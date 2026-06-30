@@ -20,10 +20,13 @@ class QuestionType(str, Enum):
 
 
 def iso_utc(ts: float) -> str:
-    """epoch 秒 → ISO8601 UTC。ts<=0 視為未知，回空字串。"""
+    """epoch 秒 → ISO8601 UTC。ts<=0 或超出合理範圍視為未知，回空字串（不崩）。"""
     if not ts or ts <= 0:
         return ""
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError, OSError):
+        return ""
 
 
 @dataclass

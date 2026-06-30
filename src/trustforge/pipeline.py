@@ -23,7 +23,8 @@ def run(coin: str, query: str, qtype: QuestionType,
     coin = coin.upper()
     log = _log if _log is not None else ExecutionLog()
     log.record("ingestion.collect", params={"coin": coin, "offline": offline})
-    docs = collect(query, coin=coin, offline=offline, data_dir=data_dir)
+    _failed: list[str] = []
+    docs = collect(query, coin=coin, offline=offline, data_dir=data_dir, _failed=_failed)
     if not docs:
         raise ValueError("無資料：offline 請確認 demo/sample_data 與 data/，線上請接連接器")
 
@@ -31,6 +32,13 @@ def run(coin: str, query: str, qtype: QuestionType,
         query, coin, qtype, docs,
         client=BedrockClient(offline=offline), log=log,
     )
+    # 將 collect 階段失敗的來源名稱補入 report.limits，讓評審可見資料缺口
+    # 去重（order-preserving），避免同來源多次失敗造成重複條目
+    _seen_failed: set[str] = set()
+    for src_name in _failed:
+        if src_name not in _seen_failed:
+            _seen_failed.add(src_name)
+            report.limits.append(f"{src_name} 來源無法取得，已跳過（逾時或連線失敗）。")
     return report, evidence, log
 
 

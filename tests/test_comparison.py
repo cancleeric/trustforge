@@ -49,7 +49,7 @@ def _make_docs(coin: str):
 
 def test_run_comparison_returns_five_tuple(monkeypatch):
     """run_comparison 回傳 (report_a, ev_a, report_b, ev_b, log) 五元組。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -63,7 +63,7 @@ def test_run_comparison_returns_five_tuple(monkeypatch):
 
 def test_run_comparison_both_pipelines_executed(monkeypatch):
     """兩個幣種各自有獨立 pipeline 輸出。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -77,7 +77,7 @@ def test_run_comparison_both_pipelines_executed(monkeypatch):
 
 def test_run_comparison_evidence_has_source_fields(monkeypatch):
     """兩幣 evidence 每筆都有官方必備欄位。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -91,7 +91,7 @@ def test_run_comparison_evidence_has_source_fields(monkeypatch):
 
 def test_run_comparison_shared_log(monkeypatch):
     """比較分析共用同一 ExecutionLog，log 事件數應超過兩個 pipeline 各自起始事件。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -135,7 +135,7 @@ def test_run_comparison_one_coin_via_cli(monkeypatch):
 
 def test_comparison_markdown_has_required_sections(monkeypatch):
     """comparison_to_markdown 含所有必備並列比較章節。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -149,7 +149,7 @@ def test_comparison_markdown_has_required_sections(monkeypatch):
 
 def test_comparison_markdown_labels_both_coins(monkeypatch):
     """並列報告中兩個幣種名稱都必須出現。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -164,7 +164,7 @@ def test_comparison_evidence_json_coin_field(monkeypatch):
     """evidence.json 合併後，每筆加 coin 欄位標明歸屬（CLI 行為驗證）。"""
     import tempfile, pathlib
 
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -199,7 +199,7 @@ def test_comparison_evidence_json_coin_field(monkeypatch):
 
 def test_multi_source_still_works(monkeypatch):
     """multi_source 題型不受 comparison 改動影響。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -211,7 +211,7 @@ def test_multi_source_still_works(monkeypatch):
 
 def test_hypothesis_still_works(monkeypatch):
     """hypothesis 題型不受 comparison 改動影響。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -255,7 +255,7 @@ def test_parse_comparison_coins_invalid():
 
 def test_do_comparison_returns_five_tuple(monkeypatch):
     """_do_comparison 回傳 5 元組 (report_a, ev_a, report_b, ev_b, log)。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -322,7 +322,7 @@ def test_parse_comparison_coins_lefttoright_order():
 
 def test_report_direction_field_set(monkeypatch):
     """build_report 應把 _direction(brief) 存入 report.direction。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -335,7 +335,7 @@ def test_report_direction_field_set(monkeypatch):
 
 def test_comparison_markdown_uses_direction_field(monkeypatch):
     """comparison_to_markdown 應讀 report.direction 而非掃 market_judgment。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -351,7 +351,7 @@ def test_comparison_markdown_uses_direction_field(monkeypatch):
 
 def test_lambda_comparison_html(monkeypatch):
     """Lambda handler：comparison 題型回 HTML（含幣種對比標題，不 502）。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
@@ -375,7 +375,7 @@ def test_lambda_comparison_html(monkeypatch):
 
 def test_lambda_comparison_json(monkeypatch):
     """Lambda handler：comparison.json 回 JSON，含 report_a/report_b/evidence_a/evidence_b。"""
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)

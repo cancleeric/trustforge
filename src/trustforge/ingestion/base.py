@@ -67,8 +67,13 @@ class OfflineSampleSource(Source):
 
 def collect(query: str, coin: str | None = None,
             sources: Iterable[Source] | None = None,
-            offline: bool = False, data_dir=None) -> list[Document]:
-    """匯流所有來源（文件型 + OHLCV 價格事實）。offline=True 時用樣本資料。"""
+            offline: bool = False, data_dir=None,
+            _failed: list | None = None) -> list[Document]:
+    """匯流所有來源（文件型 + OHLCV 價格事實）。offline=True 時用樣本資料。
+
+    _failed：可選 list，失敗的來源名稱（source.name）會被 append 進去，
+             供呼叫者（如 pipeline.run）填入 report.limits。
+    """
     docs: list[Document] = []
 
     # 1. 價格事實（官方基準 OHLCV）
@@ -110,7 +115,8 @@ def collect(query: str, coin: str | None = None,
             docs.extend(s.fetch(query, coin=_coin))
         except Exception:
             # 單一來源失敗（逾時 / 網路錯誤）→ 跳過不崩，其他來源照常
-            pass
+            if _failed is not None:
+                _failed.append(getattr(s, "name", str(s)))
     return docs
 
 

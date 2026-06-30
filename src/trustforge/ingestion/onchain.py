@@ -78,7 +78,9 @@ class BlockchainInfoSource(Source):
             return []
         raw = _fetch_url(self._URL)
         data = json.loads(raw)
-        ts = float(data.get("timestamp", datetime.now(tz=timezone.utc).timestamp()))
+        # blockchain.info/stats returns timestamp in **milliseconds**; divide by 1000
+        ts_raw = float(data.get("timestamp", datetime.now(tz=timezone.utc).timestamp() * 1000))
+        ts = ts_raw / 1000
         market_price = data.get("market_price_usd", "N/A")
         hash_rate = data.get("hash_rate", "N/A")
         ref = f"BTC market_price_usd={market_price}, hash_rate={hash_rate}"
