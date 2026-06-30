@@ -167,7 +167,7 @@ def test_render_comparison_has_trust_bars(monkeypatch):
     """_render_comparison 含信任橫條（tf-bar-wrap）與可展開 details。"""
     from trustforge.ingestion.base import Document
 
-    def fake_collect(query, coin, offline, data_dir=None):
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return [
             Document(id="d1", kind="price", source="fake-ohlcv", text=f"{coin} price data"),
             Document(id="d2", kind="news", source="fake-news", text=f"{coin} news"),
