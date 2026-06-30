@@ -89,21 +89,42 @@ def test_manipulation_entries_land_in_contrarian():
 
 
 def test_cross_source_corroboration_active():
-    """BTC 交易所流入主題應被 onchain + news + social 多源佐證，corroboration > 0.5。"""
+    """onchain-btc-inflow 應被 news + social 至少 2 種不同 kind 獨立佐證（corroboration > 0.5）。"""
+    import re
     from trustforge.ingestion.base import collect, OHLCV_DIR
     docs = collect("BTC 交易所", coin="BTC", offline=True, data_dir=OHLCV_DIR)
     assert docs, "離線樣本不可為空"
     now = max(d.ts for d in docs)
     claims = extract_claims(docs)
     scored_all = score(claims, now=now)
-    # onchain-btc-inflow 應被多個獨立來源佐證（corroboration > 0.5）
-    high_corr_onchain = [
-        sc for sc in scored_all
-        if sc.claim.doc.kind == "onchain"
-        and "btc" in sc.claim.doc.id.lower()
-        and sc.components["corroboration"] > 0.5
-    ]
-    assert high_corr_onchain, (
-        "BTC onchain 流入主張應被多個獨立來源（news + social）佐證（corroboration > 0.5），"
-        f"onchain corr: {[(sc.claim.doc.id, round(sc.components['corroboration'], 3)) for sc in scored_all if sc.claim.doc.kind == 'onchain']}"
+
+    # 釘住具體主張 onchain-btc-inflow
+    btc_inflow = next(
+        (sc for sc in scored_all if sc.claim.doc.id == "onchain-btc-inflow"),
+        None,
+    )
+    assert btc_inflow is not None, "onchain-btc-inflow 主張必須存在於離線樣本"
+    assert btc_inflow.components["corroboration"] > 0.5, (
+        f"onchain-btc-inflow corroboration={btc_inflow.components['corroboration']:.3f}，應 > 0.5"
+    )
+
+    # 驗證跨源：佐證來自 ≥2 個不同 kind（使用與 _corroboration 相同的 token-overlap 邏輯）
+    def _tokens(text: str) -> set:
+        return {t for t in re.findall(r"[\w一-鿿]+", text.lower()) if len(t) > 1}
+
+    target_tokens = _tokens(btc_inflow.claim.text)
+    corroborating_kinds: set = set()
+    for sc in scored_all:
+        c = sc.claim
+        if c.doc.source == btc_inflow.claim.doc.source:
+            continue
+        overlap = len(target_tokens & _tokens(c.text)) / max(1, len(target_tokens))
+        if overlap >= 0.4:
+            corroborating_kinds.add(c.doc.kind)
+
+    assert len(corroborating_kinds) >= 2, (
+        f"onchain-btc-inflow 應被 ≥2 種不同 kind 來源佐證，實際: {corroborating_kinds}"
+    )
+    assert {"news", "social"} <= corroborating_kinds, (
+        f"佐證 kind 集合應同時包含 news 與 social，實際: {corroborating_kinds}"
     )
