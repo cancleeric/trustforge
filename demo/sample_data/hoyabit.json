@@ -4,7 +4,7 @@
     "source": "hoyabit-ticker",
     "text": "BTC/USDT 現報 46,200，24h 跌幅 -2.1%，成交量 持平。",
     "url": "https://hoyabit.com/ticker/BTCUSDT",
-    "ts": 1751155200,
+    "ts": 1780185600,
     "meta": {}
   },
   {
@@ -12,7 +12,7 @@
     "source": "hoyabit-depth",
     "text": "BTC/USDT 買盤 深度 較昨日 下降 35%，流動性 轉差 警示。",
     "url": "https://hoyabit.com/depth/BTCUSDT",
-    "ts": 1751148000,
+    "ts": 1780185600,
     "meta": {}
   },
   {
@@ -20,7 +20,7 @@
     "source": "hoyabit-volume",
     "text": "ETH/USDT 成交量 放大 至 日均 3.2 倍，短期 波動 加劇 預警。",
     "url": "https://hoyabit.com/volume/ETHUSD",
-    "ts": 1751126400,
+    "ts": 1780142400,
     "meta": {}
   },
   {
@@ -28,7 +28,7 @@
     "source": "hoyabit-spread",
     "text": "SOL/USDT 買賣 價差 擴大 至 0.18%，流動性 惡化 信號。",
     "url": "https://hoyabit.com/spread/SOLUSDT",
-    "ts": 1751140800,
+    "ts": 1780185600,
     "meta": {}
   }
 ]

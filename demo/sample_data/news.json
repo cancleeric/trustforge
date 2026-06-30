@@ -3,40 +3,40 @@
     "id": "news-btc-bearish",
     "source": "coindesk",
     "text": "大額 BTC 轉入 交易所 引發 賣壓，比特幣 價格 走低。",
-    "url": "https://www.coindesk.com/markets/2026/06/29/btc-exchange-inflow-selling-pressure",
-    "ts": 1751140800,
+    "url": "https://www.coindesk.com/markets/2026/05/31/btc-exchange-inflow-selling-pressure",
+    "ts": 1780185600,
     "meta": {}
   },
   {
     "id": "news-eth-bullish",
     "source": "decrypt",
     "text": "以太坊 質押 率 突破 28%，機構 需求 推升 ETH 長線 看漲。",
-    "url": "https://decrypt.co/markets/2026/06/29/ethereum-staking-surge-institutional-bullish",
-    "ts": 1751126400,
+    "url": "https://decrypt.co/markets/2026/05/31/ethereum-staking-surge-institutional-bullish",
+    "ts": 1780185600,
     "meta": {}
   },
   {
     "id": "news-sol-neutral",
     "source": "coindesk",
     "text": "Solana 網路 擁塞 警告 發出，開發者 社群 關注 效能 改善 進度。",
-    "url": "https://www.coindesk.com/tech/2026/06/29/solana-network-congestion-developer-update",
-    "ts": 1751112000,
+    "url": "https://www.coindesk.com/tech/2026/05/30/solana-network-congestion-developer-update",
+    "ts": 1780142400,
     "meta": {}
   },
   {
     "id": "news-bnb-bearish",
     "source": "decrypt",
     "text": "監管 機構 對 BNB 展開 調查，幣安 發言人 否認 違規 指控。",
-    "url": "https://decrypt.co/news/2026/06/29/regulators-investigate-bnb-binance-statement",
-    "ts": 1751068800,
+    "url": "https://decrypt.co/news/2026/05/30/regulators-investigate-bnb-binance-statement",
+    "ts": 1780099200,
     "meta": {}
   },
   {
     "id": "news-xrp-bullish",
     "source": "coindesk",
     "text": "多家 資產 管理公司 向 SEC 提交 XRP 現貨 ETF 申請，市場 情緒 升溫。",
-    "url": "https://www.coindesk.com/policy/2026/06/28/xrp-spot-etf-applications-submitted-sec",
-    "ts": 1751025600,
+    "url": "https://www.coindesk.com/policy/2026/05/28/xrp-spot-etf-applications-submitted-sec",
+    "ts": 1779969600,
     "meta": {}
   }
 ]
