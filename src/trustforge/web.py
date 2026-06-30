@@ -129,13 +129,37 @@ def _conf_gauge(confidence: float, label: str) -> str:
     )
 
 
+def _safe_href(url: str) -> str:
+    """安全連結產生器：scheme 為 http/https 才輸出 <a>，否則輸出純 html.escape 文字（不可點）。
+
+    防護向量：javascript:、data:、vbscript:、file://、大小寫混用（JaVaScRiPt:）、
+    前導空白（ javascript:）、空字串、相對路徑。
+    escape 在任何分支都保留。
+    """
+    if not url:
+        return html.escape(url)
+    # 去除前後空白（前導空白是常見繞過手法：" javascript:alert(1)"）
+    normalized = url.strip()
+    parsed = urlparse(normalized)
+    # 白名單：只允許 http / https（scheme 可能含大寫，統一 lower 比較）
+    if parsed.scheme.lower() in {"http", "https"}:
+        escaped_url = html.escape(normalized)
+        escaped_display = html.escape(normalized[:80])
+        return (
+            f'<a href="{escaped_url}" target="_blank" rel="noopener">'
+            f"{escaped_display}</a>"
+        )
+    # 非 http/https → 純文字，不產生可點擊連結
+    return html.escape(url)
+
+
 def _render_evidence_list(
     evidence: list, coin: str | None = None, start_idx: int = 0
 ) -> str:
     """evidence 渲染為帶信任橫條 + 可展開 <details> 的 <tr> 列表。
 
     - trust < 0.3 或 contrarian 項目顯示紅色 tf-low badge。
-    - source_url 渲染為可點擊連結（html.escape XSS 防護）。
+    - source_url 透過 _safe_href 渲染：http/https 輸出連結，其餘輸出純文字。
     """
     e = html.escape
     rows: list[str] = []
@@ -146,12 +170,9 @@ def _render_evidence_list(
             f' <span class="tf-low">&#9888; 低信任/操縱</span>'
             if is_low else ""
         )
-        # source_url 安全連結：href 和顯示文字都 escape
+        # source_url 安全連結：_safe_href 驗 scheme，escape 由其內部保留
         if ev.source_url:
-            url_html = (
-                f'<a href="{e(ev.source_url)}" target="_blank" rel="noopener">'
-                f'{e(ev.source_url[:80])}</a>'
-            )
+            url_html = _safe_href(ev.source_url)
         else:
             url_html = "&#8212;"
         coin_td = f"<td>{e(coin)}</td>" if coin is not None else ""
