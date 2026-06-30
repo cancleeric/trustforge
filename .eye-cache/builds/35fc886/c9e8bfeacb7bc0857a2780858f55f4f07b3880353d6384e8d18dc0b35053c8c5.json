@@ -1,0 +1,63 @@
+{
+  "target": "src/trustforge/agent/orchestrator.py:build_report",
+  "total": 5,
+  "refs": [
+    {
+      "file": "src/trustforge/agent/__init__.py",
+      "line": 2,
+      "kind": "import",
+      "preview": "from .orchestrator import build_report",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "src/trustforge/agent/__init__.py",
+      "line": 4,
+      "kind": "comment",
+      "preview": "__all__ = [\"build_report\"]",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "src/trustforge/pipeline.py",
+      "line": 6,
+      "kind": "import",
+      "preview": "from .agent.orchestrator import build_report",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "src/trustforge/pipeline.py",
+      "line": 33,
+      "kind": "caller",
+      "preview": "report, evidence = build_report(",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_report.py",
+      "line": 2,
+      "kind": "import",
+      "preview": "from trustforge.agent.orchestrator import build_report",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_report.py",
+      "line": 16,
+      "kind": "caller",
+      "preview": "return build_report(query, coin, qtype, brief,",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    }
+  ],
+  "confidence_summary": {
+    "high": 0,
+    "medium": 6,
+    "low": 0
+  },
+  "caller_confidence": {
+    "high": 0,
+    "low": 0
+  }
+}

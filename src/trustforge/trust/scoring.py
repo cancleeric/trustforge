@@ -112,17 +112,17 @@ def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
     return math.pow(0.5, age_h / half_life_h)
 
 
-_NEG_MARKERS = ("不", "沒", "別", "未", "非", "勿", "無")
+# 明確否定結構(不吃「不僅/不斷/不只」這類肯定副詞)。命中前 4 字內出現才視為否定。
+_NEG_RX = re.compile(r"不會|不太|不致|不至|不再|沒有|沒|尚未|未|無法|別|勿|非")
 
 
 def _manipulation_penalty(c: Claim) -> float:
-    # 否定詞守門:命中前 2 字內若有否定(如「不會暴漲」)不計,避免正當新聞被誤扣
+    # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
     text = c.text
     hits = 0
     for p in _MANIP_PATTERNS:
         for m in re.finditer(p, text, re.IGNORECASE):
-            pre = text[max(0, m.start() - 2):m.start()]
-            if any(n in pre for n in _NEG_MARKERS):
+            if _NEG_RX.search(text[max(0, m.start() - 4):m.start()]):
                 continue
             hits += 1
     # 社群來源的操縱訊號加重

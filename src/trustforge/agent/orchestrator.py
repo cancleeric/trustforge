@@ -81,7 +81,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
 
     def _add_evidence(sc: ScoredClaim, related: str) -> int:
         ev = _scored_to_evidence(sc, related)
-        key = (ev.source, ev.content_reference)
+        # key 含角色(related):支撐與反方即使同來源同引用也不共用 bucket,避免 silent drop
+        key = (ev.source, ev.content_reference, related)
         if key in ev_index:
             idx = ev_index[key]
             if ev.trust > evidence[idx].trust:   # 同來源同引用 → 留最高信任那筆

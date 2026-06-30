@@ -57,5 +57,8 @@ def test_negated_manipulation_not_penalised():
     d = Document(id="d", kind="news", source="coindesk", text="", ts=1)
     neg = Claim(id="x", text="分析師認為 BTC 短期不會暴漲", doc=d)
     pos = Claim(id="y", text="BTC 暴漲翻倍穩賺", doc=Document(id="e", kind="social", source="x", text="", ts=1))
+    # 「不僅暴漲」是肯定語義(不+副詞),不可被否定守門誤放
+    aff = Claim(id="z", text="BTC 不僅暴漲還翻倍", doc=Document(id="f", kind="social", source="x", text="", ts=1))
     assert _manipulation_penalty(neg) == 0
     assert _manipulation_penalty(pos) > 0
+    assert _manipulation_penalty(aff) > 0

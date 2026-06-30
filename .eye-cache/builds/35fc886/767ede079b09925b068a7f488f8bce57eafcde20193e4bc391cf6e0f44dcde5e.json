@@ -1,0 +1,47 @@
+{
+  "target": "src/trustforge/trust/scoring.py:_manipulation_penalty",
+  "total": 4,
+  "refs": [
+    {
+      "file": "src/trustforge/trust/scoring.py",
+      "line": 162,
+      "kind": "caller",
+      "preview": "manip = _manipulation_penalty(c)",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_trust_scoring.py",
+      "line": 55,
+      "kind": "import",
+      "preview": "from trustforge.trust.scoring import _manipulation_penalty, Claim",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_trust_scoring.py",
+      "line": 60,
+      "kind": "caller",
+      "preview": "assert _manipulation_penalty(neg) == 0",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_trust_scoring.py",
+      "line": 61,
+      "kind": "caller",
+      "preview": "assert _manipulation_penalty(pos) > 0",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    }
+  ],
+  "confidence_summary": {
+    "high": 0,
+    "medium": 4,
+    "low": 0
+  },
+  "caller_confidence": {
+    "high": 0,
+    "low": 0
+  }
+}

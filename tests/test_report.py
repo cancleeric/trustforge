@@ -64,7 +64,8 @@ def test_hypothesis_framing():
 
 
 def test_evidence_deduped_by_source_and_reference():
-    """Evidence 清單不應出現重複 (source, content_reference)。"""
+    """Evidence 清單不應出現重複 (source, content_reference, related_claim)。
+    含 related_claim 確保支撐/反方角色不會被誤併。"""
     _, evidence = _run()
-    seen = [(e.source, e.content_reference) for e in evidence]
+    seen = [(e.source, e.content_reference, e.related_claim) for e in evidence]
     assert len(seen) == len(set(seen))
