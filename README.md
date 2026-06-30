@@ -102,6 +102,17 @@ pytest -q
 - 指定其他目錄：`--data-dir <dir>`。`--offline` 僅影響 Bedrock（不呼叫 AWS）與文件型樣本來源。
 - 新聞 / 鏈上 / 社群等非價格來源於 7/13 工作坊後接真實 API（目前為樣本）。
 
+## Live Demo（web 服務）
+
+```bash
+# 本機起 Live Demo（純 stdlib，預設離線模式，免 AWS 即可看完整管線）
+PORT=8799 python -m trustforge.web   # → http://127.0.0.1:8799
+#   /            首頁表單（選幣種/題型/問題）
+#   /analyze     HTML 報告　/analyze.json  JSON（report+evidence+log）　/healthz  健康檢查
+```
+
+**佈署到 AWS**：推薦 **App Runner 原始碼模式**——連 GitHub repo 即讀 `apprunner.yaml` 自動建置（**雲端建置，本機免 Docker**），給公開 HTTPS Live Demo URL、push 即重佈。設 `BEDROCK_MODEL_ID`+`AWS_REGION` 並給 instance role `bedrock:InvokeModel` 後，帶 `?live=1` 走真實 Bedrock。完整步驟見 [`docs/SUBMISSION-CHECKLIST.md`](docs/SUBMISSION-CHECKLIST.md)。容器路線另附 `Dockerfile`。
+
 ## 交付件（對齊官方）
 
 每次 `analyze` 產出官方要求的 4 件（程式碼/設定即本 repo）：

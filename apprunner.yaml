@@ -1,0 +1,18 @@
+# AWS App Runner 原始碼模式設定（連 GitHub source 即用，免 Docker / ECR）
+# 路徑：App Runner → 建立服務 → 來源=原始碼 → 連 GitHub repo → 自動讀本檔
+version: 1.0
+runtime: python3
+build:
+  commands:
+    build:
+      - pip install -e .
+run:
+  runtime-version: 3.12
+  command: python -m trustforge.web
+  network:
+    port: 8080
+  env:
+    - name: PORT
+      value: "8080"
+    # 真實 Bedrock：在 App Runner 服務設定加環境變數 BEDROCK_MODEL_ID 與 AWS_REGION，
+    # 並給服務的 instance role 加 bedrock:InvokeModel 權限（見 docs/SUBMISSION-CHECKLIST.md）。

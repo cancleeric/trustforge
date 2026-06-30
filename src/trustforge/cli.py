@@ -10,15 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
 from pathlib import Path
 
-from .agent.orchestrator import build_report
-from .bedrock import BedrockClient
-from .execlog import ExecutionLog
-from .ingestion.base import collect
+from .pipeline import run
 from .schema import COIN_POOL, QuestionType
-from .trust.scoring import aggregate, extract_claims, score
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -28,30 +23,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         return 2
     qtype = QuestionType(args.type)
 
-    log = ExecutionLog()
-    log.record("ingestion.collect", params={"coin": coin, "offline": args.offline})
-    docs = collect(args.query, coin=coin, offline=args.offline, data_dir=args.data_dir)
-    if not docs:
-        print("（無資料：offline 請確認 demo/sample_data 與 ohlcv/，線上請接連接器）")
+    try:
+        report, evidence, log = run(coin, args.query, qtype,
+                                    offline=args.offline, data_dir=args.data_dir)
+    except ValueError as e:
+        print(f"（{e}）")
         return 1
-
-    if args.fixed_now:
-        now = float(args.fixed_now)
-    elif args.offline:
-        now = max((d.ts for d in docs), default=time.time())
-    else:
-        now = time.time()
-
-    claims = extract_claims(docs)
-    scored = score(claims, now=now)
-    log.record("trust.score", summary=f"claims={len(claims)}")
-    brief = aggregate(scored, args.query)
-    log.record("trust.aggregate", summary=f"supporting={len(brief.supporting)} confidence={brief.confidence:.2f}")
-
-    report, evidence = build_report(
-        args.query, coin, qtype, brief,
-        client=BedrockClient(offline=args.offline), log=log,
-    )
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -78,7 +55,6 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--offline", action="store_true", help="用離線樣本資料，不需 AWS")
     a.add_argument("--data-dir", default=None, help="OHLCV CSV 目錄（預設離線樣本）")
     a.add_argument("--out", default="out", help="交付件輸出目錄")
-    a.add_argument("--fixed-now", default=None, help="固定 now epoch（測試用）")
     a.add_argument("--quiet", action="store_true", help="不在 stdout 印報告")
     a.set_defaults(func=cmd_analyze)
     args = p.parse_args(argv)
