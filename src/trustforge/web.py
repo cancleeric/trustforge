@@ -51,6 +51,13 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  pre{{background:#fff;border:1px solid #e2e2e2;border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word}}
  table{{border-collapse:collapse;width:100%;background:#fff;font-size:.85rem}} td,th{{border:1px solid #e2e2e2;padding:.4rem;text-align:left}}
  .j{{font-size:1.1rem;font-weight:600}} .conf{{color:#1f6feb}}
+ .tf-section{{background:#fff;border:1px solid #e2e2e2;border-radius:10px;padding:1rem;margin:.8rem 0}}
+ .tf-section h3{{margin-top:0;font-size:1rem;border-bottom:1px solid #eee;padding-bottom:.4rem;margin-bottom:.7rem}}
+ .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:#e8e8e8;border-radius:5px;overflow:hidden;margin-right:4px}}
+ .tf-bar{{height:100%;border-radius:5px}}
+ .tf-low{{display:inline-block;background:#fde;border:1px solid #f99;color:#900;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
+ .tf-conf-wrap{{background:#f6f8fa;border:1px solid #e2e2e2;border-radius:8px;padding:.8rem;margin:.5rem 0}}
+ .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
 </style></head><body>
 <h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　<span class="badge">{mode}</span></p>
 <form action="/analyze" method="get">
@@ -86,6 +93,106 @@ def _opts(values, labels=None):
     )
 
 
+def _trust_bar(trust: float) -> str:
+    """CSS 信任橫條（依層級上色：高綠/中橙/低紅）。"""
+    pct = max(0, min(100, int(trust * 100)))
+    if trust >= 0.7:
+        color, label = "#22863a", "高"
+    elif trust >= 0.3:
+        color, label = "#d9832a", "中"
+    else:
+        color, label = "#cb2431", "低"
+    return (
+        f'<span class="tf-bar-wrap">'
+        f'<span class="tf-bar" style="width:{pct}%;background:{color}"></span>'
+        f'</span>'
+        f'<span style="color:{color};font-size:.8rem"> {trust:.2f} {label}</span>'
+    )
+
+
+def _conf_gauge(confidence: float, label: str) -> str:
+    """整體信心視覺化：大字標籤 + 橫條。"""
+    pct = max(0, min(100, int(confidence * 100)))
+    if confidence >= 0.7:
+        color = "#22863a"
+    elif confidence >= 0.45:
+        color = "#d9832a"
+    else:
+        color = "#cb2431"
+    return (
+        f'<div class="tf-conf-wrap">'
+        f'<div class="tf-conf-big" style="color:{color}">{html.escape(label)}</div>'
+        f'<div style="font-size:.85rem;color:#555">整體信心指數 {confidence:.2f}</div>'
+        f'<div class="tf-bar-wrap" style="width:180px;height:13px;margin-top:.4rem">'
+        f'<div class="tf-bar" style="width:{pct}%;background:{color}"></div>'
+        f'</div></div>'
+    )
+
+
+def _safe_href(url: str) -> str:
+    """安全連結產生器：scheme 為 http/https 才輸出 <a>，否則輸出純 html.escape 文字（不可點）。
+
+    防護向量：javascript:、data:、vbscript:、file://、大小寫混用（JaVaScRiPt:）、
+    前導空白（ javascript:）、空字串、相對路徑。
+    escape 在任何分支都保留。
+    """
+    if not url:
+        return html.escape(url)
+    # 去除前後空白（前導空白是常見繞過手法：" javascript:alert(1)"）
+    normalized = url.strip()
+    parsed = urlparse(normalized)
+    # 白名單：只允許 http / https（scheme 可能含大寫，統一 lower 比較）
+    if parsed.scheme.lower() in {"http", "https"}:
+        escaped_url = html.escape(normalized)
+        escaped_display = html.escape(normalized[:80])
+        return (
+            f'<a href="{escaped_url}" target="_blank" rel="noopener">'
+            f"{escaped_display}</a>"
+        )
+    # 非 http/https → 純文字，不產生可點擊連結
+    return html.escape(url)
+
+
+def _render_evidence_list(
+    evidence: list, coin: str | None = None, start_idx: int = 0
+) -> str:
+    """evidence 渲染為帶信任橫條 + 可展開 <details> 的 <tr> 列表。
+
+    - trust < 0.3 或 contrarian 項目顯示紅色 tf-low badge。
+    - source_url 透過 _safe_href 渲染：http/https 輸出連結，其餘輸出純文字。
+    """
+    e = html.escape
+    rows: list[str] = []
+    for i, ev in enumerate(evidence):
+        idx = start_idx + i
+        is_low = ev.trust < 0.3
+        badge = (
+            f' <span class="tf-low">&#9888; 低信任/操縱</span>'
+            if is_low else ""
+        )
+        # source_url 安全連結：_safe_href 驗 scheme，escape 由其內部保留
+        if ev.source_url:
+            url_html = _safe_href(ev.source_url)
+        else:
+            url_html = "&#8212;"
+        coin_td = f"<td>{e(coin)}</td>" if coin is not None else ""
+        row_style = ' style="background:#fff5f5"' if is_low else ""
+        rows.append(
+            f"<tr{row_style}>"
+            f"<td>E{idx}{badge}</td>"
+            f"{coin_td}"
+            f"<td>"
+            f"<details><summary>{e(ev.source)} · {e(ev.fetched_at)}</summary>"
+            f"<p style='margin:.3rem 0;font-size:.85rem'>{e(ev.content_reference)}</p>"
+            f"<p style='margin:.3rem 0;font-size:.82rem'>URL: {url_html}</p>"
+            f"</details>"
+            f"</td>"
+            f"<td>{_trust_bar(ev.trust)}</td>"
+            f"</tr>"
+        )
+    return "".join(rows)
+
+
 def render_page(body: str = "") -> str:
     """組完整 HTML（模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。"""
     mode = "AWS Bedrock 就緒（?live=1 啟用）" if HAS_BEDROCK else "離線示範模式（未設 BEDROCK_MODEL_ID）"
@@ -98,12 +205,8 @@ def render_page(body: str = "") -> str:
 
 
 def _render_report(report, evidence) -> str:
+    """分析結果渲染為信任儀表板（事實→推論→結論三段 + 信任橫條 + 可展開 evidence）。"""
     e = html.escape
-    rows = "".join(
-        f"<tr><td>E{i}</td><td>{e(ev.source)}</td><td>{e(ev.fetched_at)}</td>"
-        f"<td>{ev.trust:.2f}</td><td>{e(ev.content_reference[:90])}</td></tr>"
-        for i, ev in enumerate(evidence)
-    )
     facts = "".join(f"<li>{e(f)}</li>" for f in report.facts)
     infer = "".join(f"<li>{e(i)}</li>" for i in report.inferences)
     basis = "".join(
@@ -114,18 +217,50 @@ def _render_report(report, evidence) -> str:
     limits = "".join(f"<li>{e(x)}</li>" for x in report.limits)
     flips = "".join(f"<li>{e(x)}</li>" for x in report.could_flip)
     contra = "".join(f"<li>{e(x)}</li>" for x in report.contrarian)
+    conf_html = _conf_gauge(report.confidence, report.confidence_label())
+    ev_rows = _render_evidence_list(evidence)
     return f"""
-<h2>{e(report.coin)} · {e(report.question_type)}</h2>
-<p class="j">市場判斷：{e(report.market_judgment)}</p>
-<p>整體信心：<span class="conf">{report.confidence_label()}（{report.confidence:.2f}）</span></p>
-<h3>事實（客觀資料）</h3><ul>{facts}</ul>
-<h3>推論（Agent 推理）</h3><ul>{infer}</ul>
-<h3>關鍵依據 → 證據</h3><ul>{basis}</ul>
-<h3>信心說明 · 限制</h3><ul>{limits or '<li>—</li>'}</ul>
-<h3>可能推翻結論的條件</h3><ul>{flips}</ul>
-<h3>反方 / 低信任（未納入主結論）</h3><ul>{contra or '<li>—</li>'}</ul>
-<h3>證據清單（會被抽查回溯）</h3>
-<table><tr><th>#</th><th>source</th><th>fetched_at</th><th>trust</th><th>content_reference</th></tr>{rows}</table>
+<div class="tf-section" style="background:#f0f6ff;border-color:#1f6feb">
+  <h2 style="margin:0 0 .4rem">{e(report.coin)} · {e(report.question_type)}</h2>
+  <p class="j">市場判斷：{e(report.market_judgment)}</p>
+  {conf_html}
+</div>
+
+<div class="tf-section" style="border-left:4px solid #22863a">
+  <h3>事實（客觀資料）</h3>
+  <ul>{facts or '<li>&#8212;</li>'}</ul>
+</div>
+
+<div class="tf-section" style="border-left:4px solid #d9832a">
+  <h3>推論（Agent 推理）</h3>
+  <ul>{infer or '<li>&#8212;</li>'}</ul>
+</div>
+
+<div class="tf-section" style="border-left:4px solid #1f6feb">
+  <h3>結論 / 關鍵依據</h3>
+  <ul>{basis or '<li>&#8212;</li>'}</ul>
+</div>
+
+<div class="tf-section">
+  <h3>信心說明 · 限制</h3>
+  <ul>{limits or '<li>&#8212;</li>'}</ul>
+  <h4>可能推翻結論的條件</h4>
+  <ul>{flips or '<li>&#8212;</li>'}</ul>
+</div>
+
+<div class="tf-section" style="border-left:4px solid #cb2431">
+  <h3>反方 / 低信任（未納入主結論）</h3>
+  <ul>{contra or '<li>&#8212;</li>'}</ul>
+</div>
+
+<div class="tf-section">
+  <h3>證據清單（信任橫條 · 點擊展開）</h3>
+  <table>
+    <tr><th>#</th><th>來源 / 摘要</th><th>信任分數</th></tr>
+    {ev_rows}
+  </table>
+</div>
+
 <p><a href="/analyze.json?coin={e(report.coin)}&type={e(report.question_type)}&q={e(report.question)}">下載 JSON（report+evidence+log）</a></p>
 """
 
@@ -194,62 +329,64 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
 
 
 def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str) -> str:
-    """comparison 結果渲染成 HTML（並列比較段落）。"""
+    """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。"""
     e = html.escape
-    md = comparison_to_markdown(report_a, evidence_a, report_b, evidence_b, query)
-    rows_a = "".join(
-        f"<tr><td>E{i}</td><td>{e(ev.source)}</td><td>{e(ev.fetched_at)}</td>"
-        f"<td>{ev.trust:.2f}</td><td>{e(ev.content_reference[:90])}</td></tr>"
-        for i, ev in enumerate(evidence_a)
-    )
-    rows_b = "".join(
-        f"<tr><td>E{len(evidence_a)+i}</td><td>{e(ev.source)}</td>"
-        f"<td>{e(ev.fetched_at)}</td>"
-        f"<td>{ev.trust:.2f}</td><td>{e(ev.content_reference[:90])}</td></tr>"
-        for i, ev in enumerate(evidence_b)
-    )
     dir_a = report_a.direction or report_a._direction_label()
     dir_b = report_b.direction or report_b._direction_label()
+
+    def _cmp_conf(conf: float, label: str) -> str:
+        pct = max(0, min(100, int(conf * 100)))
+        color = "#22863a" if conf >= 0.7 else "#d9832a" if conf >= 0.45 else "#cb2431"
+        return (
+            f'<span style="color:{color};font-weight:600">{html.escape(label)}'
+            f"（{conf:.2f}）</span>"
+            f'<div class="tf-bar-wrap" style="width:100px;margin-top:3px">'
+            f'<div class="tf-bar" style="width:{pct}%;background:{color}"></div>'
+            f"</div>"
+        )
+
+    src_a = len({ev.source for ev in evidence_a})
+    src_b = len({ev.source for ev in evidence_b})
+    ev_rows_a = _render_evidence_list(evidence_a, coin=report_a.coin, start_idx=0)
+    ev_rows_b = _render_evidence_list(
+        evidence_b, coin=report_b.coin, start_idx=len(evidence_a)
+    )
     return f"""
-<h2>{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
-<h3>1. 相對強弱比較</h3>
-<table>
-<tr><th>項目</th><th>{e(report_a.coin)}</th><th>{e(report_b.coin)}</th></tr>
-<tr><td>市場方向</td><td>{e(dir_a)}</td><td>{e(dir_b)}</td></tr>
-<tr><td>整體信心</td>
-  <td class="conf">{report_a.confidence_label()}（{report_a.confidence:.2f}）</td>
-  <td class="conf">{report_b.confidence_label()}（{report_b.confidence:.2f}）</td>
-</tr>
-<tr><td>獨立來源數</td>
-  <td>{len({ev.source for ev in evidence_a})}</td>
-  <td>{len({ev.source for ev in evidence_b})}</td>
-</tr>
-<tr><td>反方訊號數</td>
-  <td>{len(report_a.contrarian)}</td>
-  <td>{len(report_b.contrarian)}</td>
-</tr>
-</table>
-<h3>2. 合併證據清單（標明幣種）</h3>
-<table>
-<tr><th>#</th><th>幣種</th><th>source</th><th>fetched_at</th><th>trust</th><th>content_reference</th></tr>
-{"".join(
-    f"<tr><td>E{i}</td><td>{e(report_a.coin)}</td><td>{e(ev.source)}</td>"
-    f"<td>{e(ev.fetched_at)}</td><td>{ev.trust:.2f}</td>"
-    f"<td>{e(ev.content_reference[:80])}</td></tr>"
-    for i, ev in enumerate(evidence_a)
-)}
-{"".join(
-    f"<tr><td>E{len(evidence_a)+i}</td><td>{e(report_b.coin)}</td><td>{e(ev.source)}</td>"
-    f"<td>{e(ev.fetched_at)}</td><td>{ev.trust:.2f}</td>"
-    f"<td>{e(ev.content_reference[:80])}</td></tr>"
-    for i, ev in enumerate(evidence_b)
-)}
-</table>
-<details><summary>▶ {e(report_a.coin)} 詳細分析</summary>
-<pre>{e(report_a.to_markdown(evidence_a))}</pre></details>
-<details><summary>▶ {e(report_b.coin)} 詳細分析</summary>
-<pre>{e(report_b.to_markdown(evidence_b))}</pre></details>
+<div class="tf-section" style="background:#f0f6ff;border-color:#1f6feb">
+  <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
+  <p style="color:#555;margin:.2rem 0">{e(query)}</p>
+</div>
+
+<div class="tf-section">
+  <h3>1. 相對強弱比較</h3>
+  <table>
+    <tr><th>項目</th><th>{e(report_a.coin)}</th><th>{e(report_b.coin)}</th></tr>
+    <tr><td>市場方向</td><td>{e(dir_a)}</td><td>{e(dir_b)}</td></tr>
+    <tr><td>整體信心</td>
+        <td>{_cmp_conf(report_a.confidence, report_a.confidence_label())}</td>
+        <td>{_cmp_conf(report_b.confidence, report_b.confidence_label())}</td></tr>
+    <tr><td>獨立來源數</td><td>{src_a}</td><td>{src_b}</td></tr>
+    <tr><td>反方訊號數</td><td>{len(report_a.contrarian)}</td><td>{len(report_b.contrarian)}</td></tr>
+  </table>
+</div>
+
+<div class="tf-section">
+  <h3>2. 合併證據清單（標明幣種，點擊展開）</h3>
+  <table>
+    <tr><th>#</th><th>幣種</th><th>來源 / 摘要</th><th>信任分數</th></tr>
+    {ev_rows_a}
+    {ev_rows_b}
+  </table>
+</div>
+
+<details class="tf-section"><summary>&#9654; {e(report_a.coin)} 詳細分析</summary>
+{_render_report(report_a, evidence_a)}
+</details>
+<details class="tf-section"><summary>&#9654; {e(report_b.coin)} 詳細分析</summary>
+{_render_report(report_b, evidence_b)}
+</details>
 """
+
 
 
 def _parse_live(qs: dict, client_ip: str) -> bool:

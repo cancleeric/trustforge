@@ -200,3 +200,93 @@ def test_offline_requests_never_rate_limited():
     """離線請求不消耗 per-IP 限流 bucket(高頻 demo 不會誤觸 429)。"""
     for _ in range(web._RATE_MAX + 10):
         web._do_analyze(_qs(live="0"), client_ip="8.8.8.8")  # 不應拋 TooManyRequests
+
+
+# ── 9. _safe_href XSS scheme 驗證 ────────────────────────────────────────────
+
+@pytest.mark.parametrize("bad_url", [
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "vbscript:msgbox(1)",
+    "file:///etc/passwd",
+    "JaVaScRiPt:alert(1)",          # 大小寫混用
+    " javascript:alert(1)",          # 前導空白
+    "\tjavascript:alert(1)",         # 前導 tab
+    "",                              # 空字串
+    "relative/path",                 # 相對路徑（無 scheme）
+    "//evil.com/xss",                # protocol-relative
+])
+def test_safe_href_blocks_dangerous_scheme(bad_url):
+    """_safe_href 對非 http/https URL 不輸出 <a>，且輸出不含原始危險 scheme。"""
+    out = web._safe_href(bad_url)
+    assert "<a " not in out, f"不應產生 <a>：{bad_url!r} → {out!r}"
+    # javascript: / data: 等危險 scheme 不得出現在輸出（只允許 escape 後的文字）
+    assert 'href=' not in out, f"不應含 href：{bad_url!r} → {out!r}"
+
+
+@pytest.mark.parametrize("good_url", [
+    "http://example.com/article?id=42",
+    "https://example.com/page",
+    "HTTPS://EXAMPLE.COM/CAPS",      # 大寫 scheme（urlparse 保留大小寫，我們 lower 比較）
+    "http://sub.domain.com:8080/path?a=1&b=2",
+])
+def test_safe_href_allows_http_https(good_url):
+    """_safe_href 對 http/https URL 輸出含 href 的 <a> 連結。"""
+    out = web._safe_href(good_url)
+    assert "<a " in out, f"應產生 <a>：{good_url!r} → {out!r}"
+    assert 'href=' in out, f"應含 href：{good_url!r} → {out!r}"
+    assert 'target="_blank"' in out
+    assert 'rel="noopener"' in out
+
+
+def test_safe_href_escape_preserved_in_link():
+    """http/https URL 含 HTML 特殊字元時，escape 仍保留（不產生 XSS）。"""
+    url = 'https://evil.com/?x=<script>alert(1)</script>'
+    out = web._safe_href(url)
+    assert "<script>" not in out, "URL 中的 <script> 應被 escape"
+    assert "<a " in out, "有效 https URL 應仍輸出連結"
+
+
+def test_safe_href_escape_preserved_in_plain_text():
+    """非 http/https URL 含 HTML 特殊字元時，escape 仍保留（純文字輸出也安全）。"""
+    url = 'javascript:<img src=x onerror=alert(1)>'
+    out = web._safe_href(url)
+    assert "<img" not in out, "危險 HTML 應被 escape"
+    assert "<a " not in out
+
+
+def test_render_evidence_list_blocks_javascript_href():
+    """_render_evidence_list：source_url=javascript:alert(1) → 不產生可點擊 <a>。"""
+    from trustforge.schema import Evidence
+    ev = [
+        Evidence(
+            source="xss-src",
+            fetched_at="2026-07-01T00:00:00Z",
+            content_reference="ref",
+            related_claim="claim",
+            source_url="javascript:alert(1)",
+            trust=0.5,
+        )
+    ]
+    report, _, _ = web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["t"]})
+    out = web._render_report(report, ev)
+    assert 'href="javascript:' not in out, "javascript: 不可出現在 href"
+    assert "href='javascript:" not in out, "javascript: 不可出現在 href（單引號）"
+
+
+def test_render_evidence_list_blocks_data_uri():
+    """_render_evidence_list：source_url=data:text/html,... → 不產生可點擊 <a>。"""
+    from trustforge.schema import Evidence
+    ev = [
+        Evidence(
+            source="data-src",
+            fetched_at="2026-07-01T00:00:00Z",
+            content_reference="ref",
+            related_claim="claim",
+            source_url="data:text/html,<script>alert(1)</script>",
+            trust=0.5,
+        )
+    ]
+    report, _, _ = web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["t"]})
+    out = web._render_report(report, ev)
+    assert 'href="data:' not in out, "data: URI 不可出現在 href"
