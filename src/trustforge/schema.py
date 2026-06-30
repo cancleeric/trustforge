@@ -69,6 +69,13 @@ class Report:
         c = self.confidence
         return "高" if c >= 0.7 else "中" if c >= 0.45 else "低"
 
+    def _direction_label(self) -> str:
+        """從 market_judgment 擷取方向詞（偏多/偏空/中性）。"""
+        for kw in ("偏多", "偏空", "中性"):
+            if kw in self.market_judgment:
+                return kw
+        return "不明"
+
     def to_markdown(self, evidence: list[Evidence]) -> str:
         L: list[str] = []
         L.append(f"# {self.coin} 市場分析報告")
@@ -114,3 +121,93 @@ class Report:
             ref = e.content_reference.replace("|", "\\|")[:80]
             L.append(f"| E{i} | {e.source} | {e.fetched_at} | {e.trust:.2f} | {ref} |")
         return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
+# 比較分析報告 Markdown（P1-1）
+# ---------------------------------------------------------------------------
+
+def comparison_to_markdown(
+    report_a: Report,
+    evidence_a: list[Evidence],
+    report_b: Report,
+    evidence_b: list[Evidence],
+    query: str,
+) -> str:
+    """並列比較兩幣種的 Markdown 報告（P1-1 comparison 題型）。
+
+    章節：
+      1. 相對強弱比較（方向 / 信心 / 獨立來源 / 反方訊號）
+      2. 流動性 / 波動指標（price facts 摘要）
+      3. 各類訊號一致程度（來源 kind 分佈）
+      4-5. 各幣詳細分析（呼叫既有 to_markdown）
+      6. 合併證據清單（每列標明幣種，可被評審抽查）
+    """
+    L: list[str] = []
+    L.append(f"# {report_a.coin} vs {report_b.coin} 比較分析報告")
+    L.append(f"> 題型：comparison｜生成時間：{report_a.generated_at}")
+    L.append(f"> 問題：{query}\n")
+
+    # ── 1. 相對強弱 ──────────────────────────────────────────────
+    L.append("## 1. 相對強弱比較")
+    L.append(f"| 項目 | {report_a.coin} | {report_b.coin} |")
+    L.append("|------|------|------|")
+    L.append(f"| 市場方向 | {report_a._direction_label()} | {report_b._direction_label()} |")
+    L.append(
+        f"| 整體信心 | {report_a.confidence_label()}（{report_a.confidence:.2f}）"
+        f" | {report_b.confidence_label()}（{report_b.confidence:.2f}）|"
+    )
+    src_a = len({e.source for e in evidence_a})
+    src_b = len({e.source for e in evidence_b})
+    L.append(f"| 獨立來源數 | {src_a} | {src_b} |")
+    L.append(f"| 反方訊號數 | {len(report_a.contrarian)} | {len(report_b.contrarian)} |")
+    L.append("")
+
+    # ── 2. 流動性 / 波動 ─────────────────────────────────────────
+    L.append("## 2. 流動性 / 波動指標（price facts）")
+    for rpt, evs in ((report_a, evidence_a), (report_b, evidence_b)):
+        price_evs = [e for e in evs if e.kind == "price"]
+        L.append(f"**{rpt.coin}**（{len(price_evs)} 條價格證據）")
+        for e in price_evs[:3]:
+            L.append(f"- {e.content_reference[:100]}")
+        if not price_evs:
+            L.append("- （無價格證據）")
+    L.append("")
+
+    # ── 3. 各類訊號一致程度 ───────────────────────────────────────
+    L.append("## 3. 各類訊號一致程度")
+    for rpt, evs in ((report_a, evidence_a), (report_b, evidence_b)):
+        kind_count: dict[str, int] = {}
+        for e in evs:
+            kind_count[e.kind] = kind_count.get(e.kind, 0) + 1
+        kind_str = "、".join(f"{k}:{v}筆" for k, v in sorted(kind_count.items()))
+        L.append(
+            f"**{rpt.coin}**：{kind_str or '（無）'}"
+            f"｜方向：{rpt._direction_label()}"
+            f"｜信心：{rpt.confidence:.2f}"
+        )
+    L.append("")
+
+    # ── 4-5. 各幣詳細分析 ────────────────────────────────────────
+    L.append(f"## 4. {report_a.coin} 詳細分析")
+    L.append(report_a.to_markdown(evidence_a))
+
+    L.append(f"\n## 5. {report_b.coin} 詳細分析")
+    L.append(report_b.to_markdown(evidence_b))
+
+    # ── 6. 合併證據清單（標明幣種）─────────────────────────────
+    L.append("\n## 6. 合併證據清單（標明幣種，可被評審抽查）")
+    L.append("| # | 幣種 | source | fetched_at | trust | content_reference |")
+    L.append("|---|------|--------|-----------|-------|-------------------|")
+    for i, e in enumerate(evidence_a):
+        ref = e.content_reference.replace("|", "\\|")[:60]
+        L.append(f"| E{i} | {report_a.coin} | {e.source} | {e.fetched_at} | {e.trust:.2f} | {ref} |")
+    offset = len(evidence_a)
+    for i, e in enumerate(evidence_b):
+        ref = e.content_reference.replace("|", "\\|")[:60]
+        L.append(
+            f"| E{offset + i} | {report_b.coin} | {e.source}"
+            f" | {e.fetched_at} | {e.trust:.2f} | {ref} |"
+        )
+
+    return "\n".join(L)
