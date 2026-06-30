@@ -153,6 +153,86 @@ def _safe_href(url: str) -> str:
     return html.escape(url)
 
 
+def _render_trust_breakdown(tc: dict, trust: float) -> str:
+    """信任分項拆解 HTML 區塊（inline CSS，純 stdlib，免 JS）。
+
+    顯示四分項（信譽/佐證/時效/操縱）＋公式 ＋ 佐證白話說明。
+    tc 為空 dict（舊資料）→ 回空字串，優雅略過，不崩。
+    操縱分項 > 0 時以紅色標示。
+    """
+    if not tc:
+        return ""
+    e = html.escape
+
+    def _f(v) -> float:
+        # 防禦：None/非數字/NaN/Inf → 0.0（trust_components 理應為合法 float，但不信任輸入）
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        return x if (x == x and x not in (float("inf"), float("-inf"))) else 0.0
+
+    rep   = _f(tc.get("reputation",    0.0))
+    corr  = _f(tc.get("corroboration", 0.0))
+    rec   = _f(tc.get("recency",       0.0))
+    manip = _f(tc.get("manipulation",  0.0))
+
+    def mini_bar(val: float, color: str) -> str:
+        pct = max(0, min(100, int(val * 100)))
+        return (
+            f'<span class="tf-bar-wrap" style="width:54px;height:7px;vertical-align:middle">'
+            f'<span class="tf-bar" style="width:{pct}%;background:{color}"></span>'
+            f'</span>'
+        )
+
+    manip_color  = "#cb2431" if manip > 0 else "#333"
+    manip_weight = "font-weight:600;" if manip > 0 else ""
+
+    corr_text  = "✓ 有獨立來源交叉佐證" if corr > 0 else "— 無交叉佐證"
+    corr_color = "#22863a"              if corr > 0 else "#888"
+
+    return (
+        f'<div style="margin:.35rem 0;padding:.4rem .6rem;background:#f8f9fa;'
+        f'border-radius:6px;border:1px solid #e2e2e2;font-size:.78rem">'
+        f'<div style="color:#888;font-size:.7rem;font-weight:600;margin-bottom:.25rem">'
+        f'信任分析（信譽×0.5 + 佐證×0.25 + 時效×0.15 − 操縱×0.4）</div>'
+        f'<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.2rem">'
+        # 信譽
+        f'<span style="white-space:nowrap">'
+        f'<span style="color:#555">信譽</span> '
+        f'{mini_bar(rep, "#22863a")} '
+        f'<span style="color:#333">{rep:.2f}</span>'
+        f'<span style="color:#888"> ×0.5</span></span>'
+        # 佐證
+        f'<span style="color:#bbb">｜</span>'
+        f'<span style="white-space:nowrap">'
+        f'<span style="color:#555">佐證</span> '
+        f'{mini_bar(corr, "#1f6feb")} '
+        f'<span style="color:#333">{corr:.2f}</span>'
+        f'<span style="color:#888"> ×0.25</span></span>'
+        # 時效
+        f'<span style="color:#bbb">｜</span>'
+        f'<span style="white-space:nowrap">'
+        f'<span style="color:#555">時效</span> '
+        f'{mini_bar(rec, "#8957e5")} '
+        f'<span style="color:#333">{rec:.2f}</span>'
+        f'<span style="color:#888"> ×0.15</span></span>'
+        # 操縱
+        f'<span style="color:#bbb">｜</span>'
+        f'<span style="white-space:nowrap">'
+        f'<span style="color:#555">操縱</span> '
+        f'{mini_bar(manip, "#cb2431")} '
+        f'<span style="color:{manip_color};{manip_weight}">{manip:.2f}</span>'
+        f'<span style="color:#888"> ×0.4</span></span>'
+        # 結果
+        f'<span style="color:#bbb">→</span>'
+        f'<span style="white-space:nowrap;font-weight:600">信任 {trust:.2f}</span>'
+        f'</div>'
+        f'<div style="color:{corr_color};font-size:.75rem">{e(corr_text)}</div>'
+        f'</div>'
+    )
+
+
 def _render_evidence_list(
     evidence: list, coin: str | None = None, start_idx: int = 0
 ) -> str:
@@ -160,6 +240,7 @@ def _render_evidence_list(
 
     - trust < 0.3 或 contrarian 項目顯示紅色 tf-low badge。
     - source_url 透過 _safe_href 渲染：http/https 輸出連結，其餘輸出純文字。
+    - trust_components 有值時在 <details> 內顯示分項拆解。
     """
     e = html.escape
     rows: list[str] = []
@@ -185,6 +266,7 @@ def _render_evidence_list(
             f"<details><summary>{e(ev.source)} · {e(ev.fetched_at)}</summary>"
             f"<p style='margin:.3rem 0;font-size:.85rem'>{e(ev.content_reference)}</p>"
             f"<p style='margin:.3rem 0;font-size:.82rem'>URL: {url_html}</p>"
+            f"{_render_trust_breakdown(ev.trust_components, ev.trust)}"
             f"</details>"
             f"</td>"
             f"<td>{_trust_bar(ev.trust)}</td>"

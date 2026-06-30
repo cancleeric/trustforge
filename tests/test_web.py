@@ -163,6 +163,138 @@ def test_render_report_three_sections():
     assert "結論" in htmlout, "缺少結論區段"
 
 
+# ---------------------------------------------------------------------------
+# B4 信任分數「可解釋」可視化 驗收測試
+# ---------------------------------------------------------------------------
+
+def test_trust_breakdown_shows_components():
+    """trust_components 有值時，展開面板應顯示四分項關鍵字（reputation/corroboration 等對應中文）。"""
+    from trustforge.schema import Evidence
+    ev = [
+        Evidence(
+            source="test-src",
+            fetched_at="2026-07-01T00:00:00Z",
+            content_reference="some content",
+            related_claim="some claim",
+            trust=0.72,
+            trust_components={
+                "reputation": 0.95,
+                "corroboration": 0.75,
+                "recency": 1.00,
+                "manipulation": 0.00,
+            },
+        )
+    ]
+    report, _, _ = web._do_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    )
+    htmlout = web._render_report(report, ev)
+    assert "信譽" in htmlout, "缺少信譽分項"
+    assert "佐證" in htmlout, "缺少佐證分項"
+    assert "時效" in htmlout, "缺少時效分項"
+    assert "操縱" in htmlout, "缺少操縱分項"
+    assert "0.95" in htmlout, "信譽值 0.95 未顯示"
+    assert "0.75" in htmlout, "佐證值 0.75 未顯示"
+
+
+def test_trust_breakdown_manip_red():
+    """manipulation > 0 時應以紅色（#cb2431）樣式標示。"""
+    from trustforge.schema import Evidence
+    ev = [
+        Evidence(
+            source="shill-src",
+            fetched_at="2026-07-01T00:00:00Z",
+            content_reference="暴漲 to the moon",
+            related_claim="pump claim",
+            trust=0.10,
+            trust_components={
+                "reputation": 0.35,
+                "corroboration": 0.00,
+                "recency": 0.80,
+                "manipulation": 0.80,
+            },
+        )
+    ]
+    report, _, _ = web._do_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    )
+    htmlout = web._render_report(report, ev)
+    # 操縱值 > 0 → 應有 #cb2431 紅色標示
+    assert "#cb2431" in htmlout, "manipulation > 0 應出現紅色 #cb2431"
+    # 操縱值顯示
+    assert "0.80" in htmlout, "manipulation 值 0.80 未顯示"
+
+
+def test_trust_breakdown_empty_dict_no_crash():
+    """trust_components 為空 dict（舊資料）不應崩潰，且靜默略過不輸出分項區塊。"""
+    from trustforge.schema import Evidence
+    ev = [
+        Evidence(
+            source="old-src",
+            fetched_at="2026-07-01T00:00:00Z",
+            content_reference="old content",
+            related_claim="old claim",
+            trust=0.60,
+            trust_components={},   # 空 dict
+        )
+    ]
+    report, _, _ = web._do_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    )
+    # 不拋例外即通過
+    htmlout = web._render_report(report, ev)
+    assert isinstance(htmlout, str), "回傳應為字串"
+    # 不應出現信任分析區塊（因為空 dict）
+    assert "信任分析" not in htmlout, "空 trust_components 不應顯示信任分析區塊"
+
+
+def test_trust_breakdown_corroboration_badge():
+    """corroboration > 0 顯示「✓ 有獨立來源交叉佐證」；= 0 顯示「— 無交叉佐證」。"""
+    from trustforge.schema import Evidence
+
+    report, _, _ = web._do_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    )
+
+    # corroboration > 0
+    ev_corr = [
+        Evidence(
+            source="multi-src",
+            fetched_at="2026-07-01T00:00:00Z",
+            content_reference="corroborated content",
+            related_claim="claim",
+            trust=0.80,
+            trust_components={
+                "reputation": 0.90,
+                "corroboration": 0.50,
+                "recency": 0.90,
+                "manipulation": 0.00,
+            },
+        )
+    ]
+    html_corr = web._render_report(report, ev_corr)
+    assert "有獨立來源交叉佐證" in html_corr, "corroboration > 0 應顯示交叉佐證文字"
+
+    # corroboration = 0
+    ev_no_corr = [
+        Evidence(
+            source="solo-src",
+            fetched_at="2026-07-01T00:00:00Z",
+            content_reference="single source content",
+            related_claim="claim",
+            trust=0.60,
+            trust_components={
+                "reputation": 0.90,
+                "corroboration": 0.00,
+                "recency": 0.90,
+                "manipulation": 0.00,
+            },
+        )
+    ]
+    html_no_corr = web._render_report(report, ev_no_corr)
+    assert "無交叉佐證" in html_no_corr, "corroboration = 0 應顯示無交叉佐證文字"
+
+
 def test_render_comparison_has_trust_bars(monkeypatch):
     """_render_comparison 含信任橫條（tf-bar-wrap）與可展開 details。"""
     from trustforge.ingestion.base import Document
