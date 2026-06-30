@@ -64,6 +64,7 @@ class Report:
     could_flip: list[str]           # 可能推翻結論的條件
     contrarian: list[str]           # 反方 / 低信任證據
     generated_at: str
+    direction: str = ""             # 結構化方向欄位（偏多/偏空/中性），由 build_report 填入
 
     def confidence_label(self) -> str:
         c = self.confidence
@@ -127,6 +128,12 @@ class Report:
 # 比較分析報告 Markdown（P1-1）
 # ---------------------------------------------------------------------------
 
+def _md_cell(s: str, maxlen: int = 0) -> str:
+    """Markdown 表格欄位安全轉換：替換管道字元與換行，避免破壞表格結構。"""
+    out = s.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+    return out[:maxlen] if maxlen else out
+
+
 def comparison_to_markdown(
     report_a: Report,
     evidence_a: list[Evidence],
@@ -152,7 +159,9 @@ def comparison_to_markdown(
     L.append("## 1. 相對強弱比較")
     L.append(f"| 項目 | {report_a.coin} | {report_b.coin} |")
     L.append("|------|------|------|")
-    L.append(f"| 市場方向 | {report_a._direction_label()} | {report_b._direction_label()} |")
+    dir_a = report_a.direction or report_a._direction_label()
+    dir_b = report_b.direction or report_b._direction_label()
+    L.append(f"| 市場方向 | {dir_a} | {dir_b} |")
     L.append(
         f"| 整體信心 | {report_a.confidence_label()}（{report_a.confidence:.2f}）"
         f" | {report_b.confidence_label()}（{report_b.confidence:.2f}）|"
@@ -181,9 +190,10 @@ def comparison_to_markdown(
         for e in evs:
             kind_count[e.kind] = kind_count.get(e.kind, 0) + 1
         kind_str = "、".join(f"{k}:{v}筆" for k, v in sorted(kind_count.items()))
+        rpt_dir = rpt.direction or rpt._direction_label()
         L.append(
             f"**{rpt.coin}**：{kind_str or '（無）'}"
-            f"｜方向：{rpt._direction_label()}"
+            f"｜方向：{rpt_dir}"
             f"｜信心：{rpt.confidence:.2f}"
         )
     L.append("")
@@ -200,14 +210,17 @@ def comparison_to_markdown(
     L.append("| # | 幣種 | source | fetched_at | trust | content_reference |")
     L.append("|---|------|--------|-----------|-------|-------------------|")
     for i, e in enumerate(evidence_a):
-        ref = e.content_reference.replace("|", "\\|")[:60]
-        L.append(f"| E{i} | {report_a.coin} | {e.source} | {e.fetched_at} | {e.trust:.2f} | {ref} |")
+        ref = _md_cell(e.content_reference, 60)
+        L.append(
+            f"| E{i} | {_md_cell(report_a.coin)} | {_md_cell(e.source)}"
+            f" | {_md_cell(e.fetched_at)} | {e.trust:.2f} | {ref} |"
+        )
     offset = len(evidence_a)
     for i, e in enumerate(evidence_b):
-        ref = e.content_reference.replace("|", "\\|")[:60]
+        ref = _md_cell(e.content_reference, 60)
         L.append(
-            f"| E{offset + i} | {report_b.coin} | {e.source}"
-            f" | {e.fetched_at} | {e.trust:.2f} | {ref} |"
+            f"| E{offset + i} | {_md_cell(report_b.coin)} | {_md_cell(e.source)}"
+            f" | {_md_cell(e.fetched_at)} | {e.trust:.2f} | {ref} |"
         )
 
     return "\n".join(L)

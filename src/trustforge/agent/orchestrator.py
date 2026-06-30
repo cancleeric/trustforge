@@ -172,6 +172,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         limits=limits, could_flip=flips,
         contrarian=[sc.claim.text for sc in brief.contrarian],
         generated_at=iso_utc(now_fn()),
+        direction=direction,
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
     return report, evidence

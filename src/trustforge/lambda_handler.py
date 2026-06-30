@@ -49,8 +49,49 @@ def handler(event, context=None):
         return _resp(200, "ok", "text/plain; charset=utf-8")
 
     if path in ("/analyze", "/analyze.json"):
+        # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
+        from .schema import QuestionType
+        qtype_raw = qs.get("type", ["multi_source"])[0]
         try:
-            report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
+            qtype = QuestionType(qtype_raw)
+        except ValueError:
+            qtype = QuestionType.MULTI_SOURCE
+
+        try:
+            if qtype == QuestionType.COMPARISON:
+                report_a, evidence_a, report_b, evidence_b, log = web._do_comparison(
+                    qs, client_ip=client_ip
+                )
+                if path == "/analyze.json":
+                    payload = {
+                        "report_a": dataclasses.asdict(report_a),
+                        "evidence_a": [ev.to_dict() for ev in evidence_a],
+                        "report_b": dataclasses.asdict(report_b),
+                        "evidence_b": [ev.to_dict() for ev in evidence_b],
+                        "execution_log": log.events,
+                    }
+                    return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
+                                 "application/json; charset=utf-8")
+                query = qs.get("q", [""])[0]
+                return _resp(
+                    200,
+                    web.render_page(
+                        web._render_comparison(report_a, evidence_a, report_b, evidence_b, query)
+                    ),
+                    "text/html; charset=utf-8",
+                )
+            else:
+                report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
+                if path == "/analyze.json":
+                    payload = {
+                        "report": dataclasses.asdict(report),
+                        "evidence": [ev.to_dict() for ev in evidence],
+                        "execution_log": log.events,
+                    }
+                    return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
+                                 "application/json; charset=utf-8")
+                return _resp(200, web.render_page(web._render_report(report, evidence)),
+                             "text/html; charset=utf-8")
         except web.TooManyRequests as exc:
             return _resp(429,
                          web.render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>"),
@@ -65,16 +106,6 @@ def handler(event, context=None):
                          web.render_page(
                              "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>"),
                          "text/html; charset=utf-8")
-        if path == "/analyze.json":
-            payload = {
-                "report": dataclasses.asdict(report),
-                "evidence": [ev.to_dict() for ev in evidence],
-                "execution_log": log.events,
-            }
-            return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
-                         "application/json; charset=utf-8")
-        return _resp(200, web.render_page(web._render_report(report, evidence)),
-                     "text/html; charset=utf-8")
 
     if path == "/":
         return _resp(200, web.render_page(""), "text/html; charset=utf-8")

@@ -242,39 +242,159 @@ def test_parse_comparison_coins_from_query():
 
 
 def test_parse_comparison_coins_invalid():
-    """_parse_comparison_coins：無效幣種回傳 None。"""
+    """_parse_comparison_coins：含逗號但幣種不在 COIN_POOL → ValueError（不靜默回 None）。"""
     from trustforge.web import _parse_comparison_coins
 
-    result = _parse_comparison_coins("DOGE,SHIB", "比較 DOGE SHIB")
-    assert result is None
+    with pytest.raises(ValueError):
+        _parse_comparison_coins("DOGE,SHIB", "比較 DOGE SHIB")
 
 
 # ---------------------------------------------------------------------------
 # web.py _do_analyze comparison 路徑
 # ---------------------------------------------------------------------------
 
-def test_do_analyze_comparison_returns_seven_tuple(monkeypatch):
-    """_do_analyze(type=comparison) 回傳 7 元組（含兩幣各自結果）。"""
+def test_do_comparison_returns_five_tuple(monkeypatch):
+    """_do_comparison 回傳 5 元組 (report_a, ev_a, report_b, ev_b, log)。"""
     def fake_collect(query, coin, offline, data_dir=None):
         return _make_docs(coin)
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
-    from trustforge.web import _do_analyze
+    from trustforge.web import _do_comparison
 
-    result = _do_analyze(
+    result = _do_comparison(
         {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["比較 BTC 與 ETH"]},
         client_ip="",
     )
-    assert len(result) == 6, f"期望 6 元組，實際長度 {len(result)}"
+    assert len(result) == 5, f"期望 5 元組，實際長度 {len(result)}"
+    report_a, evidence_a, report_b, evidence_b, log = result
+    assert report_a.coin == "BTC"
+    assert report_b.coin == "ETH"
 
 
-def test_do_analyze_comparison_missing_pair_raises(monkeypatch):
-    """_do_analyze(comparison)，coin 只給一個且 query 無法解析 → ValueError。"""
-    from trustforge.web import _do_analyze
+def test_do_comparison_missing_pair_raises(monkeypatch):
+    """_do_comparison，coin 只給一個且 query 無法解析 → ValueError 含「兩個幣種」。"""
+    from trustforge.web import _do_comparison
 
     with pytest.raises(ValueError, match="兩個幣種"):
-        _do_analyze(
+        _do_comparison(
             {"coin": ["BTC"], "type": ["comparison"], "q": ["分析 BTC"]},
             client_ip="",
         )
+
+
+# ---------------------------------------------------------------------------
+# 新補測試（PR #6 修正驗收）
+# ---------------------------------------------------------------------------
+
+def test_parse_comparison_coins_fullwidth_comma():
+    """全形逗號「，」應正規化為半形，等同 coin=BTC,ETH。"""
+    from trustforge.web import _parse_comparison_coins
+
+    result = _parse_comparison_coins("BTC，ETH", "")
+    assert result == ("BTC", "ETH"), f"全形逗號未正規化，實際 {result}"
+
+
+def test_parse_comparison_coins_three_coins_error():
+    """3 幣逗號分隔 → ValueError（不可靜默挑兩個）。"""
+    from trustforge.web import _parse_comparison_coins
+
+    with pytest.raises(ValueError, match="2 個"):
+        _parse_comparison_coins("BTC,ETH,SOL", "")
+
+
+def test_parse_comparison_coins_same_coin_error():
+    """相同幣種重複 → ValueError。"""
+    from trustforge.web import _parse_comparison_coins
+
+    with pytest.raises(ValueError, match="不能相同"):
+        _parse_comparison_coins("BTC,BTC", "")
+
+
+def test_parse_comparison_coins_lefttoright_order():
+    """query fallback（無連接詞）應按文字左到右順序，而非 COIN_POOL 順序。"""
+    from trustforge.web import _parse_comparison_coins
+
+    # SOL 在 BTC 前，COIN_POOL 順序是 BTC 先 — 左到右應回 (SOL, BTC)
+    result = _parse_comparison_coins("", "SOL 表現比 BTC 好嗎")
+    assert result == ("SOL", "BTC"), f"期望 (SOL, BTC)，實際 {result}"
+
+
+def test_report_direction_field_set(monkeypatch):
+    """build_report 應把 _direction(brief) 存入 report.direction。"""
+    def fake_collect(query, coin, offline, data_dir=None):
+        return _make_docs(coin)
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+    report, _ev, _log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+    assert report.direction in ("偏多", "偏空", "中性"), (
+        f"direction 欄位未正確填入，實際 {report.direction!r}"
+    )
+
+
+def test_comparison_markdown_uses_direction_field(monkeypatch):
+    """comparison_to_markdown 應讀 report.direction 而非掃 market_judgment。"""
+    def fake_collect(query, coin, offline, data_dir=None):
+        return _make_docs(coin)
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+    report_a, ev_a, report_b, ev_b, _ = run_comparison("BTC", "ETH", "比較", offline=True)
+    # 人工覆寫 direction（確保測的是結構化欄位，不是 market_judgment 掃字）
+    report_a.direction = "偏多_TEST"
+    report_b.direction = "偏空_TEST"
+    md = comparison_to_markdown(report_a, ev_a, report_b, ev_b, "比較")
+    assert "偏多_TEST" in md, "比較報告未使用 report_a.direction"
+    assert "偏空_TEST" in md, "比較報告未使用 report_b.direction"
+
+
+def test_lambda_comparison_html(monkeypatch):
+    """Lambda handler：comparison 題型回 HTML（含幣種對比標題，不 502）。"""
+    def fake_collect(query, coin, offline, data_dir=None):
+        return _make_docs(coin)
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+    from trustforge.lambda_handler import handler
+
+    event = {
+        "rawPath": "/analyze",
+        "queryStringParameters": {
+            "coin": "BTC,ETH",
+            "type": "comparison",
+            "q": "比較 BTC 與 ETH",
+        },
+        "requestContext": {},
+    }
+    resp = handler(event)
+    assert resp["statusCode"] == 200, f"Lambda comparison HTML 回 {resp['statusCode']}"
+    assert "BTC" in resp["body"] and "ETH" in resp["body"]
+    assert "comparison" in resp["body"].lower() or "vs" in resp["body"].lower()
+
+
+def test_lambda_comparison_json(monkeypatch):
+    """Lambda handler：comparison.json 回 JSON，含 report_a/report_b/evidence_a/evidence_b。"""
+    def fake_collect(query, coin, offline, data_dir=None):
+        return _make_docs(coin)
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+    from trustforge.lambda_handler import handler
+
+    event = {
+        "rawPath": "/analyze.json",
+        "queryStringParameters": {
+            "coin": "BTC,ETH",
+            "type": "comparison",
+            "q": "比較 BTC 與 ETH",
+        },
+        "requestContext": {},
+    }
+    resp = handler(event)
+    assert resp["statusCode"] == 200, f"Lambda comparison JSON 回 {resp['statusCode']}"
+    data = json.loads(resp["body"])
+    for key in ("report_a", "evidence_a", "report_b", "evidence_b", "execution_log"):
+        assert key in data, f"Lambda comparison JSON 缺欄位 {key}"
+    assert data["report_a"]["coin"] == "BTC"
+    assert data["report_b"]["coin"] == "ETH"
