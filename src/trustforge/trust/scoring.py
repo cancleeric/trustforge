@@ -39,6 +39,24 @@ KIND_REPUTATION = {
     "social": 0.35,
 }
 
+# 域內停用詞（Domain Stopwords）：加密市場每篇分析都有、對「是否在說同一件事」無鑑別力的詞。
+# 這些詞從 overlap 計算中完全排除，讓佐證判斷只依賴具體/稀有的內容詞。
+DOMAIN_STOP: set[str] = {
+    # 幣名（太普遍，任何 BTC 分析都有）
+    "btc", "eth", "sol", "bnb", "xrp",
+    "bitcoin", "ethereum", "solana",
+    "比特幣", "比特", "以太坊", "以太", "幣",
+    # 超高頻市場通用詞
+    "市場", "價格", "成交量", "交易所", "交易",
+    "行情", "數據", "分析", "資料", "報告",
+    # 方向性通用詞（過於籠統；「漲」/「跌」單字被 _normalize 過濾不到，改用整詞）
+    "漲跌", "上漲", "下跌", "看漲", "看跌", "走低", "走高",
+    # 高頻語法詞（_normalize 已過濾單字，這裡補雙字）
+    # 注意：支撐/阻力是具體 TA 訊號詞，已從 DOMAIN_STOP 移除（見 codex #fix-[Low]）
+    "目前", "近期", "顯示", "表示", "預計", "預測", "可能",
+    "目標",
+}
+
 # 操縱訊號關鍵詞（啟發式；正式版可換 Bedrock 分類器）。
 _MANIP_PATTERNS = [
     r"to the moon", r"暴漲", r"翻倍", r"\bshill\b", r"喊單", r"穩賺",
@@ -136,16 +154,31 @@ def _normalize(s: str) -> set[str]:
     return {t for t in re.findall(r"[\w一-鿿]+", s.lower()) if len(t) > 1}
 
 
+def _direction_compatible(d1: str, d2: str) -> bool:
+    """方向相容檢查。任一方為 neutral 時不擋（離線/預設安全）；兩者皆有方向時必須一致。"""
+    if "neutral" in (d1, d2):
+        return True
+    return d1 == d2
+
+
 def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
-    """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。"""
-    tt = _normalize(target.text)
+    """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
+
+    改進（M1-M3）：
+    - 停用詞過濾：從 overlap 計算排除域內通用詞（幣名/市場詞），只計具體詞重疊。
+    - 方向閘：若兩條主張方向明確且相反（bullish vs bearish），略過，不算佐證。
+    """
+    tt = _normalize(target.text) - DOMAIN_STOP
     if not tt:
         return 0.0
     independent_sources: set[str] = set()
     for c in all_claims:
         if c.doc.source == target.doc.source:
             continue
-        overlap = len(tt & _normalize(c.text)) / max(1, len(tt))
+        if not _direction_compatible(target.direction, c.direction):
+            continue
+        ct = _normalize(c.text) - DOMAIN_STOP
+        overlap = len(tt & ct) / len(tt)
         if overlap >= 0.4:
             independent_sources.add(c.doc.source)
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
