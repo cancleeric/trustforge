@@ -39,7 +39,7 @@ class Source:
     kind: str = "news"
     name: str = "base"
 
-    def fetch(self, query: str) -> list[Document]:  # pragma: no cover - 介面
+    def fetch(self, query: str, coin: str = "") -> list[Document]:  # pragma: no cover - 介面
         raise NotImplementedError
 
 
@@ -50,7 +50,7 @@ class OfflineSampleSource(Source):
         self.kind = kind
         self.name = name
 
-    def fetch(self, query: str) -> list[Document]:
+    def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
         f = SAMPLE_DIR / f"{self.kind}.json"
         if not f.exists():
             return []
@@ -90,9 +90,20 @@ def collect(query: str, coin: str | None = None,
 
     # 2. 文件型來源
     if sources is None:
-        sources = [OfflineSampleSource(k, k) for k in SOURCE_KINDS] if offline else []
+        if offline:
+            sources = [OfflineSampleSource(k, k) for k in SOURCE_KINDS]
+        else:
+            # 線上模式：延遲匯入以避免循環依賴
+            from .news import build_news_sources
+            from .onchain import build_onchain_sources
+            sources = build_news_sources() + build_onchain_sources()
+    _coin = coin or ""
     for s in sources:
-        docs.extend(s.fetch(query))
+        try:
+            docs.extend(s.fetch(query, coin=_coin))
+        except Exception:
+            # 單一來源失敗（逾時 / 網路錯誤）→ 跳過不崩，其他來源照常
+            pass
     return docs
 
 
