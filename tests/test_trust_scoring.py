@@ -62,3 +62,48 @@ def test_negated_manipulation_not_penalised():
     assert _manipulation_penalty(neg) == 0
     assert _manipulation_penalty(pos) > 0
     assert _manipulation_penalty(aff) > 0
+
+
+# --- P2-1 sample-enrich 新增整合測試 ------------------------------------
+
+def test_manipulation_entries_land_in_contrarian():
+    """Sample data 的喊單社群訊息（含 to the moon/翻倍/穩賺）應被評為 trust < 0.3 並落入 contrarian。"""
+    from trustforge.ingestion.base import collect, OHLCV_DIR
+    docs = collect("BTC", coin="BTC", offline=True, data_dir=OHLCV_DIR)
+    assert docs, "離線樣本不可為空"
+    now = max(d.ts for d in docs)
+    claims = extract_claims(docs)
+    scored_all = score(claims, now=now)
+    brief = aggregate(scored_all, "BTC")
+    # contrarian 中應有 kind=social + manipulation>0 + trust<0.3 的訊息
+    pump_in_contrarian = [
+        sc for sc in brief.contrarian
+        if sc.claim.doc.kind == "social"
+        and sc.components["manipulation"] > 0
+        and sc.trust < 0.3
+    ]
+    assert pump_in_contrarian, (
+        "操縱語言社群訊息應落入 contrarian（trust < 0.3），"
+        f"contrarian social: {[(sc.claim.doc.source, round(sc.trust, 3), round(sc.components['manipulation'], 2)) for sc in brief.contrarian if sc.claim.doc.kind == 'social']}"
+    )
+
+
+def test_cross_source_corroboration_active():
+    """BTC 交易所流入主題應被 onchain + news + social 多源佐證，corroboration > 0.5。"""
+    from trustforge.ingestion.base import collect, OHLCV_DIR
+    docs = collect("BTC 交易所", coin="BTC", offline=True, data_dir=OHLCV_DIR)
+    assert docs, "離線樣本不可為空"
+    now = max(d.ts for d in docs)
+    claims = extract_claims(docs)
+    scored_all = score(claims, now=now)
+    # onchain-btc-inflow 應被多個獨立來源佐證（corroboration > 0.5）
+    high_corr_onchain = [
+        sc for sc in scored_all
+        if sc.claim.doc.kind == "onchain"
+        and "btc" in sc.claim.doc.id.lower()
+        and sc.components["corroboration"] > 0.5
+    ]
+    assert high_corr_onchain, (
+        "BTC onchain 流入主張應被多個獨立來源（news + social）佐證（corroboration > 0.5），"
+        f"onchain corr: {[(sc.claim.doc.id, round(sc.components['corroboration'], 3)) for sc in scored_all if sc.claim.doc.kind == 'onchain']}"
+    )
