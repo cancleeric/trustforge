@@ -79,11 +79,30 @@ export AWS_REGION=us-east-1
 export BEDROCK_MODEL_ID="<8/1 現場公告的 Bedrock 模型 id>"   # 例：us.anthropic.claude-...
 
 # 3. 跑一條 demo pipeline（離線樣本資料，不需 AWS 也能看信任層）
-python -m trustforge.cli analyze --query "BTC 今天為什麼急跌？" --offline
+#    產出官方 4 交付件到 out/ ：report.md / evidence.json / execution_log.jsonl
+python -m trustforge.cli analyze \
+    --coin BTC --type multi_source \
+    --query "分析 BTC 過去兩週市場狀況，整合多源資料" --offline --out out/btc
+
+# 題型：multi_source（多源整合）/ hypothesis（假設驗證）/ comparison（比較分析）
+# 幣種池：BTC / ETH / SOL / BNB / XRP
 
 # 4. 測試
 pytest -q
 ```
+
+## 交付件（對齊官方）
+
+每次 `analyze` 產出官方要求的 4 件（程式碼/設定即本 repo）：
+
+| 交付件 | 檔案 | 內容 |
+|--------|------|------|
+| 分析報告 Final Report | `out/<coin>/report.md` | 結論/市場判斷 → 關鍵依據(事實→推論→結論) → 信心說明(限制) |
+| 證據清單 Evidence List | `out/<coin>/evidence.json` | 每筆含 `source/fetched_at/content_reference/related_claim` |
+| 執行紀錄 Execution Log | `out/<coin>/execution_log.jsonl` | 時戳 + 工具呼叫 + 流程，含 15 分鐘預算追蹤 |
+
+> **反作弊鐵則**：市場判斷、證據整合、信任評分由本 pipeline 產生；Bedrock 只負責
+> 把推理「行文」，不得把第三方現成結論當主要結果。詳見 `docs/COMPETITION.md`。
 
 ---
 
@@ -99,12 +118,14 @@ trustforge/
 │   └── ARCHITECTURE.md     # 三層架構與信任演算法設計
 ├── src/trustforge/
 │   ├── bedrock.py          # AWS Bedrock runtime 封裝（唯一模型入口）
-│   ├── ingestion/          # 多源連接器（news/social/onchain/hoyabit/regulatory）
+│   ├── schema.py           # Coin 池 / 題型 / Evidence / Report（對齊交付規格）
+│   ├── execlog.py          # 執行紀錄 + 15 分鐘預算追蹤
+│   ├── ingestion/          # 多源連接器：prices(OHLCV) + news/social/onchain/hoyabit/regulatory
 │   ├── trust/              # ★ 信任提煉引擎（本專案核心競爭力）
-│   ├── agent/              # Bedrock agent 編排 + 溯源生成
-│   └── cli.py              # demo 入口
-├── demo/                   # Live Demo 素材 / 離線樣本資料
-└── tests/
+│   ├── agent/              # Bedrock 編排 → Report + Evidence + Log
+│   └── cli.py              # demo / 競賽執行入口
+├── demo/sample_data/       # 離線樣本：ohlcv/*.csv + 各來源 *.json
+└── tests/                  # 13 測試（信任評分 / 價格 / 報告管線）
 ```
 
 ---

@@ -3,10 +3,14 @@
 > 完成標準 = 8/1–2 現場能跑出有溯源、可查證的 Live Demo，且只用 AWS Bedrock。
 
 ## M0 — Repo 奠基（本輪，✅）
-- [x] 三層架構骨架（ingestion / trust / agent）
+- [x] 三層架構（ingestion / trust / agent）
 - [x] 信任提煉引擎可運作啟發式 + 測試
 - [x] Bedrock 單一模型入口（offline 可跑）
-- [x] 離線樣本資料 + CLI demo
+- [x] **對齊官方規格**：5 幣種池、OHLCV CSV 連接器、3 題型
+- [x] **4 交付件**：Report(事實→推論→結論) / Evidence(官方欄位) / Execution Log
+- [x] **15 分鐘執行預算**追蹤 + 反作弊設計（判斷由我方 pipeline 產生）
+- [x] AWS 架構文件（決賽簡報用）+ Kiro 加分標註
+- [x] 13 測試全綠 + CLI 端到端產出交付件
 - [x] GitHub（主）+ Gitea（鏡像）
 
 ## M1 — 工作坊前（~7/10）

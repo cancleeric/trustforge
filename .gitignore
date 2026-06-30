@@ -11,3 +11,5 @@ dist/
 # 企業數據（HOYA BIT）不進版控
 demo/hoyabit_data/
 *.secret
+# 生成的交付件輸出（可重跑）
+out/

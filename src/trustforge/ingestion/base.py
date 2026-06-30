@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Iterable
 
 SAMPLE_DIR = Path(__file__).resolve().parents[3] / "demo" / "sample_data"
+OHLCV_DIR = SAMPLE_DIR / "ohlcv"
 
-# 來源類型 → 預設信譽分（0–1）。鏈上/監管最高，匿名社群最低。詳見 trust/scoring.py。
+# 文件型來源類型（有對應的 sample_data/*.json）。price 走 OHLCV CSV，另行處理。
 SOURCE_KINDS = ("onchain", "regulatory", "hoyabit", "news", "social")
 
 
@@ -59,15 +60,36 @@ class OfflineSampleSource(Source):
         ]
 
 
-def collect(query: str, sources: Iterable[Source] | None = None, offline: bool = False) -> list[Document]:
-    """匯流所有來源。offline=True 時用樣本資料。"""
-    if sources is None:
-        if offline:
-            sources = [OfflineSampleSource(k, k) for k in SOURCE_KINDS]
-        else:
-            # TODO(7/13 後)：接 HOYA BIT 企業數據與各真實 API 連接器。
-            sources = []
+def collect(query: str, coin: str | None = None,
+            sources: Iterable[Source] | None = None,
+            offline: bool = False, data_dir=None) -> list[Document]:
+    """匯流所有來源（文件型 + OHLCV 價格事實）。offline=True 時用樣本資料。"""
     docs: list[Document] = []
+
+    # 1. 價格事實（官方基準 OHLCV）
+    if coin:
+        from .prices import load_ohlcv, price_facts
+        d = data_dir or (OHLCV_DIR if offline else None)
+        if d:
+            bars = load_ohlcv(coin, d)
+            docs.extend(price_facts(coin, bars, source_file=f"{coin.upper()}.csv",
+                                    ts=_latest_bar_ts(bars)))
+
+    # 2. 文件型來源
+    if sources is None:
+        sources = [OfflineSampleSource(k, k) for k in SOURCE_KINDS] if offline else []
     for s in sources:
         docs.extend(s.fetch(query))
     return docs
+
+
+def _latest_bar_ts(bars) -> float:
+    """用最後一根 K 的日期當價格事實的 fetched_at（UTC 當日 00:00）。"""
+    if not bars:
+        return 0.0
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.strptime(bars[-1].date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return 0.0

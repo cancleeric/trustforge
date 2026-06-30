@@ -29,8 +29,9 @@ DEFAULT_WEIGHTS = {
     "manip": 0.40,  # 操縱懲罰（扣分項，足以把喊單壓到 0）
 }
 
-# 來源類型基礎信譽（0–1）。鏈上資料客觀性最高，匿名社群最低。
+# 來源類型基礎信譽（0–1）。客觀數據（價格/鏈上）最高，匿名社群最低。
 KIND_REPUTATION = {
+    "price": 0.95,     # 官方提供 OHLCV，客觀事實
     "onchain": 0.95,
     "regulatory": 0.90,
     "hoyabit": 0.85,   # 交易所一手行情數據
@@ -85,8 +86,11 @@ class TrustedBrief:
 def extract_claims(docs: list[Document]) -> list[Claim]:
     """把 Document 切成句級主張。骨架版用句界切分；正式版可用 Bedrock 抽取結構化主張。"""
     claims: list[Claim] = []
+    # 只在真正的句末切分：中文標點 / 換行 / 後接空白或結尾的 ASCII .!?。
+    # 避免把 46637.08、-7.4% 這類小數拆斷而丟失語義。
+    _SENT = re.compile(r"[。！？\n]+|[.!?]+(?=\s|$)")
     for d in docs:
-        sentences = [s.strip() for s in re.split(r"[。！？.!?\n]+", d.text) if s.strip()]
+        sentences = [s.strip() for s in _SENT.split(d.text) if s.strip()]
         for i, s in enumerate(sentences):
             claims.append(Claim(id=f"{d.id}#{i}", text=s, doc=d))
     return claims
