@@ -20,7 +20,7 @@ from .base import Document, Source
 
 _MAX_BYTES = 512 * 1024   # 512 KB
 _TIMEOUT = 5
-_UA = "TrustForge/1.0 (research)"
+_UA = "TrustForge-Hackathon research contact@hurricanesoft.com.tw"
 
 # 加密相關關鍵字（小寫）
 _CRYPTO_KEYWORDS = frozenset([
@@ -95,7 +95,10 @@ def _parse_sec_atom(raw: bytes, coin: str = "") -> list[Document]:  # noqa: ARG0
             text=title,
             url=link,
             ts=ts,
-            meta={"content_reference": content_ref},
+            meta={
+                    "content_reference": content_ref,
+                    "regulatory_scope": "industry-level",
+                },
         ))
 
     return docs

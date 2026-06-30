@@ -1,39 +1,31 @@
 """P2-2 / P2-3 社群+監管連接器測試 — CI 不打真網路（monkeypatch _fetch_url）。"""
 from __future__ import annotations
 
-import json
 import pytest
 
 # ── 本地固定 fixture ──────────────────────────────────────────────────────────
 
-REDDIT_FIXTURE = json.dumps({
-    "data": {
-        "children": [
-            {
-                "data": {
-                    "id": "abc123",
-                    "title": "BTC Bitcoin surges past $70k",
-                    "selftext": "Bitcoin is showing strong institutional demand and bullish structure.",
-                    "permalink": "/r/CryptoCurrency/comments/abc123/btc_bitcoin_surges/",
-                    "created_utc": 1785542400.0,
-                    "subreddit": "CryptoCurrency",
-                }
-            },
-            {
-                "data": {
-                    "id": "def456",
-                    "title": "ETH Ethereum price prediction",
-                    "selftext": "ETH might reach new highs as network activity increases.",
-                    "permalink": "/r/CryptoCurrency/comments/def456/eth_ethereum_prediction/",
-                    "created_utc": 1785456000.0,
-                    "subreddit": "CryptoCurrency",
-                }
-            },
-        ]
-    }
-}).encode()
+REDDIT_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>r/CryptoCurrency: search results</title>
+    <item>
+      <title>BTC Bitcoin surges past $70k</title>
+      <link>https://www.reddit.com/r/CryptoCurrency/comments/abc123/btc_bitcoin_surges/</link>
+      <description>Bitcoin is showing strong institutional demand and bullish structure.</description>
+      <pubDate>Sat, 01 Aug 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>ETH Ethereum price prediction</title>
+      <link>https://www.reddit.com/r/CryptoCurrency/comments/def456/eth_ethereum_prediction/</link>
+      <description>ETH might reach new highs as network activity increases.</description>
+      <pubDate>Fri, 31 Jul 2026 00:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>"""
 
-REDDIT_EMPTY_FIXTURE = json.dumps({"data": {"children": []}}).encode()
+REDDIT_EMPTY_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel></channel></rss>"""
 
 SEC_ATOM_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -275,3 +267,105 @@ def test_collect_offline_unchanged_by_new_connectors():
     # offline 樣本含 onchain 資料
     onchain_docs = [d for d in docs if d.kind == "onchain"]
     assert len(onchain_docs) >= 1
+
+
+# ── 新測試（C / D / E / F）────────────────────────────────────────────────────
+
+def test_reddit_urlencode_query_in_url(monkeypatch):
+    """C: query 含特殊字元時 URL 必須正確 percent-encode，不能裸露 & 改寫請求。"""
+    from trustforge.ingestion import social
+
+    captured = {}
+
+    def _mock_fetch(url: str) -> bytes:
+        captured["url"] = url
+        return REDDIT_EMPTY_FIXTURE
+
+    monkeypatch.setattr(social, "_fetch_url", _mock_fetch)
+    social.RedditCryptoSource("CryptoCurrency").fetch("btc&limit=100", coin="")
+    url = captured["url"]
+    # 特殊字元需被編碼
+    assert "btc%26limit%3D100" in url or "btc&amp;limit" in url or "btc%26" in url, (
+        f"URL 未正確 encode：{url}"
+    )
+    # 不應出現裸露的注入字串
+    assert "q=btc&limit=100" not in url
+
+
+def test_reddit_rss_missing_fields_no_crash(monkeypatch):
+    """D: RSS item 缺 title/description/link/pubDate 時不崩潰，回傳空白預設值。"""
+    from trustforge.ingestion import social
+
+    bad_rss = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <item>
+  </item>
+</channel></rss>"""
+
+    monkeypatch.setattr(social, "_fetch_url", lambda url: bad_rss)
+    # 不應拋 AttributeError / TypeError
+    docs = social.RedditCryptoSource("CryptoCurrency").fetch("", coin="")
+    assert isinstance(docs, list)
+    if docs:
+        assert docs[0].text == ""
+        assert docs[0].ts == 0.0
+        assert docs[0].url == ""
+
+
+def test_reddit_atom_feed_parsed(monkeypatch):
+    """B/D: Reddit 實際回傳 Atom feed（<entry>），解析器須正確處理。"""
+    from trustforge.ingestion import social
+
+    atom_fixture = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>r/CryptoCurrency: bitcoin</title>
+  <entry>
+    <title>Bitcoin hits new ATH</title>
+    <link href="https://www.reddit.com/r/CryptoCurrency/comments/xyz/bitcoin_ath/" rel="alternate"/>
+    <updated>2026-08-01T00:00:00+00:00</updated>
+    <summary>BTC breaks all-time high on institutional inflows.</summary>
+  </entry>
+</feed>"""
+
+    monkeypatch.setattr(social, "_fetch_url", lambda url: atom_fixture)
+    docs = social.RedditCryptoSource("CryptoCurrency").fetch("bitcoin", coin="")
+    assert len(docs) == 1
+    d = docs[0]
+    assert "bitcoin" in d.text.lower() or "bitcoin" in d.meta["content_reference"].lower()
+    assert d.url == "https://www.reddit.com/r/CryptoCurrency/comments/xyz/bitcoin_ath/"
+    assert d.ts == 1785542400.0
+    assert d.source == "reddit-cryptocurrency"
+
+
+def test_reddit_permalink_no_double_domain(monkeypatch):
+    """F: permalink 已含完整 https://www.reddit.com 時，url 不能雙重前綴。"""
+    from trustforge.ingestion import social
+
+    full_url_rss = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>Full URL test</title>
+    <link>https://www.reddit.com/r/CryptoCurrency/comments/xyz/full/</link>
+    <pubDate>Sat, 01 Aug 2026 00:00:00 +0000</pubDate>
+  </item>
+</channel></rss>"""
+
+    monkeypatch.setattr(social, "_fetch_url", lambda url: full_url_rss)
+    docs = social.RedditCryptoSource("CryptoCurrency").fetch("", coin="")
+    assert len(docs) == 1
+    d = docs[0]
+    # 不應出現雙 domain
+    assert d.url.count("https://www.reddit.com") == 1
+    assert d.url == "https://www.reddit.com/r/CryptoCurrency/comments/xyz/full/"
+
+
+def test_sec_industry_level_marked(monkeypatch):
+    """E: SEC 文件必須在 meta 標示 regulatory_scope=industry-level（業界級監管背景）。"""
+    from trustforge.ingestion import regulatory
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
+    docs = regulatory.SECRSSSource().fetch("", coin="")
+    assert len(docs) >= 1
+    for d in docs:
+        assert d.meta.get("regulatory_scope") == "industry-level", (
+            f"缺少 regulatory_scope=industry-level，doc={d.id}"
+        )
