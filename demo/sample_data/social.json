@@ -46,5 +46,13 @@
     "url": "https://x.com/inst_watch/status/1806001006",
     "ts": 1780185600,
     "meta": {}
+  },
+  {
+    "id": "soc-eth-regulation",
+    "source": "x-analyst-eth",
+    "text": "SEC 調查 ETH 質押 服務 監管 風險 升高，市場 情緒 看空 賣壓 下挫 加劇，值得 關注。",
+    "url": "https://x.com/analyst_eth/status/1806001007",
+    "ts": 1780185600,
+    "meta": {}
   }
 ]

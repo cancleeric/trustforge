@@ -112,7 +112,7 @@ def extract_claims(docs: list[Document]) -> list[Claim]:
     for d in docs:
         sentences = [s.strip() for s in _SENT.split(d.text) if s.strip()]
         for i, s in enumerate(sentences):
-            claims.append(Claim(id=f"{d.id}#{i}", text=s, doc=d))
+            claims.append(Claim(id=f"{d.id}#{i}", text=s, doc=d, direction=_infer_direction(s)))
     return claims
 
 
@@ -134,6 +134,63 @@ def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
 
 # 明確否定結構(不吃「不僅/不斷/不只」這類肯定副詞)。命中前 4 字內出現才視為否定。
 _NEG_RX = re.compile(r"不會|不太|不致|不至|不再|沒有|沒|尚未|未|無法|別|勿|非")
+
+# --- 方向推斷關鍵詞（離線/regex 路徑用）---------------------------------
+_BULLISH_WORDS: list[str] = [
+    "上漲", "漲", "看漲", "看多", "買入", "買盤", "累積", "增持", "突破",
+    "流入", "利多", "走高", "反彈", "上揚", "攀升",
+]
+_BEARISH_WORDS: list[str] = [
+    "下跌", "跌", "看跌", "看空", "賣壓", "拋壓", "拋售", "流出",
+    "利空", "走低", "暴跌", "崩", "恐慌", "清算", "賣盤", "下挫",
+]
+
+
+def _infer_direction(text: str) -> str:
+    """從文字關鍵詞推斷方向（純函式，離線/regex 路徑用）。
+
+    最長詞優先非重疊匹配：先處理長詞，短詞若落在已消耗區間則不計
+    （避免「上漲」被其子字串「漲」重複計數、「看漲 看空」誤判 bullish）。
+    否定守門：若方向詞前 4 字元內出現 _NEG_RX 否定詞，該詞不計入計數
+    （但仍標記區間已消耗，防短詞補計）。
+    bullish 命中 > bearish → "bullish"；反之 "bearish"；平手或都 0 → "neutral"。
+    """
+    # 收集所有候選配對：(start, end, word, direction)
+    candidates: list[tuple[int, int, str, str]] = []
+    for w in _BULLISH_WORDS:
+        for m in re.finditer(re.escape(w), text):
+            candidates.append((m.start(), m.end(), w, "bullish"))
+    for w in _BEARISH_WORDS:
+        for m in re.finditer(re.escape(w), text):
+            candidates.append((m.start(), m.end(), w, "bearish"))
+
+    # 依詞長降序（最長優先），同長度依位置升序
+    candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
+
+    consumed: list[tuple[int, int]] = []  # 已消耗的 (start, end) 區間
+
+    def _overlaps(s: int, e: int) -> bool:
+        return any(s < ce and e > cs for cs, ce in consumed)
+
+    bullish = 0
+    bearish = 0
+    for start, end, _word, direction in candidates:
+        if _overlaps(start, end):
+            continue
+        consumed.append((start, end))
+        # 否定守門
+        if _NEG_RX.search(text[max(0, start - 4): start]):
+            continue  # 消耗區間但不計分
+        if direction == "bullish":
+            bullish += 1
+        else:
+            bearish += 1
+
+    if bullish > bearish:
+        return "bullish"
+    if bearish > bullish:
+        return "bearish"
+    return "neutral"
 
 
 def _manipulation_penalty(c: Claim) -> float:

@@ -38,5 +38,13 @@
     "url": "https://www.coindesk.com/policy/2026/05/28/xrp-spot-etf-applications-submitted-sec",
     "ts": 1779969600,
     "meta": {}
+  },
+  {
+    "id": "news-eth-regulatory",
+    "source": "coindesk",
+    "text": "美國 SEC 對 以太坊 質押 服務 展開 正式 調查，ETH 短期 市場 情緒 看空，賣壓 下挫 風險 升高。",
+    "url": "https://www.coindesk.com/policy/2026/05/31/sec-eth-staking-investigation",
+    "ts": 1780185600,
+    "meta": {}
   }
 ]

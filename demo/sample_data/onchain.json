@@ -30,5 +30,29 @@
     "url": "https://cryptoquant.com/asset/btc/miner-outflow/2026053012",
     "ts": 1780099200,
     "meta": {}
+  },
+  {
+    "id": "onchain-eth-accumulation-1",
+    "source": "glassnode-eth",
+    "text": "Glassnode 數據：ETH 交易所 可用 供應量 7 日 減少 49,200 ETH，籌碼 持續 累積 至 自管 錢包。",
+    "url": "https://glassnode.com/metrics/eth/exchange-supply/2026053100",
+    "ts": 1780185600,
+    "meta": {}
+  },
+  {
+    "id": "onchain-eth-accumulation-2",
+    "source": "nansen-eth",
+    "text": "Nansen 追蹤：ETH 長期 持有者（LTH）持倉 佔比 突破 64%，創 近 6 個月 新高，增持 意願 明確。",
+    "url": "https://nansen.ai/eth/lth-ratio/2026053102",
+    "ts": 1780192800,
+    "meta": {}
+  },
+  {
+    "id": "onchain-eth-accumulation-3",
+    "source": "cryptoquant-eth",
+    "text": "CryptoQuant：鏈上 累積 地址 數量 7 日 新增 12,400 個，買盤 接收 持續 強勁。",
+    "url": "https://cryptoquant.com/asset/eth/accumulation-addresses/2026053105",
+    "ts": 1780203600,
+    "meta": {}
   }
 ]
