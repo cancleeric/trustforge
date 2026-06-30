@@ -80,6 +80,94 @@ def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
     return limits, flips
 
 
+def detect_cross_source_signal(scored: list[ScoredClaim]) -> dict | None:
+    """跨源訊號偵測：判斷客觀類與情緒類訊號是否背離或共識（純函式，無副作用）。
+
+    入參 scored = list[ScoredClaim]，包含所有可用主張（trust 任意）。
+    函式內部只採用 trust >= 0.5 的主張進行計算。
+
+    規格：
+    - 客觀類 = OBJECTIVE_KINDS；情緒類 = {"news", "social"}
+    - 各類信任加權方向投票：weight[dir] = sum(trust for dir)，最高者為主導；
+      若最高 weight < 0.3 × 該類總 trust → 主導視為 "neutral"
+    - 背離：客觀主導 ≠ neutral 且情緒主導 ≠ neutral 且兩者相反
+    - 共識：兩類主導相同（非 neutral）且兩類各有 ≥1 source
+    - None：任一類 0 筆 / 任一主導 neutral / 兩類 source 合計 < 2
+
+    守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
+    """
+    _SENTIMENT_KINDS: set[str] = {"news", "social"}
+
+    # 只取 trust >= 0.5 的主張
+    eligible = [sc for sc in scored if sc.trust >= 0.5]
+
+    objective = [sc for sc in eligible if sc.claim.doc.kind in OBJECTIVE_KINDS]
+    sentiment = [sc for sc in eligible if sc.claim.doc.kind in _SENTIMENT_KINDS]
+
+    # 任一類 0 筆 → None
+    if not objective or not sentiment:
+        return None
+
+    def _dominant(group: list[ScoredClaim]) -> str:
+        """回傳信任加權後的主導方向；若最高票 < 0.3×total 則回 'neutral'。"""
+        weights: dict[str, float] = {}
+        total = 0.0
+        for sc in group:
+            d = sc.claim.direction
+            weights[d] = weights.get(d, 0.0) + sc.trust
+            total += sc.trust
+        if not total:
+            return "neutral"
+        best_dir = max(weights, key=lambda k: weights[k])
+        return best_dir if weights[best_dir] >= 0.3 * total else "neutral"
+
+    obj_dir = _dominant(objective)
+    sent_dir = _dominant(sentiment)
+
+    # 任一主導 neutral → None
+    if obj_dir == "neutral" or sent_dir == "neutral":
+        return None
+
+    # 兩類 source 合計 < 2 → None
+    obj_sources = {sc.claim.doc.source for sc in objective}
+    sent_sources = {sc.claim.doc.source for sc in sentiment}
+    if len(obj_sources | sent_sources) < 2:
+        return None
+
+    # 判定訊號類型
+    if obj_dir != sent_dir:
+        signal_type = "divergence"
+    else:
+        signal_type = "consensus"
+
+    # 中文方向標籤（守不代客決策）
+    _label = {"bullish": "偏多", "bearish": "偏空"}
+    obj_label = _label.get(obj_dir, obj_dir)
+    sent_label = _label.get(sent_dir, sent_dir)
+
+    if signal_type == "divergence":
+        summary = (
+            f"客觀數據{obj_label}、情緒類{sent_label}，"
+            "呈背離，建議交叉驗證、留意轉折。"
+        )
+    else:
+        summary = f"客觀與情緒同向{obj_label}，訊號一致。"
+
+    # 佐證 claim_ids：各類中方向符合主導的主張
+    supporting_ids = (
+        [sc.claim.id for sc in objective if sc.claim.direction == obj_dir]
+        + [sc.claim.id for sc in sentiment if sc.claim.direction == sent_dir]
+    )
+
+    return {
+        "type": signal_type,
+        "objective_direction": obj_dir,
+        "sentiment_direction": sent_dir,
+        "summary": summary,
+        "supporting_claim_ids": supporting_ids,
+    }
+
+
 def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief,
                  client: BedrockClient | None = None,
                  log: ExecutionLog | None = None,
@@ -132,16 +220,27 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     market_judgment = head + f"（{n_indep} 個獨立來源支撐，整體信心 {brief.confidence:.2f}）"
     log.record("judgment.derive", params={"direction": direction, "indep_sources": n_indep})
 
+    # 2.5 跨源訊號偵測（純演算法，在 Bedrock 行文前完成）
+    cross_signal = detect_cross_source_signal(brief.supporting + brief.contrarian)
+
     # 3. Bedrock 行文（Step 3：帶 claim_id 溯源；離線為佔位，結構不依賴它）
     # 建立 claim_id → 摘要對照，供 prompt 強制引用
     claim_refs = "\n".join(
         f"- [{sc.claim.id}] {sc.claim.text[:100]}"
         for sc in brief.supporting[:8]
     )
+    # 若有跨源訊號，指示 LLM 只敘述已算好的 summary，不得自行判斷背離/共識
+    _cross_note = ""
+    if cross_signal:
+        _cross_note = (
+            f"\n跨源訊號（已由 pipeline 算好）：{cross_signal['summary']}\n"
+            "請在行文中僅敘述此跨源訊號摘要，不得自行判斷背離/共識。"
+        )
     prompt = (
         f"幣種：{coin}\n題型：{qtype.value}\n問題：{query}\n"
         f"我方判斷：{market_judgment}\n"
         f"事實（含 claim_id）：\n{claim_refs}\n"
+        f"{_cross_note}"
         "\n請用 2-3 句把上述事實串成事實→推論→結論的推理，"
         "每個判斷必須引用對應 claim_id（格式：[claim_id]），僅依事實，勿引入外部結論。"
     )
@@ -173,6 +272,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         contrarian=[sc.claim.text for sc in brief.contrarian],
         generated_at=iso_utc(now_fn()),
         direction=direction,
+        cross_source_signal=cross_signal,
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
     return report, evidence

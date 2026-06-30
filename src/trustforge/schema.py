@@ -68,6 +68,7 @@ class Report:
     contrarian: list[str]           # 反方 / 低信任證據
     generated_at: str
     direction: str = ""             # 結構化方向欄位（偏多/偏空/中性），由 build_report 填入
+    cross_source_signal: dict | None = field(default=None)  # 跨源訊號背離/共識，由 orchestrator 填入
 
     def confidence_label(self) -> str:
         c = self.confidence
@@ -112,6 +113,15 @@ class Report:
             L.append("\n可能推翻結論的條件：")
             for x in self.could_flip:
                 L.append(f"- {x}")
+
+        if self.cross_source_signal:
+            sig = self.cross_source_signal
+            type_label = "背離" if sig.get("type") == "divergence" else "共識"
+            L.append(f"\n## 跨源訊號（{type_label}）")
+            L.append(sig.get("summary", ""))
+            ids = sig.get("supporting_claim_ids", [])
+            if ids:
+                L.append(f"佐證 claim_ids：{', '.join(ids)}")
 
         if self.contrarian:
             L.append("\n## 反方 / 低信任證據（已標記，未納入主結論）")

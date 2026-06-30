@@ -286,6 +286,37 @@ def render_page(body: str = "") -> str:
     )
 
 
+def _render_cross_signal(signal: dict) -> str:
+    """跨源訊號帶色框渲染（inline style，CSP 相容，無外部資源/JS）。
+
+    背離 = 橙色系（#d9832a）；共識 = 藍色系（#1f6feb）。
+    summary 與所有字串一律 html.escape（縱深防禦）。
+    """
+    e = html.escape
+    sig_type = signal.get("type", "")
+    if sig_type == "divergence":
+        border_color = "#d9832a"
+        bg_color = "#fff8f0"
+        type_label = "背離"
+    else:
+        border_color = "#1f6feb"
+        bg_color = "#f0f6ff"
+        type_label = "共識"
+    summary_esc = e(signal.get("summary", ""))
+    ids = signal.get("supporting_claim_ids", [])
+    ids_html = (
+        f'<small style="color:#666">佐證 claim_ids：{e(", ".join(ids))}</small>'
+        if ids else ""
+    )
+    return (
+        f'<div class="tf-section" style="border-left:4px solid {border_color};background:{bg_color}">'
+        f'<h3 style="color:{border_color}">跨源訊號（{e(type_label)}）</h3>'
+        f'<p style="margin:.3rem 0">{summary_esc}</p>'
+        f'{ids_html}'
+        f'</div>'
+    )
+
+
 def _render_report(report, evidence) -> str:
     """分析結果渲染為信任儀表板（事實→推論→結論三段 + 信任橫條 + 可展開 evidence）。"""
     e = html.escape
@@ -301,6 +332,10 @@ def _render_report(report, evidence) -> str:
     contra = "".join(f"<li>{e(x)}</li>" for x in report.contrarian)
     conf_html = _conf_gauge(report.confidence, report.confidence_label())
     ev_rows = _render_evidence_list(evidence)
+    cross_html = (
+        _render_cross_signal(report.cross_source_signal)
+        if getattr(report, "cross_source_signal", None) else ""
+    )
     return f"""
 <div class="tf-section" style="background:#f0f6ff;border-color:#1f6feb">
   <h2 style="margin:0 0 .4rem">{e(report.coin)} · {e(report.question_type)}</h2>
@@ -329,6 +364,8 @@ def _render_report(report, evidence) -> str:
   <h4>可能推翻結論的條件</h4>
   <ul>{flips or '<li>&#8212;</li>'}</ul>
 </div>
+
+{cross_html}
 
 <div class="tf-section" style="border-left:4px solid #cb2431">
   <h3>反方 / 低信任（未納入主結論）</h3>
