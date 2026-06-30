@@ -3,6 +3,60 @@ from trustforge.ingestion.base import Document
 from trustforge.trust.scoring import DOMAIN_STOP, aggregate, extract_claims, score
 
 
+# --- _infer_direction 純函式測試 -----------------------------------------
+
+def test_infer_direction_bullish():
+    """明確看多詞彙 → bullish。"""
+    from trustforge.trust.scoring import _infer_direction
+    assert _infer_direction("BTC 看漲 突破，買盤 累積 增持。") == "bullish"
+
+
+def test_infer_direction_bearish():
+    """明確看空詞彙 → bearish。"""
+    from trustforge.trust.scoring import _infer_direction
+    assert _infer_direction("BTC 下跌 賣壓 恐慌 走低。") == "bearish"
+
+
+def test_infer_direction_neutral_no_keywords():
+    """無方向詞彙 → neutral。"""
+    from trustforge.trust.scoring import _infer_direction
+    assert _infer_direction("BTC 近期 整合 等待 方向。") == "neutral"
+
+
+def test_infer_direction_neutral_tie():
+    """bullish 命中 == bearish 命中 → neutral。"""
+    from trustforge.trust.scoring import _infer_direction
+    # 流入(1 bullish) vs 賣壓(1 bearish) → tie → neutral
+    assert _infer_direction("BTC 流入 交易所 賣壓 急增。") == "neutral"
+
+
+def test_infer_direction_negation_cancels_bearish():
+    """否定守門：不會下跌 → 下跌不計 → neutral（無其他方向詞）。"""
+    from trustforge.trust.scoring import _infer_direction
+    assert _infer_direction("分析師認為 BTC 短期不會下跌。") == "neutral"
+
+
+def test_infer_direction_negation_only_nearby():
+    """否定守門只作用於前 4 字內：否定詞距離超過 4 字不生效，bearish 仍計。"""
+    from trustforge.trust.scoring import _infer_direction
+    # 不會 在 下跌 前 4 字以外（中間有 在短期內），下跌 仍算 bearish
+    assert _infer_direction("BTC 不會在短期內 下跌 賣壓 升高。") == "bearish"
+
+
+def test_extract_claims_sets_direction():
+    """extract_claims 建出的 Claim 應有非預設方向（不全為 neutral）。"""
+    docs = [
+        Document(id="d1", kind="news", source="coindesk",
+                 text="BTC 下跌 賣壓 急增，市場 走低。", ts=1.0),
+        Document(id="d2", kind="onchain", source="glassnode",
+                 text="ETH 買盤 累積 增持，長線 看漲。", ts=1.0),
+    ]
+    claims = extract_claims(docs)
+    directions = {c.direction for c in claims}
+    assert "bearish" in directions, "含跌/賣壓的句子應被推斷為 bearish"
+    assert "bullish" in directions, "含買盤/累積的句子應被推斷為 bullish"
+
+
 def _doc(id, kind, source, text, ts=1.0):
     return Document(id=id, kind=kind, source=source, text=text, ts=ts)
 

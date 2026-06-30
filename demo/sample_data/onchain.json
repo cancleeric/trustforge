@@ -30,5 +30,29 @@
     "url": "https://cryptoquant.com/asset/btc/miner-outflow/2026053012",
     "ts": 1780099200,
     "meta": {}
+  },
+  {
+    "id": "onchain-eth-accumulation-1",
+    "source": "glassnode-eth",
+    "text": "以太坊 大量 累積 訊號 持續，鯨魚 增持 ETH 至 冷錢包，買盤 強勁 動能 顯著。",
+    "url": "https://glassnode.com/metrics/eth/accumulation/2026053118",
+    "ts": 1780185600,
+    "meta": {}
+  },
+  {
+    "id": "onchain-eth-accumulation-2",
+    "source": "nansen-eth",
+    "text": "ETH 長期 持有 者 累積 比例 新高，增持 動能 持續 強勁，買盤 信號 明確。",
+    "url": "https://nansen.ai/eth-accumulation/2026053118",
+    "ts": 1780185600,
+    "meta": {}
+  },
+  {
+    "id": "onchain-eth-accumulation-3",
+    "source": "cryptoquant-eth",
+    "text": "ETH 鏈上 累積 地址 增持 動能 強勁，買盤 持續 顯著。",
+    "url": "https://cryptoquant.com/asset/eth/accumulation/2026053118",
+    "ts": 1780185600,
+    "meta": {}
   }
 ]
