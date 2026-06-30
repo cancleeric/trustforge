@@ -51,6 +51,8 @@ class Claim:
     id: str
     text: str
     doc: Document
+    claim_type: str = "inference"   # fact | inference | opinion
+    direction: str = "neutral"      # bullish | bearish | neutral
 
 
 @dataclass

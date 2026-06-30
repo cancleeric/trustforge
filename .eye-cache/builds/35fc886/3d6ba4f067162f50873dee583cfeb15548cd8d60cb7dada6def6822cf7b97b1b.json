@@ -1,0 +1,79 @@
+{
+  "target": "src/trustforge/agent/orchestrator.py:run_agent_pipeline",
+  "total": 6,
+  "refs": [
+    {
+      "file": "tests/test_multistep.py",
+      "line": 16,
+      "kind": "import",
+      "preview": "from trustforge.agent.orchestrator import run_agent_pipeline",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 111,
+      "kind": "comment",
+      "preview": "\"\"\"run_agent_pipeline 必須在 Execution Log 留下 ≥2 筆 bedrock.complete。\"\"\"",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 116,
+      "kind": "caller",
+      "preview": "run_agent_pipeline(",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 138,
+      "kind": "caller",
+      "preview": "run_agent_pipeline(",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 227,
+      "kind": "caller",
+      "preview": "report, evidence = run_agent_pipeline(",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 243,
+      "kind": "comment",
+      "preview": "\"\"\"run_agent_pipeline 回傳的 Report 必須含官方必備欄位。\"\"\"",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 248,
+      "kind": "caller",
+      "preview": "report, evidence = run_agent_pipeline(",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 271,
+      "kind": "caller",
+      "preview": "report, _ = run_agent_pipeline(",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    }
+  ],
+  "confidence_summary": {
+    "high": 0,
+    "medium": 8,
+    "low": 0
+  },
+  "caller_confidence": {
+    "high": 0,
+    "low": 0
+  }
+}

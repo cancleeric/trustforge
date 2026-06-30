@@ -1,0 +1,135 @@
+{
+  "target": "src/trustforge/bedrock.py:extract_claims_with_llm",
+  "total": 7,
+  "refs": [
+    {
+      "file": "src/trustforge/agent/orchestrator.py",
+      "line": 7,
+      "kind": "comment",
+      "preview": "Step 1 — Claim 抽取（Bedrock #1）：extract_claims_with_llm → 結構化主張",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "src/trustforge/agent/orchestrator.py",
+      "line": 208,
+      "kind": "caller",
+      "preview": "claims = client.extract_claims_with_llm(docs)",
+      "confidence": "low",
+      "confidence_reason": "ambiguous-receiver: method dispatch in non-TS, receiver type unverifiable (grep-only)"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 59,
+      "kind": "comment",
+      "preview": "# Step 1 呼叫：extract_claims_with_llm 在裡面呼叫 complete",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 68,
+      "kind": "def",
+      "preview": "def extract_claims_with_llm(self, docs):",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 70,
+      "kind": "comment",
+      "preview": "# 呼叫真實的 BedrockClient.extract_claims_with_llm，但使用本 fake 的 complete",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 155,
+      "kind": "comment",
+      "preview": "\"\"\"extract_claims_with_llm 回傳的 Claim 必須有 claim_type 欄位。\"\"\"",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 158,
+      "kind": "caller",
+      "preview": "claims = fake.extract_claims_with_llm(docs)",
+      "confidence": "low",
+      "confidence_reason": "ambiguous-receiver: method dispatch in non-TS, receiver type unverifiable (grep-only)"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 169,
+      "kind": "comment",
+      "preview": "\"\"\"extract_claims_with_llm 回傳的 Claim 必須有 direction 欄位。\"\"\"",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 172,
+      "kind": "caller",
+      "preview": "claims = fake.extract_claims_with_llm(docs)",
+      "confidence": "low",
+      "confidence_reason": "ambiguous-receiver: method dispatch in non-TS, receiver type unverifiable (grep-only)"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 185,
+      "kind": "caller",
+      "preview": "claims = fake.extract_claims_with_llm(docs)",
+      "confidence": "low",
+      "confidence_reason": "ambiguous-receiver: method dispatch in non-TS, receiver type unverifiable (grep-only)"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 196,
+      "kind": "comment",
+      "preview": "\"\"\"offline 模式不應呼叫 LLM，extract_claims_with_llm 應 fallback regex。\"\"\"",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 199,
+      "kind": "caller",
+      "preview": "claims = client.extract_claims_with_llm(docs)",
+      "confidence": "low",
+      "confidence_reason": "ambiguous-receiver: method dispatch in non-TS, receiver type unverifiable (grep-only)"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 212,
+      "kind": "comment",
+      "preview": "\"\"\"未設 BEDROCK_MODEL_ID 時，extract_claims_with_llm 應 fallback regex，不拋 RuntimeError。\"\"\"",
+      "confidence": "medium",
+      "confidence_reason": "tree-sitter syntax-level analysis"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 217,
+      "kind": "caller",
+      "preview": "claims = client.extract_claims_with_llm(docs)",
+      "confidence": "low",
+      "confidence_reason": "ambiguous-receiver: method dispatch in non-TS, receiver type unverifiable (grep-only)"
+    },
+    {
+      "file": "tests/test_multistep.py",
+      "line": 295,
+      "kind": "caller",
+      "preview": "claims = fake.extract_claims_with_llm(docs)",
+      "confidence": "low",
+      "confidence_reason": "ambiguous-receiver: method dispatch in non-TS, receiver type unverifiable (grep-only)"
+    }
+  ],
+  "confidence_summary": {
+    "high": 0,
+    "medium": 8,
+    "low": 7
+  },
+  "caller_confidence": {
+    "high": 0,
+    "low": 7
+  }
+}

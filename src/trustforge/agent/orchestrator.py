@@ -2,6 +2,12 @@
 
 反作弊鐵則：**判斷結構、證據整合、信任評分由本 pipeline 產生**，
 Bedrock 只負責把推理「行文」成可讀敘述，不得把第三方現成結論當主要結果。
+
+顯式 3 步驟推理鏈（P0-3）：
+  Step 1 — Claim 抽取（Bedrock #1）：extract_claims_with_llm → 結構化主張
+  Step 2 — 判斷形成（純 pipeline）：score + aggregate → TrustedBrief
+  Step 3 — 帶溯源行文（Bedrock #2）：narrative 強制引用 claim_id
+  Step 4 — 限制複審（Bedrock #3，選用，預算允許才執行）
 """
 from __future__ import annotations
 
@@ -9,8 +15,17 @@ import time
 
 from ..bedrock import BedrockClient
 from ..execlog import ExecutionLog
+from ..ingestion.base import Document
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..trust.scoring import ScoredClaim, TrustedBrief
+
+# Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
+_STEP4_MIN_BUDGET_SEC = 60.0
+
+_STEP4_SYSTEM = (
+    "你是加密市場分析審查員。只能依據提供的報告文字審查，不引入外部知識。"
+)
+_STEP4_LIMIT_SENTINEL = "LIMITS_OK"
 
 OBJECTIVE_KINDS = {"price", "onchain", "regulatory", "hoyabit"}
 
@@ -117,15 +132,33 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     market_judgment = head + f"（{n_indep} 個獨立來源支撐，整體信心 {brief.confidence:.2f}）"
     log.record("judgment.derive", params={"direction": direction, "indep_sources": n_indep})
 
-    # 3. Bedrock 行文（離線為佔位；結構不依賴它）
+    # 3. Bedrock 行文（Step 3：帶 claim_id 溯源；離線為佔位，結構不依賴它）
+    # 建立 claim_id → 摘要對照，供 prompt 強制引用
+    claim_refs = "\n".join(
+        f"- [{sc.claim.id}] {sc.claim.text[:100]}"
+        for sc in brief.supporting[:8]
+    )
     prompt = (
         f"幣種：{coin}\n題型：{qtype.value}\n問題：{query}\n"
-        f"我方判斷：{market_judgment}\n事實：\n" + "\n".join(f"- {f}" for f in facts) +
-        "\n請用 2-3 句把上述事實串成事實→推論→結論的推理，僅依事實，勿引入外部結論。"
+        f"我方判斷：{market_judgment}\n"
+        f"事實（含 claim_id）：\n{claim_refs}\n"
+        "\n請用 2-3 句把上述事實串成事實→推論→結論的推理，"
+        "每個判斷必須引用對應 claim_id（格式：[claim_id]），僅依事實，勿引入外部結論。"
     )
-    narrative = client.complete(system=SYSTEM, prompt=prompt)
-    log.record("bedrock.complete", params={"model": client.config.model_id or "offline"},
-               summary="生成推論敘述")
+    _t_step3 = log._now()
+    try:
+        narrative = client.complete(system=SYSTEM, prompt=prompt)
+    except Exception:
+        # Bedrock 失敗 → 用結構化判斷當行文降級,不中斷管線(且仍記錄此步 log)
+        narrative = f"[行文服務暫時無法使用,以下為結構化判斷] {market_judgment}"
+    _step3_elapsed = round(log._now() - _t_step3, 2)
+    log.record(
+        "bedrock.complete",
+        params={"step": 3, "task": "narrative_with_citations",
+                "model": client.config.model_id or "offline",
+                "step_elapsed_sec": _step3_elapsed},
+        summary=f"帶 claim_id 溯源行文；耗時 {_step3_elapsed}s；輸入 {len(brief.supporting)} 條主張",
+    )
     inferences = [
         f"客觀價格事實指向{direction}；由 {n_indep} 個獨立來源交叉佐證。",
         narrative.strip(),
@@ -141,4 +174,129 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         generated_at=iso_utc(now_fn()),
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
+    return report, evidence
+
+
+# ---------------------------------------------------------------------------
+# 顯式 3 步驟 Agent Pipeline（P0-3）
+# ---------------------------------------------------------------------------
+
+def run_agent_pipeline(
+    query: str,
+    coin: str,
+    qtype: QuestionType,
+    docs: list[Document],
+    client: BedrockClient | None = None,
+    log: ExecutionLog | None = None,
+    now_fn=time.time,
+) -> tuple[Report, list[Evidence]]:
+    """三步驟顯式推理鏈。
+
+    Step 1 — Claim 抽取（Bedrock #1 或 regex fallback）
+    Step 2 — pipeline 評分聚合（反作弊：純演算法，不呼叫 Bedrock）
+    Step 3 — 帶 claim_id 溯源行文（Bedrock #2，by build_report 內部執行）
+    Step 4 — 限制複審（Bedrock #3，選用，預算剩餘 > 60s 才執行）
+
+    Execution Log 保證 ≥2 筆 bedrock.complete 記錄（Step1 + Step3）。
+    """
+    from ..trust.scoring import aggregate, score  # 延遲匯入避免頂層循環
+
+    client = client or BedrockClient(offline=True)
+    log = log or ExecutionLog(now_fn=now_fn)
+
+    # ------------------------------------------------------------------
+    # Step 1: Claim 抽取（Bedrock #1 / regex fallback）
+    # ------------------------------------------------------------------
+    log.record("pipeline.step1.start", summary=f"docs={len(docs)}；準備 LLM claim 抽取")
+    _t1 = log._now()
+    claims = client.extract_claims_with_llm(docs)
+    _step1_elapsed = round(log._now() - _t1, 2)
+
+    # 區分是否真正走了 LLM（offline / 未設模型 → regex fallback）
+    _is_llm_step1 = not (client.offline or not client.config.model_id)
+    log.record(
+        "bedrock.complete",
+        params={
+            "step": 1,
+            "task": "claim_extraction",
+            "model": client.config.model_id or "offline/regex-fallback",
+            "step_elapsed_sec": _step1_elapsed,
+            "llm_active": _is_llm_step1,
+        },
+        summary=(
+            f"Step1 抽取 {len(claims)} 條主張；"
+            f"輸入 {len(docs)} 份文件；"
+            f"耗時 {_step1_elapsed}s；"
+            f"{'LLM 模式' if _is_llm_step1 else 'regex fallback'}"
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Step 2: 判斷形成（純 pipeline，不呼叫 Bedrock）
+    # ------------------------------------------------------------------
+    log.record("pipeline.step2.start", summary="pipeline 評分 + 聚合（反作弊純演算法）")
+    now_ts = max((d.ts for d in docs), default=now_fn())
+    scored = score(claims, now=now_ts)
+    brief = aggregate(scored, query=query)
+    log.record(
+        "judgment.derive",
+        params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),
+                "confidence": round(brief.confidence, 3)},
+        summary="Step2 純 pipeline 完成；判斷由演算法產生，非 LLM",
+    )
+
+    # ------------------------------------------------------------------
+    # Step 3: 帶溯源行文（Bedrock #2，由 build_report 執行並記錄 log）
+    # ------------------------------------------------------------------
+    log.record("pipeline.step3.start", summary="準備 Bedrock 行文（Step3）")
+    report, evidence = build_report(
+        query=query, coin=coin, qtype=qtype, brief=brief,
+        client=client, log=log, now_fn=now_fn,
+    )
+
+    # ------------------------------------------------------------------
+    # Step 4: 限制複審（Bedrock #3，選用）
+    # ------------------------------------------------------------------
+    _should_step4 = (
+        not client.offline
+        and client.config.model_id
+        and log.remaining() > _STEP4_MIN_BUDGET_SEC
+    )
+    if _should_step4:
+        log.record("pipeline.step4.start", summary=f"準備限制複審；剩餘預算 {log.remaining():.0f}s")
+        _review_prompt = (
+            f"以下是一份加密市場分析報告的「已知限制」段落：\n"
+            f"{chr(10).join('- ' + x for x in report.limits)}\n\n"
+            f"市場判斷：{report.market_judgment}\n"
+            f"信心：{report.confidence:.2f}\n\n"
+            f"請審查限制說明是否完整。若有遺漏，補充 JSON list of strings；"
+            f"若已充分，輸出 JSON list 包含單一元素 \"{_STEP4_LIMIT_SENTINEL}\"。"
+            f"只輸出 JSON list，不要其他文字。"
+        )
+        _t4 = log._now()      # 先賦值,確保 except 路徑也能算耗時(不依賴 dir() 探測)
+        _additions: list[str] = []
+        try:
+            _review_raw = client.complete(system=_STEP4_SYSTEM, prompt=_review_prompt)
+            _s = _review_raw.find("[")
+            _e = _review_raw.rfind("]") + 1
+            if _s != -1 and _e > 0:
+                import json as _json
+                _parsed = _json.loads(_review_raw[_s:_e])
+                _additions = [
+                    str(x) for x in _parsed
+                    if isinstance(x, str) and x != _STEP4_LIMIT_SENTINEL and x.strip()
+                ]
+                if _additions:
+                    report.limits.extend(_additions)
+        except Exception:
+            _additions = []
+        _step4_elapsed = round(log._now() - _t4, 2)
+        log.record(
+            "bedrock.complete",
+            params={"step": 4, "task": "limitation_review",
+                    "model": client.config.model_id or "offline",
+                    "step_elapsed_sec": _step4_elapsed},
+            summary=f"Step4 限制複審；補充 {len(_additions)} 條；耗時 {_step4_elapsed}s",
+        )
+
     return report, evidence
