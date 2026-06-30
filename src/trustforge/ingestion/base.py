@@ -96,7 +96,14 @@ def collect(query: str, coin: str | None = None,
             # 線上模式：延遲匯入以避免循環依賴
             from .news import build_news_sources
             from .onchain import build_onchain_sources
-            sources = build_news_sources() + build_onchain_sources()
+            from .social import build_social_sources
+            from .regulatory import build_regulatory_sources
+            sources = (
+                build_news_sources()
+                + build_onchain_sources()
+                + build_social_sources()
+                + build_regulatory_sources()
+            )
     _coin = coin or ""
     for s in sources:
         try:
