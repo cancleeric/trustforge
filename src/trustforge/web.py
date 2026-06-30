@@ -24,8 +24,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .schema import COIN_POOL, QuestionType
-from .pipeline import run
+from .schema import COIN_POOL, QuestionType, comparison_to_markdown
+from .pipeline import run, run_comparison
 
 PORT = int(os.getenv("PORT", "8080"))
 HAS_BEDROCK = bool(os.getenv("BEDROCK_MODEL_ID"))
@@ -130,25 +130,130 @@ def _render_report(report, evidence) -> str:
 """
 
 
-def _do_analyze(qs: dict, client_ip: str = ""):
-    """共用分析入口。
+def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None:
+    """從 coin 參數或 query 文字解析出兩個比較幣種。
 
-    Args:
-        qs:        query string 字典（值為 list[str]，與 parse_qs 相同格式）
-        client_ip: 呼叫方 IP，供 per-IP 限流使用；空字串略過限流
-    Raises:
-        ValueError:        幣種非法 / q 過長 / pipeline 無資料
-        TooManyRequests:   同 IP live 請求超速
-        其餘 Exception:    由呼叫方捕捉後回 502
+    解析優先順序：
+      1. coin 參數含逗號（"BTC,ETH"，含全形逗號「，」正規化）
+         → 必須剛好 2 個合法且相異幣種，否則 raise ValueError
+      2. query 含「A 與/和/vs B」模式
+      3. query 含兩個 COIN_POOL 幣種名稱（按文字左到右順序）
+
+    Returns: (coin_a, coin_b) or None（無法從文字解析時）
+    Raises:  ValueError（含逗號但不合格時）
     """
-    coin = (qs.get("coin", ["BTC"])[0]).upper()
-    if coin not in COIN_POOL:
-        raise ValueError(f"幣種須為 {COIN_POOL} 之一")
-    qtype = QuestionType(qs.get("type", ["multi_source"])[0])
-    query = qs.get("q", ["分析該幣種近兩週市場狀況"])[0]
-    if len(query) > 1000:
-        raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
+    import re
 
+    # 全形逗號正規化
+    coin_raw = coin_raw.replace("，", ",")
+
+    # 1. coin 參數逗號分隔 ── 有逗號時強制嚴格驗證
+    if "," in coin_raw:
+        parts = [c.strip().upper() for c in coin_raw.split(",") if c.strip()]
+        if len(parts) != 2:
+            raise ValueError(
+                f"逗號分隔幣種必須剛好 2 個（目前 {len(parts)} 個），請如：coin=BTC,ETH"
+            )
+        invalid = [p for p in parts if p not in COIN_POOL]
+        if invalid:
+            raise ValueError(
+                f"幣種 {invalid} 不在可選範圍 {COIN_POOL}，請選擇其中兩個"
+            )
+        if parts[0] == parts[1]:
+            raise ValueError(
+                f"兩個幣種不能相同（{parts[0]}），請選擇不同幣種"
+            )
+        return parts[0], parts[1]
+
+    # 2. query 中的「A 與/和/vs B」
+    m = re.search(
+        r"([A-Za-z]{2,5})\s*(?:與|和|vs\.?|VS\.?)\s*([A-Za-z]{2,5})",
+        query,
+    )
+    if m:
+        a, b = m.group(1).upper(), m.group(2).upper()
+        if a in COIN_POOL and b in COIN_POOL and a != b:
+            return a, b
+
+    # 3. query 出現任意兩個幣種名稱（按文字左到右順序，非 COIN_POOL 順序）
+    q_upper = query.upper()
+    positions = sorted(
+        [(q_upper.find(c), c) for c in COIN_POOL if c in q_upper],
+        key=lambda x: x[0],
+    )
+    seen: set[str] = set()
+    found: list[str] = []
+    for _, c in positions:
+        if c not in seen:
+            seen.add(c)
+            found.append(c)
+    if len(found) >= 2:
+        return found[0], found[1]
+
+    return None
+
+
+def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str) -> str:
+    """comparison 結果渲染成 HTML（並列比較段落）。"""
+    e = html.escape
+    md = comparison_to_markdown(report_a, evidence_a, report_b, evidence_b, query)
+    rows_a = "".join(
+        f"<tr><td>E{i}</td><td>{e(ev.source)}</td><td>{e(ev.fetched_at)}</td>"
+        f"<td>{ev.trust:.2f}</td><td>{e(ev.content_reference[:90])}</td></tr>"
+        for i, ev in enumerate(evidence_a)
+    )
+    rows_b = "".join(
+        f"<tr><td>E{len(evidence_a)+i}</td><td>{e(ev.source)}</td>"
+        f"<td>{e(ev.fetched_at)}</td>"
+        f"<td>{ev.trust:.2f}</td><td>{e(ev.content_reference[:90])}</td></tr>"
+        for i, ev in enumerate(evidence_b)
+    )
+    dir_a = report_a.direction or report_a._direction_label()
+    dir_b = report_b.direction or report_b._direction_label()
+    return f"""
+<h2>{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
+<h3>1. 相對強弱比較</h3>
+<table>
+<tr><th>項目</th><th>{e(report_a.coin)}</th><th>{e(report_b.coin)}</th></tr>
+<tr><td>市場方向</td><td>{e(dir_a)}</td><td>{e(dir_b)}</td></tr>
+<tr><td>整體信心</td>
+  <td class="conf">{report_a.confidence_label()}（{report_a.confidence:.2f}）</td>
+  <td class="conf">{report_b.confidence_label()}（{report_b.confidence:.2f}）</td>
+</tr>
+<tr><td>獨立來源數</td>
+  <td>{len({ev.source for ev in evidence_a})}</td>
+  <td>{len({ev.source for ev in evidence_b})}</td>
+</tr>
+<tr><td>反方訊號數</td>
+  <td>{len(report_a.contrarian)}</td>
+  <td>{len(report_b.contrarian)}</td>
+</tr>
+</table>
+<h3>2. 合併證據清單（標明幣種）</h3>
+<table>
+<tr><th>#</th><th>幣種</th><th>source</th><th>fetched_at</th><th>trust</th><th>content_reference</th></tr>
+{"".join(
+    f"<tr><td>E{i}</td><td>{e(report_a.coin)}</td><td>{e(ev.source)}</td>"
+    f"<td>{e(ev.fetched_at)}</td><td>{ev.trust:.2f}</td>"
+    f"<td>{e(ev.content_reference[:80])}</td></tr>"
+    for i, ev in enumerate(evidence_a)
+)}
+{"".join(
+    f"<tr><td>E{len(evidence_a)+i}</td><td>{e(report_b.coin)}</td><td>{e(ev.source)}</td>"
+    f"<td>{e(ev.fetched_at)}</td><td>{ev.trust:.2f}</td>"
+    f"<td>{e(ev.content_reference[:80])}</td></tr>"
+    for i, ev in enumerate(evidence_b)
+)}
+</table>
+<details><summary>▶ {e(report_a.coin)} 詳細分析</summary>
+<pre>{e(report_a.to_markdown(evidence_a))}</pre></details>
+<details><summary>▶ {e(report_b.coin)} 詳細分析</summary>
+<pre>{e(report_b.to_markdown(evidence_b))}</pre></details>
+"""
+
+
+def _parse_live(qs: dict, client_ip: str) -> bool:
+    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。"""
     req_token = qs.get("token", [""])[0]
     live = (
         HAS_BEDROCK
@@ -158,9 +263,61 @@ def _do_analyze(qs: dict, client_ip: str = ""):
     )
     if live and client_ip:
         _check_live_rate_limit(client_ip)
+    return live
+
+
+def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
+    """單幣分析入口，永遠回傳 (report, evidence, log) 三元組。
+
+    只處理 multi_source / hypothesis；comparison 請改用 _do_comparison。
+
+    Raises:
+        ValueError:        幣種非法 / q 過長 / pipeline 無資料
+        TooManyRequests:   同 IP live 請求超速
+        其餘 Exception:    由呼叫方捕捉後回 502
+    """
+    coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
+    qtype = QuestionType(qs.get("type", ["multi_source"])[0])
+    query = qs.get("q", ["分析該幣種近兩週市場狀況"])[0]
+    if len(query) > 1000:
+        raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
+
+    live = _parse_live(qs, client_ip)
+
+    coin = coin_raw.upper()
+    if coin not in COIN_POOL:
+        raise ValueError(f"幣種須為 {COIN_POOL} 之一")
 
     report, evidence, log = run(coin, query, qtype, offline=not live)
     return report, evidence, log
+
+
+def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
+    """雙幣比較分析入口，回傳 (report_a, evidence_a, report_b, evidence_b, log) 五元組。
+
+    Raises:
+        ValueError:        無法解析兩個幣種 / q 過長 / pipeline 無資料
+        TooManyRequests:   同 IP live 請求超速
+        其餘 Exception:    由呼叫方捕捉後回 502
+    """
+    coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
+    query = qs.get("q", ["分析該幣種近兩週市場狀況"])[0]
+    if len(query) > 1000:
+        raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
+
+    live = _parse_live(qs, client_ip)
+
+    pair = _parse_comparison_coins(coin_raw, query)
+    if pair is None:
+        raise ValueError(
+            "comparison 題型需兩個幣種，請用逗號分隔（coin=BTC,ETH）"
+            f"或在問題中提及兩個幣種（可選：{COIN_POOL}）"
+        )
+    coin_a, coin_b = pair
+    report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+        coin_a, coin_b, query, offline=not live
+    )
+    return report_a, evidence_a, report_b, evidence_b, log
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -189,8 +346,47 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/":
             return self._send(200, page(""))
         if u.path in ("/analyze", "/analyze.json"):
+            # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
             try:
-                report, evidence, log = _do_analyze(qs, client_ip=client_ip)
+                qtype = QuestionType(qs.get("type", ["multi_source"])[0])
+            except ValueError:
+                qtype = QuestionType.MULTI_SOURCE
+
+            try:
+                if qtype == QuestionType.COMPARISON:
+                    report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
+                        qs, client_ip=client_ip
+                    )
+                    query = qs.get("q", [""])[0]
+                    if u.path == "/analyze.json":
+                        payload = {
+                            "report_a": dataclasses.asdict(report_a),
+                            "evidence_a": [ev.to_dict() for ev in evidence_a],
+                            "report_b": dataclasses.asdict(report_b),
+                            "evidence_b": [ev.to_dict() for ev in evidence_b],
+                            "execution_log": log.events,
+                        }
+                        return self._send(
+                            200, json.dumps(payload, ensure_ascii=False, indent=2),
+                            "application/json; charset=utf-8",
+                        )
+                    return self._send(
+                        200,
+                        page(_render_comparison(report_a, evidence_a, report_b, evidence_b, query)),
+                    )
+                else:
+                    report, evidence, log = _do_analyze(qs, client_ip=client_ip)
+                    if u.path == "/analyze.json":
+                        payload = {
+                            "report": dataclasses.asdict(report),
+                            "evidence": [ev.to_dict() for ev in evidence],
+                            "execution_log": log.events,
+                        }
+                        return self._send(
+                            200, json.dumps(payload, ensure_ascii=False, indent=2),
+                            "application/json; charset=utf-8",
+                        )
+                    return self._send(200, page(_render_report(report, evidence)))
             except TooManyRequests as exc:
                 return self._send(429, page(
                     f"<p style='color:#c00'>{html.escape(str(exc))}</p>"))
@@ -201,15 +397,6 @@ class Handler(BaseHTTPRequestHandler):
                 logging.exception("TrustForge analyze error")
                 return self._send(502, page(
                     "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>"))
-            if u.path == "/analyze.json":
-                payload = {
-                    "report": dataclasses.asdict(report),
-                    "evidence": [ev.to_dict() for ev in evidence],
-                    "execution_log": log.events,
-                }
-                return self._send(200, json.dumps(payload, ensure_ascii=False, indent=2),
-                                  "application/json; charset=utf-8")
-            return self._send(200, page(_render_report(report, evidence)))
         return self._send(404, page("<p>404</p>"))
 
 
