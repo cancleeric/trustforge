@@ -5,19 +5,30 @@
 
 部署：handler = trustforge.lambda_handler.handler
 環境變數：TRUSTFORGE_HOME=/var/task；要真實 Bedrock 再設 BEDROCK_MODEL_ID + AWS_REGION。
+live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶對應 token 參數。
 """
 from __future__ import annotations
 
 import dataclasses
+import html
 import json
+import logging
 
 from . import web
 
+_CSP = "default-src 'none'; style-src 'unsafe-inline'"
+
 
 def _resp(code, body, ctype):
-    return {"statusCode": code,
-            "headers": {"Content-Type": ctype},
-            "body": body}
+    return {
+        "statusCode": code,
+        "headers": {
+            "Content-Type": ctype,
+            "Content-Security-Policy": _CSP,
+            "X-Content-Type-Options": "nosniff",
+        },
+        "body": body,
+    }
 
 
 def handler(event, context=None):
@@ -25,16 +36,34 @@ def handler(event, context=None):
     path = (event.get("rawPath")
             or event.get("requestContext", {}).get("http", {}).get("path", "/"))
     raw_qs = event.get("queryStringParameters") or {}
-    qs = {k: [v] for k, v in raw_qs.items()}  # 轉成 web._do_analyze 期望的 list 形式
+    qs = {k: [v] for k, v in raw_qs.items()}  # 轉成 _do_analyze 期望的 list 形式
+
+    # 取 client IP（Lambda Function URL v2 requestContext）
+    client_ip = (
+        event.get("requestContext", {}).get("http", {}).get("sourceIp", "")
+        or event.get("requestContext", {}).get("identity", {}).get("sourceIp", "")
+        or ""
+    )
 
     if path == "/healthz":
         return _resp(200, "ok", "text/plain; charset=utf-8")
 
     if path in ("/analyze", "/analyze.json"):
         try:
-            report, evidence, log = web._do_analyze(qs)
-        except ValueError as e:
-            return _resp(400, web.render_page(f"<p style='color:#c00'>{e}</p>"),
+            report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
+        except web.TooManyRequests as exc:
+            return _resp(429,
+                         web.render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>"),
+                         "text/html; charset=utf-8")
+        except ValueError as exc:
+            return _resp(400,
+                         web.render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>"),
+                         "text/html; charset=utf-8")
+        except Exception:
+            logging.exception("TrustForge Lambda analyze error")
+            return _resp(502,
+                         web.render_page(
+                             "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>"),
                          "text/html; charset=utf-8")
         if path == "/analyze.json":
             payload = {

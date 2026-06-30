@@ -3,19 +3,24 @@
 路由：
   GET /            首頁表單（選幣種/題型/問題）
   GET /healthz     健康檢查（App Runner 用）→ 200 "ok"
-  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1] → HTML 報告
+  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>] → HTML 報告
   GET /analyze.json 同上參數 → JSON {report, evidence, log}
 
 預設離線模式（用官方 OHLCV + 樣本來源 + Bedrock stub），故未設 AWS 也能跑出 Live Demo。
-設了環境變數 BEDROCK_MODEL_ID 且帶 ?live=1 才走真實 Bedrock。
+live 模式需同時滿足：設了 BEDROCK_MODEL_ID、TRUSTFORGE_LIVE_TOKEN，
+且請求帶正確 token 參數（用 hmac.compare_digest 比對）。
 埠口取自環境變數 PORT（App Runner 預設 8080）。
 """
 from __future__ import annotations
 
 import dataclasses
+import hmac
 import html
 import json
+import logging
 import os
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -24,6 +29,13 @@ from .pipeline import run
 
 PORT = int(os.getenv("PORT", "8080"))
 HAS_BEDROCK = bool(os.getenv("BEDROCK_MODEL_ID"))
+LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+
+# per-IP 限流：每 IP 每 60 秒最多 5 次 live 請求
+_RATE_WINDOW = 60
+_RATE_MAX = 5
+_rate_lock = threading.Lock()
+_rate_buckets: dict[str, list[float]] = {}
 
 _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -51,9 +63,27 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 </body></html>"""
 
 
+class TooManyRequests(Exception):
+    """per-IP 限流超量時拋出，對應 HTTP 429。"""
+
+
+def _check_live_rate_limit(ip: str) -> None:
+    """IP 在滑動視窗內超過 _RATE_MAX 次 live 請求 → raise TooManyRequests。"""
+    now = time.time()
+    with _rate_lock:
+        ts = [t for t in _rate_buckets.get(ip, []) if now - t < _RATE_WINDOW]
+        if len(ts) >= _RATE_MAX:
+            raise TooManyRequests(f"請求過於頻繁，請 {_RATE_WINDOW} 秒後再試")
+        ts.append(now)
+        _rate_buckets[ip] = ts
+
+
 def _opts(values, labels=None):
     labels = labels or {v: v for v in values}
-    return "".join(f'<option value="{html.escape(v)}">{html.escape(labels[v])}</option>' for v in values)
+    return "".join(
+        f'<option value="{html.escape(v)}">{html.escape(labels[v])}</option>'
+        for v in values
+    )
 
 
 def render_page(body: str = "") -> str:
@@ -77,7 +107,8 @@ def _render_report(report, evidence) -> str:
     facts = "".join(f"<li>{e(f)}</li>" for f in report.facts)
     infer = "".join(f"<li>{e(i)}</li>" for i in report.inferences)
     basis = "".join(
-        f"<li><b>{e(b.claim)}</b> {''.join(f'[E{i}]' for i in b.evidence_idx)}<br><small>{e(b.explanation)}</small></li>"
+        f"<li><b>{e(b.claim)}</b> {''.join(f'[E{i}]' for i in b.evidence_idx)}"
+        f"<br><small>{e(b.explanation)}</small></li>"
         for b in report.key_basis
     )
     limits = "".join(f"<li>{e(x)}</li>" for x in report.limits)
@@ -99,13 +130,35 @@ def _render_report(report, evidence) -> str:
 """
 
 
-def _do_analyze(qs: dict):
+def _do_analyze(qs: dict, client_ip: str = ""):
+    """共用分析入口。
+
+    Args:
+        qs:        query string 字典（值為 list[str]，與 parse_qs 相同格式）
+        client_ip: 呼叫方 IP，供 per-IP 限流使用；空字串略過限流
+    Raises:
+        ValueError:        幣種非法 / q 過長 / pipeline 無資料
+        TooManyRequests:   同 IP live 請求超速
+        其餘 Exception:    由呼叫方捕捉後回 502
+    """
     coin = (qs.get("coin", ["BTC"])[0]).upper()
     if coin not in COIN_POOL:
         raise ValueError(f"幣種須為 {COIN_POOL} 之一")
     qtype = QuestionType(qs.get("type", ["multi_source"])[0])
     query = qs.get("q", ["分析該幣種近兩週市場狀況"])[0]
-    live = qs.get("live", ["0"])[0] == "1" and HAS_BEDROCK
+    if len(query) > 1000:
+        raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
+
+    req_token = qs.get("token", [""])[0]
+    live = (
+        HAS_BEDROCK
+        and qs.get("live", ["0"])[0] == "1"
+        and bool(LIVE_TOKEN)
+        and hmac.compare_digest(req_token, LIVE_TOKEN)
+    )
+    if live and client_ip:
+        _check_live_rate_limit(client_ip)
+
     report, evidence, log = run(coin, query, qtype, offline=not live)
     return report, evidence, log
 
@@ -116,6 +169,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; style-src 'unsafe-inline'")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(b)
 
@@ -125,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
+        client_ip = self.client_address[0]
+
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
         page = render_page
@@ -132,9 +190,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, page(""))
         if u.path in ("/analyze", "/analyze.json"):
             try:
-                report, evidence, log = _do_analyze(qs)
-            except ValueError as e:
-                return self._send(400, page(f"<p style='color:#c00'>{html.escape(str(e))}</p>"))
+                report, evidence, log = _do_analyze(qs, client_ip=client_ip)
+            except TooManyRequests as exc:
+                return self._send(429, page(
+                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>"))
+            except ValueError as exc:
+                return self._send(400, page(
+                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>"))
+            except Exception:
+                logging.exception("TrustForge analyze error")
+                return self._send(502, page(
+                    "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>"))
             if u.path == "/analyze.json":
                 payload = {
                     "report": dataclasses.asdict(report),
@@ -149,7 +215,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"TrustForge web on :{PORT}  (bedrock={'live-capable' if HAS_BEDROCK else 'offline'})", flush=True)
+    print(f"TrustForge web on :{PORT}  (bedrock={'live-capable' if HAS_BEDROCK else 'offline'})",
+          flush=True)
     srv.serve_forever()
 
 
