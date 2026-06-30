@@ -164,10 +164,18 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         return ""
     e = html.escape
 
-    rep   = float(tc.get("reputation",    0.0))
-    corr  = float(tc.get("corroboration", 0.0))
-    rec   = float(tc.get("recency",       0.0))
-    manip = float(tc.get("manipulation",  0.0))
+    def _f(v) -> float:
+        # 防禦：None/非數字/NaN/Inf → 0.0（trust_components 理應為合法 float，但不信任輸入）
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        return x if (x == x and x not in (float("inf"), float("-inf"))) else 0.0
+
+    rep   = _f(tc.get("reputation",    0.0))
+    corr  = _f(tc.get("corroboration", 0.0))
+    rec   = _f(tc.get("recency",       0.0))
+    manip = _f(tc.get("manipulation",  0.0))
 
     def mini_bar(val: float, color: str) -> str:
         pct = max(0, min(100, int(val * 100)))
