@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-_REPO = Path(__file__).resolve().parents[3]
-SAMPLE_DIR = _REPO / "demo" / "sample_data"
+# 資料根目錄：預設為 repo 根（src 上一層）；Lambda 等打包環境用 TRUSTFORGE_HOME 覆寫
+# （Lambda 把 trustforge/ data/ demo/ 都放在 /var/task，設 TRUSTFORGE_HOME=/var/task）。
+_HOME = Path(os.getenv("TRUSTFORGE_HOME", Path(__file__).resolve().parents[3]))
+SAMPLE_DIR = _HOME / "demo" / "sample_data"
 OHLCV_DIR = SAMPLE_DIR / "ohlcv"                 # 合成樣本（測試/快速 demo）
-OFFICIAL_OHLCV_DIR = _REPO / "data" / "data"     # HOYA BIT 官方基準 OHLCV
+OFFICIAL_OHLCV_DIR = _HOME / "data" / "data"     # HOYA BIT 官方基準 OHLCV
 
 # 文件型來源類型（有對應的 sample_data/*.json）。price 走 OHLCV CSV，另行處理。
 SOURCE_KINDS = ("onchain", "regulatory", "hoyabit", "news", "social")

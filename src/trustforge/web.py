@@ -56,6 +56,17 @@ def _opts(values, labels=None):
     return "".join(f'<option value="{html.escape(v)}">{html.escape(labels[v])}</option>' for v in values)
 
 
+def render_page(body: str = "") -> str:
+    """組完整 HTML（模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。"""
+    mode = "AWS Bedrock 就緒（?live=1 啟用）" if HAS_BEDROCK else "離線示範模式（未設 BEDROCK_MODEL_ID）"
+    return _PAGE.format(
+        mode=html.escape(mode), body=body,
+        coins=_opts(COIN_POOL),
+        types=_opts([t.value for t in QuestionType],
+                    {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
+    )
+
+
 def _render_report(report, evidence) -> str:
     e = html.escape
     rows = "".join(
@@ -116,13 +127,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(u.query)
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
-        mode = "AWS Bedrock 就緒（?live=1 啟用）" if HAS_BEDROCK else "離線示範模式（未設 BEDROCK_MODEL_ID）"
-        page = lambda body: _PAGE.format(
-            mode=html.escape(mode), body=body,
-            coins=_opts(COIN_POOL),
-            types=_opts([t.value for t in QuestionType],
-                        {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
-        )
+        page = render_page
         if u.path == "/":
             return self._send(200, page(""))
         if u.path in ("/analyze", "/analyze.json"):
