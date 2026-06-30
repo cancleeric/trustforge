@@ -28,7 +28,7 @@ FNG_FIXTURE = b"""{
 BINFO_FIXTURE = b"""{
   "market_price_usd": 67823.45,
   "hash_rate": 650000000,
-  "timestamp": 1785542400
+  "timestamp": 1785542400000
 }"""
 
 CRYPTOPANIC_FIXTURE = b"""{
@@ -237,3 +237,55 @@ def test_collect_coin_passed_to_sources(monkeypatch):
 
     base.collect("query", coin="ETH", sources=[TrackingSource()], offline=False)
     assert received == ["ETH"]
+
+
+# ── blockchain.info ms 修正後 ts 年份驗證 ─────────────────────────────────────
+
+def test_blockchain_info_ts_year_in_valid_range(monkeypatch):
+    """修正後 BlockchainInfoSource 解析出的 ts 對應年份應在 2020–2030（非離譜未來年份）。"""
+    from datetime import datetime, timezone
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: BINFO_FIXTURE)
+    docs = onchain.BlockchainInfoSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    ts = docs[0].ts
+    year = datetime.fromtimestamp(ts, tz=timezone.utc).year
+    assert 2020 <= year <= 2030, (
+        f"blockchain.info ts 對應年份應在 2020–2030，實際 {year}（ts={ts}）"
+    )
+
+
+# ── iso_utc 防禦化測試 ────────────────────────────────────────────────────────
+
+def test_iso_utc_normal_ts_returns_valid_date():
+    """正常 epoch 秒應回傳合法 ISO8601 字串。"""
+    from trustforge.schema import iso_utc
+    result = iso_utc(1785542400.0)
+    assert result.startswith("2026-")
+    assert result.endswith("Z")
+
+
+def test_iso_utc_zero_returns_empty():
+    """ts=0 應回 ''。"""
+    from trustforge.schema import iso_utc
+    assert iso_utc(0.0) == ""
+
+
+def test_iso_utc_negative_returns_empty():
+    """ts<0 應回 ''。"""
+    from trustforge.schema import iso_utc
+    assert iso_utc(-1.0) == ""
+
+
+def test_iso_utc_millisecond_ts_returns_empty_no_raise():
+    """ms 級 ts（如 blockchain.info 未修正前的值）應回 ''，不拋例外。"""
+    from trustforge.schema import iso_utc
+    # 1785542400000 ms ≈ year 58516，超出合理範圍
+    result = iso_utc(1785542400000.0)
+    assert result == "", f"預期空字串，實際 '{result}'"
+
+
+def test_iso_utc_huge_value_no_raise():
+    """極大值不應拋例外，應回 ''。"""
+    from trustforge.schema import iso_utc
+    assert iso_utc(9e18) == ""

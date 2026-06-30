@@ -388,16 +388,23 @@ def main() -> int:
                         help="不寫入 docs/STRESS-TEST.md（僅印出）")
     args = parser.parse_args()
 
-    # online 模式：檢查 env
+    # online 模式：需 TRUSTFORGE_ONLINE=1 或 BEDROCK_MODEL_ID 作為顯式線上授權
+    # 缺授權時明確標 SKIPPED，不以 offline 結果假 pass
     online = args.online
     if online:
-        missing_env = [v for v in ("BEDROCK_MODEL_ID", "AWS_REGION") if not os.getenv(v)]
-        if missing_env:
+        has_online_auth = bool(os.getenv("TRUSTFORGE_ONLINE") or os.getenv("BEDROCK_MODEL_ID"))
+        if not has_online_auth:
             print(
-                f"[SKIP] --online 模式需要 env: {missing_env}；"
-                "切換為 offline 模式（SKIP 會在報告中說明）。"
+                "[SKIPPED(未設線上環境)] --online 需 TRUSTFORGE_ONLINE=1 或 BEDROCK_MODEL_ID；"
+                "未設線上環境，略過 online 測試（不以 offline 結果假 pass）。"
             )
-            online = False
+            sys.exit(0)
+        if not os.getenv("AWS_REGION"):
+            print(
+                "[SKIPPED(未設線上環境)] --online 需 AWS_REGION env；"
+                "未設，略過 online 測試（不以 offline 結果假 pass）。"
+            )
+            sys.exit(0)
 
     offline = not online
     print(f"TrustForge P0-5 壓測 harness — 模式：{'offline' if offline else 'online'}")

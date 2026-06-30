@@ -276,3 +276,28 @@ def test_existing_comparison_unaffected(monkeypatch):
     assert ra.coin == "BTC"
     assert rb.coin == "ETH"
     assert ea and eb
+
+
+# ── _failed 去重測試 ──────────────────────────────────────────────────────────
+
+def test_pipeline_limits_dedup_on_repeated_failure(monkeypatch):
+    """同一來源多次記入 _failed → report.limits 不重複出現相同條目。"""
+    def fake_collect_with_dup_fail(query, coin=None, offline=False, data_dir=None, _failed=None):
+        """模擬同一來源失敗兩次（例如 collect 被呼叫兩次或 source 重複記錄）。"""
+        if _failed is not None:
+            _failed.append("dup-src")
+            _failed.append("dup-src")   # 故意重複
+            _failed.append("other-src")
+        return _make_docs(coin or "BTC")
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect_with_dup_fail)
+    report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
+
+    dup_entries = [l for l in report.limits if "dup-src" in l]
+    assert len(dup_entries) == 1, (
+        f"dup-src 應只出現一次，實際 limits={report.limits}"
+    )
+    other_entries = [l for l in report.limits if "other-src" in l]
+    assert len(other_entries) == 1, (
+        f"other-src 應出現一次，實際 limits={report.limits}"
+    )
