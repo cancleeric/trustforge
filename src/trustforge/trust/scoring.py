@@ -149,21 +149,43 @@ _BEARISH_WORDS: list[str] = [
 def _infer_direction(text: str) -> str:
     """從文字關鍵詞推斷方向（純函式，離線/regex 路徑用）。
 
-    否定守門：若方向詞前 4 字元內出現 _NEG_RX 否定詞，該詞不計入計數。
+    最長詞優先非重疊匹配：先處理長詞，短詞若落在已消耗區間則不計
+    （避免「上漲」被其子字串「漲」重複計數、「看漲 看空」誤判 bullish）。
+    否定守門：若方向詞前 4 字元內出現 _NEG_RX 否定詞，該詞不計入計數
+    （但仍標記區間已消耗，防短詞補計）。
     bullish 命中 > bearish → "bullish"；反之 "bearish"；平手或都 0 → "neutral"。
     """
-    bullish = sum(
-        1
-        for w in _BULLISH_WORDS
-        for m in re.finditer(re.escape(w), text)
-        if not _NEG_RX.search(text[max(0, m.start() - 4) : m.start()])
-    )
-    bearish = sum(
-        1
-        for w in _BEARISH_WORDS
-        for m in re.finditer(re.escape(w), text)
-        if not _NEG_RX.search(text[max(0, m.start() - 4) : m.start()])
-    )
+    # 收集所有候選配對：(start, end, word, direction)
+    candidates: list[tuple[int, int, str, str]] = []
+    for w in _BULLISH_WORDS:
+        for m in re.finditer(re.escape(w), text):
+            candidates.append((m.start(), m.end(), w, "bullish"))
+    for w in _BEARISH_WORDS:
+        for m in re.finditer(re.escape(w), text):
+            candidates.append((m.start(), m.end(), w, "bearish"))
+
+    # 依詞長降序（最長優先），同長度依位置升序
+    candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
+
+    consumed: list[tuple[int, int]] = []  # 已消耗的 (start, end) 區間
+
+    def _overlaps(s: int, e: int) -> bool:
+        return any(s < ce and e > cs for cs, ce in consumed)
+
+    bullish = 0
+    bearish = 0
+    for start, end, _word, direction in candidates:
+        if _overlaps(start, end):
+            continue
+        consumed.append((start, end))
+        # 否定守門
+        if _NEG_RX.search(text[max(0, start - 4): start]):
+            continue  # 消耗區間但不計分
+        if direction == "bullish":
+            bullish += 1
+        else:
+            bearish += 1
+
     if bullish > bearish:
         return "bullish"
     if bearish > bullish:

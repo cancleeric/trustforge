@@ -222,3 +222,107 @@ def test_v3_specific_rare_words_corroborate():
 
     corr = _corroboration(c_a, [c_a, c_b])
     assert corr > 0.0, f"V3：共享具體稀有詞，corr 應 > 0，實際: {corr}"
+
+
+# --- Task 1: _infer_direction 雙重計數修復測試 --------------------------------
+
+def test_infer_direction_no_double_count_substring():
+    """「上漲」不可被「漲」重複計數：「上漲 看空」應為 neutral（不誤判 bullish）。
+
+    舊實作：上漲(+1) + 漲(+1) = bullish=2 vs 看空(+1) = bearish=1 → 誤判 bullish。
+    修正後：上漲(+1，消耗「漲」) vs 看空(+1) → 1v1 → neutral。
+    """
+    from trustforge.trust.scoring import _infer_direction
+    assert _infer_direction("上漲 看空") == "neutral", (
+        "上漲 看空：bullish=1 bearish=1 → neutral，不可因雙計「漲」誤報 bullish"
+    )
+
+
+def test_infer_direction_kanzhan_kankong_neutral():
+    """「看漲 看空」各含 1 個方向詞，應為 neutral（不因「漲」雙重計數而誤判 bullish）。
+
+    舊實作：看漲(+1) + 漲(+1) = bullish=2 vs 看空(+1) = bearish=1 → 誤判 bullish。
+    修正後：看漲(+1，消耗「漲」) vs 看空(+1) → 1v1 → neutral。
+    """
+    from trustforge.trust.scoring import _infer_direction
+    assert _infer_direction("看漲 看空") == "neutral", (
+        "看漲(1) 看空(1) → neutral，不可雙計「漲」"
+    )
+
+
+# --- Task 2: 離線 collect 幣別過濾測試 ----------------------------------------
+
+def test_eth_collect_excludes_btc_contamination():
+    """ETH 離線 collect 不應包含 BTC 專屬文件（跨幣污染修復）。
+
+    修復前：collect(coin='ETH') 回傳全部樣本，BTC 鏈上/社群資料污染 ETH 判斷。
+    修復後：BTC 專屬 doc 排除，ETH 專屬 doc 保留，全市場通用 doc 保留。
+    """
+    from trustforge.ingestion.base import collect, OHLCV_DIR
+    docs = collect("ETH", coin="ETH", offline=True, data_dir=OHLCV_DIR)
+    ids = {d.id for d in docs}
+    # BTC 專屬 doc 不應出現在 ETH 查詢
+    assert "onchain-btc-inflow" not in ids, "BTC 轉入不應汙染 ETH 查詢"
+    assert "onchain-whale" not in ids, "BTC 鯨魚不應汙染 ETH 查詢"
+    assert "onchain-miner" not in ids, "BTC 礦工不應汙染 ETH 查詢"
+    assert "soc-pump1" not in ids, "BTC 喊單不應汙染 ETH 查詢"
+    # ETH 專屬 doc 必須保留
+    assert "onchain-eth-outflow" in ids, "ETH 流出應在 ETH 查詢中"
+    assert "onchain-eth-accumulation-1" in ids, "ETH 累積-1 應在 ETH 查詢中"
+    # 全市場通用 doc 必須保留
+    assert "reg-sec-warning" in ids, "全市場監管 doc 應在 ETH 查詢中"
+    assert "reg-international" in ids, "全市場國際監管 doc 應在 ETH 查詢中"
+
+
+# --- Task 3: ETH 新樣本 trust / 多源性斷言 ------------------------------------
+
+def test_eth_accumulation_sources_distinct():
+    """ETH 三筆鏈上累積樣本應來自不同來源且時戳各異（誠實差異化驗證）。"""
+    from trustforge.ingestion.base import collect, OHLCV_DIR
+    docs = collect("ETH", coin="ETH", offline=True, data_dir=OHLCV_DIR)
+    eth_acc = [d for d in docs if d.id.startswith("onchain-eth-accumulation-")]
+    assert len(eth_acc) == 3, f"應有 3 筆 ETH 累積樣本，實際 {len(eth_acc)}"
+    sources = {d.source for d in eth_acc}
+    assert len(sources) == 3, f"3 筆應來自不同來源，實際: {sources}"
+    timestamps = {d.ts for d in eth_acc}
+    assert len(timestamps) == 3, f"3 筆時戳應各不同（錯開 2-6h），實際: {timestamps}"
+
+
+def test_eth_onchain_accumulation_has_positive_trust():
+    """ETH 鏈上累積樣本（高信譽 onchain）trust 應 > 0。"""
+    from trustforge.ingestion.base import collect, OHLCV_DIR
+    docs = collect("ETH", coin="ETH", offline=True, data_dir=OHLCV_DIR)
+    now = max(d.ts for d in docs)
+    claims = extract_claims(docs)
+    scored = score(claims, now=now)
+    eth_acc_scored = [
+        sc for sc in scored
+        if sc.claim.doc.id.startswith("onchain-eth-accumulation-")
+    ]
+    assert len(eth_acc_scored) >= 3, f"ETH 累積樣本應有 ≥3 筆主張，實際 {len(eth_acc_scored)}"
+    for sc in eth_acc_scored:
+        assert sc.trust > 0, (
+            f"{sc.claim.doc.id} trust 應 > 0（onchain 高信譽基礎分），實際: {sc.trust}"
+        )
+
+
+# --- Task 4: 方向相容佐證回歸 fixture ----------------------------------------
+
+def test_direction_compatible_neutral_allows_corroboration():
+    """neutral + bullish 方向相容 → 不被方向閘攔截，仍可互相佐證。
+
+    回歸保護：確保方向閘只攔截明確對立（bullish vs bearish），
+    不過度攔截 neutral 搭配有方向的主張（這才是設計意圖）。
+    """
+    from trustforge.trust.scoring import Claim, _corroboration
+
+    doc_a = _make_doc("da", "onchain", "glassnode")
+    doc_b = _make_doc("db", "news", "coindesk")
+    # c_a 方向 neutral，c_b 方向 bullish → 應相容，可佐證
+    c_a = Claim(id="v4a", text="清算 瀑布 觸發 ETF 審批 加速", doc=doc_a, direction="neutral")
+    c_b = Claim(id="v4b", text="清算 瀑布 影響 ETF 申請 結果", doc=doc_b, direction="bullish")
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr > 0.0, (
+        f"neutral + bullish 方向相容應可佐證，corr={corr}；"
+        "若為 0 表示方向閘過度攔截（回歸）"
+    )

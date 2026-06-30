@@ -21,6 +21,16 @@ OFFICIAL_OHLCV_DIR = _HOME / "data" / "data"     # HOYA BIT 官方基準 OHLCV
 # 文件型來源類型（有對應的 sample_data/*.json）。price 走 OHLCV CSV，另行處理。
 SOURCE_KINDS = ("onchain", "regulatory", "hoyabit", "news", "social")
 
+# 幣別別名（小寫），用於離線樣本幣別識別。
+# 優先使用 meta["coin"] 顯式欄位；次由 id / text 內別名判定。
+_COIN_ALIASES: dict[str, frozenset] = {
+    "BTC": frozenset({"btc", "bitcoin", "比特幣", "比特"}),
+    "ETH": frozenset({"eth", "ethereum", "以太坊", "以太"}),
+    "SOL": frozenset({"sol", "solana"}),
+    "BNB": frozenset({"bnb", "binance"}),
+    "XRP": frozenset({"xrp", "ripple", "瑞波"}),
+}
+
 
 @dataclass
 class Document:
@@ -43,6 +53,45 @@ class Source:
         raise NotImplementedError
 
 
+def _matches_coin(doc: "Document", coin: str) -> bool:
+    """判斷離線樣本 doc 是否與 coin 相關（或為全市場通用資料）。
+
+    優先順序：
+    1. meta["coin"] 顯式標記 → 嚴格比對，其他幣排除。
+    2. id / text 含 coin 別名 → 屬該幣，納入。
+    3. id / text 含其他幣別名 → 非目標幣專屬，排除。
+    4. 無任何幣別提及 → 全市場通用，納入。
+    """
+    coin_uc = coin.upper()
+
+    # 1. 顯式 meta 欄位（最優先）
+    explicit = doc.meta.get("coin")
+    if explicit:
+        return str(explicit).upper() == coin_uc
+
+    target = _COIN_ALIASES.get(coin_uc, frozenset({coin.lower()}))
+    other: set[str] = set()
+    for c, aliases in _COIN_ALIASES.items():
+        if c != coin_uc:
+            other |= aliases
+
+    id_lower = doc.id.lower()
+    text_lower = doc.text.lower()
+
+    # 2. 匹配目標幣別名 → 納入
+    for alias in target:
+        if alias in id_lower or alias in text_lower:
+            return True
+
+    # 3. 匹配其他幣別名 → 排除
+    for alias in other:
+        if alias in id_lower or alias in text_lower:
+            return False
+
+    # 4. 無幣別提及 → 全市場通用，納入
+    return True
+
+
 class OfflineSampleSource(Source):
     """從 demo/sample_data/*.json 讀取，讓整條管線無需任何外部 API 即可跑通。"""
 
@@ -55,7 +104,7 @@ class OfflineSampleSource(Source):
         if not f.exists():
             return []
         raw = json.loads(f.read_text(encoding="utf-8"))
-        return [
+        docs = [
             Document(
                 id=d["id"], kind=self.kind, source=d.get("source", self.name),
                 text=d["text"], url=d.get("url", ""), ts=d.get("ts", 0.0),
@@ -63,6 +112,10 @@ class OfflineSampleSource(Source):
             )
             for d in raw
         ]
+        # 按幣種過濾：只回目標幣 + 全市場通用，排除其他幣專屬樣本
+        if coin:
+            docs = [d for d in docs if _matches_coin(d, coin)]
+        return docs
 
 
 def collect(query: str, coin: str | None = None,
