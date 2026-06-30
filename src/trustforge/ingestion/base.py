@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -53,43 +54,50 @@ class Source:
         raise NotImplementedError
 
 
+def _alias_in(alias: str, text: str) -> bool:
+    """ASCII 別名用詞界 \\b（配 re.ASCII 處理 CJK 夾雜，避免 'sol' 誤命中 'solana'/'console'）；
+    CJK 別名（如 比特幣）詞界概念不同，用子字串。"""
+    if alias.isascii():
+        return re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE | re.ASCII) is not None
+    return alias in text
+
+
+def _coins_mentioned(text: str) -> set[str]:
+    """回傳 text 中提及的所有幣別代碼集合。"""
+    found: set[str] = set()
+    for code, aliases in _COIN_ALIASES.items():
+        if any(_alias_in(a, text) for a in aliases):
+            found.add(code)
+    return found
+
+
 def _matches_coin(doc: "Document", coin: str) -> bool:
     """判斷離線樣本 doc 是否與 coin 相關（或為全市場通用資料）。
 
-    優先順序：
-    1. meta["coin"] 顯式標記 → 嚴格比對，其他幣排除。
-    2. id / text 含 coin 別名 → 屬該幣，納入。
-    3. id / text 含其他幣別名 → 非目標幣專屬，排除。
-    4. 無任何幣別提及 → 全市場通用，納入。
+    支援多幣（"BTC,ETH"，comparison 用）。優先順序：
+    1. meta["coin"] 顯式標記 → 須屬目標幣集合。
+    2. 先掃出 doc 提及的「所有」幣；目標幣被提及且「無其他非目標幣」→ 納入。
+       目標幣與其他幣同時出現（跨幣內容如「BTC 與 ETH 連動」）→ 排除，
+       避免他幣訊號被誤當目標幣訊號污染。
+    3. 無任何幣別提及 → 全市場通用，納入。
     """
-    coin_uc = coin.upper()
+    targets = {t.strip().upper() for t in re.split(r"[,\s]+", coin) if t.strip()}
+    if not targets:
+        return True  # 未指定幣 → 不過濾
 
     # 1. 顯式 meta 欄位（最優先）
     explicit = doc.meta.get("coin")
     if explicit:
-        return str(explicit).upper() == coin_uc
+        return str(explicit).upper() in targets
 
-    target = _COIN_ALIASES.get(coin_uc, frozenset({coin.lower()}))
-    other: set[str] = set()
-    for c, aliases in _COIN_ALIASES.items():
-        if c != coin_uc:
-            other |= aliases
+    mentioned = _coins_mentioned(doc.id + " " + doc.text)
 
-    id_lower = doc.id.lower()
-    text_lower = doc.text.lower()
+    # 3. 無幣別提及 → 全市場通用，納入
+    if not mentioned:
+        return True
 
-    # 2. 匹配目標幣別名 → 納入
-    for alias in target:
-        if alias in id_lower or alias in text_lower:
-            return True
-
-    # 3. 匹配其他幣別名 → 排除
-    for alias in other:
-        if alias in id_lower or alias in text_lower:
-            return False
-
-    # 4. 無幣別提及 → 全市場通用，納入
-    return True
+    # 2. 目標幣被提及 且 無其他非目標幣 → 納入；否則（含跨幣內容）排除
+    return bool(mentioned & targets) and not (mentioned - targets)
 
 
 class OfflineSampleSource(Source):
