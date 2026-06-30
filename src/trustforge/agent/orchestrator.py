@@ -76,17 +76,31 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     log.record("evidence.build", summary=f"supporting={len(brief.supporting)} contrarian={len(brief.contrarian)}")
     evidence: list[Evidence] = []
     key_basis: list[BasisItem] = []
+    ev_index: dict[tuple, int] = {}   # (source, content_reference) → 去重,保留最高 trust
     judgment_tag = f"{coin} 市場判斷"
-    for sc in brief.supporting:
+
+    def _add_evidence(sc: ScoredClaim, related: str) -> int:
+        ev = _scored_to_evidence(sc, related)
+        key = (ev.source, ev.content_reference)
+        if key in ev_index:
+            idx = ev_index[key]
+            if ev.trust > evidence[idx].trust:   # 同來源同引用 → 留最高信任那筆
+                evidence[idx] = ev
+            return idx
         idx = len(evidence)
-        evidence.append(_scored_to_evidence(sc, judgment_tag))
+        evidence.append(ev)
+        ev_index[key] = idx
+        return idx
+
+    for sc in brief.supporting:
+        idx = _add_evidence(sc, judgment_tag)
         key_basis.append(BasisItem(
             claim=sc.claim.text,
             explanation=f"來源 {sc.claim.doc.source}（{sc.claim.doc.kind}），信任 {sc.trust:.2f}。",
             evidence_idx=[idx],
         ))
     for sc in brief.contrarian:
-        evidence.append(_scored_to_evidence(sc, "反方／低信任訊號"))
+        _add_evidence(sc, "反方／低信任訊號")
 
     # 2. 我方判斷（pipeline 產生，非外部結論）
     direction = _direction(brief)

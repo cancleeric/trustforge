@@ -48,3 +48,14 @@ def test_aggregate_splits_supporting_and_contrarian():
     assert all("翻倍" not in sc.claim.text for sc in brief.supporting)
     assert 0.0 <= brief.confidence <= 1.0
     assert brief.provenance()  # 溯源鏈非空
+
+
+def test_negated_manipulation_not_penalised():
+    """否定詞守門:『不會暴漲』不該被當操縱訊號扣分。"""
+    from trustforge.trust.scoring import _manipulation_penalty, Claim
+    from trustforge.ingestion.base import Document
+    d = Document(id="d", kind="news", source="coindesk", text="", ts=1)
+    neg = Claim(id="x", text="分析師認為 BTC 短期不會暴漲", doc=d)
+    pos = Claim(id="y", text="BTC 暴漲翻倍穩賺", doc=Document(id="e", kind="social", source="x", text="", ts=1))
+    assert _manipulation_penalty(neg) == 0
+    assert _manipulation_penalty(pos) > 0

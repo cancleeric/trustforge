@@ -112,8 +112,19 @@ def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
     return math.pow(0.5, age_h / half_life_h)
 
 
+_NEG_MARKERS = ("不", "沒", "別", "未", "非", "勿", "無")
+
+
 def _manipulation_penalty(c: Claim) -> float:
-    hits = sum(1 for p in _MANIP_PATTERNS if re.search(p, c.text, re.IGNORECASE))
+    # 否定詞守門:命中前 2 字內若有否定(如「不會暴漲」)不計,避免正當新聞被誤扣
+    text = c.text
+    hits = 0
+    for p in _MANIP_PATTERNS:
+        for m in re.finditer(p, text, re.IGNORECASE):
+            pre = text[max(0, m.start() - 2):m.start()]
+            if any(n in pre for n in _NEG_MARKERS):
+                continue
+            hits += 1
     # 社群來源的操縱訊號加重
     weight = 1.5 if c.doc.kind == "social" else 1.0
     return min(1.0, hits * 0.4 * weight)

@@ -61,3 +61,10 @@ def test_limits_reported_when_sources_thin():
 def test_hypothesis_framing():
     report, _ = _run(query="BTC 短期將盤整", qtype=QuestionType.HYPOTHESIS)
     assert "假設" in report.market_judgment
+
+
+def test_evidence_deduped_by_source_and_reference():
+    """Evidence 清單不應出現重複 (source, content_reference)。"""
+    _, evidence = _run()
+    seen = [(e.source, e.content_reference) for e in evidence]
+    assert len(seen) == len(set(seen))
