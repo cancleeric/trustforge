@@ -1,3 +1,34 @@
 [
-  {"id":"hoya-1","source":"hoyabit-ticker","text":"BTC 急跌，過去一小時成交量放大，買賣價差擴大顯示流動性轉差。","url":"","ts":1750000000,"meta":{}}
+  {
+    "id": "hoya-ticker",
+    "source": "hoyabit-ticker",
+    "text": "BTC/USDT 現報 46,200，24h 跌幅 -2.1%，成交量 持平。",
+    "url": "https://hoyabit.com/ticker/BTCUSDT",
+    "ts": 1780185600,
+    "meta": {}
+  },
+  {
+    "id": "hoya-depth",
+    "source": "hoyabit-depth",
+    "text": "BTC/USDT 買盤 深度 較昨日 下降 35%，流動性 轉差 警示。",
+    "url": "https://hoyabit.com/depth/BTCUSDT",
+    "ts": 1780185600,
+    "meta": {}
+  },
+  {
+    "id": "hoya-volume",
+    "source": "hoyabit-volume",
+    "text": "ETH/USDT 成交量 放大 至 日均 3.2 倍，短期 波動 加劇 預警。",
+    "url": "https://hoyabit.com/volume/ETHUSD",
+    "ts": 1780142400,
+    "meta": {}
+  },
+  {
+    "id": "hoya-spread",
+    "source": "hoyabit-spread",
+    "text": "SOL/USDT 買賣 價差 擴大 至 0.18%，流動性 惡化 信號。",
+    "url": "https://hoyabit.com/spread/SOLUSDT",
+    "ts": 1780185600,
+    "meta": {}
+  }
 ]

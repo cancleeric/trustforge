@@ -1,3 +1,34 @@
 [
-  {"id":"onchain-1","source":"glassnode","text":"過去 4 小時有 12,000 BTC 自冷錢包轉入交易所，賣壓增加。","url":"https://example/onchain1","ts":1750000000,"meta":{}}
+  {
+    "id": "onchain-btc-inflow",
+    "source": "glassnode",
+    "text": "過去 4 小時 有 15,200 BTC 轉入 交易所，賣壓 流入 急增。",
+    "url": "https://glassnode.com/metrics/btc/exchange-inflow/2026053100",
+    "ts": 1780185600,
+    "meta": {}
+  },
+  {
+    "id": "onchain-eth-outflow",
+    "source": "glassnode",
+    "text": "以太坊 鯨魚 鏈上 行為 顯示 累積，6,800 ETH 從 交易所 流出 至 冷錢包。",
+    "url": "https://glassnode.com/metrics/eth/exchange-outflow/2026053016",
+    "ts": 1780142400,
+    "meta": {}
+  },
+  {
+    "id": "onchain-whale",
+    "source": "whale-alert",
+    "text": "單一 鯨魚 地址 移動 3,100 BTC 至 冷錢包，市場 解讀 為 長線 持有 信號。",
+    "url": "https://whale-alert.io/transaction/btc/2026053016abc",
+    "ts": 1780142400,
+    "meta": {}
+  },
+  {
+    "id": "onchain-miner",
+    "source": "cryptoquant",
+    "text": "礦工 鏈上 數據 顯示 近 48 小時 礦工 拋售 量 達 2,500 BTC，賣壓 信號 值得 關注。",
+    "url": "https://cryptoquant.com/asset/btc/miner-outflow/2026053012",
+    "ts": 1780099200,
+    "meta": {}
+  }
 ]
