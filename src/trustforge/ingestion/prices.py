@@ -26,9 +26,16 @@ class Bar:
 
 
 def load_ohlcv(coin: str, data_dir: str | Path) -> list[Bar]:
-    """讀 {data_dir}/{COIN}.csv，依日期排序回傳。"""
-    f = Path(data_dir) / f"{coin.upper()}.csv"
-    if not f.exists():
+    """讀指定目錄的 OHLCV CSV，依日期排序回傳。
+
+    依序嘗試官方命名與簡名：
+      {COIN}_daily_ohlcv.csv（HOYA BIT 官方）/ {COIN}.csv / {COIN}USDT.csv
+    """
+    coin = coin.upper()
+    d = Path(data_dir)
+    f = next((d / n for n in (f"{coin}_daily_ohlcv.csv", f"{coin}.csv", f"{coin}USDT.csv")
+              if (d / n).exists()), None)
+    if f is None:
         return []
     bars: list[Bar] = []
     with f.open(encoding="utf-8") as fh:

@@ -2,13 +2,14 @@
 from trustforge.agent.orchestrator import build_report
 from trustforge.bedrock import BedrockClient
 from trustforge.execlog import ExecutionLog
-from trustforge.ingestion.base import collect
+from trustforge.ingestion.base import OHLCV_DIR, collect
 from trustforge.schema import QuestionType
 from trustforge.trust.scoring import aggregate, extract_claims, score
 
 
 def _run(coin="BTC", query="分析 BTC 過去兩週市場狀況", qtype=QuestionType.MULTI_SOURCE):
-    docs = collect(query, coin=coin, offline=True)
+    # 釘合成樣本資料夾，確保判斷可預期（不受官方真實資料波動影響）
+    docs = collect(query, coin=coin, offline=True, data_dir=OHLCV_DIR)
     now = max(d.ts for d in docs)
     brief = aggregate(score(extract_claims(docs), now=now), query)
     log = ExecutionLog(now_fn=lambda: 1000.0)

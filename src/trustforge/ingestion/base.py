@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-SAMPLE_DIR = Path(__file__).resolve().parents[3] / "demo" / "sample_data"
-OHLCV_DIR = SAMPLE_DIR / "ohlcv"
+_REPO = Path(__file__).resolve().parents[3]
+SAMPLE_DIR = _REPO / "demo" / "sample_data"
+OHLCV_DIR = SAMPLE_DIR / "ohlcv"                 # 合成樣本（測試/快速 demo）
+OFFICIAL_OHLCV_DIR = _REPO / "data" / "data"     # HOYA BIT 官方基準 OHLCV
 
 # 文件型來源類型（有對應的 sample_data/*.json）。price 走 OHLCV CSV，另行處理。
 SOURCE_KINDS = ("onchain", "regulatory", "hoyabit", "news", "social")
@@ -69,10 +71,18 @@ def collect(query: str, coin: str | None = None,
     # 1. 價格事實（官方基準 OHLCV）
     if coin:
         from .prices import load_ohlcv, price_facts
-        d = data_dir or (OHLCV_DIR if offline else None)
+        # 顯式 data_dir 優先；否則官方資料存在就用官方，再退合成樣本（offline）。
+        if data_dir:
+            d = data_dir
+        elif OFFICIAL_OHLCV_DIR.exists():
+            d = OFFICIAL_OHLCV_DIR
+        elif offline:
+            d = OHLCV_DIR
+        else:
+            d = None
         if d:
             bars = load_ohlcv(coin, d)
-            docs.extend(price_facts(coin, bars, source_file=f"{coin.upper()}.csv",
+            docs.extend(price_facts(coin, bars, source_file=f"{coin.upper()}_daily_ohlcv.csv",
                                     ts=_latest_bar_ts(bars)))
 
     # 2. 文件型來源

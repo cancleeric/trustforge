@@ -1,0 +1,83 @@
+{
+  "dataset_name": "Crypto Market Dataset",
+  "generated_at": "2026-06-09T09:16:29Z",
+  "source": {
+    "name": "public_market_data",
+    "type": "public_market_data"
+  },
+  "time_basis": "UTC",
+  "interval": "1d",
+  "price_unit": "USDT",
+  "period": {
+    "start_date": "2021-06-01",
+    "end_date": "2026-05-31"
+  },
+  "symbols": [
+    {
+      "asset": "BTC",
+      "pair": "BTCUSDT",
+      "file": "data/BTC_daily_ohlcv.csv",
+      "rows": 1826,
+      "start_date": "2021-06-01",
+      "end_date": "2026-05-31"
+    },
+    {
+      "asset": "ETH",
+      "pair": "ETHUSDT",
+      "file": "data/ETH_daily_ohlcv.csv",
+      "rows": 1826,
+      "start_date": "2021-06-01",
+      "end_date": "2026-05-31"
+    },
+    {
+      "asset": "SOL",
+      "pair": "SOLUSDT",
+      "file": "data/SOL_daily_ohlcv.csv",
+      "rows": 1826,
+      "start_date": "2021-06-01",
+      "end_date": "2026-05-31"
+    },
+    {
+      "asset": "BNB",
+      "pair": "BNBUSDT",
+      "file": "data/BNB_daily_ohlcv.csv",
+      "rows": 1826,
+      "start_date": "2021-06-01",
+      "end_date": "2026-05-31"
+    },
+    {
+      "asset": "XRP",
+      "pair": "XRPUSDT",
+      "file": "data/XRP_daily_ohlcv.csv",
+      "rows": 1826,
+      "start_date": "2021-06-01",
+      "end_date": "2026-05-31"
+    }
+  ],
+  "columns": [
+    {
+      "name": "date",
+      "description": "UTC date in YYYY-MM-DD format"
+    },
+    {
+      "name": "open",
+      "description": "Daily open price in USDT"
+    },
+    {
+      "name": "high",
+      "description": "Daily high price in USDT"
+    },
+    {
+      "name": "low",
+      "description": "Daily low price in USDT"
+    },
+    {
+      "name": "close",
+      "description": "Daily close price in USDT"
+    },
+    {
+      "name": "volume",
+      "description": "Daily traded volume in base asset units"
+    }
+  ]
+}

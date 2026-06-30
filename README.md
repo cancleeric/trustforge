@@ -91,6 +91,17 @@ python -m trustforge.cli analyze \
 pytest -q
 ```
 
+## 資料來源
+
+| 資料 | 位置 | 說明 |
+|------|------|------|
+| 官方基準 OHLCV | `data/`（HOYA BIT 提供）| 5 幣 × 5 年 Daily OHLCV，UTC，USDT 計價；`data/dataset_metadata.json` 為規格 |
+| 合成樣本 | `demo/sample_data/` | 測試 / 快速 demo 用；`ohlcv/` 為合成價格、`*.json` 為各來源樣本 |
+
+- **價格資料預設讀 `data/`（官方）**；OHLCV 連接器自動辨識官方檔名 `{COIN}_daily_ohlcv.csv`。
+- 指定其他目錄：`--data-dir <dir>`。`--offline` 僅影響 Bedrock（不呼叫 AWS）與文件型樣本來源。
+- 新聞 / 鏈上 / 社群等非價格來源於 7/13 工作坊後接真實 API（目前為樣本）。
+
 ## 交付件（對齊官方）
 
 每次 `analyze` 產出官方要求的 4 件（程式碼/設定即本 repo）：
