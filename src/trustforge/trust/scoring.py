@@ -145,9 +145,13 @@ class TrustedBrief:
     supporting: list[ScoredClaim]      # 高信任、支撐主流結論
     contrarian: list[ScoredClaim]      # 低信任 / 反方，供反方證據
     confidence: float                  # 整體信心（0–1，支撐主張 trust 的裸加權均值）
-    # W4：校準後信心（0–1），由 `aggregate()` 用 `_calibrate_confidence()`
-    # （硬編分位數映射表，見該函式上方誠實聲明）從 `confidence` 換算而來，
-    # 供 `agent.orchestrator` 的三態 abstain 判斷使用。**保留** `confidence`
+    # W4：校準後信心（0–1）。由 `aggregate()` 用 `_evidence_strength()`
+    # （綜合獨立來源數/kind 多元度/佐證對反方優勢比例/裸信心，見該函式上方
+    # 模組註解的設計說明——codex 對抗審 [HIGH] 修正：不能只校準裸均值，
+    # 因為裸均值恆為 0 或 >=support_threshold，永遠進不了中段「低信心」帶）
+    # 算出能真正跨越 [0, 1] 的證據強度指標，再用 `_calibrate_confidence()`
+    # （硬編分位數映射表，見該函式上方誠實聲明）做最後一層保守修正。供
+    # `agent.orchestrator` 的三態 abstain 判斷使用。**保留** `confidence`
     # 裸值供對照/既有呼叫端相容——不砍舊欄位。預設 0.0：只有透過
     # `aggregate()` 產生的 brief 才會是真正校準值；測試直接手動建構
     # `TrustedBrief(...)` 不傳此欄位時維持逐字向後相容（未校準 -> 0.0，
@@ -1110,29 +1114,56 @@ def score(
 
 
 # --- W4：信心校準（確定性、免 LLM）---------------------------------------
-# 現況 `aggregate()` 的 `confidence` 是支撐主張 trust 的裸加權均值，`agent.
-# orchestrator` 各處另外對它套一刀切的武斷硬門檻（0.5）決定要不要給結論、
-# 要不要標限制——裸均值在門檻附近（如 0.49 vs 0.51）一票之差就翻越門檻，
-# 是假精確。W4 加一層**硬編分位數映射表**（比照 `_MANIP_PATTERNS` 寫死在
-# 程式碼、可版控可審，不是訓練出來的黑箱模型）把裸信心壓成校準後信心，
-# 讓 `agent.orchestrator` 的三態 abstain 判斷（見該檔案）有更保守、更貼近
-# 實際證據強度的依據。
+# codex 對抗審第 1 輪 [HIGH] 修正：原第一版直接把「裸加權均值 confidence」
+# 塞進分位數映射表——但 `confidence` 定義上只取 `trust >= support_threshold`
+# （預設 0.50）的 supporting 均值，數學上**恆為 0（無 supporting）或
+# >=0.50（有 supporting）**，永遠不可能落在 (0, 0.50) 之間。若映射表在
+# >=0.40 是 identity，校準值就永遠進不了 [0.35, 0.5) 的「低信心」帶——
+# 三態在真實 `aggregate()` 輸出下只剩「空支撐 abstain」與「正常」兩態，
+# 低信心態不可達，是假的三態。
 #
-# ⚠️ 誠實聲明：這是**簡化的分位數校準，不是嚴謹的 conformal prediction**——
-# 沒有 hold-out calibration set、沒有 exchangeability 假設驗證、不提供
-# conformal coverage 保證（如「90% 校準區間實際涵蓋 90% 真值」）。這裡只是
-# 幾個工程觀察錨點的分段線性插值，目的是壓低裸信心在 0.5 附近的假精確，
-# 供下游 abstain 三態判斷用；不對外呈現為論文級統計保證。
+# 修法：不要直接校準「裸均值」，改為先用既有 aggregate 資料算一個**能真正
+# 跨越 [0, 1] 的證據強度綜合指標**（`_evidence_strength`），確定性、免
+# LLM、純用已算好的 supporting/contrarian 清單，不新增資料源、不呼叫模型：
+#   - trust：supporting 的裸加權均值（原 `confidence`）——證據本身的品質。
+#   - indep：獨立來源數。只有 1 個來源＝完全沒有交叉佐證，給 0 分；
+#     達到 `_INDEP_SOURCE_SATURATION`（4）個以上獨立來源給滿分，中間線性
+#     內插。1 源 vs 6 源佐證的信心本該天差地遠，這項讓它反映在數字上。
+#   - diversity：supporting 涵蓋的來源類型（kind）數。同理，只有 1 種
+#     kind（如全部都是 news）給 0 分，達到 `_KIND_DIVERSITY_SATURATION`
+#     （3）種以上給滿分。
+#   - dominance：supporting 相對 contrarian 的證據優勢比例
+#     `n_supporting / (n_supporting + n_contrarian)`——佐證證據被反方
+#     證據夾擊得越兇，這項越低。
+# 四項各自 clamp 在 [0, 1]，以 `_STRENGTH_WEIGHTS`（加總為 1.0）做加權
+# 平均得到 `evidence_strength`，本身已是能自然分布在整個 [0, 1] 的指標
+# （單源、無佐證、被反方夾擊的弱證據會落在低段；多源、多元 kind、佐證
+# 壓倒反方的強證據會落在高段）。
 #
-# 錨點依裸信心（x）遞增排序，(裸信心, 校準後信心)。設計邏輯：
-# - x < 0.40：非線性往下壓。這段裸均值最容易來自樣本量稀薄的邊際情境
-#   （例如只有 1 筆剛好卡在 support_threshold=0.50 之上的支撐主張，或
-#   supporting 為空時的 0.0 fallback），加權平均在此區間容易呈現「看起來
-#   還有一點信心」的假精確，實際證據強度不足，故整段壓縮往下修正。
-# - x >= 0.40：維持原值（identity，不調整）。到這個高度通常已有中等以上
-#   證據結構支撐（多源交叉佐證、時效佳的客觀來源等），裸加權均值本身已
-#   相對可信，不需要額外處理——**這也是刻意設計**：只對「稀薄證據偽裝成
-#   及格信心」的低段做保守修正，不對已經有實質佐證的中高段動刀。
+# 再用 `_CALIBRATION_TABLE`（硬編分位數映射表，比照 `_MANIP_PATTERNS`
+# 寫死在程式碼、可版控可審，不是訓練出來的黑箱模型）對這個綜合指標做
+# 最後一層保守修正，得到 `calibrated_confidence`。
+#
+# ⚠️ 誠實聲明：這整套（`evidence_strength` 加權平均 + 分位數映射表）是
+# **簡化的工程啟發式，不是嚴謹的 conformal prediction**——沒有 hold-out
+# calibration set、沒有 exchangeability 假設驗證、不提供 conformal
+# coverage 保證（如「90% 校準區間實際涵蓋 90% 真值」），權重與飽和點也
+# 是工程判斷的固定常數而非統計估計出來的參數。目的只是讓「校準後信心」
+# 是一個真正反映證據強度、可跨三態的確定性指標，供下游 abstain 判斷用；
+# 不對外呈現為論文級統計保證。
+_STRENGTH_WEIGHTS = {
+    "trust": 0.35,       # supporting 裸加權均值（證據本身品質）
+    "indep": 0.30,       # 獨立來源數（交叉佐證廣度）
+    "diversity": 0.15,   # 來源類型（kind）多元度
+    "dominance": 0.20,   # 佐證 vs 反方證據的優勢比例
+}
+_INDEP_SOURCE_SATURATION = 4  # 達到此獨立來源數即給滿分，之後不再加分
+_KIND_DIVERSITY_SATURATION = 3  # 達到此來源類型數即給滿分，之後不再加分
+
+# 分位數映射表錨點依輸入（x＝evidence_strength）遞增排序，(x, 校準後信心)。
+# 中低段（<0.40）刻意壓得比原值低——這段最容易是「勉強及格但證據結構
+# 薄弱」的情境；高段（>=0.55）貼近原值，因為 evidence_strength 本身在
+# 高段已經隱含多源、多元 kind、佐證壓倒反方，不需要再額外壓縮。
 _CALIBRATION_TABLE: list[tuple[float, float]] = [
     (0.00, 0.00),
     (0.10, 0.03),
@@ -1147,7 +1178,7 @@ _CALIBRATION_TABLE: list[tuple[float, float]] = [
 
 
 def _calibrate_confidence(raw: float) -> float:
-    """用 `_CALIBRATION_TABLE`（硬編分位數映射表）把裸信心校準。
+    """用 `_CALIBRATION_TABLE`（硬編分位數映射表）校準一個 [0, 1] 指標。
 
     確定性、免 LLM：純查表 + 分段線性插值，同輸入必同輸出，不呼叫任何
     模型。**簡化版分位數校準，非嚴謹 conformal coverage 保證**（見
@@ -1166,6 +1197,40 @@ def _calibrate_confidence(raw: float) -> float:
             ratio = (x - x0) / (x1 - x0)
             return round(y0 + ratio * (y1 - y0), 4)
     return round(x, 4)  # 理論上不會到這（表已覆蓋 [0, 1]，防禦性寫法）
+
+
+def _evidence_strength(
+    supporting: list[ScoredClaim], contrarian: list[ScoredClaim], confidence: float
+) -> float:
+    """算 `_calibrate_confidence()` 的輸入指標（見上方模組註解的設計說明）。
+
+    確定性、免 LLM：只用呼叫端已算好的 supporting/contrarian 清單與裸
+    `confidence`，不重新計算 trust、不新增資料源。回傳值 clamp 在
+    [0, 1]（四個子指標各自已是 [0, 1]，加權平均理論上不會超界，clamp
+    是防禦性寫法）。
+    """
+    n_indep = len({sc.claim.doc.source for sc in supporting})
+    n_kinds = len({sc.claim.doc.kind for sc in supporting})
+    n_supporting = len(supporting)
+    n_contrarian = len(contrarian)
+
+    indep_factor = max(0.0, min(
+        (n_indep - 1) / (_INDEP_SOURCE_SATURATION - 1), 1.0
+    ))
+    diversity_factor = max(0.0, min(
+        (n_kinds - 1) / (_KIND_DIVERSITY_SATURATION - 1), 1.0
+    ))
+    total = n_supporting + n_contrarian
+    dominance = (n_supporting / total) if total > 0 else 0.0
+
+    w = _STRENGTH_WEIGHTS
+    strength = (
+        w["trust"] * confidence
+        + w["indep"] * indep_factor
+        + w["diversity"] * diversity_factor
+        + w["dominance"] * dominance
+    )
+    return max(0.0, min(1.0, strength))
 
 
 # --- 5. 聚合 -------------------------------------------------------------
@@ -1210,10 +1275,15 @@ def aggregate(scored: list[ScoredClaim], query: str,
     contrarian = [sc for sc in relevant if sc.trust < support_threshold]
 
     confidence = (sum(sc.trust for sc in supporting) / len(supporting)) if supporting else 0.0
+    # W4：用「校準前」的完整 supporting/contrarian（截斷前，與 confidence 同一份
+    # 基礎資料，見上方 `_evidence_strength` 對「不重新計算 trust、不新增資料源」
+    # 的承諾）算證據強度綜合指標，再校準——不用截斷後的 [:10]/[:5]，避免評分
+    # 結果隨截斷上限漂移（跟 `confidence` 本身的計算基礎保持一致）。
+    evidence_strength = _evidence_strength(supporting, contrarian, confidence)
     return TrustedBrief(
         query=query,
         supporting=supporting[:10],
         contrarian=contrarian[:5],
         confidence=confidence,
-        calibrated_confidence=_calibrate_confidence(confidence),
+        calibrated_confidence=_calibrate_confidence(evidence_strength),
     )

@@ -1,19 +1,38 @@
 """W4：校準信心 + abstain（棄權）驗收測試。
 
+codex 對抗審第 1 輪 [HIGH] 修正後的版本：第一版直接把「裸加權均值
+confidence」塞進分位數映射表——但 `confidence` 定義上只取
+`trust >= support_threshold`（預設 0.50）的 supporting 均值，數學上恆為
+0（無 supporting）或 >=0.50（有 supporting），永遠不可能落在 (0, 0.50)
+之間；映射表在 >=0.40 又是 identity，導致「低信心」帶在真實
+`aggregate()` 輸出下永遠不可達（只剩 abstain / 正常兩態）。第一版測試
+用手造、confidence 與 supporting 內容互相矛盾（aggregate() 不可能產生）
+的 `TrustedBrief` 掩蓋了這個缺陷。
+
+本版修正：`aggregate()` 改用 `_evidence_strength()`（獨立來源數 / kind
+多元度 / 佐證對反方優勢比例 / 裸信心的加權綜合，見 `trust.scoring` 模組
+內對應區塊的設計說明）算出一個真正能跨越 [0, 1] 的指標，再套用分位數
+映射表校準。本檔測試**只透過真實 `aggregate()`（或直接測試 `_evidence_
+strength`/`_calibrate_confidence` 這兩個純函式本身）建構資料，不再用
+「supporting 內容與 confidence 互相矛盾」的手造 brief**，並用端到端
+（合成 Document → extract_claims → score → aggregate → build_report）
+場景證明 abstain / 低信心 / 正常三態在真實 pipeline 輸出下皆可達。
+
 CEO 派工規格：
-  - `trust.scoring.aggregate()` 新增 `calibrated_confidence`（硬編分位數映射表，
-    確定性、免 LLM）；`confidence` 裸值保留、不砍。
-  - `agent.orchestrator.build_report()` 用校準後信心取代武斷單一 0.5 硬門檻，
-    改為三態：
-      calibrated < 0.35 或 supporting < 2（證據不足）→ abstain：中性措辭，
-      不給方向性字眼。
+  - `trust.scoring.aggregate()` 新增 `calibrated_confidence`（硬編分位數
+    映射表，確定性、免 LLM）；`confidence` 裸值保留、不砍。
+  - `agent.orchestrator.build_report()` 用校準後信心取代武斷單一 0.5
+    硬門檻，改為三態：
+      calibrated < 0.35 或 supporting < 2（證據不足）→ abstain：中性
+      措辭，不給方向性字眼。
       0.35 <= calibrated < 0.5 → 仍出結論，標「低信心」。
       calibrated >= 0.5 → 正常（既有行為逐字不變）。
   - 0.5 錨點不刪，只從唯一硬門檻降為三態分界之一；`support_threshold=0.50`
     等既有呼叫端逐字不變。
 
-誠實聲明（比照 `trust.scoring._calibrate_confidence` docstring）：這是簡化版
-分位數校準，不是嚴謹 conformal prediction，沒有 coverage 保證。
+誠實聲明（比照 `trust.scoring._calibrate_confidence` / `_evidence_strength`
+docstring）：這整套是簡化版工程啟發式，不是嚴謹 conformal prediction，
+沒有 coverage 保證。
 """
 from __future__ import annotations
 
@@ -25,8 +44,8 @@ from trustforge.schema import QuestionType
 from trustforge.trust.scoring import (
     Claim,
     ScoredClaim,
-    TrustedBrief,
     _calibrate_confidence,
+    _evidence_strength,
     aggregate,
     extract_claims,
     score,
@@ -36,44 +55,41 @@ from trustforge.trust.scoring import (
 _DIRECTIONAL_WORDS = ("偏多", "偏空", "看漲", "看跌", "上漲", "下跌")
 
 
-def _doc(id_: str, kind: str, source: str, text: str = "", ts: float = 1.0) -> Document:
-    return Document(id=id_, kind=kind, source=source, text=text, ts=ts)
+def _doc(id_: str, kind: str, source: str, text: str = "", ts: float = 1_000_000.0, meta: dict | None = None) -> Document:
+    return Document(id=id_, kind=kind, source=source, text=text, ts=ts, meta=meta or {})
 
 
-def _sc(id_: str, kind: str, source: str, trust: float, text: str = "", direction: str = "neutral") -> ScoredClaim:
-    doc = _doc(id_, kind, source, text=text)
-    claim = Claim(id=id_, text=text or f"claim-{id_}", doc=doc, direction=direction)
-    return ScoredClaim(claim=claim, trust=trust)
-
-
-def _brief(supporting, contrarian, confidence: float, calibrated_confidence: float, query: str = "分析 BTC") -> TrustedBrief:
-    return TrustedBrief(
-        query=query,
-        supporting=supporting,
-        contrarian=contrarian,
-        confidence=confidence,
-        calibrated_confidence=calibrated_confidence,
+def _run_report(brief, qtype=QuestionType.MULTI_SOURCE, query="分析 BTC", now: float = 1_000_000.0):
+    return build_report(
+        query=query, coin="BTC", qtype=qtype, brief=brief,
+        client=BedrockClient(offline=True),
+        log=ExecutionLog(now_fn=lambda: now),
+        now_fn=lambda: now,
     )
 
 
+def _aggregate_from_docs(docs: list[Document], query: str = "分析 BTC", now: float = 1_000_000.0):
+    return aggregate(score(extract_claims(docs), now=now), query=query)
+
+
 # ---------------------------------------------------------------------------
-# 1. `_calibrate_confidence` 純函式：固定校準表 + 三組信心(0.3/0.4/0.6)
+# 1. `_calibrate_confidence` 純函式：固定校準表性質
 # ---------------------------------------------------------------------------
 
 def test_calibrate_confidence_0_3_lands_below_abstain_threshold():
-    """裸信心 0.3 → 校準後應落入 abstain 區間（< 0.35）。"""
+    """輸入 0.3 → 校準後應落入 abstain 區間（< 0.35）。"""
     calibrated = _calibrate_confidence(0.3)
     assert calibrated < 0.35, f"預期 0.3 校準後 < 0.35（abstain），實得 {calibrated}"
 
 
 def test_calibrate_confidence_0_4_lands_in_low_confidence_band():
-    """裸信心 0.4 → 校準後應落入低信心區間 [0.35, 0.5)。"""
+    """輸入 0.4 → 校準後應落入低信心區間 [0.35, 0.5)。"""
     calibrated = _calibrate_confidence(0.4)
     assert 0.35 <= calibrated < 0.5, f"預期 0.4 校準後落在 [0.35, 0.5)（低信心），實得 {calibrated}"
 
 
 def test_calibrate_confidence_0_6_lands_in_normal_band():
-    """裸信心 0.6 → 校準後應落入正常區間（>= 0.5）。"""
+    """輸入 0.6 → 校準後應落入正常區間（>= 0.5）。"""
     calibrated = _calibrate_confidence(0.6)
     assert calibrated >= 0.5, f"預期 0.6 校準後 >= 0.5（正常），實得 {calibrated}"
 
@@ -108,106 +124,204 @@ def test_calibrate_confidence_deterministic_same_input_same_output():
 
 
 # ---------------------------------------------------------------------------
-# 2. `aggregate()` 附上 `calibrated_confidence`，`confidence` 裸值不砍
+# 2. `_evidence_strength` 純函式：綜合指標本身能跨越 [0, 1]（codex 修正核心）
 # ---------------------------------------------------------------------------
 
-def test_aggregate_sets_calibrated_confidence_consistent_with_raw():
+def _fake_sc(source: str, kind: str, trust: float = 0.6) -> ScoredClaim:
+    doc = Document(id=f"{source}-{kind}", kind=kind, source=source, text="", ts=1.0)
+    claim = Claim(id=doc.id, text="x", doc=doc, direction="neutral")
+    return ScoredClaim(claim=claim, trust=trust)
+
+
+def test_evidence_strength_empty_supporting_is_zero():
+    assert _evidence_strength([], [], 0.0) == 0.0
+
+
+def test_evidence_strength_single_source_much_lower_than_many_sources():
+    """1 個獨立來源 vs 6 個獨立來源佐證同一裸信心，強度應差很多
+    （codex 要求：獨立來源數必須反映在指標上）。"""
+    single = [_fake_sc("only-src", "price", 0.6)]
+    many = [_fake_sc(f"src-{i}", "price", 0.6) for i in range(6)]
+    strength_single = _evidence_strength(single, [], confidence=0.6)
+    strength_many = _evidence_strength(many, [], confidence=0.6)
+    assert strength_many > strength_single + 0.2, (
+        f"多源佐證強度應明顯高於單源：single={strength_single} many={strength_many}"
+    )
+
+
+def test_evidence_strength_heavy_contrarian_dominance_lowers_strength():
+    """佐證被大量反方證據夾擊時，強度應明顯下降。"""
+    supporting = [_fake_sc("s1", "price", 0.6), _fake_sc("s2", "price", 0.6)]
+    strength_no_contra = _evidence_strength(supporting, [], confidence=0.6)
+    strength_heavy_contra = _evidence_strength(
+        supporting, [_fake_sc(f"c{i}", "social", 0.2) for i in range(8)], confidence=0.6
+    )
+    assert strength_heavy_contra < strength_no_contra
+
+
+def test_evidence_strength_spans_full_range_reaches_all_three_bands():
+    """確定性驗證：`_evidence_strength` 加上 `_calibrate_confidence` 的組合，
+    在合理輸入下能真的分別落入 abstain(<0.35) / 低信心([0.35,0.5)) /
+    正常(>=0.5) 三個區間 —— 不是只能在兩態間跳。"""
+    low = _calibrate_confidence(_evidence_strength(
+        [_fake_sc("only-src", "price", 0.6)],
+        [_fake_sc(f"c{i}", "social", 0.2) for i in range(6)],
+        confidence=0.6,
+    ))
+    mid = _calibrate_confidence(_evidence_strength(
+        [_fake_sc("s1", "price", 0.75), _fake_sc("s2", "price", 0.75)],
+        [_fake_sc(f"c{i}", "social", 0.2) for i in range(3)],
+        confidence=0.75,
+    ))
+    high = _calibrate_confidence(_evidence_strength(
+        [_fake_sc(f"s{i}", k, 0.8) for i, k in enumerate(["price", "onchain", "regulatory", "news"])],
+        [],
+        confidence=0.8,
+    ))
+    assert low < 0.35, f"低強度案例應落 abstain，實得 {low}"
+    assert 0.35 <= mid < 0.5, f"中強度案例應落低信心，實得 {mid}"
+    assert high >= 0.5, f"高強度案例應落正常，實得 {high}"
+
+
+# ---------------------------------------------------------------------------
+# 3. `aggregate()` 附上 `calibrated_confidence`，`confidence` 裸值不砍
+# ---------------------------------------------------------------------------
+
+def test_aggregate_sets_calibrated_confidence_from_evidence_strength():
+    """回歸鎖：`calibrated_confidence` 必須是 `_evidence_strength()` 經
+    `_calibrate_confidence()` 算出來的（用同一份 supporting/contrarian/
+    confidence 重算應逐字相同），不是另外一套邏輯各自漂移。"""
     docs = [
         _doc("a", "onchain", "glassnode", "大額 BTC 轉入交易所造成賣壓，價格下跌。"),
         _doc("b", "social", "x-anon", "BTC 翻倍 to the moon 穩賺！"),
     ]
-    brief = aggregate(score(extract_claims(docs), now=1.0), query="BTC 賣壓")
+    brief = _aggregate_from_docs(docs, query="BTC 賣壓")
     assert 0.0 <= brief.confidence <= 1.0
     assert 0.0 <= brief.calibrated_confidence <= 1.0
-    # calibrated_confidence 必須是 confidence 經 _calibrate_confidence() 算出來的，
-    # 不是另外一套邏輯（回歸鎖：兩者不可各自漂移）。
-    assert brief.calibrated_confidence == _calibrate_confidence(brief.confidence)
+    # 測試資料量小（<=10 supporting、<=5 contrarian），brief.supporting/
+    # contrarian 未被截斷，可直接拿來重算比對。
+    expected = _calibrate_confidence(
+        _evidence_strength(brief.supporting, brief.contrarian, brief.confidence)
+    )
+    assert brief.calibrated_confidence == expected
 
 
 def test_aggregate_no_supporting_confidence_and_calibrated_both_zero():
-    """既有行為：無 supporting 時 confidence=0.0；calibrated 亦應為 0.0（校準表 (0,0) 錨點）。"""
+    """既有行為：無 supporting 時 confidence=0.0；calibrated 亦應為 0.0。"""
     docs = [_doc("a", "social", "x-anon", "BTC 翻倍 to the moon 穩賺快上車！")]
-    brief = aggregate(score(extract_claims(docs), now=1.0), query="無關查詢字串")
-    if not brief.supporting:
-        assert brief.confidence == 0.0
-        assert brief.calibrated_confidence == 0.0
+    brief = _aggregate_from_docs(docs, query="無關查詢字串")
+    assert not brief.supporting
+    assert brief.confidence == 0.0
+    assert brief.calibrated_confidence == 0.0
+
+
+def test_aggregate_many_independent_diverse_sources_yields_high_calibrated_confidence():
+    """多獨立來源 + 多元 kind + 無反方 → calibrated 應落入正常區間（>= 0.5）。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p3", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p4", "news", "coindesk", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+    ]
+    brief = _aggregate_from_docs(docs)
+    assert brief.calibrated_confidence >= 0.5, brief.calibrated_confidence
+
+
+def test_confidence_field_stays_raw_not_calibrated():
+    """`confidence` 裸值語意不變：不等於 `calibrated_confidence`（除非剛好同值）。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 盤整 持穩。"),
+        _doc("p2", "price", "exch-b", "BTC 盤整 持穩。"),
+    ] + [_doc(f"c{i}", "social", f"anon-{i}", "BTC 翻倍 to the moon 穩賺快上車！") for i in range(3)]
+    brief = _aggregate_from_docs(docs)
+    assert brief.confidence != brief.calibrated_confidence
+    assert brief.confidence == 0.75
 
 
 # ---------------------------------------------------------------------------
-# 3. `build_report` 三態 abstain（agent/orchestrator.py）
+# 4. `build_report` 三態 abstain —— 全部只透過真實 aggregate() 建 brief
 # ---------------------------------------------------------------------------
 
-def _run_report(brief, qtype=QuestionType.MULTI_SOURCE, query="分析 BTC"):
-    return build_report(
-        query=query, coin="BTC", qtype=qtype, brief=brief,
-        client=BedrockClient(offline=True),
-        log=ExecutionLog(now_fn=lambda: 1000.0),
-        now_fn=lambda: 1000.0,
+def test_e2e_single_weak_source_with_heavy_contrarian_abstains():
+    """單一獨立來源 + 大量反方雜訊 → calibrated < 0.35（真實 aggregate 產出，
+    非手造）→ abstain：中性措辭、無方向詞。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 盤整 持穩。"),
+        _doc("p2", "price", "exch-a", "BTC 盤整 持穩。"),
+    ] + [_doc(f"c{i}", "social", f"anon-{i}", "BTC 翻倍 to the moon 穩賺快上車！") for i in range(6)]
+    brief = _aggregate_from_docs(docs)
+    assert brief.calibrated_confidence < 0.35, brief.calibrated_confidence
+    assert len(brief.supporting) >= 2, "本案例故意驗證『calibrated 驅動』的 abstain，非筆數不足驅動"
+
+    report, _evidence = _run_report(brief)
+    assert report.direction == "不明"
+    assert "不足" in report.market_judgment
+    for w in _DIRECTIONAL_WORDS:
+        assert w not in report.market_judgment, f"abstain 措辭不應含方向詞「{w}」：{report.market_judgment}"
+
+
+def test_e2e_single_supporting_claim_forced_abstain_even_if_calibrated_would_be_low_confidence():
+    """supporting 只 1 筆 → 強制 abstain，即使該筆信任被拉到很高、calibrated
+    落在 [0.35, 0.5) 低信心區間（若不看筆數規則，本會被判為『低信心』而非
+    abstain）——證明 supporting<2 這條規則有獨立於 calibrated 的實際效果，
+    不是跟 calibrated<0.35 重複的擺設。"""
+    doc = _doc("p1", "price", "exch-a", "BTC 盤整 持穩。", meta={"reputation": 1.0})
+    brief = _aggregate_from_docs([doc])
+    assert len(brief.supporting) == 1
+    assert 0.35 <= brief.calibrated_confidence < 0.5, (
+        f"前提檢查失敗：本案例應驗證『筆數不足』獨立於『calibrated 過低』生效，"
+        f"實得 calibrated={brief.calibrated_confidence}"
     )
 
-
-def test_abstain_when_calibrated_confidence_below_threshold():
-    """calibrated < 0.35 → abstain：中性「資料不足」措辭，不給方向詞。"""
-    supporting = [
-        _sc("s1", "price", "binance", 0.55, "BTC 上漲 站穩關鍵位。"),
-        _sc("s2", "onchain", "glassnode", 0.52, "鏈上資金 流入。"),
-    ]
-    brief = _brief(supporting, contrarian=[], confidence=0.3, calibrated_confidence=0.20)
     report, _evidence = _run_report(brief)
-
     assert report.direction == "不明"
     assert "不足" in report.market_judgment
     for w in _DIRECTIONAL_WORDS:
         assert w not in report.market_judgment, f"abstain 措辭不應含方向詞「{w}」：{report.market_judgment}"
 
 
-def test_abstain_forced_when_supporting_has_only_one_claim():
-    """supporting 只 1 筆 → 強制 abstain，即使 calibrated_confidence 很高
-    （證據不足鐵則優先於信心數值本身）。"""
-    supporting = [_sc("s1", "price", "binance", 0.90, "BTC 上漲 站穩關鍵位。")]
-    brief = _brief(supporting, contrarian=[], confidence=0.9, calibrated_confidence=0.85)
+def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_marked():
+    """2 個獨立來源、單一 kind、有一定反方雜訊 → calibrated 落 [0.35, 0.5)
+    （真實 aggregate 產出）→ 仍出結論（有方向），但標「低信心」。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 盤整 持穩。"),
+        _doc("p2", "price", "exch-b", "BTC 盤整 持穩。"),
+    ] + [_doc(f"c{i}", "social", f"anon-{i}", "BTC 翻倍 to the moon 穩賺快上車！") for i in range(3)]
+    brief = _aggregate_from_docs(docs)
+    assert 0.35 <= brief.calibrated_confidence < 0.5, brief.calibrated_confidence
+
     report, _evidence = _run_report(brief)
-
-    assert report.direction == "不明"
-    assert "不足" in report.market_judgment
-    for w in _DIRECTIONAL_WORDS:
-        assert w not in report.market_judgment, f"abstain 措辭不應含方向詞「{w}」：{report.market_judgment}"
-
-
-def test_low_confidence_state_still_gives_conclusion_but_marked():
-    """0.35 <= calibrated < 0.5 → 仍出結論（有方向），但標「低信心」。"""
-    supporting = [
-        _sc("s1", "price", "binance", 0.55, "BTC 上漲 站穩關鍵位。"),
-        _sc("s2", "onchain", "glassnode", 0.52, "鏈上資金 流入。"),
-    ]
-    brief = _brief(supporting, contrarian=[], confidence=0.4, calibrated_confidence=0.40)
-    report, _evidence = _run_report(brief)
-
-    assert report.direction == "偏多"
+    assert report.direction != "不明"
     assert "低信心" in report.market_judgment
-    assert "不足以判斷" not in report.market_judgment
+    assert "不足" not in report.market_judgment
 
 
-def test_normal_state_unmarked_and_unchanged():
-    """calibrated >= 0.5 → 正常，不含 abstain/低信心標記（既有行為逐字不變）。"""
-    supporting = [
-        _sc("s1", "price", "binance", 0.80, "BTC 上漲 站穩關鍵位。"),
-        _sc("s2", "onchain", "glassnode", 0.75, "鏈上資金 流入。"),
+def test_e2e_strong_multi_source_evidence_normal_state_unmarked():
+    """多獨立來源、多元 kind、無反方 → calibrated >= 0.5（真實 aggregate 產出）
+    → 正常，不含 abstain/低信心標記（既有行為逐字不變）。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p3", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p4", "news", "coindesk", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
     ]
-    brief = _brief(supporting, contrarian=[], confidence=0.7, calibrated_confidence=0.70)
-    report, _evidence = _run_report(brief)
+    brief = _aggregate_from_docs(docs)
+    assert brief.calibrated_confidence >= 0.5, brief.calibrated_confidence
 
+    report, _evidence = _run_report(brief)
     assert report.direction == "偏多"
     assert "低信心" not in report.market_judgment
-    assert "不足以判斷" not in report.market_judgment
+    assert "不足" not in report.market_judgment
 
 
-def test_confidence_field_still_reports_raw_value_not_calibrated():
-    """`Report.confidence` 沿用既有語意（裸值），回歸鎖：不得被 W4 悄悄換成校準值。"""
-    supporting = [
-        _sc("s1", "price", "binance", 0.55, "BTC 上漲 站穩關鍵位。"),
-        _sc("s2", "onchain", "glassnode", 0.52, "鏈上資金 流入。"),
-    ]
-    brief = _brief(supporting, contrarian=[], confidence=0.4, calibrated_confidence=0.40)
+def test_e2e_report_confidence_field_is_raw_value_not_calibrated():
+    """`Report.confidence` 沿用既有語意（裸值），回歸鎖：不得被 W4 悄悄換成
+    校準值（用真實 aggregate() 產出的低信心案例驗證）。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 盤整 持穩。"),
+        _doc("p2", "price", "exch-b", "BTC 盤整 持穩。"),
+    ] + [_doc(f"c{i}", "social", f"anon-{i}", "BTC 翻倍 to the moon 穩賺快上車！") for i in range(3)]
+    brief = _aggregate_from_docs(docs)
     report, _evidence = _run_report(brief)
-    assert report.confidence == 0.4
+    assert report.confidence == brief.confidence
+    assert report.confidence != brief.calibrated_confidence
