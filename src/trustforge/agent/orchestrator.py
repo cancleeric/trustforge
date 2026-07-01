@@ -337,7 +337,8 @@ def run_agent_pipeline(
     # ------------------------------------------------------------------
     log.record("pipeline.step2.start", summary="pipeline 評分 + 聚合（反作弊純演算法）")
     now_ts = max((d.ts for d in docs), default=now_fn())
-    scored = score(claims, now=now_ts)
+    # W1.5（#15）：離線 / 未設模型自動退回舊行為（stance_client=None → 語意矛盾閘不啟用）。
+    scored = score(claims, now=now_ts, stance_client=None if client.offline else client)
     brief = aggregate(scored, query=query)
     log.record(
         "judgment.derive",

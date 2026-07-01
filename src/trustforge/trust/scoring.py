@@ -18,8 +18,10 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 from ..ingestion.base import Document
+from .stance_cache import cached_stance_fn
 
 # --- 權重（可調）---------------------------------------------------------
 DEFAULT_WEIGHTS = {
@@ -218,12 +220,28 @@ def _direction_compatible(d1: str, d2: str) -> bool:
     return d1 == d2
 
 
-def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
+def _corroboration(
+    target: Claim,
+    all_claims: list[Claim],
+    stance_fn: Callable[[str, str], str] | None = None,
+) -> float:
     """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
 
     改進（M1-M3）：
     - 停用詞過濾：從 overlap 計算排除域內通用詞（幣名/市場詞），只計具體詞重疊。
     - 方向閘：若兩條主張方向明確且相反（bullish vs bearish），略過，不算佐證。
+
+    W1.5（#15）：加選用 stance_fn，對通過 overlap 前置閘 + 方向閘的候選再做一次
+    語意 stance 分類，偵測「表面詞重疊但實質矛盾」（例如 regulatory clarity/adoption
+    vs regulatory scrutiny/caution：方向詞未必明確相反，但語意明確對立）。
+
+    順序（控成本，越前面越便宜）：
+    1. 同源排除（不變）。
+    2. overlap>=0.4 前置閘（不變）——先過最便宜的集合運算。
+    3. `_direction_compatible` 明確衝突快路徑（不變）——省下不必要的 stance 呼叫。
+    4. 若 `stance_fn` 存在才呼叫（走快取）；回傳 "contradiction" 則不計入獨立佐證。
+
+    `stance_fn=None` 時完全略過第 4 步，行為與加入 W1.5 前逐字相同（向後相容）。
     """
     tt = _normalize(target.text) - DOMAIN_STOP
     if not tt:
@@ -232,24 +250,41 @@ def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
     for c in all_claims:
         if c.doc.source == target.doc.source:
             continue
-        if not _direction_compatible(target.direction, c.direction):
-            continue
         ct = _normalize(c.text) - DOMAIN_STOP
         overlap = len(tt & ct) / len(tt)
-        if overlap >= 0.4:
-            independent_sources.add(c.doc.source)
+        if overlap < 0.4:
+            continue
+        if not _direction_compatible(target.direction, c.direction):
+            continue
+        if stance_fn is not None and stance_fn(target.text, c.text) == "contradiction":
+            continue
+        independent_sources.add(c.doc.source)
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
     n = len(independent_sources)
     return 1.0 - math.pow(0.5, n) if n else 0.0
 
 
 # --- 主評分 --------------------------------------------------------------
-def score(claims: list[Claim], now: float, weights: dict | None = None) -> list[ScoredClaim]:
+def score(
+    claims: list[Claim],
+    now: float,
+    weights: dict | None = None,
+    stance_client=None,
+) -> list[ScoredClaim]:
+    """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient）。
+    None（預設）= 不啟用 W1.5 語意矛盾閘，`_corroboration` 行為與加入前逐字相同。
+    傳入的物件若沒有 `classify_stance` 方法，一律安全降級為 None（不 crash）。
+    """
     w = weights or DEFAULT_WEIGHTS
+    stance_fn = (
+        cached_stance_fn(stance_client)
+        if stance_client is not None and hasattr(stance_client, "classify_stance")
+        else None
+    )
     out: list[ScoredClaim] = []
     for c in claims:
         rep = _source_reputation(c)
-        corr = _corroboration(c, claims)
+        corr = _corroboration(c, claims, stance_fn=stance_fn)
         rec = _recency_decay(c, now)
         manip = _manipulation_penalty(c)
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
