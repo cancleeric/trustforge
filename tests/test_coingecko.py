@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,17 @@ DETAIL_FIXTURE_NULL_FIELDS = json.dumps({
     "sentiment_votes_down_percentage": None,
     "developer_data": {"stars": None, "forks": None, "commit_count_4_weeks": None},
 }).encode()
+
+
+@pytest.fixture(autouse=True)
+def _reset_coingecko_process_cache():
+    """每個測試案例前後都清空 coingecko.py 的記憶體快取（`_get_price_data()`/
+    `_get_coin_detail()`），避免案例之間互相污染（見 coingecko.py 模組頂部
+    「高效抓取」說明——這兩個快取設計上只該活在單一 process 生命週期內）。"""
+    from trustforge.ingestion import coingecko
+    coingecko.reset_process_cache()
+    yield
+    coingecko.reset_process_cache()
 
 
 # ── CoinGeckoPriceSource ──────────────────────────────────────────────────────
@@ -308,13 +320,152 @@ def test_collect_offline_unaffected_by_coingecko():
 # ── cache.py 排程間隔設定 ──────────────────────────────────────────────────────
 
 def test_coingecko_refresh_intervals_registered():
+    """三者統一 5 分鐘（300s）一輪（老闆修正：keyless 已足夠，不必分快慢）。"""
     from trustforge.ingestion.cache import DEFAULT_REFRESH_INTERVAL_SECONDS, DEFAULT_STALE_AFTER_SECONDS
-    assert DEFAULT_REFRESH_INTERVAL_SECONDS["coingecko-price"] == 10 * 60
-    assert DEFAULT_REFRESH_INTERVAL_SECONDS["coingecko-sentiment"] == 30 * 60
-    assert DEFAULT_REFRESH_INTERVAL_SECONDS["coingecko-dev"] == 60 * 60
-    # 硬過期時限應為 refresh 間隔的 STALE_AFTER_MULTIPLIER 倍（衍生值，非獨立手填）
+    assert DEFAULT_REFRESH_INTERVAL_SECONDS["coingecko-price"] == 5 * 60
+    assert DEFAULT_REFRESH_INTERVAL_SECONDS["coingecko-sentiment"] == 5 * 60
+    assert DEFAULT_REFRESH_INTERVAL_SECONDS["coingecko-dev"] == 5 * 60
+    # 硬過期時限應為 refresh 間隔的 STALE_AFTER_MULTIPLIER 倍（衍生值，非獨立手填）= 900s
     for name in ("coingecko-price", "coingecko-sentiment", "coingecko-dev"):
+        assert DEFAULT_STALE_AFTER_SECONDS[name] == 900
         assert DEFAULT_STALE_AFTER_SECONDS[name] == DEFAULT_REFRESH_INTERVAL_SECONDS[name] * 3
+
+
+# ── 高效抓取：現價 1 次涵蓋 5 幣 / coins-detail 每幣 1 次由 sentiment+dev 共用 ──
+
+def test_price_source_single_real_call_shared_across_all_coins(monkeypatch):
+    """CoinGeckoPriceSource 在同一輪（process 生命週期）內不論被呼叫幾次
+    （每幣各呼叫一次，模擬 fetch_scheduler 逐幣迴圈），底層 `_fetch_url`
+    只會真的被呼叫 1 次——現價回應本身已涵蓋全部 5 幣。"""
+    from trustforge.ingestion import coingecko
+
+    calls: list[str] = []
+
+    def _counting_fetch(url):
+        calls.append(url)
+        return PRICE_FIXTURE
+
+    monkeypatch.setattr(coingecko, "_fetch_url", _counting_fetch)
+    src = coingecko.CoinGeckoPriceSource()
+    for code in ("BTC", "ETH", "SOL", "BNB", "XRP"):
+        docs = src.fetch("", coin=code)
+        assert len(docs) == 1
+    assert len(calls) == 1, f"應只有 1 次真呼叫，實際 {len(calls)} 次：{calls}"
+
+
+def test_sentiment_and_dev_share_single_coin_detail_call(monkeypatch):
+    """CoinGeckoSentimentSource 與 CoinGeckoDevSource 打同一個 coins/{id}
+    端點；同一輪內先呼叫其中一個後，另一個直接複用快取，底層 `_fetch_url`
+    對同一幣只會真的被呼叫 1 次（不是各自獨立呼叫變 2 次）。"""
+    from trustforge.ingestion import coingecko
+
+    calls: list[str] = []
+
+    def _counting_fetch(url):
+        calls.append(url)
+        return DETAIL_FIXTURE_NORMAL
+
+    monkeypatch.setattr(coingecko, "_fetch_url", _counting_fetch)
+    sentiment_docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
+    dev_docs = coingecko.CoinGeckoDevSource().fetch("", coin="BTC")
+    assert len(sentiment_docs) == 1
+    assert len(dev_docs) == 1
+    assert len(calls) == 1, f"同一幣 coins/detail 應只打 1 次，實際 {len(calls)} 次：{calls}"
+
+
+def test_full_round_five_coins_totals_about_six_real_calls(monkeypatch):
+    """模擬 fetch_scheduler 對 5 幣跑一輪三個 Source：現價 1 次 + 5 幣
+    coins/detail 各 1 次（sentiment/dev 共用）= 6 次，不是 15 次。"""
+    from trustforge.ingestion import coingecko
+
+    calls: list[str] = []
+
+    def _counting_fetch(url):
+        calls.append(url)
+        if "simple/price" in url:
+            return PRICE_FIXTURE
+        return DETAIL_FIXTURE_NORMAL
+
+    monkeypatch.setattr(coingecko, "_fetch_url", _counting_fetch)
+    price_src = coingecko.CoinGeckoPriceSource()
+    sentiment_src = coingecko.CoinGeckoSentimentSource()
+    dev_src = coingecko.CoinGeckoDevSource()
+    coins = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+    for code in coins:
+        price_src.fetch("", coin=code)
+    for code in coins:
+        dev_src.fetch("", coin=code)
+    for code in coins:
+        sentiment_src.fetch("", coin=code)
+
+    assert len(calls) == 6, f"預期 6 次真呼叫（1 現價 + 5 幣 detail），實際 {len(calls)} 次：{calls}"
+
+
+# ── Demo API key（選用，keyless 已足夠）────────────────────────────────────────
+
+def test_api_key_appended_to_actual_request_when_env_set(monkeypatch):
+    """設定 COINGECKO_API_KEY 時，實際發送給 `_fetch_url` 的 URL 應附加
+    `x_cg_demo_api_key`；但 `Document.url`/`meta` 一律是乾淨 URL，不含 key
+    （不得留痕外洩）。"""
+    from trustforge.ingestion import coingecko
+
+    fake_key = "test-fake-demo-key-not-real"
+    monkeypatch.setenv("COINGECKO_API_KEY", fake_key)
+    captured_urls: list[str] = []
+
+    def _capture_fetch(url):
+        captured_urls.append(url)
+        return PRICE_FIXTURE
+
+    monkeypatch.setattr(coingecko, "_fetch_url", _capture_fetch)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+
+    assert len(captured_urls) == 1
+    assert f"x_cg_demo_api_key={fake_key}" in captured_urls[0]
+    # Document 對外欄位一律乾淨，不留 key 痕跡
+    assert fake_key not in docs[0].url
+    assert fake_key not in json.dumps(docs[0].meta)
+    assert fake_key not in docs[0].text
+
+
+def test_keyless_when_env_not_set(monkeypatch):
+    """未設定 COINGECKO_API_KEY 時，實際請求 URL 不含任何 key 參數（keyless
+    降級，不報錯、正常運作）。"""
+    from trustforge.ingestion import coingecko
+
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    captured_urls: list[str] = []
+
+    def _capture_fetch(url):
+        captured_urls.append(url)
+        return PRICE_FIXTURE
+
+    monkeypatch.setattr(coingecko, "_fetch_url", _capture_fetch)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+
+    assert len(docs) == 1
+    assert len(captured_urls) == 1
+    assert "x_cg_demo_api_key" not in captured_urls[0]
+
+
+def test_with_api_key_helper_blank_env_treated_as_unset(monkeypatch):
+    """空字串/純空白 env 值視為未設定，不附加空 key 參數。"""
+    from trustforge.ingestion import coingecko
+
+    monkeypatch.setenv("COINGECKO_API_KEY", "   ")
+    assert coingecko._with_api_key("https://example.test/x") == "https://example.test/x"
+
+
+def test_no_hardcoded_api_key_in_source_module():
+    """原始碼本身不得含任何看起來像真實 key 的寫死字串——本檔只允許透過
+    env 讀取（`os.environ.get(_API_KEY_ENV, ...)`），確保 secret 只從外部
+    注入，不落地進 repo。"""
+    from trustforge.ingestion import coingecko
+    src = Path(coingecko.__file__).read_text(encoding="utf-8")
+    assert "os.environ.get(_API_KEY_ENV" in src
+    # 唯一允許出現的 "= " 後面接字面字串賦值給 key 相關變數的地方應該只有
+    # env 變數名稱常數本身，不應該有第二個看起來像 API key 值的字面常數。
+    assert 'CG-' not in src  # CoinGecko 官方 key 前綴慣例，不應出現在原始碼
 
 
 # ── fetch_scheduler.py 接線測試 ────────────────────────────────────────────────
