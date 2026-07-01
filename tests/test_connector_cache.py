@@ -968,19 +968,45 @@ def test_probe_fails_nonzero_when_ledger_put_item_denied(monkeypatch, tmp_path):
     rc = fetch_scheduler.run_probe()
     assert rc == 1
     mock_table.put_item.assert_called_once()
+    mock_table.get_item.assert_not_called()  # PutItem 都失敗了，不該還去驗讀回
     mock_table.scan.assert_not_called()  # PutItem 都失敗了，不該還去 Scan
 
 
-def test_probe_fails_nonzero_when_ledger_scan_denied(monkeypatch, tmp_path):
-    """codex HIGH：ledger probe 只驗 PutItem 不夠——若只有 dynamodb:Scan 被拒
-    （PutItem 仍放行），一般 append 會成功，但 /costs（靠 Scan 讀）會整個讀
-    失敗。probe 必須真的觸發一次 Scan，被拒就非零退出。"""
+def test_probe_fails_nonzero_when_ledger_get_item_does_not_find_canary(monkeypatch, tmp_path):
+    """codex HIGH（本輪）：PutItem 沒丟例外，但按完整主鍵 GetItem（強一致）
+    讀不到剛寫入的 canary——代表寫入其實沒真的落地。probe 必須非零退出，
+    且**不該因此再去驗 Scan 權限**（先驗寫入落地都沒成功，Scan 權限驗了
+    也沒意義，兩件事分開驗但仍有先後順序）。"""
     monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
     monkeypatch.setenv("CACHE_BACKEND", "json")
 
     ledger = DynamoDBLedger(table_name="fake-ledger-table")
     mock_table = MagicMock()
     mock_table.put_item.return_value = {}
+    mock_table.get_item.return_value = {}  # 沒有 "Item" key == 沒讀到
+    ledger._table = mock_table
+    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+
+    rc = fetch_scheduler.run_probe()
+    assert rc == 1
+    mock_table.put_item.assert_called_once()
+    mock_table.get_item.assert_called_once()
+    mock_table.scan.assert_not_called()
+
+
+def test_probe_fails_nonzero_when_ledger_scan_permission_denied(monkeypatch, tmp_path):
+    """codex HIGH（本輪）：GetItem 已經讀回剛寫入的 canary（寫入確定落地），
+    但單獨驗證 `dynamodb:Scan` 權限的那次呼叫被拒——`/costs` 端點靠 Scan
+    讀，一樣會整個讀失敗，probe 必須非零退出。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    ledger = DynamoDBLedger(table_name="fake-ledger-table")
+    mock_table = MagicMock()
+    mock_table.put_item.return_value = {}
+    mock_table.get_item.return_value = {
+        "Item": {"run_id": fetch_scheduler._PROBE_SOURCE, "ts": fetch_scheduler._PROBE_LEDGER_TS}
+    }
     mock_table.scan.side_effect = RuntimeError(
         "AccessDeniedException: User is not authorized to perform: dynamodb:Scan"
     )
@@ -990,49 +1016,68 @@ def test_probe_fails_nonzero_when_ledger_scan_denied(monkeypatch, tmp_path):
     rc = fetch_scheduler.run_probe()
     assert rc == 1
     mock_table.put_item.assert_called_once()
-    mock_table.scan.assert_called_once()  # 真的觸發了一次 Scan，不是被 read_all() 的 fallback 蓋過去
+    mock_table.get_item.assert_called_once()
+    mock_table.scan.assert_called_once()
 
 
-def test_probe_fails_nonzero_when_ledger_scan_does_not_find_canary(monkeypatch, tmp_path):
-    """Scan 本身沒被拒（沒丟例外），但回傳內容裡找不到剛寫入的 canary——防止
-    probe 只看「Scan 有沒有丟例外」就誤判成功，必須真的核對讀回內容。"""
+def test_probe_succeeds_when_ledger_get_item_finds_canary_and_scan_permitted(monkeypatch, tmp_path):
+    """happy path：PutItem 成功、GetItem（強一致，按完整主鍵）真的讀到剛寫入
+    的 canary，且 Scan 呼叫本身沒被拒 → probe 判定成功。刻意讓 Scan 回應是
+    空的（不含 canary），證明「驗 Scan 權限」真的不看內容，只要呼叫不被拒
+    就算過（不是只驗 PutItem 沒丟例外就算數，也不因 Scan 掃不到東西就誤判
+    失敗）。"""
     monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
     monkeypatch.setenv("CACHE_BACKEND", "json")
 
     ledger = DynamoDBLedger(table_name="fake-ledger-table")
     mock_table = MagicMock()
     mock_table.put_item.return_value = {}
-    # 模擬「讀到別的舊資料，但沒有我們剛寫的 canary」——例如 PutItem 其實沒有
-    # 真的落地卻沒丟例外的邊界情況。
-    mock_table.scan.return_value = {"Items": [{"run_id": "some-other-run", "ts": "x"}]}
-    ledger._table = mock_table
-    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
-
-    rc = fetch_scheduler.run_probe()
-    assert rc == 1
-
-
-def test_probe_succeeds_when_dynamodb_ledger_scan_finds_the_canary(monkeypatch, tmp_path):
-    """happy path：ledger 用真的 DynamoDBLedger，PutItem 成功後 Scan 真的讀
-    得到剛寫入的 canary → probe 判定成功（不是只驗 PutItem 沒丟例外就算數）。"""
-    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
-    monkeypatch.setenv("CACHE_BACKEND", "json")
-
-    ledger = DynamoDBLedger(table_name="fake-ledger-table")
-    mock_table = MagicMock()
-    mock_table.put_item.return_value = {}
-    mock_table.scan.return_value = {
-        "Items": [{"run_id": fetch_scheduler._PROBE_SOURCE, "ts": fetch_scheduler._PROBE_LEDGER_TS}]
+    mock_table.get_item.return_value = {
+        "Item": {"run_id": fetch_scheduler._PROBE_SOURCE, "ts": fetch_scheduler._PROBE_LEDGER_TS}
     }
+    mock_table.scan.return_value = {"Items": []}
     ledger._table = mock_table
     monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 0
     mock_table.put_item.assert_called_once()
+    mock_table.get_item.assert_called_once()
+    get_item_kwargs = mock_table.get_item.call_args.kwargs
+    assert get_item_kwargs["ConsistentRead"] is True
+    assert get_item_kwargs["Key"] == {
+        "run_id": fetch_scheduler._PROBE_SOURCE, "ts": fetch_scheduler._PROBE_LEDGER_TS,
+    }
     mock_table.scan.assert_called_once()
-    scan_kwargs = mock_table.scan.call_args.kwargs
-    assert scan_kwargs["ExpressionAttributeValues"][":rid"] == fetch_scheduler._PROBE_SOURCE
+    assert mock_table.scan.call_args.kwargs.get("Limit") == 1
+
+
+def test_probe_scan_pagination_with_missing_canary_in_first_page_does_not_fail(
+    monkeypatch, tmp_path
+):
+    """codex HIGH（本輪）核心回歸案例：Scan 只回第一頁（`LastEvaluatedKey`
+    代表還有下一頁）、第一頁完全沒有 canary、內容也跟 canary 無關——這正是
+    舊版「用 Scan 內容核對 canary」在大表上會誤判失敗的情境。新版驗證方式
+    下，Scan 只驗權限不驗內容，GetItem 才驗寫入落地，因此不該因此判定
+    失敗。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    ledger = DynamoDBLedger(table_name="fake-ledger-table")
+    mock_table = MagicMock()
+    mock_table.put_item.return_value = {}
+    mock_table.get_item.return_value = {
+        "Item": {"run_id": fetch_scheduler._PROBE_SOURCE, "ts": fetch_scheduler._PROBE_LEDGER_TS}
+    }
+    mock_table.scan.return_value = {
+        "Items": [{"run_id": "other-run-1"}, {"run_id": "other-run-2"}],
+        "LastEvaluatedKey": {"run_id": "other-run-2", "ts": "2026-01-01T00:00:00+00:00"},
+    }
+    ledger._table = mock_table
+    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+
+    rc = fetch_scheduler.run_probe()
+    assert rc == 0
 
 
 def test_probe_is_not_fooled_by_fully_fresh_cache_where_normal_run_would_report_success(

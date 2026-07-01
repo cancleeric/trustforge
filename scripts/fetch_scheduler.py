@@ -281,14 +281,23 @@ def run_probe() -> int:
         `ConsistentRead=True` 保證讀到的就是本次剛寫入的那筆，canary 值
         本身也每次唯一（`pid+timestamp`），雙重確保判定是確定性的。
       - cost-ledger 表：對固定 `(run_id, ts)` 的一筆 record 做 `append()`
-        （PutItem），**寫完再用 `DynamoDBLedger.scan_has_run_id()` 低階
-        `Scan` 讀回核對**——不透過 `read_all()`：`read_all()` 對 DynamoDB
-        失敗會 fallback 讀本機 JSONL，若只有 `dynamodb:Scan` 被拒（PutItem
-        仍放行），用 `read_all()` 驗證會被這層 fallback 悄悄接住看不出來，
-        但正式環境的 `/costs` 端點就是靠 `Scan` 讀，一樣會整個讀失敗——這正
-        是本次要抓的東西。非 `DynamoDBLedger`（如本機開發用的 `JsonlLedger`）
-        沒有 IAM/`Scan` 這層疑慮，`append()` 沒丟例外就視為成功，不強求
-        `Scan` 讀回。
+        （PutItem），**寫完拆成兩個獨立、互不干擾的驗證**：
+        1. `DynamoDBLedger.get_canary(run_id, ts)`——低階「按完整主鍵」
+           `GetItem`（`ConsistentRead=True`）核對寫入真的落地。按主鍵查沒有
+           `Scan` 的分頁問題（回應 ≤1MB 只回一頁，`FilterExpression` 是掃完
+           才套用，表大時 canary 可能剛好落在後面沒掃到的頁），配強一致讀
+           也沒有最終一致的問題——不管表多大、複寫延遲多久，都能確定性地
+           判斷「這筆到底寫進去了沒」。
+        2. `DynamoDBLedger.probe_scan_permission()`——另外單獨呼叫一次
+           `Scan`（`Limit=1`），**只驗證 `dynamodb:Scan` 這個 action 本身
+           有沒有被拒**，不要求掃到任何特定內容（正式環境的 `/costs`
+           端點就是靠 `Scan` 讀，若這個 action 被拒，`/costs` 會整個讀
+           失敗）。若拿 `Scan` 結果去核對「有沒有掃到剛寫的 canary」，會
+           被最終一致讀 + 分頁問題污染成非確定性誤判——這正是本輪要拆解
+           掉的耦合：「驗寫入落地」跟「驗 Scan 權限」分開，兩者都不受
+           最終一致/分頁影響。
+        非 `DynamoDBLedger`（如本機開發用的 `JsonlLedger`）沒有 IAM/Scan
+        這層疑慮，`append()` 沒丟例外就視為成功，不強求上述兩項。
       - 兩個 canary key 都固定、冪等（重跑覆寫同一筆，不會無限堆積垃圾資料）。
 
     刻意**不透過** `cache_get()`/`cache_set()` 高階便利函式：它們對讀/寫
@@ -297,8 +306,8 @@ def run_probe() -> int:
     但這正是 probe 要拆穿的東西——probe 要問的是「primary backend（實際配置
     的 `CACHE_BACKEND`/`COST_LEDGER_BACKEND`）本身能不能真的讀寫」，不能被
     這層 fallback 悄悄接住又回報「看起來沒事」。直接呼叫 backend 的低階
-    `get()`/`set()`/`append()`/`scan_has_run_id()`，任何例外一律視為
-    probe 失敗。
+    `get()`/`set()`/`append()`/`get_canary()`/`probe_scan_permission()`，
+    任何例外一律視為 probe 失敗。
     """
     ok = True
 
@@ -349,22 +358,32 @@ def run_probe() -> int:
     else:
         if isinstance(ledger_backend, DynamoDBLedger):
             try:
-                found = ledger_backend.scan_has_run_id(_PROBE_SOURCE)
+                canary_item = ledger_backend.get_canary(_PROBE_SOURCE, _PROBE_LEDGER_TS)
             except Exception as exc:  # noqa: BLE001
-                print(f"[fetch_scheduler] PROBE FAIL：cost-ledger Scan 讀回失敗"
+                print(f"[fetch_scheduler] PROBE FAIL：cost-ledger GetItem（強一致）讀回失敗"
                       f"（backend={type(ledger_backend).__name__}）：{exc}", file=sys.stderr)
                 ok = False
             else:
-                if not found:
-                    print("[fetch_scheduler] PROBE FAIL：cost-ledger Scan 讀不到剛寫入的"
-                          "canary（PutItem 沒丟例外，但可能其實沒真的落地）", file=sys.stderr)
+                if canary_item is None:
+                    print("[fetch_scheduler] PROBE FAIL：cost-ledger GetItem（ConsistentRead）"
+                          "讀不到剛寫入的 canary（PutItem 沒丟例外，但可能其實沒真的落地）",
+                          file=sys.stderr)
                     ok = False
                 else:
-                    print(f"[fetch_scheduler] PROBE OK：cost-ledger PutItem + Scan 讀回一致"
-                          f"（backend={type(ledger_backend).__name__}）")
+                    try:
+                        ledger_backend.probe_scan_permission()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[fetch_scheduler] PROBE FAIL：cost-ledger Scan 權限檢查失敗"
+                              f"（/costs 端點靠 Scan 讀，會整個讀失敗）"
+                              f"（backend={type(ledger_backend).__name__}）：{exc}", file=sys.stderr)
+                        ok = False
+                    else:
+                        print(f"[fetch_scheduler] PROBE OK：cost-ledger PutItem + GetItem"
+                              f"（強一致）讀回一致 + Scan 權限正常"
+                              f"（backend={type(ledger_backend).__name__}）")
         else:
             print(f"[fetch_scheduler] PROBE OK：cost-ledger PutItem 成功"
-                  f"（backend={type(ledger_backend).__name__}，非 DynamoDB，不強求 Scan 讀回）")
+                  f"（backend={type(ledger_backend).__name__}，非 DynamoDB，不強求 GetItem/Scan）")
 
     if not ok:
         print("[fetch_scheduler] PROBE 結論：失敗——DynamoDB cache/cost-ledger 至少一項"
