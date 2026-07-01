@@ -94,7 +94,7 @@ case "$ALL" in
   "s3 cp"*)
     exit 0 ;;
   "ec2 describe-instances --region"*"Reservations[].Instances[].[InstanceId,State.Name]"*)
-    if [ "$SCENARIO" = "update-in-place" ]; then
+    if [ "$SCENARIO" = "update-in-place" ] || [ "$SCENARIO" = "scheduler-fail" ]; then
       printf 'i-0123456789abcdef0\trunning\n'
     else
       printf ''
@@ -105,6 +105,21 @@ case "$ALL" in
     echo "203.0.113.10" ;;
   "iam get-role"*)
     exit 0 ;;
+  "iam put-role-policy"*)
+    # reconcile 用：抓 --policy-name / --policy-document 存起來供斷言（兩條
+    # 部署路徑都要跑過這裡，且 dynamodb 那份要鎖兩個 table ARN）。用場景名
+    # 分檔避免兩個場景先後跑時互相覆蓋。
+    PNAME=$(find_after --policy-name)
+    PDOC=$(find_after --policy-document)
+    printf '%s' "$PDOC" > "$CAPTURE_DIR/iam_policy_${SCENARIO}_${PNAME}.txt"
+    exit 0 ;;
+  "dynamodb describe-table"*)
+    if [ "$SCENARIO" = "table-missing" ]; then
+      exit 254
+    fi
+    exit 0 ;;
+  "ssm describe-instance-information"*)
+    echo "Online" ;;
   "ec2 describe-vpcs"*)
     echo "vpc-0123456789abcdef0" ;;
   "ec2 describe-security-groups"*)
@@ -121,14 +136,29 @@ case "$ALL" in
   "ec2 wait instance-running"*)
     exit 0 ;;
   "ssm send-command"*)
-    # update-in-place：捕捉 --parameters 值（commands=[...]）
+    # 一次部署可能送出 2 次 send-command（update-in-place 主設定 + 兩條路徑
+    # 都會有的 verify_fetch_scheduler 驗證）：用計數器分開存檔，CommandId 也
+    # 帶編號，讓 get-command-invocation 能依 --command-id 分辨是哪一次呼叫。
+    N=1
+    if [ -f "$CAPTURE_DIR/ssm_call_count" ]; then
+      N=$(($(cat "$CAPTURE_DIR/ssm_call_count") + 1))
+    fi
+    echo "$N" > "$CAPTURE_DIR/ssm_call_count"
     PARAMS=$(find_after --parameters)
-    printf '%s' "$PARAMS" > "$CAPTURE_DIR/ssm_params.txt"
-    echo "cmd-0123456789abcdef0" ;;
+    printf '%s' "$PARAMS" > "$CAPTURE_DIR/ssm_params_call${N}.txt"
+    echo "cmd-call${N}" ;;
   "ssm wait command-executed"*)
     exit 0 ;;
   "ssm get-command-invocation"*)
-    echo "Success" ;;
+    CMDID_ARG=$(find_after --command-id)
+    # scheduler-fail 場景：讓「驗證 fetch-scheduler」那次 send-command 回
+    # Failed（模擬 DynamoDB IAM 權限不夠、scheduler exit 1 的真實情境），其餘
+    # 呼叫維持 Success，藉此斷言 deploy 腳本會非零結束、不會誤報成功。
+    if [ "$SCENARIO" = "scheduler-fail" ] && [ "$CMDID_ARG" = "cmd-call2" ]; then
+      echo "Failed"
+    else
+      echo "Success"
+    fi ;;
   *)
     echo "[aws-mock] 未預期的呼叫，測試沒 mock 到，中止: $ALL" >&2
     exit 99 ;;
@@ -138,6 +168,10 @@ chmod +x "$MOCKDIR/aws"
 
 run_deploy() {
   local scenario="$1"
+  # ssm_call_count 是「這次部署送了幾次 ssm send-command」的計數器，每個
+  # scenario 各自從 1 開始編號（call1=主設定或首次驗證、call2=update-in-place
+  # 額外的 fetch-scheduler 同步驗證），開跑前先清掉避免跨場景疊加。
+  rm -f "$CAPTURE/ssm_call_count"
   TF_TEST_SCENARIO="$scenario" TF_TEST_CAPTURE_DIR="$CAPTURE" PATH="$MOCKDIR:$PATH" \
     bash "$REPO_ROOT/deploy/deploy_ec2.sh" >"$CAPTURE/stdout_$scenario.log" 2>&1
 }
@@ -174,6 +208,30 @@ ZIP="$REPO_ROOT/build/trustforge_app.zip"
 assert_zip_contains "$ZIP" "scripts/fetch_scheduler.py" "zip 封包含 scripts/fetch_scheduler.py"
 assert_zip_contains "$ZIP" "trustforge/web.py" "zip 封包仍含 trustforge/（既有回歸）"
 
+# IAM DynamoDB reconcile：首次建置這條路徑也要在 instance 分支之前跑過
+# put-role-policy，鎖兩個 table 各自的 ARN（不給 Resource "*"）。
+DDB_POLICY_FT=$(cat "$CAPTURE/iam_policy_first-time_trustforge-dynamodb.txt" 2>/dev/null || echo "")
+if [ -z "$DDB_POLICY_FT" ]; then
+  echo "  [FAIL] 首次建置：沒抓到 iam put-role-policy --policy-name trustforge-dynamodb"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$DDB_POLICY_FT" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-connector-cache" "首次建置：DynamoDB policy 鎖 cache table ARN"
+  assert_contains "$DDB_POLICY_FT" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-cost-ledger" "首次建置：DynamoDB policy 鎖 cost-ledger table ARN"
+  assert_contains "$DDB_POLICY_FT" "dynamodb:PutItem" "首次建置：DynamoDB policy 含 PutItem"
+fi
+
+# 排程 fetcher 同步驗證：首次建置這條路徑唯一的一次 ssm send-command 就是
+# verify_fetch_scheduler（沒有 update-in-place 那條主設定命令）。
+VERIFY_FT=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+if [ -z "$VERIFY_FT" ]; then
+  echo "  [FAIL] 首次建置：沒捕捉到 fetch-scheduler 同步驗證的 ssm send-command"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$VERIFY_FT" "systemctl start fetch-scheduler.service" "首次建置：同步觸發 systemctl start fetch-scheduler.service"
+  assert_contains "$VERIFY_FT" "fetch-scheduler.service ] && break" "首次建置：有等 unit 檔存在（容忍 user-data 還沒跑完）"
+  assert_contains "$VERIFY_FT" "journalctl -u fetch-scheduler" "首次建置：失敗時有印 journal"
+fi
+
 echo
 echo "== 場景 2：既有實例 running → update-in-place =="
 if run_deploy "update-in-place"; then
@@ -184,7 +242,28 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-SSM_RAW=$(cat "$CAPTURE/ssm_params.txt" 2>/dev/null || echo "")
+# IAM DynamoDB reconcile：update-in-place 這條路徑也要在 instance 分支之前
+# 跑過 put-role-policy（跟首次建置共用同一段程式碼，位置在分支判斷之前）。
+DDB_POLICY_UP=$(cat "$CAPTURE/iam_policy_update-in-place_trustforge-dynamodb.txt" 2>/dev/null || echo "")
+if [ -z "$DDB_POLICY_UP" ]; then
+  echo "  [FAIL] update-in-place：沒抓到 iam put-role-policy --policy-name trustforge-dynamodb"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$DDB_POLICY_UP" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-connector-cache" "update-in-place：DynamoDB policy 鎖 cache table ARN"
+  assert_contains "$DDB_POLICY_UP" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-cost-ledger" "update-in-place：DynamoDB policy 鎖 cost-ledger table ARN"
+fi
+
+# 排程 fetcher 同步驗證：update-in-place 這條路徑主設定 SSM 成功後，還會
+# 再送第二次 send-command（call2）同步跑 fetch-scheduler 驗證。
+VERIFY_UP=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
+if [ -z "$VERIFY_UP" ]; then
+  echo "  [FAIL] update-in-place：沒捕捉到 fetch-scheduler 同步驗證的第二次 ssm send-command"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$VERIFY_UP" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service"
+fi
+
+SSM_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
 if [ -z "$SSM_RAW" ]; then
   echo "  [FAIL] 沒捕捉到 SSM send-command 的 --parameters"
   FAIL=$((FAIL + 1))
@@ -290,6 +369,27 @@ UNITEOF
   else
     echo "  [SKIP] 本機 sed 非 GNU sed（macOS 內建 BSD sed 對 'a' 指令語法不同），
           略過 ensure-env 實跑驗證，已用 CI/EC2 實際跑的 GNU sed 4.10 (Homebrew gnu-sed) 驗過"
+  fi
+fi
+
+echo
+echo "== 場景 3：fetch-scheduler 同步驗證失敗（模擬 DynamoDB IAM 權限不足）=="
+# 模擬「主設定 SSM 成功，但實際跑 fetch-scheduler 卻失敗」（HIGH 修的核心情境：
+# 只 enable timer 不代表真的能寫進 DynamoDB）。mock 讓 call2（驗證那次）回
+# Failed，斷言整支 deploy_ec2.sh 必須非零結束、不能誤報成功。
+if run_deploy "scheduler-fail"; then
+  echo "  [FAIL] fetch-scheduler 驗證失敗時，deploy_ec2.sh 仍回報成功（exit 0）——不可接受"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] fetch-scheduler 驗證失敗時，deploy_ec2.sh 正確地非零結束"
+  PASS=$((PASS + 1))
+  if grep -qF "fetch-scheduler 同步驗證失敗" "$CAPTURE/stdout_scheduler-fail.log"; then
+    echo "  [PASS] 失敗訊息明確（含 fetch-scheduler 同步驗證失敗 字樣）"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] deploy_ec2.sh 非零結束了，但訊息沒有明確指出是 fetch-scheduler 驗證失敗："
+    cat "$CAPTURE/stdout_scheduler-fail.log"
+    FAIL=$((FAIL + 1))
   fi
 fi
 

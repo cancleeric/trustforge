@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # TrustForge → EC2 公開部署（純 AWS CLI，冪等）。
 # 給「真正跑在 AWS、有公開網址、不靠筆電」的 Live Demo，並完成 EC2 領 $20 credit。
-# 最小權限：instance role 只有 bedrock:InvokeModel + S3 讀(自家 bucket) + SSM。
+# 最小權限：instance role 有 bedrock:InvokeModel + S3 讀(自家 bucket) + SSM +
+# DynamoDB（鎖 trustforge-connector-cache / trustforge-cost-ledger 兩表 ARN）。
 # 無 SSH key pair（走 SSM Session Manager）。
 # ⚠️ 假設單人循序部署；不支援並行部署（TOCTOU：兩個行程同時偵測到「無既有
 # 實例」再各自 run-instances 的競態，本腳本未加跨程序鎖）。緩解措施：
@@ -25,7 +26,76 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-t3.micro}"
 
 echo "[ec2] 帳號 $ACCT / 區域 $REGION / 模型 ${MODEL:-<離線,無BEDROCK_MODEL_ID,不燒credit>}"
 
-# 1) 打包 + 上傳 S3 -----------------------------------------------------------
+# 排程 fetcher 同步驗證：部署後立刻真的跑一次 fetch-scheduler.service（經
+# SSM），用 exit code 判斷成功與否——不能只 enable timer 就當部署成功，否則
+# 像「IAM 角色少了 DynamoDB 權限」這種錯，會一路 exit1 到有人手動查 journal
+# 才發現，deploy 腳本卻回報成功。首次建置 user-data 可能還在跑，所以先等
+# unit 檔出現（逾時 200s）才 daemon-reload + systemctl start（Type=oneshot
+# 會同步等它跑完）；update-in-place 呼叫這函式時 unit 檔已經寫好，那段等待
+# 迴圈第一輪就會 break，等同無感。首次建置與 update-in-place 兩條路徑都會
+# 呼叫本函式（分別在各自流程最後）。
+verify_fetch_scheduler() {
+  local iid="$1"
+  local vcmdid
+  # shellcheck disable=SC2016  # 單引號內的 $(seq..)/$i 刻意留給遠端展開，不
+  # 是漏加雙引號（跟既有 healthz for-loop 那行同一個模式）。
+  vcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","for i in $(seq 1 40); do [ -f /etc/systemd/system/fetch-scheduler.service ] && break; sleep 5; done","if [ ! -f /etc/systemd/system/fetch-scheduler.service ]; then echo \"[ec2] fetch-scheduler.service 逾時仍未由 user-data 建立\" >&2; exit 1; fi","systemctl daemon-reload","if ! systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 同步執行失敗（DynamoDB IAM 權限可能不足，見 trustforge-dynamodb inline policy）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager; exit 1; fi","echo \"[ec2] fetch-scheduler 同步執行成功\""]' \
+    --query 'Command.CommandId' --output text)
+  if [ -z "$vcmdid" ] || [ "$vcmdid" = "None" ]; then
+    echo "[ec2] ❌ fetch-scheduler 驗證用 SSM send-command 未取得 CommandId，中止" >&2
+    exit 1
+  fi
+  aws ssm wait command-executed --region "$REGION" --command-id "$vcmdid" --instance-id "$iid" 2>/dev/null || true
+  local vstatus
+  vstatus=$(aws ssm get-command-invocation --region "$REGION" \
+    --command-id "$vcmdid" --instance-id "$iid" --query Status --output text)
+  if [ "$vstatus" != "Success" ]; then
+    echo "[ec2] ❌ fetch-scheduler 同步驗證失敗：CommandId=$vcmdid Status=${vstatus}（DynamoDB cache 權限或程式有誤，deploy 視為失敗，不可當成功回報）" >&2
+    exit 1
+  fi
+  echo "[ec2] ✅ fetch-scheduler 同步驗證成功（DynamoDB cache 讀寫權限正常）"
+}
+
+# 1) IAM 角色 + instance profile（最小權限）+ DynamoDB reconcile -------------
+# 放在「既有實例？」分支判斷之前的共用段：IAM 是從部署主機用 aws cli 直接做
+# （不經 SSM），首次建置跟 update-in-place 兩條路徑都會先跑過這裡，確保腳本
+# 對 DynamoDB 權限自足——不依賴「CEO 手動補過一次 IAM」這種外部前提。
+if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
+  echo "[ec2] 建 IAM 角色 ${ROLE}…"
+  aws iam create-role --role-name "$ROLE" --assume-role-policy-document \
+    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
+  aws iam attach-role-policy --role-name "$ROLE" \
+    --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null
+  aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
+    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
+      {\"Effect\":\"Allow\",\"Action\":\"bedrock:InvokeModel\",\"Resource\":[
+        \"arn:aws:bedrock:*::foundation-model/anthropic.*\",
+        \"arn:aws:bedrock:*:*:inference-profile/*anthropic*\"]},
+      {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"}]}" >/dev/null
+  aws iam create-instance-profile --instance-profile-name "$ROLE" >/dev/null
+  aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" >/dev/null
+  echo "[ec2] 等 instance profile 生效…"; sleep 12
+fi
+# DynamoDB 最小權限：每次部署都 reconcile（put-role-policy 覆寫同名 policy，
+# 冪等安全），鎖死兩個 table 各自的 ARN，不給萬用 Resource "*"。
+echo "[ec2] reconcile DynamoDB IAM inline policy（${ROLE}）…"
+aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-dynamodb \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:PutItem\",\"dynamodb:Scan\",\"dynamodb:Query\"],
+     \"Resource\":\"arn:aws:dynamodb:$REGION:$ACCT:table/trustforge-connector-cache\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\",\"dynamodb:Scan\"],
+     \"Resource\":\"arn:aws:dynamodb:$REGION:$ACCT:table/trustforge-cost-ledger\"}]}" >/dev/null
+# 表本身不歸這支腳本建（CDO/db-ops 範疇），但部署前先確認表存在，不存在就
+# 提早、明確地失敗，而不是讓 scheduler 之後每次 exit 1 卻沒人發現。
+for T in trustforge-connector-cache trustforge-cost-ledger; do
+  if ! aws dynamodb describe-table --region "$REGION" --table-name "$T" >/dev/null 2>&1; then
+    echo "[ec2] ❌ DynamoDB 表 $T 在 $REGION 不存在，cache/ledger 會失敗，中止部署" >&2
+    exit 1
+  fi
+done
+
+# 2) 打包 + 上傳 S3 -----------------------------------------------------------
 echo "[ec2] 打包應用 zip…"
 B=$(mktemp -d); ZIP="$(pwd)/build/trustforge_app.zip"; mkdir -p build
 cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
@@ -43,7 +113,7 @@ aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
 aws s3 cp "$ZIP" "s3://$BUCKET/trustforge_app.zip" --region "$REGION" >/dev/null
 echo "[ec2] 已上傳 s3://$BUCKET/trustforge_app.zip"
 
-# 2) 既有實例？→ update-in-place（重用現有 EC2，不 run-instances）-----------
+# 3) 既有實例？→ update-in-place（重用現有 EC2，不 run-instances）-----------
 # EIP 已附著在 tag Name=trustforge-demo 的既有實例上；只要不 terminate 該實例，
 # EIP 就會一直留在上面（stop/start 也保留附著，不用重綁）→ 查到就重用，不建新的。
 # 「查詢失敗（憑證/throttle/網路）」與「真的無既有實例」必須分開處理：查詢失敗
@@ -130,6 +200,9 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
     echo "[ec2] ❌ update-in-place 失敗：SSM CommandId=$CMDID Status=$SSM_STATUS" >&2
     exit 1
   fi
+  # 主要 config SSM 成功不代表 fetch-scheduler 真的能跑（IAM 權限不足只有實
+  # 際執行才會露餡）：再同步跑一次，非成功就讓整支腳本 exit 非零。
+  verify_fetch_scheduler "$IID"
   IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
   echo "[ec2] ✅ 既有實例已更新：$IID  公開 IP：${IP}（EIP 未動，模型=${MODEL:-<離線>}）"
@@ -138,24 +211,6 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   exit 0
 fi
 echo "[ec2] 無既有實例（tag Name=trustforge-demo，非 terminated）→ 首次建置流程"
-
-# 3) IAM 角色 + instance profile（最小權限）----------------------------------
-if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
-  echo "[ec2] 建 IAM 角色 ${ROLE}…"
-  aws iam create-role --role-name "$ROLE" --assume-role-policy-document \
-    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
-  aws iam attach-role-policy --role-name "$ROLE" \
-    --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null
-  aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
-    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
-      {\"Effect\":\"Allow\",\"Action\":\"bedrock:InvokeModel\",\"Resource\":[
-        \"arn:aws:bedrock:*::foundation-model/anthropic.*\",
-        \"arn:aws:bedrock:*:*:inference-profile/*anthropic*\"]},
-      {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"}]}" >/dev/null
-  aws iam create-instance-profile --instance-profile-name "$ROLE" >/dev/null
-  aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" >/dev/null
-  echo "[ec2] 等 instance profile 生效…"; sleep 12
-fi
 
 # 4) Security group（開 80 公開）---------------------------------------------
 VPC=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
@@ -264,6 +319,27 @@ if [ "$RECHECK_COUNT" -gt 1 ]; then
     --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")
   echo "[ec2] ⚠️  警告：建立後複查發現 ${RECHECK_COUNT} 個相符實例（tag Name=trustforge-demo），疑似並行部署造成重複，請人工確認並清理：${RECHECK_IDS}" >&2
 fi
+echo "[ec2] 等待 SSM agent 上線（供下面同步驗證 fetch-scheduler 用）…"
+SSM_READY=""
+for _try in $(seq 1 30); do
+  PING=$(aws ssm describe-instance-information --region "$REGION" \
+    --filters Key=InstanceIds,Values="$IID" \
+    --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "")
+  if [ "$PING" = "Online" ]; then
+    SSM_READY=1
+    break
+  fi
+  sleep 5
+done
+if [ -z "$SSM_READY" ]; then
+  echo "[ec2] ❌ 實例 $IID 已開機但 SSM agent 逾時仍未 Online，無法驗證 fetch-scheduler，中止" >&2
+  exit 1
+fi
+# 首次建置：不能只 enable --now timer 就當成功——user-data 裡 systemd unit
+# 都寫好之後，實際同步跑一次才知道 DynamoDB IAM 權限是否真的夠（這就是本次
+# 修的 HIGH：舊版腳本角色只有 Bedrock+S3，scheduler 會一路 exit 1 但 deploy
+# 卻回報成功）。
+verify_fetch_scheduler "$IID"
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
   --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
 echo "[ec2] ✅ 實例上線：$IID  公開 IP：$IP"
