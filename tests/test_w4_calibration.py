@@ -146,6 +146,33 @@ narrative。
     （對照組：正常多 BTC 來源，coin-scoped 貫穿修正後仍正常給出方向結論）。
   - 既有 652 綠 + 三態 demo（`pipeline.run(offline=True)` BTC 多源樣本
     normal、單一來源同源 2 句 abstain）不回歸確認。
+
+codex 對抗審第 7 輪 [HIGH]（coin-relevance 最後一條輸入路徑）：第 6 輪已把
+`coin_scoped_supporting` 貫穿 n_indep／`_direction()`／facts／key_basis／
+Step3 prompt 的 claim_refs，但 `agent.orchestrator.build_report` 傳給
+`detect_cross_source_signal` 的仍是完整、未經 coin 過濾的 `scored`（或
+fallback `brief.supporting + brief.contrarian`）——該函式只依 trust/kind
+篩、不檢查 coin，BTC 報告的跨源訊號可能由高信任他幣（如 ETH）客觀/新聞
+主張湊出 consensus/divergence，混進 Step3 prompt／`inferences`／
+`Report.cross_source_signal`，`supporting_claim_ids` 也可能指向未列入 BTC
+evidence 的他幣主張。第 6 輪的 ETH 回歸測試只查 facts/key_basis/
+market_judgment/direction，漏了這條輸入路徑。
+  - 修法：在呼叫 `detect_cross_source_signal` 前，用跟 `coin_scoped_
+    supporting`／calibration 同一份 `_matches_coin(doc, coin)` 規則過濾
+    `scored`（保留本幣相關 + 全市場通用，只排除明確他幣），過濾後的集合才
+    餵給 `detect_cross_source_signal`；函式本身的 trust/kind 篩選規格不動。
+  - 本輪新增 `test_e2e_high_trust_other_coin_sentiment_source_does_not_
+    flip_cross_source_signal`：BTC 客觀(2 源)+情緒(1 則全市場通用新聞)天然
+    構成 consensus 偏多，另混入 1 個高信任度更高、方向相反的 ETH 情緒源。
+    測試先用未過濾的 `scored` 直接呼叫 `detect_cross_source_signal` 證明
+    「前提成立」——修法前確實會被 ETH 蓋成 divergence、`supporting_
+    claim_ids` 含 ETH 主張；再驗證 `build_report()` 產出的
+    `report.cross_source_signal` 恢復 BTC-only 的 consensus、`supporting_
+    claim_ids` 只含 BTC/全市場通用主張、`inferences`（含 Step3 offline
+    narrative 回顯的 prompt 片段）不含「ETH」字樣，同時證明全市場通用新聞
+    （無任何幣別提及）仍正常計入（呼應 #32 精神，不誤排）。
+  - 既有 655 綠 + 三態 demo（`pipeline.run(offline=True)` BTC 多源樣本
+    normal、單一來源同源 2 句 abstain）不回歸確認。
 """
 from __future__ import annotations
 
@@ -771,6 +798,71 @@ def test_e2e_multi_btc_sources_normal_state_unaffected_by_coin_scoping():
         f"4 個獨立 BTC 來源應正常給出方向結論，實得 decision_state={report.decision_state}"
     )
     assert report.direction in ("偏多", "偏空", "中性")
+
+
+def test_e2e_high_trust_other_coin_sentiment_source_does_not_flip_cross_source_signal():
+    """codex 對抗審第 7 輪 e2e：BTC 客觀(2 源)+情緒(1 則全市場通用新聞)天然
+    構成 consensus 偏多；另混入 1 個信任度更高、方向相反的 ETH 情緒源。
+
+    前提檢查：不做 coin 過濾直接呼叫 `detect_cross_source_signal(scored)`
+    （即修法前 `build_report` 的行為）必須真的被 ETH 蓋成 divergence、
+    `supporting_claim_ids` 含 ETH 主張——否則這個場景無法證明漏洞存在。
+
+    修法後：`build_report()` 應恢復 BTC-only 的 consensus，
+    `supporting_claim_ids` 只含 BTC／全市場通用主張（不含 ETH），
+    `inferences`（含 Step3 offline narrative 回顯的 prompt 片段）不含
+    「ETH」字樣；且全市場通用新聞（未提及任何幣別）仍正常計入跨源訊號，
+    不因本輪修正被誤排（呼應 demo 可靠性 #32 精神）。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "price", "exch-b", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc(
+            "n1", "news", "coindesk-mkt", "多家 交易所 資金 湧入 情緒 樂觀 上漲。",
+            meta={"reputation": 0.9},
+        ),
+        _doc(
+            "e1", "news", "coindesk-eth", "ETH 遭遇 監管 壓力 市場 恐慌 下跌。",
+            meta={"reputation": 0.95},
+        ),
+    ]
+    scored = score(extract_claims(docs), now=1_000_000.0)
+    eth_claim_id = next(sc.claim.id for sc in scored if sc.claim.doc.id == "e1")
+    mkt_claim_id = next(sc.claim.id for sc in scored if sc.claim.doc.id == "n1")
+
+    # 前提檢查：未過濾 scored 直接送 detect_cross_source_signal，
+    # 場景須重現修法前的跨幣污染（否則測試場景本身無效）。
+    raw_signal = detect_cross_source_signal(scored)
+    assert raw_signal is not None and raw_signal["type"] == "divergence", (
+        f"前提失敗：場景未能重現修法前的跨幣污染，實得 {raw_signal}"
+    )
+    assert eth_claim_id in raw_signal["supporting_claim_ids"], (
+        "前提失敗：ETH 主張應出現在未過濾（修法前行為）的跨源訊號中"
+    )
+
+    brief = aggregate(scored, query="分析 BTC", coin="BTC")
+    report, _evidence = build_report(
+        query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE, brief=brief,
+        client=BedrockClient(offline=True),
+        log=ExecutionLog(now_fn=lambda: 1_000_000.0),
+        now_fn=lambda: 1_000_000.0,
+        scored=scored,
+    )
+    assert report.decision_state == "normal"
+    assert report.cross_source_signal is not None, "BTC-only 跨源訊號應仍正常運作，不應被誤中和成 None"
+    assert report.cross_source_signal["type"] == "consensus", (
+        f"coin 過濾後應恢復 BTC-only consensus，實得 {report.cross_source_signal}"
+    )
+    assert "ETH" not in report.cross_source_signal["summary"]
+    assert eth_claim_id not in report.cross_source_signal["supporting_claim_ids"], (
+        "supporting_claim_ids 不應指向未列入 BTC evidence 的他幣主張"
+    )
+    assert mkt_claim_id in report.cross_source_signal["supporting_claim_ids"], (
+        "全市場通用新聞（未提及任何幣別）不應被誤排出跨源訊號"
+    )
+    for inf in report.inferences:
+        assert "ETH" not in inf, f"inferences 不應含他幣內容：{inf}"
+    for f in report.facts:
+        assert "ETH" not in f, f"facts 不應含他幣內容：{f}"
 
 
 def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_marked():

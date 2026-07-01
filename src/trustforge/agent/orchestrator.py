@@ -16,7 +16,7 @@ from typing import Callable
 
 from ..bedrock import BedrockClient
 from ..execlog import ExecutionLog
-from ..ingestion.base import Document
+from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..trust.scoring import ScoredClaim, TrustedBrief
@@ -390,6 +390,13 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     未提供時（例如既有測試直接呼叫 `build_report(..., brief=brief)` 不給
     `scored`）退回 `brief.supporting + brief.contrarian`（既有行為，逐字向後
     相容，不影響既有合成 fixture 單元測試）。
+
+    W4 codex 對抗審第 7 輪 [HIGH]（coin-relevance 最後一條輸入路徑）：不論
+    來源是傳入的 `scored` 或上述 fallback，實際餵給
+    `detect_cross_source_signal` 前都會再用 `_matches_coin(doc, coin)` 篩
+    一次（保留本幣相關 + 全市場通用，只排除明確他幣），與 `aggregate()` 的
+    calibration 輸入／`coin_scoped_supporting` 用同一份規則，避免他幣高信任
+    客觀/新聞主張混入跨源訊號偵測。
     """
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
@@ -530,8 +537,24 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             stance_client=None if client.offline else client,
             stance_remaining_time_fn=log.remaining,
         )
+    # W4 codex 對抗審第 7 輪 [HIGH]（coin-relevance 最後一條輸入路徑）：
+    # `detect_cross_source_signal`（含其內部 `_detect_stance_pairs`）原本吃
+    # 完整、未經 coin 過濾的 `scored`（或 fallback `brief.supporting +
+    # brief.contrarian`）——只依 trust/kind 篩、不檢查 coin，導致 BTC 報告的
+    # 跨源訊號可能由高信任 ETH 等他幣客觀/新聞主張湊出 consensus/divergence，
+    # 混進 Step3 prompt／`inferences`／`Report.cross_source_signal`，
+    # `supporting_claim_ids` 也可能指向未列入 BTC evidence 的他幣主張。
+    # 修法：與 `coin_scoped_supporting`／calibration 用同一份
+    # `_matches_coin(doc, coin)` 規則先篩（保留本幣相關 + 全市場通用，只排除
+    # 明確他幣），再餵給 `detect_cross_source_signal`；函式本身的 trust/kind
+    # 篩選規格不動。
+    cross_signal_input = [
+        sc
+        for sc in (scored if scored is not None else brief.supporting + brief.contrarian)
+        if _matches_coin(sc.claim.doc, coin)
+    ]
     cross_signal = detect_cross_source_signal(
-        scored if scored is not None else brief.supporting + brief.contrarian,
+        cross_signal_input,
         stance_fn=stance_fn,
     )
     # 收割本步驟（Step2.5）可能產生的 stance 呼叫成本，避免漏記帳／殘留到下一輪。
