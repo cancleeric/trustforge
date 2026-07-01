@@ -424,28 +424,51 @@ def _max_distinct_in_rolling_window(
     return best, ordered[best_range[0]:best_range[1]]
 
 
-def _coordination_burst_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
-    """W3 指標 B：單源爆量偵測（確定性滾動 60 分鐘視窗）。
+def _distinct_text_count_in_range(
+    ordered: list[Claim], start_ts: float, end_ts: float
+) -> int:
+    """在依 ts 排序好的 claims 上，數出 `doc.ts ∈ [start_ts, end_ts)` 區間內的
+    相異 `c.text` 數（逐字去重）。與 `_max_distinct_in_rolling_window` 的視窗
+    定義一致（左閉右開），用於把「候選源爆量的那個具體時段」對齊到其他來源，
+    數他們在**同一段時間**內各自發了幾則——而不是他們自己歷史上不相干時段
+    的最大值。
+    """
+    return len({c.text for c in ordered if start_ts <= c.doc.ts < end_ts})
 
-    對每個來源，各自獨立在其依 ts 排序後的 claims 上用
+
+def _coordination_burst_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
+    """W3 指標 B：單源爆量偵測（確定性滾動 60 分鐘視窗，同窗對齊比較基準）。
+
+    對每個來源，先各自獨立在其依 ts 排序後的 claims 上用
     `_max_distinct_in_rolling_window` 找出**任一** `_BURST_WINDOW_SEC`（60
     分鐘）滾動視窗內的最大相異文本數（`c.text` 逐字去重——同一段文本重貼
-    不算多筆主張，見下方防呆）。
+    不算多筆主張，見下方防呆），記為該來源的候選爆量計數 `cnt` 與對應的
+    絕對時間區間 `[window_start, window_start + 60min)`。
 
-    判定：某來源的最大值 > **排除自己後**其餘各來源同一統計量（各自獨立
-    算出的最大值）的中位數 × `_BURST_RATIO`（3）才觸發——leave-one-out 中位數
-    （codex 對抗審 [HIGH] 修正：先前中位數誤含候選自己，2 來源灌水/正常
-    (100,1) 情境下 `median([100,1])=50.5`，`100 > 3×50.5=151.5` 為 False，
-    灌水來源在只有 1 個對照來源時會逃脫偵測；排除自己後，對照組退化成單一
-    來源本身的值，`100 > 3×1=3` 正確觸發）。
+    判定基準（baseline）：**把候選來源爆量的那個具體時間區間，對齊套用到
+    每個其他來源**，各自數他們在同一段時間內發了幾則相異主張——取這些
+    「同窗計數」的中位數（leave-one-out：候選自己不計入）× `_BURST_RATIO`
+    （3）當門檻，`cnt` 超過才觸發。
+
+    （codex 對抗審 [第 3 個 HIGH] 修正：先前 baseline 誤用「每個來源自己
+    歷史上的最大滾動窗計數」，即使該最大值發生在跟候選完全不相干的時段。
+    例：候選現在爆 8 則，另一來源 3 小時前也曾自己爆過 8 則、但在候選爆量
+    的當下窗口內其實只發了 0～1 則──用「別人歷史最大」當分母會讓
+    `8 ≤ 3×8` 不觸發，即使其他來源在候選爆量當下其實毫無動靜。改為
+    「同一時段大家多活躍」而非「別人歷史多活躍」，才是正確的協同異常
+    比較基準。）
+
+    （codex 對抗審 [HIGH #1] 修正仍保留：中位數排除候選自己再算——2 來源
+    灌水/正常情境下，若中位數誤含候選自己會造成數學上無法觸發。）
 
     防呆：
-    - 以 `c.text` 逐字去重後才計數（同一來源、逐字相同文本只算 1 筆）——與
-      `_iterate_source_reputation` 的 `unique_claims_by_source` 同一設計原則：
-      重複貼同一段文本不算「多筆主張」，避免既有『重複貼同一 claim N 次』
-      的反暴走回歸測試被本指標誤判為爆量。
-    - 整個資料池只有 1 個來源時（無其他來源可比較）整批跳過，避免用
-      「只有自己」當分母誤判。
+    - 以 `c.text` 逐字去重後才計數。
+    - 整個資料池只有 1 個來源時（無其他來源可比較）整批跳過。
+    - 同窗中位數 ≤ 0（其餘來源在候選爆量當下同窗內完全沒有主張）時保守
+      跳過不觸發——刻意不讓「基準為 0」讓任何 ≥1 則主張都被判定爆量
+      （避免把單一正常來源在安靜窗口內僅發 1 則就誤判為爆量；已知
+      的保守取捨，若候選源同時真的爆量且其餘來源在同窗內至少有
+      ≥1 則活動，中位數 ≥1 即可正常觸發）。
     """
     claims_by_source: dict[str, list[Claim]] = {}
     for c in all_claims:
@@ -454,29 +477,40 @@ def _coordination_burst_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
     if len(claims_by_source) < 2:
         return {}
 
+    ordered_by_source: dict[str, list[Claim]] = {
+        source: sorted(s_claims, key=lambda c: (c.doc.ts, c.id))
+        for source, s_claims in claims_by_source.items()
+    }
+
     max_count: dict[str, int] = {}
     max_window: dict[str, list[Claim]] = {}
-    for source, s_claims in claims_by_source.items():
-        ordered = sorted(s_claims, key=lambda c: (c.doc.ts, c.id))
+    window_bounds: dict[str, tuple[float, float]] = {}
+    for source, ordered in ordered_by_source.items():
         best, window_claims = _max_distinct_in_rolling_window(ordered, _BURST_WINDOW_SEC)
         max_count[source] = best
         max_window[source] = window_claims
+        start_ts = window_claims[0].doc.ts if window_claims else ordered[0].doc.ts
+        window_bounds[source] = (start_ts, start_ts + _BURST_WINDOW_SEC)
 
     flags: dict[str, list[str]] = {}
     window_min = int(_BURST_WINDOW_SEC // 60)
     for source, cnt in max_count.items():
-        others = [v for s, v in max_count.items() if s != source]
-        if not others:
+        if cnt <= 0:
             continue
-        values = sorted(others)
-        mid = len(values) // 2
-        median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2.0
+        start_ts, end_ts = window_bounds[source]
+        aligned = sorted(
+            _distinct_text_count_in_range(ordered, start_ts, end_ts)
+            for other_source, ordered in ordered_by_source.items()
+            if other_source != source
+        )
+        mid = len(aligned) // 2
+        median = aligned[mid] if len(aligned) % 2 else (aligned[mid - 1] + aligned[mid]) / 2.0
         if median <= 0 or cnt <= median * _BURST_RATIO:
             continue
         for c in max_window[source]:
             flags.setdefault(c.id, []).append(
                 f"協同:單源爆量(來源{source};{window_min}分鐘內{cnt}則相異主張,"
-                f"排除自身後其餘來源中位數{median:g}的{cnt / median:.1f}倍)"
+                f"同窗對照其餘來源中位數{median:g}的{cnt / median:.1f}倍)"
             )
     return flags
 

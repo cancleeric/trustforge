@@ -1136,6 +1136,65 @@ def test_w3_b_burst_spanning_hour_boundary_detected_via_rolling_window():
     assert flags.get("normal-2") is None, "正常單則來源不應被誤傷"
 
 
+def test_w3_b_baseline_uses_aligned_window_not_other_sources_historical_max():
+    """對抗性回歸（codex 對抗審 [burst 第 3 個 HIGH]）：比較基準必須對齊到候選
+    「現在」爆量的那個時間窗口，去看其他來源在同一時段各發了幾則，而不是
+    「其他來源自己歷史上不相干時段的最大值」。
+
+    情境：`old-spiker` 3 小時前自己也曾爆量 8 則（跟 `x-real-flooder` 現在
+    爆量的時段完全不相干），但在 `x-real-flooder` 現在爆量的當下同一窗口內，
+    `old-spiker` 只發了 1 則。若 baseline 誤用 old-spiker 的歷史最大值（8）
+    當中位數，`8 ≤ 3×8=24` 不會觸發，即使 old-spiker 當下其實幾乎無動靜；
+    改為同窗對齊比較後，old-spiker 在候選窗口內的『真實』同窗計數只有 1，
+    中位數應為 1，`8 > 3×1=3`，`x-real-flooder` 應正確觸發。
+
+    old-spiker 自己 3 小時前的歷史爆量，因為在那個時段完全沒有其他來源可
+    比較（同窗中位數為 0），依既有保守防呆不予回溯標記——這是刻意的取捨
+    （見 `_coordination_burst_flags` docstring），不是本測試要驗證的重點。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    claims = []
+    for i in range(8):
+        t = f"現爆{i} GHI幣 快訊 搶進 第{i}條"
+        claims.append(
+            Claim(id=f"now-flood-{i}", text=t,
+                  doc=_doc(f"now-flood-doc-{i}", "social", "x-real-flooder", t,
+                           ts=_BURST_BASE_TS + i * 60))
+        )
+
+    old_window_start = _BURST_BASE_TS - 3 * 3600  # 3 小時前，跟候選窗口完全不相干
+    for i in range(8):
+        t = f"舊爆{i} JKL幣 舊聞 快訊 第{i}條"
+        claims.append(
+            Claim(id=f"old-flood-{i}", text=t,
+                  doc=_doc(f"old-flood-doc-{i}", "social", "old-spiker", t,
+                           ts=old_window_start + i * 60))
+        )
+    claims.append(
+        Claim(id="old-spiker-recent", text="老玩家 近況 更新",
+              doc=_doc("old-spiker-recent-doc", "social", "old-spiker", "老玩家 近況 更新",
+                       ts=_BURST_BASE_TS + 30))
+    )
+
+    flags = _coordination_burst_flags(claims)
+
+    for i in range(8):
+        fl = flags.get(f"now-flood-{i}")
+        assert fl, (
+            "baseline 必須對齊候選當下窗口，不能被 old-spiker 3 小時前不相干的"
+            f"歷史爆量『掩護』；now-flood-{i} 仍應被偵測，實際: {flags}"
+        )
+        assert "x-real-flooder" in fl[0]
+        assert "8則" in fl[0]
+
+    for i in range(8):
+        assert flags.get(f"old-flood-{i}") is None, (
+            "old-spiker 3 小時前的歷史事件，因當下同窗內無其他來源可比較"
+            "（中位數為 0，保守不判），不應被回溯標記"
+        )
+    assert flags.get("old-spiker-recent") is None
+
+
 def test_w3_normal_multi_source_corroboration_not_flagged():
     """回歸：既有的正常多源佐證情境（onchain/news/social 三方各自轉述同一事實，
     onchain 為 OBJECTIVE_KINDS 豁免、news/social 僅 2 個非豁免來源，未達
