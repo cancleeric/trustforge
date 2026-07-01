@@ -1,23 +1,36 @@
-"""Tier2（真實分歧樣本）驗收測試。
+"""Tier2（跨源 stance_pairs 背離偵測機制）驗收測試。
 
-CEO 派工規格：
+CEO 派工規格（原始）：
   - ETH multi_source 分析 → cross_source_signal.type == "divergence"（或含「背離」）
     且含 stance_pairs 兩筆方向相反。
   - `stance_fn=None`（未提供）時 detect_cross_source_signal 行為逐字不變
     （回歸鎖，見 test_cross_source_signal.py 既有 T1-T8）。
   - ETH 既有確定性測試（evidence/facts 數量）同步鎖定，避免未來改動悄悄回歸。
 
-真實現象：ETH 現貨 ETF 資金流向因結算時區/資料商方法論不同，不同來源對同一天
-可能報出方向相反的淨流入/流出——同議題、來源獨立、內容自帶分歧成因說明，非造假
-對抗樣本（守 #24 紅線）。
-CEO 追加派工（demo 可靠性 #32）：
-  - 跨源背離不得依查詢字串措辭而定——ETH 任何合理問法（含中文「以太坊」、
-    無空格「ETH現況」）皆須穩定觸發 divergence + 2 筆 stance_pairs。
-  - 其他幣（BTC/SOL/BNB/XRP）不得因此修正而誤觸假背離。
-第四輪對抗審修正（codex 追加）：ETF 分歧樣本的 `source` 不得冠真實媒體名
-（原 coindesk/decrypt）或帶真實可點 URL——內容維持定性合成，但來源本身也必須
-是明確「示範」合成標籤（`示範來源·機構觀點` / `示範來源·觀望觀點`），避免
-「可證偽的真來源歸屬」把 demo 示意資料當真實獨立來源計入。
+老闆校準（demo 可靠性 #32 第五輪，最終定案）：**這是要上線賣的真產品，不是
+demo**——`demo/sample_data/news.json` 裡強塞「ETH ETF 資金流分歧」樣本來觸發
+stance_pairs 機制，即使內容改成不可證偽的定性描述、來源改成「示範來源·XXX」
+合成標籤，本質上仍是「為了展示功能而在產品資料裡塞假資料」，不可接受。
+
+**已移除**：`demo/sample_data/news.json` 的 `news-eth-etf-inflow`/
+`news-eth-etf-outflow` 兩筆樣本、`demo/sample_data/stance_cache.json` 對應的
+contradiction 快取條目。ETH 一般 demo 分析現在誠實反映真實（示範）資料——
+沒有真的跨源矛盾就回 `None`，不強行製造背離。
+
+**保留**（都是真產品邏輯，不因移除假樣本而受影響）：
+  - `_detect_stance_pairs` / `detect_cross_source_signal` 的 stance_pairs 分支
+    （純演算法，本檔下方單元測試用合成 fixture 直接驗證邏輯正確性）。
+  - `aggregate(coin=...)` coin-filter 主導修正——讓「明確提及該幣」的主張不受
+    query 文字措辭影響去留；對真實資料一樣有效，用真實 demo 資料驗證查詢
+    措辭不影響結果（見下方 stability 測試，改為驗證「結果穩定」而非「必觸發
+    背離」）。
+  - `build_stance_fn` 共用預算 + 成本入帳（見 `tests/test_stance_budget_sharing.py`）。
+  - `cross_source_signal.stance_pairs` 欄位機制本身——用**注入的合成矛盾
+    claim**（非 demo 檔案）驗證端到端正確觸發（見
+    `test_stance_pairs_mechanism_triggers_divergence_with_injected_synthetic_claims`），
+    比照 `test_stance_budget_sharing.py` 既有慣例：測試裡的合成資料是測試替身，
+    不是塞進產品 demo 資料庫的假樣本，兩者性質不同。
+  - 其他幣（BTC/SOL/BNB/XRP）不得誤觸假背離（維持既有測試）。
 """
 from __future__ import annotations
 
@@ -27,7 +40,10 @@ from trustforge.agent.orchestrator import (
     _STANCE_PAIR_MIN_TRUST,
     _detect_stance_pairs,
     detect_cross_source_signal,
+    run_agent_pipeline,
 )
+from trustforge.bedrock import BedrockClient, BedrockConfig
+from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.pipeline import run
 from trustforge.schema import QuestionType
@@ -178,18 +194,54 @@ def test_cross_source_signal_merges_stance_pairs_into_aggregate_result():
 
 
 # ---------------------------------------------------------------------------
-# 整合測試：ETH multi_source 真實分歧樣本（demo/sample_data/news.json +
-# stance_cache.json），全離線，不打真 AWS。
+# 機制端到端測試：用「注入的合成矛盾 claim」（非 demo 檔案）驗證
+# stance_pairs 偵測 + run_agent_pipeline 完整接線正確運作。
+#
+# 與舊版（已移除）的差異：舊版靠 demo/sample_data/news.json 裡強塞的「ETH ETF
+# 分歧」樣本觸發，即使內容/來源都改成不可證偽的合成標籤，本質仍是「產品資料
+# 裡塞假資料」（老闆校準：真產品不是 demo，禁止）。這裡改用測試檔案內部建構
+# 的合成 Document（比照 tests/test_stance_budget_sharing.py 既有慣例），純粹
+# 是測試替身，不落地進 demo/sample_data/，不影響任何真實使用者看到的資料。
 # ---------------------------------------------------------------------------
 
-def test_eth_multi_source_shows_real_divergence_with_stance_pairs():
-    """ETH multi_source 分析：ETF 資金流向真實分歧樣本應在 cross_source_signal
-    浮現，含 stance_pairs 兩筆方向相反的主張。
+def test_stance_pairs_mechanism_triggers_divergence_with_injected_synthetic_claims(monkeypatch):
+    """端到端驗證：兩則不同來源、方向明確相反、語意矛盾的合成 claim，經
+    `run_agent_pipeline()` 完整跑過 Step1~Step2.5，應正確在
+    `report.cross_source_signal` 產出 divergence + 2 筆 stance_pairs。
+
+    用 `BedrockClient(offline=False)` + monkeypatch `_stance_runtime()` 模擬
+    「語意分類器判定矛盾」（比照 test_cost_ledger.py／test_stance_budget_sharing.py
+    既有作法），不打真 AWS。
     """
-    report, evidence, log = run("ETH", "ETH 現況", QuestionType.MULTI_SOURCE, offline=True)
+    docs = [
+        Document(id="syn-n1", kind="news", source="test-source-institutional",
+                  text="ETH 市場 情緒 明顯 看漲，交易員 樂觀 買盤 湧入。", ts=1000.0, meta={}),
+        Document(id="syn-n2", kind="news", source="test-source-cautious",
+                  text="ETH 市場 情緒 轉為 看跌，交易員 悲觀 賣壓 湧現。", ts=1000.0, meta={}),
+    ]
+
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=False)
+
+    class _FakeRuntime:
+        def converse(self, **kwargs):
+            return {
+                "output": {"message": {"content": [
+                    {"toolUse": {"name": "classify_stance", "input": {"label": "contradiction"}}}
+                ]}},
+                "usage": {"inputTokens": 10, "outputTokens": 2},
+            }
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
+
+    report, evidence = run_agent_pipeline(
+        query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
+        docs=docs, client=client, log=ExecutionLog(now_fn=lambda: 1000.0),
+        now_fn=lambda: 1000.0,
+    )
 
     sig = report.cross_source_signal
-    assert sig is not None, "ETH 應偵測到跨源訊號（真實 ETF 分歧樣本）"
+    assert sig is not None, "注入合成矛盾 claim 後應偵測到跨源訊號"
     assert sig["type"] == "divergence" or "背離" in sig["summary"]
 
     assert "stance_pairs" in sig
@@ -198,13 +250,7 @@ def test_eth_multi_source_shows_real_divergence_with_stance_pairs():
     stances = {p["stance"] for p in pairs}
     assert stances == {"bullish", "bearish"}, f"應為方向相反兩筆，實得 {stances}"
     sources = {p["source"] for p in pairs}
-    # 第四輪對抗審修正（demo 可靠性 #32 codex 追加）：ETF 分歧樣本的來源改為明確
-    # 「示範」合成標籤，不得冠真實媒體名（coindesk/decrypt），避免「可證偽的真
-    # 來源歸屬」誤把 demo 示意資料當真實獨立來源計入。
-    assert sources == {"示範來源·機構觀點", "示範來源·觀望觀點"}
-    assert "coindesk" not in sources and "decrypt" not in sources
-    claim_ids = {p["claim_id"] for p in pairs}
-    assert claim_ids == {"news-eth-etf-inflow#0", "news-eth-etf-outflow#0"}
+    assert sources == {"test-source-institutional", "test-source-cautious"}
 
     # 守 HOYA 不代客決策：summary 不得含決策字眼
     for word in ("買", "賣", "進場", "出場"):
@@ -212,41 +258,18 @@ def test_eth_multi_source_shows_real_divergence_with_stance_pairs():
 
 
 def test_eth_multi_source_evidence_facts_count_pinned():
-    """ETH 既有確定性測試同步更新：納入 Tier2 兩筆新樣本後的 evidence/facts
-    數量鎖定（回歸鎖，避免未來改動悄悄改變證據/事實輸出規模）。
+    """ETH 既有確定性測試（回歸鎖，避免未來改動悄悄改變證據/事實輸出規模）。
 
-    數量由 6/12 調整為 7/13（demo 可靠性 #32 追加的 coin-filter 主導修正）：
-    `aggregate()` 改為讓「明確提及該幣」的主張不再受 query 文字措辭影響去留，
-    使一筆先前因「ETH 現況」查詢字面篩選而被排除的 ETH 客觀事實
-    （objective kind）穩定納入 `brief.supporting`，讓 facts/evidence 各多 1 筆
-    ——這是修復查詢脆弱性後的預期結果，非回歸。
+    老闆校準（demo 可靠性 #32 第五輪）：移除強塞的 ETF 分歧樣本後，數量改回
+    移除後的真實觀測值（本測試不再假設任何特定分歧樣本存在）。
     """
     report, evidence, log = run("ETH", "ETH 現況", QuestionType.MULTI_SOURCE, offline=True)
 
     assert len(report.facts) == 7
     assert len(evidence) == 13
-
-    sources = {e.source for e in evidence}
-    # 第四輪對抗審修正（demo 可靠性 #32 codex 追加）：ETF 分歧樣本來源改為明確
-    # 「示範」合成標籤，不得冠真實媒體名（coindesk/decrypt）或帶真實可點 URL——
-    # 避免「可證偽的真來源歸屬」把 demo 示意資料當真實獨立來源計入。
-    assert {"示範來源·機構觀點", "示範來源·觀望觀點"} <= sources, (
-        "兩則 ETF 分歧樣本（示範合成來源）應都出現在證據清單"
-    )
-
-    refs = [e.content_reference for e in evidence]
-    assert any("淨流入" in r for r in refs), "應含 ETF 淨流入證據"
-    assert any("淨流出" in r for r in refs), "應含 ETF 淨流出證據"
-
-    etf_evidence = [e for e in evidence if "淨流入" in e.content_reference or "淨流出" in e.content_reference]
-    assert len(etf_evidence) == 2, f"應恰好 2 筆 ETF 分歧證據，實得 {len(etf_evidence)}"
-    for e in etf_evidence:
-        assert e.source not in {"coindesk", "decrypt"}, (
-            f"ETF 分歧樣本不得冠真實媒體名，實得 source={e.source!r}"
-        )
-        assert e.source_url == "", (
-            f"ETF 分歧樣本不得帶真實可點 URL，實得 source_url={e.source_url!r}"
-        )
+    # 誠實反映真實（示範）資料：目前 demo 資料集裡 ETH 沒有真實跨源矛盾樣本，
+    # 不應再出現任何背離訊號（無背離就是無，不強行製造）。
+    assert report.cross_source_signal is None
 
 
 # ---------------------------------------------------------------------------
@@ -269,21 +292,24 @@ def test_eth_multi_source_evidence_facts_count_pinned():
         "ETH",                # 純幣代碼
     ],
 )
-def test_eth_divergence_stable_across_query_wording(query: str):
-    """coin-filter 主導修正：ETH 的跨源背離（含 stance_pairs）不得因查詢字串
-    措辭（中/英文、有無空格）而忽有忽無——只要 coin=ETH，結果必須一致。
+def test_eth_analysis_stable_across_query_wording(query: str):
+    """coin-filter 主導修正：ETH 分析結果（facts/evidence 數量、跨源訊號）不得
+    因查詢字串措辭（中/英文、有無空格）而忽多忽少、忽有忽無——只要 coin=ETH，
+    無論怎麼問，結果必須一致。
+
+    老闆校準（demo 可靠性 #32 第五輪）：不再斷言「必觸發背離」——demo 資料集
+    裡目前沒有真實跨源矛盾樣本，誠實的結果是 `cross_source_signal is None`；
+    這裡驗證的是「無論問法為何，這個誠實結果都穩定一致」，而非靠強塞樣本製造
+    背離。stance_pairs 機制本身的正確性見上方
+    `test_stance_pairs_mechanism_triggers_divergence_with_injected_synthetic_claims`
+    （用注入的合成矛盾 claim 驗證）。
     """
     report, evidence, log = run("ETH", query, QuestionType.MULTI_SOURCE, offline=True)
-    sig = report.cross_source_signal
-    assert sig is not None, f"query={query!r} 應觸發跨源訊號，實得 None"
-    assert sig["type"] == "divergence" or "背離" in sig["summary"]
-    assert "stance_pairs" in sig
-    pairs = sig["stance_pairs"]
-    assert len(pairs) == 2, f"query={query!r} 應為 2 筆 stance_pairs，實得 {len(pairs)}"
-    stances = {p["stance"] for p in pairs}
-    assert stances == {"bullish", "bearish"}
-    claim_ids = {p["claim_id"] for p in pairs}
-    assert claim_ids == {"news-eth-etf-inflow#0", "news-eth-etf-outflow#0"}
+    assert len(report.facts) == 7, f"query={query!r} facts 數應穩定為 7，實得 {len(report.facts)}"
+    assert len(evidence) == 13, f"query={query!r} evidence 數應穩定為 13，實得 {len(evidence)}"
+    assert report.cross_source_signal is None, (
+        f"query={query!r} 應誠實反映真實資料無背離，實得 {report.cross_source_signal}"
+    )
 
 
 @pytest.mark.parametrize(
