@@ -987,10 +987,36 @@ def test_w3_a_two_source_verbatim_wire_repost_not_flagged():
     assert flags == {}, f"2 家轉載同一通稿不應觸發協同 flag，實際: {flags}"
 
 
+def test_w3_a_three_plus_news_outlets_verbatim_wire_repost_not_flagged():
+    """對抗性回歸（codex 對抗審 [HIGH]）：3 家以上新聞媒體逐字/近似轉載同一份
+    官方通稿——即使涉及來源數 ≥ `_TEMPLATE_MIN_SOURCES`（3），過去只靠
+    Jaccard 門檻判斷會誤標為協同操縱，因為確定性相似度分數本身分不清
+    「合法通稿聯播」與「協同灌水」。修正後 `kind="news"` 不在
+    `_TEMPLATE_ELIGIBLE_KINDS`（只有 social/sentiment）內，整批直接排除在
+    模板比對之外，不應觸發任何協同 flag。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "reuters": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+        "apnews": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+        "bloomberg": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+        "coindesk": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+    }
+    claims = [
+        Claim(id=f"wire3-{src}", text=t, doc=_doc(f"d-{src}", "news", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    flags = _coordination_signals(claims)
+    assert flags == {}, (
+        f"≥3 家新聞媒體轉載同一通稿（kind=news）應因豁免清單不觸發協同 flag，實際: {flags}"
+    )
+
+
 def test_w3_a_objective_kinds_exempt_from_template_matching():
-    """防呆：OBJECTIVE_KINDS（price/price_live/onchain/regulatory/hoyabit）不納入
-    模板比對——即使 3 個 onchain 來源文字高度相似（客觀數據本來就該長得像），
-    也不應被誤判為協同操縱。"""
+    """防呆：只有 `_TEMPLATE_ELIGIBLE_KINDS`（social/sentiment）才納入模板比對，
+    客觀事實類（price/price_live/onchain/regulatory/hoyabit）一律跳過——即使
+    3 個 onchain 來源文字高度相似（客觀數據本來就該長得像），也不應被誤判為
+    協同操縱。"""
     from trustforge.trust.scoring import Claim, _coordination_signals
 
     texts = {
@@ -1003,7 +1029,48 @@ def test_w3_a_objective_kinds_exempt_from_template_matching():
         for src, t in texts.items()
     ]
     flags = _coordination_signals(claims)
-    assert flags == {}, f"onchain（OBJECTIVE_KINDS）不應納入模板比對，實際: {flags}"
+    assert flags == {}, f"onchain 不在 _TEMPLATE_ELIGIBLE_KINDS 內，不應納入模板比對，實際: {flags}"
+
+
+def test_w3_a_regulatory_kind_exempt_from_template_matching():
+    """對抗性回歸（codex 對抗審 [HIGH] 擴大豁免清單）：`kind="regulatory"`
+    現已明確排除在 `_TEMPLATE_ELIGIBLE_KINDS` 之外，3 個官方監管來源公告
+    高度相似（監管口徑本來就該一致）不應被誤判為協同操縱。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "sec-gov": "證券 主管機關 公告 加密貨幣 交易所 需 完成 牌照 申請 方可 營運",
+        "fca-uk": "證券 主管機關 公告 加密貨幣 交易所 需 完成 牌照 申請 方可 繼續 營運",
+        "mas-sg": "證券 主管機關 公告 加密貨幣 交易所 需 完成 牌照 申請 才可 營運",
+    }
+    claims = [
+        Claim(id=f"reg-{src}", text=t, doc=_doc(f"d-{src}", "regulatory", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    flags = _coordination_signals(claims)
+    assert flags == {}, f"regulatory 不在 _TEMPLATE_ELIGIBLE_KINDS 內，不應納入模板比對，實際: {flags}"
+
+
+def test_w3_a_three_social_sources_template_flood_still_triggers():
+    """對抗性回歸（收斂驗證）：豁免清單擴大後，`kind="social"` 的模板協同
+    灌水仍必須正常觸發——確認收斂修法沒有連社群協同偵測本身也一起弱化。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "tg-shill-a": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 卡位",
+        "tg-shill-b": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 進場",
+        "tg-shill-c": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 加倉",
+    }
+    claims = [
+        Claim(id=f"soc-{src}", text=t, doc=_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    flags = _coordination_signals(claims)
+    assert set(flags.keys()) == {c.id for c in claims}, (
+        f"3 個 social 來源模板灌水仍應觸發協同 flag，實際: {flags}"
+    )
+    for c in claims:
+        assert flags[c.id][0].startswith("協同:模板相似(")
 
 
 @pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)

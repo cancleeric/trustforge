@@ -314,12 +314,17 @@ def _direction_compatible(d1: str, d2: str) -> bool:
 # `raw = w["src"]*rep + w["corr"]*corr + w["rec"]*rec - w["manip"]*manip` 聚合公式，
 # 只是 `manip` 這一項的計算多算一種訊號（見 `_manipulation_penalty` 的 `extra_hits`）。
 
-# 指標 A 專用：客觀事實類 kind 本來就該長得像（同一價格/鏈上事件被多方獨立引用），
-# 數字/敘述重複是正常現象，不納入模板相似度比對，避免誤傷。刻意在本模組內獨立
-# 定義一份（值與 `agent.orchestrator.OBJECTIVE_KINDS` 逐字相同）：orchestrator 反過來
-# `from ..trust.scoring import ScoredClaim, TrustedBrief`，本模組若回頭 import
-# orchestrator 會造成循環 import。
-_TEMPLATE_EXEMPT_KINDS = frozenset({"price", "price_live", "onchain", "regulatory", "hoyabit"})
+# 指標 A 專用：只有社群類 kind（social/sentiment）才納入模板相似度比對，見下方
+# codex 對抗審修正說明。客觀事實類（price/onchain/...）本來就該長得像、新聞聯播
+# 同一通稿也本來就該長得像，皆非協同操縱訊號，一律不比對。
+_TEMPLATE_ELIGIBLE_KINDS = frozenset({"social", "sentiment"})
+# codex 對抗審 [HIGH]：3 家新聞逐字/近似轉載同一通稿（kind=news，先前非豁免）
+# 曾被誤標協同操縱——確定性相似度分數本身分不清「合法通稿聯播」與「協同
+# 灌水」，只能靠 kind 收斂。協同操縱灌水本質上是社群現象（telegram/reddit/
+# twitter 群），新聞聯播、官方/監管公告高相似是正常。改用**允許清單**（而非
+# 持續加長的豁免清單）：只有 social/sentiment 才納入模板比對，news/
+# regulatory/price/price_live/onchain/hoyabit 全數不比對，未來新增的 kind
+# 預設也不納入（更安全，不必每次都記得補豁免清單）。
 
 _TEMPLATE_JACCARD_THRESHOLD = 0.8  # 指標 A：模板相似度門檻（比 _corroboration 的 0.4 嚴格得多）
 _TEMPLATE_MIN_SOURCES = 3          # 指標 A：至少涉及幾個不同來源才觸發
@@ -347,12 +352,16 @@ def _coordination_template_flags(all_claims: list[Claim]) -> dict[str, list[str]
     （含涉入來源清單與最高 Jaccard 值，供 `Evidence.flags` 顯示）。
 
     防呆：
-    - `_TEMPLATE_EXEMPT_KINDS`（price/price_live/onchain/regulatory/hoyabit）
-      不納入比對——客觀數據類 claim 本來就該長得像，重複不代表協同造假。
-    - 需 ≥3 個獨立來源才觸發：2 家媒體逐字轉載同一份通稿（只有 2 個來源）
-      不觸發，避免把正常的通稿轉載誤判為協同操縱。
+    - **只有 `_TEMPLATE_ELIGIBLE_KINDS`（social/sentiment）納入比對**——
+      news/regulatory/price/price_live/onchain/hoyabit 全數跳過。協同操縱
+      灌水是社群現象；新聞聯播同一份通稿、官方/監管公告本來就該高度相似，
+      不是協同造假（codex 對抗審 [HIGH]：3 家新聞轉載同一通稿曾被誤標，
+      確定性相似度分數分不清「合法通稿聯播」與「協同灌水」，改用 kind
+      收斂而非只靠相似度門檻）。
+    - 需 ≥3 個獨立來源才觸發：2 家社群帳號模板灌水（只有 2 個來源）不觸發，
+      避免誤判。
     """
-    eligible = [c for c in all_claims if c.doc.kind not in _TEMPLATE_EXEMPT_KINDS]
+    eligible = [c for c in all_claims if c.doc.kind in _TEMPLATE_ELIGIBLE_KINDS]
     tokens = {c.id: (_normalize(c.text) - DOMAIN_STOP) for c in eligible}
 
     flags: dict[str, list[str]] = {}
