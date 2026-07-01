@@ -246,6 +246,39 @@ def test_dynamodb_ledger_read_all_paginates_and_converts_decimal_to_float():
     assert records[1]["calls"][0]["cost_usd"] == 0.002
 
 
+def test_dynamodb_ledger_read_all_keeps_integer_decimal_as_int():
+    """整數值的 Decimal（如 token 數）讀出要轉回 int，不能變成 700.0（fidelity nit）。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {
+                "run_id": "r1",
+                "ts": "t1",
+                "calls": [
+                    {
+                        "model": "m",
+                        "tokens_in": Decimal("700"),
+                        "tokens_out": Decimal("120"),
+                        "cost_usd": Decimal("0.0086"),
+                    }
+                ],
+            },
+        ],
+    }
+    d._table = mock_table
+
+    records = d.read_all()
+
+    call = records[0]["calls"][0]
+    assert call["tokens_in"] == 700
+    assert isinstance(call["tokens_in"], int)
+    assert call["tokens_out"] == 120
+    assert isinstance(call["tokens_out"], int)
+    assert call["cost_usd"] == 0.0086
+    assert isinstance(call["cost_usd"], float)
+
+
 def test_get_ledger_default_is_jsonl(monkeypatch):
     monkeypatch.delenv("COST_LEDGER_BACKEND", raising=False)
     assert isinstance(get_ledger(), JsonlLedger)

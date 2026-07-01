@@ -146,7 +146,8 @@ class DynamoDBLedger(Ledger):
 
     表結構（CEO gated 建表時採用）：PK=`run_id`（S）、SK=`ts`（S，ISO8601）。
     寫入的 record 若沒有 `run_id`，用 `ts` + `coin` 組一個穩定 id 頂上。
-    DynamoDB 不吃 Python `float`，寫入前遞迴轉 `Decimal`；讀出時再轉回 `float`，
+    DynamoDB 不吃 Python `float`，寫入前遞迴轉 `Decimal`；讀出時再轉回原本的
+    數字型別（整數值如 token 數轉回 `int`，非整數值如成本轉回 `float`），
     格式與 `JsonlLedger.read_all()` 保持一致，呼叫端不用分辨 backend。
     """
 
@@ -182,8 +183,15 @@ class DynamoDBLedger(Ledger):
 
     @staticmethod
     def _from_decimal(value: Any) -> Any:
-        """讀出時把 `Decimal` 轉回 `float`，格式對齊 `JsonlLedger`。"""
+        """讀出時把 `Decimal` 轉回 Python number，格式對齊 `JsonlLedger`。
+
+        整數值（如 token 數）轉回 `int`，非整數值（如成本）才轉 `float`——
+        DynamoDB 一律用 `Decimal` 存數字，若不分整數/小數會把 `tokens_in=700`
+        讀回變成 `700.0`，跟 JsonlLedger（原生 JSON int）不一致。
+        """
         if isinstance(value, Decimal):
+            if value == value.to_integral_value():
+                return int(value)
             return float(value)
         if isinstance(value, dict):
             return {k: DynamoDBLedger._from_decimal(v) for k, v in value.items()}
