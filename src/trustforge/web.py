@@ -684,8 +684,15 @@ def _render_cross_signal(signal: dict) -> str:
     summary 與所有字串一律 html.escape（縱深防禦）。
 
     背離（`type == "divergence"`）且能從 `signal` 推導出雙方陣營（見
-    `_cross_signal_sides`）時，額外附加結構化雙欄 BULLISH/BEARISH 對照 +
-    Δ%（依雙方訊號筆數差推導，非價格漲跌幅，純渲染層算術，不新增資料流）。
+    `_cross_signal_sides`）時，額外附加結構化雙欄 BULLISH/BEARISH 對照，並標示
+    誠實的「看漲 N 來源 · 看跌 M 來源」筆數對比（純渲染層計數，不新增資料流）。
+
+    刻意不做「Δ%」這類量化幅度徽章：`stance_pairs`/聚合方向是去重矛盾集，
+    未按信任加權，筆數差（如 2:1）換算成百分比會讓使用者誤把「來源數量的
+    偶然性」當成可比的市場/背離強度——這是假精度，違反 #24 不造假原則
+    （codex provenance 準確性 review 第二輪修正，PR #35）。要做真正的量化
+    背離強度是正式工作，非本輪範圍；現在只誠實顯示筆數。
+
     推不出雙方（如舊資料 fixture 只有 summary）→ 保留舊版純文字渲染，功能零損。
     """
     e = html.escape
@@ -709,8 +716,7 @@ def _render_cross_signal(signal: dict) -> str:
     if sig_type == "divergence":
         bullish, bearish = _cross_signal_sides(signal)
         if bullish or bearish:
-            total = len(bullish) + len(bearish)
-            delta_pct = round(abs(len(bullish) - len(bearish)) / total * 100) if total else 0
+            count_label = f"看漲 {len(bullish)} 來源 &middot; 看跌 {len(bearish)} 來源"
 
             def _side_body(items: list[dict]) -> str:
                 if not items:
@@ -741,7 +747,7 @@ def _render_cross_signal(signal: dict) -> str:
                 f'<div style="margin:.5rem 0 0">'
                 f'<span class="tf-div-tag" style="color:#f85149;background:rgba(248,81,73,.12);'
                 f'border:1px solid rgba(248,81,73,.4)" '
-                f'title="依雙方訊號筆數差推導，非價格漲跌幅">CONFLICT &middot; &Delta;{delta_pct}%</span>'
+                f'title="各陣營來源數量，非量化背離幅度/價格漲跌">{count_label}</span>'
                 f'</div>'
                 f'<div class="tf-div-grid">'
                 f'{bull_html}'

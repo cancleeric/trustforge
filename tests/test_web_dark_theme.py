@@ -410,7 +410,8 @@ def test_evidence_list_tier_pill_escapes_xss_in_source():
 
 
 def test_cross_signal_divergence_renders_bullish_bearish_columns_via_stance_pairs():
-    """背離 + stance_pairs → 結構化雙欄 BULLISH/BEARISH + Δ%。"""
+    """背離 + stance_pairs → 結構化雙欄 BULLISH/BEARISH，附誠實來源數對比
+    （不做假精度的量化 Δ% 徽章，見 codex provenance review 第二輪修正）。"""
     signal = {
         "type": "divergence",
         "summary": "客觀與情緒方向相反",
@@ -424,9 +425,30 @@ def test_cross_signal_divergence_renders_bullish_bearish_columns_via_stance_pair
     assert "BULLISH" in htmlout
     assert "BEARISH" in htmlout
     assert "tf-div-grid" in htmlout
-    assert "&Delta;" in htmlout, "應含 Δ% 徽章"
+    assert "看漲 1 來源" in htmlout and "看跌 1 來源" in htmlout, "應顯示誠實的來源數對比"
     assert "ETH 現價上漲" in htmlout
     assert "ETH 社群看跌" in htmlout
+
+
+def test_cross_signal_divergence_never_shows_fabricated_delta_percentage():
+    """核心回歸鎖：背離雙欄絕不可出現 Δ%／百分比幅度徽章——stance_pairs 是
+    未加權去重矛盾集，筆數差換算成百分比等於假精度（codex MEDIUM，PR #35）。"""
+    signal = {
+        "type": "divergence",
+        "summary": "s",
+        "supporting_claim_ids": [],
+        "stance_pairs": [
+            {"source": "a", "stance": "bullish", "claim_id": "c1", "text": "t1"},
+            {"source": "b", "stance": "bullish", "claim_id": "c2", "text": "t2"},
+            {"source": "c", "stance": "bearish", "claim_id": "c3", "text": "t3"},
+        ],
+    }
+    htmlout = web._render_cross_signal(signal)
+    assert "&Delta;" not in htmlout, "不應出現 Δ 符號"
+    assert "Δ" not in htmlout
+    assert "CONFLICT" not in htmlout
+    assert "%" not in htmlout, "不應出現任何百分比幅度徽章"
+    assert "看漲 2 來源" in htmlout and "看跌 1 來源" in htmlout
 
 
 def test_cross_signal_divergence_renders_columns_via_aggregate_directions():
