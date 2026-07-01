@@ -770,3 +770,79 @@ def test_duplicate_high_trust_claim_heterogeneous_via_public_api():
             f"公開 API 層級 source={source}: 1 次 vs 20 次重複貼文的動態信譽應相同，"
             f"實際: {finals_once} vs {finals_20x}"
         )
+
+
+# codex 對抗審修正（第 4 輪 HIGH，PR #29 review，跨 process 確定性）
+
+
+def test_iterate_source_reputation_deterministic_across_pythonhashseed():
+    """[第 4 輪 HIGH] `agree_union_of`/`contra_union_of` 是 set，其迭代順序受
+    `PYTHONHASHSEED` 影響；配合浮點加法無結合律，理論上同一輸入在不同 process
+    可能得到不同的 net/agreement_score/SR，甚至跨過
+    `REPUTATION_CONVERGENCE_EPS` 影響收斂輪數。用兩個不同的 `PYTHONHASHSEED`
+    （0 與 1）各起一個子 process 跑同一份輸入的 `score(dynamic_reputation=True)`，
+    斷言完整 SR（`trust`）與 `reputation_trace` 逐字相等（bit-for-bit）。"""
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    src_dir = repo_root / "src"
+
+    script = """
+import json
+from trustforge.ingestion.base import Document
+from trustforge.trust.scoring import extract_claims, score
+
+
+def _doc(id, kind, source, text, ts=1.0):
+    return Document(id=id, kind=kind, source=source, text=text, ts=ts)
+
+
+shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+docs = [
+    _doc("ph-a", "onchain", "glassnode", shared),
+    _doc("ph-b", "news", "coindesk", shared),
+    _doc("ph-c", "regulatory", "sec-filing", shared),
+    _doc("ph-d", "hoyabit", "hoyabit-x", shared),
+    _doc("ph-e", "social", "x-analyst", shared),
+    _doc("ph-f", "news", "bloomberg", shared),
+    _doc("ph-g", "onchain", "nansen", shared),
+]
+claims = extract_claims(docs)
+scored = score(claims, now=1.0, dynamic_reputation=True)
+out = {
+    sc.claim.id: {"trust": sc.trust, "reputation_trace": sc.reputation_trace}
+    for sc in scored
+}
+print(json.dumps(out, sort_keys=True))
+"""
+
+    def _run_with_seed(seed: str) -> dict:
+        env = {"PYTHONHASHSEED": seed, "PATH": __import__("os").environ.get("PATH", "")}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(repo_root),
+            env={**env, "PYTHONPATH": str(src_dir)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, (
+            f"PYTHONHASHSEED={seed} 子程序執行失敗：\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        return json.loads(result.stdout)
+
+    out_seed0 = _run_with_seed("0")
+    out_seed1 = _run_with_seed("1")
+    out_seed42 = _run_with_seed("42")
+
+    assert out_seed0 == out_seed1, (
+        "PYTHONHASHSEED=0 與 PYTHONHASHSEED=1 下的 SR/reputation_trace 不相等：\n"
+        f"seed=0: {out_seed0}\nseed=1: {out_seed1}"
+    )
+    assert out_seed0 == out_seed42, (
+        "PYTHONHASHSEED=0 與 PYTHONHASHSEED=42 下的 SR/reputation_trace 不相等：\n"
+        f"seed=0: {out_seed0}\nseed=42: {out_seed42}"
+    )

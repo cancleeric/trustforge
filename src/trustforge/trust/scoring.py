@@ -597,10 +597,21 @@ def _iterate_source_reputation(
         # 加總一次，不隨該 source 名下 claim 數量重複計票；[HIGH-2] `_stable_sigmoid`
         # 對 net 做 clamp，杜絕極端情境下 `math.exp` 溢位崩潰（雙保險：去重後 net
         # 本身也已有界，clamp 是額外防線）。
+        #
+        # [第 4 輪 HIGH，codex 對抗審] `agree_union_of[s]`/`contra_union_of[s]` 是
+        # **set**，其迭代順序取決於元素（字串）的 hash 值，而字串 hash 在不同
+        # process 間會被 `PYTHONHASHSEED` 隨機化；加上浮點加法不滿足結合律，同一
+        # 輸入在不同 process 可能得到不同的 net（甚至跨過
+        # `REPUTATION_CONVERGENCE_EPS`、導致收斂輪數/最終 SR 不同）。修正：
+        # 對這兩個 set 一律先 `sorted()` 固定成確定性順序，再用 `math.fsum`
+        # （不受加總順序影響的精確加總）取代一般 `sum()`，確保同一輸入在任何
+        # process / PYTHONHASHSEED 下都得到逐位元相同的結果。
         new_sr: dict[str, float] = {}
         for s in claims_by_source:
-            net = sum(avg_temp_by_source.get(s2, 0.5) for s2 in agree_union_of[s]) - sum(
-                avg_temp_by_source.get(s2, 0.5) for s2 in contra_union_of[s]
+            net = math.fsum(
+                avg_temp_by_source.get(s2, 0.5) for s2 in sorted(agree_union_of[s])
+            ) - math.fsum(
+                avg_temp_by_source.get(s2, 0.5) for s2 in sorted(contra_union_of[s])
             )
             agreement_score = _stable_sigmoid(net)
             a = alpha_of[s]
