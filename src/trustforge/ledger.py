@@ -39,11 +39,23 @@ PRICING: dict[str, tuple[float, float]] = {
     "apac.anthropic.claude-haiku-4-5": (1.0, 5.0),
     # 待 AWS 官網確認：競賽現場（8/1）公告正式模型 id 與定價後需更新此暫值。
     "apac.anthropic.claude-sonnet-4-6": (3.0, 15.0),  # 待 AWS 官網確認
+    # W1.5（#15）+ codex 審查發現的 MEDIUM 修正：bedrock.py 預設 stance_model_id
+    # 已改用 `au.` region 前綴 + 帶日期/版本後綴的完整 id，跟這裡舊有的
+    # `apac.anthropic.claude-haiku-4-5` 精確 key 對不上，導致 estimate_cost()
+    # 精確查找失敗 → 真實呼叫成本被悄悄記成 $0，掩蓋支出。價格同 Haiku 4.5。
+    "au.anthropic.claude-haiku-4-5-20251001-v1:0": (1.0, 5.0),
 }
 
 
 def estimate_cost(model_id: str | None, tokens_in: int, tokens_out: int) -> float:
-    """依 `PRICING` 估算單次呼叫成本（USD）。model_id 為 None/未知 → 0，不 raise。"""
+    """依 `PRICING` 估算單次呼叫成本（USD）。model_id 為 None/未知 → 0，不 raise。
+
+    刻意**只做精確查表**，不做子字串/正規化比對（codex 審查發現：先前加過的
+    「model id 含 haiku-4-5/sonnet-4-6 關鍵字就套價」子字串 fallback 太鬆，
+    `vendor.fake-haiku-4-5` 這種非法/山寨 id 也會被誤套 Haiku 價，違反
+    「unknown model → 0」的精確契約）。我們的 model id 自己可控，換 region/
+    版本時直接在 `PRICING` 明確加一個 key 即可，不靠模糊比對猜。
+    """
     if not model_id:
         return 0.0
     rate = PRICING.get(model_id)

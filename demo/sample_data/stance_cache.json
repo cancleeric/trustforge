@@ -6,5 +6,33 @@
   "[\"institutional adoption continues rising despite short-term regulatory caution.\",\"institutional adoption continues rising steadily this quarter.\"]": {
     "label": "entailment",
     "version": "v1"
+  },
+  "[\"大額 btc 轉入 交易所，流入 急增 引發 賣壓，比特幣 走低\",\"過去 4 小時 有 15,200 btc 轉入 交易所，賣壓 流入 急增\"]": {
+    "label": "entailment",
+    "version": "v1"
+  },
+  "[\"btc 大額 轉入 交易所 流入 急增，賣壓 信號 明確，短線 謹慎\",\"過去 4 小時 有 15,200 btc 轉入 交易所，賣壓 流入 急增\"]": {
+    "label": "entailment",
+    "version": "v1"
+  },
+  "[\"btc 大額 轉入 交易所 流入 急增，賣壓 信號 明確，短線 謹慎\",\"大額 btc 轉入 交易所，流入 急增 引發 賣壓，比特幣 走低\"]": {
+    "label": "entailment",
+    "version": "v1"
+  },
+  "[\"大額 btc 轉入 交易所，流入 急增 引發 賣壓，比特幣 走低\",\"市場 恐慌，btc 大額 轉入 交易所 賣壓 急增，散戶 跌破 割肉 出場\"]": {
+    "label": "entailment",
+    "version": "v1"
+  },
+  "[\"btc 大額 轉入 交易所 流入 急增，賣壓 信號 明確，短線 謹慎\",\"市場 恐慌，btc 大額 轉入 交易所 賣壓 急增，散戶 跌破 割肉 出場\"]": {
+    "label": "entailment",
+    "version": "v1"
+  },
+  "[\"eth 近期成交量相對區間初期變化 -28%\",\"以太坊 質押 率 突破 28%，機構 需求 推升 eth 長線 看漲\"]": {
+    "label": "neutral",
+    "version": "v1"
+  },
+  "[\"sec 調查 eth 質押 服務 監管 風險 升高，市場 情緒 看空 賣壓 下挫 加劇，值得 關注\",\"美國 sec 對 以太坊 質押 服務 展開 正式 調查，eth 短期 市場 情緒 看空，賣壓 下挫 風險 升高\"]": {
+    "label": "entailment",
+    "version": "v1"
   }
 }

@@ -52,6 +52,28 @@ def test_estimate_cost_none_model_returns_zero():
     assert estimate_cost(None, 1000, 1000) == 0.0
 
 
+def test_estimate_cost_default_stance_model_id_is_nonzero_and_correct():
+    """codex 審查發現的 MEDIUM 修正：bedrock.py 預設 `stance_model_id`
+    （`au.anthropic.claude-haiku-4-5-20251001-v1:0`）必須能在 `PRICING` 精確
+    查到，真實 stance 呼叫的成本不可再被悄悄記成 $0。"""
+    cost = estimate_cost("au.anthropic.claude-haiku-4-5-20251001-v1:0", 700, 33)
+    assert cost > 0
+    assert cost == round(700 / 1_000_000 * 1.0 + 33 / 1_000_000 * 5.0, 6)
+
+
+def test_estimate_cost_lookalike_unknown_model_id_still_returns_zero():
+    """codex 二次審查發現：先前的子字串正規化 fallback 太鬆——
+    `vendor.fake-haiku-4-5` 這種內含關鍵字但根本不是合法 model id 的字串，
+    也會被誤套 Haiku 價格，違反「unknown model → 0」的精確契約。移除子字串
+    fallback、改回精確查表後，這種 lookalike id 必須仍然回 0。"""
+    assert estimate_cost("vendor.fake-haiku-4-5", 100, 100) == 0.0
+
+
+def test_estimate_cost_truly_unknown_model_still_returns_zero():
+    """既有行為不回歸：完全不含任何已知關鍵字的 model id 仍應回 0，不誤套價格。"""
+    assert estimate_cost("some-totally-unrelated-model-id", 1_000_000, 1_000_000) == 0.0
+
+
 # ---------------------------------------------------------------------------
 # execlog.record_llm_cost()
 # ---------------------------------------------------------------------------
