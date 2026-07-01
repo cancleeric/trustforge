@@ -21,6 +21,9 @@ echo "[ec2] 帳號 $ACCT / 區域 $REGION / 模型 $MODEL"
 echo "[ec2] 打包應用 zip…"
 B=$(mktemp -d); ZIP="$(pwd)/build/trustforge_app.zip"; mkdir -p build
 cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
+GIT_VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+printf 'VERSION = "%s"\n' "$GIT_VER" > "$B/trustforge/_version.py"
+echo "[ec2] 版號 = $GIT_VER"
 ( cd "$B" && zip -qr "$ZIP" trustforge data demo -x '*/__pycache__/*' ); rm -rf "$B"
 
 aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
