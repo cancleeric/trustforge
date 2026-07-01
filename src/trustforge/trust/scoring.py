@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document, _mentions_coin
+from ..ingestion.base import Document, _matches_coin, _mentions_coin
 from .stance_cache import cached_stance_fn
 
 # W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
@@ -144,7 +144,33 @@ class TrustedBrief:
     query: str
     supporting: list[ScoredClaim]      # 高信任、支撐主流結論
     contrarian: list[ScoredClaim]      # 低信任 / 反方，供反方證據
-    confidence: float                  # 整體信心（0–1）
+    confidence: float                  # 整體信心（0–1，支撐主張 trust 的裸加權均值）
+    # W4：校準後信心（0–1）。由 `aggregate()` 用 `_evidence_strength()`
+    # （綜合獨立來源數/kind 多元度/佐證對反方優勢比例/裸信心，見該函式上方
+    # 模組註解的設計說明——codex 對抗審 [HIGH] 修正：不能只校準裸均值，
+    # 因為裸均值恆為 0 或 >=support_threshold，永遠進不了中段「低信心」帶）
+    # 算出能真正跨越 [0, 1] 的證據強度指標，再用 `_calibrate_confidence()`
+    # （硬編分位數映射表，見該函式上方誠實聲明）做最後一層保守修正。供
+    # `agent.orchestrator` 的三態 abstain 判斷使用。**保留** `confidence`
+    # 裸值供對照/既有呼叫端相容——不砍舊欄位。預設 0.0：只有透過
+    # `aggregate()` 產生的 brief 才會是真正校準值；測試直接手動建構
+    # `TrustedBrief(...)` 不傳此欄位時維持逐字向後相容（未校準 -> 0.0，
+    # 呼叫端若讀取此欄位務必經由 aggregate() 取得有意義的值）。
+    calibrated_confidence: float = 0.0
+    # W4 codex 對抗審第 6～8 輪（coin-relevance 收斂史，見 `aggregate()`
+    # docstring 完整說明）：第 6/7 輪先後用「額外欄位」（`coin_scoped_
+    # supporting`）＋「呼叫端各自重新過濾」（`build_report` 的
+    # `cross_signal_input`）修補 facts/`_direction()`/cross_source_signal
+    # 等單點漏洞，但這種「piecemeal」修法本質上治標不治本——只要還有一個
+    # report-facing 欄位是從「未過濾的 supporting/contrarian」算出來的
+    # （例如 `contrarian` 輸出、裸 `confidence` 顯示、`_derive_limits`），
+    # 就會被抓出下一個漏洞。第 8 輪根治：`aggregate(coin=)` 直接讓
+    # `supporting`／`contrarian`／`confidence` 三者本身就是 coin-scoped
+    # 的（`_matches_coin` 篩過，保留本幣相關＋全市場通用，只排除明確他幣）
+    # ——不再需要額外欄位；已移除 `coin_scoped_supporting`（第 6/7 輪引入，
+    # 第 8 輪起併入 `supporting` 本身，不再單獨存在）。`agent.orchestrator.
+    # build_report` 現在直接讀 `brief.supporting`/`brief.contrarian`/
+    # `brief.confidence` 即可拿到已 coin-scoped 的資料，不必再各自過濾。
 
     def provenance(self) -> list[dict]:
         """溯源鏈：每個被採用主張的來源與分數。"""
@@ -1101,6 +1127,134 @@ def score(
     return out
 
 
+# --- W4：信心校準（確定性、免 LLM）---------------------------------------
+# codex 對抗審第 1 輪 [HIGH] 修正：原第一版直接把「裸加權均值 confidence」
+# 塞進分位數映射表——但 `confidence` 定義上只取 `trust >= support_threshold`
+# （預設 0.50）的 supporting 均值，數學上**恆為 0（無 supporting）或
+# >=0.50（有 supporting）**，永遠不可能落在 (0, 0.50) 之間。若映射表在
+# >=0.40 是 identity，校準值就永遠進不了 [0.35, 0.5) 的「低信心」帶——
+# 三態在真實 `aggregate()` 輸出下只剩「空支撐 abstain」與「正常」兩態，
+# 低信心態不可達，是假的三態。
+#
+# 修法：不要直接校準「裸均值」，改為先用既有 aggregate 資料算一個**能真正
+# 跨越 [0, 1] 的證據強度綜合指標**（`_evidence_strength`），確定性、免
+# LLM、純用已算好的 supporting/contrarian 清單，不新增資料源、不呼叫模型：
+#   - trust：supporting 的裸加權均值（原 `confidence`）——證據本身的品質。
+#   - indep：獨立來源數。只有 1 個來源＝完全沒有交叉佐證，給 0 分；
+#     達到 `_INDEP_SOURCE_SATURATION`（4）個以上獨立來源給滿分，中間線性
+#     內插。1 源 vs 6 源佐證的信心本該天差地遠，這項讓它反映在數字上。
+#   - diversity：supporting 涵蓋的來源類型（kind）數。同理，只有 1 種
+#     kind（如全部都是 news）給 0 分，達到 `_KIND_DIVERSITY_SATURATION`
+#     （3）種以上給滿分。
+#   - dominance：supporting 相對 contrarian 的證據優勢比例
+#     `n_supporting / (n_supporting + n_contrarian)`——佐證證據被反方
+#     證據夾擊得越兇，這項越低。
+# 四項各自 clamp 在 [0, 1]，以 `_STRENGTH_WEIGHTS`（加總為 1.0）做加權
+# 平均得到 `evidence_strength`，本身已是能自然分布在整個 [0, 1] 的指標
+# （單源、無佐證、被反方夾擊的弱證據會落在低段；多源、多元 kind、佐證
+# 壓倒反方的強證據會落在高段）。
+#
+# 再用 `_CALIBRATION_TABLE`（硬編分位數映射表，比照 `_MANIP_PATTERNS`
+# 寫死在程式碼、可版控可審，不是訓練出來的黑箱模型）對這個綜合指標做
+# 最後一層保守修正，得到 `calibrated_confidence`。
+#
+# ⚠️ 誠實聲明：這整套（`evidence_strength` 加權平均 + 分位數映射表）是
+# **簡化的工程啟發式，不是嚴謹的 conformal prediction**——沒有 hold-out
+# calibration set、沒有 exchangeability 假設驗證、不提供 conformal
+# coverage 保證（如「90% 校準區間實際涵蓋 90% 真值」），權重與飽和點也
+# 是工程判斷的固定常數而非統計估計出來的參數。目的只是讓「校準後信心」
+# 是一個真正反映證據強度、可跨三態的確定性指標，供下游 abstain 判斷用；
+# 不對外呈現為論文級統計保證。
+_STRENGTH_WEIGHTS = {
+    "trust": 0.35,       # supporting 裸加權均值（證據本身品質）
+    "indep": 0.30,       # 獨立來源數（交叉佐證廣度）
+    "diversity": 0.15,   # 來源類型（kind）多元度
+    "dominance": 0.20,   # 佐證 vs 反方證據的優勢比例
+}
+_INDEP_SOURCE_SATURATION = 4  # 達到此獨立來源數即給滿分，之後不再加分
+_KIND_DIVERSITY_SATURATION = 3  # 達到此來源類型數即給滿分，之後不再加分
+
+# 分位數映射表錨點依輸入（x＝evidence_strength）遞增排序，(x, 校準後信心)。
+# 中低段（<0.40）刻意壓得比原值低——這段最容易是「勉強及格但證據結構
+# 薄弱」的情境；高段（>=0.55）貼近原值，因為 evidence_strength 本身在
+# 高段已經隱含多源、多元 kind、佐證壓倒反方，不需要再額外壓縮。
+_CALIBRATION_TABLE: list[tuple[float, float]] = [
+    (0.00, 0.00),
+    (0.10, 0.03),
+    (0.20, 0.08),
+    (0.30, 0.20),
+    (0.40, 0.40),
+    (0.55, 0.55),
+    (0.70, 0.70),
+    (0.85, 0.85),
+    (1.00, 1.00),
+]
+
+
+def _calibrate_confidence(raw: float) -> float:
+    """用 `_CALIBRATION_TABLE`（硬編分位數映射表）校準一個 [0, 1] 指標。
+
+    確定性、免 LLM：純查表 + 分段線性插值，同輸入必同輸出，不呼叫任何
+    模型。**簡化版分位數校準，非嚴謹 conformal coverage 保證**（見
+    `_CALIBRATION_TABLE` 上方誠實聲明）。輸入超出 [0, 1] 時 clamp 到邊界。
+    """
+    x = max(0.0, min(1.0, raw))
+    table = _CALIBRATION_TABLE
+    if x <= table[0][0]:
+        return table[0][1]
+    if x >= table[-1][0]:
+        return table[-1][1]
+    for (x0, y0), (x1, y1) in zip(table, table[1:]):
+        if x0 <= x <= x1:
+            if x1 == x0:  # 防禦性：表若有重複 x 值不除以 0
+                return y0
+            ratio = (x - x0) / (x1 - x0)
+            return round(y0 + ratio * (y1 - y0), 4)
+    return round(x, 4)  # 理論上不會到這（表已覆蓋 [0, 1]，防禦性寫法）
+
+
+def _evidence_strength(
+    supporting: list[ScoredClaim], contrarian: list[ScoredClaim], confidence: float
+) -> float:
+    """算 `_calibrate_confidence()` 的輸入指標（見上方模組註解的設計說明）。
+
+    確定性、免 LLM：只用呼叫端已算好的 supporting/contrarian 清單與裸
+    `confidence`，不重新計算 trust、不新增資料源。回傳值 clamp 在
+    [0, 1]（四個子指標各自已是 [0, 1]，加權平均理論上不會超界，clamp
+    是防禦性寫法）。
+
+    W4 codex 對抗審第 4 輪 [HIGH] robustness 修正：`dominance`（佐證 vs
+    反方的證據優勢比例）改用**去重後的獨立來源數**，不用原始 claim（逐句）
+    計數——`extract_claims()` 是句級切分，同一個來源囉嗦寫一大段會被切成
+    多筆 claim；若 dominance 直接數 claim 筆數，單一囉嗦來源（無論支撐或
+    反方）就能用「句數」灌爆／稀釋 dominance，等同讓「決策態隨 ingestion
+    量而變、單一冗長來源能壓制方向結論」——這正是 codex 抓到的可操縱面。
+    修法：dominance 的分子分母都改用「該側涉及的獨立來源數」（同一來源
+    無論產生幾句 claim，只算一份），跟 `indep_factor` 既有的去重口徑一致
+    （`n_indep` 本就已是去重來源數，直接複用）。"""
+    n_indep = len({sc.claim.doc.source for sc in supporting})
+    n_kinds = len({sc.claim.doc.kind for sc in supporting})
+
+    indep_factor = max(0.0, min(
+        (n_indep - 1) / (_INDEP_SOURCE_SATURATION - 1), 1.0
+    ))
+    diversity_factor = max(0.0, min(
+        (n_kinds - 1) / (_KIND_DIVERSITY_SATURATION - 1), 1.0
+    ))
+    n_contrarian_sources = len({sc.claim.doc.source for sc in contrarian})
+    total_sources = n_indep + n_contrarian_sources
+    dominance = (n_indep / total_sources) if total_sources > 0 else 0.0
+
+    w = _STRENGTH_WEIGHTS
+    strength = (
+        w["trust"] * confidence
+        + w["indep"] * indep_factor
+        + w["diversity"] * diversity_factor
+        + w["dominance"] * dominance
+    )
+    return max(0.0, min(1.0, strength))
+
+
 # --- 5. 聚合 -------------------------------------------------------------
 def aggregate(scored: list[ScoredClaim], query: str,
               support_threshold: float = 0.50,
@@ -1122,18 +1276,58 @@ def aggregate(scored: list[ScoredClaim], query: str,
     文字措辭影響——查詢字串仍照樣傳入供其他用途（如 `TrustedBrief.query`
     留痕），但不再左右候選池的去留或排序。不傳 coin 時（既有呼叫端）
     行為完全不變。
+
+    W4 codex 對抗審第 4～8 輪（coin-relevance 收斂史）：`relevant`（決定
+    `supporting`/`contrarian`/`confidence`——報表 facts/evidence/
+    calibration 共用的唯一一份資料）在傳 `coin` 時，用 `_matches_coin`
+    （幣種相關或全市場通用，見 `ingestion.base._matches_coin` docstring）
+    篩過，排除「明確提及其他幣、與本次分析目標幣無關」的雜訊主張。
+
+    這段修法史本身就是「piecemeal 修法會一直漏」的活教材，完整記錄於此
+    供之後維護者理解為什麼最終長這樣（而不是重蹈覆轍）：
+      - 第 4 輪最初只讓 calibration（`_evidence_strength()` 的輸入）用
+        `_matches_coin` 篩過的子集，`supporting`/`contrarian`/`confidence`
+        仍是「全納入、只排序」——calibration 乾淨了，但報表本身（facts/
+        `_direction()`/key_basis）還是會混進他幣證據。
+      - 第 6 輪加了 `coin_scoped_supporting` 額外欄位，把同一份 coin-scoped
+        子集帶給 `agent.orchestrator.build_report` 貫穿 facts/`_direction()`/
+        key_basis/n_indep 門檻——但只補了 supporting 側，`contrarian`/
+        `confidence` 仍未過濾。
+      - 第 7 輪修了 `detect_cross_source_signal` 的輸入（呼叫端另外用
+        `_matches_coin` 重新篩一次）——但那是在 `build_report` 裡「各自重新
+        過濾一次」，不是共用同一份資料，第 8 輪才發現 `contrarian` 輸出／
+        裸 `confidence` 顯示／`_derive_limits` 這些「report-facing」欄位還是
+        沒過濾。
+      - 第 8 輪根治：不再區分「relevant（報表用，全納入）」跟「calib_pool
+        （calibration 用，篩過）」兩份資料——傳 `coin` 時，`relevant` 本身
+        就是 `_matches_coin` 篩過的子集，`supporting`/`contrarian`/
+        `confidence`/`calibrated_confidence` 全部從這唯一一份算出來，
+        `TrustedBrief` 回傳後任何欄位天生就是 coin-scoped，不需要呼叫端
+        （`build_report`）再各自過濾一次，也不需要額外欄位。已移除
+        `coin_scoped_supporting`（第 6/7 輪引入，現已併入 `supporting`
+        本身）。
+    不傳 coin 時（既有呼叫端）行為完全不變：`relevant` 沿用 `_normalize
+    (query)` 相關性排序、全納入（不新增篩選），維持 #32 修正前就存在的
+    既有語意。
     """
     qt = _normalize(query)
     if coin:
-        # 只排序、不篩選：與既有「全納入」精神一致，只是把幣種特定證據
-        # 排到全市場通用雜訊之前，讓 [:10]/[:5] 截斷優先保留前者。
+        # 先依 (是否幣種特定, 信任分) 排序——把「明確提及該幣」的主張排在
+        # 「全市場通用」主張之前，使下面的 [:10]/[:5] 截斷優先保留前者
+        # （demo 可靠性 #32 追加的既有精神，見上方 docstring）。
         relevant = sorted(
             scored,
             key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
         )
-        # 已依 (是否幣種特定, 信任分) 排序完成，不再套用下面純信任分排序。
+        # W4 codex 對抗審第 8 輪根治：排序後直接用 `_matches_coin` 過濾
+        # （保留本幣相關 + 全市場通用，只排除明確他幣）——`supporting`/
+        # `contrarian`/`confidence` 全部從這份已過濾的 `relevant` 算，
+        # 不再是「全納入、只排序」。`_matches_coin` 是幣別別名比對，不是
+        # #32 當年那種脆弱的 `_normalize(query)` 文字比對，不會重蹈覆轍。
+        relevant = [sc for sc in relevant if _matches_coin(sc.claim.doc, coin)]
     else:
-        # 與 query 相關者優先（無相關詞則全納入）
+        # 與 query 相關者優先（無相關詞則全納入）——未指定 coin 時無獨立的
+        # 幣種相關性判準可用，行為逐字向後相容，不引入新篩選。
         relevant = [
             sc for sc in scored
             if not qt or (_normalize(sc.claim.text) & qt)
@@ -1143,9 +1337,15 @@ def aggregate(scored: list[ScoredClaim], query: str,
     contrarian = [sc for sc in relevant if sc.trust < support_threshold]
 
     confidence = (sum(sc.trust for sc in supporting) / len(supporting)) if supporting else 0.0
+    # W4：用「校準前」的完整 supporting/contrarian（截斷前，與 confidence 同一份
+    # 基礎資料，見上方 `_evidence_strength` 對「不重新計算 trust、不新增資料源」
+    # 的承諾）算證據強度綜合指標，再校準——不用截斷後的 [:10]/[:5]，避免評分
+    # 結果隨截斷上限漂移（跟 `confidence` 本身的計算基礎保持一致）。
+    evidence_strength = _evidence_strength(supporting, contrarian, confidence)
     return TrustedBrief(
         query=query,
         supporting=supporting[:10],
         contrarian=contrarian[:5],
         confidence=confidence,
+        calibrated_confidence=_calibrate_confidence(evidence_strength),
     )
