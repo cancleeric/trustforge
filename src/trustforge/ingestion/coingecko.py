@@ -66,6 +66,11 @@ _MAX_BYTES = 512 * 1024   # 512 KB
 _TIMEOUT = 5
 _UA = "TrustForge/1.0 (research)"
 
+# 社群情緒多空票數差距門檻（百分點）：達到門檻才在文字裡採用單一方向的
+# 明確措辭，讓 trust.scoring._infer_direction 能推出正確主導方向；差距不足
+# 門檻視為五五波、維持中性語意（見 CoinGeckoSentimentSource.fetch）。
+_SENTIMENT_DOMINANCE_THRESHOLD = 5.0
+
 # Demo API key env（選用；keyless 已足夠，見模組頂部說明）。只從 env 讀，
 # 絕不 hardcode。實際 key 由 CEO 另立步驟在部署環境（systemd/EC2）設定，
 # 本檔不經手真實 key 值。
@@ -192,8 +197,22 @@ class CoinGeckoPriceSource(Source):
                 continue
             change_24h = entry.get("usd_24h_change")
             mcap = entry.get("usd_market_cap")
-            change_str = f"{change_24h:+.2f}%" if isinstance(change_24h, (int, float)) else "N/A"
             mcap_str = f"{mcap:,.0f}" if isinstance(mcap, (int, float)) else "N/A"
+            # 修（codex HIGH，Tier2 同批修正）：原本只寫數字「+8.20%」，不含
+            # trust.scoring._infer_direction 認得的方向詞（上漲/下跌等），導致
+            # price_live 主張永遠推斷成 neutral——即使漲跌幅再大，客觀類的
+            # 信任加權主導方向也恆為 neutral，detect_cross_source_signal 永遠
+            # 拒收，背離/共識判定形同虛設。改為依漲跌幅正負附上明確方向詞
+            # （持平則不附，維持中性語意，符合實際盤況）。
+            if isinstance(change_24h, (int, float)):
+                if change_24h > 0:
+                    change_str = f"{change_24h:+.2f}%（上漲）"
+                elif change_24h < 0:
+                    change_str = f"{change_24h:+.2f}%（下跌）"
+                else:
+                    change_str = f"{change_24h:+.2f}%（持平）"
+            else:
+                change_str = "N/A"
             ref = f"{code} 現價 {price} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
             doc_id = "coingecko-price-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
             # 優先用 API 回應本身的 last_updated_at（真正的鮮度來源，反映該筆
@@ -235,9 +254,29 @@ class CoinGeckoSentimentSource(Source):
         down = data.get("sentiment_votes_down_percentage")
         if up is None and down is None:
             return []
-        up_str = f"{up:.1f}%" if isinstance(up, (int, float)) else "N/A"
-        down_str = f"{down:.1f}%" if isinstance(down, (int, float)) else "N/A"
-        ref = f"{code} 社群情緒投票：看漲 {up_str}，看跌 {down_str}"
+        up_val = up if isinstance(up, (int, float)) else None
+        down_val = down if isinstance(down, (int, float)) else None
+        up_str = f"{up_val:.1f}%" if up_val is not None else "N/A"
+        down_str = f"{down_val:.1f}%" if down_val is not None else "N/A"
+        # 修（codex HIGH，Tier2）：原本文字固定同時寫「看漲 X%，看跌 Y%」，
+        # 導致 trust.scoring._infer_direction 對「看漲」「看跌」各計一次而
+        # 永遠打平回 neutral，使 detect_cross_source_signal 拒收、背離永不
+        # 觸發——把 sentiment 加進 _SENTIMENT_KINDS 形同虛設。改為依多空數字
+        # 的實際主導方向組字：差距達門檻才用單一方向詞描述（另一側只給數字、
+        # 不帶任何方向關鍵詞，避免又被計成平手）；差距不足門檻或只有單邊
+        # 數據極端時才維持/退回原始語意。
+        if up_val is not None and down_val is not None:
+            diff = up_val - down_val
+        elif up_val is not None:
+            diff = 100.0  # 只有多方票數 → 視為明確偏多
+        else:
+            diff = -100.0  # 只有空方票數 → 視為明確偏空
+        if diff >= _SENTIMENT_DOMINANCE_THRESHOLD:
+            ref = f"{code} 社群情緒偏多：看漲 {up_str}（多數意見），另有 {down_str} 持保留看法"
+        elif diff <= -_SENTIMENT_DOMINANCE_THRESHOLD:
+            ref = f"{code} 社群情緒偏空：看跌 {down_str}（多數意見），另有 {up_str} 持保留看法"
+        else:
+            ref = f"{code} 社群情緒投票：看漲 {up_str}，看跌 {down_str}"
         doc_id = "coingecko-sentiment-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
         return [Document(
             id=doc_id,
