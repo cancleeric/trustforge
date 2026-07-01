@@ -7,6 +7,8 @@ monkeypatch 換掉 `client._stance_runtime()`（CEO/codex 對抗審修正後 sta
 """
 from __future__ import annotations
 
+import pytest
+
 from trustforge.bedrock import BedrockClient, BedrockConfig
 
 
@@ -135,3 +137,93 @@ def test_classify_stance_request_uses_correct_model_and_min_max_tokens(monkeypat
 
     assert captured["modelId"] == "au.anthropic.claude-haiku-4-5-20251001-v1:0"
     assert captured["inferenceConfig"]["maxTokens"] >= 64
+
+
+# ── classify_stance_strict（HIGH 修正：gen 腳本專用，失敗一律 raise，不吞 neutral）
+
+
+def test_classify_stance_strict_offline_raises():
+    """offline client：`classify_stance` 回 neutral，但 strict 版必須 raise，
+    不可讓呼叫端把「離線佔位」誤當成真實分類寫進持久化快取。
+    """
+    client = BedrockClient(offline=True)
+    with pytest.raises(Exception):
+        client.classify_stance_strict("A", "B")
+
+
+def test_classify_stance_strict_no_stance_model_id_raises():
+    config = BedrockConfig(model_id="some-narrative-model", stance_model_id="")
+    client = BedrockClient(config=config, offline=False)
+    with pytest.raises(Exception):
+        client.classify_stance_strict("A", "B")
+
+
+def test_classify_stance_strict_runtime_exception_raises_not_neutral(monkeypatch):
+    """核心 HIGH 修正：runtime 逾時/異常時，strict 版必須把例外往上丟，
+    不可吞成 neutral（否則 gen 腳本會把假 neutral 寫進 stance_cache.json）。
+    """
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=False)
+
+    class _BoomRuntime:
+        def converse(self, **kwargs):
+            raise TimeoutError("simulated Bedrock timeout")
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _BoomRuntime())
+    with pytest.raises(TimeoutError):
+        client.classify_stance_strict("A", "B")
+
+
+def test_classify_stance_strict_illegal_label_raises(monkeypatch):
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=False)
+
+    class _FakeRuntime:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [
+                            {"toolUse": {"name": "classify_stance", "input": {"label": "bogus-label"}}}
+                        ]
+                    }
+                }
+            }
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
+    with pytest.raises(ValueError):
+        client.classify_stance_strict("A", "B")
+
+
+def test_classify_stance_strict_missing_tool_use_raises(monkeypatch):
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=False)
+
+    class _FakeRuntime:
+        def converse(self, **kwargs):
+            return {"output": {"message": {"content": [{"text": "unexpected plain text"}]}}}
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
+    with pytest.raises(ValueError):
+        client.classify_stance_strict("A", "B")
+
+
+def test_classify_stance_strict_success_returns_label(monkeypatch):
+    """成功路徑：strict 版與非 strict 版解析行為一致，正常回傳合法 label。"""
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=False)
+
+    class _FakeRuntime:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [
+                            {"toolUse": {"name": "classify_stance", "input": {"label": "contradiction"}}}
+                        ]
+                    }
+                }
+            }
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
+    assert client.classify_stance_strict("A", "B") == "contradiction"

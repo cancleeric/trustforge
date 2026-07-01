@@ -19,10 +19,14 @@
 3. 用 `stance_cache.cache_key()` 對候選對去重（(a,b) 與 (b,a) 視為同一對），跨 5 幣
    合併成唯一候選對清單。
 4. `--dry-run`：只印出候選對，不呼叫 client、不寫檔。
-   否則：對每一對呼叫 `client.classify_stance(a, b)`（真 Bedrock，非 offline
-   client），依 `cache_key(a, b)` 存成 `{"label": label, "version":
+   否則：對每一對呼叫 `client.classify_stance_strict(a, b)`（真 Bedrock，非 offline
+   client——**不用**降級版 `classify_stance`：那個方法失敗時會吞成 "neutral"，
+   離線批次生成快取分不出「真 neutral」跟「呼叫失敗」，會把假 neutral 悄悄寫進
+   `stance_cache.json`、弱化矛盾偵測，見 codex 審查發現的 HIGH）。任一對呼叫/解析
+   失敗（strict 版 raise）→ **立即中止，完全不寫檔**（既有快取檔原封不動）；
+   全部 7 對都成功才依 `cache_key(a, b)` 存成 `{"label": label, "version":
    STANCE_CACHE_VERSION}`，跟既有快取檔 merge（舊 key 保留，新 key 覆蓋/新增）後
-   整份覆寫回 `--out`。
+   原子寫入（temp file + rename，避免寫到一半被中斷產生半殘檔）回 `--out`。
 
 ⚠️ 本檔本身不含任何呼叫入口保護以外的巧門——真正打 AWS 只發生在非 --dry-run 且
 傳入非 offline 的 `BedrockClient` 時。CEO 親手執行前務必確認環境變數
@@ -32,7 +36,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -114,15 +120,52 @@ def merge_cache(existing: dict, new_entries: dict) -> dict:
 
 
 def classify_pairs(client: BedrockClient, pairs: dict[str, tuple[str, str]]) -> dict:
-    """對每一對呼叫 `client.classify_stance(a, b)`（真呼叫，由呼叫端保證 client
-    非 offline），依 `cache_key` 存成 `{"label": ..., "version": STANCE_CACHE_VERSION}`。
+    """對每一對呼叫 `client.classify_stance_strict(a, b)`（**嚴格版**，真呼叫，由
+    呼叫端保證 client 非 offline），依 `cache_key` 存成
+    `{"label": ..., "version": STANCE_CACHE_VERSION}`。
+
+    ⚠️ 刻意用 `classify_stance_strict` 而非降級版 `classify_stance`：批次生成
+    持久化快取時，「呼叫失敗」必須跟「模型真的判斷 neutral」明確分開，否則會把
+    假 neutral 悄悄寫進 `stance_cache.json`、弱化矛盾偵測（見 codex 審查 HIGH）。
+
+    任一對呼叫/解析失敗 → `classify_stance_strict` raise，這裡**不 catch**、直接
+    往上傳給呼叫端（`main()`），讓整批「全成功才寫」的語意成立：只要有一對失敗，
+    這個函式就不會回傳完整的 entries dict，呼叫端也就不會走到 merge + 寫檔那步。
     """
     entries: dict = {}
     for key, (a, b) in pairs.items():
-        label = client.classify_stance(a, b)
+        label = client.classify_stance_strict(a, b)
         entries[key] = {"label": label, "version": STANCE_CACHE_VERSION}
         print(f"{a[:40]!r} | {b[:40]!r} -> {label}")
     return entries
+
+
+def atomic_write_json(path: str | Path, data: dict) -> None:
+    """原子寫入 JSON：先寫 temp file 再 `os.replace` rename，避免寫到一半被中斷
+    （或跟其他 process 競爭）留下半殘的快取檔。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _build_live_client() -> BedrockClient:
+    """建立真 Bedrock client（CEO 親手執行用）。獨立成函式方便測試 monkeypatch
+    替換成假 client，不必真的建立/呼叫 boto3。
+    """
+    return BedrockClient(offline=False)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,15 +189,20 @@ def main(argv: list[str] | None = None) -> int:
         print("--dry-run：不呼叫 client、不寫檔。")
         return 0
 
-    client = BedrockClient(offline=False)  # 真 Bedrock client（CEO 親手執行）
-    new_entries = classify_pairs(client, pairs)
+    client = _build_live_client()  # 真 Bedrock client（CEO 親手執行）
+    try:
+        new_entries = classify_pairs(client, pairs)
+    except Exception as exc:
+        # 任一對失敗 → 中止且完全不寫檔，既有快取保持不變（見 classify_pairs docstring）。
+        print(
+            f"錯誤：分類失敗，中止且不寫檔，既有快取保持不變：{exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     existing = load_existing_cache(args.out)
     merged = merge_cache(existing, new_entries)
-
-    Path(args.out).write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
-    )
+    atomic_write_json(args.out, merged)
     print(f"已寫入 {args.out}（共 {len(merged)} 筆）")
     return 0
 

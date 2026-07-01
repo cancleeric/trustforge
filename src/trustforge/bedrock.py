@@ -200,10 +200,49 @@ class BedrockClient:
         離線模式、未設 stance_model_id、或呼叫/解析過程任何失敗（含逾時）→ 一律回
         "neutral"，不 raise、不中斷管線（比照 extract_claims_with_llm 的降級哲學：
         寧可漏抓真矛盾，也不可讓 stance 分類器變成單點故障）。
+
+        ⚠️ 此降級行為只適合「pipeline 即時打分」場景（單點故障不能拖垮整條管線）。
+        離線批次生成快取（`scripts/gen_stance_cache.py`）**不可**用這個方法——會把
+        「呼叫失敗」跟「模型真的判斷 neutral」混為一談，把假 neutral 悄悄寫進
+        持久化快取、弱化矛盾偵測。批次生成請改用 `classify_stance_strict()`。
         """
         if self.offline or not self.config.stance_model_id:
             return "neutral"
+        try:
+            return self._classify_stance_impl(a, b)
+        except Exception:
+            # 任何失敗（憑證/逾時/回應格式不符）一律保守回 neutral，不 raise
+            return "neutral"
 
+    def classify_stance_strict(self, a: str, b: str) -> str:
+        """`classify_stance` 的嚴格版：**任何失敗一律 raise，不回 neutral**。
+
+        供離線批次生成持久化快取（`scripts/gen_stance_cache.py`）使用——那個場景
+        「呼叫失敗」跟「模型真的判斷 neutral」必須明確分開，否則失敗會被悄悄寫成
+        看似合法的 neutral entry，污染 `stance_cache.json`、弱化矛盾偵測（見 codex
+        審查發現的 HIGH）。離線模式、未設 stance_model_id、逾時、憑證錯誤、回應格式
+        不符、或回應內容缺少合法 toolUse.label，一律 raise，讓呼叫端（gen 腳本）
+        中止且不寫檔。
+
+        ⚠️ 不供 pipeline 即時打分使用——pipeline 需要 `classify_stance` 的降級容錯，
+        避免單一逾時拖垮整條 O(n²) 迴圈。
+        """
+        if self.offline:
+            raise RuntimeError(
+                "classify_stance_strict: client 為 offline 模式，無法產生真實分類"
+                "（離線模式本就無法呼叫 Bedrock，故意 raise 避免呼叫端誤把佔位結果當真）"
+            )
+        if not self.config.stance_model_id:
+            raise RuntimeError("classify_stance_strict: stance_model_id 未設定")
+        return self._classify_stance_impl(a, b)
+
+    def _classify_stance_impl(self, a: str, b: str) -> str:
+        """`classify_stance` / `classify_stance_strict` 共用的核心呼叫/解析邏輯。
+
+        任何失敗（逾時、憑證錯誤、回應格式不符、缺少合法 toolUse.label）一律
+        raise；是否要吞成 "neutral" 由呼叫端（`classify_stance` 的 try/except）
+        決定，這裡不做降級判斷。
+        """
         fewshot_block = "\n".join(
             f"範例{i}：A=「{ex['a']}」 B=「{ex['b']}」 → {ex['label']}"
             for i, ex in enumerate(_STANCE_FEWSHOT, start=1)
@@ -237,37 +276,32 @@ class BedrockClient:
             "toolChoice": {"tool": {"name": _STANCE_TOOL_NAME}},
         }
 
-        try:
-            resp = self._stance_runtime().converse(
-                modelId=self.config.stance_model_id,
-                system=[{"text": _STANCE_SYSTEM}],
-                messages=[{"role": "user", "content": [{"text": user_text}]}],
-                inferenceConfig={"temperature": 0, "maxTokens": 128},
-                toolConfig=tool_config,
-            )
-            # 只在 cache-miss 真呼叫（即這裡，converse 已成功回來）才記成本——
-            # cache-hit 完全不會走到這個函式（見 stance_cache.cached_stance_fn）。
-            usage = resp.get("usage", {}) or {}
-            tokens_in = int(usage.get("inputTokens", 0) or 0)
-            tokens_out = int(usage.get("outputTokens", 0) or 0)
-            self.cost_events.append({
-                "model": self.config.stance_model_id,
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "cost_usd": estimate_cost(self.config.stance_model_id, tokens_in, tokens_out),
-            })
-            blocks = resp["output"]["message"]["content"]
-            for block in blocks:
-                tool_use = block.get("toolUse")
-                if tool_use and tool_use.get("name") == _STANCE_TOOL_NAME:
-                    label = str(tool_use.get("input", {}).get("label", "")).strip().lower()
-                    if label in _STANCE_LABELS:
-                        return label
-            return "neutral"
-        except Exception:
-            # 任何失敗（憑證/逾時/回應格式不符）一律保守回 neutral，不 raise
-            # 呼叫未成功取得 usage → 不記成本（沒有真實花費數字可記）
-            return "neutral"
+        resp = self._stance_runtime().converse(
+            modelId=self.config.stance_model_id,
+            system=[{"text": _STANCE_SYSTEM}],
+            messages=[{"role": "user", "content": [{"text": user_text}]}],
+            inferenceConfig={"temperature": 0, "maxTokens": 128},
+            toolConfig=tool_config,
+        )
+        # 只在真呼叫（converse 已成功回來）才記成本——
+        # cache-hit 完全不會走到這個函式（見 stance_cache.cached_stance_fn）。
+        usage = resp.get("usage", {}) or {}
+        tokens_in = int(usage.get("inputTokens", 0) or 0)
+        tokens_out = int(usage.get("outputTokens", 0) or 0)
+        self.cost_events.append({
+            "model": self.config.stance_model_id,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": estimate_cost(self.config.stance_model_id, tokens_in, tokens_out),
+        })
+        blocks = resp["output"]["message"]["content"]
+        for block in blocks:
+            tool_use = block.get("toolUse")
+            if tool_use and tool_use.get("name") == _STANCE_TOOL_NAME:
+                label = str(tool_use.get("input", {}).get("label", "")).strip().lower()
+                if label in _STANCE_LABELS:
+                    return label
+        raise ValueError("classify_stance: 回應內容缺少合法的 toolUse.label")
 
     # ------------------------------------------------------------------
     # Step 1: LLM-based Claim 抽取（Bedrock 呼叫 #1）
