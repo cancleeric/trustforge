@@ -308,12 +308,19 @@ class CoinGeckoPriceSource(Source):
             # `_MIN_PLAUSIBLE_EPOCH`（擋 0/極小值），也不晚於「本次呼叫時間 +
             # 時鐘偏差容忍」（擋未來時間戳）；超出範圍/NaN/inf/非數值一律退回
             # `fallback_now`（真實、有限、非未來的本地時間，不捏造鮮度）。
+            #
+            # 再修（codex HIGH，容忍範圍內近未來仍拿滿分 recency）：時鐘偏差
+            # 容忍讓 `now+1s ~ now+300s` 的戳通過上面的合理範圍檢查（接受為
+            # 真實資料、不誤拒），但 `_recency_decay` 對「未來」時間戳一樣會
+            # 把負齡 clamp 成 0 → recency=1.0 最高信任。驗證通過後再對儲存值
+            # 取 `min(validated_ts, fallback_now)`：容忍時鐘誤差但不讓任何
+            # 未來時間點被當成「現在」以外更新的鮮度來源。
             last_updated_val = _finite_num(
                 entry.get("last_updated_at"),
                 lo=_MIN_PLAUSIBLE_EPOCH,
                 hi=fallback_now + _CLOCK_SKEW_TOLERANCE_SEC,
             )
-            ts = last_updated_val if last_updated_val is not None else fallback_now
+            ts = min(last_updated_val, fallback_now) if last_updated_val is not None else fallback_now
             docs.append(Document(
                 id=doc_id,
                 kind=self.kind,

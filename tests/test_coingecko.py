@@ -457,6 +457,61 @@ def test_price_source_extreme_change_pct_infers_neutral_not_fabricated_direction
     assert claims[0].direction == "neutral"
 
 
+# codex HIGH（subtle 邊界：容忍範圍內近未來時間戳仍拿滿分 recency，
+# coingecko.py:311-316）：時鐘偏差容忍讓 `fallback_now+1s ~ +300s` 的戳通過
+# 合理範圍檢查（合法接受，不誤拒），但若原封不動存為 Document.ts，
+# `_recency_decay` 對「未來」時間戳一樣會把負齡 clamp 成 0 → recency=1.0。
+# 上面遠未來/超大有限的測試都遠超容忍窗口，測不到這個邊界，須專測
+# 容忍窗口內的近未來值。
+@pytest.mark.parametrize("skew_sec", [1.0, 300.0], ids=["skew_plus_1s", "skew_plus_300s"])
+def test_price_source_near_future_within_tolerance_ts_clamped_to_now(monkeypatch, skew_sec):
+    """容忍範圍內的近未來 last_updated_at（now+1s / now+300s）：驗證通過
+    （視為真實資料、不誤拒），但儲存的 ts 須 clamp 到 min(ts, now)，不得
+    直接沿用未來值。"""
+    import json
+    import time
+    from trustforge.ingestion import coingecko
+
+    before = time.time()
+    fixture = json.dumps({
+        "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                    "usd_24h_change": 2.34, "last_updated_at": before + skew_sec},
+    }).encode()
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: fixture)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    after = time.time()
+    assert len(docs) == 1
+    assert docs[0].ts <= after, f"近未來戳（+{skew_sec}s）須 clamp 到 now，實得 ts={docs[0].ts}，now~{after}"
+
+
+@pytest.mark.parametrize("skew_sec", [1.0, 300.0], ids=["skew_plus_1s", "skew_plus_300s"])
+def test_price_source_near_future_within_tolerance_does_not_max_out_recency(monkeypatch, skew_sec):
+    """真實 score() 路徑：容忍範圍內的近未來時間戳 clamp 後，recency 分數
+    須反映「非負齡」的正常衰減（< 1.0），不得因未來戳被灌成最高信任。"""
+    import json
+    import time
+    from trustforge.ingestion import coingecko
+    from trustforge.trust.scoring import extract_claims, score
+
+    fetch_time = time.time()
+    fixture = json.dumps({
+        "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                    "usd_24h_change": 2.34, "last_updated_at": fetch_time + skew_sec},
+    }).encode()
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: fixture)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+
+    claims = extract_claims(docs)
+    scored = score(claims, now=time.time() + 1.0)
+    assert len(scored) == 1
+    recency = scored[0].components.get("recency")
+    assert recency is not None
+    assert 0.0 <= recency < 1.0, (
+        f"容忍窗口內近未來戳（+{skew_sec}s）clamp 後 recency 不應被灌成 1.0，實得 {recency}"
+    )
+
+
 # ── CoinGeckoSentimentSource ──────────────────────────────────────────────────
 
 def test_sentiment_source_document_fields(monkeypatch):
