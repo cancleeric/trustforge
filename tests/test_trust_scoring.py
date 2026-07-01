@@ -1,6 +1,16 @@
 """信任提煉引擎核心測試。確保『信任層』行為符合設計意圖。"""
+import pytest
+
 from trustforge.ingestion.base import Document
 from trustforge.trust.scoring import DOMAIN_STOP, aggregate, extract_claims, score
+
+_W3_BURST_FOLLOWUP_SKIP_REASON = (
+    "W3 burst 指標（指標 B）經 4 輪 codex 對抗審持續挖出新的 subtle 檢測缺陷"
+    "（中位數自含候選自己/固定牆鐘分桶可繞/baseline 未對齊候選窗口/只評估各源"
+    "最大窗漏掉後續同窗 baseline 偏低的小爆量），降級為 follow-up #15 重新設計，"
+    "本輪 W3 只 ship 模板指標 A。程式碼保留（_coordination_burst_flags 等）供 "
+    "#15 沿用，但 _coordination_signals 目前不呼叫，故暫時 skip 這些測試。"
+)
 
 
 # --- _infer_direction 純函式測試 -----------------------------------------
@@ -891,3 +901,488 @@ print(json.dumps(out, sort_keys=True))
         "PYTHONHASHSEED=0 與 PYTHONHASHSEED=42 下的 SR/reputation_trace 不相等：\n"
         f"seed=0: {out_seed0}\nseed=42: {out_seed42}"
     )
+
+
+# =========================================================================
+# W3：確定性協同操縱偵測（_coordination_signals / 指標 A 模板相似 / 指標 B 單源爆量）
+# =========================================================================
+
+_BURST_BASE_TS = 1780185600.0  # 對齊 demo/sample_data 慣用的樣本時戳，避免魔法數字
+
+
+def test_w3_a_synonym_template_flood_triggers_and_evades_regex():
+    """指標 A：3 個假來源用近義詞置換（換詞不換意）灌水同一套話術。
+
+    刻意選用完全不在 `_MANIP_PATTERNS`（to moon/暴漲/翻倍/shill/喊單/穩賺/
+    financial advice/pump/快上車/百倍）內的字眼（起飛/十倍/情報），證明舊版
+    regex 對這種灌水完全失效（`_manip_hits` 全部命中 0），而 W3 協同指標仍能
+    靠 3 個不同來源間 ≥0.8 的模板 Jaccard 相似度抓到——**但這只是 informational
+    flag（見下方「資訊:」前綴），不代表已判定操縱，不扣信任分**（CEO 定案，
+    見 `test_w3_a_informational_only_does_not_penalize_trust_and_flows_into_info_flags`）。
+    """
+    from trustforge.trust.scoring import Claim, _coordination_signals, _manip_hits
+
+    texts = {
+        "x-shill-a": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 進場",
+        "x-shill-b": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 買入",
+        "x-shill-c": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 加碼",
+    }
+    claims = [
+        Claim(id=f"w3a-{src}", text=t, doc=_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+
+    # 回歸證據：舊版關鍵詞 regex 對這批「換詞不換意」文字完全繞過（0 命中）。
+    for c in claims:
+        assert _manip_hits(c.text) == [], f"{c.doc.source} 不應命中任何 _MANIP_PATTERNS 關鍵詞"
+
+    flags = _coordination_signals(claims)
+    assert set(flags.keys()) == {c.id for c in claims}, "3 個來源都應被標記模板相似 informational flag"
+    for c in claims:
+        fl = flags[c.id]
+        assert len(fl) == 1
+        flag = fl[0]
+        assert flag.startswith("資訊:多源文字高度相似(")
+        # 措辭中性：只允許「可能協同或聯播」這種並列可能性描述，不可用「協同:」
+        # 這種直接指控前綴（前綴已由上面 startswith 斷言把關）。
+        # 可回溯：flag 內必須列出涉入的 3 個來源與 Jaccard 數值
+        assert "x-shill-a" in flag and "x-shill-b" in flag and "x-shill-c" in flag
+        assert "Jaccard 0.8" in flag
+
+
+def test_w3_a_informational_only_does_not_penalize_trust_and_flows_into_info_flags():
+    """CEO 定案（codex 對抗審確認根本限制）：文字相似度單獨無法區分「協同操縱」
+    vs「合法聯播/引用」，指標 A 命中改為 informational-only，應：
+    (1) **不扣信任分**——`components["manipulation"]` 必須與「完全沒有協同訊號時」
+        逐位元相等，斷言 manip 分量不含模板貢獻（不是只驗證某個 `>=`/`<=`
+        方向，而是直接跟 `_manipulation_penalty(c)`（無 extra_hits）比對相等）；
+    (2) flag 併入 `ScoredClaim.info_flags`（供 `agent.orchestrator._scored_to_evidence`
+        回填 `Evidence.info_flags`，web 用中性樣式顯示，不是操縱🚩紅旗）；
+    (3) **不**混入 `ScoredClaim.manip_flags`（那是操縱紅旗專用，維持只裝
+        regex 關鍵詞命中）。
+    """
+    from trustforge.trust.scoring import _manipulation_penalty
+
+    texts = {
+        "x-shill-a": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 進場",
+        "x-shill-b": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 買入",
+        "x-shill-c": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 加碼",
+    }
+    docs = [_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS) for src, t in texts.items()]
+    claims = extract_claims(docs)
+    scored = score(claims, now=_BURST_BASE_TS)
+
+    for sc in scored:
+        # 模板相似「應該」命中（否則這條測試沒測到東西）：info_flags 非空。
+        assert any(f.startswith("資訊:多源文字高度相似(") for f in sc.info_flags), (
+            f"{sc.claim.doc.source} 的 info_flags 應含模板相似 informational flag，"
+            f"實際: {sc.info_flags}"
+        )
+        # 但完全不扣分：manipulation 分量必須跟「不考慮任何協同訊號」時的
+        # _manipulation_penalty(c) 逐位元相等，不是「還在合理範圍」的模糊比較。
+        no_signal_manip = _manipulation_penalty(sc.claim)
+        assert sc.components["manipulation"] == no_signal_manip, (
+            f"{sc.claim.doc.source} 的 manipulation 分量不應含模板相似貢獻："
+            f"實際 {sc.components['manipulation']}，無協同訊號應為 {no_signal_manip}"
+        )
+        # 且不混入操縱紅旗清單：manip_flags 只該有 regex 關鍵詞命中（本例無）。
+        assert sc.manip_flags == [], (
+            f"{sc.claim.doc.source} 的 manip_flags 不應含模板相似 flag（那應在 "
+            f"info_flags），實際: {sc.manip_flags}"
+        )
+
+
+def test_w3_a_two_source_verbatim_wire_repost_not_flagged():
+    """防呆：2 家媒體逐字轉載同一份官方通稿（只有 2 個來源，即使 Jaccard=1.0）
+    不應觸發協同 flag——避免正常的通稿轉載被誤判為協同操縱。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    official = "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報"
+    c1 = Claim(id="wire-1", text=official, doc=_doc("d1", "news", "reuters", official, ts=_BURST_BASE_TS))
+    c2 = Claim(id="wire-2", text=official, doc=_doc("d2", "news", "apnews", official, ts=_BURST_BASE_TS))
+
+    flags = _coordination_signals([c1, c2])
+    assert flags == {}, f"2 家轉載同一通稿不應觸發協同 flag，實際: {flags}"
+
+
+def test_w3_a_three_plus_news_outlets_verbatim_wire_repost_not_flagged():
+    """對抗性回歸（codex 對抗審 [HIGH]）：3 家以上新聞媒體逐字/近似轉載同一份
+    官方通稿——即使涉及來源數 ≥ `_TEMPLATE_MIN_SOURCES`（3），過去只靠
+    Jaccard 門檻判斷會誤標為協同操縱，因為確定性相似度分數本身分不清
+    「合法通稿聯播」與「協同灌水」。修正後 `kind="news"` 不在
+    `_TEMPLATE_ELIGIBLE_KINDS`（只有 social/sentiment）內，整批直接排除在
+    模板比對之外，不應觸發任何協同 flag。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "reuters": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+        "apnews": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+        "bloomberg": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+        "coindesk": "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報",
+    }
+    claims = [
+        Claim(id=f"wire3-{src}", text=t, doc=_doc(f"d-{src}", "news", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    flags = _coordination_signals(claims)
+    assert flags == {}, (
+        f"≥3 家新聞媒體轉載同一通稿（kind=news）應因豁免清單不觸發協同 flag，實際: {flags}"
+    )
+
+
+def test_w3_a_objective_kinds_exempt_from_template_matching():
+    """防呆：只有 `_TEMPLATE_ELIGIBLE_KINDS`（social/sentiment）才納入模板比對，
+    客觀事實類（price/price_live/onchain/regulatory/hoyabit）一律跳過——即使
+    3 個 onchain 來源文字高度相似（客觀數據本來就該長得像），也不應被誤判為
+    協同操縱。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "glassnode": "鏈上 數據 顯示 BTC 交易所 餘額 過去 24 小時 減少 一 萬 枚",
+        "nansen": "鏈上 數據 顯示 BTC 交易所 餘額 過去 24 小時 減少 一點一 萬 枚",
+        "cryptoquant": "鏈上 數據 顯示 BTC 交易所 餘額 過去 24 小時 減少 一點二 萬 枚",
+    }
+    claims = [
+        Claim(id=f"obj-{src}", text=t, doc=_doc(f"d-{src}", "onchain", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    flags = _coordination_signals(claims)
+    assert flags == {}, f"onchain 不在 _TEMPLATE_ELIGIBLE_KINDS 內，不應納入模板比對，實際: {flags}"
+
+
+def test_w3_a_regulatory_kind_exempt_from_template_matching():
+    """對抗性回歸（codex 對抗審 [HIGH] 擴大豁免清單）：`kind="regulatory"`
+    現已明確排除在 `_TEMPLATE_ELIGIBLE_KINDS` 之外，3 個官方監管來源公告
+    高度相似（監管口徑本來就該一致）不應被誤判為協同操縱。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "sec-gov": "證券 主管機關 公告 加密貨幣 交易所 需 完成 牌照 申請 方可 營運",
+        "fca-uk": "證券 主管機關 公告 加密貨幣 交易所 需 完成 牌照 申請 方可 繼續 營運",
+        "mas-sg": "證券 主管機關 公告 加密貨幣 交易所 需 完成 牌照 申請 才可 營運",
+    }
+    claims = [
+        Claim(id=f"reg-{src}", text=t, doc=_doc(f"d-{src}", "regulatory", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    flags = _coordination_signals(claims)
+    assert flags == {}, f"regulatory 不在 _TEMPLATE_ELIGIBLE_KINDS 內，不應納入模板比對，實際: {flags}"
+
+
+def test_w3_a_three_social_sources_template_flood_still_triggers():
+    """對抗性回歸（收斂驗證）：豁免清單擴大後，`kind="social"` 的模板相似
+    偵測仍必須正常觸發——確認收斂修法沒有連社群相似偵測本身也一起弱化。
+
+    CEO 定案後（informational-only），「觸發」只代表產生中性 informational
+    flag 供人工判讀，**不代表判定操縱、不扣分**——見下方 `score()` 層驗證。
+    """
+    from trustforge.trust.scoring import Claim, _coordination_signals, _manipulation_penalty
+
+    texts = {
+        "tg-shill-a": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 卡位",
+        "tg-shill-b": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 進場",
+        "tg-shill-c": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 加倉",
+    }
+    docs = [_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS) for src, t in texts.items()]
+    claims = [
+        Claim(id=f"soc-{src}", text=t, doc=doc)
+        for (src, t), doc in zip(texts.items(), docs)
+    ]
+    flags = _coordination_signals(claims)
+    assert set(flags.keys()) == {c.id for c in claims}, (
+        f"3 個 social 來源模板相似仍應觸發 informational flag，實際: {flags}"
+    )
+    for c in claims:
+        assert flags[c.id][0].startswith("資訊:多源文字高度相似(")
+
+    # 供人工判讀，但不扣分：走完整 score() 確認 info_flags 有值、manipulation
+    # 分量跟無協同訊號時逐位元相等。
+    all_claims = extract_claims(docs)
+    scored = score(all_claims, now=_BURST_BASE_TS)
+    for sc in scored:
+        assert any(f.startswith("資訊:多源文字高度相似(") for f in sc.info_flags)
+        assert sc.components["manipulation"] == _manipulation_penalty(sc.claim)
+
+
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
+def test_w3_b_single_source_burst_triggers_and_baseline_untouched():
+    """指標 B：單一來源在 60 分鐘窗口內連發 8 則相異主張（10 分鐘內），
+    相對全池同窗口中位數（=1）達 8 倍 → 觸發爆量 flag；同窗口內正常的 3 個
+    單則來源不應被誤傷。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    claims = []
+    for i in range(8):
+        t = f"快訊{i} XYZ幣 突破 關鍵 價位 值得 留意 第{i}則"
+        claims.append(
+            Claim(id=f"burst-{i}", text=t,
+                  doc=_doc(f"burst-doc-{i}", "social", "x-spammer", t, ts=_BURST_BASE_TS + i * 60))
+        )
+    for j, src in enumerate(["news-a", "news-b", "news-c"]):
+        t = f"正常報導{j} 市場 觀察 淡定"
+        claims.append(
+            Claim(id=f"base-{j}", text=t,
+                  doc=_doc(f"base-doc-{j}", "news", src, t, ts=_BURST_BASE_TS + 30))
+        )
+
+    flags = _coordination_signals(claims)
+
+    for i in range(8):
+        fl = flags.get(f"burst-{i}")
+        assert fl, f"burst-{i} 應被標記單源爆量"
+        flag = fl[0]
+        assert flag.startswith("協同:單源爆量(")
+        assert "x-spammer" in flag
+        assert "8則" in flag
+        assert "8.0倍" in flag
+
+    for j in range(3):
+        assert flags.get(f"base-{j}") is None, "正常單則來源不應被爆量指標誤傷"
+
+
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
+def test_w3_b_repeated_identical_text_does_not_count_as_burst():
+    """防呆／回歸鎖：同一來源在同一窗口內重複貼「逐字相同」的文本 N 次，
+    不應被判定為爆量——與 `_iterate_source_reputation` 的
+    `unique_claims_by_source` 去重原則一致（見既有 W2 反暴走測試：同一 claim
+    重貼 1 次 vs 20 次，動態信譽必須逐字相同）。若本指標對逐字重複的文本也
+    計數，會與既有 W2 回歸鎖互相打架。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    claims = [
+        Claim(id=f"dup-{i}", text=shared,
+              doc=_doc(f"dup-doc-{i}", "social", "x-analyst", shared, ts=_BURST_BASE_TS))
+        for i in range(20)
+    ] + [
+        Claim(id="other-1", text="其他 來源 的 一則 主張",
+              doc=_doc("other-doc-1", "news", "coindesk", "其他 來源 的 一則 主張", ts=_BURST_BASE_TS)),
+        Claim(id="other-2", text="第二個 其他 來源 主張",
+              doc=_doc("other-doc-2", "news", "bloomberg", "第二個 其他 來源 主張", ts=_BURST_BASE_TS)),
+    ]
+
+    flags = _coordination_burst_flags(claims)
+    assert flags == {}, f"逐字重複同一文本 20 次不應觸發爆量，實際: {flags}"
+
+
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
+def test_w3_burst_window_requires_at_least_two_sources():
+    """防呆：窗口內只有單一來源時（無從比較），不應觸發爆量（避免用「只有
+    自己」當分母誤判）。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    claims = [
+        Claim(id=f"solo-{i}", text=f"訊息{i} 內容 各不相同 第{i}篇",
+              doc=_doc(f"solo-doc-{i}", "social", "x-only",
+                       f"訊息{i} 內容 各不相同 第{i}篇", ts=_BURST_BASE_TS + i * 30))
+        for i in range(10)
+    ]
+    flags = _coordination_burst_flags(claims)
+    assert flags == {}, "整個資料池只有 1 個來源時不應觸發爆量（無從比較）"
+
+
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
+def test_w3_b_two_source_flood_vs_normal_detected_via_leave_one_out_median():
+    """對抗性回歸（codex [HIGH]）：只有 2 個來源時，若中位數誤含候選自己會
+    造成數學上偵測不到——例如 (100, 1) 兩來源，`median([100,1])=50.5`，
+    `100 > 3×50.5=151.5` 為 False，灌水來源逃脫。改為 leave-one-out 中位數
+    （排除候選自己）後，對照組退化為單一來源本身的值：候選=灌水源時，
+    其餘來源中位數=1，`8 > 3×1` 成立而觸發；候選=正常源時，其餘來源中位數
+    =8，`1 > 3×8` 不成立而不觸發。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    claims = []
+    for i in range(8):
+        t = f"急報{i} ABC幣 即將 暴衝 提前 卡位 第{i}條"
+        claims.append(
+            Claim(id=f"flood-{i}", text=t,
+                  doc=_doc(f"flood-doc-{i}", "social", "x-flooder", t, ts=_BURST_BASE_TS + i * 60))
+        )
+    claims.append(
+        Claim(id="normal-1", text="單純 觀察 市場 動態",
+              doc=_doc("normal-doc-1", "news", "solo-outlet", "單純 觀察 市場 動態", ts=_BURST_BASE_TS))
+    )
+
+    flags = _coordination_burst_flags(claims)
+
+    for i in range(8):
+        fl = flags.get(f"flood-{i}")
+        assert fl, f"2 來源情境下 flood-{i} 仍應被偵測到單源爆量，實際: {flags}"
+        assert "x-flooder" in fl[0]
+        assert "8則" in fl[0]
+
+    assert flags.get("normal-1") is None, "正常單則來源不應被誤傷"
+
+
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
+def test_w3_b_burst_spanning_hour_boundary_detected_via_rolling_window():
+    """對抗性回歸（codex [MEDIUM]）：爆量橫跨牆鐘整點（xx:59:30 ~
+    xx+1:00:45，全部在 75 秒內），若用固定 `int(ts // 3600)` 分桶會被切成
+    「整點前」「整點後」兩個各自低於門檻的子群而逃脫；改為依 ts 排序後
+    雙指標(two-pointer)找任一 60 分鐘滾動窗內的最大相異文本數，應能正確
+    偵測到橫跨整點的完整爆量。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    hour_boundary = (int(_BURST_BASE_TS // 3600) + 1) * 3600  # 對齊到下一個整點
+    offsets = [-30, -15, 0, 15, 30, 45]  # xx:59:30 ~ xx+1:00:45，橫跨整點，全在 75 秒內
+    claims = []
+    for i, off in enumerate(offsets):
+        t = f"整點突襲{i} DEF幣 快訊 搶先 布局 第{i}波"
+        claims.append(
+            Claim(id=f"boundary-{i}", text=t,
+                  doc=_doc(f"boundary-doc-{i}", "social", "x-boundary-flooder", t,
+                           ts=hour_boundary + off))
+        )
+    claims.append(
+        Claim(id="normal-2", text="平靜 觀望 中",
+              doc=_doc("normal-doc-2", "news", "quiet-outlet", "平靜 觀望 中", ts=hour_boundary))
+    )
+
+    flags = _coordination_burst_flags(claims)
+
+    for i in range(len(offsets)):
+        fl = flags.get(f"boundary-{i}")
+        assert fl, f"橫跨整點的爆量 boundary-{i} 仍應被滾動窗偵測到，實際: {flags}"
+        assert "x-boundary-flooder" in fl[0]
+        assert f"{len(offsets)}則" in fl[0]
+
+    assert flags.get("normal-2") is None, "正常單則來源不應被誤傷"
+
+
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
+def test_w3_b_baseline_uses_aligned_window_not_other_sources_historical_max():
+    """對抗性回歸（codex 對抗審 [burst 第 3 個 HIGH]）：比較基準必須對齊到候選
+    「現在」爆量的那個時間窗口，去看其他來源在同一時段各發了幾則，而不是
+    「其他來源自己歷史上不相干時段的最大值」。
+
+    情境：`old-spiker` 3 小時前自己也曾爆量 8 則（跟 `x-real-flooder` 現在
+    爆量的時段完全不相干），但在 `x-real-flooder` 現在爆量的當下同一窗口內，
+    `old-spiker` 只發了 1 則。若 baseline 誤用 old-spiker 的歷史最大值（8）
+    當中位數，`8 ≤ 3×8=24` 不會觸發，即使 old-spiker 當下其實幾乎無動靜；
+    改為同窗對齊比較後，old-spiker 在候選窗口內的『真實』同窗計數只有 1，
+    中位數應為 1，`8 > 3×1=3`，`x-real-flooder` 應正確觸發。
+
+    old-spiker 自己 3 小時前的歷史爆量，因為在那個時段完全沒有其他來源可
+    比較（同窗中位數為 0），依既有保守防呆不予回溯標記——這是刻意的取捨
+    （見 `_coordination_burst_flags` docstring），不是本測試要驗證的重點。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    claims = []
+    for i in range(8):
+        t = f"現爆{i} GHI幣 快訊 搶進 第{i}條"
+        claims.append(
+            Claim(id=f"now-flood-{i}", text=t,
+                  doc=_doc(f"now-flood-doc-{i}", "social", "x-real-flooder", t,
+                           ts=_BURST_BASE_TS + i * 60))
+        )
+
+    old_window_start = _BURST_BASE_TS - 3 * 3600  # 3 小時前，跟候選窗口完全不相干
+    for i in range(8):
+        t = f"舊爆{i} JKL幣 舊聞 快訊 第{i}條"
+        claims.append(
+            Claim(id=f"old-flood-{i}", text=t,
+                  doc=_doc(f"old-flood-doc-{i}", "social", "old-spiker", t,
+                           ts=old_window_start + i * 60))
+        )
+    claims.append(
+        Claim(id="old-spiker-recent", text="老玩家 近況 更新",
+              doc=_doc("old-spiker-recent-doc", "social", "old-spiker", "老玩家 近況 更新",
+                       ts=_BURST_BASE_TS + 30))
+    )
+
+    flags = _coordination_burst_flags(claims)
+
+    for i in range(8):
+        fl = flags.get(f"now-flood-{i}")
+        assert fl, (
+            "baseline 必須對齊候選當下窗口，不能被 old-spiker 3 小時前不相干的"
+            f"歷史爆量『掩護』；now-flood-{i} 仍應被偵測，實際: {flags}"
+        )
+        assert "x-real-flooder" in fl[0]
+        assert "8則" in fl[0]
+
+    for i in range(8):
+        assert flags.get(f"old-flood-{i}") is None, (
+            "old-spiker 3 小時前的歷史事件，因當下同窗內無其他來源可比較"
+            "（中位數為 0，保守不判），不應被回溯標記"
+        )
+    assert flags.get("old-spiker-recent") is None
+
+
+def test_w3_normal_multi_source_corroboration_not_flagged():
+    """回歸：既有的正常多源佐證情境（onchain/news/social 三方各自轉述同一事實，
+    onchain 為 OBJECTIVE_KINDS 豁免、news/social 僅 2 個非豁免來源，未達
+    `_TEMPLATE_MIN_SOURCES`）不應被 W3 誤傷——trust 應與 W3 加入前一致。"""
+    from trustforge.trust.scoring import _coordination_signals
+
+    shared = "大額 BTC 轉入 交易所 造成 賣壓 比特幣 下跌"
+    docs = [
+        _doc("a", "onchain", "glassnode", shared, ts=_BURST_BASE_TS),
+        _doc("b", "news", "coindesk", shared, ts=_BURST_BASE_TS),
+        _doc("c", "social", "x-trader", shared, ts=_BURST_BASE_TS),
+    ]
+    claims = extract_claims(docs)
+    scored = score(claims, now=_BURST_BASE_TS)
+    assert _coordination_signals(claims) == {}, "正常三方佐證不應觸發任何協同 flag"
+    for sc in scored:
+        assert sc.manip_flags == [], f"{sc.claim.doc.source} 不應有任何操縱 flag（正常佐證）"
+
+
+def test_w3_coordination_signals_deterministic_repeat_calls():
+    """確定性：同一輸入重複呼叫 `_coordination_signals` 必須逐字相同（無隨機性、
+    無 LLM），符合『確定性、免 LLM、credit-safe』的設計要求。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "x-shill-a": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 進場",
+        "x-shill-b": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 買入",
+        "x-shill-c": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 加碼",
+    }
+    claims = [
+        Claim(id=f"det-{src}", text=t, doc=_doc(f"det-doc-{src}", "social", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    results = [_coordination_signals(claims) for _ in range(5)]
+    assert all(r == results[0] for r in results), "重複呼叫應逐字相同（確定性）"
+
+
+def test_w3_coordination_signals_burst_indicator_disabled_only_template_active():
+    """W3 burst 指標（指標 B）降級為 follow-up #15，`_coordination_signals`
+    目前只接指標 A（模板相似）。用一個「單源在短時間內連發多則相異主張」的
+    典型爆量情境驗證：即使該情境若直接呼叫 `_coordination_burst_flags`
+    仍會產生『協同:單源爆量』flag，`_coordination_signals`（實際掛在
+    `score()` 主流程上的入口）也不應該回傳任何『協同:單源爆量』字樣的
+    flag——證明 burst 指標確實已從 active 路徑移除，且移除後不影響模板
+    指標本身的行為（此情境文本彼此不相似，模板指標本來就不該命中）。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags, _coordination_signals
+
+    claims = []
+    for i in range(8):
+        t = f"快訊{i} XYZ幣 突破 關鍵 價位 值得 留意 第{i}則"
+        claims.append(
+            Claim(id=f"burst-{i}", text=t,
+                  doc=_doc(f"burst-doc-{i}", "social", "x-spammer", t, ts=_BURST_BASE_TS + i * 60))
+        )
+    for j, src in enumerate(["news-a", "news-b", "news-c"]):
+        t = f"正常報導{j} 市場 觀察 淡定"
+        claims.append(
+            Claim(id=f"base-{j}", text=t,
+                  doc=_doc(f"base-doc-{j}", "news", src, t, ts=_BURST_BASE_TS + 30))
+        )
+
+    # 佐證：_coordination_burst_flags 本身（獨立函式，程式碼保留供 #15 沿用）
+    # 對這個典型爆量情境仍然會命中，代表移除的是「呼叫端接線」而不是把偵測
+    # 邏輯本身弄壞了。
+    raw_burst_flags = _coordination_burst_flags(claims)
+    assert any("協同:單源爆量(" in fl for fls in raw_burst_flags.values() for fl in fls), (
+        "前提假設：_coordination_burst_flags 獨立呼叫應仍能命中典型爆量情境"
+        "（若這裡都不命中，代表函式本身被誤改壞了，不是本測試要驗證的降級行為）"
+    )
+
+    active_signals = _coordination_signals(claims)
+    for cid, fls in active_signals.items():
+        for fl in fls:
+            assert "單源爆量" not in fl, (
+                f"burst 指標已降級 follow-up #15，_coordination_signals 的 active "
+                f"路徑不應再產生單源爆量 flag，實際: {cid} -> {fl}"
+            )

@@ -129,7 +129,14 @@ class ScoredClaim:
     # Tier2 可解釋 UX：操縱關鍵詞命中原文清單（由 `_manipulation_flags` 填入，
     # 供 `agent.orchestrator._scored_to_evidence` 回填 `Evidence.flags`）。
     # 預設空 list，不影響既有以 keyword 建構 ScoredClaim 的呼叫點/相等性比較。
+    # 這是「確定判定為操縱」的紅旗，會反映在 `components["manipulation"]`。
     manip_flags: list[str] = field(default_factory=list)
+    # W3：informational-only 透明化 flag（由 `_coordination_signals` 填入，供
+    # `agent.orchestrator._scored_to_evidence` 回填 `Evidence.info_flags`）。
+    # 與 `manip_flags` 不同：這裡的訊號（如多源文字高度相似）不代表已判定操縱、
+    # **不併入 `components["manipulation"]`**，純粹供人工判讀。CEO 定案：文字
+    # 相似度單獨無法證明協同操縱，自動扣分必然誤傷合法聯播/引用。預設空 list。
+    info_flags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -269,12 +276,23 @@ def _manip_hits(text: str) -> list[str]:
     return hits
 
 
-def _manipulation_penalty(c: Claim) -> float:
+def _manipulation_penalty(c: Claim, extra_hits: int = 0) -> float:
     # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
     hits = _manip_hits(c.text)
     # 社群來源的操縱訊號加重
     weight = 1.5 if c.doc.kind == "social" else 1.0
-    return min(1.0, len(hits) * 0.4 * weight)
+    # `extra_hits`：預留給「確定判定為操縱、需要真正扣分」的額外命中數量，
+    # 併入同一套關鍵詞計分公式（沿用既有 0.4/hit、social 加重 1.5 倍），不新增
+    # 權重項、不動 `raw = ... - w["manip"] * manip` 既有公式結構。預設 0。
+    #
+    # CEO 定案（codex 對抗審確認根本限制）：W3 模板相似指標
+    # （`_coordination_template_flags`）**不再**餵入這裡——文字相似度單獨無法
+    # 區分「協同操縱」vs「合法聯播/引用」，自動扣分必然誤傷合法聯播；改為
+    # informational-only（見 `_coordination_signals` docstring），只產生
+    # `ScoredClaim.info_flags`，不影響這個函式的分數。目前 `score()` 呼叫本
+    # 函式一律不傳 `extra_hits`（沿用預設 0），此參數保留供未來若有「確定性
+    # 且經證實有效」的扣分型協同指標時使用。
+    return min(1.0, (len(hits) + extra_hits) * 0.4 * weight)
 
 
 def _manipulation_flags(c: Claim) -> list[str]:
@@ -301,6 +319,272 @@ def _direction_compatible(d1: str, d2: str) -> bool:
     if "neutral" in (d1, d2):
         return True
     return d1 == d2
+
+
+# --- W3：確定性協同操縱偵測（免 LLM，見 scoring.py 頂部 docstring 分項公式）------
+# 現況操縱偵測（`_MANIP_PATTERNS`）是關鍵詞比對，換詞即可繞過。W3 補兩個確定性、
+# 可回溯的協同/異常指標，只用既有 evidence pool 的 source/text/ts（不需真社群圖、
+# 不呼叫 Bedrock）。命中時併入既有 `w["manip"]`（0.40）懲罰——不新增權重項、不動
+# `raw = w["src"]*rep + w["corr"]*corr + w["rec"]*rec - w["manip"]*manip` 聚合公式，
+# 只是 `manip` 這一項的計算多算一種訊號（見 `_manipulation_penalty` 的 `extra_hits`）。
+
+# 指標 A 專用：只有社群類 kind（social/sentiment）才納入模板相似度比對，見下方
+# codex 對抗審修正說明。客觀事實類（price/onchain/...）本來就該長得像、新聞聯播
+# 同一通稿也本來就該長得像，皆非協同操縱訊號，一律不比對。
+_TEMPLATE_ELIGIBLE_KINDS = frozenset({"social", "sentiment"})
+# codex 對抗審 [HIGH]：3 家新聞逐字/近似轉載同一通稿（kind=news，先前非豁免）
+# 曾被誤標協同操縱——確定性相似度分數本身分不清「合法通稿聯播」與「協同
+# 灌水」，只能靠 kind 收斂。協同操縱灌水本質上是社群現象（telegram/reddit/
+# twitter 群），新聞聯播、官方/監管公告高相似是正常。改用**允許清單**（而非
+# 持續加長的豁免清單）：只有 social/sentiment 才納入模板比對，news/
+# regulatory/price/price_live/onchain/hoyabit 全數不比對，未來新增的 kind
+# 預設也不納入（更安全，不必每次都記得補豁免清單）。
+
+_TEMPLATE_JACCARD_THRESHOLD = 0.8  # 指標 A：模板相似度門檻（比 _corroboration 的 0.4 嚴格得多）
+_TEMPLATE_MIN_SOURCES = 3          # 指標 A：至少涉及幾個不同來源才觸發
+
+_BURST_WINDOW_SEC = 3600.0         # 指標 B：爆量偵測窗口（60 分鐘）
+_BURST_RATIO = 3.0                 # 指標 B：單源窗口內主張數 > 全池同窗口中位數的幾倍才觸發
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """Jaccard 相似度：|交集| / |聯集|。任一邊為空集合視為不相似（0.0），避免除以 0。"""
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def _coordination_template_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
+    """W3 指標 A：模板化文字相似偵測（informational-only，不扣信任分）。
+
+    同議題跨**不同來源**兩兩比對（沿用既有 `_normalize` 去 `DOMAIN_STOP` 後的
+    token 集），門檻拉高到 `_TEMPLATE_JACCARD_THRESHOLD`（0.8）——遠比
+    `_corroboration` 判斷「同主題可佐證」用的 0.4 嚴格，0.8 代表「近乎逐字/
+    近義詞置換」的模板化文字，不是單純同主題。命中且涉及
+    `_TEMPLATE_MIN_SOURCES`（3）個以上獨立來源才觸發，回傳可回溯 flag
+    （含涉入來源清單與最高 Jaccard 值，供 `Evidence.info_flags` 顯示）。
+
+    **codex 對抗審確認的根本限制、CEO 定案**：文字相似度在任何 kind 下都無法
+    單獨區分「協同操縱」vs「合法聯播/引用」（3 家新聞轉載同一通稿也會是高
+    Jaccard），自動扣信任分必然誤傷合法聯播。因此本指標**只做透明化的
+    informational flag、不再併入 `_manipulation_penalty` 的 `extra_hits`**
+    （見 `_coordination_signals` docstring），措辭刻意用中性的「資訊:」前綴，
+    不用「協同:」等指控字眼——單靠相似度分數不足以自動判定操縱，留給人工
+    判讀。
+
+    防呆：
+    - **只有 `_TEMPLATE_ELIGIBLE_KINDS`（social/sentiment）納入比對**——
+      news/regulatory/price/price_live/onchain/hoyabit 全數跳過。理由同上：
+      新聞聯播同一份通稿、官方/監管公告本來就該高度相似，此防呆進一步降低
+      informational flag 的雜訊量（即使不扣分，也不該對合法聯播灌一堆
+      無意義的相似度提示）。
+    - 需 ≥3 個獨立來源才觸發：2 家媒體/帳號逐字轉載同一份文本（只有 2 個
+      來源）不觸發，避免雜訊。
+    """
+    eligible = [c for c in all_claims if c.doc.kind in _TEMPLATE_ELIGIBLE_KINDS]
+    tokens = {c.id: (_normalize(c.text) - DOMAIN_STOP) for c in eligible}
+
+    flags: dict[str, list[str]] = {}
+    for c in eligible:
+        t1 = tokens[c.id]
+        if not t1:
+            continue
+        # 同一其他來源可能有多筆命中，取每個「其他來源」的最高 Jaccard 供顯示。
+        best_by_source: dict[str, float] = {}
+        for other in eligible:
+            if other.id == c.id or other.doc.source == c.doc.source:
+                continue
+            t2 = tokens[other.id]
+            if not t2:
+                continue
+            j = _jaccard(t1, t2)
+            if j >= _TEMPLATE_JACCARD_THRESHOLD and j > best_by_source.get(other.doc.source, 0.0):
+                best_by_source[other.doc.source] = j
+
+        involved_sources = {c.doc.source, *best_by_source.keys()}
+        if len(involved_sources) < _TEMPLATE_MIN_SOURCES:
+            continue
+
+        best_j = max(best_by_source.values())
+        source_list = ",".join(sorted(involved_sources))
+        flags.setdefault(c.id, []).append(
+            f"資訊:多源文字高度相似(來源{source_list};Jaccard {best_j:.2f})"
+            "—可能協同或聯播,供判讀"
+        )
+    return flags
+
+
+def _max_distinct_in_rolling_window(
+    ordered: list[Claim], window_sec: float
+) -> tuple[int, list[Claim]]:
+    """在依 `(ts, id)` 遞增排序好的同一來源 claims 上，用雙指標(two-pointer)找出
+    **任一**長度 `window_sec` 的滾動視窗內，相異 `c.text` 數的最大值，以及達成
+    該最大值的其中一組 claims（原始 claim 物件，含重複文本，供回溯/flag 用）。
+
+    真正的滑動窗（視窗邊界＝實際 ts 差值 < window_sec），不是固定牆鐘分桶——
+    避免爆量橫跨整點（如 xx:59~xx+1:01）被切成兩個低於門檻的子群、給攻擊者
+    鑽空子（codex 對抗審 [MEDIUM] 修正）。
+
+    確定性：多個視窗打平時取「最早出現」的那個（`right` 由左至右遞增掃描、
+    `distinct > best` 用嚴格大於，先找到的視窗不會被同分的後來者覆蓋）；
+    呼叫端已用 `(ts, id)` 排序保證輸入順序本身不受 `PYTHONHASHSEED` 影響。
+    """
+    n = len(ordered)
+    if n == 0:
+        return 0, []
+    freq: dict[str, int] = {}
+    distinct = 0
+    best = 0
+    best_range = (0, 0)
+    left = 0
+    for right in range(n):
+        t = ordered[right].text
+        if freq.get(t, 0) == 0:
+            distinct += 1
+        freq[t] = freq.get(t, 0) + 1
+        while ordered[right].doc.ts - ordered[left].doc.ts >= window_sec:
+            lt = ordered[left].text
+            freq[lt] -= 1
+            if freq[lt] == 0:
+                distinct -= 1
+            left += 1
+        if distinct > best:
+            best = distinct
+            best_range = (left, right + 1)
+    return best, ordered[best_range[0]:best_range[1]]
+
+
+def _distinct_text_count_in_range(
+    ordered: list[Claim], start_ts: float, end_ts: float
+) -> int:
+    """在依 ts 排序好的 claims 上，數出 `doc.ts ∈ [start_ts, end_ts)` 區間內的
+    相異 `c.text` 數（逐字去重）。與 `_max_distinct_in_rolling_window` 的視窗
+    定義一致（左閉右開），用於把「候選源爆量的那個具體時段」對齊到其他來源，
+    數他們在**同一段時間**內各自發了幾則——而不是他們自己歷史上不相干時段
+    的最大值。
+    """
+    return len({c.text for c in ordered if start_ts <= c.doc.ts < end_ts})
+
+
+def _coordination_burst_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
+    """W3 指標 B：單源爆量偵測（確定性滾動 60 分鐘視窗，同窗對齊比較基準）。
+
+    對每個來源，先各自獨立在其依 ts 排序後的 claims 上用
+    `_max_distinct_in_rolling_window` 找出**任一** `_BURST_WINDOW_SEC`（60
+    分鐘）滾動視窗內的最大相異文本數（`c.text` 逐字去重——同一段文本重貼
+    不算多筆主張，見下方防呆），記為該來源的候選爆量計數 `cnt` 與對應的
+    絕對時間區間 `[window_start, window_start + 60min)`。
+
+    判定基準（baseline）：**把候選來源爆量的那個具體時間區間，對齊套用到
+    每個其他來源**，各自數他們在同一段時間內發了幾則相異主張——取這些
+    「同窗計數」的中位數（leave-one-out：候選自己不計入）× `_BURST_RATIO`
+    （3）當門檻，`cnt` 超過才觸發。
+
+    （codex 對抗審 [第 3 個 HIGH] 修正：先前 baseline 誤用「每個來源自己
+    歷史上的最大滾動窗計數」，即使該最大值發生在跟候選完全不相干的時段。
+    例：候選現在爆 8 則，另一來源 3 小時前也曾自己爆過 8 則、但在候選爆量
+    的當下窗口內其實只發了 0～1 則──用「別人歷史最大」當分母會讓
+    `8 ≤ 3×8` 不觸發，即使其他來源在候選爆量當下其實毫無動靜。改為
+    「同一時段大家多活躍」而非「別人歷史多活躍」，才是正確的協同異常
+    比較基準。）
+
+    （codex 對抗審 [HIGH #1] 修正仍保留：中位數排除候選自己再算——2 來源
+    灌水/正常情境下，若中位數誤含候選自己會造成數學上無法觸發。）
+
+    防呆：
+    - 以 `c.text` 逐字去重後才計數。
+    - 整個資料池只有 1 個來源時（無其他來源可比較）整批跳過。
+    - 同窗中位數 ≤ 0（其餘來源在候選爆量當下同窗內完全沒有主張）時保守
+      跳過不觸發——刻意不讓「基準為 0」讓任何 ≥1 則主張都被判定爆量
+      （避免把單一正常來源在安靜窗口內僅發 1 則就誤判為爆量；已知
+      的保守取捨，若候選源同時真的爆量且其餘來源在同窗內至少有
+      ≥1 則活動，中位數 ≥1 即可正常觸發）。
+    """
+    claims_by_source: dict[str, list[Claim]] = {}
+    for c in all_claims:
+        claims_by_source.setdefault(c.doc.source, []).append(c)
+
+    if len(claims_by_source) < 2:
+        return {}
+
+    ordered_by_source: dict[str, list[Claim]] = {
+        source: sorted(s_claims, key=lambda c: (c.doc.ts, c.id))
+        for source, s_claims in claims_by_source.items()
+    }
+
+    max_count: dict[str, int] = {}
+    max_window: dict[str, list[Claim]] = {}
+    window_bounds: dict[str, tuple[float, float]] = {}
+    for source, ordered in ordered_by_source.items():
+        best, window_claims = _max_distinct_in_rolling_window(ordered, _BURST_WINDOW_SEC)
+        max_count[source] = best
+        max_window[source] = window_claims
+        start_ts = window_claims[0].doc.ts if window_claims else ordered[0].doc.ts
+        window_bounds[source] = (start_ts, start_ts + _BURST_WINDOW_SEC)
+
+    flags: dict[str, list[str]] = {}
+    window_min = int(_BURST_WINDOW_SEC // 60)
+    for source, cnt in max_count.items():
+        if cnt <= 0:
+            continue
+        start_ts, end_ts = window_bounds[source]
+        aligned = sorted(
+            _distinct_text_count_in_range(ordered, start_ts, end_ts)
+            for other_source, ordered in ordered_by_source.items()
+            if other_source != source
+        )
+        mid = len(aligned) // 2
+        median = aligned[mid] if len(aligned) % 2 else (aligned[mid - 1] + aligned[mid]) / 2.0
+        if median <= 0 or cnt <= median * _BURST_RATIO:
+            continue
+        for c in max_window[source]:
+            flags.setdefault(c.id, []).append(
+                f"協同:單源爆量(來源{source};{window_min}分鐘內{cnt}則相異主張,"
+                f"同窗對照其餘來源中位數{median:g}的{cnt / median:.1f}倍)"
+            )
+    return flags
+
+
+def _coordination_signals(all_claims: list[Claim]) -> dict[str, list[str]]:
+    """W3：確定性、免 LLM 的協同操縱偵測總入口。
+
+    目前只整合指標 A（模板相似，`_coordination_template_flags`），對
+    `all_claims` 只算一次——O(n²)，量級同 `_corroboration`（`score()` 對每個
+    claim 都要跟其他所有 claims 比對一次），不新增預算風險。
+
+    指標 B（單源爆量，`_coordination_burst_flags`）**降級為 follow-up
+    #15，目前不啟用**：經 4 輪 codex 對抗審（中位數自含候選自己、固定牆鐘
+    分桶可繞、baseline 未對齊候選窗口、只評估各源「最大窗」漏掉後續同窗
+    baseline 偏低的小爆量），仍持續挖出新的 subtle 檢測缺陷，屬於
+    per-window anomaly 統計上需要更嚴謹重新設計的問題，不宜無限打磨後
+    倉促上線。`_coordination_burst_flags` / `_max_distinct_in_rolling_window`
+    / `_distinct_text_count_in_range` 程式碼保留（不刪），供 #15 重新設計時
+    直接沿用/參考，但呼叫端刻意不接。
+
+    回傳 `{claim_id: [flag, ...]}`；未命中的 claim 不會出現在 dict 中，呼叫端
+    用 `.get(claim.id, [])` 取用。
+
+    **CEO 定案（codex 對抗審確認根本限制）：informational-only，不扣信任
+    分。** 文字相似度在任何 kind 下都無法單獨區分「協同操縱」vs「合法聯播/
+    引用」（3 家新聞轉載同一份官方通稿也會是高 Jaccard），自動扣分必然誤傷
+    合法聯播。命中結果**不**併入 `_manipulation_penalty` 的 `extra_hits`、
+    **不**降低 trust、**不**影響動態信譽（`_iterate_source_reputation`）；
+    純粹併入 `ScoredClaim.info_flags` → `Evidence.info_flags`，供人工判讀
+    （如「資訊:多源文字高度相似(來源a,b,c;Jaccard 0.85)—可能協同或聯播,
+    供判讀」，措辭刻意中性，不用「協同:」等指控字眼）。
+
+    與此互斥、維持原行為不變的是 `_manipulation_flags`（regex 關鍵詞命中）：
+    那是既有的、獨立的操縱偵測機制，仍正常扣分 + 紅旗🚩，不受本次
+    informational-only 改動影響。
+    """
+    signals: dict[str, list[str]] = {}
+    for cid, fl in _coordination_template_flags(all_claims).items():
+        signals.setdefault(cid, []).extend(fl)
+    # W3 burst 指標降級 follow-up #15：per-window anomaly 需正確重設計，暫不啟用。
+    # for cid, fl in _coordination_burst_flags(all_claims).items():
+    #     signals.setdefault(cid, []).extend(fl)
+    return signals
 
 
 class _StanceBudget:
@@ -471,6 +755,12 @@ def _iterate_source_reputation(
     trace_out: dict | None = None,
 ) -> dict[str, float]:
     """W2：bounded 迭代動態來源信譽。純函式、無隨機性 → 同輸入必同輸出。
+
+    W3 協同操縱指標（`_coordination_signals`）**不參與這裡的 manip 計算**：
+    CEO 定案（codex 對抗審確認根本限制）改為 informational-only，只產生
+    `ScoredClaim.info_flags`，不併入任何 `_manipulation_penalty` 的
+    `extra_hits`，因此動態信譽的 `static_manip` 也不受 W3 訊號影響（純粹
+    只看 `_manip_hits` 既有 regex 關鍵詞命中）。
 
     實作偏離 gray 計劃字面簽章之處（皆為必要、非隱藏的工程判斷，詳見 PR 說明）：
     - 加了 `now`：`_recency_decay` 需要，計劃描述省略。
@@ -736,6 +1026,13 @@ def score(
     if stance_fn is None:
         stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
 
+    # W3：確定性、informational-only 文字相似度透明化訊號（模板相似），對本次
+    # `score()` 的整個 claims 池只算一次（O(n²)，量級同 `_corroboration`，見
+    # `_coordination_signals` docstring）。**不參與 manip 計算**——CEO 定案：
+    # 文字相似度單獨無法證明協同操縱，只回填 `ScoredClaim.info_flags` 供人工
+    # 判讀，`_iterate_source_reputation` 的 static_manip 也不吃這份結果。
+    info_flags_by_id = _coordination_signals(claims) if claims else {}
+
     dynamic_map: dict[str, float] | None = None
     trace_by_source: dict[str, dict] | None = None
     if dynamic_reputation and claims:
@@ -781,6 +1078,7 @@ def score(
         rep = _source_reputation(c, dynamic_map=dynamic_map)
         corr = _corroboration(c, claims, stance_fn=stance_fn)
         rec = _recency_decay(c, now)
+        c_info_flags = info_flags_by_id.get(c.id, [])
         manip = _manipulation_penalty(c)
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
         trust = max(0.0, min(1.0, raw))
@@ -794,6 +1092,10 @@ def score(
                     trace_by_source.get(c.doc.source) if trace_by_source is not None else None
                 ),
                 manip_flags=_manipulation_flags(c),
+                # W3：文字相似度透明化 flag，informational-only，回填
+                # `Evidence.info_flags`（見 `_coordination_signals` docstring）。
+                # 不併入 `manip_flags`／`components["manipulation"]`。
+                info_flags=c_info_flags,
             )
         )
     return out

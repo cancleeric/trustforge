@@ -70,6 +70,10 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         # Tier2 可解釋 UX：操縱關鍵詞命中原文回填，供 web.py 渲染紅旗
         # （見 trust.scoring._manipulation_flags；空 list 時等同未命中）。
         flags=list(sc.manip_flags),
+        # W3：文字相似度透明化 flag，informational-only、不影響 trust 分數，
+        # 供 web.py 用中性樣式渲染（見 trust.scoring._coordination_signals；
+        # 空 list 時等同未命中）。
+        info_flags=list(sc.info_flags),
     )
 
 

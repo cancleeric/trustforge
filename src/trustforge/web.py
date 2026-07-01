@@ -92,6 +92,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:#0d1117;border:1px solid #30363d;border-radius:5px;overflow:hidden;margin-right:4px}}
  .tf-bar{{height:100%;border-radius:5px}}
  .tf-low{{display:inline-block;background:rgba(248,81,73,.14);border:1px solid rgba(248,81,73,.4);color:#f85149;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
+ .tf-info{{display:inline-block;background:rgba(139,148,158,.14);border:1px solid rgba(139,148,158,.4);color:#8b949e;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
  .tf-conf-wrap{{background:#0f141a;border:1px solid #30363d;border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
  .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
@@ -542,7 +543,12 @@ def _render_evidence_list(
     - trust_components 有值時在 <details> 內顯示分項拆解。
     - 來源 pill 旁附 tier·獨立性標籤（依 kind 映射，見 `_independence_tier`）。
     - `ev.flags` 非空時附操縱紅旗徽章（沿用既有 `.tf-low` badge 樣式，見
-      `trust.scoring._manipulation_flags` / `Evidence.flags`）。
+      `trust.scoring._manipulation_flags` / `Evidence.flags`）——這是「確定
+      判定為操縱」，已反映在 trust 分數。
+    - `ev.info_flags` 非空時另外附中性資訊徽章（`.tf-info`，ℹ️，不用紅旗樣式，
+      見 `trust.scoring._coordination_signals` / `Evidence.info_flags`）——
+      這**不是**操縱判定，只是「文字相似度高，供人工判讀」的透明化提示，
+      不影響 trust 分數，UI 上刻意與操縱紅旗區分開來，避免誤導。
     """
     e = html.escape
     rows: list[str] = []
@@ -560,6 +566,14 @@ def _render_evidence_list(
             flags_badge = (
                 f' <span class="tf-low" title="操縱關鍵詞：{e(flags_text)}">'
                 f'&#128681; {e(flags_text)}</span>'
+            )
+        info_flags = getattr(ev, "info_flags", None) or []
+        info_flags_badge = ""
+        if info_flags:
+            info_flags_text = "、".join(info_flags)
+            info_flags_badge = (
+                f' <span class="tf-info" title="{e(info_flags_text)}">'
+                f'&#8505; 相似簇</span>'
             )
         tier_label, tier_color = _independence_tier(ev.kind)
         tier_pill = (
@@ -586,6 +600,7 @@ def _render_evidence_list(
             f'{tier_pill}'
             f'<span class="tf-ev-date">{e(ev.fetched_at)}</span>'
             f'{flags_badge}'
+            f'{info_flags_badge}'
             f"</summary>"
             f'<div class="tf-ev-body">'
             f"<p style='margin:.3rem 0;font-size:.85rem;color:#c9d1d9'>{e(ev.content_reference)}</p>"
