@@ -144,7 +144,15 @@ class TrustedBrief:
     query: str
     supporting: list[ScoredClaim]      # 高信任、支撐主流結論
     contrarian: list[ScoredClaim]      # 低信任 / 反方，供反方證據
-    confidence: float                  # 整體信心（0–1）
+    confidence: float                  # 整體信心（0–1，支撐主張 trust 的裸加權均值）
+    # W4：校準後信心（0–1），由 `aggregate()` 用 `_calibrate_confidence()`
+    # （硬編分位數映射表，見該函式上方誠實聲明）從 `confidence` 換算而來，
+    # 供 `agent.orchestrator` 的三態 abstain 判斷使用。**保留** `confidence`
+    # 裸值供對照/既有呼叫端相容——不砍舊欄位。預設 0.0：只有透過
+    # `aggregate()` 產生的 brief 才會是真正校準值；測試直接手動建構
+    # `TrustedBrief(...)` 不傳此欄位時維持逐字向後相容（未校準 -> 0.0，
+    # 呼叫端若讀取此欄位務必經由 aggregate() 取得有意義的值）。
+    calibrated_confidence: float = 0.0
 
     def provenance(self) -> list[dict]:
         """溯源鏈：每個被採用主張的來源與分數。"""
@@ -1101,6 +1109,65 @@ def score(
     return out
 
 
+# --- W4：信心校準（確定性、免 LLM）---------------------------------------
+# 現況 `aggregate()` 的 `confidence` 是支撐主張 trust 的裸加權均值，`agent.
+# orchestrator` 各處另外對它套一刀切的武斷硬門檻（0.5）決定要不要給結論、
+# 要不要標限制——裸均值在門檻附近（如 0.49 vs 0.51）一票之差就翻越門檻，
+# 是假精確。W4 加一層**硬編分位數映射表**（比照 `_MANIP_PATTERNS` 寫死在
+# 程式碼、可版控可審，不是訓練出來的黑箱模型）把裸信心壓成校準後信心，
+# 讓 `agent.orchestrator` 的三態 abstain 判斷（見該檔案）有更保守、更貼近
+# 實際證據強度的依據。
+#
+# ⚠️ 誠實聲明：這是**簡化的分位數校準，不是嚴謹的 conformal prediction**——
+# 沒有 hold-out calibration set、沒有 exchangeability 假設驗證、不提供
+# conformal coverage 保證（如「90% 校準區間實際涵蓋 90% 真值」）。這裡只是
+# 幾個工程觀察錨點的分段線性插值，目的是壓低裸信心在 0.5 附近的假精確，
+# 供下游 abstain 三態判斷用；不對外呈現為論文級統計保證。
+#
+# 錨點依裸信心（x）遞增排序，(裸信心, 校準後信心)。設計邏輯：
+# - x < 0.40：非線性往下壓。這段裸均值最容易來自樣本量稀薄的邊際情境
+#   （例如只有 1 筆剛好卡在 support_threshold=0.50 之上的支撐主張，或
+#   supporting 為空時的 0.0 fallback），加權平均在此區間容易呈現「看起來
+#   還有一點信心」的假精確，實際證據強度不足，故整段壓縮往下修正。
+# - x >= 0.40：維持原值（identity，不調整）。到這個高度通常已有中等以上
+#   證據結構支撐（多源交叉佐證、時效佳的客觀來源等），裸加權均值本身已
+#   相對可信，不需要額外處理——**這也是刻意設計**：只對「稀薄證據偽裝成
+#   及格信心」的低段做保守修正，不對已經有實質佐證的中高段動刀。
+_CALIBRATION_TABLE: list[tuple[float, float]] = [
+    (0.00, 0.00),
+    (0.10, 0.03),
+    (0.20, 0.08),
+    (0.30, 0.20),
+    (0.40, 0.40),
+    (0.55, 0.55),
+    (0.70, 0.70),
+    (0.85, 0.85),
+    (1.00, 1.00),
+]
+
+
+def _calibrate_confidence(raw: float) -> float:
+    """用 `_CALIBRATION_TABLE`（硬編分位數映射表）把裸信心校準。
+
+    確定性、免 LLM：純查表 + 分段線性插值，同輸入必同輸出，不呼叫任何
+    模型。**簡化版分位數校準，非嚴謹 conformal coverage 保證**（見
+    `_CALIBRATION_TABLE` 上方誠實聲明）。輸入超出 [0, 1] 時 clamp 到邊界。
+    """
+    x = max(0.0, min(1.0, raw))
+    table = _CALIBRATION_TABLE
+    if x <= table[0][0]:
+        return table[0][1]
+    if x >= table[-1][0]:
+        return table[-1][1]
+    for (x0, y0), (x1, y1) in zip(table, table[1:]):
+        if x0 <= x <= x1:
+            if x1 == x0:  # 防禦性：表若有重複 x 值不除以 0
+                return y0
+            ratio = (x - x0) / (x1 - x0)
+            return round(y0 + ratio * (y1 - y0), 4)
+    return round(x, 4)  # 理論上不會到這（表已覆蓋 [0, 1]，防禦性寫法）
+
+
 # --- 5. 聚合 -------------------------------------------------------------
 def aggregate(scored: list[ScoredClaim], query: str,
               support_threshold: float = 0.50,
@@ -1148,4 +1215,5 @@ def aggregate(scored: list[ScoredClaim], query: str,
         supporting=supporting[:10],
         contrarian=contrarian[:5],
         confidence=confidence,
+        calibrated_confidence=_calibrate_confidence(confidence),
     )

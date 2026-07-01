@@ -48,6 +48,19 @@ _SENTIMENT_KINDS: set[str] = {"news", "social", "sentiment"}
 # （非快取命中一律 fail-safe 為 "neutral"，不會誤判），不靠這個門檻把關準確度。
 _STANCE_PAIR_MIN_TRUST = 0.35
 
+# W4：校準信心三態 abstain 門檻（取代現行單一武斷 0.5 硬門檻）。
+# 沿用 `trust.scoring._calibrate_confidence()` 產出的 `calibrated_confidence`
+# （硬編分位數映射表，確定性、免 LLM；誠實聲明見該函式 docstring：簡化版，
+# 非嚴謹 conformal coverage 保證）。0.5 錨點本身**不刪**——從「唯一硬門檻」
+# 降為三態分界之一，`_derive_limits` 的 `brief.confidence < 0.5`、
+# `aggregate(support_threshold=0.50)` 等既有呼叫端逐字不變（回歸鎖）。
+#   calibrated < _ABSTAIN_CALIBRATED_THRESHOLD 或 supporting 筆數
+#   < _ABSTAIN_MIN_SUPPORTING（證據不足，樣本量過小）→ abstain：不給方向詞。
+#   _ABSTAIN_CALIBRATED_THRESHOLD <= calibrated < 0.5 → 仍出結論，標「低信心」。
+#   calibrated >= 0.5 → 正常（既有行為逐字不變）。
+_ABSTAIN_CALIBRATED_THRESHOLD = 0.35
+_ABSTAIN_MIN_SUPPORTING = 2
+
 SYSTEM = (
     "你是加密市場分析助理。只能依據提供的『已信任加權證據』作答，"
     "區分事實/推論/結論，標註信心與限制，不提供投資建議。"
@@ -401,18 +414,52 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         _add_evidence(sc, "反方／低信任訊號")
 
     # 2. 我方判斷（pipeline 產生，非外部結論）
-    direction = _direction(brief)
+    # W4：校準信心三態 abstain（見上方 `_ABSTAIN_CALIBRATED_THRESHOLD` 常數
+    # 註解）。calibrated 的誠實聲明見 `trust.scoring._calibrate_confidence`
+    # docstring：簡化版分位數校準，非嚴謹 conformal coverage 保證。
+    calibrated = brief.calibrated_confidence
+    n_supporting = len(brief.supporting)
+    is_abstain = (
+        calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_supporting < _ABSTAIN_MIN_SUPPORTING
+    )
+    is_low_confidence = (not is_abstain) and calibrated < 0.5
+
     facts = [sc.claim.text for sc in brief.supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
     n_indep = len({sc.claim.doc.source for sc in brief.supporting})
 
-    if qtype == QuestionType.HYPOTHESIS:
-        head = f"針對假設「{query}」：依現有證據，{coin} 短期傾向{direction}。"
-    elif qtype == QuestionType.COMPARISON:
-        head = f"{coin} 當前市場位置：{direction}。（比較分析需對每個幣種各跑一次 pipeline 後並列）"
+    if is_abstain:
+        # 證據不足：不代客決策，不給任何方向性字眼（不判斷偏多/偏空/中性），
+        # 只中性陳述「資料不足以判斷」+ 具體原因，供人工自行決定是否需要
+        # 補資料再問。direction 設為「不明」，與 schema.Report._direction_label()
+        # 掃描不到 偏多/偏空/中性 關鍵詞時的預設值一致。
+        direction = "不明"
+        head = (
+            f"{coin}：現有資料不足以判斷市場方向"
+            f"（支撐證據 {n_supporting} 筆、校準信心 {calibrated:.2f}），"
+            "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
+        )
     else:
-        head = f"{coin} 當前市場狀態判斷：{direction}。"
-    market_judgment = head + f"（{n_indep} 個獨立來源支撐，整體信心 {brief.confidence:.2f}）"
-    log.record("judgment.derive", params={"direction": direction, "indep_sources": n_indep})
+        direction = _direction(brief)
+        if qtype == QuestionType.HYPOTHESIS:
+            head = f"針對假設「{query}」：依現有證據，{coin} 短期傾向{direction}。"
+        elif qtype == QuestionType.COMPARISON:
+            head = f"{coin} 當前市場位置：{direction}。（比較分析需對每個幣種各跑一次 pipeline 後並列）"
+        else:
+            head = f"{coin} 當前市場狀態判斷：{direction}。"
+        if is_low_confidence:
+            head += "（低信心，證據強度有限，僅供參考）"
+    market_judgment = (
+        head + f"（{n_indep} 個獨立來源支撐，整體信心 {brief.confidence:.2f}，"
+        f"校準後信心 {calibrated:.2f}）"
+    )
+    log.record(
+        "judgment.derive",
+        params={
+            "direction": direction, "indep_sources": n_indep,
+            "calibrated_confidence": round(calibrated, 4),
+            "abstain": is_abstain, "low_confidence": is_low_confidence,
+        },
+    )
 
     # 2.5 跨源訊號偵測（純演算法，在 Bedrock 行文前完成）
     # stance_fn：未由呼叫端提供時（例如測試直接呼叫 build_report），自建一份
@@ -448,13 +495,25 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             f"\n跨源訊號（已由 pipeline 算好）：{cross_signal['summary']}\n"
             "請在行文中僅敘述此跨源訊號摘要，不得自行判斷背離/共識。"
         )
+    if is_abstain:
+        # abstain：不引導 LLM 產生任何方向性推論，只請它敘述「證據不足」現況。
+        _instruction = (
+            "\n目前支撐證據不足（筆數過少或校準信心過低），"
+            "請用 1-2 句敘述資料現況、說明尚不足以形成市場判斷，"
+            "不得推測任何方向性結論、不得使用「看漲/看跌/偏多/偏空/上漲/下跌」等字眼，"
+            "每個敘述必須引用對應 claim_id（格式：[claim_id]），僅依事實，勿引入外部結論。"
+        )
+    else:
+        _instruction = (
+            "\n請用 2-3 句把上述事實串成事實→推論→結論的推理，"
+            "每個判斷必須引用對應 claim_id（格式：[claim_id]），僅依事實，勿引入外部結論。"
+        )
     prompt = (
         f"幣種：{coin}\n題型：{qtype.value}\n問題：{query}\n"
         f"我方判斷：{market_judgment}\n"
         f"事實（含 claim_id）：\n{claim_refs}\n"
         f"{_cross_note}"
-        "\n請用 2-3 句把上述事實串成事實→推論→結論的推理，"
-        "每個判斷必須引用對應 claim_id（格式：[claim_id]），僅依事實，勿引入外部結論。"
+        f"{_instruction}"
     )
     _t_step3 = log._now()
     try:
@@ -482,10 +541,17 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                 "step_elapsed_sec": _step3_elapsed},
         summary=f"帶 claim_id 溯源行文；耗時 {_step3_elapsed}s；輸入 {len(brief.supporting)} 條主張",
     )
-    inferences = [
-        f"客觀價格事實指向{direction}；由 {n_indep} 個獨立來源交叉佐證。",
-        narrative.strip(),
-    ]
+    if is_abstain:
+        inferences = [
+            f"支撐證據僅 {n_supporting} 筆、校準信心 {calibrated:.2f}，"
+            "證據強度不足以支持任何方向性推論。",
+            narrative.strip(),
+        ]
+    else:
+        inferences = [
+            f"客觀價格事實指向{direction}；由 {n_indep} 個獨立來源交叉佐證。",
+            narrative.strip(),
+        ]
 
     limits, flips = _derive_limits(brief)
     report = Report(
