@@ -353,17 +353,35 @@ def test_issue15_english_antonym_claims_not_corroborated():
     assert stance == "contradict", f"#15：應判為 contradict，實際: {stance}（evidence={evidence}）"
 
 
-def test_chinese_antonym_claims_not_corroborated():
-    """中文反義對照：『監管明朗』vs『監管收緊』同樣應被矛盾閘擋下，不能只修英文。"""
+def test_chinese_single_antonym_pair_conservatively_not_blocked():
+    """中文單一反義對（保守硬化後更新，2026-07-01 code-review）：
+
+    『監管明朗』vs『監管收緊』只命中 1 個反義對（明朗↔收緊）。核心保守機制
+    改為「≥2 個不同反義對才判 contradict」，恰好命中 1 對時保守回 neutral，
+    不誤殺——該來源仍計入獨立佐證（corr > 0），不再是 corr = 0.0。
+
+    這是刻意的保守取捨：寧可漏抓單對矛盾，不可錯殺合法佐證。細膩的單對語意
+    判斷（例如靠更多上下文才能確定「明朗」與「收緊」在此語境下真的對立）
+    留給後續 W1.5（Bedrock 輔助）處理，不在本輪 regex/集合運算範圍內。
+
+    #15 原始 bug 案例（英文，命中 2 對：clarity↔scrutiny + adoption↔caution）
+    仍然會被矛盾閘擋下，見 `test_issue15_english_antonym_claims_not_corroborated`。
+    """
     from trustforge.trust.scoring import Claim, _corroboration
+    from trustforge.trust.stance import semantic_stance
 
     doc_a = _make_doc("da", "news", "coindesk")
     doc_b = _make_doc("db", "news", "financial-times")
-    c_a = Claim(id="zh15a", text="監管 明朗 有助 市場 信心 大幅 提升", doc=doc_a)
-    c_b = Claim(id="zh15b", text="監管 收緊 導致 市場 信心 大幅 下滑", doc=doc_b)
+    text_a = "監管 明朗 有助 市場 信心 大幅 提升"
+    text_b = "監管 收緊 導致 市場 信心 大幅 下滑"
+    c_a = Claim(id="zh15a", text=text_a, doc=doc_a)
+    c_b = Claim(id="zh15b", text=text_b, doc=doc_b)
+
+    stance, evidence = semantic_stance(text_a, text_b, set(), set())
+    assert stance != "contradict", f"單一反義對不應判 contradict，實際: {stance}（evidence={evidence}）"
 
     corr = _corroboration(c_a, [c_a, c_b])
-    assert corr == 0.0, f"中文反義主張不應被判為佐證，corr 應 = 0.0，實際: {corr}"
+    assert corr > 0.0, f"單一反義對應保守計入佐證（不誤殺），corr 應 > 0.0，實際: {corr}"
 
 
 def test_genuine_synonym_support_not_falsely_blocked():
@@ -443,9 +461,9 @@ def test_antonym_pairs_avoid_domain_drift_generic_words():
         )
 
 
-def test_score_components_has_new_corroboration_evidence_key():
-    """score() 的 components dict 新增 corroboration_evidence（非替換），
-    既有分項 key（reputation/corroboration/recency/manipulation）維持不變。
+def test_score_components_stays_pure_numeric():
+    """review 回歸（#6/#7/#8）：components dict 還原為純 str→number，不對外 JSON API
+    contract 引入非數值欄位（evidence 可解釋輸出延到 Tier2 UX 再做）。
     """
     from trustforge.trust.scoring import extract_claims, score
 
@@ -455,9 +473,9 @@ def test_score_components_has_new_corroboration_evidence_key():
     ]
     scored = score(extract_claims(docs), now=1.0)
     for sc in scored:
-        assert {"reputation", "corroboration", "recency", "manipulation"} <= set(sc.components.keys())
-        assert "corroboration_evidence" in sc.components
-        assert isinstance(sc.components["corroboration_evidence"], list)
+        assert set(sc.components.keys()) == {"reputation", "corroboration", "recency", "manipulation"}
+        for v in sc.components.values():
+            assert isinstance(v, (int, float)), f"components 值應為純數值，實際: {v!r}（型別 {type(v)}）"
 
 
 # --- W1 案2b 追加修正：中文單字「不」否定漏偵測（CEO 親測抓到的假 contradict）--------
@@ -504,3 +522,117 @@ def test_zh_bujin_not_treated_as_negation():
     tb = _normalize(b) - DOMAIN_STOP
     stance, evidence = semantic_stance(a, b, ta, tb)
     assert stance == "contradict", f"「不僅」不應被當否定詞，仍應判 contradict，實際: {stance}（evidence={evidence}）"
+
+
+# --- W1 案2b 保守硬化（2026-07-01 高強度 code-review 實證回歸）--------------------
+#
+# 老闆拍板：矛盾閘改為「僅當跨兩主張命中 ≥2 個不同反義對，才判 contradict；
+# 單一反義對 → neutral（計入佐證，不丟）」。以下測試皆來自 review 實證失敗案例。
+
+def test_review1_adoption_despite_caution_corroborates():
+    """[#1] 『adoption rising despite short-term caution』與『adoption is rising』
+    只命中 1 個反義對（adoption↔caution，經由反向配對）→ 保守回 neutral，
+    不可判 contradict。
+
+    semantic_stance 直接用 review 原始短句驗證核心保守機制；`_corroboration`
+    則另外用語意等價、但補足共享詞彙的版本驗證管線層級真的算入佐證——
+    M1 既有的 token-overlap≥0.4 門檻是與本次修正無關的前置閘，過短的句子
+    本來就不會進入 stance 判斷，這裡刻意加長句子只為讓 overlap 門檻通過，
+    語意（adoption 主軸 + caution 從屬子句）與 review 原句一致。
+    """
+    from trustforge.trust.scoring import Claim, _corroboration
+    from trustforge.trust.stance import semantic_stance
+
+    text_a = "adoption rising despite short-term caution"
+    text_b = "adoption is rising"
+    stance, evidence = semantic_stance(text_a, text_b, set(), set())
+    assert stance != "contradict", f"單一反義對不可判 contradict，實際: {stance}（evidence={evidence}）"
+
+    doc_a = _make_doc("da", "news", "coindesk")
+    doc_b = _make_doc("db", "news", "reuters")
+    long_a = "Institutional adoption continues rising despite short-term regulatory caution"
+    long_b = "Institutional adoption continues rising steadily this quarter"
+    c_a = Claim(id="rev1a", text=long_a, doc=doc_a)
+    c_b = Claim(id="rev1b", text=long_b, doc=doc_b)
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr > 0.0, f"應計入佐證，corr 應 > 0.0，實際: {corr}"
+
+
+def test_review2_precautionary_substring_not_false_hit():
+    """[#2] 『adoption continues under a precautionary framework』與
+    『adoption is rising』：「precautionary」不可被子字串誤命中成「caution」
+    （word-boundary 修正）。不可判 contradict，evidence 不可含 caution。
+
+    `_corroboration` 用加長版本驗證管線層級（理由同 test_review1）。
+    """
+    from trustforge.trust.scoring import Claim, _corroboration
+    from trustforge.trust.stance import semantic_stance
+
+    text_a = "adoption continues under a precautionary framework"
+    text_b = "adoption is rising"
+    stance, evidence = semantic_stance(text_a, text_b, set(), set())
+    assert stance != "contradict", f"precautionary 不可誤命中 caution，不可判 contradict，實際: {stance}（evidence={evidence}）"
+    assert not any("caution" in e for e in evidence), f"不可有 caution 相關 evidence（子字串誤命中），實際: {evidence}"
+
+    doc_a = _make_doc("da", "news", "coindesk")
+    doc_b = _make_doc("db", "news", "reuters")
+    long_a = "Institutional adoption continues rising under a precautionary regulatory framework"
+    long_b = "Institutional adoption continues rising steadily this quarter"
+    c_a = Claim(id="rev2a", text=long_a, doc=doc_a)
+    c_b = Claim(id="rev2b", text=long_b, doc=doc_b)
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr > 0.0, f"應計入佐證，corr 應 > 0.0，實際: {corr}"
+
+
+def test_review3_postfix_negation_not_false_contradict():
+    """[#3] 『regulatory clarity improving』與『regulatory scrutiny will not
+    materialize』："not" 出現在 "scrutiny" 之後（後置否定），只查詞前窗口
+    會漏掉，誤判 scrutiny 被正面主張。改雙向查詢後不可判 contradict。
+
+    `_corroboration` 用加長版本驗證管線層級（理由同 test_review1）。
+    """
+    from trustforge.trust.scoring import Claim, _corroboration
+    from trustforge.trust.stance import semantic_stance
+
+    text_a = "regulatory clarity improving"
+    text_b = "regulatory scrutiny will not materialize"
+    stance, evidence = semantic_stance(text_a, text_b, set(), set())
+    assert stance != "contradict", f"後置否定應取消 scrutiny 命中，不可判 contradict，實際: {stance}（evidence={evidence}）"
+
+    doc_a = _make_doc("da", "news", "coindesk")
+    doc_b = _make_doc("db", "news", "reuters")
+    long_a = "Analysts say regulatory clarity is improving across major markets"
+    long_b = "Analysts say regulatory scrutiny will not materialize across major markets"
+    c_a = Claim(id="rev3a", text=long_a, doc=doc_a)
+    c_b = Claim(id="rev3b", text=long_b, doc=doc_b)
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr > 0.0, f"應計入佐證，corr 應 > 0.0，實際: {corr}"
+
+
+def test_review5_all_domain_stop_sentence_still_corroborates():
+    """[#5 回歸] 『Analysts expect market boost significantly』由兩個獨立來源
+    發出相同主張：即使扣除 DOMAIN_STOP 後具體詞集合可能變空，也要 fallback
+    回未過濾集合，不可讓「全通用詞句」永遠 corr=0。
+    """
+    from trustforge.trust.scoring import Claim, _corroboration
+
+    doc_a = _make_doc("da", "news", "coindesk")
+    doc_b = _make_doc("db", "news", "reuters")
+    text = "Analysts expect market boost significantly"
+    c_a = Claim(id="rev5a", text=text, doc=doc_a)
+    c_b = Claim(id="rev5b", text=text, doc=doc_b)
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr > 0.0, f"全通用詞句、兩獨立來源相同主張，仍應計入佐證，corr 應 > 0.0，實際: {corr}"
+
+
+def test_review4_any_clean_occurrence_counts_as_hit():
+    """[#4] 『no clarity at first, but real clarity later』：第一個 "clarity"
+    被 "no" 否定，但第二個 occurrence 未被否定——只要有任一乾淨 occurrence，
+    該詞就應被視為已主張（不可只看第一個 occurrence 就判定整體未命中）。
+    """
+    from trustforge.trust.stance import _find_hit, ANTONYM_PAIRS
+
+    text = "no clarity at first, but real clarity later".lower()
+    clarity_group = next(gx for gx, gy in ANTONYM_PAIRS if "clarity" in gx)
+    hit = _find_hit(text, clarity_group)
+    assert hit == "clarity", f"第二個乾淨 occurrence 應被視為命中，實際: {hit}"
