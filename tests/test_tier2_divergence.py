@@ -37,6 +37,8 @@ from __future__ import annotations
 import pytest
 
 from trustforge.agent.orchestrator import (
+    OBJECTIVE_KINDS,
+    _SENTIMENT_KINDS,
     _STANCE_PAIR_MIN_TRUST,
     _detect_stance_pairs,
     build_report,
@@ -192,6 +194,68 @@ def test_cross_source_signal_merges_stance_pairs_into_aggregate_result():
     assert result["sentiment_direction"] == "bearish"
     assert "stance_pairs" in result
     assert len(result["stance_pairs"]) == 2
+
+
+def test_cross_source_signal_stance_pairs_override_consensus_when_contradiction_confirmed():
+    """[correctness HIGH 修正] codex 對抗審：客觀主導方向 == 情緒主導方向時，
+    原邏輯一律判 `type="consensus"`；但若情緒來源內部藏著已確認的跨源矛盾配對
+    （stance_pairs 非空），繼續顯示「訊號一致」會把真矛盾蓋掉，誤導使用者，
+    違反本功能「呈現真實背離」的目的。
+
+    矛盾優先於一致：只要 stance_pairs 非空，一律 type="divergence"，不論聚合
+    層級算出的方向是否剛好同向。
+
+    情境構造：
+      - 客觀類 1 筆 bullish、trust=0.80（納入聚合方向計算）。
+      - 情緒類「多數」2 筆 bullish、trust=0.80（若無 stance_pairs，聚合層級
+        會判 consensus：obj_dir == sent_dir == bullish）。
+      - 情緒類另有 1 組矛盾配對，trust 皆 <0.5（被排除在聚合方向計算之外，
+        不影響 obj_dir/sent_dir 的計算結果），但仍在 `_detect_stance_pairs`
+        的 0.35 門檻內、會被偵測到——用只認得這組特定文字配對的 stance_fn，
+        避免高信任的「多數」claim 被誤判進矛盾配對（假 stance_fn 若無差別
+        對任何方向相反的 pair 都回 contradiction，會把多數 claim 也一起
+        掃進來，污染測試情境）。
+    """
+    def _pair_only_stance_fn(a: str, b: str) -> str:
+        if {a, b} == {"看漲敘述 C", "看跌敘述 D"}:
+            return "contradiction"
+        return "neutral"
+
+    scored = [
+        _sc("obj1", "onchain", "glassnode", "bullish", 0.80, "客觀看漲"),
+        _sc("sent-major-1", "news", "src-a", "bullish", 0.80, "看漲多數 A"),
+        _sc("sent-major-2", "social", "src-b", "bullish", 0.80, "看漲多數 B"),
+        _sc("pair-a", "news", "src-c", "bullish", 0.40, "看漲敘述 C"),
+        _sc("pair-b", "news", "src-d", "bearish", 0.38, "看跌敘述 D"),
+    ]
+
+    # 前提檢查：若忽略矛盾配對，聚合層級單獨算出的方向確實同向（會判 consensus）。
+    eligible = [sc for sc in scored if sc.trust >= 0.5]
+    obj_only = [sc for sc in eligible if sc.claim.doc.kind in OBJECTIVE_KINDS]
+    sent_only = [sc for sc in eligible if sc.claim.doc.kind in _SENTIMENT_KINDS]
+    assert {sc.claim.direction for sc in obj_only} == {"bullish"}
+    assert {sc.claim.direction for sc in sent_only} == {"bullish"}
+
+    sig = detect_cross_source_signal(scored, stance_fn=_pair_only_stance_fn)
+
+    assert sig is not None
+    assert sig["type"] == "divergence", (
+        f"情緒來源內部已確認矛盾，不應被聚合層級的同向多數蓋成 consensus，"
+        f"實得 type={sig['type']!r}"
+    )
+    assert "背離" in sig["summary"] or "矛盾" in sig["summary"]
+    for word in ("買", "賣", "進場", "出場"):
+        assert word not in sig["summary"]  # 守 HOYA 不代客決策
+
+    assert "stance_pairs" in sig
+    pair_claim_ids = {p["claim_id"] for p in sig["stance_pairs"]}
+    assert pair_claim_ids == {"pair-a", "pair-b"}, (
+        f"只有 pair-a/pair-b 應被判定矛盾，實得 {pair_claim_ids}"
+    )
+    assert pair_claim_ids <= set(sig["supporting_claim_ids"]), (
+        "矛盾配對的 claim_id 須併入 supporting_claim_ids，"
+        "即使 renderer 只讀這個欄位也不會漏顯示矛盾證據"
+    )
 
 
 # ---------------------------------------------------------------------------

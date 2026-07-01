@@ -186,12 +186,18 @@ def detect_cross_source_signal(
     `stance_fn`（選用，預設 None）：Tier2 新增。None 時完全不影響上述既有規格
     （逐字相容，回歸鎖）。提供時，額外掃描情緒類主張中「同議題語意矛盾」的
     跨源配對（見 `_detect_stance_pairs`）：
-    - 找到配對時：若上述聚合層級已判定 divergence/consensus，在該 dict 補上
-      選填 key `stance_pairs`；若聚合層級判不出結論（回 None 的任一分支），
-      仍會改回傳一個以 stance_pairs 為主體的 `type="divergence"` 訊號——
-      因為客觀類趨勢與「兩則新聞互相矛盾」是兩件獨立可觀察到的事，後者不該
-      被前者的聚合結果蓋掉。
-    - 找不到配對時：完全不影響既有回傳值（含 None）。
+    - 找到配對時：矛盾優先於聚合層級的判定（demo 可靠性 #32 追加
+      correctness HIGH 修正）——
+        - 若聚合層級已判定 divergence：維持 divergence，`stance_pairs` 併入
+          dict，配對 claim_id 併入 `supporting_claim_ids`。
+        - 若聚合層級判定 consensus（客觀/情緒多數方向剛好同向）：**改判為
+          divergence**，summary 改寫為反映矛盾的背離敘述——共識底下藏著
+          「已確認」的跨源矛盾時，不得繼續顯示「訊號一致」把矛盾蓋掉。
+        - 若聚合層級判不出結論（回 None 的任一分支）：改回傳一個以
+          stance_pairs 為主體的 `type="divergence"` 訊號——因為客觀類趨勢
+          與「兩則新聞互相矛盾」是兩件獨立可觀察到的事，後者不該被前者的
+          聚合結果蓋掉。
+    - 找不到配對時：完全不影響既有回傳值（含 None、consensus）。
 
     守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
     """
@@ -252,18 +258,39 @@ def detect_cross_source_signal(
     if len(obj_sources | sent_sources) < 2:
         return _stance_pair_signal()
 
-    # 判定訊號類型
+    # 判定訊號類型（矛盾優先於一致，demo 可靠性 #32 追加 correctness HIGH 修正）：
+    # 客觀/情緒兩類的信任加權多數方向可能剛好同向（聚合層級判定 consensus），
+    # 但若 `_detect_stance_pairs` 已在情緒來源內部抓到「已確認」的跨源語意
+    # 矛盾配對（stance_pairs 非空），代表這個共識底下其實藏著真矛盾——繼續
+    # 顯示「訊號一致」會把矛盾蓋掉、誤導使用者，違反本功能「呈現真實背離」
+    # 的目的。修法：只要 stance_pairs 非空，一律 type="divergence"，不論聚合
+    # 層級算出的 obj_dir/sent_dir 是否同向；沒有 stance_pairs 時維持既有
+    # divergence/consensus 判定不變（回歸鎖）。
     if obj_dir != sent_dir:
         signal_type = "divergence"
+        collision = False
+    elif stance_pairs:
+        signal_type = "divergence"
+        collision = True
     else:
         signal_type = "consensus"
+        collision = False
 
     # 中文方向標籤（守不代客決策）
     _label = {"bullish": "偏多", "bearish": "偏空"}
     obj_label = _label.get(obj_dir, obj_dir)
     sent_label = _label.get(sent_dir, sent_dir)
 
-    if signal_type == "divergence":
+    if collision:
+        # obj_dir == sent_dir（聚合層級同向），但情緒來源內部已測出矛盾——
+        # 矛盾優先，摘要必須反映真背離，不得沿用「訊號一致」敘述。
+        stance_sources = sorted({p["source"] for p in stance_pairs})
+        summary = (
+            f"客觀與情緒多數方向雖同為{obj_label}，"
+            f"但來源 {'、'.join(stance_sources)} 對同一議題方向相反，"
+            "情緒面存在矛盾，呈背離，建議交叉驗證、留意轉折。"
+        )
+    elif signal_type == "divergence":
         summary = (
             f"客觀數據{obj_label}、情緒類{sent_label}，"
             "呈背離，建議交叉驗證、留意轉折。"
@@ -271,11 +298,15 @@ def detect_cross_source_signal(
     else:
         summary = f"客觀與情緒同向{obj_label}，訊號一致。"
 
-    # 佐證 claim_ids：各類中方向符合主導的主張
+    # 佐證 claim_ids：各類中方向符合主導的主張 + 已確認矛盾配對涉及的主張
+    # （即使 renderer 只讀 supporting_claim_ids，也能指向矛盾證據，不會漏顯示）。
     supporting_ids = (
         [sc.claim.id for sc in objective if sc.claim.direction == obj_dir]
         + [sc.claim.id for sc in sentiment if sc.claim.direction == sent_dir]
     )
+    for _p in stance_pairs:
+        if _p["claim_id"] not in supporting_ids:
+            supporting_ids.append(_p["claim_id"])
 
     result = {
         "type": signal_type,
