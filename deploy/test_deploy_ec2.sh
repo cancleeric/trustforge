@@ -55,6 +55,46 @@ assert_zip_contains() {
   fi
 }
 
+assert_ddb_action_set() {
+  # 結構化解析 IAM policy JSON（不是肉眼字串 grep）：找出 Resource 為指定
+  # table 的那個 statement，斷言它的 Action 集合「恰好等於」期望值——用來
+  # 抓 codex 這種「少放/多放某個 dynamodb action」的問題（例如上一輪
+  # cost-ledger 只給 PutItem+Scan，probe 的 GetItem 會被拒）。
+  local desc="$1" file="$2" table="$3" expected_csv="$4"
+  local result
+  result=$(python3 - "$file" "$table" "$expected_csv" <<'PYEOF'
+import json, sys
+
+path, table, expected_csv = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    doc = json.load(f)
+expected = {a for a in expected_csv.split(",") if a}
+found = None
+for stmt in doc.get("Statement", []):
+    res = stmt.get("Resource", "")
+    if isinstance(res, str) and res.endswith("table/" + table):
+        actions = stmt.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        found = set(actions)
+        break
+if found is None:
+    print("NOSTATEMENT")
+elif found == expected:
+    print("MATCH")
+else:
+    print("MISMATCH:實際=" + ",".join(sorted(found)) + " 期望=" + ",".join(sorted(expected)))
+PYEOF
+)
+  if [ "$result" = "MATCH" ]; then
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $desc — $result"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 MOCKDIR=$(mktemp -d)
 CAPTURE=$(mktemp -d)
 trap 'rm -rf "$MOCKDIR" "$CAPTURE"' EXIT
@@ -218,6 +258,18 @@ else
   assert_contains "$DDB_POLICY_FT" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-connector-cache" "首次建置：DynamoDB policy 鎖 cache table ARN"
   assert_contains "$DDB_POLICY_FT" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-cost-ledger" "首次建置：DynamoDB policy 鎖 cost-ledger table ARN"
   assert_contains "$DDB_POLICY_FT" "dynamodb:PutItem" "首次建置：DynamoDB policy 含 PutItem"
+  # codex HIGH：probe 的 get_canary() 對 cost-ledger 做強一致 GetItem，若
+  # IAM 只放行 PutItem+Scan，真部署會 AccessDenied、每次都失敗——結構化
+  # 解析 statement，斷言兩個表的 Action 集合「恰好」符合 probe 實際需要的
+  # 權限（不是只肉眼 grep 有沒有出現某個字串）。
+  assert_ddb_action_set \
+    "首次建置：cost-ledger statement 同時具 PutItem + GetItem（probe get_canary 強一致讀回）+ Scan（probe_scan_permission）" \
+    "$CAPTURE/iam_policy_first-time_trustforge-dynamodb.txt" "trustforge-cost-ledger" \
+    "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan"
+  assert_ddb_action_set \
+    "首次建置：cache statement 具 GetItem/PutItem/Scan/Query（維持原有最小權限，不受本次 ledger 修改波及）" \
+    "$CAPTURE/iam_policy_first-time_trustforge-dynamodb.txt" "trustforge-connector-cache" \
+    "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan,dynamodb:Query"
 fi
 
 # 排程 fetcher 同步驗證：首次建置這條路徑唯一的一次 ssm send-command 就是
@@ -256,6 +308,14 @@ if [ -z "$DDB_POLICY_UP" ]; then
 else
   assert_contains "$DDB_POLICY_UP" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-connector-cache" "update-in-place：DynamoDB policy 鎖 cache table ARN"
   assert_contains "$DDB_POLICY_UP" "arn:aws:dynamodb:ap-southeast-2:123456789012:table/trustforge-cost-ledger" "update-in-place：DynamoDB policy 鎖 cost-ledger table ARN"
+  assert_ddb_action_set \
+    "update-in-place：cost-ledger statement 同時具 PutItem + GetItem（probe get_canary 強一致讀回）+ Scan（probe_scan_permission）" \
+    "$CAPTURE/iam_policy_update-in-place_trustforge-dynamodb.txt" "trustforge-cost-ledger" \
+    "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan"
+  assert_ddb_action_set \
+    "update-in-place：cache statement 具 GetItem/PutItem/Scan/Query" \
+    "$CAPTURE/iam_policy_update-in-place_trustforge-dynamodb.txt" "trustforge-connector-cache" \
+    "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan,dynamodb:Query"
 fi
 
 # 排程 fetcher 同步驗證：update-in-place 這條路徑主設定 SSM 成功後，還會

@@ -89,7 +89,7 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-dynamodb \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:PutItem\",\"dynamodb:Scan\",\"dynamodb:Query\"],
      \"Resource\":\"arn:aws:dynamodb:$REGION:$ACCT:table/trustforge-connector-cache\"},
-    {\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\",\"dynamodb:Scan\"],
+    {\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:PutItem\",\"dynamodb:Scan\"],
      \"Resource\":\"arn:aws:dynamodb:$REGION:$ACCT:table/trustforge-cost-ledger\"}]}" >/dev/null
 # 表本身不歸這支腳本建（CDO/db-ops 範疇），但部署前先確認表存在，不存在就
 # 提早、明確地失敗，而不是讓 scheduler 之後每次 exit 1 卻沒人發現。
