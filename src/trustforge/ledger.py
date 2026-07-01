@@ -34,14 +34,40 @@ PRICING: dict[str, tuple[float, float]] = {
     "apac.anthropic.claude-haiku-4-5": (1.0, 5.0),
     # 待 AWS 官網確認：競賽現場（8/1）公告正式模型 id 與定價後需更新此暫值。
     "apac.anthropic.claude-sonnet-4-6": (3.0, 15.0),  # 待 AWS 官網確認
+    # W1.5（#15）+ codex 審查發現的 MEDIUM 修正：bedrock.py 預設 stance_model_id
+    # 已改用 `au.` region 前綴 + 帶日期/版本後綴的完整 id，跟這裡舊有的
+    # `apac.anthropic.claude-haiku-4-5` 精確 key 對不上，導致 estimate_cost()
+    # 精確查找失敗 → 真實呼叫成本被悄悄記成 $0，掩蓋支出。價格同 Haiku 4.5。
+    "au.anthropic.claude-haiku-4-5-20251001-v1:0": (1.0, 5.0),
 }
+
+# 正規化 fallback：region 前綴（us./au./apac./eu./global. 等）與版本/日期後綴
+# （-20251001-v1:0 等）不影響定價本身——只要 model id 內含以下關鍵字串就套用
+# 對應價格，避免未來換 region/AWS 又新增一個沒收錄進 `PRICING` 的完整 id 時，
+# 再次悄悄把真實成本記成 $0（見上方 codex 審查 MEDIUM）。精確 key 命中優先於
+# 這個 fallback；兩者都沒中才回真正的「未知 model」0 元。
+_NORMALIZED_PRICING: tuple[tuple[str, tuple[float, float]], ...] = (
+    ("haiku-4-5", (1.0, 5.0)),
+    ("sonnet-4-6", (3.0, 15.0)),
+)
 
 
 def estimate_cost(model_id: str | None, tokens_in: int, tokens_out: int) -> float:
-    """依 `PRICING` 估算單次呼叫成本（USD）。model_id 為 None/未知 → 0，不 raise。"""
+    """依 `PRICING` 估算單次呼叫成本（USD）。model_id 為 None/未知 → 0，不 raise。
+
+    先精確查 `PRICING`；查不到再用 `_NORMALIZED_PRICING` 做子字串比對（大小寫
+    不敏感），涵蓋同一模型換 region 前綴或版本/日期後綴的情況。兩者都查不到
+    才是真正的「未知 model」，回 0。
+    """
     if not model_id:
         return 0.0
     rate = PRICING.get(model_id)
+    if rate is None:
+        lower_id = model_id.lower()
+        for needle, normalized_rate in _NORMALIZED_PRICING:
+            if needle in lower_id:
+                rate = normalized_rate
+                break
     if rate is None:
         return 0.0
     in_rate, out_rate = rate

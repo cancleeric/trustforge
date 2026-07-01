@@ -50,6 +50,34 @@ def test_estimate_cost_none_model_returns_zero():
     assert estimate_cost(None, 1000, 1000) == 0.0
 
 
+def test_estimate_cost_default_stance_model_id_is_nonzero_and_correct():
+    """codex 審查發現的 MEDIUM 修正：bedrock.py 預設 `stance_model_id`
+    （`au.anthropic.claude-haiku-4-5-20251001-v1:0`）必須能在 `PRICING` 精確
+    查到，真實 stance 呼叫的成本不可再被悄悄記成 $0。"""
+    cost = estimate_cost("au.anthropic.claude-haiku-4-5-20251001-v1:0", 700, 33)
+    assert cost > 0
+    assert cost == round(700 / 1_000_000 * 1.0 + 33 / 1_000_000 * 5.0, 6)
+
+
+def test_estimate_cost_normalized_fallback_matches_other_haiku_prefix():
+    """正規化 fallback：即使換了另一個沒收錄進 `PRICING` 的 region 前綴/版本
+    後綴，只要 model id 內含 `haiku-4-5`，仍應套用 Haiku 價格而非悄悄回 0。"""
+    cost = estimate_cost("us.anthropic.claude-haiku-4-5-20260101-v2:0", 1_000_000, 1_000_000)
+    assert cost > 0
+    assert cost == round(1.0 + 5.0, 6)
+
+
+def test_estimate_cost_normalized_fallback_matches_other_sonnet_prefix():
+    cost = estimate_cost("global.anthropic.claude-sonnet-4-6-20260101-v1:0", 1_000_000, 1_000_000)
+    assert cost > 0
+    assert cost == round(3.0 + 15.0, 6)
+
+
+def test_estimate_cost_truly_unknown_model_still_returns_zero():
+    """既有行為不回歸：完全不含任何已知關鍵字的 model id 仍應回 0，不誤套價格。"""
+    assert estimate_cost("some-totally-unrelated-model-id", 1_000_000, 1_000_000) == 0.0
+
+
 # ---------------------------------------------------------------------------
 # execlog.record_llm_cost()
 # ---------------------------------------------------------------------------
