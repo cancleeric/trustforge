@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -144,8 +145,14 @@ class DynamoDBLedger(Ledger):
     真表建立 + IAM 權限（`dynamodb:PutItem` / `dynamodb:Scan`）+ 生產環境切
     `COST_LEDGER_BACKEND=dynamodb` 由 CEO 另立步驟完成，本檔不涉及。
 
-    表結構（CEO gated 建表時採用）：PK=`run_id`（S）、SK=`ts`（S，ISO8601）。
-    寫入的 record 若沒有 `run_id`，用 `ts` + `coin` 組一個穩定 id 頂上。
+    表結構（CEO gated 建表時採用）：PK=`run_id`（S，全域唯一，見下方）、
+    SK=`ts`（S，ISO8601）。`run_id` 由 `append_run()` 在分派給 backend/fallback
+    **之前**統一生成（`uuid.uuid4().hex`），確保同一筆記錄無論寫成功或
+    fallback 都拿到同一個 id——不再用 `ts+coin` 衍生：同幣同秒兩次執行
+    （如 comparison 兩輪、平行 run）`ts` 精度只到秒會相同，`ts+coin` 會
+    產生一樣的 PK 互相覆蓋，這裡改成每次呼叫都是全新 uuid，不會碰撞。
+    `append()` 本身仍留一道防線（見下方），只在 record 真的沒有 `run_id`
+    時才補（理論上經過 `append_run()` 後一定有）。
     DynamoDB 不吃 Python `float`，寫入前遞迴轉 `Decimal`；讀出時再轉回原本的
     數字型別（整數值如 token 數轉回 `int`，非整數值如成本轉回 `float`），
     格式與 `JsonlLedger.read_all()` 保持一致，呼叫端不用分辨 backend。
@@ -207,16 +214,28 @@ class DynamoDBLedger(Ledger):
             item["ts"] = ts
         run_id = item.get("run_id")
         if not run_id:
-            coin = item.get("coin", "unknown")
-            run_id = f"{ts}:{coin}"
+            # 防線：理論上 append_run() 已在分派前生成全域唯一的 uuid run_id，
+            # 這裡只防直接呼叫 DynamoDBLedger.append() 略過 append_run 的情況。
+            # ⚠️ 不再用 ts+coin 衍生——同幣同秒兩次執行會撞成同一個 PK 互相覆蓋。
+            run_id = uuid.uuid4().hex
         item["run_id"] = str(run_id)
         item["ts"] = str(ts)
         self._get_table().put_item(Item=self._to_decimal(item))
 
     @staticmethod
-    def _record_key(record: dict[str, Any]) -> tuple[str, str]:
-        """`(run_id, ts)` 當去重唯一鍵，兩者對齊 `append()` 寫入時保證都有值。"""
-        return (str(record.get("run_id", "")), str(record.get("ts", "")))
+    def _dedup_key(record: dict[str, Any]) -> str:
+        """去重唯一鍵：只靠 `run_id`（`append_run()` 保證每筆都有全域唯一的
+        uuid run_id）。
+
+        若 record 完全沒有 `run_id`（理論上不會發生，防禦舊資料/直接呼叫
+        backend 略過 append_run 的情況），**不**退回用 `("", ts)` 這種空鍵，
+        否則同一秒缺 run_id 的不同記錄（如不同幣）會被誤判成同一筆併掉；
+        改用 `id(record)`（物件身分）保證這類記錄互不相撞、各自保留。
+        """
+        run_id = record.get("run_id")
+        if run_id:
+            return str(run_id)
+        return f"__no_run_id__:{id(record)}"
 
     def read_all(self) -> list[dict[str, Any]]:
         """scan DynamoDB + 合併 JSONL fallback，去重後依 `(ts, run_id)` 排序回傳。
@@ -225,8 +244,8 @@ class DynamoDBLedger(Ledger):
         寫進 `JsonlLedger`（見模組頂部說明）；若這裡只 scan DynamoDB，outage
         期間的記錄雖然還在磁碟上，卻不會出現在 `/costs`。因此一律也讀一次
         `JsonlLedger()`（預設路徑）並與 DynamoDB 結果合併：
-          - 去重鍵是 `(run_id, ts)`；同一筆兩邊都有時（DynamoDB 事後補寫成功）
-            以 DynamoDB 版本為準。
+          - 去重鍵是 `run_id`（見 `_dedup_key`）；同一筆兩邊都有時（DynamoDB
+            事後補寫成功）以 DynamoDB 版本為準。
           - `Scan` 本身無序、跨頁也不保證穩定，最後依 `(ts, run_id)` 排序，
             讓回傳順序與 `JsonlLedger.read_all()`（寫入序）一致、跨請求穩定。
         """
@@ -246,11 +265,11 @@ class DynamoDBLedger(Ledger):
 
         fallback_records = JsonlLedger().read_all()
 
-        merged: dict[tuple[str, str], dict[str, Any]] = {}
+        merged: dict[str, dict[str, Any]] = {}
         for rec in fallback_records:
-            merged[self._record_key(rec)] = rec
+            merged[self._dedup_key(rec)] = rec
         for rec in dynamo_records:
-            merged[self._record_key(rec)] = rec  # DynamoDB 版本優先，覆蓋 fallback 那筆
+            merged[self._dedup_key(rec)] = rec  # DynamoDB 版本優先，覆蓋 fallback 那筆
 
         records = list(merged.values())
         records.sort(key=lambda r: (str(r.get("ts", "")), str(r.get("run_id", ""))))
@@ -274,12 +293,23 @@ def append_run(record: dict[str, Any], ledger: Ledger | None = None) -> None:
     """寫入一筆 run 記錄；`ledger` 未提供時用 `get_ledger()`。
 
     帳本是分析 pipeline 的旁路（side-channel）：任何 backend 失敗（如
-    `DynamoDBLedger` 的 `NotImplementedError`、未來真 DynamoDB 缺憑證/建表、
-    或 `JsonlLedger` 路徑不可寫）一律吞掉例外、只印 stderr warning，**絕不
-    往上拋**——帳本壞了頂多這筆沒記錄，不能讓已經算完的分析報告因此中斷
-    （502）。fallback 也包 try/except，且若 target 本身已是 `JsonlLedger`
-    就不重試同一路徑（同路徑必再失敗，重試沒有意義）。
+    `DynamoDBLedger` 缺憑證/建表、`JsonlLedger` 路徑不可寫）一律吞掉例外、
+    只印 stderr warning，**絕不往上拋**——帳本壞了頂多這筆沒記錄，不能讓
+    已經算完的分析報告因此中斷（502）。fallback 也包 try/except，且若
+    target 本身已是 `JsonlLedger` 就不重試同一路徑（同路徑必再失敗，重試
+    沒有意義）。
+
+    ⚠️ 統一在這裡（分派給 backend/fallback **之前**）生成 `run_id`（若
+    record 本身沒有）：`record["run_id"] = uuid.uuid4().hex`。這樣不管最終
+    寫進 backend（如 DynamoDB）還是 outage 時 fallback 寫進 JsonlLedger，
+    拿到的都是同一個全域唯一 id——避免同幣同秒兩次執行（ts 只到秒）在
+    backend 內部各自用 `ts+coin` 衍生出同一個 id 而互相覆蓋，也讓
+    `DynamoDBLedger.read_all()` 合併 DynamoDB + fallback 時能正確去重、
+    不會跟其他幣同秒的記錄相撞。
     """
+    if not record.get("run_id"):
+        record["run_id"] = uuid.uuid4().hex
+
     target = ledger if ledger is not None else get_ledger()
     try:
         target.append(record)

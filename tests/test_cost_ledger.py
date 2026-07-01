@@ -200,16 +200,22 @@ def test_dynamodb_ledger_append_calls_put_item_with_decimal_and_keys():
 
 
 def test_dynamodb_ledger_append_generates_run_id_and_ts_when_missing():
+    """直接呼叫 DynamoDBLedger.append() 略過 append_run（理論上不會發生的防線）
+    ——run_id 仍要自動補上，且是全域唯一的 uuid，不再用 ts+coin 衍生（避免同幣
+    同秒兩次呼叫撞成同一個 id）。"""
     d = DynamoDBLedger(table_name="fake-table")
     mock_table = MagicMock()
     d._table = mock_table
 
     d.append({"coin": "ETH", "total_cost_usd": 0.0, "calls": []})
+    d.append({"coin": "ETH", "total_cost_usd": 0.0, "calls": []})
 
-    item = mock_table.put_item.call_args.kwargs["Item"]
-    assert item["run_id"]  # 自動生成，非空字串
-    assert "ETH" in item["run_id"]
-    assert item["ts"]  # 自動補上 ISO8601 時間戳
+    first_item = mock_table.put_item.call_args_list[0].kwargs["Item"]
+    second_item = mock_table.put_item.call_args_list[1].kwargs["Item"]
+    assert first_item["run_id"]  # 自動生成，非空字串
+    assert second_item["run_id"]
+    assert first_item["run_id"] != second_item["run_id"]  # 每次都是新 uuid，不會撞
+    assert first_item["ts"]  # 自動補上 ISO8601 時間戳
 
 
 def test_dynamodb_ledger_read_all_paginates_and_converts_decimal_to_float():
@@ -346,6 +352,70 @@ def test_dynamodb_ledger_read_all_dedupes_same_run_id_ts_prefers_dynamodb():
     assert len(records) == 1
     assert records[0]["run_id"] == "dup-1"
     assert records[0]["total_cost_usd"] == 0.0025  # DynamoDB 版本覆蓋 fallback 的 0.0
+
+
+def test_append_run_same_coin_same_second_twice_get_distinct_run_ids_both_kept():
+    """codex HIGH：同幣同秒兩次 append_run（如 comparison/平行 run）——ts 只到秒，
+    若 run_id 用 ts+coin 衍生會撞成同一個 PK 互相覆蓋。append_run 現在統一在分派
+    前生成 uuid run_id，兩筆各自不同，DynamoDBLedger.read_all() 合併去重後兩筆
+    都要在，互不覆蓋。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    put_items: list[dict] = []
+    mock_table.put_item.side_effect = lambda Item: put_items.append(Item)
+    mock_table.scan.return_value = {"Items": put_items}
+    d._table = mock_table
+
+    same_ts = "2026-07-01T00:00:00+00:00"
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.001, "calls": []}, ledger=d)
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.002, "calls": []}, ledger=d)
+
+    assert mock_table.put_item.call_count == 2
+    run_id_1 = put_items[0]["run_id"]
+    run_id_2 = put_items[1]["run_id"]
+    assert run_id_1 != run_id_2  # 不會撞成同一個 PK
+
+    records = d.read_all()
+    assert len(records) == 2  # 兩筆都在，沒有互相覆蓋
+    costs = sorted(float(r["total_cost_usd"]) for r in records)
+    assert costs == [0.001, 0.002]
+
+
+def test_append_run_outage_fallback_record_has_run_id_and_dedupes_correctly():
+    """codex HIGH：DynamoDB append 失敗（outage）→ fallback 寫進 JsonlLedger 的那筆
+    也要有 run_id（append_run 在分派前就生成，backend 失敗不影響已生成的 run_id）。
+    之後 DynamoDBLedger.read_all() 合併 DynamoDB + fallback 時，要能以 run_id 正確
+    去重、不會跟「同幣同秒」的其他正常記錄相撞。"""
+    fallback_path_env = "TRUSTFORGE_COST_LEDGER_PATH"
+    import os as _os
+    fallback_path = _os.environ[fallback_path_env]
+
+    broken = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.put_item.side_effect = RuntimeError("no aws credentials / table not found")
+    broken._table = mock_table
+
+    same_ts = "2026-07-01T00:00:00+00:00"
+    # outage：這筆 put_item 失敗，fallback 寫進 JsonlLedger
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.001, "calls": []}, ledger=broken)
+    # 同幣同秒、DynamoDB 正常寫入成功的另一筆（模擬 outage 恢復後的下一次呼叫）
+    mock_table.put_item.side_effect = None
+    put_items: list[dict] = []
+    mock_table.put_item.side_effect = lambda Item: put_items.append(Item)
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.002, "calls": []}, ledger=broken)
+
+    fallback_records = JsonlLedger(fallback_path).read_all()
+    assert len(fallback_records) == 1
+    assert fallback_records[0]["run_id"]  # fallback 那筆也有 run_id
+
+    mock_table.scan.return_value = {"Items": put_items}
+    records = broken.read_all()
+
+    assert len(records) == 2  # fallback 那筆 + DynamoDB 那筆都在，沒有因同 ts 誤併
+    run_ids = {r["run_id"] for r in records}
+    assert len(run_ids) == 2  # run_id 各自不同
+    costs = sorted(float(r["total_cost_usd"]) for r in records)
+    assert costs == [0.001, 0.002]
 
 
 def test_get_ledger_default_is_jsonl(monkeypatch):
