@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -173,12 +174,25 @@ def get_ledger() -> Ledger:
 def append_run(record: dict[str, Any], ledger: Ledger | None = None) -> None:
     """寫入一筆 run 記錄；`ledger` 未提供時用 `get_ledger()`。
 
-    任何 backend 失敗（如 `DynamoDBLedger` 的 `NotImplementedError`，或未來真
-    DynamoDB 缺憑證/建表）一律 fallback 寫入 `JsonlLedger`，確保帳本永遠可寫、
-    分析 pipeline 不因帳本故障而中斷或掉資料。
+    帳本是分析 pipeline 的旁路（side-channel）：任何 backend 失敗（如
+    `DynamoDBLedger` 的 `NotImplementedError`、未來真 DynamoDB 缺憑證/建表、
+    或 `JsonlLedger` 路徑不可寫）一律吞掉例外、只印 stderr warning，**絕不
+    往上拋**——帳本壞了頂多這筆沒記錄，不能讓已經算完的分析報告因此中斷
+    （502）。fallback 也包 try/except，且若 target 本身已是 `JsonlLedger`
+    就不重試同一路徑（同路徑必再失敗，重試沒有意義）。
     """
     target = ledger if ledger is not None else get_ledger()
     try:
         target.append(record)
-    except Exception:
+        return
+    except Exception as exc:
+        print(f"[ledger] WARNING: append 失敗（backend={type(target).__name__}）：{exc}",
+              file=sys.stderr)
+
+    if isinstance(target, JsonlLedger):
+        return  # 同一顆 JsonlLedger 剛失敗，換個新實例打同路徑必再失敗，不重試
+
+    try:
         JsonlLedger().append(record)
+    except Exception as exc:
+        print(f"[ledger] WARNING: fallback JsonlLedger append 仍失敗：{exc}", file=sys.stderr)

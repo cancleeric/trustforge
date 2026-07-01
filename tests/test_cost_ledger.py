@@ -444,6 +444,106 @@ def test_run_agent_pipeline_online_ledger_total_matches_log_sum(monkeypatch):
     assert rec["offline"] is False
 
 
+def test_comparison_shared_log_does_not_double_count_ledger_cost(monkeypatch):
+    """[HIGH-1 回歸] comparison 兩幣共用同一 ExecutionLog（比照 pipeline.run_comparison
+    的作法：兩次 run_agent_pipeline 呼叫共用一個 log 物件）。帳本兩筆記錄加總必須等於
+    共用 log 的實際成本總額，不可變成 2A+B（第二輪把第一輪已寫過的又算一次）。"""
+    priced_model = "apac.anthropic.claude-haiku-4-5"
+    config = BedrockConfig(model_id=priced_model)
+
+    def _fake_complete(system, prompt):
+        return LLMResult(text="[claim1] 假敘述", input_tokens=500, output_tokens=120,
+                          model_id=priced_model)
+
+    client_a = BedrockClient(config=config, offline=False)
+    monkeypatch.setattr(client_a, "complete", _fake_complete)
+    client_b = BedrockClient(config=config, offline=False)
+    monkeypatch.setattr(client_b, "complete", _fake_complete)
+
+    captured: list[dict] = []
+    monkeypatch.setattr(orch_mod, "append_run", lambda record, ledger=None: captured.append(record))
+
+    docs = [_doc("p1", "price"), _doc("n1", "news")]
+    log = ExecutionLog(now_fn=lambda: 1000.0)  # 共用同一個 log，模擬 comparison 兩輪
+
+    run_agent_pipeline(
+        query="比較 BTC/ETH", coin="BTC", qtype=QuestionType.COMPARISON,
+        docs=docs, client=client_a, log=log, now_fn=lambda: 1000.0,
+    )
+    run_agent_pipeline(
+        query="比較 BTC/ETH", coin="ETH", qtype=QuestionType.COMPARISON,
+        docs=docs, client=client_b, log=log, now_fn=lambda: 1000.0,
+    )
+
+    assert len(captured) == 2  # 兩輪各寫一筆
+    ledger_total = round(sum(r["total_cost_usd"] for r in captured), 6)
+    log_total = round(
+        sum(e["params"]["cost_usd"] for e in log.events if e["tool"] == "llm.cost"), 6
+    )
+    assert ledger_total == log_total  # 不變量：帳本總額 == 共用 log 實際成本總額
+    assert ledger_total > 0.0
+    # 反證修好前的 bug：第一輪只該記自己那份（< 共用 log 全部總額，不含第二輪）
+    assert captured[0]["total_cost_usd"] < log_total
+    # 兩輪各自的 total 加總才是共用 log 全部，任一單輪都不應等於全部（避免重複計費）
+    assert captured[1]["total_cost_usd"] != log_total or captured[0]["total_cost_usd"] == 0.0
+
+
+def test_append_run_unwritable_path_swallows_exception_not_raise(tmp_path):
+    """[HIGH-2 回歸] 不可寫的帳本路徑（如目錄本身當檔名寫入會出錯）→ append_run
+    吞掉例外、不往上拋，確保帳本壞了不會中斷已經算完的分析 pipeline。"""
+    bad_path = tmp_path  # 拿一個目錄路徑當「檔案」寫入，必定引發 IsADirectoryError
+    broken_ledger = JsonlLedger(bad_path)
+
+    # 不應拋出任何例外（append_run 內部吞掉、只印 stderr warning）
+    append_run({"ts": "t1", "coin": "BTC", "total_cost_usd": 0.0, "calls": []},
+                ledger=broken_ledger)
+    # 明確驗證：帳本路徑本身還是那個壞目錄，沒有意外寫出檔案內容
+    assert bad_path.is_dir()
+
+
+def test_append_run_unwritable_path_does_not_retry_same_jsonl_path(tmp_path, monkeypatch):
+    """target 已是 JsonlLedger 且寫入失敗 → 不該用同路徑再建一顆 JsonlLedger 重試
+    （必定再失敗，浪費且無意義）；驗證 fallback 沒有再嘗試寫入同一個壞路徑。"""
+    bad_path = tmp_path / "sub"  # 尚未建立成目錄，讓 mkdir/open 都失敗好模擬寫入失敗
+    bad_path.mkdir()
+    fake_file_path = bad_path  # 直接拿目錄路徑當檔案路徑，open(..., "a") 必炸
+
+    broken_ledger = JsonlLedger(fake_file_path)
+
+    calls = {"n": 0}
+    real_init = JsonlLedger.__init__
+
+    def _spy_init(self, path=None):
+        calls["n"] += 1
+        real_init(self, path)
+
+    monkeypatch.setattr(JsonlLedger, "__init__", _spy_init)
+    append_run({"ts": "t1", "total_cost_usd": 0.0, "calls": []}, ledger=broken_ledger)
+    # 只有原本那顆 broken_ledger 建構時觸發一次；append_run 內部判斷 target 已是
+    # JsonlLedger 就直接放棄，不應再 new 一顆 JsonlLedger() 重試同路徑
+    assert calls["n"] == 0  # broken_ledger 是測試碼自建，不算在 spy 監控範圍內
+
+
+def test_run_agent_pipeline_survives_unwritable_ledger_path(monkeypatch, tmp_path):
+    """[HIGH-2 驗收] 帳本路徑不可寫時，整個 pipeline 仍正常回傳報告，不 crash、不中斷。"""
+    unwritable_dir = tmp_path / "as_a_file"
+    unwritable_dir.mkdir()
+    # 讓預設帳本路徑指向一個「目錄」，JsonlLedger.append() 對它 open(path, "a") 必炸
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(unwritable_dir))
+
+    docs = [_doc("p1", "price"), _doc("n1", "news")]
+    client = BedrockClient(offline=True)
+    log = ExecutionLog(now_fn=lambda: 1000.0)
+
+    report, evidence = run_agent_pipeline(
+        query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
+        docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
+    )
+
+    assert report is not None
+    assert evidence is not None  # pipeline 正常完成，未被帳本寫入失敗中斷
+
+
 # ---------------------------------------------------------------------------
 # web.py：本次成本卡 + /costs 頁面
 # ---------------------------------------------------------------------------

@@ -317,6 +317,10 @@ def run_agent_pipeline(
 
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
+    # comparison 兩幣共用同一個 log（見 pipeline.run_comparison）：若帳本收尾直接
+    # 掃「log.events 全部」的 llm.cost，第二輪會把第一輪已寫過的成本又算一次
+    # （帳本累計變成 2A+B）。記下本輪開始時的事件數，收尾只彙總「本輪新增」的部分。
+    _log_events_start_idx = len(log.events)
 
     # ------------------------------------------------------------------
     # Step 1: Claim 抽取（Bedrock #1 / regex fallback）
@@ -447,6 +451,8 @@ def run_agent_pipeline(
 
     # ------------------------------------------------------------------
     # 帳本：run 收尾寫一筆跨 run 持久化成本紀錄（append-only，不影響 report/evidence）
+    # 只彙總「本輪開始後新增」的 llm.cost 事件（見 _log_events_start_idx），
+    # 避免 comparison 兩幣共用同一 log 時，第二輪把第一輪已寫過的成本重複計入。
     # ------------------------------------------------------------------
     _llm_calls = [
         {
@@ -455,7 +461,7 @@ def run_agent_pipeline(
             "tokens_out": e["params"].get("tokens_out", 0),
             "cost_usd": e["params"].get("cost_usd", 0.0),
         }
-        for e in log.events
+        for e in log.events[_log_events_start_idx:]
         if e["tool"] == "llm.cost"
     ]
     append_run({
