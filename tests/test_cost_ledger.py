@@ -354,6 +354,54 @@ def test_dynamodb_ledger_read_all_dedupes_same_run_id_ts_prefers_dynamodb():
     assert records[0]["total_cost_usd"] == 0.0025  # DynamoDB 版本覆蓋 fallback 的 0.0
 
 
+def test_dynamodb_ledger_read_all_survives_broken_jsonl_fallback_oserror(monkeypatch):
+    """codex MEDIUM：讀 JSONL fallback 那步若拋 OSError（本機檔案權限異常/I-O
+    失敗），不能拖垮已經 scan 成功的 DynamoDB 結果——read_all 仍要正常回傳
+    DynamoDB 那幾筆，不往上拋。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {"run_id": "r1", "ts": "2026-07-01T00:00:00+00:00",
+             "total_cost_usd": Decimal("0.001"), "calls": []},
+        ],
+    }
+    d._table = mock_table
+
+    monkeypatch.setattr(
+        JsonlLedger, "read_all",
+        MagicMock(side_effect=OSError("Permission denied")),
+    )
+
+    records = d.read_all()  # 不應拋出任何例外
+
+    assert len(records) == 1
+    assert records[0]["run_id"] == "r1"
+
+
+def test_dynamodb_ledger_read_all_survives_broken_jsonl_fallback_unicode_error(monkeypatch):
+    """同上，換一種 fallback 壞法：JSONL 檔非 UTF-8（UnicodeDecodeError）。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {"run_id": "r2", "ts": "2026-07-01T00:00:01+00:00",
+             "total_cost_usd": Decimal("0.002"), "calls": []},
+        ],
+    }
+    d._table = mock_table
+
+    def _raise_unicode_error():
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(JsonlLedger, "read_all", lambda self: _raise_unicode_error())
+
+    records = d.read_all()  # 不應拋出任何例外
+
+    assert len(records) == 1
+    assert records[0]["run_id"] == "r2"
+
+
 def test_append_run_same_coin_same_second_twice_get_distinct_run_ids_both_kept():
     """codex HIGH：同幣同秒兩次 append_run（如 comparison/平行 run）——ts 只到秒，
     若 run_id 用 ts+coin 衍生會撞成同一個 PK 互相覆蓋。append_run 現在統一在分派

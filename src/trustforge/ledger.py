@@ -248,6 +248,10 @@ class DynamoDBLedger(Ledger):
             事後補寫成功）以 DynamoDB 版本為準。
           - `Scan` 本身無序、跨頁也不保證穩定，最後依 `(ts, run_id)` 排序，
             讓回傳順序與 `JsonlLedger.read_all()`（寫入序）一致、跨請求穩定。
+
+        讀 fallback 這步單獨包 try/except：本機檔案權限異常/I-O 失敗/非 UTF-8
+        等問題只會讓 fallback 那幾筆讀不到，**不會**讓已經 scan 成功的
+        DynamoDB 結果也跟著拋錯——DynamoDB 才是這個 backend 的主資料來源。
         """
         dynamo_records: list[dict[str, Any]] = []
         table = self._get_table()
@@ -263,7 +267,15 @@ class DynamoDBLedger(Ledger):
                 break
             scan_kwargs["ExclusiveStartKey"] = last_key
 
-        fallback_records = JsonlLedger().read_all()
+        # 讀 JSONL fallback 單獨隔離例外：本機檔案權限異常/I-O 失敗/非 UTF-8
+        # 等問題，不能拖垮已經 scan 成功的 DynamoDB 結果——寧可少幾筆 outage
+        # 期間的 fallback 記錄，也不能讓整個 read_all 拋錯把 /costs 弄成 500。
+        try:
+            fallback_records = JsonlLedger().read_all()
+        except Exception as exc:
+            print(f"[ledger] WARNING: 讀取 JSONL fallback 失敗，忽略並僅回傳 "
+                  f"DynamoDB 結果：{exc}", file=sys.stderr)
+            fallback_records = []
 
         merged: dict[str, dict[str, Any]] = {}
         for rec in fallback_records:
