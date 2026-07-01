@@ -28,6 +28,11 @@ from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .pipeline import run, run_comparison
 from .ledger import JsonlLedger, get_ledger
 
+try:
+    from ._version import VERSION
+except Exception:
+    VERSION = "dev"
+
 PORT = int(os.getenv("PORT", "8080"))
 HAS_BEDROCK = bool(os.getenv("BEDROCK_MODEL_ID"))
 LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
@@ -63,6 +68,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
 </style></head><body>
 <h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　<span class="badge">{mode}</span>　<a href="/costs">成本帳本</a></p>
+<p><span class="badge" style="opacity:.6">v{version}</span></p>
 <form action="/analyze" method="get">
  <div><label>幣種</label><select name="coin">{coins}</select></div>
  <div><label>題型</label><select name="type">{types}</select></div>
@@ -395,6 +401,7 @@ def render_page(body: str = "") -> str:
     mode = "AWS Bedrock 就緒（?live=1 啟用）" if HAS_BEDROCK else "離線示範模式（未設 BEDROCK_MODEL_ID）"
     return _PAGE.format(
         mode=html.escape(mode), body=body,
+        version=html.escape(VERSION),
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
                     {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
@@ -748,6 +755,7 @@ class Handler(BaseHTTPRequestHandler):
                     query = qs.get("q", [""])[0]
                     if u.path == "/analyze.json":
                         payload = {
+                            "version": VERSION,
                             "report_a": dataclasses.asdict(report_a),
                             "evidence_a": [ev.to_dict() for ev in evidence_a],
                             "report_b": dataclasses.asdict(report_b),
@@ -766,6 +774,7 @@ class Handler(BaseHTTPRequestHandler):
                     report, evidence, log = _do_analyze(qs, client_ip=client_ip)
                     if u.path == "/analyze.json":
                         payload = {
+                            "version": VERSION,
                             "report": dataclasses.asdict(report),
                             "evidence": [ev.to_dict() for ev in evidence],
                             "execution_log": log.events,
