@@ -96,6 +96,56 @@ PRICE_FIXTURE_NON_NUMERIC_CHANGE = json.dumps({
                 "usd_24h_change": "flat"},
 }).encode()
 
+# codex MEDIUM #3（收斂整個數值欄位驗證類別）：`usd`/`usd_market_cap`/
+# `last_updated_at` 同類壞值 fixture。前兩輪只擋了 `usd_24h_change`，
+# `usd` 本身（現價，price_live 存在的唯一理由）只擋了 None，NaN/inf/字串/
+# bool/負值/零都會被當成「有效現價」直接寫進 ref、進 OBJECTIVE_KINDS。
+PRICE_FIXTURE_NAN_USD = json.dumps({
+    "bitcoin": {"usd": float("nan"), "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_INF_USD = json.dumps({
+    "bitcoin": {"usd": float("inf"), "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_STRING_USD = json.dumps({
+    "bitcoin": {"usd": "sixty-seven-thousand", "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_BOOL_USD = json.dumps({
+    "bitcoin": {"usd": True, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_ZERO_USD = json.dumps({
+    "bitcoin": {"usd": 0, "usd_market_cap": 1_330_000_000_000, "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_NEGATIVE_USD = json.dumps({
+    "bitcoin": {"usd": -100.0, "usd_market_cap": 1_330_000_000_000, "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_NAN_MCAP = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": float("nan"), "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_NEGATIVE_MCAP = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": -5.0, "usd_24h_change": 2.34},
+}).encode()
+
+PRICE_FIXTURE_NAN_LAST_UPDATED = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34, "last_updated_at": float("nan")},
+}).encode()
+
+PRICE_FIXTURE_STRING_LAST_UPDATED = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34, "last_updated_at": "just now"},
+}).encode()
+
 
 @pytest.fixture(autouse=True)
 def _reset_coingecko_process_cache():
@@ -179,6 +229,97 @@ def test_price_source_failure_does_not_crash_collect(monkeypatch):
     src = coingecko.CoinGeckoPriceSource()
     docs = base.collect("BTC", coin="BTC", sources=[src], offline=False)
     assert isinstance(docs, list)
+
+
+# codex MEDIUM #3（呼應 #24 不造假，Tier2 最後一根，收斂整個數值欄位驗證
+# 類別）：`usd`（現價）壞值不得被當成有效觀測放行——`price_live` 是
+# OBJECTIVE_KINDS、會直接進 `detect_cross_source_signal`，壞現價因此可能
+# 變成內部看似合理、實則無效的客觀觀測，製造假背離/假共識。下面全部走
+# 真實 `CoinGeckoPriceSource.fetch()`，不手造 Document。
+
+@pytest.mark.parametrize("fixture_name", [
+    "PRICE_FIXTURE_NAN_USD",
+    "PRICE_FIXTURE_INF_USD",
+    "PRICE_FIXTURE_STRING_USD",
+    "PRICE_FIXTURE_BOOL_USD",
+    "PRICE_FIXTURE_ZERO_USD",
+    "PRICE_FIXTURE_NEGATIVE_USD",
+])
+def test_price_source_bad_usd_produces_no_document(monkeypatch, fixture_name):
+    """usd 是 NaN/inf/字串/bool/零/負值：一律不產該幣 price_live Document
+    （現價是這個 Document 存在的唯一理由，壞現價沒有「退化成 N/A」的意義，
+    直接跳過該幣，不進 OBJECTIVE_KINDS、不參與背離偵測）。"""
+    from trustforge.ingestion import coingecko
+    fixture = globals()[fixture_name]
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: fixture)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert docs == [], f"{fixture_name} 壞 usd 不應產生 Document，實得 {docs!r}"
+
+
+def test_price_source_bad_usd_does_not_enter_divergence_detection(monkeypatch):
+    """端到端：usd=NaN 時 `CoinGeckoPriceSource` 不產 Document → 真實
+    `extract_claims`/`score`/`detect_cross_source_signal` 全程看不到這個
+    壞現價觀測（不是產生了一個 neutral 的假觀測，而是它根本不存在），
+    不炸、不造假、也不會意外冒出背離/共識結果。"""
+    from trustforge.ingestion import coingecko
+    from trustforge.ingestion.base import Document
+    from trustforge.trust.scoring import extract_claims, score
+    from trustforge.agent.orchestrator import detect_cross_source_signal
+
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE_NAN_USD)
+    price_docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert price_docs == []
+
+    social_doc = Document(
+        id="social-btc-1", kind="social", source="reddit-btc",
+        text="BTC 社群看漲氣氛濃厚，買盤湧入", ts=1_700_000_000.0,
+    )
+    claims = extract_claims(price_docs + [social_doc])
+    scored = score(claims, now=1_700_000_100.0)
+    result = detect_cross_source_signal(scored)
+    assert result is None, f"壞 usd 被排除後客觀類應為空、不應產生訊號，實得 {result}"
+
+
+def test_price_source_nan_market_cap_degrades_to_na_not_fabricated(monkeypatch):
+    """market_cap 是 NaN：現價本身仍有效就照常產 Document，market_cap 欄位
+    單獨退化成 N/A，不崩潰、不捏造市值數字。"""
+    from trustforge.ingestion import coingecko
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE_NAN_MCAP)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    ref = docs[0].meta["content_reference"]
+    assert "67823.45" in ref
+    assert "市值 N/A" in ref
+
+
+def test_price_source_negative_market_cap_degrades_to_na(monkeypatch):
+    """market_cap 是負值（不合理的市值）：退化成 N/A，不當成合法數字顯示。"""
+    from trustforge.ingestion import coingecko
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE_NEGATIVE_MCAP)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    ref = docs[0].meta["content_reference"]
+    assert "市值 N/A" in ref
+
+
+def test_price_source_nan_last_updated_falls_back_to_fetch_time_not_nan(monkeypatch):
+    """last_updated_at 是 NaN：不得把 NaN 塞進 `Document.ts`（會污染 recency
+    衰減計算），須退回本地呼叫當下時間（有限、可用的時間戳）。"""
+    import math
+    from trustforge.ingestion import coingecko
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE_NAN_LAST_UPDATED)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    assert math.isfinite(docs[0].ts)
+
+
+def test_price_source_string_last_updated_falls_back_to_fetch_time(monkeypatch):
+    """last_updated_at 是非數值字串：同樣不得崩潰，退回本地呼叫當下時間。"""
+    import math
+    from trustforge.ingestion import coingecko
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE_STRING_LAST_UPDATED)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    assert math.isfinite(docs[0].ts)
 
 
 # ── CoinGeckoSentimentSource ──────────────────────────────────────────────────

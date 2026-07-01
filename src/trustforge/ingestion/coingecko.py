@@ -73,36 +73,53 @@ _UA = "TrustForge/1.0 (research)"
 _SENTIMENT_DOMINANCE_THRESHOLD = 5.0
 
 
-def _valid_pct(v: object) -> float | None:
-    """驗證「有限數字且落在 0–100」的百分比欄位，其餘一律回 None（不造假）。
+def _finite_num(
+    v: object,
+    lo: float | None = None,
+    hi: float | None = None,
+    exclusive_lo: bool = False,
+) -> float | None:
+    """CoinGecko 數值欄位共用有限驗證（codex MEDIUM x2，呼應 #24 不造假）：
+    有限數字（非 bool/非數值/NaN/inf 一律拒收），選用值域檢查。
 
-    codex MEDIUM（呼應 #24 不造假，Tier2）：partial/malformed API 回應（單邊缺、
-    非數值、NaN/inf、超出 0–100 範圍）不得被硬轉成「明確方向」的觀測——那等於
-    把壞資料捏造成強訊號。只要不是「有限、範圍內的數字」，一律視為不可用，
-    交由呼叫端退回中性/N-A 語意，絕不代入方向判斷。
+    這是所有 CoinGecko 數值欄位（現價 usd、市值 usd_market_cap、24h 漲跌幅
+    usd_24h_change、更新時間 last_updated_at、情緒投票百分比）共用的單一
+    驗證入口——一次收斂，避免像前兩輪那樣逐欄位各補一次、漏掉沒補到的欄位
+    （如這次的 `usd`）又被同類壞資料捏造成看似合理的觀測（如「現價 nan
+    USD」仍被當成有效客觀事實送進背離偵測）。
+
+    - `bool` 是 `int` 子類但語意上不是數字，明確排除。
+    - `NaN`/`inf`/`-inf` 一律視為不可用（`>`/`<` 比較會悄悄吃掉這些壞值，
+      落入某個分支被誤判成看似合理的觀測，等於把壞資料捏造成訊號）。
+    - `lo`/`hi`：選用的值域檢查（含邊界）；`exclusive_lo=True` 時 `lo`
+      本身也視為不合格（例如現價必須 > 0，0 或負值不是合法現價）。
     """
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    if not math.isfinite(v):
+    fv = float(v)
+    if not math.isfinite(fv):
         return None
-    if v < 0.0 or v > 100.0:
+    if lo is not None:
+        if exclusive_lo and fv <= lo:
+            return None
+        if not exclusive_lo and fv < lo:
+            return None
+    if hi is not None and fv > hi:
         return None
-    return float(v)
+    return fv
+
+
+def _valid_pct(v: object) -> float | None:
+    """驗證「有限數字且落在 0–100」的百分比欄位（情緒投票用），其餘一律回
+    None（不造假）——partial/malformed API 回應（單邊缺、非數值、NaN/inf、
+    超出 0–100 範圍）不得被硬轉成「明確方向」的觀測。"""
+    return _finite_num(v, lo=0.0, hi=100.0)
 
 
 def _valid_change_pct(v: object) -> float | None:
-    """驗證 24h 漲跌幅欄位：必須是有限數字（NaN/inf/非數值 → None，不造假）。
-
-    漲跌幅理論上無界（可能 >100% 或 <-100%），故不套用 0–100 範圍檢查，
-    只擋「非數值/NaN/inf」這類會被 `>`/`<` 比較悄悄吃掉、卻不代表真實漲跌的
-    壞值（例如 NaN 落入 else 分支會被誤判成「持平」，等於把壞資料捏造成
-    一個看似合理的觀測）。
-    """
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return None
-    if not math.isfinite(v):
-        return None
-    return float(v)
+    """驗證 24h 漲跌幅欄位：必須是有限數字，理論上無界故不套用值域檢查
+    （可能 >100% 或 <-100%），只擋非數值/NaN/inf 這類壞值。"""
+    return _finite_num(v)
 
 # Demo API key env（選用；keyless 已足夠，見模組頂部說明）。只從 env 讀，
 # 絕不 hardcode。實際 key 由 CEO 另立步驟在部署環境（systemd/EC2）設定，
@@ -225,12 +242,19 @@ class CoinGeckoPriceSource(Source):
             entry = data.get(gid)
             if not isinstance(entry, dict):
                 continue
-            price = entry.get("usd")
-            if price is None:
+            # 修（codex MEDIUM #3，呼應 #24 不造假，收斂整個數值欄位驗證類別）：
+            # 原本 `usd` 只擋 None，NaN/inf/字串/bool/負值/零都會被當成「有效
+            # 現價」直接寫進 ref（如「現價 nan USD」）——`price_live` 是
+            # OBJECTIVE_KINDS、會進 `detect_cross_source_signal`，壞現價因此
+            # 變成內部看似合理、實則無效的客觀觀測，可能製造假背離/假共識。
+            # 現價是這個 Document 存在的唯一理由，不合格就不產這筆 Document
+            # （不是退 N/A 續產——退化成 N/A 對「現價」欄位沒有意義）。
+            price_val = _finite_num(entry.get("usd"), lo=0.0, exclusive_lo=True)
+            if price_val is None:
                 continue
             change_24h = entry.get("usd_24h_change")
-            mcap = entry.get("usd_market_cap")
-            mcap_str = f"{mcap:,.0f}" if isinstance(mcap, (int, float)) else "N/A"
+            mcap_val = _finite_num(entry.get("usd_market_cap"), lo=0.0)
+            mcap_str = f"{mcap_val:,.0f}" if mcap_val is not None else "N/A"
             # 修（codex HIGH，Tier2 同批修正）：原本只寫數字「+8.20%」，不含
             # trust.scoring._infer_direction 認得的方向詞（上漲/下跌等），導致
             # price_live 主張永遠推斷成 neutral——即使漲跌幅再大，客觀類的
@@ -252,13 +276,15 @@ class CoinGeckoPriceSource(Source):
                     change_str = f"{change_val:+.2f}%（持平）"
             else:
                 change_str = "N/A"
-            ref = f"{code} 現價 {price} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
+            ref = f"{code} 現價 {price_val} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
             doc_id = "coingecko-price-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
             # 優先用 API 回應本身的 last_updated_at（真正的鮮度來源，反映該筆
-            # 報價實際成立的時間點）；缺欄位（未設 include_last_updated_at 生效
-            # 前的舊快取/降級回應）才退回本地呼叫當下時間。
-            last_updated = entry.get("last_updated_at")
-            ts = float(last_updated) if isinstance(last_updated, (int, float)) else fallback_now
+            # 報價實際成立的時間點）；缺欄位/壞值（未設 include_last_updated_at
+            # 生效前的舊快取、或 NaN/inf/非數值等 malformed 回應）才退回本地
+            # 呼叫當下時間——同樣套 `_finite_num`，避免 NaN 直接被塞進
+            # `Document.ts`（會污染 recency 衰減計算，等於用壞資料捏造鮮度）。
+            last_updated_val = _finite_num(entry.get("last_updated_at"))
+            ts = last_updated_val if last_updated_val is not None else fallback_now
             docs.append(Document(
                 id=doc_id,
                 kind=self.kind,
