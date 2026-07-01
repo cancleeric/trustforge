@@ -1,0 +1,501 @@
+"""W1.5（#15）：Bedrock 語意 stance 子分類器測試。
+
+⚠️ 本檔全部用注入的 fake stance_fn／fake client（純 dict 對照或計數 stub），
+不呼叫真實 Bedrock/AWS（見 bedrock.py 的 classify_stance 才需要 boto3；本檔測試
+的是 `trust.scoring._corroboration` / `trust.scoring.score` / `trust.stance_cache`
+的介接邏輯，與真實模型輸出解耦，符合本 PR 範圍限制）。
+
+案例來源：
+- issue15：Issue #15 復現案例（英文『監管明朗+採用』vs『監管收緊+審慎』，token overlap
+  高但語意對立）。
+- review1/2/3：前三輪 code review 對舊詞表 heuristic 的打臉案例（despite caution /
+  precautionary framework / scrutiny will not materialize 後置否定），這些案例語意上
+  都「不是矛盾」，W1.5 的語意分類器不該把它們錯殺成 contradiction。
+"""
+from __future__ import annotations
+
+from trustforge.ingestion.base import Document
+from trustforge.trust.scoring import Claim, _corroboration, _StanceBudget, score
+from trustforge.trust.stance_cache import StanceCache, cache_key, cached_stance_fn
+
+
+def _doc(id: str, kind: str, source: str, ts: float = 1000.0) -> Document:
+    return Document(id=id, kind=kind, source=source, text="", ts=ts)
+
+
+def _dict_stance_fn(table: dict[str, str]):
+    """純 dict 對照的 fake stance_fn（不打真 AWS）。
+
+    key 用 `stance_cache.cache_key`（排序後正規化），與生產程式碼的快取邏輯一致，
+    確保無論 `_corroboration` 用哪個順序呼叫 (a, b) 都能命中同一筆假資料。
+    """
+    def _fn(a: str, b: str) -> str:
+        return table.get(cache_key(a, b), "neutral")
+    return _fn
+
+
+# --- Issue #15 案例：fake 給 contradiction → corr 不含該來源（矛盾閘生效） ------
+
+def test_issue15_fake_contradiction_excludes_from_corroboration():
+    text_a = ("Market analysts expect regulatory clarity to boost institutional "
+              "adoption significantly.")
+    text_b = ("Market observers expect regulatory scrutiny to boost investor "
+              "caution significantly.")
+    c_a = Claim(id="i15a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="i15b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    stance_fn = _dict_stance_fn({cache_key(text_a, text_b): "contradiction"})
+    corr = _corroboration(c_a, [c_a, c_b], stance_fn=stance_fn)
+
+    assert corr == 0.0, f"#15：fake stance_fn 判 contradiction，corr 應 = 0.0，實際: {corr}"
+
+
+# --- 前 3 輪 review 打臉案例：fake 給 entailment/neutral → 不可錯殺合法佐證 -------
+
+def test_review1_despite_caution_not_falsely_blocked():
+    """review#1：『despite short-term caution』仍是同向支撐，fake 給 entailment。"""
+    text_a = "Institutional adoption continues rising despite short-term regulatory caution"
+    text_b = "Institutional adoption continues rising steadily this quarter"
+    c_a = Claim(id="rev1a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="rev1b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    stance_fn = _dict_stance_fn({cache_key(text_a, text_b): "entailment"})
+    corr = _corroboration(c_a, [c_a, c_b], stance_fn=stance_fn)
+
+    assert corr > 0.0, f"despite caution 不應被錯殺，corr 應 > 0，實際: {corr}"
+
+
+def test_review2_precautionary_framework_not_falsely_blocked():
+    """review#2：『precautionary regulatory framework』不等於反對採用，fake 給 entailment。"""
+    text_a = "Institutional adoption continues rising under a precautionary regulatory framework"
+    text_b = "Institutional adoption continues rising steadily this quarter"
+    c_a = Claim(id="rev2a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="rev2b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    stance_fn = _dict_stance_fn({cache_key(text_a, text_b): "entailment"})
+    corr = _corroboration(c_a, [c_a, c_b], stance_fn=stance_fn)
+
+    assert corr > 0.0, f"precautionary framework 不應被錯殺，corr 應 > 0，實際: {corr}"
+
+
+def test_review3_scrutiny_will_not_materialize_not_falsely_blocked():
+    """review#3：『scrutiny will not materialize』是後置否定，實際不構成矛盾，fake 給 neutral。"""
+    text_a = "Analysts say regulatory clarity is improving across major markets"
+    text_b = "Analysts say regulatory scrutiny will not materialize across major markets"
+    c_a = Claim(id="rev3a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="rev3b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    stance_fn = _dict_stance_fn({cache_key(text_a, text_b): "neutral"})
+    corr = _corroboration(c_a, [c_a, c_b], stance_fn=stance_fn)
+
+    assert corr > 0.0, f"scrutiny will not materialize 不應被錯殺，corr 應 > 0，實際: {corr}"
+
+
+# --- stance_fn=None 回歸鎖：向後相容，逐字比對舊行為 -----------------------------
+
+def test_stance_fn_none_keeps_two_independent_sources_formula():
+    """回歸鎖：stance_fn=None（未傳參數的預設值）時，兩個獨立來源仍是
+    1 - 0.5**2 = 0.75，跟加入 W1.5 前的公式逐字相同（純加參數不改變既有數值行為）。
+    """
+    doc_a = _doc("da", "onchain", "glassnode")
+    doc_b = _doc("db", "news", "coindesk")
+    doc_c = _doc("dc", "news", "reuters")
+    c_a = Claim(id="ga", text="清算 瀑布 觸發 ETF 審批 加速", doc=doc_a)
+    c_b = Claim(id="gb", text="清算 瀑布 影響 ETF 申請 結果", doc=doc_b)
+    c_c = Claim(id="gc", text="清算 瀑布 導致 ETF 審批 延後", doc=doc_c)
+
+    corr_explicit_none = _corroboration(c_a, [c_a, c_b, c_c], stance_fn=None)
+    corr_default = _corroboration(c_a, [c_a, c_b, c_c])  # 不傳參數，走預設值
+
+    assert corr_explicit_none == corr_default == 1.0 - 0.5 ** 2, (
+        f"回歸鎖：兩獨立來源 corr 應 = 0.75，實際: explicit={corr_explicit_none} "
+        f"default={corr_default}"
+    )
+
+
+def test_stance_fn_none_review_cases_keep_pre_w15_corroboration():
+    """回歸鎖：review1/2/3 案例在 stance_fn=None 時，corr 數值必須跟 W1.5 加入前
+    （純 overlap + 方向閘判斷）一致——這些案例本就通過方向閘，corr 應 > 0，
+    加入 stance_fn 參數本身不應改變任何既有數值。
+    """
+    cases = [
+        ("review1", "Institutional adoption continues rising despite short-term regulatory caution",
+         "Institutional adoption continues rising steadily this quarter"),
+        ("review2", "Institutional adoption continues rising under a precautionary regulatory framework",
+         "Institutional adoption continues rising steadily this quarter"),
+        ("review3", "Analysts say regulatory clarity is improving across major markets",
+         "Analysts say regulatory scrutiny will not materialize across major markets"),
+    ]
+    for name, text_a, text_b in cases:
+        c_a = Claim(id=f"{name}a", text=text_a, doc=_doc(f"{name}da", "news", "coindesk"))
+        c_b = Claim(id=f"{name}b", text=text_b, doc=_doc(f"{name}db", "news", "reuters"))
+        corr = _corroboration(c_a, [c_a, c_b], stance_fn=None)
+        assert corr > 0.0, f"回歸鎖 {name}：stance_fn=None 應維持 corr > 0，實際: {corr}"
+
+
+# --- 快取層：命中同輸入回同結果（確定性），且底層 classify_stance 只呼叫一次 -------
+
+def test_cache_hit_is_deterministic_and_avoids_duplicate_calls():
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "contradiction"
+
+    cache = StanceCache()  # 無持久化路徑，純記憶體、乾淨環境
+    stance_fn = cached_stance_fn(_CountingClient(), cache=cache)
+
+    text_a = ("Market analysts expect regulatory clarity to boost institutional "
+              "adoption significantly.")
+    text_b = ("Market observers expect regulatory scrutiny to boost investor "
+              "caution significantly.")
+
+    r1 = stance_fn(text_a, text_b)
+    r2 = stance_fn(text_b, text_a)  # 反轉順序，仍應命中同一筆快取（key 排序後正規化）
+    r3 = stance_fn(text_a, text_b)
+
+    assert r1 == r2 == r3 == "contradiction", f"快取命中應回同結果，實際: {r1}, {r2}, {r3}"
+    assert len(calls) == 1, f"快取應讓底層 classify_stance 只被呼叫一次，實際呼叫 {len(calls)} 次"
+
+
+def test_cache_version_mismatch_is_treated_as_miss():
+    """version 不符（prompt/model 版本變更）視為 miss，不可誤用舊版本快取結果。"""
+    cache = StanceCache()
+    key = cache_key("A", "B")
+    cache._mem[key] = {"label": "contradiction", "version": "stale-version"}
+    assert cache.get("A", "B") is None, "version 不符應視為 miss，不可回傳過期快取值"
+
+
+# --- score() 貫穿參數 stance_client：端到端驗證 ---------------------------------
+
+def test_score_stance_client_wiring_reduces_corroboration():
+    """score() 的 stance_client 貫穿參數：確實透過 cached_stance_fn 呼叫
+    client.classify_stance，並反映在 ScoredClaim.components['corroboration']。
+    """
+    class _FakeContradictClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            return "contradiction"
+
+    text_a = ("Market analysts expect regulatory clarity to boost institutional "
+              "adoption significantly.")
+    text_b = ("Market observers expect regulatory scrutiny to boost investor "
+              "caution significantly.")
+    c_a = Claim(id="wa", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="wb", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    scored_with_stance = score([c_a, c_b], now=1000.0, stance_client=_FakeContradictClient())
+    sc_a = next(sc for sc in scored_with_stance if sc.claim.id == "wa")
+    assert sc_a.components["corroboration"] == 0.0, (
+        "score() 應把 stance_client 貫穿到 _corroboration，矛盾閘生效"
+    )
+
+    # CEO+codex 對抗審修正後：stance_client=None 不等於「矛盾閘關閉」，而是
+    # 「沒有線上 client、只讀持久化快取，快取 miss 時 fail-safe 回 neutral」。
+    # 用一組確定不在 demo/sample_data/stance_cache.json 裡的文字，驗證 miss 情境
+    # 下不會誤判成 contradiction、不會錯殺合法佐證。
+    text_c = "Traders note steady exchange inflows this week amid low volatility"
+    text_d = "Traders note steady exchange outflows this week amid low volatility"
+    c_c = Claim(id="wc", text=text_c, doc=_doc("dc", "news", "coindesk"))
+    c_d = Claim(id="wd", text=text_d, doc=_doc("dd", "news", "reuters"))
+    scored_without_stance = score([c_c, c_d], now=1000.0, stance_client=None)
+    sc_c = next(sc for sc in scored_without_stance if sc.claim.id == "wc")
+    assert sc_c.components["corroboration"] > 0.0, (
+        "stance_client=None + 持久化快取 miss 時應 fail-safe 回 neutral，不可錯殺合法佐證"
+    )
+
+
+def test_score_stance_client_without_classify_stance_does_not_crash():
+    """向後相容防禦：stance_client 若沒有 classify_stance 方法（如舊版測試 stub），
+    score() 應安全降級為不啟用矛盾閘，不 crash。
+    """
+    class _NoStanceClient:
+        pass
+
+    c_a = Claim(id="na", text="清算 瀑布 觸發 ETF 審批", doc=_doc("da", "onchain", "glassnode"))
+    c_b = Claim(id="nb", text="清算 瀑布 影響 ETF 申請", doc=_doc("db", "news", "coindesk"))
+
+    scored = score([c_a, c_b], now=1000.0, stance_client=_NoStanceClient())
+    assert len(scored) == 2
+
+
+# --- CEO+codex 對抗審修正回歸測試（PR #26 續修）----------------------------------
+# [HIGH] 離線路徑必須也走持久化快取；[MEDIUM] cache_key 不可用裸分隔符串接。
+
+
+def test_offline_persistent_cache_hit_excludes_contradiction():
+    """[HIGH 驗收] 離線（無真實 Bedrock client）+ demo/sample_data/stance_cache.json
+    已預先算好 #15 這對是 contradiction 時，score(stance_client=None)（orchestrator.py
+    離線路徑實際傳的值）應該仍能透過 cached_stance_fn(None) 讀到持久化快取、正確把
+    這對主張排除在獨立佐證之外——不是完全不啟用矛盾閘。這是 orchestrator.py:341
+    `stance_client=None if client.offline else client` 離線分支的等價重現。
+    """
+    text_a = ("Market analysts expect regulatory clarity to boost institutional "
+              "adoption significantly.")
+    text_b = ("Market observers expect regulatory scrutiny to boost investor "
+              "caution significantly.")
+    c_a = Claim(id="off15a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="off15b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    # 完全不提供 client（等同 orchestrator 離線時傳的 None），只靠預設持久化快取路徑
+    # （demo/sample_data/stance_cache.json）。
+    scored = score([c_a, c_b], now=1000.0, stance_client=None)
+    sc_a = next(sc for sc in scored if sc.claim.id == "off15a")
+    assert sc_a.components["corroboration"] == 0.0, (
+        "離線模式應能讀到持久化快取的 contradiction 判斷並排除該對佐證，"
+        f"實際 corr={sc_a.components['corroboration']}"
+    )
+
+
+def test_offline_cache_miss_fails_safe_to_neutral_without_client():
+    """[HIGH 驗收] 離線 + 快取 miss（demo/sample_data/stance_cache.json 沒有這對的
+    預算結果）→ fail-safe 回 "neutral"，不 crash（不會因為 client=None 去呼叫
+    client.classify_stance）、也不可錯殺原本合法的佐證。
+    """
+    text_a = "Institutional adoption continues rising despite short-term regulatory caution"
+    text_b = "Institutional adoption continues rising steadily this quarter"
+    c_a = Claim(id="offmiss_a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="offmiss_b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    scored = score([c_a, c_b], now=1000.0, stance_client=None)
+    sc_a = next(sc for sc in scored if sc.claim.id == "offmiss_a")
+    assert sc_a.components["corroboration"] > 0.0, (
+        "快取 miss 時應 fail-safe 回 neutral、不可錯殺合法佐證，"
+        f"實際 corr={sc_a.components['corroboration']}"
+    )
+
+
+def test_cache_key_no_collision_via_raw_separator_concat():
+    """[MEDIUM 驗收] cache_key 不可用裸分隔符字串接：('a<SEP>b', 'c') 與
+    ('a', 'b<SEP>c') 這類「使用者可控文字恰好包含分隔符」的輸入，正規化排序後
+    若用裸串接會產生同一把 key（讓惡意 claim 挪用他對快取結果）。改用 canonical
+    JSON 陣列序列化後，兩者必須是不同的 key。
+    """
+    # 用舊版分隔符 "␟" 本身當作使用者輸入的一部分，模擬對抗場景。
+    sep = "␟"
+    key1 = cache_key(f"a{sep}b", "c")
+    key2 = cache_key("a", f"b{sep}c")
+    assert key1 != key2, f"cache_key 發生碰撞：{key1!r} == {key2!r}"
+
+    # 額外驗證：兩把 key 各自仍能正確命中/不命中自己對應的快取，不會互相干擾。
+    cache = StanceCache()
+    cache.set(f"a{sep}b", "c", "contradiction")
+    cache.set("a", f"b{sep}c", "entailment")
+    assert cache.get(f"a{sep}b", "c") == "contradiction"
+    assert cache.get("a", f"b{sep}c") == "entailment"
+
+
+# --- 第二輪 codex 對抗審修正：線上 stance 呼叫預算（O(n²) 效能/成本）------------
+
+
+def test_already_counted_source_skips_redundant_stance_calls():
+    """[HIGH 驗收] 同一個來源已經算進 independent_sources 後，該來源後續的其他
+    claim 不應該再花一次 stance 呼叫確認——這個 set 已經含有該 source，再分類不
+    會改變最終結果，純屬冗餘呼叫（見 scoring.py:_corroboration 的「已計入來源」
+    快路徑）。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+
+    # 同一個來源 "dup-source" 出 3 條高重疊 claim：只算 1 個獨立來源，理應只需要
+    # 1 次 stance 呼叫（第一次判斷後就把 "dup-source" 計入 independent_sources，
+    # 後兩條同源 claim 應直接跳過，不再呼叫）。
+    dup_claims = [
+        Claim(id=f"dup{i}", text=target_text, doc=_doc(f"ddup{i}", "news", "dup-source"))
+        for i in range(3)
+    ]
+
+    scored = score(
+        [target, *dup_claims],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=100,
+    )
+    sc_target = next(sc for sc in scored if sc.claim.id == "t0")
+    assert sc_target.components["corroboration"] > 0.0
+    assert len(calls) == 1, (
+        "同一來源已計入 independent_sources 後不應再花額外 stance 呼叫，"
+        f"實際呼叫 {len(calls)} 次：{calls}"
+    )
+
+
+def test_stance_pair_budget_caps_calls_and_falls_back_to_neutral():
+    """[HIGH 驗收] 高重疊 claims（多個不同來源）情境下，stance 呼叫次數必須有硬
+    上限；超過預算的配對一律 fail-safe 降級為 "neutral"（不呼叫、不錯殺），防
+    O(n²) 呼叫在 credit/15 分鐘執行窗口上無上限爆量。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+
+    # 10 個不同來源，全部高重疊——若無上限，光 target 這一輪就要 10 次 stance
+    # 呼叫；score() 對每個 claim 都當一次 target，總呼叫數沒上限的話會是 O(n²)。
+    # 每個來源的文字略有不同（附加 variant 標記），避免正規化後跟 target 完全
+    # byte-identical 而共用同一把快取 key（那樣只會真的呼叫 1 次，測不出上限）；
+    # 附加內容是 target 文字的超集，overlap 仍是 1.0（見上方驗證腳本）。
+    other_claims = [
+        Claim(
+            id=f"o{i}",
+            text=f"{target_text} variant number {i}",
+            doc=_doc(f"do{i}", "news", f"source-{i}"),
+        )
+        for i in range(10)
+    ]
+
+    budget = 5
+    scored = score(
+        [target, *other_claims],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=budget,
+    )
+
+    assert len(calls) == budget, (
+        f"stance 呼叫次數應被硬上限 {budget} 卡住，實際呼叫 {len(calls)} 次"
+    )
+    # 預算耗盡後的配對 fail-safe 回 neutral（不是 contradiction），不可錯殺合法
+    # 佐證：所有 claim 應該仍然看得到 > 0 的 corroboration。
+    for sc in scored:
+        assert sc.components["corroboration"] > 0.0, (
+            f"{sc.claim.id} 的佐證不應被預算耗盡的 fail-safe neutral 錯殺，"
+            f"實際 corr={sc.components['corroboration']}"
+        )
+
+
+def test_stance_remaining_time_fn_exhausted_falls_back_to_neutral():
+    """[HIGH 驗收] 時間預算（ExecutionLog.remaining() 的等價回呼）耗盡時，就算配對
+    硬上限還沒用完，也要 fail-safe 降級為 "neutral"，不繼續呼叫、不 crash、不錯殺。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+    other = Claim(id="o0", text=target_text, doc=_doc("do0", "news", "source-0"))
+
+    # 時間預算永遠回傳 0 秒（低於 STANCE_TIME_RESERVE_SEC），模擬官方 15 分鐘執行
+    # 窗口已經耗盡；就算配對硬上限（100）還很充裕，也不應該再呼叫。
+    scored = score(
+        [target, other],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=100,
+        stance_remaining_time_fn=lambda: 0.0,
+    )
+    assert len(calls) == 0, (
+        f"時間預算耗盡時不應再呼叫 stance_fn，實際呼叫 {len(calls)} 次：{calls}"
+    )
+    sc_target = next(sc for sc in scored if sc.claim.id == "t0")
+    assert sc_target.components["corroboration"] > 0.0, (
+        "時間預算耗盡的 fail-safe neutral 不可錯殺合法佐證，"
+        f"實際 corr={sc_target.components['corroboration']}"
+    )
+
+
+def test_bulk_cache_hits_do_not_consume_budget_real_contradiction_still_excluded():
+    """[HIGH-1 驗收，第 3 輪對抗審] 大量 cache-hit（遠超預算上限）不可消耗真正的
+    Bedrock 呼叫預算；快取裡真正的 contradiction 配對即使排在大量 hit 之後，仍要
+    被正確辨識、排除——證明 cache-hit 不吃預算，無法靠「先塞大量便宜 cache-hit
+    耗光預算」的排序手法讓真矛盾繞過矛盾閘（第 2 輪的錯誤設計：預算扣點在
+    `_corroboration` 呼叫 `stance_fn` 之前，連 cache-hit 也一併扣；第 3 輪修正把
+    扣點移進 `cached_stance_fn`，只在確認 cache miss、真的要打 Bedrock 時才扣）。
+    """
+
+    class _CrashingClient:
+        """一旦被真的呼叫就直接 raise——藉此證明本測試全程沒有任何一次真呼叫
+        （所有配對都該命中快取，budget 應該完全沒被消耗）。"""
+
+        offline = False
+
+        def classify_stance(self, a: str, b: str) -> str:
+            raise AssertionError("不應觸發真 Bedrock 呼叫：這裡的配對都該命中快取")
+
+    cache = StanceCache()  # 純記憶體，乾淨環境，不依賴/污染 DEFAULT_CACHE_PATH
+    target_text = "institutional demand keeps climbing across major trading venues"
+
+    # 20 組「干擾用」cache-hit（遠超下面預算上限 3），標成 neutral，模擬離線 demo
+    # 大量走快取的常態，也模擬對抗者故意把便宜的 hit 排在前面想耗光預算。
+    distractor_texts = [f"distractor claim number {i}" for i in range(20)]
+    for text in distractor_texts:
+        cache.set(target_text, text, "neutral")
+
+    # 快取裡真正的 contradiction 配對——同樣是 cache-hit，不是真呼叫。
+    contradiction_text = "institutional demand is collapsing across major trading venues"
+    cache.set(target_text, contradiction_text, "contradiction")
+
+    budget = _StanceBudget(max_pairs=3)
+    stance_fn = cached_stance_fn(_CrashingClient(), cache=cache, budget=budget)
+
+    for text in distractor_texts:
+        result = stance_fn(target_text, text)
+        assert result == "neutral", f"預期 cache-hit 回 neutral，實際 {result}"
+
+    # 大量 hit 之後，預算應該完全沒被動用（還是滿的 3）。
+    assert budget._remaining_pairs == 3, (
+        "cache-hit 不應消耗預算，實際剩餘 "
+        f"{budget._remaining_pairs}（預期仍是 3，20 次 hit 後應該完全沒被扣）"
+    )
+
+    # 快取裡真正的 contradiction 配對，即使排在大量 hit 之後，仍要被正確辨識、
+    # 不受前面 20 次 cache-hit 影響（不會被誤判成預算已耗盡而降級成 neutral）。
+    result = stance_fn(target_text, contradiction_text)
+    assert result == "contradiction", (
+        f"cache 裡的 contradiction 配對不可被前面大量 cache-hit 影響，實際: {result}"
+    )
+
+
+def test_stance_remaining_time_between_old_and_new_reserve_blocks_call():
+    """[HIGH-2 驗收，第 3 輪對抗審] 剩餘時間落在「單次呼叫最壞總耗時
+    （connect_timeout + read_timeout = 3+8 = 11 秒）」與舊版時間門檻（5 秒）之間
+    （例如剩 8 秒）——第 2 輪的門檻（STANCE_TIME_RESERVE_SEC=5.0）會誤判為「還夠」
+    而啟動呼叫，但呼叫本身最壞可能耗掉 11 秒，讓官方 15 分鐘執行窗口被越界。
+    第 3 輪修正後的門檻（>= connect+read+報告裕量，目前 25 秒）必須擋下這次呼叫，
+    降級為 neutral，確保 stance 階段最壞耗時有上界。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+    other = Claim(
+        id="o0", text=f"{target_text} variant", doc=_doc("do0", "news", "source-0")
+    )
+
+    # 剩餘 8 秒：介於舊門檻 5 秒與單次呼叫最壞耗時 11 秒之間，第 2 輪的邏輯會誤放行。
+    scored = score(
+        [target, other],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=100,
+        stance_remaining_time_fn=lambda: 8.0,
+    )
+    assert len(calls) == 0, (
+        "剩餘 8 秒（< 單次呼叫最壞耗時 11 秒 + 報告裕量）不應啟動新呼叫，"
+        f"實際呼叫 {len(calls)} 次：{calls}"
+    )
+    sc_target = next(sc for sc in scored if sc.claim.id == "t0")
+    assert sc_target.components["corroboration"] > 0.0, (
+        "時間不足擋下呼叫的 fail-safe neutral 不可錯殺合法佐證，"
+        f"實際 corr={sc_target.components['corroboration']}"
+    )

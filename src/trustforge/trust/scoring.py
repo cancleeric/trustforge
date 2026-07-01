@@ -18,8 +18,35 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
+from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
 from ..ingestion.base import Document
+from .stance_cache import cached_stance_fn
+
+# W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
+# Bedrock）。這是「真正呼叫 Bedrock」的配對硬上限——只在 stance_cache.py 的
+# `cached_stance_fn` 確認 cache miss、即將發起真呼叫時才消耗；免費的 cache-hit
+# 不吃這個額度（第 3 輪對抗審修正：預算若在查快取前就先扣，會讓大量 cache-hit
+# 吃光全域預算，導致快取裡真正的 contradiction 也被跳過檢查、錯判為佐證）。
+# 額度用完後其餘「需要新呼叫」的配對一律降級 "neutral"（不呼叫、不錯殺）。數字是
+# 保守預設，可視實際成本調整；claims 數量在此之內時完全不受影響。
+DEFAULT_STANCE_PAIR_BUDGET = 40
+
+# stance 呼叫最少要保留的剩餘執行時間（秒）。ExecutionLog.remaining() 低於這個門檻
+# 時一律視為預算耗盡，不再發起新的真呼叫，就算配對數還沒到硬上限，避免官方 15
+# 分鐘執行窗口的最後一點時間被 stance 呼叫吃光、報告生不出來（命題第一號失敗模式）。
+#
+# 第 3 輪對抗審修正：門檻必須 >= 單次呼叫最壞總耗時（connect_timeout + read_timeout，
+# 兩者皆設 `total_max_attempts=1` 不重試，見 bedrock.py），否則「剩餘時間看起來還夠」
+# 但呼叫真正開始執行後仍可能把僅存的一點時間吃光、讓報告生成階段越過 15 分鐘。
+# 直接算自 bedrock.py 的 timeout 常數（不在這裡重複寫死數字），避免兩邊之後各自
+# 調整 timeout 卻忘記同步更新這裡，數字對不上。
+_STANCE_REPORT_MARGIN_SEC = 14.0  # 呼叫結束後留給報告產生/收尾階段的裕量
+STANCE_TIME_RESERVE_SEC = (
+    _STANCE_CONNECT_TIMEOUT_SEC + _STANCE_READ_TIMEOUT_SEC + _STANCE_REPORT_MARGIN_SEC
+)  # = 3 + 8 + 14 = 25.0s
+
 
 # --- 權重（可調）---------------------------------------------------------
 DEFAULT_WEIGHTS = {
@@ -218,12 +245,76 @@ def _direction_compatible(d1: str, d2: str) -> bool:
     return d1 == d2
 
 
-def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
+class _StanceBudget:
+    """CEO/codex 對抗審修正：單次 `score()` 執行共用的 stance 呼叫預算。
+
+    O(n²) 迴圈（每個 claim 都要跟其他所有 claims 比對）在高重疊 claims 的情境下，
+    最壞會產生 n(n-1)/2 次 stance 呼叫；沒有上限會爆 credit、也可能吃光官方 15
+    分鐘執行窗口（命題第一號失敗模式：報告生不出來）。
+
+    這是一個跨所有 `_corroboration()` 呼叫共享的可變計數器（`score()` 建立一個
+    實例，傳給每一次 `_corroboration()`），同時檢查：
+    1. 配對硬上限（`max_pairs`，用完就不再呼叫）。
+    2. 選用的即時剩餘時間（`remaining_time_fn`，通常是 `ExecutionLog.remaining`
+       的 bound method）——低於 `STANCE_TIME_RESERVE_SEC` 秒也視為耗盡。
+
+    額度/時間耗盡時，呼叫端（`_corroboration`）應 fail-safe 降級為 "neutral"
+    （不呼叫、不 raise、不錯殺既有佐證）。
+    """
+
+    def __init__(
+        self,
+        max_pairs: int = DEFAULT_STANCE_PAIR_BUDGET,
+        remaining_time_fn: Callable[[], float] | None = None,
+    ):
+        self._remaining_pairs = max_pairs
+        self._remaining_time_fn = remaining_time_fn
+
+    def take(self) -> bool:
+        """嘗試消耗一次配額。回 False 代表額度或時間已耗盡，呼叫端不應再呼叫
+        stance_fn，應直接降級為 "neutral"。"""
+        if self._remaining_pairs <= 0:
+            return False
+        if (
+            self._remaining_time_fn is not None
+            and self._remaining_time_fn() <= STANCE_TIME_RESERVE_SEC
+        ):
+            return False
+        self._remaining_pairs -= 1
+        return True
+
+
+def _corroboration(
+    target: Claim,
+    all_claims: list[Claim],
+    stance_fn: Callable[[str, str], str] | None = None,
+) -> float:
     """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
 
     改進（M1-M3）：
     - 停用詞過濾：從 overlap 計算排除域內通用詞（幣名/市場詞），只計具體詞重疊。
     - 方向閘：若兩條主張方向明確且相反（bullish vs bearish），略過，不算佐證。
+
+    W1.5（#15）：加選用 stance_fn，對通過 overlap 前置閘 + 方向閘的候選再做一次
+    語意 stance 分類，偵測「表面詞重疊但實質矛盾」（例如 regulatory clarity/adoption
+    vs regulatory scrutiny/caution：方向詞未必明確相反，但語意明確對立）。
+
+    順序（控成本，越前面越便宜）：
+    0. 該來源已計入 independent_sources → 直接跳過（CEO/codex 對抗審修正：同一
+       來源已經算過，再花一次 overlap/方向/stance 判斷不會改變結果，純屬冗餘
+       呼叫，尤其在高重疊 claims 情境下能砍掉大量 stance 呼叫）。
+    1. 同源排除（不變）。
+    2. overlap>=0.4 前置閘（不變）——先過最便宜的集合運算。
+    3. `_direction_compatible` 明確衝突快路徑（不變）——省下不必要的 stance 呼叫。
+    4. 若 `stance_fn` 存在才呼叫（走快取）；回傳 "contradiction" 則不計入獨立佐證。
+
+    第 3 輪對抗審修正：呼叫預算（配對硬上限 + 時間預算）**不在這裡管**，而是移進
+    `stance_cache.py::cached_stance_fn` 內部——只在確認 cache miss、即將真正打
+    Bedrock 時才消耗預算；免費的 cache-hit 不吃預算（否則大量 cache-hit 會把全域
+    預算耗盡，讓快取裡真正的 contradiction 反而被跳過檢查、錯判為佐證）。這裡只
+    單純呼叫 `stance_fn`，預算耗盡與否對這層完全透明。
+
+    `stance_fn=None` 時完全略過第 4 步，行為與加入 W1.5 前逐字相同（向後相容）。
     """
     tt = _normalize(target.text) - DOMAIN_STOP
     if not tt:
@@ -232,24 +323,60 @@ def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
     for c in all_claims:
         if c.doc.source == target.doc.source:
             continue
-        if not _direction_compatible(target.direction, c.direction):
+        if c.doc.source in independent_sources:
             continue
         ct = _normalize(c.text) - DOMAIN_STOP
         overlap = len(tt & ct) / len(tt)
-        if overlap >= 0.4:
-            independent_sources.add(c.doc.source)
+        if overlap < 0.4:
+            continue
+        if not _direction_compatible(target.direction, c.direction):
+            continue
+        if stance_fn is not None and stance_fn(target.text, c.text) == "contradiction":
+            continue
+        independent_sources.add(c.doc.source)
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
     n = len(independent_sources)
     return 1.0 - math.pow(0.5, n) if n else 0.0
 
 
 # --- 主評分 --------------------------------------------------------------
-def score(claims: list[Claim], now: float, weights: dict | None = None) -> list[ScoredClaim]:
+def score(
+    claims: list[Claim],
+    now: float,
+    weights: dict | None = None,
+    stance_client=None,
+    stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
+    stance_remaining_time_fn: Callable[[], float] | None = None,
+) -> list[ScoredClaim]:
+    """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient），
+    或 None。
+
+    CEO+codex 對抗審修正：`stance_client=None` **不代表關掉 W1.5**，而是「沒有可用的
+    線上模型（離線 / 未設模型）」——仍會建立 `cached_stance_fn(None)`，讓持久化快取
+    （`demo/sample_data/stance_cache.json`）在離線路徑也能生效；快取 miss 時
+    `cached_stance_fn` 內部 fail-safe 回 "neutral"，不呼叫任何 Bedrock、不 crash。
+    只有當 `stance_client` 是「非 None 但沒有 `classify_stance` 方法」的物件（例如
+    舊版測試用的 stub）時，才視為不相容物件、完全跳過矛盾閘（`stance_fn=None`，
+    等同 W1.5 加入前的行為）。
+
+    `stance_pair_budget`：單次執行「真正呼叫 Bedrock」的配對硬上限（見
+    `_StanceBudget`），預設 `DEFAULT_STANCE_PAIR_BUDGET`；`stance_remaining_time_fn`：
+    選用的即時剩餘時間回呼（通常傳 `ExecutionLog.remaining` 這個 bound method）。
+    額度或時間耗盡時，其餘**需要新呼叫**的配對一律 fail-safe 降級為 "neutral"，
+    防 O(n²) 呼叫無上限打 Bedrock；免費的 cache-hit 不受影響、不消耗這個預算
+    （第 3 輪對抗審修正：預算消耗點在 `cached_stance_fn` 內部，只在確認 cache
+    miss 後才扣，見該函式 docstring）。
+    """
     w = weights or DEFAULT_WEIGHTS
+    if stance_client is None or hasattr(stance_client, "classify_stance"):
+        stance_budget = _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
+        stance_fn = cached_stance_fn(stance_client, budget=stance_budget)
+    else:
+        stance_fn = None
     out: list[ScoredClaim] = []
     for c in claims:
         rep = _source_reputation(c)
-        corr = _corroboration(c, claims)
+        corr = _corroboration(c, claims, stance_fn=stance_fn)
         rec = _recency_decay(c, now)
         manip = _manipulation_penalty(c)
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip

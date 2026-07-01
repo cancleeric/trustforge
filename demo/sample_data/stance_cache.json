@@ -1,0 +1,10 @@
+{
+  "[\"market analysts expect regulatory clarity to boost institutional adoption significantly.\",\"market observers expect regulatory scrutiny to boost investor caution significantly.\"]": {
+    "label": "contradiction",
+    "version": "v1"
+  },
+  "[\"institutional adoption continues rising despite short-term regulatory caution.\",\"institutional adoption continues rising steadily this quarter.\"]": {
+    "label": "entailment",
+    "version": "v1"
+  }
+}
