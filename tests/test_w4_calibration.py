@@ -66,6 +66,39 @@ codex 對抗審第 3 輪 [HIGH] 修正（cross_source_signal 方向洩漏）：
     整體 calibrated_confidence 仍 < 0.35（重方反方雜訊拉低），驗證修後
     `report.cross_source_signal is None`，且完整 Markdown/Web HTML/
     analyze.json 三管道都無方向詞洩漏。
+
+codex 對抗審第 4 輪 [HIGH] 修正（robustness：原始 claim 計數可被灌量操縱）：
+  - `_evidence_strength` 的 `dominance`（佐證 vs 反方的證據優勢比例）舊版直接
+    數「原始 claim（逐句）筆數」——`extract_claims()` 是句級切分，同一個
+    來源寫一大段會被切成多筆 claim；單一囉嗦來源（不論支撐或反方）就能用
+    「句數」灌爆／稀釋 dominance，讓決策態隨 ingestion 量而變、單一冗長
+    來源能壓制方向結論（跟 `n_indep`/`indep_factor` 既有的「去重來源數」
+    口徑不一致，是這個綜合指標裡唯一還在用原始計數的子項）。
+  - 修法：`dominance` 分子分母改用**去重後的獨立來源數**（複用 `n_indep`
+    當分子，新增反方側的去重來源數當分母的另一項），跟 `indep_factor` 口徑
+    一致——同一來源無論產生幾句 claim，只算一份。
+  - 傳 `coin` 時，`aggregate()` 舊版的 coin 分支「只排序、不篩選」（見上方
+    #32 demo 可靠性修正的說明）——calibration 直接吃全部 `scored`，包含
+    「明確提及其他幣、與本次目標幣無關」的雜訊主張，一樣會被算進
+    `_evidence_strength` 的反方側拉低 dominance。修法：`aggregate()` 新增
+    `calib_pool`——傳 `coin` 時用 `_matches_coin`（幣種相關或全市場通用）
+    篩過的子集，只餵給 `_evidence_strength()`（`supporting`/`contrarian`/
+    `confidence` 等報表/事實清單欄位維持既有「全納入、只排序」語意不變，
+    避免重蹈 #32 覆轍）。未傳 coin 時行為逐字不變（`calib_pool = relevant`）。
+  - 本輪新增：
+    `test_evidence_strength_dominance_reflects_source_count_not_claim_count`
+    （純函式：單一來源狂洗 N 句 vs 該來源只有 1 句，兩者證據強度必須逐字
+    相同；且單一來源狂洗 N 句的證據強度必須明顯高於「N 個獨立來源各一句」
+    ——後者才是真的、獨立的反方訊號，dominance 該低）、
+    `test_aggregate_repeated_low_trust_claims_from_one_source_do_not_change_decision_state`
+    （e2e：單一來源灌大量重複低信任反方句子，`decision_state`/
+    `calibrated_confidence` 不得因句數增加而改變）、
+    `test_aggregate_coin_irrelevant_low_trust_claims_do_not_change_calibrated_confidence`
+    （e2e：`aggregate(coin=...)` 灌入明確提及「其他幣」、與目標幣無關的
+    低信任雜訊，`calibrated_confidence` 不得被拉低——同時確認雜訊仍照常
+    出現在 `brief.contrarian`，只是不進 calibration，未偷改報表內容）。
+  - 既有 647 綠 + 三態 e2e/abstain 一致性回歸確認：全部沿用既有測試逐字
+    不動，未修改任何既有斷言（見下方測試本體，本輪只新增測試，不改舊有）。
 """
 from __future__ import annotations
 
@@ -256,6 +289,35 @@ def test_evidence_strength_spans_full_range_reaches_all_three_bands():
     assert high >= 0.5, f"高強度案例應落正常，實得 {high}"
 
 
+def test_evidence_strength_dominance_reflects_source_count_not_claim_count():
+    """codex 對抗審第 4 輪 [HIGH]：`dominance` 必須反映「幾個獨立來源」，
+    不是「幾句 claim」——單一來源狂洗 N 句雜訊，不該跟 N 個獨立來源各洗
+    一句造成一樣的 dominance 稀釋（前者是灌量操縱，後者才是真的獨立反方
+    訊號）。"""
+    supporting = [_fake_sc("s1", "price", 0.6), _fake_sc("s2", "onchain", 0.6)]
+
+    # 情境 A：反方由「單一來源」灌 10 句雜訊組成（同一 source，逐句切分）。
+    single_source_verbose = [_fake_sc("spam", "social", 0.2) for _ in range(10)]
+    # 情境 B：反方由「單一來源」只有 1 句（與 A 同一來源，句數不同）。
+    single_source_one_sentence = [_fake_sc("spam", "social", 0.2)]
+    # 情境 C：反方由「10 個不同來源」各一句組成——真的、獨立的反方訊號。
+    many_distinct_sources = [_fake_sc(f"src-{i}", "social", 0.2) for i in range(10)]
+
+    strength_verbose = _evidence_strength(supporting, single_source_verbose, confidence=0.6)
+    strength_one = _evidence_strength(supporting, single_source_one_sentence, confidence=0.6)
+    strength_many_distinct = _evidence_strength(supporting, many_distinct_sources, confidence=0.6)
+
+    assert strength_verbose == strength_one, (
+        "同一來源不論產生幾句 claim，dominance 應只算 1 份獨立來源——"
+        f"狂洗 10 句={strength_verbose} 只有 1 句={strength_one} 不應有差異"
+    )
+    assert strength_verbose > strength_many_distinct, (
+        "單一來源灌量（10 句同源）不該跟 10 個獨立來源各一句造成一樣的證據"
+        f"強度衰減：single_source_verbose={strength_verbose} "
+        f"many_distinct_sources={strength_many_distinct}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. `aggregate()` 附上 `calibrated_confidence`，`confidence` 裸值不砍
 # ---------------------------------------------------------------------------
@@ -309,6 +371,81 @@ def test_confidence_field_stays_raw_not_calibrated():
     brief = _aggregate_from_docs(docs)
     assert brief.confidence != brief.calibrated_confidence
     assert brief.confidence == 0.75
+
+
+def test_aggregate_repeated_low_trust_claims_from_one_source_do_not_change_decision_state():
+    """codex 對抗審第 4 輪 [HIGH] 回歸：單一來源灌大量重複低信任反方句子
+    （模擬囉嗦/灌量攻擊——同一個 source 寫一大段被 `extract_claims()`
+    切成很多句），不得因為句數增加而把 `calibrated_confidence`／
+    `decision_state` 壓低——舊版用原始 claim 計數算 dominance 時，這個
+    情境會隨句數增加持續拉低 calibrated_confidence（見本次修正 commit
+    message 內附的實測數據：同樣的兩筆佐證，反方句數從 1 灌到 20，舊版
+    calibrated_confidence 從 0.5665 一路降到 0.4513、且在 5 句左右就會把
+    decision_state 從 normal 壓成 low_confidence；修後應完全不受句數影響）。
+    """
+    supporting_docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+    ]
+
+    def _brief_with_spam_sentences(n: int):
+        spam_text = "".join(
+            f"BTC 完全無關的第{i}句垃圾雜訊內容純噪音。" for i in range(n)
+        )
+        docs = list(supporting_docs)
+        if spam_text:
+            docs.append(_doc("spam1", "social", "spammer-x", spam_text))
+        return _aggregate_from_docs(docs)
+
+    baseline = _brief_with_spam_sentences(1)  # 單一來源、只有 1 句反方雜訊
+    flooded = _brief_with_spam_sentences(20)  # 同一來源，狂灌到 20 句
+
+    assert baseline.calibrated_confidence == flooded.calibrated_confidence, (
+        "單一來源不論灌幾句反方雜訊，calibrated_confidence 不應改變："
+        f"1 句={baseline.calibrated_confidence} 20 句={flooded.calibrated_confidence}"
+    )
+    assert flooded.calibrated_confidence >= 0.5, (
+        f"decision_state 不該因單一來源灌量而被壓出 normal 態，"
+        f"實得 calibrated_confidence={flooded.calibrated_confidence}"
+    )
+    assert len(flooded.supporting) >= 2
+
+
+def test_aggregate_coin_irrelevant_low_trust_claims_do_not_change_calibrated_confidence():
+    """codex 對抗審第 4 輪 [HIGH] 回歸：`aggregate(coin=...)` 灌入「明確提及
+    其他幣、與目標幣無關」的低信任雜訊，不得拉低目標幣的
+    `calibrated_confidence`——calibration 應只從 `_matches_coin()` 篩過的
+    幣種相關（或全市場通用）子集算，不是全部 scored claim 都納入。同時
+    確認雜訊仍照常出現在 `brief.contrarian`（報表/事實清單語意不變，只有
+    calibration 輸入變窄，沒有偷改報表內容）。"""
+    supporting_docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+    ]
+
+    def _brief_with_eth_noise(n: int):
+        eth_text = "".join(
+            f"ETH 完全無關的第{i}句垃圾雜訊內容純噪音。" for i in range(n)
+        )
+        docs = list(supporting_docs)
+        if eth_text:
+            docs.append(_doc("eth-spam", "social", "eth-spammer", eth_text))
+        scored = score(extract_claims(docs), now=1_000_000.0)
+        return aggregate(scored, query="分析 BTC", coin="BTC")
+
+    baseline = _brief_with_eth_noise(0)      # 無任何他幣雜訊
+    noisy = _brief_with_eth_noise(20)        # 灌 20 句「明確提及 ETH」的雜訊
+
+    assert baseline.calibrated_confidence == noisy.calibrated_confidence, (
+        "與目標幣無關（明確提及其他幣）的低信任雜訊不該影響 "
+        f"calibrated_confidence：無雜訊={baseline.calibrated_confidence} "
+        f"灌 20 句 ETH 雜訊={noisy.calibrated_confidence}"
+    )
+    # 雜訊仍照常透明列在 contrarian（報表內容不變，只是不進 calibration）。
+    assert any("ETH" in sc.claim.text for sc in noisy.contrarian), (
+        "ETH 雜訊應仍出現在 brief.contrarian（報表透明度不變），"
+        "只是被排除在 calibration 輸入之外"
+    )
 
 
 # ---------------------------------------------------------------------------

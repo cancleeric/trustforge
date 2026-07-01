@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document, _mentions_coin
+from ..ingestion.base import Document, _matches_coin, _mentions_coin
 from .stance_cache import cached_stance_fn
 
 # W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
@@ -1208,11 +1208,18 @@ def _evidence_strength(
     `confidence`，不重新計算 trust、不新增資料源。回傳值 clamp 在
     [0, 1]（四個子指標各自已是 [0, 1]，加權平均理論上不會超界，clamp
     是防禦性寫法）。
-    """
+
+    W4 codex 對抗審第 4 輪 [HIGH] robustness 修正：`dominance`（佐證 vs
+    反方的證據優勢比例）改用**去重後的獨立來源數**，不用原始 claim（逐句）
+    計數——`extract_claims()` 是句級切分，同一個來源囉嗦寫一大段會被切成
+    多筆 claim；若 dominance 直接數 claim 筆數，單一囉嗦來源（無論支撐或
+    反方）就能用「句數」灌爆／稀釋 dominance，等同讓「決策態隨 ingestion
+    量而變、單一冗長來源能壓制方向結論」——這正是 codex 抓到的可操縱面。
+    修法：dominance 的分子分母都改用「該側涉及的獨立來源數」（同一來源
+    無論產生幾句 claim，只算一份），跟 `indep_factor` 既有的去重口徑一致
+    （`n_indep` 本就已是去重來源數，直接複用）。"""
     n_indep = len({sc.claim.doc.source for sc in supporting})
     n_kinds = len({sc.claim.doc.kind for sc in supporting})
-    n_supporting = len(supporting)
-    n_contrarian = len(contrarian)
 
     indep_factor = max(0.0, min(
         (n_indep - 1) / (_INDEP_SOURCE_SATURATION - 1), 1.0
@@ -1220,8 +1227,9 @@ def _evidence_strength(
     diversity_factor = max(0.0, min(
         (n_kinds - 1) / (_KIND_DIVERSITY_SATURATION - 1), 1.0
     ))
-    total = n_supporting + n_contrarian
-    dominance = (n_supporting / total) if total > 0 else 0.0
+    n_contrarian_sources = len({sc.claim.doc.source for sc in contrarian})
+    total_sources = n_indep + n_contrarian_sources
+    dominance = (n_indep / total_sources) if total_sources > 0 else 0.0
 
     w = _STRENGTH_WEIGHTS
     strength = (
@@ -1254,6 +1262,22 @@ def aggregate(scored: list[ScoredClaim], query: str,
     文字措辭影響——查詢字串仍照樣傳入供其他用途（如 `TrustedBrief.query`
     留痕），但不再左右候選池的去留或排序。不傳 coin 時（既有呼叫端）
     行為完全不變。
+
+    W4 codex 對抗審第 4 輪 [HIGH] robustness 修正：`relevant`（決定
+    `supporting`/`contrarian`/`confidence`——報表 facts/evidence 清單用的
+    那份，維持既有「全納入、只排序」語意不變，見上一段）跟「餵給
+    `_evidence_strength()` 算 `calibrated_confidence` 的那份資料」現在**分開
+    處理**——傳 `coin` 時，calibration 只從 `_matches_coin`（幣種相關或
+    全市場通用，見 `ingestion.base._matches_coin` docstring）篩過的子集算，
+    排除「明確提及其他幣、與本次分析目標幣無關」的雜訊主張。背景：舊版
+    calibration 直接吃 `supporting`/`contrarian`（=`relevant`，coin 分支下
+    「全部 scored 都算 relevant，coin 只影響排序」）——不相關雜訊只要信任
+    分夠低，一樣會被算進 `_evidence_strength` 的 `contrarian` 一側拉低
+    dominance，讓決策態隨「餵了多少不相關雜訊」而變，形同讓資料蒐集量、
+    而非證據本身的品質，決定要不要 abstain。不影響 `supporting`/
+    `contrarian`/`confidence`/facts/evidence 清單本身（那些仍刻意「全納
+    入」，避免重蹈 #32 那次靠文字比對篩選導致候選池不穩定的覆轍）——只有
+    校準用的統計輸入變窄。不傳 coin 時（既有呼叫端）行為完全不變。
     """
     qt = _normalize(query)
     if coin:
@@ -1264,6 +1288,9 @@ def aggregate(scored: list[ScoredClaim], query: str,
             key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
         )
         # 已依 (是否幣種特定, 信任分) 排序完成，不再套用下面純信任分排序。
+        # calibration 專用子集：只留「幣種相關或全市場通用」（`_matches_coin`
+        # 分支 1/3），排除明確提及其他幣、與本次目標幣無關的雜訊。
+        calib_pool = [sc for sc in scored if _matches_coin(sc.claim.doc, coin)]
     else:
         # 與 query 相關者優先（無相關詞則全納入）
         relevant = [
@@ -1271,6 +1298,9 @@ def aggregate(scored: list[ScoredClaim], query: str,
             if not qt or (_normalize(sc.claim.text) & qt)
         ] or scored
         relevant.sort(key=lambda sc: sc.trust, reverse=True)
+        # 未指定 coin：無獨立的幣種相關性判準可用，calibration 沿用既有
+        # 「全納入」的 relevant（逐字向後相容，不引入新篩選）。
+        calib_pool = relevant
     supporting = [sc for sc in relevant if sc.trust >= support_threshold]
     contrarian = [sc for sc in relevant if sc.trust < support_threshold]
 
@@ -1279,7 +1309,18 @@ def aggregate(scored: list[ScoredClaim], query: str,
     # 基礎資料，見上方 `_evidence_strength` 對「不重新計算 trust、不新增資料源」
     # 的承諾）算證據強度綜合指標，再校準——不用截斷後的 [:10]/[:5]，避免評分
     # 結果隨截斷上限漂移（跟 `confidence` 本身的計算基礎保持一致）。
-    evidence_strength = _evidence_strength(supporting, contrarian, confidence)
+    #
+    # W4 codex 對抗審第 4 輪：calibration 的 trust 子指標也改用 calib_pool
+    # 自己的裸信心均值（`calib_confidence`），不沿用可能被幣種不相關雜訊
+    # 污染的 `confidence`——確保 `evidence_strength` 四個子指標（trust/
+    # indep/diversity/dominance）全部只從 calib_pool 算，口徑一致。
+    calib_supporting = [sc for sc in calib_pool if sc.trust >= support_threshold]
+    calib_contrarian = [sc for sc in calib_pool if sc.trust < support_threshold]
+    calib_confidence = (
+        sum(sc.trust for sc in calib_supporting) / len(calib_supporting)
+        if calib_supporting else 0.0
+    )
+    evidence_strength = _evidence_strength(calib_supporting, calib_contrarian, calib_confidence)
     return TrustedBrief(
         query=query,
         supporting=supporting[:10],
