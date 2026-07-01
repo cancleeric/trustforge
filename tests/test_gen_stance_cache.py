@@ -134,6 +134,51 @@ def test_load_existing_cache_missing_file_returns_empty(tmp_path):
     assert gen_stance_cache.load_existing_cache(tmp_path / "does-not-exist.json") == {}
 
 
+def test_load_existing_cache_normal_file_merges_fine(tmp_path):
+    """既有正常流程回歸：檔案存在且是合法 dict → 照常回傳內容（不 raise）。"""
+    p = tmp_path / "stance_cache.json"
+    p.write_text(
+        json.dumps({"k": {"label": "neutral", "version": STANCE_CACHE_VERSION}}),
+        encoding="utf-8",
+    )
+    assert gen_stance_cache.load_existing_cache(p) == {
+        "k": {"label": "neutral", "version": STANCE_CACHE_VERSION}
+    }
+
+
+# ── load_existing_cache fail-closed（第二個 HIGH：讀失敗絕不能當空 dict）───────
+
+
+def test_load_existing_cache_malformed_json_raises(tmp_path):
+    p = tmp_path / "stance_cache.json"
+    p.write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(Exception):
+        gen_stance_cache.load_existing_cache(p)
+
+
+def test_load_existing_cache_non_dict_top_level_raises(tmp_path):
+    p = tmp_path / "stance_cache.json"
+    p.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+
+    with pytest.raises(Exception):
+        gen_stance_cache.load_existing_cache(p)
+
+
+def test_load_existing_cache_os_error_raises(tmp_path, monkeypatch):
+    """模擬讀取權限錯誤：`Path.read_text` 拋 `OSError` → 必須 raise，不可回空 dict。"""
+    p = tmp_path / "stance_cache.json"
+    p.write_text(json.dumps({"k": {"label": "neutral", "version": STANCE_CACHE_VERSION}}))
+
+    def _boom(self, encoding=None):
+        raise OSError("simulated permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+
+    with pytest.raises(Exception):
+        gen_stance_cache.load_existing_cache(p)
+
+
 # ── classify_pairs：假 client，不打真 AWS ───────────────────────────────────
 
 
@@ -245,3 +290,65 @@ def test_main_success_writes_merged_result_preserving_existing_keys(tmp_path, mo
     assert written["k1"] == {"label": "entailment", "version": STANCE_CACHE_VERSION}
     assert written["k2"] == {"label": "entailment", "version": STANCE_CACHE_VERSION}
     assert len(fake_client.calls) == 2
+
+
+# ── 第二個 HIGH 整合測試：既有快取「讀不到」時 main() 必須 fail-closed 中止，
+#    不可把讀失敗當空 dict 而覆寫掉舊資料。三種壞檔情境皆須「原檔不變」。──────
+
+
+def test_main_malformed_json_cache_aborts_without_touching_file(tmp_path, monkeypatch, capsys):
+    out_path = tmp_path / "stance_cache.json"
+    original_content = "{not valid json"
+    out_path.write_text(original_content, encoding="utf-8")
+
+    monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
+    fake_client = _FakeClient(label="entailment")
+    monkeypatch.setattr(gen_stance_cache, "_build_live_client", lambda: fake_client)
+
+    rc = gen_stance_cache.main(["--out", str(out_path)])
+
+    assert rc != 0
+    assert out_path.read_text(encoding="utf-8") == original_content
+    # 壞檔在真呼叫之前就該被擋下，不該浪費任何一次真 Bedrock 呼叫
+    assert fake_client.calls == []
+    captured = capsys.readouterr()
+    assert "中止" in captured.err or "中止" in captured.out
+
+
+def test_main_non_dict_top_level_cache_aborts_without_touching_file(tmp_path, monkeypatch):
+    out_path = tmp_path / "stance_cache.json"
+    original_content = json.dumps(["not", "a", "dict"])
+    out_path.write_text(original_content, encoding="utf-8")
+
+    monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
+    fake_client = _FakeClient(label="entailment")
+    monkeypatch.setattr(gen_stance_cache, "_build_live_client", lambda: fake_client)
+
+    rc = gen_stance_cache.main(["--out", str(out_path)])
+
+    assert rc != 0
+    assert out_path.read_text(encoding="utf-8") == original_content
+    assert fake_client.calls == []
+
+
+def test_main_cache_os_error_aborts_without_touching_file(tmp_path, monkeypatch):
+    out_path = tmp_path / "stance_cache.json"
+    original_content = json.dumps({"keep-me": {"label": "neutral", "version": STANCE_CACHE_VERSION}})
+    out_path.write_text(original_content, encoding="utf-8")
+
+    monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
+    fake_client = _FakeClient(label="entailment")
+    monkeypatch.setattr(gen_stance_cache, "_build_live_client", lambda: fake_client)
+
+    def _boom(self, encoding=None):
+        raise OSError("simulated permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+
+    rc = gen_stance_cache.main(["--out", str(out_path)])
+
+    assert rc != 0
+    # 繞過被 monkeypatch 的 read_text，用原生 open 驗證檔案內容真的沒被動過
+    with open(out_path, encoding="utf-8") as f:
+        assert f.read() == original_content
+    assert fake_client.calls == []

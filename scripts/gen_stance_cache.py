@@ -19,14 +19,19 @@
 3. 用 `stance_cache.cache_key()` 對候選對去重（(a,b) 與 (b,a) 視為同一對），跨 5 幣
    合併成唯一候選對清單。
 4. `--dry-run`：只印出候選對，不呼叫 client、不寫檔。
-   否則：對每一對呼叫 `client.classify_stance_strict(a, b)`（真 Bedrock，非 offline
-   client——**不用**降級版 `classify_stance`：那個方法失敗時會吞成 "neutral"，
-   離線批次生成快取分不出「真 neutral」跟「呼叫失敗」，會把假 neutral 悄悄寫進
-   `stance_cache.json`、弱化矛盾偵測，見 codex 審查發現的 HIGH）。任一對呼叫/解析
-   失敗（strict 版 raise）→ **立即中止，完全不寫檔**（既有快取檔原封不動）；
-   全部 7 對都成功才依 `cache_key(a, b)` 存成 `{"label": label, "version":
-   STANCE_CACHE_VERSION}`，跟既有快取檔 merge（舊 key 保留，新 key 覆蓋/新增）後
-   原子寫入（temp file + rename，避免寫到一半被中斷產生半殘檔）回 `--out`。
+   否則：先 **fail-closed 讀取既有快取**（`load_existing_cache`：檔案不存在才是
+   合法的空 `{}`；存在但讀取/解析失敗或頂層非 dict 一律 raise，避免把「讀不到」
+   誤當「本來就是空」，靜默用新資料覆寫掉舊 entry，見 codex 審查發現的第二個
+   HIGH），失敗立即中止、不呼叫 client、不寫檔。
+   通過後對每一對呼叫 `client.classify_stance_strict(a, b)`（真 Bedrock，非
+   offline client——**不用**降級版 `classify_stance`：那個方法失敗時會吞成
+   "neutral"，離線批次生成快取分不出「真 neutral」跟「呼叫失敗」，會把假
+   neutral 悄悄寫進 `stance_cache.json`、弱化矛盾偵測，見第一個 HIGH）。任一對
+   呼叫/解析失敗（strict 版 raise）→ **立即中止，完全不寫檔**（既有快取檔原封
+   不動）；全部 7 對都成功才依 `cache_key(a, b)` 存成 `{"label": label,
+   "version": STANCE_CACHE_VERSION}`，跟既有快取檔 merge（舊 key 保留，新 key
+   覆蓋/新增）後原子寫入（temp file + rename，避免寫到一半被中斷產生半殘檔）
+   回 `--out`。
 
 ⚠️ 本檔本身不含任何呼叫入口保護以外的巧門——真正打 AWS 只發生在非 --dry-run 且
 傳入非 offline 的 `BedrockClient` 時。CEO 親手執行前務必確認環境變數
@@ -101,15 +106,34 @@ def enumerate_candidate_pairs(coins: list[str] | None = None) -> dict[str, tuple
 
 
 def load_existing_cache(path: str | Path) -> dict:
-    """讀取既有快取 JSON；不存在或格式錯誤則回空 dict（不拋錯）。"""
+    """讀取既有快取 JSON——**fail-closed**（codex 審查發現的第二個 HIGH）。
+
+    - 檔案**不存在** → 回 `{}`（正常情境：首次生成快取，沒有舊檔可讀）。
+    - 檔案**存在但**讀取失敗（`OSError`，如權限錯誤）/ JSON 解析失敗 / 頂層不是
+      dict（如整份是 `[]`）→ **raise**，絕不能悄悄回空 dict！
+
+    原因：呼叫端（`main`）讀到空 dict 後會拿新的候選對 merge 進去，再原子覆寫
+    整個檔案——如果這裡把「讀不到」誤當成「本來就是空」，就等於用一份只有 7 對
+    新資料的快取，把 CEO/先前 run 累積的所有舊 entry 靜默刪光。「原子寫入」只能
+    防止寫到一半損毀，防不了「完整但資料遺失」這種覆寫，所以必須在讀取這一步就
+    fail-closed，讓 main 直接中止、完全不寫檔。
+    """
     p = Path(path)
     if not p.exists():
         return {}
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        raw = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"既有快取檔 {p} 讀取失敗（OSError）：{exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"既有快取檔 {p} JSON 解析失敗：{exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"既有快取檔 {p} 頂層結構不是 dict（實際型別：{type(data).__name__}）"
+        )
+    return data
 
 
 def merge_cache(existing: dict, new_entries: dict) -> dict:
@@ -189,6 +213,18 @@ def main(argv: list[str] | None = None) -> int:
         print("--dry-run：不呼叫 client、不寫檔。")
         return 0
 
+    # 先讀既有快取（fail-closed，見 load_existing_cache docstring）：確保寫檔前
+    # 一定拿得到「真正的舊資料」，也讓壞檔案能在花真 Bedrock 呼叫之前就先中止，
+    # 不浪費真呼叫的成本/額度。
+    try:
+        existing = load_existing_cache(args.out)
+    except Exception as exc:
+        print(
+            f"錯誤：既有快取檔讀取失敗，中止且不寫檔，既有快取保持不變：{exc}",
+            file=sys.stderr,
+        )
+        return 1
+
     client = _build_live_client()  # 真 Bedrock client（CEO 親手執行）
     try:
         new_entries = classify_pairs(client, pairs)
@@ -200,7 +236,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    existing = load_existing_cache(args.out)
     merged = merge_cache(existing, new_entries)
     atomic_write_json(args.out, merged)
     print(f"已寫入 {args.out}（共 {len(merged)} 筆）")
