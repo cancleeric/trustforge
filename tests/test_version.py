@@ -94,6 +94,23 @@ def test_lambda_handler_analyze_json_has_version(monkeypatch):
     assert body["version"] == web.VERSION
 
 
+def test_deploy_lambda_stamps_version_like_deploy_ec2():
+    """deploy_lambda.sh 應比照 deploy_ec2.sh，在封裝前用 git describe 蓋 build 複本的
+    _version.py，避免 Lambda 部署永遠顯示 'dev'（不動 repo 原檔）。"""
+    deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
+    ec2_script = (deploy_dir / "deploy_ec2.sh").read_text(encoding="utf-8")
+    lambda_script = (deploy_dir / "deploy_lambda.sh").read_text(encoding="utf-8")
+
+    assert "git describe --tags --always --dirty" in ec2_script
+    assert "git describe --tags --always --dirty" in lambda_script
+    assert '_version.py' in lambda_script
+    assert "GIT_VER" in lambda_script
+    # 覆寫步驟須在打包 zip（zip -qr）之前，才能蓋到封裝進 zip 的複本
+    ver_stamp_pos = lambda_script.index("GIT_VER")
+    zip_pos = lambda_script.index("zip -qr")
+    assert ver_stamp_pos < zip_pos
+
+
 def test_lambda_handler_comparison_json_has_version(monkeypatch):
     """Lambda handler 的比較分析 /analyze.json 回應應含 version（與 web.VERSION 一致）。"""
     from trustforge import lambda_handler
