@@ -518,10 +518,18 @@ def _coordination_burst_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
 def _coordination_signals(all_claims: list[Claim]) -> dict[str, list[str]]:
     """W3：確定性、免 LLM 的協同操縱偵測總入口。
 
-    整合指標 A（模板相似，`_coordination_template_flags`）與指標 B（單源爆量，
-    `_coordination_burst_flags`），對 `all_claims` 只算一次——O(n²)，量級同
-    `_corroboration`（`score()` 對每個 claim 都要跟其他所有 claims 比對一次），
-    不新增預算風險。
+    目前只整合指標 A（模板相似，`_coordination_template_flags`），對
+    `all_claims` 只算一次——O(n²)，量級同 `_corroboration`（`score()` 對每個
+    claim 都要跟其他所有 claims 比對一次），不新增預算風險。
+
+    指標 B（單源爆量，`_coordination_burst_flags`）**降級為 follow-up
+    #15，目前不啟用**：經 4 輪 codex 對抗審（中位數自含候選自己、固定牆鐘
+    分桶可繞、baseline 未對齊候選窗口、只評估各源「最大窗」漏掉後續同窗
+    baseline 偏低的小爆量），仍持續挖出新的 subtle 檢測缺陷，屬於
+    per-window anomaly 統計上需要更嚴謹重新設計的問題，不宜無限打磨後
+    倉促上線。`_coordination_burst_flags` / `_max_distinct_in_rolling_window`
+    / `_distinct_text_count_in_range` 程式碼保留（不刪），供 #15 重新設計時
+    直接沿用/參考，但呼叫端刻意不接。
 
     回傳 `{claim_id: [flag, ...]}`；未命中的 claim 不會出現在 dict 中，呼叫端
     用 `.get(claim.id, [])` 取用。命中結果同時：
@@ -533,8 +541,9 @@ def _coordination_signals(all_claims: list[Claim]) -> dict[str, list[str]]:
     signals: dict[str, list[str]] = {}
     for cid, fl in _coordination_template_flags(all_claims).items():
         signals.setdefault(cid, []).extend(fl)
-    for cid, fl in _coordination_burst_flags(all_claims).items():
-        signals.setdefault(cid, []).extend(fl)
+    # W3 burst 指標降級 follow-up #15：per-window anomaly 需正確重設計，暫不啟用。
+    # for cid, fl in _coordination_burst_flags(all_claims).items():
+    #     signals.setdefault(cid, []).extend(fl)
     return signals
 
 

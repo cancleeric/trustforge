@@ -1,6 +1,16 @@
 """信任提煉引擎核心測試。確保『信任層』行為符合設計意圖。"""
+import pytest
+
 from trustforge.ingestion.base import Document
 from trustforge.trust.scoring import DOMAIN_STOP, aggregate, extract_claims, score
+
+_W3_BURST_FOLLOWUP_SKIP_REASON = (
+    "W3 burst 指標（指標 B）經 4 輪 codex 對抗審持續挖出新的 subtle 檢測缺陷"
+    "（中位數自含候選自己/固定牆鐘分桶可繞/baseline 未對齊候選窗口/只評估各源"
+    "最大窗漏掉後續同窗 baseline 偏低的小爆量），降級為 follow-up #15 重新設計，"
+    "本輪 W3 只 ship 模板指標 A。程式碼保留（_coordination_burst_flags 等）供 "
+    "#15 沿用，但 _coordination_signals 目前不呼叫，故暫時 skip 這些測試。"
+)
 
 
 # --- _infer_direction 純函式測試 -----------------------------------------
@@ -996,6 +1006,7 @@ def test_w3_a_objective_kinds_exempt_from_template_matching():
     assert flags == {}, f"onchain（OBJECTIVE_KINDS）不應納入模板比對，實際: {flags}"
 
 
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
 def test_w3_b_single_source_burst_triggers_and_baseline_untouched():
     """指標 B：單一來源在 60 分鐘窗口內連發 8 則相異主張（10 分鐘內），
     相對全池同窗口中位數（=1）達 8 倍 → 觸發爆量 flag；同窗口內正常的 3 個
@@ -1031,6 +1042,7 @@ def test_w3_b_single_source_burst_triggers_and_baseline_untouched():
         assert flags.get(f"base-{j}") is None, "正常單則來源不應被爆量指標誤傷"
 
 
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
 def test_w3_b_repeated_identical_text_does_not_count_as_burst():
     """防呆／回歸鎖：同一來源在同一窗口內重複貼「逐字相同」的文本 N 次，
     不應被判定為爆量——與 `_iterate_source_reputation` 的
@@ -1055,6 +1067,7 @@ def test_w3_b_repeated_identical_text_does_not_count_as_burst():
     assert flags == {}, f"逐字重複同一文本 20 次不應觸發爆量，實際: {flags}"
 
 
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
 def test_w3_burst_window_requires_at_least_two_sources():
     """防呆：窗口內只有單一來源時（無從比較），不應觸發爆量（避免用「只有
     自己」當分母誤判）。"""
@@ -1070,6 +1083,7 @@ def test_w3_burst_window_requires_at_least_two_sources():
     assert flags == {}, "整個資料池只有 1 個來源時不應觸發爆量（無從比較）"
 
 
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
 def test_w3_b_two_source_flood_vs_normal_detected_via_leave_one_out_median():
     """對抗性回歸（codex [HIGH]）：只有 2 個來源時，若中位數誤含候選自己會
     造成數學上偵測不到——例如 (100, 1) 兩來源，`median([100,1])=50.5`，
@@ -1102,6 +1116,7 @@ def test_w3_b_two_source_flood_vs_normal_detected_via_leave_one_out_median():
     assert flags.get("normal-1") is None, "正常單則來源不應被誤傷"
 
 
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
 def test_w3_b_burst_spanning_hour_boundary_detected_via_rolling_window():
     """對抗性回歸（codex [MEDIUM]）：爆量橫跨牆鐘整點（xx:59:30 ~
     xx+1:00:45，全部在 75 秒內），若用固定 `int(ts // 3600)` 分桶會被切成
@@ -1136,6 +1151,7 @@ def test_w3_b_burst_spanning_hour_boundary_detected_via_rolling_window():
     assert flags.get("normal-2") is None, "正常單則來源不應被誤傷"
 
 
+@pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
 def test_w3_b_baseline_uses_aligned_window_not_other_sources_historical_max():
     """對抗性回歸（codex 對抗審 [burst 第 3 個 HIGH]）：比較基準必須對齊到候選
     「現在」爆量的那個時間窗口，去看其他來源在同一時段各發了幾則，而不是
@@ -1230,3 +1246,45 @@ def test_w3_coordination_signals_deterministic_repeat_calls():
     ]
     results = [_coordination_signals(claims) for _ in range(5)]
     assert all(r == results[0] for r in results), "重複呼叫應逐字相同（確定性）"
+
+
+def test_w3_coordination_signals_burst_indicator_disabled_only_template_active():
+    """W3 burst 指標（指標 B）降級為 follow-up #15，`_coordination_signals`
+    目前只接指標 A（模板相似）。用一個「單源在短時間內連發多則相異主張」的
+    典型爆量情境驗證：即使該情境若直接呼叫 `_coordination_burst_flags`
+    仍會產生『協同:單源爆量』flag，`_coordination_signals`（實際掛在
+    `score()` 主流程上的入口）也不應該回傳任何『協同:單源爆量』字樣的
+    flag——證明 burst 指標確實已從 active 路徑移除，且移除後不影響模板
+    指標本身的行為（此情境文本彼此不相似，模板指標本來就不該命中）。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags, _coordination_signals
+
+    claims = []
+    for i in range(8):
+        t = f"快訊{i} XYZ幣 突破 關鍵 價位 值得 留意 第{i}則"
+        claims.append(
+            Claim(id=f"burst-{i}", text=t,
+                  doc=_doc(f"burst-doc-{i}", "social", "x-spammer", t, ts=_BURST_BASE_TS + i * 60))
+        )
+    for j, src in enumerate(["news-a", "news-b", "news-c"]):
+        t = f"正常報導{j} 市場 觀察 淡定"
+        claims.append(
+            Claim(id=f"base-{j}", text=t,
+                  doc=_doc(f"base-doc-{j}", "news", src, t, ts=_BURST_BASE_TS + 30))
+        )
+
+    # 佐證：_coordination_burst_flags 本身（獨立函式，程式碼保留供 #15 沿用）
+    # 對這個典型爆量情境仍然會命中，代表移除的是「呼叫端接線」而不是把偵測
+    # 邏輯本身弄壞了。
+    raw_burst_flags = _coordination_burst_flags(claims)
+    assert any("協同:單源爆量(" in fl for fls in raw_burst_flags.values() for fl in fls), (
+        "前提假設：_coordination_burst_flags 獨立呼叫應仍能命中典型爆量情境"
+        "（若這裡都不命中，代表函式本身被誤改壞了，不是本測試要驗證的降級行為）"
+    )
+
+    active_signals = _coordination_signals(claims)
+    for cid, fls in active_signals.items():
+        for fl in fls:
+            assert "單源爆量" not in fl, (
+                f"burst 指標已降級 follow-up #15，_coordination_signals 的 active "
+                f"路徑不應再產生單源爆量 flag，實際: {cid} -> {fl}"
+            )
