@@ -499,19 +499,36 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
 
 
 # Tier2 可解釋 UX：來源獨立性標籤依 kind 映射推導（純渲染層，不新增 schema
-# 欄位）。官方／現價類（客觀 kind，對齊 agent.orchestrator.OBJECTIVE_KINDS）
-# → 高；情緒／社群類（對齊 _SENTIMENT_KINDS）→ 中等；其餘（如 dev_activity——
-# 兩邊都不歸類的輔助訊號，見 orchestrator 註解）→ 一般。
-_HIGH_INDEP_KINDS = {"price", "price_live", "onchain", "regulatory", "hoyabit"}
-_MED_INDEP_KINDS = {"news", "social", "sentiment"}
+# 欄位）。故意拆成「獨立性層級（高/中/一般）」×「權威性（官方/第三方/社群）」
+# 兩個維度——不可混為一談：CoinGecko（price_live）與 onchain（blockchain.info／
+# Alternative.me FNG）雖然客觀、獨立性高，但都是**第三方聚合／公開 API**，
+# 不是一手權威來源，標「官方」會讓使用者誤以為是交易所/監管機關一手資料，
+# 破壞溯源 UX 的誠信基礎（codex provenance 準確性 review，PR #35 修正）。
+#
+# 官方／一手權威：hoyabit（交易所一手行情）、regulatory（SEC EDGAR 直接
+# feed）、price（HOYA BIT 官方基準 OHLCV，見 ingestion/base.py
+# OFFICIAL_OHLCV_DIR 說明）。
+_OFFICIAL_KINDS = {"price", "hoyabit", "regulatory"}
+# 第三方聚合／高獨立（客觀但非一手）：price_live（CoinGecko）、onchain
+# （blockchain.info/Alternative.me，第三方公開 API，非鏈上一手節點）。
+_THIRD_PARTY_KINDS = {"price_live", "onchain"}
+# 社群／情緒：news/social/sentiment，中等獨立性。
+_COMMUNITY_KINDS = {"news", "social", "sentiment"}
 
 
 def _independence_tier(kind: str) -> tuple[str, str]:
-    """回傳 (顯示標籤, 顏色) 供來源 pill 的 tier·獨立性徽章使用。"""
-    if kind in _HIGH_INDEP_KINDS:
+    """回傳 (顯示標籤, 顏色) 供來源 pill 的 tier·權威性徽章使用。
+
+    標籤格式「層級·權威性」：高·官方 / 高·第三方 / 中·社群 / 一般·輔助。
+    `price_live`（CoinGecko）與 `onchain`（第三方聚合 API）獨立性層級雖與
+    官方同屬「高」，但權威性標「第三方」，絕不會渲染成「官方」。
+    """
+    if kind in _OFFICIAL_KINDS:
         return "高·官方", "#3fb950"
-    if kind in _MED_INDEP_KINDS:
-        return "中等·情緒", "#d9832a"
+    if kind in _THIRD_PARTY_KINDS:
+        return "高·第三方", "#3fb950"
+    if kind in _COMMUNITY_KINDS:
+        return "中·社群", "#d9832a"
     return "一般·輔助", "#8b949e"
 
 

@@ -329,34 +329,54 @@ def test_aggregate_trust_components_empty_when_no_data():
 # Tier2 可解釋 UX：來源獨立性標籤 + 操縱紅旗 + 跨源背離雙欄（gray 計劃 W2）
 # ---------------------------------------------------------------------------
 
-def test_independence_tier_maps_official_and_price_kinds_high():
-    """官方（onchain/regulatory/hoyabit）與現價（price/price_live）→ 高獨立性。"""
-    for kind in ("price", "price_live", "onchain", "regulatory", "hoyabit"):
+def test_independence_tier_official_kinds_are_hoyabit_regulatory_price_only():
+    """真正一手權威（官方）僅限 hoyabit（交易所一手行情）、regulatory（SEC 直接
+    feed）、price（HOYA 官方基準 OHLCV）——不可再擴大範圍（codex provenance
+    review，PR #35）。"""
+    for kind in ("hoyabit", "regulatory", "price"):
         label, _color = web._independence_tier(kind)
-        assert "高" in label, f"{kind} 應歸高獨立性，實得 {label}"
+        assert "官方" in label, f"{kind} 應歸官方，實得 {label}"
+        assert "高" in label
 
 
-def test_independence_tier_maps_sentiment_kinds_medium():
-    """情緒／社群（news/social/sentiment）→ 中等獨立性。"""
+def test_independence_tier_price_live_coingecko_never_renders_as_official():
+    """CoinGecko(price_live) 是第三方聚合器，永不可標「官方」——只能是「高·第三方」。
+    這是本輪 codex provenance 準確性修復的核心斷言：破這條＝回歸誤導 UX。"""
+    label, _color = web._independence_tier("price_live")
+    assert "官方" not in label, f"price_live 不應標官方，實得 {label}"
+    assert label == "高·第三方", f"price_live 應為『高·第三方』，實得 {label}"
+
+
+def test_independence_tier_onchain_third_party_aggregator_not_official():
+    """onchain（blockchain.info／Alternative.me FNG，第三方公開 API）同樣不是
+    一手權威，不可標官方，應為『高·第三方』。"""
+    label, _color = web._independence_tier("onchain")
+    assert "官方" not in label, f"onchain 不應標官方，實得 {label}"
+    assert label == "高·第三方", f"onchain 應為『高·第三方』，實得 {label}"
+
+
+def test_independence_tier_maps_sentiment_kinds_to_community_medium():
+    """情緒／社群（news/social/sentiment）→ 中·社群（中等獨立性）。"""
     for kind in ("news", "social", "sentiment"):
         label, _color = web._independence_tier(kind)
-        assert "中等" in label, f"{kind} 應歸中等獨立性，實得 {label}"
+        assert label == "中·社群", f"{kind} 應歸『中·社群』，實得 {label}"
 
 
 def test_independence_tier_unclassified_kind_falls_back_to_general():
-    """未分類的 kind（如 dev_activity）→ 一般，不誤標成高/中等。"""
+    """未分類的 kind（如 dev_activity）→ 一般，不誤標成官方/第三方/社群。"""
     label, _color = web._independence_tier("dev_activity")
-    assert "高" not in label
-    assert "中等" not in label
+    assert label == "一般·輔助", f"dev_activity 應歸『一般·輔助』，實得 {label}"
 
 
 def test_evidence_list_shows_tier_pill_next_to_source():
-    """evidence 清單來源 pill 旁應附 tier·獨立性標籤。"""
+    """evidence 清單來源 pill 旁應附 tier·權威性標籤；CoinGecko(price_live) 的
+    evidence 渲染出來的 pill 絕不可含「官方」字樣。"""
     ev = [Evidence(source="coingecko-price", fetched_at="t", content_reference="c",
                     related_claim="x", trust=0.9, kind="price_live")]
     htmlout = web._render_evidence_list(ev)
     assert "tf-tier-pill" in htmlout
-    assert "高" in htmlout
+    assert "高·第三方" in htmlout
+    assert "官方" not in htmlout, "CoinGecko evidence pill 不應出現『官方』字樣"
 
 
 def test_evidence_list_shows_manipulation_red_flag_badge():
