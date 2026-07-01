@@ -74,6 +74,37 @@ verify_fetch_scheduler() {
   echo "[ec2] ✅ fetch-scheduler 同步驗證成功（--probe 通過，DynamoDB cache/cost-ledger 讀寫權限已真的驗證過；一般全源排程結果僅供參考 log，不影響此 gate，避免來源端短暫失敗如 reddit 429 造成部署誤判失敗）"
 }
 
+# codex HIGH：首次建置路徑原本只跑 verify_fetch_scheduler（DynamoDB probe），
+# 沒有像 update-in-place 那樣同步驗證 web 服務本身健康
+# （systemctl is-active trustforge + curl /healthz）。user-data 若在寫完
+# fetch-scheduler unit 之後才失敗（相依套件裝失敗、web 服務起不來、port 沒
+# 綁定等），DynamoDB probe 依然會過（DynamoDB R/W 本身沒問題）——deploy 會
+# 回報成功，但公開服務其實是壞的。這裡補一個獨立的同步 SSM healthz gate，
+# 邏輯比照 update-in-place 既有那段 for-loop（有限次重試、逾時印 journal、
+# exit 非零），跟 verify_fetch_scheduler 各自獨立判定、兩者都過才算成功。
+verify_web_healthz() {
+  local iid="$1"
+  local hcmdid
+  # shellcheck disable=SC2016  # 單引號內的 $(seq..)/$i 刻意留給遠端展開，不
+  # 是漏加雙引號（跟既有 healthz for-loop 那行同一個模式）。
+  hcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters commands='["for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗（trustforge.service 沒 active 或 /healthz 逾時仍不通）\" >&2; journalctl -u trustforge -n 40 --no-pager >&2; exit 1"]' \
+    --query 'Command.CommandId' --output text)
+  if [ -z "$hcmdid" ] || [ "$hcmdid" = "None" ]; then
+    echo "[ec2] ❌ web healthz 驗證用 SSM send-command 未取得 CommandId，中止" >&2
+    exit 1
+  fi
+  aws ssm wait command-executed --region "$REGION" --command-id "$hcmdid" --instance-id "$iid" 2>/dev/null || true
+  local hstatus
+  hstatus=$(aws ssm get-command-invocation --region "$REGION" \
+    --command-id "$hcmdid" --instance-id "$iid" --query Status --output text)
+  if [ "$hstatus" != "Success" ]; then
+    echo "[ec2] ❌ web healthz 同步驗證失敗：CommandId=$hcmdid Status=${hstatus}（trustforge.service 沒 active 或 /healthz 逾時仍不通，deploy 視為失敗；跟 DynamoDB probe 各自獨立，probe 過不代表這裡也會過）" >&2
+    exit 1
+  fi
+  echo "[ec2] ✅ web healthz 同步驗證成功（trustforge.service active 且 /healthz 有回應）"
+}
+
 # 1) IAM 角色 + instance profile（最小權限）+ DynamoDB reconcile -------------
 # 放在「既有實例？」分支判斷之前的共用段：IAM 是從部署主機用 aws cli 直接做
 # （不經 SSM），首次建置跟 update-in-place 兩條路徑都會先跑過這裡，確保腳本
@@ -356,6 +387,10 @@ fi
 # 都寫好之後，實際同步跑一次才知道 DynamoDB IAM 權限是否真的夠（這就是本次
 # 修的 HIGH：舊版腳本角色只有 Bedrock+S3，scheduler 會一路 exit 1 但 deploy
 # 卻回報成功）。
+# 另一個 codex HIGH：光 --probe 過只證明 DynamoDB R/W 沒問題，證明不了 user-
+# data 裝完套件、web 服務真的有起來——這裡先跑 update-in-place 路徑既有的
+# 那種 web healthz gate，兩個 gate 都過才報成功，任一失敗都讓部署 exit 1。
+verify_web_healthz "$IID"
 verify_fetch_scheduler "$IID"
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
   --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
