@@ -27,6 +27,9 @@ BUILD="$(mktemp -d)"; ZIP="$(pwd)/build/trustforge_lambda.zip"; mkdir -p build
 cp -r src/trustforge "$BUILD/trustforge"
 cp -r data "$BUILD/data"
 cp -r demo "$BUILD/demo"
+GIT_VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+printf 'VERSION = "%s"\n' "$GIT_VER" > "$BUILD/trustforge/_version.py"
+echo "[lambda] 版號 = $GIT_VER"
 ( cd "$BUILD" && zip -qr "$ZIP" trustforge data demo -x '*/__pycache__/*' )
 rm -rf "$BUILD"
 echo "[deploy] zip = $ZIP ($(du -h "$ZIP" | cut -f1))"

@@ -66,6 +66,16 @@ KIND_REPUTATION = {
     "social": 0.35,
 }
 
+
+def _reputation_floor(kind: str) -> float:
+    """W2：動態信譽每輪迭代 clamp 下限，防止 SR 蒸發到 0。
+
+    取 kind 基礎信譽的 30%（social: 0.35*0.3≈0.105，符合 CEO refinement「social
+    不低於 ~0.1」；price/onchain 最高 ≈0.29，依序遞減，未知 kind 保守回退 0.35 基礎
+    → floor≈0.105，等同 social 下限，不給未知來源類型更高保障）。
+    """
+    return round(0.3 * KIND_REPUTATION.get(kind, 0.35), 4)
+
 # 域內停用詞（Domain Stopwords）：加密市場每篇分析都有、對「是否在說同一件事」無鑑別力的詞。
 # 這些詞從 overlap 計算中完全排除，讓佐證判斷只依賴具體/稀有的內容詞。
 DOMAIN_STOP: set[str] = {
@@ -105,6 +115,11 @@ class ScoredClaim:
     claim: Claim
     trust: float                       # 0–1
     components: dict = field(default_factory=dict)   # 各分項，供溯源/解釋
+    # W2：動態來源信譽可解釋 trace。預設 None（`dynamic_reputation=False` 逐字相容，
+    # 不影響既有 dataclass 相等性比較）。開啟時填入該 claim 來源的
+    # {source, prior, final, agree_n, contradict_n, iterations_run}。
+    # 刻意獨立於 components（後者維持 str -> number 契約，不塞巢狀 dict）。
+    reputation_trace: dict | None = None
 
 
 @dataclass
@@ -144,11 +159,21 @@ def extract_claims(docs: list[Document]) -> list[Claim]:
 
 
 # --- 2~4. 分項 -----------------------------------------------------------
-def _source_reputation(c: Claim) -> float:
+def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) -> float:
+    """來源信譽。`dynamic_map=None`（預設，逐字等同現行）：純先驗，僅取決於
+    `KIND_REPUTATION` 或 per-doc `meta["reputation"]` 覆寫。
+
+    W2：傳入 `dynamic_map`（`{source: SR}`，見 `_iterate_source_reputation`）時，
+    改用該來源的動態信譽；若該來源不在 map 中（理論上不會發生，防禦性寫法），
+    回退為先驗值，不 raise。
+    """
     base = KIND_REPUTATION.get(c.doc.kind, 0.5)
     # 來源層級覆寫（白名單/黑名單）
     override = c.doc.meta.get("reputation")
-    return float(override) if override is not None else base
+    prior = float(override) if override is not None else base
+    if dynamic_map is None:
+        return prior
+    return dynamic_map.get(c.doc.source, prior)
 
 
 def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
@@ -284,6 +309,44 @@ class _StanceBudget:
         return True
 
 
+def _corroboration_detail(
+    target: Claim,
+    all_claims: list[Claim],
+    stance_fn: Callable[[str, str], str] | None = None,
+) -> tuple[set[str], set[str]]:
+    """`_corroboration()` 核心迴圈抽出版，回傳 `(independent_sources, contradicting_sources)`。
+
+    W2（#動態信譽）新增：獨立佐證迴圈本身完全不變（逐字保留原順序/判斷，確保
+    `_corroboration()` 的回傳值 byte-identical），只是額外把「W1.5 stance 判定為
+    contradiction」的來源也收進第二個集合——這是既有迴圈裡本來就會算出來的資訊
+    （只是舊版直接丟棄），現在同一次迴圈順便記下來，**不新增任何 stance_fn 呼叫**。
+
+    供 `_corroboration()`（沿用原本行為）與 `_iterate_source_reputation()`（W2
+    agreement 訊號）共用同一次 overlap/方向/stance 判斷結果。
+    """
+    tt = _normalize(target.text) - DOMAIN_STOP
+    independent_sources: set[str] = set()
+    contradicting_sources: set[str] = set()
+    if not tt:
+        return independent_sources, contradicting_sources
+    for c in all_claims:
+        if c.doc.source == target.doc.source:
+            continue
+        if c.doc.source in independent_sources:
+            continue
+        ct = _normalize(c.text) - DOMAIN_STOP
+        overlap = len(tt & ct) / len(tt)
+        if overlap < 0.4:
+            continue
+        if not _direction_compatible(target.direction, c.direction):
+            continue
+        if stance_fn is not None and stance_fn(target.text, c.text) == "contradiction":
+            contradicting_sources.add(c.doc.source)
+            continue
+        independent_sources.add(c.doc.source)
+    return independent_sources, contradicting_sources
+
+
 def _corroboration(
     target: Claim,
     all_claims: list[Claim],
@@ -315,28 +378,255 @@ def _corroboration(
     單純呼叫 `stance_fn`，預算耗盡與否對這層完全透明。
 
     `stance_fn=None` 時完全略過第 4 步，行為與加入 W1.5 前逐字相同（向後相容）。
+
+    W2：內部改呼叫 `_corroboration_detail()`，迴圈邏輯逐字不變，僅為 W2 動態信譽
+    抽出共用；本函式回傳值不受影響（見 `_corroboration_detail` docstring）。
     """
-    tt = _normalize(target.text) - DOMAIN_STOP
-    if not tt:
-        return 0.0
-    independent_sources: set[str] = set()
-    for c in all_claims:
-        if c.doc.source == target.doc.source:
-            continue
-        if c.doc.source in independent_sources:
-            continue
-        ct = _normalize(c.text) - DOMAIN_STOP
-        overlap = len(tt & ct) / len(tt)
-        if overlap < 0.4:
-            continue
-        if not _direction_compatible(target.direction, c.direction):
-            continue
-        if stance_fn is not None and stance_fn(target.text, c.text) == "contradiction":
-            continue
-        independent_sources.add(c.doc.source)
+    independent_sources, _contradicting = _corroboration_detail(
+        target, all_claims, stance_fn=stance_fn
+    )
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
     n = len(independent_sources)
     return 1.0 - math.pow(0.5, n) if n else 0.0
+
+
+# --- W2：truth-discovery 動態來源信譽 -------------------------------------
+# CEO 核准 gray 計劃 + 3 輪 refinement：bounded 迭代、無隨機性、成本不放大（不得因
+# 迭代輪數重呼叫 stance_fn）、小樣本守門、每輪 clamp 防蒸發。
+DEFAULT_REPUTATION_ITERATIONS = 3
+MAX_REPUTATION_ITERATIONS = 5           # 硬上限，即使呼叫端傳更大值也不放行
+REPUTATION_CONVERGENCE_EPS = 0.01       # max|SR^t - SR^(t-1)| < eps 提早停
+DEFAULT_REPUTATION_ALPHA = 0.55         # SR^t = α·SR⁰ + (1-α)·agreement_score
+MIN_INDEPENDENT_EVIDENCE = 3            # 獨立佐證+矛盾來源聯集 < 3 → 該 source 強制 α=1
+
+
+def _stable_sigmoid(x: float, clamp: float = 30.0) -> float:
+    """數值穩定 sigmoid：呼叫 `math.exp` 前把 logit clamp 到 `[-clamp, clamp]`。
+
+    codex 對抗審 [HIGH-2] 修正：`net`（agreement 淨值）理論上可能被推到極端值，
+    若不設防，`math.exp(-net)` 在 `|net|` 超過浮點指數上限（約 709）時會丟出
+    `OverflowError`，讓 `score(dynamic_reputation=True)` 直接當掉。clamp=30 時
+    sigmoid 早已飽和到 1e-13 等級、精度損失可忽略不計，純粹是防禦性上限——
+    搭配 [HIGH-1]（agreement 按唯一佐證/矛盾來源去重後才加總，見
+    `_iterate_source_reputation` 內的 `agree_union_of`/`contra_union_of`）雙重
+    保險：正常情境下去重後的 net 本身就有界，這裡的 clamp 是最後一道防線。
+    """
+    xc = max(-clamp, min(clamp, x))
+    return 1.0 / (1.0 + math.exp(-xc))
+
+
+def _reputation_evidence(
+    claims: list[Claim],
+    stance_fn: Callable[[str, str], str] | None = None,
+) -> dict[str, tuple[set[str], set[str]]]:
+    """`{claim.id: (agree_sources, contradict_sources)}`，只算一次（每個 claim 各跑一次
+    `_corroboration_detail`），供 `_iterate_source_reputation` 的每一輪迭代與
+    `score()` 的 `reputation_trace` 共用——**迭代輪數 K 不會讓這裡的 stance_fn 呼叫變多**
+    （K 輪只重算 SR 混合權重，不重跑 overlap/方向/stance 判斷）。
+    """
+    return {c.id: _corroboration_detail(c, claims, stance_fn=stance_fn) for c in claims}
+
+
+def _iterate_source_reputation(
+    claims: list[Claim],
+    now: float,
+    weights: dict | None = None,
+    stance_fn: Callable[[str, str], str] | None = None,
+    iterations: int = DEFAULT_REPUTATION_ITERATIONS,
+    alpha: float = DEFAULT_REPUTATION_ALPHA,
+    evidence: dict[str, tuple[set[str], set[str]]] | None = None,
+    trace_out: dict | None = None,
+) -> dict[str, float]:
+    """W2：bounded 迭代動態來源信譽。純函式、無隨機性 → 同輸入必同輸出。
+
+    實作偏離 gray 計劃字面簽章之處（皆為必要、非隱藏的工程判斷，詳見 PR 說明）：
+    - 加了 `now`：`_recency_decay` 需要，計劃描述省略。
+    - 加了選用的 `evidence`/`trace_out`：避免 `score()` 為了 trace 再重跑一次
+      `_corroboration_detail`（見下方 `evidence` 說明）；不影響核心演算法語意。
+
+    先驗 SR⁰(source)：沿用現行 `_source_reputation()`（KIND_REPUTATION / doc 覆寫），
+    逐 source 取 `claims` 出現順序第一筆（同一來源理論上 kind 一致，deterministic）。
+
+    每輪 t = 1..K：
+      Step A：用「當前」SR（t-1 輪結果，第一輪即 SR⁰）取代固定 kind 權重，重算每條
+              claim 的暫時 trust（`_source_reputation(c, dynamic_map=prev)` + 既有
+              `_corroboration`/`_recency_decay`/`_manipulation_penalty` 分項——後三者
+              是靜態值，全程只算一次、跨輪重用，不因迭代重複計算）。
+      Step B：`SR^t(source) = α·SR⁰(source) + (1-α)·agreement_score(source)`。
+              `agreement_score` 由該 source 名下所有 claim 的獨立佐證/矛盾來源
+              **聯集去重後**（`agree_union_of`/`contra_union_of`，全程只算一次）
+              按其「暫時 trust」加權：一致來源 +其暫時 trust、W1.5 stance 判矛盾
+              來源 -其暫時 trust，加總後以 `_stable_sigmoid` 正規化到 0–1（無任何
+              佐證/矛盾時 net=0 → 0.5，中性，不偏袒也不懲罰）。
+              自家來源的 claim 不會給自己投票（`_corroboration_detail` 本就排除
+              同源），單一來源灌水灌再多自家 claims 也不會自抬信譽（需要「其他」
+              獨立來源真的來佐證才有效——複用既有反回音室設計）。
+
+    codex 對抗審修正（HIGH-1/HIGH-2/第 2 輪 HIGH，PR #29 review）：
+    - **[HIGH-1]** agreement 投票按「唯一佐證/矛盾來源」聯集去重後才加總一次，
+      不隨該 source 名下 claim 數量重複計票——原本若把「已有 3 個外部佐證的
+      claim」重複貼 N 次，會重用同一批佐證來源疊加 N 次、把 `agreement_score`
+      推向飽和，繞過反暴走。去重後，claim 重複次數**不能**放大票數。
+    - **[HIGH-2]** `_stable_sigmoid` 在 `math.exp` 前把 logit clamp 到安全範圍
+      （預設 ±30），杜絕 net 極端值時的 `OverflowError`；配合 HIGH-1 去重後
+      net 本身已有界，這是雙保險而非唯一防線。
+    - **[第 2 輪 HIGH]** HIGH-1 去重的是「佐證/矛盾來源的身分」，但 `avg_temp_by_source`
+      （某來源投給其他來源的「票權」）原本仍對該來源**全部 claims**（含重複）取
+      平均——攻擊者可重複貼自己「最高 trust」的那條 claim 拉高自己的平均票權，
+      再透過跨輪互證回饋間接墊高自己或共謀來源的信譽（同文本、同 trust 的重複
+      測試測不出，需異質 trust 的 claim 才會暴露）。修正：`unique_claims_by_source`
+      先以 `claim.text` 逐字去重（同文本只留第一次出現那筆），`avg_temp_by_source`
+      只對這份去重後的「內容不同的主張種類」取平均——不變量：對任一來源重複其
+      任意 claim（含高/低 trust 混合）N 次，**所有來源在第 1–5 輪的最終 SR 完全
+      不變**（見對應測試）。
+
+    小樣本守門（CEO refinement #1）：某 source 名下所有 claim 的獨立佐證+矛盾來源
+    **聯集（去重後）** < `MIN_INDEPENDENT_EVIDENCE`（3）時，該 source 強制 α=1
+    （等同純先驗、完全不受 agreement 影響），避免少樣本佐證/矛盾把信譽炒到失真。
+
+    每輪 clamp 到 `[_reputation_floor(kind), 1.0]`，防止信譽蒸發到 0（見
+    `_reputation_floor`）。收斂：`max|SR^t - SR^(t-1)| < REPUTATION_CONVERGENCE_EPS`
+    提早停；`iterations` 內部 clamp 到 `[1, MAX_REPUTATION_ITERATIONS]`，即使呼叫端
+    傳更大值也不會真的多跑。
+
+    已知限制（#17 同源別名，本 W2 不解）：獨立性 key 沿用 `doc.source` 字面值，
+    同一實體用不同帳號/別名發文會被當成多個「獨立」來源，可能被灌水墊高
+    agreement_score——與既有 `_corroboration` 的既有限制一致，非 W2 新引入。
+    """
+    n_iter = max(1, min(int(iterations), MAX_REPUTATION_ITERATIONS))
+    w = weights or DEFAULT_WEIGHTS
+
+    if not claims:
+        if trace_out is not None:
+            trace_out["iterations_run"] = 0
+        return {}
+
+    # SR⁰ 與每 source 的代表 kind（deterministic：claims 出現順序第一筆）
+    sr0: dict[str, float] = {}
+    kind_of: dict[str, str] = {}
+    claims_by_source: dict[str, list[Claim]] = {}
+    for c in claims:
+        s = c.doc.source
+        if s not in sr0:
+            sr0[s] = _source_reputation(c)
+            kind_of[s] = c.doc.kind
+        claims_by_source.setdefault(s, []).append(c)
+
+    # 靜態分項（不受 SR 影響，全程只算一次；agree/contra 來源集合全程共用，
+    # 不因迭代輪數重呼叫 stance_fn）
+    ev = evidence if evidence is not None else _reputation_evidence(claims, stance_fn=stance_fn)
+    static_corr: dict[str, float] = {}
+    static_rec: dict[str, float] = {}
+    static_manip: dict[str, float] = {}
+    for c in claims:
+        agree, _contra = ev.get(c.id, (set(), set()))
+        nn = len(agree)
+        static_corr[c.id] = 1.0 - math.pow(0.5, nn) if nn else 0.0
+        static_rec[c.id] = _recency_decay(c, now)
+        static_manip[c.id] = _manipulation_penalty(c)
+
+    # codex 對抗審 [HIGH-1] 修正：先把每個 source 名下所有 claim 的 agree/contra
+    # 來源做「聯集去重」（agree_union_of / contra_union_of），後續小樣本守門與
+    # Step B 的 agreement 投票都只吃這份去重後的資料——同一來源把「已有 3 個外部
+    # 佐證的 claim」重複貼 N 次，去重後對 net 沒有任何額外貢獻（不能靠重複貼文
+    # 繞過反暴走、把 logistic 推向飽和）。
+    agree_union_of: dict[str, set[str]] = {}
+    contra_union_of: dict[str, set[str]] = {}
+    for s, s_claims in claims_by_source.items():
+        au: set[str] = set()
+        cu: set[str] = set()
+        for c in s_claims:
+            agree, contra = ev.get(c.id, (set(), set()))
+            au |= agree
+            cu |= contra
+        agree_union_of[s] = au
+        contra_union_of[s] = cu
+
+    # 小樣本守門：獨立佐證+矛盾來源聯集（去重後）< 3 → 強制 α=1
+    alpha_of: dict[str, float] = {
+        s: (1.0 if len(agree_union_of[s] | contra_union_of[s]) < MIN_INDEPENDENT_EVIDENCE else alpha)
+        for s in claims_by_source
+    }
+
+    # codex 對抗審修正（第 2 輪 HIGH，PR #29）：`avg_temp_by_source`（該來源投給
+    # 其他來源的「票權」）必須以「內容不同的主張種類」為單位平均，不能被同一來源
+    # 重複貼同一條 claim（尤其是刻意重貼「自己最高 trust」那條）拉抬——否則即使
+    # HIGH-1 已把 agreement 的佐證來源計數去重，攻擊者仍可靠重複高分 claim 墊高
+    # 自己的平均票權，透過「先抬互相佐證來源 SR、下輪再回抬自己」的跨輪回饋間接
+    # 灌水。以 `claim.text` 逐字去重，同文本只留該來源 claims 中第一次出現那筆
+    # （deterministic），使「重複任意 claim N 次」對每輪 SR 完全無影響。
+    unique_claims_by_source: dict[str, list[Claim]] = {}
+    for s, s_claims in claims_by_source.items():
+        seen_text: set[str] = set()
+        uniq: list[Claim] = []
+        for c in s_claims:
+            if c.text in seen_text:
+                continue
+            seen_text.add(c.text)
+            uniq.append(c)
+        unique_claims_by_source[s] = uniq
+
+    sr = dict(sr0)
+    iterations_run = 0
+    for _t in range(n_iter):
+        prev = sr
+        iterations_run += 1
+
+        # Step A：用當前 SR 取代固定 kind 權重，重算每條 claim 的暫時 trust
+        temp_trust: dict[str, float] = {}
+        for c in claims:
+            rep = _source_reputation(c, dynamic_map=prev)
+            raw = (
+                w["src"] * rep
+                + w["corr"] * static_corr[c.id]
+                + w["rec"] * static_rec[c.id]
+                - w["manip"] * static_manip[c.id]
+            )
+            temp_trust[c.id] = max(0.0, min(1.0, raw))
+
+        # 每 source 的平均暫時 trust，供 Step B 當「投票權重」——只取「內容不同的
+        # 主張種類」（`unique_claims_by_source`，見上方去重說明），重複貼同一條
+        # claim 對這個平均值沒有任何影響。
+        avg_temp_by_source: dict[str, float] = {}
+        for s, u_claims in unique_claims_by_source.items():
+            vals = [temp_trust[c.id] for c in u_claims]
+            avg_temp_by_source[s] = sum(vals) / len(vals)
+
+        # Step B：agreement_score → SR^t
+        # [HIGH-1] net 只按「唯一佐證/矛盾來源」（agree_union_of/contra_union_of）
+        # 加總一次，不隨該 source 名下 claim 數量重複計票；[HIGH-2] `_stable_sigmoid`
+        # 對 net 做 clamp，杜絕極端情境下 `math.exp` 溢位崩潰（雙保險：去重後 net
+        # 本身也已有界，clamp 是額外防線）。
+        #
+        # [第 4 輪 HIGH，codex 對抗審] `agree_union_of[s]`/`contra_union_of[s]` 是
+        # **set**，其迭代順序取決於元素（字串）的 hash 值，而字串 hash 在不同
+        # process 間會被 `PYTHONHASHSEED` 隨機化；加上浮點加法不滿足結合律，同一
+        # 輸入在不同 process 可能得到不同的 net（甚至跨過
+        # `REPUTATION_CONVERGENCE_EPS`、導致收斂輪數/最終 SR 不同）。修正：
+        # 對這兩個 set 一律先 `sorted()` 固定成確定性順序，再用 `math.fsum`
+        # （不受加總順序影響的精確加總）取代一般 `sum()`，確保同一輸入在任何
+        # process / PYTHONHASHSEED 下都得到逐位元相同的結果。
+        new_sr: dict[str, float] = {}
+        for s in claims_by_source:
+            net = math.fsum(
+                avg_temp_by_source.get(s2, 0.5) for s2 in sorted(agree_union_of[s])
+            ) - math.fsum(
+                avg_temp_by_source.get(s2, 0.5) for s2 in sorted(contra_union_of[s])
+            )
+            agreement_score = _stable_sigmoid(net)
+            a = alpha_of[s]
+            blended = a * sr0[s] + (1.0 - a) * agreement_score
+            floor = _reputation_floor(kind_of[s])
+            new_sr[s] = max(floor, min(1.0, blended))
+
+        sr = new_sr
+        delta = max(abs(sr[s] - prev.get(s, sr0[s])) for s in sr)
+        if delta < REPUTATION_CONVERGENCE_EPS:
+            break
+
+    if trace_out is not None:
+        trace_out["iterations_run"] = iterations_run
+    return sr
 
 
 # --- 主評分 --------------------------------------------------------------
@@ -347,6 +637,8 @@ def score(
     stance_client=None,
     stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
     stance_remaining_time_fn: Callable[[], float] | None = None,
+    dynamic_reputation: bool = False,
+    reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
 ) -> list[ScoredClaim]:
     """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient），
     或 None。
@@ -366,6 +658,15 @@ def score(
     防 O(n²) 呼叫無上限打 Bedrock；免費的 cache-hit 不受影響、不消耗這個預算
     （第 3 輪對抗審修正：預算消耗點在 `cached_stance_fn` 內部，只在確認 cache
     miss 後才扣，見該函式 docstring）。
+
+    W2（truth-discovery 動態來源信譽）：`dynamic_reputation=False`（**預設**）完全
+    跳過 `_iterate_source_reputation`，`reputation` 分項與既有行為逐字相同（回歸
+    鎖）。設 `True` 才啟用：來源信譽不再是固定 `KIND_REPUTATION`，而是由
+    `_iterate_source_reputation` 依交叉佐證/矛盾動態調整（bounded 迭代，見該函式
+    docstring）；`reputation_iterations` 控制迭代輪數上限（硬上限 5）。啟用時每筆
+    `ScoredClaim.reputation_trace` 會附上該來源的
+    `{source, prior, final, agree_n, contradict_n, iterations_run}`（可解釋，不塞進
+    `components`，維持 `components` 的 str→number 契約）。
     """
     w = weights or DEFAULT_WEIGHTS
     if stance_client is None or hasattr(stance_client, "classify_stance"):
@@ -373,9 +674,50 @@ def score(
         stance_fn = cached_stance_fn(stance_client, budget=stance_budget)
     else:
         stance_fn = None
+
+    dynamic_map: dict[str, float] | None = None
+    trace_by_source: dict[str, dict] | None = None
+    if dynamic_reputation and claims:
+        # evidence 只算一次，`_iterate_source_reputation` 的 K 輪迭代與下面建 trace
+        # 共用同一份結果，不因迭代輪數或 trace 需求重呼叫 stance_fn。
+        evidence = _reputation_evidence(claims, stance_fn=stance_fn)
+        trace_meta: dict = {}
+        sr0_for_trace: dict[str, float] = {}
+        for c in claims:
+            sr0_for_trace.setdefault(c.doc.source, _source_reputation(c))
+        dynamic_map = _iterate_source_reputation(
+            claims,
+            now,
+            weights=w,
+            stance_fn=stance_fn,
+            iterations=reputation_iterations,
+            evidence=evidence,
+            trace_out=trace_meta,
+        )
+        iterations_run = trace_meta.get("iterations_run", 0)
+        by_source: dict[str, list[Claim]] = {}
+        for c in claims:
+            by_source.setdefault(c.doc.source, []).append(c)
+        trace_by_source = {}
+        for s, s_claims in by_source.items():
+            agree_sources: set[str] = set()
+            contra_sources: set[str] = set()
+            for c in s_claims:
+                agree, contra = evidence.get(c.id, (set(), set()))
+                agree_sources |= agree
+                contra_sources |= contra
+            trace_by_source[s] = {
+                "source": s,
+                "prior": round(sr0_for_trace.get(s, 0.0), 4),
+                "final": round(dynamic_map.get(s, sr0_for_trace.get(s, 0.0)), 4),
+                "agree_n": len(agree_sources),
+                "contradict_n": len(contra_sources),
+                "iterations_run": iterations_run,
+            }
+
     out: list[ScoredClaim] = []
     for c in claims:
-        rep = _source_reputation(c)
+        rep = _source_reputation(c, dynamic_map=dynamic_map)
         corr = _corroboration(c, claims, stance_fn=stance_fn)
         rec = _recency_decay(c, now)
         manip = _manipulation_penalty(c)
@@ -387,6 +729,9 @@ def score(
                 trust=trust,
                 components={"reputation": rep, "corroboration": corr,
                             "recency": rec, "manipulation": manip},
+                reputation_trace=(
+                    trace_by_source.get(c.doc.source) if trace_by_source is not None else None
+                ),
             )
         )
     return out

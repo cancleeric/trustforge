@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -48,6 +50,28 @@ def test_estimate_cost_unknown_model_returns_zero_not_raise():
 
 def test_estimate_cost_none_model_returns_zero():
     assert estimate_cost(None, 1000, 1000) == 0.0
+
+
+def test_estimate_cost_default_stance_model_id_is_nonzero_and_correct():
+    """codex 審查發現的 MEDIUM 修正：bedrock.py 預設 `stance_model_id`
+    （`au.anthropic.claude-haiku-4-5-20251001-v1:0`）必須能在 `PRICING` 精確
+    查到，真實 stance 呼叫的成本不可再被悄悄記成 $0。"""
+    cost = estimate_cost("au.anthropic.claude-haiku-4-5-20251001-v1:0", 700, 33)
+    assert cost > 0
+    assert cost == round(700 / 1_000_000 * 1.0 + 33 / 1_000_000 * 5.0, 6)
+
+
+def test_estimate_cost_lookalike_unknown_model_id_still_returns_zero():
+    """codex 二次審查發現：先前的子字串正規化 fallback 太鬆——
+    `vendor.fake-haiku-4-5` 這種內含關鍵字但根本不是合法 model id 的字串，
+    也會被誤套 Haiku 價格，違反「unknown model → 0」的精確契約。移除子字串
+    fallback、改回精確查表後，這種 lookalike id 必須仍然回 0。"""
+    assert estimate_cost("vendor.fake-haiku-4-5", 100, 100) == 0.0
+
+
+def test_estimate_cost_truly_unknown_model_still_returns_zero():
+    """既有行為不回歸：完全不含任何已知關鍵字的 model id 仍應回 0，不誤套價格。"""
+    assert estimate_cost("some-totally-unrelated-model-id", 1_000_000, 1_000_000) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -157,16 +181,311 @@ def test_jsonl_ledger_append_is_append_only_not_overwrite(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# DynamoDBLedger stub + get_ledger() / append_run() fallback
+# DynamoDBLedger（mock boto3 Table，不打真 AWS）+ get_ledger() / append_run() fallback
 # ---------------------------------------------------------------------------
 
-def test_dynamodb_ledger_is_ledger_subclass_but_unimplemented():
+def test_dynamodb_ledger_is_ledger_subclass():
     d = DynamoDBLedger()
     assert isinstance(d, Ledger)
-    with pytest.raises(NotImplementedError):
-        d.append({"x": 1})
-    with pytest.raises(NotImplementedError):
-        d.read_all()
+
+
+def test_dynamodb_ledger_construction_does_not_touch_aws(monkeypatch):
+    """建構只讀 env，不建立 boto3 resource/Table（lazy）——無憑證/未建表環境不炸。"""
+    monkeypatch.delenv("TRUSTFORGE_COST_LEDGER_TABLE", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    d = DynamoDBLedger()
+    assert d.table_name == "trustforge-cost-ledger"
+    assert d.region == "us-east-1"
+    assert d._table is None  # 尚未真的碰 AWS SDK
+
+
+def test_dynamodb_ledger_append_calls_put_item_with_decimal_and_keys():
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    d._table = mock_table  # 繞過 boto3，模擬已建好的 Table，確保不打真 AWS
+
+    d.append({
+        "run_id": "run-1",
+        "ts": "2026-07-01T00:00:00+00:00",
+        "coin": "BTC",
+        "total_cost_usd": 0.0012,
+        "calls": [{"model": "m", "cost_usd": 0.0012}],
+    })
+
+    mock_table.put_item.assert_called_once()
+    item = mock_table.put_item.call_args.kwargs["Item"]
+    assert item["run_id"] == "run-1"
+    assert item["ts"] == "2026-07-01T00:00:00+00:00"
+    assert isinstance(item["total_cost_usd"], Decimal)
+    assert item["total_cost_usd"] == Decimal("0.0012")
+    assert isinstance(item["calls"][0]["cost_usd"], Decimal)
+
+
+def test_dynamodb_ledger_append_generates_run_id_and_ts_when_missing():
+    """直接呼叫 DynamoDBLedger.append() 略過 append_run（理論上不會發生的防線）
+    ——run_id 仍要自動補上，且是全域唯一的 uuid，不再用 ts+coin 衍生（避免同幣
+    同秒兩次呼叫撞成同一個 id）。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    d._table = mock_table
+
+    d.append({"coin": "ETH", "total_cost_usd": 0.0, "calls": []})
+    d.append({"coin": "ETH", "total_cost_usd": 0.0, "calls": []})
+
+    first_item = mock_table.put_item.call_args_list[0].kwargs["Item"]
+    second_item = mock_table.put_item.call_args_list[1].kwargs["Item"]
+    assert first_item["run_id"]  # 自動生成，非空字串
+    assert second_item["run_id"]
+    assert first_item["run_id"] != second_item["run_id"]  # 每次都是新 uuid，不會撞
+    assert first_item["ts"]  # 自動補上 ISO8601 時間戳
+
+
+def test_dynamodb_ledger_read_all_paginates_and_converts_decimal_to_float():
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.side_effect = [
+        {
+            "Items": [
+                {"run_id": "r1", "ts": "t1", "total_cost_usd": Decimal("0.001"), "calls": []},
+            ],
+            "LastEvaluatedKey": {"run_id": "r1", "ts": "t1"},
+        },
+        {
+            "Items": [
+                {
+                    "run_id": "r2",
+                    "ts": "t2",
+                    "total_cost_usd": Decimal("0.002"),
+                    "calls": [{"model": "m", "cost_usd": Decimal("0.002")}],
+                },
+            ],
+        },
+    ]
+    d._table = mock_table
+
+    records = d.read_all()
+
+    assert mock_table.scan.call_count == 2
+    second_call_kwargs = mock_table.scan.call_args_list[1].kwargs
+    assert second_call_kwargs.get("ExclusiveStartKey") == {"run_id": "r1", "ts": "t1"}
+    assert len(records) == 2
+    assert isinstance(records[0]["total_cost_usd"], float)
+    assert records[0]["total_cost_usd"] == 0.001
+    assert records[1]["calls"][0]["cost_usd"] == 0.002
+
+
+def test_dynamodb_ledger_read_all_keeps_integer_decimal_as_int():
+    """整數值的 Decimal（如 token 數）讀出要轉回 int，不能變成 700.0（fidelity nit）。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {
+                "run_id": "r1",
+                "ts": "t1",
+                "calls": [
+                    {
+                        "model": "m",
+                        "tokens_in": Decimal("700"),
+                        "tokens_out": Decimal("120"),
+                        "cost_usd": Decimal("0.0086"),
+                    }
+                ],
+            },
+        ],
+    }
+    d._table = mock_table
+
+    records = d.read_all()
+
+    call = records[0]["calls"][0]
+    assert call["tokens_in"] == 700
+    assert isinstance(call["tokens_in"], int)
+    assert call["tokens_out"] == 120
+    assert isinstance(call["tokens_out"], int)
+    assert call["cost_usd"] == 0.0086
+    assert isinstance(call["cost_usd"], float)
+
+
+def test_dynamodb_ledger_read_all_merges_jsonl_fallback_and_sorts_by_ts():
+    """outage 期間 put_item 失敗 → append_run fallback 寫進 JsonlLedger（見
+    test_append_run_falls_back_to_jsonl_on_broken_backend）。read_all 若只 scan
+    DynamoDB，這筆在 /costs 會消失——必須合併 fallback，且 scan 分頁本身無序，
+    最終要依 (ts, run_id) 排序回傳（與 JsonlLedger 寫入序一致、跨請求穩定）。
+    `TRUSTFORGE_COST_LEDGER_PATH` 已由 conftest 的 autouse fixture 隔離到本測試
+    專屬的 tmp_path，直接用 JsonlLedger() 預設路徑寫入即可命中同一份 fallback。
+    """
+    # outage 期間寫進 JSONL fallback、DynamoDB 完全沒有的一筆
+    JsonlLedger().append({
+        "run_id": "outage-1", "ts": "2026-07-01T00:00:02+00:00",
+        "coin": "ETH", "total_cost_usd": 0.001, "calls": [],
+    })
+
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    # 刻意讓兩頁「亂序」（晚的時間先出現），驗證 read_all 不能直接信任 scan 順序
+    mock_table.scan.side_effect = [
+        {
+            "Items": [
+                {"run_id": "r-late", "ts": "2026-07-01T00:00:03+00:00",
+                 "total_cost_usd": Decimal("0.003"), "calls": []},
+            ],
+            "LastEvaluatedKey": {"run_id": "r-late", "ts": "2026-07-01T00:00:03+00:00"},
+        },
+        {
+            "Items": [
+                {"run_id": "r-early", "ts": "2026-07-01T00:00:01+00:00",
+                 "total_cost_usd": Decimal("0.001"), "calls": []},
+            ],
+        },
+    ]
+    d._table = mock_table
+
+    records = d.read_all()
+
+    run_ids_in_order = [r["run_id"] for r in records]
+    assert run_ids_in_order == ["r-early", "outage-1", "r-late"]  # 依 ts 排序
+    ts_list = [r["ts"] for r in records]
+    assert ts_list == sorted(ts_list)
+    assert len(records) == 3  # 三筆都在、無重複
+
+
+def test_dynamodb_ledger_read_all_dedupes_same_run_id_ts_prefers_dynamodb():
+    """同一筆記錄同時存在 DynamoDB 和 JSONL fallback（outage 後補寫成功但 fallback
+    檔案沒清）→ read_all 只能出現一次，且以 DynamoDB 版本為準（較新/權威）。
+    """
+    JsonlLedger().append({
+        "run_id": "dup-1", "ts": "2026-07-01T00:00:00+00:00",
+        "coin": "BTC", "total_cost_usd": 0.0, "calls": [],
+    })
+
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {"run_id": "dup-1", "ts": "2026-07-01T00:00:00+00:00",
+             "coin": "BTC", "total_cost_usd": Decimal("0.0025"), "calls": []},
+        ],
+    }
+    d._table = mock_table
+
+    records = d.read_all()
+
+    assert len(records) == 1
+    assert records[0]["run_id"] == "dup-1"
+    assert records[0]["total_cost_usd"] == 0.0025  # DynamoDB 版本覆蓋 fallback 的 0.0
+
+
+def test_dynamodb_ledger_read_all_survives_broken_jsonl_fallback_oserror(monkeypatch):
+    """codex MEDIUM：讀 JSONL fallback 那步若拋 OSError（本機檔案權限異常/I-O
+    失敗），不能拖垮已經 scan 成功的 DynamoDB 結果——read_all 仍要正常回傳
+    DynamoDB 那幾筆，不往上拋。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {"run_id": "r1", "ts": "2026-07-01T00:00:00+00:00",
+             "total_cost_usd": Decimal("0.001"), "calls": []},
+        ],
+    }
+    d._table = mock_table
+
+    monkeypatch.setattr(
+        JsonlLedger, "read_all",
+        MagicMock(side_effect=OSError("Permission denied")),
+    )
+
+    records = d.read_all()  # 不應拋出任何例外
+
+    assert len(records) == 1
+    assert records[0]["run_id"] == "r1"
+
+
+def test_dynamodb_ledger_read_all_survives_broken_jsonl_fallback_unicode_error(monkeypatch):
+    """同上，換一種 fallback 壞法：JSONL 檔非 UTF-8（UnicodeDecodeError）。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {"run_id": "r2", "ts": "2026-07-01T00:00:01+00:00",
+             "total_cost_usd": Decimal("0.002"), "calls": []},
+        ],
+    }
+    d._table = mock_table
+
+    def _raise_unicode_error():
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(JsonlLedger, "read_all", lambda self: _raise_unicode_error())
+
+    records = d.read_all()  # 不應拋出任何例外
+
+    assert len(records) == 1
+    assert records[0]["run_id"] == "r2"
+
+
+def test_append_run_same_coin_same_second_twice_get_distinct_run_ids_both_kept():
+    """codex HIGH：同幣同秒兩次 append_run（如 comparison/平行 run）——ts 只到秒，
+    若 run_id 用 ts+coin 衍生會撞成同一個 PK 互相覆蓋。append_run 現在統一在分派
+    前生成 uuid run_id，兩筆各自不同，DynamoDBLedger.read_all() 合併去重後兩筆
+    都要在，互不覆蓋。"""
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    put_items: list[dict] = []
+    mock_table.put_item.side_effect = lambda Item: put_items.append(Item)
+    mock_table.scan.return_value = {"Items": put_items}
+    d._table = mock_table
+
+    same_ts = "2026-07-01T00:00:00+00:00"
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.001, "calls": []}, ledger=d)
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.002, "calls": []}, ledger=d)
+
+    assert mock_table.put_item.call_count == 2
+    run_id_1 = put_items[0]["run_id"]
+    run_id_2 = put_items[1]["run_id"]
+    assert run_id_1 != run_id_2  # 不會撞成同一個 PK
+
+    records = d.read_all()
+    assert len(records) == 2  # 兩筆都在，沒有互相覆蓋
+    costs = sorted(float(r["total_cost_usd"]) for r in records)
+    assert costs == [0.001, 0.002]
+
+
+def test_append_run_outage_fallback_record_has_run_id_and_dedupes_correctly():
+    """codex HIGH：DynamoDB append 失敗（outage）→ fallback 寫進 JsonlLedger 的那筆
+    也要有 run_id（append_run 在分派前就生成，backend 失敗不影響已生成的 run_id）。
+    之後 DynamoDBLedger.read_all() 合併 DynamoDB + fallback 時，要能以 run_id 正確
+    去重、不會跟「同幣同秒」的其他正常記錄相撞。"""
+    fallback_path_env = "TRUSTFORGE_COST_LEDGER_PATH"
+    import os as _os
+    fallback_path = _os.environ[fallback_path_env]
+
+    broken = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.put_item.side_effect = RuntimeError("no aws credentials / table not found")
+    broken._table = mock_table
+
+    same_ts = "2026-07-01T00:00:00+00:00"
+    # outage：這筆 put_item 失敗，fallback 寫進 JsonlLedger
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.001, "calls": []}, ledger=broken)
+    # 同幣同秒、DynamoDB 正常寫入成功的另一筆（模擬 outage 恢復後的下一次呼叫）
+    mock_table.put_item.side_effect = None
+    put_items: list[dict] = []
+    mock_table.put_item.side_effect = lambda Item: put_items.append(Item)
+    append_run({"ts": same_ts, "coin": "BTC", "total_cost_usd": 0.002, "calls": []}, ledger=broken)
+
+    fallback_records = JsonlLedger(fallback_path).read_all()
+    assert len(fallback_records) == 1
+    assert fallback_records[0]["run_id"]  # fallback 那筆也有 run_id
+
+    mock_table.scan.return_value = {"Items": put_items}
+    records = broken.read_all()
+
+    assert len(records) == 2  # fallback 那筆 + DynamoDB 那筆都在，沒有因同 ts 誤併
+    run_ids = {r["run_id"] for r in records}
+    assert len(run_ids) == 2  # run_id 各自不同
+    costs = sorted(float(r["total_cost_usd"]) for r in records)
+    assert costs == [0.001, 0.002]
 
 
 def test_get_ledger_default_is_jsonl(monkeypatch):
@@ -182,11 +501,16 @@ def test_get_ledger_dynamodb_backend_does_not_raise_at_construction(monkeypatch)
 
 
 def test_append_run_falls_back_to_jsonl_on_broken_backend(monkeypatch, tmp_path):
-    """dynamodb（未實作）等 backend append 失敗 → fallback 寫入 JsonlLedger，不中斷 pipeline。"""
+    """dynamodb backend append 失敗（缺憑證/表未建/網路問題）→ fallback 寫入 JsonlLedger，
+    不中斷 pipeline。用 mock 讓 `_get_table()` 直接炸掉，確保這裡不會意外打到真 AWS。"""
     fallback_path = tmp_path / "fallback_cost_ledger.jsonl"
     monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(fallback_path))
 
     broken = DynamoDBLedger()
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
     append_run({"ts": "t1", "coin": "BTC", "total_cost_usd": 0.0, "calls": []}, ledger=broken)
 
     assert fallback_path.exists()
