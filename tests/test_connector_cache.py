@@ -230,7 +230,9 @@ def test_dynamodb_cache_get_calls_get_item_with_split_key():
 
     entry = d.get(cache_key("coindesk", "BTC"))
 
-    mock_table.get_item.assert_called_once_with(Key={"source_id": "coindesk", "coin": "BTC"})
+    mock_table.get_item.assert_called_once_with(
+        Key={"source_id": "coindesk", "coin": "BTC"}, ConsistentRead=False
+    )
     assert entry == {"docs": docs, "fetched_at": 1000.0}
 
 
@@ -918,6 +920,38 @@ def test_probe_fails_nonzero_when_cache_get_item_denied_after_put_succeeds(monke
     mock_table.get_item.assert_called_once()
 
 
+def test_probe_cache_readback_uses_consistent_read(monkeypatch, tmp_path):
+    """codex MEDIUM：固定 canary key 若用預設最終一致讀，PutItem 後立刻讀可能
+    因複寫延遲讀到上一輪的舊 sentinel，變成非確定性誤判。probe 的讀回必須
+    帶 `ConsistentRead=True`。"""
+    backend = DynamoDBCache(table_name="fake-table")
+    mock_table = MagicMock()
+    state: dict[str, str] = {}
+
+    def _fake_put_item(Item):  # noqa: N803 — 對齊 boto3 參數名
+        state["docs_json"] = Item["docs_json"]
+        return {}
+
+    def _fake_get_item(Key, ConsistentRead=False):  # noqa: N803
+        assert ConsistentRead is True, "probe 讀回必須帶 ConsistentRead=True，不能吃預設最終一致讀"
+        return {"Item": {"docs_json": state["docs_json"], "fetched_at": time.time()}}
+
+    mock_table.put_item.side_effect = _fake_put_item
+    mock_table.get_item.side_effect = _fake_get_item
+    backend._table = mock_table
+
+    monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: backend)
+    monkeypatch.setattr(
+        fetch_scheduler, "get_ledger", lambda: JsonlLedger(path=tmp_path / "ledger.jsonl")
+    )
+
+    rc = fetch_scheduler.run_probe()
+
+    assert rc == 0
+    mock_table.get_item.assert_called_once()
+    assert mock_table.get_item.call_args.kwargs["ConsistentRead"] is True
+
+
 def test_probe_fails_nonzero_when_ledger_put_item_denied(monkeypatch, tmp_path):
     """cost-ledger 表 PutItem 被拒 → probe 也要非零退出（即使 cache 表沒問題）。"""
     monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
@@ -934,6 +968,71 @@ def test_probe_fails_nonzero_when_ledger_put_item_denied(monkeypatch, tmp_path):
     rc = fetch_scheduler.run_probe()
     assert rc == 1
     mock_table.put_item.assert_called_once()
+    mock_table.scan.assert_not_called()  # PutItem 都失敗了，不該還去 Scan
+
+
+def test_probe_fails_nonzero_when_ledger_scan_denied(monkeypatch, tmp_path):
+    """codex HIGH：ledger probe 只驗 PutItem 不夠——若只有 dynamodb:Scan 被拒
+    （PutItem 仍放行），一般 append 會成功，但 /costs（靠 Scan 讀）會整個讀
+    失敗。probe 必須真的觸發一次 Scan，被拒就非零退出。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    ledger = DynamoDBLedger(table_name="fake-ledger-table")
+    mock_table = MagicMock()
+    mock_table.put_item.return_value = {}
+    mock_table.scan.side_effect = RuntimeError(
+        "AccessDeniedException: User is not authorized to perform: dynamodb:Scan"
+    )
+    ledger._table = mock_table
+    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+
+    rc = fetch_scheduler.run_probe()
+    assert rc == 1
+    mock_table.put_item.assert_called_once()
+    mock_table.scan.assert_called_once()  # 真的觸發了一次 Scan，不是被 read_all() 的 fallback 蓋過去
+
+
+def test_probe_fails_nonzero_when_ledger_scan_does_not_find_canary(monkeypatch, tmp_path):
+    """Scan 本身沒被拒（沒丟例外），但回傳內容裡找不到剛寫入的 canary——防止
+    probe 只看「Scan 有沒有丟例外」就誤判成功，必須真的核對讀回內容。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    ledger = DynamoDBLedger(table_name="fake-ledger-table")
+    mock_table = MagicMock()
+    mock_table.put_item.return_value = {}
+    # 模擬「讀到別的舊資料，但沒有我們剛寫的 canary」——例如 PutItem 其實沒有
+    # 真的落地卻沒丟例外的邊界情況。
+    mock_table.scan.return_value = {"Items": [{"run_id": "some-other-run", "ts": "x"}]}
+    ledger._table = mock_table
+    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+
+    rc = fetch_scheduler.run_probe()
+    assert rc == 1
+
+
+def test_probe_succeeds_when_dynamodb_ledger_scan_finds_the_canary(monkeypatch, tmp_path):
+    """happy path：ledger 用真的 DynamoDBLedger，PutItem 成功後 Scan 真的讀
+    得到剛寫入的 canary → probe 判定成功（不是只驗 PutItem 沒丟例外就算數）。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "cache.json"))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    ledger = DynamoDBLedger(table_name="fake-ledger-table")
+    mock_table = MagicMock()
+    mock_table.put_item.return_value = {}
+    mock_table.scan.return_value = {
+        "Items": [{"run_id": fetch_scheduler._PROBE_SOURCE, "ts": fetch_scheduler._PROBE_LEDGER_TS}]
+    }
+    ledger._table = mock_table
+    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+
+    rc = fetch_scheduler.run_probe()
+    assert rc == 0
+    mock_table.put_item.assert_called_once()
+    mock_table.scan.assert_called_once()
+    scan_kwargs = mock_table.scan.call_args.kwargs
+    assert scan_kwargs["ExpressionAttributeValues"][":rid"] == fetch_scheduler._PROBE_SOURCE
 
 
 def test_probe_is_not_fooled_by_fully_fresh_cache_where_normal_run_would_report_success(

@@ -77,7 +77,7 @@ from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
-from trustforge.ledger import get_ledger  # noqa: E402
+from trustforge.ledger import DynamoDBLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL  # noqa: E402
 
 
@@ -254,32 +254,41 @@ def run_once(
 
 _PROBE_SOURCE = "__fetch_scheduler_probe__"
 _PROBE_COIN = "PROBE"
+# ledger canary 固定 ts（不像一般 record 交給 DynamoDBLedger.append() 自動填當下
+# 時間）：PK=run_id、SK=ts 都固定，才能讓每次 probe 覆寫同一筆，不會無限堆積。
+_PROBE_LEDGER_TS = "1970-01-01T00:00:01+00:00"
 
 
 def run_probe() -> int:
-    """DynamoDB R/W canary probe（codex HIGH-3 修正）。
+    """DynamoDB R/W canary probe（codex HIGH-3 修正 + 後續 2 個 probe 自身的洞）。
 
     背景：`verify_fetch_scheduler`（`deploy/deploy_ec2.sh`）原本只是同步跑一次
     普通排程（`main()` 不帶 `--probe`），但普通排程對每個來源都先過新鮮度
     守門（`_is_fresh()`）——若剛好碰上 cache 全新鮮（如剛部署完、上一輪才
     成功寫過），本次執行對所有來源全部「略過」、0 次真呼叫、0 次 PutItem，
     仍然 `exit 0`。這樣一來，若 IAM 權限被 permission boundary / SCP / table
-    resource policy 擋掉（GetItem 還過得去，只有 PutItem 被拒），只要當下
-    cache 恰好新鮮，`verify_fetch_scheduler` 就會誤判成功，直到下一輪真的
-    需要刷新（cache 過期）時才會開始每次 exit 1——正好繞過本來要防的東西。
+    resource policy 擋掉，只要當下 cache 恰好新鮮，`verify_fetch_scheduler`
+    就會誤判成功，直到下一輪真的需要刷新（cache 過期）時才會開始每次
+    exit 1——正好繞過本來要防的東西。
 
     修法：完全不碰任何真連接器 API、不看任何來源的新鮮度，直接對兩個表各做
-    一次**保證真的會發生**的 R/W：
+    一次**保證真的會發生**的 R/W，且寫完都**真的讀回核對**：
       - cache 表：對保留的 canary key（`__fetch_scheduler_probe__:PROBE`，
-        不會跟真實來源撞名）做 `set()`（PutItem）→`get()`（GetItem）→比對
-        讀回內容是否等於剛寫入的 sentinel。任一步丟例外，或讀回內容對不上
-        （可能是背景讀到舊資料、或其實根本沒寫進去卻沒丟例外的邊界情況），
-        都視為失敗。
-      - cost-ledger 表：對固定 `run_id="__fetch_scheduler_probe__"` 的一筆
-        record 做 `append()`（PutItem），驗證寫入本身不丟例外即可（`Ledger`
-        介面沒有「依 key 讀單筆」，`read_all()` 是全表 scan + 合併 JSONL
-        fallback，拿來當輕量 canary 的讀回驗證太重也太容易被 fallback 掩蓋，
-        因此本 probe 只驗證 PutItem，不驗證讀回）。
+        不會跟真實來源撞名）做 `set()`（PutItem）→`get(consistent_read=True)`
+        （**強一致讀**的 GetItem）→比對讀回內容是否等於剛寫入的 sentinel。
+        固定 key 若用預設的最終一致讀，PutItem 之後立刻讀，可能因複寫延遲
+        讀到上一輪的舊 sentinel，變成非確定性地誤判「讀回不一致」；用
+        `ConsistentRead=True` 保證讀到的就是本次剛寫入的那筆，canary 值
+        本身也每次唯一（`pid+timestamp`），雙重確保判定是確定性的。
+      - cost-ledger 表：對固定 `(run_id, ts)` 的一筆 record 做 `append()`
+        （PutItem），**寫完再用 `DynamoDBLedger.scan_has_run_id()` 低階
+        `Scan` 讀回核對**——不透過 `read_all()`：`read_all()` 對 DynamoDB
+        失敗會 fallback 讀本機 JSONL，若只有 `dynamodb:Scan` 被拒（PutItem
+        仍放行），用 `read_all()` 驗證會被這層 fallback 悄悄接住看不出來，
+        但正式環境的 `/costs` 端點就是靠 `Scan` 讀，一樣會整個讀失敗——這正
+        是本次要抓的東西。非 `DynamoDBLedger`（如本機開發用的 `JsonlLedger`）
+        沒有 IAM/`Scan` 這層疑慮，`append()` 沒丟例外就視為成功，不強求
+        `Scan` 讀回。
       - 兩個 canary key 都固定、冪等（重跑覆寫同一筆，不會無限堆積垃圾資料）。
 
     刻意**不透過** `cache_get()`/`cache_set()` 高階便利函式：它們對讀/寫
@@ -288,7 +297,8 @@ def run_probe() -> int:
     但這正是 probe 要拆穿的東西——probe 要問的是「primary backend（實際配置
     的 `CACHE_BACKEND`/`COST_LEDGER_BACKEND`）本身能不能真的讀寫」，不能被
     這層 fallback 悄悄接住又回報「看起來沒事」。直接呼叫 backend 的低階
-    `get()`/`set()`/`append()`，任何例外一律視為 probe 失敗。
+    `get()`/`set()`/`append()`/`scan_has_run_id()`，任何例外一律視為
+    probe 失敗。
     """
     ok = True
 
@@ -306,9 +316,9 @@ def run_probe() -> int:
         ok = False
     else:
         try:
-            entry = cache_backend.get(canary_key)
+            entry = cache_backend.get(canary_key, consistent_read=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"[fetch_scheduler] PROBE FAIL：cache GetItem 失敗"
+            print(f"[fetch_scheduler] PROBE FAIL：cache GetItem（ConsistentRead）失敗"
                   f"（backend={type(cache_backend).__name__}）：{exc}", file=sys.stderr)
             ok = False
         else:
@@ -316,17 +326,18 @@ def run_probe() -> int:
             read_back = docs[0].get("text") if docs else None
             if read_back != sentinel:
                 print(f"[fetch_scheduler] PROBE FAIL：cache 讀回內容與剛寫入的不一致"
-                      f"（可能讀到舊資料，或寫入其實沒真的落地卻沒丟例外）："
+                      f"（ConsistentRead 之下理論上不該發生，代表寫入其實沒真的落地）："
                       f"預期 {sentinel!r}，讀到 {read_back!r}", file=sys.stderr)
                 ok = False
             else:
-                print(f"[fetch_scheduler] PROBE OK：cache PutItem + GetItem 讀寫一致"
-                      f"（backend={type(cache_backend).__name__}）")
+                print(f"[fetch_scheduler] PROBE OK：cache PutItem + GetItem（ConsistentRead）"
+                      f"讀寫一致（backend={type(cache_backend).__name__}）")
 
     ledger_backend = get_ledger()
     try:
         ledger_backend.append({
             "run_id": _PROBE_SOURCE,
+            "ts": _PROBE_LEDGER_TS,
             "total_cost_usd": 0.0,
             "calls": [],
             "note": "fetch_scheduler --probe canary，非真實花費紀錄",
@@ -336,8 +347,24 @@ def run_probe() -> int:
               f"（backend={type(ledger_backend).__name__}）：{exc}", file=sys.stderr)
         ok = False
     else:
-        print(f"[fetch_scheduler] PROBE OK：cost-ledger PutItem 成功"
-              f"（backend={type(ledger_backend).__name__}）")
+        if isinstance(ledger_backend, DynamoDBLedger):
+            try:
+                found = ledger_backend.scan_has_run_id(_PROBE_SOURCE)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[fetch_scheduler] PROBE FAIL：cost-ledger Scan 讀回失敗"
+                      f"（backend={type(ledger_backend).__name__}）：{exc}", file=sys.stderr)
+                ok = False
+            else:
+                if not found:
+                    print("[fetch_scheduler] PROBE FAIL：cost-ledger Scan 讀不到剛寫入的"
+                          "canary（PutItem 沒丟例外，但可能其實沒真的落地）", file=sys.stderr)
+                    ok = False
+                else:
+                    print(f"[fetch_scheduler] PROBE OK：cost-ledger PutItem + Scan 讀回一致"
+                          f"（backend={type(ledger_backend).__name__}）")
+        else:
+            print(f"[fetch_scheduler] PROBE OK：cost-ledger PutItem 成功"
+                  f"（backend={type(ledger_backend).__name__}，非 DynamoDB，不強求 Scan 讀回）")
 
     if not ok:
         print("[fetch_scheduler] PROBE 結論：失敗——DynamoDB cache/cost-ledger 至少一項"

@@ -234,6 +234,25 @@ class DynamoDBLedger(Ledger):
         item["ts"] = str(ts)
         self._get_table().put_item(Item=self._to_decimal(item))
 
+    def scan_has_run_id(self, run_id: str) -> bool:
+        """低階 `Scan`（不經 `read_all()`）查某個 `run_id` 是否真的能被讀回。
+
+        供 `scripts/fetch_scheduler.py --probe` 用：`/costs` 端點跟
+        `read_all()` 都是靠 `Scan` 讀 DynamoDB 這張表，若 IAM 只放行
+        `PutItem`、`Scan` 被拒，一般 `append()` 仍會成功，但 `/costs` 會整個
+        讀失敗——這正是 probe 要抓的東西。若改用 `read_all()` 驗證，會被它
+        「DynamoDB 失敗就 fallback 讀本機 JSONL」的邏輯悄悄接住、看不出來
+        （見該方法 docstring），所以這裡刻意繞開 `read_all()`，直接呼叫底層
+        `Table.scan()`；任何例外（含被拒）都讓呼叫端自行決定如何處理
+        （probe 一律視為失敗）。
+        """
+        resp = self._get_table().scan(
+            FilterExpression="run_id = :rid",
+            ExpressionAttributeValues={":rid": run_id},
+        )
+        items = resp.get("Items") or []
+        return any(item.get("run_id") == run_id for item in items)
+
     @staticmethod
     def _dedup_key(record: dict[str, Any]) -> str:
         """去重唯一鍵：只靠 `run_id`（`append_run()` 保證每筆都有全域唯一的
