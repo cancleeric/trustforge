@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from trustforge.ingestion.base import Document
-from trustforge.trust.scoring import Claim, _corroboration, score
+from trustforge.trust.scoring import Claim, _corroboration, _StanceBudget, score
 from trustforge.trust.stance_cache import StanceCache, cache_key, cached_stance_fn
 
 
@@ -405,5 +405,97 @@ def test_stance_remaining_time_fn_exhausted_falls_back_to_neutral():
     sc_target = next(sc for sc in scored if sc.claim.id == "t0")
     assert sc_target.components["corroboration"] > 0.0, (
         "時間預算耗盡的 fail-safe neutral 不可錯殺合法佐證，"
+        f"實際 corr={sc_target.components['corroboration']}"
+    )
+
+
+def test_bulk_cache_hits_do_not_consume_budget_real_contradiction_still_excluded():
+    """[HIGH-1 驗收，第 3 輪對抗審] 大量 cache-hit（遠超預算上限）不可消耗真正的
+    Bedrock 呼叫預算；快取裡真正的 contradiction 配對即使排在大量 hit 之後，仍要
+    被正確辨識、排除——證明 cache-hit 不吃預算，無法靠「先塞大量便宜 cache-hit
+    耗光預算」的排序手法讓真矛盾繞過矛盾閘（第 2 輪的錯誤設計：預算扣點在
+    `_corroboration` 呼叫 `stance_fn` 之前，連 cache-hit 也一併扣；第 3 輪修正把
+    扣點移進 `cached_stance_fn`，只在確認 cache miss、真的要打 Bedrock 時才扣）。
+    """
+
+    class _CrashingClient:
+        """一旦被真的呼叫就直接 raise——藉此證明本測試全程沒有任何一次真呼叫
+        （所有配對都該命中快取，budget 應該完全沒被消耗）。"""
+
+        offline = False
+
+        def classify_stance(self, a: str, b: str) -> str:
+            raise AssertionError("不應觸發真 Bedrock 呼叫：這裡的配對都該命中快取")
+
+    cache = StanceCache()  # 純記憶體，乾淨環境，不依賴/污染 DEFAULT_CACHE_PATH
+    target_text = "institutional demand keeps climbing across major trading venues"
+
+    # 20 組「干擾用」cache-hit（遠超下面預算上限 3），標成 neutral，模擬離線 demo
+    # 大量走快取的常態，也模擬對抗者故意把便宜的 hit 排在前面想耗光預算。
+    distractor_texts = [f"distractor claim number {i}" for i in range(20)]
+    for text in distractor_texts:
+        cache.set(target_text, text, "neutral")
+
+    # 快取裡真正的 contradiction 配對——同樣是 cache-hit，不是真呼叫。
+    contradiction_text = "institutional demand is collapsing across major trading venues"
+    cache.set(target_text, contradiction_text, "contradiction")
+
+    budget = _StanceBudget(max_pairs=3)
+    stance_fn = cached_stance_fn(_CrashingClient(), cache=cache, budget=budget)
+
+    for text in distractor_texts:
+        result = stance_fn(target_text, text)
+        assert result == "neutral", f"預期 cache-hit 回 neutral，實際 {result}"
+
+    # 大量 hit 之後，預算應該完全沒被動用（還是滿的 3）。
+    assert budget._remaining_pairs == 3, (
+        "cache-hit 不應消耗預算，實際剩餘 "
+        f"{budget._remaining_pairs}（預期仍是 3，20 次 hit 後應該完全沒被扣）"
+    )
+
+    # 快取裡真正的 contradiction 配對，即使排在大量 hit 之後，仍要被正確辨識、
+    # 不受前面 20 次 cache-hit 影響（不會被誤判成預算已耗盡而降級成 neutral）。
+    result = stance_fn(target_text, contradiction_text)
+    assert result == "contradiction", (
+        f"cache 裡的 contradiction 配對不可被前面大量 cache-hit 影響，實際: {result}"
+    )
+
+
+def test_stance_remaining_time_between_old_and_new_reserve_blocks_call():
+    """[HIGH-2 驗收，第 3 輪對抗審] 剩餘時間落在「單次呼叫最壞總耗時
+    （connect_timeout + read_timeout = 3+8 = 11 秒）」與舊版時間門檻（5 秒）之間
+    （例如剩 8 秒）——第 2 輪的門檻（STANCE_TIME_RESERVE_SEC=5.0）會誤判為「還夠」
+    而啟動呼叫，但呼叫本身最壞可能耗掉 11 秒，讓官方 15 分鐘執行窗口被越界。
+    第 3 輪修正後的門檻（>= connect+read+報告裕量，目前 25 秒）必須擋下這次呼叫，
+    降級為 neutral，確保 stance 階段最壞耗時有上界。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+    other = Claim(
+        id="o0", text=f"{target_text} variant", doc=_doc("do0", "news", "source-0")
+    )
+
+    # 剩餘 8 秒：介於舊門檻 5 秒與單次呼叫最壞耗時 11 秒之間，第 2 輪的邏輯會誤放行。
+    scored = score(
+        [target, other],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=100,
+        stance_remaining_time_fn=lambda: 8.0,
+    )
+    assert len(calls) == 0, (
+        "剩餘 8 秒（< 單次呼叫最壞耗時 11 秒 + 報告裕量）不應啟動新呼叫，"
+        f"實際呼叫 {len(calls)} 次：{calls}"
+    )
+    sc_target = next(sc for sc in scored if sc.claim.id == "t0")
+    assert sc_target.components["corroboration"] > 0.0, (
+        "時間不足擋下呼叫的 fail-safe neutral 不可錯殺合法佐證，"
         f"實際 corr={sc_target.components['corroboration']}"
     )

@@ -95,7 +95,7 @@ class StanceCache:
 
 
 def cached_stance_fn(
-    client=None, cache: StanceCache | None = None
+    client=None, cache: StanceCache | None = None, budget=None
 ) -> Callable[[str, str], str]:
     """把 `client.classify_stance(a, b)` 包一層快取，回傳可直接傳給
     `trust.scoring._corroboration(..., stance_fn=...)` 的純函式。
@@ -108,11 +108,22 @@ def cached_stance_fn(
     `client is None` 就整個不建 stance_fn，離線 pipeline 會永遠讀不到
     `stance_cache.json` 的預算結果，#15 的修復在公開離線 demo 路徑上完全看不到。
 
+    `budget`：選用的呼叫預算物件（duck-typed，只需要 `.take() -> bool`，通常是
+    `trust.scoring._StanceBudget`）。第 3 輪對抗審修正：預算只能限制**真正的
+    Bedrock 呼叫**（cost/time），不該限制免費的 cache-hit——若在查快取「之前」
+    就先扣預算，大量 cache-hit（離線 demo 的常態）會把全域預算耗盡，導致後面
+    真正的 cache-miss（可能含快取裡的真 contradiction）也被跳過檢查、錯判為
+    佐證，等於能被排序操縱繞過矛盾閘。所以 `budget.take()` 只在**確認 cache
+    miss、即將發起真呼叫**的這一刻才呼叫；cache-hit（含命中 contradiction）
+    永遠先於預算檢查、直接回傳，不消耗、不受預算耗盡與否影響。
+
     cache miss 時：
     - `client` 為 None，或 `client.offline` 為真（沒有可用的線上模型）→ fail-safe
       直接回 "neutral"，不呼叫 `client.classify_stance`（不 raise、不打真 AWS），
       也**不寫入快取**（避免把「沒查到」誤存成 neutral 的既定事實，之後接上真線上
       client 或補上持久化快取時應該能重新判斷，而不是被這次的 fail-safe 值卡住）。
+    - 有可用 client，但 `budget.take()` 回 False（額度或時間耗盡）→ 同樣 fail-safe
+      回 "neutral"，不呼叫、不寫入快取。
     - 否則才呼叫 `client.classify_stance(a, b)` 並把結果寫入快取。
     """
     if cache is None:
@@ -121,9 +132,11 @@ def cached_stance_fn(
     def _fn(a: str, b: str) -> str:
         cached = cache.get(a, b)
         if cached is not None:
-            return cached
+            return cached  # cache-hit：免費，不消耗預算
         if client is None or getattr(client, "offline", False):
             return "neutral"
+        if budget is not None and not budget.take():
+            return "neutral"  # 只有「確認需要真呼叫」的這一刻才可能因預算耗盡降級
         label = client.classify_stance(a, b)
         if label not in _VALID_LABELS:
             label = "neutral"

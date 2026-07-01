@@ -26,8 +26,9 @@ _STANCE_TOOL_NAME = "classify_stance"
 # CEO/codex 對抗審修正：stance 呼叫走獨立、短 timeout 的 boto3 client（不與主敘事
 # 模型的 self._runtime() 共用），避免 scoring.py 的 O(n²) 迴圈中單一慢呼叫拖垮整條、
 # 吃光官方 15 分鐘執行窗口。分類任務 maxTokens=32、應秒級回應，短 timeout 合理；
-# 不重試（max_attempts=1）讓逾時快速失敗進 classify_stance() 的 except → "neutral"，
-# 不要讓 boto3 內建重試把等待時間再乘倍。
+# 不重試（total_max_attempts=1，見下方 `_stance_runtime` docstring 對 botocore
+# max_attempts vs total_max_attempts 語意差異的說明）讓逾時快速失敗進
+# classify_stance() 的 except → "neutral"，不要讓 boto3 內建重試把等待時間再乘倍。
 _STANCE_READ_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_READ_TIMEOUT_SEC", "8"))
 _STANCE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_CONNECT_TIMEOUT_SEC", "3"))
 
@@ -100,7 +101,18 @@ class BedrockClient:
 
     def _stance_runtime(self):
         """W1.5（#15）+ CEO/codex 對抗審修正：stance 分類專用的短 timeout client，
-        見上方 `_STANCE_READ_TIMEOUT_SEC` 常數註解。"""
+        見上方 `_STANCE_READ_TIMEOUT_SEC` 常數註解。
+
+        retries 用 `total_max_attempts=1`（不是 `max_attempts=1`）：查過 botocore
+        `Config` 的官方 docstring（`botocore/config.py`）——`max_attempts` 語意是
+        「初始請求之外**還能重試幾次**」（`max_attempts=1` 代表初始 + 1 次重試 =
+        共 2 次嘗試，等於把單次呼叫的最壞耗時翻倍）；`total_max_attempts` 才是
+        「整個請求總共嘗試幾次（含初始請求）」，`total_max_attempts=1` 才是真正
+        的「只打一次、不重試」，且兩者同時提供時 `total_max_attempts` 優先。這裡
+        必須明確不重試，讓單次呼叫的最壞耗時有確定上界（見 scoring.py 的
+        `STANCE_TIME_RESERVE_SEC`，需要跟這裡的 timeout 數字對得上才能保證
+        15 分鐘官方執行窗口不被越界）。
+        """
         if self._stance_client is None:
             import boto3  # 延遲匯入：離線模式不需安裝/設定 AWS
             from botocore.config import Config
@@ -111,7 +123,7 @@ class BedrockClient:
                 config=Config(
                     read_timeout=_STANCE_READ_TIMEOUT_SEC,
                     connect_timeout=_STANCE_CONNECT_TIMEOUT_SEC,
-                    retries={"max_attempts": 1},
+                    retries={"total_max_attempts": 1},
                 ),
             )
         return self._stance_client

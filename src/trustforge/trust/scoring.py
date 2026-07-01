@@ -20,19 +20,32 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
 from ..ingestion.base import Document
 from .stance_cache import cached_stance_fn
 
 # W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
-# Bedrock）。單次 score() 執行最多消耗這麼多「呼叫額度」（含快取命中，保守估計）；
-# 額度用完後其餘配對一律降級 "neutral"（不呼叫、不錯殺）。數字是保守預設，可視實際
-# 成本調整；claims 數量在此之內時完全不受影響（既有測試場景 claims 數都遠小於此）。
+# Bedrock）。這是「真正呼叫 Bedrock」的配對硬上限——只在 stance_cache.py 的
+# `cached_stance_fn` 確認 cache miss、即將發起真呼叫時才消耗；免費的 cache-hit
+# 不吃這個額度（第 3 輪對抗審修正：預算若在查快取前就先扣，會讓大量 cache-hit
+# 吃光全域預算，導致快取裡真正的 contradiction 也被跳過檢查、錯判為佐證）。
+# 額度用完後其餘「需要新呼叫」的配對一律降級 "neutral"（不呼叫、不錯殺）。數字是
+# 保守預設，可視實際成本調整；claims 數量在此之內時完全不受影響。
 DEFAULT_STANCE_PAIR_BUDGET = 40
 
 # stance 呼叫最少要保留的剩餘執行時間（秒）。ExecutionLog.remaining() 低於這個門檻
-# 時一律視為預算耗盡，就算配對數還沒到硬上限，避免官方 15 分鐘執行窗口的最後一點
-# 時間被 stance 呼叫吃光、報告生不出來（命題第一號失敗模式）。
-STANCE_TIME_RESERVE_SEC = 5.0
+# 時一律視為預算耗盡，不再發起新的真呼叫，就算配對數還沒到硬上限，避免官方 15
+# 分鐘執行窗口的最後一點時間被 stance 呼叫吃光、報告生不出來（命題第一號失敗模式）。
+#
+# 第 3 輪對抗審修正：門檻必須 >= 單次呼叫最壞總耗時（connect_timeout + read_timeout，
+# 兩者皆設 `total_max_attempts=1` 不重試，見 bedrock.py），否則「剩餘時間看起來還夠」
+# 但呼叫真正開始執行後仍可能把僅存的一點時間吃光、讓報告生成階段越過 15 分鐘。
+# 直接算自 bedrock.py 的 timeout 常數（不在這裡重複寫死數字），避免兩邊之後各自
+# 調整 timeout 卻忘記同步更新這裡，數字對不上。
+_STANCE_REPORT_MARGIN_SEC = 14.0  # 呼叫結束後留給報告產生/收尾階段的裕量
+STANCE_TIME_RESERVE_SEC = (
+    _STANCE_CONNECT_TIMEOUT_SEC + _STANCE_READ_TIMEOUT_SEC + _STANCE_REPORT_MARGIN_SEC
+)  # = 3 + 8 + 14 = 25.0s
 
 
 # --- 權重（可調）---------------------------------------------------------
@@ -275,7 +288,6 @@ def _corroboration(
     target: Claim,
     all_claims: list[Claim],
     stance_fn: Callable[[str, str], str] | None = None,
-    stance_budget: "_StanceBudget | None" = None,
 ) -> float:
     """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
 
@@ -294,8 +306,13 @@ def _corroboration(
     1. 同源排除（不變）。
     2. overlap>=0.4 前置閘（不變）——先過最便宜的集合運算。
     3. `_direction_compatible` 明確衝突快路徑（不變）——省下不必要的 stance 呼叫。
-    4. 若 `stance_fn` 存在才呼叫：`stance_budget` 額度耗盡時 fail-safe 降級為
-       "neutral"（不呼叫、不 raise、不錯殺）；回傳 "contradiction" 則不計入獨立佐證。
+    4. 若 `stance_fn` 存在才呼叫（走快取）；回傳 "contradiction" 則不計入獨立佐證。
+
+    第 3 輪對抗審修正：呼叫預算（配對硬上限 + 時間預算）**不在這裡管**，而是移進
+    `stance_cache.py::cached_stance_fn` 內部——只在確認 cache miss、即將真正打
+    Bedrock 時才消耗預算；免費的 cache-hit 不吃預算（否則大量 cache-hit 會把全域
+    預算耗盡，讓快取裡真正的 contradiction 反而被跳過檢查、錯判為佐證）。這裡只
+    單純呼叫 `stance_fn`，預算耗盡與否對這層完全透明。
 
     `stance_fn=None` 時完全略過第 4 步，行為與加入 W1.5 前逐字相同（向後相容）。
     """
@@ -314,13 +331,8 @@ def _corroboration(
             continue
         if not _direction_compatible(target.direction, c.direction):
             continue
-        if stance_fn is not None:
-            if stance_budget is None or stance_budget.take():
-                label = stance_fn(target.text, c.text)
-            else:
-                label = "neutral"  # 預算耗盡，保守降級，不呼叫、不錯殺
-            if label == "contradiction":
-                continue
+        if stance_fn is not None and stance_fn(target.text, c.text) == "contradiction":
+            continue
         independent_sources.add(c.doc.source)
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
     n = len(independent_sources)
@@ -347,26 +359,24 @@ def score(
     舊版測試用的 stub）時，才視為不相容物件、完全跳過矛盾閘（`stance_fn=None`，
     等同 W1.5 加入前的行為）。
 
-    `stance_pair_budget`：單次執行 stance 呼叫配對硬上限（見 `_StanceBudget`），
-    預設 `DEFAULT_STANCE_PAIR_BUDGET`；`stance_remaining_time_fn`：選用的即時剩餘
-    時間回呼（通常傳 `ExecutionLog.remaining` 這個 bound method），額度或時間耗盡
-    時其餘配對一律 fail-safe 降級為 "neutral"，防 O(n²) 呼叫無上限打 Bedrock。
+    `stance_pair_budget`：單次執行「真正呼叫 Bedrock」的配對硬上限（見
+    `_StanceBudget`），預設 `DEFAULT_STANCE_PAIR_BUDGET`；`stance_remaining_time_fn`：
+    選用的即時剩餘時間回呼（通常傳 `ExecutionLog.remaining` 這個 bound method）。
+    額度或時間耗盡時，其餘**需要新呼叫**的配對一律 fail-safe 降級為 "neutral"，
+    防 O(n²) 呼叫無上限打 Bedrock；免費的 cache-hit 不受影響、不消耗這個預算
+    （第 3 輪對抗審修正：預算消耗點在 `cached_stance_fn` 內部，只在確認 cache
+    miss 後才扣，見該函式 docstring）。
     """
     w = weights or DEFAULT_WEIGHTS
-    stance_fn = (
-        cached_stance_fn(stance_client)
-        if stance_client is None or hasattr(stance_client, "classify_stance")
-        else None
-    )
-    stance_budget = (
-        _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
-        if stance_fn is not None
-        else None
-    )
+    if stance_client is None or hasattr(stance_client, "classify_stance"):
+        stance_budget = _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
+        stance_fn = cached_stance_fn(stance_client, budget=stance_budget)
+    else:
+        stance_fn = None
     out: list[ScoredClaim] = []
     for c in claims:
         rep = _source_reputation(c)
-        corr = _corroboration(c, claims, stance_fn=stance_fn, stance_budget=stance_budget)
+        corr = _corroboration(c, claims, stance_fn=stance_fn)
         rec = _recency_decay(c, now)
         manip = _manipulation_penalty(c)
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
