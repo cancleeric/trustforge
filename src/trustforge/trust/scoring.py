@@ -269,12 +269,16 @@ def _manip_hits(text: str) -> list[str]:
     return hits
 
 
-def _manipulation_penalty(c: Claim) -> float:
+def _manipulation_penalty(c: Claim, extra_hits: int = 0) -> float:
     # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
     hits = _manip_hits(c.text)
     # 社群來源的操縱訊號加重
     weight = 1.5 if c.doc.kind == "social" else 1.0
-    return min(1.0, len(hits) * 0.4 * weight)
+    # W3：extra_hits 為協同操縱指標（模板灌水/單源爆量，見 `_coordination_signals`）
+    # 額外命中數，併入同一套關鍵詞計分公式（沿用既有 0.4/hit、social 加重 1.5 倍），
+    # 不新增權重項、不動 `raw = ... - w["manip"] * manip` 既有公式結構。預設 0，
+    # 逐字等同既有行為（向後相容，不影響任何既有呼叫點/測試）。
+    return min(1.0, (len(hits) + extra_hits) * 0.4 * weight)
 
 
 def _manipulation_flags(c: Claim) -> list[str]:
@@ -301,6 +305,151 @@ def _direction_compatible(d1: str, d2: str) -> bool:
     if "neutral" in (d1, d2):
         return True
     return d1 == d2
+
+
+# --- W3：確定性協同操縱偵測（免 LLM，見 scoring.py 頂部 docstring 分項公式）------
+# 現況操縱偵測（`_MANIP_PATTERNS`）是關鍵詞比對，換詞即可繞過。W3 補兩個確定性、
+# 可回溯的協同/異常指標，只用既有 evidence pool 的 source/text/ts（不需真社群圖、
+# 不呼叫 Bedrock）。命中時併入既有 `w["manip"]`（0.40）懲罰——不新增權重項、不動
+# `raw = w["src"]*rep + w["corr"]*corr + w["rec"]*rec - w["manip"]*manip` 聚合公式，
+# 只是 `manip` 這一項的計算多算一種訊號（見 `_manipulation_penalty` 的 `extra_hits`）。
+
+# 指標 A 專用：客觀事實類 kind 本來就該長得像（同一價格/鏈上事件被多方獨立引用），
+# 數字/敘述重複是正常現象，不納入模板相似度比對，避免誤傷。刻意在本模組內獨立
+# 定義一份（值與 `agent.orchestrator.OBJECTIVE_KINDS` 逐字相同）：orchestrator 反過來
+# `from ..trust.scoring import ScoredClaim, TrustedBrief`，本模組若回頭 import
+# orchestrator 會造成循環 import。
+_TEMPLATE_EXEMPT_KINDS = frozenset({"price", "price_live", "onchain", "regulatory", "hoyabit"})
+
+_TEMPLATE_JACCARD_THRESHOLD = 0.8  # 指標 A：模板相似度門檻（比 _corroboration 的 0.4 嚴格得多）
+_TEMPLATE_MIN_SOURCES = 3          # 指標 A：至少涉及幾個不同來源才觸發
+
+_BURST_WINDOW_SEC = 3600.0         # 指標 B：爆量偵測窗口（60 分鐘）
+_BURST_RATIO = 3.0                 # 指標 B：單源窗口內主張數 > 全池同窗口中位數的幾倍才觸發
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """Jaccard 相似度：|交集| / |聯集|。任一邊為空集合視為不相似（0.0），避免除以 0。"""
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def _coordination_template_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
+    """W3 指標 A：模板化協同灌水偵測。
+
+    同議題跨**不同來源**兩兩比對（沿用既有 `_normalize` 去 `DOMAIN_STOP` 後的
+    token 集），門檻拉高到 `_TEMPLATE_JACCARD_THRESHOLD`（0.8）——遠比
+    `_corroboration` 判斷「同主題可佐證」用的 0.4 嚴格，0.8 代表「近乎逐字/
+    近義詞置換」的模板化文字，不是單純同主題。命中且涉及
+    `_TEMPLATE_MIN_SOURCES`（3）個以上獨立來源才觸發，回傳可回溯 flag
+    （含涉入來源清單與最高 Jaccard 值，供 `Evidence.flags` 顯示）。
+
+    防呆：
+    - `_TEMPLATE_EXEMPT_KINDS`（price/price_live/onchain/regulatory/hoyabit）
+      不納入比對——客觀數據類 claim 本來就該長得像，重複不代表協同造假。
+    - 需 ≥3 個獨立來源才觸發：2 家媒體逐字轉載同一份通稿（只有 2 個來源）
+      不觸發，避免把正常的通稿轉載誤判為協同操縱。
+    """
+    eligible = [c for c in all_claims if c.doc.kind not in _TEMPLATE_EXEMPT_KINDS]
+    tokens = {c.id: (_normalize(c.text) - DOMAIN_STOP) for c in eligible}
+
+    flags: dict[str, list[str]] = {}
+    for c in eligible:
+        t1 = tokens[c.id]
+        if not t1:
+            continue
+        # 同一其他來源可能有多筆命中，取每個「其他來源」的最高 Jaccard 供顯示。
+        best_by_source: dict[str, float] = {}
+        for other in eligible:
+            if other.id == c.id or other.doc.source == c.doc.source:
+                continue
+            t2 = tokens[other.id]
+            if not t2:
+                continue
+            j = _jaccard(t1, t2)
+            if j >= _TEMPLATE_JACCARD_THRESHOLD and j > best_by_source.get(other.doc.source, 0.0):
+                best_by_source[other.doc.source] = j
+
+        involved_sources = {c.doc.source, *best_by_source.keys()}
+        if len(involved_sources) < _TEMPLATE_MIN_SOURCES:
+            continue
+
+        best_j = max(best_by_source.values())
+        source_list = ",".join(sorted(involved_sources))
+        flags.setdefault(c.id, []).append(
+            f"協同:模板相似(來源{source_list};Jaccard {best_j:.2f})"
+        )
+    return flags
+
+
+def _coordination_burst_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
+    """W3 指標 B：單源爆量偵測。
+
+    把 `doc.ts` 分進固定 `_BURST_WINDOW_SEC`（60 分鐘）窗口（`int(ts // WINDOW)`，
+    確定性的固定分桶，無滑動窗口的邊界模糊問題）。同一窗口內，若某來源在該窗口
+    的相異主張數超過「窗口內有出現的來源」相異主張數中位數的 `_BURST_RATIO`
+    （3）倍，判定為單源爆量灌水。
+
+    防呆：
+    - 以 `c.text` 逐字去重後才計數（同一來源、逐字相同文本只算 1 筆）——與
+      `_iterate_source_reputation` 的 `unique_claims_by_source` 同一設計原則：
+      重複貼同一段文本不算「多筆主張」，避免既有『重複貼同一 claim N 次』
+      的反暴走回歸測試被本指標誤判為爆量（見 PR 說明）。
+    - 窗口內少於 2 個不同來源時（無從比較，例如整個資料池只有 1 個來源）
+      跳過，避免用「只有自己」當分母誤判。
+    """
+    buckets: dict[int, list[Claim]] = {}
+    for c in all_claims:
+        bucket = int(c.doc.ts // _BURST_WINDOW_SEC)
+        buckets.setdefault(bucket, []).append(c)
+
+    flags: dict[str, list[str]] = {}
+    for bucket_claims in buckets.values():
+        texts_by_source: dict[str, set[str]] = {}
+        for c in bucket_claims:
+            texts_by_source.setdefault(c.doc.source, set()).add(c.text)
+        counts = {s: len(texts) for s, texts in texts_by_source.items()}
+        if len(counts) < 2:
+            continue
+        values = sorted(counts.values())
+        mid = len(values) // 2
+        median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2.0
+        if median <= 0:
+            continue
+        window_min = int(_BURST_WINDOW_SEC // 60)
+        for c in bucket_claims:
+            cnt = counts[c.doc.source]
+            if cnt > median * _BURST_RATIO:
+                flags.setdefault(c.id, []).append(
+                    f"協同:單源爆量(來源{c.doc.source};{window_min}分鐘內{cnt}則相異主張,"
+                    f"中位數{median:g}的{cnt / median:.1f}倍)"
+                )
+    return flags
+
+
+def _coordination_signals(all_claims: list[Claim]) -> dict[str, list[str]]:
+    """W3：確定性、免 LLM 的協同操縱偵測總入口。
+
+    整合指標 A（模板相似，`_coordination_template_flags`）與指標 B（單源爆量，
+    `_coordination_burst_flags`），對 `all_claims` 只算一次——O(n²)，量級同
+    `_corroboration`（`score()` 對每個 claim 都要跟其他所有 claims 比對一次），
+    不新增預算風險。
+
+    回傳 `{claim_id: [flag, ...]}`；未命中的 claim 不會出現在 dict 中，呼叫端
+    用 `.get(claim.id, [])` 取用。命中結果同時：
+    1. 併入既有 `_manipulation_penalty` 的 `extra_hits`（沿用 `w["manip"]`
+       權重，不新增權重項、不動 `score()` 的 `raw` 聚合公式）。
+    2. 併入 `ScoredClaim.manip_flags` → `Evidence.flags`，可回溯到具體指標/
+       來源/數字（如「協同:模板相似(來源a,b,c;Jaccard 0.85)」）。
+    """
+    signals: dict[str, list[str]] = {}
+    for cid, fl in _coordination_template_flags(all_claims).items():
+        signals.setdefault(cid, []).extend(fl)
+    for cid, fl in _coordination_burst_flags(all_claims).items():
+        signals.setdefault(cid, []).extend(fl)
+    return signals
 
 
 class _StanceBudget:
@@ -469,8 +618,16 @@ def _iterate_source_reputation(
     alpha: float = DEFAULT_REPUTATION_ALPHA,
     evidence: dict[str, tuple[set[str], set[str]]] | None = None,
     trace_out: dict | None = None,
+    coord_flags: dict[str, list[str]] | None = None,
 ) -> dict[str, float]:
     """W2：bounded 迭代動態來源信譽。純函式、無隨機性 → 同輸入必同輸出。
+
+    `coord_flags`：W3 協同操縱指標（`_coordination_signals` 的回傳值），選填。
+    提供時併入 `static_manip` 的 `_manipulation_penalty` 計算（`extra_hits`），
+    與 `score()` 主迴圈的 manip 分項使用同一份結果，確保靜態/動態信譽兩條路徑
+    對「這條 claim 是否命中協同訊號」的認定一致。預設 `None`（視同空 dict），
+    逐字等同 W3 加入前的行為——不傳時無任何行為變化（向後相容，既有 W2 測試
+    直接呼叫 `_iterate_source_reputation()` 不受影響）。
 
     實作偏離 gray 計劃字面簽章之處（皆為必要、非隱藏的工程判斷，詳見 PR 說明）：
     - 加了 `now`：`_recency_decay` 需要，計劃描述省略。
@@ -548,6 +705,7 @@ def _iterate_source_reputation(
     # 靜態分項（不受 SR 影響，全程只算一次；agree/contra 來源集合全程共用，
     # 不因迭代輪數重呼叫 stance_fn）
     ev = evidence if evidence is not None else _reputation_evidence(claims, stance_fn=stance_fn)
+    cf = coord_flags or {}
     static_corr: dict[str, float] = {}
     static_rec: dict[str, float] = {}
     static_manip: dict[str, float] = {}
@@ -556,7 +714,7 @@ def _iterate_source_reputation(
         nn = len(agree)
         static_corr[c.id] = 1.0 - math.pow(0.5, nn) if nn else 0.0
         static_rec[c.id] = _recency_decay(c, now)
-        static_manip[c.id] = _manipulation_penalty(c)
+        static_manip[c.id] = _manipulation_penalty(c, extra_hits=len(cf.get(c.id, [])))
 
     # codex 對抗審 [HIGH-1] 修正：先把每個 source 名下所有 claim 的 agree/contra
     # 來源做「聯集去重」（agree_union_of / contra_union_of），後續小樣本守門與
@@ -736,6 +894,12 @@ def score(
     if stance_fn is None:
         stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
 
+    # W3：確定性協同操縱偵測（模板灌水/單源爆量），對本次 `score()` 的整個 claims
+    # 池只算一次（O(n²)，量級同 `_corroboration`，見 `_coordination_signals`
+    # docstring），下面靜態 manip 分項與（若啟用）`_iterate_source_reputation`
+    # 的 static_manip 共用同一份結果。
+    coord_flags = _coordination_signals(claims) if claims else {}
+
     dynamic_map: dict[str, float] | None = None
     trace_by_source: dict[str, dict] | None = None
     if dynamic_reputation and claims:
@@ -754,6 +918,7 @@ def score(
             iterations=reputation_iterations,
             evidence=evidence,
             trace_out=trace_meta,
+            coord_flags=coord_flags,
         )
         iterations_run = trace_meta.get("iterations_run", 0)
         by_source: dict[str, list[Claim]] = {}
@@ -781,7 +946,8 @@ def score(
         rep = _source_reputation(c, dynamic_map=dynamic_map)
         corr = _corroboration(c, claims, stance_fn=stance_fn)
         rec = _recency_decay(c, now)
-        manip = _manipulation_penalty(c)
+        c_coord_flags = coord_flags.get(c.id, [])
+        manip = _manipulation_penalty(c, extra_hits=len(c_coord_flags))
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
         trust = max(0.0, min(1.0, raw))
         out.append(
@@ -793,7 +959,9 @@ def score(
                 reputation_trace=(
                     trace_by_source.get(c.doc.source) if trace_by_source is not None else None
                 ),
-                manip_flags=_manipulation_flags(c),
+                # W3：協同操縱 flag（模板灌水/單源爆量）併入既有操縱關鍵詞 flags，
+                # 一起回填 `Evidence.flags`（見 `_coordination_signals` docstring）。
+                manip_flags=_manipulation_flags(c) + c_coord_flags,
             )
         )
     return out

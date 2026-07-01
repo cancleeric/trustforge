@@ -891,3 +891,217 @@ print(json.dumps(out, sort_keys=True))
         "PYTHONHASHSEED=0 與 PYTHONHASHSEED=42 下的 SR/reputation_trace 不相等：\n"
         f"seed=0: {out_seed0}\nseed=42: {out_seed42}"
     )
+
+
+# =========================================================================
+# W3：確定性協同操縱偵測（_coordination_signals / 指標 A 模板相似 / 指標 B 單源爆量）
+# =========================================================================
+
+_BURST_BASE_TS = 1780185600.0  # 對齊 demo/sample_data 慣用的樣本時戳，避免魔法數字
+
+
+def test_w3_a_synonym_template_flood_triggers_and_evades_regex():
+    """指標 A：3 個假來源用近義詞置換（換詞不換意）灌水同一套話術。
+
+    刻意選用完全不在 `_MANIP_PATTERNS`（to moon/暴漲/翻倍/shill/喊單/穩賺/
+    financial advice/pump/快上車/百倍）內的字眼（起飛/十倍/情報），證明舊版
+    regex 對這種灌水完全失效（`_manip_hits` 全部命中 0），而 W3 協同指標仍能
+    靠 3 個不同來源間 ≥0.8 的模板 Jaccard 相似度抓到。
+    """
+    from trustforge.trust.scoring import Claim, _coordination_signals, _manip_hits
+
+    texts = {
+        "x-shill-a": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 進場",
+        "x-shill-b": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 買入",
+        "x-shill-c": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 加碼",
+    }
+    claims = [
+        Claim(id=f"w3a-{src}", text=t, doc=_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+
+    # 回歸證據：舊版關鍵詞 regex 對這批「換詞不換意」文字完全繞過（0 命中）。
+    for c in claims:
+        assert _manip_hits(c.text) == [], f"{c.doc.source} 不應命中任何 _MANIP_PATTERNS 關鍵詞"
+
+    flags = _coordination_signals(claims)
+    assert set(flags.keys()) == {c.id for c in claims}, "3 個來源都應被標記協同模板 flag"
+    for c in claims:
+        fl = flags[c.id]
+        assert len(fl) == 1
+        flag = fl[0]
+        assert flag.startswith("協同:模板相似(")
+        # 可回溯：flag 內必須列出涉入的 3 個來源與 Jaccard 數值
+        assert "x-shill-a" in flag and "x-shill-b" in flag and "x-shill-c" in flag
+        assert "Jaccard 0.8" in flag
+
+
+def test_w3_a_penalises_trust_and_flows_into_evidence_flags():
+    """指標 A 命中應：(1) 拉低 trust（扣分方向正確）；(2) flag 併入
+    `ScoredClaim.manip_flags`（供 `agent.orchestrator._scored_to_evidence` 回填
+    `Evidence.flags`，web 自動顯示🚩）；(3) 不動既有 `raw` 聚合公式——同一批
+    claims，關掉協同偵測（用原始 `_manipulation_penalty` 手算）應該分數更高。
+    """
+    from trustforge.trust.scoring import _manipulation_penalty
+
+    texts = {
+        "x-shill-a": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 進場",
+        "x-shill-b": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 買入",
+        "x-shill-c": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 加碼",
+    }
+    docs = [_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS) for src, t in texts.items()]
+    claims = extract_claims(docs)
+    scored = score(claims, now=_BURST_BASE_TS)
+
+    for sc in scored:
+        assert sc.components["manipulation"] > 0, "協同模板灌水應計入操縱分項扣分"
+        assert any(f.startswith("協同:模板相似(") for f in sc.manip_flags), (
+            f"{sc.claim.doc.source} 的 manip_flags 應含協同模板 flag，實際: {sc.manip_flags}"
+        )
+        # 沒有協同懲罰時的分數（等同 W3 加入前的既有行為）必須更高，證明扣分方向正確
+        # 且確實是「多扣了協同這一項」，不是動了既有公式結構。
+        baseline_manip = _manipulation_penalty(sc.claim)
+        assert sc.components["manipulation"] >= baseline_manip
+
+
+def test_w3_a_two_source_verbatim_wire_repost_not_flagged():
+    """防呆：2 家媒體逐字轉載同一份官方通稿（只有 2 個來源，即使 Jaccard=1.0）
+    不應觸發協同 flag——避免正常的通稿轉載被誤判為協同操縱。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    official = "歐盟 監管 機關 發布 加密 資產 新規 業者 需 於 六個 月 內 完成 合規 申報"
+    c1 = Claim(id="wire-1", text=official, doc=_doc("d1", "news", "reuters", official, ts=_BURST_BASE_TS))
+    c2 = Claim(id="wire-2", text=official, doc=_doc("d2", "news", "apnews", official, ts=_BURST_BASE_TS))
+
+    flags = _coordination_signals([c1, c2])
+    assert flags == {}, f"2 家轉載同一通稿不應觸發協同 flag，實際: {flags}"
+
+
+def test_w3_a_objective_kinds_exempt_from_template_matching():
+    """防呆：OBJECTIVE_KINDS（price/price_live/onchain/regulatory/hoyabit）不納入
+    模板比對——即使 3 個 onchain 來源文字高度相似（客觀數據本來就該長得像），
+    也不應被誤判為協同操縱。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "glassnode": "鏈上 數據 顯示 BTC 交易所 餘額 過去 24 小時 減少 一 萬 枚",
+        "nansen": "鏈上 數據 顯示 BTC 交易所 餘額 過去 24 小時 減少 一點一 萬 枚",
+        "cryptoquant": "鏈上 數據 顯示 BTC 交易所 餘額 過去 24 小時 減少 一點二 萬 枚",
+    }
+    claims = [
+        Claim(id=f"obj-{src}", text=t, doc=_doc(f"d-{src}", "onchain", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    flags = _coordination_signals(claims)
+    assert flags == {}, f"onchain（OBJECTIVE_KINDS）不應納入模板比對，實際: {flags}"
+
+
+def test_w3_b_single_source_burst_triggers_and_baseline_untouched():
+    """指標 B：單一來源在 60 分鐘窗口內連發 8 則相異主張（10 分鐘內），
+    相對全池同窗口中位數（=1）達 8 倍 → 觸發爆量 flag；同窗口內正常的 3 個
+    單則來源不應被誤傷。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    claims = []
+    for i in range(8):
+        t = f"快訊{i} XYZ幣 突破 關鍵 價位 值得 留意 第{i}則"
+        claims.append(
+            Claim(id=f"burst-{i}", text=t,
+                  doc=_doc(f"burst-doc-{i}", "social", "x-spammer", t, ts=_BURST_BASE_TS + i * 60))
+        )
+    for j, src in enumerate(["news-a", "news-b", "news-c"]):
+        t = f"正常報導{j} 市場 觀察 淡定"
+        claims.append(
+            Claim(id=f"base-{j}", text=t,
+                  doc=_doc(f"base-doc-{j}", "news", src, t, ts=_BURST_BASE_TS + 30))
+        )
+
+    flags = _coordination_signals(claims)
+
+    for i in range(8):
+        fl = flags.get(f"burst-{i}")
+        assert fl, f"burst-{i} 應被標記單源爆量"
+        flag = fl[0]
+        assert flag.startswith("協同:單源爆量(")
+        assert "x-spammer" in flag
+        assert "8則" in flag
+        assert "8.0倍" in flag
+
+    for j in range(3):
+        assert flags.get(f"base-{j}") is None, "正常單則來源不應被爆量指標誤傷"
+
+
+def test_w3_b_repeated_identical_text_does_not_count_as_burst():
+    """防呆／回歸鎖：同一來源在同一窗口內重複貼「逐字相同」的文本 N 次，
+    不應被判定為爆量——與 `_iterate_source_reputation` 的
+    `unique_claims_by_source` 去重原則一致（見既有 W2 反暴走測試：同一 claim
+    重貼 1 次 vs 20 次，動態信譽必須逐字相同）。若本指標對逐字重複的文本也
+    計數，會與既有 W2 回歸鎖互相打架。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    claims = [
+        Claim(id=f"dup-{i}", text=shared,
+              doc=_doc(f"dup-doc-{i}", "social", "x-analyst", shared, ts=_BURST_BASE_TS))
+        for i in range(20)
+    ] + [
+        Claim(id="other-1", text="其他 來源 的 一則 主張",
+              doc=_doc("other-doc-1", "news", "coindesk", "其他 來源 的 一則 主張", ts=_BURST_BASE_TS)),
+        Claim(id="other-2", text="第二個 其他 來源 主張",
+              doc=_doc("other-doc-2", "news", "bloomberg", "第二個 其他 來源 主張", ts=_BURST_BASE_TS)),
+    ]
+
+    flags = _coordination_burst_flags(claims)
+    assert flags == {}, f"逐字重複同一文本 20 次不應觸發爆量，實際: {flags}"
+
+
+def test_w3_burst_window_requires_at_least_two_sources():
+    """防呆：窗口內只有單一來源時（無從比較），不應觸發爆量（避免用「只有
+    自己」當分母誤判）。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    claims = [
+        Claim(id=f"solo-{i}", text=f"訊息{i} 內容 各不相同 第{i}篇",
+              doc=_doc(f"solo-doc-{i}", "social", "x-only",
+                       f"訊息{i} 內容 各不相同 第{i}篇", ts=_BURST_BASE_TS + i * 30))
+        for i in range(10)
+    ]
+    flags = _coordination_burst_flags(claims)
+    assert flags == {}, "整個資料池只有 1 個來源時不應觸發爆量（無從比較）"
+
+
+def test_w3_normal_multi_source_corroboration_not_flagged():
+    """回歸：既有的正常多源佐證情境（onchain/news/social 三方各自轉述同一事實，
+    onchain 為 OBJECTIVE_KINDS 豁免、news/social 僅 2 個非豁免來源，未達
+    `_TEMPLATE_MIN_SOURCES`）不應被 W3 誤傷——trust 應與 W3 加入前一致。"""
+    from trustforge.trust.scoring import _coordination_signals
+
+    shared = "大額 BTC 轉入 交易所 造成 賣壓 比特幣 下跌"
+    docs = [
+        _doc("a", "onchain", "glassnode", shared, ts=_BURST_BASE_TS),
+        _doc("b", "news", "coindesk", shared, ts=_BURST_BASE_TS),
+        _doc("c", "social", "x-trader", shared, ts=_BURST_BASE_TS),
+    ]
+    claims = extract_claims(docs)
+    scored = score(claims, now=_BURST_BASE_TS)
+    assert _coordination_signals(claims) == {}, "正常三方佐證不應觸發任何協同 flag"
+    for sc in scored:
+        assert sc.manip_flags == [], f"{sc.claim.doc.source} 不應有任何操縱 flag（正常佐證）"
+
+
+def test_w3_coordination_signals_deterministic_repeat_calls():
+    """確定性：同一輸入重複呼叫 `_coordination_signals` 必須逐字相同（無隨機性、
+    無 LLM），符合『確定性、免 LLM、credit-safe』的設計要求。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    texts = {
+        "x-shill-a": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 進場",
+        "x-shill-b": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 買入",
+        "x-shill-c": "內幕 情報 XYZ幣 即將 起飛 十倍 現在 機會 難得 加碼",
+    }
+    claims = [
+        Claim(id=f"det-{src}", text=t, doc=_doc(f"det-doc-{src}", "social", src, t, ts=_BURST_BASE_TS))
+        for src, t in texts.items()
+    ]
+    results = [_coordination_signals(claims) for _ in range(5)]
+    assert all(r == results[0] for r in results), "重複呼叫應逐字相同（確定性）"
