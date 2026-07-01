@@ -41,33 +41,19 @@ PRICING: dict[str, tuple[float, float]] = {
     "au.anthropic.claude-haiku-4-5-20251001-v1:0": (1.0, 5.0),
 }
 
-# 正規化 fallback：region 前綴（us./au./apac./eu./global. 等）與版本/日期後綴
-# （-20251001-v1:0 等）不影響定價本身——只要 model id 內含以下關鍵字串就套用
-# 對應價格，避免未來換 region/AWS 又新增一個沒收錄進 `PRICING` 的完整 id 時，
-# 再次悄悄把真實成本記成 $0（見上方 codex 審查 MEDIUM）。精確 key 命中優先於
-# 這個 fallback；兩者都沒中才回真正的「未知 model」0 元。
-_NORMALIZED_PRICING: tuple[tuple[str, tuple[float, float]], ...] = (
-    ("haiku-4-5", (1.0, 5.0)),
-    ("sonnet-4-6", (3.0, 15.0)),
-)
-
 
 def estimate_cost(model_id: str | None, tokens_in: int, tokens_out: int) -> float:
     """依 `PRICING` 估算單次呼叫成本（USD）。model_id 為 None/未知 → 0，不 raise。
 
-    先精確查 `PRICING`；查不到再用 `_NORMALIZED_PRICING` 做子字串比對（大小寫
-    不敏感），涵蓋同一模型換 region 前綴或版本/日期後綴的情況。兩者都查不到
-    才是真正的「未知 model」，回 0。
+    刻意**只做精確查表**，不做子字串/正規化比對（codex 審查發現：先前加過的
+    「model id 含 haiku-4-5/sonnet-4-6 關鍵字就套價」子字串 fallback 太鬆，
+    `vendor.fake-haiku-4-5` 這種非法/山寨 id 也會被誤套 Haiku 價，違反
+    「unknown model → 0」的精確契約）。我們的 model id 自己可控，換 region/
+    版本時直接在 `PRICING` 明確加一個 key 即可，不靠模糊比對猜。
     """
     if not model_id:
         return 0.0
     rate = PRICING.get(model_id)
-    if rate is None:
-        lower_id = model_id.lower()
-        for needle, normalized_rate in _NORMALIZED_PRICING:
-            if needle in lower_id:
-                rate = normalized_rate
-                break
     if rate is None:
         return 0.0
     in_rate, out_rate = rate

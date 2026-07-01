@@ -59,18 +59,12 @@ def test_estimate_cost_default_stance_model_id_is_nonzero_and_correct():
     assert cost == round(700 / 1_000_000 * 1.0 + 33 / 1_000_000 * 5.0, 6)
 
 
-def test_estimate_cost_normalized_fallback_matches_other_haiku_prefix():
-    """正規化 fallback：即使換了另一個沒收錄進 `PRICING` 的 region 前綴/版本
-    後綴，只要 model id 內含 `haiku-4-5`，仍應套用 Haiku 價格而非悄悄回 0。"""
-    cost = estimate_cost("us.anthropic.claude-haiku-4-5-20260101-v2:0", 1_000_000, 1_000_000)
-    assert cost > 0
-    assert cost == round(1.0 + 5.0, 6)
-
-
-def test_estimate_cost_normalized_fallback_matches_other_sonnet_prefix():
-    cost = estimate_cost("global.anthropic.claude-sonnet-4-6-20260101-v1:0", 1_000_000, 1_000_000)
-    assert cost > 0
-    assert cost == round(3.0 + 15.0, 6)
+def test_estimate_cost_lookalike_unknown_model_id_still_returns_zero():
+    """codex 二次審查發現：先前的子字串正規化 fallback 太鬆——
+    `vendor.fake-haiku-4-5` 這種內含關鍵字但根本不是合法 model id 的字串，
+    也會被誤套 Haiku 價格，違反「unknown model → 0」的精確契約。移除子字串
+    fallback、改回精確查表後，這種 lookalike id 必須仍然回 0。"""
+    assert estimate_cost("vendor.fake-haiku-4-5", 100, 100) == 0.0
 
 
 def test_estimate_cost_truly_unknown_model_still_returns_zero():
