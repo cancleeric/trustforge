@@ -37,12 +37,15 @@ Demo API key（選用，keyless 已足夠，key 只是錦上添花）：
   官方文件：keyless public API 5-15 calls/min；上面的高效抓取策略把一輪
   壓到 ≈6 次、排程間隔 300 秒（見 `cache.py`），平均 <1.2 次/分鐘，keyless
   綽綽有餘。仍支援選用的免費 Demo key（`COINGECKO_API_KEY` env）以防未來
-  幣種擴充或排程加密：有值才附加 `x_cg_demo_api_key` query param 隨請求
-  送出；**沒有設 env 時完全不受影響，退回 keyless 呼叫**（不報錯）。
+  幣種擴充或排程加密：有值才透過 **`x-cg-demo-api-key` 請求 header**
+  （非 URL query param）隨請求送出；**沒有設 env 時完全不受影響，退回
+  keyless 呼叫**（不報錯，不加該 header）。
   ⚠️ key 是 secret：只從 env 讀，絕不 hardcode，絕不寫進
-  `Document.url`/`meta`/log（避免留痕外洩）——`Document.url` 一律存不含
-  key 的乾淨端點 URL，key 只在 `_fetch_url` 實際發送 HTTP 請求那一刻才
-  附加在記憶體中的請求 URL 上。
+  `Document.url`/`meta`/log（避免留痕外洩）——**URL 全程（含實際發出的
+  HTTP request）一律乾淨、不含 key**，key 只透過 header 傳遞，不會被
+  proxy/tracing/access-log/例外訊息裡常見的「記錄請求 URL」路徑意外側錄
+  外洩（codex 對抗審 HIGH 修正：query param 版本即使 `Document.url` 乾淨，
+  `Request.full_url` 實際仍含 key，一樣有外洩風險）。
 
 安全措施（同 onchain.py）：
   - timeout 5 秒 / 回應大小上限 512 KB（超過截斷）
@@ -102,24 +105,32 @@ def reset_process_cache() -> None:
     _coin_detail_cache.clear()
 
 
-def _with_api_key(url: str) -> str:
-    """若設定 `COINGECKO_API_KEY` env，附加 demo key query param 供實際
-    HTTP 請求使用；未設定則原樣回傳（keyless 降級，不報錯）。
+def _api_key_headers() -> dict[str, str]:
+    """若設定 `COINGECKO_API_KEY` env，回傳含 `x-cg-demo-api-key` 的請求
+    header 字典供 `_fetch_url` 附加；未設定則回傳空字典（keyless 降級，
+    不報錯、不加該 header）。
 
-    ⚠️ 回傳值只能傳給 `_fetch_url` 發送請求，**不得**存入 `Document.url`/
-    `meta`/log——那些欄位一律用未附加 key 的乾淨 URL（呼叫端各自保留一份
-    「乾淨」與「附 key」兩個版本，見各 Source.fetch()）。
+    ⚠️ key 一律透過 HTTP header 傳遞，**絕不**附加在 URL query param 上
+    （避免 proxy/tracing/access-log/例外訊息等常見「記錄請求 URL」路徑
+    side-channel 側錄外洩）；`Document.url`/`meta`/log 一律只存乾淨 URL，
+    與此函式回傳值無關。
     """
     key = os.environ.get(_API_KEY_ENV, "").strip()
     if not key:
-        return url
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}x_cg_demo_api_key={key}"
+        return {}
+    return {"x-cg-demo-api-key": key}
 
 
-def _fetch_url(url: str) -> bytes:
-    """帶 timeout / 大小上限 / User-Agent 的 urllib GET（同 onchain.py）。"""
-    req = Request(url, headers={"User-Agent": _UA})
+def _fetch_url(url: str, extra_headers: dict[str, str] | None = None) -> bytes:
+    """帶 timeout / 大小上限 / User-Agent 的 urllib GET（同 onchain.py）。
+
+    `extra_headers`（如有）會與固定 `User-Agent` 一併附加在請求 header
+    上；URL 本身不受影響、一律保持乾淨（不含任何 secret）。
+    """
+    headers = {"User-Agent": _UA}
+    if extra_headers:
+        headers.update(extra_headers)
+    req = Request(url, headers=headers)
     with urlopen(req, timeout=_TIMEOUT) as resp:
         return resp.read(_MAX_BYTES)
 
@@ -138,7 +149,7 @@ def _get_price_data() -> dict:
     真的打 API，之後直接複用，讓 5 幣共用同一次呼叫（見模組頂部說明）。"""
     global _price_response_cache
     if _price_response_cache is None:
-        raw = _fetch_url(_with_api_key(_PRICE_URL))
+        raw = _fetch_url(_PRICE_URL, _api_key_headers())
         _price_response_cache = json.loads(raw)
     return _price_response_cache
 
@@ -147,7 +158,7 @@ def _get_coin_detail(coingecko_id: str) -> dict:
     """`_coin_detail_url(coingecko_id)` 的記憶體快取版：sentiment 與 dev
     兩個 Source 共用，同一幣本輪只真的打一次 API（見模組頂部說明）。"""
     if coingecko_id not in _coin_detail_cache:
-        raw = _fetch_url(_with_api_key(_coin_detail_url(coingecko_id)))
+        raw = _fetch_url(_coin_detail_url(coingecko_id), _api_key_headers())
         _coin_detail_cache[coingecko_id] = json.loads(raw)
     return _coin_detail_cache[coingecko_id]
 

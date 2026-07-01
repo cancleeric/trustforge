@@ -57,7 +57,7 @@ def _reset_coingecko_process_cache():
 
 def test_price_source_document_fields(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: PRICE_FIXTURE)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
     assert len(docs) == 1
     d = docs[0]
@@ -74,14 +74,14 @@ def test_price_source_document_fields(monkeypatch):
 def test_price_source_non_target_coin_skipped(monkeypatch):
     """非 5 幣白名單的幣種一律跳過。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: PRICE_FIXTURE)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE)
     assert coingecko.CoinGeckoPriceSource().fetch("", coin="DOGE") == []
 
 
 def test_price_source_empty_coin_returns_all_five(monkeypatch):
     """coin='' 時（全市場通用查詢）回傳 5 幣各一筆，皆帶顯式 meta['coin']。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: PRICE_FIXTURE)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="")
     assert len(docs) == 5
     coins = {d.meta["coin"] for d in docs}
@@ -91,7 +91,7 @@ def test_price_source_empty_coin_returns_all_five(monkeypatch):
 def test_price_source_missing_fields_degrades_to_na(monkeypatch):
     """缺 24h 變動 / 市值欄位時不炸，改顯示 N/A。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: PRICE_FIXTURE_MISSING_FIELDS)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE_MISSING_FIELDS)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
     assert len(docs) == 1
     ref = docs[0].meta["content_reference"]
@@ -101,7 +101,7 @@ def test_price_source_missing_fields_degrades_to_na(monkeypatch):
 def test_price_source_null_fields_degrades_to_na(monkeypatch):
     """欄位為 null（非缺欄）時同樣不炸，改顯示 N/A。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: PRICE_FIXTURE_NULL_FIELDS)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE_NULL_FIELDS)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
     assert len(docs) == 1
     ref = docs[0].meta["content_reference"]
@@ -111,7 +111,7 @@ def test_price_source_null_fields_degrades_to_na(monkeypatch):
 def test_price_source_missing_price_entirely_skips_coin(monkeypatch):
     """整個幣別在回應中缺席（如 API 部分降級）時該幣被跳過，不炸。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: b'{"bitcoin": {"usd": 100.0}}')
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: b'{"bitcoin": {"usd": 100.0}}')
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="ETH")
     assert docs == []
 
@@ -120,7 +120,7 @@ def test_price_source_failure_does_not_crash_collect(monkeypatch):
     """連接器逾時/例外 → collect 跳過該來源，不拋例外。"""
     from urllib.error import URLError
     from trustforge.ingestion import coingecko, base
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: (_ for _ in ()).throw(URLError("timeout")))
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: (_ for _ in ()).throw(URLError("timeout")))
     src = coingecko.CoinGeckoPriceSource()
     docs = base.collect("BTC", coin="BTC", sources=[src], offline=False)
     assert isinstance(docs, list)
@@ -130,7 +130,7 @@ def test_price_source_failure_does_not_crash_collect(monkeypatch):
 
 def test_sentiment_source_document_fields(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NORMAL)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NORMAL)
     docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="ETH")
     assert len(docs) == 1
     d = docs[0]
@@ -145,21 +145,21 @@ def test_sentiment_source_document_fields(monkeypatch):
 
 def test_sentiment_source_non_target_coin_skipped(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NORMAL)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NORMAL)
     assert coingecko.CoinGeckoSentimentSource().fetch("", coin="DOGE") == []
 
 
 def test_sentiment_source_empty_coin_skipped(monkeypatch):
     """空 coin 無法決定要打哪個 id 的端點，直接跳過。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NORMAL)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NORMAL)
     assert coingecko.CoinGeckoSentimentSource().fetch("", coin="") == []
 
 
 def test_sentiment_source_missing_fields_returns_empty(monkeypatch):
     """欄位整個缺席（community_data-only 回應等）時安靜回傳 []，不炸。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_MISSING_FIELDS)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_MISSING_FIELDS)
     docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
     assert docs == []
 
@@ -167,7 +167,7 @@ def test_sentiment_source_missing_fields_returns_empty(monkeypatch):
 def test_sentiment_source_null_fields_returns_empty(monkeypatch):
     """欄位存在但值為 null（免費 tier 常見）時安靜回傳 []，不炸。"""
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NULL_FIELDS)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NULL_FIELDS)
     docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
     assert docs == []
 
@@ -175,7 +175,7 @@ def test_sentiment_source_null_fields_returns_empty(monkeypatch):
 def test_sentiment_source_failure_does_not_crash_collect(monkeypatch):
     from urllib.error import URLError
     from trustforge.ingestion import coingecko, base
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: (_ for _ in ()).throw(URLError("timeout")))
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: (_ for _ in ()).throw(URLError("timeout")))
     src = coingecko.CoinGeckoSentimentSource()
     docs = base.collect("BTC", coin="BTC", sources=[src], offline=False)
     assert isinstance(docs, list)
@@ -185,7 +185,7 @@ def test_sentiment_source_failure_does_not_crash_collect(monkeypatch):
 
 def test_dev_source_document_fields(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NORMAL)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NORMAL)
     docs = coingecko.CoinGeckoDevSource().fetch("", coin="SOL")
     assert len(docs) == 1
     d = docs[0]
@@ -200,26 +200,26 @@ def test_dev_source_document_fields(monkeypatch):
 
 def test_dev_source_non_target_coin_skipped(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NORMAL)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NORMAL)
     assert coingecko.CoinGeckoDevSource().fetch("", coin="DOGE") == []
 
 
 def test_dev_source_empty_coin_skipped(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NORMAL)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NORMAL)
     assert coingecko.CoinGeckoDevSource().fetch("", coin="") == []
 
 
 def test_dev_source_missing_fields_returns_empty(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_MISSING_FIELDS)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_MISSING_FIELDS)
     docs = coingecko.CoinGeckoDevSource().fetch("", coin="BTC")
     assert docs == []
 
 
 def test_dev_source_null_fields_returns_empty(monkeypatch):
     from trustforge.ingestion import coingecko
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NULL_FIELDS)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NULL_FIELDS)
     docs = coingecko.CoinGeckoDevSource().fetch("", coin="BTC")
     assert docs == []
 
@@ -227,7 +227,7 @@ def test_dev_source_null_fields_returns_empty(monkeypatch):
 def test_dev_source_failure_does_not_crash_collect(monkeypatch):
     from urllib.error import URLError
     from trustforge.ingestion import coingecko, base
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: (_ for _ in ()).throw(URLError("timeout")))
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: (_ for _ in ()).throw(URLError("timeout")))
     src = coingecko.CoinGeckoDevSource()
     docs = base.collect("BTC", coin="BTC", sources=[src], offline=False)
     assert isinstance(docs, list)
@@ -256,7 +256,7 @@ def test_collect_online_includes_coingecko_kinds(monkeypatch, tmp_path):
     from trustforge.ingestion import cache as cache_mod
     from trustforge.ingestion.coingecko import build_coingecko_sources
 
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: PRICE_FIXTURE)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: PRICE_FIXTURE)
 
     backend = cache_mod.JsonCacheBackend(tmp_path / "cache.json")
     monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: backend)
@@ -269,7 +269,7 @@ def test_collect_online_includes_coingecko_kinds(monkeypatch, tmp_path):
         [cache_mod.doc_to_dict(d) for d in price_src.fetch("BTC", coin="BTC")],
         fetched_at=time.time(),
     )
-    monkeypatch.setattr(coingecko, "_fetch_url", lambda url: DETAIL_FIXTURE_NORMAL)
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: DETAIL_FIXTURE_NORMAL)
     backend.set(
         cache_mod.cache_key(sentiment_src.name, "BTC"),
         [cache_mod.doc_to_dict(d) for d in sentiment_src.fetch("BTC", coin="BTC")],
@@ -293,7 +293,7 @@ def test_collect_online_cache_miss_coingecko_degrades_gracefully(monkeypatch, tm
     優雅降級（來源名進 _failed），不崩潰、不觸發真連線。"""
     from trustforge.ingestion import coingecko, base
 
-    def _boom(url):  # pragma: no cover - 不應被呼叫到
+    def _boom(url, headers=None):  # pragma: no cover - 不應被呼叫到
         raise AssertionError(f"CachedSource 不該打真連接器 API：{url}")
 
     monkeypatch.setattr(coingecko, "_fetch_url", _boom)
@@ -341,7 +341,7 @@ def test_price_source_single_real_call_shared_across_all_coins(monkeypatch):
 
     calls: list[str] = []
 
-    def _counting_fetch(url):
+    def _counting_fetch(url, headers=None):
         calls.append(url)
         return PRICE_FIXTURE
 
@@ -361,7 +361,7 @@ def test_sentiment_and_dev_share_single_coin_detail_call(monkeypatch):
 
     calls: list[str] = []
 
-    def _counting_fetch(url):
+    def _counting_fetch(url, headers=None):
         calls.append(url)
         return DETAIL_FIXTURE_NORMAL
 
@@ -380,7 +380,7 @@ def test_full_round_five_coins_totals_about_six_real_calls(monkeypatch):
 
     calls: list[str] = []
 
-    def _counting_fetch(url):
+    def _counting_fetch(url, headers=None):
         calls.append(url)
         if "simple/price" in url:
             return PRICE_FIXTURE
@@ -401,59 +401,83 @@ def test_full_round_five_coins_totals_about_six_real_calls(monkeypatch):
     assert len(calls) == 6, f"預期 6 次真呼叫（1 現價 + 5 幣 detail），實際 {len(calls)} 次：{calls}"
 
 
-# ── Demo API key（選用，keyless 已足夠）────────────────────────────────────────
+# ── Demo API key（選用，keyless 已足夠；透過 header 傳遞，URL 全程乾淨）────────
+#    codex 對抗審 HIGH 修正：舊版把 key 附成 URL query param，即使 Document.url
+#    乾淨，`_fetch_url` 實際發送的 `Request.full_url` 仍含 key，會被
+#    proxy/tracing/access-log/例外訊息外洩。改用 `x-cg-demo-api-key` 請求
+#    header 傳遞後，URL（含實際 Request.full_url）全程不含 key。以下測試直接
+#    mock `coingecko.urlopen`（而非 `_fetch_url`）以檢視真正送出的 `Request`
+#    物件，證明修正生效。
 
-def test_api_key_appended_to_actual_request_when_env_set(monkeypatch):
-    """設定 COINGECKO_API_KEY 時，實際發送給 `_fetch_url` 的 URL 應附加
-    `x_cg_demo_api_key`；但 `Document.url`/`meta` 一律是乾淨 URL，不含 key
-    （不得留痕外洩）。"""
+class _FakeHttpResponse:
+    """`urlopen()` 回傳值的最小可用替身，供以下測試模擬 HTTP 回應本體。"""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self, _n: int = -1) -> bytes:
+        return self._body
+
+
+def test_api_key_sent_via_header_not_url_when_env_set(monkeypatch):
+    """設定 COINGECKO_API_KEY 時，key 應透過 `x-cg-demo-api-key` 請求 header
+    傳遞；實際送出的 `Request.full_url` 完全不含 key（不只 Document.url 乾
+    淨——connection 層真正發出去的 URL 也必須乾淨）。"""
     from trustforge.ingestion import coingecko
 
     fake_key = "test-fake-demo-key-not-real"
     monkeypatch.setenv("COINGECKO_API_KEY", fake_key)
-    captured_urls: list[str] = []
+    captured: dict = {}
 
-    def _capture_fetch(url):
-        captured_urls.append(url)
-        return PRICE_FIXTURE
+    def _fake_urlopen(req, timeout=None):
+        captured["request"] = req
+        return _FakeHttpResponse(PRICE_FIXTURE)
 
-    monkeypatch.setattr(coingecko, "_fetch_url", _capture_fetch)
+    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
 
-    assert len(captured_urls) == 1
-    assert f"x_cg_demo_api_key={fake_key}" in captured_urls[0]
+    req = captured["request"]
+    assert fake_key not in req.full_url
+    assert req.get_header("X-cg-demo-api-key") == fake_key
     # Document 對外欄位一律乾淨，不留 key 痕跡
     assert fake_key not in docs[0].url
     assert fake_key not in json.dumps(docs[0].meta)
     assert fake_key not in docs[0].text
 
 
-def test_keyless_when_env_not_set(monkeypatch):
-    """未設定 COINGECKO_API_KEY 時，實際請求 URL 不含任何 key 參數（keyless
-    降級，不報錯、正常運作）。"""
+def test_no_api_key_header_when_env_not_set(monkeypatch):
+    """未設定 COINGECKO_API_KEY 時，實際請求 URL 與 header 皆不含任何 key
+    （keyless 降級，不報錯、正常運作，也不會附加空的 header）。"""
     from trustforge.ingestion import coingecko
 
     monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
-    captured_urls: list[str] = []
+    captured: dict = {}
 
-    def _capture_fetch(url):
-        captured_urls.append(url)
-        return PRICE_FIXTURE
+    def _fake_urlopen(req, timeout=None):
+        captured["request"] = req
+        return _FakeHttpResponse(PRICE_FIXTURE)
 
-    monkeypatch.setattr(coingecko, "_fetch_url", _capture_fetch)
+    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
 
+    req = captured["request"]
+    assert "x_cg_demo_api_key" not in req.full_url
+    assert req.get_header("X-cg-demo-api-key") is None
     assert len(docs) == 1
-    assert len(captured_urls) == 1
-    assert "x_cg_demo_api_key" not in captured_urls[0]
 
 
-def test_with_api_key_helper_blank_env_treated_as_unset(monkeypatch):
-    """空字串/純空白 env 值視為未設定，不附加空 key 參數。"""
+def test_api_key_headers_helper_blank_env_treated_as_unset(monkeypatch):
+    """空字串/純空白 env 值視為未設定，回傳空 header 字典（不附加空 key）。"""
     from trustforge.ingestion import coingecko
 
     monkeypatch.setenv("COINGECKO_API_KEY", "   ")
-    assert coingecko._with_api_key("https://example.test/x") == "https://example.test/x"
+    assert coingecko._api_key_headers() == {}
 
 
 def test_no_hardcoded_api_key_in_source_module():
