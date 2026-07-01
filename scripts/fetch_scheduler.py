@@ -73,6 +73,7 @@ from trustforge.ingestion.cache import (  # noqa: E402
     get_cache_backend,
     stale_after_for,
 )
+from trustforge.ingestion.coingecko import build_coingecko_sources  # noqa: E402
 from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
@@ -89,6 +90,7 @@ def build_registry() -> dict[str, Source]:
         + build_onchain_sources()
         + build_social_sources()
         + build_regulatory_sources()
+        + build_coingecko_sources()
     )
     return {s.name: s for s in sources}
 

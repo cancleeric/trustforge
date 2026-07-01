@@ -109,6 +109,11 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     "alternative-me-fng": 60 * 60,
     "blockchain-info": 15 * 60,
     "sec-gov": 60 * 60,
+    # CoinGecko（W-coingecko，CEO 審核 gray 計劃）：free tier 10-30 req/min，
+    # 現價變動快、情緒/開發活動變化慢，各自取不同節奏。
+    "coingecko-price": 10 * 60,       # price_live：10 分鐘
+    "coingecko-sentiment": 30 * 60,   # sentiment：30 分鐘
+    "coingecko-dev": 60 * 60,         # dev_activity：60 分鐘（commit 統計變化更慢）
 }
 DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS = 15 * 60  # 未知來源名的保守預設
 

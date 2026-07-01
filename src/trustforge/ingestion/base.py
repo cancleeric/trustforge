@@ -185,12 +185,14 @@ def collect(query: str, coin: str | None = None,
             from .onchain import build_onchain_sources
             from .social import build_social_sources
             from .regulatory import build_regulatory_sources
+            from .coingecko import build_coingecko_sources
             from .cache import CachedSource
             raw_sources = (
                 build_news_sources()
                 + build_onchain_sources()
                 + build_social_sources()
                 + build_regulatory_sources()
+                + build_coingecko_sources()
             )
             # 階段2（cache + 排程 fetcher）：產品路徑一律讀快取，不直接打真連接器
             # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程
