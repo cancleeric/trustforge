@@ -94,6 +94,28 @@ def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
     return limits, flips
 
 
+def _harvest_stance_cost_events(client: BedrockClient, log: ExecutionLog) -> None:
+    """收割 `client.cost_events`（stance 語意分類真呼叫的成本）進 `log`，並清空。
+
+    `classify_stance` 的成本無法在深層 O(n²) 迴圈中方便帶入 log，改由
+    `BedrockClient` 自己在真呼叫（cache-miss）成功後累積在 `client.cost_events`；
+    呼叫端在每個可能觸發 stance 呼叫的階段（Step2 `score()`、Step2.5
+    `detect_cross_source_signal()`）結束後都必須呼叫本函式收割，確保：
+    (1) 成本確實進帳本；(2) `client.cost_events` 歸零，不殘留到下一階段/
+    下一輪 run（demo 可靠性 #32 追加 cost-integrity HIGH 修正——同一個
+    client 物件常見於 comparison 模式兩幣共用同一輪，殘留未清空的
+    cost_events 會被下一輪誤記到別的幣頭上）。
+
+    `getattr` 防禦：測試用的假 client（如 FakeBedrockClient）可能沒有此屬性。
+    """
+    cost_events = getattr(client, "cost_events", None)
+    if not cost_events:
+        return
+    for ev in cost_events:
+        log.record_llm_cost(ev["model"], ev["tokens_in"], ev["tokens_out"], ev["cost_usd"])
+    cost_events.clear()
+
+
 def _detect_stance_pairs(
     scored: list[ScoredClaim],
     stance_fn: Callable[[str, str], str] | None,
@@ -367,14 +389,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         scored if scored is not None else brief.supporting + brief.contrarian,
         stance_fn=stance_fn,
     )
-    # 收割本步驟可能產生的 stance 呼叫成本（同 Step2 收割慣例，避免漏記帳）。
-    _stance_cost_events = getattr(client, "cost_events", None)
-    if _stance_cost_events:
-        for _ev in _stance_cost_events:
-            log.record_llm_cost(
-                _ev["model"], _ev["tokens_in"], _ev["tokens_out"], _ev["cost_usd"]
-            )
-        _stance_cost_events.clear()
+    # 收割本步驟（Step2.5）可能產生的 stance 呼叫成本，避免漏記帳／殘留到下一輪。
+    _harvest_stance_cost_events(client, log)
 
     # 3. Bedrock 行文（Step 3：帶 claim_id 溯源；離線為佔位，結構不依賴它）
     # 建立 claim_id → 摘要對照，供 prompt 強制引用
@@ -526,17 +542,9 @@ def run_agent_pipeline(
         now=now_ts,
         stance_fn=shared_stance_fn,
     )
-    # classify_stance 的成本無法在深層 O(n²) 迴圈中方便帶入 log，改由 BedrockClient
-    # 自己在真呼叫（cache-miss）成功後累積在 client.cost_events；score() 跑完、
-    # 所有 stance 呼叫都已發生，這裡統一讀出、寫回 log、並清空避免下個 run 重複計。
-    # getattr 防禦：測試用的假 client（如 FakeBedrockClient）可能沒有此屬性。
-    _stance_cost_events = getattr(client, "cost_events", None)
-    if _stance_cost_events:
-        for _ev in _stance_cost_events:
-            log.record_llm_cost(
-                _ev["model"], _ev["tokens_in"], _ev["tokens_out"], _ev["cost_usd"]
-            )
-        _stance_cost_events.clear()
+    # score() 跑完、Step2 交叉佐證矛盾閘可能觸發的 stance 呼叫都已發生，
+    # 這裡統一收割進 log、並清空 client.cost_events，避免下個 run 重複計費。
+    _harvest_stance_cost_events(client, log)
     # coin=coin：「coin-filter 主導」（demo 可靠性 #32 追加）——見 aggregate() docstring，
     # 讓明確提及該幣的證據不因 query 措辭（如中文複合詞、無空格）忽窄忽寬地被截斷擠出。
     brief = aggregate(scored, query=query, coin=coin)
@@ -560,6 +568,12 @@ def run_agent_pipeline(
         # 配對擠出偵測範圍（見 build_report docstring）。
         scored=scored,
     )
+    # 防禦性再收割一次（demo 可靠性 #32 追加 cost-integrity HIGH 修正）：
+    # build_report() 內部已在 Step2.5 偵測後自行收割一次，這裡屬於
+    # belt-and-suspenders——`run_agent_pipeline()` 自身保證每輪結束時
+    # client.cost_events 必為空，不依賴 build_report() 未來重構仍維持
+    # 內部收割時機正確；目前正常路徑下這裡永遠是 no-op（cost_events 已空）。
+    _harvest_stance_cost_events(client, log)
 
     # ------------------------------------------------------------------
     # Step 4: 限制複審（Bedrock #3，選用）

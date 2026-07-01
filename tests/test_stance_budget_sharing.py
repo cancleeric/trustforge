@@ -15,6 +15,23 @@
 
 本檔全部用 fake/monkeypatch client，不打真 AWS（比照 `test_stance_w15.py` /
 `test_cost_ledger.py` 既有慣例）。
+
+demo 可靠性 #32 追加 cost-integrity HIGH（第二次對抗審）：codex 複審時指出
+`run_agent_pipeline()` 內 Step2 後的收割「之後沒有再 harvest」，擔心 Step2.5
+成本漏記、`client.cost_events` 殘留誤記到下一輪別的幣。經查證：`build_report()`
+內部**早已**在 Step2.5 `detect_cross_source_signal()` 呼叫後緊接著收割一次
+（即上述修復的一部分），非空測——用 `git stash`/暫時移除收割程式碼實測驗證過
+（見 `test_run_agent_pipeline_step25_stance_cost_is_harvested_into_ledger` 移除
+收割後會真的 FAIL）。這輪仍依 codex 建議做防禦性強化：
+  1. 把原本重複貼兩份的 6 行收割樣板抽成共用 helper
+     `agent.orchestrator._harvest_stance_cost_events(client, log)`。
+  2. `run_agent_pipeline()` 在 `build_report()` 回傳「之後」也額外呼叫一次
+     （belt-and-suspenders——正常路徑下永遠是 no-op，因為 `build_report()`
+     內部已收割乾淨；防的是未來重構不慎在收割點之後又加了新的 stance 呼叫）。
+新增 `test_stance_cost_does_not_leak_across_runs_with_same_client`（同一 client
+物件跑 ETH 再跑 BTC，確認 BTC 那輪的帳本不含 ETH 殘留成本）與
+`test_step25_offline_no_bedrock_produces_zero_stance_cost_without_crashing`
+（offline 時零 stance 成本、不炸）。
 """
 from __future__ import annotations
 
@@ -239,4 +256,88 @@ def test_run_agent_pipeline_step25_stance_cost_is_harvested_into_ledger(monkeypa
     assert report.cross_source_signal is not None
     assert report.cross_source_signal.get("stance_pairs"), (
         "應偵測到 stance_pairs（fake runtime 回 contradiction）"
+    )
+
+
+def test_stance_cost_does_not_leak_across_runs_with_same_client(monkeypatch):
+    """[cost-integrity HIGH 驗收，demo 可靠性 #32 追加] codex 對抗審：若
+    Step 2.5 的 stance 成本沒被收割乾淨，殘留在 `client.cost_events` 上的舊
+    事件會被下一輪 `run_agent_pipeline()`（常見於 comparison 模式兩幣共用
+    同一個 client）誤記到別的幣頭上。
+
+    這裡用**同一個** client 物件跑兩輪（模擬 ETH → BTC），兩輪各自觸發一次
+    Step 2.5 stance 真呼叫，斷言：
+      1. 兩輪各自的 log 都恰好記到「屬於自己這一輪」的 1 筆 llm.cost；
+      2. 第二輪的 log 不含第一輪殘留的成本事件（不誤記到別的幣）；
+      3. 每輪跑完 `client.cost_events` 都歸零。
+    """
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=False)
+
+    class _FakeRuntime:
+        def converse(self, **kwargs):
+            return {
+                "output": {"message": {"content": [
+                    {"toolUse": {"name": "classify_stance", "input": {"label": "contradiction"}}}
+                ]}},
+                "usage": {"inputTokens": 42, "outputTokens": 7},
+            }
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
+
+    docs_eth = _opposite_direction_news_docs()
+    docs_btc = [
+        Document(id="b1", kind="news", source="theblock",
+                  text="BTC 市場 情緒 明顯 看漲，交易員 樂觀 買盤 湧入。", ts=1000.0, meta={}),
+        Document(id="b2", kind="news", source="cointelegraph",
+                  text="BTC 市場 情緒 轉為 看跌，交易員 悲觀 賣壓 湧現。", ts=1000.0, meta={}),
+    ]
+
+    log_eth = ExecutionLog(now_fn=lambda: 1000.0)
+    run_agent_pipeline(
+        query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
+        docs=docs_eth, client=client, log=log_eth, now_fn=lambda: 1000.0,
+    )
+    assert client.cost_events == [], "第一輪（ETH）跑完 cost_events 應歸零"
+    eth_cost_events = [e for e in log_eth.events if e["tool"] == "llm.cost"]
+    assert len(eth_cost_events) == 1
+
+    log_btc = ExecutionLog(now_fn=lambda: 2000.0)
+    run_agent_pipeline(
+        query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
+        docs=docs_btc, client=client, log=log_btc, now_fn=lambda: 2000.0,
+    )
+    assert client.cost_events == [], "第二輪（BTC）跑完 cost_events 應歸零"
+    btc_cost_events = [e for e in log_btc.events if e["tool"] == "llm.cost"]
+    assert len(btc_cost_events) == 1, (
+        f"BTC 這輪的 log 應恰好有 1 筆屬於自己的 llm.cost，實得 {len(btc_cost_events)} "
+        "（若 >1 代表 ETH 那輪的成本殘留、誤記到 BTC 頭上）"
+    )
+    # log 物件本身互相獨立，直接用物件身份確認 ETH 那筆事件沒有出現在 BTC 的 log 裡。
+    assert eth_cost_events[0] is not btc_cost_events[0]
+
+
+def test_step25_offline_no_bedrock_produces_zero_stance_cost_without_crashing():
+    """[cost-integrity HIGH 驗收，demo 可靠性 #32 追加] offline（無 Bedrock）
+    情境：`_harvest_stance_cost_events` 面對 `getattr(client, "cost_events", None)`
+    可能是 `None`／空列表／甚至假 client 沒有此屬性，都必須安全跳過、不拋例外，
+    且不得產生任何「歸因於 stance 呼叫」的 llm.cost 事件（fail-safe，不誤記
+    成本；offline 時 stance 走持久化快取/fail-safe 回 neutral，不打真 Bedrock）。
+
+    注意：Step3（narrative 行文）本身會固定記一筆 model="offline"、成本 0 的
+    佔位 llm.cost 事件（既有行為，與 stance 無關）——這裡只驗證「沒有額外的
+    stance 呼叫成本事件」，不是斷言整個 log 空無一筆 llm.cost。
+    """
+    log = ExecutionLog(now_fn=lambda: 1000.0)
+    client = BedrockClient(offline=True)  # 預設離線，無真 Bedrock
+    report, evidence = run_agent_pipeline(
+        query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
+        docs=_opposite_direction_news_docs(),
+        client=client, log=log, now_fn=lambda: 1000.0,
+    )
+    assert client.cost_events == []
+    cost_events = [e for e in log.events if e["tool"] == "llm.cost"]
+    stance_cost_events = [e for e in cost_events if e["params"]["model"] != "offline"]
+    assert stance_cost_events == [], (
+        f"offline 情境不應產生任何額外的 stance 呼叫成本，實得 {stance_cost_events}"
     )
