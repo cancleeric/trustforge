@@ -1,6 +1,8 @@
 """版號徽章功能測試（純字串斷言，不碰真 AWS）。"""
 import dataclasses
 import json
+import tomllib
+from pathlib import Path
 
 from trustforge import web
 
@@ -65,3 +67,48 @@ def test_analyze_json_payload_has_version_key():
     parsed = json.loads(s)
     assert "version" in parsed
     assert parsed["version"] == web.VERSION
+
+
+def test_pyproject_version_matches_package_version():
+    """pyproject.toml 的 [project].version 應與 trustforge.__version__ 單一來源一致。"""
+    import trustforge
+
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    assert data["project"]["version"] == trustforge.__version__
+
+
+def test_lambda_handler_analyze_json_has_version(monkeypatch):
+    """Lambda handler 的一般分析 /analyze.json 回應應含 version（與 web.VERSION 一致）。"""
+    from trustforge import lambda_handler
+
+    event = {
+        "rawPath": "/analyze.json",
+        "queryStringParameters": {"coin": "BTC", "type": "multi_source", "q": "test"},
+        "requestContext": {"http": {"sourceIp": "127.0.0.1"}},
+    }
+    resp = lambda_handler.handler(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert "version" in body
+    assert body["version"] == web.VERSION
+
+
+def test_lambda_handler_comparison_json_has_version(monkeypatch):
+    """Lambda handler 的比較分析 /analyze.json 回應應含 version（與 web.VERSION 一致）。"""
+    from trustforge import lambda_handler
+
+    event = {
+        "rawPath": "/analyze.json",
+        "queryStringParameters": {
+            "coin": "BTC,ETH",
+            "type": "comparison",
+            "q": "比較 BTC 與 ETH",
+        },
+        "requestContext": {"http": {"sourceIp": "127.0.0.1"}},
+    }
+    resp = lambda_handler.handler(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert "version" in body
+    assert body["version"] == web.VERSION

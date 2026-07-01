@@ -64,6 +64,7 @@ def handler(event, context=None):
                 )
                 if path == "/analyze.json":
                     payload = {
+                        "version": web.VERSION,
                         "report_a": dataclasses.asdict(report_a),
                         "evidence_a": [ev.to_dict() for ev in evidence_a],
                         "report_b": dataclasses.asdict(report_b),
@@ -84,6 +85,7 @@ def handler(event, context=None):
                 report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
                 if path == "/analyze.json":
                     payload = {
+                        "version": web.VERSION,
                         "report": dataclasses.asdict(report),
                         "evidence": [ev.to_dict() for ev in evidence],
                         "execution_log": log.events,
