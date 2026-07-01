@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..ingestion.base import Document
+from .stance import semantic_stance
 
 # --- 權重（可調）---------------------------------------------------------
 DEFAULT_WEIGHTS = {
@@ -55,6 +56,14 @@ DOMAIN_STOP: set[str] = {
     # 注意：支撐/阻力是具體 TA 訊號詞，已從 DOMAIN_STOP 移除（見 codex #fix-[Low]）
     "目前", "近期", "顯示", "表示", "預計", "預測", "可能",
     "目標",
+    # --- 英文高頻虛詞（W1 案2b：英文主張過去未過濾，導致 overlap 被墊高）------
+    # 只收「真正無鑑別力」的通用函詞/報導套語，具 TA 意義的詞（如 clarity/scrutiny/
+    # adoption/bullish 等）一律不放進來，避免連同語意一起被過濾掉。
+    "to", "the", "of", "in", "on", "for", "and", "or", "that", "this", "with",
+    "from", "are", "is", "be", "as", "at", "by", "it", "its", "an",
+    "market", "markets", "analysts", "analyst", "observers", "observer",
+    "investor", "investors", "expect", "expects", "expected", "boost",
+    "boosts", "boosted", "significantly", "significant",
 }
 
 # 操縱訊號關鍵詞（啟發式；正式版可換 Bedrock 分類器）。
@@ -96,7 +105,10 @@ class TrustedBrief:
                 "kind": sc.claim.doc.kind,
                 "url": sc.claim.doc.url,
                 "trust": round(sc.trust, 3),
-                "components": {k: round(v, 3) for k, v in sc.components.items()},
+                "components": {
+                    k: (round(v, 3) if isinstance(v, (int, float)) else v)
+                    for k, v in sc.components.items()
+                },
             }
             for sc in self.supporting
         ]
@@ -218,17 +230,24 @@ def _direction_compatible(d1: str, d2: str) -> bool:
     return d1 == d2
 
 
-def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
-    """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
+def _corroboration_detail(target: Claim, all_claims: list[Claim]) -> tuple[float, list[str]]:
+    """`_corroboration` 的完整版本，額外回傳可解釋依據（evidence）。
 
-    改進（M1-M3）：
-    - 停用詞過濾：從 overlap 計算排除域內通用詞（幣名/市場詞），只計具體詞重疊。
-    - 方向閘：若兩條主張方向明確且相反（bullish vs bearish），略過，不算佐證。
+    有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
+
+    改進：
+    - M1-M3：停用詞過濾（排除域內通用詞/英文虛詞，只計具體詞重疊）；方向閘
+      （bullish vs bearish 明確相反則略過）。
+    - W1 案2b（#15）：語意矛盾閘——token overlap 高不代表方向一致（例如
+      "regulatory clarity" vs "regulatory scrutiny" 共享大量虛詞但語意對立）。
+      overlap 通過門檻後，再用 `semantic_stance` 做反義/否定感知判斷：偵測到
+      contradict → 不計入獨立佐證（該來源不加分，但也不倒扣，維持保守）。
     """
     tt = _normalize(target.text) - DOMAIN_STOP
     if not tt:
-        return 0.0
+        return 0.0, []
     independent_sources: set[str] = set()
+    evidence: list[str] = []
     for c in all_claims:
         if c.doc.source == target.doc.source:
             continue
@@ -236,11 +255,26 @@ def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
             continue
         ct = _normalize(c.text) - DOMAIN_STOP
         overlap = len(tt & ct) / len(tt)
-        if overlap >= 0.4:
-            independent_sources.add(c.doc.source)
+        if overlap < 0.4:
+            continue
+        stance, stance_evidence = semantic_stance(target.text, c.text, tt, ct)
+        if stance == "contradict":
+            continue  # 矛盾閘：語意對立，不計入獨立佐證
+        if c.doc.source not in independent_sources and stance_evidence:
+            evidence.extend(stance_evidence)
+        independent_sources.add(c.doc.source)
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
     n = len(independent_sources)
-    return 1.0 - math.pow(0.5, n) if n else 0.0
+    corr = 1.0 - math.pow(0.5, n) if n else 0.0
+    return corr, evidence
+
+
+def _corroboration(target: Claim, all_claims: list[Claim]) -> float:
+    """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
+
+    介面/回傳型別維持不變（float），完整可解釋版本見 `_corroboration_detail`。
+    """
+    return _corroboration_detail(target, all_claims)[0]
 
 
 # --- 主評分 --------------------------------------------------------------
@@ -249,7 +283,7 @@ def score(claims: list[Claim], now: float, weights: dict | None = None) -> list[
     out: list[ScoredClaim] = []
     for c in claims:
         rep = _source_reputation(c)
-        corr = _corroboration(c, claims)
+        corr, corr_evidence = _corroboration_detail(c, claims)
         rec = _recency_decay(c, now)
         manip = _manipulation_penalty(c)
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
@@ -259,7 +293,10 @@ def score(claims: list[Claim], now: float, weights: dict | None = None) -> list[
                 claim=c,
                 trust=trust,
                 components={"reputation": rep, "corroboration": corr,
-                            "recency": rec, "manipulation": manip},
+                            "recency": rec, "manipulation": manip,
+                            # 可解釋欄位（非分項數值，供 UX 顯示佐證依據）；
+                            # 新增 key，既有 components 分項 key 皆維持不變。
+                            "corroboration_evidence": corr_evidence},
             )
         )
     return out

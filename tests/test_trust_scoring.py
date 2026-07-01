@@ -326,3 +326,135 @@ def test_direction_compatible_neutral_allows_corroboration():
         f"neutral + bullish 方向相容應可佐證，corr={corr}；"
         "若為 0 表示方向閘過度攔截（回歸）"
     )
+
+
+# --- W1 案2b（#15）：反義/否定感知 stance 佐證矛盾閘 --------------------------
+
+def test_issue15_english_antonym_claims_not_corroborated():
+    """#15 復現案例：英文『監管明朗』vs『監管收緊』token overlap 高但語意對立。
+
+    修復前：corr≈0.5（overlap 高 + 英文永遠判 neutral 繞過方向閘 → 誤判佐證）。
+    修復後：語意矛盾閘攔截 → corr 應 = 0.0，且 semantic_stance 應判為 contradict。
+    """
+    from trustforge.trust.scoring import Claim, _corroboration
+    from trustforge.trust.stance import semantic_stance
+
+    doc_a = _make_doc("da", "news", "coindesk")
+    doc_b = _make_doc("db", "news", "reuters")
+    text_a = "Market analysts expect regulatory clarity to boost institutional adoption significantly"
+    text_b = "Market observers expect regulatory scrutiny to boost investor caution significantly"
+    c_a = Claim(id="i15a", text=text_a, doc=doc_a)
+    c_b = Claim(id="i15b", text=text_b, doc=doc_b)
+
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr == 0.0, f"#15：英文反義主張不應被判為佐證，corr 應 = 0.0，實際: {corr}"
+
+    stance, evidence = semantic_stance(text_a, text_b, {"clarity"}, {"scrutiny"})
+    assert stance == "contradict", f"#15：應判為 contradict，實際: {stance}（evidence={evidence}）"
+
+
+def test_chinese_antonym_claims_not_corroborated():
+    """中文反義對照：『監管明朗』vs『監管收緊』同樣應被矛盾閘擋下，不能只修英文。"""
+    from trustforge.trust.scoring import Claim, _corroboration
+
+    doc_a = _make_doc("da", "news", "coindesk")
+    doc_b = _make_doc("db", "news", "financial-times")
+    c_a = Claim(id="zh15a", text="監管 明朗 有助 市場 信心 大幅 提升", doc=doc_a)
+    c_b = Claim(id="zh15b", text="監管 收緊 導致 市場 信心 大幅 下滑", doc=doc_b)
+
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr == 0.0, f"中文反義主張不應被判為佐證，corr 應 = 0.0，實際: {corr}"
+
+
+def test_genuine_synonym_support_not_falsely_blocked():
+    """真同義支撐（正向案例）：具體詞同向 → 仍應正確判為佐證，不被矛盾閘誤殺。"""
+    from trustforge.trust.scoring import Claim, _corroboration
+
+    doc_a = _make_doc("da", "onchain", "glassnode")
+    doc_b = _make_doc("db", "news", "coindesk")
+    text_a = "Market analysts expect regulatory clarity to boost institutional adoption significantly"
+    text_b = "Industry observers expect regulatory clarity to boost institutional adoption meaningfully"
+    c_a = Claim(id="supa", text=text_a, doc=doc_a)
+    c_b = Claim(id="supb", text=text_b, doc=doc_b)
+
+    corr = _corroboration(c_a, [c_a, c_b])
+    assert corr > 0.0, f"真同義（雙方皆談 clarity/adoption）應正確佐證，corr 應 > 0，實際: {corr}"
+
+
+def test_double_negation_english_not_misjudged_as_contradiction():
+    """雙重否定（CEO 追加）：『not without scrutiny』≈『其實有 scrutiny』。
+
+    否定標記為偶數（ambiguous，parity 判斷）→ 不嘗試還原語意二次判斷方向，
+    保守回 neutral；不可被誤判成『無 scrutiny』（單純看到 not/without 就翻轉方向）。
+    """
+    from trustforge.trust.stance import semantic_stance
+
+    stance, evidence = semantic_stance(
+        "monitoring regulatory clarity closely",
+        "framework is not without scrutiny",
+        {"clarity"}, {"scrutiny"},
+    )
+    assert stance == "neutral", f"雙重否定應保守判為 neutral，實際: {stance}（evidence={evidence}）"
+
+
+def test_double_negation_chinese_not_misjudged_as_contradiction():
+    """雙重否定中文對照：『並非沒有收緊』= 其實有收緊，偶數否定 → 保守 neutral。"""
+    from trustforge.trust.stance import semantic_stance
+
+    stance, evidence = semantic_stance(
+        "監管 明朗",
+        "監管 並非 沒有 收緊",
+        {"明朗"}, {"收緊"},
+    )
+    assert stance == "neutral", f"中文雙重否定應保守判為 neutral，實際: {stance}（evidence={evidence}）"
+
+
+def test_ambiguous_negation_falls_back_to_neutral_not_hard_verdict():
+    """ambiguous（偶數個否定標記）不可被硬判為 support 或 contradict，一律保守回 neutral。
+
+    唯一訊號來源是雙重否定的反義詞命中，且無其他共享詞干擾，驗證 evidence 亦為空。
+    """
+    from trustforge.trust.stance import semantic_stance
+
+    stance, evidence = semantic_stance(
+        "分析師 認為 監管 明朗",
+        "報告 指出 監管 並非 沒有 收緊",
+        {"明朗"}, {"收緊"},
+    )
+    assert stance == "neutral", f"ambiguous 否定應保守回 neutral，實際: {stance}"
+    assert evidence == [], f"ambiguous 否定不應產生 evidence，實際: {evidence}"
+
+
+def test_antonym_pairs_avoid_domain_drift_generic_words():
+    """領域漂移守則（CEO 追加）：ANTONYM_PAIRS 只收金融/監管語境明確反義詞。
+
+    不收 trust/doubt、growth/decline 這類多領域通用詞（例如 "trust" 在資安/科技
+    語境常表示完全不同的意思，與市場信心無關）——對不確定的詞寧可不收，
+    避免在非金融語境誤殺合法佐證。
+    """
+    from trustforge.trust.stance import ANTONYM_PAIRS
+
+    all_words: set[str] = set()
+    for group_x, group_y in ANTONYM_PAIRS:
+        all_words |= group_x | group_y
+    for risky_word in ("trust", "doubt", "growth", "decline", "confidence"):
+        assert risky_word not in all_words, (
+            f"'{risky_word}' 為多領域通用詞，不應收錄於 ANTONYM_PAIRS，避免領域漂移誤判"
+        )
+
+
+def test_score_components_has_new_corroboration_evidence_key():
+    """score() 的 components dict 新增 corroboration_evidence（非替換），
+    既有分項 key（reputation/corroboration/recency/manipulation）維持不變。
+    """
+    from trustforge.trust.scoring import extract_claims, score
+
+    docs = [
+        _doc("a", "news", "coindesk", "Market analysts expect regulatory clarity to boost institutional adoption significantly"),
+        _doc("b", "news", "reuters", "Market observers expect regulatory scrutiny to boost investor caution significantly"),
+    ]
+    scored = score(extract_claims(docs), now=1.0)
+    for sc in scored:
+        assert {"reputation", "corroboration", "recency", "manipulation"} <= set(sc.components.keys())
+        assert "corroboration_evidence" in sc.components
+        assert isinstance(sc.components["corroboration_evidence"], list)

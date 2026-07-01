@@ -47,7 +47,10 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         source_url=doc.url,
         kind=doc.kind,
         trust=round(sc.trust, 3),
-        trust_components={k: round(v, 3) for k, v in sc.components.items()},
+        trust_components={
+            k: (round(v, 3) if isinstance(v, (int, float)) else v)
+            for k, v in sc.components.items()
+        },
     )
 
 
