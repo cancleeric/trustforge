@@ -86,12 +86,20 @@ _STANCE_FEWSHOT = [
 
 @dataclass
 class BedrockConfig:
-    region: str = os.getenv("AWS_REGION", "us-east-1")
+    # codex 審查發現的 HIGH：預設值必須跟預設 `stance_model_id` 用的 `au.` 地理
+    # profile（只能從 ap-southeast-2/4/6 呼叫）相容——EC2/Bedrock 實際部署在
+    # 雪梨，region 預設改 `ap-southeast-2`。舊預設 `us-east-1` 會讓沒設
+    # `AWS_REGION` 環境變數的每一次 stance 呼叫都失敗（pipeline 降級 neutral、
+    # gen 腳本中止），先前驗證時是因為手動帶了 `AWS_REGION=ap-southeast-2`
+    # 才成功，掩蓋了這個預設不相容組合。env `AWS_REGION` 仍可覆寫。
+    region: str = os.getenv("AWS_REGION", "ap-southeast-2")
     # 競賽現場（8/1）公告可用模型後填入；保持環境變數可配置，勿在程式碼寫死。
+    # 目前預設空字串（未指定任何 region profile），故不受 region 相容性問題影響。
     model_id: str = os.getenv("BEDROCK_MODEL_ID", "")
     max_tokens: int = int(os.getenv("BEDROCK_MAX_TOKENS", "1024"))
     # W1.5（#15）：語意 stance 子分類器專用小模型，與主敘事模型分開設定，
-    # 讓高頻小任務可用更便宜/低延遲的模型，不佔用主模型預算。
+    # 讓高頻小任務可用更便宜/低延遲的模型，不佔用主模型預算。`au.` 地理 profile
+    # 需搭配上面 `ap-southeast-2/4/6` 其中一個 region 才能呼叫。
     stance_model_id: str = os.getenv(
         "BEDROCK_HAIKU_MODEL_ID", "au.anthropic.claude-haiku-4-5-20251001-v1:0"
     )
