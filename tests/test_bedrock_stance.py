@@ -104,3 +104,34 @@ def test_classify_stance_missing_tool_use_falls_back_to_neutral(monkeypatch):
 
     monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
     assert client.classify_stance("A", "B") == "neutral"
+
+
+def test_classify_stance_request_uses_correct_model_and_min_max_tokens(monkeypatch):
+    """守門測試（防 regression）：`classify_stance` 送出的請求必須用正確的
+    stance 模型 id，且 `inferenceConfig["maxTokens"]` 不可低於 64——見
+    bedrock.py 頂部註解：實測 maxTokens=32 會把 tool_use JSON 輸出截斷成空回應，
+    導致每次都誤降級為 neutral（漏抓真矛盾）。本測試鎖住這個下限與模型 id，
+    避免未來改動不小心把 maxTokens 調回過小的值。
+    """
+    client = BedrockClient(offline=False)  # 用預設 BedrockConfig，鎖住預設 stance_model_id
+
+    captured: dict = {}
+
+    class _FakeRuntime:
+        def converse(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "output": {
+                    "message": {
+                        "content": [
+                            {"toolUse": {"name": "classify_stance", "input": {"label": "neutral"}}}
+                        ]
+                    }
+                }
+            }
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
+    client.classify_stance("A", "B")
+
+    assert captured["modelId"] == "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert captured["inferenceConfig"]["maxTokens"] >= 64
