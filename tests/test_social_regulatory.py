@@ -244,14 +244,43 @@ def test_build_regulatory_sources():
 
 # ── collect 整合測試 ──────────────────────────────────────────────────────────
 
-def test_collect_online_includes_social_and_regulatory(monkeypatch):
-    """collect offline=False 同時產出 social 與 regulatory 文件。"""
+def test_collect_online_includes_social_and_regulatory(monkeypatch, tmp_path):
+    """collect offline=False 同時產出 social 與 regulatory 文件。
+
+    階段2（cache + 排程 fetcher）後，collect() 的線上預設路徑改成一律經
+    `CachedSource` 讀快取（見 `ingestion/cache.py`）。這裡比照
+    `scripts/fetch_scheduler.py` 的寫入方式，先用（monkeypatch 過
+    `_fetch_url` 的）真 source 各自 fetch 一次寫入測試用 cache backend，
+    驗證 collect() 端到端仍能正確讀出 social/regulatory 文件——CachedSource
+    本身的命中/降級邏輯已在 test_connector_cache.py 完整覆蓋。
+    """
+    import time
     from trustforge.ingestion import news, onchain, social, regulatory, base
+    from trustforge.ingestion import cache as cache_mod
+    from trustforge.ingestion.news import build_news_sources
+    from trustforge.ingestion.onchain import build_onchain_sources
+    from trustforge.ingestion.social import build_social_sources
+    from trustforge.ingestion.regulatory import build_regulatory_sources
+
     monkeypatch.setattr(news, "_fetch_url", lambda url: _RSS_MINIMAL)
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: _FNG_MINIMAL)
     monkeypatch.setattr(social, "_fetch_url", lambda url: REDDIT_FIXTURE)
     monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
     monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
+
+    backend = cache_mod.JsonCacheBackend(tmp_path / "cache.json")
+    monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: backend)
+    all_sources = (
+        build_news_sources() + build_onchain_sources()
+        + build_social_sources() + build_regulatory_sources()
+    )
+    for src in all_sources:
+        raw_docs = src.fetch("BTC", coin="BTC")
+        backend.set(
+            cache_mod.cache_key(src.name, "BTC"),
+            [cache_mod.doc_to_dict(d) for d in raw_docs],
+            fetched_at=time.time(),
+        )
 
     docs = base.collect("BTC", coin="BTC", offline=False)
     kinds = {d.kind for d in docs}

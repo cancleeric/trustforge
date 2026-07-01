@@ -198,17 +198,68 @@ def test_onchain_source_failure_does_not_crash_collect(monkeypatch):
 
 # ── collect 整合測試 ──────────────────────────────────────────────────────────
 
-def test_collect_online_produces_news_and_onchain(monkeypatch):
-    """collect offline=False + sources=None 應同時產出 news 與 onchain 文件。"""
+def test_collect_online_produces_news_and_onchain(monkeypatch, tmp_path):
+    """collect offline=False + sources=None 應同時產出 news 與 onchain 文件。
+
+    階段2（cache + 排程 fetcher）後，collect() 的線上預設路徑改成一律經
+    `CachedSource` 讀快取，不再直接呼叫真 source 的 `fetch()`（見
+    `ingestion/cache.py`）。這裡比照 `scripts/fetch_scheduler.py` 的寫入方式，
+    先用（monkeypatch 過 `_fetch_url` 的）真 source 各自 fetch 一次寫入
+    測試用 cache backend，驗證 collect() 端到端仍能正確讀出 news/onchain
+    文件——CachedSource 本身的命中/降級邏輯已在 test_connector_cache.py
+    完整覆蓋，這裡只驗證 build_news_sources()/build_onchain_sources() 有
+    正確被接進 collect() 的預設在線流程。
+    """
+    import time
     from trustforge.ingestion import news, onchain, base
+    from trustforge.ingestion import cache as cache_mod
+    from trustforge.ingestion.news import build_news_sources
+    from trustforge.ingestion.onchain import build_onchain_sources
+
     monkeypatch.setattr(news, "_fetch_url", lambda url: RSS_FIXTURE)
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: FNG_FIXTURE)
     monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
+
+    backend = cache_mod.JsonCacheBackend(tmp_path / "cache.json")
+    monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: backend)
+    for src in build_news_sources() + build_onchain_sources():
+        raw_docs = src.fetch("BTC", coin="BTC")
+        backend.set(
+            cache_mod.cache_key(src.name, "BTC"),
+            [cache_mod.doc_to_dict(d) for d in raw_docs],
+            fetched_at=time.time(),
+        )
 
     docs = base.collect("BTC", coin="BTC", offline=False)
     kinds = {d.kind for d in docs}
     assert "news" in kinds, f"缺 news，got kinds={kinds}"
     assert "onchain" in kinds, f"缺 onchain，got kinds={kinds}"
+
+
+def test_collect_online_cache_miss_degrades_gracefully_not_real_call(monkeypatch, tmp_path):
+    """未預先寫入 cache 時，collect() 線上路徑不應反過來呼叫真 source.fetch()
+    （這裡故意讓 `_fetch_url` 一被呼叫就炸，藉此證明它完全沒被呼叫），
+    而是優雅降級（docs 為空，來源名進 `_failed`），不崩潰。"""
+    from trustforge.ingestion import news, onchain, base
+
+    def _boom(url):  # pragma: no cover - 不應被呼叫到
+        raise AssertionError(f"CachedSource 不該打真連接器 API：{url}")
+
+    monkeypatch.setattr(news, "_fetch_url", _boom)
+    monkeypatch.setattr(onchain, "_fetch_url", _boom)
+    monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
+    # 隔離快取路徑：確保這次一定是全新、空的 cache（不受開發者本機
+    # out/connector_cache 既有內容或其他測試殘留影響）。
+    monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path / "cache"))
+
+    failed: list = []
+    docs = base.collect("BTC", coin="BTC", offline=False, _failed=failed)
+    # 只剩 price（OHLCV 官方基準資料，跟連接器快取無關）；news/onchain 因
+    # cache-miss 優雅降級，完全沒有觸發真呼叫。
+    kinds = {d.kind for d in docs}
+    assert "news" not in kinds and "onchain" not in kinds, f"不應含 news/onchain：{kinds}"
+    assert "coindesk" in failed
+    assert "alternative-me-fng" in failed
 
 
 def test_collect_offline_still_uses_sample_data():
