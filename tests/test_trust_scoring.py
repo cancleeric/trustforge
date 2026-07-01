@@ -326,3 +326,242 @@ def test_direction_compatible_neutral_allows_corroboration():
         f"neutral + bullish 方向相容應可佐證，corr={corr}；"
         "若為 0 表示方向閘過度攔截（回歸）"
     )
+
+
+# =========================================================================
+# W2：truth-discovery 動態來源信譽（_iterate_source_reputation / dynamic_reputation）
+# =========================================================================
+
+def _shared_text_docs():
+    """4 個不同 source、完全相同文本的 doc，overlap=1.0，用來讓每個 source 的獨立
+    佐證來源數達到 MIN_INDEPENDENT_EVIDENCE(3)，跳脫小樣本守門、真正觸發迭代。"""
+    shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    return [
+        _doc("w2-a", "onchain", "glassnode", shared),
+        _doc("w2-b", "news", "coindesk", shared),
+        _doc("w2-c", "regulatory", "sec-filing", shared),
+        _doc("w2-d", "social", "x-analyst", shared),
+    ]
+
+
+def test_dynamic_reputation_default_off_byte_identical_to_legacy_call():
+    """`dynamic_reputation` 不傳（預設 False）與明確傳 False，結果須逐字相同；
+    且與『完全不知道這個參數存在』的舊呼叫方式（BTC 離線樣本）行為一致
+    ——回歸鎖：W2 開發前既有呼叫端不用改一行程式碼、結果不受任何影響。
+    """
+    from trustforge.ingestion.base import OHLCV_DIR, collect
+
+    docs = collect("BTC", coin="BTC", data_dir=OHLCV_DIR)
+    now = max(d.ts for d in docs)
+    claims = extract_claims(docs)
+
+    legacy = score(claims, now=now)
+    explicit_off = score(claims, now=now, dynamic_reputation=False)
+
+    assert len(legacy) == len(explicit_off) == len(claims)
+    for a, b in zip(legacy, explicit_off):
+        assert a.claim.id == b.claim.id
+        assert a.trust == b.trust, f"trust 不同：{a.trust} vs {b.trust}（回歸！）"
+        assert a.components == b.components, "components 不同（回歸！）"
+        assert a.reputation_trace is None, "dynamic_reputation=False 時 reputation_trace 應為 None"
+        assert b.reputation_trace is None, "dynamic_reputation=False 時 reputation_trace 應為 None"
+
+
+def test_source_reputation_dynamic_map_none_identical_to_legacy():
+    """`_source_reputation(c, dynamic_map=None)` 逐字等同 `_source_reputation(c)`。"""
+    from trustforge.trust.scoring import Claim, _source_reputation
+
+    d = _doc("sr1", "news", "coindesk", "BTC 大漲")
+    c = Claim(id="sr1#0", text="BTC 大漲", doc=d, direction="bullish")
+    assert _source_reputation(c, dynamic_map=None) == _source_reputation(c)
+    assert _source_reputation(c, dynamic_map=None) == 0.65  # news 基礎信譽
+
+
+def test_source_reputation_dynamic_map_used_with_fallback():
+    """`dynamic_map` 提供時優先採用；來源不在 map 中則回退先驗值（防禦性）。"""
+    from trustforge.trust.scoring import Claim, _source_reputation
+
+    d = _doc("sr2", "news", "coindesk", "BTC 大漲")
+    c = Claim(id="sr2#0", text="BTC 大漲", doc=d, direction="bullish")
+    assert _source_reputation(c, dynamic_map={"coindesk": 0.8}) == 0.8
+    # 來源不在 map → 回退先驗（不 raise、不預設 0）
+    assert _source_reputation(c, dynamic_map={"other-source": 0.9}) == 0.65
+
+
+def test_reputation_floor_social_about_point_one():
+    """CEO refinement：social 下限 ≈0.1，防止信譽蒸發。"""
+    from trustforge.trust.scoring import _reputation_floor
+
+    assert abs(_reputation_floor("social") - 0.105) < 1e-6
+    # 客觀來源（onchain）floor 應明顯高於 social
+    assert _reputation_floor("onchain") > _reputation_floor("social")
+
+
+def test_iterate_source_reputation_deterministic_repeat():
+    """同輸入連續 3 次呼叫，結果 bit-for-bit 相同（無隨機性）。"""
+    from trustforge.trust.scoring import _iterate_source_reputation
+
+    docs = _shared_text_docs()
+    claims = extract_claims(docs)
+    results = [_iterate_source_reputation(claims, now=1.0) for _ in range(3)]
+    assert results[0] == results[1] == results[2], f"三次結果不同（非確定性！）：{results}"
+
+
+def test_iterate_source_reputation_idempotent_past_k():
+    """超過收斂輪數後再迭代不再變化（idempotent）：K=3 與 K=5 結果應相同
+    （本場景在 K=2 已收斂，K=1 應與 K>=2 不同，證明迭代確實有作用）。"""
+    from trustforge.trust.scoring import _iterate_source_reputation
+
+    docs = _shared_text_docs()
+    claims = extract_claims(docs)
+    sr_k1 = _iterate_source_reputation(claims, now=1.0, iterations=1)
+    sr_k3 = _iterate_source_reputation(claims, now=1.0, iterations=3)
+    sr_k5 = _iterate_source_reputation(claims, now=1.0, iterations=5)
+    assert sr_k3 == sr_k5, "K=3 與 K=5 應相同（已收斂，超過 K 不再變）"
+    assert sr_k1 != sr_k3, "K=1（尚未收斂）理應與 K=3（已收斂）不同，證明迭代確實生效"
+
+
+def test_iterate_source_reputation_hard_cap_five():
+    """`iterations` 硬上限 5，即使呼叫端傳更大值也不會多跑（不放行超過 5 輪）。"""
+    from trustforge.trust.scoring import _iterate_source_reputation
+
+    docs = _shared_text_docs()
+    claims = extract_claims(docs)
+    sr_100 = _iterate_source_reputation(claims, now=1.0, iterations=100)
+    sr_5 = _iterate_source_reputation(claims, now=1.0, iterations=5)
+    assert sr_100 == sr_5, "iterations=100 應被硬上限 clamp 到 5，結果應與 iterations=5 相同"
+
+
+def test_iterate_source_reputation_small_sample_gate_keeps_prior():
+    """獨立佐證+矛盾來源聯集 < 3（小樣本）→ 該 source 強制 α=1，動態信譽應與先驗
+    完全相同（不因少量樣本被炒高或壓低）。案例：只有 2 個獨立來源互相佐證。
+    """
+    from trustforge.trust.scoring import _iterate_source_reputation, _source_reputation
+
+    shared = "大額 BTC 轉入 交易所 造成 賣壓 比特幣 下跌"
+    docs = [
+        _doc("sg-a", "onchain", "glassnode", shared),
+        _doc("sg-b", "news", "coindesk", shared),
+    ]
+    claims = extract_claims(docs)
+    sr = _iterate_source_reputation(claims, now=1.0)
+    for c in claims:
+        prior = _source_reputation(c)
+        assert sr[c.doc.source] == prior, (
+            f"{c.doc.source}：小樣本（<3 獨立佐證）應強制 α=1，維持先驗 {prior}，"
+            f"實際: {sr[c.doc.source]}"
+        )
+
+
+def test_iterate_source_reputation_agreement_raises_reputation_bounded():
+    """4 來源互相佐證（達到小樣本守門門檻）：信譽較低的來源（social, prior=0.35）
+    因獨立佐證應上升，但幅度應合理（不翻倍/不失控），且反映到最終 trust 的差異
+    落在 CEO 要求的 ±0.15 合理區間內。"""
+    docs = _shared_text_docs()
+    claims = extract_claims(docs)
+    now = 1.0
+
+    off = score(claims, now=now)
+    on = score(claims, now=now, dynamic_reputation=True)
+    by_id_off = {sc.claim.id: sc for sc in off}
+    for sc in on:
+        prior_trust = by_id_off[sc.claim.id].trust
+        delta = sc.trust - prior_trust
+        assert abs(delta) <= 0.15, (
+            f"{sc.claim.doc.source}: on/off trust 差 {delta:.4f} 超出 ±0.15 合理區間"
+        )
+        assert sc.trust <= 1.0 and sc.trust >= 0.0
+
+    social_sc = next(sc for sc in on if sc.claim.doc.source == "x-analyst")
+    social_prior_trust = next(sc for sc in off if sc.claim.doc.source == "x-analyst").trust
+    assert social_sc.trust > social_prior_trust, (
+        "x-analyst（social, prior=0.35）獲 3 個獨立來源佐證，動態信譽應上升"
+    )
+    assert social_sc.trust < social_prior_trust * 2, "不可翻倍"
+    assert social_sc.reputation_trace is not None
+    assert social_sc.reputation_trace["agree_n"] == 3
+    assert social_sc.reputation_trace["contradict_n"] == 0
+    assert social_sc.reputation_trace["prior"] == 0.35
+    assert social_sc.reputation_trace["final"] > 0.35
+
+
+def test_iterate_source_reputation_contradiction_lowers_reputation_bounded_by_floor():
+    """W1.5 stance 判矛盾時，agreement_score 應下拉該來源動態信譽（-1 訊號生效），
+    但每輪 clamp 保證不低於 kind floor（不蒸發到 0）。"""
+    from trustforge.trust.scoring import _iterate_source_reputation, _reputation_floor
+
+    docs = _shared_text_docs()
+    claims = extract_claims(docs)
+
+    def _always_contradiction(a, b):
+        return "contradiction"
+
+    sr = _iterate_source_reputation(claims, now=1.0, stance_fn=_always_contradiction)
+    for c in claims:
+        floor = _reputation_floor(c.doc.kind)
+        assert sr[c.doc.source] >= floor - 1e-9, (
+            f"{c.doc.source} 信譽 {sr[c.doc.source]} 低於 floor {floor}（蒸發，回歸！）"
+        )
+    # 全面矛盾情境下，social 來源（prior 最低）動態信譽應低於先驗
+    from trustforge.trust.scoring import _source_reputation
+    social_claim = next(c for c in claims if c.doc.source == "x-analyst")
+    assert sr["x-analyst"] < _source_reputation(social_claim), (
+        "全面矛盾情境下，social 來源動態信譽應低於先驗（矛盾訊號生效）"
+    )
+
+
+def test_anti_spam_single_source_cannot_inflate_own_reputation():
+    """反暴走：單一來源大量灌自己的 claims（無其他獨立來源佐證），不能自抬信譽——
+    因為 agreement 需要「其他」獨立來源真的來佐證（複用既有反回音室設計，
+    `_corroboration_detail` 本就排除同源），小樣本守門也會擋住（0 個外部佐證 <3）。
+    """
+    from trustforge.trust.scoring import _iterate_source_reputation, _source_reputation
+
+    docs = [
+        _doc(f"spam{i}", "social", "x-spammer", f"BTC 即將 大漲 機構 進場 第{i}輪 獨家消息", ts=1.0)
+        for i in range(30)
+    ]
+    claims = extract_claims(docs)
+    sr = _iterate_source_reputation(claims, now=1.0)
+    prior = _source_reputation(claims[0])
+    assert sr["x-spammer"] == prior, (
+        f"單一來源自我灌水 30 筆 claims 不應自抬信譽，"
+        f"prior={prior}, dynamic={sr['x-spammer']}"
+    )
+
+
+def test_score_reputation_iterations_hard_cap_via_public_api():
+    """`score(..., reputation_iterations=100)` 不應 crash，且經 `_iterate_source_reputation`
+    的硬上限 clamp，trace 記錄的 `iterations_run` 不應超過 5。"""
+    docs = _shared_text_docs()
+    claims = extract_claims(docs)
+    on = score(claims, now=1.0, dynamic_reputation=True, reputation_iterations=100)
+    for sc in on:
+        assert sc.reputation_trace is not None
+        assert sc.reputation_trace["iterations_run"] <= 5
+
+
+def test_btc_eth_sol_offline_sample_on_off_bounded_no_double_no_zero():
+    """CEO 要求：BTC/ETH/SOL 離線樣本 on/off 對照，trust 差在 ±0.15 合理區間內，
+    不翻倍、不歸零。（離線樣本各來源間高重疊-跨來源主張稀少，多數來源獨立佐證
+    <3 觸發小樣本守門、維持先驗——這正是設計上刻意保守的安全預設，見下方
+    `test_iterate_source_reputation_agreement_raises_reputation_bounded` 驗證迭代
+    本身在有充分證據時確實會生效。）
+    """
+    from trustforge.ingestion.base import OHLCV_DIR, collect
+
+    for coin in ("BTC", "ETH", "SOL"):
+        docs = collect(coin, coin=coin, data_dir=OHLCV_DIR)
+        now = max(d.ts for d in docs)
+        claims = extract_claims(docs)
+        off = score(claims, now=now)
+        on = score(claims, now=now, dynamic_reputation=True)
+        assert len(off) == len(on)
+        for a, b in zip(off, on):
+            assert a.claim.id == b.claim.id
+            delta = b.trust - a.trust
+            assert abs(delta) <= 0.15, f"{coin} {a.claim.doc.source}: delta={delta:.4f} 超出 ±0.15"
+            if a.trust > 0.05:
+                assert b.trust > 0.0, f"{coin} {a.claim.doc.source}: trust 被歸零（回歸！）"
+            if a.trust > 0.01:
+                assert b.trust <= a.trust * 2 + 1e-9, f"{coin} {a.claim.doc.source}: trust 翻倍以上"
