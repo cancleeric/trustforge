@@ -43,7 +43,7 @@ _STANCE_TOOL_NAME = "classify_stance"
 
 # CEO/codex 對抗審修正：stance 呼叫走獨立、短 timeout 的 boto3 client（不與主敘事
 # 模型的 self._runtime() 共用），避免 scoring.py 的 O(n²) 迴圈中單一慢呼叫拖垮整條、
-# 吃光官方 15 分鐘執行窗口。分類任務 maxTokens=32、應秒級回應，短 timeout 合理；
+# 吃光官方 15 分鐘執行窗口。分類任務 maxTokens=128（tool_use JSON 輸出需 >32，實測 32 會截斷成空回應→誤降 neutral）、應秒級回應，短 timeout 合理；
 # 不重試（total_max_attempts=1，見下方 `_stance_runtime` docstring 對 botocore
 # max_attempts vs total_max_attempts 語意差異的說明）讓逾時快速失敗進
 # classify_stance() 的 except → "neutral"，不要讓 boto3 內建重試把等待時間再乘倍。
@@ -93,7 +93,7 @@ class BedrockConfig:
     # W1.5（#15）：語意 stance 子分類器專用小模型，與主敘事模型分開設定，
     # 讓高頻小任務可用更便宜/低延遲的模型，不佔用主模型預算。
     stance_model_id: str = os.getenv(
-        "BEDROCK_HAIKU_MODEL_ID", "apac.anthropic.claude-haiku-4-5"
+        "BEDROCK_HAIKU_MODEL_ID", "au.anthropic.claude-haiku-4-5-20251001-v1:0"
     )
 
 
@@ -242,7 +242,7 @@ class BedrockClient:
                 modelId=self.config.stance_model_id,
                 system=[{"text": _STANCE_SYSTEM}],
                 messages=[{"role": "user", "content": [{"text": user_text}]}],
-                inferenceConfig={"temperature": 0, "maxTokens": 32},
+                inferenceConfig={"temperature": 0, "maxTokens": 128},
                 toolConfig=tool_config,
             )
             # 只在 cache-miss 真呼叫（即這裡，converse 已成功回來）才記成本——
