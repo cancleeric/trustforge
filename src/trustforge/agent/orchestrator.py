@@ -482,7 +482,9 @@ def run_agent_pipeline(
                 _ev["model"], _ev["tokens_in"], _ev["tokens_out"], _ev["cost_usd"]
             )
         _stance_cost_events.clear()
-    brief = aggregate(scored, query=query)
+    # coin=coin：「coin-filter 主導」（demo 可靠性 #32 追加）——見 aggregate() docstring，
+    # 讓明確提及該幣的證據不因 query 措辭（如中文複合詞、無空格）忽窄忽寬地被截斷擠出。
+    brief = aggregate(scored, query=query, coin=coin)
     log.record(
         "judgment.derive",
         params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),

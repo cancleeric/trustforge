@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document
+from ..ingestion.base import Document, _mentions_coin
 from .stance_cache import cached_stance_fn
 
 # W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
@@ -739,16 +739,42 @@ def score(
 
 # --- 5. 聚合 -------------------------------------------------------------
 def aggregate(scored: list[ScoredClaim], query: str,
-              support_threshold: float = 0.50) -> TrustedBrief:
-    """信任加權聚合。高於門檻→支撐證據；明顯低分→反方證據。"""
-    qt = _normalize(query)
-    # 與 query 相關者優先（無相關詞則全納入）
-    relevant = [
-        sc for sc in scored
-        if not qt or (_normalize(sc.claim.text) & qt)
-    ] or scored
+              support_threshold: float = 0.50,
+              coin: str | None = None) -> TrustedBrief:
+    """信任加權聚合。高於門檻→支撐證據；明顯低分→反方證據。
 
-    relevant.sort(key=lambda sc: sc.trust, reverse=True)
+    coin：選填。「coin-filter 主導」修正（demo 可靠性 #32 追加）——
+    背景：`_normalize(query)` 對無空格的中/英混排（如「以太坊分析」
+    「ETH現況」）會併成單一複合 token，與樣本文字的斷詞完全對不上，
+    導致「與 query 相關者」篩選結果隨查詢措辭忽窄忽寬——即使某次問法
+    「恰好」文字命中而把泛用雜訊（如「多家交易所遭 SEC 警告」這類未提及
+    任何幣別的通用監管新聞）擠出候選池，也純屬巧合，換一種問法就可能
+    連該幣「明確提及」的真實證據（例如 ETF 資金流背離樣本）一起被泛用
+    雜訊擠出 contrarian 的截斷上限（`[:5]`）——同一份資料、不同問法卻
+    得到不同的跨源訊號結果，不穩定、不可預期。
+    修法：只要有指定 coin，排序時一律把「明確提及該幣」的主張
+    （`_mentions_coin`）排在「全市場通用」主張之前（各自內部仍照信任分
+    由高到低），使截斷上限優先保留該幣的特定證據，且完全不受 query
+    文字措辭影響——查詢字串仍照樣傳入供其他用途（如 `TrustedBrief.query`
+    留痕），但不再左右候選池的去留或排序。不傳 coin 時（既有呼叫端）
+    行為完全不變。
+    """
+    qt = _normalize(query)
+    if coin:
+        # 只排序、不篩選：與既有「全納入」精神一致，只是把幣種特定證據
+        # 排到全市場通用雜訊之前，讓 [:10]/[:5] 截斷優先保留前者。
+        relevant = sorted(
+            scored,
+            key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
+        )
+        # 已依 (是否幣種特定, 信任分) 排序完成，不再套用下面純信任分排序。
+    else:
+        # 與 query 相關者優先（無相關詞則全納入）
+        relevant = [
+            sc for sc in scored
+            if not qt or (_normalize(sc.claim.text) & qt)
+        ] or scored
+        relevant.sort(key=lambda sc: sc.trust, reverse=True)
     supporting = [sc for sc in relevant if sc.trust >= support_threshold]
     contrarian = [sc for sc in relevant if sc.trust < support_threshold]
 
