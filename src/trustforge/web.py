@@ -846,7 +846,11 @@ def _render_report(
     limits = "".join(f"<li>{e(x)}</li>" for x in report.limits)
     flips = "".join(f"<li>{e(x)}</li>" for x in report.could_flip)
     contra = "".join(f"<li>{e(x)}</li>" for x in report.contrarian)
-    conf_html = _conf_gauge(report.confidence, report.confidence_label())
+    # W4 codex 對抗審第 2 輪 [HIGH-1]：主 gauge 改用校準值＋三態標籤
+    # （confidence_label() 已含三態），避免弱證據 abstain 時裸 confidence
+    # （supporting 均值恆為 0 或 >=0.5）讓信心欄仍顯示「中/高」，跟
+    # market_judgment 的「資料不足、暫不判斷」矛盾。
+    conf_html = _conf_gauge(report.calibrated_confidence, report.confidence_label())
     agg_tc = _aggregate_trust_components(evidence)
     breakdown_html = _render_trust_breakdown(agg_tc, report.confidence) if agg_tc else ""
     ev_rows = _render_evidence_list(evidence)
@@ -1056,8 +1060,8 @@ def _render_comparison(
     <tr><th>項目</th><th>{e(report_a.coin)}</th><th>{e(report_b.coin)}</th></tr>
     <tr><td>市場方向</td><td>{e(dir_a)}</td><td>{e(dir_b)}</td></tr>
     <tr><td>整體信心</td>
-        <td>{_cmp_conf(report_a.confidence, report_a.confidence_label())}</td>
-        <td>{_cmp_conf(report_b.confidence, report_b.confidence_label())}</td></tr>
+        <td>{_cmp_conf(report_a.calibrated_confidence, report_a.confidence_label())}</td>
+        <td>{_cmp_conf(report_b.calibrated_confidence, report_b.confidence_label())}</td></tr>
     <tr><td>獨立來源數</td><td>{src_a}</td><td>{src_b}</td></tr>
     <tr><td>反方訊號數</td><td>{len(report_a.contrarian)}</td><td>{len(report_b.contrarian)}</td></tr>
   </table>

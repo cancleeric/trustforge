@@ -18,6 +18,22 @@ strength`/`_calibrate_confidence` 這兩個純函式本身）建構資料，不�
 （合成 Document → extract_claims → score → aggregate → build_report）
 場景證明 abstain / 低信心 / 正常三態在真實 pipeline 輸出下皆可達。
 
+codex 對抗審第 2 輪 [HIGH-1][HIGH-2] 修正（真一致性）：
+  - [HIGH-1] 三態用 `calibrated_confidence` 判斷，但舊版 `Report` 只存裸
+    `confidence`（supporting 均值，恆為 0 或 >=0.5）——弱證據 abstain 時，
+    Markdown/Web 的信心欄仍讀裸值，可能顯示「中/高」，跟 market_judgment
+    已寫的「資料不足、暫不判斷」矛盾。修法：`Report` 新增
+    `calibrated_confidence`/`decision_state` 結構化欄位，顯示層
+    （`confidence_label`/`to_markdown`/web gauge/comparison）全部改用
+    校準值＋三態標籤；裸 `confidence` 保留供對照、不砍。
+  - [HIGH-2] 舊版 abstain 態的 `inferences` 仍塞入 Step3 `narrative`
+    （LLM 自由生成的行文）——prompt 指示雖已要求不得出現方向詞，但對真實
+    LLM 呼叫只是軟性指示，非確定性保證。修法：abstain 態的 `inferences`
+    完全不採用 LLM narrative，改用純確定性模板；`facts`（原始證據文字，
+    可能含方向詞，如「BTC 上漲」）仍照常透明列出——這是「觀察訊號」，
+    不是「方向結論」，允許出現；但 `market_judgment`／`inferences`／
+    標題等「結論層」文字必須保證零方向詞。
+
 CEO 派工規格：
   - `trust.scoring.aggregate()` 新增 `calibrated_confidence`（硬編分位數
     映射表，確定性、免 LLM）；`confidence` 裸值保留、不砍。
@@ -36,6 +52,11 @@ docstring）：這整套是簡化版工程啟發式，不是嚴謹 conformal pre
 """
 from __future__ import annotations
 
+import dataclasses
+import html as _html
+import json
+
+from trustforge import web
 from trustforge.agent.orchestrator import build_report
 from trustforge.bedrock import BedrockClient
 from trustforge.execlog import ExecutionLog
@@ -53,6 +74,22 @@ from trustforge.trust.scoring import (
 
 # 不得出現在 abstain 措辭裡的方向性字眼（守「不代客決策」鐵律）。
 _DIRECTIONAL_WORDS = ("偏多", "偏空", "看漲", "看跌", "上漲", "下跌")
+
+
+def _assert_directional_words_confined_to_facts(full_text: str, facts: list[str]) -> None:
+    """codex 對抗審第 2 輪 [HIGH-2] 端到端驗證：把 `facts`（允許含方向詞的
+    「觀察訊號」原文）從完整輸出文字裡挖掉後，剩餘文字（含 market_judgment／
+    inferences／標題／key_basis／cross_source 等「結論層」內容）不得再出現
+    任何方向詞——確保方向性結論不會透過任何管道（Markdown／Web HTML／
+    analyze.json）洩漏。"""
+    masked = full_text
+    for f in facts:
+        masked = masked.replace(f, "")
+        masked = masked.replace(_html.escape(f), "")
+    for w_ in _DIRECTIONAL_WORDS:
+        assert w_ not in masked, (
+            f"方向詞「{w_}」出現在 facts 觀察訊號以外的內容（結論層）：\n{masked[:3000]}"
+        )
 
 
 def _doc(id_: str, kind: str, source: str, text: str = "", ts: float = 1_000_000.0, meta: dict | None = None) -> Document:
@@ -244,20 +281,49 @@ def test_confidence_field_stays_raw_not_calibrated():
 
 def test_e2e_single_weak_source_with_heavy_contrarian_abstains():
     """單一獨立來源 + 大量反方雜訊 → calibrated < 0.35（真實 aggregate 產出，
-    非手造）→ abstain：中性措辭、無方向詞。"""
+    非手造）→ abstain：中性措辭、無方向詞。
+
+    p1 故意含方向詞「上漲」——驗證 facts（觀察訊號）可以透明保留原文方向詞，
+    但 market_judgment 不得出現（[HIGH-2] 結論層／觀察層分離）。"""
     docs = [
-        _doc("p1", "price", "exch-a", "BTC 盤整 持穩。"),
+        _doc("p1", "price", "exch-a", "BTC 早盤 短暫 上漲，隨後 拉回 整理，整體 呈 盤整。"),
         _doc("p2", "price", "exch-a", "BTC 盤整 持穩。"),
     ] + [_doc(f"c{i}", "social", f"anon-{i}", "BTC 翻倍 to the moon 穩賺快上車！") for i in range(6)]
     brief = _aggregate_from_docs(docs)
     assert brief.calibrated_confidence < 0.35, brief.calibrated_confidence
     assert len(brief.supporting) >= 2, "本案例故意驗證『calibrated 驅動』的 abstain，非筆數不足驅動"
 
-    report, _evidence = _run_report(brief)
+    report, evidence = _run_report(brief)
     assert report.direction == "不明"
     assert "不足" in report.market_judgment
+    # [HIGH-1] 結構化三態欄位：decision_state 必須為 "abstain"，
+    # calibrated_confidence 必須與 brief 一致（非裸 confidence）。
+    assert report.decision_state == "abstain"
+    assert report.calibrated_confidence == brief.calibrated_confidence
+    assert report.confidence_label() == "棄權／資料不足"
+    # facts 允許含方向詞（觀察訊號，透明呈現）——本案例特意驗證這點。
+    assert any("上漲" in f for f in report.facts), "本案例應驗證 facts 保留原始方向詞"
     for w in _DIRECTIONAL_WORDS:
         assert w not in report.market_judgment, f"abstain 措辭不應含方向詞「{w}」：{report.market_judgment}"
+    # [HIGH-2] inferences（推論層）必須零方向詞，即使 facts 有、即使 Bedrock
+    # narrative 理論上可能違反 prompt 指示——inferences 已改確定性模板，
+    # 完全不採 LLM narrative，不依賴 LLM 是否守規矩。
+    for inf in report.inferences:
+        for w in _DIRECTIONAL_WORDS:
+            assert w not in inf, f"abstain inferences 不應含方向詞「{w}」：{inf}"
+
+    # 完整輸出（Markdown／Web HTML／analyze.json）皆須驗證：方向詞只能出現
+    # 在 facts 原文裡，市場判斷/推論/標題等結論層絕對零方向詞。
+    md = report.to_markdown(evidence)
+    _assert_directional_words_confined_to_facts(md, report.facts)
+
+    log = ExecutionLog(now_fn=lambda: 1_000_000.0)
+    web_html = web._render_report(report, evidence, log)
+    _assert_directional_words_confined_to_facts(web_html, report.facts)
+
+    payload = json.dumps(dataclasses.asdict(report), ensure_ascii=False)
+    _assert_directional_words_confined_to_facts(payload, report.facts)
+    assert payload  # analyze.json 的 report 區塊可正常序列化，不拋錯
 
 
 def test_e2e_single_supporting_claim_forced_abstain_even_if_calibrated_would_be_low_confidence():
@@ -276,8 +342,14 @@ def test_e2e_single_supporting_claim_forced_abstain_even_if_calibrated_would_be_
     report, _evidence = _run_report(brief)
     assert report.direction == "不明"
     assert "不足" in report.market_judgment
+    assert report.decision_state == "abstain"
+    assert report.calibrated_confidence == brief.calibrated_confidence
+    assert report.confidence_label() == "棄權／資料不足"
     for w in _DIRECTIONAL_WORDS:
         assert w not in report.market_judgment, f"abstain 措辭不應含方向詞「{w}」：{report.market_judgment}"
+    for inf in report.inferences:
+        for w in _DIRECTIONAL_WORDS:
+            assert w not in inf, f"abstain inferences 不應含方向詞「{w}」：{inf}"
 
 
 def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_marked():
@@ -294,6 +366,10 @@ def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_m
     assert report.direction != "不明"
     assert "低信心" in report.market_judgment
     assert "不足" not in report.market_judgment
+    # [HIGH-1] 結構化三態欄位：decision_state 必須為 "low_confidence"。
+    assert report.decision_state == "low_confidence"
+    assert report.calibrated_confidence == brief.calibrated_confidence
+    assert report.confidence_label() == "低信心"
 
 
 def test_e2e_strong_multi_source_evidence_normal_state_unmarked():
@@ -312,6 +388,11 @@ def test_e2e_strong_multi_source_evidence_normal_state_unmarked():
     assert report.direction == "偏多"
     assert "低信心" not in report.market_judgment
     assert "不足" not in report.market_judgment
+    # [HIGH-1] 結構化三態欄位：decision_state 必須為 "normal"，confidence_label
+    # 用校準值分桶（本案例 calibrated 夠高，應落「高」或「中」，不因裸值分桶）。
+    assert report.decision_state == "normal"
+    assert report.calibrated_confidence == brief.calibrated_confidence
+    assert report.confidence_label() in ("高", "中")
 
 
 def test_e2e_report_confidence_field_is_raw_value_not_calibrated():
@@ -325,3 +406,24 @@ def test_e2e_report_confidence_field_is_raw_value_not_calibrated():
     report, _evidence = _run_report(brief)
     assert report.confidence == brief.confidence
     assert report.confidence != brief.calibrated_confidence
+
+
+def test_default_report_decision_state_and_calibrated_confidence_backward_compatible():
+    """[HIGH-1] 向後相容回歸鎖：舊呼叫端手造 `Report(...)` 不傳
+    `calibrated_confidence`/`decision_state` 時，預設值須維持「正常態」語意，
+    不影響既有測試斷言（見 `tests/test_cross_source_signal.py` 的手造用法）。"""
+    from trustforge.schema import Report
+
+    r = Report(
+        coin="BTC", question_type="multi_source", question="test",
+        market_judgment="偏空", facts=[], inferences=[], key_basis=[],
+        confidence=0.6, limits=[], could_flip=[], contrarian=[],
+        generated_at="2026-07-01T00:00:00Z",
+    )
+    assert r.calibrated_confidence == 0.0
+    assert r.decision_state == "normal"
+    # 正常態沿用舊版純數字分桶邏輯（此時 calibrated_confidence 為預設 0.0，
+    # 分桶結果會是「低」——這是刻意的：舊呼叫端若真的在意分桶結果，本就該
+    # 改用 build_report() 走真實 pipeline 填入 calibrated_confidence，手造
+    # Report 不應假裝有校準值）。
+    assert r.confidence_label() == "低"

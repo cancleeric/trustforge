@@ -90,8 +90,34 @@ class Report:
     # 時完全不填，既有讀取 cross_source_signal 的程式碼（含本檔 to_markdown、
     # web.py render）不受影響。供未來 UI 渲染跨源矛盾對照用，本次不消費此欄位。
 
+    # W4 codex 對抗審第 2 輪 [HIGH-1] 修正：三態 abstain/低信心/正常判斷用的是
+    # `trust.scoring.aggregate()` 算出的 `calibrated_confidence`（見
+    # `agent.orchestrator._ABSTAIN_CALIBRATED_THRESHOLD` 一帶），但 Report 舊版
+    # 只存裸 `confidence`（supporting 均值，恆為 0 或 >=0.5）——弱證據被判
+    # abstain 時，Markdown/Web 的信心欄仍讀裸值，可能顯示「中/高」，跟
+    # market_judgment 已經寫的「資料不足、暫不判斷」自相矛盾，下游（UI／
+    # analyze.json 消費端）也沒有結構化欄位可辨三態。
+    # 修法：新增 `calibrated_confidence`（校準值，`confidence` 裸值語意不變、
+    # 不砍，供對照）與 `decision_state`（三態字面值 "abstain" | "low_confidence"
+    # | "normal"），由 `agent.orchestrator.build_report` 依同一份判斷結果填入。
+    # 預設 calibrated_confidence=0.0／decision_state="normal"：向後相容——舊測試
+    # / 舊呼叫端手造 `Report(...)` 不傳這兩個欄位時維持「正常態」語意，不影響
+    # 既有斷言（見 `tests/test_cross_source_signal.py` 手造 Report 的用法）。
+    calibrated_confidence: float = 0.0
+    decision_state: str = "normal"
+
     def confidence_label(self) -> str:
-        c = self.confidence
+        """三態優先於純數字分桶：abstain/低信心用結構化狀態直接標示，避免
+        校準值落在門檻附近時被舊版純數字 bucket 誤標成「中/高」，跟
+        market_judgment 的棄權措辭矛盾（codex 對抗審第 2 輪 [HIGH-1]）。
+        「正常」態改用 `calibrated_confidence`（校準值）分桶，不用裸 `confidence`
+        ——顯示層統一改採校準後信心，裸值只留供對照（見 dataclass 欄位註解）。
+        """
+        if self.decision_state == "abstain":
+            return "棄權／資料不足"
+        if self.decision_state == "low_confidence":
+            return "低信心"
+        c = self.calibrated_confidence
         return "高" if c >= 0.7 else "中" if c >= 0.45 else "低"
 
     def _direction_label(self) -> str:
@@ -109,7 +135,12 @@ class Report:
 
         L.append("## 1. 結論 / 市場判斷")
         L.append(self.market_judgment or "（待 Agent 生成）")
-        L.append(f"\n**整體信心：{self.confidence_label()}（{self.confidence:.2f}）**\n")
+        # W4 [HIGH-1]：顯示改用校準值＋三態標籤（confidence_label() 已含三態），
+        # 裸值並列供對照、不隱藏（見 dataclass 欄位註解，不砍舊欄位語意）。
+        L.append(
+            f"\n**整體信心：{self.confidence_label()}"
+            f"（校準後 {self.calibrated_confidence:.2f}｜裸均值 {self.confidence:.2f}）**\n"
+        )
 
         L.append("## 2. 關鍵依據（事實 → 推論 → 結論）")
         L.append("### 事實（客觀資料）")
@@ -124,7 +155,10 @@ class Report:
             L.append(f"- **{b.claim}** {tags}\n  - {b.explanation}")
 
         L.append("\n## 3. 信心說明")
-        L.append(f"信心程度：**{self.confidence_label()}**（{self.confidence:.2f}）")
+        L.append(
+            f"信心程度：**{self.confidence_label()}**"
+            f"（校準後 {self.calibrated_confidence:.2f}｜裸均值 {self.confidence:.2f}）"
+        )
         if self.limits:
             L.append("\n已知限制 / 資料不足：")
             for x in self.limits:
@@ -195,9 +229,10 @@ def comparison_to_markdown(
     dir_a = report_a.direction or report_a._direction_label()
     dir_b = report_b.direction or report_b._direction_label()
     L.append(f"| 市場方向 | {dir_a} | {dir_b} |")
+    # W4 [HIGH-1]：改用校準值＋三態標籤（confidence_label() 已含三態）。
     L.append(
-        f"| 整體信心 | {report_a.confidence_label()}（{report_a.confidence:.2f}）"
-        f" | {report_b.confidence_label()}（{report_b.confidence:.2f}）|"
+        f"| 整體信心 | {report_a.confidence_label()}（{report_a.calibrated_confidence:.2f}）"
+        f" | {report_b.confidence_label()}（{report_b.calibrated_confidence:.2f}）|"
     )
     src_a = len({e.source for e in evidence_a})
     src_b = len({e.source for e in evidence_b})
@@ -227,7 +262,7 @@ def comparison_to_markdown(
         L.append(
             f"**{rpt.coin}**：{kind_str or '（無）'}"
             f"｜方向：{rpt_dir}"
-            f"｜信心：{rpt.confidence:.2f}"
+            f"｜信心：{rpt.calibrated_confidence:.2f}（{rpt.confidence_label()}）"
         )
     L.append("")
 

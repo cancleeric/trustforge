@@ -423,6 +423,10 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_supporting < _ABSTAIN_MIN_SUPPORTING
     )
     is_low_confidence = (not is_abstain) and calibrated < 0.5
+    # W4 codex 對抗審第 2 輪 [HIGH-1]：三態字面值下放給 `schema.Report.
+    # decision_state`，供 UI／analyze.json 消費端結構化辨態（見該欄位註解），
+    # 不必再各自重算 calibrated 門檻。
+    decision_state = "abstain" if is_abstain else ("low_confidence" if is_low_confidence else "normal")
 
     facts = [sc.claim.text for sc in brief.supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
     n_indep = len({sc.claim.doc.source for sc in brief.supporting})
@@ -458,6 +462,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             "direction": direction, "indep_sources": n_indep,
             "calibrated_confidence": round(calibrated, 4),
             "abstain": is_abstain, "low_confidence": is_low_confidence,
+            "decision_state": decision_state,
         },
     )
 
@@ -542,10 +547,30 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         summary=f"帶 claim_id 溯源行文；耗時 {_step3_elapsed}s；輸入 {len(brief.supporting)} 條主張",
     )
     if is_abstain:
+        # W4 codex 對抗審第 2 輪 [HIGH-2] 修正：舊版即使 abstain 仍把 Step3
+        # `narrative`（LLM 自由生成的行文）塞進 inferences——prompt 的
+        # `_instruction` 雖已要求「不得使用方向性字眼」，但那只是軟性指示，
+        # 對真實（非 offline）LLM 呼叫沒有確定性保證，一旦模型不遵守，
+        # abstain 報告的 inferences 仍可能夾帶「上漲/下跌」等方向性結論，
+        # 跟 market_judgment 已經棄權的立場矛盾。
+        # 修法：abstain 態的 inferences **完全不採用 LLM narrative**，改用
+        # 純確定性模板——只點出「有幾筆客觀事實訊號可查」，不引用 fact 原文
+        # （fact 原文本身可能含方向詞，如「BTC 上漲」，但那是「觀察訊號」，
+        # 允許在 facts 欄位透明呈現；inferences 是推論層，必須保證零方向詞）。
+        # Step3 呼叫本身**仍照跑**（不砍，見下方 client.complete()）——保留
+        # pipeline「Step3 必呼叫、≥2 筆 bedrock.complete log」的既有契約與
+        # 成本可觀測性不回歸，只是其輸出不會流入最終報表。
+        if facts:
+            _obs_line = (
+                f"已觀察到 {len(facts)} 則客觀事實訊號（詳見下方「事實」與證據清單），"
+                "但整體證據強度不足以形成方向性結論。"
+            )
+        else:
+            _obs_line = "目前無足夠客觀事實可供觀察，需待更多獨立來源佐證後再評估。"
         inferences = [
             f"支撐證據僅 {n_supporting} 筆、校準信心 {calibrated:.2f}，"
             "證據強度不足以支持任何方向性推論。",
-            narrative.strip(),
+            _obs_line,
         ]
     else:
         inferences = [
@@ -563,6 +588,11 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         generated_at=iso_utc(now_fn()),
         direction=direction,
         cross_source_signal=cross_signal,
+        # W4 codex 對抗審第 2 輪 [HIGH-1]：結構化校準值＋三態，供 UI／
+        # analyze.json 消費端辨態，不必再各自重算門檻（見 schema.Report
+        # 欄位註解）。
+        calibrated_confidence=calibrated,
+        decision_state=decision_state,
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
     return report, evidence
