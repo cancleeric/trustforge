@@ -23,6 +23,18 @@ from typing import Callable
 from ..ingestion.base import Document
 from .stance_cache import cached_stance_fn
 
+# W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
+# Bedrock）。單次 score() 執行最多消耗這麼多「呼叫額度」（含快取命中，保守估計）；
+# 額度用完後其餘配對一律降級 "neutral"（不呼叫、不錯殺）。數字是保守預設，可視實際
+# 成本調整；claims 數量在此之內時完全不受影響（既有測試場景 claims 數都遠小於此）。
+DEFAULT_STANCE_PAIR_BUDGET = 40
+
+# stance 呼叫最少要保留的剩餘執行時間（秒）。ExecutionLog.remaining() 低於這個門檻
+# 時一律視為預算耗盡，就算配對數還沒到硬上限，避免官方 15 分鐘執行窗口的最後一點
+# 時間被 stance 呼叫吃光、報告生不出來（命題第一號失敗模式）。
+STANCE_TIME_RESERVE_SEC = 5.0
+
+
 # --- 權重（可調）---------------------------------------------------------
 DEFAULT_WEIGHTS = {
     "src": 0.50,    # 來源信譽（客觀來源即使無佐證也應有基本信任）
@@ -220,10 +232,50 @@ def _direction_compatible(d1: str, d2: str) -> bool:
     return d1 == d2
 
 
+class _StanceBudget:
+    """CEO/codex 對抗審修正：單次 `score()` 執行共用的 stance 呼叫預算。
+
+    O(n²) 迴圈（每個 claim 都要跟其他所有 claims 比對）在高重疊 claims 的情境下，
+    最壞會產生 n(n-1)/2 次 stance 呼叫；沒有上限會爆 credit、也可能吃光官方 15
+    分鐘執行窗口（命題第一號失敗模式：報告生不出來）。
+
+    這是一個跨所有 `_corroboration()` 呼叫共享的可變計數器（`score()` 建立一個
+    實例，傳給每一次 `_corroboration()`），同時檢查：
+    1. 配對硬上限（`max_pairs`，用完就不再呼叫）。
+    2. 選用的即時剩餘時間（`remaining_time_fn`，通常是 `ExecutionLog.remaining`
+       的 bound method）——低於 `STANCE_TIME_RESERVE_SEC` 秒也視為耗盡。
+
+    額度/時間耗盡時，呼叫端（`_corroboration`）應 fail-safe 降級為 "neutral"
+    （不呼叫、不 raise、不錯殺既有佐證）。
+    """
+
+    def __init__(
+        self,
+        max_pairs: int = DEFAULT_STANCE_PAIR_BUDGET,
+        remaining_time_fn: Callable[[], float] | None = None,
+    ):
+        self._remaining_pairs = max_pairs
+        self._remaining_time_fn = remaining_time_fn
+
+    def take(self) -> bool:
+        """嘗試消耗一次配額。回 False 代表額度或時間已耗盡，呼叫端不應再呼叫
+        stance_fn，應直接降級為 "neutral"。"""
+        if self._remaining_pairs <= 0:
+            return False
+        if (
+            self._remaining_time_fn is not None
+            and self._remaining_time_fn() <= STANCE_TIME_RESERVE_SEC
+        ):
+            return False
+        self._remaining_pairs -= 1
+        return True
+
+
 def _corroboration(
     target: Claim,
     all_claims: list[Claim],
     stance_fn: Callable[[str, str], str] | None = None,
+    stance_budget: "_StanceBudget | None" = None,
 ) -> float:
     """有多少**獨立來源**（不同 source）提到相似主張。回音室（同源轉發）不加分。
 
@@ -236,10 +288,14 @@ def _corroboration(
     vs regulatory scrutiny/caution：方向詞未必明確相反，但語意明確對立）。
 
     順序（控成本，越前面越便宜）：
+    0. 該來源已計入 independent_sources → 直接跳過（CEO/codex 對抗審修正：同一
+       來源已經算過，再花一次 overlap/方向/stance 判斷不會改變結果，純屬冗餘
+       呼叫，尤其在高重疊 claims 情境下能砍掉大量 stance 呼叫）。
     1. 同源排除（不變）。
     2. overlap>=0.4 前置閘（不變）——先過最便宜的集合運算。
     3. `_direction_compatible` 明確衝突快路徑（不變）——省下不必要的 stance 呼叫。
-    4. 若 `stance_fn` 存在才呼叫（走快取）；回傳 "contradiction" 則不計入獨立佐證。
+    4. 若 `stance_fn` 存在才呼叫：`stance_budget` 額度耗盡時 fail-safe 降級為
+       "neutral"（不呼叫、不 raise、不錯殺）；回傳 "contradiction" 則不計入獨立佐證。
 
     `stance_fn=None` 時完全略過第 4 步，行為與加入 W1.5 前逐字相同（向後相容）。
     """
@@ -250,14 +306,21 @@ def _corroboration(
     for c in all_claims:
         if c.doc.source == target.doc.source:
             continue
+        if c.doc.source in independent_sources:
+            continue
         ct = _normalize(c.text) - DOMAIN_STOP
         overlap = len(tt & ct) / len(tt)
         if overlap < 0.4:
             continue
         if not _direction_compatible(target.direction, c.direction):
             continue
-        if stance_fn is not None and stance_fn(target.text, c.text) == "contradiction":
-            continue
+        if stance_fn is not None:
+            if stance_budget is None or stance_budget.take():
+                label = stance_fn(target.text, c.text)
+            else:
+                label = "neutral"  # 預算耗盡，保守降級，不呼叫、不錯殺
+            if label == "contradiction":
+                continue
         independent_sources.add(c.doc.source)
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
     n = len(independent_sources)
@@ -270,6 +333,8 @@ def score(
     now: float,
     weights: dict | None = None,
     stance_client=None,
+    stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
+    stance_remaining_time_fn: Callable[[], float] | None = None,
 ) -> list[ScoredClaim]:
     """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient），
     或 None。
@@ -281,6 +346,11 @@ def score(
     只有當 `stance_client` 是「非 None 但沒有 `classify_stance` 方法」的物件（例如
     舊版測試用的 stub）時，才視為不相容物件、完全跳過矛盾閘（`stance_fn=None`，
     等同 W1.5 加入前的行為）。
+
+    `stance_pair_budget`：單次執行 stance 呼叫配對硬上限（見 `_StanceBudget`），
+    預設 `DEFAULT_STANCE_PAIR_BUDGET`；`stance_remaining_time_fn`：選用的即時剩餘
+    時間回呼（通常傳 `ExecutionLog.remaining` 這個 bound method），額度或時間耗盡
+    時其餘配對一律 fail-safe 降級為 "neutral"，防 O(n²) 呼叫無上限打 Bedrock。
     """
     w = weights or DEFAULT_WEIGHTS
     stance_fn = (
@@ -288,10 +358,15 @@ def score(
         if stance_client is None or hasattr(stance_client, "classify_stance")
         else None
     )
+    stance_budget = (
+        _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
+        if stance_fn is not None
+        else None
+    )
     out: list[ScoredClaim] = []
     for c in claims:
         rep = _source_reputation(c)
-        corr = _corroboration(c, claims, stance_fn=stance_fn)
+        corr = _corroboration(c, claims, stance_fn=stance_fn, stance_budget=stance_budget)
         rec = _recency_decay(c, now)
         manip = _manipulation_penalty(c)
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip

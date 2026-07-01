@@ -283,3 +283,127 @@ def test_cache_key_no_collision_via_raw_separator_concat():
     cache.set("a", f"b{sep}c", "entailment")
     assert cache.get(f"a{sep}b", "c") == "contradiction"
     assert cache.get("a", f"b{sep}c") == "entailment"
+
+
+# --- 第二輪 codex 對抗審修正：線上 stance 呼叫預算（O(n²) 效能/成本）------------
+
+
+def test_already_counted_source_skips_redundant_stance_calls():
+    """[HIGH 驗收] 同一個來源已經算進 independent_sources 後，該來源後續的其他
+    claim 不應該再花一次 stance 呼叫確認——這個 set 已經含有該 source，再分類不
+    會改變最終結果，純屬冗餘呼叫（見 scoring.py:_corroboration 的「已計入來源」
+    快路徑）。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+
+    # 同一個來源 "dup-source" 出 3 條高重疊 claim：只算 1 個獨立來源，理應只需要
+    # 1 次 stance 呼叫（第一次判斷後就把 "dup-source" 計入 independent_sources，
+    # 後兩條同源 claim 應直接跳過，不再呼叫）。
+    dup_claims = [
+        Claim(id=f"dup{i}", text=target_text, doc=_doc(f"ddup{i}", "news", "dup-source"))
+        for i in range(3)
+    ]
+
+    scored = score(
+        [target, *dup_claims],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=100,
+    )
+    sc_target = next(sc for sc in scored if sc.claim.id == "t0")
+    assert sc_target.components["corroboration"] > 0.0
+    assert len(calls) == 1, (
+        "同一來源已計入 independent_sources 後不應再花額外 stance 呼叫，"
+        f"實際呼叫 {len(calls)} 次：{calls}"
+    )
+
+
+def test_stance_pair_budget_caps_calls_and_falls_back_to_neutral():
+    """[HIGH 驗收] 高重疊 claims（多個不同來源）情境下，stance 呼叫次數必須有硬
+    上限；超過預算的配對一律 fail-safe 降級為 "neutral"（不呼叫、不錯殺），防
+    O(n²) 呼叫在 credit/15 分鐘執行窗口上無上限爆量。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+
+    # 10 個不同來源，全部高重疊——若無上限，光 target 這一輪就要 10 次 stance
+    # 呼叫；score() 對每個 claim 都當一次 target，總呼叫數沒上限的話會是 O(n²)。
+    # 每個來源的文字略有不同（附加 variant 標記），避免正規化後跟 target 完全
+    # byte-identical 而共用同一把快取 key（那樣只會真的呼叫 1 次，測不出上限）；
+    # 附加內容是 target 文字的超集，overlap 仍是 1.0（見上方驗證腳本）。
+    other_claims = [
+        Claim(
+            id=f"o{i}",
+            text=f"{target_text} variant number {i}",
+            doc=_doc(f"do{i}", "news", f"source-{i}"),
+        )
+        for i in range(10)
+    ]
+
+    budget = 5
+    scored = score(
+        [target, *other_claims],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=budget,
+    )
+
+    assert len(calls) == budget, (
+        f"stance 呼叫次數應被硬上限 {budget} 卡住，實際呼叫 {len(calls)} 次"
+    )
+    # 預算耗盡後的配對 fail-safe 回 neutral（不是 contradiction），不可錯殺合法
+    # 佐證：所有 claim 應該仍然看得到 > 0 的 corroboration。
+    for sc in scored:
+        assert sc.components["corroboration"] > 0.0, (
+            f"{sc.claim.id} 的佐證不應被預算耗盡的 fail-safe neutral 錯殺，"
+            f"實際 corr={sc.components['corroboration']}"
+        )
+
+
+def test_stance_remaining_time_fn_exhausted_falls_back_to_neutral():
+    """[HIGH 驗收] 時間預算（ExecutionLog.remaining() 的等價回呼）耗盡時，就算配對
+    硬上限還沒用完，也要 fail-safe 降級為 "neutral"，不繼續呼叫、不 crash、不錯殺。
+    """
+    calls: list[tuple[str, str]] = []
+
+    class _CountingClient:
+        def classify_stance(self, a: str, b: str) -> str:
+            calls.append((a, b))
+            return "neutral"
+
+    target_text = "Traders note steady exchange inflows amid low volatility this week"
+    target = Claim(id="t0", text=target_text, doc=_doc("dt", "news", "target-source"))
+    other = Claim(id="o0", text=target_text, doc=_doc("do0", "news", "source-0"))
+
+    # 時間預算永遠回傳 0 秒（低於 STANCE_TIME_RESERVE_SEC），模擬官方 15 分鐘執行
+    # 窗口已經耗盡；就算配對硬上限（100）還很充裕，也不應該再呼叫。
+    scored = score(
+        [target, other],
+        now=1000.0,
+        stance_client=_CountingClient(),
+        stance_pair_budget=100,
+        stance_remaining_time_fn=lambda: 0.0,
+    )
+    assert len(calls) == 0, (
+        f"時間預算耗盡時不應再呼叫 stance_fn，實際呼叫 {len(calls)} 次：{calls}"
+    )
+    sc_target = next(sc for sc in scored if sc.claim.id == "t0")
+    assert sc_target.components["corroboration"] > 0.0, (
+        "時間預算耗盡的 fail-safe neutral 不可錯殺合法佐證，"
+        f"實際 corr={sc_target.components['corroboration']}"
+    )

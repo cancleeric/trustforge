@@ -341,7 +341,14 @@ def run_agent_pipeline(
     # None（CEO+codex 對抗審修正：None 不代表關掉語意矛盾閘，score() 仍會建立
     # cached_stance_fn(None) 去讀持久化快取 demo/sample_data/stance_cache.json，
     # 只有在快取也 miss 時才 fail-safe 回 neutral——離線 demo 才看得到 #15 的修復）。
-    scored = score(claims, now=now_ts, stance_client=None if client.offline else client)
+    # 第二輪對抗審修正：接 log.remaining()（即時剩餘的官方 15 分鐘執行時間）當
+    # stance 呼叫的時間預算，跟配對硬上限一起防 O(n²) 呼叫吃光整條執行窗口。
+    scored = score(
+        claims,
+        now=now_ts,
+        stance_client=None if client.offline else client,
+        stance_remaining_time_fn=log.remaining,
+    )
     brief = aggregate(scored, query=query)
     log.record(
         "judgment.derive",

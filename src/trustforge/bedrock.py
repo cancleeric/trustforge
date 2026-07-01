@@ -23,6 +23,14 @@ _OBJECTIVE_KINDS = frozenset({"price", "onchain", "regulatory"})
 _STANCE_LABELS = ("entailment", "contradiction", "neutral")
 _STANCE_TOOL_NAME = "classify_stance"
 
+# CEO/codex 對抗審修正：stance 呼叫走獨立、短 timeout 的 boto3 client（不與主敘事
+# 模型的 self._runtime() 共用），避免 scoring.py 的 O(n²) 迴圈中單一慢呼叫拖垮整條、
+# 吃光官方 15 分鐘執行窗口。分類任務 maxTokens=32、應秒級回應，短 timeout 合理；
+# 不重試（max_attempts=1）讓逾時快速失敗進 classify_stance() 的 except → "neutral"，
+# 不要讓 boto3 內建重試把等待時間再乘倍。
+_STANCE_READ_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_READ_TIMEOUT_SEC", "8"))
+_STANCE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_CONNECT_TIMEOUT_SEC", "3"))
+
 _STANCE_SYSTEM = (
     "你是金融/監管文本的語意立場分類器。給定兩句市場相關敘述 A、B，判斷 B 相對 A 的立場，"
     "只能三選一：\n"
@@ -81,6 +89,7 @@ class BedrockClient:
         self.config = config or BedrockConfig()
         self.offline = offline
         self._client = None
+        self._stance_client = None  # W1.5：獨立、短 timeout，不與主敘事模型共用
 
     def _runtime(self):
         if self._client is None:
@@ -88,6 +97,24 @@ class BedrockClient:
 
             self._client = boto3.client("bedrock-runtime", region_name=self.config.region)
         return self._client
+
+    def _stance_runtime(self):
+        """W1.5（#15）+ CEO/codex 對抗審修正：stance 分類專用的短 timeout client，
+        見上方 `_STANCE_READ_TIMEOUT_SEC` 常數註解。"""
+        if self._stance_client is None:
+            import boto3  # 延遲匯入：離線模式不需安裝/設定 AWS
+            from botocore.config import Config
+
+            self._stance_client = boto3.client(
+                "bedrock-runtime",
+                region_name=self.config.region,
+                config=Config(
+                    read_timeout=_STANCE_READ_TIMEOUT_SEC,
+                    connect_timeout=_STANCE_CONNECT_TIMEOUT_SEC,
+                    retries={"max_attempts": 1},
+                ),
+            )
+        return self._stance_client
 
     def complete(self, system: str, prompt: str) -> str:
         """單輪文字生成。回傳模型文字輸出。"""
@@ -164,7 +191,7 @@ class BedrockClient:
         }
 
         try:
-            resp = self._runtime().converse(
+            resp = self._stance_runtime().converse(
                 modelId=self.config.stance_model_id,
                 system=[{"text": _STANCE_SYSTEM}],
                 messages=[{"role": "user", "content": [{"text": user_text}]}],

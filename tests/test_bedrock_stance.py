@@ -1,8 +1,9 @@
 """W1.5（#15）：`BedrockClient.classify_stance` 單元測試。
 
 ⛔ 本 PR 範圍限制：不真的呼叫 Bedrock。offline 路徑純本地驗證；線上路徑用
-monkeypatch 換掉 `client._runtime()`，回傳假的 Converse API 回應（純 dict），
-不打真 AWS，不花 credit。
+monkeypatch 換掉 `client._stance_runtime()`（CEO/codex 對抗審修正後 stance 專用、
+獨立短 timeout 的 client，見 bedrock.py 的 `_STANCE_READ_TIMEOUT_SEC`），
+回傳假的 Converse API 回應（純 dict），不打真 AWS，不花 credit。
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ def test_classify_stance_runtime_exception_falls_back_to_neutral(monkeypatch):
         def converse(self, **kwargs):
             raise TimeoutError("simulated Bedrock timeout")
 
-    monkeypatch.setattr(client, "_runtime", lambda: _BoomRuntime())
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _BoomRuntime())
     assert client.classify_stance("A", "B") == "neutral"
 
 
@@ -56,7 +57,7 @@ def test_classify_stance_parses_tool_use_label(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr(client, "_runtime", lambda: _FakeRuntime())
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
     result = client.classify_stance("A", "B")
 
     assert result == "contradiction"
@@ -88,7 +89,7 @@ def test_classify_stance_illegal_label_falls_back_to_neutral(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr(client, "_runtime", lambda: _FakeRuntime())
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
     assert client.classify_stance("A", "B") == "neutral"
 
 
@@ -101,5 +102,5 @@ def test_classify_stance_missing_tool_use_falls_back_to_neutral(monkeypatch):
         def converse(self, **kwargs):
             return {"output": {"message": {"content": [{"text": "unexpected plain text"}]}}}
 
-    monkeypatch.setattr(client, "_runtime", lambda: _FakeRuntime())
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
     assert client.classify_stance("A", "B") == "neutral"
