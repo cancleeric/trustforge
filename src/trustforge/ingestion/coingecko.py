@@ -72,6 +72,24 @@ _UA = "TrustForge/1.0 (research)"
 # 門檻視為五五波、維持中性語意（見 CoinGeckoSentimentSource.fetch）。
 _SENTIMENT_DOMINANCE_THRESHOLD = 5.0
 
+# codex HIGH（呼應 #24 不造假，Tier2 收斂最後一根）：24h 漲跌幅合理範圍。
+# 這 5 個目標幣（BTC/ETH/SOL/BNB/XRP）皆為大型主流幣，真實 24h 漲跌幅超過
+# ±100% 幾乎必屬單位換算錯亂/API 異常等壞資料，不是真實行情——超出範圍
+# 一律視為不可用，交由呼叫端退回 N/A、不下方向判斷，避免把壞資料捏造成
+# 「真實大漲/大跌」。
+_MAX_PLAUSIBLE_CHANGE_PCT = 100.0
+
+# codex HIGH（呼應 #24 不造假，Tier2 收斂最後一根）：`last_updated_at` 只驗
+# 「有限」不夠——未來時間戳（例如遠未來/超大 epoch）會讓
+# `trust.scoring._recency_decay` 把「now - ts」算出負值，被 `max(0.0, ...)`
+# clamp 成 0 齡 → recency=1.0（最高信任），等於把壞資料捏造成「剛剛發生、
+# 最新鮮」的觀測，讓它更容易主導客觀類方向、扭曲背離/共識判定。改為只接受
+# 「合理範圍內的過去 epoch」：不早於 `_MIN_PLAUSIBLE_EPOCH`（避免 0/極小值
+# 這類明顯異常），也不晚於「呼叫當下 + 時鐘偏差容忍」（避免未來時間戳）；
+# 超出範圍一律退回 `fallback_now`（本地呼叫當下時間，真實、有限、非未來）。
+_MIN_PLAUSIBLE_EPOCH = 1_577_836_800.0  # 2020-01-01T00:00:00Z（保守下限，只用來擋明顯異常值）
+_CLOCK_SKEW_TOLERANCE_SEC = 300.0  # 容許的時鐘偏差：未來 5 分鐘內視為可能的正常時鐘漂移
+
 
 def _finite_num(
     v: object,
@@ -117,9 +135,11 @@ def _valid_pct(v: object) -> float | None:
 
 
 def _valid_change_pct(v: object) -> float | None:
-    """驗證 24h 漲跌幅欄位：必須是有限數字，理論上無界故不套用值域檢查
-    （可能 >100% 或 <-100%），只擋非數值/NaN/inf 這類壞值。"""
-    return _finite_num(v)
+    """驗證 24h 漲跌幅欄位：必須是有限數字，且落在合理範圍
+    ±`_MAX_PLAUSIBLE_CHANGE_PCT`（見模組頂部說明：這 5 個大型主流幣真實
+    24h 漲跌幅超過 ±100% 幾乎必屬壞資料）。超出範圍一律回 None，交由
+    呼叫端退回 N/A、不下方向判斷。"""
+    return _finite_num(v, lo=-_MAX_PLAUSIBLE_CHANGE_PCT, hi=_MAX_PLAUSIBLE_CHANGE_PCT)
 
 # Demo API key env（選用；keyless 已足夠，見模組頂部說明）。只從 env 讀，
 # 絕不 hardcode。實際 key 由 CEO 另立步驟在部署環境（systemd/EC2）設定，
@@ -279,11 +299,20 @@ class CoinGeckoPriceSource(Source):
             ref = f"{code} 現價 {price_val} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
             doc_id = "coingecko-price-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
             # 優先用 API 回應本身的 last_updated_at（真正的鮮度來源，反映該筆
-            # 報價實際成立的時間點）；缺欄位/壞值（未設 include_last_updated_at
-            # 生效前的舊快取、或 NaN/inf/非數值等 malformed 回應）才退回本地
-            # 呼叫當下時間——同樣套 `_finite_num`，避免 NaN 直接被塞進
-            # `Document.ts`（會污染 recency 衰減計算，等於用壞資料捏造鮮度）。
-            last_updated_val = _finite_num(entry.get("last_updated_at"))
+            # 報價實際成立的時間點）；缺欄位/壞值才退回本地呼叫當下時間。
+            #
+            # 修（codex HIGH，呼應 #24 不造假，Tier2 收斂最後一根）：原本只驗
+            # 「有限」，未來時間戳/超大 epoch 會讓 `_recency_decay` 把負齡
+            # clamp 成 0 → recency=1.0（最高信任），等於把壞資料捏造成「最新
+            # 鮮」的觀測。改為只接受「合理範圍內的過去 epoch」：不早於
+            # `_MIN_PLAUSIBLE_EPOCH`（擋 0/極小值），也不晚於「本次呼叫時間 +
+            # 時鐘偏差容忍」（擋未來時間戳）；超出範圍/NaN/inf/非數值一律退回
+            # `fallback_now`（真實、有限、非未來的本地時間，不捏造鮮度）。
+            last_updated_val = _finite_num(
+                entry.get("last_updated_at"),
+                lo=_MIN_PLAUSIBLE_EPOCH,
+                hi=fallback_now + _CLOCK_SKEW_TOLERANCE_SEC,
+            )
             ts = last_updated_val if last_updated_val is not None else fallback_now
             docs.append(Document(
                 id=doc_id,

@@ -146,6 +146,40 @@ PRICE_FIXTURE_STRING_LAST_UPDATED = json.dumps({
                 "usd_24h_change": 2.34, "last_updated_at": "just now"},
 }).encode()
 
+# codex HIGH（未來/超大時間戳 → 最高 recency 信任）：以下四種皆為「有限」但
+# 不合理的 epoch，只驗有限性擋不住，須靠合理範圍檢查。
+PRICE_FIXTURE_NEGATIVE_LAST_UPDATED = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34, "last_updated_at": -1_700_000_000},
+}).encode()
+
+PRICE_FIXTURE_ZERO_LAST_UPDATED = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34, "last_updated_at": 0},
+}).encode()
+
+# 西元 3000 年附近的 epoch：對任何現實中會執行本測試的時間點都是「遠未來」。
+PRICE_FIXTURE_FAR_FUTURE_LAST_UPDATED = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34, "last_updated_at": 32_503_680_000},
+}).encode()
+
+PRICE_FIXTURE_OVERSIZED_LAST_UPDATED = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 2.34, "last_updated_at": 1e18},
+}).encode()
+
+# codex HIGH（一次 sweep）：24h 漲跌幅超出合理範圍 ±100%，理應視為壞資料。
+PRICE_FIXTURE_EXTREME_POSITIVE_CHANGE = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": 5000.0},
+}).encode()
+
+PRICE_FIXTURE_EXTREME_NEGATIVE_CHANGE = json.dumps({
+    "bitcoin": {"usd": 67823.45, "usd_market_cap": 1_330_000_000_000,
+                "usd_24h_change": -300.0},
+}).encode()
+
 
 @pytest.fixture(autouse=True)
 def _reset_coingecko_process_cache():
@@ -320,6 +354,107 @@ def test_price_source_string_last_updated_falls_back_to_fetch_time(monkeypatch):
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
     assert len(docs) == 1
     assert math.isfinite(docs[0].ts)
+
+
+# codex HIGH（未來/超大時間戳 → 最高 recency 信任，coingecko.py:286-294）：
+# `last_updated_at` 只驗「有限」擋不住未來/超大 epoch——這些值會直接變成
+# `Document.ts`，讓 `_recency_decay` 算出負齡、clamp 成 0 齡 → recency=1.0
+# （最高信任），等於把壞資料捏造成「最新鮮」的觀測。以下四種皆須退回
+# `fallback_now`（本地真實呼叫時間），且經過真實 `score()` 得到的 recency
+# 分數不得被灌成 1.0（斷言實際分數落在合理衰減曲線內，而非只驗
+# `math.isfinite`）。
+@pytest.mark.parametrize(
+    "fixture_json",
+    [
+        PRICE_FIXTURE_NEGATIVE_LAST_UPDATED,
+        PRICE_FIXTURE_ZERO_LAST_UPDATED,
+        PRICE_FIXTURE_FAR_FUTURE_LAST_UPDATED,
+        PRICE_FIXTURE_OVERSIZED_LAST_UPDATED,
+    ],
+    ids=["negative", "zero", "far_future", "oversized_finite"],
+)
+def test_price_source_implausible_last_updated_falls_back_to_fetch_time(monkeypatch, fixture_json):
+    """負/零/遠未來/超大有限 epoch：Document.ts 須落在合理範圍（退回
+    fallback_now），不得直接採用壞值。"""
+    import math
+    import time
+    from trustforge.ingestion import coingecko
+    before = time.time()
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: fixture_json)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    after = time.time()
+    assert len(docs) == 1
+    assert math.isfinite(docs[0].ts)
+    # 退回的是本地呼叫當下時間（fallback_now），不是原始壞值。
+    assert before - 1.0 <= docs[0].ts <= after + 1.0
+
+
+@pytest.mark.parametrize(
+    "fixture_json",
+    [
+        PRICE_FIXTURE_NEGATIVE_LAST_UPDATED,
+        PRICE_FIXTURE_ZERO_LAST_UPDATED,
+        PRICE_FIXTURE_FAR_FUTURE_LAST_UPDATED,
+        PRICE_FIXTURE_OVERSIZED_LAST_UPDATED,
+    ],
+    ids=["negative", "zero", "far_future", "oversized_finite"],
+)
+def test_price_source_implausible_last_updated_does_not_inflate_recency_to_max(monkeypatch, fixture_json):
+    """真實 score() 路徑：壞時間戳退回 fallback_now 後，recency 分數應反映
+    「剛剛才 fetch」的正常新鮮度（略小於 1.0，因為 fetch 到 score 之間必有
+    非零耗時），而不是被壞值人為灌成剛好 1.0 的最高信任——用以證明壞資料
+    確實被判定為過去時間、走正常衰減公式，不是繞過驗證的巧合。"""
+    import time
+    from trustforge.ingestion import coingecko
+    from trustforge.trust.scoring import extract_claims, score
+
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: fixture_json)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+
+    claims = extract_claims(docs)
+    scored = score(claims, now=time.time() + 1.0)
+    assert len(scored) == 1
+    recency = scored[0].components.get("recency")
+    assert recency is not None
+    assert 0.0 <= recency < 1.0, (
+        f"壞時間戳退回 fallback_now 後，recency 不應被灌成 1.0 最高信任，實得 {recency}"
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_json",
+    [PRICE_FIXTURE_EXTREME_POSITIVE_CHANGE, PRICE_FIXTURE_EXTREME_NEGATIVE_CHANGE],
+    ids=["extreme_positive", "extreme_negative"],
+)
+def test_price_source_extreme_change_pct_degrades_to_na_not_fabricated(monkeypatch, fixture_json):
+    """codex HIGH sweep：24h 漲跌幅超出合理範圍 ±100%（如單位換算錯亂造成
+    的 5000%/-300%）視為壞資料，只退回 N/A、不下方向措辭，不得寫進 ref。"""
+    from trustforge.ingestion import coingecko
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: fixture_json)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    assert "N/A" in docs[0].text
+    assert "上漲" not in docs[0].text
+    assert "下跌" not in docs[0].text
+    assert "持平" not in docs[0].text
+
+
+@pytest.mark.parametrize(
+    "fixture_json",
+    [PRICE_FIXTURE_EXTREME_POSITIVE_CHANGE, PRICE_FIXTURE_EXTREME_NEGATIVE_CHANGE],
+    ids=["extreme_positive", "extreme_negative"],
+)
+def test_price_source_extreme_change_pct_infers_neutral_not_fabricated_direction(monkeypatch, fixture_json):
+    """真實 extract_claims 路徑：24h 漲跌幅超出合理範圍時，文字不含方向詞，
+    推出的 direction 須是 neutral，不得因壞資料被捏造成 bullish/bearish。"""
+    from trustforge.ingestion import coingecko
+    from trustforge.trust.scoring import extract_claims
+    monkeypatch.setattr(coingecko, "_fetch_url", lambda url, headers=None: fixture_json)
+    docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    claims = extract_claims(docs)
+    assert len(claims) == 1
+    assert claims[0].direction == "neutral"
 
 
 # ── CoinGeckoSentimentSource ──────────────────────────────────────────────────
