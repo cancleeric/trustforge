@@ -190,10 +190,18 @@ def test_score_stance_client_wiring_reduces_corroboration():
         "score() 應把 stance_client 貫穿到 _corroboration，矛盾閘生效"
     )
 
-    scored_without_stance = score([c_a, c_b], now=1000.0, stance_client=None)
-    sc_a2 = next(sc for sc in scored_without_stance if sc.claim.id == "wa")
-    assert sc_a2.components["corroboration"] > 0.0, (
-        "stance_client=None 時應維持原本佐證（矛盾閘不啟用）"
+    # CEO+codex 對抗審修正後：stance_client=None 不等於「矛盾閘關閉」，而是
+    # 「沒有線上 client、只讀持久化快取，快取 miss 時 fail-safe 回 neutral」。
+    # 用一組確定不在 demo/sample_data/stance_cache.json 裡的文字，驗證 miss 情境
+    # 下不會誤判成 contradiction、不會錯殺合法佐證。
+    text_c = "Traders note steady exchange inflows this week amid low volatility"
+    text_d = "Traders note steady exchange outflows this week amid low volatility"
+    c_c = Claim(id="wc", text=text_c, doc=_doc("dc", "news", "coindesk"))
+    c_d = Claim(id="wd", text=text_d, doc=_doc("dd", "news", "reuters"))
+    scored_without_stance = score([c_c, c_d], now=1000.0, stance_client=None)
+    sc_c = next(sc for sc in scored_without_stance if sc.claim.id == "wc")
+    assert sc_c.components["corroboration"] > 0.0, (
+        "stance_client=None + 持久化快取 miss 時應 fail-safe 回 neutral，不可錯殺合法佐證"
     )
 
 
@@ -209,3 +217,69 @@ def test_score_stance_client_without_classify_stance_does_not_crash():
 
     scored = score([c_a, c_b], now=1000.0, stance_client=_NoStanceClient())
     assert len(scored) == 2
+
+
+# --- CEO+codex 對抗審修正回歸測試（PR #26 續修）----------------------------------
+# [HIGH] 離線路徑必須也走持久化快取；[MEDIUM] cache_key 不可用裸分隔符串接。
+
+
+def test_offline_persistent_cache_hit_excludes_contradiction():
+    """[HIGH 驗收] 離線（無真實 Bedrock client）+ demo/sample_data/stance_cache.json
+    已預先算好 #15 這對是 contradiction 時，score(stance_client=None)（orchestrator.py
+    離線路徑實際傳的值）應該仍能透過 cached_stance_fn(None) 讀到持久化快取、正確把
+    這對主張排除在獨立佐證之外——不是完全不啟用矛盾閘。這是 orchestrator.py:341
+    `stance_client=None if client.offline else client` 離線分支的等價重現。
+    """
+    text_a = ("Market analysts expect regulatory clarity to boost institutional "
+              "adoption significantly.")
+    text_b = ("Market observers expect regulatory scrutiny to boost investor "
+              "caution significantly.")
+    c_a = Claim(id="off15a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="off15b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    # 完全不提供 client（等同 orchestrator 離線時傳的 None），只靠預設持久化快取路徑
+    # （demo/sample_data/stance_cache.json）。
+    scored = score([c_a, c_b], now=1000.0, stance_client=None)
+    sc_a = next(sc for sc in scored if sc.claim.id == "off15a")
+    assert sc_a.components["corroboration"] == 0.0, (
+        "離線模式應能讀到持久化快取的 contradiction 判斷並排除該對佐證，"
+        f"實際 corr={sc_a.components['corroboration']}"
+    )
+
+
+def test_offline_cache_miss_fails_safe_to_neutral_without_client():
+    """[HIGH 驗收] 離線 + 快取 miss（demo/sample_data/stance_cache.json 沒有這對的
+    預算結果）→ fail-safe 回 "neutral"，不 crash（不會因為 client=None 去呼叫
+    client.classify_stance）、也不可錯殺原本合法的佐證。
+    """
+    text_a = "Institutional adoption continues rising despite short-term regulatory caution"
+    text_b = "Institutional adoption continues rising steadily this quarter"
+    c_a = Claim(id="offmiss_a", text=text_a, doc=_doc("da", "news", "coindesk"))
+    c_b = Claim(id="offmiss_b", text=text_b, doc=_doc("db", "news", "reuters"))
+
+    scored = score([c_a, c_b], now=1000.0, stance_client=None)
+    sc_a = next(sc for sc in scored if sc.claim.id == "offmiss_a")
+    assert sc_a.components["corroboration"] > 0.0, (
+        "快取 miss 時應 fail-safe 回 neutral、不可錯殺合法佐證，"
+        f"實際 corr={sc_a.components['corroboration']}"
+    )
+
+
+def test_cache_key_no_collision_via_raw_separator_concat():
+    """[MEDIUM 驗收] cache_key 不可用裸分隔符字串接：('a<SEP>b', 'c') 與
+    ('a', 'b<SEP>c') 這類「使用者可控文字恰好包含分隔符」的輸入，正規化排序後
+    若用裸串接會產生同一把 key（讓惡意 claim 挪用他對快取結果）。改用 canonical
+    JSON 陣列序列化後，兩者必須是不同的 key。
+    """
+    # 用舊版分隔符 "␟" 本身當作使用者輸入的一部分，模擬對抗場景。
+    sep = "␟"
+    key1 = cache_key(f"a{sep}b", "c")
+    key2 = cache_key("a", f"b{sep}c")
+    assert key1 != key2, f"cache_key 發生碰撞：{key1!r} == {key2!r}"
+
+    # 額外驗證：兩把 key 各自仍能正確命中/不命中自己對應的快取，不會互相干擾。
+    cache = StanceCache()
+    cache.set(f"a{sep}b", "c", "contradiction")
+    cache.set("a", f"b{sep}c", "entailment")
+    assert cache.get(f"a{sep}b", "c") == "contradiction"
+    assert cache.get("a", f"b{sep}c") == "entailment"

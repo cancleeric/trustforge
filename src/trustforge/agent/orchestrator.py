@@ -337,7 +337,10 @@ def run_agent_pipeline(
     # ------------------------------------------------------------------
     log.record("pipeline.step2.start", summary="pipeline 評分 + 聚合（反作弊純演算法）")
     now_ts = max((d.ts for d in docs), default=now_fn())
-    # W1.5（#15）：離線 / 未設模型自動退回舊行為（stance_client=None → 語意矛盾閘不啟用）。
+    # W1.5（#15）：線上帶真 client（cache miss 才即時呼叫 Bedrock）；離線／未設模型帶
+    # None（CEO+codex 對抗審修正：None 不代表關掉語意矛盾閘，score() 仍會建立
+    # cached_stance_fn(None) 去讀持久化快取 demo/sample_data/stance_cache.json，
+    # 只有在快取也 miss 時才 fail-safe 回 neutral——離線 demo 才看得到 #15 的修復）。
     scored = score(claims, now=now_ts, stance_client=None if client.offline else client)
     brief = aggregate(scored, query=query)
     log.record(

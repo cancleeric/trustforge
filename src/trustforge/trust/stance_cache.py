@@ -31,9 +31,6 @@ _VALID_LABELS = frozenset({"entailment", "contradiction", "neutral"})
 
 DEFAULT_CACHE_PATH = SAMPLE_DIR / "stance_cache.json"
 
-# 不可見的分隔符，避免原句剛好含常見符號（如 "|"）造成 key 碰撞。
-_KEY_SEP = "␟"
-
 
 def normalize(text: str) -> str:
     """正規化：小寫 + 摺疊空白。保留原句文字，不做 tokenize/停用詞處理。"""
@@ -41,10 +38,18 @@ def normalize(text: str) -> str:
 
 
 def cache_key(a: str, b: str) -> str:
-    """順序無關 key：正規化後排序組合，讓 (a, b) 與 (b, a) 命中同一筆快取。"""
+    """順序無關 key：正規化後排序組合，讓 (a, b) 與 (b, a) 命中同一筆快取。
+
+    安全性（CEO+codex 對抗審發現）：`a`/`b` 是使用者可控文字（claim 原文），
+    不可用裸分隔符字串接（即使選罕見字元）——只要輸入恰好包含該分隔符，就能構造
+    `("a<SEP>b", "c")` 與 `("a", "b<SEP>c")` 這種不同語意輸入卻算出同一把 key
+    的碰撞，讓惡意 claim 挪用別對主張的快取結果（壓制合法佐證或繞過矛盾閘）。
+    改用 canonical JSON 陣列序列化：json.dumps 對字串內容做正確跳脫（含任何分隔符
+    候選字元本身），陣列邊界由跳脫過的引號界定，不會因為內容剛好像分隔符就混淆。
+    """
     na, nb = normalize(a), normalize(b)
-    first, second = sorted((na, nb))
-    return f"{first}{_KEY_SEP}{second}"
+    pair = sorted((na, nb))
+    return json.dumps(pair, ensure_ascii=False, separators=(",", ":"))
 
 
 class StanceCache:
@@ -90,13 +95,25 @@ class StanceCache:
 
 
 def cached_stance_fn(
-    client, cache: StanceCache | None = None
+    client=None, cache: StanceCache | None = None
 ) -> Callable[[str, str], str]:
     """把 `client.classify_stance(a, b)` 包一層快取，回傳可直接傳給
     `trust.scoring._corroboration(..., stance_fn=...)` 的純函式。
 
     cache 未提供時，預設用 `DEFAULT_CACHE_PATH`（demo/sample_data/stance_cache.json）
-    建立快取（含持久化層讀取）。
+    建立快取（含持久化層讀取），讓離線環境也能重放先前算好的 stance 判斷。
+
+    `client` 可為 None（CEO+codex 對抗審發現的修復）：離線模式或沒有可用的線上
+    client 時，呼叫端應仍能建立這個 stance_fn 以便讀取持久化快取——若因此排除
+    `client is None` 就整個不建 stance_fn，離線 pipeline 會永遠讀不到
+    `stance_cache.json` 的預算結果，#15 的修復在公開離線 demo 路徑上完全看不到。
+
+    cache miss 時：
+    - `client` 為 None，或 `client.offline` 為真（沒有可用的線上模型）→ fail-safe
+      直接回 "neutral"，不呼叫 `client.classify_stance`（不 raise、不打真 AWS），
+      也**不寫入快取**（避免把「沒查到」誤存成 neutral 的既定事實，之後接上真線上
+      client 或補上持久化快取時應該能重新判斷，而不是被這次的 fail-safe 值卡住）。
+    - 否則才呼叫 `client.classify_stance(a, b)` 並把結果寫入快取。
     """
     if cache is None:
         cache = StanceCache(DEFAULT_CACHE_PATH)
@@ -105,6 +122,8 @@ def cached_stance_fn(
         cached = cache.get(a, b)
         if cached is not None:
             return cached
+        if client is None or getattr(client, "offline", False):
+            return "neutral"
         label = client.classify_stance(a, b)
         if label not in _VALID_LABELS:
             label = "neutral"

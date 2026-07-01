@@ -271,14 +271,21 @@ def score(
     weights: dict | None = None,
     stance_client=None,
 ) -> list[ScoredClaim]:
-    """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient）。
-    None（預設）= 不啟用 W1.5 語意矛盾閘，`_corroboration` 行為與加入前逐字相同。
-    傳入的物件若沒有 `classify_stance` 方法，一律安全降級為 None（不 crash）。
+    """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient），
+    或 None。
+
+    CEO+codex 對抗審修正：`stance_client=None` **不代表關掉 W1.5**，而是「沒有可用的
+    線上模型（離線 / 未設模型）」——仍會建立 `cached_stance_fn(None)`，讓持久化快取
+    （`demo/sample_data/stance_cache.json`）在離線路徑也能生效；快取 miss 時
+    `cached_stance_fn` 內部 fail-safe 回 "neutral"，不呼叫任何 Bedrock、不 crash。
+    只有當 `stance_client` 是「非 None 但沒有 `classify_stance` 方法」的物件（例如
+    舊版測試用的 stub）時，才視為不相容物件、完全跳過矛盾閘（`stance_fn=None`，
+    等同 W1.5 加入前的行為）。
     """
     w = weights or DEFAULT_WEIGHTS
     stance_fn = (
         cached_stance_fn(stance_client)
-        if stance_client is not None and hasattr(stance_client, "classify_stance")
+        if stance_client is None or hasattr(stance_client, "classify_stance")
         else None
     )
     out: list[ScoredClaim] = []
