@@ -3,12 +3,16 @@
 路由：
   GET /            首頁表單（選幣種/題型/問題）
   GET /healthz     健康檢查（App Runner 用）→ 200 "ok"
-  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>] → HTML 報告
+  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>][&real=1] → HTML 報告
   GET /analyze.json 同上參數 → JSON {report, evidence, log}
 
-預設離線模式（用官方 OHLCV + 樣本來源 + Bedrock stub），故未設 AWS 也能跑出 Live Demo。
-live 模式需同時滿足：設了 BEDROCK_MODEL_ID、TRUSTFORGE_LIVE_TOKEN，
-且請求帶正確 token 參數（用 hmac.compare_digest 比對）。
+三檔模式（`data_mode`/`llm_mode` 解耦，見 `pipeline.run`）：
+  1. 離線示範（預設）：樣本資料 + Bedrock stub，未設 AWS 也能跑，$0。
+  2. 真資料·$0（`?real=1`）：走真連接器抓真資料，但 Bedrock 關閉（llm_mode=off），
+     不依賴 HAS_BEDROCK/token，仍是 $0，credit-safe。
+  3. 真 Bedrock（`?live=1&token=<TOKEN>`）：需同時滿足設了 BEDROCK_MODEL_ID、
+     TRUSTFORGE_LIVE_TOKEN，且請求帶正確 token 參數（用 hmac.compare_digest 比對）。
+     `live` 優先於 `real`：兩者同時滿足時走 live。
 埠口取自環境變數 PORT（App Runner 預設 8080）。
 """
 from __future__ import annotations
@@ -18,11 +22,12 @@ import hmac
 import html
 import json
 import logging
+import math
 import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .pipeline import run, run_comparison
@@ -48,34 +53,89 @@ _rate_buckets: dict[str, list[float]] = {}
 _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TrustForge — 加密市場分析 AI Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
- body{{font-family:-apple-system,"PingFang TC",sans-serif;max-width:920px;margin:2rem auto;padding:0 1rem;color:#1a1a1a;background:#fafafa}}
- h1{{margin-bottom:.2rem}} .sub{{color:#666;margin-top:0}}
- form{{background:#fff;border:1px solid #e2e2e2;border-radius:12px;padding:1.2rem;display:flex;gap:.8rem;flex-wrap:wrap;align-items:end}}
- label{{display:block;font-size:.8rem;color:#555;margin-bottom:.2rem}}
- select,input,button{{padding:.5rem .7rem;border:1px solid #ccc;border-radius:8px;font-size:1rem}}
- input[name=q]{{min-width:340px}} button{{background:#1f6feb;color:#fff;border:0;cursor:pointer}}
- .badge{{display:inline-block;background:#eef;border-radius:6px;padding:.1rem .5rem;font-size:.75rem;color:#356}}
- pre{{background:#fff;border:1px solid #e2e2e2;border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word}}
- table{{border-collapse:collapse;width:100%;background:#fff;font-size:.85rem}} td,th{{border:1px solid #e2e2e2;padding:.4rem;text-align:left}}
+ *{{box-sizing:border-box}}
+ body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:#e6edf3;background:#0d1117;-webkit-font-smoothing:antialiased}}
+ h1{{margin-bottom:.2rem}} .sub{{color:#8b949e;margin-top:0}}
+ a{{color:#1f6feb}}
+ header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid #30363d;border-radius:12px;background:linear-gradient(#12171e,#0f141a);margin-bottom:1rem;flex-wrap:wrap}}
+ .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:#e6edf3}}
+ .tf-logo b{{color:#1f6feb}}
+ .tf-version{{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:#8b949e;border:1px solid #30363d;border-radius:5px;padding:.15rem .5rem}}
+ .tf-mode-badge{{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:.7rem;border-radius:5px;padding:.2rem .55rem;border:1px solid #30363d}}
+ .tf-mode-badge.active.tf-live{{color:#3fb950;background:rgba(63,185,80,.12);border-color:rgba(63,185,80,.4)}}
+ .tf-mode-badge.active.tf-offline{{color:#8b949e;background:rgba(139,148,158,.10);border-color:#30363d}}
+ .tf-mode-badge.active.tf-real{{color:#79c0ff;background:rgba(31,111,235,.12);border-color:rgba(31,111,235,.4)}}
+ .tf-mode-badge.tf-static{{color:#484f58;background:transparent;border-color:#21262d;opacity:.7}}
+ .tf-mode-dot{{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0;animation:tf-pulse 1.8s infinite}}
+ @keyframes tf-pulse{{0%,100%{{opacity:1}}50%{{opacity:.35}}}}
+ .tf-hdr-spacer{{flex:1}}
+ .tf-costlink{{font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:#8b949e;text-decoration:none;border:1px solid #30363d;border-radius:6px;padding:.3rem .7rem;white-space:nowrap}}
+ .tf-costlink:hover{{border-color:#1f6feb;color:#e6edf3}}
+ .tf-layout{{display:grid;grid-template-columns:290px minmax(0,1fr);gap:1.2rem;align-items:start}}
+ .tf-query-panel{{position:sticky;top:1rem;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
+ .tf-query-panel h3{{margin:0;font-size:.72rem;font-weight:700;color:#6e7681;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #30363d;padding-bottom:.6rem}}
+ .tf-dashboard{{min-width:0}}
+ form{{background:transparent;border:0;padding:0;display:flex;flex-direction:column;gap:.8rem;align-items:stretch}}
+ label{{display:block;font-size:.8rem;color:#8b949e;margin-bottom:.2rem}}
+ select,input,button{{width:100%;padding:.5rem .7rem;border:1px solid #30363d;border-radius:8px;font-size:1rem;background:#0d1117;color:#e6edf3;font-family:inherit}}
+ input[name=q]{{min-width:0}} button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600}}
+ .badge{{display:inline-block;background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.4);border-radius:6px;padding:.1rem .5rem;font-size:.75rem;color:#79c0ff}}
+ pre{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:#e6edf3}}
+ table{{border-collapse:collapse;width:100%;background:#161b22;font-size:.85rem;color:#e6edf3}} td,th{{border:1px solid #30363d;padding:.4rem;text-align:left}}
  .j{{font-size:1.1rem;font-weight:600}} .conf{{color:#1f6feb}}
- .tf-section{{background:#fff;border:1px solid #e2e2e2;border-radius:10px;padding:1rem;margin:.8rem 0}}
- .tf-section h3{{margin-top:0;font-size:1rem;border-bottom:1px solid #eee;padding-bottom:.4rem;margin-bottom:.7rem}}
- .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:#e8e8e8;border-radius:5px;overflow:hidden;margin-right:4px}}
+ .tf-section{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1rem;margin:.8rem 0}}
+ .tf-section h3{{margin-top:0;font-size:1rem;border-bottom:1px solid #30363d;padding-bottom:.4rem;margin-bottom:.7rem;color:#e6edf3}}
+ .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:#0d1117;border:1px solid #30363d;border-radius:5px;overflow:hidden;margin-right:4px}}
  .tf-bar{{height:100%;border-radius:5px}}
- .tf-low{{display:inline-block;background:#fde;border:1px solid #f99;color:#900;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
- .tf-conf-wrap{{background:#f6f8fa;border:1px solid #e2e2e2;border-radius:8px;padding:.8rem;margin:.5rem 0}}
+ .tf-low{{display:inline-block;background:rgba(248,81,73,.14);border:1px solid rgba(248,81,73,.4);color:#f85149;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
+ .tf-conf-wrap{{background:#0f141a;border:1px solid #30363d;border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
+ .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
+ .tf-ev-date{{font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:#6e7681}}
+ .tf-ev-summary{{cursor:pointer}}
+ .tf-ev-body{{padding-top:.2rem}}
+ .tf-dash-hdr{{display:flex;align-items:center;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap}}
+ .tf-coin-badge{{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:1rem;color:#e6edf3;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:.25rem .7rem}}
+ .tf-dash-sep{{color:#30363d}}
+ .tf-dash-q{{color:#8b949e;font-size:.9rem}}
+ .tf-hero-row{{display:grid;grid-template-columns:auto minmax(0,1fr);gap:1.2rem;align-items:center}}
+ .tf-step{{border-left:4px solid #30363d;padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
+ .tf-step li{{margin:.25rem 0}}
+ @media (max-width:900px){{
+  body{{margin:1rem auto}}
+  header.tf-hdr{{flex-direction:column;align-items:flex-start}}
+  .tf-hdr-spacer{{display:none}}
+  .tf-layout{{grid-template-columns:1fr}}
+  .tf-query-panel{{position:static}}
+  .tf-hero-row{{grid-template-columns:1fr}}
+ }}
 </style></head><body>
-<h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　<span class="badge">{mode}</span>　<a href="/costs">成本帳本</a></p>
-<p><span class="badge" style="opacity:.6">{version}</span></p>
-<form action="/analyze" method="get">
- <div><label>幣種</label><select name="coin">{coins}</select></div>
- <div><label>題型</label><select name="type">{types}</select></div>
- <div><label>問題</label><input name="q" value="分析該幣種近兩週市場狀況，整合多源資料"></div>
- <button type="submit">分析</button>
-</form>
+<header class="tf-hdr">
+ <span class="tf-logo">Trust<b>Forge</b></span>
+ <span class="tf-version">{version}</span>
+ {mode}
+ <div class="tf-hdr-spacer"></div>
+ <a class="tf-costlink" href="/costs">成本帳本</a>
+</header>
+<div class="tf-layout">
+ <aside class="tf-query-panel">
+  <h3>Query Console</h3>
+  <p class="sub" style="margin:0;font-size:.8rem">加密市場分析 AI Agent — 多源資訊的信任提煉</p>
+  <form action="/analyze" method="get">
+   <div><label>幣種</label><select name="coin">{coins}</select></div>
+   <div><label>題型</label><select name="type">{types}</select></div>
+   <div><label>問題</label><input name="q" value="分析該幣種近兩週市場狀況，整合多源資料"></div>
+   <button type="submit">分析</button>
+  </form>
+ </aside>
+ <main class="tf-dashboard">
 {body}
+ </main>
+</div>
 </body></html>"""
 
 
@@ -103,38 +163,67 @@ def _opts(values, labels=None):
 
 
 def _trust_bar(trust: float) -> str:
-    """CSS 信任橫條（依層級上色：高綠/中橙/低紅）。"""
-    pct = max(0, min(100, int(trust * 100)))
+    """SVG 弧形信任量表（依層級上色：高綠/中橙/低紅）。取代舊版 CSS 橫條。"""
+    pct = max(0.0, min(1.0, trust))
     if trust >= 0.7:
-        color, label = "#22863a", "高"
+        color, label = "#3fb950", "高"
     elif trust >= 0.3:
         color, label = "#d9832a", "中"
     else:
-        color, label = "#cb2431", "低"
+        color, label = "#f85149", "低"
+    r = 14
+    circumference = 2 * math.pi * r
+    arc_val = circumference * pct
     return (
-        f'<span class="tf-bar-wrap">'
-        f'<span class="tf-bar" style="width:{pct}%;background:{color}"></span>'
+        f'<span style="display:inline-flex;align-items:center;gap:.35rem;vertical-align:middle">'
+        f'<svg width="34" height="34" viewBox="0 0 34 34" style="flex-shrink:0">'
+        f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="#30363d" stroke-width="4"></circle>'
+        f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="{color}" stroke-width="4" '
+        f'stroke-linecap="round" stroke-dasharray="{arc_val:.2f} {circumference:.2f}" '
+        f'transform="rotate(-90 17 17)"></circle>'
+        f'</svg>'
+        f'<span style="color:{color};font-size:.8rem">{trust:.2f} {label}</span>'
         f'</span>'
-        f'<span style="color:{color};font-size:.8rem"> {trust:.2f} {label}</span>'
     )
 
 
 def _conf_gauge(confidence: float, label: str) -> str:
-    """整體信心視覺化：大字標籤 + 橫條。"""
-    pct = max(0, min(100, int(confidence * 100)))
+    """整體信心視覺化：SVG 弧形 Trust Score gauge（270° 弧）+ 大字標籤。"""
+    pct = max(0.0, min(1.0, confidence))
     if confidence >= 0.7:
-        color = "#22863a"
+        color = "#3fb950"
     elif confidence >= 0.45:
         color = "#d9832a"
     else:
-        color = "#cb2431"
+        color = "#f85149"
+    r = 72
+    circumference = 2 * math.pi * r
+    arc_span = 0.75 * circumference  # 270 度弧，缺口朝下（呼應 dc-handoff 設計稿）
+    arc_val = arc_span * pct
+    score100 = int(round(confidence * 100))
     return (
-        f'<div class="tf-conf-wrap">'
+        f'<div class="tf-conf-wrap" style="display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap">'
+        f'<div style="position:relative;width:168px;height:168px;flex-shrink:0">'
+        f'<svg viewBox="0 0 168 168" width="168" height="168">'
+        f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="#30363d" stroke-width="13" '
+        f'stroke-linecap="round" stroke-dasharray="{arc_span:.1f} {circumference:.1f}" '
+        f'transform="rotate(135 84 84)"></circle>'
+        f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="{color}" stroke-width="13" '
+        f'stroke-linecap="round" stroke-dasharray="{arc_val:.1f} {circumference:.1f}" '
+        f'transform="rotate(135 84 84)"></circle>'
+        f'</svg>'
+        f'<div style="position:absolute;inset:0;display:flex;flex-direction:column;'
+        f'align-items:center;justify-content:center">'
+        f'<div style="font-family:\'IBM Plex Mono\',monospace;font-weight:700;font-size:2.6rem;'
+        f'color:{color}">{score100}</div>'
+        f'<div style="font-size:.7rem;color:#6e7681">/ 100</div>'
+        f'</div>'
+        f'</div>'
+        f'<div>'
         f'<div class="tf-conf-big" style="color:{color}">{html.escape(label)}</div>'
-        f'<div style="font-size:.85rem;color:#555">整體信心指數 {confidence:.2f}</div>'
-        f'<div class="tf-bar-wrap" style="width:180px;height:13px;margin-top:.4rem">'
-        f'<div class="tf-bar" style="width:{pct}%;background:{color}"></div>'
-        f'</div></div>'
+        f'<div style="font-size:.85rem;color:#8b949e">整體信心指數 {confidence:.2f}</div>'
+        f'</div>'
+        f'</div>'
     )
 
 
@@ -166,7 +255,7 @@ def _render_cost_card(log) -> str:
         f'<div class="tf-section">'
         f'<h3>本次分析成本</h3>'
         f'<p class="j">{e(cost_display)}</p>'
-        f'<p style="color:#666;font-size:.85rem">'
+        f'<p style="color:#8b949e;font-size:.85rem">'
         f'共 {len(cost_events)} 次 LLM 呼叫；輸入 {tokens_in} tokens／輸出 {tokens_out} tokens</p>'
         f'<table><tr><th>Model</th><th>輸入 tokens</th><th>輸出 tokens</th><th>估算成本</th></tr>'
         f'{rows}</table>'
@@ -199,7 +288,8 @@ def _render_costs_page() -> str:
             over_budget = False
 
     card_style = (
-        "border-color:#cb2431;background:#fff5f5" if over_budget else "border-color:#1f6feb;background:#f0f6ff"
+        "border-color:#cb2431;background:rgba(203,36,49,.08)"
+        if over_budget else "border-color:#1f6feb;background:rgba(31,111,235,.08)"
     )
     alert_html = (
         f'<p style="color:#cb2431;font-weight:600">'
@@ -217,7 +307,7 @@ def _render_costs_page() -> str:
     run_rows = []
     for r in recent:
         calls = r.get("calls", []) or []
-        offline_badge = " <small style='color:#888'>(離線)</small>" if r.get("offline") else ""
+        offline_badge = " <small style='color:#6e7681'>(離線)</small>" if r.get("offline") else ""
         run_rows.append(
             f"<tr><td>{e(str(r.get('ts', '')))}</td>"
             f"<td>{e(str(r.get('coin', '')))}</td>"
@@ -232,7 +322,7 @@ def _render_costs_page() -> str:
   <h2 style="margin:0 0 .3rem">累計成本帳本</h2>
   <p class="j">${total:.4f}</p>
   {alert_html}
-  <p style="color:#666;font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
+  <p style="color:#8b949e;font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
 </div>
 
 <div class="tf-section">
@@ -306,50 +396,94 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
             f'</span>'
         )
 
-    manip_color  = "#cb2431" if manip > 0 else "#333"
+    # manip>0 一律紅色 #cb2431（回歸測試鎖定的顏色碼，勿改）；manip==0 用中性灰
+    manip_color  = "#cb2431" if manip > 0 else "#8b949e"
     manip_weight = "font-weight:600;" if manip > 0 else ""
 
     corr_text  = "✓ 有獨立來源交叉佐證" if corr > 0 else "— 無交叉佐證"
-    corr_color = "#22863a"              if corr > 0 else "#888"
+    corr_color = "#3fb950"              if corr > 0 else "#8b949e"
+
+    # ---- WHY caption：純由既有 float 值推導的白話說明，不新增資料欄位 ----
+    why_rep = "高信譽來源佐證" if rep >= 0.7 else ("中等信譽來源" if rep >= 0.4 else "低信譽來源，需查證")
+    why_corr = "有獨立來源交叉佐證" if corr > 0 else "單一來源，無交叉佐證"
+    why_rec = "資料具時效性" if rec >= 0.7 else ("時效性中等" if rec >= 0.4 else "資料可能已過時")
+    why_manip = "偵測到操縱風險信號，予以扣分" if manip > 0 else "未偵測到操縱風險信號"
+
+    # ---- composite stacked bar：僅信譽/佐證/時效三個正向分項疊加；
+    # 操縱不可並列成正向第四塊，改在下方以獨立紅色 deficit bar（靠右生長、代表扣分）呈現，
+    # 對應真實公式：信任 = 信譽×0.5 + 佐證×0.25 + 時效×0.15 − 操縱×0.4 ----
+    pos_weight = 0.5 + 0.25 + 0.15
+    rep_c, corr_c, rec_c = rep * 0.5, corr * 0.25, rec * 0.15
+
+    def _seg_pct(contrib: float) -> float:
+        return max(0.0, min(100.0, contrib / pos_weight * 100))
+
+    manip_deficit = manip * 0.4
+    stacked_bar = (
+        f'<div style="display:flex;height:14px;width:100%;background:#0d1117;'
+        f'border-radius:4px;overflow:hidden;border:1px solid #30363d">'
+        f'<span style="height:100%;width:{_seg_pct(rep_c):.1f}%;background:#3fb950" '
+        f'title="信譽 {rep:.2f}×0.50"></span>'
+        f'<span style="height:100%;width:{_seg_pct(corr_c):.1f}%;background:#1f6feb" '
+        f'title="佐證 {corr:.2f}×0.25"></span>'
+        f'<span style="height:100%;width:{_seg_pct(rec_c):.1f}%;background:#8957e5" '
+        f'title="時效 {rec:.2f}×0.15"></span>'
+        f'</div>'
+        f'<div style="display:flex;justify-content:space-between;font-size:.65rem;'
+        f'color:#6e7681;margin-top:.15rem">'
+        f'<span>0</span><span>正向合計 {(rep_c + corr_c + rec_c):.2f}</span>'
+        f'<span>{pos_weight:.2f}</span></div>'
+        f'<div style="display:flex;height:8px;width:100%;background:#0d1117;'
+        f'border-radius:4px;overflow:hidden;border:1px solid rgba(203,36,49,.4);margin-top:.35rem" '
+        f'title="操縱扣分 −{manip_deficit:.2f}">'
+        f'<span style="margin-left:auto;height:100%;'
+        f'width:{max(0.0, min(100.0, manip * 100)):.1f}%;background:#cb2431"></span>'
+        f'</div>'
+        f'<div style="color:#cb2431;font-size:.65rem;margin-top:.1rem">'
+        f'扣分：操縱 {manip:.2f} × 0.40 = −{manip_deficit:.2f}</div>'
+    )
 
     return (
-        f'<div style="margin:.35rem 0;padding:.4rem .6rem;background:#f8f9fa;'
-        f'border-radius:6px;border:1px solid #e2e2e2;font-size:.78rem">'
-        f'<div style="color:#888;font-size:.7rem;font-weight:600;margin-bottom:.25rem">'
-        f'信任分析（信譽×0.5 + 佐證×0.25 + 時效×0.15 − 操縱×0.4）</div>'
-        f'<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.2rem">'
+        f'<div style="margin:.35rem 0;padding:.5rem .6rem;background:#0f141a;'
+        f'border-radius:6px;border:1px solid #30363d;font-size:.78rem">'
+        f'<div style="color:#6e7681;font-size:.7rem;font-weight:600;margin-bottom:.3rem">'
+        f'信任分析（信譽×0.50 + 佐證×0.25 + 時效×0.15 − 操縱×0.40）</div>'
+        f'{stacked_bar}'
+        f'<div style="display:flex;flex-direction:column;gap:.3rem;margin-top:.5rem">'
         # 信譽
-        f'<span style="white-space:nowrap">'
-        f'<span style="color:#555">信譽</span> '
-        f'{mini_bar(rep, "#22863a")} '
-        f'<span style="color:#333">{rep:.2f}</span>'
-        f'<span style="color:#888"> ×0.5</span></span>'
+        f'<div><span style="white-space:nowrap">'
+        f'<span style="color:#8b949e">信譽</span> '
+        f'{mini_bar(rep, "#3fb950")} '
+        f'<span style="color:#e6edf3">{rep:.2f}</span>'
+        f'<span style="color:#6e7681"> ×0.50</span></span>'
+        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div></div>'
         # 佐證
-        f'<span style="color:#bbb">｜</span>'
-        f'<span style="white-space:nowrap">'
-        f'<span style="color:#555">佐證</span> '
+        f'<div><span style="white-space:nowrap">'
+        f'<span style="color:#8b949e">佐證</span> '
         f'{mini_bar(corr, "#1f6feb")} '
-        f'<span style="color:#333">{corr:.2f}</span>'
-        f'<span style="color:#888"> ×0.25</span></span>'
+        f'<span style="color:#e6edf3">{corr:.2f}</span>'
+        f'<span style="color:#6e7681"> ×0.25</span></span>'
+        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_corr)}</div></div>'
         # 時效
-        f'<span style="color:#bbb">｜</span>'
-        f'<span style="white-space:nowrap">'
-        f'<span style="color:#555">時效</span> '
+        f'<div><span style="white-space:nowrap">'
+        f'<span style="color:#8b949e">時效</span> '
         f'{mini_bar(rec, "#8957e5")} '
-        f'<span style="color:#333">{rec:.2f}</span>'
-        f'<span style="color:#888"> ×0.15</span></span>'
-        # 操縱
-        f'<span style="color:#bbb">｜</span>'
-        f'<span style="white-space:nowrap">'
-        f'<span style="color:#555">操縱</span> '
+        f'<span style="color:#e6edf3">{rec:.2f}</span>'
+        f'<span style="color:#6e7681"> ×0.15</span></span>'
+        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_rec)}</div></div>'
+        # 操縱（紅色扣分方向，非正向第四塊）
+        f'<div><span style="white-space:nowrap">'
+        f'<span style="color:#8b949e">操縱</span> '
         f'{mini_bar(manip, "#cb2431")} '
         f'<span style="color:{manip_color};{manip_weight}">{manip:.2f}</span>'
-        f'<span style="color:#888"> ×0.4</span></span>'
-        # 結果
-        f'<span style="color:#bbb">→</span>'
-        f'<span style="white-space:nowrap;font-weight:600">信任 {trust:.2f}</span>'
+        f'<span style="color:#6e7681"> ×0.40</span></span>'
+        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_manip)}</div></div>'
         f'</div>'
-        f'<div style="color:{corr_color};font-size:.75rem">{e(corr_text)}</div>'
+        f'<div style="margin-top:.4rem">'
+        f'<span style="color:#6e7681">→</span> '
+        f'<span style="font-weight:600;color:#e6edf3">信任 {trust:.2f}</span>'
+        f'</div>'
+        f'<div style="color:{corr_color};font-size:.75rem;margin-top:.15rem">{e(corr_text)}</div>'
         f'</div>'
     )
 
@@ -378,16 +512,23 @@ def _render_evidence_list(
         else:
             url_html = "&#8212;"
         coin_td = f"<td>{e(coin)}</td>" if coin is not None else ""
-        row_style = ' style="background:#fff5f5"' if is_low else ""
+        row_style = ' style="background:rgba(248,81,73,.07)"' if is_low else ""
+        # 來源 pill + 深色 <details> 卡殼（僅外包 class/樣式，e()／_safe_href 呼叫點與參數不變）
         rows.append(
             f"<tr{row_style}>"
             f"<td>E{idx}{badge}</td>"
             f"{coin_td}"
             f"<td>"
-            f"<details><summary>{e(ev.source)} · {e(ev.fetched_at)}</summary>"
-            f"<p style='margin:.3rem 0;font-size:.85rem'>{e(ev.content_reference)}</p>"
-            f"<p style='margin:.3rem 0;font-size:.82rem'>URL: {url_html}</p>"
+            f"<details>"
+            f'<summary class="tf-ev-summary">'
+            f'<span class="tf-src-pill">{e(ev.source)}</span>'
+            f'<span class="tf-ev-date">{e(ev.fetched_at)}</span>'
+            f"</summary>"
+            f'<div class="tf-ev-body">'
+            f"<p style='margin:.3rem 0;font-size:.85rem;color:#c9d1d9'>{e(ev.content_reference)}</p>"
+            f"<p style='margin:.3rem 0;font-size:.82rem;color:#8b949e'>URL: {url_html}</p>"
             f"{_render_trust_breakdown(ev.trust_components, ev.trust)}"
+            f"</div>"
             f"</details>"
             f"</td>"
             f"<td>{_trust_bar(ev.trust)}</td>"
@@ -396,11 +537,46 @@ def _render_evidence_list(
     return "".join(rows)
 
 
-def render_page(body: str = "") -> str:
-    """組完整 HTML（模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。"""
-    mode = "AWS Bedrock 就緒（?live=1 啟用）" if HAS_BEDROCK else "離線示範模式（未設 BEDROCK_MODEL_ID）"
+def render_page(body: str = "", active_mode: str = "offline") -> str:
+    """組完整 HTML（三檔模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。
+
+    三檔徽章（dark 樣式，見 .tf-mode-badge）恆同時列出：離線示範／真資料·$0
+    （?real=1）／真 Bedrock（?live=1+token）——但**只有 `active_mode` 指定的
+    那一檔**渲染成 active（動畫脈動點 + 該檔專屬色），其餘兩檔渲染成灰色靜態
+    能力標籤（無動畫），代表「可用但非本次」。
+
+    修復 MEDIUM：三檔徽章若同時顯示 active，使用者無法判斷本次畫面的證據到底
+    來自樣本 / 真連接器 / 真 Bedrock，對「信任提煉」產品是實質誤導（provenance
+    不清）。`active_mode` 須為呼叫方對本次請求實際生效模式的判斷結果（見
+    `_active_mode()`），而非畫面能力宣告。
+
+    `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`
+    （首頁 `/`、`/costs` 等未經過分析流程的頁面，視為離線示範為預設 active 檔）。
+    """
+    live_capable = HAS_BEDROCK
+    live_is_active = active_mode == "live" and live_capable
+
+    def _badge(css_class: str, text: str, is_active: bool) -> str:
+        # 文案皆為固定常數（非使用者輸入），escape 仍保留縱深防禦
+        if is_active:
+            return (
+                f'<span class="tf-mode-badge {css_class} active">'
+                f'<span class="tf-mode-dot"></span>{html.escape(text)}</span>'
+            )
+        return f'<span class="tf-mode-badge tf-static">{html.escape(text)}</span>'
+
+    if live_capable:
+        live_text = "LIVE · 真 Bedrock（?live=1）" if live_is_active else "真 Bedrock（?live=1）"
+    else:
+        live_text = "真 Bedrock（未設 BEDROCK_MODEL_ID）"
+
+    mode = (
+        _badge("tf-offline", "離線示範", active_mode == "offline")
+        + _badge("tf-real", "真資料·$0（?real=1）", active_mode == "real")
+        + _badge("tf-live", live_text, live_is_active)
+    )
     return _PAGE.format(
-        mode=html.escape(mode), body=body,
+        mode=mode, body=body,
         version=html.escape(VERSION),
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
@@ -418,16 +594,16 @@ def _render_cross_signal(signal: dict) -> str:
     sig_type = signal.get("type", "")
     if sig_type == "divergence":
         border_color = "#d9832a"
-        bg_color = "#fff8f0"
+        bg_color = "rgba(217,131,42,.08)"
         type_label = "背離"
     else:
         border_color = "#1f6feb"
-        bg_color = "#f0f6ff"
+        bg_color = "rgba(31,111,235,.08)"
         type_label = "共識"
     summary_esc = e(signal.get("summary", ""))
     ids = signal.get("supporting_claim_ids", [])
     ids_html = (
-        f'<small style="color:#666">佐證 claim_ids：{e(", ".join(ids))}</small>'
+        f'<small style="color:#8b949e">佐證 claim_ids：{e(", ".join(ids))}</small>'
         if ids else ""
     )
     return (
@@ -439,11 +615,59 @@ def _render_cross_signal(signal: dict) -> str:
     )
 
 
-def _render_report(report, evidence, log=None) -> str:
-    """分析結果渲染為信任儀表板（事實→推論→結論三段 + 信任橫條 + 可展開 evidence）。
+def _aggregate_trust_components(evidence: list) -> dict:
+    """純渲染層彙總：對 evidence 逐筆 trust_components 取平均，供 dashboard hero 區塊
+    的「Trust Breakdown」並排面板顯示。不新增資料欄位、不改真實信任公式——
+    每筆 evidence 的 trust/trust_components 仍是 pipeline 算出的原值，這裡只是
+    純視覺呈現用的算術平均，供使用者一眼看整體分項分布。
+    """
+    keys = ("reputation", "corroboration", "recency", "manipulation")
+    sums = {k: 0.0 for k in keys}
+    n = 0
+    for ev in evidence:
+        tc = getattr(ev, "trust_components", None) or {}
+        if not tc:
+            continue
+        n += 1
+        for k in keys:
+            try:
+                sums[k] += float(tc.get(k, 0.0))
+            except (TypeError, ValueError):
+                pass
+    if n == 0:
+        return {}
+    return {k: sums[k] / n for k in keys}
+
+
+def _render_report(
+    report, evidence, log=None, mode_extra: dict | None = None, show_json_link: bool = True
+) -> str:
+    """分析結果渲染為信任儀表板（頂部 hero：大 gauge + Trust Breakdown 並排，
+    事實→推論→結論三段階梯卡片 + 信任橫條 + 可展開 evidence）。
 
     `log`：可選的 `ExecutionLog`，提供時嵌入「本次分析成本」卡（見 `_render_cost_card`）。
     comparison 頁面內嵌的單幣詳細分析不傳 `log`（避免重複顯示合併後的整體成本卡）。
+    `mode_extra`：由 `_mode_extra_params()` 算出的模式參數 dict（`{}` /
+    `{"real": "1"}` / `{"live": "1", "token": ...}`），跟 `coin`/`type`/`q` 一起
+    交給 `_analyze_json_href()` 一次 `urlencode`，確保 real/live 模式點「下載
+    JSON」時仍匯出同一模式的資料，不會落回預設 offline/sample 分支造成匯出跟
+    畫面不一致。預設 `None`（視同 `{}`）＝不帶模式參數（向後相容）。
+
+    HIGH 根治修復（連結構造根因）：舊版 `coin`/`type`/`q` 逐段只 `html.escape`
+    串接進 href，從未 percent-encode——`q` 含 `& + # % "` 或非 ASCII 字元時，
+    這些字元在 query string 語法裡的地位沒被正確轉義，瀏覽器/後端 `parse_qs`
+    解碼後會誤判成參數分隔符，重新請求解出的參數跟畫面原始值兜不起來，破壞
+    溯源。現在改由 `_analyze_json_href()` 統一處理：coin/type/q/mode 參數
+    一次進同一個 `urlencode`（值層 percent-encode），組出的完整 query string
+    再整段做一次 `html.escape`（href 屬性層），兩層各司其職、不再逐段補丁。
+
+    `show_json_link`：是否渲染本函式自己的「下載 JSON」連結。HIGH 修復：comparison
+    頁面內嵌的單幣詳細分析（`report.coin` 只有單一幣種，如 "BTC"）若各自帶一條用
+    `coin={report.coin}&type=comparison` 建的下載連結，點下去會因缺第二個幣種、
+    `_parse_comparison_coins` 無法從單一幣種重建雙幣配對而回 400——匯出連結整個壞掉。
+    因此 comparison 場景（見 `_render_comparison`）呼叫內嵌的 `_render_report` 時傳
+    `show_json_link=False`，改由 `_render_comparison` 自己用原始雙幣參數
+    （`coin=A,B&type=comparison`）組出唯一一條正確的 top-level 下載連結。
     """
     e = html.escape
     facts = "".join(f"<li>{e(f)}</li>" for f in report.facts)
@@ -457,32 +681,48 @@ def _render_report(report, evidence, log=None) -> str:
     flips = "".join(f"<li>{e(x)}</li>" for x in report.could_flip)
     contra = "".join(f"<li>{e(x)}</li>" for x in report.contrarian)
     conf_html = _conf_gauge(report.confidence, report.confidence_label())
+    agg_tc = _aggregate_trust_components(evidence)
+    breakdown_html = _render_trust_breakdown(agg_tc, report.confidence) if agg_tc else ""
     ev_rows = _render_evidence_list(evidence)
     cross_html = (
         _render_cross_signal(report.cross_source_signal)
         if getattr(report, "cross_source_signal", None) else ""
     )
     cost_html = _render_cost_card(log) if log is not None else ""
+    json_link_html = (
+        f'<p><a href="{_analyze_json_href(report.coin, report.question_type, report.question, mode_extra)}">'
+        f'下載 JSON（report+evidence+log）</a></p>'
+        if show_json_link else ""
+    )
     return f"""
-<div class="tf-section" style="background:#f0f6ff;border-color:#1f6feb">
-  <h2 style="margin:0 0 .4rem">{e(report.coin)} · {e(report.question_type)}</h2>
-  <p class="j">市場判斷：{e(report.market_judgment)}</p>
-  {conf_html}
+<div class="tf-dash-hdr">
+  <span class="tf-coin-badge">{e(report.coin)}</span>
+  <span class="tf-dash-sep">●</span>
+  <span class="tf-dash-q">{e(report.question)}</span>
 </div>
 
-<div class="tf-section" style="border-left:4px solid #22863a">
+<div class="tf-section" style="background:rgba(31,111,235,.08);border-color:#1f6feb">
+  <h2 style="margin:0 0 .4rem">{e(report.coin)} · {e(report.question_type)}</h2>
+  <p class="j">市場判斷：{e(report.market_judgment)}</p>
+  <div class="tf-hero-row">
+    {conf_html}
+    <div>{breakdown_html}</div>
+  </div>
+</div>
+
+<div class="tf-section" style="border-left:4px solid #3fb950">
   <h3>事實（客觀資料）</h3>
-  <ul>{facts or '<li>&#8212;</li>'}</ul>
+  <ul class="tf-step">{facts or '<li>&#8212;</li>'}</ul>
 </div>
 
 <div class="tf-section" style="border-left:4px solid #d9832a">
   <h3>推論（Agent 推理）</h3>
-  <ul>{infer or '<li>&#8212;</li>'}</ul>
+  <ul class="tf-step">{infer or '<li>&#8212;</li>'}</ul>
 </div>
 
 <div class="tf-section" style="border-left:4px solid #1f6feb">
   <h3>結論 / 關鍵依據</h3>
-  <ul>{basis or '<li>&#8212;</li>'}</ul>
+  <ul class="tf-step">{basis or '<li>&#8212;</li>'}</ul>
 </div>
 
 <div class="tf-section">
@@ -494,7 +734,7 @@ def _render_report(report, evidence, log=None) -> str:
 
 {cross_html}
 
-<div class="tf-section" style="border-left:4px solid #cb2431">
+<div class="tf-section" style="border-left:4px solid #f85149">
   <h3>反方 / 低信任（未納入主結論）</h3>
   <ul>{contra or '<li>&#8212;</li>'}</ul>
 </div>
@@ -509,7 +749,7 @@ def _render_report(report, evidence, log=None) -> str:
 
 {cost_html}
 
-<p><a href="/analyze.json?coin={e(report.coin)}&type={e(report.question_type)}&q={e(report.question)}">下載 JSON（report+evidence+log）</a></p>
+{json_link_html}
 """
 
 
@@ -576,12 +816,31 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
     return None
 
 
-def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str, log=None) -> str:
+def _render_comparison(
+    report_a, evidence_a, report_b, evidence_b, query: str, log=None,
+    mode_extra: dict | None = None,
+) -> str:
     """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。
 
     `log`：兩幣共用同一個 `ExecutionLog`（見 `pipeline.run_comparison`），提供時
     在頂層嵌一張合併「本次分析成本」卡（涵蓋兩幣總花費）；內嵌的單幣詳細分析
     不重複帶 log（避免同一份合併成本重複顯示兩次）。
+    `mode_extra`：見 `_render_report`——由 `_mode_extra_params()` 算出的模式參數
+    dict，供 top-level 下載連結跟 coin/type/q 一起進同一次 `urlencode`
+    （預設 `None`，視同 `{}`＝不帶，向後相容）。
+
+    HIGH 修復（comparison JSON 下載連結掉第二個幣）：內嵌的兩份單幣詳細分析各自
+    只知道自己那一個 `report.coin`（如 "BTC"），若各自照 `_render_report` 預設行為
+    產生「下載 JSON」連結，會建出 `coin=BTC&type=comparison` 這種單幣配 comparison
+    型別的連結——`_do_comparison`/`_parse_comparison_coins` 需要 `coin=A,B` 兩個
+    幣種才能重建配對，單幣版本一律 400，連結整個是壞的。修法：內嵌呼叫
+    `_render_report(..., show_json_link=False)` 關掉各自的連結，改由本函式用
+    原始雙幣（`report_a.coin`, `report_b.coin`）組唯一一條 top-level 正確連結
+    （`coin=A,B&type=comparison&q=<query>`）。
+
+    HIGH 根治修復（連結構造根因，見 `_render_report`/`_analyze_json_href`）：
+    coin/type/query 一律跟 `mode_extra` 併成同一個 dict、一次 `urlencode`，不再
+    逐段 `html.escape` 串接——`query` 含 `& + # % "` 或非 ASCII 中文時同樣受影響。
     """
     e = html.escape
     dir_a = report_a.direction or report_a._direction_label()
@@ -589,7 +848,7 @@ def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str, l
 
     def _cmp_conf(conf: float, label: str) -> str:
         pct = max(0, min(100, int(conf * 100)))
-        color = "#22863a" if conf >= 0.7 else "#d9832a" if conf >= 0.45 else "#cb2431"
+        color = "#3fb950" if conf >= 0.7 else "#d9832a" if conf >= 0.45 else "#f85149"
         return (
             f'<span style="color:{color};font-weight:600">{html.escape(label)}'
             f"（{conf:.2f}）</span>"
@@ -605,10 +864,24 @@ def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str, l
         evidence_b, coin=report_b.coin, start_idx=len(evidence_a)
     )
     cost_html = _render_cost_card(log) if log is not None else ""
+    # HIGH 修復：唯一一條 top-level 下載連結，用原始雙幣參數（coin=A,B）建，
+    # 才能讓 _do_comparison/_parse_comparison_coins 重建正確的雙幣配對。
+    json_link_html = (
+        f'<p><a href="{_analyze_json_href(f"{report_a.coin},{report_b.coin}", "comparison", query, mode_extra)}">'
+        f'下載 JSON（report_a+report_b+evidence+log）</a></p>'
+    )
     return f"""
-<div class="tf-section" style="background:#f0f6ff;border-color:#1f6feb">
+<div class="tf-dash-hdr">
+  <span class="tf-coin-badge">{e(report_a.coin)}</span>
+  <span class="tf-dash-sep">vs</span>
+  <span class="tf-coin-badge">{e(report_b.coin)}</span>
+  <span class="tf-dash-sep">●</span>
+  <span class="tf-dash-q">{e(query)}</span>
+</div>
+
+<div class="tf-section" style="background:rgba(31,111,235,.08);border-color:#1f6feb">
   <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
-  <p style="color:#555;margin:.2rem 0">{e(query)}</p>
+  <p style="color:#8b949e;margin:.2rem 0">{e(query)}</p>
 </div>
 
 <div class="tf-section">
@@ -635,28 +908,148 @@ def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str, l
 
 {cost_html}
 
+{json_link_html}
+
 <details class="tf-section"><summary>&#9654; {e(report_a.coin)} 詳細分析</summary>
-{_render_report(report_a, evidence_a)}
+{_render_report(report_a, evidence_a, show_json_link=False)}
 </details>
 <details class="tf-section"><summary>&#9654; {e(report_b.coin)} 詳細分析</summary>
-{_render_report(report_b, evidence_b)}
+{_render_report(report_b, evidence_b, show_json_link=False)}
 </details>
 """
 
 
 
-def _parse_live(qs: dict, client_ip: str) -> bool:
-    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。"""
+def _is_live_request(qs: dict) -> bool:
+    """純判斷 live=1 是否成立（HAS_BEDROCK + token 正確），無副作用、不觸發限流。
+
+    供 `_parse_live`（有副作用版）與 `_mode_link_suffix`（自我連結用，不能重複
+    消耗限流額度）共用同一套判斷邏輯，避免兩處各寫一份、日後改一邊漏改另一邊。
+    """
     req_token = qs.get("token", [""])[0]
-    live = (
+    return (
         HAS_BEDROCK
         and qs.get("live", ["0"])[0] == "1"
         and bool(LIVE_TOKEN)
         and hmac.compare_digest(req_token, LIVE_TOKEN)
     )
+
+
+def _parse_live(qs: dict, client_ip: str) -> bool:
+    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。"""
+    live = _is_live_request(qs)
     if live and client_ip:
         _check_live_rate_limit(client_ip)
     return live
+
+
+def _is_real_request(qs: dict, live: bool) -> bool:
+    """純判斷「真資料·$0」（?real=1）是否成立，無副作用、不觸發限流。見 `_is_live_request`。"""
+    if live:
+        return False
+    return qs.get("real", ["0"])[0] == "1"
+
+
+def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
+    """從 qs 解析「真資料·$0」開關（?real=1）：走真連接器、免 Bedrock。
+
+    不依賴 HAS_BEDROCK / token（與 live 檔位互相獨立）；`live` 已成立時
+    real 不重複判斷（live 優先，走真 Bedrock 就不必再走真資料免敘事檔）。
+    real 生效時比照 live 走同一組 per-IP 限流，避免真連接器被打爆。
+    """
+    real = _is_real_request(qs, live)
+    if real and client_ip:
+        _check_live_rate_limit(client_ip)
+    return real
+
+
+def _mode_extra_params(qs: dict) -> dict:
+    """算出目前請求應在自我連結（如 `/analyze.json` 下載連結）保留的模式參數，
+    以 dict 形式回傳（`{}` / `{"real": "1"}` / `{"live": "1", "token": <token>}`），
+    交給呼叫端跟 coin/type/q 等其他參數**一起**丟進同一次 `urllib.parse.urlencode`
+    組出完整 query string（見 `_analyze_json_href`）。
+
+    HIGH 根治修復（連結構造根因）：先前 `_mode_link_suffix` 回傳的是「半截字串」
+    （如 `"&real=1"`、`"&live=1&token=<urlencoded token>"`），由呼叫端直接用
+    f-string 接在 `coin=...&type=...&q=...` 這種逐段 html.escape 的字串尾巴——
+    這代表 query string 的「值層編碼」被拆成兩種不一致的作法（coin/type/q 只
+    html.escape、mode 參數才 urlencode），且 coin/type/q 從未做 percent-encoding，
+    q 含 `& + # % "` 或非 ASCII 中文時，這些字元在 query string 語法裡的地位
+    未被正確轉義，瀏覽器/後端 `parse_qs` 解碼後會把它們誤判成參數分隔符，重新
+    請求解出來的 coin/type/q 跟畫面顯示的原始值兜不起來——不只 token（上輪已修），
+    coin/type/q 全部都中，單幣與比較頁面都有問題。
+
+    根治：不再讓任何一處「自己組半截 query 片段再字串串接」，改成所有自我連結
+    一律呼叫本函式取得「額外模式參數」的 dict，跟 coin/type/q 合併成同一個 dict
+    後，一次丟給 `urlencode()`（見 `_analyze_json_href`）——確保**所有**參數
+    （不只 mode 參數）都經過同一套 percent-encoding，不會有漏做 urlencode 的
+    參數存在。
+
+    純函式：只重算跟 `_parse_live`/`_parse_real` 相同的判斷邏輯（`_is_live_request`/
+    `_is_real_request`），不呼叫 `_check_live_rate_limit`，才不會讓同一次請求的
+    自我連結重複消耗限流額度。
+    """
+    live = _is_live_request(qs)
+    if live:
+        return {"live": "1", "token": qs.get("token", [""])[0]}
+    if _is_real_request(qs, live):
+        return {"real": "1"}
+    return {}
+
+
+def _mode_link_suffix(qs: dict) -> str:
+    """`_mode_extra_params(qs)` 的字串版包裝（向後相容既有呼叫端/測試對回傳格式
+    的假設，例如 `"&real=1"`、`"&live=1&token=secret"`）。
+
+    本身**不**再用於組 `/analyze.json` 自我連結（見 `_analyze_json_href`，連結
+    一律用 `_mode_extra_params` 的 dict 版直接併入完整參數字典後一次 `urlencode`）
+    ——但字串仍是用 `urlencode(_mode_extra_params(qs))` 產生（而非手動字串接），
+    維持「值層一律 urlencode」的一致性，同時保留舊介面供其他呼叫端沿用。
+    """
+    extra = _mode_extra_params(qs)
+    if not extra:
+        return ""
+    return f"&{urlencode(extra)}"
+
+
+def _analyze_json_href(coin: str, qtype: str, q: str, extra: dict | None = None) -> str:
+    """組出 `/analyze.json` 自我連結的完整、安全 href 屬性字串（可直接嵌進
+    `href="..."`，已含 HTML escape）。
+
+    HIGH 根治修復：兩層編碼分清楚、對所有參數一致套用，不可漏、不可混用：
+      1. **query 值層**：`coin`/`type`/`q` 與 `extra`（`_mode_extra_params()` 算出
+         的 real=1／live=1+token）**一次**用 `urllib.parse.urlencode` 組出完整
+         query string——負責 URL 語法安全：任一參數值裡的 `& + = % # "` 或非
+         ASCII 字元都會被正確 percent-encode，不會被瀏覽器/後端 `parse_qs`
+         誤判成參數分隔符，重新請求時才能逐字還原成畫面上的原始值。
+      2. **href 屬性層**：對第 1 步組出、已經 percent-encode 過的完整 query
+         string 再做**一次** `html.escape`——負責 HTML 屬性語法安全（`&`→`&amp;`
+         等，避免被誤判成 HTML entity 起點或造成屬性逃逸/HTML 注入）。
+    兩層各司其職、只做一次，不疊加、不遺漏任何參數。
+    """
+    params = {"coin": coin, "type": qtype, "q": q}
+    if extra:
+        params.update(extra)
+    return html.escape(f"/analyze.json?{urlencode(params)}")
+
+
+def _active_mode(qs: dict) -> str:
+    """算出本次請求實際生效的模式：`"offline"` | `"real"` | `"live"`。
+
+    供 `render_page(..., active_mode=...)` 判斷「只標一個徽章 active」——修復
+    MEDIUM：舊版三檔徽章恆同時顯示為可用/動畫，使用者無法判斷本次畫面的證據
+    到底來自樣本、真連接器、還是真 Bedrock，對信任提煉產品是實質誤導。
+
+    純函式：邏輯與 `_mode_link_suffix`/`_parse_live`/`_parse_real` 完全一致
+    （皆基於 `_is_live_request`/`_is_real_request`），不呼叫
+    `_check_live_rate_limit`，不會讓同一次請求的畫面渲染重複消耗限流額度。
+    """
+    live = _is_live_request(qs)
+    if live:
+        return "live"
+    if _is_real_request(qs, live):
+        return "real"
+    return "offline"
 
 
 def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
@@ -676,12 +1069,16 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
     live = _parse_live(qs, client_ip)
+    real = _parse_real(qs, client_ip, live)
 
     coin = coin_raw.upper()
     if coin not in COIN_POOL:
         raise ValueError(f"幣種須為 {COIN_POOL} 之一")
 
-    report, evidence, log = run(coin, query, qtype, offline=not live)
+    if real:
+        report, evidence, log = run(coin, query, qtype, data_mode="live", llm_mode="off")
+    else:
+        report, evidence, log = run(coin, query, qtype, offline=not live)
     return report, evidence, log
 
 
@@ -699,6 +1096,7 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
     live = _parse_live(qs, client_ip)
+    real = _parse_real(qs, client_ip, live)
 
     pair = _parse_comparison_coins(coin_raw, query)
     if pair is None:
@@ -707,9 +1105,14 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
             f"或在問題中提及兩個幣種（可選：{COIN_POOL}）"
         )
     coin_a, coin_b = pair
-    report_a, evidence_a, report_b, evidence_b, log = run_comparison(
-        coin_a, coin_b, query, offline=not live
-    )
+    if real:
+        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+            coin_a, coin_b, query, data_mode="live", llm_mode="off"
+        )
+    else:
+        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+            coin_a, coin_b, query, offline=not live
+        )
     return report_a, evidence_a, report_b, evidence_b, log
 
 
@@ -719,8 +1122,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
-        self.send_header("Content-Security-Policy",
-                         "default-src 'none'; style-src 'unsafe-inline'")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; "
+            "style-src 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src https://fonts.gstatic.com",
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(b)
@@ -747,6 +1154,13 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 qtype = QuestionType.MULTI_SOURCE
 
+            # MEDIUM 修復：在執行分析「之前」就算好本次請求生效的模式，success／
+            # error（429/400/502）路徑的 page() 都要帶，否則 real/live 模式的
+            # 請求一旦失敗，錯誤頁會落回 render_page 預設值顯示 offline-active，
+            # 跟本次請求實際嘗試的模式不符，一樣是 provenance 誤導。
+            # _active_mode 為純函式（只讀 qs），提前呼叫不影響限流/分析行為。
+            active_mode = _active_mode(qs)
+
             try:
                 if qtype == QuestionType.COMPARISON:
                     report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
@@ -766,9 +1180,17 @@ class Handler(BaseHTTPRequestHandler):
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
                         )
+                    # 自我連結（下載 JSON）須保留當次請求實際生效的模式參數，
+                    # 否則點下載會落回預設 offline/sample，匯出跟畫面看到的不一致。
+                    # HIGH 根治：改傳 dict（_mode_extra_params），由 _render_comparison
+                    # 內部併入 coin/type/q 一次 urlencode，不再自己組半截字串。
+                    mode_extra = _mode_extra_params(qs)
                     return self._send(
                         200,
-                        page(_render_comparison(report_a, evidence_a, report_b, evidence_b, query, log)),
+                        page(_render_comparison(
+                            report_a, evidence_a, report_b, evidence_b, query, log,
+                            mode_extra=mode_extra,
+                        ), active_mode=active_mode),
                     )
                 else:
                     report, evidence, log = _do_analyze(qs, client_ip=client_ip)
@@ -783,17 +1205,27 @@ class Handler(BaseHTTPRequestHandler):
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
                         )
-                    return self._send(200, page(_render_report(report, evidence, log)))
+                    mode_extra = _mode_extra_params(qs)
+                    return self._send(
+                        200,
+                        page(
+                            _render_report(report, evidence, log, mode_extra=mode_extra),
+                            active_mode=active_mode,
+                        ),
+                    )
             except TooManyRequests as exc:
                 return self._send(429, page(
-                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>"))
+                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
+                    active_mode=active_mode))
             except ValueError as exc:
                 return self._send(400, page(
-                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>"))
+                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
+                    active_mode=active_mode))
             except Exception:
                 logging.exception("TrustForge analyze error")
                 return self._send(502, page(
-                    "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>"))
+                    "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>",
+                    active_mode=active_mode))
         return self._send(404, page("<p>404</p>"))
 
 

@@ -100,6 +100,27 @@ def _matches_coin(doc: "Document", coin: str) -> bool:
     return bool(mentioned & targets) and not (mentioned - targets)
 
 
+def _mentions_coin(doc: "Document", coin: str) -> bool:
+    """判斷 doc 是否「明確」提及目標 coin（不含 `_matches_coin` 分支 3 的
+    「無任何幣別提及→全市場通用」兜底）。
+
+    供 `trust.scoring.aggregate` 的 coin-filter 判斷使用：僅「明確提及該幣」
+    的樣本才算該幣的「特定」佐證，藉此與泛用市場新聞（如「多家交易所遭
+    SEC 警告」）區分——後者雖然也會通過 `_matches_coin`（全市場通用分支）
+    納入該幣的資料池，但不應被視為該幣「特定」證據。
+    """
+    targets = {t.strip().upper() for t in re.split(r"[,\s]+", coin) if t.strip()}
+    if not targets:
+        return False
+
+    explicit = doc.meta.get("coin")
+    if explicit:
+        return str(explicit).upper() in targets
+
+    mentioned = _coins_mentioned(doc.id + " " + doc.text)
+    return bool(mentioned & targets) and not (mentioned - targets)
+
+
 class OfflineSampleSource(Source):
     """從 demo/sample_data/*.json 讀取，讓整條管線無需任何外部 API 即可跑通。"""
 
@@ -164,12 +185,17 @@ def collect(query: str, coin: str | None = None,
             from .onchain import build_onchain_sources
             from .social import build_social_sources
             from .regulatory import build_regulatory_sources
-            sources = (
+            from .cache import CachedSource
+            raw_sources = (
                 build_news_sources()
                 + build_onchain_sources()
                 + build_social_sources()
                 + build_regulatory_sources()
             )
+            # 階段2（cache + 排程 fetcher）：產品路徑一律讀快取，不直接打真連接器
+            # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程
+            # 任務裡發生。見 .cache 模組頂部說明。
+            sources = [CachedSource(s) for s in raw_sources]
     _coin = coin or ""
     for s in sources:
         try:

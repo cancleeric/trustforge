@@ -234,6 +234,41 @@ class DynamoDBLedger(Ledger):
         item["ts"] = str(ts)
         self._get_table().put_item(Item=self._to_decimal(item))
 
+    def get_canary(self, run_id: str, ts: str) -> dict[str, Any] | None:
+        """低階「按完整主鍵」`GetItem`（強一致 `ConsistentRead=True`），查某筆
+        固定 canary 是否真的寫入落地。
+
+        供 `scripts/fetch_scheduler.py --probe` 用：canary 的 `(run_id, ts)`
+        每次都固定，直接按完整主鍵 `GetItem` 一定讀得到剛才 `append()` 寫入
+        的那筆——不像 `Scan`：`Scan` 只保證掃過去，但（1）預設是最終一致讀，
+        PutItem 後立刻讀理論上可能讀到舊值；（2）單次回應只有第一頁
+        （回應大小 ≤1MB，`FilterExpression` 是掃完才套用，不保證篩到的那頁
+        剛好含目標項目）——表越大、canary 落在越後面的頁就越可能被誤判成
+        「讀不到」，造成正常部署被判失敗。`GetItem` 按主鍵查，沒有分頁問題，
+        搭配 `ConsistentRead=True` 也沒有最終一致的問題，能不受表大小/複寫
+        延遲影響地確定性判斷「這筆到底寫進去了沒」。
+        """
+        resp = self._get_table().get_item(
+            Key={"run_id": run_id, "ts": ts}, ConsistentRead=True
+        )
+        item = resp.get("Item")
+        return item if isinstance(item, dict) else None
+
+    def probe_scan_permission(self) -> None:
+        """純粹驗證 `dynamodb:Scan` 這個 action 本身有沒有被拒——**不**要求
+        掃到任何特定內容。
+
+        `/costs` 端點跟 `read_all()` 都是靠 `Scan` 讀這張表，若 IAM 只放行
+        `PutItem`、`Scan` 被拒，一般 `append()` 仍會成功但 `/costs` 會整個
+        讀失敗，這是 probe 要另外驗的東西。但**驗證方式跟「驗證寫入落地」
+        必須分開**：若拿 `Scan` 的結果去核對「有沒有掃到剛寫的 canary」，
+        會被最終一致讀 + 分頁問題污染，變成誤判（見 `get_canary()`
+        docstring）；這裡只做 `Table.scan(Limit=1)`，只要呼叫本身不丟例外
+        （不管掃回什麼、掃不掃得到 canary）就代表 `Scan` 權限正常，呼叫端
+        自行決定例外（含 AccessDenied）要怎麼處理（probe 一律視為失敗）。
+        """
+        self._get_table().scan(Limit=1)
+
     @staticmethod
     def _dedup_key(record: dict[str, Any]) -> str:
         """去重唯一鍵：只靠 `run_id`（`append_run()` 保證每筆都有全域唯一的
