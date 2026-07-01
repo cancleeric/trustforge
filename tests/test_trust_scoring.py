@@ -565,3 +565,120 @@ def test_btc_eth_sol_offline_sample_on_off_bounded_no_double_no_zero():
                 assert b.trust > 0.0, f"{coin} {a.claim.doc.source}: trust 被歸零（回歸！）"
             if a.trust > 0.01:
                 assert b.trust <= a.trust * 2 + 1e-9, f"{coin} {a.claim.doc.source}: trust 翻倍以上"
+
+
+# --- codex 對抗審修正（PR #29 review，[HIGH-1] 重複計票 / [HIGH-2] 溢位）--------
+
+def test_stable_sigmoid_no_overflow_at_extreme_net():
+    """[HIGH-2] `_stable_sigmoid` 在極端 net 值下不應 raise（純 `math.exp(-net)`
+    在 |net| 夠大時會直接 OverflowError，這裡驗證 clamp 後的版本不會）。"""
+    import math
+
+    import pytest
+
+    from trustforge.trust.scoring import _stable_sigmoid
+
+    with pytest.raises(OverflowError):
+        math.exp(2000)  # 先證明「不 clamp 就會炸」，證明修法確實必要
+
+    for net in (2000.0, -2000.0, 1e15, -1e15, 0.0, 30.0, -30.0):
+        v = _stable_sigmoid(net)
+        assert 0.0 <= v <= 1.0
+    assert _stable_sigmoid(2000.0) > 0.999
+    assert _stable_sigmoid(-2000.0) < 0.001
+    assert _stable_sigmoid(0.0) == 0.5
+
+
+def test_duplicate_corroborated_claim_does_not_inflate_reputation():
+    """[HIGH-1] 同一來源把「已有 3 個固定外部佐證的 claim」重複貼 1 次 vs 20 次，
+    動態信譽必須完全相同（重複貼文不可放大票數、繞過反暴走）。"""
+    from trustforge.trust.scoring import _iterate_source_reputation
+
+    shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    fixed_external = [
+        _doc("dup-ext-a", "onchain", "glassnode", shared),
+        _doc("dup-ext-b", "news", "coindesk", shared),
+        _doc("dup-ext-c", "regulatory", "sec-filing", shared),
+    ]
+
+    docs_once = fixed_external + [_doc("dup-x-1", "social", "x-analyst", shared)]
+    docs_20x = fixed_external + [
+        _doc(f"dup-x-{i}", "social", "x-analyst", shared) for i in range(20)
+    ]
+
+    claims_once = extract_claims(docs_once)
+    claims_20x = extract_claims(docs_20x)
+
+    sr_once = _iterate_source_reputation(claims_once, now=1.0)
+    sr_20x = _iterate_source_reputation(claims_20x, now=1.0)
+
+    assert sr_once["x-analyst"] == sr_20x["x-analyst"], (
+        "重複貼同一已佐證 claim 20 次不應放大信譽："
+        f"1 次={sr_once['x-analyst']}, 20 次={sr_20x['x-analyst']}"
+    )
+    # 確認不是被小樣本守門「意外擋掉」造成的假陽性——這裡應確實吃到佐證加成
+    assert sr_once["x-analyst"] > 0.35, "應確實吃到 3 個獨立佐證的加成（非小樣本守門情境）"
+    # 順便驗證固定外部來源的信譽也不因 x-analyst 重複貼文而被放大
+    assert sr_once["glassnode"] == sr_20x["glassnode"]
+    assert sr_once["coindesk"] == sr_20x["coindesk"]
+    assert sr_once["sec-filing"] == sr_20x["sec-filing"]
+
+
+def test_duplicate_corroborated_claim_does_not_inflate_reputation_via_public_api():
+    """同上，但走 `score(..., dynamic_reputation=True)` 公開 API 端到端驗證。"""
+    shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    fixed_external = [
+        _doc("dup2-ext-a", "onchain", "glassnode", shared),
+        _doc("dup2-ext-b", "news", "coindesk", shared),
+        _doc("dup2-ext-c", "regulatory", "sec-filing", shared),
+    ]
+    docs_once = fixed_external + [_doc("dup2-x-1", "social", "x-analyst", shared)]
+    docs_20x = fixed_external + [
+        _doc(f"dup2-x-{i}", "social", "x-analyst", shared) for i in range(20)
+    ]
+
+    on_once = score(extract_claims(docs_once), now=1.0, dynamic_reputation=True)
+    on_20x = score(extract_claims(docs_20x), now=1.0, dynamic_reputation=True)
+
+    final_once = next(sc for sc in on_once if sc.claim.doc.source == "x-analyst").reputation_trace["final"]
+    final_20x = next(sc for sc in on_20x if sc.claim.doc.source == "x-analyst").reputation_trace["final"]
+    assert final_once == final_20x, (
+        f"公開 API 層級：1 次 vs 20 次重複貼文的動態信譽應相同，"
+        f"實際: {final_once} vs {final_20x}"
+    )
+
+
+def test_large_scale_contradiction_score_does_not_crash_bounded():
+    """[HIGH-2] 壓力測試：目標來源被 500 個獨立來源同時判定矛盾，
+    `score(dynamic_reputation=True)` 不應 crash（OverflowError 或其他例外），
+    且動態信譽仍落在 `[floor, 1]` 範圍內。"""
+    shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    target_doc = _doc("big-target", "social", "x-target", shared)
+    contra_docs = [
+        _doc(f"big-contra-{i}", "news", f"contra-source-{i}", shared) for i in range(500)
+    ]
+    docs = [target_doc] + contra_docs
+    claims = extract_claims(docs)
+
+    class _AlwaysContradictClient:
+        def classify_stance(self, a, b):
+            return "contradiction"
+
+    from trustforge.trust.scoring import _reputation_floor
+
+    scored = score(
+        claims,
+        now=1.0,
+        dynamic_reputation=True,
+        stance_client=_AlwaysContradictClient(),
+        stance_pair_budget=10_000,
+    )
+    assert len(scored) == len(claims)
+    for sc in scored:
+        assert sc.reputation_trace is not None
+        floor = _reputation_floor(sc.claim.doc.kind)
+        final = sc.reputation_trace["final"]
+        assert floor - 1e-9 <= final <= 1.0 + 1e-9, (
+            f"{sc.claim.doc.source}: final={final} 超出 [{floor},1] 範圍"
+        )
+        assert 0.0 <= sc.trust <= 1.0

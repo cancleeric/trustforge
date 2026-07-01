@@ -400,6 +400,21 @@ DEFAULT_REPUTATION_ALPHA = 0.55         # SR^t = α·SR⁰ + (1-α)·agreement_s
 MIN_INDEPENDENT_EVIDENCE = 3            # 獨立佐證+矛盾來源聯集 < 3 → 該 source 強制 α=1
 
 
+def _stable_sigmoid(x: float, clamp: float = 30.0) -> float:
+    """數值穩定 sigmoid：呼叫 `math.exp` 前把 logit clamp 到 `[-clamp, clamp]`。
+
+    codex 對抗審 [HIGH-2] 修正：`net`（agreement 淨值）理論上可能被推到極端值，
+    若不設防，`math.exp(-net)` 在 `|net|` 超過浮點指數上限（約 709）時會丟出
+    `OverflowError`，讓 `score(dynamic_reputation=True)` 直接當掉。clamp=30 時
+    sigmoid 早已飽和到 1e-13 等級、精度損失可忽略不計，純粹是防禦性上限——
+    搭配 [HIGH-1]（agreement 按唯一佐證/矛盾來源去重後才加總，見
+    `_iterate_source_reputation` 內的 `agree_union_of`/`contra_union_of`）雙重
+    保險：正常情境下去重後的 net 本身就有界，這裡的 clamp 是最後一道防線。
+    """
+    xc = max(-clamp, min(clamp, x))
+    return 1.0 / (1.0 + math.exp(-xc))
+
+
 def _reputation_evidence(
     claims: list[Claim],
     stance_fn: Callable[[str, str], str] | None = None,
@@ -439,16 +454,26 @@ def _iterate_source_reputation(
               是靜態值，全程只算一次、跨輪重用，不因迭代重複計算）。
       Step B：`SR^t(source) = α·SR⁰(source) + (1-α)·agreement_score(source)`。
               `agreement_score` 由該 source 名下所有 claim 的獨立佐證/矛盾來源
-              （`evidence`，全程只算一次）按其「暫時 trust」加權：一致來源 +其暫時
-              trust、W1.5 stance 判矛盾來源 -其暫時 trust，加總後以 logistic 正規化
-              到 0–1（無任何佐證/矛盾時 net=0 → 0.5，中性，不偏袒也不懲罰）。
+              **聯集去重後**（`agree_union_of`/`contra_union_of`，全程只算一次）
+              按其「暫時 trust」加權：一致來源 +其暫時 trust、W1.5 stance 判矛盾
+              來源 -其暫時 trust，加總後以 `_stable_sigmoid` 正規化到 0–1（無任何
+              佐證/矛盾時 net=0 → 0.5，中性，不偏袒也不懲罰）。
               自家來源的 claim 不會給自己投票（`_corroboration_detail` 本就排除
               同源），單一來源灌水灌再多自家 claims 也不會自抬信譽（需要「其他」
               獨立來源真的來佐證才有效——複用既有反回音室設計）。
 
+    codex 對抗審修正（HIGH-1/HIGH-2，PR #29 review）：
+    - **[HIGH-1]** agreement 投票按「唯一佐證/矛盾來源」聯集去重後才加總一次，
+      不隨該 source 名下 claim 數量重複計票——原本若把「已有 3 個外部佐證的
+      claim」重複貼 N 次，會重用同一批佐證來源疊加 N 次、把 `agreement_score`
+      推向飽和，繞過反暴走。去重後，claim 重複次數**不能**放大票數。
+    - **[HIGH-2]** `_stable_sigmoid` 在 `math.exp` 前把 logit clamp 到安全範圍
+      （預設 ±30），杜絕 net 極端值時的 `OverflowError`；配合 HIGH-1 去重後
+      net 本身已有界，這是雙保險而非唯一防線。
+
     小樣本守門（CEO refinement #1）：某 source 名下所有 claim 的獨立佐證+矛盾來源
-    聯集 < `MIN_INDEPENDENT_EVIDENCE`（3）時，該 source 強制 α=1（等同純先驗、
-    完全不受 agreement 影響），避免少樣本佐證/矛盾把信譽炒到失真。
+    **聯集（去重後）** < `MIN_INDEPENDENT_EVIDENCE`（3）時，該 source 強制 α=1
+    （等同純先驗、完全不受 agreement 影響），避免少樣本佐證/矛盾把信譽炒到失真。
 
     每輪 clamp 到 `[_reputation_floor(kind), 1.0]`，防止信譽蒸發到 0（見
     `_reputation_floor`）。收斂：`max|SR^t - SR^(t-1)| < REPUTATION_CONVERGENCE_EPS`
@@ -491,15 +516,28 @@ def _iterate_source_reputation(
         static_rec[c.id] = _recency_decay(c, now)
         static_manip[c.id] = _manipulation_penalty(c)
 
-    # 小樣本守門：某 source 全部 claim 的獨立佐證+矛盾來源聯集 < 3 → 強制 α=1
-    alpha_of: dict[str, float] = {}
+    # codex 對抗審 [HIGH-1] 修正：先把每個 source 名下所有 claim 的 agree/contra
+    # 來源做「聯集去重」（agree_union_of / contra_union_of），後續小樣本守門與
+    # Step B 的 agreement 投票都只吃這份去重後的資料——同一來源把「已有 3 個外部
+    # 佐證的 claim」重複貼 N 次，去重後對 net 沒有任何額外貢獻（不能靠重複貼文
+    # 繞過反暴走、把 logistic 推向飽和）。
+    agree_union_of: dict[str, set[str]] = {}
+    contra_union_of: dict[str, set[str]] = {}
     for s, s_claims in claims_by_source.items():
-        evidence_sources: set[str] = set()
+        au: set[str] = set()
+        cu: set[str] = set()
         for c in s_claims:
             agree, contra = ev.get(c.id, (set(), set()))
-            evidence_sources |= agree
-            evidence_sources |= contra
-        alpha_of[s] = 1.0 if len(evidence_sources) < MIN_INDEPENDENT_EVIDENCE else alpha
+            au |= agree
+            cu |= contra
+        agree_union_of[s] = au
+        contra_union_of[s] = cu
+
+    # 小樣本守門：獨立佐證+矛盾來源聯集（去重後）< 3 → 強制 α=1
+    alpha_of: dict[str, float] = {
+        s: (1.0 if len(agree_union_of[s] | contra_union_of[s]) < MIN_INDEPENDENT_EVIDENCE else alpha)
+        for s in claims_by_source
+    }
 
     sr = dict(sr0)
     iterations_run = 0
@@ -526,16 +564,16 @@ def _iterate_source_reputation(
             avg_temp_by_source[s] = sum(vals) / len(vals)
 
         # Step B：agreement_score → SR^t
+        # [HIGH-1] net 只按「唯一佐證/矛盾來源」（agree_union_of/contra_union_of）
+        # 加總一次，不隨該 source 名下 claim 數量重複計票；[HIGH-2] `_stable_sigmoid`
+        # 對 net 做 clamp，杜絕極端情境下 `math.exp` 溢位崩潰（雙保險：去重後 net
+        # 本身也已有界，clamp 是額外防線）。
         new_sr: dict[str, float] = {}
-        for s, s_claims in claims_by_source.items():
-            net = 0.0
-            for c in s_claims:
-                agree, contra = ev.get(c.id, (set(), set()))
-                for s2 in agree:
-                    net += avg_temp_by_source.get(s2, 0.5)
-                for s2 in contra:
-                    net -= avg_temp_by_source.get(s2, 0.5)
-            agreement_score = 1.0 / (1.0 + math.exp(-net))
+        for s in claims_by_source:
+            net = sum(avg_temp_by_source.get(s2, 0.5) for s2 in agree_union_of[s]) - sum(
+                avg_temp_by_source.get(s2, 0.5) for s2 in contra_union_of[s]
+            )
+            agreement_score = _stable_sigmoid(net)
             a = alpha_of[s]
             blended = a * sr0[s] + (1.0 - a) * agreement_score
             floor = _reputation_floor(kind_of[s])
