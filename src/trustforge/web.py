@@ -68,7 +68,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
 </style></head><body>
 <h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　<span class="badge">{mode}</span>　<a href="/costs">成本帳本</a></p>
-<p><span class="badge" style="opacity:.6">v{version}</span></p>
+<p><span class="badge" style="opacity:.6">{version}</span></p>
 <form action="/analyze" method="get">
  <div><label>幣種</label><select name="coin">{coins}</select></div>
  <div><label>題型</label><select name="type">{types}</select></div>

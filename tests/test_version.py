@@ -34,9 +34,20 @@ def test_version_has_default_value():
 
 
 def test_render_page_contains_version_string():
-    """render_page() 產出的 HTML 應含版號徽章字串。"""
+    """render_page() 產出的 HTML 應含版號徽章字串（不自行加 v 前綴，避免與
+    git describe 已含的 tag v 前綴疊成雙 v）。"""
     htmlout = web.render_page("")
-    assert f"v{web.VERSION}" in htmlout
+    assert web.VERSION in htmlout
+    assert "vv" not in htmlout
+
+
+def test_render_page_deployed_version_has_single_v(monkeypatch):
+    """模擬部署後 VERSION 已含 git describe 的 v 前綴（如 v0.2.0-16-gce741e4）
+    時，badge 應顯示單一 v，不應出現雙 v。"""
+    monkeypatch.setattr(web, "VERSION", "v0.2.0-16-gce741e4")
+    htmlout = web.render_page("")
+    assert "v0.2.0-16-gce741e4" in htmlout
+    assert "vv0.2.0-16-gce741e4" not in htmlout
 
 
 def test_analyze_json_payload_has_version_key():
