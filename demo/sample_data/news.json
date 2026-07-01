@@ -49,20 +49,20 @@
   },
   {
     "id": "news-eth-etf-inflow",
-    "source": "coindesk",
+    "source": "示範來源·機構觀點",
     "text": "市場 消息 指出，ETH 現貨 ETF 資金 動向 傳出 淨流入 觀點，機構 買盤 回補 力道 增強。",
-    "url": "https://www.coindesk.com/markets/2026/05/31/eth-etf-flow-inflow-view",
+    "url": "",
     "ts": 1780185600,
     "meta": {
       "illustrative": true,
-      "note": "demo 合成示意資料：定性描述資金流向觀點分歧，非引用特定資料商之精確數字"
+      "note": "demo 合成示意資料：定性描述資金流向觀點分歧，非引用特定資料商之精確數字，來源為示範標籤非真實媒體"
     }
   },
   {
     "id": "news-eth-etf-outflow",
-    "source": "decrypt",
+    "source": "示範來源·觀望觀點",
     "text": "另 有 市場 消息 指出，ETH 現貨 ETF 資金 動向 同期 卻 傳出 淨流出 觀點，解讀 方法論 落差 致 資金 觀望 情緒 升溫。",
-    "url": "https://decrypt.co/markets/2026/05/31/eth-etf-flow-outflow-view",
+    "url": "",
     "ts": 1780185600,
     "meta": {
       "illustrative": true,

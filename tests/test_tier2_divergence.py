@@ -7,13 +7,17 @@ CEO 派工規格：
     （回歸鎖，見 test_cross_source_signal.py 既有 T1-T8）。
   - ETH 既有確定性測試（evidence/facts 數量）同步鎖定，避免未來改動悄悄回歸。
 
-真實現象：ETH 現貨 ETF 資金流向因結算時區/資料商方法論不同，不同來源（coindesk /
-decrypt）對同一天可能報出方向相反的淨流入/流出——同議題、來源獨立、內容自帶分歧
-成因說明，非造假對抗樣本（守 #24 紅線）。
+真實現象：ETH 現貨 ETF 資金流向因結算時區/資料商方法論不同，不同來源對同一天
+可能報出方向相反的淨流入/流出——同議題、來源獨立、內容自帶分歧成因說明，非造假
+對抗樣本（守 #24 紅線）。
 CEO 追加派工（demo 可靠性 #32）：
   - 跨源背離不得依查詢字串措辭而定——ETH 任何合理問法（含中文「以太坊」、
     無空格「ETH現況」）皆須穩定觸發 divergence + 2 筆 stance_pairs。
   - 其他幣（BTC/SOL/BNB/XRP）不得因此修正而誤觸假背離。
+第四輪對抗審修正（codex 追加）：ETF 分歧樣本的 `source` 不得冠真實媒體名
+（原 coindesk/decrypt）或帶真實可點 URL——內容維持定性合成，但來源本身也必須
+是明確「示範」合成標籤（`示範來源·機構觀點` / `示範來源·觀望觀點`），避免
+「可證偽的真來源歸屬」把 demo 示意資料當真實獨立來源計入。
 """
 from __future__ import annotations
 
@@ -194,7 +198,11 @@ def test_eth_multi_source_shows_real_divergence_with_stance_pairs():
     stances = {p["stance"] for p in pairs}
     assert stances == {"bullish", "bearish"}, f"應為方向相反兩筆，實得 {stances}"
     sources = {p["source"] for p in pairs}
-    assert sources == {"coindesk", "decrypt"}
+    # 第四輪對抗審修正（demo 可靠性 #32 codex 追加）：ETF 分歧樣本的來源改為明確
+    # 「示範」合成標籤，不得冠真實媒體名（coindesk/decrypt），避免「可證偽的真
+    # 來源歸屬」誤把 demo 示意資料當真實獨立來源計入。
+    assert sources == {"示範來源·機構觀點", "示範來源·觀望觀點"}
+    assert "coindesk" not in sources and "decrypt" not in sources
     claim_ids = {p["claim_id"] for p in pairs}
     assert claim_ids == {"news-eth-etf-inflow#0", "news-eth-etf-outflow#0"}
 
@@ -219,11 +227,26 @@ def test_eth_multi_source_evidence_facts_count_pinned():
     assert len(evidence) == 13
 
     sources = {e.source for e in evidence}
-    assert {"coindesk", "decrypt"} <= sources, "兩則 ETF 分歧樣本來源應都出現在證據清單"
+    # 第四輪對抗審修正（demo 可靠性 #32 codex 追加）：ETF 分歧樣本來源改為明確
+    # 「示範」合成標籤，不得冠真實媒體名（coindesk/decrypt）或帶真實可點 URL——
+    # 避免「可證偽的真來源歸屬」把 demo 示意資料當真實獨立來源計入。
+    assert {"示範來源·機構觀點", "示範來源·觀望觀點"} <= sources, (
+        "兩則 ETF 分歧樣本（示範合成來源）應都出現在證據清單"
+    )
 
     refs = [e.content_reference for e in evidence]
     assert any("淨流入" in r for r in refs), "應含 ETF 淨流入證據"
     assert any("淨流出" in r for r in refs), "應含 ETF 淨流出證據"
+
+    etf_evidence = [e for e in evidence if "淨流入" in e.content_reference or "淨流出" in e.content_reference]
+    assert len(etf_evidence) == 2, f"應恰好 2 筆 ETF 分歧證據，實得 {len(etf_evidence)}"
+    for e in etf_evidence:
+        assert e.source not in {"coindesk", "decrypt"}, (
+            f"ETF 分歧樣本不得冠真實媒體名，實得 source={e.source!r}"
+        )
+        assert e.source_url == "", (
+            f"ETF 分歧樣本不得帶真實可點 URL，實得 source_url={e.source_url!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
