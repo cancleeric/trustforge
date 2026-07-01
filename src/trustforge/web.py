@@ -92,6 +92,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:#0d1117;border:1px solid #30363d;border-radius:5px;overflow:hidden;margin-right:4px}}
  .tf-bar{{height:100%;border-radius:5px}}
  .tf-low{{display:inline-block;background:rgba(248,81,73,.14);border:1px solid rgba(248,81,73,.4);color:#f85149;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
+ .tf-info{{display:inline-block;background:rgba(139,148,158,.14);border:1px solid rgba(139,148,158,.4);color:#8b949e;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
  .tf-conf-wrap{{background:#0f141a;border:1px solid #30363d;border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
  .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
@@ -105,6 +106,14 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-hero-row{{display:grid;grid-template-columns:auto minmax(0,1fr);gap:1.2rem;align-items:center}}
  .tf-step{{border-left:4px solid #30363d;padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
  .tf-step li{{margin:.25rem 0}}
+ .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:#6e7681;font-weight:400;margin-left:.4rem}}
+ .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle}}
+ .tf-div-grid{{display:grid;grid-template-columns:1fr 34px 1fr;gap:0;align-items:stretch;margin-top:.6rem}}
+ .tf-div-side{{border-radius:9px;padding:.7rem .8rem}}
+ .tf-div-bull{{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.35)}}
+ .tf-div-bear{{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.35)}}
+ .tf-div-mid{{display:flex;align-items:center;justify-content:center;color:#f85149;font-weight:700;font-size:1rem}}
+ .tf-div-tag{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.1rem .5rem;margin-right:.4rem}}
  @media (max-width:900px){{
   body{{margin:1rem auto}}
   header.tf-hdr{{flex-direction:column;align-items:flex-start}}
@@ -112,6 +121,8 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
   .tf-layout{{grid-template-columns:1fr}}
   .tf-query-panel{{position:static}}
   .tf-hero-row{{grid-template-columns:1fr}}
+  .tf-div-grid{{grid-template-columns:1fr}}
+  .tf-div-mid{{padding:.3rem 0}}
  }}
 </style></head><body>
 <header class="tf-hdr">
@@ -488,6 +499,40 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
     )
 
 
+# Tier2 可解釋 UX：來源獨立性標籤依 kind 映射推導（純渲染層，不新增 schema
+# 欄位）。故意拆成「獨立性層級（高/中/一般）」×「權威性（官方/第三方/社群）」
+# 兩個維度——不可混為一談：CoinGecko（price_live）與 onchain（blockchain.info／
+# Alternative.me FNG）雖然客觀、獨立性高，但都是**第三方聚合／公開 API**，
+# 不是一手權威來源，標「官方」會讓使用者誤以為是交易所/監管機關一手資料，
+# 破壞溯源 UX 的誠信基礎（codex provenance 準確性 review，PR #35 修正）。
+#
+# 官方／一手權威：hoyabit（交易所一手行情）、regulatory（SEC EDGAR 直接
+# feed）、price（HOYA BIT 官方基準 OHLCV，見 ingestion/base.py
+# OFFICIAL_OHLCV_DIR 說明）。
+_OFFICIAL_KINDS = {"price", "hoyabit", "regulatory"}
+# 第三方聚合／高獨立（客觀但非一手）：price_live（CoinGecko）、onchain
+# （blockchain.info/Alternative.me，第三方公開 API，非鏈上一手節點）。
+_THIRD_PARTY_KINDS = {"price_live", "onchain"}
+# 社群／情緒：news/social/sentiment，中等獨立性。
+_COMMUNITY_KINDS = {"news", "social", "sentiment"}
+
+
+def _independence_tier(kind: str) -> tuple[str, str]:
+    """回傳 (顯示標籤, 顏色) 供來源 pill 的 tier·權威性徽章使用。
+
+    標籤格式「層級·權威性」：高·官方 / 高·第三方 / 中·社群 / 一般·輔助。
+    `price_live`（CoinGecko）與 `onchain`（第三方聚合 API）獨立性層級雖與
+    官方同屬「高」，但權威性標「第三方」，絕不會渲染成「官方」。
+    """
+    if kind in _OFFICIAL_KINDS:
+        return "高·官方", "#3fb950"
+    if kind in _THIRD_PARTY_KINDS:
+        return "高·第三方", "#3fb950"
+    if kind in _COMMUNITY_KINDS:
+        return "中·社群", "#d9832a"
+    return "一般·輔助", "#8b949e"
+
+
 def _render_evidence_list(
     evidence: list, coin: str | None = None, start_idx: int = 0
 ) -> str:
@@ -496,6 +541,14 @@ def _render_evidence_list(
     - trust < 0.3 或 contrarian 項目顯示紅色 tf-low badge。
     - source_url 透過 _safe_href 渲染：http/https 輸出連結，其餘輸出純文字。
     - trust_components 有值時在 <details> 內顯示分項拆解。
+    - 來源 pill 旁附 tier·獨立性標籤（依 kind 映射，見 `_independence_tier`）。
+    - `ev.flags` 非空時附操縱紅旗徽章（沿用既有 `.tf-low` badge 樣式，見
+      `trust.scoring._manipulation_flags` / `Evidence.flags`）——這是「確定
+      判定為操縱」，已反映在 trust 分數。
+    - `ev.info_flags` 非空時另外附中性資訊徽章（`.tf-info`，ℹ️，不用紅旗樣式，
+      見 `trust.scoring._coordination_signals` / `Evidence.info_flags`）——
+      這**不是**操縱判定，只是「文字相似度高，供人工判讀」的透明化提示，
+      不影響 trust 分數，UI 上刻意與操縱紅旗區分開來，避免誤導。
     """
     e = html.escape
     rows: list[str] = []
@@ -505,6 +558,28 @@ def _render_evidence_list(
         badge = (
             f' <span class="tf-low">&#9888; 低信任/操縱</span>'
             if is_low else ""
+        )
+        flags = getattr(ev, "flags", None) or []
+        flags_badge = ""
+        if flags:
+            flags_text = "、".join(flags)
+            flags_badge = (
+                f' <span class="tf-low" title="操縱關鍵詞：{e(flags_text)}">'
+                f'&#128681; {e(flags_text)}</span>'
+            )
+        info_flags = getattr(ev, "info_flags", None) or []
+        info_flags_badge = ""
+        if info_flags:
+            info_flags_text = "、".join(info_flags)
+            info_flags_badge = (
+                f' <span class="tf-info" title="{e(info_flags_text)}">'
+                f'&#8505; 相似簇</span>'
+            )
+        tier_label, tier_color = _independence_tier(ev.kind)
+        tier_pill = (
+            f'<span class="tf-tier-pill" '
+            f'style="color:{tier_color};border:1px solid {tier_color}">'
+            f'{e(tier_label)}</span>'
         )
         # source_url 安全連結：_safe_href 驗 scheme，escape 由其內部保留
         if ev.source_url:
@@ -522,7 +597,10 @@ def _render_evidence_list(
             f"<details>"
             f'<summary class="tf-ev-summary">'
             f'<span class="tf-src-pill">{e(ev.source)}</span>'
+            f'{tier_pill}'
             f'<span class="tf-ev-date">{e(ev.fetched_at)}</span>'
+            f'{flags_badge}'
+            f'{info_flags_badge}'
             f"</summary>"
             f'<div class="tf-ev-body">'
             f"<p style='margin:.3rem 0;font-size:.85rem;color:#c9d1d9'>{e(ev.content_reference)}</p>"
@@ -584,11 +662,53 @@ def render_page(body: str = "", active_mode: str = "offline") -> str:
     )
 
 
+def _cross_signal_sides(signal: dict) -> tuple[list[dict], list[dict]]:
+    """從既有 `cross_source_signal` 欄位純推導雙欄 BULLISH/BEARISH 資料，供
+    `_render_cross_signal` 背離時的結構化雙欄呈現使用。
+
+    不新增資料流——只重組已存在的欄位：優先用 `stance_pairs`（若有，每筆
+    `{"source","stance","text",...}` 直接對應一欄一則）；沒有 `stance_pairs`
+    時退回聚合層級的 `objective_direction`/`sentiment_direction`（各代表一欄，
+    描述文字為靜態說明，不引入新數值）。兩者皆缺 → 回傳 `([], [])`，呼叫端
+    據此判斷是否顯示雙欄區塊（向後相容，舊有僅 summary 的樣態仍可運作）。
+    """
+    bullish: list[dict] = []
+    bearish: list[dict] = []
+    for p in signal.get("stance_pairs") or []:
+        side = bullish if p.get("stance") == "bullish" else bearish
+        side.append({"label": p.get("source", ""), "detail": p.get("text", "")})
+    if bullish or bearish:
+        return bullish, bearish
+
+    obj_dir = signal.get("objective_direction")
+    sent_dir = signal.get("sentiment_direction")
+    if obj_dir in ("bullish", "bearish") and sent_dir in ("bullish", "bearish"):
+        (bullish if obj_dir == "bullish" else bearish).append(
+            {"label": "客觀數據（現價／鏈上）", "detail": "信任加權多數方向"}
+        )
+        (bullish if sent_dir == "bullish" else bearish).append(
+            {"label": "情緒類（新聞／社群）", "detail": "信任加權多數方向"}
+        )
+    return bullish, bearish
+
+
 def _render_cross_signal(signal: dict) -> str:
     """跨源訊號帶色框渲染（inline style，CSP 相容，無外部資源/JS）。
 
     背離 = 橙色系（#d9832a）；共識 = 藍色系（#1f6feb）。
     summary 與所有字串一律 html.escape（縱深防禦）。
+
+    背離（`type == "divergence"`）且能從 `signal` 推導出雙方陣營（見
+    `_cross_signal_sides`）時，額外附加結構化雙欄 BULLISH/BEARISH 對照，並標示
+    誠實的「看漲 N 來源 · 看跌 M 來源」筆數對比（純渲染層計數，不新增資料流）。
+
+    刻意不做「Δ%」這類量化幅度徽章：`stance_pairs`/聚合方向是去重矛盾集，
+    未按信任加權，筆數差（如 2:1）換算成百分比會讓使用者誤把「來源數量的
+    偶然性」當成可比的市場/背離強度——這是假精度，違反 #24 不造假原則
+    （codex provenance 準確性 review 第二輪修正，PR #35）。要做真正的量化
+    背離強度是正式工作，非本輪範圍；現在只誠實顯示筆數。
+
+    推不出雙方（如舊資料 fixture 只有 summary）→ 保留舊版純文字渲染，功能零損。
     """
     e = html.escape
     sig_type = signal.get("type", "")
@@ -606,11 +726,57 @@ def _render_cross_signal(signal: dict) -> str:
         f'<small style="color:#8b949e">佐證 claim_ids：{e(", ".join(ids))}</small>'
         if ids else ""
     )
+
+    div_html = ""
+    if sig_type == "divergence":
+        bullish, bearish = _cross_signal_sides(signal)
+        if bullish or bearish:
+            count_label = f"看漲 {len(bullish)} 來源 &middot; 看跌 {len(bearish)} 來源"
+
+            def _side_body(items: list[dict]) -> str:
+                if not items:
+                    return '<p style="margin:0;font-size:.8rem;color:#6e7681">&#8212;</p>'
+                return "".join(
+                    f'<p style="margin:.3rem 0 .1rem;font-size:.85rem;color:#e6edf3">'
+                    f'<b>{e(it.get("label", ""))}</b></p>'
+                    f'<p style="margin:0 0 .3rem;font-size:.8rem;color:#8b949e">'
+                    f'{e(it.get("detail", ""))}</p>'
+                    for it in items
+                )
+
+            bull_html = (
+                f'<div class="tf-div-side tf-div-bull">'
+                f'<span class="tf-div-tag" style="color:#3fb950;background:rgba(63,185,80,.12);'
+                f'border:1px solid rgba(63,185,80,.4)">&#9650; BULLISH</span>'
+                f'{_side_body(bullish)}'
+                f'</div>'
+            )
+            bear_html = (
+                f'<div class="tf-div-side tf-div-bear">'
+                f'<span class="tf-div-tag" style="color:#f85149;background:rgba(248,81,73,.12);'
+                f'border:1px solid rgba(248,81,73,.4)">&#9660; BEARISH</span>'
+                f'{_side_body(bearish)}'
+                f'</div>'
+            )
+            div_html = (
+                f'<div style="margin:.5rem 0 0">'
+                f'<span class="tf-div-tag" style="color:#f85149;background:rgba(248,81,73,.12);'
+                f'border:1px solid rgba(248,81,73,.4)" '
+                f'title="各陣營來源數量，非量化背離幅度/價格漲跌">{count_label}</span>'
+                f'</div>'
+                f'<div class="tf-div-grid">'
+                f'{bull_html}'
+                f'<div class="tf-div-mid">&#8800;</div>'
+                f'{bear_html}'
+                f'</div>'
+            )
+
     return (
         f'<div class="tf-section" style="border-left:4px solid {border_color};background:{bg_color}">'
         f'<h3 style="color:{border_color}">跨源訊號（{e(type_label)}）</h3>'
         f'<p style="margin:.3rem 0">{summary_esc}</p>'
         f'{ids_html}'
+        f'{div_html}'
         f'</div>'
     )
 
@@ -680,7 +846,11 @@ def _render_report(
     limits = "".join(f"<li>{e(x)}</li>" for x in report.limits)
     flips = "".join(f"<li>{e(x)}</li>" for x in report.could_flip)
     contra = "".join(f"<li>{e(x)}</li>" for x in report.contrarian)
-    conf_html = _conf_gauge(report.confidence, report.confidence_label())
+    # W4 codex 對抗審第 2 輪 [HIGH-1]：主 gauge 改用校準值＋三態標籤
+    # （confidence_label() 已含三態），避免弱證據 abstain 時裸 confidence
+    # （supporting 均值恆為 0 或 >=0.5）讓信心欄仍顯示「中/高」，跟
+    # market_judgment 的「資料不足、暫不判斷」矛盾。
+    conf_html = _conf_gauge(report.calibrated_confidence, report.confidence_label())
     agg_tc = _aggregate_trust_components(evidence)
     breakdown_html = _render_trust_breakdown(agg_tc, report.confidence) if agg_tc else ""
     ev_rows = _render_evidence_list(evidence)
@@ -711,17 +881,17 @@ def _render_report(
 </div>
 
 <div class="tf-section" style="border-left:4px solid #3fb950">
-  <h3>事實（客觀資料）</h3>
+  <h3>事實（客觀資料）<span class="tf-step-badge">步驟 1/3</span></h3>
   <ul class="tf-step">{facts or '<li>&#8212;</li>'}</ul>
 </div>
 
 <div class="tf-section" style="border-left:4px solid #d9832a">
-  <h3>推論（Agent 推理）</h3>
+  <h3>推論（Agent 推理）<span class="tf-step-badge">步驟 2/3</span></h3>
   <ul class="tf-step">{infer or '<li>&#8212;</li>'}</ul>
 </div>
 
 <div class="tf-section" style="border-left:4px solid #1f6feb">
-  <h3>結論 / 關鍵依據</h3>
+  <h3>結論 / 關鍵依據<span class="tf-step-badge">步驟 3/3</span></h3>
   <ul class="tf-step">{basis or '<li>&#8212;</li>'}</ul>
 </div>
 
@@ -890,8 +1060,8 @@ def _render_comparison(
     <tr><th>項目</th><th>{e(report_a.coin)}</th><th>{e(report_b.coin)}</th></tr>
     <tr><td>市場方向</td><td>{e(dir_a)}</td><td>{e(dir_b)}</td></tr>
     <tr><td>整體信心</td>
-        <td>{_cmp_conf(report_a.confidence, report_a.confidence_label())}</td>
-        <td>{_cmp_conf(report_b.confidence, report_b.confidence_label())}</td></tr>
+        <td>{_cmp_conf(report_a.calibrated_confidence, report_a.confidence_label())}</td>
+        <td>{_cmp_conf(report_b.calibrated_confidence, report_b.confidence_label())}</td></tr>
     <tr><td>獨立來源數</td><td>{src_a}</td><td>{src_b}</td></tr>
     <tr><td>反方訊號數</td><td>{len(report_a.contrarian)}</td><td>{len(report_b.contrarian)}</td></tr>
   </table>

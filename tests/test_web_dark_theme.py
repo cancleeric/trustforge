@@ -323,3 +323,195 @@ def test_aggregate_trust_components_empty_when_no_data():
     ev = [Evidence(source="a", fetched_at="t", content_reference="c", related_claim="x", trust=0.5)]
     assert web._aggregate_trust_components(ev) == {}
     assert web._aggregate_trust_components([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# Tier2 可解釋 UX：來源獨立性標籤 + 操縱紅旗 + 跨源背離雙欄（gray 計劃 W2）
+# ---------------------------------------------------------------------------
+
+def test_independence_tier_official_kinds_are_hoyabit_regulatory_price_only():
+    """真正一手權威（官方）僅限 hoyabit（交易所一手行情）、regulatory（SEC 直接
+    feed）、price（HOYA 官方基準 OHLCV）——不可再擴大範圍（codex provenance
+    review，PR #35）。"""
+    for kind in ("hoyabit", "regulatory", "price"):
+        label, _color = web._independence_tier(kind)
+        assert "官方" in label, f"{kind} 應歸官方，實得 {label}"
+        assert "高" in label
+
+
+def test_independence_tier_price_live_coingecko_never_renders_as_official():
+    """CoinGecko(price_live) 是第三方聚合器，永不可標「官方」——只能是「高·第三方」。
+    這是本輪 codex provenance 準確性修復的核心斷言：破這條＝回歸誤導 UX。"""
+    label, _color = web._independence_tier("price_live")
+    assert "官方" not in label, f"price_live 不應標官方，實得 {label}"
+    assert label == "高·第三方", f"price_live 應為『高·第三方』，實得 {label}"
+
+
+def test_independence_tier_onchain_third_party_aggregator_not_official():
+    """onchain（blockchain.info／Alternative.me FNG，第三方公開 API）同樣不是
+    一手權威，不可標官方，應為『高·第三方』。"""
+    label, _color = web._independence_tier("onchain")
+    assert "官方" not in label, f"onchain 不應標官方，實得 {label}"
+    assert label == "高·第三方", f"onchain 應為『高·第三方』，實得 {label}"
+
+
+def test_independence_tier_maps_sentiment_kinds_to_community_medium():
+    """情緒／社群（news/social/sentiment）→ 中·社群（中等獨立性）。"""
+    for kind in ("news", "social", "sentiment"):
+        label, _color = web._independence_tier(kind)
+        assert label == "中·社群", f"{kind} 應歸『中·社群』，實得 {label}"
+
+
+def test_independence_tier_unclassified_kind_falls_back_to_general():
+    """未分類的 kind（如 dev_activity）→ 一般，不誤標成官方/第三方/社群。"""
+    label, _color = web._independence_tier("dev_activity")
+    assert label == "一般·輔助", f"dev_activity 應歸『一般·輔助』，實得 {label}"
+
+
+def test_evidence_list_shows_tier_pill_next_to_source():
+    """evidence 清單來源 pill 旁應附 tier·權威性標籤；CoinGecko(price_live) 的
+    evidence 渲染出來的 pill 絕不可含「官方」字樣。"""
+    ev = [Evidence(source="coingecko-price", fetched_at="t", content_reference="c",
+                    related_claim="x", trust=0.9, kind="price_live")]
+    htmlout = web._render_evidence_list(ev)
+    assert "tf-tier-pill" in htmlout
+    assert "高·第三方" in htmlout
+    assert "官方" not in htmlout, "CoinGecko evidence pill 不應出現『官方』字樣"
+
+
+def test_evidence_list_shows_manipulation_red_flag_badge():
+    """ev.flags 非空 → 顯示操縱紅旗徽章（沿用 tf-low 樣式）+ 命中關鍵詞原文。"""
+    ev = [Evidence(source="x-anon", fetched_at="t", content_reference="穩賺翻倍！",
+                    related_claim="x", trust=0.15, kind="social",
+                    flags=["穩賺", "翻倍"])]
+    htmlout = web._render_evidence_list(ev)
+    assert "&#128681;" in htmlout, "應有紅旗 emoji entity"
+    assert "穩賺" in htmlout
+    assert "翻倍" in htmlout
+
+
+def test_evidence_list_no_flag_badge_when_flags_empty():
+    """ev.flags 為空 list 時不應出現紅旗徽章。"""
+    ev = [Evidence(source="coindesk", fetched_at="t", content_reference="正常新聞",
+                    related_claim="x", trust=0.8, kind="news")]
+    htmlout = web._render_evidence_list(ev)
+    assert "&#128681;" not in htmlout
+
+
+def test_evidence_list_tier_pill_escapes_xss_in_source():
+    """tier pill 套上後，source 的 XSS payload 仍須被 html.escape（縱深防禦回歸）。"""
+    ev = [Evidence(source="<script>alert(1)</script>", fetched_at="t", content_reference="c",
+                    related_claim="x", trust=0.9, kind="price_live",
+                    flags=["<img onerror=alert(1)>"])]
+    htmlout = web._render_evidence_list(ev)
+    assert "<script>alert(1)</script>" not in htmlout
+    assert "<img onerror=alert(1)>" not in htmlout
+    assert "&lt;script&gt;" in htmlout
+
+
+def test_cross_signal_divergence_renders_bullish_bearish_columns_via_stance_pairs():
+    """背離 + stance_pairs → 結構化雙欄 BULLISH/BEARISH，附誠實來源數對比
+    （不做假精度的量化 Δ% 徽章，見 codex provenance review 第二輪修正）。"""
+    signal = {
+        "type": "divergence",
+        "summary": "客觀與情緒方向相反",
+        "supporting_claim_ids": ["c1", "c2"],
+        "stance_pairs": [
+            {"source": "coingecko-price", "stance": "bullish", "claim_id": "c1", "text": "ETH 現價上漲"},
+            {"source": "coingecko-sentiment", "stance": "bearish", "claim_id": "c2", "text": "ETH 社群看跌"},
+        ],
+    }
+    htmlout = web._render_cross_signal(signal)
+    assert "BULLISH" in htmlout
+    assert "BEARISH" in htmlout
+    assert "tf-div-grid" in htmlout
+    assert "看漲 1 來源" in htmlout and "看跌 1 來源" in htmlout, "應顯示誠實的來源數對比"
+    assert "ETH 現價上漲" in htmlout
+    assert "ETH 社群看跌" in htmlout
+
+
+def test_cross_signal_divergence_never_shows_fabricated_delta_percentage():
+    """核心回歸鎖：背離雙欄絕不可出現 Δ%／百分比幅度徽章——stance_pairs 是
+    未加權去重矛盾集，筆數差換算成百分比等於假精度（codex MEDIUM，PR #35）。"""
+    signal = {
+        "type": "divergence",
+        "summary": "s",
+        "supporting_claim_ids": [],
+        "stance_pairs": [
+            {"source": "a", "stance": "bullish", "claim_id": "c1", "text": "t1"},
+            {"source": "b", "stance": "bullish", "claim_id": "c2", "text": "t2"},
+            {"source": "c", "stance": "bearish", "claim_id": "c3", "text": "t3"},
+        ],
+    }
+    htmlout = web._render_cross_signal(signal)
+    assert "&Delta;" not in htmlout, "不應出現 Δ 符號"
+    assert "Δ" not in htmlout
+    assert "CONFLICT" not in htmlout
+    assert "%" not in htmlout, "不應出現任何百分比幅度徽章"
+    assert "看漲 2 來源" in htmlout and "看跌 1 來源" in htmlout
+
+
+def test_cross_signal_divergence_renders_columns_via_aggregate_directions():
+    """背離但無 stance_pairs（純聚合層級）→ 仍能從 objective/sentiment_direction 推導雙欄。"""
+    signal = {
+        "type": "divergence",
+        "summary": "客觀看漲、情緒看跌",
+        "supporting_claim_ids": [],
+        "objective_direction": "bullish",
+        "sentiment_direction": "bearish",
+    }
+    htmlout = web._render_cross_signal(signal)
+    assert "BULLISH" in htmlout
+    assert "BEARISH" in htmlout
+    assert "tf-div-grid" in htmlout
+
+
+def test_cross_signal_consensus_has_no_bullish_bearish_columns():
+    """共識（非背離）不應出現雙欄結構——舊版純文字渲染保留。"""
+    signal = {
+        "type": "consensus",
+        "summary": "多源一致看漲",
+        "supporting_claim_ids": ["c1"],
+    }
+    htmlout = web._render_cross_signal(signal)
+    assert "跨源訊號（共識）" in htmlout
+    assert "tf-div-grid" not in htmlout
+    assert "BULLISH" not in htmlout
+
+
+def test_cross_signal_divergence_without_sides_falls_back_to_summary_only():
+    """背離但既無 stance_pairs 也無完整 objective/sentiment_direction（如舊版
+    fixture）→ 不強行湊雙欄，退回舊版純文字渲染，功能零損。"""
+    signal = {"type": "divergence", "summary": "背離摘要", "supporting_claim_ids": []}
+    htmlout = web._render_cross_signal(signal)
+    assert "跨源訊號（背離）" in htmlout
+    assert "背離摘要" in htmlout
+    assert "tf-div-grid" not in htmlout
+
+
+def test_cross_signal_xss_escaped_in_stance_pair_text_and_source():
+    """雙欄結構化渲染下，stance_pairs 的 source/text XSS payload 仍須被 escape。"""
+    signal = {
+        "type": "divergence",
+        "summary": "s",
+        "supporting_claim_ids": [],
+        "stance_pairs": [
+            {"source": "<script>a1</script>", "stance": "bullish", "claim_id": "c1",
+             "text": "<img onerror=alert(2)>"},
+            {"source": "ok-src", "stance": "bearish", "claim_id": "c2", "text": "正常內容"},
+        ],
+    }
+    htmlout = web._render_cross_signal(signal)
+    assert "<script>a1</script>" not in htmlout
+    assert "<img onerror=alert(2)>" not in htmlout
+
+
+def test_render_report_step_ladder_headers_have_step_numbers():
+    """事實鏈加序號：事實/推論/結論標題應附「步驟 N/3」徽章。"""
+    report, evidence, _ = web._do_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    )
+    htmlout = web._render_report(report, evidence)
+    assert "步驟 1/3" in htmlout
+    assert "步驟 2/3" in htmlout
+    assert "步驟 3/3" in htmlout

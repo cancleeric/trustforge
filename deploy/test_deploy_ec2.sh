@@ -95,6 +95,167 @@ PYEOF
   fi
 }
 
+assert_verify_gate_behavior() {
+  # follow-up（真部署發現 reddit-429 false-fail）：光靠字串斷言（有沒有含
+  # `--probe`）測不出「部署 gate 到底聽誰的」——這裡把捕捉到的 fetch-
+  # scheduler 同步驗證 SSM script 實際還原成一支 bash 腳本，用假的
+  # systemctl/journalctl/python3 真的把它跑一遍，直接斷言腳本本身的 exit
+  # code，而不是只看文字內容像不像。
+  local desc_prefix="$1" raw_content="$2" fake_systemctl_start_rc="$3" fake_probe_rc="$4" expect_rc="$5"
+
+  if [ -z "$raw_content" ]; then
+    echo "  [FAIL] $desc_prefix — 沒有可重跑的 verify script（raw content 是空的）"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+
+  local work fake_unit fake_opt fake_py mockbin
+  work=$(mktemp -d)
+  fake_unit="$work/fake-fetch-scheduler.service"
+  fake_opt="$work/opt-trustforge"
+  fake_py="$work/python3"
+  mockbin="$work/bin"
+  mkdir -p "$fake_opt" "$mockbin"
+  touch "$fake_unit"
+
+  cat >"$mockbin/systemctl" <<'EOSC'
+#!/usr/bin/env bash
+if [ "$1" = "daemon-reload" ]; then exit 0; fi
+if [ "$1" = "start" ]; then exit "${GATE_TEST_SYSTEMCTL_START_RC:-0}"; fi
+exit 0
+EOSC
+  chmod +x "$mockbin/systemctl"
+
+  cat >"$mockbin/journalctl" <<'EOJC'
+#!/usr/bin/env bash
+exit 0
+EOJC
+  chmod +x "$mockbin/journalctl"
+
+  cat >"$fake_py" <<'EOPY'
+#!/usr/bin/env bash
+exit "${GATE_TEST_PROBE_RC:-0}"
+EOPY
+  chmod +x "$fake_py"
+
+  local ssm_json="${raw_content#commands=}"
+  printf '%s' "$ssm_json" >"$work/ssm.json"
+  if ! python3 -c "
+import json
+
+with open('$work/ssm.json') as f:
+    cmds = json.load(f)
+script = chr(10).join(cmds)
+script = script.replace('/etc/systemd/system/fetch-scheduler.service', '$fake_unit')
+script = script.replace('/opt/trustforge', '$fake_opt')
+script = script.replace('/usr/bin/python3', '$fake_py')
+with open('$work/verify.sh', 'w') as f:
+    f.write(script)
+" 2>"$work/pyerr.txt"; then
+    echo "  [FAIL] $desc_prefix — 重建 verify script 失敗：$(cat "$work/pyerr.txt")"
+    FAIL=$((FAIL + 1))
+    rm -rf "$work"
+    return
+  fi
+
+  local rc
+  set +e
+  GATE_TEST_SYSTEMCTL_START_RC="$fake_systemctl_start_rc" GATE_TEST_PROBE_RC="$fake_probe_rc" \
+    PATH="$mockbin:$PATH" bash "$work/verify.sh" >"$work/stdout.log" 2>"$work/stderr.log"
+  rc=$?
+  set -e
+
+  if [ "$rc" = "$expect_rc" ]; then
+    echo "  [PASS] ${desc_prefix}（實際重跑 gate 腳本 exit=${rc}，符合預期 ${expect_rc}）"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] ${desc_prefix} — 實際重跑 gate 腳本 exit=${rc}，預期 ${expect_rc}"
+    sed 's/^/    stdout: /' "$work/stdout.log"
+    sed 's/^/    stderr: /' "$work/stderr.log"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$work"
+}
+
+assert_healthz_gate_behavior() {
+  # codex HIGH（首次建置缺 web healthz gate）：一樣不能只看字串斷言，這裡把
+  # 捕捉到的 web healthz SSM script 實際還原成一支 bash 腳本，用假的
+  # systemctl（is-active）/curl/journalctl/sleep 真的把它跑一遍，直接斷言
+  # 腳本本身的 exit code。sleep 用 no-op 假的，避免真的等 12*3=36 秒。
+  local desc_prefix="$1" raw_content="$2" fake_systemctl_active_rc="$3" fake_curl_rc="$4" expect_rc="$5"
+
+  if [ -z "$raw_content" ]; then
+    echo "  [FAIL] $desc_prefix — 沒有可重跑的 healthz script（raw content 是空的）"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+
+  local work mockbin
+  work=$(mktemp -d)
+  mockbin="$work/bin"
+  mkdir -p "$mockbin"
+
+  cat >"$mockbin/systemctl" <<'EOSC'
+#!/usr/bin/env bash
+if [ "$1" = "is-active" ]; then exit "${GATE_TEST_SYSTEMCTL_ACTIVE_RC:-0}"; fi
+exit 0
+EOSC
+  chmod +x "$mockbin/systemctl"
+
+  cat >"$mockbin/curl" <<'EOCURL'
+#!/usr/bin/env bash
+exit "${GATE_TEST_CURL_RC:-0}"
+EOCURL
+  chmod +x "$mockbin/curl"
+
+  cat >"$mockbin/journalctl" <<'EOJC'
+#!/usr/bin/env bash
+exit 0
+EOJC
+  chmod +x "$mockbin/journalctl"
+
+  cat >"$mockbin/sleep" <<'EOSL'
+#!/usr/bin/env bash
+exit 0
+EOSL
+  chmod +x "$mockbin/sleep"
+
+  local ssm_json="${raw_content#commands=}"
+  printf '%s' "$ssm_json" >"$work/ssm.json"
+  if ! python3 -c "
+import json
+
+with open('$work/ssm.json') as f:
+    cmds = json.load(f)
+script = chr(10).join(cmds)
+with open('$work/healthz.sh', 'w') as f:
+    f.write(script)
+" 2>"$work/pyerr.txt"; then
+    echo "  [FAIL] $desc_prefix — 重建 healthz script 失敗：$(cat "$work/pyerr.txt")"
+    FAIL=$((FAIL + 1))
+    rm -rf "$work"
+    return
+  fi
+
+  local rc
+  set +e
+  GATE_TEST_SYSTEMCTL_ACTIVE_RC="$fake_systemctl_active_rc" GATE_TEST_CURL_RC="$fake_curl_rc" \
+    PATH="$mockbin:$PATH" bash "$work/healthz.sh" >"$work/stdout.log" 2>"$work/stderr.log"
+  rc=$?
+  set -e
+
+  if [ "$rc" = "$expect_rc" ]; then
+    echo "  [PASS] ${desc_prefix}（實際重跑 healthz gate 腳本 exit=${rc}，符合預期 ${expect_rc}）"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] ${desc_prefix} — 實際重跑 healthz gate 腳本 exit=${rc}，預期 ${expect_rc}"
+    sed 's/^/    stdout: /' "$work/stdout.log"
+    sed 's/^/    stderr: /' "$work/stderr.log"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$work"
+}
+
 MOCKDIR=$(mktemp -d)
 CAPTURE=$(mktemp -d)
 trap 'rm -rf "$MOCKDIR" "$CAPTURE"' EXIT
@@ -194,7 +355,13 @@ case "$ALL" in
     # scheduler-fail 場景：讓「驗證 fetch-scheduler」那次 send-command 回
     # Failed（模擬 DynamoDB IAM 權限不夠、scheduler exit 1 的真實情境），其餘
     # 呼叫維持 Success，藉此斷言 deploy 腳本會非零結束、不會誤報成功。
+    # healthz-fail 場景（codex HIGH）：讓首次建置路徑第一次 send-command
+    # （verify_web_healthz）回 Failed（模擬 systemctl is-active/curl healthz
+    # 失敗），藉此斷言部署會非零結束、且第二次 send-command（verify_fetch_
+    # scheduler 的 --probe）根本沒被呼叫到——healthz gate 獨立擋在 probe 之前。
     if [ "$SCENARIO" = "scheduler-fail" ] && [ "$CMDID_ARG" = "cmd-call2" ]; then
+      echo "Failed"
+    elif [ "$SCENARIO" = "healthz-fail" ] && [ "$CMDID_ARG" = "cmd-call1" ]; then
       echo "Failed"
     else
       echo "Success"
@@ -272,9 +439,27 @@ else
     "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan,dynamodb:Query"
 fi
 
-# 排程 fetcher 同步驗證：首次建置這條路徑唯一的一次 ssm send-command 就是
-# verify_fetch_scheduler（沒有 update-in-place 那條主設定命令）。
-VERIFY_FT=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+# codex HIGH（首次建置缺 web healthz gate）：首次建置路徑現在會送 2 次 ssm
+# send-command——call1 是新加的 verify_web_healthz（web 服務本身健康），
+# call2 才是 verify_fetch_scheduler（DynamoDB probe）。
+VERIFY_FT_HEALTHZ=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+if [ -z "$VERIFY_FT_HEALTHZ" ]; then
+  echo "  [FAIL] 首次建置：沒捕捉到 web healthz 同步驗證的 ssm send-command"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$VERIFY_FT_HEALTHZ" "systemctl is-active --quiet trustforge" "首次建置：web healthz gate 有檢查 trustforge.service is-active"
+  assert_contains "$VERIFY_FT_HEALTHZ" "curl -fsS http://localhost/healthz" "首次建置：web healthz gate 有 curl /healthz"
+  assert_contains "$VERIFY_FT_HEALTHZ" "healthz 檢查失敗" "首次建置：web healthz gate 失敗時有印訊息"
+  assert_contains "$VERIFY_FT_HEALTHZ" "journalctl -u trustforge" "首次建置：web healthz gate 失敗時有印 trustforge journal"
+  assert_healthz_gate_behavior \
+    "首次建置：web healthz 失敗（模擬 systemctl is-active/curl 失敗）→ gate 判定失敗（exit1），獨立於 probe 是否會過" \
+    "$VERIFY_FT_HEALTHZ" 1 1 1
+  assert_healthz_gate_behavior \
+    "首次建置：web healthz 通過（systemctl is-active + curl 都成功）→ gate 判定成功（exit0）" \
+    "$VERIFY_FT_HEALTHZ" 0 0 0
+fi
+
+VERIFY_FT=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
 if [ -z "$VERIFY_FT" ]; then
   echo "  [FAIL] 首次建置：沒捕捉到 fetch-scheduler 同步驗證的 ssm send-command"
   FAIL=$((FAIL + 1))
@@ -287,6 +472,14 @@ else
   assert_contains "$VERIFY_FT" "fetch_scheduler.py --probe" "首次建置：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
   assert_contains "$VERIFY_FT" "TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache" "首次建置：probe 呼叫有帶正確的 cache table 環境變數"
   assert_contains "$VERIFY_FT" "TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger" "首次建置：probe 呼叫有帶正確的 cost-ledger table 環境變數"
+  # follow-up（真部署發現）：reddit 在 EC2 共享 IP 上必定 429，一般全源排程
+  # 因此必定非零，但這不代表基建有問題——部署 gate 只該認 --probe。
+  assert_verify_gate_behavior \
+    "首次建置：一般排程失敗（模擬 reddit 429）但 --probe 通過 → gate 仍判定成功（exit0，不再 false-fail）" \
+    "$VERIFY_FT" 1 0 0
+  assert_verify_gate_behavior \
+    "首次建置：--probe 失敗（模擬 DynamoDB 被拒）→ gate 判定失敗（exit1），與一般排程是否成功無關" \
+    "$VERIFY_FT" 0 1 1
 fi
 
 echo
@@ -327,6 +520,12 @@ if [ -z "$VERIFY_UP" ]; then
 else
   assert_contains "$VERIFY_UP" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service"
   assert_contains "$VERIFY_UP" "fetch_scheduler.py --probe" "update-in-place：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
+  assert_verify_gate_behavior \
+    "update-in-place：一般排程失敗（模擬 reddit 429）但 --probe 通過 → gate 仍判定成功（exit0，不再 false-fail）" \
+    "$VERIFY_UP" 1 0 0
+  assert_verify_gate_behavior \
+    "update-in-place：--probe 失敗（模擬 DynamoDB 被拒）→ gate 判定失敗（exit1），與一般排程是否成功無關" \
+    "$VERIFY_UP" 0 1 1
 fi
 
 SSM_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
@@ -464,6 +663,38 @@ fi
 # systemctl start（無參數、可能因 cache 全新鮮而假成功）那條路。
 SCHED_FAIL_CONTENT=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
 assert_contains "$SCHED_FAIL_CONTENT" "fetch_scheduler.py --probe" "場景 3：判定失敗的那次驗證，內容包含 --probe（不是只靠 freshness-skip 的一般排程）"
+
+echo
+echo "== 場景 4：首次建置 web healthz 驗證失敗（codex HIGH，模擬 systemctl/curl 失敗）=="
+# 模擬「user-data 建完 scheduler unit 之後，web 服務其實沒起來」（本次修的
+# HIGH 核心情境：舊版首次建置只驗 DynamoDB probe，probe 過就報成功，公開
+# 服務卻是壞的）。mock 讓 call1（新加的 verify_web_healthz）回 Failed，斷言
+# 整支 deploy_ec2.sh 必須非零結束、且 call2（--probe）根本沒被呼叫到——
+# healthz gate 獨立擋在 probe 之前，不受 probe 會不會過影響。
+rm -f "$CAPTURE/ssm_params_call2.txt"
+if run_deploy "healthz-fail"; then
+  echo "  [FAIL] web healthz 驗證失敗時，deploy_ec2.sh 仍回報成功（exit 0）——不可接受"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] web healthz 驗證失敗時，deploy_ec2.sh 正確地非零結束"
+  PASS=$((PASS + 1))
+  if grep -qF "web healthz 同步驗證失敗" "$CAPTURE/stdout_healthz-fail.log"; then
+    echo "  [PASS] 失敗訊息明確（含 web healthz 同步驗證失敗 字樣）"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] deploy_ec2.sh 非零結束了，但訊息沒有明確指出是 web healthz 驗證失敗："
+    cat "$CAPTURE/stdout_healthz-fail.log"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+if [ -f "$CAPTURE/ssm_params_call2.txt" ]; then
+  echo "  [FAIL] 場景 4：healthz gate 沒擋住，--probe 那次 send-command（call2）仍被呼叫到了"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] 場景 4：healthz gate 正確擋在 --probe 之前，--probe 那次 send-command 根本沒被呼叫（獨立於 scheduler/probe 結果）"
+  PASS=$((PASS + 1))
+fi
 
 echo
 echo "== 結果：PASS=$PASS FAIL=$FAIL =="
