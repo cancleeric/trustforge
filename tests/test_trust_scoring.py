@@ -1070,6 +1070,72 @@ def test_w3_burst_window_requires_at_least_two_sources():
     assert flags == {}, "整個資料池只有 1 個來源時不應觸發爆量（無從比較）"
 
 
+def test_w3_b_two_source_flood_vs_normal_detected_via_leave_one_out_median():
+    """對抗性回歸（codex [HIGH]）：只有 2 個來源時，若中位數誤含候選自己會
+    造成數學上偵測不到——例如 (100, 1) 兩來源，`median([100,1])=50.5`，
+    `100 > 3×50.5=151.5` 為 False，灌水來源逃脫。改為 leave-one-out 中位數
+    （排除候選自己）後，對照組退化為單一來源本身的值：候選=灌水源時，
+    其餘來源中位數=1，`8 > 3×1` 成立而觸發；候選=正常源時，其餘來源中位數
+    =8，`1 > 3×8` 不成立而不觸發。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    claims = []
+    for i in range(8):
+        t = f"急報{i} ABC幣 即將 暴衝 提前 卡位 第{i}條"
+        claims.append(
+            Claim(id=f"flood-{i}", text=t,
+                  doc=_doc(f"flood-doc-{i}", "social", "x-flooder", t, ts=_BURST_BASE_TS + i * 60))
+        )
+    claims.append(
+        Claim(id="normal-1", text="單純 觀察 市場 動態",
+              doc=_doc("normal-doc-1", "news", "solo-outlet", "單純 觀察 市場 動態", ts=_BURST_BASE_TS))
+    )
+
+    flags = _coordination_burst_flags(claims)
+
+    for i in range(8):
+        fl = flags.get(f"flood-{i}")
+        assert fl, f"2 來源情境下 flood-{i} 仍應被偵測到單源爆量，實際: {flags}"
+        assert "x-flooder" in fl[0]
+        assert "8則" in fl[0]
+
+    assert flags.get("normal-1") is None, "正常單則來源不應被誤傷"
+
+
+def test_w3_b_burst_spanning_hour_boundary_detected_via_rolling_window():
+    """對抗性回歸（codex [MEDIUM]）：爆量橫跨牆鐘整點（xx:59:30 ~
+    xx+1:00:45，全部在 75 秒內），若用固定 `int(ts // 3600)` 分桶會被切成
+    「整點前」「整點後」兩個各自低於門檻的子群而逃脫；改為依 ts 排序後
+    雙指標(two-pointer)找任一 60 分鐘滾動窗內的最大相異文本數，應能正確
+    偵測到橫跨整點的完整爆量。"""
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    hour_boundary = (int(_BURST_BASE_TS // 3600) + 1) * 3600  # 對齊到下一個整點
+    offsets = [-30, -15, 0, 15, 30, 45]  # xx:59:30 ~ xx+1:00:45，橫跨整點，全在 75 秒內
+    claims = []
+    for i, off in enumerate(offsets):
+        t = f"整點突襲{i} DEF幣 快訊 搶先 布局 第{i}波"
+        claims.append(
+            Claim(id=f"boundary-{i}", text=t,
+                  doc=_doc(f"boundary-doc-{i}", "social", "x-boundary-flooder", t,
+                           ts=hour_boundary + off))
+        )
+    claims.append(
+        Claim(id="normal-2", text="平靜 觀望 中",
+              doc=_doc("normal-doc-2", "news", "quiet-outlet", "平靜 觀望 中", ts=hour_boundary))
+    )
+
+    flags = _coordination_burst_flags(claims)
+
+    for i in range(len(offsets)):
+        fl = flags.get(f"boundary-{i}")
+        assert fl, f"橫跨整點的爆量 boundary-{i} 仍應被滾動窗偵測到，實際: {flags}"
+        assert "x-boundary-flooder" in fl[0]
+        assert f"{len(offsets)}則" in fl[0]
+
+    assert flags.get("normal-2") is None, "正常單則來源不應被誤傷"
+
+
 def test_w3_normal_multi_source_corroboration_not_flagged():
     """回歸：既有的正常多源佐證情境（onchain/news/social 三方各自轉述同一事實，
     onchain 為 OBJECTIVE_KINDS 豁免、news/social 僅 2 個非豁免來源，未達
