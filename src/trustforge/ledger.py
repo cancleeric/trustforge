@@ -11,12 +11,14 @@ Backend 可插拔（CEO 架構決策）：
     不用改呼叫碼。
   - `JsonlLedger`：本 PR 唯一實作，append-only JSONL 檔案。離線/測試/開發預設。
     ⚠️ EC2 容器重建即失（非真持久），僅供本機/單機部署與測試用。
-  - `DynamoDBLedger`：stub，未實作（本 PR 不打真 AWS、不建表）。線上持久用，
-    需先建表 + 賦予執行環境（EC2 instance role / Lambda execution role）
-    dynamodb:PutItem / dynamodb:Scan 權限，兩者皆完成後才由 CEO 另立步驟啟用。
+  - `DynamoDBLedger`：線上持久用實作（本 PR 只寫 code + mock 測試，**不打真
+    AWS、不建表**）。需先建表 + 賦予執行環境（EC2 instance role / Lambda
+    execution role）dynamodb:PutItem / dynamodb:Scan 權限，兩者皆完成後才由
+    CEO 另立步驟切 `COST_LEDGER_BACKEND=dynamodb` 真正啟用。
   - `get_ledger()` 依 env `COST_LEDGER_BACKEND`（jsonl|dynamodb，預設 jsonl）
-    選 backend；`append_run()` 對 DynamoDB 等未實作/失敗的 backend 一律 fallback
-    寫 JsonlLedger，確保帳本永遠可寫、pipeline 不因帳本故障而中斷。
+    選 backend；`append_run()` 對 DynamoDB 等 backend 呼叫失敗（缺憑證/表未建/
+    網路問題）一律 fallback 寫 JsonlLedger，確保帳本永遠可寫、pipeline 不因
+    帳本故障而中斷。
 """
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ import json
 import os
 import sys
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -131,39 +135,99 @@ class JsonlLedger(Ledger):
 
 
 class DynamoDBLedger(Ledger):
-    """線上持久用 backend（stub，未實作）。
+    """線上持久用 backend（DynamoDB 實作）。
 
-    CEO gated AWS 步驟：需先建 DynamoDB 表（建議 PK=run_id 或 ts+coin 組合），
-    並賦予執行環境（EC2 instance role / Lambda execution role）
-    `dynamodb:PutItem` / `dynamodb:Scan` 權限，兩者皆完成後才能真正啟用
-    （`COST_LEDGER_BACKEND=dynamodb`）。
+    ⚠️ 本 repo 端（開發/CI）**不打真 AWS**：`__init__` 只讀 env、不連線，`boto3`
+    resource/Table 一律 lazy 建立（第一次真的 `append`/`read_all` 才建），確保
+    沒有 AWS 憑證、表也還沒建的環境下，**建構 `DynamoDBLedger()` 不會炸**。
 
-    本 PR **不實作真 DynamoDB、不打 AWS**，僅預留介面位置：`append`/`read_all`
-    目前一律 raise `NotImplementedError`，`get_ledger()`/`append_run()` 遇到此
-    情況會 fallback 回 `JsonlLedger`，確保呼叫端不受影響。
+    真表建立 + IAM 權限（`dynamodb:PutItem` / `dynamodb:Scan`）+ 生產環境切
+    `COST_LEDGER_BACKEND=dynamodb` 由 CEO 另立步驟完成，本檔不涉及。
+
+    表結構（CEO gated 建表時採用）：PK=`run_id`（S）、SK=`ts`（S，ISO8601）。
+    寫入的 record 若沒有 `run_id`，用 `ts` + `coin` 組一個穩定 id 頂上。
+    DynamoDB 不吃 Python `float`，寫入前遞迴轉 `Decimal`；讀出時再轉回 `float`，
+    格式與 `JsonlLedger.read_all()` 保持一致，呼叫端不用分辨 backend。
     """
 
-    def __init__(self, table_name: str | None = None):
+    def __init__(self, table_name: str | None = None, region: str | None = None):
         self.table_name = table_name or os.getenv(
             "TRUSTFORGE_COST_LEDGER_TABLE", "trustforge-cost-ledger"
         )
+        self.region = region or os.getenv("AWS_REGION", "us-east-1")
+        self._table: Any = None  # lazy：建構本身不連 AWS
+
+    def _get_table(self) -> Any:
+        """lazy 取得 boto3 Table 物件；第一次呼叫才真的碰 AWS SDK。"""
+        if self._table is None:
+            import boto3  # 延遲匯入：建構/未啟用 dynamodb backend 時不需要憑證
+
+            self._table = boto3.resource("dynamodb", region_name=self.region).Table(
+                self.table_name
+            )
+        return self._table
+
+    @staticmethod
+    def _to_decimal(value: Any) -> Any:
+        """遞迴把 float 轉 `Decimal`（DynamoDB 不接受 float），巢狀 dict/list 一併處理。"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, float):
+            return Decimal(str(value))
+        if isinstance(value, dict):
+            return {k: DynamoDBLedger._to_decimal(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [DynamoDBLedger._to_decimal(v) for v in value]
+        return value
+
+    @staticmethod
+    def _from_decimal(value: Any) -> Any:
+        """讀出時把 `Decimal` 轉回 `float`，格式對齊 `JsonlLedger`。"""
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, dict):
+            return {k: DynamoDBLedger._from_decimal(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [DynamoDBLedger._from_decimal(v) for v in value]
+        return value
 
     def append(self, record: dict[str, Any]) -> None:
-        raise NotImplementedError(
-            "DynamoDBLedger 尚未實作（stub）。需 CEO gated AWS 步驟（建表 + IAM 權限）後啟用。"
-        )
+        item = dict(record)
+        ts = item.get("ts")
+        if not ts:
+            ts = datetime.now(timezone.utc).isoformat()
+            item["ts"] = ts
+        run_id = item.get("run_id")
+        if not run_id:
+            coin = item.get("coin", "unknown")
+            run_id = f"{ts}:{coin}"
+        item["run_id"] = str(run_id)
+        item["ts"] = str(ts)
+        self._get_table().put_item(Item=self._to_decimal(item))
 
     def read_all(self) -> list[dict[str, Any]]:
-        raise NotImplementedError(
-            "DynamoDBLedger 尚未實作（stub）。需 CEO gated AWS 步驟（建表 + IAM 權限）後啟用。"
-        )
+        table = self._get_table()
+        records: list[dict[str, Any]] = []
+        scan_kwargs: dict[str, Any] = {}
+        while True:
+            resp = table.scan(**scan_kwargs)
+            for item in resp.get("Items", []) or []:
+                converted = self._from_decimal(item)
+                if isinstance(converted, dict):
+                    records.append(converted)
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
+        return records
 
 
 def get_ledger() -> Ledger:
     """依 env `COST_LEDGER_BACKEND`（jsonl|dynamodb，預設 jsonl）選 backend。
 
-    `dynamodb` 目前是未實作 stub；選了也不 raise（建構本身不打 AWS），實際失敗
-    會在 `append`/`read_all` 呼叫時發生，由 `append_run()` 接住 fallback。
+    選 `dynamodb` 本身不會 raise（`DynamoDBLedger.__init__` 只讀 env、不連
+    AWS），實際是否可用（憑證/表是否存在）要到 `append`/`read_all` 呼叫時才
+    知道，失敗由 `append_run()` 接住 fallback 寫 JsonlLedger。
     """
     backend = os.getenv("COST_LEDGER_BACKEND", "jsonl").strip().lower()
     if backend == "dynamodb":

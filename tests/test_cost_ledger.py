@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -157,16 +159,91 @@ def test_jsonl_ledger_append_is_append_only_not_overwrite(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# DynamoDBLedger stub + get_ledger() / append_run() fallback
+# DynamoDBLedger（mock boto3 Table，不打真 AWS）+ get_ledger() / append_run() fallback
 # ---------------------------------------------------------------------------
 
-def test_dynamodb_ledger_is_ledger_subclass_but_unimplemented():
+def test_dynamodb_ledger_is_ledger_subclass():
     d = DynamoDBLedger()
     assert isinstance(d, Ledger)
-    with pytest.raises(NotImplementedError):
-        d.append({"x": 1})
-    with pytest.raises(NotImplementedError):
-        d.read_all()
+
+
+def test_dynamodb_ledger_construction_does_not_touch_aws(monkeypatch):
+    """建構只讀 env，不建立 boto3 resource/Table（lazy）——無憑證/未建表環境不炸。"""
+    monkeypatch.delenv("TRUSTFORGE_COST_LEDGER_TABLE", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    d = DynamoDBLedger()
+    assert d.table_name == "trustforge-cost-ledger"
+    assert d.region == "us-east-1"
+    assert d._table is None  # 尚未真的碰 AWS SDK
+
+
+def test_dynamodb_ledger_append_calls_put_item_with_decimal_and_keys():
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    d._table = mock_table  # 繞過 boto3，模擬已建好的 Table，確保不打真 AWS
+
+    d.append({
+        "run_id": "run-1",
+        "ts": "2026-07-01T00:00:00+00:00",
+        "coin": "BTC",
+        "total_cost_usd": 0.0012,
+        "calls": [{"model": "m", "cost_usd": 0.0012}],
+    })
+
+    mock_table.put_item.assert_called_once()
+    item = mock_table.put_item.call_args.kwargs["Item"]
+    assert item["run_id"] == "run-1"
+    assert item["ts"] == "2026-07-01T00:00:00+00:00"
+    assert isinstance(item["total_cost_usd"], Decimal)
+    assert item["total_cost_usd"] == Decimal("0.0012")
+    assert isinstance(item["calls"][0]["cost_usd"], Decimal)
+
+
+def test_dynamodb_ledger_append_generates_run_id_and_ts_when_missing():
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    d._table = mock_table
+
+    d.append({"coin": "ETH", "total_cost_usd": 0.0, "calls": []})
+
+    item = mock_table.put_item.call_args.kwargs["Item"]
+    assert item["run_id"]  # 自動生成，非空字串
+    assert "ETH" in item["run_id"]
+    assert item["ts"]  # 自動補上 ISO8601 時間戳
+
+
+def test_dynamodb_ledger_read_all_paginates_and_converts_decimal_to_float():
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.side_effect = [
+        {
+            "Items": [
+                {"run_id": "r1", "ts": "t1", "total_cost_usd": Decimal("0.001"), "calls": []},
+            ],
+            "LastEvaluatedKey": {"run_id": "r1", "ts": "t1"},
+        },
+        {
+            "Items": [
+                {
+                    "run_id": "r2",
+                    "ts": "t2",
+                    "total_cost_usd": Decimal("0.002"),
+                    "calls": [{"model": "m", "cost_usd": Decimal("0.002")}],
+                },
+            ],
+        },
+    ]
+    d._table = mock_table
+
+    records = d.read_all()
+
+    assert mock_table.scan.call_count == 2
+    second_call_kwargs = mock_table.scan.call_args_list[1].kwargs
+    assert second_call_kwargs.get("ExclusiveStartKey") == {"run_id": "r1", "ts": "t1"}
+    assert len(records) == 2
+    assert isinstance(records[0]["total_cost_usd"], float)
+    assert records[0]["total_cost_usd"] == 0.001
+    assert records[1]["calls"][0]["cost_usd"] == 0.002
 
 
 def test_get_ledger_default_is_jsonl(monkeypatch):
@@ -182,11 +259,16 @@ def test_get_ledger_dynamodb_backend_does_not_raise_at_construction(monkeypatch)
 
 
 def test_append_run_falls_back_to_jsonl_on_broken_backend(monkeypatch, tmp_path):
-    """dynamodb（未實作）等 backend append 失敗 → fallback 寫入 JsonlLedger，不中斷 pipeline。"""
+    """dynamodb backend append 失敗（缺憑證/表未建/網路問題）→ fallback 寫入 JsonlLedger，
+    不中斷 pipeline。用 mock 讓 `_get_table()` 直接炸掉，確保這裡不會意外打到真 AWS。"""
     fallback_path = tmp_path / "fallback_cost_ledger.jsonl"
     monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(fallback_path))
 
     broken = DynamoDBLedger()
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
     append_run({"ts": "t1", "coin": "BTC", "total_cost_usd": 0.0, "calls": []}, ledger=broken)
 
     assert fallback_path.exists()
