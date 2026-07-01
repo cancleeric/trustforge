@@ -173,6 +173,70 @@ market_judgment/direction，漏了這條輸入路徑。
     （無任何幣別提及）仍正常計入（呼應 #32 精神，不誤排）。
   - 既有 655 綠 + 三態 demo（`pipeline.run(offline=True)` BTC 多源樣本
     normal、單一來源同源 2 句 abstain）不回歸確認。
+
+codex 對抗審第 8 輪根治（coin-relevance 全類別收斂）：第 6/7 輪先後用
+「額外欄位」（`coin_scoped_supporting`）＋「呼叫端各自重新過濾一次」
+（`build_report` 的 `cross_signal_input`）修補了 facts／`_direction()`／
+key_basis／cross_source_signal 這幾個單點漏洞，但這種 piecemeal 修法治標
+不治本——只要還有一個 report-facing 欄位是從「未過濾的 supporting/
+contrarian」算出來的，就會被抓出下一個漏洞。本輪 codex 抓到最後兩個：
+`contrarian` 輸出本身未 coin-scoped（ETH 反方證據仍會出現在 BTC 報告的
+`contrarian` 清單），以及裸 `confidence` 顯示未 coin-scoped（`confidence`
+仍是從未過濾的 `supporting` 算出來的均值）。
+  - 根治：不再新增任何「額外欄位」或「呼叫端重新過濾」，改讓
+    `trust.scoring.aggregate(coin=)` 本身直接讓 `TrustedBrief.supporting`／
+    `contrarian`／`confidence` 三者都是 `_matches_coin` 篩過的 coin-scoped
+    結果（保留本幣相關 + 全市場通用，只排除明確他幣）——`evidence_strength`/
+    `calibrated_confidence` 也改用這份已過濾的 `supporting`/`contrarian`/
+    `confidence` 算（不再是額外算一份 `calib_pool`）。已移除 `coin_scoped_
+    supporting` 欄位（第 6/7 輪引入，現已併入 `supporting` 本身，不再單獨
+    存在）。`agent.orchestrator.build_report` 因此全面回歸直接讀
+    `brief.supporting`/`brief.contrarian`/`brief.confidence`——facts／
+    `_direction()`／evidence／key_basis／`_derive_limits`（limits/could_flip
+    計數）／最終 `Report.contrarian`／`Report.confidence`／Step3 prompt
+    的 claim_refs 全部自動一致，不必再各自過濾一次。唯一例外：
+    `cross_signal_input`（供 `detect_cross_source_signal` 用的獨立
+    `scored` 參數，不是 `brief` 的一部分，原始全集無法從 `brief` 反推）
+    仍需自行用同一份 `_matches_coin` 規則過濾一次——這不是「piecemeal」，
+    而是因為它本來就是不同的資料來源。
+  - 設計語意反轉（非回歸，是本輪刻意變更）：第 4～7 輪原本認為「未過濾
+    的 contrarian」是報表透明度的一部分（ETH 雜訊仍照常列出，只是不進
+    calibration），本輪起改為 contrarian 也必須 coin-scoped——BTC 報告不
+    該列 ETH 反方。因此 `test_aggregate_coin_irrelevant_low_trust_claims_
+    do_not_change_calibrated_confidence` 的最終斷言從「ETH 雜訊應出現在
+    `brief.contrarian`」反轉為「ETH 雜訊不應出現在 `brief.contrarian`」。
+  - 守 #32：`_matches_coin` 本身就是幣別別名比對（非 `_normalize(query)`
+    文字比對），本輪只是把它同時套用到 `supporting`/`contrarian` 兩側，
+    不是重新引入 #32 當年的脆弱文字比對機制；全市場通用（未提及任何幣別）
+    新聞仍正常納入，未傳 `coin` 時行為逐字不變。
+  - 既有第 6 輪三個回歸測試（`test_aggregate_coin_scoped_supporting_
+    still_includes_generic_market_wide_news`／`test_e2e_strong_btc_source_
+    plus_high_trust_eth_sources_still_abstains_and_stays_clean`／
+    `test_e2e_multi_btc_sources_normal_state_unaffected_by_coin_scoping`）
+    改讀 `brief.supporting`（不再有獨立的 `coin_scoped_supporting` 欄位可
+    讀）；其中 `test_e2e_strong_btc_source_plus_high_trust_eth_sources_
+    still_abstains_and_stays_clean` 的「前提檢查」改成直接檢查過濾前的
+    `scored` 原始集合（證明若不過濾，確實有 ETH 高信任來源會混入
+    supporting），因為過濾後的 `brief.supporting` 現在本身就已經是乾淨的
+    coin-scoped 結果，不能再拿它自己來證明「過濾前會出問題」。
+  - 本輪新增 `test_e2e_root_fix_all_report_fields_immune_to_mixed_trust_
+    other_coin_claims`：一次涵蓋全部 report-facing 欄位的跨幣汙染 e2e
+    ——同時混入低信任與高信任兩種明確 ETH claim（涵蓋 objective 與
+    social kind），逐欄位比對「有 ETH 雜訊」vs「無 ETH 雜訊」兩個 brief/
+    report 在 `confidence`／`calibrated_confidence`／`decision_state`／
+    `direction`／`facts`／`key_basis`／`contrarian`／`limits`／
+    `could_flip`／`cross_source_signal` 上完全一致，並逐一確認這些欄位＋
+    `inferences`（Step3 offline narrative 回顯 prompt 的管道）都不含
+    「ETH」字樣；前提檢查沿用 Round 7 手法，證明未過濾時 ETH 高信任
+    objective 來源確實會混入 `detect_cross_source_signal` 的
+    `supporting_claim_ids`。測試裡的 ETH 雜訊文字刻意避開跟 BTC 文字共用
+    具體詞——`trust.scoring._corroboration()` 是跨全池、非 coin-aware 的
+    文字重疊比對（獨立於本輪修正範圍之外的既有機制），若字面雷同會讓
+    trust 本身被墊高，混淆「coin-scoping 修法是否生效」與「文字重疊佐證」
+    兩件事，此為測試設計限制的誠實記錄，非新發現的缺陷。
+  - 既有 656 綠（+本輪新增 1 個 = 657 綠）＋三態 demo
+    （`pipeline.run(offline=True)` BTC 多源樣本 normal、單一來源同源 2 句
+    abstain）不回歸確認。
 """
 from __future__ import annotations
 
@@ -486,12 +550,22 @@ def test_aggregate_repeated_low_trust_claims_from_one_source_do_not_change_decis
 
 
 def test_aggregate_coin_irrelevant_low_trust_claims_do_not_change_calibrated_confidence():
-    """codex 對抗審第 4 輪 [HIGH] 回歸：`aggregate(coin=...)` 灌入「明確提及
-    其他幣、與目標幣無關」的低信任雜訊，不得拉低目標幣的
-    `calibrated_confidence`——calibration 應只從 `_matches_coin()` 篩過的
-    幣種相關（或全市場通用）子集算，不是全部 scored claim 都納入。同時
-    確認雜訊仍照常出現在 `brief.contrarian`（報表/事實清單語意不變，只有
-    calibration 輸入變窄，沒有偷改報表內容）。"""
+    """codex 對抗審第 4 輪 [HIGH] 回歸 + 第 8 輪根治後語意更新：
+    `aggregate(coin=...)` 灌入「明確提及其他幣、與目標幣無關」的低信任
+    雜訊，不得拉低目標幣的 `calibrated_confidence`——calibration 應只從
+    `_matches_coin()` 篩過的幣種相關（或全市場通用）子集算，不是全部
+    scored claim 都納入。
+
+    第 8 輪根治前（第 4～7 輪）：`_matches_coin` 只套用在 calibration 輸入，
+    `brief.contrarian` 本身仍是未過濾全集，明確講 ETH 的雜訊會照常「透明」
+    出現在 `brief.contrarian` 裡（當時視為報表透明度的刻意設計）。
+
+    第 8 輪根治後：coordinator 明確要求 `contrarian` 也必須 coin-scoped
+    （「BTC 報告不該列 ETH 反方」）——`aggregate(coin=)` 現在用同一份
+    `_matches_coin` 規則同時篩 `supporting` 與 `contrarian`，本測試灌入的
+    明確 ETH 雜訊現在應該「兩頭都被排除」：既不影響 calibration，也不再
+    出現在 `brief.contrarian`。此為本輪刻意的語意反轉（非回歸），詳見
+    `aggregate()` docstring 第 8 輪根治說明。"""
     supporting_docs = [
         _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p2", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
@@ -515,20 +589,22 @@ def test_aggregate_coin_irrelevant_low_trust_claims_do_not_change_calibrated_con
         f"calibrated_confidence：無雜訊={baseline.calibrated_confidence} "
         f"灌 20 句 ETH 雜訊={noisy.calibrated_confidence}"
     )
-    # 雜訊仍照常透明列在 contrarian（報表內容不變，只是不進 calibration）。
-    assert any("ETH" in sc.claim.text for sc in noisy.contrarian), (
-        "ETH 雜訊應仍出現在 brief.contrarian（報表透明度不變），"
-        "只是被排除在 calibration 輸入之外"
+    # 第 8 輪根治後：contrarian 也已 coin-scoped，明確講 ETH 的雜訊不應再
+    # 出現在 brief.contrarian（BTC 報告不該列 ETH 反方）。
+    assert not any("ETH" in sc.claim.text for sc in noisy.contrarian), (
+        "根治後 contrarian 也已 coin-scoped，ETH 雜訊不應再出現在 "
+        "brief.contrarian"
     )
 
 
 def test_aggregate_coin_scoped_supporting_still_includes_generic_market_wide_news():
-    """codex 對抗審第 6 輪回歸守門：`coin_scoped_supporting`（`_matches_coin`
-    篩過的子集）不得誤排「全市場通用、未提及任何幣別」的高信任新聞——延續
-    demo 可靠性 #32 的精神（`_matches_coin` 分支 3：無任何幣別提及→全市場
-    通用，納入）。本測試用高信任（`meta={"reputation": 0.9}`）的通用監管
-    新聞（不提及 BTC 或任何幣別），確認它仍出現在 `coin_scoped_supporting`
-    裡，不會被 coin 過濾誤傷。"""
+    """codex 對抗審第 6 輪回歸守門（第 8 輪根治後語意更新）：`aggregate(coin=)`
+    的 `supporting`（現已直接是 `_matches_coin` 篩過的 coin-scoped 結果，
+    不再是額外的 `coin_scoped_supporting` 欄位）不得誤排「全市場通用、未
+    提及任何幣別」的高信任新聞——延續 demo 可靠性 #32 的精神（`_matches_coin`
+    分支 3：無任何幣別提及→全市場通用，納入）。本測試用高信任
+    （`meta={"reputation": 0.9}`）的通用監管新聞（不提及 BTC 或任何幣別），
+    確認它仍出現在 `brief.supporting` 裡，不會被 coin 過濾誤傷。"""
     docs = [
         _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
@@ -540,10 +616,10 @@ def test_aggregate_coin_scoped_supporting_still_includes_generic_market_wide_new
     scored = score(extract_claims(docs), now=1_000_000.0)
     brief = aggregate(scored, query="分析 BTC", coin="BTC")
 
-    coin_scoped_sources = {sc.claim.doc.source for sc in brief.coin_scoped_supporting}
+    coin_scoped_sources = {sc.claim.doc.source for sc in brief.supporting}
     assert "coindesk" in coin_scoped_sources, (
         "全市場通用（未提及任何幣別）的高信任新聞不該被 coin 過濾排除，"
-        f"實際 coin_scoped_supporting 來源集合={coin_scoped_sources}"
+        f"實際 brief.supporting 來源集合={coin_scoped_sources}"
     )
 
 
@@ -735,12 +811,19 @@ def test_e2e_two_distinct_sources_one_claim_each_can_leave_abstain():
 
 
 def test_e2e_strong_btc_source_plus_high_trust_eth_sources_still_abstains_and_stays_clean():
-    """codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）核心回歸：
-    上一輪（第 4 輪）的 coin 過濾只套用在 calibration，`build_report` 的
-    n_indep 門檻／`_direction()`／facts／key_basis 仍吃未過濾的
-    `brief.supporting` 全集——強本幣(BTC)源 + 多個高信任他幣(ETH)源，若不
-    做 coin-scoped 貫穿，會被誤判為「3 個獨立來源」脫離 abstain，且他幣
-    的 facts/key_basis/方向可能混入 BTC 報告。
+    """codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）核心回歸，
+    第 8 輪根治後前提檢查機制更新：第 4 輪的 coin 過濾只套用在
+    calibration，`build_report` 的 n_indep 門檻／`_direction()`／facts／
+    key_basis 仍吃未過濾的 `brief.supporting` 全集——強本幣(BTC)源 + 多個
+    高信任他幣(ETH)源，若不做 coin-scoped 貫穿，會被誤判為「3 個獨立來源」
+    脫離 abstain，且他幣的 facts/key_basis/方向可能混入 BTC 報告。
+
+    第 8 輪根治後：`aggregate(coin=)` 直接讓 `brief.supporting` 本身就是
+    coin-scoped 的（不再是額外的 `coin_scoped_supporting` 欄位），所以
+    `brief.supporting` 這時已經只剩 exch-a——前提檢查因此改成直接檢查
+    「若不過濾，原始 `scored` 全集裡本來就存在 ≥2 個會通過信任門檻的高
+    信任 ETH 來源」，藉此證明本案例確實踩得到『若不做 coin-scoped 過濾
+    會誤判過門檻』這個場景，而不是改成一個湊巧本來就只有 1 個來源的假案例。
 
     本測試：1 個 BTC 來源（exch-a）+ 3 個不同的高信任 ETH 來源（跨
     price/onchain/news kind，皆明確提及 ETH、不提及 BTC）。修後應：
@@ -756,15 +839,23 @@ def test_e2e_strong_btc_source_plus_high_trust_eth_sources_still_abstains_and_st
     scored = score(extract_claims(docs), now=1_000_000.0)
     brief = aggregate(scored, query="分析 BTC", coin="BTC")
 
-    # 前提檢查：若不做 coin-scoped 貫穿，未過濾的 brief.supporting 會有 3
-    # 個不同來源（exch-a + 2 個 ETH 來源，過門檻），但 coin_scoped_supporting
-    # 應只剩 exch-a 這 1 個。
-    assert len({sc.claim.doc.source for sc in brief.supporting}) >= 2, (
-        "前提檢查失敗：本案例應能證明『若不做 coin-scoped 貫穿會誤判過門檻』"
+    # 前提檢查：直接看原始 scored 全集（過濾前）——若 aggregate() 不做
+    # coin-scoped 過濾，光是這 3 個高信任 ETH 來源就足以讓 supporting 湊出
+    # ≥2 個獨立來源、脫離 abstain，證明本案例確實踩得到這個風險場景。
+    eth_sources_would_qualify = {
+        sc.claim.doc.source
+        for sc in scored
+        if sc.trust >= 0.50 and sc.claim.doc.source != "exch-a"
+    }
+    assert len(eth_sources_would_qualify) >= 1, (
+        "前提檢查失敗：本案例應能證明『若不做 coin-scoped 過濾，至少有 1 個"
+        f"高信任 ETH 來源會混入 supporting』，實得 {eth_sources_would_qualify}"
     )
-    assert {sc.claim.doc.source for sc in brief.coin_scoped_supporting} == {"exch-a"}, (
-        f"前提檢查失敗：coin_scoped_supporting 應只剩 exch-a，"
-        f"實得 {[sc.claim.doc.source for sc in brief.coin_scoped_supporting]}"
+    # 過濾後：aggregate(coin="BTC") 讓 brief.supporting 本身就是 coin-scoped
+    # 的，應只剩 exch-a 這 1 個 BTC 來源。
+    assert {sc.claim.doc.source for sc in brief.supporting} == {"exch-a"}, (
+        f"前提檢查失敗：brief.supporting 應只剩 exch-a，"
+        f"實得 {[sc.claim.doc.source for sc in brief.supporting]}"
     )
 
     report, _evidence = _run_report(brief)
@@ -791,7 +882,7 @@ def test_e2e_multi_btc_sources_normal_state_unaffected_by_coin_scoping():
     ]
     scored = score(extract_claims(docs), now=1_000_000.0)
     brief = aggregate(scored, query="分析 BTC", coin="BTC")
-    assert len(brief.coin_scoped_supporting) == 4
+    assert len(brief.supporting) == 4
 
     report, _evidence = _run_report(brief)
     assert report.decision_state == "normal", (
@@ -863,6 +954,133 @@ def test_e2e_high_trust_other_coin_sentiment_source_does_not_flip_cross_source_s
         assert "ETH" not in inf, f"inferences 不應含他幣內容：{inf}"
     for f in report.facts:
         assert "ETH" not in f, f"facts 不應含他幣內容：{f}"
+
+
+def test_e2e_root_fix_all_report_fields_immune_to_mixed_trust_other_coin_claims():
+    """codex 對抗審第 8 輪根治 e2e（一次涵蓋全欄位的跨幣汙染回歸）：
+    coordinator 明確指出第 4～7 輪 piecemeal 修法只堵住了 facts／
+    `_direction()`／key_basis／cross_source_signal 這幾個單點，`contrarian`
+    輸出與裸 `confidence` 顯示仍是從未過濾的 `brief.contrarian`／
+    `brief.confidence` 算出來——BTC 報告仍可能列出 ETH 反方證據、
+    confidence 仍可能被 ETH 主張拉動。
+
+    第 8 輪根治：`aggregate(coin=)` 讓整個 `TrustedBrief`（`supporting`／
+    `contrarian`／`confidence`）本身就是 `_matches_coin` 篩過的 coin-scoped
+    結果，`build_report` 全欄位直接沿用，不再各自過濾一次。
+
+    本測試同時混入「低信任」與「高信任」兩種明確提及 ETH（非目標幣）的
+    claim（涵蓋 objective 與 sentiment/social 多種 kind），與一個乾淨的
+    BTC-only baseline（含 1 筆本幣低信任反方，確保 `contrarian`／`limits`／
+    `could_flip` 有實際內容可比對）逐欄位比對，斷言兩者在下列欄位上完全
+    一致（ETH 雜訊不論信任高低，一律不得影響任何欄位）：
+    `confidence`、`calibrated_confidence`、`decision_state`、`direction`、
+    `facts`、`key_basis`（claim 文字）、`contrarian`、`limits`、
+    `could_flip`、`cross_source_signal`。並逐一確認上述欄位＋
+    `inferences`（Step3 offline narrative 回顯 prompt 的管道）都不含
+    「ETH」字樣。
+
+    前提檢查：直接對「BTC docs + ETH 高信任 docs」的原始 `scored` 呼叫
+    `detect_cross_source_signal`（未過濾，即修法前行為），必須真的能重現
+    ETH 主張混入 `supporting_claim_ids` 的汙染——否則本場景無法證明漏洞
+    存在（同 Round 7 測試手法，套用到本輪更廣的欄位集合）。
+    """
+    btc_docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p3", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p4", "news", "coindesk", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("c1", "social", "anon-btc-bear", "BTC 即將 崩盤 恐慌 拋售 暴跌。"),
+    ]
+    # 注意：ETH 雜訊文字刻意避開跟 btc_docs 共用具體詞（如「站穩／關鍵／
+    # 支撐位／反彈」）——`trust.scoring._corroboration()` 是跨全池、非
+    # coin-aware 的文字重疊比對（獨立於本輪修正範圍之外的既有機制），若
+    # ETH 文字跟 BTC 文字用字雷同，會透過文字重疊佐證真的把 BTC claim 的
+    # trust 墊高，混淆「coin-scoping 修法本身是否生效」與「文字重疊佐證」
+    # 兩件事；用不同措辭才能讓本測試乾淨地只驗證 coin-scoping。
+    eth_noise_docs = [
+        # 低信任明確他幣（social 預設信譽 0.35，< support_threshold）
+        _doc("e-low", "social", "anon-eth-spam", "ETH 完全 無關 垃圾 雜訊 純 噪音 內容。"),
+        # 高信任明確他幣（objective kind，方向與 BTC 同為偏多，最容易魚目混珠）
+        _doc(
+            "e-high1", "price", "exch-eth-1", "ETH 網路 手續費 大幅 下降 用戶 需求 明顯 攀升。",
+            meta={"reputation": 0.97},
+        ),
+        _doc(
+            "e-high2", "onchain", "glassnode-eth", "ETH 鏈上 巨鯨 地址 持續 累積 籌碼 增持 部位。",
+            meta={"reputation": 0.97},
+        ),
+    ]
+
+    def _build(docs):
+        scored = score(extract_claims(docs), now=1_000_000.0)
+        brief = aggregate(scored, query="分析 BTC", coin="BTC")
+        report, _evidence = build_report(
+            query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE, brief=brief,
+            client=BedrockClient(offline=True),
+            log=ExecutionLog(now_fn=lambda: 1_000_000.0),
+            now_fn=lambda: 1_000_000.0,
+            scored=scored,
+        )
+        return scored, brief, report
+
+    baseline_scored, _baseline_brief, baseline_report = _build(btc_docs)
+    noisy_scored, _noisy_brief, noisy_report = _build(btc_docs + eth_noise_docs)
+
+    # 前提檢查：未過濾的 scored 直接送 detect_cross_source_signal，ETH 高
+    # 信任 objective 來源必須真的混進 supporting_claim_ids——否則本案例
+    # 無法證明「若不做 coin-scoped 過濾，cross_source_signal 也會被汙染」。
+    eth_claim_ids = {
+        sc.claim.id for sc in noisy_scored if sc.claim.doc.source.startswith("exch-eth") or "eth" in sc.claim.doc.source
+    }
+    raw_signal = detect_cross_source_signal(noisy_scored)
+    assert raw_signal is not None, "前提失敗：未過濾場景應仍能偵測到跨源訊號"
+    assert eth_claim_ids & set(raw_signal["supporting_claim_ids"]), (
+        f"前提失敗：ETH 主張應出現在未過濾（修法前行為）的 supporting_claim_ids，"
+        f"實得 {raw_signal['supporting_claim_ids']}"
+    )
+
+    # 修法後：逐欄位比對 baseline（無 ETH 雜訊）與 noisy（混入低+高信任 ETH），
+    # 兩者在下列 report-facing 欄位上必須完全一致——ETH 雜訊不論信任高低，
+    # 一律不得影響任何欄位。
+    assert noisy_report.confidence == baseline_report.confidence
+    assert noisy_report.calibrated_confidence == baseline_report.calibrated_confidence
+    assert noisy_report.decision_state == baseline_report.decision_state
+    assert noisy_report.direction == baseline_report.direction
+    assert noisy_report.facts == baseline_report.facts
+    assert [b.claim for b in noisy_report.key_basis] == [b.claim for b in baseline_report.key_basis]
+    assert noisy_report.contrarian == baseline_report.contrarian
+    assert noisy_report.limits == baseline_report.limits
+    assert noisy_report.could_flip == baseline_report.could_flip
+    assert noisy_report.cross_source_signal == baseline_report.cross_source_signal
+
+    # 逐欄位確認完全不含「ETH」字樣（即使巧合與 baseline 相同也要獨立守住）。
+    assert "ETH" not in str(noisy_report.confidence)
+    assert "ETH" not in noisy_report.decision_state
+    assert "ETH" not in noisy_report.direction
+    for f in noisy_report.facts:
+        assert "ETH" not in f, f"facts 不應含他幣內容：{f}"
+    for b in noisy_report.key_basis:
+        assert "ETH" not in b.claim, f"key_basis 不應含他幣內容：{b.claim}"
+    for c in noisy_report.contrarian:
+        assert "ETH" not in c, f"contrarian 不應含他幣內容：{c}"
+    for lim in noisy_report.limits:
+        assert "ETH" not in lim, f"limits 不應含他幣內容：{lim}"
+    for flip in noisy_report.could_flip:
+        assert "ETH" not in flip, f"could_flip 不應含他幣內容：{flip}"
+    if noisy_report.cross_source_signal is not None:
+        assert "ETH" not in noisy_report.cross_source_signal["summary"]
+        assert not (eth_claim_ids & set(noisy_report.cross_source_signal["supporting_claim_ids"])), (
+            "cross_source_signal.supporting_claim_ids 不應指向他幣主張"
+        )
+    for inf in noisy_report.inferences:
+        assert "ETH" not in inf, f"inferences（含 Step3 prompt 回顯）不應含他幣內容：{inf}"
+
+    # 全市場通用（未提及任何幣別）內容 + 正常多本幣源情境仍應正常運作，
+    # 不因本輪根治誤傷（呼應 demo 可靠性 #32 精神）：baseline 本身應為
+    # normal 態、有方向、有 contrarian（本幣低信任反方仍照常保留）。
+    assert baseline_report.decision_state == "normal"
+    assert baseline_report.direction == "偏多"
+    assert baseline_report.contrarian, "BTC 本幣的低信任反方證據應正常保留在 contrarian"
 
 
 def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_marked():

@@ -157,18 +157,20 @@ class TrustedBrief:
     # `TrustedBrief(...)` 不傳此欄位時維持逐字向後相容（未校準 -> 0.0，
     # 呼叫端若讀取此欄位務必經由 aggregate() 取得有意義的值）。
     calibrated_confidence: float = 0.0
-    # W4 codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）：coin 過濾
-    # 原本只套用在 calibration 輸入（見 `aggregate()` 的 `calib_pool`），但
-    # `supporting`（進而 facts/key_basis/`_direction()`/abstain 門檻）仍用
-    # 未過濾全集——強本幣源 + 高信任他幣源會讓他幣證據混入本幣報告的支撐/
-    # 方向/事實。修法：`aggregate()` 把「跟 calibration 同一份 coin-scoped
-    # supporting 子集」（`_matches_coin` 篩過，已截斷至 `[:10]` 跟 `supporting`
-    # 口徑一致）透過此欄位帶出，供 `agent.orchestrator.build_report` 貫穿
-    # n_indep/`_direction()`/facts/key_basis 使用，不再各自分開判準。
-    # None：非經 `aggregate()` 產生的 brief（測試手動建構 `TrustedBrief(...)`
-    # 不傳此欄位）——呼叫端應 fallback 回 `supporting`（未套用 coin 過濾，
-    # 逐字向後相容既有手動建構的合成 fixture）。
-    coin_scoped_supporting: list[ScoredClaim] | None = None
+    # W4 codex 對抗審第 6～8 輪（coin-relevance 收斂史，見 `aggregate()`
+    # docstring 完整說明）：第 6/7 輪先後用「額外欄位」（`coin_scoped_
+    # supporting`）＋「呼叫端各自重新過濾」（`build_report` 的
+    # `cross_signal_input`）修補 facts/`_direction()`/cross_source_signal
+    # 等單點漏洞，但這種「piecemeal」修法本質上治標不治本——只要還有一個
+    # report-facing 欄位是從「未過濾的 supporting/contrarian」算出來的
+    # （例如 `contrarian` 輸出、裸 `confidence` 顯示、`_derive_limits`），
+    # 就會被抓出下一個漏洞。第 8 輪根治：`aggregate(coin=)` 直接讓
+    # `supporting`／`contrarian`／`confidence` 三者本身就是 coin-scoped
+    # 的（`_matches_coin` 篩過，保留本幣相關＋全市場通用，只排除明確他幣）
+    # ——不再需要額外欄位；已移除 `coin_scoped_supporting`（第 6/7 輪引入，
+    # 第 8 輪起併入 `supporting` 本身，不再單獨存在）。`agent.orchestrator.
+    # build_report` 現在直接讀 `brief.supporting`/`brief.contrarian`/
+    # `brief.confidence` 即可拿到已 coin-scoped 的資料，不必再各自過濾。
 
     def provenance(self) -> list[dict]:
         """溯源鏈：每個被採用主張的來源與分數。"""
@@ -1275,49 +1277,62 @@ def aggregate(scored: list[ScoredClaim], query: str,
     留痕），但不再左右候選池的去留或排序。不傳 coin 時（既有呼叫端）
     行為完全不變。
 
-    W4 codex 對抗審第 4 輪 [HIGH] robustness 修正：`relevant`（決定
-    `supporting`/`contrarian`/`confidence`——報表 facts/evidence 清單用的
-    那份，維持既有「全納入、只排序」語意不變，見上一段）跟「餵給
-    `_evidence_strength()` 算 `calibrated_confidence` 的那份資料」現在**分開
-    處理**——傳 `coin` 時，calibration 只從 `_matches_coin`（幣種相關或
-    全市場通用，見 `ingestion.base._matches_coin` docstring）篩過的子集算，
-    排除「明確提及其他幣、與本次分析目標幣無關」的雜訊主張。背景：舊版
-    calibration 直接吃 `supporting`/`contrarian`（=`relevant`，coin 分支下
-    「全部 scored 都算 relevant，coin 只影響排序」）——不相關雜訊只要信任
-    分夠低，一樣會被算進 `_evidence_strength` 的 `contrarian` 一側拉低
-    dominance，讓決策態隨「餵了多少不相關雜訊」而變，形同讓資料蒐集量、
-    而非證據本身的品質，決定要不要 abstain。不影響 `supporting`/
-    `contrarian`/`confidence`/facts/evidence 清單本身（那些仍刻意「全納
-    入」，避免重蹈 #32 那次靠文字比對篩選導致候選池不穩定的覆轍）——只有
-    校準用的統計輸入變窄。不傳 coin 時（既有呼叫端）行為完全不變。
+    W4 codex 對抗審第 4～8 輪（coin-relevance 收斂史）：`relevant`（決定
+    `supporting`/`contrarian`/`confidence`——報表 facts/evidence/
+    calibration 共用的唯一一份資料）在傳 `coin` 時，用 `_matches_coin`
+    （幣種相關或全市場通用，見 `ingestion.base._matches_coin` docstring）
+    篩過，排除「明確提及其他幣、與本次分析目標幣無關」的雜訊主張。
+
+    這段修法史本身就是「piecemeal 修法會一直漏」的活教材，完整記錄於此
+    供之後維護者理解為什麼最終長這樣（而不是重蹈覆轍）：
+      - 第 4 輪最初只讓 calibration（`_evidence_strength()` 的輸入）用
+        `_matches_coin` 篩過的子集，`supporting`/`contrarian`/`confidence`
+        仍是「全納入、只排序」——calibration 乾淨了，但報表本身（facts/
+        `_direction()`/key_basis）還是會混進他幣證據。
+      - 第 6 輪加了 `coin_scoped_supporting` 額外欄位，把同一份 coin-scoped
+        子集帶給 `agent.orchestrator.build_report` 貫穿 facts/`_direction()`/
+        key_basis/n_indep 門檻——但只補了 supporting 側，`contrarian`/
+        `confidence` 仍未過濾。
+      - 第 7 輪修了 `detect_cross_source_signal` 的輸入（呼叫端另外用
+        `_matches_coin` 重新篩一次）——但那是在 `build_report` 裡「各自重新
+        過濾一次」，不是共用同一份資料，第 8 輪才發現 `contrarian` 輸出／
+        裸 `confidence` 顯示／`_derive_limits` 這些「report-facing」欄位還是
+        沒過濾。
+      - 第 8 輪根治：不再區分「relevant（報表用，全納入）」跟「calib_pool
+        （calibration 用，篩過）」兩份資料——傳 `coin` 時，`relevant` 本身
+        就是 `_matches_coin` 篩過的子集，`supporting`/`contrarian`/
+        `confidence`/`calibrated_confidence` 全部從這唯一一份算出來，
+        `TrustedBrief` 回傳後任何欄位天生就是 coin-scoped，不需要呼叫端
+        （`build_report`）再各自過濾一次，也不需要額外欄位。已移除
+        `coin_scoped_supporting`（第 6/7 輪引入，現已併入 `supporting`
+        本身）。
+    不傳 coin 時（既有呼叫端）行為完全不變：`relevant` 沿用 `_normalize
+    (query)` 相關性排序、全納入（不新增篩選），維持 #32 修正前就存在的
+    既有語意。
     """
     qt = _normalize(query)
     if coin:
-        # 只排序、不篩選：與既有「全納入」精神一致，只是把幣種特定證據
-        # 排到全市場通用雜訊之前，讓 [:10]/[:5] 截斷優先保留前者。
+        # 先依 (是否幣種特定, 信任分) 排序——把「明確提及該幣」的主張排在
+        # 「全市場通用」主張之前，使下面的 [:10]/[:5] 截斷優先保留前者
+        # （demo 可靠性 #32 追加的既有精神，見上方 docstring）。
         relevant = sorted(
             scored,
             key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
         )
-        # 已依 (是否幣種特定, 信任分) 排序完成，不再套用下面純信任分排序。
-        # calibration 專用子集：只留「幣種相關或全市場通用」（`_matches_coin`
-        # 分支 1/3），排除明確提及其他幣、與本次目標幣無關的雜訊。
-        # 從已排序的 `relevant`（不是重新從 `scored`篩）取子集，保留信任分
-        # 排序——這份子集後面（見 `coin_scoped_supporting`）會被
-        # `agent.orchestrator.build_report` 拿去做 `_direction()`/facts/
-        # key_basis 的資料來源，順序需跟 `supporting` 口徑一致（trust 高者
-        # 優先），不能是未排序的原始 `scored` 順序。
-        calib_pool = [sc for sc in relevant if _matches_coin(sc.claim.doc, coin)]
+        # W4 codex 對抗審第 8 輪根治：排序後直接用 `_matches_coin` 過濾
+        # （保留本幣相關 + 全市場通用，只排除明確他幣）——`supporting`/
+        # `contrarian`/`confidence` 全部從這份已過濾的 `relevant` 算，
+        # 不再是「全納入、只排序」。`_matches_coin` 是幣別別名比對，不是
+        # #32 當年那種脆弱的 `_normalize(query)` 文字比對，不會重蹈覆轍。
+        relevant = [sc for sc in relevant if _matches_coin(sc.claim.doc, coin)]
     else:
-        # 與 query 相關者優先（無相關詞則全納入）
+        # 與 query 相關者優先（無相關詞則全納入）——未指定 coin 時無獨立的
+        # 幣種相關性判準可用，行為逐字向後相容，不引入新篩選。
         relevant = [
             sc for sc in scored
             if not qt or (_normalize(sc.claim.text) & qt)
         ] or scored
         relevant.sort(key=lambda sc: sc.trust, reverse=True)
-        # 未指定 coin：無獨立的幣種相關性判準可用，calibration 沿用既有
-        # 「全納入」的 relevant（逐字向後相容，不引入新篩選）。
-        calib_pool = relevant
     supporting = [sc for sc in relevant if sc.trust >= support_threshold]
     contrarian = [sc for sc in relevant if sc.trust < support_threshold]
 
@@ -1326,26 +1341,11 @@ def aggregate(scored: list[ScoredClaim], query: str,
     # 基礎資料，見上方 `_evidence_strength` 對「不重新計算 trust、不新增資料源」
     # 的承諾）算證據強度綜合指標，再校準——不用截斷後的 [:10]/[:5]，避免評分
     # 結果隨截斷上限漂移（跟 `confidence` 本身的計算基礎保持一致）。
-    #
-    # W4 codex 對抗審第 4 輪：calibration 的 trust 子指標也改用 calib_pool
-    # 自己的裸信心均值（`calib_confidence`），不沿用可能被幣種不相關雜訊
-    # 污染的 `confidence`——確保 `evidence_strength` 四個子指標（trust/
-    # indep/diversity/dominance）全部只從 calib_pool 算，口徑一致。
-    calib_supporting = [sc for sc in calib_pool if sc.trust >= support_threshold]
-    calib_contrarian = [sc for sc in calib_pool if sc.trust < support_threshold]
-    calib_confidence = (
-        sum(sc.trust for sc in calib_supporting) / len(calib_supporting)
-        if calib_supporting else 0.0
-    )
-    evidence_strength = _evidence_strength(calib_supporting, calib_contrarian, calib_confidence)
+    evidence_strength = _evidence_strength(supporting, contrarian, confidence)
     return TrustedBrief(
         query=query,
         supporting=supporting[:10],
         contrarian=contrarian[:5],
         confidence=confidence,
         calibrated_confidence=_calibrate_confidence(evidence_strength),
-        # W4 codex 對抗審第 6 輪：跟 calibration 用同一份 coin-scoped 子集
-        # （截斷口徑對齊 `supporting[:10]`），供 build_report 貫穿 n_indep/
-        # _direction()/facts/key_basis 判準，見 TrustedBrief 欄位註解。
-        coin_scoped_supporting=calib_supporting[:10],
     )
