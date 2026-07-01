@@ -197,8 +197,17 @@ class CacheBackend(ABC):
     """快取儲存最小介面：單筆 get / 單筆 set。"""
 
     @abstractmethod
-    def get(self, key: str) -> dict[str, Any] | None:
-        """回傳 `{"docs": [dict, ...], "fetched_at": float}`；未命中回 `None`。"""
+    def get(self, key: str, *, consistent_read: bool = False) -> dict[str, Any] | None:
+        """回傳 `{"docs": [dict, ...], "fetched_at": float}`；未命中回 `None`。
+
+        `consistent_read`：選用。純本地 backend（`JsonCacheBackend`）忽略它
+        （本來就沒有最終一致性問題）；`DynamoDBCache` 傳給 `get_item` 的
+        `ConsistentRead`。預設 `False`（沿用正常讀取路徑的最終一致讀，較省
+        成本）——只有 `scripts/fetch_scheduler.py --probe` 這種「剛寫完馬上
+        要驗證讀不讀得回同一筆」的場景才需要 `True`，否則固定 canary key
+        遇到最終一致讀的複寫延遲，可能讀到上一輪的舊 sentinel，誤判成
+        「讀回內容不一致」而非確定性地失敗。
+        """
 
     @abstractmethod
     def set(
@@ -233,7 +242,8 @@ class JsonCacheBackend(CacheBackend):
             return {}
         return data if isinstance(data, dict) else {}
 
-    def get(self, key: str) -> dict[str, Any] | None:
+    def get(self, key: str, *, consistent_read: bool = False) -> dict[str, Any] | None:
+        del consistent_read  # 單一本機 JSON 檔案，本來就沒有最終一致性問題
         entry = self._load().get(key)
         if not isinstance(entry, dict):
             return None
@@ -315,9 +325,11 @@ class DynamoDBCache(CacheBackend):
         source_id, _, coin = key.partition(":")
         return source_id, coin
 
-    def get(self, key: str) -> dict[str, Any] | None:
+    def get(self, key: str, *, consistent_read: bool = False) -> dict[str, Any] | None:
         source_id, coin = self._split_key(key)
-        resp = self._get_table().get_item(Key={"source_id": source_id, "coin": coin})
+        resp = self._get_table().get_item(
+            Key={"source_id": source_id, "coin": coin}, ConsistentRead=consistent_read,
+        )
         item = resp.get("Item")
         if not isinstance(item, dict):
             return None
