@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document
+from ..ingestion.base import Document, _mentions_coin
 from .stance_cache import cached_stance_fn
 
 # W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
@@ -629,6 +629,28 @@ def _iterate_source_reputation(
     return sr
 
 
+def build_stance_fn(
+    stance_client=None,
+    stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
+    stance_remaining_time_fn: Callable[[], float] | None = None,
+) -> Callable[[str, str], str] | None:
+    """建立 W1.5 stance 判定函式（語意見 `score()` docstring 對
+    `stance_client`/`stance_pair_budget`/`stance_remaining_time_fn` 的完整說明）。
+
+    抽出成獨立函式（demo 可靠性 #32 追加）：讓 `score()` 內部的矛盾閘與
+    `agent.orchestrator` 的跨源 stance_pairs 偵測能**共用同一個
+    `_StanceBudget` 實例**——同一次 pipeline 執行內，真正呼叫 Bedrock 的
+    配對硬上限與 `ExecutionLog.remaining()` 剩餘時間預算是同一個池子，
+    不會因為分兩處（`score()` 的交叉佐證 vs. `detect_cross_source_signal`
+    的 stance_pairs 偵測）各自另建一份預算，讓「單次執行真呼叫上限」實質
+    變成兩倍、失去原本的防護意義。
+    """
+    if stance_client is None or hasattr(stance_client, "classify_stance"):
+        stance_budget = _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
+        return cached_stance_fn(stance_client, budget=stance_budget)
+    return None
+
+
 # --- 主評分 --------------------------------------------------------------
 def score(
     claims: list[Claim],
@@ -639,6 +661,7 @@ def score(
     stance_remaining_time_fn: Callable[[], float] | None = None,
     dynamic_reputation: bool = False,
     reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
+    stance_fn: Callable[[str, str], str] | None = None,
 ) -> list[ScoredClaim]:
     """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient），
     或 None。
@@ -667,13 +690,18 @@ def score(
     `ScoredClaim.reputation_trace` 會附上該來源的
     `{source, prior, final, agree_n, contradict_n, iterations_run}`（可解釋，不塞進
     `components`，維持 `components` 的 str→number 契約）。
+
+    `stance_fn`：選填。若提供，直接使用此函式（跳過用 `stance_client`/
+    `stance_pair_budget`/`stance_remaining_time_fn` 另建一份），供呼叫端
+    （如 `agent.orchestrator.run_agent_pipeline`）用 `build_stance_fn()`
+    先建好、跟其他步驟（如跨源 stance_pairs 偵測）共用同一個
+    `_StanceBudget` 實例（demo 可靠性 #32 追加，見 `build_stance_fn`
+    docstring）。不提供時（預設）行為與之前逐字相同——用 `stance_client`
+    等參數自建一份專屬本次 `score()` 呼叫的 stance_fn。
     """
     w = weights or DEFAULT_WEIGHTS
-    if stance_client is None or hasattr(stance_client, "classify_stance"):
-        stance_budget = _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
-        stance_fn = cached_stance_fn(stance_client, budget=stance_budget)
-    else:
-        stance_fn = None
+    if stance_fn is None:
+        stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
 
     dynamic_map: dict[str, float] | None = None
     trace_by_source: dict[str, dict] | None = None
@@ -739,16 +767,42 @@ def score(
 
 # --- 5. 聚合 -------------------------------------------------------------
 def aggregate(scored: list[ScoredClaim], query: str,
-              support_threshold: float = 0.50) -> TrustedBrief:
-    """信任加權聚合。高於門檻→支撐證據；明顯低分→反方證據。"""
-    qt = _normalize(query)
-    # 與 query 相關者優先（無相關詞則全納入）
-    relevant = [
-        sc for sc in scored
-        if not qt or (_normalize(sc.claim.text) & qt)
-    ] or scored
+              support_threshold: float = 0.50,
+              coin: str | None = None) -> TrustedBrief:
+    """信任加權聚合。高於門檻→支撐證據；明顯低分→反方證據。
 
-    relevant.sort(key=lambda sc: sc.trust, reverse=True)
+    coin：選填。「coin-filter 主導」修正（demo 可靠性 #32 追加）——
+    背景：`_normalize(query)` 對無空格的中/英混排（如「以太坊分析」
+    「ETH現況」）會併成單一複合 token，與樣本文字的斷詞完全對不上，
+    導致「與 query 相關者」篩選結果隨查詢措辭忽窄忽寬——即使某次問法
+    「恰好」文字命中而把泛用雜訊（如「多家交易所遭 SEC 警告」這類未提及
+    任何幣別的通用監管新聞）擠出候選池，也純屬巧合，換一種問法就可能
+    連該幣「明確提及」的真實證據（例如 ETF 資金流背離樣本）一起被泛用
+    雜訊擠出 contrarian 的截斷上限（`[:5]`）——同一份資料、不同問法卻
+    得到不同的跨源訊號結果，不穩定、不可預期。
+    修法：只要有指定 coin，排序時一律把「明確提及該幣」的主張
+    （`_mentions_coin`）排在「全市場通用」主張之前（各自內部仍照信任分
+    由高到低），使截斷上限優先保留該幣的特定證據，且完全不受 query
+    文字措辭影響——查詢字串仍照樣傳入供其他用途（如 `TrustedBrief.query`
+    留痕），但不再左右候選池的去留或排序。不傳 coin 時（既有呼叫端）
+    行為完全不變。
+    """
+    qt = _normalize(query)
+    if coin:
+        # 只排序、不篩選：與既有「全納入」精神一致，只是把幣種特定證據
+        # 排到全市場通用雜訊之前，讓 [:10]/[:5] 截斷優先保留前者。
+        relevant = sorted(
+            scored,
+            key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
+        )
+        # 已依 (是否幣種特定, 信任分) 排序完成，不再套用下面純信任分排序。
+    else:
+        # 與 query 相關者優先（無相關詞則全納入）
+        relevant = [
+            sc for sc in scored
+            if not qt or (_normalize(sc.claim.text) & qt)
+        ] or scored
+        relevant.sort(key=lambda sc: sc.trust, reverse=True)
     supporting = [sc for sc in relevant if sc.trust >= support_threshold]
     contrarian = [sc for sc in relevant if sc.trust < support_threshold]
 
