@@ -54,10 +54,15 @@ _STANCE_PAIR_MIN_TRUST = 0.35
 # 非嚴謹 conformal coverage 保證）。0.5 錨點本身**不刪**——從「唯一硬門檻」
 # 降為三態分界之一，`_derive_limits` 的 `brief.confidence < 0.5`、
 # `aggregate(support_threshold=0.50)` 等既有呼叫端逐字不變（回歸鎖）。
-#   calibrated < _ABSTAIN_CALIBRATED_THRESHOLD 或 supporting 筆數
-#   < _ABSTAIN_MIN_SUPPORTING（證據不足，樣本量過小）→ abstain：不給方向詞。
+#   calibrated < _ABSTAIN_CALIBRATED_THRESHOLD 或 supporting 獨立來源數
+#   （去重，見下方 n_indep）< _ABSTAIN_MIN_SUPPORTING（證據不足、樣本量
+#   過小或單源灌量）→ abstain：不給方向詞。
 #   _ABSTAIN_CALIBRATED_THRESHOLD <= calibrated < 0.5 → 仍出結論，標「低信心」。
 #   calibrated >= 0.5 → 正常（既有行為逐字不變）。
+# W4 codex 對抗審第 5 輪修正：_ABSTAIN_MIN_SUPPORTING 原本比對 supporting
+# 的「claim（句）筆數」，單一文件切兩句就能通過門檻；現改比對「去重後的
+# 獨立來源數」，跟 trust.scoring._evidence_strength 的 indep_factor/
+# dominance 去重口徑一致——單源不論產生幾句 claim，仍只算 1 份。
 _ABSTAIN_CALIBRATED_THRESHOLD = 0.35
 _ABSTAIN_MIN_SUPPORTING = 2
 
@@ -419,8 +424,20 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # docstring：簡化版分位數校準，非嚴謹 conformal coverage 保證。
     calibrated = brief.calibrated_confidence
     n_supporting = len(brief.supporting)
+    # W4 codex 對抗審第 5 輪（claim-vs-source 主題收斂）[HIGH]：abstain 最小
+    # 支撐門檻原本用 `n_supporting`（句級 claim 筆數）——`extract_claims()`
+    # 是句級切分，同一份文件寫兩句高信任內容就會產生 2 筆 supporting
+    # claim，足以通過 `n_supporting >= _ABSTAIN_MIN_SUPPORTING`，即使全部
+    # 出自單一來源、無任何獨立佐證，evidence_strength 仍可能落在 abstain
+    # 門檻之上而給出方向性結論——跟 dominance/indep_factor 已改用去重來源數
+    # 的口徑不一致，是這條門檻唯一還在用原始 claim 計數的地方。
+    # 修法：改用「去重的 supporting 來源數」（`n_indep`，下方 facts/market_
+    # judgment 敘事本就需要這個值，這裡只是提前算好、重複使用同一份，不
+    # 重算 trust、不新增資料源）——單源不論產生幾句 claim，仍只算 1 份獨立
+    # 來源，需要 ≥2 個不同來源才可能脫離 abstain。
+    n_indep = len({sc.claim.doc.source for sc in brief.supporting})
     is_abstain = (
-        calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_supporting < _ABSTAIN_MIN_SUPPORTING
+        calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_indep < _ABSTAIN_MIN_SUPPORTING
     )
     is_low_confidence = (not is_abstain) and calibrated < 0.5
     # W4 codex 對抗審第 2 輪 [HIGH-1]：三態字面值下放給 `schema.Report.
@@ -429,7 +446,6 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     decision_state = "abstain" if is_abstain else ("low_confidence" if is_low_confidence else "normal")
 
     facts = [sc.claim.text for sc in brief.supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
-    n_indep = len({sc.claim.doc.source for sc in brief.supporting})
 
     if is_abstain:
         # 證據不足：不代客決策，不給任何方向性字眼（不判斷偏多/偏空/中性），

@@ -99,6 +99,24 @@ codex 對抗審第 4 輪 [HIGH] 修正（robustness：原始 claim 計數可被�
     出現在 `brief.contrarian`，只是不進 calibration，未偷改報表內容）。
   - 既有 647 綠 + 三態 e2e/abstain 一致性回歸確認：全部沿用既有測試逐字
     不動，未修改任何既有斷言（見下方測試本體，本輪只新增測試，不改舊有）。
+
+codex 對抗審第 5 輪 [HIGH]（claim-vs-source 主題收斂）：`orchestrator.py`
+的 `_ABSTAIN_MIN_SUPPORTING` 門檻原本比對 `n_supporting`（supporting 的
+claim/句級筆數）——同一份文件寫兩句高信任內容就會產生 2 筆 claim，足以
+通過 `>=2` 門檻，即使全部出自單一來源、無任何獨立佐證；跟
+`_evidence_strength` 的 `indep_factor`/`dominance` 已改用去重來源數的口徑
+不一致，是這條門檻唯一還在用原始 claim 計數的地方。
+  - 修法：門檻改比對「去重後的 supporting 來源數」（`n_indep`，複用既有
+    已算好的同一份值，不重算 trust、不新增資料源）——單源不論產生幾句
+    claim，仍只算 1 份，需 >=2 個不同來源才可能脫離 abstain。
+  - 本輪新增 `test_e2e_same_source_two_supporting_claims_still_abstains`
+    （單一文件/單一來源切成 2 句 supporting claim，calibrated 落在
+    [0.35, 0.5)——若只看筆數會誤判為『低信心但仍出結論』，修後應正確判
+    abstain）與 `test_e2e_two_distinct_sources_one_claim_each_can_leave_
+    abstain`（對照組：2 個不同來源各 1 筆，門檻應正確判定已達最小支撐
+    來源數，不誤傷正常案例）。
+  - 既有 650 綠 + 三態 e2e/abstain 一致性回歸確認：全部沿用既有測試逐字
+    不動，未修改任何既有斷言。
 """
 from __future__ import annotations
 
@@ -577,6 +595,62 @@ def test_e2e_single_supporting_claim_forced_abstain_even_if_calibrated_would_be_
     for inf in report.inferences:
         for w in _DIRECTIONAL_WORDS:
             assert w not in inf, f"abstain inferences 不應含方向詞「{w}」：{inf}"
+
+
+def test_e2e_same_source_two_supporting_claims_still_abstains():
+    """codex 對抗審第 5 輪（claim-vs-source 主題收斂）[HIGH] 回歸：`_ABSTAIN_
+    MIN_SUPPORTING` 門檻改用去重來源數之前，`n_supporting` 直接數 supporting
+    的 claim（句）筆數——同一份文件寫兩句高信任內容，會被 `extract_claims()`
+    切成 2 筆 claim，足以通過『>=2』的門檻，即使全部出自單一來源、無任何
+    獨立佐證。本測試單一文件、單一來源（exch-a）產生 2 句 supporting claim，
+    calibrated_confidence 落在 [0.35, 0.5)（若只看筆數規則、不看來源數，會
+    被誤判為『低信心但仍出結論』而非 abstain）——驗證修後仍正確判 abstain。
+    """
+    doc = _doc(
+        "p1", "price", "exch-a",
+        "BTC 站穩 關鍵 支撐位 反彈 上漲。BTC 交易量 放大 買盤 湧入 動能 增強。",
+    )
+    brief = _aggregate_from_docs([doc])
+    assert len(brief.supporting) == 2, "前提檢查失敗：本案例應產生 2 筆 supporting claim"
+    assert len({sc.claim.doc.source for sc in brief.supporting}) == 1, (
+        "前提檢查失敗：本案例應為單一來源"
+    )
+    assert 0.35 <= brief.calibrated_confidence < 0.5, (
+        f"前提檢查失敗：本案例應落在『若只看筆數會誤判低信心』的區間，"
+        f"實得 calibrated={brief.calibrated_confidence}"
+    )
+
+    report, _evidence = _run_report(brief)
+    assert report.decision_state == "abstain", (
+        f"單一來源灌 2 句 supporting claim 不應脫離 abstain，"
+        f"實得 decision_state={report.decision_state}"
+    )
+    assert report.direction == "不明"
+    for w in _DIRECTIONAL_WORDS:
+        assert w not in report.market_judgment, f"abstain 措辭不應含方向詞「{w}」：{report.market_judgment}"
+
+
+def test_e2e_two_distinct_sources_one_claim_each_can_leave_abstain():
+    """對照組：2 個「不同」來源、各 1 筆 supporting claim（真的獨立佐證，
+    非單源灌量）——門檻應正確判定為已達最小支撐來源數，不再卡在
+    `_ABSTAIN_MIN_SUPPORTING`（是否進一步落 normal/low_confidence 則看
+    calibrated_confidence，不是本測試重點）。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+    ]
+    brief = _aggregate_from_docs(docs)
+    assert len(brief.supporting) == 2
+    assert len({sc.claim.doc.source for sc in brief.supporting}) == 2, (
+        "前提檢查失敗：本案例應為 2 個不同來源"
+    )
+
+    report, _evidence = _run_report(brief)
+    assert report.decision_state != "abstain", (
+        "2 個不同來源各 1 筆佐證應達最小支撐來源數，不該被 abstain 門檻擋下，"
+        f"實得 decision_state={report.decision_state}（calibrated="
+        f"{brief.calibrated_confidence}）"
+    )
 
 
 def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_marked():
