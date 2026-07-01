@@ -95,6 +95,88 @@ PYEOF
   fi
 }
 
+assert_verify_gate_behavior() {
+  # follow-up（真部署發現 reddit-429 false-fail）：光靠字串斷言（有沒有含
+  # `--probe`）測不出「部署 gate 到底聽誰的」——這裡把捕捉到的 fetch-
+  # scheduler 同步驗證 SSM script 實際還原成一支 bash 腳本，用假的
+  # systemctl/journalctl/python3 真的把它跑一遍，直接斷言腳本本身的 exit
+  # code，而不是只看文字內容像不像。
+  local desc_prefix="$1" raw_content="$2" fake_systemctl_start_rc="$3" fake_probe_rc="$4" expect_rc="$5"
+
+  if [ -z "$raw_content" ]; then
+    echo "  [FAIL] $desc_prefix — 沒有可重跑的 verify script（raw content 是空的）"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+
+  local work fake_unit fake_opt fake_py mockbin
+  work=$(mktemp -d)
+  fake_unit="$work/fake-fetch-scheduler.service"
+  fake_opt="$work/opt-trustforge"
+  fake_py="$work/python3"
+  mockbin="$work/bin"
+  mkdir -p "$fake_opt" "$mockbin"
+  touch "$fake_unit"
+
+  cat >"$mockbin/systemctl" <<'EOSC'
+#!/usr/bin/env bash
+if [ "$1" = "daemon-reload" ]; then exit 0; fi
+if [ "$1" = "start" ]; then exit "${GATE_TEST_SYSTEMCTL_START_RC:-0}"; fi
+exit 0
+EOSC
+  chmod +x "$mockbin/systemctl"
+
+  cat >"$mockbin/journalctl" <<'EOJC'
+#!/usr/bin/env bash
+exit 0
+EOJC
+  chmod +x "$mockbin/journalctl"
+
+  cat >"$fake_py" <<'EOPY'
+#!/usr/bin/env bash
+exit "${GATE_TEST_PROBE_RC:-0}"
+EOPY
+  chmod +x "$fake_py"
+
+  local ssm_json="${raw_content#commands=}"
+  printf '%s' "$ssm_json" >"$work/ssm.json"
+  if ! python3 -c "
+import json
+
+with open('$work/ssm.json') as f:
+    cmds = json.load(f)
+script = chr(10).join(cmds)
+script = script.replace('/etc/systemd/system/fetch-scheduler.service', '$fake_unit')
+script = script.replace('/opt/trustforge', '$fake_opt')
+script = script.replace('/usr/bin/python3', '$fake_py')
+with open('$work/verify.sh', 'w') as f:
+    f.write(script)
+" 2>"$work/pyerr.txt"; then
+    echo "  [FAIL] $desc_prefix — 重建 verify script 失敗：$(cat "$work/pyerr.txt")"
+    FAIL=$((FAIL + 1))
+    rm -rf "$work"
+    return
+  fi
+
+  local rc
+  set +e
+  GATE_TEST_SYSTEMCTL_START_RC="$fake_systemctl_start_rc" GATE_TEST_PROBE_RC="$fake_probe_rc" \
+    PATH="$mockbin:$PATH" bash "$work/verify.sh" >"$work/stdout.log" 2>"$work/stderr.log"
+  rc=$?
+  set -e
+
+  if [ "$rc" = "$expect_rc" ]; then
+    echo "  [PASS] ${desc_prefix}（實際重跑 gate 腳本 exit=${rc}，符合預期 ${expect_rc}）"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] ${desc_prefix} — 實際重跑 gate 腳本 exit=${rc}，預期 ${expect_rc}"
+    sed 's/^/    stdout: /' "$work/stdout.log"
+    sed 's/^/    stderr: /' "$work/stderr.log"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$work"
+}
+
 MOCKDIR=$(mktemp -d)
 CAPTURE=$(mktemp -d)
 trap 'rm -rf "$MOCKDIR" "$CAPTURE"' EXIT
@@ -287,6 +369,14 @@ else
   assert_contains "$VERIFY_FT" "fetch_scheduler.py --probe" "首次建置：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
   assert_contains "$VERIFY_FT" "TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache" "首次建置：probe 呼叫有帶正確的 cache table 環境變數"
   assert_contains "$VERIFY_FT" "TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger" "首次建置：probe 呼叫有帶正確的 cost-ledger table 環境變數"
+  # follow-up（真部署發現）：reddit 在 EC2 共享 IP 上必定 429，一般全源排程
+  # 因此必定非零，但這不代表基建有問題——部署 gate 只該認 --probe。
+  assert_verify_gate_behavior \
+    "首次建置：一般排程失敗（模擬 reddit 429）但 --probe 通過 → gate 仍判定成功（exit0，不再 false-fail）" \
+    "$VERIFY_FT" 1 0 0
+  assert_verify_gate_behavior \
+    "首次建置：--probe 失敗（模擬 DynamoDB 被拒）→ gate 判定失敗（exit1），與一般排程是否成功無關" \
+    "$VERIFY_FT" 0 1 1
 fi
 
 echo
@@ -327,6 +417,12 @@ if [ -z "$VERIFY_UP" ]; then
 else
   assert_contains "$VERIFY_UP" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service"
   assert_contains "$VERIFY_UP" "fetch_scheduler.py --probe" "update-in-place：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
+  assert_verify_gate_behavior \
+    "update-in-place：一般排程失敗（模擬 reddit 429）但 --probe 通過 → gate 仍判定成功（exit0，不再 false-fail）" \
+    "$VERIFY_UP" 1 0 0
+  assert_verify_gate_behavior \
+    "update-in-place：--probe 失敗（模擬 DynamoDB 被拒）→ gate 判定失敗（exit1），與一般排程是否成功無關" \
+    "$VERIFY_UP" 0 1 1
 fi
 
 SSM_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
