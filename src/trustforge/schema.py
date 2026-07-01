@@ -40,6 +40,10 @@ class Evidence:
     kind: str = ""           # price/onchain/regulatory/hoyabit/news/social
     trust: float = 0.0
     trust_components: dict = field(default_factory=dict)
+    # Tier2 可解釋 UX：操縱關鍵詞命中清單（由 trust.scoring._manipulation_flags
+    # 回填，見 agent.orchestrator._scored_to_evidence）。預設空 list，向後相容——
+    # 舊呼叫點（皆用 keyword 建構）不受影響，序列化/反序列化多一個可省略欄位。
+    flags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

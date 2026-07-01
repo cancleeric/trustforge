@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from urllib.request import Request, urlopen
@@ -65,6 +66,80 @@ from .base import Document, Source
 _MAX_BYTES = 512 * 1024   # 512 KB
 _TIMEOUT = 5
 _UA = "TrustForge/1.0 (research)"
+
+# 社群情緒多空票數差距門檻（百分點）：達到門檻才在文字裡採用單一方向的
+# 明確措辭，讓 trust.scoring._infer_direction 能推出正確主導方向；差距不足
+# 門檻視為五五波、維持中性語意（見 CoinGeckoSentimentSource.fetch）。
+_SENTIMENT_DOMINANCE_THRESHOLD = 5.0
+
+# codex HIGH（呼應 #24 不造假，Tier2 收斂最後一根）：24h 漲跌幅合理範圍。
+# 這 5 個目標幣（BTC/ETH/SOL/BNB/XRP）皆為大型主流幣，真實 24h 漲跌幅超過
+# ±100% 幾乎必屬單位換算錯亂/API 異常等壞資料，不是真實行情——超出範圍
+# 一律視為不可用，交由呼叫端退回 N/A、不下方向判斷，避免把壞資料捏造成
+# 「真實大漲/大跌」。
+_MAX_PLAUSIBLE_CHANGE_PCT = 100.0
+
+# codex HIGH（呼應 #24 不造假，Tier2 收斂最後一根）：`last_updated_at` 只驗
+# 「有限」不夠——未來時間戳（例如遠未來/超大 epoch）會讓
+# `trust.scoring._recency_decay` 把「now - ts」算出負值，被 `max(0.0, ...)`
+# clamp 成 0 齡 → recency=1.0（最高信任），等於把壞資料捏造成「剛剛發生、
+# 最新鮮」的觀測，讓它更容易主導客觀類方向、扭曲背離/共識判定。改為只接受
+# 「合理範圍內的過去 epoch」：不早於 `_MIN_PLAUSIBLE_EPOCH`（避免 0/極小值
+# 這類明顯異常），也不晚於「呼叫當下 + 時鐘偏差容忍」（避免未來時間戳）；
+# 超出範圍一律退回 `fallback_now`（本地呼叫當下時間，真實、有限、非未來）。
+_MIN_PLAUSIBLE_EPOCH = 1_577_836_800.0  # 2020-01-01T00:00:00Z（保守下限，只用來擋明顯異常值）
+_CLOCK_SKEW_TOLERANCE_SEC = 300.0  # 容許的時鐘偏差：未來 5 分鐘內視為可能的正常時鐘漂移
+
+
+def _finite_num(
+    v: object,
+    lo: float | None = None,
+    hi: float | None = None,
+    exclusive_lo: bool = False,
+) -> float | None:
+    """CoinGecko 數值欄位共用有限驗證（codex MEDIUM x2，呼應 #24 不造假）：
+    有限數字（非 bool/非數值/NaN/inf 一律拒收），選用值域檢查。
+
+    這是所有 CoinGecko 數值欄位（現價 usd、市值 usd_market_cap、24h 漲跌幅
+    usd_24h_change、更新時間 last_updated_at、情緒投票百分比）共用的單一
+    驗證入口——一次收斂，避免像前兩輪那樣逐欄位各補一次、漏掉沒補到的欄位
+    （如這次的 `usd`）又被同類壞資料捏造成看似合理的觀測（如「現價 nan
+    USD」仍被當成有效客觀事實送進背離偵測）。
+
+    - `bool` 是 `int` 子類但語意上不是數字，明確排除。
+    - `NaN`/`inf`/`-inf` 一律視為不可用（`>`/`<` 比較會悄悄吃掉這些壞值，
+      落入某個分支被誤判成看似合理的觀測，等於把壞資料捏造成訊號）。
+    - `lo`/`hi`：選用的值域檢查（含邊界）；`exclusive_lo=True` 時 `lo`
+      本身也視為不合格（例如現價必須 > 0，0 或負值不是合法現價）。
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    fv = float(v)
+    if not math.isfinite(fv):
+        return None
+    if lo is not None:
+        if exclusive_lo and fv <= lo:
+            return None
+        if not exclusive_lo and fv < lo:
+            return None
+    if hi is not None and fv > hi:
+        return None
+    return fv
+
+
+def _valid_pct(v: object) -> float | None:
+    """驗證「有限數字且落在 0–100」的百分比欄位（情緒投票用），其餘一律回
+    None（不造假）——partial/malformed API 回應（單邊缺、非數值、NaN/inf、
+    超出 0–100 範圍）不得被硬轉成「明確方向」的觀測。"""
+    return _finite_num(v, lo=0.0, hi=100.0)
+
+
+def _valid_change_pct(v: object) -> float | None:
+    """驗證 24h 漲跌幅欄位：必須是有限數字，且落在合理範圍
+    ±`_MAX_PLAUSIBLE_CHANGE_PCT`（見模組頂部說明：這 5 個大型主流幣真實
+    24h 漲跌幅超過 ±100% 幾乎必屬壞資料）。超出範圍一律回 None，交由
+    呼叫端退回 N/A、不下方向判斷。"""
+    return _finite_num(v, lo=-_MAX_PLAUSIBLE_CHANGE_PCT, hi=_MAX_PLAUSIBLE_CHANGE_PCT)
 
 # Demo API key env（選用；keyless 已足夠，見模組頂部說明）。只從 env 讀，
 # 絕不 hardcode。實際 key 由 CEO 另立步驟在部署環境（systemd/EC2）設定，
@@ -187,20 +262,65 @@ class CoinGeckoPriceSource(Source):
             entry = data.get(gid)
             if not isinstance(entry, dict):
                 continue
-            price = entry.get("usd")
-            if price is None:
+            # 修（codex MEDIUM #3，呼應 #24 不造假，收斂整個數值欄位驗證類別）：
+            # 原本 `usd` 只擋 None，NaN/inf/字串/bool/負值/零都會被當成「有效
+            # 現價」直接寫進 ref（如「現價 nan USD」）——`price_live` 是
+            # OBJECTIVE_KINDS、會進 `detect_cross_source_signal`，壞現價因此
+            # 變成內部看似合理、實則無效的客觀觀測，可能製造假背離/假共識。
+            # 現價是這個 Document 存在的唯一理由，不合格就不產這筆 Document
+            # （不是退 N/A 續產——退化成 N/A 對「現價」欄位沒有意義）。
+            price_val = _finite_num(entry.get("usd"), lo=0.0, exclusive_lo=True)
+            if price_val is None:
                 continue
             change_24h = entry.get("usd_24h_change")
-            mcap = entry.get("usd_market_cap")
-            change_str = f"{change_24h:+.2f}%" if isinstance(change_24h, (int, float)) else "N/A"
-            mcap_str = f"{mcap:,.0f}" if isinstance(mcap, (int, float)) else "N/A"
-            ref = f"{code} 現價 {price} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
+            mcap_val = _finite_num(entry.get("usd_market_cap"), lo=0.0)
+            mcap_str = f"{mcap_val:,.0f}" if mcap_val is not None else "N/A"
+            # 修（codex HIGH，Tier2 同批修正）：原本只寫數字「+8.20%」，不含
+            # trust.scoring._infer_direction 認得的方向詞（上漲/下跌等），導致
+            # price_live 主張永遠推斷成 neutral——即使漲跌幅再大，客觀類的
+            # 信任加權主導方向也恆為 neutral，detect_cross_source_signal 永遠
+            # 拒收，背離/共識判定形同虛設。改為依漲跌幅正負附上明確方向詞
+            # （持平則不附，維持中性語意，符合實際盤況）。
+            #
+            # 再修（codex MEDIUM，呼應 #24 不造假）：`change_24h > 0`/`< 0` 對
+            # NaN 兩者皆為 False，會落入 else 的「持平」分支——等於把壞資料
+            # （NaN/inf）捏造成一個看似合理的「持平」觀測。改用 `_valid_change_pct`
+            # 先擋非數值/NaN/inf，不合格一律退回 N/A、不下任何方向判斷。
+            change_val = _valid_change_pct(change_24h)
+            if change_val is not None:
+                if change_val > 0:
+                    change_str = f"{change_val:+.2f}%（上漲）"
+                elif change_val < 0:
+                    change_str = f"{change_val:+.2f}%（下跌）"
+                else:
+                    change_str = f"{change_val:+.2f}%（持平）"
+            else:
+                change_str = "N/A"
+            ref = f"{code} 現價 {price_val} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
             doc_id = "coingecko-price-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
             # 優先用 API 回應本身的 last_updated_at（真正的鮮度來源，反映該筆
-            # 報價實際成立的時間點）；缺欄位（未設 include_last_updated_at 生效
-            # 前的舊快取/降級回應）才退回本地呼叫當下時間。
-            last_updated = entry.get("last_updated_at")
-            ts = float(last_updated) if isinstance(last_updated, (int, float)) else fallback_now
+            # 報價實際成立的時間點）；缺欄位/壞值才退回本地呼叫當下時間。
+            #
+            # 修（codex HIGH，呼應 #24 不造假，Tier2 收斂最後一根）：原本只驗
+            # 「有限」，未來時間戳/超大 epoch 會讓 `_recency_decay` 把負齡
+            # clamp 成 0 → recency=1.0（最高信任），等於把壞資料捏造成「最新
+            # 鮮」的觀測。改為只接受「合理範圍內的過去 epoch」：不早於
+            # `_MIN_PLAUSIBLE_EPOCH`（擋 0/極小值），也不晚於「本次呼叫時間 +
+            # 時鐘偏差容忍」（擋未來時間戳）；超出範圍/NaN/inf/非數值一律退回
+            # `fallback_now`（真實、有限、非未來的本地時間，不捏造鮮度）。
+            #
+            # 再修（codex HIGH，容忍範圍內近未來仍拿滿分 recency）：時鐘偏差
+            # 容忍讓 `now+1s ~ now+300s` 的戳通過上面的合理範圍檢查（接受為
+            # 真實資料、不誤拒），但 `_recency_decay` 對「未來」時間戳一樣會
+            # 把負齡 clamp 成 0 → recency=1.0 最高信任。驗證通過後再對儲存值
+            # 取 `min(validated_ts, fallback_now)`：容忍時鐘誤差但不讓任何
+            # 未來時間點被當成「現在」以外更新的鮮度來源。
+            last_updated_val = _finite_num(
+                entry.get("last_updated_at"),
+                lo=_MIN_PLAUSIBLE_EPOCH,
+                hi=fallback_now + _CLOCK_SKEW_TOLERANCE_SEC,
+            )
+            ts = min(last_updated_val, fallback_now) if last_updated_val is not None else fallback_now
             docs.append(Document(
                 id=doc_id,
                 kind=self.kind,
@@ -235,9 +355,35 @@ class CoinGeckoSentimentSource(Source):
         down = data.get("sentiment_votes_down_percentage")
         if up is None and down is None:
             return []
-        up_str = f"{up:.1f}%" if isinstance(up, (int, float)) else "N/A"
-        down_str = f"{down:.1f}%" if isinstance(down, (int, float)) else "N/A"
-        ref = f"{code} 社群情緒投票：看漲 {up_str}，看跌 {down_str}"
+        # 修（codex HIGH，Tier2）：原本文字固定同時寫「看漲 X%，看跌 Y%」，
+        # 導致 trust.scoring._infer_direction 對「看漲」「看跌」各計一次而
+        # 永遠打平回 neutral，使 detect_cross_source_signal 拒收、背離永不
+        # 觸發——把 sentiment 加進 _SENTIMENT_KINDS 形同虛設。改為依多空數字
+        # 的實際主導方向組字：差距達門檻才用單一方向詞描述（另一側只給數字、
+        # 不帶任何方向關鍵詞，避免又被計成平手）；差距不足門檻維持中性語意。
+        #
+        # 再修（codex MEDIUM，呼應 #24 不造假）：上一版對「只有單邊票數」的
+        # 情況直接捏出 ±100pp 差距、硬發強方向詞——partial/malformed API
+        # 回應（單邊缺、非數值、NaN/inf、超出 0–100 範圍）因此會被偽裝成
+        # 強烈的多空觀測，進而製造假背離。改為用 `_valid_pct` 嚴格驗證：
+        # 兩邊都必須是有限數字且落在 0–100，才進入方向判斷；只要有一邊不合格，
+        # 一律回中性語意的 data-quality 措辭，絕不捏造方向。比較也改嚴格
+        # `>`/`<`（原 `>=`/`<=` 會把剛好等於門檻的 5pp 也算方向，不符合
+        # 「僅 > 5pp 才算」的規格）。
+        up_val = _valid_pct(up)
+        down_val = _valid_pct(down)
+        up_str = f"{up_val:.1f}%" if up_val is not None else "N/A"
+        down_str = f"{down_val:.1f}%" if down_val is not None else "N/A"
+        if up_val is None or down_val is None:
+            ref = f"{code} 社群情緒投票：資料不完整或無效（看漲 {up_str}，看跌 {down_str}），暫無法判斷方向"
+        else:
+            diff = up_val - down_val
+            if diff > _SENTIMENT_DOMINANCE_THRESHOLD:
+                ref = f"{code} 社群情緒偏多：看漲 {up_str}（多數意見），另有 {down_str} 持保留看法"
+            elif diff < -_SENTIMENT_DOMINANCE_THRESHOLD:
+                ref = f"{code} 社群情緒偏空：看跌 {down_str}（多數意見），另有 {up_str} 持保留看法"
+            else:
+                ref = f"{code} 社群情緒投票：看漲 {up_str}，看跌 {down_str}"
         doc_id = "coingecko-sentiment-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
         return [Document(
             id=doc_id,

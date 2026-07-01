@@ -29,8 +29,13 @@ _STEP4_SYSTEM = (
 )
 _STEP4_LIMIT_SENTINEL = "LIMITS_OK"
 
-OBJECTIVE_KINDS = {"price", "onchain", "regulatory", "hoyabit"}
-_SENTIMENT_KINDS: set[str] = {"news", "social"}
+OBJECTIVE_KINDS = {"price", "price_live", "onchain", "regulatory", "hoyabit"}
+_SENTIMENT_KINDS: set[str] = {"news", "social", "sentiment"}
+# CoinGecko `dev_activity`（GitHub stars/forks/commits）刻意不歸入任一類：既非
+# 客觀「市場」事實（開發活躍度與價格走勢無直接因果），也非情緒訊號，若強行
+# 分類容易在跨源背離偵測中製造假背離（例如開發活躍度下降 vs 現價上漲被誤判
+# 為客觀類內部矛盾）。不歸類 = 該 kind 的主張永遠不進入
+# `detect_cross_source_signal` 的 objective/sentiment 分組計算。
 
 # Tier2（真實分歧樣本）：stance_pairs 專用的最低信任門檻。刻意低於 detect_cross_
 # _source_signal 主流程的 0.5「合格」門檻——真實的雙來源直接矛盾（如同議題 ETF
@@ -62,6 +67,9 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         kind=doc.kind,
         trust=round(sc.trust, 3),
         trust_components={k: round(v, 3) for k, v in sc.components.items()},
+        # Tier2 可解釋 UX：操縱關鍵詞命中原文回填，供 web.py 渲染紅旗
+        # （見 trust.scoring._manipulation_flags；空 list 時等同未命中）。
+        flags=list(sc.manip_flags),
     )
 
 

@@ -118,6 +118,51 @@ def test_negated_manipulation_not_penalised():
     assert _manipulation_penalty(aff) > 0
 
 
+# --- Tier2 可解釋 UX：_manipulation_flags 回溯測試 ------------------------
+
+def test_manipulation_flags_traces_back_to_original_keywords():
+    """flags 命中內容須可回溯到原文中的操縱關鍵詞（供 Evidence.flags 顯示）。"""
+    from trustforge.trust.scoring import _manipulation_flags, Claim
+    from trustforge.ingestion.base import Document
+    d = Document(id="e", kind="social", source="x", text="", ts=1)
+    c = Claim(id="y", text="BTC 暴漲翻倍穩賺，快上車！", doc=d)
+    flags = _manipulation_flags(c)
+    assert flags, "應命中至少一個操縱關鍵詞"
+    # 每個 flag 都必須能在原文字串裡逐字找到（可回溯）
+    for f in flags:
+        assert f in c.text, f"flag {f!r} 無法回溯到原文 {c.text!r}"
+    assert "暴漲" in flags
+    assert "翻倍" in flags
+    assert "快上車" in flags
+
+
+def test_manipulation_flags_empty_when_no_hits():
+    """無操縱關鍵詞命中時，flags 為空 list（不誤報）。"""
+    from trustforge.trust.scoring import _manipulation_flags, Claim
+    from trustforge.ingestion.base import Document
+    d = Document(id="d", kind="news", source="coindesk", text="", ts=1)
+    c = Claim(id="x", text="BTC 今日盤整，觀察後續動能。", doc=d)
+    assert _manipulation_flags(c) == []
+
+
+def test_manipulation_flags_respects_negation_gate_like_penalty():
+    """否定守門對 flags 與 penalty 一致：『不會暴漲』不應被列入 flags。"""
+    from trustforge.trust.scoring import _manipulation_flags, Claim
+    from trustforge.ingestion.base import Document
+    d = Document(id="d", kind="news", source="coindesk", text="", ts=1)
+    neg = Claim(id="x", text="分析師認為 BTC 短期不會暴漲", doc=d)
+    assert _manipulation_flags(neg) == []
+
+
+def test_score_fills_scored_claim_manip_flags():
+    """score() 應把命中的操縱關鍵詞填進 ScoredClaim.manip_flags，供 orchestrator 回填 Evidence.flags。"""
+    docs = [_doc("b", "social", "x-anon", "穩賺 翻倍 to the moon！")]
+    sc = score(extract_claims(docs), now=1.0)[0]
+    assert sc.manip_flags, "命中操縱關鍵詞時 manip_flags 不應為空"
+    for f in sc.manip_flags:
+        assert f.lower() in sc.claim.text.lower()
+
+
 # --- P2-1 sample-enrich 新增整合測試 ------------------------------------
 
 def test_manipulation_entries_land_in_contrarian():

@@ -50,7 +50,7 @@ from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.pipeline import run
 from trustforge.schema import QuestionType
-from trustforge.trust.scoring import Claim, ScoredClaim, aggregate
+from trustforge.trust.scoring import Claim, ScoredClaim, aggregate, extract_claims, score
 
 
 # ---------------------------------------------------------------------------
@@ -491,3 +491,214 @@ def test_other_coins_no_false_divergence_after_coin_filter_fix(coin: str, query:
         assert "stance_pairs" not in sig or not sig["stance_pairs"], (
             f"{coin} query={query!r} 不應出現 stance_pairs 假背離，實得 {sig}"
         )
+
+
+# ---------------------------------------------------------------------------
+# W-coingecko：新 kind（price_live/sentiment）接線進客觀/情緒分類（gray 計劃）。
+# `dev_activity` 刻意不歸類，見 orchestrator.OBJECTIVE_KINDS/_SENTIMENT_KINDS
+# 旁的說明——不進入任何一組，永遠不參與跨源背離/共識計算。
+# ---------------------------------------------------------------------------
+
+def test_coingecko_kinds_registered_in_objective_and_sentiment_sets():
+    """price_live 歸客觀類、sentiment 歸情緒類；dev_activity 兩邊都不進。"""
+    assert "price_live" in OBJECTIVE_KINDS
+    assert "sentiment" in _SENTIMENT_KINDS
+    assert "dev_activity" not in OBJECTIVE_KINDS
+    assert "dev_activity" not in _SENTIMENT_KINDS
+
+
+def test_price_live_bullish_sentiment_bearish_is_divergence():
+    """price_live 看漲、sentiment 看跌 → 客觀/情緒方向相反，判定 divergence。"""
+    scored = [
+        _sc("obj1", "price_live", "coingecko-price", "bullish", 0.80, "ETH 現價上漲"),
+        _sc("sen1", "sentiment", "coingecko-sentiment", "bearish", 0.55, "ETH 社群看跌"),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is not None
+    assert result["type"] == "divergence"
+    assert result["objective_direction"] == "bullish"
+    assert result["sentiment_direction"] == "bearish"
+    assert "背離" in result["summary"]
+
+
+def test_price_live_and_sentiment_same_direction_is_consensus():
+    """price_live、sentiment 同向（皆看漲）→ 判定 consensus，非背離。"""
+    scored = [
+        _sc("obj1", "price_live", "coingecko-price", "bullish", 0.80, "ETH 現價上漲"),
+        _sc("sen1", "sentiment", "coingecko-sentiment", "bullish", 0.55, "ETH 社群看漲"),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is not None
+    assert result["type"] == "consensus"
+    assert "stance_pairs" not in result
+
+
+def test_dev_activity_not_counted_in_objective_or_sentiment_grouping():
+    """dev_activity 不歸類：即使方向與 sentiment 相反，也不觸發假背離
+    （因為只有 dev_activity + sentiment 兩筆，客觀類 0 筆 → 回 None）。"""
+    scored = [
+        _sc("dev1", "dev_activity", "coingecko-dev", "bearish", 0.55, "ETH 開發活動下滑"),
+        _sc("sen1", "sentiment", "coingecko-sentiment", "bullish", 0.55, "ETH 社群看漲"),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is None, f"dev_activity 不應被計入客觀類，實得 {result}"
+
+
+# ---------------------------------------------------------------------------
+# codex HIGH（Tier2 最後一根）：上面 4 個測試用手造 ScoredClaim(direction=...) 直接
+# 指定方向，繞過了真實 production 路徑——測不出
+# `CoinGeckoSentimentSource` 產出的文字本身是否真的能讓
+# `trust.scoring._infer_direction` 推出正確方向。根因：原文字固定寫
+# 「看漲 X%，看跌 Y%」，兩個方向詞都出現、計數打平 → 永遠 neutral →
+# `detect_cross_source_signal` 拒收 → kind 接線形同虛設。
+#
+# 下面改用**真實** `CoinGeckoSentimentSource`/`CoinGeckoPriceSource`（只 monkeypatch
+# 最底層 `_fetch_url` 固定回應 JSON，其餘一路走真代碼）→ `extract_claims` →
+# `score` → `detect_cross_source_signal`，全程不手造 ScoredClaim/direction。
+# ---------------------------------------------------------------------------
+
+def _fake_sentiment_json(up: float, down: float) -> bytes:
+    import json
+    return json.dumps({
+        "sentiment_votes_up_percentage": up,
+        "sentiment_votes_down_percentage": down,
+    }).encode()
+
+
+def _fake_price_json(coingecko_id: str, price: float, change_24h: float) -> bytes:
+    import json
+    return json.dumps({
+        coingecko_id: {
+            "usd": price,
+            "usd_24h_change": change_24h,
+            "usd_market_cap": 4e11,
+            "last_updated_at": 1_700_000_000,
+        },
+    }).encode()
+
+
+def test_coingecko_sentiment_up_dominant_infers_bullish_via_real_pipeline(monkeypatch):
+    """真實 CoinGeckoSentimentSource（up 明顯 > down）→ 真實 extract_claims，
+    斷言推出的 direction 是 bullish（不手造 direction，走真代碼）。"""
+    from trustforge.ingestion import coingecko
+
+    coingecko.reset_process_cache()
+    monkeypatch.setattr(
+        coingecko, "_fetch_url",
+        lambda url, extra_headers=None: _fake_sentiment_json(58.6, 41.4),
+    )
+    docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    claims = extract_claims(docs)
+    assert len(claims) == 1
+    assert claims[0].direction == "bullish", (
+        f"up-dominant 應推出 bullish，實得 {claims[0].direction}（text={claims[0].text!r}）"
+    )
+
+
+def test_coingecko_sentiment_down_dominant_infers_bearish_via_real_pipeline(monkeypatch):
+    """真實 CoinGeckoSentimentSource（down 明顯 > up）→ 真實 extract_claims，
+    斷言推出的 direction 是 bearish（不手造 direction，走真代碼）。"""
+    from trustforge.ingestion import coingecko
+
+    coingecko.reset_process_cache()
+    monkeypatch.setattr(
+        coingecko, "_fetch_url",
+        lambda url, extra_headers=None: _fake_sentiment_json(30.0, 70.0),
+    )
+    docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="ETH")
+    assert len(docs) == 1
+    claims = extract_claims(docs)
+    assert len(claims) == 1
+    assert claims[0].direction == "bearish", (
+        f"down-dominant 應推出 bearish，實得 {claims[0].direction}（text={claims[0].text!r}）"
+    )
+
+
+def test_coingecko_sentiment_near_tie_stays_neutral_via_real_pipeline(monkeypatch):
+    """差距 < 門檻（五五波）時維持中性語意，不強行分邊（回歸鎖，同批修正的
+    邊界情況：避免為了「必須有方向」而把雜訊也判成有方向）。"""
+    from trustforge.ingestion import coingecko
+
+    coingecko.reset_process_cache()
+    monkeypatch.setattr(
+        coingecko, "_fetch_url",
+        lambda url, extra_headers=None: _fake_sentiment_json(51.0, 49.0),
+    )
+    docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="SOL")
+    claims = extract_claims(docs)
+    assert claims[0].direction == "neutral"
+
+
+def test_coingecko_price_live_direction_reflects_24h_change_sign_via_real_pipeline(monkeypatch):
+    """同批發現的連帶問題：`CoinGeckoPriceSource` 文字原本完全不含方向詞
+    （「24h 變動 +8.20%」沒有「上漲」/「下跌」字樣），導致 price_live 主張
+    永遠被 `_infer_direction` 判成 neutral——即使加進 OBJECTIVE_KINDS，客觀類
+    的主導方向也恆為 neutral，跨源背離/共識同樣永遠拒收。修法已在
+    `coingecko.py` 依漲跌幅正負附上明確方向詞；這裡走真代碼驗證。"""
+    from trustforge.ingestion import coingecko
+
+    coingecko.reset_process_cache()
+    monkeypatch.setattr(
+        coingecko, "_fetch_url",
+        lambda url, extra_headers=None: _fake_price_json("ethereum", 3500.0, 8.2),
+    )
+    up_docs = coingecko.CoinGeckoPriceSource().fetch("", coin="ETH")
+    assert extract_claims(up_docs)[0].direction == "bullish"
+
+    coingecko.reset_process_cache()
+    monkeypatch.setattr(
+        coingecko, "_fetch_url",
+        lambda url, extra_headers=None: _fake_price_json("ethereum", 3200.0, -6.5),
+    )
+    down_docs = coingecko.CoinGeckoPriceSource().fetch("", coin="ETH")
+    assert extract_claims(down_docs)[0].direction == "bearish"
+
+
+def test_coingecko_real_pipeline_objective_reverse_sentiment_produces_real_divergence(monkeypatch):
+    """端到端最終驗收：真實 `CoinGeckoPriceSource`（看多）+ 真實
+    `CoinGeckoSentimentSource`（看空，down-dominant）一路走 extract_claims →
+    score → detect_cross_source_signal，斷言真的產出 divergence，
+    objective_direction/sentiment_direction 皆來自真代碼推斷，非手造。
+
+    情緒類單一來源信任分結構性地到不了 detect_cross_source_signal 的 0.5
+    合格門檻（見 orchestrator.py `_STANCE_PAIR_MIN_TRUST` 旁的說明：即使
+    news(0.65 信譽) 單來源無佐證也只有 ~0.475）——這是既有、刻意的設計
+    （單一匿名/聚合來源不該單獨觸發高信心跨源訊號），不是本輪修的範圍。
+    比照 `test_trust_scoring.py::test_independent_corroboration_raises_trust`
+    既有慣例，補一則同議題、不同來源的真實佐證文本，模擬「CoinGecko 情緒
+    投票結果被社群另一來源同步報導」的真實情境，讓情緒類信任分透過交叉
+    佐證機制（非手造 trust 數字）合法跨過門檻。"""
+    from trustforge.ingestion import coingecko
+
+    coingecko.reset_process_cache()
+    monkeypatch.setattr(
+        coingecko, "_fetch_url",
+        lambda url, extra_headers=None: _fake_price_json("ethereum", 3500.0, 8.2),
+    )
+    price_docs = coingecko.CoinGeckoPriceSource().fetch("", coin="ETH")
+
+    coingecko.reset_process_cache()
+    monkeypatch.setattr(
+        coingecko, "_fetch_url",
+        lambda url, extra_headers=None: _fake_sentiment_json(30.0, 70.0),
+    )
+    sentiment_docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="ETH")
+
+    # 佐證來源：與 CoinGecko 情緒投票同議題、方向相同，文字部分重疊（同
+    # `test_independent_corroboration_raises_trust` 用 `shared` 字串佐證的慣例）。
+    corroborating_doc = Document(
+        id="social-eth-echo-1", kind="social", source="reddit-eth",
+        text=f"{sentiment_docs[0].text}，Reddit 版討論同步轉向謹慎",
+        ts=1_700_000_100.0,
+    )
+
+    claims = extract_claims(price_docs + sentiment_docs + [corroborating_doc])
+    scored = score(claims, now=1_700_000_200.0)
+
+    result = detect_cross_source_signal(scored)
+    assert result is not None, "真實 CoinGecko 資料應能產出跨源訊號，實得 None"
+    assert result["type"] == "divergence"
+    assert result["objective_direction"] == "bullish"
+    assert result["sentiment_direction"] == "bearish"
+    assert "背離" in result["summary"]
