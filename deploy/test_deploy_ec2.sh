@@ -230,6 +230,11 @@ else
   assert_contains "$VERIFY_FT" "systemctl start fetch-scheduler.service" "首次建置：同步觸發 systemctl start fetch-scheduler.service"
   assert_contains "$VERIFY_FT" "fetch-scheduler.service ] && break" "首次建置：有等 unit 檔存在（容忍 user-data 還沒跑完）"
   assert_contains "$VERIFY_FT" "journalctl -u fetch-scheduler" "首次建置：失敗時有印 journal"
+  # codex HIGH-3：不能只靠一般排程（可能因 cache 全新鮮 0 次真呼叫仍成功）
+  # 當成 R/W 驗證，必須真的另外跑一次不依賴 freshness 的 --probe。
+  assert_contains "$VERIFY_FT" "fetch_scheduler.py --probe" "首次建置：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
+  assert_contains "$VERIFY_FT" "TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache" "首次建置：probe 呼叫有帶正確的 cache table 環境變數"
+  assert_contains "$VERIFY_FT" "TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger" "首次建置：probe 呼叫有帶正確的 cost-ledger table 環境變數"
 fi
 
 echo
@@ -261,6 +266,7 @@ if [ -z "$VERIFY_UP" ]; then
   FAIL=$((FAIL + 1))
 else
   assert_contains "$VERIFY_UP" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service"
+  assert_contains "$VERIFY_UP" "fetch_scheduler.py --probe" "update-in-place：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
 fi
 
 SSM_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
@@ -392,6 +398,12 @@ else
     FAIL=$((FAIL + 1))
   fi
 fi
+
+# codex HIGH-3：確認會被判定失敗的那次 send-command，內容真的包含 --probe——
+# 證明失敗判定是掛在「一般排程 + probe」的組合驗證上，不是舊版只驗
+# systemctl start（無參數、可能因 cache 全新鮮而假成功）那條路。
+SCHED_FAIL_CONTENT=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
+assert_contains "$SCHED_FAIL_CONTENT" "fetch_scheduler.py --probe" "場景 3：判定失敗的那次驗證，內容包含 --probe（不是只靠 freshness-skip 的一般排程）"
 
 echo
 echo "== 結果：PASS=$PASS FAIL=$FAIL =="

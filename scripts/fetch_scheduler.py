@@ -52,6 +52,7 @@ Exit code：`0` 全部成功（或本來就沒有目標要跑）；`1` 表示至
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -59,7 +60,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "src"))
 
-from trustforge.ingestion.base import Source  # noqa: E402
+from trustforge.ingestion.base import Document, Source  # noqa: E402
 from trustforge.ingestion.cache import (  # noqa: E402
     COIN_AGNOSTIC_SOURCES,
     DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS,
@@ -76,6 +77,7 @@ from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
+from trustforge.ledger import get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL  # noqa: E402
 
 
@@ -250,6 +252,100 @@ def run_once(
     return results, failures
 
 
+_PROBE_SOURCE = "__fetch_scheduler_probe__"
+_PROBE_COIN = "PROBE"
+
+
+def run_probe() -> int:
+    """DynamoDB R/W canary probe（codex HIGH-3 修正）。
+
+    背景：`verify_fetch_scheduler`（`deploy/deploy_ec2.sh`）原本只是同步跑一次
+    普通排程（`main()` 不帶 `--probe`），但普通排程對每個來源都先過新鮮度
+    守門（`_is_fresh()`）——若剛好碰上 cache 全新鮮（如剛部署完、上一輪才
+    成功寫過），本次執行對所有來源全部「略過」、0 次真呼叫、0 次 PutItem，
+    仍然 `exit 0`。這樣一來，若 IAM 權限被 permission boundary / SCP / table
+    resource policy 擋掉（GetItem 還過得去，只有 PutItem 被拒），只要當下
+    cache 恰好新鮮，`verify_fetch_scheduler` 就會誤判成功，直到下一輪真的
+    需要刷新（cache 過期）時才會開始每次 exit 1——正好繞過本來要防的東西。
+
+    修法：完全不碰任何真連接器 API、不看任何來源的新鮮度，直接對兩個表各做
+    一次**保證真的會發生**的 R/W：
+      - cache 表：對保留的 canary key（`__fetch_scheduler_probe__:PROBE`，
+        不會跟真實來源撞名）做 `set()`（PutItem）→`get()`（GetItem）→比對
+        讀回內容是否等於剛寫入的 sentinel。任一步丟例外，或讀回內容對不上
+        （可能是背景讀到舊資料、或其實根本沒寫進去卻沒丟例外的邊界情況），
+        都視為失敗。
+      - cost-ledger 表：對固定 `run_id="__fetch_scheduler_probe__"` 的一筆
+        record 做 `append()`（PutItem），驗證寫入本身不丟例外即可（`Ledger`
+        介面沒有「依 key 讀單筆」，`read_all()` 是全表 scan + 合併 JSONL
+        fallback，拿來當輕量 canary 的讀回驗證太重也太容易被 fallback 掩蓋，
+        因此本 probe 只驗證 PutItem，不驗證讀回）。
+      - 兩個 canary key 都固定、冪等（重跑覆寫同一筆，不會無限堆積垃圾資料）。
+
+    刻意**不透過** `cache_get()`/`cache_set()` 高階便利函式：它們對讀/寫
+    失敗各自有 fallback/降級語意（見 `cache.py` 模組頂部與 `CacheWriteResult`
+    docstring），目的是讓「產品路徑」在 primary backend 故障時還能盡量堪用；
+    但這正是 probe 要拆穿的東西——probe 要問的是「primary backend（實際配置
+    的 `CACHE_BACKEND`/`COST_LEDGER_BACKEND`）本身能不能真的讀寫」，不能被
+    這層 fallback 悄悄接住又回報「看起來沒事」。直接呼叫 backend 的低階
+    `get()`/`set()`/`append()`，任何例外一律視為 probe 失敗。
+    """
+    ok = True
+
+    cache_backend = get_cache_backend()
+    canary_key = cache_key(_PROBE_SOURCE, _PROBE_COIN)
+    sentinel = f"probe-{os.getpid()}-{time.time():.6f}"
+    try:
+        probe_doc = Document(
+            id="probe", kind="probe", source=_PROBE_SOURCE, text=sentinel, ts=time.time(),
+        )
+        cache_backend.set(canary_key, [doc_to_dict(probe_doc)], time.time())
+    except Exception as exc:  # noqa: BLE001 — probe 就是要抓「任何」寫入失敗，含被拒
+        print(f"[fetch_scheduler] PROBE FAIL：cache PutItem 失敗"
+              f"（backend={type(cache_backend).__name__}）：{exc}", file=sys.stderr)
+        ok = False
+    else:
+        try:
+            entry = cache_backend.get(canary_key)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fetch_scheduler] PROBE FAIL：cache GetItem 失敗"
+                  f"（backend={type(cache_backend).__name__}）：{exc}", file=sys.stderr)
+            ok = False
+        else:
+            docs = (entry or {}).get("docs") or []
+            read_back = docs[0].get("text") if docs else None
+            if read_back != sentinel:
+                print(f"[fetch_scheduler] PROBE FAIL：cache 讀回內容與剛寫入的不一致"
+                      f"（可能讀到舊資料，或寫入其實沒真的落地卻沒丟例外）："
+                      f"預期 {sentinel!r}，讀到 {read_back!r}", file=sys.stderr)
+                ok = False
+            else:
+                print(f"[fetch_scheduler] PROBE OK：cache PutItem + GetItem 讀寫一致"
+                      f"（backend={type(cache_backend).__name__}）")
+
+    ledger_backend = get_ledger()
+    try:
+        ledger_backend.append({
+            "run_id": _PROBE_SOURCE,
+            "total_cost_usd": 0.0,
+            "calls": [],
+            "note": "fetch_scheduler --probe canary，非真實花費紀錄",
+        })
+    except Exception as exc:  # noqa: BLE001
+        print(f"[fetch_scheduler] PROBE FAIL：cost-ledger PutItem 失敗"
+              f"（backend={type(ledger_backend).__name__}）：{exc}", file=sys.stderr)
+        ok = False
+    else:
+        print(f"[fetch_scheduler] PROBE OK：cost-ledger PutItem 成功"
+              f"（backend={type(ledger_backend).__name__}）")
+
+    if not ok:
+        print("[fetch_scheduler] PROBE 結論：失敗——DynamoDB cache/cost-ledger 至少一項"
+              "真的讀寫不通（可能是 IAM 權限被 permission boundary/SCP/table policy 擋，"
+              "或表不存在/名稱不對），deploy 不應視為成功", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     parser.add_argument(
@@ -281,7 +377,18 @@ def main(argv: list[str] | None = None) -> int:
         "--list-sources", action="store_true",
         help="列出所有已知來源名稱後結束（不打任何 API）",
     )
+    parser.add_argument(
+        "--probe", action="store_true",
+        help="DynamoDB cache/cost-ledger 兩表的 R/W canary probe（保留 key，"
+             "PutItem→GetItem→驗證讀回，cost-ledger 額外驗 PutItem）；完全不依賴"
+             "任何來源新鮮度或外部 API，任一步失敗（含被 IAM 拒絕）即非零退出。"
+             "供 deploy 部署後同步健康檢查用，取代『跑一次可能因 cache 全新鮮"
+             "而 0 次真呼叫仍 exit 0』的舊驗法（codex HIGH）",
+    )
     args = parser.parse_args(argv)
+
+    if args.probe:
+        return run_probe()
 
     registry = build_registry()
     if args.list_sources:

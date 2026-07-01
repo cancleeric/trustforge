@@ -39,8 +39,13 @@ verify_fetch_scheduler() {
   local vcmdid
   # shellcheck disable=SC2016  # 單引號內的 $(seq..)/$i 刻意留給遠端展開，不
   # 是漏加雙引號（跟既有 healthz for-loop 那行同一個模式）。
+  # codex HIGH-3：光跑一般排程（無參數）不夠——cache 全新鮮時 0 次真呼叫仍
+  # exit 0，PutItem 被拒也測不到（見 fetch_scheduler.py::run_probe 的說明）。
+  # 這裡先跑一次一般排程當基本健康檢查（抓程式本身/相依套件是否正常），再
+  # 額外跑一次不依賴 freshness 的 `--probe`（真的觸發一次 PutItem/GetItem），
+  # 任一步失敗都讓部署 exit 1。
   vcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","for i in $(seq 1 40); do [ -f /etc/systemd/system/fetch-scheduler.service ] && break; sleep 5; done","if [ ! -f /etc/systemd/system/fetch-scheduler.service ]; then echo \"[ec2] fetch-scheduler.service 逾時仍未由 user-data 建立\" >&2; exit 1; fi","systemctl daemon-reload","if ! systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 同步執行失敗（DynamoDB IAM 權限可能不足，見 trustforge-dynamodb inline policy）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager; exit 1; fi","echo \"[ec2] fetch-scheduler 同步執行成功\""]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","for i in $(seq 1 40); do [ -f /etc/systemd/system/fetch-scheduler.service ] && break; sleep 5; done","if [ ! -f /etc/systemd/system/fetch-scheduler.service ]; then echo \"[ec2] fetch-scheduler.service 逾時仍未由 user-data 建立\" >&2; exit 1; fi","systemctl daemon-reload","if ! systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 一般排程執行失敗（程式錯誤/相依套件缺漏，非 DynamoDB 權限問題）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager; exit 1; fi","echo \"[ec2] fetch-scheduler 一般排程執行成功（注意：cache 全新鮮時這步 0 次真呼叫也會成功，不代表 PutItem 真的通，見下一步 probe）\"","if ! ( cd /opt/trustforge && AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe 失敗（DynamoDB cache/cost-ledger 至少一表 PutItem/GetItem 真的不通，可能被 permission boundary/SCP/table policy 擋，見 trustforge-dynamodb inline policy；probe 不依賴 cache 是否新鮮，一定會真的觸發一次寫入）\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe 通過（DynamoDB cache/cost-ledger 讀寫權限已真的驗證過）\""]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$vcmdid" ] || [ "$vcmdid" = "None" ]; then
     echo "[ec2] ❌ fetch-scheduler 驗證用 SSM send-command 未取得 CommandId，中止" >&2
@@ -51,10 +56,10 @@ verify_fetch_scheduler() {
   vstatus=$(aws ssm get-command-invocation --region "$REGION" \
     --command-id "$vcmdid" --instance-id "$iid" --query Status --output text)
   if [ "$vstatus" != "Success" ]; then
-    echo "[ec2] ❌ fetch-scheduler 同步驗證失敗：CommandId=$vcmdid Status=${vstatus}（DynamoDB cache 權限或程式有誤，deploy 視為失敗，不可當成功回報）" >&2
+    echo "[ec2] ❌ fetch-scheduler 同步驗證失敗：CommandId=$vcmdid Status=${vstatus}（一般排程或 --probe 至少一步沒過，DynamoDB cache/cost-ledger 權限或程式有誤，deploy 視為失敗，不可當成功回報）" >&2
     exit 1
   fi
-  echo "[ec2] ✅ fetch-scheduler 同步驗證成功（DynamoDB cache 讀寫權限正常）"
+  echo "[ec2] ✅ fetch-scheduler 同步驗證成功（一般排程 + --probe 皆通過，DynamoDB cache/cost-ledger 讀寫權限已真的驗證過，不是只靠 cache 新鮮度矇混過關）"
 }
 
 # 1) IAM 角色 + instance profile（最小權限）+ DynamoDB reconcile -------------
