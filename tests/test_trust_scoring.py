@@ -458,3 +458,49 @@ def test_score_components_has_new_corroboration_evidence_key():
         assert {"reputation", "corroboration", "recency", "manipulation"} <= set(sc.components.keys())
         assert "corroboration_evidence" in sc.components
         assert isinstance(sc.components["corroboration_evidence"], list)
+
+
+# --- W1 案2b 追加修正：中文單字「不」否定漏偵測（CEO 親測抓到的假 contradict）--------
+
+def test_zh_single_negation_bu_cancels_antonym_hit():
+    """『監管不明確』vs『監管收緊』：單字「不」否定「明確」，兩者其實同為偏空方向，
+    不可判 contradict（修復前：_NEG_RX_ZH 漏收單字「不」，導致「明確」誤判命中，
+    與「收緊」湊成假 contradict）。
+    """
+    from trustforge.trust.stance import semantic_stance
+    from trustforge.trust.scoring import _normalize, DOMAIN_STOP
+
+    a = "監管不明確 令人擔憂"
+    b = "監管收緊 令人擔憂"
+    ta = _normalize(a) - DOMAIN_STOP
+    tb = _normalize(b) - DOMAIN_STOP
+    stance, evidence = semantic_stance(a, b, ta, tb)
+    assert stance != "contradict", f"單字「不」應取消「明確」命中，不可判 contradict，實際: {stance}（evidence={evidence}）"
+
+
+def test_zh_bukanduo_not_false_contradict():
+    """『不看多』vs『看空』：不看多 ≈ 看空，同向，不可判 contradict。"""
+    from trustforge.trust.stance import semantic_stance
+    from trustforge.trust.scoring import _normalize, DOMAIN_STOP
+
+    a = "市場 情緒 不看多"
+    b = "市場 情緒 看空"
+    ta = _normalize(a) - DOMAIN_STOP
+    tb = _normalize(b) - DOMAIN_STOP
+    stance, evidence = semantic_stance(a, b, ta, tb)
+    assert stance != "contradict", f"「不看多」應取消「看多」命中，不可判 contradict，實際: {stance}（evidence={evidence}）"
+
+
+def test_zh_bujin_not_treated_as_negation():
+    """『不僅監管明朗，且機構採用』vs『監管收緊 投資人觀望』：「不僅」是連接詞，
+    不是否定「明朗」，仍應正確判為 contradict（不可被誤濾成 negated 而漏判矛盾）。
+    """
+    from trustforge.trust.stance import semantic_stance
+    from trustforge.trust.scoring import _normalize, DOMAIN_STOP
+
+    a = "不僅監管明朗，且機構採用"
+    b = "監管收緊 投資人觀望"
+    ta = _normalize(a) - DOMAIN_STOP
+    tb = _normalize(b) - DOMAIN_STOP
+    stance, evidence = semantic_stance(a, b, ta, tb)
+    assert stance == "contradict", f"「不僅」不應被當否定詞，仍應判 contradict，實際: {stance}（evidence={evidence}）"

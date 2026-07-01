@@ -67,13 +67,22 @@ _NEG_RX_EN = re.compile(
     r"\bdoesn'?t\b|\bdon'?t\b|\bisn'?t\b|\baren'?t\b|\bcan'?t\b|\bwon'?t\b",
     re.IGNORECASE,
 )
-_NEG_RX_ZH = re.compile(r"不會|不太|不致|不至|不再|沒有|沒|尚未|未|無法|別|勿|非")
+# 單字「不」/「沒」在中文極常見（不明確/不看多/不採用），但「不僅/不但/不只/不斷/
+# 不外乎/不過」是連接詞/程度副詞語境，不是在否定後面那個詞的方向——比照英文
+# _NEG_FALSE_POSITIVE_EN 的精神，計數前先濾掉這些片語，避免誤判否定（W1 案2b 追加）。
+_NEG_FALSE_POSITIVE_ZH = re.compile(r"不僅|不但|不只|不斷|不外乎|不過")
+_NEG_RX_ZH = re.compile(r"不會|不太|不致|不至|不再|沒有|沒|尚未|未|無法|別|勿|非|不")
 
 
 def _neg_count_zh(text: str, start: int, window_chars: int = 4) -> int:
-    """中文否定標記計數：命中詞前 window_chars 字內出現幾個否定詞（供奇偶判斷）。"""
+    """中文否定標記計數：命中詞前 window_chars 字內出現幾個否定詞（供奇偶判斷）。
+
+    先濾掉「不僅/不但/不只/不斷/不外乎/不過」這類肯定語境片語，再計數剩餘否定詞
+    （含新增的單字「不」/「沒」，修 codex 回報的「不明確」漏偵測假陰性）。
+    """
     window = text[max(0, start - window_chars):start]
-    return len(_NEG_RX_ZH.findall(window))
+    cleaned = _NEG_FALSE_POSITIVE_ZH.sub(" ", window)
+    return len(_NEG_RX_ZH.findall(cleaned))
 
 
 def _neg_count_en(text: str, start: int, look_words: int = 4) -> int:
