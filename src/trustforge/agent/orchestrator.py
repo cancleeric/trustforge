@@ -12,6 +12,7 @@ Bedrock 只負責把推理「行文」成可讀敘述，不得把第三方現成
 from __future__ import annotations
 
 import time
+from typing import Callable
 
 from ..bedrock import BedrockClient
 from ..execlog import ExecutionLog
@@ -19,6 +20,7 @@ from ..ingestion.base import Document
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..trust.scoring import ScoredClaim, TrustedBrief
+from ..trust.stance_cache import cached_stance_fn
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
 _STEP4_MIN_BUDGET_SEC = 60.0
@@ -29,6 +31,18 @@ _STEP4_SYSTEM = (
 _STEP4_LIMIT_SENTINEL = "LIMITS_OK"
 
 OBJECTIVE_KINDS = {"price", "onchain", "regulatory", "hoyabit"}
+_SENTIMENT_KINDS: set[str] = {"news", "social"}
+
+# Tier2（真實分歧樣本）：stance_pairs 專用的最低信任門檻。刻意低於 detect_cross_
+# _source_signal 主流程的 0.5「合格」門檻——真實的雙來源直接矛盾（如同議題 ETF
+# 資金流向因結算時區/資料商方法論不同，當日方向相反）本質上**拿不到跨源佐證加分**
+# （_corroboration 的方向閘會擋掉互相佐證，兩造各自單打獨鬥），信任分結構性地封頂在
+# 「來源基礎信譽 + 滿分時效」附近（news：0.5*0.65+0.15*1.0=0.475 都到不了 0.5）。
+# 若沿用 0.5 門檻，真實的兩方矛盾樣本幾乎不可能被納入 stance_pairs 掃描池，等於
+# 這個偵測機制對其設計目標（呈現真實背離）永遠失效。0.35 仍濾掉低信任雜訊／被
+# manipulation penalty 命中的主張，precision 由下方 stance_fn 的語意矛盾分類把關
+# （非快取命中一律 fail-safe 為 "neutral"，不會誤判），不靠這個門檻把關準確度。
+_STANCE_PAIR_MIN_TRUST = 0.35
 
 SYSTEM = (
     "你是加密市場分析助理。只能依據提供的『已信任加權證據』作答，"
@@ -81,7 +95,60 @@ def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
     return limits, flips
 
 
-def detect_cross_source_signal(scored: list[ScoredClaim]) -> dict | None:
+def _detect_stance_pairs(
+    scored: list[ScoredClaim],
+    stance_fn: Callable[[str, str], str] | None,
+) -> list[dict]:
+    """掃描情緒類（news/social）主張中「不同來源 + 方向明確相反」的候選配對，
+    交給 stance_fn 做語意矛盾分類，過濾掉純方向詞表面相反、實質無關的假陽性。
+
+    真實案例（Tier2）：同議題（如 ETH 現貨 ETF 資金流向）因結算時區/資料商方法論
+    不同，不同來源當日報導方向相反——兩則新聞遣詞完全不同、關鍵字重疊低，純文字
+    overlap 比對（見 trust.scoring._corroboration）抓不到，需靠語意 stance 分類
+    （trust/stance_cache.py，離線走持久化快取，不即時打 Bedrock）才辨識得出。
+
+    `stance_fn` 為 None（未提供）時直接回空 list：向後相容，不改變
+    `detect_cross_source_signal` 既有行為，也不會意外觸發任何 stance 呼叫。
+
+    回傳：扁平 list，內含所有涉及至少一組矛盾配對的主張（跨配對去重），每筆
+    `{"source", "stance", "claim_id", "text"}`，供未來 UI 渲染跨源矛盾對照。
+    """
+    if stance_fn is None:
+        return []
+
+    eligible = [
+        sc for sc in scored
+        if sc.trust >= _STANCE_PAIR_MIN_TRUST and sc.claim.doc.kind in _SENTIMENT_KINDS
+    ]
+
+    seen_claim_ids: set[str] = set()
+    pairs: list[dict] = []
+    for i, a in enumerate(eligible):
+        for b in eligible[i + 1:]:
+            if a.claim.doc.source == b.claim.doc.source:
+                continue  # 同源不算跨源矛盾
+            da, db = a.claim.direction, b.claim.direction
+            if "neutral" in (da, db) or da == db:
+                continue  # 需方向明確且相反；方向相同或不明不算矛盾
+            if stance_fn(a.claim.text, b.claim.text) != "contradiction":
+                continue
+            for sc in (a, b):
+                if sc.claim.id in seen_claim_ids:
+                    continue
+                seen_claim_ids.add(sc.claim.id)
+                pairs.append({
+                    "source": sc.claim.doc.source,
+                    "stance": sc.claim.direction,
+                    "claim_id": sc.claim.id,
+                    "text": sc.claim.text,
+                })
+    return pairs
+
+
+def detect_cross_source_signal(
+    scored: list[ScoredClaim],
+    stance_fn: Callable[[str, str], str] | None = None,
+) -> dict | None:
     """跨源訊號偵測：判斷客觀類與情緒類訊號是否背離或共識（純函式，無副作用）。
 
     入參 scored = list[ScoredClaim]，包含所有可用主張（trust 任意）。
@@ -95,19 +162,48 @@ def detect_cross_source_signal(scored: list[ScoredClaim]) -> dict | None:
     - 共識：兩類主導相同（非 neutral）且兩類各有 ≥1 source
     - None：任一類 0 筆 / 任一主導 neutral / 兩類 source 合計 < 2
 
+    `stance_fn`（選用，預設 None）：Tier2 新增。None 時完全不影響上述既有規格
+    （逐字相容，回歸鎖）。提供時，額外掃描情緒類主張中「同議題語意矛盾」的
+    跨源配對（見 `_detect_stance_pairs`）：
+    - 找到配對時：若上述聚合層級已判定 divergence/consensus，在該 dict 補上
+      選填 key `stance_pairs`；若聚合層級判不出結論（回 None 的任一分支），
+      仍會改回傳一個以 stance_pairs 為主體的 `type="divergence"` 訊號——
+      因為客觀類趨勢與「兩則新聞互相矛盾」是兩件獨立可觀察到的事，後者不該
+      被前者的聚合結果蓋掉。
+    - 找不到配對時：完全不影響既有回傳值（含 None）。
+
     守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
     """
-    _SENTIMENT_KINDS: set[str] = {"news", "social"}
-
     # 只取 trust >= 0.5 的主張
     eligible = [sc for sc in scored if sc.trust >= 0.5]
 
     objective = [sc for sc in eligible if sc.claim.doc.kind in OBJECTIVE_KINDS]
     sentiment = [sc for sc in eligible if sc.claim.doc.kind in _SENTIMENT_KINDS]
 
-    # 任一類 0 筆 → None
+    stance_pairs = _detect_stance_pairs(scored, stance_fn)
+
+    def _stance_pair_signal() -> dict | None:
+        """聚合層級判不出背離/共識時的備援：若仍偵測到同議題語意矛盾配對，
+        產出以 stance_pairs 為主體的 divergence 訊號。stance_pairs 為空則回 None
+        （逐字等同未提供 stance_fn 時的既有行為）。"""
+        if not stance_pairs:
+            return None
+        sources = sorted({p["source"] for p in stance_pairs})
+        return {
+            "type": "divergence",
+            "objective_direction": None,
+            "sentiment_direction": None,
+            "summary": (
+                f"來源 {'、'.join(sources)} 對同一議題方向相反，"
+                "呈背離，建議交叉驗證、留意轉折。"
+            ),
+            "supporting_claim_ids": [p["claim_id"] for p in stance_pairs],
+            "stance_pairs": stance_pairs,
+        }
+
+    # 任一類 0 筆 → None（除非有 stance_pairs 備援）
     if not objective or not sentiment:
-        return None
+        return _stance_pair_signal()
 
     def _dominant(group: list[ScoredClaim]) -> str:
         """回傳信任加權後的主導方向；若最高票 < 0.3×total 則回 'neutral'。"""
@@ -125,15 +221,15 @@ def detect_cross_source_signal(scored: list[ScoredClaim]) -> dict | None:
     obj_dir = _dominant(objective)
     sent_dir = _dominant(sentiment)
 
-    # 任一主導 neutral → None
+    # 任一主導 neutral → None（除非有 stance_pairs 備援）
     if obj_dir == "neutral" or sent_dir == "neutral":
-        return None
+        return _stance_pair_signal()
 
-    # 兩類 source 合計 < 2 → None
+    # 兩類 source 合計 < 2 → None（除非有 stance_pairs 備援）
     obj_sources = {sc.claim.doc.source for sc in objective}
     sent_sources = {sc.claim.doc.source for sc in sentiment}
     if len(obj_sources | sent_sources) < 2:
-        return None
+        return _stance_pair_signal()
 
     # 判定訊號類型
     if obj_dir != sent_dir:
@@ -160,13 +256,16 @@ def detect_cross_source_signal(scored: list[ScoredClaim]) -> dict | None:
         + [sc.claim.id for sc in sentiment if sc.claim.direction == sent_dir]
     )
 
-    return {
+    result = {
         "type": signal_type,
         "objective_direction": obj_dir,
         "sentiment_direction": sent_dir,
         "summary": summary,
         "supporting_claim_ids": supporting_ids,
     }
+    if stance_pairs:
+        result["stance_pairs"] = stance_pairs
+    return result
 
 
 def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief,
@@ -222,7 +321,13 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     log.record("judgment.derive", params={"direction": direction, "indep_sources": n_indep})
 
     # 2.5 跨源訊號偵測（純演算法，在 Bedrock 行文前完成）
-    cross_signal = detect_cross_source_signal(brief.supporting + brief.contrarian)
+    # stance_fn：與 Step2 的 W1.5 矛盾閘同一套慣例——offline 一律傳 None，
+    # 讓 cached_stance_fn 只讀持久化快取（demo/sample_data/stance_cache.json），
+    # 快取 miss 時 fail-safe 回 "neutral"，不即時打 Bedrock、不 raise。
+    cross_signal = detect_cross_source_signal(
+        brief.supporting + brief.contrarian,
+        stance_fn=cached_stance_fn(None if client.offline else client),
+    )
 
     # 3. Bedrock 行文（Step 3：帶 claim_id 溯源；離線為佔位，結構不依賴它）
     # 建立 claim_id → 摘要對照，供 prompt 強制引用

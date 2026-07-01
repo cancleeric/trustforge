@@ -69,6 +69,13 @@ class Report:
     generated_at: str
     direction: str = ""             # 結構化方向欄位（偏多/偏空/中性），由 build_report 填入
     cross_source_signal: dict | None = field(default=None)  # 跨源訊號背離/共識，由 orchestrator 填入
+    # 結構逐字沿用（不新增 dataclass 欄位，向後相容）。Tier2（真實分歧樣本）新增
+    # 一個「選填」key：cross_source_signal["stance_pairs"]（list[dict]，
+    # 每筆 {"source", "stance", "claim_id", "text"}）——只在
+    # agent.orchestrator.detect_cross_source_signal 實際偵測到「同議題、跨源、
+    # 語意矛盾」的主張配對時才會出現（見該函式 docstring）；無背離/無矛盾配對
+    # 時完全不填，既有讀取 cross_source_signal 的程式碼（含本檔 to_markdown、
+    # web.py render）不受影響。供未來 UI 渲染跨源矛盾對照用，本次不消費此欄位。
 
     def confidence_label(self) -> str:
         c = self.confidence

@@ -46,5 +46,21 @@
     "url": "https://www.coindesk.com/policy/2026/05/31/sec-eth-staking-investigation",
     "ts": 1780185600,
     "meta": {}
+  },
+  {
+    "id": "news-eth-etf-inflow",
+    "source": "coindesk",
+    "text": "據 Farside Investors 追蹤，ETH 現貨 ETF 單日 淨流入 4200 萬 美元，機構 買盤 回補。",
+    "url": "https://www.coindesk.com/markets/2026/05/31/eth-etf-farside-inflow",
+    "ts": 1780185600,
+    "meta": {}
+  },
+  {
+    "id": "news-eth-etf-outflow",
+    "source": "decrypt",
+    "text": "據 SoSoValue 追蹤 顯示，ETH 現貨 ETF 同日 淨流出 1800 萬 美元，結算 時區 落差 致 解讀 不同。",
+    "url": "https://decrypt.co/markets/2026/05/31/eth-etf-sosovalue-outflow",
+    "ts": 1780185600,
+    "meta": {}
   }
 ]
