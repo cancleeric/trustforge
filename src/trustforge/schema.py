@@ -43,7 +43,16 @@ class Evidence:
     # Tier2 可解釋 UX：操縱關鍵詞命中清單（由 trust.scoring._manipulation_flags
     # 回填，見 agent.orchestrator._scored_to_evidence）。預設空 list，向後相容——
     # 舊呼叫點（皆用 keyword 建構）不受影響，序列化/反序列化多一個可省略欄位。
+    # 這是「確定判定為操縱」的紅旗🚩，會反映在 trust 分數（見 scoring.manip）。
     flags: list[str] = field(default_factory=list)
+    # W3：informational-only 透明化 flag（由 trust.scoring._coordination_signals
+    # 回填，見 agent.orchestrator._scored_to_evidence）。與 `flags` 不同，這裡的
+    # 訊號（如多源文字高度相似）**不代表已判定操縱、也不影響 trust 分數**——
+    # 純粹是「相似度高，供人工判讀」的中性提示，UI 不可用操縱紅旗樣式呈現
+    # （見 web.py 的中性樣式）。CEO 定案：文字相似度單獨無法證明協同操縱，
+    # 自動扣分必然誤傷合法聯播/引用，故拆成獨立欄位、獨立語意。預設空 list，
+    # 向後相容。
+    info_flags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

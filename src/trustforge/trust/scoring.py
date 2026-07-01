@@ -129,7 +129,14 @@ class ScoredClaim:
     # Tier2 可解釋 UX：操縱關鍵詞命中原文清單（由 `_manipulation_flags` 填入，
     # 供 `agent.orchestrator._scored_to_evidence` 回填 `Evidence.flags`）。
     # 預設空 list，不影響既有以 keyword 建構 ScoredClaim 的呼叫點/相等性比較。
+    # 這是「確定判定為操縱」的紅旗，會反映在 `components["manipulation"]`。
     manip_flags: list[str] = field(default_factory=list)
+    # W3：informational-only 透明化 flag（由 `_coordination_signals` 填入，供
+    # `agent.orchestrator._scored_to_evidence` 回填 `Evidence.info_flags`）。
+    # 與 `manip_flags` 不同：這裡的訊號（如多源文字高度相似）不代表已判定操縱、
+    # **不併入 `components["manipulation"]`**，純粹供人工判讀。CEO 定案：文字
+    # 相似度單獨無法證明協同操縱，自動扣分必然誤傷合法聯播/引用。預設空 list。
+    info_flags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -274,10 +281,17 @@ def _manipulation_penalty(c: Claim, extra_hits: int = 0) -> float:
     hits = _manip_hits(c.text)
     # 社群來源的操縱訊號加重
     weight = 1.5 if c.doc.kind == "social" else 1.0
-    # W3：extra_hits 為協同操縱指標（模板灌水/單源爆量，見 `_coordination_signals`）
-    # 額外命中數，併入同一套關鍵詞計分公式（沿用既有 0.4/hit、social 加重 1.5 倍），
-    # 不新增權重項、不動 `raw = ... - w["manip"] * manip` 既有公式結構。預設 0，
-    # 逐字等同既有行為（向後相容，不影響任何既有呼叫點/測試）。
+    # `extra_hits`：預留給「確定判定為操縱、需要真正扣分」的額外命中數量，
+    # 併入同一套關鍵詞計分公式（沿用既有 0.4/hit、social 加重 1.5 倍），不新增
+    # 權重項、不動 `raw = ... - w["manip"] * manip` 既有公式結構。預設 0。
+    #
+    # CEO 定案（codex 對抗審確認根本限制）：W3 模板相似指標
+    # （`_coordination_template_flags`）**不再**餵入這裡——文字相似度單獨無法
+    # 區分「協同操縱」vs「合法聯播/引用」，自動扣分必然誤傷合法聯播；改為
+    # informational-only（見 `_coordination_signals` docstring），只產生
+    # `ScoredClaim.info_flags`，不影響這個函式的分數。目前 `score()` 呼叫本
+    # 函式一律不傳 `extra_hits`（沿用預設 0），此參數保留供未來若有「確定性
+    # 且經證實有效」的扣分型協同指標時使用。
     return min(1.0, (len(hits) + extra_hits) * 0.4 * weight)
 
 
@@ -342,24 +356,31 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 
 def _coordination_template_flags(all_claims: list[Claim]) -> dict[str, list[str]]:
-    """W3 指標 A：模板化協同灌水偵測。
+    """W3 指標 A：模板化文字相似偵測（informational-only，不扣信任分）。
 
     同議題跨**不同來源**兩兩比對（沿用既有 `_normalize` 去 `DOMAIN_STOP` 後的
     token 集），門檻拉高到 `_TEMPLATE_JACCARD_THRESHOLD`（0.8）——遠比
     `_corroboration` 判斷「同主題可佐證」用的 0.4 嚴格，0.8 代表「近乎逐字/
     近義詞置換」的模板化文字，不是單純同主題。命中且涉及
     `_TEMPLATE_MIN_SOURCES`（3）個以上獨立來源才觸發，回傳可回溯 flag
-    （含涉入來源清單與最高 Jaccard 值，供 `Evidence.flags` 顯示）。
+    （含涉入來源清單與最高 Jaccard 值，供 `Evidence.info_flags` 顯示）。
+
+    **codex 對抗審確認的根本限制、CEO 定案**：文字相似度在任何 kind 下都無法
+    單獨區分「協同操縱」vs「合法聯播/引用」（3 家新聞轉載同一通稿也會是高
+    Jaccard），自動扣信任分必然誤傷合法聯播。因此本指標**只做透明化的
+    informational flag、不再併入 `_manipulation_penalty` 的 `extra_hits`**
+    （見 `_coordination_signals` docstring），措辭刻意用中性的「資訊:」前綴，
+    不用「協同:」等指控字眼——單靠相似度分數不足以自動判定操縱，留給人工
+    判讀。
 
     防呆：
     - **只有 `_TEMPLATE_ELIGIBLE_KINDS`（social/sentiment）納入比對**——
-      news/regulatory/price/price_live/onchain/hoyabit 全數跳過。協同操縱
-      灌水是社群現象；新聞聯播同一份通稿、官方/監管公告本來就該高度相似，
-      不是協同造假（codex 對抗審 [HIGH]：3 家新聞轉載同一通稿曾被誤標，
-      確定性相似度分數分不清「合法通稿聯播」與「協同灌水」，改用 kind
-      收斂而非只靠相似度門檻）。
-    - 需 ≥3 個獨立來源才觸發：2 家社群帳號模板灌水（只有 2 個來源）不觸發，
-      避免誤判。
+      news/regulatory/price/price_live/onchain/hoyabit 全數跳過。理由同上：
+      新聞聯播同一份通稿、官方/監管公告本來就該高度相似，此防呆進一步降低
+      informational flag 的雜訊量（即使不扣分，也不該對合法聯播灌一堆
+      無意義的相似度提示）。
+    - 需 ≥3 個獨立來源才觸發：2 家媒體/帳號逐字轉載同一份文本（只有 2 個
+      來源）不觸發，避免雜訊。
     """
     eligible = [c for c in all_claims if c.doc.kind in _TEMPLATE_ELIGIBLE_KINDS]
     tokens = {c.id: (_normalize(c.text) - DOMAIN_STOP) for c in eligible}
@@ -388,7 +409,8 @@ def _coordination_template_flags(all_claims: list[Claim]) -> dict[str, list[str]
         best_j = max(best_by_source.values())
         source_list = ",".join(sorted(involved_sources))
         flags.setdefault(c.id, []).append(
-            f"協同:模板相似(來源{source_list};Jaccard {best_j:.2f})"
+            f"資訊:多源文字高度相似(來源{source_list};Jaccard {best_j:.2f})"
+            "—可能協同或聯播,供判讀"
         )
     return flags
 
@@ -541,11 +563,20 @@ def _coordination_signals(all_claims: list[Claim]) -> dict[str, list[str]]:
     直接沿用/參考，但呼叫端刻意不接。
 
     回傳 `{claim_id: [flag, ...]}`；未命中的 claim 不會出現在 dict 中，呼叫端
-    用 `.get(claim.id, [])` 取用。命中結果同時：
-    1. 併入既有 `_manipulation_penalty` 的 `extra_hits`（沿用 `w["manip"]`
-       權重，不新增權重項、不動 `score()` 的 `raw` 聚合公式）。
-    2. 併入 `ScoredClaim.manip_flags` → `Evidence.flags`，可回溯到具體指標/
-       來源/數字（如「協同:模板相似(來源a,b,c;Jaccard 0.85)」）。
+    用 `.get(claim.id, [])` 取用。
+
+    **CEO 定案（codex 對抗審確認根本限制）：informational-only，不扣信任
+    分。** 文字相似度在任何 kind 下都無法單獨區分「協同操縱」vs「合法聯播/
+    引用」（3 家新聞轉載同一份官方通稿也會是高 Jaccard），自動扣分必然誤傷
+    合法聯播。命中結果**不**併入 `_manipulation_penalty` 的 `extra_hits`、
+    **不**降低 trust、**不**影響動態信譽（`_iterate_source_reputation`）；
+    純粹併入 `ScoredClaim.info_flags` → `Evidence.info_flags`，供人工判讀
+    （如「資訊:多源文字高度相似(來源a,b,c;Jaccard 0.85)—可能協同或聯播,
+    供判讀」，措辭刻意中性，不用「協同:」等指控字眼）。
+
+    與此互斥、維持原行為不變的是 `_manipulation_flags`（regex 關鍵詞命中）：
+    那是既有的、獨立的操縱偵測機制，仍正常扣分 + 紅旗🚩，不受本次
+    informational-only 改動影響。
     """
     signals: dict[str, list[str]] = {}
     for cid, fl in _coordination_template_flags(all_claims).items():
@@ -722,16 +753,14 @@ def _iterate_source_reputation(
     alpha: float = DEFAULT_REPUTATION_ALPHA,
     evidence: dict[str, tuple[set[str], set[str]]] | None = None,
     trace_out: dict | None = None,
-    coord_flags: dict[str, list[str]] | None = None,
 ) -> dict[str, float]:
     """W2：bounded 迭代動態來源信譽。純函式、無隨機性 → 同輸入必同輸出。
 
-    `coord_flags`：W3 協同操縱指標（`_coordination_signals` 的回傳值），選填。
-    提供時併入 `static_manip` 的 `_manipulation_penalty` 計算（`extra_hits`），
-    與 `score()` 主迴圈的 manip 分項使用同一份結果，確保靜態/動態信譽兩條路徑
-    對「這條 claim 是否命中協同訊號」的認定一致。預設 `None`（視同空 dict），
-    逐字等同 W3 加入前的行為——不傳時無任何行為變化（向後相容，既有 W2 測試
-    直接呼叫 `_iterate_source_reputation()` 不受影響）。
+    W3 協同操縱指標（`_coordination_signals`）**不參與這裡的 manip 計算**：
+    CEO 定案（codex 對抗審確認根本限制）改為 informational-only，只產生
+    `ScoredClaim.info_flags`，不併入任何 `_manipulation_penalty` 的
+    `extra_hits`，因此動態信譽的 `static_manip` 也不受 W3 訊號影響（純粹
+    只看 `_manip_hits` 既有 regex 關鍵詞命中）。
 
     實作偏離 gray 計劃字面簽章之處（皆為必要、非隱藏的工程判斷，詳見 PR 說明）：
     - 加了 `now`：`_recency_decay` 需要，計劃描述省略。
@@ -809,7 +838,6 @@ def _iterate_source_reputation(
     # 靜態分項（不受 SR 影響，全程只算一次；agree/contra 來源集合全程共用，
     # 不因迭代輪數重呼叫 stance_fn）
     ev = evidence if evidence is not None else _reputation_evidence(claims, stance_fn=stance_fn)
-    cf = coord_flags or {}
     static_corr: dict[str, float] = {}
     static_rec: dict[str, float] = {}
     static_manip: dict[str, float] = {}
@@ -818,7 +846,7 @@ def _iterate_source_reputation(
         nn = len(agree)
         static_corr[c.id] = 1.0 - math.pow(0.5, nn) if nn else 0.0
         static_rec[c.id] = _recency_decay(c, now)
-        static_manip[c.id] = _manipulation_penalty(c, extra_hits=len(cf.get(c.id, [])))
+        static_manip[c.id] = _manipulation_penalty(c)
 
     # codex 對抗審 [HIGH-1] 修正：先把每個 source 名下所有 claim 的 agree/contra
     # 來源做「聯集去重」（agree_union_of / contra_union_of），後續小樣本守門與
@@ -998,11 +1026,12 @@ def score(
     if stance_fn is None:
         stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
 
-    # W3：確定性協同操縱偵測（模板灌水/單源爆量），對本次 `score()` 的整個 claims
-    # 池只算一次（O(n²)，量級同 `_corroboration`，見 `_coordination_signals`
-    # docstring），下面靜態 manip 分項與（若啟用）`_iterate_source_reputation`
-    # 的 static_manip 共用同一份結果。
-    coord_flags = _coordination_signals(claims) if claims else {}
+    # W3：確定性、informational-only 文字相似度透明化訊號（模板相似），對本次
+    # `score()` 的整個 claims 池只算一次（O(n²)，量級同 `_corroboration`，見
+    # `_coordination_signals` docstring）。**不參與 manip 計算**——CEO 定案：
+    # 文字相似度單獨無法證明協同操縱，只回填 `ScoredClaim.info_flags` 供人工
+    # 判讀，`_iterate_source_reputation` 的 static_manip 也不吃這份結果。
+    info_flags_by_id = _coordination_signals(claims) if claims else {}
 
     dynamic_map: dict[str, float] | None = None
     trace_by_source: dict[str, dict] | None = None
@@ -1022,7 +1051,6 @@ def score(
             iterations=reputation_iterations,
             evidence=evidence,
             trace_out=trace_meta,
-            coord_flags=coord_flags,
         )
         iterations_run = trace_meta.get("iterations_run", 0)
         by_source: dict[str, list[Claim]] = {}
@@ -1050,8 +1078,8 @@ def score(
         rep = _source_reputation(c, dynamic_map=dynamic_map)
         corr = _corroboration(c, claims, stance_fn=stance_fn)
         rec = _recency_decay(c, now)
-        c_coord_flags = coord_flags.get(c.id, [])
-        manip = _manipulation_penalty(c, extra_hits=len(c_coord_flags))
+        c_info_flags = info_flags_by_id.get(c.id, [])
+        manip = _manipulation_penalty(c)
         raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
         trust = max(0.0, min(1.0, raw))
         out.append(
@@ -1063,9 +1091,11 @@ def score(
                 reputation_trace=(
                     trace_by_source.get(c.doc.source) if trace_by_source is not None else None
                 ),
-                # W3：協同操縱 flag（模板灌水/單源爆量）併入既有操縱關鍵詞 flags，
-                # 一起回填 `Evidence.flags`（見 `_coordination_signals` docstring）。
-                manip_flags=_manipulation_flags(c) + c_coord_flags,
+                manip_flags=_manipulation_flags(c),
+                # W3：文字相似度透明化 flag，informational-only，回填
+                # `Evidence.info_flags`（見 `_coordination_signals` docstring）。
+                # 不併入 `manip_flags`／`components["manipulation"]`。
+                info_flags=c_info_flags,
             )
         )
     return out

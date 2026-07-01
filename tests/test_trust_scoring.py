@@ -916,7 +916,9 @@ def test_w3_a_synonym_template_flood_triggers_and_evades_regex():
     刻意選用完全不在 `_MANIP_PATTERNS`（to moon/暴漲/翻倍/shill/喊單/穩賺/
     financial advice/pump/快上車/百倍）內的字眼（起飛/十倍/情報），證明舊版
     regex 對這種灌水完全失效（`_manip_hits` 全部命中 0），而 W3 協同指標仍能
-    靠 3 個不同來源間 ≥0.8 的模板 Jaccard 相似度抓到。
+    靠 3 個不同來源間 ≥0.8 的模板 Jaccard 相似度抓到——**但這只是 informational
+    flag（見下方「資訊:」前綴），不代表已判定操縱，不扣信任分**（CEO 定案，
+    見 `test_w3_a_informational_only_does_not_penalize_trust_and_flows_into_info_flags`）。
     """
     from trustforge.trust.scoring import Claim, _coordination_signals, _manip_hits
 
@@ -935,22 +937,29 @@ def test_w3_a_synonym_template_flood_triggers_and_evades_regex():
         assert _manip_hits(c.text) == [], f"{c.doc.source} 不應命中任何 _MANIP_PATTERNS 關鍵詞"
 
     flags = _coordination_signals(claims)
-    assert set(flags.keys()) == {c.id for c in claims}, "3 個來源都應被標記協同模板 flag"
+    assert set(flags.keys()) == {c.id for c in claims}, "3 個來源都應被標記模板相似 informational flag"
     for c in claims:
         fl = flags[c.id]
         assert len(fl) == 1
         flag = fl[0]
-        assert flag.startswith("協同:模板相似(")
+        assert flag.startswith("資訊:多源文字高度相似(")
+        # 措辭中性：只允許「可能協同或聯播」這種並列可能性描述，不可用「協同:」
+        # 這種直接指控前綴（前綴已由上面 startswith 斷言把關）。
         # 可回溯：flag 內必須列出涉入的 3 個來源與 Jaccard 數值
         assert "x-shill-a" in flag and "x-shill-b" in flag and "x-shill-c" in flag
         assert "Jaccard 0.8" in flag
 
 
-def test_w3_a_penalises_trust_and_flows_into_evidence_flags():
-    """指標 A 命中應：(1) 拉低 trust（扣分方向正確）；(2) flag 併入
-    `ScoredClaim.manip_flags`（供 `agent.orchestrator._scored_to_evidence` 回填
-    `Evidence.flags`，web 自動顯示🚩）；(3) 不動既有 `raw` 聚合公式——同一批
-    claims，關掉協同偵測（用原始 `_manipulation_penalty` 手算）應該分數更高。
+def test_w3_a_informational_only_does_not_penalize_trust_and_flows_into_info_flags():
+    """CEO 定案（codex 對抗審確認根本限制）：文字相似度單獨無法區分「協同操縱」
+    vs「合法聯播/引用」，指標 A 命中改為 informational-only，應：
+    (1) **不扣信任分**——`components["manipulation"]` 必須與「完全沒有協同訊號時」
+        逐位元相等，斷言 manip 分量不含模板貢獻（不是只驗證某個 `>=`/`<=`
+        方向，而是直接跟 `_manipulation_penalty(c)`（無 extra_hits）比對相等）；
+    (2) flag 併入 `ScoredClaim.info_flags`（供 `agent.orchestrator._scored_to_evidence`
+        回填 `Evidence.info_flags`，web 用中性樣式顯示，不是操縱🚩紅旗）；
+    (3) **不**混入 `ScoredClaim.manip_flags`（那是操縱紅旗專用，維持只裝
+        regex 關鍵詞命中）。
     """
     from trustforge.trust.scoring import _manipulation_penalty
 
@@ -964,14 +973,23 @@ def test_w3_a_penalises_trust_and_flows_into_evidence_flags():
     scored = score(claims, now=_BURST_BASE_TS)
 
     for sc in scored:
-        assert sc.components["manipulation"] > 0, "協同模板灌水應計入操縱分項扣分"
-        assert any(f.startswith("協同:模板相似(") for f in sc.manip_flags), (
-            f"{sc.claim.doc.source} 的 manip_flags 應含協同模板 flag，實際: {sc.manip_flags}"
+        # 模板相似「應該」命中（否則這條測試沒測到東西）：info_flags 非空。
+        assert any(f.startswith("資訊:多源文字高度相似(") for f in sc.info_flags), (
+            f"{sc.claim.doc.source} 的 info_flags 應含模板相似 informational flag，"
+            f"實際: {sc.info_flags}"
         )
-        # 沒有協同懲罰時的分數（等同 W3 加入前的既有行為）必須更高，證明扣分方向正確
-        # 且確實是「多扣了協同這一項」，不是動了既有公式結構。
-        baseline_manip = _manipulation_penalty(sc.claim)
-        assert sc.components["manipulation"] >= baseline_manip
+        # 但完全不扣分：manipulation 分量必須跟「不考慮任何協同訊號」時的
+        # _manipulation_penalty(c) 逐位元相等，不是「還在合理範圍」的模糊比較。
+        no_signal_manip = _manipulation_penalty(sc.claim)
+        assert sc.components["manipulation"] == no_signal_manip, (
+            f"{sc.claim.doc.source} 的 manipulation 分量不應含模板相似貢獻："
+            f"實際 {sc.components['manipulation']}，無協同訊號應為 {no_signal_manip}"
+        )
+        # 且不混入操縱紅旗清單：manip_flags 只該有 regex 關鍵詞命中（本例無）。
+        assert sc.manip_flags == [], (
+            f"{sc.claim.doc.source} 的 manip_flags 不應含模板相似 flag（那應在 "
+            f"info_flags），實際: {sc.manip_flags}"
+        )
 
 
 def test_w3_a_two_source_verbatim_wire_repost_not_flagged():
@@ -1052,25 +1070,38 @@ def test_w3_a_regulatory_kind_exempt_from_template_matching():
 
 
 def test_w3_a_three_social_sources_template_flood_still_triggers():
-    """對抗性回歸（收斂驗證）：豁免清單擴大後，`kind="social"` 的模板協同
-    灌水仍必須正常觸發——確認收斂修法沒有連社群協同偵測本身也一起弱化。"""
-    from trustforge.trust.scoring import Claim, _coordination_signals
+    """對抗性回歸（收斂驗證）：豁免清單擴大後，`kind="social"` 的模板相似
+    偵測仍必須正常觸發——確認收斂修法沒有連社群相似偵測本身也一起弱化。
+
+    CEO 定案後（informational-only），「觸發」只代表產生中性 informational
+    flag 供人工判讀，**不代表判定操縱、不扣分**——見下方 `score()` 層驗證。
+    """
+    from trustforge.trust.scoring import Claim, _coordination_signals, _manipulation_penalty
 
     texts = {
         "tg-shill-a": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 卡位",
         "tg-shill-b": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 進場",
         "tg-shill-c": "重磅 消息 ABC幣 馬上 噴發 十倍 機會 現在 立刻 馬上 加倉",
     }
+    docs = [_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS) for src, t in texts.items()]
     claims = [
-        Claim(id=f"soc-{src}", text=t, doc=_doc(f"d-{src}", "social", src, t, ts=_BURST_BASE_TS))
-        for src, t in texts.items()
+        Claim(id=f"soc-{src}", text=t, doc=doc)
+        for (src, t), doc in zip(texts.items(), docs)
     ]
     flags = _coordination_signals(claims)
     assert set(flags.keys()) == {c.id for c in claims}, (
-        f"3 個 social 來源模板灌水仍應觸發協同 flag，實際: {flags}"
+        f"3 個 social 來源模板相似仍應觸發 informational flag，實際: {flags}"
     )
     for c in claims:
-        assert flags[c.id][0].startswith("協同:模板相似(")
+        assert flags[c.id][0].startswith("資訊:多源文字高度相似(")
+
+    # 供人工判讀，但不扣分：走完整 score() 確認 info_flags 有值、manipulation
+    # 分量跟無協同訊號時逐位元相等。
+    all_claims = extract_claims(docs)
+    scored = score(all_claims, now=_BURST_BASE_TS)
+    for sc in scored:
+        assert any(f.startswith("資訊:多源文字高度相似(") for f in sc.info_flags)
+        assert sc.components["manipulation"] == _manipulation_penalty(sc.claim)
 
 
 @pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
