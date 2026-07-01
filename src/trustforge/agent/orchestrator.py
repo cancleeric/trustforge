@@ -579,6 +579,24 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         ]
 
     limits, flips = _derive_limits(brief)
+    # W4 codex 對抗審第 3 輪 [HIGH]：cross_signal 的 summary 在有真實客觀/情緒
+    # 主導方向可判定時（`objective_direction`/`sentiment_direction` 皆非
+    # None——consensus／divergence／collision 三種類型皆屬此類，見
+    # `detect_cross_source_signal` 內的 `_label` 對照），summary 文字必含
+    # 「偏多/偏空」方向標籤，abstain 態若仍無條件塞進 Report，會透過
+    # Markdown「跨源訊號」區塊／Web `_render_cross_signal` 洩漏方向性結論，
+    # 跟 abstain「不足以判斷、不下方向結論」的立場矛盾。修法：abstain 態下，
+    # 只中和「真的帶方向標籤」的 cross_signal（設 None，不代客決策），純
+    # `_stance_pair_signal()` 備援訊號（`objective_direction`/
+    # `sentiment_direction` 皆為 None，summary 只講「來源方向相反、建議交叉
+    # 驗證」，不帶偏多/偏空標籤）維持不變——那本質是「觀察到來源分歧」的
+    # 事實陳述，不是方向結論，跟 abstain 立場不衝突，也是既有測試
+    # （`test_tier2_divergence.py`／`test_stance_budget_sharing.py`）在證據
+    # 稀薄（甚至 supporting=0）情境下仍預期能拿到的訊號，不得砍掉
+    # （回歸鎖：blanket None 會誤殺這條，已用真跑測試驗證過）。
+    report_cross_signal = cross_signal
+    if is_abstain and cross_signal and cross_signal.get("objective_direction") is not None:
+        report_cross_signal = None
     report = Report(
         coin=coin, question_type=qtype.value, question=query,
         market_judgment=market_judgment, facts=facts, inferences=inferences,
@@ -587,7 +605,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         contrarian=[sc.claim.text for sc in brief.contrarian],
         generated_at=iso_utc(now_fn()),
         direction=direction,
-        cross_source_signal=cross_signal,
+        cross_source_signal=report_cross_signal,
         # W4 codex 對抗審第 2 輪 [HIGH-1]：結構化校準值＋三態，供 UI／
         # analyze.json 消費端辨態，不必再各自重算門檻（見 schema.Report
         # 欄位註解）。

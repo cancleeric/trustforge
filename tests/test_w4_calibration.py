@@ -49,6 +49,23 @@ CEO 派工規格：
 誠實聲明（比照 `trust.scoring._calibrate_confidence` / `_evidence_strength`
 docstring）：這整套是簡化版工程啟發式，不是嚴謹 conformal prediction，
 沒有 coverage 保證。
+
+codex 對抗審第 3 輪 [HIGH] 修正（cross_source_signal 方向洩漏）：
+  - 第 2 輪的 e2e 全輸出測試用的 abstain 情境剛好沒觸發 `detect_cross_
+    source_signal`（heavy contrarian 皆為低信任、被 `trust>=0.5` 篩選排除），
+    漏測了「abstain 但仍有跨源共識/背離訊號」的情境——該訊號的 summary
+    固定含「偏多/偏空」中文標籤（見 `detect_cross_source_signal` 內
+    `_label` 對照），舊版無條件塞進 `Report.cross_source_signal`，會透過
+    Markdown「跨源訊號」區塊／Web `_render_cross_signal` 洩漏方向結論，
+    跟 abstain 立場矛盾。
+  - 修法：`build_report()` 在 `is_abstain` 時，`Report.cross_source_signal`
+    直接設 `None`（不下方向性跨源結論；normal/low_confidence 態不變）。
+  - 本輪新增 `test_e2e_abstain_with_real_cross_source_signal_is_neutralized`：
+    構造一個「有 2 筆高信任、跨 kind（price+news）、方向一致」的證據，讓
+    `detect_cross_source_signal` 真的產出含「偏多」的 consensus 訊號，同時
+    整體 calibrated_confidence 仍 < 0.35（重方反方雜訊拉低），驗證修後
+    `report.cross_source_signal is None`，且完整 Markdown/Web HTML/
+    analyze.json 三管道都無方向詞洩漏。
 """
 from __future__ import annotations
 
@@ -57,7 +74,7 @@ import html as _html
 import json
 
 from trustforge import web
-from trustforge.agent.orchestrator import build_report
+from trustforge.agent.orchestrator import build_report, detect_cross_source_signal
 from trustforge.bedrock import BedrockClient
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
@@ -76,12 +93,31 @@ from trustforge.trust.scoring import (
 _DIRECTIONAL_WORDS = ("偏多", "偏空", "看漲", "看跌", "上漲", "下跌")
 
 
+def _observed_texts(report) -> list[str]:
+    """回傳一份報告裡所有「觀察訊號」原文（供 `_assert_directional_words_
+    confined_to_facts` 挖掉）：`facts`（客觀事實）＋ `key_basis[].claim`
+    （supporting 主張原文，含 `facts` 未涵蓋的 news/social 等情緒類 kind，
+    見 `orchestrator.build_report` 的 `key_basis` 迴圈——逐一走訪
+    `brief.supporting`，不限 `OBJECTIVE_KINDS`）＋ `contrarian`（反方低信任
+    原文）。這三者都是「透明列出的來源原文」，不是本報告自己下的方向性
+    結論——即使其中一句剛好含方向詞（如某則新聞寫「轉為看漲」），那是
+    對來源內容的如實引用，不是 pipeline 自己判斷的方向，允許出現；真正
+    要保證零方向詞的是 market_judgment／inferences／標題／cross_source
+    summary 這些「pipeline 自己組出來的結論層文字」。"""
+    return (
+        list(report.facts)
+        + [b.claim for b in report.key_basis]
+        + list(report.contrarian)
+    )
+
+
 def _assert_directional_words_confined_to_facts(full_text: str, facts: list[str]) -> None:
     """codex 對抗審第 2 輪 [HIGH-2] 端到端驗證：把 `facts`（允許含方向詞的
-    「觀察訊號」原文）從完整輸出文字裡挖掉後，剩餘文字（含 market_judgment／
-    inferences／標題／key_basis／cross_source 等「結論層」內容）不得再出現
-    任何方向詞——確保方向性結論不會透過任何管道（Markdown／Web HTML／
-    analyze.json）洩漏。"""
+    「觀察訊號」原文，呼叫端應傳入 `_observed_texts(report)` 取得完整範圍，
+    非只 `report.facts`）從完整輸出文字裡挖掉後，剩餘文字（含
+    market_judgment／inferences／標題／cross_source 等「結論層」內容）不得
+    再出現任何方向詞——確保方向性結論不會透過任何管道（Markdown／Web
+    HTML／analyze.json）洩漏。"""
     masked = full_text
     for f in facts:
         masked = masked.replace(f, "")
@@ -315,15 +351,69 @@ def test_e2e_single_weak_source_with_heavy_contrarian_abstains():
     # 完整輸出（Markdown／Web HTML／analyze.json）皆須驗證：方向詞只能出現
     # 在 facts 原文裡，市場判斷/推論/標題等結論層絕對零方向詞。
     md = report.to_markdown(evidence)
-    _assert_directional_words_confined_to_facts(md, report.facts)
+    _assert_directional_words_confined_to_facts(md, _observed_texts(report))
 
     log = ExecutionLog(now_fn=lambda: 1_000_000.0)
     web_html = web._render_report(report, evidence, log)
-    _assert_directional_words_confined_to_facts(web_html, report.facts)
+    _assert_directional_words_confined_to_facts(web_html, _observed_texts(report))
 
     payload = json.dumps(dataclasses.asdict(report), ensure_ascii=False)
-    _assert_directional_words_confined_to_facts(payload, report.facts)
+    _assert_directional_words_confined_to_facts(payload, _observed_texts(report))
     assert payload  # analyze.json 的 report 區塊可正常序列化，不拋錯
+
+
+def test_e2e_abstain_with_real_cross_source_signal_is_neutralized():
+    """codex 對抗審第 3 輪 [HIGH]：abstain 態即使真的觸發 `detect_cross_
+    source_signal`（客觀+情緒跨源共識，summary 含「偏多」），`Report.
+    cross_source_signal` 也必須被中和為 None，不得透過 Markdown「跨源訊號」
+    區塊／Web `_render_cross_signal`／analyze.json 洩漏方向結論。
+
+    構造重點：p1（price，客觀）與 n1（news，情緒）皆高信任（>=0.5，供
+    `detect_cross_source_signal` 的 `trust>=0.5` 篩選採用）、方向皆 bullish
+    （形成 consensus，非 divergence，一樣會下方向標籤）；同時疊 30 筆高
+    manipulation 雜訊社群文件把 calibrated_confidence 拉到 <0.35，逼出
+    abstain——證明「abstain」與「有真跨源共識訊號」可以同時成立，不是互斥
+    情境，e2e 必須覆蓋。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 上漲 突破 關鍵 阻力位。", meta={"reputation": 0.7}),
+        _doc("n1", "news", "coindesk", "BTC 市場 情緒 轉為 看漲，散戶 買盤 湧入。", meta={"reputation": 0.7}),
+    ] + [_doc(f"c{i}", "social", f"anon-{i}", "BTC 翻倍 to the moon 穩賺快上車！") for i in range(30)]
+    claims = extract_claims(docs)
+    scored = score(claims, now=1_000_000.0)
+    brief = aggregate(scored, query="分析 BTC")
+    assert brief.calibrated_confidence < 0.35, brief.calibrated_confidence
+    assert len(brief.supporting) == 2, "前提檢查：本案例只有 p1/n1 兩筆高信任 supporting"
+
+    # 前提檢查（證明本測試非 vacuous）：純演算法層級真的會產出含方向詞的
+    # consensus 跨源訊號——若這步就是 None/無方向詞，代表案例設計失敗，
+    # 沒測到 codex 抓到的洩漏路徑。
+    raw_cross_signal = detect_cross_source_signal(scored)
+    assert raw_cross_signal is not None
+    assert raw_cross_signal["type"] == "consensus"
+    assert "偏多" in raw_cross_signal["summary"], raw_cross_signal
+
+    report, evidence = build_report(
+        query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE, brief=brief,
+        client=BedrockClient(offline=True),
+        log=ExecutionLog(now_fn=lambda: 1_000_000.0),
+        now_fn=lambda: 1_000_000.0,
+    )
+    assert report.decision_state == "abstain"
+    # 修後：abstain 態的 Report 必須把跨源訊號中和成 None，即使底層演算法
+    # 真的算出了帶方向詞的 consensus。
+    assert report.cross_source_signal is None
+
+    md = report.to_markdown(evidence)
+    assert "跨源訊號" not in md, "abstain 態不應顯示跨源訊號區塊"
+    _assert_directional_words_confined_to_facts(md, _observed_texts(report))
+
+    log = ExecutionLog(now_fn=lambda: 1_000_000.0)
+    web_html = web._render_report(report, evidence, log)
+    _assert_directional_words_confined_to_facts(web_html, _observed_texts(report))
+
+    payload = json.dumps(dataclasses.asdict(report), ensure_ascii=False)
+    _assert_directional_words_confined_to_facts(payload, _observed_texts(report))
+    assert '"cross_source_signal": null' in payload
 
 
 def test_e2e_single_supporting_claim_forced_abstain_even_if_calibrated_would_be_low_confidence():
