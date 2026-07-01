@@ -10,12 +10,30 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .ledger import estimate_cost
+
 if TYPE_CHECKING:
+    from .execlog import ExecutionLog
     from .ingestion.base import Document
     from .trust.scoring import Claim
 
 # 僅客觀來源才能標記 claim_type=fact（反作弊：主觀社群/新聞不得宣稱是事實）
 _OBJECTIVE_KINDS = frozenset({"price", "onchain", "regulatory"})
+
+
+@dataclass
+class LLMResult:
+    """`BedrockClient.complete()` 的回傳型別：文字輸出 + token 用量（供成本記錄）。
+
+    離線 / 未設 model_id 時 `input_tokens=output_tokens=0`、`model_id=None`
+    （呼叫端據此估算成本恆為 $0，但仍可記一筆，讓帳本看得到「此 run 離線」）。
+    """
+
+    text: str
+    input_tokens: int
+    output_tokens: int
+    model_id: str | None
+
 
 # --- W1.5（#15）語意 stance 子分類器 ---------------------------------------
 # 合法標籤：entailment（語意一致/相互支持）｜contradiction（明確方向對立）｜
@@ -91,6 +109,11 @@ class BedrockClient:
         self.offline = offline
         self._client = None
         self._stance_client = None  # W1.5：獨立、短 timeout，不與主敘事模型共用
+        # 成本記錄用：classify_stance 在 scoring.py 的 O(n²) 迴圈深處被呼叫，
+        # 呼叫端（cached_stance_fn/score()）無法方便地帶入 ExecutionLog，故改由
+        # classify_stance 每次真呼叫（cache-miss）成功後自行把成本事件累積在此，
+        # 呼叫端（orchestrator Step2）於 score() 完成後統一讀出並清空、寫回 log。
+        self.cost_events: list[dict] = []
 
     def _runtime(self):
         if self._client is None:
@@ -128,10 +151,15 @@ class BedrockClient:
             )
         return self._stance_client
 
-    def complete(self, system: str, prompt: str) -> str:
-        """單輪文字生成。回傳模型文字輸出。"""
+    def complete(self, system: str, prompt: str) -> LLMResult:
+        """單輪文字生成。回傳 `LLMResult`（文字輸出 + token 用量，供成本記錄用）。
+
+        離線模式：回傳佔位文字，token=0、model_id=None（呼叫端仍可記一筆 $0 成本，
+        讓帳本看得到「此 run 離線」）。
+        """
         if self.offline:
-            return f"[OFFLINE] (model={self.config.model_id or 'unset'}) would answer:\n{prompt[:280]}"
+            text = f"[OFFLINE] (model={self.config.model_id or 'unset'}) would answer:\n{prompt[:280]}"
+            return LLMResult(text=text, input_tokens=0, output_tokens=0, model_id=None)
 
         if not self.config.model_id:
             raise RuntimeError(
@@ -150,7 +178,14 @@ class BedrockClient:
         )
         payload = json.loads(resp["body"].read())
         # Bedrock messages 回應：content 為 block 陣列
-        return "".join(b.get("text", "") for b in payload.get("content", []))
+        text = "".join(b.get("text", "") for b in payload.get("content", []))
+        usage = payload.get("usage", {}) or {}
+        return LLMResult(
+            text=text,
+            input_tokens=int(usage.get("input_tokens", 0) or 0),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            model_id=self.config.model_id,
+        )
 
     # ------------------------------------------------------------------
     # W1.5（#15）：語意 stance 子分類器（Bedrock Converse API + 強制 tool-use）
@@ -210,6 +245,17 @@ class BedrockClient:
                 inferenceConfig={"temperature": 0, "maxTokens": 32},
                 toolConfig=tool_config,
             )
+            # 只在 cache-miss 真呼叫（即這裡，converse 已成功回來）才記成本——
+            # cache-hit 完全不會走到這個函式（見 stance_cache.cached_stance_fn）。
+            usage = resp.get("usage", {}) or {}
+            tokens_in = int(usage.get("inputTokens", 0) or 0)
+            tokens_out = int(usage.get("outputTokens", 0) or 0)
+            self.cost_events.append({
+                "model": self.config.stance_model_id,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": estimate_cost(self.config.stance_model_id, tokens_in, tokens_out),
+            })
             blocks = resp["output"]["message"]["content"]
             for block in blocks:
                 tool_use = block.get("toolUse")
@@ -220,17 +266,23 @@ class BedrockClient:
             return "neutral"
         except Exception:
             # 任何失敗（憑證/逾時/回應格式不符）一律保守回 neutral，不 raise
+            # 呼叫未成功取得 usage → 不記成本（沒有真實花費數字可記）
             return "neutral"
 
     # ------------------------------------------------------------------
     # Step 1: LLM-based Claim 抽取（Bedrock 呼叫 #1）
     # ------------------------------------------------------------------
-    def extract_claims_with_llm(self, docs: list[Document]) -> list[Claim]:
+    def extract_claims_with_llm(
+        self, docs: list[Document], log: "ExecutionLog | None" = None
+    ) -> list[Claim]:
         """從多源 Document 用 LLM 抽出結構化主張。
 
         離線模式或未設模型時 fall back 回 regex extract_claims，確保測試/離線 demo 不變。
         線上模式：Bedrock 呼叫 #1，輸出 claim_type + direction；
                   fact 類只來自客觀來源（price/onchain/regulatory），事後過濾。
+
+        `log`：可選的 `ExecutionLog`，真呼叫（非 fallback）成功後把 token 用量／
+        估算成本記一筆 `llm.cost`（見 `ExecutionLog.record_llm_cost`）。
         """
         # 延遲匯入：避免模組頂層循環依賴
         from .trust.scoring import Claim, extract_claims  # noqa: PLC0415
@@ -266,7 +318,17 @@ class BedrockClient:
         )
 
         try:
-            raw = self.complete(system=system_prompt, prompt=user_prompt)
+            result = self.complete(system=system_prompt, prompt=user_prompt)
+            if log is not None:
+                # 真呼叫已成功取得 usage → 記一筆成本，不管後面 JSON 解析是否成功
+                # （呼叫本身已發生、已有花費，parse 失敗只是降級 fallback，不代表沒呼叫）
+                log.record_llm_cost(
+                    result.model_id,
+                    result.input_tokens,
+                    result.output_tokens,
+                    estimate_cost(result.model_id, result.input_tokens, result.output_tokens),
+                )
+            raw = result.text
             # 找到 JSON array（容錯：模型可能在 ``` 內）
             start = raw.find("[")
             end = raw.rfind("]") + 1

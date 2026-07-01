@@ -16,6 +16,7 @@ import time
 from ..bedrock import BedrockClient
 from ..execlog import ExecutionLog
 from ..ingestion.base import Document
+from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..trust.scoring import ScoredClaim, TrustedBrief
 
@@ -246,9 +247,21 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     )
     _t_step3 = log._now()
     try:
-        narrative = client.complete(system=SYSTEM, prompt=prompt)
+        _result_step3 = client.complete(system=SYSTEM, prompt=prompt)
+        narrative = _result_step3.text
+        # 離線也會走到這（complete() 離線回傳 token=0 的佔位結果），故這裡永遠
+        # 記一筆：線上是真花費，離線是 $0 ——帳本兩種情況都看得到本次 Step3 呼叫。
+        log.record_llm_cost(
+            _result_step3.model_id,
+            _result_step3.input_tokens,
+            _result_step3.output_tokens,
+            estimate_cost(
+                _result_step3.model_id, _result_step3.input_tokens, _result_step3.output_tokens
+            ),
+        )
     except Exception:
         # Bedrock 失敗 → 用結構化判斷當行文降級,不中斷管線(且仍記錄此步 log)
+        # 呼叫未成功、無 usage 數字 → 不記成本
         narrative = f"[行文服務暫時無法使用,以下為結構化判斷] {market_judgment}"
     _step3_elapsed = round(log._now() - _t_step3, 2)
     log.record(
@@ -310,7 +323,7 @@ def run_agent_pipeline(
     # ------------------------------------------------------------------
     log.record("pipeline.step1.start", summary=f"docs={len(docs)}；準備 LLM claim 抽取")
     _t1 = log._now()
-    claims = client.extract_claims_with_llm(docs)
+    claims = client.extract_claims_with_llm(docs, log=log)
     _step1_elapsed = round(log._now() - _t1, 2)
 
     # 區分是否真正走了 LLM（offline / 未設模型 → regex fallback）
@@ -349,6 +362,17 @@ def run_agent_pipeline(
         stance_client=None if client.offline else client,
         stance_remaining_time_fn=log.remaining,
     )
+    # classify_stance 的成本無法在深層 O(n²) 迴圈中方便帶入 log，改由 BedrockClient
+    # 自己在真呼叫（cache-miss）成功後累積在 client.cost_events；score() 跑完、
+    # 所有 stance 呼叫都已發生，這裡統一讀出、寫回 log、並清空避免下個 run 重複計。
+    # getattr 防禦：測試用的假 client（如 FakeBedrockClient）可能沒有此屬性。
+    _stance_cost_events = getattr(client, "cost_events", None)
+    if _stance_cost_events:
+        for _ev in _stance_cost_events:
+            log.record_llm_cost(
+                _ev["model"], _ev["tokens_in"], _ev["tokens_out"], _ev["cost_usd"]
+            )
+        _stance_cost_events.clear()
     brief = aggregate(scored, query=query)
     log.record(
         "judgment.derive",
@@ -388,7 +412,16 @@ def run_agent_pipeline(
         _t4 = log._now()      # 先賦值,確保 except 路徑也能算耗時(不依賴 dir() 探測)
         _additions: list[str] = []
         try:
-            _review_raw = client.complete(system=_STEP4_SYSTEM, prompt=_review_prompt)
+            _result_step4 = client.complete(system=_STEP4_SYSTEM, prompt=_review_prompt)
+            log.record_llm_cost(
+                _result_step4.model_id,
+                _result_step4.input_tokens,
+                _result_step4.output_tokens,
+                estimate_cost(
+                    _result_step4.model_id, _result_step4.input_tokens, _result_step4.output_tokens
+                ),
+            )
+            _review_raw = _result_step4.text
             _s = _review_raw.find("[")
             _e = _review_raw.rfind("]") + 1
             if _s != -1 and _e > 0:
@@ -402,6 +435,7 @@ def run_agent_pipeline(
                     report.limits.extend(_additions)
         except Exception:
             _additions = []
+            # 呼叫未成功、無 usage 數字 → 不記成本
         _step4_elapsed = round(log._now() - _t4, 2)
         log.record(
             "bedrock.complete",
@@ -410,5 +444,27 @@ def run_agent_pipeline(
                     "step_elapsed_sec": _step4_elapsed},
             summary=f"Step4 限制複審；補充 {len(_additions)} 條；耗時 {_step4_elapsed}s",
         )
+
+    # ------------------------------------------------------------------
+    # 帳本：run 收尾寫一筆跨 run 持久化成本紀錄（append-only，不影響 report/evidence）
+    # ------------------------------------------------------------------
+    _llm_calls = [
+        {
+            "model": e["params"].get("model"),
+            "tokens_in": e["params"].get("tokens_in", 0),
+            "tokens_out": e["params"].get("tokens_out", 0),
+            "cost_usd": e["params"].get("cost_usd", 0.0),
+        }
+        for e in log.events
+        if e["tool"] == "llm.cost"
+    ]
+    append_run({
+        "ts": iso_utc(now_fn()),
+        "question_type": qtype.value,
+        "coin": coin,
+        "offline": client.offline,
+        "calls": _llm_calls,
+        "total_cost_usd": round(sum(c["cost_usd"] for c in _llm_calls), 6),
+    })
 
     return report, evidence
