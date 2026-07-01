@@ -271,13 +271,35 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                  client: BedrockClient | None = None,
                  log: ExecutionLog | None = None,
                  now_fn=time.time,
-                 stance_fn: Callable[[str, str], str] | None = None) -> tuple[Report, list[Evidence]]:
+                 stance_fn: Callable[[str, str], str] | None = None,
+                 scored: list[ScoredClaim] | None = None) -> tuple[Report, list[Evidence]]:
     """`stance_fn`：選填。供跨源 stance_pairs 偵測（Step 2.5）使用；未提供時
     （例如直接呼叫 `build_report` 的測試）會自建一份**有預算上限**的
     stance_fn（`build_stance_fn`，綁 `log.remaining()`），不會無上限直接打
     Bedrock（demo 可靠性 #32 追加 HIGH-2 修正）。`run_agent_pipeline` 會傳入
     與 Step2 `score()` **共用同一個 `_StanceBudget` 實例**的 stance_fn，
     避免兩處各自另建一份預算讓真呼叫上限實質變成兩倍。
+
+    `scored`：選填。供跨源訊號偵測（`detect_cross_source_signal`/
+    `_detect_stance_pairs`）使用的**完整、未截斷**主張全集——即 `aggregate()`
+    把 `supporting`/`contrarian` 分別截斷成 `[:10]`/`[:5]` **之前**的原始
+    `scored` 清單（demo 可靠性 #32 追加 HIGH 修正）。
+
+    背景：真資料上，兩則真矛盾的情緒類新聞常因方向鮮明而落在 contrarian
+    （trust < 0.5）；只要同一輪還有 >5 筆信任分更高的 contrarian（不論是否與
+    該矛盾對相關），這兩則就會被 `aggregate()` 的 `[:5]` 截斷擠出
+    `brief.contrarian`，若這裡改用 `brief.supporting + brief.contrarian` 偵測，
+    真背離就會漏抓——且截斷是否命中純看資料量與分數分布，不是可預期、可重現
+    的行為。修法：一律優先用呼叫端傳入的完整 `scored`（`aggregate()` 只重排
+    不刪項，`_detect_stance_pairs` 內部本就自行以 `_STANCE_PAIR_MIN_TRUST`/
+    `_SENTIMENT_KINDS` 篩選，不依賴 supporting/contrarian 的截斷結果）。
+    stance 預算（`_StanceBudget`）不因輸入變大而失守——候選對變多只會讓更多
+    次落入持久化快取命中（免費）或提早耗盡預算改 fail-safe 回 neutral，
+    真呼叫次數上限不變。
+
+    未提供時（例如既有測試直接呼叫 `build_report(..., brief=brief)` 不給
+    `scored`）退回 `brief.supporting + brief.contrarian`（既有行為，逐字向後
+    相容，不影響既有合成 fixture 單元測試）。
     """
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
@@ -342,7 +364,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             stance_remaining_time_fn=log.remaining,
         )
     cross_signal = detect_cross_source_signal(
-        brief.supporting + brief.contrarian,
+        scored if scored is not None else brief.supporting + brief.contrarian,
         stance_fn=stance_fn,
     )
     # 收割本步驟可能產生的 stance 呼叫成本（同 Step2 收割慣例，避免漏記帳）。
@@ -533,6 +555,10 @@ def run_agent_pipeline(
         query=query, coin=coin, qtype=qtype, brief=brief,
         client=client, log=log, now_fn=now_fn,
         stance_fn=shared_stance_fn,
+        # demo 可靠性 #32 追加 HIGH 修正：傳完整（未截斷）scored 全集做跨源訊號
+        # 偵測，避免 aggregate() 的 supporting[:10]/contrarian[:5] 截斷把真矛盾
+        # 配對擠出偵測範圍（見 build_report docstring）。
+        scored=scored,
     )
 
     # ------------------------------------------------------------------

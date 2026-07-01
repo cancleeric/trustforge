@@ -39,6 +39,7 @@ import pytest
 from trustforge.agent.orchestrator import (
     _STANCE_PAIR_MIN_TRUST,
     _detect_stance_pairs,
+    build_report,
     detect_cross_source_signal,
     run_agent_pipeline,
 )
@@ -47,7 +48,7 @@ from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.pipeline import run
 from trustforge.schema import QuestionType
-from trustforge.trust.scoring import Claim, ScoredClaim
+from trustforge.trust.scoring import Claim, ScoredClaim, aggregate
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +256,89 @@ def test_stance_pairs_mechanism_triggers_divergence_with_injected_synthetic_clai
     # 守 HOYA 不代客決策：summary 不得含決策字眼
     for word in ("買", "賣", "進場", "出場"):
         assert word not in sig["summary"]
+
+
+def test_build_report_stance_pairs_survive_aggregate_truncation_overflow():
+    """[HIGH 回歸] codex 抓出：`aggregate()` 把 `supporting[:10]`/`contrarian[:5]`
+    截斷後才交給 `build_report()`；若 `build_report()` 改用截斷後的
+    `brief.supporting + brief.contrarian` 做跨源訊號偵測，真資料上兩則信任分
+    皆 <0.5（因而落入 contrarian）的真矛盾配對，只要同時存在 >=5 筆信任分更高
+    的其他 contrarian 主張，就會被 `[:5]` 截斷擠出去、偵測不到——且是否命中純
+    看資料量與分數分布，不可預期、不可重現。
+
+    這裡刻意構造「overflow」情境：5 筆信任分更高（0.45~0.49，皆 <0.5）的填充
+    contrarian 主張，把目標矛盾配對（trust 0.38/0.40）擠到 contrarian 的第
+    6、7 名，確認：
+      1. 截斷後的 `brief.contrarian` 確實已不含這組矛盾配對（證明 overflow
+         情境真的成立，不是測了個假案例）；
+      2. `build_report(..., scored=<完整未截斷全集>)` 仍能正確偵測到
+         divergence + 2 筆 stance_pairs（證明修法生效：改用完整 scored，不
+         再依賴 brief 截斷後的 supporting/contrarian）。
+    """
+    pair_a = _sc("pair-a", "news", "src-a", "bullish", 0.40, "看漲敘述 A")
+    pair_b = _sc("pair-b", "news", "src-b", "bearish", 0.38, "看跌敘述 B")
+    fillers = [
+        _sc(f"filler-{i}", "news", f"filler-src-{i}", "neutral", trust, f"填充主張 {i}")
+        for i, trust in enumerate([0.49, 0.48, 0.47, 0.46, 0.45], start=1)
+    ]
+    scored = [*fillers, pair_a, pair_b]
+
+    brief = aggregate(scored, query="分析 ETH", coin="ETH")
+
+    # 前提檢查：矛盾配對確實已被截斷擠出 brief.contrarian。
+    contrarian_ids = {sc.claim.id for sc in brief.contrarian}
+    assert not ({"pair-a", "pair-b"} & contrarian_ids), (
+        f"測試前提失敗：overflow 情境未成立，矛盾配對仍在截斷後的 contrarian "
+        f"（{contrarian_ids}），請調整填充主張的信任分"
+    )
+    assert len(brief.contrarian) == 5  # 截斷確實生效
+
+    report, evidence = build_report(
+        query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
+        brief=brief,
+        client=BedrockClient(offline=True),
+        log=ExecutionLog(now_fn=lambda: 1000.0),
+        now_fn=lambda: 1000.0,
+        stance_fn=_contradiction_stance_fn,
+        scored=scored,  # 修法核心：傳完整未截斷全集，不是 brief 截斷後的結果
+    )
+
+    sig = report.cross_source_signal
+    assert sig is not None, "矛盾配對雖被 aggregate() 截斷擠出 brief，仍應被完整 scored 偵測到"
+    assert "stance_pairs" in sig
+    pairs = sig["stance_pairs"]
+    claim_ids = {p["claim_id"] for p in pairs}
+    assert claim_ids == {"pair-a", "pair-b"}, f"應偵測到被截斷的矛盾配對，實得 {claim_ids}"
+
+
+def test_build_report_without_scored_falls_back_to_brief_supporting_contrarian():
+    """向後相容鎖：既有測試/呼叫端若不傳 `scored`（例如直接呼叫
+    `build_report(..., brief=brief)`），行為逐字不變——退回用
+    `brief.supporting + brief.contrarian` 做跨源偵測（截斷後的結果）。
+    """
+    supporting = [_sc("s1", "onchain", "glassnode", "bullish", 0.80)]
+    contrarian = [
+        _sc("pair-a", "news", "src-a", "bullish", 0.40, "看漲敘述 A"),
+        _sc("pair-b", "news", "src-b", "bearish", 0.38, "看跌敘述 B"),
+    ]
+    from trustforge.trust.scoring import TrustedBrief
+    brief = TrustedBrief(query="分析 ETH", supporting=supporting, contrarian=contrarian, confidence=0.8)
+
+    report, evidence = build_report(
+        query="分析 ETH", coin="ETH", qtype=QuestionType.MULTI_SOURCE,
+        brief=brief,
+        client=BedrockClient(offline=True),
+        log=ExecutionLog(now_fn=lambda: 1000.0),
+        now_fn=lambda: 1000.0,
+        stance_fn=_contradiction_stance_fn,
+        # 不傳 scored → 應退回 brief.supporting + brief.contrarian
+    )
+
+    sig = report.cross_source_signal
+    assert sig is not None
+    pairs = sig.get("stance_pairs", [])
+    claim_ids = {p["claim_id"] for p in pairs}
+    assert claim_ids == {"pair-a", "pair-b"}
 
 
 def test_eth_multi_source_evidence_facts_count_pinned():
