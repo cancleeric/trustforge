@@ -20,7 +20,6 @@ from ..ingestion.base import Document
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..trust.scoring import ScoredClaim, TrustedBrief
-from ..trust.stance_cache import cached_stance_fn
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
 _STEP4_MIN_BUDGET_SEC = 60.0
@@ -271,7 +270,15 @@ def detect_cross_source_signal(
 def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief,
                  client: BedrockClient | None = None,
                  log: ExecutionLog | None = None,
-                 now_fn=time.time) -> tuple[Report, list[Evidence]]:
+                 now_fn=time.time,
+                 stance_fn: Callable[[str, str], str] | None = None) -> tuple[Report, list[Evidence]]:
+    """`stance_fn`：選填。供跨源 stance_pairs 偵測（Step 2.5）使用；未提供時
+    （例如直接呼叫 `build_report` 的測試）會自建一份**有預算上限**的
+    stance_fn（`build_stance_fn`，綁 `log.remaining()`），不會無上限直接打
+    Bedrock（demo 可靠性 #32 追加 HIGH-2 修正）。`run_agent_pipeline` 會傳入
+    與 Step2 `score()` **共用同一個 `_StanceBudget` 實例**的 stance_fn，
+    避免兩處各自另建一份預算讓真呼叫上限實質變成兩倍。
+    """
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
 
@@ -321,13 +328,31 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     log.record("judgment.derive", params={"direction": direction, "indep_sources": n_indep})
 
     # 2.5 跨源訊號偵測（純演算法，在 Bedrock 行文前完成）
-    # stance_fn：與 Step2 的 W1.5 矛盾閘同一套慣例——offline 一律傳 None，
-    # 讓 cached_stance_fn 只讀持久化快取（demo/sample_data/stance_cache.json），
-    # 快取 miss 時 fail-safe 回 "neutral"，不即時打 Bedrock、不 raise。
+    # stance_fn：未由呼叫端提供時（例如測試直接呼叫 build_report），自建一份
+    # 有預算上限的 stance_fn（demo 可靠性 #32 追加 HIGH-2 修正——原本這裡另建
+    # 一份「無預算」的 cached_stance_fn，線上模式 cache miss 會無上限直接打
+    # Bedrock，且發生在 Step2 成本收割之後，成本永遠沒進帳本）。離線一律傳
+    # None 給 build_stance_fn，讓底層 cached_stance_fn 只讀持久化快取
+    # （demo/sample_data/stance_cache.json），快取 miss 時 fail-safe 回
+    # "neutral"，不即時打 Bedrock、不 raise。
+    if stance_fn is None:
+        from ..trust.scoring import build_stance_fn  # 延遲匯入避免頂層循環
+        stance_fn = build_stance_fn(
+            stance_client=None if client.offline else client,
+            stance_remaining_time_fn=log.remaining,
+        )
     cross_signal = detect_cross_source_signal(
         brief.supporting + brief.contrarian,
-        stance_fn=cached_stance_fn(None if client.offline else client),
+        stance_fn=stance_fn,
     )
+    # 收割本步驟可能產生的 stance 呼叫成本（同 Step2 收割慣例，避免漏記帳）。
+    _stance_cost_events = getattr(client, "cost_events", None)
+    if _stance_cost_events:
+        for _ev in _stance_cost_events:
+            log.record_llm_cost(
+                _ev["model"], _ev["tokens_in"], _ev["tokens_out"], _ev["cost_usd"]
+            )
+        _stance_cost_events.clear()
 
     # 3. Bedrock 行文（Step 3：帶 claim_id 溯源；離線為佔位，結構不依賴它）
     # 建立 claim_id → 摘要對照，供 prompt 強制引用
@@ -418,7 +443,7 @@ def run_agent_pipeline(
 
     Execution Log 保證 ≥2 筆 bedrock.complete 記錄（Step1 + Step3）。
     """
-    from ..trust.scoring import aggregate, score  # 延遲匯入避免頂層循環
+    from ..trust.scoring import aggregate, build_stance_fn, score  # 延遲匯入避免頂層循環
 
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
@@ -465,11 +490,19 @@ def run_agent_pipeline(
     # 只有在快取也 miss 時才 fail-safe 回 neutral——離線 demo 才看得到 #15 的修復）。
     # 第二輪對抗審修正：接 log.remaining()（即時剩餘的官方 15 分鐘執行時間）當
     # stance 呼叫的時間預算，跟配對硬上限一起防 O(n²) 呼叫吃光整條執行窗口。
+    # 第三輪對抗審修正（demo 可靠性 #32 追加 HIGH-2）：先建「一份」共用的
+    # budgeted stance_fn，Step2 的交叉佐證矛盾閘與 Step3（build_report 內的
+    # 跨源 stance_pairs 偵測）共用同一個 `_StanceBudget` 實例——避免兩處各自
+    # 另建一份預算，讓「單次執行真呼叫 Bedrock 的配對硬上限」實質變成兩倍、
+    # 也讓兩處共用同一份即時剩餘時間（`log.remaining()`）判斷。
+    shared_stance_fn = build_stance_fn(
+        stance_client=None if client.offline else client,
+        stance_remaining_time_fn=log.remaining,
+    )
     scored = score(
         claims,
         now=now_ts,
-        stance_client=None if client.offline else client,
-        stance_remaining_time_fn=log.remaining,
+        stance_fn=shared_stance_fn,
     )
     # classify_stance 的成本無法在深層 O(n²) 迴圈中方便帶入 log，改由 BedrockClient
     # 自己在真呼叫（cache-miss）成功後累積在 client.cost_events；score() 跑完、
@@ -499,6 +532,7 @@ def run_agent_pipeline(
     report, evidence = build_report(
         query=query, coin=coin, qtype=qtype, brief=brief,
         client=client, log=log, now_fn=now_fn,
+        stance_fn=shared_stance_fn,
     )
 
     # ------------------------------------------------------------------

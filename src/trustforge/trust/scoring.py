@@ -629,6 +629,28 @@ def _iterate_source_reputation(
     return sr
 
 
+def build_stance_fn(
+    stance_client=None,
+    stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
+    stance_remaining_time_fn: Callable[[], float] | None = None,
+) -> Callable[[str, str], str] | None:
+    """建立 W1.5 stance 判定函式（語意見 `score()` docstring 對
+    `stance_client`/`stance_pair_budget`/`stance_remaining_time_fn` 的完整說明）。
+
+    抽出成獨立函式（demo 可靠性 #32 追加）：讓 `score()` 內部的矛盾閘與
+    `agent.orchestrator` 的跨源 stance_pairs 偵測能**共用同一個
+    `_StanceBudget` 實例**——同一次 pipeline 執行內，真正呼叫 Bedrock 的
+    配對硬上限與 `ExecutionLog.remaining()` 剩餘時間預算是同一個池子，
+    不會因為分兩處（`score()` 的交叉佐證 vs. `detect_cross_source_signal`
+    的 stance_pairs 偵測）各自另建一份預算，讓「單次執行真呼叫上限」實質
+    變成兩倍、失去原本的防護意義。
+    """
+    if stance_client is None or hasattr(stance_client, "classify_stance"):
+        stance_budget = _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
+        return cached_stance_fn(stance_client, budget=stance_budget)
+    return None
+
+
 # --- 主評分 --------------------------------------------------------------
 def score(
     claims: list[Claim],
@@ -639,6 +661,7 @@ def score(
     stance_remaining_time_fn: Callable[[], float] | None = None,
     dynamic_reputation: bool = False,
     reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
+    stance_fn: Callable[[str, str], str] | None = None,
 ) -> list[ScoredClaim]:
     """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient），
     或 None。
@@ -667,13 +690,18 @@ def score(
     `ScoredClaim.reputation_trace` 會附上該來源的
     `{source, prior, final, agree_n, contradict_n, iterations_run}`（可解釋，不塞進
     `components`，維持 `components` 的 str→number 契約）。
+
+    `stance_fn`：選填。若提供，直接使用此函式（跳過用 `stance_client`/
+    `stance_pair_budget`/`stance_remaining_time_fn` 另建一份），供呼叫端
+    （如 `agent.orchestrator.run_agent_pipeline`）用 `build_stance_fn()`
+    先建好、跟其他步驟（如跨源 stance_pairs 偵測）共用同一個
+    `_StanceBudget` 實例（demo 可靠性 #32 追加，見 `build_stance_fn`
+    docstring）。不提供時（預設）行為與之前逐字相同——用 `stance_client`
+    等參數自建一份專屬本次 `score()` 呼叫的 stance_fn。
     """
     w = weights or DEFAULT_WEIGHTS
-    if stance_client is None or hasattr(stance_client, "classify_stance"):
-        stance_budget = _StanceBudget(stance_pair_budget, stance_remaining_time_fn)
-        stance_fn = cached_stance_fn(stance_client, budget=stance_budget)
-    else:
-        stance_fn = None
+    if stance_fn is None:
+        stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
 
     dynamic_map: dict[str, float] | None = None
     trace_by_source: dict[str, dict] | None = None

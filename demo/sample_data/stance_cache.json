@@ -35,7 +35,7 @@
     "label": "entailment",
     "version": "v1"
   },
-  "[\"據 farside investors 追蹤，eth 現貨 etf 單日 淨流入 4200 萬 美元，機構 買盤 回補\",\"據 sosovalue 追蹤 顯示，eth 現貨 etf 同日 淨流出 1800 萬 美元，結算 時區 落差 致 解讀 不同\"]": {
+  "[\"另 有 市場 消息 指出，eth 現貨 etf 資金 動向 同期 卻 傳出 淨流出 觀點，解讀 方法論 落差 致 資金 觀望 情緒 升溫\",\"市場 消息 指出，eth 現貨 etf 資金 動向 傳出 淨流入 觀點，機構 買盤 回補 力道 增強\"]": {
     "label": "contradiction",
     "version": "v1"
   }
