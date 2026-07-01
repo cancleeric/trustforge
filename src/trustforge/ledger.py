@@ -213,20 +213,47 @@ class DynamoDBLedger(Ledger):
         item["ts"] = str(ts)
         self._get_table().put_item(Item=self._to_decimal(item))
 
+    @staticmethod
+    def _record_key(record: dict[str, Any]) -> tuple[str, str]:
+        """`(run_id, ts)` 當去重唯一鍵，兩者對齊 `append()` 寫入時保證都有值。"""
+        return (str(record.get("run_id", "")), str(record.get("ts", "")))
+
     def read_all(self) -> list[dict[str, Any]]:
+        """scan DynamoDB + 合併 JSONL fallback，去重後依 `(ts, run_id)` 排序回傳。
+
+        `append_run()` 遇到 `put_item` 失敗（outage/缺憑證/表未建）會 fallback
+        寫進 `JsonlLedger`（見模組頂部說明）；若這裡只 scan DynamoDB，outage
+        期間的記錄雖然還在磁碟上，卻不會出現在 `/costs`。因此一律也讀一次
+        `JsonlLedger()`（預設路徑）並與 DynamoDB 結果合併：
+          - 去重鍵是 `(run_id, ts)`；同一筆兩邊都有時（DynamoDB 事後補寫成功）
+            以 DynamoDB 版本為準。
+          - `Scan` 本身無序、跨頁也不保證穩定，最後依 `(ts, run_id)` 排序，
+            讓回傳順序與 `JsonlLedger.read_all()`（寫入序）一致、跨請求穩定。
+        """
+        dynamo_records: list[dict[str, Any]] = []
         table = self._get_table()
-        records: list[dict[str, Any]] = []
         scan_kwargs: dict[str, Any] = {}
         while True:
             resp = table.scan(**scan_kwargs)
             for item in resp.get("Items", []) or []:
                 converted = self._from_decimal(item)
                 if isinstance(converted, dict):
-                    records.append(converted)
+                    dynamo_records.append(converted)
             last_key = resp.get("LastEvaluatedKey")
             if not last_key:
                 break
             scan_kwargs["ExclusiveStartKey"] = last_key
+
+        fallback_records = JsonlLedger().read_all()
+
+        merged: dict[tuple[str, str], dict[str, Any]] = {}
+        for rec in fallback_records:
+            merged[self._record_key(rec)] = rec
+        for rec in dynamo_records:
+            merged[self._record_key(rec)] = rec  # DynamoDB 版本優先，覆蓋 fallback 那筆
+
+        records = list(merged.values())
+        records.sort(key=lambda r: (str(r.get("ts", "")), str(r.get("run_id", ""))))
         return records
 
 

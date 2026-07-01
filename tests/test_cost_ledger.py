@@ -279,6 +279,75 @@ def test_dynamodb_ledger_read_all_keeps_integer_decimal_as_int():
     assert isinstance(call["cost_usd"], float)
 
 
+def test_dynamodb_ledger_read_all_merges_jsonl_fallback_and_sorts_by_ts():
+    """outage 期間 put_item 失敗 → append_run fallback 寫進 JsonlLedger（見
+    test_append_run_falls_back_to_jsonl_on_broken_backend）。read_all 若只 scan
+    DynamoDB，這筆在 /costs 會消失——必須合併 fallback，且 scan 分頁本身無序，
+    最終要依 (ts, run_id) 排序回傳（與 JsonlLedger 寫入序一致、跨請求穩定）。
+    `TRUSTFORGE_COST_LEDGER_PATH` 已由 conftest 的 autouse fixture 隔離到本測試
+    專屬的 tmp_path，直接用 JsonlLedger() 預設路徑寫入即可命中同一份 fallback。
+    """
+    # outage 期間寫進 JSONL fallback、DynamoDB 完全沒有的一筆
+    JsonlLedger().append({
+        "run_id": "outage-1", "ts": "2026-07-01T00:00:02+00:00",
+        "coin": "ETH", "total_cost_usd": 0.001, "calls": [],
+    })
+
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    # 刻意讓兩頁「亂序」（晚的時間先出現），驗證 read_all 不能直接信任 scan 順序
+    mock_table.scan.side_effect = [
+        {
+            "Items": [
+                {"run_id": "r-late", "ts": "2026-07-01T00:00:03+00:00",
+                 "total_cost_usd": Decimal("0.003"), "calls": []},
+            ],
+            "LastEvaluatedKey": {"run_id": "r-late", "ts": "2026-07-01T00:00:03+00:00"},
+        },
+        {
+            "Items": [
+                {"run_id": "r-early", "ts": "2026-07-01T00:00:01+00:00",
+                 "total_cost_usd": Decimal("0.001"), "calls": []},
+            ],
+        },
+    ]
+    d._table = mock_table
+
+    records = d.read_all()
+
+    run_ids_in_order = [r["run_id"] for r in records]
+    assert run_ids_in_order == ["r-early", "outage-1", "r-late"]  # 依 ts 排序
+    ts_list = [r["ts"] for r in records]
+    assert ts_list == sorted(ts_list)
+    assert len(records) == 3  # 三筆都在、無重複
+
+
+def test_dynamodb_ledger_read_all_dedupes_same_run_id_ts_prefers_dynamodb():
+    """同一筆記錄同時存在 DynamoDB 和 JSONL fallback（outage 後補寫成功但 fallback
+    檔案沒清）→ read_all 只能出現一次，且以 DynamoDB 版本為準（較新/權威）。
+    """
+    JsonlLedger().append({
+        "run_id": "dup-1", "ts": "2026-07-01T00:00:00+00:00",
+        "coin": "BTC", "total_cost_usd": 0.0, "calls": [],
+    })
+
+    d = DynamoDBLedger(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.scan.return_value = {
+        "Items": [
+            {"run_id": "dup-1", "ts": "2026-07-01T00:00:00+00:00",
+             "coin": "BTC", "total_cost_usd": Decimal("0.0025"), "calls": []},
+        ],
+    }
+    d._table = mock_table
+
+    records = d.read_all()
+
+    assert len(records) == 1
+    assert records[0]["run_id"] == "dup-1"
+    assert records[0]["total_cost_usd"] == 0.0025  # DynamoDB 版本覆蓋 fallback 的 0.0
+
+
 def test_get_ledger_default_is_jsonl(monkeypatch):
     monkeypatch.delenv("COST_LEDGER_BACKEND", raising=False)
     assert isinstance(get_ledger(), JsonlLedger)
