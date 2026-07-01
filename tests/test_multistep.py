@@ -312,3 +312,32 @@ def test_claim_type_preserved_in_scoring():
     assert scored, "應有評分結果"
     for sc in scored:
         assert hasattr(sc.claim, "claim_type"), "score() 後 claim_type 應保留"
+
+
+def test_evidence_flags_populated_for_manipulation_hits():
+    """Tier2 可解釋 UX：喊單/操縱語言的社群主張，對應 Evidence.flags 應非空且
+    可回溯到原文關鍵詞；一般客觀來源的 Evidence.flags 應為空 list。"""
+    docs = _make_docs()  # 含 s1: "BTC 馬上暴漲翻倍穩賺！"（social，喊單語言）
+    client = BedrockClient(offline=True)
+    log = ExecutionLog(now_fn=lambda: 1000.0)
+
+    _, evidence = run_agent_pipeline(
+        query="分析 BTC 市場",
+        coin="BTC",
+        qtype=QuestionType.MULTI_SOURCE,
+        docs=docs,
+        client=client,
+        log=log,
+        now_fn=lambda: 1000.0,
+    )
+
+    social_ev = [ev for ev in evidence if ev.kind == "social"]
+    assert social_ev, "應有 social 來源的 evidence"
+    for ev in social_ev:
+        assert ev.flags, f"喊單社群 evidence 應有 flags，實得 {ev.flags}（{ev.content_reference!r}）"
+        for f in ev.flags:
+            assert f in ev.content_reference, f"flag {f!r} 應可回溯到原文 {ev.content_reference!r}"
+
+    price_ev = [ev for ev in evidence if ev.kind == "price"]
+    for ev in price_ev:
+        assert ev.flags == [], "客觀價格來源不應誤觸操縱 flags"

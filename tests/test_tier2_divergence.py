@@ -491,3 +491,54 @@ def test_other_coins_no_false_divergence_after_coin_filter_fix(coin: str, query:
         assert "stance_pairs" not in sig or not sig["stance_pairs"], (
             f"{coin} query={query!r} 不應出現 stance_pairs 假背離，實得 {sig}"
         )
+
+
+# ---------------------------------------------------------------------------
+# W-coingecko：新 kind（price_live/sentiment）接線進客觀/情緒分類（gray 計劃）。
+# `dev_activity` 刻意不歸類，見 orchestrator.OBJECTIVE_KINDS/_SENTIMENT_KINDS
+# 旁的說明——不進入任何一組，永遠不參與跨源背離/共識計算。
+# ---------------------------------------------------------------------------
+
+def test_coingecko_kinds_registered_in_objective_and_sentiment_sets():
+    """price_live 歸客觀類、sentiment 歸情緒類；dev_activity 兩邊都不進。"""
+    assert "price_live" in OBJECTIVE_KINDS
+    assert "sentiment" in _SENTIMENT_KINDS
+    assert "dev_activity" not in OBJECTIVE_KINDS
+    assert "dev_activity" not in _SENTIMENT_KINDS
+
+
+def test_price_live_bullish_sentiment_bearish_is_divergence():
+    """price_live 看漲、sentiment 看跌 → 客觀/情緒方向相反，判定 divergence。"""
+    scored = [
+        _sc("obj1", "price_live", "coingecko-price", "bullish", 0.80, "ETH 現價上漲"),
+        _sc("sen1", "sentiment", "coingecko-sentiment", "bearish", 0.55, "ETH 社群看跌"),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is not None
+    assert result["type"] == "divergence"
+    assert result["objective_direction"] == "bullish"
+    assert result["sentiment_direction"] == "bearish"
+    assert "背離" in result["summary"]
+
+
+def test_price_live_and_sentiment_same_direction_is_consensus():
+    """price_live、sentiment 同向（皆看漲）→ 判定 consensus，非背離。"""
+    scored = [
+        _sc("obj1", "price_live", "coingecko-price", "bullish", 0.80, "ETH 現價上漲"),
+        _sc("sen1", "sentiment", "coingecko-sentiment", "bullish", 0.55, "ETH 社群看漲"),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is not None
+    assert result["type"] == "consensus"
+    assert "stance_pairs" not in result
+
+
+def test_dev_activity_not_counted_in_objective_or_sentiment_grouping():
+    """dev_activity 不歸類：即使方向與 sentiment 相反，也不觸發假背離
+    （因為只有 dev_activity + sentiment 兩筆，客觀類 0 筆 → 回 None）。"""
+    scored = [
+        _sc("dev1", "dev_activity", "coingecko-dev", "bearish", 0.55, "ETH 開發活動下滑"),
+        _sc("sen1", "sentiment", "coingecko-sentiment", "bullish", 0.55, "ETH 社群看漲"),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is None, f"dev_activity 不應被計入客觀類，實得 {result}"

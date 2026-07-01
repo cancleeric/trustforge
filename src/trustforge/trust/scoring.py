@@ -126,6 +126,10 @@ class ScoredClaim:
     # {source, prior, final, agree_n, contradict_n, iterations_run}。
     # 刻意獨立於 components（後者維持 str -> number 契約，不塞巢狀 dict）。
     reputation_trace: dict | None = None
+    # Tier2 可解釋 UX：操縱關鍵詞命中原文清單（由 `_manipulation_flags` 填入，
+    # 供 `agent.orchestrator._scored_to_evidence` 回填 `Evidence.flags`）。
+    # 預設空 list，不影響既有以 keyword 建構 ScoredClaim 的呼叫點/相等性比較。
+    manip_flags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -251,18 +255,41 @@ def _infer_direction(text: str) -> str:
     return "neutral"
 
 
-def _manipulation_penalty(c: Claim) -> float:
-    # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
-    text = c.text
-    hits = 0
+def _manip_hits(text: str) -> list[str]:
+    """回傳文字中所有通過否定守門（見 `_manipulation_penalty` 註解）的操縱關鍵詞
+    命中原文字串，依出現順序、未去重。`_manipulation_penalty`／`_manipulation_flags`
+    共用此清單，確保兩者對「命中什麼」的認定逐字一致，只是用途不同（前者算分數，
+    後者回原文供 UI 回溯）。"""
+    hits: list[str] = []
     for p in _MANIP_PATTERNS:
         for m in re.finditer(p, text, re.IGNORECASE):
             if _NEG_RX.search(text[max(0, m.start() - 4):m.start()]):
                 continue
-            hits += 1
+            hits.append(m.group(0))
+    return hits
+
+
+def _manipulation_penalty(c: Claim) -> float:
+    # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
+    hits = _manip_hits(c.text)
     # 社群來源的操縱訊號加重
     weight = 1.5 if c.doc.kind == "social" else 1.0
-    return min(1.0, hits * 0.4 * weight)
+    return min(1.0, len(hits) * 0.4 * weight)
+
+
+def _manipulation_flags(c: Claim) -> list[str]:
+    """Tier2 可解釋 UX：回傳命中的操縱關鍵詞原文（去重、保留原文大小寫），
+    供 `Evidence.flags` 回溯——使用者可從 flags 直接對照原文出現的可疑字眼。
+
+    刻意獨立於 `_manipulation_penalty`：純粹列出「命中什麼」，不含權重/分數
+    計算，不動 `_manipulation_penalty` 既有 float 簽名與既有測試鎖定的分數
+    行為（兩者底層共用 `_manip_hits`，命中判定邏輯不會分岔）。
+    """
+    seen: list[str] = []
+    for h in _manip_hits(c.text):
+        if h not in seen:
+            seen.append(h)
+    return seen
 
 
 def _normalize(s: str) -> set[str]:
@@ -766,6 +793,7 @@ def score(
                 reputation_trace=(
                     trace_by_source.get(c.doc.source) if trace_by_source is not None else None
                 ),
+                manip_flags=_manipulation_flags(c),
             )
         )
     return out

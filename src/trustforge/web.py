@@ -105,6 +105,14 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-hero-row{{display:grid;grid-template-columns:auto minmax(0,1fr);gap:1.2rem;align-items:center}}
  .tf-step{{border-left:4px solid #30363d;padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
  .tf-step li{{margin:.25rem 0}}
+ .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:#6e7681;font-weight:400;margin-left:.4rem}}
+ .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle}}
+ .tf-div-grid{{display:grid;grid-template-columns:1fr 34px 1fr;gap:0;align-items:stretch;margin-top:.6rem}}
+ .tf-div-side{{border-radius:9px;padding:.7rem .8rem}}
+ .tf-div-bull{{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.35)}}
+ .tf-div-bear{{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.35)}}
+ .tf-div-mid{{display:flex;align-items:center;justify-content:center;color:#f85149;font-weight:700;font-size:1rem}}
+ .tf-div-tag{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.1rem .5rem;margin-right:.4rem}}
  @media (max-width:900px){{
   body{{margin:1rem auto}}
   header.tf-hdr{{flex-direction:column;align-items:flex-start}}
@@ -112,6 +120,8 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
   .tf-layout{{grid-template-columns:1fr}}
   .tf-query-panel{{position:static}}
   .tf-hero-row{{grid-template-columns:1fr}}
+  .tf-div-grid{{grid-template-columns:1fr}}
+  .tf-div-mid{{padding:.3rem 0}}
  }}
 </style></head><body>
 <header class="tf-hdr">
@@ -488,6 +498,23 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
     )
 
 
+# Tier2 可解釋 UX：來源獨立性標籤依 kind 映射推導（純渲染層，不新增 schema
+# 欄位）。官方／現價類（客觀 kind，對齊 agent.orchestrator.OBJECTIVE_KINDS）
+# → 高；情緒／社群類（對齊 _SENTIMENT_KINDS）→ 中等；其餘（如 dev_activity——
+# 兩邊都不歸類的輔助訊號，見 orchestrator 註解）→ 一般。
+_HIGH_INDEP_KINDS = {"price", "price_live", "onchain", "regulatory", "hoyabit"}
+_MED_INDEP_KINDS = {"news", "social", "sentiment"}
+
+
+def _independence_tier(kind: str) -> tuple[str, str]:
+    """回傳 (顯示標籤, 顏色) 供來源 pill 的 tier·獨立性徽章使用。"""
+    if kind in _HIGH_INDEP_KINDS:
+        return "高·官方", "#3fb950"
+    if kind in _MED_INDEP_KINDS:
+        return "中等·情緒", "#d9832a"
+    return "一般·輔助", "#8b949e"
+
+
 def _render_evidence_list(
     evidence: list, coin: str | None = None, start_idx: int = 0
 ) -> str:
@@ -496,6 +523,9 @@ def _render_evidence_list(
     - trust < 0.3 或 contrarian 項目顯示紅色 tf-low badge。
     - source_url 透過 _safe_href 渲染：http/https 輸出連結，其餘輸出純文字。
     - trust_components 有值時在 <details> 內顯示分項拆解。
+    - 來源 pill 旁附 tier·獨立性標籤（依 kind 映射，見 `_independence_tier`）。
+    - `ev.flags` 非空時附操縱紅旗徽章（沿用既有 `.tf-low` badge 樣式，見
+      `trust.scoring._manipulation_flags` / `Evidence.flags`）。
     """
     e = html.escape
     rows: list[str] = []
@@ -505,6 +535,20 @@ def _render_evidence_list(
         badge = (
             f' <span class="tf-low">&#9888; 低信任/操縱</span>'
             if is_low else ""
+        )
+        flags = getattr(ev, "flags", None) or []
+        flags_badge = ""
+        if flags:
+            flags_text = "、".join(flags)
+            flags_badge = (
+                f' <span class="tf-low" title="操縱關鍵詞：{e(flags_text)}">'
+                f'&#128681; {e(flags_text)}</span>'
+            )
+        tier_label, tier_color = _independence_tier(ev.kind)
+        tier_pill = (
+            f'<span class="tf-tier-pill" '
+            f'style="color:{tier_color};border:1px solid {tier_color}">'
+            f'{e(tier_label)}</span>'
         )
         # source_url 安全連結：_safe_href 驗 scheme，escape 由其內部保留
         if ev.source_url:
@@ -522,7 +566,9 @@ def _render_evidence_list(
             f"<details>"
             f'<summary class="tf-ev-summary">'
             f'<span class="tf-src-pill">{e(ev.source)}</span>'
+            f'{tier_pill}'
             f'<span class="tf-ev-date">{e(ev.fetched_at)}</span>'
+            f'{flags_badge}'
             f"</summary>"
             f'<div class="tf-ev-body">'
             f"<p style='margin:.3rem 0;font-size:.85rem;color:#c9d1d9'>{e(ev.content_reference)}</p>"
@@ -584,11 +630,46 @@ def render_page(body: str = "", active_mode: str = "offline") -> str:
     )
 
 
+def _cross_signal_sides(signal: dict) -> tuple[list[dict], list[dict]]:
+    """從既有 `cross_source_signal` 欄位純推導雙欄 BULLISH/BEARISH 資料，供
+    `_render_cross_signal` 背離時的結構化雙欄呈現使用。
+
+    不新增資料流——只重組已存在的欄位：優先用 `stance_pairs`（若有，每筆
+    `{"source","stance","text",...}` 直接對應一欄一則）；沒有 `stance_pairs`
+    時退回聚合層級的 `objective_direction`/`sentiment_direction`（各代表一欄，
+    描述文字為靜態說明，不引入新數值）。兩者皆缺 → 回傳 `([], [])`，呼叫端
+    據此判斷是否顯示雙欄區塊（向後相容，舊有僅 summary 的樣態仍可運作）。
+    """
+    bullish: list[dict] = []
+    bearish: list[dict] = []
+    for p in signal.get("stance_pairs") or []:
+        side = bullish if p.get("stance") == "bullish" else bearish
+        side.append({"label": p.get("source", ""), "detail": p.get("text", "")})
+    if bullish or bearish:
+        return bullish, bearish
+
+    obj_dir = signal.get("objective_direction")
+    sent_dir = signal.get("sentiment_direction")
+    if obj_dir in ("bullish", "bearish") and sent_dir in ("bullish", "bearish"):
+        (bullish if obj_dir == "bullish" else bearish).append(
+            {"label": "客觀數據（現價／鏈上）", "detail": "信任加權多數方向"}
+        )
+        (bullish if sent_dir == "bullish" else bearish).append(
+            {"label": "情緒類（新聞／社群）", "detail": "信任加權多數方向"}
+        )
+    return bullish, bearish
+
+
 def _render_cross_signal(signal: dict) -> str:
     """跨源訊號帶色框渲染（inline style，CSP 相容，無外部資源/JS）。
 
     背離 = 橙色系（#d9832a）；共識 = 藍色系（#1f6feb）。
     summary 與所有字串一律 html.escape（縱深防禦）。
+
+    背離（`type == "divergence"`）且能從 `signal` 推導出雙方陣營（見
+    `_cross_signal_sides`）時，額外附加結構化雙欄 BULLISH/BEARISH 對照 +
+    Δ%（依雙方訊號筆數差推導，非價格漲跌幅，純渲染層算術，不新增資料流）。
+    推不出雙方（如舊資料 fixture 只有 summary）→ 保留舊版純文字渲染，功能零損。
     """
     e = html.escape
     sig_type = signal.get("type", "")
@@ -606,11 +687,58 @@ def _render_cross_signal(signal: dict) -> str:
         f'<small style="color:#8b949e">佐證 claim_ids：{e(", ".join(ids))}</small>'
         if ids else ""
     )
+
+    div_html = ""
+    if sig_type == "divergence":
+        bullish, bearish = _cross_signal_sides(signal)
+        if bullish or bearish:
+            total = len(bullish) + len(bearish)
+            delta_pct = round(abs(len(bullish) - len(bearish)) / total * 100) if total else 0
+
+            def _side_body(items: list[dict]) -> str:
+                if not items:
+                    return '<p style="margin:0;font-size:.8rem;color:#6e7681">&#8212;</p>'
+                return "".join(
+                    f'<p style="margin:.3rem 0 .1rem;font-size:.85rem;color:#e6edf3">'
+                    f'<b>{e(it.get("label", ""))}</b></p>'
+                    f'<p style="margin:0 0 .3rem;font-size:.8rem;color:#8b949e">'
+                    f'{e(it.get("detail", ""))}</p>'
+                    for it in items
+                )
+
+            bull_html = (
+                f'<div class="tf-div-side tf-div-bull">'
+                f'<span class="tf-div-tag" style="color:#3fb950;background:rgba(63,185,80,.12);'
+                f'border:1px solid rgba(63,185,80,.4)">&#9650; BULLISH</span>'
+                f'{_side_body(bullish)}'
+                f'</div>'
+            )
+            bear_html = (
+                f'<div class="tf-div-side tf-div-bear">'
+                f'<span class="tf-div-tag" style="color:#f85149;background:rgba(248,81,73,.12);'
+                f'border:1px solid rgba(248,81,73,.4)">&#9660; BEARISH</span>'
+                f'{_side_body(bearish)}'
+                f'</div>'
+            )
+            div_html = (
+                f'<div style="margin:.5rem 0 0">'
+                f'<span class="tf-div-tag" style="color:#f85149;background:rgba(248,81,73,.12);'
+                f'border:1px solid rgba(248,81,73,.4)" '
+                f'title="依雙方訊號筆數差推導，非價格漲跌幅">CONFLICT &middot; &Delta;{delta_pct}%</span>'
+                f'</div>'
+                f'<div class="tf-div-grid">'
+                f'{bull_html}'
+                f'<div class="tf-div-mid">&#8800;</div>'
+                f'{bear_html}'
+                f'</div>'
+            )
+
     return (
         f'<div class="tf-section" style="border-left:4px solid {border_color};background:{bg_color}">'
         f'<h3 style="color:{border_color}">跨源訊號（{e(type_label)}）</h3>'
         f'<p style="margin:.3rem 0">{summary_esc}</p>'
         f'{ids_html}'
+        f'{div_html}'
         f'</div>'
     )
 
@@ -711,17 +839,17 @@ def _render_report(
 </div>
 
 <div class="tf-section" style="border-left:4px solid #3fb950">
-  <h3>事實（客觀資料）</h3>
+  <h3>事實（客觀資料）<span class="tf-step-badge">步驟 1/3</span></h3>
   <ul class="tf-step">{facts or '<li>&#8212;</li>'}</ul>
 </div>
 
 <div class="tf-section" style="border-left:4px solid #d9832a">
-  <h3>推論（Agent 推理）</h3>
+  <h3>推論（Agent 推理）<span class="tf-step-badge">步驟 2/3</span></h3>
   <ul class="tf-step">{infer or '<li>&#8212;</li>'}</ul>
 </div>
 
 <div class="tf-section" style="border-left:4px solid #1f6feb">
-  <h3>結論 / 關鍵依據</h3>
+  <h3>結論 / 關鍵依據<span class="tf-step-badge">步驟 3/3</span></h3>
   <ul class="tf-step">{basis or '<li>&#8212;</li>'}</ul>
 </div>
 
