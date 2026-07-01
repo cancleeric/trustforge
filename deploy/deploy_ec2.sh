@@ -8,14 +8,18 @@ cd "$(dirname "$0")/.."
 
 REGION="${REGION:-ap-southeast-2}"
 NAME=trustforge
-MODEL="${BEDROCK_MODEL_ID:-au.anthropic.claude-sonnet-4-6}"
+# ⚠️ credit-safety fail-safe：公開 EC2 預設「離線」(空 model id → 不呼叫 Bedrock、不燒 credit)。
+# 用 `${VAR-}`（非 `:-`）：只有「未設」才空。此腳本目前僅供**離線公開部署**。
+# 註：真正開受控 live 需同時設 BEDROCK_MODEL_ID + 傳 TRUSTFORGE_LIVE_TOKEN 進 systemd
+# (本腳本尚未傳 token → live 完整化為 follow-up；今日離線部署不需要)。
+MODEL="${BEDROCK_MODEL_ID-}"
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="trustforge-deploy-${ACCT}"
 ROLE=trustforge-ec2
 SG=trustforge-ec2-sg
 INSTANCE_TYPE="${INSTANCE_TYPE:-t3.micro}"
 
-echo "[ec2] 帳號 $ACCT / 區域 $REGION / 模型 $MODEL"
+echo "[ec2] 帳號 $ACCT / 區域 $REGION / 模型 ${MODEL:-<離線,無BEDROCK_MODEL_ID,不燒credit>}"
 
 # 1) 打包 + 上傳 S3 -----------------------------------------------------------
 echo "[ec2] 打包應用 zip…"
