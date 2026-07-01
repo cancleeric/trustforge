@@ -14,7 +14,7 @@ import json
 import pytest
 
 from trustforge.agent.orchestrator import run_agent_pipeline
-from trustforge.bedrock import BedrockClient, BedrockConfig
+from trustforge.bedrock import BedrockClient, BedrockConfig, LLMResult
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.schema import QuestionType
@@ -54,25 +54,39 @@ class FakeBedrockClient:
         self.offline = False
         self._call_count = 0
 
-    def complete(self, system: str, prompt: str) -> str:
+    def complete(self, system: str, prompt: str) -> LLMResult:
         self._call_count += 1
         # Step 1 呼叫：extract_claims_with_llm 在裡面呼叫 complete
         # Step 3 呼叫：build_report narrative
         # 以呼叫順序 / prompt 特徵區分回傳內容
+        # fake usage（非真 AWS）：固定 token 數方便斷言成本記錄計算正確
         if "JSON array" in prompt or "source_doc_id" in prompt:
             # Step 1: claim extraction
-            return _FAKE_CLAIMS_JSON
+            return LLMResult(
+                text=_FAKE_CLAIMS_JSON, input_tokens=120, output_tokens=40,
+                model_id=self.config.model_id,
+            )
         # Step 3: narrative
-        return "[p1#llm0] BTC 大額流出交易所，減少賣壓，短期傾向看漲。"
+        return LLMResult(
+            text="[p1#llm0] BTC 大額流出交易所，減少賣壓，短期傾向看漲。",
+            input_tokens=80, output_tokens=30, model_id=self.config.model_id,
+        )
 
-    def extract_claims_with_llm(self, docs):
+    def extract_claims_with_llm(self, docs, log=None):
         """直接呼叫真實實作（讓 complete 被計數）。"""
         # 呼叫真實的 BedrockClient.extract_claims_with_llm，但使用本 fake 的 complete
         from trustforge.bedrock import _OBJECTIVE_KINDS
+        from trustforge.ledger import estimate_cost
         from trustforge.trust.scoring import Claim, extract_claims
         import json as _json
 
-        raw = self.complete(system="", prompt="JSON array source_doc_id")
+        result = self.complete(system="", prompt="JSON array source_doc_id")
+        if log is not None:
+            log.record_llm_cost(
+                result.model_id, result.input_tokens, result.output_tokens,
+                estimate_cost(result.model_id, result.input_tokens, result.output_tokens),
+            )
+        raw = result.text
         doc_map = {d.id: d for d in docs}
         try:
             items = _json.loads(raw)

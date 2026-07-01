@@ -26,10 +26,13 @@ from urllib.parse import parse_qs, urlparse
 
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .pipeline import run, run_comparison
+from .ledger import JsonlLedger, get_ledger
 
 PORT = int(os.getenv("PORT", "8080"))
 HAS_BEDROCK = bool(os.getenv("BEDROCK_MODEL_ID"))
 LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+# 累計花費超過此門檻（USD）→ /costs 頁面卡片轉紅告警。未設定則不告警。
+COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
 
 # per-IP 限流：每 IP 每 60 秒最多 5 次 live 請求
 _RATE_WINDOW = 60
@@ -59,7 +62,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-conf-wrap{{background:#f6f8fa;border:1px solid #e2e2e2;border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
 </style></head><body>
-<h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　<span class="badge">{mode}</span></p>
+<h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　<span class="badge">{mode}</span>　<a href="/costs">成本帳本</a></p>
 <form action="/analyze" method="get">
  <div><label>幣種</label><select name="coin">{coins}</select></div>
  <div><label>題型</label><select name="type">{types}</select></div>
@@ -127,6 +130,118 @@ def _conf_gauge(confidence: float, label: str) -> str:
         f'<div class="tf-bar" style="width:{pct}%;background:{color}"></div>'
         f'</div></div>'
     )
+
+
+def _render_cost_card(log) -> str:
+    """本次分析成本卡（`.tf-section` 慣例）：從 `log.events` 篩 `tool=="llm.cost"` 加總。
+
+    離線 run（Step3 一定會呼叫一次 `client.complete()`，離線回傳 token=0/cost=0，
+    仍會記一筆 `llm.cost`，model 記為 "offline"）顯示 `$0.00（離線）`，讓使用者
+    一眼看出這次分析沒有實際 Bedrock 花費，而不是誤以為 UI 沒算對。
+    沒有任何 `llm.cost` 事件（理論上不會發生，Step3 恆記一筆）時回空字串，優雅略過。
+    """
+    e = html.escape
+    cost_events = [ev["params"] for ev in log.events if ev.get("tool") == "llm.cost"]
+    if not cost_events:
+        return ""
+    total = sum(float(p.get("cost_usd", 0.0) or 0.0) for p in cost_events)
+    tokens_in = sum(int(p.get("tokens_in", 0) or 0) for p in cost_events)
+    tokens_out = sum(int(p.get("tokens_out", 0) or 0) for p in cost_events)
+    is_offline = all((p.get("model") or "offline") == "offline" for p in cost_events)
+    cost_display = "$0.00（離線）" if is_offline else f"${total:.4f}"
+    rows = "".join(
+        f"<tr><td>{e(str(p.get('model') or 'offline'))}</td>"
+        f"<td>{int(p.get('tokens_in', 0) or 0)}</td>"
+        f"<td>{int(p.get('tokens_out', 0) or 0)}</td>"
+        f"<td>${float(p.get('cost_usd', 0.0) or 0.0):.4f}</td></tr>"
+        for p in cost_events
+    )
+    return (
+        f'<div class="tf-section">'
+        f'<h3>本次分析成本</h3>'
+        f'<p class="j">{e(cost_display)}</p>'
+        f'<p style="color:#666;font-size:.85rem">'
+        f'共 {len(cost_events)} 次 LLM 呼叫；輸入 {tokens_in} tokens／輸出 {tokens_out} tokens</p>'
+        f'<table><tr><th>Model</th><th>輸入 tokens</th><th>輸出 tokens</th><th>估算成本</th></tr>'
+        f'{rows}</table>'
+        f'</div>'
+    )
+
+
+def _render_costs_page() -> str:
+    """`/costs`：跨 run 持久化成本帳本彙總頁 —— 累計總花費、依 model 分組、per-run 明細。
+
+    累計總花費超過 env `COST_BUDGET_USD` 門檻 → 卡片轉紅告警。帳本 backend 讀取
+    失敗（如 `COST_LEDGER_BACKEND=dynamodb` 但未實作）→ fallback 讀 `JsonlLedger`，
+    與 `ledger.append_run()` 的 fallback 邏輯一致，確保頁面永遠可顯示。
+    """
+    e = html.escape
+    try:
+        summary = get_ledger().summary()
+    except Exception:
+        summary = JsonlLedger().summary()
+
+    total = float(summary.get("total_cost_usd", 0.0) or 0.0)
+    by_model = summary.get("by_model", {}) or {}
+    runs = summary.get("runs", []) or []
+
+    over_budget = False
+    if COST_BUDGET_USD:
+        try:
+            over_budget = total > float(COST_BUDGET_USD)
+        except ValueError:
+            over_budget = False
+
+    card_style = (
+        "border-color:#cb2431;background:#fff5f5" if over_budget else "border-color:#1f6feb;background:#f0f6ff"
+    )
+    alert_html = (
+        f'<p style="color:#cb2431;font-weight:600">'
+        f'&#9888; 累計花費已超過預算門檻 ${e(COST_BUDGET_USD)}</p>'
+        if over_budget else ""
+    )
+
+    model_rows = "".join(
+        f"<tr><td>{e(str(m))}</td><td>${float(c):.4f}</td></tr>"
+        for m, c in sorted(by_model.items(), key=lambda kv: -kv[1])
+    )
+
+    # per-run 明細：最近 N 筆（最新在前）
+    recent = list(reversed(runs))[:50]
+    run_rows = []
+    for r in recent:
+        calls = r.get("calls", []) or []
+        offline_badge = " <small style='color:#888'>(離線)</small>" if r.get("offline") else ""
+        run_rows.append(
+            f"<tr><td>{e(str(r.get('ts', '')))}</td>"
+            f"<td>{e(str(r.get('coin', '')))}</td>"
+            f"<td>{e(str(r.get('question_type', '')))}{offline_badge}</td>"
+            f"<td>{len(calls)}</td>"
+            f"<td>${float(r.get('total_cost_usd', 0.0) or 0.0):.4f}</td></tr>"
+        )
+    run_rows_html = "".join(run_rows)
+
+    return f"""
+<div class="tf-section" style="{card_style}">
+  <h2 style="margin:0 0 .3rem">累計成本帳本</h2>
+  <p class="j">${total:.4f}</p>
+  {alert_html}
+  <p style="color:#666;font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
+</div>
+
+<div class="tf-section">
+  <h3>依 Model 分組</h3>
+  <table><tr><th>Model</th><th>累計成本</th></tr>{model_rows or '<tr><td colspan="2">&#8212;</td></tr>'}</table>
+</div>
+
+<div class="tf-section">
+  <h3>Per-run 明細（最近 {len(recent)} 筆，最新在前）</h3>
+  <table>
+    <tr><th>時間</th><th>幣種</th><th>題型</th><th>LLM 呼叫數</th><th>本次成本</th></tr>
+    {run_rows_html or '<tr><td colspan="5">&#8212;（尚無紀錄）</td></tr>'}
+  </table>
+</div>
+"""
 
 
 def _safe_href(url: str) -> str:
@@ -317,8 +432,12 @@ def _render_cross_signal(signal: dict) -> str:
     )
 
 
-def _render_report(report, evidence) -> str:
-    """分析結果渲染為信任儀表板（事實→推論→結論三段 + 信任橫條 + 可展開 evidence）。"""
+def _render_report(report, evidence, log=None) -> str:
+    """分析結果渲染為信任儀表板（事實→推論→結論三段 + 信任橫條 + 可展開 evidence）。
+
+    `log`：可選的 `ExecutionLog`，提供時嵌入「本次分析成本」卡（見 `_render_cost_card`）。
+    comparison 頁面內嵌的單幣詳細分析不傳 `log`（避免重複顯示合併後的整體成本卡）。
+    """
     e = html.escape
     facts = "".join(f"<li>{e(f)}</li>" for f in report.facts)
     infer = "".join(f"<li>{e(i)}</li>" for i in report.inferences)
@@ -336,6 +455,7 @@ def _render_report(report, evidence) -> str:
         _render_cross_signal(report.cross_source_signal)
         if getattr(report, "cross_source_signal", None) else ""
     )
+    cost_html = _render_cost_card(log) if log is not None else ""
     return f"""
 <div class="tf-section" style="background:#f0f6ff;border-color:#1f6feb">
   <h2 style="margin:0 0 .4rem">{e(report.coin)} · {e(report.question_type)}</h2>
@@ -379,6 +499,8 @@ def _render_report(report, evidence) -> str:
     {ev_rows}
   </table>
 </div>
+
+{cost_html}
 
 <p><a href="/analyze.json?coin={e(report.coin)}&type={e(report.question_type)}&q={e(report.question)}">下載 JSON（report+evidence+log）</a></p>
 """
@@ -447,8 +569,13 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
     return None
 
 
-def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str) -> str:
-    """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。"""
+def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str, log=None) -> str:
+    """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。
+
+    `log`：兩幣共用同一個 `ExecutionLog`（見 `pipeline.run_comparison`），提供時
+    在頂層嵌一張合併「本次分析成本」卡（涵蓋兩幣總花費）；內嵌的單幣詳細分析
+    不重複帶 log（避免同一份合併成本重複顯示兩次）。
+    """
     e = html.escape
     dir_a = report_a.direction or report_a._direction_label()
     dir_b = report_b.direction or report_b._direction_label()
@@ -470,6 +597,7 @@ def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str) -
     ev_rows_b = _render_evidence_list(
         evidence_b, coin=report_b.coin, start_idx=len(evidence_a)
     )
+    cost_html = _render_cost_card(log) if log is not None else ""
     return f"""
 <div class="tf-section" style="background:#f0f6ff;border-color:#1f6feb">
   <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
@@ -497,6 +625,8 @@ def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str) -
     {ev_rows_b}
   </table>
 </div>
+
+{cost_html}
 
 <details class="tf-section"><summary>&#9654; {e(report_a.coin)} 詳細分析</summary>
 {_render_report(report_a, evidence_a)}
@@ -601,6 +731,8 @@ class Handler(BaseHTTPRequestHandler):
         page = render_page
         if u.path == "/":
             return self._send(200, page(""))
+        if u.path == "/costs":
+            return self._send(200, page(_render_costs_page()))
         if u.path in ("/analyze", "/analyze.json"):
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
             try:
@@ -628,7 +760,7 @@ class Handler(BaseHTTPRequestHandler):
                         )
                     return self._send(
                         200,
-                        page(_render_comparison(report_a, evidence_a, report_b, evidence_b, query)),
+                        page(_render_comparison(report_a, evidence_a, report_b, evidence_b, query, log)),
                     )
                 else:
                     report, evidence, log = _do_analyze(qs, client_ip=client_ip)
@@ -642,7 +774,7 @@ class Handler(BaseHTTPRequestHandler):
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
                         )
-                    return self._send(200, page(_render_report(report, evidence)))
+                    return self._send(200, page(_render_report(report, evidence, log)))
             except TooManyRequests as exc:
                 return self._send(429, page(
                     f"<p style='color:#c00'>{html.escape(str(exc))}</p>"))

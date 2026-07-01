@@ -39,5 +39,28 @@ class ExecutionLog:
             "summary": summary,
         })
 
+    def record_llm_cost(
+        self, model: str | None, tokens_in: int, tokens_out: int, cost_usd: float
+    ) -> None:
+        """記錄一次真實 Bedrock LLM 呼叫的 token 用量與估算成本。
+
+        走既有 `record()`（tool="llm.cost"），不改 `to_jsonl()`/event schema —
+        WebUI 本次成本卡與跨 run 帳本都從 `events` 篩 `tool=="llm.cost"` 彙總。
+        離線/無 model_id 的呼叫也可能傳入（tokens=0, cost_usd=0.0），代表
+        「此次呼叫發生但無花費」，不代表沒呼叫——是否呼叫由呼叫端決定要不要記。
+        """
+        model = model or "offline"
+        cost_usd = round(float(cost_usd or 0.0), 6)
+        self.record(
+            "llm.cost",
+            params={
+                "model": model,
+                "tokens_in": int(tokens_in or 0),
+                "tokens_out": int(tokens_out or 0),
+                "cost_usd": cost_usd,
+            },
+            summary=f"{model}：輸入 {tokens_in} tokens／輸出 {tokens_out} tokens／${cost_usd:.4f}",
+        )
+
     def to_jsonl(self) -> str:
         return "\n".join(json.dumps(e, ensure_ascii=False) for e in self.events)
