@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from urllib.request import Request, urlopen
@@ -70,6 +71,38 @@ _UA = "TrustForge/1.0 (research)"
 # 明確措辭，讓 trust.scoring._infer_direction 能推出正確主導方向；差距不足
 # 門檻視為五五波、維持中性語意（見 CoinGeckoSentimentSource.fetch）。
 _SENTIMENT_DOMINANCE_THRESHOLD = 5.0
+
+
+def _valid_pct(v: object) -> float | None:
+    """驗證「有限數字且落在 0–100」的百分比欄位，其餘一律回 None（不造假）。
+
+    codex MEDIUM（呼應 #24 不造假，Tier2）：partial/malformed API 回應（單邊缺、
+    非數值、NaN/inf、超出 0–100 範圍）不得被硬轉成「明確方向」的觀測——那等於
+    把壞資料捏造成強訊號。只要不是「有限、範圍內的數字」，一律視為不可用，
+    交由呼叫端退回中性/N-A 語意，絕不代入方向判斷。
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if not math.isfinite(v):
+        return None
+    if v < 0.0 or v > 100.0:
+        return None
+    return float(v)
+
+
+def _valid_change_pct(v: object) -> float | None:
+    """驗證 24h 漲跌幅欄位：必須是有限數字（NaN/inf/非數值 → None，不造假）。
+
+    漲跌幅理論上無界（可能 >100% 或 <-100%），故不套用 0–100 範圍檢查，
+    只擋「非數值/NaN/inf」這類會被 `>`/`<` 比較悄悄吃掉、卻不代表真實漲跌的
+    壞值（例如 NaN 落入 else 分支會被誤判成「持平」，等於把壞資料捏造成
+    一個看似合理的觀測）。
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if not math.isfinite(v):
+        return None
+    return float(v)
 
 # Demo API key env（選用；keyless 已足夠，見模組頂部說明）。只從 env 讀，
 # 絕不 hardcode。實際 key 由 CEO 另立步驟在部署環境（systemd/EC2）設定，
@@ -204,13 +237,19 @@ class CoinGeckoPriceSource(Source):
             # 信任加權主導方向也恆為 neutral，detect_cross_source_signal 永遠
             # 拒收，背離/共識判定形同虛設。改為依漲跌幅正負附上明確方向詞
             # （持平則不附，維持中性語意，符合實際盤況）。
-            if isinstance(change_24h, (int, float)):
-                if change_24h > 0:
-                    change_str = f"{change_24h:+.2f}%（上漲）"
-                elif change_24h < 0:
-                    change_str = f"{change_24h:+.2f}%（下跌）"
+            #
+            # 再修（codex MEDIUM，呼應 #24 不造假）：`change_24h > 0`/`< 0` 對
+            # NaN 兩者皆為 False，會落入 else 的「持平」分支——等於把壞資料
+            # （NaN/inf）捏造成一個看似合理的「持平」觀測。改用 `_valid_change_pct`
+            # 先擋非數值/NaN/inf，不合格一律退回 N/A、不下任何方向判斷。
+            change_val = _valid_change_pct(change_24h)
+            if change_val is not None:
+                if change_val > 0:
+                    change_str = f"{change_val:+.2f}%（上漲）"
+                elif change_val < 0:
+                    change_str = f"{change_val:+.2f}%（下跌）"
                 else:
-                    change_str = f"{change_24h:+.2f}%（持平）"
+                    change_str = f"{change_val:+.2f}%（持平）"
             else:
                 change_str = "N/A"
             ref = f"{code} 現價 {price} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
@@ -254,29 +293,35 @@ class CoinGeckoSentimentSource(Source):
         down = data.get("sentiment_votes_down_percentage")
         if up is None and down is None:
             return []
-        up_val = up if isinstance(up, (int, float)) else None
-        down_val = down if isinstance(down, (int, float)) else None
-        up_str = f"{up_val:.1f}%" if up_val is not None else "N/A"
-        down_str = f"{down_val:.1f}%" if down_val is not None else "N/A"
         # 修（codex HIGH，Tier2）：原本文字固定同時寫「看漲 X%，看跌 Y%」，
         # 導致 trust.scoring._infer_direction 對「看漲」「看跌」各計一次而
         # 永遠打平回 neutral，使 detect_cross_source_signal 拒收、背離永不
         # 觸發——把 sentiment 加進 _SENTIMENT_KINDS 形同虛設。改為依多空數字
         # 的實際主導方向組字：差距達門檻才用單一方向詞描述（另一側只給數字、
-        # 不帶任何方向關鍵詞，避免又被計成平手）；差距不足門檻或只有單邊
-        # 數據極端時才維持/退回原始語意。
-        if up_val is not None and down_val is not None:
+        # 不帶任何方向關鍵詞，避免又被計成平手）；差距不足門檻維持中性語意。
+        #
+        # 再修（codex MEDIUM，呼應 #24 不造假）：上一版對「只有單邊票數」的
+        # 情況直接捏出 ±100pp 差距、硬發強方向詞——partial/malformed API
+        # 回應（單邊缺、非數值、NaN/inf、超出 0–100 範圍）因此會被偽裝成
+        # 強烈的多空觀測，進而製造假背離。改為用 `_valid_pct` 嚴格驗證：
+        # 兩邊都必須是有限數字且落在 0–100，才進入方向判斷；只要有一邊不合格，
+        # 一律回中性語意的 data-quality 措辭，絕不捏造方向。比較也改嚴格
+        # `>`/`<`（原 `>=`/`<=` 會把剛好等於門檻的 5pp 也算方向，不符合
+        # 「僅 > 5pp 才算」的規格）。
+        up_val = _valid_pct(up)
+        down_val = _valid_pct(down)
+        up_str = f"{up_val:.1f}%" if up_val is not None else "N/A"
+        down_str = f"{down_val:.1f}%" if down_val is not None else "N/A"
+        if up_val is None or down_val is None:
+            ref = f"{code} 社群情緒投票：資料不完整或無效（看漲 {up_str}，看跌 {down_str}），暫無法判斷方向"
+        else:
             diff = up_val - down_val
-        elif up_val is not None:
-            diff = 100.0  # 只有多方票數 → 視為明確偏多
-        else:
-            diff = -100.0  # 只有空方票數 → 視為明確偏空
-        if diff >= _SENTIMENT_DOMINANCE_THRESHOLD:
-            ref = f"{code} 社群情緒偏多：看漲 {up_str}（多數意見），另有 {down_str} 持保留看法"
-        elif diff <= -_SENTIMENT_DOMINANCE_THRESHOLD:
-            ref = f"{code} 社群情緒偏空：看跌 {down_str}（多數意見），另有 {up_str} 持保留看法"
-        else:
-            ref = f"{code} 社群情緒投票：看漲 {up_str}，看跌 {down_str}"
+            if diff > _SENTIMENT_DOMINANCE_THRESHOLD:
+                ref = f"{code} 社群情緒偏多：看漲 {up_str}（多數意見），另有 {down_str} 持保留看法"
+            elif diff < -_SENTIMENT_DOMINANCE_THRESHOLD:
+                ref = f"{code} 社群情緒偏空：看跌 {down_str}（多數意見），另有 {up_str} 持保留看法"
+            else:
+                ref = f"{code} 社群情緒投票：看漲 {up_str}，看跌 {down_str}"
         doc_id = "coingecko-sentiment-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
         return [Document(
             id=doc_id,
