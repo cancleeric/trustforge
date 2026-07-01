@@ -157,6 +157,18 @@ class TrustedBrief:
     # `TrustedBrief(...)` 不傳此欄位時維持逐字向後相容（未校準 -> 0.0，
     # 呼叫端若讀取此欄位務必經由 aggregate() 取得有意義的值）。
     calibrated_confidence: float = 0.0
+    # W4 codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）：coin 過濾
+    # 原本只套用在 calibration 輸入（見 `aggregate()` 的 `calib_pool`），但
+    # `supporting`（進而 facts/key_basis/`_direction()`/abstain 門檻）仍用
+    # 未過濾全集——強本幣源 + 高信任他幣源會讓他幣證據混入本幣報告的支撐/
+    # 方向/事實。修法：`aggregate()` 把「跟 calibration 同一份 coin-scoped
+    # supporting 子集」（`_matches_coin` 篩過，已截斷至 `[:10]` 跟 `supporting`
+    # 口徑一致）透過此欄位帶出，供 `agent.orchestrator.build_report` 貫穿
+    # n_indep/`_direction()`/facts/key_basis 使用，不再各自分開判準。
+    # None：非經 `aggregate()` 產生的 brief（測試手動建構 `TrustedBrief(...)`
+    # 不傳此欄位）——呼叫端應 fallback 回 `supporting`（未套用 coin 過濾，
+    # 逐字向後相容既有手動建構的合成 fixture）。
+    coin_scoped_supporting: list[ScoredClaim] | None = None
 
     def provenance(self) -> list[dict]:
         """溯源鏈：每個被採用主張的來源與分數。"""
@@ -1290,7 +1302,12 @@ def aggregate(scored: list[ScoredClaim], query: str,
         # 已依 (是否幣種特定, 信任分) 排序完成，不再套用下面純信任分排序。
         # calibration 專用子集：只留「幣種相關或全市場通用」（`_matches_coin`
         # 分支 1/3），排除明確提及其他幣、與本次目標幣無關的雜訊。
-        calib_pool = [sc for sc in scored if _matches_coin(sc.claim.doc, coin)]
+        # 從已排序的 `relevant`（不是重新從 `scored`篩）取子集，保留信任分
+        # 排序——這份子集後面（見 `coin_scoped_supporting`）會被
+        # `agent.orchestrator.build_report` 拿去做 `_direction()`/facts/
+        # key_basis 的資料來源，順序需跟 `supporting` 口徑一致（trust 高者
+        # 優先），不能是未排序的原始 `scored` 順序。
+        calib_pool = [sc for sc in relevant if _matches_coin(sc.claim.doc, coin)]
     else:
         # 與 query 相關者優先（無相關詞則全納入）
         relevant = [
@@ -1327,4 +1344,8 @@ def aggregate(scored: list[ScoredClaim], query: str,
         contrarian=contrarian[:5],
         confidence=confidence,
         calibrated_confidence=_calibrate_confidence(evidence_strength),
+        # W4 codex 對抗審第 6 輪：跟 calibration 用同一份 coin-scoped 子集
+        # （截斷口徑對齊 `supporting[:10]`），供 build_report 貫穿 n_indep/
+        # _direction()/facts/key_basis 判準，見 TrustedBrief 欄位註解。
+        coin_scoped_supporting=calib_supporting[:10],
     )

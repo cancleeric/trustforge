@@ -117,6 +117,35 @@ claim/句級筆數）——同一份文件寫兩句高信任內容就會產生 2
     來源數，不誤傷正常案例）。
   - 既有 650 綠 + 三態 e2e/abstain 一致性回歸確認：全部沿用既有測試逐字
     不動，未修改任何既有斷言。
+
+codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）：第 4 輪的 coin
+相關過濾（`_matches_coin`）只套用在 `aggregate()` 的 calibration 輸入，
+但 `agent.orchestrator.build_report` 的 `brief.supporting`（進而 n_indep
+門檻／`_direction()`／facts／key_basis／Step3 LLM prompt 的 claim_refs）
+仍吃未過濾全集——強本幣源 + 高信任他幣源可能一起湊過 2-源門檻脫離
+abstain，他幣的 fact/claim 也可能混進 facts/key_basis/方向判斷/LLM
+narrative。
+  - 修法：`TrustedBrief` 新增 `coin_scoped_supporting` 欄位，`aggregate()`
+    把跟 calibration 同一份 `calib_supporting`（`_matches_coin` 篩過，
+    截斷口徑對齊 `supporting[:10]`）透過此欄位帶出（None 代表非經
+    `aggregate()` 產生的手動合成 brief，逐字向後相容 fallback 回
+    `brief.supporting`）。`build_report` 改用這份 `coin_scoped_supporting`
+    貫穿 n_indep 門檻／`_direction()`／facts／key_basis／evidence 支撐清單
+    ／Step3 LLM prompt 的 claim_refs，不再各自用不同判準。
+  - 同時修正 `aggregate()` coin 分支的 `calib_pool` 從未排序的 `scored`
+    改為從已排序的 `relevant` 篩子集，保留信任分排序（`coin_scoped_
+    supporting` 現在會被拿去做 `_direction()`/facts 的資料來源，順序需要
+    跟 `supporting` 一致，不能是未排序的原始順序）。
+  - 本輪新增：
+    `test_aggregate_coin_scoped_supporting_still_includes_generic_market_wide_news`
+    （純 aggregate：延續 #32 精神，全市場通用高信任新聞不被 coin 過濾誤排）、
+    `test_e2e_strong_btc_source_plus_high_trust_eth_sources_still_abstains_and_stays_clean`
+    （核心回歸：1 個 BTC 源 + 3 個高信任 ETH 源，仍 abstain，facts/
+    key_basis/market_judgment/direction 完全不含 ETH 內容）、
+    `test_e2e_multi_btc_sources_normal_state_unaffected_by_coin_scoping`
+    （對照組：正常多 BTC 來源，coin-scoped 貫穿修正後仍正常給出方向結論）。
+  - 既有 652 綠 + 三態 demo（`pipeline.run(offline=True)` BTC 多源樣本
+    normal、單一來源同源 2 句 abstain）不回歸確認。
 """
 from __future__ import annotations
 
@@ -466,6 +495,31 @@ def test_aggregate_coin_irrelevant_low_trust_claims_do_not_change_calibrated_con
     )
 
 
+def test_aggregate_coin_scoped_supporting_still_includes_generic_market_wide_news():
+    """codex 對抗審第 6 輪回歸守門：`coin_scoped_supporting`（`_matches_coin`
+    篩過的子集）不得誤排「全市場通用、未提及任何幣別」的高信任新聞——延續
+    demo 可靠性 #32 的精神（`_matches_coin` 分支 3：無任何幣別提及→全市場
+    通用，納入）。本測試用高信任（`meta={"reputation": 0.9}`）的通用監管
+    新聞（不提及 BTC 或任何幣別），確認它仍出現在 `coin_scoped_supporting`
+    裡，不會被 coin 過濾誤傷。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc(
+            "p3", "news", "coindesk", "多家交易所遭 SEC 警告 監管 趨嚴。",
+            meta={"reputation": 0.9},
+        ),
+    ]
+    scored = score(extract_claims(docs), now=1_000_000.0)
+    brief = aggregate(scored, query="分析 BTC", coin="BTC")
+
+    coin_scoped_sources = {sc.claim.doc.source for sc in brief.coin_scoped_supporting}
+    assert "coindesk" in coin_scoped_sources, (
+        "全市場通用（未提及任何幣別）的高信任新聞不該被 coin 過濾排除，"
+        f"實際 coin_scoped_supporting 來源集合={coin_scoped_sources}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 4. `build_report` 三態 abstain —— 全部只透過真實 aggregate() 建 brief
 # ---------------------------------------------------------------------------
@@ -651,6 +705,72 @@ def test_e2e_two_distinct_sources_one_claim_each_can_leave_abstain():
         f"實得 decision_state={report.decision_state}（calibrated="
         f"{brief.calibrated_confidence}）"
     )
+
+
+def test_e2e_strong_btc_source_plus_high_trust_eth_sources_still_abstains_and_stays_clean():
+    """codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）核心回歸：
+    上一輪（第 4 輪）的 coin 過濾只套用在 calibration，`build_report` 的
+    n_indep 門檻／`_direction()`／facts／key_basis 仍吃未過濾的
+    `brief.supporting` 全集——強本幣(BTC)源 + 多個高信任他幣(ETH)源，若不
+    做 coin-scoped 貫穿，會被誤判為「3 個獨立來源」脫離 abstain，且他幣
+    的 facts/key_basis/方向可能混入 BTC 報告。
+
+    本測試：1 個 BTC 來源（exch-a）+ 3 個不同的高信任 ETH 來源（跨
+    price/onchain/news kind，皆明確提及 ETH、不提及 BTC）。修後應：
+      - 仍 abstain（本幣 coin-scoped 只有 1 個獨立來源，未達 2 個門檻）。
+      - facts／key_basis／market_judgment／direction 完全不含 ETH 內容。
+    """
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("e1", "price", "exch-eth-1", "ETH 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("e2", "onchain", "glassnode-eth", "ETH 鏈上 大戶 增持 買盤 湧入 上漲。"),
+        _doc("e3", "news", "coindesk-eth", "ETH 生態 系統 升級 利多 消息 上漲。"),
+    ]
+    scored = score(extract_claims(docs), now=1_000_000.0)
+    brief = aggregate(scored, query="分析 BTC", coin="BTC")
+
+    # 前提檢查：若不做 coin-scoped 貫穿，未過濾的 brief.supporting 會有 3
+    # 個不同來源（exch-a + 2 個 ETH 來源，過門檻），但 coin_scoped_supporting
+    # 應只剩 exch-a 這 1 個。
+    assert len({sc.claim.doc.source for sc in brief.supporting}) >= 2, (
+        "前提檢查失敗：本案例應能證明『若不做 coin-scoped 貫穿會誤判過門檻』"
+    )
+    assert {sc.claim.doc.source for sc in brief.coin_scoped_supporting} == {"exch-a"}, (
+        f"前提檢查失敗：coin_scoped_supporting 應只剩 exch-a，"
+        f"實得 {[sc.claim.doc.source for sc in brief.coin_scoped_supporting]}"
+    )
+
+    report, _evidence = _run_report(brief)
+    assert report.decision_state == "abstain", (
+        f"BTC 只有 1 個獨立來源（他幣高信任源不算數），應 abstain，"
+        f"實得 decision_state={report.decision_state}"
+    )
+    assert report.direction == "不明"
+    assert "ETH" not in report.market_judgment, f"market_judgment 不應含他幣內容：{report.market_judgment}"
+    for f in report.facts:
+        assert "ETH" not in f, f"facts 不應含他幣內容：{f}"
+    for b in report.key_basis:
+        assert "ETH" not in b.claim, f"key_basis 不應含他幣內容：{b.claim}"
+
+
+def test_e2e_multi_btc_sources_normal_state_unaffected_by_coin_scoping():
+    """回歸對照組：正常多本幣(BTC)來源情境，coin-scoped 貫穿修正後仍應正常
+    給出 normal 態方向結論——確認本輪修正沒有誤傷合法的多幣種相關來源。"""
+    docs = [
+        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p3", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p4", "news", "coindesk", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+    ]
+    scored = score(extract_claims(docs), now=1_000_000.0)
+    brief = aggregate(scored, query="分析 BTC", coin="BTC")
+    assert len(brief.coin_scoped_supporting) == 4
+
+    report, _evidence = _run_report(brief)
+    assert report.decision_state == "normal", (
+        f"4 個獨立 BTC 來源應正常給出方向結論，實得 decision_state={report.decision_state}"
+    )
+    assert report.direction in ("偏多", "偏空", "中性")
 
 
 def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_marked():

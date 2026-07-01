@@ -95,9 +95,16 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
     )
 
 
-def _direction(brief: TrustedBrief) -> str:
-    """從高信任價格事實判方向（我方判斷，非外部結論）。"""
-    for sc in brief.supporting:
+def _direction(supporting: list[ScoredClaim]) -> str:
+    """從高信任價格事實判方向（我方判斷，非外部結論）。
+
+    W4 codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）：參數改吃
+    呼叫端已篩過「coin-scoped」的 supporting 子集（見 `build_report` 的
+    `coin_scoped_supporting`），不再直接吃整份 `brief.supporting`——避免
+    明確提及其他幣的高信任價格 claim（如強 BTC 報告混入他幣價格 claim）
+    被誤用來推方向。
+    """
+    for sc in supporting:
         if sc.claim.doc.kind == "price":
             t = sc.claim.text
             if "上漲" in t:
@@ -387,8 +394,29 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
 
+    # W4 codex 對抗審第 6 輪 [HIGH]（coin-relevance 根本一致性）：上一輪
+    # （第 4 輪）的 coin 相關過濾（`_matches_coin`）只套用在 `aggregate()`
+    # 的 calibration 輸入，但整份報告的支撐/方向/事實仍用未過濾的
+    # `brief.supporting` 全集——強本幣源 + 高信任他幣源（明確講 ETH/BNB）
+    # 可能一起湊過 2-源門檻脫離 abstain，他幣的 fact/claim 也可能混進
+    # facts/key_basis，`_direction()` 甚至可能誤用他幣的價格 claim 判斷
+    # 本幣方向。修法：把 `aggregate()` 帶出的 `coin_scoped_supporting`
+    # （跟 calibration 同一份 `_matches_coin` 篩過的子集）拿來貫穿本函式
+    # 所有「本幣支撐」語意的地方（n_indep 門檻／`_direction()`／facts／
+    # key_basis／evidence 的支撐清單），不再各自用不同判準。
+    # None（非經 `aggregate()` 產生的手動合成 brief，例如既有測試直接
+    # `TrustedBrief(...)`）→ fallback 回 `brief.supporting`，逐字向後相容。
+    coin_scoped_supporting = (
+        brief.coin_scoped_supporting
+        if brief.coin_scoped_supporting is not None
+        else brief.supporting
+    )
+
     # 1. 證據清單（支撐 + 反方）
-    log.record("evidence.build", summary=f"supporting={len(brief.supporting)} contrarian={len(brief.contrarian)}")
+    log.record(
+        "evidence.build",
+        summary=f"supporting={len(coin_scoped_supporting)} contrarian={len(brief.contrarian)}",
+    )
     evidence: list[Evidence] = []
     key_basis: list[BasisItem] = []
     ev_index: dict[tuple, int] = {}   # (source, content_reference) → 去重,保留最高 trust
@@ -408,7 +436,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         ev_index[key] = idx
         return idx
 
-    for sc in brief.supporting:
+    for sc in coin_scoped_supporting:
         idx = _add_evidence(sc, judgment_tag)
         key_basis.append(BasisItem(
             claim=sc.claim.text,
@@ -423,7 +451,11 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # 註解）。calibrated 的誠實聲明見 `trust.scoring._calibrate_confidence`
     # docstring：簡化版分位數校準，非嚴謹 conformal coverage 保證。
     calibrated = brief.calibrated_confidence
-    n_supporting = len(brief.supporting)
+    # W4 codex 對抗審第 6 輪 [HIGH]：`n_supporting`（訊息文字用的支撐筆數）
+    # 改用 `coin_scoped_supporting`，跟決定 abstain 的 `n_indep`/`_direction()`/
+    # facts/key_basis 同一份口徑——避免訊息文字仍把明確講他幣的 claim 算
+    # 進「支撐證據 N 筆」，跟實際判斷依據的集合對不上。
+    n_supporting = len(coin_scoped_supporting)
     # W4 codex 對抗審第 5 輪（claim-vs-source 主題收斂）[HIGH]：abstain 最小
     # 支撐門檻原本用 `n_supporting`（句級 claim 筆數）——`extract_claims()`
     # 是句級切分，同一份文件寫兩句高信任內容就會產生 2 筆 supporting
@@ -435,7 +467,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # judgment 敘事本就需要這個值，這裡只是提前算好、重複使用同一份，不
     # 重算 trust、不新增資料源）——單源不論產生幾句 claim，仍只算 1 份獨立
     # 來源，需要 ≥2 個不同來源才可能脫離 abstain。
-    n_indep = len({sc.claim.doc.source for sc in brief.supporting})
+    n_indep = len({sc.claim.doc.source for sc in coin_scoped_supporting})
     is_abstain = (
         calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_indep < _ABSTAIN_MIN_SUPPORTING
     )
@@ -445,7 +477,9 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # 不必再各自重算 calibrated 門檻。
     decision_state = "abstain" if is_abstain else ("low_confidence" if is_low_confidence else "normal")
 
-    facts = [sc.claim.text for sc in brief.supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
+    # W4 codex 對抗審第 6 輪：facts 改用 coin_scoped_supporting，明確講其他
+    # 幣的客觀事實不進本幣報告的「事實」清單。
+    facts = [sc.claim.text for sc in coin_scoped_supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
 
     if is_abstain:
         # 證據不足：不代客決策，不給任何方向性字眼（不判斷偏多/偏空/中性），
@@ -459,7 +493,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
         )
     else:
-        direction = _direction(brief)
+        direction = _direction(coin_scoped_supporting)
         if qtype == QuestionType.HYPOTHESIS:
             head = f"針對假設「{query}」：依現有證據，{coin} 短期傾向{direction}。"
         elif qtype == QuestionType.COMPARISON:
@@ -504,10 +538,13 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     _harvest_stance_cost_events(client, log)
 
     # 3. Bedrock 行文（Step 3：帶 claim_id 溯源；離線為佔位，結構不依賴它）
-    # 建立 claim_id → 摘要對照，供 prompt 強制引用
+    # 建立 claim_id → 摘要對照，供 prompt 強制引用。
+    # W4 codex 對抗審第 6 輪：改用 coin_scoped_supporting，避免明確講其他幣
+    # 的高信任 claim 被塞進 LLM prompt 的「事實」區塊，讓 Step3 narrative
+    # 引用他幣內容、間接把他幣證據漏進本幣報告的 inferences。
     claim_refs = "\n".join(
         f"- [{sc.claim.id}] {sc.claim.text[:100]}"
-        for sc in brief.supporting[:8]
+        for sc in coin_scoped_supporting[:8]
     )
     # 若有跨源訊號，指示 LLM 只敘述已算好的 summary，不得自行判斷背離/共識
     _cross_note = ""
