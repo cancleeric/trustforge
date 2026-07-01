@@ -3,12 +3,16 @@
 路由：
   GET /            首頁表單（選幣種/題型/問題）
   GET /healthz     健康檢查（App Runner 用）→ 200 "ok"
-  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>] → HTML 報告
+  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>][&real=1] → HTML 報告
   GET /analyze.json 同上參數 → JSON {report, evidence, log}
 
-預設離線模式（用官方 OHLCV + 樣本來源 + Bedrock stub），故未設 AWS 也能跑出 Live Demo。
-live 模式需同時滿足：設了 BEDROCK_MODEL_ID、TRUSTFORGE_LIVE_TOKEN，
-且請求帶正確 token 參數（用 hmac.compare_digest 比對）。
+三檔模式（`data_mode`/`llm_mode` 解耦，見 `pipeline.run`）：
+  1. 離線示範（預設）：樣本資料 + Bedrock stub，未設 AWS 也能跑，$0。
+  2. 真資料·$0（`?real=1`）：走真連接器抓真資料，但 Bedrock 關閉（llm_mode=off），
+     不依賴 HAS_BEDROCK/token，仍是 $0，credit-safe。
+  3. 真 Bedrock（`?live=1&token=<TOKEN>`）：需同時滿足設了 BEDROCK_MODEL_ID、
+     TRUSTFORGE_LIVE_TOKEN，且請求帶正確 token 參數（用 hmac.compare_digest 比對）。
+     `live` 優先於 `real`：兩者同時滿足時走 live。
 埠口取自環境變數 PORT（App Runner 預設 8080）。
 """
 from __future__ import annotations
@@ -67,7 +71,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  .tf-conf-wrap{{background:#f6f8fa;border:1px solid #e2e2e2;border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
 </style></head><body>
-<h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　<span class="badge">{mode}</span>　<a href="/costs">成本帳本</a></p>
+<h1>TrustForge</h1><p class="sub">加密市場分析 AI Agent — 多源資訊的信任提煉　{mode}　<a href="/costs">成本帳本</a></p>
 <p><span class="badge" style="opacity:.6">{version}</span></p>
 <form action="/analyze" method="get">
  <div><label>幣種</label><select name="coin">{coins}</select></div>
@@ -397,10 +401,23 @@ def _render_evidence_list(
 
 
 def render_page(body: str = "") -> str:
-    """組完整 HTML（模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。"""
-    mode = "AWS Bedrock 就緒（?live=1 啟用）" if HAS_BEDROCK else "離線示範模式（未設 BEDROCK_MODEL_ID）"
+    """組完整 HTML（三檔模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。
+
+    三檔徽章：離線示範（預設，$0）／真資料·$0（?real=1，真連接器免 Bedrock，
+    不依賴 HAS_BEDROCK）／真 Bedrock（?live=1+token，需 BEDROCK_MODEL_ID）。
+    """
+    bedrock_badge = (
+        '<span class="badge">真 Bedrock（?live=1）</span>'
+        if HAS_BEDROCK else
+        '<span class="badge" style="opacity:.5">真 Bedrock（未設 BEDROCK_MODEL_ID）</span>'
+    )
+    mode = (
+        '<span class="badge">離線示範</span> '
+        '<span class="badge">真資料·$0（?real=1）</span> '
+        f'{bedrock_badge}'
+    )
     return _PAGE.format(
-        mode=html.escape(mode), body=body,
+        mode=mode, body=body,
         version=html.escape(VERSION),
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
@@ -439,11 +456,14 @@ def _render_cross_signal(signal: dict) -> str:
     )
 
 
-def _render_report(report, evidence, log=None) -> str:
+def _render_report(report, evidence, log=None, mode_suffix: str = "") -> str:
     """分析結果渲染為信任儀表板（事實→推論→結論三段 + 信任橫條 + 可展開 evidence）。
 
     `log`：可選的 `ExecutionLog`，提供時嵌入「本次分析成本」卡（見 `_render_cost_card`）。
     comparison 頁面內嵌的單幣詳細分析不傳 `log`（避免重複顯示合併後的整體成本卡）。
+    `mode_suffix`：由 `_mode_link_suffix()` 算出的模式參數字串（見該函式），附加在
+    「下載 JSON」自我連結尾端，確保 real/live 模式點下載時仍匯出同一模式的資料，
+    不會落回預設 offline/sample 分支造成匯出跟畫面不一致。預設空字串＝不帶（向後相容）。
     """
     e = html.escape
     facts = "".join(f"<li>{e(f)}</li>" for f in report.facts)
@@ -509,7 +529,7 @@ def _render_report(report, evidence, log=None) -> str:
 
 {cost_html}
 
-<p><a href="/analyze.json?coin={e(report.coin)}&type={e(report.question_type)}&q={e(report.question)}">下載 JSON（report+evidence+log）</a></p>
+<p><a href="/analyze.json?coin={e(report.coin)}&type={e(report.question_type)}&q={e(report.question)}{mode_suffix}">下載 JSON（report+evidence+log）</a></p>
 """
 
 
@@ -576,12 +596,16 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
     return None
 
 
-def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str, log=None) -> str:
+def _render_comparison(
+    report_a, evidence_a, report_b, evidence_b, query: str, log=None, mode_suffix: str = ""
+) -> str:
     """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。
 
     `log`：兩幣共用同一個 `ExecutionLog`（見 `pipeline.run_comparison`），提供時
     在頂層嵌一張合併「本次分析成本」卡（涵蓋兩幣總花費）；內嵌的單幣詳細分析
     不重複帶 log（避免同一份合併成本重複顯示兩次）。
+    `mode_suffix`：見 `_render_report`，原樣轉傳給內嵌的兩份單幣詳細分析，讓其
+    「下載 JSON」連結同樣保留當前模式參數（預設空字串＝不帶，向後相容）。
     """
     e = html.escape
     dir_a = report_a.direction or report_a._direction_label()
@@ -636,27 +660,81 @@ def _render_comparison(report_a, evidence_a, report_b, evidence_b, query: str, l
 {cost_html}
 
 <details class="tf-section"><summary>&#9654; {e(report_a.coin)} 詳細分析</summary>
-{_render_report(report_a, evidence_a)}
+{_render_report(report_a, evidence_a, mode_suffix=mode_suffix)}
 </details>
 <details class="tf-section"><summary>&#9654; {e(report_b.coin)} 詳細分析</summary>
-{_render_report(report_b, evidence_b)}
+{_render_report(report_b, evidence_b, mode_suffix=mode_suffix)}
 </details>
 """
 
 
 
-def _parse_live(qs: dict, client_ip: str) -> bool:
-    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。"""
+def _is_live_request(qs: dict) -> bool:
+    """純判斷 live=1 是否成立（HAS_BEDROCK + token 正確），無副作用、不觸發限流。
+
+    供 `_parse_live`（有副作用版）與 `_mode_link_suffix`（自我連結用，不能重複
+    消耗限流額度）共用同一套判斷邏輯，避免兩處各寫一份、日後改一邊漏改另一邊。
+    """
     req_token = qs.get("token", [""])[0]
-    live = (
+    return (
         HAS_BEDROCK
         and qs.get("live", ["0"])[0] == "1"
         and bool(LIVE_TOKEN)
         and hmac.compare_digest(req_token, LIVE_TOKEN)
     )
+
+
+def _parse_live(qs: dict, client_ip: str) -> bool:
+    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。"""
+    live = _is_live_request(qs)
     if live and client_ip:
         _check_live_rate_limit(client_ip)
     return live
+
+
+def _is_real_request(qs: dict, live: bool) -> bool:
+    """純判斷「真資料·$0」（?real=1）是否成立，無副作用、不觸發限流。見 `_is_live_request`。"""
+    if live:
+        return False
+    return qs.get("real", ["0"])[0] == "1"
+
+
+def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
+    """從 qs 解析「真資料·$0」開關（?real=1）：走真連接器、免 Bedrock。
+
+    不依賴 HAS_BEDROCK / token（與 live 檔位互相獨立）；`live` 已成立時
+    real 不重複判斷（live 優先，走真 Bedrock 就不必再走真資料免敘事檔）。
+    real 生效時比照 live 走同一組 per-IP 限流，避免真連接器被打爆。
+    """
+    real = _is_real_request(qs, live)
+    if real and client_ip:
+        _check_live_rate_limit(client_ip)
+    return real
+
+
+def _mode_link_suffix(qs: dict) -> str:
+    """算出目前請求應在自我連結（如 `/analyze.json` 下載連結）保留的模式參數字串。
+
+    MEDIUM 修復：real/live 模式的報告頁若沒把模式參數帶進下載連結，點「下載 JSON」
+    會落回預設 offline/sample 分支，匯出的 report/evidence 就跟畫面看到的不一致，
+    破壞溯源/可重現性。三檔對應：
+      - live 成立 → "&live=1&token=<token>"（token 語意照舊：沿用當次請求已帶的值，
+        不會比目前頁面 URL 洩漏更多資訊）
+      - 否則 real 成立 → "&real=1"
+      - 兩者皆非（預設離線示範）→ ""（不帶模式參數，維持原行為）
+
+    純函式：只重算跟 `_parse_live`/`_parse_real` 相同的判斷邏輯（`_is_live_request`/
+    `_is_real_request`），不呼叫 `_check_live_rate_limit`，才不會讓同一次請求的
+    自我連結重複消耗限流額度。
+    """
+    e = html.escape
+    live = _is_live_request(qs)
+    if live:
+        token = qs.get("token", [""])[0]
+        return f"&live=1&token={e(token)}"
+    if _is_real_request(qs, live):
+        return "&real=1"
+    return ""
 
 
 def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
@@ -676,12 +754,16 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
     live = _parse_live(qs, client_ip)
+    real = _parse_real(qs, client_ip, live)
 
     coin = coin_raw.upper()
     if coin not in COIN_POOL:
         raise ValueError(f"幣種須為 {COIN_POOL} 之一")
 
-    report, evidence, log = run(coin, query, qtype, offline=not live)
+    if real:
+        report, evidence, log = run(coin, query, qtype, data_mode="live", llm_mode="off")
+    else:
+        report, evidence, log = run(coin, query, qtype, offline=not live)
     return report, evidence, log
 
 
@@ -699,6 +781,7 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
     live = _parse_live(qs, client_ip)
+    real = _parse_real(qs, client_ip, live)
 
     pair = _parse_comparison_coins(coin_raw, query)
     if pair is None:
@@ -707,9 +790,14 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
             f"或在問題中提及兩個幣種（可選：{COIN_POOL}）"
         )
     coin_a, coin_b = pair
-    report_a, evidence_a, report_b, evidence_b, log = run_comparison(
-        coin_a, coin_b, query, offline=not live
-    )
+    if real:
+        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+            coin_a, coin_b, query, data_mode="live", llm_mode="off"
+        )
+    else:
+        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+            coin_a, coin_b, query, offline=not live
+        )
     return report_a, evidence_a, report_b, evidence_b, log
 
 
@@ -766,9 +854,15 @@ class Handler(BaseHTTPRequestHandler):
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
                         )
+                    # 自我連結（下載 JSON）須保留當次請求實際生效的模式參數，
+                    # 否則點下載會落回預設 offline/sample，匯出跟畫面看到的不一致。
+                    mode_suffix = _mode_link_suffix(qs)
                     return self._send(
                         200,
-                        page(_render_comparison(report_a, evidence_a, report_b, evidence_b, query, log)),
+                        page(_render_comparison(
+                            report_a, evidence_a, report_b, evidence_b, query, log,
+                            mode_suffix=mode_suffix,
+                        )),
                     )
                 else:
                     report, evidence, log = _do_analyze(qs, client_ip=client_ip)
@@ -783,7 +877,10 @@ class Handler(BaseHTTPRequestHandler):
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
                         )
-                    return self._send(200, page(_render_report(report, evidence, log)))
+                    mode_suffix = _mode_link_suffix(qs)
+                    return self._send(
+                        200, page(_render_report(report, evidence, log, mode_suffix=mode_suffix))
+                    )
             except TooManyRequests as exc:
                 return self._send(429, page(
                     f"<p style='color:#c00'>{html.escape(str(exc))}</p>"))

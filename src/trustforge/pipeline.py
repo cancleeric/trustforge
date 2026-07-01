@@ -12,25 +12,71 @@ from .ingestion.base import collect
 from .schema import COIN_POOL, Evidence, QuestionType, Report
 
 
+_DATA_MODES = ("live", "sample")
+_LLM_MODES = ("off", "bedrock")
+
+
+def _resolve_modes(
+    offline: bool, data_mode: str | None, llm_mode: str | None
+) -> tuple[str, str]:
+    """把舊 `offline` bool 與新 `data_mode`/`llm_mode` 統一成 (data_mode, llm_mode)。
+
+    解耦重點：`offline` 只在對應參數未顯式指定時才用來推導預設值，
+    讓呼叫端可以只調其中一項（例如 data_mode="live" + llm_mode="off"
+    ＝真連接器＋免 Bedrock，credit-safe 的「真資料」檔），
+    不再被單一 bool 綁死「樣本資料」與「Bedrock 開關」必須同進退。
+    """
+    if data_mode is None:
+        data_mode = "sample" if offline else "live"
+    if data_mode not in _DATA_MODES:
+        raise ValueError(f"data_mode 須為 {_DATA_MODES} 之一，收到 {data_mode!r}")
+
+    if llm_mode is None:
+        llm_mode = "off" if offline else "bedrock"
+    if llm_mode not in _LLM_MODES:
+        raise ValueError(f"llm_mode 須為 {_LLM_MODES} 之一，收到 {llm_mode!r}")
+
+    return data_mode, llm_mode
+
+
 def run(coin: str, query: str, qtype: QuestionType,
         offline: bool = False, data_dir=None,
-        _log: ExecutionLog | None = None) -> tuple[Report, list[Evidence], ExecutionLog]:
+        _log: ExecutionLog | None = None,
+        data_mode: str | None = None,
+        llm_mode: str | None = None) -> tuple[Report, list[Evidence], ExecutionLog]:
     """跑完整管線：collect → 多步 agent 推理 → 報告。回傳 (report, evidence, log)。
 
     _log：可傳入外部 ExecutionLog（供 run_comparison 共用同一 log）；
           None 時自行建立新 log（原始行為）。
+
+    data_mode / llm_mode：解耦「資料來源」與「Bedrock 開關」的獨立旗標。
+        data_mode="live"|"sample"（預設 None，由 `offline` 推導：offline→sample）
+        llm_mode ="off" |"bedrock"（預設 None，由 `offline` 推導：offline→off）
+    未顯式傳入時完全等同舊行為（僅靠 `offline`）；對外簽名與預設值向後相容。
+    三檔組合：
+        offline=True（或 data_mode=sample, llm_mode=off）  → 離線示範，$0
+        data_mode="live", llm_mode="off"                    → 真資料·$0（本次新增）
+        offline=False（或 data_mode=live, llm_mode=bedrock）→ 真連接器 + 真 Bedrock
     """
     coin = coin.upper()
+    data_mode, llm_mode = _resolve_modes(offline, data_mode, llm_mode)
+    collect_offline = data_mode == "sample"
+    llm_offline = llm_mode == "off"
+
     log = _log if _log is not None else ExecutionLog()
-    log.record("ingestion.collect", params={"coin": coin, "offline": offline})
+    log.record(
+        "ingestion.collect",
+        params={"coin": coin, "offline": collect_offline,
+                "data_mode": data_mode, "llm_mode": llm_mode},
+    )
     _failed: list[str] = []
-    docs = collect(query, coin=coin, offline=offline, data_dir=data_dir, _failed=_failed)
+    docs = collect(query, coin=coin, offline=collect_offline, data_dir=data_dir, _failed=_failed)
     if not docs:
         raise ValueError("無資料：offline 請確認 demo/sample_data 與 data/，線上請接連接器")
 
     report, evidence = run_agent_pipeline(
         query, coin, qtype, docs,
-        client=BedrockClient(offline=offline), log=log,
+        client=BedrockClient(offline=llm_offline), log=log,
     )
     # 將 collect 階段失敗的來源名稱補入 report.limits，讓評審可見資料缺口
     # 去重（order-preserving），避免同來源多次失敗造成重複條目
@@ -48,15 +94,19 @@ def run_comparison(
     query: str,
     offline: bool = False,
     data_dir=None,
+    data_mode: str | None = None,
+    llm_mode: str | None = None,
 ) -> tuple[Report, list[Evidence], Report, list[Evidence], ExecutionLog]:
     """比較分析：各跑一次完整 pipeline，共用 ExecutionLog，回傳並列結果。
 
     Args:
-        coin_a:   幣種 A（須在 COIN_POOL）
-        coin_b:   幣種 B（須在 COIN_POOL，且不與 A 相同）
-        query:    分析問題
-        offline:  是否離線模式
-        data_dir: OHLCV 資料目錄（可選）
+        coin_a:    幣種 A（須在 COIN_POOL）
+        coin_b:    幣種 B（須在 COIN_POOL，且不與 A 相同）
+        query:     分析問題
+        offline:   是否離線模式（`data_mode`/`llm_mode` 未顯式指定時的推導來源，向後相容）
+        data_dir:  OHLCV 資料目錄（可選）
+        data_mode: "live"|"sample"（見 `run()`；預設 None 由 offline 推導）
+        llm_mode:  "off"|"bedrock"（見 `run()`；預設 None 由 offline 推導）
 
     Returns:
         (report_a, evidence_a, report_b, evidence_b, log)
@@ -76,10 +126,12 @@ def run_comparison(
     log.record("comparison.start", params={"coin_a": coin_a, "coin_b": coin_b})
 
     report_a, evidence_a, _ = run(
-        coin_a, query, QuestionType.COMPARISON, offline, data_dir, _log=log
+        coin_a, query, QuestionType.COMPARISON, offline, data_dir, _log=log,
+        data_mode=data_mode, llm_mode=llm_mode,
     )
     report_b, evidence_b, _ = run(
-        coin_b, query, QuestionType.COMPARISON, offline, data_dir, _log=log
+        coin_b, query, QuestionType.COMPARISON, offline, data_dir, _log=log,
+        data_mode=data_mode, llm_mode=llm_mode,
     )
 
     log.record(
