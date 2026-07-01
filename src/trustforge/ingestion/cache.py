@@ -109,6 +109,13 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     "alternative-me-fng": 60 * 60,
     "blockchain-info": 15 * 60,
     "sec-gov": 60 * 60,
+    # CoinGecko（W-coingecko，CEO 審核 gray 計劃 + 老闆修正）：呼叫量極小
+    # （見 ingestion/coingecko.py 模組頂部「高效抓取」——一輪 5 幣合計只需
+    # ≈6 次真呼叫，price 1 次全涵蓋 + coins/{id} 詳情每幣 1 次由 sentiment/
+    # dev 共用），三者統一 5 分鐘一輪，keyless（5-15 req/min）綽綽有餘。
+    "coingecko-price": 5 * 60,        # price_live：5 分鐘
+    "coingecko-sentiment": 5 * 60,    # sentiment：5 分鐘
+    "coingecko-dev": 5 * 60,          # dev_activity：5 分鐘
 }
 DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS = 15 * 60  # 未知來源名的保守預設
 

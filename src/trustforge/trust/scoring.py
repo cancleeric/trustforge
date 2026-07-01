@@ -64,6 +64,12 @@ KIND_REPUTATION = {
     "hoyabit": 0.85,   # 交易所一手行情數據
     "news": 0.65,
     "social": 0.35,
+    # CoinGecko（W-coingecko，CEO 審核 gray 計劃）：現價客觀事實，但為
+    # 第三方彙整（非交易所一手數據），信譽略低於 hoyabit/onchain；情緒投票
+    # 與 GitHub 開發活動皆為輔助訊號，信譽落在 news 與 social 之間。
+    "price_live": 0.90,
+    "sentiment": 0.50,
+    "dev_activity": 0.50,
 }
 
 
