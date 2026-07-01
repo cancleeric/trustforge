@@ -682,3 +682,91 @@ def test_large_scale_contradiction_score_does_not_crash_bounded():
             f"{sc.claim.doc.source}: final={final} 超出 [{floor},1] 範圍"
         )
         assert 0.0 <= sc.trust <= 1.0
+
+
+# codex 對抗審修正（第 2 輪 HIGH，PR #29 review，票權聚合去重）
+
+
+def test_duplicate_high_trust_claim_heterogeneous_all_sources_sr_equal_across_rounds():
+    """[第 2 輪 HIGH] 異質 trust 場景：同一來源同時貼一條「高 trust」（有 3 個
+    固定外部佐證）與一條「低 trust」（操縱語氣、無佐證）claim。把高 trust 那條
+    重複 1 次 vs 20 次——`avg_temp_by_source` 去重後，所有來源（不只攻擊來源
+    自己）在 iterations=1~5 每一輪的最終 SR 皆應完全相等，證明 claim 重複次數
+    對整個系統的迭代結果沒有任何影響（同文本、同 trust 的舊測試測不出這個
+    bug，需要異質 trust 才會暴露）。"""
+    from trustforge.trust.scoring import _iterate_source_reputation
+
+    high_trust_text = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    low_trust_text = "BTC 馬上翻倍 moon 穩賺快上車！"
+
+    fixed_external = [
+        _doc("het-ext-a", "onchain", "glassnode", high_trust_text),
+        _doc("het-ext-b", "news", "coindesk", high_trust_text),
+        _doc("het-ext-c", "regulatory", "sec-filing", high_trust_text),
+    ]
+
+    docs_once = fixed_external + [
+        _doc("het-x-high-1", "social", "x-analyst", high_trust_text),
+        _doc("het-x-low-1", "social", "x-analyst", low_trust_text),
+    ]
+    docs_20x = (
+        fixed_external
+        + [_doc(f"het-x-high-{i}", "social", "x-analyst", high_trust_text) for i in range(20)]
+        + [_doc("het-x-low-1", "social", "x-analyst", low_trust_text)]
+    )
+
+    claims_once = extract_claims(docs_once)
+    claims_20x = extract_claims(docs_20x)
+
+    for k in range(1, 6):
+        sr_once = _iterate_source_reputation(claims_once, now=1.0, iterations=k)
+        sr_20x = _iterate_source_reputation(claims_20x, now=1.0, iterations=k)
+        assert sr_once.keys() == sr_20x.keys(), f"iterations={k}: 來源集合不一致"
+        for s in sr_once:
+            assert sr_once[s] == sr_20x[s], (
+                f"iterations={k}, source={s}: 高 trust claim 重複 1 次 vs 20 次的 SR 不相等："
+                f"{sr_once[s]} vs {sr_20x[s]}"
+            )
+
+    # 確認不是被小樣本守門「意外擋掉」造成的假陽性——x-analyst 應確實吃到高 trust
+    # claim 的佐證加成，也吃到低 trust claim 的操縱懲罰（介於 floor 與 1 之間，
+    # 不是原封不動的先驗值）。
+    sr5_once = _iterate_source_reputation(claims_once, now=1.0, iterations=5)
+    assert 0.1 < sr5_once["x-analyst"] < 1.0
+
+
+def test_duplicate_high_trust_claim_heterogeneous_via_public_api():
+    """同上，但走 `score(..., dynamic_reputation=True)` 公開 API 端到端驗證。"""
+    high_trust_text = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
+    low_trust_text = "BTC 馬上翻倍 moon 穩賺快上車！"
+
+    fixed_external = [
+        _doc("het2-ext-a", "onchain", "glassnode", high_trust_text),
+        _doc("het2-ext-b", "news", "coindesk", high_trust_text),
+        _doc("het2-ext-c", "regulatory", "sec-filing", high_trust_text),
+    ]
+
+    docs_once = fixed_external + [
+        _doc("het2-x-high-1", "social", "x-analyst", high_trust_text),
+        _doc("het2-x-low-1", "social", "x-analyst", low_trust_text),
+    ]
+    docs_20x = (
+        fixed_external
+        + [_doc(f"het2-x-high-{i}", "social", "x-analyst", high_trust_text) for i in range(20)]
+        + [_doc("het2-x-low-1", "social", "x-analyst", low_trust_text)]
+    )
+
+    on_once = score(extract_claims(docs_once), now=1.0, dynamic_reputation=True)
+    on_20x = score(extract_claims(docs_20x), now=1.0, dynamic_reputation=True)
+
+    for source in {sc.claim.doc.source for sc in on_once}:
+        finals_once = {
+            sc.reputation_trace["final"] for sc in on_once if sc.claim.doc.source == source
+        }
+        finals_20x = {
+            sc.reputation_trace["final"] for sc in on_20x if sc.claim.doc.source == source
+        }
+        assert finals_once == finals_20x, (
+            f"公開 API 層級 source={source}: 1 次 vs 20 次重複貼文的動態信譽應相同，"
+            f"實際: {finals_once} vs {finals_20x}"
+        )

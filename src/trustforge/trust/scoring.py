@@ -462,7 +462,7 @@ def _iterate_source_reputation(
               同源），單一來源灌水灌再多自家 claims 也不會自抬信譽（需要「其他」
               獨立來源真的來佐證才有效——複用既有反回音室設計）。
 
-    codex 對抗審修正（HIGH-1/HIGH-2，PR #29 review）：
+    codex 對抗審修正（HIGH-1/HIGH-2/第 2 輪 HIGH，PR #29 review）：
     - **[HIGH-1]** agreement 投票按「唯一佐證/矛盾來源」聯集去重後才加總一次，
       不隨該 source 名下 claim 數量重複計票——原本若把「已有 3 個外部佐證的
       claim」重複貼 N 次，會重用同一批佐證來源疊加 N 次、把 `agreement_score`
@@ -470,6 +470,15 @@ def _iterate_source_reputation(
     - **[HIGH-2]** `_stable_sigmoid` 在 `math.exp` 前把 logit clamp 到安全範圍
       （預設 ±30），杜絕 net 極端值時的 `OverflowError`；配合 HIGH-1 去重後
       net 本身已有界，這是雙保險而非唯一防線。
+    - **[第 2 輪 HIGH]** HIGH-1 去重的是「佐證/矛盾來源的身分」，但 `avg_temp_by_source`
+      （某來源投給其他來源的「票權」）原本仍對該來源**全部 claims**（含重複）取
+      平均——攻擊者可重複貼自己「最高 trust」的那條 claim 拉高自己的平均票權，
+      再透過跨輪互證回饋間接墊高自己或共謀來源的信譽（同文本、同 trust 的重複
+      測試測不出，需異質 trust 的 claim 才會暴露）。修正：`unique_claims_by_source`
+      先以 `claim.text` 逐字去重（同文本只留第一次出現那筆），`avg_temp_by_source`
+      只對這份去重後的「內容不同的主張種類」取平均——不變量：對任一來源重複其
+      任意 claim（含高/低 trust 混合）N 次，**所有來源在第 1–5 輪的最終 SR 完全
+      不變**（見對應測試）。
 
     小樣本守門（CEO refinement #1）：某 source 名下所有 claim 的獨立佐證+矛盾來源
     **聯集（去重後）** < `MIN_INDEPENDENT_EVIDENCE`（3）時，該 source 強制 α=1
@@ -539,6 +548,24 @@ def _iterate_source_reputation(
         for s in claims_by_source
     }
 
+    # codex 對抗審修正（第 2 輪 HIGH，PR #29）：`avg_temp_by_source`（該來源投給
+    # 其他來源的「票權」）必須以「內容不同的主張種類」為單位平均，不能被同一來源
+    # 重複貼同一條 claim（尤其是刻意重貼「自己最高 trust」那條）拉抬——否則即使
+    # HIGH-1 已把 agreement 的佐證來源計數去重，攻擊者仍可靠重複高分 claim 墊高
+    # 自己的平均票權，透過「先抬互相佐證來源 SR、下輪再回抬自己」的跨輪回饋間接
+    # 灌水。以 `claim.text` 逐字去重，同文本只留該來源 claims 中第一次出現那筆
+    # （deterministic），使「重複任意 claim N 次」對每輪 SR 完全無影響。
+    unique_claims_by_source: dict[str, list[Claim]] = {}
+    for s, s_claims in claims_by_source.items():
+        seen_text: set[str] = set()
+        uniq: list[Claim] = []
+        for c in s_claims:
+            if c.text in seen_text:
+                continue
+            seen_text.add(c.text)
+            uniq.append(c)
+        unique_claims_by_source[s] = uniq
+
     sr = dict(sr0)
     iterations_run = 0
     for _t in range(n_iter):
@@ -557,10 +584,12 @@ def _iterate_source_reputation(
             )
             temp_trust[c.id] = max(0.0, min(1.0, raw))
 
-        # 每 source 的平均暫時 trust，供 Step B 當「投票權重」
+        # 每 source 的平均暫時 trust，供 Step B 當「投票權重」——只取「內容不同的
+        # 主張種類」（`unique_claims_by_source`，見上方去重說明），重複貼同一條
+        # claim 對這個平均值沒有任何影響。
         avg_temp_by_source: dict[str, float] = {}
-        for s, s_claims in claims_by_source.items():
-            vals = [temp_trust[c.id] for c in s_claims]
+        for s, u_claims in unique_claims_by_source.items():
+            vals = [temp_trust[c.id] for c in u_claims]
             avg_temp_by_source[s] = sum(vals) / len(vals)
 
         # Step B：agreement_score → SR^t
