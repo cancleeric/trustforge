@@ -99,18 +99,45 @@ class Ledger(ABC):
         """讀出全部歷史紀錄（依寫入順序）。"""
 
     def summary(self) -> dict[str, Any]:
-        """累計總花費 + 依 model 分組彙總（預設實作；backend 可覆寫做更有效率的版本）。"""
+        """累計總花費 + 依 model 分組彙總（預設實作；backend 可覆寫做更有效率的版本）。
+
+        成本會計階段1（純顯示層）：除了既有的 `by_model`（model → 累計成本，向後
+        相容、格式不變，避免破壞既有呼叫端/測試），另外彙總 `by_model_detail`
+        （model → {cost_usd, tokens_in, tokens_out}）——資料來源與 `by_model` 完全
+        相同（每筆 run 的 `calls[]`），只是同時累加 tokens_in/tokens_out，供
+        `/costs`、`/status` 顯示「Model｜輸入tokens｜輸出tokens｜單價｜成本」明細表。
+        用 `.get(..., 0)` 防呆：舊紀錄（本欄位加入前寫入的 `calls[]`）沒有
+        tokens_in/tokens_out 欄位時視為 0，不 raise、不影響既有 cost_usd 彙總。
+        """
         records = self.read_all()
         total = 0.0
         by_model: dict[str, float] = {}
+        by_model_detail: dict[str, dict[str, float | int]] = {}
         for rec in records:
             total += float(rec.get("total_cost_usd", 0.0) or 0.0)
             for call in rec.get("calls", []) or []:
                 model = call.get("model") or "offline"
-                by_model[model] = by_model.get(model, 0.0) + float(call.get("cost_usd", 0.0) or 0.0)
+                cost = float(call.get("cost_usd", 0.0) or 0.0)
+                tokens_in = int(call.get("tokens_in", 0) or 0)
+                tokens_out = int(call.get("tokens_out", 0) or 0)
+                by_model[model] = by_model.get(model, 0.0) + cost
+                detail = by_model_detail.setdefault(
+                    model, {"cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0}
+                )
+                detail["cost_usd"] += cost
+                detail["tokens_in"] += tokens_in
+                detail["tokens_out"] += tokens_out
         return {
             "total_cost_usd": round(total, 6),
             "by_model": {m: round(v, 6) for m, v in by_model.items()},
+            "by_model_detail": {
+                m: {
+                    "cost_usd": round(d["cost_usd"], 6),
+                    "tokens_in": d["tokens_in"],
+                    "tokens_out": d["tokens_out"],
+                }
+                for m, d in by_model_detail.items()
+            },
             "runs": records,
         }
 

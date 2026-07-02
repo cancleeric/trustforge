@@ -292,6 +292,43 @@ def test_web_live_takes_priority_over_real(monkeypatch):
     assert captured["llm_mode"] is None
 
 
+def test_web_do_analyze_real_mode_increments_service_counter(monkeypatch):
+    """成本會計階段3：real=1（真連接器路徑）要記 1 次「真服務」呼叫，供
+    `/status`「快取節省」估算用。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    web._analyze_service_count = 0
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                 data_mode=None, llm_mode=None):
+        import trustforge.pipeline as _pl
+        return _pl.run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    before = web._get_analyze_service_count()
+    web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "real": ["1"]})
+    assert web._get_analyze_service_count() == before + 1
+    web._analyze_service_count = 0
+
+
+def test_web_do_analyze_offline_default_does_not_increment_service_counter(monkeypatch):
+    """離線示範（樣本資料，未觸碰任何連接器/cache）不該計入「真服務」次數，
+    否則快取節省估算會被離線 demo 流量污染。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    web._analyze_service_count = 0
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None):
+        import trustforge.pipeline as _pl
+        return _pl.run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]})
+    assert web._get_analyze_service_count() == 0
+
+
 def test_web_do_comparison_real_mode(monkeypatch):
     """_do_comparison 同步支援 ?real=1。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
@@ -314,6 +351,27 @@ def test_web_do_comparison_real_mode(monkeypatch):
     )
     assert captured == {"data_mode": "live", "llm_mode": "off"}
     assert len(result) == 5
+
+
+def test_web_do_comparison_real_mode_increments_service_counter_by_two(monkeypatch):
+    """comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，記 2 次。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    web._analyze_service_count = 0
+
+    def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
+                            data_mode=None, llm_mode=None):
+        import trustforge.pipeline as _pl
+        return _pl.run_comparison(coin_a, coin_b, query, offline=True)
+
+    monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
+
+    before = web._get_analyze_service_count()
+    web._do_comparison(
+        {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["比較 BTC 與 ETH"], "real": ["1"]},
+    )
+    assert web._get_analyze_service_count() == before + 2
+    web._analyze_service_count = 0
 
 
 # ---------------------------------------------------------------------------
