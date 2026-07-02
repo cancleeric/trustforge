@@ -26,6 +26,7 @@ import math
 import os
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -44,69 +45,97 @@ LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
 # 累計花費超過此門檻（USD）→ /costs 頁面卡片轉紅告警。未設定則不告警。
 COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
 
+# `/status` 頁面「運行時間」：本程序（web worker）匯入這個模組的當下當作起點，
+# 不是真的 process 啟動時間（stdlib 無法可靠取得），但對觀測用途已足夠。
+_START_TIME = time.time()
+
 # per-IP 限流：每 IP 每 60 秒最多 5 次 live 請求
 _RATE_WINDOW = 60
 _RATE_MAX = 5
 _rate_lock = threading.Lock()
 _rate_buckets: dict[str, list[float]] = {}
 
-_PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+# `/status` 專用 per-IP 限流：獨立於上面 live/real 的 bucket，避免互相干擾
+# （/status 是唯讀觀測端點，不消耗真連接器/Bedrock 配額，門檻可以更寬鬆）。
+_STATUS_RATE_WINDOW = 30
+_STATUS_RATE_MAX = 10
+_status_rate_lock = threading.Lock()
+_status_rate_buckets: dict[str, list[float]] = {}
+
+# `/status` 頁面級 TTL 快取（跨 IP 共用，非安全機制，純降低重算頻率）：資料
+# 鮮度矩陣要逐 (source, coin) 讀 cache backend，組合數量多，DynamoDB backend
+# 下每次都重算有明顯延遲，也容易被打爆，見 `_render_status_page_cached()`。
+_STATUS_CACHE_TTL_SECONDS = 30.0
+_status_cache_lock = threading.Lock()
+_status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
+
+_PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TrustForge — 加密市場分析 AI Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
+ :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9}}
+ :root[data-theme="light"]{{--tf-bg:#f6f8fa;--tf-card:#ffffff;--tf-border:#d0d7de;--tf-text:#1f2328;--tf-muted:#57606a;--tf-muted2:#6e7781;--tf-hdr-g1:#ffffff;--tf-hdr-g2:#f6f8fa;--tf-inset:#eef2f6;--tf-text2:#3d444d}}
  *{{box-sizing:border-box}}
- body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:#e6edf3;background:#0d1117;-webkit-font-smoothing:antialiased}}
- h1{{margin-bottom:.2rem}} .sub{{color:#8b949e;margin-top:0}}
+ body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
+ h1{{margin-bottom:.2rem}} .sub{{color:var(--tf-muted);margin-top:0}}
  a{{color:#1f6feb}}
- header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid #30363d;border-radius:12px;background:linear-gradient(#12171e,#0f141a);margin-bottom:1rem;flex-wrap:wrap}}
- .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:#e6edf3}}
+ header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid var(--tf-border);border-radius:12px;background:linear-gradient(var(--tf-hdr-g1),var(--tf-hdr-g2));margin-bottom:1rem;flex-wrap:wrap}}
+ .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:var(--tf-text)}}
  .tf-logo b{{color:#1f6feb}}
- .tf-version{{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:#8b949e;border:1px solid #30363d;border-radius:5px;padding:.15rem .5rem}}
- .tf-mode-badge{{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:.7rem;border-radius:5px;padding:.2rem .55rem;border:1px solid #30363d}}
+ .tf-version{{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--tf-muted);border:1px solid var(--tf-border);border-radius:5px;padding:.15rem .5rem}}
+ .tf-mode-badge{{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:.7rem;border-radius:5px;padding:.2rem .55rem;border:1px solid var(--tf-border)}}
  .tf-mode-badge.active.tf-live{{color:#3fb950;background:rgba(63,185,80,.12);border-color:rgba(63,185,80,.4)}}
- .tf-mode-badge.active.tf-offline{{color:#8b949e;background:rgba(139,148,158,.10);border-color:#30363d}}
+ .tf-mode-badge.active.tf-offline{{color:var(--tf-muted);background:rgba(139,148,158,.10);border-color:var(--tf-border)}}
  .tf-mode-badge.active.tf-real{{color:#79c0ff;background:rgba(31,111,235,.12);border-color:rgba(31,111,235,.4)}}
- .tf-mode-badge.tf-static{{color:#484f58;background:transparent;border-color:#21262d;opacity:.7}}
+ .tf-mode-badge.tf-static{{color:var(--tf-muted2);background:transparent;border-color:var(--tf-border);opacity:.7}}
  .tf-mode-dot{{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0;animation:tf-pulse 1.8s infinite}}
  @keyframes tf-pulse{{0%,100%{{opacity:1}}50%{{opacity:.35}}}}
  .tf-hdr-spacer{{flex:1}}
- .tf-costlink{{font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:#8b949e;text-decoration:none;border:1px solid #30363d;border-radius:6px;padding:.3rem .7rem;white-space:nowrap}}
- .tf-costlink:hover{{border-color:#1f6feb;color:#e6edf3}}
+ .tf-costlink{{font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:var(--tf-muted);text-decoration:none;border:1px solid var(--tf-border);border-radius:6px;padding:.3rem .7rem;white-space:nowrap}}
+ .tf-costlink:hover{{border-color:#1f6feb;color:var(--tf-text)}}
  .tf-layout{{display:grid;grid-template-columns:290px minmax(0,1fr);gap:1.2rem;align-items:start}}
- .tf-query-panel{{position:sticky;top:1rem;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
- .tf-query-panel h3{{margin:0;font-size:.72rem;font-weight:700;color:#6e7681;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #30363d;padding-bottom:.6rem}}
+ .tf-query-panel{{position:sticky;top:1rem;background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
+ .tf-query-panel h3{{margin:0;font-family:'IBM Plex Mono',monospace;font-size:.72rem;font-weight:700;color:var(--tf-muted2);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--tf-border);padding-bottom:.6rem}}
+ .tf-logo-mark{{color:#1f6feb;margin-right:.15rem}}
+ .tf-run-stats{{border-top:1px solid var(--tf-border);padding-top:.8rem;margin-top:.1rem;display:flex;flex-direction:column;gap:.35rem}}
+ .tf-run-stats h3{{margin-bottom:.4rem}}
+ .tf-stat-row{{display:flex;justify-content:space-between;gap:.6rem;font-size:.78rem}}
+ .tf-stat-k{{color:var(--tf-muted);font-family:'IBM Plex Mono',monospace;font-size:.7rem;letter-spacing:.03em}}
+ .tf-stat-v{{color:var(--tf-text);font-family:'IBM Plex Mono',monospace;font-weight:600}}
  .tf-dashboard{{min-width:0}}
  form{{background:transparent;border:0;padding:0;display:flex;flex-direction:column;gap:.8rem;align-items:stretch}}
- label{{display:block;font-size:.8rem;color:#8b949e;margin-bottom:.2rem}}
- select,input,button{{width:100%;padding:.5rem .7rem;border:1px solid #30363d;border-radius:8px;font-size:1rem;background:#0d1117;color:#e6edf3;font-family:inherit}}
- input[name=q]{{min-width:0}} button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600}}
+ label{{display:block;font-size:.8rem;color:var(--tf-muted);margin-bottom:.2rem}}
+ select,input,textarea,button{{width:100%;padding:.5rem .7rem;border:1px solid var(--tf-border);border-radius:8px;font-size:1rem;background:var(--tf-bg);color:var(--tf-text);font-family:inherit}}
+ textarea[name=q]{{min-width:0;min-height:5.2rem;resize:vertical;line-height:1.4}}
+ button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em}}
+ button .tf-kbd{{opacity:.75;font-family:'IBM Plex Mono',monospace;margin-left:.3rem}}
  .badge{{display:inline-block;background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.4);border-radius:6px;padding:.1rem .5rem;font-size:.75rem;color:#79c0ff}}
- pre{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:#e6edf3}}
- table{{border-collapse:collapse;width:100%;background:#161b22;font-size:.85rem;color:#e6edf3}} td,th{{border:1px solid #30363d;padding:.4rem;text-align:left}}
+ pre{{background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:var(--tf-text)}}
+ table{{border-collapse:collapse;width:100%;background:var(--tf-card);font-size:.85rem;color:var(--tf-text)}} td,th{{border:1px solid var(--tf-border);padding:.4rem;text-align:left}}
  .j{{font-size:1.1rem;font-weight:600}} .conf{{color:#1f6feb}}
- .tf-section{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1rem;margin:.8rem 0}}
- .tf-section h3{{margin-top:0;font-size:1rem;border-bottom:1px solid #30363d;padding-bottom:.4rem;margin-bottom:.7rem;color:#e6edf3}}
- .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:#0d1117;border:1px solid #30363d;border-radius:5px;overflow:hidden;margin-right:4px}}
+ .tf-section{{background:var(--tf-card);border:1px solid var(--tf-border);border-radius:10px;padding:1rem;margin:.8rem 0}}
+ .tf-section h3{{margin-top:0;font-size:1rem;border-bottom:1px solid var(--tf-border);padding-bottom:.4rem;margin-bottom:.7rem;color:var(--tf-text)}}
+ .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:var(--tf-bg);border:1px solid var(--tf-border);border-radius:5px;overflow:hidden;margin-right:4px}}
  .tf-bar{{height:100%;border-radius:5px}}
  .tf-low{{display:inline-block;background:rgba(248,81,73,.14);border:1px solid rgba(248,81,73,.4);color:#f85149;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
- .tf-info{{display:inline-block;background:rgba(139,148,158,.14);border:1px solid rgba(139,148,158,.4);color:#8b949e;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
- .tf-conf-wrap{{background:#0f141a;border:1px solid #30363d;border-radius:8px;padding:.8rem;margin:.5rem 0}}
+ .tf-info{{display:inline-block;background:rgba(139,148,158,.14);border:1px solid rgba(139,148,158,.4);color:var(--tf-muted);border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
+ .tf-conf-wrap{{background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
- .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
- .tf-ev-date{{font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:#6e7681}}
+ .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:var(--tf-text);background:var(--tf-bg);border:1px solid var(--tf-border);border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
+ .tf-ev-date{{font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--tf-muted2)}}
  .tf-ev-summary{{cursor:pointer}}
  .tf-ev-body{{padding-top:.2rem}}
  .tf-dash-hdr{{display:flex;align-items:center;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap}}
- .tf-coin-badge{{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:1rem;color:#e6edf3;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:.25rem .7rem}}
- .tf-dash-sep{{color:#30363d}}
- .tf-dash-q{{color:#8b949e;font-size:.9rem}}
+ .tf-coin-badge{{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:1rem;color:var(--tf-text);background:var(--tf-card);border:1px solid var(--tf-border);border-radius:8px;padding:.25rem .7rem}}
+ .tf-dash-sep{{color:var(--tf-border)}}
+ .tf-dash-q{{color:var(--tf-muted);font-size:.9rem}}
  .tf-hero-row{{display:grid;grid-template-columns:auto minmax(0,1fr);gap:1.2rem;align-items:center}}
- .tf-step{{border-left:4px solid #30363d;padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
+ .tf-step{{border-left:4px solid var(--tf-border);padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
  .tf-step li{{margin:.25rem 0}}
- .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:#6e7681;font-weight:400;margin-left:.4rem}}
+ .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--tf-muted2);font-weight:400;margin-left:.4rem}}
  .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle}}
  .tf-div-grid{{display:grid;grid-template-columns:1fr 34px 1fr;gap:0;align-items:stretch;margin-top:.6rem}}
  .tf-div-side{{border-radius:9px;padding:.7rem .8rem}}
@@ -126,11 +155,12 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  }}
 </style></head><body>
 <header class="tf-hdr">
- <span class="tf-logo">Trust<b>Forge</b></span>
+ <span class="tf-logo"><span class="tf-logo-mark">&#9670;</span>Trust<b>Forge</b></span>
  <span class="tf-version">{version}</span>
  {mode}
  <div class="tf-hdr-spacer"></div>
- <a class="tf-costlink" href="/costs">成本帳本</a>
+ <a class="tf-costlink" href="/status">系統狀態</a>
+ <a class="tf-costlink" href="/costs">cost ledger {cost_display}</a>
 </header>
 <div class="tf-layout">
  <aside class="tf-query-panel">
@@ -139,9 +169,10 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
   <form action="/analyze" method="get">
    <div><label>幣種</label><select name="coin">{coins}</select></div>
    <div><label>題型</label><select name="type">{types}</select></div>
-   <div><label>問題</label><input name="q" value="分析該幣種近兩週市場狀況，整合多源資料"></div>
-   <button type="submit">分析</button>
+   <div><label>問題</label><textarea name="q" rows="3">分析該幣種近兩週市場狀況，整合多源資料</textarea></div>
+   <button type="submit">Run analysis<span class="tf-kbd">&#8629;</span></button>
   </form>
+  {run_stats}
  </aside>
  <main class="tf-dashboard">
 {body}
@@ -154,15 +185,61 @@ class TooManyRequests(Exception):
     """per-IP 限流超量時拋出，對應 HTTP 429。"""
 
 
+# 兩個限流 bucket（`_rate_buckets`/`_status_rate_buckets`）共用的硬上限：
+# 光靠「修剪單一 IP 內過期的時間戳」不夠——bucket dict 本身的 *key 數量*
+# （歷史上出現過的不同 IP 數）才是真正的記憶體風險，尤其 IPv6/偽造來源 IP
+# 高頻換位的情境下，dict 會無限增長成一個記憶體耗盡向量（防 DoS 反成
+# DoS）。達上限時：先掃掉整批「視窗內已完全無動靜」的 IP（O(n)，但只在
+# 達上限時才觸發，攤還成本有界）；掃完仍超過上限（同一視窗內大量不同 IP
+# 高頻打），退化成逐出最舊活動時間的 IP 直到降回上限之下——犧牲極少數最
+# 不活躍 IP 的限流狀態換取整體記憶體有界，是刻意的 trade-off。
+_RATE_LIMIT_MAX_TRACKED_IPS = 5000
+
+
+def _evict_stale_rate_buckets(
+    buckets: dict[str, list[float]], window: float, now: float, max_tracked_ips: int
+) -> None:
+    """呼叫端已持有對應的 lock。bucket 數未達上限時直接返回，不做任何事
+    （正常情況下零額外成本）。"""
+    if len(buckets) < max_tracked_ips:
+        return
+    stale_ips = [ip for ip, ts in buckets.items() if not any(now - t < window for t in ts)]
+    for ip in stale_ips:
+        del buckets[ip]
+    while len(buckets) >= max_tracked_ips:
+        oldest_ip = min(buckets, key=lambda k: max(buckets[k], default=0.0))
+        del buckets[oldest_ip]
+
+
 def _check_live_rate_limit(ip: str) -> None:
     """IP 在滑動視窗內超過 _RATE_MAX 次 live 請求 → raise TooManyRequests。"""
     now = time.time()
     with _rate_lock:
+        _evict_stale_rate_buckets(_rate_buckets, _RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS)
         ts = [t for t in _rate_buckets.get(ip, []) if now - t < _RATE_WINDOW]
         if len(ts) >= _RATE_MAX:
             raise TooManyRequests(f"請求過於頻繁，請 {_RATE_WINDOW} 秒後再試")
         ts.append(now)
         _rate_buckets[ip] = ts
+
+
+def _check_status_rate_limit(ip: str) -> None:
+    """`/status` 專用 per-IP 限流（獨立 bucket，見模組頂部 `_STATUS_RATE_*`
+    常數）：IP 在滑動視窗內超過 `_STATUS_RATE_MAX` 次請求 → raise
+    `TooManyRequests`。防的是「資料鮮度矩陣逐 (source,coin) 讀 cache 的頁面
+    被當 DoS 高頻打」，跟 `_check_live_rate_limit` 保護真連接器/Bedrock 配額
+    的目的不同，故不共用同一組 bucket/門檻（但共用同一套 `_evict_stale_rate_buckets`
+    上限保護邏輯）。"""
+    now = time.time()
+    with _status_rate_lock:
+        _evict_stale_rate_buckets(
+            _status_rate_buckets, _STATUS_RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS
+        )
+        ts = [t for t in _status_rate_buckets.get(ip, []) if now - t < _STATUS_RATE_WINDOW]
+        if len(ts) >= _STATUS_RATE_MAX:
+            raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
+        ts.append(now)
+        _status_rate_buckets[ip] = ts
 
 
 def _opts(values, labels=None):
@@ -188,7 +265,7 @@ def _trust_bar(trust: float) -> str:
     return (
         f'<span style="display:inline-flex;align-items:center;gap:.35rem;vertical-align:middle">'
         f'<svg width="34" height="34" viewBox="0 0 34 34" style="flex-shrink:0">'
-        f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="#30363d" stroke-width="4"></circle>'
+        f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="var(--tf-border)" stroke-width="4"></circle>'
         f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="{color}" stroke-width="4" '
         f'stroke-linecap="round" stroke-dasharray="{arc_val:.2f} {circumference:.2f}" '
         f'transform="rotate(-90 17 17)"></circle>'
@@ -216,7 +293,7 @@ def _conf_gauge(confidence: float, label: str) -> str:
         f'<div class="tf-conf-wrap" style="display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap">'
         f'<div style="position:relative;width:168px;height:168px;flex-shrink:0">'
         f'<svg viewBox="0 0 168 168" width="168" height="168">'
-        f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="#30363d" stroke-width="13" '
+        f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="var(--tf-border)" stroke-width="13" '
         f'stroke-linecap="round" stroke-dasharray="{arc_span:.1f} {circumference:.1f}" '
         f'transform="rotate(135 84 84)"></circle>'
         f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="{color}" stroke-width="13" '
@@ -227,12 +304,12 @@ def _conf_gauge(confidence: float, label: str) -> str:
         f'align-items:center;justify-content:center">'
         f'<div style="font-family:\'IBM Plex Mono\',monospace;font-weight:700;font-size:2.6rem;'
         f'color:{color}">{score100}</div>'
-        f'<div style="font-size:.7rem;color:#6e7681">/ 100</div>'
+        f'<div style="font-size:.7rem;color:var(--tf-muted2)">/ 100</div>'
         f'</div>'
         f'</div>'
         f'<div>'
         f'<div class="tf-conf-big" style="color:{color}">{html.escape(label)}</div>'
-        f'<div style="font-size:.85rem;color:#8b949e">整體信心指數 {confidence:.2f}</div>'
+        f'<div style="font-size:.85rem;color:var(--tf-muted)">整體信心指數 {confidence:.2f}</div>'
         f'</div>'
         f'</div>'
     )
@@ -266,12 +343,333 @@ def _render_cost_card(log) -> str:
         f'<div class="tf-section">'
         f'<h3>本次分析成本</h3>'
         f'<p class="j">{e(cost_display)}</p>'
-        f'<p style="color:#8b949e;font-size:.85rem">'
+        f'<p style="color:var(--tf-muted);font-size:.85rem">'
         f'共 {len(cost_events)} 次 LLM 呼叫；輸入 {tokens_in} tokens／輸出 {tokens_out} tokens</p>'
         f'<table><tr><th>Model</th><th>輸入 tokens</th><th>輸出 tokens</th><th>估算成本</th></tr>'
         f'{rows}</table>'
         f'</div>'
     )
+
+
+def _format_uptime(seconds: float) -> str:
+    """把秒數格式化成「N天N小時N分N秒」，供 `/status` 顯示運行時間用。"""
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours or days:
+        parts.append(f"{hours}小時")
+    if minutes or hours or days:
+        parts.append(f"{minutes}分")
+    parts.append(f"{secs}秒")
+    return "".join(parts)
+
+
+_FRESHNESS_STATUS_LABEL = {
+    "fresh": ("新鮮", "#3fb950"),
+    "stale": ("過期", "#d9832a"),
+    "missing": ("缺", "#f85149"),
+}
+
+
+def _render_freshness_table(snapshot: list[dict]) -> str:
+    """把 `cache.get_freshness_snapshot()` 的結果渲染成「來源 × 幣種」矩陣表格。
+
+    純渲染層：不做任何額外查詢，`snapshot` 完全由呼叫端（`_render_status_page`）
+    一次算好傳入。`snapshot` 為空（如讀取整批失敗降級）→ 顯示提示文字，不崩。
+    """
+    e = html.escape
+    if not snapshot:
+        return '<p style="color:var(--tf-muted);font-size:.85rem">（暫無資料可顯示）</p>'
+
+    sources: list[str] = []
+    coins: list[str] = []
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in snapshot:
+        src, coin = row.get("source", ""), row.get("coin", "")
+        if src not in sources:
+            sources.append(src)
+        if coin not in coins:
+            coins.append(coin)
+        by_key[(src, coin)] = row
+
+    header = "<th>來源</th>" + "".join(f"<th>{e(c)}</th>" for c in coins)
+    body_rows = []
+    for src in sources:
+        cells = []
+        for coin in coins:
+            row = by_key.get((src, coin))
+            if row is None:
+                cells.append("<td>&#8212;</td>")
+                continue
+            label, color = _FRESHNESS_STATUS_LABEL.get(row.get("status", ""), ("未知", "var(--tf-muted)"))
+            cells.append(f'<td><span style="color:{color}">{label}</span></td>')
+        body_rows.append(f"<tr><td>{e(src)}</td>{''.join(cells)}</tr>")
+
+    return f"<table><tr>{header}</tr>{''.join(body_rows)}</table>"
+
+
+def _render_recent_scheduler_run() -> str:
+    """`/status`「最近排程執行」區塊：讀 Phase3 `scheduler_log.get_last_scheduler_run()`
+    寫入的 run record（唯讀）。取不到（尚未跑過排程／讀取失敗已降級）一律顯示
+    提示文字，不崩頁面。"""
+    e = html.escape
+    try:
+        from .scheduler_log import get_last_scheduler_run
+
+        run = get_last_scheduler_run()
+    except Exception:
+        run = None
+
+    if not run:
+        return '<p style="color:var(--tf-muted);font-size:.85rem">（尚無排程執行紀錄）</p>'
+
+    ts = e(str(run.get("ts", "")))
+    success = run.get("success_count", 0)
+    failure = run.get("failure_count", 0)
+    total_docs = run.get("total_docs", 0)
+    failures = run.get("failures") or []
+    failures_html = (
+        f'<p style="color:#f85149;font-size:.8rem">失敗目標：{e("、".join(str(x) for x in failures))}</p>'
+        if failures else ""
+    )
+    return (
+        "<table><tr><th>時間</th><th>成功目標數</th><th>失敗目標數</th><th>寫入文件數</th></tr>"
+        f"<tr><td>{ts}</td><td>{success}</td><td>{failure}</td><td>{total_docs}</td></tr>"
+        f"</table>{failures_html}"
+    )
+
+
+def _render_status_page() -> str:
+    """`/status`：系統可觀測性頁——版本、執行模式能力、快取 backend 連線探測、
+    成本摘要、資料鮮度矩陣、最近排程執行。
+
+    ⚠️ credit-safe 鐵律：本頁**只讀**既有 cache/ledger/scheduler run log，不呼叫
+    Bedrock、不觸發任何連接器真抓取。快取 backend 連線探測與資料鮮度矩陣都是
+    對既有 cache backend 的唯讀 `get()`（資料只可能來自 `scripts/fetch_scheduler.py`
+    排程既有寫入的內容），不是新的連接器外呼；成本摘要重用 `/costs` 頁面同一套
+    `get_ledger().summary()` fallback 邏輯，零新查詢語意。
+    """
+    e = html.escape
+    uptime_html = e(_format_uptime(time.time() - _START_TIME))
+
+    mode_rows = f"""
+      <tr><td>版本</td><td>{e(VERSION)}</td></tr>
+      <tr><td>Bedrock（HAS_BEDROCK）</td>
+          <td style="color:{'#3fb950' if HAS_BEDROCK else 'var(--tf-muted)'}">
+            {'已設定（真 Bedrock 模式可用）' if HAS_BEDROCK else '未設定（僅離線示範／真資料·$0 模式可用）'}
+          </td></tr>
+      <tr><td>LIVE_TOKEN</td>
+          <td style="color:{'#3fb950' if LIVE_TOKEN else 'var(--tf-muted)'}">
+            {'已設定' if LIVE_TOKEN else '未設定'}
+          </td></tr>
+      <tr><td>成本預算門檻（COST_BUDGET_USD）</td>
+          <td>{e(COST_BUDGET_USD) if COST_BUDGET_USD else '未設定'}</td></tr>
+      <tr><td>運行時間</td><td>{uptime_html}</td></tr>
+    """
+
+    # 延遲匯入：避免 web.py 模組載入順序把 ingestion 子套件提前拉進來。
+    from .ingestion.cache import cache_key, get_cache_backend, get_freshness_snapshot
+
+    cache_backend = get_cache_backend()
+    # 唯讀連線探測：對保留的探測 key 做一次 `get()`（cache-miss 也算探測成功，
+    # 只要呼叫本身沒丟例外就代表 backend 讀寫路徑通——不影響任何真實資料，
+    # 更不會觸發任何連接器抓取）。故意繞過 `cache_get()` 的自動 fallback 語意，
+    # 才能問到「primary backend 本身」通不通，而非被 fallback 悄悄接住。
+    try:
+        cache_backend.get(cache_key("__status_probe__", ""))
+        cache_color = "#3fb950"
+        cache_text = f"connected（backend={e(type(cache_backend).__name__)}）"
+    except Exception as exc:
+        cache_color = "#f85149"
+        cache_text = f"disconnected（backend={e(type(cache_backend).__name__)}）：{e(str(exc))}"
+
+    try:
+        summary = get_ledger().summary()
+    except Exception:
+        summary = JsonlLedger().summary()
+    total_cost = float(summary.get("total_cost_usd", 0.0) or 0.0)
+    run_count = len(summary.get("runs", []) or [])
+
+    try:
+        freshness = get_freshness_snapshot(backend=cache_backend)
+    except Exception:
+        freshness = []
+    fresh_n = sum(1 for r in freshness if r.get("status") == "fresh")
+    stale_n = sum(1 for r in freshness if r.get("status") == "stale")
+    missing_n = sum(1 for r in freshness if r.get("status") == "missing")
+    freshness_html = _render_freshness_table(freshness)
+
+    recent_run_html = _render_recent_scheduler_run()
+
+    return f"""
+<div class="tf-section">
+  <h2 style="margin:0 0 .3rem">系統狀態</h2>
+  <p style="color:var(--tf-muted);font-size:.85rem">本頁純讀既有資料，不觸發任何連接器抓取／Bedrock 呼叫。</p>
+  <table>{mode_rows}</table>
+</div>
+
+<div class="tf-section">
+  <h3>連線狀態</h3>
+  <table>
+    <tr><th>元件</th><th>狀態</th></tr>
+    <tr><td>快取 backend（DynamoDB／JSON，依 CACHE_BACKEND）</td>
+        <td style="color:{cache_color}">{cache_text}</td></tr>
+  </table>
+</div>
+
+<div class="tf-section">
+  <h3>成本摘要</h3>
+  <p class="j">累計花費 ${total_cost:.4f}</p>
+  <p style="color:var(--tf-muted);font-size:.85rem">共 {run_count} 筆歷史 run 紀錄，詳見 <a href="/costs">成本帳本</a>。</p>
+</div>
+
+<div class="tf-section">
+  <h3>資料鮮度矩陣（各連接器 × 各幣種）</h3>
+  <p style="color:var(--tf-muted);font-size:.85rem">
+    <span style="color:#3fb950">新鮮 {fresh_n}</span> ·
+    <span style="color:#d9832a">過期 {stale_n}</span> ·
+    <span style="color:#f85149">缺 {missing_n}</span>
+  </p>
+  {freshness_html}
+</div>
+
+<div class="tf-section">
+  <h3>最近排程執行</h3>
+  {recent_run_html}
+</div>
+"""
+
+
+def _render_status_page_cached() -> str:
+    """`_render_status_page()` 的 ~30 秒 module 級 TTL 快取包裝。
+
+    資料鮮度矩陣要逐 (source, coin) 讀 cache backend（見 `get_freshness_snapshot`），
+    組合數不小，DynamoDB backend 下每次請求都重算會有明顯延遲，也容易被打爆。
+    這是**跨 IP 共用**的頁面級快取（非安全機制，`_check_status_rate_limit` 才是），
+    純粹降低重算頻率。
+
+    ⚠️ single-flight：cache 過期瞬間可能有多個 `ThreadingHTTPServer` 併發請求
+    同時進來（跨多個 client IP，per-IP 限流擋不住）。若鎖只保護「檢查/寫入」
+    兩小段、`_render_status_page()` 本身在鎖外跑，這些併發請求會全部 miss、
+    各自獨立重算整份 freshness matrix + ledger summary + scheduler run 讀取
+    ——thundering herd，DynamoDB backend 下造成負載/成本尖峰。因此把
+    `_render_status_page()` 整個放進鎖內序列化執行：只有第一個發現 cache
+    過期的請求真的重算，其餘請求卡在鎖外等待；等它們拿到鎖時，上面的
+    `now < expires_at` 檢查已經因為前者剛寫入的新值而成立，直接吃新值
+    返回，不會各自重算。代價是過期瞬間的併發請求會被序列化等重算完成
+    （而非立刻各自平行拿到舊值），但這正是 TTL 快取本來就允許的等級（本
+    來單一請求重算也要付這個延遲），且比起 thundering herd 更安全。
+    """
+    with _status_cache_lock:
+        now = time.time()
+        if now < _status_cache["expires_at"]:
+            return _status_cache["html"]  # type: ignore[return-value]
+        rendered = _render_status_page()
+        _status_cache["html"] = rendered
+        _status_cache["expires_at"] = time.time() + _STATUS_CACHE_TTL_SECONDS
+        return rendered
+
+
+def _handle_status(client_ip: str = "") -> tuple[int, str]:
+    """處理 `/status` 請求邏輯，回傳 `(http_status, html_body)`——由 `Handler.do_GET`
+    包一層 `self._send`；抽出成獨立函式方便測試直接呼叫，不需開真 socket
+    （比照 `_do_analyze`/`_do_comparison` 的抽出慣例）。
+
+    CEO 決策（PR #39，收斂）：theme toggle 機制整個拆除，`render_page()`
+    固定 dark，這裡不再需要接受/轉傳 `theme`/`theme_toggle_href` 參數。
+    """
+    try:
+        _check_status_rate_limit(client_ip)
+    except TooManyRequests as exc:
+        return 429, render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>")
+    return 200, render_page(_render_status_page_cached())
+
+
+_LEDGER_SUMMARY_CACHE_TTL_SEC = 20.0
+_LEDGER_SUMMARY_CACHE_MAX = 32
+_ledger_summary_cache: dict[Callable[[], object], tuple[float, dict]] = {}
+_ledger_summary_cache_lock = threading.Lock()
+
+
+def _get_ledger_summary() -> dict:
+    """讀取跨 run 持久化成本帳本彙總（`get_ledger().summary()`），backend 讀取失敗
+    （如 `COST_LEDGER_BACKEND=dynamodb` 但未實作）時 fallback 讀 `JsonlLedger`，
+    與 `ledger.append_run()` 的 fallback 邏輯一致，確保呼叫端永遠拿得到 dict。
+
+    供 `/costs` 頁面與 header「cost ledger $X」連結共用同一份真實累計數字。
+
+    效能修正（CEO Chrome 複審 MEDIUM）：`Ledger.summary()`（JSONL 全檔重讀／
+    DynamoDB 全表 Scan + JSONL fallback 合併）成本隨歷史紀錄筆數線性增長；
+    先前版本每個頁面（含每次 render_page 都會渲染的 header cost ledger 連結、
+    以及 `/costs` 本身）都重新全掃一次帳本，隨帳本增長會拖慢每個頁面的
+    latency。這裡加一層以「目前生效的 `get_ledger` 工廠函式本身」為 key、
+    TTL 20 秒、上限 32 筆的 bounded 記憶體快取：同一個 `get_ledger` 在 20
+    秒內重複呼叫只真的全掃一次（含同一次請求內 header + `/costs` 內容各
+    呼叫一次，也只掃一次）；只要 `get_ledger` 被換掉（例如測試
+    `monkeypatch.setattr(web, "get_ledger", lambda: fake_ledger)` 換一顆新的
+    fake），key 立刻不同、絕不會讀到舊 ledger 的快取值——`test_costs_page_*`
+    系列測試每個都換一顆全新 fake ledger 並斷言各自數字，因此不受影響。
+
+    ⚠️ single-flight 修正（codex 複審 MEDIUM，PR #39，與 `_render_status_page_cached`
+    同類 bug）：先前版本鎖只保護「檢查 cache」與「寫入 cache」兩小段，中間
+    `get_ledger().summary()` 的實際計算是在**鎖外**跑的——冷啟動或 TTL 剛過期
+    那一瞬間，`ThreadingHTTPServer` 下每個併發進來的頁面請求（header cost
+    ledger 連結每頁都會觸發，`/costs` 本身也會）都各自判定 cache miss，
+    全部平行呼叫一次 `summary()`，等同 thundering herd：JSONL 全檔重讀／
+    DynamoDB 全表 Scan 被同時打好幾份，延遲尖峰、DynamoDB backend 下還有
+    成本放大。修法比照 `_render_status_page_cached()` 已驗證過的做法：把
+    「檢查 cache → miss 就地計算 → 寫回 cache」整段放進同一把鎖內序列化
+    執行。只有第一個發現 miss 的請求真的呼叫 `summary()`，其餘請求卡在鎖
+    外等待；等它們拿到鎖時，前者剛寫入的新值已經讓 cache 命中，直接吃新
+    值返回，不會各自重算。TTL 語意不變（20 秒），只是把「讀什麼」跟「算
+    什麼」的鎖粒度對齊，不再有鎖外的計算窗口。
+
+    ⚠️ cache key 修正（codex 複審 MEDIUM，PR #39）：先前用 `id(get_ledger)`
+    （純整數）當 key，字典本身不持有 `get_ledger` 函式物件的參照。若
+    `get_ledger` 被重新綁定（例如測試換一顆新的 fake 工廠）、舊的函式物件
+    又剛好被 GC 回收，CPython 有機率把同一個記憶體位址（同一個 `id()`）
+    重新分配給新建立的另一個函式物件——20 秒 TTL 內若新工廠恰好拿到舊 id，
+    會直接命中舊工廠留下的摘要快取，顯示錯誤（過期）的成本數字，而且是
+    悄無聲息、不會噴錯的資料錯誤。修法：**直接用 `get_ledger` 這個函式物件
+    本身作 dict key**（函式可雜湊、預設用身分比較），而不是它的 `id()`。
+    字典的 key 引用本身會讓該函式物件在快取存活期間至少多一份強參照，
+    杜絕「物件已死、id 被別人撿走」這個時間窗——只要 key 還在快取裡，
+    Python 就不可能把同一個 id 分配給另一個物件；等 TTL 過期或被 32 筆
+    上限淘汰、key 才會真的釋放。TTL、single-flight、bounded 淘汰邏輯全部
+    不變。
+    """
+    key = get_ledger
+    with _ledger_summary_cache_lock:
+        now = time.monotonic()
+        cached = _ledger_summary_cache.get(key)
+        if cached is not None and (now - cached[0]) < _LEDGER_SUMMARY_CACHE_TTL_SEC:
+            return cached[1]
+        try:
+            summary = get_ledger().summary()
+        except Exception:
+            summary = JsonlLedger().summary()
+        _ledger_summary_cache[key] = (now, summary)
+        if len(_ledger_summary_cache) > _LEDGER_SUMMARY_CACHE_MAX:
+            oldest_key = min(_ledger_summary_cache, key=lambda k: _ledger_summary_cache[k][0])
+            _ledger_summary_cache.pop(oldest_key, None)
+        return summary
+
+
+def _header_cost_display() -> str:
+    """Header「cost ledger $X」連結顯示用字串：累計真實花費（`$0.0000` 起跳）。
+
+    讀取失敗時（理論上不會，`_get_ledger_summary` 已有 fallback）優雅退回 `$0.0000`，
+    不讓整頁因帳本 I/O 例外而掛掉。
+    """
+    try:
+        total = float(_get_ledger_summary().get("total_cost_usd", 0.0) or 0.0)
+    except Exception:
+        total = 0.0
+    return f"${total:.4f}"
 
 
 def _render_costs_page() -> str:
@@ -282,10 +680,7 @@ def _render_costs_page() -> str:
     與 `ledger.append_run()` 的 fallback 邏輯一致，確保頁面永遠可顯示。
     """
     e = html.escape
-    try:
-        summary = get_ledger().summary()
-    except Exception:
-        summary = JsonlLedger().summary()
+    summary = _get_ledger_summary()
 
     total = float(summary.get("total_cost_usd", 0.0) or 0.0)
     by_model = summary.get("by_model", {}) or {}
@@ -318,7 +713,7 @@ def _render_costs_page() -> str:
     run_rows = []
     for r in recent:
         calls = r.get("calls", []) or []
-        offline_badge = " <small style='color:#6e7681'>(離線)</small>" if r.get("offline") else ""
+        offline_badge = " <small style='color:var(--tf-muted2)'>(離線)</small>" if r.get("offline") else ""
         run_rows.append(
             f"<tr><td>{e(str(r.get('ts', '')))}</td>"
             f"<td>{e(str(r.get('coin', '')))}</td>"
@@ -333,7 +728,7 @@ def _render_costs_page() -> str:
   <h2 style="margin:0 0 .3rem">累計成本帳本</h2>
   <p class="j">${total:.4f}</p>
   {alert_html}
-  <p style="color:#8b949e;font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
+  <p style="color:var(--tf-muted);font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
 </div>
 
 <div class="tf-section">
@@ -408,11 +803,11 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         )
 
     # manip>0 一律紅色 #cb2431（回歸測試鎖定的顏色碼，勿改）；manip==0 用中性灰
-    manip_color  = "#cb2431" if manip > 0 else "#8b949e"
+    manip_color  = "#cb2431" if manip > 0 else "var(--tf-muted)"
     manip_weight = "font-weight:600;" if manip > 0 else ""
 
     corr_text  = "✓ 有獨立來源交叉佐證" if corr > 0 else "— 無交叉佐證"
-    corr_color = "#3fb950"              if corr > 0 else "#8b949e"
+    corr_color = "#3fb950"              if corr > 0 else "var(--tf-muted)"
 
     # ---- WHY caption：純由既有 float 值推導的白話說明，不新增資料欄位 ----
     why_rep = "高信譽來源佐證" if rep >= 0.7 else ("中等信譽來源" if rep >= 0.4 else "低信譽來源，需查證")
@@ -431,8 +826,8 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
 
     manip_deficit = manip * 0.4
     stacked_bar = (
-        f'<div style="display:flex;height:14px;width:100%;background:#0d1117;'
-        f'border-radius:4px;overflow:hidden;border:1px solid #30363d">'
+        f'<div style="display:flex;height:14px;width:100%;background:var(--tf-bg);'
+        f'border-radius:4px;overflow:hidden;border:1px solid var(--tf-border)">'
         f'<span style="height:100%;width:{_seg_pct(rep_c):.1f}%;background:#3fb950" '
         f'title="信譽 {rep:.2f}×0.50"></span>'
         f'<span style="height:100%;width:{_seg_pct(corr_c):.1f}%;background:#1f6feb" '
@@ -441,10 +836,10 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         f'title="時效 {rec:.2f}×0.15"></span>'
         f'</div>'
         f'<div style="display:flex;justify-content:space-between;font-size:.65rem;'
-        f'color:#6e7681;margin-top:.15rem">'
+        f'color:var(--tf-muted2);margin-top:.15rem">'
         f'<span>0</span><span>正向合計 {(rep_c + corr_c + rec_c):.2f}</span>'
         f'<span>{pos_weight:.2f}</span></div>'
-        f'<div style="display:flex;height:8px;width:100%;background:#0d1117;'
+        f'<div style="display:flex;height:8px;width:100%;background:var(--tf-bg);'
         f'border-radius:4px;overflow:hidden;border:1px solid rgba(203,36,49,.4);margin-top:.35rem" '
         f'title="操縱扣分 −{manip_deficit:.2f}">'
         f'<span style="margin-left:auto;height:100%;'
@@ -455,44 +850,44 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
     )
 
     return (
-        f'<div style="margin:.35rem 0;padding:.5rem .6rem;background:#0f141a;'
-        f'border-radius:6px;border:1px solid #30363d;font-size:.78rem">'
-        f'<div style="color:#6e7681;font-size:.7rem;font-weight:600;margin-bottom:.3rem">'
+        f'<div style="margin:.35rem 0;padding:.5rem .6rem;background:var(--tf-inset);'
+        f'border-radius:6px;border:1px solid var(--tf-border);font-size:.78rem">'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;font-weight:600;margin-bottom:.3rem">'
         f'信任分析（信譽×0.50 + 佐證×0.25 + 時效×0.15 − 操縱×0.40）</div>'
         f'{stacked_bar}'
         f'<div style="display:flex;flex-direction:column;gap:.3rem;margin-top:.5rem">'
         # 信譽
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">信譽</span> '
+        f'<span style="color:var(--tf-muted)">信譽</span> '
         f'{mini_bar(rep, "#3fb950")} '
-        f'<span style="color:#e6edf3">{rep:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.50</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div></div>'
+        f'<span style="color:var(--tf-text)">{rep:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)"> ×0.50</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div></div>'
         # 佐證
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">佐證</span> '
+        f'<span style="color:var(--tf-muted)">佐證</span> '
         f'{mini_bar(corr, "#1f6feb")} '
-        f'<span style="color:#e6edf3">{corr:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.25</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_corr)}</div></div>'
+        f'<span style="color:var(--tf-text)">{corr:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)"> ×0.25</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_corr)}</div></div>'
         # 時效
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">時效</span> '
+        f'<span style="color:var(--tf-muted)">時效</span> '
         f'{mini_bar(rec, "#8957e5")} '
-        f'<span style="color:#e6edf3">{rec:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.15</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_rec)}</div></div>'
+        f'<span style="color:var(--tf-text)">{rec:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)"> ×0.15</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rec)}</div></div>'
         # 操縱（紅色扣分方向，非正向第四塊）
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">操縱</span> '
+        f'<span style="color:var(--tf-muted)">操縱</span> '
         f'{mini_bar(manip, "#cb2431")} '
         f'<span style="color:{manip_color};{manip_weight}">{manip:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.40</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_manip)}</div></div>'
+        f'<span style="color:var(--tf-muted2)"> ×0.40</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_manip)}</div></div>'
         f'</div>'
         f'<div style="margin-top:.4rem">'
-        f'<span style="color:#6e7681">→</span> '
-        f'<span style="font-weight:600;color:#e6edf3">信任 {trust:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)">→</span> '
+        f'<span style="font-weight:600;color:var(--tf-text)">信任 {trust:.2f}</span>'
         f'</div>'
         f'<div style="color:{corr_color};font-size:.75rem;margin-top:.15rem">{e(corr_text)}</div>'
         f'</div>'
@@ -530,7 +925,7 @@ def _independence_tier(kind: str) -> tuple[str, str]:
         return "高·第三方", "#3fb950"
     if kind in _COMMUNITY_KINDS:
         return "中·社群", "#d9832a"
-    return "一般·輔助", "#8b949e"
+    return "一般·輔助", "var(--tf-muted)"
 
 
 def _render_evidence_list(
@@ -603,8 +998,8 @@ def _render_evidence_list(
             f'{info_flags_badge}'
             f"</summary>"
             f'<div class="tf-ev-body">'
-            f"<p style='margin:.3rem 0;font-size:.85rem;color:#c9d1d9'>{e(ev.content_reference)}</p>"
-            f"<p style='margin:.3rem 0;font-size:.82rem;color:#8b949e'>URL: {url_html}</p>"
+            f"<p style='margin:.3rem 0;font-size:.85rem;color:var(--tf-text2)'>{e(ev.content_reference)}</p>"
+            f"<p style='margin:.3rem 0;font-size:.82rem;color:var(--tf-muted)'>URL: {url_html}</p>"
             f"{_render_trust_breakdown(ev.trust_components, ev.trust)}"
             f"</div>"
             f"</details>"
@@ -615,7 +1010,11 @@ def _render_evidence_list(
     return "".join(rows)
 
 
-def render_page(body: str = "", active_mode: str = "offline") -> str:
+def render_page(
+    body: str = "",
+    active_mode: str = "offline",
+    run_stats_html: str = "",
+) -> str:
     """組完整 HTML（三檔模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。
 
     三檔徽章（dark 樣式，見 .tf-mode-badge）恆同時列出：離線示範／真資料·$0
@@ -630,6 +1029,20 @@ def render_page(body: str = "", active_mode: str = "offline") -> str:
 
     `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`
     （首頁 `/`、`/costs` 等未經過分析流程的頁面，視為離線示範為預設 active 檔）。
+
+    CEO 決策（PR #39，收斂）：拆掉 theme toggle 切換機制，固定
+    `data-theme="dark"`（見 `_PAGE`），不再接受外部 `theme` 參數。原因：
+    rtok render cache 是 process-local（重啟/部署/多 worker/TTL 過期即
+    cache miss），"切主題不重跑 pipeline" 與 "不遺失已產出報告" 在無狀態
+    SSR 架構下本質難以兩全——與其留一個會在特定條件下把使用者已產出的
+    真報告弄丟的功能，不如先收斂成 dark-only，等 #20（結果持久化）做對
+    後再重新開放 theme toggle。`var(--tf-*)` CSS custom properties／
+    `:root[data-theme="light"]` 色票**仍保留**（不刪 token），只是目前
+    沒有任何切換入口能到達 light。
+
+    `run_stats_html`：左側 Query Console 面板的「RUN STATS」區塊（見
+    `_render_run_stats()`），只有跑過一次真實分析（`/analyze` 成功）才有資料，
+    預設空字串（首頁／`/costs`／尚未分析的錯誤頁不顯示）。
     """
     live_capable = HAS_BEDROCK
     live_is_active = active_mode == "live" and live_capable
@@ -656,6 +1069,8 @@ def render_page(body: str = "", active_mode: str = "offline") -> str:
     return _PAGE.format(
         mode=mode, body=body,
         version=html.escape(VERSION),
+        cost_display=html.escape(_header_cost_display()),
+        run_stats=run_stats_html,
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
                     {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
@@ -723,7 +1138,7 @@ def _render_cross_signal(signal: dict) -> str:
     summary_esc = e(signal.get("summary", ""))
     ids = signal.get("supporting_claim_ids", [])
     ids_html = (
-        f'<small style="color:#8b949e">佐證 claim_ids：{e(", ".join(ids))}</small>'
+        f'<small style="color:var(--tf-muted)">佐證 claim_ids：{e(", ".join(ids))}</small>'
         if ids else ""
     )
 
@@ -735,11 +1150,11 @@ def _render_cross_signal(signal: dict) -> str:
 
             def _side_body(items: list[dict]) -> str:
                 if not items:
-                    return '<p style="margin:0;font-size:.8rem;color:#6e7681">&#8212;</p>'
+                    return '<p style="margin:0;font-size:.8rem;color:var(--tf-muted2)">&#8212;</p>'
                 return "".join(
-                    f'<p style="margin:.3rem 0 .1rem;font-size:.85rem;color:#e6edf3">'
+                    f'<p style="margin:.3rem 0 .1rem;font-size:.85rem;color:var(--tf-text)">'
                     f'<b>{e(it.get("label", ""))}</b></p>'
-                    f'<p style="margin:0 0 .3rem;font-size:.8rem;color:#8b949e">'
+                    f'<p style="margin:0 0 .3rem;font-size:.8rem;color:var(--tf-muted)">'
                     f'{e(it.get("detail", ""))}</p>'
                     for it in items
                 )
@@ -803,6 +1218,94 @@ def _aggregate_trust_components(evidence: list) -> dict:
     if n == 0:
         return {}
     return {k: sums[k] / n for k in keys}
+
+
+def _render_run_stats(evidence: list, log=None) -> str:
+    """左側 Query Console 面板的「RUN STATS」區塊——只用本次分析已產生的真實
+    物件（`evidence`/`log.events`）算出，沒有任何示範/假造欄位（#24）：
+
+    - Evidence rows／Unflagged ≥0.3／Flagged／Below 0.3：四者都是對同一份
+      `evidence`（`_render_report`/`_render_comparison` 已收到的真實證據
+      清單，即「證據清單」表格會逐列渲染的同一批物件）的計數，口徑彼此
+      一致、可對帳（unflagged + flagged + below-0.3 ＝ evidence rows，恆
+      成立）：
+        * evidence rows   = len(evidence)（本輪納入報告的證據**列數**——
+                            標籤故意不叫「Sources scanned」：這是「證據
+                            清單」表格的列數，不是唯一來源數（同一來源
+                            可能貢獻多筆證據，會被重複計入），也不是
+                            pipeline 前端真的「掃描」了幾個來源，標
+                            「scanned」是誇大成結構化計數的假語意（codex
+                            複審 MEDIUM，CLAUDE 規範 #24 不做假語意）。
+        * flagged         = ev.flags 非空的筆數（`trust.scoring._manipulation_flags`
+                            命中，即證據清單裡渲染 &#128681; 操縱紅旗徽章的同一批）
+                            —— 命名故意不用「dropped」：這批證據**仍顯示在
+                            報告裡**（只是帶紅旗警示），沒有真的被過濾掉，
+                            標「dropped」是失真宣稱（CEO Chrome 複審 MEDIUM
+                            修正，CLAUDE 規範 #24 不做假語意）。
+        * unflagged ≥0.3  = 其餘「未被紅旗、且 trust>=0.3」的筆數（沿用
+                            `_render_evidence_list` 既有的 tf-low 0.3 門檻，
+                            不新造閾值）——標籤故意不叫「Passed filter」：
+                            低分／被紅旗的證據並沒有真的被過濾掉、仍全部
+                            顯示在報告裡，稱「filter」暗示有東西被擋下來
+                            了，是另一個假語意（codex 複審 MEDIUM）。
+        * below 0.3       = evidence rows − unflagged≥0.3 − flagged（未被
+                            紅旗但 trust<0.3 的證據；只在 >0 時才顯示這列，
+                            避免多一列恆為 0 的雜訊）——先前版本沒有這一列，
+                            導致兩者對不上證據總數，這裡補上讓四個數字永遠
+                            能對帳。
+      注意：這是「證據清單」這個階段的口徑（claim 抽取＋信任評分之後），不等於
+      pipeline 最前端 `ingestion.collect()` 抓到的原始文件數（該數字目前只存在
+      於 log 的自由文字 summary，沒有結構化欄位可安全取用，寧可不顯示也不用
+      正則從文字反推假裝結構化——見 CLAUDE 規範 #24）。標籤本身也刻意選字
+      面上精確等於它顯示的數字之真義，不誇大成「掃了幾個來源、過濾掉幾個」
+      （codex 複審 MEDIUM，PR #39）。
+    - Latency：`log.events` 最後一筆的 `elapsed_sec`（`ExecutionLog` 本就用來
+      追蹤官方 15 分鐘執行預算的即時累積耗時，真實量測值，非估算）。
+    - Model：`log.events` 內最後一筆 `tool=="bedrock.complete"` 的
+      `params["model"]`（`agent.orchestrator` 已記錄的真實模型 id，或離線/
+      未設模型時的 `"offline/regex-fallback"` 字面值）。
+
+    任何一項算不出來就整列省略（不是顯示「—」或 0 這種看起來像真值的假值）；
+    整體都沒有資料時回傳空字串，讓呼叫端不渲染這個區塊。
+    """
+    e = html.escape
+    rows: list[tuple[str, str]] = []
+
+    if evidence:
+        n_flagged = sum(1 for ev in evidence if getattr(ev, "flags", None))
+        n_passed = sum(
+            1 for ev in evidence
+            if not getattr(ev, "flags", None) and float(getattr(ev, "trust", 0.0)) >= 0.3
+        )
+        n_below = len(evidence) - n_passed - n_flagged
+        rows.append(("Evidence rows", str(len(evidence))))
+        rows.append(("Unflagged ≥ 0.3", str(n_passed)))
+        rows.append(("Flagged", str(n_flagged)))
+        if n_below > 0:
+            rows.append(("Below 0.3", str(n_below)))
+
+    if log is not None and getattr(log, "events", None):
+        last_elapsed = log.events[-1].get("elapsed_sec")
+        if isinstance(last_elapsed, (int, float)):
+            rows.append(("Latency", f"{last_elapsed:.2f}s"))
+        model = None
+        for ev in reversed(log.events):
+            if ev.get("tool") == "bedrock.complete":
+                model = (ev.get("params") or {}).get("model")
+                if model:
+                    break
+        if model:
+            rows.append(("Model", str(model)))
+
+    if not rows:
+        return ""
+
+    row_html = "".join(
+        f'<div class="tf-stat-row"><span class="tf-stat-k">{e(k)}</span>'
+        f'<span class="tf-stat-v">{e(v)}</span></div>'
+        for k, v in rows
+    )
+    return f'<div class="tf-run-stats"><h3>Run Stats</h3>{row_html}</div>'
 
 
 def _render_report(
@@ -1051,7 +1554,7 @@ def _render_comparison(
 
 <div class="tf-section" style="background:rgba(31,111,235,.08);border-color:#1f6feb">
   <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
-  <p style="color:#8b949e;margin:.2rem 0">{e(query)}</p>
+  <p style="color:var(--tf-muted);margin:.2rem 0">{e(query)}</p>
 </div>
 
 <div class="tf-section">
@@ -1287,7 +1790,7 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+    def _send(self, code, body, ctype="text/html; charset=utf-8", extra_headers=None):
         b = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -1299,6 +1802,8 @@ class Handler(BaseHTTPRequestHandler):
             "font-src https://fonts.gstatic.com",
         )
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, val in (extra_headers or {}).items():
+            self.send_header(name, val)
         self.end_headers()
         self.wfile.write(b)
 
@@ -1312,11 +1817,25 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
-        page = render_page
+
+        # CEO 決策（PR #39，收斂）：theme toggle 切換機制（/theme 路由、
+        # rtok render cache、cookie 讀寫、header ★ 按鈕）整個拆除——rtok
+        # cache 是 process-local，重啟/部署/多 worker/TTL 過期都會 cache
+        # miss，"切主題不重跑 pipeline" 與 "不遺失已產出報告" 在無狀態 SSR
+        # 架構下本質難兩全。固定 dark（`render_page()` 預設值），
+        # `var(--tf-*)` token 架構保留，等 #20（結果持久化）做對後再重新
+        # 開放。`page()` 因此只是 `render_page()` 的薄包裝，不再需要算
+        # toggle_href。
+        def page(body="", active_mode="offline", run_stats_html=""):
+            return render_page(body, active_mode=active_mode, run_stats_html=run_stats_html)
+
         if u.path == "/":
             return self._send(200, page(""))
         if u.path == "/costs":
             return self._send(200, page(_render_costs_page()))
+        if u.path == "/status":
+            code, body = _handle_status(client_ip)
+            return self._send(code, body)
         if u.path in ("/analyze", "/analyze.json"):
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
             try:
@@ -1355,12 +1874,17 @@ class Handler(BaseHTTPRequestHandler):
                     # HIGH 根治：改傳 dict（_mode_extra_params），由 _render_comparison
                     # 內部併入 coin/type/q 一次 urlencode，不再自己組半截字串。
                     mode_extra = _mode_extra_params(qs)
+                    comparison_body = _render_comparison(
+                        report_a, evidence_a, report_b, evidence_b, query, log,
+                        mode_extra=mode_extra,
+                    )
+                    comparison_stats = _render_run_stats(evidence_a + evidence_b, log)
                     return self._send(
                         200,
-                        page(_render_comparison(
-                            report_a, evidence_a, report_b, evidence_b, query, log,
-                            mode_extra=mode_extra,
-                        ), active_mode=active_mode),
+                        page(
+                            comparison_body, active_mode=active_mode,
+                            run_stats_html=comparison_stats,
+                        ),
                     )
                 else:
                     report, evidence, log = _do_analyze(qs, client_ip=client_ip)
@@ -1376,11 +1900,14 @@ class Handler(BaseHTTPRequestHandler):
                             "application/json; charset=utf-8",
                         )
                     mode_extra = _mode_extra_params(qs)
+                    report_body = _render_report(report, evidence, log, mode_extra=mode_extra)
+                    report_stats = _render_run_stats(evidence, log)
                     return self._send(
                         200,
                         page(
-                            _render_report(report, evidence, log, mode_extra=mode_extra),
+                            report_body,
                             active_mode=active_mode,
+                            run_stats_html=report_stats,
                         ),
                     )
             except TooManyRequests as exc:

@@ -69,7 +69,7 @@ import time
 from abc import ABC, abstractmethod
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Iterable, NamedTuple
 
 from .base import Document, Source
 
@@ -520,3 +520,60 @@ class CachedSource(Source):
             )
         docs_raw = entry.get("docs") or []
         return [doc_from_dict(d) for d in docs_raw if isinstance(d, dict)]
+
+
+def get_freshness_snapshot(
+    backend: CacheBackend | None = None,
+    source_names: Iterable[str] | None = None,
+    coins: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """`/status` 資料鮮度矩陣用的唯讀 helper：逐 (source, coin) 讀 cache
+    `fetched_at`，比對 `stale_after_for(refresh_interval)` 標「新鮮／過期／缺」。
+
+    ⚠️ 純讀：只呼叫既有 `cache_get()`（本身已具備 backend 失敗 fallback 讀
+    `JsonCacheBackend` 的語意），**不寫入、不改任何既有快取/寫入邏輯**，也
+    **不會**觸發任何真連接器 API 呼叫——跟 `CachedSource.fetch()` 一樣，資料
+    只可能來自 `scripts/fetch_scheduler.py` 排程既有寫入的內容，credit-safe。
+
+    `source_names`/`coins` 預設分別為 `DEFAULT_REFRESH_INTERVAL_SECONDS` 的所有
+    已知來源、`COIN_POOL` 全部幣種（供測試以較小組合覆寫，避免每個測試都要
+    跑滿全量組合）。
+
+    回傳 `[{"source", "coin", "status", "fetched_at", "age_seconds"}, ...]`：
+      - `status="missing"`：`cache_get()` 回 `None`（從未成功寫入，或讀取失敗
+        已降級）——`fetched_at`/`age_seconds` 皆為 `None`。
+      - `status="stale"`：`age_seconds > stale_after_for(refresh_interval)`。
+      - `status="fresh"`：`age_seconds <= stale_after_for(refresh_interval)`。
+    來源的 refresh 間隔查 `DEFAULT_REFRESH_INTERVAL_SECONDS`（未知來源名 fallback
+    `DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS`），跟 `CachedSource`/
+    `scripts/fetch_scheduler.py` 共用同一份數字，不另外手填第二份。
+    """
+    # 延遲匯入避免模組載入順序造成循環匯入（schema.py 不依賴 ingestion，
+    # 理論上不會循環，但沿用專案內其他處延遲匯入的保守慣例）。
+    from ..schema import COIN_POOL
+
+    resolved_backend = backend if backend is not None else get_cache_backend()
+    names = list(source_names) if source_names is not None else sorted(DEFAULT_REFRESH_INTERVAL_SECONDS)
+    coin_list = list(coins) if coins is not None else list(COIN_POOL)
+
+    now = time.time()
+    snapshot: list[dict[str, Any]] = []
+    for name in names:
+        interval = DEFAULT_REFRESH_INTERVAL_SECONDS.get(name, DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS)
+        stale_after = stale_after_for(interval)
+        for coin in coin_list:
+            entry = cache_get(resolved_backend, cache_key(name, coin))
+            if entry is None:
+                snapshot.append({
+                    "source": name, "coin": coin, "status": "missing",
+                    "fetched_at": None, "age_seconds": None,
+                })
+                continue
+            fetched_at = float(entry.get("fetched_at", 0.0) or 0.0)
+            age = now - fetched_at
+            snapshot.append({
+                "source": name, "coin": coin,
+                "status": "fresh" if age <= stale_after else "stale",
+                "fetched_at": fetched_at, "age_seconds": age,
+            })
+    return snapshot

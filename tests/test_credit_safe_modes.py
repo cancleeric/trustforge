@@ -819,10 +819,11 @@ def _run_do_get(path: str, client_ip: str = "1.2.3.4") -> dict:
     h.client_address = (client_ip, 55555)
     captured: dict = {}
 
-    def fake_send(code, body, ctype="text/html; charset=utf-8"):
+    def fake_send(code, body, ctype="text/html; charset=utf-8", extra_headers=None):
         captured["code"] = code
         captured["body"] = body
         captured["ctype"] = ctype
+        captured["extra_headers"] = extra_headers
 
     h._send = fake_send
     h.do_GET()
