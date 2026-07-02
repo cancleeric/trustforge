@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
@@ -454,24 +455,34 @@ def _render_recent_scheduler_run() -> str:
     )
 
 
-def _get_connector_usage_summary() -> dict[str, int]:
+def _get_connector_usage_summary(records: list[dict[str, Any]] | None = None) -> dict[str, int]:
     """近期（最近 `scheduler_log.RECENT_WINDOW_SIZE` 次以內）排程執行的
     `source_calls` 加總，供 `/status`「連接器用量」表使用（成本會計階段2）。
 
     ⚠️ O(1)-相容：只呼叫 `SchedulerRunLog.recent()`（`JsonlSchedulerRunLog`
-    讀一份獨立維護的 bounded window 檔，見 `scheduler_log.py` 模組頂部
+    讀一份獨立維護的 bounded window 檔，`DynamoDBSchedulerRunLog` 對應讀一份
+    獨立維護的 bounded window 項目，見 `scheduler_log.py` 模組頂部
     `RECENT_WINDOW_SIZE` 說明），不掃描完整排程歷史。任何讀取失敗（尚未跑過
     排程／backend 故障）一律降級回空 dict，`/status` 頁面必須永遠能顯示。
 
     ⚠️ 這是「最近 N 次排程執行」的加總，不是嚴格日曆 30 天——呼叫端顯示文案
     需誠實反映這點，不宣稱「近 30 天」（見 `_render_connector_usage_table`）。
-    """
-    try:
-        from .scheduler_log import get_scheduler_run_log
 
-        records = get_scheduler_run_log().recent()
-    except Exception:
-        records = []
+    ⚠️ `records` 可選（codex MEDIUM，PR #41）：`/status` 一次 render 需要
+    「連接器用量」表 + 「快取節省」卡兩處都彙總 `source_calls`，若各自獨立
+    呼叫 `recent()`，同一次 render 會對 DynamoDB backend 打兩次 `GetItem`
+    （JSONL backend 則是多讀一次 window 檔），沒必要。呼叫端（見
+    `_render_status_page`）應該只呼叫一次 `SchedulerRunLog.recent()`，把結果
+    透過 `records` 參數**共用**給兩個彙總點；未傳（`None`，預設值，供獨立
+    呼叫/測試用）才退回原本各自呼叫 `recent()` 的行為，向後相容。
+    """
+    if records is None:
+        try:
+            from .scheduler_log import get_scheduler_run_log
+
+            records = get_scheduler_run_log().recent()
+        except Exception:
+            records = []
 
     totals: dict[str, int] = {}
     for rec in records or []:
@@ -480,7 +491,7 @@ def _get_connector_usage_summary() -> dict[str, int]:
     return totals
 
 
-def _render_connector_usage_table() -> str:
+def _render_connector_usage_table(records: list[dict[str, Any]] | None = None) -> str:
     """`/status`「連接器用量」表：各連接器最近 N 次排程執行的呼叫數加總、
     估計成本；共用同一組配額 key 的 source（見 `cost_model.py::shared_pool`，
     目前是 3 個 coingecko-* source）合併成一行、呼叫數加總顯示。
@@ -499,6 +510,11 @@ def _render_connector_usage_table() -> str:
     共用池合併一行加總呼叫數，只顯示原始呼叫數＋官方配額參考文字，不假裝
     精確百分比；未來若要提供真正的配額%，需先做月曆月 bucket 計數（本 PR
     範圍外）。
+
+    `records`：見 `_get_connector_usage_summary` 的同名參數說明——`/status`
+    一次 render 應共用同一份 `recent()` 結果傳進來（codex MEDIUM，PR #41），
+    不要各自獨立呼叫 `recent()`。未傳（`None`）才退回獨立呼叫，供直接單獨
+    呼叫本函式（如測試）使用。
     """
     e = html.escape
     try:
@@ -506,7 +522,7 @@ def _render_connector_usage_table() -> str:
     except Exception:
         RECENT_WINDOW_SIZE = 30  # noqa: N806 — 匯入失敗時的顯示用退路，不影響實際彙總邏輯
 
-    usage = _get_connector_usage_summary()
+    usage = _get_connector_usage_summary(records)
     # 顯示 CONNECTOR_COST_MODEL 登記過的全部來源（含用量 0 的），讓維運者
     # 一眼看到「哪些來源這個視窗內完全沒被排程呼叫到」；usage 裡若出現不在
     # 登記表的來源名稱（理論上不會，防禦性容錯）一併補上顯示，不吞掉。
@@ -591,7 +607,7 @@ def _get_analyze_service_count() -> int:
         return _analyze_service_count
 
 
-def _render_cache_savings_card() -> str:
+def _render_cache_savings_card(records: list[dict[str, Any]] | None = None) -> str:
     """`/status`「快取節省」卡：估算「若無快取」需要的連接器呼叫次數，對比
     scheduler 實際呼叫次數，算出估計省下的次數／成本（**標「估算」**，見下方
     明確算式；多數連接器是 free tier，故以次數為主，成本欄目前恆為 $0）。
@@ -606,9 +622,13 @@ def _render_cache_savings_card() -> str:
     ⚠️ 兩個數字時間窗不同源（analyze 次數是本 process 啟動以來累計，scheduler
     呼叫數是最近 N 次排程執行 window，見 `_get_connector_usage_summary`）——
     刻意不假裝精確對齊同一個時間窗，這正是要標「估算」的原因，不是抓 bug。
+
+    `records`：同 `_render_connector_usage_table` 的同名參數——`/status` 一次
+    render 應共用同一份 `recent()` 結果（codex MEDIUM，PR #41），不要各自
+    獨立呼叫 `recent()`。未傳（`None`）才退回獨立呼叫。
     """
     analyze_count = _get_analyze_service_count()
-    usage = _get_connector_usage_summary()
+    usage = _get_connector_usage_summary(records)
     actual_calls = sum(usage.values())
     n_sources = len(CONNECTOR_COST_MODEL)
     would_be_calls = analyze_count * n_sources
@@ -700,6 +720,20 @@ def _render_status_page() -> str:
 
     recent_run_html = _render_recent_scheduler_run()
 
+    # codex MEDIUM（PR #41）：「連接器用量」表 + 「快取節省」卡都需要
+    # `SchedulerRunLog.recent()` 的彙總結果，一次 render 只呼叫一次、結果
+    # 共用給兩處——不要各自獨立呼叫 `recent()`（會讓同一次 render 對
+    # DynamoDB backend 打兩次 GetItem／JSONL backend 多讀一次 window 檔，
+    # 沒必要；比照本頁面本身已有的 TTL + single-flight 快取精神，同一次
+    # render 內部也不重複讀同一份資料）。任何讀取失敗一律降級回空清單，
+    # 兩個渲染函式各自對空清單有防禦性處理，不會讓 `/status` 崩頁。
+    try:
+        from .scheduler_log import get_scheduler_run_log
+
+        scheduler_records = get_scheduler_run_log().recent()
+    except Exception:
+        scheduler_records = []
+
     return f"""
 <div class="tf-section">
   <h2 style="margin:0 0 .3rem">系統狀態</h2>
@@ -725,12 +759,12 @@ def _render_status_page() -> str:
 
 <div class="tf-section">
   <h3>連接器用量（近期排程執行加總）</h3>
-  {_render_connector_usage_table()}
+  {_render_connector_usage_table(scheduler_records)}
 </div>
 
 <div class="tf-section">
   <h3>快取節省（估算）</h3>
-  {_render_cache_savings_card()}
+  {_render_cache_savings_card(scheduler_records)}
 </div>
 
 <div class="tf-section">

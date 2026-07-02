@@ -327,7 +327,7 @@ def test_render_connector_usage_table_placeholder_when_registry_and_usage_both_e
     """防禦性分支（目前 CONNECTOR_COST_MODEL 恆非空，正常不會走到）：登記表
     與用量都空時要顯示明確的「無資料」訊息，不是空表格。"""
     monkeypatch.setattr(web, "CONNECTOR_COST_MODEL", {})
-    monkeypatch.setattr(web, "_get_connector_usage_summary", lambda: {})
+    monkeypatch.setattr(web, "_get_connector_usage_summary", lambda records=None: {})
     body = web._render_connector_usage_table()
     assert "尚無排程執行紀錄，無連接器用量可顯示" in body
 
@@ -372,6 +372,35 @@ def test_status_page_connector_usage_never_scans_full_history(
     monkeypatch.setattr(JsonlSchedulerRunLog, "read_all", spy)
     web._handle_status(client_ip="6.6.6.4")
     assert calls["n"] == 0
+
+
+def test_status_page_recent_called_once_per_render_shared_across_sections(
+    json_cache_backend, monkeypatch, tmp_path
+):
+    """codex MEDIUM（PR #41）回歸鎖：「連接器用量」表 + 「快取節省」卡都要
+    彙總 `SchedulerRunLog.recent()`，一次 `/status` render 只該呼叫一次、
+    結果共用給兩處——不是各自獨立呼叫兩次（原本的 bug：DynamoDB backend
+    會因此同一次 render 多打一次 GetItem，JSONL backend 多讀一次 window
+    檔，沒必要）。"""
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    append_scheduler_run({
+        "ts": "2026-06-01T00:00:00+00:00", "success_count": 1, "failure_count": 0,
+        "failures": [], "total_docs": 1, "source_calls": {"coindesk": 1},
+    })
+
+    original_recent = JsonlSchedulerRunLog.recent
+    calls = {"n": 0}
+
+    def spy(self, n=30):
+        calls["n"] += 1
+        return original_recent(self, n)
+
+    monkeypatch.setattr(JsonlSchedulerRunLog, "recent", spy)
+    _, body = web._handle_status(client_ip="6.6.6.7")
+
+    assert calls["n"] == 1, f"recent() 該只被呼叫一次（共用），實際 {calls['n']} 次"
+    assert "連接器用量" in body
+    assert "快取節省" in body
 
 
 # ---------------------------------------------------------------------------

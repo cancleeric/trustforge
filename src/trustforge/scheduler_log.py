@@ -268,9 +268,20 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
     嚴格小於這次要寫入的值），把「比較」跟「覆寫」在 DynamoDB 伺服器端合
     成單一原子操作；`ConditionalCheckFailedException` 代表已有更新（或相
     等）的指標存在，直接忽略、不當錯誤。
+
+    同一套精神也用在 `recent()`（codex MEDIUM，PR #41）：`append()` 額外用
+    另一個固定 Key（`_RECENT_KEY`）維護一份 bounded「最近 N 筆」window 項目
+    （見 `_update_recent_window`），`recent()` 只對這個固定 Key 做**單筆
+    `GetItem`**，**絕不 `Scan`**——修正前 `recent()` 沒 override，會繼承
+    `SchedulerRunLog.recent()` 的未優化參考實作（整份 `read_all()` 再排序取
+    前 n 筆），成本隨歷史筆數線性增長，違反 `/status`「連接器用量」表的
+    O(1) 熱路徑宣稱。window 維護是 read-modify-write（無法只靠比較 ts 表達），
+    改用樂觀鎖版本號重試，細節見 `_update_recent_window` docstring。
     """
 
     _LATEST_KEY = {"run_id": "__latest__", "ts": "__latest__"}
+    _RECENT_KEY = {"run_id": "__recent__", "ts": "__recent__"}
+    _RECENT_WINDOW_MAX_RETRIES = 5  # 樂觀鎖重試上限，見 `_update_recent_window`
 
     def __init__(self, table_name: str | None = None, region: str | None = None):
         self.table_name = table_name or os.getenv(
@@ -324,6 +335,7 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
         item["run_id"] = str(run_id)
         table.put_item(Item=self._to_decimal(item))
         self._update_latest_pointer(table, item)
+        self._update_recent_window(table, item)
 
     def _update_latest_pointer(self, table: Any, item: dict[str, Any]) -> None:
         """維護固定 Key 的 latest 指標。真正的 key 屬性（`run_id`/`ts`）改成
@@ -352,6 +364,66 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
             if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 return  # 已有更新（或相等）的指標存在，忽略，不當錯誤
             raise
+
+    def _update_recent_window(self, table: Any, item: dict[str, Any]) -> None:
+        """維護固定 Key 的 bounded recent-window 項目（codex MEDIUM，PR #41：
+        原本 `recent()` 沒 override、繼承 `read_all()` 全 `Scan`，成本隨歷史
+        筆數增長，違反 O(1) 熱路徑宣稱）。比照 `latest()` 用固定 Key
+        （`_RECENT_KEY`）存**單一項目**，`recent()` 對它做單筆 `GetItem`，
+        絕不 `Scan`。
+
+        跟 `_update_latest_pointer` 的差異：latest 指標是「比較 ts 決定要不
+        要覆寫」的單純 compare-and-set；recent window 則是「讀目前 window →
+        把新記錄併入 → 依 ts 排序截斷到 `RECENT_WINDOW_SIZE` 筆 → 寫回」的
+        read-modify-write，沒辦法只靠一個 `ConditionExpression` 表達比較
+        邏輯。因此改用**樂觀鎖版本號**（`_version` 欄位）：讀目前版本號與
+        window 內容，計算新 window，用 `ConditionExpression`（版本號仍等於
+        剛讀到的值，或項目尚不存在）做條件式 `PutItem`；若版本已被別的併發
+        `append` 動過（`ConditionalCheckFailedException`），代表寫入期間有
+        人搶先更新，整個讀-併入-寫循環重試，直到成功或達重試上限——這是
+        DynamoDB 上常見的 optimistic concurrency 模式，跟 `JsonlSchedulerRunLog`
+        用 `fcntl.flock` 序列化整個臨界區達到同樣「不會漏記錄」的效果，只是
+        DynamoDB 沒有跨行程鎖，改用版本號重試取代。
+
+        window 內容存整筆原始 record（不只 `source_calls`），格式對齊
+        `JsonlSchedulerRunLog._recent_path` 的內容慣例，讓 `recent()` 的回傳
+        形狀在兩個 backend 之間一致。"""
+        from boto3.dynamodb.conditions import Attr  # 延遲匯入，同 boto3 lazy 慣例
+        from botocore.exceptions import ClientError
+
+        for _ in range(self._RECENT_WINDOW_MAX_RETRIES):
+            resp = table.get_item(Key=self._RECENT_KEY)
+            existing = resp.get("Item")
+            version = int(existing.get("_version", 0)) if existing else 0
+            raw_records = existing.get("records") if existing else None
+            window = self._from_decimal(raw_records) if raw_records else []
+            if not isinstance(window, list):
+                window = []
+            window = [dict(r) for r in window if isinstance(r, dict)]
+            window.append(dict(item))
+            window.sort(key=lambda r: str(r.get("ts", "")), reverse=True)
+            window = window[:RECENT_WINDOW_SIZE]
+
+            new_item = dict(self._RECENT_KEY)
+            new_item["records"] = window
+            new_item["_version"] = version + 1
+
+            condition = (
+                Attr("_version").not_exists()
+                if version == 0
+                else Attr("_version").eq(version)
+            )
+            try:
+                table.put_item(Item=self._to_decimal(new_item), ConditionExpression=condition)
+                return
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    continue  # 版本被別的併發 append 搶先動過，重讀重試
+                raise
+        raise RuntimeError(
+            "DynamoDBSchedulerRunLog._update_recent_window: 樂觀鎖重試 "
+            f"{self._RECENT_WINDOW_MAX_RETRIES} 次仍衝突，放棄（同時間過多併發 append？）"
+        )
 
     def latest(self) -> dict[str, Any] | None:
         """O(1)：對固定 Key 做單筆 `GetItem`，**絕不 `Scan`**——查詢成本不隨
@@ -392,14 +464,23 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
             scan_kwargs["ExclusiveStartKey"] = last_key
         return records
 
-    # `recent()`：本 PR 範圍內不覆寫，沿用 `SchedulerRunLog.recent()` 的未優化
-    # 參考實作（`read_all()` 全 Scan 再排序取前 n 筆）——誠實標記：這條路徑
-    # **不是** O(1)，成本隨歷史筆數增長。`SCHEDULER_RUN_LOG_BACKEND` 預設
-    # `jsonl`（`JsonlSchedulerRunLog.recent()` 才是真正 O(1) 的 window 讀取，
-    # 見該類別實作），DynamoDB backend 要先由 CEO 另立步驟建表、切換 env 才會
-    # 生效；屆時若要在 DynamoDB backend 上維持 O(1)，應比照 `latest()` 用
-    # 固定 Key + 條件式 `PutItem` 維護一份獨立的 recent-window 項目，不在本
-    # PR（成本會計階段2）範圍內，先誠實留白，不假裝已經優化。
+    def recent(self, n: int = RECENT_WINDOW_SIZE) -> list[dict[str, Any]]:
+        """O(1)：對固定 Key（`_RECENT_KEY`）做單筆 `GetItem`，**絕不 `Scan`**
+        ——查詢成本恆為 O(1)，不隨排程歷史筆數增長（codex MEDIUM，PR #41：
+        原本繼承 `SchedulerRunLog.recent()` 的未優化參考實作，全 `Scan` 再
+        排序取前 n 筆；現比照 `latest()` 改為讀一份獨立維護、bounded 大小的
+        recent-window 項目，見 `_update_recent_window` docstring）。window
+        項目不存在（表剛建/尚未有任何 append）視為「尚無紀錄」。"""
+        resp = self._get_table().get_item(Key=self._RECENT_KEY)
+        item = resp.get("Item")
+        if not item:
+            return []
+        raw_records = item.get("records")
+        records = self._from_decimal(raw_records) if raw_records else []
+        if not isinstance(records, list):
+            return []
+        records = [r for r in records if isinstance(r, dict)]
+        return records[:n]
 
 
 def get_scheduler_run_log() -> SchedulerRunLog:
