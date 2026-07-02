@@ -1,0 +1,265 @@
+"""`/status`（系統可觀測性頁，Phase1~3）測試。
+
+⛔ credit-safe 鐵律：`/status` 只讀既有 cache/ledger/scheduler run log，
+不呼叫 Bedrock、不觸發任何連接器真抓取。本檔用 monkeypatch 把
+`pipeline.run`/`BedrockClient`/真 `Source.fetch()` 全部替換成「一旦被呼叫就
+斷言失敗」的樁，證明 `/status` 完全不碰這些路徑。
+"""
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from trustforge import web
+from trustforge.ingestion.cache import JsonCacheBackend, cache_key
+from trustforge.ledger import JsonlLedger
+from trustforge.scheduler_log import JsonlSchedulerRunLog, append_scheduler_run
+
+
+@pytest.fixture(autouse=True)
+def _reset_status_module_state():
+    """`_status_rate_buckets`/`_status_cache` 是 module 級共用狀態，比照既有
+    `web._rate_buckets.clear()` 慣例，每個測試前重置，避免跨測試互相汙染。"""
+    web._status_rate_buckets.clear()
+    web._status_cache["expires_at"] = 0.0
+    web._status_cache["html"] = ""
+    yield
+    web._status_rate_buckets.clear()
+    web._status_cache["expires_at"] = 0.0
+    web._status_cache["html"] = ""
+
+
+@pytest.fixture
+def json_cache_backend(tmp_path, monkeypatch):
+    """`/status` 用 `CACHE_BACKEND=json` 且指向隔離的 tmp_path，避免碰到真
+    DynamoDB / 汙染開發者本機的 out/connector_cache/。"""
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+    monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
+    return JsonCacheBackend()
+
+
+# ---------------------------------------------------------------------------
+# 基本 200 + 內容
+# ---------------------------------------------------------------------------
+
+def test_status_route_returns_200(json_cache_backend):
+    code, body = web._handle_status(client_ip="1.2.3.4")
+    assert code == 200
+    assert "系統狀態" in body
+
+
+def test_status_page_shows_version_and_mode_info(json_cache_backend, monkeypatch):
+    monkeypatch.setattr(web, "VERSION", "9.9.9-test")
+    code, body = web._handle_status(client_ip="1.2.3.5")
+    assert code == 200
+    assert "9.9.9-test" in body
+    assert "HAS_BEDROCK" in body or "Bedrock" in body
+
+
+def test_status_page_shows_uptime(json_cache_backend):
+    code, body = web._handle_status(client_ip="1.2.3.6")
+    assert code == 200
+    assert "運行時間" in body
+
+
+def test_status_page_links_to_costs(json_cache_backend):
+    _, body = web._handle_status(client_ip="1.2.3.7")
+    assert 'href="/costs"' in body
+
+
+def test_homepage_has_status_link(json_cache_backend):
+    """首頁 header 應有連到 /status 的連結（比照既有 /costs 連結慣例）。"""
+    assert 'href="/status"' in web.render_page("")
+
+
+# ---------------------------------------------------------------------------
+# DynamoDB／cache backend 連線探測：失敗要優雅降級，不炸頁面
+# ---------------------------------------------------------------------------
+
+def test_status_page_shows_connected_when_cache_backend_healthy(json_cache_backend):
+    _, body = web._handle_status(client_ip="2.2.2.2")
+    assert "connected" in body
+    assert "disconnected" not in body
+
+
+def test_status_page_degrades_gracefully_when_cache_backend_broken(monkeypatch, tmp_path):
+    """cache backend `get()` 丟例外（如 DynamoDB 缺憑證/表未建）→ 頁面顯示
+    disconnected，不 raise、不回 500。"""
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+
+    class BrokenBackend:
+        def get(self, key, *, consistent_read=False):
+            raise RuntimeError("AccessDeniedException：dynamodb:GetItem 被拒")
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise RuntimeError("不該被呼叫")
+
+    # web.py 內部用延遲匯入 `from .ingestion.cache import get_cache_backend`，
+    # 需在 ingestion.cache 模組層級 patch 才會被拿到。
+    import trustforge.ingestion.cache as cache_mod
+    monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: BrokenBackend())
+
+    code, body = web._handle_status(client_ip="2.2.2.3")
+    assert code == 200  # 不因為 backend 掛掉就整頁 500
+    assert "disconnected" in body
+
+
+# ---------------------------------------------------------------------------
+# 成本摘要：重用既有 get_ledger().summary()，零新查詢
+# ---------------------------------------------------------------------------
+
+def test_status_page_shows_cost_summary(json_cache_backend, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+    JsonlLedger().append({
+        "run_id": "r1", "ts": "2026-01-01T00:00:00+00:00",
+        "total_cost_usd": 0.0042, "calls": [{"model": "m", "cost_usd": 0.0042}],
+    })
+    _, body = web._handle_status(client_ip="3.3.3.3")
+    assert "成本摘要" in body
+    assert "0.0042" in body
+
+
+# ---------------------------------------------------------------------------
+# 資料鮮度矩陣（Phase2）
+# ---------------------------------------------------------------------------
+
+def test_status_page_shows_freshness_matrix(json_cache_backend):
+    json_cache_backend.set(cache_key("coindesk", "BTC"), [], fetched_at=time.time())
+    _, body = web._handle_status(client_ip="4.4.4.4")
+    assert "資料鮮度矩陣" in body
+    assert "coindesk" in body
+    assert "BTC" in body
+
+
+# ---------------------------------------------------------------------------
+# 排程持久化（Phase3）：讀「最近排程執行」
+# ---------------------------------------------------------------------------
+
+def test_status_page_shows_recent_scheduler_run(json_cache_backend, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    append_scheduler_run({
+        "ts": "2026-06-01T00:00:00+00:00", "success_count": 7,
+        "failure_count": 1, "failures": ["reddit-bitcoin:ETH"], "total_docs": 42,
+    })
+    _, body = web._handle_status(client_ip="5.5.5.5")
+    assert "最近排程執行" in body
+    assert "reddit-bitcoin:ETH" in body
+
+
+def test_status_page_shows_placeholder_when_no_scheduler_run(json_cache_backend, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "empty.jsonl"))
+    _, body = web._handle_status(client_ip="5.5.5.6")
+    assert "尚無排程執行紀錄" in body
+
+
+# ---------------------------------------------------------------------------
+# 頁面級 ~30s TTL 快取
+# ---------------------------------------------------------------------------
+
+def test_status_page_cached_within_ttl(json_cache_backend, monkeypatch):
+    calls = {"n": 0}
+    real_render = web._render_status_page
+
+    def counting_render():
+        calls["n"] += 1
+        return real_render()
+
+    monkeypatch.setattr(web, "_render_status_page", counting_render)
+
+    web._handle_status(client_ip="6.6.6.6")
+    web._handle_status(client_ip="6.6.6.7")  # 不同 IP，仍應共用同一份快取
+    assert calls["n"] == 1
+
+
+def test_status_page_recomputed_after_ttl_expires(json_cache_backend, monkeypatch):
+    calls = {"n": 0}
+    real_render = web._render_status_page
+
+    def counting_render():
+        calls["n"] += 1
+        return real_render()
+
+    monkeypatch.setattr(web, "_render_status_page", counting_render)
+
+    web._handle_status(client_ip="6.6.6.8")
+    web._status_cache["expires_at"] = time.time() - 1  # 模擬 TTL 已過期
+    web._handle_status(client_ip="6.6.6.8")
+    assert calls["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# per-IP 限流：獨立於 live/real 限流的 bucket
+# ---------------------------------------------------------------------------
+
+def test_status_rate_limit_triggers_429_after_max(json_cache_backend):
+    ip = "7.7.7.7"
+    for _ in range(web._STATUS_RATE_MAX):
+        code, _ = web._handle_status(client_ip=ip)
+        assert code == 200
+    code, body = web._handle_status(client_ip=ip)
+    assert code == 429
+    assert "請求過於頻繁" in body
+
+
+def test_status_rate_limit_independent_from_live_rate_limit(json_cache_backend):
+    """/status 限流用獨立 bucket，不消耗/受 live 限流 bucket 影響。"""
+    ip = "7.7.7.8"
+    web._rate_buckets.clear()
+    # 灌爆 live 限流 bucket
+    for _ in range(web._RATE_MAX):
+        web._check_live_rate_limit(ip)
+    with pytest.raises(web.TooManyRequests):
+        web._check_live_rate_limit(ip)
+
+    # /status 仍應正常放行（獨立 bucket，不受上面影響）
+    code, _ = web._handle_status(client_ip=ip)
+    assert code == 200
+    web._rate_buckets.clear()
+
+
+def test_status_rate_limit_scoped_per_ip(json_cache_backend):
+    ip_a, ip_b = "7.7.7.9", "7.7.7.10"
+    for _ in range(web._STATUS_RATE_MAX):
+        code, _ = web._handle_status(client_ip=ip_a)
+        assert code == 200
+    code, _ = web._handle_status(client_ip=ip_a)
+    assert code == 429
+
+    # 另一個 IP 不受影響
+    code, _ = web._handle_status(client_ip=ip_b)
+    assert code == 200
+
+
+# ---------------------------------------------------------------------------
+# credit-safe：/status 完全不觸發 Bedrock / 真連接器 API 呼叫
+# ---------------------------------------------------------------------------
+
+def test_status_route_never_calls_pipeline_run(json_cache_backend, monkeypatch):
+    def _boom(*a, **kw):
+        raise AssertionError("/status 不該呼叫 pipeline.run()")
+
+    monkeypatch.setattr("trustforge.pipeline.run", _boom)
+    monkeypatch.setattr(web, "run", _boom)
+
+    code, _ = web._handle_status(client_ip="8.8.8.8")
+    assert code == 200
+
+
+def test_status_route_never_calls_real_source_fetch(json_cache_backend, monkeypatch):
+    """`get_freshness_snapshot()` 只讀 cache，`/status` 全鏈路都不該呼叫任何
+    真 `Source.fetch()`（credit-safe：/status 探測不可觸發真抓取）。"""
+    from trustforge.ingestion.base import Source
+
+    original_fetch = Source.fetch if hasattr(Source, "fetch") else None
+
+    def _boom(self, query, coin=""):
+        raise AssertionError(f"/status 不該呼叫真 Source.fetch()（{self})")
+
+    monkeypatch.setattr(Source, "fetch", _boom, raising=False)
+    try:
+        code, _ = web._handle_status(client_ip="8.8.8.9")
+        assert code == 200
+    finally:
+        if original_fetch is not None:
+            monkeypatch.setattr(Source, "fetch", original_fetch, raising=False)

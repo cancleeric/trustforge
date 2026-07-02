@@ -51,9 +51,11 @@ from trustforge.ingestion.cache import (
     doc_from_dict,
     doc_to_dict,
     get_cache_backend,
+    get_freshness_snapshot,
     stale_after_for,
 )
 from trustforge.ledger import DynamoDBLedger, JsonlLedger
+from trustforge import scheduler_log
 
 # scripts/ 沒有 __init__.py，用 importlib 依路徑載入，避免污染 sys.path 套件命名空間
 # （比照 test_gen_stance_cache.py 的既有作法）。
@@ -832,6 +834,73 @@ def test_main_returns_zero_exit_code_when_all_writes_succeed(monkeypatch, tmp_pa
     assert rc == 0
 
 
+# ---------------------------------------------------------------------------
+# Phase3：main() 收尾寫排程 run record（/status「最近排程執行」用），見
+# `trustforge/scheduler_log.py`。
+# ---------------------------------------------------------------------------
+
+def test_main_persists_scheduler_run_record_on_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    src = _FakeSource("coindesk", kind="news")
+    _patch_registry(monkeypatch, [src])
+
+    rc = fetch_scheduler.main(["--source", "coindesk", "--coin", "BTC", "--force"])
+    assert rc == 0
+
+    record = scheduler_log.get_last_scheduler_run()
+    assert record is not None
+    assert record["success_count"] == 1
+    assert record["failure_count"] == 0
+    assert record["failures"] == []
+
+
+def test_main_dry_run_does_not_persist_scheduler_run_record(monkeypatch, tmp_path):
+    """--dry-run 沒真的呼叫/寫入任何東西，不該留下一筆誤導成「有真執行」的紀錄。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    src = _FakeSource("coindesk", kind="news")
+    _patch_registry(monkeypatch, [src])
+
+    rc = fetch_scheduler.main(["--dry-run", "--source", "coindesk", "--coin", "BTC"])
+    assert rc == 0
+    assert scheduler_log.get_last_scheduler_run() is None
+
+
+def test_main_scheduler_run_record_write_failure_does_not_change_exit_code(
+    monkeypatch, tmp_path
+):
+    """run log 寫入失敗（primary backend 掛掉）不該讓排程的 exit code 被誤判——
+    真正的成功/失敗語意只看 `run_once()` 算出的 `failures`，run log 只是旁路的
+    執行摘要（見 `scheduler_log.append_scheduler_run()` 內部已吞例外的 fallback
+    邏輯，這裡用 `fetch_scheduler.main()` 端到端驗證這個邊界）。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    src = _FakeSource("coindesk", kind="news")
+    _patch_registry(monkeypatch, [src])
+
+    class BrokenPrimaryLog(scheduler_log.SchedulerRunLog):
+        def append(self, record):
+            raise RuntimeError("scheduler run 表掛了（IAM/建表問題）")
+
+        def read_all(self):
+            return []
+
+    monkeypatch.setattr(scheduler_log, "get_scheduler_run_log", lambda: BrokenPrimaryLog())
+
+    rc = fetch_scheduler.main(["--source", "coindesk", "--coin", "BTC", "--force"])
+    assert rc == 0  # 真呼叫/cache 寫入都成功，run log 寫入失敗不影響 exit code
+
+    # primary（BrokenPrimaryLog）寫入失敗 → append_scheduler_run() 自動 fallback
+    # 寫本地 JsonlSchedulerRunLog，直接讀該 backend 確認 fallback 真的落地。
+    fallback_records = scheduler_log.JsonlSchedulerRunLog().read_all()
+    assert len(fallback_records) == 1
+    assert fallback_records[0]["success_count"] == 1
+
+
 def test_scheduler_list_sources_cli(capsys):
     rc = fetch_scheduler.main(["--list-sources"])
     assert rc == 0
@@ -1118,3 +1187,97 @@ def test_probe_is_not_fooled_by_fully_fresh_cache_where_normal_run_would_report_
     rc_probe = fetch_scheduler.main(["--probe"])
     assert rc_probe == 1
     assert denied_fresh_backend.put_calls == 1  # 這次真的觸發了一次 PutItem
+
+
+# ---------------------------------------------------------------------------
+# get_freshness_snapshot()（/status 資料鮮度矩陣用，Phase2）
+# ---------------------------------------------------------------------------
+# ⛔ 純讀：只呼叫既有 cache_get()，不觸發任何真連接器 API、不改任何寫入邏輯。
+
+def test_freshness_snapshot_missing_when_no_cache_entry(tmp_path):
+    backend = JsonCacheBackend(path=tmp_path / "cache.json")
+    snapshot = get_freshness_snapshot(
+        backend=backend, source_names=["coindesk"], coins=["BTC"]
+    )
+    assert snapshot == [
+        {"source": "coindesk", "coin": "BTC", "status": "missing",
+         "fetched_at": None, "age_seconds": None}
+    ]
+
+
+def test_freshness_snapshot_fresh_within_stale_window(tmp_path):
+    backend = JsonCacheBackend(path=tmp_path / "cache.json")
+    now = time.time()
+    backend.set(cache_key("coindesk", "BTC"), [], fetched_at=now)
+
+    snapshot = get_freshness_snapshot(
+        backend=backend, source_names=["coindesk"], coins=["BTC"]
+    )
+    assert len(snapshot) == 1
+    assert snapshot[0]["status"] == "fresh"
+    assert snapshot[0]["fetched_at"] == now
+
+
+def test_freshness_snapshot_stale_past_stale_after(tmp_path):
+    backend = JsonCacheBackend(path=tmp_path / "cache.json")
+    refresh_interval = DEFAULT_REFRESH_INTERVAL_SECONDS["coindesk"]
+    stale_after = stale_after_for(refresh_interval)
+    old_fetched_at = time.time() - stale_after - 1  # 剛好過期一秒
+    backend.set(cache_key("coindesk", "BTC"), [], fetched_at=old_fetched_at)
+
+    snapshot = get_freshness_snapshot(
+        backend=backend, source_names=["coindesk"], coins=["BTC"]
+    )
+    assert snapshot[0]["status"] == "stale"
+
+
+def test_freshness_snapshot_unknown_source_uses_fallback_interval(tmp_path):
+    """未知來源名（不在 DEFAULT_REFRESH_INTERVAL_SECONDS）用
+    fallback 間隔換算硬過期，不 raise。"""
+    backend = JsonCacheBackend(path=tmp_path / "cache.json")
+    fallback_stale_after = stale_after_for(DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS)
+    backend.set(
+        cache_key("some-unknown-source", "BTC"), [],
+        fetched_at=time.time() - fallback_stale_after - 1,
+    )
+    snapshot = get_freshness_snapshot(
+        backend=backend, source_names=["some-unknown-source"], coins=["BTC"]
+    )
+    assert snapshot[0]["status"] == "stale"
+
+
+def test_freshness_snapshot_default_covers_all_known_sources_and_coin_pool(tmp_path):
+    """不傳 source_names/coins 時，預設涵蓋 DEFAULT_REFRESH_INTERVAL_SECONDS
+    全部來源 × COIN_POOL 全部幣種（/status 頁面預設呼叫方式）。"""
+    from trustforge.schema import COIN_POOL
+
+    backend = JsonCacheBackend(path=tmp_path / "cache.json")
+    snapshot = get_freshness_snapshot(backend=backend)
+    assert len(snapshot) == len(DEFAULT_REFRESH_INTERVAL_SECONDS) * len(COIN_POOL)
+    sources_seen = {row["source"] for row in snapshot}
+    coins_seen = {row["coin"] for row in snapshot}
+    assert sources_seen == set(DEFAULT_REFRESH_INTERVAL_SECONDS)
+    assert coins_seen == set(COIN_POOL)
+
+
+def test_freshness_snapshot_does_not_call_wrapped_source_fetch(tmp_path):
+    """`get_freshness_snapshot()` 純讀 cache backend，絕不呼叫任何真 `Source.fetch()`
+    ——即使 cache-miss，也只回傳 `status="missing"`，不會反過來打真 API
+    （credit-safe 鐵律，跟 `CachedSource.fetch()` 一樣的邊界）。"""
+    calls = []
+
+    class SpySource(Source):
+        def __init__(self):
+            self.kind = "news"
+            self.name = "coindesk"
+
+        def fetch(self, query: str, coin: str = ""):
+            calls.append((query, coin))
+            raise AssertionError("get_freshness_snapshot 不該呼叫真 Source.fetch()")
+
+    backend = JsonCacheBackend(path=tmp_path / "cache.json")
+    snapshot = get_freshness_snapshot(
+        backend=backend, source_names=["coindesk"], coins=["BTC"]
+    )
+    assert snapshot[0]["status"] == "missing"
+    assert calls == []  # 從未呼叫過任何真 fetch()

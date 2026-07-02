@@ -34,3 +34,17 @@ def _isolate_connector_cache(tmp_path, monkeypatch):
     `monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", ...)` 再覆寫一次。
     """
     monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path / "connector_cache"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_scheduler_run_log(tmp_path, monkeypatch):
+    """排程 run log（Phase3 `scheduler_log.py`）測試隔離：預設寫入 tmp_path，
+    而非真實 repo 的 `out/scheduler_runs.jsonl`。
+
+    比照 `_isolate_cost_ledger`/`_isolate_connector_cache`：不隔離的話，跑
+    `scripts/fetch_scheduler.py` 相關測試會把測試噪音寫進開發者本機的
+    `out/scheduler_runs.jsonl`，汙染 `/status` 頁面「最近排程執行」顯示。
+    """
+    monkeypatch.setenv(
+        "TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "test_scheduler_runs.jsonl")
+    )

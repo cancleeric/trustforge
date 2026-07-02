@@ -44,11 +44,29 @@ LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
 # 累計花費超過此門檻（USD）→ /costs 頁面卡片轉紅告警。未設定則不告警。
 COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
 
+# `/status` 頁面「運行時間」：本程序（web worker）匯入這個模組的當下當作起點，
+# 不是真的 process 啟動時間（stdlib 無法可靠取得），但對觀測用途已足夠。
+_START_TIME = time.time()
+
 # per-IP 限流：每 IP 每 60 秒最多 5 次 live 請求
 _RATE_WINDOW = 60
 _RATE_MAX = 5
 _rate_lock = threading.Lock()
 _rate_buckets: dict[str, list[float]] = {}
+
+# `/status` 專用 per-IP 限流：獨立於上面 live/real 的 bucket，避免互相干擾
+# （/status 是唯讀觀測端點，不消耗真連接器/Bedrock 配額，門檻可以更寬鬆）。
+_STATUS_RATE_WINDOW = 30
+_STATUS_RATE_MAX = 10
+_status_rate_lock = threading.Lock()
+_status_rate_buckets: dict[str, list[float]] = {}
+
+# `/status` 頁面級 TTL 快取（跨 IP 共用，非安全機制，純降低重算頻率）：資料
+# 鮮度矩陣要逐 (source, coin) 讀 cache backend，組合數量多，DynamoDB backend
+# 下每次都重算有明顯延遲，也容易被打爆，見 `_render_status_page_cached()`。
+_STATUS_CACHE_TTL_SECONDS = 30.0
+_status_cache_lock = threading.Lock()
+_status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
 
 _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -130,6 +148,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  <span class="tf-version">{version}</span>
  {mode}
  <div class="tf-hdr-spacer"></div>
+ <a class="tf-costlink" href="/status">系統狀態</a>
  <a class="tf-costlink" href="/costs">成本帳本</a>
 </header>
 <div class="tf-layout">
@@ -163,6 +182,21 @@ def _check_live_rate_limit(ip: str) -> None:
             raise TooManyRequests(f"請求過於頻繁，請 {_RATE_WINDOW} 秒後再試")
         ts.append(now)
         _rate_buckets[ip] = ts
+
+
+def _check_status_rate_limit(ip: str) -> None:
+    """`/status` 專用 per-IP 限流（獨立 bucket，見模組頂部 `_STATUS_RATE_*`
+    常數）：IP 在滑動視窗內超過 `_STATUS_RATE_MAX` 次請求 → raise
+    `TooManyRequests`。防的是「資料鮮度矩陣逐 (source,coin) 讀 cache 的頁面
+    被當 DoS 高頻打」，跟 `_check_live_rate_limit` 保護真連接器/Bedrock 配額
+    的目的不同，故不共用同一組 bucket/門檻。"""
+    now = time.time()
+    with _status_rate_lock:
+        ts = [t for t in _status_rate_buckets.get(ip, []) if now - t < _STATUS_RATE_WINDOW]
+        if len(ts) >= _STATUS_RATE_MAX:
+            raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
+        ts.append(now)
+        _status_rate_buckets[ip] = ts
 
 
 def _opts(values, labels=None):
@@ -272,6 +306,229 @@ def _render_cost_card(log) -> str:
         f'{rows}</table>'
         f'</div>'
     )
+
+
+def _format_uptime(seconds: float) -> str:
+    """把秒數格式化成「N天N小時N分N秒」，供 `/status` 顯示運行時間用。"""
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours or days:
+        parts.append(f"{hours}小時")
+    if minutes or hours or days:
+        parts.append(f"{minutes}分")
+    parts.append(f"{secs}秒")
+    return "".join(parts)
+
+
+_FRESHNESS_STATUS_LABEL = {
+    "fresh": ("新鮮", "#3fb950"),
+    "stale": ("過期", "#d9832a"),
+    "missing": ("缺", "#f85149"),
+}
+
+
+def _render_freshness_table(snapshot: list[dict]) -> str:
+    """把 `cache.get_freshness_snapshot()` 的結果渲染成「來源 × 幣種」矩陣表格。
+
+    純渲染層：不做任何額外查詢，`snapshot` 完全由呼叫端（`_render_status_page`）
+    一次算好傳入。`snapshot` 為空（如讀取整批失敗降級）→ 顯示提示文字，不崩。
+    """
+    e = html.escape
+    if not snapshot:
+        return '<p style="color:#8b949e;font-size:.85rem">（暫無資料可顯示）</p>'
+
+    sources: list[str] = []
+    coins: list[str] = []
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in snapshot:
+        src, coin = row.get("source", ""), row.get("coin", "")
+        if src not in sources:
+            sources.append(src)
+        if coin not in coins:
+            coins.append(coin)
+        by_key[(src, coin)] = row
+
+    header = "<th>來源</th>" + "".join(f"<th>{e(c)}</th>" for c in coins)
+    body_rows = []
+    for src in sources:
+        cells = []
+        for coin in coins:
+            row = by_key.get((src, coin))
+            if row is None:
+                cells.append("<td>&#8212;</td>")
+                continue
+            label, color = _FRESHNESS_STATUS_LABEL.get(row.get("status", ""), ("未知", "#8b949e"))
+            cells.append(f'<td><span style="color:{color}">{label}</span></td>')
+        body_rows.append(f"<tr><td>{e(src)}</td>{''.join(cells)}</tr>")
+
+    return f"<table><tr>{header}</tr>{''.join(body_rows)}</table>"
+
+
+def _render_recent_scheduler_run() -> str:
+    """`/status`「最近排程執行」區塊：讀 Phase3 `scheduler_log.get_last_scheduler_run()`
+    寫入的 run record（唯讀）。取不到（尚未跑過排程／讀取失敗已降級）一律顯示
+    提示文字，不崩頁面。"""
+    e = html.escape
+    try:
+        from .scheduler_log import get_last_scheduler_run
+
+        run = get_last_scheduler_run()
+    except Exception:
+        run = None
+
+    if not run:
+        return '<p style="color:#8b949e;font-size:.85rem">（尚無排程執行紀錄）</p>'
+
+    ts = e(str(run.get("ts", "")))
+    success = run.get("success_count", 0)
+    failure = run.get("failure_count", 0)
+    total_docs = run.get("total_docs", 0)
+    failures = run.get("failures") or []
+    failures_html = (
+        f'<p style="color:#f85149;font-size:.8rem">失敗目標：{e("、".join(str(x) for x in failures))}</p>'
+        if failures else ""
+    )
+    return (
+        "<table><tr><th>時間</th><th>成功目標數</th><th>失敗目標數</th><th>寫入文件數</th></tr>"
+        f"<tr><td>{ts}</td><td>{success}</td><td>{failure}</td><td>{total_docs}</td></tr>"
+        f"</table>{failures_html}"
+    )
+
+
+def _render_status_page() -> str:
+    """`/status`：系統可觀測性頁——版本、執行模式能力、快取 backend 連線探測、
+    成本摘要、資料鮮度矩陣、最近排程執行。
+
+    ⚠️ credit-safe 鐵律：本頁**只讀**既有 cache/ledger/scheduler run log，不呼叫
+    Bedrock、不觸發任何連接器真抓取。快取 backend 連線探測與資料鮮度矩陣都是
+    對既有 cache backend 的唯讀 `get()`（資料只可能來自 `scripts/fetch_scheduler.py`
+    排程既有寫入的內容），不是新的連接器外呼；成本摘要重用 `/costs` 頁面同一套
+    `get_ledger().summary()` fallback 邏輯，零新查詢語意。
+    """
+    e = html.escape
+    uptime_html = e(_format_uptime(time.time() - _START_TIME))
+
+    mode_rows = f"""
+      <tr><td>版本</td><td>{e(VERSION)}</td></tr>
+      <tr><td>Bedrock（HAS_BEDROCK）</td>
+          <td style="color:{'#3fb950' if HAS_BEDROCK else '#8b949e'}">
+            {'已設定（真 Bedrock 模式可用）' if HAS_BEDROCK else '未設定（僅離線示範／真資料·$0 模式可用）'}
+          </td></tr>
+      <tr><td>LIVE_TOKEN</td>
+          <td style="color:{'#3fb950' if LIVE_TOKEN else '#8b949e'}">
+            {'已設定' if LIVE_TOKEN else '未設定'}
+          </td></tr>
+      <tr><td>成本預算門檻（COST_BUDGET_USD）</td>
+          <td>{e(COST_BUDGET_USD) if COST_BUDGET_USD else '未設定'}</td></tr>
+      <tr><td>運行時間</td><td>{uptime_html}</td></tr>
+    """
+
+    # 延遲匯入：避免 web.py 模組載入順序把 ingestion 子套件提前拉進來。
+    from .ingestion.cache import cache_key, get_cache_backend, get_freshness_snapshot
+
+    cache_backend = get_cache_backend()
+    # 唯讀連線探測：對保留的探測 key 做一次 `get()`（cache-miss 也算探測成功，
+    # 只要呼叫本身沒丟例外就代表 backend 讀寫路徑通——不影響任何真實資料，
+    # 更不會觸發任何連接器抓取）。故意繞過 `cache_get()` 的自動 fallback 語意，
+    # 才能問到「primary backend 本身」通不通，而非被 fallback 悄悄接住。
+    try:
+        cache_backend.get(cache_key("__status_probe__", ""))
+        cache_color = "#3fb950"
+        cache_text = f"connected（backend={e(type(cache_backend).__name__)}）"
+    except Exception as exc:
+        cache_color = "#f85149"
+        cache_text = f"disconnected（backend={e(type(cache_backend).__name__)}）：{e(str(exc))}"
+
+    try:
+        summary = get_ledger().summary()
+    except Exception:
+        summary = JsonlLedger().summary()
+    total_cost = float(summary.get("total_cost_usd", 0.0) or 0.0)
+    run_count = len(summary.get("runs", []) or [])
+
+    try:
+        freshness = get_freshness_snapshot(backend=cache_backend)
+    except Exception:
+        freshness = []
+    fresh_n = sum(1 for r in freshness if r.get("status") == "fresh")
+    stale_n = sum(1 for r in freshness if r.get("status") == "stale")
+    missing_n = sum(1 for r in freshness if r.get("status") == "missing")
+    freshness_html = _render_freshness_table(freshness)
+
+    recent_run_html = _render_recent_scheduler_run()
+
+    return f"""
+<div class="tf-section">
+  <h2 style="margin:0 0 .3rem">系統狀態</h2>
+  <p style="color:#8b949e;font-size:.85rem">本頁純讀既有資料，不觸發任何連接器抓取／Bedrock 呼叫。</p>
+  <table>{mode_rows}</table>
+</div>
+
+<div class="tf-section">
+  <h3>連線狀態</h3>
+  <table>
+    <tr><th>元件</th><th>狀態</th></tr>
+    <tr><td>快取 backend（DynamoDB／JSON，依 CACHE_BACKEND）</td>
+        <td style="color:{cache_color}">{cache_text}</td></tr>
+  </table>
+</div>
+
+<div class="tf-section">
+  <h3>成本摘要</h3>
+  <p class="j">累計花費 ${total_cost:.4f}</p>
+  <p style="color:#8b949e;font-size:.85rem">共 {run_count} 筆歷史 run 紀錄，詳見 <a href="/costs">成本帳本</a>。</p>
+</div>
+
+<div class="tf-section">
+  <h3>資料鮮度矩陣（各連接器 × 各幣種）</h3>
+  <p style="color:#8b949e;font-size:.85rem">
+    <span style="color:#3fb950">新鮮 {fresh_n}</span> ·
+    <span style="color:#d9832a">過期 {stale_n}</span> ·
+    <span style="color:#f85149">缺 {missing_n}</span>
+  </p>
+  {freshness_html}
+</div>
+
+<div class="tf-section">
+  <h3>最近排程執行</h3>
+  {recent_run_html}
+</div>
+"""
+
+
+def _render_status_page_cached() -> str:
+    """`_render_status_page()` 的 ~30 秒 module 級 TTL 快取包裝。
+
+    資料鮮度矩陣要逐 (source, coin) 讀 cache backend（見 `get_freshness_snapshot`），
+    組合數不小，DynamoDB backend 下每次請求都重算會有明顯延遲，也容易被打爆。
+    這是**跨 IP 共用**的頁面級快取（非安全機制，`_check_status_rate_limit` 才是），
+    純粹降低重算頻率。
+    """
+    now = time.time()
+    with _status_cache_lock:
+        if now < _status_cache["expires_at"]:
+            return _status_cache["html"]  # type: ignore[return-value]
+    rendered = _render_status_page()
+    with _status_cache_lock:
+        _status_cache["html"] = rendered
+        _status_cache["expires_at"] = time.time() + _STATUS_CACHE_TTL_SECONDS
+    return rendered
+
+
+def _handle_status(client_ip: str = "") -> tuple[int, str]:
+    """處理 `/status` 請求邏輯，回傳 `(http_status, html_body)`——由 `Handler.do_GET`
+    包一層 `self._send`；抽出成獨立函式方便測試直接呼叫，不需開真 socket
+    （比照 `_do_analyze`/`_do_comparison` 的抽出慣例）。"""
+    try:
+        _check_status_rate_limit(client_ip)
+    except TooManyRequests as exc:
+        return 429, render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>")
+    return 200, render_page(_render_status_page_cached())
 
 
 def _render_costs_page() -> str:
@@ -1317,6 +1574,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, page(""))
         if u.path == "/costs":
             return self._send(200, page(_render_costs_page()))
+        if u.path == "/status":
+            code, body = _handle_status(client_ip)
+            return self._send(code, body)
         if u.path in ("/analyze", "/analyze.json"):
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
             try:
