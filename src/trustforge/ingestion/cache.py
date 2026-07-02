@@ -162,8 +162,25 @@ def _json_fallback_enabled(explicit: bool | None) -> bool:
     return os.getenv(CACHE_JSON_FALLBACK_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 # 內容完全不依 coin 篩選的來源（全市場/產業層級信號）：排程器只打一次真
-# API，把同一份結果廣播寫入每個幣的 cache key，避免浪費呼叫額度。
+# API，把「同一份」結果廣播寫入每個幣的 cache key，避免浪費呼叫額度。
+# ⚠️ 跟下面 `COIN_KEYED_BATCH_SOURCES` 不同：這裡廣播的內容對每個幣是
+# **完全相同**的（FNG/SEC 本來就不分幣），適合直接整份複製。
 COIN_AGNOSTIC_SOURCES = frozenset({"alternative-me-fng", "sec-gov"})
+
+# 一次真呼叫的回應本身就「涵蓋多幣、且已用 `Document.meta['coin']` 明確
+# 標示各自歸屬」的來源（生產事故修復：CoinGecko price 429 風暴根因，見
+# `scripts/fetch_scheduler.py::run_once()` 對應分支說明）：
+#   - `coingecko-price`（`ingestion/coingecko.py::CoinGeckoPriceSource`）
+#     `simple/price` 端點一次回應就含 5 幣現價，`fetch(coin="")` 會回傳
+#     5 筆 Document，各自帶顯式 `meta["coin"]`。
+# 跟 `COIN_AGNOSTIC_SOURCES` 的關鍵差異：這裡每個幣的內容**不同**（各幣
+# 現價本來就不一樣），排程器只能真呼叫一次，但**不能**像 coin-agnostic
+# 那樣把同一份完整結果廣播到每個幣的 cache key（那樣 BTC 的 cache 裡會
+# 混進 ETH/SOL/BNB/XRP 的價格文件，即使下游 `_matches_coin` 有過濾網，
+# 也不該讓「他幣資料」平白出現在「本幣」的 cache 快取裡）——而是把單次
+# 回應依每筆 Document 自帶的 `meta["coin"]` **分流**寫入各自對應的 cache
+# key，讓每個幣的 cache 內容天生就「只含自己」，語意與其餘逐幣來源一致。
+COIN_KEYED_BATCH_SOURCES = frozenset({"coingecko-price"})
 
 
 def _normalize_coin(coin: str | None) -> str:

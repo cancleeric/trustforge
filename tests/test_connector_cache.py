@@ -34,6 +34,7 @@ import pytest
 from trustforge.ingestion.base import Document, Source
 from trustforge.ingestion.cache import (
     COIN_AGNOSTIC_SOURCES,
+    COIN_KEYED_BATCH_SOURCES,
     DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS,
     DEFAULT_REFRESH_INTERVAL_SECONDS,
     DEFAULT_STALE_AFTER_FALLBACK_SECONDS,
@@ -797,6 +798,215 @@ def test_scheduler_coin_agnostic_broadcast_write_failure_is_reported(monkeypatch
     assert results == []
     assert failures == [name]
     assert src.calls == [("", "")]  # 真呼叫確實只發生一次
+
+
+# ---------------------------------------------------------------------------
+# COIN_KEYED_BATCH_SOURCES（生產事故修復：coingecko-price 429 風暴根因）
+# ---------------------------------------------------------------------------
+#
+# 舊版 coingecko-price 未歸類進任何 batch 集合，落入逐幣迴圈被 run_once()
+# 呼叫 5 次（每幣一次）；`_get_price_data()` 的 process 級記憶體快取只在
+# 「成功」時才寫入，第一幣真呼叫若 429（記憶體快取仍是 None），下一幣又會
+# 再觸發一次真呼叫——5 幣依序把同一個已在限流的端點又打了 5 次，正是生產
+# log `coingecko-price[BTC/ETH/SOL/BNB/XRP]` 各自 429 的根因。以下驗證
+# 歸類進 `COIN_KEYED_BATCH_SOURCES` 後，不論成功/失敗，`run_once()` 對這類
+# 來源永遠只呼叫 `source.fetch()` 一次。
+
+def test_coingecko_price_is_registered_as_coin_keyed_batch_source():
+    """生產事故修復驗收：`coingecko-price` 必須在 `COIN_KEYED_BATCH_SOURCES`
+    裡，才不會落入逐幣迴圈被呼叫 5 次。"""
+    assert "coingecko-price" in COIN_KEYED_BATCH_SOURCES
+
+
+def test_scheduler_coin_keyed_batch_source_fetches_once_demuxes_by_coin(monkeypatch, tmp_path):
+    """一次真呼叫回應涵蓋全部目標幣（用 `meta["coin"]` 區分），排程器只呼叫
+    `source.fetch()` 一次，並依各 Document 自帶的 `meta["coin"]` 分流寫入
+    對應幣別的 cache key——**不是**廣播同一份完整結果（跟 coin-agnostic 不同：
+    每個幣的 cache 內容天生只含自己，不會混進其他幣的資料）。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    name = next(iter(COIN_KEYED_BATCH_SOURCES))
+    coins = ["BTC", "ETH", "SOL"]
+    docs = [
+        Document(id=f"{name}-{c}", kind="price_live", source=name,
+                 text=f"{c} price", ts=1.0, meta={"coin": c})
+        for c in coins
+    ]
+    src = _FakeSource(name, kind="price_live", docs=docs)
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        None, coins, backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+
+    assert src.calls == [("", "")]  # 只真呼叫一次，不是每幣各呼叫一次
+    assert results == [(name, 3)]
+    assert failures == []
+    for c in coins:
+        entry = backend.get(cache_key(name, c))
+        assert entry is not None
+        # 每個幣的 cache 只含自己的那一筆，不含其他幣的資料。
+        assert entry["docs"] == [doc_to_dict(d) for d in docs if d.meta["coin"] == c]
+
+
+def test_scheduler_coin_keyed_batch_source_failure_does_not_retry_per_coin(monkeypatch, tmp_path):
+    """生產事故修復核心驗收：真呼叫失敗（模擬 429）時，`run_once()` 對這類
+    來源仍然只呼叫 `source.fetch()` 一次（不會像舊版逐幣迴圈那樣對同一個
+    已限流的端點重複觸發 `len(coins)` 次）。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    name = next(iter(COIN_KEYED_BATCH_SOURCES))
+    boom = _FakeSource(name, kind="price_live", raise_exc=RuntimeError("429 too many requests"))
+    _patch_registry(monkeypatch, [boom])
+    coins = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+
+    results, failures = fetch_scheduler.run_once(
+        None, coins, backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+
+    assert boom.calls == [("", "")], (
+        f"真呼叫失敗仍只該呼叫 1 次，實得 {len(boom.calls)} 次：{boom.calls}——"
+        "若這裡呼叫次數等於幣數，代表退回了生產事故的行為（同一個限流端點被連續重打）"
+    )
+    assert results == []
+    assert failures == [name]
+    for c in coins:
+        assert backend.get(cache_key(name, c)) is None
+
+
+def test_scheduler_coin_keyed_batch_unknown_coin_in_response_is_dropped(monkeypatch, tmp_path):
+    """回應裡若混進不在目標幣清單內的 `meta["coin"]`（不應發生，純防禦性
+    測試），該筆文件直接被捨棄，不會誤塞進任何一個幣的 cache key。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    name = next(iter(COIN_KEYED_BATCH_SOURCES))
+    coins = ["BTC", "ETH"]
+    docs = [
+        Document(id=f"{name}-BTC", kind="price_live", source=name, text="BTC", ts=1.0,
+                 meta={"coin": "BTC"}),
+        Document(id=f"{name}-DOGE", kind="price_live", source=name, text="DOGE", ts=1.0,
+                 meta={"coin": "DOGE"}),  # 非目標幣，須被捨棄
+    ]
+    src = _FakeSource(name, kind="price_live", docs=docs)
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        None, coins, backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+
+    assert failures == []
+    assert results == [(name, 1)]  # 只有 BTC 那 1 筆落地
+    assert backend.get(cache_key(name, "BTC"))["docs"] == [doc_to_dict(docs[0])]
+    assert backend.get(cache_key(name, "ETH"))["docs"] == []
+
+
+def test_scheduler_coin_keyed_batch_broadcast_write_failure_is_reported(monkeypatch, tmp_path):
+    """分流寫入時若任一幣別的 cache 寫入失敗，整個來源要算進 failures（同
+    coin-agnostic 分支的既有慣例）。"""
+    monkeypatch.delenv("TRUSTFORGE_CACHE_JSON_FALLBACK", raising=False)
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "should_not_exist.json"))
+
+    broken = DynamoDBCache(table_name="fake-table")
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
+    name = next(iter(COIN_KEYED_BATCH_SOURCES))
+    coins = ["BTC", "ETH"]
+    docs = [
+        Document(id=f"{name}-{c}", kind="price_live", source=name, text=c, ts=1.0,
+                 meta={"coin": c})
+        for c in coins
+    ]
+    src = _FakeSource(name, kind="price_live", docs=docs)
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        None, coins, broken, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+
+    assert results == []
+    assert failures == [name]
+    assert src.calls == [("", "")]  # 真呼叫確實只發生一次
+
+
+def test_scheduler_coin_keyed_batch_dry_run_never_calls_fetch(monkeypatch, tmp_path):
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    name = next(iter(COIN_KEYED_BATCH_SOURCES))
+    src = _FakeSource(name, kind="price_live", docs=[])
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        None, ["BTC", "ETH"], backend, force=True, interval_overrides={}, stagger=0, dry_run=True,
+    )
+    assert results == []
+    assert failures == []
+    assert src.calls == []
+
+
+def test_scheduler_coin_keyed_batch_freshness_guard_needs_all_coins_fresh(monkeypatch, tmp_path):
+    """同 coin-agnostic 分支的 codex MEDIUM-2 考量：任一目標幣缺資料就視為
+    不新鮮，重新真呼叫一次順便補齊缺的幣。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    name = next(iter(COIN_KEYED_BATCH_SOURCES))
+    backend.set(cache_key(name, "BTC"), [], fetched_at=time.time())
+    assert backend.get(cache_key(name, "ETH")) is None
+
+    docs = [
+        Document(id=f"{name}-{c}", kind="price_live", source=name, text=c, ts=1.0,
+                 meta={"coin": c})
+        for c in ("BTC", "ETH")
+    ]
+    src = _FakeSource(name, kind="price_live", docs=docs)
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        None, ["BTC", "ETH"], backend, force=False, interval_overrides={name: 3600}, stagger=0,
+        dry_run=False,
+    )
+    assert src.calls == [("", "")]
+    assert results == [(name, 2)]
+    assert failures == []
+
+
+# ---------------------------------------------------------------------------
+# CoinGecko 逐幣來源額外 stagger 下限（生產事故修復：避免 keyless 5-15/min
+# 短時間密集呼叫瞬間爆量）
+# ---------------------------------------------------------------------------
+
+def test_effective_stagger_floors_coingecko_sources(monkeypatch):
+    """CoinGecko 逐幣來源（coingecko-sentiment/coingecko-dev）取
+    `max(使用者傳入的 --stagger, 下限)`；使用者傳入更大值時不被下限蓋掉。"""
+    assert fetch_scheduler._effective_stagger("coingecko-sentiment", 1.0) == (
+        fetch_scheduler._COINGECKO_STAGGER_FLOOR_SECONDS
+    )
+    assert fetch_scheduler._effective_stagger("coingecko-dev", 0.0) == (
+        fetch_scheduler._COINGECKO_STAGGER_FLOOR_SECONDS
+    )
+    bigger = fetch_scheduler._COINGECKO_STAGGER_FLOOR_SECONDS + 10.0
+    assert fetch_scheduler._effective_stagger("coingecko-sentiment", bigger) == bigger
+
+
+def test_effective_stagger_does_not_affect_other_sources():
+    """非 CoinGecko 逐幣來源（如 reddit）原樣沿用呼叫端傳入的 --stagger，
+    不受 CoinGecko 下限影響。"""
+    assert fetch_scheduler._effective_stagger("reddit-bitcoin", 1.0) == 1.0
+    assert fetch_scheduler._effective_stagger("coindesk", 0.0) == 0.0
+
+
+def test_scheduler_coingecko_percoin_source_sleeps_at_least_floor(monkeypatch, tmp_path):
+    """端到端：`run_once()` 對 CoinGecko 逐幣來源（sentiment/dev，未歸類進
+    `COIN_KEYED_BATCH_SOURCES`）逐幣呼叫之間的實際 sleep 時間，須套用
+    CoinGecko stagger 下限，即使呼叫端傳入的 `--stagger` 遠小於下限。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    src = _FakeSource("coingecko-sentiment", kind="sentiment")
+    _patch_registry(monkeypatch, [src])
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(fetch_scheduler.time, "sleep", lambda s: sleeps.append(s))
+
+    fetch_scheduler.run_once(
+        None, ["BTC", "ETH"], backend, force=True, interval_overrides={}, stagger=0.5,
+        dry_run=False,
+    )
+    assert sleeps == [fetch_scheduler._COINGECKO_STAGGER_FLOOR_SECONDS] * 2
 
 
 def test_main_returns_nonzero_exit_code_when_cache_write_fails(monkeypatch, tmp_path):

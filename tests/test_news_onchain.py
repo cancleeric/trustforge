@@ -59,6 +59,58 @@ def test_coindesk_rss_document_fields(monkeypatch):
     assert len(d.meta["content_reference"]) <= 120
 
 
+def test_coindesk_url_has_no_trailing_slash(monkeypatch):
+    """生產事故修復：`.../rss/`（帶斜線）已被 CoinDesk 永久重導（308）到
+    `.../rss`（無斜線），寫死的白名單 URL 須直接用無斜線版本，不依賴跟轉址
+    才能拿到內容。"""
+    from trustforge.ingestion import news
+    assert news.CoinDeskRSSSource._URL == "https://www.coindesk.com/arc/outboundfeeds/rss"
+
+
+# ── `_fetch_url` → 共用 SSRF-safe fetch 整合測試 ─────────────────────────────
+#
+# codex 對抗審第 3 輪 HIGH：`_fetch_url` 原本自帶的「禁自動跟轉 + 逐跳驗證」
+# 邏輯已抽成共用模組 `safe_fetch.py`（套用到 news/coingecko/onchain/
+# regulatory/social 全部連接器），核心 SSRF 防護（初始 URL 驗證、DNS
+# pinning、rebinding 抵抗力、轉址跨 host/私有 IP/跳數上限/legacy 狀態碼）
+# 已在 `tests/test_safe_fetch.py` 針對共用模組本身完整覆蓋，不需要在每個
+# 連接器各自重測一次底層邏輯。以下只驗證 news.py 的 `_fetch_url` 確實把
+# 對的參數（UA/timeout/max_bytes）轉交給 `safe_fetch.fetch_url`，以及
+# `SSRFBlockedError` 會原樣往外傳（不被吞掉）。
+
+def test_fetch_url_delegates_to_safe_fetch_with_correct_params(monkeypatch):
+    from trustforge.ingestion import news, safe_fetch
+
+    captured: dict = {}
+
+    def _fake_safe_fetch(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return RSS_FIXTURE
+
+    monkeypatch.setattr(news.safe_fetch, "fetch_url", _fake_safe_fetch)
+    raw = news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+    assert raw == RSS_FIXTURE
+    assert captured["url"] == "https://www.coindesk.com/arc/outboundfeeds/rss"
+    assert captured["user_agent"] == news._UA
+    assert captured["timeout"] == news._TIMEOUT
+    assert captured["max_bytes"] == news._MAX_BYTES
+
+
+def test_fetch_url_propagates_ssrf_blocked_error(monkeypatch):
+    """`safe_fetch.fetch_url` 判定不安全時拋出的 `SSRFBlockedError`，原樣
+    往外傳，不會在 news.py 這層被吞掉或降級成別的錯誤。"""
+    from trustforge.ingestion import news, safe_fetch
+
+    def _boom(url, **kwargs):
+        raise safe_fetch.SSRFBlockedError(url, "測試用：私有 IP")
+
+    monkeypatch.setattr(news.safe_fetch, "fetch_url", _boom)
+    with pytest.raises(safe_fetch.SSRFBlockedError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+
 def test_decrypt_rss_document_fields(monkeypatch):
     """Decrypt RSS 解析 source 名稱正確。"""
     from trustforge.ingestion import news

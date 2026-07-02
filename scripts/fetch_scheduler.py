@@ -63,6 +63,7 @@ sys.path.insert(0, str(_REPO / "src"))
 from trustforge.ingestion.base import Document, Source  # noqa: E402
 from trustforge.ingestion.cache import (  # noqa: E402
     COIN_AGNOSTIC_SOURCES,
+    COIN_KEYED_BATCH_SOURCES,
     DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS,
     DEFAULT_REFRESH_INTERVAL_SECONDS,
     CacheBackend,
@@ -116,6 +117,37 @@ def _warn_if_fallback_used(label: str, result) -> None:  # noqa: ANN001 — Cach
         )
 
 
+# 生產事故修復（coingecko-price 429 風暴，見 run_once() 對 COIN_KEYED_BATCH_
+# SOURCES 分支說明 + `--stagger` CLI help）：CoinGecko 逐幣來源（coins/{id}
+# 詳情，目前是 coingecko-sentiment/coingecko-dev）keyless 額度只有
+# 5-15 req/min，即使一輪只需 5 次真呼叫（每幣 1 次、sentiment/dev 共用
+# 快取），5 次呼叫若在極短時間內（如既有預設 --stagger=1 秒）密集發出，
+# 瞬間節奏仍可能撞上較保守的滑動窗口限流。這裡對 CoinGecko 逐幣來源設一個
+# 額外的呼叫間隔下限，取「使用者傳入的 --stagger」與「這個下限」兩者較大值，
+# 其餘來源（reddit 等）不受影響、沿用使用者傳入值。
+#
+# 後續加固（codex HIGH #1，安全/健康雙審）：這裡的 6 秒只是「同一個 Source
+# 內部」逐幣呼叫的間隔，不同 Source（price 與 sentiment/dev）之間完全不
+# 共享——排程順序若先跑完 5 幣 dev（0/6/12/18/24s）再跑 1 次 price
+# （COIN_KEYED_BATCH，~30s），30 秒內仍發生 6 次真請求（12 次/分鐘），
+# keyless 5-15 req/min 的保守下限依然可能撞到。真正的修法已下放到
+# `trustforge.ingestion.coingecko._fetch_url` 內部：那裡對「整個 CoinGecko
+# host」維護一個共享節流器（不分 Source/端點，任兩次真請求至少間隔 12 秒
+# keyless / 2 秒有 key），才是消除 429 的權威保護層。這裡的 6 秒 stagger
+# 保留下來只是同一來源內部逐幣呼叫的額外邊際緩衝（belt-and-braces），跟
+# coingecko.py 內建的節流器疊加，不衝突，也不是必要條件——即使拿掉這 6 秒
+# stagger，coingecko.py 內建的節流器仍會獨立擋住實際的真請求密集發送。
+_COINGECKO_STAGGER_FLOOR_SECONDS = 6.0
+
+
+def _effective_stagger(name: str, stagger: float) -> float:
+    """`name` 是 CoinGecko 逐幣來源時，回傳 `max(stagger, 下限)`；其餘來源
+    原樣回傳 `stagger`（沿用呼叫端 `--stagger` 設定，不受影響）。"""
+    if name.startswith("coingecko-"):
+        return max(stagger, _COINGECKO_STAGGER_FLOOR_SECONDS)
+    return stagger
+
+
 def run_once(
     source_names: list[str] | None,
     coins: list[str],
@@ -130,6 +162,20 @@ def run_once(
     coin-agnostic 來源（`COIN_AGNOSTIC_SOURCES`，如 FNG/SEC，內容不依 coin
     篩選）只真呼叫一次，把同一份結果廣播寫入每個目標幣別的 cache key，
     避免對它們重複打 `len(coins)` 次浪費額度。
+
+    coin-keyed-batch 來源（`COIN_KEYED_BATCH_SOURCES`，目前是
+    `coingecko-price`：一次真呼叫的回應本身就涵蓋全部目標幣，且已用
+    `Document.meta["coin"]` 明確標示各自歸屬）同樣只真呼叫一次，但**不**
+    廣播同一份完整結果——而是依每筆 Document 的 `meta["coin"]` 分流，只把
+    屬於該幣的 Document 寫進該幣自己的 cache key（生產事故修復：舊版此來源
+    未歸類進任何 batch 集合，落入下面逐幣迴圈被呼叫 `len(coins)` 次；
+    `_get_price_data()` 的 process 級記憶體快取雖然讓「成功」時只發生 1 次
+    真 HTTP 呼叫，但**呼叫失敗時完全沒有這層保護**——第一幣觸發真呼叫若
+    429，記憶體快取仍是 `None`，下一幣又會再觸發一次真呼叫，5 幣依序把
+    同一個已經在限流的端點又打了 5 次，正是生產 log 見到
+    `coingecko-price[BTC/ETH/SOL/BNB/XRP]` 各自 429 的根因。歸類進
+    `COIN_KEYED_BATCH_SOURCES` 後排程器本身只呼叫 `source.fetch()` 一次，
+    不論成功失敗都不會重試，徹底消除這個放大效應）。
 
     單一 (來源, 幣別) 真呼叫失敗（逾時/429/憑證錯/上游故障）只印警告並跳過，
     不中斷整批排程——其他來源/幣別照常繼續（呼應 `base.collect()` 對真連接器
@@ -223,6 +269,62 @@ def run_once(
                 results.append((name, len(docs)))
             continue
 
+        if name in COIN_KEYED_BATCH_SOURCES:
+            # 新鮮度守門邏輯同 coin-agnostic 分支（codex MEDIUM-2 同款考量）：
+            # 任一目標幣缺資料/已過期就視為需要重新真呼叫——反正一次真呼叫
+            # 本來就涵蓋全部目標幣，順便把上一輪部分分流寫入失敗漏掉的幣補齊。
+            if not force and all(
+                _is_fresh(backend, name, c, refresh_interval) for c in coins
+            ):
+                print(f"[fetch_scheduler] {name}: 未達 refresh 間隔（{refresh_interval:.0f}s），略過")
+                continue
+            if dry_run:
+                print(f"[fetch_scheduler] (dry-run) {name}: 會呼叫 1 次，"
+                      f"依 meta['coin'] 分流寫入 {len(coins)} 個幣別 key")
+                continue
+            try:
+                docs = source.fetch("", coin="")
+            except Exception as exc:  # noqa: BLE001 — 理由同 coin-agnostic 分支（codex HIGH-1）：
+                # 只呼叫一次，失敗也只算一次失敗，不會像舊版逐幣迴圈那樣對同一個
+                # 已限流的端點重複觸發（見本函式 docstring「生產事故修復」說明）。
+                print(f"[fetch_scheduler] {name}: 真呼叫失敗，略過（{exc}）", file=sys.stderr)
+                failures.append(name)
+                continue
+            now = time.time()
+            # 依每筆 Document 自帶的 meta["coin"] 分流（不是廣播同一份完整
+            # 結果）：非白名單/缺 coin 標記的文件直接捨棄，不落地進任何一個
+            # cache key（正常情況下不該發生——來源實作保證回傳的每筆都帶
+            # 合法 meta["coin"]，這裡只是防禦性寫法，避免格式意外飄移時把
+            # 未知幣別的資料誤塞進某個幣的 cache）。
+            docs_by_coin: dict[str, list[Document]] = {c: [] for c in coins}
+            for d in docs:
+                doc_coin = str(d.meta.get("coin", "")).upper()
+                if doc_coin in docs_by_coin:
+                    docs_by_coin[doc_coin].append(d)
+            broadcast_failed = []
+            total_docs = 0
+            for c in coins:
+                payload = [doc_to_dict(d) for d in docs_by_coin[c]]
+                result = cache_set(
+                    backend, cache_key(name, c), payload, fetched_at=now, ttl_seconds=stale_after
+                )
+                if not result.ok:
+                    broadcast_failed.append(c)
+                    print(f"[fetch_scheduler] {name}[{c}]: cache 寫入失敗"
+                          f"（backend={result.backend}）：{result.error}", file=sys.stderr)
+                else:
+                    _warn_if_fallback_used(f"{name}[{c}]", result)
+                    total_docs += len(payload)
+            if broadcast_failed:
+                print(f"[fetch_scheduler] {name}: 分流寫入失敗（幣別：{broadcast_failed}）",
+                      file=sys.stderr)
+                failures.append(name)
+            else:
+                print(f"[fetch_scheduler] {name}: 1 次真呼叫，{len(docs)} 筆文件，"
+                      f"依 meta['coin'] 分流寫入 {len(coins)} 個幣別 key")
+                results.append((name, total_docs))
+            continue
+
         for c in coins:
             if not force and _is_fresh(backend, name, c, refresh_interval):
                 print(f"[fetch_scheduler] {name}[{c}]: 未達 refresh 間隔（{refresh_interval:.0f}s），略過")
@@ -249,8 +351,9 @@ def run_once(
                 _warn_if_fallback_used(f"{name}[{c}]", result)
                 print(f"[fetch_scheduler] {name}[{c}]: {len(docs)} 筆文件")
                 results.append((f"{name}:{c}", len(docs)))
-            if stagger > 0:
-                time.sleep(stagger)
+            effective_stagger = _effective_stagger(name, stagger)
+            if effective_stagger > 0:
+                time.sleep(effective_stagger)
 
     return results, failures
 
@@ -416,7 +519,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--stagger", type=float, default=1.0,
-        help="同一來源內逐幣呼叫之間的間隔秒數，避免瞬間爆量（預設 1 秒；0 關閉）",
+        help="同一來源內逐幣呼叫之間的間隔秒數，避免瞬間爆量（預設 1 秒；0 關閉；"
+             "CoinGecko 逐幣來源另有 6 秒下限，取兩者較大值，見 "
+             "_COINGECKO_STAGGER_FLOOR_SECONDS）",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
