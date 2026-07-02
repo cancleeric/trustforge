@@ -1,9 +1,12 @@
 """web 服務 smoke 測試（不開真 socket，直接測處理邏輯）。"""
 import html
 import json
+import re
 from io import BytesIO
 from email.message import Message
 from urllib.parse import parse_qs, urlparse
+
+import pytest
 
 from trustforge import web
 from trustforge.schema import COIN_POOL
@@ -390,6 +393,52 @@ def test_render_home_page_marks_example_as_illustrative():
     """範例卡標「示意用途」而非佯裝即時資料（過渡期文案，#24 誠實原則）。"""
     htmlout = web._render_home_page()
     assert "示意用途" in htmlout
+
+
+def test_render_home_page_never_calls_cache_get_or_dynamodb(monkeypatch):
+    """CEO 決策（Phase 3 退件）：首頁「多幣總覽」已整個移除，首頁必須回到
+    純靜態渲染——不讀 cache、不碰 DynamoDB，零可用性風險。這裡直接斷言
+    `ingestion.cache.cache_get()`／`get_cache_backend()` 一旦被呼叫就失敗，
+    確保沒有殘留的隱性呼叫路徑（比照既有 pipeline/Source.fetch 零外呼樁
+    寫法）。"""
+    import trustforge.ingestion.cache as cache_mod
+
+    def _boom(*a, **kw):
+        raise AssertionError("首頁不該呼叫 cache_get()（多幣總覽已移除）")
+
+    def _boom_backend(*a, **kw):
+        raise AssertionError("首頁不該呼叫 get_cache_backend()（多幣總覽已移除）")
+
+    monkeypatch.setattr(cache_mod, "cache_get", _boom)
+    monkeypatch.setattr(cache_mod, "get_cache_backend", _boom_backend)
+
+    htmlout = web._render_home_page()
+    assert "多幣總覽" not in htmlout
+    assert "尚無資料" not in htmlout
+    assert "信任提煉" in htmlout  # 首頁其餘內容照常渲染
+
+
+def test_mobile_media_query_forces_table_horizontal_scroll():
+    """375px 可讀性驗收（codex #MEDIUM）：base table 是 `width:100%`，若
+    mobile media query 只給 container `overflow-x:auto` 而不限制 table
+    `min-width`，table 會被壓縮換行、不會真的橫向捲動。這裡不依賴瀏覽器
+    引擎（本專案零外部 runtime 依賴，未含 Playwright/Selenium），改用靜態
+    CSS 斷言驗證：480px 斷點內 `.tf-section table` 必須有一個明顯大於
+    375px 視窗寬度的 min-width（迫使 `width:100%` 溢出容器），且外層
+    `.tf-section` 仍保留 `overflow-x:auto` 讓溢出內容變成可橫向捲動而非
+    被壓縮換行。實機 375px viewport 的 scrollWidth/clientWidth 對稿由
+    CEO Chrome 親驗（既有驗收流程）。
+    """
+    _, css = _do_get("/")
+    media_start = css.index("@media (max-width:480px)")
+    media_end = css.index("</style>", media_start)
+    media_block = css[media_start:media_end]
+
+    assert "overflow-x:auto" in css  # .tf-section 既有橫捲容器
+    match = re.search(r"\.tf-section table\{min-width:(\d+)px\}", media_block)
+    assert match is not None, "mobile 斷點內找不到 .tf-section table 的 min-width 規則"
+    min_width_px = int(match.group(1))
+    assert min_width_px >= 600, "min-width 太小不足以在 375px 視窗強制溢出橫捲"
 
 
 def test_do_get_home_route_returns_200_non_empty_body():

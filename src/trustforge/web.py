@@ -105,11 +105,15 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
- :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9}}
+ :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9;--tf-fs-h1:1.6rem;--tf-fw-h1:700;--tf-fs-h2:1.3rem;--tf-fw-h2:700;--tf-fs-h3:1rem;--tf-fw-h3:600;--tf-fs-h4:.85rem;--tf-fw-h4:600;--tf-fs-body:1rem;--tf-lh-body:1.55}}
  :root[data-theme="light"]{{--tf-bg:#f6f8fa;--tf-card:#ffffff;--tf-border:#d0d7de;--tf-text:#1f2328;--tf-muted:#57606a;--tf-muted2:#6e7781;--tf-hdr-g1:#ffffff;--tf-hdr-g2:#f6f8fa;--tf-inset:#eef2f6;--tf-text2:#3d444d}}
  *{{box-sizing:border-box}}
- body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
- h1{{margin-bottom:.2rem}} .sub{{color:var(--tf-muted);margin-top:0}}
+ body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;font-size:var(--tf-fs-body);line-height:var(--tf-lh-body);max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
+ h1{{margin-bottom:.2rem;font-size:var(--tf-fs-h1);font-weight:var(--tf-fw-h1);letter-spacing:-.01em;line-height:1.25}}
+ h2{{font-size:var(--tf-fs-h2);font-weight:var(--tf-fw-h2);line-height:1.3}}
+ h3{{font-size:var(--tf-fs-h3);font-weight:var(--tf-fw-h3);line-height:1.35}}
+ h4{{font-size:var(--tf-fs-h4);font-weight:var(--tf-fw-h4)}}
+ .sub{{color:var(--tf-muted);margin-top:0}}
  a{{color:#1f6feb}}
  header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid var(--tf-border);border-radius:12px;background:linear-gradient(var(--tf-hdr-g1),var(--tf-hdr-g2));margin-bottom:1rem;flex-wrap:wrap}}
  .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:var(--tf-text)}}
@@ -142,8 +146,19 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  label{{display:block;font-size:.8rem;color:var(--tf-muted);margin-bottom:.2rem}}
  select,input,textarea,button{{width:100%;padding:.5rem .7rem;border:1px solid var(--tf-border);border-radius:8px;font-size:1rem;background:var(--tf-bg);color:var(--tf-text);font-family:inherit}}
  textarea[name=q]{{min-width:0;min-height:5.2rem;resize:vertical;line-height:1.4}}
- button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em}}
+ button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em;position:relative}}
  button .tf-kbd{{opacity:.75;font-family:'IBM Plex Mono',monospace;margin-left:.3rem}}
+ /* 世界第一重寫 Phase 3：純 CSS loading 回饋——zero-JS 頁面（CSP `default-src 'none'`
+    已擋死所有 script），全頁 GET 表單送出到瀏覽器完成導航前無法用 JS 插入 spinner，
+    只能靠 `:active`（滑鼠按下/觸控/多數瀏覽器對 Enter 觸發的送出也會套用）在舊頁面
+    卸載前的最後幾個 render frame 換上 disabled 外觀＋spinner＋提示文字，讓使用者
+    在等待網路請求時至少有即時視覺回饋，不是完全白屏。不改變 `<form>` 本身的 GET
+    行為、不影響 `_do_analyze` 參數解析。 */
+ button[type=submit]:active{{display:flex;align-items:center;justify-content:center;gap:.5rem;cursor:progress;pointer-events:none;background:#1a5fc7}}
+ button[type=submit]:active .tf-btn-label{{display:none}}
+ button[type=submit]:active::before{{content:"";width:14px;height:14px;flex-shrink:0;border-radius:50%;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;animation:tf-spin .6s linear infinite}}
+ button[type=submit]:active::after{{content:"正在整合多源資料…";font-size:.85rem}}
+ @keyframes tf-spin{{to{{transform:rotate(360deg)}}}}
  .badge{{display:inline-block;background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.4);border-radius:6px;padding:.1rem .5rem;font-size:.75rem;color:#79c0ff}}
  pre{{background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:var(--tf-text)}}
  table{{border-collapse:collapse;width:100%;background:var(--tf-card);font-size:.85rem;color:var(--tf-text)}} td,th{{border:1px solid var(--tf-border);padding:.4rem;text-align:left}}
@@ -168,7 +183,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-step{{border-left:4px solid var(--tf-border);padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
  .tf-step li{{margin:.25rem 0}}
  .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--tf-muted2);font-weight:400;margin-left:.4rem}}
- .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle}}
+ .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle;background:color-mix(in srgb,currentColor 14%,transparent)}}
  .tf-div-grid{{display:grid;grid-template-columns:1fr 34px 1fr;gap:0;align-items:stretch;margin-top:.6rem}}
  .tf-div-side{{border-radius:9px;padding:.7rem .8rem}}
  .tf-div-bull{{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.35)}}
@@ -194,6 +209,17 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
   .tf-div-mid{{padding:.3rem 0}}
   .tf-home-steps{{grid-template-columns:1fr}}
  }}
+ /* 世界第一重寫 Phase 3：375px 手機補強。表格橫向捲（而非強制欄位換行/擠壓）
+    ——`.tf-section` 是所有表格既有的統一容器（見 evidence 清單／資料鮮度矩陣／
+    連接器用量／成本帳本各表），讓容器本身可橫向捲動即可在不改任何 HTML 結構
+    的前提下讓表格內容在窄螢幕保持可讀，不強制每個 <td> 換行擠壞版面。 */
+ @media (max-width:480px){{
+  body{{padding:0 .6rem}}
+  .tf-section{{padding:.8rem;overflow-x:auto}}
+  .tf-section table{{min-width:640px}}
+  .tf-dash-hdr{{gap:.4rem}}
+  .tf-coin-badge{{font-size:.9rem;padding:.2rem .55rem}}
+ }}
 </style></head><body>
 {header}
 <div class="tf-layout">
@@ -204,7 +230,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
    <div><label>幣種</label><select name="coin">{coins}</select></div>
    <div><label>題型</label><select name="type">{types}</select></div>
    <div><label>問題</label><textarea name="q" rows="3">{default_query}</textarea></div>
-   <button type="submit">Run analysis<span class="tf-kbd">&#8629;</span></button>
+   <button type="submit"><span class="tf-btn-label">Run analysis<span class="tf-kbd">&#8629;</span></span></button>
   </form>
   {run_stats}
  </aside>
@@ -1134,15 +1160,24 @@ def _example_analyze_href() -> str:
     return html.escape(f"/analyze?{urlencode(params)}")
 
 
+
 def _render_home_page() -> str:
     """首頁（`/`）內容：純靜態 HTML 字串組裝，比照 `_render_status_page`／
-    `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock 任何一項**
-    ——首頁流量最高，必須是零外呼的純靜態渲染（credit-safe：不能是計費熱點）。
+    `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock/DynamoDB
+    任何一項**——首頁流量最高，必須是零外呼、零外部讀取的純靜態渲染
+    （credit-safe：不能是計費或可用性熱點）。
 
-    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、產品總覽（事實→
-    推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟 1/3、2/3、3/3」，
-    不新發明一套說法）、範例入口（連到一個真實可執行的 `/analyze` 查詢，
-    非虛構資料——見 `_example_analyze_href`）。
+    ⚠️ Phase 3 曾短暫在此加過「多幣總覽」讀 DynamoDB cache 快照，但 codex
+    抓出 ThreadPool 孤兒執行緒在 backend 永久阻塞時會無限累積、耗盡進程
+    資源；且該功能現在（issue #20 結果持久化尚未落地）必然全空、顯示不了
+    任何東西——CEO 決策：為一個現在看不到的東西冒可用性風險不值得，**整個
+    移除**。等 Axis C（快照寫入者 + 正確的背景預算/預渲染讀路徑）一起設計
+    做對後再重新加回。
+
+    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、產品總覽
+    （事實→推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟
+    1/3、2/3、3/3」，不新發明一套說法）、範例入口（連到一個真實可執行的
+    `/analyze` 查詢，非虛構資料——見 `_example_analyze_href`）。
     """
     e = html.escape
     example_href = _example_analyze_href()
