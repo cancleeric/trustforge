@@ -80,6 +80,7 @@ from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E4
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL  # noqa: E402
+from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
 
 
 def build_registry() -> dict[str, Source]:
@@ -457,6 +458,22 @@ def main(argv: list[str] | None = None) -> int:
     total_docs = sum(n for _, n in results)
     print(f"[fetch_scheduler] 完成：{len(results)} 個 (來源,幣別) 目標實際呼叫/廣播成功，"
           f"共 {total_docs} 筆文件寫入快取。")
+
+    # Phase3：收尾寫一筆輕量 run record，供 `/status` 顯示「最近排程執行」。
+    # --dry-run 沒有真的呼叫/寫入任何東西，不記錄，避免誤導成「有一輪真執行」。
+    # ⚠️ append_scheduler_run() 內部已把所有例外吞掉只印警告，不會 raise——
+    # 這裡故意不包 try/except：run log 寫入失敗與否，都不該影響下面依
+    # `failures`（真呼叫/cache 寫入是否成功）決定的 exit code 語意。
+    if not args.dry_run:
+        append_scheduler_run({
+            "targets": args.sources if args.sources else sorted(registry),
+            "coins": coins,
+            "success_count": len(results),
+            "failure_count": len(failures),
+            "failures": failures,
+            "total_docs": total_docs,
+        })
+
     if failures:
         # codex HIGH-1：failures 現在同時涵蓋「真呼叫本身失敗」（逾時/429/憑證錯/
         # 上游故障）與「真呼叫成功但 cache 寫入失敗」兩種情況——只要有任一目標
