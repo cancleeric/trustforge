@@ -223,6 +223,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  @media (max-width:480px){{
   body{{padding:0 .6rem}}
   .tf-section{{padding:.8rem;overflow-x:auto}}
+  .tf-section table{{min-width:640px}}
   .tf-mc-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .tf-dash-hdr{{gap:.4rem}}
   .tf-coin-badge{{font-size:.9rem;padding:.2rem .55rem}}
@@ -1241,17 +1242,17 @@ def _multicoin_analyze_href(coin: str) -> str:
     return html.escape(f"/analyze?{urlencode(params)}")
 
 
-def _render_home_multicoin_card(coin: str) -> str:
-    """單一幣種迷你信任卡：讀 `_get_coin_trust_snapshot`，無資料一律優雅顯示
-    「尚無資料」（不即時算、不打連接器，見模組頂部註解）。信任分顏色沿用
-    `_trust_bar()` 既有三檔門檻（≥0.7 綠／≥0.3 橙／其餘紅）；方向標籤沿用
-    `.tf-div-tag` 既有樣式與 comparison 頁「偏多＝綠 #3fb950／偏空＝紅
-    #f85149」既定色碼（見 `_render_comparison` 附近的 `.tf-div-bull`/
-    `.tf-div-bear`），不新發明一套配色。
+def _render_home_multicoin_card(coin: str, snap: dict[str, Any] | None) -> str:
+    """單一幣種迷你信任卡：`snap` 為 `_get_coin_trust_snapshot(coin)` 的結果
+    （由呼叫端先讀好傳入，避免重複打 cache），無資料一律優雅顯示「尚無資料」
+    （不即時算、不打連接器，見模組頂部註解）。信任分顏色沿用 `_trust_bar()`
+    既有三檔門檻（≥0.7 綠／≥0.3 橙／其餘紅）；方向標籤沿用 `.tf-div-tag`
+    既有樣式與 comparison 頁「偏多＝綠 #3fb950／偏空＝紅 #f85149」既定色碼
+    （見 `_render_comparison` 附近的 `.tf-div-bull`/`.tf-div-bear`），不新
+    發明一套配色。
     """
     e = html.escape
     href = _multicoin_analyze_href(coin)
-    snap = _get_coin_trust_snapshot(coin)
     if snap is None:
         return (
             f'<a class="tf-mc-card" href="{href}">'
@@ -1297,20 +1298,29 @@ def _render_home_multicoin_overview() -> str:
     """首頁「多幣總覽」區塊：`COIN_POOL` 5 幣迷你信任卡列。純讀 cache（見
     `_get_coin_trust_snapshot`），零 pipeline/connector/Bedrock 呼叫；
     single-flight TTL 快取包裝，理由與寫法同 `_render_status_page_cached`。
+
+    5 幣快照**全部缺** 時（issue #20 結果持久化尚未落地前的今天必然狀態）
+    整區塊回傳空字串、完全不渲染——首頁維持 hero+怎麼運作+範例的乾淨版面，
+    避免「5 張尚無資料卡」拉低專業度。只要 ≥1 幣有快照，就渲染整區塊
+    （有資料的顯正常卡，其餘沒資料的幣仍顯示「尚無資料」佔位卡）。
     """
     with _home_multicoin_cache_lock:
         now = time.time()
         if now < _home_multicoin_cache["expires_at"]:
             return _home_multicoin_cache["html"]  # type: ignore[return-value]
-        cards = "".join(_render_home_multicoin_card(c) for c in COIN_POOL)
-        rendered = (
-            '<div class="tf-section">'
-            "<h3>多幣總覽</h3>"
-            '<p class="sub" style="margin:0 0 .6rem">'
-            "最近一次背景分析的信任分快照（純讀取，非即時計算）。</p>"
-            f'<div class="tf-mc-grid">{cards}</div>'
-            "</div>"
-        )
+        snapshots = {c: _get_coin_trust_snapshot(c) for c in COIN_POOL}
+        if not any(snap is not None for snap in snapshots.values()):
+            rendered = ""
+        else:
+            cards = "".join(_render_home_multicoin_card(c, snapshots[c]) for c in COIN_POOL)
+            rendered = (
+                '<div class="tf-section">'
+                "<h3>多幣總覽</h3>"
+                '<p class="sub" style="margin:0 0 .6rem">'
+                "最近一次背景分析的信任分快照（純讀取，非即時計算）。</p>"
+                f'<div class="tf-mc-grid">{cards}</div>'
+                "</div>"
+            )
         _home_multicoin_cache["html"] = rendered
         _home_multicoin_cache["expires_at"] = time.time() + _HOME_MULTICOIN_CACHE_TTL_SECONDS
         return rendered

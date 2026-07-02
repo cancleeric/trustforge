@@ -1,6 +1,7 @@
 """web 服務 smoke 測試（不開真 socket，直接測處理邏輯）。"""
 import html
 import json
+import re
 from io import BytesIO
 from email.message import Message
 from urllib.parse import parse_qs, urlparse
@@ -419,13 +420,13 @@ def json_cache_backend(tmp_path, monkeypatch):
 
 
 def test_render_home_page_shows_multicoin_overview_all_coins_empty(json_cache_backend):
-    """尚無任何快取寫入（#20「結果持久化」尚未落地的現況）→ 5 幣全部優雅
-    顯示「尚無資料」，不報錯、不即時算、不打連接器。"""
+    """尚無任何快取寫入（#20「結果持久化」尚未落地的現況）→ 5 幣全部無資料
+    時，CEO 決策：整個「多幣總覽」區塊不渲染（避免首頁出現 5 張「尚無資料」
+    醜卡），回到 hero+怎麼運作+範例 的乾淨版面。不報錯、不即時算、不打
+    連接器。"""
     htmlout = web._render_home_page()
-    assert "多幣總覽" in htmlout
-    for coin in COIN_POOL:
-        assert coin in htmlout
-    assert htmlout.count("尚無資料") == len(COIN_POOL)
+    assert "多幣總覽" not in htmlout
+    assert "尚無資料" not in htmlout
 
 
 def test_get_coin_trust_snapshot_returns_none_when_cache_miss(json_cache_backend):
@@ -505,7 +506,15 @@ def test_home_multicoin_card_link_targets_real_analyze_default():
 def test_home_page_multicoin_never_calls_pipeline_or_connectors(json_cache_backend, monkeypatch):
     """credit-safe 鐵律：多幣總覽純讀 cache，絕不觸發 pipeline.run / 真
     Source.fetch()（比照 `test_status_page.py::test_status_route_never_calls_*`
-    的樁寫法：一旦被呼叫就斷言失敗）。"""
+    的樁寫法：一旦被呼叫就斷言失敗）。這裡刻意先寫入 1 幣快照，確保區塊會
+    渲染（全空會被 CEO 決策的「整區隱藏」邏輯吃掉，测不到零外呼路徑）。"""
+    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
+
+    JsonCacheBackend().set(
+        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BTC"),
+        [{"trust": 0.5, "direction": "中性"}], fetched_at=1000.0,
+    )
+
     def _boom(*a, **kw):
         raise AssertionError("首頁多幣總覽不該呼叫 pipeline.run()")
 
@@ -542,6 +551,29 @@ def test_home_multicoin_overview_ttl_cached_across_calls(json_cache_backend, mon
 
     web._render_home_multicoin_overview()
     assert calls["n"] == first_call_count  # TTL 內第二次呼叫應完全吃快取，不再重讀
+
+
+def test_mobile_media_query_forces_table_horizontal_scroll():
+    """375px 可讀性驗收（codex #MEDIUM）：base table 是 `width:100%`，若
+    mobile media query 只給 container `overflow-x:auto` 而不限制 table
+    `min-width`，table 會被壓縮換行、不會真的橫向捲動。這裡不依賴瀏覽器
+    引擎（本專案零外部 runtime 依賴，未含 Playwright/Selenium），改用靜態
+    CSS 斷言驗證：480px 斷點內 `.tf-section table` 必須有一個明顯大於
+    375px 視窗寬度的 min-width（迫使 `width:100%` 溢出容器），且外層
+    `.tf-section` 仍保留 `overflow-x:auto` 讓溢出內容變成可橫向捲動而非
+    被壓縮換行。實機 375px viewport 的 scrollWidth/clientWidth 對稿由
+    CEO Chrome 親驗（既有驗收流程）。
+    """
+    _, css = _do_get("/")
+    media_start = css.index("@media (max-width:480px)")
+    media_end = css.index("</style>", media_start)
+    media_block = css[media_start:media_end]
+
+    assert "overflow-x:auto" in css  # .tf-section 既有橫捲容器
+    match = re.search(r"\.tf-section table\{min-width:(\d+)px\}", media_block)
+    assert match is not None, "mobile 斷點內找不到 .tf-section table 的 min-width 規則"
+    min_width_px = int(match.group(1))
+    assert min_width_px >= 600, "min-width 太小不足以在 375px 視窗強制溢出橫捲"
 
 
 def test_do_get_home_route_returns_200_non_empty_body():
