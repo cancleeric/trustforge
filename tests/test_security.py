@@ -9,13 +9,22 @@ from trustforge import lambda_handler
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _qs(coin="BTC", qtype="multi_source", q="test", live="0", token=""):
-    """組出 _do_analyze 期望的 qs dict。"""
+def _qs(coin="BTC", qtype="multi_source", q="test", live="0", token="", sample=None):
+    """組出 _do_analyze 期望的 qs dict。
+
+    世界第一重寫 Phase 2：新增可選 `sample` 參數——預設 `None`（不帶
+    `sample` key，落在新版預設檔位「真資料·$0」）；測試若要驗證跟資料
+    模式默認值無關的邏輯（如 Bedrock token 驗證本身），可傳 `sample="1"`
+    明確走離線示範沙盒，取得確定性的豐富樣本證據，避免被「真連接器全數
+    cache miss → 證據太薄 → abstain」這種資料面雜訊污染判斷。
+    """
     d: dict[str, list[str]] = {
         "coin": [coin], "type": [qtype], "q": [q], "live": [live],
     }
     if token:
         d["token"] = [token]
+    if sample is not None:
+        d["sample"] = [sample]
     return d
 
 
@@ -26,40 +35,55 @@ def _patch_live(monkeypatch, token_value="secret"):
 
 
 def _make_fake_run(calls: list):
-    """回傳 fake run()，記錄 offline 旗標並強制離線執行（不打 AWS）。"""
+    """回傳 fake run()，記錄完整呼叫參數並強制離線執行（不打 AWS/真連接器）。
+
+    世界第一重寫 Phase 2：預設檔位已從「離線樣本」變成「真資料·$0」
+    （`data_mode="live", llm_mode="off"`），`_do_analyze` 對應會用這兩個
+    關鍵字呼叫 `run()`（而非舊版單一 `offline` bool）——這裡改記錄完整
+    參數組合，讓呼叫端能分辨究竟落在哪個檔位，不是只認 `offline`。
+    """
     import trustforge.pipeline as _pl
 
-    def fake_run(coin, query, qtype, offline=False, data_dir=None):
-        calls.append({"offline": offline})
-        # 強制離線避免真打 Bedrock
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                 data_mode=None, llm_mode=None):
+        calls.append({"offline": offline, "data_mode": data_mode, "llm_mode": llm_mode})
+        # 強制離線避免真打 Bedrock/真連接器
         return _pl.run(coin, query, qtype, offline=True, data_dir=data_dir)
 
     return fake_run
 
 
-# ── 1. live 沒帶 token → 走離線 ──────────────────────────────────────────────
+# ── 1. live 沒帶 token → 不成立 live，落回新版預設「真資料·$0」 ──────────────
 
-def test_live_no_token_stays_offline(monkeypatch):
-    """live=1 但未帶 token 參數 → offline=True，不呼叫 Bedrock。"""
+def test_live_no_token_falls_back_to_real_not_offline(monkeypatch):
+    """live=1 但未帶 token 參數 → 不成立 live；世界第一重寫 Phase 2 起，
+    安全的 fallback 檔位是「真資料·$0」（data_mode=live, llm_mode=off），
+    不再是完整離線樣本——一樣不呼叫 Bedrock、一樣 $0，但資料是真連接器
+    （credit-safe，且比舊版樣本 fallback 更誠實）。
+    """
     _patch_live(monkeypatch)
     calls: list = []
     monkeypatch.setattr(web, "run", _make_fake_run(calls))
 
     web._do_analyze(_qs(live="1"))  # 沒有 token key
     assert calls, "run 應被呼叫"
-    assert calls[0]["offline"] is True, "沒帶 token 應走離線"
+    assert calls[0]["data_mode"] == "live" and calls[0]["llm_mode"] == "off", (
+        f"沒帶 token 不成立 live，應落回預設真資料·$0 檔，實際 {calls[0]!r}"
+    )
 
 
-# ── 2. live 帶錯誤 token → 走離線 ────────────────────────────────────────────
+# ── 2. live 帶錯誤 token → 不成立 live，落回新版預設「真資料·$0」 ────────────
 
-def test_live_wrong_token_stays_offline(monkeypatch):
-    """live=1 + 錯誤 token → offline=True。"""
+def test_live_wrong_token_falls_back_to_real_not_offline(monkeypatch):
+    """live=1 + 錯誤 token → 不成立 live，落回真資料·$0（見上一測試說明）。"""
     _patch_live(monkeypatch, "secret123")
     calls: list = []
     monkeypatch.setattr(web, "run", _make_fake_run(calls))
 
     web._do_analyze(_qs(live="1", token="wrongtoken"))
-    assert calls[0]["offline"] is True, "錯誤 token 應走離線"
+    assert calls[0]["data_mode"] == "live" and calls[0]["llm_mode"] == "off", (
+        f"錯誤 token 不成立 live，應落回預設真資料·$0 檔，實際 {calls[0]!r}"
+    )
 
 
 # ── 3. live + 正確 token + env 就緒 → live 路徑 ───────────────────────────────
@@ -74,17 +98,18 @@ def test_live_correct_token_calls_live_path(monkeypatch):
     assert calls[0]["offline"] is False, "正確 token 應走 live（offline=False）"
 
 
-# ── 4. live_token 未設（空字串）→ 即使帶 token 也走離線 ──────────────────────
+# ── 4. live_token 未設（空字串）→ 即使帶 token 也不成立 live，落回真資料·$0 ──
 
-def test_live_token_env_not_set_stays_offline(monkeypatch):
-    """TRUSTFORGE_LIVE_TOKEN 未設時，任何 token 都不能啟用 live。"""
+def test_live_token_env_not_set_falls_back_to_real(monkeypatch):
+    """TRUSTFORGE_LIVE_TOKEN 未設時，任何 token 都不能啟用 live，落回真資料·$0
+    （見 `test_live_no_token_falls_back_to_real_not_offline` 說明）。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")   # 未設
     calls: list = []
     monkeypatch.setattr(web, "run", _make_fake_run(calls))
 
     web._do_analyze(_qs(live="1", token="anything"))
-    assert calls[0]["offline"] is True
+    assert calls[0]["data_mode"] == "live" and calls[0]["llm_mode"] == "off"
 
 
 # ── 5. q 過長 → ValueError（對應 400）────────────────────────────────────────
@@ -173,6 +198,7 @@ def test_rate_limit_triggers_after_max_requests(monkeypatch):
 
     # 清除先前殘留 bucket（避免其他測試干擾）
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     ip = "10.0.0.99"
     qs = _qs(live="1", token="tok")
@@ -189,17 +215,79 @@ def test_rate_limit_triggers_after_max_requests(monkeypatch):
 # ── CEO 親測補充（CPO 指出的覆蓋缺口）──────────────────────────────────────
 
 def test_correct_token_but_no_model_id_stays_offline(monkeypatch):
-    """token 正確但未設 BEDROCK_MODEL_ID(HAS_BEDROCK=False)→ 強制離線。"""
+    """token 正確但未設 BEDROCK_MODEL_ID(HAS_BEDROCK=False)→ 強制離線。
+
+    這條測的是「Bedrock 層本身」的離線降級（跟資料模式預設值無關），刻意帶
+    `sample=1` 走離線示範沙盒，確保拿到確定性的豐富樣本證據——世界第一重寫
+    Phase 2 起，不帶 `sample=1` 會落在真連接器·$0 預設檔，測試環境的連接器
+    快取多半是空的（cache miss），證據可能太薄觸發 abstain，讓 Step3 narrative
+    走「不採用 LLM narrative」的確定性模板（不含 `[OFFLINE]` 字樣），
+    會讓這條測試量到資料面雜訊而非本來要驗的 Bedrock 層行為。
+    """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "sek")
-    report, _, _ = web._do_analyze(_qs(live="1", token="sek"), client_ip="9.9.9.9")
+    report, _, _ = web._do_analyze(
+        _qs(live="1", token="sek", sample="1"), client_ip="9.9.9.9"
+    )
     assert any("[OFFLINE]" in i for i in report.inferences)
 
 
-def test_offline_requests_never_rate_limited():
-    """離線請求不消耗 per-IP 限流 bucket(高頻 demo 不會誤觸 429)。"""
+def test_sample_requests_never_rate_limited():
+    """`?sample=1` 離線示範沙盒不消耗 per-IP 限流 bucket（高頻 demo 不會誤觸 429）。
+
+    世界第一重寫 Phase 2：離線示範不再是預設，改成 opt-in（`?sample=1`），
+    這條測試對應更新——原測試名「offline_requests_never_rate_limited」驗的
+    就是這個離線示範沙盒的限流豁免，語意不變，只是現在要顯式帶 `sample=1`
+    才會落在這個檔位（見下一測試：不帶任何參數的新預設「真資料·$0」則
+    *應該*被限流，兩者互補）。
+    """
     for _ in range(web._RATE_MAX + 10):
-        web._do_analyze(_qs(live="0"), client_ip="8.8.8.8")  # 不應拋 TooManyRequests
+        web._do_analyze(_qs(live="0", sample="1"), client_ip="8.8.8.8")  # 不應拋 TooManyRequests
+
+
+def test_real_default_requests_not_rate_limited_at_normal_volume(monkeypatch):
+    """codex HIGH（PR #44）：新預設「真資料·$0」（未帶任何 mode 參數）走自己
+    獨立的寬鬆限流（`_check_real_rate_limit`／`_REAL_RATE_MAX`），不是 live
+    的緊 `_check_live_rate_limit`（`_RATE_MAX`=5）——real-off 免費、只讀
+    cache，緊限流是為了保護 Bedrock 花費，不該套在這條路徑上，否則一般
+    使用者正常瀏覽（連跑幾次、比較分析算兩次呼叫）就會被誤 429，反向代理
+    後所有使用者共用一個來源 IP 更會整批 429。
+
+    這裡連跑超過 live 門檻（`_RATE_MAX`）次數的正常請求，不應觸發限流。
+
+    用 `_make_fake_run` 強制離線執行 pipeline（不打真連接器/網路）——這裡
+    只驗證限流邏輯本身（純看 client_ip/qs），跟 pipeline 實際抓到什麼資料
+    無關，避免測試在 CI/沙盒環境因真連接器 cache miss/逾時而變慢或卡住。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.setattr(web, "run", _make_fake_run([]))
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+    ip = "8.8.4.4"
+    for _ in range(web._RATE_MAX + 10):
+        web._do_analyze(_qs(live="0"), client_ip=ip)  # 未帶 sample/real/live → 落在新預設 real
+    assert web._rate_buckets == {}, "real 預設路徑不該動用 live 的 _rate_buckets"
+
+
+def test_real_default_requests_rate_limited_at_flood_volume(monkeypatch):
+    """real-off 預設檔位仍需要限流（防真連接器被洪水級高頻打爆），只是門檻
+    改成 DoS 洪水級（`_REAL_RATE_MAX`）而非 Bedrock 成本級（`_RATE_MAX`）——
+    超過 `_REAL_RATE_MAX` 次才應拋 TooManyRequests（codex HIGH，PR #44）。
+    這是「真資料·$0 成為預設」後最重要的防線，不可回歸成無限流。
+
+    用 `_make_fake_run` 強制離線執行 pipeline，理由同上一測試。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.setattr(web, "run", _make_fake_run([]))
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+    ip = "8.8.4.5"
+    for _ in range(web._REAL_RATE_MAX):
+        web._do_analyze(_qs(live="0"), client_ip=ip)  # 未帶 sample/real/live → 落在新預設 real
+    with pytest.raises(web.TooManyRequests):
+        web._do_analyze(_qs(live="0"), client_ip=ip)
 
 
 # ── 9. _safe_href XSS scheme 驗證 ────────────────────────────────────────────

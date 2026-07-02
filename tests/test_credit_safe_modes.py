@@ -223,10 +223,15 @@ def test_web_real_mode_routes_to_live_data_off_llm(monkeypatch):
 
 
 def test_web_real_mode_not_rate_limited_by_live_bucket_conflict(monkeypatch):
-    """real=1 生效時仍會走 per-IP 限流（避免真連接器被打爆），超量應拋 TooManyRequests。"""
+    """real=1 走自己獨立的寬鬆 per-IP 限流（`_REAL_RATE_*`），不共用 live 的
+    緊 bucket（`_RATE_MAX`=5）——codex HIGH（PR #44）：real-off 免費、只讀
+    cache，不該套跟 Bedrock 花費防線一樣緊的門檻。這裡連續打超過 live 門檻
+    （`_RATE_MAX`）次數的 real 請求，仍不應被擋，證明兩組 bucket 互不干擾。
+    """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -237,14 +242,68 @@ def test_web_real_mode_not_rate_limited_by_live_bucket_conflict(monkeypatch):
 
     ip = "10.0.0.42"
     qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "real": ["1"]}
-    for _ in range(web._RATE_MAX):
+    # 打超過 live 的緊門檻次數（_RATE_MAX=5），real-off 仍不該被擋。
+    for _ in range(web._RATE_MAX + 5):
+        web._do_analyze(qs, client_ip=ip)
+    # live 的緊 bucket 完全沒被 real 請求動用到。
+    assert web._rate_buckets == {}, "real=1 不該動用 live 的 _rate_buckets"
+
+
+def test_web_real_mode_rate_limited_at_real_threshold(monkeypatch):
+    """real=1 仍需要限流（防真連接器被洪水級高頻打爆），只是門檻改成
+    DoS 洪水級（`_REAL_RATE_MAX`）而非 Bedrock 成本級（`_RATE_MAX`）——
+    超過 `_REAL_RATE_MAX` 次才應拋 TooManyRequests（codex HIGH，PR #44）。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                 data_mode=None, llm_mode=None):
+        import trustforge.pipeline as _pl
+        return _pl.run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    ip = "10.0.0.43"
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "real": ["1"]}
+    for _ in range(web._REAL_RATE_MAX):
         web._do_analyze(qs, client_ip=ip)
     with pytest.raises(web.TooManyRequests):
         web._do_analyze(qs, client_ip=ip)
 
 
-def test_web_real_mode_without_flag_stays_offline_default(monkeypatch):
-    """不帶 real/live 參數 → 仍是預設離線樣本檔，行為不變（向後相容基準線）。"""
+def test_web_real_mode_without_flag_is_new_default(monkeypatch):
+    """世界第一重寫 Phase 2：不帶 real/live/sample 參數 → 落在新預設「真資料·$0」
+    （data_mode=live, llm_mode=off），不再是離線樣本檔——這正是本輪重寫的
+    核心行為變更（見 DEV-PLAN-REWRITE.md Task 1），不是回歸。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+
+    captured = {}
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                 data_mode=None, llm_mode=None):
+        captured["offline"] = offline
+        captured["data_mode"] = data_mode
+        captured["llm_mode"] = llm_mode
+        import trustforge.pipeline as _pl
+        return _pl.run(coin, query, qtype, offline=True)  # 強制真正執行時用離線樣本，避免真打連接器
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    report, evidence, log = web._do_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    )
+    assert captured == {"offline": False, "data_mode": "live", "llm_mode": "off"}
+
+
+def test_web_sample_flag_still_reaches_offline_sample_path(monkeypatch):
+    """`?sample=1`：離線示範沙盒 opt-in，行為與舊版「無參數預設」完全一致
+    （只是現在要顯式帶 `sample=1` 才觸發，向後相容既有離線樣本語意）。
+    """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
 
@@ -258,7 +317,7 @@ def test_web_real_mode_without_flag_stays_offline_default(monkeypatch):
     monkeypatch.setattr(web, "run", fake_run)
 
     report, evidence, log = web._do_analyze(
-        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "sample": ["1"]}
     )
     assert captured == {"offline": True}
 
@@ -268,6 +327,7 @@ def test_web_live_takes_priority_over_real(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     captured = {}
 
@@ -312,9 +372,9 @@ def test_web_do_analyze_real_mode_increments_service_counter(monkeypatch):
     web._analyze_service_count = 0
 
 
-def test_web_do_analyze_offline_default_does_not_increment_service_counter(monkeypatch):
-    """離線示範（樣本資料，未觸碰任何連接器/cache）不該計入「真服務」次數，
-    否則快取節省估算會被離線 demo 流量污染。"""
+def test_web_do_analyze_sample_flag_does_not_increment_service_counter(monkeypatch):
+    """`?sample=1`（離線示範，樣本資料，未觸碰任何連接器/cache）不該計入
+    「真服務」次數，否則快取節省估算會被離線 demo 流量污染。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._analyze_service_count = 0
@@ -325,8 +385,29 @@ def test_web_do_analyze_offline_default_does_not_increment_service_counter(monke
 
     monkeypatch.setattr(web, "run", fake_run)
 
-    web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]})
+    web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "sample": ["1"]})
     assert web._get_analyze_service_count() == 0
+
+
+def test_web_do_analyze_default_mode_increments_service_counter(monkeypatch):
+    """世界第一重寫 Phase 2：不帶任何 mode 參數 → 落在新預設「真資料·$0」，
+    要計入「真服務」次數（跟顯式 `?real=1` 行為一致，因為現在就是同一檔位）。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    web._analyze_service_count = 0
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                 data_mode=None, llm_mode=None):
+        import trustforge.pipeline as _pl
+        return _pl.run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    before = web._get_analyze_service_count()
+    web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]})
+    assert web._get_analyze_service_count() == before + 1
+    web._analyze_service_count = 0
 
 
 def test_web_do_comparison_real_mode(monkeypatch):
@@ -421,8 +502,16 @@ def _extract_json_link(html_out: str) -> str:
     return html.unescape(m.group(1))
 
 
-def test_mode_link_suffix_real():
-    assert web._mode_link_suffix({"real": ["1"]}) == "&real=1"
+def test_mode_link_suffix_real_is_default_no_suffix_needed():
+    """世界第一重寫 Phase 2：real 現在是預設檔位，顯式 `?real=1` 等同預設，
+    自我連結不需要再帶 `real=1` 才能保留模式（少一個參數，畫面更乾淨）。"""
+    assert web._mode_link_suffix({"real": ["1"]}) == ""
+
+
+def test_mode_link_suffix_sample():
+    """`?sample=1`（離線示範沙盒 opt-in）自我連結須保留 `sample=1`，否則
+    重新請求會落回新預設「真資料·$0」，跟畫面顯示的離線樣本資料不一致。"""
+    assert web._mode_link_suffix({"sample": ["1"]}) == "&sample=1"
 
 
 def test_mode_link_suffix_live(monkeypatch):
@@ -484,15 +573,19 @@ def test_mode_link_suffix_has_no_rate_limit_side_effect(monkeypatch):
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
     qs = {"real": ["1"]}
     for _ in range(50):
         web._mode_link_suffix(qs)
     assert web._rate_buckets == {}, "_mode_link_suffix 不應消耗/建立任何限流 bucket"
 
 
-def test_do_analyze_real_mode_json_link_preserves_real_param(monkeypatch):
-    """real 模式報告的下載連結須帶 real=1；點擊後重新請求仍以
-    data_mode=live/llm_mode=off 執行，輸出與畫面一致（$0、來源仍是真連接器）。
+def test_do_analyze_real_mode_json_link_round_trips_without_needing_real_param(monkeypatch):
+    """世界第一重寫 Phase 2：real 現在是預設檔位，下載連結**不需要**帶
+    `real=1`（`_mode_extra_params` 對預設檔位回傳 `{}`）——點擊後重新請求
+    （沒有任何 mode 參數）仍會落在同一個預設檔位（data_mode=live/llm_mode=off），
+    輸出與畫面一致（$0、來源仍是真連接器）。少一個參數，畫面更乾淨，且不影響
+    可重現性（因為現在「無參數」本身就是唯一、確定的真資料·$0 檔位）。
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
@@ -508,9 +601,10 @@ def test_do_analyze_real_mode_json_link_preserves_real_param(monkeypatch):
     html_out = web._render_report(report, evidence, log, mode_extra=mode_extra)
 
     link = _extract_json_link(html_out)
-    assert "real=1" in link, f"real 模式的下載連結未帶 real=1：{link}"
+    assert "real=1" not in link, f"real 是預設檔位，下載連結不應多帶 real=1：{link}"
 
-    # 模擬使用者點擊該下載連結 → 重新請求，斷言仍以 data_mode=live/llm_mode=off 執行
+    # 模擬使用者點擊該下載連結 → 重新請求（不帶任何 mode 參數），斷言仍以
+    # data_mode=live/llm_mode=off 執行（因為這正是新預設）
     link_qs = parse_qs(urlparse(link).query)
     report2, evidence2, log2 = web._do_analyze(link_qs, client_ip="")
 
@@ -528,6 +622,7 @@ def test_do_analyze_live_mode_json_link_preserves_live_and_token(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -562,8 +657,8 @@ def test_do_analyze_default_mode_json_link_has_no_mode_param(monkeypatch):
     assert "live=1" not in link
 
 
-def test_do_comparison_real_mode_json_link_has_both_coins_and_real_param(monkeypatch):
-    """comparison + real 模式：唯一一條 top-level 下載連結須同時帶 real=1 與雙幣。
+def test_do_comparison_real_mode_json_link_has_both_coins_no_extra_mode_param(monkeypatch):
+    """comparison + real 模式：唯一一條 top-level 下載連結須同時含雙幣。
 
     HIGH 修復揭露（既有測試語意變更）：舊版本測試名為
     `test_do_comparison_real_mode_nested_json_links_preserve_real_param`，斷言「內嵌
@@ -572,8 +667,11 @@ def test_do_comparison_real_mode_json_link_has_both_coins_and_real_param(monkeyp
     讓 `_parse_comparison_coins` 400（見 codex HIGH 覆核意見，web.py 舊 727 行附近）。
     舊測試只驗字串含 "real=1"，從未實際跟隨連結，因此完全沒抓到這個壞連結。
     修復後 comparison 頁面只有**一條** top-level 連結（`coin=A,B&type=comparison`），
-    內嵌的兩份單幣詳細分析改用 `show_json_link=False` 不再各自產生壞連結——本測試
-    改為斷言恰好一條連結、且同時含兩個幣種與 real=1。
+    內嵌的兩份單幣詳細分析改用 `show_json_link=False` 不再各自產生壞連結。
+
+    世界第一重寫 Phase 2：real 現在是預設檔位，`real=1` 不再需要（也不應該）
+    出現在自我連結——本測試改為斷言恰好一條連結、含兩個幣種、且**不**多帶
+    任何模式參數（見 `test_mode_link_suffix_real_is_default_no_suffix_needed`）。
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
@@ -599,7 +697,7 @@ def test_do_comparison_real_mode_json_link_has_both_coins_and_real_param(monkeyp
         f"應已關閉），實際找到 {len(links)} 條：{links}"
     )
     link = links[0]
-    assert "real=1" in link, f"comparison 下載連結未帶 real=1：{link}"
+    assert "real=1" not in link, f"real 是預設檔位，comparison 下載連結不應多帶 real=1：{link}"
     link_qs = parse_qs(urlparse(link).query)
     coins_param = link_qs.get("coin", [""])[0]
     assert set(coins_param.split(",")) == {"BTC", "ETH"}, (
@@ -623,6 +721,7 @@ def test_do_comparison_json_link_actually_follows_to_200_with_both_coins_pair_on
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -670,10 +769,15 @@ def test_do_analyze_json_link_round_trips_special_char_query_and_follows_to_200(
     q 含這些保留字或非 ASCII 字元時會在 query string 語法層被誤判成分隔符。
     現在改用 `_analyze_json_href()`（coin/type/q/mode 一次 `urlencode`，整段
     再 `html.escape`），本測試驗證這個雙層編碼組合的正確性與可逆性。
+
+    世界第一重寫 Phase 2：real 現在是預設檔位，`real=1` 不再出現在自我連結
+    （見 `test_mode_link_suffix_real_is_default_no_suffix_needed`）——請求本身
+    仍可顯式帶 `real=1`（向後相容），但產生的下載連結不會多帶這個參數。
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -693,7 +797,9 @@ def test_do_analyze_json_link_round_trips_special_char_query_and_follows_to_200(
         f"下載連結解碼出的 q 應與原始 q 逐字相同，實際 {link_qs.get('q')!r}"
     )
     assert link_qs.get("coin", [""])[0] == "BTC"
-    assert link_qs.get("real", [""])[0] == "1", "下載連結解碼出的 mode 參數須與原始 real=1 逐字相同"
+    assert "real" not in link_qs, (
+        f"real 是預設檔位，下載連結不應多帶 real 參數，實際 {link_qs!r}"
+    )
 
     followed = _run_do_get(link)
     assert followed["code"] == 200, (
@@ -716,6 +822,7 @@ def test_do_comparison_json_link_round_trips_special_char_query_and_follows_to_2
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -735,7 +842,9 @@ def test_do_comparison_json_link_round_trips_special_char_query_and_follows_to_2
         f"下載連結解碼出的 q 應與原始 q 逐字相同，實際 {link_qs.get('q')!r}"
     )
     assert set(link_qs.get("coin", [""])[0].split(",")) == {"BTC", "ETH"}
-    assert link_qs.get("real", [""])[0] == "1", "下載連結解碼出的 mode 參數須與原始 real=1 逐字相同"
+    assert "real" not in link_qs, (
+        f"real 是預設檔位，comparison 下載連結不應多帶 real 參數，實際 {link_qs!r}"
+    )
 
     followed = _run_do_get(link)
     assert followed["code"] == 200, (
@@ -756,8 +865,33 @@ def test_do_comparison_json_link_round_trips_special_char_query_and_follows_to_2
 _ACTIVE_BADGE_RE = re.compile(r'class="tf-mode-badge ([a-z-]+) active"')
 
 
-def test_active_mode_offline_request_shows_only_offline_active(monkeypatch):
-    """未帶 real/live 的一般請求：_active_mode 判為 offline，畫面恰好離線徽章 active。"""
+def test_active_mode_no_params_request_shows_only_real_active(monkeypatch):
+    """世界第一重寫 Phase 2：未帶任何 mode 參數的一般請求 → _active_mode 判為
+    real（新預設「真資料·$0」），畫面恰好真資料徽章 active（不再是離線示範）。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                 data_mode=None, llm_mode=None):
+        import trustforge.pipeline as _pl
+        return _pl.run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    report, evidence, log = web._do_analyze(qs, client_ip="")
+    active_mode = web._active_mode(qs)
+    assert active_mode == "real"
+
+    html_out = web.render_page(web._render_report(report, evidence, log), active_mode=active_mode)
+    actives = _ACTIVE_BADGE_RE.findall(html_out)
+    assert actives == ["tf-real"], f"未帶參數的請求應恰好 tf-real active，實際：{actives}"
+
+
+def test_active_mode_sample_request_shows_only_offline_active(monkeypatch):
+    """`?sample=1`：_active_mode 判為 offline，畫面恰好離線示範徽章 active
+    （離線示範沙盒 opt-in，見 `_is_sample_request`）。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
 
@@ -767,14 +901,14 @@ def test_active_mode_offline_request_shows_only_offline_active(monkeypatch):
 
     monkeypatch.setattr(web, "run", fake_run)
 
-    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "sample": ["1"]}
     report, evidence, log = web._do_analyze(qs, client_ip="")
     active_mode = web._active_mode(qs)
     assert active_mode == "offline"
 
     html_out = web.render_page(web._render_report(report, evidence, log), active_mode=active_mode)
     actives = _ACTIVE_BADGE_RE.findall(html_out)
-    assert actives == ["tf-offline"], f"offline 請求應恰好 tf-offline active，實際：{actives}"
+    assert actives == ["tf-offline"], f"?sample=1 請求應恰好 tf-offline active，實際：{actives}"
 
 
 def test_active_mode_real_request_shows_only_real_active(monkeypatch):
@@ -804,6 +938,7 @@ def test_active_mode_live_request_shows_only_live_active(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -827,17 +962,23 @@ def test_active_mode_live_request_shows_only_live_active(monkeypatch):
 @pytest.mark.parametrize(
     "qs,has_bedrock,live_token,expected",
     [
-        ({"coin": ["BTC"], "type": ["multi_source"], "q": ["t"]}, False, "", "offline"),
+        # 世界第一重寫 Phase 2：未帶任何 mode 參數 → 新預設「真資料·$0」（real）
+        ({"coin": ["BTC"], "type": ["multi_source"], "q": ["t"]}, False, "", "real"),
         ({"coin": ["BTC"], "type": ["multi_source"], "q": ["t"], "real": ["1"]}, False, "", "real"),
         (
             {"coin": ["BTC"], "type": ["multi_source"], "q": ["t"],
              "live": ["1"], "token": ["secret"]},
             True, "secret", "live",
         ),
-        # live 沒帶正確 token → 不算 live，落回 offline（非 real，未帶 real 參數）
+        # live 沒帶正確 token → 不算 live，落回新預設 real（非 offline，未帶 sample 參數）
         (
             {"coin": ["BTC"], "type": ["multi_source"], "q": ["t"], "live": ["1"]},
-            True, "secret", "offline",
+            True, "secret", "real",
+        ),
+        # `?sample=1`：離線示範沙盒 opt-in
+        (
+            {"coin": ["BTC"], "type": ["multi_source"], "q": ["t"], "sample": ["1"]},
+            False, "", "offline",
         ),
     ],
 )
@@ -893,6 +1034,7 @@ def test_error_400_real_mode_keeps_real_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     result = _run_do_get(
         "/analyze?coin=NOPE&type=multi_source&q=t&real=1", client_ip="10.0.0.1"
@@ -908,6 +1050,7 @@ def test_error_429_live_mode_keeps_live_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
     ip = "10.0.0.2"
     for _ in range(web._RATE_MAX):
         web._check_live_rate_limit(ip)  # 灌爆同一 IP 的限流桶
@@ -926,6 +1069,7 @@ def test_error_502_real_mode_keeps_real_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def boom(*a, **k):
         raise RuntimeError("connector 掛了（測試模擬，非真連接器）")
@@ -941,11 +1085,13 @@ def test_error_502_real_mode_keeps_real_active_badge(monkeypatch):
     assert actives == ["tf-real"], f"502 real=1 應恰好 tf-real active，實際：{actives}"
 
 
-def test_error_400_offline_request_keeps_offline_active_badge(monkeypatch):
-    """一般離線請求（無 real/live）幣種非法 → 400，錯誤頁維持 tf-offline active（既有行為不回歸）。"""
+def test_error_400_no_params_request_keeps_real_active_badge(monkeypatch):
+    """世界第一重寫 Phase 2：一般請求（無 real/live/sample）幣種非法 → 400，
+    錯誤頁應維持新預設 tf-real active（不落回舊版 offline）。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     result = _run_do_get(
         "/analyze?coin=NOPE&type=multi_source&q=t", client_ip="10.0.0.4"
@@ -953,4 +1099,178 @@ def test_error_400_offline_request_keeps_offline_active_badge(monkeypatch):
 
     assert result["code"] == 400
     actives = _ACTIVE_BADGE_RE.findall(result["body"])
-    assert actives == ["tf-offline"], f"400 offline 應恰好 tf-offline active，實際：{actives}"
+    assert actives == ["tf-real"], f"400 real 應恰好 tf-real active，實際：{actives}"
+
+
+def test_error_400_sample_request_keeps_offline_active_badge(monkeypatch):
+    """`?sample=1` 幣種非法 → 400，錯誤頁維持 tf-offline active（既有離線
+    示範沙盒行為不回歸，只是現在要顯式帶 `sample=1`）。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+
+    result = _run_do_get(
+        "/analyze?coin=NOPE&type=multi_source&q=t&sample=1", client_ip="10.0.0.5"
+    )
+
+    assert result["code"] == 400
+    actives = _ACTIVE_BADGE_RE.findall(result["body"])
+    assert actives == ["tf-offline"], f"400 sample=1 應恰好 tf-offline active，實際：{actives}"
+
+
+# ── codex MEDIUM #2（PR #44）：查詢文字改回 date-agnostic，日期只在結果頁
+# provenance 顯示，避免 zero-JS 表單「切幣種但 textarea 不跟著變」時把舊
+# 幣種的日期字樣一起送出 ────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _write_ohlcv_csv(path, filename: str, dates: list[str]) -> None:
+    """寫一份最小可用的 OHLCV CSV（僅日期需要精準控制，其餘欄位隨意）。"""
+    lines = ["date,open,high,low,close,volume"]
+    for d in dates:
+        lines.append(f"{d},1.0,1.0,1.0,1.0,1.0")
+    (path / filename).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_form_default_query_textarea_contains_no_date():
+    """首頁表單 q textarea 的預填值本身完全不含任何具體日期字樣——這是
+    by-construction 修復：不管使用者選哪個幣種、textarea 有沒有跟著更新
+    （zero-JS 頁面本就不會跟著動），送出的文字都不可能誤帶錯幣種的日期。
+    """
+    page_html = web.render_page("")
+    m = re.search(r'<textarea name="q"[^>]*>([^<]*)</textarea>', page_html)
+    assert m, "首頁應有 name=q 的 textarea"
+    default_query = html.unescape(m.group(1))
+    assert not _DATE_RE.search(default_query), (
+        f"表單預填查詢文案不應內嵌任何具體日期，實際：{default_query!r}"
+    )
+
+
+def test_do_analyze_default_query_has_no_date_regardless_of_coin(monkeypatch):
+    """`_do_analyze` 省略 q 時的預設文案，不論 coin 為何都不含日期。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    captured = {}
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                  data_mode=None, llm_mode=None):
+        captured["query"] = query
+        return pl.run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    web._do_analyze({"coin": ["ETH"], "type": ["multi_source"]})
+
+    assert not _DATE_RE.search(captured["query"]), (
+        f"ETH 預設查詢文案不應含任何日期，實際：{captured['query']!r}"
+    )
+
+
+def test_do_comparison_default_query_has_no_date(monkeypatch):
+    """`_do_comparison` 省略 q 時的預設文案不含任何日期。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    captured = {}
+
+    def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
+                             data_mode=None, llm_mode=None):
+        captured["query"] = query
+        return pl.run_comparison(coin_a, coin_b, query, offline=True)
+
+    monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
+
+    web._do_comparison({"coin": ["BTC,ETH"], "type": ["comparison"]})
+
+    assert not _DATE_RE.search(captured["query"]), (
+        f"comparison 預設查詢文案不應含任何日期，實際：{captured['query']!r}"
+    )
+
+
+def test_form_submit_with_switched_coin_query_still_shows_correct_coin_provenance(
+    monkeypatch, tmp_path
+):
+    """整合測試（codex MEDIUM #2 驗收核心）：模擬 zero-JS 表單真實送出路徑
+    ——先 render 首頁拿到使用者「沒動過」的 textarea 預填值，原封不動當 q
+    送出、coin 改選 ETH（模擬使用者切換幣種下拉但 textarea 未跟著變）。
+
+    驗證：
+      1. 送出的 q 不含任何日期字樣（不會有「textarea 還停在 BTC 日期」的
+         錯配可能，因為文字本身壓根沒有日期可誤帶）。
+      2. 結果頁 provenance（`_render_price_provenance`）顯示的是 ETH 自己
+         的基準日期（真實 evidence，非模擬），且不混入刻意設定為不同步的
+         BTC 日期——證明沒有跨幣污染。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+
+    # 1. 模擬 zero-JS 首頁 render，拿使用者「沒動過」的 textarea 預填值。
+    page_html = web.render_page("")
+    m = re.search(r'<textarea name="q"[^>]*>([^<]*)</textarea>', page_html)
+    assert m, "首頁應有 name=q 的 textarea"
+    default_query = html.unescape(m.group(1))
+    assert not _DATE_RE.search(default_query)
+
+    # 2. BTC/ETH 各自 CSV 日期刻意設不同步，驗證 provenance 沒有跨幣污染。
+    _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-01", "2026-05-31"])
+    _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])
+
+    captured = {}
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                  data_mode=None, llm_mode=None):
+        captured["query"] = query
+        return pl.run(coin, query, qtype, offline=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    # 使用者切換幣種下拉為 ETH，但 textarea 沒變（zero-JS）——直接把剛剛
+    # 拿到的 default_query 原封不動當 q 送出。
+    report, evidence, log = web._do_analyze(
+        {"coin": ["ETH"], "type": ["multi_source"], "q": [default_query]}
+    )
+
+    assert not _DATE_RE.search(captured["query"]), (
+        f"送出的 q 不應含任何日期，實際：{captured['query']!r}"
+    )
+    assert report.coin == "ETH"
+
+    provenance_html = web._render_price_provenance(evidence)
+    assert "2026-06-28" in provenance_html, (
+        f"ETH 分析結果的 provenance 應顯示 ETH 自己的基準日期 2026-06-28，"
+        f"實際：{provenance_html!r}"
+    )
+    assert "2026-05-31" not in provenance_html, (
+        f"ETH 分析結果不應誤混入 BTC 的日期，實際：{provenance_html!r}"
+    )
+
+
+def test_comparison_submit_provenance_shows_each_coins_own_date(monkeypatch, tmp_path):
+    """comparison 同理：查詢文字無日期，兩幣各自的結果頁 provenance 各自
+    顯示正確、不同步的基準日期，互不污染。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+
+    _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-01", "2026-05-31"])
+    _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])
+
+    def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
+                             data_mode=None, llm_mode=None):
+        return pl.run_comparison(coin_a, coin_b, query, offline=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
+
+    report_a, evidence_a, report_b, evidence_b, log = web._do_comparison(
+        {"coin": ["BTC,ETH"], "type": ["comparison"]}
+    )
+
+    prov_a = web._render_price_provenance(evidence_a)
+    prov_b = web._render_price_provenance(evidence_b)
+
+    assert "2026-05-31" in prov_a and "2026-06-28" not in prov_a, (
+        f"BTC provenance 應只顯示 BTC 自己的日期，實際：{prov_a!r}"
+    )
+    assert "2026-06-28" in prov_b and "2026-05-31" not in prov_b, (
+        f"ETH provenance 應只顯示 ETH 自己的日期，實際：{prov_b!r}"
+    )

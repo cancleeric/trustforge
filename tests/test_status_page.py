@@ -558,6 +558,7 @@ def test_status_rate_limit_independent_from_live_rate_limit(json_cache_backend):
     """/status 限流用獨立 bucket，不消耗/受 live 限流 bucket 影響。"""
     ip = "7.7.7.8"
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
     # 灌爆 live 限流 bucket
     for _ in range(web._RATE_MAX):
         web._check_live_rate_limit(ip)
@@ -568,6 +569,7 @@ def test_status_rate_limit_independent_from_live_rate_limit(json_cache_backend):
     code, _ = web._handle_status(client_ip=ip)
     assert code == 200
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
 
 def test_status_rate_limit_bucket_count_bounded_under_many_distinct_ips(monkeypatch):
@@ -585,16 +587,33 @@ def test_status_rate_limit_bucket_count_bounded_under_many_distinct_ips(monkeypa
 
 
 def test_live_rate_limit_bucket_count_bounded_under_many_distinct_ips(monkeypatch):
-    """同一套上限保護也套用在既有 `_rate_buckets`（live/real 限流），不是只
+    """同一套上限保護也套用在既有 `_rate_buckets`（live 緊限流），不是只
     修新加的 /status bucket。"""
     monkeypatch.setattr(web, "_RATE_LIMIT_MAX_TRACKED_IPS", 50)
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     for i in range(500):
         web._check_live_rate_limit(f"172.16.{i // 256}.{i % 256}")
 
     assert len(web._rate_buckets) <= 50
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+
+
+def test_real_rate_limit_bucket_count_bounded_under_many_distinct_ips(monkeypatch):
+    """同一套上限保護也套用在 codex HIGH 修復新加的 `_real_rate_buckets`
+    （real-off 寬鬆限流），避免這個新 bucket 自己變成記憶體耗盡向量。"""
+    monkeypatch.setattr(web, "_RATE_LIMIT_MAX_TRACKED_IPS", 50)
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+
+    for i in range(500):
+        web._check_real_rate_limit(f"172.20.{i // 256}.{i % 256}")
+
+    assert len(web._real_rate_buckets) <= 50
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
 
 def test_status_rate_limit_state_preserved_when_under_bucket_cap(monkeypatch):
