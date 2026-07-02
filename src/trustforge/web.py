@@ -108,6 +108,8 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-hdr-spacer{{flex:1}}
  .tf-costlink{{font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:var(--tf-muted);text-decoration:none;border:1px solid var(--tf-border);border-radius:6px;padding:.3rem .7rem;white-space:nowrap}}
  .tf-costlink:hover{{border-color:#1f6feb;color:var(--tf-text)}}
+ .tf-hdr-status-link{{font-size:.72rem;color:var(--tf-muted2);text-decoration:none;white-space:nowrap;opacity:.75}}
+ .tf-hdr-status-link:hover{{color:var(--tf-muted);opacity:1;text-decoration:underline}}
  .tf-layout{{display:grid;grid-template-columns:290px minmax(0,1fr);gap:1.2rem;align-items:start}}
  .tf-query-panel{{position:sticky;top:1rem;background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
  .tf-query-panel h3{{margin:0;font-family:'IBM Plex Mono',monospace;font-size:.72rem;font-weight:700;color:var(--tf-muted2);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--tf-border);padding-bottom:.6rem}}
@@ -155,6 +157,14 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-div-bear{{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.35)}}
  .tf-div-mid{{display:flex;align-items:center;justify-content:center;color:#f85149;font-weight:700;font-size:1rem}}
  .tf-div-tag{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.1rem .5rem;margin-right:.4rem}}
+ .tf-home-hero h1{{font-size:1.6rem;margin:0 0 .5rem}}
+ .tf-hero-cta{{display:inline-block;background:#1f6feb;color:#fff;text-decoration:none;font-weight:600;padding:.55rem 1.1rem;border-radius:8px;font-size:.9rem;margin-top:.3rem}}
+ .tf-hero-cta:hover{{background:#3b82f6}}
+ .tf-hero-cta.tf-hero-cta-ghost{{background:transparent;border:1px solid var(--tf-border);color:var(--tf-text)}}
+ .tf-hero-cta.tf-hero-cta-ghost:hover{{border-color:#1f6feb;color:#79c0ff}}
+ .tf-home-steps{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:.6rem}}
+ .tf-home-step{{background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:8px;padding:.8rem}}
+ .tf-home-step .sub{{font-size:.8rem;margin:.3rem 0 0}}
  @media (max-width:900px){{
   body{{margin:1rem auto}}
   header.tf-hdr{{flex-direction:column;align-items:flex-start}}
@@ -164,18 +174,12 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
   .tf-hero-row{{grid-template-columns:1fr}}
   .tf-div-grid{{grid-template-columns:1fr}}
   .tf-div-mid{{padding:.3rem 0}}
+  .tf-home-steps{{grid-template-columns:1fr}}
  }}
 </style></head><body>
-<header class="tf-hdr">
- <span class="tf-logo"><span class="tf-logo-mark">&#9670;</span>Trust<b>Forge</b></span>
- <span class="tf-version">{version}</span>
- {mode}
- <div class="tf-hdr-spacer"></div>
- <a class="tf-costlink" href="/status">系統狀態</a>
- <a class="tf-costlink" href="/costs">cost ledger {cost_display}</a>
-</header>
+{header}
 <div class="tf-layout">
- <aside class="tf-query-panel">
+ <aside class="tf-query-panel" id="tf-query-console">
   <h3>Query Console</h3>
   <p class="sub" style="margin:0;font-size:.8rem">加密市場分析 AI Agent — 多源資訊的信任提煉</p>
   <form action="/analyze" method="get">
@@ -1045,6 +1049,72 @@ def _render_costs_page() -> str:
 """
 
 
+def _example_analyze_href() -> str:
+    """首頁「看範例報告」CTA 連結：沿用 Query Console 表單本身的預設幣種／
+    題型／問題文字（`_PAGE` 表單預設值），走一般 `/analyze` GET 路由。
+
+    ⛔ credit-safe / #24：不帶 `real`/`live` 參數 → 落在既有預設（離線示範，
+    $0），結果頁會照常顯示「離線示範」為 active 模式（見 `render_page`
+    active_mode 徽章），對使用者誠實揭露這是示範資料，不是即時市場資料、
+    也不會觸發任何真連接器或 Bedrock 呼叫。coin/q 皆為既有既定文案，不新增
+    / 虛構任何樣本資料。
+    """
+    params = {
+        "coin": COIN_POOL[0],
+        "type": QuestionType.MULTI_SOURCE.value,
+        "q": "分析該幣種近兩週市場狀況，整合多源資料",
+    }
+    return html.escape(f"/analyze?{urlencode(params)}")
+
+
+def _render_home_page() -> str:
+    """首頁（`/`）內容：純靜態 HTML 字串組裝，比照 `_render_status_page`／
+    `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock 任何一項**
+    ——首頁流量最高，必須是零外呼的純靜態渲染（credit-safe：不能是計費熱點）。
+
+    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、產品總覽（事實→
+    推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟 1/3、2/3、3/3」，
+    不新發明一套說法）、範例入口（連到一個真實可執行的 `/analyze` 查詢，
+    非虛構資料——見 `_example_analyze_href`）。
+    """
+    e = html.escape
+    example_href = _example_analyze_href()
+    return f"""
+<div class="tf-section tf-home-hero" style="border-color:#1f6feb;background:linear-gradient(135deg,rgba(31,111,235,.10),rgba(31,111,235,.02))">
+  <h1>多源市場情報的信任提煉——不只給分數，給你為什麼</h1>
+  <p class="sub" style="margin:0 0 .8rem">輸入幣種與問題，TrustForge 整合多來源證據，拆解成「事實 &#8594; 推論 &#8594; 結論」三層，
+  附上信任評分與可展開的原始依據——不是一句話式的黑箱結論。</p>
+  <a class="tf-hero-cta" href="#tf-query-console">立即開始分析 &#8594;</a>
+</div>
+
+<div class="tf-section">
+  <h3>怎麼運作</h3>
+  <p class="sub" style="margin:0 0 .3rem">左側 Query Console 選幣種、題型、輸入問題，送出後三層架構逐層產出：</p>
+  <div class="tf-home-steps">
+    <div class="tf-home-step">
+      <span class="tf-step-badge">步驟 1/3</span><br><b>事實</b>
+      <p class="sub">客觀資料——價格、鏈上數據、官方公告，逐條列出可追溯來源與時間戳。</p>
+    </div>
+    <div class="tf-home-step">
+      <span class="tf-step-badge">步驟 2/3</span><br><b>推論</b>
+      <p class="sub">Agent 綜合多來源證據的分析推理，附信任評分拆解與潛在操縱／協同訊號提示。</p>
+    </div>
+    <div class="tf-home-step">
+      <span class="tf-step-badge">步驟 3/3</span><br><b>結論</b>
+      <p class="sub">市場判斷、關鍵依據與限制、可能推翻結論的條件——結論可回溯，不是黑箱一句話。</p>
+    </div>
+  </div>
+</div>
+
+<div class="tf-section">
+  <h3>範例</h3>
+  <p class="sub" style="margin:0 0 .5rem">想先看看實際輸出長什麼樣？</p>
+  <a class="tf-hero-cta tf-hero-cta-ghost" href="{example_href}">看範例報告 &#8594;</a>
+  <p style="color:var(--tf-muted);font-size:.75rem;margin-top:.5rem">示意用途，離線示範資料，非即時市場資料。</p>
+</div>
+"""
+
+
 def _safe_href(url: str) -> str:
     """安全連結產生器：scheme 為 http/https 才輸出 <a>，否則輸出純 html.escape 文字（不可點）。
 
@@ -1309,40 +1379,36 @@ def _render_evidence_list(
     return "".join(rows)
 
 
-def render_page(
-    body: str = "",
-    active_mode: str = "offline",
-    run_stats_html: str = "",
-) -> str:
-    """組完整 HTML（三檔模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。
+def _render_header(active_mode: str = "offline", *, minimal: bool = False) -> str:
+    """組 `<header class="tf-hdr">`。
 
-    三檔徽章（dark 樣式，見 .tf-mode-badge）恆同時列出：離線示範／真資料·$0
+    `minimal=True`（世界第一重寫 Phase 1）：首頁 `/` 專用——只留 logo +
+    一個極簡的 `/status` 小連結，**不顯示** `tf-version`／三檔模式徽號／
+    `cost ledger` 連結。這三樣不是被刪掉的功能，是移位：版號／模式能力／
+    成本摘要仍完整顯示於 `/status`（見 `_render_status_page`），首頁只是
+    不再讓判審 3 秒內看到一排 dev 內部資訊。
+
+    `minimal=False`（預設，`/costs`／`/status`／`/analyze` 結果頁沿用不變）：
+    三檔徽號（dark 樣式，見 `.tf-mode-badge`）恆同時列出：離線示範／真資料·$0
     （?real=1）／真 Bedrock（?live=1+token）——但**只有 `active_mode` 指定的
     那一檔**渲染成 active（動畫脈動點 + 該檔專屬色），其餘兩檔渲染成灰色靜態
-    能力標籤（無動畫），代表「可用但非本次」。
+    能力標籤（無動畫），代表「可用但非本次」。這是分析結果頁的 provenance
+    標示（本次畫面的證據到底來自樣本 / 真連接器 / 真 Bedrock），非首頁「dev
+    artifacts」問題的範疇，不受本次首頁重寫影響（修復 MEDIUM 的既有邏輯
+    原樣保留）。
 
-    修復 MEDIUM：三檔徽章若同時顯示 active，使用者無法判斷本次畫面的證據到底
-    來自樣本 / 真連接器 / 真 Bedrock，對「信任提煉」產品是實質誤導（provenance
-    不清）。`active_mode` 須為呼叫方對本次請求實際生效模式的判斷結果（見
-    `_active_mode()`），而非畫面能力宣告。
-
-    `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`
-    （首頁 `/`、`/costs` 等未經過分析流程的頁面，視為離線示範為預設 active 檔）。
-
-    CEO 決策（PR #39，收斂）：拆掉 theme toggle 切換機制，固定
-    `data-theme="dark"`（見 `_PAGE`），不再接受外部 `theme` 參數。原因：
-    rtok render cache 是 process-local（重啟/部署/多 worker/TTL 過期即
-    cache miss），"切主題不重跑 pipeline" 與 "不遺失已產出報告" 在無狀態
-    SSR 架構下本質難以兩全——與其留一個會在特定條件下把使用者已產出的
-    真報告弄丟的功能，不如先收斂成 dark-only，等 #20（結果持久化）做對
-    後再重新開放 theme toggle。`var(--tf-*)` CSS custom properties／
-    `:root[data-theme="light"]` 色票**仍保留**（不刪 token），只是目前
-    沒有任何切換入口能到達 light。
-
-    `run_stats_html`：左側 Query Console 面板的「RUN STATS」區塊（見
-    `_render_run_stats()`），只有跑過一次真實分析（`/analyze` 成功）才有資料，
-    預設空字串（首頁／`/costs`／尚未分析的錯誤頁不顯示）。
+    `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`。
     """
+    logo = '<span class="tf-logo"><span class="tf-logo-mark">&#9670;</span>Trust<b>Forge</b></span>'
+    if minimal:
+        return (
+            '<header class="tf-hdr">'
+            f'{logo}'
+            '<div class="tf-hdr-spacer"></div>'
+            '<a class="tf-hdr-status-link" href="/status">系統狀態</a>'
+            '</header>'
+        )
+
     live_capable = HAS_BEDROCK
     live_is_active = active_mode == "live" and live_capable
 
@@ -1365,10 +1431,51 @@ def render_page(
         + _badge("tf-real", "真資料·$0（?real=1）", active_mode == "real")
         + _badge("tf-live", live_text, live_is_active)
     )
+    return (
+        '<header class="tf-hdr">'
+        f'{logo}'
+        f'<span class="tf-version">{html.escape(VERSION)}</span>'
+        f'{mode}'
+        '<div class="tf-hdr-spacer"></div>'
+        '<a class="tf-costlink" href="/status">系統狀態</a>'
+        f'<a class="tf-costlink" href="/costs">cost ledger {html.escape(_header_cost_display())}</a>'
+        '</header>'
+    )
+
+
+def render_page(
+    body: str = "",
+    active_mode: str = "offline",
+    run_stats_html: str = "",
+    minimal_header: bool = False,
+) -> str:
+    """組完整 HTML（header + 表單 + body）。CLI web 與 Lambda handler 共用。
+
+    `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`
+    （首頁 `/`、`/costs` 等未經過分析流程的頁面，視為離線示範為預設 active 檔）。
+
+    CEO 決策（PR #39，收斂）：拆掉 theme toggle 切換機制，固定
+    `data-theme="dark"`（見 `_PAGE`），不再接受外部 `theme` 參數。原因：
+    rtok render cache 是 process-local（重啟/部署/多 worker/TTL 過期即
+    cache miss），"切主題不重跑 pipeline" 與 "不遺失已產出報告" 在無狀態
+    SSR 架構下本質難以兩全——與其留一個會在特定條件下把使用者已產出的
+    真報告弄丟的功能，不如先收斂成 dark-only，等 #20（結果持久化）做對
+    後再重新開放 theme toggle。`var(--tf-*)` CSS custom properties／
+    `:root[data-theme="light"]` 色票**仍保留**（不刪 token），只是目前
+    沒有任何切換入口能到達 light。
+
+    `run_stats_html`：左側 Query Console 面板的「RUN STATS」區塊（見
+    `_render_run_stats()`），只有跑過一次真實分析（`/analyze` 成功）才有資料，
+    預設空字串（首頁／`/costs`／尚未分析的錯誤頁不顯示）。
+
+    `minimal_header`：世界第一重寫 Phase 1 新增。`True` 只有首頁 `/` 會傳
+    （見 `do_GET`），其餘所有既有呼叫端（`/costs`、`/status`、`/analyze`、
+    comparison、429/400/502 錯誤頁）維持預設 `False`，header 行為與既有
+    測試斷言完全不變，零回歸。細節見 `_render_header`。
+    """
+    header_html = _render_header(active_mode, minimal=minimal_header)
     return _PAGE.format(
-        mode=mode, body=body,
-        version=html.escape(VERSION),
-        cost_display=html.escape(_header_cost_display()),
+        header=header_html, body=body,
         run_stats=run_stats_html,
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
@@ -2134,11 +2241,17 @@ class Handler(BaseHTTPRequestHandler):
         # `var(--tf-*)` token 架構保留，等 #20（結果持久化）做對後再重新
         # 開放。`page()` 因此只是 `render_page()` 的薄包裝，不再需要算
         # toggle_href。
-        def page(body="", active_mode="offline", run_stats_html=""):
-            return render_page(body, active_mode=active_mode, run_stats_html=run_stats_html)
+        def page(body="", active_mode="offline", run_stats_html="", minimal_header=False):
+            return render_page(
+                body, active_mode=active_mode, run_stats_html=run_stats_html,
+                minimal_header=minimal_header,
+            )
 
         if u.path == "/":
-            return self._send(200, page(""))
+            # 世界第一重寫 Phase 1：首頁不再是空白 body（見 `_render_home_page`），
+            # header 用 `minimal_header=True`——只留 logo + 極簡 /status 連結，
+            # 版號／模式徽號／cost ledger 移到 /status（不是刪功能，是移位）。
+            return self._send(200, page(_render_home_page(), minimal_header=True))
         if u.path == "/costs":
             return self._send(200, page(_render_costs_page()))
         if u.path == "/status":
