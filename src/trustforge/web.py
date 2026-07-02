@@ -26,6 +26,7 @@ import math
 import os
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -590,7 +591,7 @@ def _handle_status(client_ip: str = "") -> tuple[int, str]:
 
 _LEDGER_SUMMARY_CACHE_TTL_SEC = 20.0
 _LEDGER_SUMMARY_CACHE_MAX = 32
-_ledger_summary_cache: dict[int, tuple[float, dict]] = {}
+_ledger_summary_cache: dict[Callable[[], object], tuple[float, dict]] = {}
 _ledger_summary_cache_lock = threading.Lock()
 
 
@@ -605,10 +606,10 @@ def _get_ledger_summary() -> dict:
     DynamoDB 全表 Scan + JSONL fallback 合併）成本隨歷史紀錄筆數線性增長；
     先前版本每個頁面（含每次 render_page 都會渲染的 header cost ledger 連結、
     以及 `/costs` 本身）都重新全掃一次帳本，隨帳本增長會拖慢每個頁面的
-    latency。這裡加一層以 `id(get_ledger)`（目前生效的 ledger 工廠函式身分）
-    為 key、TTL 20 秒、上限 32 筆的 bounded 記憶體快取：同一個 `get_ledger`
-    在 20 秒內重複呼叫只真的全掃一次（含同一次請求內 header + `/costs` 內容
-    各呼叫一次，也只掃一次）；只要 `get_ledger` 被換掉（例如測試
+    latency。這裡加一層以「目前生效的 `get_ledger` 工廠函式本身」為 key、
+    TTL 20 秒、上限 32 筆的 bounded 記憶體快取：同一個 `get_ledger` 在 20
+    秒內重複呼叫只真的全掃一次（含同一次請求內 header + `/costs` 內容各
+    呼叫一次，也只掃一次）；只要 `get_ledger` 被換掉（例如測試
     `monkeypatch.setattr(web, "get_ledger", lambda: fake_ledger)` 換一顆新的
     fake），key 立刻不同、絕不會讀到舊 ledger 的快取值——`test_costs_page_*`
     系列測試每個都換一顆全新 fake ledger 並斷言各自數字，因此不受影響。
@@ -626,8 +627,22 @@ def _get_ledger_summary() -> dict:
     外等待；等它們拿到鎖時，前者剛寫入的新值已經讓 cache 命中，直接吃新
     值返回，不會各自重算。TTL 語意不變（20 秒），只是把「讀什麼」跟「算
     什麼」的鎖粒度對齊，不再有鎖外的計算窗口。
+
+    ⚠️ cache key 修正（codex 複審 MEDIUM，PR #39）：先前用 `id(get_ledger)`
+    （純整數）當 key，字典本身不持有 `get_ledger` 函式物件的參照。若
+    `get_ledger` 被重新綁定（例如測試換一顆新的 fake 工廠）、舊的函式物件
+    又剛好被 GC 回收，CPython 有機率把同一個記憶體位址（同一個 `id()`）
+    重新分配給新建立的另一個函式物件——20 秒 TTL 內若新工廠恰好拿到舊 id，
+    會直接命中舊工廠留下的摘要快取，顯示錯誤（過期）的成本數字，而且是
+    悄無聲息、不會噴錯的資料錯誤。修法：**直接用 `get_ledger` 這個函式物件
+    本身作 dict key**（函式可雜湊、預設用身分比較），而不是它的 `id()`。
+    字典的 key 引用本身會讓該函式物件在快取存活期間至少多一份強參照，
+    杜絕「物件已死、id 被別人撿走」這個時間窗——只要 key 還在快取裡，
+    Python 就不可能把同一個 id 分配給另一個物件；等 TTL 過期或被 32 筆
+    上限淘汰、key 才會真的釋放。TTL、single-flight、bounded 淘汰邏輯全部
+    不變。
     """
-    key = id(get_ledger)
+    key = get_ledger
     with _ledger_summary_cache_lock:
         now = time.monotonic()
         cached = _ledger_summary_cache.get(key)

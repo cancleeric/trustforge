@@ -1088,3 +1088,85 @@ def test_get_ledger_summary_single_flight_on_concurrent_cache_miss(monkeypatch):
     assert all(r["total_cost_usd"] == 9.99 for r in results), (
         "其餘請求應排隊等鎖後直接吃第一個請求算好、寫回快取的新值"
     )
+
+
+def test_get_ledger_summary_new_factory_gets_fresh_value_after_old_factory_gc(monkeypatch):
+    """cache key 修正回歸（MEDIUM，codex 複審，PR #39）：先前版本用
+    `id(get_ledger)`（純整數）當快取 key，字典本身不持有 `get_ledger` 函式
+    物件的參照。若舊工廠被重新綁定、其函式物件又剛好被 GC 回收，CPython
+    有機率把同一個記憶體位址（同一個 `id()`）重新分配給另一個新建立的
+    函式物件——20 秒 TTL 內若新工廠恰好拿到舊 id，會直接命中舊工廠留下的
+    摘要快取，顯示錯誤（過期）的成本數字，而且是悄無聲息、不會噴錯的
+    資料錯誤。
+
+    修法：直接用 `get_ledger` 這個函式物件本身作 dict key，而不是它的
+    `id()`。這裡不靠「刻意製造真實 id 重用」這種依賴 CPython 記憶體分配
+    細節、跨直譯器不保證重現的作法去驗證（會是 flaky 測試的來源），而是
+    直接驗證修法真正保證的不變量，用 `weakref` 證明：
+
+    1. 快取 entry 還在字典裡（TTL 未過期）時，舊工廠函式物件不可能被 GC
+       回收——因為 dict key 本身就是對它的一份強參照。這正是修法讓
+       「同一個 id 被分配給另一個活著的物件」這件事結構上不可能發生的
+       原因：物件活著、id 就不會被回收再利用。
+    2. 快取 entry 被移除後（模擬 TTL 過期或 32 筆上限淘汰），舊工廠才真的
+       失去所有參照、可以被回收。
+    3. 新工廠接手後，一定拿到自己算出來的新摘要，不會吃到舊工廠殘留的
+       快取值。
+    """
+    import gc
+    import weakref
+
+    class _FakeLedgerOld:
+        def summary(self):
+            return {"total_cost_usd": 111.0, "by_model": {}, "n_runs": 1}
+
+    def factory_old():
+        return _FakeLedgerOld()
+
+    monkeypatch.setattr(web, "get_ledger", factory_old)
+    out_old = web._get_ledger_summary()
+    assert out_old["total_cost_usd"] == 111.0
+
+    ref = weakref.ref(factory_old)
+    del factory_old
+    # 注意：這裡故意不用 `monkeypatch.setattr(web, "get_ledger", None)`——
+    # `MonkeyPatch.setattr()` 每次呼叫都會 `getattr(target, name)` 記下
+    # 「當下的舊值」放進自己的 `_setattr` 還原清單，等於再多留一份對
+    # `factory_old` 的強參照直到測試結束才釋放，會讓底下「該被回收」的
+    # 斷言永遠失敗（pytest 測試框架本身的參照，不是本次要驗證的修法邏輯）。
+    # 直接對 module 屬性賦值即可——monkeypatch 在第一次 `setattr()` 時已經
+    # 記住了「測試開始前的真正原始值」，測試結束時仍會正確還原，不受這裡
+    # 的直接賦值影響。
+    web.get_ledger = None
+    gc.collect()
+
+    # 注意：不要在 `assert` 表達式裡直接呼叫 `ref()`——pytest 的 assertion
+    # rewriting 會把求值結果暫存進一個隱藏的區域變數，該變數會一路存活到
+    # 函式結束，等於偷偷多留一份對 factory_old 的強參照，讓底下「該被回收」
+    # 的斷言永遠失敗（誤判成 bug）。這裡先明確存到具名變數、斷言後立刻
+    # `del` 釋放，才不會被這個 pytest 內部機制污染判斷。
+    snapshot = ref()
+    assert snapshot is not None, (
+        "cache 內這筆 entry 還在（TTL 未過期），dict key 應該持有函式物件"
+        "的強參照，此時舊工廠不該已經被 GC 回收——這正是修法要保證的不變量"
+    )
+    web._ledger_summary_cache.pop(snapshot, None)
+    del snapshot
+    gc.collect()
+
+    snapshot = ref()
+    assert snapshot is None, "cache entry 移除後，舊工廠沒有其他參照了，該被 GC 回收"
+    del snapshot
+
+    class _FakeLedgerNew:
+        def summary(self):
+            return {"total_cost_usd": 222.0, "by_model": {}, "n_runs": 1}
+
+    def factory_new():
+        return _FakeLedgerNew()
+
+    monkeypatch.setattr(web, "get_ledger", factory_new)
+    out_new = web._get_ledger_summary()
+    assert out_new["total_cost_usd"] == 222.0, (
+        "新工廠必須拿到自己的新摘要，不該吃到舊工廠殘留的快取值"
+    )
