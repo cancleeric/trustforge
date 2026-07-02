@@ -5,8 +5,12 @@
 """
 from __future__ import annotations
 
+import threading
+import time
 from decimal import Decimal
 from unittest.mock import MagicMock
+
+from botocore.exceptions import ClientError
 
 from trustforge.scheduler_log import (
     DynamoDBSchedulerRunLog,
@@ -16,6 +20,45 @@ from trustforge.scheduler_log import (
     get_last_scheduler_run,
     get_scheduler_run_log,
 )
+
+
+class FakeConditionalTable:
+    """輕量記憶體版 DynamoDB Table 假物件，模擬真正 DynamoDB 對
+    `ConditionExpression` 的原子檢查語意（`put_item` 的比較與寫入不可被
+    打斷）——用來驗證 `_update_latest_pointer` 的 compare-and-set 在真實
+    交錯下不會 lost update。純記憶體、不打真 AWS，不用 moto。
+
+    只支援本檔（`scheduler_log.py::DynamoDBSchedulerRunLog._update_latest_pointer`）
+    唯一用到的 condition 形狀：`source_ts not_exists OR source_ts < 新值`，
+    直接比較 Item 自帶的 `source_ts` 與目前已存的值，不解析 boto3
+    ConditionExpression 物件本身（那是 boto3 SDK 內部細節，不該綁死在測試
+    替身的實作上）。用 `threading.Lock` 包住檢查+寫入，正確模擬 DynamoDB
+    伺服器端「條件檢查與寫入同一個原子操作」的保證，讓多執行緒交錯測試
+    有意義。
+    """
+
+    def __init__(self):
+        self._store: dict[tuple, dict] = {}
+        self._lock = threading.Lock()
+
+    def put_item(self, Item, ConditionExpression=None):  # noqa: N803 — 比照 boto3 API 命名
+        key = (Item["run_id"], Item["ts"])
+        with self._lock:
+            if ConditionExpression is not None:
+                existing = self._store.get(key)
+                new_source_ts = Item.get("source_ts")
+                if existing is not None and existing.get("source_ts") is not None:
+                    if not (str(existing["source_ts"]) < str(new_source_ts)):
+                        raise ClientError(
+                            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "x"}},
+                            "PutItem",
+                        )
+            self._store[key] = dict(Item)
+
+    def get_item(self, Key):  # noqa: N803
+        with self._lock:
+            item = self._store.get((Key["run_id"], Key["ts"]))
+            return {"Item": dict(item)} if item is not None else {}
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +144,50 @@ def test_jsonl_run_log_latest_cost_independent_of_history_size(tmp_path):
     assert abs(size_after_300 - size_after_1) < 32
 
 
+def test_jsonl_run_log_latest_pointer_interleaved_writers_no_regression(tmp_path, monkeypatch):
+    """交錯回歸（HIGH）：`append()` 對 latest 指標的讀-比較-寫是跨執行緒/
+    跨行程臨界區（`fcntl.flock`），兩個「排程」交錯呼叫時，較舊的一筆事後
+    才嘗試寫入指標不該把指標蓋回舊值。用 monkeypatch 在
+    `_write_latest_pointer` 中插入延遲拉長臨界區窗口，逼真交錯（沒有鎖的
+    話這個延遲會讓 race 幾乎必然重現；有鎖則序列化執行，結果仍正確）。"""
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+
+    original_write = JsonlSchedulerRunLog._write_latest_pointer
+
+    def slow_write(self, record):
+        time.sleep(0.03)
+        original_write(self, record)
+
+    monkeypatch.setattr(JsonlSchedulerRunLog, "_write_latest_pointer", slow_write)
+
+    newer = {"run_id": "run-newer", "ts": "2026-01-03T00:00:00+00:00", "success_count": 2}
+    older = {"run_id": "run-older", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1}
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def writer(item, delay_before):
+        try:
+            barrier.wait(timeout=5)
+            time.sleep(delay_before)
+            log.append(item)
+        except BaseException as exc:  # noqa: BLE001 — 測試執行緒需回報例外供主執行緒斷言
+            errors.append(exc)
+
+    t_newer = threading.Thread(target=writer, args=(newer, 0.0))
+    t_older = threading.Thread(target=writer, args=(older, 0.01))
+    t_newer.start()
+    t_older.start()
+    t_newer.join(timeout=5)
+    t_older.join(timeout=5)
+
+    assert not errors, f"writer 執行緒不該拋例外：{errors}"
+    pointer = log.latest()
+    assert pointer is not None
+    assert pointer["run_id"] == "run-newer"
+    assert pointer["ts"] == "2026-01-03T00:00:00+00:00"
+
+
 # ---------------------------------------------------------------------------
 # DynamoDBSchedulerRunLog（mock boto3 Table，不打真 AWS）
 # ---------------------------------------------------------------------------
@@ -121,7 +208,6 @@ def test_dynamodb_run_log_construction_does_not_touch_aws(monkeypatch):
 def test_dynamodb_run_log_append_calls_put_item_with_decimal_and_keys():
     d = DynamoDBSchedulerRunLog(table_name="fake-table")
     mock_table = MagicMock()
-    mock_table.get_item.return_value = {}  # 尚無 latest 指標
     d._table = mock_table  # 繞過 boto3
 
     d.append({
@@ -129,11 +215,14 @@ def test_dynamodb_run_log_append_calls_put_item_with_decimal_and_keys():
         "success_count": 3, "failure_count": 0, "total_docs": 12.0,
     })
 
-    # append() 寫兩筆：完整歷史記錄 + O(1) latest 指標（固定 Key，見
-    # `_update_latest_pointer`），不是只寫一筆。
+    # append() 寫兩筆：完整歷史記錄 + O(1) latest 指標（固定 Key，條件式
+    # PutItem，見 `_update_latest_pointer`），不是只寫一筆；且**不再**用
+    # GetItem 比較（那正是舊設計的競態來源），純原子 PutItem+Condition。
+    mock_table.get_item.assert_not_called()
     assert mock_table.put_item.call_count == 2
     history_item = mock_table.put_item.call_args_list[0].kwargs["Item"]
-    pointer_item = mock_table.put_item.call_args_list[1].kwargs["Item"]
+    pointer_call = mock_table.put_item.call_args_list[1]
+    pointer_item = pointer_call.kwargs["Item"]
 
     assert history_item["run_id"] == "run-1"
     assert history_item["ts"] == "2026-07-01T00:00:00+00:00"
@@ -143,16 +232,14 @@ def test_dynamodb_run_log_append_calls_put_item_with_decimal_and_keys():
     assert pointer_item["ts"] == "__latest__"
     assert pointer_item["source_run_id"] == "run-1"
     assert pointer_item["source_ts"] == "2026-07-01T00:00:00+00:00"
+    assert "ConditionExpression" in pointer_call.kwargs  # 比較與覆寫原子化
 
-    # latest 指標查詢只 GetItem 一次固定 Key，不 Scan。
-    mock_table.get_item.assert_called_once_with(Key=DynamoDBSchedulerRunLog._LATEST_KEY)
     mock_table.scan.assert_not_called()
 
 
 def test_dynamodb_run_log_append_generates_run_id_and_ts_when_missing():
     d = DynamoDBSchedulerRunLog(table_name="fake-table")
     mock_table = MagicMock()
-    mock_table.get_item.return_value = {}
     d._table = mock_table
 
     d.append({"success_count": 1})
@@ -172,23 +259,92 @@ def test_dynamodb_run_log_append_generates_run_id_and_ts_when_missing():
 
 def test_dynamodb_run_log_append_only_overwrites_latest_pointer_when_strictly_newer():
     """out-of-order append（如時鐘漂移/並發）不該讓較舊的一筆蓋掉較新的
-    latest 指標，比照 `JsonlSchedulerRunLog` 對平手/較舊一律不覆寫的語意。"""
+    latest 指標，比照 `JsonlSchedulerRunLog` 對平手/較舊一律不覆寫的語意。
+    用 `FakeConditionalTable`（真的執行條件檢查）而非無腦 MagicMock，才能
+    驗證「覆寫被擋下」而不是只驗證「呼叫了 put_item」。"""
     d = DynamoDBSchedulerRunLog(table_name="fake-table")
-    mock_table = MagicMock()
-    mock_table.get_item.return_value = {}
-    d._table = mock_table
+    table = FakeConditionalTable()
+    d._table = table
 
     d.append({"run_id": "newer", "ts": "2026-01-03T00:00:00+00:00", "success_count": 1})
-    pointer_after_first = mock_table.put_item.call_args_list[-1].kwargs["Item"]
-    assert pointer_after_first["source_run_id"] == "newer"
-
-    # 模擬目前指標已是 newer（GetItem 回傳剛寫入的內容）
-    mock_table.get_item.return_value = {"Item": dict(pointer_after_first)}
-
     d.append({"run_id": "older", "ts": "2026-01-01T00:00:00+00:00", "success_count": 2})
-    # 這次 append 只該寫「歷史記錄」那 1 筆，指標不該被較舊的一筆覆寫。
-    latest_call_item = mock_table.put_item.call_args_list[-1].kwargs["Item"]
-    assert latest_call_item["run_id"] == "older"  # 是歷史記錄本身，不是指標覆寫
+
+    pointer = table.get_item(Key=DynamoDBSchedulerRunLog._LATEST_KEY)["Item"]
+    assert pointer["source_run_id"] == "newer"  # 較舊一筆的條件式覆寫被擋下
+
+
+def test_dynamodb_run_log_update_latest_pointer_swallows_conditional_check_failed():
+    """`ConditionalCheckFailedException` 是預期的「已有更新指標」訊號，不該
+    往上拋、不該讓 `append()` 的歷史記錄寫入受影響。"""
+    d = DynamoDBSchedulerRunLog(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.put_item.side_effect = [
+        None,  # 歷史記錄寫入成功
+        ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "x"}}, "PutItem"
+        ),
+    ]
+    d._table = mock_table
+
+    d.append({"run_id": "r1", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1})
+    # 沒有拋例外就是成功；歷史記錄那筆 put_item 確實有打（side_effect 第一
+    # 個 None 已被消耗）。
+    assert mock_table.put_item.call_count == 2
+
+
+def test_dynamodb_run_log_update_latest_pointer_reraises_other_client_errors():
+    """只吞 `ConditionalCheckFailedException`，其他 DynamoDB 錯誤（如
+    AccessDenied）仍該往上拋，不能被誤吞成靜默失敗。"""
+    d = DynamoDBSchedulerRunLog(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.put_item.side_effect = [
+        None,
+        ClientError({"Error": {"Code": "AccessDeniedException", "Message": "x"}}, "PutItem"),
+    ]
+    d._table = mock_table
+
+    try:
+        d.append({"run_id": "r1", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1})
+        assert False, "應該要往上拋 AccessDeniedException"
+    except ClientError as exc:
+        assert exc.response["Error"]["Code"] == "AccessDeniedException"
+
+
+def test_dynamodb_run_log_latest_pointer_interleaved_writers_no_regression():
+    """交錯回歸（HIGH）：兩個「排程」真的用多執行緒交錯呼叫
+    `_update_latest_pointer`（較舊的一筆刻意在較新的一筆之後才嘗試寫入，
+    模擬重疊排程的時間差），原子條件式 PutItem 應保證最終指標維持較新的
+    ts，不會被較舊的一筆蓋回去——不會出現「A 讀到舊指標 → B 寫入新指標
+    → A 仍照著舊狀態把指標蓋回舊值」的 lost update。"""
+    d = DynamoDBSchedulerRunLog(table_name="fake-table")
+    table = FakeConditionalTable()
+    d._table = table
+
+    newer_item = {"run_id": "run-newer", "ts": "2026-01-03T00:00:00+00:00", "success_count": 2}
+    older_item = {"run_id": "run-older", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1}
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def writer(item, delay_before):
+        try:
+            barrier.wait(timeout=5)
+            time.sleep(delay_before)  # 刻意錯開，逼兩邊都進入臨界區嘗試寫入
+            d._update_latest_pointer(table, dict(item))
+        except BaseException as exc:  # noqa: BLE001 — 測試執行緒需回報例外供主執行緒斷言
+            errors.append(exc)
+
+    t_newer = threading.Thread(target=writer, args=(newer_item, 0.0))
+    t_older = threading.Thread(target=writer, args=(older_item, 0.02))
+    t_newer.start()
+    t_older.start()
+    t_newer.join(timeout=5)
+    t_older.join(timeout=5)
+
+    assert not errors, f"writer 執行緒不該拋例外：{errors}"
+    pointer = table.get_item(Key=DynamoDBSchedulerRunLog._LATEST_KEY)["Item"]
+    assert pointer["source_run_id"] == "run-newer"
+    assert pointer["source_ts"] == "2026-01-03T00:00:00+00:00"
 
 
 def test_dynamodb_run_log_latest_uses_get_item_not_scan():

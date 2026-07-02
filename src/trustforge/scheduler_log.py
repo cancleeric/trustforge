@@ -22,6 +22,7 @@ Phase3：`/status` 要顯示「最近排程執行」，需要一個跨 run 持�
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -82,6 +83,14 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
     歷史筆數增長（history 檔本身可以無限增長，但沒有任何讀取路徑會整份掃
     它；`read_all()` 仍會整份讀，只給匯出/除錯等離線用途用，不在 `/status`
     的熱路徑上）。
+
+    ⚠️ 併發安全：維護 latest 指標是「讀目前指標 → 比較 ts → （可能）覆
+    寫」的 compare-and-set，`os.replace` 只保證單次寫入本身原子，**不保證
+    整個讀-比較-寫序列不被打斷**——兩個重疊排程各自進入這段臨界區時，較
+    新的一筆若先寫完，較舊的一筆若照著它自己更早讀到的（尚未看到較新一
+    筆的）舊狀態判斷「該覆寫」，仍可能把指標蓋回舊值（lost update）。因
+    此整個 compare-and-set 用 `fcntl.flock` 包住（見 `_update_latest_pointer_locked`），
+    跨行程/跨執行緒序列化，確保最終指標不會倒退。
     """
 
     def __init__(self, path: str | Path | None = None):
@@ -90,6 +99,10 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
     @property
     def _latest_path(self) -> Path:
         return self.path.with_name(self.path.name + ".latest.json")
+
+    @property
+    def _latest_lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".latest.lock")
 
     def _read_latest_pointer(self) -> dict[str, Any] | None:
         if not self._latest_path.exists():
@@ -118,19 +131,29 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
                 pass
             raise
 
+    def _update_latest_pointer_locked(self, record: dict[str, Any]) -> None:
+        """原子 compare-and-set：`fcntl.flock` 包住「讀目前指標 → 比較 ts →
+        （可能）覆寫」整段臨界區，跨行程/跨執行緒序列化，避免兩個重疊排程
+        交錯造成指標倒退（見類別 docstring）。只在新記錄的 `ts` 嚴格大於目
+        前指標時才覆寫（同 `max(records, key=ts)` 對平手取先出現者的既有
+        語意）。"""
+        self._latest_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._latest_lock_path, "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                current = self._read_latest_pointer()
+                if current is None or str(record.get("ts", "")) > str(current.get("ts", "")):
+                    self._write_latest_pointer(record)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def append(self, record: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
 
-        # 維護 latest 指標：只在新記錄的 ts 嚴格大於目前指標時才覆寫（同
-        # `max(records, key=ts)` 對平手取先出現者的既有語意，不因為新記錄
-        # append 順序在後就直接蓋掉——正常排程呼叫端 ts 必為遞增，此比較純
-        # 為容錯（時鐘漂移/並發呼叫）與語意穩定，不會退化成整檔掃描。
-        current = self._read_latest_pointer()
-        if current is None or str(record.get("ts", "")) > str(current.get("ts", "")):
-            self._write_latest_pointer(record)
+        self._update_latest_pointer_locked(record)
 
     def read_all(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -174,6 +197,15 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
     `GetItem`**，**絕不 `Scan`**——查詢成本恆為 O(1)，不隨排程歷史筆數增長。
     `read_all()` 仍會整份 `Scan`，只給匯出/除錯等離線用途用，不在 `/status`
     的熱路徑上。
+
+    ⚠️ 併發安全：維護 latest 指標**不能**用「先 `GetItem` 比較、再無條件
+    `PutItem`」——兩個重疊排程各自 `GetItem` 到同一份舊指標後，較新的一筆
+    先寫完，較舊的一筆仍照著它自己更早讀到的舊狀態判斷「該覆寫」，會把
+    指標蓋回舊值（lost update / read-compare-write 競態）。因此改用**條件
+    式 `PutItem`**（`ConditionExpression`：目前指標不存在，或其 `source_ts`
+    嚴格小於這次要寫入的值），把「比較」跟「覆寫」在 DynamoDB 伺服器端合
+    成單一原子操作；`ConditionalCheckFailedException` 代表已有更新（或相
+    等）的指標存在，直接忽略、不當錯誤。
     """
 
     _LATEST_KEY = {"run_id": "__latest__", "ts": "__latest__"}
@@ -232,20 +264,32 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
         self._update_latest_pointer(table, item)
 
     def _update_latest_pointer(self, table: Any, item: dict[str, Any]) -> None:
-        """維護固定 Key 的 latest 指標（O(1) `GetItem` 比較後決定要不要覆寫，
-        絕不 `Scan`）。真正的 key 屬性（`run_id`/`ts`）改成固定值，原始值
-        另存 `source_run_id`/`source_ts` 欄位供 `latest()` 還原。"""
-        current = table.get_item(Key=self._LATEST_KEY).get("Item")
-        current_ts = str(current.get("source_ts", "")) if current else ""
-        if current is not None and str(item["ts"]) <= current_ts:
-            return  # 目前指標已較新（或相等，保留先寫入者），不覆寫
+        """維護固定 Key 的 latest 指標。真正的 key 屬性（`run_id`/`ts`）改成
+        固定值，原始值另存 `source_run_id`/`source_ts` 欄位供 `latest()`
+        還原。
+
+        用**條件式 `PutItem`**做原子 compare-and-set，取代「先 `GetItem`
+        比較、再無條件 `PutItem`」——後者在兩個重疊排程交錯時，較舊的一筆
+        可能照著自己更早讀到的舊狀態把指標蓋回去（見類別 docstring）。
+        `ConditionExpression` 讓「目前指標不存在，或其 `source_ts` 嚴格小於
+        這次要寫入的值」與「覆寫」在 DynamoDB 伺服器端合成單一原子操作，
+        不會有 read-compare-write 之間的競態窗口。"""
+        from boto3.dynamodb.conditions import Attr  # 延遲匯入，同 boto3 lazy 慣例
+        from botocore.exceptions import ClientError
 
         pointer = dict(item)
         pointer["source_run_id"] = pointer.pop("run_id")
         pointer["source_ts"] = pointer.pop("ts")
         pointer["run_id"] = self._LATEST_KEY["run_id"]
         pointer["ts"] = self._LATEST_KEY["ts"]
-        table.put_item(Item=self._to_decimal(pointer))
+
+        condition = Attr("source_ts").not_exists() | Attr("source_ts").lt(pointer["source_ts"])
+        try:
+            table.put_item(Item=self._to_decimal(pointer), ConditionExpression=condition)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return  # 已有更新（或相等）的指標存在，忽略，不當錯誤
+            raise
 
     def latest(self) -> dict[str, Any] | None:
         """O(1)：對固定 Key 做單筆 `GetItem`，**絕不 `Scan`**——查詢成本不隨
