@@ -128,6 +128,59 @@ def test_negated_manipulation_not_penalised():
     assert _manipulation_penalty(aff) > 0
 
 
+# --- #12 _recency_decay 未來時間戳全域防禦回歸測試 ------------------------
+
+def test_recency_decay_future_ts_not_maxed_out():
+    """未來時間戳（ts > now，如壞資料/時鐘偏差/偽造 pubDate）不應被灌成滿分
+    recency=1.0。舊實作 `max(0.0, age_h)` 會把負齡 clamp 成 0 齡 → 滿分，
+    等於把不可能存在的未來資訊捏造成「最新鮮、最高信任」的觀測。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    future_doc = Document(id="future", kind="news", source="coindesk", text="",
+                           ts=now + 3600 * 24)  # 未來 24 小時
+    c = Claim(id="c1", text="x", doc=future_doc)
+    decay = _recency_decay(c, now)
+    assert decay < 1.0, f"未來時間戳不應拿到滿分 recency，實得 {decay}"
+    assert decay == pytest.approx(0.5), (
+        f"未來時間戳應比照 ts=0（未知）降級為中性 0.5，實得 {decay}"
+    )
+
+
+def test_recency_decay_future_ts_not_lower_than_neutral():
+    """未來時間戳降級為中性 0.5，而非被當成『已知最舊』打到 0 分——真實年齡
+    未知，不該直接重罰到底（可能只是輕微時鐘漂移）。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    slightly_future_doc = Document(id="slight-future", kind="news", source="coindesk",
+                                    text="", ts=now + 1.0)  # 未來 1 秒
+    c = Claim(id="c2", text="x", doc=slightly_future_doc)
+    assert _recency_decay(c, now) == pytest.approx(0.5)
+
+
+def test_recency_decay_past_ts_unaffected_by_future_ts_fix():
+    """回歸鎖：正常過去時間戳的衰減計算完全不受本次未來戳防禦影響。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    past_doc = Document(id="past", kind="news", source="coindesk", text="",
+                         ts=now - 3600 * 12)  # 12 小時前，剛好 1 個半衰期
+    c = Claim(id="c3", text="x", doc=past_doc)
+    assert _recency_decay(c, now) == pytest.approx(0.5)
+
+
+def test_score_future_ts_claim_recency_component_not_maxed():
+    """真實 `score()` 路徑：帶未來時間戳的來源，`components['recency']`
+    不應是 1.0（回歸鎖：確保修法在完整評分流程生效，非僅單元函式層面）。"""
+    now = 1_000_000.0
+    docs = [
+        _doc("future-claim", "news", "coindesk", "BTC 大漲", ts=now + 3600 * 48),
+    ]
+    scored = score(extract_claims(docs), now=now)
+    assert scored[0].components["recency"] < 1.0
+
+
 # --- Tier2 可解釋 UX：_manipulation_flags 回溯測試 ------------------------
 
 def test_manipulation_flags_traces_back_to_original_keywords():

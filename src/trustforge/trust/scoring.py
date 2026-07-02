@@ -220,10 +220,27 @@ def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) ->
 
 
 def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
-    """指數衰減；加密資訊半衰期短，預設 12 小時。ts=0 視為未知→中性 0.5。"""
+    """指數衰減；加密資訊半衰期短，預設 12 小時。ts=0 視為未知→中性 0.5。
+
+    #12（全域防禦，呼應 #24 不虛增）：`age_h = (now - ts) / 3600` 未來時間戳
+    （`ts > now`，如壞資料/時鐘偏差/偽造 pubDate）會算出負值。舊實作用
+    `max(0.0, age_h)` 把負齡 clamp 成 0 齡 → `decay = 0.5**0 = 1.0`，等於把
+    「不可能存在的未來資訊」捏造成「剛剛發生、最高信任」的觀測——這個 clamp
+    在 `_recency_decay` 這一層對**所有來源**都成立，不只 CoinGecko（該連接器
+    已在自己的 ingestion 層另外 clamp 了 `last_updated_at`，但那只保護
+    CoinGecko 自己的欄位；news RSS `pubDate`／社群／鏈上等其他來源若出現
+    未來時間戳，仍會流進這裡被灌成滿分）。
+
+    修法：age_h < 0（未來時間戳）視為異常，不給滿分、也不當成「已知的最舊」
+    （因為真實年齡未知，不該用 0.0 分懲罰它可能只是輕微時鐘漂移），比照
+    ts=0（未知 ts）的既有中性語意，回傳 0.5——全來源、scoring 層統一生效，
+    不必逐連接器各自補防禦。
+    """
     if not c.doc.ts:
         return 0.5
-    age_h = max(0.0, (now - c.doc.ts) / 3600.0)
+    age_h = (now - c.doc.ts) / 3600.0
+    if age_h < 0:
+        return 0.5
     return math.pow(0.5, age_h / half_life_h)
 
 
