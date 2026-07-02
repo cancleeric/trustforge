@@ -34,6 +34,29 @@
        coingecko.py/onchain.py/regulatory.py/social.py 一樣是「urlopen +
        白名單 host」的模式，同樣有第 2/3 輪的洞，一次性 by construction
        封閉整個 SSRF class，不是逐檔案各修一次。
+  第 4 輪（codex，安全+可用性，本檔本次修復的問題）：
+    (a) [HIGH 可用性] 第 3 輪只 pin「第一個」已驗證公開 IP、connect 只試
+        它一個——標準 `socket.create_connection(hostname)` 會依序嘗試
+        `getaddrinfo` 回傳的**所有**位址，但第 3 輪的實作只試第一個就放
+        棄。若 DNS 把不可達的 AAAA(IPv6) 排在可用 A(IPv4) 前面（IPv4-only
+        部署環境常見排序），第一個「已驗證安全」的位址其實連不通，整個
+        請求直接失敗、不會 fallback 到後面能連的 IPv4——而 5 個連接器共
+        用這一條路，一個網路環境設定就能讓真資料管線全滅，正是這個健康
+        修復任務原本要解決、卻反而被自己新增的邏輯弄壞的那類問題。
+        修法：`_resolve_safe_ips` 回傳**所有**已驗證非私有公開位址的清單
+        （每個都各自通過完整的私有 IP 檢查，不會為了 fallback 放寬任何
+        一個候選的安全性），連線階段**依序嘗試每一個 pinned IP**（前一個
+        TCP 連線失敗才試下一個，每次仍然是 DNS pinning 到那個已驗證的
+        IP，hostname 依然只作 SNI/憑證/Host），全部位址都失敗才對外拋出
+        錯誤。
+    (b) [MEDIUM 安全] 轉址回應的 body 原本用無界 `resp.read()` 排空（想
+        避免殘留資料影響下一跳），但轉址情境根本不需要讀 body、也不該無
+        界讀——同網域的上游若被入侵/誤配置在轉址回應裡塞超大或無限長度
+        的 body，會被硬讀到記憶體耗盡或卡到 timeout。修法：轉址時**完全
+        不讀 body**，直接關閉這一跳的連線（反正下一跳本來就是全新的
+        `_PinnedHTTPSConnection`，不會有「殘留資料汙染下一跳」的問題，
+        關閉舊連線就足夠乾淨）。非轉址（含錯誤狀態碼）的最終回應維持原
+        本 `resp.read(max_bytes)` 的有界讀取，不受影響。
 
 安全模型摘要（每一跳，含初始 URL，都要通過全部檢查才連線）：
   - scheme 必須是 `https`
@@ -41,15 +64,19 @@
     完全相同（轉址鏈不能中途變更 host，也不是只比對「上一跳」——第二跳
     才變更 host 一樣會被擋，見 `test_safe_fetch.py` 回歸鎖）
   - port 必須是 https 預設 443（或 URL 未寫明 port）
-  - hostname 解析出的**所有** IP 都必須非私有/迴環/link-local/保留/
-    多播/未指定（`ipaddress` 標準庫判斷，涵蓋 169.254.169.254 這類雲端
-    metadata endpoint）
-  - 驗證通過後，**直接拿驗證用的那個 IP** 建立實際 TCP 連線（DNS
-    pinning），不再讓連線階段重新解析一次 hostname
-  - 最多跟 `max_redirects`（預設 3）跳，避免無限轉址鏈
+  - hostname 解析出的**每一個**候選 IP 都必須各自非私有/迴環/link-local/
+    保留/多播/未指定（`ipaddress` 標準庫判斷，涵蓋 169.254.169.254 這類
+    雲端 metadata endpoint）才會進入「已驗證清單」；只要有任一個安全 IP
+    存在就算通過驗證（不要求全部位址都安全，但不安全的位址永遠不會被
+    拿去連線）
+  - 驗證通過後，**依序拿已驗證清單裡的 IP** 建立實際 TCP 連線（DNS
+    pinning，每個候選各自 pin），不再讓連線階段重新解析一次 hostname；
+    前一個連線失敗才試下一個，全部失敗才對外拋錯
+  - 最多跟 `max_redirects`（預設 3）跳，避免無限轉址鏈；轉址回應一律不
+    讀 body（見上方第 4 輪 (b)）
 
 安全措施（沿用各連接器原本就有的規格，這裡集中實作一次）：
-  - timeout / 回應大小上限（超過截斷）
+  - timeout / 回應大小上限（超過截斷，僅套用在最終非轉址回應）
   - 固定 User-Agent（各連接器自帶各自的 UA 字串傳入）
   - 完整 TLS 憑證驗證（`ssl._create_default_https_context()`，不降級）
 """
@@ -79,14 +106,21 @@ class SSRFBlockedError(HTTPError):
         super().__init__(url, 0, f"SSRF blocked: {reason}", None, None)
 
 
-def _resolve_safe_ip(hostname: str) -> str:
-    """解析 `hostname`，回傳第一個「非私有/迴環/link-local/保留/多播/
-    未指定」的 IP 字串；沒有任何安全 IP 可用（含完全解析失敗）一律拋出
-    `OSError`，由呼叫端轉成 `SSRFBlockedError`。"""
+def _resolve_safe_ips(hostname: str) -> list[str]:
+    """解析 `hostname`，回傳**所有**「非私有/迴環/link-local/保留/多播/
+    未指定」的 IP 字串清單（保留 `getaddrinfo` 原始順序，去重）；一個都
+    沒有（含完全解析失敗）一律拋出 `OSError`，由呼叫端轉成
+    `SSRFBlockedError`。
+
+    刻意回傳清單而非單一 IP：見模組頂部第 4 輪 (a) 說明——只 pin 第一個
+    位址會在該位址剛好不可達時（如 IPv4-only 部署遇到排序在前的 AAAA）
+    整條路直接斷掉，不會 fallback 到清單裡其他同樣已驗證安全的位址。
+    """
     try:
         infos = socket.getaddrinfo(hostname, None)
     except OSError as exc:
         raise OSError(f"{hostname}: DNS 解析失敗（{exc}）") from exc
+    safe_ips: list[str] = []
     for info in infos:
         ip_str = info[4][0]
         try:
@@ -98,8 +132,11 @@ def _resolve_safe_ip(hostname: str) -> str:
             or ip.is_reserved or ip.is_multicast or ip.is_unspecified
         ):
             continue
-        return ip_str
-    raise OSError(f"{hostname}: 解析出的 IP 皆非安全位址（私有/迴環/link-local/保留）")
+        if ip_str not in safe_ips:
+            safe_ips.append(ip_str)
+    if not safe_ips:
+        raise OSError(f"{hostname}: 解析出的 IP 皆非安全位址（私有/迴環/link-local/保留）")
+    return safe_ips
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -124,10 +161,11 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
-def _validate_hop(url: str, allowed_hostname: str) -> tuple[str, str, int]:
+def _validate_hop(url: str, allowed_hostname: str) -> tuple[str, list[str], int]:
     """驗證單一跳（含初始 URL）：scheme=https、hostname 與
-    `allowed_hostname` 完全相同、port=443（或未指定）、解析出的 IP 非
-    私有。回傳 `(hostname, pinned_ip, port)`；任一項不合格拋出
+    `allowed_hostname` 完全相同、port=443（或未指定）、解析出至少一個
+    非私有 IP。回傳 `(hostname, pinned_ips, port)`（`pinned_ips` 是**全部**
+    已驗證安全的候選 IP，見 `_resolve_safe_ips`）；任一項不合格拋出
     `SSRFBlockedError`。"""
     parsed = urlparse(url)
     if parsed.scheme != "https":
@@ -138,10 +176,10 @@ def _validate_hop(url: str, allowed_hostname: str) -> tuple[str, str, int]:
     if port != 443:
         raise SSRFBlockedError(url, "port 須為 https 預設 443")
     try:
-        pinned_ip = _resolve_safe_ip(parsed.hostname)
+        pinned_ips = _resolve_safe_ips(parsed.hostname)
     except OSError as exc:
         raise SSRFBlockedError(url, str(exc)) from exc
-    return parsed.hostname, pinned_ip, port
+    return parsed.hostname, pinned_ips, port
 
 
 def fetch_url(
@@ -154,9 +192,11 @@ def fetch_url(
     max_redirects: int = 3,
 ) -> bytes:
     """SSRF-safe 的 HTTPS GET（見模組頂部說明）：每一跳（含初始 URL）都
-    驗證 scheme/hostname/port/私有 IP，驗證用的 IP 直接拿去 DNS pinning
-    連線，轉址完全手動處理（不使用 `urllib.request` 的自動轉址機制），
-    最多 `max_redirects` 跳。回應大小超過 `max_bytes` 截斷。
+    驗證 scheme/hostname/port/私有 IP，驗證用的每個安全 IP 依序拿去 DNS
+    pinning 連線（前一個連線失敗才試下一個，見模組頂部第 4 輪 (a)），
+    轉址完全手動處理（不使用 `urllib.request` 的自動轉址機制），最多
+    `max_redirects` 跳。回應大小超過 `max_bytes` 截斷（僅套用在最終
+    非轉址回應；轉址回應完全不讀 body，見模組頂部第 4 輪 (b)）。
 
     `extra_headers`（如有）與固定 `User-Agent` 一併附加在請求 header 上
     （如 CoinGecko 選用的 `x-cg-demo-api-key`）；`Host` header 由
@@ -169,7 +209,7 @@ def fetch_url(
     current_url = url
 
     for hop in range(max_redirects + 1):
-        hostname, pinned_ip, port = _validate_hop(current_url, allowed_hostname)
+        hostname, pinned_ips, port = _validate_hop(current_url, allowed_hostname)
         parsed = urlparse(current_url)
         path = parsed.path or "/"
         if parsed.query:
@@ -179,15 +219,38 @@ def fetch_url(
         if extra_headers:
             headers.update(extra_headers)
 
-        conn = _PinnedHTTPSConnection(pinned_ip, hostname, port, timeout=timeout)
+        resp = None
+        conn = None
+        last_connect_error: OSError | None = None
+        for pinned_ip in pinned_ips:
+            candidate = _PinnedHTTPSConnection(pinned_ip, hostname, port, timeout=timeout)
+            try:
+                candidate.request("GET", path, headers=headers)
+                resp = candidate.getresponse()
+            except OSError as exc:
+                # 這個已驗證安全的 IP 連不上（如 IPv4-only 環境遇到排序在
+                # 前但不可達的 AAAA）——試清單裡下一個已驗證安全的 IP，不
+                # 是直接判定整個請求失敗。
+                last_connect_error = exc
+                candidate.close()
+                continue
+            conn = candidate
+            break
+
+        if resp is None:
+            raise OSError(
+                f"{hostname}: 已驗證的 {len(pinned_ips)} 個安全 IP 全部連線失敗"
+                f"（最後錯誤：{last_connect_error}）"
+            ) from last_connect_error
+
         try:
-            conn.request("GET", path, headers=headers)
-            resp = conn.getresponse()
             status = resp.status
             resp_headers = resp.headers
             if status in _REDIRECT_CODES:
                 location = resp_headers.get("Location")
-                resp.read()  # 排空這一跳的連線，避免殘留資料影響下一跳
+                # 轉址回應完全不讀 body（見模組頂部第 4 輪 (b)）：不需要、
+                # 也不該無界排空——直接關閉這一跳的連線即可，下一跳本來就
+                # 是全新連線，沒有「殘留資料汙染下一跳」的問題。
                 if not location:
                     raise HTTPError(current_url, status, resp.reason, resp_headers, None)
                 if hop >= max_redirects:
