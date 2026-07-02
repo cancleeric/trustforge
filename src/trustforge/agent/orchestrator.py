@@ -19,6 +19,7 @@ from ..execlog import ExecutionLog
 from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
+from ..trust.conformal import conformal_abstain_threshold
 from ..trust.scoring import ScoredClaim, TrustedBrief
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
@@ -48,22 +49,33 @@ _SENTIMENT_KINDS: set[str] = {"news", "social", "sentiment"}
 # （非快取命中一律 fail-safe 為 "neutral"，不會誤判），不靠這個門檻把關準確度。
 _STANCE_PAIR_MIN_TRUST = 0.35
 
-# W4：校準信心三態 abstain 門檻（取代現行單一武斷 0.5 硬門檻）。
-# 沿用 `trust.scoring._calibrate_confidence()` 產出的 `calibrated_confidence`
-# （硬編分位數映射表，確定性、免 LLM；誠實聲明見該函式 docstring：簡化版，
-# 非嚴謹 conformal coverage 保證）。0.5 錨點本身**不刪**——從「唯一硬門檻」
-# 降為三態分界之一，`_derive_limits` 的 `brief.confidence < 0.5`、
-# `aggregate(support_threshold=0.50)` 等既有呼叫端逐字不變（回歸鎖）。
-#   calibrated < _ABSTAIN_CALIBRATED_THRESHOLD 或 supporting 獨立來源數
-#   （去重，見下方 n_indep）< _ABSTAIN_MIN_SUPPORTING（證據不足、樣本量
-#   過小或單源灌量）→ abstain：不給方向詞。
-#   _ABSTAIN_CALIBRATED_THRESHOLD <= calibrated < 0.5 → 仍出結論，標「低信心」。
-#   calibrated >= 0.5 → 正常（既有行為逐字不變）。
-# W4 codex 對抗審第 5 輪修正：_ABSTAIN_MIN_SUPPORTING 原本比對 supporting
-# 的「claim（句）筆數」，單一文件切兩句就能通過門檻；現改比對「去重後的
-# 獨立來源數」，跟 trust.scoring._evidence_strength 的 indep_factor/
+# W4：三態 abstain 門檻。三態骨架（abstain / low_confidence / normal）與
+# `_ABSTAIN_MIN_SUPPORTING` 本身**不動**（回歸鎖）；abstain 這一側的門檻
+# 來源已從「工程判斷的簡化分位數表」升級成 `trust.conformal` 的 **split
+# conformal τ**（見該模組 docstring 完整的方法論、split、coverage 實測與
+# 誠實聲明——⚠️ 基於 HOYA 歷史 OHLCV 回測校準的 conformal τ，**非未來
+# 保證**：coverage 保證只在校準集與未來資料對此指標可交換的假設下成立，
+# 且回測用的技術訊號是價格代理、不是真正的多來源異質證據，回測結果不能
+# 直接外推成「上線後永遠 ≤ α」）。
+#
+# 比較對象是 `brief.evidence_strength`（`_evidence_strength()` 的**原始值**，
+# 校準前），跟 τ 同一量綱——τ 就是在這個原始量綱上，用歷史回測「錯誤方向
+# 判斷樣本」算出來的順序統計量（見 `trust.conformal` 模組）。
+#   `brief.evidence_strength < _ABSTAIN_CALIBRATED_THRESHOLD`（= τ）或
+#   supporting 獨立來源數（去重，見下方 n_indep）< `_ABSTAIN_MIN_SUPPORTING`
+#   （證據不足、樣本量過小或單源灌量）→ abstain：不給方向詞。
+#   否則若 `brief.calibrated_confidence < 0.5` → 仍出結論，標「低信心」
+#   （這段的 0.5 錨點與 `_calibrate_confidence()` 顯示值維持既有語意不變，
+#   只有「是否 abstain」這一側換了門檻來源，不影響 low_confidence 判斷）。
+#   `calibrated_confidence >= 0.5` → 正常（既有行為逐字不變）。
+# `_CALIBRATION_TABLE`/`_calibrate_confidence()` 仍保留、供上面 low_confidence
+# 判斷與 market_judgment 敘事文字顯示「校準後信心」數字用，不因這次改動而砍。
+#
+# W4 codex 對抗審第 5 輪修正（沿用，未動）：_ABSTAIN_MIN_SUPPORTING 原本比對
+# supporting 的「claim（句）筆數」，單一文件切兩句就能通過門檻；現改比對
+# 「去重後的獨立來源數」，跟 trust.scoring._evidence_strength 的 indep_factor/
 # dominance 去重口徑一致——單源不論產生幾句 claim，仍只算 1 份。
-_ABSTAIN_CALIBRATED_THRESHOLD = 0.35
+_ABSTAIN_CALIBRATED_THRESHOLD = conformal_abstain_threshold()
 _ABSTAIN_MIN_SUPPORTING = 2
 
 SYSTEM = (
@@ -442,10 +454,13 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         _add_evidence(sc, "反方／低信任訊號")
 
     # 2. 我方判斷（pipeline 產生，非外部結論）
-    # W4：校準信心三態 abstain（見上方 `_ABSTAIN_CALIBRATED_THRESHOLD` 常數
-    # 註解）。calibrated 的誠實聲明見 `trust.scoring._calibrate_confidence`
-    # docstring：簡化版分位數校準，非嚴謹 conformal coverage 保證。
+    # W4：三態 abstain（見上方 `_ABSTAIN_CALIBRATED_THRESHOLD` 常數註解——
+    # 門檻來源已升級為 `trust.conformal` 的 split conformal τ，誠實聲明見
+    # 該模組 docstring）。`calibrated` 仍是 `_calibrate_confidence()` 的
+    # 顯示值，繼續用於 low_confidence 判斷與 market_judgment 敘事文字；
+    # `evidence_strength` 才是跟 τ 同量綱、拿來判斷是否 abstain 的原始值。
     calibrated = brief.calibrated_confidence
+    evidence_strength = brief.evidence_strength
     n_supporting = len(brief.supporting)
     # W4 codex 對抗審第 5 輪（claim-vs-source 主題收斂）[HIGH]：abstain 最小
     # 支撐門檻原本用 `n_supporting`（句級 claim 筆數）——`extract_claims()`
@@ -460,7 +475,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # 來源，需要 ≥2 個不同來源才可能脫離 abstain。
     n_indep = len({sc.claim.doc.source for sc in brief.supporting})
     is_abstain = (
-        calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_indep < _ABSTAIN_MIN_SUPPORTING
+        evidence_strength < _ABSTAIN_CALIBRATED_THRESHOLD or n_indep < _ABSTAIN_MIN_SUPPORTING
     )
     is_low_confidence = (not is_abstain) and calibrated < 0.5
     # W4 codex 對抗審第 2 輪 [HIGH-1]：三態字面值下放給 `schema.Report.
