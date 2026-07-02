@@ -105,6 +105,102 @@ def test_status_page_degrades_gracefully_when_cache_backend_broken(monkeypatch, 
     assert "disconnected" in body
 
 
+def test_status_page_shows_connected_when_probe_key_is_cache_miss(monkeypatch, tmp_path):
+    """探測 key 在 backend 上查無資料（`get()` 回 `None`，非例外）就是正常
+    cache-miss，代表 backend 讀寫路徑本身是通的 → 應顯示 connected，不是
+    disconnected。"""
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+
+    class MissBackend:
+        def get(self, key, *, consistent_read=False):
+            return None  # 查無此 key，正常 cache-miss，不是錯誤
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise RuntimeError("不該被呼叫")
+
+    import trustforge.ingestion.cache as cache_mod
+    monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: MissBackend())
+
+    code, body = web._handle_status(client_ip="2.2.2.4")
+    assert code == 200
+    assert "connected" in body
+    assert "disconnected" not in body
+
+
+def test_status_page_shows_disconnected_on_real_client_error(monkeypatch, tmp_path):
+    """`get()` 丟真的 `botocore.exceptions.ClientError`（如連線/權限錯誤）→
+    仍要顯示 disconnected，不能因為修探測 key 就連真的斷線都吞掉不報。"""
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+
+    class ClientErrorBackend:
+        def get(self, key, *, consistent_read=False):
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "not authorized"}},
+                "GetItem",
+            )
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise RuntimeError("不該被呼叫")
+
+    import trustforge.ingestion.cache as cache_mod
+    monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: ClientErrorBackend())
+
+    code, body = web._handle_status(client_ip="2.2.2.5")
+    assert code == 200
+    assert "disconnected" in body
+
+
+def test_status_page_probe_never_passes_empty_string_key_parts(monkeypatch, tmp_path):
+    """回歸鎖（生產 bug）：探測 key 的 `source_id`／`coin` 兩段都必須非空字串。
+
+    `DynamoDBCache` 表結構 PK=`source_id`、SK=`coin`，DynamoDB 對空字串 key
+    屬性一律回 `ValidationException`（`GetItem`），跟「backend 真的連不上」
+    是兩回事，卻曾經被 `/status` 誤判成 disconnected（CEO 生產親測抓到：
+    探測傳了空字串 coin，實際 cache 完全正常）。這裡用一個模擬 DynamoDB
+    真實行為的假 backend（空字串 key 段落 → 丟 `ValidationException`
+    `ClientError`，否則回 `None`）直接驗證：修好之後探測必須顯示
+    connected，不能再誤報 disconnected。"""
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+
+    class DynamoLikeBackend:
+        """比照 `DynamoDBCache._split_key` + 真 DynamoDB 對空字串 key 屬性
+        的驗證行為：`source_id`／`coin` 任一段是空字串就丟
+        `ValidationException`，兩段都非空則視為正常 cache-miss（回 `None`）。
+        """
+
+        def get(self, key, *, consistent_read=False):
+            source_id, _, coin = key.partition(":")
+            if source_id == "" or coin == "":
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "ValidationException",
+                            "Message": (
+                                "The AttributeValue for a key attribute cannot "
+                                "contain an empty string value. Key: coin"
+                            ),
+                        }
+                    },
+                    "GetItem",
+                )
+            return None
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise RuntimeError("不該被呼叫")
+
+    import trustforge.ingestion.cache as cache_mod
+    monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: DynamoLikeBackend())
+
+    code, body = web._handle_status(client_ip="2.2.2.6")
+    assert code == 200
+    assert "connected" in body
+    assert "disconnected" not in body
+
+
 # ---------------------------------------------------------------------------
 # 成本摘要：重用既有 get_ledger().summary()，零新查詢
 # ---------------------------------------------------------------------------
