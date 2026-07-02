@@ -1076,8 +1076,11 @@ def test_error_400_sample_request_keeps_offline_active_badge(monkeypatch):
     assert actives == ["tf-offline"], f"400 sample=1 應恰好 tf-offline active，實際：{actives}"
 
 
-# ── codex MEDIUM（PR #44）：預設查詢文案要用「本次請求 coin」的 HOYA 基準
-# 日期，不能恆用 COIN_POOL[0]（BTC）代表其他幣 ─────────────────────────────
+# ── codex MEDIUM #2（PR #44）：查詢文字改回 date-agnostic，日期只在結果頁
+# provenance 顯示，避免 zero-JS 表單「切幣種但 textarea 不跟著變」時把舊
+# 幣種的日期字樣一起送出 ────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _write_ohlcv_csv(path, filename: str, dates: list[str]) -> None:
@@ -1088,35 +1091,28 @@ def _write_ohlcv_csv(path, filename: str, dates: list[str]) -> None:
     (path / filename).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_hoya_baseline_phrase_uses_given_coin_not_always_btc(monkeypatch, tmp_path):
-    """`_hoya_baseline_phrase(coin)` 要讀該 coin 自己的 CSV 日期，BTC/ETH 各自
-    CSV 最後一筆日期不同步時，兩者組出的文案日期須不同、且各自正確。"""
-    _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-01", "2026-05-31"])
-    _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])
-    monkeypatch.setattr(web, "OFFICIAL_OHLCV_DIR", tmp_path)
+def test_form_default_query_textarea_contains_no_date():
+    """首頁表單 q textarea 的預填值本身完全不含任何具體日期字樣——這是
+    by-construction 修復：不管使用者選哪個幣種、textarea 有沒有跟著更新
+    （zero-JS 頁面本就不會跟著動），送出的文字都不可能誤帶錯幣種的日期。
+    """
+    page_html = web.render_page("")
+    m = re.search(r'<textarea name="q"[^>]*>([^<]*)</textarea>', page_html)
+    assert m, "首頁應有 name=q 的 textarea"
+    default_query = html.unescape(m.group(1))
+    assert not _DATE_RE.search(default_query), (
+        f"表單預填查詢文案不應內嵌任何具體日期，實際：{default_query!r}"
+    )
 
-    btc_phrase = web._hoya_baseline_phrase("BTC")
-    eth_phrase = web._hoya_baseline_phrase("ETH")
 
-    assert "2026-05-31" in btc_phrase
-    assert "2026-06-28" in eth_phrase
-    assert btc_phrase != eth_phrase
-
-
-def test_do_analyze_default_query_uses_requested_coin_date_not_btc(monkeypatch, tmp_path):
-    """`/analyze?coin=ETH` 省略 q → 預設查詢文案須含 ETH 自己的 latest_bar_date，
-    不能落回 COIN_POOL[0]（BTC）的日期（codex MEDIUM 修復驗收）。"""
-    _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-01", "2026-05-31"])
-    _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])
-    monkeypatch.setattr(web, "OFFICIAL_OHLCV_DIR", tmp_path)
+def test_do_analyze_default_query_has_no_date_regardless_of_coin(monkeypatch):
+    """`_do_analyze` 省略 q 時的預設文案，不論 coin 為何都不含日期。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
-
     captured = {}
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
-                 data_mode=None, llm_mode=None):
-        captured["coin"] = coin
+                  data_mode=None, llm_mode=None):
         captured["query"] = query
         return pl.run(coin, query, qtype, offline=True)
 
@@ -1124,92 +1120,114 @@ def test_do_analyze_default_query_uses_requested_coin_date_not_btc(monkeypatch, 
 
     web._do_analyze({"coin": ["ETH"], "type": ["multi_source"]})
 
-    assert captured["coin"] == "ETH"
-    assert "2026-06-28" in captured["query"], (
-        f"ETH 預設查詢文案應含 ETH 自己的日期 2026-06-28，實際：{captured['query']!r}"
-    )
-    assert "2026-05-31" not in captured["query"], (
-        f"ETH 預設查詢文案不應誤用 BTC 的日期，實際：{captured['query']!r}"
+    assert not _DATE_RE.search(captured["query"]), (
+        f"ETH 預設查詢文案不應含任何日期，實際：{captured['query']!r}"
     )
 
 
-def test_do_comparison_default_query_shows_both_coin_dates_when_different(
+def test_do_comparison_default_query_has_no_date(monkeypatch):
+    """`_do_comparison` 省略 q 時的預設文案不含任何日期。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    captured = {}
+
+    def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
+                             data_mode=None, llm_mode=None):
+        captured["query"] = query
+        return pl.run_comparison(coin_a, coin_b, query, offline=True)
+
+    monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
+
+    web._do_comparison({"coin": ["BTC,ETH"], "type": ["comparison"]})
+
+    assert not _DATE_RE.search(captured["query"]), (
+        f"comparison 預設查詢文案不應含任何日期，實際：{captured['query']!r}"
+    )
+
+
+def test_form_submit_with_switched_coin_query_still_shows_correct_coin_provenance(
     monkeypatch, tmp_path
 ):
-    """comparison 省略 q、雙幣 CSV 日期不同步 → 預設文案須分別呈現兩幣各自
-    日期，不能用單一（例如 BTC）日期代表兩幣（codex MEDIUM 修復驗收）。"""
+    """整合測試（codex MEDIUM #2 驗收核心）：模擬 zero-JS 表單真實送出路徑
+    ——先 render 首頁拿到使用者「沒動過」的 textarea 預填值，原封不動當 q
+    送出、coin 改選 ETH（模擬使用者切換幣種下拉但 textarea 未跟著變）。
+
+    驗證：
+      1. 送出的 q 不含任何日期字樣（不會有「textarea 還停在 BTC 日期」的
+         錯配可能，因為文字本身壓根沒有日期可誤帶）。
+      2. 結果頁 provenance（`_render_price_provenance`）顯示的是 ETH 自己
+         的基準日期（真實 evidence，非模擬），且不混入刻意設定為不同步的
+         BTC 日期——證明沒有跨幣污染。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+
+    # 1. 模擬 zero-JS 首頁 render，拿使用者「沒動過」的 textarea 預填值。
+    page_html = web.render_page("")
+    m = re.search(r'<textarea name="q"[^>]*>([^<]*)</textarea>', page_html)
+    assert m, "首頁應有 name=q 的 textarea"
+    default_query = html.unescape(m.group(1))
+    assert not _DATE_RE.search(default_query)
+
+    # 2. BTC/ETH 各自 CSV 日期刻意設不同步，驗證 provenance 沒有跨幣污染。
     _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-01", "2026-05-31"])
     _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])
-    monkeypatch.setattr(web, "OFFICIAL_OHLCV_DIR", tmp_path)
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
 
     captured = {}
 
-    def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
-                             data_mode=None, llm_mode=None):
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                  data_mode=None, llm_mode=None):
         captured["query"] = query
-        return pl.run_comparison(coin_a, coin_b, query, offline=True)
+        return pl.run(coin, query, qtype, offline=True, data_dir=tmp_path)
 
-    monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
+    monkeypatch.setattr(web, "run", fake_run)
 
-    web._do_comparison({"coin": ["BTC,ETH"], "type": ["comparison"]})
-
-    assert "2026-05-31" in captured["query"], (
-        f"comparison 預設文案應含 BTC 日期 2026-05-31，實際：{captured['query']!r}"
-    )
-    assert "2026-06-28" in captured["query"], (
-        f"comparison 預設文案應含 ETH 日期 2026-06-28，實際：{captured['query']!r}"
+    # 使用者切換幣種下拉為 ETH，但 textarea 沒變（zero-JS）——直接把剛剛
+    # 拿到的 default_query 原封不動當 q 送出。
+    report, evidence, log = web._do_analyze(
+        {"coin": ["ETH"], "type": ["multi_source"], "q": [default_query]}
     )
 
+    assert not _DATE_RE.search(captured["query"]), (
+        f"送出的 q 不應含任何日期，實際：{captured['query']!r}"
+    )
+    assert report.coin == "ETH"
 
-def test_do_comparison_default_query_merges_when_both_coins_same_date(
-    monkeypatch, tmp_path
-):
-    """兩幣 CSV 最後一筆日期恰好相同 → 合併成一個共同日期，不需重複列兩次。"""
-    _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-06-28"])
-    _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-28"])
-    monkeypatch.setattr(web, "OFFICIAL_OHLCV_DIR", tmp_path)
+    provenance_html = web._render_price_provenance(evidence)
+    assert "2026-06-28" in provenance_html, (
+        f"ETH 分析結果的 provenance 應顯示 ETH 自己的基準日期 2026-06-28，"
+        f"實際：{provenance_html!r}"
+    )
+    assert "2026-05-31" not in provenance_html, (
+        f"ETH 分析結果不應誤混入 BTC 的日期，實際：{provenance_html!r}"
+    )
+
+
+def test_comparison_submit_provenance_shows_each_coins_own_date(monkeypatch, tmp_path):
+    """comparison 同理：查詢文字無日期，兩幣各自的結果頁 provenance 各自
+    顯示正確、不同步的基準日期，互不污染。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
 
-    captured = {}
+    _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-01", "2026-05-31"])
+    _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])
 
     def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
                              data_mode=None, llm_mode=None):
-        captured["query"] = query
-        return pl.run_comparison(coin_a, coin_b, query, offline=True)
+        return pl.run_comparison(coin_a, coin_b, query, offline=True, data_dir=tmp_path)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 
-    web._do_comparison({"coin": ["BTC,ETH"], "type": ["comparison"]})
-
-    assert captured["query"].count("2026-06-28") == 1, (
-        f"日期相同時應合併成一個日期，不重複列，實際：{captured['query']!r}"
+    report_a, evidence_a, report_b, evidence_b, log = web._do_comparison(
+        {"coin": ["BTC,ETH"], "type": ["comparison"]}
     )
 
+    prov_a = web._render_price_provenance(evidence_a)
+    prov_b = web._render_price_provenance(evidence_b)
 
-def test_hoya_baseline_phrase_pair_missing_one_coin_falls_back_gracefully(
-    monkeypatch, tmp_path
-):
-    """其中一幣查無 CSV（latest_bar_date 回 None）→ 該幣不顯示日期，另一幣
-    仍正確顯示，沿用既有「不猜、不補假日期」優雅處理，不崩不報錯。"""
-    _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-31"])
-    # ETH 故意不寫 CSV，模擬查無資料
-    monkeypatch.setattr(web, "OFFICIAL_OHLCV_DIR", tmp_path)
-
-    phrase = web._hoya_baseline_phrase_pair("BTC", "ETH")
-
-    assert "2026-05-31" in phrase
-    assert "ETH" not in phrase or "None" not in phrase, (
-        f"缺日期的幣不應出現假日期，實際：{phrase!r}"
+    assert "2026-05-31" in prov_a and "2026-06-28" not in prov_a, (
+        f"BTC provenance 應只顯示 BTC 自己的日期，實際：{prov_a!r}"
     )
-
-
-def test_hoya_baseline_phrase_pair_both_missing_falls_back_to_no_date(tmp_path, monkeypatch):
-    """兩幣皆查無 CSV → 整體退回不含日期的「近期市場狀況」，不崩不猜日期。"""
-    monkeypatch.setattr(web, "OFFICIAL_OHLCV_DIR", tmp_path)
-
-    phrase = web._hoya_baseline_phrase_pair("BTC", "ETH")
-
-    assert phrase == "近期市場狀況"
+    assert "2026-06-28" in prov_b and "2026-05-31" not in prov_b, (
+        f"ETH provenance 應只顯示 ETH 自己的日期，實際：{prov_b!r}"
+    )

@@ -40,8 +40,6 @@ from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
-from .ingestion.base import OFFICIAL_OHLCV_DIR
-from .ingestion.prices import latest_bar_date
 
 try:
     from ._version import VERSION
@@ -266,50 +264,25 @@ def _check_status_rate_limit(ip: str) -> None:
         _status_rate_buckets[ip] = ts
 
 
-def _hoya_baseline_phrase(coin: str = COIN_POOL[0]) -> str:
-    """組出「近期市場狀況（基準資料涵蓋至 {日期}）」片語，`{日期}` 動態讀
-    `ingestion/prices.py::latest_bar_date` 算出的 HOYA OHLCV 官方基準 CSV
-    最後一筆日期——取代先前寫死的「近兩週」措辭。
-
-    背景（#24 誠實原則）：HOYA OHLCV 是定期更新的官方基準檔，不是即時串流，
-    「近兩週」這種相對時間字樣會隨資料未同步更新而逐漸過期（實測曾出現落
-    後 32 天仍寫「近兩週」），對判審是誤導。改成絕對日期後，資料再舊也
-    如實呈現，不含糊帶過；即時現價另由 `_render_price_provenance` 並列
-    CoinGecko `price_live` 標示各自時間戳，避免把舊基準誤當即時行情。
-
-    找不到日期（CSV 缺失/測試環境無資料）→ 退回不含日期的「近期市場狀況」，
-    不阻斷分析、不捏造日期。
-    """
-    date = latest_bar_date(coin, OFFICIAL_OHLCV_DIR)
-    return f"近期市場狀況（基準資料涵蓋至 {date}）" if date else "近期市場狀況"
-
-
-def _hoya_baseline_phrase_pair(coin_a: str, coin_b: str) -> str:
-    """雙幣比較版 `_hoya_baseline_phrase`：分別讀 coin_a/coin_b 各自 CSV 的
-    `latest_bar_date`，不拿其中一幣的日期代表兩幣。
-
-    背景（codex MEDIUM，PR #44）：comparison 無 q 時舊版直接呼叫不帶 coin 的
-    `_hoya_baseline_phrase()`，恆用 COIN_POOL[0]（BTC）的日期，兩幣 CSV 更新
-    不同步時，文案宣稱的日期與另一幣的實際證據區間對不上。
-
-    兩幣日期相同 → 合併成一個日期；不同 → 各自列出（`{coin} 至 {date}`），
-    避免用單一日期籠統代表兩份不同步的基準資料。任一幣查無日期
-    （latest_bar_date 回 None）→ 該幣退回不顯示日期，沿用單幣版「不猜、
-    不補假日期」的優雅處理；兩幣皆查無 → 整體退回不含日期的「近期市場
-    狀況」。
-    """
-    date_a = latest_bar_date(coin_a, OFFICIAL_OHLCV_DIR)
-    date_b = latest_bar_date(coin_b, OFFICIAL_OHLCV_DIR)
-    if date_a is None and date_b is None:
-        return "近期市場狀況"
-    if date_a == date_b:
-        return f"近期市場狀況（基準資料涵蓋至 {date_a}）"
-    parts = []
-    if date_a is not None:
-        parts.append(f"{coin_a} 至 {date_a}")
-    if date_b is not None:
-        parts.append(f"{coin_b} 至 {date_b}")
-    return f"近期市場狀況（基準資料涵蓋：{'、'.join(parts)}）"
+# 世界第一重寫 Phase 2：預設查詢文案（表單 textarea / _do_analyze・
+# _do_comparison 的 q-缺 fallback）改回 date-agnostic 常數，不再內嵌任何
+# 具體日期。
+#
+# 背景（codex MEDIUM #2，PR #44）：先前版本用 `_hoya_baseline_phrase(coin)`
+# 把「近兩週」換成「基準資料涵蓋至 {日期}」動態日期，但這串文字是塞進
+# **表單 textarea 的預填值**——zero-JS 頁面裡，使用者切換幣種下拉選單時
+# textarea 內容不會跟著更新；一旦送出表單，textarea 當時顯示的日期字串
+# 就整段變成 `q` 參數送進 `_do_analyze`。而 `_do_analyze`/`_do_comparison`
+# 只在 `q` 完全缺席時才會用當次請求的 coin 重新產生文案——表單正常送出
+# 一定帶著 `q`，所以真實使用路徑永遠拿到 textarea 預填當下的舊日期，
+# 選 ETH 送出卻夾帶 BTC 的日期，日期與實際分析幣種對不上。
+#
+# 正解（by construction 封閉整個 class）：查詢文字本身不做任何具體時間
+# 宣稱，只用「近期」這種模糊措辭；精確、可回溯、各幣正確配對的日期改由
+# 結果頁 `_render_price_provenance()` 專職負責——那裡直接讀當次分析
+# 用到的 `evidence`（`ohlcv-csv`／`coingecko-price`），保證日期一定跟著
+# 實際分析的幣種走，不會有「查詢文字日期」與「證據日期」不同步的可能。
+_DATE_AGNOSTIC_QUERY_SUFFIX = "近期市場狀況"
 
 
 def _opts(values, labels=None):
@@ -1119,7 +1092,7 @@ def _example_analyze_href() -> str:
     params = {
         "coin": COIN_POOL[0],
         "type": QuestionType.MULTI_SOURCE.value,
-        "q": f"分析該幣種{_hoya_baseline_phrase()}，整合多源資料",
+        "q": f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料",
         "sample": "1",
     }
     return html.escape(f"/analyze?{urlencode(params)}")
@@ -1442,10 +1415,14 @@ def _render_price_provenance(evidence: list) -> str:
     時間戳——世界第一重寫 Phase 2：修復「HOYA OHLCV 過期日期破綻」。
 
     背景（#24 誠實原則）：HOYA OHLCV 是定期更新的官方基準檔（非即時串流），
-    只靠 `_hoya_baseline_phrase()` 把預設問題文案的「近兩週」換成絕對日期
-    還不夠——判審看到結果頁本身，也要能一眼分辨「這份分析裡哪個數字是
-    官方歷史基準、哪個是真即時報價」，不能讓兩者混在證據清單裡各自一行
-    毫不起眼，含糊帶過「這是即時資料」的錯覺。
+    只靠把預設問題文案的「近兩週」換成絕對日期還不夠——那段文字是塞進
+    zero-JS 表單的 textarea 預填值，使用者切換幣種送出時常常帶著舊幣種
+    的日期字樣一起送出，反而變成新的誤導來源（見 codex MEDIUM #2，PR
+    #44）。所以查詢文字本身改回不含日期的 date-agnostic 措辭
+    （`_DATE_AGNOSTIC_QUERY_SUFFIX`），精確日期只在**這裡**、結果頁本身
+    負責——判審看到結果頁，要能一眼分辨「這份分析裡哪個數字是官方歷史
+    基準、哪個是真即時報價」，不能讓兩者混在證據清單裡各自一行毫不起眼，
+    含糊帶過「這是即時資料」的錯覺。
 
     做法：從既有 `evidence` 直接找 `source == "ohlcv-csv"`（OHLCV 價格事實，
     `ingestion/prices.py::price_facts`）與 `source == "coingecko-price"`
@@ -1589,7 +1566,7 @@ def render_page(
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
                     {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
-        default_query=html.escape(f"分析該幣種{_hoya_baseline_phrase()}，整合多源資料"),
+        default_query=html.escape(f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料"),
     )
 
 
@@ -2290,14 +2267,10 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     qtype = QuestionType(qs.get("type", ["multi_source"])[0])
     coin = coin_raw.upper()
-    # codex MEDIUM（PR #44）：預設查詢文案的日期要跟著本次請求的 coin 走，
-    # 不能恆用 COIN_POOL[0]（BTC）的日期代表其他幣——`coin` 非法時仍先算
-    # 一個安全的 fallback 文案（用 COIN_POOL[0]），不影響下面的合法性檢查，
-    # 反正非法 coin 會在下面 raise，不會真的把這段文案送進 run()。
-    query = qs.get(
-        "q",
-        [f"分析該幣種{_hoya_baseline_phrase(coin if coin in COIN_POOL else COIN_POOL[0])}"],
-    )[0]
+    # codex MEDIUM #2（PR #44）：預設查詢文案改回 date-agnostic 常數，不再
+    # 依 coin 動態組日期——精確、正確配對的日期改由結果頁
+    # `_render_price_provenance()` 專職負責，見該函式 docstring。
+    query = qs.get("q", [f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}"])[0]
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
@@ -2328,25 +2301,12 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         其餘 Exception:    由呼叫方捕捉後回 502
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
-    query_provided = qs.get("q", [None])[0]
-    if query_provided is not None:
-        query = query_provided
-    else:
-        # codex MEDIUM（PR #44）：comparison 無 q 時，舊版直接用不帶 coin 的
-        # `_hoya_baseline_phrase()`，恆用 COIN_POOL[0]（BTC）日期代表兩幣，
-        # 兩幣 CSV 更新不同步時文案與另一幣實際證據區間對不上。這裡先用
-        # 不含任何幣種文字的中性佔位文案 probe 一次 `_parse_comparison_coins`
-        # 只為了拿到 coin_a/coin_b 建文案；probe 失敗（幣種不合法/無法解析）
-        # 一律吞掉，交由下面「正式」呼叫在原本順序位置（live/real 解析之後）
-        # 才 raise，不改變既有錯誤優先序（TooManyRequests vs ValueError）。
-        try:
-            probe_pair = _parse_comparison_coins(coin_raw, "比較兩幣種")
-        except ValueError:
-            probe_pair = None
-        if probe_pair is not None:
-            query = f"分析兩幣種{_hoya_baseline_phrase_pair(*probe_pair)}"
-        else:
-            query = f"分析該幣種{_hoya_baseline_phrase()}"
+    # codex MEDIUM #2（PR #44）：預設查詢文案改回 date-agnostic 常數，不再
+    # 依 coin 動態組日期（先前版本曾用 probe 出 coin_a/coin_b 各自組日期，
+    # 但根源問題是「查詢文字本身不該宣稱日期」，改文案內容治標不治本）。
+    # 精確、正確配對兩幣各自的日期改由結果頁 `_render_price_provenance()`
+    # 專職負責，見該函式 docstring。
+    query = qs.get("q", [f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}"])[0]
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
