@@ -341,3 +341,122 @@ def test_evidence_flags_populated_for_manipulation_hits():
     price_ev = [ev for ev in evidence if ev.kind == "price"]
     for ev in price_ev:
         assert ev.flags == [], "客觀價格來源不應誤觸操縱 flags"
+
+
+# ---------------------------------------------------------------------------
+# #12 second-round：`now_ts = max(d.ts for d in docs)` 被偽造未來戳污染的
+# 全域防禦回歸測試（codex 對抗審，PR #48）。
+#
+# 舊 bug：`now_ts` 直接取全池文件時間戳的最大值——若某份文件帶偽造/異常的
+# 未來時間戳，它會**變成 `now_ts` 本身**（因為它是最大值），該文件相對
+# `now_ts` 的年齡是 0（不是負值），上一輪的 `_recency_decay` age<0→0.5
+# 防禦完全不會觸發（它不是「>now」而是「=now」）；同時其餘合法文件相對這個
+# 被撐高的參考時間顯得異常老舊，時效分被錯誤壓低。
+#
+# 修法：`now_ts` 改用 `min(max(docs.ts), now_fn())`——參考時間不得超過
+# 「牆鐘」（`now_fn()`，production 是 `time.time()`，測試可注入固定值代表
+# 當下）。這裡用「spy」（call-through wrapper）而非替換掉 `score()`：
+# 讓 `run_agent_pipeline()` 走完整真實的 Step1~Step3（真實 `score()`／
+# `_recency_decay()`），只額外攔截並記下 `score()` 實際收到的 `now` 值與
+# `claims`，供測試斷言用——不是拿假資料手造 recency 數字。
+# ---------------------------------------------------------------------------
+
+def test_pipeline_now_ts_capped_to_wall_clock_against_forged_future_doc(monkeypatch):
+    """偽造未來時間戳的文件不應能把 `now_ts`（進而是全池的時效參考點）
+    撐到未來；該文件自己的 recency 應降為中性 0.5，其餘正常文件的 recency
+    仍以真實牆鐘為準計算，不被錯誤壓成「異常老舊」。"""
+    import trustforge.trust.scoring as scoring_mod
+    from trustforge.trust.scoring import _recency_decay
+
+    wall_clock = 1_000_000.0
+    forged_future_ts = wall_clock + 3600 * 24 * 365  # 偽造：未來整整一年
+    normal_ts = wall_clock - 3600 * 2                # 正常：2 小時前
+
+    docs = [
+        _doc("real1", "onchain", "glassnode", "大額 BTC 流出交易所，減少賣壓。", ts=normal_ts),
+        _doc("forged1", "news", "malformed-feed", "分析師預測 BTC 長線看漲。", ts=forged_future_ts),
+    ]
+
+    captured: dict = {}
+    real_score = scoring_mod.score
+
+    def _spy_score(claims, now, **kwargs):
+        captured["now"] = now
+        captured["claims"] = list(claims)
+        return real_score(claims, now, **kwargs)
+
+    monkeypatch.setattr(scoring_mod, "score", _spy_score)
+
+    client = BedrockClient(offline=True)
+    log = ExecutionLog(now_fn=lambda: wall_clock)
+    run_agent_pipeline(
+        query="分析 BTC 市場",
+        coin="BTC",
+        qtype=QuestionType.MULTI_SOURCE,
+        docs=docs,
+        client=client,
+        log=log,
+        now_fn=lambda: wall_clock,
+    )
+
+    assert "now" in captured, "score() 應被真實呼叫過（spy 只是 call-through，不取代）"
+    # 核心斷言：now_ts 被 cap 在牆鐘，不會被偽造未來戳撐高
+    assert captured["now"] == wall_clock, (
+        f"now_ts 不應超過真實牆鐘 {wall_clock}，實得 {captured['now']}"
+        "（偽造未來戳可能污染了參考時間）"
+    )
+
+    claims_by_doc_id = {c.doc.id: c for c in captured["claims"]}
+    forged_claim = claims_by_doc_id["forged1"]
+    real_claim = claims_by_doc_id["real1"]
+
+    forged_recency = _recency_decay(forged_claim, captured["now"])
+    real_recency = _recency_decay(real_claim, captured["now"])
+
+    assert forged_recency == pytest.approx(0.5), (
+        f"偽造未來戳文件的 recency 應降為中性 0.5，實得 {forged_recency}"
+        "（若仍是 1.0，代表它把自己撐成 now_ts、age=0 逃過 age<0 防禦）"
+    )
+    # 2 小時前的正常文件，牆鐘為真實參考時，recency 應接近滿分，不被
+    # 錯誤壓成「異常老舊」（舊 bug 下它相對被撐高的 now_ts 年齡近一年，
+    # decay 會被壓到接近 0）。
+    assert real_recency > 0.8, (
+        f"正常文件的 recency 不應被偽造未來戳的文件拖累變老舊，實得 {real_recency}"
+    )
+
+
+def test_pipeline_now_ts_unaffected_for_all_past_offline_docs(monkeypatch):
+    """回歸鎖：全部文件時間戳都在牆鐘之前（典型離線 fixture 情境，如 HOYA
+    歷史資料）時，`now_ts` 行為完全不受本次修正影響——仍取 docs 時間戳的
+    最大值（dataset-relative），不會被錯誤 cap 成別的值。"""
+    import trustforge.trust.scoring as scoring_mod
+
+    docs = _make_docs()  # 全部 ts=1000.0（預設值），遠早於任何真實牆鐘時間
+    max_docs_ts = max(d.ts for d in docs)
+
+    captured: dict = {}
+    real_score = scoring_mod.score
+
+    def _spy_score(claims, now, **kwargs):
+        captured["now"] = now
+        return real_score(claims, now, **kwargs)
+
+    monkeypatch.setattr(scoring_mod, "score", _spy_score)
+
+    client = BedrockClient(offline=True)
+    log = ExecutionLog(now_fn=lambda: 1000.0)
+    run_agent_pipeline(
+        query="分析 BTC 市場",
+        coin="BTC",
+        qtype=QuestionType.MULTI_SOURCE,
+        docs=docs,
+        client=client,
+        log=log,
+        now_fn=lambda: 1000.0,
+    )
+
+    assert captured["now"] == max_docs_ts, (
+        f"全部文件皆為過去時間戳時，now_ts 應維持 dataset-relative 的 "
+        f"max(docs.ts)={max_docs_ts}，實得 {captured['now']}（cap 邏輯不應"
+        "影響離線 fixture 既有行為）"
+    )

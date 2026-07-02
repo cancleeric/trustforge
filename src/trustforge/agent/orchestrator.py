@@ -732,7 +732,23 @@ def run_agent_pipeline(
     # Step 2: 判斷形成（純 pipeline，不呼叫 Bedrock）
     # ------------------------------------------------------------------
     log.record("pipeline.step2.start", summary="pipeline 評分 + 聚合（反作弊純演算法）")
-    now_ts = max((d.ts for d in docs), default=now_fn())
+    # codex 對抗審修正（PR #48 second-round HIGH，呼應 #12/#24 不虛增）：
+    # 原本 `now_ts = max(d.ts for d in docs)`——若某份文件帶偽造/異常的
+    # 未來時間戳，它會直接**變成 `now_ts` 本身**（因為它是全池最大值）。
+    # 此時該偽造文件相對 `now_ts` 的年齡是 0（`age_h == 0`，不是負值），
+    # `_recency_decay` 的 age<0→0.5 全域防禦完全不會觸發（它不是「>now」，
+    # 而是「=now」）——偽造文件反而白拿滿分 recency=1.0，還把其餘合法
+    # 文件相對這個被撐高的參考時間顯得更舊，扭曲全池的時效排序。
+    # 修法：參考時間不得超過真實牆鐘（`now_fn()`，production 是
+    # `time.time()`；測試可注入固定值代表「當下」）——
+    #   - 偽造未來戳：`max(docs.ts)` 被 cap 回牆鐘 → 該文件變回「>now_ts」
+    #     → 觸發既有的 age<0→0.5 防禦，真的被抓到。
+    #   - 離線 fixture（如 HOYA 歷史資料，ts 遠早於真實牆鐘）：
+    #     `max(docs.ts) < now_fn()` → 仍取 `max(docs.ts)`（dataset-relative，
+    #     沿用既有離線行為，不受影響）。
+    #   - 線上真資料：`max(docs.ts) ≈ now_fn() ≈ 牆鐘`，不受影響。
+    _wall_clock = now_fn()
+    now_ts = min(max((d.ts for d in docs), default=_wall_clock), _wall_clock)
     # W1.5（#15）：線上帶真 client（cache miss 才即時呼叫 Bedrock）；離線／未設模型帶
     # None（CEO+codex 對抗審修正：None 不代表關掉語意矛盾閘，score() 仍會建立
     # cached_stance_fn(None) 去讀持久化快取 demo/sample_data/stance_cache.json，
