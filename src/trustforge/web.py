@@ -68,63 +68,75 @@ _STATUS_CACHE_TTL_SECONDS = 30.0
 _status_cache_lock = threading.Lock()
 _status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
 
-_PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+_PAGE = """<!doctype html><html lang="zh-Hant" data-theme="{theme}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TrustForge — 加密市場分析 AI Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
+ :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681}}
+ :root[data-theme="light"]{{--tf-bg:#f6f8fa;--tf-card:#ffffff;--tf-border:#d0d7de;--tf-text:#1f2328;--tf-muted:#57606a;--tf-muted2:#6e7781}}
  *{{box-sizing:border-box}}
- body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:#e6edf3;background:#0d1117;-webkit-font-smoothing:antialiased}}
- h1{{margin-bottom:.2rem}} .sub{{color:#8b949e;margin-top:0}}
+ body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
+ h1{{margin-bottom:.2rem}} .sub{{color:var(--tf-muted);margin-top:0}}
  a{{color:#1f6feb}}
- header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid #30363d;border-radius:12px;background:linear-gradient(#12171e,#0f141a);margin-bottom:1rem;flex-wrap:wrap}}
- .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:#e6edf3}}
+ header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid var(--tf-border);border-radius:12px;background:linear-gradient(#12171e,#0f141a);margin-bottom:1rem;flex-wrap:wrap}}
+ .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:var(--tf-text)}}
  .tf-logo b{{color:#1f6feb}}
- .tf-version{{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:#8b949e;border:1px solid #30363d;border-radius:5px;padding:.15rem .5rem}}
- .tf-mode-badge{{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:.7rem;border-radius:5px;padding:.2rem .55rem;border:1px solid #30363d}}
+ .tf-version{{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--tf-muted);border:1px solid var(--tf-border);border-radius:5px;padding:.15rem .5rem}}
+ .tf-mode-badge{{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:.7rem;border-radius:5px;padding:.2rem .55rem;border:1px solid var(--tf-border)}}
  .tf-mode-badge.active.tf-live{{color:#3fb950;background:rgba(63,185,80,.12);border-color:rgba(63,185,80,.4)}}
- .tf-mode-badge.active.tf-offline{{color:#8b949e;background:rgba(139,148,158,.10);border-color:#30363d}}
+ .tf-mode-badge.active.tf-offline{{color:var(--tf-muted);background:rgba(139,148,158,.10);border-color:var(--tf-border)}}
  .tf-mode-badge.active.tf-real{{color:#79c0ff;background:rgba(31,111,235,.12);border-color:rgba(31,111,235,.4)}}
  .tf-mode-badge.tf-static{{color:#484f58;background:transparent;border-color:#21262d;opacity:.7}}
  .tf-mode-dot{{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0;animation:tf-pulse 1.8s infinite}}
  @keyframes tf-pulse{{0%,100%{{opacity:1}}50%{{opacity:.35}}}}
  .tf-hdr-spacer{{flex:1}}
- .tf-costlink{{font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:#8b949e;text-decoration:none;border:1px solid #30363d;border-radius:6px;padding:.3rem .7rem;white-space:nowrap}}
- .tf-costlink:hover{{border-color:#1f6feb;color:#e6edf3}}
+ .tf-costlink{{font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:var(--tf-muted);text-decoration:none;border:1px solid var(--tf-border);border-radius:6px;padding:.3rem .7rem;white-space:nowrap}}
+ .tf-costlink:hover{{border-color:#1f6feb;color:var(--tf-text)}}
  .tf-layout{{display:grid;grid-template-columns:290px minmax(0,1fr);gap:1.2rem;align-items:start}}
- .tf-query-panel{{position:sticky;top:1rem;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
- .tf-query-panel h3{{margin:0;font-size:.72rem;font-weight:700;color:#6e7681;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #30363d;padding-bottom:.6rem}}
+ .tf-query-panel{{position:sticky;top:1rem;background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
+ .tf-query-panel h3{{margin:0;font-family:'IBM Plex Mono',monospace;font-size:.72rem;font-weight:700;color:var(--tf-muted2);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--tf-border);padding-bottom:.6rem}}
+ .tf-logo-mark{{color:#1f6feb;margin-right:.15rem}}
+ .tf-theme-toggle{{font-size:.85rem;color:var(--tf-muted);text-decoration:none;border:1px solid var(--tf-border);border-radius:6px;padding:.3rem .55rem;line-height:1}}
+ .tf-theme-toggle:hover{{border-color:#1f6feb;color:var(--tf-text)}}
+ .tf-run-stats{{border-top:1px solid var(--tf-border);padding-top:.8rem;margin-top:.1rem;display:flex;flex-direction:column;gap:.35rem}}
+ .tf-run-stats h3{{margin-bottom:.4rem}}
+ .tf-stat-row{{display:flex;justify-content:space-between;gap:.6rem;font-size:.78rem}}
+ .tf-stat-k{{color:var(--tf-muted);font-family:'IBM Plex Mono',monospace;font-size:.7rem;letter-spacing:.03em}}
+ .tf-stat-v{{color:var(--tf-text);font-family:'IBM Plex Mono',monospace;font-weight:600}}
  .tf-dashboard{{min-width:0}}
  form{{background:transparent;border:0;padding:0;display:flex;flex-direction:column;gap:.8rem;align-items:stretch}}
- label{{display:block;font-size:.8rem;color:#8b949e;margin-bottom:.2rem}}
- select,input,button{{width:100%;padding:.5rem .7rem;border:1px solid #30363d;border-radius:8px;font-size:1rem;background:#0d1117;color:#e6edf3;font-family:inherit}}
- input[name=q]{{min-width:0}} button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600}}
+ label{{display:block;font-size:.8rem;color:var(--tf-muted);margin-bottom:.2rem}}
+ select,input,textarea,button{{width:100%;padding:.5rem .7rem;border:1px solid var(--tf-border);border-radius:8px;font-size:1rem;background:var(--tf-bg);color:var(--tf-text);font-family:inherit}}
+ textarea[name=q]{{min-width:0;min-height:5.2rem;resize:vertical;line-height:1.4}}
+ button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em}}
+ button .tf-kbd{{opacity:.75;font-family:'IBM Plex Mono',monospace;margin-left:.3rem}}
  .badge{{display:inline-block;background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.4);border-radius:6px;padding:.1rem .5rem;font-size:.75rem;color:#79c0ff}}
- pre{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:#e6edf3}}
- table{{border-collapse:collapse;width:100%;background:#161b22;font-size:.85rem;color:#e6edf3}} td,th{{border:1px solid #30363d;padding:.4rem;text-align:left}}
+ pre{{background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:var(--tf-text)}}
+ table{{border-collapse:collapse;width:100%;background:var(--tf-card);font-size:.85rem;color:var(--tf-text)}} td,th{{border:1px solid var(--tf-border);padding:.4rem;text-align:left}}
  .j{{font-size:1.1rem;font-weight:600}} .conf{{color:#1f6feb}}
- .tf-section{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1rem;margin:.8rem 0}}
- .tf-section h3{{margin-top:0;font-size:1rem;border-bottom:1px solid #30363d;padding-bottom:.4rem;margin-bottom:.7rem;color:#e6edf3}}
- .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:#0d1117;border:1px solid #30363d;border-radius:5px;overflow:hidden;margin-right:4px}}
+ .tf-section{{background:var(--tf-card);border:1px solid var(--tf-border);border-radius:10px;padding:1rem;margin:.8rem 0}}
+ .tf-section h3{{margin-top:0;font-size:1rem;border-bottom:1px solid var(--tf-border);padding-bottom:.4rem;margin-bottom:.7rem;color:var(--tf-text)}}
+ .tf-bar-wrap{{display:inline-block;vertical-align:middle;width:90px;height:10px;background:var(--tf-bg);border:1px solid var(--tf-border);border-radius:5px;overflow:hidden;margin-right:4px}}
  .tf-bar{{height:100%;border-radius:5px}}
  .tf-low{{display:inline-block;background:rgba(248,81,73,.14);border:1px solid rgba(248,81,73,.4);color:#f85149;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
- .tf-info{{display:inline-block;background:rgba(139,148,158,.14);border:1px solid rgba(139,148,158,.4);color:#8b949e;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
- .tf-conf-wrap{{background:#0f141a;border:1px solid #30363d;border-radius:8px;padding:.8rem;margin:.5rem 0}}
+ .tf-info{{display:inline-block;background:rgba(139,148,158,.14);border:1px solid rgba(139,148,158,.4);color:var(--tf-muted);border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
+ .tf-conf-wrap{{background:#0f141a;border:1px solid var(--tf-border);border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
- .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:#e6edf3;background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
- .tf-ev-date{{font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:#6e7681}}
+ .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:var(--tf-text);background:var(--tf-bg);border:1px solid var(--tf-border);border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
+ .tf-ev-date{{font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--tf-muted2)}}
  .tf-ev-summary{{cursor:pointer}}
  .tf-ev-body{{padding-top:.2rem}}
  .tf-dash-hdr{{display:flex;align-items:center;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap}}
- .tf-coin-badge{{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:1rem;color:#e6edf3;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:.25rem .7rem}}
- .tf-dash-sep{{color:#30363d}}
- .tf-dash-q{{color:#8b949e;font-size:.9rem}}
+ .tf-coin-badge{{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:1rem;color:var(--tf-text);background:var(--tf-card);border:1px solid var(--tf-border);border-radius:8px;padding:.25rem .7rem}}
+ .tf-dash-sep{{color:var(--tf-border)}}
+ .tf-dash-q{{color:var(--tf-muted);font-size:.9rem}}
  .tf-hero-row{{display:grid;grid-template-columns:auto minmax(0,1fr);gap:1.2rem;align-items:center}}
- .tf-step{{border-left:4px solid #30363d;padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
+ .tf-step{{border-left:4px solid var(--tf-border);padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
  .tf-step li{{margin:.25rem 0}}
- .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:#6e7681;font-weight:400;margin-left:.4rem}}
+ .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--tf-muted2);font-weight:400;margin-left:.4rem}}
  .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle}}
  .tf-div-grid{{display:grid;grid-template-columns:1fr 34px 1fr;gap:0;align-items:stretch;margin-top:.6rem}}
  .tf-div-side{{border-radius:9px;padding:.7rem .8rem}}
@@ -144,12 +156,13 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
  }}
 </style></head><body>
 <header class="tf-hdr">
- <span class="tf-logo">Trust<b>Forge</b></span>
+ <span class="tf-logo"><span class="tf-logo-mark">&#9670;</span>Trust<b>Forge</b></span>
  <span class="tf-version">{version}</span>
  {mode}
  <div class="tf-hdr-spacer"></div>
+ <a class="tf-theme-toggle" href="{theme_toggle_href}" title="切換淺色/深色主題">&#9733;</a>
  <a class="tf-costlink" href="/status">系統狀態</a>
- <a class="tf-costlink" href="/costs">成本帳本</a>
+ <a class="tf-costlink" href="/costs">cost ledger {cost_display}</a>
 </header>
 <div class="tf-layout">
  <aside class="tf-query-panel">
@@ -158,9 +171,10 @@ _PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
   <form action="/analyze" method="get">
    <div><label>幣種</label><select name="coin">{coins}</select></div>
    <div><label>題型</label><select name="type">{types}</select></div>
-   <div><label>問題</label><input name="q" value="分析該幣種近兩週市場狀況，整合多源資料"></div>
-   <button type="submit">分析</button>
+   <div><label>問題</label><textarea name="q" rows="3">分析該幣種近兩週市場狀況，整合多源資料</textarea></div>
+   <button type="submit">Run analysis<span class="tf-kbd">&#8629;</span></button>
   </form>
+  {run_stats}
  </aside>
  <main class="tf-dashboard">
 {body}
@@ -253,7 +267,7 @@ def _trust_bar(trust: float) -> str:
     return (
         f'<span style="display:inline-flex;align-items:center;gap:.35rem;vertical-align:middle">'
         f'<svg width="34" height="34" viewBox="0 0 34 34" style="flex-shrink:0">'
-        f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="#30363d" stroke-width="4"></circle>'
+        f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="var(--tf-border)" stroke-width="4"></circle>'
         f'<circle cx="17" cy="17" r="{r}" fill="none" stroke="{color}" stroke-width="4" '
         f'stroke-linecap="round" stroke-dasharray="{arc_val:.2f} {circumference:.2f}" '
         f'transform="rotate(-90 17 17)"></circle>'
@@ -281,7 +295,7 @@ def _conf_gauge(confidence: float, label: str) -> str:
         f'<div class="tf-conf-wrap" style="display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap">'
         f'<div style="position:relative;width:168px;height:168px;flex-shrink:0">'
         f'<svg viewBox="0 0 168 168" width="168" height="168">'
-        f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="#30363d" stroke-width="13" '
+        f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="var(--tf-border)" stroke-width="13" '
         f'stroke-linecap="round" stroke-dasharray="{arc_span:.1f} {circumference:.1f}" '
         f'transform="rotate(135 84 84)"></circle>'
         f'<circle cx="84" cy="84" r="{r}" fill="none" stroke="{color}" stroke-width="13" '
@@ -292,12 +306,12 @@ def _conf_gauge(confidence: float, label: str) -> str:
         f'align-items:center;justify-content:center">'
         f'<div style="font-family:\'IBM Plex Mono\',monospace;font-weight:700;font-size:2.6rem;'
         f'color:{color}">{score100}</div>'
-        f'<div style="font-size:.7rem;color:#6e7681">/ 100</div>'
+        f'<div style="font-size:.7rem;color:var(--tf-muted2)">/ 100</div>'
         f'</div>'
         f'</div>'
         f'<div>'
         f'<div class="tf-conf-big" style="color:{color}">{html.escape(label)}</div>'
-        f'<div style="font-size:.85rem;color:#8b949e">整體信心指數 {confidence:.2f}</div>'
+        f'<div style="font-size:.85rem;color:var(--tf-muted)">整體信心指數 {confidence:.2f}</div>'
         f'</div>'
         f'</div>'
     )
@@ -331,7 +345,7 @@ def _render_cost_card(log) -> str:
         f'<div class="tf-section">'
         f'<h3>本次分析成本</h3>'
         f'<p class="j">{e(cost_display)}</p>'
-        f'<p style="color:#8b949e;font-size:.85rem">'
+        f'<p style="color:var(--tf-muted);font-size:.85rem">'
         f'共 {len(cost_events)} 次 LLM 呼叫；輸入 {tokens_in} tokens／輸出 {tokens_out} tokens</p>'
         f'<table><tr><th>Model</th><th>輸入 tokens</th><th>輸出 tokens</th><th>估算成本</th></tr>'
         f'{rows}</table>'
@@ -573,6 +587,32 @@ def _handle_status(client_ip: str = "") -> tuple[int, str]:
     return 200, render_page(_render_status_page_cached())
 
 
+def _get_ledger_summary() -> dict:
+    """讀取跨 run 持久化成本帳本彙總（`get_ledger().summary()`），backend 讀取失敗
+    （如 `COST_LEDGER_BACKEND=dynamodb` 但未實作）時 fallback 讀 `JsonlLedger`，
+    與 `ledger.append_run()` 的 fallback 邏輯一致，確保呼叫端永遠拿得到 dict。
+
+    供 `/costs` 頁面與 header「cost ledger $X」連結共用同一份真實累計數字。
+    """
+    try:
+        return get_ledger().summary()
+    except Exception:
+        return JsonlLedger().summary()
+
+
+def _header_cost_display() -> str:
+    """Header「cost ledger $X」連結顯示用字串：累計真實花費（`$0.0000` 起跳）。
+
+    讀取失敗時（理論上不會，`_get_ledger_summary` 已有 fallback）優雅退回 `$0.0000`，
+    不讓整頁因帳本 I/O 例外而掛掉。
+    """
+    try:
+        total = float(_get_ledger_summary().get("total_cost_usd", 0.0) or 0.0)
+    except Exception:
+        total = 0.0
+    return f"${total:.4f}"
+
+
 def _render_costs_page() -> str:
     """`/costs`：跨 run 持久化成本帳本彙總頁 —— 累計總花費、依 model 分組、per-run 明細。
 
@@ -581,10 +621,7 @@ def _render_costs_page() -> str:
     與 `ledger.append_run()` 的 fallback 邏輯一致，確保頁面永遠可顯示。
     """
     e = html.escape
-    try:
-        summary = get_ledger().summary()
-    except Exception:
-        summary = JsonlLedger().summary()
+    summary = _get_ledger_summary()
 
     total = float(summary.get("total_cost_usd", 0.0) or 0.0)
     by_model = summary.get("by_model", {}) or {}
@@ -617,7 +654,7 @@ def _render_costs_page() -> str:
     run_rows = []
     for r in recent:
         calls = r.get("calls", []) or []
-        offline_badge = " <small style='color:#6e7681'>(離線)</small>" if r.get("offline") else ""
+        offline_badge = " <small style='color:var(--tf-muted2)'>(離線)</small>" if r.get("offline") else ""
         run_rows.append(
             f"<tr><td>{e(str(r.get('ts', '')))}</td>"
             f"<td>{e(str(r.get('coin', '')))}</td>"
@@ -632,7 +669,7 @@ def _render_costs_page() -> str:
   <h2 style="margin:0 0 .3rem">累計成本帳本</h2>
   <p class="j">${total:.4f}</p>
   {alert_html}
-  <p style="color:#8b949e;font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
+  <p style="color:var(--tf-muted);font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
 </div>
 
 <div class="tf-section">
@@ -707,11 +744,11 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         )
 
     # manip>0 一律紅色 #cb2431（回歸測試鎖定的顏色碼，勿改）；manip==0 用中性灰
-    manip_color  = "#cb2431" if manip > 0 else "#8b949e"
+    manip_color  = "#cb2431" if manip > 0 else "var(--tf-muted)"
     manip_weight = "font-weight:600;" if manip > 0 else ""
 
     corr_text  = "✓ 有獨立來源交叉佐證" if corr > 0 else "— 無交叉佐證"
-    corr_color = "#3fb950"              if corr > 0 else "#8b949e"
+    corr_color = "#3fb950"              if corr > 0 else "var(--tf-muted)"
 
     # ---- WHY caption：純由既有 float 值推導的白話說明，不新增資料欄位 ----
     why_rep = "高信譽來源佐證" if rep >= 0.7 else ("中等信譽來源" if rep >= 0.4 else "低信譽來源，需查證")
@@ -730,8 +767,8 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
 
     manip_deficit = manip * 0.4
     stacked_bar = (
-        f'<div style="display:flex;height:14px;width:100%;background:#0d1117;'
-        f'border-radius:4px;overflow:hidden;border:1px solid #30363d">'
+        f'<div style="display:flex;height:14px;width:100%;background:var(--tf-bg);'
+        f'border-radius:4px;overflow:hidden;border:1px solid var(--tf-border)">'
         f'<span style="height:100%;width:{_seg_pct(rep_c):.1f}%;background:#3fb950" '
         f'title="信譽 {rep:.2f}×0.50"></span>'
         f'<span style="height:100%;width:{_seg_pct(corr_c):.1f}%;background:#1f6feb" '
@@ -740,10 +777,10 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         f'title="時效 {rec:.2f}×0.15"></span>'
         f'</div>'
         f'<div style="display:flex;justify-content:space-between;font-size:.65rem;'
-        f'color:#6e7681;margin-top:.15rem">'
+        f'color:var(--tf-muted2);margin-top:.15rem">'
         f'<span>0</span><span>正向合計 {(rep_c + corr_c + rec_c):.2f}</span>'
         f'<span>{pos_weight:.2f}</span></div>'
-        f'<div style="display:flex;height:8px;width:100%;background:#0d1117;'
+        f'<div style="display:flex;height:8px;width:100%;background:var(--tf-bg);'
         f'border-radius:4px;overflow:hidden;border:1px solid rgba(203,36,49,.4);margin-top:.35rem" '
         f'title="操縱扣分 −{manip_deficit:.2f}">'
         f'<span style="margin-left:auto;height:100%;'
@@ -755,43 +792,43 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
 
     return (
         f'<div style="margin:.35rem 0;padding:.5rem .6rem;background:#0f141a;'
-        f'border-radius:6px;border:1px solid #30363d;font-size:.78rem">'
-        f'<div style="color:#6e7681;font-size:.7rem;font-weight:600;margin-bottom:.3rem">'
+        f'border-radius:6px;border:1px solid var(--tf-border);font-size:.78rem">'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;font-weight:600;margin-bottom:.3rem">'
         f'信任分析（信譽×0.50 + 佐證×0.25 + 時效×0.15 − 操縱×0.40）</div>'
         f'{stacked_bar}'
         f'<div style="display:flex;flex-direction:column;gap:.3rem;margin-top:.5rem">'
         # 信譽
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">信譽</span> '
+        f'<span style="color:var(--tf-muted)">信譽</span> '
         f'{mini_bar(rep, "#3fb950")} '
-        f'<span style="color:#e6edf3">{rep:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.50</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div></div>'
+        f'<span style="color:var(--tf-text)">{rep:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)"> ×0.50</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div></div>'
         # 佐證
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">佐證</span> '
+        f'<span style="color:var(--tf-muted)">佐證</span> '
         f'{mini_bar(corr, "#1f6feb")} '
-        f'<span style="color:#e6edf3">{corr:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.25</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_corr)}</div></div>'
+        f'<span style="color:var(--tf-text)">{corr:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)"> ×0.25</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_corr)}</div></div>'
         # 時效
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">時效</span> '
+        f'<span style="color:var(--tf-muted)">時效</span> '
         f'{mini_bar(rec, "#8957e5")} '
-        f'<span style="color:#e6edf3">{rec:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.15</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_rec)}</div></div>'
+        f'<span style="color:var(--tf-text)">{rec:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)"> ×0.15</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rec)}</div></div>'
         # 操縱（紅色扣分方向，非正向第四塊）
         f'<div><span style="white-space:nowrap">'
-        f'<span style="color:#8b949e">操縱</span> '
+        f'<span style="color:var(--tf-muted)">操縱</span> '
         f'{mini_bar(manip, "#cb2431")} '
         f'<span style="color:{manip_color};{manip_weight}">{manip:.2f}</span>'
-        f'<span style="color:#6e7681"> ×0.40</span></span>'
-        f'<div style="color:#6e7681;font-size:.7rem;padding-left:.2rem">WHY {e(why_manip)}</div></div>'
+        f'<span style="color:var(--tf-muted2)"> ×0.40</span></span>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_manip)}</div></div>'
         f'</div>'
         f'<div style="margin-top:.4rem">'
-        f'<span style="color:#6e7681">→</span> '
-        f'<span style="font-weight:600;color:#e6edf3">信任 {trust:.2f}</span>'
+        f'<span style="color:var(--tf-muted2)">→</span> '
+        f'<span style="font-weight:600;color:var(--tf-text)">信任 {trust:.2f}</span>'
         f'</div>'
         f'<div style="color:{corr_color};font-size:.75rem;margin-top:.15rem">{e(corr_text)}</div>'
         f'</div>'
@@ -829,7 +866,7 @@ def _independence_tier(kind: str) -> tuple[str, str]:
         return "高·第三方", "#3fb950"
     if kind in _COMMUNITY_KINDS:
         return "中·社群", "#d9832a"
-    return "一般·輔助", "#8b949e"
+    return "一般·輔助", "var(--tf-muted)"
 
 
 def _render_evidence_list(
@@ -903,7 +940,7 @@ def _render_evidence_list(
             f"</summary>"
             f'<div class="tf-ev-body">'
             f"<p style='margin:.3rem 0;font-size:.85rem;color:#c9d1d9'>{e(ev.content_reference)}</p>"
-            f"<p style='margin:.3rem 0;font-size:.82rem;color:#8b949e'>URL: {url_html}</p>"
+            f"<p style='margin:.3rem 0;font-size:.82rem;color:var(--tf-muted)'>URL: {url_html}</p>"
             f"{_render_trust_breakdown(ev.trust_components, ev.trust)}"
             f"</div>"
             f"</details>"
@@ -914,7 +951,13 @@ def _render_evidence_list(
     return "".join(rows)
 
 
-def render_page(body: str = "", active_mode: str = "offline") -> str:
+def render_page(
+    body: str = "",
+    active_mode: str = "offline",
+    theme: str = "dark",
+    theme_toggle_href: str = "/?theme=light",
+    run_stats_html: str = "",
+) -> str:
     """組完整 HTML（三檔模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。
 
     三檔徽章（dark 樣式，見 .tf-mode-badge）恆同時列出：離線示範／真資料·$0
@@ -929,7 +972,22 @@ def render_page(body: str = "", active_mode: str = "offline") -> str:
 
     `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`
     （首頁 `/`、`/costs` 等未經過分析流程的頁面，視為離線示範為預設 active 檔）。
+
+    `theme`：`"dark"`（預設）| `"light"`，只切換 CSS 變數（見 `_PAGE` 內
+    `:root`/`:root[data-theme="light"]`），zero-JS：不引入任何 inline script，
+    純靠 `<html data-theme="...">` + CSS custom properties 切換色票。非法值一律
+    視同 `"dark"`（呼叫端 `Handler.do_GET` 已做白名單過濾，這裡再防禦一次）。
+
+    `theme_toggle_href`：header「★」主題切換連結的完整 href（由呼叫端用
+    `_theme_toggle_href()` 算出，保留當前頁面其餘參數、只切換 theme），
+    預設 `"/?theme=light"` 供未帶請求脈絡的呼叫端（如既有測試）使用。
+
+    `run_stats_html`：左側 Query Console 面板的「RUN STATS」區塊（見
+    `_render_run_stats()`），只有跑過一次真實分析（`/analyze` 成功）才有資料，
+    預設空字串（首頁／`/costs`／尚未分析的錯誤頁不顯示）。
     """
+    if theme not in ("dark", "light"):
+        theme = "dark"
     live_capable = HAS_BEDROCK
     live_is_active = active_mode == "live" and live_capable
 
@@ -955,6 +1013,10 @@ def render_page(body: str = "", active_mode: str = "offline") -> str:
     return _PAGE.format(
         mode=mode, body=body,
         version=html.escape(VERSION),
+        theme=html.escape(theme),
+        theme_toggle_href=html.escape(theme_toggle_href),
+        cost_display=html.escape(_header_cost_display()),
+        run_stats=run_stats_html,
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
                     {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
@@ -1022,7 +1084,7 @@ def _render_cross_signal(signal: dict) -> str:
     summary_esc = e(signal.get("summary", ""))
     ids = signal.get("supporting_claim_ids", [])
     ids_html = (
-        f'<small style="color:#8b949e">佐證 claim_ids：{e(", ".join(ids))}</small>'
+        f'<small style="color:var(--tf-muted)">佐證 claim_ids：{e(", ".join(ids))}</small>'
         if ids else ""
     )
 
@@ -1034,11 +1096,11 @@ def _render_cross_signal(signal: dict) -> str:
 
             def _side_body(items: list[dict]) -> str:
                 if not items:
-                    return '<p style="margin:0;font-size:.8rem;color:#6e7681">&#8212;</p>'
+                    return '<p style="margin:0;font-size:.8rem;color:var(--tf-muted2)">&#8212;</p>'
                 return "".join(
-                    f'<p style="margin:.3rem 0 .1rem;font-size:.85rem;color:#e6edf3">'
+                    f'<p style="margin:.3rem 0 .1rem;font-size:.85rem;color:var(--tf-text)">'
                     f'<b>{e(it.get("label", ""))}</b></p>'
-                    f'<p style="margin:0 0 .3rem;font-size:.8rem;color:#8b949e">'
+                    f'<p style="margin:0 0 .3rem;font-size:.8rem;color:var(--tf-muted)">'
                     f'{e(it.get("detail", ""))}</p>'
                     for it in items
                 )
@@ -1102,6 +1164,69 @@ def _aggregate_trust_components(evidence: list) -> dict:
     if n == 0:
         return {}
     return {k: sums[k] / n for k in keys}
+
+
+def _render_run_stats(evidence: list, log=None) -> str:
+    """左側 Query Console 面板的「RUN STATS」區塊——只用本次分析已產生的真實
+    物件（`evidence`/`log.events`）算出，沒有任何示範/假造欄位（#24）：
+
+    - Sources scanned／Passed filter／Flagged dropped：三者都是對同一份
+      `evidence`（`_render_report`/`_render_comparison` 已收到的真實證據清單，
+      即「證據清單」表格會逐列渲染的同一批物件）的計數，口徑彼此一致：
+        * scanned    = len(evidence)（本輪納入報告的證據總筆數）
+        * flagged    = ev.flags 非空的筆數（`trust.scoring._manipulation_flags`
+                       命中，即證據清單裡渲染 &#128681; 操縱紅旗徽章的同一批）
+        * passed     = 其餘「未被紅旗、且 trust>=0.3」的筆數（沿用
+                       `_render_evidence_list` 既有的 tf-low 0.3 門檻，不新造
+                       閾值）
+      注意：這是「證據清單」這個階段的口徑（claim 抽取＋信任評分之後），不等於
+      pipeline 最前端 `ingestion.collect()` 抓到的原始文件數（該數字目前只存在
+      於 log 的自由文字 summary，沒有結構化欄位可安全取用，寧可不顯示也不用
+      正則從文字反推假裝結構化——見 CLAUDE 規範 #24）。
+    - Latency：`log.events` 最後一筆的 `elapsed_sec`（`ExecutionLog` 本就用來
+      追蹤官方 15 分鐘執行預算的即時累積耗時，真實量測值，非估算）。
+    - Model：`log.events` 內最後一筆 `tool=="bedrock.complete"` 的
+      `params["model"]`（`agent.orchestrator` 已記錄的真實模型 id，或離線/
+      未設模型時的 `"offline/regex-fallback"` 字面值）。
+
+    任何一項算不出來就整列省略（不是顯示「—」或 0 這種看起來像真值的假值）；
+    整體都沒有資料時回傳空字串，讓呼叫端不渲染這個區塊。
+    """
+    e = html.escape
+    rows: list[tuple[str, str]] = []
+
+    if evidence:
+        n_flagged = sum(1 for ev in evidence if getattr(ev, "flags", None))
+        n_passed = sum(
+            1 for ev in evidence
+            if not getattr(ev, "flags", None) and float(getattr(ev, "trust", 0.0)) >= 0.3
+        )
+        rows.append(("Sources scanned", str(len(evidence))))
+        rows.append(("Passed filter", str(n_passed)))
+        rows.append(("Flagged dropped", str(n_flagged)))
+
+    if log is not None and getattr(log, "events", None):
+        last_elapsed = log.events[-1].get("elapsed_sec")
+        if isinstance(last_elapsed, (int, float)):
+            rows.append(("Latency", f"{last_elapsed:.2f}s"))
+        model = None
+        for ev in reversed(log.events):
+            if ev.get("tool") == "bedrock.complete":
+                model = (ev.get("params") or {}).get("model")
+                if model:
+                    break
+        if model:
+            rows.append(("Model", str(model)))
+
+    if not rows:
+        return ""
+
+    row_html = "".join(
+        f'<div class="tf-stat-row"><span class="tf-stat-k">{e(k)}</span>'
+        f'<span class="tf-stat-v">{e(v)}</span></div>'
+        for k, v in rows
+    )
+    return f'<div class="tf-run-stats"><h3>Run Stats</h3>{row_html}</div>'
 
 
 def _render_report(
@@ -1350,7 +1475,7 @@ def _render_comparison(
 
 <div class="tf-section" style="background:rgba(31,111,235,.08);border-color:#1f6feb">
   <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
-  <p style="color:#8b949e;margin:.2rem 0">{e(query)}</p>
+  <p style="color:var(--tf-muted);margin:.2rem 0">{e(query)}</p>
 </div>
 
 <div class="tf-section">
@@ -1521,6 +1646,28 @@ def _active_mode(qs: dict) -> str:
     return "offline"
 
 
+def _theme_toggle_href(path: str, qs: dict) -> str:
+    """算出 header「★」主題切換連結的 href：保留當前請求的其餘參數（coin/type/
+    q/real/live/token 等），只把 `theme` 切成另一個值。
+
+    zero-JS 設計（見 CLAUDE 規範）：主題切換完全靠一次真正的 GET 導覽 +
+    `<html data-theme>` CSS 變數切換，不引入任何 inline script。
+
+    只有顯式 `theme=light` 時才視為淺色；其餘一律視為深色（預設）。切回深色時
+    刻意不帶 `theme=dark` 參數（維持乾淨網址，向後相容既有 `?real=1`/`?live=1`
+    連結格式，跟現有 mode 參數「只在非預設時出現」的慣例一致）。
+    """
+    params = {k: v[0] for k, v in qs.items() if k != "theme" and v}
+    current = qs.get("theme", ["dark"])[0]
+    if current == "light":
+        params.pop("theme", None)  # 切回預設深色，不帶參數
+    else:
+        params["theme"] = "light"
+    if not params:
+        return path
+    return f"{path}?{urlencode(params)}"
+
+
 def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     """單幣分析入口，永遠回傳 (report, evidence, log) 三元組。
 
@@ -1611,7 +1758,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
-        page = render_page
+
+        # 主題（zero-JS：`?theme=light` server param，見 `_theme_toggle_href`）——
+        # 白名單過濾，非 "light" 一律視為預設深色，提前算好讓所有分支（含
+        # 429/400/502 錯誤頁）的 header ★ 切換連結都指向「本次請求其餘參數不變、
+        # 只切換 theme」的正確 URL。
+        theme = "light" if qs.get("theme", ["dark"])[0] == "light" else "dark"
+        theme_toggle_href = _theme_toggle_href(u.path, qs)
+
+        def page(body="", active_mode="offline", run_stats_html=""):
+            return render_page(
+                body, active_mode=active_mode, theme=theme,
+                theme_toggle_href=theme_toggle_href, run_stats_html=run_stats_html,
+            )
+
         if u.path == "/":
             return self._send(200, page(""))
         if u.path == "/costs":
@@ -1662,7 +1822,8 @@ class Handler(BaseHTTPRequestHandler):
                         page(_render_comparison(
                             report_a, evidence_a, report_b, evidence_b, query, log,
                             mode_extra=mode_extra,
-                        ), active_mode=active_mode),
+                        ), active_mode=active_mode,
+                            run_stats_html=_render_run_stats(evidence_a + evidence_b, log)),
                     )
                 else:
                     report, evidence, log = _do_analyze(qs, client_ip=client_ip)
@@ -1683,6 +1844,7 @@ class Handler(BaseHTTPRequestHandler):
                         page(
                             _render_report(report, evidence, log, mode_extra=mode_extra),
                             active_mode=active_mode,
+                            run_stats_html=_render_run_stats(evidence, log),
                         ),
                     )
             except TooManyRequests as exc:

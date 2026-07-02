@@ -238,12 +238,16 @@ def test_page_has_two_column_layout_grid():
 
 
 def test_query_panel_contains_form_fields():
-    """Query Console 面板應含幣種/題型/問題/分析按鈕（表單移進左側常駐面板）。"""
+    """Query Console 面板應含幣種/題型/問題/分析按鈕（表單移進左側常駐面板）。
+
+    第三輪 claude.ai/design world-class handoff（task #18）：問題欄位改用
+    `<textarea>`（設計稿 Prompt textarea），純視覺升級，非資料/邏輯變動。
+    """
     htmlout = web.render_page("")
     assert "Query Console" in htmlout
     assert '<select name="coin">' in htmlout
     assert '<select name="type">' in htmlout
-    assert '<input name="q"' in htmlout
+    assert '<textarea name="q"' in htmlout
     assert "<form" in htmlout
 
 
