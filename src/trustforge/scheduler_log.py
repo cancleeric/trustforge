@@ -383,23 +383,44 @@ def get_last_scheduler_run() -> dict[str, Any] | None:
     """讀「最近一次排程執行」記錄，供 `/status` 顯示。
 
     ⚠️ 唯讀，任何 backend 失敗（DynamoDB 缺憑證/表未建/網路問題）一律降級：
-    先試主 backend，失敗再試本地 `JsonlSchedulerRunLog`（比照 `cache.py::
-    cache_get()` 的 fallback 慣例），兩者都失敗回 `None`——絕不拋例外，
-    `/status` 頁面必須永遠能顯示，讀不到就顯示「尚無紀錄」。
+    絕不拋例外，`/status` 頁面必須永遠能顯示，讀不到就顯示「尚無紀錄」。
+
+    ⚠️ split-brain：`append_scheduler_run()` 在 primary（如 DynamoDB）寫入
+    latest 指標**失敗**時，會 fallback 把整筆記錄寫進本地
+    `JsonlSchedulerRunLog`——這代表「真正最新的一筆」有可能只存在 fallback
+    裡，而 primary 讀取本身**沒有拋例外**、只是回傳它自己那份還沒更新到
+    的舊指標。如果只在 `primary.latest()` 拋例外時才去讀 fallback，就會被
+    這個「primary 讀得到但內容是舊的」情境騙過，隱藏 fallback 裡更新的一
+    筆。因此**兩邊都讀**（primary + 本地 JSONL fallback，皆為 O(1) 單筆
+    `latest()`，不掃全表），依 `ts` 字串比較取較新者；任一邊讀失敗就退化
+    用另一邊；兩者都沒有才回 `None`。
+
+    當 primary 本身就是 `JsonlSchedulerRunLog`（預設 `SCHEDULER_RUN_LOG_BACKEND
+    =jsonl`）時，primary 與 fallback 是同一份資料，不必重讀第二次。
     """
     primary = get_scheduler_run_log()
+
+    primary_record: dict[str, Any] | None = None
     try:
-        return primary.latest()
+        primary_record = primary.latest()
     except Exception as exc:
         print(f"[scheduler_log] WARNING: 讀取失敗（backend={type(primary).__name__}）："
               f"{exc}", file=sys.stderr)
 
     if isinstance(primary, JsonlSchedulerRunLog):
-        return None  # 同一顆 JsonlSchedulerRunLog 剛失敗，換個新實例打同路徑必再失敗
+        return primary_record  # primary 已是本地 JSONL，跟 fallback 同一份資料
 
+    fallback_record: dict[str, Any] | None = None
     try:
-        return JsonlSchedulerRunLog().latest()
+        fallback_record = JsonlSchedulerRunLog().latest()
     except Exception as exc:
         print(f"[scheduler_log] WARNING: fallback JsonlSchedulerRunLog 讀取仍失敗："
               f"{exc}", file=sys.stderr)
-        return None
+
+    if primary_record is None:
+        return fallback_record
+    if fallback_record is None:
+        return primary_record
+    if str(fallback_record.get("ts", "")) > str(primary_record.get("ts", "")):
+        return fallback_record
+    return primary_record
