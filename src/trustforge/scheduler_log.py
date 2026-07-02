@@ -70,6 +70,25 @@ class SchedulerRunLog(ABC):
             return None
         return max(records, key=lambda r: str(r.get("ts", "")))
 
+    def recent(self, n: int = 30) -> list[dict[str, Any]]:
+        """依 `ts` 字串排序取最近 `n` 筆（新到舊）；無紀錄回空清單。
+
+        ⚠️ 這是**未優化的參考實作**（`read_all()` 掃全表再排序取前 n 筆）——
+        同 `latest()` 慣例，只給沒有專用「recent window」結構的假想 backend
+        當退路用。`JsonlSchedulerRunLog` 必須 override 成 O(1)-相容（讀一份
+        獨立維護、bounded 大小的 recent window 檔，不掃全歷史），供
+        `/status`「連接器用量」表彙總近期 `source_calls` 用（見階段2）。"""
+        records = sorted(self.read_all(), key=lambda r: str(r.get("ts", "")), reverse=True)
+        return records[:n]
+
+
+# `JsonlSchedulerRunLog`/`DynamoDBSchedulerRunLog` 的 recent-window 大小：只保留
+# 最近 N 筆排程 run record 供 `/status`「連接器用量」彙總用（見 `recent()`）。
+# ⚠️ 這是「最近 N 次排程執行」的視窗，不是嚴格的日曆 30 天——排程 cron 間隔可
+# 調整，N 筆不保證恰好對應 30 個日曆天，UI 顯示文案應誠實標「最近 N 次排程執行」
+# 而非「近 30 天」，避免無根據宣稱（見 web.py `_render_connector_usage_table`）。
+RECENT_WINDOW_SIZE = 30
+
 
 class JsonlSchedulerRunLog(SchedulerRunLog):
     """Append-only JSONL 檔案（離線/測試/開發預設）。
@@ -104,6 +123,14 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
     def _latest_lock_path(self) -> Path:
         return self.path.with_name(self.path.name + ".latest.lock")
 
+    @property
+    def _recent_path(self) -> Path:
+        """階段2：bounded「最近 N 筆」window 檔（見 `RECENT_WINDOW_SIZE`），
+        供 `recent()` 讀取。跟 `_latest_path` 是姊妹檔，同一把鎖
+        （`_latest_lock_path`）保護，不另開一把鎖——`append()` 只有一次
+        機會更新兩者，用同一把鎖序列化即可，不需要額外鎖粒度。"""
+        return self.path.with_name(self.path.name + ".recent.json")
+
     def _read_latest_pointer(self) -> dict[str, Any] | None:
         if not self._latest_path.exists():
             return None
@@ -113,17 +140,17 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
             return None
         return data if isinstance(data, dict) else None
 
-    def _write_latest_pointer(self, record: dict[str, Any]) -> None:
-        self._latest_path.parent.mkdir(parents=True, exist_ok=True)
+    def _write_json_atomic(self, path: Path, payload: Any) -> None:
+        """原子寫入單一 JSON 檔（temp file + `os.replace`），`_latest_path`／
+        `_recent_path` 共用此輔助，避免重複實作同一套「寫 temp → replace」邏輯。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
-            dir=str(self._latest_path.parent),
-            prefix=f".{self._latest_path.name}.",
-            suffix=".tmp",
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            os.replace(tmp_name, self._latest_path)
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            os.replace(tmp_name, path)
         except BaseException:
             try:
                 os.unlink(tmp_name)
@@ -131,12 +158,30 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
                 pass
             raise
 
-    def _update_latest_pointer_locked(self, record: dict[str, Any]) -> None:
-        """原子 compare-and-set：`fcntl.flock` 包住「讀目前指標 → 比較 ts →
-        （可能）覆寫」整段臨界區，跨行程/跨執行緒序列化，避免兩個重疊排程
-        交錯造成指標倒退（見類別 docstring）。只在新記錄的 `ts` 嚴格大於目
-        前指標時才覆寫（同 `max(records, key=ts)` 對平手取先出現者的既有
-        語意）。"""
+    def _write_latest_pointer(self, record: dict[str, Any]) -> None:
+        self._write_json_atomic(self._latest_path, record)
+
+    def _read_recent_window(self) -> list[dict[str, Any]]:
+        if not self._recent_path.exists():
+            return []
+        try:
+            data = json.loads(self._recent_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+    def _update_pointers_locked(self, record: dict[str, Any]) -> None:
+        """原子 compare-and-set + window 更新：`fcntl.flock` 包住「讀目前指標
+        → 比較 ts → （可能）覆寫 latest」與「把新記錄併入 recent window
+        （依 ts 排序、截斷到 `RECENT_WINDOW_SIZE` 筆）」整段臨界區，跨行程/
+        跨執行緒序列化，避免兩個重疊排程交錯造成指標倒退或 window 漏記
+        （見類別 docstring）。
+
+        latest 指標只在新記錄的 `ts` 嚴格大於目前指標時才覆寫（同
+        `max(records, key=ts)` 對平手取先出現者的既有語意）；recent window
+        則一律把新記錄併入再依 ts 排序截斷——window 本身有限大小
+        （`RECENT_WINDOW_SIZE`），用來源不需要「只新不舊」的嚴格單調語意，
+        重跑/亂序寫入頂多讓 window 內順序重排，不影響正確性。"""
         self._latest_lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._latest_lock_path, "a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -144,6 +189,12 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
                 current = self._read_latest_pointer()
                 if current is None or str(record.get("ts", "")) > str(current.get("ts", "")):
                     self._write_latest_pointer(record)
+
+                window = self._read_recent_window()
+                window.append(record)
+                window.sort(key=lambda r: str(r.get("ts", "")), reverse=True)
+                window = window[:RECENT_WINDOW_SIZE]
+                self._write_json_atomic(self._recent_path, window)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
@@ -153,7 +204,7 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
 
-        self._update_latest_pointer_locked(record)
+        self._update_pointers_locked(record)
 
     def read_all(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -176,6 +227,17 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
         不掃描歷史檔案。指標檔遺失/損毀視為「尚無紀錄」（`/status` 會顯示
         提示文字），不退回全表掃描以維持常數成本保證。"""
         return self._read_latest_pointer()
+
+    def recent(self, n: int = RECENT_WINDOW_SIZE) -> list[dict[str, Any]]:
+        """O(1)-相容：只讀 `self._recent_path` 維護的 bounded window（append
+        時同步更新，見 `_update_pointers_locked`），不呼叫 `read_all()`、不
+        掃描完整歷史——查詢成本恆為 `min(n, RECENT_WINDOW_SIZE)`，不隨排程
+        歷史總筆數增長。`n` 大於視窗實際大小時只能拿到視窗內已有的筆數
+        （不會回頭去掃歷史補齊；`n` 大於 `RECENT_WINDOW_SIZE` 時同理，window
+        本身就只保留最近 `RECENT_WINDOW_SIZE` 筆）。視窗檔遺失/損毀視為
+        「尚無紀錄」（回空清單），不退回全表掃描。"""
+        window = self._read_recent_window()
+        return window[:n]
 
 
 class DynamoDBSchedulerRunLog(SchedulerRunLog):
@@ -329,6 +391,15 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
                 break
             scan_kwargs["ExclusiveStartKey"] = last_key
         return records
+
+    # `recent()`：本 PR 範圍內不覆寫，沿用 `SchedulerRunLog.recent()` 的未優化
+    # 參考實作（`read_all()` 全 Scan 再排序取前 n 筆）——誠實標記：這條路徑
+    # **不是** O(1)，成本隨歷史筆數增長。`SCHEDULER_RUN_LOG_BACKEND` 預設
+    # `jsonl`（`JsonlSchedulerRunLog.recent()` 才是真正 O(1) 的 window 讀取，
+    # 見該類別實作），DynamoDB backend 要先由 CEO 另立步驟建表、切換 env 才會
+    # 生效；屆時若要在 DynamoDB backend 上維持 O(1)，應比照 `latest()` 用
+    # 固定 Key + 條件式 `PutItem` 維護一份獨立的 recent-window 項目，不在本
+    # PR（成本會計階段2）範圍內，先誠實留白，不假裝已經優化。
 
 
 def get_scheduler_run_log() -> SchedulerRunLog:

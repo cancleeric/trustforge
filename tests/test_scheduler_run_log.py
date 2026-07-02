@@ -104,6 +104,96 @@ def test_jsonl_run_log_latest_none_when_empty(tmp_path):
     assert log.latest() is None
 
 
+# ---------------------------------------------------------------------------
+# JsonlSchedulerRunLog.recent()（成本會計階段2：/status「連接器用量」用）
+# ---------------------------------------------------------------------------
+
+def test_jsonl_run_log_recent_returns_newest_first_bounded_by_n(tmp_path):
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+    log.append({"run_id": "r1", "ts": "2026-01-01T00:00:00+00:00"})
+    log.append({"run_id": "r2", "ts": "2026-01-03T00:00:00+00:00"})
+    log.append({"run_id": "r3", "ts": "2026-01-02T00:00:00+00:00"})
+
+    recent = log.recent(2)
+    assert [r["run_id"] for r in recent] == ["r2", "r3"]
+
+
+def test_jsonl_run_log_recent_empty_when_no_records(tmp_path):
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+    assert log.recent() == []
+
+
+def test_jsonl_run_log_recent_never_calls_read_all(tmp_path, monkeypatch):
+    """回歸測試（scalability，同 `latest()` 慣例）：`recent()` 必須讀 bounded
+    window 檔，不管歷史檔案累積多少筆，都不該去掃 `read_all()`。"""
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+    for i in range(200):
+        log.append({"run_id": f"r{i}", "ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00+00:00"})
+
+    calls = {"n": 0}
+    original_read_all = JsonlSchedulerRunLog.read_all
+
+    def spy_read_all(self):
+        calls["n"] += 1
+        return original_read_all(self)
+
+    monkeypatch.setattr(JsonlSchedulerRunLog, "read_all", spy_read_all)
+
+    result = log.recent()
+    assert len(result) > 0
+    assert calls["n"] == 0  # recent() 完全沒碰 read_all()
+
+
+def test_jsonl_run_log_recent_window_bounded_to_recent_window_size(tmp_path):
+    """視窗檔本身只保留最近 `RECENT_WINDOW_SIZE` 筆，append 超過視窗大小的
+    紀錄不會讓視窗無限增長（bounded 儲存/讀取成本，不隨歷史筆數線性增長）。"""
+    from trustforge.scheduler_log import RECENT_WINDOW_SIZE
+
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+    total = RECENT_WINDOW_SIZE + 20
+    for i in range(total):
+        log.append({"run_id": f"r{i}", "ts": f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}T00:00:00+00:00"})
+
+    recent = log.recent(n=1000)  # 要求比視窗大小還多，也只能拿到視窗內已有的筆數
+    assert len(recent) == RECENT_WINDOW_SIZE
+    # 視窗內是「最近」的那批（append 順序後段），不是最早的那批
+    assert "r0" not in {r["run_id"] for r in recent}
+
+
+def test_jsonl_run_log_recent_source_calls_field_roundtrips(tmp_path):
+    """`fetch_scheduler.py` 寫入的 `source_calls` 欄位在 recent window 內
+    原封不動保留（成本會計階段2：`/status`「連接器用量」表直接讀這個欄位）。"""
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+    log.append({
+        "run_id": "r1", "ts": "2026-01-01T00:00:00+00:00",
+        "source_calls": {"coingecko-price": 1, "coindesk": 1},
+    })
+
+    recent = log.recent()
+    assert recent[0]["source_calls"] == {"coingecko-price": 1, "coindesk": 1}
+
+
+def test_scheduler_run_log_base_recent_default_is_unoptimized_reference(monkeypatch):
+    """`SchedulerRunLog.recent()` 的預設實作（未被子類別 override 時）走
+    `read_all()` 排序取前 n 筆——驗證這個未優化參考實作本身邏輯正確
+    （`DynamoDBSchedulerRunLog` 目前沿用此預設，見該類別註解）。"""
+
+    class _FakeLog(SchedulerRunLog):
+        def append(self, record):
+            raise NotImplementedError
+
+        def read_all(self):
+            return [
+                {"run_id": "a", "ts": "2026-01-01T00:00:00+00:00"},
+                {"run_id": "b", "ts": "2026-01-03T00:00:00+00:00"},
+                {"run_id": "c", "ts": "2026-01-02T00:00:00+00:00"},
+            ]
+
+    fake = _FakeLog()
+    recent = fake.recent(2)
+    assert [r["run_id"] for r in recent] == ["b", "c"]
+
+
 def test_jsonl_run_log_latest_never_calls_read_all(tmp_path, monkeypatch):
     """回歸測試（scalability）：`latest()` 必須是 O(1) 單筆指標讀取，不管
     歷史檔案累積多少筆，都不該去掃 `read_all()`。"""

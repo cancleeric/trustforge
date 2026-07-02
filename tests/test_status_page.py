@@ -216,6 +216,19 @@ def test_status_page_shows_cost_summary(json_cache_backend, monkeypatch, tmp_pat
     assert "0.0042" in body
 
 
+def test_status_page_shows_model_token_detail_table(json_cache_backend, monkeypatch, tmp_path):
+    """成本會計階段1：`/status`「成本摘要」也要含 tokens 明細表（與 `/costs`
+    共用同一份 `_render_model_token_table`）。"""
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+    JsonlLedger().append({
+        "ts": "2026-01-01T00:00:00+00:00", "total_cost_usd": 0.005,
+        "calls": [{"model": "haiku", "tokens_in": 300, "tokens_out": 60, "cost_usd": 0.005}],
+    })
+    _, body = web._handle_status(client_ip="7.7.7.1")
+    assert "300" in body
+    assert "60" in body
+
+
 # ---------------------------------------------------------------------------
 # 資料鮮度矩陣（Phase2）
 # ---------------------------------------------------------------------------
@@ -247,6 +260,140 @@ def test_status_page_shows_placeholder_when_no_scheduler_run(json_cache_backend,
     monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "empty.jsonl"))
     _, body = web._handle_status(client_ip="5.5.5.6")
     assert "尚無排程執行紀錄" in body
+
+
+# ---------------------------------------------------------------------------
+# 成本會計階段2：連接器用量表
+# ---------------------------------------------------------------------------
+
+def test_status_page_shows_connector_usage_table(json_cache_backend, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    append_scheduler_run({
+        "ts": "2026-06-01T00:00:00+00:00", "success_count": 4, "failure_count": 0,
+        "failures": [], "total_docs": 10,
+        "source_calls": {"coingecko-price": 3, "coindesk": 1},
+    })
+    _, body = web._handle_status(client_ip="6.6.6.1")
+    assert "連接器用量" in body
+    assert "coingecko-price" in body
+    assert "coindesk" in body
+    # coingecko-price 有官方配額（10,000/month）→ 顯示配額百分比
+    assert "0.03%" in body  # 3 / 10_000 * 100
+    # coindesk 無官方配額 → 誠實標示「無官方配額」而非假造數字
+    assert "無官方配額" in body
+    # free tier 恆 $0，但仍顯示真實用量次數（誠實原則，非隱藏用量）
+    assert "$0.00" in body
+
+
+def test_status_page_connector_usage_shows_registered_sources_with_zero_when_no_scheduler_run(
+    json_cache_backend, monkeypatch, tmp_path
+):
+    """尚無排程執行紀錄時，仍列出成本模型登記過的全部連接器（用量 0），
+    而不是整段隱藏——讓維運者一眼看到「哪些來源還沒被排程跑過」。"""
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "empty.jsonl"))
+    _, body = web._handle_status(client_ip="6.6.6.2")
+    assert "連接器用量" in body
+    assert "<td>coindesk</td><td>0</td>" in body
+
+
+def test_render_connector_usage_table_placeholder_when_registry_and_usage_both_empty(monkeypatch):
+    """防禦性分支（目前 CONNECTOR_COST_MODEL 恆非空，正常不會走到）：登記表
+    與用量都空時要顯示明確的「無資料」訊息，不是空表格。"""
+    monkeypatch.setattr(web, "CONNECTOR_COST_MODEL", {})
+    monkeypatch.setattr(web, "_get_connector_usage_summary", lambda: {})
+    body = web._render_connector_usage_table()
+    assert "尚無排程執行紀錄，無連接器用量可顯示" in body
+
+
+def test_status_page_connector_usage_aggregates_across_multiple_runs(
+    json_cache_backend, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    append_scheduler_run({
+        "ts": "2026-06-01T00:00:00+00:00", "success_count": 1, "failure_count": 0,
+        "failures": [], "total_docs": 1, "source_calls": {"coindesk": 2},
+    })
+    append_scheduler_run({
+        "ts": "2026-06-01T01:00:00+00:00", "success_count": 1, "failure_count": 0,
+        "failures": [], "total_docs": 1, "source_calls": {"coindesk": 3},
+    })
+    _, body = web._handle_status(client_ip="6.6.6.3")
+    # 兩輪加總 = 5 次
+    assert "<td>coindesk</td><td>5</td>" in body
+
+
+def test_status_page_connector_usage_never_scans_full_history(
+    json_cache_backend, monkeypatch, tmp_path
+):
+    """回歸測試：`/status` 讀連接器用量走 `recent()`（O(1)-相容），不掃描
+    完整排程歷史（呼應 iron rule「O(1) 規則不能破壞」）。"""
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    for i in range(50):
+        append_scheduler_run({
+            "ts": f"2026-06-{(i % 28) + 1:02d}T00:00:00+00:00",
+            "success_count": 1, "failure_count": 0, "failures": [], "total_docs": 1,
+            "source_calls": {"coindesk": 1},
+        })
+
+    original_read_all = JsonlSchedulerRunLog.read_all
+    calls = {"n": 0}
+
+    def spy(self):
+        calls["n"] += 1
+        return original_read_all(self)
+
+    monkeypatch.setattr(JsonlSchedulerRunLog, "read_all", spy)
+    web._handle_status(client_ip="6.6.6.4")
+    assert calls["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 成本會計階段3：快取節省估算卡
+# ---------------------------------------------------------------------------
+
+def test_status_page_shows_cache_savings_card(json_cache_backend, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    _, body = web._handle_status(client_ip="6.6.6.5")
+    assert "快取節省" in body
+    assert "估算" in body
+    assert "算式" in body
+
+
+def test_cache_savings_formula_matches_analyze_and_scheduler_counts(
+    json_cache_backend, monkeypatch, tmp_path
+):
+    """`_render_cache_savings_card()` 算式：若無快取 ≈ analyze 次數 × 已知
+    連接器來源數；實際 = scheduler 呼叫加總；省下 = max(0, 若無快取 − 實際)。"""
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    from trustforge.cost_model import CONNECTOR_COST_MODEL
+
+    web._analyze_service_count = 0
+    web._record_analyze_service_calls(2)
+    append_scheduler_run({
+        "ts": "2026-06-01T00:00:00+00:00", "success_count": 1, "failure_count": 0,
+        "failures": [], "total_docs": 1, "source_calls": {"coindesk": 3},
+    })
+
+    n_sources = len(CONNECTOR_COST_MODEL)
+    expected_would_be = 2 * n_sources
+    expected_saved = max(0, expected_would_be - 3)
+
+    body = web._render_cache_savings_card()
+    assert f"省下約 {expected_saved} 次" in body
+    assert f"＝ {expected_would_be} 次" in body
+    web._analyze_service_count = 0  # 測試後歸零，避免汙染其他測試（module 級狀態）
+
+
+def test_analyze_service_counter_increments_only_on_real_or_live(monkeypatch):
+    """離線示範（樣本資料）不計數，只有 `real`/`live` 真連接器路徑才計數，
+    否則快取節省估算會被離線 demo 流量汙染。"""
+    web._analyze_service_count = 0
+    assert web._get_analyze_service_count() == 0
+    web._record_analyze_service_calls(1)
+    assert web._get_analyze_service_count() == 1
+    web._record_analyze_service_calls(2)
+    assert web._get_analyze_service_count() == 3
+    web._analyze_service_count = 0
 
 
 # ---------------------------------------------------------------------------

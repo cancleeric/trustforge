@@ -32,7 +32,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .pipeline import run, run_comparison
-from .ledger import JsonlLedger, get_ledger
+from .ledger import PRICING, JsonlLedger, get_ledger
+from .cost_model import CONNECTOR_COST_MODEL, estimate_connector_cost, quota_percent
 
 try:
     from ._version import VERSION
@@ -453,6 +454,147 @@ def _render_recent_scheduler_run() -> str:
     )
 
 
+def _get_connector_usage_summary() -> dict[str, int]:
+    """近期（最近 `scheduler_log.RECENT_WINDOW_SIZE` 次以內）排程執行的
+    `source_calls` 加總，供 `/status`「連接器用量」表使用（成本會計階段2）。
+
+    ⚠️ O(1)-相容：只呼叫 `SchedulerRunLog.recent()`（`JsonlSchedulerRunLog`
+    讀一份獨立維護的 bounded window 檔，見 `scheduler_log.py` 模組頂部
+    `RECENT_WINDOW_SIZE` 說明），不掃描完整排程歷史。任何讀取失敗（尚未跑過
+    排程／backend 故障）一律降級回空 dict，`/status` 頁面必須永遠能顯示。
+
+    ⚠️ 這是「最近 N 次排程執行」的加總，不是嚴格日曆 30 天——呼叫端顯示文案
+    需誠實反映這點，不宣稱「近 30 天」（見 `_render_connector_usage_table`）。
+    """
+    try:
+        from .scheduler_log import get_scheduler_run_log
+
+        records = get_scheduler_run_log().recent()
+    except Exception:
+        records = []
+
+    totals: dict[str, int] = {}
+    for rec in records or []:
+        for source, count in (rec.get("source_calls") or {}).items():
+            totals[str(source)] = totals.get(str(source), 0) + int(count or 0)
+    return totals
+
+
+def _render_connector_usage_table() -> str:
+    """`/status`「連接器用量」表：各連接器最近 N 次排程執行的呼叫數加總、
+    （有官方配額才顯示）配額使用百分比、估計成本。
+
+    純讀既有資料（`_get_connector_usage_summary`）+ 純函式計算
+    （`cost_model.py` 常數），不觸發任何連接器抓取。free tier（目前全部
+    連接器）估計成本恆為 $0，但仍顯示真實用量（誠實原則，見 `cost_model.py`
+    模組頂部說明）。
+    """
+    e = html.escape
+    try:
+        from .scheduler_log import RECENT_WINDOW_SIZE
+    except Exception:
+        RECENT_WINDOW_SIZE = 30  # noqa: N806 — 匯入失敗時的顯示用退路，不影響實際彙總邏輯
+
+    usage = _get_connector_usage_summary()
+    # 顯示 CONNECTOR_COST_MODEL 登記過的全部來源（含用量 0 的），讓維運者
+    # 一眼看到「哪些來源這個視窗內完全沒被排程呼叫到」；usage 裡若出現不在
+    # 登記表的來源名稱（理論上不會，防禦性容錯）一併補上顯示，不吞掉。
+    all_sources = sorted(set(CONNECTOR_COST_MODEL) | set(usage))
+    if not all_sources:
+        return (
+            '<p style="color:var(--tf-muted);font-size:.85rem">'
+            "（尚無排程執行紀錄，無連接器用量可顯示）</p>"
+        )
+
+    rows = []
+    for source in all_sources:
+        count = usage.get(source, 0)
+        model = CONNECTOR_COST_MODEL.get(source)
+        pct = quota_percent(source, count)
+        pct_cell = f"{pct:.2f}%" if pct is not None else "&#8212;（無官方配額）"
+        cost = estimate_connector_cost(source, count)
+        cost_cell = f"${cost:.4f}" if cost > 0 else "$0.00（free tier）"
+        quota_note = e(model.free_tier_reference) if model else "（未登記於成本模型）"
+        rows.append(
+            f"<tr><td>{e(source)}</td><td>{count}</td><td>{pct_cell}</td><td>{cost_cell}</td></tr>"
+            f'<tr><td colspan="4" style="color:var(--tf-muted2);font-size:.7rem;'
+            f'border-top:none;padding-top:0">{quota_note}</td></tr>'
+        )
+    return (
+        f'<p style="color:var(--tf-muted);font-size:.85rem">'
+        f"最近（&#8804; {RECENT_WINDOW_SIZE} 次）排程執行加總——是「最近 N 次排程執行」"
+        f"視窗，非嚴格日曆 30 天（排程間隔可調整，N 筆不保證恰好對應 30 個日曆天）。</p>"
+        "<table><tr><th>連接器</th><th>呼叫數</th><th>配額使用%</th><th>估計成本</th></tr>"
+        f"{''.join(rows)}</table>"
+    )
+
+
+# 成本會計階段3：`/analyze`（含 comparison）真實服務次數計數器——比照 `_rate_buckets`
+# 限流計數器慣例，純記憶體、process 重啟歸零，不持久化，只是粗略觀測指標。
+# 只在請求實際走「真連接器」路徑（`real=1` 或 `live=1`，pipeline 透過 cache 讀
+# 連接器資料）時才計數；純離線示範（樣本資料，未觸碰任何連接器/cache）不計，
+# 否則「快取節省」估算會被離線 demo 流量污染，失去意義。
+_analyze_service_lock = threading.Lock()
+_analyze_service_count = 0
+
+
+def _record_analyze_service_calls(n: int) -> None:
+    """記錄 `n` 次「真連接器」分析服務事件（單幣 `_do_analyze` 記 1，雙幣
+    `_do_comparison` 記 2——各自都要讀一輪多來源資料），供 `/status`
+    「快取節省」估算用。"""
+    global _analyze_service_count
+    with _analyze_service_lock:
+        _analyze_service_count += n
+
+
+def _get_analyze_service_count() -> int:
+    with _analyze_service_lock:
+        return _analyze_service_count
+
+
+def _render_cache_savings_card() -> str:
+    """`/status`「快取節省」卡：估算「若無快取」需要的連接器呼叫次數，對比
+    scheduler 實際呼叫次數，算出估計省下的次數／成本（**標「估算」**，見下方
+    明確算式；多數連接器是 free tier，故以次數為主，成本欄目前恆為 $0）。
+
+    算式：
+      若無快取 ≈ analyze 服務次數（本 process 累計，見 `_record_analyze_service_calls`）
+                × 已知連接器來源數（`len(CONNECTOR_COST_MODEL)`——每次真分析理論上
+                  都要重新打一輪全部已知來源）
+      實際 scheduler 呼叫次數 = 連接器用量表（近期排程執行）加總
+      省下次數 = max(0, 若無快取 − 實際)
+
+    ⚠️ 兩個數字時間窗不同源（analyze 次數是本 process 啟動以來累計，scheduler
+    呼叫數是最近 N 次排程執行 window，見 `_get_connector_usage_summary`）——
+    刻意不假裝精確對齊同一個時間窗，這正是要標「估算」的原因，不是抓 bug。
+    """
+    analyze_count = _get_analyze_service_count()
+    usage = _get_connector_usage_summary()
+    actual_calls = sum(usage.values())
+    n_sources = len(CONNECTOR_COST_MODEL)
+    would_be_calls = analyze_count * n_sources
+    saved_calls = max(0, would_be_calls - actual_calls)
+
+    would_be_cost = sum(
+        estimate_connector_cost(source, analyze_count) for source in CONNECTOR_COST_MODEL
+    )
+    actual_cost = sum(estimate_connector_cost(source, count) for source, count in usage.items())
+    saved_cost = max(0.0, round(would_be_cost - actual_cost, 6))
+
+    return (
+        f'<p class="j">省下約 {saved_calls} 次連接器呼叫'
+        f'（≈ ${saved_cost:.4f}，多數 free source 故以次數為主）</p>'
+        f'<p style="color:var(--tf-muted);font-size:.85rem">'
+        f'算式（估算）：若無快取 ≈ analyze 服務次數（{analyze_count}）'
+        f'× 已知連接器來源數（{n_sources}）＝ {would_be_calls} 次；'
+        f'實際 scheduler 呼叫次數（近期排程執行加總）＝ {actual_calls} 次'
+        f' → 估計省 {saved_calls} 次。</p>'
+        f'<p style="color:var(--tf-muted2);font-size:.75rem">'
+        f'analyze 服務次數為本 process 啟動以來累計（見上方「運行時間」），'
+        f'與 scheduler 的近期視窗非同一時間窗，此數字僅供估算參考。</p>'
+    )
+
+
 def _render_status_page() -> str:
     """`/status`：系統可觀測性頁——版本、執行模式能力、快取 backend 連線探測、
     成本摘要、資料鮮度矩陣、最近排程執行。
@@ -539,6 +681,17 @@ def _render_status_page() -> str:
   <h3>成本摘要</h3>
   <p class="j">累計花費 ${total_cost:.4f}</p>
   <p style="color:var(--tf-muted);font-size:.85rem">共 {run_count} 筆歷史 run 紀錄，詳見 <a href="/costs">成本帳本</a>。</p>
+  {_render_model_token_table(summary)}
+</div>
+
+<div class="tf-section">
+  <h3>連接器用量（近期排程執行加總）</h3>
+  {_render_connector_usage_table()}
+</div>
+
+<div class="tf-section">
+  <h3>快取節省（估算）</h3>
+  {_render_cache_savings_card()}
 </div>
 
 <div class="tf-section">
@@ -686,6 +839,47 @@ def _header_cost_display() -> str:
     return f"${total:.4f}"
 
 
+def _model_price_display(model: str) -> str:
+    """`model` 在 `PRICING`（ledger.py）的單價顯示字串（USD／百萬 tokens，輸入/輸出）。
+
+    不在 `PRICING` 的 model_id（如 "offline"、未知/淘汰的 model_id）一律顯示
+    「—（無定價／離線）」，不猜測、不誤植價格——與 `ledger.py::estimate_cost()`
+    「未知 model_id 一律 $0，不誤套價格」的既有契約一致。
+    """
+    rates = PRICING.get(model)
+    if rates is None:
+        return "—（無定價／離線）"
+    in_rate, out_rate = rates
+    return f"入 ${in_rate:.2f}／出 ${out_rate:.2f}（每百萬 tokens）"
+
+
+def _render_model_token_table(summary: dict) -> str:
+    """成本會計階段1：把 `summary()` 的 `by_model_detail` 渲染成
+    「Model｜輸入tokens｜輸出tokens｜單價(來自 PRICING)｜成本」明細表。
+
+    純顯示層：資料完全來自 `Ledger.summary()` 既有彙總（見 `ledger.py` 階段1
+    註解），這裡不做任何額外查詢/計算，只負責排版。`by_model_detail` 缺欄位
+    （理論上不會，`summary()` 已保證每個 model 都有完整三欄）時用 `.get(...,0)`
+    防呆，不讓渲染因缺欄位而拋例外。
+    """
+    e = html.escape
+    detail = summary.get("by_model_detail", {}) or {}
+    if not detail:
+        return '<p style="color:var(--tf-muted);font-size:.85rem">（尚無 LLM 呼叫紀錄）</p>'
+    rows = "".join(
+        f"<tr><td>{e(str(m))}</td>"
+        f"<td>{int(d.get('tokens_in', 0) or 0)}</td>"
+        f"<td>{int(d.get('tokens_out', 0) or 0)}</td>"
+        f"<td>{e(_model_price_display(m))}</td>"
+        f"<td>${float(d.get('cost_usd', 0.0) or 0.0):.4f}</td></tr>"
+        for m, d in sorted(detail.items(), key=lambda kv: -kv[1].get("cost_usd", 0.0))
+    )
+    return (
+        '<table><tr><th>Model</th><th>輸入 tokens</th><th>輸出 tokens</th>'
+        f'<th>單價</th><th>成本</th></tr>{rows}</table>'
+    )
+
+
 def _render_costs_page() -> str:
     """`/costs`：跨 run 持久化成本帳本彙總頁 —— 累計總花費、依 model 分組、per-run 明細。
 
@@ -748,6 +942,13 @@ def _render_costs_page() -> str:
 <div class="tf-section">
   <h3>依 Model 分組</h3>
   <table><tr><th>Model</th><th>累計成本</th></tr>{model_rows or '<tr><td colspan="2">&#8212;</td></tr>'}</table>
+</div>
+
+<div class="tf-section">
+  <h3>LLM 成本明細（依 Model，含 tokens）</h3>
+  <p style="color:var(--tf-muted);font-size:.85rem">單價取自 <code>ledger.py::PRICING</code>（USD／百萬 tokens）；
+  成本＝輸入 tokens×入單價 ＋ 輸出 tokens×出單價，與上方「累計成本」同一份資料，純拆分顯示。</p>
+  {_render_model_token_table(summary)}
 </div>
 
 <div class="tf-section">
@@ -1766,6 +1967,11 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
         report, evidence, log = run(coin, query, qtype, data_mode="live", llm_mode="off")
     else:
         report, evidence, log = run(coin, query, qtype, offline=not live)
+    # 成本會計階段3：只有 real/live（data_mode 最終落在 "live"，真的透過
+    # CachedSource 讀連接器資料）才計入「真連接器」服務次數；純離線示範
+    # （樣本資料，未觸碰任何連接器/cache）不計，見 `_record_analyze_service_calls`。
+    if real or live:
+        _record_analyze_service_calls(1)
     return report, evidence, log
 
 
@@ -1800,6 +2006,10 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         report_a, evidence_a, report_b, evidence_b, log = run_comparison(
             coin_a, coin_b, query, offline=not live
         )
+    # 成本會計階段3：comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，
+    # 記 2 次（見 `_record_analyze_service_calls` docstring），理由同 `_do_analyze`。
+    if real or live:
+        _record_analyze_service_calls(2)
     return report_a, evidence_a, report_b, evidence_b, log
 
 

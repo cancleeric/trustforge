@@ -167,6 +167,62 @@ def test_jsonl_ledger_summary_aggregates_total_and_by_model(tmp_path):
     assert len(summary["runs"]) == 2
 
 
+# ---------------------------------------------------------------------------
+# 成本會計階段1：`summary()["by_model_detail"]` 同時累加 tokens_in/tokens_out
+# ---------------------------------------------------------------------------
+
+def test_jsonl_ledger_summary_by_model_detail_aggregates_tokens(tmp_path):
+    """`by_model_detail` 是純顯示層新增彙總：每個 model 的 cost_usd 要跟既有
+    `by_model` 一致，同時 tokens_in/tokens_out 要正確跨 run 累加。"""
+    ledger = JsonlLedger(tmp_path / "cost_ledger.jsonl")
+    ledger.append({
+        "ts": "t1", "coin": "BTC", "total_cost_usd": 0.003,
+        "calls": [
+            {"model": "haiku", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.001},
+            {"model": "sonnet", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.002},
+        ],
+    })
+    ledger.append({
+        "ts": "t2", "coin": "ETH", "total_cost_usd": 0.001,
+        "calls": [{"model": "haiku", "tokens_in": 50, "tokens_out": 10, "cost_usd": 0.001}],
+    })
+
+    summary = ledger.summary()
+    detail = summary["by_model_detail"]
+
+    assert detail["haiku"]["cost_usd"] == pytest.approx(0.002)
+    assert detail["haiku"]["tokens_in"] == 150
+    assert detail["haiku"]["tokens_out"] == 60
+    assert detail["sonnet"]["cost_usd"] == pytest.approx(0.002)
+    assert detail["sonnet"]["tokens_in"] == 100
+    assert detail["sonnet"]["tokens_out"] == 50
+    # cost_usd 跟既有 by_model（向後相容、格式不變）數字必須一致，純拆分顯示
+    assert detail["haiku"]["cost_usd"] == pytest.approx(summary["by_model"]["haiku"])
+    assert detail["sonnet"]["cost_usd"] == pytest.approx(summary["by_model"]["sonnet"])
+
+
+def test_jsonl_ledger_summary_by_model_detail_defaults_missing_token_fields_to_zero(tmp_path):
+    """舊紀錄（本欄位加入前寫入的 `calls[]`）缺 tokens_in/tokens_out 欄位時
+    用 `.get(..., 0)` 防呆，不 raise、也不讓彙總報 KeyError。"""
+    ledger = JsonlLedger(tmp_path / "cost_ledger.jsonl")
+    ledger.append({
+        "ts": "t1", "coin": "BTC", "total_cost_usd": 0.001,
+        "calls": [{"model": "legacy-model", "cost_usd": 0.001}],  # 舊格式：無 tokens_in/out
+    })
+
+    summary = ledger.summary()
+    detail = summary["by_model_detail"]["legacy-model"]
+    assert detail["tokens_in"] == 0
+    assert detail["tokens_out"] == 0
+    assert detail["cost_usd"] == pytest.approx(0.001)
+
+
+def test_jsonl_ledger_summary_by_model_detail_empty_when_no_runs(tmp_path):
+    ledger = JsonlLedger(tmp_path / "cost_ledger.jsonl")
+    summary = ledger.summary()
+    assert summary["by_model_detail"] == {}
+
+
 def test_jsonl_ledger_append_is_append_only_not_overwrite(tmp_path):
     path = tmp_path / "cost_ledger.jsonl"
     ledger = JsonlLedger(path)
@@ -903,6 +959,74 @@ def test_costs_page_reflects_ledger_summary(monkeypatch, tmp_path):
     assert "0.0123" in htmlout
     assert "fake-model" in htmlout
     assert "BTC" in htmlout
+
+
+def test_costs_page_shows_model_token_detail_table(monkeypatch, tmp_path):
+    """成本會計階段1：`/costs` 新增「LLM 成本明細（依 Model，含 tokens）」表，
+    顯示 tokens_in/tokens_out/單價/成本，且總額與既有彙總一致（純拆分顯示，
+    不重複計算）。"""
+    ledger_path = tmp_path / "cost_ledger.jsonl"
+    fake_ledger = JsonlLedger(ledger_path)
+    fake_ledger.append({
+        "ts": "t1", "coin": "BTC", "total_cost_usd": 0.003,
+        "calls": [
+            {"model": "haiku", "tokens_in": 1000, "tokens_out": 200, "cost_usd": 0.001},
+            {"model": "sonnet", "tokens_in": 500, "tokens_out": 100, "cost_usd": 0.002},
+        ],
+    })
+    monkeypatch.setattr(web, "get_ledger", lambda: fake_ledger)
+
+    htmlout = web._render_costs_page()
+    assert "LLM 成本明細" in htmlout
+    assert "haiku" in htmlout
+    assert "1000" in htmlout  # tokens_in
+    assert "200" in htmlout  # tokens_out
+    assert "500" in htmlout
+    assert "100" in htmlout
+    # 舊有「依 Model 分組」總額不受影響（純拆分顯示、無雙重計算）
+    summary = fake_ledger.summary()
+    assert summary["by_model"]["haiku"] == pytest.approx(0.001)
+    assert summary["by_model"]["sonnet"] == pytest.approx(0.002)
+    assert summary["total_cost_usd"] == pytest.approx(0.003)
+
+
+def test_costs_page_model_token_table_defensive_on_legacy_records_without_tokens(monkeypatch, tmp_path):
+    """舊格式紀錄（無 tokens_in/out 欄位）渲染不炸頁面，顯示 0。"""
+    ledger_path = tmp_path / "cost_ledger.jsonl"
+    fake_ledger = JsonlLedger(ledger_path)
+    fake_ledger.append({
+        "ts": "t1", "coin": "BTC", "total_cost_usd": 0.001,
+        "calls": [{"model": "legacy-model", "cost_usd": 0.001}],
+    })
+    monkeypatch.setattr(web, "get_ledger", lambda: fake_ledger)
+
+    htmlout = web._render_costs_page()
+    assert "legacy-model" in htmlout
+
+
+def test_render_model_token_table_shows_unit_price_from_pricing():
+    """已在 `PRICING` 登記的 model 要顯示對應單價，來自 `ledger.PRICING`。"""
+    from trustforge.ledger import PRICING
+
+    known_model = next(iter(PRICING))
+    summary = {
+        "by_model_detail": {
+            known_model: {"cost_usd": 0.001, "tokens_in": 100, "tokens_out": 50},
+        }
+    }
+    htmlout = web._render_model_token_table(summary)
+    assert known_model in htmlout
+
+
+def test_render_model_token_table_unknown_model_shows_offline_fallback():
+    summary = {
+        "by_model_detail": {
+            "offline": {"cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0},
+        }
+    }
+    htmlout = web._render_model_token_table(summary)
+    assert "offline" in htmlout
+    assert "無定價" in htmlout or "離線" in htmlout
 
 
 def test_costs_page_over_budget_shows_alert(monkeypatch, tmp_path):
