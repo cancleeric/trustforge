@@ -8,14 +8,16 @@
   - 固定 User-Agent
   - 不接受外部傳入 URL
   - 本地篩選加密相關關鍵字（無相關事件時回空清單，pipeline limits 會反映）
+  - SSRF-safe fetch（見 `safe_fetch.py`）：逐跳驗證（含初始 URL）scheme/
+    hostname/port/私有 IP，DNS pinning 杜絕 rebinding，禁自動跟轉
 """
 from __future__ import annotations
 
 import hashlib
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from urllib.request import Request, urlopen
 
+from . import safe_fetch
 from .base import Document, Source
 
 _MAX_BYTES = 512 * 1024   # 512 KB
@@ -31,10 +33,8 @@ _CRYPTO_KEYWORDS = frozenset([
 
 
 def _fetch_url(url: str) -> bytes:
-    """帶 timeout / 大小上限 / User-Agent 的 urllib GET。"""
-    req = Request(url, headers={"User-Agent": _UA})
-    with urlopen(req, timeout=_TIMEOUT) as resp:
-        return resp.read(_MAX_BYTES)
+    """帶 timeout / 大小上限 / User-Agent 的 SSRF-safe GET（見 safe_fetch.py）。"""
+    return safe_fetch.fetch_url(url, user_agent=_UA, timeout=_TIMEOUT, max_bytes=_MAX_BYTES)
 
 
 def _is_crypto_related(text: str) -> bool:
