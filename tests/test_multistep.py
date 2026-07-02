@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -459,4 +460,90 @@ def test_pipeline_now_ts_unaffected_for_all_past_offline_docs(monkeypatch):
         f"全部文件皆為過去時間戳時，now_ts 應維持 dataset-relative 的 "
         f"max(docs.ts)={max_docs_ts}，實得 {captured['now']}（cap 邏輯不應"
         "影響離線 fixture 既有行為）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #12 third-round：NaN / ±inf 時間戳繞過未來戳防禦、被 clamp 成滿分信任的
+# 全域防禦回歸測試（codex 對抗審，PR #48）。
+#
+# 舊 bug：`float('nan')` 可通過既有 ts 解析（壞資料/on-chain/cache 皆可能夾
+# 帶）。`age_h < 0` 對 NaN 恆為 False（NaN 與任何數比較恆假）→ 不觸發未來戳
+# 防禦、`_recency_decay` 回傳 NaN → `score()` 最後
+# `max(0.0, min(1.0, raw))` 對 NaN 同樣比較恆假，CPython 在此情況下回傳
+# **滿分 1.0**——比未來戳問題更嚴重（未來戳只降到中性 0.5，NaN 卻衝到滿
+# 分）。orchestrator 的 `now_ts = min(max(docs.ts), wall_clock)` 若 `d.ts`
+# 混入 NaN，也可能依疊代順序被污染成 NaN，繼續往下游傳播。
+#
+# 修法：`_recency_decay` 用 `math.isfinite` 檢查 `ts`/`now`/`age_h`，任一
+# 非有限（NaN/±inf）一律回中性 0.5；`orchestrator.now_ts` 計算前先濾掉非
+# 有限的 `d.ts` 再取 max，確保 `now_ts` 永遠有限。
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_ts", [float("nan"), float("inf"), float("-inf")])
+def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
+    """NaN / +inf / -inf 時間戳文件不應拿到滿分 recency=1.0（NaN 舊 bug
+    甚至比未來戳更嚴重：`max(0.0, min(1.0, nan))` 在 CPython 會回傳 1.0），
+    且不應污染 now_ts（now_ts 必須維持有限值），也不應把其他正常文件的
+    recency 拖老。"""
+    import trustforge.trust.scoring as scoring_mod
+    from trustforge.trust.scoring import _recency_decay
+
+    wall_clock = 1_000_000.0
+    normal_ts = wall_clock - 3600 * 2  # 正常：2 小時前
+
+    docs = [
+        _doc("real1", "onchain", "glassnode", "大額 BTC 流出交易所，減少賣壓。", ts=normal_ts),
+        _doc("bad1", "news", "malformed-feed", "分析師預測 BTC 長線看漲。", ts=bad_ts),
+    ]
+
+    captured: dict = {}
+    real_score = scoring_mod.score
+
+    def _spy_score(claims, now, **kwargs):
+        captured["now"] = now
+        captured["claims"] = list(claims)
+        return real_score(claims, now, **kwargs)
+
+    monkeypatch.setattr(scoring_mod, "score", _spy_score)
+
+    client = BedrockClient(offline=True)
+    log = ExecutionLog(now_fn=lambda: wall_clock)
+    scored, evidence = run_agent_pipeline(
+        query="分析 BTC 市場",
+        coin="BTC",
+        qtype=QuestionType.MULTI_SOURCE,
+        docs=docs,
+        client=client,
+        log=log,
+        now_fn=lambda: wall_clock,
+    )
+
+    # now_ts 不得被非有限 ts 污染——必須維持有限值。濾掉非有限值後，候選只
+    # 剩 normal_ts（唯一有限的 doc.ts），故 now_ts 應是
+    # min(normal_ts, wall_clock) == normal_ts（早於牆鐘，未被 cap 影響）。
+    assert math.isfinite(captured["now"]), (
+        f"now_ts 不應被非有限的 doc.ts（{bad_ts}）污染成非有限值，"
+        f"實得 {captured['now']}"
+    )
+    assert captured["now"] == normal_ts, (
+        f"濾掉非有限 ts 後，now_ts 應為唯一有限候選 normal_ts={normal_ts}，"
+        f"實得 {captured['now']}"
+    )
+
+    claims_by_doc_id = {c.doc.id: c for c in captured["claims"]}
+    bad_claim = claims_by_doc_id["bad1"]
+    real_claim = claims_by_doc_id["real1"]
+
+    bad_recency = _recency_decay(bad_claim, captured["now"])
+    real_recency = _recency_decay(real_claim, captured["now"])
+
+    assert math.isfinite(bad_recency) and bad_recency == pytest.approx(0.5), (
+        f"非有限時間戳（{bad_ts}）的 recency 應降為中性 0.5，實得 {bad_recency}"
+        "（若是 1.0，代表 NaN/inf 繞過防禦被 clamp 成滿分信任）"
+    )
+    assert bad_recency != 1.0, "非有限時間戳絕不該拿到滿分 recency"
+
+    assert real_recency > 0.8, (
+        f"正常文件的 recency 不應被非有限時間戳的文件拖累變老舊，實得 {real_recency}"
     )

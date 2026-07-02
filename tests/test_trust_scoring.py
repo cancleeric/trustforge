@@ -1,4 +1,6 @@
 """信任提煉引擎核心測試。確保『信任層』行為符合設計意圖。"""
+import math
+
 import pytest
 
 from trustforge.ingestion.base import Document
@@ -179,6 +181,59 @@ def test_score_future_ts_claim_recency_component_not_maxed():
     ]
     scored = score(extract_claims(docs), now=now)
     assert scored[0].components["recency"] < 1.0
+
+
+# --- #12 third-round：NaN / ±inf 時間戳全域防禦回歸測試 -------------------
+#
+# codex 對抗審 HIGH（PR #48）：`float('nan')` 可通過既有 ts 解析。舊版
+# `age_h < 0`（未來戳防禦）對 NaN 恆為 False，`_recency_decay` 回傳 NaN，
+# 傳到 `score()` 最後 `max(0.0, min(1.0, raw))` 時，NaN 與 0.0/1.0 比較同樣
+# 恆假，CPython 在此情況下回傳滿分 1.0——比未來戳問題更嚴重（未來戳只降到
+# 中性 0.5，NaN 卻衝到滿分）。+inf/-inf 同樣需要防禦。
+
+@pytest.mark.parametrize("bad_ts", [float("nan"), float("inf"), float("-inf")])
+def test_recency_decay_non_finite_ts_neutralised(bad_ts):
+    """NaN / +inf / -inf 時間戳一律降為中性 recency=0.5，不得傳播成 NaN
+    或被 clamp 成滿分。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    bad_doc = Document(id="bad", kind="news", source="malformed-feed", text="",
+                        ts=bad_ts)
+    c = Claim(id="c-bad", text="x", doc=bad_doc)
+    decay = _recency_decay(c, now)
+    assert math.isfinite(decay), f"非有限時間戳不應讓 recency 傳播成非有限值，實得 {decay}"
+    assert decay == pytest.approx(0.5), (
+        f"非有限時間戳應降為中性 0.5，實得 {decay}"
+    )
+
+
+def test_recency_decay_non_finite_now_neutralised():
+    """`now` 本身非有限（理論上不該發生，但防禦性檢查）時同樣中性化，
+    不讓 NaN/inf 從 `now` 這一側傳播。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    doc = Document(id="d", kind="news", source="coindesk", text="", ts=1_000_000.0)
+    c = Claim(id="c-now-nan", text="x", doc=doc)
+    assert _recency_decay(c, float("nan")) == pytest.approx(0.5)
+    assert _recency_decay(c, float("inf")) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("bad_ts", [float("nan"), float("inf"), float("-inf")])
+def test_score_non_finite_ts_claim_not_maxed_to_full_trust(bad_ts):
+    """真實 `score()` 路徑：NaN/±inf 時間戳的來源，`trust` 分數與
+    `components['recency']` 都不得是滿分 1.0（回歸鎖：確保 NaN 不會靠
+    `max(0.0, min(1.0, nan))` 的 CPython 行為漏網拿到滿分信任）。"""
+    now = 1_000_000.0
+    docs = [
+        _doc("bad-ts-claim", "news", "malformed-feed", "BTC 長線看漲", ts=bad_ts),
+    ]
+    scored = score(extract_claims(docs), now=now)
+    assert math.isfinite(scored[0].components["recency"])
+    assert scored[0].components["recency"] == pytest.approx(0.5)
+    assert scored[0].trust != 1.0, (
+        f"非有限時間戳不應拿到滿分 trust，實得 {scored[0].trust}"
+    )
 
 
 # --- Tier2 可解釋 UX：_manipulation_flags 回溯測試 ------------------------

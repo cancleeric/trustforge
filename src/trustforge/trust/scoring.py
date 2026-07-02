@@ -235,11 +235,29 @@ def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
     （因為真實年齡未知，不該用 0.0 分懲罰它可能只是輕微時鐘漂移），比照
     ts=0（未知 ts）的既有中性語意，回傳 0.5——全來源、scoring 層統一生效，
     不必逐連接器各自補防禦。
+
+    codex 對抗審 HIGH（PR #48 third-round，呼應 #12/#24）：`float('nan')` 能
+    通過既有 ts 解析（cached docs、on-chain 等來源皆可能夾帶壞資料）。舊版
+    `age_h < 0` 對 NaN 一律回傳 `False`（NaN 與任何數比較恆假）→ 不會走進
+    上面的未來戳分支，而是落到 `math.pow(0.5, nan / half_life_h) == nan`，
+    NaN 一路傳播到 `score()` 最後的 `max(0.0, min(1.0, raw))`——NaN 與 0.0/
+    1.0 比較同樣恆假，CPython 的 `min`/`max` 在此情況下會回傳**第一個比較到
+    的引數**，實測 `max(0.0, min(1.0, nan)) == 1.0`，等於让含 NaN（或 ±inf）
+    的時間戳拿到**滿分信任**——比未來戳問題更嚴重（未來戳只降到中性 0.5，
+    NaN 卻反而衝到滿分）。
+
+    修法：`ts`/`now`/算出的 `age_h` 任一非有限值（NaN、+inf、-inf，用
+    `math.isfinite` 判斷）一律視為「真實年齡未知」，比照 ts=0／未來戳的既有
+    中性語意回傳 0.5，阻斷 NaN/inf 往下游 `min`/`max` 傳播（沿用
+    `ingestion/coingecko.py` 的 `_finite_num` 同款 `math.isfinite` 防禦慣例，
+    保持一致）。
     """
     if not c.doc.ts:
         return 0.5
+    if not math.isfinite(c.doc.ts) or not math.isfinite(now):
+        return 0.5
     age_h = (now - c.doc.ts) / 3600.0
-    if age_h < 0:
+    if not math.isfinite(age_h) or age_h < 0:
         return 0.5
     return math.pow(0.5, age_h / half_life_h)
 

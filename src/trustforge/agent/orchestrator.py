@@ -11,6 +11,7 @@ Bedrock 只負責把推理「行文」成可讀敘述，不得把第三方現成
 """
 from __future__ import annotations
 
+import math
 import time
 from typing import Callable
 
@@ -747,8 +748,18 @@ def run_agent_pipeline(
     #     `max(docs.ts) < now_fn()` → 仍取 `max(docs.ts)`（dataset-relative，
     #     沿用既有離線行為，不受影響）。
     #   - 線上真資料：`max(docs.ts) ≈ now_fn() ≈ 牆鐘`，不受影響。
+    #
+    # codex 對抗審 HIGH（third-round，呼應 #12/#24）：`d.ts` 可能是
+    # `float('nan')`（壞資料/on-chain/cache 來源皆可能夾帶）。NaN 與任何數
+    # 比較恆為 False，Python 的 `max`/`min` 在混入 NaN 時**依引數/疊代順序
+    # 決定結果是否被污染成 NaN**（實測：NaN 排在後面時 `max` 才會回傳
+    # NaN），若 `now_ts` 因此變成 NaN，會繼續往下游 `_recency_decay`／
+    # `score()` 傳播，重演同一個滿分污染問題。修法：先濾掉非有限
+    # （`math.isfinite`）的 `d.ts` 再取 `max`，全部非有限則 fallback 牆鐘，
+    # `now_ts` 永遠是有限值。
     _wall_clock = now_fn()
-    now_ts = min(max((d.ts for d in docs), default=_wall_clock), _wall_clock)
+    _finite_ts = [d.ts for d in docs if math.isfinite(d.ts)]
+    now_ts = min(max(_finite_ts, default=_wall_clock), _wall_clock)
     # W1.5（#15）：線上帶真 client（cache miss 才即時呼叫 Bedrock）；離線／未設模型帶
     # None（CEO+codex 對抗審修正：None 不代表關掉語意矛盾閘，score() 仍會建立
     # cached_stance_fn(None) 去讀持久化快取 demo/sample_data/stance_cache.json，
