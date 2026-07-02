@@ -27,6 +27,7 @@ def _stop_overview_bg_thread_for_test() -> None:
     web._overview_bg_thread = None
     web._overview_bg_stop_event = None
     web._overview_html = None
+    web._overview_expiry_epoch = 0.0
 
 
 @pytest.fixture(autouse=True)

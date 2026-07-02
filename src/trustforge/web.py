@@ -133,14 +133,35 @@ _STATUS_PROBE_COIN = "__status_probe__"
 #      自己下一輪要不要重試，完全不會拖到任何一個首頁 request。
 #   3. 首頁 request 因此永遠即時（zero I/O）——backend 再怎麼 stall、憑證
 #      /DNS 再怎麼有問題，都碰不到 request 執行緒。
+#
+#   - HIGH #3（PR #47 三輪 review，最後一個微妙變體）：即使 I/O 全部移到
+#     背景 thread，新鮮度也只在**背景 thread `cache_get()` 成功返回後**才
+#     被檢查一次——如果背景那一輪讀取本身**永久 stall**（唯一一條 worker
+#     thread 卡住不返回、不拋錯，也不會有替補 thread 接手），它永遠到不了
+#     「判過期就設 `None`」那行程式碼。此時 `_overview_html` 會停在**上一
+#     輪成功時寫入的舊值**，且 request 路徑本身完全不檢查這個值的年齡，
+#     於是舊的信任判斷會無限期地繼續顯示，即使早就超過新鮮窗——對信任產
+#     品是致命的「過期當即時」。
+#     修法：**in-memory 值連同 expiry 時間戳一起存**（`_overview_html` +
+#     `_overview_expiry_epoch`，expiry = 該 blob 的 `fetched_at` +
+#     `TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`，背景 thread 寫值時一併寫
+#     expiry）。request 路徑讀完後、回傳前，多做**一次純記憶體時鐘比較**
+#     （`time.time() <= expiry`，零 I/O、鎖內完成）——即使背景 thread 永久
+#     stall、再也不會有新的一輪去把值設回 `None`，這顆 in-memory 現貨也會
+#     在時鐘走到 expiry 那一刻**自己失效**，不依賴背景 thread 主動清除。
 _OVERVIEW_BG_INTERVAL_SECONDS = 30.0  # 背景刷新頻率；跟首頁「即不即時」
 # 完全無關（首頁只讀 in-memory 現貨），純粹是「總覽資料多快跟上寫入者」
 # 的取捨，30–60s 區間內任一值皆可，取下限求新鮮。
 
-_overview_state_lock = threading.Lock()  # 只護 `_overview_html` 這個變數
-# 本身的讀寫，鎖內絕不做 I/O（見上）。
+_overview_state_lock = threading.Lock()  # 只護 `_overview_html`／
+# `_overview_expiry_epoch` 這兩個變數本身的讀寫，鎖內絕不做 I/O（見上）。
 _overview_html: str | None = None  # in-memory 現貨；`None` = 目前沒有可
 # 顯示的新鮮總覽（首次啟動前、或背景 thread 判定 stale/失敗）。
+_overview_expiry_epoch: float = 0.0  # 這顆現貨的絕對到期時間（`time.time()`
+# 座標系，等於寫入當下 blob 的 `fetched_at + TRUST_SNAPSHOT_FRESH_WINDOW_
+# SECONDS`）。request 路徑讀取後會拿現在時間跟這個值比較（HIGH #3
+# 修復）——就算背景 thread 之後永久 stall、再也不會來更新/清空
+# `_overview_html`，這個絕對時間戳到了照樣讓現貨在 request 端自己失效。
 
 _overview_bg_thread_lock = threading.Lock()  # 只護「有沒有啟動背景
 # thread」這個判斷本身（`is_alive()` 檢查 + `Thread.start()`），同樣不是
@@ -1262,6 +1283,15 @@ def _overview_bg_refresh_once() -> None:
     的**：卡住的只是這條背景 thread 自己，下一輪迴圈（或下次首頁 request
     觸發 `_ensure_overview_bg_thread_started()` 檢查 `is_alive()`）不受
     影響，首頁 request 執行緒從頭到尾不會呼叫到這個函式。
+
+    codex HIGH #3：如果**這一輪呼叫本身永久 stall**（`cache_get()` 卡住不
+    返回、不拋錯），這個函式永遠不會走到下面「寫回 `_overview_html`」那
+    行——舊值會停在記憶體裡。所以新鮮度不能只在「這輪成功」時檢查一次就
+    算數，還要讓 request 端有辦法自己判斷「這顆現貨是不是已經過期了」，
+    因此這裡連同 expiry 時間戳一起寫回：`_overview_expiry_epoch =
+    fetched_at + TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`（絕對時間，不是
+    倒數計時器）——即使之後再也沒有一輪成功刷新，request 路徑仍能靠純
+    記憶體時鐘比較讓這顆現貨準時失效（見 `_render_home_overview_cached()`）。
     """
     from .ingestion.cache import (
         TRUST_OVERVIEW_COIN,
@@ -1271,8 +1301,9 @@ def _overview_bg_refresh_once() -> None:
         cache_key,
     )
 
-    global _overview_html
+    global _overview_html, _overview_expiry_epoch
     new_html: str | None = None
+    new_expiry = 0.0
     try:
         backend = _home_overview_backend()
         entry = cache_get(backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN))
@@ -1283,16 +1314,20 @@ def _overview_bg_refresh_once() -> None:
                 docs = entry.get("docs") or []
                 if docs and isinstance(docs[0], dict):
                     candidate = str(docs[0].get("html", "") or "")
-                    new_html = candidate or None
-            # else：過期，`new_html` 維持 None——視同 miss，不顯示過期判斷。
+                    if candidate:
+                        new_html = candidate
+                        new_expiry = fetched_at + TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS
+            # else：過期，`new_html`/`new_expiry` 維持初值——視同 miss，不顯示過期判斷。
     except Exception as exc:  # noqa: BLE001 — 背景 thread 專用防禦：任何
         # I/O 問題（含真 stall 後才拋出、憑證/DNS/JSON fallback 檔案 I/O）
         # 都只影響這一輪結果，絕不往外傳、也絕不讓首頁 request 承擔。
         print(f"[web] WARNING: overview 背景刷新讀取失敗：{exc}", file=sys.stderr)
         new_html = None
+        new_expiry = 0.0
 
-    with _overview_state_lock:  # 極短：只做一次變數賦值，鎖內零 I/O
+    with _overview_state_lock:  # 極短：只做兩次變數賦值，鎖內零 I/O
         _overview_html = new_html
+        _overview_expiry_epoch = new_expiry
 
 
 def _overview_bg_loop(stop_event: threading.Event, interval: float) -> None:
@@ -1336,19 +1371,33 @@ def _ensure_overview_bg_thread_started() -> None:
 def _render_home_overview_cached() -> str:
     """首頁「多幣總覽」區塊讀路徑——**零 I/O**：只確保背景 thread 已啟動
     （`_ensure_overview_bg_thread_started()`，非阻塞），然後持極短鎖讀一
-    次 in-memory 現貨 `_overview_html`。不管 backend 有沒有 stall、
-    DynamoDB 憑證/DNS 有沒有問題，這個函式的執行時間都跟那些完全無關，
-    恆定是微秒級——真正的 I/O 全部關在 `_overview_bg_refresh_once()`
-    裡，只被背景 thread 呼叫（設計理由完整版見模組頂部「首頁『多幣總
-    覽』」大段註解，含 codex 兩輪 HIGH review 的教訓）。
+    次 in-memory 現貨 `_overview_html` + `_overview_expiry_epoch`，外加一
+    次**純記憶體時鐘比較**。不管 backend 有沒有 stall、DynamoDB 憑證/DNS
+    有沒有問題，這個函式的執行時間都跟那些完全無關，恆定是微秒級——真正
+    的 I/O 全部關在 `_overview_bg_refresh_once()` 裡，只被背景 thread 呼叫
+    （設計理由完整版見模組頂部「首頁『多幣總覽』」大段註解，含 codex 三
+    輪 HIGH review 的教訓）。
 
-    讀到 `None`（尚未有新鮮總覽/背景判定過期或失敗）一律回空字串——首頁
-    其餘內容照常渲染，只有總覽區塊優雅缺席（見 `_render_home_page()`
-    呼叫處）。
+    codex HIGH #3：光靠背景 thread「判過期就設 None」不夠——如果背景那
+    一輪呼叫本身永久 stall，它永遠到不了那行程式碼，舊值會停在記憶體裡
+    不會失效。所以這裡除了讀 `_overview_html`，還要拿現在時間跟寫入時算
+    好的絕對到期時間 `_overview_expiry_epoch` 比較：即使背景 thread 已經
+    卡死、再也不會來更新/清空這顆現貨，時鐘一旦走過 expiry，這個函式自
+    己就會判定它失效並回傳空字串——不依賴背景 thread 主動清除。
+
+    讀到 `None`／已過期一律回空字串——首頁其餘內容照常渲染，只有總覽區
+    塊優雅缺席（見 `_render_home_page()` 呼叫處）。
     """
     _ensure_overview_bg_thread_started()
     with _overview_state_lock:
-        return _overview_html or ""
+        html = _overview_html
+        expiry = _overview_expiry_epoch
+    if not html:
+        return ""
+    if time.time() > expiry:  # 純記憶體比較，零 I/O——即使背景 thread 永久
+        # stall、再也不會來更新，現貨到了絕對到期時間也會在這裡自己失效。
+        return ""
+    return html
 
 
 def _render_home_page() -> str:

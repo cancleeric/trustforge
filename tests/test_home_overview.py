@@ -50,6 +50,7 @@ def _stop_overview_bg_thread_for_test() -> None:
     web._overview_bg_thread = None
     web._overview_bg_stop_event = None
     web._overview_html = None
+    web._overview_expiry_epoch = 0.0
 
 
 @pytest.fixture(autouse=True)
@@ -264,6 +265,7 @@ def test_render_home_overview_cached_is_pure_in_memory_read(monkeypatch):
 
     with web._overview_state_lock:
         web._overview_html = '<div class="tf-overview-grid">FROM-MEMORY</div>'
+        web._overview_expiry_epoch = time.time() + 1000.0  # 還在新鮮窗內
 
     result = web._render_home_overview_cached()
     assert "FROM-MEMORY" in result  # 直接讀到 in-memory 現貨，沒有經過任何 I/O
@@ -298,6 +300,7 @@ def test_overview_bg_refresh_once_stale_entry_sets_none(monkeypatch):
     web._overview_bg_refresh_once()
 
     assert web._overview_html is None  # 過期視同 miss，不保留舊值也不顯示過期資料
+    assert web._overview_expiry_epoch == 0.0  # codex HIGH #3：expiry 也一併清空，不留殘值
     assert web._render_home_overview_cached() == ""
 
 
@@ -320,6 +323,11 @@ def test_overview_bg_refresh_once_fresh_entry_updates_memory(monkeypatch):
 
     assert web._overview_html is not None
     assert "FRESH" in web._overview_html
+    # codex HIGH #3：expiry 必須是「這顆 blob 的 fetched_at + 新鮮窗」這個
+    # 絕對時間，而不是「現在 + 新鮮窗」——避免背景 thread 因為排程延遲晚
+    # 執行時，反而把 expiry 往後拖延、變相放寬新鮮度。
+    expected_expiry = fresh_fetched_at + TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS
+    assert web._overview_expiry_epoch == pytest.approx(expected_expiry, abs=1.0)
     assert "FRESH" in web._render_home_overview_cached()
 
 
@@ -339,6 +347,7 @@ def test_overview_bg_refresh_once_sets_none_on_backend_exception(monkeypatch):
     web._overview_bg_refresh_once()  # 不該拋出
 
     assert web._overview_html is None
+    assert web._overview_expiry_epoch == 0.0  # codex HIGH #3：expiry 也一併清空
 
 
 def test_overview_bg_thread_started_lazily_and_is_singleton(monkeypatch):
@@ -436,6 +445,71 @@ def test_home_page_never_hangs_on_true_backend_stall(monkeypatch):
     stop_event.set()
     thread.join(timeout=stall_seconds + 2.0)
     assert not thread.is_alive()  # 撐過 stall 之後，收到停止訊號能正常收尾
+
+
+def test_home_page_overview_self_expires_when_background_permanently_stalled(monkeypatch):
+    """codex HIGH #3 回歸鎖（PR #47 三輪 review，最後一個微妙變體）——如果
+    背景那一輪 `cache_get()` 呼叫本身**永久 stall**（不是像上面測試那樣
+    「之後還是會返回」的暫時 stall，而是完全卡死、不會自己返回、也不會
+    有替補 thread 接手），這條背景 thread 永遠走不到「判過期就設 None」
+    那行程式碼。如果 request 路徑完全不驗證現貨的年齡，舊的信任判斷就會
+    被無限期地繼續顯示。
+
+    先直接模擬「上一輪成功快取的值，但視窗已經過期」（`_overview_html`
+    非空、`_overview_expiry_epoch` 設在過去），然後啟動一條真的會永久卡
+    住（`threading.Event().wait()` 沒有 timeout，永遠不會被 set）的背景
+    thread，證明：即使這條背景 thread 真的卡死、永遠不會再更新/清空
+    `_overview_html`，首頁 request 依然不顯示這顆已過期的舊值——純記憶
+    體時鐘比較讓它在 request 端自己失效，不依賴背景 thread 主動清除；且
+    首頁 request 依然即時，不會被卡死的背景 thread 拖慢。"""
+    with web._overview_state_lock:
+        web._overview_html = '<div class="tf-overview-grid">OLD-EXPIRED-WHILE-BG-STUCK</div>'
+        web._overview_expiry_epoch = time.time() - 1.0  # 一秒前就已經過期
+
+    never_set_event = threading.Event()
+
+    class _PermanentlyStallingBackend:
+        def get(self, key, *, consistent_read=False):
+            never_set_event.wait()  # 永遠不會被 set——真正的「永久」stall
+            return None  # 這行永遠不會被執行到
+
+    monkeypatch.setattr(web, "_home_overview_backend", lambda: _PermanentlyStallingBackend())
+
+    bg_stop_event = threading.Event()
+    bg_thread = threading.Thread(
+        target=web._overview_bg_loop,
+        args=(bg_stop_event, 30.0),
+        name="tf-overview-bg",
+        daemon=True,
+    )
+    bg_thread.start()
+    web._overview_bg_thread = bg_thread
+    web._overview_bg_stop_event = bg_stop_event
+
+    time.sleep(0.2)  # 讓背景 thread 有機會真的卡進 _PermanentlyStallingBackend.get() 裡
+    assert bg_thread.is_alive()  # 還活著——正卡在永久 stall 裡
+
+    start = time.time()
+    htmlout = web._render_home_page()
+    elapsed = time.time() - start
+
+    assert elapsed < 0.1  # 首頁 request 完全不受卡死的背景 thread 拖累
+    assert "OLD-EXPIRED-WHILE-BG-STUCK" not in htmlout  # 過期現貨自己失效
+    assert "多幣信任總覽" not in htmlout
+    assert "信任提煉" in htmlout
+
+    # 背景 thread 這時仍應該卡在永久 stall 裡——證明上面的「不顯示」是
+    # request 端自己判斷過期，不是背景 thread 剛好在這之間把值清掉了。
+    assert bg_thread.is_alive()
+
+    # 清理：背景 thread 卡在一個沒有 timeout 的 `Event.wait()` 上，
+    # `stop_event.set()` 本身沒辦法讓它中斷這個呼叫，要先讓
+    # `never_set_event` 被 set 它才能繼續往下跑、再走到迴圈頂端檢查
+    # `stop_event`。
+    never_set_event.set()
+    bg_stop_event.set()
+    bg_thread.join(timeout=3.0)
+    assert not bg_thread.is_alive()
 
 
 def test_home_page_concurrent_requests_never_touch_backend_and_stay_fast(monkeypatch):
