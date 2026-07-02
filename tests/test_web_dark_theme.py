@@ -238,12 +238,16 @@ def test_page_has_two_column_layout_grid():
 
 
 def test_query_panel_contains_form_fields():
-    """Query Console 面板應含幣種/題型/問題/分析按鈕（表單移進左側常駐面板）。"""
+    """Query Console 面板應含幣種/題型/問題/分析按鈕（表單移進左側常駐面板）。
+
+    第三輪 claude.ai/design world-class handoff（task #18）：問題欄位改用
+    `<textarea>`（設計稿 Prompt textarea），純視覺升級，非資料/邏輯變動。
+    """
     htmlout = web.render_page("")
     assert "Query Console" in htmlout
     assert '<select name="coin">' in htmlout
     assert '<select name="type">' in htmlout
-    assert '<input name="q"' in htmlout
+    assert '<textarea name="q"' in htmlout
     assert "<form" in htmlout
 
 
@@ -515,3 +519,117 @@ def test_render_report_step_ladder_headers_have_step_numbers():
     assert "步驟 1/3" in htmlout
     assert "步驟 2/3" in htmlout
     assert "步驟 3/3" in htmlout
+
+
+# ---------------------------------------------------------------------------
+# CEO 決策（PR #39，收斂）：theme toggle 切換機制（`/theme` 路由、rtok
+# render cache、`_sanitize_theme_next`/allowlist、cookie 讀寫、header ★
+# 按鈕）整個拆除——原本這裡有一大段 D 輪回歸測試（rtok 不重跑 pipeline、
+# CRLF/backslash/open-redirect 注入防護、`_render_cache_get` 過期語意），
+# 隨機制拆除一併移除，不再適用（機制不存在，測試無對象可測）。理由：rtok
+# cache 是 process-local，重啟/部署/多 worker/TTL 過期即 cache miss，會
+# 把使用者已產出的報告永久弄丟——「切主題不重跑 pipeline」與「不遺失
+# 報告」在無狀態 SSR 本質難兩全。`var(--tf-*)` CSS token 架構本身保留
+# （見下方 light-ready 測試），等 #20（結果持久化）做對後再重新開放。
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# RUN STATS 誠實命名 + 可對帳（MEDIUM 修正）
+# ---------------------------------------------------------------------------
+
+def test_run_stats_uses_honest_flagged_label_not_fake_dropped():
+    """flagged 證據仍顯示在報告裡（帶🚩徽章），不是真的被 drop 掉，
+    命名只能叫「Flagged」，不能叫「Flagged dropped」（假語意，CLAUDE #24）。"""
+    evidence = [
+        Evidence(
+            source="a", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="ref-a", related_claim="c-a", trust=0.8, flags=[],
+        ),
+        Evidence(
+            source="b", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="ref-b", related_claim="c-b", trust=0.8,
+            flags=["manipulation_keyword"],
+        ),
+    ]
+    out = web._render_run_stats(evidence)
+    assert "Flagged</span>" in out
+    assert "Flagged dropped" not in out
+
+
+def test_run_stats_scanned_reconciles_with_passed_flagged_below_threshold():
+    """Evidence rows 必須等於 unflagged≥0.3 + flagged + below-0.3，三者
+    加總不能對不上——不能有落在門檻之間、既沒被判 unflagged 也沒被判
+    flagged 的證據憑空從統計裡消失（MEDIUM 修正：可對帳）。"""
+    evidence = [
+        Evidence(
+            source="high", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r1", related_claim="c1", trust=0.9, flags=[],
+        ),
+        Evidence(
+            source="flagged", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r2", related_claim="c2", trust=0.9,
+            flags=["x"],
+        ),
+        Evidence(
+            source="low", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r3", related_claim="c3", trust=0.1, flags=[],
+        ),
+    ]
+    out = web._render_run_stats(evidence)
+    assert '<span class="tf-stat-k">Evidence rows</span><span class="tf-stat-v">3</span>' in out
+    assert '<span class="tf-stat-k">Unflagged ≥ 0.3</span><span class="tf-stat-v">1</span>' in out
+    assert '<span class="tf-stat-k">Flagged</span><span class="tf-stat-v">1</span>' in out
+    assert '<span class="tf-stat-k">Below 0.3</span><span class="tf-stat-v">1</span>' in out
+
+
+def test_run_stats_labels_match_true_semantics_not_scan_or_filter_claims():
+    """標籤誠實化回歸（codex 複審 MEDIUM，PR #39）：先前標「Sources scanned」
+    暗示真的掃描/統計了幾個唯一來源（實際上是證據**列數**，同源多筆會被
+    重複計；也不是 pipeline 前端真的掃描到的原始文件數），標「Passed
+    filter」暗示低分/被紅旗的證據真的被擋掉了（實際上全部仍顯示在報告
+    裡，沒有東西被過濾掉）——兩個標籤都誇大成「掃描/過濾」語意，與它們
+    顯示的數字之真義不符。修法：標籤直接改成數字的真義本身，不再出現
+    「scanned」「filter」這種暗示主動篩選/掃描行為的字眼。"""
+    evidence = [
+        Evidence(
+            source="a", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r1", related_claim="c1", trust=0.9, flags=[],
+        ),
+    ]
+    out = web._render_run_stats(evidence)
+    assert "Sources scanned" not in out, "不該再宣稱『掃描了幾個來源』——顯示的其實是證據列數"
+    assert "Passed filter" not in out, "不該再宣稱『通過過濾』——低分/flagged 證據並沒有被真的過濾掉"
+    assert "Below threshold" not in out, "門檻標籤應直接寫出真實數值 0.3，不用模糊的 threshold 字眼"
+    assert "Evidence rows" in out, "標籤必須精確等於它顯示的數字之真義：證據列數"
+
+
+# ---------------------------------------------------------------------------
+# light 主題全卡片一致（MEDIUM 修正：header/gauge 卡/信任分析卡不再寫死深色）
+# ---------------------------------------------------------------------------
+
+def test_light_theme_header_gradient_uses_css_vars_not_hardcoded_dark():
+    """header 背景漸層先前寫死 `#12171e`/`#0f141a`，light 模式下仍然一片深色
+    ——改用 `var(--tf-hdr-g1)`/`var(--tf-hdr-g2)`，light token 才會真的生效。"""
+    htmlout = web.render_page("")
+    assert "background:linear-gradient(var(--tf-hdr-g1),var(--tf-hdr-g2))" in htmlout
+    assert "background:linear-gradient(#12171e,#0f141a)" not in htmlout
+
+
+def test_confidence_gauge_wrap_uses_css_var_not_hardcoded_dark():
+    """信心 gauge 卡（`.tf-conf-wrap`）先前背景寫死 `#0f141a`，light 模式下
+    仍是深色卡片——改用 `var(--tf-inset)`。"""
+    htmlout = web.render_page("")
+    assert ".tf-conf-wrap{background:var(--tf-inset)" in htmlout
+    assert ".tf-conf-wrap{background:#0f141a" not in htmlout
+
+
+def test_trust_breakdown_card_uses_css_var_not_hardcoded_dark():
+    """信任分析卡（`_render_trust_breakdown` 內層卡片）先前背景寫死
+    `#0f141a`，light 模式下仍是深色——改用 `var(--tf-inset)`。"""
+    out = web._render_trust_breakdown(
+        {"reputation": 0.8, "corroboration": 0.7, "recency": 0.6, "manipulation": 0.0},
+        0.75,
+    )
+    assert "background:var(--tf-inset)" in out
+    assert "background:#0f141a" not in out

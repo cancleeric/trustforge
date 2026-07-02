@@ -391,3 +391,65 @@ def test_status_route_never_calls_real_source_fetch(json_cache_backend, monkeypa
     finally:
         if original_fetch is not None:
             monkeypatch.setattr(Source, "fetch", original_fetch, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# CEO 決策（PR #39，收斂）：theme toggle 切換機制整個拆除（rtok render
+# cache 是 process-local，重啟/部署/多 worker/TTL 過期即 cache miss，會把
+# 使用者已產出的報告永久弄丟——「切主題不重跑 pipeline」與「不遺失報告」
+# 在無狀態 SSR 本質難兩全）。`/status` 不再接受 theme 參數，固定渲染
+# dark；`var(--tf-*)` token 架構仍保留，等 #20（結果持久化）做對後再重新
+# 開放。
+# ---------------------------------------------------------------------------
+
+def test_handle_status_always_renders_dark_no_theme_param():
+    """`_handle_status` 不再接受 theme 參數，只回傳固定 dark 的頁面。"""
+    _, body = web._handle_status(client_ip="9.9.9.1")
+    assert 'data-theme="dark"' in body
+
+
+def test_status_route_via_do_get_ignores_any_cookie_and_stays_dark():
+    """端到端：即使帶 `Cookie: tf_theme=light`（theme toggle 已拆除，理論上
+    不會再有呼叫端設這個 cookie），`/status` 頁面仍固定渲染 dark，不因
+    cookie 值而改變（no-op，非白名單/驗證問題）。"""
+    from io import BytesIO
+    from email.message import Message
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("127.0.0.1", 12345)
+    h.path = "/status"
+    h.wfile = BytesIO()
+    headers = Message()
+    headers["Cookie"] = "tf_theme=light"
+    h.headers = headers
+
+    captured = []
+    h.send_response = lambda code: captured.append(("status", code))
+    h.send_header = lambda name, val: captured.append(("header", name, val))
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    body = h.wfile.getvalue().decode("utf-8")
+    assert 'data-theme="dark"' in body
+
+
+def test_theme_route_no_longer_exists():
+    """`/theme` 路由已整個拆除——命中 `/theme` 應落回一般路由分派（不存在
+    專屬處理，回 404），不再有任何 rtok/next/cookie 相關邏輯可觸發。"""
+    from io import BytesIO
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("127.0.0.1", 12345)
+    h.path = "/theme?to=light&rtok=whatever"
+    h.wfile = BytesIO()
+
+    captured = []
+    h.send_response = lambda code: captured.append(("status", code))
+    h.send_header = lambda name, val: captured.append(("header", name, val))
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    statuses = [c[1] for c in captured if c[0] == "status"]
+    assert statuses == [404]

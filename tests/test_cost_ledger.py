@@ -953,3 +953,220 @@ def test_costs_route_reachable_via_do_get_handler():
     handler.send_response.assert_called_once()
     status_code = handler.send_response.call_args[0][0]
     assert status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM 修正（CEO Chrome 複審，PR #39）：header cost 不再每次 render 都
+# 全掃 ledger（`_get_ledger_summary()` 要在 TTL 內命中快取，不是每次都真的
+# 呼叫底層 `.summary()`）。
+# ---------------------------------------------------------------------------
+
+def test_get_ledger_summary_caches_within_ttl(monkeypatch):
+    """同一個 `get_ledger` 參照下，短時間內連續呼叫 `_get_ledger_summary()`
+    多次，底層 `Ledger.summary()` 只應該真的被呼叫一次（快取命中），
+    不是每次都全掃 JSONL/DynamoDB。"""
+    calls = {"n": 0}
+
+    class _FakeLedger:
+        def summary(self):
+            calls["n"] += 1
+            return {"total_cost_usd": 1.23, "by_model": {}, "n_runs": 1}
+
+    fake = _FakeLedger()
+    monkeypatch.setattr(web, "get_ledger", lambda: fake)
+
+    for _ in range(5):
+        out = web._get_ledger_summary()
+        assert out["total_cost_usd"] == 1.23
+
+    assert calls["n"] == 1, "TTL 內重複呼叫應該命中快取，不該每次都真掃 ledger"
+
+
+def test_get_ledger_summary_cache_isolated_per_get_ledger_identity(monkeypatch):
+    """不同測試 monkeypatch 不同的 `get_ledger` 時（identity 改變），快取要
+    自動失效、拿到各自新的資料——確保 O(1) 快取不會讓不同測試互相污染
+    （既有 test_cost_ledger.py 內連續三個測試各自 monkeypatch 不同
+    fake_ledger 的模式必須繼續正確）。"""
+    class _FakeLedgerA:
+        def summary(self):
+            return {"total_cost_usd": 11.0, "by_model": {}, "n_runs": 1}
+
+    class _FakeLedgerB:
+        def summary(self):
+            return {"total_cost_usd": 22.0, "by_model": {}, "n_runs": 1}
+
+    monkeypatch.setattr(web, "get_ledger", lambda: _FakeLedgerA())
+    out_a = web._get_ledger_summary()
+    assert out_a["total_cost_usd"] == 11.0
+
+    monkeypatch.setattr(web, "get_ledger", lambda: _FakeLedgerB())
+    out_b = web._get_ledger_summary()
+    assert out_b["total_cost_usd"] == 22.0, "get_ledger 換了參照，快取不該回舊值"
+
+
+def test_costs_page_render_does_not_rescan_ledger_per_render(monkeypatch):
+    """`/costs` 頁面渲染（`_render_costs_page`）不該每次都真的觸發底層
+    ledger 全掃——同一個 request 內部即使讀了摘要多次，底層 `.summary()`
+    呼叫次數應該是常數（O(1)），不隨 render 次數線性增長。"""
+    calls = {"n": 0}
+
+    class _FakeLedger:
+        def summary(self):
+            calls["n"] += 1
+            return {"total_cost_usd": 5.0, "by_model": {}, "n_runs": 3}
+
+    fake = _FakeLedger()
+    monkeypatch.setattr(web, "get_ledger", lambda: fake)
+    monkeypatch.setattr(web, "COST_BUDGET_USD", "100")
+
+    for _ in range(3):
+        web._render_costs_page()
+
+    assert calls["n"] <= 1, (
+        f"/costs 重複 render {3} 次，底層 summary() 被呼叫 {calls['n']} 次，"
+        "應該在 TTL 內被快取吃掉，不該線性增長"
+    )
+
+
+def test_get_ledger_summary_single_flight_on_concurrent_cache_miss(monkeypatch):
+    """thundering herd 回歸（MEDIUM，codex 複審，PR #39，與 `/status` 的
+    `_render_status_page_cached` 同類 bug）：先前版本只在鎖內做「檢查
+    cache」跟「寫入 cache」兩小段，中間真正的 `Ledger.summary()` 計算是在
+    **鎖外**跑的——冷啟動或 TTL 剛過期那一瞬間，`ThreadingHTTPServer` 下
+    每個併發進來的頁面請求（header cost ledger 連結每頁都會觸發、`/costs`
+    本身也會）都各自判定 cache miss，全部平行呼叫一次 `summary()`：JSONL
+    全檔重讀／DynamoDB 全表 Scan 被同時打好幾份，延遲尖峰、DynamoDB
+    backend 下還有成本放大。
+
+    修法把整段「檢查 cache → miss 就地計算 → 寫回 cache」放進同一把鎖內
+    序列化——這裡斷言：cache miss 瞬間多執行緒併發呼叫
+    `_get_ledger_summary()`，底層 `summary()` 必須只被呼叫一次，其餘請求
+    排隊等鎖後直接吃新快取，不各自重算。
+
+    用 `time.sleep()` 刻意拉寬 `summary()` 的執行視窗，確保其他執行緒真的
+    會在它執行期間排隊等鎖，而不是僥倖沒撞在一起（比照 `/status` 的
+    `test_render_status_page_cached_single_flight_on_concurrent_expiry`）。
+    """
+    import threading
+    import time as time_mod
+
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+
+    class _SlowFakeLedger:
+        def summary(self):
+            with calls_lock:
+                calls["n"] += 1
+            time_mod.sleep(0.05)  # 拉寬執行視窗，逼其他執行緒排隊等鎖
+            return {"total_cost_usd": 9.99, "by_model": {}, "n_runs": 1}
+
+    fake = _SlowFakeLedger()
+    monkeypatch.setattr(web, "get_ledger", lambda: fake)
+    web._ledger_summary_cache.clear()  # 模擬冷啟動／TTL 過期後的 cache miss
+
+    barrier = threading.Barrier(20)
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        barrier.wait()  # 讓 20 個執行緒盡量同時撞上 cache-miss
+        out = web._get_ledger_summary()
+        with results_lock:
+            results.append(out)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert calls["n"] == 1, (
+        f"single-flight：cache miss 瞬間應只有一個請求真的重算 summary()，"
+        f"實際被呼叫 {calls['n']} 次"
+    )
+    assert len(results) == 20
+    assert all(r["total_cost_usd"] == 9.99 for r in results), (
+        "其餘請求應排隊等鎖後直接吃第一個請求算好、寫回快取的新值"
+    )
+
+
+def test_get_ledger_summary_new_factory_gets_fresh_value_after_old_factory_gc(monkeypatch):
+    """cache key 修正回歸（MEDIUM，codex 複審，PR #39）：先前版本用
+    `id(get_ledger)`（純整數）當快取 key，字典本身不持有 `get_ledger` 函式
+    物件的參照。若舊工廠被重新綁定、其函式物件又剛好被 GC 回收，CPython
+    有機率把同一個記憶體位址（同一個 `id()`）重新分配給另一個新建立的
+    函式物件——20 秒 TTL 內若新工廠恰好拿到舊 id，會直接命中舊工廠留下的
+    摘要快取，顯示錯誤（過期）的成本數字，而且是悄無聲息、不會噴錯的
+    資料錯誤。
+
+    修法：直接用 `get_ledger` 這個函式物件本身作 dict key，而不是它的
+    `id()`。這裡不靠「刻意製造真實 id 重用」這種依賴 CPython 記憶體分配
+    細節、跨直譯器不保證重現的作法去驗證（會是 flaky 測試的來源），而是
+    直接驗證修法真正保證的不變量，用 `weakref` 證明：
+
+    1. 快取 entry 還在字典裡（TTL 未過期）時，舊工廠函式物件不可能被 GC
+       回收——因為 dict key 本身就是對它的一份強參照。這正是修法讓
+       「同一個 id 被分配給另一個活著的物件」這件事結構上不可能發生的
+       原因：物件活著、id 就不會被回收再利用。
+    2. 快取 entry 被移除後（模擬 TTL 過期或 32 筆上限淘汰），舊工廠才真的
+       失去所有參照、可以被回收。
+    3. 新工廠接手後，一定拿到自己算出來的新摘要，不會吃到舊工廠殘留的
+       快取值。
+    """
+    import gc
+    import weakref
+
+    class _FakeLedgerOld:
+        def summary(self):
+            return {"total_cost_usd": 111.0, "by_model": {}, "n_runs": 1}
+
+    def factory_old():
+        return _FakeLedgerOld()
+
+    monkeypatch.setattr(web, "get_ledger", factory_old)
+    out_old = web._get_ledger_summary()
+    assert out_old["total_cost_usd"] == 111.0
+
+    ref = weakref.ref(factory_old)
+    del factory_old
+    # 注意：這裡故意不用 `monkeypatch.setattr(web, "get_ledger", None)`——
+    # `MonkeyPatch.setattr()` 每次呼叫都會 `getattr(target, name)` 記下
+    # 「當下的舊值」放進自己的 `_setattr` 還原清單，等於再多留一份對
+    # `factory_old` 的強參照直到測試結束才釋放，會讓底下「該被回收」的
+    # 斷言永遠失敗（pytest 測試框架本身的參照，不是本次要驗證的修法邏輯）。
+    # 直接對 module 屬性賦值即可——monkeypatch 在第一次 `setattr()` 時已經
+    # 記住了「測試開始前的真正原始值」，測試結束時仍會正確還原，不受這裡
+    # 的直接賦值影響。
+    web.get_ledger = None
+    gc.collect()
+
+    # 注意：不要在 `assert` 表達式裡直接呼叫 `ref()`——pytest 的 assertion
+    # rewriting 會把求值結果暫存進一個隱藏的區域變數，該變數會一路存活到
+    # 函式結束，等於偷偷多留一份對 factory_old 的強參照，讓底下「該被回收」
+    # 的斷言永遠失敗（誤判成 bug）。這裡先明確存到具名變數、斷言後立刻
+    # `del` 釋放，才不會被這個 pytest 內部機制污染判斷。
+    snapshot = ref()
+    assert snapshot is not None, (
+        "cache 內這筆 entry 還在（TTL 未過期），dict key 應該持有函式物件"
+        "的強參照，此時舊工廠不該已經被 GC 回收——這正是修法要保證的不變量"
+    )
+    web._ledger_summary_cache.pop(snapshot, None)
+    del snapshot
+    gc.collect()
+
+    snapshot = ref()
+    assert snapshot is None, "cache entry 移除後，舊工廠沒有其他參照了，該被 GC 回收"
+    del snapshot
+
+    class _FakeLedgerNew:
+        def summary(self):
+            return {"total_cost_usd": 222.0, "by_model": {}, "n_runs": 1}
+
+    def factory_new():
+        return _FakeLedgerNew()
+
+    monkeypatch.setattr(web, "get_ledger", factory_new)
+    out_new = web._get_ledger_summary()
+    assert out_new["total_cost_usd"] == 222.0, (
+        "新工廠必須拿到自己的新摘要，不該吃到舊工廠殘留的快取值"
+    )
