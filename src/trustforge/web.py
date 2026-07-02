@@ -612,23 +612,36 @@ def _get_ledger_summary() -> dict:
     `monkeypatch.setattr(web, "get_ledger", lambda: fake_ledger)` 換一顆新的
     fake），key 立刻不同、絕不會讀到舊 ledger 的快取值——`test_costs_page_*`
     系列測試每個都換一顆全新 fake ledger 並斷言各自數字，因此不受影響。
+
+    ⚠️ single-flight 修正（codex 複審 MEDIUM，PR #39，與 `_render_status_page_cached`
+    同類 bug）：先前版本鎖只保護「檢查 cache」與「寫入 cache」兩小段，中間
+    `get_ledger().summary()` 的實際計算是在**鎖外**跑的——冷啟動或 TTL 剛過期
+    那一瞬間，`ThreadingHTTPServer` 下每個併發進來的頁面請求（header cost
+    ledger 連結每頁都會觸發，`/costs` 本身也會）都各自判定 cache miss，
+    全部平行呼叫一次 `summary()`，等同 thundering herd：JSONL 全檔重讀／
+    DynamoDB 全表 Scan 被同時打好幾份，延遲尖峰、DynamoDB backend 下還有
+    成本放大。修法比照 `_render_status_page_cached()` 已驗證過的做法：把
+    「檢查 cache → miss 就地計算 → 寫回 cache」整段放進同一把鎖內序列化
+    執行。只有第一個發現 miss 的請求真的呼叫 `summary()`，其餘請求卡在鎖
+    外等待；等它們拿到鎖時，前者剛寫入的新值已經讓 cache 命中，直接吃新
+    值返回，不會各自重算。TTL 語意不變（20 秒），只是把「讀什麼」跟「算
+    什麼」的鎖粒度對齊，不再有鎖外的計算窗口。
     """
     key = id(get_ledger)
-    now = time.monotonic()
     with _ledger_summary_cache_lock:
+        now = time.monotonic()
         cached = _ledger_summary_cache.get(key)
         if cached is not None and (now - cached[0]) < _LEDGER_SUMMARY_CACHE_TTL_SEC:
             return cached[1]
-    try:
-        summary = get_ledger().summary()
-    except Exception:
-        summary = JsonlLedger().summary()
-    with _ledger_summary_cache_lock:
+        try:
+            summary = get_ledger().summary()
+        except Exception:
+            summary = JsonlLedger().summary()
         _ledger_summary_cache[key] = (now, summary)
         if len(_ledger_summary_cache) > _LEDGER_SUMMARY_CACHE_MAX:
             oldest_key = min(_ledger_summary_cache, key=lambda k: _ledger_summary_cache[k][0])
             _ledger_summary_cache.pop(oldest_key, None)
-    return summary
+        return summary
 
 
 def _header_cost_display() -> str:

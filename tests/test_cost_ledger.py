@@ -1026,3 +1026,65 @@ def test_costs_page_render_does_not_rescan_ledger_per_render(monkeypatch):
         f"/costs 重複 render {3} 次，底層 summary() 被呼叫 {calls['n']} 次，"
         "應該在 TTL 內被快取吃掉，不該線性增長"
     )
+
+
+def test_get_ledger_summary_single_flight_on_concurrent_cache_miss(monkeypatch):
+    """thundering herd 回歸（MEDIUM，codex 複審，PR #39，與 `/status` 的
+    `_render_status_page_cached` 同類 bug）：先前版本只在鎖內做「檢查
+    cache」跟「寫入 cache」兩小段，中間真正的 `Ledger.summary()` 計算是在
+    **鎖外**跑的——冷啟動或 TTL 剛過期那一瞬間，`ThreadingHTTPServer` 下
+    每個併發進來的頁面請求（header cost ledger 連結每頁都會觸發、`/costs`
+    本身也會）都各自判定 cache miss，全部平行呼叫一次 `summary()`：JSONL
+    全檔重讀／DynamoDB 全表 Scan 被同時打好幾份，延遲尖峰、DynamoDB
+    backend 下還有成本放大。
+
+    修法把整段「檢查 cache → miss 就地計算 → 寫回 cache」放進同一把鎖內
+    序列化——這裡斷言：cache miss 瞬間多執行緒併發呼叫
+    `_get_ledger_summary()`，底層 `summary()` 必須只被呼叫一次，其餘請求
+    排隊等鎖後直接吃新快取，不各自重算。
+
+    用 `time.sleep()` 刻意拉寬 `summary()` 的執行視窗，確保其他執行緒真的
+    會在它執行期間排隊等鎖，而不是僥倖沒撞在一起（比照 `/status` 的
+    `test_render_status_page_cached_single_flight_on_concurrent_expiry`）。
+    """
+    import threading
+    import time as time_mod
+
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+
+    class _SlowFakeLedger:
+        def summary(self):
+            with calls_lock:
+                calls["n"] += 1
+            time_mod.sleep(0.05)  # 拉寬執行視窗，逼其他執行緒排隊等鎖
+            return {"total_cost_usd": 9.99, "by_model": {}, "n_runs": 1}
+
+    fake = _SlowFakeLedger()
+    monkeypatch.setattr(web, "get_ledger", lambda: fake)
+    web._ledger_summary_cache.clear()  # 模擬冷啟動／TTL 過期後的 cache miss
+
+    barrier = threading.Barrier(20)
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        barrier.wait()  # 讓 20 個執行緒盡量同時撞上 cache-miss
+        out = web._get_ledger_summary()
+        with results_lock:
+            results.append(out)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert calls["n"] == 1, (
+        f"single-flight：cache miss 瞬間應只有一個請求真的重算 summary()，"
+        f"實際被呼叫 {calls['n']} 次"
+    )
+    assert len(results) == 20
+    assert all(r["total_cost_usd"] == 9.99 for r in results), (
+        "其餘請求應排隊等鎖後直接吃第一個請求算好、寫回快取的新值"
+    )
