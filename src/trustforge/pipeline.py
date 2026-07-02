@@ -78,13 +78,19 @@ def run(coin: str, query: str, qtype: QuestionType,
         query, coin, qtype, docs,
         client=BedrockClient(offline=llm_offline), log=log,
     )
-    # 將 collect 階段失敗的來源名稱補入 report.limits，讓評審可見資料缺口
-    # 去重（order-preserving），避免同來源多次失敗造成重複條目
-    _seen_failed: set[str] = set()
+    # 世界第一重寫 Phase 2「缺源優雅處理」：collect 階段失敗的來源（cache
+    # miss / 429 / 逾時等）合併成**單一**中性句子補入 report.limits，讓評審
+    # 看得到資料缺口、但不是一排逐來源的刺眼「無法取得，已跳過」——單一
+    # 來源失敗（如 reddit 429）在多源分析裡是常態，不該讀起來像整頁出錯。
+    # 去重（order-preserving），避免同來源多次失敗造成重複條目。
+    _seen_failed: list[str] = []
     for src_name in _failed:
         if src_name not in _seen_failed:
-            _seen_failed.add(src_name)
-            report.limits.append(f"{src_name} 來源無法取得，已跳過（逾時或連線失敗）。")
+            _seen_failed.append(src_name)
+    if _seen_failed:
+        report.limits.append(
+            "以下來源本輪未取得資料，不納入計算：" + "、".join(_seen_failed) + "。"
+        )
     return report, evidence, log
 
 

@@ -53,6 +53,19 @@ def load_ohlcv(coin: str, data_dir: str | Path) -> list[Bar]:
     return bars
 
 
+def latest_bar_date(coin: str, data_dir: str | Path) -> str | None:
+    """讀指定目錄的 OHLCV CSV，回傳最後一筆日期字串（`YYYY-MM-DD`）；查無資料
+    （檔案不存在/空檔）回 `None`，不猜測、不補一個假日期。
+
+    世界第一重寫 Phase 2：供 `web.py` 首頁/`/analyze` 預設查詢文案動態顯示
+    「基準資料涵蓋至 {日期}」，取代先前寫死的「近兩週」措辭——HOYA OHLCV
+    是定期更新的官方基準檔（非即時串流），寫死的相對時間字樣會隨資料未
+    同步更新而逐漸變成對判審的誤導破綻，日期必須每次動態讀 CSV 算出。
+    """
+    bars = load_ohlcv(coin, data_dir)
+    return bars[-1].date if bars else None
+
+
 def _pct(a: float, b: float) -> float:
     return 0.0 if a == 0 else (b - a) / a * 100.0
 
