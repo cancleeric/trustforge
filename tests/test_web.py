@@ -401,11 +401,12 @@ def test_do_get_home_route_returns_200_non_empty_body():
 
 
 def test_do_get_home_route_header_has_no_dev_artifacts():
-    """CEO 驗收標準 #2：header 最上方一行看不到版號/三檔模式徽號/
-    `cost ledger $` 字樣——這些移到 `/status`（見下方 `_do_get("/status")`
-    對照測試），不是刪除。"""
+    """老闆複驗後調整：首頁 header 允許保留一個小字/muted 版號（靠版號確認
+    部署是否成功），但三檔模式徽號／`cost ledger $` 這些才是真正的雜訊，
+    仍移到 `/status`（見下方 `_do_get("/status")` 對照測試），不是刪除。"""
     _, body = _do_get("/")
-    assert 'class="tf-version"' not in body
+    assert 'class="tf-hdr-version"' in body
+    assert web.VERSION in body
     assert 'class="tf-mode-badge' not in body
     assert "cost ledger" not in body
     assert "未設 BEDROCK_MODEL_ID" not in body

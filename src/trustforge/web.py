@@ -110,6 +110,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-costlink:hover{{border-color:#1f6feb;color:var(--tf-text)}}
  .tf-hdr-status-link{{font-size:.72rem;color:var(--tf-muted2);text-decoration:none;white-space:nowrap;opacity:.75}}
  .tf-hdr-status-link:hover{{color:var(--tf-muted);opacity:1;text-decoration:underline}}
+ .tf-hdr-version{{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--tf-muted2);opacity:.7;white-space:nowrap;margin-right:.5rem}}
  .tf-layout{{display:grid;grid-template-columns:290px minmax(0,1fr);gap:1.2rem;align-items:start}}
  .tf-query-panel{{position:sticky;top:1rem;background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
  .tf-query-panel h3{{margin:0;font-family:'IBM Plex Mono',monospace;font-size:.72rem;font-weight:700;color:var(--tf-muted2);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--tf-border);padding-bottom:.6rem}}
@@ -1382,11 +1383,14 @@ def _render_evidence_list(
 def _render_header(active_mode: str = "offline", *, minimal: bool = False) -> str:
     """組 `<header class="tf-hdr">`。
 
-    `minimal=True`（世界第一重寫 Phase 1）：首頁 `/` 專用——只留 logo +
-    一個極簡的 `/status` 小連結，**不顯示** `tf-version`／三檔模式徽號／
-    `cost ledger` 連結。這三樣不是被刪掉的功能，是移位：版號／模式能力／
-    成本摘要仍完整顯示於 `/status`（見 `_render_status_page`），首頁只是
-    不再讓判審 3 秒內看到一排 dev 內部資訊。
+    `minimal=True`（世界第一重寫 Phase 1，老闆 Chrome 複驗後調整）：首頁 `/`
+    專用——只留 logo + **小字/muted 版號** + 一個極簡的 `/status` 小連結，
+    **不顯示**三檔模式徽號／`cost ledger` 連結。版號是老闆明確要求保留的
+    （靠版號確認每次上版有沒有正常部署），小字不搶眼、不算 dev 雜訊；三檔
+    模式徽號／cost ledger 連結才是雜訊，這兩樣仍是移位（不是刪功能）：
+    模式能力／成本摘要仍完整顯示於 `/status`（見 `_render_status_page`）。
+    版號一律讀既有 `VERSION`（`_version.py`），fallback 是 `"dev"` 就照實
+    顯示 `"dev"`，不美化成假版號（老闆要看真實部署版號）。
 
     `minimal=False`（預設，`/costs`／`/status`／`/analyze` 結果頁沿用不變）：
     三檔徽號（dark 樣式，見 `.tf-mode-badge`）恆同時列出：離線示範／真資料·$0
@@ -1405,6 +1409,7 @@ def _render_header(active_mode: str = "offline", *, minimal: bool = False) -> st
             '<header class="tf-hdr">'
             f'{logo}'
             '<div class="tf-hdr-spacer"></div>'
+            f'<span class="tf-hdr-version">{html.escape(VERSION)}</span>'
             '<a class="tf-hdr-status-link" href="/status">系統狀態</a>'
             '</header>'
         )
