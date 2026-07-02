@@ -1224,6 +1224,13 @@ def _render_home_overview_cached() -> str:
     情況也只有一次 ~0.5 秒的網路 timeout，不會讓首頁被拖住。讀失敗/miss
     一律回空字串——首頁其餘內容照常渲染，只有總覽區塊優雅缺席（見
     `_render_home_page()` 呼叫處）。
+
+    codex HIGH（PR #47 review）：讀到非空 entry 不代表新鮮——DynamoDB TTL
+    刪除是 best-effort、可能延遲數小時到 48 小時，快照寫入者若停擺，
+    DynamoDB 仍會續回舊 item。這裡會自驗 `entry["fetched_at"]` 是否落在
+    `TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`（45 分鐘）新鮮窗內，超過視同
+    cache-miss（不顯總覽）；而且是在**寫入 module TTL cache 之前**就先過
+    濾掉過期結果，不會讓過期 blob 被這層快取續命成「新鮮」。
     """
     with _home_overview_cache_lock:
         now = time.time()
@@ -1233,6 +1240,7 @@ def _render_home_overview_cached() -> str:
         from .ingestion.cache import (
             TRUST_OVERVIEW_COIN,
             TRUST_OVERVIEW_SOURCE,
+            TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS,
             cache_get,
             cache_key,
         )
@@ -1242,9 +1250,22 @@ def _render_home_overview_cached() -> str:
             backend = _home_overview_backend()
             entry = cache_get(backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN))
             if entry is not None:
-                docs = entry.get("docs") or []
-                if docs and isinstance(docs[0], dict):
-                    overview_html = str(docs[0].get("html", "") or "")
+                # codex HIGH（PR #47 review）：不能只看「entry 非空」就當作
+                # 新鮮——DynamoDB TTL 刪除是 best-effort，可能延遲數小時到
+                # 48 小時（見 `DynamoDBCache` docstring），快照寫入者若停擺，
+                # DynamoDB 仍會續回舊 item，若這裡不驗新鮮度，會被下面的
+                # module TTL cache 每次 renew 成「新鮮」，斷網/排程停擺期間
+                # 首頁就會一直顯示過期的信任判斷當成即時。比照
+                # `CachedSource.fetch()` 既有的自驗新鮮度慣例（見
+                # `cache.py`），自己拿 `fetched_at` 跟新鮮窗比對，**不依賴
+                # DynamoDB TTL 的非同步刪除語意**——超過窗口就視同
+                # cache-miss，不顯總覽（寧可不顯示也不顯示過期判斷）。
+                fetched_at = float(entry.get("fetched_at", 0.0) or 0.0)
+                age = time.time() - fetched_at
+                if age <= TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS:
+                    docs = entry.get("docs") or []
+                    if docs and isinstance(docs[0], dict):
+                        overview_html = str(docs[0].get("html", "") or "")
         except Exception:
             # 讀失敗（含短 timeout 逾時、backend 例外）→ 不顯總覽，首頁其餘
             # 內容照常渲染；`cache_get()` 本身已具備例外處理/fallback，這裡

@@ -21,6 +21,7 @@ from trustforge.ingestion.cache import (
     JsonCacheBackend,
     TRUST_OVERVIEW_COIN,
     TRUST_OVERVIEW_SOURCE,
+    TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS,
     TRUST_SNAPSHOT_SOURCE,
     cache_get,
     cache_key,
@@ -224,6 +225,47 @@ def test_home_overview_recomputed_after_ttl_expires(monkeypatch):
     web._home_overview_cache["expires_at"] = time.time() - 1
     web._render_home_overview_cached()
     assert calls["n"] == 2
+
+
+def test_home_overview_stale_entry_treated_as_miss(monkeypatch):
+    """codex HIGH（PR #47 review）回歸鎖：DynamoDB TTL 刪除是 best-effort，
+    可能延遲數小時到 48 小時，reader 讀到「entry 仍非空但 fetched_at 早已
+    超過新鮮窗」時，必須自己判過期、視同 cache-miss（不顯總覽）——不能只
+    看「entry 非空」就當作新鮮，否則排程停擺時首頁會一直顯示過期的信任
+    判斷當成即時。這裡刻意讓假 backend 一直回傳同一筆「很舊」的 entry
+    （模擬 DynamoDB TTL 刪除滯後），證明不是靠 TTL 刪除才不顯示。"""
+    stale_fetched_at = time.time() - (TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS + 60.0)
+
+    class _StaleBackend:
+        def get(self, key, *, consistent_read=False):
+            return {
+                "docs": [{"html": '<div class="tf-overview-grid">STALE</div>'}],
+                "fetched_at": stale_fetched_at,
+            }
+
+    monkeypatch.setattr(web, "_home_overview_backend", lambda: _StaleBackend())
+
+    result = web._render_home_overview_cached()
+    assert result == ""  # 過期視同 miss，不顯示過期判斷
+    assert "STALE" not in result
+
+
+def test_home_overview_fresh_entry_shown(monkeypatch):
+    """對照組：`fetched_at` 落在新鮮窗內（未超過 45 分鐘），正常顯示總覽
+    ——證明新鮮度檢查沒有把正常情況也一併擋掉。"""
+    fresh_fetched_at = time.time() - 60.0  # 1 分鐘前，遠在 45 分鐘窗內
+
+    class _FreshBackend:
+        def get(self, key, *, consistent_read=False):
+            return {
+                "docs": [{"html": '<div class="tf-overview-grid">FRESH</div>'}],
+                "fetched_at": fresh_fetched_at,
+            }
+
+    monkeypatch.setattr(web, "_home_overview_backend", lambda: _FreshBackend())
+
+    result = web._render_home_overview_cached()
+    assert "FRESH" in result
 
 
 def test_home_overview_failure_result_also_cached_short_ttl(monkeypatch):

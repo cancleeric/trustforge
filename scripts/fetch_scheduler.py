@@ -79,6 +79,8 @@ from trustforge.ingestion.cache import (  # noqa: E402
     DEFAULT_REFRESH_INTERVAL_SECONDS,
     TRUST_OVERVIEW_COIN,
     TRUST_OVERVIEW_SOURCE,
+    TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS,
+    TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS,
     TRUST_SNAPSHOT_SOURCE,
     CacheBackend,
     cache_get,
@@ -545,15 +547,19 @@ def run_probe() -> int:
 # timeout 讀取，不逐幣讀取，見 `web.py::_render_home_overview_cached()`。
 # ---------------------------------------------------------------------------
 
-SNAPSHOT_REFRESH_INTERVAL_SECONDS = 15 * 60  # 建議 cron cadence（獨立 line，
-# 不綁在既有「打真連接器 API」的排程節奏內）。快照寫入者本身**不**做新鮮度
-# 守門（跟 `run_once()` 對真連接器的節流動機不同：這裡每次都是 real-off
-# `pipeline.run()`，只讀既有 cache 純運算，$0、無 429/rate-limit 疑慮，沒有
-# 「省額度」的理由；cron 多久觸發一次本身就是唯一的節流）。
-SNAPSHOT_STALE_AFTER_SECONDS = stale_after_for(SNAPSHOT_REFRESH_INTERVAL_SECONDS)
+SNAPSHOT_REFRESH_INTERVAL_SECONDS = TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS
+# = 15 分鐘，建議 cron cadence（獨立 line，不綁在既有「打真連接器 API」的
+# 排程節奏內）。快照寫入者本身**不**做新鮮度守門（跟 `run_once()` 對真連接器
+# 的節流動機不同：這裡每次都是 real-off `pipeline.run()`，只讀既有 cache
+# 純運算，$0、無 429/rate-limit 疑慮，沒有「省額度」的理由；cron 多久觸發
+# 一次本身就是唯一的節流）。定義於 `cache.py`（跟 `web.py` 讀路徑的新鮮度
+# 自驗共用同一份數字，避免各自定義漂移，見該模組 Axis C 段落 codex HIGH
+# 修復說明），本地只是同名 re-export，方便本檔既有程式碼原樣引用。
+SNAPSHOT_STALE_AFTER_SECONDS = TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS
 # = 45 分鐘，沿用 `cache.py` 既有的 3 倍 margin 換算公式（codex HIGH-1
 # 同款考量：cron jitter 或單輪 pipeline.run() 失敗仍要留緩衝，不能讓硬過期
-# 等於 refresh 間隔）。
+# 等於 refresh 間隔）——同一份數字也是 `web.py` 讀路徑驗證總覽 blob 新鮮度
+# 用的窗口，見 `cache.py::TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`。
 
 # 與 `web.py::_DATE_AGNOSTIC_QUERY_SUFFIX` 組出的預設查詢同文案（"分析該幣種
 # 近期市場狀況，整合多源資料"）——刻意不 import web.py（避免這支排程腳本被
