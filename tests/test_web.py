@@ -2,8 +2,6 @@
 import html
 import json
 import re
-import threading
-import time
 from io import BytesIO
 from email.message import Message
 from urllib.parse import parse_qs, urlparse
@@ -397,271 +395,27 @@ def test_render_home_page_marks_example_as_illustrative():
     assert "示意用途" in htmlout
 
 
-# ---------------------------------------------------------------------------
-# 世界第一重寫 Phase 3：首頁「多幣總覽」（讀 cache 信任分快照，credit-safe）
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _reset_home_multicoin_cache():
-    """`_home_multicoin_cache` 是 module 級 TTL 快取共用狀態，比照
-    `test_status_page.py::_reset_status_module_state` 慣例，每個測試前後
-    重置，避免前一個測試留下的 30 秒 TTL 快取內容外溢到後一個測試。"""
-    web._home_multicoin_cache["expires_at"] = 0.0
-    web._home_multicoin_cache["html"] = ""
-    web._home_multicoin_refreshing = False
-    yield
-    web._home_multicoin_cache["expires_at"] = 0.0
-    web._home_multicoin_cache["html"] = ""
-    web._home_multicoin_refreshing = False
-
-
-@pytest.fixture
-def json_cache_backend(tmp_path, monkeypatch):
-    """比照 `test_status_page.py` 慣例：`CACHE_BACKEND=json` + 指向隔離
-    tmp_path，確保測試不會意外打真 AWS（開發機可能設有 SSO/AWS profile）。"""
-    monkeypatch.setenv("CACHE_BACKEND", "json")
-    monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
-
-
-def test_render_home_page_shows_multicoin_overview_all_coins_empty(json_cache_backend):
-    """尚無任何快取寫入（#20「結果持久化」尚未落地的現況）→ 5 幣全部無資料
-    時，CEO 決策：整個「多幣總覽」區塊不渲染（避免首頁出現 5 張「尚無資料」
-    醜卡），回到 hero+怎麼運作+範例 的乾淨版面。不報錯、不即時算、不打
-    連接器。"""
-    htmlout = web._render_home_page()
-    assert "多幣總覽" not in htmlout
-    assert "尚無資料" not in htmlout
-
-
-def test_get_coin_trust_snapshot_returns_none_when_cache_miss(json_cache_backend):
-    assert web._get_coin_trust_snapshot("BTC") is None
-
-
-def test_get_coin_trust_snapshot_reads_valid_snapshot(json_cache_backend):
-    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
-
-    backend = JsonCacheBackend()
-    key = cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BTC")
-    backend.set(key, [{"trust": 0.82, "direction": "偏多"}], fetched_at=1000.0)
-
-    snap = web._get_coin_trust_snapshot("BTC")
-    assert snap is not None
-    assert snap["trust"] == pytest.approx(0.82)
-    assert snap["direction"] == "偏多"
-
-
-def test_get_coin_trust_snapshot_gracefully_handles_malformed_data(json_cache_backend):
-    """快取內容格式不符（缺 trust／非法數字／空 docs）→ 優雅回 None，不拋
-    例外，首頁不能因為快取格式漂移就掛掉。"""
-    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
-
-    backend = JsonCacheBackend()
-    backend.set(
-        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "ETH"),
-        [{"direction": "偏多"}], fetched_at=1000.0,  # 缺 trust
-    )
-    assert web._get_coin_trust_snapshot("ETH") is None
-
-    backend.set(
-        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "SOL"),
-        [{"trust": "not-a-number"}], fetched_at=1000.0,
-    )
-    assert web._get_coin_trust_snapshot("SOL") is None
-
-    backend.set(cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BNB"), [], fetched_at=1000.0)
-    assert web._get_coin_trust_snapshot("BNB") is None
-
-
-def test_render_home_page_shows_snapshot_when_cache_has_data(json_cache_backend):
-    """有快取資料的幣種顯示信任分＋方向標籤；其餘沒有資料的幣種仍優雅顯示
-    「尚無資料」——同一列可以混合兩種狀態，互不影響。"""
-    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
-
-    backend = JsonCacheBackend()
-    backend.set(
-        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BTC"),
-        [{"trust": 0.91, "direction": "偏多"}], fetched_at=1000.0,
-    )
-    backend.set(
-        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "ETH"),
-        [{"trust": 0.20, "direction": "偏空"}], fetched_at=1000.0,
-    )
-
-    htmlout = web._render_home_page()
-    assert "0.91" in htmlout
-    assert "0.20" in htmlout
-    assert "偏多" in htmlout
-    assert "偏空" in htmlout
-    # 其餘 3 幣（SOL/BNB/XRP）沒有快取資料，仍優雅顯示「尚無資料」
-    assert htmlout.count("尚無資料") == 3
-
-
-def test_home_multicoin_card_link_targets_real_analyze_default():
-    """每張卡的 CTA 連到 `/analyze` 真資料·$0 預設檔位（不帶 sample=1），
-    跟首頁範例卡刻意不同（範例卡才需要標「示意」，見
-    `test_render_home_page_marks_example_as_illustrative`）。"""
-    href = web._multicoin_analyze_href("BTC")
-    assert href.startswith("/analyze?")
-    qs = parse_qs(urlparse(html.unescape(href)).query)
-    assert qs["coin"][0] == "BTC"
-    assert "sample" not in qs
-
-
-def test_home_page_multicoin_never_calls_pipeline_or_connectors(json_cache_backend, monkeypatch):
-    """credit-safe 鐵律：多幣總覽純讀 cache，絕不觸發 pipeline.run / 真
-    Source.fetch()（比照 `test_status_page.py::test_status_route_never_calls_*`
-    的樁寫法：一旦被呼叫就斷言失敗）。這裡刻意先寫入 1 幣快照，確保區塊會
-    渲染（全空會被 CEO 決策的「整區隱藏」邏輯吃掉，测不到零外呼路徑）。"""
-    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
-
-    JsonCacheBackend().set(
-        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BTC"),
-        [{"trust": 0.5, "direction": "中性"}], fetched_at=1000.0,
-    )
+def test_render_home_page_never_calls_cache_get_or_dynamodb(monkeypatch):
+    """CEO 決策（Phase 3 退件）：首頁「多幣總覽」已整個移除，首頁必須回到
+    純靜態渲染——不讀 cache、不碰 DynamoDB，零可用性風險。這裡直接斷言
+    `ingestion.cache.cache_get()`／`get_cache_backend()` 一旦被呼叫就失敗，
+    確保沒有殘留的隱性呼叫路徑（比照既有 pipeline/Source.fetch 零外呼樁
+    寫法）。"""
+    import trustforge.ingestion.cache as cache_mod
 
     def _boom(*a, **kw):
-        raise AssertionError("首頁多幣總覽不該呼叫 pipeline.run()")
+        raise AssertionError("首頁不該呼叫 cache_get()（多幣總覽已移除）")
 
-    monkeypatch.setattr("trustforge.pipeline.run", _boom)
-    monkeypatch.setattr(web, "run", _boom)
+    def _boom_backend(*a, **kw):
+        raise AssertionError("首頁不該呼叫 get_cache_backend()（多幣總覽已移除）")
 
-    from trustforge.ingestion.base import Source
-
-    def _boom_fetch(self, query, coin=""):
-        raise AssertionError(f"首頁多幣總覽不該呼叫真 Source.fetch()（{self})")
-
-    monkeypatch.setattr(Source, "fetch", _boom_fetch, raising=False)
+    monkeypatch.setattr(cache_mod, "cache_get", _boom)
+    monkeypatch.setattr(cache_mod, "get_cache_backend", _boom_backend)
 
     htmlout = web._render_home_page()
-    assert "多幣總覽" in htmlout
-
-
-def test_home_multicoin_overview_ttl_cached_across_calls(json_cache_backend, monkeypatch):
-    """30 秒 TTL 內重複呼叫 `_render_home_multicoin_overview()` 不重打 cache
-    backend（比照 `_render_status_page_cached` single-flight 設計）——首頁
-    是全站流量最高頁面，避免每個請求都重新逐幣讀 cache。"""
-    calls = {"n": 0}
-    original = web._get_coin_trust_snapshot
-
-    def _counting(coin, *, backend=None):
-        calls["n"] += 1
-        return original(coin, backend=backend)
-
-    monkeypatch.setattr(web, "_get_coin_trust_snapshot", _counting)
-
-    web._render_home_multicoin_overview()
-    first_call_count = calls["n"]
-    assert first_call_count == len(COIN_POOL)
-
-    web._render_home_multicoin_overview()
-    assert calls["n"] == first_call_count  # TTL 內第二次呼叫應完全吃快取，不再重讀
-
-
-class _HangingBackend:
-    """模擬 DynamoDB client 沒有明確 timeout 時的「讀阻塞」情境（codex
-    HIGH）：`.get()` 完全不會自己逾時，模擬 AWS/憑證/DNS/表降級時 socket
-    卡住的最差狀況。刻意遠大於 `_HOME_MULTICOIN_READ_BUDGET_SECONDS`
-    （1.0s），確保測試斷言的是「硬預算生效」而不是恰好backend自己夠快。
-    """
-
-    def get(self, key, *, consistent_read=False):
-        # 這個 sleep 遠大於硬預算，且刻意「正常回傳」而非拋例外——測試斷
-        # 言的是呼叫端（ThreadPoolExecutor + `future.result(timeout=...)`）
-        # 沒有傻等這裡睡完，不是靠 backend 自己失敗才提早結束。
-        time.sleep(5.0)
-        return None
-
-
-class _RaisingBackend:
-    """模擬 backend 立即拋錯（如 AccessDenied／ValidationException）。"""
-
-    def get(self, key, *, consistent_read=False):
-        raise RuntimeError("模擬 DynamoDB 立即失敗")
-
-
-def test_home_page_responds_within_budget_when_backend_hangs(json_cache_backend, monkeypatch):
-    """codex HIGH：多幣總覽的 cache 讀不能拖垮首頁核心。backend 完全不回應
-    （模擬沒有 timeout 上限的 DynamoDB client 卡住）時，首頁仍須在硬預算
-    （`_HOME_MULTICOIN_READ_BUDGET_SECONDS`）內回應、渲染無總覽區塊、不是
-    500，且不能傻等 backend 那個 5 秒的 `time.sleep`。"""
-    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _HangingBackend())
-
-    start = time.monotonic()
-    htmlout = web._render_home_page()
-    elapsed = time.monotonic() - start
-
-    assert elapsed < web._HOME_MULTICOIN_READ_BUDGET_SECONDS + 1.0, (
-        f"首頁被 hang 住的 backend 拖慢，耗時 {elapsed:.2f}s"
-    )
     assert "多幣總覽" not in htmlout
     assert "尚無資料" not in htmlout
-
-
-def test_do_get_home_route_responds_within_budget_when_backend_hangs(
-    json_cache_backend, monkeypatch
-):
-    """比照上一則，但走真正的 `_do_get('/')` HTTP handler 路徑，確認整條
-    請求鏈（含 header/hero/其餘首頁內容）不因總覽 hang 住而回 500 或卡死。
-    """
-    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _HangingBackend())
-
-    start = time.monotonic()
-    code, body = _do_get("/")
-    elapsed = time.monotonic() - start
-
-    assert code == 200
-    assert elapsed < web._HOME_MULTICOIN_READ_BUDGET_SECONDS + 1.0
-    assert "信任提煉" in body  # 首頁其餘內容照常渲染，不是空白/錯誤頁
-
-
-def test_home_page_gracefully_hides_overview_when_backend_raises(
-    json_cache_backend, monkeypatch
-):
-    """backend 立即拋錯（如 AccessDenied）時，`cache_get()` 會 fallback 讀
-    本地 JsonCacheBackend（既有行為），這裡本地也沒資料 → 依然優雅整區
-    隱藏，不報 500、不洩漏例外字串到首頁。"""
-    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _RaisingBackend())
-
-    htmlout = web._render_home_page()
-    assert "多幣總覽" not in htmlout
-    assert "RuntimeError" not in htmlout
-    assert "Traceback" not in htmlout
-
-
-def test_concurrent_home_page_requests_not_all_blocked_by_hanging_backend(
-    json_cache_backend, monkeypatch
-):
-    """codex HIGH 核心情境：TTL miss + 慢 backend 時，多個併發首頁請求
-    不能全部卡在同一顆鎖上排隊（會變成「首頁全站不可用」）。這裡開
-    8 條執行緒同時打 `_render_home_page()`，斷言**每一條**都在硬預算附近
-    內完成，而不是像鎖序列化那樣越晚開始的執行緒等越久（例如第 8 條要
-    等前 7 條各自 hang 完才輪到）。
-    """
-    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _HangingBackend())
-
-    n_threads = 8
-    elapsed_times: list[float] = []
-    lock = threading.Lock()
-
-    def _worker():
-        start = time.monotonic()
-        web._render_home_page()
-        elapsed = time.monotonic() - start
-        with lock:
-            elapsed_times.append(elapsed)
-
-    threads = [threading.Thread(target=_worker) for _ in range(n_threads)]
-    overall_start = time.monotonic()
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=10.0)
-    overall_elapsed = time.monotonic() - overall_start
-
-    assert len(elapsed_times) == n_threads, "有執行緒沒在 10 秒內完成，代表被鎖序列化卡死"
-    # 若序列化排隊（每條都等前面的 hang 完），8 條會接近 8 * 5s = 40s+；
-    # 這裡斷言遠低於此，證明沒有互相卡隊。
-    assert overall_elapsed < 8.0, f"併發首頁請求疑似互相卡隊，總耗時 {overall_elapsed:.2f}s"
+    assert "信任提煉" in htmlout  # 首頁其餘內容照常渲染
 
 
 def test_mobile_media_query_forces_table_horizontal_scroll():

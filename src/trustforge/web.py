@@ -22,7 +22,6 @@
 """
 from __future__ import annotations
 
-import concurrent.futures
 import dataclasses
 import hmac
 import html
@@ -199,13 +198,6 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-home-steps{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:.6rem}}
  .tf-home-step{{background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:8px;padding:.8rem}}
  .tf-home-step .sub{{font-size:.8rem;margin:.3rem 0 0}}
- .tf-mc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:.7rem;margin-top:.3rem}}
- .tf-mc-card{{display:flex;flex-direction:column;gap:.35rem;background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:10px;padding:.75rem .85rem;text-decoration:none;color:inherit}}
- .tf-mc-card:hover{{border-color:#1f6feb}}
- .tf-mc-coin{{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:.92rem;color:var(--tf-text)}}
- .tf-mc-trust{{font-size:1.35rem;font-weight:700;font-family:'IBM Plex Mono',monospace}}
- .tf-mc-empty{{font-size:.8rem;color:var(--tf-muted)}}
- .tf-mc-cta{{font-size:.72rem;color:#79c0ff;margin-top:.15rem}}
  @media (max-width:900px){{
   body{{margin:1rem auto}}
   header.tf-hdr{{flex-direction:column;align-items:flex-start}}
@@ -225,7 +217,6 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
   body{{padding:0 .6rem}}
   .tf-section{{padding:.8rem;overflow-x:auto}}
   .tf-section table{{min-width:640px}}
-  .tf-mc-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .tf-dash-hdr{{gap:.4rem}}
   .tf-coin-badge{{font-size:.9rem;padding:.2rem .55rem}}
  }}
@@ -1169,271 +1160,27 @@ def _example_analyze_href() -> str:
     return html.escape(f"/analyze?{urlencode(params)}")
 
 
-# 世界第一重寫 Phase 3：首頁「多幣總覽」——讀最近一次分析的信任分快照。
-#
-# ⚠️ 目前尚無寫入端（#20「結果持久化」尚未落地）：`pipeline.run()`／
-# `pipeline.run_comparison()` 目前只把分析結果回傳給呼叫端組報告頁，不會
-# 寫回任何持久層。因此下面 `_get_coin_trust_snapshot()` 今天對所有幣種
-# 必然回傳 `None`（首頁卡片一律顯示「尚無資料」）——這是**已知、預期中**
-# 的現況，不是 bug。這裡先把讀路徑與資料契約建好（forward-compatible）：
-# 等 #20 補上「分析完寫回一筆快照」的寫入端後，首頁卡片會自動生效，不需要
-# 再改這支函式或 `_render_home_page()`。
-#
-# ⛔ credit-safe：只呼叫 `ingestion.cache.cache_get()`（單次 DynamoDB
-# GetItem／本地 JSON 讀取，跟 `/status` 既有的連線探測、資料鮮度矩陣同一套
-# 唯讀 cache 存取模式），**不呼叫 pipeline/connector/Bedrock 任何一項**；
-# 讀取失敗／格式不符一律回 `None`，不拋例外、不重算、不觸發任何外呼。
-_ANALYSIS_SNAPSHOT_SOURCE = "__analysis_snapshot__"
-
-
-def _get_coin_trust_snapshot(
-    coin: str, *, backend: Any | None = None
-) -> dict[str, Any] | None:
-    """讀 `{coin}` 最近一次分析的信任分快照（純 cache 讀，見上方模組註解）。
-
-    快取 key 沿用 `ingestion.cache.cache_key()` 慣例（`來源:幣別`），來源用
-    保留 sentinel `_ANALYSIS_SNAPSHOT_SOURCE`（比照 `_STATUS_PROBE_SOURCE`
-    的保留 key 寫法，不會撞到任何真實連接器名稱）。`CacheBackend.get()`
-    固定回傳 `{{"docs": [...], "fetched_at": float}}` 信封（見 `cache.py`
-    `DynamoDBCache`/`JsonCacheBackend` 共同介面）——這裡借用同一個信封存
-    一筆快照 dict（`docs[0]`），欄位：
-      - `trust`（float，0-1，信任分）
-      - `direction`（str，"偏多"/"偏空"/"中性"/"不明"，沿用既有
-        `schema.Report._direction_label()` 詞彙，不新發明一套說法）
-
-    任何讀取例外／格式不符（缺欄位、非 dict、trust 非法數字）一律回
-    `None`，呼叫端優雅降級顯示「尚無資料」，不拋例外、不讓首頁掛掉。
-
-    `backend` 可選——預設 `None` 時沿用 `get_cache_backend()`（既有行為，
-    測試/其他呼叫端不受影響）；首頁多幣總覽會顯式傳入自帶嚴格 timeout 的
-    backend（見 `_home_overview_cache_backend()`），避免預設 DynamoDB
-    client 無 timeout 上限而長時間 hang（codex HIGH）。
-    """
-    try:
-        from .ingestion.cache import cache_get, cache_key, get_cache_backend
-
-        entry = cache_get(
-            backend if backend is not None else get_cache_backend(),
-            cache_key(_ANALYSIS_SNAPSHOT_SOURCE, coin),
-        )
-    except Exception:
-        return None
-    if not entry:
-        return None
-    docs = entry.get("docs")
-    if not isinstance(docs, list) or not docs or not isinstance(docs[0], dict):
-        return None
-    snap = docs[0]
-    try:
-        trust = float(snap.get("trust"))
-    except (TypeError, ValueError):
-        return None
-    if trust != trust or trust in (float("inf"), float("-inf")):  # NaN/Inf 防禦
-        return None
-    direction = snap.get("direction")
-    if direction not in ("偏多", "偏空", "中性", "不明"):
-        direction = "不明"
-    return {
-        "trust": max(0.0, min(1.0, trust)),
-        "direction": direction,
-        "fetched_at": entry.get("fetched_at"),
-    }
-
-
-def _multicoin_analyze_href(coin: str) -> str:
-    """多幣總覽卡「看完整報告」CTA：連到 `/analyze` 真資料·$0 預設檔位（不帶
-    `sample=1`——跟首頁範例 CTA `_example_analyze_href()` 刻意不同：範例卡
-    本來就要標示「示意」，這裡是使用者主動選了某一幣種，要看的是真報告）。
-    """
-    params = {
-        "coin": coin,
-        "type": QuestionType.MULTI_SOURCE.value,
-        "q": f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料",
-    }
-    return html.escape(f"/analyze?{urlencode(params)}")
-
-
-def _render_home_multicoin_card(coin: str, snap: dict[str, Any] | None) -> str:
-    """單一幣種迷你信任卡：`snap` 為 `_get_coin_trust_snapshot(coin)` 的結果
-    （由呼叫端先讀好傳入，避免重複打 cache），無資料一律優雅顯示「尚無資料」
-    （不即時算、不打連接器，見模組頂部註解）。信任分顏色沿用 `_trust_bar()`
-    既有三檔門檻（≥0.7 綠／≥0.3 橙／其餘紅）；方向標籤沿用 `.tf-div-tag`
-    既有樣式與 comparison 頁「偏多＝綠 #3fb950／偏空＝紅 #f85149」既定色碼
-    （見 `_render_comparison` 附近的 `.tf-div-bull`/`.tf-div-bear`），不新
-    發明一套配色。
-    """
-    e = html.escape
-    href = _multicoin_analyze_href(coin)
-    if snap is None:
-        return (
-            f'<a class="tf-mc-card" href="{href}">'
-            f'<span class="tf-mc-coin">{e(coin)}</span>'
-            f'<span class="tf-mc-empty">尚無資料</span>'
-            f'<span class="tf-mc-cta">看完整報告 &#8594;</span>'
-            f"</a>"
-        )
-    trust = snap["trust"]
-    if trust >= 0.7:
-        trust_color = "#3fb950"
-    elif trust >= 0.3:
-        trust_color = "#d9832a"
-    else:
-        trust_color = "#f85149"
-    direction = snap["direction"]
-    if direction == "偏多":
-        dir_color, dir_bg = "#3fb950", "rgba(63,185,80,.12)"
-    elif direction == "偏空":
-        dir_color, dir_bg = "#f85149", "rgba(248,81,73,.12)"
-    else:
-        dir_color, dir_bg = "var(--tf-muted)", "rgba(139,148,158,.12)"
-    return (
-        f'<a class="tf-mc-card" href="{href}">'
-        f'<span class="tf-mc-coin">{e(coin)}</span>'
-        f'<span class="tf-mc-trust" style="color:{trust_color}">{trust:.2f}</span>'
-        f'<span class="tf-div-tag" style="color:{dir_color};background:{dir_bg}">{e(direction)}</span>'
-        f'<span class="tf-mc-cta">看完整報告 &#8594;</span>'
-        f"</a>"
-    )
-
-
-# module 級 ~30 秒 TTL 快取（比照 `_render_status_page_cached` single-flight
-# 寫法）：首頁是全站流量最高的頁面，多幣總覽每次 render 要對 `COIN_POOL`
-# 逐幣讀一次 cache（5 次 GetItem），沒必要每個請求都重打 DynamoDB，也怕被
-# 當洪水打。
-#
-# ⚠️ codex HIGH（首頁可用性）：原本 TTL miss 時**鎖內**對 5 幣連續讀，
-# `DynamoDBCache` 預設沒有明確 connect/read timeout——AWS/憑證/DNS/表降級
-# 時每次讀會長時間 hang 才 fallback，5 幣疊加 + `ThreadingHTTPServer` 下
-# 其他併發首頁請求全部卡在同一顆鎖等待，等同**首頁（全站最高流量頁）長時
-# 間不可用**。修法（總覽永遠是「輔助、best-effort」，不能拖垮首頁核心）：
-#   1. `_home_overview_cache_backend()`：DynamoDB 走**嚴格 timeout + 不
-#      重試**（見 `_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS`），json
-#      backend（測試/開發，走本地磁碟）不受網路影響、免額外限制。
-#   2. `_HOME_MULTICOIN_READ_BUDGET_SECONDS`：5 幣讀取的**硬總預算**，
-#      超過預算後剩餘幣一律視為「這次讀不到」（等同 cache miss），不再
-#      等——最差情況也只是總覽卡片變少甚至整區隱藏，不是首頁掛掉。
-#   3. 慢 I/O 全部在**鎖外**進行，鎖只用來做「TTL 是否命中」「是否已有
-#      執行緒在刷新」這兩個瞬時判斷（stale-while-revalidate）。若已有
-#      執行緒在刷新，其餘併發請求**立刻**拿舊/空快取回應，不排隊等鎖、
-#      不重複打 DynamoDB。
-_HOME_MULTICOIN_CACHE_TTL_SECONDS = 30.0
-_HOME_MULTICOIN_READ_BUDGET_SECONDS = 1.0
-_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS = 0.3
-_home_multicoin_cache_lock = threading.Lock()
-_home_multicoin_refreshing = False
-_home_multicoin_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
-
-
-def _home_overview_cache_backend() -> Any:
-    """多幣總覽專用 cache backend：`CACHE_BACKEND=dynamodb`（預設）時回傳
-    **自帶嚴格 connect/read timeout、不重試**的 `DynamoDBCache`，避免首頁
-    因 AWS/憑證/DNS/表降級而長時間 hang（codex HIGH，見上方模組註解）；
-    `CACHE_BACKEND=json`（測試/開發）時直接回傳 `JsonCacheBackend()`——
-    本地檔案 I/O 沒有網路 hang 的風險，沿用 `get_cache_backend()` 既有
-    行為即可，不需要額外限制。
-    """
-    from .ingestion.cache import DynamoDBCache, JsonCacheBackend
-
-    backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
-    if backend_name == "json":
-        return JsonCacheBackend()
-    return DynamoDBCache(
-        connect_timeout=_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS,
-        read_timeout=_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS,
-        max_attempts=1,
-    )
-
-
-def _render_home_multicoin_overview() -> str:
-    """首頁「多幣總覽」區塊：`COIN_POOL` 5 幣迷你信任卡列。純讀 cache（見
-    `_get_coin_trust_snapshot`），零 pipeline/connector/Bedrock 呼叫；
-    single-flight TTL 快取包裝，理由與寫法同 `_render_status_page_cached`，
-    但改為鎖外做慢 I/O + 硬讀取預算（見上方模組註解，codex HIGH 修正）。
-
-    5 幣快照**全部缺**（含「讀取逾時/失敗」，視同缺）時，整區塊回傳空
-    字串、完全不渲染——首頁維持 hero+怎麼運作+範例的乾淨版面，避免「5 張
-    尚無資料卡」拉低專業度。只要 ≥1 幣有快照，就渲染整區塊（有資料的顯
-    正常卡，其餘沒資料/逾時的幣仍顯示「尚無資料」佔位卡）。任何非預期例外
-    一律降級為「不顯示總覽」，絕不讓首頁其餘內容因此渲染失敗。
-    """
-    global _home_multicoin_refreshing
-    with _home_multicoin_cache_lock:
-        now = time.time()
-        if now < _home_multicoin_cache["expires_at"]:
-            return _home_multicoin_cache["html"]  # type: ignore[return-value]
-        if _home_multicoin_refreshing:
-            # 已有其他執行緒在刷新——別排隊等鎖、別重複打 5 次 DynamoDB，
-            # 直接回上一版快取（可能是空字串，若從未成功刷新過）。
-            return _home_multicoin_cache["html"]  # type: ignore[return-value]
-        _home_multicoin_refreshing = True
-
-    rendered = ""
-    try:
-        backend = _home_overview_cache_backend()
-        deadline = time.monotonic() + _HOME_MULTICOIN_READ_BUDGET_SECONDS
-        snapshots: dict[str, dict[str, Any] | None] = {c: None for c in COIN_POOL}
-
-        # 5 幣「同時」丟進 thread pool，而非逐一同步呼叫——即使某幣的
-        # `backend.get()` 本身完全沒有 timeout 機制而真的卡住（不只是
-        # DynamoDB 網路逾時，任何非預期的 backend/mock 行為都算），也只是
-        # 那顆背景執行緒繼續卡著，**不影響**這裡收集結果的迴圈：每個
-        # `future.result(timeout=剩餘預算)` 到點就會拋 `TimeoutError`，
-        # 讓總覽渲染在 `_HOME_MULTICOIN_READ_BUDGET_SECONDS` 硬預算內
-        # 一定返回，不因單一幣讀取 hang 住而拖垮整個首頁。
-        # `shutdown(wait=False)` 不等孤兒執行緒收尾，避免它們反過來拖住
-        # 這個 request handler thread 的回應時間。
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(COIN_POOL))
-        try:
-            futures = {
-                c: pool.submit(_get_coin_trust_snapshot, c, backend=backend) for c in COIN_POOL
-            }
-            for c, fut in futures.items():
-                remaining = max(0.0, deadline - time.monotonic())
-                try:
-                    snapshots[c] = fut.result(timeout=remaining)
-                except Exception:
-                    snapshots[c] = None  # 逾時或該執行緒本身拋例外，一律視為這次讀不到
-        finally:
-            pool.shutdown(wait=False)
-
-        if any(snap is not None for snap in snapshots.values()):
-            cards = "".join(_render_home_multicoin_card(c, snapshots[c]) for c in COIN_POOL)
-            rendered = (
-                '<div class="tf-section">'
-                "<h3>多幣總覽</h3>"
-                '<p class="sub" style="margin:0 0 .6rem">'
-                "最近一次背景分析的信任分快照（純讀取，非即時計算）。</p>"
-                f'<div class="tf-mc-grid">{cards}</div>'
-                "</div>"
-            )
-    except Exception:
-        rendered = ""  # 總覽是輔助功能，任何非預期錯誤都退回「不顯示」，不能讓首頁掛掉
-    finally:
-        with _home_multicoin_cache_lock:
-            _home_multicoin_cache["html"] = rendered
-            _home_multicoin_cache["expires_at"] = time.time() + _HOME_MULTICOIN_CACHE_TTL_SECONDS
-            _home_multicoin_refreshing = False
-    return rendered
-
 
 def _render_home_page() -> str:
     """首頁（`/`）內容：純靜態 HTML 字串組裝，比照 `_render_status_page`／
-    `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock 任何一項**
-    ——首頁流量最高，必須是零外呼的純靜態渲染（credit-safe：不能是計費熱點）。
-    唯一例外：「多幣總覽」讀取既有 cache backend 的唯讀 `get()`（見
-    `_render_home_multicoin_overview`／`_get_coin_trust_snapshot`），跟
-    `/status` 既有的 cache 唯讀存取同一套模式，不是新的連接器外呼，且加了
-    30 秒 TTL 快取降低重算頻率。
+    `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock/DynamoDB
+    任何一項**——首頁流量最高，必須是零外呼、零外部讀取的純靜態渲染
+    （credit-safe：不能是計費或可用性熱點）。
 
-    四段：Hero（一句話定位 + CTA 導向左側 Query Console）、多幣總覽（5 幣
-    迷你信任卡，見上）、產品總覽（事實→推論→結論三層架構，語彙沿用
-    `_render_report` 既有「步驟 1/3、2/3、3/3」，不新發明一套說法）、範例
-    入口（連到一個真實可執行的 `/analyze` 查詢，非虛構資料——見
-    `_example_analyze_href`）。
+    ⚠️ Phase 3 曾短暫在此加過「多幣總覽」讀 DynamoDB cache 快照，但 codex
+    抓出 ThreadPool 孤兒執行緒在 backend 永久阻塞時會無限累積、耗盡進程
+    資源；且該功能現在（issue #20 結果持久化尚未落地）必然全空、顯示不了
+    任何東西——CEO 決策：為一個現在看不到的東西冒可用性風險不值得，**整個
+    移除**。等 Axis C（快照寫入者 + 正確的背景預算/預渲染讀路徑）一起設計
+    做對後再重新加回。
+
+    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、產品總覽
+    （事實→推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟
+    1/3、2/3、3/3」，不新發明一套說法）、範例入口（連到一個真實可執行的
+    `/analyze` 查詢，非虛構資料——見 `_example_analyze_href`）。
     """
     e = html.escape
     example_href = _example_analyze_href()
-    multicoin_html = _render_home_multicoin_overview()
     return f"""
 <div class="tf-section tf-home-hero" style="border-color:#1f6feb;background:linear-gradient(135deg,rgba(31,111,235,.10),rgba(31,111,235,.02))">
   <h1>多源市場情報的信任提煉——不只給分數，給你為什麼</h1>
@@ -1441,8 +1188,6 @@ def _render_home_page() -> str:
   附上信任評分與可展開的原始依據——不是一句話式的黑箱結論。</p>
   <a class="tf-hero-cta" href="#tf-query-console">立即開始分析 &#8594;</a>
 </div>
-
-{multicoin_html}
 
 <div class="tf-section">
   <h3>怎麼運作</h3>

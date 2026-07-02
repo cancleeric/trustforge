@@ -344,10 +344,13 @@ class DynamoDBCache(CacheBackend):
         # 三個 timeout/重試參數**預設一律 None**（沿用 boto3/botocore 內建
         # 預設值，等同修改前行為）——只有明確傳入才會限縮，避免影響既有呼叫端
         # （`fetch_scheduler.py`／`get_cache_backend()` 預設路徑）既有的容錯
-        # 空間。目的是讓「首頁多幣總覽」這種高流量、讀失敗可優雅降級的呼叫端
-        # 能自帶嚴格 timeout（見 `web.py::_home_overview_cache_backend`），
-        # 而非全域改變 DynamoDB client 行為（codex HIGH：首頁不可因 AWS/
-        # 憑證/DNS/表降級而長時間 hang）。
+        # 空間。保留原因（codex HIGH，Phase 3）：高流量、讀失敗可優雅降級的
+        # 呼叫端應該能自帶嚴格 timeout，而非全域改變 DynamoDB client 行為
+        # （不可因 AWS/憑證/DNS/表降級而長時間 hang）。Phase 3 曾在
+        # `web.py` 加過一個這樣的呼叫端（首頁多幣總覽），但因該功能本身
+        # （結果快照尚無寫入者、現在必然全空）不值得冒 ThreadPool 孤兒
+        # 執行緒風險，已整個移除（見 `web.py::_render_home_page` 註解）；
+        # 這三個參數留著給 Axis C（快照寫入者 + 正確讀路徑）用。
         self._connect_timeout = connect_timeout
         self._read_timeout = read_timeout
         self._max_attempts = max_attempts
