@@ -24,11 +24,8 @@ import json
 import logging
 import math
 import os
-import secrets
 import threading
 import time
-from collections import OrderedDict
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -71,7 +68,7 @@ _STATUS_CACHE_TTL_SECONDS = 30.0
 _status_cache_lock = threading.Lock()
 _status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
 
-_PAGE = """<!doctype html><html lang="zh-Hant" data-theme="{theme}"><head><meta charset="utf-8">
+_PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TrustForge — 加密市場分析 AI Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -102,8 +99,6 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="{theme}"><head><meta 
  .tf-query-panel{{position:sticky;top:1rem;background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1.2rem;display:flex;flex-direction:column;gap:.9rem}}
  .tf-query-panel h3{{margin:0;font-family:'IBM Plex Mono',monospace;font-size:.72rem;font-weight:700;color:var(--tf-muted2);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--tf-border);padding-bottom:.6rem}}
  .tf-logo-mark{{color:#1f6feb;margin-right:.15rem}}
- .tf-theme-toggle{{font-size:.85rem;color:var(--tf-muted);text-decoration:none;border:1px solid var(--tf-border);border-radius:6px;padding:.3rem .55rem;line-height:1}}
- .tf-theme-toggle:hover{{border-color:#1f6feb;color:var(--tf-text)}}
  .tf-run-stats{{border-top:1px solid var(--tf-border);padding-top:.8rem;margin-top:.1rem;display:flex;flex-direction:column;gap:.35rem}}
  .tf-run-stats h3{{margin-bottom:.4rem}}
  .tf-stat-row{{display:flex;justify-content:space-between;gap:.6rem;font-size:.78rem}}
@@ -163,7 +158,6 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="{theme}"><head><meta 
  <span class="tf-version">{version}</span>
  {mode}
  <div class="tf-hdr-spacer"></div>
- <a class="tf-theme-toggle" href="{theme_toggle_href}" title="切換淺色/深色主題">&#9733;</a>
  <a class="tf-costlink" href="/status">系統狀態</a>
  <a class="tf-costlink" href="/costs">cost ledger {cost_display}</a>
 </header>
@@ -579,33 +573,19 @@ def _render_status_page_cached() -> str:
         return rendered
 
 
-def _handle_status(
-    client_ip: str = "",
-    *,
-    theme: str = "dark",
-    theme_toggle_href: str = "/theme?to=light&next=%2Fstatus",
-) -> tuple[int, str]:
+def _handle_status(client_ip: str = "") -> tuple[int, str]:
     """處理 `/status` 請求邏輯，回傳 `(http_status, html_body)`——由 `Handler.do_GET`
     包一層 `self._send`；抽出成獨立函式方便測試直接呼叫，不需開真 socket
     （比照 `_do_analyze`/`_do_comparison` 的抽出慣例）。
 
-    `theme`/`theme_toggle_href` 皆為關鍵字參數、有預設值，向後相容既有測試
-    （多處直接以 `_handle_status(client_ip=...)` 呼叫，不帶這兩個參數）。
-    `Handler.do_GET` 的 `/status` 分支會帶入依 `Cookie: tf_theme` 算出的
-    實際值——先前這裡沒有把 theme 往下傳，導致 `/status` 頁永遠渲染成
-    `data-theme="dark"`，即使使用者已經把主題切成 light 也沒用（light 主題
-    一致性修正一併補上，見 CEO Chrome 複審 PR #39）。
+    CEO 決策（PR #39，收斂）：theme toggle 機制整個拆除，`render_page()`
+    固定 dark，這裡不再需要接受/轉傳 `theme`/`theme_toggle_href` 參數。
     """
     try:
         _check_status_rate_limit(client_ip)
     except TooManyRequests as exc:
-        return 429, render_page(
-            f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
-            theme=theme, theme_toggle_href=theme_toggle_href,
-        )
-    return 200, render_page(
-        _render_status_page_cached(), theme=theme, theme_toggle_href=theme_toggle_href,
-    )
+        return 429, render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>")
+    return 200, render_page(_render_status_page_cached())
 
 
 _LEDGER_SUMMARY_CACHE_TTL_SEC = 20.0
@@ -1005,8 +985,6 @@ def _render_evidence_list(
 def render_page(
     body: str = "",
     active_mode: str = "offline",
-    theme: str = "dark",
-    theme_toggle_href: str = "/theme?to=light&next=%2F",
     run_stats_html: str = "",
 ) -> str:
     """組完整 HTML（三檔模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。
@@ -1024,27 +1002,20 @@ def render_page(
     `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`
     （首頁 `/`、`/costs` 等未經過分析流程的頁面，視為離線示範為預設 active 檔）。
 
-    `theme`：`"dark"`（預設）| `"light"`，只切換 CSS 變數（見 `_PAGE` 內
-    `:root`/`:root[data-theme="light"]`），zero-JS：不引入任何 inline script，
-    純靠 `<html data-theme="...">` + CSS custom properties 切換色票。非法值一律
-    視同 `"dark"`（呼叫端 `Handler.do_GET` 用 `_read_theme_cookie()` 讀
-    `Cookie: tf_theme=...` 已做白名單過濾，這裡再防禦一次）。
-
-    `theme_toggle_href`：header「★」主題切換連結的完整 href。HIGH 修正
-    （CEO Chrome 複審，PR #39）：主題改 cookie-based，這個 href 一律指向
-    輕量 `GET /theme` 路由（由呼叫端用 `_theme_href()` 算出：分析結果頁帶
-    `rtok` 直接用渲染快取重繪、不呼叫 pipeline；其餘頁面帶 `next` 導回），
-    不再是舊版把 `theme=light` 塞進當前分析網址、導致點一下切主題就重新
-    觸發一次真分析（live 模式下等於重花真金錢）的做法。預設
-    `"/theme?to=light&next=%2F"` 供未帶請求脈絡的呼叫端（如既有測試、
-    Lambda handler）使用。
+    CEO 決策（PR #39，收斂）：拆掉 theme toggle 切換機制，固定
+    `data-theme="dark"`（見 `_PAGE`），不再接受外部 `theme` 參數。原因：
+    rtok render cache 是 process-local（重啟/部署/多 worker/TTL 過期即
+    cache miss），"切主題不重跑 pipeline" 與 "不遺失已產出報告" 在無狀態
+    SSR 架構下本質難以兩全——與其留一個會在特定條件下把使用者已產出的
+    真報告弄丟的功能，不如先收斂成 dark-only，等 #20（結果持久化）做對
+    後再重新開放 theme toggle。`var(--tf-*)` CSS custom properties／
+    `:root[data-theme="light"]` 色票**仍保留**（不刪 token），只是目前
+    沒有任何切換入口能到達 light。
 
     `run_stats_html`：左側 Query Console 面板的「RUN STATS」區塊（見
     `_render_run_stats()`），只有跑過一次真實分析（`/analyze` 成功）才有資料，
     預設空字串（首頁／`/costs`／尚未分析的錯誤頁不顯示）。
     """
-    if theme not in ("dark", "light"):
-        theme = "dark"
     live_capable = HAS_BEDROCK
     live_is_active = active_mode == "live" and live_capable
 
@@ -1070,8 +1041,6 @@ def render_page(
     return _PAGE.format(
         mode=mode, body=body,
         version=html.escape(VERSION),
-        theme=html.escape(theme),
-        theme_toggle_href=html.escape(theme_toggle_href),
         cost_display=html.escape(_header_cost_display()),
         run_stats=run_stats_html,
         coins=_opts(COIN_POOL),
@@ -1716,158 +1685,6 @@ def _active_mode(qs: dict) -> str:
     return "offline"
 
 
-def _read_theme_cookie(cookie_header: str | None) -> str:
-    """從請求的 `Cookie` header 讀 `tf_theme`（"dark"｜"light"），缺值/非法值
-    一律回預設 `"dark"`。
-
-    HIGH 修正（CEO Chrome 複審，PR #39）：主題偏好改用 cookie 持久化，不再是
-    舊版把 `theme=light` 併入當前網址（含 `coin`/`type`/`q`/`live`/`token`
-    等）的做法——那個做法下，使用者在 `/analyze` 分析結果頁點主題切換星號，
-    等同對 `/analyze` 發一次新的 GET，會重新呼叫 pipeline；`live` 模式下更會
-    重打一次真 Bedrock、重花一次真金錢、多消耗一次限流額度。一個看起來純視覺
-    的切換動作卻悄悄觸發有金錢成本、有限流的後端操作，是使用者完全無法預期
-    的地雷。cookie 純粹是瀏覽器端狀態，讀取不需要、也絕不會呼叫任何 pipeline。
-    """
-    if not cookie_header:
-        return "dark"
-    try:
-        jar = SimpleCookie()
-        jar.load(cookie_header)
-    except Exception:
-        return "dark"
-    morsel = jar.get("tf_theme")
-    if morsel is not None and morsel.value == "light":
-        return "light"
-    return "dark"
-
-
-# ── 分析結果渲染快取（供主題切換重繪用，見 _read_theme_cookie 的 HIGH 修正）──
-#
-# 只快取「已經渲染完成的靜態 HTML 片段」（不含 Report/Evidence/log 物件本身，
-# 不佔用比字串更多的記憶體語意），且本輪視覺重構已把報告內文的結構色全面
-# 改用 CSS 變數（`var(--tf-*)`），同一份 body HTML 本身不含任何主題相關內容，
-# 可以安全地在不同主題間重複使用而不必重新渲染、更不必重新呼叫 pipeline。
-_RENDER_CACHE_TTL_SEC = 900.0  # 15 分鐘：夠使用者在同一份報告內切換幾次主題
-_RENDER_CACHE_MAX = 200
-_render_cache: "OrderedDict[str, tuple[float, str, str, str]]" = OrderedDict()
-_render_cache_lock = threading.Lock()
-
-
-def _render_cache_put(body_html: str, active_mode: str, run_stats_html: str) -> str:
-    """把一次 `/analyze` 成功渲染出的報告內容暫存起來，換一個一次性、不可預測
-    （`secrets.token_urlsafe`）的 opaque token，讓主題切換能重繪同一份報告而
-    完全不必重新呼叫 pipeline。Bounded LRU（上限 `_RENDER_CACHE_MAX` 筆、TTL
-    `_RENDER_CACHE_TTL_SEC` 秒），避免長跑服務因持續有分析請求而無限吃記憶體。
-    """
-    token = secrets.token_urlsafe(16)
-    now = time.monotonic()
-    with _render_cache_lock:
-        expired = [
-            k for k, (ts, *_rest) in _render_cache.items()
-            if now - ts > _RENDER_CACHE_TTL_SEC
-        ]
-        for k in expired:
-            _render_cache.pop(k, None)
-        while len(_render_cache) >= _RENDER_CACHE_MAX:
-            _render_cache.popitem(last=False)
-        _render_cache[token] = (now, body_html, active_mode, run_stats_html)
-    return token
-
-
-def _render_cache_get(token: str | None) -> tuple[str, str, str] | None:
-    """依 token 取回先前快取的 `(body_html, active_mode, run_stats_html)`；
-    查無此 token 或已過期一律回傳 `None`。
-
-    呼叫端（`/theme` 路由）查無快取時，就單純不還原報告內容、只做主題切換
-    本身——**絕不** fallback 成重新呼叫 pipeline：`/theme` 這個路由的程式碼
-    本身完全不 import、也不呼叫 `run`/`run_comparison`/`_do_analyze`/
-    `_do_comparison`，這是結構上的保證，不是「多數情況下不會」而已。
-    """
-    if not token:
-        return None
-    with _render_cache_lock:
-        entry = _render_cache.get(token)
-        if entry is None:
-            return None
-        ts, body_html, active_mode, run_stats_html = entry
-        if time.monotonic() - ts > _RENDER_CACHE_TTL_SEC:
-            _render_cache.pop(token, None)
-            return None
-    return body_html, active_mode, run_stats_html
-
-
-def _theme_href(to: str, *, next_path: str | None = None, rtok: str | None = None) -> str:
-    """組出 header「★」主題切換連結的 href，一律指向輕量 `GET /theme` 路由
-    （見 `Handler.do_GET` 的 `/theme` 分支），取代舊版把 `theme=` 塞進當前
-    網址的做法。
-
-    - 帶 `rtok`（`/analyze` 的每一種 HTML 回應：成功頁與 400/429/502 錯誤頁，
-      見 `Handler.do_GET` 內的 `analyze_page()`）：`/theme` 直接用
-      `_render_cache` 裡已經渲染好的內容換主題重繪並回 200，全程不呼叫
-      pipeline——包含錯誤頁，避免切主題誤觸發瀏覽器重新 GET `/analyze?...`
-      （含 live/real 模式參數）而重跑一次分析（502 尤其可能已消耗部分
-      Bedrock 成本）。
-    - 不帶 `rtok`（首頁／`/costs`／`/status`）：帶 `next`，`/theme` 設完
-      cookie 後 302 導回；這類頁面本來就不會呼叫 pipeline，重新 GET 一次
-      零成本、零風險，不需要走渲染快取。
-    """
-    params = {"to": to if to in ("dark", "light") else "dark"}
-    if rtok:
-        params["rtok"] = rtok
-    elif next_path:
-        params["next"] = next_path
-    return f"/theme?{urlencode(params)}"
-
-
-# /theme 導回目標允許的站內路由白名單（僅比對 urlparse 後、去掉 query
-# string 的 path 部分；見 `_sanitize_theme_next`）。
-_THEME_NEXT_ALLOWED_PATHS = frozenset({"/", "/analyze", "/analyze.json", "/costs", "/status"})
-
-
-def _sanitize_theme_next(next_raw: str | None) -> str:
-    """嚴格驗證 `/theme` 的 `next` 導回目標，防 open redirect 與
-    HTTP response-splitting／header 注入（HIGH 安全修正，codex 複審 PR #39）。
-
-    背景：`next` 經 `parse_qs` percent-decode 後，若只檢查「以單一 `/`
-    開頭」，`next=%2F%0D%0ASet-Cookie%3Aattacker%3D1` 解碼後會變成帶
-    CRLF 的字串，原封不動塞進 `send_header("Location", ...)`——Python 的
-    `http.server` 不會 sanitize header value，攻擊者可注入額外的
-    response header（例如偽造 `Set-Cookie` 幫受害者種 cookie）。
-
-    規則（任一項不過關就 fallback 回 `"/"`，一律以 **decode 後**的字串
-    驗證，不只驗 raw percent-encoded 形式）：
-
-    1. 拒絕任何控制字元（`ord(ch) < 0x20`，涵蓋 `\\r` `\\n` `\\t` 等所有
-       ASCII 控制碼）——擋 CRLF header 注入。
-    2. 拒絕 backslash `\\`——部分瀏覽器/代理會把 `\\` 正規化成 `/`，
-       `/\\evil.com` 可能被當成 protocol-relative URL 導到外部網域。
-    3. 必須以單一 `/` 開頭、且不是 `//` 開頭（`//evil.com` 會被瀏覽器
-       解讀成同 scheme 的 protocol-relative URL，導到外部網域）。
-    4. 用 `urlparse` 解析後，`scheme`/`netloc` 都必須是空字串（防禦
-       urlparse 對怪異輸入的正規化落差，多一層保險）。
-    5. allowlist：`urlparse(next_raw).path`（不含 query string）必須是
-       已知站內路由（`/`、`/analyze`、`/analyze.json`、`/costs`），
-       不在清單內一律 fallback——不接受任意站內路徑當開放跳板。
-    """
-    if not next_raw:
-        return "/"
-    if any(ord(ch) < 0x20 for ch in next_raw):
-        return "/"
-    if "\\" in next_raw:
-        return "/"
-    if not next_raw.startswith("/") or next_raw.startswith("//"):
-        return "/"
-    try:
-        parsed = urlparse(next_raw)
-    except ValueError:
-        return "/"
-    if parsed.scheme or parsed.netloc:
-        return "/"
-    if parsed.path not in _THEME_NEXT_ALLOWED_PATHS:
-        return "/"
-    return next_raw
-
-
 def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     """單幣分析入口，永遠回傳 (report, evidence, log) 三元組。
 
@@ -1950,17 +1767,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def _redirect(self, location: str, extra_headers=None):
-        """302 導回，供 `/theme` 路由設完 cookie 後導回原頁面用（見
-        `_read_theme_cookie`/`_theme_href` 的 HIGH 修正說明）。不帶 body。
-        """
-        self.send_response(302)
-        self.send_header("Location", location)
-        self.send_header("Content-Length", "0")
-        for name, val in (extra_headers or {}).items():
-            self.send_header(name, val)
-        self.end_headers()
-
     def log_message(self, *a):  # 靜音預設存取日誌
         pass
 
@@ -1972,73 +1778,23 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
 
-        # 主題（cookie-based，見 `_read_theme_cookie` 的 HIGH 修正說明）——
-        # 讀 `Cookie: tf_theme=...`，非 "light" 一律視為預設深色。首頁／
-        # `/costs`／尚未產出報告的錯誤頁，主題切換連結走「導回目前這頁」；
-        # `/analyze` 成功頁會在渲染完成後另外算一個帶 rtok 的連結（見下方），
-        # 蓋掉這裡的預設值。
-        # getattr 防禦：BaseHTTPRequestHandler 正常 dispatch 一定會先設好
-        # self.headers 才呼叫 do_GET；只有測試用 Handler.__new__(...) 手動
-        # 建構的最小化 mock（不跑真正的 request-line 解析）才會沒有這個屬性，
-        # 此時視同沒帶 Cookie，退回預設深色，不影響任何既有測試語意。
-        _headers = getattr(self, "headers", None)
-        theme = _read_theme_cookie(_headers.get("Cookie") if _headers is not None else None)
-        other_theme = "light" if theme == "dark" else "dark"
-        default_toggle_href = _theme_href(other_theme, next_path=self.path)
-
-        def page(body="", active_mode="offline", run_stats_html="", toggle_href=None):
-            return render_page(
-                body, active_mode=active_mode, theme=theme,
-                theme_toggle_href=toggle_href or default_toggle_href,
-                run_stats_html=run_stats_html,
-            )
-
-        # HIGH 修正（by construction，非逐分支補丁）：/analyze 的「每一種」HTML
-        # 回應——成功頁與 400/429/502 錯誤頁——一律經過 _render_cache_put 存進
-        # render cache，主題切換連結一律帶 rtok。這樣 /theme 永遠從 cache
-        # 重繪，不存在任何「toggle_href 帶著原始 /analyze?...(含 live/real
-        # 模式參數) 當 next」的分支，也就不會再有「切主題 → 302 導回 /analyze
-        # → 瀏覽器重新 GET → pipeline 重跑」的路徑，錯誤頁（尤其可能已消耗
-        # 部分 Bedrock 成本的 502）也不例外。
-        def analyze_page(body="", active_mode="offline", run_stats_html=""):
-            rtok = _render_cache_put(body, active_mode, run_stats_html)
-            return page(
-                body, active_mode=active_mode, run_stats_html=run_stats_html,
-                toggle_href=_theme_href(other_theme, rtok=rtok),
-            )
-
-        if u.path == "/theme":
-            to = qs.get("to", ["dark"])[0]
-            if to not in ("dark", "light"):
-                to = "dark"
-            set_cookie = f"tf_theme={to}; Path=/; Max-Age=31536000; SameSite=Lax"
-            rtok = qs.get("rtok", [None])[0]
-            cached = _render_cache_get(rtok) if rtok else None
-            if cached is not None:
-                body_html, active_mode, run_stats_html = cached
-                return self._send(
-                    200,
-                    render_page(
-                        body_html, active_mode=active_mode, theme=to,
-                        theme_toggle_href=_theme_href(
-                            "dark" if to == "light" else "light", rtok=rtok,
-                        ),
-                        run_stats_html=run_stats_html,
-                    ),
-                    extra_headers={"Set-Cookie": set_cookie},
-                )
-            next_path = _sanitize_theme_next(qs.get("next", ["/"])[0])
-            return self._redirect(next_path, extra_headers={"Set-Cookie": set_cookie})
+        # CEO 決策（PR #39，收斂）：theme toggle 切換機制（/theme 路由、
+        # rtok render cache、cookie 讀寫、header ★ 按鈕）整個拆除——rtok
+        # cache 是 process-local，重啟/部署/多 worker/TTL 過期都會 cache
+        # miss，"切主題不重跑 pipeline" 與 "不遺失已產出報告" 在無狀態 SSR
+        # 架構下本質難兩全。固定 dark（`render_page()` 預設值），
+        # `var(--tf-*)` token 架構保留，等 #20（結果持久化）做對後再重新
+        # 開放。`page()` 因此只是 `render_page()` 的薄包裝，不再需要算
+        # toggle_href。
+        def page(body="", active_mode="offline", run_stats_html=""):
+            return render_page(body, active_mode=active_mode, run_stats_html=run_stats_html)
 
         if u.path == "/":
             return self._send(200, page(""))
         if u.path == "/costs":
             return self._send(200, page(_render_costs_page()))
         if u.path == "/status":
-            code, body = _handle_status(
-                client_ip, theme=theme,
-                theme_toggle_href=_theme_href(other_theme, next_path="/status"),
-            )
+            code, body = _handle_status(client_ip)
             return self._send(code, body)
         if u.path in ("/analyze", "/analyze.json"):
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
@@ -2083,12 +1839,9 @@ class Handler(BaseHTTPRequestHandler):
                         mode_extra=mode_extra,
                     )
                     comparison_stats = _render_run_stats(evidence_a + evidence_b, log)
-                    # HIGH 修正：把渲染好的內容存進 _render_cache，主題切換連結
-                    # 帶 rtok 直接重繪這份內容，不會再對 /analyze 發新請求
-                    # （見 analyze_page/_theme_href 說明）。
                     return self._send(
                         200,
-                        analyze_page(
+                        page(
                             comparison_body, active_mode=active_mode,
                             run_stats_html=comparison_stats,
                         ),
@@ -2109,31 +1862,25 @@ class Handler(BaseHTTPRequestHandler):
                     mode_extra = _mode_extra_params(qs)
                     report_body = _render_report(report, evidence, log, mode_extra=mode_extra)
                     report_stats = _render_run_stats(evidence, log)
-                    # HIGH 修正：同上——存渲染快取，主題切換不重跑 pipeline。
                     return self._send(
                         200,
-                        analyze_page(
+                        page(
                             report_body,
                             active_mode=active_mode,
                             run_stats_html=report_stats,
                         ),
                     )
             except TooManyRequests as exc:
-                # HIGH 修正（by construction）：429/400/502 錯誤頁一律走
-                # analyze_page（rtok 快取重繪），不可再落回 page()/
-                # default_toggle_href——後者會把含 live/real 模式參數的原始
-                # /analyze?... 塞進 next，切主題會 302 導回原請求，讓瀏覽器
-                # 重新 GET、pipeline 重跑（502 尤其可能已消耗部分 Bedrock 成本）。
-                return self._send(429, analyze_page(
+                return self._send(429, page(
                     f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
                     active_mode=active_mode))
             except ValueError as exc:
-                return self._send(400, analyze_page(
+                return self._send(400, page(
                     f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
                     active_mode=active_mode))
             except Exception:
                 logging.exception("TrustForge analyze error")
-                return self._send(502, analyze_page(
+                return self._send(502, page(
                     "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>",
                     active_mode=active_mode))
         return self._send(404, page("<p>404</p>"))
