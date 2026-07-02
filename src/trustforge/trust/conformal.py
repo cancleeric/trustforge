@@ -28,14 +28,16 @@ HOYA BIT 歷史 OHLCV
 ----------------------------------------------------------------------------
 `τ` 是「錯誤方向判斷（判斷方向 ≠ 往後 3 個交易日實際方向）」的
 `trust.scoring._evidence_strength()` 分數，取校準集裡這些錯誤樣本由小到大
-排序後第 ⌈(n+1)(1-α)⌉ 大的順序統計量。若 held-out test 與校準集對「錯誤
-樣本的 evidence_strength」這個量可交換（exchangeable），則有 distribution
--free 的**聯合機率**保證：
+排序後第 ⌈(n+1)(1-α)⌉ 大的順序統計量（名次超出樣本數或校準集無錯誤樣本
+時，τ=`math.inf`）。若 held-out test 與校準集對「錯誤樣本的
+evidence_strength」這個量可交換（exchangeable），則有 distribution-free
+的**聯合機率**保證——⚠️ 保證是對**嚴格不等式**成立的：
 
-    P(方向判斷錯誤 且 evidence_strength ≥ τ) ≤ α
+    P(方向判斷錯誤 且 evidence_strength > τ) ≤ α
 
-也就是 `evidence_strength ≥ τ` 时，「同時是錯的」這件事發生的機率有嚴謹
-上界，不再是 `_CALIBRATION_TABLE` 那種工程判斷的武斷門檻。
+也就是 `evidence_strength > τ`（嚴格大於，不是 `≥`——見下方誠實聲明的
+邊界修正說明）时，「同時是錯的」這件事發生的機率有嚴謹上界，不再是
+`_CALIBRATION_TABLE` 那種工程判斷的武斷門檻。
 
 ----------------------------------------------------------------------------
 ⚠️ 誠實聲明（不可省略，任何引用此模組的地方都要保留）
@@ -53,12 +55,24 @@ HOYA BIT 歷史 OHLCV
   `_evidence_strength()` 所需「多來源」輸入的簡化代理，不是 news/social/
   onchain/regulatory 那種真正異質的多來源。
 - **回測實測發現（誠實揭露、非隱藏）**：此代理訊號集合對「3 個交易日後
-  方向是否正確」幾乎沒有判別力（held-out 上 P(錯|strength≥τ) 遠高於
+  方向是否正確」幾乎沒有判別力（held-out 上 P(錯|strength>τ) 遠高於
   α——joint 機率保證仍成立，但那是因為 τ 訂得很嚴、幾乎總是 abstain，
   不是訊號本身準。實際 held-out abstain 率見 `scripts/backtest_conformal.py`
   輸出與 PR 說明；這代表用真實 pipeline 的異質多來源證據（而非單一價格
   序列代理）重跑這套回測，τ 與 abstain 率很可能截然不同——本常數僅是
   這次特定代理訊號集合、這段歷史資料下的校準結果。
+- **邊界語義修正（codex 對抗審發現，已修）**：初版 `compute_tau()` 在
+  「校準集無錯誤樣本／樣本不足」時 fallback 回傳 `1.0`，且判斷「是否
+  通過門檻」全用 `>=`。但 `evidence_strength` 值域上界含 1.0，這個組合
+  會讓 fallback 場景（理論上該一律 abstain）被剛好等於 1.0 的樣本鑽
+  漏洞算「通過」，且標準 split conformal 順序統計量的有限樣本保證本來
+  就是對嚴格 `>` 成立、不是 `>=`。已訂正為 fallback=`math.inf` ＋ 全面
+  改用嚴格 `>`（見 `scripts/backtest_conformal.py::compute_tau()` 與
+  `main()`），並補上反例測試（全 1.0 錯誤樣本、ties、空校準集）鎖住
+  這個邊界。**下方回測數字是用修正後的嚴格 `>` 重跑驗證過的**——這次
+  資料集裡沒有測試樣本 evidence_strength 恰好等於 τ 的邊界情形，所以
+  修正前後數字本身沒變，但修正是必要的（保證原本的數學宣稱要對，不能
+  只是巧合沒踩到邊界）。
 
 回測參數與結果（`scripts/backtest_conformal.py`，可重現，同資料同輸出）：
     date range   : 2021-06-01 ~ 2026-05-31（BTC/ETH/SOL/BNB/XRP）
@@ -69,11 +83,12 @@ HOYA BIT 歷史 OHLCV
     forward_days : 3（判對錯的往後看窗口）
     calib samples: 1249（其中 wrong=649）
     tau (raw)    : 0.9153692142145569（硬編時無條件進位到 0.9154，
-                   保守方向——調高 τ 只會讓 P(wrong AND strength>=τ) 更小，
+                   保守方向——調高 τ 只會讓 P(wrong AND strength>τ) 更小，
                    不會破壞上面的聯合機率保證）
     held-out test: n=1226, pass(不 abstain)=73, confidently-wrong=49
-                   JOINT P(wrong AND strength>=tau) = 0.0400 (<= alpha=0.10，達標)
-                   CONDITIONAL P(wrong | strength>=tau) = 0.6712（參考用，
+                   （用嚴格 `>` 計得，見上方「邊界語義修正」）
+                   JOINT P(wrong AND strength>tau) = 0.0400 (<= alpha=0.10，達標)
+                   CONDITIONAL P(wrong | strength>tau) = 0.6712（參考用，
                    本輪程序不保證此量；數字偏高原因見上方「回測實測發現」）
                    abstain rate = 0.9405（見 PR 說明 / CEO 判讀是否要調整
                    α、N 或訊號設計）

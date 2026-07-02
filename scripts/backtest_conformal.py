@@ -42,12 +42,14 @@ gray 細案指定的「同一條 OHLCV 衍生多技術訊號」代理對方向�
 3. **nonconformity score = 校準集中 label=錯 的樣本的 evidence_strength**。
    τ = 這些「錯誤樣本」evidence_strength 由小到大排序後，第
    ⌈(n+1)(1-α)⌉ 大的順序統計量（α=0.1，標準 split conformal 有限樣本
-   修正公式）。直覺：τ 訂在「就算是錯的判斷，也很少能把 evidence_strength
-   衝到這麼高」的門檻之上——evidence_strength ≥ τ 時，錯誤同時發生的機率
-   有 distribution-free 保證上界 α（前提：校準集與 held-out test 對此指標
-   可交換／同分布，且歷史≈未來——見下方誠實聲明）。
+   修正公式；名次超出樣本數或校準集無錯誤樣本時，τ=`math.inf`，見
+   `compute_tau()` docstring）。直覺：τ 訂在「就算是錯的判斷，也很少能把
+   evidence_strength 衝到這麼高」的門檻之上——**嚴格**
+   `evidence_strength > τ`（不是 `≥`，見下方誠實聲明的邊界說明）時，
+   錯誤同時發生的機率有 distribution-free 保證上界 α（前提：校準集與
+   held-out test 對此指標可交換／同分布，且歷史≈未來——見下方誠實聲明）。
 4. **held-out test 驗證**：在 test 集上實測
-   P(方向錯 且 evidence_strength ≥ τ) 是否 ≤ α，印出 τ、n_calib_wrong、
+   P(方向錯 且 evidence_strength > τ) 是否 ≤ α，印出 τ、n_calib_wrong、
    coverage 實測值供人工核對。
 
 ----------------------------------------------------------------------------
@@ -69,6 +71,15 @@ gray 細案指定的「同一條 OHLCV 衍生多技術訊號」代理對方向�
 - 本腳本產出的 τ 之後**手動**抄進 `trust/conformal.py`（連同回測日期範圍/
   α/coverage 一併寫成註解，可版控可審——比照 `_CALIBRATION_TABLE` 的模式），
   不是每次啟動自動重跑；資料/規則變動時需重新執行本腳本並更新常數。
+- **邊界語義（codex 對抗審修正）**：初版用 `>=` 判斷是否通過門檻、
+  fallback（校準集無錯誤樣本/樣本不足）回傳 `1.0`——但 `evidence_strength`
+  值域上界含 1.0，`>=` + fallback=1.0 的組合會讓「理論上該一律 abstain」
+  的 fallback 場景被剛好等於 1.0 的樣本鑽漏洞算「通過」，且一般情況下
+  `>=` 本身也沒有標準 split conformal 順序統計量結果（該結果是對嚴格
+  `>` 成立）宣稱的有限樣本上界。已訂正為 fallback=`math.inf` ＋ 全面
+  改用嚴格 `>`（見 `compute_tau()` 與 `main()` 內註解），並補上反例測試
+  （全 1.0 錯誤樣本、ties、空校準集）鎖住這個邊界，見
+  `tests/test_w4_conformal.py`。
 """
 from __future__ import annotations
 
@@ -216,17 +227,26 @@ def _time_split(n_dates: int) -> tuple[int, int]:
 def compute_tau(wrong_strengths: list[float], alpha: float = ALPHA) -> float:
     """標準 split conformal 有限樣本分位數：第 ceil((n+1)(1-alpha)) 大順序統計量。
 
+    保證是對 **嚴格不等式** `strength > tau` 成立的（標準 split conformal
+    結果：P(s_{n+1} <= qhat) >= 1-alpha，qhat 為此順序統計量；k>n 時依
+    慣例 qhat=+inf）。呼叫端判斷「是否通過門檻」一律要用 `>`，不能用
+    `>=`——`evidence_strength` 的合法上界是 1.0（含），若門檻本身也可能
+    等於 1.0，`>=` 會讓「幾乎總是 abstain」的 fallback 被上界值鑽漏洞
+    通過，破壞保證。
+
     n=0（校準集裡沒有任何「錯」樣本）或需要的名次超出樣本數時，無法在此
-    校準集規模下給出 distribution-free 保證——保守地回傳 1.0（相當於「幾乎
-    總是 abstain」，見模組 docstring 對此 fallback 的説明）。
+    校準集規模下給出 distribution-free 保證——回傳 `math.inf`（**不是**
+    合法分數範圍內的值，任何有限 `evidence_strength`（值域 [0, 1]）都
+    不可能 `> math.inf`，因此配合呼叫端的嚴格 `>` 比較，效果是「一律
+    abstain」，這才是真正保守、不會被邊界值鑽漏洞的 fallback）。
     """
     n = len(wrong_strengths)
     if n == 0:
-        return 1.0
+        return math.inf
     ordered = sorted(wrong_strengths)
     k = math.ceil((n + 1) * (1 - alpha))
     if k > n:
-        return 1.0
+        return math.inf
     return ordered[k - 1]  # 1-indexed k -> 0-indexed
 
 
@@ -253,15 +273,20 @@ def main() -> None:
     wrong_strengths = [s.evidence_strength for s in calib_samples if s.wrong]
     tau = compute_tau(wrong_strengths)
 
+    # ⚠️ 嚴格 `>`（不是 `>=`）：見 `compute_tau()` docstring——標準 split
+    # conformal 的有限樣本保證是對嚴格不等式成立的；`evidence_strength`
+    # 值域上界含 1.0，用 `>=` 會讓邊界值（含 fallback 的 inf 場景之外，
+    # 一般場景 tau 剛好等於某個樣本值時）鑽漏洞算「通過」，破壞保證。
     n_test = len(test_samples)
-    n_test_pass = sum(1 for s in test_samples if s.evidence_strength >= tau)
-    n_test_confidently_wrong = sum(1 for s in test_samples if s.wrong and s.evidence_strength >= tau)
-    # 主指標（跟 gray 細案文字一致）：JOINT 機率 P(方向錯 且 strength>=tau)，
+    n_test_pass = sum(1 for s in test_samples if s.evidence_strength > tau)
+    n_test_confidently_wrong = sum(1 for s in test_samples if s.wrong and s.evidence_strength > tau)
+    # 主指標（跟 gray 細案文字一致，僅將「≥」訂正為嚴格「>」以對齊有限
+    # 樣本保證的實際數學形式）：JOINT 機率 P(方向錯 且 strength>tau)，
     # 這是 split conformal 對「錯誤樣本 score 分位數」做校準時能拿到
     # distribution-free 保證的量（見腳本上方 docstring 第 3 點的推導）。
     joint_wrong_rate = (n_test_confidently_wrong / n_test) if n_test else 0.0
     # 附帶指標（非本輪保證對象，僅供參考）：CONDITIONAL 機率
-    # P(方向錯 | strength>=tau, 即「不 abstain 時」)——這個量沒有本輪
+    # P(方向錯 | strength>tau, 即「不 abstain 時」)——這個量沒有本輪
     # split conformal 程序的理論保證，可能明顯偏離 alpha（信號本身預測力
     # 有限時尤其如此），印出來是為了誠實揭露、不是拿來宣稱達標。
     conditional_wrong_rate = (n_test_confidently_wrong / n_test_pass) if n_test_pass else 0.0
@@ -274,9 +299,9 @@ def main() -> None:
     print(f"calib samples: {len(calib_samples)} (wrong={len(wrong_strengths)})")
     print(f"tau = {tau:.4f}")
     print(f"test samples: {n_test} (pass/not-abstain={n_test_pass}, confidently-wrong={n_test_confidently_wrong})")
-    print(f"held-out JOINT coverage: P(wrong AND strength>=tau) = {joint_wrong_rate:.4f} (target <= alpha={ALPHA}) "
+    print(f"held-out JOINT coverage: P(wrong AND strength>tau) = {joint_wrong_rate:.4f} (target <= alpha={ALPHA}) "
           f"{'OK' if joint_wrong_rate <= ALPHA else 'VIOLATED'}")
-    print(f"held-out CONDITIONAL (參考用、非本輪保證對象): P(wrong | strength>=tau) = {conditional_wrong_rate:.4f}")
+    print(f"held-out CONDITIONAL (參考用、非本輪保證對象): P(wrong | strength>tau) = {conditional_wrong_rate:.4f}")
     print(f"held-out abstain rate at tau: {abstain_rate_test:.4f}")
 
     # 額外供比對：舊簡化分位數表隱含的 abstain 門檻（calibrated_confidence

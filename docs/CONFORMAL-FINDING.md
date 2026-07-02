@@ -11,7 +11,8 @@
 用 gray 細案指定的方法論（同一條 HOYA OHLCV 價格序列衍生出多個技術訊號，
 餵給既有 `_evidence_strength()`）算出的 conformal τ 在數學上是正確、可
 重現的 split conformal prediction，JOINT coverage 保證確實達標
-（P(方向錯 且 evidence_strength≥τ) = 0.0400 ≤ α=0.10）。但這個代理訊號
+（P(方向錯 且 evidence_strength>τ) = 0.0400 ≤ α=0.10；⚠️ 是嚴格 `>`，
+見下方「邊界語義修正」）。但這個代理訊號
 集合對「3 個交易日後方向是否正確」**幾乎沒有真實判別力**（pseudo-AUC≈
 0.49，等同隨機），coverage 達標的唯一原因是 τ 被回測校準得極嚴、系統
 幾乎總是選擇 abstain（held-out 實測 abstain 率 0.9405）。若把這個 τ
@@ -51,6 +52,37 @@ conformal coverage 保證）。
 **可重現性**：`python3 scripts/backtest_conformal.py` 跑兩次輸出逐字
 相同。
 
+### 邊界語義修正（codex 對抗審發現，PR #45 內已修）
+
+codex 審查發現初版 `compute_tau()` 有兩個邊界問題會推翻「數學正確、
+保守 abstain」的核心主張：
+
+1. **fallback 值不安全**：校準集裡沒有錯誤樣本、或所需名次超出樣本數
+   時，初版 fallback 回傳 `1.0`。但 `evidence_strength` 的合法值域是
+   `[0, 1]`（上界含 1.0）——若未來真的出現 `evidence_strength == 1.0`
+   的錯誤樣本，用 `>=` 判斷仍會判定「通過門檻」，讓本該「保守到一律
+   abstain」的 fallback 場景被鑽漏洞放行。
+2. **比較運算子錯誤**：標準 split conformal 的順序統計量結果
+   （P(s_{n+1} ≤ qhat) ≥ 1-α）在等價的「超過門檻」形式下是對**嚴格
+   不等式** `>` 成立的，不是 `>=`。用 `>=` 沒有這個結果宣稱的有限樣本
+   上界保證，ties（分數剛好等於 τ）時尤其會失真。
+
+**修正**（已套用，見 `scripts/backtest_conformal.py`）：
+- fallback 改回傳 `math.inf`（不是合法分數範圍內的值，任何有限
+  `evidence_strength` 都不可能大於它，配合下一點的嚴格 `>`，效果是
+  「一律 abstain」，這才是真正保守）。
+- 判斷是否通過門檻全面從 `strength >= tau` 改為 `strength > tau`（腳本
+  的 `main()` 與所有相關 docstring/註解同步訂正）。
+- 新增反例測試（`tests/test_w4_conformal.py`）：全 1.0 錯誤樣本、
+  重複分數（ties）、空校準集三種邊界情形，斷言不會誤放行、coverage
+  上界仍成立。
+- 用修正後的邏輯重跑真實回測驗證：**數字與修正前完全一致**
+  （τ=0.9154、JOINT=0.0400、CONDITIONAL=0.6712、abstain=0.9405）——
+  這次歷史資料集裡沒有測試樣本 evidence_strength 恰好等於 τ 的邊界
+  情形，所以沒踩到這個 bug 的實際影響，但修正本身仍是必要的：文件
+  宣稱「數學正確」就必須經得起邊界情形檢驗，不能只是這次資料剛好沒
+  暴露問題。
+
 ---
 
 ## (b) 核心發現：價格代理訊號對方向判別力≈隨機
@@ -64,16 +96,18 @@ alpha=0.1, forward_days=3
 calib samples: 1249 (wrong=649)
 tau = 0.9154
 test samples: 1226 (pass/not-abstain=73, confidently-wrong=49)
-held-out JOINT coverage: P(wrong AND strength>=tau) = 0.0400 (target <= alpha=0.1) OK
-held-out CONDITIONAL（參考用、非本輪保證對象）: P(wrong | strength>=tau) = 0.6712
+held-out JOINT coverage: P(wrong AND strength>tau) = 0.0400 (target <= alpha=0.1) OK
+held-out CONDITIONAL（參考用、非本輪保證對象）: P(wrong | strength>tau) = 0.6712
 held-out abstain rate at tau: 0.9405
 ```
+（用修正後的嚴格 `>` 重跑得到，數字跟修正前一致——這次資料集沒有測試
+樣本剛好卡在邊界，但修正本身仍是必要的，見下方「邊界語義修正」。）
 
 診斷過程（非猜測，實測驗證）：
 
 - **JOINT coverage 達標**（0.0400 ≤ 0.1）——這是 gray 細案唯一要求的數學
   保證，確實成立。
-- 但 **CONDITIONAL** P(錯 | strength≥τ) = 0.6712，遠高於 α。這代表就算
+- 但 **CONDITIONAL** P(錯 | strength>τ) = 0.6712，遠高於 α。這代表就算
   strength 通過了 τ 這道嚴格門檻，實際判斷仍有 67% 機率是錯的——JOINT
   保證能成立純粹是因為分母（test 全體樣本）夠大、通過 τ 的樣本
   （73/1226 ≈ 6%）夠少，不是訊號本身有預測力。
@@ -132,14 +166,21 @@ coverage 保證」——這個誠實標註本身在本輪之前已存在，未�
 
 ## 測試現況
 
-`tests/test_w4_conformal.py`（4 個測試，只驗研究工件本身，不牽動
+`tests/test_w4_conformal.py`（8 個測試，只驗研究工件本身，不牽動
 production 行為）：
 1. `test_conformal_abstain_threshold_is_deterministic`
 2. `test_compute_tau_matches_manual_order_statistic`
 3. `test_compute_tau_empty_wrong_set_is_conservative`
 4. `test_compute_tau_deterministic_same_input_same_output`
 5. `test_backtest_holdout_joint_coverage_within_alpha_plus_slack`（重跑
-   真實資料驗證 JOINT coverage，並比對硬編常數與最新回測是否同量級）
+   真實資料驗證 JOINT coverage（嚴格 `>`），並比對硬編常數與最新回測是否
+   同量級）
+6. `test_all_wrong_strengths_at_max_value_does_not_leak_at_boundary`
+7. `test_tied_scores_at_order_statistic_boundary_do_not_leak`
+8. `test_empty_calibration_set_forces_abstain_even_at_max_legal_strength`
+
+第 6-8 項是本輪 codex 對抗審發現「fallback=1.0 + `>=`」邊界 bug 後新增
+的反例測試，見上方「邊界語義修正」章節。
 
 既有測試套件（含 `tests/test_w4_calibration.py`）因 production 行為
 revert 回原狀，理論上應全綠——實測結果見 PR 說明。
