@@ -1,8 +1,16 @@
-"""W4：Split Conformal Prediction abstain 門檻——驗收測試。
+"""W4：Split Conformal Prediction 研究工件——驗收測試。
 
-master 計劃 Axis B #1，取代 `trust.scoring._CALIBRATION_TABLE` 那套簡化
-分位數表。涵蓋範圍（見 PR 說明 / `trust/conformal.py` 與
-`scripts/backtest_conformal.py` 模組上方誠實聲明，本檔不重複貼）：
+master 計劃 Axis B #1。**CEO 決策（見 PR 說明）：本輪只留研究工件，不
+wire 進 production**——`trust.conformal`/`scripts/backtest_conformal.py`
+本身數學正確、可重現，但依 gray 細案指定方法論算出的 τ 是「同一條 OHLCV
+衍生多技術訊號」這個非真異質代理訊號的產物（pseudo-AUC≈0.49、對方向
+幾乎無判別力），套進 production 會讓 abstain 率衝到 ~94%（見
+`docs/CONFORMAL-FINDING.md` 完整記錄）。`agent.orchestrator` 的三態
+abstain 門檻**維持原本的簡化分位數校準**（`_ABSTAIN_CALIBRATED_THRESHOLD
+= 0.35`），不讀這裡的 τ；三態回歸測試在既有 `tests/test_w4_calibration.py`
+即涵蓋，本檔不重複。
+
+本檔只驗證研究工件本身（純數學/可重現性，不牽動 production 行為）：
   1. `conformal_abstain_threshold()` 確定性。
   2. `backtest_conformal.compute_tau()` 順序統計量公式本身正確性（純數學，
      跟真實資料無關，用手算小範例驗證）。
@@ -10,17 +18,6 @@ master 計劃 Axis B #1，取代 `trust.scoring._CALIBRATION_TABLE` 那套簡化
      test 集的 JOINT coverage 檢查（P(方向錯 且 strength≥τ) ≤ α+餘裕）——
      跟 `trust/conformal.py` 硬編 τ 時附的回測數字互相印證，資料/規則
      變動時這個測試能抓到「硬編常數過時」。
-  4. **三態回歸鎖**：`agent.orchestrator` 的 abstain/low_confidence/normal
-     三態骨架機制本身（不是某個特定門檻數值）在真實（當前硬編）τ 下仍
-     正確運作——用手造 `TrustedBrief`（直接指定 `evidence_strength`／
-     `calibrated_confidence`），鎖住三態邊界行為，不管 τ 未來因重新回測
-     而調整多少，只要機制正確這組測試就該一直通過。
-
-⚠️ 不在本檔測試範圍內、需要人工判讀的重大發現：用本輪 gray 細案指定的
-「OHLCV 技術訊號代理多來源」方法論算出的真實 τ（見 `trust/conformal.py`）
-遠比舊版簡化門檻嚴格，套用到既有測試資料的實際效果是 abstain 率大幅
-上升（held-out backtest ~94%，見 PR 說明的 alpha 敏感度掃描與 pseudo-AUC
-分析）——這是本次誠實回測的真實結果，不是本檔測試要掩蓋或迴避的對象。
 """
 from __future__ import annotations
 
@@ -29,17 +26,7 @@ import math
 import sys
 from pathlib import Path
 
-from trustforge.agent.orchestrator import (
-    _ABSTAIN_CALIBRATED_THRESHOLD,
-    _ABSTAIN_MIN_SUPPORTING,
-    build_report,
-)
-from trustforge.bedrock import BedrockClient
-from trustforge.execlog import ExecutionLog
-from trustforge.ingestion.base import Document
-from trustforge.schema import QuestionType
 from trustforge.trust.conformal import conformal_abstain_threshold
-from trustforge.trust.scoring import Claim, ScoredClaim, TrustedBrief
 
 _REPO = Path(__file__).resolve().parent.parent
 _BACKTEST_PATH = _REPO / "scripts" / "backtest_conformal.py"
@@ -57,13 +44,6 @@ def test_conformal_abstain_threshold_is_deterministic():
     b = conformal_abstain_threshold()
     assert a == b, "同輸入（無輸入）必同輸出——純常數查詢，不得有隨機性"
     assert 0.0 <= a <= 1.0
-
-
-def test_orchestrator_reads_threshold_from_conformal_module():
-    """orchestrator 的 `_ABSTAIN_CALIBRATED_THRESHOLD` 必須直接來自
-    `trust.conformal.conformal_abstain_threshold()`，不是另外寫死的數字
-    （回歸鎖：防止之後有人不小心把它改回手動硬編）。"""
-    assert _ABSTAIN_CALIBRATED_THRESHOLD == conformal_abstain_threshold()
 
 
 # ---------------------------------------------------------------------------
@@ -139,68 +119,3 @@ def test_backtest_holdout_joint_coverage_within_alpha_plus_slack():
         "差距過大，`trust/conformal.py` 可能需要用最新資料重新回測更新。"
     )
 
-
-# ---------------------------------------------------------------------------
-# 4. 三態回歸鎖（機制本身，不綁定特定門檻數值）
-# ---------------------------------------------------------------------------
-def _signal_claim(idx: int, kind: str, text: str, trust: float) -> ScoredClaim:
-    doc = Document(id=f"lock-{idx}", kind=kind, source=f"src-{idx}", text=text, ts=0.0)
-    claim = Claim(id=doc.id, text=text, doc=doc, claim_type="fact")
-    return ScoredClaim(claim=claim, trust=trust)
-
-
-def _supporting(n_sources: int, text: str = "BTC 上漲。") -> list[ScoredClaim]:
-    return [_signal_claim(i, "price", text, 0.8) for i in range(n_sources)]
-
-
-def _brief(evidence_strength: float, calibrated_confidence: float, n_sources: int = 3) -> TrustedBrief:
-    return TrustedBrief(
-        query="分析 BTC",
-        supporting=_supporting(n_sources),
-        contrarian=[],
-        confidence=0.8,
-        calibrated_confidence=calibrated_confidence,
-        evidence_strength=evidence_strength,
-    )
-
-
-def _run(brief: TrustedBrief):
-    return build_report(
-        query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE, brief=brief,
-        client=BedrockClient(offline=True),
-        log=ExecutionLog(now_fn=lambda: 1_000_000.0),
-        now_fn=lambda: 1_000_000.0,
-    )
-
-
-def test_abstain_when_evidence_strength_just_below_tau():
-    tau = _ABSTAIN_CALIBRATED_THRESHOLD
-    brief = _brief(evidence_strength=max(0.0, tau - 0.01), calibrated_confidence=0.95)
-    report, _ = _run(brief)
-    assert report.decision_state == "abstain"
-    assert report.direction == "不明"
-
-
-def test_normal_when_evidence_strength_at_tau_and_calibrated_high():
-    tau = _ABSTAIN_CALIBRATED_THRESHOLD
-    brief = _brief(evidence_strength=min(1.0, tau + 0.001), calibrated_confidence=0.9)
-    report, _ = _run(brief)
-    assert report.decision_state == "normal"
-    assert report.direction == "偏多"
-
-
-def test_low_confidence_when_pass_tau_but_calibrated_below_half():
-    tau = _ABSTAIN_CALIBRATED_THRESHOLD
-    brief = _brief(evidence_strength=min(1.0, tau + 0.001), calibrated_confidence=0.45)
-    report, _ = _run(brief)
-    assert report.decision_state == "low_confidence"
-    assert report.direction != "不明"  # 低信心仍出結論，只是標註
-
-
-def test_abstain_when_min_supporting_not_met_even_with_max_strength():
-    """`_ABSTAIN_MIN_SUPPORTING`（獨立來源數門檻）不因 W4 conformal 改動——
-    即使 evidence_strength/calibrated 都拉滿，來源數不足一樣 abstain。"""
-    assert _ABSTAIN_MIN_SUPPORTING == 2
-    brief = _brief(evidence_strength=1.0, calibrated_confidence=1.0, n_sources=1)
-    report, _ = _run(brief)
-    assert report.decision_state == "abstain"

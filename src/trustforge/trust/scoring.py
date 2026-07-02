@@ -172,18 +172,6 @@ class TrustedBrief:
     # build_report` 現在直接讀 `brief.supporting`/`brief.contrarian`/
     # `brief.confidence` 即可拿到已 coin-scoped 的資料，不必再各自過濾。
 
-    # W4 conformal（`trust.conformal`）：`_evidence_strength()` 的**原始值**
-    # （校準前，即 `_calibrate_confidence()` 的輸入），供 `agent.orchestrator`
-    # 的 abstain 判斷直接跟 `trust.conformal.conformal_abstain_threshold()`
-    # 回傳的 τ 比較——τ 是在這個原始量綱上用歷史回測校準出來的（見
-    # `trust/conformal.py` 模組上方誠實聲明），不是 `calibrated_confidence`
-    # （分位數映射表過的顯示值）的量綱，兩者不可混用比較。`calibrated_
-    # confidence` 繼續保留供人類可讀的「校準後信心」顯示（market_judgment
-    # 敘事文字），不受本欄位新增影響。預設 0.0，逐字向後相容（同
-    # `calibrated_confidence` 的預設值語意：只有透過 `aggregate()` 產生的
-    # brief 才是真正有意義的值）。
-    evidence_strength: float = 0.0
-
     def provenance(self) -> list[dict]:
         """溯源鏈：每個被採用主張的來源與分數。"""
         return [
@@ -1360,8 +1348,4 @@ def aggregate(scored: list[ScoredClaim], query: str,
         contrarian=contrarian[:5],
         confidence=confidence,
         calibrated_confidence=_calibrate_confidence(evidence_strength),
-        # W4 conformal：原始值一併帶出，供 `agent.orchestrator` 跟
-        # `trust.conformal.conformal_abstain_threshold()` 的 τ 比較（見
-        # `TrustedBrief.evidence_strength` 欄位註解）。
-        evidence_strength=evidence_strength,
     )

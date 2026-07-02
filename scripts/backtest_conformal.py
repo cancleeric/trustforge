@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """W4：Split Conformal Prediction 一次性離線回測（master 計劃 Axis B #1）。
 
+⚠️ 2026-07 CEO 決策：本腳本產出的 τ **未 wire 進 production**（見
+`trust/conformal.py` 模組上方說明與 `docs/CONFORMAL-FINDING.md`）——
+gray 細案指定的「同一條 OHLCV 衍生多技術訊號」代理對方向判斷幾乎無
+判別力，套用會讓 abstain 率衝到 ~94%。本腳本作為已完成、可重現的研究
+工件保留。
+
 用法：
     python3 scripts/backtest_conformal.py
 

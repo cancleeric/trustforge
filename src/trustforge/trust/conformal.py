@@ -1,7 +1,22 @@
-"""W4：Split Conformal Prediction abstain 門檻（master 計劃 Axis B #1）。
+"""W4：Split Conformal Prediction abstain 門檻——**研究工件（master 計劃
+Axis B #1，2026-07 CEO 決策：本輪不 wire 進 production）**。
 
-取代 `trust.scoring._CALIBRATION_TABLE` 那套「工程判斷、非統計估計」的簡化
-分位數表（見該檔上方誠實聲明）。這裡的 τ 是用真實 HOYA BIT 歷史 OHLCV
+⚠️ 本模組目前**不被** `agent.orchestrator` 呼叫。production 的三態
+abstain 門檻已改回 `trust.scoring._CALIBRATION_TABLE` 那套簡化分位數
+校準（`agent.orchestrator._ABSTAIN_CALIBRATED_THRESHOLD = 0.35`）。原因
+與完整記錄見 `docs/CONFORMAL-FINDING.md`：gray 細案指定的「同一條 OHLCV
+衍生多技術訊號」不是真異質多來源代理，對方向判斷幾乎無判別力
+（pseudo-AUC≈0.49），套用此模組算出的 τ 會讓 held-out abstain 率衝到
+~94%（見下方回測結果），等同廢掉功能。本模組保留作為**已完成、可重現
+的研究工件**：單階段 split conformal 的數學實作與 coverage 計算本身
+正確且經測試驗證（見 `tests/test_w4_conformal.py`），未來若拿到真正
+異質的歷史多來源資料（news/onchain/social 等；目前連接器只 cache
+現值、無歷史序列），可重跑 `scripts/backtest_conformal.py` 重新評估。
+
+以下取代對象/意義說明沿用原設計文字（僅供理解本模組意圖，**取代尚未
+實際發生**）：取代 `trust.scoring._CALIBRATION_TABLE` 那套「工程判斷、
+非統計估計」的簡化分位數表（見該檔上方誠實聲明）。這裡的 τ 是用真實
+HOYA BIT 歷史 OHLCV
 資料（`data/data/*.csv`，BTC/ETH/SOL/BNB/XRP，2021-06-01~2026-05-31）跑
 `scripts/backtest_conformal.py` 離線回測出來的，**硬編成常數**（比照
 `_CALIBRATION_TABLE` 的模式：寫死在程式碼、可版控可審，不是每次啟動重跑，
@@ -71,12 +86,13 @@ _CONFORMAL_TAU = 0.9154
 
 
 def conformal_abstain_threshold() -> float:
-    """回傳硬編的 conformal abstain 門檻 τ，供 `agent.orchestrator` 使用。
+    """回傳硬編的 conformal abstain 門檻 τ（研究工件，⚠️ 目前未被
+    `agent.orchestrator` 呼叫，見本模組上方 2026-07 CEO 決策說明與
+    `docs/CONFORMAL-FINDING.md`）。
 
     確定性、免 LLM、零 credit：純常數查詢，同輸入（無輸入）必同輸出。
-    比較對象是 `trust.scoring._evidence_strength()` 的**原始值**（不是
-    `_calibrate_confidence()` 校準過的顯示值——後者仍保留供人類可讀的
-    「校準後信心」顯示，兩者是不同用途，見 `trust.scoring` 模組上方 W4
-    區塊註解與 `agent.orchestrator` 呼叫端註解）。
+    比較對象設計上是 `trust.scoring._evidence_strength()` 的**原始值**
+    （不是 `_calibrate_confidence()` 校準過的顯示值），供未來若重新評估
+    wire 進 production 時參考此設計決定。
     """
     return _CONFORMAL_TAU
