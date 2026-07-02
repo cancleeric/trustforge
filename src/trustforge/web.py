@@ -56,11 +56,23 @@ COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
 # 不是真的 process 啟動時間（stdlib 無法可靠取得），但對觀測用途已足夠。
 _START_TIME = time.time()
 
-# per-IP 限流：每 IP 每 60 秒最多 5 次 live 請求
+# per-IP 限流：每 IP 每 60 秒最多 5 次 **live（真 Bedrock）**請求。
+# 這組門檻是為了保護 Bedrock 花費而刻意設緊的——只給真的會燒錢的 live 路徑用，
+# 不要跟下面的 real-off 共用（codex HIGH，PR #44：real-off 曾誤套這組緊限流，
+# 導致反向代理後所有使用者共用一個來源 IP，5 次/60s 就整批 429）。
 _RATE_WINDOW = 60
 _RATE_MAX = 5
 _rate_lock = threading.Lock()
 _rate_buckets: dict[str, list[float]] = {}
+
+# real-off（真資料·$0，PR #44 起的預設檔位）專用 per-IP 限流：獨立於上面
+# live 的緊 bucket。real-off 不呼叫 Bedrock、只讀 cache，完全免費——緊限流
+# 存在的理由（保護 Bedrock 花費）在這裡不成立，只需擋洪水級濫用（DoS），
+# 門檻可以遠比 live 寬鬆，一般使用者連續瀏覽/重整/跑比較分析不會誤中。
+_REAL_RATE_WINDOW = 60
+_REAL_RATE_MAX = 60
+_real_rate_lock = threading.Lock()
+_real_rate_buckets: dict[str, list[float]] = {}
 
 # `/status` 專用 per-IP 限流：獨立於上面 live/real 的 bucket，避免互相干擾
 # （/status 是唯讀觀測端點，不消耗真連接器/Bedrock 配額，門檻可以更寬鬆）。
@@ -207,7 +219,7 @@ class TooManyRequests(Exception):
     """per-IP 限流超量時拋出，對應 HTTP 429。"""
 
 
-# 兩個限流 bucket（`_rate_buckets`/`_status_rate_buckets`）共用的硬上限：
+# 三個限流 bucket（`_rate_buckets`/`_real_rate_buckets`/`_status_rate_buckets`）共用的硬上限：
 # 光靠「修剪單一 IP 內過期的時間戳」不夠——bucket dict 本身的 *key 數量*
 # （歷史上出現過的不同 IP 數）才是真正的記憶體風險，尤其 IPv6/偽造來源 IP
 # 高頻換位的情境下，dict 會無限增長成一個記憶體耗盡向量（防 DoS 反成
@@ -243,6 +255,30 @@ def _check_live_rate_limit(ip: str) -> None:
             raise TooManyRequests(f"請求過於頻繁，請 {_RATE_WINDOW} 秒後再試")
         ts.append(now)
         _rate_buckets[ip] = ts
+
+
+def _check_real_rate_limit(ip: str) -> None:
+    """real-off（真資料·$0，預設檔位）專用 per-IP 限流（獨立 bucket，見模組
+    頂部 `_REAL_RATE_*` 常數）：IP 在滑動視窗內超過 `_REAL_RATE_MAX` 次請求
+    → raise `TooManyRequests`。
+
+    刻意不共用 `_check_live_rate_limit` 的緊 bucket/門檻（codex HIGH，PR
+    #44）：那組 5 次/60s 是為了保護真的會燒錢的 Bedrock 配額，real-off 只讀
+    cache、不打 Bedrock，完全免費，不該套一樣緊的限流——尤其 real-off 現在
+    是 `/analyze` 的預設檔位，一般使用者不帶任何參數就會走到這裡，若沿用
+    live 的緊門檻，反向代理後所有使用者共用一個來源 IP，5 次/60s 後就會
+    整批被 429。這裡改成 DoS 洪水級門檻（見 `_REAL_RATE_MAX`），只擋高頻
+    濫用，正常瀏覽/連跑幾次不會誤中。"""
+    now = time.time()
+    with _real_rate_lock:
+        _evict_stale_rate_buckets(
+            _real_rate_buckets, _REAL_RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS
+        )
+        ts = [t for t in _real_rate_buckets.get(ip, []) if now - t < _REAL_RATE_WINDOW]
+        if len(ts) >= _REAL_RATE_MAX:
+            raise TooManyRequests(f"請求過於頻繁，請 {_REAL_RATE_WINDOW} 秒後再試")
+        ts.append(now)
+        _real_rate_buckets[ip] = ts
 
 
 def _check_status_rate_limit(ip: str) -> None:
@@ -2144,13 +2180,19 @@ def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
 
     不依賴 HAS_BEDROCK / token（與 live 檔位互相獨立）；`live` 已成立時
     real 不重複判斷（live 優先，走真 Bedrock 就不必再走真資料免敘事檔）。
-    real 生效時比照 live 走同一組 per-IP 限流，避免真連接器被打爆——這也是
-    「真資料·$0 成為預設」後最重要的防線：一般使用者瀏覽 `/analyze` 不必
-    帶任何參數就會觸發真連接器讀取，若無限流會被當高頻真連接器配額打爆。
+
+    real 生效時走**自己獨立**的 per-IP 限流（`_check_real_rate_limit`／
+    `_REAL_RATE_*`），刻意不共用 `_parse_live` 那組緊 bucket（codex HIGH，
+    PR #44）：live 的 5 次/60s 是為了保護真的會燒錢的 Bedrock 配額，
+    real-off 只讀 cache、不打 Bedrock，完全免費，套一樣緊的限流反而傷到
+    「真資料·$0 成為預設」後的一般使用者——不帶任何參數瀏覽 `/analyze`
+    就會觸發這條路徑，若沿用 live 的緊門檻，反向代理後所有使用者共用一個
+    來源 IP，5 次/60s 就會整批 429。real-off 仍需要限流（防真連接器被
+    洪水級高頻打爆），只是門檻改成 DoS 洪水級而非 Bedrock 成本級。
     """
     real = _is_real_request(qs, live)
     if real and client_ip:
-        _check_live_rate_limit(client_ip)
+        _check_real_rate_limit(client_ip)
     return real
 
 
@@ -2359,6 +2401,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
+        # `client_address[0]` 是 TCP 對端 IP，用來 keyed per-IP 限流
+        # （`_check_live_rate_limit`/`_check_real_rate_limit`/
+        # `_check_status_rate_limit`）。這在**直連部署**（目前：直接對外的
+        # EC2，前面沒有 reverse proxy/LB）下才是真使用者 IP，per-user
+        # bucket 才正確——目前部署即此狀況，維持現狀即可（codex 確認，
+        # PR #44）。
+        #
+        # 若未來部署在 reverse proxy/LB 後面，`client_address[0]` 會變成
+        # 代理自己的 IP，所有使用者共用一個 bucket，限流會失效（甚至誤傷：
+        # 一人超量全體 429）。屆時須改讀 `X-Forwarded-For`，但**絕對不能
+        # 無條件信任**這個 header——它是使用者可自由偽造的請求標頭，若盲信
+        # 會讓限流被繞過（攻擊者自帶假 XFF 偽裝成不同 IP，繞過限流無限重
+        # 打）。正確作法是「只在明確設定信任特定反向代理時才採信其設定的
+        # XFF」（config-gated allowlist，預設仍只信任直連）。這裡刻意不先
+        # 實作 XFF 解析：目前環境沒有真代理可測，硬寫容易埋下繞過漏洞，
+        # 等真的要上代理部署時再依當時的代理拓樸實作+測試。
         client_ip = self.client_address[0]
 
         if u.path == "/healthz":

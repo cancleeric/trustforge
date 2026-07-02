@@ -223,10 +223,15 @@ def test_web_real_mode_routes_to_live_data_off_llm(monkeypatch):
 
 
 def test_web_real_mode_not_rate_limited_by_live_bucket_conflict(monkeypatch):
-    """real=1 生效時仍會走 per-IP 限流（避免真連接器被打爆），超量應拋 TooManyRequests。"""
+    """real=1 走自己獨立的寬鬆 per-IP 限流（`_REAL_RATE_*`），不共用 live 的
+    緊 bucket（`_RATE_MAX`=5）——codex HIGH（PR #44）：real-off 免費、只讀
+    cache，不該套跟 Bedrock 花費防線一樣緊的門檻。這裡連續打超過 live 門檻
+    （`_RATE_MAX`）次數的 real 請求，仍不應被擋，證明兩組 bucket 互不干擾。
+    """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -237,7 +242,33 @@ def test_web_real_mode_not_rate_limited_by_live_bucket_conflict(monkeypatch):
 
     ip = "10.0.0.42"
     qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "real": ["1"]}
-    for _ in range(web._RATE_MAX):
+    # 打超過 live 的緊門檻次數（_RATE_MAX=5），real-off 仍不該被擋。
+    for _ in range(web._RATE_MAX + 5):
+        web._do_analyze(qs, client_ip=ip)
+    # live 的緊 bucket 完全沒被 real 請求動用到。
+    assert web._rate_buckets == {}, "real=1 不該動用 live 的 _rate_buckets"
+
+
+def test_web_real_mode_rate_limited_at_real_threshold(monkeypatch):
+    """real=1 仍需要限流（防真連接器被洪水級高頻打爆），只是門檻改成
+    DoS 洪水級（`_REAL_RATE_MAX`）而非 Bedrock 成本級（`_RATE_MAX`）——
+    超過 `_REAL_RATE_MAX` 次才應拋 TooManyRequests（codex HIGH，PR #44）。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+
+    def fake_run(coin, query, qtype, offline=False, data_dir=None,
+                 data_mode=None, llm_mode=None):
+        import trustforge.pipeline as _pl
+        return _pl.run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    ip = "10.0.0.43"
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"], "real": ["1"]}
+    for _ in range(web._REAL_RATE_MAX):
         web._do_analyze(qs, client_ip=ip)
     with pytest.raises(web.TooManyRequests):
         web._do_analyze(qs, client_ip=ip)
@@ -296,6 +327,7 @@ def test_web_live_takes_priority_over_real(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     captured = {}
 
@@ -541,6 +573,7 @@ def test_mode_link_suffix_has_no_rate_limit_side_effect(monkeypatch):
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
     qs = {"real": ["1"]}
     for _ in range(50):
         web._mode_link_suffix(qs)
@@ -589,6 +622,7 @@ def test_do_analyze_live_mode_json_link_preserves_live_and_token(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -687,6 +721,7 @@ def test_do_comparison_json_link_actually_follows_to_200_with_both_coins_pair_on
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -742,6 +777,7 @@ def test_do_analyze_json_link_round_trips_special_char_query_and_follows_to_200(
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -786,6 +822,7 @@ def test_do_comparison_json_link_round_trips_special_char_query_and_follows_to_2
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -901,6 +938,7 @@ def test_active_mode_live_request_shows_only_live_active(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -996,6 +1034,7 @@ def test_error_400_real_mode_keeps_real_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     result = _run_do_get(
         "/analyze?coin=NOPE&type=multi_source&q=t&real=1", client_ip="10.0.0.1"
@@ -1011,6 +1050,7 @@ def test_error_429_live_mode_keeps_live_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
     ip = "10.0.0.2"
     for _ in range(web._RATE_MAX):
         web._check_live_rate_limit(ip)  # 灌爆同一 IP 的限流桶
@@ -1029,6 +1069,7 @@ def test_error_502_real_mode_keeps_real_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     def boom(*a, **k):
         raise RuntimeError("connector 掛了（測試模擬，非真連接器）")
@@ -1050,6 +1091,7 @@ def test_error_400_no_params_request_keeps_real_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     result = _run_do_get(
         "/analyze?coin=NOPE&type=multi_source&q=t", client_ip="10.0.0.4"
@@ -1066,6 +1108,7 @@ def test_error_400_sample_request_keeps_offline_active_badge(monkeypatch):
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     result = _run_do_get(
         "/analyze?coin=NOPE&type=multi_source&q=t&sample=1", client_ip="10.0.0.5"

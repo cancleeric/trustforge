@@ -198,6 +198,7 @@ def test_rate_limit_triggers_after_max_requests(monkeypatch):
 
     # 清除先前殘留 bucket（避免其他測試干擾）
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
 
     ip = "10.0.0.99"
     qs = _qs(live="1", token="tok")
@@ -244,16 +245,46 @@ def test_sample_requests_never_rate_limited():
         web._do_analyze(_qs(live="0", sample="1"), client_ip="8.8.8.8")  # 不應拋 TooManyRequests
 
 
-def test_real_default_requests_are_rate_limited(monkeypatch):
-    """世界第一重寫 Phase 2 驗收要求：新預設「真資料·$0」（未帶任何 mode 參數）
-    一樣要套用 `_check_live_rate_limit`，避免真連接器被高頻流量打爆——這是
-    「真資料·$0 成為預設」後最重要的防線，不可回歸成無限流。
+def test_real_default_requests_not_rate_limited_at_normal_volume(monkeypatch):
+    """codex HIGH（PR #44）：新預設「真資料·$0」（未帶任何 mode 參數）走自己
+    獨立的寬鬆限流（`_check_real_rate_limit`／`_REAL_RATE_MAX`），不是 live
+    的緊 `_check_live_rate_limit`（`_RATE_MAX`=5）——real-off 免費、只讀
+    cache，緊限流是為了保護 Bedrock 花費，不該套在這條路徑上，否則一般
+    使用者正常瀏覽（連跑幾次、比較分析算兩次呼叫）就會被誤 429，反向代理
+    後所有使用者共用一個來源 IP 更會整批 429。
+
+    這裡連跑超過 live 門檻（`_RATE_MAX`）次數的正常請求，不應觸發限流。
+
+    用 `_make_fake_run` 強制離線執行 pipeline（不打真連接器/網路）——這裡
+    只驗證限流邏輯本身（純看 client_ip/qs），跟 pipeline 實際抓到什麼資料
+    無關，避免測試在 CI/沙盒環境因真連接器 cache miss/逾時而變慢或卡住。
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.setattr(web, "run", _make_fake_run([]))
     web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
     ip = "8.8.4.4"
-    for _ in range(web._RATE_MAX):
+    for _ in range(web._RATE_MAX + 10):
+        web._do_analyze(_qs(live="0"), client_ip=ip)  # 未帶 sample/real/live → 落在新預設 real
+    assert web._rate_buckets == {}, "real 預設路徑不該動用 live 的 _rate_buckets"
+
+
+def test_real_default_requests_rate_limited_at_flood_volume(monkeypatch):
+    """real-off 預設檔位仍需要限流（防真連接器被洪水級高頻打爆），只是門檻
+    改成 DoS 洪水級（`_REAL_RATE_MAX`）而非 Bedrock 成本級（`_RATE_MAX`）——
+    超過 `_REAL_RATE_MAX` 次才應拋 TooManyRequests（codex HIGH，PR #44）。
+    這是「真資料·$0 成為預設」後最重要的防線，不可回歸成無限流。
+
+    用 `_make_fake_run` 強制離線執行 pipeline，理由同上一測試。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.setattr(web, "run", _make_fake_run([]))
+    web._rate_buckets.clear()
+    web._real_rate_buckets.clear()
+    ip = "8.8.4.5"
+    for _ in range(web._REAL_RATE_MAX):
         web._do_analyze(_qs(live="0"), client_ip=ip)  # 未帶 sample/real/live → 落在新預設 real
     with pytest.raises(web.TooManyRequests):
         web._do_analyze(_qs(live="0"), client_ip=ip)
