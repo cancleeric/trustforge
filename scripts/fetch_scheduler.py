@@ -125,6 +125,18 @@ def _warn_if_fallback_used(label: str, result) -> None:  # noqa: ANN001 — Cach
 # 瞬間節奏仍可能撞上較保守的滑動窗口限流。這裡對 CoinGecko 逐幣來源設一個
 # 額外的呼叫間隔下限，取「使用者傳入的 --stagger」與「這個下限」兩者較大值，
 # 其餘來源（reddit 等）不受影響、沿用使用者傳入值。
+#
+# 後續加固（codex HIGH #1，安全/健康雙審）：這裡的 6 秒只是「同一個 Source
+# 內部」逐幣呼叫的間隔，不同 Source（price 與 sentiment/dev）之間完全不
+# 共享——排程順序若先跑完 5 幣 dev（0/6/12/18/24s）再跑 1 次 price
+# （COIN_KEYED_BATCH，~30s），30 秒內仍發生 6 次真請求（12 次/分鐘），
+# keyless 5-15 req/min 的保守下限依然可能撞到。真正的修法已下放到
+# `trustforge.ingestion.coingecko._fetch_url` 內部：那裡對「整個 CoinGecko
+# host」維護一個共享節流器（不分 Source/端點，任兩次真請求至少間隔 12 秒
+# keyless / 2 秒有 key），才是消除 429 的權威保護層。這裡的 6 秒 stagger
+# 保留下來只是同一來源內部逐幣呼叫的額外邊際緩衝（belt-and-braces），跟
+# coingecko.py 內建的節流器疊加，不衝突，也不是必要條件——即使拿掉這 6 秒
+# stagger，coingecko.py 內建的節流器仍會獨立擋住實際的真請求密集發送。
 _COINGECKO_STAGGER_FLOOR_SECONDS = 6.0
 
 

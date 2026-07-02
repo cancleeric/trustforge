@@ -67,15 +67,35 @@ def test_coindesk_url_has_no_trailing_slash(monkeypatch):
     assert news.CoinDeskRSSSource._URL == "https://www.coindesk.com/arc/outboundfeeds/rss"
 
 
+# ── `_fetch_url` 轉址安全測試（安全事故修復：見 news.py 模組頂部說明）───────
+#
+# `urlopen()` 預設 `HTTPRedirectHandler` 對 3xx 一律自動跟轉、完全不檢查
+# 目的地 host/scheme/是否私有 IP——第一版「跟 308」防禦寫在 `except
+# HTTPError` 裡，在自動跟轉的 Python 版本上根本不會被執行，等於形同虛設。
+# 修法：自訂 `_NoRedirectHandler` 完全禁用自動跟轉，`_fetch_url` 改成手動
+# 逐跳驗證。以下測試一律 mock `news._opener.open`（而非已被移除的
+# `news.urlopen`）＋ `news.socket.getaddrinfo`（避免測試真的打 DNS 查詢，
+# credit-safe/no real network）。
+
+def _fake_getaddrinfo_returning(*ips: str):
+    """回傳一個 `socket.getaddrinfo` 替身：不管查哪個 hostname，都回傳給定
+    的 IP 清單（用最小可用的 tuple 結構，只有 `_is_safe_redirect_target`
+    實際會讀的 `info[4][0]` 這個位置需要正確）。"""
+    def _fake(host, port, *args, **kwargs):
+        return [(None, None, None, None, (ip, 0)) for ip in ips]
+    return _fake
+
+
 def test_fetch_url_follows_308_same_host_https(monkeypatch):
     """`_fetch_url` 對 308 Permanent Redirect（urllib < 3.11 不會自動跟）
-    手動跟一次：跳轉目標同 host + https 時，改打新 URL 並回傳其內容。"""
+    手動跟一次：跳轉目標同 host + https + 解析出的 IP 非私有時，改打新
+    URL 並回傳其內容。"""
     from urllib.error import HTTPError
     from trustforge.ingestion import news
 
     calls: list[str] = []
 
-    def _fake_urlopen(req, timeout=None):
+    def _fake_open(req, timeout=None):
         url = req.full_url
         calls.append(url)
         if url == "https://www.coindesk.com/arc/outboundfeeds/rss":
@@ -86,7 +106,8 @@ def test_fetch_url_follows_308_same_host_https(monkeypatch):
         assert url == "https://www.coindesk.com/arc/outboundfeeds/rss-new"
         return _FakeResp(RSS_FIXTURE)
 
-    monkeypatch.setattr(news, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(news._opener, "open", _fake_open)
+    monkeypatch.setattr(news.socket, "getaddrinfo", _fake_getaddrinfo_returning("104.16.1.1"))
     raw = news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
     assert raw == RSS_FIXTURE
     assert calls == [
@@ -101,28 +122,166 @@ def test_fetch_url_308_cross_host_redirect_not_followed(monkeypatch):
     from urllib.error import HTTPError
     from trustforge.ingestion import news
 
-    def _fake_urlopen(req, timeout=None):
+    def _fake_open(req, timeout=None):
         raise HTTPError(
             req.full_url, 308, "Permanent Redirect",
             {"Location": "https://evil.example.com/steal"}, None,
         )
 
-    monkeypatch.setattr(news, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(news._opener, "open", _fake_open)
     with pytest.raises(HTTPError):
         news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
 
 
-def test_fetch_url_non_308_http_error_propagates(monkeypatch):
-    """非 308 的 HTTPError（如 429/500）不受這層跟轉址邏輯影響，原樣拋出。"""
+def test_fetch_url_second_hop_cross_host_redirect_not_followed(monkeypatch):
+    """SSRF 回歸鎖：第一跳同 host（通過驗證、正常跟轉），但第一跳的目的地
+    緊接著又把請求轉到「不同 host」——整條轉址鏈只要有任一跳的目的地不是
+    最初白名單 URL 的 host，就必須拒絕，不能只比對「上一跳」而放行第二跳
+    才變更 host 的繞過手法。"""
     from urllib.error import HTTPError
     from trustforge.ingestion import news
 
-    def _fake_urlopen(req, timeout=None):
-        raise HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+    calls: list[str] = []
 
-    monkeypatch.setattr(news, "urlopen", _fake_urlopen)
+    def _fake_open(req, timeout=None):
+        url = req.full_url
+        calls.append(url)
+        if url == "https://www.coindesk.com/arc/outboundfeeds/rss":
+            raise HTTPError(
+                url, 308, "Permanent Redirect",
+                {"Location": "https://www.coindesk.com/arc/outboundfeeds/rss-hop2"}, None,
+            )
+        if url == "https://www.coindesk.com/arc/outboundfeeds/rss-hop2":
+            raise HTTPError(
+                url, 302, "Found",
+                {"Location": "https://evil.example.com/steal"}, None,
+            )
+        raise AssertionError(f"不該打到 {url}")
+
+    monkeypatch.setattr(news._opener, "open", _fake_open)
+    monkeypatch.setattr(news.socket, "getaddrinfo", _fake_getaddrinfo_returning("104.16.1.1"))
     with pytest.raises(HTTPError):
         news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+    # 第一跳確實嘗試過（同 host，通過驗證），第二跳的跨 host 目標沒有被打
+    assert calls == [
+        "https://www.coindesk.com/arc/outboundfeeds/rss",
+        "https://www.coindesk.com/arc/outboundfeeds/rss-hop2",
+    ]
+
+
+@pytest.mark.parametrize("private_ip", ["127.0.0.1", "10.0.0.5", "169.254.169.254", "192.168.1.1"])
+def test_fetch_url_redirect_to_private_ip_not_followed(monkeypatch, private_ip):
+    """轉址目標即使 host 字串與白名單同名，但解析出的 IP 是私有/迴環/
+    link-local（含雲端 metadata endpoint 169.254.169.254）時，一律拒絕
+    跟轉（防禦 DNS rebinding 把同一個網域名稱解析到內網位址的攻擊手法）。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    def _fake_open(req, timeout=None):
+        raise HTTPError(
+            req.full_url, 308, "Permanent Redirect",
+            {"Location": "/arc/outboundfeeds/rss-new"}, None,
+        )
+
+    monkeypatch.setattr(news._opener, "open", _fake_open)
+    monkeypatch.setattr(news.socket, "getaddrinfo", _fake_getaddrinfo_returning(private_ip))
+    with pytest.raises(HTTPError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+
+def test_fetch_url_redirect_non_standard_port_not_followed(monkeypatch):
+    """轉址目標 port 不是 https 預設 443 時拒絕跟轉（避免被導去內網服務常
+    用的非標準 port）。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    def _fake_open(req, timeout=None):
+        raise HTTPError(
+            req.full_url, 308, "Permanent Redirect",
+            {"Location": "https://www.coindesk.com:8443/arc/outboundfeeds/rss-new"}, None,
+        )
+
+    monkeypatch.setattr(news._opener, "open", _fake_open)
+    monkeypatch.setattr(news.socket, "getaddrinfo", _fake_getaddrinfo_returning("104.16.1.1"))
+    with pytest.raises(HTTPError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+
+def test_fetch_url_exceeds_max_redirects_rejected(monkeypatch):
+    """轉址鏈超過 `_MAX_REDIRECTS` 跳（每一跳本身驗證都合法、同 host 安全
+    IP）仍要被拒絕，避免無限轉址鏈耗盡資源。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    calls: list[str] = []
+
+    def _fake_open(req, timeout=None):
+        url = req.full_url
+        calls.append(url)
+        n = len(calls)
+        raise HTTPError(
+            url, 308, "Permanent Redirect",
+            {"Location": f"/arc/outboundfeeds/rss-hop{n}"}, None,
+        )
+
+    monkeypatch.setattr(news._opener, "open", _fake_open)
+    monkeypatch.setattr(news.socket, "getaddrinfo", _fake_getaddrinfo_returning("104.16.1.1"))
+    with pytest.raises(HTTPError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+    # 最初一次 + 最多 _MAX_REDIRECTS 跳 = 上限，不會無止盡跟下去
+    assert len(calls) == news._MAX_REDIRECTS + 1
+
+
+def test_fetch_url_non_redirect_http_error_propagates(monkeypatch):
+    """非轉址類 HTTPError（如 429/500）不受這層跟轉址邏輯影響，原樣拋出，
+    也不會嘗試呼叫 DNS 解析（不是轉址，不需要驗證目的地）。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    def _fake_open(req, timeout=None):
+        raise HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+
+    def _boom_getaddrinfo(*args, **kwargs):
+        raise AssertionError("非轉址錯誤不該觸發 DNS 解析")
+
+    monkeypatch.setattr(news._opener, "open", _fake_open)
+    monkeypatch.setattr(news.socket, "getaddrinfo", _boom_getaddrinfo)
+    with pytest.raises(HTTPError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307])
+def test_fetch_url_legacy_redirect_codes_also_require_manual_validation(monkeypatch, code):
+    """安全回歸鎖：301/302/303/307（這些狀態碼在所有 Python 版本都會被
+    `urlopen()` 預設 handler 自動跟轉、不分 Python 版本、從一開始就存在的
+    洞——不是只有 308 才有問題）現在也必須走同一套手動逐跳驗證，跨 host
+    目標一律拒絕，不能被預設 handler 偷偷跟走。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    def _fake_open(req, timeout=None):
+        raise HTTPError(
+            req.full_url, code, "Redirect",
+            {"Location": "https://evil.example.com/steal"}, None,
+        )
+
+    monkeypatch.setattr(news._opener, "open", _fake_open)
+    with pytest.raises(HTTPError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+
+def test_no_redirect_handler_disables_automatic_redirect():
+    """`_NoRedirectHandler.redirect_request` 恆回傳 `None`：直接單元測試
+    這個 handler 本身確實會讓 urllib 視為「不處理」轉址（進而對呼叫端拋出
+    HTTPError，而不是偷偷自動跟走），是本檔唯一安裝的 opener 行為的核心
+    保證。"""
+    from trustforge.ingestion import news
+    handler = news._NoRedirectHandler()
+    result = handler.redirect_request(
+        req=None, fp=None, code=308, msg="Permanent Redirect",
+        headers=None, newurl="https://evil.example.com/steal",
+    )
+    assert result is None
 
 
 class _FakeResp:

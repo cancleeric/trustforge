@@ -29,6 +29,28 @@
   不會有跨輪髒資料殘留的疑慮；平常測試需要在每個測試案例間重置（見
   `reset_process_cache()`）。
 
+生產事故修復（2026-07：CoinGecko keyless 仍 429，見 `_throttle_before_request`）：
+  上面「≈6 次真呼叫」只保證**次數**少，沒保證**節奏**。舊版只有各 Source
+  獨立的排程間隔（`fetch_scheduler.py` 的 `--stagger`/CoinGecko stagger
+  下限），互不共享——若排程順序先跑完 `coingecko-dev`（5 幣 detail，
+  間隔 6 秒：t=0/6/12/18/24）再跑 `coingecko-price`（1 次，COIN_KEYED_
+  BATCH，t≈30），30 秒內仍發生 6 次真請求，換算 12 次/分鐘，keyless
+  5-15 req/min 的保守下限（5/min）依然可能撞到。
+  修法：**整個 CoinGecko host 用一個共享的節流器**（`_fetch_url` 內部呼叫
+  `_throttle_before_request()`）——不論是 price 還是 coin-detail、不論
+  屬於哪個 Source，只要是「實際打出去」的真 HTTP 請求，彼此之間都強制
+  間隔至少 `_min_interval_seconds()` 秒（keyless 12 秒 → 任兩次真請求
+  最多 5 次/分鐘的節奏；有 key 放寬到 2 秒 → 30 次/分鐘的節奏，仍保守，
+  不留 burst 空間）。這是「以實際請求為單位」的節流，不是「排程間隔」：
+  即使排程順序改變、即使多個 Source 交錯呼叫，只要真的打了一次 HTTP
+  請求就會更新共享的最後請求時間戳，下一次真請求（不論來自哪個
+  Source）都要等滿間隔。
+  另外，`_get_coin_detail()` 新增失敗結果的記憶體快取（`_coin_detail_failed`）：
+  sentiment/dev 共用同一個 coins/{id} 端點，若第一個呼叫的 Source 該幣
+  失敗（如 429），失敗結果本輪內會被記住，第二個 Source 對同一幣不會
+  再重打一次已知失敗/限流的請求（避免舊版「成功才快取」讓失敗被下一個
+  共用端點的 Source 重打，變相把節流開的窗口又多用掉一次）。
+
 5 幣對映（COIN_POOL 代碼 -> CoinGecko coin id）：
   BTC->bitcoin, ETH->ethereum, SOL->solana, BNB->binancecoin, XRP->ripple
 其餘幣種一律視為非目標，`fetch()` 靜默跳過（回傳 []），不會現串任意 URL。
@@ -169,15 +191,59 @@ _price_response_cache: dict | None = None
 # coins/{id} 詳情：以 coingecko id 為 key，sentiment 與 dev 兩個 Source
 # 共用同一份，任一個先呼叫時才真的打 API。
 _coin_detail_cache: dict[str, dict] = {}
+# coins/{id} 詳情「失敗」結果的記憶體快取（生產事故修復：見模組頂部「去重」
+# 說明）：以 coingecko id 為 key，記住本輪內該幣的 coins/{id} 呼叫已經失敗
+# 過（如 429/timeout）；sentiment 與 dev 共用同一個端點，第二個 Source 對
+# 同一幣不會再重打一次已知失敗的請求（改為重新拋出同一個例外，行為對呼叫
+# 端等價，只是不再多打一次真 HTTP）。
+_coin_detail_failed: dict[str, BaseException] = {}
+
+# 生產事故修復：整個 CoinGecko host 共享的節流器（見模組頂部說明）。
+# `_last_request_monotonic` 記錄「最近一次真 HTTP 請求」的單調時鐘時間戳，
+# price/coin-detail 不分 Source 共用同一份狀態；`None` 代表本輪尚未打過
+# 任何真請求。用 `time.monotonic()` 而非 `time.time()`：不受系統時鐘調整
+# 影響，節流間隔的量測才可靠。
+_last_request_monotonic: float | None = None
+
+# keyless：官方 5-15 req/min 保守下限是 5/min，12 秒間隔對應剛好 5 次/分鐘
+# 的節奏，是老闆/codex 指定的安全值。
+_MIN_INTERVAL_KEYLESS_SECONDS = 12.0
+# 有 key：30 req/min，2 秒間隔對應剛好 30 次/分鐘的節奏，同樣保守取整除
+# 值，不留任何 burst 空間。
+_MIN_INTERVAL_WITH_KEY_SECONDS = 2.0
 
 
 def reset_process_cache() -> None:
-    """清空上述兩個記憶體快取。供測試在案例之間重置，避免快取內容跨測試
-    案例殘留污染；正常執行（`scripts/fetch_scheduler.py`）每次都是全新
-    process，不需要呼叫這個函式。"""
-    global _price_response_cache
+    """清空上述所有記憶體快取/節流狀態。供測試在案例之間重置，避免快取
+    內容跨測試案例殘留污染；正常執行（`scripts/fetch_scheduler.py`）每次
+    都是全新 process，不需要呼叫這個函式。"""
+    global _price_response_cache, _last_request_monotonic
     _price_response_cache = None
     _coin_detail_cache.clear()
+    _coin_detail_failed.clear()
+    _last_request_monotonic = None
+
+
+def _min_interval_seconds() -> float:
+    """依是否設定 `COINGECKO_API_KEY` 決定共享節流間隔（見模組頂部「生產
+    事故修復」說明）：keyless 12 秒、有 key 2 秒。"""
+    return _MIN_INTERVAL_WITH_KEY_SECONDS if _api_key_headers() else _MIN_INTERVAL_KEYLESS_SECONDS
+
+
+def _throttle_before_request() -> None:
+    """在每次真 HTTP 請求送出前呼叫：確保跟「上一次真請求」（不論是哪個
+    Source/哪個端點）之間至少間隔 `_min_interval_seconds()` 秒，不足則
+    同步 `time.sleep()` 補足。這是整個 CoinGecko host 共享的單一節流狀態
+    （見模組頂部「生產事故修復」說明），不是各 Source 各自獨立的排程
+    間隔——不論排程呼叫順序為何，只要是真請求就受同一份狀態節流。"""
+    global _last_request_monotonic
+    now = time.monotonic()
+    if _last_request_monotonic is not None:
+        wait = _min_interval_seconds() - (now - _last_request_monotonic)
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+    _last_request_monotonic = now
 
 
 def _api_key_headers() -> dict[str, str]:
@@ -201,7 +267,13 @@ def _fetch_url(url: str, extra_headers: dict[str, str] | None = None) -> bytes:
 
     `extra_headers`（如有）會與固定 `User-Agent` 一併附加在請求 header
     上；URL 本身不受影響、一律保持乾淨（不含任何 secret）。
+
+    這是本模組所有真 HTTP 請求（現價 + coins/{id} 詳情）唯一的出口，因此
+    也是整個 CoinGecko host 共享節流器（`_throttle_before_request`，見
+    模組頂部「生產事故修復」說明）的唯一掛載點——不論呼叫端是哪個
+    Source，送出請求前一律先過這道節流。
     """
+    _throttle_before_request()
     headers = {"User-Agent": _UA}
     if extra_headers:
         headers.update(extra_headers)
@@ -231,11 +303,25 @@ def _get_price_data() -> dict:
 
 def _get_coin_detail(coingecko_id: str) -> dict:
     """`_coin_detail_url(coingecko_id)` 的記憶體快取版：sentiment 與 dev
-    兩個 Source 共用，同一幣本輪只真的打一次 API（見模組頂部說明）。"""
-    if coingecko_id not in _coin_detail_cache:
+    兩個 Source 共用，同一幣本輪只真的打一次 API（見模組頂部說明）。
+
+    生產事故修復：失敗結果也快取（`_coin_detail_failed`）——若本輪內這個
+    幣已經失敗過一次，直接重新拋出同一個例外，**不再重打**一次已知失敗
+    /限流的請求（sentiment/dev 共用同一端點，第一個 Source 先失敗時，第
+    二個 Source 不會把同一個請求再送一次，變相省下共享節流器的一個間隔
+    窗口）。"""
+    if coingecko_id in _coin_detail_cache:
+        return _coin_detail_cache[coingecko_id]
+    if coingecko_id in _coin_detail_failed:
+        raise _coin_detail_failed[coingecko_id]
+    try:
         raw = _fetch_url(_coin_detail_url(coingecko_id), _api_key_headers())
-        _coin_detail_cache[coingecko_id] = json.loads(raw)
-    return _coin_detail_cache[coingecko_id]
+        data = json.loads(raw)
+    except Exception as exc:
+        _coin_detail_failed[coingecko_id] = exc
+        raise
+    _coin_detail_cache[coingecko_id] = data
+    return data
 
 
 class CoinGeckoPriceSource(Source):

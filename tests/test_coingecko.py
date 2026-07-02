@@ -1007,6 +1007,187 @@ def test_no_hardcoded_api_key_in_source_module():
     assert 'CG-' not in src  # CoinGecko 官方 key 前綴慣例，不應出現在原始碼
 
 
+# ── 整個 host 共享節流器（生產事故修復：keyless 仍 429，codex HIGH）───────────
+#
+# 舊版只有各 Source 獨立的排程間隔（fetch_scheduler.py 的 --stagger），互不
+# 共享——若排程順序先跑完 coingecko-dev（5 幣 detail，間隔 6 秒）再跑
+# coingecko-price（1 次），30 秒內仍發生 6 次真請求（12 次/分鐘），keyless
+# 5-15 req/min 的保守下限（5/min）依然可能撞到。以下驗證 `_fetch_url` 內部
+# 的共享節流器（`_throttle_before_request`）能不分 Source/端點，強制任兩次
+# 真請求之間至少間隔 `_min_interval_seconds()` 秒。
+#
+# 全部用假時鐘（`monkeypatch.setattr(coingecko.time, "monotonic"/"sleep", ...)`）
+# 取代真的 `time.sleep`，測試不會真的等待，維持測試套件秒級執行。
+
+def _install_fake_clock(monkeypatch):
+    """安裝假的 `time.monotonic`/`time.sleep`：`time.sleep(s)` 不會真的等
+    待，只把假時鐘往前推進 `s` 秒，讓節流邏輯的等待時間可被斷言而不拖慢
+    測試。回傳 `clock`（list[0] 為目前假時間）與 `sleeps`（記錄的每次
+    sleep 秒數）。"""
+    from trustforge.ingestion import coingecko
+    clock = [0.0]
+    sleeps: list[float] = []
+
+    def _fake_monotonic():
+        return clock[0]
+
+    def _fake_sleep(s):
+        sleeps.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr(coingecko.time, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(coingecko.time, "sleep", _fake_sleep)
+    return clock, sleeps
+
+
+def test_throttle_shares_state_across_price_and_sentiment_sources(monkeypatch):
+    """核心驗收：price 與 sentiment（不同 Source、不同端點）共用同一個節流
+    狀態——第 2、3 次真請求前都補足到 keyless 下限 12 秒，不因為換了
+    Source/端點就重新起算。"""
+    from trustforge.ingestion import coingecko
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    clock, sleeps = _install_fake_clock(monkeypatch)
+
+    def _fake_urlopen(req, timeout=None):
+        body = PRICE_FIXTURE if "simple/price" in req.full_url else DETAIL_FIXTURE_NORMAL
+        return _FakeHttpResponse(body)
+
+    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+
+    coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")       # 真請求 #1（price）
+    coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")   # 真請求 #2（coin-detail，不同端點）
+    coingecko.CoinGeckoSentimentSource().fetch("", coin="ETH")   # 真請求 #3（不同幣，新的 coin-detail）
+
+    assert sleeps == [12.0, 12.0], f"跨 Source 的真請求間隔應共享節流狀態，實得 sleeps={sleeps}"
+
+
+def test_throttle_skips_sleep_when_elapsed_already_sufficient(monkeypatch):
+    """呼叫端之間本來就間隔夠久（模擬慢速的上游處理時間）時，節流器不該
+    多此一舉再補一次 sleep。"""
+    from trustforge.ingestion import coingecko
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    clock, sleeps = _install_fake_clock(monkeypatch)
+
+    def _fake_urlopen(req, timeout=None):
+        return _FakeHttpResponse(PRICE_FIXTURE)
+
+    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+
+    coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    clock[0] = 20.0  # 模擬呼叫端之間本來就間隔了 20 秒（超過 12 秒下限）
+    coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
+
+    assert sleeps == []
+
+
+def test_throttle_uses_shorter_interval_when_api_key_set(monkeypatch):
+    """有 `COINGECKO_API_KEY` 時（30 req/min）節流間隔放寬到 2 秒，不再套
+    用 keyless 的 12 秒下限。"""
+    from trustforge.ingestion import coingecko
+    monkeypatch.setenv("COINGECKO_API_KEY", "test-fake-demo-key-not-real")
+    clock, sleeps = _install_fake_clock(monkeypatch)
+
+    def _fake_urlopen(req, timeout=None):
+        body = PRICE_FIXTURE if "simple/price" in req.full_url else DETAIL_FIXTURE_NORMAL
+        return _FakeHttpResponse(body)
+
+    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+
+    coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
+    coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
+
+    assert sleeps == [2.0]
+
+
+def test_throttle_full_round_six_calls_all_gaps_at_least_keyless_floor(monkeypatch):
+    """端到端：完整一輪（price 1 次 + 5 幣 coin-detail 各 1 次，共 6 次真
+    請求，對應生產排程一輪的真實請求數）不管排程呼叫序為何，任兩次真請求
+    的時間戳差距都 ≥12 秒（keyless）——換算最多 5 次/分鐘，不會再撞
+    keyless 5-15 req/min 的保守下限。"""
+    from trustforge.ingestion import coingecko
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    clock, _sleeps = _install_fake_clock(monkeypatch)
+    timestamps: list[float] = []
+
+    def _fake_urlopen(req, timeout=None):
+        timestamps.append(clock[0])
+        body = PRICE_FIXTURE if "simple/price" in req.full_url else DETAIL_FIXTURE_NORMAL
+        return _FakeHttpResponse(body)
+
+    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+
+    coingecko.CoinGeckoPriceSource().fetch("", coin="")
+    for code in ("BTC", "ETH", "SOL", "BNB", "XRP"):
+        coingecko.CoinGeckoSentimentSource().fetch("", coin=code)
+
+    assert len(timestamps) == 6
+    gaps = [b - a for a, b in zip(timestamps, timestamps[1:])]
+    assert all(g >= 12.0 for g in gaps), f"任兩次真請求間隔須 ≥12 秒，實得 gaps={gaps}"
+
+
+def test_coin_detail_failure_is_not_retried_by_second_source(monkeypatch):
+    """核心驗收（去重）：coins/{id} 第一次呼叫失敗（如 429）後，第二個共用
+    同端點的 Source（sentiment 先失敗，dev 接著對同一幣呼叫）不會再對同一
+    幣重打一次真請求——直接重新拋出同一個已知失敗，`_fetch_url` 只被呼叫
+    1 次而非 2 次。"""
+    from urllib.error import URLError
+    from trustforge.ingestion import coingecko
+
+    calls: list[str] = []
+
+    def _fake_fetch_url(url, headers=None):
+        calls.append(url)
+        raise URLError("429 too many requests")
+
+    monkeypatch.setattr(coingecko, "_fetch_url", _fake_fetch_url)
+
+    with pytest.raises(URLError):
+        coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
+    with pytest.raises(URLError):
+        coingecko.CoinGeckoDevSource().fetch("", coin="BTC")
+
+    assert len(calls) == 1, (
+        f"第二個 Source 不該對同一幣已知失敗的請求再打一次真請求，實得 {len(calls)} 次：{calls}"
+    )
+
+
+def test_coin_detail_failure_cache_is_scoped_per_coin(monkeypatch):
+    """去重快取以 coingecko id 為粒度：BTC 失敗不影響 ETH 仍正常打真請求。"""
+    from urllib.error import URLError
+    from trustforge.ingestion import coingecko
+
+    calls: list[str] = []
+
+    def _fake_fetch_url(url, headers=None):
+        calls.append(url)
+        if "bitcoin" in url:
+            raise URLError("429 too many requests")
+        return DETAIL_FIXTURE_NORMAL
+
+    monkeypatch.setattr(coingecko, "_fetch_url", _fake_fetch_url)
+
+    with pytest.raises(URLError):
+        coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
+    docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="ETH")
+
+    assert len(docs) == 1
+    assert len(calls) == 2  # BTC 一次（失敗）+ ETH 一次（成功），互不干擾
+
+
+def test_reset_process_cache_clears_failure_cache_and_throttle_state():
+    """`reset_process_cache()` 須連同去重失敗快取、共享節流時間戳一併清空
+    （不只是原本的成功結果快取），避免跨測試案例/跨輪殘留污染。"""
+    from trustforge.ingestion import coingecko
+
+    coingecko._coin_detail_failed["bitcoin"] = RuntimeError("boom")
+    coingecko._last_request_monotonic = 123.0
+
+    coingecko.reset_process_cache()
+
+    assert coingecko._coin_detail_failed == {}
+    assert coingecko._last_request_monotonic is None
+
+
 # ── fetch_scheduler.py 接線測試 ────────────────────────────────────────────────
 
 def test_fetch_scheduler_registry_includes_coingecko():

@@ -8,12 +8,35 @@
 生產事故修復（coindesk 全 308 Permanent Redirect）：CoinDesk 把舊網址
 `.../rss/`（末尾帶斜線）永久重導到 `.../rss`（無斜線），同網域、只差路徑
 末尾斜線。已直接改用新網址（見下方 `CoinDeskRSSSource._URL`），不必再依賴
-redirect 才能拿到內容。`_fetch_url` 額外補上「跟 308」的防禦（見下方
-說明）——`urllib.request` 的 `HTTPRedirectHandler` 在 Python 3.11 之前
-不認得 308（只認 301/302/303/307），舊網址在較舊 Python 版本上就算 CoinDesk
-未來又搬家一次也會直接炸 `HTTPError`，不會像 3.11+ 那樣自動轉址；補這層
-可以讓「新網址又被 308 到另一個路徑」這種未來情境不必等下一次程式碼修改
-就能自動跟上（僅限同 host + https，避免任意網域跳轉造成 SSRF）。
+redirect 才能拿到內容。
+
+安全事故修復（codex 對抗審發現，2026-07）：第一版「跟 308」的防禦有洞——
+`urlopen()` 預設會安裝 `HTTPRedirectHandler`，這個 handler 對 301/302/303/
+307**在所有 Python 版本**、對 308**在 Python 3.11+**都會**自動跟轉**，
+而且完全不檢查目的地 host/scheme/是否為私有 IP。也就是說第一版程式碼裡
+`except HTTPError` 裡手寫的「同 host + https」檢查，在 3.11+ 的 Python 上
+對 308 根本**永遠不會被執行**——`urlopen()` 早就在進入 except 區塊之前，
+用預設 handler 把 3xx 自動跟到任意 host 去了（本專案 Dockerfile 用
+`python:3.12-slim`，正是這個高風險版本）；對 301/302/303/307 這個洞則
+**不分 Python 版本、從一開始就存在**。若任一白名單來源的網域未來被入侵/
+CDN 誤配置成把請求重導到內網位址（如雲端 metadata endpoint、內部管理
+API），服務會在毫無察覺的情況下把請求送過去，構成典型的 SSRF via redirect。
+
+修法：`_fetch_url` 改用**自訂 opener，完全禁用自動轉址**
+（`_NoRedirectHandler.redirect_request()` 恆回傳 `None`，讓 urllib 對任何
+3xx 一律拋出 `HTTPError`，不會偷偷自己跟走）；轉址改成**手動、逐跳驗證**
+後才進行：
+  - scheme 必須是 `https`（拒絕降級到 http 或非 http(s) scheme）
+  - hostname 必須與「最初白名單 URL」的 hostname 完全相同（`urlparse().
+    hostname` 已自動小寫正規化）——整條轉址鏈只要出現任何一跳的目的地
+    host 不同，立刻拒絕，不是只比對「上一跳」（防禦第二跳才變更 host 的
+    繞過手法）
+  - port 必須是 https 預設 443（或未指定 port）
+  - hostname 解析出的**所有** IP 都必須不是私有/迴環/link-local/保留/
+    多播/未指定位址（`ipaddress` 標準庫判斷）——即使 host 字串本身合法，
+    仍防禦 DNS rebinding 把同一個網域名稱解析到內網 IP 的攻擊手法
+  - 最多跟 `_MAX_REDIRECTS`（3）跳，避免無限轉址鏈
+  全部通過才手動發下一次請求；任一項檢查沒過，原樣拋出 `HTTPError`，不跟。
 
 安全措施：
   - timeout 5 秒 / 回應大小上限 512 KB（超過截斷）
@@ -23,13 +46,15 @@ redirect 才能拿到內容。`_fetch_url` 額外補上「跟 308」的防禦（
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
+import socket
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from .base import Document, Source
 
@@ -37,33 +62,84 @@ _MAX_BYTES = 512 * 1024   # 512 KB
 _TIMEOUT = 5
 _UA = "TrustForge/1.0 (research)"
 
+# 轉址鏈最多允許的跳數（見模組頂部「安全事故修復」說明）：擋無限轉址鏈，
+# 3 跳對正常的白名單來源（同網域內頂多一次路徑搬家）綽綽有餘。
+_MAX_REDIRECTS = 3
+
+_ALLOWED_HTTPS_PORTS = (None, 443)  # None = URL 未寫明 port，走預設 443
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """完全禁用 urllib 預設的自動轉址（見模組頂部「安全事故修復」說明）：
+    `redirect_request` 回傳 `None` 讓 urllib 視為「不處理這個轉址」，改為
+    對呼叫端拋出 `HTTPError`，轉由 `_fetch_url` 手動逐跳驗證後才決定是否
+    要跟。這是本模組唯一安裝的 opener，`_fetch_url` 是唯一出口，因此所有
+    真請求（不論哪個白名單來源）都受這層保護。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = build_opener(_NoRedirectHandler)
+
+
+def _is_safe_redirect_target(url: str, allowed_hostname: str) -> bool:
+    """驗證轉址目標是否安全（見模組頂部「安全事故修復」逐跳驗證說明）：
+    scheme=https、hostname 與最初白名單 URL 完全相同、port 是 https 預設
+    值、解析出的所有 IP 皆非私有/內網（防 DNS rebinding）。"""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+    if not parsed.hostname or parsed.hostname != allowed_hostname:
+        return False
+    if parsed.port not in _ALLOWED_HTTPS_PORTS:
+        return False
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+        ):
+            return False
+    return True
+
 
 def _fetch_url(url: str) -> bytes:
-    """帶 timeout / 大小上限 / User-Agent 的 urllib GET。
-
-    對 308 Permanent Redirect 額外手動跟一次（urllib 在 Python 3.11 之前不
-    認得 308，見模組頂部「生產事故修復」說明）；301/302/303/307 由
-    `urllib.request` 內建 `HTTPRedirectHandler` 自動處理，不受影響。只跟
-    「同 host + https」的單一跳轉，避免任意網域跳轉造成 SSRF（本檔所有
-    URL 皆為寫死白名單，跳轉目標理應仍是同一個網域）。
+    """帶 timeout / 大小上限 / User-Agent 的 urllib GET，透過禁用自動轉址
+    的 `_opener` 送出（見模組頂部「安全事故修復」說明）——3xx 一律先拋出
+    `HTTPError`，由這裡手動逐跳驗證（同 https、同 hostname、標準 port、
+    解析後 IP 非私有）通過才跟，最多 `_MAX_REDIRECTS` 跳。任一跳驗證失敗
+    或超過跳數上限，原樣拋出最後一次的 `HTTPError`。
     """
-    req = Request(url, headers={"User-Agent": _UA})
-    try:
-        with urlopen(req, timeout=_TIMEOUT) as resp:
-            return resp.read(_MAX_BYTES)
-    except HTTPError as exc:
-        if exc.code != 308:
-            raise
-        location = exc.headers.get("Location") if exc.headers else None
-        if not location:
-            raise
-        redirect_url = urljoin(url, location)
-        parsed = urlparse(redirect_url)
-        if parsed.scheme != "https" or parsed.hostname != urlparse(url).hostname:
-            raise
-        req2 = Request(redirect_url, headers={"User-Agent": _UA})
-        with urlopen(req2, timeout=_TIMEOUT) as resp2:
-            return resp2.read(_MAX_BYTES)
+    allowed_hostname = urlparse(url).hostname
+    current_url = url
+    for hop in range(_MAX_REDIRECTS + 1):
+        req = Request(current_url, headers={"User-Agent": _UA})
+        try:
+            with _opener.open(req, timeout=_TIMEOUT) as resp:
+                return resp.read(_MAX_BYTES)
+        except HTTPError as exc:
+            if exc.code not in (301, 302, 303, 307, 308):
+                raise
+            if hop >= _MAX_REDIRECTS:
+                raise
+            location = exc.headers.get("Location") if exc.headers else None
+            if not location:
+                raise
+            redirect_url = urljoin(current_url, location)
+            if not _is_safe_redirect_target(redirect_url, allowed_hostname):
+                raise
+            current_url = redirect_url
+    raise AssertionError("unreachable：迴圈必定在跳數上限內 return 或 raise")
 
 
 def _parse_ts(text: str) -> float:
