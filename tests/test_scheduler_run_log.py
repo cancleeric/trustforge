@@ -61,6 +61,46 @@ def test_jsonl_run_log_latest_none_when_empty(tmp_path):
     assert log.latest() is None
 
 
+def test_jsonl_run_log_latest_never_calls_read_all(tmp_path, monkeypatch):
+    """回歸測試（scalability）：`latest()` 必須是 O(1) 單筆指標讀取，不管
+    歷史檔案累積多少筆，都不該去掃 `read_all()`。"""
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+    for i in range(500):
+        log.append({"run_id": f"r{i}", "ts": f"2026-01-{(i % 28) + 1:02d}T00:00:00+00:00"})
+
+    calls = {"n": 0}
+    original_read_all = JsonlSchedulerRunLog.read_all
+
+    def spy_read_all(self):
+        calls["n"] += 1
+        return original_read_all(self)
+
+    monkeypatch.setattr(JsonlSchedulerRunLog, "read_all", spy_read_all)
+
+    result = log.latest()
+    assert result is not None
+    assert calls["n"] == 0  # latest() 完全沒碰 read_all()
+
+
+def test_jsonl_run_log_latest_cost_independent_of_history_size(tmp_path):
+    """append 越多筆，latest 指標檔本身大小仍是常數（單筆 JSON），不隨歷史
+    筆數增長——用檔案大小間接驗證「latest 查詢成本不隨歷史增長」。"""
+    log = JsonlSchedulerRunLog(path=tmp_path / "runs.jsonl")
+    log.append({"run_id": "r0", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1})
+    size_after_1 = log._latest_path.stat().st_size
+
+    for i in range(1, 300):
+        log.append({
+            "run_id": f"r{i}", "ts": f"2026-02-{(i % 28) + 1:02d}T00:00:00+00:00",
+            "success_count": 1,
+        })
+    size_after_300 = log._latest_path.stat().st_size
+
+    # 單筆 record 的序列化大小穩定（欄位不變），不會隨歷史筆數線性成長；
+    # 允許些微誤差（例如日期字串長度固定，理論上應完全相等）。
+    assert abs(size_after_300 - size_after_1) < 32
+
+
 # ---------------------------------------------------------------------------
 # DynamoDBSchedulerRunLog（mock boto3 Table，不打真 AWS）
 # ---------------------------------------------------------------------------
@@ -81,6 +121,7 @@ def test_dynamodb_run_log_construction_does_not_touch_aws(monkeypatch):
 def test_dynamodb_run_log_append_calls_put_item_with_decimal_and_keys():
     d = DynamoDBSchedulerRunLog(table_name="fake-table")
     mock_table = MagicMock()
+    mock_table.get_item.return_value = {}  # 尚無 latest 指標
     d._table = mock_table  # 繞過 boto3
 
     d.append({
@@ -88,26 +129,97 @@ def test_dynamodb_run_log_append_calls_put_item_with_decimal_and_keys():
         "success_count": 3, "failure_count": 0, "total_docs": 12.0,
     })
 
-    mock_table.put_item.assert_called_once()
-    item = mock_table.put_item.call_args.kwargs["Item"]
-    assert item["run_id"] == "run-1"
-    assert item["ts"] == "2026-07-01T00:00:00+00:00"
-    assert isinstance(item["total_docs"], Decimal)
+    # append() 寫兩筆：完整歷史記錄 + O(1) latest 指標（固定 Key，見
+    # `_update_latest_pointer`），不是只寫一筆。
+    assert mock_table.put_item.call_count == 2
+    history_item = mock_table.put_item.call_args_list[0].kwargs["Item"]
+    pointer_item = mock_table.put_item.call_args_list[1].kwargs["Item"]
+
+    assert history_item["run_id"] == "run-1"
+    assert history_item["ts"] == "2026-07-01T00:00:00+00:00"
+    assert isinstance(history_item["total_docs"], Decimal)
+
+    assert pointer_item["run_id"] == "__latest__"
+    assert pointer_item["ts"] == "__latest__"
+    assert pointer_item["source_run_id"] == "run-1"
+    assert pointer_item["source_ts"] == "2026-07-01T00:00:00+00:00"
+
+    # latest 指標查詢只 GetItem 一次固定 Key，不 Scan。
+    mock_table.get_item.assert_called_once_with(Key=DynamoDBSchedulerRunLog._LATEST_KEY)
+    mock_table.scan.assert_not_called()
 
 
 def test_dynamodb_run_log_append_generates_run_id_and_ts_when_missing():
     d = DynamoDBSchedulerRunLog(table_name="fake-table")
     mock_table = MagicMock()
+    mock_table.get_item.return_value = {}
     d._table = mock_table
 
     d.append({"success_count": 1})
     d.append({"success_count": 2})
 
-    first = mock_table.put_item.call_args_list[0].kwargs["Item"]
-    second = mock_table.put_item.call_args_list[1].kwargs["Item"]
+    # 每次 append 各寫 2 筆（歷史 + 指標），只取歷史那筆比對 run_id/ts。
+    history_puts = [
+        c.kwargs["Item"] for c in mock_table.put_item.call_args_list
+        if c.kwargs["Item"].get("run_id") != "__latest__"
+    ]
+    assert len(history_puts) == 2
+    first, second = history_puts
     assert first["run_id"] and second["run_id"]
     assert first["run_id"] != second["run_id"]
     assert first["ts"]
+
+
+def test_dynamodb_run_log_append_only_overwrites_latest_pointer_when_strictly_newer():
+    """out-of-order append（如時鐘漂移/並發）不該讓較舊的一筆蓋掉較新的
+    latest 指標，比照 `JsonlSchedulerRunLog` 對平手/較舊一律不覆寫的語意。"""
+    d = DynamoDBSchedulerRunLog(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.get_item.return_value = {}
+    d._table = mock_table
+
+    d.append({"run_id": "newer", "ts": "2026-01-03T00:00:00+00:00", "success_count": 1})
+    pointer_after_first = mock_table.put_item.call_args_list[-1].kwargs["Item"]
+    assert pointer_after_first["source_run_id"] == "newer"
+
+    # 模擬目前指標已是 newer（GetItem 回傳剛寫入的內容）
+    mock_table.get_item.return_value = {"Item": dict(pointer_after_first)}
+
+    d.append({"run_id": "older", "ts": "2026-01-01T00:00:00+00:00", "success_count": 2})
+    # 這次 append 只該寫「歷史記錄」那 1 筆，指標不該被較舊的一筆覆寫。
+    latest_call_item = mock_table.put_item.call_args_list[-1].kwargs["Item"]
+    assert latest_call_item["run_id"] == "older"  # 是歷史記錄本身，不是指標覆寫
+
+
+def test_dynamodb_run_log_latest_uses_get_item_not_scan():
+    d = DynamoDBSchedulerRunLog(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.get_item.return_value = {
+        "Item": {
+            "run_id": "__latest__", "ts": "__latest__",
+            "source_run_id": "run-9", "source_ts": "2026-07-01T00:00:00+00:00",
+            "success_count": Decimal("3"),
+        }
+    }
+    d._table = mock_table
+
+    record = d.latest()
+
+    mock_table.get_item.assert_called_once_with(Key=DynamoDBSchedulerRunLog._LATEST_KEY)
+    mock_table.scan.assert_not_called()
+    assert record["run_id"] == "run-9"
+    assert record["ts"] == "2026-07-01T00:00:00+00:00"
+    assert record["success_count"] == 3
+
+
+def test_dynamodb_run_log_latest_none_when_no_pointer_item():
+    d = DynamoDBSchedulerRunLog(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.get_item.return_value = {}
+    d._table = mock_table
+
+    assert d.latest() is None
+    mock_table.scan.assert_not_called()
 
 
 def test_dynamodb_run_log_read_all_paginates_and_converts_decimal():

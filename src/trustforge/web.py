@@ -173,10 +173,37 @@ class TooManyRequests(Exception):
     """per-IP 限流超量時拋出，對應 HTTP 429。"""
 
 
+# 兩個限流 bucket（`_rate_buckets`/`_status_rate_buckets`）共用的硬上限：
+# 光靠「修剪單一 IP 內過期的時間戳」不夠——bucket dict 本身的 *key 數量*
+# （歷史上出現過的不同 IP 數）才是真正的記憶體風險，尤其 IPv6/偽造來源 IP
+# 高頻換位的情境下，dict 會無限增長成一個記憶體耗盡向量（防 DoS 反成
+# DoS）。達上限時：先掃掉整批「視窗內已完全無動靜」的 IP（O(n)，但只在
+# 達上限時才觸發，攤還成本有界）；掃完仍超過上限（同一視窗內大量不同 IP
+# 高頻打），退化成逐出最舊活動時間的 IP 直到降回上限之下——犧牲極少數最
+# 不活躍 IP 的限流狀態換取整體記憶體有界，是刻意的 trade-off。
+_RATE_LIMIT_MAX_TRACKED_IPS = 5000
+
+
+def _evict_stale_rate_buckets(
+    buckets: dict[str, list[float]], window: float, now: float, max_tracked_ips: int
+) -> None:
+    """呼叫端已持有對應的 lock。bucket 數未達上限時直接返回，不做任何事
+    （正常情況下零額外成本）。"""
+    if len(buckets) < max_tracked_ips:
+        return
+    stale_ips = [ip for ip, ts in buckets.items() if not any(now - t < window for t in ts)]
+    for ip in stale_ips:
+        del buckets[ip]
+    while len(buckets) >= max_tracked_ips:
+        oldest_ip = min(buckets, key=lambda k: max(buckets[k], default=0.0))
+        del buckets[oldest_ip]
+
+
 def _check_live_rate_limit(ip: str) -> None:
     """IP 在滑動視窗內超過 _RATE_MAX 次 live 請求 → raise TooManyRequests。"""
     now = time.time()
     with _rate_lock:
+        _evict_stale_rate_buckets(_rate_buckets, _RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS)
         ts = [t for t in _rate_buckets.get(ip, []) if now - t < _RATE_WINDOW]
         if len(ts) >= _RATE_MAX:
             raise TooManyRequests(f"請求過於頻繁，請 {_RATE_WINDOW} 秒後再試")
@@ -189,9 +216,13 @@ def _check_status_rate_limit(ip: str) -> None:
     常數）：IP 在滑動視窗內超過 `_STATUS_RATE_MAX` 次請求 → raise
     `TooManyRequests`。防的是「資料鮮度矩陣逐 (source,coin) 讀 cache 的頁面
     被當 DoS 高頻打」，跟 `_check_live_rate_limit` 保護真連接器/Bedrock 配額
-    的目的不同，故不共用同一組 bucket/門檻。"""
+    的目的不同，故不共用同一組 bucket/門檻（但共用同一套 `_evict_stale_rate_buckets`
+    上限保護邏輯）。"""
     now = time.time()
     with _status_rate_lock:
+        _evict_stale_rate_buckets(
+            _status_rate_buckets, _STATUS_RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS
+        )
         ts = [t for t in _status_rate_buckets.get(ip, []) if now - t < _STATUS_RATE_WINDOW]
         if len(ts) >= _STATUS_RATE_MAX:
             raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")

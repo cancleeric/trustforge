@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -55,7 +56,14 @@ class SchedulerRunLog(ABC):
         """讀出全部歷史紀錄。"""
 
     def latest(self) -> dict[str, Any] | None:
-        """依 `ts` 字串排序取最新一筆；無紀錄回 `None`。"""
+        """依 `ts` 字串排序取最新一筆；無紀錄回 `None`。
+
+        ⚠️ 這是**未優化的參考實作**（`read_all()` 掃全表再取 max）——只給沒有
+        專用「latest 指標」的假想 backend 當退路用。`JsonlSchedulerRunLog` /
+        `DynamoDBSchedulerRunLog` 兩個實際 backend 都**必須 override 成 O(1)
+        常數成本**（維護一份獨立更新的 latest 指標，append 時比較 `ts` 決定
+        是否覆寫），不可讓 `/status` 的「最近排程執行」查詢隨排程歷史筆數線性
+        增長（見兩個子類別各自的 `latest()` docstring）。"""
         records = self.read_all()
         if not records:
             return None
@@ -66,16 +74,63 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
     """Append-only JSONL 檔案（離線/測試/開發預設）。
 
     ⚠️ 本機/單容器持久，EC2 重建即失——線上長期持久見 `DynamoDBSchedulerRunLog`。
+
+    效能設計：`append()` 除了寫入完整歷史（append-only `self.path`），還會
+    同步維護一份**獨立的單筆 latest 指標檔**（`self._latest_path`，原子寫
+    temp file + `os.replace`，同 `JsonCacheBackend` 慣例）。`latest()` 只讀
+    這份單筆檔案，**不掃描/不讀取完整歷史**——查詢成本恆為 O(1)，不隨排程
+    歷史筆數增長（history 檔本身可以無限增長，但沒有任何讀取路徑會整份掃
+    它；`read_all()` 仍會整份讀，只給匯出/除錯等離線用途用，不在 `/status`
+    的熱路徑上）。
     """
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path is not None else _default_run_log_path()
+
+    @property
+    def _latest_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".latest.json")
+
+    def _read_latest_pointer(self) -> dict[str, Any] | None:
+        if not self._latest_path.exists():
+            return None
+        try:
+            data = json.loads(self._latest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _write_latest_pointer(self, record: dict[str, Any]) -> None:
+        self._latest_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self._latest_path.parent),
+            prefix=f".{self._latest_path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            os.replace(tmp_name, self._latest_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def append(self, record: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
+
+        # 維護 latest 指標：只在新記錄的 ts 嚴格大於目前指標時才覆寫（同
+        # `max(records, key=ts)` 對平手取先出現者的既有語意，不因為新記錄
+        # append 順序在後就直接蓋掉——正常排程呼叫端 ts 必為遞增，此比較純
+        # 為容錯（時鐘漂移/並發呼叫）與語意穩定，不會退化成整檔掃描。
+        current = self._read_latest_pointer()
+        if current is None or str(record.get("ts", "")) > str(current.get("ts", "")):
+            self._write_latest_pointer(record)
 
     def read_all(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -93,6 +148,12 @@ class JsonlSchedulerRunLog(SchedulerRunLog):
                 records.append(rec)
         return records
 
+    def latest(self) -> dict[str, Any] | None:
+        """O(1)：只讀 `self._latest_path` 單筆指標檔，不呼叫 `read_all()`、
+        不掃描歷史檔案。指標檔遺失/損毀視為「尚無紀錄」（`/status` 會顯示
+        提示文字），不退回全表掃描以維持常數成本保證。"""
+        return self._read_latest_pointer()
+
 
 class DynamoDBSchedulerRunLog(SchedulerRunLog):
     """線上持久用 backend（DynamoDB 實作，比照 `ledger.py::DynamoDBLedger` 慣例）。
@@ -102,9 +163,20 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
     確保沒有 AWS 憑證、表也還沒建的環境下，**建構本類別不會炸**。
 
     真表建立（PK=`run_id`、SK=`ts`）+ IAM 權限（`dynamodb:PutItem`/
-    `dynamodb:Scan`）+ 生產環境切 `SCHEDULER_RUN_LOG_BACKEND=dynamodb` 由 CEO
-    另立步驟完成，本檔不涉及、不真的建表。
+    `dynamodb:GetItem`/`dynamodb:Scan`）+ 生產環境切
+    `SCHEDULER_RUN_LOG_BACKEND=dynamodb` 由 CEO 另立步驟完成，本檔不涉及、
+    不真的建表。
+
+    效能設計：`append()` 除了寫入完整歷史記錄，還會用固定 Key
+    （`run_id="__latest__"`, `ts="__latest__"`）額外 `put_item` 一份「latest
+    指標」（每次覆寫同一筆，只在新記錄 `ts` 嚴格較新時才覆寫，比照
+    `JsonlSchedulerRunLog` 語意）。`latest()` 只對這個固定 Key 做**單筆
+    `GetItem`**，**絕不 `Scan`**——查詢成本恆為 O(1)，不隨排程歷史筆數增長。
+    `read_all()` 仍會整份 `Scan`，只給匯出/除錯等離線用途用，不在 `/status`
+    的熱路徑上。
     """
+
+    _LATEST_KEY = {"run_id": "__latest__", "ts": "__latest__"}
 
     def __init__(self, table_name: str | None = None, region: str | None = None):
         self.table_name = table_name or os.getenv(
@@ -150,20 +222,61 @@ class DynamoDBSchedulerRunLog(SchedulerRunLog):
         return value
 
     def append(self, record: dict[str, Any]) -> None:
+        table = self._get_table()
         item = dict(record)
         ts = item.get("ts") or datetime.now(timezone.utc).isoformat()
         run_id = item.get("run_id") or uuid.uuid4().hex
         item["ts"] = str(ts)
         item["run_id"] = str(run_id)
-        self._get_table().put_item(Item=self._to_decimal(item))
+        table.put_item(Item=self._to_decimal(item))
+        self._update_latest_pointer(table, item)
+
+    def _update_latest_pointer(self, table: Any, item: dict[str, Any]) -> None:
+        """維護固定 Key 的 latest 指標（O(1) `GetItem` 比較後決定要不要覆寫，
+        絕不 `Scan`）。真正的 key 屬性（`run_id`/`ts`）改成固定值，原始值
+        另存 `source_run_id`/`source_ts` 欄位供 `latest()` 還原。"""
+        current = table.get_item(Key=self._LATEST_KEY).get("Item")
+        current_ts = str(current.get("source_ts", "")) if current else ""
+        if current is not None and str(item["ts"]) <= current_ts:
+            return  # 目前指標已較新（或相等，保留先寫入者），不覆寫
+
+        pointer = dict(item)
+        pointer["source_run_id"] = pointer.pop("run_id")
+        pointer["source_ts"] = pointer.pop("ts")
+        pointer["run_id"] = self._LATEST_KEY["run_id"]
+        pointer["ts"] = self._LATEST_KEY["ts"]
+        table.put_item(Item=self._to_decimal(pointer))
+
+    def latest(self) -> dict[str, Any] | None:
+        """O(1)：對固定 Key 做單筆 `GetItem`，**絕不 `Scan`**——查詢成本不隨
+        排程歷史筆數增長。指標項目不存在（表剛建/尚未有任何 append）視為
+        「尚無紀錄」。"""
+        resp = self._get_table().get_item(Key=self._LATEST_KEY)
+        item = resp.get("Item")
+        if not item:
+            return None
+        converted = self._from_decimal(item)
+        if not isinstance(converted, dict):
+            return None
+        record = dict(converted)
+        record["run_id"] = record.pop("source_run_id", record.get("run_id"))
+        record["ts"] = record.pop("source_ts", record.get("ts"))
+        return record
 
     def read_all(self) -> list[dict[str, Any]]:
+        """整份 `Scan` 讀出全部歷史紀錄（含 latest 指標項目本身，已用固定
+        Key 濾掉）——只給匯出/除錯等離線用途，**不在 `/status` 的熱路徑上**
+        （`/status` 走 `latest()`，恆為 O(1)）。"""
         table = self._get_table()
         records: list[dict[str, Any]] = []
         scan_kwargs: dict[str, Any] = {}
         while True:
             resp = table.scan(**scan_kwargs)
             for item in resp.get("Items", []) or []:
+                if item.get("run_id") == self._LATEST_KEY["run_id"] and item.get(
+                    "ts"
+                ) == self._LATEST_KEY["ts"]:
+                    continue  # 跳過 latest 指標項目，只回傳真正的歷史記錄
                 converted = self._from_decimal(item)
                 if isinstance(converted, dict):
                     records.append(converted)

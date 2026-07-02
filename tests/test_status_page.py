@@ -218,6 +218,81 @@ def test_status_rate_limit_independent_from_live_rate_limit(json_cache_backend):
     web._rate_buckets.clear()
 
 
+def test_status_rate_limit_bucket_count_bounded_under_many_distinct_ips(monkeypatch):
+    """Scalability 回歸：大量不同 IP 打 /status 限流不該讓 `_status_rate_buckets`
+    這個 dict 本身無限增長（記憶體耗盡向量，防 DoS 反成 DoS）——bucket 數
+    必須有上限。"""
+    monkeypatch.setattr(web, "_RATE_LIMIT_MAX_TRACKED_IPS", 50)
+    web._status_rate_buckets.clear()
+
+    for i in range(500):
+        web._check_status_rate_limit(f"10.0.{i // 256}.{i % 256}")
+
+    assert len(web._status_rate_buckets) <= 50
+    web._status_rate_buckets.clear()
+
+
+def test_live_rate_limit_bucket_count_bounded_under_many_distinct_ips(monkeypatch):
+    """同一套上限保護也套用在既有 `_rate_buckets`（live/real 限流），不是只
+    修新加的 /status bucket。"""
+    monkeypatch.setattr(web, "_RATE_LIMIT_MAX_TRACKED_IPS", 50)
+    web._rate_buckets.clear()
+
+    for i in range(500):
+        web._check_live_rate_limit(f"172.16.{i // 256}.{i % 256}")
+
+    assert len(web._rate_buckets) <= 50
+    web._rate_buckets.clear()
+
+
+def test_status_rate_limit_state_preserved_when_under_bucket_cap(monkeypatch):
+    """未達 bucket 數上限時，`_evict_stale_rate_buckets` 直接短路返回，不影響
+    任何既有 IP 的限流狀態——驗證新加的上限保護邏輯在正常（未觸頂）情境下
+    零行為改變，不會誤傷。"""
+    monkeypatch.setattr(web, "_RATE_LIMIT_MAX_TRACKED_IPS", 1000)
+    web._status_rate_buckets.clear()
+
+    active_ip = "9.9.9.9"
+    for _ in range(web._STATUS_RATE_MAX):
+        web._check_status_rate_limit(active_ip)
+    with pytest.raises(web.TooManyRequests):
+        web._check_status_rate_limit(active_ip)
+
+    for i in range(50):
+        web._check_status_rate_limit(f"8.8.{i // 256}.{i % 256}")
+
+    with pytest.raises(web.TooManyRequests):
+        web._check_status_rate_limit(active_ip)
+    web._status_rate_buckets.clear()
+
+
+def test_evict_stale_rate_buckets_prefers_fully_expired_ips_over_active_ones():
+    """達上限時，優先清「視窗內完全無動靜」的 IP，不動仍活躍的 IP。"""
+    now = time.time()
+    buckets = {"expired-ip": [now - 1000.0], "active-ip": [now]}
+    web._evict_stale_rate_buckets(buckets, window=30, now=now, max_tracked_ips=2)
+    assert "expired-ip" not in buckets
+    assert "active-ip" in buckets
+
+
+def test_evict_stale_rate_buckets_falls_back_to_lru_when_all_active():
+    """掃完仍超過上限（沒有完全無動靜的 IP 可清）時，退化成逐出最舊活動
+    時間的 IP，直到降回上限之下。"""
+    now = time.time()
+    buckets = {"older-active": [now - 5.0], "newer-active": [now]}
+    web._evict_stale_rate_buckets(buckets, window=30, now=now, max_tracked_ips=2)
+    assert "older-active" not in buckets
+    assert "newer-active" in buckets
+
+
+def test_evict_stale_rate_buckets_noop_when_under_cap():
+    """未達上限時完全不動 dict（零額外成本，正常情境行為不變）。"""
+    now = time.time()
+    buckets = {"a": [now - 1000.0], "b": [now]}
+    web._evict_stale_rate_buckets(buckets, window=30, now=now, max_tracked_ips=10)
+    assert set(buckets) == {"a", "b"}
+
+
 def test_status_rate_limit_scoped_per_ip(json_cache_backend):
     ip_a, ip_b = "7.7.7.9", "7.7.7.10"
     for _ in range(web._STATUS_RATE_MAX):
