@@ -613,6 +613,97 @@ def test_theme_toggle_rejects_open_redirect_next():
     assert locations == ["/"]
 
 
+# ---------------------------------------------------------------------------
+# HIGH 安全修正（codex 複審，PR #39）：`/theme` 的 `next` 若只檢查
+# 「以單一 `/` 開頭」，percent-decode 後帶 CRLF/控制字元/backslash 的值
+# 會被原封不動塞進 `Location` header，造成 response splitting／header 注入。
+# `_sanitize_theme_next` 必須嚴格擋下這些變體，只放行 allowlist 內的路由。
+# ---------------------------------------------------------------------------
+
+def test_theme_next_crlf_injection_rejected_and_location_header_clean():
+    """`next=%2F%0D%0ASet-Cookie%3Aattacker%3D1`（percent-encoded CRLF）
+    decode 後會變成帶 `\\r\\n` 的字串——必須被拒絕、fallback `/`，且
+    `Location` header 裡完全不能出現 `\\r`/`\\n`（不能被拿來注入額外
+    response header，例如偽造 `Set-Cookie`）。"""
+    h = _make_mock_handler(
+        "/theme?to=dark&next=%2F%0D%0ASet-Cookie%3Aattacker%3D1"
+    )
+    h.do_GET()
+    locations = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Location"]
+    assert locations == ["/"]
+    assert "\r" not in locations[0]
+    assert "\n" not in locations[0]
+    # 確認沒有任何回應 header 被偷渡了額外的 Set-Cookie（只能有 /theme
+    # 自己合法設的那個 tf_theme cookie，不能有 attacker=1）。
+    set_cookies = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Set-Cookie"]
+    assert all("attacker" not in c for c in set_cookies)
+
+
+def test_theme_next_backslash_variant_rejected():
+    """`/\\evil.com`（單一 `/` 開頭但夾帶 backslash）——部分瀏覽器/代理
+    會把 `\\` 正規化成 `/`，等同 `//evil.com` 的 protocol-relative 外部
+    導向，必須拒絕。"""
+    h = _make_mock_handler("/theme?to=dark&next=%2F%5Cevil.com")
+    h.do_GET()
+    locations = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Location"]
+    assert locations == ["/"]
+
+
+def test_theme_next_tab_control_char_rejected():
+    """`next=%2F%09`（tab，ASCII 0x09，屬控制字元）——即使以單一 `/`
+    開頭也必須拒絕，不能只驗開頭字元就放行。"""
+    h = _make_mock_handler("/theme?to=dark&next=%2F%09evil")
+    h.do_GET()
+    locations = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Location"]
+    assert locations == ["/"]
+
+
+def test_theme_next_not_in_allowlist_rejected():
+    """就算是「看起來正常」的站內相對路徑，只要不在已知路由 allowlist
+    內（`/`、`/analyze`、`/analyze.json`、`/costs`），一律 fallback，
+    不接受任意站內路徑當開放跳板。"""
+    h = _make_mock_handler("/theme?to=dark&next=%2Fadmin%2Fsecret")
+    h.do_GET()
+    locations = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Location"]
+    assert locations == ["/"]
+
+
+def test_theme_next_valid_analyze_path_with_query_round_trips():
+    """正常案例：`next=/analyze?coin=BTC&...` 這種帶合法 query string 的
+    allowlist 路徑必須原樣導回，不能被過度攔阻（功能不能被安全修正誤傷）。"""
+    h = _make_mock_handler(
+        "/theme?to=dark&next=%2Fanalyze%3Fcoin%3DBTC%26type%3Dmulti_source%26q%3Dtest"
+    )
+    h.do_GET()
+    locations = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Location"]
+    assert locations == ["/analyze?coin=BTC&type=multi_source&q=test"]
+
+
+def test_sanitize_theme_next_unit_coverage():
+    """直接單元測試 `_sanitize_theme_next`，涵蓋 codex 列出的所有變體。"""
+    assert web._sanitize_theme_next(None) == "/"
+    assert web._sanitize_theme_next("") == "/"
+    assert web._sanitize_theme_next("/") == "/"
+    assert web._sanitize_theme_next("/costs") == "/costs"
+    assert web._sanitize_theme_next("/analyze?coin=BTC") == "/analyze?coin=BTC"
+    assert web._sanitize_theme_next("/analyze.json?coin=BTC") == "/analyze.json?coin=BTC"
+    # protocol-relative
+    assert web._sanitize_theme_next("//evil.com") == "/"
+    # backslash 變體
+    assert web._sanitize_theme_next("/\\evil.com") == "/"
+    assert web._sanitize_theme_next("\\evil.com") == "/"
+    # CRLF / 控制字元注入
+    assert web._sanitize_theme_next("/\r\nSet-Cookie:attacker=1") == "/"
+    assert web._sanitize_theme_next("/\tevil") == "/"
+    assert web._sanitize_theme_next("/\x00evil") == "/"
+    # 不在 allowlist
+    assert web._sanitize_theme_next("/admin/secret") == "/"
+    assert web._sanitize_theme_next("/healthz") == "/"
+    # 絕對 URL（帶 scheme/netloc）
+    assert web._sanitize_theme_next("http://evil.com") == "/"
+    assert web._sanitize_theme_next("https://evil.com/analyze") == "/"
+
+
 def test_analyze_success_page_theme_link_uses_rtok_not_query_theme():
     """`/analyze` 成功頁的主題切換連結必須帶 rtok、指向 `/theme`；
     不能再把 `theme=` 塞進 `/analyze` 本身的網址（HIGH 修正的直接體現：

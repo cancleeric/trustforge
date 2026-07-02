@@ -1797,6 +1797,55 @@ def _theme_href(to: str, *, next_path: str | None = None, rtok: str | None = Non
     return f"/theme?{urlencode(params)}"
 
 
+# /theme 導回目標允許的站內路由白名單（僅比對 urlparse 後、去掉 query
+# string 的 path 部分；見 `_sanitize_theme_next`）。
+_THEME_NEXT_ALLOWED_PATHS = frozenset({"/", "/analyze", "/analyze.json", "/costs"})
+
+
+def _sanitize_theme_next(next_raw: str | None) -> str:
+    """嚴格驗證 `/theme` 的 `next` 導回目標，防 open redirect 與
+    HTTP response-splitting／header 注入（HIGH 安全修正，codex 複審 PR #39）。
+
+    背景：`next` 經 `parse_qs` percent-decode 後，若只檢查「以單一 `/`
+    開頭」，`next=%2F%0D%0ASet-Cookie%3Aattacker%3D1` 解碼後會變成帶
+    CRLF 的字串，原封不動塞進 `send_header("Location", ...)`——Python 的
+    `http.server` 不會 sanitize header value，攻擊者可注入額外的
+    response header（例如偽造 `Set-Cookie` 幫受害者種 cookie）。
+
+    規則（任一項不過關就 fallback 回 `"/"`，一律以 **decode 後**的字串
+    驗證，不只驗 raw percent-encoded 形式）：
+
+    1. 拒絕任何控制字元（`ord(ch) < 0x20`，涵蓋 `\\r` `\\n` `\\t` 等所有
+       ASCII 控制碼）——擋 CRLF header 注入。
+    2. 拒絕 backslash `\\`——部分瀏覽器/代理會把 `\\` 正規化成 `/`，
+       `/\\evil.com` 可能被當成 protocol-relative URL 導到外部網域。
+    3. 必須以單一 `/` 開頭、且不是 `//` 開頭（`//evil.com` 會被瀏覽器
+       解讀成同 scheme 的 protocol-relative URL，導到外部網域）。
+    4. 用 `urlparse` 解析後，`scheme`/`netloc` 都必須是空字串（防禦
+       urlparse 對怪異輸入的正規化落差，多一層保險）。
+    5. allowlist：`urlparse(next_raw).path`（不含 query string）必須是
+       已知站內路由（`/`、`/analyze`、`/analyze.json`、`/costs`），
+       不在清單內一律 fallback——不接受任意站內路徑當開放跳板。
+    """
+    if not next_raw:
+        return "/"
+    if any(ord(ch) < 0x20 for ch in next_raw):
+        return "/"
+    if "\\" in next_raw:
+        return "/"
+    if not next_raw.startswith("/") or next_raw.startswith("//"):
+        return "/"
+    try:
+        parsed = urlparse(next_raw)
+    except ValueError:
+        return "/"
+    if parsed.scheme or parsed.netloc:
+        return "/"
+    if parsed.path not in _THEME_NEXT_ALLOWED_PATHS:
+        return "/"
+    return next_raw
+
+
 def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     """單幣分析入口，永遠回傳 (report, evidence, log) 三元組。
 
@@ -1942,9 +1991,7 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     extra_headers={"Set-Cookie": set_cookie},
                 )
-            next_path = qs.get("next", ["/"])[0]
-            if not next_path.startswith("/") or next_path.startswith("//"):
-                next_path = "/"  # 防 open redirect：只允許站內相對路徑
+            next_path = _sanitize_theme_next(qs.get("next", ["/"])[0])
             return self._redirect(next_path, extra_headers={"Set-Cookie": set_cookie})
 
         if u.path == "/":
