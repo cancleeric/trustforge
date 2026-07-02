@@ -188,6 +188,59 @@ def test_status_page_recomputed_after_ttl_expires(json_cache_backend, monkeypatc
     assert calls["n"] == 2
 
 
+def test_render_status_page_cached_single_flight_on_concurrent_expiry(
+    json_cache_backend, monkeypatch
+):
+    """cache-stampede 回歸（MEDIUM）：cache 過期瞬間多執行緒併發打
+    `_render_status_page_cached()`（模擬 `ThreadingHTTPServer` 底下、分散
+    IP 打進來、per-IP 限流擋不住的 thundering herd 情境）——必須只有一個
+    請求真的跑 `_render_status_page()`（後端讀取 freshness matrix + ledger
+    summary + dual scheduler run log），其餘請求直接吃新快取，不各自重算。
+
+    用 `time.sleep()` 刻意拉寬 `_render_status_page()` 的執行視窗，確保
+    其他執行緒真的會在它執行期間排隊等鎖，而不是僥倖沒撞在一起。
+    """
+    import threading
+
+    real_render = web._render_status_page
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+
+    def slow_counting_render():
+        with calls_lock:
+            calls["n"] += 1
+        time.sleep(0.05)  # 拉寬執行視窗，逼其他執行緒排隊等鎖
+        return real_render()
+
+    monkeypatch.setattr(web, "_render_status_page", slow_counting_render)
+
+    # 先讓 cache 有效過一次（確保 _render_status_page 之後真的可以正常跑），
+    # 再手動讓它過期，模擬「TTL 剛過期的那一瞬間」。
+    web._render_status_page_cached()
+    calls["n"] = 0
+    web._status_cache["expires_at"] = time.time() - 1
+
+    barrier = threading.Barrier(20)
+    results: list[str] = []
+    results_lock = threading.Lock()
+
+    def worker():
+        barrier.wait()  # 盡量讓所有執行緒同時衝進 cache-miss 分支
+        html_out = web._render_status_page_cached()
+        with results_lock:
+            results.append(html_out)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert calls["n"] == 1  # single-flight：只有一個請求真的重算
+    assert len(results) == 20
+    assert all(r == results[0] for r in results)  # 其餘全部拿到同一份新快取
+
+
 # ---------------------------------------------------------------------------
 # per-IP 限流：獨立於 live/real 限流的 bucket
 # ---------------------------------------------------------------------------

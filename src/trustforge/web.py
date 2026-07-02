@@ -539,16 +539,27 @@ def _render_status_page_cached() -> str:
     組合數不小，DynamoDB backend 下每次請求都重算會有明顯延遲，也容易被打爆。
     這是**跨 IP 共用**的頁面級快取（非安全機制，`_check_status_rate_limit` 才是），
     純粹降低重算頻率。
+
+    ⚠️ single-flight：cache 過期瞬間可能有多個 `ThreadingHTTPServer` 併發請求
+    同時進來（跨多個 client IP，per-IP 限流擋不住）。若鎖只保護「檢查/寫入」
+    兩小段、`_render_status_page()` 本身在鎖外跑，這些併發請求會全部 miss、
+    各自獨立重算整份 freshness matrix + ledger summary + scheduler run 讀取
+    ——thundering herd，DynamoDB backend 下造成負載/成本尖峰。因此把
+    `_render_status_page()` 整個放進鎖內序列化執行：只有第一個發現 cache
+    過期的請求真的重算，其餘請求卡在鎖外等待；等它們拿到鎖時，上面的
+    `now < expires_at` 檢查已經因為前者剛寫入的新值而成立，直接吃新值
+    返回，不會各自重算。代價是過期瞬間的併發請求會被序列化等重算完成
+    （而非立刻各自平行拿到舊值），但這正是 TTL 快取本來就允許的等級（本
+    來單一請求重算也要付這個延遲），且比起 thundering herd 更安全。
     """
-    now = time.time()
     with _status_cache_lock:
+        now = time.time()
         if now < _status_cache["expires_at"]:
             return _status_cache["html"]  # type: ignore[return-value]
-    rendered = _render_status_page()
-    with _status_cache_lock:
+        rendered = _render_status_page()
         _status_cache["html"] = rendered
         _status_cache["expires_at"] = time.time() + _STATUS_CACHE_TTL_SECONDS
-    return rendered
+        return rendered
 
 
 def _handle_status(client_ip: str = "") -> tuple[int, str]:
