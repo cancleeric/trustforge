@@ -105,11 +105,15 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
- :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9}}
+ :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9;--tf-fs-h1:1.6rem;--tf-fw-h1:700;--tf-fs-h2:1.3rem;--tf-fw-h2:700;--tf-fs-h3:1rem;--tf-fw-h3:600;--tf-fs-h4:.85rem;--tf-fw-h4:600;--tf-fs-body:1rem;--tf-lh-body:1.55}}
  :root[data-theme="light"]{{--tf-bg:#f6f8fa;--tf-card:#ffffff;--tf-border:#d0d7de;--tf-text:#1f2328;--tf-muted:#57606a;--tf-muted2:#6e7781;--tf-hdr-g1:#ffffff;--tf-hdr-g2:#f6f8fa;--tf-inset:#eef2f6;--tf-text2:#3d444d}}
  *{{box-sizing:border-box}}
- body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
- h1{{margin-bottom:.2rem}} .sub{{color:var(--tf-muted);margin-top:0}}
+ body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;font-size:var(--tf-fs-body);line-height:var(--tf-lh-body);max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
+ h1{{margin-bottom:.2rem;font-size:var(--tf-fs-h1);font-weight:var(--tf-fw-h1);letter-spacing:-.01em;line-height:1.25}}
+ h2{{font-size:var(--tf-fs-h2);font-weight:var(--tf-fw-h2);line-height:1.3}}
+ h3{{font-size:var(--tf-fs-h3);font-weight:var(--tf-fw-h3);line-height:1.35}}
+ h4{{font-size:var(--tf-fs-h4);font-weight:var(--tf-fw-h4)}}
+ .sub{{color:var(--tf-muted);margin-top:0}}
  a{{color:#1f6feb}}
  header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid var(--tf-border);border-radius:12px;background:linear-gradient(var(--tf-hdr-g1),var(--tf-hdr-g2));margin-bottom:1rem;flex-wrap:wrap}}
  .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:var(--tf-text)}}
@@ -142,8 +146,19 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  label{{display:block;font-size:.8rem;color:var(--tf-muted);margin-bottom:.2rem}}
  select,input,textarea,button{{width:100%;padding:.5rem .7rem;border:1px solid var(--tf-border);border-radius:8px;font-size:1rem;background:var(--tf-bg);color:var(--tf-text);font-family:inherit}}
  textarea[name=q]{{min-width:0;min-height:5.2rem;resize:vertical;line-height:1.4}}
- button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em}}
+ button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em;position:relative}}
  button .tf-kbd{{opacity:.75;font-family:'IBM Plex Mono',monospace;margin-left:.3rem}}
+ /* 世界第一重寫 Phase 3：純 CSS loading 回饋——zero-JS 頁面（CSP `default-src 'none'`
+    已擋死所有 script），全頁 GET 表單送出到瀏覽器完成導航前無法用 JS 插入 spinner，
+    只能靠 `:active`（滑鼠按下/觸控/多數瀏覽器對 Enter 觸發的送出也會套用）在舊頁面
+    卸載前的最後幾個 render frame 換上 disabled 外觀＋spinner＋提示文字，讓使用者
+    在等待網路請求時至少有即時視覺回饋，不是完全白屏。不改變 `<form>` 本身的 GET
+    行為、不影響 `_do_analyze` 參數解析。 */
+ button[type=submit]:active{{display:flex;align-items:center;justify-content:center;gap:.5rem;cursor:progress;pointer-events:none;background:#1a5fc7}}
+ button[type=submit]:active .tf-btn-label{{display:none}}
+ button[type=submit]:active::before{{content:"";width:14px;height:14px;flex-shrink:0;border-radius:50%;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;animation:tf-spin .6s linear infinite}}
+ button[type=submit]:active::after{{content:"正在整合多源資料…";font-size:.85rem}}
+ @keyframes tf-spin{{to{{transform:rotate(360deg)}}}}
  .badge{{display:inline-block;background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.4);border-radius:6px;padding:.1rem .5rem;font-size:.75rem;color:#79c0ff}}
  pre{{background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:var(--tf-text)}}
  table{{border-collapse:collapse;width:100%;background:var(--tf-card);font-size:.85rem;color:var(--tf-text)}} td,th{{border:1px solid var(--tf-border);padding:.4rem;text-align:left}}
@@ -168,7 +183,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-step{{border-left:4px solid var(--tf-border);padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
  .tf-step li{{margin:.25rem 0}}
  .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--tf-muted2);font-weight:400;margin-left:.4rem}}
- .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle}}
+ .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle;background:color-mix(in srgb,currentColor 14%,transparent)}}
  .tf-div-grid{{display:grid;grid-template-columns:1fr 34px 1fr;gap:0;align-items:stretch;margin-top:.6rem}}
  .tf-div-side{{border-radius:9px;padding:.7rem .8rem}}
  .tf-div-bull{{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.35)}}
@@ -183,6 +198,13 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-home-steps{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:.6rem}}
  .tf-home-step{{background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:8px;padding:.8rem}}
  .tf-home-step .sub{{font-size:.8rem;margin:.3rem 0 0}}
+ .tf-mc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:.7rem;margin-top:.3rem}}
+ .tf-mc-card{{display:flex;flex-direction:column;gap:.35rem;background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:10px;padding:.75rem .85rem;text-decoration:none;color:inherit}}
+ .tf-mc-card:hover{{border-color:#1f6feb}}
+ .tf-mc-coin{{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:.92rem;color:var(--tf-text)}}
+ .tf-mc-trust{{font-size:1.35rem;font-weight:700;font-family:'IBM Plex Mono',monospace}}
+ .tf-mc-empty{{font-size:.8rem;color:var(--tf-muted)}}
+ .tf-mc-cta{{font-size:.72rem;color:#79c0ff;margin-top:.15rem}}
  @media (max-width:900px){{
   body{{margin:1rem auto}}
   header.tf-hdr{{flex-direction:column;align-items:flex-start}}
@@ -194,6 +216,17 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
   .tf-div-mid{{padding:.3rem 0}}
   .tf-home-steps{{grid-template-columns:1fr}}
  }}
+ /* 世界第一重寫 Phase 3：375px 手機補強。表格橫向捲（而非強制欄位換行/擠壓）
+    ——`.tf-section` 是所有表格既有的統一容器（見 evidence 清單／資料鮮度矩陣／
+    連接器用量／成本帳本各表），讓容器本身可橫向捲動即可在不改任何 HTML 結構
+    的前提下讓表格內容在窄螢幕保持可讀，不強制每個 <td> 換行擠壞版面。 */
+ @media (max-width:480px){{
+  body{{padding:0 .6rem}}
+  .tf-section{{padding:.8rem;overflow-x:auto}}
+  .tf-mc-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .tf-dash-hdr{{gap:.4rem}}
+  .tf-coin-badge{{font-size:.9rem;padding:.2rem .55rem}}
+ }}
 </style></head><body>
 {header}
 <div class="tf-layout">
@@ -204,7 +237,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
    <div><label>幣種</label><select name="coin">{coins}</select></div>
    <div><label>題型</label><select name="type">{types}</select></div>
    <div><label>問題</label><textarea name="q" rows="3">{default_query}</textarea></div>
-   <button type="submit">Run analysis<span class="tf-kbd">&#8629;</span></button>
+   <button type="submit"><span class="tf-btn-label">Run analysis<span class="tf-kbd">&#8629;</span></span></button>
   </form>
   {run_stats}
  </aside>
@@ -1134,18 +1167,173 @@ def _example_analyze_href() -> str:
     return html.escape(f"/analyze?{urlencode(params)}")
 
 
+# 世界第一重寫 Phase 3：首頁「多幣總覽」——讀最近一次分析的信任分快照。
+#
+# ⚠️ 目前尚無寫入端（#20「結果持久化」尚未落地）：`pipeline.run()`／
+# `pipeline.run_comparison()` 目前只把分析結果回傳給呼叫端組報告頁，不會
+# 寫回任何持久層。因此下面 `_get_coin_trust_snapshot()` 今天對所有幣種
+# 必然回傳 `None`（首頁卡片一律顯示「尚無資料」）——這是**已知、預期中**
+# 的現況，不是 bug。這裡先把讀路徑與資料契約建好（forward-compatible）：
+# 等 #20 補上「分析完寫回一筆快照」的寫入端後，首頁卡片會自動生效，不需要
+# 再改這支函式或 `_render_home_page()`。
+#
+# ⛔ credit-safe：只呼叫 `ingestion.cache.cache_get()`（單次 DynamoDB
+# GetItem／本地 JSON 讀取，跟 `/status` 既有的連線探測、資料鮮度矩陣同一套
+# 唯讀 cache 存取模式），**不呼叫 pipeline/connector/Bedrock 任何一項**；
+# 讀取失敗／格式不符一律回 `None`，不拋例外、不重算、不觸發任何外呼。
+_ANALYSIS_SNAPSHOT_SOURCE = "__analysis_snapshot__"
+
+
+def _get_coin_trust_snapshot(coin: str) -> dict[str, Any] | None:
+    """讀 `{coin}` 最近一次分析的信任分快照（純 cache 讀，見上方模組註解）。
+
+    快取 key 沿用 `ingestion.cache.cache_key()` 慣例（`來源:幣別`），來源用
+    保留 sentinel `_ANALYSIS_SNAPSHOT_SOURCE`（比照 `_STATUS_PROBE_SOURCE`
+    的保留 key 寫法，不會撞到任何真實連接器名稱）。`CacheBackend.get()`
+    固定回傳 `{{"docs": [...], "fetched_at": float}}` 信封（見 `cache.py`
+    `DynamoDBCache`/`JsonCacheBackend` 共同介面）——這裡借用同一個信封存
+    一筆快照 dict（`docs[0]`），欄位：
+      - `trust`（float，0-1，信任分）
+      - `direction`（str，"偏多"/"偏空"/"中性"/"不明"，沿用既有
+        `schema.Report._direction_label()` 詞彙，不新發明一套說法）
+
+    任何讀取例外／格式不符（缺欄位、非 dict、trust 非法數字）一律回
+    `None`，呼叫端優雅降級顯示「尚無資料」，不拋例外、不讓首頁掛掉。
+    """
+    try:
+        from .ingestion.cache import cache_get, cache_key, get_cache_backend
+
+        entry = cache_get(get_cache_backend(), cache_key(_ANALYSIS_SNAPSHOT_SOURCE, coin))
+    except Exception:
+        return None
+    if not entry:
+        return None
+    docs = entry.get("docs")
+    if not isinstance(docs, list) or not docs or not isinstance(docs[0], dict):
+        return None
+    snap = docs[0]
+    try:
+        trust = float(snap.get("trust"))
+    except (TypeError, ValueError):
+        return None
+    if trust != trust or trust in (float("inf"), float("-inf")):  # NaN/Inf 防禦
+        return None
+    direction = snap.get("direction")
+    if direction not in ("偏多", "偏空", "中性", "不明"):
+        direction = "不明"
+    return {
+        "trust": max(0.0, min(1.0, trust)),
+        "direction": direction,
+        "fetched_at": entry.get("fetched_at"),
+    }
+
+
+def _multicoin_analyze_href(coin: str) -> str:
+    """多幣總覽卡「看完整報告」CTA：連到 `/analyze` 真資料·$0 預設檔位（不帶
+    `sample=1`——跟首頁範例 CTA `_example_analyze_href()` 刻意不同：範例卡
+    本來就要標示「示意」，這裡是使用者主動選了某一幣種，要看的是真報告）。
+    """
+    params = {
+        "coin": coin,
+        "type": QuestionType.MULTI_SOURCE.value,
+        "q": f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料",
+    }
+    return html.escape(f"/analyze?{urlencode(params)}")
+
+
+def _render_home_multicoin_card(coin: str) -> str:
+    """單一幣種迷你信任卡：讀 `_get_coin_trust_snapshot`，無資料一律優雅顯示
+    「尚無資料」（不即時算、不打連接器，見模組頂部註解）。信任分顏色沿用
+    `_trust_bar()` 既有三檔門檻（≥0.7 綠／≥0.3 橙／其餘紅）；方向標籤沿用
+    `.tf-div-tag` 既有樣式與 comparison 頁「偏多＝綠 #3fb950／偏空＝紅
+    #f85149」既定色碼（見 `_render_comparison` 附近的 `.tf-div-bull`/
+    `.tf-div-bear`），不新發明一套配色。
+    """
+    e = html.escape
+    href = _multicoin_analyze_href(coin)
+    snap = _get_coin_trust_snapshot(coin)
+    if snap is None:
+        return (
+            f'<a class="tf-mc-card" href="{href}">'
+            f'<span class="tf-mc-coin">{e(coin)}</span>'
+            f'<span class="tf-mc-empty">尚無資料</span>'
+            f'<span class="tf-mc-cta">看完整報告 &#8594;</span>'
+            f"</a>"
+        )
+    trust = snap["trust"]
+    if trust >= 0.7:
+        trust_color = "#3fb950"
+    elif trust >= 0.3:
+        trust_color = "#d9832a"
+    else:
+        trust_color = "#f85149"
+    direction = snap["direction"]
+    if direction == "偏多":
+        dir_color, dir_bg = "#3fb950", "rgba(63,185,80,.12)"
+    elif direction == "偏空":
+        dir_color, dir_bg = "#f85149", "rgba(248,81,73,.12)"
+    else:
+        dir_color, dir_bg = "var(--tf-muted)", "rgba(139,148,158,.12)"
+    return (
+        f'<a class="tf-mc-card" href="{href}">'
+        f'<span class="tf-mc-coin">{e(coin)}</span>'
+        f'<span class="tf-mc-trust" style="color:{trust_color}">{trust:.2f}</span>'
+        f'<span class="tf-div-tag" style="color:{dir_color};background:{dir_bg}">{e(direction)}</span>'
+        f'<span class="tf-mc-cta">看完整報告 &#8594;</span>'
+        f"</a>"
+    )
+
+
+# module 級 ~30 秒 TTL 快取（比照 `_render_status_page_cached` single-flight
+# 寫法）：首頁是全站流量最高的頁面，多幣總覽每次 render 要對 `COIN_POOL`
+# 逐幣讀一次 cache（5 次 GetItem），沒必要每個請求都重打 DynamoDB，也怕被
+# 當洪水打。
+_HOME_MULTICOIN_CACHE_TTL_SECONDS = 30.0
+_home_multicoin_cache_lock = threading.Lock()
+_home_multicoin_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
+
+
+def _render_home_multicoin_overview() -> str:
+    """首頁「多幣總覽」區塊：`COIN_POOL` 5 幣迷你信任卡列。純讀 cache（見
+    `_get_coin_trust_snapshot`），零 pipeline/connector/Bedrock 呼叫；
+    single-flight TTL 快取包裝，理由與寫法同 `_render_status_page_cached`。
+    """
+    with _home_multicoin_cache_lock:
+        now = time.time()
+        if now < _home_multicoin_cache["expires_at"]:
+            return _home_multicoin_cache["html"]  # type: ignore[return-value]
+        cards = "".join(_render_home_multicoin_card(c) for c in COIN_POOL)
+        rendered = (
+            '<div class="tf-section">'
+            "<h3>多幣總覽</h3>"
+            '<p class="sub" style="margin:0 0 .6rem">'
+            "最近一次背景分析的信任分快照（純讀取，非即時計算）。</p>"
+            f'<div class="tf-mc-grid">{cards}</div>'
+            "</div>"
+        )
+        _home_multicoin_cache["html"] = rendered
+        _home_multicoin_cache["expires_at"] = time.time() + _HOME_MULTICOIN_CACHE_TTL_SECONDS
+        return rendered
+
+
 def _render_home_page() -> str:
     """首頁（`/`）內容：純靜態 HTML 字串組裝，比照 `_render_status_page`／
     `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock 任何一項**
     ——首頁流量最高，必須是零外呼的純靜態渲染（credit-safe：不能是計費熱點）。
+    唯一例外：「多幣總覽」讀取既有 cache backend 的唯讀 `get()`（見
+    `_render_home_multicoin_overview`／`_get_coin_trust_snapshot`），跟
+    `/status` 既有的 cache 唯讀存取同一套模式，不是新的連接器外呼，且加了
+    30 秒 TTL 快取降低重算頻率。
 
-    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、產品總覽（事實→
-    推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟 1/3、2/3、3/3」，
-    不新發明一套說法）、範例入口（連到一個真實可執行的 `/analyze` 查詢，
-    非虛構資料——見 `_example_analyze_href`）。
+    四段：Hero（一句話定位 + CTA 導向左側 Query Console）、多幣總覽（5 幣
+    迷你信任卡，見上）、產品總覽（事實→推論→結論三層架構，語彙沿用
+    `_render_report` 既有「步驟 1/3、2/3、3/3」，不新發明一套說法）、範例
+    入口（連到一個真實可執行的 `/analyze` 查詢，非虛構資料——見
+    `_example_analyze_href`）。
     """
     e = html.escape
     example_href = _example_analyze_href()
+    multicoin_html = _render_home_multicoin_overview()
     return f"""
 <div class="tf-section tf-home-hero" style="border-color:#1f6feb;background:linear-gradient(135deg,rgba(31,111,235,.10),rgba(31,111,235,.02))">
   <h1>多源市場情報的信任提煉——不只給分數，給你為什麼</h1>
@@ -1153,6 +1341,8 @@ def _render_home_page() -> str:
   附上信任評分與可展開的原始依據——不是一句話式的黑箱結論。</p>
   <a class="tf-hero-cta" href="#tf-query-console">立即開始分析 &#8594;</a>
 </div>
+
+{multicoin_html}
 
 <div class="tf-section">
   <h3>怎麼運作</h3>

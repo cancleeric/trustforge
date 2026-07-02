@@ -5,6 +5,8 @@ from io import BytesIO
 from email.message import Message
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from trustforge import web
 from trustforge.schema import COIN_POOL
 
@@ -390,6 +392,156 @@ def test_render_home_page_marks_example_as_illustrative():
     """範例卡標「示意用途」而非佯裝即時資料（過渡期文案，#24 誠實原則）。"""
     htmlout = web._render_home_page()
     assert "示意用途" in htmlout
+
+
+# ---------------------------------------------------------------------------
+# 世界第一重寫 Phase 3：首頁「多幣總覽」（讀 cache 信任分快照，credit-safe）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_home_multicoin_cache():
+    """`_home_multicoin_cache` 是 module 級 TTL 快取共用狀態，比照
+    `test_status_page.py::_reset_status_module_state` 慣例，每個測試前後
+    重置，避免前一個測試留下的 30 秒 TTL 快取內容外溢到後一個測試。"""
+    web._home_multicoin_cache["expires_at"] = 0.0
+    web._home_multicoin_cache["html"] = ""
+    yield
+    web._home_multicoin_cache["expires_at"] = 0.0
+    web._home_multicoin_cache["html"] = ""
+
+
+@pytest.fixture
+def json_cache_backend(tmp_path, monkeypatch):
+    """比照 `test_status_page.py` 慣例：`CACHE_BACKEND=json` + 指向隔離
+    tmp_path，確保測試不會意外打真 AWS（開發機可能設有 SSO/AWS profile）。"""
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+    monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
+
+
+def test_render_home_page_shows_multicoin_overview_all_coins_empty(json_cache_backend):
+    """尚無任何快取寫入（#20「結果持久化」尚未落地的現況）→ 5 幣全部優雅
+    顯示「尚無資料」，不報錯、不即時算、不打連接器。"""
+    htmlout = web._render_home_page()
+    assert "多幣總覽" in htmlout
+    for coin in COIN_POOL:
+        assert coin in htmlout
+    assert htmlout.count("尚無資料") == len(COIN_POOL)
+
+
+def test_get_coin_trust_snapshot_returns_none_when_cache_miss(json_cache_backend):
+    assert web._get_coin_trust_snapshot("BTC") is None
+
+
+def test_get_coin_trust_snapshot_reads_valid_snapshot(json_cache_backend):
+    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
+
+    backend = JsonCacheBackend()
+    key = cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BTC")
+    backend.set(key, [{"trust": 0.82, "direction": "偏多"}], fetched_at=1000.0)
+
+    snap = web._get_coin_trust_snapshot("BTC")
+    assert snap is not None
+    assert snap["trust"] == pytest.approx(0.82)
+    assert snap["direction"] == "偏多"
+
+
+def test_get_coin_trust_snapshot_gracefully_handles_malformed_data(json_cache_backend):
+    """快取內容格式不符（缺 trust／非法數字／空 docs）→ 優雅回 None，不拋
+    例外，首頁不能因為快取格式漂移就掛掉。"""
+    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
+
+    backend = JsonCacheBackend()
+    backend.set(
+        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "ETH"),
+        [{"direction": "偏多"}], fetched_at=1000.0,  # 缺 trust
+    )
+    assert web._get_coin_trust_snapshot("ETH") is None
+
+    backend.set(
+        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "SOL"),
+        [{"trust": "not-a-number"}], fetched_at=1000.0,
+    )
+    assert web._get_coin_trust_snapshot("SOL") is None
+
+    backend.set(cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BNB"), [], fetched_at=1000.0)
+    assert web._get_coin_trust_snapshot("BNB") is None
+
+
+def test_render_home_page_shows_snapshot_when_cache_has_data(json_cache_backend):
+    """有快取資料的幣種顯示信任分＋方向標籤；其餘沒有資料的幣種仍優雅顯示
+    「尚無資料」——同一列可以混合兩種狀態，互不影響。"""
+    from trustforge.ingestion.cache import JsonCacheBackend, cache_key
+
+    backend = JsonCacheBackend()
+    backend.set(
+        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "BTC"),
+        [{"trust": 0.91, "direction": "偏多"}], fetched_at=1000.0,
+    )
+    backend.set(
+        cache_key(web._ANALYSIS_SNAPSHOT_SOURCE, "ETH"),
+        [{"trust": 0.20, "direction": "偏空"}], fetched_at=1000.0,
+    )
+
+    htmlout = web._render_home_page()
+    assert "0.91" in htmlout
+    assert "0.20" in htmlout
+    assert "偏多" in htmlout
+    assert "偏空" in htmlout
+    # 其餘 3 幣（SOL/BNB/XRP）沒有快取資料，仍優雅顯示「尚無資料」
+    assert htmlout.count("尚無資料") == 3
+
+
+def test_home_multicoin_card_link_targets_real_analyze_default():
+    """每張卡的 CTA 連到 `/analyze` 真資料·$0 預設檔位（不帶 sample=1），
+    跟首頁範例卡刻意不同（範例卡才需要標「示意」，見
+    `test_render_home_page_marks_example_as_illustrative`）。"""
+    href = web._multicoin_analyze_href("BTC")
+    assert href.startswith("/analyze?")
+    qs = parse_qs(urlparse(html.unescape(href)).query)
+    assert qs["coin"][0] == "BTC"
+    assert "sample" not in qs
+
+
+def test_home_page_multicoin_never_calls_pipeline_or_connectors(json_cache_backend, monkeypatch):
+    """credit-safe 鐵律：多幣總覽純讀 cache，絕不觸發 pipeline.run / 真
+    Source.fetch()（比照 `test_status_page.py::test_status_route_never_calls_*`
+    的樁寫法：一旦被呼叫就斷言失敗）。"""
+    def _boom(*a, **kw):
+        raise AssertionError("首頁多幣總覽不該呼叫 pipeline.run()")
+
+    monkeypatch.setattr("trustforge.pipeline.run", _boom)
+    monkeypatch.setattr(web, "run", _boom)
+
+    from trustforge.ingestion.base import Source
+
+    def _boom_fetch(self, query, coin=""):
+        raise AssertionError(f"首頁多幣總覽不該呼叫真 Source.fetch()（{self})")
+
+    monkeypatch.setattr(Source, "fetch", _boom_fetch, raising=False)
+
+    htmlout = web._render_home_page()
+    assert "多幣總覽" in htmlout
+
+
+def test_home_multicoin_overview_ttl_cached_across_calls(json_cache_backend, monkeypatch):
+    """30 秒 TTL 內重複呼叫 `_render_home_multicoin_overview()` 不重打 cache
+    backend（比照 `_render_status_page_cached` single-flight 設計）——首頁
+    是全站流量最高頁面，避免每個請求都重新逐幣讀 cache。"""
+    calls = {"n": 0}
+    original = web._get_coin_trust_snapshot
+
+    def _counting(coin):
+        calls["n"] += 1
+        return original(coin)
+
+    monkeypatch.setattr(web, "_get_coin_trust_snapshot", _counting)
+
+    web._render_home_multicoin_overview()
+    first_call_count = calls["n"]
+    assert first_call_count == len(COIN_POOL)
+
+    web._render_home_multicoin_overview()
+    assert calls["n"] == first_call_count  # TTL 內第二次呼叫應完全吃快取，不再重讀
 
 
 def test_do_get_home_route_returns_200_non_empty_body():
