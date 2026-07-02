@@ -3,16 +3,21 @@
 路由：
   GET /            首頁表單（選幣種/題型/問題）
   GET /healthz     健康檢查（App Runner 用）→ 200 "ok"
-  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>][&real=1] → HTML 報告
+  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>][&sample=1] → HTML 報告
   GET /analyze.json 同上參數 → JSON {report, evidence, log}
 
 三檔模式（`data_mode`/`llm_mode` 解耦，見 `pipeline.run`）：
-  1. 離線示範（預設）：樣本資料 + Bedrock stub，未設 AWS 也能跑，$0。
-  2. 真資料·$0（`?real=1`）：走真連接器抓真資料，但 Bedrock 關閉（llm_mode=off），
-     不依賴 HAS_BEDROCK/token，仍是 $0，credit-safe。
+  1. 真資料·$0（**預設**，世界第一重寫 Phase 2 起）：未帶任何 mode 參數即走
+     真連接器抓真資料（data_mode=live），但 Bedrock 關閉（llm_mode=off）——
+     不依賴 HAS_BEDROCK/token，仍是 $0，credit-safe。這是差異化賣點「真多源
+     信任提煉」第一眼就要被看見，故不再需要 `?real=1` 才能觸發（`?real=1`
+     仍相容接受，效果與預設相同）。
+  2. 離線示範沙盒（`?sample=1`，opt-in）：樣本資料 + Bedrock stub，未設 AWS
+     也能跑，$0——想看離線 demo 的人才需要，不再是預設，畫面會清楚標示
+     「離線示範」。
   3. 真 Bedrock（`?live=1&token=<TOKEN>`）：需同時滿足設了 BEDROCK_MODEL_ID、
      TRUSTFORGE_LIVE_TOKEN，且請求帶正確 token 參數（用 hmac.compare_digest 比對）。
-     `live` 優先於 `real`：兩者同時滿足時走 live。
+     `live` 優先於「真資料/離線示範」：滿足時一律走 live。
 埠口取自環境變數 PORT（App Runner 預設 8080）。
 """
 from __future__ import annotations
@@ -51,11 +56,23 @@ COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
 # 不是真的 process 啟動時間（stdlib 無法可靠取得），但對觀測用途已足夠。
 _START_TIME = time.time()
 
-# per-IP 限流：每 IP 每 60 秒最多 5 次 live 請求
+# per-IP 限流：每 IP 每 60 秒最多 5 次 **live（真 Bedrock）**請求。
+# 這組門檻是為了保護 Bedrock 花費而刻意設緊的——只給真的會燒錢的 live 路徑用，
+# 不要跟下面的 real-off 共用（codex HIGH，PR #44：real-off 曾誤套這組緊限流，
+# 導致反向代理後所有使用者共用一個來源 IP，5 次/60s 就整批 429）。
 _RATE_WINDOW = 60
 _RATE_MAX = 5
 _rate_lock = threading.Lock()
 _rate_buckets: dict[str, list[float]] = {}
+
+# real-off（真資料·$0，PR #44 起的預設檔位）專用 per-IP 限流：獨立於上面
+# live 的緊 bucket。real-off 不呼叫 Bedrock、只讀 cache，完全免費——緊限流
+# 存在的理由（保護 Bedrock 花費）在這裡不成立，只需擋洪水級濫用（DoS），
+# 門檻可以遠比 live 寬鬆，一般使用者連續瀏覽/重整/跑比較分析不會誤中。
+_REAL_RATE_WINDOW = 60
+_REAL_RATE_MAX = 60
+_real_rate_lock = threading.Lock()
+_real_rate_buckets: dict[str, list[float]] = {}
 
 # `/status` 專用 per-IP 限流：獨立於上面 live/real 的 bucket，避免互相干擾
 # （/status 是唯讀觀測端點，不消耗真連接器/Bedrock 配額，門檻可以更寬鬆）。
@@ -186,7 +203,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
   <form action="/analyze" method="get">
    <div><label>幣種</label><select name="coin">{coins}</select></div>
    <div><label>題型</label><select name="type">{types}</select></div>
-   <div><label>問題</label><textarea name="q" rows="3">分析該幣種近兩週市場狀況，整合多源資料</textarea></div>
+   <div><label>問題</label><textarea name="q" rows="3">{default_query}</textarea></div>
    <button type="submit">Run analysis<span class="tf-kbd">&#8629;</span></button>
   </form>
   {run_stats}
@@ -202,7 +219,7 @@ class TooManyRequests(Exception):
     """per-IP 限流超量時拋出，對應 HTTP 429。"""
 
 
-# 兩個限流 bucket（`_rate_buckets`/`_status_rate_buckets`）共用的硬上限：
+# 三個限流 bucket（`_rate_buckets`/`_real_rate_buckets`/`_status_rate_buckets`）共用的硬上限：
 # 光靠「修剪單一 IP 內過期的時間戳」不夠——bucket dict 本身的 *key 數量*
 # （歷史上出現過的不同 IP 數）才是真正的記憶體風險，尤其 IPv6/偽造來源 IP
 # 高頻換位的情境下，dict 會無限增長成一個記憶體耗盡向量（防 DoS 反成
@@ -240,6 +257,30 @@ def _check_live_rate_limit(ip: str) -> None:
         _rate_buckets[ip] = ts
 
 
+def _check_real_rate_limit(ip: str) -> None:
+    """real-off（真資料·$0，預設檔位）專用 per-IP 限流（獨立 bucket，見模組
+    頂部 `_REAL_RATE_*` 常數）：IP 在滑動視窗內超過 `_REAL_RATE_MAX` 次請求
+    → raise `TooManyRequests`。
+
+    刻意不共用 `_check_live_rate_limit` 的緊 bucket/門檻（codex HIGH，PR
+    #44）：那組 5 次/60s 是為了保護真的會燒錢的 Bedrock 配額，real-off 只讀
+    cache、不打 Bedrock，完全免費，不該套一樣緊的限流——尤其 real-off 現在
+    是 `/analyze` 的預設檔位，一般使用者不帶任何參數就會走到這裡，若沿用
+    live 的緊門檻，反向代理後所有使用者共用一個來源 IP，5 次/60s 後就會
+    整批被 429。這裡改成 DoS 洪水級門檻（見 `_REAL_RATE_MAX`），只擋高頻
+    濫用，正常瀏覽/連跑幾次不會誤中。"""
+    now = time.time()
+    with _real_rate_lock:
+        _evict_stale_rate_buckets(
+            _real_rate_buckets, _REAL_RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS
+        )
+        ts = [t for t in _real_rate_buckets.get(ip, []) if now - t < _REAL_RATE_WINDOW]
+        if len(ts) >= _REAL_RATE_MAX:
+            raise TooManyRequests(f"請求過於頻繁，請 {_REAL_RATE_WINDOW} 秒後再試")
+        ts.append(now)
+        _real_rate_buckets[ip] = ts
+
+
 def _check_status_rate_limit(ip: str) -> None:
     """`/status` 專用 per-IP 限流（獨立 bucket，見模組頂部 `_STATUS_RATE_*`
     常數）：IP 在滑動視窗內超過 `_STATUS_RATE_MAX` 次請求 → raise
@@ -257,6 +298,27 @@ def _check_status_rate_limit(ip: str) -> None:
             raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
         ts.append(now)
         _status_rate_buckets[ip] = ts
+
+
+# 世界第一重寫 Phase 2：預設查詢文案（表單 textarea / _do_analyze・
+# _do_comparison 的 q-缺 fallback）改回 date-agnostic 常數，不再內嵌任何
+# 具體日期。
+#
+# 背景（codex MEDIUM #2，PR #44）：先前版本用 `_hoya_baseline_phrase(coin)`
+# 把「近兩週」換成「基準資料涵蓋至 {日期}」動態日期，但這串文字是塞進
+# **表單 textarea 的預填值**——zero-JS 頁面裡，使用者切換幣種下拉選單時
+# textarea 內容不會跟著更新；一旦送出表單，textarea 當時顯示的日期字串
+# 就整段變成 `q` 參數送進 `_do_analyze`。而 `_do_analyze`/`_do_comparison`
+# 只在 `q` 完全缺席時才會用當次請求的 coin 重新產生文案——表單正常送出
+# 一定帶著 `q`，所以真實使用路徑永遠拿到 textarea 預填當下的舊日期，
+# 選 ETH 送出卻夾帶 BTC 的日期，日期與實際分析幣種對不上。
+#
+# 正解（by construction 封閉整個 class）：查詢文字本身不做任何具體時間
+# 宣稱，只用「近期」這種模糊措辭；精確、可回溯、各幣正確配對的日期改由
+# 結果頁 `_render_price_provenance()` 專職負責——那裡直接讀當次分析
+# 用到的 `evidence`（`ohlcv-csv`／`coingecko-price`），保證日期一定跟著
+# 實際分析的幣種走，不會有「查詢文字日期」與「證據日期」不同步的可能。
+_DATE_AGNOSTIC_QUERY_SUFFIX = "近期市場狀況"
 
 
 def _opts(values, labels=None):
@@ -1054,8 +1116,11 @@ def _example_analyze_href() -> str:
     """首頁「看範例報告」CTA 連結：沿用 Query Console 表單本身的預設幣種／
     題型／問題文字（`_PAGE` 表單預設值），走一般 `/analyze` GET 路由。
 
-    ⛔ credit-safe / #24：不帶 `real`/`live` 參數 → 落在既有預設（離線示範，
-    $0），結果頁會照常顯示「離線示範」為 active 模式（見 `render_page`
+    ⛔ credit-safe / #24：世界第一重寫 Phase 2 起，「真資料·$0」是 `/analyze`
+    的預設檔位——這條範例 CTA 明確標示「示意用途，離線示範資料」（見
+    `_render_home_page`），必須顯式帶 `?sample=1` 才會落在離線示範沙盒，
+    否則不帶參數會觸發真連接器（跟畫面文案「非即時市場資料」自相矛盾）。
+    結果頁會照常顯示「離線示範」為 active 模式（見 `render_page`
     active_mode 徽章），對使用者誠實揭露這是示範資料，不是即時市場資料、
     也不會觸發任何真連接器或 Bedrock 呼叫。coin/q 皆為既有既定文案，不新增
     / 虛構任何樣本資料。
@@ -1063,7 +1128,8 @@ def _example_analyze_href() -> str:
     params = {
         "coin": COIN_POOL[0],
         "type": QuestionType.MULTI_SOURCE.value,
-        "q": "分析該幣種近兩週市場狀況，整合多源資料",
+        "q": f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料",
+        "sample": "1",
     }
     return html.escape(f"/analyze?{urlencode(params)}")
 
@@ -1380,6 +1446,57 @@ def _render_evidence_list(
     return "".join(rows)
 
 
+def _render_price_provenance(evidence: list) -> str:
+    """把 HOYA 官方基準 OHLCV 與 CoinGecko 即時現價並列顯示、各自標明資料
+    時間戳——世界第一重寫 Phase 2：修復「HOYA OHLCV 過期日期破綻」。
+
+    背景（#24 誠實原則）：HOYA OHLCV 是定期更新的官方基準檔（非即時串流），
+    只靠把預設問題文案的「近兩週」換成絕對日期還不夠——那段文字是塞進
+    zero-JS 表單的 textarea 預填值，使用者切換幣種送出時常常帶著舊幣種
+    的日期字樣一起送出，反而變成新的誤導來源（見 codex MEDIUM #2，PR
+    #44）。所以查詢文字本身改回不含日期的 date-agnostic 措辭
+    （`_DATE_AGNOSTIC_QUERY_SUFFIX`），精確日期只在**這裡**、結果頁本身
+    負責——判審看到結果頁，要能一眼分辨「這份分析裡哪個數字是官方歷史
+    基準、哪個是真即時報價」，不能讓兩者混在證據清單裡各自一行毫不起眼，
+    含糊帶過「這是即時資料」的錯覺。
+
+    做法：從既有 `evidence` 直接找 `source == "ohlcv-csv"`（OHLCV 價格事實，
+    `ingestion/prices.py::price_facts`）與 `source == "coingecko-price"`
+    （CoinGecko 即時現價，`ingestion/coingecko.py::CoinGeckoPriceSource`）
+    各一筆，並列渲染各自的 `content_reference`（原始事實敘述）與
+    `fetched_at`（真實時間戳，非現算）——**不新增任何資料流、不重寫既有
+    連接器**，純粹是既有 evidence 的一層更顯眼的複寫呈現。
+
+    缺源優雅處理：任一來源本輪未取得（cache miss / 429 等）→ 該行直接不
+    渲染，不報錯、不留刺眼「無法取得」字樣（呼應 pipeline.py 的
+    `report.limits` 中性化）；兩者皆缺 → 回傳空字串，整個區塊不顯示。
+    """
+    e = html.escape
+    ohlcv_ev = next((ev for ev in evidence if ev.source == "ohlcv-csv"), None)
+    live_ev = next((ev for ev in evidence if ev.source == "coingecko-price"), None)
+    if ohlcv_ev is None and live_ev is None:
+        return ""
+    rows = []
+    if ohlcv_ev is not None:
+        rows.append(
+            "<p style='margin:.4rem 0'><b>HOYA 官方基準 OHLCV</b>（歷史基準，非即時）："
+            f"{e(ohlcv_ev.content_reference)}"
+            f"<br><span class='tf-ev-date'>基準資料時間：{e(ohlcv_ev.fetched_at)}</span></p>"
+        )
+    if live_ev is not None:
+        rows.append(
+            "<p style='margin:.4rem 0'><b>CoinGecko 即時現價</b>（真 API 回應，非模擬）："
+            f"{e(live_ev.content_reference)}"
+            f"<br><span class='tf-ev-date'>擷取時間：{e(live_ev.fetched_at)}</span></p>"
+        )
+    return (
+        '<div class="tf-section" style="border-left:4px solid #6e7681">'
+        "<h3>資料基準（官方歷史 OHLCV vs 即時現價）</h3>"
+        + "".join(rows)
+        + "</div>"
+    )
+
+
 def _render_header(active_mode: str = "offline", *, minimal: bool = False) -> str:
     """組 `<header class="tf-hdr">`。
 
@@ -1485,6 +1602,7 @@ def render_page(
         coins=_opts(COIN_POOL),
         types=_opts([t.value for t in QuestionType],
                     {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
+        default_query=html.escape(f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料"),
     )
 
 
@@ -1768,6 +1886,7 @@ def _render_report(
     agg_tc = _aggregate_trust_components(evidence)
     breakdown_html = _render_trust_breakdown(agg_tc, report.confidence) if agg_tc else ""
     ev_rows = _render_evidence_list(evidence)
+    price_provenance_html = _render_price_provenance(evidence)
     cross_html = (
         _render_cross_signal(report.cross_source_signal)
         if getattr(report, "cross_source_signal", None) else ""
@@ -1784,6 +1903,8 @@ def _render_report(
   <span class="tf-dash-sep">●</span>
   <span class="tf-dash-q">{e(report.question)}</span>
 </div>
+
+{price_provenance_html}
 
 <div class="tf-section" style="background:rgba(31,111,235,.08);border-color:#1f6feb">
   <h2 style="margin:0 0 .4rem">{e(report.coin)} · {e(report.question_type)}</h2>
@@ -2027,31 +2148,65 @@ def _parse_live(qs: dict, client_ip: str) -> bool:
     return live
 
 
-def _is_real_request(qs: dict, live: bool) -> bool:
-    """純判斷「真資料·$0」（?real=1）是否成立，無副作用、不觸發限流。見 `_is_live_request`。"""
+def _is_sample_request(qs: dict, live: bool) -> bool:
+    """純判斷「離線示範沙盒」（?sample=1）是否成立，無副作用、不觸發限流。
+
+    世界第一重寫 Phase 2：離線示範不再是預設，改成 opt-in——想看樣本資料
+    demo 的人才需要明確帶 `?sample=1`。`live` 已成立時 sample 不適用
+    （live 優先，跟 `_is_real_request` 對稱）。
+    """
     if live:
         return False
-    return qs.get("real", ["0"])[0] == "1"
+    return qs.get("sample", ["0"])[0] == "1"
+
+
+def _is_real_request(qs: dict, live: bool) -> bool:
+    """純判斷「真資料·$0」是否生效，無副作用、不觸發限流。見 `_is_live_request`。
+
+    世界第一重寫 Phase 2：這是**預設**檔位——未帶任何 mode 參數即視為
+    real（`data_mode=live, llm_mode=off`），是差異化賣點「真多源信任提煉」
+    第一眼就要被看見，不必再靠 `?real=1` 才能觸發。唯二例外：`live` 已
+    成立（live 優先），或明確帶 `?sample=1`（離線示範沙盒，opt-in）。
+    `?real=1` 仍相容接受（顯式等同預設，不影響結果，向後相容既有連結）。
+    """
+    if live:
+        return False
+    return not _is_sample_request(qs, live)
 
 
 def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
-    """從 qs 解析「真資料·$0」開關（?real=1）：走真連接器、免 Bedrock。
+    """從 qs 解析「真資料·$0」是否生效（預設檔位，見 `_is_real_request`）：
+    走真連接器、免 Bedrock。
 
     不依賴 HAS_BEDROCK / token（與 live 檔位互相獨立）；`live` 已成立時
     real 不重複判斷（live 優先，走真 Bedrock 就不必再走真資料免敘事檔）。
-    real 生效時比照 live 走同一組 per-IP 限流，避免真連接器被打爆。
+
+    real 生效時走**自己獨立**的 per-IP 限流（`_check_real_rate_limit`／
+    `_REAL_RATE_*`），刻意不共用 `_parse_live` 那組緊 bucket（codex HIGH，
+    PR #44）：live 的 5 次/60s 是為了保護真的會燒錢的 Bedrock 配額，
+    real-off 只讀 cache、不打 Bedrock，完全免費，套一樣緊的限流反而傷到
+    「真資料·$0 成為預設」後的一般使用者——不帶任何參數瀏覽 `/analyze`
+    就會觸發這條路徑，若沿用 live 的緊門檻，反向代理後所有使用者共用一個
+    來源 IP，5 次/60s 就會整批 429。real-off 仍需要限流（防真連接器被
+    洪水級高頻打爆），只是門檻改成 DoS 洪水級而非 Bedrock 成本級。
     """
     real = _is_real_request(qs, live)
     if real and client_ip:
-        _check_live_rate_limit(client_ip)
+        _check_real_rate_limit(client_ip)
     return real
 
 
 def _mode_extra_params(qs: dict) -> dict:
     """算出目前請求應在自我連結（如 `/analyze.json` 下載連結）保留的模式參數，
-    以 dict 形式回傳（`{}` / `{"real": "1"}` / `{"live": "1", "token": <token>}`），
+    以 dict 形式回傳（`{}` / `{"sample": "1"}` / `{"live": "1", "token": <token>}`），
     交給呼叫端跟 coin/type/q 等其他參數**一起**丟進同一次 `urllib.parse.urlencode`
     組出完整 query string（見 `_analyze_json_href`）。
+
+    世界第一重寫 Phase 2：「真資料·$0」是預設檔位，未帶任何 mode 參數即
+    生效，故 real 生效時**不**額外帶參數（`{}`，維持連結乾淨、行為與預設
+    一致）；只有離線示範沙盒（`sample=1`，opt-in）才需要在自我連結顯式帶
+    `sample=1`，否則點下載/重新整理會落回預設的真資料檔位，跟畫面看到的
+    離線樣本不一致。
 
     HIGH 根治修復（連結構造根因）：先前 `_mode_link_suffix` 回傳的是「半截字串」
     （如 `"&real=1"`、`"&live=1&token=<urlencoded token>"`），由呼叫端直接用
@@ -2076,8 +2231,8 @@ def _mode_extra_params(qs: dict) -> dict:
     live = _is_live_request(qs)
     if live:
         return {"live": "1", "token": qs.get("token", [""])[0]}
-    if _is_real_request(qs, live):
-        return {"real": "1"}
+    if _is_sample_request(qs, live):
+        return {"sample": "1"}
     return {}
 
 
@@ -2124,16 +2279,21 @@ def _active_mode(qs: dict) -> str:
     MEDIUM：舊版三檔徽章恆同時顯示為可用/動畫，使用者無法判斷本次畫面的證據
     到底來自樣本、真連接器、還是真 Bedrock，對信任提煉產品是實質誤導。
 
+    世界第一重寫 Phase 2：`"real"` 是**預設**回傳值——未帶任何 mode 參數的
+    請求即判定為 real（呼應 `_is_real_request` 的新預設），`"offline"` 只在
+    明確帶 `?sample=1` 時才成立。
+
     純函式：邏輯與 `_mode_link_suffix`/`_parse_live`/`_parse_real` 完全一致
-    （皆基於 `_is_live_request`/`_is_real_request`），不呼叫
-    `_check_live_rate_limit`，不會讓同一次請求的畫面渲染重複消耗限流額度。
+    （皆基於 `_is_live_request`/`_is_real_request`/`_is_sample_request`），
+    不呼叫 `_check_live_rate_limit`，不會讓同一次請求的畫面渲染重複消耗
+    限流額度。
     """
     live = _is_live_request(qs)
     if live:
         return "live"
-    if _is_real_request(qs, live):
-        return "real"
-    return "offline"
+    if _is_sample_request(qs, live):
+        return "offline"
+    return "real"
 
 
 def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
@@ -2148,14 +2308,17 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     qtype = QuestionType(qs.get("type", ["multi_source"])[0])
-    query = qs.get("q", ["分析該幣種近兩週市場狀況"])[0]
+    coin = coin_raw.upper()
+    # codex MEDIUM #2（PR #44）：預設查詢文案改回 date-agnostic 常數，不再
+    # 依 coin 動態組日期——精確、正確配對的日期改由結果頁
+    # `_render_price_provenance()` 專職負責，見該函式 docstring。
+    query = qs.get("q", [f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}"])[0]
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
     live = _parse_live(qs, client_ip)
     real = _parse_real(qs, client_ip, live)
 
-    coin = coin_raw.upper()
     if coin not in COIN_POOL:
         raise ValueError(f"幣種須為 {COIN_POOL} 之一")
 
@@ -2180,7 +2343,12 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         其餘 Exception:    由呼叫方捕捉後回 502
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
-    query = qs.get("q", ["分析該幣種近兩週市場狀況"])[0]
+    # codex MEDIUM #2（PR #44）：預設查詢文案改回 date-agnostic 常數，不再
+    # 依 coin 動態組日期（先前版本曾用 probe 出 coin_a/coin_b 各自組日期，
+    # 但根源問題是「查詢文字本身不該宣稱日期」，改文案內容治標不治本）。
+    # 精確、正確配對兩幣各自的日期改由結果頁 `_render_price_provenance()`
+    # 專職負責，見該函式 docstring。
+    query = qs.get("q", [f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}"])[0]
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
@@ -2233,6 +2401,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
+        # `client_address[0]` 是 TCP 對端 IP，用來 keyed per-IP 限流
+        # （`_check_live_rate_limit`/`_check_real_rate_limit`/
+        # `_check_status_rate_limit`）。這在**直連部署**（目前：直接對外的
+        # EC2，前面沒有 reverse proxy/LB）下才是真使用者 IP，per-user
+        # bucket 才正確——目前部署即此狀況，維持現狀即可（codex 確認，
+        # PR #44）。
+        #
+        # 若未來部署在 reverse proxy/LB 後面，`client_address[0]` 會變成
+        # 代理自己的 IP，所有使用者共用一個 bucket，限流會失效（甚至誤傷：
+        # 一人超量全體 429）。屆時須改讀 `X-Forwarded-For`，但**絕對不能
+        # 無條件信任**這個 header——它是使用者可自由偽造的請求標頭，若盲信
+        # 會讓限流被繞過（攻擊者自帶假 XFF 偽裝成不同 IP，繞過限流無限重
+        # 打）。正確作法是「只在明確設定信任特定反向代理時才採信其設定的
+        # XFF」（config-gated allowlist，預設仍只信任直連）。這裡刻意不先
+        # 實作 XFF 解析：目前環境沒有真代理可測，硬寫容易埋下繞過漏洞，
+        # 等真的要上代理部署時再依當時的代理拓樸實作+測試。
         client_ip = self.client_address[0]
 
         if u.path == "/healthz":
@@ -2256,7 +2440,15 @@ class Handler(BaseHTTPRequestHandler):
             # 世界第一重寫 Phase 1：首頁不再是空白 body（見 `_render_home_page`），
             # header 用 `minimal_header=True`——只留 logo + 極簡 /status 連結，
             # 版號／模式徽號／cost ledger 移到 /status（不是刪功能，是移位）。
-            return self._send(200, page(_render_home_page(), minimal_header=True))
+            # 世界第一重寫 Phase 2：`active_mode` 對齊 `_active_mode(qs)`（不再
+            # 寫死 "offline"）——首頁本身仍是零連接器呼叫的純靜態渲染，只是
+            # 讓「未帶參數＝真資料·$0 預設」在模式判斷上也對齊首頁請求本身，
+            # 不留一處寫死舊預設值的死角（minimal header 目前不顯示徽章，
+            # 這裡對齊只是不留技術債，不影響本次畫面）。
+            return self._send(
+                200,
+                page(_render_home_page(), active_mode=_active_mode(qs), minimal_header=True),
+            )
         if u.path == "/costs":
             return self._send(200, page(_render_costs_page()))
         if u.path == "/status":
