@@ -391,3 +391,51 @@ def test_status_route_never_calls_real_source_fetch(json_cache_backend, monkeypa
     finally:
         if original_fetch is not None:
             monkeypatch.setattr(Source, "fetch", original_fetch, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# light 主題一致性修正（rebase 到 develop /status PR#38 後補的回歸）：先前
+# `_handle_status` 沒有把 `theme`/`theme_toggle_href` 往下傳給 `render_page`，
+# 導致 `/status` 頁永遠渲染成 `data-theme="dark"`，即使使用者已經把 cookie
+# 切成 light 也沒用。
+# ---------------------------------------------------------------------------
+
+def test_handle_status_default_theme_is_dark_for_backward_compat():
+    """不帶 theme 參數呼叫（既有測試/呼叫慣例）時，預設仍是 dark，
+    不因這次修正改變預設行為。"""
+    _, body = web._handle_status(client_ip="9.9.9.1")
+    assert 'data-theme="dark"' in body
+
+
+def test_handle_status_respects_explicit_light_theme():
+    """`Handler.do_GET` 的 `/status` 分支會把依 Cookie 算出的實際 theme
+    傳進來——`_handle_status` 必須真的用上，不能永遠渲染 dark。"""
+    _, body = web._handle_status(client_ip="9.9.9.2", theme="light")
+    assert 'data-theme="light"' in body
+
+
+def test_status_route_via_do_get_respects_theme_cookie():
+    """端到端：`Handler.do_GET` 收到 `Cookie: tf_theme=light` 時，
+    `/status` 頁面回應要真的是 `data-theme="light"`。"""
+    from io import BytesIO
+    from email.message import Message
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("127.0.0.1", 12345)
+    h.path = "/status"
+    h.wfile = BytesIO()
+    headers = Message()
+    headers["Cookie"] = "tf_theme=light"
+    h.headers = headers
+
+    captured = []
+    h.send_response = lambda code: captured.append(("status", code))
+    h.send_header = lambda name, val: captured.append(("header", name, val))
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    body = h.wfile.getvalue().decode("utf-8")
+    assert 'data-theme="light"' in body
+    # 主題切換連結要停留在 /status，不能被導去別的頁面
+    assert "next=%2Fstatus" in body

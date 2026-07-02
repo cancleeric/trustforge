@@ -388,7 +388,7 @@ def _render_freshness_table(snapshot: list[dict]) -> str:
     """
     e = html.escape
     if not snapshot:
-        return '<p style="color:#8b949e;font-size:.85rem">（暫無資料可顯示）</p>'
+        return '<p style="color:var(--tf-muted);font-size:.85rem">（暫無資料可顯示）</p>'
 
     sources: list[str] = []
     coins: list[str] = []
@@ -410,7 +410,7 @@ def _render_freshness_table(snapshot: list[dict]) -> str:
             if row is None:
                 cells.append("<td>&#8212;</td>")
                 continue
-            label, color = _FRESHNESS_STATUS_LABEL.get(row.get("status", ""), ("未知", "#8b949e"))
+            label, color = _FRESHNESS_STATUS_LABEL.get(row.get("status", ""), ("未知", "var(--tf-muted)"))
             cells.append(f'<td><span style="color:{color}">{label}</span></td>')
         body_rows.append(f"<tr><td>{e(src)}</td>{''.join(cells)}</tr>")
 
@@ -430,7 +430,7 @@ def _render_recent_scheduler_run() -> str:
         run = None
 
     if not run:
-        return '<p style="color:#8b949e;font-size:.85rem">（尚無排程執行紀錄）</p>'
+        return '<p style="color:var(--tf-muted);font-size:.85rem">（尚無排程執行紀錄）</p>'
 
     ts = e(str(run.get("ts", "")))
     success = run.get("success_count", 0)
@@ -464,11 +464,11 @@ def _render_status_page() -> str:
     mode_rows = f"""
       <tr><td>版本</td><td>{e(VERSION)}</td></tr>
       <tr><td>Bedrock（HAS_BEDROCK）</td>
-          <td style="color:{'#3fb950' if HAS_BEDROCK else '#8b949e'}">
+          <td style="color:{'#3fb950' if HAS_BEDROCK else 'var(--tf-muted)'}">
             {'已設定（真 Bedrock 模式可用）' if HAS_BEDROCK else '未設定（僅離線示範／真資料·$0 模式可用）'}
           </td></tr>
       <tr><td>LIVE_TOKEN</td>
-          <td style="color:{'#3fb950' if LIVE_TOKEN else '#8b949e'}">
+          <td style="color:{'#3fb950' if LIVE_TOKEN else 'var(--tf-muted)'}">
             {'已設定' if LIVE_TOKEN else '未設定'}
           </td></tr>
       <tr><td>成本預算門檻（COST_BUDGET_USD）</td>
@@ -513,7 +513,7 @@ def _render_status_page() -> str:
     return f"""
 <div class="tf-section">
   <h2 style="margin:0 0 .3rem">系統狀態</h2>
-  <p style="color:#8b949e;font-size:.85rem">本頁純讀既有資料，不觸發任何連接器抓取／Bedrock 呼叫。</p>
+  <p style="color:var(--tf-muted);font-size:.85rem">本頁純讀既有資料，不觸發任何連接器抓取／Bedrock 呼叫。</p>
   <table>{mode_rows}</table>
 </div>
 
@@ -529,12 +529,12 @@ def _render_status_page() -> str:
 <div class="tf-section">
   <h3>成本摘要</h3>
   <p class="j">累計花費 ${total_cost:.4f}</p>
-  <p style="color:#8b949e;font-size:.85rem">共 {run_count} 筆歷史 run 紀錄，詳見 <a href="/costs">成本帳本</a>。</p>
+  <p style="color:var(--tf-muted);font-size:.85rem">共 {run_count} 筆歷史 run 紀錄，詳見 <a href="/costs">成本帳本</a>。</p>
 </div>
 
 <div class="tf-section">
   <h3>資料鮮度矩陣（各連接器 × 各幣種）</h3>
-  <p style="color:#8b949e;font-size:.85rem">
+  <p style="color:var(--tf-muted);font-size:.85rem">
     <span style="color:#3fb950">新鮮 {fresh_n}</span> ·
     <span style="color:#d9832a">過期 {stale_n}</span> ·
     <span style="color:#f85149">缺 {missing_n}</span>
@@ -579,15 +579,33 @@ def _render_status_page_cached() -> str:
         return rendered
 
 
-def _handle_status(client_ip: str = "") -> tuple[int, str]:
+def _handle_status(
+    client_ip: str = "",
+    *,
+    theme: str = "dark",
+    theme_toggle_href: str = "/theme?to=light&next=%2Fstatus",
+) -> tuple[int, str]:
     """處理 `/status` 請求邏輯，回傳 `(http_status, html_body)`——由 `Handler.do_GET`
     包一層 `self._send`；抽出成獨立函式方便測試直接呼叫，不需開真 socket
-    （比照 `_do_analyze`/`_do_comparison` 的抽出慣例）。"""
+    （比照 `_do_analyze`/`_do_comparison` 的抽出慣例）。
+
+    `theme`/`theme_toggle_href` 皆為關鍵字參數、有預設值，向後相容既有測試
+    （多處直接以 `_handle_status(client_ip=...)` 呼叫，不帶這兩個參數）。
+    `Handler.do_GET` 的 `/status` 分支會帶入依 `Cookie: tf_theme` 算出的
+    實際值——先前這裡沒有把 theme 往下傳，導致 `/status` 頁永遠渲染成
+    `data-theme="dark"`，即使使用者已經把主題切成 light 也沒用（light 主題
+    一致性修正一併補上，見 CEO Chrome 複審 PR #39）。
+    """
     try:
         _check_status_rate_limit(client_ip)
     except TooManyRequests as exc:
-        return 429, render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>")
-    return 200, render_page(_render_status_page_cached())
+        return 429, render_page(
+            f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
+            theme=theme, theme_toggle_href=theme_toggle_href,
+        )
+    return 200, render_page(
+        _render_status_page_cached(), theme=theme, theme_toggle_href=theme_toggle_href,
+    )
 
 
 _LEDGER_SUMMARY_CACHE_TTL_SEC = 20.0
@@ -1799,7 +1817,7 @@ def _theme_href(to: str, *, next_path: str | None = None, rtok: str | None = Non
 
 # /theme 導回目標允許的站內路由白名單（僅比對 urlparse 後、去掉 query
 # string 的 path 部分；見 `_sanitize_theme_next`）。
-_THEME_NEXT_ALLOWED_PATHS = frozenset({"/", "/analyze", "/analyze.json", "/costs"})
+_THEME_NEXT_ALLOWED_PATHS = frozenset({"/", "/analyze", "/analyze.json", "/costs", "/status"})
 
 
 def _sanitize_theme_next(next_raw: str | None) -> str:
@@ -1999,7 +2017,10 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/costs":
             return self._send(200, page(_render_costs_page()))
         if u.path == "/status":
-            code, body = _handle_status(client_ip)
+            code, body = _handle_status(
+                client_ip, theme=theme,
+                theme_toggle_href=_theme_href(other_theme, next_path="/status"),
+            )
             return self._send(code, body)
         if u.path in ("/analyze", "/analyze.json"):
             # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
