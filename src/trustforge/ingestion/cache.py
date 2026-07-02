@@ -327,21 +327,56 @@ class DynamoDBCache(CacheBackend):
         `ttl_seconds` 重新驗證新鮮度，不依賴這個屬性做即時過期判斷。
     """
 
-    def __init__(self, table_name: str | None = None, region: str | None = None):
+    def __init__(
+        self,
+        table_name: str | None = None,
+        region: str | None = None,
+        *,
+        connect_timeout: float | None = None,
+        read_timeout: float | None = None,
+        max_attempts: int | None = None,
+    ):
         self.table_name = table_name or os.getenv(
             "TRUSTFORGE_CACHE_TABLE", "trustforge-connector-cache"
         )
         self.region = region or os.getenv("AWS_REGION", "us-east-1")
         self._table: Any = None  # lazy：建構本身不連 AWS
+        # 三個 timeout/重試參數**預設一律 None**（沿用 boto3/botocore 內建
+        # 預設值，等同修改前行為）——只有明確傳入才會限縮，避免影響既有呼叫端
+        # （`fetch_scheduler.py`／`get_cache_backend()` 預設路徑）既有的容錯
+        # 空間。目的是讓「首頁多幣總覽」這種高流量、讀失敗可優雅降級的呼叫端
+        # 能自帶嚴格 timeout（見 `web.py::_home_overview_cache_backend`），
+        # 而非全域改變 DynamoDB client 行為（codex HIGH：首頁不可因 AWS/
+        # 憑證/DNS/表降級而長時間 hang）。
+        self._connect_timeout = connect_timeout
+        self._read_timeout = read_timeout
+        self._max_attempts = max_attempts
 
     def _get_table(self) -> Any:
         """lazy 取得 boto3 Table 物件；第一次呼叫才真的碰 AWS SDK。"""
         if self._table is None:
             import boto3  # 延遲匯入：建構/未啟用 dynamodb backend 時不需要憑證
 
-            self._table = boto3.resource("dynamodb", region_name=self.region).Table(
-                self.table_name
-            )
+            config = None
+            if (
+                self._connect_timeout is not None
+                or self._read_timeout is not None
+                or self._max_attempts is not None
+            ):
+                from botocore.config import Config
+
+                kwargs: dict[str, Any] = {}
+                if self._connect_timeout is not None:
+                    kwargs["connect_timeout"] = self._connect_timeout
+                if self._read_timeout is not None:
+                    kwargs["read_timeout"] = self._read_timeout
+                if self._max_attempts is not None:
+                    kwargs["retries"] = {"max_attempts": self._max_attempts, "mode": "standard"}
+                config = Config(**kwargs)
+
+            self._table = boto3.resource(
+                "dynamodb", region_name=self.region, config=config
+            ).Table(self.table_name)
         return self._table
 
     @staticmethod

@@ -2,6 +2,8 @@
 import html
 import json
 import re
+import threading
+import time
 from io import BytesIO
 from email.message import Message
 from urllib.parse import parse_qs, urlparse
@@ -406,9 +408,11 @@ def _reset_home_multicoin_cache():
     重置，避免前一個測試留下的 30 秒 TTL 快取內容外溢到後一個測試。"""
     web._home_multicoin_cache["expires_at"] = 0.0
     web._home_multicoin_cache["html"] = ""
+    web._home_multicoin_refreshing = False
     yield
     web._home_multicoin_cache["expires_at"] = 0.0
     web._home_multicoin_cache["html"] = ""
+    web._home_multicoin_refreshing = False
 
 
 @pytest.fixture
@@ -539,9 +543,9 @@ def test_home_multicoin_overview_ttl_cached_across_calls(json_cache_backend, mon
     calls = {"n": 0}
     original = web._get_coin_trust_snapshot
 
-    def _counting(coin):
+    def _counting(coin, *, backend=None):
         calls["n"] += 1
-        return original(coin)
+        return original(coin, backend=backend)
 
     monkeypatch.setattr(web, "_get_coin_trust_snapshot", _counting)
 
@@ -551,6 +555,113 @@ def test_home_multicoin_overview_ttl_cached_across_calls(json_cache_backend, mon
 
     web._render_home_multicoin_overview()
     assert calls["n"] == first_call_count  # TTL 內第二次呼叫應完全吃快取，不再重讀
+
+
+class _HangingBackend:
+    """模擬 DynamoDB client 沒有明確 timeout 時的「讀阻塞」情境（codex
+    HIGH）：`.get()` 完全不會自己逾時，模擬 AWS/憑證/DNS/表降級時 socket
+    卡住的最差狀況。刻意遠大於 `_HOME_MULTICOIN_READ_BUDGET_SECONDS`
+    （1.0s），確保測試斷言的是「硬預算生效」而不是恰好backend自己夠快。
+    """
+
+    def get(self, key, *, consistent_read=False):
+        # 這個 sleep 遠大於硬預算，且刻意「正常回傳」而非拋例外——測試斷
+        # 言的是呼叫端（ThreadPoolExecutor + `future.result(timeout=...)`）
+        # 沒有傻等這裡睡完，不是靠 backend 自己失敗才提早結束。
+        time.sleep(5.0)
+        return None
+
+
+class _RaisingBackend:
+    """模擬 backend 立即拋錯（如 AccessDenied／ValidationException）。"""
+
+    def get(self, key, *, consistent_read=False):
+        raise RuntimeError("模擬 DynamoDB 立即失敗")
+
+
+def test_home_page_responds_within_budget_when_backend_hangs(json_cache_backend, monkeypatch):
+    """codex HIGH：多幣總覽的 cache 讀不能拖垮首頁核心。backend 完全不回應
+    （模擬沒有 timeout 上限的 DynamoDB client 卡住）時，首頁仍須在硬預算
+    （`_HOME_MULTICOIN_READ_BUDGET_SECONDS`）內回應、渲染無總覽區塊、不是
+    500，且不能傻等 backend 那個 5 秒的 `time.sleep`。"""
+    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _HangingBackend())
+
+    start = time.monotonic()
+    htmlout = web._render_home_page()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < web._HOME_MULTICOIN_READ_BUDGET_SECONDS + 1.0, (
+        f"首頁被 hang 住的 backend 拖慢，耗時 {elapsed:.2f}s"
+    )
+    assert "多幣總覽" not in htmlout
+    assert "尚無資料" not in htmlout
+
+
+def test_do_get_home_route_responds_within_budget_when_backend_hangs(
+    json_cache_backend, monkeypatch
+):
+    """比照上一則，但走真正的 `_do_get('/')` HTTP handler 路徑，確認整條
+    請求鏈（含 header/hero/其餘首頁內容）不因總覽 hang 住而回 500 或卡死。
+    """
+    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _HangingBackend())
+
+    start = time.monotonic()
+    code, body = _do_get("/")
+    elapsed = time.monotonic() - start
+
+    assert code == 200
+    assert elapsed < web._HOME_MULTICOIN_READ_BUDGET_SECONDS + 1.0
+    assert "信任提煉" in body  # 首頁其餘內容照常渲染，不是空白/錯誤頁
+
+
+def test_home_page_gracefully_hides_overview_when_backend_raises(
+    json_cache_backend, monkeypatch
+):
+    """backend 立即拋錯（如 AccessDenied）時，`cache_get()` 會 fallback 讀
+    本地 JsonCacheBackend（既有行為），這裡本地也沒資料 → 依然優雅整區
+    隱藏，不報 500、不洩漏例外字串到首頁。"""
+    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _RaisingBackend())
+
+    htmlout = web._render_home_page()
+    assert "多幣總覽" not in htmlout
+    assert "RuntimeError" not in htmlout
+    assert "Traceback" not in htmlout
+
+
+def test_concurrent_home_page_requests_not_all_blocked_by_hanging_backend(
+    json_cache_backend, monkeypatch
+):
+    """codex HIGH 核心情境：TTL miss + 慢 backend 時，多個併發首頁請求
+    不能全部卡在同一顆鎖上排隊（會變成「首頁全站不可用」）。這裡開
+    8 條執行緒同時打 `_render_home_page()`，斷言**每一條**都在硬預算附近
+    內完成，而不是像鎖序列化那樣越晚開始的執行緒等越久（例如第 8 條要
+    等前 7 條各自 hang 完才輪到）。
+    """
+    monkeypatch.setattr(web, "_home_overview_cache_backend", lambda: _HangingBackend())
+
+    n_threads = 8
+    elapsed_times: list[float] = []
+    lock = threading.Lock()
+
+    def _worker():
+        start = time.monotonic()
+        web._render_home_page()
+        elapsed = time.monotonic() - start
+        with lock:
+            elapsed_times.append(elapsed)
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_threads)]
+    overall_start = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+    overall_elapsed = time.monotonic() - overall_start
+
+    assert len(elapsed_times) == n_threads, "有執行緒沒在 10 秒內完成，代表被鎖序列化卡死"
+    # 若序列化排隊（每條都等前面的 hang 完），8 條會接近 8 * 5s = 40s+；
+    # 這裡斷言遠低於此，證明沒有互相卡隊。
+    assert overall_elapsed < 8.0, f"併發首頁請求疑似互相卡隊，總耗時 {overall_elapsed:.2f}s"
 
 
 def test_mobile_media_query_forces_table_horizontal_scroll():

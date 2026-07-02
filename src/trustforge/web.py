@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import dataclasses
 import hmac
 import html
@@ -1185,7 +1186,9 @@ def _example_analyze_href() -> str:
 _ANALYSIS_SNAPSHOT_SOURCE = "__analysis_snapshot__"
 
 
-def _get_coin_trust_snapshot(coin: str) -> dict[str, Any] | None:
+def _get_coin_trust_snapshot(
+    coin: str, *, backend: Any | None = None
+) -> dict[str, Any] | None:
     """讀 `{coin}` 最近一次分析的信任分快照（純 cache 讀，見上方模組註解）。
 
     快取 key 沿用 `ingestion.cache.cache_key()` 慣例（`來源:幣別`），來源用
@@ -1200,11 +1203,19 @@ def _get_coin_trust_snapshot(coin: str) -> dict[str, Any] | None:
 
     任何讀取例外／格式不符（缺欄位、非 dict、trust 非法數字）一律回
     `None`，呼叫端優雅降級顯示「尚無資料」，不拋例外、不讓首頁掛掉。
+
+    `backend` 可選——預設 `None` 時沿用 `get_cache_backend()`（既有行為，
+    測試/其他呼叫端不受影響）；首頁多幣總覽會顯式傳入自帶嚴格 timeout 的
+    backend（見 `_home_overview_cache_backend()`），避免預設 DynamoDB
+    client 無 timeout 上限而長時間 hang（codex HIGH）。
     """
     try:
         from .ingestion.cache import cache_get, cache_key, get_cache_backend
 
-        entry = cache_get(get_cache_backend(), cache_key(_ANALYSIS_SNAPSHOT_SOURCE, coin))
+        entry = cache_get(
+            backend if backend is not None else get_cache_backend(),
+            cache_key(_ANALYSIS_SNAPSHOT_SOURCE, coin),
+        )
     except Exception:
         return None
     if not entry:
@@ -1289,29 +1300,103 @@ def _render_home_multicoin_card(coin: str, snap: dict[str, Any] | None) -> str:
 # 寫法）：首頁是全站流量最高的頁面，多幣總覽每次 render 要對 `COIN_POOL`
 # 逐幣讀一次 cache（5 次 GetItem），沒必要每個請求都重打 DynamoDB，也怕被
 # 當洪水打。
+#
+# ⚠️ codex HIGH（首頁可用性）：原本 TTL miss 時**鎖內**對 5 幣連續讀，
+# `DynamoDBCache` 預設沒有明確 connect/read timeout——AWS/憑證/DNS/表降級
+# 時每次讀會長時間 hang 才 fallback，5 幣疊加 + `ThreadingHTTPServer` 下
+# 其他併發首頁請求全部卡在同一顆鎖等待，等同**首頁（全站最高流量頁）長時
+# 間不可用**。修法（總覽永遠是「輔助、best-effort」，不能拖垮首頁核心）：
+#   1. `_home_overview_cache_backend()`：DynamoDB 走**嚴格 timeout + 不
+#      重試**（見 `_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS`），json
+#      backend（測試/開發，走本地磁碟）不受網路影響、免額外限制。
+#   2. `_HOME_MULTICOIN_READ_BUDGET_SECONDS`：5 幣讀取的**硬總預算**，
+#      超過預算後剩餘幣一律視為「這次讀不到」（等同 cache miss），不再
+#      等——最差情況也只是總覽卡片變少甚至整區隱藏，不是首頁掛掉。
+#   3. 慢 I/O 全部在**鎖外**進行，鎖只用來做「TTL 是否命中」「是否已有
+#      執行緒在刷新」這兩個瞬時判斷（stale-while-revalidate）。若已有
+#      執行緒在刷新，其餘併發請求**立刻**拿舊/空快取回應，不排隊等鎖、
+#      不重複打 DynamoDB。
 _HOME_MULTICOIN_CACHE_TTL_SECONDS = 30.0
+_HOME_MULTICOIN_READ_BUDGET_SECONDS = 1.0
+_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS = 0.3
 _home_multicoin_cache_lock = threading.Lock()
+_home_multicoin_refreshing = False
 _home_multicoin_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
+
+
+def _home_overview_cache_backend() -> Any:
+    """多幣總覽專用 cache backend：`CACHE_BACKEND=dynamodb`（預設）時回傳
+    **自帶嚴格 connect/read timeout、不重試**的 `DynamoDBCache`，避免首頁
+    因 AWS/憑證/DNS/表降級而長時間 hang（codex HIGH，見上方模組註解）；
+    `CACHE_BACKEND=json`（測試/開發）時直接回傳 `JsonCacheBackend()`——
+    本地檔案 I/O 沒有網路 hang 的風險，沿用 `get_cache_backend()` 既有
+    行為即可，不需要額外限制。
+    """
+    from .ingestion.cache import DynamoDBCache, JsonCacheBackend
+
+    backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
+    if backend_name == "json":
+        return JsonCacheBackend()
+    return DynamoDBCache(
+        connect_timeout=_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS,
+        read_timeout=_HOME_MULTICOIN_PER_READ_TIMEOUT_SECONDS,
+        max_attempts=1,
+    )
 
 
 def _render_home_multicoin_overview() -> str:
     """首頁「多幣總覽」區塊：`COIN_POOL` 5 幣迷你信任卡列。純讀 cache（見
     `_get_coin_trust_snapshot`），零 pipeline/connector/Bedrock 呼叫；
-    single-flight TTL 快取包裝，理由與寫法同 `_render_status_page_cached`。
+    single-flight TTL 快取包裝，理由與寫法同 `_render_status_page_cached`，
+    但改為鎖外做慢 I/O + 硬讀取預算（見上方模組註解，codex HIGH 修正）。
 
-    5 幣快照**全部缺** 時（issue #20 結果持久化尚未落地前的今天必然狀態）
-    整區塊回傳空字串、完全不渲染——首頁維持 hero+怎麼運作+範例的乾淨版面，
-    避免「5 張尚無資料卡」拉低專業度。只要 ≥1 幣有快照，就渲染整區塊
-    （有資料的顯正常卡，其餘沒資料的幣仍顯示「尚無資料」佔位卡）。
+    5 幣快照**全部缺**（含「讀取逾時/失敗」，視同缺）時，整區塊回傳空
+    字串、完全不渲染——首頁維持 hero+怎麼運作+範例的乾淨版面，避免「5 張
+    尚無資料卡」拉低專業度。只要 ≥1 幣有快照，就渲染整區塊（有資料的顯
+    正常卡，其餘沒資料/逾時的幣仍顯示「尚無資料」佔位卡）。任何非預期例外
+    一律降級為「不顯示總覽」，絕不讓首頁其餘內容因此渲染失敗。
     """
+    global _home_multicoin_refreshing
     with _home_multicoin_cache_lock:
         now = time.time()
         if now < _home_multicoin_cache["expires_at"]:
             return _home_multicoin_cache["html"]  # type: ignore[return-value]
-        snapshots = {c: _get_coin_trust_snapshot(c) for c in COIN_POOL}
-        if not any(snap is not None for snap in snapshots.values()):
-            rendered = ""
-        else:
+        if _home_multicoin_refreshing:
+            # 已有其他執行緒在刷新——別排隊等鎖、別重複打 5 次 DynamoDB，
+            # 直接回上一版快取（可能是空字串，若從未成功刷新過）。
+            return _home_multicoin_cache["html"]  # type: ignore[return-value]
+        _home_multicoin_refreshing = True
+
+    rendered = ""
+    try:
+        backend = _home_overview_cache_backend()
+        deadline = time.monotonic() + _HOME_MULTICOIN_READ_BUDGET_SECONDS
+        snapshots: dict[str, dict[str, Any] | None] = {c: None for c in COIN_POOL}
+
+        # 5 幣「同時」丟進 thread pool，而非逐一同步呼叫——即使某幣的
+        # `backend.get()` 本身完全沒有 timeout 機制而真的卡住（不只是
+        # DynamoDB 網路逾時，任何非預期的 backend/mock 行為都算），也只是
+        # 那顆背景執行緒繼續卡著，**不影響**這裡收集結果的迴圈：每個
+        # `future.result(timeout=剩餘預算)` 到點就會拋 `TimeoutError`，
+        # 讓總覽渲染在 `_HOME_MULTICOIN_READ_BUDGET_SECONDS` 硬預算內
+        # 一定返回，不因單一幣讀取 hang 住而拖垮整個首頁。
+        # `shutdown(wait=False)` 不等孤兒執行緒收尾，避免它們反過來拖住
+        # 這個 request handler thread 的回應時間。
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(COIN_POOL))
+        try:
+            futures = {
+                c: pool.submit(_get_coin_trust_snapshot, c, backend=backend) for c in COIN_POOL
+            }
+            for c, fut in futures.items():
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    snapshots[c] = fut.result(timeout=remaining)
+                except Exception:
+                    snapshots[c] = None  # 逾時或該執行緒本身拋例外，一律視為這次讀不到
+        finally:
+            pool.shutdown(wait=False)
+
+        if any(snap is not None for snap in snapshots.values()):
             cards = "".join(_render_home_multicoin_card(c, snapshots[c]) for c in COIN_POOL)
             rendered = (
                 '<div class="tf-section">'
@@ -1321,9 +1406,14 @@ def _render_home_multicoin_overview() -> str:
                 f'<div class="tf-mc-grid">{cards}</div>'
                 "</div>"
             )
-        _home_multicoin_cache["html"] = rendered
-        _home_multicoin_cache["expires_at"] = time.time() + _HOME_MULTICOIN_CACHE_TTL_SECONDS
-        return rendered
+    except Exception:
+        rendered = ""  # 總覽是輔助功能，任何非預期錯誤都退回「不顯示」，不能讓首頁掛掉
+    finally:
+        with _home_multicoin_cache_lock:
+            _home_multicoin_cache["html"] = rendered
+            _home_multicoin_cache["expires_at"] = time.time() + _HOME_MULTICOIN_CACHE_TTL_SECONDS
+            _home_multicoin_refreshing = False
+    return rendered
 
 
 def _render_home_page() -> str:
