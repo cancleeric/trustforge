@@ -1,5 +1,9 @@
 """web 服務 smoke 測試（不開真 socket，直接測處理邏輯）。"""
+import html
 import json
+from io import BytesIO
+from email.message import Message
+from urllib.parse import parse_qs, urlparse
 
 from trustforge import web
 from trustforge.schema import COIN_POOL
@@ -315,3 +319,144 @@ def test_render_comparison_has_trust_bars(monkeypatch):
     assert "tf-bar-wrap" in htmlout, "comparison 頁缺少 tf-bar-wrap"
     assert "<details>" in htmlout, "comparison 頁缺少 <details>"
     assert "BTC" in htmlout and "ETH" in htmlout
+
+
+# ---------------------------------------------------------------------------
+# 世界第一重寫 Phase 1：首頁不再空白 + header 拔 dev artifacts
+#
+# 背景：`docs/DEV-PLAN-REWRITE.md` Phase 1——判審打開首頁的第一眼不該是黑色
+# 空白 `.tf-dashboard` + header 露出 `tf-version`/三檔模式徽號/`cost ledger`
+# 這類 dev 內部資訊。這批測試斷言的是「移位」而非「刪除」：dev artifacts
+# 從首頁 header 消失，但版號/模式能力/成本摘要仍完整活在 `/status`（見
+# `tests/test_status_page.py::test_status_page_shows_version_and_mode_info`
+# 等既有斷言，未刪除、未搬動，本檔不重複斷言 /status 內容）。
+# ---------------------------------------------------------------------------
+
+def _do_get(path: str) -> tuple[int, str]:
+    """比照 `tests/test_status_page.py` 既有慣例，端到端呼叫 `Handler.do_GET`
+    （不開真 socket），回傳 (status_code, body)。"""
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("127.0.0.1", 12345)
+    h.path = path
+    h.wfile = BytesIO()
+    h.headers = Message()
+
+    captured = []
+    h.send_response = lambda code: captured.append(code)
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    body = h.wfile.getvalue().decode("utf-8")
+    return captured[0], body
+
+
+def test_render_home_page_is_non_empty_and_has_hero_keywords():
+    """`_render_home_page()` 純函式：非空字串，含一句話定位（hero）文案。"""
+    htmlout = web._render_home_page()
+    assert htmlout.strip()
+    assert "信任提煉" in htmlout
+    assert "怎麼運作" in htmlout
+    assert "步驟 1/3" in htmlout and "步驟 2/3" in htmlout and "步驟 3/3" in htmlout
+
+
+def test_render_home_page_has_query_console_cta():
+    """Hero CTA 導向左側 Query Console（錨點 `#tf-query-console`）。"""
+    htmlout = web._render_home_page()
+    assert 'href="#tf-query-console"' in htmlout
+
+
+def test_render_home_page_example_link_uses_real_analyze_query():
+    """「看範例報告」CTA 連到真實可執行的 `/analyze` 查詢（非虛構資料）：
+    href 解析出來的 coin/type/q 餵給 `_do_analyze` 要能正常產出報告。"""
+    htmlout = web._render_home_page()
+    assert "看範例報告" in htmlout
+
+    href = web._example_analyze_href()
+    assert href.startswith("/analyze?")
+    qs = parse_qs(urlparse(html.unescape(href)).query)
+    report, evidence, log = web._do_analyze(qs)
+    assert report.coin == qs["coin"][0]
+    assert evidence
+    assert log.events
+
+    # 未帶 real/live 參數 → 落在既有預設（離線示範，$0），對使用者誠實揭露
+    assert "real" not in qs
+    assert "live" not in qs
+
+
+def test_render_home_page_marks_example_as_illustrative():
+    """範例卡標「示意用途」而非佯裝即時資料（過渡期文案，#24 誠實原則）。"""
+    htmlout = web._render_home_page()
+    assert "示意用途" in htmlout
+
+
+def test_do_get_home_route_returns_200_non_empty_body():
+    code, body = _do_get("/")
+    assert code == 200
+    assert body.strip()
+    assert "信任提煉" in body
+    assert 'class="tf-dashboard"' in body
+
+
+def test_do_get_home_route_header_has_no_dev_artifacts():
+    """老闆複驗後調整：首頁 header 允許保留一個小字/muted 版號（靠版號確認
+    部署是否成功），但三檔模式徽號／`cost ledger $` 這些才是真正的雜訊，
+    仍移到 `/status`（見下方 `_do_get("/status")` 對照測試），不是刪除。"""
+    _, body = _do_get("/")
+    assert 'class="tf-hdr-version"' in body
+    assert web.VERSION in body
+    assert 'class="tf-mode-badge' not in body
+    assert "cost ledger" not in body
+    assert "未設 BEDROCK_MODEL_ID" not in body
+    assert "離線示範資料" in body  # 範例卡的透明標示屬於本次新增內容，非殘留舊 badge
+
+
+def test_do_get_home_route_header_keeps_minimal_status_link():
+    """header 不是整個拔光——仍保留一個極簡連到 `/status` 的連結（移位，非刪除）。"""
+    _, body = _do_get("/")
+    assert 'href="/status"' in body
+    assert 'class="tf-logo"' in body
+
+
+def test_do_get_home_route_never_calls_pipeline_run(monkeypatch):
+    """credit-safe 鐵律：首頁必須是純靜態渲染，不觸發 pipeline/Bedrock。"""
+    def _boom(*a, **kw):
+        raise AssertionError("首頁 / 不該呼叫 pipeline.run()")
+
+    monkeypatch.setattr("trustforge.pipeline.run", _boom)
+    monkeypatch.setattr(web, "run", _boom)
+
+    code, _ = _do_get("/")
+    assert code == 200
+
+
+def test_do_get_home_route_never_calls_real_source_fetch(monkeypatch):
+    """credit-safe 鐵律：首頁不該觸發任何真 `Source.fetch()`（零連接器外呼）。"""
+    from trustforge.ingestion.base import Source
+
+    def _boom(self, query, coin=""):
+        raise AssertionError(f"首頁 / 不該呼叫真 Source.fetch()（{self}）")
+
+    monkeypatch.setattr(Source, "fetch", _boom, raising=False)
+    code, _ = _do_get("/")
+    assert code == 200
+
+
+def test_render_page_default_header_unchanged_for_non_home_routes():
+    """回歸鎖：`render_page()` 預設（`minimal_header=False`，`/costs`／
+    `/status`／`/analyze` 結果頁沿用）行為完全不變——版號/三檔模式徽號/
+    cost ledger 連結仍在，既有測試（`tests/test_web_dark_theme.py`、
+    `tests/test_credit_safe_modes.py`）的斷言零回歸。"""
+    htmlout = web.render_page("")
+    assert 'class="tf-version"' in htmlout
+    assert 'class="tf-mode-badge' in htmlout
+    assert "cost ledger" in htmlout
+
+
+def test_do_get_costs_route_header_unchanged():
+    """`/costs` 不受本次首頁重寫影響，header 仍是完整版（非首頁範疇）。"""
+    _, body = _do_get("/costs")
+    assert 'class="tf-version"' in body
+    assert "cost ledger" in body
