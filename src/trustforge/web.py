@@ -1224,29 +1224,41 @@ def _render_run_stats(evidence: list, log=None) -> str:
     """左側 Query Console 面板的「RUN STATS」區塊——只用本次分析已產生的真實
     物件（`evidence`/`log.events`）算出，沒有任何示範/假造欄位（#24）：
 
-    - Sources scanned／Passed filter／Flagged／Below threshold：四者都是對
-      同一份 `evidence`（`_render_report`/`_render_comparison` 已收到的真實
-      證據清單，即「證據清單」表格會逐列渲染的同一批物件）的計數，口徑彼此
-      一致、可對帳（passed + flagged + below-threshold ＝ scanned，恆成立）：
-        * scanned         = len(evidence)（本輪納入報告的證據總筆數）
+    - Evidence rows／Unflagged ≥0.3／Flagged／Below 0.3：四者都是對同一份
+      `evidence`（`_render_report`/`_render_comparison` 已收到的真實證據
+      清單，即「證據清單」表格會逐列渲染的同一批物件）的計數，口徑彼此
+      一致、可對帳（unflagged + flagged + below-0.3 ＝ evidence rows，恆
+      成立）：
+        * evidence rows   = len(evidence)（本輪納入報告的證據**列數**——
+                            標籤故意不叫「Sources scanned」：這是「證據
+                            清單」表格的列數，不是唯一來源數（同一來源
+                            可能貢獻多筆證據，會被重複計入），也不是
+                            pipeline 前端真的「掃描」了幾個來源，標
+                            「scanned」是誇大成結構化計數的假語意（codex
+                            複審 MEDIUM，CLAUDE 規範 #24 不做假語意）。
         * flagged         = ev.flags 非空的筆數（`trust.scoring._manipulation_flags`
                             命中，即證據清單裡渲染 &#128681; 操縱紅旗徽章的同一批）
                             —— 命名故意不用「dropped」：這批證據**仍顯示在
                             報告裡**（只是帶紅旗警示），沒有真的被過濾掉，
                             標「dropped」是失真宣稱（CEO Chrome 複審 MEDIUM
                             修正，CLAUDE 規範 #24 不做假語意）。
-        * passed filter   = 其餘「未被紅旗、且 trust>=0.3」的筆數（沿用
+        * unflagged ≥0.3  = 其餘「未被紅旗、且 trust>=0.3」的筆數（沿用
                             `_render_evidence_list` 既有的 tf-low 0.3 門檻，
-                            不新造閾值）
-        * below threshold = scanned − passed − flagged（未被紅旗但
-                            trust<0.3 的證據；只在 >0 時才顯示這列，避免
-                            多一列恆為 0 的雜訊）——先前版本沒有這一列，
-                            導致 passed+flagged 對不上 scanned 總數，這裡
-                            補上讓四個數字永遠能對帳。
+                            不新造閾值）——標籤故意不叫「Passed filter」：
+                            低分／被紅旗的證據並沒有真的被過濾掉、仍全部
+                            顯示在報告裡，稱「filter」暗示有東西被擋下來
+                            了，是另一個假語意（codex 複審 MEDIUM）。
+        * below 0.3       = evidence rows − unflagged≥0.3 − flagged（未被
+                            紅旗但 trust<0.3 的證據；只在 >0 時才顯示這列，
+                            避免多一列恆為 0 的雜訊）——先前版本沒有這一列，
+                            導致兩者對不上證據總數，這裡補上讓四個數字永遠
+                            能對帳。
       注意：這是「證據清單」這個階段的口徑（claim 抽取＋信任評分之後），不等於
       pipeline 最前端 `ingestion.collect()` 抓到的原始文件數（該數字目前只存在
       於 log 的自由文字 summary，沒有結構化欄位可安全取用，寧可不顯示也不用
-      正則從文字反推假裝結構化——見 CLAUDE 規範 #24）。
+      正則從文字反推假裝結構化——見 CLAUDE 規範 #24）。標籤本身也刻意選字
+      面上精確等於它顯示的數字之真義，不誇大成「掃了幾個來源、過濾掉幾個」
+      （codex 複審 MEDIUM，PR #39）。
     - Latency：`log.events` 最後一筆的 `elapsed_sec`（`ExecutionLog` 本就用來
       追蹤官方 15 分鐘執行預算的即時累積耗時，真實量測值，非估算）。
     - Model：`log.events` 內最後一筆 `tool=="bedrock.complete"` 的
@@ -1266,11 +1278,11 @@ def _render_run_stats(evidence: list, log=None) -> str:
             if not getattr(ev, "flags", None) and float(getattr(ev, "trust", 0.0)) >= 0.3
         )
         n_below = len(evidence) - n_passed - n_flagged
-        rows.append(("Sources scanned", str(len(evidence))))
-        rows.append(("Passed filter", str(n_passed)))
+        rows.append(("Evidence rows", str(len(evidence))))
+        rows.append(("Unflagged ≥ 0.3", str(n_passed)))
         rows.append(("Flagged", str(n_flagged)))
         if n_below > 0:
-            rows.append(("Below threshold", str(n_below)))
+            rows.append(("Below 0.3", str(n_below)))
 
     if log is not None and getattr(log, "events", None):
         last_elapsed = log.events[-1].get("elapsed_sec")

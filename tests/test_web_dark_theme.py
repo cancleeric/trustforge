@@ -558,9 +558,9 @@ def test_run_stats_uses_honest_flagged_label_not_fake_dropped():
 
 
 def test_run_stats_scanned_reconciles_with_passed_flagged_below_threshold():
-    """Sources scanned 必須等於 passed + flagged + below-threshold，三者
-    加總不能對不上——不能有落在門檻之間、既沒被判 passed 也沒被判
-    flagged 的來源憑空從統計裡消失（MEDIUM 修正：可對帳）。"""
+    """Evidence rows 必須等於 unflagged≥0.3 + flagged + below-0.3，三者
+    加總不能對不上——不能有落在門檻之間、既沒被判 unflagged 也沒被判
+    flagged 的證據憑空從統計裡消失（MEDIUM 修正：可對帳）。"""
     evidence = [
         Evidence(
             source="high", fetched_at="2026-01-01T00:00:00Z",
@@ -577,10 +577,31 @@ def test_run_stats_scanned_reconciles_with_passed_flagged_below_threshold():
         ),
     ]
     out = web._render_run_stats(evidence)
-    assert '<span class="tf-stat-k">Sources scanned</span><span class="tf-stat-v">3</span>' in out
-    assert '<span class="tf-stat-k">Passed filter</span><span class="tf-stat-v">1</span>' in out
+    assert '<span class="tf-stat-k">Evidence rows</span><span class="tf-stat-v">3</span>' in out
+    assert '<span class="tf-stat-k">Unflagged ≥ 0.3</span><span class="tf-stat-v">1</span>' in out
     assert '<span class="tf-stat-k">Flagged</span><span class="tf-stat-v">1</span>' in out
-    assert '<span class="tf-stat-k">Below threshold</span><span class="tf-stat-v">1</span>' in out
+    assert '<span class="tf-stat-k">Below 0.3</span><span class="tf-stat-v">1</span>' in out
+
+
+def test_run_stats_labels_match_true_semantics_not_scan_or_filter_claims():
+    """標籤誠實化回歸（codex 複審 MEDIUM，PR #39）：先前標「Sources scanned」
+    暗示真的掃描/統計了幾個唯一來源（實際上是證據**列數**，同源多筆會被
+    重複計；也不是 pipeline 前端真的掃描到的原始文件數），標「Passed
+    filter」暗示低分/被紅旗的證據真的被擋掉了（實際上全部仍顯示在報告
+    裡，沒有東西被過濾掉）——兩個標籤都誇大成「掃描/過濾」語意，與它們
+    顯示的數字之真義不符。修法：標籤直接改成數字的真義本身，不再出現
+    「scanned」「filter」這種暗示主動篩選/掃描行為的字眼。"""
+    evidence = [
+        Evidence(
+            source="a", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r1", related_claim="c1", trust=0.9, flags=[],
+        ),
+    ]
+    out = web._render_run_stats(evidence)
+    assert "Sources scanned" not in out, "不該再宣稱『掃描了幾個來源』——顯示的其實是證據列數"
+    assert "Passed filter" not in out, "不該再宣稱『通過過濾』——低分/flagged 證據並沒有被真的過濾掉"
+    assert "Below threshold" not in out, "門檻標籤應直接寫出真實數值 0.3，不用模糊的 threshold 字眼"
+    assert "Evidence rows" in out, "標籤必須精確等於它顯示的數字之真義：證據列數"
 
 
 # ---------------------------------------------------------------------------
