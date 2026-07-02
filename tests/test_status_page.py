@@ -275,14 +275,41 @@ def test_status_page_shows_connector_usage_table(json_cache_backend, monkeypatch
     })
     _, body = web._handle_status(client_ip="6.6.6.1")
     assert "連接器用量" in body
-    assert "coingecko-price" in body
+    # codex HIGH（#24、PR #41）修正後：3 個 coingecko-* source 合併成一行
+    # 「共用 demo key」，不逐 source 顯示，也不顯示配額使用%（rolling window
+    # 無法代表月曆月配額）。
+    assert "coingecko-price" in body  # 出現在合併列的成員清單裡
+    assert "共用 demo key" in body
     assert "coindesk" in body
-    # coingecko-price 有官方配額（10,000/month）→ 顯示配額百分比
-    assert "0.03%" in body  # 3 / 10_000 * 100
-    # coindesk 無官方配額 → 誠實標示「無官方配額」而非假造數字
-    assert "無官方配額" in body
+    assert "配額使用%" not in body
+    assert "%" not in body.split("連接器用量")[1].split("資料鮮度矩陣")[0]
+    # coindesk 無官方配額 → 誠實標示，非假造百分比
+    assert "無官方公開量化硬配額" in body
     # free tier 恆 $0，但仍顯示真實用量次數（誠實原則，非隱藏用量）
     assert "$0.00" in body
+
+
+def test_status_page_connector_usage_aggregates_coingecko_shared_pool(
+    json_cache_backend, monkeypatch, tmp_path
+):
+    """codex HIGH（#24、PR #41）回歸鎖：3 個 coingecko-* source 各自用量都要
+    合併加總顯示在同一列（呼叫數加總），不能逐 source 分開顯示成各自獨立
+    的配額使用率（那會嚴重低估共用同一組 key 的真實用量）。"""
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+    append_scheduler_run({
+        "ts": "2026-06-01T00:00:00+00:00", "success_count": 3, "failure_count": 0,
+        "failures": [], "total_docs": 3,
+        "source_calls": {
+            "coingecko-price": 4000, "coingecko-sentiment": 4000, "coingecko-dev": 4000,
+        },
+    })
+    _, body = web._handle_status(client_ip="6.6.6.6")
+    # 3 源合計 12000（超過官方 10,000/月配額）——不能被拆成三個各 <100% 的
+    # 「安全」數字掩蓋掉真實已超額的事實；因為完全不顯示%，天然不會誤導。
+    assert "<td>CoinGecko（price + sentiment + dev，共用 demo key）</td><td>12000</td>" in body
+    # 回歸鎖：不會出現「各自 40%」這種逐 source 拆開的假象
+    assert "40.00%" not in body
+    assert "120.00%" not in body
 
 
 def test_status_page_connector_usage_shows_registered_sources_with_zero_when_no_scheduler_run(

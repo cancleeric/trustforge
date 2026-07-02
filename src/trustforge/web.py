@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
-from .cost_model import CONNECTOR_COST_MODEL, estimate_connector_cost, quota_percent
+from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
 
 try:
     from ._version import VERSION
@@ -482,12 +482,23 @@ def _get_connector_usage_summary() -> dict[str, int]:
 
 def _render_connector_usage_table() -> str:
     """`/status`「連接器用量」表：各連接器最近 N 次排程執行的呼叫數加總、
-    （有官方配額才顯示）配額使用百分比、估計成本。
+    估計成本；共用同一組配額 key 的 source（見 `cost_model.py::shared_pool`，
+    目前是 3 個 coingecko-* source）合併成一行、呼叫數加總顯示。
 
     純讀既有資料（`_get_connector_usage_summary`）+ 純函式計算
     （`cost_model.py` 常數），不觸發任何連接器抓取。free tier（目前全部
     連接器）估計成本恆為 $0，但仍顯示真實用量（誠實原則，見 `cost_model.py`
     模組頂部說明）。
+
+    ⛔ codex HIGH（#24、PR #41）：本表**刻意不顯示「配額使用%」**。呼叫數
+    來源是 rolling「最近 N 次排程執行」window（見 `RECENT_WINDOW_SIZE`），
+    不是嚴格日曆月配額會計；直接拿 rolling window 值除以官方「月配額」算
+    百分比是語意錯誤的數字。對 3 個 coingecko-* source 共用同一組 key 額度
+    來說，逐 source 各自算 % 還會嚴重低估真實使用率（例：3 源各顯示 40%，
+    但共用 key 實際已耗用 120% 超額——逐 source % 會把超額隱藏起來）。改為：
+    共用池合併一行加總呼叫數，只顯示原始呼叫數＋官方配額參考文字，不假裝
+    精確百分比；未來若要提供真正的配額%，需先做月曆月 bucket 計數（本 PR
+    範圍外）。
     """
     e = html.escape
     try:
@@ -506,25 +517,53 @@ def _render_connector_usage_table() -> str:
             "（尚無排程執行紀錄，無連接器用量可顯示）</p>"
         )
 
-    rows = []
+    # 依 shared_pool 分組：同一組（如 3 個 coingecko-* source）合併成一行、
+    # 呼叫數加總，不逐 source 假裝獨立配額（codex HIGH，見上方 docstring）。
+    pool_members: dict[str, list[str]] = {}
+    standalone: list[str] = []
     for source in all_sources:
+        model = CONNECTOR_COST_MODEL.get(source)
+        pool_key = model.shared_pool if model else None
+        if pool_key:
+            pool_members.setdefault(pool_key, []).append(source)
+        else:
+            standalone.append(source)
+
+    def _row(label: str, count: int, cost: float, note: str) -> str:
+        cost_cell = f"${cost:.4f}" if cost > 0 else "$0.00（free tier）"
+        return (
+            f"<tr><td>{e(label)}</td><td>{count}</td><td>{cost_cell}</td></tr>"
+            f'<tr><td colspan="3" style="color:var(--tf-muted2);font-size:.7rem;'
+            f'border-top:none;padding-top:0">{note}</td></tr>'
+        )
+
+    rows = []
+    for pool_key in sorted(pool_members):
+        members = pool_members[pool_key]
+        total_count = sum(usage.get(m, 0) for m in members)
+        total_cost = sum(estimate_connector_cost(m, usage.get(m, 0)) for m in members)
+        label = SHARED_POOL_LABEL.get(pool_key, pool_key)
+        first_model = CONNECTOR_COST_MODEL.get(members[0])
+        ref = e(first_model.free_tier_reference) if first_model else ""
+        note = (
+            f"{ref}；此列為 {len(members)} 個 source"
+            f"（{e('、'.join(members))}）呼叫數加總（共用同一組 key 額度）——"
+            "rolling window 非月曆月配額會計，不顯示百分比，請自行對照官方配額判讀。"
+        )
+        rows.append(_row(label, total_count, total_cost, note))
+
+    for source in standalone:
         count = usage.get(source, 0)
         model = CONNECTOR_COST_MODEL.get(source)
-        pct = quota_percent(source, count)
-        pct_cell = f"{pct:.2f}%" if pct is not None else "&#8212;（無官方配額）"
         cost = estimate_connector_cost(source, count)
-        cost_cell = f"${cost:.4f}" if cost > 0 else "$0.00（free tier）"
-        quota_note = e(model.free_tier_reference) if model else "（未登記於成本模型）"
-        rows.append(
-            f"<tr><td>{e(source)}</td><td>{count}</td><td>{pct_cell}</td><td>{cost_cell}</td></tr>"
-            f'<tr><td colspan="4" style="color:var(--tf-muted2);font-size:.7rem;'
-            f'border-top:none;padding-top:0">{quota_note}</td></tr>'
-        )
+        note = e(model.free_tier_reference) if model else "（未登記於成本模型）"
+        rows.append(_row(source, count, cost, note))
+
     return (
         f'<p style="color:var(--tf-muted);font-size:.85rem">'
         f"最近（&#8804; {RECENT_WINDOW_SIZE} 次）排程執行加總——是「最近 N 次排程執行」"
         f"視窗，非嚴格日曆 30 天（排程間隔可調整，N 筆不保證恰好對應 30 個日曆天）。</p>"
-        "<table><tr><th>連接器</th><th>呼叫數</th><th>配額使用%</th><th>估計成本</th></tr>"
+        "<table><tr><th>連接器</th><th>呼叫數</th><th>估計成本</th></tr>"
         f"{''.join(rows)}</table>"
     )
 

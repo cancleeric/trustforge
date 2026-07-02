@@ -35,6 +35,14 @@ class ConnectorCostModel:
     free_tier_reference: str          # 官方文件連結／說明（純註解性質，人工查證，不做網路驗證）
     paid_unit_cost_usd: float | None  # 假設性每次呼叫成本（USD）；None = 無官方付費方案／未評估
     paid_tier_note: str               # 付費方案的假設依據說明（誠實標「假設」，未啟用）
+    shared_pool: str | None = None    # 與其他 source 共用同一組配額額度的 pool key（見下方
+                                       # `SHARED_POOL_LABEL`）；None = 獨立配額（或無配額）。
+                                       # ⛔ codex HIGH（#24、PR #41）：3 個 coingecko-* source
+                                       # 共用同一組 Demo API key 額度，若逐 source 各自算「配額
+                                       # 使用%」會嚴重低估真實使用率（如 3 源各 40% 但實際共用
+                                       # key 已 120% 超額，逐 source % 會把超額隱藏起來）——因此
+                                       # 用 `shared_pool` 標記同一額度池的成員，供 `web.py` 呈現
+                                       # 時把它們合併成一行、加總呼叫數，不逐 source 假裝獨立。
 
 
 # --- CoinGecko（coingecko.py：3 個 source 共用同一組免費 Demo API key 額度） ---
@@ -56,6 +64,14 @@ _COINGECKO_PAID_NOTE = (
 
 _NO_PAID_TIER_NOTE = "無官方付費方案／未評估"
 
+# 共用配額池 key → 顯示用中文標籤。目前只有 CoinGecko 3 個 source 共用一組
+# Demo API key 額度；`web.py::_render_connector_usage_table()` 據此把同池成員
+# 合併成一行呈現（呼叫數加總），不逐 source 各自顯示會嚴重誤導的獨立「配額%」。
+_COINGECKO_SHARED_POOL = "coingecko-demo-key"
+SHARED_POOL_LABEL: dict[str, str] = {
+    _COINGECKO_SHARED_POOL: "CoinGecko（price + sentiment + dev，共用 demo key）",
+}
+
 
 def _free_connector(source: str, reference: str, paid_note: str = _NO_PAID_TIER_NOTE) -> ConnectorCostModel:
     """公開端點（RSS／非申請制公開 API）、無官方公開量化配額的連接器共用建構器，
@@ -71,16 +87,19 @@ CONNECTOR_COST_MODEL: dict[str, ConnectorCostModel] = {
         source="coingecko-price", free_tier_quota=_COINGECKO_FREE_QUOTA,
         free_tier_period="month", free_tier_reference=_COINGECKO_REF,
         paid_unit_cost_usd=_COINGECKO_PAID_UNIT_COST, paid_tier_note=_COINGECKO_PAID_NOTE,
+        shared_pool=_COINGECKO_SHARED_POOL,
     ),
     "coingecko-sentiment": ConnectorCostModel(
         source="coingecko-sentiment", free_tier_quota=_COINGECKO_FREE_QUOTA,
         free_tier_period="month", free_tier_reference=_COINGECKO_REF,
         paid_unit_cost_usd=_COINGECKO_PAID_UNIT_COST, paid_tier_note=_COINGECKO_PAID_NOTE,
+        shared_pool=_COINGECKO_SHARED_POOL,
     ),
     "coingecko-dev": ConnectorCostModel(
         source="coingecko-dev", free_tier_quota=_COINGECKO_FREE_QUOTA,
         free_tier_period="month", free_tier_reference=_COINGECKO_REF,
         paid_unit_cost_usd=_COINGECKO_PAID_UNIT_COST, paid_tier_note=_COINGECKO_PAID_NOTE,
+        shared_pool=_COINGECKO_SHARED_POOL,
     ),
     "coindesk": _free_connector(
         "coindesk",
@@ -150,12 +169,13 @@ def estimate_connector_cost(source: str, call_count: int) -> float:
     return round(call_count * model.paid_unit_cost_usd, 6)
 
 
-def quota_percent(source: str, call_count: int) -> float | None:
-    """回傳 `source` 在 `call_count` 次呼叫下的免費額度使用百分比（可能 >100，
-    代表已超額）。`source` 沒有登記、或該 source 官方未公開量化配額時回
-    `None`——呼叫端（`web.py`）據此決定要不要顯示「配額%」欄（見階段2需求：
-    「配額%(有配額才顯)」）。"""
-    model = CONNECTOR_COST_MODEL.get(source)
-    if model is None or not model.free_tier_quota:
-        return None
-    return round(call_count / model.free_tier_quota * 100, 2)
+# ⛔ codex HIGH（#24、PR #41）：本模組刻意**不提供**「配額使用%」計算函式。
+# `/status`「連接器用量」的呼叫數來源是 `scheduler_log.recent()`（rolling
+# 最近 N 次排程執行 window），不是嚴格日曆月配額會計；若直接拿這個 rolling
+# window 的呼叫數去除以官方「月配額」算百分比，會呈現一個看似精確、實則
+# 語意錯誤的數字（rolling window ≠ calendar month），且對共用同一組 key
+# 額度的 source（見 `shared_pool`）逐 source 分別算 % 還會嚴重低估真實使用率
+# （3 源各 40% 但共用 key 實際已超額 120%）。若未來要提供真的配額百分比，
+# 應該先做月曆月（calendar month）bucket 計數，而不是在 rolling window 上
+# 硬套百分比公式——那是本 PR 範圍外的較大工程，這裡先誠實只顯示原始呼叫數
+# +官方配額參考文字，不顯示百分比。

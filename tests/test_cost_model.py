@@ -5,9 +5,9 @@ import pytest
 
 from trustforge.cost_model import (
     CONNECTOR_COST_MODEL,
+    SHARED_POOL_LABEL,
     estimate_connector_cost,
     is_paid_tier_enabled,
-    quota_percent,
 )
 
 ALL_KNOWN_SOURCES = [
@@ -91,18 +91,35 @@ def test_estimate_connector_cost_unknown_source_is_zero(monkeypatch):
     assert estimate_connector_cost("not-a-real-source", 1000) == 0.0
 
 
-def test_quota_percent_none_when_no_official_quota():
+# ---------------------------------------------------------------------------
+# codex HIGH（#24、PR #41）：不再提供 quota_percent()——rolling window 呼叫數
+# 除以官方月配額算百分比語意錯誤，且逐 source 分別算會低估共用 key 的真實
+# 使用率。改用 `shared_pool` 讓呼叫端把共用同一組配額 key 的 source 合併
+# 顯示（見 `web.py::_render_connector_usage_table`）。
+# ---------------------------------------------------------------------------
+
+def test_quota_percent_no_longer_exported():
+    """回歸鎖：確保沒有人不小心把這個已知會誤導的函式加回去。"""
+    import trustforge.cost_model as cm
+
+    assert not hasattr(cm, "quota_percent")
+
+
+def test_coingecko_sources_share_the_same_pool_key():
+    """3 個 coingecko-* source 必須標記同一個 `shared_pool`，`web.py` 才能
+    正確把它們合併成一行加總，而不是逐 source 誤顯示成各自獨立配額。"""
+    pool_keys = {
+        CONNECTOR_COST_MODEL[s].shared_pool
+        for s in ("coingecko-price", "coingecko-sentiment", "coingecko-dev")
+    }
+    assert len(pool_keys) == 1
+    pool_key = pool_keys.pop()
+    assert pool_key is not None
+    assert pool_key in SHARED_POOL_LABEL
+
+
+def test_non_coingecko_sources_have_no_shared_pool():
     for source in ALL_KNOWN_SOURCES:
         if source.startswith("coingecko-"):
             continue
-        assert quota_percent(source, 100) is None
-
-
-def test_quota_percent_none_for_unknown_source():
-    assert quota_percent("not-a-real-source", 100) is None
-
-
-def test_quota_percent_computed_for_coingecko():
-    assert quota_percent("coingecko-price", 100) == pytest.approx(1.0)
-    assert quota_percent("coingecko-price", 10_000) == pytest.approx(100.0)
-    assert quota_percent("coingecko-price", 20_000) == pytest.approx(200.0)  # 允許顯示超額
+        assert CONNECTOR_COST_MODEL[source].shared_pool is None
