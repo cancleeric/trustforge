@@ -918,48 +918,34 @@ def test_full_round_five_coins_totals_about_six_real_calls(monkeypatch):
 
 # ── Demo API key（選用，keyless 已足夠；透過 header 傳遞，URL 全程乾淨）────────
 #    codex 對抗審 HIGH 修正：舊版把 key 附成 URL query param，即使 Document.url
-#    乾淨，`_fetch_url` 實際發送的 `Request.full_url` 仍含 key，會被
-#    proxy/tracing/access-log/例外訊息外洩。改用 `x-cg-demo-api-key` 請求
-#    header 傳遞後，URL（含實際 Request.full_url）全程不含 key。以下測試直接
-#    mock `coingecko.urlopen`（而非 `_fetch_url`）以檢視真正送出的 `Request`
-#    物件，證明修正生效。
-
-class _FakeHttpResponse:
-    """`urlopen()` 回傳值的最小可用替身，供以下測試模擬 HTTP 回應本體。"""
-
-    def __init__(self, body: bytes):
-        self._body = body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
-    def read(self, _n: int = -1) -> bytes:
-        return self._body
-
+#    乾淨，實際發送的請求仍含 key，會被 proxy/tracing/access-log/例外訊息
+#    外洩。改用 `x-cg-demo-api-key` 請求 header 傳遞後，URL 全程不含 key。
+#    `_fetch_url` 現在透過共用的 `safe_fetch.fetch_url()` 送出真請求（見
+#    codex 對抗審第 3 輪 SSRF 修復），以下測試直接 mock
+#    `coingecko.safe_fetch.fetch_url`，檢視傳入的 `url`/`extra_headers`
+#    參數，證明 key 只走 header、不落在 URL 上。
 
 def test_api_key_sent_via_header_not_url_when_env_set(monkeypatch):
-    """設定 COINGECKO_API_KEY 時，key 應透過 `x-cg-demo-api-key` 請求 header
-    傳遞；實際送出的 `Request.full_url` 完全不含 key（不只 Document.url 乾
-    淨——connection 層真正發出去的 URL 也必須乾淨）。"""
+    """設定 COINGECKO_API_KEY 時，key 應透過 `extra_headers`（最終送進
+    `x-cg-demo-api-key` 請求 header）傳給 `safe_fetch.fetch_url`；傳入的
+    `url` 本身完全不含 key（不只 Document.url 乾淨——交給 SSRF-safe fetch
+    層的 URL 也必須乾淨）。"""
     from trustforge.ingestion import coingecko
 
     fake_key = "test-fake-demo-key-not-real"
     monkeypatch.setenv("COINGECKO_API_KEY", fake_key)
     captured: dict = {}
 
-    def _fake_urlopen(req, timeout=None):
-        captured["request"] = req
-        return _FakeHttpResponse(PRICE_FIXTURE)
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
+        captured["url"] = url
+        captured["extra_headers"] = extra_headers
+        return PRICE_FIXTURE
 
-    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
 
-    req = captured["request"]
-    assert fake_key not in req.full_url
-    assert req.get_header("X-cg-demo-api-key") == fake_key
+    assert fake_key not in captured["url"]
+    assert captured["extra_headers"] == {"x-cg-demo-api-key": fake_key}
     # Document 對外欄位一律乾淨，不留 key 痕跡
     assert fake_key not in docs[0].url
     assert fake_key not in json.dumps(docs[0].meta)
@@ -974,16 +960,16 @@ def test_no_api_key_header_when_env_not_set(monkeypatch):
     monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
     captured: dict = {}
 
-    def _fake_urlopen(req, timeout=None):
-        captured["request"] = req
-        return _FakeHttpResponse(PRICE_FIXTURE)
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
+        captured["url"] = url
+        captured["extra_headers"] = extra_headers
+        return PRICE_FIXTURE
 
-    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
     docs = coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
 
-    req = captured["request"]
-    assert "x_cg_demo_api_key" not in req.full_url
-    assert req.get_header("X-cg-demo-api-key") is None
+    assert "x_cg_demo_api_key" not in captured["url"]
+    assert not captured["extra_headers"]
     assert len(docs) == 1
 
 
@@ -1048,11 +1034,10 @@ def test_throttle_shares_state_across_price_and_sentiment_sources(monkeypatch):
     monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
     clock, sleeps = _install_fake_clock(monkeypatch)
 
-    def _fake_urlopen(req, timeout=None):
-        body = PRICE_FIXTURE if "simple/price" in req.full_url else DETAIL_FIXTURE_NORMAL
-        return _FakeHttpResponse(body)
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
+        return PRICE_FIXTURE if "simple/price" in url else DETAIL_FIXTURE_NORMAL
 
-    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
 
     coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")       # 真請求 #1（price）
     coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")   # 真請求 #2（coin-detail，不同端點）
@@ -1068,10 +1053,10 @@ def test_throttle_skips_sleep_when_elapsed_already_sufficient(monkeypatch):
     monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
     clock, sleeps = _install_fake_clock(monkeypatch)
 
-    def _fake_urlopen(req, timeout=None):
-        return _FakeHttpResponse(PRICE_FIXTURE)
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
+        return PRICE_FIXTURE
 
-    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
 
     coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
     clock[0] = 20.0  # 模擬呼叫端之間本來就間隔了 20 秒（超過 12 秒下限）
@@ -1087,11 +1072,10 @@ def test_throttle_uses_shorter_interval_when_api_key_set(monkeypatch):
     monkeypatch.setenv("COINGECKO_API_KEY", "test-fake-demo-key-not-real")
     clock, sleeps = _install_fake_clock(monkeypatch)
 
-    def _fake_urlopen(req, timeout=None):
-        body = PRICE_FIXTURE if "simple/price" in req.full_url else DETAIL_FIXTURE_NORMAL
-        return _FakeHttpResponse(body)
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
+        return PRICE_FIXTURE if "simple/price" in url else DETAIL_FIXTURE_NORMAL
 
-    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
 
     coingecko.CoinGeckoPriceSource().fetch("", coin="BTC")
     coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
@@ -1109,12 +1093,11 @@ def test_throttle_full_round_six_calls_all_gaps_at_least_keyless_floor(monkeypat
     clock, _sleeps = _install_fake_clock(monkeypatch)
     timestamps: list[float] = []
 
-    def _fake_urlopen(req, timeout=None):
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
         timestamps.append(clock[0])
-        body = PRICE_FIXTURE if "simple/price" in req.full_url else DETAIL_FIXTURE_NORMAL
-        return _FakeHttpResponse(body)
+        return PRICE_FIXTURE if "simple/price" in url else DETAIL_FIXTURE_NORMAL
 
-    monkeypatch.setattr(coingecko, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
 
     coingecko.CoinGeckoPriceSource().fetch("", coin="")
     for code in ("BTC", "ETH", "SOL", "BNB", "XRP"):

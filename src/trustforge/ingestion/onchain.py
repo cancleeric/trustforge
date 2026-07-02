@@ -8,14 +8,16 @@
   - timeout 5 秒 / 回應大小上限 512 KB（超過截斷）
   - 固定 User-Agent
   - 不接受外部傳入 URL
+  - SSRF-safe fetch（見 `safe_fetch.py`）：逐跳驗證（含初始 URL）scheme/
+    hostname/port/私有 IP，DNS pinning 杜絕 rebinding，禁自動跟轉
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from datetime import datetime, timezone
-from urllib.request import Request, urlopen
 
+from . import safe_fetch
 from .base import Document, Source
 
 _MAX_BYTES = 512 * 1024   # 512 KB
@@ -24,10 +26,8 @@ _UA = "TrustForge/1.0 (research)"
 
 
 def _fetch_url(url: str) -> bytes:
-    """帶 timeout / 大小上限 / User-Agent 的 urllib GET。"""
-    req = Request(url, headers={"User-Agent": _UA})
-    with urlopen(req, timeout=_TIMEOUT) as resp:
-        return resp.read(_MAX_BYTES)
+    """帶 timeout / 大小上限 / User-Agent 的 SSRF-safe GET（見 safe_fetch.py）。"""
+    return safe_fetch.fetch_url(url, user_agent=_UA, timeout=_TIMEOUT, max_bytes=_MAX_BYTES)
 
 
 class FearGreedSource(Source):

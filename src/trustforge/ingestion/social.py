@@ -12,6 +12,8 @@ NOTE: Reddit 在 cloud IP 可能 403，生產可靠存取需 OAuth（待辦）�
   - 描述性 User-Agent（Reddit 預設 UA 會 429/403）
   - 不接受外部傳入 URL
   - query 參數以 urlencode 編碼，防止 &limit=100 等注入改寫請求語義
+  - SSRF-safe fetch（見 `safe_fetch.py`）：逐跳驗證（含初始 URL）scheme/
+    hostname/port/私有 IP，DNS pinning 杜絕 rebinding，禁自動跟轉
 """
 from __future__ import annotations
 
@@ -19,8 +21,8 @@ import hashlib
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode, urljoin, urlsplit
-from urllib.request import Request, urlopen
 
+from . import safe_fetch
 from .base import Document, Source
 
 _MAX_BYTES = 512 * 1024   # 512 KB
@@ -36,10 +38,8 @@ _REDDIT_BASE = "https://www.reddit.com"
 
 
 def _fetch_url(url: str) -> bytes:
-    """帶 timeout / 大小上限 / 描述性 User-Agent 的 urllib GET。"""
-    req = Request(url, headers={"User-Agent": _UA})
-    with urlopen(req, timeout=_TIMEOUT) as resp:
-        return resp.read(_MAX_BYTES)
+    """帶 timeout / 大小上限 / 描述性 User-Agent 的 SSRF-safe GET（見 safe_fetch.py）。"""
+    return safe_fetch.fetch_url(url, user_agent=_UA, timeout=_TIMEOUT, max_bytes=_MAX_BYTES)
 
 
 def _build_permalink(permalink: str) -> str:

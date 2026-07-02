@@ -73,6 +73,11 @@ Demo API key（選用，keyless 已足夠，key 只是錦上添花）：
   - timeout 5 秒 / 回應大小上限 512 KB（超過截斷）
   - 固定 User-Agent
   - 不接受外部傳入 URL；URL 只由本檔內建的白名單常數 + 5 幣白名單映射組成
+  - SSRF-safe fetch（見 `safe_fetch.py`，codex 對抗審第 3 輪 HIGH 修復）：
+    逐跳驗證（含初始 URL）scheme/hostname/port/私有 IP，DNS pinning 杜絕
+    「檢查」與「連線」之間的 rebinding 窗口，禁自動跟轉——與本模組原有的
+    共享節流器（`_throttle_before_request`）為正交機制，兩者在 `_fetch_url`
+    這個唯一出口疊加生效，互不影響。
 """
 from __future__ import annotations
 
@@ -81,8 +86,8 @@ import json
 import math
 import os
 import time
-from urllib.request import Request, urlopen
 
+from . import safe_fetch
 from .base import Document, Source
 
 _MAX_BYTES = 512 * 1024   # 512 KB
@@ -263,7 +268,8 @@ def _api_key_headers() -> dict[str, str]:
 
 
 def _fetch_url(url: str, extra_headers: dict[str, str] | None = None) -> bytes:
-    """帶 timeout / 大小上限 / User-Agent 的 urllib GET（同 onchain.py）。
+    """帶 timeout / 大小上限 / User-Agent 的 SSRF-safe GET（見
+    `safe_fetch.py`：逐跳驗證含初始 URL、DNS pinning、禁自動跟轉）。
 
     `extra_headers`（如有）會與固定 `User-Agent` 一併附加在請求 header
     上；URL 本身不受影響、一律保持乾淨（不含任何 secret）。
@@ -271,15 +277,14 @@ def _fetch_url(url: str, extra_headers: dict[str, str] | None = None) -> bytes:
     這是本模組所有真 HTTP 請求（現價 + coins/{id} 詳情）唯一的出口，因此
     也是整個 CoinGecko host 共享節流器（`_throttle_before_request`，見
     模組頂部「生產事故修復」說明）的唯一掛載點——不論呼叫端是哪個
-    Source，送出請求前一律先過這道節流。
+    Source，送出請求前一律先過這道節流，節流之後才交給 SSRF-safe 的
+    `safe_fetch.fetch_url` 實際送出請求。
     """
     _throttle_before_request()
-    headers = {"User-Agent": _UA}
-    if extra_headers:
-        headers.update(extra_headers)
-    req = Request(url, headers=headers)
-    with urlopen(req, timeout=_TIMEOUT) as resp:
-        return resp.read(_MAX_BYTES)
+    return safe_fetch.fetch_url(
+        url, user_agent=_UA, extra_headers=extra_headers,
+        timeout=_TIMEOUT, max_bytes=_MAX_BYTES,
+    )
 
 
 def _coin_detail_url(coingecko_id: str) -> str:
