@@ -465,6 +465,17 @@ def main(argv: list[str] | None = None) -> int:
     # 這裡故意不包 try/except：run log 寫入失敗與否，都不該影響下面依
     # `failures`（真呼叫/cache 寫入是否成功）決定的 exit code 語意。
     if not args.dry_run:
+        # 成本會計階段2：逐源呼叫數（供 `/status`「連接器用量」表彙總用）。
+        # `results` 標籤是 `"{name}"`（coin-agnostic 廣播，1 筆＝1 次真呼叫）
+        # 或 `"{name}:{coin}"`（逐幣，1 筆＝該幣的 1 次真呼叫），資料完全來自
+        # 既有 `run_once()` 回傳，不新增任何外呼——純粹把已經拿到的結果重新
+        # 依來源名稱分組計數。來源名稱本身不含 ":"（見各 ingestion/*.py
+        # `name =` 定義），用 `split(":", 1)[0]` 取來源名稱是安全的。
+        source_calls: dict[str, int] = {}
+        for label, _ndocs in results:
+            src_name = label.split(":", 1)[0]
+            source_calls[src_name] = source_calls.get(src_name, 0) + 1
+
         append_scheduler_run({
             "targets": args.sources if args.sources else sorted(registry),
             "coins": coins,
@@ -472,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
             "failure_count": len(failures),
             "failures": failures,
             "total_docs": total_docs,
+            "source_calls": source_calls,
         })
 
     if failures:
