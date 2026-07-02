@@ -1801,11 +1801,15 @@ def _theme_href(to: str, *, next_path: str | None = None, rtok: str | None = Non
     （見 `Handler.do_GET` 的 `/theme` 分支），取代舊版把 `theme=` 塞進當前
     網址的做法。
 
-    - 帶 `rtok`（`/analyze` 成功頁）：`/theme` 直接用 `_render_cache` 裡已經
-      渲染好的內容換主題重繪並回 200，全程不呼叫 pipeline。
-    - 不帶 `rtok`（首頁／`/costs`／尚未產出報告的錯誤頁）：帶 `next`，
-      `/theme` 設完 cookie 後 302 導回；這類頁面本來就不會呼叫 pipeline，
-      重新 GET 一次零成本、零風險，不需要走渲染快取。
+    - 帶 `rtok`（`/analyze` 的每一種 HTML 回應：成功頁與 400/429/502 錯誤頁，
+      見 `Handler.do_GET` 內的 `analyze_page()`）：`/theme` 直接用
+      `_render_cache` 裡已經渲染好的內容換主題重繪並回 200，全程不呼叫
+      pipeline——包含錯誤頁，避免切主題誤觸發瀏覽器重新 GET `/analyze?...`
+      （含 live/real 模式參數）而重跑一次分析（502 尤其可能已消耗部分
+      Bedrock 成本）。
+    - 不帶 `rtok`（首頁／`/costs`／`/status`）：帶 `next`，`/theme` 設完
+      cookie 後 302 導回；這類頁面本來就不會呼叫 pipeline，重新 GET 一次
+      零成本、零風險，不需要走渲染快取。
     """
     params = {"to": to if to in ("dark", "light") else "dark"}
     if rtok:
@@ -1989,6 +1993,20 @@ class Handler(BaseHTTPRequestHandler):
                 run_stats_html=run_stats_html,
             )
 
+        # HIGH 修正（by construction，非逐分支補丁）：/analyze 的「每一種」HTML
+        # 回應——成功頁與 400/429/502 錯誤頁——一律經過 _render_cache_put 存進
+        # render cache，主題切換連結一律帶 rtok。這樣 /theme 永遠從 cache
+        # 重繪，不存在任何「toggle_href 帶著原始 /analyze?...(含 live/real
+        # 模式參數) 當 next」的分支，也就不會再有「切主題 → 302 導回 /analyze
+        # → 瀏覽器重新 GET → pipeline 重跑」的路徑，錯誤頁（尤其可能已消耗
+        # 部分 Bedrock 成本的 502）也不例外。
+        def analyze_page(body="", active_mode="offline", run_stats_html=""):
+            rtok = _render_cache_put(body, active_mode, run_stats_html)
+            return page(
+                body, active_mode=active_mode, run_stats_html=run_stats_html,
+                toggle_href=_theme_href(other_theme, rtok=rtok),
+            )
+
         if u.path == "/theme":
             to = qs.get("to", ["dark"])[0]
             if to not in ("dark", "light"):
@@ -2067,14 +2085,12 @@ class Handler(BaseHTTPRequestHandler):
                     comparison_stats = _render_run_stats(evidence_a + evidence_b, log)
                     # HIGH 修正：把渲染好的內容存進 _render_cache，主題切換連結
                     # 帶 rtok 直接重繪這份內容，不會再對 /analyze 發新請求
-                    # （見 _read_theme_cookie/_theme_href 說明）。
-                    rtok = _render_cache_put(comparison_body, active_mode, comparison_stats)
+                    # （見 analyze_page/_theme_href 說明）。
                     return self._send(
                         200,
-                        page(
+                        analyze_page(
                             comparison_body, active_mode=active_mode,
                             run_stats_html=comparison_stats,
-                            toggle_href=_theme_href(other_theme, rtok=rtok),
                         ),
                     )
                 else:
@@ -2094,27 +2110,30 @@ class Handler(BaseHTTPRequestHandler):
                     report_body = _render_report(report, evidence, log, mode_extra=mode_extra)
                     report_stats = _render_run_stats(evidence, log)
                     # HIGH 修正：同上——存渲染快取，主題切換不重跑 pipeline。
-                    rtok = _render_cache_put(report_body, active_mode, report_stats)
                     return self._send(
                         200,
-                        page(
+                        analyze_page(
                             report_body,
                             active_mode=active_mode,
                             run_stats_html=report_stats,
-                            toggle_href=_theme_href(other_theme, rtok=rtok),
                         ),
                     )
             except TooManyRequests as exc:
-                return self._send(429, page(
+                # HIGH 修正（by construction）：429/400/502 錯誤頁一律走
+                # analyze_page（rtok 快取重繪），不可再落回 page()/
+                # default_toggle_href——後者會把含 live/real 模式參數的原始
+                # /analyze?... 塞進 next，切主題會 302 導回原請求，讓瀏覽器
+                # 重新 GET、pipeline 重跑（502 尤其可能已消耗部分 Bedrock 成本）。
+                return self._send(429, analyze_page(
                     f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
                     active_mode=active_mode))
             except ValueError as exc:
-                return self._send(400, page(
+                return self._send(400, analyze_page(
                     f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
                     active_mode=active_mode))
             except Exception:
                 logging.exception("TrustForge analyze error")
-                return self._send(502, page(
+                return self._send(502, analyze_page(
                     "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>",
                     active_mode=active_mode))
         return self._send(404, page("<p>404</p>"))
