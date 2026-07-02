@@ -953,3 +953,76 @@ def test_costs_route_reachable_via_do_get_handler():
     handler.send_response.assert_called_once()
     status_code = handler.send_response.call_args[0][0]
     assert status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM 修正（CEO Chrome 複審，PR #39）：header cost 不再每次 render 都
+# 全掃 ledger（`_get_ledger_summary()` 要在 TTL 內命中快取，不是每次都真的
+# 呼叫底層 `.summary()`）。
+# ---------------------------------------------------------------------------
+
+def test_get_ledger_summary_caches_within_ttl(monkeypatch):
+    """同一個 `get_ledger` 參照下，短時間內連續呼叫 `_get_ledger_summary()`
+    多次，底層 `Ledger.summary()` 只應該真的被呼叫一次（快取命中），
+    不是每次都全掃 JSONL/DynamoDB。"""
+    calls = {"n": 0}
+
+    class _FakeLedger:
+        def summary(self):
+            calls["n"] += 1
+            return {"total_cost_usd": 1.23, "by_model": {}, "n_runs": 1}
+
+    fake = _FakeLedger()
+    monkeypatch.setattr(web, "get_ledger", lambda: fake)
+
+    for _ in range(5):
+        out = web._get_ledger_summary()
+        assert out["total_cost_usd"] == 1.23
+
+    assert calls["n"] == 1, "TTL 內重複呼叫應該命中快取，不該每次都真掃 ledger"
+
+
+def test_get_ledger_summary_cache_isolated_per_get_ledger_identity(monkeypatch):
+    """不同測試 monkeypatch 不同的 `get_ledger` 時（identity 改變），快取要
+    自動失效、拿到各自新的資料——確保 O(1) 快取不會讓不同測試互相污染
+    （既有 test_cost_ledger.py 內連續三個測試各自 monkeypatch 不同
+    fake_ledger 的模式必須繼續正確）。"""
+    class _FakeLedgerA:
+        def summary(self):
+            return {"total_cost_usd": 11.0, "by_model": {}, "n_runs": 1}
+
+    class _FakeLedgerB:
+        def summary(self):
+            return {"total_cost_usd": 22.0, "by_model": {}, "n_runs": 1}
+
+    monkeypatch.setattr(web, "get_ledger", lambda: _FakeLedgerA())
+    out_a = web._get_ledger_summary()
+    assert out_a["total_cost_usd"] == 11.0
+
+    monkeypatch.setattr(web, "get_ledger", lambda: _FakeLedgerB())
+    out_b = web._get_ledger_summary()
+    assert out_b["total_cost_usd"] == 22.0, "get_ledger 換了參照，快取不該回舊值"
+
+
+def test_costs_page_render_does_not_rescan_ledger_per_render(monkeypatch):
+    """`/costs` 頁面渲染（`_render_costs_page`）不該每次都真的觸發底層
+    ledger 全掃——同一個 request 內部即使讀了摘要多次，底層 `.summary()`
+    呼叫次數應該是常數（O(1)），不隨 render 次數線性增長。"""
+    calls = {"n": 0}
+
+    class _FakeLedger:
+        def summary(self):
+            calls["n"] += 1
+            return {"total_cost_usd": 5.0, "by_model": {}, "n_runs": 3}
+
+    fake = _FakeLedger()
+    monkeypatch.setattr(web, "get_ledger", lambda: fake)
+    monkeypatch.setattr(web, "COST_BUDGET_USD", "100")
+
+    for _ in range(3):
+        web._render_costs_page()
+
+    assert calls["n"] <= 1, (
+        f"/costs 重複 render {3} 次，底層 summary() 被呼叫 {calls['n']} 次，"
+        "應該在 TTL 內被快取吃掉，不該線性增長"
+    )

@@ -24,8 +24,11 @@ import json
 import logging
 import math
 import os
+import secrets
 import threading
 import time
+from collections import OrderedDict
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -75,13 +78,13 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="{theme}"><head><meta 
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
- :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681}}
- :root[data-theme="light"]{{--tf-bg:#f6f8fa;--tf-card:#ffffff;--tf-border:#d0d7de;--tf-text:#1f2328;--tf-muted:#57606a;--tf-muted2:#6e7781}}
+ :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9}}
+ :root[data-theme="light"]{{--tf-bg:#f6f8fa;--tf-card:#ffffff;--tf-border:#d0d7de;--tf-text:#1f2328;--tf-muted:#57606a;--tf-muted2:#6e7781;--tf-hdr-g1:#ffffff;--tf-hdr-g2:#f6f8fa;--tf-inset:#eef2f6;--tf-text2:#3d444d}}
  *{{box-sizing:border-box}}
  body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
  h1{{margin-bottom:.2rem}} .sub{{color:var(--tf-muted);margin-top:0}}
  a{{color:#1f6feb}}
- header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid var(--tf-border);border-radius:12px;background:linear-gradient(#12171e,#0f141a);margin-bottom:1rem;flex-wrap:wrap}}
+ header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid var(--tf-border);border-radius:12px;background:linear-gradient(var(--tf-hdr-g1),var(--tf-hdr-g2));margin-bottom:1rem;flex-wrap:wrap}}
  .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:var(--tf-text)}}
  .tf-logo b{{color:#1f6feb}}
  .tf-version{{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--tf-muted);border:1px solid var(--tf-border);border-radius:5px;padding:.15rem .5rem}}
@@ -89,7 +92,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="{theme}"><head><meta 
  .tf-mode-badge.active.tf-live{{color:#3fb950;background:rgba(63,185,80,.12);border-color:rgba(63,185,80,.4)}}
  .tf-mode-badge.active.tf-offline{{color:var(--tf-muted);background:rgba(139,148,158,.10);border-color:var(--tf-border)}}
  .tf-mode-badge.active.tf-real{{color:#79c0ff;background:rgba(31,111,235,.12);border-color:rgba(31,111,235,.4)}}
- .tf-mode-badge.tf-static{{color:#484f58;background:transparent;border-color:#21262d;opacity:.7}}
+ .tf-mode-badge.tf-static{{color:var(--tf-muted2);background:transparent;border-color:var(--tf-border);opacity:.7}}
  .tf-mode-dot{{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0;animation:tf-pulse 1.8s infinite}}
  @keyframes tf-pulse{{0%,100%{{opacity:1}}50%{{opacity:.35}}}}
  .tf-hdr-spacer{{flex:1}}
@@ -123,7 +126,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="{theme}"><head><meta 
  .tf-bar{{height:100%;border-radius:5px}}
  .tf-low{{display:inline-block;background:rgba(248,81,73,.14);border:1px solid rgba(248,81,73,.4);color:#f85149;border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
  .tf-info{{display:inline-block;background:rgba(139,148,158,.14);border:1px solid rgba(139,148,158,.4);color:var(--tf-muted);border-radius:4px;padding:.1rem .35rem;font-size:.68rem;font-weight:600;margin-left:4px}}
- .tf-conf-wrap{{background:#0f141a;border:1px solid var(--tf-border);border-radius:8px;padding:.8rem;margin:.5rem 0}}
+ .tf-conf-wrap{{background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:8px;padding:.8rem;margin:.5rem 0}}
  .tf-conf-big{{font-size:1.6rem;font-weight:700;margin:0 0 .2rem}}
  .tf-src-pill{{display:inline-block;font-weight:600;font-size:.82rem;color:var(--tf-text);background:var(--tf-bg);border:1px solid var(--tf-border);border-radius:12px;padding:.05rem .6rem;margin-right:.4rem}}
  .tf-ev-date{{font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--tf-muted2)}}
@@ -587,17 +590,47 @@ def _handle_status(client_ip: str = "") -> tuple[int, str]:
     return 200, render_page(_render_status_page_cached())
 
 
+_LEDGER_SUMMARY_CACHE_TTL_SEC = 20.0
+_LEDGER_SUMMARY_CACHE_MAX = 32
+_ledger_summary_cache: dict[int, tuple[float, dict]] = {}
+_ledger_summary_cache_lock = threading.Lock()
+
+
 def _get_ledger_summary() -> dict:
     """讀取跨 run 持久化成本帳本彙總（`get_ledger().summary()`），backend 讀取失敗
     （如 `COST_LEDGER_BACKEND=dynamodb` 但未實作）時 fallback 讀 `JsonlLedger`，
     與 `ledger.append_run()` 的 fallback 邏輯一致，確保呼叫端永遠拿得到 dict。
 
     供 `/costs` 頁面與 header「cost ledger $X」連結共用同一份真實累計數字。
+
+    效能修正（CEO Chrome 複審 MEDIUM）：`Ledger.summary()`（JSONL 全檔重讀／
+    DynamoDB 全表 Scan + JSONL fallback 合併）成本隨歷史紀錄筆數線性增長；
+    先前版本每個頁面（含每次 render_page 都會渲染的 header cost ledger 連結、
+    以及 `/costs` 本身）都重新全掃一次帳本，隨帳本增長會拖慢每個頁面的
+    latency。這裡加一層以 `id(get_ledger)`（目前生效的 ledger 工廠函式身分）
+    為 key、TTL 20 秒、上限 32 筆的 bounded 記憶體快取：同一個 `get_ledger`
+    在 20 秒內重複呼叫只真的全掃一次（含同一次請求內 header + `/costs` 內容
+    各呼叫一次，也只掃一次）；只要 `get_ledger` 被換掉（例如測試
+    `monkeypatch.setattr(web, "get_ledger", lambda: fake_ledger)` 換一顆新的
+    fake），key 立刻不同、絕不會讀到舊 ledger 的快取值——`test_costs_page_*`
+    系列測試每個都換一顆全新 fake ledger 並斷言各自數字，因此不受影響。
     """
+    key = id(get_ledger)
+    now = time.monotonic()
+    with _ledger_summary_cache_lock:
+        cached = _ledger_summary_cache.get(key)
+        if cached is not None and (now - cached[0]) < _LEDGER_SUMMARY_CACHE_TTL_SEC:
+            return cached[1]
     try:
-        return get_ledger().summary()
+        summary = get_ledger().summary()
     except Exception:
-        return JsonlLedger().summary()
+        summary = JsonlLedger().summary()
+    with _ledger_summary_cache_lock:
+        _ledger_summary_cache[key] = (now, summary)
+        if len(_ledger_summary_cache) > _LEDGER_SUMMARY_CACHE_MAX:
+            oldest_key = min(_ledger_summary_cache, key=lambda k: _ledger_summary_cache[k][0])
+            _ledger_summary_cache.pop(oldest_key, None)
+    return summary
 
 
 def _header_cost_display() -> str:
@@ -791,7 +824,7 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
     )
 
     return (
-        f'<div style="margin:.35rem 0;padding:.5rem .6rem;background:#0f141a;'
+        f'<div style="margin:.35rem 0;padding:.5rem .6rem;background:var(--tf-inset);'
         f'border-radius:6px;border:1px solid var(--tf-border);font-size:.78rem">'
         f'<div style="color:var(--tf-muted2);font-size:.7rem;font-weight:600;margin-bottom:.3rem">'
         f'信任分析（信譽×0.50 + 佐證×0.25 + 時效×0.15 − 操縱×0.40）</div>'
@@ -939,7 +972,7 @@ def _render_evidence_list(
             f'{info_flags_badge}'
             f"</summary>"
             f'<div class="tf-ev-body">'
-            f"<p style='margin:.3rem 0;font-size:.85rem;color:#c9d1d9'>{e(ev.content_reference)}</p>"
+            f"<p style='margin:.3rem 0;font-size:.85rem;color:var(--tf-text2)'>{e(ev.content_reference)}</p>"
             f"<p style='margin:.3rem 0;font-size:.82rem;color:var(--tf-muted)'>URL: {url_html}</p>"
             f"{_render_trust_breakdown(ev.trust_components, ev.trust)}"
             f"</div>"
@@ -955,7 +988,7 @@ def render_page(
     body: str = "",
     active_mode: str = "offline",
     theme: str = "dark",
-    theme_toggle_href: str = "/?theme=light",
+    theme_toggle_href: str = "/theme?to=light&next=%2F",
     run_stats_html: str = "",
 ) -> str:
     """組完整 HTML（三檔模式徽章 + 表單 + body）。CLI web 與 Lambda handler 共用。
@@ -976,11 +1009,17 @@ def render_page(
     `theme`：`"dark"`（預設）| `"light"`，只切換 CSS 變數（見 `_PAGE` 內
     `:root`/`:root[data-theme="light"]`），zero-JS：不引入任何 inline script，
     純靠 `<html data-theme="...">` + CSS custom properties 切換色票。非法值一律
-    視同 `"dark"`（呼叫端 `Handler.do_GET` 已做白名單過濾，這裡再防禦一次）。
+    視同 `"dark"`（呼叫端 `Handler.do_GET` 用 `_read_theme_cookie()` 讀
+    `Cookie: tf_theme=...` 已做白名單過濾，這裡再防禦一次）。
 
-    `theme_toggle_href`：header「★」主題切換連結的完整 href（由呼叫端用
-    `_theme_toggle_href()` 算出，保留當前頁面其餘參數、只切換 theme），
-    預設 `"/?theme=light"` 供未帶請求脈絡的呼叫端（如既有測試）使用。
+    `theme_toggle_href`：header「★」主題切換連結的完整 href。HIGH 修正
+    （CEO Chrome 複審，PR #39）：主題改 cookie-based，這個 href 一律指向
+    輕量 `GET /theme` 路由（由呼叫端用 `_theme_href()` 算出：分析結果頁帶
+    `rtok` 直接用渲染快取重繪、不呼叫 pipeline；其餘頁面帶 `next` 導回），
+    不再是舊版把 `theme=light` 塞進當前分析網址、導致點一下切主題就重新
+    觸發一次真分析（live 模式下等於重花真金錢）的做法。預設
+    `"/theme?to=light&next=%2F"` 供未帶請求脈絡的呼叫端（如既有測試、
+    Lambda handler）使用。
 
     `run_stats_html`：左側 Query Console 面板的「RUN STATS」區塊（見
     `_render_run_stats()`），只有跑過一次真實分析（`/analyze` 成功）才有資料，
@@ -1170,15 +1209,25 @@ def _render_run_stats(evidence: list, log=None) -> str:
     """左側 Query Console 面板的「RUN STATS」區塊——只用本次分析已產生的真實
     物件（`evidence`/`log.events`）算出，沒有任何示範/假造欄位（#24）：
 
-    - Sources scanned／Passed filter／Flagged dropped：三者都是對同一份
-      `evidence`（`_render_report`/`_render_comparison` 已收到的真實證據清單，
-      即「證據清單」表格會逐列渲染的同一批物件）的計數，口徑彼此一致：
-        * scanned    = len(evidence)（本輪納入報告的證據總筆數）
-        * flagged    = ev.flags 非空的筆數（`trust.scoring._manipulation_flags`
-                       命中，即證據清單裡渲染 &#128681; 操縱紅旗徽章的同一批）
-        * passed     = 其餘「未被紅旗、且 trust>=0.3」的筆數（沿用
-                       `_render_evidence_list` 既有的 tf-low 0.3 門檻，不新造
-                       閾值）
+    - Sources scanned／Passed filter／Flagged／Below threshold：四者都是對
+      同一份 `evidence`（`_render_report`/`_render_comparison` 已收到的真實
+      證據清單，即「證據清單」表格會逐列渲染的同一批物件）的計數，口徑彼此
+      一致、可對帳（passed + flagged + below-threshold ＝ scanned，恆成立）：
+        * scanned         = len(evidence)（本輪納入報告的證據總筆數）
+        * flagged         = ev.flags 非空的筆數（`trust.scoring._manipulation_flags`
+                            命中，即證據清單裡渲染 &#128681; 操縱紅旗徽章的同一批）
+                            —— 命名故意不用「dropped」：這批證據**仍顯示在
+                            報告裡**（只是帶紅旗警示），沒有真的被過濾掉，
+                            標「dropped」是失真宣稱（CEO Chrome 複審 MEDIUM
+                            修正，CLAUDE 規範 #24 不做假語意）。
+        * passed filter   = 其餘「未被紅旗、且 trust>=0.3」的筆數（沿用
+                            `_render_evidence_list` 既有的 tf-low 0.3 門檻，
+                            不新造閾值）
+        * below threshold = scanned − passed − flagged（未被紅旗但
+                            trust<0.3 的證據；只在 >0 時才顯示這列，避免
+                            多一列恆為 0 的雜訊）——先前版本沒有這一列，
+                            導致 passed+flagged 對不上 scanned 總數，這裡
+                            補上讓四個數字永遠能對帳。
       注意：這是「證據清單」這個階段的口徑（claim 抽取＋信任評分之後），不等於
       pipeline 最前端 `ingestion.collect()` 抓到的原始文件數（該數字目前只存在
       於 log 的自由文字 summary，沒有結構化欄位可安全取用，寧可不顯示也不用
@@ -1201,9 +1250,12 @@ def _render_run_stats(evidence: list, log=None) -> str:
             1 for ev in evidence
             if not getattr(ev, "flags", None) and float(getattr(ev, "trust", 0.0)) >= 0.3
         )
+        n_below = len(evidence) - n_passed - n_flagged
         rows.append(("Sources scanned", str(len(evidence))))
         rows.append(("Passed filter", str(n_passed)))
-        rows.append(("Flagged dropped", str(n_flagged)))
+        rows.append(("Flagged", str(n_flagged)))
+        if n_below > 0:
+            rows.append(("Below threshold", str(n_below)))
 
     if log is not None and getattr(log, "events", None):
         last_elapsed = log.events[-1].get("elapsed_sec")
@@ -1646,26 +1698,103 @@ def _active_mode(qs: dict) -> str:
     return "offline"
 
 
-def _theme_toggle_href(path: str, qs: dict) -> str:
-    """算出 header「★」主題切換連結的 href：保留當前請求的其餘參數（coin/type/
-    q/real/live/token 等），只把 `theme` 切成另一個值。
+def _read_theme_cookie(cookie_header: str | None) -> str:
+    """從請求的 `Cookie` header 讀 `tf_theme`（"dark"｜"light"），缺值/非法值
+    一律回預設 `"dark"`。
 
-    zero-JS 設計（見 CLAUDE 規範）：主題切換完全靠一次真正的 GET 導覽 +
-    `<html data-theme>` CSS 變數切換，不引入任何 inline script。
-
-    只有顯式 `theme=light` 時才視為淺色；其餘一律視為深色（預設）。切回深色時
-    刻意不帶 `theme=dark` 參數（維持乾淨網址，向後相容既有 `?real=1`/`?live=1`
-    連結格式，跟現有 mode 參數「只在非預設時出現」的慣例一致）。
+    HIGH 修正（CEO Chrome 複審，PR #39）：主題偏好改用 cookie 持久化，不再是
+    舊版把 `theme=light` 併入當前網址（含 `coin`/`type`/`q`/`live`/`token`
+    等）的做法——那個做法下，使用者在 `/analyze` 分析結果頁點主題切換星號，
+    等同對 `/analyze` 發一次新的 GET，會重新呼叫 pipeline；`live` 模式下更會
+    重打一次真 Bedrock、重花一次真金錢、多消耗一次限流額度。一個看起來純視覺
+    的切換動作卻悄悄觸發有金錢成本、有限流的後端操作，是使用者完全無法預期
+    的地雷。cookie 純粹是瀏覽器端狀態，讀取不需要、也絕不會呼叫任何 pipeline。
     """
-    params = {k: v[0] for k, v in qs.items() if k != "theme" and v}
-    current = qs.get("theme", ["dark"])[0]
-    if current == "light":
-        params.pop("theme", None)  # 切回預設深色，不帶參數
-    else:
-        params["theme"] = "light"
-    if not params:
-        return path
-    return f"{path}?{urlencode(params)}"
+    if not cookie_header:
+        return "dark"
+    try:
+        jar = SimpleCookie()
+        jar.load(cookie_header)
+    except Exception:
+        return "dark"
+    morsel = jar.get("tf_theme")
+    if morsel is not None and morsel.value == "light":
+        return "light"
+    return "dark"
+
+
+# ── 分析結果渲染快取（供主題切換重繪用，見 _read_theme_cookie 的 HIGH 修正）──
+#
+# 只快取「已經渲染完成的靜態 HTML 片段」（不含 Report/Evidence/log 物件本身，
+# 不佔用比字串更多的記憶體語意），且本輪視覺重構已把報告內文的結構色全面
+# 改用 CSS 變數（`var(--tf-*)`），同一份 body HTML 本身不含任何主題相關內容，
+# 可以安全地在不同主題間重複使用而不必重新渲染、更不必重新呼叫 pipeline。
+_RENDER_CACHE_TTL_SEC = 900.0  # 15 分鐘：夠使用者在同一份報告內切換幾次主題
+_RENDER_CACHE_MAX = 200
+_render_cache: "OrderedDict[str, tuple[float, str, str, str]]" = OrderedDict()
+_render_cache_lock = threading.Lock()
+
+
+def _render_cache_put(body_html: str, active_mode: str, run_stats_html: str) -> str:
+    """把一次 `/analyze` 成功渲染出的報告內容暫存起來，換一個一次性、不可預測
+    （`secrets.token_urlsafe`）的 opaque token，讓主題切換能重繪同一份報告而
+    完全不必重新呼叫 pipeline。Bounded LRU（上限 `_RENDER_CACHE_MAX` 筆、TTL
+    `_RENDER_CACHE_TTL_SEC` 秒），避免長跑服務因持續有分析請求而無限吃記憶體。
+    """
+    token = secrets.token_urlsafe(16)
+    now = time.monotonic()
+    with _render_cache_lock:
+        expired = [
+            k for k, (ts, *_rest) in _render_cache.items()
+            if now - ts > _RENDER_CACHE_TTL_SEC
+        ]
+        for k in expired:
+            _render_cache.pop(k, None)
+        while len(_render_cache) >= _RENDER_CACHE_MAX:
+            _render_cache.popitem(last=False)
+        _render_cache[token] = (now, body_html, active_mode, run_stats_html)
+    return token
+
+
+def _render_cache_get(token: str | None) -> tuple[str, str, str] | None:
+    """依 token 取回先前快取的 `(body_html, active_mode, run_stats_html)`；
+    查無此 token 或已過期一律回傳 `None`。
+
+    呼叫端（`/theme` 路由）查無快取時，就單純不還原報告內容、只做主題切換
+    本身——**絕不** fallback 成重新呼叫 pipeline：`/theme` 這個路由的程式碼
+    本身完全不 import、也不呼叫 `run`/`run_comparison`/`_do_analyze`/
+    `_do_comparison`，這是結構上的保證，不是「多數情況下不會」而已。
+    """
+    if not token:
+        return None
+    with _render_cache_lock:
+        entry = _render_cache.get(token)
+        if entry is None:
+            return None
+        ts, body_html, active_mode, run_stats_html = entry
+        if time.monotonic() - ts > _RENDER_CACHE_TTL_SEC:
+            _render_cache.pop(token, None)
+            return None
+    return body_html, active_mode, run_stats_html
+
+
+def _theme_href(to: str, *, next_path: str | None = None, rtok: str | None = None) -> str:
+    """組出 header「★」主題切換連結的 href，一律指向輕量 `GET /theme` 路由
+    （見 `Handler.do_GET` 的 `/theme` 分支），取代舊版把 `theme=` 塞進當前
+    網址的做法。
+
+    - 帶 `rtok`（`/analyze` 成功頁）：`/theme` 直接用 `_render_cache` 裡已經
+      渲染好的內容換主題重繪並回 200，全程不呼叫 pipeline。
+    - 不帶 `rtok`（首頁／`/costs`／尚未產出報告的錯誤頁）：帶 `next`，
+      `/theme` 設完 cookie 後 302 導回；這類頁面本來就不會呼叫 pipeline，
+      重新 GET 一次零成本、零風險，不需要走渲染快取。
+    """
+    params = {"to": to if to in ("dark", "light") else "dark"}
+    if rtok:
+        params["rtok"] = rtok
+    elif next_path:
+        params["next"] = next_path
+    return f"/theme?{urlencode(params)}"
 
 
 def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
@@ -1733,7 +1862,7 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+    def _send(self, code, body, ctype="text/html; charset=utf-8", extra_headers=None):
         b = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -1745,8 +1874,21 @@ class Handler(BaseHTTPRequestHandler):
             "font-src https://fonts.gstatic.com",
         )
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, val in (extra_headers or {}).items():
+            self.send_header(name, val)
         self.end_headers()
         self.wfile.write(b)
+
+    def _redirect(self, location: str, extra_headers=None):
+        """302 導回，供 `/theme` 路由設完 cookie 後導回原頁面用（見
+        `_read_theme_cookie`/`_theme_href` 的 HIGH 修正說明）。不帶 body。
+        """
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        for name, val in (extra_headers or {}).items():
+            self.send_header(name, val)
+        self.end_headers()
 
     def log_message(self, *a):  # 靜音預設存取日誌
         pass
@@ -1759,18 +1901,51 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
 
-        # 主題（zero-JS：`?theme=light` server param，見 `_theme_toggle_href`）——
-        # 白名單過濾，非 "light" 一律視為預設深色，提前算好讓所有分支（含
-        # 429/400/502 錯誤頁）的 header ★ 切換連結都指向「本次請求其餘參數不變、
-        # 只切換 theme」的正確 URL。
-        theme = "light" if qs.get("theme", ["dark"])[0] == "light" else "dark"
-        theme_toggle_href = _theme_toggle_href(u.path, qs)
+        # 主題（cookie-based，見 `_read_theme_cookie` 的 HIGH 修正說明）——
+        # 讀 `Cookie: tf_theme=...`，非 "light" 一律視為預設深色。首頁／
+        # `/costs`／尚未產出報告的錯誤頁，主題切換連結走「導回目前這頁」；
+        # `/analyze` 成功頁會在渲染完成後另外算一個帶 rtok 的連結（見下方），
+        # 蓋掉這裡的預設值。
+        # getattr 防禦：BaseHTTPRequestHandler 正常 dispatch 一定會先設好
+        # self.headers 才呼叫 do_GET；只有測試用 Handler.__new__(...) 手動
+        # 建構的最小化 mock（不跑真正的 request-line 解析）才會沒有這個屬性，
+        # 此時視同沒帶 Cookie，退回預設深色，不影響任何既有測試語意。
+        _headers = getattr(self, "headers", None)
+        theme = _read_theme_cookie(_headers.get("Cookie") if _headers is not None else None)
+        other_theme = "light" if theme == "dark" else "dark"
+        default_toggle_href = _theme_href(other_theme, next_path=self.path)
 
-        def page(body="", active_mode="offline", run_stats_html=""):
+        def page(body="", active_mode="offline", run_stats_html="", toggle_href=None):
             return render_page(
                 body, active_mode=active_mode, theme=theme,
-                theme_toggle_href=theme_toggle_href, run_stats_html=run_stats_html,
+                theme_toggle_href=toggle_href or default_toggle_href,
+                run_stats_html=run_stats_html,
             )
+
+        if u.path == "/theme":
+            to = qs.get("to", ["dark"])[0]
+            if to not in ("dark", "light"):
+                to = "dark"
+            set_cookie = f"tf_theme={to}; Path=/; Max-Age=31536000; SameSite=Lax"
+            rtok = qs.get("rtok", [None])[0]
+            cached = _render_cache_get(rtok) if rtok else None
+            if cached is not None:
+                body_html, active_mode, run_stats_html = cached
+                return self._send(
+                    200,
+                    render_page(
+                        body_html, active_mode=active_mode, theme=to,
+                        theme_toggle_href=_theme_href(
+                            "dark" if to == "light" else "light", rtok=rtok,
+                        ),
+                        run_stats_html=run_stats_html,
+                    ),
+                    extra_headers={"Set-Cookie": set_cookie},
+                )
+            next_path = qs.get("next", ["/"])[0]
+            if not next_path.startswith("/") or next_path.startswith("//"):
+                next_path = "/"  # 防 open redirect：只允許站內相對路徑
+            return self._redirect(next_path, extra_headers={"Set-Cookie": set_cookie})
 
         if u.path == "/":
             return self._send(200, page(""))
@@ -1817,13 +1992,22 @@ class Handler(BaseHTTPRequestHandler):
                     # HIGH 根治：改傳 dict（_mode_extra_params），由 _render_comparison
                     # 內部併入 coin/type/q 一次 urlencode，不再自己組半截字串。
                     mode_extra = _mode_extra_params(qs)
+                    comparison_body = _render_comparison(
+                        report_a, evidence_a, report_b, evidence_b, query, log,
+                        mode_extra=mode_extra,
+                    )
+                    comparison_stats = _render_run_stats(evidence_a + evidence_b, log)
+                    # HIGH 修正：把渲染好的內容存進 _render_cache，主題切換連結
+                    # 帶 rtok 直接重繪這份內容，不會再對 /analyze 發新請求
+                    # （見 _read_theme_cookie/_theme_href 說明）。
+                    rtok = _render_cache_put(comparison_body, active_mode, comparison_stats)
                     return self._send(
                         200,
-                        page(_render_comparison(
-                            report_a, evidence_a, report_b, evidence_b, query, log,
-                            mode_extra=mode_extra,
-                        ), active_mode=active_mode,
-                            run_stats_html=_render_run_stats(evidence_a + evidence_b, log)),
+                        page(
+                            comparison_body, active_mode=active_mode,
+                            run_stats_html=comparison_stats,
+                            toggle_href=_theme_href(other_theme, rtok=rtok),
+                        ),
                     )
                 else:
                     report, evidence, log = _do_analyze(qs, client_ip=client_ip)
@@ -1839,12 +2023,17 @@ class Handler(BaseHTTPRequestHandler):
                             "application/json; charset=utf-8",
                         )
                     mode_extra = _mode_extra_params(qs)
+                    report_body = _render_report(report, evidence, log, mode_extra=mode_extra)
+                    report_stats = _render_run_stats(evidence, log)
+                    # HIGH 修正：同上——存渲染快取，主題切換不重跑 pipeline。
+                    rtok = _render_cache_put(report_body, active_mode, report_stats)
                     return self._send(
                         200,
                         page(
-                            _render_report(report, evidence, log, mode_extra=mode_extra),
+                            report_body,
                             active_mode=active_mode,
-                            run_stats_html=_render_run_stats(evidence, log),
+                            run_stats_html=report_stats,
+                            toggle_href=_theme_href(other_theme, rtok=rtok),
                         ),
                     )
             except TooManyRequests as exc:

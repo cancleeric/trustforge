@@ -519,3 +519,195 @@ def test_render_report_step_ladder_headers_have_step_numbers():
     assert "步驟 1/3" in htmlout
     assert "步驟 2/3" in htmlout
     assert "步驟 3/3" in htmlout
+
+
+# ---------------------------------------------------------------------------
+# D 輪：CEO Chrome 複審 4 項修正回歸測試（PR #39）
+# ---------------------------------------------------------------------------
+#
+# 1. [HIGH] 主題切換改 cookie-based + /theme 輕量路由，結構上不呼叫 pipeline。
+# 2. [MEDIUM] RUN STATS 命名誠實化（Flagged 不是 Flagged dropped）+ 可對帳。
+# 4. [MEDIUM] light 主題全卡片一致（header/gauge 卡/信任分析卡不再寫死深色）。
+#    （[MEDIUM] header cost O(1) 快取的回歸測試放在 tests/test_cost_ledger.py。）
+
+def _make_mock_handler(path: str):
+    """建一個最小化 web.Handler mock，能讓 do_GET 真的跑、但不開真 socket。
+    沿用 tests/test_security.py::test_web_handler_502_on_unexpected_exception
+    的既有模式。"""
+    from io import BytesIO
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("127.0.0.1", 12345)
+    h.path = path
+    h.wfile = BytesIO()
+    h._captured = []
+
+    def fake_send_response(code):
+        h._captured.append(("status", code))
+
+    def fake_send_header(name, val):
+        h._captured.append(("header", name, val))
+
+    def fake_end_headers():
+        pass
+
+    h.send_response = fake_send_response
+    h.send_header = fake_send_header
+    h.end_headers = fake_end_headers
+    return h
+
+
+def test_theme_toggle_with_rtok_never_calls_pipeline(monkeypatch):
+    """HIGH 修正核心斷言：`/theme?...&rtok=...` 直接用 `_render_cache` 重繪，
+    結構上完全不呼叫 `run`/`run_comparison`——即使把兩者都 monkeypatch 成
+    「一被呼叫就 raise」，主題切換仍應正常回 200，證明真的沒被呼叫到
+    （避免 live 模式下切主題重複計費/重複命中限流）。"""
+    def _boom(*a, **kw):
+        raise AssertionError("主題切換不應該呼叫 run()/run_comparison()")
+
+    monkeypatch.setattr(web, "run", _boom)
+    monkeypatch.setattr(web, "run_comparison", _boom)
+
+    rtok = web._render_cache_put("<p>cached report body</p>", "offline", "")
+    h = _make_mock_handler(f"/theme?to=light&rtok={rtok}")
+    h.do_GET()  # 若內部誤呼叫 run()，_boom 會在這裡 raise，測試會失敗
+
+    statuses = [c[1] for c in h._captured if c[0] == "status"]
+    assert statuses == [200]
+    body = h.wfile.getvalue().decode("utf-8")
+    assert "cached report body" in body
+    assert 'data-theme="light"' in body
+
+
+def test_theme_toggle_without_rtok_redirects_and_never_calls_pipeline(monkeypatch):
+    """沒有 rtok（如首頁的主題切換）走 302 導回，一樣結構上不呼叫 pipeline。"""
+    def _boom(*a, **kw):
+        raise AssertionError("主題切換不應該呼叫 run()/run_comparison()")
+
+    monkeypatch.setattr(web, "run", _boom)
+    monkeypatch.setattr(web, "run_comparison", _boom)
+
+    h = _make_mock_handler("/theme?to=dark&next=%2Fcosts")
+    h.do_GET()
+
+    statuses = [c[1] for c in h._captured if c[0] == "status"]
+    assert statuses == [302]
+    locations = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Location"]
+    assert locations == ["/costs"]
+
+
+def test_theme_toggle_sets_cookie_not_query_param():
+    """主題持久化改靠 `Set-Cookie: tf_theme=...`，不再靠 query string。"""
+    h = _make_mock_handler("/theme?to=light&next=%2F")
+    h.do_GET()
+    cookies = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Set-Cookie"]
+    assert any(c.startswith("tf_theme=light") for c in cookies)
+
+
+def test_theme_toggle_rejects_open_redirect_next():
+    """`next` 只允許站內相對路徑，帶 `//evil.com` 這種會被瀏覽器當成
+    protocol-relative URL 的值一律退回首頁，不可用來做開放重導向。"""
+    h = _make_mock_handler("/theme?to=dark&next=%2F%2Fevil.com")
+    h.do_GET()
+    locations = [c[2] for c in h._captured if c[0] == "header" and c[1] == "Location"]
+    assert locations == ["/"]
+
+
+def test_analyze_success_page_theme_link_uses_rtok_not_query_theme():
+    """`/analyze` 成功頁的主題切換連結必須帶 rtok、指向 `/theme`；
+    不能再把 `theme=` 塞進 `/analyze` 本身的網址（HIGH 修正的直接體現：
+    重點分析結果頁本身的網址／自我連結都不該含 theme 參數）。"""
+    h = _make_mock_handler("/analyze?coin=BTC&type=multi_source&q=test")
+    h.do_GET()
+    body = h.wfile.getvalue().decode("utf-8")
+    assert "/theme?to=" in body
+    assert "rtok=" in body
+    assert "&amp;theme=light" not in body
+    assert "?theme=light" not in body
+
+
+def test_render_cache_get_missing_or_expired_returns_none():
+    """查無 token／已過期一律回 `None`；呼叫端據此只是不還原內容，
+    不會 fallback 成重新呼叫 pipeline。"""
+    assert web._render_cache_get(None) is None
+    assert web._render_cache_get("not-a-real-token") is None
+
+
+# ---------------------------------------------------------------------------
+# RUN STATS 誠實命名 + 可對帳（MEDIUM 修正）
+# ---------------------------------------------------------------------------
+
+def test_run_stats_uses_honest_flagged_label_not_fake_dropped():
+    """flagged 證據仍顯示在報告裡（帶🚩徽章），不是真的被 drop 掉，
+    命名只能叫「Flagged」，不能叫「Flagged dropped」（假語意，CLAUDE #24）。"""
+    evidence = [
+        Evidence(
+            source="a", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="ref-a", related_claim="c-a", trust=0.8, flags=[],
+        ),
+        Evidence(
+            source="b", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="ref-b", related_claim="c-b", trust=0.8,
+            flags=["manipulation_keyword"],
+        ),
+    ]
+    out = web._render_run_stats(evidence)
+    assert "Flagged</span>" in out
+    assert "Flagged dropped" not in out
+
+
+def test_run_stats_scanned_reconciles_with_passed_flagged_below_threshold():
+    """Sources scanned 必須等於 passed + flagged + below-threshold，三者
+    加總不能對不上——不能有落在門檻之間、既沒被判 passed 也沒被判
+    flagged 的來源憑空從統計裡消失（MEDIUM 修正：可對帳）。"""
+    evidence = [
+        Evidence(
+            source="high", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r1", related_claim="c1", trust=0.9, flags=[],
+        ),
+        Evidence(
+            source="flagged", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r2", related_claim="c2", trust=0.9,
+            flags=["x"],
+        ),
+        Evidence(
+            source="low", fetched_at="2026-01-01T00:00:00Z",
+            content_reference="r3", related_claim="c3", trust=0.1, flags=[],
+        ),
+    ]
+    out = web._render_run_stats(evidence)
+    assert '<span class="tf-stat-k">Sources scanned</span><span class="tf-stat-v">3</span>' in out
+    assert '<span class="tf-stat-k">Passed filter</span><span class="tf-stat-v">1</span>' in out
+    assert '<span class="tf-stat-k">Flagged</span><span class="tf-stat-v">1</span>' in out
+    assert '<span class="tf-stat-k">Below threshold</span><span class="tf-stat-v">1</span>' in out
+
+
+# ---------------------------------------------------------------------------
+# light 主題全卡片一致（MEDIUM 修正：header/gauge 卡/信任分析卡不再寫死深色）
+# ---------------------------------------------------------------------------
+
+def test_light_theme_header_gradient_uses_css_vars_not_hardcoded_dark():
+    """header 背景漸層先前寫死 `#12171e`/`#0f141a`，light 模式下仍然一片深色
+    ——改用 `var(--tf-hdr-g1)`/`var(--tf-hdr-g2)`，light token 才會真的生效。"""
+    htmlout = web.render_page("")
+    assert "background:linear-gradient(var(--tf-hdr-g1),var(--tf-hdr-g2))" in htmlout
+    assert "background:linear-gradient(#12171e,#0f141a)" not in htmlout
+
+
+def test_confidence_gauge_wrap_uses_css_var_not_hardcoded_dark():
+    """信心 gauge 卡（`.tf-conf-wrap`）先前背景寫死 `#0f141a`，light 模式下
+    仍是深色卡片——改用 `var(--tf-inset)`。"""
+    htmlout = web.render_page("")
+    assert ".tf-conf-wrap{background:var(--tf-inset)" in htmlout
+    assert ".tf-conf-wrap{background:#0f141a" not in htmlout
+
+
+def test_trust_breakdown_card_uses_css_var_not_hardcoded_dark():
+    """信任分析卡（`_render_trust_breakdown` 內層卡片）先前背景寫死
+    `#0f141a`，light 模式下仍是深色——改用 `var(--tf-inset)`。"""
+    out = web._render_trust_breakdown(
+        {"reputation": 0.8, "corroboration": 0.7, "recency": 0.6, "manipulation": 0.0},
+        0.75,
+    )
+    assert "background:var(--tf-inset)" in out
+    assert "background:#0f141a" not in out
