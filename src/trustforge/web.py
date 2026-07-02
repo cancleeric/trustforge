@@ -97,6 +97,26 @@ _status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
 _STATUS_PROBE_SOURCE = "__status_probe__"
 _STATUS_PROBE_COIN = "__status_probe__"
 
+# Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：首頁「多幣總覽」
+# 正確讀路徑——比照 `_STATUS_CACHE_TTL_SECONDS`/`_status_cache` 同款 module
+# 級 TTL + 鎖內 single-flight 模式（見 `_render_home_overview_cached()`
+# docstring），但加一層 P3 事故加固：**讀失敗/miss 這個結果本身也要快取**
+# （短 TTL），避免斷網期間每個 request 都要重新等一次短 timeout 才能判定
+# 失敗——這是比 `/status` 更進一步的加固，因為首頁流量遠高於 `/status`。
+_HOME_OVERVIEW_CACHE_TTL_SECONDS = 60.0       # 讀成功（有總覽內容）的 TTL
+_HOME_OVERVIEW_FAIL_TTL_SECONDS = 15.0        # 讀失敗/miss 的 TTL（較短，
+# backend 恢復後不用等太久就能重新顯示總覽）
+_home_overview_cache_lock = threading.Lock()
+_home_overview_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
+
+# 首頁總覽讀路徑專用的 DynamoDB 連線 timeout（秒）——`DynamoDBCache.__init__`
+# 三個 timeout/重試參數專為此保留（見該類別 docstring「這三個參數留著給
+# Axis C 用」）：`get_cache_backend()`（給排程器／`/status` 用）刻意不帶
+# timeout（容錯優先，讀失敗頂多多一次 cache-miss 降級），但首頁流量最高、
+# 絕不能因為 backend 慢/掛而長時間 hang，必須用自己的短 timeout 版本，見
+# `_home_overview_backend()`。
+_HOME_OVERVIEW_TIMEOUT_SECONDS = 0.5
+
 _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta charset="utf-8">
 
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1160,27 +1180,120 @@ def _example_analyze_href() -> str:
     return html.escape(f"/analyze?{urlencode(params)}")
 
 
+def _home_overview_backend():
+    """首頁總覽讀路徑專用 cache backend：短 timeout（見
+    `_HOME_OVERVIEW_TIMEOUT_SECONDS`），跟 `get_cache_backend()`（給排程器／
+    `/status` 用，無 timeout、容錯優先）刻意分開建構——不能共用同一個無
+    timeout 版本，否則慢/掛掉的 backend 會讓首頁 request 被拖住（P3 事故的
+    根因就是首頁請求直接吃了 DynamoDB 的預設容錯行為）。
+
+    沿用 `CACHE_BACKEND` env 決定 dynamodb/json（跟 `get_cache_backend()`
+    同一套判斷邏輯，只是 dynamodb 分支多帶三個 timeout 參數）：`json` 分支
+    是本機檔案 I/O，本來就不會 hang，不需要 timeout。
+    """
+    from .ingestion.cache import DynamoDBCache, JsonCacheBackend
+
+    backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
+    if backend_name == "json":
+        return JsonCacheBackend()
+    return DynamoDBCache(
+        connect_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
+        read_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
+        max_attempts=1,
+    )
+
+
+def _render_home_overview_cached() -> str:
+    """首頁「多幣總覽」區塊：module 級 TTL 快取 + 鎖內 single-flight，比照
+    `_render_status_page_cached()` 同款模式（thundering herd 完整論證見該
+    函式 docstring，此處不重複），但多一層 P3 事故加固。
+
+    P3 加固（比 `_render_status_page_cached()` 更進一步，見 PLAN
+    docs/PLAN-axisC-snapshots.md「首頁總覽正確讀路徑」段）：連「讀失敗/
+    miss」這個結果本身也要快取（`_HOME_OVERVIEW_FAIL_TTL_SECONDS`，短
+    TTL），否則斷網期間每個 request 都要重新等一次短 timeout 才能判定失敗
+    ——首頁流量遠高於 `/status`，即使單次只等 ~0.5 秒，也不該每個 request
+    都重複付這個代價。
+
+    ⚠️ 絕不使用 ThreadPool、絕不逐幣讀取、絕不在首頁 request 當下對 5 幣
+    各自查詢——TTL 過期時只發生**一次** `cache_get()`，對象是
+    `_home_overview_backend()`（短 timeout 版），讀那顆寫入者預先組好的
+    單一 HTML blob（`TRUST_OVERVIEW_SOURCE`/`TRUST_OVERVIEW_COIN`，見
+    `cache.py` Axis C 段落）。`cache_get()` 內部失敗會 fallback 讀本地
+    `JsonCacheBackend`（本身是快速的本機檔案 I/O，不會 hang），全程最壞
+    情況也只有一次 ~0.5 秒的網路 timeout，不會讓首頁被拖住。讀失敗/miss
+    一律回空字串——首頁其餘內容照常渲染，只有總覽區塊優雅缺席（見
+    `_render_home_page()` 呼叫處）。
+    """
+    with _home_overview_cache_lock:
+        now = time.time()
+        if now < _home_overview_cache["expires_at"]:
+            return _home_overview_cache["html"]  # type: ignore[return-value]
+
+        from .ingestion.cache import (
+            TRUST_OVERVIEW_COIN,
+            TRUST_OVERVIEW_SOURCE,
+            cache_get,
+            cache_key,
+        )
+
+        overview_html = ""
+        try:
+            backend = _home_overview_backend()
+            entry = cache_get(backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN))
+            if entry is not None:
+                docs = entry.get("docs") or []
+                if docs and isinstance(docs[0], dict):
+                    overview_html = str(docs[0].get("html", "") or "")
+        except Exception:
+            # 讀失敗（含短 timeout 逾時、backend 例外）→ 不顯總覽，首頁其餘
+            # 內容照常渲染；`cache_get()` 本身已具備例外處理/fallback，這裡
+            # 是額外一層防禦（如 `_home_overview_backend()` 建構本身意外
+            # 出錯），比照本頁其餘讀取路徑一貫的防禦性寫法。
+            overview_html = ""
+
+        ttl = (
+            _HOME_OVERVIEW_CACHE_TTL_SECONDS if overview_html
+            else _HOME_OVERVIEW_FAIL_TTL_SECONDS
+        )
+        _home_overview_cache["html"] = overview_html
+        _home_overview_cache["expires_at"] = time.time() + ttl
+        return overview_html
+
 
 def _render_home_page() -> str:
-    """首頁（`/`）內容：純靜態 HTML 字串組裝，比照 `_render_status_page`／
-    `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock/DynamoDB
-    任何一項**——首頁流量最高，必須是零外呼、零外部讀取的純靜態渲染
-    （credit-safe：不能是計費或可用性熱點）。
+    """首頁（`/`）內容：Hero/總覽/範例三段以純字串組裝，比照
+    `_render_status_page`／`_render_costs_page` 寫法——**除了「多幣總覽」
+    區塊**（見下方），首頁其餘內容仍是零外呼、零外部讀取的純靜態渲染
+    （credit-safe：首頁流量最高，不能是計費或可用性熱點）。
 
-    ⚠️ Phase 3 曾短暫在此加過「多幣總覽」讀 DynamoDB cache 快照，但 codex
-    抓出 ThreadPool 孤兒執行緒在 backend 永久阻塞時會無限累積、耗盡進程
-    資源；且該功能現在（issue #20 結果持久化尚未落地）必然全空、顯示不了
-    任何東西——CEO 決策：為一個現在看不到的東西冒可用性風險不值得，**整個
-    移除**。等 Axis C（快照寫入者 + 正確的背景預算/預渲染讀路徑）一起設計
-    做對後再重新加回。
+    Axis C #1（task #23）：「多幣總覽」區塊正確讀路徑已加回。Phase 3 曾
+    短暫在此加過同名區塊，在首頁 request 當下逐幣讀 DynamoDB，codex 抓出
+    ThreadPool 孤兒執行緒在 backend 永久阻塞時會無限累積、耗盡進程資源，
+    已整個移除（見 git 歷史）；現在改用 `_render_home_overview_cached()`
+    ——module 級 TTL 快取 + 鎖內 single-flight + 短 timeout 單次讀取單一
+    預渲染 blob（見該函式 docstring 完整論證），不是重新踩同一個坑。讀
+    失敗/miss 時總覽區塊優雅缺席、不影響首頁其餘內容渲染與整體回應速度。
 
-    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、產品總覽
+    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、多幣總覽（若總覽
+    blob 可讀，顯示各幣真信任分卡；讀失敗/miss 則整段不渲染）、產品總覽
     （事實→推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟
     1/3、2/3、3/3」，不新發明一套說法）、範例入口（連到一個真實可執行的
     `/analyze` 查詢，非虛構資料——見 `_example_analyze_href`）。
     """
     e = html.escape
     example_href = _example_analyze_href()
+    overview_html = _render_home_overview_cached()
+    overview_section = (
+        f"""
+<div class="tf-section">
+  <h3>多幣信任總覽</h3>
+  <p class="sub" style="margin:0 0 .4rem">背景排程定期快照，非即時計算——每張卡片皆為真實 pipeline 分析結果。</p>
+  {overview_html}
+</div>
+"""
+        if overview_html else ""
+    )
     return f"""
 <div class="tf-section tf-home-hero" style="border-color:#1f6feb;background:linear-gradient(135deg,rgba(31,111,235,.10),rgba(31,111,235,.02))">
   <h1>多源市場情報的信任提煉——不只給分數，給你為什麼</h1>
@@ -1188,7 +1301,7 @@ def _render_home_page() -> str:
   附上信任評分與可展開的原始依據——不是一句話式的黑箱結論。</p>
   <a class="tf-hero-cta" href="#tf-query-console">立即開始分析 &#8594;</a>
 </div>
-
+{overview_section}
 <div class="tf-section">
   <h3>怎麼運作</h3>
   <p class="sub" style="margin:0 0 .3rem">左側 Query Console 選幣種、題型、輸入問題，送出後三層架構逐層產出：</p>

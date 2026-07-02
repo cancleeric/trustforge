@@ -142,6 +142,19 @@ news/blockchain 10-15min，見上方 refresh 間隔對照表 /
 0    * * * *  cd /path/to/trustforge && python3 scripts/fetch_scheduler.py --source alternative-me-fng --source sec-gov
 ```
 
+**Axis C #1（task #23）：`--snapshot` 快照寫入者**——獨立 cron line，**不**
+跟上面「打真連接器 API」的方式 A/B 共用同一條，cadence 也刻意分開（見
+`scripts/fetch_scheduler.py::SNAPSHOT_REFRESH_INTERVAL_SECONDS`）：每 15
+分鐘對 `COIN_POOL` 5 幣各跑一次 real-off `pipeline.run(data_mode="live",
+llm_mode="off")`（純讀既有 cache 運算，$0，不打真連接器、不打 Bedrock），
+把精華信任快照寫入 `__trust_snapshot__:{coin}`，並把首頁「多幣總覽」HTML
+blob 寫入 `__trust_overview_html__`——供 `web.py::_render_home_page()` 走
+單次短 timeout 讀路徑顯示，不在首頁 request 當下逐幣讀 DynamoDB：
+
+```cron
+*/15 * * * * cd /path/to/trustforge && AWS_REGION=ap-southeast-2 python3 scripts/fetch_scheduler.py --snapshot >> out/fetch_scheduler_snapshot.log 2>&1
+```
+
 **systemd timer 等效寫法**（`fetch-scheduler.service` + `fetch-scheduler.timer`，
 `OnUnitActiveSec=10min` 對應方式 A 的 `*/10 * * * *`）：
 

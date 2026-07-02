@@ -37,6 +37,16 @@
     # 或維持 CACHE_BACKEND=dynamodb，但允許失敗時 fallback 寫本地 JSON：
     TRUSTFORGE_CACHE_JSON_FALLBACK=1 python3 scripts/fetch_scheduler.py
 
+    # Axis C #1（task #23）：多幣信任快照寫入者——獨立分支，跟上面「打真
+    # 連接器 API」的預設模式完全分開、不共用同一條 cron line。對 COIN_POOL
+    # 5 幣各跑 1 次 real-off pipeline.run(data_mode="live", llm_mode="off")
+    # （純讀既有 cache 運算，$0，不打真連接器、不打 Bedrock），寫入
+    # __trust_snapshot__:{coin} 快照 + __trust_overview_html__ 總覽 blob，
+    # 建議 cron 每 15 分鐘一次（見 SNAPSHOT_REFRESH_INTERVAL_SECONDS）：
+    python3 scripts/fetch_scheduler.py --snapshot
+    # 驗證這個分支會跑哪些幣、不真的呼叫 pipeline.run()：
+    python3 scripts/fetch_scheduler.py --snapshot --dry-run
+
 部署方式（EC2 cron 或 systemd timer，見 deploy/README.md「排程 fetcher」章節
 詳細教學）：各來源 rate limit 不同，用各自間隔的 cron line（或每 5-15 分鐘
 跑一次本腳本「全部來源」、靠內建的新鮮度守門自然分散頻率，兩種都可以，
@@ -52,6 +62,7 @@ Exit code：`0` 全部成功（或本來就沒有目標要跑）；`1` 表示至
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import sys
 import time
@@ -66,6 +77,9 @@ from trustforge.ingestion.cache import (  # noqa: E402
     COIN_KEYED_BATCH_SOURCES,
     DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS,
     DEFAULT_REFRESH_INTERVAL_SECONDS,
+    TRUST_OVERVIEW_COIN,
+    TRUST_OVERVIEW_SOURCE,
+    TRUST_SNAPSHOT_SOURCE,
     CacheBackend,
     cache_get,
     cache_key,
@@ -80,7 +94,7 @@ from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, get_ledger  # noqa: E402
-from trustforge.schema import COIN_POOL  # noqa: E402
+from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
 from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
 
 
@@ -498,6 +512,192 @@ def run_probe() -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：多幣信任快照寫入者
+# + 首頁總覽正確讀路徑。
+#
+# 背景：`web.py::_render_home_page()` 曾在 Phase 3 短暫加過「多幣總覽」，
+# 在首頁 request 當下逐幣讀 DynamoDB，codex 抓出 ThreadPool 孤兒執行緒可用性
+# HIGH 風險，整個移除等 Axis C 做對（見該函式 docstring）。這裡是「做對」的
+# 寫入者那一半：**獨立**分支（不混進上面 `run_once()` 打真連接器 API 的
+# 流程，cadence 也刻意分開），對 5 幣各跑一次 **real-off**
+# `pipeline.run(data_mode="live", llm_mode="off")`——`collect()` 線上分支
+# 只讀既有 `CachedSource`（cache-miss 就走既有 `_failed` 優雅降級，不打真
+# 連接器）、Bedrock `offline=True`（regex fallback，不打真 Bedrock）——純 CPU
+# 確定性運算，$0（credit-safe，#24：只寫真 pipeline 結果，不得補假值）。
+#
+# 精華欄位逐字取自 `Report` 既有欄位（不新造 schema）：
+#   - `trust_score` ← `report.confidence`：`trust.scoring.aggregate()` 算出
+#     的整體信任分，`web.py::_render_trust_breakdown()` 顯示「信任 X.XX」
+#     用的就是這個欄位（見 `_render_report()` 呼叫處），不是新概念。
+#   - `direction`/`calibrated_confidence`/`decision_state`/`generated_at`
+#     皆是 `Report` dataclass 對應欄位原樣複製。
+#
+# 單幣 `pipeline.run()` 失敗（如該幣 5 個來源全 cache-miss/已過期，
+# `collect()` 回傳空清單觸發 `ValueError`）只印警告、跳過該幣，不寫入任何
+# 值（#24 鐵律：不補假值）也不中斷其餘幣別——同 `run_once()` 一貫的「單點
+# 失敗不中斷整批」容錯精神。
+#
+# 5 幣算完後，**順便**把整份總覽組成單一 HTML blob，寫入單一 key
+# （`TRUST_OVERVIEW_SOURCE`/`TRUST_OVERVIEW_COIN`，定義於 `cache.py`，跟
+# `web.py` 讀路徑共用同一份常數，避免兩處字串各自維護漂移，見該模組
+# 「Axis C」段落說明）——首頁 request 只需對這一顆 blob 做**一次**短
+# timeout 讀取，不逐幣讀取，見 `web.py::_render_home_overview_cached()`。
+# ---------------------------------------------------------------------------
+
+SNAPSHOT_REFRESH_INTERVAL_SECONDS = 15 * 60  # 建議 cron cadence（獨立 line，
+# 不綁在既有「打真連接器 API」的排程節奏內）。快照寫入者本身**不**做新鮮度
+# 守門（跟 `run_once()` 對真連接器的節流動機不同：這裡每次都是 real-off
+# `pipeline.run()`，只讀既有 cache 純運算，$0、無 429/rate-limit 疑慮，沒有
+# 「省額度」的理由；cron 多久觸發一次本身就是唯一的節流）。
+SNAPSHOT_STALE_AFTER_SECONDS = stale_after_for(SNAPSHOT_REFRESH_INTERVAL_SECONDS)
+# = 45 分鐘，沿用 `cache.py` 既有的 3 倍 margin 換算公式（codex HIGH-1
+# 同款考量：cron jitter 或單輪 pipeline.run() 失敗仍要留緩衝，不能讓硬過期
+# 等於 refresh 間隔）。
+
+# 與 `web.py::_DATE_AGNOSTIC_QUERY_SUFFIX` 組出的預設查詢同文案（"分析該幣種
+# 近期市場狀況，整合多源資料"）——刻意不 import web.py（避免這支排程腳本被
+# 拉進一堆 web 專用依賴），純字串複製；兩處若之後要改請同步改。
+_SNAPSHOT_QUERY = "分析該幣種近期市場狀況，整合多源資料"
+
+
+def _snapshot_dict(coin: str, report) -> dict:
+    """`Report`（真 `pipeline.run()` 結果）→ 快照精華 dict。欄位逐字取自
+    既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。"""
+    return {
+        "coin": coin,
+        "trust_score": round(float(report.confidence), 4),
+        "direction": report.direction,
+        "calibrated_confidence": round(float(report.calibrated_confidence), 4),
+        "decision_state": report.decision_state,
+        "generated_at": report.generated_at,
+    }
+
+
+def _render_overview_html(snapshots: list[dict]) -> str:
+    """5 卡總覽 HTML（`html.escape` 逐欄）——寫入者這端組好整份字串，首頁
+    讀路徑只是把這個 blob 原樣嵌進頁面，request 當下不重新組字串／不逐幣讀
+    （見 `web.py::_render_home_overview_cached()`）。
+
+    `snapshots` 為空（本輪全部幣都失敗）回空字串，呼叫端據此判斷不寫總覽
+    blob（見 `run_snapshot()`）。CSS 變數沿用 `web.py` 既有 dark/light 主題
+    變數名稱（`--tf-border`/`--tf-inset`/`--tf-muted`/`--tf-muted2`），跟
+    頁面其餘區塊視覺一致。
+    """
+    if not snapshots:
+        return ""
+    e = html.escape
+    cards = []
+    for snap in snapshots:
+        coin = e(str(snap.get("coin", "")))
+        trust = float(snap.get("trust_score", 0.0) or 0.0)
+        direction = e(str(snap.get("direction", "")))
+        calibrated = float(snap.get("calibrated_confidence", 0.0) or 0.0)
+        decision_state = e(str(snap.get("decision_state", "")))
+        generated_at = e(str(snap.get("generated_at", "")))
+        cards.append(
+            '<div class="tf-overview-card" style="border:1px solid var(--tf-border);'
+            'border-radius:8px;padding:.6rem .8rem;background:var(--tf-inset)">'
+            f'<div style="font-weight:700">{coin}</div>'
+            f'<div style="font-size:.85rem;color:var(--tf-muted)">信任分 {trust:.2f} · {direction}</div>'
+            f'<div style="font-size:.75rem;color:var(--tf-muted2)">'
+            f'校準信心 {calibrated:.2f} · {decision_state}</div>'
+            f'<div style="font-size:.7rem;color:var(--tf-muted2)">{generated_at}</div>'
+            '</div>'
+        )
+    return (
+        '<div class="tf-overview-grid" style="display:grid;'
+        'grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.6rem">'
+        + "".join(cards) + "</div>"
+    )
+
+
+def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
+    """`--snapshot` 模式：對 `coins` 各跑一次 real-off `pipeline.run()`，把
+    精華快照寫入各自 cache key，並把總覽 HTML 寫入單一 blob key。
+
+    `dry_run`：只列出會跑哪些幣、會寫哪些 key，不真的呼叫 `pipeline.run()`
+    （跟既有 `run_once()` 的 `--dry-run` 語意一致），供 cron/CI 驗證這個
+    分支不會誤打真 API（此模式本來就 $0 real-off，但仍要能驗證「不執行」
+    這件事本身正確）。
+
+    回傳 exit code：任一幣快照寫入失敗（或總覽 blob 寫入失敗）計入
+    `failures`，只要非空即回 `1`（比照 `main()` 對 `run_once()` failures 的
+    既有語意，讓 cron/監控看得到）；全部幣本輪都失敗（0 筆快照）也視為
+    失敗，即使沒有寫入任何東西可失敗——因為代表整輪排程根本沒產出任何
+    結果，值得被監控看到，而非默默 exit 0。
+    """
+    from trustforge.pipeline import run as pipeline_run
+
+    if dry_run:
+        for coin in coins:
+            print(f"[fetch_scheduler] (dry-run) --snapshot {coin}: 會跑 1 次 "
+                  f"real-off pipeline.run()，寫入 cache key "
+                  f"{cache_key(TRUST_SNAPSHOT_SOURCE, coin)!r}")
+        print(f"[fetch_scheduler] (dry-run) --snapshot: 完成後會寫入總覽 blob "
+              f"{cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN)!r}")
+        return 0
+
+    snapshots: list[dict] = []
+    failures: list[str] = []
+    for coin in coins:
+        try:
+            report, _evidence, _log = pipeline_run(
+                coin, _SNAPSHOT_QUERY, QuestionType.MULTI_SOURCE,
+                data_mode="live", llm_mode="off",
+            )
+        except Exception as exc:  # noqa: BLE001 — 單幣失敗（含 collect 全
+            # cache-miss/過期時 pipeline.run() 內部 `collect()` 回傳空清單
+            # 觸發 ValueError）只跳過該幣、不中斷其餘幣別，且**不寫入任何
+            # 值**——#24 鐵律：不得用假值填補失敗的分析結果。
+            print(f"[fetch_scheduler] --snapshot {coin}: pipeline.run() 失敗，"
+                  f"略過（{exc}）", file=sys.stderr)
+            failures.append(coin)
+            continue
+
+        snap = _snapshot_dict(coin, report)
+        result = cache_set(
+            backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), [snap],
+            fetched_at=time.time(), ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+        )
+        if not result.ok:
+            print(f"[fetch_scheduler] --snapshot {coin}: cache 寫入失敗"
+                  f"（backend={result.backend}）：{result.error}", file=sys.stderr)
+            failures.append(coin)
+            continue
+        _warn_if_fallback_used(f"--snapshot {coin}", result)
+        snapshots.append(snap)
+        print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
+              f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
+
+    overview_html = _render_overview_html(snapshots)
+    if overview_html:
+        overview_result = cache_set(
+            backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN),
+            [{"html": overview_html}],
+            fetched_at=time.time(), ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+        )
+        if not overview_result.ok:
+            print(f"[fetch_scheduler] --snapshot: 總覽 blob 寫入失敗"
+                  f"（backend={overview_result.backend}）：{overview_result.error}",
+                  file=sys.stderr)
+            failures.append("__trust_overview_html__")
+        else:
+            _warn_if_fallback_used("--snapshot overview", overview_result)
+            print(f"[fetch_scheduler] --snapshot: 總覽 blob 已寫入（{len(snapshots)} 幣）")
+    else:
+        # 本輪 0 幣成功 → 沒有東西可組總覽，不寫入（不留舊 blob 誤導，靠既有
+        # TTL 讓上一輪殘留的 blob 自然過期）——非 bug，等下一輪（見 PLAN
+        # 「風險」段落：冷啟動時 15 分鐘 cadence 若跟 5 幣 collect 同時全部
+        # cache-miss，快照本來就該是空，首頁總覽該次不顯示）。
+        print("[fetch_scheduler] --snapshot: 0 幣成功，跳過總覽 blob 寫入"
+              "（非 bug，等下一輪）", file=sys.stderr)
+        failures.append("__trust_overview_html__:no-snapshots")
+
+    print(f"[fetch_scheduler] --snapshot 完成：{len(snapshots)}/{len(coins)} 幣成功寫入快照。")
+    return 1 if failures else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     parser.add_argument(
@@ -539,10 +739,26 @@ def main(argv: list[str] | None = None) -> int:
              "供 deploy 部署後同步健康檢查用，取代『跑一次可能因 cache 全新鮮"
              "而 0 次真呼叫仍 exit 0』的舊驗法（codex HIGH）",
     )
+    parser.add_argument(
+        "--snapshot", action="store_true",
+        help="Axis C #1（task #23）：多幣信任快照寫入者——獨立分支，不打任何"
+             "真連接器 API／Bedrock，對 --coin 指定（預設 COIN_POOL 5 幣）各跑"
+             "1 次 real-off pipeline.run(data_mode=live, llm_mode=off)（純讀"
+             "既有 cache 運算，$0），把精華結果寫入 __trust_snapshot__:{coin}"
+             "與總覽 blob __trust_overview_html__，供首頁正確讀路徑使用；建議"
+             "獨立 cron line、cadence 見 SNAPSHOT_REFRESH_INTERVAL_SECONDS。"
+             "可與 --dry-run 合併使用，只列出會跑哪些幣、不真的呼叫",
+    )
     args = parser.parse_args(argv)
 
     if args.probe:
         return run_probe()
+
+    coins = args.coins if args.coins else list(COIN_POOL)
+
+    if args.snapshot:
+        backend = get_cache_backend()
+        return run_snapshot(coins, backend, args.dry_run)
 
     registry = build_registry()
     if args.list_sources:
@@ -550,7 +766,6 @@ def main(argv: list[str] | None = None) -> int:
             print(name)
         return 0
 
-    coins = args.coins if args.coins else list(COIN_POOL)
     interval_overrides: dict[str, float] = {}
     if args.interval is not None:
         target_names = args.sources if args.sources else list(registry)
