@@ -59,6 +59,88 @@ def test_coindesk_rss_document_fields(monkeypatch):
     assert len(d.meta["content_reference"]) <= 120
 
 
+def test_coindesk_url_has_no_trailing_slash(monkeypatch):
+    """生產事故修復：`.../rss/`（帶斜線）已被 CoinDesk 永久重導（308）到
+    `.../rss`（無斜線），寫死的白名單 URL 須直接用無斜線版本，不依賴跟轉址
+    才能拿到內容。"""
+    from trustforge.ingestion import news
+    assert news.CoinDeskRSSSource._URL == "https://www.coindesk.com/arc/outboundfeeds/rss"
+
+
+def test_fetch_url_follows_308_same_host_https(monkeypatch):
+    """`_fetch_url` 對 308 Permanent Redirect（urllib < 3.11 不會自動跟）
+    手動跟一次：跳轉目標同 host + https 時，改打新 URL 並回傳其內容。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    calls: list[str] = []
+
+    def _fake_urlopen(req, timeout=None):
+        url = req.full_url
+        calls.append(url)
+        if url == "https://www.coindesk.com/arc/outboundfeeds/rss":
+            raise HTTPError(
+                url, 308, "Permanent Redirect",
+                {"Location": "/arc/outboundfeeds/rss-new"}, None,
+            )
+        assert url == "https://www.coindesk.com/arc/outboundfeeds/rss-new"
+        return _FakeResp(RSS_FIXTURE)
+
+    monkeypatch.setattr(news, "urlopen", _fake_urlopen)
+    raw = news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+    assert raw == RSS_FIXTURE
+    assert calls == [
+        "https://www.coindesk.com/arc/outboundfeeds/rss",
+        "https://www.coindesk.com/arc/outboundfeeds/rss-new",
+    ]
+
+
+def test_fetch_url_308_cross_host_redirect_not_followed(monkeypatch):
+    """308 跳轉目標若不是同 host（如被劫持/CDN 誤配置跳到其他網域），不得
+    跟轉址（避免任意網域跳轉造成 SSRF），原樣拋出 HTTPError。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    def _fake_urlopen(req, timeout=None):
+        raise HTTPError(
+            req.full_url, 308, "Permanent Redirect",
+            {"Location": "https://evil.example.com/steal"}, None,
+        )
+
+    monkeypatch.setattr(news, "urlopen", _fake_urlopen)
+    with pytest.raises(HTTPError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+
+def test_fetch_url_non_308_http_error_propagates(monkeypatch):
+    """非 308 的 HTTPError（如 429/500）不受這層跟轉址邏輯影響，原樣拋出。"""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import news
+
+    def _fake_urlopen(req, timeout=None):
+        raise HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(news, "urlopen", _fake_urlopen)
+    with pytest.raises(HTTPError):
+        news._fetch_url("https://www.coindesk.com/arc/outboundfeeds/rss")
+
+
+class _FakeResp:
+    """`urlopen()` 回傳值的最小可用替身（context manager + read）。"""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self, _n: int = -1) -> bytes:
+        return self._body
+
+
 def test_decrypt_rss_document_fields(monkeypatch):
     """Decrypt RSS 解析 source 名稱正確。"""
     from trustforge.ingestion import news

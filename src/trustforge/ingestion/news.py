@@ -1,9 +1,19 @@
 """真實新聞連接器 (P0-1)。
 
 來源白名單（寫死，防 SSRF）：
-  - CoinDesk RSS  https://www.coindesk.com/arc/outboundfeeds/rss/  (公開，免 key)
+  - CoinDesk RSS  https://www.coindesk.com/arc/outboundfeeds/rss   (公開，免 key)
   - Decrypt RSS   https://decrypt.co/feed                          (公開，免 key)
   - CryptoPanic   https://cryptopanic.com/api/v1/posts/            (選用，需 env CRYPTOPANIC_TOKEN)
+
+生產事故修復（coindesk 全 308 Permanent Redirect）：CoinDesk 把舊網址
+`.../rss/`（末尾帶斜線）永久重導到 `.../rss`（無斜線），同網域、只差路徑
+末尾斜線。已直接改用新網址（見下方 `CoinDeskRSSSource._URL`），不必再依賴
+redirect 才能拿到內容。`_fetch_url` 額外補上「跟 308」的防禦（見下方
+說明）——`urllib.request` 的 `HTTPRedirectHandler` 在 Python 3.11 之前
+不認得 308（只認 301/302/303/307），舊網址在較舊 Python 版本上就算 CoinDesk
+未來又搬家一次也會直接炸 `HTTPError`，不會像 3.11+ 那樣自動轉址；補這層
+可以讓「新網址又被 308 到另一個路徑」這種未來情境不必等下一次程式碼修改
+就能自動跟上（僅限同 host + https，避免任意網域跳轉造成 SSRF）。
 
 安全措施：
   - timeout 5 秒 / 回應大小上限 512 KB（超過截斷）
@@ -17,6 +27,8 @@ import json
 import os
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
+from urllib.error import HTTPError
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from .base import Document, Source
@@ -27,10 +39,31 @@ _UA = "TrustForge/1.0 (research)"
 
 
 def _fetch_url(url: str) -> bytes:
-    """帶 timeout / 大小上限 / User-Agent 的 urllib GET。"""
+    """帶 timeout / 大小上限 / User-Agent 的 urllib GET。
+
+    對 308 Permanent Redirect 額外手動跟一次（urllib 在 Python 3.11 之前不
+    認得 308，見模組頂部「生產事故修復」說明）；301/302/303/307 由
+    `urllib.request` 內建 `HTTPRedirectHandler` 自動處理，不受影響。只跟
+    「同 host + https」的單一跳轉，避免任意網域跳轉造成 SSRF（本檔所有
+    URL 皆為寫死白名單，跳轉目標理應仍是同一個網域）。
+    """
     req = Request(url, headers={"User-Agent": _UA})
-    with urlopen(req, timeout=_TIMEOUT) as resp:
-        return resp.read(_MAX_BYTES)
+    try:
+        with urlopen(req, timeout=_TIMEOUT) as resp:
+            return resp.read(_MAX_BYTES)
+    except HTTPError as exc:
+        if exc.code != 308:
+            raise
+        location = exc.headers.get("Location") if exc.headers else None
+        if not location:
+            raise
+        redirect_url = urljoin(url, location)
+        parsed = urlparse(redirect_url)
+        if parsed.scheme != "https" or parsed.hostname != urlparse(url).hostname:
+            raise
+        req2 = Request(redirect_url, headers={"User-Agent": _UA})
+        with urlopen(req2, timeout=_TIMEOUT) as resp2:
+            return resp2.read(_MAX_BYTES)
 
 
 def _parse_ts(text: str) -> float:
@@ -107,10 +140,15 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
 
 
 class CoinDeskRSSSource(Source):
-    """CoinDesk RSS，公開無 key。"""
+    """CoinDesk RSS，公開無 key。
+
+    ⚠️ URL 末尾**不帶**斜線：`.../rss/`（帶斜線）已被 CoinDesk 永久重導
+    （308）到 `.../rss`（無斜線），生產環境曾因此全部收到
+    `HTTP Error 308: Permanent Redirect` 而拿不到任何新聞。
+    """
     kind = "news"
     name = "coindesk"
-    _URL = "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    _URL = "https://www.coindesk.com/arc/outboundfeeds/rss"
 
     def fetch(self, query: str, coin: str = "") -> list[Document]:
         raw = _fetch_url(self._URL)
