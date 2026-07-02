@@ -182,6 +182,44 @@ COIN_AGNOSTIC_SOURCES = frozenset({"alternative-me-fng", "sec-gov"})
 # key，讓每個幣的 cache 內容天生就「只含自己」，語意與其餘逐幣來源一致。
 COIN_KEYED_BATCH_SOURCES = frozenset({"coingecko-price"})
 
+# Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：多幣信任快照 +
+# 首頁總覽正確讀路徑——`scripts/fetch_scheduler.py --snapshot` 這個「寫入者」
+# 與 `web.py::_render_home_page()` 這個「讀路徑」用的 cache key 名稱必須逐字
+# 一致，兩處若各自寫死字串、之後改一邊忘了同步改另一邊，會變成「寫入者寫進
+# A key，讀路徑讀 B key」——cache-miss 靜默降級成「不顯總覽」，不會有任何
+# 錯誤訊息可循。定義在本模組（兩者共同的依賴）作為單一事實來源，避免這個坑
+# （呼應模組頂部「codex HIGH-1」refresh/stale 兩組數字分離時同樣的教訓）。
+#
+# `TRUST_SNAPSHOT_SOURCE`：逐幣快照 key 前綴，實際 key 為
+# `cache_key(TRUST_SNAPSHOT_SOURCE, coin)`（如 `__trust_snapshot__:BTC`）。
+# `TRUST_OVERVIEW_SOURCE`/`TRUST_OVERVIEW_COIN`：單一總覽 HTML blob 的
+# (source, coin) 組合——`coin` 刻意給非空 sentinel（同 `web.py`
+# `_STATUS_PROBE_COIN` 慣例）：`DynamoDBCache` 的 SK 絕不接受空字串，傳空字串
+# 會被 DynamoDB 直接拒絕（`ValidationException`），不是「backend 連不上」，
+# 兩者不可混為一談。
+TRUST_SNAPSHOT_SOURCE = "__trust_snapshot__"
+TRUST_OVERVIEW_SOURCE = "__trust_overview_html__"
+TRUST_OVERVIEW_COIN = "__trust_overview_html__"
+
+# codex HIGH（PR #47 review）：`web.py` 讀路徑原本只檢查總覽 blob 是否
+# 非空，未檢查 `fetched_at`——DynamoDB TTL 刪除是 best-effort，官方文件
+# 說明可能延遲數小時到 48 小時（見 `DynamoDBCache` docstring「表結構」
+# 段），若快照寫入者（cron）停擺，reader 仍會持續讀到舊 item，且被
+# `web.py` module 級 TTL cache 每次 renew 成「新鮮」，導致斷網/排程停擺
+# 期間首頁一直顯示過期的信任判斷當成即時——信任產品不能這樣。
+#
+# 修法比照本模組 `CachedSource.fetch()` 既有的自驗新鮮度慣例（見下方
+# `age = now - fetched_at; age > ttl_seconds` 一段）：reader 讀到 entry 後
+# 自己拿 `fetched_at` 跟這個新鮮窗比對，超過就視同 cache-miss（不顯總
+# 覽），不依賴 DynamoDB TTL 的非同步刪除語意。窗口沿用 `stale_after_for()`
+# 既有 3x margin 公式，refresh 間隔跟 `scripts/fetch_scheduler.py
+# --snapshot` 建議 cron cadence 共用同一份數字（單一事實來源，避免寫入者
+# 與讀路徑各自定義漂移，同上方 key 常數的理由）。
+TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS = 15 * 60  # 建議 cron cadence
+TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS = stale_after_for(
+    TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS
+)  # = 45 分鐘
+
 
 def _normalize_coin(coin: str | None) -> str:
     return (coin or "").strip().upper()

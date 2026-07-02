@@ -2,6 +2,7 @@
 import html
 import json
 import re
+import time
 from io import BytesIO
 from email.message import Message
 from urllib.parse import parse_qs, urlparse
@@ -10,6 +11,42 @@ import pytest
 
 from trustforge import web
 from trustforge.schema import COIN_POOL
+
+
+def _stop_overview_bg_thread_for_test() -> None:
+    """測試專用：強制停止目前的首頁總覽背景 thread（若有）並清空
+    in-memory 狀態（同 `test_home_overview.py` 慣例，本檔獨立維護一份，
+    比照 `test_status_page.py`／本檔既有各自維護自己 module-state-reset
+    fixture 的既有風格，不共用單一 helper）。"""
+    stop_event = web._overview_bg_stop_event
+    if stop_event is not None:
+        stop_event.set()
+    thread = web._overview_bg_thread
+    if thread is not None:
+        thread.join(timeout=3.0)
+    web._overview_bg_thread = None
+    web._overview_bg_stop_event = None
+    web._overview_html = None
+    web._overview_expiry_epoch = 0.0
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home_overview_cache(monkeypatch):
+    """Axis C #1：`_render_home_page()` 會透過 `_render_home_overview_cached()`
+    讀一次 in-memory 總覽現貨（`_overview_html`），並可能懶啟動背景刷新
+    thread（`_ensure_overview_bg_thread_started()`）——本檔多數測試與總覽
+    功能無關，強制 `CACHE_BACKEND=json`（`_isolate_connector_cache` 既有
+    autouse fixture 已把 `TRUSTFORGE_CACHE_DIR` 指到隔離的 tmp_path），避免
+    背景 thread 在有設定真 AWS SSO/憑證的開發機上意外打到真 DynamoDB
+    （即使只是讀，也不該讓不相關的測試行為依賴開發者本機的 AWS 設定而變
+    得不確定）；並在每個測試前後徹底停掉背景 thread、清空 `_overview_html`
+    （比照 `test_status_page.py::_reset_status_module_state` 慣例），避免
+    跨測試互相汙染。
+    """
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+    _stop_overview_bg_thread_for_test()
+    yield
+    _stop_overview_bg_thread_for_test()
 
 
 def test_do_analyze_returns_report():
@@ -395,27 +432,101 @@ def test_render_home_page_marks_example_as_illustrative():
     assert "示意用途" in htmlout
 
 
-def test_render_home_page_never_calls_cache_get_or_dynamodb(monkeypatch):
-    """CEO 決策（Phase 3 退件）：首頁「多幣總覽」已整個移除，首頁必須回到
-    純靜態渲染——不讀 cache、不碰 DynamoDB，零可用性風險。這裡直接斷言
-    `ingestion.cache.cache_get()`／`get_cache_backend()` 一旦被呼叫就失敗，
-    確保沒有殘留的隱性呼叫路徑（比照既有 pipeline/Source.fetch 零外呼樁
-    寫法）。"""
+def test_render_home_page_never_calls_get_cache_backend(monkeypatch):
+    """`get_cache_backend()`（給排程器／`/status` 用，無 timeout、容錯優先）
+    不該被首頁呼叫——首頁總覽讀路徑必須走專用的短 timeout backend
+    （`_home_overview_backend()`），兩者刻意分開建構，不可混用（見該函式
+    docstring：混用會讓慢/掛掉的 backend 拖住首頁）。"""
     import trustforge.ingestion.cache as cache_mod
 
-    def _boom(*a, **kw):
-        raise AssertionError("首頁不該呼叫 cache_get()（多幣總覽已移除）")
-
     def _boom_backend(*a, **kw):
-        raise AssertionError("首頁不該呼叫 get_cache_backend()（多幣總覽已移除）")
+        raise AssertionError("首頁不該呼叫 get_cache_backend()（應走 _home_overview_backend()）")
 
-    monkeypatch.setattr(cache_mod, "cache_get", _boom)
     monkeypatch.setattr(cache_mod, "get_cache_backend", _boom_backend)
 
     htmlout = web._render_home_page()
-    assert "多幣總覽" not in htmlout
-    assert "尚無資料" not in htmlout
     assert "信任提煉" in htmlout  # 首頁其餘內容照常渲染
+
+
+def test_render_home_page_never_touches_backend_directly(monkeypatch):
+    """codex HIGH #2（PR #47）：`_render_home_page()`（首頁 request 路徑）
+    絕對不能同步呼叫 `_home_overview_backend()`/`cache_get()`——所有 I/O
+    只准發生在背景 thread 的 `_overview_bg_refresh_once()` 裡，request 路徑
+    只讀 in-memory 的 `_overview_html`。用一個「活著但什麼都不做」的假
+    thread 佔住 `_overview_bg_thread` 的位子（讓 `_ensure_overview_bg_thread_
+    started()` 判定已有一條在跑而跳過真的啟動），確保這裡從頭到尾保證
+    backend 呼叫次數是 0，而不是「機率上通常不會被呼叫到」（P3 ThreadPool
+    事故 + Axis C v1/v2 兩輪 codex HIGH 的教訓延續）。"""
+    calls = {"n": 0}
+
+    class _FakeBackend:
+        def get(self, key, *, consistent_read=False):
+            calls["n"] += 1
+            return None  # cache-miss
+
+    monkeypatch.setattr(web, "_home_overview_backend", lambda: _FakeBackend())
+
+    import threading as _threading
+
+    placeholder_stop = _threading.Event()
+    placeholder_thread = _threading.Thread(
+        target=placeholder_stop.wait, name="tf-overview-bg", daemon=True
+    )
+    placeholder_thread.start()
+    web._overview_bg_thread = placeholder_thread
+    web._overview_bg_stop_event = placeholder_stop
+
+    htmlout = web._render_home_page()
+    assert calls["n"] == 0  # request 路徑零 I/O，一次都不該打到 backend
+    assert "多幣信任總覽" not in htmlout  # in-memory 現貨是 None → 優雅缺席
+    assert "信任提煉" in htmlout  # 首頁其餘內容照常渲染
+
+
+def test_render_home_page_shows_overview_when_blob_present(monkeypatch):
+    """寫入者（`fetch_scheduler.py --snapshot`）預先組好的總覽 blob 存在時，
+    背景刷新讀到後寫入 `_overview_html`，首頁把它原樣嵌入頁面。
+
+    codex HIGH #2 之後 `_render_home_page()` 不再同步讀 backend，改為手動
+    呼叫一次 `_overview_bg_refresh_once()`（模擬背景 thread 跑過一輪）餵好
+    in-memory 現貨，再驗證首頁讀路徑正確把它顯示出來。"""
+    fake_html = '<div class="tf-overview-card">BTC 假卡片（測試樁）</div>'
+
+    class _FakeBackend:
+        def get(self, key, *, consistent_read=False):
+            return {"docs": [{"html": fake_html}], "fetched_at": time.time()}
+
+    monkeypatch.setattr(web, "_home_overview_backend", lambda: _FakeBackend())
+
+    web._overview_bg_refresh_once()
+    assert web._overview_html == fake_html
+
+    htmlout = web._render_home_page()
+    assert "多幣信任總覽" in htmlout
+    assert fake_html in htmlout
+
+
+def test_render_home_page_omits_overview_when_backend_raises(monkeypatch):
+    """讀失敗（含短 timeout 逾時、backend 例外）→ 不顯總覽，首頁其餘內容
+    照常渲染、不崩、不把例外往外拋（P3 鐵律：首頁永不因為 backend 故障而
+    壞掉或被拖住）。
+
+    codex HIGH #2 之後例外只會發生在背景 thread 的
+    `_overview_bg_refresh_once()` 裡（被吞掉、`_overview_html` 設回
+    `None`），先手動跑一輪真正驗證例外處理路徑，避免變成「反正
+    `_render_home_page()` 本來就不會碰 backend，所以無論如何都會斷言成功」
+    的假覆蓋。"""
+    class _BoomBackend:
+        def get(self, key, *, consistent_read=False):
+            raise TimeoutError("simulated backend timeout")
+
+    monkeypatch.setattr(web, "_home_overview_backend", lambda: _BoomBackend())
+
+    web._overview_bg_refresh_once()
+    assert web._overview_html is None  # 例外被吞掉、現貨清空，不是保留舊值
+
+    htmlout = web._render_home_page()
+    assert "多幣信任總覽" not in htmlout
+    assert "信任提煉" in htmlout
 
 
 def test_mobile_media_query_forces_table_horizontal_scroll():
