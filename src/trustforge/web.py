@@ -459,28 +459,35 @@ def _get_connector_usage_summary(records: list[dict[str, Any]] | None = None) ->
     """近期（最近 `scheduler_log.RECENT_WINDOW_SIZE` 次以內）排程執行的
     `source_calls` 加總，供 `/status`「連接器用量」表使用（成本會計階段2）。
 
-    ⚠️ O(1)-相容：只呼叫 `SchedulerRunLog.recent()`（`JsonlSchedulerRunLog`
-    讀一份獨立維護的 bounded window 檔，`DynamoDBSchedulerRunLog` 對應讀一份
-    獨立維護的 bounded window 項目，見 `scheduler_log.py` 模組頂部
-    `RECENT_WINDOW_SIZE` 說明），不掃描完整排程歷史。任何讀取失敗（尚未跑過
-    排程／backend 故障）一律降級回空 dict，`/status` 頁面必須永遠能顯示。
+    ⚠️ O(1)-相容：只呼叫 `scheduler_log.get_recent_scheduler_runs()`（內部對
+    `JsonlSchedulerRunLog`/`DynamoDBSchedulerRunLog` 都是讀一份獨立維護的
+    bounded window，見 `scheduler_log.py` 模組頂部 `RECENT_WINDOW_SIZE`
+    說明），不掃描完整排程歷史。任何讀取失敗（尚未跑過排程／backend 故障）
+    一律降級回空 dict，`/status` 頁面必須永遠能顯示。
 
     ⚠️ 這是「最近 N 次排程執行」的加總，不是嚴格日曆 30 天——呼叫端顯示文案
     需誠實反映這點，不宣稱「近 30 天」（見 `_render_connector_usage_table`）。
 
+    ⚠️ split-brain dual-read（codex HIGH，PR #41）：不能只讀 primary 的
+    `recent()`——DynamoDB backend 的 recent-window 更新若樂觀鎖衝突耗盡/
+    寫入暫時失敗，該筆記錄會 fallback 進本地 JSONL，但 primary 的
+    recent-window 不會回頭補上，導致該筆 `source_calls` 永久漏算。
+    `get_recent_scheduler_runs()` 會同時讀 primary + JSONL fallback、去重、
+    排序、截斷，詳見該函式 docstring。
+
     ⚠️ `records` 可選（codex MEDIUM，PR #41）：`/status` 一次 render 需要
     「連接器用量」表 + 「快取節省」卡兩處都彙總 `source_calls`，若各自獨立
-    呼叫 `recent()`，同一次 render 會對 DynamoDB backend 打兩次 `GetItem`
-    （JSONL backend 則是多讀一次 window 檔），沒必要。呼叫端（見
-    `_render_status_page`）應該只呼叫一次 `SchedulerRunLog.recent()`，把結果
-    透過 `records` 參數**共用**給兩個彙總點；未傳（`None`，預設值，供獨立
-    呼叫/測試用）才退回原本各自呼叫 `recent()` 的行為，向後相容。
+    呼叫 `get_recent_scheduler_runs()`，同一次 render 會重複讀取（dual-read
+    下等於重複讀 4 次而非 2 次），沒必要。呼叫端（見 `_render_status_page`）
+    應該只呼叫一次，把結果透過 `records` 參數**共用**給兩個彙總點；未傳
+    （`None`，預設值，供獨立呼叫/測試用）才退回原本獨立呼叫的行為，向後
+    相容。
     """
     if records is None:
         try:
-            from .scheduler_log import get_scheduler_run_log
+            from .scheduler_log import get_recent_scheduler_runs
 
-            records = get_scheduler_run_log().recent()
+            records = get_recent_scheduler_runs()
         except Exception:
             records = []
 
@@ -720,17 +727,21 @@ def _render_status_page() -> str:
 
     recent_run_html = _render_recent_scheduler_run()
 
-    # codex MEDIUM（PR #41）：「連接器用量」表 + 「快取節省」卡都需要
-    # `SchedulerRunLog.recent()` 的彙總結果，一次 render 只呼叫一次、結果
-    # 共用給兩處——不要各自獨立呼叫 `recent()`（會讓同一次 render 對
-    # DynamoDB backend 打兩次 GetItem／JSONL backend 多讀一次 window 檔，
-    # 沒必要；比照本頁面本身已有的 TTL + single-flight 快取精神，同一次
-    # render 內部也不重複讀同一份資料）。任何讀取失敗一律降級回空清單，
-    # 兩個渲染函式各自對空清單有防禦性處理，不會讓 `/status` 崩頁。
+    # codex MEDIUM+HIGH（PR #41）：「連接器用量」表 + 「快取節省」卡都需要
+    # 排程執行記錄的彙總結果，一次 render 只呼叫一次、結果共用給兩處——不要
+    # 各自獨立呼叫（沒必要的重複讀取；比照本頁面本身已有的 TTL +
+    # single-flight 快取精神，同一次 render 內部也不重複讀同一份資料）。
+    # 用 `get_recent_scheduler_runs()`（dual-read 合併 primary + JSONL
+    # fallback，見該函式 docstring）而不是只讀 `get_scheduler_run_log().recent()`
+    # ——只讀 primary 在 DynamoDB backend 上有 split-brain 風險：recent-window
+    # 若更新失敗會 fallback 進本地 JSONL，但 primary 的 recent-window 不會
+    # 補上，導致該筆記錄的 source_calls 永久漏算（codex HIGH）。任何讀取
+    # 失敗一律降級回空清單，兩個渲染函式各自對空清單有防禦性處理，不會讓
+    # `/status` 崩頁。
     try:
-        from .scheduler_log import get_scheduler_run_log
+        from .scheduler_log import get_recent_scheduler_runs
 
-        scheduler_records = get_scheduler_run_log().recent()
+        scheduler_records = get_recent_scheduler_runs()
     except Exception:
         scheduler_records = []
 

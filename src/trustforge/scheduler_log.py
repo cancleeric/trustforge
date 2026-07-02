@@ -576,3 +576,69 @@ def get_last_scheduler_run() -> dict[str, Any] | None:
     if str(fallback_record.get("ts", "")) > str(primary_record.get("ts", "")):
         return fallback_record
     return primary_record
+
+
+def get_recent_scheduler_runs(n: int = RECENT_WINDOW_SIZE) -> list[dict[str, Any]]:
+    """讀「最近 N 次排程執行」記錄（合併 primary + fallback），供 `/status`
+    「連接器用量」表 + 「快取節省」卡彙總 `source_calls` 用。
+
+    ⚠️ split-brain（codex HIGH，PR #41，與 `get_last_scheduler_run()` 已解的
+    同型問題）：`DynamoDBSchedulerRunLog.append()` 依序寫入歷史記錄 → latest
+    指標 → recent-window（`_update_recent_window`，樂觀鎖版本號重試）。
+    recent-window 是 read-modify-write，若樂觀鎖連續衝突超過重試上限，或
+    `GetItem`/`PutItem` 本身暫時失敗，`_update_recent_window` 會拋例外，讓
+    整個 `append()` 往上拋——但這時歷史記錄跟 latest 指標往往已經寫成功
+    （它們排在 recent-window 更新之前，不會回滾）。`append_scheduler_run()`
+    抓到這個例外後會把整筆記錄 fallback 寫進本地 `JsonlSchedulerRunLog`
+    （含它自己的 recent-window，本地寫入不受 DynamoDB 那邊的問題影響，一定
+    成功）。
+
+    結果：DynamoDB primary 的 recent-window **沒有**這筆記錄（still 停在
+    衝突/失敗前的舊版本），但排程明明成功、DynamoDB 的 latest 指標甚至都
+    已經更新到這筆——只有這份「輔助彙總結構」漏了。若 `/status` 只讀
+    `primary.recent()`，會拿到這份「primary 讀得到、但內容是舊的」window，
+    這筆記錄的 `source_calls` 永久不會被算進「連接器用量」/「快取節省」，
+    且沒有任何例外可以偵測到這個情況（primary 讀取本身不會失敗）。
+
+    修法（比照 `get_last_scheduler_run()` 的 dual-read 手法）：**同時讀**
+    `primary.recent(n)` 與本地 JSONL fallback 的 `recent(n)`（兩者皆為 O(1)
+    bounded window 讀取，不掃全表），合併後**依 `run_id` 去重**（同一筆
+    record 理論上兩邊內容一致，谁先出現保留誰即可，這裡以 primary 優先，
+    fallback 補上 primary 漏掉的）、**依 `ts` 字串排序**（新到舊）、
+    **截斷到 `n`**。任一邊讀失敗就退化用另一邊。
+
+    當 primary 本身就是 `JsonlSchedulerRunLog`（預設
+    `SCHEDULER_RUN_LOG_BACKEND=jsonl`）時，primary 與 fallback 是同一份
+    資料，不必重讀第二次。
+    """
+    primary = get_scheduler_run_log()
+
+    primary_records: list[dict[str, Any]] = []
+    try:
+        primary_records = primary.recent(n) or []
+    except Exception as exc:
+        print(f"[scheduler_log] WARNING: recent() 讀取失敗（backend={type(primary).__name__}）："
+              f"{exc}", file=sys.stderr)
+
+    if isinstance(primary, JsonlSchedulerRunLog):
+        return primary_records  # primary 已是本地 JSONL，跟 fallback 同一份資料
+
+    fallback_records: list[dict[str, Any]] = []
+    try:
+        fallback_records = JsonlSchedulerRunLog().recent(n) or []
+    except Exception as exc:
+        print(f"[scheduler_log] WARNING: fallback JsonlSchedulerRunLog recent() 讀取仍失敗："
+              f"{exc}", file=sys.stderr)
+
+    merged_by_run_id: dict[str, dict[str, Any]] = {}
+    for rec in (*primary_records, *fallback_records):
+        if not isinstance(rec, dict):
+            continue
+        run_id = str(rec.get("run_id") or "")
+        # run_id 理論上恆非空（append_scheduler_run 一定會補），沒有的極端
+        # 情況用物件 id 當去重 key，避免整筆被誤丟——寧可多顯示、不可漏記。
+        key = run_id or f"__no_run_id_{id(rec)}"
+        merged_by_run_id.setdefault(key, rec)
+
+    merged = sorted(merged_by_run_id.values(), key=lambda r: str(r.get("ts", "")), reverse=True)
+    return merged[:n]

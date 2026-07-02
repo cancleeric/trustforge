@@ -18,6 +18,7 @@ from trustforge.scheduler_log import (
     SchedulerRunLog,
     append_scheduler_run,
     get_last_scheduler_run,
+    get_recent_scheduler_runs,
     get_scheduler_run_log,
 )
 
@@ -870,3 +871,239 @@ def test_get_last_scheduler_run_dual_read_stays_constant_cost(monkeypatch, tmp_p
     assert result is not None
     assert result["run_id"] == "run-1"
     assert calls["n"] == 0  # fallback 沒有掃全表
+
+
+# ---------------------------------------------------------------------------
+# get_recent_scheduler_runs()（codex HIGH，PR #41：與 get_last_scheduler_run()
+# 已解的同型 split-brain 問題——recent-window 更新失敗會 fallback 進本地
+# JSONL，但 primary 的 recent-window 不會回頭補上，只讀 primary 會永久漏算）
+# ---------------------------------------------------------------------------
+
+class _ThrottledRecentWindowTable(FakeConditionalTable):
+    """歷史記錄 + latest 指標 PutItem 正常，但 recent-window（固定 sentinel
+    key `_RECENT_KEY`）PutItem 一律拋一個**非** ConditionalCheckFailedException
+    的 ClientError——模擬「歷史/latest 寫入成功、recent-window 樂觀鎖更新
+    因暫時性節流失敗（非版本衝突）」的 split-brain 情境（比照既有
+    `_ThrottledLatestPointerTable`，換成節流 recent-window 那個固定 Key）。
+    """
+
+    def put_item(self, Item, ConditionExpression=None):
+        if Item.get("run_id") == DynamoDBSchedulerRunLog._RECENT_KEY["run_id"]:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "ProvisionedThroughputExceededException",
+                        "Message": "節流（模擬暫時性失敗，非版本衝突）",
+                    }
+                },
+                "PutItem",
+            )
+        super().put_item(Item, ConditionExpression=ConditionExpression)
+
+
+def test_get_recent_scheduler_runs_split_brain_includes_fallback_only_record(
+    monkeypatch, tmp_path
+):
+    """split-brain 回歸（codex HIGH，PR #41，與 `get_last_scheduler_run()` 已
+    解的同型問題）：
+
+    1. 第一輪 append 正常，primary（DynamoDB）recent-window 記到 run-old。
+    2. 第二輪 append：歷史 PutItem、latest 指標 PutItem 都成功，但
+       recent-window PutItem 被節流（非 ConditionalCheckFailedException）
+       而失敗 → `_update_recent_window` 往上拋 → `DynamoDBSchedulerRunLog
+       .append()` 整體拋例外 → `append_scheduler_run()` 判定失敗，fallback
+       把完整的新記錄（run-new）寫進本地 JsonlSchedulerRunLog（含它自己的
+       recent-window）。
+    3. 此時 primary 的 recent-window 仍只有 run-old——`primary.recent()`
+       讀取本身**不會拋例外**，只是回傳這份「讀得到但缺了 run-new」的
+       window，即使 primary 的 latest 指標其實已經更新到 run-new（驗證
+       codex 描述的「排程明明成功、latest 甚至更新了」屬實）。
+
+    `get_recent_scheduler_runs()` 必須兩邊都讀、合併，回傳的清單裡要同時有
+    run-old（來自 primary）跟 run-new（只存在 fallback），且 run-new 的
+    `source_calls` 不能漏——這正是回歸鎖的核心斷言。
+    """
+    monkeypatch.setenv("SCHEDULER_RUN_LOG_BACKEND", "dynamodb")
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "fallback.jsonl"))
+
+    table = FakeConditionalTable()
+    healthy_log = DynamoDBSchedulerRunLog(table_name="fake-table")
+    healthy_log._table = table
+
+    # 第一輪：一切正常，primary recent-window 記到 run-old。
+    append_scheduler_run(
+        {
+            "run_id": "run-old", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1,
+            "source_calls": {"coindesk": 1},
+        },
+        log=healthy_log,
+    )
+
+    # 第二輪：沿用同一份既有資料，但這次的 table 對 recent-window 寫入一律節流失敗。
+    throttled_table = _ThrottledRecentWindowTable()
+    throttled_table._store = dict(table._store)
+    throttled_log = DynamoDBSchedulerRunLog(table_name="fake-table")
+    throttled_log._table = throttled_table
+
+    append_scheduler_run(
+        {
+            "run_id": "run-new", "ts": "2026-01-02T00:00:00+00:00", "success_count": 2,
+            "source_calls": {"coindesk": 5},
+        },
+        log=throttled_log,
+    )
+
+    # primary 的 recent-window 讀取本身不拋例外，只是缺了 run-new。
+    assert {r["run_id"] for r in throttled_log.recent()} == {"run-old"}
+    # 但 primary 的 latest 指標其實已經更新到 run-new。
+    assert throttled_log.latest()["run_id"] == "run-new"
+
+    monkeypatch.setattr(
+        "trustforge.scheduler_log.get_scheduler_run_log", lambda: throttled_log
+    )
+
+    merged = get_recent_scheduler_runs()
+    run_ids = {r["run_id"] for r in merged}
+    assert run_ids == {"run-old", "run-new"}
+    new_record = next(r for r in merged if r["run_id"] == "run-new")
+    assert new_record["source_calls"] == {"coindesk": 5}
+
+
+def test_get_recent_scheduler_runs_dedupes_by_run_id_when_present_in_both(
+    monkeypatch, tmp_path
+):
+    """同一筆 run_id 若剛好在 primary 跟 fallback 都讀得到（正常情況：沒有
+    split-brain，兩邊內容一致），合併後只算一次，不會把同一筆 source_calls
+    重複計入。"""
+    monkeypatch.setenv("SCHEDULER_RUN_LOG_BACKEND", "dynamodb")
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "fallback.jsonl"))
+
+    table = FakeConditionalTable()
+    healthy_log = DynamoDBSchedulerRunLog(table_name="fake-table")
+    healthy_log._table = table
+    append_scheduler_run(
+        {
+            "run_id": "run-1", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1,
+            "source_calls": {"coindesk": 3},
+        },
+        log=healthy_log,
+    )
+    # 手動也寫一份內容相同的到本地 fallback JSONL，模擬「兩邊剛好都有」的
+    # 正常情況（不是 split-brain，純粹驗證去重邏輯本身）。
+    JsonlSchedulerRunLog().append(
+        {
+            "run_id": "run-1", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1,
+            "source_calls": {"coindesk": 3},
+        }
+    )
+
+    monkeypatch.setattr(
+        "trustforge.scheduler_log.get_scheduler_run_log", lambda: healthy_log
+    )
+
+    merged = get_recent_scheduler_runs()
+    assert [r["run_id"] for r in merged] == ["run-1"]  # 不是 ["run-1", "run-1"]
+
+
+def test_get_recent_scheduler_runs_merges_sorts_by_ts_and_truncates_to_window_size(
+    monkeypatch, tmp_path
+):
+    """合併後要依 ts 新到舊排序、截斷到 `RECENT_WINDOW_SIZE`（不是原封不動
+    把兩邊全部塞回去）。"""
+    from trustforge.scheduler_log import RECENT_WINDOW_SIZE
+
+    monkeypatch.setenv("SCHEDULER_RUN_LOG_BACKEND", "dynamodb")
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "fallback.jsonl"))
+
+    table = FakeConditionalTable()
+    primary_log = DynamoDBSchedulerRunLog(table_name="fake-table")
+    primary_log._table = table
+
+    # primary 記 20 筆（run-p0..run-p19），ts 較新（2026-02）。
+    for i in range(20):
+        append_scheduler_run(
+            {"run_id": f"run-p{i}", "ts": f"2026-02-01T00:{i:02d}:00+00:00", "success_count": 1},
+            log=primary_log,
+        )
+    # fallback 本地另外記 20 筆（run-f0..run-f19），ts 較舊（2026-01）——模擬
+    # 「以前失敗過幾次，本地累積了一些 primary 沒有的舊記錄」。
+    for i in range(20):
+        JsonlSchedulerRunLog().append(
+            {"run_id": f"run-f{i}", "ts": f"2026-01-01T00:{i:02d}:00+00:00", "success_count": 1}
+        )
+
+    monkeypatch.setattr(
+        "trustforge.scheduler_log.get_scheduler_run_log", lambda: primary_log
+    )
+
+    merged = get_recent_scheduler_runs()
+    assert len(merged) == RECENT_WINDOW_SIZE  # 截斷到 30，不是 40
+    # 新到舊：primary 的 20 筆（2026-02，較新）全部入選，排在前面；
+    # fallback 的 20 筆（2026-01，較舊）只有最新的 10 筆擠進剩下的名額。
+    assert all(r["run_id"].startswith("run-p") for r in merged[:20])
+    ts_list = [r["ts"] for r in merged]
+    assert ts_list == sorted(ts_list, reverse=True)
+
+
+def test_get_recent_scheduler_runs_dual_read_stays_constant_cost(monkeypatch, tmp_path):
+    """讀兩邊合併，仍要保持 O(1)：primary 用不存在 `scan` 方法的假 table
+    （呼叫到就會 AttributeError），fallback 只允許呼叫 `recent()`（讀 window
+    檔），不能呼叫 `read_all()`（掃全表 jsonl）。"""
+    monkeypatch.setenv("SCHEDULER_RUN_LOG_BACKEND", "dynamodb")
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "fallback.jsonl"))
+
+    table = FakeConditionalTable()  # 沒有 .scan()，一呼叫就 AttributeError
+    primary_log = DynamoDBSchedulerRunLog(table_name="fake-table")
+    primary_log._table = table
+    append_scheduler_run(
+        {
+            "run_id": "run-1", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1,
+            "source_calls": {"coindesk": 1},
+        },
+        log=primary_log,
+    )
+    monkeypatch.setattr(
+        "trustforge.scheduler_log.get_scheduler_run_log", lambda: primary_log
+    )
+
+    calls = {"n": 0}
+    original_read_all = JsonlSchedulerRunLog.read_all
+
+    def spy_read_all(self):
+        calls["n"] += 1
+        return original_read_all(self)
+
+    monkeypatch.setattr(JsonlSchedulerRunLog, "read_all", spy_read_all)
+
+    result = get_recent_scheduler_runs()
+
+    assert [r["run_id"] for r in result] == ["run-1"]
+    assert calls["n"] == 0  # fallback 沒有掃全表
+
+
+def test_get_recent_scheduler_runs_default_backend_reads_primary_once_no_fallback_read(
+    monkeypatch, tmp_path
+):
+    """預設 backend（`SCHEDULER_RUN_LOG_BACKEND` 未設，即 JSONL）：primary
+    本身就是 `JsonlSchedulerRunLog`，跟 fallback 是同一份資料，不該再額外
+    建一個 `JsonlSchedulerRunLog()` 重讀一次——只呼叫一次 `recent()`。"""
+    monkeypatch.delenv("SCHEDULER_RUN_LOG_BACKEND", raising=False)
+    monkeypatch.setenv("TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "runs.jsonl"))
+
+    append_scheduler_run(
+        {"run_id": "run-1", "ts": "2026-01-01T00:00:00+00:00", "success_count": 1}
+    )
+
+    calls = {"n": 0}
+    original_recent = JsonlSchedulerRunLog.recent
+
+    def spy_recent(self, n=30):
+        calls["n"] += 1
+        return original_recent(self, n)
+
+    monkeypatch.setattr(JsonlSchedulerRunLog, "recent", spy_recent)
+
+    result = get_recent_scheduler_runs()
+
+    assert [r["run_id"] for r in result] == ["run-1"]
+    assert calls["n"] == 1
