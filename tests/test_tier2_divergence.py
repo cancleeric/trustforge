@@ -683,6 +683,13 @@ def test_coingecko_real_pipeline_objective_reverse_sentiment_produces_real_diver
         coingecko, "_fetch_url",
         lambda url, extra_headers=None: _fake_sentiment_json(30.0, 70.0),
     )
+    # 情緒投票 API 本身無時間戳欄位，`CoinGeckoSentimentSource.fetch()` 用
+    # `time.time()`（呼叫當下真實牆鐘時間）當 ts——固定住它，讓這筆 doc 跟
+    # 下面其餘 doc／`score(now=...)` 落在同一個測試時間軸（~1_700_000_000
+    # 附近），而非真實「現在」（#12 recency 全域防禦修正後，若不固定，這筆
+    # doc 相對 `now=1_700_000_200.0` 會變成「未來時間戳」，recency 降為中性
+    # 0.5，不再是舊版 bug 誤灌的滿分 1.0，會讓本測試的跨源訊號斷言失真）。
+    monkeypatch.setattr(coingecko.time, "time", lambda: 1_700_000_150.0)
     sentiment_docs = coingecko.CoinGeckoSentimentSource().fetch("", coin="ETH")
 
     # 佐證來源：與 CoinGecko 情緒投票同議題、方向相同，文字部分重疊（同
