@@ -69,7 +69,17 @@ _STATUS_CACHE_TTL_SECONDS = 30.0
 _status_cache_lock = threading.Lock()
 _status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
 
+# `/status` 連線探測用的保留 canary key。⚠️ `DynamoDBCache` 表結構 PK=`source_id`、
+# SK=`coin`，**SK 一律非空字串**（見 `ingestion/cache.py::DynamoDBCache` docstring）
+# ——空字串會讓 DynamoDB 直接丟 `ValidationException`（GetItem 對空字串 key
+# 屬性一律拒絕），跟「backend 連不上」是完全不同的兩件事，卻會被下面的
+# try/except 誤判成 disconnected。兩個欄位都必須給非空、不會撞到真實
+# source/coin 的保留值。
+_STATUS_PROBE_SOURCE = "__status_probe__"
+_STATUS_PROBE_COIN = "__status_probe__"
+
 _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta charset="utf-8">
+
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TrustForge — 加密市場分析 AI Agent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -479,8 +489,12 @@ def _render_status_page() -> str:
     # 只要呼叫本身沒丟例外就代表 backend 讀寫路徑通——不影響任何真實資料，
     # 更不會觸發任何連接器抓取）。故意繞過 `cache_get()` 的自動 fallback 語意，
     # 才能問到「primary backend 本身」通不通，而非被 fallback 悄悄接住。
+    # ⚠️ source/coin 兩個欄位都必須非空（見 `_STATUS_PROBE_SOURCE`/
+    # `_STATUS_PROBE_COIN` 定義處註解）：`DynamoDBCache` 的 SK 絕不接受空字串，
+    # 傳空字串會被 DynamoDB 當成參數錯誤直接拒絕（`ValidationException`），
+    # 跟「backend 真的連不上」是兩回事，不能混為一談誤報 disconnected。
     try:
-        cache_backend.get(cache_key("__status_probe__", ""))
+        cache_backend.get(cache_key(_STATUS_PROBE_SOURCE, _STATUS_PROBE_COIN))
         cache_color = "#3fb950"
         cache_text = f"connected（backend={e(type(cache_backend).__name__)}）"
     except Exception as exc:
