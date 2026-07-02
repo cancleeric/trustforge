@@ -434,6 +434,20 @@ def _coordination_template_flags(all_claims: list[Claim]) -> dict[str, list[str]
     不用「協同:」等指控字眼——單靠相似度分數不足以自動判定操縱，留給人工
     判讀。
 
+    **#16 修正（CEO 定案：相似簇 flag 須傳播到全體成員，不能只標 hub）**：
+    高於門檻的「相似邊」（不同來源、Jaccard ≥ 0.8）先用 union-find 併成
+    「相似簇」（一個連通分量），涉入來源數以**整個簇**計算，只要簇達
+    `_TEMPLATE_MIN_SOURCES` 就對**簇內每一個成員**都掛 flag，而不是各自只看
+    「自己」直接相鄰的來源數。修正前的缺陷（星狀相似拓樸）：hub 對 3 個
+    spoke 都高度相似（各自來源都不同），但 spoke 彼此互不相似（低於門檻）
+    ——hub 局部視角能看到 hub+3 spoke＝4 個來源、達標；每個 spoke 局部只看
+    得到「自己＋hub」＝2 個來源、未達 `_TEMPLATE_MIN_SOURCES`，導致同一個
+    貨真價實橫跨 4 個來源的相似簇裡，只有 hub 被標記、3 個 spoke 全部漏標，
+    判審看不到完整的簇。改用連通分量後，簇內每個成員都用**同一份、涵蓋
+    整簇的來源清單**顯示（讓判審看到整個簇的全貌），但 Jaccard 數值維持
+    **各自誠實回報**——每個成員仍顯示「自己」跟簇內某個直接相鄰成員的最高
+    Jaccard，不是隨便套用一個簇級平均值或別人的數字。
+
     防呆：
     - **只有 `_TEMPLATE_ELIGIBLE_KINDS`（social/sentiment）納入比對**——
       news/regulatory/price/price_live/onchain/hoyabit 全數跳過。理由同上：
@@ -445,34 +459,74 @@ def _coordination_template_flags(all_claims: list[Claim]) -> dict[str, list[str]
     """
     eligible = [c for c in all_claims if c.doc.kind in _TEMPLATE_ELIGIBLE_KINDS]
     tokens = {c.id: (_normalize(c.text) - DOMAIN_STOP) for c in eligible}
+    n = len(eligible)
 
-    flags: dict[str, list[str]] = {}
-    for c in eligible:
-        t1 = tokens[c.id]
+    # Union-find：把「兩兩 Jaccard ≥ 門檻」的邊併成相似簇，讓「涉入來源數」
+    # 以整簇計算，而非各自局部相鄰來源數（見上方 docstring #16 修正說明）。
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            # 無 rank/size 優化的最簡單合併規則（固定把較大 root 併入較小
+            # root）：資料規模與既有 O(n²) 比對同級，不需要額外優化，維持
+            # 邏輯最簡單、行為與輸入順序無關（確定性）。
+            if ra < rb:
+                parent[rb] = ra
+            else:
+                parent[ra] = rb
+
+    # 每個節點自己的「跟哪個其他來源最像、像多少」——維持既有語意：各自
+    # 誠實回報自己跟簇內某個直接相鄰成員的最高相似度，不套用簇級數字。
+    best_by_node: list[dict[str, float]] = [dict() for _ in range(n)]
+
+    for i in range(n):
+        t1 = tokens[eligible[i].id]
         if not t1:
             continue
-        # 同一其他來源可能有多筆命中，取每個「其他來源」的最高 Jaccard 供顯示。
-        best_by_source: dict[str, float] = {}
-        for other in eligible:
-            if other.id == c.id or other.doc.source == c.doc.source:
+        for j in range(i + 1, n):
+            if eligible[i].doc.source == eligible[j].doc.source:
                 continue
-            t2 = tokens[other.id]
+            t2 = tokens[eligible[j].id]
             if not t2:
                 continue
-            j = _jaccard(t1, t2)
-            if j >= _TEMPLATE_JACCARD_THRESHOLD and j > best_by_source.get(other.doc.source, 0.0):
-                best_by_source[other.doc.source] = j
+            j_score = _jaccard(t1, t2)
+            if j_score < _TEMPLATE_JACCARD_THRESHOLD:
+                continue
+            _union(i, j)
+            src_i, src_j = eligible[i].doc.source, eligible[j].doc.source
+            if j_score > best_by_node[i].get(src_j, 0.0):
+                best_by_node[i][src_j] = j_score
+            if j_score > best_by_node[j].get(src_i, 0.0):
+                best_by_node[j][src_i] = j_score
 
-        involved_sources = {c.doc.source, *best_by_source.keys()}
-        if len(involved_sources) < _TEMPLATE_MIN_SOURCES:
+    # 依 root 分組成相似簇，每簇算出涉入的所有來源（整簇範圍，非局部鄰居）。
+    components: dict[int, list[int]] = {}
+    for i in range(n):
+        components.setdefault(_find(i), []).append(i)
+
+    flags: dict[str, list[str]] = {}
+    for idxs in components.values():
+        sources = {eligible[i].doc.source for i in idxs}
+        if len(sources) < _TEMPLATE_MIN_SOURCES:
             continue
-
-        best_j = max(best_by_source.values())
-        source_list = ",".join(sorted(involved_sources))
-        flags.setdefault(c.id, []).append(
-            f"資訊:多源文字高度相似(來源{source_list};Jaccard {best_j:.2f})"
-            "—可能協同或聯播,供判讀"
-        )
+        source_list = ",".join(sorted(sources))
+        for i in idxs:
+            if not best_by_node[i]:
+                # 理論上不會發生：能進入 size ≥ _TEMPLATE_MIN_SOURCES 的簇，
+                # 代表該節點至少有一條滿足門檻的邊，best_by_node 必非空。
+                continue
+            best_j = max(best_by_node[i].values())
+            flags.setdefault(eligible[i].id, []).append(
+                f"資訊:多源文字高度相似(來源{source_list};Jaccard {best_j:.2f})"
+                "—可能協同或聯播,供判讀"
+            )
     return flags
 
 
@@ -622,6 +676,22 @@ def _coordination_signals(all_claims: list[Claim]) -> dict[str, list[str]]:
     倉促上線。`_coordination_burst_flags` / `_max_distinct_in_rolling_window`
     / `_distinct_text_count_in_range` 程式碼保留（不刪），供 #15 重新設計時
     直接沿用/參考，但呼叫端刻意不接。
+
+    **CTO 複查（#16 同批任務，重新 grep + 實跑驗證）**：前 3 個已修正的缺陷
+    （中位數自含候選、固定牆鐘分桶、baseline 未對齊）在目前程式碼中確認
+    已修好（見 `_max_distinct_in_rolling_window`／`_coordination_burst_flags`
+    docstring 內的修正說明與對應測試）。但第 4 個「只評估各源『最大窗』漏
+    掉後續同窗 baseline 偏低的小爆量」**仍未修**，並已用可執行的回歸測試
+    重新複現（`test_w3_b_max_absolute_window_can_miss_smaller_higher_ratio_
+    window`）：`_max_distinct_in_rolling_window` 只在「絕對數量最大」的單一
+    視窗上算 ratio，若某個絕對數量較小、但相對當下 baseline 更異常的視窗
+    沒被選中，就完全不會被評估到。要修好需要對每個來源在**所有**候選視窗
+    位置（而非單一絕對最大視窗）都評估 ratio、取全域最大 ratio——這是比
+    現有「先選單一視窗、後算 baseline」更大幅度的多來源同步滑動視窗演算法
+    重新設計，還需要額外的最小絕對數量下限（避免極小樣本數的極端比值誤
+    觸發）與對應的新一輪對抗測試，不是本次「改動最小」範圍內能完成、也
+    不宜為了上線而端出一個已知仍有缺口的假指標（見 #24：資訊訊號寧可少、
+    不可濫）。**維持停用**，本輪不啟用、不動 `_coordination_signals` 呼叫端。
 
     回傳 `{claim_id: [flag, ...]}`；未命中的 claim 不會出現在 dict 中，呼叫端
     用 `.get(claim.id, [])` 取用。
