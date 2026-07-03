@@ -471,10 +471,34 @@ class JsonCacheBackend(CacheBackend):
             return None
         return {"docs": docs, "fetched_at": float(fetched_at)}
 
-    def set(
+    @property
+    def _lock_path(self) -> Path:
+        """跟 `self.path` 同目錄的鎖檔（比照 `scheduler_log.py
+        ::JsonlSchedulerRunLog._latest_lock_path` 慣例，`fcntl.flock` 用）。
+
+        codex HIGH（PR #59 review 第二輪）：**所有**會整檔 read-modify-write
+        `self.path` 的 mutation（`set()`／`set_if_newer()`，未來若加
+        `delete()` 之類也一樣）都必須共用同一把鎖，缺一不可——先前只有
+        `set_if_newer()` 拿鎖，`set()` 沒拿，導致：`set_if_newer()` 在鎖內
+        load 出一份資料、判斷該覆寫、寫回；但另一個執行緒/行程同時呼叫的
+        普通 `set()` 若剛好在 `set_if_newer()` 寫入前就已經 load 了同一份
+        「舊」資料到自己的記憶體，`set_if_newer()` 寫完之後，`set()` 才拿
+        著手上那份舊 copy（不包含 `set_if_newer()` 剛寫進去的 key）整檔
+        覆寫回去——等於把 `set_if_newer()` 剛寫的 key 直接刪掉（lost
+        update，只是這次遺失的是「整把 key」而不是單一欄位）。`get()` 維持
+        不拿鎖：`os.replace()` 保證讀者只會看到「舊的完整檔」或「新的完整
+        檔」其中一種，不會讀到寫一半的殘檔，讀不需要鎖也不會有這個坑。"""
+        return self.path.with_name(self.path.name + ".lock")
+
+    def _set_unlocked(
         self, key: str, docs: list[dict[str, Any]], fetched_at: float,
         ttl_seconds: float | None = None,  # noqa: ARG002 — 本地 backend 不需要，見介面 docstring
     ) -> None:
+        """`set()` 的核心 read-modify-write 邏輯，**假設呼叫端已經持有
+        `_lock_path` 的 flock**——只給 `set()`/`set_if_newer()` 兩個公開方法
+        在各自的鎖臨界區內呼叫，避免 `set_if_newer()` 呼叫 `self.set()` 時
+        對同一把鎖再巢狀 `open()`/`flock()` 一次（語意上容易搞混，直接用
+        不拿鎖的內部版本更清楚，不依賴 flock 對同執行緒重入的細節）。"""
         data = self._load()
         data[key] = {"docs": docs, "fetched_at": fetched_at}
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -492,13 +516,21 @@ class JsonCacheBackend(CacheBackend):
                 pass
             raise
 
-    @property
-    def _lock_path(self) -> Path:
-        """跟 `self.path` 同目錄的鎖檔（比照 `scheduler_log.py
-        ::JsonlSchedulerRunLog._latest_lock_path` 慣例，`fcntl.flock` 用），
-        只用來序列化 `set_if_newer()` 的臨界區，不影響既有 `get()`/`set()`
-        的無鎖行為（那兩個本來就是單次原子 `os.replace`，不需要鎖）。"""
-        return self.path.with_name(self.path.name + ".lock")
+    def set(
+        self, key: str, docs: list[dict[str, Any]], fetched_at: float,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        """公開介面：**先拿 `_lock_path` 的 flock，再做 read-modify-write**
+        （見 `_lock_path` docstring 的 lost-update 說明）——跟
+        `set_if_newer()` 共用同一把鎖，兩者交錯呼叫時彼此序列化，任一方都
+        不會拿著對方寫入前的舊資料整檔覆寫回去。"""
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                self._set_unlocked(key, docs, fetched_at, ttl_seconds=ttl_seconds)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def set_if_newer(
         self, key: str, docs: list[dict[str, Any]], fetched_at: float,
@@ -508,7 +540,9 @@ class JsonCacheBackend(CacheBackend):
         覆寫」臨界區，跨行程/跨執行緒序列化——避免兩個重疊排程各自照著自己
         讀到的（尚未看到對方較新一筆的）舊狀態判斷「該覆寫」，把較新的值
         蓋回舊值（lost update，同 `JsonlSchedulerRunLog._update_pointers_locked`
-        docstring 說明的坑）。"""
+        docstring 說明的坑）。覆寫時呼叫 `_set_unlocked()`（**不是**
+        `self.set()`）——鎖已經在這個 `with` 區塊裡拿著，避免對同一把鎖再
+        巢狀 `open()`/`flock()` 一次。"""
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -516,7 +550,7 @@ class JsonCacheBackend(CacheBackend):
                 existing = self.get(key)
                 if existing is not None and existing["fetched_at"] >= fetched_at:
                     return False
-                self.set(key, docs, fetched_at, ttl_seconds=ttl_seconds)
+                self._set_unlocked(key, docs, fetched_at, ttl_seconds=ttl_seconds)
                 return True
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

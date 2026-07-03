@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -304,6 +305,67 @@ def test_history_interleaved_out_of_order_completion_does_not_corrupt_with_stale
     entry = cache_get(json_cache_backend, key)
     assert entry["docs"][0] == run_b_snap
     assert entry["fetched_at"] == run_b_fetched_at
+
+
+def test_concurrent_ordinary_set_and_set_if_newer_both_keys_survive(
+    json_cache_backend, monkeypatch,
+):
+    """codex HIGH（PR #59 review 第二輪）回歸測試：`JsonCacheBackend` 所有
+    會整檔 read-modify-write 的 mutation（普通 `set()` 跟 `set_if_newer()`）
+    必須共用同一把鎖，不能只鎖 `set_if_newer()`——否則普通 `set(key_x)` 可能
+    在 `set_if_newer(key_y)` 條件寫入前就 load 到舊檔（不含 `key_y`），
+    `set_if_newer` 寫完之後，`set(key_x)` 才拿著手上那份舊 copy 整檔覆寫
+    回去，等於把剛寫進去的 `key_y` 直接刪掉。
+
+    用 `_load()` 插一段 `time.sleep()` 製造夠寬的臨界區窗口：讓先開始的
+    `set(key_x)` 在（修好後）已經拿到鎖、`_load()` 讀完的當下睡一下，隨後
+    才啟動的 `set_if_newer(key_y)` 嘗試搶同一把鎖。修好前：`set()` 沒拿鎖，
+    `set_if_newer()` 會在這段睡眠期間整套（load→比較→寫）完整跑完並釋放
+    自己的鎖，`set(key_x)` 醒來後用舊 copy 整檔覆寫，`key_y` 就會消失。
+    修好後：兩者共用同一把鎖，`set_if_newer(key_y)` 必須排隊等 `set(key_x)`
+    整段臨界區（含睡眠）結束才能進入，不會插隊——`key_x`、`key_y` 兩把都要
+    活著。"""
+    original_load = json_cache_backend._load
+    first_call_seen = threading.Event()
+
+    def slow_load():
+        data = original_load()
+        if not first_call_seen.is_set():
+            first_call_seen.set()
+            time.sleep(0.2)  # 撐開「已讀到資料、還沒寫回」的臨界區窗口
+        return data
+
+    monkeypatch.setattr(json_cache_backend, "_load", slow_load)
+
+    key_x = cache_key("some_ordinary_source", "ETH")
+    key_y = trust_snapshot_history_key("BTC", "2026-07-01")
+    errors: list[BaseException] = []
+
+    def writer_x():
+        try:
+            json_cache_backend.set(key_x, [{"v": "x"}], fetched_at=1.0)
+        except BaseException as exc:  # noqa: BLE001 — 測試執行緒需要把例外帶回主執行緒斷言
+            errors.append(exc)
+
+    def writer_y():
+        first_call_seen.wait(timeout=5)  # 確保 writer_x 已經先進入臨界區
+        try:
+            json_cache_backend.set_if_newer(key_y, [{"v": "y"}], fetched_at=2.0)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t_x = threading.Thread(target=writer_x)
+    t_y = threading.Thread(target=writer_y)
+    t_x.start()
+    t_y.start()
+    t_x.join(timeout=5)
+    t_y.join(timeout=5)
+
+    assert not errors, f"背景執行緒發生例外：{errors}"
+    entry_x = cache_get(json_cache_backend, key_x)
+    entry_y = cache_get(json_cache_backend, key_y)
+    assert entry_x is not None and entry_x["docs"][0] == {"v": "x"}
+    assert entry_y is not None and entry_y["docs"][0] == {"v": "y"}
 
 
 # ---------------------------------------------------------------------------
