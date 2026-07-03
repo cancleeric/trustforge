@@ -61,6 +61,7 @@ Cache key 設計：`(source.name, coin)`，**不含 query**——原因：
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -269,6 +270,28 @@ TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS = stale_after_for(
 TRUST_SNAPSHOT_HISTORY_SOURCE = "__trust_snapshot_history__"
 TRUST_SNAPSHOT_HISTORY_TTL_SECONDS = 90 * 24 * 60 * 60  # 90 天
 
+# codex HIGH（PR #59 review，task #26 追加修正）：「最新一筆」（上面
+# `TRUST_SNAPSHOT_SOURCE`）跟「按日歷史」原本都是各自獨立、無條件的
+# `cache_set()`——若兩輪排程重疊（cron jitter/重試/DynamoDB 延遲），run A
+# （較舊 `fetched_at`）跟 run B（較新）交錯執行，可能 A 的 latest 先寫、B
+# 兩者都寫、但 **A 的 history 寫入最後才完成**，當日 key 就會被 A 的舊快照
+# 覆蓋回去，而 latest 卻是 B 的新快照——歷史序列被舊值污染，且每次寫都回報
+# 成功，是靜默資料損毀（違反 #24：歷史趨勢會顯示錯誤數值）。
+#
+# 修法：「按日歷史」key 改用**單調條件寫入**（`CacheBackend.set_if_newer()`／
+# `cache_set_if_newer()`）——寫入前先讀當日 key，只有「不存在」或「既有
+# `fetched_at` 嚴格小於 incoming `fetched_at`」才真的覆寫，較舊的 incoming
+# 直接跳過（不寫、不算失敗）。「最新一筆」`TRUST_SNAPSHOT_SOURCE` 維持原樣
+# 不變——它本來就是 last-write-wins 語意，沒有歷史正確性要求，見
+# `set_if_newer()`/`DynamoDBCache.set_if_newer()`/`JsonCacheBackend.set_if_newer()`
+# 三處實作與 `scripts/fetch_scheduler.py::run_snapshot()` 呼叫端。
+#
+# 比照 `scheduler_log.py::DynamoDBSchedulerRunLog._update_latest_pointer`／
+# `JsonlSchedulerRunLog._update_pointers_locked` 既有的 compare-and-set 慣例
+# （同一顆 repo 內已有先例，非本次新發明）：DynamoDB 用條件式 `PutItem`
+# （`ConditionExpression`）在伺服器端把「比較＋覆寫」合成單一原子操作；本地
+# JSON 用 `fcntl.flock` 包住整段「讀→比較→寫」臨界區，跨行程/跨執行緒序列化。
+
 
 def snapshot_history_date(fetched_at: float) -> str:
     """把 epoch 秒換算成歷史快照按日 key 用的 UTC 日期字串（`YYYY-MM-DD`）。
@@ -395,6 +418,28 @@ class CacheBackend(ABC):
         原生 `ttl` 屬性，作為背景自動清理的最佳努力優化（見該類別 docstring）。
         """
 
+    def set_if_newer(
+        self, key: str, docs: list[dict[str, Any]], fetched_at: float,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """單調條件寫入：只有這把 `key` 目前不存在、或既有 `fetched_at`
+        嚴格小於這次要寫入的 `fetched_at` 時，才真的覆寫；否則跳過（回傳
+        `False`，**不是**失敗——只是這次的值比已存在的舊，不該覆寫，見
+        codex HIGH「歷史快照 out-of-order 覆蓋」修正說明）。
+
+        ⚠️ 這是**未優化/非原子的參考實作**（get → 比較 → set，中間有
+        race window）——只給沒有專用原子 compare-and-set 能力的假想 backend
+        當退路用。兩個實際 backend（`JsonCacheBackend`／`DynamoDBCache`）都
+        **必須 override** 成真正原子的操作（`fcntl.flock` 包住臨界區／
+        DynamoDB 條件式 `PutItem`），不可讓兩個重疊排程的讀-比較-寫序列
+        彼此打斷（同 `scheduler_log.py` 兩個子類別各自 override `latest()`/
+        `recent()` 的既有教訓）。"""
+        existing = self.get(key, consistent_read=True)
+        if existing is not None and existing.get("fetched_at", float("-inf")) >= fetched_at:
+            return False
+        self.set(key, docs, fetched_at, ttl_seconds=ttl_seconds)
+        return True
+
 
 class JsonCacheBackend(CacheBackend):
     """單一 JSON 檔案，`{key: {"docs": [...], "fetched_at": ...}}`。
@@ -446,6 +491,35 @@ class JsonCacheBackend(CacheBackend):
             except OSError:
                 pass
             raise
+
+    @property
+    def _lock_path(self) -> Path:
+        """跟 `self.path` 同目錄的鎖檔（比照 `scheduler_log.py
+        ::JsonlSchedulerRunLog._latest_lock_path` 慣例，`fcntl.flock` 用），
+        只用來序列化 `set_if_newer()` 的臨界區，不影響既有 `get()`/`set()`
+        的無鎖行為（那兩個本來就是單次原子 `os.replace`，不需要鎖）。"""
+        return self.path.with_name(self.path.name + ".lock")
+
+    def set_if_newer(
+        self, key: str, docs: list[dict[str, Any]], fetched_at: float,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """`fcntl.flock` 包住整段「讀目前值 → 比較 `fetched_at` → （可能）
+        覆寫」臨界區，跨行程/跨執行緒序列化——避免兩個重疊排程各自照著自己
+        讀到的（尚未看到對方較新一筆的）舊狀態判斷「該覆寫」，把較新的值
+        蓋回舊值（lost update，同 `JsonlSchedulerRunLog._update_pointers_locked`
+        docstring 說明的坑）。"""
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                existing = self.get(key)
+                if existing is not None and existing["fetched_at"] >= fetched_at:
+                    return False
+                self.set(key, docs, fetched_at, ttl_seconds=ttl_seconds)
+                return True
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class DynamoDBCache(CacheBackend):
@@ -571,6 +645,42 @@ class DynamoDBCache(CacheBackend):
         }
         self._get_table().put_item(Item=item)
 
+    def set_if_newer(
+        self, key: str, docs: list[dict[str, Any]], fetched_at: float,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """用**條件式 `PutItem`**做原子 compare-and-set（完全比照
+        `scheduler_log.py::DynamoDBSchedulerRunLog._update_latest_pointer`
+        同一套慣例）：`ConditionExpression` 讓「這把 key 目前不存在，或其
+        `fetched_at` 嚴格小於這次要寫入的值」與「覆寫」在 DynamoDB 伺服器端
+        合成單一原子操作，取代「先 `GetItem` 比較、再無條件 `PutItem`」——
+        後者在兩個重疊排程交錯時，較舊的一筆可能照著自己更早讀到的舊狀態
+        把值蓋回去（見模組頂部 codex HIGH「歷史快照 out-of-order 覆蓋」
+        說明）。`ConditionalCheckFailedException` 代表已有更新（或相同時間
+        戳）的一筆贏得這場 race，視為「跳過」，不是錯誤，往上層一律不
+        raise。"""
+        from boto3.dynamodb.conditions import Attr
+        from botocore.exceptions import ClientError
+
+        source_id, coin = self._split_key(key)
+        window = ttl_seconds if ttl_seconds is not None else DEFAULT_STALE_AFTER_FALLBACK_SECONDS
+        fetched_at_dec = Decimal(str(fetched_at))
+        item = {
+            "source_id": source_id,
+            "coin": coin,
+            "docs_json": json.dumps(docs, ensure_ascii=False),
+            "fetched_at": fetched_at_dec,
+            "ttl": int(fetched_at + window),
+        }
+        condition = Attr("fetched_at").not_exists() | Attr("fetched_at").lt(fetched_at_dec)
+        try:
+            self._get_table().put_item(Item=item, ConditionExpression=condition)
+            return True
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+
 
 def get_cache_backend() -> CacheBackend:
     """依 env `CACHE_BACKEND`（`dynamodb`|`json`，**預設 `dynamodb`**）選
@@ -628,12 +738,18 @@ class CacheWriteResult(NamedTuple):
     - `backend`：實際成功寫入的 backend 類別名稱；全部失敗時為 primary
       backend 的類別名稱（供記錄用）。
     - `error`：primary backend 失敗時的例外訊息字串；primary 成功則為 `None`。
+    - `skipped`：`True` 表示這是 `cache_set_if_newer()` 的單調條件寫入判定
+      「incoming 比既有值舊（或一樣新），不該覆寫」而**主動跳過**——`ok`
+      仍為 `True`（這不是失敗，backend 正常運作，只是這次沒有真的寫入新
+      內容），呼叫端不應把它算進失敗清單。一般 `cache_set()` 一律
+      `skipped=False`（它沒有條件判斷，寫就是寫）。
     """
 
     ok: bool
     used_fallback: bool
     backend: str
     error: str | None = None
+    skipped: bool = False
 
 
 def cache_set(
@@ -675,6 +791,60 @@ def cache_set(
         )
     except Exception as exc2:
         print(f"[cache] WARNING: fallback JsonCacheBackend set 仍失敗：{exc2}", file=sys.stderr)
+        return CacheWriteResult(
+            ok=False, used_fallback=False, backend=backend_name,
+            error=f"{err}; fallback JsonCacheBackend 也失敗：{exc2}",
+        )
+
+
+def cache_set_if_newer(
+    backend: CacheBackend, key: str, docs: list[dict[str, Any]], fetched_at: float,
+    ttl_seconds: float | None = None,
+    allow_json_fallback: bool | None = None,
+) -> CacheWriteResult:
+    """`cache_set()` 的**單調條件寫入**版本（codex HIGH，PR #59 review，
+    task #26 追加修正）：只有這把 `key` 目前不存在、或既有 `fetched_at`
+    嚴格小於 incoming `fetched_at` 時才真的覆寫，否則跳過（`ok=True,
+    skipped=True`——不是失敗，只是這次的值比已存在的舊，見
+    `CacheBackend.set_if_newer()` 與模組頂部 `TRUST_SNAPSHOT_HISTORY_SOURCE`
+    附近的完整說明）。
+
+    專供「按日歷史快照」這類**需要歷史正確性**（值只能被更新的覆寫、不能
+    被更舊的值污染）的 key 使用；一般「latest 覆寫」語意（如
+    `TRUST_SNAPSHOT_SOURCE`）仍應繼續用普通 `cache_set()`，那裡本來就是
+    last-write-wins、沒有單調要求，不需要多付一次讀的成本。
+
+    `allow_json_fallback` 語意與 `cache_set()` 完全一致（見該函式
+    docstring）——**唯一差別**：`skipped` 這個結果只描述「primary/成功
+    fallback 的那個 backend 自己判斷的單調結果」，不代表兩個 backend 的
+    值彼此同步（本來就是各自獨立儲存，`cache_set()` 的既有限制）。
+    """
+    backend_name = type(backend).__name__
+    try:
+        wrote = backend.set_if_newer(key, docs, fetched_at, ttl_seconds=ttl_seconds)
+        return CacheWriteResult(
+            ok=True, used_fallback=False, backend=backend_name, error=None, skipped=not wrote,
+        )
+    except Exception as exc:
+        err = str(exc)
+        print(f"[cache] WARNING: set_if_newer 失敗（backend={backend_name}）：{exc}",
+              file=sys.stderr)
+
+    if isinstance(backend, JsonCacheBackend):
+        # 同一顆 JsonCacheBackend 剛失敗，換個新實例打同路徑必再失敗，不重試
+        return CacheWriteResult(ok=False, used_fallback=False, backend=backend_name, error=err)
+
+    if not _json_fallback_enabled(allow_json_fallback):
+        return CacheWriteResult(ok=False, used_fallback=False, backend=backend_name, error=err)
+
+    try:
+        wrote = JsonCacheBackend().set_if_newer(key, docs, fetched_at, ttl_seconds=ttl_seconds)
+        return CacheWriteResult(
+            ok=True, used_fallback=True, backend="JsonCacheBackend", error=err, skipped=not wrote,
+        )
+    except Exception as exc2:
+        print(f"[cache] WARNING: fallback JsonCacheBackend set_if_newer 仍失敗：{exc2}",
+              file=sys.stderr)
         return CacheWriteResult(
             ok=False, used_fallback=False, backend=backend_name,
             error=f"{err}; fallback JsonCacheBackend 也失敗：{exc2}",

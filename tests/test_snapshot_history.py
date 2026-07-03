@@ -19,6 +19,7 @@ from trustforge.ingestion.cache import (
     TRUST_SNAPSHOT_SOURCE,
     cache_get,
     cache_key,
+    cache_set_if_newer,
     get_trust_history,
     snapshot_history_date,
     trust_snapshot_history_key,
@@ -207,6 +208,102 @@ def test_snapshot_history_key_uses_utc_date_not_local_time():
     import datetime as _dt
     ts = _dt.datetime(2026, 7, 1, 23, 30, 0, tzinfo=_dt.timezone.utc).timestamp()
     assert snapshot_history_date(ts) == "2026-07-01"
+
+
+# ---------------------------------------------------------------------------
+# codex HIGH（PR #59 review）：按日歷史單調條件寫入（`cache_set_if_newer()`）
+# ---------------------------------------------------------------------------
+
+def test_history_write_skipped_when_incoming_older_than_existing(json_cache_backend):
+    """既有值的 `fetched_at` 較新時，incoming（較舊）應被跳過——不寫入、
+    當日 key 內容維持既有值不變，且 `result.ok=True`、`result.skipped=True`
+    （這不是失敗）。"""
+    key = trust_snapshot_history_key("BTC", "2026-07-01")
+    newer_snap = {"coin": "BTC", "trust_score": 0.9}
+    older_snap = {"coin": "BTC", "trust_score": 0.1}
+
+    result_first = cache_set_if_newer(
+        json_cache_backend, key, [newer_snap], fetched_at=2000.0,
+        ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+    )
+    assert result_first.ok is True
+    assert result_first.skipped is False
+
+    result_second = cache_set_if_newer(
+        json_cache_backend, key, [older_snap], fetched_at=1000.0,
+        ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+    )
+    assert result_second.ok is True
+    assert result_second.skipped is True
+
+    entry = cache_get(json_cache_backend, key)
+    assert entry["docs"][0] == newer_snap
+    assert entry["fetched_at"] == 2000.0
+
+
+def test_history_write_upserts_when_incoming_newer_than_existing(json_cache_backend):
+    """正常情況：incoming 比既有值新 → 正常 upsert（覆寫），`skipped=False`。"""
+    key = trust_snapshot_history_key("BTC", "2026-07-01")
+    older_snap = {"coin": "BTC", "trust_score": 0.1}
+    newer_snap = {"coin": "BTC", "trust_score": 0.9}
+
+    result_first = cache_set_if_newer(
+        json_cache_backend, key, [older_snap], fetched_at=1000.0,
+        ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+    )
+    assert result_first.ok is True
+    assert result_first.skipped is False
+
+    result_second = cache_set_if_newer(
+        json_cache_backend, key, [newer_snap], fetched_at=2000.0,
+        ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+    )
+    assert result_second.ok is True
+    assert result_second.skipped is False
+
+    entry = cache_get(json_cache_backend, key)
+    assert entry["docs"][0] == newer_snap
+    assert entry["fetched_at"] == 2000.0
+
+
+def test_history_interleaved_out_of_order_completion_does_not_corrupt_with_stale_value(
+    json_cache_backend,
+):
+    """回歸測試（codex HIGH 根因場景）：模擬 run A（較舊 `fetched_at`）跟
+    run B（較新）兩輪排程重疊，而 **A 的歷史寫入在 B 之後才完成**（排程
+    重疊/重試/DynamoDB 延遲）。修正前：兩者都是無條件 `cache_set()`，A 最後
+    完成就會把當日 key 蓋回 A 的舊快照，即使 B 的值更新、latest 也已經是
+    B——歷史序列被舊值靜默污染。修正後：即使 A 的寫入在時間序上「最後才
+    執行」，`cache_set_if_newer()` 仍會判斷 A 的 `fetched_at` 比當日既有
+    （B 寫入的）值舊而跳過，當日 key 最終必須是 B（較新 `fetched_at`）的
+    快照，不能被 A 覆蓋回去。"""
+    key = trust_snapshot_history_key("BTC", "2026-07-01")
+    run_a_snap = {"coin": "BTC", "trust_score": 0.2, "run": "A-stale"}
+    run_b_snap = {"coin": "BTC", "trust_score": 0.8, "run": "B-fresh"}
+    run_a_fetched_at = 1_000.0  # 較舊
+    run_b_fetched_at = 5_000.0  # 較新
+
+    # B（較新 fetched_at）先完成寫入。
+    result_b = cache_set_if_newer(
+        json_cache_backend, key, [run_b_snap], fetched_at=run_b_fetched_at,
+        ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+    )
+    assert result_b.ok is True
+    assert result_b.skipped is False
+
+    # A（較舊 fetched_at）的寫入「最後才完成」——這就是 codex 抓到的
+    # out-of-order 場景：時間序上 A 在 B 之後執行，但其資料時間戳其實較舊。
+    result_a = cache_set_if_newer(
+        json_cache_backend, key, [run_a_snap], fetched_at=run_a_fetched_at,
+        ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+    )
+    assert result_a.ok is True
+    assert result_a.skipped is True  # 主動跳過，不是失敗
+
+    # 斷言：當日 key 最終必須是 B（新）的快照，不被 A（舊）覆蓋。
+    entry = cache_get(json_cache_backend, key)
+    assert entry["docs"][0] == run_b_snap
+    assert entry["fetched_at"] == run_b_fetched_at
 
 
 # ---------------------------------------------------------------------------

@@ -90,6 +90,7 @@ from trustforge.ingestion.cache import (  # noqa: E402
     cache_get,
     cache_key,
     cache_set,
+    cache_set_if_newer,
     doc_to_dict,
     get_cache_backend,
     snapshot_history_date,
@@ -786,6 +787,14 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     圖／`get_trust_history()` 讀取。歷史寫入失敗獨立計入
     `failures`（`"{coin}:history"`），不影響已成功寫入的「最新一筆」與
     總覽 blob（那條路徑本來就穩定運作，不該被歷史寫入這個新增功能拖累）。
+
+    codex HIGH（PR #59 review）：歷史 key 改用 `cache_set_if_newer()`（單調
+    條件寫入）而非普通 `cache_set()`——兩個重疊排程交錯時，較舊一筆的歷史
+    寫入若最後才完成，只要當日 key 既有的 `fetched_at` 已經比它新，就會被
+    直接跳過（不覆寫），避免歷史序列被舊值污染。跳過（`result.skipped`）
+    是正常情況、不計入 `failures`；只有 backend 真的寫入失敗
+    （`result.ok=False`）才計入。「最新一筆」`TRUST_SNAPSHOT_SOURCE` 維持
+    原樣無條件覆寫，見 `cache.py` 模組頂部完整說明。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -835,7 +844,12 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
         # 跨日才會因日期不同而各自成一筆，天然累積成序列。用跟「最新一筆」
         # 同一個 `now`，避免同一輪內兩次 time.time() 剛好跨過 UTC 午夜造成
         # 「同一次真呼叫，兩把 key 寫進不同日期」的邊界亂跳。
-        history_result = cache_set(
+        #
+        # codex HIGH（PR #59 review）：改用 `cache_set_if_newer()` 單調條件
+        # 寫入——兩個重疊排程交錯時，較舊一筆的歷史寫入若最後才完成，只要
+        # 當日 key 既有的 `fetched_at` 已經比 `now` 新，就直接跳過，不會把
+        # 較新的快照蓋回較舊的值（見 `cache.py` 模組頂部完整說明）。
+        history_result = cache_set_if_newer(
             backend, trust_snapshot_history_key(coin, snapshot_history_date(now)),
             [snap], fetched_at=now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
         )
@@ -844,6 +858,12 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
                   f"（backend={history_result.backend}）：{history_result.error}",
                   file=sys.stderr)
             failures.append(f"{coin}:history")
+        elif history_result.skipped:
+            # 單調條件寫入判斷 incoming 比當日既有值舊（或一樣新）而主動
+            # 跳過——這是正確行為（避免覆蓋較新的值），不是失敗，不計入
+            # failures，只印一行資訊性訊息供除錯追蹤。
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照跳過寫入"
+                  f"（當日已有較新或同時的快照，fetched_at={now:.0f} 未覆寫）")
         else:
             _warn_if_fallback_used(f"--snapshot {coin} history", history_result)
 
