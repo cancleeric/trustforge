@@ -96,6 +96,7 @@ from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
+from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
 from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
@@ -642,9 +643,16 @@ def _render_overview_html(snapshots: list[dict]) -> str:
             'border-radius:8px;padding:.6rem .8rem;background:var(--tf-inset)">'
         )
         tag_close = '</a>' if href is not None else '</div>'
+        # 商業級視覺（Nansen/Messari 級）：幣別旁附官方 LOGO（inline SVG，
+        # simple-icons CC0，見 trustforge.brand_logos 模組 docstring）。
+        # `coin_raw` 一律經 COIN_POOL 白名單產生（見本函式頂部迴圈），非
+        # HTTP request 直接控制的字串；`coin_logo_html` 內部仍只認白名單
+        # dict，查無對應幣種回空字串，不會印出破圖或錯誤幣的 LOGO。
+        logo = coin_logo_html(coin_raw)
+        logo_html = f'{logo} ' if logo else ""
         cards.append(
             tag_open
-            + f'<div style="font-weight:700">{coin}</div>'
+            + f'<div style="font-weight:700">{logo_html}{coin}</div>'
             f'<div style="font-size:.85rem;color:var(--tf-muted)">信任分 {trust:.2f} · {direction}</div>'
             f'<div style="font-size:.75rem;color:var(--tf-muted2)">'
             f'校準信心 {calibrated:.2f} · {decision_state}</div>'
