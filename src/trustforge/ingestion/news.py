@@ -5,6 +5,15 @@
   - Decrypt RSS   https://decrypt.co/feed                          (公開，免 key)
   - CryptoPanic   https://cryptopanic.com/api/v1/posts/            (選用，需 env CRYPTOPANIC_TOKEN)
 
+資料密度第一批（#24，2026-07，見 docs/PLAN-data-density.md，gray 已逐一 curl
+驗證 200 OK）——全部 keyless、公開 RSS，複用同一套 `_parse_rss`：
+  - CoinTelegraph    https://cointelegraph.com/rss
+  - Bitcoin Magazine https://bitcoinmagazine.com/feed
+  - CryptoSlate      https://cryptoslate.com/feed/
+  - Bitcoinist       https://bitcoinist.com/feed/
+  - NewsBTC          https://www.newsbtc.com/feed/
+  - The Daily Hodl   https://dailyhodl.com/feed/
+
 生產事故修復（coindesk 全 308 Permanent Redirect）：CoinDesk 把舊網址
 `.../rss/`（末尾帶斜線）永久重導到 `.../rss`（無斜線），同網域、只差路徑
 末尾斜線。已直接改用新網址（見下方 `CoinDeskRSSSource._URL`），不必再依賴
@@ -154,6 +163,72 @@ class DecryptRSSSource(Source):
         return _parse_rss(raw, self.name, query, coin)
 
 
+class CoinTelegraphRSSSource(Source):
+    """CoinTelegraph RSS，公開無 key。"""
+    kind = "news"
+    name = "cointelegraph"
+    _URL = "https://cointelegraph.com/rss"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class BitcoinMagazineRSSSource(Source):
+    """Bitcoin Magazine RSS，公開無 key。"""
+    kind = "news"
+    name = "bitcoinmagazine"
+    _URL = "https://bitcoinmagazine.com/feed"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class CryptoSlateRSSSource(Source):
+    """CryptoSlate RSS，公開無 key。"""
+    kind = "news"
+    name = "cryptoslate"
+    _URL = "https://cryptoslate.com/feed/"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class BitcoinistRSSSource(Source):
+    """Bitcoinist RSS，公開無 key。"""
+    kind = "news"
+    name = "bitcoinist"
+    _URL = "https://bitcoinist.com/feed/"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class NewsBTCRSSSource(Source):
+    """NewsBTC RSS，公開無 key。"""
+    kind = "news"
+    name = "newsbtc"
+    _URL = "https://www.newsbtc.com/feed/"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class DailyHodlRSSSource(Source):
+    """The Daily Hodl RSS，公開無 key。"""
+    kind = "news"
+    name = "dailyhodl"
+    _URL = "https://dailyhodl.com/feed/"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
 class CryptoPanicSource(Source):
     """CryptoPanic API（需 env CRYPTOPANIC_TOKEN；無 token 時安靜回空）。"""
     kind = "news"
@@ -190,7 +265,16 @@ class CryptoPanicSource(Source):
 
 def build_news_sources() -> list[Source]:
     """回傳所有已啟用的新聞連接器（CryptoPanic 僅在 token 存在時加入）。"""
-    sources: list[Source] = [CoinDeskRSSSource(), DecryptRSSSource()]
+    sources: list[Source] = [
+        CoinDeskRSSSource(),
+        DecryptRSSSource(),
+        CoinTelegraphRSSSource(),
+        BitcoinMagazineRSSSource(),
+        CryptoSlateRSSSource(),
+        BitcoinistRSSSource(),
+        NewsBTCRSSSource(),
+        DailyHodlRSSSource(),
+    ]
     if os.getenv("CRYPTOPANIC_TOKEN"):
         sources.append(CryptoPanicSource())
     return sources

@@ -13,7 +13,8 @@
     被誤顯示成「正在花錢」。
 
 來源名稱（`source`）對應 `src/trustforge/ingestion/*.py` 各 `Source.name`：
-  news.py:      coindesk, decrypt, cryptopanic
+  news.py:      coindesk, decrypt, cryptopanic, cointelegraph, bitcoinmagazine,
+                cryptoslate, bitcoinist, newsbtc, dailyhodl
   onchain.py:   alternative-me-fng（coin-agnostic）, blockchain-info
   regulatory.py: sec-gov（coin-agnostic）
   social.py:    reddit-cryptocurrency, reddit-bitcoin
@@ -111,6 +112,26 @@ CONNECTOR_COST_MODEL: dict[str, ConnectorCostModel] = {
     "cryptopanic": _free_connector(
         "cryptopanic",
         "公開端點，未申請／未使用付費 developer API key，無官方公開量化硬配額",
+    ),
+    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS，
+    # 全部 keyless 公開 RSS feed，比照 coindesk/decrypt 同款登記方式。
+    "cointelegraph": _free_connector(
+        "cointelegraph", "公開 RSS feed（https://cointelegraph.com/rss），無官方公開量化硬配額",
+    ),
+    "bitcoinmagazine": _free_connector(
+        "bitcoinmagazine", "公開 RSS feed（https://bitcoinmagazine.com/feed），無官方公開量化硬配額",
+    ),
+    "cryptoslate": _free_connector(
+        "cryptoslate", "公開 RSS feed（https://cryptoslate.com/feed/），無官方公開量化硬配額",
+    ),
+    "bitcoinist": _free_connector(
+        "bitcoinist", "公開 RSS feed（https://bitcoinist.com/feed/），無官方公開量化硬配額",
+    ),
+    "newsbtc": _free_connector(
+        "newsbtc", "公開 RSS feed（https://www.newsbtc.com/feed/），無官方公開量化硬配額",
+    ),
+    "dailyhodl": _free_connector(
+        "dailyhodl", "公開 RSS feed（https://dailyhodl.com/feed/），無官方公開量化硬配額",
     ),
     "alternative-me-fng": _free_connector(
         "alternative-me-fng",
