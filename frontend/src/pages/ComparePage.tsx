@@ -29,7 +29,35 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
   const [coin, setCoin] = useState(initial.coin)
   const [coin2, setCoin2] = useState(initial.coin2)
   const [q, setQ] = useState(initial.q)
+  // 使用者是否手動編輯過問題欄——一旦編輯過，換幣就不再覆蓋掉他打的字；
+  // 這個旗標會在下方「URL 變了就整個表單重新對齊」的 effect 裡重置，
+  // 代表「送出/瀏覽器上下頁」都算開啟一輪新的表單狀態。
+  const [queryEdited, setQueryEdited] = useState(false)
   const sameCoin = coin === coin2
+
+  // 瀏覽器上下頁（或外部導覽帶新的 coin/coin2/q 進來）：URL 是唯一事實來源，
+  // 把整個表單（含 queryEdited 旗標）重新對齊，避免可見控件跟網址/報告脫節。
+  useEffect(() => {
+    setCoin(initial.coin)
+    setCoin2(initial.coin2)
+    setQ(initial.q)
+    setQueryEdited(false)
+  }, [initial.coin, initial.coin2, initial.q])
+
+  function handleCoinChange(next: string) {
+    setCoin(next)
+    if (!queryEdited) setQ(defaultQuery(next, coin2))
+  }
+
+  function handleCoin2Change(next: string) {
+    setCoin2(next)
+    if (!queryEdited) setQ(defaultQuery(coin, next))
+  }
+
+  function handleQChange(next: string) {
+    setQ(next)
+    setQueryEdited(true)
+  }
 
   return (
     <form
@@ -48,7 +76,7 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
           <select
             id="cmp-coin"
             value={coin}
-            onChange={(e) => setCoin(e.target.value)}
+            onChange={(e) => handleCoinChange(e.target.value)}
             className="w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
           >
             {COIN_POOL.map((c) => (
@@ -65,7 +93,7 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
           <select
             id="cmp-coin2"
             value={coin2}
-            onChange={(e) => setCoin2(e.target.value)}
+            onChange={(e) => handleCoin2Change(e.target.value)}
             className="w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
           >
             {COIN_POOL.map((c) => (
@@ -88,7 +116,7 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
         <textarea
           id="cmp-q"
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => handleQChange(e.target.value)}
           rows={3}
           className="w-full resize-none rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
         />

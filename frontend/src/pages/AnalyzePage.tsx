@@ -8,10 +8,14 @@ import QueryConsole, { type QueryValues } from '../components/QueryConsole'
 import AnalysisReportView from '../components/AnalysisReportView'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 
+function defaultQuery(coin: string): string {
+  return `分析${coin}近期市場狀況，整合多源資料`
+}
+
 function paramsFromSearch(sp: URLSearchParams): AnalyzeParams {
   const coin = sp.get('coin') || COIN_POOL[0]
   const type = (sp.get('type') as AnalyzeParams['type']) || 'multi_source'
-  const q = sp.get('q') || `分析${coin}近期市場狀況，整合多源資料`
+  const q = sp.get('q') || defaultQuery(coin)
   const sample = sp.get('sample') === '1' ? '1' : undefined
   return { coin, type, q, sample }
 }
