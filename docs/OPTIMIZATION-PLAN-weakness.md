@@ -75,23 +75,29 @@ blockchair），需要獨立設計（含「相同 ts 算不算異常」「廣播
 
 ## Follow-up（技術債，非本輪修復，**歷史趨勢 UI 建置前完成**）｜跨快取 key 原子發布（PR #59 每日累積歷史快照）
 
-**背景**：PR #59（task #26，`feat/snapshot-history` 分支）codex 複審 4 輪逐步把
+**背景**：PR #59（task #26，`feat/snapshot-history` 分支）codex 複審 5 輪逐步把
 `scripts/fetch_scheduler.py::run_snapshot()` 的三個持久化表示（「最新一筆」
 `TRUST_SNAPSHOT_SOURCE`、「按日歷史」`TRUST_SNAPSHOT_HISTORY_SOURCE`、「總覽
 blob」`TRUST_OVERVIEW_SOURCE`）都改成 `cache_set_if_newer()` monotonic 條件
 寫入，且共用同一個 `run_now = time.time()`，讓同一輪三個 CAS 決策彼此一致；
-第 4 輪再做 **per-coin all-or-nothing 收窄**——以每一幣「latest」這次寫入
-的結果（skipped/error/成功）決定該幣的 history 是否寫入、是否納入總覽
-候選，把「latest 新、history 舊」的同一幣內部矛盾收斂到最小。
+第 4 輪做 per-coin all-or-nothing 收窄；第 5 輪進一步發現並修正**寫入序
+的方向性問題**——原本先寫 latest、才寫 history，若程序剛好在這兩步之間
+被砍斷、且下一輪排程跨過 UTC 日界，**前一天的 history 會永久遺失、不可
+復原**（history 是不可復原的 point-in-time 累積資料，不像 latest 只是
+「暫時舊」、下一輪就能自癒）。第 5 輪改成**先寫 history（不可復原、優先
+保住）、成功後才寫 latest/overview（last-write-wins、可自癒）**，gating
+也相應改成以 history 這次的 CAS 結果為準。
 
-**未做（本節追蹤）**：latest 跟 history 這兩個獨立的 `cache_set_if_newer()`
-呼叫本身仍不是同一個原子操作。極罕見情況下（latest CAS 剛好成功、程序在
-寫 history 之前被中斷/crash），會留下「latest 已經是新的，history 卻還
-停在舊的」暫態矛盾——transient、下一輪排程會自然覆蓋回一致狀態
-（self-healing）。真正的跨 key 原子需要 DynamoDB `TransactWriteItems`
-（全項單調條件包成同一個 transaction）或 immutable generation + 原子切換
-manifest 指標（讀端只讀已發布的 generation），屬於架構層級改動，需要獨立
-設計 review，不適合在單一 PR 順手塞。
+**未做（本節追蹤）**：即使重排了寫入序，history 跟 latest 這兩個獨立的
+`cache_set_if_newer()` 呼叫本身仍不是同一個原子操作。極罕見情況下
+（history CAS 剛好成功、程序在寫 latest 之前被中斷/crash），會留下
+「history 已經是新的，latest 卻還停在舊的」暫態矛盾——這是 transient、
+下一輪排程會自然覆蓋回一致狀態的自癒暫態（不再有第 5 輪修正前「永久遺失
+一天歷史」的不可復原風險，只剩「latest 暫時落後」這種可自癒的殘餘視窗）。
+真正的跨 key 原子需要 DynamoDB `TransactWriteItems`（全項單調條件包成
+同一個 transaction）或 immutable generation + 原子切換 manifest 指標
+（讀端只讀已發布的 generation），屬於架構層級改動，需要獨立設計 review，
+不適合在單一 PR 順手塞。
 
 **現況風險評估**：目前完全沒有歷史趨勢 reader UI，沒有人讀 history 資料，
 暫態矛盾影響極小，**本輪不需要修**。**歷史趨勢 UI 建置前必須完成**——一旦

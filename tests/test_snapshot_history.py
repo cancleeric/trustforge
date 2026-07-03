@@ -427,47 +427,48 @@ def test_full_run_snapshot_interleaved_out_of_order_run_keeps_all_three_represen
 
 
 # ---------------------------------------------------------------------------
-# codex HIGH（PR #59 review 第四輪）：per-coin all-or-nothing 收窄——latest
-# 這一幣的寫入結果（skipped/error/成功）決定 history／overview 是否處理
-# 這一幣，避免單幣內部矛盾。
+# codex HIGH（PR #59 review 第四／五輪）：per-coin all-or-nothing 收窄——
+# 第五輪起改成先寫 history、再寫 latest/overview，gating 也改以 history
+# 這次的 CAS 結果為準（history 才是不可復原、需要優先保住的那個）。
 # ---------------------------------------------------------------------------
 
-def test_latest_skipped_for_one_coin_excludes_it_from_history_and_overview(
+def test_history_skipped_for_one_coin_excludes_it_from_latest_and_overview(
     monkeypatch, json_cache_backend,
 ):
-    """混合批次（BTC + ETH）：BTC 的 latest 因為已有更新的並行排程結果而
-    單調跳過（模擬另一輪較新的排程已經處理過 BTC），ETH 正常成功。
+    """混合批次（BTC + ETH）：BTC 當天的 history 因為已有更新的並行排程
+    結果而單調跳過（模擬另一輪較新的排程已經處理過 BTC 這一天），ETH 正常
+    成功。
 
-    per-coin gating 斷言：BTC 這一幣的 history 完全不寫（不留一筆比 latest
-    目前實際內容更新、卻沒被 latest 接受的矛盾資料）、總覽 blob 也不含
-    BTC 這輪（本該被跳過）的候選值；ETH 三表示都正常反映這輪新值。整體
-    回傳碼仍是 0——這是健康的正常情況，不是失敗（見 `run_snapshot()`
-    `skipped_coins` 的說明）。
+    per-coin gating 斷言（第五輪：以 history 結果為準）：BTC 這一幣的
+    latest 完全不寫、總覽 blob 也不含 BTC 這輪（本該被跳過）的候選值；
+    ETH 三表示都正常反映這輪新值。整體回傳碼仍是 0——這是健康的正常
+    情況，不是失敗（見 `run_snapshot()` `skipped_coins` 的說明）。
     """
     day = "2026-07-01"
     stale_ts = _utc_ts(f"{day}T08:00:00")
     fresh_ts = _utc_ts(f"{day}T20:00:00")
 
-    # 預先幫 BTC 的「最新一筆」種一筆已經比這輪要寫的還新的既有值——
-    # 模擬「另一輪更新的排程已經處理過 BTC」。
-    btc_latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
-    pre_existing_btc_snap = {
+    # 預先幫 BTC 當天的 history 種一筆已經比這輪要寫的還新的既有值——
+    # 模擬「另一輪更新的排程已經處理過 BTC 這一天」。
+    btc_history_key = trust_snapshot_history_key("BTC", day)
+    pre_existing_btc_history = {
         "coin": "BTC", "trust_score": 0.99, "direction": "既有勝出值",
         "calibrated_confidence": 0.9, "decision_state": "normal",
         "generated_at": "2026-07-01T19:00:00Z",
     }
-    json_cache_backend.set(btc_latest_key, [pre_existing_btc_snap], fetched_at=fresh_ts)
+    json_cache_backend.set(btc_history_key, [pre_existing_btc_history], fetched_at=fresh_ts)
 
     monkeypatch.setattr(time, "time", lambda: stale_ts)
     _patch_pipeline_run(monkeypatch, confidence=0.3)
     assert fetch_scheduler.main(["--snapshot", "--coin", "BTC", "--coin", "ETH"]) == 0
 
-    # BTC：latest 維持既有（較新）值不被覆寫，history 完全沒被建立。
-    btc_latest = cache_get(json_cache_backend, btc_latest_key)
-    assert btc_latest is not None
-    assert btc_latest["docs"][0] == pre_existing_btc_snap
-    btc_history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day))
-    assert btc_history is None
+    # BTC：history 維持既有（較新）值不被覆寫，latest 完全沒被建立
+    # （這一幣本輪被跳過，不留一筆跟 history 矛盾的 latest）。
+    btc_history = cache_get(json_cache_backend, btc_history_key)
+    assert btc_history is not None
+    assert btc_history["docs"][0] == pre_existing_btc_history
+    btc_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"))
+    assert btc_latest is None
 
     # ETH：不受 BTC 影響，三表示正常寫入這輪新值。
     eth_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "ETH"))
@@ -484,21 +485,19 @@ def test_latest_skipped_for_one_coin_excludes_it_from_history_and_overview(
     overview_html = overview["docs"][0]["html"]
     assert "ETH" in overview_html
     assert "既有勝出值" not in overview_html
-    # 只有 ETH 一張卡——BTC 被跳過的這輪候選值完全沒被納入（用卡片數量
-    # 斷言而非比對信任分數字，因為測試用同一組假 confidence，兩幣本輪
-    # 的分數本來就一樣，不能拿數字有沒有出現當判準）。
     assert overview_html.count("tf-overview-card") == 1
 
 
-def test_latest_error_for_one_coin_excludes_it_from_history_and_overview_and_counts_failure(
+def test_history_error_for_one_coin_excludes_it_from_latest_and_overview_and_counts_failure(
     monkeypatch, json_cache_backend,
 ):
-    """混合批次（BTC + ETH）：BTC 的 latest 寫入模擬 backend 端真的失敗
+    """混合批次（BTC + ETH）：BTC 的 history 寫入模擬 backend 端真的失敗
     （`result.ok=False`，不是單調跳過）。
 
-    per-coin gating 斷言：BTC 不寫 history、不進總覽候選、且真的計入
-    `failures`（整體回傳碼非 0，這才是真失敗，需要被監控看到）；ETH 不受
-    影響，正常寫三表示。
+    per-coin gating 斷言：BTC 不寫 latest、不進總覽候選、且真的計入
+    `failures`（整體回傳碼非 0，這才是真失敗，需要被監控看到）——不能讓
+    history 失敗但 latest/overview 還是幫這一幣寫了；ETH 不受影響，正常
+    寫三表示。
     """
     day = "2026-07-01"
     ts = _utc_ts(f"{day}T12:00:00")
@@ -506,10 +505,10 @@ def test_latest_error_for_one_coin_excludes_it_from_history_and_overview_and_cou
     _patch_pipeline_run(monkeypatch, confidence=0.5)
 
     real_cache_set_if_newer = fetch_scheduler.cache_set_if_newer
-    btc_latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
+    btc_history_key = trust_snapshot_history_key("BTC", day)
 
     def flaky_cache_set_if_newer(backend, key, docs, fetched_at, ttl_seconds=None):
-        if key == btc_latest_key:
+        if key == btc_history_key:
             return CacheWriteResult(
                 ok=False, used_fallback=False, backend="JsonCacheBackend",
                 error="模擬 backend 寫入失敗（測試注入，非單調跳過）",
@@ -523,10 +522,10 @@ def test_latest_error_for_one_coin_excludes_it_from_history_and_overview_and_cou
     # BTC 真失敗，本輪不是全乾淨，回傳碼必須是 1 才能被監控看到。
     assert fetch_scheduler.main(["--snapshot", "--coin", "BTC", "--coin", "ETH"]) == 1
 
-    btc_latest = cache_get(json_cache_backend, btc_latest_key)
-    assert btc_latest is None
-    btc_history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day))
+    btc_history = cache_get(json_cache_backend, btc_history_key)
     assert btc_history is None
+    btc_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"))
+    assert btc_latest is None
 
     eth_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "ETH"))
     eth_history = cache_get(json_cache_backend, trust_snapshot_history_key("ETH", day))
@@ -538,6 +537,125 @@ def test_latest_error_for_one_coin_excludes_it_from_history_and_overview_and_cou
     )
     overview_html = overview["docs"][0]["html"]
     assert "ETH" in overview_html
+
+
+def test_crash_after_history_before_latest_keeps_history_durable(
+    monkeypatch, json_cache_backend,
+):
+    """codex HIGH（PR #59 review 第五輪，#1 durability 最終閉合）核心情境：
+    模擬程序剛好在「history 寫完」跟「latest 寫入」這兩步之間被砍斷
+    （crash／OOM kill／部署中途被殺）——用 monkeypatch 讓 latest 這次
+    `cache_set_if_newer()` 呼叫直接丟例外，且刻意不去接它（模擬程序真的
+    終止，不是被 `run_snapshot()` 自己的 try/except 接住優雅降級）。
+
+    斷言：即使 latest 完全沒機會寫、程序整個中斷退出，這一天這一幣的
+    history 依然已經 durable 寫入正確值——這正是「重排成 history 先寫」
+    要保住的東西（如果還是舊的「latest 先寫」順序，crash 會發生在 latest
+    寫完、history 寫前，日後也還是自癒得了；但真正的風險場景反過來——
+    history 沒寫到——用這個測試直接驗證新順序下 history 已經先保住）。
+    """
+    day = "2026-07-01"
+    ts = _utc_ts(f"{day}T12:00:00")
+    monkeypatch.setattr(time, "time", lambda: ts)
+    _patch_pipeline_run(monkeypatch, confidence=0.42)
+
+    real_cache_set_if_newer = fetch_scheduler.cache_set_if_newer
+    btc_latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
+
+    class _SimulatedCrash(Exception):
+        """模擬程序被砍斷（crash/OOM kill）——不是正常的錯誤處理路徑，
+        刻意不被 `run_snapshot()` 內任何 try/except 接住。"""
+
+    def crash_on_latest_write(backend, key, docs, fetched_at, ttl_seconds=None):
+        if key == btc_latest_key:
+            raise _SimulatedCrash("模擬程序在 history 寫完、latest 寫入前被砍斷")
+        return real_cache_set_if_newer(
+            backend, key, docs, fetched_at, ttl_seconds=ttl_seconds,
+        )
+
+    monkeypatch.setattr(fetch_scheduler, "cache_set_if_newer", crash_on_latest_write)
+
+    # 整個排程呼叫因為模擬 crash 而中斷，不是優雅降級——這才是真實
+    # 「程序被砍斷」的行為，不應該被 `run_snapshot()` 吞掉繼續跑下去。
+    with pytest.raises(_SimulatedCrash):
+        fetch_scheduler.main(["--snapshot", "--coin", "BTC"])
+
+    # 核心斷言：即使程序在 latest 寫入前整個中斷，這一天這一幣的 history
+    # 已經 durable 保住，不會因為程序被砍斷而永久遺失。
+    btc_history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day))
+    assert btc_history is not None
+    assert btc_history["fetched_at"] == ts
+    assert btc_history["docs"][0]["trust_score"] == pytest.approx(0.42, abs=1e-6)
+
+    # latest 這一輪確實沒機會寫（程序中斷在它之前）——這是預期中「暫時
+    # 落後」的自癒暫態，不是本測試要驗證的重點，但列出來讓行為顯式化。
+    btc_latest = cache_get(json_cache_backend, btc_latest_key)
+    assert btc_latest is None
+
+
+def test_history_survives_across_utc_day_boundary_after_crash(
+    monkeypatch, json_cache_backend,
+):
+    """codex HIGH（PR #59 review 第五輪）跨 UTC 日界情境：D 日最後一次
+    排程在 history 寫完、latest 寫入前被砍斷（同上一個測試的 crash 模擬），
+    接著 D+1 日重新正常跑一輪。
+
+    斷言：D 日的 history 不會因為排程已經跨到 D+1 日而遺失或被覆寫
+    （history key 本身就是按日分開的，D+1 的寫入完全不會碰到 D 的 key）；
+    D+1 日的 history 也正確累積成新的一筆；先前因為 crash 而暫時落後的
+    latest，在 D+1 這輪正常執行後自癒成 D+1 的最新值。
+    """
+    day_d = "2026-07-01"
+    day_d1 = "2026-07-02"
+    ts_d = _utc_ts(f"{day_d}T23:30:00")
+    ts_d1 = _utc_ts(f"{day_d1}T00:05:00")
+
+    real_cache_set_if_newer = fetch_scheduler.cache_set_if_newer
+    btc_latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
+
+    class _SimulatedCrash(Exception):
+        pass
+
+    def crash_on_latest_write(backend, key, docs, fetched_at, ttl_seconds=None):
+        if key == btc_latest_key:
+            raise _SimulatedCrash("模擬 D 日最後一次排程在跨日前被砍斷")
+        return real_cache_set_if_newer(
+            backend, key, docs, fetched_at, ttl_seconds=ttl_seconds,
+        )
+
+    # D 日：history 寫完、latest 寫入前程序中斷（crash）。
+    monkeypatch.setattr(time, "time", lambda: ts_d)
+    monkeypatch.setattr(fetch_scheduler, "cache_set_if_newer", crash_on_latest_write)
+    _patch_pipeline_run(monkeypatch, confidence=0.71)
+    with pytest.raises(_SimulatedCrash):
+        fetch_scheduler.main(["--snapshot", "--coin", "BTC"])
+
+    # crash 當下確認：D 日 history 已經 durable 保住，latest 還沒寫到。
+    day_d_history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day_d))
+    assert day_d_history is not None
+    assert day_d_history["docs"][0]["trust_score"] == pytest.approx(0.71, abs=1e-6)
+    assert cache_get(json_cache_backend, btc_latest_key) is None
+
+    # D+1 日：排程正常重跑（不再模擬 crash），latest 應該自癒成 D+1 新值。
+    monkeypatch.setattr(fetch_scheduler, "cache_set_if_newer", real_cache_set_if_newer)
+    monkeypatch.setattr(time, "time", lambda: ts_d1)
+    _patch_pipeline_run(monkeypatch, confidence=0.88)
+    assert fetch_scheduler.main(["--snapshot", "--coin", "BTC"]) == 0
+
+    # 核心斷言：D 日的 history 完全沒有因為跨日、或因為 D 日曾經 crash
+    # 過，而被遺失或被 D+1 的寫入動到——這正是重排寫入序要保住的東西。
+    day_d_history_after = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day_d))
+    assert day_d_history_after is not None
+    assert day_d_history_after["docs"][0]["trust_score"] == pytest.approx(0.71, abs=1e-6)
+
+    # D+1 日的 history 正確新增成另一筆，latest 也自癒成 D+1 的最新值。
+    day_d1_history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day_d1))
+    assert day_d1_history is not None
+    assert day_d1_history["docs"][0]["trust_score"] == pytest.approx(0.88, abs=1e-6)
+    btc_latest_after = cache_get(json_cache_backend, btc_latest_key)
+    assert btc_latest_after is not None
+    assert btc_latest_after["fetched_at"] == ts_d1
+    assert btc_latest_after["docs"][0]["trust_score"] == pytest.approx(0.88, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

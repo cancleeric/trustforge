@@ -829,6 +829,50 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     寫成功，但兩個 `cache_set_if_newer()` 呼叫之間程序被砍斷」這種極罕見
     的 transient crash 窗——下一輪排程會自然覆蓋回一致狀態（self-healing），
     不需要跨 key 原子就能把常態下的矛盾視窗壓到最小。
+
+    codex HIGH（PR #59 review 第五輪，#1 durability 最終閉合）：第四輪的
+    per-coin 收窄仍有一個方向性缺陷——它是**先寫 latest、才寫 history**。
+    若程序剛好在「latest 已經寫成功」跟「history 還沒寫」這兩步之間被砍斷
+    （crash／OOM kill／部署中途被殺），且下一輪排程剛好跨過 UTC 日界，
+    **前一天的歷史就永久遺失、無法復原**——history 的存在意義正是按日
+    累積成 point-in-time 序列，一旦某一天完全沒有任何一次成功寫入，
+    之後**沒有任何辦法補回那一天**（不像 latest，latest 弄丟舊值只是
+    「暫時舊」，下一輪重跑一定會自然覆蓋回最新，是可自癒的）。「下一輪
+    排程自然覆蓋回一致狀態」這個自癒說法，只在「還沒跨過那一天」的前提
+    下成立；一旦跨了日界，該幣當天的歷史就是真的、永久地空了一格。
+
+    修法：**重排寫入序，把不可復原的那個（history）放在可自癒的那個
+    （latest／overview）前面**——
+    1. 先寫 `history`（當日 PIT，一旦這步寫完，這一天這一幣的資料就
+       durable 保住了，即使接下來 crash 也不會再遺失）。
+    2. `history` 成功後，才接著寫 `latest` + 納入總覽候選（這兩個是
+       last-write-wins、下一輪排程一定會自然覆蓋回最新值，可以安心放在
+       後面——即使中間又被砍斷，最多只是「latest 暫時顯示舊資料」，不是
+       「這一天的歷史永遠消失」）。
+
+    對應把 gating 依據也整個反過來，改成**以 history 這次的 CAS 結果為
+    準**（取代第四輪「以 latest 結果為準」的方向）：
+    - history **skipped**（當日已有較新或同時的快照）→ 同步跳過這一幣
+      的 latest／總覽候選寫入，交給既有/勝出的那筆資料（不計入
+      `failures`）。
+    - history **error/失敗**（非 skip）→ 一樣跳過 latest／總覽候選，並
+      計入 `failures`（不會出現「history 沒寫成但 latest/overview 還是
+      寫了」，避免重新引入第四輪修的那種同幣內部矛盾，只是換了個方向）。
+    - history **成功覆寫** → 才繼續嘗試 `cache_set_if_newer()` 寫
+      `latest`（**仍然是條件寫入**，因為 latest 是全域 key、可能還在跟
+      其他天的另一輪排程競爭，不能因為 history 贏了就無條件覆寫
+      latest）。latest 本身若又被判定 skip（極罕見：不同天的另一輪已經
+      寫入更新的 latest），視為正常、自癒的暫態，不計入 `failures`，也
+      不把這筆 stale 資料納入總覽候選（總覽只收「這一幣這一輪真的成為
+      目前最新」的資料）；latest 真的寫入失敗（`ok=False`）才計入
+      `failures`，同樣排除出總覽候選。
+    三表示仍共用同一個 `run_now`；全部幣本輪都合法跳過非失敗誤報的既有
+    邏輯（`skipped_coins`）維持不變，只是現在會被兩個地方（history 跳過、
+    或 history 成功但 latest 又跳過）都計入。這樣把「crash 在 history 跟
+    latest 之間」的殘餘視窗，從「可能永久弄丟一天歷史」收斂成「latest
+    暫時顯示舊資料、下一輪自癒」——真正的跨 key 原子仍是 follow-up
+    （見 GitHub issue #62、`docs/OPTIMIZATION-PLAN-weakness.md`），但這次
+    重排已經把「不可復原」的那一半風險大幅降低。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -871,13 +915,52 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(coin)
             continue
 
-        # codex HIGH（PR #59 review 第三輪）：改用 `cache_set_if_newer()`——
-        # 兩個重疊排程交錯時，較舊一輪（`run_now` 較小）的「最新一筆」寫入
-        # 若最後才完成，只要既有值的 `fetched_at` 已經比 `run_now` 新，就
-        # 直接跳過，不會把較新的快照蓋回較舊的值（先前只有歷史 key 是
-        # monotonic，這把 latest key 還是無條件覆寫，會造成首頁「最新」跟
-        # history 互相矛盾，見本函式 docstring）。
         snap = _snapshot_dict(coin, report, evidence)
+
+        # codex HIGH（PR #59 review 第五輪，#1 durability 最終閉合）：
+        # **先寫 history、才寫 latest/overview**——history 是「按日累積、
+        # 一旦某天完全沒寫到就永久補不回」的不可復原資料（point-in-time
+        # 序列），latest/overview 則是 last-write-wins、下一輪排程一定會
+        # 自然覆蓋回最新值的可自癒資料。把不可復原的那個放前面寫，才能讓
+        # 「history 寫完、latest 還沒寫」之間發生 crash 時，這一天這一幣
+        # 的歷史已經 durable 保住，不會因為程序被砍斷而永久遺失（見本函式
+        # docstring 完整說明；先前第三、四輪是反過來先寫 latest，若 crash
+        # 剛好卡在 latest 寫完、history 寫前，且下一輪已跨過 UTC 日界，
+        # 前一天的 history 就會永久遺失，不可復原）。
+        #
+        # task #26：按日累積歷史——同一天多次跑對同一把 key 覆寫
+        # （upsert），跨日才會因日期不同而各自成一筆，天然累積成序列。用
+        # 跟 latest/overview 同一個 `run_now`，避免同一輪內兩次
+        # `time.time()` 剛好跨過 UTC 午夜造成「同一次真呼叫，兩把 key
+        # 寫進不同日期」的邊界亂跳。
+        history_result = cache_set_if_newer(
+            backend, trust_snapshot_history_key(coin, snapshot_history_date(run_now)),
+            [snap], fetched_at=run_now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+        )
+        if not history_result.ok:
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照 cache 寫入失敗"
+                  f"（backend={history_result.backend}）：{history_result.error}，"
+                  f"本輪同步跳過該幣 latest／總覽候選", file=sys.stderr)
+            failures.append(f"{coin}:history")
+            continue
+        if history_result.skipped:
+            # 單調條件寫入判斷 incoming 比當日既有值舊（或一樣新）而主動
+            # 跳過——這是正確行為（避免覆蓋較新的值），不是失敗，不計入
+            # failures。per-coin all-or-nothing 收窄（第五輪起改以 history
+            # 這次的 CAS 結果為準）：history 跳過時，同步跳過這一幣的
+            # latest 寫入、也不把它納入這輪的總覽候選，讓三個表示對「這一
+            # 幣該不該反映本輪資料」的判斷收斂成同一個答案。
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照跳過寫入"
+                  f"（當日已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫，"
+                  f"本輪同步跳過該幣 latest／總覽候選）")
+            skipped_coins.append(coin)
+            continue
+        _warn_if_fallback_used(f"--snapshot {coin} history", history_result)
+
+        # history 已經 durable 保住這一幣這一天的資料，才輪到寫
+        # last-write-wins、可自癒的 latest。`latest` 是全域 key（不分日
+        # 期），可能還在跟其他天的另一輪排程競爭，即使 history 贏了也不能
+        # 無條件覆寫 latest，仍必須是條件寫入。
         result = cache_set_if_newer(
             backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), [snap],
             fetched_at=run_now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
@@ -888,55 +971,21 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(coin)
             continue
         if result.skipped:
-            # codex HIGH（PR #59 review 第四輪，per-coin all-or-nothing 收窄）：
-            # 三個 key 的條件寫入本身不是跨 key 原子操作（真原子需
-            # DynamoDB TransactWriteItems 或 generation manifest，屬於
-            # follow-up 架構改動，見 `docs/OPTIMIZATION-PLAN-weakness.md`）
-            # ——這裡先用「以這一幣 latest 這次的寫入結果為準」把矛盾窗
-            # 收到最小：latest 被判定「比既有值舊」而跳過時，**同步跳過
-            # 這一幣的歷史寫入、也不把它納入這輪的總覽候選**，不繼續往下
-            # 執行。避免「latest 沒真的覆寫成最新，history 卻另外寫了一筆
-            # 比 latest 目前實際內容更新的資料」這種同一幣內部矛盾——
-            # 三個表示對「這一幣該不該反映本輪資料」的判斷全部收斂成同一個
-            # 答案（history/overview 因此不需要各自的獨立判斷，這輪本來就
-            # 不該處理這一幣）。
+            # 極罕見：history 贏了（這一天這一幣目前最新），但 latest
+            # 這個全域 key 已經被另一輪（處理不同天、run_now 更新）的排程
+            # 搶先寫入更新的值。這是正常、可自癒的暫態（下一輪排程一定會
+            # 自然覆蓋回真正最新），不計入 failures；但也不把這筆已經不是
+            # 「目前最新」的資料納入總覽候選，避免總覽顯示比 latest 實際
+            # 內容還舊的值。
             print(f"[fetch_scheduler] --snapshot {coin}: 最新一筆快照跳過寫入"
                   f"（已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫，"
-                  f"本輪同步跳過該幣歷史寫入與總覽候選）")
+                  f"history 已保住當日資料，本輪不納入總覽候選）")
             skipped_coins.append(coin)
             continue
         _warn_if_fallback_used(f"--snapshot {coin}", result)
         print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
               f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
         snapshots.append(snap)
-
-        # task #26：按日累積歷史——同一天多次跑對同一把 key 覆寫（uPsert），
-        # 跨日才會因日期不同而各自成一筆，天然累積成序列。用跟「最新一筆」
-        # 同一個 `run_now`，避免同一輪內兩次 time.time() 剛好跨過 UTC 午夜
-        # 造成「同一次真呼叫，兩把 key 寫進不同日期」的邊界亂跳，也確保
-        # latest/history 這一輪要嘛一起贏、要嘛一起跳過（見本函式 docstring）。
-        #
-        # codex HIGH（PR #59 review）：`cache_set_if_newer()` 單調條件寫入
-        # ——兩個重疊排程交錯時，較舊一筆的歷史寫入若最後才完成，只要當日
-        # key 既有的 `fetched_at` 已經比 `run_now` 新，就直接跳過，不會把
-        # 較新的快照蓋回較舊的值（見 `cache.py` 模組頂部完整說明）。
-        history_result = cache_set_if_newer(
-            backend, trust_snapshot_history_key(coin, snapshot_history_date(run_now)),
-            [snap], fetched_at=run_now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
-        )
-        if not history_result.ok:
-            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照 cache 寫入失敗"
-                  f"（backend={history_result.backend}）：{history_result.error}",
-                  file=sys.stderr)
-            failures.append(f"{coin}:history")
-        elif history_result.skipped:
-            # 單調條件寫入判斷 incoming 比當日既有值舊（或一樣新）而主動
-            # 跳過——這是正確行為（避免覆蓋較新的值），不是失敗，不計入
-            # failures，只印一行資訊性訊息供除錯追蹤。
-            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照跳過寫入"
-                  f"（當日已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫）")
-        else:
-            _warn_if_fallback_used(f"--snapshot {coin} history", history_result)
 
     overview_html = _render_overview_html(snapshots)
     if overview_html:
