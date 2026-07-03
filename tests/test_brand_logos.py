@@ -25,6 +25,7 @@ from trustforge.brand_logos import (
     COIN_LOGO_SVG,
     SOURCE_LOGO_SVG,
     coin_logo_html,
+    source_display_name,
     source_logo_html,
 )
 from trustforge.schema import COIN_POOL, Evidence
@@ -109,26 +110,26 @@ def test_coingecko_variants_normalize_to_same_brand_key(source_name):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "source_name,expected_letter",
+    "source_name,expected_abbr",
     [
-        ("coindesk", "C"),
-        ("decrypt", "D"),
-        ("cryptopanic", "C"),
-        ("sec-gov", "S"),
-        ("alternative-me-fng", "A"),
-        ("coingecko-price", "C"),
-        ("ohlcv-csv", "O"),
+        ("coindesk", "CD"),
+        ("decrypt", "DE"),
+        ("cryptopanic", "CP"),
+        ("sec-gov", "SEC"),
+        ("alternative-me-fng", "F&amp;G"),  # `&` 經 html.escape 變 `&amp;`
+        ("coingecko-price", "CG"),
+        ("ohlcv-csv", "HB"),
     ],
 )
 def test_sources_without_simple_icons_entry_use_fallback_badge(
-    source_name, expected_letter
+    source_name, expected_abbr
 ):
     """simple-icons 查無條目（已逐一 grep slugs.md 確認）的來源一律走中性
-    字首徽章，不是 <svg> 官方 LOGO——避免放錯/瞎猜的品牌識別。"""
+    2-3 字縮寫徽章，不是 <svg> 官方 LOGO——避免放錯/瞎猜的品牌識別。"""
     out = source_logo_html(source_name, fallback_color="#3fb950")
     assert "<svg" not in out, f"{source_name} 不應誤植真 LOGO（simple-icons 未收錄）"
     assert 'class="tf-brand-fallback"' in out
-    assert f">{expected_letter}<" in out
+    assert f">{expected_abbr}<" in out
     assert "#3fb950" in out, "fallback 顏色應沿用呼叫端傳入的 tier 顏色"
 
 
@@ -268,3 +269,91 @@ def test_home_overview_html_svg_has_no_external_resource_refs(monkeypatch):
     assert "<img" not in out
     assert re.search(r'(src|href)\s*=\s*["\']https?://', out) is None
     assert "data:" not in out
+
+
+# ---------------------------------------------------------------------------
+# 7. source_display_name() —— 12 slug 品牌化顯示名 + 無 slug 洩漏
+#    （docs/PLAN-source-branding.md：老闆真 Chrome 看到 `coingecko-sentiment`/
+#    `ohlcv-csv` 這種工程師代號的直接修法）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "slug,expected_display",
+    [
+        ("coingecko-price", "CoinGecko · 即時報價"),
+        ("coingecko-sentiment", "CoinGecko · 社群情緒"),
+        ("coingecko-dev", "CoinGecko · 開發活動"),
+        ("reddit-cryptocurrency", "Reddit · r/CryptoCurrency"),
+        ("reddit-bitcoin", "Reddit · r/Bitcoin"),
+        ("coindesk", "CoinDesk"),
+        ("decrypt", "Decrypt"),
+        ("cryptopanic", "CryptoPanic"),
+        ("alternative-me-fng", "Alternative.me · 恐懼貪婪指數"),
+        ("blockchain-info", "Blockchain.com"),
+        ("sec-gov", "美國 SEC"),
+        ("ohlcv-csv", "HOYA BIT · 官方 OHLCV"),
+    ],
+)
+def test_source_display_name_covers_all_12_known_slugs(slug, expected_display):
+    """gray plan 逐 slug 對照表：目前全部 12 個真連接器 slug 都要有明確、
+    不裸露內部代號的品牌顯示名。同一品牌不同資料面向（3 個 coingecko-*、
+    2 個 reddit-*）要顯示不同文字，不能因為共用同一顆 LOGO icon 就把文字
+    也併成同一句。"""
+    assert source_display_name(slug) == expected_display
+    # 顯示名本身不應該就是裸 slug（防呆：白名單填錯成原樣時要能抓到）
+    assert source_display_name(slug) != slug
+
+
+def test_source_display_name_unknown_slug_gracefully_title_cased():
+    """未來新連接器（如尚未實裝的 whale-alert）查無白名單時，優雅降級成
+    title case，不留原始裸 slug 的痕跡（連字號被拿掉，不是原樣印出）。"""
+    out = source_display_name("whale-alert")
+    assert out == "Whale Alert"
+    assert out != "whale-alert"
+    assert "-" not in out
+
+
+def test_source_display_name_empty_string_does_not_crash():
+    """空字串輸入（理論上不會發生，防禦性測試）不炸、給明確中性文字。"""
+    assert source_display_name("") == "未知來源"
+
+
+def test_evidence_pill_uses_display_name_not_raw_slug():
+    """`_render_evidence_list` 的 evidence pill 文字必須是品牌顯示名，
+    絕不能出現原始裸 slug（web.py:1809 曾經直接印 `ev.source` 的根因回歸
+    鎖，見 docs/PLAN-source-branding.md）。"""
+    evidence = [
+        _make_evidence("coingecko-sentiment", kind="social"),
+        _make_evidence("ohlcv-csv", kind="price"),
+        _make_evidence("reddit-bitcoin", kind="social"),
+    ]
+    out = web._render_evidence_list(evidence)
+    assert "CoinGecko · 社群情緒" in out
+    assert "HOYA BIT · 官方 OHLCV" in out
+    assert "Reddit · r/Bitcoin" in out
+    # 原始裸 slug 不應該以「顯示文字」的身分出現在 pill 裡
+    assert ">coingecko-sentiment<" not in out
+    assert ">ohlcv-csv<" not in out
+    assert ">reddit-bitcoin<" not in out
+
+
+def test_pipeline_missing_source_message_uses_display_name_not_raw_slug(monkeypatch):
+    """report.limits 的「以下來源本輪未取得資料」清單同樣要用品牌顯示名，
+    不得印裸 slug（pipeline.py 的 `_failed` 收集邏輯，同一個根因的另一個
+    呈現點，見 docs/PLAN-source-branding.md）。"""
+    from trustforge.ingestion.base import Document
+    from trustforge.pipeline import run
+    from trustforge.schema import QuestionType
+
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+        if _failed is not None:
+            _failed.append("coingecko-sentiment")
+        return [Document(id="d1", kind="price", source="ohlcv-csv", text=f"{coin} price")]
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+    report, _evidence, _log = run(
+        "BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True
+    )
+    limits_text = " ".join(report.limits)
+    assert "CoinGecko · 社群情緒" in limits_text
+    assert "coingecko-sentiment" not in limits_text

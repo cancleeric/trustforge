@@ -164,7 +164,14 @@ def test_collect_skips_failing_source():
 
 
 def test_source_failure_reflected_in_limits(monkeypatch):
-    """collect 記錄失敗來源 → pipeline.run 應將其加入 report.limits。"""
+    """collect 記錄失敗來源 → pipeline.run 應將其加入 report.limits。
+
+    docs/PLAN-source-branding.md：`report.limits` 這句「未取得資料」清單
+    已改用 `source_display_name()` 品牌化顯示（不再直接印原始 slug），
+    所以這裡斷言要對「顯示名」，同時反向斷言原始裸 slug 不外洩。
+    """
+    from trustforge.brand_logos import source_display_name
+
     def fake_collect_with_fail(query, coin=None, offline=False, data_dir=None, _failed=None):
         """回傳 docs，同時模擬 failing-news-src 失敗記錄。"""
         if _failed is not None:
@@ -175,10 +182,14 @@ def test_source_failure_reflected_in_limits(monkeypatch):
 
     report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
 
-    # report.limits 應含失敗來源名稱
+    # report.limits 應含失敗來源的品牌顯示名，而非原始裸 slug
     limits_text = " ".join(report.limits)
-    assert "failing-news-src" in limits_text, (
-        f"report.limits 應記錄失敗來源 'failing-news-src'，實際：{report.limits}"
+    expected_display = source_display_name("failing-news-src")
+    assert expected_display in limits_text, (
+        f"report.limits 應記錄失敗來源顯示名 {expected_display!r}，實際：{report.limits}"
+    )
+    assert "failing-news-src" not in limits_text, (
+        f"report.limits 不應洩漏原始裸 slug 'failing-news-src'，實際：{report.limits}"
     )
     # pipeline 不崩，evidence 仍有內容
     assert evidence, "evidence 不可空（working sources 仍提供文件）"
@@ -206,10 +217,16 @@ def test_pipeline_does_not_crash_with_failing_source(monkeypatch):
     assert report is not None, "report 不可為 None"
     assert report.market_judgment, "market_judgment 不可空"
     assert evidence, "evidence 不可空"
-    # limits 應有 failing-news-src 記錄
+    # limits 應有 failing-news-src 的品牌顯示名記錄（非原始裸 slug，
+    # 見 docs/PLAN-source-branding.md）
+    from trustforge.brand_logos import source_display_name
+
     limits_text = " ".join(report.limits)
-    assert "failing-news-src" in limits_text, (
-        f"limits 應含失敗來源名稱，實際：{report.limits}"
+    assert source_display_name("failing-news-src") in limits_text, (
+        f"limits 應含失敗來源顯示名，實際：{report.limits}"
+    )
+    assert "failing-news-src" not in limits_text, (
+        f"limits 不應洩漏原始裸 slug，實際：{report.limits}"
     )
 
 
@@ -281,7 +298,13 @@ def test_existing_comparison_unaffected(monkeypatch):
 # ── _failed 去重測試 ──────────────────────────────────────────────────────────
 
 def test_pipeline_limits_dedup_on_repeated_failure(monkeypatch):
-    """同一來源多次記入 _failed → report.limits 不重複出現相同條目。"""
+    """同一來源多次記入 _failed → report.limits 不重複出現相同條目。
+
+    docs/PLAN-source-branding.md：斷言改對品牌顯示名（`source_display_name`
+    的 graceful title-case 降級），因為 limits 句子已不再印原始裸 slug。
+    """
+    from trustforge.brand_logos import source_display_name
+
     def fake_collect_with_dup_fail(query, coin=None, offline=False, data_dir=None, _failed=None):
         """模擬同一來源失敗兩次（例如 collect 被呼叫兩次或 source 重複記錄）。"""
         if _failed is not None:
@@ -293,11 +316,16 @@ def test_pipeline_limits_dedup_on_repeated_failure(monkeypatch):
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect_with_dup_fail)
     report, evidence, log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
 
-    dup_entries = [l for l in report.limits if "dup-src" in l]
+    dup_display = source_display_name("dup-src")
+    other_display = source_display_name("other-src")
+    dup_entries = [l for l in report.limits if dup_display in l]
     assert len(dup_entries) == 1, (
-        f"dup-src 應只出現一次，實際 limits={report.limits}"
+        f"dup-src（顯示名 {dup_display!r}）應只出現一次，實際 limits={report.limits}"
     )
-    other_entries = [l for l in report.limits if "other-src" in l]
+    other_entries = [l for l in report.limits if other_display in l]
     assert len(other_entries) == 1, (
-        f"other-src 應出現一次，實際 limits={report.limits}"
+        f"other-src（顯示名 {other_display!r}）應出現一次，實際 limits={report.limits}"
     )
+    # 反向斷言：原始裸 slug 不應外洩
+    limits_text = " ".join(report.limits)
+    assert "dup-src" not in limits_text and "other-src" not in limits_text

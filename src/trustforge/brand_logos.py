@@ -11,9 +11,26 @@ develop 分支，2026-07 fetch）：
 simple-icons **沒有收錄**的來源（CoinGecko／CoinDesk／Decrypt／
 CryptoPanic／SEC EDGAR／Alternative.me 等，已逐一 grep 確認 slugs.md
 不存在對應條目）不得瞎猜/拼裝其他來源的 LOGO 冒充官方——一律 fallback 成
-中性的「圓角方塊 + 品牌名首字母」徽章（見 `_fallback_badge_html`），顏色
-沿用呼叫端既有語意色（如 evidence 的獨立性 tier 顏色），不偽裝成官方
-LOGO、不誤導使用者。
+中性的「圓角徽章 + 2-3 字縮寫」（見 `_fallback_badge_html`），顏色沿用
+呼叫端既有語意色（如 evidence 的獨立性 tier 顏色），不偽裝成官方 LOGO、
+不誤導使用者。
+
+CoinGecko 官方 LOGO 查證記錄（docs/PLAN-source-branding.md #24 任務，
+2026-07 查證）：CoinGecko 官方文件站 https://brand.coingecko.com 確有
+公開「Attribution Guide」（`resources/attribution-guide`），**明文允許**
+第三方在附上超連結＋文字歸屬（"Data provided by CoinGecko" 等）的前提下
+使用其官方 LOGO，並提供「Brand Kit」下載官方 SVG/PNG。**但**該 Brand Kit
+是透過 GitBook 檔案瀏覽器的網頁下載互動流程提供（`/files/<id>` 這類連結
+會導回 GitBook SPA 頁面而非直接可 `curl` 到的靜態檔案 URL，不像
+simple-icons 那樣有可直接 fetch 的 raw SVG 檔案路徑），本次查證環境沒有
+瀏覽器工具可完成「點擊下載 ZIP → 解壓 → 核對向量路徑」這個流程，因此
+**沒有辦法取得可驗證來源的真官方 SVG path data**——依 #24 鐵律「path
+data 必須查證，不得憑記憶手繪」，這次維持 fallback 徽章，不強行湊一個
+猜測的 CoinGecko 圖形。附帶查到官方核心品牌色 Gecko Green `#4BCC00`
+（`visual-identity/color/core-brand-colors`），但**刻意不**拿來覆蓋
+fallback 徽章顏色——理由同上一段：`_fallback_badge_html` 的顏色語意是
+「沿用呼叫端既有 tier 色」，改用外部品牌色會讓使用者誤以為這是官方視覺
+識別，因此保留現有設計原則不變。
 
 CSP 相容性：本模組只產生 inline `<svg>`／`<span>` HTML 標記本身（非
 `<img src=...>`、非外部 URL、非 `data:` URI），零外部請求。專案 CSP 為
@@ -174,8 +191,10 @@ SOURCE_LOGO_SVG: dict[str, str] = {
 }
 
 
-# simple-icons **沒有**收錄的來源（已逐一 grep slugs.md 確認查無條目）——
-# 顯示名稱僅供 fallback 徽章 tooltip／首字母使用，不是宣稱有官方 LOGO。
+# 粗粒度品牌名（依 `_source_brand_key()` 正規化後的 key）——只給 fallback
+# icon（`_fallback_badge_html`）的 tooltip／縮寫取名用，不是宣稱有官方 LOGO。
+# 細粒度、給使用者實際閱讀的顯示文字見下方 `_SOURCE_DISPLAY_NAME_FINE` /
+# `source_display_name()`。
 _SOURCE_DISPLAY_NAME: dict[str, str] = {
     "coingecko": "CoinGecko",
     "reddit": "Reddit",
@@ -186,6 +205,18 @@ _SOURCE_DISPLAY_NAME: dict[str, str] = {
     "decrypt": "Decrypt",
     "cryptopanic": "CryptoPanic",
     "ohlcv-csv": "OHLCV",
+}
+
+# fallback 徽章（icon）縮寫——2-3 字，非官方 LOGO 替代品，純視覺辨識用。
+# 查無收錄的 key 由 `_fallback_badge_html` 退回取顯示名前兩碼，不會炸。
+_FALLBACK_BADGE_ABBR: dict[str, str] = {
+    "coingecko": "CG",
+    "coindesk": "CD",
+    "decrypt": "DE",
+    "cryptopanic": "CP",
+    "alternative-me-fng": "F&G",
+    "sec-gov": "SEC",
+    "ohlcv-csv": "HB",
 }
 
 
@@ -209,25 +240,80 @@ def _source_brand_key(source: str) -> str:
     return source
 
 
+# ---------------------------------------------------------------------------
+# 使用者可見文字顯示名 —— 逐 slug 細粒度，跟上面 icon 用的粗粒度品牌 key
+# 不是同一件事：3 個 coingecko-* 共用同一顆 LOGO icon，但文字要分辨清楚
+# 「這是 CoinGecko 的哪個資料面向」，不能都印成同一句「CoinGecko」，
+# 資訊量會不夠（見 docs/PLAN-source-branding.md 12 slug 對照表）。
+# ---------------------------------------------------------------------------
+_SOURCE_DISPLAY_NAME_FINE: dict[str, str] = {
+    "coingecko-price": "CoinGecko · 即時報價",
+    "coingecko-sentiment": "CoinGecko · 社群情緒",
+    "coingecko-dev": "CoinGecko · 開發活動",
+    "reddit-cryptocurrency": "Reddit · r/CryptoCurrency",
+    "reddit-bitcoin": "Reddit · r/Bitcoin",
+    "coindesk": "CoinDesk",
+    "decrypt": "Decrypt",
+    "cryptopanic": "CryptoPanic",
+    "alternative-me-fng": "Alternative.me · 恐懼貪婪指數",
+    "blockchain-info": "Blockchain.com",
+    "sec-gov": "美國 SEC",
+    "ohlcv-csv": "HOYA BIT · 官方 OHLCV",
+}
+
+
+def source_display_name(source: str) -> str:
+    """把 raw `Evidence.source`／連接器 slug 轉成使用者可讀的品牌顯示名。
+
+    任何使用者可見處都應呼叫這支，不得直接印 `ev.source` 原始 slug——這
+    正是老闆真 Chrome 看生產頁面時看到 `coingecko-sentiment`/`ohlcv-csv`
+    這種工程師代號的根因（見 docs/PLAN-source-branding.md）。呼叫端仍須
+    自行 `html.escape()`：本函式只負責取名，不負責跳脫（維持跟模組內其
+    餘函式一致的分工，呼叫端如 `web.py` 一律用 `e()` 包一層）。
+
+    1. 先查逐 slug 細粒度白名單 `_SOURCE_DISPLAY_NAME_FINE`（目前 12 個
+       連接器皆已收錄，見上表）。
+    2. 查無白名單（未來新連接器尚未補表，如 `whale-alert`）→ graceful
+       降級：`-`/`_` 轉空白後 title case，至少不是原始裸 slug（例如
+       `whale-alert` → `Whale Alert`），不崩、不洩漏內部命名慣例。
+    """
+    if source in _SOURCE_DISPLAY_NAME_FINE:
+        return _SOURCE_DISPLAY_NAME_FINE[source]
+    if not source:
+        return "未知來源"
+    return source.replace("-", " ").replace("_", " ").title()
+
+
 def _fallback_badge_html(brand_key: str, color: str) -> str:
-    """simple-icons 沒收錄的來源 → 中性「圓角方塊 + 品牌名首字母」徽章。
+    """simple-icons 沒收錄的來源 → 中性「圓角徽章 + 2-3 字縮寫」。
 
     這**不是**官方 LOGO 的替代視覺、也不偽裝成官方 LOGO（#24 鐵律：不得
-    放錯 LOGO，查無真 LOGO 寧可用明顯中性的字首徽章）。`color` 由呼叫端
+    放錯 LOGO，查無真 LOGO 寧可用明顯中性的縮寫徽章）。`color` 由呼叫端
     傳入（例如 evidence 既有的獨立性 tier 顏色，見 `web.py
     ::_independence_tier`），不硬編品牌色——硬編品牌色反而會讓使用者誤以
-    為這是官方視覺識別。
+    為這是官方視覺識別（CoinGecko 官方色 `#4BCC00` 查證過程見模組頂部
+    docstring，刻意不採用即是此故）。
+
+    視覺升級（原本是單字母裸框，商業級要求體面一點）：改成填色圓角
+    「chip」——背景用 `color-mix(in srgb, currentColor N%, transparent)`
+    對呼叫端傳入的 `color` 取淡色調（`.tf-tier-pill` 既有同款手法，見
+    `web.py` 樣式表），而不是自己另外調一個固定底色；`currentColor` 會
+    自動吃到本 `<span>` inline `color:` 設的值，`color` 不論是 hex
+    （`#3fb950`）或 CSS 變數（`var(--tf-muted)`）都能正確運作，不必自己
+    手動做 alpha 混色字串拼接。
     """
     name = _SOURCE_DISPLAY_NAME.get(brand_key, brand_key)
-    letter = html.escape((name[:1] or "?").upper())
+    abbr = html.escape(_FALLBACK_BADGE_ABBR.get(brand_key) or (name[:2] or "??").upper())
     title = html.escape(name)
     c = html.escape(color, quote=True)
     return (
         f'<span class="tf-brand-fallback" title="{title}" '
-        "style=\"display:inline-block;width:14px;height:14px;line-height:"
-        "14px;text-align:center;font-size:.62rem;font-weight:700;border-"
-        f'radius:3px;color:{c};border:1px solid {c};vertical-align:-3px;'
-        f'flex:none">{letter}</span>'
+        "style=\"display:inline-flex;align-items:center;justify-content:"
+        "center;min-width:20px;height:16px;padding:0 5px;font-size:.62rem;"
+        "font-weight:700;letter-spacing:.02em;border-radius:8px;"
+        f'color:{c};background:color-mix(in srgb,currentColor 16%,'
+        f'transparent);border:1px solid currentColor;vertical-align:-3px;'
+        f'flex:none">{abbr}</span>'
     )
 
 

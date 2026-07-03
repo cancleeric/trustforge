@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .agent.orchestrator import run_agent_pipeline
 from .bedrock import BedrockClient
+from .brand_logos import source_display_name
 from .execlog import ExecutionLog
 from .ingestion.base import collect
 from .schema import COIN_POOL, Evidence, QuestionType, Report
@@ -88,8 +89,12 @@ def run(coin: str, query: str, qtype: QuestionType,
         if src_name not in _seen_failed:
             _seen_failed.append(src_name)
     if _seen_failed:
+        # docs/PLAN-source-branding.md：這句「未取得資料」清單以前直接
+        # join 原始 `Evidence.source` slug（如 `coingecko-sentiment`），
+        # 跟 evidence pill 是同一個「印裸 slug 給使用者看」的問題，一併修。
+        _display_failed = [source_display_name(s) for s in _seen_failed]
         report.limits.append(
-            "以下來源本輪未取得資料，不納入計算：" + "、".join(_seen_failed) + "。"
+            "以下來源本輪未取得資料，不納入計算：" + "、".join(_display_failed) + "。"
         )
     return report, evidence, log
 
