@@ -1,0 +1,48 @@
+@import 'tailwindcss';
+
+/* 沿用既有 SSR 的 `--tf-*` 色彩 token（見 `src/trustforge/web.py` 內嵌
+   CSS，GitHub dark 系配色），維持新舊前端視覺一致，不是重新發明一套色。 */
+@theme {
+  --color-tf-bg: #0d1117;
+  --color-tf-card: #161b22;
+  --color-tf-border: #30363d;
+  --color-tf-text: #e6edf3;
+  --color-tf-text2: #c9d1d9;
+  --color-tf-muted: #8b949e;
+  --color-tf-muted2: #6e7681;
+  --color-tf-accent: #1f6feb;
+  /* UX Round1 稽核：純文字用 accent 色在深色底對比僅 4.08:1，未達 AA
+     4.5:1；連結/文字一律改用這個較亮的藍，`--color-tf-accent` 只留給
+     按鈕底色/邊框等「非文字」用途（UI 元件對比門檻 3:1 即足夠）。 */
+  --color-tf-link: #58a6ff;
+  --color-tf-good: #3fb950;
+  --color-tf-warn: #d9832a;
+  --color-tf-bad: #f85149;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, Consolas, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--color-tf-bg);
+  color: var(--color-tf-text);
+  font-family: var(--font-sans);
+}
+
+/* 數字一律等寬對齊（PLAN 要求 tabular-nums），信任分/百分比/金額全套用。 */
+.tf-num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* focus ring：鍵盤可達性，對比度符合 WCAG AA（見 UX Round1 稽核要求）。 */
+:focus-visible {
+  outline: 2px solid var(--color-tf-accent);
+  outline-offset: 2px;
+}
