@@ -719,6 +719,17 @@ def _render_overview_html(snapshots: list[dict]) -> str:
 
     每張卡包成 `<a href="/analyze?...">`（見 `_overview_card_href`），點卡
     直接導向該幣真分析——不再是死 `<div>`（P-2026 生產 UX bug 第二處）。
+
+    P-2026 生產 UX bug（第三處，CEO 真 Chrome 診斷）：卡片內裝飾性子元素
+    （幣別 LOGO `<svg>`、信任分/校準信心/時間戳那些純顯示用 `<div>`）在
+    瀏覽器裡是各自獨立的點擊目標——滑鼠點在這些子元素上時，事件目標是
+    子元素本身而非外層 `<a>`，導致「點卡片沒反應」（`<a>` 本身、
+    `a.click()` 程式化觸發、curl 拉 HTML 結構驗證起來都正常，只有「真人
+    滑鼠點在子元素上」這個情境會死掉，比對 hero CTA／系統狀態那種文字
+    直接包在 `<a>` 裡、沒有子元素分走事件的連結，就不會有這個問題）。
+    修法：卡片內每個子元素都加 `pointer-events:none`，讓點擊全部穿透到
+    外層 `<a>`；`<a>` 本身維持（顯式標註）`pointer-events:auto`，確保
+    整張卡表面都能可靠觸發導航。
     """
     if not snapshots:
         return ""
@@ -736,6 +747,7 @@ def _render_overview_html(snapshots: list[dict]) -> str:
         tag_open = (
             f'<a class="tf-overview-card" href="{href}" '
             'style="display:block;text-decoration:none;color:inherit;'
+            'pointer-events:auto;'
             'border:1px solid var(--tf-border);border-radius:8px;'
             'padding:.6rem .8rem;background:var(--tf-inset)">'
             if href is not None
@@ -748,15 +760,25 @@ def _render_overview_html(snapshots: list[dict]) -> str:
         # `coin_raw` 一律經 COIN_POOL 白名單產生（見本函式頂部迴圈），非
         # HTTP request 直接控制的字串；`coin_logo_html` 內部仍只認白名單
         # dict，查無對應幣種回空字串，不會印出破圖或錯誤幣的 LOGO。
+        #
+        # P-2026 第三處 UX bug 修法：LOGO 是純裝飾（不需要自己被點），用
+        # `<span style="pointer-events:none">` 包一層，讓點在 LOGO 上的
+        # 滑鼠事件穿透到外層 `<a>`；刻意不動 `trustforge.brand_logos` 共用
+        # 的 `_svg()` 輸出本身，那份 SVG 也被非卡片情境的 evidence pill
+        # 共用，那邊沒有這個死點擊問題、不該被牽動。
         logo = coin_logo_html(coin_raw)
-        logo_html = f'{logo} ' if logo else ""
+        logo_html = (
+            f'<span style="pointer-events:none">{logo}</span> ' if logo else ""
+        )
         cards.append(
             tag_open
-            + f'<div style="font-weight:700">{logo_html}{coin}</div>'
-            f'<div style="font-size:.85rem;color:var(--tf-muted)">信任分 {trust:.2f} · {direction}</div>'
-            f'<div style="font-size:.75rem;color:var(--tf-muted2)">'
+            + f'<div style="font-weight:700;pointer-events:none">{logo_html}{coin}</div>'
+            f'<div style="font-size:.85rem;color:var(--tf-muted);pointer-events:none">'
+            f'信任分 {trust:.2f} · {direction}</div>'
+            f'<div style="font-size:.75rem;color:var(--tf-muted2);pointer-events:none">'
             f'校準信心 {calibrated:.2f} · {decision_state}</div>'
-            f'<div style="font-size:.7rem;color:var(--tf-muted2)">{generated_at}</div>'
+            f'<div style="font-size:.7rem;color:var(--tf-muted2);pointer-events:none">'
+            f'{generated_at}</div>'
             + tag_close
         )
     return (
