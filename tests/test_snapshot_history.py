@@ -15,6 +15,7 @@ import pytest
 
 from scripts import fetch_scheduler
 from trustforge.ingestion.cache import (
+    CacheBackend,
     CacheWriteResult,
     JsonCacheBackend,
     TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
@@ -656,6 +657,94 @@ def test_history_survives_across_utc_day_boundary_after_crash(
     assert btc_latest_after is not None
     assert btc_latest_after["fetched_at"] == ts_d1
     assert btc_latest_after["docs"][0]["trust_score"] == pytest.approx(0.88, abs=1e-6)
+
+
+class _FlakyPrimaryBackend(CacheBackend):
+    """模擬 primary backend（如 DynamoDB）對特定 key 暫時失敗、其餘 key
+    正常運作（等同「兩次呼叫之間 primary 部分恢復」）——只用來驗證 codex
+    第六輪 backend-affinity gating，不是真的 DynamoDB，純記憶體字典。"""
+
+    def __init__(self, fail_once_for_keys: set[str]):
+        self._store: dict[str, dict] = {}
+        self._fail_once_for_keys = set(fail_once_for_keys)
+        self._already_failed: set[str] = set()
+
+    def get(self, key: str, *, consistent_read: bool = False):
+        entry = self._store.get(key)
+        return dict(entry) if entry is not None else None
+
+    def set(self, key: str, docs, fetched_at: float, ttl_seconds=None) -> None:
+        if key in self._fail_once_for_keys and key not in self._already_failed:
+            self._already_failed.add(key)
+            raise RuntimeError("模擬 primary backend 暫時失敗（測試注入，非真 DynamoDB）")
+        self._store[key] = {"docs": docs, "fetched_at": fetched_at}
+
+
+# ---------------------------------------------------------------------------
+# codex HIGH（PR #59 review 第六輪，backend-affinity 一致性、#1 最終閉合）：
+# history 走 JSON fallback（primary 失敗）時，不能讓 latest/overview 卻
+# 正常寫進 primary（跨 backend 分裂）。
+# ---------------------------------------------------------------------------
+
+def test_history_fallback_then_primary_recovery_does_not_split_backends(
+    monkeypatch, json_cache_backend,
+):
+    """history 這次的 CAS 呼叫在 primary 端失敗、真正走了本地 JSON
+    fallback 才寫成功（`used_fallback=True`）；緊接著這一幣的 latest
+    這次呼叫若打向 primary 會正常成功（模擬 primary 剛好恢復）。
+
+    gating 斷言：即使 primary 已經恢復、latest 這次呼叫「理論上打得進去」，
+    也絕對不能讓它真的寫入 primary（否則 primary 就會出現「latest 是新的
+    但 history 根本不存在」的分裂）——latest/overview 這一幣本輪整個不
+    處理（不寫進 primary，也刻意不寫進 fallback），並計入 `failures`
+    （回傳碼非 0，讓監控看得到、逼 DynamoDB 問題被處理，下一輪恢復後
+    自然重新整批寫回 primary）。
+    """
+    day = "2026-07-01"
+    ts = _utc_ts(f"{day}T12:00:00")
+    monkeypatch.setattr(time, "time", lambda: ts)
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_FALLBACK", "1")
+    _patch_pipeline_run(monkeypatch, confidence=0.6)
+
+    history_key = trust_snapshot_history_key("BTC", day)
+    primary = _FlakyPrimaryBackend(fail_once_for_keys={history_key})
+
+    # 直接呼叫 `run_snapshot()`（不透過 `main()` 的 env-var backend 選擇），
+    # 才能注入這個非 `JsonCacheBackend` 的假 primary，觸發
+    # `cache_set_if_newer()` 真正的 cross-backend fallback 邏輯（見
+    # `src/trustforge/ingestion/cache.py`）——不是 monkeypatch
+    # `fetch_scheduler.cache_set_if_newer` 繞過真正的 fallback 機制。
+    exit_code = fetch_scheduler.run_snapshot(["BTC"], primary, dry_run=False)
+
+    # 真失敗（history 沒真正 durable 進 primary），回傳碼必須非 0。
+    assert exit_code == 1
+
+    # primary 端完全沒有這一輪的任何資料——history 因為打 primary 失敗
+    # 才走 fallback（primary 本來就沒有它），latest/overview 則是被 gating
+    # 主動跳過、根本沒有嘗試寫，即使 primary 這時已經「恢復」（対 latest
+    # 這把 key 而言 primary.set() 本來就不會失敗）也一樣沒被寫入。
+    assert history_key not in primary._store
+    assert cache_key(TRUST_SNAPSHOT_SOURCE, "BTC") not in primary._store
+    assert cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN) not in primary._store
+
+    # 本地 JSON fallback 這端：history 真的走 fallback 寫成功了（這是
+    # `cache_set_if_newer()` 既有、預期中的行為，我們沒有關閉它，只是
+    # gating 不再往下寫 latest/overview）——用這個斷言證明測試真的觸發了
+    # 「fallback 已寫入」這個前提，不是誤打誤撞其他原因造成 primary 沒資料。
+    fallback_history = cache_get(json_cache_backend, history_key)
+    assert fallback_history is not None
+    assert fallback_history["docs"][0]["trust_score"] == pytest.approx(0.6, abs=1e-6)
+
+    # latest/overview 刻意也沒有被寫進 fallback（設計選擇：不分別在兩個
+    # backend 各自 fallback、之後還要追蹤兩邊一致性，直接整個不處理這一幣
+    # 這一輪，等下一輪 primary 恢復後三表示一起重新對齊）。
+    fallback_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"))
+    assert fallback_latest is None
+    fallback_overview = cache_get(
+        json_cache_backend,
+        cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN),
+    )
+    assert fallback_overview is None
 
 
 # ---------------------------------------------------------------------------

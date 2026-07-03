@@ -873,6 +873,27 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     暫時顯示舊資料、下一輪自癒」——真正的跨 key 原子仍是 follow-up
     （見 GitHub issue #62、`docs/OPTIMIZATION-PLAN-weakness.md`），但這次
     重排已經把「不可復原」的那一半風險大幅降低。
+
+    codex HIGH（PR #59 review 第六輪，backend-affinity 一致性、#1 最終
+    閉合）：上面的「history 先寫」重排隱含一個假設——history 這次真的
+    durable 進了 primary backend。但 `cache_set_if_newer()` 本身有
+    cross-backend fallback 機制（primary 如 DynamoDB 失敗時，可能改寫本地
+    `JsonCacheBackend` 並回傳 `ok=True, used_fallback=True`——見
+    `src/trustforge/ingestion/cache.py`）。若 history 這次是靠 fallback
+    才寫成功，那份資料**只在本機看得到，沒有真正進 primary**；如果緊接著
+    latest/overview 的 CAS 呼叫時 primary 剛好恢復、正常寫進 primary，
+    primary 端就會出現「latest/overview 是新的，但 history 完全不存在」
+    的跨 backend 分裂——一旦跨過 UTC 日界，primary 那天的 PIT 就永久
+    缺角，且因為 `history_result.ok` 是 `True`，這個分裂完全不會被
+    `failures` 抓到、run 還是回報 exit 0，形同悄悄發生、沒有人會發現。
+    修法：把「history 走 fallback、沒真正進 primary」視同跟
+    `history_result.ok=False` 一樣的 gating 失敗——同步跳過這一幣的
+    latest/overview（刻意不寫進任何 backend，包含也不寫進 fallback，
+    避免又要另外追蹤兩個 backend 各自的一致性），並計入 `failures`
+    （逼監控看得到，下一輪 DynamoDB 恢復後才會自然重新整批寫回
+    primary，三表示重新對齊）。這確保三個表示要嘛全部落在同一個
+    backend 保持一致，要嘛這一幣這一輪整個不處理，不會有「這一幣的
+    三個表示分散在不同 backend」這種更難排查的分裂狀態。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -943,6 +964,38 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
                   f"本輪同步跳過該幣 latest／總覽候選", file=sys.stderr)
             failures.append(f"{coin}:history")
             continue
+        if history_result.used_fallback:
+            # codex HIGH（PR #59 review 第六輪，backend-affinity 一致性、
+            # #1 最終閉合）：primary（DynamoDB）寫入失敗、靠本地
+            # `JsonCacheBackend` fallback 才把 history 寫進去時，
+            # `history_result.ok` 仍是 `True`（fallback 語意上「有真的
+            # 持久化成功」），但那份資料**只在本機看得到，沒有真正
+            # durable 進 primary**。若接下來這一幣的 latest/overview
+            # 卻正常寫進 primary（例如 DynamoDB 剛好在兩次呼叫之間恢復），
+            # primary 就會出現「latest/overview 是新的，但 history 根本
+            # 不存在」的跨 backend 分裂——一旦排程跨過 UTC 日界，那天的
+            # PIT 在 primary 端就永久缺角，而且因為 `history_result.ok`
+            # 是 `True`，這個分裂完全不會被 `failures` 抓到、run 還是
+            # exit 0，不會有人發現。
+            #
+            # 修法：把「history 沒有真正 durable 進 primary」視同 gating
+            # 失敗——跟 `not history_result.ok` 一樣處理：跳過這一幣的
+            # latest/overview（不寫進任何 backend，避免製造分裂），並計入
+            # `failures`（讓監控看得到，逼出 DynamoDB 的問題，下一輪
+            # DynamoDB 恢復後會自然重寫回 primary、三表示補齊）。刻意
+            # **不**額外把 latest/overview 也寫進 JSON fallback——因為
+            # snapshot 三表示本來就設計成三個要嘛同時在同一個 backend
+            # 達成一致、要嘛這一幣這一輪整個不處理，不做「history 在
+            # fallback、latest 在 fallback」這種本輪各自獨立 fallback、
+            # 之後又要對兩個 backend 分別追蹤一致性的複雜度。
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照走本地 JSON "
+                  f"fallback 寫入（primary 失敗：{history_result.error}），"
+                  f"視為未真正 durable 進 primary——本輪同步跳過該幣 "
+                  f"latest／總覽候選、計入 failures，避免 primary 出現 "
+                  f"history 缺角但 latest/overview 卻已更新的跨 backend 分裂",
+                  file=sys.stderr)
+            failures.append(f"{coin}:history-fallback")
+            continue
         if history_result.skipped:
             # 單調條件寫入判斷 incoming 比當日既有值舊（或一樣新）而主動
             # 跳過——這是正確行為（避免覆蓋較新的值），不是失敗，不計入
@@ -955,7 +1008,10 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
                   f"本輪同步跳過該幣 latest／總覽候選）")
             skipped_coins.append(coin)
             continue
-        _warn_if_fallback_used(f"--snapshot {coin} history", history_result)
+        # 走到這裡代表 `history_result.used_fallback` 一定是 `False`
+        # （上面已經攔截並 `continue` 掉 fallback 的情況）——history 這次
+        # 真的成功 durable 進 primary，不需要再另外呼叫
+        # `_warn_if_fallback_used()`。
 
         # history 已經 durable 保住這一幣這一天的資料，才輪到寫
         # last-write-wins、可自癒的 latest。`latest` 是全域 key（不分日

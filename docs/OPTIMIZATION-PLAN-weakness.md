@@ -75,7 +75,7 @@ blockchair），需要獨立設計（含「相同 ts 算不算異常」「廣播
 
 ## Follow-up（技術債，非本輪修復，**歷史趨勢 UI 建置前完成**）｜跨快取 key 原子發布（PR #59 每日累積歷史快照）
 
-**背景**：PR #59（task #26，`feat/snapshot-history` 分支）codex 複審 5 輪逐步把
+**背景**：PR #59（task #26，`feat/snapshot-history` 分支）codex 複審 6 輪逐步把
 `scripts/fetch_scheduler.py::run_snapshot()` 的三個持久化表示（「最新一筆」
 `TRUST_SNAPSHOT_SOURCE`、「按日歷史」`TRUST_SNAPSHOT_HISTORY_SOURCE`、「總覽
 blob」`TRUST_OVERVIEW_SOURCE`）都改成 `cache_set_if_newer()` monotonic 條件
@@ -86,7 +86,17 @@ blob」`TRUST_OVERVIEW_SOURCE`）都改成 `cache_set_if_newer()` monotonic 條�
 復原**（history 是不可復原的 point-in-time 累積資料，不像 latest 只是
 「暫時舊」、下一輪就能自癒）。第 5 輪改成**先寫 history（不可復原、優先
 保住）、成功後才寫 latest/overview（last-write-wins、可自癒）**，gating
-也相應改成以 history 這次的 CAS 結果為準。
+也相應改成以 history 這次的 CAS 結果為準。第 6 輪再抓到一個更隱蔽的變體
+——`cache_set_if_newer()` 本身有 cross-backend fallback（primary 如
+DynamoDB 失敗時，改寫本地 JSON 並回傳 `ok=True, used_fallback=True`）；
+若 history 這次是靠 fallback 才寫成功（只在本機看得到、沒真正進
+primary），緊接著 latest/overview 若打向已經恢復的 primary、正常寫入，
+primary 端就會出現「latest/overview 是新的，但 history 完全不存在」的
+**跨 backend 分裂**，而且因為 `ok=True`，完全不會被 `failures` 抓到、
+run 還是 exit 0，形同悄悄發生。修法：把「history 走 fallback、沒真正進
+primary」視同跟 `ok=False` 一樣的 gating 失敗，同步跳過該幣
+latest/overview（不寫進任何 backend），並計入 `failures`，確保三表示
+要嘛全部落在同一個 backend 一致，要嘛這一幣這一輪整個不處理。
 
 **未做（本節追蹤）**：即使重排了寫入序，history 跟 latest 這兩個獨立的
 `cache_set_if_newer()` 呼叫本身仍不是同一個原子操作。極罕見情況下
