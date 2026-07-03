@@ -62,6 +62,12 @@ echo "[ec2] 帳號 $ACCT / 區域 $REGION / 模型 ${MODEL:-<離線,無BEDROCK_M
 # 改成兩支完全獨立的 SSM command：一般排程 seed 是 fire-and-forget 不
 # gate；`--probe`（有界，只測 DynamoDB R/W）是唯一被輪詢、唯一決定部署
 # 成敗的 command。
+# 再再 follow-up：光拆出 probe 還不夠，`--probe` 內部若沿用
+# `get_cache_backend()`/`get_ledger()` 建構的 DynamoDB client，其 boto3/
+# botocore 預設 timeout/重試降級時可達數分鐘，「有界」不成立；已在
+# `scripts/fetch_scheduler.py::run_probe()` 改用帶明確短 timeout 的
+# `_probe_cache_backend()`/`_probe_ledger_backend()`，poll deadline 依此
+# bounded worst-case 推導（見 verify_fetch_scheduler 內部註解）。
 # 用法：poll_ssm_terminal_status <command-id> <instance-id> [max_wait_secs] [interval_secs]
 # 輸出（stdout）：終態字串；若逾時仍非終態，輸出當下抓到的狀態（可能是空
 # 字串）並以非零結束，呼叫端據此判定失敗。
@@ -131,11 +137,23 @@ verify_fetch_scheduler() {
     echo "[ec2] ❌ fetch-scheduler probe 用 SSM send-command 未取得 CommandId，中止" >&2
     exit 1
   fi
-  # timeout 契約：poll deadline 只需要覆蓋 probe 自身的有界耗時（兩表各
-  # 一次 PutItem/GetItem，外加 cost-ledger 一次 Scan 權限探測），不再被
+  # timeout 契約：poll deadline 只需要覆蓋 probe 自身的有界耗時，不再被
   # seed 的無界延遲拖累——這就是本輪架構修正的重點：gate 只依賴、只等待
-  # probe 這一個獨立 SSM command。給 90s 當 poll deadline，對 DynamoDB
-  # 呼叫本身的耗時（含 boto3 重試）留合理 margin。
+  # probe 這一個獨立 SSM command。
+  # codex HIGH（後續一輪）：光「拆出 probe」還不夠——probe 若透過
+  # get_cache_backend()/get_ledger() 建構 DynamoDB client，走的是 boto3/
+  # botocore 內建預設 connect/read timeout + 標準重試，降級時可達數分鐘，
+  # 「有界」名不副實。已改成 `scripts/fetch_scheduler.py::run_probe()` 內部
+  # 改用 `_probe_cache_backend()`/`_probe_ledger_backend()`，明確帶
+  # connect_timeout=3.0s／read_timeout=3.0s／max_attempts=2（見該檔案常數
+  # `_PROBE_DYNAMODB_*`），probe 現在是真正有界的：
+  #   bounded worst-case ≈ 5 次序列 DynamoDB 操作
+  #     （cache PutItem、cache GetItem、ledger PutItem、ledger GetItem、
+  #       ledger Scan）
+  #     × (connect_timeout 3s + read_timeout 3s) × max_attempts 2
+  #     ≈ 5 × 6s × 2 = 60s
+  # 90s 當 poll deadline，對這個 60s bounded worst-case 留 30s margin
+  # （SSM 啟動/排程開銷 + 冪等 margin），不再是「猜一個夠大的數字」。
   # `|| true`：poll_ssm_terminal_status 逾時仍非終態時會 return 1，若不擋掉
   # 會被 `set -e` 在這行賦值當場中止腳本，跳過下面印診斷訊息的 if 區塊。
   local vstatus
