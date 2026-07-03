@@ -761,6 +761,7 @@ def _corroboration_detail(
     target: Claim,
     all_claims: list[Claim],
     stance_fn: Callable[[str, str], str] | None = None,
+    require_entailment: bool = False,
 ) -> tuple[set[str], set[str]]:
     """`_corroboration()` 核心迴圈抽出版，回傳 `(independent_sources, contradicting_sources)`。
 
@@ -771,6 +772,31 @@ def _corroboration_detail(
 
     供 `_corroboration()`（沿用原本行為）與 `_iterate_source_reputation()`（W2
     agreement 訊號）共用同一次 overlap/方向/stance 判斷結果。
+
+    codex 對抗審 [HIGH，#24]：`require_entailment=False`（**預設**，`_corroboration()`
+    既有分項專用）沿用原本語意——`stance_fn` 只用來「排除」明確矛盾，overlap+方向
+    閘通過、且非 "contradiction" 的一律算獨立佐證（`entailment` 或 `neutral` 皆算，
+    這是既有純文字重疊式「corroboration 分項」一路以來的設計，非本次修正範圍）。
+
+    `require_entailment=True`（**W2 動態信譽專用**，`_reputation_evidence()` 呼叫）：
+    truth-discovery 的「動態信譽」語意上要求真語意驗證，"neutral" 在這裡**不是**
+    「經查證為中立」，而是 `cached_stance_fn` 的萬用 fail-safe 值——離線 / 未設模型
+    / timeout / malformed 回應 / cache miss 又無可用 client / stance 預算或時間
+    耗盡，全部無差別回傳 "neutral"（見 `stance_cache.py`/`bedrock.py` 對應
+    docstring）。若沿用 `require_entailment=False` 的「非 contradiction 即佐證」，
+    生產預設 `llm_mode=off` 時幾乎所有配對都會落在這個 fail-safe neutral，等同
+    「沒有真的做過語意驗證，就把信譽當作已驗證佐證來調整」——直接違反 #24（假訊號
+    當真）。修法：`require_entailment=True` 時，只有 `stance_fn` 明確回傳
+    `"entailment"`（真的呼叫了分類器且判定為真語意蘊含）才計入
+    `independent_sources`；`"neutral"`（不論是分類器真判定為中立，或任何一種
+    fail-safe 降級——回傳值層級無法區分兩者，一律保守排除，不猜測）與
+    `stance_fn is None`（完全沒有可用的分類器）**都不計入任何一個集合**，也
+    不會進入 `_iterate_source_reputation` 的 `MIN_INDEPENDENT_EVIDENCE` 小樣本
+    守門分母——不採信，也不當它「什麼都沒發生」去湊樣本數。`"contradiction"`
+    不受影響：`cached_stance_fn` 的 fail-safe 只會降級成 `"neutral"`，絕不會
+    無中生有出一個 `"contradiction"`（見該函式 docstring），因此
+    `"contradiction"` 只可能來自真正跑成功（或先前持久化快取過）的分類結果，
+    是已驗證的真訊號，兩種模式下都照樣計入 `contradicting_sources`。
     """
     tt = _normalize(target.text) - DOMAIN_STOP
     independent_sources: set[str] = set()
@@ -788,8 +814,20 @@ def _corroboration_detail(
             continue
         if not _direction_compatible(target.direction, c.direction):
             continue
-        if stance_fn is not None and stance_fn(target.text, c.text) == "contradiction":
+        if stance_fn is None:
+            if require_entailment:
+                # W2：沒有可用的分類器，無法驗證語意——保守排除，不當佐證。
+                continue
+            independent_sources.add(c.doc.source)
+            continue
+        label = stance_fn(target.text, c.text)
+        if label == "contradiction":
             contradicting_sources.add(c.doc.source)
+            continue
+        if require_entailment:
+            if label == "entailment":
+                independent_sources.add(c.doc.source)
+            # "neutral"（genuine 或 fail-safe，無法區分）：W2 不採信，兩個集合都不進。
             continue
         independent_sources.add(c.doc.source)
     return independent_sources, contradicting_sources
@@ -871,8 +909,18 @@ def _reputation_evidence(
     `_corroboration_detail`），供 `_iterate_source_reputation` 的每一輪迭代與
     `score()` 的 `reputation_trace` 共用——**迭代輪數 K 不會讓這裡的 stance_fn 呼叫變多**
     （K 輪只重算 SR 混合權重，不重跑 overlap/方向/stance 判斷）。
+
+    codex 對抗審 [HIGH，#24] 修正：`require_entailment=True`——動態信譽只認真語意
+    `entailment`，`"neutral"`（含離線/timeout/malformed/cache miss/預算耗盡等
+    fail-safe 降級，回傳值層級無法區分）與無可用分類器一律不計入 `agree_sources`
+    （也不進 `contradict_sources`），見 `_corroboration_detail` docstring 完整
+    理由。`_corroboration()`（既有非 W2 分項）不受影響，仍用預設
+    `require_entailment=False`。
     """
-    return {c.id: _corroboration_detail(c, claims, stance_fn=stance_fn) for c in claims}
+    return {
+        c.id: _corroboration_detail(c, claims, stance_fn=stance_fn, require_entailment=True)
+        for c in claims
+    }
 
 
 def _iterate_source_reputation(
@@ -1144,6 +1192,17 @@ def score(
     `ScoredClaim.reputation_trace` 會附上該來源的
     `{source, prior, final, agree_n, contradict_n, iterations_run}`（可解釋，不塞進
     `components`，維持 `components` 的 str→number 契約）。
+
+    codex 對抗審 [HIGH，#24]：`agree_n`/`prior→final` 的上調**只認真語意
+    `entailment`**（見 `_reputation_evidence`/`_corroboration_detail`
+    `require_entailment` 說明）——`stance_fn` 回傳 `"neutral"`（含離線/未設
+    模型/timeout/malformed/cache miss/預算耗盡等 fail-safe，回傳值層級無法
+    區分「真中立」與「沒驗證成功」）一律不採信、不計入樣本。生產預設
+    `llm_mode=off` 時幾乎所有配對都是 fail-safe neutral，**W2 因此在離線模式
+    下對信譽是 no-op**（`agree_n`/`contradict_n` 皆 0，`final == prior`）——
+    這是刻意、誠實的行為：沒有真的做過語意驗證，就不動信譽，只有真連上
+    Bedrock/W1.5 語意分類且判定為 `entailment` 時才會上調；`"contradiction"`
+    不受影響（fail-safe 絕不會產生 `"contradiction"`，見上述函式）。
 
     `stance_fn`：選填。若提供，直接使用此函式（跳過用 `stance_client`/
     `stance_pair_budget`/`stance_remaining_time_fn` 另建一份），供呼叫端
