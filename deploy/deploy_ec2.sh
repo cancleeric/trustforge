@@ -116,7 +116,7 @@ verify_fetch_scheduler() {
     --document-name AWS-RunShellScript --parameters commands='["cd /opt/trustforge","systemctl daemon-reload","if systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 一般排程執行成功（best-effort seed，fire-and-forget，非部署 gate）\"; else echo \"[ec2] ⚠️ fetch-scheduler 一般排程 exit 非零（best-effort，不影響部署判定——常見原因是來源端短暫限流如 reddit 429，跟基建/程式碼健康無關）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager >&2 || true; fi"]' \
     --query 'Command.CommandId' --output text 2>/dev/null || echo "")
   if [ -n "$seed_cmdid" ] && [ "$seed_cmdid" != "None" ]; then
-    echo "[ec2] fetch-scheduler 一般排程 seed 已送出（CommandId=$seed_cmdid，fire-and-forget，不等待、不影響部署判定；結果可事後用 aws ssm get-command-invocation 查）"
+    echo "[ec2] fetch-scheduler 一般排程 seed 已送出（CommandId=${seed_cmdid}，fire-and-forget，不等待、不影響部署判定；結果可事後用 aws ssm get-command-invocation 查）"
   else
     echo "[ec2] ⚠️ fetch-scheduler seed 送出失敗（best-effort，不影響部署判定，略過）" >&2
   fi
@@ -320,7 +320,7 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   esac
 
   # 遠端指令最前面加 set -e：任一步失敗就整段中止，不會壞版本仍 restart。
-  # 同時把 systemd 的 BEDROCK_MODEL_ID 重寫成本次的 $MODEL（離線部署就清空）——
+  # 同時把 systemd 的 BEDROCK_MODEL_ID 重寫成本次的 ${MODEL}（離線部署就清空）——
   # 否則曾經開過真模型 online 的實例，離線重部署後 systemd 環境沒被更新，
   # service 仍帶著舊的 BEDROCK_MODEL_ID 繼續跑，等於「離線部署」沒真的離線、
   # 持續燒 credit。
@@ -351,7 +351,7 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   # `|| true`：理由同上，避免 set -e 在逾時時於賦值行就靜默中止腳本。
   SSM_STATUS=$(poll_ssm_terminal_status "$CMDID" "$IID" 180 5) || true
   if [ "$SSM_STATUS" != "Success" ]; then
-    echo "[ec2] ❌ update-in-place 失敗：SSM CommandId=$CMDID Status=$SSM_STATUS（等到終態或輪詢 180s 逾時仍非 Success）" >&2
+    echo "[ec2] ❌ update-in-place 失敗：SSM CommandId=$CMDID Status=${SSM_STATUS}（等到終態或輪詢 180s 逾時仍非 Success）" >&2
     aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" \
       --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
