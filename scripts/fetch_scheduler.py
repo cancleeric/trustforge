@@ -81,6 +81,7 @@ from trustforge.ingestion.cache import (  # noqa: E402
     TRUST_OVERVIEW_COIN,
     TRUST_OVERVIEW_SOURCE,
     TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS,
+    TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
     TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS,
     TRUST_SNAPSHOT_SOURCE,
     CacheBackend,
@@ -89,9 +90,12 @@ from trustforge.ingestion.cache import (  # noqa: E402
     cache_get,
     cache_key,
     cache_set,
+    cache_set_if_newer,
     doc_to_dict,
     get_cache_backend,
+    snapshot_history_date,
     stale_after_for,
+    trust_snapshot_history_key,
 )
 from trustforge.ingestion.coingecko import build_coingecko_sources  # noqa: E402
 from trustforge.ingestion.news import build_news_sources  # noqa: E402
@@ -615,10 +619,55 @@ SNAPSHOT_STALE_AFTER_SECONDS = TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS
 _SNAPSHOT_QUERY = "分析該幣種近期市場狀況，整合多源資料"
 
 
-def _snapshot_dict(coin: str, report) -> dict:
+def _reputation_summary(evidence: list) -> dict[str, dict]:
+    """task #26：從單次 `pipeline.run()` 回傳的 `evidence`（`list[Evidence]`，
+    先前呼叫端一律用 `_evidence` 丟棄）擷取 W2 可解釋性 trace 精華。
+
+    背景：`agent.orchestrator._scored_to_evidence()` 在 `dynamic_reputation=
+    True`（production 固定開啟，見該模組 `run_agent_pipeline`）時，把
+    `trust.scoring.score()` 算出的 `{source, prior, final, agree_n,
+    contradict_n, iterations_run}` 併入每筆 `Evidence.trust_components` 的
+    `reputation_prior`/`reputation_final`/`reputation_agree_n`/
+    `reputation_contradict_n`/`reputation_iterations_run` 欄位——同一來源在
+    同一份報告裡的每筆 `Evidence` 攜帶**完全相同**的 trace 值（`scoring.
+    score()` 逐 source 建一份、廣播給該 source 所有 claim，見該函式
+    `trace_by_source` 實作），這裡依 `source` 去重，只留一份代表值。
+
+    只在真的有 trace 資料時才收錄該來源（`llm_mode=off` 的 real-off
+    `--snapshot` 路徑下，`stance_fn` 全部 fail-safe 回 neutral，`agree_n`/
+    `contradict_n` 恆為 0、`final == prior`——這是誠實的真結果，不是 bug，
+    #24 鐵律：只寫真分析結果，不因為「目前恆為 0」就不寫或造假填別的值）。
+    """
+    summary: dict[str, dict] = {}
+    for ev in evidence:
+        tc = getattr(ev, "trust_components", None) or {}
+        if "reputation_prior" not in tc or "reputation_final" not in tc:
+            continue
+        source = getattr(ev, "source", "")
+        if not source or source in summary:
+            continue  # 同來源多筆 Evidence 的 trace 值相同，取第一筆即可
+        prior = float(tc["reputation_prior"])
+        final = float(tc["reputation_final"])
+        summary[source] = {
+            "prior": prior,
+            "final": final,
+            "delta": round(final - prior, 4),
+            "agree_n": int(tc.get("reputation_agree_n", 0)),
+            "contradict_n": int(tc.get("reputation_contradict_n", 0)),
+        }
+    return summary
+
+
+def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     """`Report`（真 `pipeline.run()` 結果）→ 快照精華 dict。欄位逐字取自
-    既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。"""
-    return {
+    既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。
+
+    task #26 追加：`evidence`（`pipeline.run()` 回傳的第二個值，之前呼叫端
+    直接丟棄）非空時，順便擷取 W2 reputation_trace 精華（見
+    `_reputation_summary()`），寫入 `"reputation_trace"` 欄位，供未來 #4
+    來源信譽榜使用。沒有 trace 資料（`evidence=None`/空清單，或該幣本輪
+    尚未啟用動態信譽）時完全不新增這個鍵，逐字向後相容，也不補假值。"""
+    snap = {
         "coin": coin,
         "trust_score": round(float(report.confidence), 4),
         "direction": report.direction,
@@ -626,6 +675,11 @@ def _snapshot_dict(coin: str, report) -> dict:
         "decision_state": report.decision_state,
         "generated_at": report.generated_at,
     }
+    if evidence:
+        reputation_trace = _reputation_summary(evidence)
+        if reputation_trace:
+            snap["reputation_trace"] = reputation_trace
+    return snap
 
 
 def _overview_card_href(coin: str) -> str | None:
@@ -726,6 +780,144 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     既有語意，讓 cron/監控看得到）；全部幣本輪都失敗（0 筆快照）也視為
     失敗，即使沒有寫入任何東西可失敗——因為代表整輪排程根本沒產出任何
     結果，值得被監控看到，而非默默 exit 0。
+
+    task #26：每幣寫完「最新一筆」（`TRUST_SNAPSHOT_SOURCE`，每輪覆寫）後，
+    順便多寫一筆**按日**歷史快照（`trust_snapshot_history_key()`，同一天
+    多次跑對同一把 key 覆寫＝uPsert，跨日累積成序列），供未來 #26 UI 趨勢
+    圖／`get_trust_history()` 讀取。歷史寫入失敗獨立計入
+    `failures`（`"{coin}:history"`），不影響已成功寫入的「最新一筆」與
+    總覽 blob（那條路徑本來就穩定運作，不該被歷史寫入這個新增功能拖累）。
+
+    codex HIGH（PR #59 review 第三輪，#1 三表示一致性最終閉合）：「最新一筆」
+    （`TRUST_SNAPSHOT_SOURCE`）、「按日歷史」（`TRUST_SNAPSHOT_HISTORY_SOURCE`）、
+    「總覽 blob」（`TRUST_OVERVIEW_SOURCE`）三個持久化表示**全部**改用
+    `cache_set_if_newer()`（單調條件寫入），且**共用同一個 `run_now`**（本函式
+    一進來就 `time.time()` 一次，取代先前逐幣各自呼叫、總覽再另外呼叫一次
+    `time.time()` 的寫法）。理由：前一輪只把歷史改 monotonic，「最新一筆」跟
+    總覽 blob 還是無條件覆寫——run A（較舊）暫停、run B（較新）寫完全部三表
+    示、A 恢復繼續寫 → A 會**無條件**把 latest/overview 蓋回舊值，而 history
+    因為已經是 monotonic 正確跳過成 B，造成「首頁看到的最新/總覽是 A 的舊
+    值、history 卻是 B 的新值」的長期 silent 矛盾（違反 #24：使用者看到的
+    「當下」跟「歷史」互相打架）。三者共用同一 `run_now` 這件事本身也很關鍵：
+    確保同一輪呼叫的三個寫入判斷用的是**同一把時間戳**跟各自既有值比較，
+    不會出現「這輪一部分寫入贏、一部分寫入輸」的內部不一致（同一輪要嘛全部
+    覆寫成功、要嘛全部因為比既有值舊而跳過）。跳過（`result.skipped`）皆屬
+    正常情況、不計入 `failures`；只有 backend 真的寫入失敗（`result.ok=False`）
+    才計入。
+
+    codex HIGH（PR #59 review 第四輪，per-coin all-or-nothing 收窄，非重量級
+    跨 key transaction）：latest/history/overview 三個各自的條件寫入雖然都
+    是 monotonic，但**彼此不是同一個原子操作**——例如 latest 寫成功後，
+    history 那步才發生 error/timeout，會出現「latest 已經是新的，history
+    卻還停在舊的」這種單幣局部矛盾。真正的跨 key 原子（DynamoDB
+    `TransactWriteItems` 全項單調條件、或 immutable generation + 原子切換
+    manifest 指標）屬於重量級架構改動，決定當 follow-up 處理（見
+    `docs/OPTIMIZATION-PLAN-weakness.md` 對應段落 + GitHub issue）——歷史
+    趨勢 UI 目前還沒建、沒有人讀 history，暫態矛盾影響極小，值得先用一個
+    收斂矛盾窗的**低成本收窄**頂著，而不是本輪就上重量級方案。
+
+    本輪收窄做法：**以這一幣 latest 這次的寫入結果為準，串接該幣接下來
+    是否處理 history/overview**——
+    - latest **skipped**（比既有值舊）→ 同步 `continue` 跳過這一幣的
+      history 寫入，也不把它納入這輪的總覽候選（不計入 `failures`，這輪
+      本來就不該處理這一幣，交給既有/勝出的那筆資料）。
+    - latest **error/失敗**（非 skip）→ 沿用既有的 `continue`，一樣跳過
+      history、排除出總覽候選，並計入 `failures`（不會出現「latest 沒寫成
+      但 history/overview 還是寫了」）。
+    - latest **成功覆寫** → 照常寫 history + 納入總覽候選。
+    這把「latest 新但 history 舊」的矛盾窗收到只剩「latest 跟 history 都
+    寫成功，但兩個 `cache_set_if_newer()` 呼叫之間程序被砍斷」這種極罕見
+    的 transient crash 窗——下一輪排程會自然覆蓋回一致狀態（self-healing），
+    不需要跨 key 原子就能把常態下的矛盾視窗壓到最小。
+
+    codex HIGH（PR #59 review 第五輪，#1 durability 最終閉合）：第四輪的
+    per-coin 收窄仍有一個方向性缺陷——它是**先寫 latest、才寫 history**。
+    若程序剛好在「latest 已經寫成功」跟「history 還沒寫」這兩步之間被砍斷
+    （crash／OOM kill／部署中途被殺），且下一輪排程剛好跨過 UTC 日界，
+    **前一天的歷史就永久遺失、無法復原**——history 的存在意義正是按日
+    累積成 point-in-time 序列，一旦某一天完全沒有任何一次成功寫入，
+    之後**沒有任何辦法補回那一天**（不像 latest，latest 弄丟舊值只是
+    「暫時舊」，下一輪重跑一定會自然覆蓋回最新，是可自癒的）。「下一輪
+    排程自然覆蓋回一致狀態」這個自癒說法，只在「還沒跨過那一天」的前提
+    下成立；一旦跨了日界，該幣當天的歷史就是真的、永久地空了一格。
+
+    修法：**重排寫入序，把不可復原的那個（history）放在可自癒的那個
+    （latest／overview）前面**——
+    1. 先寫 `history`（當日 PIT，一旦這步寫完，這一天這一幣的資料就
+       durable 保住了，即使接下來 crash 也不會再遺失）。
+    2. `history` 成功後，才接著寫 `latest` + 納入總覽候選（這兩個是
+       last-write-wins、下一輪排程一定會自然覆蓋回最新值，可以安心放在
+       後面——即使中間又被砍斷，最多只是「latest 暫時顯示舊資料」，不是
+       「這一天的歷史永遠消失」）。
+
+    對應把 gating 依據也整個反過來，改成**以 history 這次的 CAS 結果為
+    準**（取代第四輪「以 latest 結果為準」的方向）：
+    - history **skipped**（當日已有較新或同時的快照）→ 同步跳過這一幣
+      的 latest／總覽候選寫入，交給既有/勝出的那筆資料（不計入
+      `failures`）。
+    - history **error/失敗**（非 skip）→ 一樣跳過 latest／總覽候選，並
+      計入 `failures`（不會出現「history 沒寫成但 latest/overview 還是
+      寫了」，避免重新引入第四輪修的那種同幣內部矛盾，只是換了個方向）。
+    - history **成功覆寫** → 才繼續嘗試 `cache_set_if_newer()` 寫
+      `latest`（**仍然是條件寫入**，因為 latest 是全域 key、可能還在跟
+      其他天的另一輪排程競爭，不能因為 history 贏了就無條件覆寫
+      latest）。latest 本身若又被判定 skip（極罕見：不同天的另一輪已經
+      寫入更新的 latest），視為正常、自癒的暫態，不計入 `failures`，也
+      不把這筆 stale 資料納入總覽候選（總覽只收「這一幣這一輪真的成為
+      目前最新」的資料）；latest 真的寫入失敗（`ok=False`）才計入
+      `failures`，同樣排除出總覽候選。
+    三表示仍共用同一個 `run_now`；全部幣本輪都合法跳過非失敗誤報的既有
+    邏輯（`skipped_coins`）維持不變，只是現在會被兩個地方（history 跳過、
+    或 history 成功但 latest 又跳過）都計入。這樣把「crash 在 history 跟
+    latest 之間」的殘餘視窗，從「可能永久弄丟一天歷史」收斂成「latest
+    暫時顯示舊資料、下一輪自癒」——真正的跨 key 原子仍是 follow-up
+    （見 GitHub issue #62、`docs/OPTIMIZATION-PLAN-weakness.md`），但這次
+    重排已經把「不可復原」的那一半風險大幅降低。
+
+    codex HIGH（PR #59 review 第六輪，backend-affinity 一致性、#1 最終
+    閉合）：上面的「history 先寫」重排隱含一個假設——history 這次真的
+    durable 進了 primary backend。但 `cache_set_if_newer()` 本身有
+    cross-backend fallback 機制（primary 如 DynamoDB 失敗時，可能改寫本地
+    `JsonCacheBackend` 並回傳 `ok=True, used_fallback=True`——見
+    `src/trustforge/ingestion/cache.py`）。若 history 這次是靠 fallback
+    才寫成功，那份資料**只在本機看得到，沒有真正進 primary**；如果緊接著
+    latest/overview 的 CAS 呼叫時 primary 剛好恢復、正常寫進 primary，
+    primary 端就會出現「latest/overview 是新的，但 history 完全不存在」
+    的跨 backend 分裂——一旦跨過 UTC 日界，primary 那天的 PIT 就永久
+    缺角，且因為 `history_result.ok` 是 `True`，這個分裂完全不會被
+    `failures` 抓到、run 還是回報 exit 0，形同悄悄發生、沒有人會發現。
+    修法：把「history 走 fallback、沒真正進 primary」視同跟
+    `history_result.ok=False` 一樣的 gating 失敗——同步跳過這一幣的
+    latest/overview（刻意不寫進任何 backend，包含也不寫進 fallback，
+    避免又要另外追蹤兩個 backend 各自的一致性），並計入 `failures`
+    （逼監控看得到，下一輪 DynamoDB 恢復後才會自然重新整批寫回
+    primary，三表示重新對齊）。這確保三個表示要嘛全部落在同一個
+    backend 保持一致，要嘛這一幣這一輪整個不處理，不會有「這一幣的
+    三個表示分散在不同 backend」這種更難排查的分裂狀態。
+
+    codex HIGH（PR #59 review 第七輪，跨 backend 分裂 class 徹底閉合）：
+    第六輪只擋了 history 的 fallback，**latest 跟 overview 這兩個寫入的
+    fallback 完全沒擋**——history 成功進 primary 之後，latest 這次呼叫若
+    剛好 primary transient 失敗、轉走 JSON fallback，`result.ok` 一樣是
+    `True`，程式會照常把它當成功、納入總覽候選；overview 接著若正常寫進
+    （已經恢復的）primary，primary 端就會出現「history/overview 是新的，
+    但 latest 沒真的更新」的分裂；overview 自己也可能發生一樣的事。用
+    「per-key 個別判斷 used_fallback」這種修法，每加一個 key 就要多补一次
+    判斷，容易漏，是治標不治本。
+
+    最乾淨的解法：**這三個 `cache_set_if_newer()` 呼叫全部明確傳
+    `allow_json_fallback=False`**，從根本上關掉這條路徑的 cross-backend
+    fallback（`_json_fallback_enabled()` 收到明確 `False` 時一律直接視為
+    停用，不會再嘗試 fallback，不管環境變數 `TRUSTFORGE_CACHE_JSON_FALLBACK`
+    是否開啟）——snapshot 這三個表示只認 primary backend 是否真的寫成功；
+    primary 失敗就是失敗（`ok=False`），不會有「fallback 成功但沒進
+    primary」這種曖昧地帶。一般 cache（連接器資料抓取的快取）呼叫端完全
+    不受影響，`allow_json_fallback` 預設值沒變，這裡只是 snapshot 路徑
+    明確傳入 `False`。history/latest/overview 三處各自保留的
+    `used_fallback` 檢查因此結構上都變成不可能觸發的 defense-in-depth
+    （防止未來有人漏改某一處呼叫又重新打開這個 class），三表示要嘛全部
+    真的 durable 進 primary、要嘛任何一個環節失敗就整幣跳過並計入
+    `failures`，不可能再出現跨 backend 分裂。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -738,11 +930,24 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
               f"{cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN)!r}")
         return 0
 
+    # codex HIGH（PR #59 review 第三輪）：三個持久化表示（latest/history/
+    # overview）共用同一個 `run_now`，一進函式就取一次——不要逐幣、逐 key
+    # 各自呼叫 `time.time()`。同一輪呼叫用同一把時間戳跟各自既有值比較，
+    # 確保這一輪要嘛全部覆寫成功、要嘛全部因為比既有值舊而跳過，不會出現
+    # 「這輪一部分寫贏、一部分寫輸」的內部不一致（見本函式 docstring）。
+    run_now = time.time()
     snapshots: list[dict] = []
     failures: list[str] = []
+    # codex HIGH（PR #59 review 第四輪，per-coin all-or-nothing 收窄）：
+    # 「latest 被單調條件寫入判斷為跳過」是**正常、健康**的行為（代表有另一
+    # 輪更新的排程已經處理過這幣，見下方 `continue` 分支），不是失敗——
+    # 用獨立的 `skipped_coins` 追蹤，跟真正的 `failures`（pipeline 失敗／
+    # cache 寫入失敗）分開，讓「這輪全部幣都被更新的並行排程超車而跳過」
+    # 不會被回傳碼誤判成「這輪排程失敗」（見下方總覽 blob 段落）。
+    skipped_coins: list[str] = []
     for coin in coins:
         try:
-            report, _evidence, _log = pipeline_run(
+            report, evidence, _log = pipeline_run(
                 coin, _SNAPSHOT_QUERY, QuestionType.MULTI_SOURCE,
                 data_mode="live", llm_mode="off",
             )
@@ -755,40 +960,197 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(coin)
             continue
 
-        snap = _snapshot_dict(coin, report)
-        result = cache_set(
+        snap = _snapshot_dict(coin, report, evidence)
+
+        # codex HIGH（PR #59 review 第五輪，#1 durability 最終閉合）：
+        # **先寫 history、才寫 latest/overview**——history 是「按日累積、
+        # 一旦某天完全沒寫到就永久補不回」的不可復原資料（point-in-time
+        # 序列），latest/overview 則是 last-write-wins、下一輪排程一定會
+        # 自然覆蓋回最新值的可自癒資料。把不可復原的那個放前面寫，才能讓
+        # 「history 寫完、latest 還沒寫」之間發生 crash 時，這一天這一幣
+        # 的歷史已經 durable 保住，不會因為程序被砍斷而永久遺失（見本函式
+        # docstring 完整說明；先前第三、四輪是反過來先寫 latest，若 crash
+        # 剛好卡在 latest 寫完、history 寫前，且下一輪已跨過 UTC 日界，
+        # 前一天的 history 就會永久遺失，不可復原）。
+        #
+        # task #26：按日累積歷史——同一天多次跑對同一把 key 覆寫
+        # （upsert），跨日才會因日期不同而各自成一筆，天然累積成序列。用
+        # 跟 latest/overview 同一個 `run_now`，避免同一輪內兩次
+        # `time.time()` 剛好跨過 UTC 午夜造成「同一次真呼叫，兩把 key
+        # 寫進不同日期」的邊界亂跳。
+        # codex HIGH（PR #59 review 第七輪，跨 backend 分裂 class 徹底
+        # 閉合）：明確傳 `allow_json_fallback=False`——snapshot 這三個
+        # 表示（history/latest/overview）只認 primary backend 是否真的
+        # 寫成功，完全關掉 cross-backend fallback（見本函式 docstring
+        # 完整說明）。一般 cache（連接器資料）呼叫端不受影響，`False`
+        # 是這裡明確傳入、不是改預設值。
+        history_result = cache_set_if_newer(
+            backend, trust_snapshot_history_key(coin, snapshot_history_date(run_now)),
+            [snap], fetched_at=run_now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+            allow_json_fallback=False,
+        )
+        if not history_result.ok:
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照 cache 寫入失敗"
+                  f"（backend={history_result.backend}）：{history_result.error}，"
+                  f"本輪同步跳過該幣 latest／總覽候選", file=sys.stderr)
+            failures.append(f"{coin}:history")
+            continue
+        if history_result.used_fallback:
+            # codex HIGH（PR #59 review 第六輪，backend-affinity 一致性）：
+            # primary（DynamoDB）寫入失敗、靠本地 `JsonCacheBackend`
+            # fallback 才把 history 寫進去時，`history_result.ok` 仍是
+            # `True`（fallback 語意上「有真的持久化成功」），但那份資料
+            # **只在本機看得到，沒有真正 durable 進 primary**。若接下來
+            # 這一幣的 latest/overview 卻正常寫進 primary（例如 DynamoDB
+            # 剛好在兩次呼叫之間恢復），primary 就會出現「latest/overview
+            # 是新的，但 history 根本不存在」的跨 backend 分裂——一旦排程
+            # 跨過 UTC 日界，那天的 PIT 在 primary 端就永久缺角，而且因為
+            # `history_result.ok` 是 `True`，這個分裂完全不會被
+            # `failures` 抓到、run 還是 exit 0，不會有人發現。
+            #
+            # 第七輪起：上面呼叫已經明確傳 `allow_json_fallback=False`，
+            # 這個分支結構上**已經不可能再被觸發**（`_json_fallback_enabled`
+            # 收到明確 `False` 時一律直接回 `ok=False`，不會嘗試 fallback）
+            # ——保留這段檢查純粹是 defense-in-depth：如果未來有人不小心
+            # 在上面的呼叫漏掉 `allow_json_fallback=False`，這裡還是能攔住，
+            # 不讓「跨 backend 分裂」這個 class 因為一次疏忽就重新打開。
+            #
+            # 修法：把「history 沒有真正 durable 進 primary」視同 gating
+            # 失敗——跟 `not history_result.ok` 一樣處理：跳過這一幣的
+            # latest/overview（不寫進任何 backend，避免製造分裂），並計入
+            # `failures`（讓監控看得到，逼出 DynamoDB 的問題，下一輪
+            # DynamoDB 恢復後會自然重寫回 primary、三表示補齊）。刻意
+            # **不**額外把 latest/overview 也寫進 JSON fallback——因為
+            # snapshot 三表示本來就設計成三個要嘛同時在同一個 backend
+            # 達成一致、要嘛這一幣這一輪整個不處理，不做「history 在
+            # fallback、latest 在 fallback」這種本輪各自獨立 fallback、
+            # 之後又要對兩個 backend 分別追蹤一致性的複雜度。
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照走本地 JSON "
+                  f"fallback 寫入（primary 失敗：{history_result.error}），"
+                  f"視為未真正 durable 進 primary——本輪同步跳過該幣 "
+                  f"latest／總覽候選、計入 failures，避免 primary 出現 "
+                  f"history 缺角但 latest/overview 卻已更新的跨 backend 分裂",
+                  file=sys.stderr)
+            failures.append(f"{coin}:history-fallback")
+            continue
+        if history_result.skipped:
+            # 單調條件寫入判斷 incoming 比當日既有值舊（或一樣新）而主動
+            # 跳過——這是正確行為（避免覆蓋較新的值），不是失敗，不計入
+            # failures。per-coin all-or-nothing 收窄（第五輪起改以 history
+            # 這次的 CAS 結果為準）：history 跳過時，同步跳過這一幣的
+            # latest 寫入、也不把它納入這輪的總覽候選，讓三個表示對「這一
+            # 幣該不該反映本輪資料」的判斷收斂成同一個答案。
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照跳過寫入"
+                  f"（當日已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫，"
+                  f"本輪同步跳過該幣 latest／總覽候選）")
+            skipped_coins.append(coin)
+            continue
+        # 走到這裡代表 `history_result.used_fallback` 一定是 `False`
+        # （上面已經攔截並 `continue` 掉 fallback 的情況）——history 這次
+        # 真的成功 durable 進 primary，不需要再另外呼叫
+        # `_warn_if_fallback_used()`。
+
+        # history 已經 durable 保住這一幣這一天的資料，才輪到寫
+        # last-write-wins、可自癒的 latest。`latest` 是全域 key（不分日
+        # 期），可能還在跟其他天的另一輪排程競爭，即使 history 贏了也不能
+        # 無條件覆寫 latest，仍必須是條件寫入。
+        result = cache_set_if_newer(
             backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), [snap],
-            fetched_at=time.time(), ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            fetched_at=run_now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            allow_json_fallback=False,
         )
         if not result.ok:
             print(f"[fetch_scheduler] --snapshot {coin}: cache 寫入失敗"
                   f"（backend={result.backend}）：{result.error}", file=sys.stderr)
             failures.append(coin)
             continue
+        if result.used_fallback:
+            # codex HIGH（PR #59 review 第七輪，跨 backend 分裂 class
+            # 徹底閉合）：history 已經 durable 進 primary，但這一幣的
+            # latest 這次卻只走了本地 JSON fallback（沒真正進
+            # primary）——若這裡當成功繼續往下納入總覽候選，總覽 blob
+            # 若接著正常寫進 primary，primary 端就會出現「history/總覽
+            # 是新的，但 latest 沒真的更新」的跨 backend 分裂。上面已經
+            # 明確傳 `allow_json_fallback=False`，結構上這裡已經不可能
+            # 被觸發（保留純屬 defense-in-depth，見 history 那段同款
+            # 注解）。視同失敗處理：不納入總覽候選、計入 failures。
+            print(f"[fetch_scheduler] --snapshot {coin}: 最新一筆快照走本地 "
+                  f"JSON fallback 寫入（primary 失敗：{result.error}），視為"
+                  f"未真正 durable 進 primary——不納入總覽候選、計入 failures",
+                  file=sys.stderr)
+            failures.append(f"{coin}:latest-fallback")
+            continue
+        if result.skipped:
+            # 極罕見：history 贏了（這一天這一幣目前最新），但 latest
+            # 這個全域 key 已經被另一輪（處理不同天、run_now 更新）的排程
+            # 搶先寫入更新的值。這是正常、可自癒的暫態（下一輪排程一定會
+            # 自然覆蓋回真正最新），不計入 failures；但也不把這筆已經不是
+            # 「目前最新」的資料納入總覽候選，避免總覽顯示比 latest 實際
+            # 內容還舊的值。
+            print(f"[fetch_scheduler] --snapshot {coin}: 最新一筆快照跳過寫入"
+                  f"（已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫，"
+                  f"history 已保住當日資料，本輪不納入總覽候選）")
+            skipped_coins.append(coin)
+            continue
         _warn_if_fallback_used(f"--snapshot {coin}", result)
-        snapshots.append(snap)
         print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
               f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
+        snapshots.append(snap)
 
     overview_html = _render_overview_html(snapshots)
     if overview_html:
-        overview_result = cache_set(
+        # codex HIGH（PR #59 review 第三輪）：總覽 blob 也改 `cache_set_if_newer()`
+        # 並沿用跟 latest/history 同一個 `run_now`（不再另外呼叫一次
+        # `time.time()`）——三者共用同一把時間戳，確保同一輪要嘛三個表示
+        # 全部覆寫成功、要嘛全部因為比既有值舊而跳過，不會出現「latest/總覽
+        # 被較舊一輪蓋掉、history 卻正確跳過」的表示間矛盾（見本函式
+        # docstring）。
+        # codex HIGH（PR #59 review 第七輪）：總覽 blob 也明確傳
+        # `allow_json_fallback=False`——理由同 history/latest（見本函式
+        # docstring），三個 snapshot 表示只認 primary backend 是否真的
+        # 寫成功，完全關掉這條路徑的 cross-backend fallback。
+        overview_result = cache_set_if_newer(
             backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN),
             [{"html": overview_html}],
-            fetched_at=time.time(), ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            fetched_at=run_now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            allow_json_fallback=False,
         )
         if not overview_result.ok:
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 寫入失敗"
                   f"（backend={overview_result.backend}）：{overview_result.error}",
                   file=sys.stderr)
             failures.append("__trust_overview_html__")
+        elif overview_result.used_fallback:
+            # 同上面 latest 那段：`allow_json_fallback=False` 讓這裡結構上
+            # 不可能被觸發，純屬 defense-in-depth。總覽走 fallback 代表
+            # 沒真正 durable 進 primary——若當成功放過，primary 端就會
+            # 出現「latest/history 是新的，但總覽 blob 沒真的更新」的
+            # 跨 backend 分裂。視同失敗計入 failures。
+            print(f"[fetch_scheduler] --snapshot: 總覽 blob 走本地 JSON "
+                  f"fallback 寫入（primary 失敗：{overview_result.error}），"
+                  f"視為未真正 durable 進 primary，計入 failures",
+                  file=sys.stderr)
+            failures.append("__trust_overview_html__:fallback")
+        elif overview_result.skipped:
+            print(f"[fetch_scheduler] --snapshot: 總覽 blob 跳過寫入"
+                  f"（已有較新或同時的總覽，fetched_at={run_now:.0f} 未覆寫）")
         else:
-            _warn_if_fallback_used("--snapshot overview", overview_result)
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 已寫入（{len(snapshots)} 幣）")
+    elif skipped_coins and not failures:
+        # codex HIGH（PR #59 review 第四輪）：本輪 0 幣成功，但**不是失敗**
+        # ——全部幣的 latest 都被單調條件寫入判斷為「比既有值舊」而跳過，
+        # 代表有另一輪更新的並行排程已經處理過這批幣（見上方 `skipped_coins`
+        # 累積邏輯），系統運作正常、資料已經是最新，不該被回傳碼誤判成
+        # 「這輪排程失敗」而觸發假警報（尤其排程重疊是這整組修正本來就要
+        # 正常處理、不是異常的情境）。
+        print(f"[fetch_scheduler] --snapshot: {len(skipped_coins)}/{len(coins)} 幣"
+              "本輪跳過寫入（已有更新的並行排程結果，非失敗），跳過總覽 blob 寫入")
     else:
-        # 本輪 0 幣成功 → 沒有東西可組總覽，不寫入（不留舊 blob 誤導，靠既有
-        # TTL 讓上一輪殘留的 blob 自然過期）——非 bug，等下一輪（見 PLAN
-        # 「風險」段落：冷啟動時 15 分鐘 cadence 若跟 5 幣 collect 同時全部
+        # 本輪 0 幣成功、且不是「全部因為被更新的並行排程超車而跳過」
+        # ——是真的沒有任何一幣產出可用結果（pipeline 失敗／cache 寫入失敗
+        # 等），沒有東西可組總覽，不寫入（不留舊 blob 誤導，靠既有 TTL 讓
+        # 上一輪殘留的 blob 自然過期）——非 bug，等下一輪（見 PLAN「風險」
+        # 段落：冷啟動時 15 分鐘 cadence 若跟 5 幣 collect 同時全部
         # cache-miss，快照本來就該是空，首頁總覽該次不顯示）。
         print("[fetch_scheduler] --snapshot: 0 幣成功，跳過總覽 blob 寫入"
               "（非 bug，等下一輪）", file=sys.stderr)
