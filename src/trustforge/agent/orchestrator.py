@@ -11,6 +11,7 @@ Bedrock 只負責把推理「行文」成可讀敘述，不得把第三方現成
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Callable
@@ -186,28 +187,38 @@ def aggregate_trust_by_kind(evidence: list[Evidence]) -> dict[str, dict]:
     使用者把「沒資料」誤讀成「該維度信任極差」。
 
     回傳：`{kind: {"label", "has_data", "trust", "n_sources", "n_evidence",
-    "single_source"}}`，鍵順序固定依 `KIND_REPUTATION` 插入順序（不受
-    evidence 出現順序影響，同一份候選清單每次渲染順序一致；本次 evidence
-    出現、但不在 `KIND_REPUTATION` 裡的未知 kind 會附加在後面，防禦性地
-    不被靜默丟掉）。
+    "single_source"}}`，鍵集合**嚴格等於** `KIND_REPUTATION` 全集、鍵順序固定
+    依 `KIND_REPUTATION` 插入順序——不受 evidence 內容影響，確保雷達軸跨報告
+    可比較。evidence 出現、但不在 `KIND_REPUTATION` 裡的 kind（空字串、
+    schema drift、連接器拼字錯誤，例如把 "news" 打成 "newss"）**一律忽略、
+    不動態加軸**：這類 evidence 不計入任何維度（不會被硬塞進某個「看起來
+    像」的既有維度，以免污染該維度的信任平均與來源計數），只用
+    `logging.warning` 記一筆可觀測 log 供事後發現分類錯誤，雷達軸本身
+    絕不因此變動。
 
     只讀 `evidence`，不改動任何既有欄位／物件——`Report.confidence`／
     `calibrated_confidence`（信任總分）完全不受影響，分維聚合是額外呈現，
     不改總分演算法。
     """
     by_kind: dict[str, list[Evidence]] = {}
+    unknown_kinds: set[str] = set()
     for ev in evidence:
+        if ev.kind not in KIND_REPUTATION:
+            unknown_kinds.add(ev.kind)
+            continue
         by_kind.setdefault(ev.kind, []).append(ev)
 
-    dims_order = list(KIND_REPUTATION.keys())
-    for k in by_kind:
-        if k not in dims_order:
-            dims_order.append(k)
+    if unknown_kinds:
+        logging.warning(
+            "aggregate_trust_by_kind: 忽略不在 KIND_REPUTATION 的未知/空 kind"
+            "（不動態加軸，可能是 schema drift 或連接器拼字錯誤）：%s",
+            sorted(unknown_kinds),
+        )
 
     out: dict[str, dict] = {}
-    for kind in dims_order:
+    for kind in KIND_REPUTATION:
         kind_evidence = by_kind.get(kind, [])
-        label = _DIMENSION_LABELS.get(kind, kind or "未知")
+        label = _DIMENSION_LABELS.get(kind, kind)
         if not kind_evidence:
             out[kind] = {
                 "label": label,

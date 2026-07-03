@@ -12,6 +12,9 @@
    事件數一致，比照 `tests/test_w2_enable.py` 既有手法）。
 6. 信任總分演算法不變：呼叫 `aggregate_trust_by_kind` 前後 `report.confidence`／
    `calibrated_confidence` 逐字相同（純額外呈現，不改總分）。
+7. 固定軸契約（codex review）：回傳鍵集合嚴格等於 `KIND_REPUTATION` 全集，
+   不在該表裡的 kind（空字串、schema drift、拼字錯誤）一律忽略、不動態
+   加軸、不誤入其他既有維度——確保雷達軸跨報告可比較，不掩蓋分類錯誤。
 """
 from __future__ import annotations
 
@@ -112,14 +115,49 @@ def test_aggregate_by_kind_candidate_set_covers_all_kind_reputation_keys():
     assert all(d["has_data"] is False for d in dims.values())
 
 
-def test_aggregate_by_kind_unknown_kind_not_silently_dropped():
-    """不在 KIND_REPUTATION 裡的未知 kind（防禦性：未來連接器忘記登記）
-    仍會出現在回傳結果，不被靜默丟掉。"""
+def test_aggregate_by_kind_output_keys_strictly_equal_kind_reputation():
+    """雷達軸嚴格等於 KIND_REPUTATION 全集——不多不少，跨報告可比較。
+    （codex code review：舊版會把未知 kind 動態附加成額外軸，破壞可比性。）"""
+    evidence = [
+        _ev("cryptopanic", "news", 0.8),
+        _ev("mystery-source", "mystery_kind", 0.5),
+        _ev("typo-source", "newss", 0.9),  # 疑似把 "news" 拼錯
+        _ev("nokind-source", "", 0.4),  # 空 kind
+    ]
+    dims = aggregate_trust_by_kind(evidence)
+    assert set(dims.keys()) == set(KIND_REPUTATION.keys())
+
+
+def test_aggregate_by_kind_unknown_kind_ignored_not_added_as_axis():
+    """不在 KIND_REPUTATION 裡的未知 kind：忽略，不動態加軸、不誤入其他維度。"""
     evidence = [_ev("mystery-source", "mystery_kind", 0.5)]
     dims = aggregate_trust_by_kind(evidence)
-    assert "mystery_kind" in dims
-    assert dims["mystery_kind"]["has_data"] is True
-    assert dims["mystery_kind"]["trust"] == 0.5
+    assert "mystery_kind" not in dims
+    assert set(dims.keys()) == set(KIND_REPUTATION.keys())
+    # 未知 kind 的 evidence 不會被塞進任何既有維度，也不影響它們的信任平均。
+    for kind, d in dims.items():
+        assert d["has_data"] is False, f"{kind} 不該因為未知 kind 的 evidence 誤標有資料"
+
+
+def test_aggregate_by_kind_empty_kind_ignored_not_added_as_axis():
+    """空字串 kind（schema drift / 忘記填）：忽略，不自成一軸。"""
+    evidence = [_ev("nokind-source", "", 0.4), _ev("cryptopanic", "news", 0.8)]
+    dims = aggregate_trust_by_kind(evidence)
+    assert "" not in dims
+    assert set(dims.keys()) == set(KIND_REPUTATION.keys())
+    assert dims["news"]["n_evidence"] == 1
+    assert dims["news"]["trust"] == 0.8
+
+
+def test_aggregate_by_kind_misspelled_kind_ignored_not_folded_into_similar_axis():
+    """拼錯的 kind（如 "newss"）不會被誤判、悄悄併入拼字相近的 "news" 維度，
+    也不會自成一軸——避免掩蓋連接器分類錯誤。"""
+    evidence = [_ev("typo-source", "newss", 0.9), _ev("cryptopanic", "news", 0.6)]
+    dims = aggregate_trust_by_kind(evidence)
+    assert "newss" not in dims
+    assert set(dims.keys()) == set(KIND_REPUTATION.keys())
+    assert dims["news"]["n_evidence"] == 1
+    assert dims["news"]["trust"] == 0.6
 
 
 def test_aggregate_by_kind_empty_evidence_all_no_data():
