@@ -77,6 +77,22 @@ SYSTEM = (
 def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
     doc = sc.claim.doc
     ref = doc.meta.get("content_reference") or sc.claim.text[:120]
+    trust_components = {k: round(v, 3) for k, v in sc.components.items()}
+    # W2 可解釋性接線：`dynamic_reputation=True` 時 `sc.reputation_trace` 會帶
+    # 該來源的 {source, prior, final, agree_n, contradict_n, iterations_run}
+    # （見 trust.scoring.score docstring）。刻意只挑數值欄位併入
+    # `trust_components`（維持該 dict 既有 str→number 契約，`source` 字串已
+    # 有 `Evidence.source` 承載，不重複塞）——讓 web.py 既有的
+    # `_render_trust_breakdown` 不必改資料型別就能多顯示「為什麼信譽變動」。
+    # `dynamic_reputation=False`（例如舊測試/其他呼叫點）時 `reputation_trace`
+    # 為 None，這裡完全不新增鍵，逐字向後相容。
+    if sc.reputation_trace is not None:
+        trace = sc.reputation_trace
+        trust_components["reputation_prior"] = round(trace["prior"], 3)
+        trust_components["reputation_final"] = round(trace["final"], 3)
+        trust_components["reputation_agree_n"] = trace["agree_n"]
+        trust_components["reputation_contradict_n"] = trace["contradict_n"]
+        trust_components["reputation_iterations_run"] = trace["iterations_run"]
     return Evidence(
         source=doc.source,
         fetched_at=iso_utc(doc.ts),
@@ -85,7 +101,7 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         source_url=doc.url,
         kind=doc.kind,
         trust=round(sc.trust, 3),
-        trust_components={k: round(v, 3) for k, v in sc.components.items()},
+        trust_components=trust_components,
         # Tier2 可解釋 UX：操縱關鍵詞命中原文回填，供 web.py 渲染紅旗
         # （見 trust.scoring._manipulation_flags；空 list 時等同未命中）。
         flags=list(sc.manip_flags),
@@ -775,10 +791,20 @@ def run_agent_pipeline(
         stance_client=None if client.offline else client,
         stance_remaining_time_fn=log.remaining,
     )
+    # W2 啟用（gray `docs/PLAN-w2-enable-final.md`）：truth-discovery 動態來源
+    # 信譽由 PR #29 打底、預設關（`scoring.score` 的 `dynamic_reputation:
+    # bool = False`，見該處 docstring），本行是全 repo 生產唯一呼叫點正式
+    # 開啟。$0 確定性：K 輪迭代與下方 `_reputation_evidence` 都吃同一份
+    # `shared_stance_fn`（即上面已跟 Step 2.5 stance_pairs 偵測共用的同一顆
+    # `_StanceBudget`），不會多打一次 Bedrock（見 `score()` docstring、
+    # `tests/test_stance_budget_sharing.py`）。小樣本守門（<3 獨立佐證來源
+    # 強制 α=1，見 `scoring.py` `_iterate_source_reputation`）本身就是失效
+    # 安全，故不做 feature flag，直接預設開。
     scored = score(
         claims,
         now=now_ts,
         stance_fn=shared_stance_fn,
+        dynamic_reputation=True,
     )
     # score() 跑完、Step2 交叉佐證矛盾閘可能觸發的 stance 呼叫都已發生，
     # 這裡統一收割進 log、並清空 client.cost_events，避免下個 run 重複計費。
