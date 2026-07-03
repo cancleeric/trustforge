@@ -83,32 +83,45 @@ poll_ssm_terminal_status() {
 verify_fetch_scheduler() {
   local iid="$1"
   local vcmdid
-  # shellcheck disable=SC2016  # 單引號內的 $(seq..)/$i 刻意留給遠端展開，不
-  # 是漏加雙引號（跟既有 healthz for-loop 那行同一個模式）。
   # codex HIGH-3：光跑一般排程（無參數）不夠——cache 全新鮮時 0 次真呼叫仍
   # exit 0，PutItem 被拒也測不到（見 fetch_scheduler.py::run_probe 的說明）。
   # 這裡先跑一次一般排程當 best-effort seed（讓 cache 儘早有資料可用，但
   # 「來源端短暫失敗如 reddit 429」不該讓部署失敗，所以刻意不判斷它的 exit
   # code），真正的部署 gate 是接下來不依賴 freshness、不碰任何外部來源的
   # `--probe`（真的觸發一次 PutItem/GetItem，只測 DynamoDB R/W/IAM）。
+  # codex HIGH（timeout 契約修正）：原本這裡開頭有「for i in seq 1 40; do
+  # [ -f fetch-scheduler.service ] && break; sleep 5; done」等 unit 檔最多
+  # 200s 的迴圈，會讓這支遠端指令自身耗時上界（200s + 排程 + probe）超過
+  # 外層 poll timeout（180s），造成「指令還在合法跑，poll 卻先逾時」的同款
+  # 誤判——跟本次要修的 bug 是同一類矛盾。改成直接檢查一次即可（不重試）：
+  # verify_fetch_scheduler 兩個呼叫點（update-in-place 主 SSM 指令成功後、
+  # 或 verify_web_healthz 成功後）都已經確保 fetch-scheduler.service 這時
+  # 一定已經寫到磁碟上（user-data / 主指令都是先寫這個 unit 檔，才啟動
+  # trustforge 服務或跑 healthz 迴圈；trustforge 服務會 active/healthz 會
+  # 通，代表寫檔那行早就執行過了），所以不需要重試等待，若真的不存在代表
+  # 前面的假設被打破，直接印清楚的診斷、exit 1，不要浪費 200s 空等。
   vcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","for i in $(seq 1 40); do [ -f /etc/systemd/system/fetch-scheduler.service ] && break; sleep 5; done","if [ ! -f /etc/systemd/system/fetch-scheduler.service ]; then echo \"[ec2] fetch-scheduler.service 逾時仍未由 user-data 建立\" >&2; exit 1; fi","systemctl daemon-reload","if systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 一般排程執行成功（best-effort seed，非部署 gate）\"; else echo \"[ec2] ⚠️ fetch-scheduler 一般排程 exit 非零（best-effort，不讓部署失敗——常見原因是來源端短暫限流如 reddit 429，跟基建/程式碼健康無關；真正的部署 gate 是下一步 --probe）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager >&2 || true; fi","if ! ( cd /opt/trustforge && AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe 失敗（DynamoDB cache/cost-ledger 至少一表 PutItem/GetItem 真的不通，可能被 permission boundary/SCP/table policy 擋，見 trustforge-dynamodb inline policy；probe 不依賴任何外部來源/cache 是否新鮮，一定會真的觸發一次寫入，是唯一的部署 gate）\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe 通過（DynamoDB cache/cost-ledger 讀寫權限已真的驗證過）\""]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","if [ ! -f /etc/systemd/system/fetch-scheduler.service ]; then echo \"[ec2] fetch-scheduler.service 不存在（理論上不該發生：呼叫這支驗證前，update-in-place 主 SSM 指令或 user-data 應已寫入此檔並讓 trustforge 服務先 active/healthz 先過，此假設被打破，非逾時問題）\" >&2; exit 1; fi","systemctl daemon-reload","if systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 一般排程執行成功（best-effort seed，非部署 gate）\"; else echo \"[ec2] ⚠️ fetch-scheduler 一般排程 exit 非零（best-effort，不讓部署失敗——常見原因是來源端短暫限流如 reddit 429，跟基建/程式碼健康無關；真正的部署 gate 是下一步 --probe）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager >&2 || true; fi","if ! ( cd /opt/trustforge && AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe 失敗（DynamoDB cache/cost-ledger 至少一表 PutItem/GetItem 真的不通，可能被 permission boundary/SCP/table policy 擋，見 trustforge-dynamodb inline policy；probe 不依賴任何外部來源/cache 是否新鮮，一定會真的觸發一次寫入，是唯一的部署 gate）\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe 通過（DynamoDB cache/cost-ledger 讀寫權限已真的驗證過）\""]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$vcmdid" ] || [ "$vcmdid" = "None" ]; then
     echo "[ec2] ❌ fetch-scheduler 驗證用 SSM send-command 未取得 CommandId，中止" >&2
     exit 1
   fi
-  # 這支遠端指令包含「等 unit 檔出現（up to 200s）+ 一般排程 + --probe」
-  # 三段，總耗時常超過 `aws ssm wait command-executed` 內建的 100s 逾時，
-  # 逾時後 wait 本身失敗被 `|| true` 吞掉，緊接著查到的 Status 常常還是
-  # InProgress——這就是 v0.5.11/v0.5.12 誤報失敗的根因。改成自己輪詢到
-  # 終態，給 180s（遠端最長理論耗時的合理上限）才判定。
+  # timeout 契約：poll deadline 必須 > 這支遠端指令自身最大可能耗時。移除
+  # 上面 up to 200s 的 unit 等待後，剩下的耗時主要來自「一般排程」本身
+  # （systemctl start 對 oneshot unit 是同步阻塞——scripts/fetch_scheduler.py
+  # 目前 22 個來源，19 個逐幣（5 幣）；一般連接器 stagger 1s、CoinGecko
+  # 逐幣來源 6s 下限，光是保證會發生的 stagger sleep 就有
+  # 17*5*1s + 2*5*6s ≈ 145s，再加上每個真連接器實際 HTTP 呼叫時間），
+  # 之後才是耗時很短的 `--probe`（DynamoDB R/W，數秒等級）。給 300s（5 分
+  # 鐘）當 poll deadline，對「145s 保證 sleep + 真呼叫時間 + probe + SSM
+  # 開銷」留合理 margin；逾時才真的當失敗（並印 StandardErrorContent 診斷）。
   # `|| true`：poll_ssm_terminal_status 逾時仍非終態時會 return 1，若不擋掉
   # 會被 `set -e` 在這行賦值當場中止腳本，跳過下面印診斷訊息的 if 區塊。
   local vstatus
-  vstatus=$(poll_ssm_terminal_status "$vcmdid" "$iid" 180 5) || true
+  vstatus=$(poll_ssm_terminal_status "$vcmdid" "$iid" 300 5) || true
   if [ "$vstatus" != "Success" ]; then
-    echo "[ec2] ❌ fetch-scheduler 同步驗證失敗：CommandId=$vcmdid Status=${vstatus}（等到終態或輪詢 180s 逾時仍非 Success；--probe 未通過，DynamoDB cache/cost-ledger 權限或程式有誤，deploy 視為失敗；一般全源排程僅 best-effort seed，其失敗不影響此判定，不可能是它造成這裡非 Success）" >&2
+    echo "[ec2] ❌ fetch-scheduler 同步驗證失敗：CommandId=$vcmdid Status=${vstatus}（等到終態或輪詢 300s 逾時仍非 Success；--probe 未通過，DynamoDB cache/cost-ledger 權限或程式有誤，deploy 視為失敗；一般全源排程僅 best-effort seed，其失敗不影響此判定，不可能是它造成這裡非 Success）" >&2
     aws ssm get-command-invocation --region "$REGION" --command-id "$vcmdid" --instance-id "$iid" \
       --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
@@ -139,6 +152,9 @@ verify_web_healthz() {
   # 同一個潛在誤判模式（見 poll_ssm_terminal_status 上方註解），這裡的遠端
   # 指令本身有界（最長 12*3=36s），但仍改用同款終態輪詢，避免日後跟
   # verify_fetch_scheduler 一樣在慢的環境下被 100s 內建逾時誤判。
+  # timeout 契約稽核：這支遠端指令只有一個 healthz for-loop（≤36s），
+  # 120s poll deadline 對它有寬裕 margin，跟 verify_fetch_scheduler
+  # 那個 180s < 200s 的矛盾不同款，不需要再壓縮/移除任何步驟。
   # `|| true`：理由同 verify_fetch_scheduler 那處，避免 set -e 在逾時時
   # 於賦值行就把腳本靜默中止掉，吃掉後面的診斷訊息。
   local hstatus
@@ -288,6 +304,11 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   # send-command 只確認「已接受」是非同步的；輪詢到終態再查真正的執行結果
   # 狀態（同款 poll_ssm_terminal_status，避免 `aws ssm wait command-executed`
   # 內建 ~100s 逾時把還在跑的 InProgress 誤判成失敗）。
+  # timeout 契約稽核：這支遠端指令是 s3 cp+unzip+多個 sed+寫兩個 unit
+  # 檔+daemon-reload+restart trustforge+`enable --now fetch-scheduler.timer`
+  # （只啟用計時器，非同步觸發，不會在這裡阻塞等一般排程跑完）+healthz
+  # for-loop（≤36s）——沒有任何一步會同步等「一般排程」跑完，180s poll
+  # deadline 有寬裕 margin，跟 verify_fetch_scheduler 的矛盾不同款。
   # `|| true`：理由同上，避免 set -e 在逾時時於賦值行就靜默中止腳本。
   SSM_STATUS=$(poll_ssm_terminal_status "$CMDID" "$IID" 180 5) || true
   if [ "$SSM_STATUS" != "Success" ]; then
