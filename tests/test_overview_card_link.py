@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import html
+import re
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -75,3 +76,32 @@ def test_render_overview_html_keeps_dead_div_for_non_whitelisted_coin():
 
 def test_render_overview_html_empty_snapshots_returns_empty_string():
     assert fetch_scheduler._render_overview_html([]) == ""
+
+
+def test_render_overview_card_children_have_pointer_events_none():
+    """P-2026 生產 UX bug（第三處，CEO 真 Chrome 診斷）：卡片 `<a>` 本身
+    HTML 有效、程式化 `a.click()` 能導航，但真滑鼠點在卡片子元素（幣
+    LOGO `<svg>`／內層信任分-校準信心-時間戳那些純顯示 `<div>`）上時，
+    事件目標是子元素而非外層 `<a>`，導致「按了沒反應」。修法：卡片內
+    每個裝飾性子元素都要有 `pointer-events:none`，讓點擊穿透到外層
+    `<a>`；`<a>` 本身要維持 `pointer-events:auto`。"""
+    snapshots = [_fake_snapshot(coin) for coin in COIN_POOL]
+    htmlout = fetch_scheduler._render_overview_html(snapshots)
+
+    # <a> 本身顯式標註 pointer-events:auto，確保整張卡表面可靠觸發導航
+    assert htmlout.count("pointer-events:auto") == len(COIN_POOL)
+
+    for card in re.findall(
+        r'<a class="tf-overview-card"[^>]*>(.*?)</a>', htmlout, flags=re.DOTALL
+    ):
+        # 卡片內每個 <div>（信任分/校準信心/時間戳）都帶 pointer-events:none
+        divs = re.findall(r"<div[^>]*>", card)
+        assert divs, "卡片內應有內容 <div>"
+        for div in divs:
+            assert "pointer-events:none" in div, f"卡片子元素缺 pointer-events:none：{div}"
+        # 幣別 LOGO <svg> 外層也要有 pointer-events:none（點 LOGO 也要能導航）
+        if "<svg" in card:
+            assert '<span style="pointer-events:none">' in card
+            assert re.search(
+                r'<span style="pointer-events:none"><svg', card
+            ), "LOGO <svg> 應包在 pointer-events:none 的容器內"
