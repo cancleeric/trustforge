@@ -804,6 +804,31 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     覆寫成功、要嘛全部因為比既有值舊而跳過）。跳過（`result.skipped`）皆屬
     正常情況、不計入 `failures`；只有 backend 真的寫入失敗（`result.ok=False`）
     才計入。
+
+    codex HIGH（PR #59 review 第四輪，per-coin all-or-nothing 收窄，非重量級
+    跨 key transaction）：latest/history/overview 三個各自的條件寫入雖然都
+    是 monotonic，但**彼此不是同一個原子操作**——例如 latest 寫成功後，
+    history 那步才發生 error/timeout，會出現「latest 已經是新的，history
+    卻還停在舊的」這種單幣局部矛盾。真正的跨 key 原子（DynamoDB
+    `TransactWriteItems` 全項單調條件、或 immutable generation + 原子切換
+    manifest 指標）屬於重量級架構改動，決定當 follow-up 處理（見
+    `docs/OPTIMIZATION-PLAN-weakness.md` 對應段落 + GitHub issue）——歷史
+    趨勢 UI 目前還沒建、沒有人讀 history，暫態矛盾影響極小，值得先用一個
+    收斂矛盾窗的**低成本收窄**頂著，而不是本輪就上重量級方案。
+
+    本輪收窄做法：**以這一幣 latest 這次的寫入結果為準，串接該幣接下來
+    是否處理 history/overview**——
+    - latest **skipped**（比既有值舊）→ 同步 `continue` 跳過這一幣的
+      history 寫入，也不把它納入這輪的總覽候選（不計入 `failures`，這輪
+      本來就不該處理這一幣，交給既有/勝出的那筆資料）。
+    - latest **error/失敗**（非 skip）→ 沿用既有的 `continue`，一樣跳過
+      history、排除出總覽候選，並計入 `failures`（不會出現「latest 沒寫成
+      但 history/overview 還是寫了」）。
+    - latest **成功覆寫** → 照常寫 history + 納入總覽候選。
+    這把「latest 新但 history 舊」的矛盾窗收到只剩「latest 跟 history 都
+    寫成功，但兩個 `cache_set_if_newer()` 呼叫之間程序被砍斷」這種極罕見
+    的 transient crash 窗——下一輪排程會自然覆蓋回一致狀態（self-healing），
+    不需要跨 key 原子就能把常態下的矛盾視窗壓到最小。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -824,6 +849,13 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     run_now = time.time()
     snapshots: list[dict] = []
     failures: list[str] = []
+    # codex HIGH（PR #59 review 第四輪，per-coin all-or-nothing 收窄）：
+    # 「latest 被單調條件寫入判斷為跳過」是**正常、健康**的行為（代表有另一
+    # 輪更新的排程已經處理過這幣，見下方 `continue` 分支），不是失敗——
+    # 用獨立的 `skipped_coins` 追蹤，跟真正的 `failures`（pipeline 失敗／
+    # cache 寫入失敗）分開，讓「這輪全部幣都被更新的並行排程超車而跳過」
+    # 不會被回傳碼誤判成「這輪排程失敗」（見下方總覽 blob 段落）。
+    skipped_coins: list[str] = []
     for coin in coins:
         try:
             report, evidence, _log = pipeline_run(
@@ -856,16 +888,26 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(coin)
             continue
         if result.skipped:
-            # 單調條件寫入判斷 incoming 比既有「最新一筆」舊（或一樣新）而
-            # 主動跳過——不是失敗，只印資訊性訊息；仍照常嘗試下面的歷史
-            # 寫入／納入總覽候選（history/overview 各自有自己的單調判斷，
-            # 不會因此被污染，見本函式 docstring）。
+            # codex HIGH（PR #59 review 第四輪，per-coin all-or-nothing 收窄）：
+            # 三個 key 的條件寫入本身不是跨 key 原子操作（真原子需
+            # DynamoDB TransactWriteItems 或 generation manifest，屬於
+            # follow-up 架構改動，見 `docs/OPTIMIZATION-PLAN-weakness.md`）
+            # ——這裡先用「以這一幣 latest 這次的寫入結果為準」把矛盾窗
+            # 收到最小：latest 被判定「比既有值舊」而跳過時，**同步跳過
+            # 這一幣的歷史寫入、也不把它納入這輪的總覽候選**，不繼續往下
+            # 執行。避免「latest 沒真的覆寫成最新，history 卻另外寫了一筆
+            # 比 latest 目前實際內容更新的資料」這種同一幣內部矛盾——
+            # 三個表示對「這一幣該不該反映本輪資料」的判斷全部收斂成同一個
+            # 答案（history/overview 因此不需要各自的獨立判斷，這輪本來就
+            # 不該處理這一幣）。
             print(f"[fetch_scheduler] --snapshot {coin}: 最新一筆快照跳過寫入"
-                  f"（已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫）")
-        else:
-            _warn_if_fallback_used(f"--snapshot {coin}", result)
-            print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
-                  f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
+                  f"（已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫，"
+                  f"本輪同步跳過該幣歷史寫入與總覽候選）")
+            skipped_coins.append(coin)
+            continue
+        _warn_if_fallback_used(f"--snapshot {coin}", result)
+        print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
+              f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
         snapshots.append(snap)
 
         # task #26：按日累積歷史——同一天多次跑對同一把 key 覆寫（uPsert），
@@ -920,10 +962,21 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
         else:
             _warn_if_fallback_used("--snapshot overview", overview_result)
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 已寫入（{len(snapshots)} 幣）")
+    elif skipped_coins and not failures:
+        # codex HIGH（PR #59 review 第四輪）：本輪 0 幣成功，但**不是失敗**
+        # ——全部幣的 latest 都被單調條件寫入判斷為「比既有值舊」而跳過，
+        # 代表有另一輪更新的並行排程已經處理過這批幣（見上方 `skipped_coins`
+        # 累積邏輯），系統運作正常、資料已經是最新，不該被回傳碼誤判成
+        # 「這輪排程失敗」而觸發假警報（尤其排程重疊是這整組修正本來就要
+        # 正常處理、不是異常的情境）。
+        print(f"[fetch_scheduler] --snapshot: {len(skipped_coins)}/{len(coins)} 幣"
+              "本輪跳過寫入（已有更新的並行排程結果，非失敗），跳過總覽 blob 寫入")
     else:
-        # 本輪 0 幣成功 → 沒有東西可組總覽，不寫入（不留舊 blob 誤導，靠既有
-        # TTL 讓上一輪殘留的 blob 自然過期）——非 bug，等下一輪（見 PLAN
-        # 「風險」段落：冷啟動時 15 分鐘 cadence 若跟 5 幣 collect 同時全部
+        # 本輪 0 幣成功、且不是「全部因為被更新的並行排程超車而跳過」
+        # ——是真的沒有任何一幣產出可用結果（pipeline 失敗／cache 寫入失敗
+        # 等），沒有東西可組總覽，不寫入（不留舊 blob 誤導，靠既有 TTL 讓
+        # 上一輪殘留的 blob 自然過期）——非 bug，等下一輪（見 PLAN「風險」
+        # 段落：冷啟動時 15 分鐘 cadence 若跟 5 幣 collect 同時全部
         # cache-miss，快照本來就該是空，首頁總覽該次不顯示）。
         print("[fetch_scheduler] --snapshot: 0 幣成功，跳過總覽 blob 寫入"
               "（非 bug，等下一輪）", file=sys.stderr)

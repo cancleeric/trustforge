@@ -15,6 +15,7 @@ import pytest
 
 from scripts import fetch_scheduler
 from trustforge.ingestion.cache import (
+    CacheWriteResult,
     JsonCacheBackend,
     TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
     TRUST_SNAPSHOT_SOURCE,
@@ -423,6 +424,120 @@ def test_full_run_snapshot_interleaved_out_of_order_run_keeps_all_three_represen
     overview_html = overview["docs"][0]["html"]
     assert "0.90" in overview_html
     assert "0.10" not in overview_html
+
+
+# ---------------------------------------------------------------------------
+# codex HIGH（PR #59 review 第四輪）：per-coin all-or-nothing 收窄——latest
+# 這一幣的寫入結果（skipped/error/成功）決定 history／overview 是否處理
+# 這一幣，避免單幣內部矛盾。
+# ---------------------------------------------------------------------------
+
+def test_latest_skipped_for_one_coin_excludes_it_from_history_and_overview(
+    monkeypatch, json_cache_backend,
+):
+    """混合批次（BTC + ETH）：BTC 的 latest 因為已有更新的並行排程結果而
+    單調跳過（模擬另一輪較新的排程已經處理過 BTC），ETH 正常成功。
+
+    per-coin gating 斷言：BTC 這一幣的 history 完全不寫（不留一筆比 latest
+    目前實際內容更新、卻沒被 latest 接受的矛盾資料）、總覽 blob 也不含
+    BTC 這輪（本該被跳過）的候選值；ETH 三表示都正常反映這輪新值。整體
+    回傳碼仍是 0——這是健康的正常情況，不是失敗（見 `run_snapshot()`
+    `skipped_coins` 的說明）。
+    """
+    day = "2026-07-01"
+    stale_ts = _utc_ts(f"{day}T08:00:00")
+    fresh_ts = _utc_ts(f"{day}T20:00:00")
+
+    # 預先幫 BTC 的「最新一筆」種一筆已經比這輪要寫的還新的既有值——
+    # 模擬「另一輪更新的排程已經處理過 BTC」。
+    btc_latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
+    pre_existing_btc_snap = {
+        "coin": "BTC", "trust_score": 0.99, "direction": "既有勝出值",
+        "calibrated_confidence": 0.9, "decision_state": "normal",
+        "generated_at": "2026-07-01T19:00:00Z",
+    }
+    json_cache_backend.set(btc_latest_key, [pre_existing_btc_snap], fetched_at=fresh_ts)
+
+    monkeypatch.setattr(time, "time", lambda: stale_ts)
+    _patch_pipeline_run(monkeypatch, confidence=0.3)
+    assert fetch_scheduler.main(["--snapshot", "--coin", "BTC", "--coin", "ETH"]) == 0
+
+    # BTC：latest 維持既有（較新）值不被覆寫，history 完全沒被建立。
+    btc_latest = cache_get(json_cache_backend, btc_latest_key)
+    assert btc_latest is not None
+    assert btc_latest["docs"][0] == pre_existing_btc_snap
+    btc_history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day))
+    assert btc_history is None
+
+    # ETH：不受 BTC 影響，三表示正常寫入這輪新值。
+    eth_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "ETH"))
+    eth_history = cache_get(json_cache_backend, trust_snapshot_history_key("ETH", day))
+    assert eth_latest is not None and eth_history is not None
+    assert eth_latest["docs"][0]["trust_score"] == pytest.approx(0.3, abs=1e-6)
+    assert eth_history["docs"][0]["trust_score"] == pytest.approx(0.3, abs=1e-6)
+
+    # 總覽只含 ETH：不含 BTC 既有勝出值、更不含 BTC 這輪本該被跳過的新值。
+    overview = cache_get(
+        json_cache_backend,
+        cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN),
+    )
+    overview_html = overview["docs"][0]["html"]
+    assert "ETH" in overview_html
+    assert "既有勝出值" not in overview_html
+    # 只有 ETH 一張卡——BTC 被跳過的這輪候選值完全沒被納入（用卡片數量
+    # 斷言而非比對信任分數字，因為測試用同一組假 confidence，兩幣本輪
+    # 的分數本來就一樣，不能拿數字有沒有出現當判準）。
+    assert overview_html.count("tf-overview-card") == 1
+
+
+def test_latest_error_for_one_coin_excludes_it_from_history_and_overview_and_counts_failure(
+    monkeypatch, json_cache_backend,
+):
+    """混合批次（BTC + ETH）：BTC 的 latest 寫入模擬 backend 端真的失敗
+    （`result.ok=False`，不是單調跳過）。
+
+    per-coin gating 斷言：BTC 不寫 history、不進總覽候選、且真的計入
+    `failures`（整體回傳碼非 0，這才是真失敗，需要被監控看到）；ETH 不受
+    影響，正常寫三表示。
+    """
+    day = "2026-07-01"
+    ts = _utc_ts(f"{day}T12:00:00")
+    monkeypatch.setattr(time, "time", lambda: ts)
+    _patch_pipeline_run(monkeypatch, confidence=0.5)
+
+    real_cache_set_if_newer = fetch_scheduler.cache_set_if_newer
+    btc_latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
+
+    def flaky_cache_set_if_newer(backend, key, docs, fetched_at, ttl_seconds=None):
+        if key == btc_latest_key:
+            return CacheWriteResult(
+                ok=False, used_fallback=False, backend="JsonCacheBackend",
+                error="模擬 backend 寫入失敗（測試注入，非單調跳過）",
+            )
+        return real_cache_set_if_newer(
+            backend, key, docs, fetched_at, ttl_seconds=ttl_seconds,
+        )
+
+    monkeypatch.setattr(fetch_scheduler, "cache_set_if_newer", flaky_cache_set_if_newer)
+
+    # BTC 真失敗，本輪不是全乾淨，回傳碼必須是 1 才能被監控看到。
+    assert fetch_scheduler.main(["--snapshot", "--coin", "BTC", "--coin", "ETH"]) == 1
+
+    btc_latest = cache_get(json_cache_backend, btc_latest_key)
+    assert btc_latest is None
+    btc_history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day))
+    assert btc_history is None
+
+    eth_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "ETH"))
+    eth_history = cache_get(json_cache_backend, trust_snapshot_history_key("ETH", day))
+    assert eth_latest is not None and eth_history is not None
+
+    overview = cache_get(
+        json_cache_backend,
+        cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN),
+    )
+    overview_html = overview["docs"][0]["html"]
+    assert "ETH" in overview_html
 
 
 # ---------------------------------------------------------------------------

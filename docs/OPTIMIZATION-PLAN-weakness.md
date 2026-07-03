@@ -73,6 +73,37 @@ blockchair），需要獨立設計（含「相同 ts 算不算異常」「廣播
 
 ---
 
+## Follow-up（技術債，非本輪修復，**歷史趨勢 UI 建置前完成**）｜跨快取 key 原子發布（PR #59 每日累積歷史快照）
+
+**背景**：PR #59（task #26，`feat/snapshot-history` 分支）codex 複審 4 輪逐步把
+`scripts/fetch_scheduler.py::run_snapshot()` 的三個持久化表示（「最新一筆」
+`TRUST_SNAPSHOT_SOURCE`、「按日歷史」`TRUST_SNAPSHOT_HISTORY_SOURCE`、「總覽
+blob」`TRUST_OVERVIEW_SOURCE`）都改成 `cache_set_if_newer()` monotonic 條件
+寫入，且共用同一個 `run_now = time.time()`，讓同一輪三個 CAS 決策彼此一致；
+第 4 輪再做 **per-coin all-or-nothing 收窄**——以每一幣「latest」這次寫入
+的結果（skipped/error/成功）決定該幣的 history 是否寫入、是否納入總覽
+候選，把「latest 新、history 舊」的同一幣內部矛盾收斂到最小。
+
+**未做（本節追蹤）**：latest 跟 history 這兩個獨立的 `cache_set_if_newer()`
+呼叫本身仍不是同一個原子操作。極罕見情況下（latest CAS 剛好成功、程序在
+寫 history 之前被中斷/crash），會留下「latest 已經是新的，history 卻還
+停在舊的」暫態矛盾——transient、下一輪排程會自然覆蓋回一致狀態
+（self-healing）。真正的跨 key 原子需要 DynamoDB `TransactWriteItems`
+（全項單調條件包成同一個 transaction）或 immutable generation + 原子切換
+manifest 指標（讀端只讀已發布的 generation），屬於架構層級改動，需要獨立
+設計 review，不適合在單一 PR 順手塞。
+
+**現況風險評估**：目前完全沒有歷史趨勢 reader UI，沒有人讀 history 資料，
+暫態矛盾影響極小，**本輪不需要修**。**歷史趨勢 UI 建置前必須完成**——一旦
+有真正的讀路徑會呈現 history 給使用者，這個暫態矛盾就從「沒人看得到、無
+影響」變成「使用者可能看到不一致的歷史曲線」，屬於 #24（只寫真分析結果、
+不誤導使用者）風險。
+
+**追蹤**：[GitHub issue #62](https://github.com/cancleeric/trustforge/issues/62)，
+歷史趨勢 UI 排程前應重新拉出本節確認已處理。
+
+---
+
 ## Phase 2｜核心戰略抉擇（需老闆拍板，CTO 不自行決定）
 
 ### a. 效度驗證 vs 誠實重定位
