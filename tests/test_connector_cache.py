@@ -25,6 +25,7 @@ import importlib.util
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -701,6 +702,232 @@ def test_scheduler_single_source_failure_does_not_abort_others(monkeypatch, tmp_
     assert backend.get(cache_key("coindesk", "BTC")) is None
     err = capsys.readouterr().err
     assert "coindesk" in err and "network down" in err
+
+
+def test_scheduler_onchain_invalid_payload_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex HIGH（#24+robustness，PR #55）驗收：`BlockchairStatsSource` 遇到
+    無效 payload（`data` 為 `null`）必須 `raise`，走跟其他來源真呼叫失敗一樣
+    的路徑——`run_once()` 計入 `failures`、**完全不覆寫**上一輪還能用的舊
+    快取（不是靜靜寫入一筆帶目前時間戳的 "N/A" 假證據）。"""
+    from trustforge.ingestion import onchain
+    from trustforge.ingestion.onchain import BlockchairStatsSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-blockchair-doc", "kind": "onchain", "source": "blockchair",
+        "text": "上一輪的真實統計：區塊高度=956000", "url": "https://api.blockchair.com/bitcoin/stats",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("blockchair", "BTC"), old_docs, time.time() - 3600)
+
+    # 讓真正的 fetch() 邏輯自己走到驗證失敗、自己 raise（不是外部硬塞例外）——
+    # 只換掉最底層的 HTTP GET，證明的是新加的驗證程式碼本身，不是測試假設。
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: b'{"data": null, "context": {"code": 200}}')
+    src = BlockchairStatsSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["blockchair"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["blockchair:BTC"]
+    entry = backend.get(cache_key("blockchair", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "blockchair" in err
+
+
+def test_scheduler_onchain_bad_best_block_time_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex MEDIUM（PR #55，鏈上驗證最終閉合）驗收：`best_block_time`
+    格式漂移（其餘統計欄位都合法）一樣要 raise，不能用 `time.time()`
+    把上游回的歷史/不完整 envelope 偽裝成剛取得的新證據——`run_once()`
+    要計入 failures、完全不覆寫舊快取。"""
+    from trustforge.ingestion import onchain
+    from trustforge.ingestion.onchain import BlockchairStatsSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-blockchair-doc", "kind": "onchain", "source": "blockchair",
+        "text": "上一輪的真實統計：區塊高度=956000", "url": "https://api.blockchair.com/bitcoin/stats",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("blockchair", "BTC"), old_docs, time.time() - 3600)
+
+    bad_payload = (
+        b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, '
+        b'"transactions_24h": 4, "best_block_time": "not-a-date"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_payload)
+    src = BlockchairStatsSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["blockchair"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["blockchair:BTC"]
+    entry = backend.get(cache_key("blockchair", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "blockchair" in err
+
+
+def test_scheduler_onchain_sentinel_negative_value_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex MEDIUM 第 8 輪（PR #55，鏈上驗證最終閉合）驗收：型別合法但
+    語意上不可能的 sentinel 值（`blocks: -1`，區塊高度不可能為負）必須
+    raise，`run_once()` 計入 failures、完全不覆寫舊快取——不能把不可能
+    的數值當真資料、包上新鮮時間戳發布出去覆蓋還能用的舊快取。"""
+    from trustforge.ingestion import onchain
+    from trustforge.ingestion.onchain import BlockchairStatsSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-blockchair-doc", "kind": "onchain", "source": "blockchair",
+        "text": "上一輪的真實統計：區塊高度=956000", "url": "https://api.blockchair.com/bitcoin/stats",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("blockchair", "BTC"), old_docs, time.time() - 3600)
+
+    sentinel_payload = (
+        b'{"data": {"blocks": -1, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 82785, "transactions_24h": 573582, '
+        b'"best_block_time": "2026-07-03 09:18:09"}, "context": {"code": 200}}'
+    )
+    fixed_now = datetime(2026, 7, 3, 9, 30, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: sentinel_payload)
+    monkeypatch.setattr(onchain.time, "time", lambda: fixed_now)
+    src = BlockchairStatsSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["blockchair"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["blockchair:BTC"]
+    entry = backend.get(cache_key("blockchair", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "blockchair" in err
+
+
+def test_scheduler_onchain_stale_best_block_time_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex MEDIUM（PR #55，第 5 輪，有界新鮮度窗）驗收：`best_block_time`
+    格式正確但超過 6 小時新鮮度窗（重放的陳舊 payload）一樣要 raise，
+    `run_once()` 計入 failures、完全不覆寫舊快取。用固定注入的 now，
+    不依賴真牆鐘。"""
+    from trustforge.ingestion import onchain
+    from trustforge.ingestion.onchain import BlockchairStatsSource
+
+    fixed_now = datetime(2026, 7, 3, 9, 30, 0, tzinfo=timezone.utc)
+    stale_bbt = (fixed_now - timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-blockchair-doc", "kind": "onchain", "source": "blockchair",
+        "text": "上一輪的真實統計：區塊高度=956000", "url": "https://api.blockchair.com/bitcoin/stats",
+        "ts": fixed_now.timestamp() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("blockchair", "BTC"), old_docs, fixed_now.timestamp() - 3600)
+
+    stale_payload = (
+        b'{"data": {"blocks": 956480, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 82785, "transactions_24h": 573582, '
+        b'"best_block_time": "' + stale_bbt.encode() + b'"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: stale_payload)
+    monkeypatch.setattr(onchain.time, "time", lambda: fixed_now.timestamp())
+    src = BlockchairStatsSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["blockchair"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["blockchair:BTC"]
+    entry = backend.get(cache_key("blockchair", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "blockchair" in err
+
+
+def test_scheduler_rss_schema_drift_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex MEDIUM（PR #55，資料密度第二批最終閉合）驗收：共用
+    `_parse_rss` 遇到合法 XML 但沒有任何 `<item>`/`<entry>`（schema drift／
+    供應商回錯誤頁）必須 raise，`run_once()` 計入 failures、完全不覆寫
+    舊快取（不是靜靜用 [] 覆蓋掉還能用的舊新聞）。"""
+    from trustforge.ingestion import news
+    from trustforge.ingestion.news import CoinDeskRSSSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-coindesk-doc", "kind": "news", "source": "coindesk",
+        "text": "上一輪的真實新聞標題", "url": "https://www.coindesk.com/old-article",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("coindesk", "BTC"), old_docs, time.time() - 3600)
+
+    drifted_feed = b'<?xml version="1.0"?><feed xmlns="urn:other"><weird-entry/></feed>'
+    monkeypatch.setattr(news, "_fetch_url", lambda url: drifted_feed)
+    src = CoinDeskRSSSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["coindesk"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["coindesk:BTC"]
+    entry = backend.get(cache_key("coindesk", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "coindesk" in err
+
+
+def test_scheduler_rss_subfield_drift_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex HIGH 第 6 輪（PR #55，RSS 資料品質最終閉合）驗收：`<item>`
+    容器都在，但供應商把 title/link/description/pubDate 全改名（子欄位
+    drift），導致每筆解析成空白 title/空 URL/ts=0——`run_once()` 必須
+    計入 failures、完全不覆寫舊快取（不能靜靜用垃圾文件覆蓋掉還能用的
+    舊新聞）。"""
+    from trustforge.ingestion import news
+    from trustforge.ingestion.news import CoinDeskRSSSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-coindesk-doc", "kind": "news", "source": "coindesk",
+        "text": "上一輪的真實新聞標題", "url": "https://www.coindesk.com/old-article",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("coindesk", "BTC"), old_docs, time.time() - 3600)
+
+    subfield_drifted_feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CoinDesk</title>
+    <item>
+      <headline>Bitcoin BTC surges past $70,000</headline>
+      <permalink>https://www.coindesk.com/markets/2026/08/01/btc-surge</permalink>
+    </item>
+  </channel>
+</rss>"""
+    monkeypatch.setattr(news, "_fetch_url", lambda url: subfield_drifted_feed)
+    src = CoinDeskRSSSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["coindesk"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["coindesk:BTC"]
+    entry = backend.get(cache_key("coindesk", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "coindesk" in err
 
 
 def test_scheduler_coin_agnostic_fetch_failure_is_counted_into_failures(monkeypatch, tmp_path, capsys):

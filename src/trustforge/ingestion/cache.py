@@ -113,10 +113,21 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     "bitcoinist": 15 * 60,
     "newsbtc": 15 * 60,
     "dailyhodl": 15 * 60,
+    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 The Block/U.Today/
+    # Blockworks 3 家新聞 RSS，同上統一 15 分鐘一輪。
+    "theblock": 15 * 60,
+    "utoday": 15 * 60,
+    "blockworks": 15 * 60,
     "reddit-cryptocurrency": 30 * 60,
     "reddit-bitcoin": 30 * 60,
     "alternative-me-fng": 60 * 60,
     "blockchain-info": 15 * 60,
+    # 資料密度第二批：mempool.space（即時手續費/難度進度，波動快，跟
+    # blockchain-info 一樣取 15 分鐘）、Blockchair（免費層 1440 req/day ≈
+    # 每分鐘 1 次上限，遠低於此排程頻率，60 分鐘一輪保守使用額度）。
+    "mempool-space-fees": 15 * 60,
+    "mempool-space-difficulty": 15 * 60,
+    "blockchair": 60 * 60,
     "sec-gov": 60 * 60,
     # CoinGecko（W-coingecko，CEO 審核 gray 計劃 + 老闆修正）：呼叫量極小
     # （見 ingestion/coingecko.py 模組頂部「高效抓取」——一輪 5 幣合計只需

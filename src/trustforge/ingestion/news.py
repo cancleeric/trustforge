@@ -14,6 +14,14 @@
   - NewsBTC          https://www.newsbtc.com/feed/
   - The Daily Hodl   https://dailyhodl.com/feed/
 
+資料密度第二批（#24，2026-07，見 docs/PLAN-data-density.md，gray 已逐一 curl
+驗證 200 OK）——同樣全部 keyless、公開 RSS，複用 `_parse_rss`。The Block／
+Blockworks 的原始網址（`theblock.co`/`blockworks.co`）會 308 轉到下列終點，
+比照 coindesk 教訓直接寫終點 URL，不依賴轉址：
+  - The Block   https://www.theblock.co/rss.xml
+  - U.Today     https://u.today/rss.php
+  - Blockworks  https://blockworks.com/feed（回傳 Atom，`_parse_rss` 已相容）
+
 生產事故修復（coindesk 全 308 Permanent Redirect）：CoinDesk 把舊網址
 `.../rss/`（末尾帶斜線）永久重導到 `.../rss`（無斜線），同網域、只差路徑
 末尾斜線。已直接改用新網址（見下方 `CoinDeskRSSSource._URL`），不必再依賴
@@ -48,6 +56,7 @@ import json
 import os
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 
 from . import safe_fetch
 from .base import Document, Source
@@ -87,16 +96,85 @@ def _first(item: ET.Element, *tags: str, ns: dict | None = None) -> ET.Element |
     return None
 
 
+def _is_valid_http_link(link: str) -> bool:
+    """codex MEDIUM 第 7 輪（PR #55，RSS 資料品質最終閉合）：舊版只檢查
+    `startswith(("http://", "https://"))`，會把 `https://`（無 host）、
+    `https:///article`（空 host）這類殘缺 URL 當合法——子欄位 drift 後
+    若 link 剛好長這樣，仍會通過結構驗證、把不可用 URL 寫進 Document
+    覆蓋舊快取。改用 `urlsplit` 嚴格驗（比照 `web.py:_safe_href` 的
+    http/https 白名單慣例，額外加 host/credentials/控制字元/port 驗證）：
+      - scheme 嚴格限定 http/https（大小寫不拘）
+      - hostname 必須非空
+      - 拒絕帶 credentials 的 URL（`user:pass@host`）
+      - 拒絕含控制字元的字串
+      - port（若有）必須合法，否則視為無效
+    """
+    if not link:
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in link):
+        return False
+    try:
+        parts = urlsplit(link)
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in {"http", "https"}:
+        return False
+    if not parts.hostname:
+        return False
+    if parts.username or parts.password:
+        return False
+    try:
+        parts.port  # 存取即觸發驗證，非法 port（如超出範圍）會拋 ValueError
+    except ValueError:
+        return False
+    return True
+
+
+def _entry_is_structurally_valid(title: str, desc: str, link: str, ts: float) -> bool:
+    """codex HIGH 第 6 輪 + MEDIUM 第 7 輪（PR #55，RSS 資料品質最終閉合）：
+    單筆 entry 是否有「有意義的內容」——非空 title 或 description、可用
+    （絕對、有效 host 的 http(s)，見 `_is_valid_http_link()`）link、可解析
+    且非 0 的發布時間戳。三者缺一即視為子欄位 drift（供應商改名/換
+    namespace 導致 `_first()` 找不到對應欄位，或 link 殘缺無 host），這筆
+    entry 不能被拿去發布空白 title/空/無效 URL/ts=0 的垃圾文件。"""
+    has_content = bool(title or desc)
+    has_link = _is_valid_http_link(link)
+    has_ts = ts != 0.0
+    return has_content and has_link and has_ts
+
+
 def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Document]:
-    """解析 RSS 2.0 / Atom XML，依 query/coin 關鍵字過濾，回傳 Document list。"""
+    """解析 RSS 2.0 / Atom XML，依 query/coin 關鍵字過濾，回傳 Document list。
+
+    這是所有 RSS 源共用的 parser（coindesk/decrypt 起算共 11 家），區分
+    兩層「空」，別誤傷合法情境（codex MEDIUM 第 4 輪 + HIGH 第 6 輪，PR
+    #55，資料密度第二批最終閉合）：
+      - **容器層**：合法可解析但一個 `<item>`/`<entry>` 都沒有（換
+        namespace/schema、或回了個錯誤頁但仍是合法 XML）→ schema drift。
+      - **子欄位層**：有 `<item>`/`<entry>` 容器，但供應商把 title/
+        description/link/pubDate 改名/換 namespace，導致每筆都解析成
+        空白 title、空 URL、ts=0 的垃圾——**結構有效的 entry 數為 0**
+        （見 `_entry_is_structurally_valid()`）一樣是 schema drift。
+      - 上述兩層皆 **raise ValueError**，讓呼叫端（`fetch_scheduler.py`）
+        保留舊快取、計入 failure，不能靜靜用空/垃圾覆蓋掉還能用的舊資料。
+      - **合法路徑**：結構有效的 entries 存在，但依 query/coin 關鍵字
+        過濾後一則都不符（那個幣剛好沒新聞）→ 仍是合法結果，回 `[]`，
+        不 raise。
+    """
     root = ET.fromstring(raw)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     items = root.findall(".//item")
     if not items:
         items = root.findall(".//atom:entry", ns)
+    if not items:
+        raise ValueError(
+            f"{source_name}: RSS/Atom 回應沒有任何 <item>/<entry>"
+            "（可能是供應商 schema drift 或回了錯誤頁）"
+        )
 
     keywords = [kw.lower() for kw in (query, coin) if kw]
     docs: list[Document] = []
+    valid_entry_count = 0
 
     for item in items:
         title_el = _first(item, "title", "atom:title", ns=ns)
@@ -112,6 +190,13 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
             link = ""
         desc = (desc_el.text or "").strip() if desc_el is not None else ""
         ts = _parse_ts(pub_el.text) if pub_el is not None and pub_el.text else 0.0
+
+        # 子欄位結構驗證：title/link/pubDate 被改名/換 namespace 導致解析
+        # 全空的 entry，直接跳過，不計入 valid_entry_count，也絕不發布
+        # （無關鍵字模式一樣擋，見下方 valid_entry_count==0 才 raise）。
+        if not _entry_is_structurally_valid(title, desc, link, ts):
+            continue
+        valid_entry_count += 1
 
         # 關鍵字過濾（無關鍵字時全收；有關鍵字時至少命中一個）
         if keywords:
@@ -132,6 +217,13 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
             ts=ts,
             meta={"content_reference": snippet},
         ))
+
+    if valid_entry_count == 0:
+        raise ValueError(
+            f"{source_name}: 所有 <item>/<entry> 的子欄位皆缺失/型別 drift"
+            "（title/description/link/pubDate 全空或不合法，可能是供應商"
+            "改版/換 namespace）"
+        )
 
     return docs
 
@@ -229,6 +321,39 @@ class DailyHodlRSSSource(Source):
         return _parse_rss(raw, self.name, query, coin)
 
 
+class TheBlockRSSSource(Source):
+    """The Block RSS，公開無 key。"""
+    kind = "news"
+    name = "theblock"
+    _URL = "https://www.theblock.co/rss.xml"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class UTodayRSSSource(Source):
+    """U.Today RSS，公開無 key。"""
+    kind = "news"
+    name = "utoday"
+    _URL = "https://u.today/rss.php"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class BlockworksRSSSource(Source):
+    """Blockworks feed（Atom 格式，`_parse_rss` 已相容），公開無 key。"""
+    kind = "news"
+    name = "blockworks"
+    _URL = "https://blockworks.com/feed"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
 class CryptoPanicSource(Source):
     """CryptoPanic API（需 env CRYPTOPANIC_TOKEN；無 token 時安靜回空）。"""
     kind = "news"
@@ -274,6 +399,9 @@ def build_news_sources() -> list[Source]:
         BitcoinistRSSSource(),
         NewsBTCRSSSource(),
         DailyHodlRSSSource(),
+        TheBlockRSSSource(),
+        UTodayRSSSource(),
+        BlockworksRSSSource(),
     ]
     if os.getenv("CRYPTOPANIC_TOKEN"):
         sources.append(CryptoPanicSource())
