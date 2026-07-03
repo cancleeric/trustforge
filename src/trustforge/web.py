@@ -38,7 +38,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
-from .brand_logos import coin_logo_html, source_logo_html
+from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
@@ -1785,12 +1785,18 @@ def _render_evidence_list(
             f'{e(tier_label)}</span>'
         )
         # 商業級視覺（Nansen/Messari 級）：來源 pill 旁附官方 LOGO（inline
-        # SVG，simple-icons CC0）或（查無收錄品牌時）中性字首徽章——見
+        # SVG，simple-icons CC0）或（查無收錄品牌時）中性縮寫徽章——見
         # trustforge.brand_logos 模組 docstring，#24 鐵律不放錯 LOGO。
         # `ev.source` 出自各 ingestion 連接器固定的 `Source.name` 常數
         # （非使用者輸入）；fallback 顏色沿用這裡剛算出的 tier 顏色，跟
         # tier pill 視覺語言一致，不另外硬編品牌色。
         src_logo = source_logo_html(ev.source, fallback_color=tier_color)
+        # docs/PLAN-source-branding.md：evidence pill 文字曾經直接印
+        # `ev.source` 原始 slug（如 `coingecko-sentiment`），老闆真 Chrome
+        # 看到工程師代號 —— 改用 `source_display_name()` 取品牌顯示名，
+        # 不得再印裸 slug。仍走 `e()` 跳脫（跟其餘欄位一致，防禦性處理，
+        # 即使目前 `ev.source` 非使用者輸入）。
+        src_display = source_display_name(ev.source)
         # source_url 安全連結：_safe_href 驗 scheme，escape 由其內部保留
         if ev.source_url:
             url_html = _safe_href(ev.source_url)
@@ -1806,7 +1812,7 @@ def _render_evidence_list(
             f"<td>"
             f"<details>"
             f'<summary class="tf-ev-summary">'
-            f'<span class="tf-src-pill">{src_logo} {e(ev.source)}</span>'
+            f'<span class="tf-src-pill">{src_logo} {e(src_display)}</span>'
             f'{tier_pill}'
             f'<span class="tf-ev-date">{e(ev.fetched_at)}</span>'
             f'{flags_badge}'
