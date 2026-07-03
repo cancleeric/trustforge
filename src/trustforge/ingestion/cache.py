@@ -67,6 +67,7 @@ import sys
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
@@ -239,6 +240,96 @@ TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS = 15 * 60  # 建議 cron cadence
 TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS = stale_after_for(
     TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS
 )  # = 45 分鐘
+
+# task #26（docs/PLAN-multicore-worldfirst.md，「新核心#1 持久化寫入基礎：
+# 快照按日累積歷史」）：`TRUST_SNAPSHOT_SOURCE` 只存「最新一筆」、每輪覆寫，
+# 完全沒有歷史——這裡加一組**按日**的 key pattern，讓「歷史信任趨勢
+# Point-in-Time」的資料現在就開始累積（UI 晚做沒關係，但寫入現在不開始，
+# 賣點就永遠無法成立）。
+#
+# Key 慣例：`cache_key(TRUST_SNAPSHOT_HISTORY_SOURCE, f"{coin}:{YYYY-MM-DD}")`
+# （見下方 `trust_snapshot_history_key()`）——沿用既有 `cache_key(source,
+# coin)` 兩段式介面，把「幣別:日期」塞進第二段。`_normalize_coin()` 只做
+# `strip().upper()`，日期裡的數字/連字號不受影響。**這是新 key pattern，
+# 不是 DynamoDB schema/表異動**：底層仍是同一張 `trustforge-connector-cache`
+# 表、同樣的 `source_id`/`coin` 兩個屬性，`DynamoDBCache._split_key()` 用
+# `partition(":")` 只切第一個冒號，`coin` 屬性會存進完整的
+# `"BTC:2026-07-01"` 字串，跟其他逐幣 key 一樣只是個字串值，沒有新增任何
+# 屬性/索引，不需要 CDO 過 6 步異動流程。
+#
+# 同一天多次跑 `--snapshot` 對同一把 key 覆寫（`cache_set()` 本來就是「同
+# key 覆蓋舊值」，見 `JsonCacheBackend.set`/`DynamoDBCache.set`）＝uPsert；
+# 跨日才會因 key 不同而各自累積成一筆，天然形成按日序列。
+#
+# TTL 刻意跟「最新一筆」快照的 45 分鐘新鮮窗**分開**：歷史快照本來就該讓
+# 舊資料繼續存在供未來趨勢圖用（不能套「45 分鐘沒更新視為過期」那套語意），
+# 但也不能無限期累積佔用儲存——90 天是合理上限，交給 DynamoDB 原生 TTL
+# 背景清除（best effort，見 `DynamoDBCache` docstring）；`JsonCacheBackend`
+# 忽略 TTL 屬性（本地開發用途，不會真的無限膨脹到有感的程度）。
+TRUST_SNAPSHOT_HISTORY_SOURCE = "__trust_snapshot_history__"
+TRUST_SNAPSHOT_HISTORY_TTL_SECONDS = 90 * 24 * 60 * 60  # 90 天
+
+
+def snapshot_history_date(fetched_at: float) -> str:
+    """把 epoch 秒換算成歷史快照按日 key 用的 UTC 日期字串（`YYYY-MM-DD`）。
+
+    固定用 UTC（比照 `scheduler_log.py`/`schema.py::iso_utc()` 既有時間戳
+    慣例），不用本機時區——避免「同一次真實寫入，換一台跑排程的機器就切出
+    不同日期」這種亂跳（PLAN 明確點名的風險）。"""
+    return datetime.fromtimestamp(fetched_at, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def trust_snapshot_history_key(coin: str, date_str: str) -> str:
+    """按日歷史快照 cache key，寫入者（`scripts/fetch_scheduler.py
+    --snapshot`）與讀取者（`get_trust_history()`）共用同一份組字串邏輯，
+    避免兩處各自手串日後漂移（同模組其餘 key 常數一貫的教訓）。"""
+    return cache_key(TRUST_SNAPSHOT_HISTORY_SOURCE, f"{_normalize_coin(coin)}:{date_str}")
+
+
+def get_trust_history(
+    coin: str,
+    days: int,
+    backend: CacheBackend | None = None,
+    *,
+    end_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """讀回 `coin` 過去 `days` 天（含 `end_date` 當天，預設今天 UTC）的按日
+    信任快照序列——供未來 #26 UI 趨勢圖使用（本輪只做寫入 + 這個讀取
+    helper，UI 本身晚做沒關係，見 PLAN）。
+
+    純讀：只呼叫既有 `cache_get()`（本身已具備 backend 失敗自動 fallback
+    讀 `JsonCacheBackend` 的語意），**不寫入**、不觸發任何真連接器 API 或
+    `pipeline.run()` 計算——資料只可能來自 `scripts/fetch_scheduler.py
+    --snapshot` 既有寫入的按日快照，credit-safe。
+
+    回傳依日期由舊到新排序的清單，每筆是該日 `_snapshot_dict()` 原樣內容
+    + 補上 `"date"` 欄位標明所屬日期；缺漏的日期（尚未跑過 `--snapshot`，
+    或該日該幣 `pipeline.run()` 失敗未寫入）直接跳過，不補假值（#24 鐵律）。
+
+    `end_date`：選用，`YYYY-MM-DD` 字串，供測試/未來 UI 指定「以哪天為
+    終點往回看」；不傳預設用當下 UTC 日期。
+    """
+    resolved_backend = backend if backend is not None else get_cache_backend()
+    if end_date is not None:
+        end = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    else:
+        end = datetime.now(timezone.utc)
+
+    history: list[dict[str, Any]] = []
+    for offset in range(days):
+        day_str = (end - timedelta(days=offset)).strftime("%Y-%m-%d")
+        entry = cache_get(resolved_backend, trust_snapshot_history_key(coin, day_str))
+        if entry is None:
+            continue
+        docs = entry.get("docs") or []
+        if not docs or not isinstance(docs[0], dict):
+            continue
+        snap = dict(docs[0])
+        snap["date"] = day_str
+        history.append(snap)
+
+    history.sort(key=lambda s: s["date"])
+    return history
 
 
 def _normalize_coin(coin: str | None) -> str:

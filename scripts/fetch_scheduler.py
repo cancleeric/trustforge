@@ -81,6 +81,7 @@ from trustforge.ingestion.cache import (  # noqa: E402
     TRUST_OVERVIEW_COIN,
     TRUST_OVERVIEW_SOURCE,
     TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS,
+    TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
     TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS,
     TRUST_SNAPSHOT_SOURCE,
     CacheBackend,
@@ -91,7 +92,9 @@ from trustforge.ingestion.cache import (  # noqa: E402
     cache_set,
     doc_to_dict,
     get_cache_backend,
+    snapshot_history_date,
     stale_after_for,
+    trust_snapshot_history_key,
 )
 from trustforge.ingestion.coingecko import build_coingecko_sources  # noqa: E402
 from trustforge.ingestion.news import build_news_sources  # noqa: E402
@@ -615,10 +618,55 @@ SNAPSHOT_STALE_AFTER_SECONDS = TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS
 _SNAPSHOT_QUERY = "分析該幣種近期市場狀況，整合多源資料"
 
 
-def _snapshot_dict(coin: str, report) -> dict:
+def _reputation_summary(evidence: list) -> dict[str, dict]:
+    """task #26：從單次 `pipeline.run()` 回傳的 `evidence`（`list[Evidence]`，
+    先前呼叫端一律用 `_evidence` 丟棄）擷取 W2 可解釋性 trace 精華。
+
+    背景：`agent.orchestrator._scored_to_evidence()` 在 `dynamic_reputation=
+    True`（production 固定開啟，見該模組 `run_agent_pipeline`）時，把
+    `trust.scoring.score()` 算出的 `{source, prior, final, agree_n,
+    contradict_n, iterations_run}` 併入每筆 `Evidence.trust_components` 的
+    `reputation_prior`/`reputation_final`/`reputation_agree_n`/
+    `reputation_contradict_n`/`reputation_iterations_run` 欄位——同一來源在
+    同一份報告裡的每筆 `Evidence` 攜帶**完全相同**的 trace 值（`scoring.
+    score()` 逐 source 建一份、廣播給該 source 所有 claim，見該函式
+    `trace_by_source` 實作），這裡依 `source` 去重，只留一份代表值。
+
+    只在真的有 trace 資料時才收錄該來源（`llm_mode=off` 的 real-off
+    `--snapshot` 路徑下，`stance_fn` 全部 fail-safe 回 neutral，`agree_n`/
+    `contradict_n` 恆為 0、`final == prior`——這是誠實的真結果，不是 bug，
+    #24 鐵律：只寫真分析結果，不因為「目前恆為 0」就不寫或造假填別的值）。
+    """
+    summary: dict[str, dict] = {}
+    for ev in evidence:
+        tc = getattr(ev, "trust_components", None) or {}
+        if "reputation_prior" not in tc or "reputation_final" not in tc:
+            continue
+        source = getattr(ev, "source", "")
+        if not source or source in summary:
+            continue  # 同來源多筆 Evidence 的 trace 值相同，取第一筆即可
+        prior = float(tc["reputation_prior"])
+        final = float(tc["reputation_final"])
+        summary[source] = {
+            "prior": prior,
+            "final": final,
+            "delta": round(final - prior, 4),
+            "agree_n": int(tc.get("reputation_agree_n", 0)),
+            "contradict_n": int(tc.get("reputation_contradict_n", 0)),
+        }
+    return summary
+
+
+def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     """`Report`（真 `pipeline.run()` 結果）→ 快照精華 dict。欄位逐字取自
-    既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。"""
-    return {
+    既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。
+
+    task #26 追加：`evidence`（`pipeline.run()` 回傳的第二個值，之前呼叫端
+    直接丟棄）非空時，順便擷取 W2 reputation_trace 精華（見
+    `_reputation_summary()`），寫入 `"reputation_trace"` 欄位，供未來 #4
+    來源信譽榜使用。沒有 trace 資料（`evidence=None`/空清單，或該幣本輪
+    尚未啟用動態信譽）時完全不新增這個鍵，逐字向後相容，也不補假值。"""
+    snap = {
         "coin": coin,
         "trust_score": round(float(report.confidence), 4),
         "direction": report.direction,
@@ -626,6 +674,11 @@ def _snapshot_dict(coin: str, report) -> dict:
         "decision_state": report.decision_state,
         "generated_at": report.generated_at,
     }
+    if evidence:
+        reputation_trace = _reputation_summary(evidence)
+        if reputation_trace:
+            snap["reputation_trace"] = reputation_trace
+    return snap
 
 
 def _overview_card_href(coin: str) -> str | None:
@@ -726,6 +779,13 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     既有語意，讓 cron/監控看得到）；全部幣本輪都失敗（0 筆快照）也視為
     失敗，即使沒有寫入任何東西可失敗——因為代表整輪排程根本沒產出任何
     結果，值得被監控看到，而非默默 exit 0。
+
+    task #26：每幣寫完「最新一筆」（`TRUST_SNAPSHOT_SOURCE`，每輪覆寫）後，
+    順便多寫一筆**按日**歷史快照（`trust_snapshot_history_key()`，同一天
+    多次跑對同一把 key 覆寫＝uPsert，跨日累積成序列），供未來 #26 UI 趨勢
+    圖／`get_trust_history()` 讀取。歷史寫入失敗獨立計入
+    `failures`（`"{coin}:history"`），不影響已成功寫入的「最新一筆」與
+    總覽 blob（那條路徑本來就穩定運作，不該被歷史寫入這個新增功能拖累）。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -742,7 +802,7 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     failures: list[str] = []
     for coin in coins:
         try:
-            report, _evidence, _log = pipeline_run(
+            report, evidence, _log = pipeline_run(
                 coin, _SNAPSHOT_QUERY, QuestionType.MULTI_SOURCE,
                 data_mode="live", llm_mode="off",
             )
@@ -755,10 +815,11 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(coin)
             continue
 
-        snap = _snapshot_dict(coin, report)
+        now = time.time()
+        snap = _snapshot_dict(coin, report, evidence)
         result = cache_set(
             backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), [snap],
-            fetched_at=time.time(), ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            fetched_at=now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
         )
         if not result.ok:
             print(f"[fetch_scheduler] --snapshot {coin}: cache 寫入失敗"
@@ -769,6 +830,22 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
         snapshots.append(snap)
         print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
               f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
+
+        # task #26：按日累積歷史——同一天多次跑對同一把 key 覆寫（uPsert），
+        # 跨日才會因日期不同而各自成一筆，天然累積成序列。用跟「最新一筆」
+        # 同一個 `now`，避免同一輪內兩次 time.time() 剛好跨過 UTC 午夜造成
+        # 「同一次真呼叫，兩把 key 寫進不同日期」的邊界亂跳。
+        history_result = cache_set(
+            backend, trust_snapshot_history_key(coin, snapshot_history_date(now)),
+            [snap], fetched_at=now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+        )
+        if not history_result.ok:
+            print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照 cache 寫入失敗"
+                  f"（backend={history_result.backend}）：{history_result.error}",
+                  file=sys.stderr)
+            failures.append(f"{coin}:history")
+        else:
+            _warn_if_fallback_used(f"--snapshot {coin} history", history_result)
 
     overview_html = _render_overview_html(snapshots)
     if overview_html:
