@@ -275,7 +275,15 @@ def test_collect_online_includes_social_and_regulatory(monkeypatch, tmp_path):
         + build_social_sources() + build_regulatory_sources()
     )
     for src in all_sources:
-        raw_docs = src.fetch("BTC", coin="BTC")
+        # 同 test_news_onchain.py::test_collect_online_produces_news_and_onchain
+        # 的說明：`_FNG_MINIMAL` 對 mempool-space-*/blockchair 三個新源是
+        # 缺欄位的無效 payload，嚴格驗證會 raise（見 onchain.py），比照真
+        # 排程器行為單獨跳過、不中斷其他來源；這裡只驗 collect() 有沒有
+        # 正確接上各 kind 的線上快取路徑。
+        try:
+            raw_docs = src.fetch("BTC", coin="BTC")
+        except Exception:
+            continue
         backend.set(
             cache_mod.cache_key(src.name, "BTC"),
             [cache_mod.doc_to_dict(d) for d in raw_docs],

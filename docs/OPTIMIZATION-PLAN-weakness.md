@@ -53,6 +53,26 @@ Bedrock 上線排程前應重新拉出本節確認已處理。
 
 ---
 
+## Follow-up（技術債，非本輪修復）｜跨快取單調性（PR #55 資料密度第二批）
+
+**背景**：PR #55（#24）codex 複審第 5 輪抓到 `BlockchairStatsSource` 的
+`best_block_time` 只驗語法（存在/型別/可解析），不驗新鮮度——CEO 決策
+本輪先做 **per-source 有界新鮮度窗**（未來容差 10 分鐘、過舊上限 6 小時，
+直接、無 scheduler 大改）：見 `src/trustforge/ingestion/onchain.py`
+`BlockchairStatsSource.fetch()`。這擋住了「語法正確但明顯 bogus/重放」的
+兩端極值，正常出塊節奏下永遠滿足。
+
+**未做（本節追蹤）**：**跨快取單調性**——新 doc 的時間戳落在合理新鮮度
+窗內，但比上一輪已快取的 doc 還舊（供應商回應命中一份稍舊但仍在窗內的
+版本）時，目前沒有機制擋下來。這是 `scripts/fetch_scheduler.py` 層級的
+**通用增強**，該套用到所有拿上游時間戳當 `Document.ts` 的來源（不只
+blockchair），需要獨立設計（含「相同 ts 算不算異常」「廣播/batch 來源
+怎麼套用」等細節），不適合在單一來源裡硬塞半套。
+
+**追蹤**：[GitHub issue #56](https://github.com/cancleeric/trustforge/issues/56)。
+
+---
+
 ## Phase 2｜核心戰略抉擇（需老闆拍板，CTO 不自行決定）
 
 ### a. 效度驗證 vs 誠實重定位

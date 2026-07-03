@@ -127,6 +127,14 @@ def test_coingecko_variants_normalize_to_same_brand_key(source_name):
         ("bitcoinist", "BI"),
         ("newsbtc", "NB"),
         ("dailyhodl", "DH"),
+        # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞
+        # RSS + 3 個鏈上來源，simple-icons 逐一查證無收錄，一律 fallback 徽章。
+        ("theblock", "TB"),
+        ("utoday", "UT"),
+        ("blockworks", "BW"),
+        ("mempool-space-fees", "MP"),
+        ("mempool-space-difficulty", "MP"),
+        ("blockchair", "BC"),
     ],
 )
 def test_sources_without_simple_icons_entry_use_fallback_badge(
@@ -307,13 +315,22 @@ def test_home_overview_html_svg_has_no_external_resource_refs(monkeypatch):
         ("bitcoinist", "Bitcoinist"),
         ("newsbtc", "NewsBTC"),
         ("dailyhodl", "The Daily Hodl"),
+        # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞
+        # RSS + 3 個鏈上來源。
+        ("theblock", "The Block"),
+        ("utoday", "U.Today"),
+        ("blockworks", "Blockworks"),
+        ("mempool-space-fees", "mempool.space · 建議手續費"),
+        ("mempool-space-difficulty", "mempool.space · 難度調整進度"),
+        ("blockchair", "Blockchair · BTC 鏈上統計"),
     ],
 )
-def test_source_display_name_covers_all_18_known_slugs(slug, expected_display):
-    """gray plan 逐 slug 對照表：目前全部 18 個真連接器 slug（原 12 個 +
-    資料密度第一批新增 6 家新聞 RSS）都要有明確、不裸露內部代號的品牌
-    顯示名。同一品牌不同資料面向（3 個 coingecko-*、2 個 reddit-*）要顯示
-    不同文字，不能因為共用同一顆 LOGO icon 就把文字也併成同一句。"""
+def test_source_display_name_covers_all_known_slugs(slug, expected_display):
+    """gray plan 逐 slug 對照表：目前全部 24 個真連接器 slug（原 12 個 +
+    資料密度第一批新增 6 家新聞 RSS + 第二批新增 6 個源）都要有明確、不
+    裸露內部代號的品牌顯示名。同一品牌不同資料面向（3 個 coingecko-*、
+    2 個 reddit-*、2 個 mempool-space-*）要顯示不同文字，不能因為共用
+    同一顆 LOGO icon 就把文字也併成同一句。"""
     assert source_display_name(slug) == expected_display
     # 顯示名本身不應該就是裸 slug（防呆：白名單填錯成原樣時要能抓到）
     assert source_display_name(slug) != slug
