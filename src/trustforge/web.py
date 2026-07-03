@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from .agent.orchestrator import aggregate_trust_by_kind
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .pipeline import run, run_comparison
@@ -1728,6 +1729,95 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
     )
 
 
+def _render_trust_radar(dims: dict, evidence: list) -> str:
+    """新核心#2（gray docs/PLAN-multicore-worldfirst.md，task #25）：多維度信任
+    區塊（inline CSS，純 stdlib，zero-JS，CSP 不變）。
+
+    `dims`：`agent.orchestrator.aggregate_trust_by_kind()` 的回傳值；空 dict
+    （無 evidence／舊呼叫端未接線）→ 回空字串，優雅略過，不崩（比照
+    `_render_trust_breakdown` 慣例）。`evidence`：同一次分析的完整證據清單，
+    僅用於「展開查看該維度證據」——純渲染層重新依 kind 分組一次，不改動任何
+    既有物件、不影響信任總分。
+
+    每個維度一列（長條 + 分數 + 來源數／證據筆數），`<details>` 展開可回溯
+    到該維度實際引用的證據來源。**誠實標記**：
+    - `has_data=False`（本次未取得該類資料，如未啟用 coingecko 連接器時的
+      price_live/sentiment/dev_activity）→ 灰底顯示「— 無資料」，不用 0
+      冒充「查過但很低」（#24）。
+    - `single_source=True`（gray 抓出 regulatory 僅 SEC 1 源、social 僅
+      Reddit 1 源）→ 橘色「⚠ 單一來源」徽章，明確跟多源維度（如 news 12 源）
+      區隔開，不包裝成同等可信。
+    """
+    if not dims:
+        return ""
+    e = html.escape
+
+    ev_by_kind: dict[str, list] = {}
+    for ev in evidence:
+        ev_by_kind.setdefault(ev.kind, []).append(ev)
+
+    def _color(v: float) -> str:
+        if v >= 0.7:
+            return "#3fb950"
+        if v >= 0.4:
+            return "#d9832a"
+        return "#cb2431"
+
+    rows: list[str] = []
+    for kind, d in dims.items():
+        label = e(str(d.get("label", kind)))
+        if not d.get("has_data"):
+            rows.append(
+                f'<div style="display:flex;align-items:center;gap:.5rem;'
+                f'padding:.3rem 0;opacity:.55;border-bottom:1px solid var(--tf-border)">'
+                f'<span style="width:6.5em;flex:0 0 auto;font-size:.78rem">{label}</span>'
+                f'<span class="tf-bar-wrap" style="flex:1 1 auto;height:9px">'
+                f'<span class="tf-bar" style="width:0%;background:var(--tf-muted)"></span></span>'
+                f'<span style="font-size:.72rem;color:var(--tf-muted);white-space:nowrap">— 無資料</span>'
+                f'</div>'
+            )
+            continue
+        trust = float(d.get("trust") or 0.0)
+        pct = max(0, min(100, int(trust * 100)))
+        n_sources = int(d.get("n_sources", 0))
+        n_evidence = int(d.get("n_evidence", 0))
+        single = bool(d.get("single_source"))
+        single_badge = (
+            ' <span style="color:#d9832a;font-weight:600" '
+            'title="僅單一來源，非多源獨立交叉驗證，可信度不等同多源維度">'
+            '&#9888; 單一來源</span>'
+        ) if single else ""
+        detail_items = ev_by_kind.get(kind, [])
+        detail_html = "".join(
+            f'<li>{e(source_display_name(it.source))}｜信任 {it.trust:.2f}｜'
+            f'{e((it.content_reference or "")[:80])}</li>'
+            for it in detail_items
+        )
+        rows.append(
+            f'<details style="padding:.3rem 0;border-bottom:1px solid var(--tf-border)">'
+            f'<summary style="cursor:pointer;display:flex;align-items:center;gap:.5rem">'
+            f'<span style="width:6.5em;flex:0 0 auto;font-size:.78rem">{label}</span>'
+            f'<span class="tf-bar-wrap" style="flex:1 1 auto;height:9px">'
+            f'<span class="tf-bar" style="width:{pct}%;background:{_color(trust)}"></span></span>'
+            f'<span style="font-size:.78rem;color:var(--tf-text);white-space:nowrap">'
+            f'{trust:.2f}（{n_sources} 源／{n_evidence} 筆）</span>{single_badge}'
+            f'</summary>'
+            f'<ul style="margin:.35rem 0 0 1.3rem;padding:0;font-size:.7rem;'
+            f'color:var(--tf-muted2)">{detail_html}</ul>'
+            f'</details>'
+        )
+
+    return (
+        '<div class="tf-section">'
+        '<h3>多維度信任雷達</h3>'
+        '<p style="color:var(--tf-muted2);font-size:.72rem;margin:.1rem 0 .6rem">'
+        '按來源類型分維度聚合信任分（複用同一套「信譽×佐證×時效−操縱」公式），'
+        '單一來源維度已明確標示、不等同多源交叉驗證；點各列可展開查看該維度證據。</p>'
+        + "".join(rows) +
+        '</div>'
+    )
+
+
 # Tier2 可解釋 UX：來源獨立性標籤依 kind 映射推導（純渲染層，不新增 schema
 # 欄位）。故意拆成「獨立性層級（高/中/一般）」×「權威性（官方/第三方/社群）」
 # 兩個維度——不可混為一談：CoinGecko（price_live）與 onchain（blockchain.info／
@@ -2319,6 +2409,9 @@ def _render_report(
     conf_html = _conf_gauge(report.calibrated_confidence, report.confidence_label())
     agg_tc = _aggregate_trust_components(evidence)
     breakdown_html = _render_trust_breakdown(agg_tc, report.confidence) if agg_tc else ""
+    # 新核心#2（task #25）：多維度信任雷達——按 source kind 聚合出分維度信任分，
+    # 純渲染層重新聚合既有 evidence.trust，不多打任何呼叫（$0）。
+    radar_html = _render_trust_radar(aggregate_trust_by_kind(evidence), evidence)
     ev_rows = _render_evidence_list(evidence)
     price_provenance_html = _render_price_provenance(evidence)
     cross_html = (
@@ -2348,6 +2441,8 @@ def _render_report(
     <div>{breakdown_html}</div>
   </div>
 </div>
+
+{radar_html}
 
 <div class="tf-section" style="border-left:4px solid #3fb950">
   <h3>事實（客觀資料）<span class="tf-step-badge">步驟 1/3</span></h3>
