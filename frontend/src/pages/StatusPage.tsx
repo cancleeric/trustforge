@@ -63,7 +63,15 @@ function FreshnessMatrix({ entries }: { entries: FreshnessEntry[] }) {
   )
 }
 
-function CostSummaryCard({ costs, costsError }: { costs: CostsData | null; costsError: { code: string; message: string } | null }) {
+function CostSummaryCard({
+  costs,
+  costsError,
+  costsLoading,
+}: {
+  costs: CostsData | null
+  costsError: { code: string; message: string } | null
+  costsLoading: boolean
+}) {
   return (
     <div className="rounded-lg border border-tf-border bg-tf-card p-4">
       <div className="mb-2 flex items-center justify-between">
@@ -72,8 +80,12 @@ function CostSummaryCard({ costs, costsError }: { costs: CostsData | null; costs
           查看完整成本明細 &#8594;
         </Link>
       </div>
-      {costsError && <p className="text-xs text-tf-muted">成本資料暫時無法讀取（{costsError.code}）。</p>}
-      {!costsError && costs && (
+      {/* 成本是輔助區塊，自己的 loading/error 只影響這張卡，不阻塞已經
+          顯示的狀態主內容——帳本變大或成本 API 延遲時，監控頁最需要看
+          的鮮度矩陣/cache backend 狀態必須立即可見。 */}
+      {costsLoading && <p className="text-xs text-tf-muted">成本資料載入中…</p>}
+      {!costsLoading && costsError && <p className="text-xs text-tf-muted">成本資料暫時無法讀取（{costsError.code}）。</p>}
+      {!costsLoading && !costsError && costs && (
         <div className="flex items-baseline gap-2">
           <span className="tf-num text-2xl font-bold text-tf-text">{formatUsd(costs.total_cost_usd)}</span>
           <span className="text-xs text-tf-muted">累計花費（跨 run）</span>
@@ -86,32 +98,49 @@ function CostSummaryCard({ costs, costsError }: { costs: CostsData | null; costs
 export default function StatusPage() {
   const [status, setStatus] = useState<StatusData | null>(null)
   const [statusError, setStatusError] = useState<{ code: string; message: string } | null>(null)
-  const [costs, setCosts] = useState<CostsData | null>(null)
-  const [costsError, setCostsError] = useState<{ code: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
 
+  const [costs, setCosts] = useState<CostsData | null>(null)
+  const [costsError, setCostsError] = useState<{ code: string; message: string } | null>(null)
+  const [costsLoading, setCostsLoading] = useState(true)
+
+  // 狀態獨立請求：主 loading 只取決於 getStatus，資料一到就立即渲染，
+  // 不受成本 API（無界 runs 陣列、可能延遲/逾時）拖累。
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true)
     setStatusError(null)
-    Promise.all([getStatus(controller.signal), getCosts(controller.signal)]).then(([statusRes, costsRes]) => {
+    getStatus(controller.signal).then((res) => {
       if (controller.signal.aborted) return
       setLoading(false)
-      if (statusRes.ok) {
-        setStatus(statusRes.data)
+      if (res.ok) {
+        setStatus(res.data)
         setStatusError(null)
       } else {
         setStatus(null)
-        setStatusError(statusRes.error)
+        setStatusError(res.error)
       }
-      // 成本摘要是輔助區塊，讀取失敗不擋主要狀態頁渲染，只在該區塊顯示
-      // 錯誤（見 `CostSummaryCard`）。
-      if (costsRes.ok) {
-        setCosts(costsRes.data)
+    })
+    return () => {
+      controller.abort()
+    }
+  }, [])
+
+  // 成本獨立請求：各自的 AbortController/timeout，pending/timeout/error
+  // 只反映在 CostSummaryCard 自己的區塊，不影響上面已渲染的狀態內容。
+  useEffect(() => {
+    const controller = new AbortController()
+    setCostsLoading(true)
+    setCostsError(null)
+    getCosts(controller.signal).then((res) => {
+      if (controller.signal.aborted) return
+      setCostsLoading(false)
+      if (res.ok) {
+        setCosts(res.data)
         setCostsError(null)
       } else {
         setCosts(null)
-        setCostsError(costsRes.error)
+        setCostsError(res.error)
       }
     })
     return () => {
@@ -161,7 +190,7 @@ export default function StatusPage() {
             <FreshnessMatrix entries={status.freshness.entries} />
           </section>
 
-          <CostSummaryCard costs={costs} costsError={costsError} />
+          <CostSummaryCard costs={costs} costsError={costsError} costsLoading={costsLoading} />
         </>
       )}
     </main>
