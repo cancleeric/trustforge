@@ -50,6 +50,7 @@ from trustforge.ingestion.cache import (
     cache_get,
     cache_key,
     cache_set,
+    cache_set_if_newer,
     doc_from_dict,
     doc_to_dict,
     get_cache_backend,
@@ -217,6 +218,79 @@ def test_dynamodb_cache_set_without_ttl_seconds_uses_fallback_window():
 
     item = mock_table.put_item.call_args.kwargs["Item"]
     assert item["ttl"] == 1000 + DEFAULT_STALE_AFTER_FALLBACK_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# codex HIGH（PR #59 review）：`DynamoDBCache.set_if_newer()` 條件式 PutItem
+# ---------------------------------------------------------------------------
+
+def test_dynamodb_cache_set_if_newer_calls_put_item_with_condition_expression():
+    """正常寫入應帶 `ConditionExpression`（比照 `scheduler_log.py
+    ::DynamoDBSchedulerRunLog._update_latest_pointer` 既有慣例），成功回傳
+    `True`。"""
+    d = DynamoDBCache(table_name="fake-table")
+    mock_table = MagicMock()
+    d._table = mock_table
+
+    wrote = d.set_if_newer(cache_key("__trust_snapshot_history__", "BTC:2026-07-01"), [], fetched_at=1000.0)
+
+    assert wrote is True
+    call_kwargs = mock_table.put_item.call_args.kwargs
+    assert "ConditionExpression" in call_kwargs
+    assert call_kwargs["Item"]["fetched_at"] == Decimal("1000.0")
+
+
+def test_dynamodb_cache_set_if_newer_returns_false_on_conditional_check_failed():
+    """`ConditionalCheckFailedException`（既有值較新，贏得 race）視為「跳過」，
+    回傳 `False`，**不**往上層 raise——這是正常的單調條件寫入結果，不是
+    錯誤。"""
+    from botocore.exceptions import ClientError
+
+    d = DynamoDBCache(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.put_item.side_effect = ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "stale"}}, "PutItem",
+    )
+    d._table = mock_table
+
+    wrote = d.set_if_newer(cache_key("__trust_snapshot_history__", "BTC:2026-07-01"), [], fetched_at=1000.0)
+
+    assert wrote is False
+
+
+def test_dynamodb_cache_set_if_newer_reraises_unrelated_client_errors():
+    """非 `ConditionalCheckFailedException` 的其他 DynamoDB 錯誤（如權限/
+    網路問題）仍應照常往上層 raise，不能被單調條件寫入的「跳過」語意
+    誤吞掉。"""
+    from botocore.exceptions import ClientError
+
+    d = DynamoDBCache(table_name="fake-table")
+    mock_table = MagicMock()
+    mock_table.put_item.side_effect = ClientError(
+        {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "boom"}}, "PutItem",
+    )
+    d._table = mock_table
+
+    with pytest.raises(ClientError):
+        d.set_if_newer(cache_key("__trust_snapshot_history__", "BTC:2026-07-01"), [], fetched_at=1000.0)
+
+
+def test_cache_set_if_newer_wrapper_reports_skipped_without_marking_failure():
+    """`cache_set_if_newer()`（模組級便利函式）在 backend 判斷跳過時，應
+    回傳 `ok=True, skipped=True`——呼叫端（`fetch_scheduler.py`）不該把它
+    當成寫入失敗。"""
+    d = DynamoDBCache(table_name="fake-table")
+    mock_table = MagicMock()
+    from botocore.exceptions import ClientError
+    mock_table.put_item.side_effect = ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "stale"}}, "PutItem",
+    )
+    d._table = mock_table
+
+    result = cache_set_if_newer(d, cache_key("__trust_snapshot_history__", "BTC:2026-07-01"), [], fetched_at=1000.0)
+
+    assert result.ok is True
+    assert result.skipped is True
 
 
 def test_dynamodb_cache_get_calls_get_item_with_split_key():

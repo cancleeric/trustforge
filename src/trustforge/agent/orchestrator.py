@@ -11,6 +11,7 @@ Bedrock 只負責把推理「行文」成可讀敘述，不得把第三方現成
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Callable
@@ -20,7 +21,7 @@ from ..execlog import ExecutionLog
 from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
-from ..trust.scoring import ScoredClaim, TrustedBrief
+from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
 _STEP4_MIN_BUDGET_SEC = 60.0
@@ -146,6 +147,99 @@ def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
         flips.append("若反方訊號獲得高信任獨立來源佐證，結論可能反轉。")
     flips.append("出現高信任的反向鏈上大額流動或監管事件時，須重評。")
     return limits, flips
+
+
+# 新核心#2（gray docs/PLAN-multicore-worldfirst.md，task #25）：分維度信任的
+# 中文標籤。鍵集合刻意不獨立重複維護——候選維度＝`KIND_REPUTATION`（信任評分
+# 唯一吃得到的 kind 全集），新增連接器只要在該表登記一筆 kind，雷達自動多出
+# 一維，這裡只補顯示用的中文標籤（缺標籤時 fallback 用 kind 原字串，不會噴錯）。
+_DIMENSION_LABELS: dict[str, str] = {
+    "news": "新聞信任",
+    "onchain": "鏈上信任",
+    "social": "社群信任",
+    "regulatory": "監管信任",
+    "price": "價格信任",
+    "price_live": "即時價格信任",
+    "hoyabit": "交易所信任",
+    "sentiment": "情緒信任",
+    "dev_activity": "開發活躍度信任",
+}
+
+
+def aggregate_trust_by_kind(evidence: list[Evidence]) -> dict[str, dict]:
+    """新核心#2：把 evidence 按 source kind 分組，每組聚合出一個「維度信任分」。
+
+    ⛔ $0 保證：不重新呼叫 Bedrock／連接器、不重算信譽公式——直接複用每筆
+    `Evidence.trust`（已由 `trust.scoring.score()` 依「信譽×0.5 + 佐證×0.25 +
+    時效×0.15 − 操縱×0.4」算好，見該模組 docstring），同 kind 取算術平均當
+    該維度信任分。純粹是對既有結果的**重新聚合**，不多打任何外部呼叫。
+
+    誠實標單源維度（gray 抓出：regulatory 只有 SEC 1 源、social 只有 Reddit
+    1 源，跟 news 12 源不能等量齊觀）：每個有資料的維度都回傳 `n_sources`
+    （去重後的獨立來源數，依 `Evidence.source` 計）與 `single_source`
+    （`n_sources <= 1`）——呼叫端（web.py）必須用這個旗標把單源維度明確標成
+    「單一來源，非多源獨立交叉驗證」，不能包裝成跟多源維度同等可信。
+
+    誠實顯示無資料（#24）：候選維度固定取自 `KIND_REPUTATION` 全集，本次
+    analysis 若某 kind 完全沒有 evidence（例如未啟用 coingecko 連接器時的
+    price_live/sentiment/dev_activity），該維度回傳 `has_data=False`、
+    `trust=None`——不會用 0 或任何佔位數字冒充「有算過但分數低」，避免
+    使用者把「沒資料」誤讀成「該維度信任極差」。
+
+    回傳：`{kind: {"label", "has_data", "trust", "n_sources", "n_evidence",
+    "single_source"}}`，鍵集合**嚴格等於** `KIND_REPUTATION` 全集、鍵順序固定
+    依 `KIND_REPUTATION` 插入順序——不受 evidence 內容影響，確保雷達軸跨報告
+    可比較。evidence 出現、但不在 `KIND_REPUTATION` 裡的 kind（空字串、
+    schema drift、連接器拼字錯誤，例如把 "news" 打成 "newss"）**一律忽略、
+    不動態加軸**：這類 evidence 不計入任何維度（不會被硬塞進某個「看起來
+    像」的既有維度，以免污染該維度的信任平均與來源計數），只用
+    `logging.warning` 記一筆可觀測 log 供事後發現分類錯誤，雷達軸本身
+    絕不因此變動。
+
+    只讀 `evidence`，不改動任何既有欄位／物件——`Report.confidence`／
+    `calibrated_confidence`（信任總分）完全不受影響，分維聚合是額外呈現，
+    不改總分演算法。
+    """
+    by_kind: dict[str, list[Evidence]] = {}
+    unknown_kinds: set[str] = set()
+    for ev in evidence:
+        if ev.kind not in KIND_REPUTATION:
+            unknown_kinds.add(ev.kind)
+            continue
+        by_kind.setdefault(ev.kind, []).append(ev)
+
+    if unknown_kinds:
+        logging.warning(
+            "aggregate_trust_by_kind: 忽略不在 KIND_REPUTATION 的未知/空 kind"
+            "（不動態加軸，可能是 schema drift 或連接器拼字錯誤）：%s",
+            sorted(unknown_kinds),
+        )
+
+    out: dict[str, dict] = {}
+    for kind in KIND_REPUTATION:
+        kind_evidence = by_kind.get(kind, [])
+        label = _DIMENSION_LABELS.get(kind, kind)
+        if not kind_evidence:
+            out[kind] = {
+                "label": label,
+                "has_data": False,
+                "trust": None,
+                "n_sources": 0,
+                "n_evidence": 0,
+                "single_source": None,
+            }
+            continue
+        sources = {ev.source for ev in kind_evidence}
+        avg_trust = sum(ev.trust for ev in kind_evidence) / len(kind_evidence)
+        out[kind] = {
+            "label": label,
+            "has_data": True,
+            "trust": round(avg_trust, 3),
+            "n_sources": len(sources),
+            "n_evidence": len(kind_evidence),
+            "single_source": len(sources) <= 1,
+        }
+    return out
 
 
 def _harvest_stance_cost_events(client: BedrockClient, log: ExecutionLog) -> None:

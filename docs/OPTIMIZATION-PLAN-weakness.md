@@ -73,6 +73,74 @@ blockchair），需要獨立設計（含「相同 ts 算不算異常」「廣播
 
 ---
 
+## Follow-up（技術債，非本輪修復，**歷史趨勢 UI 建置前完成**）｜跨快取 key 原子發布（PR #59 每日累積歷史快照）
+
+**背景**：PR #59（task #26，`feat/snapshot-history` 分支）codex 複審 7 輪逐步把
+`scripts/fetch_scheduler.py::run_snapshot()` 的三個持久化表示（「最新一筆」
+`TRUST_SNAPSHOT_SOURCE`、「按日歷史」`TRUST_SNAPSHOT_HISTORY_SOURCE`、「總覽
+blob」`TRUST_OVERVIEW_SOURCE`）都改成 `cache_set_if_newer()` monotonic 條件
+寫入，且共用同一個 `run_now = time.time()`，讓同一輪三個 CAS 決策彼此一致；
+第 4 輪做 per-coin all-or-nothing 收窄；第 5 輪進一步發現並修正**寫入序
+的方向性問題**——原本先寫 latest、才寫 history，若程序剛好在這兩步之間
+被砍斷、且下一輪排程跨過 UTC 日界，**前一天的 history 會永久遺失、不可
+復原**（history 是不可復原的 point-in-time 累積資料，不像 latest 只是
+「暫時舊」、下一輪就能自癒）。第 5 輪改成**先寫 history（不可復原、優先
+保住）、成功後才寫 latest/overview（last-write-wins、可自癒）**，gating
+也相應改成以 history 這次的 CAS 結果為準。第 6 輪再抓到一個更隱蔽的變體
+——`cache_set_if_newer()` 本身有 cross-backend fallback（primary 如
+DynamoDB 失敗時，改寫本地 JSON 並回傳 `ok=True, used_fallback=True`）；
+若 history 這次是靠 fallback 才寫成功（只在本機看得到、沒真正進
+primary），緊接著 latest/overview 若打向已經恢復的 primary、正常寫入，
+primary 端就會出現「latest/overview 是新的，但 history 完全不存在」的
+**跨 backend 分裂**，而且因為 `ok=True`，完全不會被 `failures` 抓到、
+run 還是 exit 0，形同悄悄發生。修法：把「history 走 fallback、沒真正進
+primary」視同跟 `ok=False` 一樣的 gating 失敗，同步跳過該幣
+latest/overview（不寫進任何 backend），並計入 `failures`，確保三表示
+要嘛全部落在同一個 backend 一致，要嘛這一幣這一輪整個不處理。第 7 輪
+codex 指出第 6 輪只擋了 history 的 fallback，**latest 跟 overview 這兩個
+寫入自己的 fallback 完全沒擋**——history 成功進 primary 之後，latest
+這次呼叫若剛好 primary transient 失敗、轉走本地 JSON fallback，
+`result.ok` 一樣是 `True`，會被當成功繼續納入總覽候選；overview 接著
+若正常寫進（已經恢復的）primary，primary 端就會出現「history/overview
+是新的，但 latest 沒真的更新」的同類跨 backend 分裂；overview 自己的
+fallback 也可能發生一樣的事。逐一補 per-key 的 `used_fallback` 判斷是
+治標、每加一個 key 就多一次容易漏改的地方。第 7 輪改用最乾淨的解法：
+**history/latest/overview 這三個 `cache_set_if_newer()` 呼叫全部明確傳
+`allow_json_fallback=False`**，從根本關掉這條路徑的 cross-backend
+fallback（`_json_fallback_enabled()` 收到明確 `False` 時一律視為停用，
+不管環境變數 `TRUSTFORGE_CACHE_JSON_FALLBACK` 是否開啟）——snapshot 這
+三個表示只認 primary backend 是否真的寫成功，primary 失敗就是直接
+`ok=False`，不再有「fallback 成功但沒進 primary」這種曖昧地帶。原本
+`used_fallback` gating 判斷保留在三處呼叫之後，結構上都已經是不可能
+再被觸發的 defense-in-depth（防止未來有人漏改某一處呼叫又重新打開這個
+class）。一般 cache（連接器資料抓取）呼叫端的 `allow_json_fallback`
+預設值沒變、不受影響，只有 snapshot 路徑明確關閉。至此，**跨 backend
+分裂**這個 bug class（history/latest/overview 任一走 fallback 卻讓其餘
+表示正常落地 primary）在 snapshot 路徑已經結構性不可能發生，不是機率
+降低。
+
+**未做（本節追蹤，跟上述跨 backend 分裂是不同層次的殘餘風險）**：即使重排了寫入序，history 跟 latest 這兩個獨立的
+`cache_set_if_newer()` 呼叫本身仍不是同一個原子操作。極罕見情況下
+（history CAS 剛好成功、程序在寫 latest 之前被中斷/crash），會留下
+「history 已經是新的，latest 卻還停在舊的」暫態矛盾——這是 transient、
+下一輪排程會自然覆蓋回一致狀態的自癒暫態（不再有第 5 輪修正前「永久遺失
+一天歷史」的不可復原風險，只剩「latest 暫時落後」這種可自癒的殘餘視窗）。
+真正的跨 key 原子需要 DynamoDB `TransactWriteItems`（全項單調條件包成
+同一個 transaction）或 immutable generation + 原子切換 manifest 指標
+（讀端只讀已發布的 generation），屬於架構層級改動，需要獨立設計 review，
+不適合在單一 PR 順手塞。
+
+**現況風險評估**：目前完全沒有歷史趨勢 reader UI，沒有人讀 history 資料，
+暫態矛盾影響極小，**本輪不需要修**。**歷史趨勢 UI 建置前必須完成**——一旦
+有真正的讀路徑會呈現 history 給使用者，這個暫態矛盾就從「沒人看得到、無
+影響」變成「使用者可能看到不一致的歷史曲線」，屬於 #24（只寫真分析結果、
+不誤導使用者）風險。
+
+**追蹤**：[GitHub issue #62](https://github.com/cancleeric/trustforge/issues/62)，
+歷史趨勢 UI 排程前應重新拉出本節確認已處理。
+
+---
+
 ## Phase 2｜核心戰略抉擇（需老闆拍板，CTO 不自行決定）
 
 ### a. 效度驗證 vs 誠實重定位
