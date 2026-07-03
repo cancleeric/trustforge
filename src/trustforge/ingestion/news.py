@@ -14,6 +14,14 @@
   - NewsBTC          https://www.newsbtc.com/feed/
   - The Daily Hodl   https://dailyhodl.com/feed/
 
+資料密度第二批（#24，2026-07，見 docs/PLAN-data-density.md，gray 已逐一 curl
+驗證 200 OK）——同樣全部 keyless、公開 RSS，複用 `_parse_rss`。The Block／
+Blockworks 的原始網址（`theblock.co`/`blockworks.co`）會 308 轉到下列終點，
+比照 coindesk 教訓直接寫終點 URL，不依賴轉址：
+  - The Block   https://www.theblock.co/rss.xml
+  - U.Today     https://u.today/rss.php
+  - Blockworks  https://blockworks.com/feed（回傳 Atom，`_parse_rss` 已相容）
+
 生產事故修復（coindesk 全 308 Permanent Redirect）：CoinDesk 把舊網址
 `.../rss/`（末尾帶斜線）永久重導到 `.../rss`（無斜線），同網域、只差路徑
 末尾斜線。已直接改用新網址（見下方 `CoinDeskRSSSource._URL`），不必再依賴
@@ -229,6 +237,39 @@ class DailyHodlRSSSource(Source):
         return _parse_rss(raw, self.name, query, coin)
 
 
+class TheBlockRSSSource(Source):
+    """The Block RSS，公開無 key。"""
+    kind = "news"
+    name = "theblock"
+    _URL = "https://www.theblock.co/rss.xml"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class UTodayRSSSource(Source):
+    """U.Today RSS，公開無 key。"""
+    kind = "news"
+    name = "utoday"
+    _URL = "https://u.today/rss.php"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
+class BlockworksRSSSource(Source):
+    """Blockworks feed（Atom 格式，`_parse_rss` 已相容），公開無 key。"""
+    kind = "news"
+    name = "blockworks"
+    _URL = "https://blockworks.com/feed"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        raw = _fetch_url(self._URL)
+        return _parse_rss(raw, self.name, query, coin)
+
+
 class CryptoPanicSource(Source):
     """CryptoPanic API（需 env CRYPTOPANIC_TOKEN；無 token 時安靜回空）。"""
     kind = "news"
@@ -274,6 +315,9 @@ def build_news_sources() -> list[Source]:
         BitcoinistRSSSource(),
         NewsBTCRSSSource(),
         DailyHodlRSSSource(),
+        TheBlockRSSSource(),
+        UTodayRSSSource(),
+        BlockworksRSSSource(),
     ]
     if os.getenv("CRYPTOPANIC_TOKEN"):
         sources.append(CryptoPanicSource())

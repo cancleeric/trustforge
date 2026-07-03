@@ -14,8 +14,10 @@
 
 來源名稱（`source`）對應 `src/trustforge/ingestion/*.py` 各 `Source.name`：
   news.py:      coindesk, decrypt, cryptopanic, cointelegraph, bitcoinmagazine,
-                cryptoslate, bitcoinist, newsbtc, dailyhodl
-  onchain.py:   alternative-me-fng（coin-agnostic）, blockchain-info
+                cryptoslate, bitcoinist, newsbtc, dailyhodl, theblock, utoday,
+                blockworks
+  onchain.py:   alternative-me-fng（coin-agnostic）, blockchain-info,
+                mempool-space-fees, mempool-space-difficulty, blockchair
   regulatory.py: sec-gov（coin-agnostic）
   social.py:    reddit-cryptocurrency, reddit-bitcoin
   coingecko.py: coingecko-price, coingecko-sentiment, coingecko-dev
@@ -133,6 +135,17 @@ CONNECTOR_COST_MODEL: dict[str, ConnectorCostModel] = {
     "dailyhodl": _free_connector(
         "dailyhodl", "公開 RSS feed（https://dailyhodl.com/feed/），無官方公開量化硬配額",
     ),
+    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 The Block/U.Today/
+    # Blockworks 3 家新聞 RSS，全部 keyless 公開 RSS feed，比照第一批同款登記。
+    "theblock": _free_connector(
+        "theblock", "公開 RSS feed（https://www.theblock.co/rss.xml），無官方公開量化硬配額",
+    ),
+    "utoday": _free_connector(
+        "utoday", "公開 RSS feed（https://u.today/rss.php），無官方公開量化硬配額",
+    ),
+    "blockworks": _free_connector(
+        "blockworks", "公開 Atom feed（https://blockworks.com/feed），無官方公開量化硬配額",
+    ),
     "alternative-me-fng": _free_connector(
         "alternative-me-fng",
         "Alternative.me Fear & Greed Index 公開 API"
@@ -142,6 +155,31 @@ CONNECTOR_COST_MODEL: dict[str, ConnectorCostModel] = {
     "blockchain-info": _free_connector(
         "blockchain-info",
         "blockchain.info 公開 API（https://www.blockchain.com/explorer/api），無官方公開量化硬配額",
+        paid_note="無付費方案",
+    ),
+    # 資料密度第二批：mempool.space keyless 公開 API，官方文件無嚴格月配額
+    # 公告（僅建議 <10 req/min，非配額制）；Blockchair 免費層有明確公開配額
+    # （1440 req/day），但屬「日配額」非本模型 `free_tier_period` 支援的
+    # "month" 語意（沿用 CoinGecko 那組月配額語意會誤導），比照其餘公開端點
+    # 誠實標「無官方公開量化硬配額」（`free_tier_quota=None`），配額數字改寫
+    # 在 `free_tier_reference` 純文字說明供人工覆核，不臆測成月配額換算。
+    "mempool-space-fees": _free_connector(
+        "mempool-space-fees",
+        "mempool.space 公開 API（https://mempool.space/api/v1/fees/recommended），"
+        "官方文件無嚴格 QPS 硬配額（建議 <10 req/min），無付費方案",
+        paid_note="無付費方案",
+    ),
+    "mempool-space-difficulty": _free_connector(
+        "mempool-space-difficulty",
+        "mempool.space 公開 API（https://mempool.space/api/v1/difficulty-adjustment），"
+        "官方文件無嚴格 QPS 硬配額（建議 <10 req/min），無付費方案",
+        paid_note="無付費方案",
+    ),
+    "blockchair": _free_connector(
+        "blockchair",
+        "Blockchair 公開 API（https://api.blockchair.com/bitcoin/stats），免費層"
+        "官方公告 1440 requests/day（日配額，非本模型月配額欄位語意，見"
+        "https://blockchair.com/api/docs），無付費方案",
         paid_note="無付費方案",
     ),
     "sec-gov": _free_connector(

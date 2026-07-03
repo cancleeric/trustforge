@@ -161,11 +161,11 @@ def test_cryptopanic_with_token_parses_fields(monkeypatch):
 
 def test_build_news_sources_no_cryptopanic_when_no_token(monkeypatch):
     """未設 token 時，build_news_sources 不包含 CryptoPanicSource（資料密度
-    第一批 #24 加 6 家新聞 RSS 後，基礎來源數從 2 變 8）。"""
+    第一批 #24 加 6 家新聞 RSS 後基礎來源數從 2 變 8，第二批再加 3 家變 11）。"""
     from trustforge.ingestion import news
     monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
     sources = news.build_news_sources()
-    assert len(sources) == 8
+    assert len(sources) == 11
     types = [type(s).__name__ for s in sources]
     assert "CryptoPanicSource" not in types
 
@@ -201,7 +201,7 @@ def test_new_rss_sources_document_fields_and_url(monkeypatch, source_cls_name, e
 
 
 def test_build_news_sources_includes_all_6_new_rss_sources(monkeypatch):
-    """build_news_sources() 含新舊共 8 個新聞來源（不含條件式 cryptopanic）。"""
+    """build_news_sources() 含新舊共 11 個新聞來源（不含條件式 cryptopanic）。"""
     from trustforge.ingestion import news
     monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
     sources = news.build_news_sources()
@@ -209,7 +209,62 @@ def test_build_news_sources_includes_all_6_new_rss_sources(monkeypatch):
     assert names == {
         "coindesk", "decrypt", "cointelegraph", "bitcoinmagazine",
         "cryptoslate", "bitcoinist", "newsbtc", "dailyhodl",
+        "theblock", "utoday", "blockworks",
     }
+
+
+# ── 資料密度第二批（#24，docs/PLAN-data-density.md）：The Block/U.Today/
+# Blockworks 3 家新聞 RSS ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "source_cls_name,expected_name,expected_url",
+    [
+        ("TheBlockRSSSource", "theblock", "https://www.theblock.co/rss.xml"),
+        ("UTodayRSSSource", "utoday", "https://u.today/rss.php"),
+        ("BlockworksRSSSource", "blockworks", "https://blockworks.com/feed"),
+    ],
+)
+def test_batch2_rss_sources_document_fields_and_url(monkeypatch, source_cls_name, expected_name, expected_url):
+    """資料密度第二批 3 家新聞 RSS：各自 name/kind/URL 正確，且複用
+    `_parse_rss` 能正確解析出 Document（url/ts/content_reference）。"""
+    from trustforge.ingestion import news
+    source_cls = getattr(news, source_cls_name)
+    assert source_cls._URL == expected_url
+    monkeypatch.setattr(news, "_fetch_url", lambda url: RSS_FIXTURE)
+    docs = source_cls().fetch("BTC", coin="BTC")
+    assert len(docs) >= 1
+    d = docs[0]
+    assert d.kind == "news"
+    assert d.source == expected_name
+    assert d.ts > 0
+    assert d.meta.get("content_reference")
+    assert len(d.meta["content_reference"]) <= 120
+
+
+ATOM_FIXTURE = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Blockworks</title>
+  <entry>
+    <title type="html">ETF inflows accelerate amid rate-cut bets</title>
+    <id>https://blockworks.com/news/etf-inflows</id>
+    <link href="https://blockworks.com/news/etf-inflows"/>
+    <summary type="html">Bitcoin BTC ETF inflows accelerate amid rate-cut bets and strong demand.</summary>
+    <published>2026-08-01T10:00:00.000Z</published>
+  </entry>
+</feed>"""
+
+
+def test_blockworks_atom_feed_parses_via_shared_parse_rss(monkeypatch):
+    """Blockworks 回傳 Atom（非 RSS 2.0），驗證 `_parse_rss` 對 atom:entry/
+    atom:link[href]/atom:summary/atom:published 的既有相容路徑能正確解析。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: ATOM_FIXTURE)
+    docs = news.BlockworksRSSSource().fetch("BTC", coin="BTC")
+    assert len(docs) == 1
+    d = docs[0]
+    assert d.source == "blockworks"
+    assert d.url == "https://blockworks.com/news/etf-inflows"
+    assert d.ts > 0
 
 
 def test_news_source_failure_does_not_crash_collect(monkeypatch):
@@ -289,6 +344,123 @@ def test_onchain_source_failure_does_not_crash_collect(monkeypatch):
     src = onchain.FearGreedSource()
     docs = base.collect("BTC", coin="BTC", sources=[src], offline=False)
     assert isinstance(docs, list)
+
+
+# ── 資料密度第二批（#24，docs/PLAN-data-density.md）：mempool.space 2 端點 +
+# Blockchair ─────────────────────────────────────────────────────────────────
+
+MPFEES_FIXTURE = b"""{
+  "fastestFee": 12, "halfHourFee": 8, "hourFee": 6, "economyFee": 3, "minimumFee": 1
+}"""
+
+MPDIFF_FIXTURE = b"""{
+  "progressPercent": 44.39, "difficultyChange": -1.43, "remainingBlocks": 1121,
+  "estimatedRetargetDate": 1783754115859
+}"""
+
+BLOCKCHAIR_FIXTURE = b"""{
+  "data": {
+    "blocks": 956480, "difficulty": 133869853540305.4,
+    "mempool_transactions": 82785, "transactions_24h": 573582,
+    "best_block_time": "2026-07-03 09:18:09"
+  }
+}"""
+
+
+def test_mempool_space_fees_document_fields(monkeypatch):
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: MPFEES_FIXTURE)
+    docs = onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    d = docs[0]
+    assert d.kind == "onchain"
+    assert d.source == "mempool-space-fees"
+    assert "mempool.space" in d.url
+    assert d.ts > 0
+    ref = d.meta["content_reference"]
+    assert "最快=12" in ref
+    assert "最低=1" in ref
+
+
+def test_mempool_space_fees_skipped_for_non_btc(monkeypatch):
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: MPFEES_FIXTURE)
+    assert onchain.MempoolSpaceFeesSource().fetch("", coin="ETH") == []
+
+
+def test_mempool_space_difficulty_document_fields(monkeypatch):
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: MPDIFF_FIXTURE)
+    docs = onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    d = docs[0]
+    assert d.kind == "onchain"
+    assert d.source == "mempool-space-difficulty"
+    assert "mempool.space" in d.url
+    assert d.ts > 0
+    ref = d.meta["content_reference"]
+    assert "44.4%" in ref
+    assert "1121" in ref
+
+
+def test_mempool_space_difficulty_skipped_for_non_btc(monkeypatch):
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: MPDIFF_FIXTURE)
+    assert onchain.MempoolSpaceDifficultySource().fetch("", coin="SOL") == []
+
+
+def test_blockchair_document_fields(monkeypatch):
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: BLOCKCHAIR_FIXTURE)
+    docs = onchain.BlockchairStatsSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    d = docs[0]
+    assert d.kind == "onchain"
+    assert d.source == "blockchair"
+    assert "blockchair.com" in d.url
+    ref = d.meta["content_reference"]
+    assert "956480" in ref
+    assert "82785" in ref
+    # best_block_time "2026-07-03 09:18:09" UTC → 對應 epoch
+    import datetime as _dt
+    expected_ts = _dt.datetime(2026, 7, 3, 9, 18, 9, tzinfo=_dt.timezone.utc).timestamp()
+    assert d.ts == expected_ts
+
+
+def test_blockchair_skipped_for_non_btc(monkeypatch):
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: BLOCKCHAIR_FIXTURE)
+    assert onchain.BlockchairStatsSource().fetch("", coin="ETH") == []
+
+
+def test_blockchair_bad_best_block_time_falls_back_to_now(monkeypatch):
+    """`best_block_time` 缺失/格式不符時，不拋例外，退回目前時間。"""
+    from trustforge.ingestion import onchain
+    bad_fixture = b'{"data": {"blocks": 1, "best_block_time": "not-a-date"}}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_fixture)
+    docs = onchain.BlockchairStatsSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    assert docs[0].ts > 0
+
+
+def test_build_onchain_sources_includes_batch2_sources(monkeypatch):
+    """build_onchain_sources() 含新舊共 5 個鏈上來源（2 變 5）。"""
+    from trustforge.ingestion import onchain
+    sources = onchain.build_onchain_sources()
+    names = {s.name for s in sources}
+    assert names == {
+        "alternative-me-fng", "blockchain-info",
+        "mempool-space-fees", "mempool-space-difficulty", "blockchair",
+    }
+
+
+def test_mempool_space_and_blockchair_source_failure_does_not_crash_collect(monkeypatch):
+    from urllib.error import URLError
+    from trustforge.ingestion import onchain, base
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: (_ for _ in ()).throw(URLError("timeout")))
+    for src in (onchain.MempoolSpaceFeesSource(), onchain.MempoolSpaceDifficultySource(), onchain.BlockchairStatsSource()):
+        docs = base.collect("BTC", coin="BTC", sources=[src], offline=False)
+        assert isinstance(docs, list)
 
 
 # ── collect 整合測試 ──────────────────────────────────────────────────────────

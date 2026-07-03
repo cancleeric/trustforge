@@ -10,9 +10,10 @@ develop 分支，2026-07 fetch）：
 
 simple-icons **沒有收錄**的來源（CoinGecko／CoinDesk／Decrypt／
 CryptoPanic／SEC EDGAR／Alternative.me／CoinTelegraph／Bitcoin Magazine／
-CryptoSlate／Bitcoinist／NewsBTC／The Daily Hodl 等，已逐一 curl
+CryptoSlate／Bitcoinist／NewsBTC／The Daily Hodl／The Block／U.Today／
+Blockworks／mempool.space／Blockchair 等，已逐一 curl
 `raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/<slug>.svg`
-+ 查 slugs.md 確認不存在對應條目，2026-07 資料密度第一批 #24 補查）不得
++ 查 slugs.md 確認不存在對應條目，2026-07 資料密度第一批／第二批 #24 補查）不得
 瞎猜/拼裝其他來源的 LOGO 冒充官方——一律 fallback 成
 中性的「圓角徽章 + 2-3 字縮寫」（見 `_fallback_badge_html`），顏色沿用
 呼叫端既有語意色（如 evidence 的獨立性 tier 顏色），不偽裝成官方 LOGO、
@@ -217,6 +218,17 @@ _SOURCE_DISPLAY_NAME: dict[str, str] = {
     "bitcoinist": "Bitcoinist",
     "newsbtc": "NewsBTC",
     "dailyhodl": "The Daily Hodl",
+    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞 RSS +
+    # 3 個鏈上來源，simple-icons 逐一查證無收錄，一律走中性 fallback 徽章，
+    # 不偽造官方 LOGO。
+    "theblock": "The Block",
+    "utoday": "U.Today",
+    "blockworks": "Blockworks",
+    # 2 個 mempool.space 連接器共用同一個品牌 key（見 `_source_brand_key`
+    # 把 `mempool-space-*` 都正規化成 "mempool-space-fees"），這裡只需登記
+    # 一筆，"mempool-space-difficulty" 不會被直接查到。
+    "mempool-space-fees": "mempool.space",
+    "blockchair": "Blockchair",
 }
 
 # fallback 徽章（icon）縮寫——2-3 字，非官方 LOGO 替代品，純視覺辨識用。
@@ -235,6 +247,11 @@ _FALLBACK_BADGE_ABBR: dict[str, str] = {
     "bitcoinist": "BI",
     "newsbtc": "NB",
     "dailyhodl": "DH",
+    "theblock": "TB",
+    "utoday": "UT",
+    "blockworks": "BW",
+    "mempool-space-fees": "MP",
+    "blockchair": "BC",
 }
 
 
@@ -247,14 +264,18 @@ def _source_brand_key(source: str) -> str:
     - `reddit-<subreddit>`（每個 subreddit 各自一個連接器 name，見
       `ingestion/social.py::RedditCryptoSource.name`）共用同一個 Reddit
       品牌。
+    - `mempool-space-fees`/`mempool-space-difficulty`（`ingestion/onchain.py`
+      2 個各自獨立的連接器，見模組頂部說明）共用同一個 mempool.space 品牌。
     - 其餘來源（`coindesk`/`decrypt`/`cryptopanic`/`sec-gov`/
-      `blockchain-info`/`alternative-me-fng`/`ohlcv-csv`，見
+      `blockchain-info`/`alternative-me-fng`/`ohlcv-csv`/`blockchair`，見
       `ingestion/{news,regulatory,onchain,prices}.py`）名稱本身即為 key。
     """
     if source.startswith("coingecko"):
         return "coingecko"
     if source.startswith("reddit"):
         return "reddit"
+    if source.startswith("mempool-space"):
+        return "mempool-space-fees"
     return source
 
 
@@ -284,6 +305,14 @@ _SOURCE_DISPLAY_NAME_FINE: dict[str, str] = {
     "bitcoinist": "Bitcoinist",
     "newsbtc": "NewsBTC",
     "dailyhodl": "The Daily Hodl",
+    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞 RSS +
+    # 3 個鏈上來源。
+    "theblock": "The Block",
+    "utoday": "U.Today",
+    "blockworks": "Blockworks",
+    "mempool-space-fees": "mempool.space · 建議手續費",
+    "mempool-space-difficulty": "mempool.space · 難度調整進度",
+    "blockchair": "Blockchair · BTC 鏈上統計",
 }
 
 

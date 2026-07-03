@@ -15,7 +15,9 @@ ALL_KNOWN_SOURCES = [
     "coindesk", "decrypt", "cryptopanic",
     "cointelegraph", "bitcoinmagazine", "cryptoslate",
     "bitcoinist", "newsbtc", "dailyhodl",
+    "theblock", "utoday", "blockworks",
     "alternative-me-fng", "blockchain-info", "sec-gov",
+    "mempool-space-fees", "mempool-space-difficulty", "blockchair",
     "reddit-cryptocurrency", "reddit-bitcoin",
 ]
 
@@ -40,6 +42,19 @@ def test_connector_cost_model_covers_every_build_news_source(monkeypatch):
     assert expected_names, "build_news_sources() 不應回傳空集合"
     for name in expected_names:
         assert name in CONNECTOR_COST_MODEL, f"{name} 由 build_news_sources() 產生，但未登記於 CONNECTOR_COST_MODEL"
+
+
+def test_connector_cost_model_covers_every_build_onchain_source():
+    """防呆：`build_onchain_sources()` 實際會註冊的每個連接器 name，都必須在
+    `CONNECTOR_COST_MODEL` 登記到——同 `build_news_sources()` 的防呆邏輯，
+    直接從 `build_onchain_sources()` 推導預期集合，未來加新鏈上源忘了登記
+    成本模型，這裡就會紅。"""
+    from trustforge.ingestion.onchain import build_onchain_sources
+
+    expected_names = {s.name for s in build_onchain_sources()}
+    assert expected_names, "build_onchain_sources() 不應回傳空集合"
+    for name in expected_names:
+        assert name in CONNECTOR_COST_MODEL, f"{name} 由 build_onchain_sources() 產生，但未登記於 CONNECTOR_COST_MODEL"
 
 
 def test_coingecko_sources_share_official_10000_per_month_quota():
