@@ -508,7 +508,7 @@ def test_history_error_for_one_coin_excludes_it_from_latest_and_overview_and_cou
     real_cache_set_if_newer = fetch_scheduler.cache_set_if_newer
     btc_history_key = trust_snapshot_history_key("BTC", day)
 
-    def flaky_cache_set_if_newer(backend, key, docs, fetched_at, ttl_seconds=None):
+    def flaky_cache_set_if_newer(backend, key, docs, fetched_at, ttl_seconds=None, allow_json_fallback=None):
         if key == btc_history_key:
             return CacheWriteResult(
                 ok=False, used_fallback=False, backend="JsonCacheBackend",
@@ -516,6 +516,7 @@ def test_history_error_for_one_coin_excludes_it_from_latest_and_overview_and_cou
             )
         return real_cache_set_if_newer(
             backend, key, docs, fetched_at, ttl_seconds=ttl_seconds,
+            allow_json_fallback=allow_json_fallback,
         )
 
     monkeypatch.setattr(fetch_scheduler, "cache_set_if_newer", flaky_cache_set_if_newer)
@@ -567,11 +568,12 @@ def test_crash_after_history_before_latest_keeps_history_durable(
         """模擬程序被砍斷（crash/OOM kill）——不是正常的錯誤處理路徑，
         刻意不被 `run_snapshot()` 內任何 try/except 接住。"""
 
-    def crash_on_latest_write(backend, key, docs, fetched_at, ttl_seconds=None):
+    def crash_on_latest_write(backend, key, docs, fetched_at, ttl_seconds=None, allow_json_fallback=None):
         if key == btc_latest_key:
             raise _SimulatedCrash("模擬程序在 history 寫完、latest 寫入前被砍斷")
         return real_cache_set_if_newer(
             backend, key, docs, fetched_at, ttl_seconds=ttl_seconds,
+            allow_json_fallback=allow_json_fallback,
         )
 
     monkeypatch.setattr(fetch_scheduler, "cache_set_if_newer", crash_on_latest_write)
@@ -617,11 +619,12 @@ def test_history_survives_across_utc_day_boundary_after_crash(
     class _SimulatedCrash(Exception):
         pass
 
-    def crash_on_latest_write(backend, key, docs, fetched_at, ttl_seconds=None):
+    def crash_on_latest_write(backend, key, docs, fetched_at, ttl_seconds=None, allow_json_fallback=None):
         if key == btc_latest_key:
             raise _SimulatedCrash("模擬 D 日最後一次排程在跨日前被砍斷")
         return real_cache_set_if_newer(
             backend, key, docs, fetched_at, ttl_seconds=ttl_seconds,
+            allow_json_fallback=allow_json_fallback,
         )
 
     # D 日：history 寫完、latest 寫入前程序中斷（crash）。
@@ -681,24 +684,30 @@ class _FlakyPrimaryBackend(CacheBackend):
 
 
 # ---------------------------------------------------------------------------
-# codex HIGH（PR #59 review 第六輪，backend-affinity 一致性、#1 最終閉合）：
-# history 走 JSON fallback（primary 失敗）時，不能讓 latest/overview 卻
-# 正常寫進 primary（跨 backend 分裂）。
+# codex HIGH（PR #59 review 第六輪 backend-affinity 一致性 → 第七輪
+# 跨 backend 分裂 class 徹底閉合）：history/latest/overview 任一走 JSON
+# fallback（primary 失敗）都不能讓其餘表示卻正常寫進 primary（跨 backend
+# 分裂）。第七輪起 `run_snapshot()` 對這三個 `cache_set_if_newer()` 呼叫
+# 都明確傳 `allow_json_fallback=False`——不管全域環境變數
+# `TRUSTFORGE_CACHE_JSON_FALLBACK` 開或關，snapshot 這條路徑一律不嘗試
+# fallback，primary 失敗就是直接 `ok=False`，不會有「fallback 成功但沒
+# 進 primary」這種曖昧地帶。
 # ---------------------------------------------------------------------------
 
-def test_history_fallback_then_primary_recovery_does_not_split_backends(
+def test_history_primary_failure_ignores_global_json_fallback_env_and_fails_closed(
     monkeypatch, json_cache_backend,
 ):
-    """history 這次的 CAS 呼叫在 primary 端失敗、真正走了本地 JSON
-    fallback 才寫成功（`used_fallback=True`）；緊接著這一幣的 latest
-    這次呼叫若打向 primary 會正常成功（模擬 primary 剛好恢復）。
+    """history 這次的 CAS 呼叫在 primary 端失敗；即使全域環境變數
+    `TRUSTFORGE_CACHE_JSON_FALLBACK=1`（一般 cache 呼叫端會允許 fallback），
+    `run_snapshot()` 對 history 明確傳的 `allow_json_fallback=False` 必須
+    覆蓋掉環境變數——不嘗試 fallback，直接視為失敗，本輪這一幣的
+    latest／總覽候選整個跳過、計入 failures，任何 backend（primary 或本地
+    JSON fallback 檔）都不該出現這筆資料，不可能有跨 backend 分裂。
 
-    gating 斷言：即使 primary 已經恢復、latest 這次呼叫「理論上打得進去」，
-    也絕對不能讓它真的寫入 primary（否則 primary 就會出現「latest 是新的
-    但 history 根本不存在」的分裂）——latest/overview 這一幣本輪整個不
-    處理（不寫進 primary，也刻意不寫進 fallback），並計入 `failures`
-    （回傳碼非 0，讓監控看得到、逼 DynamoDB 問題被處理，下一輪恢復後
-    自然重新整批寫回 primary）。
+    這是第六輪同名測試的第七輪更新版：第六輪驗證的是「history 走 fallback
+    時 gating 要擋 latest/overview」，第七輪把 fallback 本身直接關閉，
+    所以第六輪那個「history 真的走 fallback 成功」的前提不再成立——
+    這裡改成驗證「fallback 從頭到尾都沒被嘗試」這個更強的保證。
     """
     day = "2026-07-01"
     ts = _utc_ts(f"{day}T12:00:00")
@@ -711,40 +720,108 @@ def test_history_fallback_then_primary_recovery_does_not_split_backends(
 
     # 直接呼叫 `run_snapshot()`（不透過 `main()` 的 env-var backend 選擇），
     # 才能注入這個非 `JsonCacheBackend` 的假 primary，觸發
-    # `cache_set_if_newer()` 真正的 cross-backend fallback 邏輯（見
-    # `src/trustforge/ingestion/cache.py`）——不是 monkeypatch
-    # `fetch_scheduler.cache_set_if_newer` 繞過真正的 fallback 機制。
+    # `cache_set_if_newer()` 真正的 fallback 判斷邏輯（見
+    # `src/trustforge/ingestion/cache.py` 的 `_json_fallback_enabled()`）
+    # ——不是 monkeypatch `fetch_scheduler.cache_set_if_newer` 繞過真正的
+    # 判斷。
     exit_code = fetch_scheduler.run_snapshot(["BTC"], primary, dry_run=False)
 
-    # 真失敗（history 沒真正 durable 進 primary），回傳碼必須非 0。
+    # 真失敗（history 沒真正 durable 進 primary，也沒有走 fallback），
+    # 回傳碼必須非 0。
     assert exit_code == 1
 
-    # primary 端完全沒有這一輪的任何資料——history 因為打 primary 失敗
-    # 才走 fallback（primary 本來就沒有它），latest/overview 則是被 gating
-    # 主動跳過、根本沒有嘗試寫，即使 primary 這時已經「恢復」（対 latest
-    # 這把 key 而言 primary.set() 本來就不會失敗）也一樣沒被寫入。
+    # primary 端完全沒有這一輪的任何資料。
     assert history_key not in primary._store
     assert cache_key(TRUST_SNAPSHOT_SOURCE, "BTC") not in primary._store
     assert cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN) not in primary._store
 
-    # 本地 JSON fallback 這端：history 真的走 fallback 寫成功了（這是
-    # `cache_set_if_newer()` 既有、預期中的行為，我們沒有關閉它，只是
-    # gating 不再往下寫 latest/overview）——用這個斷言證明測試真的觸發了
-    # 「fallback 已寫入」這個前提，不是誤打誤撞其他原因造成 primary 沒資料。
-    fallback_history = cache_get(json_cache_backend, history_key)
-    assert fallback_history is not None
-    assert fallback_history["docs"][0]["trust_score"] == pytest.approx(0.6, abs=1e-6)
-
-    # latest/overview 刻意也沒有被寫進 fallback（設計選擇：不分別在兩個
-    # backend 各自 fallback、之後還要追蹤兩邊一致性，直接整個不處理這一幣
-    # 這一輪，等下一輪 primary 恢復後三表示一起重新對齊）。
-    fallback_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"))
-    assert fallback_latest is None
-    fallback_overview = cache_get(
+    # 本地 JSON fallback 這端：即使環境變數允許 fallback，`run_snapshot()`
+    # 明確傳的 `allow_json_fallback=False` 必須讓 fallback 完全不被嘗試
+    # ——history/latest/overview 三把 key 在本地 JSON 都不該出現任何資料。
+    assert cache_get(json_cache_backend, history_key) is None
+    assert cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")) is None
+    assert cache_get(
         json_cache_backend,
         cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN),
-    )
-    assert fallback_overview is None
+    ) is None
+
+
+def test_latest_only_primary_failure_excludes_coin_and_does_not_split_backends(
+    monkeypatch, json_cache_backend,
+):
+    """codex HIGH（PR #59 review 第七輪）：history 對 primary 寫入成功，
+    緊接著同一幣的 latest 這次呼叫在 primary 端失敗（其餘 key 正常）。
+
+    gating 斷言：即使全域環境變數 `TRUSTFORGE_CACHE_JSON_FALLBACK=1`，
+    latest 也絕對不能走本地 JSON fallback 當成功繼續——必須直接視為
+    失敗，這一幣排除在總覽候選外（若只有這一幣，overview_html 會是空字串
+    根本不寫），計入 failures，回傳碼非 0。primary 端會有 history（真的
+    成功了），但不該有 latest／overview；本地 JSON fallback 端則三者
+    都不該有——不是「history 在 primary、latest 在 fallback」這種
+    跨 backend 分裂，而是乾脆地整幣跳過。
+    """
+    day = "2026-07-01"
+    ts = _utc_ts(f"{day}T12:00:00")
+    monkeypatch.setattr(time, "time", lambda: ts)
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_FALLBACK", "1")
+    _patch_pipeline_run(monkeypatch, confidence=0.6)
+
+    latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
+    primary = _FlakyPrimaryBackend(fail_once_for_keys={latest_key})
+
+    exit_code = fetch_scheduler.run_snapshot(["BTC"], primary, dry_run=False)
+
+    assert exit_code == 1
+
+    # history 對 primary 寫入沒有被 latest 的失敗影響（在它之前就已經
+    # 成功了）——primary 端該有 history，不該有 latest／overview。
+    history_key = trust_snapshot_history_key("BTC", day)
+    assert history_key in primary._store
+    assert latest_key not in primary._store
+    overview_key = cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN)
+    assert overview_key not in primary._store
+
+    # 本地 JSON fallback 端：即使環境變數允許 fallback，`allow_json_fallback
+    # =False` 必須讓 latest 完全不嘗試 fallback——不該在本地看到 latest
+    # 資料（也不該有 overview，畢竟只有這一幣、被排除後總覽候選是空的）。
+    assert cache_get(json_cache_backend, latest_key) is None
+    assert cache_get(json_cache_backend, overview_key) is None
+
+
+def test_overview_only_primary_failure_counts_failure_and_does_not_split_backends(
+    monkeypatch, json_cache_backend,
+):
+    """codex HIGH（PR #59 review 第七輪）：所有幣的 history／latest 都對
+    primary 寫入成功，只有總覽 blob 這次呼叫在 primary 端失敗。
+
+    gating 斷言：即使全域環境變數 `TRUSTFORGE_CACHE_JSON_FALLBACK=1`，
+    總覽 blob 也不能走本地 JSON fallback 當成功繼續——直接視為失敗、
+    計入 failures、回傳碼非 0。primary 端會有 BTC 的 history／latest
+    （真的成功了），但不該有總覽 blob；本地 JSON fallback 端則完全不該
+    出現總覽 blob 資料——不是「history/latest 在 primary、overview 在
+    fallback」這種跨 backend 分裂，而是總覽這塊直接失敗、下一輪再重試。
+    """
+    day = "2026-07-01"
+    ts = _utc_ts(f"{day}T12:00:00")
+    monkeypatch.setattr(time, "time", lambda: ts)
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_FALLBACK", "1")
+    _patch_pipeline_run(monkeypatch, confidence=0.6)
+
+    overview_key = cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN)
+    primary = _FlakyPrimaryBackend(fail_once_for_keys={overview_key})
+
+    exit_code = fetch_scheduler.run_snapshot(["BTC"], primary, dry_run=False)
+
+    assert exit_code == 1
+
+    history_key = trust_snapshot_history_key("BTC", day)
+    latest_key = cache_key(TRUST_SNAPSHOT_SOURCE, "BTC")
+    assert history_key in primary._store
+    assert latest_key in primary._store
+    assert overview_key not in primary._store
+
+    # 本地 JSON fallback 端：總覽 blob 不該出現在任何 backend。
+    assert cache_get(json_cache_backend, overview_key) is None
 
 
 # ---------------------------------------------------------------------------

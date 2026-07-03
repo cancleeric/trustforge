@@ -894,6 +894,30 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     primary，三表示重新對齊）。這確保三個表示要嘛全部落在同一個
     backend 保持一致，要嘛這一幣這一輪整個不處理，不會有「這一幣的
     三個表示分散在不同 backend」這種更難排查的分裂狀態。
+
+    codex HIGH（PR #59 review 第七輪，跨 backend 分裂 class 徹底閉合）：
+    第六輪只擋了 history 的 fallback，**latest 跟 overview 這兩個寫入的
+    fallback 完全沒擋**——history 成功進 primary 之後，latest 這次呼叫若
+    剛好 primary transient 失敗、轉走 JSON fallback，`result.ok` 一樣是
+    `True`，程式會照常把它當成功、納入總覽候選；overview 接著若正常寫進
+    （已經恢復的）primary，primary 端就會出現「history/overview 是新的，
+    但 latest 沒真的更新」的分裂；overview 自己也可能發生一樣的事。用
+    「per-key 個別判斷 used_fallback」這種修法，每加一個 key 就要多补一次
+    判斷，容易漏，是治標不治本。
+
+    最乾淨的解法：**這三個 `cache_set_if_newer()` 呼叫全部明確傳
+    `allow_json_fallback=False`**，從根本上關掉這條路徑的 cross-backend
+    fallback（`_json_fallback_enabled()` 收到明確 `False` 時一律直接視為
+    停用，不會再嘗試 fallback，不管環境變數 `TRUSTFORGE_CACHE_JSON_FALLBACK`
+    是否開啟）——snapshot 這三個表示只認 primary backend 是否真的寫成功；
+    primary 失敗就是失敗（`ok=False`），不會有「fallback 成功但沒進
+    primary」這種曖昧地帶。一般 cache（連接器資料抓取的快取）呼叫端完全
+    不受影響，`allow_json_fallback` 預設值沒變，這裡只是 snapshot 路徑
+    明確傳入 `False`。history/latest/overview 三處各自保留的
+    `used_fallback` 檢查因此結構上都變成不可能觸發的 defense-in-depth
+    （防止未來有人漏改某一處呼叫又重新打開這個 class），三表示要嘛全部
+    真的 durable 進 primary、要嘛任何一個環節失敗就整幣跳過並計入
+    `failures`，不可能再出現跨 backend 分裂。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -954,9 +978,16 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
         # 跟 latest/overview 同一個 `run_now`，避免同一輪內兩次
         # `time.time()` 剛好跨過 UTC 午夜造成「同一次真呼叫，兩把 key
         # 寫進不同日期」的邊界亂跳。
+        # codex HIGH（PR #59 review 第七輪，跨 backend 分裂 class 徹底
+        # 閉合）：明確傳 `allow_json_fallback=False`——snapshot 這三個
+        # 表示（history/latest/overview）只認 primary backend 是否真的
+        # 寫成功，完全關掉 cross-backend fallback（見本函式 docstring
+        # 完整說明）。一般 cache（連接器資料）呼叫端不受影響，`False`
+        # 是這裡明確傳入、不是改預設值。
         history_result = cache_set_if_newer(
             backend, trust_snapshot_history_key(coin, snapshot_history_date(run_now)),
             [snap], fetched_at=run_now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+            allow_json_fallback=False,
         )
         if not history_result.ok:
             print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照 cache 寫入失敗"
@@ -965,18 +996,24 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(f"{coin}:history")
             continue
         if history_result.used_fallback:
-            # codex HIGH（PR #59 review 第六輪，backend-affinity 一致性、
-            # #1 最終閉合）：primary（DynamoDB）寫入失敗、靠本地
-            # `JsonCacheBackend` fallback 才把 history 寫進去時，
-            # `history_result.ok` 仍是 `True`（fallback 語意上「有真的
-            # 持久化成功」），但那份資料**只在本機看得到，沒有真正
-            # durable 進 primary**。若接下來這一幣的 latest/overview
-            # 卻正常寫進 primary（例如 DynamoDB 剛好在兩次呼叫之間恢復），
-            # primary 就會出現「latest/overview 是新的，但 history 根本
-            # 不存在」的跨 backend 分裂——一旦排程跨過 UTC 日界，那天的
-            # PIT 在 primary 端就永久缺角，而且因為 `history_result.ok`
-            # 是 `True`，這個分裂完全不會被 `failures` 抓到、run 還是
-            # exit 0，不會有人發現。
+            # codex HIGH（PR #59 review 第六輪，backend-affinity 一致性）：
+            # primary（DynamoDB）寫入失敗、靠本地 `JsonCacheBackend`
+            # fallback 才把 history 寫進去時，`history_result.ok` 仍是
+            # `True`（fallback 語意上「有真的持久化成功」），但那份資料
+            # **只在本機看得到，沒有真正 durable 進 primary**。若接下來
+            # 這一幣的 latest/overview 卻正常寫進 primary（例如 DynamoDB
+            # 剛好在兩次呼叫之間恢復），primary 就會出現「latest/overview
+            # 是新的，但 history 根本不存在」的跨 backend 分裂——一旦排程
+            # 跨過 UTC 日界，那天的 PIT 在 primary 端就永久缺角，而且因為
+            # `history_result.ok` 是 `True`，這個分裂完全不會被
+            # `failures` 抓到、run 還是 exit 0，不會有人發現。
+            #
+            # 第七輪起：上面呼叫已經明確傳 `allow_json_fallback=False`，
+            # 這個分支結構上**已經不可能再被觸發**（`_json_fallback_enabled`
+            # 收到明確 `False` 時一律直接回 `ok=False`，不會嘗試 fallback）
+            # ——保留這段檢查純粹是 defense-in-depth：如果未來有人不小心
+            # 在上面的呼叫漏掉 `allow_json_fallback=False`，這裡還是能攔住，
+            # 不讓「跨 backend 分裂」這個 class 因為一次疏忽就重新打開。
             #
             # 修法：把「history 沒有真正 durable 進 primary」視同 gating
             # 失敗——跟 `not history_result.ok` 一樣處理：跳過這一幣的
@@ -1020,11 +1057,28 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
         result = cache_set_if_newer(
             backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), [snap],
             fetched_at=run_now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            allow_json_fallback=False,
         )
         if not result.ok:
             print(f"[fetch_scheduler] --snapshot {coin}: cache 寫入失敗"
                   f"（backend={result.backend}）：{result.error}", file=sys.stderr)
             failures.append(coin)
+            continue
+        if result.used_fallback:
+            # codex HIGH（PR #59 review 第七輪，跨 backend 分裂 class
+            # 徹底閉合）：history 已經 durable 進 primary，但這一幣的
+            # latest 這次卻只走了本地 JSON fallback（沒真正進
+            # primary）——若這裡當成功繼續往下納入總覽候選，總覽 blob
+            # 若接著正常寫進 primary，primary 端就會出現「history/總覽
+            # 是新的，但 latest 沒真的更新」的跨 backend 分裂。上面已經
+            # 明確傳 `allow_json_fallback=False`，結構上這裡已經不可能
+            # 被觸發（保留純屬 defense-in-depth，見 history 那段同款
+            # 注解）。視同失敗處理：不納入總覽候選、計入 failures。
+            print(f"[fetch_scheduler] --snapshot {coin}: 最新一筆快照走本地 "
+                  f"JSON fallback 寫入（primary 失敗：{result.error}），視為"
+                  f"未真正 durable 進 primary——不納入總覽候選、計入 failures",
+                  file=sys.stderr)
+            failures.append(f"{coin}:latest-fallback")
             continue
         if result.skipped:
             # 極罕見：history 贏了（這一天這一幣目前最新），但 latest
@@ -1051,21 +1105,36 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
         # 全部覆寫成功、要嘛全部因為比既有值舊而跳過，不會出現「latest/總覽
         # 被較舊一輪蓋掉、history 卻正確跳過」的表示間矛盾（見本函式
         # docstring）。
+        # codex HIGH（PR #59 review 第七輪）：總覽 blob 也明確傳
+        # `allow_json_fallback=False`——理由同 history/latest（見本函式
+        # docstring），三個 snapshot 表示只認 primary backend 是否真的
+        # 寫成功，完全關掉這條路徑的 cross-backend fallback。
         overview_result = cache_set_if_newer(
             backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN),
             [{"html": overview_html}],
             fetched_at=run_now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            allow_json_fallback=False,
         )
         if not overview_result.ok:
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 寫入失敗"
                   f"（backend={overview_result.backend}）：{overview_result.error}",
                   file=sys.stderr)
             failures.append("__trust_overview_html__")
+        elif overview_result.used_fallback:
+            # 同上面 latest 那段：`allow_json_fallback=False` 讓這裡結構上
+            # 不可能被觸發，純屬 defense-in-depth。總覽走 fallback 代表
+            # 沒真正 durable 進 primary——若當成功放過，primary 端就會
+            # 出現「latest/history 是新的，但總覽 blob 沒真的更新」的
+            # 跨 backend 分裂。視同失敗計入 failures。
+            print(f"[fetch_scheduler] --snapshot: 總覽 blob 走本地 JSON "
+                  f"fallback 寫入（primary 失敗：{overview_result.error}），"
+                  f"視為未真正 durable 進 primary，計入 failures",
+                  file=sys.stderr)
+            failures.append("__trust_overview_html__:fallback")
         elif overview_result.skipped:
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 跳過寫入"
                   f"（已有較新或同時的總覽，fetched_at={run_now:.0f} 未覆寫）")
         else:
-            _warn_if_fallback_used("--snapshot overview", overview_result)
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 已寫入（{len(snapshots)} 幣）")
     elif skipped_coins and not failures:
         # codex HIGH（PR #59 review 第四輪）：本輪 0 幣成功，但**不是失敗**
