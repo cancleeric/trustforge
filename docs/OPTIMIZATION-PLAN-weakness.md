@@ -16,11 +16,40 @@
 | 2 | 比較分析表單斷：Query Console 只有單一 `<select name="coin">`，選「比較分析」題型後送出 → `_parse_comparison_coins` 找不到第二幣 → `ValueError` 洩露內部參數字串 `coin=BTC,ETH` 給使用者看 | (a) 題型選「比較分析」時，用純 CSS/最小 JS 顯示第二個幣種 `<select name="coin2">`，送出前組成 `coin=A,B`；或 (b) 兩選項互斥前先擋：後端保留現有「文字含兩幣種」偵測作 fallback，前端在比較分析題型下把 textarea placeholder 改成明確引導「請在問題中提及兩個幣種，如 BTC 與 ETH」，避免無提示直接炸 400 | `web.py` `_PAGE` 表單區（~L308-317）+ `_do_comparison`/`_parse_comparison_coins` 錯誤訊息（改成不含裸 querystring 語法的使用者可讀文字） | 首頁選「比較分析」→ 送出未含兩幣的問題 → 應看到清楚中文提示（非 `coin=BTC,ETH` 這種內部語法），且有明確路徑（第二欄或文字引導）能成功送出比較 |
 | 3 | 錯誤頁裸紅字（429/400/502 皆 `<p style='color:#c00'>...</p>`），404 只顯示 `<p>404</p>` | 統一錯誤 body 包成品牌化卡片：`.tf-section` 卡 + 標題（依狀態碼："請求過於頻繁"/"輸入有誤"/"服務暫時無法使用"/"找不到頁面"）+ 一個「返回首頁」`<a href="/">` 按鈕，維持既有 `page()` 包裝（header/CSS 不動） | `web.py` L2831-2843（429/400/502/404 四處 `_send`）新增一個共用 `_render_error_card(title, detail)` helper | 手動觸發各狀態碼（如 `/analyze?coin=XXX`→400、`/nope`→404）→ 每頁都看到卡片式排版 + 「返回首頁」按鈕可點回 `/` |
 | 4 | 內頁無回首頁：logo 是純 `<span class="tf-logo">`，非連結 | logo 外包 `<a href="/" style="text-decoration:none;color:inherit">` | `web.py` L1822（`logo = ...`，`render_page`/header 共用） | 在 `/status`、`/costs`、任一 `/analyze` 結果頁點 logo → 導回首頁 |
-| 5 | loading 脆弱：純靠 `button:active` CSS 偽狀態模擬 loading，滑鼠放開/鍵盤觸發不穩定，且無真正禁用機制 | 補最小 inline `onsubmit`：送出瞬間 `disabled` 按鈕 + 切文字為「處理中…」，`:active` 效果保留作視覺加強（非唯一依賴） | `web.py` `_PAGE` 表單 `<form action="/analyze">` 處 | 送出查詢瞬間按鈕文字變「處理中…」且不可重複點擊，直到新頁載入 |
+| 5 | loading 脆弱：純靠 `button:active` CSS 偽狀態模擬 loading，滑鼠放開/鍵盤觸發不穩定，且無真正禁用機制 | **已拍板維持 zero-JS**：`inline onsubmit` 需要 JS，會破壞現有 strict CSP（`default-src 'none'`），非本輪範圍——保留 CSS `:active` best-effort loading（有勝於無，不做誤導性承諾）；相關程式碼註解已改誠實聲明「不保證防重複送出」（見下方 codex MEDIUM follow-up） | `web.py` `_PAGE` CSS 註解（`button[type=submit]:active` 區塊） | 送出查詢瞬間按鈕短暫呈現 loading 樣式（放開/導航中仍可再點——**已知限制，非本輪修復目標**） |
 | 6 | mobile 表格硬橫捲：`.tf-section table{{min-width:640px}}` 在 375px 下體驗差，但目前是刻意選擇（保可讀性優先於美觀） | 標記為**可接受的暫時取捨**，不列入本輪修復——改法（如關鍵欄位優先/卡片化表格）成本較高，先確認是否有買家/評審實測反饋再排 | 無 | （不驗收，留待下一輪視反饋決定） |
 | 7 | 資訊卡 vs 可點卡視覺不分（多幣卡修完會變可點，需與純資訊卡如「怎麼運作」步驟卡區隔） | 可點卡追加輕量視覺提示：右下角小箭頭圖示或 hover 時邊框變 `#1f6feb`（呼應既有 CTA 藍） | `web.py` CSS `.tf-overview-card:hover` | 首頁同時看多幣卡（hover 有變化）與步驟卡（hover 無變化）→ 使用者能分辨哪個可點 |
 
 **驗收基準**：evidence `<details>` + 真來源連結目前做對，改動不得破壞這塊。
+
+---
+
+## Follow-up（技術債，非本輪修復）｜`:active` loading 不是真防重複送出
+
+**背景**：codex MEDIUM 複審抓到 `web.py`（`_PAGE` CSS 註解區，`button[type=
+submit]:active` 附近）曾誤稱「`/analyze` 是唯讀 GET，重複送出風險可接受」
+暗示已防住重複送出——這個推論混淆了「GET 不寫入資料庫（沒有髒污/重複
+扣款）」跟「防不防得住重複執行」，兩者不是同一件事。已修正為誠實聲明：
+CSS `:active` 純粹是 zero-JS 架構下的 best-effort 視覺 loading 回饋，
+**不保證**防止使用者在導航完成前再次點擊/送出。
+
+**現況風險評估**：
+- 現在生產是離線 sample、`llm_mode=off`，重複送出頂多是白工重算一次
+  確定性結果，$0 代價，殘餘風險可接受，**本輪不需要修**。
+- **Bedrock 開啟後（`llm_mode=bedrock`）風險質變**：每次重複送出都是真實
+  token 成本，`:active` 視覺回饋完全防不住連點/導航中再點造成的重複計費。
+
+**Bedrock 正式開啟前必須做**（架構層級決策，CTO 不自行拍板，需老闆同意
+方向後才動）：
+1. **Server 端 idempotency**：例如以 `(client_ip, coin, query, 時間窗)`
+   雜湊出的 key，短時間窗內重複請求直接回快取結果，不重跑 pipeline/不
+   重打 Bedrock；或
+2. **前端 JS 防重複**：submit 事件監聽 + disable，但會破壞現有 strict CSP
+   （`default-src 'none'`）——需搭配 CSP 調整（如換用 nonce/hash 白名單），
+   屬於架構抉擇。
+
+兩條路都不在本輪快修範圍內。**追蹤**：[GitHub issue #51](https://github.com/cancleeric/trustforge/issues/51)，
+Bedrock 上線排程前應重新拉出本節確認已處理。
 
 ---
 

@@ -236,7 +236,32 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
     只能靠 `:active`（滑鼠按下/觸控/多數瀏覽器對 Enter 觸發的送出也會套用）在舊頁面
     卸載前的最後幾個 render frame 換上 disabled 外觀＋spinner＋提示文字，讓使用者
     在等待網路請求時至少有即時視覺回饋，不是完全白屏。不改變 `<form>` 本身的 GET
-    行為、不影響 `_do_analyze` 參數解析。 */
+    行為、不影響 `_do_analyze` 參數解析。
+
+    商業級修復（防呆補強）：誠實標註零 JS/CSP 下的天花板——`button[type=
+    submit]:active` 只能在按住/觸控/鍵盤啟動的當下短暫套用，瀏覽器一放開
+    就結束，**無法**真正做到「送出後整個禁用直到新頁載入」（那需要 JS 監聽
+    submit 事件切 disabled 屬性，CSP `default-src 'none'` 完全擋死）。這裡
+    追加 `touch-action:manipulation`：關掉行動瀏覽器對這顆按鈕的雙擊縮放
+    手勢判斷延遲，是業界常見、真實有效的零 JS 手機端「誤觸連點」緩解手法
+    （非萬用解，但目前架構下可行且真的有效果）。
+
+    codex MEDIUM 複審更正（誠實聲明，別再誤導）：`:active` 一放開就恢復
+    可點，導航完成前使用者仍能再點一次 → **這不是真正的防重複送出**，只是
+    zero-JS 架構下 best-effort 的視覺 loading 回饋（有勝於無，但不保證）。
+    先前這裡曾寫「`/analyze` 是唯讀 GET，重複送出不會有破壞性後果，殘餘
+    風險可接受」——這個推論本身沒錯（GET 不寫入、不會資料髒污/重複扣款），
+    但誤導在於：GET 唯讀跟「防不防得住重複執行」是兩回事，**不代表重複
+    送出沒有成本風險**。現況（離線 sample、`llm_mode=off`）重複送出頂多
+    白工重算一次確定性結果，$0 代價，可以接受；但 Bedrock 開啟後
+    （`llm_mode=bedrock`）每次重複送出都是真實 token 成本，`:active` 這個
+    best-effort 視覺回饋完全防不住連點/導航中再點造成的重複計費。真正的
+    防重複送出需要 JS 監聽 submit 事件（會破壞現有 strict CSP `default-src
+    'none'`）或 server 端 idempotency key／去重機制，兩者都是架構層級決策
+    （非本輪 CTO 快修範圍），已列為 follow-up 記錄在
+    `docs/OPTIMIZATION-PLAN-weakness.md` 第 5 項，**Bedrock 正式開啟前必須
+    先做**。 */
+ button[type=submit]{{touch-action:manipulation}}
  button[type=submit]:active{{display:flex;align-items:center;justify-content:center;gap:.5rem;cursor:progress;pointer-events:none;background:#1a5fc7}}
  button[type=submit]:active .tf-btn-label{{display:none}}
  button[type=submit]:active::before{{content:"";width:14px;height:14px;flex-shrink:0;border-radius:50%;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;animation:tf-spin .6s linear infinite}}
@@ -279,8 +304,22 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-hero-cta.tf-hero-cta-ghost{{background:transparent;border:1px solid var(--tf-border);color:var(--tf-text)}}
  .tf-hero-cta.tf-hero-cta-ghost:hover{{border-color:#1f6feb;color:#79c0ff}}
  .tf-home-steps{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin-top:.6rem}}
- .tf-home-step{{background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:8px;padding:.8rem}}
+ .tf-home-step{{background:var(--tf-inset);border:1px solid var(--tf-border);border-radius:8px;padding:.8rem;cursor:default}}
  .tf-home-step .sub{{font-size:.8rem;margin:.3rem 0 0}}
+ /* 商業級修復：多幣總覽卡（`a.tf-overview-card`，見 `fetch_scheduler.py::
+    _render_overview_html()`）已是真 `<a href="/analyze?...">`，但缺 CSS
+    的 `cursor:pointer`／hover 回饋，使用者滑過去看不出能點，跟旁邊純資訊
+    的 `.tf-home-step` 步驟卡（不可點）視覺上無法區分。選用 `a.tf-overview-
+    card` 限定選擇器（而非泛用 `.tf-overview-card`）：非白名單幣種防呆時
+    仍會渲染成純 div 版本卡片（class 相同、標籤換成 div，見同一支檔案
+    `_render_overview_html` docstring），那種情況本來就不可點，不該套用
+    pointer/hover，用 `a` 前綴精準只命中真正可點的卡片。hover 用
+    `box-shadow` 而非 `border-color`——卡片本身在 inline style 上已寫死
+    `border:1px solid var(--tf-border)`，inline style 的優先度高於外部
+    stylesheet 的同屬性宣告，`box-shadow`／`transform` 不受影響，才會實際
+    生效。 */
+ a.tf-overview-card{{cursor:pointer;transition:box-shadow .15s,transform .15s}}
+ a.tf-overview-card:hover{{box-shadow:0 0 0 1px #1f6feb,0 4px 14px rgba(31,111,235,.18);transform:translateY(-1px)}}
  @media (max-width:900px){{
   body{{margin:1rem auto}}
   header.tf-hdr{{flex-direction:column;align-items:flex-start}}
@@ -311,6 +350,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
   <p class="sub" style="margin:0;font-size:.8rem">加密市場分析 AI Agent — 多源資訊的信任提煉</p>
   <form action="/analyze" method="get">
    <div><label>幣種</label><select name="coin">{coins}</select></div>
+   <div><label>比較幣種<span style="font-weight:400;color:var(--tf-muted2)"> ｜ 題型選「比較分析」時使用</span></label><select name="coin2">{coins2}</select></div>
    <div><label>題型</label><select name="type">{types}</select></div>
    <div><label>問題</label><textarea name="q" rows="3">{default_query}</textarea></div>
    <button type="submit"><span class="tf-btn-label">Run analysis<span class="tf-kbd">&#8629;</span></span></button>
@@ -430,10 +470,12 @@ def _check_status_rate_limit(ip: str) -> None:
 _DATE_AGNOSTIC_QUERY_SUFFIX = "近期市場狀況"
 
 
-def _opts(values, labels=None):
+def _opts(values, labels=None, selected=None):
     labels = labels or {v: v for v in values}
     return "".join(
-        f'<option value="{html.escape(v)}">{html.escape(labels[v])}</option>'
+        f'<option value="{html.escape(v)}"'
+        f'{" selected" if selected is not None and v == selected else ""}>'
+        f'{html.escape(labels[v])}</option>'
         for v in values
     )
 
@@ -1012,7 +1054,11 @@ def _handle_status(client_ip: str = "") -> tuple[int, str]:
     try:
         _check_status_rate_limit(client_ip)
     except TooManyRequests as exc:
-        return 429, render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>")
+        # 商業級修復：跟 `/analyze` 錯誤頁一致，統一走品牌化錯誤卡（見
+        # `_render_error_card`），不留一處裸紅字例外。
+        return 429, render_page(
+            _render_error_card("請求過於頻繁", str(exc), retry_href="/status")
+        )
     return 200, render_page(_render_status_page_cached())
 
 
@@ -1845,7 +1891,15 @@ def _render_header(active_mode: str = "offline", *, minimal: bool = False) -> st
 
     `active_mode`：`"offline"` | `"real"` | `"live"`，預設 `"offline"`。
     """
-    logo = '<span class="tf-logo"><span class="tf-logo-mark">&#9670;</span>Trust<b>Forge</b></span>'
+    # 商業級修復：logo 從純 <span>（死文字，內頁點下去無反應）改成
+    # <a href="/">——所有頁面（含 minimal/一般 header）點 logo 都能回首頁，
+    # 這是商用網站的基本期待。`text-decoration:none;color:inherit` 讓連結
+    # 視覺上維持原本純文字外觀，不變成一般藍色底線超連結。
+    logo = (
+        '<a href="/" class="tf-logo" style="text-decoration:none;color:inherit;'
+        'display:inline-flex;align-items:center">'
+        '<span class="tf-logo-mark">&#9670;</span>Trust<b>Forge</b></a>'
+    )
     if minimal:
         return (
             '<header class="tf-hdr">'
@@ -1921,10 +1975,19 @@ def render_page(
     測試斷言完全不變，零回歸。細節見 `_render_header`。
     """
     header_html = _render_header(active_mode, minimal=minimal_header)
+    # 商業級修復：比較分析表單斷——原本只有單一 `coin` 下拉，選「比較分析」
+    # 題型後送出必定缺第二個幣種、丟 ValueError。zero-JS 下無法依題型動態
+    # 顯示/隱藏欄位，改為第二個幣種下拉常駐顯示（label 註明「比較分析時
+    # 使用」，非比較題型下這個欄位單純被忽略，不影響 multi_source/
+    # hypothesis）。預設值特意選 `COIN_POOL[1]`（非第一個幣），讓使用者
+    # 一開始就看到兩個「不同」幣種，避免預設就撞到「不能相同」錯誤。
+    # 實際合併成 `coin=A,B` 給 `_do_comparison` 見該函式。
+    coin2_default = COIN_POOL[1] if len(COIN_POOL) > 1 else COIN_POOL[0]
     return _PAGE.format(
         header=header_html, body=body,
         run_stats=run_stats_html,
         coins=_opts(COIN_POOL),
+        coins2=_opts(COIN_POOL, selected=coin2_default),
         types=_opts([t.value for t in QuestionType],
                     {"multi_source": "多源整合", "hypothesis": "假設驗證", "comparison": "比較分析"}),
         default_query=html.escape(f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料"),
@@ -2304,13 +2367,20 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
     if "," in coin_raw:
         parts = [c.strip().upper() for c in coin_raw.split(",") if c.strip()]
         if len(parts) != 2:
+            # 商業級修復：原訊息含 `coin=BTC,ETH` 這種內部查詢字串語法，
+            # 使用者看不懂也不該看到系統內部參數格式——改成純中文引導。
             raise ValueError(
-                f"逗號分隔幣種必須剛好 2 個（目前 {len(parts)} 個），請如：coin=BTC,ETH"
+                f"比較分析需剛好選擇 2 個幣種（目前偵測到 {len(parts)} 個），"
+                "請重新選擇兩個不同的幣種"
             )
         invalid = [p for p in parts if p not in COIN_POOL]
         if invalid:
+            # 商業級修復：原訊息直接印出 Python list/tuple repr（如
+            # `['DOGE']`／`('BTC', 'ETH', ...)`），對使用者不友善——改成
+            # 自然語言列點。
             raise ValueError(
-                f"幣種 {invalid} 不在可選範圍 {COIN_POOL}，請選擇其中兩個"
+                f"幣種「{'、'.join(invalid)}」不在可選範圍內，"
+                f"請選擇：{'、'.join(COIN_POOL)}"
             )
         if parts[0] == parts[1]:
             raise ValueError(
@@ -2645,7 +2715,9 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     real = _parse_real(qs, client_ip, live)
 
     if coin not in COIN_POOL:
-        raise ValueError(f"幣種須為 {COIN_POOL} 之一")
+        # 同一批商業級修復：不印 Python tuple repr（如 `('BTC', 'ETH', ...)`）
+        # 給使用者看，改自然語言列點。
+        raise ValueError(f"幣種須為以下其中之一：{'、'.join(COIN_POOL)}")
 
     if real:
         report, evidence, log = run(coin, query, qtype, data_mode="live", llm_mode="off")
@@ -2668,6 +2740,14 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         其餘 Exception:    由呼叫方捕捉後回 502
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
+    # 商業級修復：表單新增常駐第二個幣種下拉（`coin2`，見 `render_page()`），
+    # 這裡是它跟既有 `coin=A,B` 逗號語法（API 直連/下載 JSON 連結沿用）匯合
+    # 的地方——只有 `coin_raw` 本身還沒帶逗號時才拼接 `coin2`，避免蓋掉
+    # 明確的 `coin=A,B` 直連呼叫（後者才是唯一真相來源）。`coin2` 留白
+    # （或跟表單未選比較分析題型時一起送出、被忽略）都不影響既有行為。
+    coin2_raw = (qs.get("coin2", [""])[0]).strip()
+    if coin2_raw and "," not in coin_raw:
+        coin_raw = f"{coin_raw},{coin2_raw}"
     # codex MEDIUM #2（PR #44）：預設查詢文案改回 date-agnostic 常數，不再
     # 依 coin 動態組日期（先前版本曾用 probe 出 coin_a/coin_b 各自組日期，
     # 但根源問題是「查詢文字本身不該宣稱日期」，改文案內容治標不治本）。
@@ -2682,9 +2762,12 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
 
     pair = _parse_comparison_coins(coin_raw, query)
     if pair is None:
+        # 商業級修復：原訊息含 `coin=BTC,ETH` 內部查詢字串語法，直接洩露給
+        # 使用者看——改成純中文引導，且不暴露任何內部參數命名/格式。
         raise ValueError(
-            "comparison 題型需兩個幣種，請用逗號分隔（coin=BTC,ETH）"
-            f"或在問題中提及兩個幣種（可選：{COIN_POOL}）"
+            "比較分析需要選擇兩個幣種，請在左側「比較幣種」欄位選擇一個跟"
+            f"「幣種」不同的幣種（可選：{'、'.join(COIN_POOL)}），"
+            "或在問題文字中同時提及兩個幣種名稱"
         )
     coin_a, coin_b = pair
     if real:
@@ -2700,6 +2783,38 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
     if real or live:
         _record_analyze_service_calls(2)
     return report_a, evidence_a, report_b, evidence_b, log
+
+
+def _render_error_card(title: str, detail: str, *, retry_href: str | None = None) -> str:
+    """商業級修復：統一錯誤頁品牌卡片，取代原本裸 `<p style='color:#c00'>...</p>`
+    /純 `<p>404</p>`——4xx/5xx 一律走這裡，維持 `.tf-section` 卡片視覺（跟
+    其餘頁面一致），並附「返回首頁」出口，讓使用者永遠有路可走，不會卡在
+    死路錯誤頁。
+
+    `title`：固定中文常數（依狀態碼），`detail`：實際錯誤訊息（可能含使用者
+    輸入回顯，如題型驗證訊息——呼叫端已保證訊息本身不含內部參數語法，這裡
+    仍統一 `html.escape` 縱深防禦）。
+
+    `retry_href`：只有暫時性錯誤（429 限流、502 服務暫時無法使用）才給，
+    讓使用者能直接重試同一個請求；使用者輸入錯誤（400）/路徑不存在（404）
+    給了也沒意義（同樣輸入重試仍會失敗），維持 `None`。
+    """
+    e = html.escape
+    retry_html = (
+        f'<a class="tf-hero-cta tf-hero-cta-ghost" href="{e(retry_href)}" '
+        'style="margin-left:.6rem">重試</a>'
+        if retry_href else ""
+    )
+    return (
+        '<div class="tf-section" style="border-color:#f85149;text-align:center;'
+        'padding:2rem 1rem">'
+        '<div style="font-size:1.8rem;line-height:1;color:#f85149;margin-bottom:.5rem">'
+        "&#9670;</div>"
+        f"<h2 style='margin:0 0 .5rem'>{e(title)}</h2>"
+        f"<p class='sub' style='margin:0 0 1.1rem'>{e(detail)}</p>"
+        f'<a class="tf-hero-cta" href="/">返回首頁</a>{retry_html}'
+        "</div>"
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2854,19 +2969,32 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     )
             except TooManyRequests as exc:
+                # 商業級修復：品牌化錯誤卡取代裸紅字，429 是暫時性限流，附
+                # 「重試」直接導回同一個請求。
                 return self._send(429, page(
-                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
+                    _render_error_card(
+                        "請求過於頻繁", str(exc), retry_href=self.path,
+                    ),
                     active_mode=active_mode))
             except ValueError as exc:
+                # 使用者輸入本身有誤（幣種/題型/長度），重試同樣輸入還是會
+                # 錯，不給「重試」，只給「返回首頁」重新開始。
                 return self._send(400, page(
-                    f"<p style='color:#c00'>{html.escape(str(exc))}</p>",
+                    _render_error_card("輸入有誤", str(exc)),
                     active_mode=active_mode))
             except Exception:
                 logging.exception("TrustForge analyze error")
+                # 未預期例外一律 502，不回顯任何原始例外訊息（縱深防禦，維持
+                # 既有行為）；服務暫時性問題，給「重試」。
                 return self._send(502, page(
-                    "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>",
+                    _render_error_card(
+                        "服務暫時無法使用", "分析服務暫時無法使用，請稍後再試",
+                        retry_href=self.path,
+                    ),
                     active_mode=active_mode))
-        return self._send(404, page("<p>404</p>"))
+        return self._send(404, page(
+            _render_error_card("找不到頁面", "您造訪的網址不存在，請確認網址是否正確。"),
+        ))
 
 
 def main():
