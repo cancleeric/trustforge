@@ -154,6 +154,61 @@ _SCHEMA_DRIFT_NO_ITEM_OR_ENTRY = b"""<?xml version="1.0" encoding="UTF-8"?>
 _SCHEMA_DRIFT_ERROR_HTML_AS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 <html><body><h1>503 Service Unavailable</h1></body></html>"""
 
+# codex HIGH 第 6 輪：<item> 容器都在，但供應商把 title/link/description/
+# pubDate 全部改名成沒人認得的 tag（headline/permalink/summary-text/
+# published-at），_first() 找不到對應欄位，全部 entry 解析成空白 title、
+# 空 URL、ts=0 的垃圾——這是子欄位層的 schema drift，不是容器層的。
+_SUBFIELD_DRIFT_RENAMED_TAGS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CoinDesk</title>
+    <item>
+      <headline>Bitcoin BTC surges past $70,000</headline>
+      <permalink>https://www.coindesk.com/markets/2026/08/01/btc-surge</permalink>
+      <summary-text>Bitcoin BTC has surged amid strong institutional demand.</summary-text>
+      <published-at>Wed, 01 Aug 2026 10:00:00 +0000</published-at>
+    </item>
+    <item>
+      <headline>Ethereum ETH also rallies</headline>
+      <permalink>https://www.coindesk.com/markets/2026/08/01/eth-surge</permalink>
+    </item>
+  </channel>
+</rss>"""
+
+# 供應商保留 <title>/<link>/<pubDate> tag 名稱，但值全變空字串——同樣是子
+# 欄位 drift（別跟「有值但被 coin 關鍵字篩掉」搞混）。
+_SUBFIELD_DRIFT_EMPTY_VALUES = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CoinDesk</title>
+    <item>
+      <title></title>
+      <link></link>
+      <description></description>
+      <pubDate></pubDate>
+    </item>
+  </channel>
+</rss>"""
+
+# 混合：一筆子欄位 drift（改名）+ 一筆正常 entry——drift 的那筆該被單獨
+# 跳過，不該讓整批 raise（整批只在「結構有效 entry 數 == 0」才 raise）。
+_SUBFIELD_DRIFT_PARTIAL = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CoinDesk</title>
+    <item>
+      <headline>Drifted entry with renamed tags</headline>
+      <permalink>https://www.coindesk.com/drifted</permalink>
+    </item>
+    <item>
+      <title>Bitcoin BTC surges past $70,000</title>
+      <link>https://www.coindesk.com/markets/2026/08/01/btc-surge</link>
+      <description>Bitcoin BTC has surged amid strong institutional demand.</description>
+      <pubDate>Wed, 01 Aug 2026 10:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>"""
+
 
 def test_parse_rss_schema_drift_no_item_or_entry_raises(monkeypatch):
     """合法可解析 XML，但完全沒有 `<item>`/Atom `<entry>`（換 namespace/
@@ -181,6 +236,49 @@ def test_parse_rss_entries_exist_but_coin_filter_empty_is_legitimate(monkeypatch
     monkeypatch.setattr(news, "_fetch_url", lambda url: RSS_FIXTURE)
     docs = news.CoinDeskRSSSource().fetch("XRP price prediction", coin="XRP")
     assert docs == []
+
+
+def test_parse_rss_subfield_drift_renamed_tags_raises(monkeypatch):
+    """codex HIGH 第 6 輪：<item> 容器都在，但 title/link/description/
+    pubDate 全被改名（headline/permalink/...），_first() 找不到對應欄位，
+    所有 entry 解析成空白 title/空 URL/ts=0——這是子欄位層 schema drift，
+    必須 raise，不能靜靜用空/垃圾覆蓋掉還能用的舊快取。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _SUBFIELD_DRIFT_RENAMED_TAGS)
+    with pytest.raises(ValueError):
+        news.CoinDeskRSSSource().fetch("", coin="")
+
+
+def test_parse_rss_subfield_drift_empty_values_raises(monkeypatch):
+    """<title>/<link>/<pubDate> tag 名稱都在，但值全是空字串——同樣是子
+    欄位 drift，必須 raise。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _SUBFIELD_DRIFT_EMPTY_VALUES)
+    with pytest.raises(ValueError):
+        news.CoinDeskRSSSource().fetch("", coin="")
+
+
+def test_parse_rss_subfield_drift_never_publishes_blank_document(monkeypatch):
+    """即使無關鍵字過濾（收全部），drift 的 entry 也絕不能被發布成空白
+    title/空 URL/ts=0 的文件——parse 應在建 Document 前就把它擋掉並
+    最終 raise（因為這個 fixture 全部 entry 都 drift）。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _SUBFIELD_DRIFT_RENAMED_TAGS)
+    with pytest.raises(ValueError):
+        news.CoinDeskRSSSource().fetch("", coin="")
+
+
+def test_parse_rss_subfield_drift_partial_skips_bad_entry_keeps_good_one(monkeypatch):
+    """一批裡有一筆子欄位 drift（改名）、一筆正常——drift 的那筆該被單獨
+    跳過（不發布垃圾文件），但不該讓整批 raise，因為結構有效的 entry
+    數不是 0（正常那筆還在）。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _SUBFIELD_DRIFT_PARTIAL)
+    docs = news.CoinDeskRSSSource().fetch("", coin="")
+    assert len(docs) == 1
+    assert docs[0].text
+    assert docs[0].url == "https://www.coindesk.com/markets/2026/08/01/btc-surge"
+    assert docs[0].ts != 0.0
 
 
 def test_cryptopanic_no_token_returns_empty(monkeypatch):

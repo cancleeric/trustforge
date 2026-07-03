@@ -95,17 +95,35 @@ def _first(item: ET.Element, *tags: str, ns: dict | None = None) -> ET.Element |
     return None
 
 
+def _entry_is_structurally_valid(title: str, desc: str, link: str, ts: float) -> bool:
+    """codex HIGH 第 6 輪（PR #55，RSS 資料品質最終閉合）：單筆 entry 是否
+    有「有意義的內容」——非空 title 或 description、可用（絕對 http(s)）
+    link、可解析且非 0 的發布時間戳。三者缺一即視為子欄位 drift（供應商
+    改名/換 namespace 導致 `_first()` 找不到對應欄位），這筆 entry 不能
+    被拿去發布空白 title/空 URL/ts=0 的垃圾文件。"""
+    has_content = bool(title or desc)
+    has_link = bool(link) and link.lower().startswith(("http://", "https://"))
+    has_ts = ts != 0.0
+    return has_content and has_link and has_ts
+
+
 def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Document]:
     """解析 RSS 2.0 / Atom XML，依 query/coin 關鍵字過濾，回傳 Document list。
 
-    codex MEDIUM（PR #55，資料密度第二批最終閉合）：這是所有 RSS 源共用的
-    parser（coindesk/decrypt 起算共 11 家），區分兩種「空」——
-      - **合法可解析但一個 `<item>`/`<entry>` 都沒有**（供應商換
-        namespace/schema、或回了個錯誤頁但仍是合法 XML）：這是 schema
-        drift 訊號，**raise ValueError**，讓呼叫端（`fetch_scheduler.py`）
-        保留舊快取、計入 failure，不能靜靜用空清單覆蓋掉還能用的舊資料。
-      - **有 entries，但依 query/coin 關鍵字過濾後一則都不符**（那個幣剛
-        好沒新聞）：**仍是合法結果，回 `[]`**，不 raise（見下方迴圈）。
+    這是所有 RSS 源共用的 parser（coindesk/decrypt 起算共 11 家），區分
+    兩層「空」，別誤傷合法情境（codex MEDIUM 第 4 輪 + HIGH 第 6 輪，PR
+    #55，資料密度第二批最終閉合）：
+      - **容器層**：合法可解析但一個 `<item>`/`<entry>` 都沒有（換
+        namespace/schema、或回了個錯誤頁但仍是合法 XML）→ schema drift。
+      - **子欄位層**：有 `<item>`/`<entry>` 容器，但供應商把 title/
+        description/link/pubDate 改名/換 namespace，導致每筆都解析成
+        空白 title、空 URL、ts=0 的垃圾——**結構有效的 entry 數為 0**
+        （見 `_entry_is_structurally_valid()`）一樣是 schema drift。
+      - 上述兩層皆 **raise ValueError**，讓呼叫端（`fetch_scheduler.py`）
+        保留舊快取、計入 failure，不能靜靜用空/垃圾覆蓋掉還能用的舊資料。
+      - **合法路徑**：結構有效的 entries 存在，但依 query/coin 關鍵字
+        過濾後一則都不符（那個幣剛好沒新聞）→ 仍是合法結果，回 `[]`，
+        不 raise。
     """
     root = ET.fromstring(raw)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
@@ -120,6 +138,7 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
 
     keywords = [kw.lower() for kw in (query, coin) if kw]
     docs: list[Document] = []
+    valid_entry_count = 0
 
     for item in items:
         title_el = _first(item, "title", "atom:title", ns=ns)
@@ -135,6 +154,13 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
             link = ""
         desc = (desc_el.text or "").strip() if desc_el is not None else ""
         ts = _parse_ts(pub_el.text) if pub_el is not None and pub_el.text else 0.0
+
+        # 子欄位結構驗證：title/link/pubDate 被改名/換 namespace 導致解析
+        # 全空的 entry，直接跳過，不計入 valid_entry_count，也絕不發布
+        # （無關鍵字模式一樣擋，見下方 valid_entry_count==0 才 raise）。
+        if not _entry_is_structurally_valid(title, desc, link, ts):
+            continue
+        valid_entry_count += 1
 
         # 關鍵字過濾（無關鍵字時全收；有關鍵字時至少命中一個）
         if keywords:
@@ -155,6 +181,13 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
             ts=ts,
             meta={"content_reference": snippet},
         ))
+
+    if valid_entry_count == 0:
+        raise ValueError(
+            f"{source_name}: 所有 <item>/<entry> 的子欄位皆缺失/型別 drift"
+            "（title/description/link/pubDate 全空或不合法，可能是供應商"
+            "改版/換 namespace）"
+        )
 
     return docs
 
