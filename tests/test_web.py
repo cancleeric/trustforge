@@ -401,10 +401,30 @@ def test_render_home_page_is_non_empty_and_has_hero_keywords():
     assert "步驟 1/3" in htmlout and "步驟 2/3" in htmlout and "步驟 3/3" in htmlout
 
 
-def test_render_home_page_has_query_console_cta():
-    """Hero CTA 導向左側 Query Console（錨點 `#tf-query-console`）。"""
+def test_render_home_page_hero_cta_navigates_to_real_analyze():
+    """P-2026 生產 UX bug 回歸測試：hero「立即開始分析」CTA 必須是真的會
+    導航的 `/analyze` 連結（非 `#錨點`），桌面版點下去在可見範圍內也會有
+    畫面反應（跳轉載入新報告），不是原本「捲到已可見處＝視覺零反應」。
+
+    連到的必須是**真資料**分析（不帶 `sample=1`），query 非空、非虛構——
+    符合「立即開始分析」語意。"""
     htmlout = web._render_home_page()
-    assert 'href="#tf-query-console"' in htmlout
+    assert "立即開始分析" in htmlout
+
+    href = web._hero_analyze_href()
+    assert href.startswith("/analyze?")
+    assert f'href="{href}"' in htmlout
+    assert "#tf-query-console" not in href
+
+    qs = parse_qs(urlparse(html.unescape(href)).query)
+    assert qs["coin"][0] == web.COIN_POOL[0]
+    assert qs["q"][0].strip()
+    assert "sample" not in qs  # 真資料，不落在離線示範沙盒
+
+    report, evidence, log = web._do_analyze(qs)
+    assert report.coin == qs["coin"][0]
+    assert evidence
+    assert log.events
 
 
 def test_render_home_page_example_link_uses_real_analyze_query():

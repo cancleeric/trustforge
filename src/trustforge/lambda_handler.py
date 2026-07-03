@@ -10,9 +10,9 @@ live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶對應 token 參數�
 from __future__ import annotations
 
 import dataclasses
-import html
 import json
 import logging
+from urllib.parse import urlencode
 
 from . import web
 
@@ -37,6 +37,10 @@ def handler(event, context=None):
             or event.get("requestContext", {}).get("http", {}).get("path", "/"))
     raw_qs = event.get("queryStringParameters") or {}
     qs = {k: [v] for k, v in raw_qs.items()}  # 轉成 _do_analyze 期望的 list 形式
+    # 商業級一致性修（codex MEDIUM）：429/502 的「重試」連結要導回同一個請求
+    # （比照 EC2 web.py 用 self.path），Lambda 沒有現成的 self.path，用
+    # rawPath + 重組 query string 還原。
+    retry_href = path if not raw_qs else f"{path}?{urlencode(raw_qs)}"
 
     # 取 client IP（Lambda Function URL v2 requestContext）
     client_ip = (
@@ -95,20 +99,32 @@ def handler(event, context=None):
                 return _resp(200, web.render_page(web._render_report(report, evidence)),
                              "text/html; charset=utf-8")
         except web.TooManyRequests as exc:
+            # 商業級一致性修（codex MEDIUM）：HTML 錯誤分支改用跟 EC2 web.py
+            # 一致的品牌錯誤卡（`_render_error_card`），不再是裸紅字 `<p>`。
+            # JSON 端點（machine-readable）不在此分支，格式不動。
             return _resp(429,
-                         web.render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>"),
+                         web.render_page(
+                             web._render_error_card(
+                                 "請求過於頻繁", str(exc), retry_href=retry_href)),
                          "text/html; charset=utf-8")
         except ValueError as exc:
             return _resp(400,
-                         web.render_page(f"<p style='color:#c00'>{html.escape(str(exc))}</p>"),
+                         web.render_page(
+                             web._render_error_card("輸入有誤", str(exc))),
                          "text/html; charset=utf-8")
         except Exception:
             logging.exception("TrustForge Lambda analyze error")
             return _resp(502,
                          web.render_page(
-                             "<p style='color:#c00'>分析服務暫時無法使用，請稍後再試</p>"),
+                             web._render_error_card(
+                                 "服務暫時無法使用", "分析服務暫時無法使用，請稍後再試",
+                                 retry_href=retry_href)),
                          "text/html; charset=utf-8")
 
     if path == "/":
         return _resp(200, web.render_page(""), "text/html; charset=utf-8")
-    return _resp(404, web.render_page("<p>404</p>"), "text/html; charset=utf-8")
+    return _resp(404,
+                 web.render_page(
+                     web._render_error_card(
+                         "找不到頁面", "您造訪的網址不存在，請確認網址是否正確。")),
+                 "text/html; charset=utf-8")

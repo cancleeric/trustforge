@@ -398,3 +398,119 @@ def test_lambda_comparison_json(monkeypatch):
         assert key in data, f"Lambda comparison JSON 缺欄位 {key}"
     assert data["report_a"]["coin"] == "BTC"
     assert data["report_b"]["coin"] == "ETH"
+
+
+# ---------------------------------------------------------------------------
+# codex MEDIUM：比較選擇器可提交非法組合（同幣／非 BTC 主幣未覆蓋）
+#
+# `_parse_comparison_coins` 早已有「兩個幣種不能相同」友善 ValueError（見上方
+# `test_parse_comparison_coins_same_coin_error`），且 `run_comparison`/
+# `_do_comparison` 對兩個參數幣種完全對稱、無 BTC 硬編碼——但先前測試只覆蓋
+# BTC 當主幣，未曾端到端驗證（a）表單常駐 `coin`+`coin2` 兩個下拉送出同幣時
+# 走到 HTTP 400 品牌錯誤卡、不洩露 `coin=` 內部語法，以及（b）非 BTC 主幣
+# （如 ETH 主 + SOL 比較）也能跑出正確雙欄結果。本節補齊這兩塊回歸覆蓋。
+# ---------------------------------------------------------------------------
+
+def _comparison_do_get(path: str) -> tuple[int, str]:
+    """比照 `tests/test_web.py::_do_get`，端到端呼叫 `web.Handler.do_GET`
+    （不開真 socket），回傳 (status_code, body)。"""
+    import trustforge.web as web
+    from io import BytesIO
+    from email.message import Message
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("127.0.0.1", 12345)
+    h.path = path
+    h.wfile = BytesIO()
+    h.headers = Message()
+
+    captured = []
+    h.send_response = lambda code: captured.append(code)
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    body = h.wfile.getvalue().decode("utf-8")
+    return captured[0], body
+
+
+def test_do_comparison_non_btc_primary_coin(monkeypatch):
+    """`_do_comparison`：主幣非 BTC（ETH 主 + SOL 比較，經表單 coin/coin2
+    兩個常駐下拉組合）一樣要能正確跑出雙欄結果，不是只有 BTC 當主幣才行。"""
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+        return _make_docs(coin)
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+    from trustforge.web import _do_comparison
+
+    result = _do_comparison(
+        {"coin": ["ETH"], "coin2": ["SOL"], "type": ["comparison"], "q": ["比較 ETH 與 SOL"]},
+        client_ip="",
+    )
+    report_a, evidence_a, report_b, evidence_b, log = result
+    assert report_a.coin == "ETH"
+    assert report_b.coin == "SOL"
+    assert evidence_a and evidence_b
+
+
+def test_do_comparison_same_coin_via_form_fields_raises_friendly(monkeypatch):
+    """`_do_comparison`：表單 `coin`+`coin2` 兩個下拉都選同一幣種（非直連
+    `coin=BTC,BTC` 語法，而是選擇器真實會送出的兩個獨立參數）一樣要擋下，
+    訊息友善、不洩露內部 `coin=` 語法。"""
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+        return _make_docs(coin)
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+    from trustforge.web import _do_comparison
+
+    with pytest.raises(ValueError) as excinfo:
+        _do_comparison(
+            {"coin": ["BTC"], "coin2": ["BTC"], "type": ["comparison"], "q": ["比較"]},
+            client_ip="",
+        )
+    msg = str(excinfo.value)
+    assert "不能相同" in msg
+    assert "coin=" not in msg, "錯誤訊息不該洩露內部查詢字串語法"
+
+
+@pytest.mark.parametrize("coin_a, coin_b", [
+    ("ETH", "SOL"),
+    ("XRP", "BNB"),
+    ("SOL", "XRP"),
+])
+def test_parse_comparison_coins_accepts_any_distinct_pair(coin_a, coin_b):
+    """`_parse_comparison_coins`：任意兩個相異 COIN_POOL 幣種都應合法解析，
+    不是只有 BTC 開頭的配對才行（抽樣覆蓋，見 codex MEDIUM 比較選擇器修）。"""
+    from trustforge.web import _parse_comparison_coins
+
+    assert coin_a in COIN_POOL and coin_b in COIN_POOL
+    result = _parse_comparison_coins(f"{coin_a},{coin_b}", "")
+    assert result == (coin_a, coin_b)
+
+
+def test_http_comparison_same_coin_returns_branded_400_no_leak(monkeypatch):
+    """端到端（`web.Handler.do_GET`）：主幣＋比較幣選同一幣種 → HTTP 400，
+    走品牌錯誤卡（含「返回首頁」出口），不洩露 `coin=` 內部查詢字串語法。"""
+    code, body = _comparison_do_get("/analyze?type=comparison&coin=BTC&coin2=BTC&q=比較")
+    assert code == 400
+    assert "不能相同" in body
+    assert 'href="/"' in body  # 返回首頁出口（_render_error_card 統一行為）
+    assert "coin=" not in body, "錯誤頁不該洩露內部查詢字串語法"
+
+
+def test_http_comparison_non_btc_primary_returns_dual_column(monkeypatch):
+    """端到端（`web.Handler.do_GET`）：非 BTC 主幣（ETH 主 + SOL 比較）也要
+    能跑出 200 正確雙欄結果，不是只有 BTC 當主幣才行。"""
+    def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+        return _make_docs(coin)
+
+    monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
+
+    code, body = _comparison_do_get(
+        "/analyze?type=comparison&coin=ETH&coin2=SOL&q=%E6%AF%94%E8%BC%83ETH%E8%88%87SOL"
+    )
+    assert code == 200
+    assert "ETH" in body and "SOL" in body

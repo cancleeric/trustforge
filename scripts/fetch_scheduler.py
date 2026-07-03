@@ -67,6 +67,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "src"))
@@ -580,6 +581,31 @@ def _snapshot_dict(coin: str, report) -> dict:
     }
 
 
+def _overview_card_href(coin: str) -> str | None:
+    """單張總覽卡的點擊目標：真 `/analyze` 連結（真資料，不帶 `sample=1`），
+    點卡直接跑一次該幣的完整多源分析。
+
+    P-2026 生產 UX bug（第二處）：卡片原本是純 `<div>`，桌面版真點下去
+    零反應，使用者以為壞掉。世界級 dashboard 卡片理應可點進該幣完整分析。
+
+    `coin` **必須**在 `COIN_POOL` 白名單內才組連結（防呆：`coins` 理論上
+    只可能來自 `COIN_POOL` 或 `--coin` 這種操作者輸入的 CLI 參數，非 HTTP
+    request 直接控制，但仍不假設呼叫端已驗證——不在白名單就回 `None`，
+    呼叫端據此讓卡片保持純 `<div>` 不可點，不組出指向未知/非法幣種、多半
+    404 的連結）。查詢文案沿用跟 `_SNAPSHOT_QUERY`／`web.py` 首頁 hero CTA
+    （`_hero_analyze_href`）一致的 date-agnostic 句型，只是把幣種換成該卡
+    真正對應的幣，而非泛稱「該幣種」。
+    """
+    if coin not in COIN_POOL:
+        return None
+    params = {
+        "coin": coin,
+        "type": QuestionType.MULTI_SOURCE.value,
+        "q": f"分析{coin}近期市場狀況，整合多源資料",
+    }
+    return html.escape(f"/analyze?{urlencode(params)}")
+
+
 def _render_overview_html(snapshots: list[dict]) -> str:
     """5 卡總覽 HTML（`html.escape` 逐欄）——寫入者這端組好整份字串，首頁
     讀路徑只是把這個 blob 原樣嵌進頁面，request 當下不重新組字串／不逐幣讀
@@ -589,27 +615,41 @@ def _render_overview_html(snapshots: list[dict]) -> str:
     blob（見 `run_snapshot()`）。CSS 變數沿用 `web.py` 既有 dark/light 主題
     變數名稱（`--tf-border`/`--tf-inset`/`--tf-muted`/`--tf-muted2`），跟
     頁面其餘區塊視覺一致。
+
+    每張卡包成 `<a href="/analyze?...">`（見 `_overview_card_href`），點卡
+    直接導向該幣真分析——不再是死 `<div>`（P-2026 生產 UX bug 第二處）。
     """
     if not snapshots:
         return ""
     e = html.escape
     cards = []
     for snap in snapshots:
-        coin = e(str(snap.get("coin", "")))
+        coin_raw = str(snap.get("coin", ""))
+        coin = e(coin_raw)
         trust = float(snap.get("trust_score", 0.0) or 0.0)
         direction = e(str(snap.get("direction", "")))
         calibrated = float(snap.get("calibrated_confidence", 0.0) or 0.0)
         decision_state = e(str(snap.get("decision_state", "")))
         generated_at = e(str(snap.get("generated_at", "")))
-        cards.append(
-            '<div class="tf-overview-card" style="border:1px solid var(--tf-border);'
+        href = _overview_card_href(coin_raw)
+        tag_open = (
+            f'<a class="tf-overview-card" href="{href}" '
+            'style="display:block;text-decoration:none;color:inherit;'
+            'border:1px solid var(--tf-border);border-radius:8px;'
+            'padding:.6rem .8rem;background:var(--tf-inset)">'
+            if href is not None
+            else '<div class="tf-overview-card" style="border:1px solid var(--tf-border);'
             'border-radius:8px;padding:.6rem .8rem;background:var(--tf-inset)">'
-            f'<div style="font-weight:700">{coin}</div>'
+        )
+        tag_close = '</a>' if href is not None else '</div>'
+        cards.append(
+            tag_open
+            + f'<div style="font-weight:700">{coin}</div>'
             f'<div style="font-size:.85rem;color:var(--tf-muted)">信任分 {trust:.2f} · {direction}</div>'
             f'<div style="font-size:.75rem;color:var(--tf-muted2)">'
             f'校準信心 {calibrated:.2f} · {decision_state}</div>'
             f'<div style="font-size:.7rem;color:var(--tf-muted2)">{generated_at}</div>'
-            '</div>'
+            + tag_close
         )
     return (
         '<div class="tf-overview-grid" style="display:grid;'
