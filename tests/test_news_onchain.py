@@ -436,11 +436,11 @@ def test_blockchair_skipped_for_non_btc(monkeypatch):
     assert onchain.BlockchairStatsSource().fetch("", coin="ETH") == []
 
 
-def test_blockchair_bad_best_block_time_falls_back_to_now(monkeypatch):
-    """必要統計欄位都合法時，僅 `best_block_time` 格式不符不拋例外，退回
-    目前時間——`best_block_time` 只影響 `ts`（時效衰減用），不是被展示的
-    統計證據內容，跟 codex 抓到的「統計欄位缺失/型別錯誤仍發布」是兩回事，
-    不需要因為時間戳解析失敗就丟棄整筆真實統計資料。"""
+def test_blockchair_bad_best_block_time_raises(monkeypatch):
+    """codex MEDIUM（PR #55，鏈上驗證最終閉合）：`best_block_time` 格式不符
+    也視為必要欄位驗證失敗，必須拋例外——不能退回 `time.time()` 把「上游
+    回歷史統計/不完整 envelope」偽裝成剛取得的新證據去覆蓋舊快取（反轉
+    上一輪的 `..._falls_back_to_now`，那個設計違反本批的核心不變量）。"""
     from trustforge.ingestion import onchain
     bad_fixture = (
         b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, '
@@ -448,9 +448,41 @@ def test_blockchair_bad_best_block_time_falls_back_to_now(monkeypatch):
         b'"context": {"code": 200}}'
     )
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_fixture)
-    docs = onchain.BlockchairStatsSource().fetch("", coin="BTC")
-    assert len(docs) == 1
-    assert docs[0].ts > 0
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_missing_best_block_time_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad_fixture = (
+        b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, '
+        b'"transactions_24h": 4}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_fixture)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_null_best_block_time_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad_fixture = (
+        b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, '
+        b'"transactions_24h": 4, "best_block_time": null}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_fixture)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_non_string_best_block_time_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad_fixture = (
+        b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, '
+        b'"transactions_24h": 4, "best_block_time": 1783754115}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_fixture)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
 
 
 # ── codex HIGH 修復（#24+robustness，PR #55）：無效 payload 必須拋例外，

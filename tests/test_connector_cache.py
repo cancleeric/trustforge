@@ -737,6 +737,42 @@ def test_scheduler_onchain_invalid_payload_raises_and_preserves_old_cache(monkey
     assert "blockchair" in err
 
 
+def test_scheduler_onchain_bad_best_block_time_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex MEDIUM（PR #55，鏈上驗證最終閉合）驗收：`best_block_time`
+    格式漂移（其餘統計欄位都合法）一樣要 raise，不能用 `time.time()`
+    把上游回的歷史/不完整 envelope 偽裝成剛取得的新證據——`run_once()`
+    要計入 failures、完全不覆寫舊快取。"""
+    from trustforge.ingestion import onchain
+    from trustforge.ingestion.onchain import BlockchairStatsSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-blockchair-doc", "kind": "onchain", "source": "blockchair",
+        "text": "上一輪的真實統計：區塊高度=956000", "url": "https://api.blockchair.com/bitcoin/stats",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("blockchair", "BTC"), old_docs, time.time() - 3600)
+
+    bad_payload = (
+        b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, '
+        b'"transactions_24h": 4, "best_block_time": "not-a-date"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_payload)
+    src = BlockchairStatsSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["blockchair"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["blockchair:BTC"]
+    entry = backend.get(cache_key("blockchair", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "blockchair" in err
+
+
 def test_scheduler_coin_agnostic_fetch_failure_is_counted_into_failures(monkeypatch, tmp_path, capsys):
     """codex HIGH-1：coin-agnostic 來源真呼叫失敗，同樣要計入 failures（不是
     只印警告就當沒事）。"""

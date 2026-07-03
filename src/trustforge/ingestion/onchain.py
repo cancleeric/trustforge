@@ -248,7 +248,16 @@ class BlockchairStatsSource(Source):
         difficulty = _require_number(data, "difficulty", self.name)
         mempool_tx = _require_number(data, "mempool_transactions", self.name)
         tx_24h = _require_number(data, "transactions_24h", self.name)
-        best_block_time = data.get("best_block_time", "")
+        # codex MEDIUM（PR #55，鏈上驗證最終閉合）：`best_block_time` 也視為
+        # 必要欄位——缺失/null/格式漂移正是「payload 不完整/schema drift」
+        # 的訊號，跟其他必要欄位一致一律 raise，不得退回 `time.time()` 把
+        # 歷史或不完整的回應偽裝成「剛取得」的新證據去覆蓋舊快取（違反本
+        # 批「驗證失敗不建 Document、保留舊快取」的核心不變量）。
+        best_block_time = data.get("best_block_time")
+        if not isinstance(best_block_time, str) or not best_block_time:
+            raise ValueError(
+                f"{self.name}: 欄位 'best_block_time' 缺失或型別錯誤：{best_block_time!r}"
+            )
         ref = (
             f"BTC 鏈上統計：區塊高度={_fmt_num(blocks)}，難度={_fmt_num(difficulty)}，"
             f"mempool 交易數={_fmt_num(mempool_tx)}，24h 交易數={_fmt_num(tx_24h)}"
@@ -259,8 +268,10 @@ class BlockchairStatsSource(Source):
                 .replace(tzinfo=timezone.utc)
                 .timestamp()
             )
-        except (TypeError, ValueError):
-            ts = time.time()
+        except ValueError as exc:
+            raise ValueError(
+                f"{self.name}: 欄位 'best_block_time' 格式不符預期：{best_block_time!r}"
+            ) from exc
         doc_id = "onchain-bcair-" + hashlib.md5(ref.encode()).hexdigest()[:12]
         return [Document(
             id=doc_id,
