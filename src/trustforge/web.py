@@ -38,6 +38,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
+from .brand_logos import coin_logo_html, source_logo_html
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
@@ -1783,6 +1784,13 @@ def _render_evidence_list(
             f'style="color:{tier_color};border:1px solid {tier_color}">'
             f'{e(tier_label)}</span>'
         )
+        # 商業級視覺（Nansen/Messari 級）：來源 pill 旁附官方 LOGO（inline
+        # SVG，simple-icons CC0）或（查無收錄品牌時）中性字首徽章——見
+        # trustforge.brand_logos 模組 docstring，#24 鐵律不放錯 LOGO。
+        # `ev.source` 出自各 ingestion 連接器固定的 `Source.name` 常數
+        # （非使用者輸入）；fallback 顏色沿用這裡剛算出的 tier 顏色，跟
+        # tier pill 視覺語言一致，不另外硬編品牌色。
+        src_logo = source_logo_html(ev.source, fallback_color=tier_color)
         # source_url 安全連結：_safe_href 驗 scheme，escape 由其內部保留
         if ev.source_url:
             url_html = _safe_href(ev.source_url)
@@ -1798,7 +1806,7 @@ def _render_evidence_list(
             f"<td>"
             f"<details>"
             f'<summary class="tf-ev-summary">'
-            f'<span class="tf-src-pill">{e(ev.source)}</span>'
+            f'<span class="tf-src-pill">{src_logo} {e(ev.source)}</span>'
             f'{tier_pill}'
             f'<span class="tf-ev-date">{e(ev.fetched_at)}</span>'
             f'{flags_badge}'
@@ -2256,6 +2264,12 @@ def _render_report(
     （`coin=A,B&type=comparison`）組出唯一一條正確的 top-level 下載連結。
     """
     e = html.escape
+    # 商業級視覺（Nansen/Messari 級）：幣種標題旁附官方 LOGO（inline SVG，
+    # simple-icons CC0，見 trustforge.brand_logos 模組 docstring）。
+    # `report.coin` 一律出自 pipeline 已驗證過的 `COIN_POOL` 白名單（見
+    # `_do_analyze`），非使用者輸入直接控制；`coin_logo_html` 內部仍只認
+    # 白名單 dict，查無對應幣種回空字串，不會印出破圖。
+    coin_logo = coin_logo_html(report.coin)
     facts = "".join(f"<li>{e(f)}</li>" for f in report.facts)
     infer = "".join(f"<li>{e(i)}</li>" for i in report.inferences)
     basis = "".join(
@@ -2287,7 +2301,7 @@ def _render_report(
     )
     return f"""
 <div class="tf-dash-hdr">
-  <span class="tf-coin-badge">{e(report.coin)}</span>
+  <span class="tf-coin-badge">{coin_logo}{' ' if coin_logo else ''}{e(report.coin)}</span>
   <span class="tf-dash-sep">●</span>
   <span class="tf-dash-q">{e(report.question)}</span>
 </div>
