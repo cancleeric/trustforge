@@ -1221,6 +1221,30 @@ def _render_costs_page() -> str:
 """
 
 
+def _hero_analyze_href() -> str:
+    """首頁 hero「立即開始分析」CTA 連結：真的觸發一次 `/analyze` 真資料
+    分析（`_is_real_request()` 預設檔位——未帶 `sample`/`live` 即走真連接器
+    + Bedrock off，$0），不是離線示範、也不是錨點捲動。
+
+    P-2026 生產 UX bug：原本是 `href="#tf-query-console"`，桌面版 Query
+    Console 本來就在左側可見，點下去等於捲到已可見處＝視覺零反應，使用者
+    以為壞掉。改成連到真正會導航、真的跑一次分析的連結，符合「立即開始
+    分析」語意，且維持 zero-JS（純 `<a href>`，無 JS 監聽）。
+
+    coin 固定 `COIN_POOL[0]`（即 BTC，既有預設幣種），問題文字沿用既有
+    `_DATE_AGNOSTIC_QUERY_SUFFIX` 常數組出、不新造文案、不帶日期（避免
+    `_render_price_provenance()` 之外的地方自行宣稱日期，見該常數旁註解）。
+    刻意**不帶** `sample=1`：這顆 CTA 要展示的正是「真資料」這個賣點。
+    """
+    coin = COIN_POOL[0]
+    params = {
+        "coin": coin,
+        "type": QuestionType.MULTI_SOURCE.value,
+        "q": f"分析{coin}{_DATE_AGNOSTIC_QUERY_SUFFIX}，整合多源資料",
+    }
+    return html.escape(f"/analyze?{urlencode(params)}")
+
+
 def _example_analyze_href() -> str:
     """首頁「看範例報告」CTA 連結：沿用 Query Console 表單本身的預設幣種／
     題型／問題文字（`_PAGE` 表單預設值），走一般 `/analyze` GET 路由。
@@ -1426,13 +1450,15 @@ def _render_home_page() -> str:
     stall 都碰不到 request 執行緒——見 `_render_home_overview_cached()`
     docstring 完整論證。
 
-    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、多幣總覽（若總覽
+    三段：Hero（一句話定位 + CTA 直接觸發一次真 BTC 多源分析，見
+    `_hero_analyze_href`）、多幣總覽（若總覽
     blob 可讀，顯示各幣真信任分卡；讀失敗/miss 則整段不渲染）、產品總覽
     （事實→推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟
     1/3、2/3、3/3」，不新發明一套說法）、範例入口（連到一個真實可執行的
     `/analyze` 查詢，非虛構資料——見 `_example_analyze_href`）。
     """
     e = html.escape
+    hero_href = _hero_analyze_href()
     example_href = _example_analyze_href()
     overview_html = _render_home_overview_cached()
     overview_section = (
@@ -1450,7 +1476,7 @@ def _render_home_page() -> str:
   <h1>多源市場情報的信任提煉——不只給分數，給你為什麼</h1>
   <p class="sub" style="margin:0 0 .8rem">輸入幣種與問題，TrustForge 整合多來源證據，拆解成「事實 &#8594; 推論 &#8594; 結論」三層，
   附上信任評分與可展開的原始依據——不是一句話式的黑箱結論。</p>
-  <a class="tf-hero-cta" href="#tf-query-console">立即開始分析 &#8594;</a>
+  <a class="tf-hero-cta" href="{hero_href}">立即開始分析 &#8594;</a>
 </div>
 {overview_section}
 <div class="tf-section">
