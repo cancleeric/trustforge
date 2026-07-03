@@ -209,6 +209,49 @@ _SUBFIELD_DRIFT_PARTIAL = b"""<?xml version="1.0" encoding="UTF-8"?>
   </channel>
 </rss>"""
 
+# codex MEDIUM 第 7 輪：所有 entry 的 link 都是「有字首但無 host」的殘缺
+# URL（`https://` 空、`https:///path` 空 host）——舊版 startswith 檢查會
+# 誤判合法，urlsplit 嚴格驗必須擋下，視為子欄位 drift。
+_INVALID_HOST_LINK_ALL = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CoinDesk</title>
+    <item>
+      <title>Bitcoin BTC surges past $70,000</title>
+      <link>https://</link>
+      <description>Bitcoin BTC has surged amid strong institutional demand.</description>
+      <pubDate>Wed, 01 Aug 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Ethereum ETH also rallies</title>
+      <link>https:///article</link>
+      <description>Ethereum ETH climbs on strong demand.</description>
+      <pubDate>Wed, 01 Aug 2026 11:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>"""
+
+# 混合：一筆 link 無 host（無效）+ 一筆正常絕對 URL——無效那筆該被單獨
+# 跳過，不該讓整批 raise。
+_INVALID_HOST_LINK_PARTIAL = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CoinDesk</title>
+    <item>
+      <title>Bad link entry</title>
+      <link>https:///article</link>
+      <description>This entry has an unusable link.</description>
+      <pubDate>Wed, 01 Aug 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Bitcoin BTC surges past $70,000</title>
+      <link>https://www.coindesk.com/markets/2026/08/01/btc-surge</link>
+      <description>Bitcoin BTC has surged amid strong institutional demand.</description>
+      <pubDate>Wed, 01 Aug 2026 10:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>"""
+
 
 def test_parse_rss_schema_drift_no_item_or_entry_raises(monkeypatch):
     """合法可解析 XML，但完全沒有 `<item>`/Atom `<entry>`（換 namespace/
@@ -279,6 +322,49 @@ def test_parse_rss_subfield_drift_partial_skips_bad_entry_keeps_good_one(monkeyp
     assert docs[0].text
     assert docs[0].url == "https://www.coindesk.com/markets/2026/08/01/btc-surge"
     assert docs[0].ts != 0.0
+
+
+def test_is_valid_http_link_rejects_missing_host():
+    """codex MEDIUM 第 7 輪：`startswith(("http://","https://"))` 會把
+    `https://`（無 host）、`https:///article`（空 host）當合法——urlsplit
+    嚴格驗必須擋下這兩種殘缺 URL。"""
+    from trustforge.ingestion.news import _is_valid_http_link
+    assert _is_valid_http_link("https://") is False
+    assert _is_valid_http_link("https:///article") is False
+    assert _is_valid_http_link("http://") is False
+
+
+def test_is_valid_http_link_rejects_credentials_and_bad_scheme():
+    from trustforge.ingestion.news import _is_valid_http_link
+    assert _is_valid_http_link("https://user:pass@example.com/x") is False
+    assert _is_valid_http_link("javascript:alert(1)") is False
+    assert _is_valid_http_link("ftp://example.com/x") is False
+    assert _is_valid_http_link("") is False
+
+
+def test_is_valid_http_link_accepts_normal_absolute_url():
+    from trustforge.ingestion.news import _is_valid_http_link
+    assert _is_valid_http_link("https://www.coindesk.com/markets/2026/08/01/btc-surge") is True
+
+
+def test_parse_rss_invalid_host_link_all_entries_raises(monkeypatch):
+    """所有 entry 的 link 都是無 host 的殘缺 URL（`https://`、
+    `https:///article`）→ 結構有效 entry 數為 0，視為子欄位 drift，
+    必須 raise（保留舊快取），不能建含不可用 URL 的 Document。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _INVALID_HOST_LINK_ALL)
+    with pytest.raises(ValueError):
+        news.CoinDeskRSSSource().fetch("", coin="")
+
+
+def test_parse_rss_invalid_host_link_partial_skips_bad_entry_keeps_good_one(monkeypatch):
+    """一筆 link 無 host（無效）+ 一筆正常絕對 URL——無效那筆該被單獨
+    跳過，不該讓整批 raise，正常那筆照常出 Document。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _INVALID_HOST_LINK_PARTIAL)
+    docs = news.CoinDeskRSSSource().fetch("", coin="")
+    assert len(docs) == 1
+    assert docs[0].url == "https://www.coindesk.com/markets/2026/08/01/btc-surge"
 
 
 def test_cryptopanic_no_token_returns_empty(monkeypatch):
