@@ -84,6 +84,8 @@ from trustforge.ingestion.cache import (  # noqa: E402
     TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS,
     TRUST_SNAPSHOT_SOURCE,
     CacheBackend,
+    DynamoDBCache,
+    JsonCacheBackend,
     cache_get,
     cache_key,
     cache_set,
@@ -97,7 +99,7 @@ from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
-from trustforge.ledger import DynamoDBLedger, get_ledger  # noqa: E402
+from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
 from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
 
@@ -382,6 +384,50 @@ _PROBE_COIN = "PROBE"
 # 時間）：PK=run_id、SK=ts 都固定，才能讓每次 probe 覆寫同一筆，不會無限堆積。
 _PROBE_LEDGER_TS = "1970-01-01T00:00:01+00:00"
 
+# codex HIGH（probe 真正有界化，deploy_ec2.sh 的部署 gate 依賴這裡）：
+# `get_cache_backend()`/`get_ledger()` 建構 `DynamoDBCache`/`DynamoDBLedger`
+# 時**刻意**不帶 timeout（見 cache.py::DynamoDBCache 註解），沿用 boto3/
+# botocore 內建預設 connect/read timeout + 標準重試——正常情況數秒等級，
+# 但 DynamoDB/DNS/網路降級時可能拖到數分鐘。probe 存在的目的就是要給
+# `deploy/deploy_ec2.sh` 一個「有界、快速」的部署 gate，若 client 本身沒有
+# 明確 timeout，這個「有界」的前提就不成立——一次降級就可能讓 probe 這支
+# SSM 指令卡到遠超部署 gate 的 poll timeout（見 `_probe_cache_backend()`/
+# `_probe_ledger_backend()`：只在 probe 這條路徑額外帶入明確短 timeout/
+# 重試上限，不影響一般排程路徑既有的容錯空間）。
+_PROBE_DYNAMODB_CONNECT_TIMEOUT_SECONDS = 3.0
+_PROBE_DYNAMODB_READ_TIMEOUT_SECONDS = 3.0
+_PROBE_DYNAMODB_MAX_ATTEMPTS = 2
+
+
+def _probe_cache_backend() -> CacheBackend:
+    """比照 `get_cache_backend()` 的 env 選擇邏輯（`CACHE_BACKEND`），但
+    DynamoDB 分支額外帶入明確短 timeout/重試上限，讓 probe 對 cache 表的
+    PutItem/GetItem 真正有界（理由見上方 `_PROBE_DYNAMODB_*` 常數註解）。
+    """
+    backend = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
+    if backend == "json":
+        return JsonCacheBackend()
+    return DynamoDBCache(
+        connect_timeout=_PROBE_DYNAMODB_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=_PROBE_DYNAMODB_READ_TIMEOUT_SECONDS,
+        max_attempts=_PROBE_DYNAMODB_MAX_ATTEMPTS,
+    )
+
+
+def _probe_ledger_backend() -> DynamoDBLedger | JsonlLedger:
+    """比照 `get_ledger()` 的 env 選擇邏輯（`COST_LEDGER_BACKEND`），但
+    DynamoDB 分支同樣帶入明確短 timeout/重試上限，理由同
+    `_probe_cache_backend()`。
+    """
+    backend = os.getenv("COST_LEDGER_BACKEND", "jsonl").strip().lower()
+    if backend == "dynamodb":
+        return DynamoDBLedger(
+            connect_timeout=_PROBE_DYNAMODB_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=_PROBE_DYNAMODB_READ_TIMEOUT_SECONDS,
+            max_attempts=_PROBE_DYNAMODB_MAX_ATTEMPTS,
+        )
+    return JsonlLedger()
+
 
 def run_probe() -> int:
     """DynamoDB R/W canary probe（codex HIGH-3 修正 + 後續 2 個 probe 自身的洞）。
@@ -435,7 +481,7 @@ def run_probe() -> int:
     """
     ok = True
 
-    cache_backend = get_cache_backend()
+    cache_backend = _probe_cache_backend()
     canary_key = cache_key(_PROBE_SOURCE, _PROBE_COIN)
     sentinel = f"probe-{os.getpid()}-{time.time():.6f}"
     try:
@@ -466,7 +512,7 @@ def run_probe() -> int:
                 print(f"[fetch_scheduler] PROBE OK：cache PutItem + GetItem（ConsistentRead）"
                       f"讀寫一致（backend={type(cache_backend).__name__}）")
 
-    ledger_backend = get_ledger()
+    ledger_backend = _probe_ledger_backend()
     try:
         ledger_backend.append({
             "run_id": _PROBE_SOURCE,

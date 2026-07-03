@@ -1390,6 +1390,93 @@ def test_probe_succeeds_when_both_tables_are_writable(monkeypatch, tmp_path):
     assert len(records) == 1
 
 
+def test_probe_cache_backend_uses_bounded_timeout_for_dynamodb(monkeypatch):
+    """codex HIGH（probe 真正有界化）：`_probe_cache_backend()`（`CACHE_BACKEND`
+    未顯式設 json 時）必須帶明確短 timeout/重試參數建構 `DynamoDBCache`，不能
+    沿用 `get_cache_backend()` 的無 timeout 版本——否則 degraded/blackholed
+    的 DynamoDB（DNS/網路/節流異常導致連線或讀取長時間不回應）會讓 boto3
+    預設 timeout/重試把單次呼叫拖到數分鐘，部署 gate 的「有界」假設就不成立
+    （見 `scripts/fetch_scheduler.py::run_probe()` 上方 `_PROBE_DYNAMODB_*`
+    常數註解）。比照 `web.py::_home_overview_backend()` 既有的驗證慣例：直接
+    斷言建構出來的 backend 實例帶著預期的 timeout/重試參數，不需要真的模擬
+    網路 hang（那需要真連線，不是 unit test 該做的事）。"""
+    monkeypatch.delenv("CACHE_BACKEND", raising=False)
+
+    backend = fetch_scheduler._probe_cache_backend()
+    assert type(backend).__name__ == "DynamoDBCache"
+    assert backend._connect_timeout == fetch_scheduler._PROBE_DYNAMODB_CONNECT_TIMEOUT_SECONDS
+    assert backend._read_timeout == fetch_scheduler._PROBE_DYNAMODB_READ_TIMEOUT_SECONDS
+    assert backend._max_attempts == fetch_scheduler._PROBE_DYNAMODB_MAX_ATTEMPTS
+
+
+def test_probe_cache_backend_json_branch_has_no_dynamodb_timeout_concept(monkeypatch):
+    """`CACHE_BACKEND=json` 時是本機檔案 I/O，本來就不會 hang，`_probe_cache_backend()`
+    要回傳一般的 `JsonCacheBackend()`，不該誤帶 DynamoDB 的 timeout 參數（該
+    類別也沒有這種建構參數）。"""
+    monkeypatch.setenv("CACHE_BACKEND", "json")
+
+    backend = fetch_scheduler._probe_cache_backend()
+    assert type(backend).__name__ == "JsonCacheBackend"
+
+
+def test_probe_ledger_backend_uses_bounded_timeout_for_dynamodb(monkeypatch):
+    """同上，`_probe_ledger_backend()`（`COST_LEDGER_BACKEND=dynamodb` 時）
+    也要帶一樣的明確短 timeout/重試參數建構 `DynamoDBLedger`，不能沿用
+    `get_ledger()` 的無 timeout 版本，理由同 cache 那份。"""
+    monkeypatch.setenv("COST_LEDGER_BACKEND", "dynamodb")
+
+    ledger = fetch_scheduler._probe_ledger_backend()
+    assert type(ledger).__name__ == "DynamoDBLedger"
+    assert ledger._connect_timeout == fetch_scheduler._PROBE_DYNAMODB_CONNECT_TIMEOUT_SECONDS
+    assert ledger._read_timeout == fetch_scheduler._PROBE_DYNAMODB_READ_TIMEOUT_SECONDS
+    assert ledger._max_attempts == fetch_scheduler._PROBE_DYNAMODB_MAX_ATTEMPTS
+
+
+def test_probe_ledger_backend_jsonl_branch_default(monkeypatch):
+    """`COST_LEDGER_BACKEND` 未設（預設 jsonl）時，`_probe_ledger_backend()`
+    要回傳一般的 `JsonlLedger()`，本機檔案 I/O 不需要 timeout 概念。"""
+    monkeypatch.delenv("COST_LEDGER_BACKEND", raising=False)
+
+    ledger = fetch_scheduler._probe_ledger_backend()
+    assert isinstance(ledger, JsonlLedger)
+
+
+def test_probe_bounded_timeout_actually_reaches_boto3_config_on_degraded_dynamodb(monkeypatch):
+    """codex HIGH（degraded/blackholed DynamoDB mock）：即使 DynamoDB 端已經
+    降級（連線/讀取會被 explicit timeout 中止而不是無限等待——這裡直接模擬
+    `_get_table()` 建 client 時真的丟出 botocore 風格的連線逾時例外，代表
+    「該次呼叫在 bounded 時間內 raise/終止」，而不是被 boto3 預設值拖著空等），
+    probe 必須在（模擬的）bounded 時間內拿到終態並正確判定失敗（非零退出），
+    不會被卡住、也不會誤判成功。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", "unused-cache.json")
+    monkeypatch.setenv("CACHE_BACKEND", "dynamodb")
+
+    class _DegradedTable:
+        """模擬 degraded/blackholed DynamoDB：呼叫本身不會無限 hang（explicit
+        timeout 已經在 botocore 層擋掉），而是很快就丟出逾時類例外——這正是
+        `connect_timeout`/`read_timeout`/`max_attempts` 存在的目的。"""
+
+        def put_item(self, **_kwargs):
+            raise TimeoutError(
+                "Connect timeout on endpoint URL (degraded DynamoDB, "
+                "bounded by explicit connect_timeout/read_timeout, not boto3 預設)"
+            )
+
+    degraded_backend = DynamoDBCache(table_name="fake-table")
+    degraded_backend._table = _DegradedTable()  # 繞過 boto3，直接注入「已降級」的 Table
+    monkeypatch.setattr(fetch_scheduler, "_probe_cache_backend", lambda: degraded_backend)
+
+    started = time.monotonic()
+    rc = fetch_scheduler.run_probe()
+    elapsed = time.monotonic() - started
+
+    assert rc == 1  # 真的失敗（degraded backend），不是誤判成功
+    # 這裡的重點不是「跑多快」（mock 本來就是瞬間 raise），而是證明 probe
+    # 遇到降級 backend 時會直接往上拋出、被 run_probe() 接住轉成非零退出，
+    # 不會卡在某個無界等待點——跟部署 gate 的 90s poll deadline 契約一致。
+    assert elapsed < 5.0
+
+
 def test_probe_fails_nonzero_when_cache_put_item_denied(monkeypatch):
     """codex HIGH-3 核心案例：cache 表 PutItem 被拒（權限被 permission
     boundary/SCP/table policy 擋掉）→ probe 必須非零退出。"""
@@ -1400,7 +1487,7 @@ def test_probe_fails_nonzero_when_cache_put_item_denied(monkeypatch):
     )
     broken._table = mock_table  # 繞過 boto3，模擬已建好但被拒的 Table
 
-    monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: broken)
+    monkeypatch.setattr(fetch_scheduler, "_probe_cache_backend", lambda: broken)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 1
@@ -1418,7 +1505,7 @@ def test_probe_fails_nonzero_when_cache_get_item_denied_after_put_succeeds(monke
     )
     broken._table = mock_table
 
-    monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: broken)
+    monkeypatch.setattr(fetch_scheduler, "_probe_cache_backend", lambda: broken)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 1
@@ -1446,9 +1533,9 @@ def test_probe_cache_readback_uses_consistent_read(monkeypatch, tmp_path):
     mock_table.get_item.side_effect = _fake_get_item
     backend._table = mock_table
 
-    monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: backend)
+    monkeypatch.setattr(fetch_scheduler, "_probe_cache_backend", lambda: backend)
     monkeypatch.setattr(
-        fetch_scheduler, "get_ledger", lambda: JsonlLedger(path=tmp_path / "ledger.jsonl")
+        fetch_scheduler, "_probe_ledger_backend", lambda: JsonlLedger(path=tmp_path / "ledger.jsonl")
     )
 
     rc = fetch_scheduler.run_probe()
@@ -1469,7 +1556,7 @@ def test_probe_fails_nonzero_when_ledger_put_item_denied(monkeypatch, tmp_path):
         "AccessDeniedException: User is not authorized to perform: dynamodb:PutItem"
     )
     broken_ledger._table = mock_table
-    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: broken_ledger)
+    monkeypatch.setattr(fetch_scheduler, "_probe_ledger_backend", lambda: broken_ledger)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 1
@@ -1491,7 +1578,7 @@ def test_probe_fails_nonzero_when_ledger_get_item_does_not_find_canary(monkeypat
     mock_table.put_item.return_value = {}
     mock_table.get_item.return_value = {}  # 沒有 "Item" key == 沒讀到
     ledger._table = mock_table
-    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+    monkeypatch.setattr(fetch_scheduler, "_probe_ledger_backend", lambda: ledger)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 1
@@ -1517,7 +1604,7 @@ def test_probe_fails_nonzero_when_ledger_scan_permission_denied(monkeypatch, tmp
         "AccessDeniedException: User is not authorized to perform: dynamodb:Scan"
     )
     ledger._table = mock_table
-    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+    monkeypatch.setattr(fetch_scheduler, "_probe_ledger_backend", lambda: ledger)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 1
@@ -1543,7 +1630,7 @@ def test_probe_succeeds_when_ledger_get_item_finds_canary_and_scan_permitted(mon
     }
     mock_table.scan.return_value = {"Items": []}
     ledger._table = mock_table
-    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+    monkeypatch.setattr(fetch_scheduler, "_probe_ledger_backend", lambda: ledger)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 0
@@ -1580,7 +1667,7 @@ def test_probe_scan_pagination_with_missing_canary_in_first_page_does_not_fail(
         "LastEvaluatedKey": {"run_id": "other-run-2", "ts": "2026-01-01T00:00:00+00:00"},
     }
     ledger._table = mock_table
-    monkeypatch.setattr(fetch_scheduler, "get_ledger", lambda: ledger)
+    monkeypatch.setattr(fetch_scheduler, "_probe_ledger_backend", lambda: ledger)
 
     rc = fetch_scheduler.run_probe()
     assert rc == 0
@@ -1607,9 +1694,18 @@ def test_probe_is_not_fooled_by_fully_fresh_cache_where_normal_run_would_report_
             return {"docs": [], "fetched_at": time.time()}
 
     denied_fresh_backend = DeniedPutAlwaysFreshCache()
+    # 一般排程路徑（main() 內部）跟 --probe 路徑（run_probe() 內部）現在各自
+    # 走不同的 backend 取得函式（見 codex HIGH：probe 真正有界化，run_probe()
+    # 改用 `_probe_cache_backend()`/`_probe_ledger_backend()`），兩邊都要
+    # monkeypatch 到同一個 denied_fresh_backend 實例，才能驗證這裡要斷言的
+    # 「同一個被拒的 PutItem，一般排程繞過去、--probe 抓得到」。
     monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: denied_fresh_backend)
+    monkeypatch.setattr(fetch_scheduler, "_probe_cache_backend", lambda: denied_fresh_backend)
     monkeypatch.setattr(
         fetch_scheduler, "get_ledger", lambda: JsonlLedger(path=tmp_path / "ledger.jsonl")
+    )
+    monkeypatch.setattr(
+        fetch_scheduler, "_probe_ledger_backend", lambda: JsonlLedger(path=tmp_path / "ledger.jsonl")
     )
 
     src = _FakeSource("coindesk", kind="news")

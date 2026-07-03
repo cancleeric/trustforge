@@ -45,33 +45,126 @@ echo "[ec2] 帳號 $ACCT / 區域 $REGION / 模型 ${MODEL:-<離線,無BEDROCK_M
 # 迴圈；一般全源排程改成 **best-effort seed**（跑、記 log，來源端短暫失敗
 # 如 reddit 429 不讓部署失敗），只有 `--probe` 失敗（真正的 DynamoDB/IAM/
 # 程式問題）才讓部署 exit 1。
+# v0.5.11/v0.5.12 誤報部署失敗的根因：`aws ssm wait command-executed` 內建
+# 固定約 100s 逾時（delay 5s * maxAttempts 20），逾時本身視為 waiter 失敗
+# （非零結束），但呼叫端用 `2>/dev/null || true` 吞掉這個錯誤後，緊接著只
+# 查一次當下的 Status——若遠端指令還沒跑完（仍是 InProgress/Pending），
+# 就會把「還在跑」誤判成「失敗」。verify_fetch_scheduler 的遠端指令包含
+# 「等 unit 檔出現（up to 200s）+ 一般排程 + --probe」三段，很容易讓整體
+# 耗時超過 100s；手動重跑同一個 --probe 卻都是 Success，因為手動重跑時
+# 有足夠時間讓它跑到終態。
+# 修法：自己輪詢 get-command-invocation 到終態（Success/Failed/Cancelled/
+# TimedOut）才判定，並給比 100s 更寬裕、貼合各指令實際可能耗時的自訂
+# timeout，逾時仍非終態才真的當失敗（並印當下狀態方便診斷）。
+# 再 follow-up（架構級最終解法，見 verify_fetch_scheduler 內部註解）：上面
+# 「等 unit 檔 + 一般排程 + --probe 三段塞進同一支 SSM command」的做法後來
+# 發現一般排程本身的網路耗時無界（無法用任何固定 timeout 安全涵蓋），已
+# 改成兩支完全獨立的 SSM command：一般排程 seed 是 fire-and-forget 不
+# gate；`--probe`（有界，只測 DynamoDB R/W）是唯一被輪詢、唯一決定部署
+# 成敗的 command。
+# 再再 follow-up：光拆出 probe 還不夠，`--probe` 內部若沿用
+# `get_cache_backend()`/`get_ledger()` 建構的 DynamoDB client，其 boto3/
+# botocore 預設 timeout/重試降級時可達數分鐘，「有界」不成立；已在
+# `scripts/fetch_scheduler.py::run_probe()` 改用帶明確短 timeout 的
+# `_probe_cache_backend()`/`_probe_ledger_backend()`，poll deadline 依此
+# bounded worst-case 推導（見 verify_fetch_scheduler 內部註解）。
+# 用法：poll_ssm_terminal_status <command-id> <instance-id> [max_wait_secs] [interval_secs]
+# 輸出（stdout）：終態字串；若逾時仍非終態，輸出當下抓到的狀態（可能是空
+# 字串）並以非零結束，呼叫端據此判定失敗。
+poll_ssm_terminal_status() {
+  local cmdid="$1" iid="$2" max_wait="${3:-180}" interval="${4:-5}"
+  local waited=0 status
+  while :; do
+    status=$(aws ssm get-command-invocation --region "$REGION" \
+      --command-id "$cmdid" --instance-id "$iid" --query Status --output text 2>/dev/null || echo "")
+    case "$status" in
+      Success|Failed|Cancelled|TimedOut)
+        echo "$status"
+        return 0
+        ;;
+    esac
+    if [ "$waited" -ge "$max_wait" ]; then
+      echo "${status:-Unknown}"
+      return 1
+    fi
+    sleep "$interval"
+    waited=$((waited + interval))
+  done
+}
+
 verify_fetch_scheduler() {
   local iid="$1"
-  local vcmdid
-  # shellcheck disable=SC2016  # 單引號內的 $(seq..)/$i 刻意留給遠端展開，不
-  # 是漏加雙引號（跟既有 healthz for-loop 那行同一個模式）。
+  # codex HIGH（架構修正，v0.5.11/v0.5.12 誤報部署失敗的最終解法）：早前
+  # 兩輪都是在同一支 SSM command 裡先跑「一般全源排程 seed」再跑
+  # `--probe`，然後想辦法把 poll timeout 設得比 seed 的最壞耗時更大——
+  # 但 seed 對每個真連接器的 HTTP 呼叫延遲本質上是**無界**的（上游慢、
+  # 429 backoff、CoinGecko host 節流…），17 個逐幣來源 * 5 幣即使每個
+  # connector 只有 5s timeout，序列跑理論上限就有 ~425s，還沒算 CoinGecko
+  # 節流器插入的等待——不管 poll timeout 設 180s/300s/更大都可能不夠，
+  # 一直在追一個追不完的數字。
+  # 正解：把「有界的 probe」跟「無界的 seed」拆成兩個獨立 SSM command。
+  # deploy gate 只送出、只 poll、只依賴 probe 這個 command 的結果；seed
+  # 是完全獨立的 fire-and-forget SSM command，送出後不等待、不 poll、不
+  # 影響部署成敗判定，失敗與否只留在該 instance 的 systemd journal 供事後
+  # 人工查（`journalctl -u fetch-scheduler`／`aws ssm get-command-invocation`）。
+
+  # ---- 1) best-effort 全源排程 seed：fire-and-forget，完全不 gate -------
+  # 讓 cache 儘早有資料可用，但這裡故意不等待、不檢查結果——seed 的無界
+  # 延遲不該擋在部署判定前面（跟部署是否成功無關，見 --probe 的說明）。
+  local seed_cmdid
+  seed_cmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters commands='["cd /opt/trustforge","systemctl daemon-reload","if systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 一般排程執行成功（best-effort seed，fire-and-forget，非部署 gate）\"; else echo \"[ec2] ⚠️ fetch-scheduler 一般排程 exit 非零（best-effort，不影響部署判定——常見原因是來源端短暫限流如 reddit 429，跟基建/程式碼健康無關）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager >&2 || true; fi"]' \
+    --query 'Command.CommandId' --output text 2>/dev/null || echo "")
+  if [ -n "$seed_cmdid" ] && [ "$seed_cmdid" != "None" ]; then
+    echo "[ec2] fetch-scheduler 一般排程 seed 已送出（CommandId=$seed_cmdid，fire-and-forget，不等待、不影響部署判定；結果可事後用 aws ssm get-command-invocation 查）"
+  else
+    echo "[ec2] ⚠️ fetch-scheduler seed 送出失敗（best-effort，不影響部署判定，略過）" >&2
+  fi
+
+  # ---- 2) --probe：唯一的部署 gate，有界 ---------------------------------
   # codex HIGH-3：光跑一般排程（無參數）不夠——cache 全新鮮時 0 次真呼叫仍
   # exit 0，PutItem 被拒也測不到（見 fetch_scheduler.py::run_probe 的說明）。
-  # 這裡先跑一次一般排程當 best-effort seed（讓 cache 儘早有資料可用，但
-  # 「來源端短暫失敗如 reddit 429」不該讓部署失敗，所以刻意不判斷它的 exit
-  # code），真正的部署 gate 是接下來不依賴 freshness、不碰任何外部來源的
-  # `--probe`（真的觸發一次 PutItem/GetItem，只測 DynamoDB R/W/IAM）。
+  # `--probe` 完全不碰任何外部連接器 API、不看任何來源新鮮度，只對
+  # DynamoDB cache/cost-ledger 兩表各做一次保證會發生的 PutItem/GetItem/
+  # Scan（boto3 預設 client/read timeout + 內建重試，正常數秒等級完成，
+  # 是貨真價實有界的操作）——獨立送出、獨立輪詢，不跟上面的 seed 共用
+  # 同一個 SSM command，也不受 seed 耗時影響。
+  local vcmdid
   vcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","for i in $(seq 1 40); do [ -f /etc/systemd/system/fetch-scheduler.service ] && break; sleep 5; done","if [ ! -f /etc/systemd/system/fetch-scheduler.service ]; then echo \"[ec2] fetch-scheduler.service 逾時仍未由 user-data 建立\" >&2; exit 1; fi","systemctl daemon-reload","if systemctl start fetch-scheduler.service; then echo \"[ec2] fetch-scheduler 一般排程執行成功（best-effort seed，非部署 gate）\"; else echo \"[ec2] ⚠️ fetch-scheduler 一般排程 exit 非零（best-effort，不讓部署失敗——常見原因是來源端短暫限流如 reddit 429，跟基建/程式碼健康無關；真正的部署 gate 是下一步 --probe）\" >&2; journalctl -u fetch-scheduler -n 40 --no-pager >&2 || true; fi","if ! ( cd /opt/trustforge && AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe 失敗（DynamoDB cache/cost-ledger 至少一表 PutItem/GetItem 真的不通，可能被 permission boundary/SCP/table policy 擋，見 trustforge-dynamodb inline policy；probe 不依賴任何外部來源/cache 是否新鮮，一定會真的觸發一次寫入，是唯一的部署 gate）\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe 通過（DynamoDB cache/cost-ledger 讀寫權限已真的驗證過）\""]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","if ! ( AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe 失敗（DynamoDB cache/cost-ledger 至少一表 PutItem/GetItem 真的不通，可能被 permission boundary/SCP/table policy 擋，見 trustforge-dynamodb inline policy；probe 不依賴任何外部來源/cache 是否新鮮，一定會真的觸發一次寫入，是唯一的部署 gate）\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe 通過（DynamoDB cache/cost-ledger 讀寫權限已真的驗證過）\""]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$vcmdid" ] || [ "$vcmdid" = "None" ]; then
-    echo "[ec2] ❌ fetch-scheduler 驗證用 SSM send-command 未取得 CommandId，中止" >&2
+    echo "[ec2] ❌ fetch-scheduler probe 用 SSM send-command 未取得 CommandId，中止" >&2
     exit 1
   fi
-  aws ssm wait command-executed --region "$REGION" --command-id "$vcmdid" --instance-id "$iid" 2>/dev/null || true
+  # timeout 契約：poll deadline 只需要覆蓋 probe 自身的有界耗時，不再被
+  # seed 的無界延遲拖累——這就是本輪架構修正的重點：gate 只依賴、只等待
+  # probe 這一個獨立 SSM command。
+  # codex HIGH（後續一輪）：光「拆出 probe」還不夠——probe 若透過
+  # get_cache_backend()/get_ledger() 建構 DynamoDB client，走的是 boto3/
+  # botocore 內建預設 connect/read timeout + 標準重試，降級時可達數分鐘，
+  # 「有界」名不副實。已改成 `scripts/fetch_scheduler.py::run_probe()` 內部
+  # 改用 `_probe_cache_backend()`/`_probe_ledger_backend()`，明確帶
+  # connect_timeout=3.0s／read_timeout=3.0s／max_attempts=2（見該檔案常數
+  # `_PROBE_DYNAMODB_*`），probe 現在是真正有界的：
+  #   bounded worst-case ≈ 5 次序列 DynamoDB 操作
+  #     （cache PutItem、cache GetItem、ledger PutItem、ledger GetItem、
+  #       ledger Scan）
+  #     × (connect_timeout 3s + read_timeout 3s) × max_attempts 2
+  #     ≈ 5 × 6s × 2 = 60s
+  # 90s 當 poll deadline，對這個 60s bounded worst-case 留 30s margin
+  # （SSM 啟動/排程開銷 + 冪等 margin），不再是「猜一個夠大的數字」。
+  # `|| true`：poll_ssm_terminal_status 逾時仍非終態時會 return 1，若不擋掉
+  # 會被 `set -e` 在這行賦值當場中止腳本，跳過下面印診斷訊息的 if 區塊。
   local vstatus
-  vstatus=$(aws ssm get-command-invocation --region "$REGION" \
-    --command-id "$vcmdid" --instance-id "$iid" --query Status --output text)
+  vstatus=$(poll_ssm_terminal_status "$vcmdid" "$iid" 90 5) || true
   if [ "$vstatus" != "Success" ]; then
-    echo "[ec2] ❌ fetch-scheduler 同步驗證失敗：CommandId=$vcmdid Status=${vstatus}（--probe 未通過，DynamoDB cache/cost-ledger 權限或程式有誤，deploy 視為失敗；一般全源排程僅 best-effort seed，其失敗不影響此判定，不可能是它造成這裡非 Success）" >&2
+    echo "[ec2] ❌ fetch-scheduler probe 同步驗證失敗：CommandId=$vcmdid Status=${vstatus}（等到終態或輪詢 90s 逾時仍非 Success；DynamoDB cache/cost-ledger 權限或程式有誤，deploy 視為失敗；跟上面的一般排程 seed 完全獨立送出/獨立判定，seed 成功與否不影響這裡）" >&2
+    aws ssm get-command-invocation --region "$REGION" --command-id "$vcmdid" --instance-id "$iid" \
+      --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
   fi
-  echo "[ec2] ✅ fetch-scheduler 同步驗證成功（--probe 通過，DynamoDB cache/cost-ledger 讀寫權限已真的驗證過；一般全源排程結果僅供參考 log，不影響此 gate，避免來源端短暫失敗如 reddit 429 造成部署誤判失敗）"
+  echo "[ec2] ✅ fetch-scheduler probe 同步驗證成功（DynamoDB cache/cost-ledger 讀寫權限已真的驗證過；一般全源排程 seed 是獨立 fire-and-forget，不影響此 gate 判定）"
 }
 
 # codex HIGH：首次建置路徑原本只跑 verify_fetch_scheduler（DynamoDB probe），
@@ -94,12 +187,21 @@ verify_web_healthz() {
     echo "[ec2] ❌ web healthz 驗證用 SSM send-command 未取得 CommandId，中止" >&2
     exit 1
   fi
-  aws ssm wait command-executed --region "$REGION" --command-id "$hcmdid" --instance-id "$iid" 2>/dev/null || true
+  # 同一個潛在誤判模式（見 poll_ssm_terminal_status 上方註解），這裡的遠端
+  # 指令本身有界（最長 12*3=36s），但仍改用同款終態輪詢，避免日後跟
+  # verify_fetch_scheduler 一樣在慢的環境下被 100s 內建逾時誤判。
+  # timeout 契約稽核：這支遠端指令只有一個 healthz for-loop（≤36s），
+  # 120s poll deadline 對它有寬裕 margin；跟 verify_fetch_scheduler 早前
+  # 版本「poll timeout < 指令自身可能耗時」的矛盾不同款，這裡沒有無界
+  # 外部依賴，不需要再壓縮/移除任何步驟或拆分 SSM command。
+  # `|| true`：理由同 verify_fetch_scheduler 那處，避免 set -e 在逾時時
+  # 於賦值行就把腳本靜默中止掉，吃掉後面的診斷訊息。
   local hstatus
-  hstatus=$(aws ssm get-command-invocation --region "$REGION" \
-    --command-id "$hcmdid" --instance-id "$iid" --query Status --output text)
+  hstatus=$(poll_ssm_terminal_status "$hcmdid" "$iid" 120 5) || true
   if [ "$hstatus" != "Success" ]; then
-    echo "[ec2] ❌ web healthz 同步驗證失敗：CommandId=$hcmdid Status=${hstatus}（trustforge.service 沒 active 或 /healthz 逾時仍不通，deploy 視為失敗；跟 DynamoDB probe 各自獨立，probe 過不代表這裡也會過）" >&2
+    echo "[ec2] ❌ web healthz 同步驗證失敗：CommandId=$hcmdid Status=${hstatus}（等到終態或輪詢 120s 逾時仍非 Success；trustforge.service 沒 active 或 /healthz 逾時仍不通，deploy 視為失敗；跟 DynamoDB probe 各自獨立，probe 過不代表這裡也會過）" >&2
+    aws ssm get-command-invocation --region "$REGION" --command-id "$hcmdid" --instance-id "$iid" \
+      --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
   fi
   echo "[ec2] ✅ web healthz 同步驗證成功（trustforge.service active 且 /healthz 有回應）"
@@ -238,14 +340,20 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
     exit 1
   fi
   echo "[ec2] SSM CommandId=${CMDID}，等待遠端執行完成…"
-  # send-command 只確認「已接受」是非同步的；用 wait 等實際跑完，再查真正的
-  # 執行結果狀態（wait 在 Failed/Cancelled/TimedOut 時也會回非零，這裡不因此
-  # 提早中止腳本，而是繼續往下查 Status 印出明確的成功/失敗）。
-  aws ssm wait command-executed --region "$REGION" --command-id "$CMDID" --instance-id "$IID" 2>/dev/null || true
-  SSM_STATUS=$(aws ssm get-command-invocation --region "$REGION" \
-    --command-id "$CMDID" --instance-id "$IID" --query Status --output text)
+  # send-command 只確認「已接受」是非同步的；輪詢到終態再查真正的執行結果
+  # 狀態（同款 poll_ssm_terminal_status，避免 `aws ssm wait command-executed`
+  # 內建 ~100s 逾時把還在跑的 InProgress 誤判成失敗）。
+  # timeout 契約稽核：這支遠端指令是 s3 cp+unzip+多個 sed+寫兩個 unit
+  # 檔+daemon-reload+restart trustforge+`enable --now fetch-scheduler.timer`
+  # （只啟用計時器，非同步觸發，不會在這裡阻塞等一般排程跑完）+healthz
+  # for-loop（≤36s）——沒有任何一步會同步等「一般排程」跑完，180s poll
+  # deadline 有寬裕 margin，跟 verify_fetch_scheduler 的矛盾不同款。
+  # `|| true`：理由同上，避免 set -e 在逾時時於賦值行就靜默中止腳本。
+  SSM_STATUS=$(poll_ssm_terminal_status "$CMDID" "$IID" 180 5) || true
   if [ "$SSM_STATUS" != "Success" ]; then
-    echo "[ec2] ❌ update-in-place 失敗：SSM CommandId=$CMDID Status=$SSM_STATUS" >&2
+    echo "[ec2] ❌ update-in-place 失敗：SSM CommandId=$CMDID Status=$SSM_STATUS（等到終態或輪詢 180s 逾時仍非 Success）" >&2
+    aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" \
+      --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
   fi
   # 主要 config SSM 成功不代表 fetch-scheduler 真的能跑（IAM 權限不足只有實
