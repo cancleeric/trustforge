@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { COIN_POOL, QUESTION_TYPES } from '../lib/constants'
 
 export interface QueryValues {
@@ -58,7 +59,13 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
             </option>
           ))}
         </select>
-        <p className="mt-1 text-[0.68rem] text-tf-muted">比較分析尚未接上（Phase 2b）。</p>
+        <p className="mt-1 text-[0.68rem] text-tf-muted">
+          雙幣比較請至
+          <Link to="/compare" className="text-tf-link underline">
+            比較頁
+          </Link>
+          。
+        </p>
       </div>
       <div>
         <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-q">

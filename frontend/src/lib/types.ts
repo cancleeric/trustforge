@@ -145,10 +145,102 @@ export interface AnalyzeData {
   execution_log: unknown[]
 }
 
+/** `/api/analyze?type=comparison`：`report`/`evidence`/... 全套欄位各出現
+ * 兩次（`_a`/`_b` 後綴），對應 `_handle_api_analyze` comparison 分支 payload
+ * （見 `web.py`）。刻意不重用 `AnalyzeData`（欄位名不同、非巢狀關係），單獨
+ * 定義一份型別，兩邊各自獨立、互不影響。 */
+export interface ComparisonAnalyzeData {
+  version: string
+  report_a: Report
+  evidence_a: Evidence[]
+  trust_radar_a: TrustRadar
+  trust_components_aggregate_a: TrustComponentsAggregate
+  price_provenance_a: PriceProvenance
+  report_b: Report
+  evidence_b: Evidence[]
+  trust_radar_b: TrustRadar
+  trust_components_aggregate_b: TrustComponentsAggregate
+  price_provenance_b: PriceProvenance
+  execution_log: unknown[]
+}
+
 // ── /api/health ──────────────────────────────────────────────────────────
 
 export interface HealthData {
   status: string
   version: string
   uptime_seconds: number
+}
+
+// ── /api/status ──────────────────────────────────────────────────────────
+
+/** 對應 `get_freshness_snapshot()`：`status==="missing"` 時 `fetched_at`／
+ * `age_seconds` 皆為 `null`（見 `ingestion/cache.py` docstring）。 */
+export interface FreshnessEntry {
+  source: string
+  coin: string
+  status: 'fresh' | 'stale' | 'missing'
+  fetched_at: number | null
+  age_seconds: number | null
+}
+
+export interface CacheBackendStatus {
+  name: string
+  connected: boolean
+  primary_connected: boolean
+  active_backend: string
+  degraded: boolean
+}
+
+export interface StatusData {
+  version: string
+  uptime_seconds: number
+  bedrock_capable: boolean
+  live_token_set: boolean
+  cache_backend: CacheBackendStatus
+  freshness: {
+    fresh: number
+    stale: number
+    missing: number
+    entries: FreshnessEntry[]
+  }
+}
+
+// ── /api/costs ───────────────────────────────────────────────────────────
+
+export interface CostModelDetail {
+  cost_usd: number
+  tokens_in: number
+  tokens_out: number
+}
+
+/** `Ledger.summary()`（`ledger.py`）——`runs` 是原始逐筆帳本紀錄，UI 只取
+ * 總計／by-model 彙總顯示，不逐筆渲染（筆數隨時間無界增長）。 */
+export interface CostsData {
+  total_cost_usd: number
+  by_model: Record<string, number>
+  by_model_detail: Record<string, CostModelDetail>
+  runs: unknown[]
+}
+
+// ── /api/history ─────────────────────────────────────────────────────────
+
+/** 對應 `scripts/fetch_scheduler.py::_snapshot_dict()` 再補上
+ * `get_trust_history()` 加的 `"date"` 欄位。`reputation_trace` 選填理由
+ * 同 `OverviewCoin`。 */
+export interface TrustHistoryEntry {
+  date: string
+  coin: string
+  trust_score: number
+  direction: string
+  calibrated_confidence: number
+  decision_state: DecisionState
+  generated_at: string
+  reputation_trace?: Record<string, ReputationTraceEntry>
+}
+
+export interface HistoryData {
+  coin: string
+  days: number
+  history: TrustHistoryEntry[]
 }
