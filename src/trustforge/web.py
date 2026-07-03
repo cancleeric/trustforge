@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -97,6 +98,88 @@ _status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
 _STATUS_PROBE_SOURCE = "__status_probe__"
 _STATUS_PROBE_COIN = "__status_probe__"
 
+# Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：首頁「多幣總覽」
+# 正確讀路徑。
+#
+# 第一輪（module 級 TTL 快取 + 鎖內 single-flight，比照 `_status_cache`）
+# 已被 codex 兩輪 HIGH review 推翻，記錄在此避免之後重踩：
+#   - HIGH #1：reader 只檢查 cache entry 是否非空、未驗新鮮度，DynamoDB
+#     TTL 刪除是 best-effort（可能延遲數小時到 48 小時），排程停擺時會一
+#     直顯示過期判斷——修法是加 `TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS` 新鮮
+#     度自驗（見 `_overview_bg_refresh_once()` 沿用）。
+#   - HIGH #2（PR #47 二輪 review）：即使新鮮度驗證修好了，request 路徑
+#     本身仍在鎖內**同步呼叫 `cache_get()`**——`DynamoDBCache` 的 0.5s
+#     timeout 只保證 socket connect/read 有上限，**不涵蓋憑證發現、DNS
+#     解析、`cache_get()` 內建的 JsonCacheBackend fallback 檔案 I/O、或任
+#     意形式的 backend stall（非拋錯、單純不回應）**——這些情況下 request
+#     執行緒仍會被真的卡住，且同一顆 single-flight 鎖會讓併發首頁 request
+#     全部排隊卡住，等於變相把 P3 事故的「ThreadPool 孤兒累積」換成「鎖
+#     隊列累積」，本質是同一個可用性 class 的問題：**I/O 出現在 request
+#     路徑上**。
+#
+# 正解（by construction，把所有 I/O 徹底移出 request 路徑）：
+#   1. 唯一一顆 module 級變數 `_overview_html`（`str | None`）—— request
+#      路徑**只**在持有 `_overview_state_lock`（極短、microsecond，鎖內
+#      絕不做任何 I/O）的情況下讀這個變數，讀完立刻放鎖。
+#   2. 唯一一條背景 daemon thread（`_overview_bg_loop`，首次首頁 request
+#      時懶啟動、`_ensure_overview_bg_thread_started()` 用
+#      `_overview_bg_thread_lock` + `is_alive()` 保證只會啟動一次），每
+#      `_OVERVIEW_BG_INTERVAL_SECONDS` 秒做一次
+#      `cache_get(__trust_overview_html__)` + 新鮮度驗證（沿用
+#      `TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`），成功且新鮮才更新
+#      `_overview_html`；backend stall/失敗/過期一律讓它變成 `None`（不顯
+#      示過期或壞資料），見 `_overview_bg_refresh_once()`。**所有 I/O、
+#      stall、timeout 只發生在這條背景 thread 身上**，它卡死也只影響它
+#      自己下一輪要不要重試，完全不會拖到任何一個首頁 request。
+#   3. 首頁 request 因此永遠即時（zero I/O）——backend 再怎麼 stall、憑證
+#      /DNS 再怎麼有問題，都碰不到 request 執行緒。
+#
+#   - HIGH #3（PR #47 三輪 review，最後一個微妙變體）：即使 I/O 全部移到
+#     背景 thread，新鮮度也只在**背景 thread `cache_get()` 成功返回後**才
+#     被檢查一次——如果背景那一輪讀取本身**永久 stall**（唯一一條 worker
+#     thread 卡住不返回、不拋錯，也不會有替補 thread 接手），它永遠到不了
+#     「判過期就設 `None`」那行程式碼。此時 `_overview_html` 會停在**上一
+#     輪成功時寫入的舊值**，且 request 路徑本身完全不檢查這個值的年齡，
+#     於是舊的信任判斷會無限期地繼續顯示，即使早就超過新鮮窗——對信任產
+#     品是致命的「過期當即時」。
+#     修法：**in-memory 值連同 expiry 時間戳一起存**（`_overview_html` +
+#     `_overview_expiry_epoch`，expiry = 該 blob 的 `fetched_at` +
+#     `TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`，背景 thread 寫值時一併寫
+#     expiry）。request 路徑讀完後、回傳前，多做**一次純記憶體時鐘比較**
+#     （`time.time() <= expiry`，零 I/O、鎖內完成）——即使背景 thread 永久
+#     stall、再也不會有新的一輪去把值設回 `None`，這顆 in-memory 現貨也會
+#     在時鐘走到 expiry 那一刻**自己失效**，不依賴背景 thread 主動清除。
+_OVERVIEW_BG_INTERVAL_SECONDS = 30.0  # 背景刷新頻率；跟首頁「即不即時」
+# 完全無關（首頁只讀 in-memory 現貨），純粹是「總覽資料多快跟上寫入者」
+# 的取捨，30–60s 區間內任一值皆可，取下限求新鮮。
+
+_overview_state_lock = threading.Lock()  # 只護 `_overview_html`／
+# `_overview_expiry_epoch` 這兩個變數本身的讀寫，鎖內絕不做 I/O（見上）。
+_overview_html: str | None = None  # in-memory 現貨；`None` = 目前沒有可
+# 顯示的新鮮總覽（首次啟動前、或背景 thread 判定 stale/失敗）。
+_overview_expiry_epoch: float = 0.0  # 這顆現貨的絕對到期時間（`time.time()`
+# 座標系，等於寫入當下 blob 的 `fetched_at + TRUST_SNAPSHOT_FRESH_WINDOW_
+# SECONDS`）。request 路徑讀取後會拿現在時間跟這個值比較（HIGH #3
+# 修復）——就算背景 thread 之後永久 stall、再也不會來更新/清空
+# `_overview_html`，這個絕對時間戳到了照樣讓現貨在 request 端自己失效。
+
+_overview_bg_thread_lock = threading.Lock()  # 只護「有沒有啟動背景
+# thread」這個判斷本身（`is_alive()` 檢查 + `Thread.start()`），同樣不是
+# I/O——`Thread.start()` 本身非阻塞，實際工作在新 thread 裡非同步跑。
+_overview_bg_thread: threading.Thread | None = None
+_overview_bg_stop_event: threading.Event | None = None  # 供測試用：設了
+# 這個事件，目前這條背景 thread 下一次檢查迴圈條件時就會自然結束（見
+# `_overview_bg_loop()`）；每次啟動都是全新的 `Event()`，不重用舊的（見
+# `_ensure_overview_bg_thread_started()` 理由）。
+
+# 首頁總覽背景刷新專用的 DynamoDB 連線 timeout（秒）——`DynamoDBCache.__init__`
+# 三個 timeout/重試參數專為此保留（見該類別 docstring「這三個參數留著給
+# Axis C 用」）：`get_cache_backend()`（給排程器／`/status` 用）刻意不帶
+# timeout（容錯優先，讀失敗頂多多一次 cache-miss 降級）。這個短 timeout
+# 現在只保護**背景 thread**（減少它自己卡住的時間），首頁 request 路徑
+# 本身已經零 I/O、不受這個 timeout 涵不涵蓋 stall 影響（見上方 HIGH #2）。
+_HOME_OVERVIEW_TIMEOUT_SECONDS = 0.5
+
 _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta charset="utf-8">
 
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -105,11 +188,15 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
- :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9}}
+ :root{{--tf-bg:#0d1117;--tf-card:#161b22;--tf-border:#30363d;--tf-text:#e6edf3;--tf-muted:#8b949e;--tf-muted2:#6e7681;--tf-hdr-g1:#12171e;--tf-hdr-g2:#0f141a;--tf-inset:#0f141a;--tf-text2:#c9d1d9;--tf-fs-h1:1.6rem;--tf-fw-h1:700;--tf-fs-h2:1.3rem;--tf-fw-h2:700;--tf-fs-h3:1rem;--tf-fw-h3:600;--tf-fs-h4:.85rem;--tf-fw-h4:600;--tf-fs-body:1rem;--tf-lh-body:1.55}}
  :root[data-theme="light"]{{--tf-bg:#f6f8fa;--tf-card:#ffffff;--tf-border:#d0d7de;--tf-text:#1f2328;--tf-muted:#57606a;--tf-muted2:#6e7781;--tf-hdr-g1:#ffffff;--tf-hdr-g2:#f6f8fa;--tf-inset:#eef2f6;--tf-text2:#3d444d}}
  *{{box-sizing:border-box}}
- body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
- h1{{margin-bottom:.2rem}} .sub{{color:var(--tf-muted);margin-top:0}}
+ body{{font-family:'IBM Plex Sans',-apple-system,"PingFang TC",sans-serif;font-size:var(--tf-fs-body);line-height:var(--tf-lh-body);max-width:1280px;margin:2rem auto;padding:0 1rem;color:var(--tf-text);background:var(--tf-bg);-webkit-font-smoothing:antialiased}}
+ h1{{margin-bottom:.2rem;font-size:var(--tf-fs-h1);font-weight:var(--tf-fw-h1);letter-spacing:-.01em;line-height:1.25}}
+ h2{{font-size:var(--tf-fs-h2);font-weight:var(--tf-fw-h2);line-height:1.3}}
+ h3{{font-size:var(--tf-fs-h3);font-weight:var(--tf-fw-h3);line-height:1.35}}
+ h4{{font-size:var(--tf-fs-h4);font-weight:var(--tf-fw-h4)}}
+ .sub{{color:var(--tf-muted);margin-top:0}}
  a{{color:#1f6feb}}
  header.tf-hdr{{display:flex;align-items:center;gap:14px;padding:.7rem 1rem;border:1px solid var(--tf-border);border-radius:12px;background:linear-gradient(var(--tf-hdr-g1),var(--tf-hdr-g2));margin-bottom:1rem;flex-wrap:wrap}}
  .tf-logo{{font-weight:700;font-size:1.05rem;letter-spacing:-.2px;color:var(--tf-text)}}
@@ -142,8 +229,19 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  label{{display:block;font-size:.8rem;color:var(--tf-muted);margin-bottom:.2rem}}
  select,input,textarea,button{{width:100%;padding:.5rem .7rem;border:1px solid var(--tf-border);border-radius:8px;font-size:1rem;background:var(--tf-bg);color:var(--tf-text);font-family:inherit}}
  textarea[name=q]{{min-width:0;min-height:5.2rem;resize:vertical;line-height:1.4}}
- button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em}}
+ button{{background:#1f6feb;color:#fff;border:0;cursor:pointer;font-weight:600;letter-spacing:.01em;position:relative}}
  button .tf-kbd{{opacity:.75;font-family:'IBM Plex Mono',monospace;margin-left:.3rem}}
+ /* 世界第一重寫 Phase 3：純 CSS loading 回饋——zero-JS 頁面（CSP `default-src 'none'`
+    已擋死所有 script），全頁 GET 表單送出到瀏覽器完成導航前無法用 JS 插入 spinner，
+    只能靠 `:active`（滑鼠按下/觸控/多數瀏覽器對 Enter 觸發的送出也會套用）在舊頁面
+    卸載前的最後幾個 render frame 換上 disabled 外觀＋spinner＋提示文字，讓使用者
+    在等待網路請求時至少有即時視覺回饋，不是完全白屏。不改變 `<form>` 本身的 GET
+    行為、不影響 `_do_analyze` 參數解析。 */
+ button[type=submit]:active{{display:flex;align-items:center;justify-content:center;gap:.5rem;cursor:progress;pointer-events:none;background:#1a5fc7}}
+ button[type=submit]:active .tf-btn-label{{display:none}}
+ button[type=submit]:active::before{{content:"";width:14px;height:14px;flex-shrink:0;border-radius:50%;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;animation:tf-spin .6s linear infinite}}
+ button[type=submit]:active::after{{content:"正在整合多源資料…";font-size:.85rem}}
+ @keyframes tf-spin{{to{{transform:rotate(360deg)}}}}
  .badge{{display:inline-block;background:rgba(31,111,235,.14);border:1px solid rgba(31,111,235,.4);border-radius:6px;padding:.1rem .5rem;font-size:.75rem;color:#79c0ff}}
  pre{{background:var(--tf-card);border:1px solid var(--tf-border);border-radius:12px;padding:1rem;white-space:pre-wrap;word-break:break-word;color:var(--tf-text)}}
  table{{border-collapse:collapse;width:100%;background:var(--tf-card);font-size:.85rem;color:var(--tf-text)}} td,th{{border:1px solid var(--tf-border);padding:.4rem;text-align:left}}
@@ -168,7 +266,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
  .tf-step{{border-left:4px solid var(--tf-border);padding:.3rem 0 .3rem .9rem;margin:.5rem 0}}
  .tf-step li{{margin:.25rem 0}}
  .tf-step-badge{{font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--tf-muted2);font-weight:400;margin-left:.4rem}}
- .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle}}
+ .tf-tier-pill{{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;border-radius:4px;padding:.05rem .4rem;margin-right:.3rem;text-transform:uppercase;vertical-align:middle;background:color-mix(in srgb,currentColor 14%,transparent)}}
  .tf-div-grid{{display:grid;grid-template-columns:1fr 34px 1fr;gap:0;align-items:stretch;margin-top:.6rem}}
  .tf-div-side{{border-radius:9px;padding:.7rem .8rem}}
  .tf-div-bull{{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.35)}}
@@ -194,6 +292,17 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
   .tf-div-mid{{padding:.3rem 0}}
   .tf-home-steps{{grid-template-columns:1fr}}
  }}
+ /* 世界第一重寫 Phase 3：375px 手機補強。表格橫向捲（而非強制欄位換行/擠壓）
+    ——`.tf-section` 是所有表格既有的統一容器（見 evidence 清單／資料鮮度矩陣／
+    連接器用量／成本帳本各表），讓容器本身可橫向捲動即可在不改任何 HTML 結構
+    的前提下讓表格內容在窄螢幕保持可讀，不強制每個 <td> 換行擠壞版面。 */
+ @media (max-width:480px){{
+  body{{padding:0 .6rem}}
+  .tf-section{{padding:.8rem;overflow-x:auto}}
+  .tf-section table{{min-width:640px}}
+  .tf-dash-hdr{{gap:.4rem}}
+  .tf-coin-badge{{font-size:.9rem;padding:.2rem .55rem}}
+ }}
 </style></head><body>
 {header}
 <div class="tf-layout">
@@ -204,7 +313,7 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
    <div><label>幣種</label><select name="coin">{coins}</select></div>
    <div><label>題型</label><select name="type">{types}</select></div>
    <div><label>問題</label><textarea name="q" rows="3">{default_query}</textarea></div>
-   <button type="submit">Run analysis<span class="tf-kbd">&#8629;</span></button>
+   <button type="submit"><span class="tf-btn-label">Run analysis<span class="tf-kbd">&#8629;</span></span></button>
   </form>
   {run_stats}
  </aside>
@@ -1134,18 +1243,208 @@ def _example_analyze_href() -> str:
     return html.escape(f"/analyze?{urlencode(params)}")
 
 
-def _render_home_page() -> str:
-    """首頁（`/`）內容：純靜態 HTML 字串組裝，比照 `_render_status_page`／
-    `_render_costs_page` 寫法，**不呼叫 pipeline/connector/Bedrock 任何一項**
-    ——首頁流量最高，必須是零外呼的純靜態渲染（credit-safe：不能是計費熱點）。
+def _home_overview_backend():
+    """首頁總覽讀路徑專用 cache backend：短 timeout（見
+    `_HOME_OVERVIEW_TIMEOUT_SECONDS`），跟 `get_cache_backend()`（給排程器／
+    `/status` 用，無 timeout、容錯優先）刻意分開建構——不能共用同一個無
+    timeout 版本，否則慢/掛掉的 backend 會讓首頁 request 被拖住（P3 事故的
+    根因就是首頁請求直接吃了 DynamoDB 的預設容錯行為）。
 
-    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、產品總覽（事實→
-    推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟 1/3、2/3、3/3」，
-    不新發明一套說法）、範例入口（連到一個真實可執行的 `/analyze` 查詢，
-    非虛構資料——見 `_example_analyze_href`）。
+    沿用 `CACHE_BACKEND` env 決定 dynamodb/json（跟 `get_cache_backend()`
+    同一套判斷邏輯，只是 dynamodb 分支多帶三個 timeout 參數）：`json` 分支
+    是本機檔案 I/O，本來就不會 hang，不需要 timeout。
+    """
+    from .ingestion.cache import DynamoDBCache, JsonCacheBackend
+
+    backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
+    if backend_name == "json":
+        return JsonCacheBackend()
+    return DynamoDBCache(
+        connect_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
+        read_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
+        max_attempts=1,
+    )
+
+
+def _overview_bg_refresh_once() -> None:
+    """單輪背景刷新：真的做 `cache_get()` + 新鮮度驗證——**這是整個首頁總
+    覽功能裡唯一允許發生 I/O 的地方**，只在背景 daemon thread 裡被呼叫
+    （見 `_overview_bg_loop()`），永遠不會被首頁 request 執行緒呼叫。
+
+    成功且新鮮才更新 `_overview_html`；backend stall（真的卡住，不是拋
+    例外）、任何例外（含 `_home_overview_backend()` 建構本身出錯、憑證/
+    DNS 問題、`cache_get()` 內建的 `JsonCacheBackend` fallback 檔案 I/O
+    失敗）、或讀到的 entry 已過期，一律讓 `_overview_html` 變成 `None`
+    （不顯示過期或壞資料）——複用上一輪 codex HIGH 修復訂出的
+    `TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`（45 分鐘）新鮮度窗口，不依賴
+    DynamoDB TTL 的非同步刪除語意。
+
+    這個函式本身可能被 backend stall 卡住任意長時間——**這是刻意允許
+    的**：卡住的只是這條背景 thread 自己，下一輪迴圈（或下次首頁 request
+    觸發 `_ensure_overview_bg_thread_started()` 檢查 `is_alive()`）不受
+    影響，首頁 request 執行緒從頭到尾不會呼叫到這個函式。
+
+    codex HIGH #3：如果**這一輪呼叫本身永久 stall**（`cache_get()` 卡住不
+    返回、不拋錯），這個函式永遠不會走到下面「寫回 `_overview_html`」那
+    行——舊值會停在記憶體裡。所以新鮮度不能只在「這輪成功」時檢查一次就
+    算數，還要讓 request 端有辦法自己判斷「這顆現貨是不是已經過期了」，
+    因此這裡連同 expiry 時間戳一起寫回：`_overview_expiry_epoch =
+    fetched_at + TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS`（絕對時間，不是
+    倒數計時器）——即使之後再也沒有一輪成功刷新，request 路徑仍能靠純
+    記憶體時鐘比較讓這顆現貨準時失效（見 `_render_home_overview_cached()`）。
+    """
+    from .ingestion.cache import (
+        TRUST_OVERVIEW_COIN,
+        TRUST_OVERVIEW_SOURCE,
+        TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS,
+        cache_get,
+        cache_key,
+    )
+
+    global _overview_html, _overview_expiry_epoch
+    new_html: str | None = None
+    new_expiry = 0.0
+    try:
+        backend = _home_overview_backend()
+        entry = cache_get(backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN))
+        if entry is not None:
+            fetched_at = float(entry.get("fetched_at", 0.0) or 0.0)
+            age = time.time() - fetched_at
+            if age <= TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS:
+                docs = entry.get("docs") or []
+                if docs and isinstance(docs[0], dict):
+                    candidate = str(docs[0].get("html", "") or "")
+                    if candidate:
+                        new_html = candidate
+                        new_expiry = fetched_at + TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS
+            # else：過期，`new_html`/`new_expiry` 維持初值——視同 miss，不顯示過期判斷。
+    except Exception as exc:  # noqa: BLE001 — 背景 thread 專用防禦：任何
+        # I/O 問題（含真 stall 後才拋出、憑證/DNS/JSON fallback 檔案 I/O）
+        # 都只影響這一輪結果，絕不往外傳、也絕不讓首頁 request 承擔。
+        print(f"[web] WARNING: overview 背景刷新讀取失敗：{exc}", file=sys.stderr)
+        new_html = None
+        new_expiry = 0.0
+
+    with _overview_state_lock:  # 極短：只做兩次變數賦值，鎖內零 I/O
+        _overview_html = new_html
+        _overview_expiry_epoch = new_expiry
+
+
+def _overview_bg_loop(stop_event: threading.Event, interval: float) -> None:
+    """背景刷新迴圈本體；只在自己專屬的 daemon thread 裡跑。"""
+    while not stop_event.is_set():
+        try:
+            _overview_bg_refresh_once()
+        except Exception as exc:  # pragma: no cover - 防禦性，背景 thread
+            # 本身不能因為未預期例外而整條死掉、永遠不再刷新。
+            print(f"[web] WARNING: overview 背景刷新迴圈例外：{exc}", file=sys.stderr)
+        stop_event.wait(interval)  # 用 `wait()` 取代 `sleep()`：收到停止
+        # 訊號可以立刻跳出這輪等待，不用真的睡滿一整個 interval（主要是
+        # 測試/優雅關閉友善；production 下兩者行為等價）。
+
+
+def _ensure_overview_bg_thread_started() -> None:
+    """懶啟動背景 thread；`is_alive()` 檢查 + `Thread.start()` 都是純
+    in-memory 操作、非阻塞，不算 I/O。用 `_overview_bg_thread_lock` 包住
+    避免併發首頁 request 同時進來重複啟動同一份背景工作（idempotent）。
+    """
+    global _overview_bg_thread, _overview_bg_stop_event
+    if _overview_bg_thread is not None and _overview_bg_thread.is_alive():
+        return
+    with _overview_bg_thread_lock:
+        if _overview_bg_thread is not None and _overview_bg_thread.is_alive():
+            return  # 併發 request 同時進來，只有一個真的啟動
+        stop_event = threading.Event()  # 每次啟動都是全新的 event，不重用
+        # 舊的——避免舊 thread 收到「新一輪啟動」誤觸發的停止訊號，或反過
+        # 來新 thread 被舊的已設 event 誤判該立刻停止。
+        thread = threading.Thread(
+            target=_overview_bg_loop,
+            args=(stop_event, _OVERVIEW_BG_INTERVAL_SECONDS),
+            name="tf-overview-bg",
+            daemon=True,
+        )
+        _overview_bg_stop_event = stop_event
+        _overview_bg_thread = thread
+        thread.start()
+
+
+def _render_home_overview_cached() -> str:
+    """首頁「多幣總覽」區塊讀路徑——**零 I/O**：只確保背景 thread 已啟動
+    （`_ensure_overview_bg_thread_started()`，非阻塞），然後持極短鎖讀一
+    次 in-memory 現貨 `_overview_html` + `_overview_expiry_epoch`，外加一
+    次**純記憶體時鐘比較**。不管 backend 有沒有 stall、DynamoDB 憑證/DNS
+    有沒有問題，這個函式的執行時間都跟那些完全無關，恆定是微秒級——真正
+    的 I/O 全部關在 `_overview_bg_refresh_once()` 裡，只被背景 thread 呼叫
+    （設計理由完整版見模組頂部「首頁『多幣總覽』」大段註解，含 codex 三
+    輪 HIGH review 的教訓）。
+
+    codex HIGH #3：光靠背景 thread「判過期就設 None」不夠——如果背景那
+    一輪呼叫本身永久 stall，它永遠到不了那行程式碼，舊值會停在記憶體裡
+    不會失效。所以這裡除了讀 `_overview_html`，還要拿現在時間跟寫入時算
+    好的絕對到期時間 `_overview_expiry_epoch` 比較：即使背景 thread 已經
+    卡死、再也不會來更新/清空這顆現貨，時鐘一旦走過 expiry，這個函式自
+    己就會判定它失效並回傳空字串——不依賴背景 thread 主動清除。
+
+    讀到 `None`／已過期一律回空字串——首頁其餘內容照常渲染，只有總覽區
+    塊優雅缺席（見 `_render_home_page()` 呼叫處）。
+    """
+    _ensure_overview_bg_thread_started()
+    with _overview_state_lock:
+        html = _overview_html
+        expiry = _overview_expiry_epoch
+    if not html:
+        return ""
+    if time.time() > expiry:  # 純記憶體比較，零 I/O——即使背景 thread 永久
+        # stall、再也不會來更新，現貨到了絕對到期時間也會在這裡自己失效。
+        return ""
+    return html
+
+
+def _render_home_page() -> str:
+    """首頁（`/`）內容：Hero/總覽/範例三段以純字串組裝，比照
+    `_render_status_page`／`_render_costs_page` 寫法。包含「多幣總覽」區
+    塊在內，整個函式現在是**零 I/O、零外部讀取**的純靜態渲染（credit-
+    safe：首頁流量最高，不能是計費或可用性熱點）——「多幣總覽」的資料來
+    自 `_render_home_overview_cached()` 讀 in-memory 現貨，真正的 I/O 全
+    部移到背景 daemon thread，見該函式與模組頂部大段註解。
+
+    Axis C #1（task #23）：「多幣總覽」區塊正確讀路徑演進三輪，皆為 codex
+    review 抓出的同一個可用性 class（I/O 出現在 request 路徑上）的不同變
+    體，記錄於此避免之後重踩：
+      1. Phase 3：在首頁 request 當下逐幣讀 DynamoDB + ThreadPool，backend
+         永久阻塞時 ThreadPool 孤兒執行緒無限累積、耗盡進程資源——整個
+         移除。
+      2. Axis C 第一版：module 級 TTL 快取 + 鎖內 single-flight + 短
+         timeout 單次讀取單一預渲染 blob，但 reader 沒驗新鮮度，DynamoDB
+         TTL 非同步刪除可能延遲數小時到 48 小時，會一直顯示過期判斷。
+      3. Axis C 第二版：修好新鮮度驗證，但 request 路徑仍在鎖內同步呼叫
+         `cache_get()`——0.5s timeout 不涵蓋憑證發現/DNS/JSON fallback
+         I/O/任意形式的 backend stall，真的 stall 時 request 執行緒照樣
+         被卡住，且 single-flight 鎖讓併發 request 全部排隊卡住。
+    現在（第三版，by construction）：唯一一條背景 daemon thread 負責所有
+    I/O（含新鮮度驗證），首頁 request 只讀 in-memory 變數，backend 再怎麼
+    stall 都碰不到 request 執行緒——見 `_render_home_overview_cached()`
+    docstring 完整論證。
+
+    三段：Hero（一句話定位 + CTA 導向左側 Query Console）、多幣總覽（若總覽
+    blob 可讀，顯示各幣真信任分卡；讀失敗/miss 則整段不渲染）、產品總覽
+    （事實→推論→結論三層架構，語彙沿用 `_render_report` 既有「步驟
+    1/3、2/3、3/3」，不新發明一套說法）、範例入口（連到一個真實可執行的
+    `/analyze` 查詢，非虛構資料——見 `_example_analyze_href`）。
     """
     e = html.escape
     example_href = _example_analyze_href()
+    overview_html = _render_home_overview_cached()
+    overview_section = (
+        f"""
+<div class="tf-section">
+  <h3>多幣信任總覽</h3>
+  <p class="sub" style="margin:0 0 .4rem">背景排程定期快照，非即時計算——每張卡片皆為真實 pipeline 分析結果。</p>
+  {overview_html}
+</div>
+"""
+        if overview_html else ""
+    )
     return f"""
 <div class="tf-section tf-home-hero" style="border-color:#1f6feb;background:linear-gradient(135deg,rgba(31,111,235,.10),rgba(31,111,235,.02))">
   <h1>多源市場情報的信任提煉——不只給分數，給你為什麼</h1>
@@ -1153,7 +1452,7 @@ def _render_home_page() -> str:
   附上信任評分與可展開的原始依據——不是一句話式的黑箱結論。</p>
   <a class="tf-hero-cta" href="#tf-query-console">立即開始分析 &#8594;</a>
 </div>
-
+{overview_section}
 <div class="tf-section">
   <h3>怎麼運作</h3>
   <p class="sub" style="margin:0 0 .3rem">左側 Query Console 選幣種、題型、輸入問題，送出後三層架構逐層產出：</p>

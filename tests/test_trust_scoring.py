@@ -1,4 +1,6 @@
 """信任提煉引擎核心測試。確保『信任層』行為符合設計意圖。"""
+import math
+
 import pytest
 
 from trustforge.ingestion.base import Document
@@ -126,6 +128,112 @@ def test_negated_manipulation_not_penalised():
     assert _manipulation_penalty(neg) == 0
     assert _manipulation_penalty(pos) > 0
     assert _manipulation_penalty(aff) > 0
+
+
+# --- #12 _recency_decay 未來時間戳全域防禦回歸測試 ------------------------
+
+def test_recency_decay_future_ts_not_maxed_out():
+    """未來時間戳（ts > now，如壞資料/時鐘偏差/偽造 pubDate）不應被灌成滿分
+    recency=1.0。舊實作 `max(0.0, age_h)` 會把負齡 clamp 成 0 齡 → 滿分，
+    等於把不可能存在的未來資訊捏造成「最新鮮、最高信任」的觀測。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    future_doc = Document(id="future", kind="news", source="coindesk", text="",
+                           ts=now + 3600 * 24)  # 未來 24 小時
+    c = Claim(id="c1", text="x", doc=future_doc)
+    decay = _recency_decay(c, now)
+    assert decay < 1.0, f"未來時間戳不應拿到滿分 recency，實得 {decay}"
+    assert decay == pytest.approx(0.5), (
+        f"未來時間戳應比照 ts=0（未知）降級為中性 0.5，實得 {decay}"
+    )
+
+
+def test_recency_decay_future_ts_not_lower_than_neutral():
+    """未來時間戳降級為中性 0.5，而非被當成『已知最舊』打到 0 分——真實年齡
+    未知，不該直接重罰到底（可能只是輕微時鐘漂移）。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    slightly_future_doc = Document(id="slight-future", kind="news", source="coindesk",
+                                    text="", ts=now + 1.0)  # 未來 1 秒
+    c = Claim(id="c2", text="x", doc=slightly_future_doc)
+    assert _recency_decay(c, now) == pytest.approx(0.5)
+
+
+def test_recency_decay_past_ts_unaffected_by_future_ts_fix():
+    """回歸鎖：正常過去時間戳的衰減計算完全不受本次未來戳防禦影響。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    past_doc = Document(id="past", kind="news", source="coindesk", text="",
+                         ts=now - 3600 * 12)  # 12 小時前，剛好 1 個半衰期
+    c = Claim(id="c3", text="x", doc=past_doc)
+    assert _recency_decay(c, now) == pytest.approx(0.5)
+
+
+def test_score_future_ts_claim_recency_component_not_maxed():
+    """真實 `score()` 路徑：帶未來時間戳的來源，`components['recency']`
+    不應是 1.0（回歸鎖：確保修法在完整評分流程生效，非僅單元函式層面）。"""
+    now = 1_000_000.0
+    docs = [
+        _doc("future-claim", "news", "coindesk", "BTC 大漲", ts=now + 3600 * 48),
+    ]
+    scored = score(extract_claims(docs), now=now)
+    assert scored[0].components["recency"] < 1.0
+
+
+# --- #12 third-round：NaN / ±inf 時間戳全域防禦回歸測試 -------------------
+#
+# codex 對抗審 HIGH（PR #48）：`float('nan')` 可通過既有 ts 解析。舊版
+# `age_h < 0`（未來戳防禦）對 NaN 恆為 False，`_recency_decay` 回傳 NaN，
+# 傳到 `score()` 最後 `max(0.0, min(1.0, raw))` 時，NaN 與 0.0/1.0 比較同樣
+# 恆假，CPython 在此情況下回傳滿分 1.0——比未來戳問題更嚴重（未來戳只降到
+# 中性 0.5，NaN 卻衝到滿分）。+inf/-inf 同樣需要防禦。
+
+@pytest.mark.parametrize("bad_ts", [float("nan"), float("inf"), float("-inf")])
+def test_recency_decay_non_finite_ts_neutralised(bad_ts):
+    """NaN / +inf / -inf 時間戳一律降為中性 recency=0.5，不得傳播成 NaN
+    或被 clamp 成滿分。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    now = 1_000_000.0
+    bad_doc = Document(id="bad", kind="news", source="malformed-feed", text="",
+                        ts=bad_ts)
+    c = Claim(id="c-bad", text="x", doc=bad_doc)
+    decay = _recency_decay(c, now)
+    assert math.isfinite(decay), f"非有限時間戳不應讓 recency 傳播成非有限值，實得 {decay}"
+    assert decay == pytest.approx(0.5), (
+        f"非有限時間戳應降為中性 0.5，實得 {decay}"
+    )
+
+
+def test_recency_decay_non_finite_now_neutralised():
+    """`now` 本身非有限（理論上不該發生，但防禦性檢查）時同樣中性化，
+    不讓 NaN/inf 從 `now` 這一側傳播。"""
+    from trustforge.trust.scoring import _recency_decay, Claim
+    from trustforge.ingestion.base import Document
+    doc = Document(id="d", kind="news", source="coindesk", text="", ts=1_000_000.0)
+    c = Claim(id="c-now-nan", text="x", doc=doc)
+    assert _recency_decay(c, float("nan")) == pytest.approx(0.5)
+    assert _recency_decay(c, float("inf")) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("bad_ts", [float("nan"), float("inf"), float("-inf")])
+def test_score_non_finite_ts_claim_not_maxed_to_full_trust(bad_ts):
+    """真實 `score()` 路徑：NaN/±inf 時間戳的來源，`trust` 分數與
+    `components['recency']` 都不得是滿分 1.0（回歸鎖：確保 NaN 不會靠
+    `max(0.0, min(1.0, nan))` 的 CPython 行為漏網拿到滿分信任）。"""
+    now = 1_000_000.0
+    docs = [
+        _doc("bad-ts-claim", "news", "malformed-feed", "BTC 長線看漲", ts=bad_ts),
+    ]
+    scored = score(extract_claims(docs), now=now)
+    assert math.isfinite(scored[0].components["recency"])
+    assert scored[0].components["recency"] == pytest.approx(0.5)
+    assert scored[0].trust != 1.0, (
+        f"非有限時間戳不應拿到滿分 trust，實得 {scored[0].trust}"
+    )
 
 
 # --- Tier2 可解釋 UX：_manipulation_flags 回溯測試 ------------------------
@@ -1104,6 +1212,78 @@ def test_w3_a_three_social_sources_template_flood_still_triggers():
         assert sc.components["manipulation"] == _manipulation_penalty(sc.claim)
 
 
+def test_w3_a_star_topology_propagates_flag_to_all_cluster_members_not_just_hub():
+    """回歸鎖（#16 修正）：星狀相似拓樸下，flag 必須傳播到相似簇內**所有**
+    成員，不能只標到 hub。
+
+    構造：hub 與 3 個 spoke（不同來源）各自的 Jaccard 都 ≥ 0.8（共享 20 個
+    base token，每個 spoke 各自只多 4 個獨有 token → 20/24 ≈ 0.83），但 3 個
+    spoke 彼此之間 Jaccard 只有 20/28 ≈ 0.71（低於門檻，彼此不直接相似）。
+
+    修正前的缺陷：`_coordination_template_flags` 逐一以「自己」的局部相鄰
+    來源數判斷是否達 `_TEMPLATE_MIN_SOURCES`（3）——hub 局部視角看得到
+    hub+3 spoke＝4 個來源、達標；但每個 spoke 局部只看得到「自己＋hub」＝2
+    個來源，未達門檻，導致同一個橫跨 4 個來源的相似簇裡只有 hub 被標記、
+    3 個 spoke 全部漏標。用連通分量（整簇）重算「涉入來源數」後，簇內
+    hub/spoke 全部應被標記，且每個成員看到的來源清單都涵蓋整個簇（4 個
+    來源），不是只看到自己局部的一小部分。
+    """
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    base = " ".join(f"base{i}" for i in range(20))
+
+    def _spoke_text(tag: str) -> str:
+        extra = " ".join(f"{tag}{i}" for i in range(4))
+        return f"{base} {extra}"
+
+    hub_text = base
+    s1_text = _spoke_text("uniq1_")
+    s2_text = _spoke_text("uniq2_")
+    s3_text = _spoke_text("uniq3_")
+
+    claims = [
+        Claim(id="hub", text=hub_text, doc=_doc("d-hub", "social", "hub-src", hub_text, ts=_BURST_BASE_TS)),
+        Claim(id="s1", text=s1_text, doc=_doc("d-s1", "social", "s1-src", s1_text, ts=_BURST_BASE_TS)),
+        Claim(id="s2", text=s2_text, doc=_doc("d-s2", "social", "s2-src", s2_text, ts=_BURST_BASE_TS)),
+        Claim(id="s3", text=s3_text, doc=_doc("d-s3", "social", "s3-src", s3_text, ts=_BURST_BASE_TS)),
+    ]
+
+    flags = _coordination_signals(claims)
+
+    assert set(flags.keys()) == {"hub", "s1", "s2", "s3"}, (
+        f"星狀相似簇（hub 對 3 個 spoke 皆 ≥0.8、spoke 彼此 <0.8）應標記全部 4 個"
+        f"成員，不能只標 hub，實際: {sorted(flags.keys())}"
+    )
+    for cid in ("hub", "s1", "s2", "s3"):
+        fl = flags[cid]
+        assert len(fl) == 1
+        flag = fl[0]
+        assert flag.startswith("資訊:多源文字高度相似(")
+        # 整簇範圍的來源清單：每個成員（包含 spoke）都應看到全部 4 個來源，
+        # 不是只看到自己局部相鄰的來源。
+        for src in ("hub-src", "s1-src", "s2-src", "s3-src"):
+            assert src in flag, f"{cid} 的 flag 應涵蓋整簇來源 {src}，實際: {flag}"
+
+
+def test_w3_a_below_threshold_cluster_size_not_flagged():
+    """防呆回歸：星狀相似拓樸若只涉及 2 個來源（hub + 1 spoke），連通分量
+    大小仍不足 `_TEMPLATE_MIN_SOURCES`（3），不應觸發任何 flag——確認 #16
+    的連通分量改法沒有連「應該不觸發」的下限判斷一起弄壞。"""
+    from trustforge.trust.scoring import Claim, _coordination_signals
+
+    base = " ".join(f"base{i}" for i in range(20))
+    hub_text = base
+    s1_text = f"{base} " + " ".join(f"uniq1_{i}" for i in range(4))
+
+    claims = [
+        Claim(id="hub2", text=hub_text, doc=_doc("d-hub2", "social", "hub2-src", hub_text, ts=_BURST_BASE_TS)),
+        Claim(id="s1-only", text=s1_text, doc=_doc("d-s1o", "social", "s1o-src", s1_text, ts=_BURST_BASE_TS)),
+    ]
+
+    flags = _coordination_signals(claims)
+    assert flags == {}, f"只有 2 個來源不應觸發協同 flag，實際: {flags}"
+
+
 @pytest.mark.skip(reason=_W3_BURST_FOLLOWUP_SKIP_REASON)
 def test_w3_b_single_source_burst_triggers_and_baseline_untouched():
     """指標 B：單一來源在 60 分鐘窗口內連發 8 則相異主張（10 分鐘內），
@@ -1386,3 +1566,78 @@ def test_w3_coordination_signals_burst_indicator_disabled_only_template_active()
                 f"burst 指標已降級 follow-up #15，_coordination_signals 的 active "
                 f"路徑不應再產生單源爆量 flag，實際: {cid} -> {fl}"
             )
+
+
+def test_w3_b_max_absolute_window_can_miss_smaller_higher_ratio_window():
+    """回歸鎖（CTO #15 複查，維持停用的具體理由）：`_coordination_burst_flags`
+    對每個來源只用 `_max_distinct_in_rolling_window` 取**單一、絕對數量最大**
+    的那個滾動視窗，再拿該視窗去對齊算 baseline／ratio。這個「先選視窗、
+    後算 ratio」的順序，會漏掉「絕對數量較小、但相對當下 baseline 更異常」
+    的視窗——因為候選視窗的篩選標準是「這來源自己絕對數量最大」，不是
+    「相對同窗基準比值最大」，根本不會被納入 ratio 評估。
+
+    構造：候選來源 `x-candidate` 有兩段活動：
+    - 窗口 A（絕對數量大：10 則相異）：同一時段其他 4 個來源同窗中位數＝5，
+      ratio = 10/5 = 2.0（< `_BURST_RATIO` 3 倍，不算異常）。
+    - 窗口 B（很久之後、絕對數量小：4 則相異，小於窗口 A）：同一時段其他
+      來源同窗中位數＝1（非 0，不觸發「基準為 0」防呆），ratio = 4/1 = 4.0
+      （≥ 3 倍，若被評估「應該」算異常）。
+
+    因為窗口 A 的絕對數量（10）大於窗口 B（4），`_max_distinct_in_rolling_
+    window` 只會回傳窗口 A 供比較，窗口 B 這個相對更異常的時段完全不會被
+    考慮到——目前這裡斷言的是「觀察到的既有行為」（未觸發任何 flag），
+    不是期望行為；這正是 CTO 判斷 #15 仍不具備『乾淨版』重新設計條件、
+    維持 informational-only 停用（不接進 `_coordination_signals`）的具體
+    根據之一。要真正修好需要對每個來源在**所有**候選視窗位置（而非單一
+    絕對最大視窗）評估 ratio、取全域最大 ratio，這是比目前『單一視窗＋
+    對齊 baseline』更大幅度的演算法重新設計（多來源同步滑動 + 每個視窗
+    位置都要重算對齊 baseline），不是本次可以『改動最小』完成的修正，
+    故本測試只鎖定現況、不代表此為可接受的最終行為。
+    """
+    from trustforge.trust.scoring import Claim, _coordination_burst_flags
+
+    claims = []
+
+    # 窗口 A：candidate 在 t=0..2700（60 分鐘窗內）發 10 則相異；同窗其他
+    # 4 個來源各自也發 5 則相異（中位數＝5）。
+    for i in range(10):
+        t = f"窗口A訊息{i} 內容各不相同"
+        claims.append(
+            Claim(id=f"x-a-{i}", text=t,
+                  doc=_doc(f"xa-doc-{i}", "social", "x-candidate", t, ts=_BURST_BASE_TS + i * 300))
+        )
+    for src_idx in range(4):
+        for i in range(5):
+            t = f"基準A來源{src_idx}訊息{i}"
+            claims.append(
+                Claim(id=f"base-a-{src_idx}-{i}", text=t,
+                      doc=_doc(f"ba-doc-{src_idx}-{i}", "social", f"base-src-{src_idx}", t,
+                                ts=_BURST_BASE_TS + i * 300))
+            )
+
+    # 窗口 B：很久之後（+100000 秒，與窗口 A 相距遠超 60 分鐘窗），candidate
+    # 只發 4 則相異（比窗口 A 的 10 少），但同窗其他來源這次很安靜、各只發
+    # 1 則（中位數＝1），相對比值反而更高（4.0 倍 > 窗口 A 的 2.0 倍）。
+    base_b = _BURST_BASE_TS + 100_000.0
+    for i in range(4):
+        t = f"窗口B訊息{i} 內容也各不相同"
+        claims.append(
+            Claim(id=f"x-b-{i}", text=t,
+                  doc=_doc(f"xb-doc-{i}", "social", "x-candidate", t, ts=base_b + i * 300))
+        )
+    for src_idx in range(4):
+        t = f"基準B來源{src_idx}訊息"
+        claims.append(
+            Claim(id=f"base-b-{src_idx}", text=t,
+                  doc=_doc(f"bb-doc-{src_idx}", "social", f"base-src-{src_idx}", t, ts=base_b))
+        )
+
+    flags = _coordination_burst_flags(claims)
+
+    # 現況（維持停用的理由）：兩個窗口都不觸發——窗口 A 因 ratio（2.0）
+    # 不足門檻本就不該觸發；窗口 B 因為根本沒被納入評估（不是候選來源的
+    # 「絕對最大視窗」），即使 ratio（4.0）超過門檻也不會被看見。
+    assert flags == {}, (
+        f"現況：只評估各來源『絕對數量最大』的單一視窗，窗口 B 更高的相對"
+        f"比值不會被納入評估，實際: {flags}"
+    )

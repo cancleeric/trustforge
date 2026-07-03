@@ -14,3 +14,4 @@ demo/hoyabit_data/
 # 生成的交付件輸出（可重跑）
 out/
 .apikey
+.eye-cache/
