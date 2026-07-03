@@ -570,16 +570,33 @@ def test_iterate_source_reputation_deterministic_repeat():
     assert results[0] == results[1] == results[2], f"三次結果不同（非確定性！）：{results}"
 
 
+def _always_entailment(a: str, b: str) -> str:
+    """codex 對抗審 [HIGH，#24] 修正後的測試用 fake stance_fn：模擬「真的跑過
+    Bedrock/W1.5 語意分類、且判定為真語意蘊含」——因為 `_iterate_source_reputation`
+    直接呼叫（不經 `score()` 的 `cached_stance_fn`）預設 `stance_fn=None`，而
+    W2 的 `require_entailment=True` 現在把 `stance_fn is None`／`"neutral"`
+    一律排除在 agreement 之外（見 `_corroboration_detail` docstring），
+    要測「真的有佐證訊號時迭代/加成如何運作」就必須明確傳一個會回傳
+    `"entailment"` 的 stance_fn，不能再靠「沒傳 stance_fn 時退回 add」的
+    舊（已修正）行為。"""
+    return "entailment"
+
+
 def test_iterate_source_reputation_idempotent_past_k():
     """超過收斂輪數後再迭代不再變化（idempotent）：K=3 與 K=5 結果應相同
-    （本場景在 K=2 已收斂，K=1 應與 K>=2 不同，證明迭代確實有作用）。"""
+    （本場景在 K=2 已收斂，K=1 應與 K>=2 不同，證明迭代確實有作用）。
+
+    codex 對抗審 [HIGH，#24] 修正後：W2 只認真 entailment，`_iterate_source_reputation`
+    直接呼叫時預設 `stance_fn=None` 不足以產生任何 agreement（誠實無操作），
+    這裡改傳 `_always_entailment` 模擬「真的跑過語意分類」，才能驗證迭代收斂
+    動態本身沒壞。"""
     from trustforge.trust.scoring import _iterate_source_reputation
 
     docs = _shared_text_docs()
     claims = extract_claims(docs)
-    sr_k1 = _iterate_source_reputation(claims, now=1.0, iterations=1)
-    sr_k3 = _iterate_source_reputation(claims, now=1.0, iterations=3)
-    sr_k5 = _iterate_source_reputation(claims, now=1.0, iterations=5)
+    sr_k1 = _iterate_source_reputation(claims, now=1.0, iterations=1, stance_fn=_always_entailment)
+    sr_k3 = _iterate_source_reputation(claims, now=1.0, iterations=3, stance_fn=_always_entailment)
+    sr_k5 = _iterate_source_reputation(claims, now=1.0, iterations=5, stance_fn=_always_entailment)
     assert sr_k3 == sr_k5, "K=3 與 K=5 應相同（已收斂，超過 K 不再變）"
     assert sr_k1 != sr_k3, "K=1（尚未收斂）理應與 K=3（已收斂）不同，證明迭代確實生效"
 
@@ -590,8 +607,8 @@ def test_iterate_source_reputation_hard_cap_five():
 
     docs = _shared_text_docs()
     claims = extract_claims(docs)
-    sr_100 = _iterate_source_reputation(claims, now=1.0, iterations=100)
-    sr_5 = _iterate_source_reputation(claims, now=1.0, iterations=5)
+    sr_100 = _iterate_source_reputation(claims, now=1.0, iterations=100, stance_fn=_always_entailment)
+    sr_5 = _iterate_source_reputation(claims, now=1.0, iterations=5, stance_fn=_always_entailment)
     assert sr_100 == sr_5, "iterations=100 應被硬上限 clamp 到 5，結果應與 iterations=5 相同"
 
 
@@ -617,15 +634,20 @@ def test_iterate_source_reputation_small_sample_gate_keeps_prior():
 
 
 def test_iterate_source_reputation_agreement_raises_reputation_bounded():
-    """4 來源互相佐證（達到小樣本守門門檻）：信譽較低的來源（social, prior=0.35）
-    因獨立佐證應上升，但幅度應合理（不翻倍/不失控），且反映到最終 trust 的差異
-    落在 CEO 要求的 ±0.15 合理區間內。"""
+    """4 來源互相佐證（達到小樣本守門門檻、且真的跑過語意分類判定為 entailment）：
+    信譽較低的來源（social, prior=0.35）應上升，但幅度應合理（不翻倍/不失控），
+    且反映到最終 trust 的差異落在 CEO 要求的 ±0.15 合理區間內。
+
+    codex 對抗審 [HIGH，#24] 修正：W2 只認真 entailment，因此這裡明確傳
+    `_always_entailment` 模擬「真的連上 Bedrock/W1.5 判定為語意蘊含」——
+    若不傳 stance_fn（等同離線 fail-safe 全 neutral），信譽應維持 prior 不動，
+    見 `test_run_agent_pipeline_dynamic_reputation_offline_is_honest_noop`。"""
     docs = _shared_text_docs()
     claims = extract_claims(docs)
     now = 1.0
 
     off = score(claims, now=now)
-    on = score(claims, now=now, dynamic_reputation=True)
+    on = score(claims, now=now, dynamic_reputation=True, stance_fn=_always_entailment)
     by_id_off = {sc.claim.id: sc for sc in off}
     for sc in on:
         prior_trust = by_id_off[sc.claim.id].trust
@@ -753,8 +775,13 @@ def test_stable_sigmoid_no_overflow_at_extreme_net():
 
 
 def test_duplicate_corroborated_claim_does_not_inflate_reputation():
-    """[HIGH-1] 同一來源把「已有 3 個固定外部佐證的 claim」重複貼 1 次 vs 20 次，
-    動態信譽必須完全相同（重複貼文不可放大票數、繞過反暴走）。"""
+    """[HIGH-1] 同一來源把「已有 3 個固定外部佐證、且真的跑過語意分類判定為
+    entailment 的 claim」重複貼 1 次 vs 20 次，動態信譽必須完全相同（重複貼文
+    不可放大票數、繞過反暴走）。
+
+    codex 對抗審 [HIGH，#24] 修正：明確傳 `_always_entailment`，否則沒有
+    stance_fn 時 W2 對任何來源都是誠實 no-op，測不出「重複貼文是否會繞過
+    反暴走」這個本測試真正要驗的東西。"""
     from trustforge.trust.scoring import _iterate_source_reputation
 
     shared = "大額 機構 資金 布局 現貨 ETF 通過 推升 市場 信心"
@@ -772,8 +799,8 @@ def test_duplicate_corroborated_claim_does_not_inflate_reputation():
     claims_once = extract_claims(docs_once)
     claims_20x = extract_claims(docs_20x)
 
-    sr_once = _iterate_source_reputation(claims_once, now=1.0)
-    sr_20x = _iterate_source_reputation(claims_20x, now=1.0)
+    sr_once = _iterate_source_reputation(claims_once, now=1.0, stance_fn=_always_entailment)
+    sr_20x = _iterate_source_reputation(claims_20x, now=1.0, stance_fn=_always_entailment)
 
     assert sr_once["x-analyst"] == sr_20x["x-analyst"], (
         "重複貼同一已佐證 claim 20 次不應放大信譽："
