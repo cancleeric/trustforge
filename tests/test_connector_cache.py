@@ -703,6 +703,40 @@ def test_scheduler_single_source_failure_does_not_abort_others(monkeypatch, tmp_
     assert "coindesk" in err and "network down" in err
 
 
+def test_scheduler_onchain_invalid_payload_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex HIGH（#24+robustness，PR #55）驗收：`BlockchairStatsSource` 遇到
+    無效 payload（`data` 為 `null`）必須 `raise`，走跟其他來源真呼叫失敗一樣
+    的路徑——`run_once()` 計入 `failures`、**完全不覆寫**上一輪還能用的舊
+    快取（不是靜靜寫入一筆帶目前時間戳的 "N/A" 假證據）。"""
+    from trustforge.ingestion import onchain
+    from trustforge.ingestion.onchain import BlockchairStatsSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-blockchair-doc", "kind": "onchain", "source": "blockchair",
+        "text": "上一輪的真實統計：區塊高度=956000", "url": "https://api.blockchair.com/bitcoin/stats",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("blockchair", "BTC"), old_docs, time.time() - 3600)
+
+    # 讓真正的 fetch() 邏輯自己走到驗證失敗、自己 raise（不是外部硬塞例外）——
+    # 只換掉最底層的 HTTP GET，證明的是新加的驗證程式碼本身，不是測試假設。
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: b'{"data": null, "context": {"code": 200}}')
+    src = BlockchairStatsSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["blockchair"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["blockchair:BTC"]
+    entry = backend.get(cache_key("blockchair", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "blockchair" in err
+
+
 def test_scheduler_coin_agnostic_fetch_failure_is_counted_into_failures(monkeypatch, tmp_path, capsys):
     """codex HIGH-1：coin-agnostic 來源真呼叫失敗，同樣要計入 failures（不是
     只印警告就當沒事）。"""

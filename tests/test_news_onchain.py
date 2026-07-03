@@ -1,6 +1,8 @@
 """P0-1 / P0-2 真實連接器測試 — CI 不打真網路（monkeypatch _fetch_url）。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 # ── 本地固定 fixture ──────────────────────────────────────────────────────────
@@ -363,7 +365,8 @@ BLOCKCHAIR_FIXTURE = b"""{
     "blocks": 956480, "difficulty": 133869853540305.4,
     "mempool_transactions": 82785, "transactions_24h": 573582,
     "best_block_time": "2026-07-03 09:18:09"
-  }
+  },
+  "context": {"code": 200}
 }"""
 
 
@@ -434,13 +437,125 @@ def test_blockchair_skipped_for_non_btc(monkeypatch):
 
 
 def test_blockchair_bad_best_block_time_falls_back_to_now(monkeypatch):
-    """`best_block_time` 缺失/格式不符時，不拋例外，退回目前時間。"""
+    """必要統計欄位都合法時，僅 `best_block_time` 格式不符不拋例外，退回
+    目前時間——`best_block_time` 只影響 `ts`（時效衰減用），不是被展示的
+    統計證據內容，跟 codex 抓到的「統計欄位缺失/型別錯誤仍發布」是兩回事，
+    不需要因為時間戳解析失敗就丟棄整筆真實統計資料。"""
     from trustforge.ingestion import onchain
-    bad_fixture = b'{"data": {"blocks": 1, "best_block_time": "not-a-date"}}'
+    bad_fixture = (
+        b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, '
+        b'"transactions_24h": 4, "best_block_time": "not-a-date"}, '
+        b'"context": {"code": 200}}'
+    )
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_fixture)
     docs = onchain.BlockchairStatsSource().fetch("", coin="BTC")
     assert len(docs) == 1
     assert docs[0].ts > 0
+
+
+# ── codex HIGH 修復（#24+robustness，PR #55）：無效 payload 必須拋例外，
+#    絕不能靜靜用 "N/A"/空 dict 補位發布假證據覆蓋舊快取 ──────────────────
+
+def test_mempool_space_fees_missing_field_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"fastestFee": 12, "halfHourFee": 8, "hourFee": 6, "economyFee": 3}'  # 缺 minimumFee
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+
+
+def test_mempool_space_fees_wrong_type_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"fastestFee": "N/A", "halfHourFee": 8, "hourFee": 6, "economyFee": 3, "minimumFee": 1}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+
+
+def test_mempool_space_fees_null_field_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"fastestFee": null, "halfHourFee": 8, "hourFee": 6, "economyFee": 3, "minimumFee": 1}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+
+
+def test_mempool_space_fees_non_object_response_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: b"[1, 2, 3]")
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+
+
+def test_mempool_space_difficulty_missing_field_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"progressPercent": 44.39, "difficultyChange": -1.43}'  # 缺 remainingBlocks
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+
+
+def test_mempool_space_difficulty_wrong_type_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"progressPercent": "N/A", "difficultyChange": -1.43, "remainingBlocks": 1121}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+
+
+def test_blockchair_error_envelope_raises(monkeypatch):
+    """Blockchair 限流/欠費會回非 200 的 `context.code`（如 402/429），
+    必須拋例外，不得用當下已無效的 `data` 產生 Document。"""
+    from trustforge.ingestion import onchain
+    for code in (402, 429):
+        bad = json.dumps({"context": {"code": code, "error": "rate limited"}}).encode()
+        monkeypatch.setattr(onchain, "_fetch_url", lambda url, bad=bad: bad)
+        with pytest.raises(ValueError):
+            onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_missing_context_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"data": {"blocks": 1, "difficulty": 2, "mempool_transactions": 3, "transactions_24h": 4}}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_null_data_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"data": null, "context": {"code": 200}}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_data_wrong_shape_raises(monkeypatch):
+    """codex 原始複現案例：`data` 被回成 list 而非 object。"""
+    from trustforge.ingestion import onchain
+    bad = b'{"data": [{"value": "38"}], "context": {"code": 200}}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_missing_required_field_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"data": {"blocks": 956480, "difficulty": 133869853540305.4}, "context": {"code": 200}}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_wrong_type_field_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = (
+        b'{"data": {"blocks": "N/A", "difficulty": 2, "mempool_transactions": 3, '
+        b'"transactions_24h": 4}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
 
 
 def test_build_onchain_sources_includes_batch2_sources(monkeypatch):
@@ -490,7 +605,16 @@ def test_collect_online_produces_news_and_onchain(monkeypatch, tmp_path):
     backend = cache_mod.JsonCacheBackend(tmp_path / "cache.json")
     monkeypatch.setattr(cache_mod, "get_cache_backend", lambda: backend)
     for src in build_news_sources() + build_onchain_sources():
-        raw_docs = src.fetch("BTC", coin="BTC")
+        # 比照 scripts/fetch_scheduler.py 真實行為：單一來源 fetch() 失敗
+        # （這裡是刻意的，FNG_FIXTURE 對 mempool-space-*/blockchair 三個
+        # 新源來說是缺欄位的無效 payload，嚴格驗證會 raise，見 onchain.py）
+        # 只跳過該來源、不中斷其他來源，也不寫入 cache——不是這個測試要
+        # 驗的東西（各源自己的解析/驗證邏輯在各自的單元測試已覆蓋，這裡
+        # 只驗 collect() 有沒有正確接上 news/onchain 的線上快取路徑）。
+        try:
+            raw_docs = src.fetch("BTC", coin="BTC")
+        except Exception:
+            continue
         backend.set(
             cache_mod.cache_key(src.name, "BTC"),
             [cache_mod.doc_to_dict(d) for d in raw_docs],
