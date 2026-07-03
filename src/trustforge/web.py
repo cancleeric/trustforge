@@ -1623,6 +1623,31 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
     why_rec = "資料具時效性" if rec >= 0.7 else ("時效性中等" if rec >= 0.4 else "資料可能已過時")
     why_manip = "偵測到操縱風險信號，予以扣分" if manip > 0 else "未偵測到操縱風險信號"
 
+    # W2 可解釋性接線：`agent.orchestrator._scored_to_evidence` 在
+    # `dynamic_reputation=True` 時會把 `reputation_prior/final/agree_n/
+    # contradict_n` 併進 `trust_components`（見該處）。這裡純渲染層再多加一行
+    # WHY caption，說明「信譽為何是這個數字」——不是新資料，只是把已有的
+    # trace 數值人話化，`tc` 沒有這幾個 key（`dynamic_reputation=False`／舊
+    # 資料）時整段回空字串，優雅略過。
+    rep_trace_html = ""
+    if "reputation_prior" in tc and "reputation_final" in tc:
+        rep_prior, rep_final = _f(tc.get("reputation_prior")), _f(tc.get("reputation_final"))
+        agree_n = tc.get("reputation_agree_n", 0)
+        contra_n = tc.get("reputation_contradict_n", 0)
+        if abs(rep_final - rep_prior) > 1e-9:
+            arrow = "↑" if rep_final > rep_prior else "↓"
+            contra_part = f"，{contra_n} 源矛盾" if contra_n else ""
+            trace_text = (
+                f"動態信譽 {arrow}：{rep_prior:.2f}→{rep_final:.2f}"
+                f"（{agree_n} 源互證{contra_part}）"
+            )
+        else:
+            trace_text = f"動態信譽：{rep_prior:.2f}（樣本不足或無互證/矛盾，維持先驗）"
+        rep_trace_html = (
+            f'<div style="color:var(--tf-muted2);font-size:.68rem;padding-left:.2rem">'
+            f'{e(trace_text)}</div>'
+        )
+
     # ---- composite stacked bar：僅信譽/佐證/時效三個正向分項疊加；
     # 操縱不可並列成正向第四塊，改在下方以獨立紅色 deficit bar（靠右生長、代表扣分）呈現，
     # 對應真實公式：信任 = 信譽×0.5 + 佐證×0.25 + 時效×0.15 − 操縱×0.4 ----
@@ -1670,7 +1695,8 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         f'{mini_bar(rep, "#3fb950")} '
         f'<span style="color:var(--tf-text)">{rep:.2f}</span>'
         f'<span style="color:var(--tf-muted2)"> ×0.50</span></span>'
-        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div></div>'
+        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div>'
+        f'{rep_trace_html}</div>'
         # 佐證
         f'<div><span style="white-space:nowrap">'
         f'<span style="color:var(--tf-muted)">佐證</span> '
