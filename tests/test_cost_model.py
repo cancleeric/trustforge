@@ -13,6 +13,8 @@ from trustforge.cost_model import (
 ALL_KNOWN_SOURCES = [
     "coingecko-price", "coingecko-sentiment", "coingecko-dev",
     "coindesk", "decrypt", "cryptopanic",
+    "cointelegraph", "bitcoinmagazine", "cryptoslate",
+    "bitcoinist", "newsbtc", "dailyhodl",
     "alternative-me-fng", "blockchain-info", "sec-gov",
     "reddit-cryptocurrency", "reddit-bitcoin",
 ]
@@ -23,6 +25,21 @@ def test_connector_cost_model_registers_all_known_ingestion_sources():
     登記到，否則 `/status`「連接器用量」表會漏掉真實用量。"""
     for source in ALL_KNOWN_SOURCES:
         assert source in CONNECTOR_COST_MODEL, f"{source} 未登記於 CONNECTOR_COST_MODEL"
+
+
+def test_connector_cost_model_covers_every_build_news_source(monkeypatch):
+    """防呆：`build_news_sources()` 實際會註冊的每個連接器 name，都必須在
+    `CONNECTOR_COST_MODEL` 登記到——直接從 `build_news_sources()` **推導**
+    預期集合（而非重複手寫一份可能漏改的清單），未來任何人加新聞源忘了
+    登記成本模型，這裡就會紅（不能被靜默略過，見 codex 對抗審 PR #54）。
+    連 `CRYPTOPANIC_TOKEN` 開起來的條件式 `cryptopanic` 也要涵蓋到。"""
+    monkeypatch.setenv("CRYPTOPANIC_TOKEN", "test-token-for-cost-model-coverage")
+    from trustforge.ingestion.news import build_news_sources
+
+    expected_names = {s.name for s in build_news_sources()}
+    assert expected_names, "build_news_sources() 不應回傳空集合"
+    for name in expected_names:
+        assert name in CONNECTOR_COST_MODEL, f"{name} 由 build_news_sources() 產生，但未登記於 CONNECTOR_COST_MODEL"
 
 
 def test_coingecko_sources_share_official_10000_per_month_quota():

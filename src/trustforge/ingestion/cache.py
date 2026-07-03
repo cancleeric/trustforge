@@ -104,6 +104,15 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     "coindesk": 15 * 60,
     "decrypt": 15 * 60,
     "cryptopanic": 15 * 60,
+    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS，
+    # 同 coindesk/decrypt 統一 15 分鐘一輪，keyless 公開 RSS 無 rate limit
+    # 硬性公告，比照現有新聞源節奏即可。
+    "cointelegraph": 15 * 60,
+    "bitcoinmagazine": 15 * 60,
+    "cryptoslate": 15 * 60,
+    "bitcoinist": 15 * 60,
+    "newsbtc": 15 * 60,
+    "dailyhodl": 15 * 60,
     "reddit-cryptocurrency": 30 * 60,
     "reddit-bitcoin": 30 * 60,
     "alternative-me-fng": 60 * 60,

@@ -9,8 +9,11 @@ develop 分支，2026-07 fetch）：
     （品牌方指定的 monochrome 識別色，非隨手配色）
 
 simple-icons **沒有收錄**的來源（CoinGecko／CoinDesk／Decrypt／
-CryptoPanic／SEC EDGAR／Alternative.me 等，已逐一 grep 確認 slugs.md
-不存在對應條目）不得瞎猜/拼裝其他來源的 LOGO 冒充官方——一律 fallback 成
+CryptoPanic／SEC EDGAR／Alternative.me／CoinTelegraph／Bitcoin Magazine／
+CryptoSlate／Bitcoinist／NewsBTC／The Daily Hodl 等，已逐一 curl
+`raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/<slug>.svg`
++ 查 slugs.md 確認不存在對應條目，2026-07 資料密度第一批 #24 補查）不得
+瞎猜/拼裝其他來源的 LOGO 冒充官方——一律 fallback 成
 中性的「圓角徽章 + 2-3 字縮寫」（見 `_fallback_badge_html`），顏色沿用
 呼叫端既有語意色（如 evidence 的獨立性 tier 顏色），不偽裝成官方 LOGO、
 不誤導使用者。
@@ -205,6 +208,15 @@ _SOURCE_DISPLAY_NAME: dict[str, str] = {
     "decrypt": "Decrypt",
     "cryptopanic": "CryptoPanic",
     "ohlcv-csv": "OHLCV",
+    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS，
+    # simple-icons 逐一查證無收錄（見模組 docstring 查證記錄），一律走
+    # 中性 fallback 徽章，不偽造官方 LOGO。
+    "cointelegraph": "CoinTelegraph",
+    "bitcoinmagazine": "Bitcoin Magazine",
+    "cryptoslate": "CryptoSlate",
+    "bitcoinist": "Bitcoinist",
+    "newsbtc": "NewsBTC",
+    "dailyhodl": "The Daily Hodl",
 }
 
 # fallback 徽章（icon）縮寫——2-3 字，非官方 LOGO 替代品，純視覺辨識用。
@@ -217,6 +229,12 @@ _FALLBACK_BADGE_ABBR: dict[str, str] = {
     "alternative-me-fng": "F&G",
     "sec-gov": "SEC",
     "ohlcv-csv": "HB",
+    "cointelegraph": "CT",
+    "bitcoinmagazine": "BM",
+    "cryptoslate": "CS",
+    "bitcoinist": "BI",
+    "newsbtc": "NB",
+    "dailyhodl": "DH",
 }
 
 
@@ -259,6 +277,13 @@ _SOURCE_DISPLAY_NAME_FINE: dict[str, str] = {
     "blockchain-info": "Blockchain.com",
     "sec-gov": "美國 SEC",
     "ohlcv-csv": "HOYA BIT · 官方 OHLCV",
+    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS。
+    "cointelegraph": "CoinTelegraph",
+    "bitcoinmagazine": "Bitcoin Magazine",
+    "cryptoslate": "CryptoSlate",
+    "bitcoinist": "Bitcoinist",
+    "newsbtc": "NewsBTC",
+    "dailyhodl": "The Daily Hodl",
 }
 
 

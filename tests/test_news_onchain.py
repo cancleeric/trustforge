@@ -160,13 +160,56 @@ def test_cryptopanic_with_token_parses_fields(monkeypatch):
 
 
 def test_build_news_sources_no_cryptopanic_when_no_token(monkeypatch):
-    """未設 token 時，build_news_sources 不包含 CryptoPanicSource。"""
+    """未設 token 時，build_news_sources 不包含 CryptoPanicSource（資料密度
+    第一批 #24 加 6 家新聞 RSS 後，基礎來源數從 2 變 8）。"""
     from trustforge.ingestion import news
     monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
     sources = news.build_news_sources()
-    assert len(sources) == 2
+    assert len(sources) == 8
     types = [type(s).__name__ for s in sources]
     assert "CryptoPanicSource" not in types
+
+
+# ── 資料密度第一批（#24，docs/PLAN-data-density.md）：6 家新聞 RSS ───────────
+
+@pytest.mark.parametrize(
+    "source_cls_name,expected_name,expected_url",
+    [
+        ("CoinTelegraphRSSSource", "cointelegraph", "https://cointelegraph.com/rss"),
+        ("BitcoinMagazineRSSSource", "bitcoinmagazine", "https://bitcoinmagazine.com/feed"),
+        ("CryptoSlateRSSSource", "cryptoslate", "https://cryptoslate.com/feed/"),
+        ("BitcoinistRSSSource", "bitcoinist", "https://bitcoinist.com/feed/"),
+        ("NewsBTCRSSSource", "newsbtc", "https://www.newsbtc.com/feed/"),
+        ("DailyHodlRSSSource", "dailyhodl", "https://dailyhodl.com/feed/"),
+    ],
+)
+def test_new_rss_sources_document_fields_and_url(monkeypatch, source_cls_name, expected_name, expected_url):
+    """資料密度第一批 6 家新聞 RSS：各自 name/kind/URL 正確，且複用
+    `_parse_rss` 能正確解析出 Document（url/ts/content_reference）。"""
+    from trustforge.ingestion import news
+    source_cls = getattr(news, source_cls_name)
+    assert source_cls._URL == expected_url
+    monkeypatch.setattr(news, "_fetch_url", lambda url: RSS_FIXTURE)
+    docs = source_cls().fetch("BTC", coin="BTC")
+    assert len(docs) >= 1
+    d = docs[0]
+    assert d.kind == "news"
+    assert d.source == expected_name
+    assert d.ts > 0
+    assert d.meta.get("content_reference")
+    assert len(d.meta["content_reference"]) <= 120
+
+
+def test_build_news_sources_includes_all_6_new_rss_sources(monkeypatch):
+    """build_news_sources() 含新舊共 8 個新聞來源（不含條件式 cryptopanic）。"""
+    from trustforge.ingestion import news
+    monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
+    sources = news.build_news_sources()
+    names = {s.name for s in sources}
+    assert names == {
+        "coindesk", "decrypt", "cointelegraph", "bitcoinmagazine",
+        "cryptoslate", "bitcoinist", "newsbtc", "dailyhodl",
+    }
 
 
 def test_news_source_failure_does_not_crash_collect(monkeypatch):
