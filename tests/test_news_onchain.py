@@ -412,6 +412,16 @@ BLOCKCHAIR_FIXTURE = b"""{
   "context": {"code": 200}
 }"""
 
+# codex MEDIUM（PR #55，第 5 輪，有界新鮮度窗）：`best_block_time` 現在會
+# 拿真牆鐘 `time.time()` 做新鮮度檢查，`BLOCKCHAIR_FIXTURE` 裡寫死的日期
+# 不能再假設「反正是未來，測試永遠在窗內」——用固定注入的 now，別依賴真
+# 牆鐘飄（coordinator 明確要求）。`_BLOCKCHAIR_FIXED_NOW` 對應
+# `BLOCKCHAIR_FIXTURE.best_block_time`（2026-07-03 09:18:09 UTC）之後 12
+# 分鐘，落在 6 小時新鮮度窗內、也不是未來時間戳。
+import datetime as _dt  # noqa: E402 - 就近放在使用它的 fixture 常數旁
+
+_BLOCKCHAIR_FIXED_NOW = _dt.datetime(2026, 7, 3, 9, 30, 0, tzinfo=_dt.timezone.utc).timestamp()
+
 
 def test_mempool_space_fees_document_fields(monkeypatch):
     from trustforge.ingestion import onchain
@@ -456,8 +466,12 @@ def test_mempool_space_difficulty_skipped_for_non_btc(monkeypatch):
 
 
 def test_blockchair_document_fields(monkeypatch):
+    """用固定注入的 now（`_BLOCKCHAIR_FIXED_NOW`）測，別依賴真牆鐘——新鮮度
+    窗（codex MEDIUM 第 5 輪）比較的是 `time.time()`，固定注入才能讓測試
+    結果不隨真實跑測試的日期改變。"""
     from trustforge.ingestion import onchain
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: BLOCKCHAIR_FIXTURE)
+    monkeypatch.setattr(onchain.time, "time", lambda: _BLOCKCHAIR_FIXED_NOW)
     docs = onchain.BlockchairStatsSource().fetch("", coin="BTC")
     assert len(docs) == 1
     d = docs[0]
@@ -468,7 +482,6 @@ def test_blockchair_document_fields(monkeypatch):
     assert "956480" in ref
     assert "82785" in ref
     # best_block_time "2026-07-03 09:18:09" UTC → 對應 epoch
-    import datetime as _dt
     expected_ts = _dt.datetime(2026, 7, 3, 9, 18, 9, tzinfo=_dt.timezone.utc).timestamp()
     assert d.ts == expected_ts
 
@@ -526,6 +539,56 @@ def test_blockchair_non_string_best_block_time_raises(monkeypatch):
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_fixture)
     with pytest.raises(ValueError):
         onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+# ── codex MEDIUM（PR #55，第 5 輪，CEO 決策：有界新鮮度窗）：
+#    best_block_time 語法正確不代表新鮮，供應商可能重放/命中陳舊快取
+#    ——全部用固定注入的 now，不依賴真牆鐘（coordinator 明確要求）────────────
+
+def _blockchair_payload_with_best_block_time(bbt: str) -> bytes:
+    return (
+        b'{"data": {"blocks": 956480, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 82785, "transactions_24h": 573582, '
+        b'"best_block_time": "' + bbt.encode() + b'"}, "context": {"code": 200}}'
+    )
+
+
+def test_blockchair_future_best_block_time_raises(monkeypatch):
+    """`best_block_time` 是明顯未來時間戳（超過 10 分鐘容差）→ 拋例外，
+    不建 Document——這是 bogus 資料的訊號。"""
+    from trustforge.ingestion import onchain
+    fixed_now = _dt.datetime(2026, 7, 3, 9, 30, 0, tzinfo=_dt.timezone.utc)
+    future_bbt = (fixed_now + _dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: _blockchair_payload_with_best_block_time(future_bbt))
+    monkeypatch.setattr(onchain.time, "time", lambda: fixed_now.timestamp())
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_stale_best_block_time_raises(monkeypatch):
+    """`best_block_time` 超過 6 小時新鮮度窗（過舊，可能是重放的陳舊
+    payload）→ 拋例外，不建 Document、不覆蓋舊快取。"""
+    from trustforge.ingestion import onchain
+    fixed_now = _dt.datetime(2026, 7, 3, 9, 30, 0, tzinfo=_dt.timezone.utc)
+    stale_bbt = (fixed_now - _dt.timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: _blockchair_payload_with_best_block_time(stale_bbt))
+    monkeypatch.setattr(onchain.time, "time", lambda: fixed_now.timestamp())
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_recent_best_block_time_within_window_succeeds(monkeypatch):
+    """`best_block_time` 落在新鮮度窗內（30 分鐘前，符合 BTC 正常出塊
+    節奏）→ 正常出 Document，不受新窗口誤殺。"""
+    from trustforge.ingestion import onchain
+    fixed_now = _dt.datetime(2026, 7, 3, 9, 30, 0, tzinfo=_dt.timezone.utc)
+    recent_bbt = (fixed_now - _dt.timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: _blockchair_payload_with_best_block_time(recent_bbt))
+    monkeypatch.setattr(onchain.time, "time", lambda: fixed_now.timestamp())
+    docs = onchain.BlockchairStatsSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+    expected_ts = (fixed_now - _dt.timedelta(minutes=30)).timestamp()
+    assert docs[0].ts == expected_ts
 
 
 # ── codex HIGH 修復（#24+robustness，PR #55）：無效 payload 必須拋例外，

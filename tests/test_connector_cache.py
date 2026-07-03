@@ -25,6 +25,7 @@ import importlib.util
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -758,6 +759,47 @@ def test_scheduler_onchain_bad_best_block_time_raises_and_preserves_old_cache(mo
         b'"transactions_24h": 4, "best_block_time": "not-a-date"}, "context": {"code": 200}}'
     )
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad_payload)
+    src = BlockchairStatsSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["blockchair"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["blockchair:BTC"]
+    entry = backend.get(cache_key("blockchair", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "blockchair" in err
+
+
+def test_scheduler_onchain_stale_best_block_time_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex MEDIUM（PR #55，第 5 輪，有界新鮮度窗）驗收：`best_block_time`
+    格式正確但超過 6 小時新鮮度窗（重放的陳舊 payload）一樣要 raise，
+    `run_once()` 計入 failures、完全不覆寫舊快取。用固定注入的 now，
+    不依賴真牆鐘。"""
+    from trustforge.ingestion import onchain
+    from trustforge.ingestion.onchain import BlockchairStatsSource
+
+    fixed_now = datetime(2026, 7, 3, 9, 30, 0, tzinfo=timezone.utc)
+    stale_bbt = (fixed_now - timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-blockchair-doc", "kind": "onchain", "source": "blockchair",
+        "text": "上一輪的真實統計：區塊高度=956000", "url": "https://api.blockchair.com/bitcoin/stats",
+        "ts": fixed_now.timestamp() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("blockchair", "BTC"), old_docs, fixed_now.timestamp() - 3600)
+
+    stale_payload = (
+        b'{"data": {"blocks": 956480, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 82785, "transactions_24h": 573582, '
+        b'"best_block_time": "' + stale_bbt.encode() + b'"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: stale_payload)
+    monkeypatch.setattr(onchain.time, "time", lambda: fixed_now.timestamp())
     src = BlockchairStatsSource()
     _patch_registry(monkeypatch, [src])
 

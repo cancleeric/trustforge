@@ -33,6 +33,15 @@ _MAX_BYTES = 512 * 1024   # 512 KB
 _TIMEOUT = 5
 _UA = "TrustForge/1.0 (research)"
 
+# codex MEDIUM（PR #55，第 5 輪，CEO 決策：有界新鮮度窗，per-source、無
+# scheduler 大改；跨快取單調性另列 follow-up，見 BlockchairStatsSource
+# 內的說明）：`best_block_time` 語法正確不代表新鮮——供應商可能重放/快取
+# 命中一份陳舊的舊回應。窗口寬度取保守值，正常出塊節奏下永遠滿足：
+_FUTURE_SKEW_TOLERANCE_SECONDS = 10 * 60       # 未來容差 10 分鐘（時鐘飄移）
+_MAX_STALENESS_SECONDS = 6 * 60 * 60           # 過舊上限 6 小時（BTC 出塊
+                                                # 均值 ~10 分鐘，慢時可到
+                                                # 1-2 小時，抓保守 6 小時）
+
 
 def _fetch_url(url: str) -> bytes:
     """帶 timeout / 大小上限 / User-Agent 的 SSRF-safe GET（見 safe_fetch.py）。"""
@@ -272,6 +281,26 @@ class BlockchairStatsSource(Source):
             raise ValueError(
                 f"{self.name}: 欄位 'best_block_time' 格式不符預期：{best_block_time!r}"
             ) from exc
+        # codex MEDIUM（PR #55，第 5 輪，CEO 決策：有界新鮮度窗）：格式正確
+        # 不代表新鮮——供應商可能重放/命中一份陳舊快取。用有界窗擋掉明顯
+        # bogus（未來時間戳）與陳舊重放（超過合理出塊節奏的過舊時間戳），
+        # 窗內視為正常新鮮資料。
+        #
+        # follow-up（非本輪）：跨快取單調性（新 doc ts 不得早於上一輪已快取
+        # doc 的 ts）是 scheduler 層的通用增強、該套用到所有來源而不只
+        # blockchair，需要獨立設計，已建 issue 追蹤，見
+        # docs/OPTIMIZATION-PLAN-weakness.md 的 follow-up 段落。
+        now = time.time()
+        if ts > now + _FUTURE_SKEW_TOLERANCE_SECONDS:
+            raise ValueError(
+                f"{self.name}: 欄位 'best_block_time' 是未來時間戳（明顯 bogus）："
+                f"{best_block_time!r}（ts={ts}, now={now}）"
+            )
+        if ts < now - _MAX_STALENESS_SECONDS:
+            raise ValueError(
+                f"{self.name}: 欄位 'best_block_time' 過舊（可能是重放的陳舊 payload）："
+                f"{best_block_time!r}（ts={ts}, now={now}）"
+            )
         doc_id = "onchain-bcair-" + hashlib.md5(ref.encode()).hexdigest()[:12]
         return [Document(
             id=doc_id,
