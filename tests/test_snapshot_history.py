@@ -844,3 +844,35 @@ def test_get_trust_history_skips_missing_days_without_faking_values(json_cache_b
 
 def test_get_trust_history_returns_empty_when_nothing_written(json_cache_backend):
     assert get_trust_history("ETH", days=30, backend=json_cache_backend) == []
+
+
+def test_get_trust_history_strict_true_pure_miss_still_returns_empty(json_cache_backend):
+    """codex 複審 HIGH（根因修復）：`strict=True` 只影響「讀取真的失敗」
+    分支——backend 正常運作、只是這幾天沒寫過快照（合法 miss），`strict`
+    傳不傳結果必須一樣，一律回空序列，不能因為多了這個參數就連帶回歸。"""
+    assert get_trust_history("ETH", days=30, backend=json_cache_backend, strict=True) == []
+
+
+def test_get_trust_history_strict_true_raises_on_real_backend_outage(monkeypatch, tmp_path):
+    """真 backend 降級（不是 replace `cache_get`/`get_trust_history` 這些
+    helper 本身）：primary（模擬 DynamoDB 憑證/連線壞掉）+ fallback（本地
+    `JsonCacheBackend`，模擬磁碟也讀不了）都真的拋例外 → `strict=True`
+    必須讓例外傳出去（`CacheReadFailure`），不能悄悄回「這幾天都沒資料」
+    的空序列，讓呼叫端（`/api/history`）誤判成正常回應。"""
+    from trustforge.ingestion.cache import CacheReadFailure, DynamoDBCache
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    broken = DynamoDBCache()
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
+    monkeypatch.setattr(
+        JsonCacheBackend, "get",
+        lambda self, key: (_ for _ in ()).throw(OSError("磁碟也壞了")),
+    )
+
+    with pytest.raises(CacheReadFailure):
+        get_trust_history("BTC", days=3, backend=broken, strict=True)

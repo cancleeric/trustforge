@@ -43,6 +43,7 @@ from trustforge.ingestion.cache import (
     STALE_AFTER_MULTIPLIER,
     CacheBackend,
     CacheMissError,
+    CacheReadFailure,
     CachedSource,
     CacheWriteResult,
     DynamoDBCache,
@@ -424,6 +425,272 @@ def test_cache_get_normal_miss_does_not_trigger_fallback(tmp_path):
     不該偷偷轉去問 fallback JsonCacheBackend（語意上 A 沒有 != 應該問 B）。"""
     backend = JsonCacheBackend(tmp_path / "primary.json")
     assert cache_get(backend, "nope") is None
+
+
+# ---------------------------------------------------------------------------
+# codex 複審 HIGH（根因修復）：`cache_get(..., strict=True)` 讓呼叫端能區分
+# 「primary+fallback 讀取都真的失敗（outage）」跟「單純沒這筆資料（miss）」。
+# 這裡直接打真正的 `cache_get()` 讀取路徑（真 backend 物件的 `.get()` 拋例
+# 外、真的去 instantiate fallback `JsonCacheBackend()`），不 monkeypatch
+# `cache_get()` 這個函式本身——比照 codex 這輪明確要求「非 replace helper」。
+# ---------------------------------------------------------------------------
+
+def test_cache_get_strict_raises_when_primary_and_fallback_both_fail(monkeypatch, tmp_path):
+    """primary（模擬 DynamoDB 壞掉）跟 fallback（本地 `JsonCacheBackend`，
+    模擬磁碟也讀不了）都真的拋例外 → `strict=True` 必須 raise
+    `CacheReadFailure`，不能悄悄回 `None` 假裝成「沒資料」。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    broken = DynamoDBCache()
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
+    monkeypatch.setattr(
+        JsonCacheBackend, "get",
+        lambda self, key: (_ for _ in ()).throw(OSError("磁碟也壞了")),
+    )
+
+    with pytest.raises(CacheReadFailure):
+        cache_get(broken, cache_key("coindesk", "BTC"), strict=True)
+
+
+def test_cache_get_strict_still_returns_none_on_normal_miss(tmp_path):
+    """`strict=True` 只影響「讀取真的失敗」這條分支；backend 正常運作、
+    只是這個 key 沒資料（合法 miss，`.get()` 正常回 `None` 不拋例外）時，
+    `strict=True`／`False` 行為必須完全一樣，一律回 `None`。"""
+    backend = JsonCacheBackend(tmp_path / "primary.json")
+    assert cache_get(backend, "nope", strict=True) is None
+
+
+def test_cache_get_strict_false_default_unaffected_when_primary_and_fallback_both_fail(monkeypatch, tmp_path):
+    """回歸鎖：不傳 `strict`（預設 `False`，既有呼叫端沒改）時，即使
+    primary+fallback 都真的失敗，行為必須逐字維持原樣——悄悄吞例外回
+    `None`，不能因為新增了 `strict` 參數就連帶動到既有預設路徑。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    broken = DynamoDBCache()
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
+    monkeypatch.setattr(
+        JsonCacheBackend, "get",
+        lambda self, key: (_ for _ in ()).throw(OSError("磁碟也壞了")),
+    )
+
+    assert cache_get(broken, cache_key("coindesk", "BTC")) is None
+
+
+# ---------------------------------------------------------------------------
+# codex 複審 MEDIUM（觀測準確性）：`degradation_out` 訊號——primary 失敗、
+# fallback 讀得到（不 raise）時，呼叫端要知道「這次是靠 fallback 撐著」，
+# 不能無條件回報成 primary 正常。
+# ---------------------------------------------------------------------------
+
+def test_cache_get_degradation_out_marks_used_fallback_true_on_fallback_success(monkeypatch, tmp_path):
+    """primary 拋例外、fallback 讀得到（合法 miss，不是例外）→
+    `degradation_out["used_fallback"]` 必須是 `True`，即使最終回傳值仍是
+    正常的 `None`（miss）。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    broken = DynamoDBCache()
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
+
+    out: dict[str, bool] = {}
+    result = cache_get(broken, cache_key("coindesk", "BTC"), degradation_out=out)
+    assert result is None  # fallback 是乾淨 tmp_path，沒資料，合法 miss
+    assert out == {"used_fallback": True}
+
+
+def test_cache_get_degradation_out_marks_used_fallback_false_when_primary_succeeds(tmp_path):
+    """primary 直接成功（不管回值是不是 miss）→
+    `degradation_out["used_fallback"]` 必須是 `False`。"""
+    backend = JsonCacheBackend(tmp_path / "primary.json")
+    out: dict[str, bool] = {}
+    assert cache_get(backend, "nope", degradation_out=out) is None
+    assert out == {"used_fallback": False}
+
+
+def test_cache_get_degradation_out_or_aggregation_across_multiple_calls(monkeypatch, tmp_path):
+    """`get_freshness_snapshot()` 逐 (source, coin) 迴圈共用同一個
+    `degradation_out` dict：只要任一次呼叫用過 fallback，整體就該視為
+    degraded，即使後面呼叫 primary 又成功了也不能被覆蓋回 `False`
+    （OR 聚合，不是「最後一次呼叫的結果」）。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    calls = {"n": 0}
+
+    class _FirstCallFailsBackend:
+        def get(self, key, *, consistent_read=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            return None  # 第二次呼叫 primary 正常（miss）
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise AssertionError("不該被呼叫")
+
+    backend = _FirstCallFailsBackend()
+    out: dict[str, bool] = {}
+    cache_get(backend, cache_key("coindesk", "BTC"), degradation_out=out)  # 第一次：primary 失敗、fallback 頂上
+    assert out == {"used_fallback": True}
+    cache_get(backend, cache_key("coindesk", "ETH"), degradation_out=out)  # 第二次：primary 正常
+    assert out == {"used_fallback": True}, "後面 primary 成功不該把 degraded 訊號覆蓋回 False"
+
+
+def test_freshness_snapshot_degradation_out_reflects_partial_fallback_usage(monkeypatch, tmp_path):
+    """真 backend 降級（非 replace helper）：`get_freshness_snapshot()` 逐
+    (source, coin) 呼叫，只讓其中一個 (source, coin) 走到 primary 失敗
+    （fallback 頂上），其餘都是 primary 正常——`degradation_out` 仍要標
+    `used_fallback:True`，不能因為多數格都正常就被覆蓋掉。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    fail_key = cache_key("coindesk", "BTC")
+
+    class _MostlyOkBackend:
+        def get(self, key, *, consistent_read=False):
+            if key == fail_key:
+                raise RuntimeError("transient DynamoDB throttling")
+            return None
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise AssertionError("不該被呼叫")
+
+    out: dict[str, bool] = {}
+    snapshot = get_freshness_snapshot(
+        backend=_MostlyOkBackend(),
+        source_names=["coindesk", "cointelegraph"],
+        coins=["BTC"],
+        strict=True,
+        degradation_out=out,
+    )
+    assert len(snapshot) == 2
+    assert all(r["status"] == "missing" for r in snapshot)
+    assert out == {"used_fallback": True}
+
+
+# ---------------------------------------------------------------------------
+# codex 複審 HIGH（production 安全）：request-scoped circuit breaker——
+# primary outage 時，`get_freshness_snapshot()` 逐 (source, coin) 迴圈不該
+# 每格都重試一次已知掛掉的 primary（流量放大 + 延遲隨格數線性放大）。
+# ---------------------------------------------------------------------------
+
+def test_cache_get_skip_primary_true_never_calls_primary_get(monkeypatch, tmp_path):
+    """`skip_primary=True` 時完全跳過 `backend.get()`，直接讀 fallback；
+    primary 的 `.get()` 一次都不該被呼叫到。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    class _MustNotBeCalledBackend:
+        def get(self, key, *, consistent_read=False):
+            raise AssertionError("skip_primary=True 時不該呼叫 primary.get()")
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise AssertionError("不該被呼叫")
+
+    out: dict[str, bool] = {}
+    result = cache_get(_MustNotBeCalledBackend(), cache_key("coindesk", "BTC"),
+                        degradation_out=out, skip_primary=True)
+    assert result is None  # 乾淨 tmp_path，fallback 合法 miss
+    assert out == {"used_fallback": True}
+
+
+def test_cache_get_skip_primary_true_ignored_for_json_cache_backend(tmp_path):
+    """`backend` 本身就是 `JsonCacheBackend`（沒有另一層可跳的 fallback）
+    時，`skip_primary=True` 沒有意義，直接忽略、照常呼叫 `backend.get()`。"""
+    backend = JsonCacheBackend(tmp_path / "primary.json")
+    out: dict[str, bool] = {}
+    result = cache_get(backend, "nope", degradation_out=out, skip_primary=True)
+    assert result is None
+    assert out == {"used_fallback": False}
+
+
+def test_cache_get_skip_primary_true_strict_raises_when_fallback_also_fails(monkeypatch, tmp_path):
+    """circuit breaker 生效中（`skip_primary=True`），如果連 fallback
+    也讀不了，`strict=True` 仍要 raise `CacheReadFailure`（不能悄悄吞成
+    `None`，那樣會把「cache 整個掛了」誤判成「單純沒資料」）。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+    monkeypatch.setattr(
+        JsonCacheBackend, "get",
+        lambda self, key: (_ for _ in ()).throw(OSError("磁碟也壞了")),
+    )
+
+    class _NeverCalledBackend:
+        def get(self, key, *, consistent_read=False):
+            raise AssertionError("skip_primary=True 時不該呼叫 primary.get()")
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise AssertionError("不該被呼叫")
+
+    with pytest.raises(CacheReadFailure):
+        cache_get(_NeverCalledBackend(), cache_key("coindesk", "BTC"),
+                   strict=True, skip_primary=True)
+
+
+def test_freshness_snapshot_circuit_breaker_limits_primary_attempts_to_one(monkeypatch, tmp_path):
+    """`circuit_breaker=True`：primary 第一次失敗後，後續所有 (source, coin)
+    格子直接跳過 primary，不逐格重試——primary `.get()` 全程只該被呼叫
+    一次，即使矩陣有多個 (source, coin) 組合。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    calls = {"n": 0}
+
+    class _AlwaysFailBackend:
+        def get(self, key, *, consistent_read=False):
+            calls["n"] += 1
+            raise RuntimeError("primary outage")
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise AssertionError("不該被呼叫")
+
+    out: dict[str, bool] = {}
+    snapshot = get_freshness_snapshot(
+        backend=_AlwaysFailBackend(),
+        source_names=["coindesk", "cointelegraph", "reddit-bitcoin"],
+        coins=["BTC", "ETH"],
+        strict=True,
+        degradation_out=out,
+        circuit_breaker=True,
+    )
+    assert len(snapshot) == 6  # 3 來源 × 2 幣種
+    assert all(r["status"] == "missing" for r in snapshot)
+    assert out == {"used_fallback": True}
+    assert calls["n"] == 1, (
+        f"circuit breaker 沒生效：primary 被呼叫了 {calls['n']} 次"
+        "（矩陣有 6 格，應該只嘗試一次就轉走 fallback）"
+    )
+
+
+def test_freshness_snapshot_circuit_breaker_false_default_retries_primary_every_cell(
+    monkeypatch, tmp_path
+):
+    """對照組（鎖住既有行為零改動）：`circuit_breaker` 預設 `False`
+    （SSR `/status` 頁呼叫端不傳這個參數）時，即使 primary 一直失敗，仍然
+    **逐格重試**——這是 codex 這輪要修的問題本身，這裡明確鎖住「不傳
+    `circuit_breaker` 就是舊行為」，避免未來不小心把預設值改成
+    `True` 而悄悄動到 SSR 路徑。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    calls = {"n": 0}
+
+    class _AlwaysFailBackend:
+        def get(self, key, *, consistent_read=False):
+            calls["n"] += 1
+            raise RuntimeError("primary outage")
+
+        def set(self, key, docs, fetched_at, ttl_seconds=None):
+            raise AssertionError("不該被呼叫")
+
+    snapshot = get_freshness_snapshot(
+        backend=_AlwaysFailBackend(),
+        source_names=["coindesk", "cointelegraph", "reddit-bitcoin"],
+        coins=["BTC", "ETH"],
+    )
+    assert len(snapshot) == 6
+    assert calls["n"] == 6, "circuit_breaker=False（預設）應維持逐格重試 primary 的既有行為"
 
 
 def test_cached_source_hit_with_mocked_dynamodb_backend_does_not_touch_wrapped_fetch():
@@ -1888,3 +2155,39 @@ def test_freshness_snapshot_does_not_call_wrapped_source_fetch(tmp_path):
     )
     assert snapshot[0]["status"] == "missing"
     assert calls == []  # 從未呼叫過任何真 fetch()
+
+
+def test_freshness_snapshot_strict_true_pure_miss_still_reports_missing(tmp_path):
+    """codex 複審 HIGH（根因修復）：`strict=True` 只影響「讀取真的失敗」
+    分支——backend 正常運作、只是這個 (source, coin) 沒資料（合法 miss），
+    `strict` 傳不傳結果必須一樣，一律標 `status="missing"`，不能 raise。"""
+    backend = JsonCacheBackend(path=tmp_path / "cache.json")
+    snapshot = get_freshness_snapshot(
+        backend=backend, source_names=["coindesk"], coins=["BTC"], strict=True
+    )
+    assert snapshot[0]["status"] == "missing"
+
+
+def test_freshness_snapshot_strict_true_raises_on_real_backend_outage(monkeypatch, tmp_path):
+    """真 backend 降級（不是 replace `cache_get`/`get_freshness_snapshot`
+    這些 helper 本身）：primary（模擬 DynamoDB 憑證/連線壞掉）+ fallback
+    （本地 `JsonCacheBackend`，模擬磁碟也讀不了）都真的拋例外 →
+    `strict=True` 必須讓例外傳出去（`CacheReadFailure`），不能悄悄把
+    「outage」標成跟正常 `status="missing"` 一樣，讓 `/api/status` 監控
+    誤判成健康。"""
+    monkeypatch.setenv("TRUSTFORGE_CACHE_JSON_PATH", str(tmp_path / "fallback_cache.json"))
+
+    broken = DynamoDBCache()
+    monkeypatch.setattr(
+        broken, "_get_table",
+        MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
+    )
+    monkeypatch.setattr(
+        JsonCacheBackend, "get",
+        lambda self, key: (_ for _ in ()).throw(OSError("磁碟也壞了")),
+    )
+
+    with pytest.raises(CacheReadFailure):
+        get_freshness_snapshot(
+            backend=broken, source_names=["coindesk"], coins=["BTC"], strict=True
+        )

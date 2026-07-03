@@ -176,11 +176,26 @@ _overview_bg_stop_event: threading.Event | None = None  # 供測試用：設了
 
 # 首頁總覽背景刷新專用的 DynamoDB 連線 timeout（秒）——`DynamoDBCache.__init__`
 # 三個 timeout/重試參數專為此保留（見該類別 docstring「這三個參數留著給
-# Axis C 用」）：`get_cache_backend()`（給排程器／`/status` 用）刻意不帶
+# Axis C 用」）：`get_cache_backend()`（給排程器用）刻意不帶
 # timeout（容錯優先，讀失敗頂多多一次 cache-miss 降級）。這個短 timeout
 # 現在只保護**背景 thread**（減少它自己卡住的時間），首頁 request 路徑
 # 本身已經零 I/O、不受這個 timeout 涵不涵蓋 stall 影響（見上方 HIGH #2）。
 _HOME_OVERVIEW_TIMEOUT_SECONDS = 0.5
+
+# `/api/status` 專用的 DynamoDB 連線 timeout/重試上限——codex 複審 HIGH
+# （production 安全）：`/api/status` 是同步 request 路徑（監控/使用者主動
+# 打），跟首頁背景 thread 一樣不能吃 SDK 預設可達分鐘級的 timeout/重試；
+# 額度沿用 `scripts/fetch_scheduler.py::_probe_cache_backend()` 既有的
+# `_PROBE_DYNAMODB_*` 慣例（connect/read 各 3s、max_attempts=2）。
+# ⚠️ 光有短 timeout 還不夠：`get_freshness_snapshot()` 逐 (source, coin)
+# 迴圈約 115 格，若每格都重新嘗試一次 primary，115 × (3s+3s) × 2 attempts
+# 仍是分鐘級——真正的 bounded worst-case 要靠
+# `get_freshness_snapshot(..., circuit_breaker=True)`：同一次請求內第一次
+# 偵測到 primary 失敗後，後續格子直接跳過 primary，兩者要一起用（見
+# `_status_cache_backend()`／`_handle_api_status()`）。
+_STATUS_CACHE_CONNECT_TIMEOUT_SECONDS = 3.0
+_STATUS_CACHE_READ_TIMEOUT_SECONDS = 3.0
+_STATUS_CACHE_MAX_ATTEMPTS = 2
 
 _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta charset="utf-8">
 
@@ -1335,6 +1350,38 @@ def _home_overview_backend():
         connect_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
         read_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
         max_attempts=1,
+    )
+
+
+def _status_cache_backend():
+    """`/api/status`（JSON API，不是 SSR `/status` 頁）專用 cache backend：
+    短 timeout + 限重試（見 `_STATUS_CACHE_*` 常數），跟 `get_cache_backend()`
+    （給排程器／SSR `/status` 頁用，無 timeout、容錯優先，這裡刻意不動）分開
+    建構，理由同 `_home_overview_backend()`——`/api/status` 是同步 request
+    路徑，不能吃 DynamoDB SDK 預設可達分鐘級的 timeout/重試。
+
+    codex 複審 HIGH（production 安全）：光有這個短 timeout 還不足以讓
+    `/api/status` 真正「有界」——`get_freshness_snapshot()` 逐 (source,
+    coin) 迴圈約 115 格，若每格都重新嘗試一次 primary，115 次 × 短
+    timeout 仍是分鐘級。這個短 timeout 只保證『每一次 primary 嘗試』本身
+    有界；真正的整體 bounded worst-case 要搭配
+    `get_freshness_snapshot(..., circuit_breaker=True)`（見
+    `_handle_api_status()`）：同一次請求內第一次 primary 失敗後，後續格子
+    直接跳過 primary，兩者合起來才是完整修復。
+
+    沿用 `CACHE_BACKEND` env 決定 dynamodb/json（跟 `get_cache_backend()`
+    同一套判斷邏輯，只是 dynamodb 分支多帶三個 timeout 參數）：`json` 分支
+    是本機檔案 I/O，本來就不會 hang，不需要 timeout。
+    """
+    from .ingestion.cache import DynamoDBCache, JsonCacheBackend
+
+    backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
+    if backend_name == "json":
+        return JsonCacheBackend()
+    return DynamoDBCache(
+        connect_timeout=_STATUS_CACHE_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=_STATUS_CACHE_READ_TIMEOUT_SECONDS,
+        max_attempts=_STATUS_CACHE_MAX_ATTEMPTS,
     )
 
 
@@ -2958,6 +3005,473 @@ def _render_error_card(title: str, detail: str, *, retry_href: str | None = None
     )
 
 
+# ---------------------------------------------------------------------------
+# 前後端分離 Phase 1（task #28，docs/PLAN-frontend-backend-split.md）：純新增
+# JSON API 端點，統一 `{ok, data, error}` 信封。⛔ 鐵律：以下函式只新增，
+# 絕不改動既有 SSR HTML 渲染函式（`_render_report`/`_render_home_page`/
+# `_render_status_page`/`_render_costs_page` 等）——那些頁面是 LIVE，逐字
+# 輸出不能變。這裡只是額外的資料組裝 + JSON 呈現層，直接重用既有「純資料」
+# 函式（`aggregate_trust_by_kind`/`_aggregate_trust_components`/
+# `get_freshness_snapshot`/`_get_ledger_summary`/`get_trust_history` 等本來
+# 就回傳 dict/list，不是 HTML），不重寫任何既有計算邏輯。
+#
+# harper（CISO）安全審 must-have（本輪放行條件，逐項對應）：
+#   1. 每個 `/api/*` 套用對應既有限流函式，換路徑不漏接限流：
+#      `/api/analyze` 透過重用 `_do_analyze`/`_do_comparison`（其內部已呼叫
+#      `_parse_live`/`_parse_real` → `_check_live_rate_limit`/
+#      `_check_real_rate_limit`）自動繼承同一組限流；`/api/status`/
+#      `/api/overview`/`/api/costs`/`/api/history` 皆為「逐 key 讀 cache
+#      backend」同一類讀取工作，統一套用 `_check_status_rate_limit`（跟
+#      `/status` 頁同一組 bucket/門檻）。`/api/health` 比照既有 `/healthz`
+#      不設限流（零 I/O，無 cache/連接器讀取）。
+#   2. `/api/analyze`、`/api/history` 的 `coin` 一律過既有 `COIN_POOL`
+#      白名單，非法回 400 + 通用訊息（不洩露內部參數語法）。
+#   3. 錯誤一律不透傳例外訊息/traceback/DynamoDB 錯誤細節，只回
+#      `{ok:false,error:{code,message}}` 通用訊息（`/api/status` 甚至比
+#      SSR `/status` 頁更保守，見 `_handle_api_status` docstring）。
+#   4. `Content-Type: application/json; charset=utf-8`（`Handler._send()`
+#      本身已恆定加 `X-Content-Type-Options: nosniff`，見該方法，兩者併用）。
+#   5. 同源、不開 CORS；全部唯讀，`/api/analyze` 沿用既有預設 real-off
+#      （$0）行為，不新增任何寫入路徑，也不放寬既有 live/real 限流。
+# ---------------------------------------------------------------------------
+
+
+def _json_envelope_ok(data) -> str:
+    return json.dumps({"ok": True, "data": data}, ensure_ascii=False)
+
+
+def _json_envelope_err(code: str, message: str) -> str:
+    return json.dumps(
+        {"ok": False, "error": {"code": code, "message": message}}, ensure_ascii=False
+    )
+
+
+def _price_provenance_data(evidence: list) -> dict:
+    """`_render_price_provenance()` 的 JSON 資料版本——**不重用/不修改**該
+    HTML 渲染函式本身（避免任何意外牽動 SSR 輸出），純粹從同一份 `evidence`
+    重新找 `ohlcv-csv`/`coingecko-price` 兩筆來源，回結構化 dict。任一來源
+    本輪未取得（cache miss / 429 等）該 key 直接不存在，兩者皆缺回空 dict
+    ——與 HTML 版本「優雅缺席」語意一致。"""
+    ohlcv_ev = next((ev for ev in evidence if ev.source == "ohlcv-csv"), None)
+    live_ev = next((ev for ev in evidence if ev.source == "coingecko-price"), None)
+    data: dict = {}
+    if ohlcv_ev is not None:
+        data["ohlcv"] = {
+            "content_reference": ohlcv_ev.content_reference,
+            "fetched_at": ohlcv_ev.fetched_at,
+            "source_url": ohlcv_ev.source_url,
+        }
+    if live_ev is not None:
+        data["live"] = {
+            "content_reference": live_ev.content_reference,
+            "fetched_at": live_ev.fetched_at,
+            "source_url": live_ev.source_url,
+        }
+    return data
+
+
+def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
+    """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
+    `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
+    trust_components 聚合（`_aggregate_trust_components`）／
+    price_provenance（`_price_provenance_data`）——三者輸入都已在既有
+    `evidence` 陣列裡，純渲染層再彙總一次，不多打任何連接器/Bedrock 呼叫
+    （$0）。
+
+    完全重用 `_do_analyze`/`_do_comparison`（含其內建限流與驗證），不重寫
+    分析邏輯；既有 `/analyze`、`/analyze.json` 兩條路由原樣不動。
+
+    codex 複審 HIGH（同分支修復）：`_do_analyze`/`_do_comparison` 內部的
+    `ValueError` 其實混雜兩種完全不同性質的情況（見兩者 docstring）——
+    「幣種非法／q 過長」是**使用者輸入錯**，但「pipeline 無資料」
+    （`pipeline.py::run()` 在 offline 樣本資料缺失時 raise）、以及深層
+    ingestion 層解析上游回應失敗時的 `ValueError`，其實是**依賴/上游失敗**
+    ——先前一律用同一個 `except ValueError → 400` 接住，會把真正的依賴
+    問題偽裝成「你輸入錯」。
+
+    修法（不碰 `_do_analyze`/`_do_comparison`/`_parse_comparison_coins`
+    本身——三者純函式、無 I/O，這裡只是在呼叫依賴**之前**先呼叫同一批
+    純函式的驗證邏輯做重複確認，兩邊邏輯是同一個 source of truth，不會
+    分岔）：
+      1. 先做零依賴的純請求驗證（type／query 長度／coin 白名單／
+         comparison 兩幣解析）——驗證失敗在呼叫任何依賴之前就回 400。
+      2. 驗證通過後才進 `try` 呼叫 `_do_analyze`/`_do_comparison`（含其
+         內部的連接器/Bedrock/pipeline 呼叫）＋ payload 組裝／信封序列化，
+         整段用單一 `except Exception`（含 `ValueError`）接住 → 一律回
+         通用 502，不再按例外型別分流成 400。
+    """
+    try:
+        qtype = QuestionType(qs.get("type", ["multi_source"])[0])
+    except ValueError:
+        return 400, _json_envelope_err("bad_request", "無效的題型（type）參數")
+
+    # --- 1. 純請求驗證（零依賴，呼叫任何 backend/連接器之前）---
+    query = qs.get("q", [f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}"])[0]
+    if len(query) > 1000:
+        return 400, _json_envelope_err(
+            "bad_request", f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）"
+        )
+
+    if qtype == QuestionType.COMPARISON:
+        coin_raw = (qs.get("coin", [""])[0]).strip()
+        coin2_raw = (qs.get("coin2", [""])[0]).strip()
+        if coin2_raw and "," not in coin_raw:
+            coin_raw = f"{coin_raw},{coin2_raw}"
+        try:
+            pair = _parse_comparison_coins(coin_raw, query)
+        except ValueError as exc:
+            return 400, _json_envelope_err("bad_request", str(exc))
+        if pair is None:
+            return 400, _json_envelope_err(
+                "bad_request",
+                "比較分析需要選擇兩個幣種，請在左側「比較幣種」欄位選擇一個跟"
+                "主要幣種不同的幣種",
+            )
+    else:
+        coin_raw = (qs.get("coin", ["BTC"])[0]).strip().upper()
+        if coin_raw not in COIN_POOL:
+            return 400, _json_envelope_err(
+                "bad_request", f"幣種須為以下其中之一：{'、'.join(COIN_POOL)}"
+            )
+
+    # --- 2. 驗證通過後才碰依賴（連接器/Bedrock/pipeline/序列化）---
+    try:
+        if qtype == QuestionType.COMPARISON:
+            report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
+                qs, client_ip=client_ip
+            )
+            payload = {
+                "version": VERSION,
+                "report_a": dataclasses.asdict(report_a),
+                "evidence_a": [ev.to_dict() for ev in evidence_a],
+                "trust_radar_a": aggregate_trust_by_kind(evidence_a),
+                "trust_components_aggregate_a": _aggregate_trust_components(evidence_a),
+                "price_provenance_a": _price_provenance_data(evidence_a),
+                "report_b": dataclasses.asdict(report_b),
+                "evidence_b": [ev.to_dict() for ev in evidence_b],
+                "trust_radar_b": aggregate_trust_by_kind(evidence_b),
+                "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
+                "price_provenance_b": _price_provenance_data(evidence_b),
+                "execution_log": log.events,
+            }
+        else:
+            report, evidence, log = _do_analyze(qs, client_ip=client_ip)
+            payload = {
+                "version": VERSION,
+                "report": dataclasses.asdict(report),
+                "evidence": [ev.to_dict() for ev in evidence],
+                "trust_radar": aggregate_trust_by_kind(evidence),
+                "trust_components_aggregate": _aggregate_trust_components(evidence),
+                "price_provenance": _price_provenance_data(evidence),
+                "execution_log": log.events,
+            }
+        return 200, _json_envelope_ok(payload)
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+    except Exception:
+        logging.exception("TrustForge /api/analyze error")
+        return 502, _json_envelope_err("upstream_error", "分析服務暫時無法使用，請稍後再試")
+
+
+def _handle_api_overview(client_ip: str = "") -> tuple[int, str]:
+    """`/api/overview`：多幣總覽結構化資料——逐幣讀 `__trust_snapshot__:{coin}`
+    最新一筆快照（`scripts/fetch_scheduler.py --snapshot` 既有寫入的
+    `_snapshot_dict()` 內容原樣），回傳結構化 JSON。
+
+    刻意不是讀首頁用的 `TRUST_OVERVIEW_SOURCE`（那顆是預先渲染好給
+    `_render_home_page()` 直接嵌字串用的 HTML blob）——API 消費者要的是可
+    程式化解析的資料，這裡改直接讀每幣的原始結構化快照；兩條讀路徑各自
+    獨立，互不影響，首頁背景刷新 thread／in-memory 現貨機制原樣不動。
+
+    套用 `_check_status_rate_limit`（跟 `/status` 同一組 bucket/門檻——這裡
+    做的是同一類逐 key 讀 cache backend 的工作，換路徑不能漏接限流）。只讀
+    既有排程寫入的快取，不寫入、不觸發任何連接器/Bedrock 呼叫。
+
+    codex 複審 HIGH（同分支修復 #1）：backend 建構＋逐幣 cache 讀取整段包
+    `except Exception`——比照 `_overview_bg_refresh_once()` 既有慣例（backend
+    建構本身出錯、憑證/DNS 問題、`cache_get()` 內建 fallback 檔案 I/O 失敗都
+    算），一律回通用 502，不讓 DynamoDB/config 例外穿透 `do_GET` 吐 traceback
+    （harper CISO must-have #3）。
+
+    codex 複審 HIGH（根因修復）：`cache_get()` 預設會把「primary+fallback
+    都讀取失敗（outage）」跟「單純沒這筆資料（miss）」兩者一樣吞成 `None`
+    ——這裡改用 `cache_get(..., strict=True)`，outage 時改成
+    `raise CacheReadFailure`，讓上面這層 `except Exception` 接住轉 502；
+    單純 miss（某幣還沒排程寫過快照）維持原樣正常跳過，回 200 該幣缺席。
+    """
+    try:
+        _check_status_rate_limit(client_ip)
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+
+    from .ingestion.cache import TRUST_SNAPSHOT_SOURCE, cache_get, cache_key
+
+    try:
+        backend = _home_overview_backend()
+        coins_data = []
+        for coin in COIN_POOL:
+            entry = cache_get(backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), strict=True)
+            if entry is None:
+                continue
+            docs = entry.get("docs") or []
+            if not docs or not isinstance(docs[0], dict):
+                continue
+            snap = dict(docs[0])
+            snap["fetched_at_epoch"] = entry.get("fetched_at")
+            coins_data.append(snap)
+        return 200, _json_envelope_ok({"coins": coins_data})
+    except Exception:
+        logging.exception("TrustForge /api/overview error")
+        return 502, _json_envelope_err("upstream_error", "總覽資料暫時無法讀取，請稍後再試")
+
+
+def _handle_api_status(client_ip: str = "") -> tuple[int, str]:
+    """`/api/status`：`/status` 頁資料的 JSON 化版本——版本／模式能力／
+    快取 backend 連線健康／資料鮮度矩陣／運行時間。
+
+    刻意比 SSR `/status` 頁更保守：連線探測失敗時**不**回傳原始例外訊息
+    （SSR 頁面歷史上會顯示 `str(exc)` 供人工除錯，這裡是機器可讀 API，更
+    容易被大量掃描/爬取，只回通用訊息，不洩露 DynamoDB 錯誤細節，見 harper
+    CISO must-have #3）。只做被要求的「連接器健康/鮮度/版本/uptime」四項，
+    不含成本帳本明細（見 `/api/costs`）／連接器用量／最近排程執行，避免
+    範圍蔓延。
+
+    codex 複審 HIGH（同分支修復 #1）：`get_cache_backend()` **建構本身**
+    （跟下面 `.get()` 探測是兩回事）先前沒包例外邊界——config/憑證錯誤會
+    直接穿透 `do_GET` 吐 traceback。現在建構失敗也整個回通用 502，不洩露
+    細節。
+
+    codex 複審 HIGH（同分支修復 #2，對齊 502 契約）：cache probe（`.get()`）
+    與 `get_freshness_snapshot()` **先前各自 swallow 例外**，退化成
+    `connected: false` / 空鮮度 + 仍然 HTTP 200——這會讓只看 HTTP 狀態碼
+    的監控把「依賴不可用」誤判成「API 健康」。現在這兩步依賴一旦拋例外，
+    整個請求回通用 502（跟其餘 `/api/*` 端點一致的「依賴失敗→502」契約），
+    診斷細節只進 server log，不進回應 body；只有兩步依賴都成功時才回
+    200 + 各元件狀態資料。
+
+    ⚠️ 這只改本 API 端點的契約；**既有 SSR `/status` HTML 頁面**
+    （`_handle_status`）的 dashboard 行為（顯示紅/綠元件狀態卡片）完全
+    沒有被觸碰，維持逐字不變（LIVE 頁面）——它呼叫 `get_freshness_snapshot()`
+    時不傳 `strict`，用預設 `False`，行為不受下面這個改動影響。
+
+    codex 複審 HIGH（根因修復）：`get_freshness_snapshot()` 內部逐
+    (source, coin) 呼叫 `cache_get()`，預設會把「讀取真的失敗（outage）」
+    跟「單純沒這個 (source, coin) 快照（missing，本來就合法）」都變成同一
+    種「這格標 missing」結果，讓監控看不出 cache 依賴其實掛了。這裡改用
+    `get_freshness_snapshot(..., strict=True)`，outage 時改成
+    `raise CacheReadFailure`，被下面這層 `except Exception` 接住轉 502；
+    純粹沒快照（`missing` 狀態）維持原樣正常回 200。
+
+    codex 複審 HIGH（最終閉合）：先前這裡在呼叫 `get_freshness_snapshot()`
+    前，還有一個**獨立、繞過 `cache_get()` fallback 機制**的 probe
+    （直接 `cache_backend.get(...)`，回傳值完全沒被使用，純粹「呼叫本身
+    有沒有丟例外」）。這個 probe 只要 **primary 拋例外就立刻 502**，即使
+    本地 `JsonCacheBackend` fallback 其實讀得到——跟 overview/history
+    「primary+fallback 都失敗才 502」的 outage 定義不一致，會把單純的
+    transient DynamoDB 失敗（fallback 正常）誤判成整個依賴掛掉。
+    現在移除這個冗餘 probe，502 判定完全交給下面
+    `get_freshness_snapshot(..., strict=True)`——它本身就是透過
+    `cache_get(..., strict=True)` 逐格讀取，天生 fallback-aware：primary
+    失敗但 fallback 讀得到 → 正常回值（不 raise）；只有 primary+fallback
+    都失敗才 `raise CacheReadFailure` → 502。跟 overview/history 的 502
+    條件完全對齊。
+
+    codex 複審 MEDIUM（觀測準確性，最終閉合）：上面這條「primary 失敗但
+    fallback 成功 → 200」的路徑修好之後，發現這裡**無條件**回報
+    `cache_backend: {name: type(cache_backend).__name__, connected: True}`
+    ——也就是說 primary（例如 DynamoDB）整段 outage、完全靠本地
+    `JsonCacheBackend` fallback 撐著時，回應照樣講「DynamoDB
+    connected:true」，掩蓋了長時間降級，違反 `/api/status` 本身作為觀測
+    端點的目的。現在用 `cache_get()`/`get_freshness_snapshot()` 新增的
+    `degradation_out` 訊號（OR 聚合：矩陣裡任一格用過 fallback 就算
+    degraded）如實分開回報：
+      - `primary_connected`：primary backend 是否真的親自答對（沒有任何
+        一格靠 fallback）。
+      - `active_backend`：這次請求實際拿資料的 backend 類名——正常時等於
+        `name`（primary 自己）；degraded 時是 `"JsonCacheBackend"`。
+      - `degraded`：`primary_connected` 的反面，明講「這次回應是降級模式
+        的結果」。
+      - `connected`（沿用既有欄位，語意收斂成跟 `primary_connected`
+        一致，不再無條件硬寫 `True`）：避免保留一個名字聽起來像「服務
+        正常」但其實只代表 fallback 撐住的舊欄位，混淆意義。
+    Fallback 成功仍然回 200（服務本身可用，只是繞去讀本地備援）；只有
+    primary+fallback 都失敗（`get_freshness_snapshot` raise
+    `CacheReadFailure`）才會落進下面的 `except Exception` 回 502，跟
+    codex 前一輪定義的 outage 條件一致。
+
+    codex 複審 HIGH（production 安全，circuit breaker + 短 timeout，最終
+    最終閉合）：上面「primary 失敗、fallback 成功仍回 200」這條路徑本身沒
+    問題，但 `get_freshness_snapshot()` 逐 (source, coin) 迴圈約 115 格，
+    先前**每一格都重新嘗試一次 primary**——DynamoDB outage 時，這是
+    (1) 對已經掛掉的依賴疊加 ~115 倍流量（可能讓 outage 更嚴重），
+    (2) 就算 SDK 有預設 timeout，115 次疊加仍可能讓整支請求拖到多分鐘，
+    「degraded 仍回 200」的承諾在實務上變成「多分鐘 hang」。現在兩處一起
+    修：
+      - **短 timeout + 限重試**：改用 `_status_cache_backend()`（而非
+        `get_cache_backend()`）建構 DynamoDB backend，帶明確
+        `connect_timeout`/`read_timeout`/`max_attempts`（見該函式與
+        `_STATUS_CACHE_*` 常數），對齊
+        `scripts/fetch_scheduler.py::_probe_cache_backend()` 既有慣例，讓
+        「每一次 primary 嘗試」本身有界。SSR `/status` 頁仍用
+        `get_cache_backend()`（無 timeout），這裡刻意不動。
+      - **request-scoped circuit breaker**：`get_freshness_snapshot(...,
+        circuit_breaker=True)`——同一次請求內第一次偵測到 primary 失敗
+        後，後續格子直接跳過 primary、只讀本地 `JsonCacheBackend`，不再
+        逐格重試已知掛掉的依賴。兩者合起來，整支請求的 primary 嘗試次數
+        全程 ≤1 次，延遲不再隨格數線性放大。
+    degraded/502 語意跟上一輪完全一致：fallback 成功仍 200 + 如實回報
+    降級 metadata；primary+fallback 都失敗才 502。
+    """
+    try:
+        _check_status_rate_limit(client_ip)
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+
+    from .ingestion.cache import get_freshness_snapshot
+
+    try:
+        cache_backend = _status_cache_backend()
+    except Exception:
+        logging.exception("TrustForge /api/status error（cache backend 建構失敗）")
+        return 502, _json_envelope_err("upstream_error", "狀態資料暫時無法讀取，請稍後再試")
+
+    try:
+        degradation: dict[str, bool] = {}
+        freshness = get_freshness_snapshot(
+            backend=cache_backend, strict=True, degradation_out=degradation,
+            circuit_breaker=True,
+        )
+        used_fallback = degradation.get("used_fallback", False)
+        primary_connected = not used_fallback
+        active_backend = "JsonCacheBackend" if used_fallback else type(cache_backend).__name__
+        fresh_n = sum(1 for r in freshness if r.get("status") == "fresh")
+        stale_n = sum(1 for r in freshness if r.get("status") == "stale")
+        missing_n = sum(1 for r in freshness if r.get("status") == "missing")
+        data = {
+            "version": VERSION,
+            "uptime_seconds": round(time.time() - _START_TIME, 3),
+            "bedrock_capable": bool(HAS_BEDROCK),
+            "live_token_set": bool(LIVE_TOKEN),
+            "cache_backend": {
+                "name": type(cache_backend).__name__,
+                "connected": primary_connected,
+                "primary_connected": primary_connected,
+                "active_backend": active_backend,
+                "degraded": used_fallback,
+            },
+            "freshness": {
+                "fresh": fresh_n,
+                "stale": stale_n,
+                "missing": missing_n,
+                "entries": freshness,
+            },
+        }
+        return 200, _json_envelope_ok(data)
+    except Exception:
+        logging.exception("TrustForge /api/status error（freshness 讀取失敗，primary+fallback 皆不可用）")
+        return 502, _json_envelope_err("upstream_error", "狀態資料暫時無法讀取，請稍後再試")
+
+
+def _handle_api_costs(client_ip: str = "") -> tuple[int, str]:
+    """`/api/costs`：成本帳本 JSON 化版本——直接重用 `_get_ledger_summary()`
+    （既有 20 秒 TTL + single-flight 快取，`/status`／`/costs` 頁共用同一份
+    真實累計數字），不新增查詢語意。套用 `_check_status_rate_limit`（理由同
+    `_handle_api_overview`）。
+
+    codex 複審 HIGH（同分支修復）：`_get_ledger_summary()` 呼叫＋序列化包
+    `except Exception`——即使該函式內部已有 fallback，fallback 本身讀檔
+    失敗仍可能往上炸，不包會讓 ledger I/O 例外穿透 `do_GET` 吐 traceback。
+    """
+    try:
+        _check_status_rate_limit(client_ip)
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+    try:
+        return 200, _json_envelope_ok(_get_ledger_summary())
+    except Exception:
+        logging.exception("TrustForge /api/costs error")
+        return 502, _json_envelope_err("upstream_error", "成本資料暫時無法讀取，請稍後再試")
+
+
+# 對齊 `cache.py::TRUST_SNAPSHOT_HISTORY_TTL_SECONDS`（90 天保留期限）——問
+# 超過保留期限的天數本來就查無資料，直接在 API 層擋掉，不做無意義的大量
+# cache 逐日讀取。
+_API_HISTORY_MAX_DAYS = 90
+
+
+def _handle_api_history(qs: dict, client_ip: str = "") -> tuple[int, str]:
+    """`/api/history`（淨新增）：PIT 歷史——`get_trust_history()`（PR#59 已
+    寫入但零路由消費）按日信任序列 JSON 化。`coin` 過既有 `COIN_POOL` 白
+    名單，`days` 限制在 `[1, _API_HISTORY_MAX_DAYS]`，兩者不合法皆回 400 +
+    通用訊息。
+
+    套用 `_check_status_rate_limit`（`get_trust_history` 逐日各讀一次
+    cache，`days` 越大讀取量越大，同一類「逐 key 讀 cache backend」風險，
+    理由同 `_handle_api_overview`）。
+
+    codex 複審 HIGH（同分支修復 #1）：`get_trust_history()` 呼叫＋信封序列化
+    整段包進同一個 `except Exception`，避免序列化那一步漏接。
+
+    codex 複審 HIGH（根因修復）：`get_trust_history()` 傳 `strict=True`——
+    逐日 `cache_get()` 若「讀取真的失敗（outage）」不再被吞成「那天沒快
+    照」，改成 `raise CacheReadFailure`，被下面 `except Exception` 接住轉
+    502；單純某幾天沒排程寫過快照（合法 miss）維持原樣正常跳過，回 200
+    + 較短的 history 陣列。
+    """
+    try:
+        _check_status_rate_limit(client_ip)
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+
+    coin_raw = (qs.get("coin", [""])[0]).strip().upper()
+    if len(coin_raw) > 20 or coin_raw not in COIN_POOL:
+        return 400, _json_envelope_err(
+            "bad_request", f"幣種須為以下其中之一：{'、'.join(COIN_POOL)}"
+        )
+
+    days_raw = (qs.get("days", ["30"])[0]).strip()
+    if len(days_raw) > 10 or not days_raw.lstrip("-").isdigit():
+        return 400, _json_envelope_err("bad_request", "days 須為正整數")
+    days = int(days_raw)
+    if days < 1 or days > _API_HISTORY_MAX_DAYS:
+        return 400, _json_envelope_err(
+            "bad_request", f"days 須介於 1 至 {_API_HISTORY_MAX_DAYS} 之間"
+        )
+
+    from .ingestion.cache import get_trust_history
+
+    try:
+        history = get_trust_history(
+            coin_raw, days, backend=_home_overview_backend(), strict=True
+        )
+        return 200, _json_envelope_ok({"coin": coin_raw, "days": days, "history": history})
+    except Exception:
+        logging.exception("TrustForge /api/history error")
+        return 502, _json_envelope_err("upstream_error", "歷史資料暫時無法讀取，請稍後再試")
+
+
+def _handle_api_health() -> tuple[int, str]:
+    """`/api/health`：JSON 版健康檢查，補在既有純文字 `/healthz` 之外（見
+    `Handler.do_GET`）——同樣零 I/O、不設限流，供偏好 JSON 回應格式的健康
+    檢查探針使用。
+
+    codex 複審 HIGH 巡查範圍內：本端點沒有任何 backend/ledger 依賴，理論上
+    不會拋例外，仍比照其餘 5 個 `/api/*` 端點包一層 `except Exception`，統一
+    防禦邊界，避免未來改動不小心引入依賴卻漏包。
+    """
+    try:
+        return 200, _json_envelope_ok(
+            {
+                "status": "ok",
+                "version": VERSION,
+                "uptime_seconds": round(time.time() - _START_TIME, 3),
+            }
+        )
+    except Exception:
+        logging.exception("TrustForge /api/health error")
+        return 502, _json_envelope_err("upstream_error", "健康檢查暫時無法讀取，請稍後再試")
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra_headers=None):
         b = body.encode("utf-8")
@@ -3002,6 +3516,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
+
+        # 前後端分離 Phase 1（task #28）：純新增 JSON API 端點，統一
+        # `{ok,data,error}` 信封，見 `_handle_api_*` 系列函式 docstring/
+        # 模組頂部大段說明。⛔ 完全獨立於下方既有 SSR 路由，不改動、不共用
+        # 任何既有分支的程式碼路徑。
+        if u.path == "/api/health":
+            code, body = _handle_api_health()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/status":
+            code, body = _handle_api_status(client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/costs":
+            code, body = _handle_api_costs(client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/overview":
+            code, body = _handle_api_overview(client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/history":
+            code, body = _handle_api_history(qs, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analyze":
+            code, body = _handle_api_analyze(qs, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
 
         # CEO 決策（PR #39，收斂）：theme toggle 切換機制（/theme 路由、
         # rtok render cache、cookie 讀寫、header ★ 按鈕）整個拆除——rtok
