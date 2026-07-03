@@ -315,6 +315,7 @@ def get_trust_history(
     backend: CacheBackend | None = None,
     *,
     end_date: str | None = None,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
     """讀回 `coin` 過去 `days` 天（含 `end_date` 當天，預設今天 UTC）的按日
     信任快照序列——供未來 #26 UI 趨勢圖使用（本輪只做寫入 + 這個讀取
@@ -331,6 +332,12 @@ def get_trust_history(
 
     `end_date`：選用，`YYYY-MM-DD` 字串，供測試/未來 UI 指定「以哪天為
     終點往回看」；不傳預設用當下 UTC 日期。
+
+    `strict`（預設 `False`，opt-in，不影響既有呼叫端）：直接透傳給底層
+    `cache_get(..., strict=...)`——`True` 時任一天讀取「真的失敗」
+    （不是單純沒快照）會 `raise CacheReadFailure`，讓呼叫端（如
+    `/api/history`）能區分「cache outage 該 502」與「這幾天沒快照，正常
+    回空序列」（見 `cache_get()` docstring、codex 複審 HIGH 根因修復）。
     """
     resolved_backend = backend if backend is not None else get_cache_backend()
     if end_date is not None:
@@ -341,7 +348,9 @@ def get_trust_history(
     history: list[dict[str, Any]] = []
     for offset in range(days):
         day_str = (end - timedelta(days=offset)).strftime("%Y-%m-%d")
-        entry = cache_get(resolved_backend, trust_snapshot_history_key(coin, day_str))
+        entry = cache_get(
+            resolved_backend, trust_snapshot_history_key(coin, day_str), strict=strict
+        )
         if entry is None:
             continue
         docs = entry.get("docs") or []
@@ -732,7 +741,26 @@ def get_cache_backend() -> CacheBackend:
     return DynamoDBCache()
 
 
-def cache_get(backend: CacheBackend, key: str) -> dict[str, Any] | None:
+class CacheReadFailure(Exception):
+    """`cache_get(..., strict=True)` 專用：primary **和** fallback（若有
+    嘗試）讀取都失敗——不是「這個 key 沒資料」的正常 miss，是 cache 本身
+    outage（DynamoDB 掛了/憑證壞了/本地磁碟也讀不了）。
+
+    codex 複審 HIGH（根因修復）：預設（非 strict）`cache_get()` 一律把這
+    種情況吞掉回 `None`，讓「outage」跟「miss」在呼叫端看起來一模一樣
+    ——`/api/overview`／`/api/history`／`/api/status` 鮮度這類需要對外
+    回報「依賴失敗→502」契約的呼叫端，用不到這個區分就會誤把 outage
+    當成「沒資料」回 200，監控/使用者都看不出依賴真的掛了。"""
+
+
+def cache_get(
+    backend: CacheBackend,
+    key: str,
+    *,
+    strict: bool = False,
+    degradation_out: dict[str, bool] | None = None,
+    skip_primary: bool = False,
+) -> dict[str, Any] | None:
     """讀快取；`backend` 失敗（如 DynamoDB 缺憑證/表未建/網路問題）自動
     fallback 讀本地 `JsonCacheBackend`（比照 `ledger.append_run()` 的 fallback
     慣例）。
@@ -741,20 +769,86 @@ def cache_get(backend: CacheBackend, key: str) -> dict[str, Any] | None:
     沒有資料」（回傳 `None`）視為合法的 cache-miss，不觸發 fallback 去查
     另一個 backend（避免兩個 backend 資料不同步時，把「A 沒有」誤判成
     「應該去問 B」，語意模糊）。
+
+    `strict`（預設 `False`，opt-in——**不傳這個參數的既有呼叫端行為逐字
+    不變**）：`False` 時維持上述既有行為，primary+fallback 都失敗一樣吞
+    例外回 `None`。`strict=True` 時，若 primary **和**（有嘗試的話）
+    fallback 都讀取失敗，改成 `raise CacheReadFailure`，不再悄悄回
+    `None`——讓呼叫端能分辨「outage（讀取真的失敗，該視為依賴不可用）」
+    跟「miss（backend 正常運作，只是這個 key 沒資料，該視為合法的『沒有
+    這筆資料』）」。純 miss（`backend.get()` 正常回傳 `None`，沒有丟例外）
+    在 `strict=True`／`False` 兩種模式下行為完全一樣，一律回 `None`——
+    `strict` 只影響「讀取真的失敗」這個分支，不影響「合法沒資料」。
+
+    `degradation_out`（預設 `None`，opt-in，不傳不影響任何既有行為）：
+    codex 複審 MEDIUM（觀測準確性）——讀取「有沒有靠 fallback 才成功」的
+    訊號原本完全丟失，呼叫端（如 `/api/status`）沒辦法知道這次讀取是
+    primary 親自答的，還是 primary 掛了、靠本地 `JsonCacheBackend` 頂著。
+    傳一個共用的 `dict` 進來，這個函式會：primary 直接成功 →
+    `degradation_out.setdefault("used_fallback", False)`（**不覆蓋**已經
+    被前面呼叫標成 `True` 的值，讓呼叫端能對多次 `cache_get()` 呼叫做
+    「只要曾經用過 fallback 就算 degraded」的 OR 聚合，比照
+    `get_freshness_snapshot()` 逐 (source, coin) 迴圈呼叫的用法）；
+    fallback 成功 → 無條件 `degradation_out["used_fallback"] = True`。
+
+    `skip_primary`（預設 `False`，opt-in，不傳不影響任何既有行為）：codex
+    複審 HIGH（circuit breaker，production 安全）——`get_freshness_snapshot()`
+    這類逐 (source, coin) 迴圈呼叫 `cache_get()` 的呼叫端，一旦在同一次
+    請求內已經觀察到 primary 讀取失敗一次，後續每一格繼續重新嘗試 primary
+    只是在對一個已知掛掉的依賴（如 DynamoDB outage）疊加流量，且吃 SDK
+    預設 timeout/重試會讓整支請求的延遲隨格數線性放大（可拖到多分鐘）。
+    `skip_primary=True` 時**完全跳過**呼叫 `backend.get(key)`，直接讀
+    fallback `JsonCacheBackend`（成功 → 視同 fallback 成功，
+    `degradation_out["used_fallback"] = True`；失敗 → 視同 primary+fallback
+    皆失敗，`strict=True` 時 raise `CacheReadFailure`）。若 `backend` 本身
+    就是 `JsonCacheBackend`（沒有另一層可跳過去的 fallback），這個參數
+    沒有意義，直接忽略、照常呼叫 `backend.get()`。
     """
+    if skip_primary and not isinstance(backend, JsonCacheBackend):
+        try:
+            result = JsonCacheBackend().get(key)
+            if degradation_out is not None:
+                degradation_out["used_fallback"] = True
+            return result
+        except Exception as exc:
+            print(
+                f"[cache] WARNING: fallback JsonCacheBackend get 仍失敗"
+                f"（circuit breaker 生效中，已跳過 primary）：{exc}",
+                file=sys.stderr,
+            )
+            if strict:
+                raise CacheReadFailure(
+                    f"cache read failed (circuit breaker, fallback): {exc}"
+                ) from exc
+            return None
+
     try:
-        return backend.get(key)
+        result = backend.get(key)
+        if degradation_out is not None:
+            degradation_out.setdefault("used_fallback", False)
+        return result
     except Exception as exc:
+        primary_exc = exc
         print(f"[cache] WARNING: get 失敗（backend={type(backend).__name__}）：{exc}",
               file=sys.stderr)
 
     if isinstance(backend, JsonCacheBackend):
-        return None  # 同一顆 JsonCacheBackend 剛失敗，換個新實例打同路徑必再失敗，不重試
+        # 同一顆 JsonCacheBackend 剛失敗，換個新實例打同路徑必再失敗，不重試
+        if strict:
+            raise CacheReadFailure(f"cache read failed: {primary_exc}") from primary_exc
+        return None
 
     try:
-        return JsonCacheBackend().get(key)
+        result = JsonCacheBackend().get(key)
+        if degradation_out is not None:
+            degradation_out["used_fallback"] = True
+        return result
     except Exception as exc:
         print(f"[cache] WARNING: fallback JsonCacheBackend get 仍失敗：{exc}", file=sys.stderr)
+        if strict:
+            raise CacheReadFailure(
+                f"cache read failed (primary+fallback): {primary_exc}; fallback: {exc}"
+            ) from exc
         return None
 
 
@@ -934,6 +1028,10 @@ def get_freshness_snapshot(
     backend: CacheBackend | None = None,
     source_names: Iterable[str] | None = None,
     coins: Iterable[str] | None = None,
+    *,
+    strict: bool = False,
+    degradation_out: dict[str, bool] | None = None,
+    circuit_breaker: bool = False,
 ) -> list[dict[str, Any]]:
     """`/status` 資料鮮度矩陣用的唯讀 helper：逐 (source, coin) 讀 cache
     `fetched_at`，比對 `stale_after_for(refresh_interval)` 標「新鮮／過期／缺」。
@@ -955,6 +1053,36 @@ def get_freshness_snapshot(
     來源的 refresh 間隔查 `DEFAULT_REFRESH_INTERVAL_SECONDS`（未知來源名 fallback
     `DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS`），跟 `CachedSource`/
     `scripts/fetch_scheduler.py` 共用同一份數字，不另外手填第二份。
+
+    `strict`（預設 `False`，opt-in——**SSR `/status` 頁呼叫端不傳這個參數，
+    行為逐字不變**，這裡描述的只是 `True` 時的差異）：直接透傳給底層
+    `cache_get(..., strict=...)`——`True` 時任一 (source, coin) 讀取「真的
+    失敗」（不是單純沒快照）會 `raise CacheReadFailure`，讓呼叫端（如
+    `/api/status`）能區分「cache outage 該 502」與「這個來源這個幣沒資料，
+    正常標 missing」（見 `cache_get()` docstring、codex 複審 HIGH 根因
+    修復）。
+
+    `degradation_out`（預設 `None`，opt-in，不傳不影響任何既有行為）：
+    codex 複審 MEDIUM（觀測準確性）——直接透傳給每一次內部 `cache_get()`
+    呼叫，讓呼叫端能知道這次鮮度矩陣是不是**曾經**靠 fallback
+    `JsonCacheBackend` 頂著才讀到（見 `cache_get()` docstring 的 OR 聚合
+    語意：只要矩陣裡任一格用過 fallback，整體就該視為 primary degraded，
+    即使其餘格都是 primary 親自答的）。
+
+    `circuit_breaker`（預設 `False`，opt-in，不傳不影響任何既有行為——
+    **SSR `/status` 頁呼叫端不傳這個參數，逐字不變**）：codex 複審 HIGH
+    （production 安全）——這個矩陣要逐 (source, coin) 迴圈呼叫
+    `cache_get()`（`DEFAULT_REFRESH_INTERVAL_SECONDS` × `COIN_POOL` 全量
+    組合約 115 格），若 primary（如 DynamoDB）整段 outage，逐格都重新
+    嘗試 primary 一次，會：(1) 對已經掛掉的依賴疊加 ~115 倍流量，可能讓
+    outage 更嚴重；(2) 就算每次呼叫都會失敗，SDK 預設 timeout/重試疊加
+    起來仍可能讓整支請求拖到多分鐘，「degraded 仍回 200」的承諾在實務上
+    變成「多分鐘 hang」。`circuit_breaker=True` 時：**同一次呼叫內**一旦
+    偵測到任一格用了 fallback（primary 那一下失敗了），後續所有格子改用
+    `cache_get(..., skip_primary=True)`——直接跳過 primary、只讀本地
+    `JsonCacheBackend`，不再重試已知掛掉的依賴。這個偵測用的正是
+    `degradation_out` 訊號；若呼叫端沒傳 `degradation_out`，內部會借用一
+    個 local dict 供 circuit breaker 自己追蹤，不影響對外回傳值。
     """
     # 延遲匯入避免模組載入順序造成循環匯入（schema.py 不依賴 ingestion，
     # 理論上不會循環，但沿用專案內其他處延遲匯入的保守慣例）。
@@ -964,13 +1092,28 @@ def get_freshness_snapshot(
     names = list(source_names) if source_names is not None else sorted(DEFAULT_REFRESH_INTERVAL_SECONDS)
     coin_list = list(coins) if coins is not None else list(COIN_POOL)
 
+    # circuit breaker 判斷「primary 是否已知失敗」的訊號來源：若呼叫端有給
+    # `degradation_out` 就直接共用同一個 dict（沿用既有 OR 聚合契約，
+    # 對外回傳值不受影響）；沒給的話（理論上不該發生在真正需要 circuit
+    # breaker 的呼叫端，但防呆）借用一個純內部 local dict，只供本函式判斷
+    # 是否該跳過 primary 用，不對外流出。`circuit_breaker=False` 時這個
+    # dict 完全不使用（見下面 `tracking` 賦值），維持既有行為零改動。
+    tracking = degradation_out if degradation_out is not None else ({} if circuit_breaker else None)
+    primary_broken = False
+
     now = time.time()
     snapshot: list[dict[str, Any]] = []
     for name in names:
         interval = DEFAULT_REFRESH_INTERVAL_SECONDS.get(name, DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS)
         stale_after = stale_after_for(interval)
         for coin in coin_list:
-            entry = cache_get(resolved_backend, cache_key(name, coin))
+            entry = cache_get(
+                resolved_backend, cache_key(name, coin),
+                strict=strict, degradation_out=tracking,
+                skip_primary=circuit_breaker and primary_broken,
+            )
+            if circuit_breaker and not primary_broken and tracking is not None and tracking.get("used_fallback"):
+                primary_broken = True
             if entry is None:
                 snapshot.append({
                     "source": name, "coin": coin, "status": "missing",
