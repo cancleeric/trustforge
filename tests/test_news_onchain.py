@@ -880,6 +880,167 @@ def test_blockchair_wrong_type_field_raises(monkeypatch):
         onchain.BlockchairStatsSource().fetch("", coin="BTC")
 
 
+# ── codex MEDIUM 第 8 輪（PR #55，鏈上驗證最終閉合）：型別合法但語意上
+# 不可能的數值（負手續費、負區塊數、進度超 0–100%、sentinel -1）不能被
+# 當真資料發布 ─────────────────────────────────────────────────────────
+
+def test_mempool_space_fees_negative_fee_raises(monkeypatch):
+    """手續費（sat/vB）語意上不可能為負——sentinel -1 或限流異常回應。"""
+    from trustforge.ingestion import onchain
+    bad = b'{"fastestFee": -1, "halfHourFee": 8, "hourFee": 6, "economyFee": 3, "minimumFee": 1}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+
+
+def test_mempool_space_fees_negative_minimum_fee_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"fastestFee": 12, "halfHourFee": 8, "hourFee": 6, "economyFee": 3, "minimumFee": -1}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+
+
+def test_mempool_space_fees_zero_fee_is_valid(monkeypatch):
+    """0 是合法邊界值（極端低擁塞時 economy/minimum 費率可能是 0），不該
+    被誤擋。"""
+    from trustforge.ingestion import onchain
+    ok = b'{"fastestFee": 1, "halfHourFee": 1, "hourFee": 0, "economyFee": 0, "minimumFee": 0}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: ok)
+    docs = onchain.MempoolSpaceFeesSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+
+
+def test_mempool_space_difficulty_progress_over_100_raises(monkeypatch):
+    """進度百分比語意上只能在 0–100 之間，超過 100 是不可能的鏈上狀態。"""
+    from trustforge.ingestion import onchain
+    bad = b'{"progressPercent": 150, "difficultyChange": -1.43, "remainingBlocks": 1121}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+
+
+def test_mempool_space_difficulty_negative_progress_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"progressPercent": -5, "difficultyChange": -1.43, "remainingBlocks": 1121}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+
+
+def test_mempool_space_difficulty_negative_remaining_blocks_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = b'{"progressPercent": 44.39, "difficultyChange": -1.43, "remainingBlocks": -1}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    with pytest.raises(ValueError):
+        onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+
+
+def test_mempool_space_difficulty_negative_change_is_valid(monkeypatch):
+    """difficultyChange 可正可負（難度下修是合法鏈上事件），不該被範圍
+    檢查誤擋。"""
+    from trustforge.ingestion import onchain
+    ok = b'{"progressPercent": 10, "difficultyChange": -12.5, "remainingBlocks": 2000}'
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: ok)
+    docs = onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+    assert len(docs) == 1
+
+
+def test_mempool_space_difficulty_boundary_0_and_100_are_valid(monkeypatch):
+    """0% 與 100% 是合法邊界值（含邊界），不該被誤擋。"""
+    from trustforge.ingestion import onchain
+    for progress in (0, 100):
+        ok = json.dumps({
+            "progressPercent": progress, "difficultyChange": 0, "remainingBlocks": 0,
+        }).encode()
+        monkeypatch.setattr(onchain, "_fetch_url", lambda url, ok=ok: ok)
+        docs = onchain.MempoolSpaceDifficultySource().fetch("", coin="BTC")
+        assert len(docs) == 1
+
+
+def test_blockchair_zero_blocks_raises(monkeypatch):
+    """區塊高度是 sentinel/不可能狀態的 0，必須擋下（真實 BTC 區塊高度
+    永遠 > 0）。"""
+    from trustforge.ingestion import onchain
+    bad = (
+        b'{"data": {"blocks": 0, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 82785, "transactions_24h": 573582, '
+        b'"best_block_time": "2026-07-03 09:18:09"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    monkeypatch.setattr(onchain.time, "time", lambda: _BLOCKCHAIR_FIXED_NOW)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_negative_blocks_sentinel_raises(monkeypatch):
+    """sentinel -1 型別合法但語意上不可能，必須擋下。"""
+    from trustforge.ingestion import onchain
+    bad = (
+        b'{"data": {"blocks": -1, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 82785, "transactions_24h": 573582, '
+        b'"best_block_time": "2026-07-03 09:18:09"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    monkeypatch.setattr(onchain.time, "time", lambda: _BLOCKCHAIR_FIXED_NOW)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_zero_difficulty_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = (
+        b'{"data": {"blocks": 956480, "difficulty": 0, '
+        b'"mempool_transactions": 82785, "transactions_24h": 573582, '
+        b'"best_block_time": "2026-07-03 09:18:09"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    monkeypatch.setattr(onchain.time, "time", lambda: _BLOCKCHAIR_FIXED_NOW)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_negative_mempool_transactions_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = (
+        b'{"data": {"blocks": 956480, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": -1, "transactions_24h": 573582, '
+        b'"best_block_time": "2026-07-03 09:18:09"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    monkeypatch.setattr(onchain.time, "time", lambda: _BLOCKCHAIR_FIXED_NOW)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_negative_transactions_24h_raises(monkeypatch):
+    from trustforge.ingestion import onchain
+    bad = (
+        b'{"data": {"blocks": 956480, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 82785, "transactions_24h": -1, '
+        b'"best_block_time": "2026-07-03 09:18:09"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: bad)
+    monkeypatch.setattr(onchain.time, "time", lambda: _BLOCKCHAIR_FIXED_NOW)
+    with pytest.raises(ValueError):
+        onchain.BlockchairStatsSource().fetch("", coin="BTC")
+
+
+def test_blockchair_zero_mempool_transactions_is_valid(monkeypatch):
+    """mempool_transactions == 0 是合法狀態（mempool 剛好清空），不該被
+    誤擋——只有負值才是不可能的。"""
+    from trustforge.ingestion import onchain
+    ok = (
+        b'{"data": {"blocks": 956480, "difficulty": 133869853540305.4, '
+        b'"mempool_transactions": 0, "transactions_24h": 0, '
+        b'"best_block_time": "2026-07-03 09:18:09"}, "context": {"code": 200}}'
+    )
+    monkeypatch.setattr(onchain, "_fetch_url", lambda url: ok)
+    monkeypatch.setattr(onchain.time, "time", lambda: _BLOCKCHAIR_FIXED_NOW)
+    docs = onchain.BlockchairStatsSource().fetch("", coin="BTC")
+    assert len(docs) == 1
+
+
 def test_build_onchain_sources_includes_batch2_sources(monkeypatch):
     """build_onchain_sources() 含新舊共 5 個鏈上來源（2 變 5）。"""
     from trustforge.ingestion import onchain

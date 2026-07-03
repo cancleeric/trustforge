@@ -63,10 +63,26 @@ def _fetch_url(url: str) -> bytes:
 # 的失敗語意，見 `test_*_source_failure_does_not_crash_collect` 系列）。
 # ---------------------------------------------------------------------------
 
-def _require_number(data: dict, key: str, context: str) -> float:
+def _require_number(
+    data: dict,
+    key: str,
+    context: str,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+    exclusive_min: bool = False,
+) -> float:
     """驗證 `data[key]` 存在且為有限數值（`bool` 雖是 `int` 子類但不算數值，
     避免 JSON 的 `true`/`false` 被誤當成 1/0 接受），否則 `raise ValueError`
-    ——不得回傳 "N/A" 或任何佔位字串讓呼叫端誤當真資料發布。"""
+    ——不得回傳 "N/A" 或任何佔位字串讓呼叫端誤當真資料發布。
+
+    codex MEDIUM（PR #55，第 8 輪，鏈上驗證最終閉合）：型別合法不代表語意
+    合理——負手續費、負區塊數、進度超出 0–100%、sentinel `-1` 等「型別對
+    但語意不可能」的數值，過去都會被 `_require_number` 放行、包成一筆
+    帶新鮮時間戳的 Document 發布，覆蓋掉還能用的舊快取。加上 `min_value`/
+    `max_value`（含邊界）與 `exclusive_min`（區塊高度/難度這類「必須嚴格
+    > 0」的欄位）選用範圍檢查，違反一律 raise，不建 Document。
+    """
     if key not in data:
         raise ValueError(f"{context}: 回應缺少必要欄位 {key!r}")
     value = data[key]
@@ -75,6 +91,20 @@ def _require_number(data: dict, key: str, context: str) -> float:
     value = float(value)
     if value != value or value in (float("inf"), float("-inf")):  # NaN / inf
         raise ValueError(f"{context}: 欄位 {key!r} 不是有限數值：{value!r}")
+    if min_value is not None:
+        if exclusive_min:
+            if value <= min_value:
+                raise ValueError(
+                    f"{context}: 欄位 {key!r} 數值語意不合理（須 > {min_value!r}）：{value!r}"
+                )
+        elif value < min_value:
+            raise ValueError(
+                f"{context}: 欄位 {key!r} 數值語意不合理（須 >= {min_value!r}）：{value!r}"
+            )
+    if max_value is not None and value > max_value:
+        raise ValueError(
+            f"{context}: 欄位 {key!r} 數值語意不合理（須 <= {max_value!r}）：{value!r}"
+        )
     return value
 
 
@@ -168,11 +198,13 @@ class MempoolSpaceFeesSource(Source):
         # 嚴格驗證（codex HIGH，#24+robustness，PR #55）：任一欄位缺失/型別
         # 錯誤（限流、供應商錯誤 envelope、schema drift）一律拋例外，絕不用
         # "N/A" 補位發布假證據——呼叫端（fetch_scheduler.py）會保留舊快取。
-        fastest = _require_number(data, "fastestFee", self.name)
-        half_hour = _require_number(data, "halfHourFee", self.name)
-        hour = _require_number(data, "hourFee", self.name)
-        economy = _require_number(data, "economyFee", self.name)
-        minimum = _require_number(data, "minimumFee", self.name)
+        # codex MEDIUM 第 8 輪：手續費（sat/vB）語意上不可能為負，sentinel
+        # -1 或限流異常回應都可能出現負值，須擋下。
+        fastest = _require_number(data, "fastestFee", self.name, min_value=0)
+        half_hour = _require_number(data, "halfHourFee", self.name, min_value=0)
+        hour = _require_number(data, "hourFee", self.name, min_value=0)
+        economy = _require_number(data, "economyFee", self.name, min_value=0)
+        minimum = _require_number(data, "minimumFee", self.name, min_value=0)
         ref = (
             f"BTC 建議手續費（sat/vB）：最快={_fmt_num(fastest)}，"
             f"30分鐘={_fmt_num(half_hour)}，1小時={_fmt_num(hour)}，"
@@ -206,9 +238,11 @@ class MempoolSpaceDifficultySource(Source):
             raise ValueError(f"{self.name}: 回應不是 JSON object：{type(data).__name__}")
         # 嚴格驗證（同 MempoolSpaceFeesSource，見模組頂部說明）：欄位缺失/
         # 型別錯誤一律拋例外，不接受 "N/A" 佔位。
-        progress = _require_number(data, "progressPercent", self.name)
+        # codex MEDIUM 第 8 輪：進度百分比語意上只能在 0–100 之間；剩餘
+        # 區塊數不可能為負；難度變化率本就可正可負（下修合法），不限範圍。
+        progress = _require_number(data, "progressPercent", self.name, min_value=0, max_value=100)
         change = _require_number(data, "difficultyChange", self.name)
-        remaining = _require_number(data, "remainingBlocks", self.name)
+        remaining = _require_number(data, "remainingBlocks", self.name, min_value=0)
         progress_str = f"{progress:.1f}%"
         change_str = f"{change:+.2f}%"
         ref = f"BTC 難度調整進度：{progress_str}，預估變化 {change_str}，剩餘 {_fmt_num(remaining)} 區塊"
@@ -253,10 +287,13 @@ class BlockchairStatsSource(Source):
             raise ValueError(f"{self.name}: 回應缺少有效 data object：{type(data).__name__}")
         # 嚴格驗證（同 MempoolSpace* 兩源，見模組頂部說明）：必要統計欄位
         # 缺失/型別錯誤一律拋例外，不接受 "N/A" 佔位。
-        blocks = _require_number(data, "blocks", self.name)
-        difficulty = _require_number(data, "difficulty", self.name)
-        mempool_tx = _require_number(data, "mempool_transactions", self.name)
-        tx_24h = _require_number(data, "transactions_24h", self.name)
+        # codex MEDIUM 第 8 輪：區塊高度/難度語意上必須嚴格 > 0（0 或負值
+        # 是 sentinel／不可能的鏈上狀態）；mempool 交易數/24h 交易數不可能
+        # 為負，但 0 是合法狀態（mempool 剛好清空）。
+        blocks = _require_number(data, "blocks", self.name, min_value=0, exclusive_min=True)
+        difficulty = _require_number(data, "difficulty", self.name, min_value=0, exclusive_min=True)
+        mempool_tx = _require_number(data, "mempool_transactions", self.name, min_value=0)
+        tx_24h = _require_number(data, "transactions_24h", self.name, min_value=0)
         # codex MEDIUM（PR #55，鏈上驗證最終閉合）：`best_block_time` 也視為
         # 必要欄位——缺失/null/格式漂移正是「payload 不完整/schema drift」
         # 的訊號，跟其他必要欄位一致一律 raise，不得退回 `time.time()` 把
