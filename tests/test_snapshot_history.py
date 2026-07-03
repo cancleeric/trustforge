@@ -369,6 +369,63 @@ def test_concurrent_ordinary_set_and_set_if_newer_both_keys_survive(
 
 
 # ---------------------------------------------------------------------------
+# codex HIGH（PR #59 review 第三輪，#1 三表示一致性最終閉合）：完整
+# `run_snapshot()` 交錯——latest／history／overview 三個表示要嘛一起贏、
+# 要嘛一起因為比既有值舊而跳過，不能出現「某表示被較舊一輪蓋掉、另一個
+# 表示卻正確跳過」的表示間矛盾。
+# ---------------------------------------------------------------------------
+
+def test_full_run_snapshot_interleaved_out_of_order_run_keeps_all_three_representations_consistent(
+    monkeypatch, json_cache_backend,
+):
+    """模擬 run B（較新 `now`）完整跑完、三個持久化表示（latest／history／
+    overview）都寫成功，接著 run A（較舊 `now`）的三個寫入才完成（真實情境
+    是排程重疊/重試/DynamoDB 延遲；這裡用「先跑新的、再跑舊的」模擬 A 的
+    寫入在 B 之後才完成）。斷言 latest、history、overview 三者最終都必須
+    是 B（新）的內容，沒有任何一個被 A（舊）的值覆寫——修正前只有 history
+    是 monotonic，latest／overview 還是無條件覆寫，會被 A 蓋回舊值，跟
+    history 顯示的新值互相矛盾（#24：使用者看到的「當下」跟「歷史」打架）。
+    """
+    day = "2026-07-01"
+    ts_a = _utc_ts(f"{day}T08:00:00")  # run A：較舊
+    ts_b = _utc_ts(f"{day}T20:00:00")  # run B：較新
+
+    # run B（較新）先完整跑完，三個表示都寫成功。
+    monkeypatch.setattr(time, "time", lambda: ts_b)
+    _patch_pipeline_run(monkeypatch, confidence=0.9)
+    assert fetch_scheduler.main(["--snapshot", "--coin", "BTC"]) == 0
+
+    # run A（較舊）的三個寫入「最後才完成」——時間序上在 B 之後才執行，
+    # 但資料時間戳其實較舊，理當被全部擋下，不能覆寫任何一個表示。
+    monkeypatch.setattr(time, "time", lambda: ts_a)
+    _patch_pipeline_run(monkeypatch, confidence=0.1)
+    assert fetch_scheduler.main(["--snapshot", "--coin", "BTC"]) == 0
+
+    latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"))
+    history = cache_get(json_cache_backend, trust_snapshot_history_key("BTC", day))
+    overview = cache_get(
+        json_cache_backend,
+        cache_key(fetch_scheduler.TRUST_OVERVIEW_SOURCE, fetch_scheduler.TRUST_OVERVIEW_COIN),
+    )
+
+    assert latest is not None and history is not None and overview is not None
+
+    # 三者的 fetched_at 都必須是 B（新）的時間戳，不是 A（舊）的。
+    assert latest["fetched_at"] == ts_b
+    assert history["fetched_at"] == ts_b
+    assert overview["fetched_at"] == ts_b
+
+    # latest／history 的實際內容也必須是 B（confidence=0.9），不是 A（0.1）。
+    assert latest["docs"][0]["trust_score"] == pytest.approx(0.9, abs=1e-6)
+    assert history["docs"][0]["trust_score"] == pytest.approx(0.9, abs=1e-6)
+
+    # overview blob 的 HTML 也必須顯示 B 的信任分（0.90），不是 A 的（0.10）。
+    overview_html = overview["docs"][0]["html"]
+    assert "0.90" in overview_html
+    assert "0.10" not in overview_html
+
+
+# ---------------------------------------------------------------------------
 # `get_trust_history()` 讀取 helper
 # ---------------------------------------------------------------------------
 

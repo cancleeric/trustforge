@@ -788,13 +788,22 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     `failures`（`"{coin}:history"`），不影響已成功寫入的「最新一筆」與
     總覽 blob（那條路徑本來就穩定運作，不該被歷史寫入這個新增功能拖累）。
 
-    codex HIGH（PR #59 review）：歷史 key 改用 `cache_set_if_newer()`（單調
-    條件寫入）而非普通 `cache_set()`——兩個重疊排程交錯時，較舊一筆的歷史
-    寫入若最後才完成，只要當日 key 既有的 `fetched_at` 已經比它新，就會被
-    直接跳過（不覆寫），避免歷史序列被舊值污染。跳過（`result.skipped`）
-    是正常情況、不計入 `failures`；只有 backend 真的寫入失敗
-    （`result.ok=False`）才計入。「最新一筆」`TRUST_SNAPSHOT_SOURCE` 維持
-    原樣無條件覆寫，見 `cache.py` 模組頂部完整說明。
+    codex HIGH（PR #59 review 第三輪，#1 三表示一致性最終閉合）：「最新一筆」
+    （`TRUST_SNAPSHOT_SOURCE`）、「按日歷史」（`TRUST_SNAPSHOT_HISTORY_SOURCE`）、
+    「總覽 blob」（`TRUST_OVERVIEW_SOURCE`）三個持久化表示**全部**改用
+    `cache_set_if_newer()`（單調條件寫入），且**共用同一個 `run_now`**（本函式
+    一進來就 `time.time()` 一次，取代先前逐幣各自呼叫、總覽再另外呼叫一次
+    `time.time()` 的寫法）。理由：前一輪只把歷史改 monotonic，「最新一筆」跟
+    總覽 blob 還是無條件覆寫——run A（較舊）暫停、run B（較新）寫完全部三表
+    示、A 恢復繼續寫 → A 會**無條件**把 latest/overview 蓋回舊值，而 history
+    因為已經是 monotonic 正確跳過成 B，造成「首頁看到的最新/總覽是 A 的舊
+    值、history 卻是 B 的新值」的長期 silent 矛盾（違反 #24：使用者看到的
+    「當下」跟「歷史」互相打架）。三者共用同一 `run_now` 這件事本身也很關鍵：
+    確保同一輪呼叫的三個寫入判斷用的是**同一把時間戳**跟各自既有值比較，
+    不會出現「這輪一部分寫入贏、一部分寫入輸」的內部不一致（同一輪要嘛全部
+    覆寫成功、要嘛全部因為比既有值舊而跳過）。跳過（`result.skipped`）皆屬
+    正常情況、不計入 `failures`；只有 backend 真的寫入失敗（`result.ok=False`）
+    才計入。
     """
     from trustforge.pipeline import run as pipeline_run
 
@@ -807,6 +816,12 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
               f"{cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN)!r}")
         return 0
 
+    # codex HIGH（PR #59 review 第三輪）：三個持久化表示（latest/history/
+    # overview）共用同一個 `run_now`，一進函式就取一次——不要逐幣、逐 key
+    # 各自呼叫 `time.time()`。同一輪呼叫用同一把時間戳跟各自既有值比較，
+    # 確保這一輪要嘛全部覆寫成功、要嘛全部因為比既有值舊而跳過，不會出現
+    # 「這輪一部分寫贏、一部分寫輸」的內部不一致（見本函式 docstring）。
+    run_now = time.time()
     snapshots: list[dict] = []
     failures: list[str] = []
     for coin in coins:
@@ -824,34 +839,48 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(coin)
             continue
 
-        now = time.time()
+        # codex HIGH（PR #59 review 第三輪）：改用 `cache_set_if_newer()`——
+        # 兩個重疊排程交錯時，較舊一輪（`run_now` 較小）的「最新一筆」寫入
+        # 若最後才完成，只要既有值的 `fetched_at` 已經比 `run_now` 新，就
+        # 直接跳過，不會把較新的快照蓋回較舊的值（先前只有歷史 key 是
+        # monotonic，這把 latest key 還是無條件覆寫，會造成首頁「最新」跟
+        # history 互相矛盾，見本函式 docstring）。
         snap = _snapshot_dict(coin, report, evidence)
-        result = cache_set(
+        result = cache_set_if_newer(
             backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), [snap],
-            fetched_at=now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            fetched_at=run_now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
         )
         if not result.ok:
             print(f"[fetch_scheduler] --snapshot {coin}: cache 寫入失敗"
                   f"（backend={result.backend}）：{result.error}", file=sys.stderr)
             failures.append(coin)
             continue
-        _warn_if_fallback_used(f"--snapshot {coin}", result)
+        if result.skipped:
+            # 單調條件寫入判斷 incoming 比既有「最新一筆」舊（或一樣新）而
+            # 主動跳過——不是失敗，只印資訊性訊息；仍照常嘗試下面的歷史
+            # 寫入／納入總覽候選（history/overview 各自有自己的單調判斷，
+            # 不會因此被污染，見本函式 docstring）。
+            print(f"[fetch_scheduler] --snapshot {coin}: 最新一筆快照跳過寫入"
+                  f"（已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫）")
+        else:
+            _warn_if_fallback_used(f"--snapshot {coin}", result)
+            print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
+                  f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
         snapshots.append(snap)
-        print(f"[fetch_scheduler] --snapshot {coin}: trust_score="
-              f"{snap['trust_score']:.2f} direction={snap['direction']} 已寫入快取")
 
         # task #26：按日累積歷史——同一天多次跑對同一把 key 覆寫（uPsert），
         # 跨日才會因日期不同而各自成一筆，天然累積成序列。用跟「最新一筆」
-        # 同一個 `now`，避免同一輪內兩次 time.time() 剛好跨過 UTC 午夜造成
-        # 「同一次真呼叫，兩把 key 寫進不同日期」的邊界亂跳。
+        # 同一個 `run_now`，避免同一輪內兩次 time.time() 剛好跨過 UTC 午夜
+        # 造成「同一次真呼叫，兩把 key 寫進不同日期」的邊界亂跳，也確保
+        # latest/history 這一輪要嘛一起贏、要嘛一起跳過（見本函式 docstring）。
         #
-        # codex HIGH（PR #59 review）：改用 `cache_set_if_newer()` 單調條件
-        # 寫入——兩個重疊排程交錯時，較舊一筆的歷史寫入若最後才完成，只要
-        # 當日 key 既有的 `fetched_at` 已經比 `now` 新，就直接跳過，不會把
+        # codex HIGH（PR #59 review）：`cache_set_if_newer()` 單調條件寫入
+        # ——兩個重疊排程交錯時，較舊一筆的歷史寫入若最後才完成，只要當日
+        # key 既有的 `fetched_at` 已經比 `run_now` 新，就直接跳過，不會把
         # 較新的快照蓋回較舊的值（見 `cache.py` 模組頂部完整說明）。
         history_result = cache_set_if_newer(
-            backend, trust_snapshot_history_key(coin, snapshot_history_date(now)),
-            [snap], fetched_at=now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
+            backend, trust_snapshot_history_key(coin, snapshot_history_date(run_now)),
+            [snap], fetched_at=run_now, ttl_seconds=TRUST_SNAPSHOT_HISTORY_TTL_SECONDS,
         )
         if not history_result.ok:
             print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照 cache 寫入失敗"
@@ -863,22 +892,31 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             # 跳過——這是正確行為（避免覆蓋較新的值），不是失敗，不計入
             # failures，只印一行資訊性訊息供除錯追蹤。
             print(f"[fetch_scheduler] --snapshot {coin}: 歷史快照跳過寫入"
-                  f"（當日已有較新或同時的快照，fetched_at={now:.0f} 未覆寫）")
+                  f"（當日已有較新或同時的快照，fetched_at={run_now:.0f} 未覆寫）")
         else:
             _warn_if_fallback_used(f"--snapshot {coin} history", history_result)
 
     overview_html = _render_overview_html(snapshots)
     if overview_html:
-        overview_result = cache_set(
+        # codex HIGH（PR #59 review 第三輪）：總覽 blob 也改 `cache_set_if_newer()`
+        # 並沿用跟 latest/history 同一個 `run_now`（不再另外呼叫一次
+        # `time.time()`）——三者共用同一把時間戳，確保同一輪要嘛三個表示
+        # 全部覆寫成功、要嘛全部因為比既有值舊而跳過，不會出現「latest/總覽
+        # 被較舊一輪蓋掉、history 卻正確跳過」的表示間矛盾（見本函式
+        # docstring）。
+        overview_result = cache_set_if_newer(
             backend, cache_key(TRUST_OVERVIEW_SOURCE, TRUST_OVERVIEW_COIN),
             [{"html": overview_html}],
-            fetched_at=time.time(), ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
+            fetched_at=run_now, ttl_seconds=SNAPSHOT_STALE_AFTER_SECONDS,
         )
         if not overview_result.ok:
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 寫入失敗"
                   f"（backend={overview_result.backend}）：{overview_result.error}",
                   file=sys.stderr)
             failures.append("__trust_overview_html__")
+        elif overview_result.skipped:
+            print(f"[fetch_scheduler] --snapshot: 總覽 blob 跳過寫入"
+                  f"（已有較新或同時的總覽，fetched_at={run_now:.0f} 未覆寫）")
         else:
             _warn_if_fallback_used("--snapshot overview", overview_result)
             print(f"[fetch_scheduler] --snapshot: 總覽 blob 已寫入（{len(snapshots)} 幣）")
