@@ -140,6 +140,49 @@ def test_rss_no_keyword_returns_all(monkeypatch):
     assert len(docs) >= 1
 
 
+# ── codex MEDIUM（PR #55，資料密度第二批最終閉合）：共用 _parse_rss 要
+#    區分「schema drift（無 item/entry）」vs「有 entries、關鍵字篩後合法為
+#    空」，前者 raise、後者回 [] ────────────────────────────────────────────
+
+_SCHEMA_DRIFT_NO_ITEM_OR_ENTRY = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://example.com/some-other-namespace">
+  <weird-entry>
+    <title>vendor switched schema, this is neither RSS item nor Atom entry</title>
+  </weird-entry>
+</feed>"""
+
+_SCHEMA_DRIFT_ERROR_HTML_AS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html><body><h1>503 Service Unavailable</h1></body></html>"""
+
+
+def test_parse_rss_schema_drift_no_item_or_entry_raises(monkeypatch):
+    """合法可解析 XML，但完全沒有 `<item>`/Atom `<entry>`（換 namespace/
+    schema）——這是 schema drift 訊號，必須 raise，不能靜靜回 [] 讓排程
+    覆蓋掉還能用的舊快取。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _SCHEMA_DRIFT_NO_ITEM_OR_ENTRY)
+    with pytest.raises(ValueError):
+        news.CoinDeskRSSSource().fetch("", coin="BTC")
+
+
+def test_parse_rss_error_page_as_xml_raises(monkeypatch):
+    """供應商回錯誤頁但仍是合法 XML（如 `<html>503...</html>`）——同樣沒有
+    任何 item/entry，必須 raise。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: _SCHEMA_DRIFT_ERROR_HTML_AS_XML)
+    with pytest.raises(ValueError):
+        news.CoinDeskRSSSource().fetch("", coin="BTC")
+
+
+def test_parse_rss_entries_exist_but_coin_filter_empty_is_legitimate(monkeypatch):
+    """有 entries，但依 coin 關鍵字過濾後一則都不符——這是合法的空結果
+    （那個幣剛好沒新聞），不是 schema drift，不該 raise。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: RSS_FIXTURE)
+    docs = news.CoinDeskRSSSource().fetch("XRP price prediction", coin="XRP")
+    assert docs == []
+
+
 def test_cryptopanic_no_token_returns_empty(monkeypatch):
     """無 CRYPTOPANIC_TOKEN 時 fetch 安靜回傳 []。"""
     from trustforge.ingestion import news

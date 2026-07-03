@@ -773,6 +773,39 @@ def test_scheduler_onchain_bad_best_block_time_raises_and_preserves_old_cache(mo
     assert "blockchair" in err
 
 
+def test_scheduler_rss_schema_drift_raises_and_preserves_old_cache(monkeypatch, tmp_path, capsys):
+    """codex MEDIUM（PR #55，資料密度第二批最終閉合）驗收：共用
+    `_parse_rss` 遇到合法 XML 但沒有任何 `<item>`/`<entry>`（schema drift／
+    供應商回錯誤頁）必須 raise，`run_once()` 計入 failures、完全不覆寫
+    舊快取（不是靜靜用 [] 覆蓋掉還能用的舊新聞）。"""
+    from trustforge.ingestion import news
+    from trustforge.ingestion.news import CoinDeskRSSSource
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    old_docs = [{
+        "id": "old-coindesk-doc", "kind": "news", "source": "coindesk",
+        "text": "上一輪的真實新聞標題", "url": "https://www.coindesk.com/old-article",
+        "ts": time.time() - 3600, "meta": {},
+    }]
+    backend.set(cache_key("coindesk", "BTC"), old_docs, time.time() - 3600)
+
+    drifted_feed = b'<?xml version="1.0"?><feed xmlns="urn:other"><weird-entry/></feed>'
+    monkeypatch.setattr(news, "_fetch_url", lambda url: drifted_feed)
+    src = CoinDeskRSSSource()
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["coindesk"], ["BTC"], backend, force=True, interval_overrides={}, stagger=0, dry_run=False,
+    )
+    assert results == []
+    assert failures == ["coindesk:BTC"]
+    entry = backend.get(cache_key("coindesk", "BTC"))
+    assert entry is not None
+    assert entry["docs"] == old_docs  # 舊快取完全沒被覆蓋
+    err = capsys.readouterr().err
+    assert "coindesk" in err
+
+
 def test_scheduler_coin_agnostic_fetch_failure_is_counted_into_failures(monkeypatch, tmp_path, capsys):
     """codex HIGH-1：coin-agnostic 來源真呼叫失敗，同樣要計入 failures（不是
     只印警告就當沒事）。"""

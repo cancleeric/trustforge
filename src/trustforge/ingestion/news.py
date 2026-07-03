@@ -96,12 +96,27 @@ def _first(item: ET.Element, *tags: str, ns: dict | None = None) -> ET.Element |
 
 
 def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Document]:
-    """解析 RSS 2.0 / Atom XML，依 query/coin 關鍵字過濾，回傳 Document list。"""
+    """解析 RSS 2.0 / Atom XML，依 query/coin 關鍵字過濾，回傳 Document list。
+
+    codex MEDIUM（PR #55，資料密度第二批最終閉合）：這是所有 RSS 源共用的
+    parser（coindesk/decrypt 起算共 11 家），區分兩種「空」——
+      - **合法可解析但一個 `<item>`/`<entry>` 都沒有**（供應商換
+        namespace/schema、或回了個錯誤頁但仍是合法 XML）：這是 schema
+        drift 訊號，**raise ValueError**，讓呼叫端（`fetch_scheduler.py`）
+        保留舊快取、計入 failure，不能靜靜用空清單覆蓋掉還能用的舊資料。
+      - **有 entries，但依 query/coin 關鍵字過濾後一則都不符**（那個幣剛
+        好沒新聞）：**仍是合法結果，回 `[]`**，不 raise（見下方迴圈）。
+    """
     root = ET.fromstring(raw)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     items = root.findall(".//item")
     if not items:
         items = root.findall(".//atom:entry", ns)
+    if not items:
+        raise ValueError(
+            f"{source_name}: RSS/Atom 回應沒有任何 <item>/<entry>"
+            "（可能是供應商 schema drift 或回了錯誤頁）"
+        )
 
     keywords = [kw.lower() for kw in (query, coin) if kw]
     docs: list[Document] = []
