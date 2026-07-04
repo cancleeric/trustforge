@@ -3519,65 +3519,97 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     編號是否還等於自己領到的那個——不等於代表自己已被取代（stale），
     整段發布 no-op（不寫快取、不動 in-flight）；`event.set()` 不受這個
     檢查影響、永遠執行，讓 join 在這個（已被取代的）Event 上的 follower
-    提早醒來、落回上面的 fail-safe 分支。取捨：Python thread 無法從外部
-    強制 cancel，stale leader 背景仍會把這次 `compute()` 跑完（重複呼叫
-    一次真連接器/Bedrock）——這裡保證的是「不發布/服務過時結果」，不是
+    提早醒來、落回下方的協調 loop。取捨：Python thread 無法從外部強制
+    cancel，stale leader 背景仍會把這次 `compute()` 跑完（重複呼叫一次
+    真連接器/Bedrock）——這裡保證的是「不發布/服務過時結果」，不是
     「零重複呼叫」；重複呼叫本身罕見（只有真的卡超過 45 秒門檻才會被
     取代）且已受 #9 護欄（每日 $ 上限）封頂。
+
+    codex HIGH 複審#4（thundering herd，見模組頂部大段說明）：複審#3 的
+    generation fencing 只保證「stale leader 的結果不會被發布/服務」，但
+    早期版本的 follower fallback 是「醒來、cache 沒有就直接自己
+    `compute()`」——這在 stale leader 於 replacement 已經接手、但
+    followers 逾時之前完成的情況下，會讓**每一個**原本 join 在 stale
+    leader 上的 follower 各自獨立呼叫一次 `compute()`（cache 剛好是空的，
+    因為 stale leader 的發布被 fence 掉了）——N 個 follower 就是 N 次多餘
+    的真連接器/Bedrock 呼叫，直接打爆 single-flight 的成本安全承諾。
+
+    修法：follower 的 fallback 改成**重入協調 lookup loop**（而不是直接
+    `compute()`）：
+      1. 先查共用結果快取——命中就直接用（大機率是 replacement leader
+         已經發布的結果）。
+      2. 沒命中 → 查目前是否有活著的 leader（新世代的 in-flight entry）
+         ——有就 join 它的 event，繼續等（用**同一個**、從本次呼叫一開始
+         就固定下來的 deadline，不會因為多次重新 join 而不斷展延，整體
+         阻塞時間仍然有界）。
+      3. 都沒有（沒快取、沒活著的 leader）→ 在鎖內原子地創建新 in-flight
+         entry、自己成為這把 key 唯一的新 leader，跳出 loop 去
+         `compute()`。
+      由於「查快取/查 in-flight/搶 leadership」這三步都在同一個
+      `_analyze_dedup_lock` 臨界區內完成，多個同時醒來的 follower 之間
+      不會重複搶到 leadership——只有其中恰好一個會在某次迭代看到
+      「沒有活著的 leader」而真的成為新 leader，其餘的會在稍晚一點點的
+      迭代看到這個新 leader（entry 已存在）而正確 join 它。整組相同請求
+      任何時刻最多 1 個活著的 leader 在算，stale leader 造成的重複執行
+      永遠被限制在「舊 leader 1 次 + 頂多 1 個 replacement leader」，不會
+      是 N 個 follower 各自一次。
     """
-    now = time.time()
-    with _analyze_dedup_lock:
-        cached = _analyze_dedup_cache.get(key)
-        if cached is not None and cached[0] > now:
-            ok, payload = cached[1]
-            if ok:
-                return payload
-            raise payload
+    deadline = time.time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
+    while True:
+        now = time.time()
+        with _analyze_dedup_lock:
+            cached = _analyze_dedup_cache.get(key)
+            if cached is not None and cached[0] > now:
+                ok, payload = cached[1]
+                if ok:
+                    return payload
+                raise payload
 
-        inflight = _analyze_dedup_inflight.get(key)
-        if inflight is not None:
-            _leader_event, leader_started_at, _leader_generation = inflight
-            if now - leader_started_at > _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS:
-                # leader 早已超過逾時上界仍未完成——很可能已經 hang 死，
-                # 視為 stale，直接取代成為新 leader（新 leader 會領一個
-                # 新的世代編號；舊 leader 稍後才完成時靠世代編號比對
-                # fencing，見上方 docstring 與下方發布段落）。
-                inflight = None
+            inflight = _analyze_dedup_inflight.get(key)
+            if inflight is not None:
+                _leader_event, leader_started_at, _leader_generation = inflight
+                if now - leader_started_at > _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS:
+                    # leader 早已超過逾時上界仍未完成——很可能已經 hang
+                    # 死，視為 stale，直接取代成為新 leader（新 leader 會
+                    # 領一個新的世代編號；舊 leader 稍後才完成時靠世代
+                    # 編號比對 fencing，見上方 docstring 與下方發布段落）。
+                    inflight = None
 
-        is_leader = inflight is None
+            is_leader = inflight is None
+            if is_leader:
+                event = threading.Event()
+                global _analyze_dedup_generation_seq
+                _analyze_dedup_generation_seq += 1
+                my_generation = _analyze_dedup_generation_seq
+                _analyze_dedup_inflight[key] = (event, now, my_generation)
+            else:
+                event = inflight[0]
+                my_generation = None  # follower 不發布，不需要世代編號
+
         if is_leader:
-            event = threading.Event()
-            global _analyze_dedup_generation_seq
-            _analyze_dedup_generation_seq += 1
-            my_generation = _analyze_dedup_generation_seq
-            _analyze_dedup_inflight[key] = (event, now, my_generation)
-        else:
-            event = inflight[0]
-            my_generation = None  # follower 不發布，不需要世代編號
+            break  # 跳出協調 loop，往下真的去 compute()
 
-    if not is_leader:
-        completed = event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise _AnalyzeDedupTimeout(
+                f"分析請求排隊等候逾時（前一個相同請求執行超過"
+                f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
+            )
+        completed = event.wait(timeout=remaining)
         if not completed:
             raise _AnalyzeDedupTimeout(
                 f"分析請求排隊等候逾時（前一個相同請求執行超過"
                 f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
             )
-        with _analyze_dedup_lock:
-            cached = _analyze_dedup_cache.get(key)
-        if cached is not None:
-            ok, payload = cached[1]
-            if ok:
-                return payload
-            raise payload
-        # 三種情況會落到這裡：(a) 理論上不會發生的極端 race（leader 寫
-        # 快取跟 set() 事件在同一個 critical path，中間應該看不到空窗）；
-        # (b) leader 遇到 `TooManyRequests`——caller-specific 的失敗，故意
-        # 不寫進共用快取；(c) 這個 follower 當初 join 的是一個後來被
-        # generation fencing 判定為 stale、發布被 no-op 掉的舊 leader
-        # （見上方 docstring）。不管哪種情況，這裡都是安全的：follower
-        # 自己的限流早已在 `_handle_api_analyze` 呼叫 `_dedup_analyze_call`
-        # 之前就通過了，獨立跑一次不會繞過任何保護、也不是「沒 dedup 到」。
-        return compute()
+        # 醒來後**不直接 fallback 自己 compute()**——重新回到 loop
+        # 頂端：可能命中 replacement 已發布的快取、可能 join 到目前真正
+        # 活著的 leader（不論是 replacement 本身，或它之後又被取代出的
+        # 下一個 leader），或者（罕見：真的沒人在跑）在下一輪迭代原子地
+        # 自己成為新 leader。三種結果都不是「盲目各自 compute()」，見上方
+        # 複審#4 docstring。這裡的 bounded wait 沿用同一個從函式一開始
+        # 就固定的 `deadline`（不因為重新 join 而展延整體等待時間），
+        # 所以即使 leadership 被連續取代好幾輪，這個呼叫端的總阻塞時間
+        # 仍然有界，跟修復前一樣不會無限期等待。
 
     try:
         result = compute()

@@ -971,6 +971,182 @@ def test_dedup_analyze_call_stale_leader_finishing_while_replacement_still_runni
     assert key not in web._analyze_dedup_inflight
 
 
+def test_dedup_analyze_call_stale_leader_thundering_herd_followers_join_replacement_not_recompute(
+    monkeypatch,
+):
+    """codex HIGH 複審#5（thundering herd）：複審#4 的 generation fencing
+    只保證 stale leader（A）的結果不會被發布/服務，但早期版本的 follower
+    fallback 是「醒來、cache 沒有就直接自己 compute()」——若 A 在
+    replacement（B）已經接手、但**多個** followers 逾時之前完成，會讓
+    每一個原本 join 在 A 上的 follower 各自獨立呼叫一次 compute()（cache
+    剛好是空的，因為 A 的發布被 fence 掉了），N 個 follower 就是 N 次
+    多餘的真連接器/Bedrock 呼叫，直接打爆 single-flight 的成本安全承諾。
+
+    情境：leader A 卡住（模擬慢/hang）；5 個 follower 在 A 還新鮮時
+    join 它的 event；接著把 A 標記成 stale（直接改 in-flight 的時間戳，
+    不用真的等滿逾時門檻，測試更快更確定）；B 進來偵測到 A 是 stale、
+    取代成為新 leader，開始跑但先卡住不完成；這時候放 A 完成——A 的發布
+    被 fence（no-op），但仍會 `event.set()` 喚醒 5 個 follower。斷言：
+    這 5 個 follower 醒來後**不會**各自呼叫 compute()（重入協調 loop、
+    發現 B 是目前活著的 leader、改成 join B），最終全部拿到 B 的結果。
+    整組請求只有 2 個「不可避免」的 leader 執行過 compute()（A 一次 +
+    B 一次），不是 A + 5 個 follower 各自一次（=6 次）。"""
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 5.0)
+    key = "dedup-thundering-herd-test-key"
+
+    a_may_finish = threading.Event()
+    b_may_finish = threading.Event()
+
+    def _compute_a():
+        a_may_finish.wait(timeout=10)
+        return "result-A"
+
+    def _compute_b():
+        b_may_finish.wait(timeout=10)
+        return "result-B"
+
+    follower_counter = _CallCounter()
+
+    def _compute_follower():
+        follower_counter.hit()
+        return "should-not-be-called-by-any-follower"
+
+    a_result_holder: dict[str, object] = {}
+
+    def _worker_a():
+        a_result_holder["value"] = web._dedup_analyze_call(key, _compute_a)
+
+    a_thread = threading.Thread(target=_worker_a)
+    a_thread.start()
+
+    # 等 A 真的成為 leader。
+    for _ in range(200):
+        if key in web._analyze_dedup_inflight:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("leader A 應該已經寫入 in-flight")
+    a_generation = web._analyze_dedup_inflight[key][2]
+
+    # 啟動 5 個 follower，讓他們在 A 仍是「新鮮」leader 時 join 它的
+    # event（此時還沒把 A 標成 stale，確保這 5 個 follower 真的走
+    # follower 分支，不是自己搶到 leadership）。
+    n_followers = 5
+    follower_holders: list[dict[str, object]] = [{} for _ in range(n_followers)]
+    follower_threads = []
+    for i in range(n_followers):
+        def _worker_follower(idx=i):
+            follower_holders[idx]["value"] = web._dedup_analyze_call(key, _compute_follower)
+
+        t = threading.Thread(target=_worker_follower)
+        follower_threads.append(t)
+        t.start()
+    follower_threads_started = follower_threads
+
+    # 給 5 個 follower 一點時間真的進到 event.wait()（走 follower 分支）。
+    time.sleep(0.3)
+
+    # 直接把 A 的 in-flight entry 的開始時間戳改成很久以前，讓下一個
+    # 「偵測」的呼叫端（下面即將建立的 B）判定 A 是 stale、取而代之——
+    # 不需要真的等滿 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`，測試更快
+    # 也更確定（跟既有 `..._entry_becomes_stale_and_replaced` 測試同一種
+    # 手法）。
+    with web._analyze_dedup_lock:
+        current = web._analyze_dedup_inflight.get(key)
+        assert current is not None
+        stale_event, _old_ts, current_generation = current
+        assert current_generation == a_generation
+        web._analyze_dedup_inflight[key] = (
+            stale_event,
+            time.time() - (web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS + 10.0),
+            a_generation,
+        )
+
+    b_result_holder: dict[str, object] = {}
+
+    def _worker_b():
+        b_result_holder["value"] = web._dedup_analyze_call(key, _compute_b)
+
+    b_thread = threading.Thread(target=_worker_b)
+    b_thread.start()
+
+    # 等 B 真的取代成為新世代的 leader。
+    for _ in range(200):
+        inflight = web._analyze_dedup_inflight.get(key)
+        if inflight is not None and inflight[2] != a_generation:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("B 應該已經取代成為新世代的 leader")
+
+    # 這時候讓 A 完成——發布被 generation fencing no-op 掉，但仍會
+    # event.set() 喚醒 5 個原本 join 在 A 上的 follower。
+    a_may_finish.set()
+    a_thread.join(timeout=5)
+    assert a_result_holder.get("value") == "result-A"
+
+    # 給 5 個 follower 一點時間醒來、重新查詢——此時 B 還沒完成
+    # （b_may_finish 還沒 set），關鍵斷言：他們不該各自呼叫 compute()，
+    # 而應該重新 join 到 B 繼續等。
+    time.sleep(0.3)
+    assert follower_counter.n == 0, (
+        f"stale leader 完成喚醒 followers 後，followers 不該各自呼叫 "
+        f"compute()，應該重新 join replacement leader B，實際額外呼叫 "
+        f"{follower_counter.n} 次"
+    )
+
+    # 現在放 B 完成。
+    b_may_finish.set()
+    b_thread.join(timeout=5)
+    for t in follower_threads_started:
+        t.join(timeout=5)
+
+    assert b_result_holder.get("value") == "result-B"
+    for idx, holder in enumerate(follower_holders):
+        assert holder.get("value") == "result-B", (
+            f"follower {idx} 應該共用 replacement leader B 的結果，實際 {holder}"
+        )
+    assert follower_counter.n == 0, "全程都不該有任何 follower 自己呼叫過 compute()"
+
+    cached_final = web._analyze_dedup_cache.get(key)
+    assert cached_final is not None and cached_final[1] == (True, "result-B")
+    assert key not in web._analyze_dedup_inflight
+
+
+def test_dedup_analyze_call_normal_no_stale_still_single_flight(monkeypatch):
+    """codex HIGH 複審#5（thundering herd）修復後的正面對照組：完全沒有
+    stale leader 涉入的正常並行重複請求，仍然只觸發 1 次 compute()——
+    確認協調 loop 的重寫沒有改壞既有、最基本的 single-flight 行為。"""
+    key = "dedup-thundering-herd-normal-control-test-key"
+    counter = _CallCounter()
+
+    def _compute():
+        counter.hit()
+        time.sleep(0.2)
+        return "result-normal"
+
+    n_callers = 6
+    holders: list[dict[str, object]] = [{} for _ in range(n_callers)]
+    barrier = threading.Barrier(n_callers)
+    threads = []
+
+    def _worker(idx):
+        barrier.wait()
+        holders[idx]["value"] = web._dedup_analyze_call(key, _compute)
+
+    for i in range(n_callers):
+        t = threading.Thread(target=_worker, args=(i,))
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join(timeout=5)
+
+    assert counter.n == 1, f"沒有 stale leader 涉入時，仍應只觸發 1 次 compute()，實際 {counter.n} 次"
+    for idx, holder in enumerate(holders):
+        assert holder.get("value") == "result-normal", f"呼叫端 {idx} 應共用同一份結果，實際 {holder}"
+
+
 def test_api_analyze_dedup_cross_ip_exhausted_ip_blocked_unrelated_ip_unaffected(monkeypatch):
     """codex 複審第二輪 HIGH（dedup×限流交互，方向 2：429-poisoning）：
     IP_A 的 real 限流 bucket 早已用滿，牠自己送 `/api/analyze` 一定要被
