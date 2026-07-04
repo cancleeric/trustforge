@@ -276,6 +276,20 @@ HSTS）。python 端 `TRUSTFORGE_CSP_MODE` 兩者都設成 `react`（CSP 指令�
   重新跑一次 location 比對，兩邊 add_header 務必同步，見
   `deploy/nginx-react-http.conf` 內註解與 `deploy/test_nginx_react_http_conf.sh`。
 
+  **cutover 完成後不是只驗語法**（codex 五次複審，HIGH）：`cutover_switch.sh`
+  Step 4 完成後驗證，除了 active symlink/CSP_MODE/python 直連 `healthz`，
+  在清除 rollback trap **之前**還加了 Step 4b public nginx（port 80）smoke
+  check——`nginx -t` 只驗語法，不證 React dist 目錄真的存在可服務、SPA
+  路由/try_files 沒壞；只驗 python 直連的話，dist 缺失/nginx 層本身有問題
+  時 python 還是健康，腳本會謊報成功。Step 4b 實際打
+  `http://127.0.0.1/`＋`/analyze`（斷言 200＋CSP header＋含
+  `<div id="root">` React dist 特徵，順便驗證 try_files SPA fallback）、
+  `http://127.0.0.1/api/health`（斷言 200＋`{"ok": true, ...}` JSON，驗
+  nginx→python 的 `/api/` proxy 是通的）；legacy 模式則打
+  `http://127.0.0.1/healthz`（驗 nginx 對 SSR 的全轉發鏈路）。任一失敗都
+  沿用同一顆 ERR trap 觸發既有 rollback（不是新的失敗路徑），失敗注入測試
+  見 `deploy/test_cutover_switch.sh` 場景 17-25。
+
 ### TLS
 
 `deploy/TLS-SETUP.md`：只有設定文件 + 指令，**沒有實際簽發憑證**——實際

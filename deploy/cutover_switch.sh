@@ -29,7 +29,18 @@
 #      半殘狀態。
 #   3. 完成後主動驗證：active nginx conf symlink、python 的 CSP_MODE、
 #      `/healthz` 都要確實是目標狀態，任一項對不上也視為失敗、觸發同一套
-#      回滾（而不是命令都跑完就假設成功）。
+#      回滾（而不是命令都跑完就假設成功）。**加上 public nginx（port 80）
+#      smoke check**（codex 五次複審，HIGH：以前完成後驗證只打 python 直連
+#      `127.0.0.1:8080/healthz`，從沒經過 nginx——`nginx -t` 只驗語法，
+#      不證 React dist 目錄真的存在可服務、SPA 路由/try_files 沒壞、
+#      location 沒設錯；dist 缺失/損毀或 nginx 層本身有問題時，python 直連
+#      依然健康，腳本會謊報 cutover 成功、使用者卻看到錯誤）：清除 ERR
+#      trap 之前，legacy 打 `http://127.0.0.1/healthz`（驗 SSR 全轉發鏈路）、
+#      react/react-http 打 `http://127.0.0.1/`＋`/analyze`（驗 React
+#      index.html 真的被服務、含 CSP header 跟 `<div id="root">` dist
+#      特徵、SPA fallback 正常）＋`/api/health`（驗 nginx→python 的
+#      `/api/` proxy 正常）——任一失敗都沿用同一顆 ERR trap 觸發既有
+#      rollback，不是新的失敗路徑，也不會謊報成功。
 #   4. **rollback 本身也不可靠、不可盲目信任**（codex 二次複審，HIGH）：
 #      回滾動作（symlink 還原／CSP_MODE 還原／daemon-reload／restart
 #      trustforge／nginx -t／reload nginx）每一步都個別追蹤成功與否，
@@ -85,6 +96,76 @@ REGION="${REGION:-ap-southeast-2}"
 CSP_MODE_ENV="$MODE"
 if [ "$MODE" = "react-http" ]; then
   CSP_MODE_ENV="react"
+fi
+
+# ---- public nginx smoke check（Step 4b，codex 五次複審，HIGH）----------
+# 以前 Step 4 完成後驗證只打 python 直連 127.0.0.1:8080/healthz，從沒經過
+# nginx。`nginx -t` 只驗語法、不證 dist 目錄存在可服務、SPA 路由/try_files
+# 沒壞、location 沒設錯——candidate conf 語法合法但 React dist 缺失/損毀、
+# 或 nginx 層本身有問題時，python 直連依然健康，腳本照樣宣告 cutover 成功、
+# 使用者卻看到錯誤。這裡在 Step 4「清除 ERR trap 之前」補上打 public
+# nginx endpoint（port 80）的驗證，任一失敗都沿用同一顆 ERR trap 觸發既有
+# rollback（不是新的失敗路徑），legacy／react／react-http 各用各自拓樸
+# 對應的檢查（legacy 驗 SSR 全轉發、react/react-http 驗 React 真的被服務、
+# SPA fallback、/api/ proxy）。跟前面所有段落一樣：`\$`／`\"` 是刻意跳脫、
+# 留給遠端 shell 執行時才展開/求值，不在本機構造字串時就處理掉。
+if [ "$MODE" = "legacy" ]; then
+  PUBLIC_SMOKE_BLOCK="
+# ---- Step 4b：public nginx smoke check（legacy 拓樸，codex 複審 HIGH：cutover
+#      後只驗 python 直連，沒驗 public nginx 面——nginx 面掛掉/conf 有問題時，
+#      python 直連依然健康，腳本會謊報成功。這裡改打 public nginx endpoint
+#      （port 80），在清除 ERR trap 之前失敗會被同一顆 trap 接住觸發 rollback。
+#      legacy 拓樸：nginx location / 全部原樣轉發給 python，用 /healthz 驗證
+#      nginx→python 這段代理鏈路是通的）----
+if ! curl -fsS -o /dev/null http://127.0.0.1/healthz; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx（port 80）/healthz 沒有回應（legacy SSR 全轉發鏈路異常）\" >&2
+fi
+curl -fsS -o /dev/null http://127.0.0.1/healthz
+echo \"[cutover] public nginx smoke check 通過（/healthz 經 nginx 轉發正常）\"
+"
+else
+  PUBLIC_SMOKE_BLOCK="
+# ---- Step 4b：public nginx smoke check（React 拓樸，codex 複審 HIGH：cutover
+#      後只驗 python 直連，沒驗 public nginx 面——dist 缺失/SPA 路由壞/nginx 面
+#      失敗時，python 直連依然健康，腳本會謊報成功。這裡改打 public nginx
+#      endpoint（port 80），任一失敗都在清除 ERR trap 之前，會被同一顆 trap
+#      接住觸發 rollback，不會謊報成功）----
+SMOKE_DIR=\"/tmp/tf-cutover-smoke-\$\$\"
+mkdir -p \"\$SMOKE_DIR\"
+
+_tf_check_react_page() {
+  local path=\"\$1\" label=\"\$2\"
+  local hdr=\"\$SMOKE_DIR/hdr-\${label}\" body=\"\$SMOKE_DIR/body-\${label}\"
+  if ! curl -fsS -D \"\$hdr\" -o \"\$body\" \"http://127.0.0.1\${path}\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx \${path}（\${label}）沒有 200 回應（React dist 是否缺失/nginx 面是否正常？）\" >&2
+    return 1
+  fi
+  if ! grep -qi \"^content-security-policy:\" \"\$hdr\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx \${path}（\${label}）沒有 CSP header（安全 header 是否真的套用到這個 React 路由？）\" >&2
+    return 1
+  fi
+  if ! grep -q '<div id=\"root\"' \"\$body\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx \${path}（\${label}）回應內容不像 React index.html（dist 是否缺失/損毀？）\" >&2
+    return 1
+  fi
+  return 0
+}
+
+_tf_check_react_page \"/\" \"root\"
+_tf_check_react_page \"/analyze\" \"spa-fallback\"
+
+if ! curl -fsS -o \"\$SMOKE_DIR/api-health-body\" \"http://127.0.0.1/api/health\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（nginx /api/ proxy 是否正常？）\" >&2
+fi
+curl -fsS -o \"\$SMOKE_DIR/api-health-body\" \"http://127.0.0.1/api/health\"
+if ! grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 回應內容不是預期 JSON\" >&2
+fi
+grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
+
+rm -rf \"\$SMOKE_DIR\"
+echo \"[cutover] public nginx smoke check 通過（/、/analyze、/api/health 皆正常且安全 header 有套用）\"
+"
 fi
 
 if [ "$MODE" = "react" ] || [ "$MODE" = "react-http" ]; then
@@ -308,9 +389,9 @@ if ! curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
   echo '❌ [cutover] 完成後驗證失敗：python /healthz 未回應' >&2
 fi
 curl -fsS -o /dev/null http://127.0.0.1:8080/healthz
-
+${PUBLIC_SMOKE_BLOCK}
 trap - ERR
-echo '[cutover] 已切換到 ${MODE}（nginx conf + python CSP_MODE 同步，完成後驗證通過）'
+echo '[cutover] 已切換到 ${MODE}（nginx conf + python CSP_MODE 同步，完成後驗證通過，含 public nginx smoke check）'
 "
 
 # 測試用 dry-run 逃生口：只印出上面組好的遠端指令內容、不真的呼叫
