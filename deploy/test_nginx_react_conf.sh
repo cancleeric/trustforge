@@ -170,6 +170,7 @@ assert_header_present "$H" "content-security-policy" "/ 有 CSP header"
 assert_header_present "$H" "x-frame-options" "/ 有 X-Frame-Options header"
 assert_header_present "$H" "referrer-policy" "/ 有 Referrer-Policy header"
 assert_header_present "$H" "x-content-type-options" "/ 有 X-Content-Type-Options header"
+assert_header_present "$H" "strict-transport-security" "/ 有 Strict-Transport-Security header（codex 複審 HIGH：location 自己宣告 add_header 會蓋掉 server 層繼承的 HSTS，不能只看 conf 裡寫了）"
 
 echo "== 場景 2：/analyze （SPA client-side route，非真實檔案，應 fallback 回 index.html）=="
 assert_status_200 "/analyze" "/analyze 回應 200（fallback 成功，不是 404）"
@@ -184,18 +185,21 @@ assert_header_present "$H" "content-security-policy" "/analyze 有 CSP header（
 assert_header_present "$H" "x-frame-options" "/analyze 有 X-Frame-Options header"
 assert_header_present "$H" "referrer-policy" "/analyze 有 Referrer-Policy header"
 assert_header_present "$H" "x-content-type-options" "/analyze 有 X-Content-Type-Options header"
+assert_header_present "$H" "strict-transport-security" "/analyze 有 Strict-Transport-Security header（SPA fallback 主要生效點，codex 複審 HIGH）"
 
 echo "== 場景 3：/index.html（直接命中，非經 try_files 重導向）=="
 assert_status_200 "/index.html" "/index.html 回應 200"
 H=$(fetch_headers "/index.html")
 assert_header_present "$H" "content-security-policy" "/index.html 有 CSP header"
 assert_header_present "$H" "x-frame-options" "/index.html 有 X-Frame-Options header"
+assert_header_present "$H" "strict-transport-security" "/index.html 有 Strict-Transport-Security header（實際命中的 location，codex 複審 HIGH）"
 
 echo "== 場景 4：/assets/<hash>.css（靜態資源，長快取，不帶 CSP）=="
 assert_status_200 "/assets/app-teststub.css" "/assets/app-teststub.css 回應 200"
 H=$(fetch_headers "/assets/app-teststub.css")
 assert_header_present "$H" "cache-control" "/assets/*.css 有 Cache-Control（長快取）header"
 assert_header_absent "$H" "content-security-policy" "/assets/*.css 不帶 CSP header（靜態資源非 SPA 頁面本身）"
+assert_header_present "$H" "strict-transport-security" "/assets/*.css 有 Strict-Transport-Security header（codex 複審 HIGH：這個 location 自己宣告 Cache-Control add_header 一樣會蓋掉繼承的 HSTS）"
 
 # ── 場景 5-7：HTTP(80) → HTTPS canonical redirect（codex 複審 HIGH：不能用
 # `$host` 當 redirect target——探測器/健康檢查/curl 直接打 IP 時 `$host` 就

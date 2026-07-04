@@ -388,9 +388,10 @@ transaction/flock/rollback 控制流程與 exit code 慣例，只是 candidate c
 | exit code | 含義 | 是否已動過 mutation | 建議動作 |
 |-----------|------|----------------------|----------|
 | `0` | 成功切換（或成功回滾但流程本身正常結束的分支不會走到這裡） | 是，已切到目標狀態 | 無 |
-| `1` | 一般失敗（候選設定驗證失敗、找不到 running 實例等）；也是任何未知/未定義 ResponseCode 的保守 fallback | 視情況——候選驗證失敗一律**沒有**任何 mutation；其餘一般失敗請查 log 判斷 | 查 log，通常可直接重試 |
+| `1` | 一般失敗（候選設定驗證失敗等）；也是任何未知/未定義 ResponseCode 的保守 fallback | 視情況——候選驗證失敗一律**沒有**任何 mutation；其餘一般失敗請查 log 判斷 | 查 log，通常可直接重試 |
 | `97` | `ROLLBACK-FAILED`：自動回滾**沒有完全成功**（見腳本內詳細訊息與手動復原指令） | **可能處於半殘狀態**，不要假設已還原 | 立即人工介入，照腳本印出的手動復原指令逐項核對 nginx symlink／CSP_MODE／healthz |
 | `98` | lock contention：另一個 cutover 呼叫正在進行中，本次直接中止 | **完全沒有** mutation | 等目前那個呼叫跑完再重試，不需要人工介入 |
+| `99` | 相符實例數不是剛好 1 台（tag `Name=trustforge-demo`、`running`）——0 台或多台一律 fail-closed 中止，不會靜默選第一台（codex 複審 HIGH：以前 `awk '{print $1}'` 會默默選到 stale/非 prod 實例，正牌 prod 沒切卻回報成功）；跟 `deploy/setup_tls.sh` 已有的同名判斷一致 | **完全沒有** mutation（連 SSM 都還沒發） | 0 台：先確認 EC2 是否真的在跑；多台：先手動確認/收斂到剛好一台 running 的 trustforge-demo 實例，再重試 |
 
 production SSM wrapper（`cutover_switch.sh` 尾段呼叫 `aws ssm
 send-command`/`get-command-invocation` 那段）會讀 `get-command-invocation`

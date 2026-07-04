@@ -572,15 +572,24 @@ if [ "${TF_CUTOVER_DRY_RUN:-}" = "1" ]; then
   exit 0
 fi
 
+# codex 複審 HIGH：以前 awk '{print $1}' 在 0 台/多台相符時會靜默選第
+# 一行（0 台時是空字串、多台時默默只挑其中一台）——對到 stale/非 prod 的
+# 實例卻回報 cutover 成功，正牌 prod 完全沒切，事故排查極難察覺。比照
+# deploy/setup_tls.sh 已修的做法：`--query` 多包一層 `[InstanceId]`，讓
+# `--output text` 每個相符實例各自一行，用 `grep -c .` 算出真正的相符數，
+# 非「剛好 1 台」一律 fail-closed 中止、不猜、不亂選，用獨立 exit code
+# （99）跟其他失敗類型區分，方便監控/自動化判斷是哪一種問題。
 MATCHES=$(aws ec2 describe-instances --region "$REGION" \
   --filters Name=tag:Name,Values=trustforge-demo \
     Name=instance-state-name,Values=running \
-  --query 'Reservations[].Instances[].InstanceId' --output text)
-IID=$(printf '%s\n' "$MATCHES" | awk '{print $1}')
-if [ -z "$IID" ] || [ "$IID" = "None" ]; then
-  echo "❌ 找不到 running 中的 trustforge-demo 實例，中止" >&2
-  exit 1
+  --query 'Reservations[].Instances[].[InstanceId]' --output text)
+MATCH_COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
+if [ "$MATCH_COUNT" -ne 1 ]; then
+  echo "❌ [cutover] 找到 ${MATCH_COUNT} 個相符實例（tag Name=trustforge-demo，running），需要剛好 1 個，中止（不會亂猜切到哪一台）。" >&2
+  echo "   0 台：請先確認 EC2 是否真的在跑；多台：請先手動確認/收斂到剛好一台 running 的 trustforge-demo 實例。" >&2
+  exit 99
 fi
+IID=$(printf '%s\n' "$MATCHES" | awk '{print $1}')
 echo "[cutover] 目標實例 ${IID}，切換到 mode=$MODE"
 
 CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
