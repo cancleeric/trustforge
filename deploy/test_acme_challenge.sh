@@ -80,7 +80,7 @@ run_acme_scenario() {
   local sed_args=(
     -e "s#listen 80;#listen ${http_port};#"
     -e "s#listen \[::\]:80;#listen [::]:${http_port};#"
-    -e "s#root /opt/trustforge/frontend/dist;#root ${case_dir}/dist;#"
+    -e "s#root /opt/trustforge/frontend/current;#root ${case_dir}/dist;#"
     -e "s#root /var/www/certbot;#root ${case_dir}/webroot;#"
   )
   if [ "$needs_tls" = "1" ]; then

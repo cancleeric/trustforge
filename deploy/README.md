@@ -225,6 +225,14 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 |------|------|--------|----------|
 | 0（既有） | `deploy_ec2.sh` | 建 EC2、裝 python，port 80 直接對外 | 不變 |
 | 1 | `deploy_frontend_nginx.sh` | 疊加 nginx 層 + 上傳 React dist + **四份** nginx conf 候選（legacy/react/react-http/legacy-tls）；python 收斂只聽 `127.0.0.1:8080` | 預設啟用 `nginx-legacy.conf`（全部原樣轉發給 python，功能與階段 0 逐字等價） |
+
+React dist 佈署本身也是 versioned release + atomic symlink（codex 複審
+HIGH）：每次下載/解壓到全新的 `frontend/releases/<ts>/`，完全不動現在活著
+的 `frontend/current`（nginx `root` 指的就是這個 symlink），驗證通過後才在
+ERR trap 保護下把 `current` atomic 切過去；前一版 release 目錄刻意保留，
+失敗時 rollback 能把 `current` 切回去、內容原封不動、立刻可服務——不再是
+舊版「先 `rm -rf` 現正 serving 的目錄再解壓」那種下載中/解壓失敗就直接讓
+active 站壞掉、且沒有任何 rollback 機制救得回來的做法。
 | 2 | `cutover_switch.sh react\|react-http\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react`/`react-http` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止；`react-http` **另外**預設禁止（見下方），需明確 `TF_ALLOW_INSECURE_HTTP_CUTOVER=yes` 才放行 |
 
 **`react` vs `react-http` 怎麼選**：兩者是同一套 React 前端拓樸，差別只在
@@ -276,7 +284,8 @@ python 端 `TRUSTFORGE_CSP_MODE` `react`/`react-http` 兩者都設成 `react`
   原樣轉發給 `127.0.0.1:8080`。
 - `deploy/nginx.conf`：cutover 後的目標拓樸，**主線（domain 已就緒）**。
   `server_name trustforge.hurricanesoft.com.tw`；`/` serve React 靜態檔
-  （`frontend/dist`）、`/api/` 轉發給 python，80→443 redirect + HSTS，
+  （`frontend/current` symlink，見上方 versioned release 說明）、`/api/`
+  轉發給 python，80→443 redirect + HSTS，
   React 用 CSP 只加在 `location /`（不外溢到 `/api/` 的 JSON 回應）；
   `ssl_certificate`/`ssl_certificate_key` 讀
   `/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/`（見
