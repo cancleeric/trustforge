@@ -2862,10 +2862,18 @@ def _is_live_request(qs: dict) -> bool:
     )
 
 
-def _parse_live(qs: dict, client_ip: str) -> bool:
-    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。"""
+def _parse_live(qs: dict, client_ip: str, *, enforce_rate_limit: bool = True) -> bool:
+    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。
+
+    `enforce_rate_limit=False`（#51 codex HIGH 複審：dedup×限流交互）：
+    呼叫端（`_dedup_analyze_call` 的 leader）已經在 dedup 查找**之前**
+    對這個 caller 自己的 IP 呼叫過 `_analyze_enforce_caller_rate_limit()`
+    ，這裡就不能再重複呼叫 `_check_live_rate_limit`——否則同一個邏輯請求
+    的 IP 會被計入限流 bucket 兩次，等於平白把該 IP 的額度砍半。
+    `/analyze`、`/analyze.json` 兩條非 dedup 路由不受影響，維持預設
+    `True`、原樣在這裡做限流。"""
     live = _is_live_request(qs)
-    if live and client_ip:
+    if live and client_ip and enforce_rate_limit:
         _check_live_rate_limit(client_ip)
     return live
 
@@ -2896,7 +2904,7 @@ def _is_real_request(qs: dict, live: bool) -> bool:
     return not _is_sample_request(qs, live)
 
 
-def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
+def _parse_real(qs: dict, client_ip: str, live: bool, *, enforce_rate_limit: bool = True) -> bool:
     """從 qs 解析「真資料·$0」是否生效（預設檔位，見 `_is_real_request`）：
     走真連接器、免 Bedrock。
 
@@ -2911,9 +2919,15 @@ def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
     就會觸發這條路徑，若沿用 live 的緊門檻，反向代理後所有使用者共用一個
     來源 IP，5 次/60s 就會整批 429。real-off 仍需要限流（防真連接器被
     洪水級高頻打爆），只是門檻改成 DoS 洪水級而非 Bedrock 成本級。
+
+    `enforce_rate_limit=False`（#51 codex HIGH 複審：dedup×限流交互，
+    見 `_parse_live` 同名參數）：`_dedup_analyze_call` 的 leader 已經在
+    dedup 查找之前對這個 caller 自己的 IP 做過
+    `_analyze_enforce_caller_rate_limit()`，這裡跳過避免重複計入同一個
+    IP 的限流 bucket。
     """
     real = _is_real_request(qs, live)
-    if real and client_ip:
+    if real and client_ip and enforce_rate_limit:
         _check_real_rate_limit(client_ip)
     return real
 
@@ -3018,15 +3032,22 @@ def _active_mode(qs: dict) -> str:
     return "real"
 
 
-def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
+def _do_analyze(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = True) -> tuple:
     """單幣分析入口，永遠回傳 (report, evidence, log) 三元組。
 
     只處理 multi_source / hypothesis；comparison 請改用 _do_comparison。
 
     Raises:
         ValueError:        幣種非法 / q 過長 / pipeline 無資料
-        TooManyRequests:   同 IP live 請求超速
+        TooManyRequests:   同 IP live 請求超速（`enforce_rate_limit=True` 時）
         其餘 Exception:    由呼叫方捕捉後回 502
+
+    `enforce_rate_limit=False`（#51 codex HIGH 複審：dedup×限流交互）：
+    只有 `/api/analyze` 的 dedup leader（`_dedup_analyze_call`）會傳
+    `False`——因為 `_handle_api_analyze` 已經在 dedup 查找之前，對這個
+    caller 自己的 IP 做過一次限流（`_analyze_enforce_caller_rate_limit`），
+    這裡不能再重複計入同一個 IP 的 bucket。`/analyze`、`/analyze.json`
+    （非 dedup 的畫面/匯出路由）維持預設 `True`，行為不變。
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     qtype = QuestionType(qs.get("type", ["multi_source"])[0])
@@ -3038,8 +3059,8 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
-    live = _parse_live(qs, client_ip)
-    real = _parse_real(qs, client_ip, live)
+    live = _parse_live(qs, client_ip, enforce_rate_limit=enforce_rate_limit)
+    real = _parse_real(qs, client_ip, live, enforce_rate_limit=enforce_rate_limit)
 
     if coin not in COIN_POOL:
         # 同一批商業級修復：不印 Python tuple repr（如 `('BTC', 'ETH', ...)`）
@@ -3071,13 +3092,16 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     return report, evidence, log
 
 
-def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
+def _do_comparison(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = True) -> tuple:
     """雙幣比較分析入口，回傳 (report_a, evidence_a, report_b, evidence_b, log) 五元組。
 
     Raises:
         ValueError:        無法解析兩個幣種 / q 過長 / pipeline 無資料
-        TooManyRequests:   同 IP live 請求超速
+        TooManyRequests:   同 IP live 請求超速（`enforce_rate_limit=True` 時）
         其餘 Exception:    由呼叫方捕捉後回 502
+
+    `enforce_rate_limit=False`：見 `_do_analyze` 同名參數 docstring，
+    語意完全一致（#51 codex HIGH 複審：dedup×限流交互）。
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     # 商業級修復：表單新增常駐第二個幣種下拉（`coin2`，見 `render_page()`），
@@ -3097,8 +3121,8 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
-    live = _parse_live(qs, client_ip)
-    real = _parse_real(qs, client_ip, live)
+    live = _parse_live(qs, client_ip, enforce_rate_limit=enforce_rate_limit)
+    real = _parse_real(qs, client_ip, live, enforce_rate_limit=enforce_rate_limit)
 
     pair = _parse_comparison_coins(coin_raw, query)
     if pair is None:
@@ -3311,26 +3335,78 @@ def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: di
     大小寫不影響語意，但英文查詢字大小寫可能承載使用者刻意的語意差異，
     保守不動。
 
-    `sample`/`live`/`real`/`token`：直接帶原始 qs 值（僅 strip）。這四者
-    合起來決定 `_parse_live`/`_parse_real`（進而 `_do_analyze`/
-    `_do_comparison` 呼叫 `pipeline.run` 時的 `data_mode`/`llm_mode`/
-    `offline`）最終落在離線示範沙盒（`sample=1`，固定樣本資料）、
-    「真資料·$0」（預設，即時連接器）、或真 Bedrock（`live=1&token=`）
-    哪一檔——同一 (type,coin,query) 但這四者不同，資料來源/代價/結果都
-    不同，必須各自獨立 key：
+    `sample`/`live`/`real`/`token`：直接帶原始 qs 值，**刻意不 strip**
+    （codex 複審：token 正規化）。這四者合起來決定 `_parse_live`/
+    `_parse_real`（進而 `_do_analyze`/`_do_comparison` 呼叫
+    `pipeline.run` 時的 `data_mode`/`llm_mode`/`offline`）最終落在離線
+    示範沙盒（`sample=1`，固定樣本資料）、「真資料·$0」（預設，即時
+    連接器）、或真 Bedrock（`live=1&token=`）哪一檔——同一
+    (type,coin,query) 但這四者不同，資料來源/代價/結果都不同，必須各自
+    獨立 key：
       - 漏帶 `sample` 會讓「離線示範固定樣本」跟「預設真連接器即時資料」
         誤判成同一把 key，讓其中一種請求吃到另一種資料來源的快取結果；
       - 漏帶 `live`/`real`/`token` 會把「免費離線/真資料請求」跟「已通過
         token 驗證的真 Bedrock 請求」誤判成同一把（讓已花錢的真結果被
         免費請求偷用），或讓兩個都合法的真請求彼此漏 dedup。
+      - `token` 不能 strip：`_is_live_request()` 用 `hmac.compare_digest`
+        對**原始、未 strip** 的 `qs.get("token", [""])[0]` 做逐位元組
+        比對——`token=<TOKEN>` 跟 `token=<TOKEN>%20`（尾端多一個空白）
+        的實際授權結果不同（後者 hmac 比對失敗、回退成 real 檔位，不是
+        真 Bedrock）。若 key 對 token 做 strip，這兩個「授權結果其實不同」
+        的請求會被誤判成同一把 key、共用同一份快取結果——等於讓授權
+        失敗的請求白吃已通過驗證的真 Bedrock 結果，或反過來讓合法
+        token 請求被腰斬成免費檔位的結果。key 裡的每一段都必須跟
+        `_is_live_request`/`_is_sample_request`/`_is_real_request` 實際
+        讀取、比對的位元組完全一致，才能保證「key 相同 ⇒ 實際生效的
+        檔位/授權結果也相同」；`sample`/`live`/`real` 同理不 strip，
+        避免同樣的「key 正規化跟實際判斷不一致」問題（如 `live=1 `
+        尾端多空白，`_is_live_request` 精確比對 `"1"` 會判 False，但
+        strip 後 key 卻會跟 `live=1` 撞成同一把）。
     """
-    sample_raw = (qs.get("sample", [""])[0] or "").strip()
-    live_raw = (qs.get("live", [""])[0] or "").strip()
-    real_raw = (qs.get("real", [""])[0] or "").strip()
-    token_raw = (qs.get("token", [""])[0] or "").strip()
+    sample_raw = qs.get("sample", [""])[0] or ""
+    live_raw = qs.get("live", [""])[0] or ""
+    real_raw = qs.get("real", [""])[0] or ""
+    token_raw = qs.get("token", [""])[0] or ""
     return "\x1f".join(
         (qtype.value, coin_key, query.strip(), sample_raw, live_raw, real_raw, token_raw)
     )
+
+
+def _analyze_enforce_caller_rate_limit(qs: dict, client_ip: str) -> None:
+    """#51 codex HIGH 複審（dedup×限流交互，兩個方向都要修）：
+
+    1. 只有 dedup 的 leader 會真的呼叫 `_do_analyze`/`_do_comparison`，
+       因而只有 leader 的 IP 會被 `_check_live_rate_limit`/
+       `_check_real_rate_limit` 檢查、計入 bucket；follower（含直接命中
+       60 秒短期快取的請求）完全跳過這個檢查——一個已經被限流的 IP，
+       只要送出的請求「碰巧」跟某個正在進行中/剛快取好的合法請求同一把
+       dedup key，就能繞過自己的限流白拿一份真結果。
+    2. 反過來，若 leader 因為自己 IP 超速而收到 `TooManyRequests`，
+       這個 429 若被當成一般失敗存進共用的 dedup 快取、replay 給
+       follower，會讓完全不相干、根本沒超速的其他 IP 平白拿到別人的
+       429（"429-poisoning"）。
+
+    修法：把限流檢查搬到**每一個 caller 自己**、在 dedup 查找
+    （`_analyze_dedup_key`/`_dedup_analyze_call`）之前執行一次——不管
+    這次請求最後是變成 leader、follower、還是直接命中短期快取，都先
+    對這個 caller 自己的 IP 過一次限流；限流本身開銷很小（純記憶體
+    bucket 查表），跟共用「昂貴」的分析結果（真連接器/Bedrock）分開，
+    各司其職。跟 `_parse_live`/`_parse_real` 用完全一致的純判斷邏輯
+    （`_is_live_request`/`_is_real_request`），只是抽出來獨立於
+    leader/follower 之外、對每個 caller 都執行；真正的
+    `_do_analyze`/`_do_comparison`（只有 leader 會呼叫，見
+    `_handle_api_analyze` 傳入的 `enforce_rate_limit=False`）不會再重複
+    檢查同一個 IP，避免同一個邏輯請求的限流額度被計入兩次。
+
+    這個檢查本身完全在 dedup 的 lock/cache 之外執行、不寫入任何共用
+    狀態——429 只回給這個 caller 自己，不可能 poisoning 到別的 IP。
+    """
+    live = _is_live_request(qs)
+    if live and client_ip:
+        _check_live_rate_limit(client_ip)
+    real = _is_real_request(qs, live)
+    if real and client_ip:
+        _check_real_rate_limit(client_ip)
 
 
 def _analyze_dedup_cache_put_locked(key: str, entry: tuple[bool, object]) -> None:
@@ -3356,24 +3432,40 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     follower 拿到的不是另外偽造的假資料，就是 leader 那份真結果。
 
     #9 護欄協同：dedup 判斷在 `compute()` **之前**——被 dedup 掉的
-    follower 完全不會呼叫 `compute()`，因此也不會呼叫
-    `_check_live_rate_limit`/`_check_real_rate_limit`（在 `_do_analyze`/
-    `_do_comparison` 內部才呼叫），更不會走到 `pipeline.run` 的
+    follower 完全不會呼叫 `compute()`，因此也不會走到 `pipeline.run` 的
     `try_reserve_request_budget()` 每日預留——不重複佔用、不重複消耗任何
     護欄額度，甚至根本不進 Bedrock。
 
-    leader 若失敗（`ValueError`/`TooManyRequests`/其餘），例外物件本身
-    一併存進短期快取＋重新拋給所有等待中的 follower（而不是讓 follower
-    默默各自重跑一次）——否則遇到 leader 失敗就變成「沒 dedup 到」，
-    失去防重複送出的意義；exception 交由 `_handle_api_analyze` 既有的
-    `except` 分支處理，跟 leader 收到的路徑完全一致。
+    leader 若失敗於**分析本身**（`ValueError`/其餘非 caller-specific
+    的 Exception），例外物件一併存進短期快取＋重新拋給所有等待中的
+    follower（而不是讓 follower 默默各自重跑一次）——否則遇到 leader
+    失敗就變成「沒 dedup 到」，失去防重複送出的意義；exception 交由
+    `_handle_api_analyze` 既有的 `except` 分支處理，跟 leader 收到的
+    路徑完全一致。
 
-    codex HIGH 複審（follower 無限阻塞資源耗盡，見模組頂部大段說明）：
+    codex HIGH 複審#1（follower 無限阻塞資源耗盡，見模組頂部大段說明）：
     follower 用 `event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)`
     bounded wait，逾時拋 `_AnalyzeDedupTimeout`（轉 503，不落回自己真的
     跑一次）；leader 存活時間戳超過同一門檻的 in-flight entry 視為
     stale，新請求會直接取代成為新 leader，而不是永遠 follow 一個死掉的
     leader。
+
+    codex HIGH 複審#2（dedup×限流交互）：`_check_live_rate_limit`/
+    `_check_real_rate_limit` 已經搬到 `_handle_api_analyze` 呼叫
+    `_dedup_analyze_call` **之前**，對每一個 caller（leader/follower 都
+    一樣）各自的 IP 執行一次（見 `_analyze_enforce_caller_rate_limit`），
+    這裡的 `compute()`（`enforce_rate_limit=False`）理論上不會再自己
+    raise `TooManyRequests`。但為了 defense-in-depth（也對齊
+    coordinator 明確要求），這裡仍明確**不快取、不 replay**
+    `TooManyRequests`——那是 caller-specific 的失敗（限流/授權類，
+    "只跟這個 caller 的身分/歷史有關"，不是分析本身的結果），絕不能被
+    當成「一般失敗」存進共用快取 replay 給不相干的其他 IP（"429
+    poisoning"）。leader 遇到 `TooManyRequests` 時只清 in-flight、
+    不寫快取、正常 `raise` 給自己；已在等待的 follower 醒來後發現
+    `_analyze_dedup_cache` 沒有這個 key 的紀錄，會落回下面「fail-safe：
+    自己真的跑一次」分支——這正是我們要的：每個 follower 各自的限流
+    早就在 `_handle_api_analyze` 前置檢查過了（合格才會走到這裡），
+    所以此時獨立跑一次是安全、正確的，不是「沒 dedup 到」。
     """
     now = time.time()
     with _analyze_dedup_lock:
@@ -3415,15 +3507,28 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             if ok:
                 return payload
             raise payload
-        # 理論上不會發生（leader 的 finally 一定先寫快取才 set 事件）——
-        # fail-safe：不讓 follower 永遠卡死收不到結果，退回自己真的跑一次。
+        # 兩種情況會落到這裡：(a) 理論上不會發生的極端 race（leader 寫
+        # 快取跟 set() 事件在同一個 critical path，中間應該看不到空窗）；
+        # (b) leader 遇到 `TooManyRequests`（見下方 except 分支）——那是
+        # caller-specific 的失敗，故意不寫進共用快取，讓每個 follower
+        # 都落到這裡、各自真的跑一次 `compute()`。不管哪種情況，這裡都
+        # 是安全的：follower 自己的限流早已在 `_handle_api_analyze` 呼叫
+        # `_dedup_analyze_call` 之前就通過了，獨立跑一次不會繞過任何
+        # 保護、也不是「沒 dedup 到」。
         return compute()
 
     try:
         result = compute()
     except Exception as exc:
         with _analyze_dedup_lock:
-            _analyze_dedup_cache_put_locked(key, (False, exc))
+            if not isinstance(exc, TooManyRequests):
+                # codex HIGH 複審（dedup×限流交互）：`TooManyRequests` 是
+                # caller-specific 的失敗（只跟 leader 自己的 IP/歷史有
+                # 關），絕不能存進共用快取 replay 給其他不相干的 IP
+                # （429-poisoning）——只清 in-flight、正常 raise 給 leader
+                # 自己，讓等待中的 follower 落回上面的 fail-safe 分支各自
+                # 獨立跑一次。
+                _analyze_dedup_cache_put_locked(key, (False, exc))
             current = _analyze_dedup_inflight.get(key)
             if current is not None and current[0] is event:
                 _analyze_dedup_inflight.pop(key, None)
@@ -3475,6 +3580,18 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     dedup ＋ 60 秒短期結果快取——同一組參數的重複/並行請求只有第一個
     （leader）真的觸發依賴呼叫，其餘原地等待、共用同一份真實結果，不會
     各自再打一次真連接器/Bedrock。詳見 `_dedup_analyze_call()` docstring。
+
+    codex HIGH 複審（dedup×限流交互，兩個方向都要修，見
+    `_analyze_enforce_caller_rate_limit` docstring）：per-IP 限流
+    （`_check_live_rate_limit`/`_check_real_rate_limit`）改成在
+    `_dedup_analyze_call()` **之前**，對每一個 caller（不管最後是
+    leader、follower、還是命中短期快取）各自的 `client_ip` 執行一次；
+    真正呼叫 `_do_analyze`/`_do_comparison`（只有 leader 會執行到）改傳
+    `enforce_rate_limit=False`，避免同一個 caller 的 IP 被重複計入限流
+    bucket 兩次。這樣一來：(1) 沒有任何 caller 能靠共用 leader 的結果
+    繞過自己的限流；(2) 限流本身完全在 dedup 的共用 lock/cache 之外，
+    一個 IP 的 429 不可能透過 dedup 快取 poisoning 到別的 IP（見
+    `_dedup_analyze_call` 對 `TooManyRequests` 的特殊處理）。
     """
     try:
         qtype = QuestionType(qs.get("type", ["multi_source"])[0])
@@ -3520,9 +3637,17 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
 
     # --- 2. 驗證通過後才碰依賴（連接器/Bedrock/pipeline/序列化）---
     try:
+        # codex HIGH 複審（dedup×限流交互）：每個 caller 都先過自己的
+        # 限流，再進 dedup 查找——不管這次請求最後是 leader、follower、
+        # 還是命中短期快取，都不能繞過自己的限流；限流本身完全在
+        # dedup 共用狀態之外，不會被快取/replay 給別的 IP。見
+        # `_analyze_enforce_caller_rate_limit` docstring。
+        _analyze_enforce_caller_rate_limit(qs, client_ip)
+
         if qtype == QuestionType.COMPARISON:
             report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
-                dedup_key, lambda: _do_comparison(qs, client_ip=client_ip)
+                dedup_key,
+                lambda: _do_comparison(qs, client_ip=client_ip, enforce_rate_limit=False),
             )
             payload = {
                 "version": VERSION,
@@ -3540,7 +3665,8 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             }
         else:
             report, evidence, log = _dedup_analyze_call(
-                dedup_key, lambda: _do_analyze(qs, client_ip=client_ip)
+                dedup_key,
+                lambda: _do_analyze(qs, client_ip=client_ip, enforce_rate_limit=False),
             )
             payload = {
                 "version": VERSION,

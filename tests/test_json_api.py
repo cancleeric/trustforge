@@ -787,30 +787,47 @@ def test_api_analyze_dedup_stalled_leader_entry_becomes_stale_and_replaced(monke
     assert current is None or current[0] is not zombie_event
 
 
-def test_api_analyze_dedup_cross_ip_follower_shares_result_without_bypassing_own_rate_limit(
-    monkeypatch,
-):
-    """codex 複審要求的 cross-IP 檢查：不同 client IP 的 follower 共用
-    leader 的真實結果時，行為必須明確、不能被 poisoning。
+def test_api_analyze_dedup_cross_ip_exhausted_ip_blocked_unrelated_ip_unaffected(monkeypatch):
+    """codex 複審第二輪 HIGH（dedup×限流交互，方向 2：429-poisoning）：
+    IP_A 的 real 限流 bucket 早已用滿，牠自己送 `/api/analyze` 一定要被
+    自己的限流擋下（429）；緊接著 IP_B（沒被限流）送出完全相同的請求，
+    不該被 IP_A 的 429 影響——因為限流檢查現在搬到 dedup 查找**之前**、
+    對每個 caller 各自的 IP 執行（`_analyze_enforce_caller_rate_limit`），
+    IP_A 的 429 從頭到尾不會碰到共用的 dedup cache/lock，不可能
+    poisoning 到 IP_B。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
 
-    這裡鎖住既有（刻意）設計：follower 完全不會碰 `_do_analyze`／
-    `_check_real_rate_limit`（never calls `compute()`），所以即使
-    follower 自己的 IP 早就把 real 限流 bucket 用滿，只要它跟某個正在
-    進行中的 leader 完全同 key（coin/query/type/sample/live/real/token
-    皆同），依然能安全拿到 leader 算出來的同一份真實結果，不會被自己
-    （用不到的）限流狀態誤傷成 429——因為 dedup 沒有多消耗任何一次真
-    連接器/Bedrock 呼叫，所謂「繞過限流」保護的資源根本沒被動用。
-    最後額外佐證：若這個 IP 真的獨立打限流檢查，的確會被擋下，證明
-    上面的 200 不是限流失效，而是 follower 這條路徑本來就不會走到限流
-    檢查。
+    ip_a = "10.1.5.1"
+    ip_b = "10.1.5.2"
+    web._real_rate_buckets[ip_a] = [time.time()] * web._REAL_RATE_MAX
+    try:
+        qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-cross-ip-poisoning-test"]}
 
-    誰先搶到 leadership 是 lock 內部的競速結果，不能單靠先 start thread
-    就假設一定是 `leader_ip` 贏（若反而是限流已用滿的 `follower_ip`
-    搶到 leadership，它自己 `_do_analyze` 內的 `_check_real_rate_limit`
-    會先炸 429、被兩邊共用，測的就不是本測試要驗的東西）。這裡用
-    `leader_started` event 明確等 leader（`leader_ip`）真的已經進入
-    `run()`（代表 leadership 已經確定寫進 in-flight dict）之後，才送出
-    `follower_ip` 的請求，確保 follower_ip 一定是 follower。"""
+        code_a, body_a = web._handle_api_analyze(qs, client_ip=ip_a)
+        assert code_a == 429, f"IP_A 自己的限流早已用滿，應該被擋下，實際 {code_a} {body_a}"
+        assert _envelope(body_a)["error"]["code"] == "rate_limited"
+
+        code_b, body_b = web._handle_api_analyze(qs, client_ip=ip_b)
+        assert code_b == 200, (
+            f"IP_B 沒被限流，不該被 IP_A 的 429 poisoning，實際 {code_b} {body_b}"
+        )
+        assert counter.n == 1, f"只有 IP_B 真的觸發分析，應恰好 1 次，實際 {counter.n} 次"
+    finally:
+        web._real_rate_buckets.pop(ip_a, None)
+
+
+def test_api_analyze_dedup_cross_ip_follower_still_enforces_own_rate_limit(monkeypatch):
+    """codex 複審第二輪 HIGH（dedup×限流交互，方向 1：繞過限流）：
+    leader_ip（沒被限流）先送出請求、進入 compute() 慢慢跑；
+    follower_ip（real 限流 bucket 早已用滿）在 leader 還在進行中時送出
+    完全相同的請求——即使 follower_ip 跟 leader 同一把 dedup key，也不該
+    因為「共用 leader 結果」而繞過自己的限流，應該被自己的限流擋下
+    （429），而不是拿到 leader 算出來的 200。
+
+    用 `leader_started` event 確保 leader_ip 先真的進入 compute()（
+    leadership 已經確定），才送出 follower_ip 的請求，避免兩邊搶
+    leadership 的競速結果影響測試判斷。"""
     counter = _CallCounter()
     leader_started = threading.Event()
     real_run = pipeline_module.run
@@ -823,16 +840,11 @@ def test_api_analyze_dedup_cross_ip_follower_shares_result_without_bypassing_own
 
     monkeypatch.setattr(web, "run", _counting_run)
 
-    leader_ip = "10.1.3.1"
-    follower_ip = "10.1.3.2"
-
-    # 模擬 follower_ip 的 real 限流 bucket 早已用滿（見 `_check_real_rate_limit`
-    # / `_REAL_RATE_MAX`）——若 follower 真的獨立跑一次 `_do_analyze`，
-    # 應該會被 429 擋下。
-    now = time.time()
-    web._real_rate_buckets[follower_ip] = [now] * web._REAL_RATE_MAX
+    leader_ip = "10.1.5.3"
+    follower_ip = "10.1.5.4"
+    web._real_rate_buckets[follower_ip] = [time.time()] * web._REAL_RATE_MAX
     try:
-        qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-cross-ip-test"]}
+        qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-cross-ip-bypass-test"]}
         results: dict[str, tuple[int, str]] = {}
         results_lock = threading.Lock()
 
@@ -853,21 +865,130 @@ def test_api_analyze_dedup_cross_ip_follower_shares_result_without_bypassing_own
 
         assert set(results) == {leader_ip, follower_ip}
         assert results[leader_ip][0] == 200
-        assert results[follower_ip][0] == 200, (
-            f"follower 共用 leader 結果不該碰自己的限流 bucket，實際 {results[follower_ip]}"
+        assert results[follower_ip][0] == 429, (
+            f"follower_ip 自己的限流早已用滿，不該靠共用 leader 結果繞過，"
+            f"實際 {results[follower_ip]}"
         )
-        assert results[leader_ip][1] == results[follower_ip][1], (
-            "cross-IP 的 follower 應共用同一份真實結果"
+        assert _envelope(results[follower_ip][1])["error"]["code"] == "rate_limited"
+        assert counter.n == 1, (
+            f"follower_ip 被自己的限流擋下，不該碰 compute()，應恰好 1 次（leader），"
+            f"實際 {counter.n} 次"
         )
-        assert counter.n == 1, f"cross-IP 重複請求仍應只觸發 1 次真的 pipeline.run，實際 {counter.n} 次"
-
-        # 佐證：若 follower_ip 真的獨立呼叫 `_check_real_rate_limit`（不透過
-        # dedup），的確會被擋下——證明上面的 200 不是限流本身失效，而是
-        # follower 這條路徑根本沒有走到限流檢查（因為沒有真的碰依賴）。
-        with pytest.raises(web.TooManyRequests):
-            web._check_real_rate_limit(follower_ip)
     finally:
         web._real_rate_buckets.pop(follower_ip, None)
+
+
+def test_dedup_analyze_call_leader_too_many_requests_not_cached_or_replayed(monkeypatch):
+    """codex 複審第二輪 HIGH（dedup×限流交互）：defense-in-depth——就算
+    某個 leader 的 `compute()` 過程中真的還是拋出 caller-specific 的
+    `TooManyRequests`（在目前架構下理論上不該發生，因為限流已經搬到
+    `_handle_api_analyze` 呼叫 `_dedup_analyze_call` 之前的
+    `_analyze_enforce_caller_rate_limit()`，且傳給 `compute()` 的
+    `_do_analyze`/`_do_comparison` 用 `enforce_rate_limit=False`），
+    `_dedup_analyze_call` 本身也不該把這個 429 存進共用快取／replay
+    給其他呼叫端——那是 caller-specific 的失敗，不是分析本身的結果。
+
+    直接單元測試 `_dedup_analyze_call`（不透過完整 HTTP handler），
+    模擬一個會拋 `TooManyRequests` 的 leader，斷言：(a) leader 自己確實
+    收到這個例外；(b) 緊接著同一把 key 換一個「另一個呼叫端」的
+    `compute`，不會拿到快取的 429 replay，而是真的被呼叫到一次。"""
+    key = "dedup-toomanyrequests-not-cached-test-key"
+
+    def _boom():
+        raise web.TooManyRequests("模擬 caller 自己的限流（不該被共用快取）")
+
+    with pytest.raises(web.TooManyRequests):
+        web._dedup_analyze_call(key, _boom)
+
+    counter = _CallCounter()
+
+    def _succeed():
+        counter.hit()
+        return "real-result-for-a-different-caller"
+
+    result = web._dedup_analyze_call(key, _succeed)
+    assert result == "real-result-for-a-different-caller", (
+        "429 不該被快取／replay，同一把 key 的下一個呼叫端應該真的拿到自己的結果"
+    )
+    assert counter.n == 1, f"應該真的呼叫到 1 次，而不是複用剛剛那個 429，實際 {counter.n} 次"
+
+
+def test_api_analyze_dedup_key_distinguishes_token_whitespace_suffix(monkeypatch):
+    """codex 複審（token 正規化）：dedup key 對 `token` 必須逐位元組比對
+    （不能 strip）——`_is_live_request()` 用 `hmac.compare_digest` 對
+    **原始、未 strip** 的 token 做逐位元組比對：`token=<TOKEN>` 合法通過
+    （live=True），`token=<TOKEN> `（尾端多一個空白）hmac 比對失敗、回退
+    成 real 檔位（live=False）。這兩個請求**實際生效的檔位不同**，若
+    key 對 token 做 strip 就會誤判成同一把，讓授權失敗的請求白吃已通過
+    驗證的真 Bedrock 結果，或反過來讓合法 token 的請求被腰斬成免費檔位
+    的結果——不能共用同一份快取。
+
+    不需要真的觸發真 Bedrock（`web.run` 換成安全的離線 stub，強制走
+    樣本資料，$0）；只驗證 dedup key 不同、且兩種請求順序
+    （valid-first / whitespace-first）都各自真的呼叫到 `pipeline.run`，
+    不是命中彼此的快取。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", True)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "secret-token-abc")
+
+    real_run = pipeline_module.run
+    qs_valid = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": ["dedup-token-ws-test"],
+        "live": ["1"],
+        "token": ["secret-token-abc"],
+    }
+    qs_ws = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": ["dedup-token-ws-test"],
+        "live": ["1"],
+        "token": ["secret-token-abc "],  # 尾端多一個空白
+    }
+
+    key_valid = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query="dedup-token-ws-test", qs=qs_valid
+    )
+    key_ws = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query="dedup-token-ws-test", qs=qs_ws
+    )
+    assert key_valid != key_ws, "token 差一個尾端空白，實際授權結果不同，dedup key 不該相同"
+
+    # 佐證兩者實際授權結果的確不同：valid token 判 live=True，空白後綴的
+    # token hmac 比對失敗、回退成非 live。
+    assert web._is_live_request(qs_valid) is True
+    assert web._is_live_request(qs_ws) is False
+
+    # 順序 1：valid 先、whitespace 後——各自都該真的呼叫 1 次 pipeline.run。
+    counter1 = _CallCounter()
+
+    def _stub_run_1(*args, **kwargs):
+        counter1.hit()
+        coin, query, qtype = args[0], args[1], args[2]
+        return real_run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", _stub_run_1)
+    code1, _ = web._handle_api_analyze(qs_valid, client_ip="10.1.6.1")
+    code2, _ = web._handle_api_analyze(qs_ws, client_ip="10.1.6.1")
+    assert code1 == 200 and code2 == 200
+    assert counter1.n == 2, f"valid/whitespace-suffixed token 應各自呼叫 1 次，實際共 {counter1.n} 次"
+
+    web._analyze_dedup_cache.clear()
+    web._analyze_dedup_inflight.clear()
+
+    # 順序 2：whitespace 先、valid 後——順序不影響結論。
+    counter2 = _CallCounter()
+
+    def _stub_run_2(*args, **kwargs):
+        counter2.hit()
+        coin, query, qtype = args[0], args[1], args[2]
+        return real_run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", _stub_run_2)
+    code3, _ = web._handle_api_analyze(qs_ws, client_ip="10.1.6.2")
+    code4, _ = web._handle_api_analyze(qs_valid, client_ip="10.1.6.2")
+    assert code3 == 200 and code4 == 200
+    assert counter2.n == 2, f"順序反過來一樣該各自呼叫 1 次，實際共 {counter2.n} 次"
 
 
 # ---------------------------------------------------------------------------
