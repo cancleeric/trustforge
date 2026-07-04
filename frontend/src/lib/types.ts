@@ -214,13 +214,27 @@ export interface CostModelDetail {
   tokens_out: number
 }
 
-/** `Ledger.summary()`（`ledger.py`）——`runs` 是原始逐筆帳本紀錄，UI 只取
- * 總計／by-model 彙總顯示，不逐筆渲染（筆數隨時間無界增長）。 */
+/** 單筆帳本 run 紀錄（`ledger.append_run()` 寫入時的欄位）。`calls` 只用來算
+ * 呼叫數，不逐筆驗證內容。 */
+export interface LedgerRunRecord {
+  ts: string
+  coin?: string
+  question_type?: string
+  offline?: boolean
+  total_cost_usd: number
+  calls: unknown[]
+}
+
+/** `Ledger.summary()`（`ledger.py`）——codex HIGH（成本端點可擴展性）修復後
+ * 為有界摘要：`run_count` 是帳本真實總筆數，`runs` 只回最近 N 筆（後端
+ * `SUMMARY_RECENT_RUNS_CAP`，目前 50），不是無界成長的完整清單。UI 顯示
+ * 「總筆數」一律讀 `run_count`，`runs` 只用來畫「最近 N 筆」明細表。 */
 export interface CostsData {
   total_cost_usd: number
   by_model: Record<string, number>
   by_model_detail: Record<string, CostModelDetail>
-  runs: unknown[]
+  run_count: number
+  runs: LedgerRunRecord[]
 }
 
 // ── /api/history ─────────────────────────────────────────────────────────

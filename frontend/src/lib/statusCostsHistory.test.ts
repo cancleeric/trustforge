@@ -107,7 +107,17 @@ function validCostsData(): CostsData {
     total_cost_usd: 0.0042,
     by_model: { 'claude-3': 0.0042 },
     by_model_detail: { 'claude-3': { cost_usd: 0.0042, tokens_in: 100, tokens_out: 50 } },
-    runs: [{ run_id: 'r1' }],
+    run_count: 1,
+    runs: [
+      {
+        ts: '2026-01-01T00:00:00+00:00',
+        coin: 'BTC',
+        question_type: 'multi_source',
+        offline: false,
+        total_cost_usd: 0.0042,
+        calls: [{ model: 'claude-3', cost_usd: 0.0042 }],
+      },
+    ],
   }
 }
 
@@ -150,6 +160,26 @@ describe('isCostsData / /api/costs', () => {
   it('total_cost_usd 缺席 → parse_error', async () => {
     const data = validCostsData()
     delete asMutable(data).total_cost_usd
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<CostsData>('/api/costs', undefined, isCostsData)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
+  // codex HIGH（成本端點可擴展性）：後端改回有界摘要後新增 `run_count`（真實
+  // 總筆數），`runs` 只回最近 N 筆——這裡確保 validator 對齊新 shape。
+  it('run_count 缺席 → parse_error', async () => {
+    const data = validCostsData()
+    delete asMutable(data).run_count
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<CostsData>('/api/costs', undefined, isCostsData)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
+  it('runs 某筆缺 ts → parse_error', async () => {
+    const data = validCostsData()
+    delete asMutable(data.runs[0]).ts
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
     const result = await apiFetch<CostsData>('/api/costs', undefined, isCostsData)
     expect(result.ok).toBe(false)

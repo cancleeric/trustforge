@@ -88,7 +88,9 @@ function CostSummaryCard({
       {!costsLoading && !costsError && costs && (
         <div className="flex items-baseline gap-2">
           <span className="tf-num text-2xl font-bold text-tf-text">{formatUsd(costs.total_cost_usd)}</span>
-          <span className="text-xs text-tf-muted">累計花費（跨 run）</span>
+          <span className="text-xs text-tf-muted">
+            累計花費，共 {costs.run_count.toLocaleString()} 個 run
+          </span>
         </div>
       )}
     </div>

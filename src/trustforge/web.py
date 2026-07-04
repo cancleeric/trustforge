@@ -949,7 +949,10 @@ def _render_status_page() -> str:
     except Exception:
         summary = JsonlLedger().summary()
     total_cost = float(summary.get("total_cost_usd", 0.0) or 0.0)
-    run_count = len(summary.get("runs", []) or [])
+    # codex HIGH：`summary()["runs"]` 現在只回最近 SUMMARY_RECENT_RUNS_CAP 筆（有界），
+    # 真實總筆數要讀新加的 `run_count` 欄位；沒有該欄位（理論上不會，防呆）才退回
+    # 用 `runs` 長度估算。
+    run_count = int(summary.get("run_count", len(summary.get("runs", []) or [])) or 0)
 
     try:
         freshness = get_freshness_snapshot(backend=cache_backend)
@@ -1215,7 +1218,12 @@ def _render_costs_page() -> str:
 
     total = float(summary.get("total_cost_usd", 0.0) or 0.0)
     by_model = summary.get("by_model", {}) or {}
+    # codex HIGH：`runs` 現在只含最近 SUMMARY_RECENT_RUNS_CAP 筆（有界），真實總筆數
+    # 讀 `run_count`；`recent`（下方 per-run 明細）本來就只顯示最近 50 筆，`runs` 本身
+    # ≤50 筆時 `reversed(runs)[:50]` 結果不變，帳本 >50 筆時兩者挑出的仍是同一批
+    # 「最近 50 筆」，SSR 輸出逐字不變。
     runs = summary.get("runs", []) or []
+    run_count = int(summary.get("run_count", len(runs)) or 0)
 
     over_budget = False
     if COST_BUDGET_USD:
@@ -1259,7 +1267,7 @@ def _render_costs_page() -> str:
   <h2 style="margin:0 0 .3rem">累計成本帳本</h2>
   <p class="j">${total:.4f}</p>
   {alert_html}
-  <p style="color:var(--tf-muted);font-size:.85rem">共 {len(runs)} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
+  <p style="color:var(--tf-muted);font-size:.85rem">共 {run_count} 個 run（跨 run 持久化，見 out/cost_ledger.jsonl）</p>
 </div>
 
 <div class="tf-section">
@@ -3381,6 +3389,12 @@ def _handle_api_costs(client_ip: str = "") -> tuple[int, str]:
     codex 複審 HIGH（同分支修復）：`_get_ledger_summary()` 呼叫＋序列化包
     `except Exception`——即使該函式內部已有 fallback，fallback 本身讀檔
     失敗仍可能往上炸，不包會讓 ledger I/O 例外穿透 `do_GET` 吐 traceback。
+
+    codex 複審 HIGH（成本端點可擴展性，同分支修復）：回應 shape 為有界摘要
+    `{total_cost_usd, by_model, by_model_detail, run_count, runs}`——`run_count`
+    是帳本真實總筆數，`runs` 只含最近 `ledger.SUMMARY_RECENT_RUNS_CAP`（50）筆，
+    不再是無界成長的完整清單（見 `Ledger.summary()`）。前端要顯示「總筆數」一律
+    讀 `run_count`，不可用 `runs.length` 估算（帳本 >50 筆時會低估）。
     """
     try:
         _check_status_rate_limit(client_ip)

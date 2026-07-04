@@ -13,6 +13,7 @@ import type {
   ComparisonAnalyzeData,
   CostModelDetail,
   CostsData,
+  LedgerRunRecord,
   CrossSourceSignal,
   DecisionState,
   Evidence,
@@ -334,17 +335,31 @@ function isCostModelDetail(value: unknown): value is CostModelDetail {
   )
 }
 
-// `runs` 刻意只驗證「是陣列」，不逐筆驗欄位——UI 不逐筆渲染這份原始帳本
-// （見 `types.ts::CostsData` 說明），過嚴驗證這個無界成長的欄位反而增加
-// 誤殺風險，不符合實際讀取需求。
+// codex HIGH（成本端點可擴展性）修復後，後端 `/api/costs` 回有界摘要：
+// `run_count`（真實總筆數）+ 最近 N 筆 `runs`（後端 cap，目前 50）。`runs`
+// 現在是有界欄位，逐筆驗證欄位型別的成本可控，用來畫「最近 N 筆」明細表。
+function isLedgerRunRecord(value: unknown): value is LedgerRunRecord {
+  return (
+    isPlainObject(value) &&
+    typeof value.ts === 'string' &&
+    typeof value.total_cost_usd === 'number' &&
+    Array.isArray(value.calls) &&
+    (value.coin === undefined || typeof value.coin === 'string') &&
+    (value.question_type === undefined || typeof value.question_type === 'string') &&
+    (value.offline === undefined || typeof value.offline === 'boolean')
+  )
+}
+
 export function isCostsData(value: unknown): value is CostsData {
   if (!isPlainObject(value)) return false
   if (typeof value.total_cost_usd !== 'number') return false
+  if (typeof value.run_count !== 'number') return false
   if (!isPlainObject(value.by_model)) return false
   if (!Object.values(value.by_model).every((v) => typeof v === 'number')) return false
   if (!isPlainObject(value.by_model_detail)) return false
   if (!Object.values(value.by_model_detail).every(isCostModelDetail)) return false
   if (!Array.isArray(value.runs)) return false
+  if (!value.runs.every(isLedgerRunRecord)) return false
   return true
 }
 
