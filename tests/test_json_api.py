@@ -679,6 +679,197 @@ def test_api_analyze_dedup_not_bypass_pre_validation(monkeypatch):
     assert parsed["error"]["code"] == "bad_request"
 
 
+def test_api_analyze_dedup_stalled_leader_follower_times_out_not_infinite_block(monkeypatch):
+    """codex HIGH 複審（follower 無限阻塞資源耗盡，web.py:3353-3354）：leader
+    （模擬真連接器/Bedrock）卡住太久時，follower 的 `event.wait()` 必須有
+    bounded timeout（`_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`），逾時後回
+    可重試的 503，而不是無限阻塞該 server thread——重複請求越多，卡住的
+    thread 就越多，會把一個單純變慢/掛掉的依賴放大成整個 server 的 thread
+    池耗盡。
+
+    這裡把逾時上界調小（0.3 秒），leader 的模擬延遲（1.5 秒）明確大於
+    逾時上界；直接量測每個 worker 各自的耗時，斷言 follower 遠早於
+    leader 完成前就已經返回（thread 真的被釋放，不是碰巧等到 leader
+    做完才順便回來），且逾時的 follower 不會落回自己真的呼叫
+    `pipeline.run`（避免放大 Bedrock 花費/thundering herd）。"""
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
+
+    counter = _CallCounter()
+    leader_finished = threading.Event()
+
+    def _stalled_run(*args, **kwargs):
+        counter.hit()
+        time.sleep(1.5)  # 遠大於逾時上界 0.3 秒，模擬 leader hang 住
+        result = pipeline_module.run(*args, **kwargs)
+        leader_finished.set()
+        return result
+
+    monkeypatch.setattr(web, "run", _stalled_run)
+
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-stalled-leader-test"]}
+    n_workers = 4
+    barrier = threading.Barrier(n_workers)
+    results: list[tuple[int, str, float]] = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        barrier.wait()
+        t0 = time.time()
+        code, body = web._handle_api_analyze(qs, client_ip="10.1.2.1")
+        with results_lock:
+            results.append((code, body, time.time() - t0))
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert all(not t.is_alive() for t in threads), "所有 worker thread 都該正常結束，不能無限阻塞"
+    assert len(results) == n_workers
+
+    codes = [code for code, _, _ in results]
+    assert codes.count(200) == 1, f"應恰好 1 個 leader 成功拿到 200，實際 {codes}"
+    assert codes.count(503) == n_workers - 1, (
+        f"其餘 follower 應在 bounded wait 逾時後回可重試的 503，實際 {codes}"
+    )
+
+    for code, body, elapsed in results:
+        if code == 503:
+            parsed = _envelope(body)
+            assert parsed["error"]["code"] == "timeout"
+            # 逾時上界只有 0.3 秒；就算加上排程/GIL 開銷，也該遠早於
+            # leader 的 1.5 秒延遲返回——證明 thread 真的被釋放，而不是
+            # 恰好等到 leader 做完才「順便」回來。
+            assert elapsed < 1.0, f"follower 應在逾時上界內返回，實際耗時 {elapsed:.3f}s"
+
+    leader_finished.wait(timeout=5)
+    assert counter.n == 1, (
+        f"逾時的 follower 不該落回自己真的呼叫 pipeline.run（會放大 Bedrock 花費），"
+        f"實際呼叫 {counter.n} 次"
+    )
+
+
+def test_api_analyze_dedup_stalled_leader_entry_becomes_stale_and_replaced(monkeypatch):
+    """codex HIGH 複審（過期/replace stale in-flight entry）：leader
+    掛掉/hang 死、且真的完全沒有觸發任何清理程式碼（例如被強制中斷，
+    不像一般 Exception 有 `except` 分支負責清理）時，該 key 的 in-flight
+    entry 會變成永久卡住的殭屍——後續所有相同請求絕不能永遠 follow 一個
+    死掉的 leader（等到 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 也沒用，
+    因為根本沒有人會 `event.set()`）。
+
+    這裡直接偽造一個「已經存在超過逾時上界、且永遠不會被 set() 的殭屍
+    in-flight entry」，斷言下一個進來的請求會偵測到它是 stale、直接取代
+    成為新 leader，真的重新觸發一次 `pipeline.run`，而不是掛在殭屍
+    entry 上等到天荒地老。"""
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
+
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-stale-leader-test"]}
+    coin_key = "BTC"
+    query = "dedup-stale-leader-test"
+    key = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key=coin_key, query=query, qs=qs
+    )
+
+    zombie_event = threading.Event()  # 永遠不會被 set() ——模擬死掉的 leader
+    stale_started_at = time.time() - 10.0  # 遠遠超過 0.3 秒的逾時上界
+    web._analyze_dedup_inflight[key] = (zombie_event, stale_started_at)
+
+    code, body = web._handle_api_analyze(qs, client_ip="10.1.2.2")
+
+    assert code == 200, f"偵測到 stale entry 後應取代成為新 leader、真的跑出結果，實際 {code} {body}"
+    assert counter.n == 1, f"應該真的觸發 1 次 pipeline.run，而不是繼續等殭屍 leader，實際 {counter.n} 次"
+    # 殭屍 entry 應該已經被新 leader 的 entry 取代／清掉，不會再殘留。
+    current = web._analyze_dedup_inflight.get(key)
+    assert current is None or current[0] is not zombie_event
+
+
+def test_api_analyze_dedup_cross_ip_follower_shares_result_without_bypassing_own_rate_limit(
+    monkeypatch,
+):
+    """codex 複審要求的 cross-IP 檢查：不同 client IP 的 follower 共用
+    leader 的真實結果時，行為必須明確、不能被 poisoning。
+
+    這裡鎖住既有（刻意）設計：follower 完全不會碰 `_do_analyze`／
+    `_check_real_rate_limit`（never calls `compute()`），所以即使
+    follower 自己的 IP 早就把 real 限流 bucket 用滿，只要它跟某個正在
+    進行中的 leader 完全同 key（coin/query/type/sample/live/real/token
+    皆同），依然能安全拿到 leader 算出來的同一份真實結果，不會被自己
+    （用不到的）限流狀態誤傷成 429——因為 dedup 沒有多消耗任何一次真
+    連接器/Bedrock 呼叫，所謂「繞過限流」保護的資源根本沒被動用。
+    最後額外佐證：若這個 IP 真的獨立打限流檢查，的確會被擋下，證明
+    上面的 200 不是限流失效，而是 follower 這條路徑本來就不會走到限流
+    檢查。
+
+    誰先搶到 leadership 是 lock 內部的競速結果，不能單靠先 start thread
+    就假設一定是 `leader_ip` 贏（若反而是限流已用滿的 `follower_ip`
+    搶到 leadership，它自己 `_do_analyze` 內的 `_check_real_rate_limit`
+    會先炸 429、被兩邊共用，測的就不是本測試要驗的東西）。這裡用
+    `leader_started` event 明確等 leader（`leader_ip`）真的已經進入
+    `run()`（代表 leadership 已經確定寫進 in-flight dict）之後，才送出
+    `follower_ip` 的請求，確保 follower_ip 一定是 follower。"""
+    counter = _CallCounter()
+    leader_started = threading.Event()
+    real_run = pipeline_module.run
+
+    def _counting_run(*args, **kwargs):
+        counter.hit()
+        leader_started.set()
+        time.sleep(0.3)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(web, "run", _counting_run)
+
+    leader_ip = "10.1.3.1"
+    follower_ip = "10.1.3.2"
+
+    # 模擬 follower_ip 的 real 限流 bucket 早已用滿（見 `_check_real_rate_limit`
+    # / `_REAL_RATE_MAX`）——若 follower 真的獨立跑一次 `_do_analyze`，
+    # 應該會被 429 擋下。
+    now = time.time()
+    web._real_rate_buckets[follower_ip] = [now] * web._REAL_RATE_MAX
+    try:
+        qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-cross-ip-test"]}
+        results: dict[str, tuple[int, str]] = {}
+        results_lock = threading.Lock()
+
+        def _worker(ip):
+            code, body = web._handle_api_analyze(qs, client_ip=ip)
+            with results_lock:
+                results[ip] = (code, body)
+
+        leader_thread = threading.Thread(target=_worker, args=(leader_ip,))
+        leader_thread.start()
+        assert leader_started.wait(timeout=2), "leader（leader_ip）應該很快就進入 compute()"
+
+        follower_thread = threading.Thread(target=_worker, args=(follower_ip,))
+        follower_thread.start()
+
+        leader_thread.join(timeout=10)
+        follower_thread.join(timeout=10)
+
+        assert set(results) == {leader_ip, follower_ip}
+        assert results[leader_ip][0] == 200
+        assert results[follower_ip][0] == 200, (
+            f"follower 共用 leader 結果不該碰自己的限流 bucket，實際 {results[follower_ip]}"
+        )
+        assert results[leader_ip][1] == results[follower_ip][1], (
+            "cross-IP 的 follower 應共用同一份真實結果"
+        )
+        assert counter.n == 1, f"cross-IP 重複請求仍應只觸發 1 次真的 pipeline.run，實際 {counter.n} 次"
+
+        # 佐證：若 follower_ip 真的獨立呼叫 `_check_real_rate_limit`（不透過
+        # dedup），的確會被擋下——證明上面的 200 不是限流本身失效，而是
+        # follower 這條路徑根本沒有走到限流檢查（因為沒有真的碰依賴）。
+        with pytest.raises(web.TooManyRequests):
+            web._check_real_rate_limit(follower_ip)
+    finally:
+        web._real_rate_buckets.pop(follower_ip, None)
+
+
 # ---------------------------------------------------------------------------
 # /api/status
 # ---------------------------------------------------------------------------

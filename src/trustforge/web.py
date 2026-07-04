@@ -3246,14 +3246,46 @@ def _price_provenance_data(evidence: list) -> dict:
 #   - key 用 per-key `threading.Event`（不是單一全域鎖），`compute()`
 #     本身（可能是慢速真連接器/Bedrock I/O）在鎖外執行——不同 key 的請求
 #     完全並行，不會被彼此拖慢。
+#
+# codex HIGH 複審（follower 無限阻塞資源耗盡）：leader（真連接器/Bedrock）
+# 卡住/hang 死時，若 follower 的 `event.wait()` 沒有逾時上界，會無限期
+# 阻塞該 server thread——同一 key 的重複請求越多，卡住的 thread 就越多，
+# 一個 degraded 依賴（單純變慢或掛掉）會被放大成整個 server 的 thread
+# 池耗盡（`ThreadingHTTPServer` 每個連線一條 thread）。修法：
+#   - follower `event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)`
+#     bounded wait；逾時未等到結果 → 拋 `_AnalyzeDedupTimeout`，
+#     `_handle_api_analyze` 轉成 503 + 可重試訊息（不落回自己真的跑一次
+#     ——避免「等太久」跟「真的失敗」混在一起放大 Bedrock 花費／
+#     thundering herd；請 client 自行重試，仍受 #9 護欄與限流保護）。
+#   - in-flight entry 額外記 leader 開始時間戳：往後新進來的請求（不是已
+#     經在等待中的 follower）發現該 entry 已超過同一個逾時上界仍未完成，
+#     視為「leader 已死掉/永久 hang 住」的 stale entry，直接取代成為新
+#     leader（不再讓後續所有請求永遠 follow 一個死掉的 leader）；舊
+#     leader 真的（很晚才）完成時，靠身分比對（`entry is (event, ...)`）
+#     確認自己的 entry 是否還在，不會誤刪已經接手的新 leader 的 entry。
 # ---------------------------------------------------------------------------
 
 _ANALYZE_DEDUP_TTL_SECONDS = 60.0
 _ANALYZE_DEDUP_CACHE_MAX = 256
+# follower bounded wait 上界，同時也是「leader 多久沒完成算 stale」的門檻
+# ——比單次分析（含真連接器/Bedrock）預期最長時間（見 #9 護欄 docstring）
+# 略長，但仍是有限值，不讓一個掛掉的依賴無限期拖垮 server threads。
+_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS = 45.0
 
 _analyze_dedup_lock = threading.Lock()
-_analyze_dedup_inflight: dict[str, threading.Event] = {}
+# key -> (leader 完成時會 set() 的 Event, leader 開始時間戳)
+_analyze_dedup_inflight: dict[str, tuple[threading.Event, float]] = {}
 _analyze_dedup_cache: dict[str, tuple[float, tuple[bool, object]]] = {}
+
+
+class _AnalyzeDedupTimeout(Exception):
+    """#51 codex HIGH 複審：follower 等待 leader 結果超過
+    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 仍未等到——leader（真連接器/
+    Bedrock）可能單純變慢，也可能已經 hang 死。不落回自己真的跑一次
+    （那樣等於「等太久」跟「真的失敗」處理方式一樣，會在依賴本來就
+    degraded 時放大成 thundering herd/重複 Bedrock 花費），改由
+    `_handle_api_analyze` 轉成 503 + 可重試訊息，交給 client 自行重試
+    （仍受 #9 護欄與既有限流保護）。"""
 
 
 def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: dict) -> str:
@@ -3335,6 +3367,13 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     默默各自重跑一次）——否則遇到 leader 失敗就變成「沒 dedup 到」，
     失去防重複送出的意義；exception 交由 `_handle_api_analyze` 既有的
     `except` 分支處理，跟 leader 收到的路徑完全一致。
+
+    codex HIGH 複審（follower 無限阻塞資源耗盡，見模組頂部大段說明）：
+    follower 用 `event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)`
+    bounded wait，逾時拋 `_AnalyzeDedupTimeout`（轉 503，不落回自己真的
+    跑一次）；leader 存活時間戳超過同一門檻的 in-flight entry 視為
+    stale，新請求會直接取代成為新 leader，而不是永遠 follow 一個死掉的
+    leader。
     """
     now = time.time()
     with _analyze_dedup_lock:
@@ -3344,14 +3383,31 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             if ok:
                 return payload
             raise payload
-        event = _analyze_dedup_inflight.get(key)
-        is_leader = event is None
+
+        inflight = _analyze_dedup_inflight.get(key)
+        if inflight is not None:
+            _leader_event, leader_started_at = inflight
+            if now - leader_started_at > _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS:
+                # leader 早已超過逾時上界仍未完成——很可能已經 hang 死，
+                # 視為 stale，直接取代成為新 leader（見下方寫回段落的
+                # 身分比對，確保舊 leader 很晚才完成時不會誤刪這個新
+                # entry）。
+                inflight = None
+
+        is_leader = inflight is None
         if is_leader:
             event = threading.Event()
-            _analyze_dedup_inflight[key] = event
+            _analyze_dedup_inflight[key] = (event, now)
+        else:
+            event = inflight[0]
 
     if not is_leader:
-        event.wait()
+        completed = event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)
+        if not completed:
+            raise _AnalyzeDedupTimeout(
+                f"分析請求排隊等候逾時（前一個相同請求執行超過"
+                f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
+            )
         with _analyze_dedup_lock:
             cached = _analyze_dedup_cache.get(key)
         if cached is not None:
@@ -3368,12 +3424,16 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     except Exception as exc:
         with _analyze_dedup_lock:
             _analyze_dedup_cache_put_locked(key, (False, exc))
-            _analyze_dedup_inflight.pop(key, None)
+            current = _analyze_dedup_inflight.get(key)
+            if current is not None and current[0] is event:
+                _analyze_dedup_inflight.pop(key, None)
         event.set()
         raise
     with _analyze_dedup_lock:
         _analyze_dedup_cache_put_locked(key, (True, result))
-        _analyze_dedup_inflight.pop(key, None)
+        current = _analyze_dedup_inflight.get(key)
+        if current is not None and current[0] is event:
+            _analyze_dedup_inflight.pop(key, None)
     event.set()
     return result
 
@@ -3492,6 +3552,11 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "execution_log": log.events,
             }
         return 200, _json_envelope_ok(payload)
+    except _AnalyzeDedupTimeout as exc:
+        # codex HIGH 複審：follower bounded wait 逾時——回可重試的 503，
+        # 不落回自己真的跑一次（見 `_dedup_analyze_call`/`_AnalyzeDedupTimeout`
+        # docstring），交給 client 自行重試。
+        return 503, _json_envelope_err("timeout", str(exc))
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     except Exception:
