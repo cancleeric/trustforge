@@ -3371,10 +3371,21 @@ def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: di
     dedup；順序不同視為不同請求，各自跑一次是正確行為，不是「沒
     dedup 到」。
 
-    `query`：已通過長度驗證的原始字串，`strip()` 去頭尾空白，避免使用者
-    多打/少打空白造成 miss；刻意不做大小寫正規化（casefold）——中文查詢字
-    大小寫不影響語意，但英文查詢字大小寫可能承載使用者刻意的語意差異，
-    保守不動。
+    `query`：已通過長度驗證的原始字串，**刻意不 `strip()`**（codex MEDIUM
+    複審：key⟺實際執行必須一致）。`_do_analyze`/`_do_comparison` 內部
+    重新讀 `qs.get("q", [...])[0]` 傳給 `pipeline.run`/`run_comparison`
+    時**同樣不 strip**——若這裡對 key 做 strip，`"foo"` 跟 `" foo "`
+    會被誤判成同一把 key、共用同一份 in-flight/快取 entry，但兩者傳給
+    pipeline 的 prompt 其實不同（有無頭尾空白）：先到的那個請求會決定
+    「共用」的實際執行內容與結果，後到的另一個字串不同的請求卻拿到
+    別人 prompt 跑出來的答案——跟先前修 `token` 的 strip 問題同一個
+    道理（見下方 `token` 段落），任何一段只要「key 正規化跟實際判斷/
+    執行不一致」就會讓 dedup 錯誤地把「本該獨立」的兩個請求綁在一起。
+    不做 strip 後，`"foo"` 與 `" foo "` 是不同 key、各自獨立 compute()，
+    正確地各自跑各自的 prompt；沒有空白差異的一般重複請求（多數情況）
+    不受影響，仍正常 dedup。刻意不做大小寫正規化（casefold）——中文
+    查詢字大小寫不影響語意，但英文查詢字大小寫可能承載使用者刻意的
+    語意差異，保守不動。
 
     `sample`/`live`/`real`/`token`：直接帶原始 qs 值，**刻意不 strip**
     （codex 複審：token 正規化）。這四者合起來決定 `_parse_live`/
@@ -3409,7 +3420,7 @@ def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: di
     real_raw = qs.get("real", [""])[0] or ""
     token_raw = qs.get("token", [""])[0] or ""
     return "\x1f".join(
-        (qtype.value, coin_key, query.strip(), sample_raw, live_raw, real_raw, token_raw)
+        (qtype.value, coin_key, query, sample_raw, live_raw, real_raw, token_raw)
     )
 
 

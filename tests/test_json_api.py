@@ -1351,6 +1351,76 @@ def test_api_analyze_dedup_key_distinguishes_token_whitespace_suffix(monkeypatch
     assert counter2.n == 2, f"順序反過來一樣該各自呼叫 1 次，實際共 {counter2.n} 次"
 
 
+def test_api_analyze_dedup_key_distinguishes_query_whitespace_variant(monkeypatch):
+    """codex 複審 MEDIUM（query key⟺實際執行必須一致）：`_analyze_dedup_key`
+    先前對 `query` 做 `.strip()`，但 `_do_analyze`/`_do_comparison` 內部
+    重新讀 `qs.get("q", [...])[0]` 傳給 `pipeline.run` 時**不 strip**——
+    `"foo"` 跟 `" foo "` 會被 key 誤判成同一把（因為都 strip 成 `"foo"`），
+    但兩者傳給 pipeline 的 prompt 其實不同（有無頭尾空白）。若共用同一個
+    in-flight/快取 entry，先到的請求會決定「共用」的實際執行內容，後到
+    的另一個字串不同的請求卻拿到別人 prompt 跑出來的答案——跟先前修
+    `token` 的 strip 問題同一個道理。
+
+    修法：key 移除 `query.strip()`，跟 pipeline 實際收到的原始 query
+    位元組一致。驗證：dedup key 不同、且兩種到達順序（"foo" 先到 /
+    " foo " 先到）都各自真的呼叫到 `pipeline.run`、且各自拿到對應**自己
+    query** 的執行內容，不共用、不被先到者決定。"""
+    qs_plain = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": ["foo"],
+    }
+    qs_spaced = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": [" foo "],
+    }
+
+    key_plain = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query="foo", qs=qs_plain
+    )
+    key_spaced = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query=" foo ", qs=qs_spaced
+    )
+    assert key_plain != key_spaced, "query 頭尾空白不同、傳給 pipeline 的 prompt 不同，dedup key 不該相同"
+
+    real_run = pipeline_module.run
+
+    # 順序 1："foo" 先到、" foo " 後到——各自都該真的呼叫 1 次 pipeline.run，
+    # 且各自收到的 query 要對應自己送出的那個（不是共用先到者的）。
+    seen_queries_1: list[str] = []
+
+    def _stub_run_1(coin, query, qtype, *args, **kwargs):
+        seen_queries_1.append(query)
+        return real_run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", _stub_run_1)
+    code1, _ = web._handle_api_analyze(qs_plain, client_ip="10.1.7.1")
+    code2, _ = web._handle_api_analyze(qs_spaced, client_ip="10.1.7.1")
+    assert code1 == 200 and code2 == 200
+    assert seen_queries_1 == ["foo", " foo "], (
+        f"應各自呼叫 1 次、各自帶自己的 query，實際觀察到 {seen_queries_1!r}"
+    )
+
+    web._analyze_dedup_cache.clear()
+    web._analyze_dedup_inflight.clear()
+
+    # 順序 2：" foo " 先到、"foo" 後到——順序反過來，結論不變。
+    seen_queries_2: list[str] = []
+
+    def _stub_run_2(coin, query, qtype, *args, **kwargs):
+        seen_queries_2.append(query)
+        return real_run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", _stub_run_2)
+    code3, _ = web._handle_api_analyze(qs_spaced, client_ip="10.1.7.2")
+    code4, _ = web._handle_api_analyze(qs_plain, client_ip="10.1.7.2")
+    assert code3 == 200 and code4 == 200
+    assert seen_queries_2 == [" foo ", "foo"], (
+        f"順序反過來一樣該各自呼叫 1 次、各自帶自己的 query，實際觀察到 {seen_queries_2!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # /api/status
 # ---------------------------------------------------------------------------
