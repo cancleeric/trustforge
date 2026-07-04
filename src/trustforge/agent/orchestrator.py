@@ -388,6 +388,31 @@ def _dedup_stance_pairs_by_source(pairs: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
+def _distinct_source_labels(pairs: list[dict]) -> list[str]:
+    """回傳 `pairs`（跨陣營，不分 bullish/bearish）涉及的來源顯示清單，供組
+    user-visible summary 文字（`f"來源 {'、'.join(...)} 對同一議題..."`）用。
+
+    codex 第三輪一致性 HIGH 修正：先前這裡直接 `sorted({p["source"] for p in
+    pairs})`，是 raw string 去重——`distinct_sources` 欄位已依
+    `_normalize_source_key` 去重收斂成 1 張 CoinDesk 卡，但 summary 文字仍會
+    把 `"CoinDesk"`／`" coindesk "` 兩個大小寫/空白變體當成兩個不同來源列出，
+    造成同一個訊號裡「結構化欄位」與「顯示文字」自相矛盾、且顯示文字本身
+    仍有來源膨脹（使用者讀 summary 會誤以為有更多獨立來源佐證）。
+
+    去重口徑跟 `_dedup_stance_pairs_by_source`／配對層完全一致：用
+    `_normalize_source_key` 比對是否同源，**顯示仍用原始 `source` 字串**（保留
+    該 normalized key 第一次出現時的大小寫/格式，不改寫使用者看到的來源
+    名稱）。去重後依顯示字串排序，確保 summary 文字順序穩定、不受
+    `pairs` 掃描順序影響（跟原本 `sorted(set(...))` 的排序意圖一致）。
+    """
+    seen: dict[str, str] = {}
+    for p in pairs:
+        key = _normalize_source_key(p["source"])
+        if key not in seen:
+            seen[key] = p["source"]
+    return sorted(seen.values())
+
+
 def detect_cross_source_signal(
     scored: list[ScoredClaim],
     stance_fn: Callable[[str, str], str] | None = None,
@@ -440,6 +465,15 @@ def detect_cross_source_signal(
     依據的訊號——不得讓單一 publisher（即使用不同大小寫/空白變體發文）
     的自我矛盾撐起一個假的「跨源分歧」。
 
+    user-visible source list 一致性（codex #13 第三輪一致性 HIGH 修正）：
+    `summary` 文字裡列出的來源名單（`_stance_pair_signal()` 的 fallback
+    summary、聚合層級同向但情緒面內部矛盾時的 collision summary）一律改用
+    `_distinct_source_labels()`，去重口徑與 `distinct_sources` 欄位完全
+    一致（都是 `_normalize_source_key`）——避免結構化欄位（`distinct_sources`）
+    已把 `CoinDesk`/`" coindesk "` 收斂成 1 筆，但顯示給使用者看的 summary
+    文字卻仍把兩個大小寫/空白變體當成兩個不同來源列出，內部自相矛盾、
+    使用者被誤導以為有更多獨立來源佐證。
+
     守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
     """
     # 只取 trust >= 0.5 的主張
@@ -462,7 +496,7 @@ def detect_cross_source_signal(
         （逐字等同未提供 stance_fn 時的既有行為）。"""
         if not stance_pairs:
             return None
-        sources = sorted({p["source"] for p in stance_pairs})
+        sources = _distinct_source_labels(stance_pairs)
         return {
             "type": "divergence",
             "objective_direction": None,
@@ -532,7 +566,7 @@ def detect_cross_source_signal(
     if collision:
         # obj_dir == sent_dir（聚合層級同向），但情緒來源內部已測出矛盾——
         # 矛盾優先，摘要必須反映真背離，不得沿用「訊號一致」敘述。
-        stance_sources = sorted({p["source"] for p in stance_pairs})
+        stance_sources = _distinct_source_labels(stance_pairs)
         summary = (
             f"客觀與情緒多數方向雖同為{obj_label}，"
             f"但來源 {'、'.join(stance_sources)} 對同一議題方向相反，"
