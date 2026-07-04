@@ -15,3 +15,4 @@ demo/hoyabit_data/
 out/
 .apikey
 .eye-cache/
+.claude/
