@@ -141,10 +141,18 @@ echo "[fe-nginx] SG=$SGID 已開 443（TLS 就緒，見 deploy/TLS-SETUP.md）" 
 #      的 ROLLBACK，把 trustforge.service／live symlink／default.conf／
 #      nginx 服務狀態全部還原成跑前的樣子，不會停在「python 已收窄、
 #      nginx 沒起來」的半殘 outage 狀態。
+#      ⛔ **issue #69（冪等性）**：live symlink 若在跑前就已經指到別份 conf
+#      （react.conf／react-http.conf／legacy-tls.conf，代表已經 cutover
+#      過），本步驟**不會**重指 symlink、不改 CSP mode——只用 Step 1 剛
+#      更新過的 dist/candidate conf 內容驗證+reload 現行拓樸，避免「單純
+#      重跑本腳本更新前端 dist」把 React/TLS 拓樸打回 legacy（見 Step 1.5
+#      的偵測邏輯）。只有跑前 live symlink 不存在（初次 bootstrap）才會
+#      走這裡描述的完整流程。
 #   5. ROLLBACK 比照 cutover_switch.sh：每一步都不用 `|| true` 吞掉失敗，
 #      全部跑完才誠實印「已回滾」；回滾本身也失敗 → 印 distinct 的
 #      `ROLLBACK-FAILED`（exit 97，跟一般失敗 exit 1 不同）+ 具體手動
-#      復原指示，不謊報成功。
+#      復原指示，不謊報成功。ROLLBACK 本身不分岔（不管 Step 4 走了哪條
+#      分支，都是同一套 PREV_* 快照 + 同一套還原邏輯）。
 #
 # TF_BOOTSTRAP_DRY_RUN=1：測試用逃生口，只印出組好的遠端指令內容、不真的
 # 呼叫 `aws ssm send-command`。給 deploy/test_deploy_frontend_nginx_transaction.sh
@@ -158,6 +166,7 @@ OPT_DIR="${TF_BOOTSTRAP_OPT:-/opt/trustforge}"
 LIVE_LINK="$ETC/nginx/conf.d/trustforge.conf"
 DEFAULT_CONF="$ETC/nginx/conf.d/default.conf"
 CANDIDATE="$ETC/nginx/trustforge-sites/legacy.conf"
+REACT_TLS_DOMAIN="trustforge.hurricanesoft.com.tw"
 SERVICE_FILE="$ETC/systemd/system/trustforge.service"
 BACKUP_SERVICE_FILE="/tmp/tf-bootstrap-service.bak.$$"
 BACKUP_DEFAULT_CONF="/tmp/tf-bootstrap-default-conf.bak.$$"
@@ -176,17 +185,36 @@ rm -rf "$OPT_DIR/frontend/dist" && mkdir -p "$OPT_DIR/frontend/dist"
 unzip -o -q "$OPT_DIR/frontend/dist.zip" -d "$OPT_DIR/frontend/dist"
 echo '[fe-nginx] 已裝 nginx + 佈署靜態檔/candidate conf 到 staging 位置（未動 live conf.d/systemd）'
 
+# ---- Step 1.5（issue #69）：偵測 live symlink 是否已配置（唯讀，不算
+#      mutation）——決定 Step 2 要驗哪份 candidate、Step 4/5 走「已配置
+#      (post-cutover，保留現有拓樸+CSP mode 不動，只換 dist/reload)」還是
+#      「未配置(初次 bootstrap，legacy 全轉發)」，避免 React/TLS cutover
+#      後重跑本腳本（例如單純更新前端 dist）把拓樸打回 legacy ----
+if [ -L "$LIVE_LINK" ] && PREV_LINK="$(readlink "$LIVE_LINK" 2>/dev/null)" && [ -n "$PREV_LINK" ]; then
+  PREV_LINK_EXISTED=1
+  ACTIVE_CANDIDATE="$PREV_LINK"
+  echo "[fe-nginx] 偵測到 live symlink 已配置（$(basename "$PREV_LINK")）→ 視為 post-cutover，本次只更新 dist/candidate conf，不重指 symlink、不改 CSP mode"
+else
+  PREV_LINK_EXISTED=0
+  PREV_LINK=""
+  ACTIVE_CANDIDATE="$CANDIDATE"
+  echo '[fe-nginx] 偵測到 live symlink 尚未配置 → 視為初次 bootstrap，套用 legacy 全轉發預設'
+fi
+
 # ---- Step 2：候選設定驗證（scratch harness），完全不動 live conf.d ----
+#      驗證對象是「這次真的會生效」的那份 conf：已配置(post-cutover)驗
+#      目前 active 的那份（同時也是本次剛被 Step 1 重新上傳過的新內容），
+#      未配置(初次)驗 legacy.conf（bootstrap 預設）----
 VALIDATE_CONF="/tmp/tf-bootstrap-validate-$$.conf"
 cat > "$VALIDATE_CONF" <<VALIDATE_EOF
 worker_processes 1;
 error_log /tmp/tf-bootstrap-validate-$$.err.log;
 pid /tmp/tf-bootstrap-validate-$$.pid;
 events { worker_connections 16; }
-http { include $CANDIDATE; }
+http { include $ACTIVE_CANDIDATE; }
 VALIDATE_EOF
 if ! nginx -t -c "$VALIDATE_CONF" 2>/tmp/tf-bootstrap-validate-$$.stderr; then
-  echo '❌ [fe-nginx] 候選 nginx 設定驗證失敗（legacy.conf），完全沒動 live conf.d/systemd，中止' >&2
+  echo "❌ [fe-nginx] 候選 nginx 設定驗證失敗（$(basename "$ACTIVE_CANDIDATE")），完全沒動 live conf.d/systemd，中止" >&2
   cat /tmp/tf-bootstrap-validate-$$.stderr >&2 2>/dev/null || true
   rm -f "$VALIDATE_CONF" "/tmp/tf-bootstrap-validate-$$.err.log" "/tmp/tf-bootstrap-validate-$$.pid" "/tmp/tf-bootstrap-validate-$$.stderr"
   exit 1
@@ -194,17 +222,12 @@ fi
 rm -f "$VALIDATE_CONF" "/tmp/tf-bootstrap-validate-$$.err.log" "/tmp/tf-bootstrap-validate-$$.pid" "/tmp/tf-bootstrap-validate-$$.stderr"
 echo '[fe-nginx] 候選設定驗證通過（未動 live conf.d/systemd）'
 
-# ---- Step 3：記錄跑前狀態，掛失敗回滾 ----
+# ---- Step 3：記錄跑前狀態，掛失敗回滾（PREV_LINK/PREV_LINK_EXISTED 已在
+#      Step 1.5 記錄，這裡只補其餘跑前狀態）----
 PREV_DEFAULT_CONF_EXISTED=0
 if [ -f "$DEFAULT_CONF" ]; then
   PREV_DEFAULT_CONF_EXISTED=1
   cp "$DEFAULT_CONF" "$BACKUP_DEFAULT_CONF"
-fi
-if [ -L "$LIVE_LINK" ] && PREV_LINK="$(readlink "$LIVE_LINK" 2>/dev/null)" && [ -n "$PREV_LINK" ]; then
-  PREV_LINK_EXISTED=1
-else
-  PREV_LINK_EXISTED=0
-  PREV_LINK=""
 fi
 cp "$SERVICE_FILE" "$BACKUP_SERVICE_FILE"
 PREV_PORT="$(grep '^Environment=PORT=' "$SERVICE_FILE" | head -1 | cut -d= -f3)"
@@ -296,34 +319,81 @@ ROLLBACK() {
 }
 trap 'ROLLBACK' ERR
 
-# ---- Step 4：收斂 python 綁定（narrow exposure）+ 起 nginx——唯一會動
-#      live 狀態的區段，全程在上面的 ERR trap 保護下 ----
-rm -f "$DEFAULT_CONF"
-ln -sfn "$CANDIDATE" "$LIVE_LINK"
-# 收斂 python 綁定：只對內監聽，nginx 是唯一對外入口（見 web.py::main() 說明）。
-sed -i "s|^Environment=PORT=.*|Environment=PORT=8080|" "$SERVICE_FILE"
-grep -q '^Environment=TRUSTFORGE_BIND_HOST=' "$SERVICE_FILE" || \
-  sed -i '/^Environment=PORT=/a Environment=TRUSTFORGE_BIND_HOST=127.0.0.1' "$SERVICE_FILE"
-grep -q '^Environment=TRUSTFORGE_TRUST_PROXY=' "$SERVICE_FILE" || \
-  sed -i '/^Environment=TRUSTFORGE_BIND_HOST=/a Environment=TRUSTFORGE_TRUST_PROXY=1' "$SERVICE_FILE"
-grep -q '^Environment=TRUSTFORGE_CSP_MODE=' "$SERVICE_FILE" || \
-  sed -i '/^Environment=TRUSTFORGE_TRUST_PROXY=/a Environment=TRUSTFORGE_CSP_MODE=legacy' "$SERVICE_FILE"
-systemctl daemon-reload
-systemctl restart trustforge
-nginx -t
-systemctl enable --now nginx
-systemctl reload nginx || systemctl restart nginx
+# ---- Step 4：唯一會動 live 狀態的區段，全程在上面的 ERR trap 保護下 ----
+#      issue #69：已配置(post-cutover，PREV_LINK_EXISTED=1)時**不重指
+#      symlink、不改 CSP mode**，只用剛被 Step 1 更新過的 dist/candidate
+#      conf reload 現行拓樸；只有未配置(初次 bootstrap)才做完整的「收斂
+#      python 綁定 + 建 legacy symlink」流程 ----
+if [ "$PREV_LINK_EXISTED" = 1 ]; then
+  echo "[fe-nginx] 已配置(post-cutover)：保留現有 symlink（$(basename "$PREV_LINK")）與 CSP mode，只驗證+reload"
+  nginx -t
+  systemctl reload nginx || systemctl restart nginx
+else
+  rm -f "$DEFAULT_CONF"
+  ln -sfn "$CANDIDATE" "$LIVE_LINK"
+  # 收斂 python 綁定：只對內監聽，nginx 是唯一對外入口（見 web.py::main() 說明）。
+  sed -i "s|^Environment=PORT=.*|Environment=PORT=8080|" "$SERVICE_FILE"
+  grep -q '^Environment=TRUSTFORGE_BIND_HOST=' "$SERVICE_FILE" || \
+    sed -i '/^Environment=PORT=/a Environment=TRUSTFORGE_BIND_HOST=127.0.0.1' "$SERVICE_FILE"
+  grep -q '^Environment=TRUSTFORGE_TRUST_PROXY=' "$SERVICE_FILE" || \
+    sed -i '/^Environment=TRUSTFORGE_BIND_HOST=/a Environment=TRUSTFORGE_TRUST_PROXY=1' "$SERVICE_FILE"
+  grep -q '^Environment=TRUSTFORGE_CSP_MODE=' "$SERVICE_FILE" || \
+    sed -i '/^Environment=TRUSTFORGE_TRUST_PROXY=/a Environment=TRUSTFORGE_CSP_MODE=legacy' "$SERVICE_FILE"
+  systemctl daemon-reload
+  systemctl restart trustforge
+  nginx -t
+  systemctl enable --now nginx
+  systemctl reload nginx || systemctl restart nginx
+fi
 
 # ---- Step 5：post-switch 驗證（bare test/不用 `|| true` 吞掉——public
 #      path 驗證失敗要能觸發上面的 ROLLBACK，這正是 codex 五次複審點名的
-#      「public-path 驗證失敗、任一 mutation 邊界後失敗都要能回滾」）----
+#      「public-path 驗證失敗、任一 mutation 邊界後失敗都要能回滾」）。
+#      依「現行 active 拓樸」驗（不是永遠假設 legacy）：react.conf／
+#      legacy-tls.conf 且憑證已存在 → HTTPS --resolve；其餘 → HTTP。
+#      比照 cutover_switch.sh：加 retry（見共用的 _tf_retry），撐過 nginx
+#      reload 之後極短暫的 worker 交接窗口，避免單發 curl 誤判失敗、白白
+#      觸發 rollback ----
 sleep 1
 [ "$(systemctl is-active trustforge)" = "active" ]
 [ "$(systemctl is-active nginx)" = "active" ]
-curl -fsS http://localhost/healthz >/dev/null
+
+if [ "$PREV_LINK_EXISTED" = 1 ]; then
+  ACTIVE_BASENAME="$(basename "$PREV_LINK")"
+else
+  ACTIVE_BASENAME="$(basename "$CANDIDATE")"
+fi
+
+TF_BOOTSTRAP_SMOKE_RETRIES="${TF_BOOTSTRAP_SMOKE_RETRIES:-10}"
+TF_BOOTSTRAP_SMOKE_DELAY="${TF_BOOTSTRAP_SMOKE_DELAY:-2}"
+_tf_retry() {
+  local _tf_retry_i
+  for _tf_retry_i in $(seq 1 "$TF_BOOTSTRAP_SMOKE_RETRIES"); do
+    if "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$_tf_retry_i" -lt "$TF_BOOTSTRAP_SMOKE_RETRIES" ]; then
+      sleep "$TF_BOOTSTRAP_SMOKE_DELAY"
+    fi
+  done
+  return 1
+}
+
+CERT_FILE="$ETC/letsencrypt/live/${REACT_TLS_DOMAIN}/fullchain.pem"
+if { [ "$ACTIVE_BASENAME" = "react.conf" ] || [ "$ACTIVE_BASENAME" = "legacy-tls.conf" ]; } && [ -f "$CERT_FILE" ]; then
+  if ! _tf_retry curl -fsS --resolve "${REACT_TLS_DOMAIN}:443:127.0.0.1" -o /dev/null "https://${REACT_TLS_DOMAIN}/healthz"; then
+    echo "❌ [fe-nginx] 完成後驗證失敗：HTTPS https://${REACT_TLS_DOMAIN}/healthz 沒有回應（重試 ${TF_BOOTSTRAP_SMOKE_RETRIES} 次，間隔 ${TF_BOOTSTRAP_SMOKE_DELAY}s，仍失敗；現行拓樸 ${ACTIVE_BASENAME}）" >&2
+  fi
+  curl -fsS --resolve "${REACT_TLS_DOMAIN}:443:127.0.0.1" -o /dev/null "https://${REACT_TLS_DOMAIN}/healthz"
+else
+  if ! _tf_retry curl -fsS http://localhost/healthz -o /dev/null; then
+    echo "❌ [fe-nginx] 完成後驗證失敗：public nginx /healthz 沒有回應（重試 ${TF_BOOTSTRAP_SMOKE_RETRIES} 次，間隔 ${TF_BOOTSTRAP_SMOKE_DELAY}s，仍失敗；現行拓樸 ${ACTIVE_BASENAME}）" >&2
+  fi
+  curl -fsS http://localhost/healthz -o /dev/null
+fi
 
 trap - ERR
-echo '[fe-nginx] nginx+python 拓樸已就緒（legacy 生效，功能與 cutover 前逐字等價）'
+echo "[fe-nginx] nginx+python 拓樸已就緒（現行拓樸：${ACTIVE_BASENAME}，完成後驗證通過）"
 CMDEOF
 )
 CMDS="${CMDS//__BUCKET__/$BUCKET}"

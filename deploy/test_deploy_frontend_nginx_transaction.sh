@@ -258,17 +258,41 @@ esac
 SYSTEMCTLEOF
 chmod +x "$MOCKDIR/systemctl"
 
-# ── mock curl：依 URL 分辨「public path」（走 nginx，port 80）跟「rollback
-# 驗證」（跑前 port，通常是 80，但用不同旗標區分好各自注入失敗）───────────
+# ── mock curl：依 URL 分辨「public path（HTTP，走 nginx port 80）」、
+# 「public path（HTTPS --resolve，react/legacy-tls 拓樸）」跟「rollback
+# 驗證」（跑前 port，通常是 80，但用不同旗標區分好各自注入失敗）。兩個
+# public path 都支援 MOCK_STATE_DIR 下的呼叫計數器＋TRANSIENT_FAILS，
+# 專測 Step 5 healthz retry「前 N 次失敗、之後成功」不誤觸 rollback ─────
 cat > "$MOCKDIR/curl" <<'CURLEOF'
 #!/usr/bin/env bash
 url=""
 for a in "$@"; do
-  case "$a" in http://*) url="$a" ;; esac
+  case "$a" in http://*|https://*) url="$a" ;; esac
 done
 case "$url" in
   http://localhost/healthz)
+    STATE_DIR="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}"
+    COUNT_FILE="$STATE_DIR/curl_public_healthz_call_count"
+    N=1
+    if [ -f "$COUNT_FILE" ]; then N=$(( $(cat "$COUNT_FILE") + 1 )); fi
+    echo "$N" > "$COUNT_FILE"
+    TRANSIENT="${MOCK_CURL_PUBLIC_TRANSIENT_FAILS:-0}"
+    if [ "$TRANSIENT" != "0" ] && [ "$N" -le "$TRANSIENT" ]; then
+      exit 1
+    fi
     [ "${MOCK_CURL_PUBLIC_FAIL:-0}" = "1" ] && exit 1
+    exit 0 ;;
+  https://trustforge.hurricanesoft.com.tw/healthz)
+    STATE_DIR="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}"
+    COUNT_FILE="$STATE_DIR/curl_react_healthz_call_count"
+    N=1
+    if [ -f "$COUNT_FILE" ]; then N=$(( $(cat "$COUNT_FILE") + 1 )); fi
+    echo "$N" > "$COUNT_FILE"
+    TRANSIENT="${MOCK_CURL_REACT_HEALTHZ_TRANSIENT_FAILS:-0}"
+    if [ "$TRANSIENT" != "0" ] && [ "$N" -le "$TRANSIENT" ]; then
+      exit 1
+    fi
+    [ "${MOCK_CURL_REACT_HEALTHZ_FAIL:-0}" = "1" ] && exit 1
     exit 0 ;;
   *)
     [ "${MOCK_CURL_ROLLBACK_FAIL:-0}" = "1" ] && exit 1
@@ -329,12 +353,18 @@ active_conf() {
 }
 active_port() { grep '^Environment=PORT=' "$SANDBOX/etc/systemd/system/trustforge.service" | head -1 | cut -d= -f3; }
 has_bind_host() { grep -q '^Environment=TRUSTFORGE_BIND_HOST=127.0.0.1' "$SANDBOX/etc/systemd/system/trustforge.service" && echo yes || echo no; }
+csp_mode() { grep '^Environment=TRUSTFORGE_CSP_MODE=' "$SANDBOX/etc/systemd/system/trustforge.service" | head -1 | cut -d= -f3; }
+call_count() { cat "$STATE/$1" 2>/dev/null || echo 0; }
 
 run_transaction() {
   set +e
+  # TF_BOOTSTRAP_SMOKE_RETRIES/DELAY 預設塞快速值（2 次、0 秒）：跑前這麼
+  # 多失敗注入情境本來就預期會失敗，不需要真的等 retry 用完；per-call 可
+  # 用 "$@" 覆蓋（env 後面同名覆蓋前面，見場景 24a/24b 專測 retry 本身）。
   env PATH="$MOCKDIR:$PATH" MOCK_STATE_DIR="$STATE" \
     TF_BOOTSTRAP_ETC="$SANDBOX/etc" TF_BOOTSTRAP_OPT="$SANDBOX/opt/trustforge" \
-    TF_BOOTSTRAP_DNF_LOG="$STATE/dnf.log" "$@" \
+    TF_BOOTSTRAP_DNF_LOG="$STATE/dnf.log" \
+    TF_BOOTSTRAP_SMOKE_RETRIES=2 TF_BOOTSTRAP_SMOKE_DELAY=0 "$@" \
     bash -c "$CMD_TRANSACTION" >"$STATE/last_run.log" 2>&1
   local ec=$?
   set -e
@@ -516,6 +546,56 @@ else
 fi
 assert_grep_log "已回滾到跑前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 還原回跑前（本來就指向 legacy.conf，不是誤刪）"
+
+echo "== 場景 16（issue #69 冪等性）：live symlink 已是 react.conf（post-cutover，CSP_MODE=react、PORT 已收斂），重跑本腳本（例如單純更新前端 dist）→ 不可把拓樸打回 legacy.conf/CSP_MODE=legacy，也不該做多餘的 daemon-reload/restart trustforge/enable --now nginx =="
+reset_sandbox
+mkdir -p "$SANDBOX/etc/nginx/trustforge-sites" "$SANDBOX/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw"
+echo "# react stub" > "$SANDBOX/etc/nginx/trustforge-sites/react.conf"
+touch "$SANDBOX/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/fullchain.pem"
+ln -sfn "$SANDBOX/etc/nginx/trustforge-sites/react.conf" "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
+cat > "$SANDBOX/etc/systemd/system/trustforge.service" <<'EOF'
+[Service]
+Environment=PORT=8080
+Environment=TRUSTFORGE_BIND_HOST=127.0.0.1
+Environment=TRUSTFORGE_TRUST_PROXY=1
+Environment=TRUSTFORGE_CSP_MODE=react
+EOF
+echo active > "$STATE/svc_nginx_active"
+echo enabled > "$STATE/svc_nginx_enabled"
+if run_transaction; then
+  pass "idempotent redeploy（react 拓樸已 active）正常結束（exit 0）"
+else
+  fail "idempotent redeploy（react 拓樸已 active）不應該非零結束"
+  cat "$STATE/last_run.log" >&2
+fi
+assert_eq "$(active_conf)" "react.conf" "symlink 仍是 react.conf（沒被打回 legacy.conf，issue #69 核心斷言）"
+assert_eq "$(active_port)" "8080" "service file PORT 仍是 8080（沒被動過）"
+assert_eq "$(csp_mode)" "react" "CSP_MODE 仍是 react（沒被改回 legacy，issue #69 核心斷言）"
+assert_eq "$(call_count systemctl_daemon_reload_count)" "0" "沒有多餘的 daemon-reload（python 綁定/CSP 都沒動，不需要）"
+assert_eq "$(call_count systemctl_restart_trustforge_count)" "0" "沒有多餘的 restart trustforge（python 綁定/CSP 都沒動，不需要重啟）"
+assert_eq "$(call_count systemctl_enable_now_nginx_count)" "0" "沒有多餘的 enable --now nginx（nginx 本來就已 enabled+active）"
+assert_grep_log "視為 post-cutover" "有印偵測到 live symlink 已配置（post-cutover）訊息"
+assert_grep_log "現行拓樸：react.conf" "post-switch 完成訊息有標明現行拓樸是 react.conf（不是誤植 legacy）"
+
+echo "== 場景 17（Step 5 healthz retry 有效性）：post-switch healthz 前 2 次失敗、第 3 次才成功（模擬 nginx reload 後極短暫的 worker 交接窗口）→ retry 吸收掉，不該誤觸發 rollback =="
+reset_sandbox
+if run_transaction MOCK_CURL_PUBLIC_TRANSIENT_FAILS=2 TF_BOOTSTRAP_SMOKE_RETRIES=5 TF_BOOTSTRAP_SMOKE_DELAY=0; then
+  pass "healthz 前 2 次失敗、第 3 次成功時，retry 吸收掉、正常結束（exit 0，沒有誤判 rollback）"
+else
+  fail "healthz 前 2 次失敗、第 3 次成功時不應該非零結束（retry 應該要吸收掉暫時性失敗）"
+  cat "$STATE/last_run.log" >&2
+fi
+assert_eq "$(active_conf)" "legacy.conf" "symlink 正常指向 candidate legacy.conf（沒有誤觸發 rollback）"
+if grep -qF "已回滾到跑前狀態" "$STATE/last_run.log"; then
+  fail "healthz 暫時性失敗（會被 retry 吸收）不應該觸發 rollback"
+else
+  pass "healthz 暫時性失敗沒有誤觸發 rollback"
+fi
+# 4 次 = _tf_retry 內部 3 次（前 2 次失敗 + 第 3 次成功即回傳）+ 既有 idiom
+# 「if ! _tf_retry ...; then 印診斷; fi」之後那個無條件的 bare 覆核呼叫
+# （比照 cutover_switch.sh 同一顆 _tf_retry 慣例），證明 retry 真的有跑
+# （不是單發 curl 就直接判定成功）。
+assert_eq "$(call_count curl_public_healthz_call_count)" "4" "healthz 總共被打了 4 次（retry 內 3 次 + bare 覆核 1 次，證明 retry 真的有跑、不是單發 curl）"
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE" "$CAPTURE"
 

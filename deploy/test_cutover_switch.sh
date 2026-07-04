@@ -302,6 +302,20 @@ case "$URL" in
     if [ "${MOCK_CURL_PUBLIC_LEGACY_FAIL:-0}" = "1" ]; then
       exit 1
     fi
+    # cutover_switch.sh 加了 retry（撐過 nginx reload 的短暫窗口）之後，
+    # 這裡額外支援「前 N 次呼叫失敗、之後成功」的瞬斷模擬（跟上面
+    # MOCK_CURL_PUBLIC_LEGACY_FAIL 的「永遠失敗」不同），驗證 retry 真的
+    # 生效、不會被暫時性失敗誤觸發 rollback。
+    TRANSIENT_N="${MOCK_CURL_PUBLIC_LEGACY_TRANSIENT_FAILS:-0}"
+    if [ "$TRANSIENT_N" != "0" ]; then
+      COUNT_FILE="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}/curl_legacy_healthz_call_count"
+      N=1
+      [ -f "$COUNT_FILE" ] && N=$(( $(cat "$COUNT_FILE") + 1 ))
+      echo "$N" > "$COUNT_FILE"
+      if [ "$N" -le "$TRANSIENT_N" ]; then
+        exit 1
+      fi
+    fi
     exit 0
     ;;
   https://trustforge.hurricanesoft.com.tw/healthz)
@@ -316,6 +330,18 @@ case "$URL" in
     case "$URL" in
       http://127.0.0.1/|https://trustforge.hurricanesoft.com.tw/)
         [ "${MOCK_CURL_REACT_ROOT_FAIL:-0}" = "1" ] && exit 1
+        # 同上（legacy /healthz）：支援「前 N 次呼叫失敗、之後成功」的瞬斷
+        # 模擬，驗證 _tf_check_react_page 外層包的 retry 真的生效。
+        TRANSIENT_N="${MOCK_CURL_REACT_ROOT_TRANSIENT_FAILS:-0}"
+        if [ "$TRANSIENT_N" != "0" ]; then
+          COUNT_FILE="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}/curl_react_root_call_count"
+          N=1
+          [ -f "$COUNT_FILE" ] && N=$(( $(cat "$COUNT_FILE") + 1 ))
+          echo "$N" > "$COUNT_FILE"
+          if [ "$N" -le "$TRANSIENT_N" ]; then
+            exit 1
+          fi
+        fi
         ;;
       *)
         [ "${MOCK_CURL_REACT_ANALYZE_FAIL:-0}" = "1" ] && exit 1
@@ -397,10 +423,20 @@ reset_sandbox_react_active() {
 run_cutover_cmd() {
   # $1 = 要執行的擷取指令內容（CMD_REACT / CMD_REACT_HTTP），其餘 "$@" 是
   # 額外的 MOCK_* 失敗注入環境變數（e.g. MOCK_NGINX_LIVE_FAIL_AT=1）
+  #
+  # TF_CUTOVER_SMOKE_RETRIES/DELAY 預設在這裡覆寫成小值（2 次、0 秒間隔）：
+  # cutover_switch.sh 的 Step 4b public smoke check 現在會 retry（撐過
+  # nginx reload 的短暫窗口，見腳本內註解），production 預設 10 次
+  # ×2 秒；沙箱測試裡故意注入的失敗是「永遠失敗」，若沿用 production
+  # 預設值，每個失敗注入場景都要真的等 ~20 秒退出，整份測試會被拖到
+  # 数分鐘——這裡只驗證「重試用盡後仍會觸發既有 rollback」的控制流程，
+  # 不需要真的等滿 production 的次數/間隔，故縮小成 2 次、0 秒，個別想
+  # 測試「retry 真的生效」的場景可用 "$@" 覆寫回更大的值。
   local cmd="$1"; shift
   set +e
   env PATH="$MOCKDIR:$PATH" MOCK_STATE_DIR="$STATE" \
-    TF_CUTOVER_ETC="$SANDBOX/etc" TF_CUTOVER_LOCK="$STATE/tf-cutover.lock" "$@" \
+    TF_CUTOVER_ETC="$SANDBOX/etc" TF_CUTOVER_LOCK="$STATE/tf-cutover.lock" \
+    TF_CUTOVER_SMOKE_RETRIES=2 TF_CUTOVER_SMOKE_DELAY=0 "$@" \
     bash -c "$cmd" >"$STATE/last_run.log" 2>&1
   local ec=$?
   set -e
@@ -829,6 +865,35 @@ fi
 assert_eq "$(active_conf)" "legacy.conf" "legacy happy path 後 live symlink 真的换到 legacy.conf"
 assert_eq "$(active_csp)" "legacy" "legacy happy path 後 service file CSP_MODE 真的换到 legacy"
 assert_grep_log "public nginx smoke check 通過" "legacy happy path 必須先過 public nginx smoke check（/healthz 經 nginx）才報成功"
+
+# ── 場景 24a-24b：Step 4b public smoke check 加了 retry（撐過 nginx reload
+# 的短暫窗口）之後——mock 前幾次 curl 失敗、之後成功，斷言 retry 真的生效、
+# 最終仍走完整套 happy path（不誤觸發 rollback）。分別驗證「直接 curl 檢查」
+# （legacy /healthz）跟「_tf_check_react_page 函式包 retry」（react root）
+# 兩種寫法都正確 ──────────────────────────────────────────────────────
+echo "== 場景 24a：legacy mode，public /healthz 前 2 次瞬斷失敗、第 3 次成功 → retry 生效，最終正常切換（不誤 rollback）=="
+reset_sandbox_react_active
+if run_cutover_legacy MOCK_CURL_PUBLIC_LEGACY_TRANSIENT_FAILS=2 TF_CUTOVER_SMOKE_RETRIES=5 TF_CUTOVER_SMOKE_DELAY=0; then
+  pass "legacy public /healthz 前 2 次瞬斷失敗、retry 撐過後仍 exit 0"
+else
+  fail "legacy public /healthz 瞬斷失敗應該被 retry 撐過、不該非零結束"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "legacy.conf" "retry 生效後正常切到 legacy.conf（沒有誤觸發 rollback）"
+assert_eq "$(active_csp)" "legacy" "retry 生效後 CSP_MODE 正常切到 legacy（沒有誤觸發 rollback）"
+assert_grep_log "public nginx smoke check 通過" "retry 撐過瞬斷失敗後，仍必須印出 smoke check 通過（真的驗證過，不是跳過）"
+
+echo "== 場景 24b：react mode，public /（root）前 2 次瞬斷失敗、第 3 次成功 → _tf_check_react_page 外層的 retry 生效，最終正常 cutover（不誤 rollback）=="
+reset_sandbox
+if run_cutover MOCK_CURL_REACT_ROOT_TRANSIENT_FAILS=2 TF_CUTOVER_SMOKE_RETRIES=5 TF_CUTOVER_SMOKE_DELAY=0; then
+  pass "react public /（root）前 2 次瞬斷失敗、retry 撐過後仍 exit 0"
+else
+  fail "react public /（root）瞬斷失敗應該被 retry 撐過、不該非零結束"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "react.conf" "retry 生效後正常切到 react.conf（沒有誤觸發 rollback）"
+assert_eq "$(active_csp)" "react" "retry 生效後 CSP_MODE 正常切到 react（沒有誤觸發 rollback）"
+assert_grep_log "public nginx smoke check 通過" "retry 撐過瞬斷失敗後，仍必須印出 smoke check 通過（真的驗證過，不是跳過）"
 
 echo "== 場景 26：react-http mode，沒有 TF_ALLOW_INSECURE_HTTP_CUTOVER=yes → 直接拒絕、非零結束、完全不 mutate（codex 複審 HIGH：production 不該用 react-http，只有 react(TLS) 才是 production 路徑）=="
 reset_sandbox
