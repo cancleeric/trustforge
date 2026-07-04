@@ -86,6 +86,7 @@ reset_sandbox() {
     "$SANDBOX/etc/nginx/conf.d" "$SANDBOX/etc/systemd/system"
   echo "# legacy conf stub" > "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf"
   echo "# react conf stub" > "$SANDBOX/etc/nginx/trustforge-sites/react.conf"
+  echo "# react-http conf stub" > "$SANDBOX/etc/nginx/trustforge-sites/react-http.conf"
   ln -sfn "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf" \
     "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
   cat > "$SANDBOX/etc/systemd/system/trustforge.service" <<'EOF'
@@ -202,23 +203,42 @@ exit 0
 CURLEOF
 chmod +x "$MOCKDIR/curl"
 
-# 擷取一次「react」cutover 的遠端指令內容（dry-run，不真送 SSM）──────────
+# 擷取一次「react」「react-http」cutover 的遠端指令內容（dry-run，不真送
+# SSM）──react-http 是 bare-IP（無 domain）現況用的 HTTP-only 版本，candidate
+# conf 檔名不同（react-http.conf）但 python 端 CSP_MODE 沿用 react（見
+# cutover_switch.sh CSP_MODE_ENV 說明），guarded transaction/rollback 邏輯
+# 兩者共用同一段（差別只在 CANDIDATE/目標 CSP_MODE 值），故只需額外驗證
+# react-http 的 candidate/CSP_MODE 值正確、happy path + 一個代表性失敗注入
+# 觸發回滾即可，不需要重跑 react 那一輪已經覆蓋過的全部失敗分支 ──────────
 CMD_REACT=$(TF_CUTOVER_DRY_RUN=1 TRUSTFORGE_CUTOVER_CONFIRMED=yes \
   bash "$REPO_ROOT/deploy/cutover_switch.sh" react)
+CMD_REACT_HTTP=$(TF_CUTOVER_DRY_RUN=1 TRUSTFORGE_CUTOVER_CONFIRMED=yes \
+  bash "$REPO_ROOT/deploy/cutover_switch.sh" react-http)
 
 active_conf() { basename "$(readlink "$SANDBOX/etc/nginx/conf.d/trustforge.conf")"; }
 active_csp() { grep '^Environment=TRUSTFORGE_CSP_MODE=' \
   "$SANDBOX/etc/systemd/system/trustforge.service" | cut -d= -f3; }
 
-run_cutover() {
-  # 額外的 MOCK_* 失敗注入環境變數透過 "$@" 傳進來（e.g. MOCK_NGINX_LIVE_FAIL_AT=1）
+run_cutover_cmd() {
+  # $1 = 要執行的擷取指令內容（CMD_REACT / CMD_REACT_HTTP），其餘 "$@" 是
+  # 額外的 MOCK_* 失敗注入環境變數（e.g. MOCK_NGINX_LIVE_FAIL_AT=1）
+  local cmd="$1"; shift
   set +e
   env PATH="$MOCKDIR:$PATH" MOCK_STATE_DIR="$STATE" \
     TF_CUTOVER_ETC="$SANDBOX/etc" TF_CUTOVER_LOCK="$STATE/tf-cutover.lock" "$@" \
-    bash -c "$CMD_REACT" >"$STATE/last_run.log" 2>&1
+    bash -c "$cmd" >"$STATE/last_run.log" 2>&1
   local ec=$?
   set -e
   return $ec
+}
+
+run_cutover() {
+  # 額外的 MOCK_* 失敗注入環境變數透過 "$@" 傳進來（e.g. MOCK_NGINX_LIVE_FAIL_AT=1）
+  run_cutover_cmd "$CMD_REACT" "$@"
+}
+
+run_cutover_http() {
+  run_cutover_cmd "$CMD_REACT_HTTP" "$@"
 }
 
 echo "== 場景 1：候選設定驗證（Step 1）失敗 → 完全不動 live symlink/service，非零結束 =="
@@ -415,6 +435,59 @@ else
   cat "$STATE/last_run.log"
 fi
 assert_eq "$(active_conf)" "react.conf" "absent pre-state 下正常 cutover 成功後 live symlink 正確指向 react.conf"
+
+echo "== 場景 14：react-http mode（bare-IP HTTP-only 版）happy path → symlink 指向 react-http.conf，CSP_MODE=react =="
+reset_sandbox
+if run_cutover_http; then
+  pass "react-http 無注入失敗時 exit 0"
+else
+  fail "react-http 無注入失敗時仍非零結束"
+  cat "$STATE/last_run.log"
+fi
+assert_grep_log "完成後驗證通過" "react-http 有印完成後驗證通過訊息"
+assert_eq "$(active_conf)" "react-http.conf" "react-http happy path 後 live symlink 換到 react-http.conf（不是 react.conf）"
+assert_eq "$(active_csp)" "react" "react-http happy path 後 service file CSP_MODE 換到 react（沿用 react 的 CSP_MODE 值，不是字面 react-http）"
+
+echo "== 場景 15：react-http mode，swap 後 nginx -t 失敗 → 觸發回滾（guarded transaction 對 react-http 也生效）=="
+reset_sandbox
+if run_cutover_http MOCK_NGINX_LIVE_FAIL_AT=1; then
+  fail "react-http swap 後 nginx -t 失敗時應該非零結束"
+else
+  pass "react-http swap 後 nginx -t 失敗時非零結束"
+fi
+assert_grep_log "已回滾到切換前狀態" "react-http 有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "react-http 回滾後 live symlink 退回 legacy.conf（不留半殘）"
+assert_eq "$(active_csp)" "legacy" "react-http 回滾後 service file CSP_MODE 退回 legacy（不留半殘）"
+
+echo "== 場景 16：react-http mode，並行呼叫 — 鎖已被持有 → reject，完全不做任何 mutation（flock 對 react-http 也生效）=="
+reset_sandbox
+LOCKFILE="$STATE/tf-cutover.lock"
+rm -f "$STATE/holder_ready"
+(
+  exec 9>"$LOCKFILE"
+  flock 9
+  : > "$STATE/holder_ready"
+  sleep 5
+) &
+HOLDER_PID=$!
+for _ in $(seq 1 50); do
+  [ -f "$STATE/holder_ready" ] && break
+  sleep 0.1
+done
+if [ ! -f "$STATE/holder_ready" ]; then
+  fail "測試設置失敗：背景 holder 沒有在時限內拿到鎖（測試環境問題，非受測程式問題）"
+fi
+if run_cutover_http; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "98" "react-http 鎖被持有時 reject，exit=98"
+assert_grep_log "另一個 cutover 進行中" "react-http 有印 distinct 的『另一個 cutover 進行中』訊息"
+assert_eq "$(active_conf)" "legacy.conf" "react-http 鎖被持有時完全沒動 live symlink"
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+rm -f "$LOCKFILE" "$STATE/holder_ready"
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE"
 

@@ -82,8 +82,10 @@ if [ ! -d frontend/dist ]; then
   exit 1
 fi
 
-# 3) 打包上傳：前端 dist + 兩份 nginx conf（直接用 repo 裡實際被
+# 3) 打包上傳：前端 dist + 三份 nginx conf（直接用 repo 裡實際被
 #    `nginx -t` 驗證過的檔案，避免跟 SSM 內嵌字串產生 drift）-------------
+#    legacy=SSR 全轉發、react=React+TLS（有 domain 才能用）、
+#    react-http=React HTTP-only（bare-IP 現況用，見 deploy/nginx-react-http.conf）
 DIST_ZIP="$(pwd)/build/trustforge_frontend_dist.zip"
 mkdir -p build
 ( cd frontend/dist && zip -qr "$DIST_ZIP" . )
@@ -93,7 +95,8 @@ aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
 aws s3 cp "$DIST_ZIP" "s3://$BUCKET/trustforge_frontend_dist.zip" --region "$REGION" >/dev/null
 aws s3 cp deploy/nginx-legacy.conf "s3://$BUCKET/nginx-legacy.conf" --region "$REGION" >/dev/null
 aws s3 cp deploy/nginx.conf "s3://$BUCKET/nginx-react.conf" --region "$REGION" >/dev/null
-echo "[fe-nginx] 已上傳前端 dist + 兩份 nginx conf 到 s3://$BUCKET/" >&2
+aws s3 cp deploy/nginx-react-http.conf "s3://$BUCKET/nginx-react-http.conf" --region "$REGION" >/dev/null
+echo "[fe-nginx] 已上傳前端 dist + 三份 nginx conf 到 s3://$BUCKET/" >&2
 
 # 4) Security group：加開 443（80 應該已由 deploy_ec2.sh 開好）-----------
 VPC=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
@@ -162,6 +165,7 @@ dnf install -y nginx unzip >"$DNF_LOG" 2>&1
 mkdir -p "$ETC/nginx/trustforge-sites" "$OPT_DIR/frontend"
 aws s3 cp s3://__BUCKET__/nginx-legacy.conf "$CANDIDATE" --region __REGION__
 aws s3 cp s3://__BUCKET__/nginx-react.conf "$ETC/nginx/trustforge-sites/react.conf" --region __REGION__
+aws s3 cp s3://__BUCKET__/nginx-react-http.conf "$ETC/nginx/trustforge-sites/react-http.conf" --region __REGION__
 aws s3 cp s3://__BUCKET__/trustforge_frontend_dist.zip "$OPT_DIR/frontend/dist.zip" --region __REGION__
 rm -rf "$OPT_DIR/frontend/dist" && mkdir -p "$OPT_DIR/frontend/dist"
 unzip -o -q "$OPT_DIR/frontend/dist.zip" -d "$OPT_DIR/frontend/dist"
@@ -342,8 +346,9 @@ RESPONSE_CODE=$(aws ssm get-command-invocation --region "$REGION" --command-id "
 if [ "$STATUS" = "Success" ] && [ "$RESPONSE_CODE" = "0" ]; then
   echo "[fe-nginx] ✅ nginx 層 + python 內收斂完成、healthz 走 nginx 驗證成功（Status=${STATUS}）"
   echo "[fe-nginx] 目前拓樸：nginx(legacy, http-only) → python(127.0.0.1:8080)"
-  echo "[fe-nginx] 下一步（需三審+簽核）：deploy/TLS-SETUP.md 設 TLS，"
-  echo "[fe-nginx]   之後才考慮 deploy/cutover_switch.sh react 切到 React 前端。"
+  echo "[fe-nginx] 下一步（需三審+簽核）："
+  echo "[fe-nginx]   bare-IP 現況（無 domain）：deploy/cutover_switch.sh react-http"
+  echo "[fe-nginx]   有 domain：先 deploy/TLS-SETUP.md 設 TLS，再 deploy/cutover_switch.sh react"
   exit 0
 fi
 echo "[fe-nginx] ❌ nginx+python 拓樸部署失敗：CommandId=$CMDID Status=${STATUS} ResponseCode=${RESPONSE_CODE}" >&2
