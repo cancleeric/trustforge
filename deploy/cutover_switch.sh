@@ -87,6 +87,15 @@ fi
 
 REGION="${REGION:-ap-southeast-2}"
 
+# react（TLS）mode 的 public smoke check 要打真正的 domain（見
+# deploy/nginx.conf server_name），不能打 bare 127.0.0.1——TLS conf 把 80
+# port 除 /healthz 外全部 301 導去 https，若 smoke check 打 http://127.0.0.1/
+# 只會拿到 301（curl -f 不把 3xx 當失敗，仍是 exit 0），CSP/body 斷言就會
+# 因為 301 回應本來就沒有這些內容而失敗，永遠觸發 rollback、cutover 永遠
+# 切不成功（codex 複審，HIGH：react smoke check 打 HTTP 但 TLS 把 HTTP 全
+# 301，被 mock 的假 200 掩蓋過去，真環境會 100% rollback）。
+REACT_TLS_DOMAIN="trustforge.hurricanesoft.com.tw"
+
 # react-http 的 python 端 CSP_MODE 跟 react（TLS 版）共用同一個值
 # `react`——web.py::_send() 只認 CSP_MODE == "react"（見模組頂部說明），
 # react-http 只是 nginx 層少了 TLS/redirect/HSTS，前端拓樸/CSP 指令集本身
@@ -105,10 +114,11 @@ fi
 # 或 nginx 層本身有問題時，python 直連依然健康，腳本照樣宣告 cutover 成功、
 # 使用者卻看到錯誤。這裡在 Step 4「清除 ERR trap 之前」補上打 public
 # nginx endpoint（port 80）的驗證，任一失敗都沿用同一顆 ERR trap 觸發既有
-# rollback（不是新的失敗路徑），legacy／react／react-http 各用各自拓樸
-# 對應的檢查（legacy 驗 SSR 全轉發、react/react-http 驗 React 真的被服務、
-# SPA fallback、/api/ proxy）。跟前面所有段落一樣：`\$`／`\"` 是刻意跳脫、
-# 留給遠端 shell 執行時才展開/求值，不在本機構造字串時就處理掉。
+# rollback（不是新的失敗路徑），legacy／react-http／react（TLS）各用各自拓樸
+# 對應的檢查（legacy 驗 SSR 全轉發、react-http 驗 HTTP 版 React 真的被服務、
+# react（TLS）驗 HTTPS 版 React + HTTP→HTTPS redirect）。跟前面所有段落一樣：
+# `\$`／`\"` 是刻意跳脫、留給遠端 shell 執行時才展開/求值，不在本機構造字串
+# 時就處理掉。
 if [ "$MODE" = "legacy" ]; then
   PUBLIC_SMOKE_BLOCK="
 # ---- Step 4b：public nginx smoke check（legacy 拓樸，codex 複審 HIGH：cutover
@@ -123,13 +133,14 @@ fi
 curl -fsS -o /dev/null http://127.0.0.1/healthz
 echo \"[cutover] public nginx smoke check 通過（/healthz 經 nginx 轉發正常）\"
 "
-else
+elif [ "$MODE" = "react-http" ]; then
   PUBLIC_SMOKE_BLOCK="
-# ---- Step 4b：public nginx smoke check（React 拓樸，codex 複審 HIGH：cutover
-#      後只驗 python 直連，沒驗 public nginx 面——dist 缺失/SPA 路由壞/nginx 面
-#      失敗時，python 直連依然健康，腳本會謊報成功。這裡改打 public nginx
-#      endpoint（port 80），任一失敗都在清除 ERR trap 之前，會被同一顆 trap
-#      接住觸發 rollback，不會謊報成功）----
+# ---- Step 4b：public nginx smoke check（React 拓樸，HTTP-only／bare-IP
+#      fallback，codex 複審 HIGH：cutover 後只驗 python 直連，沒驗 public
+#      nginx 面——dist 缺失/SPA 路由壞/nginx 面失敗時，python 直連依然健康，
+#      腳本會謊報成功。這裡改打 public nginx endpoint（port 80，沒有 TLS，
+#      跟 react（TLS）版不同，不涉及 301 redirect），任一失敗都在清除 ERR
+#      trap 之前，會被同一顆 trap 接住觸發 rollback，不會謊報成功）----
 SMOKE_DIR=\"/tmp/tf-cutover-smoke-\$\$\"
 mkdir -p \"\$SMOKE_DIR\"
 
@@ -165,6 +176,77 @@ grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
 
 rm -rf \"\$SMOKE_DIR\"
 echo \"[cutover] public nginx smoke check 通過（/、/analyze、/api/health 皆正常且安全 header 有套用）\"
+"
+else
+  # MODE = react（TLS）：nginx.conf 把 80 port 除 /healthz 外全部 301 導去
+  # https（見 deploy/nginx.conf），所以這裡「必須」打 HTTPS（用 --resolve
+  # 把 domain 指回 127.0.0.1，走本機憑證驗證、不用 -k），不能像
+  # react-http 那樣直接打 http://127.0.0.1/（打了只會拿到 301，curl -f
+  # 不把 3xx 當失敗，CSP/body 斷言會因為 301 回應本來就沒有這些內容而
+  # 失敗，變成每次 cutover 都觸發 rollback——codex 複審 HIGH）。額外補一段
+  # HTTP(80)→HTTPS redirect 的驗證，確保 80 port 真的有把非-/healthz 路徑
+  # 導去 https，而不是漏掉/導錯 domain。
+  PUBLIC_SMOKE_BLOCK="
+# ---- Step 4b：public nginx smoke check（React 拓樸，TLS 版，codex 複審
+#      HIGH：cutover 後只驗 python 直連，沒驗 public nginx 面——dist 缺失/
+#      SPA 路由壞/nginx 面失敗時，python 直連依然健康，腳本會謊報成功。這裡
+#      改打 public nginx HTTPS endpoint（--resolve 把 domain 指回
+#      127.0.0.1，走正式簽發的憑證驗證、不加 -k），任一失敗都在清除 ERR
+#      trap 之前，會被同一顆 trap 接住觸發 rollback，不會謊報成功）----
+SMOKE_DIR=\"/tmp/tf-cutover-smoke-\$\$\"
+mkdir -p \"\$SMOKE_DIR\"
+
+_tf_check_react_page() {
+  local path=\"\$1\" label=\"\$2\"
+  local hdr=\"\$SMOKE_DIR/hdr-\${label}\" body=\"\$SMOKE_DIR/body-\${label}\"
+  if ! curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -D \"\$hdr\" -o \"\$body\" \"https://${REACT_TLS_DOMAIN}\${path}\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}\${path}（\${label}）沒有 200 回應（React dist 是否缺失/nginx 面是否正常？）\" >&2
+    return 1
+  fi
+  if ! grep -qi \"^content-security-policy:\" \"\$hdr\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}\${path}（\${label}）沒有 CSP header（安全 header 是否真的套用到這個 React 路由？）\" >&2
+    return 1
+  fi
+  if ! grep -q '<div id=\"root\"' \"\$body\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}\${path}（\${label}）回應內容不像 React index.html（dist 是否缺失/損毀？）\" >&2
+    return 1
+  fi
+  return 0
+}
+
+_tf_check_react_page \"/\" \"root\"
+_tf_check_react_page \"/analyze\" \"spa-fallback\"
+
+if ! curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o \"\$SMOKE_DIR/api-health-body\" \"https://${REACT_TLS_DOMAIN}/api/health\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（nginx /api/ proxy 是否正常？）\" >&2
+fi
+curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o \"\$SMOKE_DIR/api-health-body\" \"https://${REACT_TLS_DOMAIN}/api/health\"
+if ! grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 回應內容不是預期 JSON\" >&2
+fi
+grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
+
+# ---- HTTP(80) → HTTPS redirect 驗證（codex 複審 HIGH：react（TLS）的
+#      nginx.conf 把 80 port 除 /healthz 外全部 301 導去 https，這段沒驗到
+#      的話，有可能部署出一份 80 port 沒有正確導頁的 conf，使用者打 http
+#      網址進來卻卡住、不會被導去 https，而上面對 https 的檢查完全測不出
+#      這個問題）----
+REDIRECT_HDR=\"\$SMOKE_DIR/redirect-hdr\"
+if ! curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回應（HTTP→HTTPS redirect 是否正常？）\" >&2
+fi
+curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"
+if ! grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回 301（預期全轉 HTTPS，實際首行：\$(head -1 \"\$REDIRECT_HDR\")）\" >&2
+fi
+grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"
+if ! grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 的 redirect Location 不是預期的 https://${REACT_TLS_DOMAIN}\" >&2
+fi
+grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"
+
+rm -rf \"\$SMOKE_DIR\"
+echo \"[cutover] public nginx smoke check 通過（HTTPS /、/analyze、/api/health 皆正常且安全 header 有套用，HTTP→HTTPS redirect 也正常）\"
 "
 fi
 

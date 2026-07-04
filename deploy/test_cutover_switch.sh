@@ -208,13 +208,26 @@ SYSTEMCTLEOF
 chmod +x "$MOCKDIR/systemctl"
 
 # ── mock curl：既要模擬 python 直連 /healthz 探測，也要模擬 Step 4b 新加的
-# public nginx（port 80）smoke check——後者會真的檢查 `-D`（header 檔）/
-# `-o`（body 檔）內容（CSP header、React dist 特徵 `<div id="root">`、
-# `/api/health` 的 JSON body），不是只看 curl 自己的 exit code，所以這隻
-# mock 除了「成功/失敗」還要能依 URL 產生「看起來合理」的 header/body 內容，
-# 且可用專屬環境變數選擇性只讓某一個 public 檢查失敗（模擬 dist 缺失/
-# CSP 沒套用/SPA fallback 壞掉/api proxy 壞掉等各自獨立的失效模式），
-# 而不會牽動其他檢查（否則所有 happy-path 場景都會連帶炸掉）──────────────
+# public nginx smoke check——後者會真的檢查 `-D`（header 檔）/ `-o`（body
+# 檔）內容（CSP header、React dist 特徵 `<div id="root">`、`/api/health` 的
+# JSON body），不是只看 curl 自己的 exit code，所以這隻 mock 除了「成功/
+# 失敗」還要能依 URL 產生「看起來合理」的 header/body 內容，且可用專屬環境
+# 變數選擇性只讓某一個 public 檢查失敗（模擬 dist 缺失/CSP 沒套用/SPA
+# fallback 壞掉/api proxy 壞掉等各自獨立的失效模式），而不會牽動其他檢查
+# （否則所有 happy-path 場景都會連帶炸掉）。
+#
+# react（TLS）模式的 root/analyze/api-health 檢查改打
+# `https://trustforge.hurricanesoft.com.tw${path}`（--resolve 到
+# 127.0.0.1），跟 react-http 打 `http://127.0.0.1${path}` 分屬不同 case，
+# 用同一組 MOCK_CURL_REACT_*/MOCK_CURL_API_HEALTH_* 環境變數控制（同一輪
+# 測試只會跑其中一個 mode，不會撞名）。另外 react（TLS）多一段對
+# `http://127.0.0.1/` 的 HTTP→HTTPS redirect 檢查（用 `-H
+# "X-TF-Cutover-Check: http-redirect"` 當標記，跟 react-http 對同一個 URL
+# 的「拿 React 首頁」檢查區分開來，模擬真實 nginx 對非-/healthz 路徑一律
+# 301 導去 https 的行為，預設回 301 + 正確 Location，可用專屬環境變數注入
+# 「完全沒回應／回 200 不是 301／Location 導錯 domain」三種失效模式，這正
+# 是 codex 複審 HIGH 指出的回歸：react smoke check 不能只打 HTTP 就被 mock
+# 的假 200 掩蓋過去）──────────────────────────────────────────────────
 cat > "$MOCKDIR/curl" <<'CURLEOF'
 #!/usr/bin/env bash
 if [ "${MOCK_CURL_FAIL:-0}" = "1" ]; then
@@ -224,17 +237,40 @@ fi
 HDR_FILE=""
 BODY_FILE=""
 URL=""
+IS_REDIRECT_CHECK=0
 prev=""
 for a in "$@"; do
   case "$prev" in
     -D) HDR_FILE="$a" ;;
     -o) BODY_FILE="$a" ;;
   esac
+  if [ "$prev" = "-H" ] && [ "$a" = "X-TF-Cutover-Check: http-redirect" ]; then
+    IS_REDIRECT_CHECK=1
+  fi
   prev="$a"
 done
 # URL 一律是最後一個參數（cutover_switch.sh 呼叫 curl 的方式都是這樣）
 if [ "$#" -gt 0 ]; then
   URL="${*: -1}"
+fi
+
+# react（TLS）mode 的 HTTP(80)→HTTPS redirect 驗證：跟 react-http 對
+# http://127.0.0.1/ 的「拿 React 首頁」檢查是同一個 URL，靠上面的
+# `-H "X-TF-Cutover-Check: http-redirect"` 標記區分，不能只看 URL。
+if [ "$IS_REDIRECT_CHECK" = "1" ] && [ "$URL" = "http://127.0.0.1/" ]; then
+  if [ "${MOCK_CURL_REDIRECT_FAIL:-0}" = "1" ]; then
+    exit 1
+  fi
+  if [ -n "$HDR_FILE" ]; then
+    if [ "${MOCK_CURL_REDIRECT_NOT_301:-0}" = "1" ]; then
+      printf 'HTTP/1.1 200 OK\r\n' > "$HDR_FILE"
+    elif [ "${MOCK_CURL_REDIRECT_WRONG_LOCATION:-0}" = "1" ]; then
+      printf 'HTTP/1.1 301 Moved Permanently\r\nLocation: https://wrong-domain.example.com/\r\n' > "$HDR_FILE"
+    else
+      printf 'HTTP/1.1 301 Moved Permanently\r\nLocation: https://trustforge.hurricanesoft.com.tw/\r\n' > "$HDR_FILE"
+    fi
+  fi
+  exit 0
 fi
 
 case "$URL" in
@@ -250,13 +286,15 @@ case "$URL" in
     fi
     exit 0
     ;;
-  http://127.0.0.1/|http://127.0.0.1/analyze)
-    if [ "$URL" = "http://127.0.0.1/" ] && [ "${MOCK_CURL_REACT_ROOT_FAIL:-0}" = "1" ]; then
-      exit 1
-    fi
-    if [ "$URL" = "http://127.0.0.1/analyze" ] && [ "${MOCK_CURL_REACT_ANALYZE_FAIL:-0}" = "1" ]; then
-      exit 1
-    fi
+  http://127.0.0.1/|http://127.0.0.1/analyze|https://trustforge.hurricanesoft.com.tw/|https://trustforge.hurricanesoft.com.tw/analyze)
+    case "$URL" in
+      http://127.0.0.1/|https://trustforge.hurricanesoft.com.tw/)
+        [ "${MOCK_CURL_REACT_ROOT_FAIL:-0}" = "1" ] && exit 1
+        ;;
+      *)
+        [ "${MOCK_CURL_REACT_ANALYZE_FAIL:-0}" = "1" ] && exit 1
+        ;;
+    esac
     if [ -n "$HDR_FILE" ]; then
       if [ "${MOCK_CURL_REACT_NO_CSP:-0}" = "1" ]; then
         printf 'HTTP/1.1 200 OK\r\n' > "$HDR_FILE"
@@ -273,7 +311,7 @@ case "$URL" in
     fi
     exit 0
     ;;
-  http://127.0.0.1/api/health)
+  http://127.0.0.1/api/health|https://trustforge.hurricanesoft.com.tw/api/health)
     if [ "${MOCK_CURL_API_HEALTH_FAIL:-0}" = "1" ]; then
       exit 1
     fi
@@ -613,7 +651,7 @@ if run_cutover MOCK_CURL_REACT_ROOT_FAIL=1; then
 else
   pass "public / 沒有 200 回應時非零結束（觸發 rollback）"
 fi
-assert_grep_log "public nginx /（root）沒有 200 回應" "有印出具體是 public / 沒有 200 回應（React dist 是否缺失）"
+assert_grep_log "public nginx https://trustforge.hurricanesoft.com.tw/（root）沒有 200 回應" "有印出具體是 public HTTPS /（root）沒有 200 回應（React dist 是否缺失）"
 assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
 assert_eq "$(active_csp)" "legacy" "回滾後 service file CSP_MODE 退回 legacy（不留半殘）"
@@ -647,7 +685,7 @@ if run_cutover MOCK_CURL_REACT_ANALYZE_FAIL=1; then
 else
   pass "public /analyze 沒有 200 回應時非零結束（觸發 rollback）"
 fi
-assert_grep_log "public nginx /analyze（spa-fallback）沒有 200 回應" "有印出具體是 public /analyze SPA fallback 沒有 200 回應"
+assert_grep_log "public nginx https://trustforge.hurricanesoft.com.tw/analyze（spa-fallback）沒有 200 回應" "有印出具體是 public HTTPS /analyze SPA fallback 沒有 200 回應"
 assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
 
@@ -670,6 +708,59 @@ else
   pass "public /api/health 回應內容不對時非零結束（觸發 rollback）"
 fi
 assert_grep_log "public nginx /api/health 回應內容不是預期 JSON" "有印出具體是 public /api/health 回應內容不是預期 JSON"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+# ── 場景 22a-22d：react（TLS）mode 的 HTTP→HTTPS redirect 回歸測試（codex
+# 複審 HIGH：react smoke check 以前直接打 http://127.0.0.1/，而 TLS
+# nginx.conf 把 80 port 除 /healthz 外全部 301 導去 https，curl -f 不把 3xx
+# 當失敗，所以會拿到「200 假象」被掩蓋——這裡的 mock 刻意讓 http://127.0.0.1
+# 真的回 301（不是 200），藉此證明：(a) react smoke check 現在改走 HTTPS
+# 才能通過 happy path、(b) HTTP(80) 對 / 有正確回 301+Location 也會被獨立
+# 驗到、(c) redirect 相關的三種失效模式（無回應／不是 301／Location 導錯
+# domain）都會觸發 rollback，不會被誤判成功 ──────────────────────────────
+echo "== 場景 22a：react mode，happy path 下 HTTP(80) 對 / 真的回 301（不是 200）→ smoke check 仍需走 HTTPS 才能通過 =="
+reset_sandbox
+if run_cutover; then
+  pass "HTTP(80) 對 / 回 301 時（真實 redirect 行為），react smoke check 改走 HTTPS 仍能正常通過"
+else
+  fail "HTTP(80) 對 / 回 301（真實 redirect 行為）時，react smoke check 不應該失敗（代表還在打 HTTP 被 301 卡住）"
+  cat "$STATE/last_run.log"
+fi
+assert_grep_log "public nginx smoke check 通過" "react happy path（HTTP 對 / 是真 301）也必須先過 public nginx smoke check 才報成功"
+assert_grep_log "HTTP→HTTPS redirect 也正常" "有印 HTTP→HTTPS redirect 驗證通過訊息"
+assert_eq "$(active_conf)" "react.conf" "happy path 後 live symlink 真的换到 react.conf"
+
+echo "== 場景 22b：react mode，public smoke check：HTTP(80) 對 / 完全沒有回應 → 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_REDIRECT_FAIL=1; then
+  fail "HTTP(80) 對 / 沒有回應時應該非零結束"
+else
+  pass "HTTP(80) 對 / 沒有回應時非零結束（觸發 rollback）"
+fi
+assert_grep_log "public nginx port 80 對 / 沒有回應" "有印出具體是 HTTP(80) 對 / 沒有回應（HTTP→HTTPS redirect 是否正常）"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+echo "== 場景 22c：react mode，public smoke check：HTTP(80) 對 / 回 200（不是 301）→ 觸發 rollback（正是 codex 複審抓到的那個回歸：以前這裡被 mock 的假 200 掩蓋過）=="
+reset_sandbox
+if run_cutover MOCK_CURL_REDIRECT_NOT_301=1; then
+  fail "HTTP(80) 對 / 回 200（不是 301）時應該非零結束"
+else
+  pass "HTTP(80) 對 / 回 200（不是 301）時非零結束（觸發 rollback，不再被假 200 掩蓋）"
+fi
+assert_grep_log "public nginx port 80 對 / 沒有回 301" "有印出具體是 HTTP(80) 對 / 沒有回 301"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+echo "== 場景 22d：react mode，public smoke check：HTTP(80) 對 / 回 301 但 Location 導錯 domain → 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_REDIRECT_WRONG_LOCATION=1; then
+  fail "HTTP(80) redirect Location 導錯 domain 時應該非零結束"
+else
+  pass "HTTP(80) redirect Location 導錯 domain 時非零結束（觸發 rollback）"
+fi
+assert_grep_log "redirect Location 不是預期的 https://trustforge.hurricanesoft.com.tw" "有印出具體是 redirect Location 導錯 domain"
 assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
 
