@@ -28,6 +28,33 @@ html {
   color-scheme: dark;
 }
 
+/* #20 主題切換：light 色票。色值來源 `src/trustforge/web.py:278` 舊 SSR
+   的 light palette（bg/card/border/text/text2/muted），此為淺色模式下
+   唯一有實測數值可循的來源，直接沿用維持視覺一致；`muted2` 從
+   `#6e7781` 微調到 `#68717a`——舊 SSR 該 token 只用在裝飾性用途（對比
+   門檻 3:1 即可），但 React 版目前未使用 muted2 做文字，先按同一套
+   4.5:1 標準微調備用，避免未來一用就破線。
+   accent/link/good/warn/bad 舊 SSR 沒有對應 token（React 版新增），
+   採 GitHub Primer light 色票同義詞（accent.fg/success.fg/attention.fg
+   /danger.fg），逐一驗算對 `--tf-bg`(#f6f8fa)/`--tf-card`(#ffffff) 的
+   對比皆 ≥4.5:1（4.57～5.24，WCAG 相對亮度公式實測），滿足
+   `text-tf-good/warn/bad/link` 在元件中作為文字使用的門檻。 */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --color-tf-bg: #f6f8fa;
+  --color-tf-card: #ffffff;
+  --color-tf-border: #d0d7de;
+  --color-tf-text: #1f2328;
+  --color-tf-text2: #3d444d;
+  --color-tf-muted: #57606a;
+  --color-tf-muted2: #68717a;
+  --color-tf-accent: #0969da;
+  --color-tf-link: #0969da;
+  --color-tf-good: #1a7f37;
+  --color-tf-warn: #9a6700;
+  --color-tf-bad: #cf222e;
+}
+
 body {
   margin: 0;
   background: var(--color-tf-bg);

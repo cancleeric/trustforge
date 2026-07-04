@@ -1,4 +1,5 @@
 import { Link, NavLink } from 'react-router-dom'
+import ThemeToggle from './ThemeToggle'
 
 const NAV_ITEMS = [
   { to: '/analyze', label: '分析' },
@@ -35,7 +36,8 @@ export default function Header() {
         ))}
       </nav>
 
-      <span className="hidden rounded-md border border-tf-muted/40 px-2 py-0.5 text-xs text-tf-muted sm:inline">v0.6.3</span>
+      <span className="hidden rounded-md border border-tf-muted/40 px-2 py-0.5 text-xs text-tf-muted sm:inline">v0.6.5</span>
+      <ThemeToggle />
     </header>
   )
 }

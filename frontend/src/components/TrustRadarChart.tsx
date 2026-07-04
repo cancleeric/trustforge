@@ -56,9 +56,15 @@ export default function TrustRadarChart({ radar }: Props) {
       <div className="h-64 w-full">
         <ResponsiveContainer width="100%" height="100%">
           <RadarChart data={chartData} outerRadius="70%">
-            <PolarGrid stroke="#30363d" />
-            <PolarAngleAxis dataKey="label" tick={{ fill: '#8b949e', fontSize: 11 }} />
-            <Radar dataKey="trust" stroke="#1f6feb" fill="#1f6feb" fillOpacity={0.35} isAnimationActive={false} />
+            <PolarGrid stroke="var(--color-tf-border)" />
+            <PolarAngleAxis dataKey="label" tick={{ fill: 'var(--color-tf-muted)', fontSize: 11 }} />
+            <Radar
+              dataKey="trust"
+              stroke="var(--color-tf-accent)"
+              fill="var(--color-tf-accent)"
+              fillOpacity={0.35}
+              isAnimationActive={false}
+            />
             <Tooltip content={RadarTooltip} />
           </RadarChart>
         </ResponsiveContainer>

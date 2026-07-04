@@ -24,7 +24,7 @@ function overviewCardHref(coin: string): string | null {
 export default function OverviewCard({ coin }: Props) {
   const href = overviewCardHref(coin.coin)
   const body = (
-    <div className="flex h-full flex-col gap-2 rounded-lg border border-tf-border bg-tf-card p-4 transition hover:border-tf-accent hover:shadow-[0_4px_14px_rgba(31,111,235,0.18)]">
+    <div className="flex h-full flex-col gap-2 rounded-lg border border-tf-border bg-tf-card p-4 transition hover:border-tf-accent hover:shadow-[0_4px_14px_color-mix(in_srgb,var(--color-tf-accent)_18%,transparent)]">
       <div className="flex items-center justify-between">
         <span className="text-base font-bold text-tf-text">{coin.coin}</span>
         <DirectionBadge direction={coin.direction} />

@@ -50,8 +50,8 @@ export interface IndependenceTier {
 
 /** 對應後端 `_independence_tier()`：層級·權威性徽章。 */
 export function independenceTier(kind: string): IndependenceTier {
-  if (OFFICIAL_KINDS.has(kind)) return { label: '高·官方', color: '#3fb950' }
-  if (THIRD_PARTY_KINDS.has(kind)) return { label: '高·第三方', color: '#3fb950' }
-  if (COMMUNITY_KINDS.has(kind)) return { label: '中·社群', color: '#d9832a' }
-  return { label: '一般·輔助', color: '#8b949e' }
+  if (OFFICIAL_KINDS.has(kind)) return { label: '高·官方', color: 'var(--color-tf-good)' }
+  if (THIRD_PARTY_KINDS.has(kind)) return { label: '高·第三方', color: 'var(--color-tf-good)' }
+  if (COMMUNITY_KINDS.has(kind)) return { label: '中·社群', color: 'var(--color-tf-warn)' }
+  return { label: '一般·輔助', color: 'var(--color-tf-muted)' }
 }

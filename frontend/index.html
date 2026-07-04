@@ -5,6 +5,18 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TrustForge</title>
+    <!-- #20 主題切換 FOUC 防護：在 React mount 前、CSS 套用前就先讀
+         localStorage 決定 data-theme，避免先閃一下 dark 預設值才變
+         light。邏輯需跟 src/lib/theme.ts 的 resolveInitialTheme 保持
+         一致（localStorage > prefers-color-scheme > dark）。
+
+         codex 複審 HIGH（CSP 相容）：production CSP 是
+         `script-src 'self'`（無 nonce/hash/unsafe-inline），inline
+         script 會被瀏覽器擋掉——改成同源外部檔 `/theme-init.js`
+         （Vite 會原樣把 `public/` 內容 copy 到 dist 根目錄）。刻意
+         **不加** `defer`/`async`/`type="module"`：必須同步、阻塞式
+         載入並在下面任何 CSS 套用前執行完，才有 FOUC 防護的意義。 -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

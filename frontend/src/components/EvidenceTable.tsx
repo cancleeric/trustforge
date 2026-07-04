@@ -4,9 +4,9 @@ import { safeHref } from '../lib/safeHref'
 import { FlagBadge, InfoFlagBadge, LowTrustBadge, TierBadge } from './Badges'
 
 function trustColor(trust: number): string {
-  if (trust < 0.3) return '#f85149'
-  if (trust < 0.6) return '#d9832a'
-  return '#3fb950'
+  if (trust < 0.3) return 'var(--color-tf-bad)'
+  if (trust < 0.6) return 'var(--color-tf-warn)'
+  return 'var(--color-tf-good)'
 }
 
 function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {

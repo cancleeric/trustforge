@@ -185,9 +185,9 @@ export default function StatusPage() {
           <section>
             <h3 className="mb-2 text-sm font-semibold text-tf-text">連接器資料鮮度</h3>
             <div className="mb-3 grid grid-cols-3 gap-3">
-              <StatCard label="新鮮" value={status.freshness.fresh} color="#3fb950" />
-              <StatCard label="過期" value={status.freshness.stale} color="#d9832a" />
-              <StatCard label="缺席" value={status.freshness.missing} color="#8b949e" />
+              <StatCard label="新鮮" value={status.freshness.fresh} color="var(--color-tf-good)" />
+              <StatCard label="過期" value={status.freshness.stale} color="var(--color-tf-warn)" />
+              <StatCard label="缺席" value={status.freshness.missing} color="var(--color-tf-muted)" />
             </div>
             <FreshnessMatrix entries={status.freshness.entries} />
           </section>

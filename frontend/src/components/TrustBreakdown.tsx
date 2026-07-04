@@ -21,13 +21,13 @@ export default function TrustBreakdown({ data }: { data: TrustComponentsAggregat
           const isRisk = key === 'manipulation'
           const barColor = isRisk
             ? value > 0.3
-              ? '#f85149'
-              : '#3fb950'
+              ? 'var(--color-tf-bad)'
+              : 'var(--color-tf-good)'
             : value >= 0.6
-              ? '#3fb950'
+              ? 'var(--color-tf-good)'
               : value >= 0.35
-                ? '#d9832a'
-                : '#f85149'
+                ? 'var(--color-tf-warn)'
+                : 'var(--color-tf-bad)'
           return (
             <li key={key}>
               <div className="mb-1 flex items-baseline justify-between text-xs">
