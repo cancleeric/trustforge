@@ -314,6 +314,38 @@ def _detect_stance_pairs(
     return pairs
 
 
+def _dedup_stance_pairs_by_source(pairs: list[dict]) -> dict[str, list[dict]]:
+    """`_detect_stance_pairs()` 回傳的 `pairs` 是逐筆明細（去重鍵 `claim.id`），
+    同一來源若有兩則不同 claim 各自跟不同對手配對成功，會在 `pairs` 裡出現
+    兩次——這是刻意保留的原始明細（供展開查看），**不是**「獨立來源數」。
+
+    本函式在 `pairs` 之上疊加一層「同一 stance 陣營內按 source 去重」（對照組：
+    `trust.scoring.aggregate` 的 `n_contrarian_sources`、本檔 `aggregate_trust_by_kind`
+    的 `n_sources` 都是用 set/dict 依 `source` 去重，同一模式），修正「同一來源
+    多筆矛盾主張被算成多個獨立來源」的虛高問題：
+
+    - 同一來源在同一 stance（bullish 或 bearish）只保留一筆代表——取該陣營中
+      該來源第一筆出現的 pair（`pairs` 本身依 `_detect_stance_pairs` 的掃描
+      順序產生，是確定性順序，不含隨機性）。
+    - **跨陣營不去重**：同一來源若在 bullish、bearish 都有主張（自我矛盾），
+      兩邊各自保留各自的代表——這是另一個獨立訊號（來源自我矛盾），不該被
+      當成雜訊吃掉，本輪不擴大處理，只維持不誤刪。
+    - 純資料轉換、不改變 `pairs` 原始清單本身（呼叫端仍可用 `pairs` 取得未去重
+      的完整明細）。
+    """
+    result: dict[str, list[dict]] = {"bullish": [], "bearish": []}
+    seen: dict[str, set[str]] = {"bullish": set(), "bearish": set()}
+    for p in pairs:
+        stance = p["stance"]
+        if stance not in result:
+            continue  # 理論上不會出現（方向閘已擋掉 neutral），保守略過非 bullish/bearish
+        if p["source"] in seen[stance]:
+            continue
+        seen[stance].add(p["source"])
+        result[stance].append(p)
+    return result
+
+
 def detect_cross_source_signal(
     scored: list[ScoredClaim],
     stance_fn: Callable[[str, str], str] | None = None,
@@ -347,6 +379,14 @@ def detect_cross_source_signal(
           聚合結果蓋掉。
     - 找不到配對時：完全不影響既有回傳值（含 None、consensus）。
 
+    `stance_pairs` 附加時，一律同步附加 `distinct_sources`（#13 修正）：
+    `{"bullish": [...], "bearish": [...]}`，是 `stance_pairs` 依 source 在
+    各自陣營內去重後的代表清單（見 `_dedup_stance_pairs_by_source`）——
+    `stance_pairs` 本身刻意保留原始逐筆明細（去重鍵是 `claim.id`，供展開
+    查看每一則矛盾主張），**不代表獨立來源數**；「這一輪偵測到幾個獨立
+    來源支持某方向」一律以 `distinct_sources` 為準，呼叫端（UI）計數/去重
+    渲染請讀這個欄位，不要直接對 `stance_pairs` 做 `len()`。
+
     守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
     """
     # 只取 trust >= 0.5 的主張
@@ -374,6 +414,7 @@ def detect_cross_source_signal(
             ),
             "supporting_claim_ids": [p["claim_id"] for p in stance_pairs],
             "stance_pairs": stance_pairs,
+            "distinct_sources": _dedup_stance_pairs_by_source(stance_pairs),
         }
 
     # 任一類 0 筆 → None（除非有 stance_pairs 備援）
@@ -465,6 +506,7 @@ def detect_cross_source_signal(
     }
     if stance_pairs:
         result["stance_pairs"] = stance_pairs
+        result["distinct_sources"] = _dedup_stance_pairs_by_source(stance_pairs)
     return result
 
 

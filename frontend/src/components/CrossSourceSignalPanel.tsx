@@ -1,14 +1,5 @@
 import type { CrossSourceSignal, StancePair } from '../lib/types'
-
-function groupByStance(pairs: StancePair[]) {
-  const bullish: StancePair[] = []
-  const bearish: StancePair[] = []
-  for (const p of pairs) {
-    if (p.stance === 'bullish' || p.stance === '看漲' || p.stance === 'BULLISH') bullish.push(p)
-    else if (p.stance === 'bearish' || p.stance === '看跌' || p.stance === 'BEARISH') bearish.push(p)
-  }
-  return { bullish, bearish }
-}
+import { groupByStance } from '../lib/stancePairs'
 
 function SideColumn({ label, color, items }: { label: string; color: string; items: StancePair[] }) {
   return (
@@ -54,8 +45,8 @@ export default function CrossSourceSignalPanel({ signal }: { signal: CrossSource
         <>
           <p className="mb-2 text-sm text-tf-text2">{signal.summary}</p>
           <div className="flex flex-col gap-3 sm:flex-row">
-            <SideColumn label="&#9650; BULLISH" color="#3fb950" items={groupByStance(signal.stance_pairs ?? []).bullish} />
-            <SideColumn label="&#9660; BEARISH" color="#f85149" items={groupByStance(signal.stance_pairs ?? []).bearish} />
+            <SideColumn label="&#9650; BULLISH" color="#3fb950" items={groupByStance(signal).bullish} />
+            <SideColumn label="&#9660; BEARISH" color="#f85149" items={groupByStance(signal).bearish} />
           </div>
         </>
       )}
