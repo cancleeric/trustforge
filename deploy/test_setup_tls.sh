@@ -39,6 +39,14 @@
 #      `certbot renew --dry-run` 驗證續簽路徑（webroot acme-challenge
 #      location）真的通，不能簽完就放著不管到期日。
 #
+#   6. [codex 複審 HIGH，90 天憑證定時炸彈] `certonly --webroot`（跟
+#      `--nginx` plugin 不同）續簽時**不會自動 reload nginx**——timer 續簽
+#      只更新磁碟上的憑證檔，nginx worker 仍抱著舊憑證不放，續簽本身「成功」
+#      但客戶端最終收到過期憑證，而且極難察覺。修法：certbot 加
+#      `--deploy-hook "nginx -t && systemctl reload nginx"`——這個 hook 會
+#      被寫進 renewal config，之後每次 `certbot renew` 續簽成功都會自動
+#      重跑（`nginx -t` 先擋語法錯誤，才 reload）。
+#
 # 測法：
 #   - 場景 1：hostile DOMAIN（`;`/`$()`/引號/空白）→ 斷言在碰任何 aws 呼叫
 #     前就被 regex 擋下、非零結束、訊息含「DOMAIN 格式不合法」。
@@ -61,7 +69,9 @@
 #     domain、跟改成子網域兩種 near-miss）。
 #   - 場景 3（延伸）：印出的 CMD 含 `systemctl enable --now
 #     certbot-renew.timer` 跟 `certbot renew --dry-run`（自動續簽 timer +
-#     dry-run 驗證續簽路徑）。
+#     dry-run 驗證續簽路徑）、含 `--deploy-hook "nginx -t && systemctl
+#     reload nginx"`（codex 複審 HIGH：webroot 續簽不會自動 reload
+#     nginx，續簽成功但客戶端收到過期憑證的定時炸彈）。
 #
 # 用法：bash deploy/test_setup_tls.sh
 set -euo pipefail
@@ -218,6 +228,8 @@ assert_contains "$CMD_OUT" 'systemctl enable --now certbot-renew.timer' \
   "簽發成功後啟用自動續簽 timer（codex 複審 MEDIUM next step）"
 assert_contains "$CMD_OUT" 'certbot renew --dry-run' \
   "簽發成功後跑 certbot renew --dry-run 驗證續簽路徑（webroot acme-challenge，同一條 location）"
+assert_contains "$CMD_OUT" '--deploy-hook "nginx -t && systemctl reload nginx"' \
+  "certbot certonly 帶 --deploy-hook（codex 複審 HIGH：webroot 續簽不會自動 reload nginx，會寫進 renewal config，之後每次 certbot renew 都自動觸發）"
 if bash -n <(printf '%s\n' "$CMD_OUT"); then
   pass "TF_SETUP_TLS_DRY_RUN 印出的 CMD 本身是合法 bash 語法（bash -n 過）"
 else

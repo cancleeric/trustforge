@@ -177,6 +177,19 @@ fi
 # `certonly --webroot` 的 HTTP-01 challenge，靠的正是三份 nginx conf 新增
 # 的 `location ^~ /.well-known/acme-challenge/` 例外——dry-run 這裡順便就
 # 是那條路徑的端到端驗證）。
+#
+# ⛔ codex 複審 HIGH（90 天憑證定時炸彈——最後一關）：`--nginx` plugin
+# 續簽時會自動 reload nginx，但 `certonly --webroot` **不會**——timer 續簽
+# 只更新磁碟上的憑證檔（`/etc/letsencrypt/live/<domain>/`），nginx worker
+# 仍抱著啟動時載入的舊憑證不放，直到有人手動 reload。續簽本身「成功」
+# （timer/certbot 都報 OK），但客戶端最終會收到過期憑證，而且極難察覺
+# （沒有任何一步會報錯）。修法：`certbot certonly` 加
+# `--deploy-hook "nginx -t && systemctl reload nginx"`——這個 hook 不只在
+# 這次簽發後執行一次，還會被 certbot 寫進
+# `/etc/letsencrypt/renewal/<domain>.conf` 的 `renew_hook`，之後每次
+# `certbot-renew.timer` 觸發的 `certbot renew` 續簽成功後都會自動重跑
+# （`nginx -t` 先擋語法錯誤，通過才 `systemctl reload nginx`，避免 reload
+# 到一個壞掉的 config）。
 CERTBOT_WEBROOT="/var/www/certbot"
 CMD="set -e
 dnf install -y certbot
@@ -186,13 +199,15 @@ set -e
 TF_DOMAIN=\"\$1\"
 TF_ADMIN_EMAIL=\"\$2\"
 certbot certonly --webroot -w ${CERTBOT_WEBROOT} -d \"\$TF_DOMAIN\" \\
-  --non-interactive --agree-tos -m \"\$TF_ADMIN_EMAIL\"
+  --non-interactive --agree-tos -m \"\$TF_ADMIN_EMAIL\" \\
+  --deploy-hook \"nginx -t && systemctl reload nginx\"
 echo \"[setup-tls] certbot 簽發完成，憑證路徑：/etc/letsencrypt/live/\$TF_DOMAIN/\"
+echo \"[setup-tls] --deploy-hook 已寫進 renewal config，之後每次 certbot renew 續簽成功會自動 nginx -t && systemctl reload nginx\"
 systemctl enable --now certbot-renew.timer
 echo \"[setup-tls] certbot-renew.timer 已啟用（自動續簽）\"
 systemctl list-timers 'certbot-renew.timer' --no-pager || true
 certbot renew --dry-run
-echo \"[setup-tls] certbot renew --dry-run 通過（續簽路徑，含 webroot acme-challenge location，驗證正常）\"
+echo \"[setup-tls] certbot renew --dry-run 通過（續簽路徑，含 webroot acme-challenge location + deploy-hook reload nginx，驗證正常）\"
 REMOTE_TLS_EOF
 "
 
