@@ -35,7 +35,7 @@ export default function Header() {
         ))}
       </nav>
 
-      <span className="hidden rounded-md border border-tf-muted/40 px-2 py-0.5 text-xs text-tf-muted sm:inline">v0.6.2</span>
+      <span className="hidden rounded-md border border-tf-muted/40 px-2 py-0.5 text-xs text-tf-muted sm:inline">v0.6.3</span>
     </header>
   )
 }
