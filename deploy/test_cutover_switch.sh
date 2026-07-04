@@ -25,6 +25,14 @@
 #   11. 鎖沒被持有時的正常單一呼叫（就是場景 5 happy path 本身）→
 #      證明鎖不影響正常流程；額外驗證腳本結束後鎖確實釋放（能被
 #      重新取得），不會卡死後續呼叫。
+#   12. absent live symlink 的 pre-state（codex 四次複審，HIGH）：切換前
+#      live symlink 本來就不存在 → pre-state 捕捉要能正確區分「原本無」
+#      跟「原本有」，rollback 觸發時要把切換時新建的 symlink 移除、還原
+#      成「無 symlink」，不能因為 PREV_LINK 是空字串就誤判成「這步不用
+#      做」而把新建的 symlink 留著（半殘狀態）。
+#   13. absent live symlink + 無失敗注入 → 正常 cutover 應該照常成功（同一
+#      個 pre-state 分支不能只在失敗路徑測，happy path 也要確認沒被新加
+#      的判斷式誤傷）。
 #
 # 依賴：真的 `flock`（util-linux；Amazon Linux/大多數 Linux 預設就有）。
 # macOS 本機測試需要 `brew install flock`（discoteq/flock 的 fd 型
@@ -380,6 +388,33 @@ if ( exec 9>"$STATE/tf-cutover.lock"; flock -n 9 ); then
 else
   fail "run_cutover 結束後鎖沒有釋放（會卡死下一次呼叫，是嚴重的 bug）"
 fi
+
+echo "== 場景 12：切換前 live symlink 本來就不存在（absent pre-state，codex 四次複審 HIGH）=="
+reset_sandbox
+rm -f "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
+if run_cutover MOCK_NGINX_LIVE_FAIL_AT=1; then
+  fail "absent pre-state 下，swap 後 nginx -t 失敗時應該非零結束"
+else
+  pass "absent pre-state 下，swap 後 nginx -t 失敗時非零結束（觸發回滾）"
+fi
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息（absent pre-state 也走完整套回滾流程，不會因為讀不到 symlink 就中途壞掉）"
+if [ -e "$SANDBOX/etc/nginx/conf.d/trustforge.conf" ] || [ -L "$SANDBOX/etc/nginx/conf.d/trustforge.conf" ]; then
+  fail "回滾後 live symlink 應該還原成不存在（切換前本來就沒有），但目前仍存在（誤還原：把切換時新建的 symlink 留著了）"
+else
+  pass "回滾後 live symlink 正確還原成不存在（沒有誤留切換時新建的 symlink）"
+fi
+assert_eq "$(active_csp)" "legacy" "absent pre-state 下 rollback 後 service file CSP_MODE 仍正確退回 legacy"
+
+echo "== 場景 13：切換前 live symlink 本來就不存在，且無失敗注入 → 正常 cutover 成功建立新 symlink =="
+reset_sandbox
+rm -f "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
+if run_cutover; then
+  pass "absent pre-state 下，無失敗注入時正常 cutover 成功"
+else
+  fail "absent pre-state 下，無失敗注入時應該正常成功"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "react.conf" "absent pre-state 下正常 cutover 成功後 live symlink 正確指向 react.conf"
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE"
 

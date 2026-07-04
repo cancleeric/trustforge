@@ -257,6 +257,24 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 `deploy/TLS-SETUP.md`：只有設定文件 + 指令，**沒有實際簽發憑證**——實際
 `certbot --nginx` 執行留給 netops 在真實 domain 就緒後手動跑。
 
+### `cutover_switch.sh` exit code 慣例（供維運/監控）
+
+`cutover_switch.sh`（不管是遠端腳本本身，還是本機呼叫它的 production SSM
+wrapper）用以下 distinct exit code，讓自動化/監控能分清楚失敗種類，不要
+一律當成「隨便一種失敗」處理：
+
+| exit code | 含義 | 是否已動過 mutation | 建議動作 |
+|-----------|------|----------------------|----------|
+| `0` | 成功切換（或成功回滾但流程本身正常結束的分支不會走到這裡） | 是，已切到目標狀態 | 無 |
+| `1` | 一般失敗（候選設定驗證失敗、找不到 running 實例等）；也是任何未知/未定義 ResponseCode 的保守 fallback | 視情況——候選驗證失敗一律**沒有**任何 mutation；其餘一般失敗請查 log 判斷 | 查 log，通常可直接重試 |
+| `97` | `ROLLBACK-FAILED`：自動回滾**沒有完全成功**（見腳本內詳細訊息與手動復原指令） | **可能處於半殘狀態**，不要假設已還原 | 立即人工介入，照腳本印出的手動復原指令逐項核對 nginx symlink／CSP_MODE／healthz |
+| `98` | lock contention：另一個 cutover 呼叫正在進行中，本次直接中止 | **完全沒有** mutation | 等目前那個呼叫跑完再重試，不需要人工介入 |
+
+production SSM wrapper（`cutover_switch.sh` 尾段呼叫 `aws ssm
+send-command`/`get-command-invocation` 那段）會讀 `get-command-invocation`
+的 `ResponseCode`（遠端指令實際的 exit code），把 97/98 原樣傳遞成 wrapper
+自己的 top-level exit code，不會全部塌成 1（codex 四次複審修正項）。
+
 ### 本機驗證方式（禁真 AWS/生產）
 
 ```bash
@@ -274,6 +292,15 @@ python3 -m pytest tests/test_security.py tests/test_lambda_handler.py -q
 # deploy_frontend_nginx.sh 的邏輯測試（完全 mock aws/npm，不連真 AWS/不真
 # npm install）
 bash deploy/test_deploy_frontend_nginx.sh
+
+# cutover_switch.sh 的 guarded-transaction 控制流程測試（TF_CUTOVER_DRY_RUN
+# 擷取遠端指令內容、本機沙箱 + mock nginx/systemctl/curl/flock 實際執行）
+bash deploy/test_cutover_switch.sh
+
+# cutover_switch.sh production SSM wrapper 的整合測試（mock aws CLI 本身，
+# 不用 TF_CUTOVER_DRY_RUN，驗證 ResponseCode 97/98/1/0 正確傳遞成 wrapper
+# 自己的 top-level exit code）
+bash deploy/test_cutover_ssm_wrapper.sh
 ```
 
 ### 回滾

@@ -41,6 +41,20 @@
 #      關閉）。拿不到鎖（代表已經有另一個 cutover 在跑）→ 印 distinct
 #      的「另一個 cutover 進行中」訊息、exit 98（跟一般失敗 exit 1、
 #      ROLLBACK-FAILED exit 97 都不同），**完全不做任何 mutation**就中止。
+#   6. **production SSM wrapper 以前會把 distinct exit code 全部塌成 1**
+#      （codex 四次複審，HIGH）：遠端腳本發的 97/98/1 是靠 SSM
+#      `get-command-invocation` 的 `Status` + `ResponseCode` 帶回本機，以前
+#      wrapper 只看 Status、非 Success 一律 exit 1，讓 contention（98）跟
+#      ROLLBACK-FAILED（97）在 production path 分不出來。改讀 ResponseCode
+#      並把 97/98 原樣傳遞成 wrapper 自己的 top-level exit code，其餘失敗
+#      維持 exit 1 fallback（見本檔案 SSM 呼叫段落、deploy/README.md exit
+#      code 慣例）。同一輪也修了 **absent/unreadable live symlink 的
+#      pre-state**：切換前若本來就沒有 symlink（或讀不到），以前 rollback
+#      只看 PREV_LINK 是否非空來決定要不要動作，空字串被誤當成「這步不用
+#      做」而略過，導致切換時新建的 symlink 沒被清掉；現在用明確的
+#      `PREV_LINK_EXISTED` flag 區分「原本有」跟「原本無/讀不到」，後者
+#      rollback 時主動 `rm -f` 還原成無 symlink，並且回滾後驗證也涵蓋
+#      這個分支（不再因為 PREV_LINK 是空字串就整段跳過驗證）。
 #
 # 不做：不動 TLS 憑證（見 deploy/TLS-SETUP.md，憑證跟站台切換相互獨立）、
 # 不動 SSR 是否移除（P3「一週觀察期」後才移除，屬另一個獨立、需另行確認
@@ -122,7 +136,20 @@ rm -f \"\$VALIDATE_CONF\" \"/tmp/tf-cutover-validate-\$\$.err.log\" \"/tmp/tf-cu
 echo '[cutover] 候選設定驗證通過（未動 live symlink）'
 
 # ---- Step 2：記錄切換前狀態，掛失敗回滾 ----
-PREV_LINK=\"\$(readlink \"\$LIVE_LINK\" 2>/dev/null || true)\"
+# PREV_LINK_EXISTED（codex 四次複審，HIGH：absent/unreadable symlink 的
+# pre-state 沒有 flag 區分「原本就沒有」跟「原本有但讀不到」，rollback 時
+# 只看 PREV_LINK 是否非空——若切換前 live symlink 本來就不存在，這個 flag
+# 讓 rollback 知道『正確的還原目標是移除 symlink』，而不是誤判成『這步不用
+# 做任何事』留著切換時新建的 symlink 半殘）：只有『真的是 symlink 且讀得到
+# 目標』才算 PREV_LINK_EXISTED=1；不是 symlink／讀不到目標，一律視為
+# PREV_LINK_EXISTED=0（『原本無 symlink，或原本有但讀不到』統一當成
+# rollback 目標=移除，不會因為讀不到就誤還原成別的東西）----
+if [ -L \"\$LIVE_LINK\" ] && PREV_LINK=\"\$(readlink \"\$LIVE_LINK\" 2>/dev/null)\" && [ -n \"\$PREV_LINK\" ]; then
+  PREV_LINK_EXISTED=1
+else
+  PREV_LINK_EXISTED=0
+  PREV_LINK=\"\"
+fi
 PREV_MODE_LINE=\"\$(grep '^Environment=TRUSTFORGE_CSP_MODE=' \"\$SERVICE_FILE\" 2>/dev/null || true)\"
 
 ROLLBACK() {
@@ -131,9 +158,16 @@ ROLLBACK() {
   echo \"❌ [cutover] 切換中失敗（exit=\${ec}），回滾到切換前狀態…\" >&2
   local ROLLBACK_OK=1
 
-  if [ -n \"\$PREV_LINK\" ]; then
+  if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
     if ! ln -sfn \"\$PREV_LINK\" \"\$LIVE_LINK\"; then
       echo \"❌ [cutover] rollback：symlink 還原失敗（ln -sfn \${PREV_LINK} -> \${LIVE_LINK}）\" >&2
+      ROLLBACK_OK=0
+    fi
+  else
+    # 切換前本來就沒有（或讀不到）live symlink，正確的還原目標是「移除」
+    # 切換時新建的 symlink，不是留著不管（那樣才是誤還原）
+    if ! rm -f \"\$LIVE_LINK\"; then
+      echo \"❌ [cutover] rollback：symlink 移除失敗（切換前無 symlink/讀不到，理應還原成無 symlink：\${LIVE_LINK}）\" >&2
       ROLLBACK_OK=0
     fi
   fi
@@ -172,9 +206,16 @@ ROLLBACK() {
   #      code 是兩件事、都要過 ----
   local RB_ACTIVE_LINK
   RB_ACTIVE_LINK=\"\$(readlink \"\$LIVE_LINK\" 2>/dev/null || true)\"
-  if [ -n \"\$PREV_LINK\" ] && [ \"\$RB_ACTIVE_LINK\" != \"\$PREV_LINK\" ]; then
-    echo \"❌ [cutover] rollback 驗證失敗：symlink=\$RB_ACTIVE_LINK ≠ 切換前=\$PREV_LINK\" >&2
-    ROLLBACK_OK=0
+  if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
+    if [ \"\$RB_ACTIVE_LINK\" != \"\$PREV_LINK\" ]; then
+      echo \"❌ [cutover] rollback 驗證失敗：symlink=\$RB_ACTIVE_LINK ≠ 切換前=\$PREV_LINK\" >&2
+      ROLLBACK_OK=0
+    fi
+  else
+    if [ -e \"\$LIVE_LINK\" ] || [ -L \"\$LIVE_LINK\" ]; then
+      echo \"❌ [cutover] rollback 驗證失敗：切換前無 symlink，但回滾後 \${LIVE_LINK} 仍存在\" >&2
+      ROLLBACK_OK=0
+    fi
   fi
 
   local RB_MODE_LINE
@@ -199,8 +240,13 @@ ROLLBACK() {
   #      不同的 exit code（97）方便維運腳本/監控明確分辨「這是回滾本身
   #      壞掉，不是單純切換失敗」----
   echo '🆘 [cutover] ROLLBACK-FAILED：自動回滾沒有完全成功，請立即人工介入，不要假設服務已還原！' >&2
-  echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期指向：\${PREV_LINK}）\" >&2
-  echo \"      不對就手動修：ln -sfn \${PREV_LINK} \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
+  if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
+    echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期指向：\${PREV_LINK}）\" >&2
+    echo \"      不對就手動修：ln -sfn \${PREV_LINK} \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
+  else
+    echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期：切換前不存在，應該不存在／已移除）\" >&2
+    echo \"      不對就手動修：rm -f \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
+  fi
   echo \"   2) 檢查 python service 的 CSP_MODE：grep TRUSTFORGE_CSP_MODE \${SERVICE_FILE}\" >&2
   echo \"      （預期：\${PREV_MODE_LINE}）\" >&2
   echo '      不對就手動改該行後：systemctl daemon-reload && systemctl restart trustforge' >&2
@@ -270,10 +316,23 @@ CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --query 'Command.CommandId' --output text)
 aws ssm wait command-executed --region "$REGION" --command-id "$CMDID" --instance-id "$IID" 2>/dev/null || true
 STATUS=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" --query Status --output text)
-if [ "$STATUS" != "Success" ]; then
-  echo "❌ 切換失敗：Status=$STATUS" >&2
-  aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" \
-    --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
-  exit 1
+# codex 四次複審 HIGH：遠端腳本會發 distinct exit code（97=ROLLBACK-FAILED、
+# 98=lock contention、一般失敗=其他非零值），但這裡以前只看 Status，
+# 全部非 Success 都 exit 1，把三種情況塌成同一個訊號，監控/自動化分不出來。
+# 改讀 get-command-invocation 的 ResponseCode（遠端指令真正的 exit code），
+# 把 97/98 原樣傳遞到這層 wrapper 的 top-level exit code，其餘（包含
+# TimedOut/Cancelled 等 ResponseCode 可能是 -1 的情況）維持保守 fallback
+# exit 1，不臆測。exit code 慣例見 deploy/README.md。
+RESPONSE_CODE=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" --query ResponseCode --output text 2>/dev/null || true)
+if [ "$STATUS" = "Success" ] && [ "$RESPONSE_CODE" = "0" ]; then
+  echo "✅ 已切換到 ${MODE}（CommandId=${CMDID}）"
+  exit 0
 fi
-echo "✅ 已切換到 ${MODE}（CommandId=${CMDID}）"
+echo "❌ 切換失敗：Status=$STATUS ResponseCode=$RESPONSE_CODE" >&2
+aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" \
+  --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
+case "$RESPONSE_CODE" in
+  97) exit 97 ;;
+  98) exit 98 ;;
+  *) exit 1 ;;
+esac
