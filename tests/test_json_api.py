@@ -1493,6 +1493,74 @@ def test_api_analyze_dedup_cross_ip_follower_still_enforces_own_rate_limit(monke
         web._real_rate_buckets.pop(follower_ip, None)
 
 
+def test_api_analyze_dedup_key_captures_online_stance_force_offline_per_caller(monkeypatch):
+    """codex HIGH 複審 Round 11（key 漏 caller-specific online-stance
+    降級）：real-mode 執行還依賴 `_online_stance_force_offline(client_ip)`
+    ——per-IP 的 online-stance 專用限流耗盡與否，決定這次請求會不會被
+    degrade（`force_stance_offline=True`）。dedup key 若沒捕捉這個變數，
+    會讓配額狀態不同的兩個 IP 命中同一把 key、彼此污染（甚至讓耗盡的
+    IP 白拿一份繞過自己配額限制的正常結果），而且哪個先到決定另一方
+    拿到什麼結果。
+
+    這裡驗證兩件事：
+    1. IP_A（online-stance 配額早已耗盡）跟 IP_B（配額充裕）送出完全
+       相同的 real-mode 請求，各自拿到跟自己狀態相符的結果——A 的
+       `run()` 呼叫帶 `force_stance_offline=True`、B 的不帶（`False`）
+       ——依賴各被真的呼叫 1 次，不共用同一把 key、不互相污染、不依
+       送出順序而定。
+    2. 同一個 IP（狀態不變）再送一次完全相同的請求 → 正確 dedup（命中
+       60 秒快取，不再真的呼叫 `run()`）。
+    """
+    monkeypatch.setattr(web, "online_stance_requested", lambda: True)
+    real_run = pipeline_module.run
+    calls: list[dict] = []
+
+    def _capturing_run(coin, query, qtype, offline=False, data_dir=None,
+                        data_mode=None, llm_mode=None, **kwargs):
+        calls.append({"force_stance_offline": kwargs.get("force_stance_offline", False)})
+        return real_run(coin, query, qtype, offline=True)
+
+    monkeypatch.setattr(web, "run", _capturing_run)
+
+    ip_a = "10.1.6.1"
+    ip_b = "10.1.6.2"
+    web._online_stance_rate_buckets[ip_a] = [time.time()] * web._ONLINE_STANCE_RATE_MAX
+    try:
+        qs = {
+            "coin": ["BTC"],
+            "type": ["multi_source"],
+            "q": ["dedup-online-stance-cross-ip-test"],
+            "real": ["1"],
+        }
+
+        code_a, body_a = web._handle_api_analyze(qs, client_ip=ip_a)
+        code_b, body_b = web._handle_api_analyze(qs, client_ip=ip_b)
+
+        assert code_a == 200 and code_b == 200, (code_a, body_a, code_b, body_b)
+        assert len(calls) == 2, (
+            f"IP_A（配額耗盡）跟 IP_B（配額充裕）狀態不同，不該共用同一把 "
+            f"dedup key，依賴應該各被真的呼叫 1 次，實際共 {len(calls)} 次：{calls}"
+        )
+        assert calls[0]["force_stance_offline"] is True, (
+            f"IP_A 配額耗盡，應該被 degrade（force_stance_offline=True），"
+            f"實際 {calls[0]}"
+        )
+        assert calls[1]["force_stance_offline"] is False, (
+            f"IP_B 配額充裕，不該被 degrade，實際 {calls[1]}"
+        )
+
+        # 同一個 IP（狀態不變）再送一次 → 正確 dedup，不再真的呼叫 run()。
+        code_a2, body_a2 = web._handle_api_analyze(qs, client_ip=ip_a)
+        assert code_a2 == 200, (code_a2, body_a2)
+        assert len(calls) == 2, (
+            f"同一個 IP、狀態不變的重複請求應該命中 60 秒 dedup 快取，"
+            f"不該再真的呼叫依賴，實際共 {len(calls)} 次：{calls}"
+        )
+    finally:
+        web._online_stance_rate_buckets.pop(ip_a, None)
+        web._online_stance_rate_buckets.pop(ip_b, None)
+
+
 def test_dedup_analyze_call_leader_too_many_requests_not_cached_or_replayed(monkeypatch):
     """codex 複審第二輪 HIGH（dedup×限流交互）：defense-in-depth——就算
     某個 leader 的 `compute()` 過程中真的還是拋出 caller-specific 的

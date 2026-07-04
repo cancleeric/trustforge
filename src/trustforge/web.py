@@ -3032,7 +3032,13 @@ def _active_mode(qs: dict) -> str:
     return "real"
 
 
-def _do_analyze(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = True) -> tuple:
+def _do_analyze(
+    qs: dict,
+    client_ip: str = "",
+    *,
+    enforce_rate_limit: bool = True,
+    online_stance_force_offline: bool | None = None,
+) -> tuple:
     """單幣分析入口，永遠回傳 (report, evidence, log) 三元組。
 
     只處理 multi_source / hypothesis；comparison 請改用 _do_comparison。
@@ -3048,6 +3054,16 @@ def _do_analyze(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = Tru
     caller 自己的 IP 做過一次限流（`_analyze_enforce_caller_rate_limit`），
     這裡不能再重複計入同一個 IP 的 bucket。`/analyze`、`/analyze.json`
     （非 dedup 的畫面/匯出路由）維持預設 `True`，行為不變。
+
+    `online_stance_force_offline`（#51 codex HIGH 複審 Round 11：key 漏
+    caller-specific online-stance 降級）：`None`（預設，`/analyze`、
+    `/analyze.json` 等非 dedup 路由沿用）維持原行為，這裡自己呼叫
+    `_online_stance_force_offline(client_ip)` 決定要不要 degrade。若
+    傳入具體 `bool`——只有 `/api/analyze` 的 dedup leader 會傳，值是
+    `_handle_api_analyze` 在 dedup 查找之前，已經對這個 caller 自己的
+    `client_ip` 算好（`_analyze_online_stance_force_offline_for_caller`）
+    並納入 dedup key 的同一個判斷結果——直接沿用這個值，不再對同一個
+    IP 重複呼叫、重複消耗 online-stance 限流 bucket。
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     qtype = QuestionType(qs.get("type", ["multi_source"])[0])
@@ -3077,7 +3093,12 @@ def _do_analyze(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = Tru
         # 這條（現行測試全部涵蓋的）路徑對 `run()` 的呼叫方式逐字不變，不會
         # 因為既有測試 monkeypatch 的窄簽名 fake_run（無此參數）而炸掉。
         _extra: dict = {}
-        if _online_stance_force_offline(client_ip):
+        _force_offline = (
+            _online_stance_force_offline(client_ip)
+            if online_stance_force_offline is None
+            else online_stance_force_offline
+        )
+        if _force_offline:
             _extra["force_stance_offline"] = True
         report, evidence, log = run(
             coin, query, qtype, data_mode="live", llm_mode="off", **_extra,
@@ -3092,7 +3113,13 @@ def _do_analyze(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = Tru
     return report, evidence, log
 
 
-def _do_comparison(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = True) -> tuple:
+def _do_comparison(
+    qs: dict,
+    client_ip: str = "",
+    *,
+    enforce_rate_limit: bool = True,
+    online_stance_force_offline: bool | None = None,
+) -> tuple:
     """雙幣比較分析入口，回傳 (report_a, evidence_a, report_b, evidence_b, log) 五元組。
 
     Raises:
@@ -3102,6 +3129,10 @@ def _do_comparison(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = 
 
     `enforce_rate_limit=False`：見 `_do_analyze` 同名參數 docstring，
     語意完全一致（#51 codex HIGH 複審：dedup×限流交互）。
+
+    `online_stance_force_offline`：見 `_do_analyze` 同名參數 docstring，
+    語意完全一致（#51 codex HIGH 複審 Round 11：key 漏 caller-specific
+    online-stance 降級）。
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     # 商業級修復：表單新增常駐第二個幣種下拉（`coin2`，見 `render_page()`），
@@ -3139,7 +3170,12 @@ def _do_comparison(qs: dict, client_ip: str = "", *, enforce_rate_limit: bool = 
         # comparison 兩幣共用同一次請求的限流判定/degrade 決定；同樣只在
         # 真的要 degrade 時才多帶 `force_stance_offline` kwarg。
         _extra: dict = {}
-        if _online_stance_force_offline(client_ip):
+        _force_offline = (
+            _online_stance_force_offline(client_ip)
+            if online_stance_force_offline is None
+            else online_stance_force_offline
+        )
+        if _force_offline:
             _extra["force_stance_offline"] = True
         report_a, evidence_a, report_b, evidence_b, log = run_comparison(
             coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
@@ -3392,9 +3428,17 @@ def _analyze_effective_mode(qs: dict) -> str:
     return "real"
 
 
-def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: dict) -> str:
+def _analyze_dedup_key(
+    *,
+    qtype: QuestionType,
+    coin_key: str,
+    query: str,
+    qs: dict,
+    force_offline: bool = False,
+) -> str:
     """把一次 `/api/analyze` 請求正規化成 in-flight dedup / 短期結果快取的
-    key：`(type, coin[,coin2], query, effective_mode)`。
+    key：`(type, coin[,coin2], query, effective_mode, force_offline)`
+    （`force_offline`：Round 11 新增，見下方說明）。
 
     `coin_key`：呼叫端（`_handle_api_analyze`）已完成正規化＋白名單驗證的
     幣種鍵——單幣是已 `.upper()` 過的 `coin_raw`；comparison 是
@@ -3487,10 +3531,44 @@ def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: di
     欄位）不管含什麼字元，都只能出現在自己那個被逃逸/包住的 JSON
     字串值裡，不可能偽造出跟別的欄位邊界（含 `effective_mode`
     這個由伺服器端計算、非 user 直接控制的枚舉字串）重疊的位元組序列。
+    codex HIGH 複審（Round 11：key 漏 caller-specific online-stance
+    降級）：real-mode 執行實際上還依賴一個**跟 caller 的 `client_ip`
+    有關**的變數——`_online_stance_force_offline(client_ip)`（見該函式
+    docstring；#9 online-stance 預算配額硬化：per-IP 的 online-stance
+    專用限流耗盡時，`_do_analyze`/`_do_comparison` 會誠實 degrade 這次
+    請求成 `force_stance_offline=True`，結果內容因此不同）。先前的 key
+    完全沒有捕捉這個變數，導致：(1) 一個 online-stance 配額已耗盡的
+    IP 當 leader 時，它的降級結果會被寫進共用快取，之後 60 秒內任何
+    命中同一把 key、配額本來還很充裕的其他 IP 都會被迫拿到這份降級
+    結果；(2) 反過來，配額充裕的 IP 當 leader、產出正常 online-stance
+    結果被快取後，一個配額早就耗盡的 IP 若剛好命中快取，會白拿一份
+    「本來該被 degrade」的結果、完全繞過自己的配額限制，沒有真的消耗
+    到它自己的 online-stance 限流 bucket。兩個方向都違反「per-IP
+    配額」的護欄語意，而且哪個先到、哪個後到決定了另一方拿到什麼結果
+    ——結果依到達順序而定，不是 deterministic。
+
+    修法：呼叫端（`_handle_api_analyze`）在算這個 key **之前**，先對
+    這個 caller 自己的 `client_ip` 算一次
+    `_analyze_online_stance_force_offline_for_caller(qs, client_ip)`
+    ——跟 `_do_analyze`/`_do_comparison` 實際執行時判斷 degrade 用的
+    完全同一套邏輯（`effective_mode == "real"` 時才呼叫
+    `_online_stance_force_offline`），把算出來的 `bool` 傳進來當
+    `force_offline` 參數，納入 key 的一部分：同一個 caller 不管最後是
+    leader、follower、還是命中快取，都先用自己的 IP 決定「這次算出來
+    是不是該 degrade」，狀態相同（都耗盡／都可用）的 caller 才會落在
+    同一把 key、正確共用同一份結果；狀態不同（一個耗盡、一個可用）的
+    caller 會落在不同把 key，各自拿到跟自己配額狀態相符的結果，不會
+    互相污染，也不會有任何一方繞過自己的限流。`effective_mode` 不是
+    `"real"` 時，`_do_analyze`/`_do_comparison` 根本不會呼叫
+    `_online_stance_force_offline`（該邏輯整段包在 `if real:` 底下），
+    因此這裡強制把 `force_offline` 正規化成 `False`，不讓呼叫端誤傳的
+    值意外拆散本來該共用同一把 key 的 live/sample 請求（維持「key 只
+    捕捉『實際執行真正用得到』的變數」這個 Round 9 就確立的原則）。
     """
     effective_mode = _analyze_effective_mode(qs)
+    effective_force_offline = force_offline if effective_mode == "real" else False
     return json.dumps(
-        [qtype.value, coin_key, query, effective_mode],
+        [qtype.value, coin_key, query, effective_mode, effective_force_offline],
         separators=(",", ":"),
         ensure_ascii=True,
     )
@@ -3531,6 +3609,35 @@ def _analyze_enforce_caller_rate_limit(qs: dict, client_ip: str) -> None:
     real = _is_real_request(qs, live)
     if real and client_ip:
         _check_real_rate_limit(client_ip)
+
+
+def _analyze_online_stance_force_offline_for_caller(qs: dict, client_ip: str) -> bool:
+    """#51 codex HIGH 複審（Round 11：key 漏 caller-specific online-stance
+    降級）：跟 `_analyze_enforce_caller_rate_limit` 同樣的道理——只有
+    dedup 的 leader 會真的呼叫 `_do_analyze`/`_do_comparison`，若
+    online-stance 降級判斷（`_online_stance_force_offline`）繼續留在
+    那裡面才算，就只有 leader 自己的 `client_ip` 會被檢查/計入
+    online-stance 專用限流 bucket，且這個判斷結果只跟 leader 的 IP
+    有關，卻會透過共用 dedup 快取 replay 給狀態完全不同的其他 IP（見
+    `_analyze_dedup_key` docstring 的完整說明）。
+
+    修法：在 dedup 查找之前，對**每一個 caller**（不管最後是 leader、
+    follower、還是命中短期快取）各自的 `client_ip` 先算一次這個判斷，
+    結果納入 `_analyze_dedup_key` 的 `force_offline` 參數；真正的
+    `_do_analyze`/`_do_comparison`（只有 leader 會呼叫到）改傳這裡
+    算好的值（`online_stance_force_offline=` 參數），不會再對同一個
+    IP 重複呼叫 `_online_stance_force_offline`——避免同一個邏輯請求的
+    online-stance 限流額度被消耗兩次。
+
+    只在 `effective_mode == "real"` 時才呼叫 `_online_stance_force_
+    offline`（回傳 `False` 前完全零開銷、不消耗任何 bucket）：跟
+    `_do_analyze`/`_do_comparison` 實際執行時只在 `if real:` 分支底下
+    才會用到這個判斷完全一致——`live`/`sample` 請求既然執行時根本不會
+    走到這段邏輯，這裡也不該白白消耗這個 caller 的 online-stance 配額。
+    """
+    if _analyze_effective_mode(qs) != "real":
+        return False
+    return _online_stance_force_offline(client_ip)
 
 
 def _analyze_dedup_cache_put_locked(key: str, entry: tuple[bool, object]) -> None:
@@ -3988,8 +4095,10 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     #51 server-side idempotency（防重複送出，Bedrock 開通前最後
     prereq）：驗證通過後、真的呼叫 `_do_analyze`/`_do_comparison` 之前，
     先算出 `_analyze_dedup_key()`（正規化 `type,coin[,coin2],query,
-    effective_mode`——`effective_mode` 是 `live`/`real`/`sample` 三選一
-    的實際生效檔位，見該函式 docstring），透過 `_dedup_analyze_call()`
+    effective_mode,force_offline`——`effective_mode` 是 `live`/`real`/
+    `sample` 三選一的實際生效檔位；`force_offline` 是這個 caller 自己的
+    `client_ip` 在 online-stance 配額上是否已耗盡（Round 11 codex HIGH
+    複審新增），兩者皆見該函式 docstring），透過 `_dedup_analyze_call()`
     包一層 in-flight
     dedup ＋ 60 秒短期結果快取——同一組參數的重複/並行請求只有第一個
     （leader）真的觸發依賴呼叫，其餘原地等待、共用同一份真實結果，不會
@@ -4006,6 +4115,22 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     繞過自己的限流；(2) 限流本身完全在 dedup 的共用 lock/cache 之外，
     一個 IP 的 429 不可能透過 dedup 快取 poisoning 到別的 IP（見
     `_dedup_analyze_call` 對 `TooManyRequests` 的特殊處理）。
+
+    codex HIGH 複審 Round 11（key 漏 caller-specific online-stance
+    降級，見 `_analyze_dedup_key`／`_analyze_online_stance_force_
+    offline_for_caller` docstring）：跟上面 per-IP 限流同樣的道理，
+    `_do_analyze`/`_do_comparison` real-mode 執行時是否 degrade 成
+    `force_stance_offline=True` 也是跟這個 caller 的 `client_ip` 有關
+    的變數，一樣改成在 `dedup_key` 算出來之前，對每一個 caller 各自的
+    `client_ip` 先算一次（`force_offline`），納入 `dedup_key`；真正呼叫
+    `_do_analyze`/`_do_comparison` 改傳算好的
+    `online_stance_force_offline=force_offline`，不會再對同一個 IP
+    重複呼叫 `_online_stance_force_offline`、重複消耗它的 online-stance
+    限流 bucket。這樣一來，online-stance 配額已耗盡跟配額充裕的兩個
+    caller，即使命中同一把 `key` 的其他欄位（type/coin/query/
+    effective_mode 都相同），也會因為 `force_offline` 不同而落在
+    不同的 `dedup_key`、各自拿到跟自己配額狀態相符的結果，不會互相
+    污染、也不會有任何一方繞過自己的限流。
     """
     try:
         qtype = QuestionType(qs.get("type", ["multi_source"])[0])
@@ -4047,7 +4172,6 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     # 不同的兩份報告，不能共用同一份快取（見 `_analyze_dedup_key`
     # docstring）；單幣直接用已驗證的 `coin_raw`。
     coin_key = ",".join(pair) if qtype == QuestionType.COMPARISON else coin_raw
-    dedup_key = _analyze_dedup_key(qtype=qtype, coin_key=coin_key, query=query, qs=qs)
 
     # --- 2. 驗證通過後才碰依賴（連接器/Bedrock/pipeline/序列化）---
     try:
@@ -4058,10 +4182,27 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
         # `_analyze_enforce_caller_rate_limit` docstring。
         _analyze_enforce_caller_rate_limit(qs, client_ip)
 
+        # codex HIGH 複審 Round 11（key 漏 caller-specific online-stance
+        # 降級）：online-stance degrade 判斷也是跟這個 caller 的
+        # `client_ip` 有關、real-mode 執行實際上依賴的變數，必須在
+        # dedup key 算出來**之前**、對這個 caller 自己的 IP 先算一次
+        # （見 `_analyze_online_stance_force_offline_for_caller`／
+        # `_analyze_dedup_key` docstring 的完整說明），才能讓 key 精確
+        # 捕捉「這次請求實際上會拿到 online-stance 結果還是被 degrade」。
+        force_offline = _analyze_online_stance_force_offline_for_caller(qs, client_ip)
+        dedup_key = _analyze_dedup_key(
+            qtype=qtype, coin_key=coin_key, query=query, qs=qs, force_offline=force_offline,
+        )
+
         if qtype == QuestionType.COMPARISON:
             report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
                 dedup_key,
-                lambda: _do_comparison(qs, client_ip=client_ip, enforce_rate_limit=False),
+                lambda: _do_comparison(
+                    qs,
+                    client_ip=client_ip,
+                    enforce_rate_limit=False,
+                    online_stance_force_offline=force_offline,
+                ),
             )
             payload = {
                 "version": VERSION,
@@ -4080,7 +4221,12 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
         else:
             report, evidence, log = _dedup_analyze_call(
                 dedup_key,
-                lambda: _do_analyze(qs, client_ip=client_ip, enforce_rate_limit=False),
+                lambda: _do_analyze(
+                    qs,
+                    client_ip=client_ip,
+                    enforce_rate_limit=False,
+                    online_stance_force_offline=force_offline,
+                ),
             )
             payload = {
                 "version": VERSION,
