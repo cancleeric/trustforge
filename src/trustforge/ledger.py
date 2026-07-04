@@ -86,6 +86,14 @@ def _default_ledger_path() -> Path:
 # `_default_ledger_path()` 動態取得，不依賴這個 import 當下的快照值。
 DEFAULT_LEDGER_PATH = _default_ledger_path()
 
+# codex HIGH（/api/costs 序列化無界 ledger）：`Ledger.summary()` 的 `runs` 欄位過去是
+# `read_all()` 的完整結果，帳本無上限成長時會讓 SSR /status、/costs 與 JSON /api/costs
+# 三個消費端都序列化整份帳本（server 建巨大 JSON + 網路傳輸 + 前端保留全量陣列）。
+# 這裡把 `runs` 上限訂為最近 50 筆——剛好對齊 `_render_costs_page()` 既有的
+# `list(reversed(runs))[:50]` 顯示上限，讓帳本 ≤50 筆時輸出完全不變、帳本 >50 筆時
+# SSR/`/api/costs` 都只挑最近 50 筆（真實總筆數另外用 `run_count` 欄位提供）。
+SUMMARY_RECENT_RUNS_CAP = 50
+
 
 class Ledger(ABC):
     """成本帳本最小介面：append-only 寫入 + 讀出全部紀錄。"""
@@ -108,6 +116,12 @@ class Ledger(ABC):
         `/costs`、`/status` 顯示「Model｜輸入tokens｜輸出tokens｜單價｜成本」明細表。
         用 `.get(..., 0)` 防呆：舊紀錄（本欄位加入前寫入的 `calls[]`）沒有
         tokens_in/tokens_out 欄位時視為 0，不 raise、不影響既有 cost_usd 彙總。
+
+        codex HIGH（成本端點可擴展性）：`total_cost_usd`/`by_model`/`by_model_detail`
+        仍照舊彙總「全部」紀錄（有界統計值，不受帳本大小影響回應體積）；但 `runs`
+        欄位改成有界的 `run_count`（真實總筆數）+ 最近 `SUMMARY_RECENT_RUNS_CAP` 筆
+        （依原本寫入時間順序，最舊在前，跟 `read_all()` 回傳順序一致），不再回傳
+        無界的完整清單，避免帳本成長後拖垮序列化/傳輸/前端記憶體。
         """
         records = self.read_all()
         total = 0.0
@@ -138,7 +152,8 @@ class Ledger(ABC):
                 }
                 for m, d in by_model_detail.items()
             },
-            "runs": records,
+            "run_count": len(records),
+            "runs": records[-SUMMARY_RECENT_RUNS_CAP:],
         }
 
 

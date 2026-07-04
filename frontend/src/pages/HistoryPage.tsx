@@ -1,0 +1,115 @@
+import { lazy, Suspense, useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { getHistory } from '../lib/endpoints'
+import type { HistoryData } from '../lib/types'
+import { COIN_POOL } from '../lib/constants'
+import { ErrorState, LoadingState } from '../components/StatusStates'
+
+// recharts 體積大，比照 `TrustRadarChart` 慣例 code-split 成獨立 chunk。
+const TrustHistoryChart = lazy(() => import('../components/TrustHistoryChart'))
+
+const DAY_OPTIONS = [7, 30, 90] as const
+
+function paramsFromSearch(sp: URLSearchParams): { coin: string; days: number } {
+  const coin = sp.get('coin') || COIN_POOL[0]
+  const daysRaw = Number(sp.get('days'))
+  const days = DAY_OPTIONS.includes(daysRaw as (typeof DAY_OPTIONS)[number]) ? daysRaw : 30
+  return { coin, days }
+}
+
+export default function HistoryPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const { coin, days } = paramsFromSearch(searchParams)
+
+  const [data, setData] = useState<HistoryData | null>(null)
+  const [error, setError] = useState<{ code: string; message: string } | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    setError(null)
+    getHistory({ coin, days }, controller.signal).then((res) => {
+      if (controller.signal.aborted) return
+      setLoading(false)
+      if (res.ok) {
+        setData(res.data)
+        setError(null)
+      } else {
+        setData(null)
+        setError(res.error)
+      }
+    })
+    return () => {
+      controller.abort()
+    }
+  }, [coin, days])
+
+  return (
+    <main className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6">
+      <div>
+        <h1 className="text-lg font-semibold text-tf-text">歷史信任趨勢（PIT）</h1>
+        <p className="mt-1 text-xs text-tf-muted">
+          信任分隨時間變化的 point-in-time 序列，不是單點快照——排程每日寫入一筆。
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-tf-border bg-tf-card p-4">
+        <div>
+          <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="hist-coin">
+            幣種
+          </label>
+          <select
+            id="hist-coin"
+            value={coin}
+            onChange={(e) => setSearchParams({ coin: e.target.value, days: String(days) })}
+            className="rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
+          >
+            {COIN_POOL.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="hist-days">
+            區間
+          </label>
+          <select
+            id="hist-days"
+            value={days}
+            onChange={(e) => setSearchParams({ coin, days: e.target.value })}
+            className="rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
+          >
+            {DAY_OPTIONS.map((d) => (
+              <option key={d} value={d}>
+                近 {d} 天
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {loading && <LoadingState label={`${coin} 歷史資料載入中…`} />}
+      {!loading && error && <ErrorState code={error.code} message={error.message} />}
+      {!loading && !error && data && data.history.length === 0 && (
+        <div className="rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">
+          {coin} 歷史累積中——排程尚未寫入任何按日快照，稍後再回來看看。
+        </div>
+      )}
+      {!loading && !error && data && data.history.length > 0 && data.history.length < 3 && (
+        <div className="rounded-lg border border-tf-warn bg-[color-mix(in_srgb,#d9832a_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
+          目前僅累積 {data.history.length} 筆資料點，趨勢線尚不具代表性，持續累積中。
+        </div>
+      )}
+      {!loading && !error && data && data.history.length > 0 && (
+        <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+          <Suspense fallback={<LoadingState label="趨勢圖載入中…" />}>
+            <TrustHistoryChart history={data.history} />
+          </Suspense>
+        </div>
+      )}
+    </main>
+  )
+}

@@ -9,10 +9,17 @@
 import type {
   AnalyzeData,
   BasisItem,
+  CacheBackendStatus,
+  ComparisonAnalyzeData,
+  CostModelDetail,
+  CostsData,
+  LedgerRunRecord,
   CrossSourceSignal,
   DecisionState,
   Evidence,
+  FreshnessEntry,
   HealthData,
+  HistoryData,
   OverviewCoin,
   OverviewData,
   PriceProvenance,
@@ -20,7 +27,9 @@ import type {
   ReputationTraceEntry,
   Report,
   StancePair,
+  StatusData,
   TrustComponentsAggregate,
+  TrustHistoryEntry,
   TrustRadar,
   TrustRadarDimension,
 } from './types'
@@ -238,5 +247,144 @@ export function isAnalyzeData(value: unknown): value is AnalyzeData {
     isTrustRadar(value.trust_radar) &&
     isTrustComponentsAggregate(value.trust_components_aggregate) &&
     isPriceProvenance(value.price_provenance)
+  )
+}
+
+// `/api/analyze?type=comparison`：`report_a`/`report_b` 等全套欄位各驗一次，
+// 沿用同一批 `isReport`/`isEvidence`/`isTrustRadar`/
+// `isTrustComponentsAggregate`/`isPriceProvenance` guard——跟單幣
+// `isAnalyzeData` 是同一個 source of truth，不會分岔。
+export function isComparisonAnalyzeData(value: unknown): value is ComparisonAnalyzeData {
+  return (
+    isPlainObject(value) &&
+    typeof value.version === 'string' &&
+    isReport(value.report_a) &&
+    Array.isArray(value.evidence_a) &&
+    value.evidence_a.every(isEvidence) &&
+    isTrustRadar(value.trust_radar_a) &&
+    isTrustComponentsAggregate(value.trust_components_aggregate_a) &&
+    isPriceProvenance(value.price_provenance_a) &&
+    isReport(value.report_b) &&
+    Array.isArray(value.evidence_b) &&
+    value.evidence_b.every(isEvidence) &&
+    isTrustRadar(value.trust_radar_b) &&
+    isTrustComponentsAggregate(value.trust_components_aggregate_b) &&
+    isPriceProvenance(value.price_provenance_b)
+  )
+}
+
+// ── /api/status ──────────────────────────────────────────────────────────
+
+// `StatusPage` 讀 `entry.status`（三態分支判斷顏色）、`entry.source`/
+// `entry.coin`（直接渲染文字）、`entry.age_seconds`（`status!=="missing"`
+// 時直接算術/`.toFixed`）——status 必須是三個合法值之一，否則未知狀態會
+// 讓分支判斷 fallback 到非預期顏色但不至於白屏；但 age_seconds/fetched_at
+// 型別錯誤（如物件）會在算術/渲染時炸，故仍嚴格檢查。
+function isFreshnessEntry(value: unknown): value is FreshnessEntry {
+  return (
+    isPlainObject(value) &&
+    typeof value.source === 'string' &&
+    typeof value.coin === 'string' &&
+    (value.status === 'fresh' || value.status === 'stale' || value.status === 'missing') &&
+    (value.fetched_at === null || typeof value.fetched_at === 'number') &&
+    (value.age_seconds === null || typeof value.age_seconds === 'number')
+  )
+}
+
+function isCacheBackendStatus(value: unknown): value is CacheBackendStatus {
+  return (
+    isPlainObject(value) &&
+    typeof value.name === 'string' &&
+    typeof value.connected === 'boolean' &&
+    typeof value.primary_connected === 'boolean' &&
+    typeof value.active_backend === 'string' &&
+    typeof value.degraded === 'boolean'
+  )
+}
+
+export function isStatusData(value: unknown): value is StatusData {
+  if (!isPlainObject(value)) return false
+  if (
+    typeof value.version !== 'string' ||
+    typeof value.uptime_seconds !== 'number' ||
+    typeof value.bedrock_capable !== 'boolean' ||
+    typeof value.live_token_set !== 'boolean' ||
+    !isCacheBackendStatus(value.cache_backend)
+  ) {
+    return false
+  }
+  const freshness = value.freshness
+  return (
+    isPlainObject(freshness) &&
+    typeof freshness.fresh === 'number' &&
+    typeof freshness.stale === 'number' &&
+    typeof freshness.missing === 'number' &&
+    Array.isArray(freshness.entries) &&
+    freshness.entries.every(isFreshnessEntry)
+  )
+}
+
+// ── /api/costs ───────────────────────────────────────────────────────────
+
+function isCostModelDetail(value: unknown): value is CostModelDetail {
+  return (
+    isPlainObject(value) &&
+    typeof value.cost_usd === 'number' &&
+    typeof value.tokens_in === 'number' &&
+    typeof value.tokens_out === 'number'
+  )
+}
+
+// codex HIGH（成本端點可擴展性）修復後，後端 `/api/costs` 回有界摘要：
+// `run_count`（真實總筆數）+ 最近 N 筆 `runs`（後端 cap，目前 50）。`runs`
+// 現在是有界欄位，逐筆驗證欄位型別的成本可控，用來畫「最近 N 筆」明細表。
+function isLedgerRunRecord(value: unknown): value is LedgerRunRecord {
+  return (
+    isPlainObject(value) &&
+    typeof value.ts === 'string' &&
+    typeof value.total_cost_usd === 'number' &&
+    Array.isArray(value.calls) &&
+    (value.coin === undefined || typeof value.coin === 'string') &&
+    (value.question_type === undefined || typeof value.question_type === 'string') &&
+    (value.offline === undefined || typeof value.offline === 'boolean')
+  )
+}
+
+export function isCostsData(value: unknown): value is CostsData {
+  if (!isPlainObject(value)) return false
+  if (typeof value.total_cost_usd !== 'number') return false
+  if (typeof value.run_count !== 'number') return false
+  if (!isPlainObject(value.by_model)) return false
+  if (!Object.values(value.by_model).every((v) => typeof v === 'number')) return false
+  if (!isPlainObject(value.by_model_detail)) return false
+  if (!Object.values(value.by_model_detail).every(isCostModelDetail)) return false
+  if (!Array.isArray(value.runs)) return false
+  if (!value.runs.every(isLedgerRunRecord)) return false
+  return true
+}
+
+// ── /api/history ─────────────────────────────────────────────────────────
+
+function isTrustHistoryEntry(value: unknown): value is TrustHistoryEntry {
+  return (
+    isPlainObject(value) &&
+    typeof value.date === 'string' &&
+    typeof value.coin === 'string' &&
+    typeof value.trust_score === 'number' &&
+    typeof value.direction === 'string' &&
+    typeof value.calibrated_confidence === 'number' &&
+    isDecisionState(value.decision_state) &&
+    typeof value.generated_at === 'string' &&
+    (value.reputation_trace === undefined || isReputationTrace(value.reputation_trace))
+  )
+}
+
+export function isHistoryData(value: unknown): value is HistoryData {
+  return (
+    isPlainObject(value) &&
+    typeof value.coin === 'string' &&
+    typeof value.days === 'number' &&
+    Array.isArray(value.history) &&
+    value.history.every(isTrustHistoryEntry)
   )
 }
