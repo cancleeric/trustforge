@@ -18,11 +18,31 @@
 #      吞掉失敗、不可無條件宣稱成功）→ 斷言印出 distinct 的
 #      `ROLLBACK-FAILED` 狀態 + 具體手動復原指示、exit=97（非零），
 #      不是誤導性的「已回滾」訊息。
+#   10. 並行呼叫（codex 三次複審，HIGH）：host-wide `flock` 已被另一個
+#      cutover 持有 → 第二個呼叫在 Step 1 之前就被 reject，印出 distinct
+#      的「另一個 cutover 進行中」訊息、exit=98、完全不動 symlink/
+#      service file（連候選驗證都沒開始）。
+#   11. 鎖沒被持有時的正常單一呼叫（就是場景 5 happy path 本身）→
+#      證明鎖不影響正常流程；額外驗證腳本結束後鎖確實釋放（能被
+#      重新取得），不會卡死後續呼叫。
+#
+# 依賴：真的 `flock`（util-linux；Amazon Linux/大多數 Linux 預設就有）。
+# macOS 本機測試需要 `brew install flock`（discoteq/flock 的 fd 型
+# `flock -n 9` 語法跟 util-linux 相容，已驗證）；沒有就整份測試跳過
+# （印訊息到 stderr、exit 0，不是假裝測試通過）。
 #
 # 用法：bash deploy/test_cutover_switch.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
+
+if ! command -v flock >/dev/null 2>&1; then
+  echo "找不到 flock，跳過整份 deploy/test_cutover_switch.sh" >&2
+  echo "（cutover_switch.sh 的 host-wide 交易鎖需要真的 flock；" >&2
+  echo " macOS 可用: brew install flock；Amazon Linux 預設已有）" >&2
+  exit 0
+fi
+
 PASS=0
 FAIL=0
 
@@ -186,7 +206,7 @@ run_cutover() {
   # 額外的 MOCK_* 失敗注入環境變數透過 "$@" 傳進來（e.g. MOCK_NGINX_LIVE_FAIL_AT=1）
   set +e
   env PATH="$MOCKDIR:$PATH" MOCK_STATE_DIR="$STATE" \
-    TF_CUTOVER_ETC="$SANDBOX/etc" "$@" \
+    TF_CUTOVER_ETC="$SANDBOX/etc" TF_CUTOVER_LOCK="$STATE/tf-cutover.lock" "$@" \
     bash -c "$CMD_REACT" >"$STATE/last_run.log" 2>&1
   local ec=$?
   set -e
@@ -315,6 +335,51 @@ fi
 assert_grep_log "完成後驗證通過" "有印完成後驗證通過訊息"
 assert_eq "$(active_conf)" "react.conf" "happy path 後 live symlink 真的换到 react.conf"
 assert_eq "$(active_csp)" "react" "happy path 後 service file CSP_MODE 真的换到 react"
+
+echo "== 場景 10：並行呼叫 — 鎖已被持有 → reject，完全不做任何 mutation =="
+reset_sandbox
+LOCKFILE="$STATE/tf-cutover.lock"
+rm -f "$STATE/holder_ready"
+(
+  exec 9>"$LOCKFILE"
+  flock 9
+  : > "$STATE/holder_ready"
+  sleep 5
+) &
+HOLDER_PID=$!
+for _ in $(seq 1 50); do
+  [ -f "$STATE/holder_ready" ] && break
+  sleep 0.1
+done
+if [ ! -f "$STATE/holder_ready" ]; then
+  fail "測試設置失敗：背景 holder 沒有在時限內拿到鎖（測試環境問題，非受測程式問題）"
+fi
+if run_cutover; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "98" "鎖被持有時 reject，exit=98（跟一般失敗 exit=1、ROLLBACK-FAILED exit=97 都不同）"
+assert_grep_log "另一個 cutover 進行中" "有印 distinct 的『另一個 cutover 進行中』訊息"
+assert_eq "$(active_conf)" "legacy.conf" "鎖被持有時完全沒動 live symlink（連候選驗證都沒開始）"
+assert_eq "$(active_csp)" "legacy" "鎖被持有時完全沒動 service file CSP_MODE"
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+rm -f "$LOCKFILE" "$STATE/holder_ready"
+
+echo "== 場景 11：沒有並行衝突時正常取得鎖、執行、exit 0；結束後鎖確實釋放（不卡死下一次呼叫）=="
+reset_sandbox
+if run_cutover; then
+  pass "沒有並行衝突時正常取得鎖、執行、exit 0"
+else
+  fail "沒有並行衝突時應該正常結束"
+  cat "$STATE/last_run.log"
+fi
+if ( exec 9>"$STATE/tf-cutover.lock"; flock -n 9 ); then
+  pass "run_cutover 結束後鎖確實釋放（能被重新取得，不會卡死下一次呼叫）"
+else
+  fail "run_cutover 結束後鎖沒有釋放（會卡死下一次呼叫，是嚴重的 bug）"
+fi
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE"
 

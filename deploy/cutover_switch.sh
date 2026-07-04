@@ -33,6 +33,14 @@
 #      「已回滾...驗證通過」；只要有任何一步失敗或驗證不過，一律印
 #      distinct 的 `ROLLBACK-FAILED` 狀態、附上具體手動復原指令、非零
 #      結束——絕不假裝救回來了。
+#   5. **無交易鎖時，兩個並行呼叫會 race、互相破壞 symlink/service 狀態**
+#      （codex 三次複審，HIGH）：在 Step 1 候選驗證/記錄切換前狀態**之前**，
+#      先搶一個 host-wide 的 `flock -n`（固定 lock 檔，預設
+#      `/var/lock/tf-cutover.lock`），一路持有到腳本結束（成功收尾或
+#      rollback 完成）才釋放（靠 fd 隨 process 結束自動釋放，不提前
+#      關閉）。拿不到鎖（代表已經有另一個 cutover 在跑）→ 印 distinct
+#      的「另一個 cutover 進行中」訊息、exit 98（跟一般失敗 exit 1、
+#      ROLLBACK-FAILED exit 97 都不同），**完全不做任何 mutation**就中止。
 #
 # 不做：不動 TLS 憑證（見 deploy/TLS-SETUP.md，憑證跟站台切換相互獨立）、
 # 不動 SSR 是否移除（P3「一週觀察期」後才移除，屬另一個獨立、需另行確認
@@ -79,6 +87,19 @@ ETC=\"\${TF_CUTOVER_ETC:-/etc}\"
 CANDIDATE=\"\$ETC/nginx/trustforge-sites/${MODE}.conf\"
 LIVE_LINK=\"\$ETC/nginx/conf.d/trustforge.conf\"
 SERVICE_FILE=\"\$ETC/systemd/system/trustforge.service\"
+
+# ---- Step 0：host-wide 交易鎖（codex 三次複審，HIGH：沒有鎖，兩個並行
+#      cutover 呼叫會 race、互相破壞 symlink/service 狀態）——在候選驗證
+#      /記錄切換前狀態**之前**先搶鎖，一路持有到腳本結束（成功收尾或
+#      rollback 完成）才靠 process 結束自動釋放 fd。拿不到鎖就直接中止，
+#      不執行任何後續 mutation。預設路徑 \${TF_CUTOVER_LOCK:-/var/lock/tf-cutover.lock}
+#      （生產行為不變）；沙箱測試可覆寫成 sandbox 內路徑 ----
+LOCKFILE=\"\${TF_CUTOVER_LOCK:-/var/lock/tf-cutover.lock}\"
+exec 9>\"\$LOCKFILE\"
+if ! flock -n 9; then
+  echo \"❌ [cutover] 另一個 cutover 進行中（拿不到 host-wide lock：\${LOCKFILE}），本次不做任何變更，直接中止。\" >&2
+  exit 98
+fi
 
 # ---- Step 1：候選設定驗證，完全不動 live symlink ----
 VALIDATE_CONF=\"/tmp/tf-cutover-validate-\$\$.conf\"
