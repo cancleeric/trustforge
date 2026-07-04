@@ -116,7 +116,10 @@ def test_lambda_analyze_json_success_unaffected():
 
     assert resp["statusCode"] == 200
     assert resp["headers"]["Content-Type"] == "application/json; charset=utf-8"
-    assert resp["headers"]["Content-Security-Policy"] == lambda_handler._CSP
+    # 前後端分離 Phase 3（task #28）：CSP 改由 `web.CSP_MODE` 切換，預設
+    # "legacy"（byte-identical 沿用舊 CSP），舊測試斷言的常數改讀
+    # `web._CSP_LEGACY`（cutover 前語意不變：JSON 成功路徑 CSP 不變）。
+    assert resp["headers"]["Content-Security-Policy"] == web._CSP_LEGACY
     payload = json.loads(resp["body"])
     assert payload["report"]["coin"] == "BTC"
     assert payload["evidence"]

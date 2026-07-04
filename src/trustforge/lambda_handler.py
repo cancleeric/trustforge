@@ -16,17 +16,25 @@ from urllib.parse import urlencode
 
 from . import web
 
-_CSP = "default-src 'none'; style-src 'unsafe-inline'"
-
 
 def _resp(code, body, ctype):
+    # 前後端分離 Phase 3（task #28）：CSP 切換旗標與 web.py 共用同一顆
+    # `TRUSTFORGE_CSP_MODE`（預設 "legacy"，byte-identical 沿用既有
+    # zero-JS 嚴格 CSP），"react" 才套用 harper 新指令集 + clickjacking/
+    # referrer 防護，見 `web.py` CSP_MODE/`_CSP_LEGACY`/`_CSP_REACT` 說明。
+    headers = {
+        "Content-Type": ctype,
+        "X-Content-Type-Options": "nosniff",
+    }
+    if web.CSP_MODE == "react":
+        headers["Content-Security-Policy"] = web._CSP_REACT
+        headers["X-Frame-Options"] = "DENY"
+        headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    else:
+        headers["Content-Security-Policy"] = web._CSP_LEGACY
     return {
         "statusCode": code,
-        "headers": {
-            "Content-Type": ctype,
-            "Content-Security-Policy": _CSP,
-            "X-Content-Type-Options": "nosniff",
-        },
+        "headers": headers,
         "body": body,
     }
 

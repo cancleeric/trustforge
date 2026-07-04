@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from io import BytesIO
 from unittest.mock import MagicMock
@@ -30,6 +31,7 @@ from trustforge.ingestion.cache import (
     cache_set_if_newer,
     trust_snapshot_history_key,
 )
+from trustforge import ledger as ledger_module
 from trustforge.ledger import JsonlLedger
 from trustforge.schema import COIN_POOL
 
@@ -607,6 +609,41 @@ def test_api_costs_matches_ledger_summary(json_cache_backend, monkeypatch, tmp_p
     data = parsed["data"]
     assert data["total_cost_usd"] == pytest.approx(0.0042)
     assert "by_model" in data and "runs" in data
+    assert data["run_count"] == 1
+
+
+def test_api_costs_large_ledger_response_is_bounded_not_full_scan(
+    json_cache_backend, monkeypatch, tmp_path
+):
+    """codex 複審 HIGH（成本端點可擴展性）：帳本無論多大，`/api/costs` 回應都
+    不能序列化整份 `runs`——`run_count` 反映真實總筆數，`runs` 只回最近
+    `ledger.SUMMARY_RECENT_RUNS_CAP`（50）筆，不隨帳本大小線性增長。"""
+    monkeypatch.setenv("TRUSTFORGE_COST_LEDGER_PATH", str(tmp_path / "big_ledger.jsonl"))
+    ledger = JsonlLedger()
+    total_records = 500
+    for i in range(total_records):
+        ledger.append({
+            "run_id": f"r{i}",
+            "ts": f"2026-01-01T00:{i % 60:02d}:00+00:00",
+            "coin": "BTC",
+            "question_type": "multi_source",
+            "offline": False,
+            "total_cost_usd": 0.001,
+            "calls": [{"model": "m", "cost_usd": 0.001, "tokens_in": 1, "tokens_out": 1}],
+        })
+    monkeypatch.setattr(web, "get_ledger", lambda: ledger)
+
+    code, body = web._handle_api_costs(client_ip="10.0.2.2")
+
+    assert code == 200
+    parsed = _envelope(body)
+    data = parsed["data"]
+    assert data["run_count"] == total_records
+    assert len(data["runs"]) == ledger_module.SUMMARY_RECENT_RUNS_CAP
+    assert data["total_cost_usd"] == pytest.approx(total_records * 0.001)
+    # 回應體積跟帳本大小脫鉤：body 長度不會隨 500 筆記錄線性膨脹到能塞下全部
+    # runs（每筆記錄序列化後遠大於這個門檻，能通過代表沒有整份塞進去）。
+    assert len(body) < 20_000
 
 
 def test_api_costs_ledger_read_failure_returns_502_no_leak(monkeypatch):
@@ -728,7 +765,16 @@ def test_api_overview_empty_when_no_snapshots_written(json_cache_backend):
 # ---------------------------------------------------------------------------
 
 def test_api_history_returns_sorted_daily_series(json_cache_backend):
-    for day, score in (("2026-06-29", 0.5), ("2026-06-30", 0.6)):
+    # 用「相對今天」的日期（而非寫死的曆法日期）當測資：`_handle_api_history()`
+    # 沒有（也不該有，endpoint 邏輯本輪不能動）`end_date` 覆寫參數，`days=5` 窗
+    # 一律是相對呼叫當下 UTC 今天往回算。寫死曆法日期（如 2026-06-29）只在
+    # 特定時間窗內落在「近 5 天」內，時間一過測資就跑出窗外變成 time bomb
+    # （codex 複審：`assert ('2026-06-29' in ['2026-06-30'])` 失敗）。改成
+    # `today - N 天`，不管哪天執行都保證落在 5 天窗內。
+    today = datetime.now(timezone.utc).date()
+    day1 = (today - timedelta(days=2)).isoformat()
+    day2 = (today - timedelta(days=1)).isoformat()
+    for day, score in ((day1, 0.5), (day2, 0.6)):
         snap = {"coin": "ETH", "trust_score": score, "direction": "中性",
                 "calibrated_confidence": score, "decision_state": "normal",
                 "generated_at": f"{day}T00:00:00Z"}
@@ -748,7 +794,7 @@ def test_api_history_returns_sorted_daily_series(json_cache_backend):
     assert data["days"] == 5
     dates = [h["date"] for h in data["history"]]
     assert dates == sorted(dates)
-    assert "2026-06-29" in dates and "2026-06-30" in dates
+    assert day1 in dates and day2 in dates
 
 
 def test_api_history_rejects_bad_coin(json_cache_backend):

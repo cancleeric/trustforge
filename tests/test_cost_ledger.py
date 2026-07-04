@@ -18,6 +18,7 @@ from trustforge.agent.orchestrator import run_agent_pipeline
 from trustforge.bedrock import BedrockClient, BedrockConfig, LLMResult
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
+from trustforge import ledger as ledger_module
 from trustforge.ledger import (
     PRICING,
     DynamoDBLedger,
@@ -165,6 +166,46 @@ def test_jsonl_ledger_summary_aggregates_total_and_by_model(tmp_path):
     assert summary["by_model"]["haiku"] == pytest.approx(0.002)
     assert summary["by_model"]["sonnet"] == pytest.approx(0.002)
     assert len(summary["runs"]) == 2
+    assert summary["run_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# codex 複審 HIGH（成本端點可擴展性）：`summary()["runs"]` 改成有界（最近
+# `SUMMARY_RECENT_RUNS_CAP` 筆），真實總筆數另外用 `run_count` 提供。
+# ---------------------------------------------------------------------------
+
+def test_jsonl_ledger_summary_runs_capped_and_run_count_reflects_true_total(tmp_path):
+    ledger = JsonlLedger(tmp_path / "cost_ledger.jsonl")
+    cap = ledger_module.SUMMARY_RECENT_RUNS_CAP
+    total_records = cap + 20
+    for i in range(total_records):
+        ledger.append({
+            "run_id": f"r{i}", "ts": f"t{i}", "coin": "BTC",
+            "total_cost_usd": 0.001, "calls": [{"model": "m", "cost_usd": 0.001}],
+        })
+    summary = ledger.summary()
+    assert summary["run_count"] == total_records
+    assert len(summary["runs"]) == cap
+    # 保留最近寫入的那批（依寫入順序，最舊在前），不是隨機截斷。
+    assert summary["runs"][0]["run_id"] == f"r{total_records - cap}"
+    assert summary["runs"][-1]["run_id"] == f"r{total_records - 1}"
+    # 有界統計值（total/by_model）仍照全部紀錄彙總，不受 runs 截斷影響。
+    assert summary["total_cost_usd"] == pytest.approx(total_records * 0.001)
+
+
+def test_jsonl_ledger_summary_runs_not_capped_when_at_or_below_cap(tmp_path):
+    """帳本筆數 <= cap 時，`runs` 就是全部紀錄——確保小帳本輸出跟修復前一致。"""
+    ledger = JsonlLedger(tmp_path / "cost_ledger.jsonl")
+    cap = ledger_module.SUMMARY_RECENT_RUNS_CAP
+    for i in range(cap):
+        ledger.append({
+            "run_id": f"r{i}", "ts": f"t{i}", "coin": "BTC",
+            "total_cost_usd": 0.001, "calls": [{"model": "m", "cost_usd": 0.001}],
+        })
+    summary = ledger.summary()
+    assert summary["run_count"] == cap
+    assert len(summary["runs"]) == cap
+    assert summary["runs"][0]["run_id"] == "r0"
 
 
 # ---------------------------------------------------------------------------
