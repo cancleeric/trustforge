@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from .agent.orchestrator import aggregate_trust_by_kind
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
+from .budget_guard import online_stance_requested, warn_if_bedrock_model_unpriced
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
@@ -51,6 +52,11 @@ except Exception:
 
 PORT = int(os.getenv("PORT", "8080"))
 HAS_BEDROCK = bool(os.getenv("BEDROCK_MODEL_ID"))
+# codex HIGH 追加（unpriced model 破壞 cap）：啟動期就檢查 BEDROCK_MODEL_ID
+# 是否已在計價表登記，未登記只記警告 log（不 crash）——實際 fail-closed
+# 降級離線由 pipeline.run() 每次請求各自判斷，這裡只是讓維運及早在啟動
+# log 發現設定錯誤，不必等第一個公開請求才發現整天都在離線。
+warn_if_bedrock_model_unpriced()
 LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
 # 累計花費超過此門檻（USD）→ /costs 頁面卡片轉紅告警。未設定則不告警。
 COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
@@ -152,6 +158,20 @@ _STATUS_RATE_WINDOW = 30
 _STATUS_RATE_MAX = 10
 _status_rate_lock = threading.Lock()
 _status_rate_buckets: dict[str, list[float]] = {}
+
+# #9 online-stance 預算配額硬化：online-stance（`TRUSTFORGE_ONLINE_STANCE` 開
+# 啟時，讓 real-off「真資料·$0」檔位的 stance 判斷也打真 Bedrock）專用 per-IP
+# 限流，獨立於上面 real-off 的寬鬆 bucket——real-off 本身免費、門檻寬鬆是對的，
+# 但一旦疊加 online-stance，同一個 IP 就能間接燒 Bedrock stance 呼叫，需要單獨
+# 一組更緊的門檻。刻意比 real-off 緊很多、比 live 寬（stance 呼叫比敘事生成
+# 便宜很多），門檻例子：每 IP 每小時 20 次。超量時**不 raise/429**——見
+# `_do_analyze`/`_do_comparison` 呼叫端，改成把該次請求的 `force_stance_offline`
+# 設 True，誠實 degrade 回離線 stance，而不是讓整個分析請求失敗（#24 不造假：
+# 照常回傳結果、只是清楚標明本次未用線上深度分析）。
+_ONLINE_STANCE_RATE_WINDOW = 3600
+_ONLINE_STANCE_RATE_MAX = 20
+_online_stance_rate_lock = threading.Lock()
+_online_stance_rate_buckets: dict[str, list[float]] = {}
 
 # `/status` 頁面級 TTL 快取（跨 IP 共用，非安全機制，純降低重算頻率）：資料
 # 鮮度矩陣要逐 (source, coin) 讀 cache backend，組合數量多，DynamoDB backend
@@ -533,6 +553,48 @@ def _check_status_rate_limit(ip: str) -> None:
             raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
         ts.append(now)
         _status_rate_buckets[ip] = ts
+
+
+def _check_online_stance_rate_limit(ip: str) -> None:
+    """online-stance 專用 per-IP 限流（獨立 bucket，見模組頂部
+    `_ONLINE_STANCE_RATE_*` 常數）：IP 在滑動視窗內超過 `_ONLINE_STANCE_RATE_MAX`
+    次請求 → raise `TooManyRequests`。
+
+    只在 `online_stance_requested()` 為真（`TRUSTFORGE_ONLINE_STANCE` 開啟）時
+    由呼叫端（`_do_analyze`/`_do_comparison`）呼叫；呼叫端會 catch 這個例外並
+    轉成 `force_stance_offline=True` 誠實 degrade，而不是讓例外往外傳播成
+    HTTP 429（#9 online-stance 預算配額硬化 item 4：度耗盡/限流時分析仍要
+    正常回傳，只是誠實標明本次未用線上深度分析，不是報錯）。"""
+    now = time.time()
+    with _online_stance_rate_lock:
+        _evict_stale_rate_buckets(
+            _online_stance_rate_buckets, _ONLINE_STANCE_RATE_WINDOW, now,
+            _RATE_LIMIT_MAX_TRACKED_IPS,
+        )
+        ts = [
+            t for t in _online_stance_rate_buckets.get(ip, [])
+            if now - t < _ONLINE_STANCE_RATE_WINDOW
+        ]
+        if len(ts) >= _ONLINE_STANCE_RATE_MAX:
+            raise TooManyRequests(f"請求過於頻繁，請 {_ONLINE_STANCE_RATE_WINDOW} 秒後再試")
+        ts.append(now)
+        _online_stance_rate_buckets[ip] = ts
+
+
+def _online_stance_force_offline(client_ip: str) -> bool:
+    """供 `_do_analyze`/`_do_comparison` 呼叫：online-stance 未啟用時直接回
+    `False`（零開銷、行為與加入本護欄前逐字相同）；已啟用時跑 per-IP 限流，
+    超量回 `True`（呼叫端應把這次請求的 `force_stance_offline` 設 True，誠實
+    degrade 回離線 stance），未超量回 `False`。刻意用回傳值而非例外，讓呼叫端
+    不需要額外包一層 try/except（也避免跟既有 `TooManyRequests` → 429 的錯誤
+    路徑混淆——這個護欄的語意是「degrade」不是「拒絕」）。"""
+    if not client_ip or not online_stance_requested():
+        return False
+    try:
+        _check_online_stance_rate_limit(client_ip)
+    except TooManyRequests:
+        return True
+    return False
 
 
 # 世界第一重寫 Phase 2：預設查詢文案（表單 textarea / _do_analyze・
@@ -2985,7 +3047,20 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
         raise ValueError(f"幣種須為以下其中之一：{'、'.join(COIN_POOL)}")
 
     if real:
-        report, evidence, log = run(coin, query, qtype, data_mode="live", llm_mode="off")
+        # #9 online-stance 預算配額硬化：online-stance 未啟用時
+        # `_online_stance_force_offline` 直接回 False（零開銷）；已啟用且
+        # 本 IP 超過 online-stance 專用限流時，誠實 degrade 這次請求的
+        # stance 判斷回離線，而不是讓整個分析失敗（見該函式 docstring）。
+        # 只在真的要 degrade（True）時才多帶這個 kwarg 呼叫 `run()`——刻意
+        # 不無條件帶 `force_stance_offline=False`，讓「未啟用 online-stance」
+        # 這條（現行測試全部涵蓋的）路徑對 `run()` 的呼叫方式逐字不變，不會
+        # 因為既有測試 monkeypatch 的窄簽名 fake_run（無此參數）而炸掉。
+        _extra: dict = {}
+        if _online_stance_force_offline(client_ip):
+            _extra["force_stance_offline"] = True
+        report, evidence, log = run(
+            coin, query, qtype, data_mode="live", llm_mode="off", **_extra,
+        )
     else:
         report, evidence, log = run(coin, query, qtype, offline=not live)
     # 成本會計階段3：只有 real/live（data_mode 最終落在 "live"，真的透過
@@ -3036,8 +3111,14 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         )
     coin_a, coin_b = pair
     if real:
+        # #9 online-stance 預算配額硬化：見 `_do_analyze` 同名區塊註解，
+        # comparison 兩幣共用同一次請求的限流判定/degrade 決定；同樣只在
+        # 真的要 degrade 時才多帶 `force_stance_offline` kwarg。
+        _extra: dict = {}
+        if _online_stance_force_offline(client_ip):
+            _extra["force_stance_offline"] = True
         report_a, evidence_a, report_b, evidence_b, log = run_comparison(
-            coin_a, coin_b, query, data_mode="live", llm_mode="off"
+            coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
         )
     else:
         report_a, evidence_a, report_b, evidence_b, log = run_comparison(

@@ -809,7 +809,7 @@ def _doc(id, kind, ts=1000.0):
 def test_run_agent_pipeline_offline_appends_zero_cost_run(monkeypatch):
     """離線 pipeline：ledger 收到一筆 offline=True、total_cost_usd=0 的 run 記錄。"""
     captured = []
-    monkeypatch.setattr(orch_mod, "append_run", lambda record, ledger=None: captured.append(record))
+    monkeypatch.setattr(orch_mod, "append_run", lambda record, ledger=None: (captured.append(record), True)[1])
 
     docs = [_doc("p1", "price"), _doc("n1", "news")]
     client = BedrockClient(offline=True)
@@ -845,7 +845,7 @@ def test_run_agent_pipeline_online_ledger_total_matches_log_sum(monkeypatch):
     monkeypatch.setattr(client, "complete", _fake_complete)
 
     captured = []
-    monkeypatch.setattr(orch_mod, "append_run", lambda record, ledger=None: captured.append(record))
+    monkeypatch.setattr(orch_mod, "append_run", lambda record, ledger=None: (captured.append(record), True)[1])
 
     docs = [_doc("p1", "price"), _doc("n1", "news")]
     log = ExecutionLog(now_fn=lambda: 1000.0)
@@ -882,7 +882,7 @@ def test_comparison_shared_log_does_not_double_count_ledger_cost(monkeypatch):
     monkeypatch.setattr(client_b, "complete", _fake_complete)
 
     captured: list[dict] = []
-    monkeypatch.setattr(orch_mod, "append_run", lambda record, ledger=None: captured.append(record))
+    monkeypatch.setattr(orch_mod, "append_run", lambda record, ledger=None: (captured.append(record), True)[1])
 
     docs = [_doc("p1", "price"), _doc("n1", "news")]
     log = ExecutionLog(now_fn=lambda: 1000.0)  # 共用同一個 log，模擬 comparison 兩輪

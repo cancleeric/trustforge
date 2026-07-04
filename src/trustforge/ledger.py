@@ -425,7 +425,7 @@ def get_ledger() -> Ledger:
     return JsonlLedger()
 
 
-def append_run(record: dict[str, Any], ledger: Ledger | None = None) -> None:
+def append_run(record: dict[str, Any], ledger: Ledger | None = None) -> bool:
     """寫入一筆 run 記錄；`ledger` 未提供時用 `get_ledger()`。
 
     帳本是分析 pipeline 的旁路（side-channel）：任何 backend 失敗（如
@@ -442,6 +442,16 @@ def append_run(record: dict[str, Any], ledger: Ledger | None = None) -> None:
     backend 內部各自用 `ts+coin` 衍生出同一個 id 而互相覆蓋，也讓
     `DynamoDBLedger.read_all()` 合併 DynamoDB + fallback 時能正確去重、
     不會跟其他幣同秒的記錄相撞。
+
+    codex HIGH 追加（記帳完整性）：回傳 `bool`——`True` 表示這筆記錄確實
+    持久化成功（primary 或 fallback 任一成功即算），`False` 表示 primary
+    與 fallback 都失敗（真的沒記進帳本）。呼叫端
+    （`agent.orchestrator.run_agent_pipeline()`）用這個回傳值判斷：真的
+    花掉、但沒記成功的成本不能被當作「沒發生」，需另行記到
+    `budget_guard.record_unledgered_spend()`，讓每日 cap 的比較仍算得到
+    這筆花費，不會被「帳本沒記錄」繞過。**仍然不往上拋例外**——只是把
+    「有沒有真的寫進去」用回傳值誠實回報，呼叫端要不要處理是呼叫端的事，
+    帳本壞了本身依然不中斷 pipeline。
     """
     if not record.get("run_id"):
         record["run_id"] = uuid.uuid4().hex
@@ -449,15 +459,17 @@ def append_run(record: dict[str, Any], ledger: Ledger | None = None) -> None:
     target = ledger if ledger is not None else get_ledger()
     try:
         target.append(record)
-        return
+        return True
     except Exception as exc:
         print(f"[ledger] WARNING: append 失敗（backend={type(target).__name__}）：{exc}",
               file=sys.stderr)
 
     if isinstance(target, JsonlLedger):
-        return  # 同一顆 JsonlLedger 剛失敗，換個新實例打同路徑必再失敗，不重試
+        return False  # 同一顆 JsonlLedger 剛失敗，換個新實例打同路徑必再失敗，判定總失敗
 
     try:
         JsonlLedger().append(record)
+        return True
     except Exception as exc:
         print(f"[ledger] WARNING: fallback JsonlLedger append 仍失敗：{exc}", file=sys.stderr)
+        return False
