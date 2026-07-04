@@ -3353,9 +3353,34 @@ class _AnalyzeDedupTimeout(Exception):
     （仍受 #9 護欄與既有限流保護）。"""
 
 
+def _analyze_effective_mode(qs: dict) -> str:
+    """算出一次請求**實際會生效**的單一分析檔位：`"live"` / `"real"` /
+    `"sample"`。
+
+    codex HIGH 複審（key 構造正確 canonicalization，收斂前幾輪
+    token/query 糾結，見 `_analyze_dedup_key` docstring 的完整問題背景）：
+    這裡刻意重用跟 `_parse_live`/`_parse_real`（`_do_analyze`/
+    `_do_comparison` 實際呼叫、決定 `pipeline.run` 的 `data_mode`/
+    `llm_mode`/`offline` 的那組函式）**完全相同**的判斷邏輯——只是換成
+    無副作用、不觸發限流的純函式版本（`_is_live_request`/
+    `_is_sample_request`），跟 `_mode_extra_params()` 算自我連結參數用的
+    是同一套（見該函式 docstring），確保「這裡算出來的 mode」跟「pipeline
+    實際執行的 mode」永遠是同一個 source of truth，不會分岔。
+
+    live 優先於 sample，sample 優先於 real（預設檔位）——跟
+    `_is_sample_request`/`_is_real_request` 的優先序完全一致。
+    """
+    live = _is_live_request(qs)
+    if live:
+        return "live"
+    if _is_sample_request(qs, live):
+        return "sample"
+    return "real"
+
+
 def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: dict) -> str:
     """把一次 `/api/analyze` 請求正規化成 in-flight dedup / 短期結果快取的
-    key：`(type, coin[,coin2], query, sample/live/real/token)`。
+    key：`(type, coin[,coin2], query, effective_mode)`。
 
     `coin_key`：呼叫端（`_handle_api_analyze`）已完成正規化＋白名單驗證的
     幣種鍵——單幣是已 `.upper()` 過的 `coin_raw`；comparison 是
@@ -3387,61 +3412,71 @@ def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: di
     查詢字大小寫不影響語意，但英文查詢字大小寫可能承載使用者刻意的
     語意差異，保守不動。
 
-    `sample`/`live`/`real`/`token`：直接帶原始 qs 值，**刻意不 strip**
-    （codex 複審：token 正規化）。這四者合起來決定 `_parse_live`/
-    `_parse_real`（進而 `_do_analyze`/`_do_comparison` 呼叫
-    `pipeline.run` 時的 `data_mode`/`llm_mode`/`offline`）最終落在離線
-    示範沙盒（`sample=1`，固定樣本資料）、「真資料·$0」（預設，即時
-    連接器）、或真 Bedrock（`live=1&token=`）哪一檔——同一
-    (type,coin,query) 但這四者不同，資料來源/代價/結果都不同，必須各自
-    獨立 key：
-      - 漏帶 `sample` 會讓「離線示範固定樣本」跟「預設真連接器即時資料」
-        誤判成同一把 key，讓其中一種請求吃到另一種資料來源的快取結果；
-      - 漏帶 `live`/`real`/`token` 會把「免費離線/真資料請求」跟「已通過
-        token 驗證的真 Bedrock 請求」誤判成同一把（讓已花錢的真結果被
-        免費請求偷用），或讓兩個都合法的真請求彼此漏 dedup。
-      - `token` 不能 strip：`_is_live_request()` 用 `hmac.compare_digest`
-        對**原始、未 strip** 的 `qs.get("token", [""])[0]` 做逐位元組
-        比對——`token=<TOKEN>` 跟 `token=<TOKEN>%20`（尾端多一個空白）
-        的實際授權結果不同（後者 hmac 比對失敗、回退成 real 檔位，不是
-        真 Bedrock）。若 key 對 token 做 strip，這兩個「授權結果其實不同」
-        的請求會被誤判成同一把 key、共用同一份快取結果——等於讓授權
-        失敗的請求白吃已通過驗證的真 Bedrock 結果，或反過來讓合法
-        token 請求被腰斬成免費檔位的結果。key 裡的每一段都必須跟
-        `_is_live_request`/`_is_sample_request`/`_is_real_request` 實際
-        讀取、比對的位元組完全一致，才能保證「key 相同 ⇒ 實際生效的
-        檔位/授權結果也相同」；`sample`/`live`/`real` 同理不 strip，
-        避免同樣的「key 正規化跟實際判斷不一致」問題（如 `live=1 `
-        尾端多空白，`_is_live_request` 精確比對 `"1"` 會判 False，但
-        strip 後 key 卻會跟 `live=1` 撞成同一把）。
+    `effective_mode`（codex HIGH 複審：key 構造正確 canonicalization，
+    收斂前幾輪 token/query 糾結）：**不再**直接把 `sample`/`live`/`real`/
+    `token` 四個原始 qs 值塞進 key，改用 `_analyze_effective_mode(qs)`
+    算出的單一 `"live"`/`"real"`/`"sample"` 字串。
 
-    序列化格式（codex HIGH 複審：key delimiter 注入跨 mode 碰撞）：
-    **不用** `"\x1f".join(...)` 這種固定分隔字元串接——因為每一段都是
-    user 可控的原始輸入（`query`/`token` 尤其可含任意位元組），user 若
-    直接送出含 `\x1f` 位元組的 query（例如 `q=x%1F1`），就能讓
-    `(qtype, coin, "x\x1f1", "", "", "", "")` 這組欄位串接出跟
-    `(qtype, coin, "x", "1", "", "", "")`（也就是另一個「query=x、
-    sample=1」的合法請求）一模一樣的字串——兩者用不同分隔位置切出來的
-    欄位不同，但因為分隔字元本身可以被 user 輸入偽造，串接後的**位元組
-    序列**卻可能相同，導致完全不同 mode（有沒有 `sample=1`，也就是
-    離線示範樣本 vs 預設即時真連接器資料）的兩個請求互相碰撞、共用同一
-    把 in-flight/快取 entry——其中一個請求會拿到另一個 mode 的資料源/
-    溯源結果，且該跑的那次計算被錯誤地抑制掉。
+    先前版本的根本問題：這四個原始欄位裡，有些其實會被**忽略**——
+    `live=1`（且 token 驗證通過）生效時，`sample`/`real` 完全不影響
+    `_do_analyze`/`_do_comparison` 實際呼叫 `pipeline.run` 的方式（live
+    優先，見 `_is_sample_request`/`_is_real_request` 的 `if live: return
+    False`）；`real` 這個 query 參數本身也從來不被 `_is_real_request`
+    讀取（它是「預設檔位」的向後相容顯式寫法，见該函式 docstring）。但
+    先前的 key 卻原封不動把這些「會被忽略／不影響實際執行」的原始值也
+    塞進 key——後果是：
+      - `live=1&token=<TOKEN>&sample=1` 跟 `live=1&token=<TOKEN>&sample=2`
+        （或任何不同的 `sample`/`real` 原始值）**實際執行完全相同**
+        （都是同一次真 Bedrock 呼叫），但因為原始 `sample` 字串不同，
+        舊 key 判成不同 entry、各自獨立 `compute()`——等於讓使用者只要
+        任意變動一個「反正會被忽略」的參數，就能繞過 dedup、重複觸發
+        真 Bedrock 呼叫（重複花費，正是 #51 要防的事）。
+      - real 檔位下同理：`real=1` 跟不帶 `real` 參數（兩者都落在「預設
+        真資料·$0」檔位，`_is_real_request` 根本不讀 `real` 這個 key）
+        實際執行完全相同，舊 key 卻因為原始 `real` 字串不同判成不同
+        entry，讓語意相同的請求需要各自 compute()，多做不必要的重複
+        真連接器呼叫（雖然免費，但仍是「沒 dedup 到」，違反 dedup 的
+        設計目的）。
 
-    改用 `json.dumps(...)`（`separators=(",", ":")`，緊湊、無空白）序列化
-    成一個有序 list：JSON 字串序列化會對字串內容裡的雙引號、反斜線、
-    控制字元（含 `\x1f`）做逃逸，欄位之間的分隔（逗號）只會出現在
-    字串**引號之外**——user 輸入的原始位元組不管含什麼字元，都只能
-    出現在自己那個被逃逸/包住的 JSON 字串值裡，不可能偽造出跟別的
-    欄位邊界重疊的位元組序列，因此不同語意（不同 query/coin/token/
-    sample/live/real 組合）的請求不可能被序列化碰撞成同一把 key。
+    修法：key 只保留**跟實際執行結果真正相關**的單一 canonical 欄位
+    `effective_mode`——用跟 `_do_analyze`/`_do_comparison` 呼叫
+    `pipeline.run` 時**完全相同**的判斷邏輯（`_is_live_request`/
+    `_is_sample_request`，見 `_analyze_effective_mode`）算出來，確保
+    「key 相同 ⟺ 實際執行的 data_mode/llm_mode/offline 也相同」這個
+    不變量精確成立，不多不少：
+      - `live=1`（token 驗證通過）不管 `sample`/`real` 帶什麼原始值，
+        `effective_mode` 都是 `"live"`——同一把 key，正確 dedup 成
+        1 次真 Bedrock 呼叫，不再能靠變動被忽略的參數繞過。
+      - `real=1` 跟不帶 `real` 參數（都落在預設真資料檔位）
+        `effective_mode` 都是 `"real"`——同一把 key，同樣正確 dedup。
+      - `sample=1` 精確比對成立時 `effective_mode="sample"`；`live`
+        不成立且 `sample` 不精確等於 `"1"` 時落回 `"real"`——跟
+        `_is_sample_request`/`_is_real_request` 的判斷完全一致。
+      - token 的效果已經被 `effective_mode` 完整捕捉（不需要再單獨把
+        `token` 塞進 key）：`token` 的唯一作用是透過
+        `_is_live_request()` 的 `hmac.compare_digest` 逐位元組比對決定
+        `live` 是否成立——比對通過 ⟹ `effective_mode="live"`；比對失敗
+        （含先前 codex 複審抓到的「尾端多一個空白」case）⟹ 不成立
+        `live`，`effective_mode` 落回 `"real"`（或 `"sample"`）——這正是
+        `effective_mode` 這個單一欄位本來就該捕捉到的差異，不需要額外
+        欄位。
+
+    `qtype`/`coin_key`/`query` 三段維持不變（見上方對應段落：
+    comparison 幣種順序不排序、query 不 strip）。
+
+    序列化格式（codex HIGH 複審：key delimiter 注入跨 mode 碰撞，
+    先前輪次修復，維持不變）：`json.dumps(...)`
+    （`separators=(",", ":")`，緊湊、無空白）序列化成一個有序 list——
+    JSON 字串序列化會對字串內容裡的雙引號、反斜線、控制字元（含
+    `\x1f`）做逃逸，欄位之間的分隔（逗號）只會出現在字串**引號之外**
+    ——user 輸入的原始位元組（`query` 仍是唯一保留的原始使用者輸入
+    欄位）不管含什麼字元，都只能出現在自己那個被逃逸/包住的 JSON
+    字串值裡，不可能偽造出跟別的欄位邊界（含 `effective_mode`
+    這個由伺服器端計算、非 user 直接控制的枚舉字串）重疊的位元組序列。
     """
-    sample_raw = qs.get("sample", [""])[0] or ""
-    live_raw = qs.get("live", [""])[0] or ""
-    real_raw = qs.get("real", [""])[0] or ""
-    token_raw = qs.get("token", [""])[0] or ""
+    effective_mode = _analyze_effective_mode(qs)
     return json.dumps(
-        [qtype.value, coin_key, query, sample_raw, live_raw, real_raw, token_raw],
+        [qtype.value, coin_key, query, effective_mode],
         separators=(",", ":"),
         ensure_ascii=True,
     )
@@ -3823,7 +3858,9 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     #51 server-side idempotency（防重複送出，Bedrock 開通前最後
     prereq）：驗證通過後、真的呼叫 `_do_analyze`/`_do_comparison` 之前，
     先算出 `_analyze_dedup_key()`（正規化 `type,coin[,coin2],query,
-    sample/live/real/token`），透過 `_dedup_analyze_call()` 包一層 in-flight
+    effective_mode`——`effective_mode` 是 `live`/`real`/`sample` 三選一
+    的實際生效檔位，見該函式 docstring），透過 `_dedup_analyze_call()`
+    包一層 in-flight
     dedup ＋ 60 秒短期結果快取——同一組參數的重複/並行請求只有第一個
     （leader）真的觸發依賴呼叫，其餘原地等待、共用同一份真實結果，不會
     各自再打一次真連接器/Bedrock。詳見 `_dedup_analyze_call()` docstring。

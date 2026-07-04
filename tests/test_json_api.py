@@ -1510,6 +1510,157 @@ def test_api_analyze_dedup_key_distinguishes_token_whitespace_suffix(monkeypatch
     assert counter2.n == 2, f"順序反過來一樣該各自呼叫 1 次，實際共 {counter2.n} 次"
 
 
+def test_api_analyze_dedup_key_live_ignores_sample_real_bypass(monkeypatch):
+    """codex HIGH 複審（key 構造正確 canonicalization，收斂前幾輪
+    token/query 糾結）：`live=1`（token 驗證通過）生效時，`sample`/`real`
+    完全不影響 `_do_analyze` 實際呼叫 `pipeline.run` 的方式（live 優先，
+    見 `_is_sample_request`/`_is_real_request`）——但先前版本的
+    `_analyze_dedup_key` 把這些原始（會被忽略的）值原封不動塞進 key，
+    導致使用者只要任意變動一個「反正會被忽略」的 `sample`/`real` 參數，
+    就能繞過 dedup、讓語意上完全相同的一次真 Bedrock 呼叫被拆成好幾次
+    獨立 compute()——重複花費繞過 dedup，正是 #51 要防的事。
+
+    修復後：`_analyze_dedup_key` 改用 `_analyze_effective_mode(qs)`
+    算出的單一 `"live"/"real"/"sample"` canonical 欄位取代原始
+    sample/real/token 四個欄位。本測試end-to-end驗證：同一個 query，
+    三個 `live=1` + 合法 token 的請求，只是各自帶不同（理應被忽略）的
+    `sample`/`real` 值，應該只觸發 **1 次** `pipeline.run`（正確 dedup、
+    不能被繞過）。
+
+    同時驗證反面：sample/real/live 三種**不同** effective_mode 的請求
+    （即使 query 相同）必須各自獨立 compute()，不能被錯誤地 dedup 在一起
+    ——canonicalization 只收斂「同 mode 內被忽略的雜訊欄位」，不能連
+    「真正不同的 mode」都誤判成同一把 key。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", True)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "bypass-test-live-token")
+
+    real_run = pipeline_module.run
+    query = "dedup-effective-mode-bypass-test"
+
+    # --- (1) live=1 + 不同的 sample/real 原始值——理應共用同一把 key，
+    #     只呼叫 1 次 pipeline.run（不能靠變動被忽略的參數繞過 dedup）。
+    counter_live = _CallCounter()
+
+    def _stub_run_live(*args, **kwargs):
+        counter_live.hit()
+        coin, q, qtype_arg = args[0], args[1], args[2]
+        # 用真正的 pipeline.run 跑一次真正的離線 offline 分析，$0、
+        # 不觸發任何真 Bedrock/AWS 呼叫——這裡只是要驗證 dedup 的呼叫
+        # 次數，不是要驗證 pipeline 本身的輸出內容。
+        return real_run(coin, q, qtype_arg, offline=True)
+
+    monkeypatch.setattr(web, "run", _stub_run_live)
+
+    qs_live_a = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": [query],
+        "live": ["1"],
+        "token": ["bypass-test-live-token"],
+        "sample": ["1"],
+    }
+    qs_live_b = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": [query],
+        "live": ["1"],
+        "token": ["bypass-test-live-token"],
+        "real": ["1"],
+    }
+    qs_live_c = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": [query],
+        "live": ["1"],
+        "token": ["bypass-test-live-token"],
+        "sample": ["some-other-ignored-value"],
+        "real": ["another-ignored-value"],
+    }
+
+    key_live_a = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query=query, qs=qs_live_a
+    )
+    key_live_b = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query=query, qs=qs_live_b
+    )
+    key_live_c = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query=query, qs=qs_live_c
+    )
+    assert key_live_a == key_live_b == key_live_c, (
+        "live=1 生效時，sample/real 的原始值差異理應被忽略、共用同一把 "
+        f"key，實際：a={key_live_a!r}, b={key_live_b!r}, c={key_live_c!r}"
+    )
+
+    code_a, _ = web._handle_api_analyze(qs_live_a, client_ip="10.1.7.1")
+    code_b, _ = web._handle_api_analyze(qs_live_b, client_ip="10.1.7.1")
+    code_c, _ = web._handle_api_analyze(qs_live_c, client_ip="10.1.7.1")
+    assert code_a == 200 and code_b == 200 and code_c == 200
+    assert counter_live.n == 1, (
+        f"live=1 + 不同（理應被忽略）的 sample/real 值，應該正確 dedup、"
+        f"只呼叫 1 次 pipeline.run，實際呼叫了 {counter_live.n} 次——"
+        f"代表可以靠變動被忽略的參數繞過 dedup、重複觸發真 Bedrock 呼叫"
+    )
+
+    web._analyze_dedup_cache.clear()
+    web._analyze_dedup_inflight.clear()
+
+    # --- (2) 反面驗證：sample / real / live 三種**不同**
+    #     effective_mode（即使 query 相同）必須各自獨立 compute()，
+    #     不能被誤判成同一把 key。
+    counter_modes = _CallCounter()
+
+    def _stub_run_modes(*args, **kwargs):
+        counter_modes.hit()
+        coin, q, qtype_arg = args[0], args[1], args[2]
+        return real_run(coin, q, qtype_arg, offline=True)
+
+    monkeypatch.setattr(web, "run", _stub_run_modes)
+
+    qs_sample_mode = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": [query],
+        "sample": ["1"],
+    }
+    qs_real_mode = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": [query],
+    }
+    qs_live_mode = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": [query],
+        "live": ["1"],
+        "token": ["bypass-test-live-token"],
+    }
+
+    key_sample_mode = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query=query, qs=qs_sample_mode
+    )
+    key_real_mode = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query=query, qs=qs_real_mode
+    )
+    key_live_mode = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC", query=query, qs=qs_live_mode
+    )
+    assert len({key_sample_mode, key_real_mode, key_live_mode}) == 3, (
+        f"sample/real/live 三種不同 effective_mode 應該各自產生不同 key，"
+        f"實際：sample={key_sample_mode!r}, real={key_real_mode!r}, "
+        f"live={key_live_mode!r}"
+    )
+
+    code_s, _ = web._handle_api_analyze(qs_sample_mode, client_ip="10.1.7.2")
+    code_r, _ = web._handle_api_analyze(qs_real_mode, client_ip="10.1.7.2")
+    code_l, _ = web._handle_api_analyze(qs_live_mode, client_ip="10.1.7.2")
+    assert code_s == 200 and code_r == 200 and code_l == 200
+    assert counter_modes.n == 3, (
+        f"sample/real/live 三種不同 effective_mode（即使 query 相同）應該"
+        f"各自獨立呼叫 1 次 pipeline.run，實際共呼叫了 {counter_modes.n} 次"
+    )
+
+
 def test_api_analyze_dedup_key_distinguishes_query_whitespace_variant(monkeypatch):
     """codex 複審 MEDIUM（query key⟺實際執行必須一致）：`_analyze_dedup_key`
     先前對 `query` 做 `.strip()`，但 `_do_analyze`/`_do_comparison` 內部
@@ -1676,39 +1827,117 @@ def test_api_analyze_dedup_key_no_delimiter_injection_collision(monkeypatch):
     assert call_b["query"] == "x", f"實際觀察到 {call_b['query']!r}"
 
 
-def test_api_analyze_dedup_key_json_serialization_broadly_collision_resistant():
-    """codex 複審 HIGH（key delimiter 注入碰撞）延伸驗證：不只驗證單一
-    具體反例，額外用一批刻意混入 `\\x1f`／逗號／雙引號／反斜線的
-    query／sample／token 組合做交叉組合（cartesian product），斷言所有
-    語意不同的組合（不同的 query,sample,token 三元組）都各自得到獨一
-    無二的 dedup key（無任何一對重複），驗證 JSON 序列化 key 對這整批
-    delimiter-injection 常見手法都具備 collision resistance，不只是
-    修好 codex 舉的那一種。"""
+def test_api_analyze_dedup_key_json_serialization_broadly_collision_resistant(monkeypatch):
+    """codex 複審 HIGH（key delimiter 注入碰撞 + effective_mode
+    canonicalization，兩輪修復疊加後的延伸驗證）。
+
+    codex HIGH 複審（key 構造正確 canonicalization）之後，key 已經從
+    `(type, coin, query, sample_raw, live_raw, real_raw, token_raw)` 收斂
+    成 `(type, coin, query, effective_mode)`——這個測試先前（本輪之前）
+    斷言「所有 (query,sample,token) 組合都各自得到獨一無二的 key」，但
+    這個舊斷言本身就是本輪要修的那個 bug 的鏡像：多數 sample/token 原始
+    值差異對 `effective_mode` 而言根本是**被忽略的雜訊**（例如
+    `live=1` 生效時 sample/real 完全不影響實際執行；`real` 這個 query
+    參數從來不被 `_is_real_request` 讀取），沒道理各自產生不同 key、各自
+    觸發一次獨立 compute()——那正是 codex 本輪抓到的「改 sample=a/b 產生
+    不同 key 卻跑相同 work、繞過 dedup 重複花費」。
+
+    改成驗證**兩個**互補的不變量，覆蓋 delimiter-injection
+    collision-resistance（前一輪修復）跟「同一 effective_mode 不因忽略
+    欄位變動而碎片化」（本輪修復）：
+
+    1. **同 query + 同 effective_mode ⟹ 同一把 key**：對每個
+       `tricky_queries` 裡的 query，分別構造一批「預期都落在 sample /
+       real / live 同一個 effective_mode」但在被忽略的欄位上刻意帶
+       `\\x1f`／逗號／雙引號／反斜線等 tricky 內容的 qs 組合，斷言同一
+       (query, mode) 底下產生的所有 key 完全相同（一個都不該意外
+       分裂出去）。
+    2. **不同 (query, effective_mode) ⟹ 不同 key**：抽樣每個
+       (query, mode) 各自的代表 key，斷言這批代表 key 兩兩相異，驗證
+       JSON 序列化在 `effective_mode` 這個新的、縮減後的欄位集合下仍然
+       collision-resistant（不會因為兩個不同的 query 或不同的 mode
+       意外序列化成同一把 key）。
+    """
+    monkeypatch.setattr(web, "HAS_BEDROCK", True)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "broad-test-live-token")
     qtype = web.QuestionType("multi_source")
 
     tricky_queries = ["x", "x\x1f1", "\x1f", "x,y", 'x"y', "x\\y", "foo\x1fbar\x1f", ""]
-    tricky_samples = ["", "1", "1\x1f", "\x1f1", ",", '"']
-    tricky_tokens = ["", "abc", "a\x1fb", 'a"b', "a\\b"]
 
-    keys: list[str] = []
-    combos: list[tuple[str, str, str]] = []
+    def _sample_mode_variants() -> list[dict]:
+        # sample 精確等於 "1" 才會生效——被忽略的欄位（real/token）刻意
+        # 帶 tricky 內容，理應完全不影響 effective_mode="sample"。
+        return [
+            {"sample": ["1"]},
+            {"sample": ["1"], "real": ["1"]},
+            {"sample": ["1"], "real": ["0"]},
+            {"sample": ["1"], "token": ["a\x1fb"]},
+            {"sample": ["1"], "token": ['a"b'], "real": ["x,y"]},
+        ]
+
+    def _real_mode_variants() -> list[dict]:
+        # 沒有 live、sample 不精確等於 "1"——都落在預設 real 檔位；
+        # sample/real/token 的具體 tricky 內容全部理應被忽略。
+        return [
+            {},
+            {"real": ["1"]},
+            {"sample": ["0"]},
+            {"sample": ["yes"]},
+            {"sample": ["1\x1f"]},
+            {"sample": ["\x1f1"], "token": ["a\x1fb"]},
+            {"real": ["1"], "token": ['a"b'], "sample": [","]},
+        ]
+
+    def _live_mode_variants() -> list[dict]:
+        # live=1 + 正確 token——sample/real 不管帶什麼 tricky 內容都該被
+        # 忽略（live 優先），這正是本輪修復要堵住的「改 sample/real 繞過
+        # dedup 重複花費真 Bedrock」場景。
+        return [
+            {"live": ["1"], "token": ["broad-test-live-token"]},
+            {"live": ["1"], "token": ["broad-test-live-token"], "sample": ["1"]},
+            {"live": ["1"], "token": ["broad-test-live-token"], "real": ["1"]},
+            {
+                "live": ["1"],
+                "token": ["broad-test-live-token"],
+                "sample": ["anything\x1fweird"],
+                "real": ['also"weird,stuff'],
+            },
+        ]
+
+    mode_variant_builders = {
+        "sample": _sample_mode_variants,
+        "real": _real_mode_variants,
+        "live": _live_mode_variants,
+    }
+
+    representative_keys: dict[tuple[str, str], str] = {}
+
     for query in tricky_queries:
-        for sample in tricky_samples:
-            for token in tricky_tokens:
-                qs = {
-                    "coin": ["BTC"],
-                    "type": ["multi_source"],
-                    "q": [query],
-                    "sample": [sample],
-                    "token": [token],
-                }
+        for mode_name, build_variants in mode_variant_builders.items():
+            group_keys: list[str] = []
+            for extra in build_variants():
+                qs = {"coin": ["BTC"], "type": ["multi_source"], "q": [query], **extra}
+                assert web._analyze_effective_mode(qs) == mode_name, (
+                    f"測試資料本身設計錯誤：{qs!r} 應該落在 {mode_name!r} 檔位，"
+                    f"實際 {web._analyze_effective_mode(qs)!r}"
+                )
                 key = web._analyze_dedup_key(qtype=qtype, coin_key="BTC", query=query, qs=qs)
-                keys.append(key)
-                combos.append((query, sample, token))
+                group_keys.append(key)
 
-    assert len(set(keys)) == len(keys), (
-        f"存在碰撞：{len(keys)} 組不同的 (query,sample,token) 組合只產生了 "
-        f"{len(set(keys))} 把不同的 key，代表 JSON 序列化仍有 collision"
+            assert len(set(group_keys)) == 1, (
+                f"query={query!r} mode={mode_name!r} 底下，{len(group_keys)} 組只在"
+                f"「被忽略欄位」不同的 qs 變體，理應共用同一把 key（同一 "
+                f"effective_mode），實際卻產生了 {len(set(group_keys))} 種不同的 "
+                f"key：{group_keys!r}——代表這些被忽略欄位的變動仍會不當 "
+                f"fragment dedup key。"
+            )
+            representative_keys[(query, mode_name)] = group_keys[0]
+
+    all_repr_keys = list(representative_keys.values())
+    assert len(set(all_repr_keys)) == len(all_repr_keys), (
+        f"存在碰撞：{len(all_repr_keys)} 組不同的 (query,effective_mode) 只產生了 "
+        f"{len(set(all_repr_keys))} 把不同的 key，代表 JSON 序列化在縮減後的欄位"
+        f"集合下仍有 collision"
     )
 
 
