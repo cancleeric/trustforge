@@ -171,7 +171,13 @@ case "\$ALL" in
     PARAMS=\$(find_after --parameters "\$@")
     printf '%s' "\$PARAMS" > "\$CAPTURE_DIR/ssm_params_call\${N}.txt"
     echo "cmd-call\${N}" ;;
-  "ssm get-command-invocation"*) echo "Success" ;;
+  "ssm get-command-invocation"*)
+    Q=\$(find_after --query "\$@")
+    case "\$Q" in
+      ResponseCode) echo "0" ;;
+      *) echo "Success" ;;
+    esac
+    ;;
   *) echo "[aws-mock] 未預期: \$ALL" >&2; exit 99 ;;
 esac
 MOCKEOF
@@ -200,8 +206,18 @@ assert_contains "$INSTALL_CMD" "Environment=PORT=8080" "SSM 安裝指令：PORT 
 assert_contains "$INSTALL_CMD" "Environment=TRUSTFORGE_BIND_HOST=127.0.0.1" "SSM 安裝指令：加 TRUSTFORGE_BIND_HOST=127.0.0.1"
 assert_contains "$INSTALL_CMD" "Environment=TRUSTFORGE_TRUST_PROXY=1" "SSM 安裝指令：加 TRUSTFORGE_TRUST_PROXY=1"
 assert_contains "$INSTALL_CMD" "Environment=TRUSTFORGE_CSP_MODE=legacy" "SSM 安裝指令：加 TRUSTFORGE_CSP_MODE=legacy（預設值）"
-assert_contains "$INSTALL_CMD" "ln -sfn /etc/nginx/trustforge-sites/legacy.conf /etc/nginx/conf.d/trustforge.conf" "SSM 安裝指令：預設 symlink 指向 legacy.conf（不預設切 react）"
-assert_contains "$INSTALL_CMD" "rm -f /etc/nginx/conf.d/default.conf" "SSM 安裝指令：有移除 nginx 預設 conf 避免 port 80 衝突"
+# 注意：$INSTALL_CMD 擷取自 --parameters 的 JSON 陣列文字（deploy_frontend_nginx.sh
+# 用 `python3 -c 'import json...'` 把 CMDS 逐行包成 JSON），JSON 編碼後雙引號會變成
+# \" ——比對時要用跳脫後的字面文字，不是原始未跳脫的 shell 語法。
+# shellcheck disable=SC2016  # 單引號內的 $CANDIDATE/$LIVE_LINK 刻意留給
+# 遠端（deploy_frontend_nginx.sh 的 CMDS heredoc）展開，這裡只比對字面文字。
+assert_contains "$INSTALL_CMD" 'ln -sfn \"$CANDIDATE\" \"$LIVE_LINK\"' "SSM 安裝指令：預設 symlink 指向 candidate legacy.conf（不預設切 react）"
+# shellcheck disable=SC2016
+assert_contains "$INSTALL_CMD" 'rm -f \"$DEFAULT_CONF\"' "SSM 安裝指令：有移除 nginx 預設 conf 避免 port 80 衝突"
+# shellcheck disable=SC2016
+assert_contains "$INSTALL_CMD" 'nginx -t -c \"$VALIDATE_CONF\"' "SSM 安裝指令：guarded transaction——先驗證候選設定（scratch harness），不動 live conf.d（codex 五次複審 HIGH）"
+assert_contains "$INSTALL_CMD" "trap 'ROLLBACK' ERR" "SSM 安裝指令：narrow python + 起 nginx 這段掛 ERR trap，任一步失敗會觸發 ROLLBACK"
+assert_contains "$INSTALL_CMD" 'exit 97' "SSM 安裝指令：回滾本身失敗要用 distinct ROLLBACK-FAILED exit code（97），不跟一般失敗（1）混在一起"
 
 rm -rf "$MOCKDIR" "$CAPTURE" "$REPO_ROOT/frontend/dist" "$REPO_ROOT/build/trustforge_frontend_dist.zip"
 

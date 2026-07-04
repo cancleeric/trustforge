@@ -71,7 +71,7 @@ assert_eq() {
   if [ "$actual" = "$expected" ]; then
     pass "$desc"
   else
-    fail "$desc — 實際值：$actual（預期：$expected）"
+    fail "$desc — 實際值：${actual}（預期：${expected}）"
   fi
 }
 
