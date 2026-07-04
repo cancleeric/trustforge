@@ -197,6 +197,8 @@ S3_CALLS=$(cat "$CAPTURE/s3_cp_calls.txt" 2>/dev/null || echo "")
 assert_contains "$S3_CALLS" "trustforge_frontend_dist.zip" "有上傳前端 dist zip"
 assert_contains "$S3_CALLS" "nginx-legacy.conf" "有上傳 nginx-legacy.conf"
 assert_contains "$S3_CALLS" "nginx-react.conf" "有上傳 nginx-react.conf（react.conf 命名）"
+assert_contains "$S3_CALLS" "nginx-react-http.conf" "有上傳 nginx-react-http.conf（bare-IP HTTP-only 版）"
+assert_contains "$S3_CALLS" "nginx-legacy-tls.conf" "有上傳 nginx-legacy-tls.conf（codex 複審 HIGH：HSTS-safe legacy 回滾用，443 版）"
 
 SG_CALLS=$(cat "$CAPTURE/sg_authorize_calls.txt" 2>/dev/null || echo "")
 assert_contains "$SG_CALLS" "--port 443" "有開 security group 443"
@@ -212,6 +214,10 @@ assert_contains "$INSTALL_CMD" "Environment=TRUSTFORGE_CSP_MODE=legacy" "SSM 安
 # shellcheck disable=SC2016  # 單引號內的 $CANDIDATE/$LIVE_LINK 刻意留給
 # 遠端（deploy_frontend_nginx.sh 的 CMDS heredoc）展開，這裡只比對字面文字。
 assert_contains "$INSTALL_CMD" 'ln -sfn \"$CANDIDATE\" \"$LIVE_LINK\"' "SSM 安裝指令：預設 symlink 指向 candidate legacy.conf（不預設切 react）"
+# shellcheck disable=SC2016
+assert_contains "$INSTALL_CMD" 'nginx-react-http.conf \"$ETC/nginx/trustforge-sites/react-http.conf\"' "SSM 安裝指令：有把 nginx-react-http.conf 佈署到 trustforge-sites/react-http.conf（bare-IP cutover 候選）"
+# shellcheck disable=SC2016
+assert_contains "$INSTALL_CMD" 'nginx-legacy-tls.conf \"$ETC/nginx/trustforge-sites/legacy-tls.conf\"' "SSM 安裝指令：有把 nginx-legacy-tls.conf 佈署到 trustforge-sites/legacy-tls.conf（codex 複審 HIGH：HSTS-safe legacy 回滾候選，cutover_switch.sh 偵測到憑證存在時才會選它）"
 # shellcheck disable=SC2016
 assert_contains "$INSTALL_CMD" 'rm -f \"$DEFAULT_CONF\"' "SSM 安裝指令：有移除 nginx 預設 conf 避免 port 80 衝突"
 # shellcheck disable=SC2016

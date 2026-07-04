@@ -73,8 +73,8 @@ cp "$REPO_ROOT/deploy/nginx.conf" "$WORK/nginx-react-patched.conf"
   -e "s#listen \[::\]:80;#listen [::]:18080;#" \
   -e "s#listen 443 ssl;#listen 18443 ssl;#" \
   -e "s#listen \[::\]:443 ssl;#listen [::]:18443 ssl;#" \
-  -e "s#/etc/letsencrypt/live/trustforge.example.com/fullchain.pem#$WORK/certs/fullchain.pem#" \
-  -e "s#/etc/letsencrypt/live/trustforge.example.com/privkey.pem#$WORK/certs/privkey.pem#" \
+  -e "s#/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/fullchain.pem#$WORK/certs/fullchain.pem#" \
+  -e "s#/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/privkey.pem#$WORK/certs/privkey.pem#" \
   -e "s#root /opt/trustforge/frontend/dist;#root $WORK/dist;#" \
   "$WORK/nginx-react-patched.conf"
 
@@ -170,6 +170,7 @@ assert_header_present "$H" "content-security-policy" "/ 有 CSP header"
 assert_header_present "$H" "x-frame-options" "/ 有 X-Frame-Options header"
 assert_header_present "$H" "referrer-policy" "/ 有 Referrer-Policy header"
 assert_header_present "$H" "x-content-type-options" "/ 有 X-Content-Type-Options header"
+assert_header_present "$H" "strict-transport-security" "/ 有 Strict-Transport-Security header（codex 複審 HIGH：location 自己宣告 add_header 會蓋掉 server 層繼承的 HSTS，不能只看 conf 裡寫了）"
 
 echo "== 場景 2：/analyze （SPA client-side route，非真實檔案，應 fallback 回 index.html）=="
 assert_status_200 "/analyze" "/analyze 回應 200（fallback 成功，不是 404）"
@@ -184,18 +185,67 @@ assert_header_present "$H" "content-security-policy" "/analyze 有 CSP header（
 assert_header_present "$H" "x-frame-options" "/analyze 有 X-Frame-Options header"
 assert_header_present "$H" "referrer-policy" "/analyze 有 Referrer-Policy header"
 assert_header_present "$H" "x-content-type-options" "/analyze 有 X-Content-Type-Options header"
+assert_header_present "$H" "strict-transport-security" "/analyze 有 Strict-Transport-Security header（SPA fallback 主要生效點，codex 複審 HIGH）"
 
 echo "== 場景 3：/index.html（直接命中，非經 try_files 重導向）=="
 assert_status_200 "/index.html" "/index.html 回應 200"
 H=$(fetch_headers "/index.html")
 assert_header_present "$H" "content-security-policy" "/index.html 有 CSP header"
 assert_header_present "$H" "x-frame-options" "/index.html 有 X-Frame-Options header"
+assert_header_present "$H" "strict-transport-security" "/index.html 有 Strict-Transport-Security header（實際命中的 location，codex 複審 HIGH）"
 
 echo "== 場景 4：/assets/<hash>.css（靜態資源，長快取，不帶 CSP）=="
 assert_status_200 "/assets/app-teststub.css" "/assets/app-teststub.css 回應 200"
 H=$(fetch_headers "/assets/app-teststub.css")
 assert_header_present "$H" "cache-control" "/assets/*.css 有 Cache-Control（長快取）header"
 assert_header_absent "$H" "content-security-policy" "/assets/*.css 不帶 CSP header（靜態資源非 SPA 頁面本身）"
+assert_header_present "$H" "strict-transport-security" "/assets/*.css 有 Strict-Transport-Security header（codex 複審 HIGH：這個 location 自己宣告 Cache-Control add_header 一樣會蓋掉繼承的 HSTS）"
+
+# ── 場景 5-7：HTTP(80) → HTTPS canonical redirect（codex 複審 HIGH：不能用
+# `$host` 當 redirect target——探測器/健康檢查/curl 直接打 IP 時 `$host` 就
+# 是那個 IP（或沒帶 Host 時是空/預設），redirect 出來的 Location 會是
+# `https://127.0.0.1/...`（非 canonical domain），不是我們要的
+# `https://trustforge.hurricanesoft.com.tw/...`；`deploy/cutover_switch.sh`
+# 的 react smoke check 斷言的正是 canonical domain，這裡真的起本機 nginx
+# （不是 mock）驗證這份 conf 用的是寫死的 literal domain，不受 Host header
+# 影響 ──────────────────────────────────────────────────────────────────
+BASE_HTTP="http://127.0.0.1:18080"
+
+echo "== 場景 5：HTTP(80) 對 / 回 301，Location 指向 canonical domain（不是 127.0.0.1）=="
+# `tr -d '\r'`：去掉 HTTP header 的 \r，讓後面的 grep `$` 錨定不用煩惱
+# \r\n 換行細節，只看邏輯內容 ──
+REDIRECT_HDRS=$(curl -sS -D - -o /dev/null "$BASE_HTTP/" | tr -d '\r')
+if grep -qi '^HTTP/[0-9.]* 301' <<<"$REDIRECT_HDRS"; then
+  pass "HTTP(80) 對 / 回 301"
+else
+  fail "HTTP(80) 對 / 沒有回 301 — 實際首行：$(head -1 <<<"$REDIRECT_HDRS")"
+fi
+if grep -qi '^location: https://trustforge\.hurricanesoft\.com\.tw/$' <<<"$REDIRECT_HDRS"; then
+  pass "HTTP(80) redirect Location 是 canonical domain（https://trustforge.hurricanesoft.com.tw/）"
+else
+  fail "HTTP(80) redirect Location 不是預期的 canonical domain — 實際：$(grep -i '^location:' <<<"$REDIRECT_HDRS")"
+fi
+if grep -qi '^location:.*127\.0\.0\.1' <<<"$REDIRECT_HDRS"; then
+  fail "HTTP(80) redirect Location 導回 127.0.0.1（非 canonical——codex 複審 HIGH 抓到的回歸重現）"
+else
+  pass "HTTP(80) redirect Location 確認沒有導回 127.0.0.1"
+fi
+
+echo "== 場景 6：HTTP(80) 即使 Host header 被打成 127.0.0.1（模擬探測器/curl 直接打 IP），redirect 仍導去 canonical domain，且保留原 path =="
+REDIRECT_HDRS2=$(curl -sS -D - -o /dev/null -H "Host: 127.0.0.1" "$BASE_HTTP/analyze" | tr -d '\r')
+if grep -qi '^location: https://trustforge\.hurricanesoft\.com\.tw/analyze$' <<<"$REDIRECT_HDRS2"; then
+  pass "Host header=127.0.0.1 時，redirect Location 仍是 canonical domain + 原 path（不是 https://127.0.0.1/analyze）"
+else
+  fail "Host header=127.0.0.1 時，redirect Location 沒有維持 canonical domain — 實際：$(grep -i '^location:' <<<"$REDIRECT_HDRS2")"
+fi
+
+echo "== 場景 7：HTTP(80) /healthz（健康檢查用明碼端點）不受 redirect 規則影響，直接 200 =="
+HEALTHZ_CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE_HTTP/healthz")
+if [ "$HEALTHZ_CODE" = "200" ]; then
+  pass "HTTP(80) /healthz 回 200（明碼健康檢查端點，不被導去 https）"
+else
+  fail "HTTP(80) /healthz 沒有回 200 — status=${HEALTHZ_CODE}"
+fi
 
 rm -f "$WORK/last_body.html"
 
