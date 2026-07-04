@@ -897,7 +897,15 @@ def test_api_analyze_dedup_zombie_leader_entry_not_replaced_fresh_caller_just_wa
     ，斷言：(1) 後到的請求**不會**取代它、也**不會**真的觸發
     `pipeline.run`；(2) 後到的請求只是 join 這個殭屍 Flight，bounded wait
     到自己的（縮短過的）逾時上界後正常回 503；(3) 殭屍 entry 原封不動留著
-    ——不像 Round 12～13 那樣被清掉/取代。"""
+    ——不像 Round 12～13 那樣被清掉/取代。
+
+    codex HIGH 複審 Round 15 補充：這裡的殭屍 Flight 剛建立
+    （`started_at` ≈ 現在），**還沒**超過 `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`
+    （90 秒）的 stale 門檻，所以不觸發本輪新增的 stale-entry recovery——
+    這個測試驗證的是「年輕、只是恰好卡住的 leader 不會被輕易取代」，不是
+    「entry 無論多老都永遠不會被取代」；後者已不成立，見下方
+    `test_api_analyze_dedup_stale_leader_entry_recovered_by_fresh_request_after_90s`
+    ——真的活超過 90 秒才會被接手。"""
     monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
 
     counter = _CallCounter()
@@ -1190,6 +1198,129 @@ def test_dedup_analyze_call_normal_no_stale_still_single_flight(monkeypatch):
     assert counter.n == 1, f"沒有 stale leader 涉入時，仍應只觸發 1 次 compute()，實際 {counter.n} 次"
     for idx, holder in enumerate(holders):
         assert holder.get("value") == "result-normal", f"呼叫端 {idx} 應共用同一份結果，實際 {holder}"
+
+
+def test_api_analyze_dedup_stale_leader_entry_recovered_by_fresh_request_after_90s(monkeypatch):
+    """codex HIGH 複審 Round 15（慢 leader 無 end-to-end deadline、持 key
+    整段 503-storm）：`bedrock.py` 的 `read_timeout`/`connect_timeout` 只
+    bound 單次 Bedrock 呼叫，`compute()` 整體（可能循序打好幾次連接器/
+    Bedrock）沒有 end-to-end 上界，慢 leader 可能把這把 key 佔住遠超過
+    follower 願意等的 45 秒——這段期間所有同 key 的請求全部卡死變 503，
+    直到這個慢 leader 自己結束為止。
+
+    對比 Round 14 的 zombie-not-replaced 測試（那裡的殭屍 Flight 剛建立、
+    還沒超過 90 秒門檻）：這裡的殭屍 Flight 已經活超過
+    `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`（90 秒），後到的 fresh 請求應該
+    偵測到並「接手」成為新 leader——真的呼叫一次 `pipeline.run` 拿到
+    200，而不是傻傻卡到自己的 45 秒逾時上界才 503；key 因此不會被一個慢
+    leader 永久卡死。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    qs = {
+        "coin": ["BTC"],
+        "type": ["multi_source"],
+        "q": ["dedup-stale-leader-recovered-after-90s-test"],
+    }
+    coin_key = "BTC"
+    query = "dedup-stale-leader-recovered-after-90s-test"
+    key = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key=coin_key, query=query, qs=qs
+    )
+
+    stale_flight = web._AnalyzeFlight()  # event 永遠不會被 set() ——模擬慢/掛掉的 leader
+    stale_flight.started_at = time.time() - (web._ANALYZE_DEDUP_STALE_LEADER_SECONDS + 1.0)
+    web._analyze_dedup_inflight[key] = stale_flight
+
+    t0 = time.time()
+    code, body = web._handle_api_analyze(qs, client_ip="10.1.2.4")
+    elapsed = time.time() - t0
+
+    assert code == 200, (
+        f"存活超過 90 秒的 stale entry 應該被 fresh 請求接手成為新 leader，實際 {code} {body}"
+    )
+    assert counter.n == 1, f"接手成為新 leader 後應該真的觸發一次 pipeline.run，實際 {counter.n} 次"
+    assert elapsed < 5.0, (
+        f"不該卡到 follower 自己的 45 秒逾時上界才回應，應該直接接手 fresh 計算，實際耗時 {elapsed:.3f}s"
+    )
+    assert key not in web._analyze_dedup_inflight, "接手的新 leader 完成後應清掉自己的 in-flight entry"
+
+
+def test_dedup_analyze_call_orphaned_stale_leader_finishing_after_replacement_does_not_overwrite_new_leader(
+    monkeypatch,
+):
+    """codex HIGH 複審 Round 15（fencing 天生，不需要 generation counter）：
+    一個原本的 leader（flight1）因為存活超過 90 秒被 fresh 請求取代（產生
+    flight2、自己成為新 leader）之後，flight1 背後真正的 `compute()`（被
+    orphan 掉，但仍在真的執行）之後完成時，只應該寫**自己手上那個
+    flight1 物件**，清 in-flight 字典 entry 前必須先確認字典裡現在還是不是
+    自己（identity 比對）——不能把新 leader（flight2）還在使用中的 entry
+    誤刪掉。這裡讓 flight1、flight2 都刻意卡住（各自用一個 Event 控制何時
+    完成），驗證兩者完成的先後順序下彼此都不會互相干擾。"""
+    key = "dedup-round15-fencing-orphaned-leader-test-key"
+
+    leader1_ready = threading.Event()
+    leader1_may_finish = threading.Event()
+
+    def leader1_compute():
+        leader1_ready.set()
+        assert leader1_may_finish.wait(timeout=5), "leader1 應該在測試主體釋放前保持卡住"
+        return "leader1-result"
+
+    result1_holder: dict[str, object] = {}
+
+    def _run_leader1():
+        result1_holder["value"] = web._dedup_analyze_call(key, leader1_compute)
+
+    t1 = threading.Thread(target=_run_leader1)
+    t1.start()
+    assert leader1_ready.wait(timeout=5), "leader1 應該先進入 compute() 卡住"
+
+    flight1 = web._analyze_dedup_inflight.get(key)
+    assert flight1 is not None, "leader1 應該已經把自己的 Flight 裝進 in-flight 字典"
+    # 人為把它「餵老」到超過 stale 門檻，不用真的等 90 秒。
+    flight1.started_at = time.time() - (web._ANALYZE_DEDUP_STALE_LEADER_SECONDS + 1.0)
+
+    leader2_ready = threading.Event()
+    leader2_may_finish = threading.Event()
+
+    def leader2_compute():
+        leader2_ready.set()
+        assert leader2_may_finish.wait(timeout=5), "leader2 應該在測試主體釋放前保持卡住"
+        return "leader2-result"
+
+    result2_holder: dict[str, object] = {}
+
+    def _run_leader2():
+        result2_holder["value"] = web._dedup_analyze_call(key, leader2_compute)
+
+    t2 = threading.Thread(target=_run_leader2)
+    t2.start()
+    assert leader2_ready.wait(timeout=5), "leader2（接手者）應該偵測到 stale 並自己開始 compute()"
+
+    flight2 = web._analyze_dedup_inflight.get(key)
+    assert flight2 is not None
+    assert flight2 is not flight1, "stale entry 應該已經被換成全新的 `_AnalyzeFlight`"
+
+    # 讓（已被取代的）orphaned leader1 先完成——它只應該寫自己手上的
+    # flight1，且清理時發現字典裡已經不是自己，不應該動到 leader2 還在
+    # 使用中的 entry。
+    leader1_may_finish.set()
+    t1.join(timeout=5)
+    assert not t1.is_alive(), "leader1 應該已經完成"
+    assert result1_holder["value"] == "leader1-result"
+    assert flight1.ok is True and flight1.payload == "leader1-result"
+    assert web._analyze_dedup_inflight.get(key) is flight2, (
+        "orphaned 舊 leader 完成清理時，不應該覆寫或誤刪新 leader 還在使用中的 in-flight entry"
+    )
+
+    # 收尾：讓新 leader（flight2）也完成，確認它自己的 entry 正常被清掉，
+    # 不受 leader1 的 identity-fencing 影響。
+    leader2_may_finish.set()
+    t2.join(timeout=5)
+    assert not t2.is_alive(), "leader2 應該已經完成"
+    assert result2_holder["value"] == "leader2-result"
+    assert key not in web._analyze_dedup_inflight, "新 leader 完成後應清掉自己的 in-flight entry"
 
 
 def test_api_analyze_dedup_cross_ip_exhausted_ip_blocked_unrelated_ip_unaffected(monkeypatch):

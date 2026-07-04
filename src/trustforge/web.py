@@ -3393,6 +3393,45 @@ def _price_provenance_data(evidence: list) -> dict:
 #     的結果」——這正是移除整組 generation/supersede/grace 機制之後，
 #     正確性反而更容易論證的地方（見下方 `_dedup_analyze_call` 內
 #     "invariant" 注解）。
+#
+# codex HIGH 複審 Round 15（慢 leader 無 end-to-end deadline、持 key 整段
+# 503-storm）：Round 14 拿掉「取代 stale leader」之後，`bedrock.py` 的
+# `read_timeout`/`connect_timeout` 只 bound 單次 Bedrock 呼叫，**不** bound
+# 整個 `compute()`——`_do_analyze`/`_do_comparison` pipeline 內可能循序打
+# 好幾次連接器/Bedrock（例如比較兩個標的），單次 60s 上界疊加起來仍可能
+# 遠超過 follower 願意等的 45s。此時這把 key 會被這個慢 leader**整段**
+# 佔住，所有同 key 的後續請求（不管是 follower 還是之後才進來的全新
+# 請求）全部卡到 45s 逾時、一起變成 503——雖然不會無限期 hang（Round 14
+# 已保證有界），但仍是一次「看起來像是服務掛了」的 503 storm，且在慢
+# leader 結束前，這把 key 完全無法被任何新請求推進。
+#   - 修法：`_AnalyzeFlight` 記錄 `started_at`（Round 14 就已經有這個
+#     欄位，先前只是沒被用來做任何判斷）。**全新請求**（字典裡已有
+#     entry、但這個 entry 還沒被自己 join 過）在協調 loop 查到現有 entry
+#     時，先檢查 `time.time() - joined_flight.started_at`：若超過
+#     `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`（90 秒，比 follower 等待上限
+#     45 秒更長——確保「這把 key 真的卡住超過任何正常 follower 願意等的
+#     時間」才觸發，不會跟 Round 14 的 follower 逾時搶著動作），就把這個
+#     entry 從字典換成自己全新建立的 `_AnalyzeFlight`，自己成為新 leader、
+#     帶著全新的 deadline 去跑 `compute()`——key 因此重新變成可推進的，
+#     不會被一個慢 leader 卡死到它自己結束為止。
+#   - **fencing 天生、不需要 generation counter**：舊（現在被 orphan 掉的）
+#     leader 完成時，只會寫**它自己手上那個 `_AnalyzeFlight` 物件**的
+#     `ok`/`payload`（`compute()` 的回傳值/例外一定寫回呼叫它的那個
+#     leader 自己的 `my_flight`，不會、也沒有管道去寫另一個物件）——不會
+#     跟新 leader cross-publish。清 in-flight 字典 entry 時，改成「先確認
+#     字典裡現在還是不是我自己這個物件（identity 比對）才 pop」：如果
+#     字典裡已經被新 leader 換掉，pop 就直接跳過，不會誤刪新 leader正在
+#     使用的 entry。新 Flight 是全新物件、跟舊物件在記憶體裡完全隔離，
+#     followers 各自持有自己 join 到的那個物件的參照，讀寫互不干涉——不
+#     需要引入任何整數編號去分辨「這是哪一輪」，物件本身的 identity 就是
+#     answer。
+#   - 已經 join 到舊 Flight 的 follower（在被取代之前就 `event.wait()`
+#     卡在那裡）**不會**被轉去新 leader：它們繼續等自己手上那個舊物件的
+#     `event`，若舊（orphan）leader 之後真的完成，它們一樣讀得到那份
+#     結果（不浪費 orphan leader 已經付出的真實 Bedrock 成本，見 #9 護欄
+#     ——即使被取代了、compute 也還是跑完、算進當日 cap，不會因為被取代就
+#     免費作廢重跑第二次）；若等到自己的 45 秒 deadline 還沒等到，一樣
+#     503（Round 13～14 保留的行為，不受本輪影響）。
 # ---------------------------------------------------------------------------
 
 # follower bounded wait 上界——比單次分析（含真連接器/Bedrock，現已有
@@ -3402,6 +3441,13 @@ def _price_provenance_data(evidence: list) -> dict:
 # 「leader 多久沒完成算 stale、可以被取代」的門檻——leader 是否算 stale
 # 這件事本身已經不存在，這裡純粹是 follower 自己願意等多久的預算。
 _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS = 45.0
+
+# codex HIGH 複審 Round 15：一個 in-flight entry（leader）存活超過這個
+# 門檻，就視為「慢到足以讓新請求接手」——刻意設得比
+# `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`（45 秒，follower 自己願意等的
+# 上限）更長，確保只有「真的比任何正常 follower 都還耐心等的時間更久」
+# 的 entry 才會被取代，避免這個機制在正常（甚至略慢）情況下就搶著動作。
+_ANALYZE_DEDUP_STALE_LEADER_SECONDS = 90.0
 
 _analyze_dedup_lock = threading.Lock()
 
@@ -3426,6 +3472,17 @@ class _AnalyzeFlight:
     `set()` 之前的寫入對之後 `wait()` 返回 `True` 的執行緒可見（happens-
     before），所以 follower 讀到的一定是完整寫好的值，不會看到寫一半的
     中間狀態。
+
+    `started_at`（codex HIGH 複審 Round 15 開始實際使用）：這個 leader
+    建立的時間點。全新請求在字典查到現有 entry 時，會拿現在時間跟
+    `started_at` 比較——超過 `_ANALYZE_DEDUP_STALE_LEADER_SECONDS` 就把
+    這個 entry 換成新建的 `_AnalyzeFlight`、自己接手當新 leader（見
+    `_dedup_analyze_call` 內的 stale-entry recovery 段落）。原本這個
+    entry 的 leader 完成時仍然只會寫**自己手上這個物件**（不會、也沒有
+    管道寫到取代它的新物件），對「字典裡的 in-flight entry」的移除也會
+    先比對 identity 才 pop——被取代的舊物件不會、也不能覆寫新物件的結果，
+    這就是「fencing 天生」的意思：不需要另外配一個整數 generation 編號去
+    做比對，物件本身的 identity 就是唯一需要的 fence。
     """
 
     __slots__ = ("event", "started_at", "ok", "payload")
@@ -3449,10 +3506,16 @@ class _AnalyzeDedupTimeout(Exception):
     （那樣等於「等太久」跟「真的失敗」處理方式一樣，會在依賴本來就
     degraded 時放大成 thundering herd/重複 Bedrock 花費），改由
     `_handle_api_analyze` 轉成 503 + 可重試訊息，交給 client 自行重試
-    （仍受 #9 護欄與既有限流保護）。Round 14 之後：followers 逾時就是
-    503，不會有任何一方去「取代」hang 住的 leader；leader 本身的
-    `compute()` 有沒有牆鐘上界，靠的是 `bedrock.py` 的 `Config` timeout，
-    不是這裡的 dedup 層。"""
+    （仍受 #9 護欄與既有限流保護）。Round 14 之後：已經 join 到某個
+    `_AnalyzeFlight` 的 follower 逾時就是 503，**不會**自己去「取代」它
+    正在等的那個 leader；leader 本身的 `compute()` 有沒有牆鐘上界，靠的
+    是 `bedrock.py` 的 `Config` timeout，不是這裡的 dedup 層。Round 15
+    補充：這裡指的「不會取代」僅限於「已經 join 到這個 Flight、正在
+    `event.wait()` 的 follower 自己」——**全新**進來、字典查找還沒 join
+    到任何 Flight 的請求，如果現有 entry 已經超過
+    `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`，仍然會接手成為新 leader（見
+    `_dedup_analyze_call`），這跟「等待中的 follower 逾時後自己升級成
+    leader」是兩件不同的事——後者從未存在過、本輪也沒有引入。"""
 
 
 def _analyze_effective_mode(qs: dict) -> str:
@@ -3738,21 +3801,41 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
          欄位，不重新查字典、不管字典裡現在是不是還放著同一個物件）
          回傳/`raise`。逾時 → 拋 `_AnalyzeDedupTimeout`（503）。
 
-    **不再有第三條路**（先前版本裡「偵測 stale leader、取代它」、
-    「醒來後重入協調 loop 重新查一次」這兩條路徑都被移除）：leader 若
-    真的 hang 死，所有 follower 就是各自等到自己的 `deadline` 回 503，
-    不會有任何一方試圖替補重新 compute()。這個簡化能成立的前提是
-    `bedrock.py` `_runtime()` 現在有硬性 `read_timeout`/`connect_timeout`
-    （見該檔案 `Config`），leader 的 `compute()` 本身有牆鐘時間上界。
+    先前版本（Round 14）沒有第三條路——leader 若真的 hang 死，所有
+    follower 就是各自等到自己的 `deadline` 回 503。`bedrock.py`
+    `_runtime()` 的硬性 `read_timeout`/`connect_timeout` 確實 bound 了
+    「單次」Bedrock 呼叫，但 `compute()` 本身（`_do_analyze`/
+    `_do_comparison` pipeline，可能循序打好幾次連接器/Bedrock，例如
+    comparison 兩個標的各一次）沒有 end-to-end 上界——多次呼叫疊加起來
+    仍可能遠超過 follower 願意等的 45 秒，這把 key 會被這個慢 leader
+    整段佔住，見模組頂部 Round 15 說明。
 
-    invariant（用來論證下方發布邏輯不需要 generation fencing 就是正確
-    的）：由於沒有任何路徑會在字典已有 entry 時覆寫它、也沒有任何路徑
-    會取代一個已存在的 leader，`_analyze_dedup_inflight[key]` 從
-    leader 建立entry的那一刻起，直到 leader 自己完成、把它 pop 掉為止，
-    這段期間內字典裡這把 key 對應的物件**只可能是**這個 leader 自己
-    建立的那個 `_AnalyzeFlight`——不會有其他 thread 寫過這個 key。因此
-    leader 發布結果、清 in-flight entry 時，不需要任何「我還是不是目前
-    認可的 leader」比對，一定是。
+    codex HIGH 複審 Round 15（stale-entry recovery，加第三條路）：
+
+      3. 字典裡已經有 entry，但這個 entry 存活時間
+         （`time.time() - joined_flight.started_at`）超過
+         `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`（90 秒）→ 把它從字典換成
+         自己全新建立的 `_AnalyzeFlight`，自己成為新 leader、帶著全新
+         `compute()` 去跑，不落入第 2 條路的 `event.wait()`。
+
+    fencing 天生、不需要 generation counter：舊 entry 被換掉後，原本的
+    leader 之後完成時只會寫**自己手上那個物件**的 `ok`/`payload`（不會
+    也沒有管道寫到新物件），清 in-flight 字典 entry 前也會先比對「字典
+    裡現在是不是還是我自己這個物件」（identity 比對）才 pop——如果已經
+    被換掉，直接跳過，不誤刪新 leader 正在用的 entry。已經 join 到舊
+    Flight 的 follower（在被取代之前就卡在 `event.wait()`）不受影響，
+    繼續讀自己手上那個舊物件，等到舊 leader 真的完成（若在自己的
+    deadline 內）或自己逾時 503（不受本輪影響）。
+
+    invariant（用來論證下方發布邏輯只需要一次 identity 比對、不需要
+    generation fencing 就是正確的）：對任一 leader 自己建立的
+    `_AnalyzeFlight` 物件而言，字典裡這把 key 的 entry 從「這個 leader
+    建立」到「這個 leader 自己完成、pop 掉（或發現已被取代而放棄 pop）」
+    這段期間，可能經歷 0 次或多次「被之後才進來的全新請求判定為 stale
+    並取代」；不管經歷幾次取代，**這個 leader 自己都只寫、只嘗試 pop
+    它自己建立的那個物件**，不曾寫過、也不曾 pop 過任何其他物件——因此
+    「我 pop 的時候，字典裡是不是還是我自己」這一次 identity 比對，就
+    足以保證不會誤刪別人的 entry，不需要整數編號。
     """
     deadline = time.time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
     my_flight: _AnalyzeFlight | None = None
@@ -3761,6 +3844,16 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         with _analyze_dedup_lock:
             joined_flight = _analyze_dedup_inflight.get(key)
             if joined_flight is None:
+                my_flight = _AnalyzeFlight()
+                _analyze_dedup_inflight[key] = my_flight
+                break
+            # codex HIGH 複審 Round 15：stale-entry recovery——現有 entry
+            # 存活太久（比 follower 自己願意等的 45 秒還久很多），視為慢
+            # 到足以讓新請求接手；在同一次持鎖期間原子地換成自己的新
+            # Flight，避免跟其他同時發現 stale 的 thread 競相取代（第一個
+            # 拿到鎖的取代掉，之後拿到鎖的會看到已經是新 entry、不再視為
+            # stale，落入正常 join-as-follower 路徑）。
+            if time.time() - joined_flight.started_at > _ANALYZE_DEDUP_STALE_LEADER_SECONDS:
                 my_flight = _AnalyzeFlight()
                 _analyze_dedup_inflight[key] = my_flight
                 break
@@ -3792,13 +3885,20 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         my_flight.ok = False
         my_flight.payload = exc
         with _analyze_dedup_lock:
-            _analyze_dedup_inflight.pop(key, None)
+            # codex HIGH 複審 Round 15：identity 比對過才 pop——如果這把
+            # key 已經被 stale-entry recovery 換成別人的新 Flight，字典
+            # 裡現在存的就不是 `my_flight`，此時絕不能 pop（那樣會誤刪
+            # 新 leader 正在使用的 entry），直接放棄清理即可：反正字典
+            # 裡本來就已經沒有指向我的東西。
+            if _analyze_dedup_inflight.get(key) is my_flight:
+                _analyze_dedup_inflight.pop(key, None)
         my_flight.event.set()
         raise
     my_flight.ok = True
     my_flight.payload = result
     with _analyze_dedup_lock:
-        _analyze_dedup_inflight.pop(key, None)
+        if _analyze_dedup_inflight.get(key) is my_flight:
+            _analyze_dedup_inflight.pop(key, None)
     my_flight.event.set()
     return result
 
