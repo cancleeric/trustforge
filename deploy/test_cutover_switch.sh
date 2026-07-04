@@ -33,6 +33,20 @@
 #   13. absent live symlink + 無失敗注入 → 正常 cutover 應該照常成功（同一
 #      個 pre-state 分支不能只在失敗路徑測，happy path 也要確認沒被新加
 #      的判斷式誤傷）。
+#   14-16. react-http mode（bare-IP HTTP-only 版）：happy path（candidate=
+#      react-http.conf、CSP_MODE 沿用 react 的值）、一個代表性失敗注入
+#      觸發回滾、鎖競爭 reject——控制流程跟 react 共用，只需驗證
+#      mode-specific 的 candidate/CSP_MODE 值正確。
+#   17-23. Step 4b：public nginx（port 80）smoke check 失敗注入（codex 五次
+#      複審，HIGH）——即使 candidate 驗證、symlink 切換、nginx -t、
+#      systemctl、python 直連 /healthz 全部成功，只要 public nginx 面看到
+#      的東西不對（dist 缺失/404、CSP header 沒套用、內容不像 React
+#      index.html、SPA fallback（/analyze）壞、/api/health proxy 壞或回應
+#      內容不對），都要沿用同一顆 ERR trap 觸發既有 rollback，不能謊報
+#      成功；react-http mode 額外驗證一個代表性失敗也走同一套。
+#   24-25. legacy mode（從 react 降級）：public /healthz（經 nginx 轉發）
+#      失敗注入 → 觸發 rollback、正確退回切換前的 react 狀態；無失敗注入
+#      → 正常切回 legacy，且必須先過 public smoke check 才報成功。
 #
 # 依賴：真的 `flock`（util-linux；Amazon Linux/大多數 Linux 預設就有）。
 # macOS 本機測試需要 `brew install flock`（discoteq/flock 的 fd 型
@@ -193,13 +207,89 @@ esac
 SYSTEMCTLEOF
 chmod +x "$MOCKDIR/systemctl"
 
-# ── mock curl：/healthz 探測，預設一律成功 ──────────────────────────────
+# ── mock curl：既要模擬 python 直連 /healthz 探測，也要模擬 Step 4b 新加的
+# public nginx（port 80）smoke check——後者會真的檢查 `-D`（header 檔）/
+# `-o`（body 檔）內容（CSP header、React dist 特徵 `<div id="root">`、
+# `/api/health` 的 JSON body），不是只看 curl 自己的 exit code，所以這隻
+# mock 除了「成功/失敗」還要能依 URL 產生「看起來合理」的 header/body 內容，
+# 且可用專屬環境變數選擇性只讓某一個 public 檢查失敗（模擬 dist 缺失/
+# CSP 沒套用/SPA fallback 壞掉/api proxy 壞掉等各自獨立的失效模式），
+# 而不會牽動其他檢查（否則所有 happy-path 場景都會連帶炸掉）──────────────
 cat > "$MOCKDIR/curl" <<'CURLEOF'
 #!/usr/bin/env bash
 if [ "${MOCK_CURL_FAIL:-0}" = "1" ]; then
   exit 1
 fi
-exit 0
+
+HDR_FILE=""
+BODY_FILE=""
+URL=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -D) HDR_FILE="$a" ;;
+    -o) BODY_FILE="$a" ;;
+  esac
+  prev="$a"
+done
+# URL 一律是最後一個參數（cutover_switch.sh 呼叫 curl 的方式都是這樣）
+if [ "$#" -gt 0 ]; then
+  URL="${*: -1}"
+fi
+
+case "$URL" in
+  http://127.0.0.1:8080/healthz)
+    # python 直連健康檢查（Step 4 原本就有的那顆，跟 Step 4b public 檢查
+    # 是兩回事，不用任何 MOCK_CURL_REACT_*/MOCK_CURL_PUBLIC_* 控制）
+    exit 0
+    ;;
+  http://127.0.0.1/healthz)
+    # legacy 模式的 public nginx smoke check（驗 nginx→python 全轉發鏈路）
+    if [ "${MOCK_CURL_PUBLIC_LEGACY_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  http://127.0.0.1/|http://127.0.0.1/analyze)
+    if [ "$URL" = "http://127.0.0.1/" ] && [ "${MOCK_CURL_REACT_ROOT_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    if [ "$URL" = "http://127.0.0.1/analyze" ] && [ "${MOCK_CURL_REACT_ANALYZE_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    if [ -n "$HDR_FILE" ]; then
+      if [ "${MOCK_CURL_REACT_NO_CSP:-0}" = "1" ]; then
+        printf 'HTTP/1.1 200 OK\r\n' > "$HDR_FILE"
+      else
+        printf 'HTTP/1.1 200 OK\r\nContent-Security-Policy: default-src '\''self'\''\r\n' > "$HDR_FILE"
+      fi
+    fi
+    if [ -n "$BODY_FILE" ]; then
+      if [ "${MOCK_CURL_REACT_BAD_BODY:-0}" = "1" ]; then
+        printf '<html><body>not react (dist missing/corrupted)</body></html>' > "$BODY_FILE"
+      else
+        printf '<!doctype html><html><body><div id="root"></div></body></html>' > "$BODY_FILE"
+      fi
+    fi
+    exit 0
+    ;;
+  http://127.0.0.1/api/health)
+    if [ "${MOCK_CURL_API_HEALTH_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    if [ -n "$BODY_FILE" ]; then
+      if [ "${MOCK_CURL_API_HEALTH_BAD_BODY:-0}" = "1" ]; then
+        printf '{"unexpected":"payload"}' > "$BODY_FILE"
+      else
+        printf '{"ok": true, "data": {"status": "ok"}}' > "$BODY_FILE"
+      fi
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
 CURLEOF
 chmod +x "$MOCKDIR/curl"
 
@@ -214,10 +304,26 @@ CMD_REACT=$(TF_CUTOVER_DRY_RUN=1 TRUSTFORGE_CUTOVER_CONFIRMED=yes \
   bash "$REPO_ROOT/deploy/cutover_switch.sh" react)
 CMD_REACT_HTTP=$(TF_CUTOVER_DRY_RUN=1 TRUSTFORGE_CUTOVER_CONFIRMED=yes \
   bash "$REPO_ROOT/deploy/cutover_switch.sh" react-http)
+# legacy 模式不需要 TRUSTFORGE_CUTOVER_CONFIRMED（回滾/降級用途，見
+# cutover_switch.sh：只有 react/react-http 才會擋在三審+簽核那關）
+CMD_LEGACY=$(TF_CUTOVER_DRY_RUN=1 bash "$REPO_ROOT/deploy/cutover_switch.sh" legacy)
 
 active_conf() { basename "$(readlink "$SANDBOX/etc/nginx/conf.d/trustforge.conf")"; }
 active_csp() { grep '^Environment=TRUSTFORGE_CSP_MODE=' \
   "$SANDBOX/etc/systemd/system/trustforge.service" | cut -d= -f3; }
+
+# ── 給 legacy 模式的 public smoke check 測試用：legacy 模式的「有意義」
+# 情境是從 react 切回 legacy（緊急降級），所以這裡另外準備一個 pre-state=
+# react 的 sandbox reset（跟預設 reset_sandbox 的 pre-state=legacy 相反），
+# 讓 legacy 的 happy path/rollback 有真的東西可切、可退 ──────────────────
+reset_sandbox_react_active() {
+  reset_sandbox
+  ln -sfn "$SANDBOX/etc/nginx/trustforge-sites/react.conf" \
+    "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
+  "$GSED_BIN" -i \
+    "s|^Environment=TRUSTFORGE_CSP_MODE=.*|Environment=TRUSTFORGE_CSP_MODE=react|" \
+    "$SANDBOX/etc/systemd/system/trustforge.service"
+}
 
 run_cutover_cmd() {
   # $1 = 要執行的擷取指令內容（CMD_REACT / CMD_REACT_HTTP），其餘 "$@" 是
@@ -239,6 +345,10 @@ run_cutover() {
 
 run_cutover_http() {
   run_cutover_cmd "$CMD_REACT_HTTP" "$@"
+}
+
+run_cutover_legacy() {
+  run_cutover_cmd "$CMD_LEGACY" "$@"
 }
 
 echo "== 場景 1：候選設定驗證（Step 1）失敗 → 完全不動 live symlink/service，非零結束 =="
@@ -363,6 +473,7 @@ fi
 assert_grep_log "完成後驗證通過" "有印完成後驗證通過訊息"
 assert_eq "$(active_conf)" "react.conf" "happy path 後 live symlink 真的换到 react.conf"
 assert_eq "$(active_csp)" "react" "happy path 後 service file CSP_MODE 真的换到 react"
+assert_grep_log "public nginx smoke check 通過" "happy path 必須先過 public nginx smoke check（/、/analyze、/api/health）才報成功（codex 五次複審 HIGH）"
 
 echo "== 場景 10：並行呼叫 — 鎖已被持有 → reject，完全不做任何 mutation =="
 reset_sandbox
@@ -447,6 +558,7 @@ fi
 assert_grep_log "完成後驗證通過" "react-http 有印完成後驗證通過訊息"
 assert_eq "$(active_conf)" "react-http.conf" "react-http happy path 後 live symlink 換到 react-http.conf（不是 react.conf）"
 assert_eq "$(active_csp)" "react" "react-http happy path 後 service file CSP_MODE 換到 react（沿用 react 的 CSP_MODE 值，不是字面 react-http）"
+assert_grep_log "public nginx smoke check 通過" "react-http happy path 必須先過 public nginx smoke check 才報成功"
 
 echo "== 場景 15：react-http mode，swap 後 nginx -t 失敗 → 觸發回滾（guarded transaction 對 react-http 也生效）=="
 reset_sandbox
@@ -488,6 +600,113 @@ assert_eq "$(active_conf)" "legacy.conf" "react-http 鎖被持有時完全沒動
 kill "$HOLDER_PID" 2>/dev/null || true
 wait "$HOLDER_PID" 2>/dev/null || true
 rm -f "$LOCKFILE" "$STATE/holder_ready"
+
+# ── 場景 17-23：Step 4b public nginx smoke check 失敗注入（codex 五次複審，
+# HIGH）：即使 candidate 驗證通過、symlink/nginx -t/systemctl 全部成功、
+# python 直連 /healthz 也健康，只要 public nginx（port 80）面看到的東西不
+# 對（dist 缺失、CSP 沒套用、內容不像 React、SPA fallback 壞、/api/ proxy
+# 壞），一律要觸發既有 rollback，不能謊報成功 ──────────────────────────
+echo "== 場景 17：react mode，public smoke check：/ 沒有 200 回應（dist 缺失/404）→ 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_REACT_ROOT_FAIL=1; then
+  fail "public / 沒有 200 回應時應該非零結束"
+else
+  pass "public / 沒有 200 回應時非零結束（觸發 rollback）"
+fi
+assert_grep_log "public nginx /（root）沒有 200 回應" "有印出具體是 public / 沒有 200 回應（React dist 是否缺失）"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+assert_eq "$(active_csp)" "legacy" "回滾後 service file CSP_MODE 退回 legacy（不留半殘）"
+
+echo "== 場景 18：react mode，public smoke check：/ 有 200 但沒有 CSP header → 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_REACT_NO_CSP=1; then
+  fail "public / 沒有 CSP header 時應該非零結束"
+else
+  pass "public / 沒有 CSP header 時非零結束（觸發 rollback）"
+fi
+assert_grep_log "沒有 CSP header" "有印出具體是 public / 沒有 CSP header（安全 header 沒套用到 React 路由）"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+echo "== 場景 19：react mode，public smoke check：/ 回應內容不像 React index.html（無 <div id=\"root\">）→ 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_REACT_BAD_BODY=1; then
+  fail "public / 內容不像 React 時應該非零結束"
+else
+  pass "public / 內容不像 React 時非零結束（觸發 rollback）"
+fi
+assert_grep_log "回應內容不像 React index.html" "有印出具體是 public / 內容不像 React index.html（dist 缺失/損毀）"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+echo "== 場景 20：react mode，public smoke check：/analyze（SPA fallback）沒有 200 回應 → 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_REACT_ANALYZE_FAIL=1; then
+  fail "public /analyze 沒有 200 回應時應該非零結束"
+else
+  pass "public /analyze 沒有 200 回應時非零結束（觸發 rollback）"
+fi
+assert_grep_log "public nginx /analyze（spa-fallback）沒有 200 回應" "有印出具體是 public /analyze SPA fallback 沒有 200 回應"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+echo "== 場景 21：react mode，public smoke check：/api/health 沒有 200 回應（nginx /api/ proxy 壞）→ 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_API_HEALTH_FAIL=1; then
+  fail "public /api/health 沒有 200 回應時應該非零結束"
+else
+  pass "public /api/health 沒有 200 回應時非零結束（觸發 rollback）"
+fi
+assert_grep_log "public nginx /api/health 沒有 200 回應" "有印出具體是 public /api/health 沒有 200 回應（nginx /api/ proxy 異常）"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+echo "== 場景 22：react mode，public smoke check：/api/health 回應 200 但內容不是預期 JSON → 觸發 rollback =="
+reset_sandbox
+if run_cutover MOCK_CURL_API_HEALTH_BAD_BODY=1; then
+  fail "public /api/health 回應內容不對時應該非零結束"
+else
+  pass "public /api/health 回應內容不對時非零結束（觸發 rollback）"
+fi
+assert_grep_log "public nginx /api/health 回應內容不是預期 JSON" "有印出具體是 public /api/health 回應內容不是預期 JSON"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
+
+echo "== 場景 23：react-http mode，public smoke check：/ 沒有 200 回應（dist 缺失）→ 觸發 rollback（確認 react-http 也走同一套）=="
+reset_sandbox
+if run_cutover_http MOCK_CURL_REACT_ROOT_FAIL=1; then
+  fail "react-http public / 沒有 200 回應時應該非零結束"
+else
+  pass "react-http public / 沒有 200 回應時非零結束（觸發 rollback）"
+fi
+assert_grep_log "已回滾到切換前狀態" "react-http 有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "react-http 回滾後 live symlink 退回 legacy.conf（不留半殘）"
+assert_eq "$(active_csp)" "legacy" "react-http 回滾後 service file CSP_MODE 退回 legacy（不留半殘）"
+
+echo "== 場景 24：legacy mode（從 react 降級），public smoke check：public /healthz（經 nginx）沒有回應 → 觸發 rollback、退回 react =="
+reset_sandbox_react_active
+if run_cutover_legacy MOCK_CURL_PUBLIC_LEGACY_FAIL=1; then
+  fail "legacy public /healthz 沒有回應時應該非零結束"
+else
+  pass "legacy public /healthz 沒有回應時非零結束（觸發 rollback）"
+fi
+assert_grep_log "public nginx（port 80）/healthz 沒有回應" "有印出具體是 legacy public /healthz（經 nginx）沒有回應"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "react.conf" "legacy 切換失敗時，回滾正確退回切換前的 react.conf（不是誤退回 legacy.conf）"
+assert_eq "$(active_csp)" "react" "legacy 切換失敗時，回滾正確退回切換前的 CSP_MODE=react"
+
+echo "== 場景 25：legacy mode（從 react 降級），無失敗注入 → 正常切回 legacy，且必須先過 public smoke check 才報成功 =="
+reset_sandbox_react_active
+if run_cutover_legacy; then
+  pass "legacy 無注入失敗時 exit 0"
+else
+  fail "legacy 無注入失敗時仍非零結束"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "legacy.conf" "legacy happy path 後 live symlink 真的换到 legacy.conf"
+assert_eq "$(active_csp)" "legacy" "legacy happy path 後 service file CSP_MODE 真的换到 legacy"
+assert_grep_log "public nginx smoke check 通過" "legacy happy path 必須先過 public nginx smoke check（/healthz 經 nginx）才報成功"
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE"
 
