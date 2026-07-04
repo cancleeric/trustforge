@@ -75,7 +75,7 @@ cp "$REPO_ROOT/deploy/nginx.conf" "$WORK/nginx-react-patched.conf"
   -e "s#listen \[::\]:443 ssl;#listen [::]:18443 ssl;#" \
   -e "s#/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/fullchain.pem#$WORK/certs/fullchain.pem#" \
   -e "s#/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/privkey.pem#$WORK/certs/privkey.pem#" \
-  -e "s#root /opt/trustforge/frontend/dist;#root $WORK/dist;#" \
+  -e "s#root /opt/trustforge/frontend/current;#root $WORK/dist;#" \
   "$WORK/nginx-react-patched.conf"
 
 cat > "$WORK/harness.conf" <<EOF

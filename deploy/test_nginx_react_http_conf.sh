@@ -70,7 +70,7 @@ cp "$REPO_ROOT/deploy/nginx-react-http.conf" "$WORK/nginx-react-http-patched.con
 "$GSED_BIN" -i \
   -e "s#listen 80;#listen 18180;#" \
   -e "s#listen \[::\]:80;#listen [::]:18180;#" \
-  -e "s#root /opt/trustforge/frontend/dist;#root $WORK/dist;#" \
+  -e "s#root /opt/trustforge/frontend/current;#root $WORK/dist;#" \
   "$WORK/nginx-react-http-patched.conf"
 
 cat > "$WORK/harness.conf" <<EOF

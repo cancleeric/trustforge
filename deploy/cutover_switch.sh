@@ -152,10 +152,14 @@ if [ "$MODE" = "legacy" ]; then
 #      （port 80），在清除 ERR trap 之前失敗會被同一顆 trap 接住觸發 rollback。
 #      legacy 拓樸：nginx location / 全部原樣轉發給 python，用 /healthz 驗證
 #      nginx→python 這段代理鏈路是通的）----
-if ! curl -fsS -o /dev/null http://127.0.0.1/healthz; then
-  echo \"❌ [cutover] 完成後驗證失敗：public nginx（port 80）/healthz 沒有回應（legacy SSR 全轉發鏈路異常）\" >&2
+#      codex 複審 HIGH（真部署誤報 ROLLBACK-FAILED）：nginx reload 之後有
+#      極短暫窗口 worker 還沒接手新設定，單發 curl 撞上這個窗口就會誤判
+#      失敗、觸發不必要的 rollback（真環境已實測發生）。加 retry（見上方
+#      共用的 _tf_retry），撐過 reload blip，全部重試用完才算真失敗。
+if ! _tf_retry curl -fsS -o /dev/null http://127.0.0.1/healthz; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx（port 80）/healthz 沒有回應（重試 \${TF_CUTOVER_SMOKE_RETRIES} 次，間隔 \${TF_CUTOVER_SMOKE_DELAY}s，仍失敗；legacy SSR 全轉發鏈路異常）\" >&2
+  false
 fi
-curl -fsS -o /dev/null http://127.0.0.1/healthz
 echo \"[cutover] public nginx smoke check 通過（/healthz 經 nginx 轉發正常）\"
 "
 elif [ "$MODE" = "react-http" ]; then
@@ -187,17 +191,27 @@ _tf_check_react_page() {
   return 0
 }
 
-_tf_check_react_page \"/\" \"root\"
-_tf_check_react_page \"/analyze\" \"spa-fallback\"
-
-if ! curl -fsS -o \"\$SMOKE_DIR/api-health-body\" \"http://127.0.0.1/api/health\"; then
-  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（nginx /api/ proxy 是否正常？）\" >&2
+# codex 複審 HIGH（真部署誤報 ROLLBACK-FAILED）：nginx reload 後有極短暫窗口
+# worker 還沒接手新設定，單發 curl 撞上這個窗口就會誤判失敗、觸發不必要的
+# rollback（真環境已實測發生）。加 retry（見上方共用的 _tf_retry），撐過
+# reload blip，全部重試用完才算真失敗。
+if ! _tf_retry _tf_check_react_page \"/\" \"root\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /（root）重試 \${TF_CUTOVER_SMOKE_RETRIES} 次（間隔 \${TF_CUTOVER_SMOKE_DELAY}s）仍失敗\" >&2
+  false
 fi
-curl -fsS -o \"\$SMOKE_DIR/api-health-body\" \"http://127.0.0.1/api/health\"
+if ! _tf_retry _tf_check_react_page \"/analyze\" \"spa-fallback\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /analyze（spa-fallback）重試 \${TF_CUTOVER_SMOKE_RETRIES} 次（間隔 \${TF_CUTOVER_SMOKE_DELAY}s）仍失敗\" >&2
+  false
+fi
+
+if ! _tf_retry curl -fsS -o \"\$SMOKE_DIR/api-health-body\" \"http://127.0.0.1/api/health\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（重試 \${TF_CUTOVER_SMOKE_RETRIES} 次，間隔 \${TF_CUTOVER_SMOKE_DELAY}s，仍失敗；nginx /api/ proxy 是否正常？）\" >&2
+  false
+fi
 if ! grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"; then
   echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 回應內容不是預期 JSON\" >&2
+  false
 fi
-grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
 
 rm -rf \"\$SMOKE_DIR\"
 echo \"[cutover] public nginx smoke check 通過（/、/analyze、/api/health 皆正常且安全 header 有套用）\"
@@ -239,17 +253,27 @@ _tf_check_react_page() {
   return 0
 }
 
-_tf_check_react_page \"/\" \"root\"
-_tf_check_react_page \"/analyze\" \"spa-fallback\"
-
-if ! curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o \"\$SMOKE_DIR/api-health-body\" \"https://${REACT_TLS_DOMAIN}/api/health\"; then
-  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（nginx /api/ proxy 是否正常？）\" >&2
+# codex 複審 HIGH（真部署誤報 ROLLBACK-FAILED）：nginx reload 後有極短暫窗口
+# worker 還沒接手新設定，單發 curl 撞上這個窗口就會誤判失敗、觸發不必要的
+# rollback（真環境已實測發生）。加 retry（見上方共用的 _tf_retry），撐過
+# reload blip，全部重試用完才算真失敗。
+if ! _tf_retry _tf_check_react_page \"/\" \"root\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}/（root）重試 \${TF_CUTOVER_SMOKE_RETRIES} 次（間隔 \${TF_CUTOVER_SMOKE_DELAY}s）仍失敗\" >&2
+  false
 fi
-curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o \"\$SMOKE_DIR/api-health-body\" \"https://${REACT_TLS_DOMAIN}/api/health\"
+if ! _tf_retry _tf_check_react_page \"/analyze\" \"spa-fallback\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}/analyze（spa-fallback）重試 \${TF_CUTOVER_SMOKE_RETRIES} 次（間隔 \${TF_CUTOVER_SMOKE_DELAY}s）仍失敗\" >&2
+  false
+fi
+
+if ! _tf_retry curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o \"\$SMOKE_DIR/api-health-body\" \"https://${REACT_TLS_DOMAIN}/api/health\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（重試 \${TF_CUTOVER_SMOKE_RETRIES} 次，間隔 \${TF_CUTOVER_SMOKE_DELAY}s，仍失敗；nginx /api/ proxy 是否正常？）\" >&2
+  false
+fi
 if ! grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"; then
   echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 回應內容不是預期 JSON\" >&2
+  false
 fi
-grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
 
 # ---- HTTP(80) → HTTPS redirect 驗證（codex 複審 HIGH：react（TLS）的
 #      nginx.conf 把 80 port 除 /healthz 外全部 301 導去 https，這段沒驗到
@@ -263,19 +287,22 @@ grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
 #      以前用 \\\`\$host\\\`，會直接照抄請求時的 Host（不管是不是
 #      canonical），這裡刻意把 Host 設成跟 canonical domain 一致，藉此驗
 #      證 conf 端真的是寫死 literal domain、不是把 \$host 原樣转出去）----
+# codex 複審 HIGH（真部署誤報 ROLLBACK-FAILED）：跟上面 HTTPS 檢查同理，
+# nginx reload 後有極短暫窗口，port 80 的 redirect 也可能撞上，加同一套
+# retry。
 REDIRECT_HDR=\"\$SMOKE_DIR/redirect-hdr\"
-if ! curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"Host: ${REACT_TLS_DOMAIN}\" -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"; then
-  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回應（HTTP→HTTPS redirect 是否正常？）\" >&2
+if ! _tf_retry curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"Host: ${REACT_TLS_DOMAIN}\" -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回應（重試 \${TF_CUTOVER_SMOKE_RETRIES} 次，間隔 \${TF_CUTOVER_SMOKE_DELAY}s，仍失敗；HTTP→HTTPS redirect 是否正常？）\" >&2
+  false
 fi
-curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"Host: ${REACT_TLS_DOMAIN}\" -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"
 if ! grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"; then
   echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回 301（預期全轉 HTTPS，實際首行：\$(head -1 \"\$REDIRECT_HDR\")）\" >&2
+  false
 fi
-grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"
 if ! grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"; then
   echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 的 redirect Location 不是預期的 https://${REACT_TLS_DOMAIN}（canonical domain，不是 127.0.0.1/其他 Host）\" >&2
+  false
 fi
-grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"
 
 rm -rf \"\$SMOKE_DIR\"
 echo \"[cutover] public nginx smoke check 通過（HTTPS /、/analyze、/api/health 皆正常且安全 header 有套用，HTTP→HTTPS redirect 也正常）\"
@@ -557,6 +584,39 @@ if ! curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
   echo '❌ [cutover] 完成後驗證失敗：python /healthz 未回應' >&2
 fi
 curl -fsS -o /dev/null http://127.0.0.1:8080/healthz
+
+# ---- Step 4b 共用：public smoke check 重試工具（codex 複審，HIGH：真部署
+#      cutover_switch.sh health-check 誤報 ROLLBACK-FAILED——nginx reload
+#      之後有極短暫窗口，worker process 還沒接手新設定，下面每一個 public
+#      smoke check（單發 curl）撞上這個窗口就會誤判失敗、白白觸發一次不必要
+#      的 rollback（實際切換早已成功）。比照 deploy/deploy_ec2.sh healthz
+#      gate 的 retry 慣例，把「一次失敗」的定義從「單發 curl 沒過」改成
+#      「連續 \${TF_CUTOVER_SMOKE_RETRIES} 次都沒過」，撐過 reload blip；全部
+#      重試用完才算真失敗，一樣沿用同一顆 ERR trap 觸發既有 rollback，語意
+#      不變）----
+TF_CUTOVER_SMOKE_RETRIES=\"\${TF_CUTOVER_SMOKE_RETRIES:-10}\"
+TF_CUTOVER_SMOKE_DELAY=\"\${TF_CUTOVER_SMOKE_DELAY:-2}\"
+_tf_retry() {
+  local _tf_retry_i _tf_retry_out
+  _tf_retry_out=\"\$(mktemp)\"
+  for _tf_retry_i in \$(seq 1 \"\$TF_CUTOVER_SMOKE_RETRIES\"); do
+    if \"\$@\" >\"\$_tf_retry_out\" 2>&1; then
+      rm -f \"\$_tf_retry_out\"
+      return 0
+    fi
+    if [ \"\$_tf_retry_i\" -lt \"\$TF_CUTOVER_SMOKE_RETRIES\" ]; then
+      sleep \"\$TF_CUTOVER_SMOKE_DELAY\"
+    fi
+  done
+  # 全部重試用完仍失敗：把最後一次嘗試的實際輸出（例如
+  # _tf_check_react_page 內部印的具體原因：沒有 200/沒有 CSP
+  # header/內容不像 React）吐回 stderr，不要整段吞掉——舊寫法靠
+  # retry 之後再補一個無保護的裸重複探測來洩漏這段訊息，裸探測
+  # 移除後改成這裡直接把最後一次的輸出重播出來，訊息不會消失。
+  cat \"\$_tf_retry_out\" >&2
+  rm -f \"\$_tf_retry_out\"
+  return 1
+}
 ${PUBLIC_SMOKE_BLOCK}
 trap - ERR
 echo '[cutover] 已切換到 ${MODE}（nginx conf + python CSP_MODE 同步，完成後驗證通過，含 public nginx smoke check）'

@@ -100,7 +100,20 @@ case "\$ALL" in
       N=\$((\$(cat "\$CAPTURE_DIR/ssm_call_count") + 1))
     fi
     echo "\$N" > "\$CAPTURE_DIR/ssm_call_count"
-    PARAMS=\$(find_after --parameters "\$@")
+    PARAMS_RAW=\$(find_after --parameters "\$@")
+    # commit 205216b 之後 --parameters 改傳 file://<path>（JSON
+    # {"commands":[...]}）而不是內嵌 JSON 字串，這裡要吃 file:// 路徑、
+    # 讀檔、還原成原本的多行 CMDS 文字。
+    case "\$PARAMS_RAW" in
+      file://*)
+        # 直接讀原始 JSON 檔案文字（不 json.load 解回原字串）：JSON 編碼
+        # 本來就會把每行指令內的 " 轉成 \"，這裡要比對的正是這段
+        # JSON escape 後的文字（跟改成 file:// 之前直接比對 inline JSON
+        # 字串時的斷言字面值一致，才不用大改既有斷言）。
+        PARAMS=\$(cat "\${PARAMS_RAW#file://}") ;;
+      *)
+        PARAMS="\$PARAMS_RAW" ;;
+    esac
     printf '%s' "\$PARAMS" > "\$CAPTURE_DIR/ssm_params_call\${N}.txt"
     echo "cmd-call\${N}" ;;
   "ssm get-command-invocation"*)
@@ -168,7 +181,20 @@ case "\$ALL" in
       N=\$((\$(cat "\$CAPTURE_DIR/ssm_call_count") + 1))
     fi
     echo "\$N" > "\$CAPTURE_DIR/ssm_call_count"
-    PARAMS=\$(find_after --parameters "\$@")
+    PARAMS_RAW=\$(find_after --parameters "\$@")
+    # commit 205216b 之後 --parameters 改傳 file://<path>（JSON
+    # {"commands":[...]}）而不是內嵌 JSON 字串，這裡要吃 file:// 路徑、
+    # 讀檔、還原成原本的多行 CMDS 文字，assert_contains 才找得到內容。
+    case "\$PARAMS_RAW" in
+      file://*)
+        # 直接讀原始 JSON 檔案文字（不 json.load 解回原字串）：JSON 編碼
+        # 本來就會把每行指令內的 " 轉成 \"，這裡要比對的正是這段
+        # JSON escape 後的文字（跟改成 file:// 之前直接比對 inline JSON
+        # 字串時的斷言字面值一致，才不用大改既有斷言）。
+        PARAMS=\$(cat "\${PARAMS_RAW#file://}") ;;
+      *)
+        PARAMS="\$PARAMS_RAW" ;;
+    esac
     printf '%s' "\$PARAMS" > "\$CAPTURE_DIR/ssm_params_call\${N}.txt"
     echo "cmd-call\${N}" ;;
   "ssm get-command-invocation"*)
@@ -226,6 +252,52 @@ assert_contains "$INSTALL_CMD" "trap 'ROLLBACK' ERR" "SSM 安裝指令：narrow 
 assert_contains "$INSTALL_CMD" 'exit 97' "SSM 安裝指令：回滾本身失敗要用 distinct ROLLBACK-FAILED exit code（97），不跟一般失敗（1）混在一起"
 
 rm -rf "$MOCKDIR" "$CAPTURE" "$REPO_ROOT/frontend/dist" "$REPO_ROOT/build/trustforge_frontend_dist.zip"
+
+echo "== 場景 2b（codex 複審 HIGH：dry-run 完全短路 mutating AWS 呼叫）：TF_BOOTSTRAP_DRY_RUN=1 時，即使沒有 mock npm/沒有 mock 到 s3/SG/start-instances 的處理分支，也不該真的呼叫任何 mutating aws 操作或真的 npm build ——只印出組好的遠端指令內容 =="
+DRYDIR=$(mktemp -d)
+DRYCAP=$(mktemp -d)
+cat > "$DRYDIR/aws" <<MOCKEOF
+#!/usr/bin/env bash
+echo "\$*" >> "$DRYCAP/aws_calls.log"
+case "\$*" in
+  "sts get-caller-identity"*) echo "123456789012" ;;
+  "ec2 describe-instances"*) printf 'i-0123456789abcdef0\trunning\n' ;;
+  "ec2 describe-vpcs"*) echo "vpc-0123456789abcdef0" ;;
+  "ec2 describe-security-groups"*) echo "sg-0123456789abcdef0" ;;
+  "ec2 start-instances"*|"ec2 wait"*|"s3api head-bucket"*|"s3api create-bucket"*|"s3 cp"*|"ec2 authorize-security-group-ingress"*)
+    # 這幾種是 mutating 操作：dry-run 修好之後根本不該打到這裡。萬一還是
+    # 打進來，故意讓它非零結束、讓測試明確 fail，而不是默默假裝成功。
+    echo "❌ [aws-mock] dry-run 模式不該呼叫到 mutating 操作: \$*" >&2
+    exit 1 ;;
+  *) echo "[aws-mock] 未預期: \$*" >&2; exit 99 ;;
+esac
+MOCKEOF
+chmod +x "$DRYDIR/aws"
+# 故意不放 mock npm、PATH 只留基本系統工具（/usr/bin、/bin，沒有真的
+# npm/aws 所在的 nvm/homebrew 路徑）：dry-run 若真的呼叫到 npm ci/build，
+# 會直接 exit 127（command not found），同樣能明確暴露「dry-run 沒真的
+# 短路本機 build」這個問題，而不是意外跑到真的 npm。
+if PATH="$DRYDIR:/usr/bin:/bin" TF_BOOTSTRAP_DRY_RUN=1 \
+    bash "$REPO_ROOT/deploy/deploy_frontend_nginx.sh" >"$DRYCAP/stdout.log" 2>"$DRYCAP/stderr.log"; then
+  echo "  [PASS] dry-run 模式正常結束（exit 0）"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] dry-run 模式應該正常結束（exit 0），只印指令、不 mutate"
+  cat "$DRYCAP/stderr.log"
+  FAIL=$((FAIL + 1))
+fi
+AWS_CALLS=$(cat "$DRYCAP/aws_calls.log" 2>/dev/null || echo "")
+if printf '%s\n' "$AWS_CALLS" | grep -qE '^(ec2 start-instances|ec2 wait|s3api head-bucket|s3api create-bucket|s3 cp|ec2 authorize-security-group-ingress)'; then
+  echo "  [FAIL] dry-run 模式不該呼叫任何 mutating aws 操作，但實際呼叫記錄裡有"
+  printf '%s\n' "$AWS_CALLS"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] dry-run 模式完全沒有呼叫 mutating aws 操作（start-instances/s3api create-bucket/s3 cp/authorize-security-group-ingress 呼叫次數皆為 0）——codex 複審 HIGH 修復點"
+  PASS=$((PASS + 1))
+fi
+assert_contains "$AWS_CALLS" "sts get-caller-identity" "dry-run 模式仍會做唯讀查詢（sts get-caller-identity，純讀取不算 mutation）"
+assert_contains "$(cat "$DRYCAP/stdout.log")" "dnf install -y nginx unzip" "dry-run 模式的 stdout 仍有印出組好的遠端指令內容（非空、有實質內容，不是提早 exit 的空字串）"
+rm -rf "$DRYDIR" "$DRYCAP"
 
 echo "== 場景 3：X-Real-IP 覆蓋整合測試（harper CISO 建議）=="
 # 目的：deploy/nginx-legacy.conf 裡 `proxy_set_header X-Real-IP $remote_addr;`
