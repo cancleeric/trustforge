@@ -55,6 +55,75 @@ LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
 # 累計花費超過此門檻（USD）→ /costs 頁面卡片轉紅告警。未設定則不告警。
 COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
 
+# 前後端分離 Phase 3（task #28，harper CISO 安全審 must-have）：
+# ────────────────────────────────────────────────────────────────────
+# `TRUSTFORGE_TRUST_PROXY`：**預設關**（維持現況：信任 TCP 對端
+# `client_address[0]` 當真實使用者 IP，per-IP 限流 bucket key 不變、
+# 行為逐字不變）。只有明確設成 truthy 值才會改讀 `X-Real-IP`／
+# `X-Forwarded-For` header 當真實 IP——這兩個 header 是請求端可自由偽造
+# 的欄位，**絕對不能無條件信任**，故必須 config-gated opt-in，且只在
+# 「python 綁定 127.0.0.1（不對外，前面一定有 nginx）」這個拓樸下才安全
+# （見 `main()`：開啟本旗標會強制把監聽 host 收斂成 127.0.0.1，即使
+# `TRUSTFORGE_BIND_HOST` 設了別的值，避免有心人繞過 nginx 直接對 python
+# 打偽造 header 繞過限流）。
+TRUST_PROXY = os.getenv("TRUSTFORGE_TRUST_PROXY", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# CSP 切換旗標：**預設 `legacy`**——沿用既有 zero-JS SSR 的嚴格 CSP
+# （`default-src 'none'`），cutover 前行為逐字不變。cutover 當天由 CEO+
+# CISO+CPO 三審+老闆簽核後，才把這個環境變數切成 `react`，套用 harper
+# 訂的新指令集（給 Vite build 出的 React 前端用，允許 `'self'` script/
+# style/connect 等）。同一支程式碼、單一環境變數即可切換，方便快速
+# 回滾（見 `deploy/nginx-react.conf` 與 `docs/PLAN-frontend-backend-split.md`
+# P3 一週觀察期）。
+CSP_MODE = os.getenv("TRUSTFORGE_CSP_MODE", "legacy").strip().lower()
+
+_CSP_LEGACY = (
+    "default-src 'none'; "
+    "style-src 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src https://fonts.gstatic.com"
+)
+# harper 指令集（React 前端專用，PLAN §4 + task #28 CISO 複審）。
+_CSP_REACT = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "connect-src 'self'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'; "
+    "form-action 'self'"
+)
+
+
+def _resolve_client_ip(direct_ip: str, headers) -> str:
+    """依 `TRUST_PROXY` 決定 per-IP 限流要 keyed 用哪個 IP。
+
+    - 關（預設）：原樣回傳 `direct_ip`（TCP 對端 IP，即 `client_address[0]`），
+      行為與 cutover 前逐字相同。
+    - 開：優先信任 `X-Real-IP`（nginx 設定固定寫死 `$remote_addr`，見
+      `deploy/nginx-react.conf`／`deploy/nginx-legacy.conf`），沒有才退回
+      `X-Forwarded-For` 取第一段（逗號分隔，取最左——即最原始的用戶端）。
+      兩者都沒有才退回 `direct_ip`。
+      ⚠️ 只有在 python 綁定 127.0.0.1（見 `main()`）且 nginx 是唯一對外
+      入口時，這兩個 header 才可信；`TRUST_PROXY` 本身不做拓樸檢查，
+      拓樸保證由 `main()` 的綁定收斂 + 部署腳本共同確保。
+    """
+    if not TRUST_PROXY:
+        return direct_ip
+    real_ip = headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    forwarded = headers.get("X-Forwarded-For")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return direct_ip
+
 # `/status` 頁面「運行時間」：本程序（web worker）匯入這個模組的當下當作起點，
 # 不是真的 process 啟動時間（stdlib 無法可靠取得），但對觀測用途已足夠。
 _START_TIME = time.time()
@@ -3492,12 +3561,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'none'; "
-            "style-src 'unsafe-inline' https://fonts.googleapis.com; "
-            "font-src https://fonts.gstatic.com",
-        )
+        # CSP_MODE 預設 "legacy"：byte-identical 沿用既有 zero-JS 嚴格 CSP，
+        # cutover 前不破 SSR。切成 "react" 才套用 harper 新指令集 + 追加的
+        # clickjacking/referrer 防護（見模組頂部 CSP_MODE 說明）。
+        if CSP_MODE == "react":
+            self.send_header("Content-Security-Policy", _CSP_REACT)
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        else:
+            self.send_header("Content-Security-Policy", _CSP_LEGACY)
         self.send_header("X-Content-Type-Options", "nosniff")
         for name, val in (extra_headers or {}).items():
             self.send_header(name, val)
@@ -3512,21 +3584,22 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(u.query)
         # `client_address[0]` 是 TCP 對端 IP，用來 keyed per-IP 限流
         # （`_check_live_rate_limit`/`_check_real_rate_limit`/
-        # `_check_status_rate_limit`）。這在**直連部署**（目前：直接對外的
-        # EC2，前面沒有 reverse proxy/LB）下才是真使用者 IP，per-user
-        # bucket 才正確——目前部署即此狀況，維持現狀即可（codex 確認，
-        # PR #44）。
+        # `_check_status_rate_limit`）。這在**直連部署**（沒有 reverse
+        # proxy/LB）下才是真使用者 IP，per-user bucket 才正確。
         #
-        # 若未來部署在 reverse proxy/LB 後面，`client_address[0]` 會變成
-        # 代理自己的 IP，所有使用者共用一個 bucket，限流會失效（甚至誤傷：
-        # 一人超量全體 429）。屆時須改讀 `X-Forwarded-For`，但**絕對不能
-        # 無條件信任**這個 header——它是使用者可自由偽造的請求標頭，若盲信
-        # 會讓限流被繞過（攻擊者自帶假 XFF 偽裝成不同 IP，繞過限流無限重
-        # 打）。正確作法是「只在明確設定信任特定反向代理時才採信其設定的
-        # XFF」（config-gated allowlist，預設仍只信任直連）。這裡刻意不先
-        # 實作 XFF 解析：目前環境沒有真代理可測，硬寫容易埋下繞過漏洞，
-        # 等真的要上代理部署時再依當時的代理拓樸實作+測試。
-        client_ip = self.client_address[0]
+        # 前後端分離 Phase 3（task #28）：nginx 反代上線後，
+        # `client_address[0]` 會變成 nginx 自己的 IP（127.0.0.1），所有
+        # 使用者會共用一個 bucket、限流失效。`_resolve_client_ip()` 依
+        # `TRUSTFORGE_TRUST_PROXY`（預設關）決定要不要改讀
+        # `X-Real-IP`/`X-Forwarded-For`——**絕對不能無條件信任**這兩個
+        # header（使用者可自由偽造），因此 config-gated，且只在 python
+        # 綁定 127.0.0.1（見 `main()`，nginx 是唯一對外入口）這個拓樸下
+        # 才安全開啟。預設關閉時行為與過去逐字相同（codex 確認，PR #44）。
+        # `getattr(self, "headers", {})`：正常請求路徑一定有 `self.headers`
+        # （`BaseHTTPRequestHandler.parse_request()` 設好），這裡防禦性處理
+        # 是為了相容既有測試用 `Handler.__new__` 建構的最小化 mock（不走
+        # 真 socket handshake，不會有 `.headers`）。
+        client_ip = _resolve_client_ip(self.client_address[0], getattr(self, "headers", {}))
 
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
@@ -3690,9 +3763,27 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"TrustForge web on :{PORT}  (bedrock={'live-capable' if HAS_BEDROCK else 'offline'})",
-          flush=True)
+    # 前後端分離 Phase 3（task #28，harper 安全審 must-have）：`TRUST_PROXY`
+    # 開啟時，代表部署拓樸是「nginx 對外、python 只對內」，此時**強制**把
+    # 監聽 host 收斂成 127.0.0.1——即使 `TRUSTFORGE_BIND_HOST` 被設成別的
+    # 值，也不允許 python 對外直接可連（否則有心人可繞過 nginx 直接對
+    # python 打偽造的 X-Real-IP/X-Forwarded-For header，繞過限流）。
+    # 預設（TRUST_PROXY 關）沿用舊行為 0.0.0.0，cutover 前不破現有直連部署。
+    host = os.getenv("TRUSTFORGE_BIND_HOST", "0.0.0.0")
+    if TRUST_PROXY and host != "127.0.0.1":
+        logging.warning(
+            "TRUSTFORGE_TRUST_PROXY=1 但 TRUSTFORGE_BIND_HOST=%s 非 127.0.0.1，"
+            "強制改綁 127.0.0.1（信任反代 header 只在 python 不對外時安全）",
+            host,
+        )
+        host = "127.0.0.1"
+    srv = ThreadingHTTPServer((host, PORT), Handler)
+    print(
+        f"TrustForge web on {host}:{PORT}  "
+        f"(bedrock={'live-capable' if HAS_BEDROCK else 'offline'}, "
+        f"trust_proxy={TRUST_PROXY}, csp_mode={CSP_MODE})",
+        flush=True,
+    )
     srv.serve_forever()
 
 

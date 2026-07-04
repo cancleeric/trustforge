@@ -212,3 +212,98 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
     悄悄蓋過去（見上方「cache 寫入失敗不能被靜默吞掉」）。
   - cron/systemd 應該對任何非零 exit 告警，不用區分是上述哪一種——兩種都
     代表「這次排程沒有把資料刷新進 cache」。
+
+## 前後端分離 Phase 3：cutover 拓樸（task #28）
+
+> ⛔ 以下腳本只負責「把拓樸架好、隨時可切、但預設不切」。真正把使用者流量
+> 切到 React 前端（cutover）需要 **CEO+CISO+CPO 三審 + 老闆簽核**，見
+> `docs/PLAN-frontend-backend-split.md` P3。本節不涉及任何真實 AWS/生產操作。
+
+分三個階段，各自獨立、可回滾：
+
+| 階段 | 腳本 | 做什麼 | 預設行為 |
+|------|------|--------|----------|
+| 0（既有） | `deploy_ec2.sh` | 建 EC2、裝 python，port 80 直接對外 | 不變 |
+| 1 | `deploy_frontend_nginx.sh` | 疊加 nginx 層 + 上傳 React dist；python 收斂只聽 `127.0.0.1:8080` | 預設啟用 `nginx-legacy.conf`（全部原樣轉發給 python，功能與階段 0 逐字等價） |
+| 2 | `cutover_switch.sh react\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止 |
+
+### 涉及的 config-gated 環境變數（`src/trustforge/web.py`）
+
+- `TRUSTFORGE_TRUST_PROXY`（預設關）：關閉時 rate-limit 用 `client_address[0]`
+  （現況不變）；開啟時改讀 `X-Real-IP` / `X-Forwarded-For`（nginx 已設定
+  `proxy_set_header X-Real-IP $remote_addr`）。**只在 python 只對內監聽
+  （`TRUSTFORGE_BIND_HOST=127.0.0.1`）時才安全開啟**——`main()` 會在偵測到
+  `TRUST_PROXY=1` 但綁定非 127.0.0.1 時強制改綁並記警告，避免被繞過 nginx
+  直接偽造 header 打。
+- `TRUSTFORGE_CSP_MODE`（預設 `legacy`）：`legacy` = 目前 SSR 用的舊 CSP
+  （逐字不變）；`react` = 給 React 前端用的放寬版 CSP（`script-src 'self'`
+  等，見 `web.py` 內 `_CSP_REACT`）+ `X-Frame-Options: DENY` +
+  `Referrer-Policy: strict-origin-when-cross-origin`。cutover 前後兩者不
+  混用（nginx 端也對應切換）。
+
+### nginx conf 兩個變體
+
+- `deploy/nginx-legacy.conf`：cutover 前的預設/回滾安全值。**刻意只寫
+  HTTP（80）**，不預先手刻 443/TLS——避免部署當下引用尚不存在的憑證檔案
+  導致 `nginx -t`/reload 失敗。TLS 由 `certbot --nginx` 事後自動改寫本檔
+  （見 `deploy/TLS-SETUP.md`）。全部（`/`、`/api/*`、`/healthz` 等）原樣
+  轉發給 `127.0.0.1:8080`。
+- `deploy/nginx.conf`：cutover 後的目標拓樸。`/` serve React 靜態檔
+  （`frontend/dist`）、`/api/` 轉發給 python，80→443 redirect + HSTS，
+  React 用 CSP 只加在 `location /`（不外溢到 `/api/` 的 JSON 回應）。
+
+### TLS
+
+`deploy/TLS-SETUP.md`：只有設定文件 + 指令，**沒有實際簽發憑證**——實際
+`certbot --nginx` 執行留給 netops 在真實 domain 就緒後手動跑。
+
+### `cutover_switch.sh` exit code 慣例（供維運/監控）
+
+`cutover_switch.sh`（不管是遠端腳本本身，還是本機呼叫它的 production SSM
+wrapper）用以下 distinct exit code，讓自動化/監控能分清楚失敗種類，不要
+一律當成「隨便一種失敗」處理：
+
+| exit code | 含義 | 是否已動過 mutation | 建議動作 |
+|-----------|------|----------------------|----------|
+| `0` | 成功切換（或成功回滾但流程本身正常結束的分支不會走到這裡） | 是，已切到目標狀態 | 無 |
+| `1` | 一般失敗（候選設定驗證失敗、找不到 running 實例等）；也是任何未知/未定義 ResponseCode 的保守 fallback | 視情況——候選驗證失敗一律**沒有**任何 mutation；其餘一般失敗請查 log 判斷 | 查 log，通常可直接重試 |
+| `97` | `ROLLBACK-FAILED`：自動回滾**沒有完全成功**（見腳本內詳細訊息與手動復原指令） | **可能處於半殘狀態**，不要假設已還原 | 立即人工介入，照腳本印出的手動復原指令逐項核對 nginx symlink／CSP_MODE／healthz |
+| `98` | lock contention：另一個 cutover 呼叫正在進行中，本次直接中止 | **完全沒有** mutation | 等目前那個呼叫跑完再重試，不需要人工介入 |
+
+production SSM wrapper（`cutover_switch.sh` 尾段呼叫 `aws ssm
+send-command`/`get-command-invocation` 那段）會讀 `get-command-invocation`
+的 `ResponseCode`（遠端指令實際的 exit code），把 97/98 原樣傳遞成 wrapper
+自己的 top-level exit code，不會全部塌成 1（codex 四次複審修正項）。
+
+### 本機驗證方式（禁真 AWS/生產）
+
+```bash
+# 語法檢查
+bash -n deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh
+shellcheck deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh
+
+# nginx conf 語法（本機 brew nginx，legacy 不需憑證；react 需暫時自簽憑證
+# 才能測 443 block，見 commit message／PR 描述的驗證步驟）
+nginx -t -c <harness 檔案 include 對應 conf>
+
+# rate-limit-trust + CSP 邏輯的單元測試（mock，不連真 AWS）
+python3 -m pytest tests/test_security.py tests/test_lambda_handler.py -q
+
+# deploy_frontend_nginx.sh 的邏輯測試（完全 mock aws/npm，不連真 AWS/不真
+# npm install）
+bash deploy/test_deploy_frontend_nginx.sh
+
+# cutover_switch.sh 的 guarded-transaction 控制流程測試（TF_CUTOVER_DRY_RUN
+# 擷取遠端指令內容、本機沙箱 + mock nginx/systemctl/curl/flock 實際執行）
+bash deploy/test_cutover_switch.sh
+
+# cutover_switch.sh production SSM wrapper 的整合測試（mock aws CLI 本身，
+# 不用 TF_CUTOVER_DRY_RUN，驗證 ResponseCode 97/98/1/0 正確傳遞成 wrapper
+# 自己的 top-level exit code）
+bash deploy/test_cutover_ssm_wrapper.sh
+```
+
+### 回滾
+
+`deploy/cutover_switch.sh legacy`——秒切回 SSR 全轉發，不動 AWS 資源、不
+重建實例。
