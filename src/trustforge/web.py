@@ -3587,10 +3587,100 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
       任何時刻最多 1 個活著的 leader 在算，stale leader 造成的重複執行
       永遠被限制在「舊 leader 1 次 + 頂多 1 個 replacement leader」，不會
       是 N 個 follower 各自一次。
+
+    codex MEDIUM 複審（follower liveness，最後一關）：複審#3／#4 解決了
+    「stale leader 的結果不會被錯誤發布」跟「thundering herd」，但留下
+    一個「舊 followers 白等」的活性（liveness）漏洞：
+      1. **取代當下沒 signal 舊 event**：複審#3 的「取代」只是把
+         `_analyze_dedup_inflight[key]` 的字典值換成新的 `(event,
+         start_ts, generation)` tuple——但**已經**卡在 `event.wait()` 上
+         的舊 follower，手上抓的是取代前的**舊 Event 物件參照**（Python
+         區域變數，不會因為字典裡的值被換掉而自動更新），舊 leader 沒被
+         喚醒、繼續等舊 event。若舊（stale）leader 是真的 hang 死、永遠
+         不會自己完成（也就永遠不會呼叫 `event.set()`），這些舊
+         follower 就會白等到自己那個從函式一開始就固定的 `deadline`——
+         即使 replacement leader 早就成功把新結果發布到共用快取，這些
+         舊 follower 對此一無所知（他們在等的是另一個永遠不會被 set 的
+         Event），最終逾時只能回 503——這正是「本要靠 dedup+取代機制救
+         回來的 degraded 情境」反而失敗收場。
+      2. **自己 deadline 到期時沒有最後一次複查就直接 503**：即使沒有
+         (1) 這個問題，也存在更窄的一個 race：follower 自己的固定
+         `deadline` 到期（`remaining <= 0` 或 `event.wait()` 逾時）的那一
+         刻，可能剛好跟「其他 follower 搶到 stale entry、取代成為新
+         leader」的那一刻幾乎同時發生——由於這裡使用的是「函式一進來就
+         固定死的 `deadline`」，就算取代/新 leader 幾乎立刻就緒，這個
+         follower 也已經沒有預算再等，會直接 503，完全無視剛好近乎同時
+         出現的新答案。
+
+      修法：
+      (a) **取代 stale leader 時對舊 event `.set()`**：偵測到 in-flight
+          entry stale、決定取代它成為新 leader 的當下，先記住那個「即將
+          被取代掉」的舊 Event 物件，寫入新 entry 後（鎖外，`Event.set()`
+          本身無鎖、執行緒安全）呼叫它的 `.set()`——立刻喚醒所有卡在舊
+          event 上的舊 follower，讓他們馬上重新回到協調 loop 頂端（見上
+          方複審#4 的三步查找），而不是繼續空等一個永遠不會被 stale
+          leader 自己 set 的 event。
+      (b) **deadline 到期、真的要 503 前，做最後一次有界複查**：不管是
+          `remaining <= 0` 還是 `event.wait()` 逾時，都先呼叫
+          `_final_grace_check_before_giving_up()`——鎖內重查一次共用
+          快取（有→回傳 True，讓呼叫端 `continue` 回 loop 頂端撿走）；
+          沒有快取但有一個「活著」（未超過 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`
+          門檻）的 in-flight entry，就 join 它剩餘的逾時預算（`event.wait
+          (timeout=該 entry 剩餘秒數)`）——這一次 join 是**有界**的（頂多
+          再多等一個新 leader「剩餘」的逾時預算，不是重新展延整個
+          `deadline`），也**只做這一次**（不是新的無界迴圈）：join 到的
+          新 leader 若也逾時，直接回傳 False，呼叫端照常 503。整體上，
+          即使真的遇到連續多輪 stale-leader 取代鏈，每多等一輪都要求
+          「真的有另一個活著的新 leader」且「真的又多流逝了將近一個
+          `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`」的實際牆鐘時間，不是
+          數學上無界，是任何實務部署都會自然收斂的有界重試，不違反
+          bounded wait 的核心承諾。
+      保留既有 generation fencing（複審#3）、JSON 序列化 key（見
+      `_analyze_dedup_key` docstring）、single-flight 重入協調 loop
+      （複審#4）、per-caller 限流前置（複審#2）全部不變。
     """
+    def _final_grace_check_before_giving_up() -> bool:
+        """codex MEDIUM 複審（follower liveness，最後一關）：真的要放棄
+        （拋出 `_AnalyzeDedupTimeout` → 503）之前的最後一次有界複查。
+
+        回傳 `True`：呼叫端應該 `continue` 回協調 loop 頂端重新查一次
+        （這一刻剛好有共用快取結果、或剛好有一個活著的新 leader 完成/
+        被喚醒了，loop 頂端會正確撿到）。
+        回傳 `False`：真的什麼都沒有（沒快取、沒活著的 in-flight entry，
+        或那個 entry 本身也已經逾時/stale），呼叫端照常 503。
+
+        只執行「這一次」，不是新的無界迴圈：這裡 join 的新 leader 若也
+        逾時，直接回傳 False，不會遞迴地一直找下一個又下一個 replacement
+        無限期等下去；額外多等的時間上限是「這個新 leader 剩餘的逾時
+        預算」（`_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 扣掉它已經跑了
+        多久），不是重新展延整個 `deadline`。
+        """
+        now2 = time.time()
+        with _analyze_dedup_lock:
+            cached2 = _analyze_dedup_cache.get(key)
+            if cached2 is not None and cached2[0] > now2:
+                return True
+            inflight2 = _analyze_dedup_inflight.get(key)
+            if inflight2 is None:
+                return False
+            grace_event, grace_started_at, _grace_generation = inflight2
+            grace_remaining = _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS - (now2 - grace_started_at)
+            if grace_remaining <= 0:
+                return False  # 這個 entry 本身也已經逾時/stale，沒東西可 join
+        # 鎖外阻塞等待：避免在持有 `_analyze_dedup_lock` 期間睡眠，阻塞
+        # 其他 caller 對 dedup 狀態的存取。
+        grace_event.wait(timeout=grace_remaining)
+        # 不論 wait 是被 set() 喚醒還是再次逾時，都回 True 讓呼叫端
+        # `continue` 回 loop 頂端重新查一次——真的還是沒有（該 entry 逾時
+        # 又沒人取代它），loop 頂端會依既有邏輯判斷 stale 並取代，或者
+        # 頂端的 `remaining <= 0` 檢查會再次呼叫到這個函式，這次多半會
+        # 因為 in-flight 也早已 stale 而回傳 False，正確收斂到 503。
+        return True
+
     deadline = time.time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
     while True:
         now = time.time()
+        stale_event_to_wake: threading.Event | None = None
         with _analyze_dedup_lock:
             cached = _analyze_dedup_cache.get(key)
             if cached is not None and cached[0] > now:
@@ -3607,6 +3697,16 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
                     # 死，視為 stale，直接取代成為新 leader（新 leader 會
                     # 領一個新的世代編號；舊 leader 稍後才完成時靠世代
                     # 編號比對 fencing，見上方 docstring 與下方發布段落）。
+                    #
+                    # codex MEDIUM 複審（follower liveness）：先記住這個
+                    # 「即將被取代掉」的舊 Event 物件——若舊 leader 真的
+                    # hang 死、永遠不會自己完成、永遠不會呼叫
+                    # `event.set()`，卡在它上面等待的舊 follower 會白等到
+                    # 自己的 deadline；取代它的當下就主動 signal 這個舊
+                    # event，讓所有卡在它上面的舊 follower 立刻醒來、重新
+                    # 回到協調 loop 頂端，而不是繼續空等一個可能永遠不會
+                    # 被 set 的 Event。
+                    stale_event_to_wake = _leader_event
                     inflight = None
 
             is_leader = inflight is None
@@ -3620,17 +3720,26 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
                 event = inflight[0]
                 my_generation = None  # follower 不發布，不需要世代編號
 
+        if stale_event_to_wake is not None:
+            # 鎖外呼叫：`Event.set()` 本身無鎖、執行緒安全，鎖外呼叫純粹是
+            # 為了盡快釋放 `_analyze_dedup_lock`，不影響正確性。
+            stale_event_to_wake.set()
+
         if is_leader:
             break  # 跳出協調 loop，往下真的去 compute()
 
         remaining = deadline - time.time()
         if remaining <= 0:
+            if _final_grace_check_before_giving_up():
+                continue
             raise _AnalyzeDedupTimeout(
                 f"分析請求排隊等候逾時（前一個相同請求執行超過"
                 f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
             )
         completed = event.wait(timeout=remaining)
         if not completed:
+            if _final_grace_check_before_giving_up():
+                continue
             raise _AnalyzeDedupTimeout(
                 f"分析請求排隊等候逾時（前一個相同請求執行超過"
                 f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
@@ -3643,7 +3752,9 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         # 複審#4 docstring。這裡的 bounded wait 沿用同一個從函式一開始
         # 就固定的 `deadline`（不因為重新 join 而展延整體等待時間），
         # 所以即使 leadership 被連續取代好幾輪，這個呼叫端的總阻塞時間
-        # 仍然有界，跟修復前一樣不會無限期等待。
+        # 仍然有界，跟修復前一樣不會無限期等待；`_final_grace_check_
+        # before_giving_up()` 額外多給的一次機會也是有界的（見其
+        # docstring），不破壞這個承諾。
 
     try:
         result = compute()

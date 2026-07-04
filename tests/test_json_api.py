@@ -1108,6 +1108,165 @@ def test_dedup_analyze_call_stale_leader_thundering_herd_followers_join_replacem
         )
     assert follower_counter.n == 0, "全程都不該有任何 follower 自己呼叫過 compute()"
 
+
+def test_dedup_analyze_call_stale_leader_hangs_forever_replacement_wakes_followers_not_503(
+    monkeypatch,
+):
+    """codex MEDIUM 複審（follower liveness，最後一關，見
+    `_dedup_analyze_call` docstring）：上面的 thundering herd 測試裡，
+    stale leader A **之後還是自己完成了**（只是延遲），靠它自己
+    `event.set()` 喚醒 followers——那個測試沒有涵蓋到「A 是真的 hang
+    死、永遠不會自己完成、永遠不會呼叫 event.set()」這個更嚴重的情境。
+
+    本測試模擬：leader A 卡住且**永遠不會**自己完成（`a_may_finish_never`
+    這個 Event 全程刻意不 `.set()`，代表 A 真的 hang 死）；5 個 follower
+    在 A 還新鮮時 join 它的 event；A 被標記 stale 後，B 進來偵測到、取而
+    代之成為新 leader；B 之後成功完成、把結果發布到共用快取。
+
+    在本輪修復之前：A 被取代時它的舊 Event 從未被 `.set()`，5 個原本
+    join 在 A 上的 follower 只能繼續空等（因為 A 真的不會自己完成），
+    最終各自等到自己那個從函式一開始就固定的 deadline
+    （`_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`）才逾時，回 503——即使 B
+    早就成功把新結果發布到共用快取，這些 follower 對此一無所知。
+
+    修復後應該：B 取代 A 的當下就主動 `.set()` A 的舊 event，5 個
+    follower 幾乎立刻被喚醒、重新進協調 loop，撿到（或 join 到）B 的
+    結果——斷言：(1) 這 5 個 follower **都不會**拋出
+    `_AnalyzeDedupTimeout`（非 503）；(2) 全部拿到 B 的結果
+    `"result-B"`；(3) 全程沒有任何 follower 自己額外呼叫過 compute()；
+    (4) 從 B 取代 A 到 5 個 follower 全部收尾，實際耗費的牆鐘時間遠小於
+    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`——用來佐證他們是被「取代時
+    signal 舊 event」這個修復喚醒的，不是剛好撞上自己那個原本就會在
+    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 秒後到期的 deadline。
+    """
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 5.0)
+    key = "dedup-follower-liveness-hang-forever-test-key"
+
+    # leader A 永遠不會自己完成——`a_may_finish_never` 全程刻意不 set()，
+    # 模擬真的 hang 死（不像上面 thundering herd 測試那樣之後還是會靠
+    # 自己完成、自己 event.set() 喚醒 followers）。timeout=120 只是保底，
+    # 不是真的預期會被等到。
+    a_may_finish_never = threading.Event()
+
+    def _compute_a():
+        a_may_finish_never.wait(timeout=120)
+        return "result-A-should-never-surface"
+
+    b_may_finish = threading.Event()
+
+    def _compute_b():
+        b_may_finish.wait(timeout=10)
+        return "result-B"
+
+    follower_counter = _CallCounter()
+
+    def _compute_follower():
+        follower_counter.hit()
+        return "should-not-be-called-by-any-follower"
+
+    a_thread = threading.Thread(
+        target=lambda: web._dedup_analyze_call(key, _compute_a), daemon=True
+    )
+    a_thread.start()
+
+    for _ in range(200):
+        if key in web._analyze_dedup_inflight:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("leader A 應該已經寫入 in-flight")
+    a_generation = web._analyze_dedup_inflight[key][2]
+
+    n_followers = 5
+    follower_holders: list[dict[str, object]] = [{} for _ in range(n_followers)]
+    follower_exceptions: list[dict[str, object]] = [{} for _ in range(n_followers)]
+    follower_threads = []
+    for i in range(n_followers):
+        def _worker_follower(idx=i):
+            try:
+                follower_holders[idx]["value"] = web._dedup_analyze_call(
+                    key, _compute_follower
+                )
+            except Exception as exc:  # noqa: BLE001 -- 要能捕捉/斷言 503 逾時例外
+                follower_exceptions[idx]["exc"] = exc
+
+        t = threading.Thread(target=_worker_follower)
+        follower_threads.append(t)
+        t.start()
+
+    # 給 5 個 follower 一點時間真的進到 event.wait()（走 follower 分支，
+    # join 到的是 A 這個之後永遠不會 set() 的舊 event）。
+    time.sleep(0.3)
+
+    # 把 A 標記成 stale（跟既有 thundering herd 測試同一招：直接改
+    # in-flight 的開始時間戳，不需要真的等滿逾時門檻）。
+    with web._analyze_dedup_lock:
+        current = web._analyze_dedup_inflight.get(key)
+        assert current is not None
+        stale_event, _old_ts, current_generation = current
+        assert current_generation == a_generation
+        web._analyze_dedup_inflight[key] = (
+            stale_event,
+            time.time() - (web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS + 10.0),
+            a_generation,
+        )
+
+    b_result_holder: dict[str, object] = {}
+
+    def _worker_b():
+        b_result_holder["value"] = web._dedup_analyze_call(key, _compute_b)
+
+    replacement_start = time.time()
+    b_thread = threading.Thread(target=_worker_b)
+    b_thread.start()
+
+    # 等 B 真的取代 stale 的 A、成為新世代的 leader——這個取代動作本身
+    # （本輪修復）就會順手 signal A 的舊 event，喚醒 5 個原本 join 在
+    # A 上的 follower。
+    for _ in range(200):
+        inflight = web._analyze_dedup_inflight.get(key)
+        if inflight is not None and inflight[2] != a_generation:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("B 應該已經取代 stale 的 A、成為新世代的 leader")
+
+    # 關鍵：全程刻意不 set(a_may_finish_never)——A 真的 hang 死、永遠不會
+    # 自己完成、永遠不會呼叫 event.set()。若沒有本輪修復（取代 stale
+    # leader 時主動 signal 舊 event），5 個原本 join 在 A 上的 follower
+    # 就只能繼續空等，直到各自的 deadline 到期回 503。
+
+    # 讓 B 完成、發布結果。
+    b_may_finish.set()
+    b_thread.join(timeout=5)
+    assert b_result_holder.get("value") == "result-B"
+
+    for t in follower_threads:
+        t.join(timeout=web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS + 5)
+        assert not t.is_alive(), "follower thread 不該還在等待，應該已經被喚醒並收尾"
+    elapsed_since_replacement = time.time() - replacement_start
+
+    for idx in range(n_followers):
+        assert follower_exceptions[idx] == {}, (
+            f"follower {idx} 不該逾時 503（`_AnalyzeDedupTimeout`），"
+            f"實際拋出例外：{follower_exceptions[idx].get('exc')!r}"
+        )
+        assert follower_holders[idx].get("value") == "result-B", (
+            f"follower {idx} 應該拿到 replacement leader B 的結果，"
+            f"實際：{follower_holders[idx]!r}"
+        )
+    assert follower_counter.n == 0, (
+        f"followers 不該各自呼叫 compute()，實際額外呼叫 {follower_counter.n} 次"
+    )
+    # 佐證 followers 是被「取代時 signal 舊 event」喚醒的，不是剛好等到
+    # 自己原本的 deadline（`_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` = 5 秒）
+    # 才逾時；整段從 B 取代 A 到全部收尾的耗時應該遠小於這個門檻。
+    assert elapsed_since_replacement < web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS, (
+        f"followers 收尾耗時 {elapsed_since_replacement:.3f}s，"
+        f"應該遠小於 deadline 門檻 {web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS}s"
+        f"（否則代表是撞上自己的 deadline 而非被 signal 喚醒）"
+    )
+
     cached_final = web._analyze_dedup_cache.get(key)
     assert cached_final is not None and cached_final[1] == (True, "result-B")
     assert key not in web._analyze_dedup_inflight
