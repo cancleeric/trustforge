@@ -202,11 +202,18 @@ ETC="${TF_BOOTSTRAP_ETC:-/etc}"
 OPT_DIR="${TF_BOOTSTRAP_OPT:-/opt/trustforge}"
 LIVE_LINK="$ETC/nginx/conf.d/trustforge.conf"
 DEFAULT_CONF="$ETC/nginx/conf.d/default.conf"
-CANDIDATE="$ETC/nginx/trustforge-sites/legacy.conf"
+CONF_DIR="$ETC/nginx/trustforge-sites"
+CANDIDATE="$CONF_DIR/legacy.conf"
+# codex 複審 HIGH（conf 原子化，同 dist）：這 4 份是每次都會重新佈署的
+# candidate conf，全部走「先落地 versioned staging 驗證，Step 4 guarded
+# transaction 內才 atomic replace 進 live 路徑」──不再是 Step 1 直接
+# 覆寫 live 檔案。
+CONF_FILES=(legacy.conf react.conf react-http.conf legacy-tls.conf)
 REACT_TLS_DOMAIN="trustforge.hurricanesoft.com.tw"
 SERVICE_FILE="$ETC/systemd/system/trustforge.service"
 BACKUP_SERVICE_FILE="/tmp/tf-bootstrap-service.bak.$$"
 BACKUP_DEFAULT_CONF="/tmp/tf-bootstrap-default-conf.bak.$$"
+BACKUP_CONF_DIR="/tmp/tf-bootstrap-conf-backup.$$"
 DNF_LOG="${TF_BOOTSTRAP_DNF_LOG:-/var/log/tf-nginx-setup.log}"
 
 # ---- Step 1：安裝 nginx + 佈署靜態檔/candidate conf 到 staging 位置
@@ -225,20 +232,36 @@ DNF_LOG="${TF_BOOTSTRAP_DNF_LOG:-/var/log/tf-nginx-setup.log}"
 # frontend/current 這個 symlink 指到新 release）留到 Step 4，在 ERR trap
 # 保護下才做，失敗可回滾；前一版 release 目錄刻意保留不砍，讓 rollback
 # 切得回去、資產內容真的能還原。
+#
+# codex 複審 HIGH（conf 原子化，同 dist）：以前 4 份 candidate conf
+# （legacy/react/react-http/legacy-tls.conf）是直接 `aws s3 cp` 覆寫到
+# `$ETC/nginx/trustforge-sites/` 這個 live 路徑——已配置(post-cutover)時
+# 正 active 的那份會被就地覆寫，比 Step 2 驗證、Step 3 快照、ERR trap
+# 都還早：下載中/新內容本身有問題，active 的檔案內容已經壞了；就算這次
+# 沒有其他步驟失敗（workers 記憶體裡還撐著舊設定），下次任何原因觸發
+# reload 都會直接吃到壞掉的內容而爆——舊 ROLLBACK() 只還原 live symlink
+# 指標，從沒還原過檔案內容本身，救不回來。改法跟 dist 一致：下載到全新
+# 的 versioned staging 目錄，完全不碰 live 的 trustforge-sites/*.conf，
+# 驗證（Step 2）也是驗 staging 內容；真正寫進 live 路徑留到 Step 4，在
+# ERR trap 保護下用 atomic rename 替換，且 Step 3 會先把 live 檔案目前
+# 的 byte 內容備份起來，失敗時 ROLLBACK() 能逐檔還原成跑前內容。
 dnf install -y nginx unzip >"$DNF_LOG" 2>&1
-mkdir -p "$ETC/nginx/trustforge-sites" "$OPT_DIR/frontend/releases"
-aws s3 cp s3://__BUCKET__/nginx-legacy.conf "$CANDIDATE" --region __REGION__
-aws s3 cp s3://__BUCKET__/nginx-react.conf "$ETC/nginx/trustforge-sites/react.conf" --region __REGION__
-aws s3 cp s3://__BUCKET__/nginx-react-http.conf "$ETC/nginx/trustforge-sites/react-http.conf" --region __REGION__
-aws s3 cp s3://__BUCKET__/nginx-legacy-tls.conf "$ETC/nginx/trustforge-sites/legacy-tls.conf" --region __REGION__
+RELEASE_TS="$(date -u +%Y%m%d%H%M%S)-$$"
+mkdir -p "$CONF_DIR" "$OPT_DIR/frontend/releases"
+CONF_STAGING_DIR="$ETC/nginx/trustforge-sites-staging/$RELEASE_TS"
+mkdir -p "$CONF_STAGING_DIR"
+aws s3 cp s3://__BUCKET__/nginx-legacy.conf "$CONF_STAGING_DIR/legacy.conf" --region __REGION__
+aws s3 cp s3://__BUCKET__/nginx-react.conf "$CONF_STAGING_DIR/react.conf" --region __REGION__
+aws s3 cp s3://__BUCKET__/nginx-react-http.conf "$CONF_STAGING_DIR/react-http.conf" --region __REGION__
+aws s3 cp s3://__BUCKET__/nginx-legacy-tls.conf "$CONF_STAGING_DIR/legacy-tls.conf" --region __REGION__
+for _f in "${CONF_FILES[@]}"; do [ -f "$CONF_STAGING_DIR/$_f" ]; done
 aws s3 cp s3://__BUCKET__/trustforge_frontend_dist.zip "$OPT_DIR/frontend/dist.zip" --region __REGION__
 CURRENT_LINK="$OPT_DIR/frontend/current"
-RELEASE_TS="$(date -u +%Y%m%d%H%M%S)-$$"
 RELEASE_DIR="$OPT_DIR/frontend/releases/$RELEASE_TS"
 mkdir -p "$RELEASE_DIR"
 unzip -o -q "$OPT_DIR/frontend/dist.zip" -d "$RELEASE_DIR"
 [ -f "$RELEASE_DIR/index.html" ]
-echo "[fe-nginx] 已裝 nginx + 佈署靜態檔/candidate conf 到 staging 位置（新版 dist 在 ${RELEASE_DIR}，未動 live conf.d/systemd/frontend/current）"
+echo "[fe-nginx] 已裝 nginx + 佈署靜態檔/candidate conf 到 staging 位置（新版 dist 在 ${RELEASE_DIR}、candidate conf 在 ${CONF_STAGING_DIR}，未動 live conf.d/trustforge-sites/systemd/frontend/current）"
 
 # ---- Step 1.5（issue #69）：偵測 live symlink 是否已配置（唯讀，不算
 #      mutation）——決定 Step 2 要驗哪份 candidate、Step 4/5 走「已配置
@@ -255,6 +278,11 @@ else
   ACTIVE_CANDIDATE="$CANDIDATE"
   echo '[fe-nginx] 偵測到 live symlink 尚未配置 → 視為初次 bootstrap，套用 legacy 全轉發預設'
 fi
+# codex 複審 HIGH（conf 原子化）：Step 2 驗證的必須是「這次會生效的新
+# 內容」，但 live 路徑（$ACTIVE_CANDIDATE）現在到 Step 4 前都還是舊內容
+# （Step 1 只下載到 staging，沒有覆寫 live）——驗證對象改指到 staging 裡
+# 同檔名的那份。
+ACTIVE_CANDIDATE_STAGED="$CONF_STAGING_DIR/$(basename "$ACTIVE_CANDIDATE")"
 
 # 同一批唯讀偵測，補記錄 frontend/current（dist）跑前指到哪個 release，
 # 供 Step 4 的 atomic symlink 切換 + ROLLBACK() 還原用（codex 複審 HIGH：
@@ -268,25 +296,27 @@ else
 fi
 
 # ---- Step 2：候選設定驗證（scratch harness），完全不動 live conf.d ----
-#      驗證對象是「這次真的會生效」的那份 conf：已配置(post-cutover)驗
-#      目前 active 的那份（同時也是本次剛被 Step 1 重新上傳過的新內容），
-#      未配置(初次)驗 legacy.conf（bootstrap 預設）----
+#      驗證對象是「這次真的會生效」的那份 conf 的**新內容**：已配置
+#      (post-cutover)驗目前 active 那個檔名對應的 staging 新版本，未配置
+#      (初次)驗 legacy.conf 的 staging 新版本（bootstrap 預設）——codex
+#      複審 HIGH（conf 原子化）：驗的是 staging，不是還沒被 Step 4 換過
+#      的 live 舊內容，也完全不會像舊版那樣提早覆寫 live ----
 VALIDATE_CONF="/tmp/tf-bootstrap-validate-$$.conf"
 cat > "$VALIDATE_CONF" <<VALIDATE_EOF
 worker_processes 1;
 error_log /tmp/tf-bootstrap-validate-$$.err.log;
 pid /tmp/tf-bootstrap-validate-$$.pid;
 events { worker_connections 16; }
-http { include $ACTIVE_CANDIDATE; }
+http { include $ACTIVE_CANDIDATE_STAGED; }
 VALIDATE_EOF
 if ! nginx -t -c "$VALIDATE_CONF" 2>/tmp/tf-bootstrap-validate-$$.stderr; then
-  echo "❌ [fe-nginx] 候選 nginx 設定驗證失敗（$(basename "$ACTIVE_CANDIDATE")），完全沒動 live conf.d/systemd，中止" >&2
+  echo "❌ [fe-nginx] 候選 nginx 設定驗證失敗（$(basename "$ACTIVE_CANDIDATE")，staging 新內容），完全沒動 live conf.d/trustforge-sites/systemd，中止" >&2
   cat /tmp/tf-bootstrap-validate-$$.stderr >&2 2>/dev/null || true
   rm -f "$VALIDATE_CONF" "/tmp/tf-bootstrap-validate-$$.err.log" "/tmp/tf-bootstrap-validate-$$.pid" "/tmp/tf-bootstrap-validate-$$.stderr"
   exit 1
 fi
 rm -f "$VALIDATE_CONF" "/tmp/tf-bootstrap-validate-$$.err.log" "/tmp/tf-bootstrap-validate-$$.pid" "/tmp/tf-bootstrap-validate-$$.stderr"
-echo '[fe-nginx] 候選設定驗證通過（未動 live conf.d/systemd）'
+echo '[fe-nginx] 候選設定驗證通過（未動 live conf.d/trustforge-sites/systemd）'
 
 # ---- Step 3：記錄跑前狀態，掛失敗回滾（PREV_LINK/PREV_LINK_EXISTED 已在
 #      Step 1.5 記錄，這裡只補其餘跑前狀態）----
@@ -295,6 +325,18 @@ if [ -f "$DEFAULT_CONF" ]; then
   PREV_DEFAULT_CONF_EXISTED=1
   cp "$DEFAULT_CONF" "$BACKUP_DEFAULT_CONF"
 fi
+# codex 複審 HIGH（conf 原子化）：Step 4 才會真的把 staging 內容 atomic
+# replace 進 $CONF_DIR/*.conf，這裡先把每份 live conf 檔目前的 byte 內容
+# snapshot 起來（不存在就不備份，靠 ROLLBACK() 裡檢查備份檔是否存在來
+# 判斷跑前是否存在）——光靠上面 PREV_LINK 記住 symlink 指標還不夠，
+# symlink 指向的檔案內容本身也要能還原，不然 rollback 只是把 symlink
+# 切回同一份已經被覆寫壞掉的檔案。
+mkdir -p "$BACKUP_CONF_DIR"
+for _f in "${CONF_FILES[@]}"; do
+  if [ -f "$CONF_DIR/$_f" ]; then
+    cp "$CONF_DIR/$_f" "$BACKUP_CONF_DIR/$_f"
+  fi
+done
 cp "$SERVICE_FILE" "$BACKUP_SERVICE_FILE"
 PREV_PORT="$(grep '^Environment=PORT=' "$SERVICE_FILE" | head -1 | cut -d= -f3)"
 PREV_PORT="${PREV_PORT:-80}"
@@ -338,6 +380,24 @@ ROLLBACK() {
       ROLLBACK_OK=0
     fi
   fi
+
+  # codex 複審 HIGH（conf 原子化，同 dist）：上面只還原了 live symlink
+  # 指標，這裡要把每份 conf 檔本身的內容還原成 Step 3 snapshot 的
+  # byte-for-byte 跑前內容——不存在就刪掉（跑前本來就沒有這份檔案）。
+  # 光切 symlink 指標救不回被 Step 4 覆寫過的檔案內容。
+  for _f in "${CONF_FILES[@]}"; do
+    if [ -f "$BACKUP_CONF_DIR/$_f" ]; then
+      if ! cp "$BACKUP_CONF_DIR/$_f" "$CONF_DIR/$_f"; then
+        echo "❌ [fe-nginx] rollback：${_f} 內容還原失敗（byte-for-byte 還原跑前版本）" >&2
+        ROLLBACK_OK=0
+      fi
+    else
+      if ! rm -f "$CONF_DIR/$_f"; then
+        echo "❌ [fe-nginx] rollback：${_f} 移除失敗（跑前不存在，理應還原成無）" >&2
+        ROLLBACK_OK=0
+      fi
+    fi
+  done
 
   # codex 複審 HIGH：dist swap 原子化——frontend/current 這個 symlink 才
   # 是真正決定 nginx serve 哪份 dist 的指標（前一版 release 目錄本身從
@@ -385,6 +445,7 @@ ROLLBACK() {
   fi
 
   rm -f "$BACKUP_SERVICE_FILE" "$BACKUP_DEFAULT_CONF"
+  rm -rf "$BACKUP_CONF_DIR"
 
   if [ "$ROLLBACK_OK" = 1 ]; then
     echo '✅ [fe-nginx] 已回滾到跑前狀態（bootstrap 失敗，但服務已還原成執行前的樣子，不留半殘）' >&2
@@ -405,6 +466,16 @@ trap 'ROLLBACK' ERR
 #      symlink、不改 CSP mode**，只用剛被 Step 1 更新過的 dist/candidate
 #      conf reload 現行拓樸；只有未配置(初次 bootstrap)才做完整的「收斂
 #      python 綁定 + 建 legacy symlink」流程 ----
+# codex 複審 HIGH（conf 原子化，同 dist）：唯一真的把新版 conf 內容寫
+# 進 live 路徑（$CONF_DIR/*.conf）的地方，且完全在 ERR trap 保護下——用
+# 暫存檔 + 同檔案系統內的 `mv` 做 atomic rename（不是直接 `cp` 蓋過去，
+# 避免中途讀到半份寫入的檔案），後續任何一步失敗，ROLLBACK() 都能把每
+# 份檔案還原成 Step 3 snapshot 的 byte-for-byte 跑前內容。
+for _f in "${CONF_FILES[@]}"; do
+  cp "$CONF_STAGING_DIR/$_f" "$CONF_DIR/$_f.new.$$"
+  mv "$CONF_DIR/$_f.new.$$" "$CONF_DIR/$_f"
+done
+
 # codex 複審 HIGH：dist swap 真正的 atomic 切換點——Step 1 已經把新版
 # dist 解壓驗證(有 index.html)完，Step 2 也驗過 candidate conf，這裡才
 # 是唯一真的把 frontend/current 指到新 release 的地方，且完全在 ERR

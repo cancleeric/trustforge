@@ -30,6 +30,15 @@
 #   13. absent 前置狀態（live symlink 本來不存在、default.conf 本來不存在，
 #      對應剛跑完 deploy_ec2.sh、第一次跑本腳本的真實情境）+ 無失敗注入
 #      → 正常成功，且 rollback 分支（若觸發）能正確處理「原本無」。
+#   14. codex 複審 HIGH（conf 原子化，同 dist）：以前 candidate conf
+#      （legacy/react/react-http/legacy-tls.conf）是 Step 1 直接覆寫到
+#      live 的 trustforge-sites/*.conf，比驗證/快照/ERR trap 都早——
+#      已配置(post-cutover)時正 active 的那份會被就地覆寫，即使這次沒有
+#      其他步驟失敗，內容也已經壞了。場景 2b：post-cutover + 候選設定
+#      驗證失敗 → live conf 完全沒被動過（驗證的是 staging 新內容）。
+#      場景 7b/9b：post-cutover + Step 4 mutation 邊界失敗（reload 失敗/
+#      public-path healthz 失敗）→ ROLLBACK 把 live conf 內容還原成跑前
+#      byte-for-byte（不只是切 symlink 指標）。
 #
 # 依賴：真的 gsed（GNU sed；本腳本的 `sed -i` 語法是寫給遠端 Amazon Linux
 # 用的，BSD sed 不相容），找不到就跳過整份測試（不是假裝測試通過）。
@@ -383,6 +392,10 @@ current_target() {
 # 造一份「前一版 release」＋把 frontend/current 指過去——模擬跑前已經有
 # 一次成功部署過（真實情境的常態），才有東西可以驗證 rollback「真的救得
 # 回」，不是每次都從零開始。
+# codex 複審 HIGH（conf 原子化）：讀 live 的 trustforge-sites/<name>.conf
+# 目前實際內容，byte-for-byte 比對用（判斷 Step 1/Step 4 有沒有提早覆寫、
+# rollback 有沒有真的還原成跑前版本，不是只看 symlink 指標）。
+conf_content() { cat "$SANDBOX/etc/nginx/trustforge-sites/$1" 2>/dev/null || echo "(missing)"; }
 PRIOR_RELEASE_DIR() { echo "$SANDBOX/opt/trustforge/frontend/releases/20260101000000-prior"; }
 seed_prior_release() {
   mkdir -p "$(PRIOR_RELEASE_DIR)"
@@ -442,6 +455,24 @@ fi
 assert_grep_log "候選 nginx 設定驗證失敗" "有印候選設定驗證失敗訊息"
 assert_eq "$(active_conf)" "(none)" "live symlink 仍不存在（沒被動過）"
 assert_eq "$(active_port)" "80" "service file PORT 仍是 80（沒被動過）"
+
+echo "== 場景 2b（codex 複審 HIGH：conf 原子化）：已配置(post-cutover，react.conf active) + 候選設定驗證失敗 → live 的 trustforge-sites/react.conf 完全沒被動過（Step 1 只下載到 staging 驗證，不再像舊版那樣提早覆寫 live），還沒開始 mutation，不需要也不會觸發回滾 =="
+reset_sandbox
+mkdir -p "$SANDBOX/etc/nginx/trustforge-sites"
+echo "# react stub v1（跑前既有內容）" > "$SANDBOX/etc/nginx/trustforge-sites/react.conf"
+ln -sfn "$SANDBOX/etc/nginx/trustforge-sites/react.conf" "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
+if run_transaction MOCK_NGINX_PRECHECK_FAIL=1; then
+  fail "post-cutover 情境下候選設定驗證失敗應該非零結束"
+else
+  pass "post-cutover 情境下候選設定驗證失敗時非零結束"
+fi
+assert_eq "$(active_conf)" "react.conf" "live symlink 仍指向 react.conf（沒被動過）"
+assert_eq "$(conf_content react.conf)" "# react stub v1（跑前既有內容）" "live 的 react.conf 內容完全沒被動過（codex 複審 HIGH 核心修復點：以前 Step 1 會直接覆寫這份 active 中的檔案，現在只下載到 staging，即使驗證失敗、live 內容也毫髮無傷）"
+if grep -qF "已回滾到跑前狀態" "$STATE/last_run.log"; then
+  fail "候選設定驗證失敗發生在 ERR trap 安裝之前（Step 2），不該（也不需要）觸發 rollback 訊息"
+else
+  pass "候選設定驗證失敗沒有誤觸發 rollback（本來就還沒開始 mutation，跟 dnf install 失敗同類）"
+fi
 
 echo "== 場景 3：daemon-reload 失敗（Step 4 mutation 邊界）→ 觸發回滾 =="
 reset_sandbox
@@ -514,6 +545,7 @@ assert_grep_log "已回滾到跑前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink（nginx conf.d）還原回跑前（本來就指向 legacy.conf）"
 assert_eq "$(current_target)" "$(PRIOR_RELEASE_DIR)" "回滾後 frontend/current 切回前一版 release（Step 4 已經把它 atomic 切到新版，reload 失敗後 ROLLBACK 要切回去）"
 assert_eq "$(cat "$(PRIOR_RELEASE_DIR)/index.html")" "<html>prior release stub</html>" "前一版 release 目錄內容完整未變、真的可服務（從頭到尾沒被碰過，只是指標被切走又切回來）"
+assert_eq "$(conf_content legacy.conf)" "# legacy stub" "回滾後 active conf（legacy.conf）內容 byte-for-byte 還原成跑前版本（codex 複審 HIGH：conf 原子化核心修復點——Step 4 已經把它 atomic replace 成新內容，reload/restart 都失敗後 ROLLBACK 要把檔案內容本身還原，不是留著被覆寫過的新內容、只切一個沒用的 symlink 指標）"
 
 echo "== 場景 8：reload nginx 失敗但 fallback 的 restart nginx 成功 → 不觸發回滾 =="
 reset_sandbox
@@ -535,6 +567,24 @@ fi
 assert_grep_log "已回滾到跑前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "(none)" "回滾後 live symlink 退回不存在（不留半殘）"
 assert_eq "$(active_port)" "80" "回滾後 service file PORT 退回 80（python 對外綁定也還原）"
+
+echo "== 場景 9b（codex 複審 HIGH：conf 原子化，post-cutover + public-path 驗證失敗）：已配置(post-cutover，legacy.conf active)，Step 5 走 nginx 的 healthz 失敗 → rollback 要把 trustforge-sites/legacy.conf 內容還原成跑前 byte-for-byte（不是被 Step 4 已經 atomic replace 過的新內容）=="
+reset_sandbox
+mkdir -p "$SANDBOX/etc/nginx/trustforge-sites"
+echo "# legacy stub v1（跑前既有內容）" > "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf"
+ln -sfn "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf" "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
+echo active > "$STATE/svc_nginx_active"
+echo enabled > "$STATE/svc_nginx_enabled"
+seed_prior_release
+if run_transaction MOCK_CURL_PUBLIC_FAIL=1; then
+  fail "已配置情境下 public-path healthz 失敗應該非零結束"
+else
+  pass "已配置情境下 public-path healthz 失敗時非零結束"
+fi
+assert_grep_log "已回滾到跑前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink（nginx conf.d）還原回跑前（本來就指向 legacy.conf）"
+assert_eq "$(conf_content legacy.conf)" "# legacy stub v1（跑前既有內容）" "回滾後 active conf 內容 byte-for-byte 還原成跑前版本（codex 複審 HIGH：conf 原子化核心修復點——public-path 驗證失敗這種發生在 Step 4 mutation 之後的情境，最容易暴露『只還原 symlink、沒還原檔案內容』的舊 bug）"
+assert_eq "$(current_target)" "$(PRIOR_RELEASE_DIR)" "回滾後 frontend/current 也切回前一版 release（同一筆交易，dist+conf 一起回滾）"
 
 echo "== 場景 10：無失敗注入（happy path）→ 正常成功，拓樸真的收斂 =="
 reset_sandbox
@@ -658,6 +708,10 @@ else
 fi
 assert_eq "$(cat "$(PRIOR_RELEASE_DIR)/index.html")" "<html>prior release stub</html>" "前一版 release 目錄保留未刪（供未來 rollback 用）"
 assert_eq "$([ -f "$(current_target)/index.html" ] && echo yes || echo no)" "yes" "新版 release 目錄裡有部署的 dist 內容（index.html 存在）"
+# codex 複審 HIGH（conf 原子化）：成功的重跑也該真的把 live react.conf
+# atomic replace 成這次下載的新內容（不是停在 staging、也不是還留著
+# 跑前的舊 "# react stub"）。
+assert_eq "$(conf_content react.conf)" "stub" "成功重跑後 live react.conf 內容已 atomic replace 成新版（不是還留著跑前的 \"# react stub\"）"
 
 echo "== 場景 17（Step 5 healthz retry 有效性）：post-switch healthz 前 2 次失敗、第 3 次才成功（模擬 nginx reload 後極短暫的 worker 交接窗口）→ retry 吸收掉，不該誤觸發 rollback =="
 reset_sandbox
