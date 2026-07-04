@@ -70,20 +70,19 @@ def _reset_shared_module_state():
 
 @pytest.fixture(autouse=True)
 def _reset_analyze_dedup_state():
-    """#51 `/api/analyze` server-side idempotency：`_analyze_dedup_cache`/
-    `_analyze_dedup_inflight`/`_analyze_dedup_follower_failure` 是
-    module-level 狀態（同一把 key 60 秒內共用結果；世代編號雖然全域
-    唯一不會跨測試撞號，但仍清乾淨避免不必要的殘留），本檔許多測試共用
-    相同的 (coin, query, type) 組合（如 `coin=BTC, q="test"`）——不清
-    乾淨會讓後面的測試誤命中前一個測試留下的快取結果/事件，而不是真的
-    呼叫到當次測試 monkeypatch 的 `web.run`/`web.run_comparison`。"""
-    web._analyze_dedup_cache.clear()
+    """#51 `/api/analyze` server-side idempotency：`_analyze_dedup_inflight`/
+    `_analyze_dedup_follower_result` 是 module-level 狀態（in-flight
+    coalescing 期間、以及 leader 完成當下發布給 follower 的短暫暫存區；
+    世代編號雖然全域唯一不會跨測試撞號，但仍清乾淨避免不必要的殘留），
+    本檔許多測試共用相同的 (coin, query, type) 組合（如
+    `coin=BTC, q="test"`）——不清乾淨會讓後面的測試誤命中前一個測試留下
+    的殘留事件，而不是真的呼叫到當次測試 monkeypatch 的
+    `web.run`/`web.run_comparison`。"""
     web._analyze_dedup_inflight.clear()
-    web._analyze_dedup_follower_failure.clear()
+    web._analyze_dedup_follower_result.clear()
     yield
-    web._analyze_dedup_cache.clear()
     web._analyze_dedup_inflight.clear()
-    web._analyze_dedup_follower_failure.clear()
+    web._analyze_dedup_follower_result.clear()
 
 
 @pytest.fixture
@@ -483,19 +482,45 @@ def test_api_analyze_dedup_concurrent_identical_requests_call_run_once(monkeypat
     assert len(bodies) == 1, "所有並行重複請求應共用同一份真實結果"
 
 
-def test_api_analyze_dedup_sequential_identical_requests_reuse_60s_cache(monkeypatch):
-    """非並行、緊接著的重複請求（同一 key，TTL 60 秒內）：第二次應直接吃
-    短期快取，`pipeline.run` 一樣只呼叫 1 次。"""
+def test_api_analyze_dedup_sequential_identical_requests_each_fresh(monkeypatch):
+    """codex HIGH 複審 Round 12（結果 staleness，#51 最終收斂：移除共用的
+    60 秒 TTL 結果快取，只留 in-flight coalescing）：非並行、緊接著送出
+    的兩個完全相同（coin/query/type/mode 都一樣）的請求，第二個**不該**
+    吃到第一個的快取結果——加密市場資料時效敏感，使用者刻意重送相同
+    query 通常是要最新資料，"request 內容相等" 不等於 "同一個邏輯操作"。
+
+    這裡用一個會依呼叫次數回傳**不同** `market_judgment` 的 stub 取代
+    `web.run`（模擬市場資料在兩次請求之間變動），斷言：(1) `pipeline.run`
+    真的被呼叫 2 次（而不是第二次直接複用快取）；(2) 第二個回應的
+    `market_judgment` 反映的是第二次呼叫**更新後**的資料，跟第一次不同
+    ——不是沿用第一次的舊報告。"""
     counter = _CallCounter()
-    _wrap_counting_run(monkeypatch, counter)
+    real_run = pipeline_module.run
+
+    def _varying_run(*args, **kwargs):
+        counter.hit()
+        report, evidence, log = real_run(*args, **kwargs)
+        report.market_judgment = f"市場判斷版本-{counter.n}"
+        return report, evidence, log
+
+    monkeypatch.setattr(web, "run", _varying_run)
 
     qs = {"coin": ["ETH"], "type": ["multi_source"], "q": ["dedup-sequential-test"]}
     code1, body1 = web._handle_api_analyze(qs, client_ip="10.1.1.2")
     code2, body2 = web._handle_api_analyze(qs, client_ip="10.1.1.3")
 
     assert code1 == 200 and code2 == 200
-    assert counter.n == 1, f"第二次重複請求應直接吃快取，實際呼叫 pipeline.run {counter.n} 次"
-    assert body1 == body2, "重複請求應回傳同一份真實結果（可標記為快取，但內容須逐字相同）"
+    assert counter.n == 2, (
+        f"循序（非並行）的重複請求應各自 fresh 觸發 pipeline.run，"
+        f"實際只呼叫 {counter.n} 次"
+    )
+    judgment1 = _envelope(body1)["data"]["report"]["market_judgment"]
+    judgment2 = _envelope(body2)["data"]["report"]["market_judgment"]
+    assert judgment1 == "市場判斷版本-1"
+    assert judgment2 == "市場判斷版本-2", (
+        "第二個循序請求應該拿到第二次呼叫更新後的資料，而不是第一次的舊報告"
+    )
+    assert body1 != body2, "兩次循序請求的回應內容不該逐字相同（各自反映當下最新資料）"
 
 
 def test_api_analyze_dedup_different_coin_or_query_or_type_not_deduped(monkeypatch):
@@ -553,20 +578,41 @@ def test_api_analyze_dedup_comparison_preserves_request_order_not_swapped(monkey
 
 
 def test_api_analyze_dedup_comparison_same_order_still_deduped(monkeypatch):
-    """同順序（同一個 coin_a,coin_b 序列）的重複 comparison 請求仍應正常
-    dedup（只跑 1 次）——上一條測試確認的是「順序不同不誤 dedup」，這條
-    反向確認「順序相同該 dedup 的還是有 dedup 到」，避免修正 codex HIGH
-    時矯枉過正變成完全不 dedup comparison。"""
+    """同順序（同一個 coin_a,coin_b 序列）的**並行**重複 comparison 請求
+    仍應正常 in-flight dedup（只跑 1 次）——上一條測試確認的是「順序不同
+    不誤 dedup」，這條反向確認「順序相同、同時送出的請求該 dedup 的還是
+    有 dedup 到」，避免修正 codex HIGH 時矯枉過正變成完全不 dedup
+    comparison。（Round 12 之後：dedup 只發生在 in-flight 期間，這裡改用
+    並行送出而不是循序送出兩次——循序送出在 Round 12 架構下本來就該各自
+    fresh，不再是這條測試要驗證的行為，見
+    `test_api_analyze_dedup_sequential_identical_requests_each_fresh`。）
+    """
     counter = _CallCounter()
-    _wrap_counting_run_comparison(monkeypatch, counter)
+    _wrap_counting_run_comparison(monkeypatch, counter, delay=0.2)
 
     qs = {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["cmp-same-order-test"]}
-    code1, body1 = web._handle_api_analyze(qs, client_ip="10.1.1.11")
-    code2, body2 = web._handle_api_analyze(qs, client_ip="10.1.1.12")
+    n_workers = 5
+    barrier = threading.Barrier(n_workers)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
 
-    assert code1 == 200 and code2 == 200
-    assert counter.n == 1, f"同順序重複請求應共用同一把 key，實際呼叫 {counter.n} 次"
-    assert body1 == body2
+    def _worker():
+        barrier.wait()
+        code, body = web._handle_api_analyze(qs, client_ip="10.1.1.11")
+        with results_lock:
+            results.append((code, body))
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == n_workers
+    assert all(code == 200 for code, _ in results), results
+    assert counter.n == 1, f"同順序、並行送出的重複請求應共用同一把 key，實際呼叫 {counter.n} 次"
+    bodies = {body for _, body in results}
+    assert len(bodies) == 1, "並行重複請求應共用同一份真實結果"
 
 
 def test_api_analyze_dedup_sample_vs_real_not_shared(monkeypatch):
@@ -646,12 +692,13 @@ def test_api_analyze_dedup_leader_failure_shared_with_followers(monkeypatch):
 
 
 def test_dedup_analyze_call_leader_failure_not_written_to_ttl_cache():
-    """codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：直接
-    單元測試 `_dedup_analyze_call`——leader 失敗後，`_analyze_dedup_cache`
-    （共用的 60 秒 TTL 結果快取）不該有這把 key 的任何紀錄（不論成功/
-    失敗，`(False, exc)` 這種寫法本身就不該再發生）；in-flight entry
-    也該被清乾淨，而不是卡在一個「已經失敗」卻還留著的舊 leader entry
-    上，讓下一個請求可以真的重新判斷、重新嘗試。"""
+    """codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障，原始
+    版本）／Round 12（#51 最終收斂，移除共用的 60 秒 TTL 結果快取，只留
+    in-flight coalescing）：直接單元測試 `_dedup_analyze_call`——leader
+    失敗後，in-flight entry 應該被清乾淨，而不是卡在一個「已經失敗」卻
+    還留著的舊 leader entry 上，讓下一個請求可以真的重新判斷、重新
+    嘗試（此時已經沒有任何供全新請求複用的共用快取可查，`key` 本身
+    也不再是任何結果暫存區的鍵）。"""
     key = "dedup-failure-not-in-ttl-cache-test-key"
 
     def _boom():
@@ -660,28 +707,28 @@ def test_dedup_analyze_call_leader_failure_not_written_to_ttl_cache():
     with pytest.raises(ValueError):
         web._dedup_analyze_call(key, _boom)
 
-    assert key not in web._analyze_dedup_cache, (
-        "leader 失敗不該被寫進共用的 60 秒 TTL 結果快取"
-    )
     assert key not in web._analyze_dedup_inflight, (
         "leader 失敗後應該清掉 in-flight entry，讓下一個請求可以 fresh retry"
     )
 
 
 def test_api_analyze_dedup_leader_failure_not_cached_fresh_retry_after_recovery(monkeypatch):
-    """codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：leader
-    失敗時，例外不該被寫進共用的 60 秒 TTL 結果快取——否則接下來 60 秒內
-    任何命中同一把 key 的請求（不管依賴是否早就恢復）都會立刻重拋這個
-    過時例外，短暫故障被人為放大成保證整整 60 秒的故障。
+    """codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障，原始
+    版本）／Round 12（#51 最終收斂，移除共用的 60 秒 TTL 結果快取，只留
+    in-flight coalescing）：leader 失敗時，例外只共用給當下這批
+    in-flight follower，絕不留存給任何之後才進來的全新請求——後面循序
+    送出的下一個請求，不管依賴是否早就恢復，都會 fresh 重新真的呼叫一次
+    （這是 Round 12 之後所有循序請求的預設行為，不只是「失敗恢復」這個
+    特例）。
 
     這裡驗證兩件事（銜接上一個測試 `..._leader_failure_shared_with_
     followers` 的斷言，這裡額外加上「恢復後立即重試」）：
     1. leader 第一次失敗（模擬依賴**當下仍然故障**）時，並行等待中的
        follower 共用同一次失敗（都拿到 502，依賴只被真的呼叫 1 次，不是
        依序各自輪流重試）。
-    2. 緊接著（同一個 process 內，不 sleep、不手動竄改任何快取內部
-       狀態）送出的下一個請求——模擬依賴已經恢復——立刻真的重試並成功，
-       不被剛才那次失敗卡住。"""
+    2. 緊接著（同一個 process 內，不 sleep、不手動竄改任何內部狀態）送出
+       的下一個請求——模擬依賴已經恢復——立刻真的重試並成功，不被剛才那
+       次失敗卡住。"""
     counter = _CallCounter()
     dependency_recovered = threading.Event()
     real_run = pipeline_module.run
@@ -738,26 +785,14 @@ def test_api_analyze_dedup_leader_failure_not_cached_fresh_retry_after_recovery(
     )
 
 
-def test_api_analyze_dedup_ttl_expiry_allows_refetch(monkeypatch):
-    """快取過期（TTL 60 秒）後，下一次重複請求應該重新真的跑一次，而不是
-    永久卡住舊結果——直接操控 `web._analyze_dedup_cache` 裡的過期時間，
-    不用真的 sleep 60 秒拖慢測試。"""
-    counter = _CallCounter()
-    _wrap_counting_run(monkeypatch, counter)
-
-    qs = {"coin": ["BNB"], "type": ["multi_source"], "q": ["dedup-ttl-test"]}
-    code1, _ = web._handle_api_analyze(qs, client_ip="10.1.1.8")
-    assert code1 == 200
-    assert counter.n == 1
-
-    # 手動讓快取項目過期（模擬 TTL 60 秒後）。
-    assert len(web._analyze_dedup_cache) == 1
-    (key, (_expiry, entry)), = web._analyze_dedup_cache.items()
-    web._analyze_dedup_cache[key] = (time.time() - 1.0, entry)
-
-    code2, _ = web._handle_api_analyze(qs, client_ip="10.1.1.9")
-    assert code2 == 200
-    assert counter.n == 2, "TTL 過期後應該重新真的呼叫 pipeline.run，而非永久沿用舊結果"
+# codex HIGH 複審 Round 12（#51 最終收斂）：原本這裡有一個
+# `test_api_analyze_dedup_ttl_expiry_allows_refetch`，測「TTL 過期後
+# 允許重新 fetch」——該測試的前提（存在一個 60 秒 TTL 結果快取）已經
+# 隨著本輪移除 TTL 快取而不再成立，且它最終要驗證的行為（過期/後續請求
+# 會 fresh 重新呼叫 pipeline.run）現在是
+# `test_api_analyze_dedup_sequential_identical_requests_each_fresh`
+# 保證的**預設**行為，不需要再手動竄改任何內部快取狀態去模擬「過期」，
+# 故整條測試移除，避免重複且對已不存在的內部結構做白盒操控。
 
 
 def test_api_analyze_dedup_not_bypass_pre_validation(monkeypatch):
@@ -902,25 +937,24 @@ def test_dedup_analyze_call_stale_leader_finishing_before_any_replacement_still_
         return "result-A-slow-but-sole"
 
     result = web._dedup_analyze_call(key, _compute_a)
-    assert result == "result-A-slow-but-sole"
-
-    cached = web._analyze_dedup_cache.get(key)
-    assert cached is not None and cached[1] == (True, "result-A-slow-but-sole"), (
-        "沒有被任何請求取代的 leader，即使跑得比逾時門檻久，完成後仍應正常發布"
+    assert result == "result-A-slow-but-sole", (
+        "沒有被任何請求取代的 leader，即使跑得比逾時門檻久，完成後仍應正常回傳給自己"
     )
     assert key not in web._analyze_dedup_inflight
 
-    # 佐證：緊接著同一把 key 的新請求命中的是 A 自己剛發布的快取，不會
-    # 誤判需要重新跑一次。
+    # Round 12（#51 最終收斂：移除 60 秒 TTL 結果快取，只留 in-flight
+    # coalescing）：緊接著同一把 key 的下一個請求，此時 in-flight 已經
+    # 清空，不是 follower、也沒有任何殘留結果可撿，應該 fresh 重新真的
+    # 跑一次——不再是「命中 A 剛發布的快取」。
     counter = _CallCounter()
 
-    def _compute_should_not_run():
+    def _compute_fresh():
         counter.hit()
-        return "should-not-be-called"
+        return "result-fresh-sequential"
 
-    result2 = web._dedup_analyze_call(key, _compute_should_not_run)
-    assert result2 == "result-A-slow-but-sole"
-    assert counter.n == 0
+    result2 = web._dedup_analyze_call(key, _compute_fresh)
+    assert result2 == "result-fresh-sequential"
+    assert counter.n == 1, "循序的下一個請求應該 fresh 重新真的跑一次，而不是沿用前一次的結果"
 
 
 def test_dedup_analyze_call_stale_leader_finishing_after_replacement_does_not_overwrite(
@@ -930,8 +964,11 @@ def test_dedup_analyze_call_stale_leader_finishing_after_replacement_does_not_ov
     這是 codex 這輪要修的核心 bug 場景——leader A 卡住超過逾時門檻，
     新請求偵測到 A 是 stale、取代成為新 leader B，B 很快完成、發布自己
     的結果並清掉 in-flight；**之後**A 才姍姍來遲真的完成（不是真的 hang
-    死，只是很慢）。斷言：A 完成後，共用快取仍是 B 的結果，沒有被 A
-    覆寫；in-flight 也沒有任何殘留副作用。"""
+    死，只是很慢）。斷言：B 完成時 in-flight 正確清空、拿到自己的
+    `result-B`；A 之後才姍姍來遲完成時，自己仍拿到自己真正算出來的
+    `result-A`（generation fencing 只影響「要不要發布/清 in-flight」，
+    不影響 leader 自己的直接回傳值），且不會誤動 in-flight（此時早就
+    是空的，不該被 A 的晚到完成意外重新寫入）。"""
     monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
     key = "dedup-stale-race-after-replacement-test-key"
 
@@ -967,8 +1004,6 @@ def test_dedup_analyze_call_stale_leader_finishing_after_replacement_does_not_ov
     # B 進來，偵測到 A 是 stale、取代成為新 leader，並立刻完成、發布。
     result_b = web._dedup_analyze_call(key, _compute_b)
     assert result_b == "result-B"
-    cached = web._analyze_dedup_cache.get(key)
-    assert cached is not None and cached[1] == (True, "result-B")
     assert key not in web._analyze_dedup_inflight
 
     # 現在才放 A 完成——A 的 compute() 這時候才真的返回。
@@ -976,12 +1011,9 @@ def test_dedup_analyze_call_stale_leader_finishing_after_replacement_does_not_ov
     a_thread.join(timeout=5)
     assert a_result_holder.get("value") == "result-A", "A 自己應該還是拿到自己真正算出來的結果"
 
-    # 關鍵斷言：A（stale）晚到的完成，不該覆寫 B 已經發布的結果，也不該
-    # 誤清 in-flight（此時 in-flight 早就是空的）。
-    cached_after = web._analyze_dedup_cache.get(key)
-    assert cached_after is not None and cached_after[1] == (True, "result-B"), (
-        f"stale leader A 晚到完成不該覆寫 B 已發布的結果，實際 {cached_after}"
-    )
+    # 關鍵斷言：A（stale）晚到的完成，不該誤清/誤寫 in-flight（此時
+    # in-flight 早就是空的，B 也早就發布完畢，A 的 generation-fenced
+    # no-op 不該讓 in-flight 意外重新出現這把 key 的殘留 entry）。
     assert key not in web._analyze_dedup_inflight
 
 
@@ -993,9 +1025,13 @@ def test_dedup_analyze_call_stale_leader_finishing_while_replacement_still_runni
     完**的期間，A 才姍姍來遲完成。fencing 依賴的是「supersession 是否
     已經發生」（B 是否已經領到新的世代編號，這在 B 呼叫自己的
     `compute()` 之前、在鎖內就已經確定），不是「B 自己是否已經跑完」；
-    A 這時候一樣必須是 no-op：不能誤清 B 仍在跑的 in-flight entry，也
-    不能把快取寫成自己的結果冒充「目前」的結果。最後才放 B 完成，斷言
-    最終被發布/服務的是 B 的結果。"""
+    A 這時候一樣必須是 no-op：不能誤清 B 仍在跑的 in-flight entry。
+    （Round 12 之後：發布結果的暫存區改成以世代編號為鍵，A 用的是自己
+    的 `initial_generation`、B 用的是自己的世代編號，兩者天生不會互相
+    覆寫，「A 把結果冒充成 B 的目前結果」這個歷史風險已經因為資料結構
+    本身不再存在；仍要驗證的核心風險只剩「A 不該誤清掉 B 仍在跑的
+    in-flight entry」。）最後才放 B 完成，斷言最終真的拿到的是 B 的
+    結果。"""
     monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
     key = "dedup-stale-race-during-replacement-test-key"
 
@@ -1047,23 +1083,16 @@ def test_dedup_analyze_call_stale_leader_finishing_while_replacement_still_runni
     assert a_result_holder.get("value") == "result-A"
 
     # A 完成、嘗試發布時，B 早已取代（generation 不同）——A 的發布必須是
-    # no-op：不該把 in-flight 清掉（那是 B 的 entry，B 還在跑），也不該
-    # 把快取寫成 A 的結果。
+    # no-op：不該把 in-flight 清掉（那是 B 的 entry，B 還在跑）。（Round 12
+    # 之後：結果暫存區以世代編號為鍵，A 只可能寫進自己
+    # `initial_generation` 的欄位，天生不會覆寫 B 的結果，這裡不需要再
+    # 額外檢查。）
     assert key in web._analyze_dedup_inflight, "A 不該誤清掉 B 仍在跑的 in-flight entry"
-    cached_while_b_running = web._analyze_dedup_cache.get(key)
-    assert cached_while_b_running is None or cached_while_b_running[1] != (True, "result-A"), (
-        f"A 被取代後晚到完成，不該把快取寫成自己的結果，實際 {cached_while_b_running}"
-    )
 
     # 現在才放 B 完成——B 才是應該真正發布/被服務的結果。
     b_may_finish.set()
     b_thread.join(timeout=5)
-    assert b_result_holder.get("value") == "result-B"
-
-    cached_final = web._analyze_dedup_cache.get(key)
-    assert cached_final is not None and cached_final[1] == (True, "result-B"), (
-        f"最終應該是 replacement（B）的結果被發布/服務，實際 {cached_final}"
-    )
+    assert b_result_holder.get("value") == "result-B", "最終應該是 replacement（B）真正算出來的結果"
     assert key not in web._analyze_dedup_inflight
 
 
@@ -1217,13 +1246,14 @@ def test_dedup_analyze_call_stale_leader_hangs_forever_replacement_wakes_followe
     本測試模擬：leader A 卡住且**永遠不會**自己完成（`a_may_finish_never`
     這個 Event 全程刻意不 `.set()`，代表 A 真的 hang 死）；5 個 follower
     在 A 還新鮮時 join 它的 event；A 被標記 stale 後，B 進來偵測到、取而
-    代之成為新 leader；B 之後成功完成、把結果發布到共用快取。
+    代之成為新 leader；B 之後成功完成、把結果發布給當下這批 follower
+    （鍵是 B 自己的世代編號）。
 
     在本輪修復之前：A 被取代時它的舊 Event 從未被 `.set()`，5 個原本
     join 在 A 上的 follower 只能繼續空等（因為 A 真的不會自己完成），
     最終各自等到自己那個從函式一開始就固定的 deadline
     （`_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`）才逾時，回 503——即使 B
-    早就成功把新結果發布到共用快取，這些 follower 對此一無所知。
+    早就成功把新結果發布出來，這些 follower 對此一無所知。
 
     修復後應該：B 取代 A 的當下就主動 `.set()` A 的舊 event，5 個
     follower 幾乎立刻被喚醒、重新進協調 loop，撿到（或 join 到）B 的
@@ -1363,8 +1393,6 @@ def test_dedup_analyze_call_stale_leader_hangs_forever_replacement_wakes_followe
         f"（否則代表是撞上自己的 deadline 而非被 signal 喚醒）"
     )
 
-    cached_final = web._analyze_dedup_cache.get(key)
-    assert cached_final is not None and cached_final[1] == (True, "result-B")
     assert key not in web._analyze_dedup_inflight
 
 
@@ -1508,8 +1536,11 @@ def test_api_analyze_dedup_key_captures_online_stance_force_offline_per_caller(m
        `run()` 呼叫帶 `force_stance_offline=True`、B 的不帶（`False`）
        ——依賴各被真的呼叫 1 次，不共用同一把 key、不互相污染、不依
        送出順序而定。
-    2. 同一個 IP（狀態不變）再送一次完全相同的請求 → 正確 dedup（命中
-       60 秒快取，不再真的呼叫 `run()`）。
+    2. 同一個 IP（狀態不變）循序再送一次完全相同的請求 → Round 12 之後
+       循序請求一律 fresh 重新真的呼叫 `run()`（不再命中任何共用快取），
+       但因為配額狀態沒變，一樣正確算出 `force_stance_offline=True`——
+       這條「per-caller 狀態決定誰被 degrade」的判斷不受 TTL 快取移除
+       影響，本來就該每次都獨立、正確地反映當下狀態。
     """
     monkeypatch.setattr(web, "online_stance_requested", lambda: True)
     real_run = pipeline_module.run
@@ -1549,12 +1580,19 @@ def test_api_analyze_dedup_key_captures_online_stance_force_offline_per_caller(m
             f"IP_B 配額充裕，不該被 degrade，實際 {calls[1]}"
         )
 
-        # 同一個 IP（狀態不變）再送一次 → 正確 dedup，不再真的呼叫 run()。
+        # Round 12 之後：同一個 IP 循序再送一次，in-flight 早已清空，會
+        # fresh 重新真的呼叫一次 run()（不再命中任何共用快取）——但因為
+        # IP_A 的配額狀態沒變，這次呼叫一樣該正確算出
+        # `force_stance_offline=True`，不會因為快取移除而回歸算錯。
         code_a2, body_a2 = web._handle_api_analyze(qs, client_ip=ip_a)
         assert code_a2 == 200, (code_a2, body_a2)
-        assert len(calls) == 2, (
-            f"同一個 IP、狀態不變的重複請求應該命中 60 秒 dedup 快取，"
-            f"不該再真的呼叫依賴，實際共 {len(calls)} 次：{calls}"
+        assert len(calls) == 3, (
+            f"循序（非並行）的重複請求應該 fresh 重新真的呼叫依賴，"
+            f"實際共 {len(calls)} 次：{calls}"
+        )
+        assert calls[2]["force_stance_offline"] is True, (
+            f"IP_A 配額狀態沒變，這次 fresh 呼叫一樣該正確算出 "
+            f"force_stance_offline=True，實際 {calls[2]}"
         )
     finally:
         web._online_stance_rate_buckets.pop(ip_a, None)
@@ -1656,7 +1694,6 @@ def test_api_analyze_dedup_key_distinguishes_token_whitespace_suffix(monkeypatch
     assert code1 == 200 and code2 == 200
     assert counter1.n == 2, f"valid/whitespace-suffixed token 應各自呼叫 1 次，實際共 {counter1.n} 次"
 
-    web._analyze_dedup_cache.clear()
     web._analyze_dedup_inflight.clear()
 
     # 順序 2：whitespace 先、valid 後——順序不影響結論。
@@ -1687,9 +1724,11 @@ def test_api_analyze_dedup_key_live_ignores_sample_real_bypass(monkeypatch):
     修復後：`_analyze_dedup_key` 改用 `_analyze_effective_mode(qs)`
     算出的單一 `"live"/"real"/"sample"` canonical 欄位取代原始
     sample/real/token 四個欄位。本測試end-to-end驗證：同一個 query，
-    三個 `live=1` + 合法 token 的請求，只是各自帶不同（理應被忽略）的
-    `sample`/`real` 值，應該只觸發 **1 次** `pipeline.run`（正確 dedup、
-    不能被繞過）。
+    三個**並行**送出、`live=1` + 合法 token 的請求，只是各自帶不同
+    （理應被忽略）的 `sample`/`real` 值，應該只觸發 **1 次**
+    `pipeline.run`（正確 in-flight dedup、不能被繞過）。（Round 12
+    之後：dedup 只發生在 in-flight 期間，這裡改用並行送出而不是循序
+    送出三次。）
 
     同時驗證反面：sample/real/live 三種**不同** effective_mode 的請求
     （即使 query 相同）必須各自獨立 compute()，不能被錯誤地 dedup 在一起
@@ -1709,6 +1748,7 @@ def test_api_analyze_dedup_key_live_ignores_sample_real_bypass(monkeypatch):
     def _stub_run_live(*args, **kwargs):
         counter_live.hit()
         coin, q, qtype_arg = args[0], args[1], args[2]
+        time.sleep(0.2)  # 拉長一點，確保三個並行 worker 真的重疊在一起
         # 用真正的 pipeline.run 跑一次真正的離線 offline 分析，$0、
         # 不觸發任何真 Bedrock/AWS 呼叫——這裡只是要驗證 dedup 的呼叫
         # 次數，不是要驗證 pipeline 本身的輸出內容。
@@ -1756,17 +1796,33 @@ def test_api_analyze_dedup_key_live_ignores_sample_real_bypass(monkeypatch):
         f"key，實際：a={key_live_a!r}, b={key_live_b!r}, c={key_live_c!r}"
     )
 
-    code_a, _ = web._handle_api_analyze(qs_live_a, client_ip="10.1.7.1")
-    code_b, _ = web._handle_api_analyze(qs_live_b, client_ip="10.1.7.1")
-    code_c, _ = web._handle_api_analyze(qs_live_c, client_ip="10.1.7.1")
-    assert code_a == 200 and code_b == 200 and code_c == 200
+    barrier = threading.Barrier(3)
+    live_results: list[int] = []
+    live_results_lock = threading.Lock()
+
+    def _worker(qs):
+        barrier.wait()
+        code, _ = web._handle_api_analyze(qs, client_ip="10.1.7.1")
+        with live_results_lock:
+            live_results.append(code)
+
+    threads = [
+        threading.Thread(target=_worker, args=(qs,))
+        for qs in (qs_live_a, qs_live_b, qs_live_c)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(live_results) == 3 and all(code == 200 for code in live_results), live_results
     assert counter_live.n == 1, (
-        f"live=1 + 不同（理應被忽略）的 sample/real 值，應該正確 dedup、"
-        f"只呼叫 1 次 pipeline.run，實際呼叫了 {counter_live.n} 次——"
-        f"代表可以靠變動被忽略的參數繞過 dedup、重複觸發真 Bedrock 呼叫"
+        f"live=1 + 不同（理應被忽略）的 sample/real 值，並行送出應該正確 "
+        f"in-flight dedup、只呼叫 1 次 pipeline.run，實際呼叫了 "
+        f"{counter_live.n} 次——代表可以靠變動被忽略的參數繞過 dedup、"
+        f"重複觸發真 Bedrock 呼叫"
     )
 
-    web._analyze_dedup_cache.clear()
     web._analyze_dedup_inflight.clear()
 
     # --- (2) 反面驗證：sample / real / live 三種**不同**
@@ -1876,7 +1932,6 @@ def test_api_analyze_dedup_key_distinguishes_query_whitespace_variant(monkeypatc
         f"應各自呼叫 1 次、各自帶自己的 query，實際觀察到 {seen_queries_1!r}"
     )
 
-    web._analyze_dedup_cache.clear()
     web._analyze_dedup_inflight.clear()
 
     # 順序 2：" foo " 先到、"foo" 後到——順序反過來，結論不變。

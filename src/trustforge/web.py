@@ -3295,14 +3295,19 @@ def _price_provenance_data(evidence: list) -> dict:
 # 打一次 Bedrock」這種單純重複——兩次都在 cap 之內、各自都合法放行，但語意上
 # 是同一件事被做了兩遍，白白多花一次 token 成本。
 #
-# 做法：in-flight dedup（推薦解法，見下）＋ 短期（60 秒）結果快取。
-#   - 同一 (type, coin[,coin2], query, sample/live/real/token) 的請求同時有一個正在
-#     跑時，後到的相同請求原地等待、共用同一份真實結果，不各自進
-#     `_do_analyze`/`_do_comparison`（因此也不會各自呼叫
-#     `_check_live_rate_limit`/`_check_real_rate_limit`，更不會各自走到
-#     `pipeline.run` 的 `try_reserve_request_budget()`）。
-#   - 跑完的結果額外存 60 秒短期快取，供緊接在後、沒能排進同一輪 in-flight
-#     等待的重複請求直接複用，一樣不重新觸發真連接器/Bedrock。
+# 做法：in-flight dedup（single-flight coalescing）——**不含**任何
+# post-completion 結果快取（見下方 codex HIGH 複審 Round 12：曾經有過
+# 60 秒 TTL 結果快取，因為會 replay 過時分析結果而移除）。
+#   - 同一 (type, coin[,coin2], query, sample/live/real/token, online-stance
+#     force_offline) 的請求同時有一個正在跑時，後到的相同請求原地等待、
+#     共用同一份真實結果，不各自進 `_do_analyze`/`_do_comparison`（因此也
+#     不會各自呼叫 `_check_live_rate_limit`/`_check_real_rate_limit`，更
+#     不會各自走到 `pipeline.run` 的 `try_reserve_request_budget()`）。
+#   - leader 完成後，把結果發布給**當下這一批**還在等待的 in-flight
+#     follower，然後立刻清掉這把 key 的 in-flight entry——**不**額外把
+#     結果留存供之後才進來的全新請求複用。緊接在後（沒能排進同一輪
+#     in-flight 等待）的下一個請求，會發現 in-flight 已清空，直接成為新
+#     leader、對依賴 fresh 重新呼叫一次。
 #   - key 用 per-key `threading.Event`（不是單一全域鎖），`compute()`
 #     本身（可能是慢速真連接器/Bedrock I/O）在鎖外執行——不同 key 的請求
 #     完全並行，不會被彼此拖慢。
@@ -3358,39 +3363,114 @@ def _price_provenance_data(evidence: list) -> dict:
 #     無限放大——這裡要修的是「正確性」（絕不發布/服務過時結果），不是
 #     「零重複」（那需要能真正 cancel 執行中 thread 的機制，超出目前
 #     `ThreadingHTTPServer` + 原生 thread 的能力範圍）。
+#
+# codex HIGH 複審 Round 12（結果 staleness——60 秒 TTL 結果快取 replay
+# 過時分析，#51 最終收斂）：先前版本在 leader 完成後，除了發布給當下
+# in-flight follower，還額外把結果寫進一份共用的 60 秒 TTL 結果快取
+# （key 是「請求內容」），供之後才進來、沒排進同一輪 in-flight 的重複
+# 請求直接複用。但加密市場資料（價格/情緒…）時效敏感：使用者 30 秒後
+# **刻意**重送相同 query 通常是要**最新**資料，"request 內容相等" 不等於
+# "同一個邏輯操作"；60 秒 TTL 快取卻會把第一次跑出來的舊報告原封不動
+# 回給第二次請求，完全不查一次更新的市場資料——這正是 #51 的目標
+# 「防雙送＝防雙倍 Bedrock 花費」被過度延伸成「防雙送＝永遠共用同一份
+# 結果」，兩者不是同一件事。
+#
+# 修法（移除 TTL 結果快取，只留 in-flight coalescing）：#51 真正要防的
+# 是「並行/極短間隔內的相同請求各自重複觸發真連接器/Bedrock」——這件事
+# 光靠 in-flight coalescing（followers join 目前正在跑的 leader）就已經
+# 完整達成，不需要額外的 post-completion 快取。因此：leader 完成、把
+# 結果發布給當下這一批 in-flight follower 之後，立刻清掉這把 key 的
+# in-flight entry；之後**循序**進來的新請求（不管是 1 秒後還是 1 小時
+# 後）一律 fresh 重新呼叫依賴，拿到當下最新的市場資料。這個簡化同時
+# 消除了前幾輪一整類問題的根源——結果 staleness（本輪）、失敗快取
+# 誤傷全新 caller（複審#5）、跨 mode/跨 IP replay（見 `_analyze_dedup_key`
+# 歷次複審）、TTL 內請求彼此順序相依——這些全部都是「post-completion
+# 結果快取」這個機制本身引入的，移掉它，這一整類問題不會再發生。**保留**
+# 不變：in-flight 協調（generation fencing、single-flight 重入、
+# stale-leader 喚醒，見上方複審#1~#4/MEDIUM）、per-caller 限流前置
+# （`_analyze_enforce_caller_rate_limit`）、`effective_mode`/online-stance
+# 這些「決定誰能 join 誰」的 key 組成變數（見 `_analyze_dedup_key`
+# docstring）——這幾層都只影響「誰跟誰共用同一次還在跑的 compute()」，
+# 跟「結果要不要在 compute() 完成後繼續留存」是兩個獨立的問題，只有後者
+# 被本輪移除。原本用來在 leader 失敗時只共用給當下 in-flight follower的
+# per-generation 暫存區（複審#5 引入的 `_analyze_dedup_follower_failure`）
+# 現在擴大成同時承載**成功與失敗**兩種結果（改名
+# `_analyze_dedup_follower_result`）——這正是「只給當下已在等待的
+# follower 看、絕不影響任何全新請求」這個語意本來就該同時適用於成功與
+# 失敗結果，不該只限定給失敗（成功結果原本額外進 TTL 快取是特例，拿掉
+# TTL 快取後兩者理應走同一條路徑）。
 # ---------------------------------------------------------------------------
 
-_ANALYZE_DEDUP_TTL_SECONDS = 60.0
-_ANALYZE_DEDUP_CACHE_MAX = 256
 # follower bounded wait 上界，同時也是「leader 多久沒完成算 stale」的門檻
 # ——比單次分析（含真連接器/Bedrock）預期最長時間（見 #9 護欄 docstring）
 # 略長，但仍是有限值，不讓一個掛掉的依賴無限期拖垮 server threads。
 _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS = 45.0
-# codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：leader 失敗
-# 時，例外**不**進 `_analyze_dedup_cache`（那是 60 秒 TTL、鍵是「請求
-# 內容」的共用結果快取，任何之後命中同一把 key 的全新請求都會讀到——
-# 拿來放暫時性失敗正是原本的 bug）。改成另外一個**鍵是世代編號**的獨立
-# 小暫存區，只給「這次失敗發生當下，已經在 `event.wait()` 上等這個世代
-# 的 follower」讀。世代編號全域唯一、永不重複使用，因此往後任何全新
-# 請求（不論多快進來）**永遠不可能**巧合去查到這個世代——不需要用短
-# TTL 才能保證「不影響全新 caller」，這裡的秒數只是給記憶體回收用的
-# 寬限期，不是安全邊界。
-_ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS = 5.0
+# codex HIGH 複審 Round 12（結果 staleness，#51 最終收斂，見模組頂部大段
+# 說明）：leader 完成（不論成功/失敗）後，結果**不**進任何以「請求內容」
+# 為鍵、供之後全新請求複用的共用快取——只寫進這個**鍵是世代編號**的獨立
+# 小暫存區，只給「當下已經在 `event.wait()` 上等這個世代的 follower」讀。
+# 世代編號全域唯一、永不重複使用，因此往後任何全新請求（不論多快進來）
+# **永遠不可能**巧合去查到這個世代——不需要用短 TTL 才能保證「不影響
+# 全新 caller」，這裡的秒數只是給記憶體回收用的寬限期，不是安全邊界。
+_ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS = 5.0
 
 _analyze_dedup_lock = threading.Lock()
 # key -> (leader 完成時會 set() 的 Event, leader 開始時間戳, leader 的世代編號)
 _analyze_dedup_inflight: dict[str, tuple[threading.Event, float, int]] = {}
-_analyze_dedup_cache: dict[str, tuple[float, tuple[bool, object]]] = {}
-# 世代編號 -> (寬限期到期時間戳, leader 失敗時的例外物件)——見上方
-# `_ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS` 說明；只給當下已在等
-# 該世代的 follower 讀，不是給全新請求命中的結果快取。
-_analyze_dedup_follower_failure: dict[int, tuple[float, BaseException]] = {}
+# 世代編號 -> (寬限期到期時間戳, (ok, payload))——見上方
+# `_ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS` 說明；`ok=True` 時
+# `payload` 是成功結果、`ok=False` 時 `payload` 是例外物件。只給當下已在
+# 等該世代的 follower 讀，**不是**給全新請求命中的結果快取——這把 key
+# 的下一個全新請求永遠是查 `_analyze_dedup_inflight`（空的）後 fresh
+# 自己成為新 leader，不會查這個字典。
+_analyze_dedup_follower_result: dict[int, tuple[float, tuple[bool, object]]] = {}
 # 全域、單調遞增、永不重複使用的世代編號來源（見上方模組頂部大段說明的
 # codex HIGH 複審#3）；只在持有 `_analyze_dedup_lock` 時讀寫。用單一全域
 # 計數器而非每把 key 各自的計數器字典，避免額外一個會無限增長的 dict，
 # 且保證世代編號全域唯一——不會有「同一把 key 被回收後世代編號重新從頭
 # 算」而跟舊 stale leader 巧合撞號的風險。
 _analyze_dedup_generation_seq = 0
+# 舊世代編號 -> (寬限期到期時間戳, 取代它的新世代編號)。
+#
+# codex HIGH 複審 Round 12 補丁（stale-leader 取代時的 follower 交棒
+# race）：一個 follower 原本 join 在舊 leader A（世代 a_gen）的 event
+# 上；A 被取代成新 leader B（世代 b_gen）時，A 的 event 會被立刻 signal
+# 喚醒這些 follower，但 follower 要等醒來後重新搶到
+# `_analyze_dedup_lock`、重新讀一次 `_analyze_dedup_inflight`，才會知道
+# 「現在的 leader 是 B」並把自己的 `joined_leader_generation` 更新成
+# b_gen。若 B 快到「follower 還沒來得及重新搶到鎖」就已經完成並清空
+# in-flight entry，follower 重新搶到鎖時會同時看到「a_gen 沒有已發布
+# 結果（A 還在背景 hang 著）」跟「in-flight 是空的」——若不做任何補救，
+# 它會誤判「沒有任何 leader 在跑」而自己 fresh 重新 compute() 一次，
+# 在「stale leader 被取代」這個已知、罕見、且被本檔案模組頂部大段說明
+# 視為可接受取捨的事件之上，再多引入一次原本不必要的重複真呼叫。
+#
+# 修法：每次「取代」發生時，除了 signal 舊 event，也在這裡記一筆
+# 「a_gen 已經被 b_gen 取代」；follower 醒來後、查
+# `_analyze_dedup_follower_result` 前，先沿著這個對照表把自己手上過時
+# 的世代編號追到最新的一個，再用追到的世代編號去查結果／查 in-flight。
+# 即使 follower 醒來時 B 早已完成並清空 in-flight，也一定能在這裡查到
+# b_gen（寫入這個對照表跟建立 B 的 in-flight entry 是同一個臨界區內
+# 完成，順序上必然早於 B 自己完成 compute() 並清 in-flight），從而正確
+# 查到 `_analyze_dedup_follower_result[b_gen]`（B 完成時一定會寫入，
+# 無論當下有沒有 follower 在等）拿到 B 真正算出來的結果，而不是誤判成
+# 全新請求。寬限期沿用 `_ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS`，
+# 純粹是記憶體回收，不是安全邊界（全域世代編號唯一、永不重複使用）。
+_analyze_dedup_generation_supersede: dict[int, tuple[float, int]] = {}
+
+
+def _analyze_dedup_resolve_superseded_generation_locked(generation: int, now: float) -> int:
+    """沿著 `_analyze_dedup_generation_supersede` 把過時的世代編號追到
+    最新的一個。必須在持有 `_analyze_dedup_lock` 時呼叫。"""
+
+    seen: set[int] = set()
+    while generation not in seen:
+        seen.add(generation)
+        redirect = _analyze_dedup_generation_supersede.get(generation)
+        if redirect is None or redirect[0] <= now:
+            break
+        generation = redirect[1]
+    return generation
 
 
 class _AnalyzeDedupTimeout(Exception):
@@ -3538,14 +3618,19 @@ def _analyze_dedup_key(
     專用限流耗盡時，`_do_analyze`/`_do_comparison` 會誠實 degrade 這次
     請求成 `force_stance_offline=True`，結果內容因此不同）。先前的 key
     完全沒有捕捉這個變數，導致：(1) 一個 online-stance 配額已耗盡的
-    IP 當 leader 時，它的降級結果會被寫進共用快取，之後 60 秒內任何
-    命中同一把 key、配額本來還很充裕的其他 IP 都會被迫拿到這份降級
-    結果；(2) 反過來，配額充裕的 IP 當 leader、產出正常 online-stance
-    結果被快取後，一個配額早就耗盡的 IP 若剛好命中快取，會白拿一份
+    IP 當 leader 時，它的降級結果會被發布給當下同一把 key 命中的所有
+    in-flight follower——配額本來還很充裕的其他 IP，若剛好在它 compute()
+    期間送出同一把 key 的請求，會被迫共用（join）到這份降級結果；
+    (2) 反過來，配額充裕的 IP 當 leader、產出正常 online-stance 結果，
+    一個配額早就耗盡的 IP 若剛好 join 到同一輪 in-flight，會白拿一份
     「本來該被 degrade」的結果、完全繞過自己的配額限制，沒有真的消耗
     到它自己的 online-stance 限流 bucket。兩個方向都違反「per-IP
     配額」的護欄語意，而且哪個先到、哪個後到決定了另一方拿到什麼結果
-    ——結果依到達順序而定，不是 deterministic。
+    ——結果依到達順序而定，不是 deterministic。（Round 12 之後：共用
+    的 60 秒 TTL 結果快取已整個移除，只剩 in-flight coalescing——這個
+    污染風險改成只發生在「兩個 IP 剛好同時在等同一輪 compute()」的
+    in-flight 期間，但風險本質跟修法完全不變：仍然是「key 沒捕捉到
+    caller-specific 變數，導致不該共用的請求被迫共用同一份結果」。）
 
     修法：呼叫端（`_handle_api_analyze`）在算這個 key **之前**，先對
     這個 caller 自己的 `client_ip` 算一次
@@ -3579,13 +3664,13 @@ def _analyze_enforce_caller_rate_limit(qs: dict, client_ip: str) -> None:
 
     1. 只有 dedup 的 leader 會真的呼叫 `_do_analyze`/`_do_comparison`，
        因而只有 leader 的 IP 會被 `_check_live_rate_limit`/
-       `_check_real_rate_limit` 檢查、計入 bucket；follower（含直接命中
-       60 秒短期快取的請求）完全跳過這個檢查——一個已經被限流的 IP，
-       只要送出的請求「碰巧」跟某個正在進行中/剛快取好的合法請求同一把
-       dedup key，就能繞過自己的限流白拿一份真結果。
+       `_check_real_rate_limit` 檢查、計入 bucket；follower（in-flight
+       join 到 leader 的請求）完全跳過這個檢查——一個已經被限流的 IP，
+       只要送出的請求「碰巧」跟某個正在進行中的合法請求同一把 dedup
+       key，就能繞過自己的限流白拿一份真結果。
     2. 反過來，若 leader 因為自己 IP 超速而收到 `TooManyRequests`，
-       這個 429 若被當成一般失敗存進共用的 dedup 快取、replay 給
-       follower，會讓完全不相干、根本沒超速的其他 IP 平白拿到別人的
+       這個 429 若被當成一般失敗共用給 follower（見 `_dedup_analyze_call`
+       docstring），會讓完全不相干、根本沒超速的其他 IP 平白拿到別人的
        429（"429-poisoning"）。
 
     修法：把限流檢查搬到**每一個 caller 自己**、在 dedup 查找
@@ -3640,35 +3725,26 @@ def _analyze_online_stance_force_offline_for_caller(qs: dict, client_ip: str) ->
     return _online_stance_force_offline(client_ip)
 
 
-def _analyze_dedup_cache_put_locked(key: str, entry: tuple[bool, object]) -> None:
-    """呼叫端須已持有 `_analyze_dedup_lock`。寫入前先清掉已過期項目，
-    再檢查上限（`_ANALYZE_DEDUP_CACHE_MAX`）——bounded 記憶體，不因長期
-    運行、大量不同 query 組合而無限增長（比照既有 `_ledger_summary_cache`
-    /`_status_cache` 慣例）。"""
-    now = time.time()
-    expired = [k for k, (exp, _) in _analyze_dedup_cache.items() if exp <= now]
-    for k in expired:
-        _analyze_dedup_cache.pop(k, None)
-    if len(_analyze_dedup_cache) >= _ANALYZE_DEDUP_CACHE_MAX:
-        oldest_key = min(_analyze_dedup_cache, key=lambda k: _analyze_dedup_cache[k][0])
-        _analyze_dedup_cache.pop(oldest_key, None)
-    _analyze_dedup_cache[key] = (now + _ANALYZE_DEDUP_TTL_SECONDS, entry)
+def _analyze_dedup_follower_result_put_locked(
+    generation: int, ok: bool, payload: object
+) -> None:
+    """呼叫端須已持有 `_analyze_dedup_lock`。codex HIGH 複審 Round 12（結果
+    staleness，#51 最終收斂）：leader 完成（成功或失敗皆同一條路徑）時，
+    把結果寫進**這個**世代編號專屬的小暫存區——**不是**任何以「請求
+    內容」為鍵、供之後全新請求複用的共用快取——只給當下已在等這個世代的
+    follower 讀（見 `_analyze_dedup_follower_result` 模組頂部說明）。世代
+    編號全域唯一、永不重複使用，往後任何全新請求都不可能巧合命中這個
+    世代——這裡的清掉過期項目純粹是記憶體回收，不是安全機制。
 
-
-def _analyze_dedup_follower_failure_put_locked(generation: int, exc: BaseException) -> None:
-    """呼叫端須已持有 `_analyze_dedup_lock`。codex HIGH 複審#5：leader 失敗
-    時把例外寫進**這個**世代編號專屬的小暫存區（不是 `_analyze_dedup_
-    cache`），只給當下已在等這個世代的 follower 讀（見
-    `_analyze_dedup_follower_failure` 模組頂部說明）。世代編號全域唯一、
-    永不重複使用，往後任何全新請求都不可能巧合命中這個世代——這裡的
-    清掉過期項目純粹是記憶體回收，不是安全機制。"""
+    `ok=True`：`payload` 是成功結果本身；`ok=False`：`payload` 是 leader
+    遇到的例外物件，供 follower 原樣 `raise`。"""
     now = time.time()
-    expired = [g for g, (exp, _) in _analyze_dedup_follower_failure.items() if exp <= now]
+    expired = [g for g, (exp, _) in _analyze_dedup_follower_result.items() if exp <= now]
     for g in expired:
-        _analyze_dedup_follower_failure.pop(g, None)
-    _analyze_dedup_follower_failure[generation] = (
-        now + _ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS,
-        exc,
+        _analyze_dedup_follower_result.pop(g, None)
+    _analyze_dedup_follower_result[generation] = (
+        now + _ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS,
+        (ok, payload),
     )
 
 
@@ -3684,13 +3760,14 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     `try_reserve_request_budget()` 每日預留——不重複佔用、不重複消耗任何
     護欄額度，甚至根本不進 Bedrock。
 
-    leader 若失敗於**分析本身**（`ValueError`/其餘非 caller-specific
-    的 Exception），**不**存進共用的短期結果快取（見下方 codex HIGH
-    複審#5：快取暫時性失敗把短暫故障變 60 秒故障）——只清掉 in-flight
-    entry＋`event.set()` 喚醒當下正在等待的 follower，讓它們醒來後走
-    既有的重入協調 loop（複審#4）各自重新判斷；exception 交由
-    `_handle_api_analyze` 既有的 `except` 分支處理，跟 leader 收到的
-    路徑完全一致。
+    leader 完成（成功或失敗皆同一條路徑，見下方 codex HIGH 複審 Round 12）
+    後，把結果只發布給**當下這一批**已經在 `event.wait()` 上等待的
+    follower（透過鍵是世代編號的 `_analyze_dedup_follower_result`），然後
+    立刻清掉這把 `key` 的 in-flight entry——**不**額外把結果留存供之後
+    才進來的全新請求複用。緊接在後（沒能排進同一輪 in-flight 等待）的
+    下一個請求，會發現 in-flight 已清空，直接 fresh 成為新 leader，對
+    依賴重新呼叫一次。exception 交由 `_handle_api_analyze` 既有的
+    `except` 分支處理，跟 leader 收到的路徑完全一致。
 
     codex HIGH 複審#1（follower 無限阻塞資源耗盡，見模組頂部大段說明）：
     follower 用 `event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)`
@@ -3708,13 +3785,17 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     coordinator 明確要求），這裡仍明確**不快取、不 replay**
     `TooManyRequests`——那是 caller-specific 的失敗（限流/授權類，
     "只跟這個 caller 的身分/歷史有關"，不是分析本身的結果），絕不能被
-    當成「一般失敗」存進共用快取 replay 給不相干的其他 IP（"429
-    poisoning"）。leader 遇到 `TooManyRequests` 時只清 in-flight、
-    不寫快取、正常 `raise` 給自己；已在等待的 follower 醒來後發現
-    `_analyze_dedup_cache` 沒有這個 key 的紀錄，會落回下面「fail-safe：
+    當成「一般失敗」存進供全新請求複用的共用快取 replay 給不相干的
+    其他 IP（"429 poisoning"）。leader 遇到 `TooManyRequests` 時正常
+    `raise` 給自己（Round 12 之後：跟其他例外走同一條「只共用給當下
+    in-flight follower、絕不留存給全新請求」的路徑，見下方）；不在當下
+    這批 in-flight follower 之列的下一個全新請求，會落回下面「fail-safe：
     自己真的跑一次」分支——這正是我們要的：每個 follower 各自的限流
     早就在 `_handle_api_analyze` 前置檢查過了（合格才會走到這裡），
-    所以此時獨立跑一次是安全、正確的，不是「沒 dedup 到」。
+    所以此時獨立跑一次是安全、正確的，不是「沒 dedup 到」。（Round 12
+    之後：`TooManyRequests` 跟其他例外走同一條「只共用給當下 in-flight
+    follower、絕不留存」的路徑，這裡的 defense-in-depth 保證自動成立，
+    不需要再對例外型別特判，見下方複審#5/Round 12 段落。）
 
     codex HIGH 複審#3（stale-leader 取代新 race，見模組頂部大段說明）：
     「取代」stale in-flight entry 只解決了 follower 不會永遠等一個死掉的
@@ -3744,16 +3825,18 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
 
     修法：follower 的 fallback 改成**重入協調 lookup loop**（而不是直接
     `compute()`）：
-      1. 先查共用結果快取——命中就直接用（大機率是 replacement leader
-         已經發布的結果）。
+      1. 若自己剛才實際加入等待的是某個世代（`joined_leader_generation`
+         不是 `None`），先查那個世代專屬的 `_analyze_dedup_follower_
+         result`——命中就直接用（大機率是自己原本在等的 leader，或
+         replacement leader，剛發布給當下這批 follower 的結果）。
       2. 沒命中 → 查目前是否有活著的 leader（新世代的 in-flight entry）
          ——有就 join 它的 event，繼續等（用**同一個**、從本次呼叫一開始
          就固定下來的 deadline，不會因為多次重新 join 而不斷展延，整體
          阻塞時間仍然有界）。
-      3. 都沒有（沒快取、沒活著的 leader）→ 在鎖內原子地創建新 in-flight
-         entry、自己成為這把 key 唯一的新 leader，跳出 loop 去
-         `compute()`。
-      由於「查快取/查 in-flight/搶 leadership」這三步都在同一個
+      3. 都沒有（沒有自己這個世代的已發布結果、沒有活著的 leader）→
+         在鎖內原子地創建新 in-flight entry、自己成為這把 key 唯一的新
+         leader，跳出 loop 去 `compute()`。
+      由於「查世代結果/查 in-flight/搶 leadership」這三步都在同一個
       `_analyze_dedup_lock` 臨界區內完成，多個同時醒來的 follower 之間
       不會重複搶到 leadership——只有其中恰好一個會在某次迭代看到
       「沒有活著的 leader」而真的成為新 leader，其餘的會在稍晚一點點的
@@ -3796,9 +3879,10 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
           leader 自己 set 的 event。
       (b) **deadline 到期、真的要 503 前，做最後一次有界複查**：不管是
           `remaining <= 0` 還是 `event.wait()` 逾時，都先呼叫
-          `_final_grace_check_before_giving_up()`——鎖內重查一次共用
-          快取（有→回傳 True，讓呼叫端 `continue` 回 loop 頂端撿走）；
-          沒有快取但有一個「活著」（未超過 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`
+          `_final_grace_check_before_giving_up()`——鎖內重查一次自己
+          已加入的世代是否剛好已有發布結果（有→回傳 True，讓呼叫端
+          `continue` 回 loop 頂端撿走）；沒有但有一個「活著」（未超過
+          `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`
           門檻）的 in-flight entry，就 join 它剩餘的逾時預算（`event.wait
           (timeout=該 entry 剩餘秒數)`）——這一次 join 是**有界**的（頂多
           再多等一個新 leader「剩餘」的逾時預算，不是重新展延整個
@@ -3813,81 +3897,87 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
       `_analyze_dedup_key` docstring）、single-flight 重入協調 loop
       （複審#4）、per-caller 限流前置（複審#2）全部不變。
 
-    codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：先前版本
-    在 leader `compute()` 拋出**任何**非 `TooManyRequests` 例外時，都會
-    把這個例外整個存進共用的 60 秒 TTL 結果快取（`_analyze_dedup_cache_
-    put_locked(key, (False, exc))`）——連接器 timeout、Bedrock 暫時性
-    失敗這類**本質上是暫時的**依賴故障，一旦被寫進去，接下來整整 60
-    秒內任何命中同一把 key 的請求（**不只是**當下已經在等的
-    follower，還包含 60 秒內才陸續進來、跟這次失敗完全無關的全新
-    caller）都會在協調 loop 頂端直接命中這筆快取、立刻重拋同一個過時
-    例外——完全不檢查依賴是否早就恢復。等於把一次可能只有幾百毫秒的
-    暫時性故障，人為放大成保證整整 60 秒的故障，還波及所有剛好共用
-    這把 key、跟原始那次失敗毫無關係的其他 caller。
+    codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障，原始版本）：
+    當時的版本在 leader `compute()` 拋出**任何**非 `TooManyRequests`
+    例外時，都會把這個例外整個存進共用的 60 秒 TTL 結果快取——連接器
+    timeout、Bedrock 暫時性失敗這類**本質上是暫時的**依賴故障，一旦被
+    寫進去，接下來整整 60 秒內任何命中同一把 key 的請求（**不只是**
+    當下已經在等的 follower，還包含 60 秒內才陸續進來、跟這次失敗完全
+    無關的全新 caller）都會直接命中這筆快取、立刻重拋同一個過時例外
+    ——完全不檢查依賴是否早就恢復。等於把一次可能只有幾百毫秒的暫時性
+    故障，人為放大成保證整整 60 秒的故障，還波及所有剛好共用這把 key、
+    跟原始那次失敗毫無關係的其他 caller。
 
-    修法（暫時性失敗不進 TTL 結果快取，只共用給當下 in-flight follower
-    然後清 entry）：leader 失敗時，`except` 分支不再呼叫
-    `_analyze_dedup_cache_put_locked`——不論例外種類（含先前特別排除在
-    外的 `TooManyRequests`，見下方），一律不寫進共用的 60 秒 TTL 結果
-    快取；改寫進另一個**鍵是這次失敗的世代編號**、獨立於 `key` 的小
-    暫存區 `_analyze_dedup_follower_failure`（`_analyze_dedup_follower_
-    failure_put_locked`），然後清掉這把 `key` 的 in-flight entry，
-    最後 `event.set()`。
+    當時的修法（暫時性失敗不進 TTL 結果快取，只共用給當下 in-flight
+    follower 然後清 entry）：leader 失敗時，`except` 分支不再把結果寫進
+    共用的 60 秒 TTL 結果快取；改寫進另一個**鍵是這次失敗的世代編號**、
+    獨立於 `key` 的小暫存區，然後清掉這把 `key` 的 in-flight entry，最後
+    `event.set()`。
 
     為什麼需要另一個以世代編號為鍵的暫存區，而不是單純「清 entry 後靠
     重入協調 loop 讓 follower 自己重新判斷」：若只清 entry、什麼都不
     另外記錄，被 `event.set()` 喚醒的多個 follower 會依序重新搶
-    `_analyze_dedup_lock`——查快取（沒有，快取只存成功結果）、查
-    in-flight（剛被清掉，沒有）——**其中一個**會原子地成為新 leader、
-    立刻對依賴發起一次全新 `compute()`；但因為原本的失敗發生時可能有
-    「好幾個」follower **同時**在等（不是只有 1 個），這個新 leader
-    完成（若依賴仍故障，很快又失敗）後，剩下沒搶到 leadership 的
-    follower 會被新 leader 的 `event.set()` 再喚醒一輪，其中又有一個
-    成為下一個新 leader……如此每一輪只吸收 1 個 follower、依序輪替，
-    在 N 個 follower 同時等待、依賴仍持續故障的情況下會演變成 N 次
-    依序、各自真的觸發依賴（含真連接器/Bedrock）的重複呼叫——這正是
-    single-flight dedup 一開始要防止的「重複花費」，等於在故障期間
-    完全失去 dedup 的保護，比原本 60 秒快取的問題換了一種形式重新出現
-    （且累積延遲、依賴呼叫次數都隨 follower 數量線性增長，不是
-    O(1)）。
+    `_analyze_dedup_lock`——查 in-flight（剛被清掉，沒有）——**其中
+    一個**會原子地成為新 leader、立刻對依賴發起一次全新 `compute()`；
+    但因為原本的失敗發生時可能有「好幾個」follower **同時**在等（不是
+    只有 1 個），這個新 leader 完成（若依賴仍故障，很快又失敗）後，
+    剩下沒搶到 leadership 的 follower 會被新 leader 的 `event.set()` 再
+    喚醒一輪，其中又有一個成為下一個新 leader……如此每一輪只吸收 1 個
+    follower、依序輪替，在 N 個 follower 同時等待、依賴仍持續故障的
+    情況下會演變成 N 次依序、各自真的觸發依賴（含真連接器/Bedrock）的
+    重複呼叫——這正是 single-flight dedup 一開始要防止的「重複花費」，
+    等於在故障期間完全失去 dedup 的保護（且累積延遲、依賴呼叫次數都
+    隨 follower 數量線性增長，不是 O(1)）。
 
-    因此改成：leader 失敗當下，把例外寫進以**這次失敗的世代編號**
-    （`my_generation`，全域單調遞增、永不重複使用）為鍵的
-    `_analyze_dedup_follower_failure`；每個 follower 在真正加入等待
-    某個 leader 之前，都會記住自己實際加入的是哪個世代
-    （`joined_leader_generation`，見下方迴圈實作）。被 `event.set()`
-    喚醒、回到迴圈頂端時，**優先**（在查 `_analyze_dedup_cache`／
-    `_analyze_dedup_inflight` 之前）用**非破壞性**的 `dict.get()`
-    查詢 `_analyze_dedup_follower_failure[joined_leader_generation]`
-    ——因為是 `.get()` 不是 `.pop()`，當下所有等著同一個世代的
-    follower 都能各自讀到**同一個**例外物件並直接 `raise`，不需要
-    誰先讀到就清掉、也不需要任何 follower 落回「自己變成新 leader」
-    去重新 `compute()`：真正做到「當下所有 follower 共用這一次失敗」，
-    而不是依序各自重跑。世代編號全域唯一、永不重複使用，因此**任何
-    在這次失敗之後才進來的全新請求**（不論多快到達）永遠不可能有
-    `joined_leader_generation` 剛好等於這個已經作廢的世代——安全性
-    完全不依賴 `_ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS` 這個
-    寬限期的長短，那只是給記憶體回收用，不是安全邊界（見該常數
-    docstring）。in-flight entry 在同一時刻被清空，讓真正的「下一個」
-    請求（沒有 `joined_leader_generation` 可查、從頭進來）走「查快取
-    （沒有）→查 in-flight（沒有）→自己成為新 leader」這條路徑，是
-    不折不扣的 fresh retry：依賴這時若已恢復就立刻成功，不會被舊失敗
-    卡住。TTL 結果快取（`_analyze_dedup_cache`）自此**只存成功結果**
-    （`_analyze_dedup_cache_put_locked` 唯一還會被呼叫到的地方是下方
-    成功路徑的 `(True, result)`）；`TooManyRequests` 先前的特判排除
-    （避免 429-poisoning 到不相干的 IP）現在已經被「一律寫進 per-
-    generation 暫存區、只給當下那批 follower 讀」這個更嚴格的範圍
-    自然涵蓋，不需要再對例外型別特判。
+    codex HIGH 複審 Round 12（結果 staleness，#51 最終收斂——見模組頂部
+    大段說明）：後來連「成功結果」也發現同一類問題（60 秒 TTL 快取會
+    把過時的分析結果 replay 給時效敏感的加密市場查詢），因此整個共用的
+    60 秒 TTL 結果快取（不論成功/失敗）被**完全移除**，只留 in-flight
+    coalescing。複審#5 當初「失敗結果只共用給當下這批 in-flight
+    follower，讀完即棄、不留存給全新請求」這個設計，現在**原封不動
+    套用到成功結果**——两者統一走同一個以世代編號為鍵的暫存區
+    `_analyze_dedup_follower_result`（`ok, payload`；成功時
+    `ok=True, payload=result`，失敗時 `ok=False, payload=exc`）：
+
+    leader 完成（不論成功/失敗）時，把 `(ok, payload)` 寫進以**這次
+    的世代編號**（`my_generation`，全域單調遞增、永不重複使用）為鍵的
+    `_analyze_dedup_follower_result`（`_analyze_dedup_follower_result_
+    put_locked`），然後清掉這把 `key` 的 in-flight entry，最後
+    `event.set()`。每個 follower 在真正加入等待某個 leader 之前，都會
+    記住自己實際加入的是哪個世代（`joined_leader_generation`，見下方
+    迴圈實作）。被 `event.set()` 喚醒、回到迴圈頂端時，**優先**（在查
+    `_analyze_dedup_inflight` 之前）用**非破壞性**的 `dict.get()` 查詢
+    `_analyze_dedup_follower_result[joined_leader_generation]`——因為是
+    `.get()` 不是 `.pop()`，當下所有等著同一個世代的 follower 都能各自
+    讀到**同一個**結果（或例外）並直接回傳/`raise`，不需要誰先讀到就
+    清掉、也不需要任何 follower 落回「自己變成新 leader」去重新
+    `compute()`：真正做到「當下所有 follower 共用這一次結果」，而不是
+    依序各自重跑（不論這次結果是成功還是失敗）。世代編號全域唯一、
+    永不重複使用，因此**任何在這次完成之後才進來的全新請求**（不論
+    多快到達）永遠不可能有 `joined_leader_generation` 剛好等於這個
+    已經作廢的世代——安全性完全不依賴
+    `_ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS` 這個寬限期的長短，
+    那只是給記憶體回收用，不是安全邊界（見該常數 docstring）。in-flight
+    entry 在同一時刻被清空，讓真正的「下一個」請求（沒有
+    `joined_leader_generation` 可查、從頭進來）走「查 in-flight（沒有）
+    →自己成為新 leader」這條路徑，是不折不扣的 fresh retry：不論依賴
+    這時是已經恢復（成功案例）還是市場資料已經更新（一般案例），都會
+    拿到當下最新的一次真實呼叫結果，不會被任何舊快取卡住/頂替。
+    `TooManyRequests` 先前的特判排除（避免 429-poisoning 到不相干的
+    IP）已經被「一律寫進 per-generation 暫存區、只給當下那批 follower
+    讀、絕不留存給全新請求」這個更嚴格的範圍自然涵蓋，不需要再對例外
+    型別特判。
     """
     def _final_grace_check_before_giving_up() -> bool:
         """codex MEDIUM 複審（follower liveness，最後一關）：真的要放棄
         （拋出 `_AnalyzeDedupTimeout` → 503）之前的最後一次有界複查。
 
         回傳 `True`：呼叫端應該 `continue` 回協調 loop 頂端重新查一次
-        （這一刻剛好有共用快取結果、或剛好有一個活著的新 leader 完成/
-        被喚醒了，loop 頂端會正確撿到）。
-        回傳 `False`：真的什麼都沒有（沒快取、沒活著的 in-flight entry，
-        或那個 entry 本身也已經逾時/stale），呼叫端照常 503。
+        （這一刻剛好有自己那個世代已發布的結果、或剛好有一個活著的新
+        leader 完成/被喚醒了，loop 頂端會正確撿到）。
+        回傳 `False`：真的什麼都沒有（沒有自己世代的已發布結果、沒有
+        活著的 in-flight entry，或那個 entry 本身也已經逾時/stale），
+        呼叫端照常 503。
 
         只執行「這一次」，不是新的無界迴圈：這裡 join 的新 leader 若也
         逾時，直接回傳 False，不會遞迴地一直找下一個又下一個 replacement
@@ -3897,9 +3987,15 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         """
         now2 = time.time()
         with _analyze_dedup_lock:
-            cached2 = _analyze_dedup_cache.get(key)
-            if cached2 is not None and cached2[0] > now2:
-                return True
+            if joined_leader_generation is not None:
+                resolved_generation2 = (
+                    _analyze_dedup_resolve_superseded_generation_locked(
+                        joined_leader_generation, now2
+                    )
+                )
+                pending2 = _analyze_dedup_follower_result.get(resolved_generation2)
+                if pending2 is not None and pending2[0] > now2:
+                    return True
             inflight2 = _analyze_dedup_inflight.get(key)
             if inflight2 is None:
                 return False
@@ -3918,10 +4014,10 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         return True
 
     deadline = time.time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
-    # codex HIGH 複審#5：只有「這一輪迭代剛從 `event.wait()` 醒來的
-    # follower」才會非 None——記住自己剛才實際加入等待的是哪個世代的
-    # leader，醒來後優先檢查那個世代是不是剛好失敗了（見下方
-    # `_analyze_dedup_follower_failure` 檢查），跟真正全新的請求（從頭
+    # codex HIGH 複審#5 / Round 12：只有「這一輪迭代剛從 `event.wait()`
+    # 醒來的 follower」才會非 None——記住自己剛才實際加入等待的是哪個
+    # 世代的 leader，醒來後優先檢查那個世代是不是剛好已經有結果（見下方
+    # `_analyze_dedup_follower_result` 檢查），跟真正全新的請求（從頭
     # 進來，從沒加入過任何世代）區分開。
     joined_leader_generation: int | None = None
     while True:
@@ -3929,27 +4025,32 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         stale_event_to_wake: threading.Event | None = None
         with _analyze_dedup_lock:
             if joined_leader_generation is not None:
-                pending_failure = _analyze_dedup_follower_failure.get(joined_leader_generation)
-                if pending_failure is not None and pending_failure[0] > now:
-                    # codex HIGH 複審#5：我剛才等的那個世代的 leader
-                    # 失敗了——這個例外只共用給「當下就已經在等它」的
-                    # follower（就是現在的我），不寫進 `_analyze_dedup_
-                    # cache`（那份 60 秒 TTL 快取只服務全新、跟這次失敗
-                    # 完全無關的請求，繼續維持「只存成功結果」）。拿到
-                    # 就直接 raise，不落回下面變成新 leader 重新
-                    # compute()——否則多個同時醒來的 follower 會依序
-                    # 各自輪流變成新 leader、各自真的再打一次依賴（見
-                    # 上方函式 docstring 的完整說明），失去「共用同一次
-                    # 失敗」的意義，也會在依賴仍故障時放大成 N 次重複
-                    # 呼叫。
-                    raise pending_failure[1]
-
-            cached = _analyze_dedup_cache.get(key)
-            if cached is not None and cached[0] > now:
-                ok, payload = cached[1]
-                if ok:
-                    return payload
-                raise payload
+                # codex HIGH 複審 Round 12 補丁：先把手上的世代編號沿著
+                # `_analyze_dedup_generation_supersede` 追到最新的一個
+                # （見該對照表的完整說明）——這樣即使自己是在 stale-leader
+                # 被取代後才醒來、且取代者早已完成並清空 in-flight，也還
+                # 是能正確查到取代者已發布的結果，不會誤判成全新請求。
+                joined_leader_generation = (
+                    _analyze_dedup_resolve_superseded_generation_locked(
+                        joined_leader_generation, now
+                    )
+                )
+                pending_result = _analyze_dedup_follower_result.get(joined_leader_generation)
+                if pending_result is not None and pending_result[0] > now:
+                    # codex HIGH 複審#5 / Round 12：我剛才等的那個世代的
+                    # leader 已經完成（成功或失敗）——這個結果只共用給
+                    # 「當下就已經在等它」的 follower（就是現在的我），
+                    # 不會被寫進任何供全新請求複用的共用快取（Round 12
+                    # 已整個移除）。拿到就直接回傳/raise，不落回下面變成
+                    # 新 leader 重新 compute()——否則多個同時醒來的
+                    # follower 會依序各自輪流變成新 leader、各自真的再
+                    # 打一次依賴（見上方函式 docstring 的完整說明），
+                    # 失去「共用同一次結果」的意義，也會在依賴仍故障時
+                    # 放大成 N 次重複呼叫。
+                    ok, payload = pending_result[1]
+                    if ok:
+                        return payload
+                    raise payload
 
             inflight = _analyze_dedup_inflight.get(key)
             if inflight is not None:
@@ -3969,7 +4070,12 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
                     # 回到協調 loop 頂端，而不是繼續空等一個可能永遠不會
                     # 被 set 的 Event。
                     stale_event_to_wake = _leader_event
+                    stale_generation_replaced = _leader_generation
                     inflight = None
+                else:
+                    stale_generation_replaced = None
+            else:
+                stale_generation_replaced = None
 
             is_leader = inflight is None
             if is_leader:
@@ -3978,12 +4084,21 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
                 _analyze_dedup_generation_seq += 1
                 my_generation = _analyze_dedup_generation_seq
                 _analyze_dedup_inflight[key] = (event, now, my_generation)
+                if stale_generation_replaced is not None:
+                    # codex HIGH 複審 Round 12 補丁：記一筆「舊世代已被我
+                    # 取代」，讓卡在舊 leader event 上、稍後才醒來重新搶
+                    # 到鎖的 follower 能追到我這裡（見
+                    # `_analyze_dedup_generation_supersede` 完整說明）。
+                    _analyze_dedup_generation_supersede[stale_generation_replaced] = (
+                        now + _ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS,
+                        my_generation,
+                    )
             else:
                 event = inflight[0]
                 my_generation = None  # follower 不發布，不需要世代編號
-                # codex HIGH 複審#5：記住這次實際加入等待的是哪個世代，
-                # 供醒來後在迴圈頂端查 `_analyze_dedup_follower_failure`
-                # 用（見上方檢查）。
+                # codex HIGH 複審#5 / Round 12：記住這次實際加入等待的是
+                # 哪個世代，供醒來後在迴圈頂端查
+                # `_analyze_dedup_follower_result` 用（見上方檢查）。
                 joined_leader_generation = inflight[2]
 
         if stale_event_to_wake is not None:
@@ -4030,22 +4145,21 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             is_current_leader = current is not None and current[2] == my_generation
             if is_current_leader:
                 # codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒
-                # 故障，見上方函式 docstring）：不論例外種類（含先前
+                # 故障，原始版本）／Round 12（結果 staleness，#51 最終
+                # 收斂，見上方函式 docstring）：不論例外種類（含先前
                 # 特別排除在外的 `TooManyRequests`——那個排除本來是為了
                 # 防 429-poisoning，現在改寫進世代專屬的 `_analyze_
-                # dedup_follower_failure`、不再是全域共用的 60 秒 TTL
-                # 結果快取，429-poisoning 疑慮已經一併涵蓋，原本的特判
-                # 分支不再需要）都**不**呼叫 `_analyze_dedup_cache_
-                # put_locked`——那份 60 秒 TTL 結果快取只留給下方成功
-                # 路徑寫入。改成寫進 `_analyze_dedup_follower_failure`
+                # dedup_follower_result`、不再是任何供全新請求複用的
+                # 共用快取，429-poisoning 疑慮已經一併涵蓋，原本的特判
+                # 分支不再需要）都寫進 `_analyze_dedup_follower_result`
                 # （鍵是這次失敗的世代編號，只有當下已經在等**這個
                 # 世代**的 follower 會去查它，見迴圈頂端的檢查），再清掉
                 # in-flight entry——讓下一個全新請求（in-flight 已清空）
                 # 走 fresh retry，不被任何快取卡住。
-                _analyze_dedup_follower_failure_put_locked(my_generation, exc)
+                _analyze_dedup_follower_result_put_locked(my_generation, False, exc)
                 _analyze_dedup_inflight.pop(key, None)
             # else：generation fencing——自己已被取代（stale），這次發布
-            # 整段 no-op：不寫 follower-failure（沒有 follower 在等一個
+            # 整段 no-op：不寫 follower-result（沒有 follower 在等一個
             # 早就被取代掉的世代）、不動 in-flight（那已經不是自己的
             # entry，貿然 pop 會誤刪新 leader 的 entry）。
         event.set()
@@ -4054,7 +4168,12 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         current = _analyze_dedup_inflight.get(key)
         is_current_leader = current is not None and current[2] == my_generation
         if is_current_leader:
-            _analyze_dedup_cache_put_locked(key, (True, result))
+            # codex HIGH 複審 Round 12：只發布給當下這批 in-flight
+            # follower（鍵是 `my_generation`，非 `key`），然後立刻清掉
+            # in-flight entry——**不**額外寫進任何以 `key`（請求內容）為
+            # 鍵、供之後全新請求複用的共用快取（那個機制本輪已整個
+            # 移除，見模組頂部大段說明）。
+            _analyze_dedup_follower_result_put_locked(my_generation, True, result)
             _analyze_dedup_inflight.pop(key, None)
         # else：同上，generation fencing——stale leader 晚到的成功結果，
         # 一樣不能覆寫已經被取代後的狀態，整段 no-op。
@@ -4099,10 +4218,13 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     `sample` 三選一的實際生效檔位；`force_offline` 是這個 caller 自己的
     `client_ip` 在 online-stance 配額上是否已耗盡（Round 11 codex HIGH
     複審新增），兩者皆見該函式 docstring），透過 `_dedup_analyze_call()`
-    包一層 in-flight
-    dedup ＋ 60 秒短期結果快取——同一組參數的重複/並行請求只有第一個
-    （leader）真的觸發依賴呼叫，其餘原地等待、共用同一份真實結果，不會
-    各自再打一次真連接器/Bedrock。詳見 `_dedup_analyze_call()` docstring。
+    包一層 in-flight dedup（single-flight coalescing，**不含**
+    post-completion 結果快取，見 Round 12 codex HIGH 複審）——同一組
+    參數的並行/極短間隔內重複請求只有第一個（leader）真的觸發依賴呼叫，
+    其餘原地等待、共用同一份真實結果，不會各自再打一次真連接器/
+    Bedrock；leader 完成後 in-flight entry 立刻清空，之後**循序**進來
+    的新請求一律 fresh 重新呼叫，拿當下最新資料。詳見
+    `_dedup_analyze_call()` docstring。
 
     codex HIGH 複審（dedup×限流交互，兩個方向都要修，見
     `_analyze_enforce_caller_rate_limit` docstring）：per-IP 限流
