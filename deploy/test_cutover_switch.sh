@@ -304,6 +304,14 @@ case "$URL" in
     fi
     exit 0
     ;;
+  https://trustforge.hurricanesoft.com.tw/healthz)
+    # codex 複審 HIGH（自動 trap rollback 繞過 legacy-tls 保護）：rollback
+    # 還原成 legacy-tls.conf 後的 443 HTTPS SSR 可達性驗證
+    if [ "${MOCK_CURL_ROLLBACK_HTTPS_HEALTHZ_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    exit 0
+    ;;
   http://127.0.0.1/|http://127.0.0.1/analyze|https://trustforge.hurricanesoft.com.tw/|https://trustforge.hurricanesoft.com.tw/analyze)
     case "$URL" in
       http://127.0.0.1/|https://trustforge.hurricanesoft.com.tw/)
@@ -927,6 +935,60 @@ else
 fi
 assert_eq "$(active_conf)" "react-http.conf" "react-http mode candidate 不受 legacy 憑證偵測邏輯影響，仍是 react-http.conf"
 remove_fake_cert
+
+# ── 場景 32-34：codex 複審 HIGH（自動 trap rollback 繞過 legacy-tls 保護）
+# ── react cutover 在 nginx 已經 reload 成功之後、public smoke check 清掉
+# ERR trap 之前失敗，觸發的是自動 ERR trap rollback（不是 explicit
+# `cutover_switch.sh legacy`）；切換前 pre-state 是 legacy.conf
+# （reset_sandbox 預設值）。若憑證已存在，rollback 不能只照抄 PREV_LINK
+# 逐字還原回 legacy.conf（HTTP-only）——那段短暫窗口內已經吃到 react HSTS
+# 的使用者回滾後會連不上，必須跟 explicit legacy 用同一套憑證偵測，改還原
+# 成 legacy-tls.conf（443 服務、保留 HSTS），且要真的驗證 443 可達 ──────
+echo "== 場景 32：react mode 失敗自動 rollback，憑證已存在 → 還原目標是 legacy-tls.conf（不是 legacy.conf），443 HTTPS SSR 可達性驗證通過，rollback 成功（不是 ROLLBACK-FAILED）（codex 複審 HIGH：自動 trap rollback 繞過 legacy-tls 保護）=="
+reset_sandbox
+create_fake_cert
+if run_cutover MOCK_CURL_REACT_ROOT_FAIL=1; then
+  fail "public / 沒有 200 回應時應該非零結束"
+else
+  pass "public / 沒有 200 回應時非零結束（觸發 rollback）"
+fi
+assert_grep_log "還原目標從 legacy.conf 改成 legacy-tls.conf" "有印出 rollback 偵測到憑證存在、改用 legacy-tls.conf 的訊息"
+assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息（不是 ROLLBACK-FAILED）"
+if grep -qF -- "ROLLBACK-FAILED" "$STATE/last_run.log"; then
+  fail "憑證存在、HTTPS 驗證正常時不該印出 ROLLBACK-FAILED"
+else
+  pass "沒有印出 ROLLBACK-FAILED（自動 rollback 真的成功了，不是誤判）"
+fi
+assert_eq "$(active_conf)" "legacy-tls.conf" "自動 rollback 後 live symlink 是 legacy-tls.conf（443 服務，不是 HTTP-only legacy.conf）"
+assert_eq "$(active_csp)" "legacy" "自動 rollback 後 CSP_MODE 仍是 legacy（legacy-tls.conf 拓樸跟 legacy.conf 一致，只是多包 TLS）"
+remove_fake_cert
+
+echo "== 場景 33：react mode 失敗自動 rollback，憑證存在但還原後 443 HTTPS SSR 驗證本身失敗 → ROLLBACK-FAILED（exit=97），不能謊報回滾成功（codex 複審 HIGH）=="
+reset_sandbox
+create_fake_cert
+if run_cutover MOCK_CURL_REACT_ROOT_FAIL=1 MOCK_CURL_ROLLBACK_HTTPS_HEALTHZ_FAIL=1; then
+  fail "443 HTTPS 驗證失敗時應該非零結束"
+else
+  pass "443 HTTPS 驗證失敗時非零結束"
+fi
+assert_grep_log "還原成 legacy-tls.conf 後" "有印出還原成 legacy-tls.conf 後 443 沒有回應的具體錯誤訊息"
+assert_grep_log "ROLLBACK-FAILED" "有印出 ROLLBACK-FAILED（不能假裝救回來了——symlink 雖然指對，443 實際打不通）"
+remove_fake_cert
+
+echo "== 場景 34：react mode 失敗自動 rollback，憑證尚未存在（pre-cert 現況）→ 還原目標仍是 legacy.conf，行為不變（既有 17-23 已涵蓋，這裡再次明確標註跟場景 32 對照）=="
+reset_sandbox
+remove_fake_cert
+if run_cutover MOCK_CURL_REACT_ROOT_FAIL=1; then
+  fail "public / 沒有 200 回應時應該非零結束"
+else
+  pass "無憑證時 public / 沒有 200 回應時非零結束（觸發 rollback）"
+fi
+assert_eq "$(active_conf)" "legacy.conf" "無憑證時自動 rollback 還原目標仍是 HTTP-only legacy.conf，行為不變"
+if grep -qF -- "還原目標從 legacy.conf 改成 legacy-tls.conf" "$STATE/last_run.log"; then
+  fail "無憑證時不該印出改用 legacy-tls.conf 的訊息"
+else
+  pass "無憑證時沒有印出改用 legacy-tls.conf 的訊息（cert-aware 邏輯正確地沒有誤觸發）"
+fi
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE"
 

@@ -331,13 +331,18 @@ SERVICE_FILE=\"\$ETC/systemd/system/trustforge.service\"
 #      （pre-cert ACME bootstrap 現況，還沒簽過憑證）→ 維持原本 HTTP-only
 #      legacy.conf，行為不變。\$ETC 沿用既有的 sandbox override 慣例（
 #      letsencrypt 憑證路徑本來就在 /etc 底下，不需要另開一個變數） ----
+# CERT_FILE 一律計算（不只 MODE=legacy 才算）：codex 複審 HIGH（自動 trap
+# rollback 繞過 legacy-tls 保護）——react/react-http cutover 失敗時的自動
+# ERR trap rollback（見下方 ROLLBACK()）也需要用同一套憑證偵測邏輯來決定
+# 「切換前是 legacy.conf 的話，回滾要還原成 legacy.conf 還是
+# legacy-tls.conf」，不是只有 explicit「cutover_switch.sh legacy」才要判斷。
+CERT_FILE=\"\$ETC/letsencrypt/live/${REACT_TLS_DOMAIN}/fullchain.pem\"
 if [ \"${MODE}\" = \"legacy\" ]; then
-  CERT_FILE=\"\$ETC/letsencrypt/live/${REACT_TLS_DOMAIN}/fullchain.pem\"
   if [ -f \"\$CERT_FILE\" ]; then
     CANDIDATE=\"\$ETC/nginx/trustforge-sites/legacy-tls.conf\"
-    echo \"[cutover] 偵測到憑證已存在（\$CERT_FILE），legacy 回滾改用 legacy-tls.conf（443 HTTPS 服務 SSR，保留 HSTS，避免破壞回滾）\" >&2
+    echo \"[cutover] 偵測到憑證已存在（\${CERT_FILE}），legacy 回滾改用 legacy-tls.conf（443 HTTPS 服務 SSR，保留 HSTS，避免破壞回滾）\" >&2
   else
-    echo \"[cutover] 尚未偵測到憑證（\$CERT_FILE 不存在），legacy 回滾用 HTTP-only legacy.conf（pre-cert ACME bootstrap 現況）\" >&2
+    echo \"[cutover] 尚未偵測到憑證（\${CERT_FILE} 不存在），legacy 回滾用 HTTP-only legacy.conf（pre-cert ACME bootstrap 現況）\" >&2
   fi
 fi
 
@@ -396,10 +401,24 @@ ROLLBACK() {
   trap - ERR
   echo \"❌ [cutover] 切換中失敗（exit=\${ec}），回滾到切換前狀態…\" >&2
   local ROLLBACK_OK=1
+  local RESTORE_LINK=\"\$PREV_LINK\"
 
   if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
-    if ! ln -sfn \"\$PREV_LINK\" \"\$LIVE_LINK\"; then
-      echo \"❌ [cutover] rollback：symlink 還原失敗（ln -sfn \${PREV_LINK} -> \${LIVE_LINK}）\" >&2
+    # ---- codex 複審 HIGH（自動 trap rollback 繞過 legacy-tls 保護）：react/
+    #      react-http cutover 在完成 nginx reload 之後、public smoke check
+    #      清掉 ERR trap 之前若失敗，觸發的是這顆自動 ERR trap，不是 explicit
+    #      「cutover_switch.sh legacy」——若只照抄 PREV_LINK 逐字還原，切換前
+    #      是 legacy.conf（HTTP-only）+ 憑證已存在的情況下，會把「這段短暫
+    #      窗口內已經吃到 react 的 HSTS」的使用者回滾後晾在只聽 80 的
+    #      legacy.conf，跟 explicit legacy 回滾同一個問題。修法：這裡跟
+    #      explicit legacy 用同一套 CERT_FILE 偵測，PREV_LINK 是 legacy.conf
+    #      且憑證已存在時，還原目標改成 legacy-tls.conf ----
+    if [ \"\$(basename \"\$PREV_LINK\" 2>/dev/null)\" = \"legacy.conf\" ] && [ -f \"\$CERT_FILE\" ]; then
+      RESTORE_LINK=\"\$ETC/nginx/trustforge-sites/legacy-tls.conf\"
+      echo \"[cutover] rollback：偵測到憑證已存在（\${CERT_FILE}），還原目標從 legacy.conf 改成 legacy-tls.conf（443 HTTPS 服務，避免 HSTS 讓回訪用戶連不上，codex 複審 HIGH）\" >&2
+    fi
+    if ! ln -sfn \"\$RESTORE_LINK\" \"\$LIVE_LINK\"; then
+      echo \"❌ [cutover] rollback：symlink 還原失敗（ln -sfn \${RESTORE_LINK} -> \${LIVE_LINK}）\" >&2
       ROLLBACK_OK=0
     fi
   else
@@ -446,8 +465,8 @@ ROLLBACK() {
   local RB_ACTIVE_LINK
   RB_ACTIVE_LINK=\"\$(readlink \"\$LIVE_LINK\" 2>/dev/null || true)\"
   if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
-    if [ \"\$RB_ACTIVE_LINK\" != \"\$PREV_LINK\" ]; then
-      echo \"❌ [cutover] rollback 驗證失敗：symlink=\$RB_ACTIVE_LINK ≠ 切換前=\$PREV_LINK\" >&2
+    if [ \"\$RB_ACTIVE_LINK\" != \"\$RESTORE_LINK\" ]; then
+      echo \"❌ [cutover] rollback 驗證失敗：symlink=\$RB_ACTIVE_LINK ≠ 還原目標=\$RESTORE_LINK\" >&2
       ROLLBACK_OK=0
     fi
   else
@@ -469,6 +488,16 @@ ROLLBACK() {
     ROLLBACK_OK=0
   fi
 
+  # ---- codex 複審 HIGH：還原成 legacy-tls.conf 時，不能只看 symlink 指對
+  #      路徑就當作成功——實測 443 真的能 serve SSR，不然 HSTS-safe rollback
+  #      只是紙面上正確，回訪用戶還是連不上 ----
+  if [ \"\$RESTORE_LINK\" = \"\$ETC/nginx/trustforge-sites/legacy-tls.conf\" ]; then
+    if ! curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o /dev/null \"https://${REACT_TLS_DOMAIN}/healthz\"; then
+      echo \"❌ [cutover] rollback 驗證失敗：還原成 legacy-tls.conf 後，https://${REACT_TLS_DOMAIN}/healthz（443）沒有回應（HSTS-safe rollback 沒有真的可達）\" >&2
+      ROLLBACK_OK=0
+    fi
+  fi
+
   if [ \"\$ROLLBACK_OK\" = 1 ]; then
     echo \"❌ [cutover] 已回滾到切換前狀態且驗證通過（不留半殘），exit=\$ec\" >&2
     exit \"\$ec\"
@@ -480,8 +509,8 @@ ROLLBACK() {
   #      壞掉，不是單純切換失敗」----
   echo '🆘 [cutover] ROLLBACK-FAILED：自動回滾沒有完全成功，請立即人工介入，不要假設服務已還原！' >&2
   if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
-    echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期指向：\${PREV_LINK}）\" >&2
-    echo \"      不對就手動修：ln -sfn \${PREV_LINK} \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
+    echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期指向：\${RESTORE_LINK}）\" >&2
+    echo \"      不對就手動修：ln -sfn \${RESTORE_LINK} \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
   else
     echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期：切換前不存在，應該不存在／已移除）\" >&2
     echo \"      不對就手動修：rm -f \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
@@ -490,7 +519,12 @@ ROLLBACK() {
   echo \"      （預期：\${PREV_MODE_LINE}）\" >&2
   echo '      不對就手動改該行後：systemctl daemon-reload && systemctl restart trustforge' >&2
   echo '   3) 確認服務：curl -fsS http://127.0.0.1:8080/healthz' >&2
-  echo '   4) 確認狀態：systemctl status nginx；systemctl status trustforge' >&2
+  if [ \"\$RESTORE_LINK\" = \"\$ETC/nginx/trustforge-sites/legacy-tls.conf\" ]; then
+    echo \"   4) 確認 HTTPS（HSTS-safe rollback）：curl -fsS --resolve ${REACT_TLS_DOMAIN}:443:127.0.0.1 https://${REACT_TLS_DOMAIN}/healthz\" >&2
+    echo '   5) 確認狀態：systemctl status nginx；systemctl status trustforge' >&2
+  else
+    echo '   4) 確認狀態：systemctl status nginx；systemctl status trustforge' >&2
+  fi
   exit 97
 }
 trap 'ROLLBACK \$?' ERR

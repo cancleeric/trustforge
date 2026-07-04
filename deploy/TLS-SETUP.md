@@ -164,3 +164,27 @@ TLS 憑證與 nginx 站台設定（legacy/react/react-http/legacy-tls）互相�
 `deploy/test_nginx_legacy_tls_conf.sh`；ACME challenge 在這份 TLS 版底下
 續簽時一樣不受 301 影響，見 `deploy/test_acme_challenge.sh` 的
 `legacy-tls-renewal` 場景。
+
+⛔ **這套憑證偵測不是只有使用者手動打 `cutover_switch.sh legacy` 才會做**
+（codex 複審 HIGH：自動 trap rollback 繞過 legacy-tls 保護）：`react`／
+`react-http` cutover 若在 nginx 已經 reload 成功之後、Step 4b public smoke
+check 才失敗，觸發的是腳本內建的自動 ERR-trap rollback，不是使用者手動
+呼叫 `legacy` 模式——這條自動回滾路徑同樣會用一樣的憑證偵測邏輯，切換前是
+`nginx-legacy.conf` 且憑證已存在時，還原目標一樣改成
+`deploy/nginx-legacy-tls.conf`，而不是照抄切換前的 HTTP-only 版逐字還原。
+且不是只看 symlink 有沒有指對就算成功：還原成 `legacy-tls.conf` 時，會再
+用 `curl --resolve <domain>:443:127.0.0.1 https://<domain>/healthz` 實測
+443 真的能 serve SSR，驗不過直接判定 ROLLBACK-FAILED（exit 97），要求人工
+介入，不謊報「symlink 指對但 443 打不通」的半殘狀態為 rollback 成功。
+測試見 `deploy/test_cutover_switch.sh` 場景 32-34（憑證存在＋自動 rollback
+成功走 legacy-tls / 憑證存在但 443 驗證失敗判 ROLLBACK-FAILED / pre-cert
+現況行為不變三種情境都覆蓋）。
+
+**推薦部署順序**（避免中間出現「憑證已存在但站台還是 HTTP-only」的空窗
+期）：`deploy/deploy_frontend_nginx.sh`（上傳四份 conf，預設 legacy）→
+`deploy/setup_tls.sh`（certbot 簽發憑證）→ `cutover_switch.sh legacy`
+（此時憑證已存在，會自動選用 `nginx-legacy-tls.conf`，先建立 443 HTTPS
+baseline，再觀察一段時間）→ `cutover_switch.sh react`（正式切 React
+TLS）。這樣即使 react cutover 失敗觸發自動 rollback，回滾目標本來就已經
+是 legacy-tls（憑證已存在），不會有「回滾回一個從沒驗證過的 config」的
+風險。

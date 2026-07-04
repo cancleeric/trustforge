@@ -301,6 +301,17 @@ python 端 `TRUSTFORGE_CSP_MODE` `react`/`react-http` 兩者都設成 `react`
   `cutover_switch.sh` 段落。真的起本機 nginx + python 驗證過 443 serve SSR
   + HSTS header 存在，見 `deploy/test_nginx_legacy_tls_conf.sh`。
 
+  ⛔ **憑證偵測不是只有 explicit `legacy` mode 才做**（codex 複審 HIGH：
+  自動 trap rollback 繞過 legacy-tls 保護）：`react`/`react-http` cutover
+  在 nginx 已 reload、public smoke check 卻失敗時，觸發的是 `cutover_switch.sh`
+  內建的自動 ERR-trap rollback（不是使用者手動打 `legacy` mode），這條路徑
+  一樣會偵測憑證是否存在——若切換前是 `nginx-legacy.conf`（HTTP-only）且
+  憑證已存在，rollback 還原目標改成 `nginx-legacy-tls.conf`，並且**還原後
+  真的用 `curl --resolve <domain>:443:127.0.0.1 https://<domain>/healthz`
+  驗證 443 SSR 可達**才回報 rollback 成功，驗不過直接判 ROLLBACK-FAILED
+  （exit 97），不謊報半殘的「symlink 指對但打不通」為成功。測試見
+  `deploy/test_cutover_switch.sh` 場景 32-34。
+
   **什麼時候用哪份**（cutover 決策，供 CEO/CISO/CPO 三審參考）：
   - domain + certbot 簽發憑證已就緒（主線現況）→ `deploy/cutover_switch.sh react`
   - bare IP、無 domain，或憑證尚未簽出 → `deploy/cutover_switch.sh react-http`（fallback）
