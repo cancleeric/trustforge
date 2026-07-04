@@ -340,7 +340,12 @@ chmod +x "$MOCKDIR/curl"
 # 觸發回滾即可，不需要重跑 react 那一輪已經覆蓋過的全部失敗分支 ──────────
 CMD_REACT=$(TF_CUTOVER_DRY_RUN=1 TRUSTFORGE_CUTOVER_CONFIRMED=yes \
   bash "$REPO_ROOT/deploy/cutover_switch.sh" react)
+# react-http 現在預設被擋（codex 複審 HIGH，production 應只走 react(TLS)），
+# 這裡是測「react-http cutover 邏輯本身」（candidate/CSP_MODE/guarded
+# transaction），故明確帶上例外 override 讓 dry-run 走到底──「不帶 override
+# 會被擋」本身另有專門的獨立場景驗證（見下方）
 CMD_REACT_HTTP=$(TF_CUTOVER_DRY_RUN=1 TRUSTFORGE_CUTOVER_CONFIRMED=yes \
+  TF_ALLOW_INSECURE_HTTP_CUTOVER=yes \
   bash "$REPO_ROOT/deploy/cutover_switch.sh" react-http)
 # legacy 模式不需要 TRUSTFORGE_CUTOVER_CONFIRMED（回滾/降級用途，見
 # cutover_switch.sh：只有 react/react-http 才會擋在三審+簽核那關）
@@ -798,6 +803,65 @@ fi
 assert_eq "$(active_conf)" "legacy.conf" "legacy happy path 後 live symlink 真的换到 legacy.conf"
 assert_eq "$(active_csp)" "legacy" "legacy happy path 後 service file CSP_MODE 真的换到 legacy"
 assert_grep_log "public nginx smoke check 通過" "legacy happy path 必須先過 public nginx smoke check（/healthz 經 nginx）才報成功"
+
+echo "== 場景 26：react-http mode，沒有 TF_ALLOW_INSECURE_HTTP_CUTOVER=yes → 直接拒絕、非零結束、完全不 mutate（codex 複審 HIGH：production 不該用 react-http，只有 react(TLS) 才是 production 路徑）=="
+reset_sandbox
+set +e
+env PATH="$MOCKDIR:$PATH" MOCK_STATE_DIR="$STATE" \
+  TF_CUTOVER_ETC="$SANDBOX/etc" TF_CUTOVER_LOCK="$STATE/tf-cutover.lock" \
+  TRUSTFORGE_CUTOVER_CONFIRMED=yes \
+  bash "$REPO_ROOT/deploy/cutover_switch.sh" react-http >"$STATE/last_run.log" 2>&1
+RC_EC=$?
+set -e
+if [ "$RC_EC" -ne 0 ]; then
+  pass "react-http 沒有 override 時非零結束（exit=${RC_EC}）"
+else
+  fail "react-http 沒有 override 時應該非零結束，卻 exit 0"
+fi
+assert_grep_log "react-http（純 HTTP、無 TLS）預設禁止" "有印出 react-http 預設禁止用於 production 的明確訊息"
+assert_grep_log "TF_ALLOW_INSECURE_HTTP_CUTOVER=yes" "有印出正確的 override 用法提示（例外路徑怎麼用）"
+assert_eq "$(active_conf)" "legacy.conf" "react-http 被擋時完全沒動 live symlink（連候選驗證都沒開始）"
+assert_eq "$(active_csp)" "legacy" "react-http 被擋時完全沒動 service file CSP_MODE"
+
+echo "== 場景 27：react-http mode，帶 TF_ALLOW_INSECURE_HTTP_CUTOVER=yes → 這道 gate 本身不擋，直接呼叫腳本（dry-run，不真送 SSM）驗證沒有印出拒絕訊息、正常往下產生遠端指令 =="
+reset_sandbox
+set +e
+env TRUSTFORGE_CUTOVER_CONFIRMED=yes TF_ALLOW_INSECURE_HTTP_CUTOVER=yes \
+  TF_CUTOVER_DRY_RUN=1 \
+  bash "$REPO_ROOT/deploy/cutover_switch.sh" react-http >"$STATE/last_run.log" 2>&1
+RC_EC=$?
+set -e
+if [ "$RC_EC" -eq 0 ]; then
+  pass "react-http 帶 override 時（dry-run）正常結束（exit 0），沒被自己的 gate 擋下"
+else
+  fail "react-http 帶 override 時（dry-run）應該正常結束，卻非零結束"
+  cat "$STATE/last_run.log"
+fi
+if grep -qF -- "react-http（純 HTTP、無 TLS）預設禁止" "$STATE/last_run.log"; then
+  fail "react-http 帶 override 時不應該印出拒絕訊息，但印出了"
+else
+  pass "react-http 帶 override 時沒有印出拒絕訊息（gate 正確放行例外路徑）"
+fi
+assert_grep_log "react-http.conf" "react-http 帶 override 時（dry-run）遠端指令內容正確含 react-http.conf candidate（沒被自己的 gate 誤擋，跟前面擷取 CMD_REACT_HTTP 的路徑一致）"
+
+echo "== 場景 28：react（TLS）mode 與 legacy mode 完全不受 react-http 專屬的 TF_ALLOW_INSECURE_HTTP_CUTOVER 關卡影響（沒設定這個變數也應正常成功）=="
+reset_sandbox
+if run_cutover; then
+  pass "react（TLS）mode 沒設 TF_ALLOW_INSECURE_HTTP_CUTOVER 時仍正常成功（這道關卡只針對 react-http）"
+else
+  fail "react（TLS）mode 不該被 react-http 專屬的新關卡擋到"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "react.conf" "react（TLS）mode cutover 成功，不受 react-http 專屬關卡影響"
+
+reset_sandbox
+if run_cutover_legacy; then
+  pass "legacy mode 沒設 TF_ALLOW_INSECURE_HTTP_CUTOVER 時仍正常成功（這道關卡只針對 react-http）"
+else
+  fail "legacy mode 不該被 react-http 專屬的新關卡擋到"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "legacy.conf" "legacy mode cutover 成功，不受 react-http 專屬關卡影響"
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE"
 

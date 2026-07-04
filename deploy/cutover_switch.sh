@@ -14,7 +14,14 @@
 #                                        # （HTTP-only 版，deploy/nginx-
 #                                        # react-http.conf，bare-IP 現況、
 #                                        # 無 domain 時用——見 deploy/README.md）
+#                                        # ⛔ codex 複審 HIGH：production 不該用
+#                                        # 這個（無 TLS，MITM 可竄改），預設拒絕，
+#                                        # 需 TF_ALLOW_INSECURE_HTTP_CUTOVER=yes
+#                                        # 才放行（例外路徑）
 #   deploy/cutover_switch.sh legacy      # 回滾：換回 SSR 全轉發（緊急用，秒切）
+#
+# production React 唯一路徑：legacy（ACME challenge）→ deploy/setup_tls.sh
+# 簽發憑證 → react（TLS）cutover。react-http 不是 production 路徑。
 #
 # 做的事（都在同一台既有 EC2 上，透過 SSM，不重建/不動 AWS 資源）——
 # **guarded transaction**（codex 複審，robustness 補強）：
@@ -83,6 +90,24 @@ MODE="${1:-}"
 if [ "$MODE" != "react" ] && [ "$MODE" != "react-http" ] && [ "$MODE" != "legacy" ]; then
   echo "用法：$0 react|react-http|legacy" >&2
   exit 2
+fi
+
+# ---- react-http 預設禁止（codex 複審 HIGH：production 應只走 react(TLS)）--
+# 現在已經有 domain + certbot 憑證（deploy/setup_tls.sh），react-http（React
+# 前端跑在純 HTTP、無 TLS）不該再是 production cutover 的選項——中間人可
+# 竄改沒有 TLS 保護的 JS/API 回應本身，CSP header 只能限制「已收到」的內容
+# 要怎麼執行，擋不住封包被竄改這件事。react-http 唯一合理用途是還沒申請/
+# 生效 domain 時的暫時 bare-IP fallback（見 deploy/README.md），不是常態
+# production 路徑。這裡預設拒絕，需要明確設 TF_ALLOW_INSECURE_HTTP_CUTOVER=
+# yes 才放行（例外路徑）；legacy／react（TLS）完全不受這道關卡影響。
+if [ "$MODE" = "react-http" ] && [ "${TF_ALLOW_INSECURE_HTTP_CUTOVER:-}" != "yes" ]; then
+  echo "❌ [cutover] react-http（純 HTTP、無 TLS）預設禁止用於 production。" >&2
+  echo "   production 請用 react（TLS，需先跑 deploy/setup_tls.sh 簽發憑證）。" >&2
+  echo "   react-http 只是 bare-IP（還沒有 domain）時的暫時 fallback——沒有" >&2
+  echo "   TLS，MITM 可竄改 JS/API 回應內容，CSP 擋不住。" >&2
+  echo "   確定要用（例如還沒有 domain）：" >&2
+  echo "   TF_ALLOW_INSECURE_HTTP_CUTOVER=yes $0 react-http" >&2
+  exit 1
 fi
 
 REGION="${REGION:-ap-southeast-2}"

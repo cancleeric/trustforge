@@ -225,16 +225,29 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 |------|------|--------|----------|
 | 0（既有） | `deploy_ec2.sh` | 建 EC2、裝 python，port 80 直接對外 | 不變 |
 | 1 | `deploy_frontend_nginx.sh` | 疊加 nginx 層 + 上傳 React dist + **三份** nginx conf 候選（legacy/react/react-http）；python 收斂只聽 `127.0.0.1:8080` | 預設啟用 `nginx-legacy.conf`（全部原樣轉發給 python，功能與階段 0 逐字等價） |
-| 2 | `cutover_switch.sh react\|react-http\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react`/`react-http` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止 |
+| 2 | `cutover_switch.sh react\|react-http\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react`/`react-http` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止；`react-http` **另外**預設禁止（見下方），需明確 `TF_ALLOW_INSECURE_HTTP_CUTOVER=yes` 才放行 |
 
 **`react` vs `react-http` 怎麼選**：兩者是同一套 React 前端拓樸，差別只在
 nginx 層有沒有 TLS。**DNS 已就緒**（`trustforge.hurricanesoft.com.tw →
-13.211.110.218`，見 `deploy/nginx.conf`／`deploy/TLS-SETUP.md`）——主線是
-`react`（TLS 版，需先跑 `deploy/setup_tls.sh` 簽出憑證，見下方「完整
-cutover runbook」）；`react-http` 保留當 bare-IP／無 domain 現況、或憑證
-還沒就緒前想先驗證 React 拓樸本身時的 fallback。python 端
-`TRUSTFORGE_CSP_MODE` 兩者都設成 `react`（CSP 指令集本身一致，`web.py`
-不需要為 `react-http` 多開一個分支）。
+13.211.110.218`，見 `deploy/nginx.conf`／`deploy/TLS-SETUP.md`）——**production
+唯一路徑是 `react`**（TLS 版，需先跑 `deploy/setup_tls.sh` 簽出憑證，見下方
+「完整 cutover runbook」）。
+
+⛔ **`react-http` 預設禁止用於 production**（codex 複審 HIGH）：既然
+production 已經有 domain + TLS，`react-http`（React 前端跑在純 HTTP、無
+TLS）就不該再是 production cutover 選項——中間人可以竄改沒有 TLS 保護的
+JS/API 回應內容本身，CSP header 只能限制「已收到」的內容能做什麼，擋不住
+封包被竄改這件事。`cutover_switch.sh react-http` 現在預設會直接拒絕、非零
+結束，需要明確設定 `TF_ALLOW_INSECURE_HTTP_CUTOVER=yes` 才會放行——這是
+刻意設計的例外路徑，僅供**極早期 bare-IP、還沒有 domain 時**的暫時
+fallback（或憑證還沒就緒前想先驗證 React 拓樸本身），不是常態 production
+用法。`react`（TLS）與 `legacy` 完全不受這道關卡影響。
+
+production React 的唯一路徑是：`legacy`（ACME challenge 用）→
+`deploy/setup_tls.sh` 簽發憑證 → `react`（TLS）cutover。
+
+python 端 `TRUSTFORGE_CSP_MODE` `react`/`react-http` 兩者都設成 `react`
+（CSP 指令集本身一致，`web.py` 不需要為 `react-http` 多開一個分支）。
 
 ### 涉及的 config-gated 環境變數（`src/trustforge/web.py`）
 
