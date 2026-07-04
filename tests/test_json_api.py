@@ -14,6 +14,7 @@ tmp_path，不打真 DynamoDB；`/api/analyze` 沿用 `_do_analyze`/`_do_compari
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from email.message import Message
@@ -22,6 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trustforge import pipeline as pipeline_module
 from trustforge import web
 from trustforge.ingestion.cache import (
     DynamoDBCache,
@@ -64,6 +66,21 @@ def _reset_shared_module_state():
     yield
     web._status_rate_buckets.clear()
     _stop_overview_bg_thread_for_test()
+
+
+@pytest.fixture(autouse=True)
+def _reset_analyze_dedup_state():
+    """#51 `/api/analyze` server-side idempotency：`_analyze_dedup_cache`/
+    `_analyze_dedup_inflight` 是 module-level 狀態（同一把 key 60 秒內共用
+    結果），本檔許多測試共用相同的 (coin, query, type) 組合（如
+    `coin=BTC, q="test"`）——不清乾淨會讓後面的測試誤命中前一個測試留下
+    的快取結果/事件，而不是真的呼叫到當次測試 monkeypatch 的
+    `web.run`/`web.run_comparison`。"""
+    web._analyze_dedup_cache.clear()
+    web._analyze_dedup_inflight.clear()
+    yield
+    web._analyze_dedup_cache.clear()
+    web._analyze_dedup_inflight.clear()
 
 
 @pytest.fixture
@@ -375,6 +392,218 @@ def test_do_get_api_analyze_route_sets_json_content_type():
     body = h.wfile.getvalue().decode("utf-8")
     parsed = json.loads(body)
     assert parsed["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# #51 /api/analyze server-side idempotency（防重複送出，Bedrock 開通前
+# 最後 prereq）—— in-flight dedup ＋ 60 秒短期結果快取：
+#   - 相同 (type, coin[,coin2], query, live/real/token) 的並行/連續重複
+#     請求，真正呼叫 `pipeline.run`/`pipeline.run_comparison` 的次數應遠
+#     少於請求數（理想剛好 1 次）。
+#   - 不同參數組合各自獨立跑，不誤 dedup。
+#   - 全程監測用 `monkeypatch.setattr(web, "run", ...)`（single-coin）／
+#     `monkeypatch.setattr(web, "run_comparison", ...)`（comparison）包一層
+#     呼叫計數器，內部仍轉呼叫真正的 `trustforge.pipeline.run`/
+#     `run_comparison`（offline 樣本資料路徑，$0），確保拿到的是真實、
+#     可序列化的 Report/Evidence，而不是憑空捏造的假物件。
+# ---------------------------------------------------------------------------
+
+class _CallCounter:
+    """執行緒安全的呼叫計數器——並行測試裡多個 worker thread 會同時遞增，
+    純 `dict`/`int` 的 `+= 1` 不是原子操作，需要鎖保護才不會漏算。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.n = 0
+
+    def hit(self):
+        with self._lock:
+            self.n += 1
+
+
+def _wrap_counting_run(monkeypatch, counter: _CallCounter, *, delay: float = 0.0):
+    """把 `web.run` 換成一層計數 wrapper，內部照樣轉呼叫真正的
+    `pipeline.run`（offline 樣本資料，$0）——用來驗證 dedup 是否真的擋掉
+    了重複呼叫，而不是驗證假造的回傳值。"""
+    real_run = pipeline_module.run
+
+    def _counting_run(*args, **kwargs):
+        counter.hit()
+        if delay:
+            time.sleep(delay)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(web, "run", _counting_run)
+
+
+def _wrap_counting_run_comparison(monkeypatch, counter: _CallCounter, *, delay: float = 0.0):
+    real_run_comparison = pipeline_module.run_comparison
+
+    def _counting_run_comparison(*args, **kwargs):
+        counter.hit()
+        if delay:
+            time.sleep(delay)
+        return real_run_comparison(*args, **kwargs)
+
+    monkeypatch.setattr(web, "run_comparison", _counting_run_comparison)
+
+
+def test_api_analyze_dedup_concurrent_identical_requests_call_run_once(monkeypatch):
+    """N 個完全相同 (coin,query,type) 的請求並行送出——`pipeline.run` 真正
+    只該被呼叫 1 次，其餘全部共用同一份真實結果（同一個 leader 算出來的
+    response body）。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter, delay=0.2)
+
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-concurrent-test"]}
+    n_workers = 20
+    barrier = threading.Barrier(n_workers)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        barrier.wait()
+        code, body = web._handle_api_analyze(qs, client_ip="10.1.1.1")
+        with results_lock:
+            results.append((code, body))
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == n_workers
+    assert all(code == 200 for code, _ in results), results
+    assert counter.n == 1, f"應只有 1 次真的呼叫 pipeline.run，實際 {counter.n} 次"
+    bodies = {body for _, body in results}
+    assert len(bodies) == 1, "所有並行重複請求應共用同一份真實結果"
+
+
+def test_api_analyze_dedup_sequential_identical_requests_reuse_60s_cache(monkeypatch):
+    """非並行、緊接著的重複請求（同一 key，TTL 60 秒內）：第二次應直接吃
+    短期快取，`pipeline.run` 一樣只呼叫 1 次。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    qs = {"coin": ["ETH"], "type": ["multi_source"], "q": ["dedup-sequential-test"]}
+    code1, body1 = web._handle_api_analyze(qs, client_ip="10.1.1.2")
+    code2, body2 = web._handle_api_analyze(qs, client_ip="10.1.1.3")
+
+    assert code1 == 200 and code2 == 200
+    assert counter.n == 1, f"第二次重複請求應直接吃快取，實際呼叫 pipeline.run {counter.n} 次"
+    assert body1 == body2, "重複請求應回傳同一份真實結果（可標記為快取，但內容須逐字相同）"
+
+
+def test_api_analyze_dedup_different_coin_or_query_or_type_not_deduped(monkeypatch):
+    """不同 coin/query/type 的請求各自獨立跑，絕不能被誤 dedup 掉。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    combos = [
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["q-a"]},
+        {"coin": ["SOL"], "type": ["multi_source"], "q": ["q-a"]},
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["q-b"]},
+        {"coin": ["BTC"], "type": ["hypothesis"], "q": ["q-a"]},
+    ]
+    for qs in combos:
+        code, _ = web._handle_api_analyze(qs, client_ip="10.1.1.4")
+        assert code == 200
+
+    assert counter.n == len(combos), (
+        f"4 組互不相同的請求應各自觸發 pipeline.run，實際只呼叫 {counter.n} 次"
+    )
+
+
+def test_api_analyze_dedup_comparison_coin_order_normalized(monkeypatch):
+    """comparison `coin=BTC,ETH` 與「等價但參數順序不同」的
+    `coin=ETH&coin2=BTC` 應正規化成同一把 dedup key，只真的跑 1 次
+    `pipeline.run_comparison`。"""
+    counter = _CallCounter()
+    _wrap_counting_run_comparison(monkeypatch, counter, delay=0.1)
+
+    qs_a = {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["cmp-dedup-test"]}
+    qs_b = {"coin": ["ETH"], "coin2": ["BTC"], "type": ["comparison"], "q": ["cmp-dedup-test"]}
+
+    code_a, body_a = web._handle_api_analyze(qs_a, client_ip="10.1.1.5")
+    code_b, body_b = web._handle_api_analyze(qs_b, client_ip="10.1.1.6")
+
+    assert code_a == 200 and code_b == 200
+    assert counter.n == 1, f"順序不同但語意相同的比較請求應共用同一把 key，實際呼叫 {counter.n} 次"
+    assert body_a == body_b
+
+
+def test_api_analyze_dedup_leader_failure_shared_with_followers(monkeypatch):
+    """leader 呼叫 `_do_analyze` 失敗時，並行等待中的 follower 應收到同一個
+    例外（一律轉 502），而不是各自默默重跑一次——否則遇到失敗就等於沒
+    dedup 到，防重複送出的保證形同虛設。"""
+    counter = _CallCounter()
+
+    def _boom(*args, **kwargs):
+        counter.hit()
+        time.sleep(0.2)
+        raise ValueError("無資料：offline 請確認 demo/sample_data 與 data/，線上請接連接器")
+
+    monkeypatch.setattr(web, "run", _boom)
+
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-failure-test"]}
+    n_workers = 6
+    barrier = threading.Barrier(n_workers)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        barrier.wait()
+        code, body = web._handle_api_analyze(qs, client_ip="10.1.1.7")
+        with results_lock:
+            results.append((code, body))
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == n_workers
+    assert all(code == 502 for code, _ in results), results
+    assert counter.n == 1, f"leader 失敗只該真的觸發依賴呼叫 1 次，實際 {counter.n} 次"
+
+
+def test_api_analyze_dedup_ttl_expiry_allows_refetch(monkeypatch):
+    """快取過期（TTL 60 秒）後，下一次重複請求應該重新真的跑一次，而不是
+    永久卡住舊結果——直接操控 `web._analyze_dedup_cache` 裡的過期時間，
+    不用真的 sleep 60 秒拖慢測試。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    qs = {"coin": ["BNB"], "type": ["multi_source"], "q": ["dedup-ttl-test"]}
+    code1, _ = web._handle_api_analyze(qs, client_ip="10.1.1.8")
+    assert code1 == 200
+    assert counter.n == 1
+
+    # 手動讓快取項目過期（模擬 TTL 60 秒後）。
+    assert len(web._analyze_dedup_cache) == 1
+    (key, (_expiry, entry)), = web._analyze_dedup_cache.items()
+    web._analyze_dedup_cache[key] = (time.time() - 1.0, entry)
+
+    code2, _ = web._handle_api_analyze(qs, client_ip="10.1.1.9")
+    assert code2 == 200
+    assert counter.n == 2, "TTL 過期後應該重新真的呼叫 pipeline.run，而非永久沿用舊結果"
+
+
+def test_api_analyze_dedup_not_bypass_pre_validation(monkeypatch):
+    """dedup 只包在「純驗證通過之後」——非法幣種仍應在碰任何依賴之前被
+    400 擋下，不會被 dedup key 計算或 in-flight 機制誤放行。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    code, body = web._handle_api_analyze(
+        {"coin": ["DOGE"], "type": ["multi_source"], "q": ["x"]}, client_ip="10.1.1.10"
+    )
+    assert code == 400
+    assert counter.n == 0
+    parsed = _envelope(body)
+    assert parsed["error"]["code"] == "bad_request"
 
 
 # ---------------------------------------------------------------------------

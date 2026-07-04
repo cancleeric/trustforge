@@ -3228,6 +3228,141 @@ def _price_provenance_data(evidence: list) -> dict:
     return data
 
 
+# ---------------------------------------------------------------------------
+# #51 /api/analyze server-side idempotency（防重複送出）：Bedrock 開通前最後
+# prereq——護欄 #9（daily cap + 並行原子預留）擋的是「同一 process 內累計花費
+# 超上限」，擋不住「使用者連點兩下、或前端重試造成兩個獨立 request 各自真的
+# 打一次 Bedrock」這種單純重複——兩次都在 cap 之內、各自都合法放行，但語意上
+# 是同一件事被做了兩遍，白白多花一次 token 成本。
+#
+# 做法：in-flight dedup（推薦解法，見下）＋ 短期（60 秒）結果快取。
+#   - 同一 (type, coin[,coin2], query, live/real/token) 的請求同時有一個正在
+#     跑時，後到的相同請求原地等待、共用同一份真實結果，不各自進
+#     `_do_analyze`/`_do_comparison`（因此也不會各自呼叫
+#     `_check_live_rate_limit`/`_check_real_rate_limit`，更不會各自走到
+#     `pipeline.run` 的 `try_reserve_request_budget()`）。
+#   - 跑完的結果額外存 60 秒短期快取，供緊接在後、沒能排進同一輪 in-flight
+#     等待的重複請求直接複用，一樣不重新觸發真連接器/Bedrock。
+#   - key 用 per-key `threading.Event`（不是單一全域鎖），`compute()`
+#     本身（可能是慢速真連接器/Bedrock I/O）在鎖外執行——不同 key 的請求
+#     完全並行，不會被彼此拖慢。
+# ---------------------------------------------------------------------------
+
+_ANALYZE_DEDUP_TTL_SECONDS = 60.0
+_ANALYZE_DEDUP_CACHE_MAX = 256
+
+_analyze_dedup_lock = threading.Lock()
+_analyze_dedup_inflight: dict[str, threading.Event] = {}
+_analyze_dedup_cache: dict[str, tuple[float, tuple[bool, object]]] = {}
+
+
+def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: dict) -> str:
+    """把一次 `/api/analyze` 請求正規化成 in-flight dedup / 短期結果快取的
+    key：`(type, coin[,coin2], query, live/real/token)`。
+
+    `coin_key`：呼叫端（`_handle_api_analyze`）已完成正規化＋白名單驗證的
+    幣種鍵——單幣是已 `.upper()` 過的 `coin_raw`；comparison 是
+    `_parse_comparison_coins()` 回傳的 `(coin_a, coin_b)` 依字母序排序後
+    `join(",")`，讓 `coin=BTC,ETH` 與 `coin=ETH,coin2=BTC` 這種同語意
+    不同參數順序的請求也能命中同一把 key，不會各自 miss。
+
+    `query`：已通過長度驗證的原始字串，`strip()` 去頭尾空白，避免使用者
+    多打/少打空白造成 miss；刻意不做大小寫正規化（casefold）——中文查詢字
+    大小寫不影響語意，但英文查詢字大小寫可能承載使用者刻意的語意差異，
+    保守不動。
+
+    `live`/`real`/`token`：直接帶原始 qs 值（僅 strip）。這三者決定
+    `_parse_live`/`_parse_real` 最終要不要真的打 Bedrock（`pipeline.run`
+    的 `data_mode`/`llm_mode`）——同一 (type,coin,query) 但這三者不同，
+    代價／結果不同，必須各自獨立 key：否則要嘛把「免費離線請求」跟
+    「已通過 token 驗證的真 Bedrock 請求」誤判成同一把（讓已花錢的真結果
+    被免費請求偷用），要嘛讓兩個都合法的真請求彼此漏 dedup。
+    """
+    live_raw = (qs.get("live", [""])[0] or "").strip()
+    real_raw = (qs.get("real", [""])[0] or "").strip()
+    token_raw = (qs.get("token", [""])[0] or "").strip()
+    return "\x1f".join(
+        (qtype.value, coin_key, query.strip(), live_raw, real_raw, token_raw)
+    )
+
+
+def _analyze_dedup_cache_put_locked(key: str, entry: tuple[bool, object]) -> None:
+    """呼叫端須已持有 `_analyze_dedup_lock`。寫入前先清掉已過期項目，
+    再檢查上限（`_ANALYZE_DEDUP_CACHE_MAX`）——bounded 記憶體，不因長期
+    運行、大量不同 query 組合而無限增長（比照既有 `_ledger_summary_cache`
+    /`_status_cache` 慣例）。"""
+    now = time.time()
+    expired = [k for k, (exp, _) in _analyze_dedup_cache.items() if exp <= now]
+    for k in expired:
+        _analyze_dedup_cache.pop(k, None)
+    if len(_analyze_dedup_cache) >= _ANALYZE_DEDUP_CACHE_MAX:
+        oldest_key = min(_analyze_dedup_cache, key=lambda k: _analyze_dedup_cache[k][0])
+        _analyze_dedup_cache.pop(oldest_key, None)
+    _analyze_dedup_cache[key] = (now + _ANALYZE_DEDUP_TTL_SECONDS, entry)
+
+
+def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
+    """#51 server-side idempotency 核心：同一 `key` 的重複/並行請求只讓
+    「第一個」（leader）真的呼叫 `compute()`（＝觸發 `_do_analyze`/
+    `_do_comparison` → `pipeline.run` → 真連接器/Bedrock）；後到的相同
+    請求（follower）原地等待，共用同一份真實結果物件本身——#24 不造假：
+    follower 拿到的不是另外偽造的假資料，就是 leader 那份真結果。
+
+    #9 護欄協同：dedup 判斷在 `compute()` **之前**——被 dedup 掉的
+    follower 完全不會呼叫 `compute()`，因此也不會呼叫
+    `_check_live_rate_limit`/`_check_real_rate_limit`（在 `_do_analyze`/
+    `_do_comparison` 內部才呼叫），更不會走到 `pipeline.run` 的
+    `try_reserve_request_budget()` 每日預留——不重複佔用、不重複消耗任何
+    護欄額度，甚至根本不進 Bedrock。
+
+    leader 若失敗（`ValueError`/`TooManyRequests`/其餘），例外物件本身
+    一併存進短期快取＋重新拋給所有等待中的 follower（而不是讓 follower
+    默默各自重跑一次）——否則遇到 leader 失敗就變成「沒 dedup 到」，
+    失去防重複送出的意義；exception 交由 `_handle_api_analyze` 既有的
+    `except` 分支處理，跟 leader 收到的路徑完全一致。
+    """
+    now = time.time()
+    with _analyze_dedup_lock:
+        cached = _analyze_dedup_cache.get(key)
+        if cached is not None and cached[0] > now:
+            ok, payload = cached[1]
+            if ok:
+                return payload
+            raise payload
+        event = _analyze_dedup_inflight.get(key)
+        is_leader = event is None
+        if is_leader:
+            event = threading.Event()
+            _analyze_dedup_inflight[key] = event
+
+    if not is_leader:
+        event.wait()
+        with _analyze_dedup_lock:
+            cached = _analyze_dedup_cache.get(key)
+        if cached is not None:
+            ok, payload = cached[1]
+            if ok:
+                return payload
+            raise payload
+        # 理論上不會發生（leader 的 finally 一定先寫快取才 set 事件）——
+        # fail-safe：不讓 follower 永遠卡死收不到結果，退回自己真的跑一次。
+        return compute()
+
+    try:
+        result = compute()
+    except Exception as exc:
+        with _analyze_dedup_lock:
+            _analyze_dedup_cache_put_locked(key, (False, exc))
+            _analyze_dedup_inflight.pop(key, None)
+        event.set()
+        raise
+    with _analyze_dedup_lock:
+        _analyze_dedup_cache_put_locked(key, (True, result))
+        _analyze_dedup_inflight.pop(key, None)
+    event.set()
+    return result
+
+
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
     `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
@@ -3257,6 +3392,14 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
          內部的連接器/Bedrock/pipeline 呼叫）＋ payload 組裝／信封序列化，
          整段用單一 `except Exception`（含 `ValueError`）接住 → 一律回
          通用 502，不再按例外型別分流成 400。
+
+    #51 server-side idempotency（防重複送出，Bedrock 開通前最後
+    prereq）：驗證通過後、真的呼叫 `_do_analyze`/`_do_comparison` 之前，
+    先算出 `_analyze_dedup_key()`（正規化 `type,coin[,coin2],query,
+    live/real/token`），透過 `_dedup_analyze_call()` 包一層 in-flight
+    dedup ＋ 60 秒短期結果快取——同一組參數的重複/並行請求只有第一個
+    （leader）真的觸發依賴呼叫，其餘原地等待、共用同一份真實結果，不會
+    各自再打一次真連接器/Bedrock。詳見 `_dedup_analyze_call()` docstring。
     """
     try:
         qtype = QuestionType(qs.get("type", ["multi_source"])[0])
@@ -3292,11 +3435,17 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "bad_request", f"幣種須為以下其中之一：{'、'.join(COIN_POOL)}"
             )
 
+    # #51 idempotency：comparison 用排序過的 `coin_a,coin_b`（A,B 與 B,A
+    # 同語意，排序後才不會因參數順序不同各自 miss），單幣直接用已驗證的
+    # `coin_raw`。
+    coin_key = ",".join(sorted(pair)) if qtype == QuestionType.COMPARISON else coin_raw
+    dedup_key = _analyze_dedup_key(qtype=qtype, coin_key=coin_key, query=query, qs=qs)
+
     # --- 2. 驗證通過後才碰依賴（連接器/Bedrock/pipeline/序列化）---
     try:
         if qtype == QuestionType.COMPARISON:
-            report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
-                qs, client_ip=client_ip
+            report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+                dedup_key, lambda: _do_comparison(qs, client_ip=client_ip)
             )
             payload = {
                 "version": VERSION,
@@ -3313,7 +3462,9 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "execution_log": log.events,
             }
         else:
-            report, evidence, log = _do_analyze(qs, client_ip=client_ip)
+            report, evidence, log = _dedup_analyze_call(
+                dedup_key, lambda: _do_analyze(qs, client_ip=client_ip)
+            )
             payload = {
                 "version": VERSION,
                 "report": dataclasses.asdict(report),
