@@ -307,14 +307,25 @@ case "$URL" in
     # MOCK_CURL_PUBLIC_LEGACY_FAIL 的「永遠失敗」不同），驗證 retry 真的
     # 生效、不會被暫時性失敗誤觸發 rollback。
     TRANSIENT_N="${MOCK_CURL_PUBLIC_LEGACY_TRANSIENT_FAILS:-0}"
-    if [ "$TRANSIENT_N" != "0" ]; then
+    FAIL_CALLS="${MOCK_CURL_PUBLIC_LEGACY_FAIL_CALLS:-}"
+    if [ "$TRANSIENT_N" != "0" ] || [ -n "$FAIL_CALLS" ]; then
       COUNT_FILE="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}/curl_legacy_healthz_call_count"
       N=1
       [ -f "$COUNT_FILE" ] && N=$(( $(cat "$COUNT_FILE") + 1 ))
       echo "$N" > "$COUNT_FILE"
-      if [ "$N" -le "$TRANSIENT_N" ]; then
+      if [ "$TRANSIENT_N" != "0" ] && [ "$N" -le "$TRANSIENT_N" ]; then
         exit 1
       fi
+      # codex 複審 HIGH（retry 之後又跟一個無保護的裸重複探測，等於白包
+      # retry）：跟上面「前 N 次失敗、之後永遠成功」的瞬斷模擬不同，這裡
+      # 模擬「retry 內成功之後，若還有多打一次，那一次剛好又撞上瞬斷」
+      # ——例如 FAIL_CALLS="1,2,4"：retry 前 2 次失敗、第 3 次成功（retry
+      # 正常結束，只呼叫 3 次），但如果程式碼還留著 retry 之後的裸重複探測
+      # （第 4 次呼叫），那一次會撞上這裡設定的失敗、誤觸發 rollback；
+      # 修好之後（沒有裸重複探測）根本不會有第 4 次呼叫，不受影響。
+      case ",${FAIL_CALLS}," in
+        *",${N},"*) exit 1 ;;
+      esac
     fi
     exit 0
     ;;
@@ -333,14 +344,21 @@ case "$URL" in
         # 同上（legacy /healthz）：支援「前 N 次呼叫失敗、之後成功」的瞬斷
         # 模擬，驗證 _tf_check_react_page 外層包的 retry 真的生效。
         TRANSIENT_N="${MOCK_CURL_REACT_ROOT_TRANSIENT_FAILS:-0}"
-        if [ "$TRANSIENT_N" != "0" ]; then
+        FAIL_CALLS="${MOCK_CURL_REACT_ROOT_FAIL_CALLS:-}"
+        if [ "$TRANSIENT_N" != "0" ] || [ -n "$FAIL_CALLS" ]; then
           COUNT_FILE="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}/curl_react_root_call_count"
           N=1
           [ -f "$COUNT_FILE" ] && N=$(( $(cat "$COUNT_FILE") + 1 ))
           echo "$N" > "$COUNT_FILE"
-          if [ "$N" -le "$TRANSIENT_N" ]; then
+          if [ "$TRANSIENT_N" != "0" ] && [ "$N" -le "$TRANSIENT_N" ]; then
             exit 1
           fi
+          # 同上（legacy /healthz）：驗證 retry 成功後不會再多打一次無保護
+          # 的裸重複探測；FAIL_CALLS 指定的呼叫序號如果被打到就代表裸重複
+          # 探測還在，會誤觸發 rollback。
+          case ",${FAIL_CALLS}," in
+            *",${N},"*) exit 1 ;;
+          esac
         fi
         ;;
       *)
@@ -406,6 +424,7 @@ CMD_LEGACY=$(TF_CUTOVER_DRY_RUN=1 bash "$REPO_ROOT/deploy/cutover_switch.sh" leg
 active_conf() { basename "$(readlink "$SANDBOX/etc/nginx/conf.d/trustforge.conf")"; }
 active_csp() { grep '^Environment=TRUSTFORGE_CSP_MODE=' \
   "$SANDBOX/etc/systemd/system/trustforge.service" | cut -d= -f3; }
+call_count() { cat "$STATE/$1" 2>/dev/null || echo 0; }
 
 # ── 給 legacy 模式的 public smoke check 測試用：legacy 模式的「有意義」
 # 情境是從 react 切回 legacy（緊急降級），所以這裡另外準備一個 pre-state=
@@ -882,6 +901,18 @@ fi
 assert_eq "$(active_conf)" "legacy.conf" "retry 生效後正常切到 legacy.conf（沒有誤觸發 rollback）"
 assert_eq "$(active_csp)" "legacy" "retry 生效後 CSP_MODE 正常切到 legacy（沒有誤觸發 rollback）"
 assert_grep_log "public nginx smoke check 通過" "retry 撐過瞬斷失敗後，仍必須印出 smoke check 通過（真的驗證過，不是跳過）"
+assert_eq "$(call_count curl_legacy_healthz_call_count)" "3" "public /healthz 總共只被打了 3 次（retry 用完就是 3 次，_tf_retry 成功後不該再多打一次無保護的裸重複探測——codex 複審 HIGH 修復點）"
+
+echo "== 場景 24c：legacy mode，public /healthz retry 內前 2 次失敗、第 3 次成功，但『第 4 次』若被打到會失敗（模擬瞬斷持續存在）→ 修好後根本不該有第 4 次呼叫，驗證裸重複探測已移除（codex 複審 HIGH）=="
+reset_sandbox_react_active
+if run_cutover_legacy MOCK_CURL_PUBLIC_LEGACY_FAIL_CALLS=1,2,4 TF_CUTOVER_SMOKE_RETRIES=5 TF_CUTOVER_SMOKE_DELAY=0; then
+  pass "legacy public /healthz 前 2 次失敗、第 3 次成功後 exit 0（沒有多打第 4 次撞上持續瞬斷而誤 rollback）"
+else
+  fail "legacy public /healthz retry 內第 3 次已成功，不該再被『假設中的第 4 次裸重複探測』拖累成非零結束——代表裸重複探測沒清乾淨"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "legacy.conf" "retry 第 3 次成功後應正常切到 legacy.conf（不該因為裸重複探測撞上第 4 次失敗而 rollback）"
+assert_eq "$(call_count curl_legacy_healthz_call_count)" "3" "public /healthz 恰好只被打 3 次就結束（若還有裸重複探測會是 4 次、且第 4 次會撞上 FAIL_CALLS 而誤觸發 rollback）"
 
 echo "== 場景 24b：react mode，public /（root）前 2 次瞬斷失敗、第 3 次成功 → _tf_check_react_page 外層的 retry 生效，最終正常 cutover（不誤 rollback）=="
 reset_sandbox
@@ -894,6 +925,18 @@ fi
 assert_eq "$(active_conf)" "react.conf" "retry 生效後正常切到 react.conf（沒有誤觸發 rollback）"
 assert_eq "$(active_csp)" "react" "retry 生效後 CSP_MODE 正常切到 react（沒有誤觸發 rollback）"
 assert_grep_log "public nginx smoke check 通過" "retry 撐過瞬斷失敗後，仍必須印出 smoke check 通過（真的驗證過，不是跳過）"
+assert_eq "$(call_count curl_react_root_call_count)" "3" "public /（root）總共只被打了 3 次（retry 用完就是 3 次，不該再多打一次無保護的裸重複探測——codex 複審 HIGH 修復點）"
+
+echo "== 場景 24d：react mode，public /（root）retry 內前 2 次失敗、第 3 次成功，但『第 4 次』若被打到會失敗（模擬瞬斷持續存在）→ 修好後根本不該有第 4 次呼叫，驗證裸重複探測已移除（codex 複審 HIGH）=="
+reset_sandbox
+if run_cutover MOCK_CURL_REACT_ROOT_FAIL_CALLS=1,2,4 TF_CUTOVER_SMOKE_RETRIES=5 TF_CUTOVER_SMOKE_DELAY=0; then
+  pass "react public /（root）前 2 次失敗、第 3 次成功後 exit 0（沒有多打第 4 次撞上持續瞬斷而誤 rollback）"
+else
+  fail "react public /（root）retry 內第 3 次已成功，不該再被『假設中的第 4 次裸重複探測』拖累成非零結束——代表裸重複探測沒清乾淨"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "react.conf" "retry 第 3 次成功後應正常切到 react.conf（不該因為裸重複探測撞上第 4 次失敗而 rollback）"
+assert_eq "$(call_count curl_react_root_call_count)" "3" "public /（root）恰好只被打 3 次就結束（若還有裸重複探測會是 4 次、且第 4 次會撞上 FAIL_CALLS 而誤觸發 rollback）"
 
 echo "== 場景 26：react-http mode，沒有 TF_ALLOW_INSECURE_HTTP_CUTOVER=yes → 直接拒絕、非零結束、完全不 mutate（codex 複審 HIGH：production 不該用 react-http，只有 react(TLS) 才是 production 路徑）=="
 reset_sandbox

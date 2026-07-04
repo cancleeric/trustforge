@@ -281,6 +281,12 @@ case "$url" in
       exit 1
     fi
     [ "${MOCK_CURL_PUBLIC_FAIL:-0}" = "1" ] && exit 1
+    # codex 複審 HIGH：驗證 retry 成功後不會再多打一次無保護的裸重複探測
+    # ——FAIL_CALLS 指定的呼叫序號如果被打到，代表裸重複探測還在。
+    FAIL_CALLS="${MOCK_CURL_PUBLIC_FAIL_CALLS:-}"
+    case ",${FAIL_CALLS}," in
+      *",${N},"*) exit 1 ;;
+    esac
     exit 0 ;;
   https://trustforge.hurricanesoft.com.tw/healthz)
     STATE_DIR="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}"
@@ -293,6 +299,10 @@ case "$url" in
       exit 1
     fi
     [ "${MOCK_CURL_REACT_HEALTHZ_FAIL:-0}" = "1" ] && exit 1
+    FAIL_CALLS="${MOCK_CURL_REACT_HEALTHZ_FAIL_CALLS:-}"
+    case ",${FAIL_CALLS}," in
+      *",${N},"*) exit 1 ;;
+    esac
     exit 0 ;;
   *)
     [ "${MOCK_CURL_ROLLBACK_FAIL:-0}" = "1" ] && exit 1
@@ -591,11 +601,27 @@ if grep -qF "已回滾到跑前狀態" "$STATE/last_run.log"; then
 else
   pass "healthz 暫時性失敗沒有誤觸發 rollback"
 fi
-# 4 次 = _tf_retry 內部 3 次（前 2 次失敗 + 第 3 次成功即回傳）+ 既有 idiom
-# 「if ! _tf_retry ...; then 印診斷; fi」之後那個無條件的 bare 覆核呼叫
-# （比照 cutover_switch.sh 同一顆 _tf_retry 慣例），證明 retry 真的有跑
-# （不是單發 curl 就直接判定成功）。
-assert_eq "$(call_count curl_public_healthz_call_count)" "4" "healthz 總共被打了 4 次（retry 內 3 次 + bare 覆核 1 次，證明 retry 真的有跑、不是單發 curl）"
+# 3 次 = _tf_retry 內部前 2 次失敗 + 第 3 次成功即回傳，剛好用完就結束。
+# codex 複審 HIGH：舊寫法在 _tf_retry 成功後還跟一顆無保護的裸重複探測
+# （第 4 次），那次瞬斷若還沒過去就會誤觸發 rollback——bug 沒真的解。
+# 移除裸重複探測後，成功後不該再多打一次，故意斷言恰好是 3 次而不是 4。
+assert_eq "$(call_count curl_public_healthz_call_count)" "3" "healthz 恰好只被打 3 次就結束（retry 用完就是 3 次，成功後不該再多打一次無保護的裸重複探測——codex 複審 HIGH 修復點）"
+
+echo "== 場景 17b（Step 5 healthz retry 真生效，不是裸重複探測在頂）：前 2 次失敗、第 3 次成功，但『第 4 次』若被打到會失敗（模擬瞬斷持續存在）→ 修好後根本不該有第 4 次呼叫 =="
+reset_sandbox
+if run_transaction MOCK_CURL_PUBLIC_FAIL_CALLS=1,2,4 TF_BOOTSTRAP_SMOKE_RETRIES=5 TF_BOOTSTRAP_SMOKE_DELAY=0; then
+  pass "healthz 前 2 次失敗、第 3 次成功後 exit 0（沒有多打第 4 次撞上持續瞬斷而誤 rollback）"
+else
+  fail "healthz retry 內第 3 次已成功，不該再被『假設中的第 4 次裸重複探測』拖累成非零結束——代表裸重複探測沒清乾淨"
+  cat "$STATE/last_run.log" >&2
+fi
+assert_eq "$(active_conf)" "legacy.conf" "retry 第 3 次成功後應正常指向 candidate legacy.conf（不該因為裸重複探測撞上第 4 次失敗而 rollback）"
+if grep -qF "已回滾到跑前狀態" "$STATE/last_run.log"; then
+  fail "healthz retry 第 3 次已成功，不該再誤觸發 rollback（代表裸重複探測還在、撞上第 4 次注入的失敗）"
+else
+  pass "healthz retry 第 3 次成功後沒有誤觸發 rollback（裸重複探測確認已移除）"
+fi
+assert_eq "$(call_count curl_public_healthz_call_count)" "3" "healthz 恰好只被打 3 次就結束（若還有裸重複探測會是 4 次、且第 4 次會撞上 FAIL_CALLS 而誤觸發 rollback）"
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE" "$CAPTURE"
 

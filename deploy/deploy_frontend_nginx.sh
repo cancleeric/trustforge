@@ -67,53 +67,77 @@ if [ "$MATCH_COUNT" -ne 1 ]; then
 fi
 IID=$(printf '%s\n' "$MATCHES" | awk '{print $1}')
 STATE=$(printf '%s\n' "$MATCHES" | awk '{print $2}')
+# codex 複審 HIGH：TF_BOOTSTRAP_DRY_RUN=1 原本只短路最後的 `aws ssm
+# send-command`，前面這些真的會 start-instances/npm build/上傳 S3/改
+# security group——真部署誤呼叫 dry-run 卻沒帶 mock aws 時，會真的動到
+# production（已實測發生過一次：S3 dist/conf 被真的覆蓋、SG authorize
+# 打了一次 no-op）。以下每一段「會真的 mutate AWS 或跑真的本機
+# build/上傳」的步驟都加 dry-run 短路：dry-run 只需要 IID/BUCKET/REGION
+# 這些純文字組出 CMDS 內容，不需要真的開機/build/上傳/開 port，所以即使
+# 沒有 mock aws 在 PATH 上，dry-run 也不會碰到任何真的寫入操作（唯讀查詢
+# 如上面的 describe-instances 仍會打真 AWS，但唯讀不會造成 mutation）。
 if [ "$STATE" = "stopped" ]; then
-  echo "[fe-nginx] 既有實例 $IID 已停機 → 先開機" >&2
-  aws ec2 start-instances --region "$REGION" --instance-ids "$IID" >/dev/null
-  aws ec2 wait instance-running --region "$REGION" --instance-ids "$IID"
+  if [ "${TF_BOOTSTRAP_DRY_RUN:-}" = "1" ]; then
+    echo "[fe-nginx]（dry-run）略過真的開機（aws ec2 start-instances/wait instance-running），只組遠端指令內容" >&2
+  else
+    echo "[fe-nginx] 既有實例 $IID 已停機 → 先開機" >&2
+    aws ec2 start-instances --region "$REGION" --instance-ids "$IID" >/dev/null
+    aws ec2 wait instance-running --region "$REGION" --instance-ids "$IID"
+  fi
 fi
 echo "[fe-nginx] 目標實例 $IID" >&2
 
-# 2) 本機 build 前端（Vite 純靜態輸出，$0 runtime；不佔 EC2 CPU）----------
-echo "[fe-nginx] build 前端（npm ci && npm run build）…" >&2
-( cd frontend && npm ci && npm run build )
-if [ ! -d frontend/dist ]; then
-  echo "[fe-nginx] ❌ frontend/dist 不存在，build 失敗" >&2
-  exit 1
-fi
-
-# 3) 打包上傳：前端 dist + 四份 nginx conf（直接用 repo 裡實際被
-#    `nginx -t` 驗證過的檔案，避免跟 SSM 內嵌字串產生 drift）-------------
+# 2) 本機 build 前端 + 3) 打包上傳：前端 dist + 四份 nginx conf（直接用
+#    repo 裡實際被 `nginx -t` 驗證過的檔案，避免跟 SSM 內嵌字串產生
+#    drift）----------------------------------------------------------------
 #    legacy=SSR 全轉發（HTTP-only）、react=React+TLS（有 domain 才能用）、
 #    react-http=React HTTP-only（bare-IP 現況用，見 deploy/nginx-react-http.conf）、
 #    legacy-tls=SSR 全轉發（443 HTTPS，保留 HSTS）——codex 複審 HIGH：react→
 #    legacy 緊急回滾時若憑證已存在，cutover_switch.sh 會改選這份，避免
 #    HSTS 破壞 HTTP-only 回滾（見 deploy/nginx-legacy-tls.conf 檔頭註解）。
-DIST_ZIP="$(pwd)/build/trustforge_frontend_dist.zip"
-mkdir -p build
-( cd frontend/dist && zip -qr "$DIST_ZIP" . )
-aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
-  aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
-    --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
-aws s3 cp "$DIST_ZIP" "s3://$BUCKET/trustforge_frontend_dist.zip" --region "$REGION" >/dev/null
-aws s3 cp deploy/nginx-legacy.conf "s3://$BUCKET/nginx-legacy.conf" --region "$REGION" >/dev/null
-aws s3 cp deploy/nginx.conf "s3://$BUCKET/nginx-react.conf" --region "$REGION" >/dev/null
-aws s3 cp deploy/nginx-react-http.conf "s3://$BUCKET/nginx-react-http.conf" --region "$REGION" >/dev/null
-aws s3 cp deploy/nginx-legacy-tls.conf "s3://$BUCKET/nginx-legacy-tls.conf" --region "$REGION" >/dev/null
-echo "[fe-nginx] 已上傳前端 dist + 四份 nginx conf 到 s3://$BUCKET/" >&2
+#    dry-run 不需要真的 build/zip/上傳（CMDS 只嵌 __BUCKET__/__REGION__
+#    這種純文字佔位，不依賴本機 dist 是否存在），全部略過。
+if [ "${TF_BOOTSTRAP_DRY_RUN:-}" = "1" ]; then
+  echo "[fe-nginx]（dry-run）略過本機 npm build/zip 打包與真的 aws s3 cp 上傳，只組遠端指令內容，不寫入真的 S3 bucket" >&2
+else
+  echo "[fe-nginx] build 前端（npm ci && npm run build）…" >&2
+  ( cd frontend && npm ci && npm run build )
+  if [ ! -d frontend/dist ]; then
+    echo "[fe-nginx] ❌ frontend/dist 不存在，build 失敗" >&2
+    exit 1
+  fi
+  DIST_ZIP="$(pwd)/build/trustforge_frontend_dist.zip"
+  mkdir -p build
+  ( cd frontend/dist && zip -qr "$DIST_ZIP" . )
+  aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
+    aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
+      --create-bucket-configuration LocationConstraint="$REGION" >/dev/null
+  aws s3 cp "$DIST_ZIP" "s3://$BUCKET/trustforge_frontend_dist.zip" --region "$REGION" >/dev/null
+  aws s3 cp deploy/nginx-legacy.conf "s3://$BUCKET/nginx-legacy.conf" --region "$REGION" >/dev/null
+  aws s3 cp deploy/nginx.conf "s3://$BUCKET/nginx-react.conf" --region "$REGION" >/dev/null
+  aws s3 cp deploy/nginx-react-http.conf "s3://$BUCKET/nginx-react-http.conf" --region "$REGION" >/dev/null
+  aws s3 cp deploy/nginx-legacy-tls.conf "s3://$BUCKET/nginx-legacy-tls.conf" --region "$REGION" >/dev/null
+  echo "[fe-nginx] 已上傳前端 dist + 四份 nginx conf 到 s3://$BUCKET/" >&2
+fi
 
 # 4) Security group：加開 443（80 應該已由 deploy_ec2.sh 開好）-----------
+#    VPC/SGID 查詢是唯讀，dry-run 也保留（純文字資訊，CMDS 不需要它）；
+#    真的 authorize-security-group-ingress 是 mutating，dry-run 略過。
 VPC=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
 SGID=$(aws ec2 describe-security-groups --region "$REGION" --filters Name=group-name,Values=$SG Name=vpc-id,Values=$VPC --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo None)
 if [ "$SGID" = "None" ] || [ -z "$SGID" ]; then
   echo "[fe-nginx] ❌ 找不到 security group ${SG}，deploy_ec2.sh 應該已經建過，中止" >&2
   exit 1
 fi
-if ! aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SGID" \
-  --protocol tcp --port 443 --cidr 0.0.0.0/0 >/dev/null 2>&1; then
-  echo "[fe-nginx] 443 規則已存在（authorize 回錯通常代表 duplicate，忽略）" >&2
+if [ "${TF_BOOTSTRAP_DRY_RUN:-}" = "1" ]; then
+  echo "[fe-nginx]（dry-run）略過真的 authorize-security-group-ingress，只組遠端指令內容，不改真的 SG 規則" >&2
+else
+  if ! aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SGID" \
+    --protocol tcp --port 443 --cidr 0.0.0.0/0 >/dev/null 2>&1; then
+    echo "[fe-nginx] 443 規則已存在（authorize 回錯通常代表 duplicate，忽略）" >&2
+  fi
+  echo "[fe-nginx] SG=$SGID 已開 443（TLS 就緒，見 deploy/TLS-SETUP.md）" >&2
 fi
-echo "[fe-nginx] SG=$SGID 已開 443（TLS 就緒，見 deploy/TLS-SETUP.md）" >&2
 
 # 5) SSM：裝 nginx、佈署 conf（預設啟用 legacy）、前端 dist、收斂 python 綁定
 #    ----------------------------------------------------------------------
@@ -159,6 +183,19 @@ echo "[fe-nginx] SG=$SGID 已開 443（TLS 就緒，見 deploy/TLS-SETUP.md）" 
 # 擷取這段內容後在本機沙箱（假 /etc + mock nginx/systemctl/dnf/unzip/curl）
 # 實際執行，驗證 guarded transaction／失敗回滾的控制流程真的正確。生產
 # 環境不會設這個變數，行為不受影響。
+#
+# codex 複審 HIGH：dry-run 現在是「真 dry-run」——上面 1)~4) 每一段會真的
+# mutate AWS（start-instances、npm build+zip、S3 head/create-bucket+cp、
+# authorize-security-group-ingress）都已經個別加了 dry-run 短路，dry-run
+# 時完全不執行。即使**沒有**在 PATH 上放 mock aws，dry-run 也只會打幾個
+# 唯讀查詢（sts get-caller-identity/ec2 describe-instances/describe-vpcs/
+# describe-security-groups，純讀取不 mutate），不會寫入任何真的 S3
+# object、不會開真的 EC2 機、不會改真的 security group 規則、不會呼叫
+# 真的 SSM send-command。驗證腳本改動時仍建議搭配 mock aws（更快、更
+# 決定性、不依賴真的 AWS 帳號存在），但即使忘記 mock，dry-run 本身也不
+# 會造成真的部署副作用（2026-07 曾發生一次忘記 mock 直接跑 dry-run，
+# 因為當時 dry-run 只短路 SSM 這一段，S3 upload/SG authorize 仍照跑，
+# 已修正）。
 CMDS=$(cat <<'CMDEOF'
 set -e
 ETC="${TF_BOOTSTRAP_ETC:-/etc}"
@@ -367,29 +404,39 @@ fi
 TF_BOOTSTRAP_SMOKE_RETRIES="${TF_BOOTSTRAP_SMOKE_RETRIES:-10}"
 TF_BOOTSTRAP_SMOKE_DELAY="${TF_BOOTSTRAP_SMOKE_DELAY:-2}"
 _tf_retry() {
-  local _tf_retry_i
+  local _tf_retry_i _tf_retry_out
+  _tf_retry_out="$(mktemp)"
   for _tf_retry_i in $(seq 1 "$TF_BOOTSTRAP_SMOKE_RETRIES"); do
-    if "$@" >/dev/null 2>&1; then
+    if "$@" >"$_tf_retry_out" 2>&1; then
+      rm -f "$_tf_retry_out"
       return 0
     fi
     if [ "$_tf_retry_i" -lt "$TF_BOOTSTRAP_SMOKE_RETRIES" ]; then
       sleep "$TF_BOOTSTRAP_SMOKE_DELAY"
     fi
   done
+  # codex 複審 HIGH：全部重試用完仍失敗才把最後一次嘗試的實際輸出吐回
+  # stderr，不要整段吞掉——舊寫法靠 retry 之後再補一個無保護的裸重複探測
+  # 來洩漏這段訊息，裸探測移除後改成這裡直接重播最後一次的輸出。
+  cat "$_tf_retry_out" >&2
+  rm -f "$_tf_retry_out"
   return 1
 }
 
 CERT_FILE="$ETC/letsencrypt/live/${REACT_TLS_DOMAIN}/fullchain.pem"
 if { [ "$ACTIVE_BASENAME" = "react.conf" ] || [ "$ACTIVE_BASENAME" = "legacy-tls.conf" ]; } && [ -f "$CERT_FILE" ]; then
+  # codex 複審 HIGH：_tf_retry 剛判定健康，緊接著又跟一個無保護的裸重複
+  # 探測，等於白包 retry——那一次若撞上瞬斷會誤觸發 rollback。移除裸重複
+  # 探測，重試耗盡就直接在 if body 內用 false 觸發 ERR trap。
   if ! _tf_retry curl -fsS --resolve "${REACT_TLS_DOMAIN}:443:127.0.0.1" -o /dev/null "https://${REACT_TLS_DOMAIN}/healthz"; then
     echo "❌ [fe-nginx] 完成後驗證失敗：HTTPS https://${REACT_TLS_DOMAIN}/healthz 沒有回應（重試 ${TF_BOOTSTRAP_SMOKE_RETRIES} 次，間隔 ${TF_BOOTSTRAP_SMOKE_DELAY}s，仍失敗；現行拓樸 ${ACTIVE_BASENAME}）" >&2
+    false
   fi
-  curl -fsS --resolve "${REACT_TLS_DOMAIN}:443:127.0.0.1" -o /dev/null "https://${REACT_TLS_DOMAIN}/healthz"
 else
   if ! _tf_retry curl -fsS http://localhost/healthz -o /dev/null; then
     echo "❌ [fe-nginx] 完成後驗證失敗：public nginx /healthz 沒有回應（重試 ${TF_BOOTSTRAP_SMOKE_RETRIES} 次，間隔 ${TF_BOOTSTRAP_SMOKE_DELAY}s，仍失敗；現行拓樸 ${ACTIVE_BASENAME}）" >&2
+    false
   fi
-  curl -fsS http://localhost/healthz -o /dev/null
 fi
 
 trap - ERR
