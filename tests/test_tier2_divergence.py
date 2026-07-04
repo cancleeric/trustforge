@@ -222,6 +222,70 @@ def test_dedup_stance_pairs_by_source_normalizes_case_and_whitespace():
     assert result["bearish"][0]["source"] == "decrypt"
 
 
+def test_detect_stance_pairs_normalizes_same_source_case_variant_not_cross_source():
+    """codex 第二輪 HIGH 修正：`CoinDesk`（bullish）與 ` coindesk `（bearish）
+    normalized 後是同一個來源，即使 raw string 不相等，也不該被判定為
+    跨源矛盾配對——否則單一 publisher 用大小寫/空白變體發文，就能撐起一個
+    假的「跨源分歧」，違反獨立性核心承諾。應回空 list（不產生任何配對，
+    這是同源自我矛盾，非跨源矛盾）。"""
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "A"),
+        _sc("b", "news", " coindesk ", "bearish", 0.6, "B"),
+    ]
+    assert _detect_stance_pairs(scored, _contradiction_stance_fn) == []
+
+
+def test_cross_source_signal_same_normalized_source_case_variant_does_not_emit_divergence():
+    """端到端：bullish `CoinDesk` + bearish ` coindesk `（同一 publisher 的
+    大小寫/空白變體，非真跨源，全部主張只涉及 1 個 normalized source）→
+    不 emit 跨源分歧訊號（正規化後 distinct source 數 < 2）。"""
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "看漲敘述 A"),
+        _sc("b", "news", " coindesk ", "bearish", 0.6, "看跌敘述 B"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is None, "同一 publisher 的大小寫/空白變體自我矛盾，不該被判成跨源分歧"
+
+
+def test_cross_source_signal_real_two_distinct_sources_still_emits_divergence():
+    """回歸鎖：真正兩個不同來源（非大小寫變體）→ 正常 emit 跨源分歧，
+    不因本輪修正而誤傷真實跨源矛盾案例。"""
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "看漲敘述 A"),
+        _sc("b", "news", "Decrypt", "bearish", 0.6, "看跌敘述 B"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is not None
+    assert result["type"] == "divergence"
+    assert len(result["stance_pairs"]) == 2
+    assert len(result["distinct_sources"]["bullish"]) == 1
+    assert len(result["distinct_sources"]["bearish"]) == 1
+
+
+def test_cross_source_signal_gate_rejects_degenerate_single_normalized_source_pairs(monkeypatch):
+    """防禦層測試（第二道防線，belt-and-suspenders）：即使 `_detect_stance_pairs`
+    因某種未來改動意外回傳了「只涉及 1 個 normalized source」的退化 pairs
+    （理論上配對層的正規化比對已擋住這種情況——這裡直接 monkeypatch 模擬
+    異常輸入，驗證 `detect_cross_source_signal` 自己的顯式 ≥2 來源檢查
+    獨立生效，不完全依賴單一程式碼路徑撐住整個獨立性承諾），仍不得 emit
+    跨源分歧訊號。"""
+    import trustforge.agent.orchestrator as orch
+
+    def fake_detect_stance_pairs(scored, stance_fn):
+        return [
+            {"source": "CoinDesk", "stance": "bullish", "claim_id": "x1", "text": "X1"},
+            {"source": " coindesk ", "stance": "bearish", "claim_id": "x2", "text": "X2"},
+        ]
+
+    monkeypatch.setattr(orch, "_detect_stance_pairs", fake_detect_stance_pairs)
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "A"),
+        _sc("b", "news", " coindesk ", "bearish", 0.6, "B"),
+    ]
+    result = orch.detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is None, "退化的單一 normalized source pairs 不該被 gate 放行"
+
+
 def test_stance_pairs_same_source_same_stance_deduped_in_distinct_sources():
     """端到端：同一來源兩筆不同 claim、各自與不同對手配對成功、同陣營
     （bullish）→ `stance_pairs` 原始明細仍列出兩筆（逐字不變，供展開查看），
