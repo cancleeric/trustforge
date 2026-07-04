@@ -71,16 +71,19 @@ def _reset_shared_module_state():
 @pytest.fixture(autouse=True)
 def _reset_analyze_dedup_state():
     """#51 `/api/analyze` server-side idempotency：`_analyze_dedup_cache`/
-    `_analyze_dedup_inflight` 是 module-level 狀態（同一把 key 60 秒內共用
-    結果），本檔許多測試共用相同的 (coin, query, type) 組合（如
-    `coin=BTC, q="test"`）——不清乾淨會讓後面的測試誤命中前一個測試留下
-    的快取結果/事件，而不是真的呼叫到當次測試 monkeypatch 的
-    `web.run`/`web.run_comparison`。"""
+    `_analyze_dedup_inflight`/`_analyze_dedup_follower_failure` 是
+    module-level 狀態（同一把 key 60 秒內共用結果；世代編號雖然全域
+    唯一不會跨測試撞號，但仍清乾淨避免不必要的殘留），本檔許多測試共用
+    相同的 (coin, query, type) 組合（如 `coin=BTC, q="test"`）——不清
+    乾淨會讓後面的測試誤命中前一個測試留下的快取結果/事件，而不是真的
+    呼叫到當次測試 monkeypatch 的 `web.run`/`web.run_comparison`。"""
     web._analyze_dedup_cache.clear()
     web._analyze_dedup_inflight.clear()
+    web._analyze_dedup_follower_failure.clear()
     yield
     web._analyze_dedup_cache.clear()
     web._analyze_dedup_inflight.clear()
+    web._analyze_dedup_follower_failure.clear()
 
 
 @pytest.fixture
@@ -640,6 +643,99 @@ def test_api_analyze_dedup_leader_failure_shared_with_followers(monkeypatch):
     assert len(results) == n_workers
     assert all(code == 502 for code, _ in results), results
     assert counter.n == 1, f"leader 失敗只該真的觸發依賴呼叫 1 次，實際 {counter.n} 次"
+
+
+def test_dedup_analyze_call_leader_failure_not_written_to_ttl_cache():
+    """codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：直接
+    單元測試 `_dedup_analyze_call`——leader 失敗後，`_analyze_dedup_cache`
+    （共用的 60 秒 TTL 結果快取）不該有這把 key 的任何紀錄（不論成功/
+    失敗，`(False, exc)` 這種寫法本身就不該再發生）；in-flight entry
+    也該被清乾淨，而不是卡在一個「已經失敗」卻還留著的舊 leader entry
+    上，讓下一個請求可以真的重新判斷、重新嘗試。"""
+    key = "dedup-failure-not-in-ttl-cache-test-key"
+
+    def _boom():
+        raise ValueError("模擬依賴暫時性失敗（連接器 timeout）")
+
+    with pytest.raises(ValueError):
+        web._dedup_analyze_call(key, _boom)
+
+    assert key not in web._analyze_dedup_cache, (
+        "leader 失敗不該被寫進共用的 60 秒 TTL 結果快取"
+    )
+    assert key not in web._analyze_dedup_inflight, (
+        "leader 失敗後應該清掉 in-flight entry，讓下一個請求可以 fresh retry"
+    )
+
+
+def test_api_analyze_dedup_leader_failure_not_cached_fresh_retry_after_recovery(monkeypatch):
+    """codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：leader
+    失敗時，例外不該被寫進共用的 60 秒 TTL 結果快取——否則接下來 60 秒內
+    任何命中同一把 key 的請求（不管依賴是否早就恢復）都會立刻重拋這個
+    過時例外，短暫故障被人為放大成保證整整 60 秒的故障。
+
+    這裡驗證兩件事（銜接上一個測試 `..._leader_failure_shared_with_
+    followers` 的斷言，這裡額外加上「恢復後立即重試」）：
+    1. leader 第一次失敗（模擬依賴**當下仍然故障**）時，並行等待中的
+       follower 共用同一次失敗（都拿到 502，依賴只被真的呼叫 1 次，不是
+       依序各自輪流重試）。
+    2. 緊接著（同一個 process 內，不 sleep、不手動竄改任何快取內部
+       狀態）送出的下一個請求——模擬依賴已經恢復——立刻真的重試並成功，
+       不被剛才那次失敗卡住。"""
+    counter = _CallCounter()
+    dependency_recovered = threading.Event()
+    real_run = pipeline_module.run
+
+    def _flaky(*args, **kwargs):
+        counter.hit()
+        if not dependency_recovered.is_set():
+            time.sleep(0.2)
+            raise ValueError("依賴暫時性失敗（模擬連接器 timeout）")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(web, "run", _flaky)
+
+    qs = {
+        "coin": ["ETH"],
+        "type": ["multi_source"],
+        "q": ["dedup-transient-failure-recovery-test"],
+    }
+    n_workers = 4
+    barrier = threading.Barrier(n_workers)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        barrier.wait()
+        code, body = web._handle_api_analyze(qs, client_ip="10.1.1.20")
+        with results_lock:
+            results.append((code, body))
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == n_workers
+    assert all(code == 502 for code, _ in results), results
+    assert counter.n == 1, (
+        f"依賴仍故障期間，當下 {n_workers} 個並行 follower 應該共用同一次失敗，"
+        f"依賴只該真的被打 1 次（不該依序各自輪流重試），實際 {counter.n} 次"
+    )
+
+    # 模擬依賴恢復，緊接著（不 sleep、不動任何快取內部狀態）送出下一個
+    # 請求——必須立刻真的重試並成功，而不是被剛才那次失敗的結果卡住。
+    dependency_recovered.set()
+    code, body = web._handle_api_analyze(qs, client_ip="10.1.1.21")
+    assert code == 200, (
+        f"依賴恢復後，下一個請求應該立刻真的重試並成功，不該被舊的失敗結果卡住；"
+        f"實際 code={code}, body={body!r}"
+    )
+    assert counter.n == 2, (
+        f"依賴恢復後的下一個請求應該真的觸發依賴呼叫（fresh retry），"
+        f"不是命中被快取的舊失敗，實際依賴總共被呼叫 {counter.n} 次"
+    )
 
 
 def test_api_analyze_dedup_ttl_expiry_allows_refetch(monkeypatch):

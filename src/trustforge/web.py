@@ -3330,11 +3330,25 @@ _ANALYZE_DEDUP_CACHE_MAX = 256
 # ——比單次分析（含真連接器/Bedrock）預期最長時間（見 #9 護欄 docstring）
 # 略長，但仍是有限值，不讓一個掛掉的依賴無限期拖垮 server threads。
 _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS = 45.0
+# codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：leader 失敗
+# 時，例外**不**進 `_analyze_dedup_cache`（那是 60 秒 TTL、鍵是「請求
+# 內容」的共用結果快取，任何之後命中同一把 key 的全新請求都會讀到——
+# 拿來放暫時性失敗正是原本的 bug）。改成另外一個**鍵是世代編號**的獨立
+# 小暫存區，只給「這次失敗發生當下，已經在 `event.wait()` 上等這個世代
+# 的 follower」讀。世代編號全域唯一、永不重複使用，因此往後任何全新
+# 請求（不論多快進來）**永遠不可能**巧合去查到這個世代——不需要用短
+# TTL 才能保證「不影響全新 caller」，這裡的秒數只是給記憶體回收用的
+# 寬限期，不是安全邊界。
+_ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS = 5.0
 
 _analyze_dedup_lock = threading.Lock()
 # key -> (leader 完成時會 set() 的 Event, leader 開始時間戳, leader 的世代編號)
 _analyze_dedup_inflight: dict[str, tuple[threading.Event, float, int]] = {}
 _analyze_dedup_cache: dict[str, tuple[float, tuple[bool, object]]] = {}
+# 世代編號 -> (寬限期到期時間戳, leader 失敗時的例外物件)——見上方
+# `_ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS` 說明；只給當下已在等
+# 該世代的 follower 讀，不是給全新請求命中的結果快取。
+_analyze_dedup_follower_failure: dict[int, tuple[float, BaseException]] = {}
 # 全域、單調遞增、永不重複使用的世代編號來源（見上方模組頂部大段說明的
 # codex HIGH 複審#3）；只在持有 `_analyze_dedup_lock` 時讀寫。用單一全域
 # 計數器而非每把 key 各自的計數器字典，避免額外一個會無限增長的 dict，
@@ -3534,6 +3548,23 @@ def _analyze_dedup_cache_put_locked(key: str, entry: tuple[bool, object]) -> Non
     _analyze_dedup_cache[key] = (now + _ANALYZE_DEDUP_TTL_SECONDS, entry)
 
 
+def _analyze_dedup_follower_failure_put_locked(generation: int, exc: BaseException) -> None:
+    """呼叫端須已持有 `_analyze_dedup_lock`。codex HIGH 複審#5：leader 失敗
+    時把例外寫進**這個**世代編號專屬的小暫存區（不是 `_analyze_dedup_
+    cache`），只給當下已在等這個世代的 follower 讀（見
+    `_analyze_dedup_follower_failure` 模組頂部說明）。世代編號全域唯一、
+    永不重複使用，往後任何全新請求都不可能巧合命中這個世代——這裡的
+    清掉過期項目純粹是記憶體回收，不是安全機制。"""
+    now = time.time()
+    expired = [g for g, (exp, _) in _analyze_dedup_follower_failure.items() if exp <= now]
+    for g in expired:
+        _analyze_dedup_follower_failure.pop(g, None)
+    _analyze_dedup_follower_failure[generation] = (
+        now + _ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS,
+        exc,
+    )
+
+
 def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     """#51 server-side idempotency 核心：同一 `key` 的重複/並行請求只讓
     「第一個」（leader）真的呼叫 `compute()`（＝觸發 `_do_analyze`/
@@ -3547,9 +3578,10 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     護欄額度，甚至根本不進 Bedrock。
 
     leader 若失敗於**分析本身**（`ValueError`/其餘非 caller-specific
-    的 Exception），例外物件一併存進短期快取＋重新拋給所有等待中的
-    follower（而不是讓 follower 默默各自重跑一次）——否則遇到 leader
-    失敗就變成「沒 dedup 到」，失去防重複送出的意義；exception 交由
+    的 Exception），**不**存進共用的短期結果快取（見下方 codex HIGH
+    複審#5：快取暫時性失敗把短暫故障變 60 秒故障）——只清掉 in-flight
+    entry＋`event.set()` 喚醒當下正在等待的 follower，讓它們醒來後走
+    既有的重入協調 loop（複審#4）各自重新判斷；exception 交由
     `_handle_api_analyze` 既有的 `except` 分支處理，跟 leader 收到的
     路徑完全一致。
 
@@ -3673,6 +3705,72 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
       保留既有 generation fencing（複審#3）、JSON 序列化 key（見
       `_analyze_dedup_key` docstring）、single-flight 重入協調 loop
       （複審#4）、per-caller 限流前置（複審#2）全部不變。
+
+    codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒故障）：先前版本
+    在 leader `compute()` 拋出**任何**非 `TooManyRequests` 例外時，都會
+    把這個例外整個存進共用的 60 秒 TTL 結果快取（`_analyze_dedup_cache_
+    put_locked(key, (False, exc))`）——連接器 timeout、Bedrock 暫時性
+    失敗這類**本質上是暫時的**依賴故障，一旦被寫進去，接下來整整 60
+    秒內任何命中同一把 key 的請求（**不只是**當下已經在等的
+    follower，還包含 60 秒內才陸續進來、跟這次失敗完全無關的全新
+    caller）都會在協調 loop 頂端直接命中這筆快取、立刻重拋同一個過時
+    例外——完全不檢查依賴是否早就恢復。等於把一次可能只有幾百毫秒的
+    暫時性故障，人為放大成保證整整 60 秒的故障，還波及所有剛好共用
+    這把 key、跟原始那次失敗毫無關係的其他 caller。
+
+    修法（暫時性失敗不進 TTL 結果快取，只共用給當下 in-flight follower
+    然後清 entry）：leader 失敗時，`except` 分支不再呼叫
+    `_analyze_dedup_cache_put_locked`——不論例外種類（含先前特別排除在
+    外的 `TooManyRequests`，見下方），一律不寫進共用的 60 秒 TTL 結果
+    快取；改寫進另一個**鍵是這次失敗的世代編號**、獨立於 `key` 的小
+    暫存區 `_analyze_dedup_follower_failure`（`_analyze_dedup_follower_
+    failure_put_locked`），然後清掉這把 `key` 的 in-flight entry，
+    最後 `event.set()`。
+
+    為什麼需要另一個以世代編號為鍵的暫存區，而不是單純「清 entry 後靠
+    重入協調 loop 讓 follower 自己重新判斷」：若只清 entry、什麼都不
+    另外記錄，被 `event.set()` 喚醒的多個 follower 會依序重新搶
+    `_analyze_dedup_lock`——查快取（沒有，快取只存成功結果）、查
+    in-flight（剛被清掉，沒有）——**其中一個**會原子地成為新 leader、
+    立刻對依賴發起一次全新 `compute()`；但因為原本的失敗發生時可能有
+    「好幾個」follower **同時**在等（不是只有 1 個），這個新 leader
+    完成（若依賴仍故障，很快又失敗）後，剩下沒搶到 leadership 的
+    follower 會被新 leader 的 `event.set()` 再喚醒一輪，其中又有一個
+    成為下一個新 leader……如此每一輪只吸收 1 個 follower、依序輪替，
+    在 N 個 follower 同時等待、依賴仍持續故障的情況下會演變成 N 次
+    依序、各自真的觸發依賴（含真連接器/Bedrock）的重複呼叫——這正是
+    single-flight dedup 一開始要防止的「重複花費」，等於在故障期間
+    完全失去 dedup 的保護，比原本 60 秒快取的問題換了一種形式重新出現
+    （且累積延遲、依賴呼叫次數都隨 follower 數量線性增長，不是
+    O(1)）。
+
+    因此改成：leader 失敗當下，把例外寫進以**這次失敗的世代編號**
+    （`my_generation`，全域單調遞增、永不重複使用）為鍵的
+    `_analyze_dedup_follower_failure`；每個 follower 在真正加入等待
+    某個 leader 之前，都會記住自己實際加入的是哪個世代
+    （`joined_leader_generation`，見下方迴圈實作）。被 `event.set()`
+    喚醒、回到迴圈頂端時，**優先**（在查 `_analyze_dedup_cache`／
+    `_analyze_dedup_inflight` 之前）用**非破壞性**的 `dict.get()`
+    查詢 `_analyze_dedup_follower_failure[joined_leader_generation]`
+    ——因為是 `.get()` 不是 `.pop()`，當下所有等著同一個世代的
+    follower 都能各自讀到**同一個**例外物件並直接 `raise`，不需要
+    誰先讀到就清掉、也不需要任何 follower 落回「自己變成新 leader」
+    去重新 `compute()`：真正做到「當下所有 follower 共用這一次失敗」，
+    而不是依序各自重跑。世代編號全域唯一、永不重複使用，因此**任何
+    在這次失敗之後才進來的全新請求**（不論多快到達）永遠不可能有
+    `joined_leader_generation` 剛好等於這個已經作廢的世代——安全性
+    完全不依賴 `_ANALYZE_DEDUP_FOLLOWER_FAILURE_GRACE_SECONDS` 這個
+    寬限期的長短，那只是給記憶體回收用，不是安全邊界（見該常數
+    docstring）。in-flight entry 在同一時刻被清空，讓真正的「下一個」
+    請求（沒有 `joined_leader_generation` 可查、從頭進來）走「查快取
+    （沒有）→查 in-flight（沒有）→自己成為新 leader」這條路徑，是
+    不折不扣的 fresh retry：依賴這時若已恢復就立刻成功，不會被舊失敗
+    卡住。TTL 結果快取（`_analyze_dedup_cache`）自此**只存成功結果**
+    （`_analyze_dedup_cache_put_locked` 唯一還會被呼叫到的地方是下方
+    成功路徑的 `(True, result)`）；`TooManyRequests` 先前的特判排除
+    （避免 429-poisoning 到不相干的 IP）現在已經被「一律寫進 per-
+    generation 暫存區、只給當下那批 follower 讀」這個更嚴格的範圍
+    自然涵蓋，不需要再對例外型別特判。
     """
     def _final_grace_check_before_giving_up() -> bool:
         """codex MEDIUM 複審（follower liveness，最後一關）：真的要放棄
@@ -3713,10 +3811,32 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         return True
 
     deadline = time.time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
+    # codex HIGH 複審#5：只有「這一輪迭代剛從 `event.wait()` 醒來的
+    # follower」才會非 None——記住自己剛才實際加入等待的是哪個世代的
+    # leader，醒來後優先檢查那個世代是不是剛好失敗了（見下方
+    # `_analyze_dedup_follower_failure` 檢查），跟真正全新的請求（從頭
+    # 進來，從沒加入過任何世代）區分開。
+    joined_leader_generation: int | None = None
     while True:
         now = time.time()
         stale_event_to_wake: threading.Event | None = None
         with _analyze_dedup_lock:
+            if joined_leader_generation is not None:
+                pending_failure = _analyze_dedup_follower_failure.get(joined_leader_generation)
+                if pending_failure is not None and pending_failure[0] > now:
+                    # codex HIGH 複審#5：我剛才等的那個世代的 leader
+                    # 失敗了——這個例外只共用給「當下就已經在等它」的
+                    # follower（就是現在的我），不寫進 `_analyze_dedup_
+                    # cache`（那份 60 秒 TTL 快取只服務全新、跟這次失敗
+                    # 完全無關的請求，繼續維持「只存成功結果」）。拿到
+                    # 就直接 raise，不落回下面變成新 leader 重新
+                    # compute()——否則多個同時醒來的 follower 會依序
+                    # 各自輪流變成新 leader、各自真的再打一次依賴（見
+                    # 上方函式 docstring 的完整說明），失去「共用同一次
+                    # 失敗」的意義，也會在依賴仍故障時放大成 N 次重複
+                    # 呼叫。
+                    raise pending_failure[1]
+
             cached = _analyze_dedup_cache.get(key)
             if cached is not None and cached[0] > now:
                 ok, payload = cached[1]
@@ -3754,6 +3874,10 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             else:
                 event = inflight[0]
                 my_generation = None  # follower 不發布，不需要世代編號
+                # codex HIGH 複審#5：記住這次實際加入等待的是哪個世代，
+                # 供醒來後在迴圈頂端查 `_analyze_dedup_follower_failure`
+                # 用（見上方檢查）。
+                joined_leader_generation = inflight[2]
 
         if stale_event_to_wake is not None:
             # 鎖外呼叫：`Event.set()` 本身無鎖、執行緒安全，鎖外呼叫純粹是
@@ -3798,19 +3922,25 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             current = _analyze_dedup_inflight.get(key)
             is_current_leader = current is not None and current[2] == my_generation
             if is_current_leader:
-                if not isinstance(exc, TooManyRequests):
-                    # codex HIGH 複審（dedup×限流交互）：`TooManyRequests`
-                    # 是 caller-specific 的失敗（只跟 leader 自己的 IP/
-                    # 歷史有關），絕不能存進共用快取 replay 給其他不相干
-                    # 的 IP（429-poisoning）——只清 in-flight、正常 raise
-                    # 給 leader 自己，讓等待中的 follower 落回上面的
-                    # fail-safe 分支各自獨立跑一次。
-                    _analyze_dedup_cache_put_locked(key, (False, exc))
+                # codex HIGH 複審#5（快取暫時性失敗把短暫故障變 60 秒
+                # 故障，見上方函式 docstring）：不論例外種類（含先前
+                # 特別排除在外的 `TooManyRequests`——那個排除本來是為了
+                # 防 429-poisoning，現在改寫進世代專屬的 `_analyze_
+                # dedup_follower_failure`、不再是全域共用的 60 秒 TTL
+                # 結果快取，429-poisoning 疑慮已經一併涵蓋，原本的特判
+                # 分支不再需要）都**不**呼叫 `_analyze_dedup_cache_
+                # put_locked`——那份 60 秒 TTL 結果快取只留給下方成功
+                # 路徑寫入。改成寫進 `_analyze_dedup_follower_failure`
+                # （鍵是這次失敗的世代編號，只有當下已經在等**這個
+                # 世代**的 follower 會去查它，見迴圈頂端的檢查），再清掉
+                # in-flight entry——讓下一個全新請求（in-flight 已清空）
+                # 走 fresh retry，不被任何快取卡住。
+                _analyze_dedup_follower_failure_put_locked(my_generation, exc)
                 _analyze_dedup_inflight.pop(key, None)
             # else：generation fencing——自己已被取代（stale），這次發布
-            # 整段 no-op：不寫快取（連失敗結果也不寫，過時的失敗一樣不能
-            # 服務給別人）、不動 in-flight（那已經不是自己的 entry，貿然
-            # pop 會誤刪新 leader 的 entry）。
+            # 整段 no-op：不寫 follower-failure（沒有 follower 在等一個
+            # 早就被取代掉的世代）、不動 in-flight（那已經不是自己的
+            # entry，貿然 pop 會誤刪新 leader 的 entry）。
         event.set()
         raise
     with _analyze_dedup_lock:
