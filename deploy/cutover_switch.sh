@@ -24,6 +24,15 @@
 #   3. 完成後主動驗證：active nginx conf symlink、python 的 CSP_MODE、
 #      `/healthz` 都要確實是目標狀態，任一項對不上也視為失敗、觸發同一套
 #      回滾（而不是命令都跑完就假設成功）。
+#   4. **rollback 本身也不可靠、不可盲目信任**（codex 二次複審，HIGH）：
+#      回滾動作（symlink 還原／CSP_MODE 還原／daemon-reload／restart
+#      trustforge／nginx -t／reload nginx）每一步都個別追蹤成功與否，
+#      不用 `|| true` 吞掉；全部跑完後，回滾自己也要主動驗證（symlink
+#      真的指回切換前目標、service file CSP_MODE 真的是切換前的值、
+#      `/healthz` 真的有回應）。只有「每一步都成功」+「驗證通過」才印
+#      「已回滾...驗證通過」；只要有任何一步失敗或驗證不過，一律印
+#      distinct 的 `ROLLBACK-FAILED` 狀態、附上具體手動復原指令、非零
+#      結束——絕不假裝救回來了。
 #
 # 不做：不動 TLS 憑證（見 deploy/TLS-SETUP.md，憑證跟站台切換相互獨立）、
 # 不動 SSR 是否移除（P3「一週觀察期」後才移除，屬另一個獨立、需另行確認
@@ -99,23 +108,84 @@ ROLLBACK() {
   local ec=\"\${1:-1}\"
   trap - ERR
   echo \"❌ [cutover] 切換中失敗（exit=\${ec}），回滾到切換前狀態…\" >&2
+  local ROLLBACK_OK=1
+
   if [ -n \"\$PREV_LINK\" ]; then
-    ln -sfn \"\$PREV_LINK\" \"\$LIVE_LINK\"
+    if ! ln -sfn \"\$PREV_LINK\" \"\$LIVE_LINK\"; then
+      echo \"❌ [cutover] rollback：symlink 還原失敗（ln -sfn \${PREV_LINK} -> \${LIVE_LINK}）\" >&2
+      ROLLBACK_OK=0
+    fi
   fi
+
   if [ -n \"\$PREV_MODE_LINE\" ]; then
-    sed -i \"s|^Environment=TRUSTFORGE_CSP_MODE=.*|\$PREV_MODE_LINE|\" \"\$SERVICE_FILE\"
+    if ! sed -i \"s|^Environment=TRUSTFORGE_CSP_MODE=.*|\$PREV_MODE_LINE|\" \"\$SERVICE_FILE\"; then
+      echo \"❌ [cutover] rollback：service file CSP_MODE 還原失敗（\${SERVICE_FILE}）\" >&2
+      ROLLBACK_OK=0
+    fi
   fi
-  systemctl daemon-reload || true
-  systemctl restart trustforge || true
+
+  if ! systemctl daemon-reload; then
+    echo '❌ [cutover] rollback：systemctl daemon-reload 失敗' >&2
+    ROLLBACK_OK=0
+  fi
+
+  if ! systemctl restart trustforge; then
+    echo '❌ [cutover] rollback：systemctl restart trustforge 失敗' >&2
+    ROLLBACK_OK=0
+  fi
+
   if nginx -t >/tmp/tf-cutover-rollback-\$\$.stderr 2>&1; then
-    systemctl reload nginx || true
+    if ! systemctl reload nginx; then
+      echo '❌ [cutover] rollback：systemctl reload nginx 失敗' >&2
+      ROLLBACK_OK=0
+    fi
   else
-    echo '⚠️ [cutover] 回滾後 nginx -t 仍失敗，請人工介入：' >&2
+    echo '❌ [cutover] rollback：nginx -t 失敗（沒有 reload，未觸碰目前運作中的 nginx）：' >&2
     cat /tmp/tf-cutover-rollback-\$\$.stderr >&2 2>/dev/null || true
+    ROLLBACK_OK=0
   fi
   rm -f \"/tmp/tf-cutover-rollback-\$\$.stderr\"
-  echo \"❌ [cutover] 已回滾到切換前狀態（不留半殘），exit=\$ec\" >&2
-  exit \"\$ec\"
+
+  # ---- rollback 後主動驗證：每一步「看起來」有跑完不代表真的回到切換前
+  #      狀態，這裡實測 symlink／CSP_MODE／/healthz，跟命令本身的 exit
+  #      code 是兩件事、都要過 ----
+  local RB_ACTIVE_LINK
+  RB_ACTIVE_LINK=\"\$(readlink \"\$LIVE_LINK\" 2>/dev/null || true)\"
+  if [ -n \"\$PREV_LINK\" ] && [ \"\$RB_ACTIVE_LINK\" != \"\$PREV_LINK\" ]; then
+    echo \"❌ [cutover] rollback 驗證失敗：symlink=\$RB_ACTIVE_LINK ≠ 切換前=\$PREV_LINK\" >&2
+    ROLLBACK_OK=0
+  fi
+
+  local RB_MODE_LINE
+  RB_MODE_LINE=\"\$(grep '^Environment=TRUSTFORGE_CSP_MODE=' \"\$SERVICE_FILE\" 2>/dev/null || true)\"
+  if [ -n \"\$PREV_MODE_LINE\" ] && [ \"\$RB_MODE_LINE\" != \"\$PREV_MODE_LINE\" ]; then
+    echo \"❌ [cutover] rollback 驗證失敗：CSP_MODE=\$RB_MODE_LINE ≠ 切換前=\$PREV_MODE_LINE\" >&2
+    ROLLBACK_OK=0
+  fi
+
+  if ! curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+    echo '❌ [cutover] rollback 驗證失敗：/healthz 沒有回應' >&2
+    ROLLBACK_OK=0
+  fi
+
+  if [ \"\$ROLLBACK_OK\" = 1 ]; then
+    echo \"❌ [cutover] 已回滾到切換前狀態且驗證通過（不留半殘），exit=\$ec\" >&2
+    exit \"\$ec\"
+  fi
+
+  # ---- 任一步失敗或驗證不過：絕不假裝救回來了，印 distinct 的
+  #      ROLLBACK-FAILED 狀態 + 具體手動復原指令，用跟一般失敗（exit=\${ec}）
+  #      不同的 exit code（97）方便維運腳本/監控明確分辨「這是回滾本身
+  #      壞掉，不是單純切換失敗」----
+  echo '🆘 [cutover] ROLLBACK-FAILED：自動回滾沒有完全成功，請立即人工介入，不要假設服務已還原！' >&2
+  echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期指向：\${PREV_LINK}）\" >&2
+  echo \"      不對就手動修：ln -sfn \${PREV_LINK} \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
+  echo \"   2) 檢查 python service 的 CSP_MODE：grep TRUSTFORGE_CSP_MODE \${SERVICE_FILE}\" >&2
+  echo \"      （預期：\${PREV_MODE_LINE}）\" >&2
+  echo '      不對就手動改該行後：systemctl daemon-reload && systemctl restart trustforge' >&2
+  echo '   3) 確認服務：curl -fsS http://127.0.0.1:8080/healthz' >&2
+  echo '   4) 確認狀態：systemctl status nginx；systemctl status trustforge' >&2
+  exit 97
 }
 trap 'ROLLBACK \$?' ERR
 

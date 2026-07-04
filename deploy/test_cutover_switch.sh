@@ -13,6 +13,11 @@
 #   4. `systemctl reload nginx` 失敗 → 同上，觸發回滾。
 #   5. 無注入失敗（happy path）→ symlink/CSP_MODE 都真的换到目標 mode、
 #      exit 0。
+#   6-9. rollback 自己的 daemon-reload／restart／nginx -t／reload nginx
+#      各自注入失敗（codex 二次複審，HIGH：rollback 不可用 `|| true`
+#      吞掉失敗、不可無條件宣稱成功）→ 斷言印出 distinct 的
+#      `ROLLBACK-FAILED` 狀態 + 具體手動復原指示、exit=97（非零），
+#      不是誤導性的「已回滾」訊息。
 #
 # 用法：bash deploy/test_cutover_switch.sh
 set -euo pipefail
@@ -111,8 +116,8 @@ exit 0
 NGINXEOF
 chmod +x "$MOCKDIR/nginx"
 
-# ── mock systemctl：daemon-reload 永遠 ok；restart trustforge / reload
-# nginx 各自用呼叫計數器控制只讓第 N 次失敗 ──────────────────────────────
+# ── mock systemctl：daemon-reload / restart trustforge / reload nginx
+# 各自用呼叫計數器控制只讓第 N 次失敗 ────────────────────────────────────
 cat > "$MOCKDIR/systemctl" <<'SYSTEMCTLEOF'
 #!/usr/bin/env bash
 STATE_DIR="${MOCK_STATE_DIR:?MOCK_STATE_DIR not set}"
@@ -121,6 +126,15 @@ sub="$1"; shift || true
 target="${1:-}"
 case "$sub $target" in
   "daemon-reload"*|"daemon-reload")
+    COUNT_FILE="$STATE_DIR/systemctl_daemon_reload_count"
+    N=1
+    [ -f "$COUNT_FILE" ] && N=$(( $(cat "$COUNT_FILE") + 1 ))
+    echo "$N" > "$COUNT_FILE"
+    FAIL_AT="${MOCK_SYSTEMCTL_DAEMON_RELOAD_FAIL_AT:-0}"
+    if [ "$FAIL_AT" != "0" ] && [ "$N" = "$FAIL_AT" ]; then
+      echo "mock systemctl: daemon-reload call #$N configured to fail" >&2
+      exit 1
+    fi
     exit 0 ;;
   "restart trustforge")
     COUNT_FILE="$STATE_DIR/systemctl_restart_count"
@@ -222,6 +236,73 @@ fi
 assert_grep_log "已回滾到切換前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink 退回 legacy.conf（不留半殘）"
 assert_eq "$(active_csp)" "legacy" "回滾後 service file CSP_MODE 退回 legacy（不留半殘）"
+
+echo "== 場景 6：rollback 自己的 daemon-reload 失敗 → ROLLBACK-FAILED，非零結束（不謊報成功）=="
+reset_sandbox
+if run_cutover MOCK_NGINX_LIVE_FAIL_AT=1 MOCK_SYSTEMCTL_DAEMON_RELOAD_FAIL_AT=1; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "97" "rollback 自己的 daemon-reload 失敗時非零結束（distinct exit code=97，不是隨便一個非零值）"
+assert_grep_log "ROLLBACK-FAILED" "有印 distinct 的 ROLLBACK-FAILED 狀態"
+assert_grep_log "rollback：systemctl daemon-reload 失敗" "有印出具體是 daemon-reload 這一步失敗"
+assert_grep_log "手動修" "有印手動復原指示（symlink）"
+assert_grep_log "systemctl daemon-reload && systemctl restart trustforge" "有印手動復原指示（daemon-reload/restart）"
+assert_grep_log "systemctl status nginx" "有印手動復原指示（狀態確認）"
+if ! grep -qF "已回滾到切換前狀態且驗證通過" "$STATE/last_run.log"; then
+  pass "沒有誤報『已回滾...驗證通過』（daemon-reload 失敗時不能假裝救回來了）"
+else
+  fail "不該印出『已回滾...驗證通過』（daemon-reload 已失敗卻謊報成功）"
+fi
+
+echo "== 場景 7：rollback 自己的 restart trustforge 失敗 → ROLLBACK-FAILED，非零結束 =="
+reset_sandbox
+if run_cutover MOCK_NGINX_LIVE_FAIL_AT=1 MOCK_SYSTEMCTL_RESTART_FAIL_AT=1; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "97" "rollback 自己的 restart trustforge 失敗時非零結束（distinct exit code=97，不是隨便一個非零值）"
+assert_grep_log "ROLLBACK-FAILED" "有印 distinct 的 ROLLBACK-FAILED 狀態"
+assert_grep_log "rollback：systemctl restart trustforge 失敗" "有印出具體是 restart trustforge 這一步失敗"
+if ! grep -qF "已回滾到切換前狀態且驗證通過" "$STATE/last_run.log"; then
+  pass "沒有誤報『已回滾...驗證通過』（restart 失敗時不能假裝救回來了）"
+else
+  fail "不該印出『已回滾...驗證通過』（restart 已失敗卻謊報成功）"
+fi
+
+echo "== 場景 8：rollback 自己的 nginx -t 失敗 → ROLLBACK-FAILED，非零結束（不 reload 一個沒過 -t 的設定）=="
+reset_sandbox
+if run_cutover MOCK_SYSTEMCTL_RESTART_FAIL_AT=1 MOCK_NGINX_LIVE_FAIL_AT=2; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "97" "rollback 自己的 nginx -t 失敗時非零結束（distinct exit code=97，不是隨便一個非零值）"
+assert_grep_log "ROLLBACK-FAILED" "有印 distinct 的 ROLLBACK-FAILED 狀態"
+assert_grep_log "rollback：nginx -t 失敗" "有印出具體是 nginx -t 這一步失敗"
+if ! grep -qF "已回滾到切換前狀態且驗證通過" "$STATE/last_run.log"; then
+  pass "沒有誤報『已回滾...驗證通過』（rollback 自己的 nginx -t 沒過時不能假裝救回來了）"
+else
+  fail "不該印出『已回滾...驗證通過』（nginx -t 已失敗卻謊報成功）"
+fi
+
+echo "== 場景 9：rollback 自己的 reload nginx 失敗 → ROLLBACK-FAILED，非零結束 =="
+reset_sandbox
+if run_cutover MOCK_SYSTEMCTL_RESTART_FAIL_AT=1 MOCK_SYSTEMCTL_RELOAD_FAIL_AT=1; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "97" "rollback 自己的 reload nginx 失敗時非零結束（distinct exit code=97，不是隨便一個非零值）"
+assert_grep_log "ROLLBACK-FAILED" "有印 distinct 的 ROLLBACK-FAILED 狀態"
+assert_grep_log "rollback：systemctl reload nginx 失敗" "有印出具體是 reload nginx 這一步失敗"
+if ! grep -qF "已回滾到切換前狀態且驗證通過" "$STATE/last_run.log"; then
+  pass "沒有誤報『已回滾...驗證通過』（reload nginx 失敗時不能假裝救回來了）"
+else
+  fail "不該印出『已回滾...驗證通過』（reload nginx 已失敗卻謊報成功）"
+fi
 
 echo "== 場景 5：無注入失敗（happy path）→ 真的切到 react、exit 0 =="
 reset_sandbox
