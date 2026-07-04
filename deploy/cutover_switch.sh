@@ -7,8 +7,14 @@
 # nginx.sh 已跑過（nginx 層 + 兩份 conf + 前端 dist 都已在實例上）。
 #
 # 用法：
-#   deploy/cutover_switch.sh react    # cutover：nginx 改服務 React 靜態檔
-#   deploy/cutover_switch.sh legacy   # 回滾：換回 SSR 全轉發（緊急用，秒切）
+#   deploy/cutover_switch.sh react       # cutover：nginx 改服務 React 靜態檔
+#                                        # （TLS 版，deploy/nginx.conf，需要
+#                                        # 已有 domain + certbot 簽發的憑證）
+#   deploy/cutover_switch.sh react-http  # cutover：nginx 改服務 React 靜態檔
+#                                        # （HTTP-only 版，deploy/nginx-
+#                                        # react-http.conf，bare-IP 現況、
+#                                        # 無 domain 時用——見 deploy/README.md）
+#   deploy/cutover_switch.sh legacy      # 回滾：換回 SSR 全轉發（緊急用，秒切）
 #
 # 做的事（都在同一台既有 EC2 上，透過 SSM，不重建/不動 AWS 資源）——
 # **guarded transaction**（codex 複審，robustness 補強）：
@@ -63,25 +69,43 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-}"
-if [ "$MODE" != "react" ] && [ "$MODE" != "legacy" ]; then
-  echo "用法：$0 react|legacy" >&2
+if [ "$MODE" != "react" ] && [ "$MODE" != "react-http" ] && [ "$MODE" != "legacy" ]; then
+  echo "用法：$0 react|react-http|legacy" >&2
   exit 2
 fi
 
 REGION="${REGION:-ap-southeast-2}"
 
-if [ "$MODE" = "react" ]; then
+# react-http 的 python 端 CSP_MODE 跟 react（TLS 版）共用同一個值
+# `react`——web.py::_send() 只認 CSP_MODE == "react"（見模組頂部說明），
+# react-http 只是 nginx 層少了 TLS/redirect/HSTS，前端拓樸/CSP 指令集本身
+# 跟 react 完全一致，故不新增第三個 python 端 CSP_MODE 值，避免 web.py 要
+# 多分支。nginx candidate conf 檔名則是各自獨立的
+# `${MODE}.conf`（react.conf / react-http.conf / legacy.conf）。
+CSP_MODE_ENV="$MODE"
+if [ "$MODE" = "react-http" ]; then
+  CSP_MODE_ENV="react"
+fi
+
+if [ "$MODE" = "react" ] || [ "$MODE" = "react-http" ]; then
   # 這幾行狀態訊息刻意都印到 stderr（不是 stdout）：`TF_CUTOVER_DRY_RUN=1`
   # 時 stdout 只能是純粹的遠端指令內容（給 test_cutover_switch.sh 用
   # `$(...)` 擷取去本機沙箱執行），混進來會讓擷取到的內容不是合法 shell
   # script。
-  echo "⚠️  即將切換到 React 前端拓樸（cutover）。" >&2
+  echo "⚠️  即將切換到 React 前端拓樸（cutover，mode=${MODE}）。" >&2
   echo "    這一步需要 CEO+CISO+CPO 三審 + 老闆簽核才能執行。" >&2
-  echo "    請確認：deploy/TLS-SETUP.md 的憑證已就緒、" >&2
-  echo "    deploy/nginx.conf 的 ssl_certificate 路徑/domain 跟實際簽發一致。" >&2
+  if [ "$MODE" = "react" ]; then
+    echo "    請確認：deploy/TLS-SETUP.md 的憑證已就緒、" >&2
+    echo "    deploy/nginx.conf 的 ssl_certificate 路徑/domain 跟實際簽發一致。" >&2
+  else
+    echo "    react-http 是 bare-IP（無 domain）現況用的 HTTP-only 版本，" >&2
+    echo "    請確認：deploy/nginx-react-http.conf 已部署到候選位置" >&2
+    echo "    （見 deploy/deploy_frontend_nginx.sh），且現況確實還沒有" >&2
+    echo "    domain/TLS——有 domain 後應改用 react（TLS 版）。" >&2
+  fi
   if [ "${TRUSTFORGE_CUTOVER_CONFIRMED:-}" != "yes" ]; then
     echo "❌ 未設 TRUSTFORGE_CUTOVER_CONFIRMED=yes，視為未取得簽核，中止。" >&2
-    echo "   三審+簽核完成後，執行：TRUSTFORGE_CUTOVER_CONFIRMED=yes $0 react" >&2
+    echo "   三審+簽核完成後，執行：TRUSTFORGE_CUTOVER_CONFIRMED=yes $0 ${MODE}" >&2
     exit 1
   fi
 fi
@@ -260,7 +284,7 @@ trap 'ROLLBACK \$?' ERR
 #      都會被上面的 ERR trap 接住，自動回滾 ----
 ln -sfn \"\$CANDIDATE\" \"\$LIVE_LINK\"
 nginx -t
-sed -i \"s|^Environment=TRUSTFORGE_CSP_MODE=.*|Environment=TRUSTFORGE_CSP_MODE=${MODE}|\" \"\$SERVICE_FILE\"
+sed -i \"s|^Environment=TRUSTFORGE_CSP_MODE=.*|Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}|\" \"\$SERVICE_FILE\"
 systemctl daemon-reload
 systemctl restart trustforge
 systemctl reload nginx
@@ -275,10 +299,10 @@ fi
 [ \"\$ACTIVE_LINK\" = \"\$CANDIDATE\" ]
 
 ACTIVE_MODE_LINE=\"\$(grep '^Environment=TRUSTFORGE_CSP_MODE=' \"\$SERVICE_FILE\" 2>/dev/null || true)\"
-if [ \"\$ACTIVE_MODE_LINE\" != \"Environment=TRUSTFORGE_CSP_MODE=${MODE}\" ]; then
-  echo \"❌ [cutover] 完成後驗證失敗：CSP_MODE=\$ACTIVE_MODE_LINE ≠ 預期 Environment=TRUSTFORGE_CSP_MODE=${MODE}\" >&2
+if [ \"\$ACTIVE_MODE_LINE\" != \"Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}\" ]; then
+  echo \"❌ [cutover] 完成後驗證失敗：CSP_MODE=\$ACTIVE_MODE_LINE ≠ 預期 Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}\" >&2
 fi
-[ \"\$ACTIVE_MODE_LINE\" = \"Environment=TRUSTFORGE_CSP_MODE=${MODE}\" ]
+[ \"\$ACTIVE_MODE_LINE\" = \"Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}\" ]
 
 if ! curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
   echo '❌ [cutover] 完成後驗證失敗：python /healthz 未回應' >&2

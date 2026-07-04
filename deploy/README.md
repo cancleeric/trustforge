@@ -224,8 +224,15 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 | 階段 | 腳本 | 做什麼 | 預設行為 |
 |------|------|--------|----------|
 | 0（既有） | `deploy_ec2.sh` | 建 EC2、裝 python，port 80 直接對外 | 不變 |
-| 1 | `deploy_frontend_nginx.sh` | 疊加 nginx 層 + 上傳 React dist；python 收斂只聽 `127.0.0.1:8080` | 預設啟用 `nginx-legacy.conf`（全部原樣轉發給 python，功能與階段 0 逐字等價） |
-| 2 | `cutover_switch.sh react\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止 |
+| 1 | `deploy_frontend_nginx.sh` | 疊加 nginx 層 + 上傳 React dist + **三份** nginx conf 候選（legacy/react/react-http）；python 收斂只聽 `127.0.0.1:8080` | 預設啟用 `nginx-legacy.conf`（全部原樣轉發給 python，功能與階段 0 逐字等價） |
+| 2 | `cutover_switch.sh react\|react-http\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react`/`react-http` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止 |
+
+**`react` vs `react-http` 怎麼選**：兩者是同一套 React 前端拓樸，差別只在
+nginx 層有沒有 TLS——**現況 prod 是 bare IP（無 domain），Let's Encrypt/
+certbot 不會對 bare IP 簽發憑證**，此時只能用 `react-http`；等真的有 domain
++ certbot 簽發的憑證就緒後，才切換用 `react`（TLS 版，含 80→443 redirect +
+HSTS）。python 端 `TRUSTFORGE_CSP_MODE` 兩者都設成 `react`（CSP 指令集本身
+一致，`web.py` 不需要為 `react-http` 多開一個分支）。
 
 ### 涉及的 config-gated 環境變數（`src/trustforge/web.py`）
 
@@ -241,16 +248,33 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
   `Referrer-Policy: strict-origin-when-cross-origin`。cutover 前後兩者不
   混用（nginx 端也對應切換）。
 
-### nginx conf 兩個變體
+### nginx conf 三個變體
 
 - `deploy/nginx-legacy.conf`：cutover 前的預設/回滾安全值。**刻意只寫
   HTTP（80）**，不預先手刻 443/TLS——避免部署當下引用尚不存在的憑證檔案
   導致 `nginx -t`/reload 失敗。TLS 由 `certbot --nginx` 事後自動改寫本檔
   （見 `deploy/TLS-SETUP.md`）。全部（`/`、`/api/*`、`/healthz` 等）原樣
   轉發給 `127.0.0.1:8080`。
-- `deploy/nginx.conf`：cutover 後的目標拓樸。`/` serve React 靜態檔
-  （`frontend/dist`）、`/api/` 轉發給 python，80→443 redirect + HSTS，
-  React 用 CSP 只加在 `location /`（不外溢到 `/api/` 的 JSON 回應）。
+- `deploy/nginx.conf`：cutover 後的目標拓樸（**需要 domain**）。`/` serve
+  React 靜態檔（`frontend/dist`）、`/api/` 轉發給 python，80→443 redirect +
+  HSTS，React 用 CSP 只加在 `location /`（不外溢到 `/api/` 的 JSON 回應）。
+- `deploy/nginx-react-http.conf`：cutover 後的目標拓樸，**HTTP-only 版
+  （bare IP、無 domain 現況用）**。跟 `nginx.conf` 同一套 React 拓樸/CSP
+  指令集，差別只在**只有 port 80、無 TLS、無 301 redirect、無 HSTS**（HSTS
+  只在 HTTPS 下有意義，HTTP-only 站台加了不會生效，故不加）。現況 prod 是
+  bare IP，Let's Encrypt/certbot 不會對 bare IP 簽發憑證，此時用這份；等
+  真的有 domain + 憑證就緒後，再換用 `nginx.conf`（TLS 版）。
+
+  **什麼時候用哪份**（cutover 決策，供 CEO/CISO/CPO 三審參考）：
+  - 現況 bare IP、無 domain → `deploy/cutover_switch.sh react-http`
+  - 已有 domain + certbot 簽發憑證 → `deploy/cutover_switch.sh react`
+  - 緊急回滾／SSR 一週觀察期 → `deploy/cutover_switch.sh legacy`
+
+  跟 `nginx.conf` 一樣，`/` 下 CSP/X-Frame-Options 等安全 header 的實際
+  生效點是 `location = /index.html`（精確比對），不是 `location /`——
+  `try_files ... /index.html` fallback 是內部重導向，會拿 `/index.html`
+  重新跑一次 location 比對，兩邊 add_header 務必同步，見
+  `deploy/nginx-react-http.conf` 內註解與 `deploy/test_nginx_react_http_conf.sh`。
 
 ### TLS
 
@@ -261,7 +285,10 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 
 `cutover_switch.sh`（不管是遠端腳本本身，還是本機呼叫它的 production SSM
 wrapper）用以下 distinct exit code，讓自動化/監控能分清楚失敗種類，不要
-一律當成「隨便一種失敗」處理：
+一律當成「隨便一種失敗」處理（`react-http` mode 沿用同一套 guarded
+transaction/flock/rollback 控制流程與 exit code 慣例，只是 candidate conf
+換成 `react-http.conf`、python 端 `TRUSTFORGE_CSP_MODE` 沿用 `react`，見
+`deploy/test_cutover_switch.sh` 場景 14-16）：
 
 | exit code | 含義 | 是否已動過 mutation | 建議動作 |
 |-----------|------|----------------------|----------|
@@ -282,8 +309,8 @@ send-command`/`get-command-invocation` 那段）會讀 `get-command-invocation`
 bash -n deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh
 shellcheck deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh
 
-# nginx conf 語法（本機 brew nginx，legacy 不需憑證；react 需暫時自簽憑證
-# 才能測 443 block，見 commit message／PR 描述的驗證步驟）
+# nginx conf 語法（本機 brew nginx，legacy/react-http 不需憑證；react 需
+# 暫時自簽憑證才能測 443 block，見 commit message／PR 描述的驗證步驟）
 nginx -t -c <harness 檔案 include 對應 conf>
 
 # rate-limit-trust + CSP 邏輯的單元測試（mock，不連真 AWS）
@@ -294,13 +321,23 @@ python3 -m pytest tests/test_security.py tests/test_lambda_handler.py -q
 bash deploy/test_deploy_frontend_nginx.sh
 
 # cutover_switch.sh 的 guarded-transaction 控制流程測試（TF_CUTOVER_DRY_RUN
-# 擷取遠端指令內容、本機沙箱 + mock nginx/systemctl/curl/flock 實際執行）
+# 擷取遠端指令內容、本機沙箱 + mock nginx/systemctl/curl/flock 實際執行；
+# 涵蓋 react 與 react-http 兩種 mode）
 bash deploy/test_cutover_switch.sh
 
 # cutover_switch.sh production SSM wrapper 的整合測試（mock aws CLI 本身，
 # 不用 TF_CUTOVER_DRY_RUN，驗證 ResponseCode 97/98/1/0 正確傳遞成 wrapper
 # 自己的 top-level exit code）
 bash deploy/test_cutover_ssm_wrapper.sh
+
+# deploy/nginx.conf（React + TLS）路由/安全 header 整合測試（真起本機
+# nginx + stub dist + 本機 python，自簽憑證測 443）
+bash deploy/test_nginx_react_conf.sh
+
+# deploy/nginx-react-http.conf（React + HTTP-only，bare-IP 現況）路由/
+# 安全 header 整合測試（真起本機 nginx + stub dist + 本機 python，純
+# HTTP，額外斷言不帶 HSTS）
+bash deploy/test_nginx_react_http_conf.sh
 ```
 
 ### 回滾
