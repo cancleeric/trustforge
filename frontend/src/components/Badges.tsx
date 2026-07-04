@@ -11,7 +11,11 @@ function pillClasses(color: string) {
 
 export function DirectionBadge({ direction }: { direction: string }) {
   const color =
-    direction === '偏多' ? '#3fb950' : direction === '偏空' ? '#f85149' : '#8b949e'
+    direction === '偏多'
+      ? 'var(--color-tf-good)'
+      : direction === '偏空'
+        ? 'var(--color-tf-bad)'
+        : 'var(--color-tf-muted)'
   return (
     <span
       className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
@@ -29,7 +33,12 @@ const DECISION_STATE_LABEL: Record<DecisionState, string> = {
 }
 
 export function DecisionStateBadge({ state }: { state: DecisionState }) {
-  const color = state === 'normal' ? '#3fb950' : state === 'low_confidence' ? '#d9832a' : '#f85149'
+  const color =
+    state === 'normal'
+      ? 'var(--color-tf-good)'
+      : state === 'low_confidence'
+        ? 'var(--color-tf-warn)'
+        : 'var(--color-tf-bad)'
   return (
     <span
       className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
@@ -56,7 +65,7 @@ export function TierBadge({ kind }: { kind: string }) {
 export function LowTrustBadge() {
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full border border-tf-bad bg-[color-mix(in_srgb,#f85149_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-bad"
+      className="inline-flex items-center gap-1 rounded-full border border-tf-bad bg-[color-mix(in_srgb,var(--color-tf-bad)_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-bad"
       title="信任分低於 0.3"
     >
       &#9888; 低信任/操縱
@@ -68,7 +77,7 @@ export function FlagBadge({ flags }: { flags: string[] }) {
   if (!flags.length) return null
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full border border-tf-bad bg-[color-mix(in_srgb,#f85149_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-bad"
+      className="inline-flex items-center gap-1 rounded-full border border-tf-bad bg-[color-mix(in_srgb,var(--color-tf-bad)_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-bad"
       title={`操縱關鍵詞：${flags.join('、')}`}
     >
       &#128681; {flags.join('、')}
@@ -80,7 +89,7 @@ export function InfoFlagBadge({ infoFlags }: { infoFlags: string[] }) {
   if (!infoFlags.length) return null
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full border border-tf-accent bg-[color-mix(in_srgb,#1f6feb_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-link"
+      className="inline-flex items-center gap-1 rounded-full border border-tf-accent bg-[color-mix(in_srgb,var(--color-tf-accent)_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-link"
       title={infoFlags.join('、')}
     >
       &#8505; 相似簇
@@ -91,7 +100,7 @@ export function InfoFlagBadge({ infoFlags }: { infoFlags: string[] }) {
 export function SingleSourceBadge() {
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full border border-tf-warn bg-[color-mix(in_srgb,#d9832a_14%,transparent)] px-1.5 py-0.5 text-[0.65rem] font-semibold text-tf-warn"
+      className="inline-flex items-center gap-1 rounded-full border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_14%,transparent)] px-1.5 py-0.5 text-[0.65rem] font-semibold text-tf-warn"
       title="此維度目前僅有單一來源支撐，尚未有跨源互證"
     >
       單源
@@ -109,7 +118,12 @@ const FRESHNESS_STATUS_LABEL: Record<'fresh' | 'stale' | 'missing', string> = {
  * （狀態徽章一律用膠囊 `rounded-full`，跟 `TierBadge` 這類分類標籤
  * `rounded` 區分，見 `docs/UXUI-ROUND-01.md` #2 圓角 token 統一建議）。 */
 export function FreshnessStatusBadge({ status }: { status: 'fresh' | 'stale' | 'missing' }) {
-  const color = status === 'fresh' ? '#3fb950' : status === 'stale' ? '#d9832a' : '#8b949e'
+  const color =
+    status === 'fresh'
+      ? 'var(--color-tf-good)'
+      : status === 'stale'
+        ? 'var(--color-tf-warn)'
+        : 'var(--color-tf-muted)'
   return (
     <span
       className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
@@ -126,7 +140,7 @@ export function FreshnessStatusBadge({ status }: { status: 'fresh' | 'stale' | '
 export function DegradedBadge() {
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-full border border-tf-warn bg-[color-mix(in_srgb,#d9832a_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-warn"
+      className="inline-flex items-center gap-1 rounded-full border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_14%,transparent)] px-2 py-0.5 text-xs font-semibold text-tf-warn"
       title="Primary cache backend 目前不可用，正使用本地 fallback"
     >
       &#9888; 降級中（fallback）

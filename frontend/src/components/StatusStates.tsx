@@ -10,7 +10,10 @@ export function ErrorState({ code, message }: { code: string; message: string })
   return (
     <div
       className="rounded-lg border p-4 text-sm"
-      style={{ borderColor: '#f85149', backgroundColor: 'color-mix(in srgb, #f85149 8%, transparent)' }}
+      style={{
+        borderColor: 'var(--color-tf-bad)',
+        backgroundColor: 'color-mix(in srgb, var(--color-tf-bad) 8%, transparent)',
+      }}
       role="alert"
     >
       <p className="font-semibold text-tf-bad">請求失敗（{code}）</p>

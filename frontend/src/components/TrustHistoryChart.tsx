@@ -28,15 +28,15 @@ export default function TrustHistoryChart({ history }: Props) {
     <div className="h-72 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={history} margin={{ top: 8, right: 16, left: -16, bottom: 8 }}>
-          <CartesianGrid stroke="#30363d" strokeDasharray="3 3" />
-          <XAxis dataKey="date" tick={{ fill: '#8b949e', fontSize: 11 }} />
-          <YAxis domain={[0, 1]} tick={{ fill: '#8b949e', fontSize: 11 }} />
+          <CartesianGrid stroke="var(--color-tf-border)" strokeDasharray="3 3" />
+          <XAxis dataKey="date" tick={{ fill: 'var(--color-tf-muted)', fontSize: 11 }} />
+          <YAxis domain={[0, 1]} tick={{ fill: 'var(--color-tf-muted)', fontSize: 11 }} />
           <Tooltip content={HistoryTooltip} />
           <Line
             type="monotone"
             dataKey="trust_score"
             name="信任分"
-            stroke="#1f6feb"
+            stroke="var(--color-tf-accent)"
             strokeWidth={2}
             dot={{ r: 3 }}
             isAnimationActive={false}
@@ -45,7 +45,7 @@ export default function TrustHistoryChart({ history }: Props) {
             type="monotone"
             dataKey="calibrated_confidence"
             name="校準信心"
-            stroke="#3fb950"
+            stroke="var(--color-tf-good)"
             strokeWidth={1.5}
             strokeDasharray="4 3"
             dot={{ r: 2 }}

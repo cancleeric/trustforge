@@ -34,7 +34,7 @@ export default function CrossSourceSignalPanel({ signal }: { signal: CrossSource
         <p className="text-xs text-tf-muted">目前未偵測到同議題、跨源、語意矛盾的顯著訊號。</p>
       )}
       {signal !== null && signal.type === 'consensus' && (
-        <div className="rounded-lg border border-tf-good p-3" style={{ backgroundColor: 'color-mix(in srgb, #3fb950 8%, transparent)' }}>
+        <div className="rounded-lg border border-tf-good p-3" style={{ backgroundColor: 'color-mix(in srgb, var(--color-tf-good) 8%, transparent)' }}>
           <span className="mb-1 inline-block rounded-full border border-tf-good px-2 py-0.5 text-xs font-semibold text-tf-good">
             共識
           </span>
@@ -45,8 +45,8 @@ export default function CrossSourceSignalPanel({ signal }: { signal: CrossSource
         <>
           <p className="mb-2 text-sm text-tf-text2">{signal.summary}</p>
           <div className="flex flex-col gap-3 sm:flex-row">
-            <SideColumn label="&#9650; BULLISH" color="#3fb950" items={groupByStance(signal).bullish} />
-            <SideColumn label="&#9660; BEARISH" color="#f85149" items={groupByStance(signal).bearish} />
+            <SideColumn label="&#9650; BULLISH" color="var(--color-tf-good)" items={groupByStance(signal).bullish} />
+            <SideColumn label="&#9660; BEARISH" color="var(--color-tf-bad)" items={groupByStance(signal).bearish} />
           </div>
         </>
       )}

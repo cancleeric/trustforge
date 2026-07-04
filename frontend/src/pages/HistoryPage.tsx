@@ -99,7 +99,7 @@ export default function HistoryPage() {
         </div>
       )}
       {!loading && !error && data && data.history.length > 0 && data.history.length < 3 && (
-        <div className="rounded-lg border border-tf-warn bg-[color-mix(in_srgb,#d9832a_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
+        <div className="rounded-lg border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
           目前僅累積 {data.history.length} 筆資料點，趨勢線尚不具代表性，持續累積中。
         </div>
       )}

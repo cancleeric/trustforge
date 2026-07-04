@@ -43,7 +43,11 @@ export default function HomePage() {
     <main className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 sm:px-6">
       <section
         className="rounded-xl border p-6 sm:p-10"
-        style={{ borderColor: '#1f6feb', background: 'linear-gradient(135deg, rgba(31,111,235,.10), rgba(31,111,235,.02))' }}
+        style={{
+          borderColor: 'var(--color-tf-accent)',
+          background:
+            'linear-gradient(135deg, color-mix(in srgb, var(--color-tf-accent) 10%, transparent), color-mix(in srgb, var(--color-tf-accent) 2%, transparent))',
+        }}
       >
         <h1 className="text-2xl font-bold leading-snug text-tf-text sm:text-3xl">
           多源市場情報的信任提煉——不只給分數，給你為什麼

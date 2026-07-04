@@ -7,13 +7,15 @@ interface Props {
   decisionState: DecisionState
 }
 
-/** 對應後端 `Report.confidence_label()`：三態優先於純數字分桶。 */
+/** 對應後端 `Report.confidence_label()`：三態優先於純數字分桶。
+ *  回傳 CSS var 引用（而非寫死 hex），確保 light/dark 切主題時 gauge
+ *  顏色跟著 `--color-tf-*` token 一起變，不會卡在 dark 色。 */
 function bucketColor(decisionState: DecisionState, calibrated: number): string {
-  if (decisionState === 'abstain') return '#f85149'
-  if (decisionState === 'low_confidence') return '#d9832a'
-  if (calibrated >= 0.7) return '#3fb950'
-  if (calibrated >= 0.45) return '#d9832a'
-  return '#f85149'
+  if (decisionState === 'abstain') return 'var(--color-tf-bad)'
+  if (decisionState === 'low_confidence') return 'var(--color-tf-warn)'
+  if (calibrated >= 0.7) return 'var(--color-tf-good)'
+  if (calibrated >= 0.45) return 'var(--color-tf-warn)'
+  return 'var(--color-tf-bad)'
 }
 
 const RADIUS = 60
@@ -37,7 +39,7 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
         <path
           d="M 10 70 A 60 60 0 0 1 130 70"
           fill="none"
-          stroke="#30363d"
+          stroke="var(--color-tf-border)"
           strokeWidth={STROKE}
           strokeLinecap="round"
         />
