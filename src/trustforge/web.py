@@ -2862,10 +2862,18 @@ def _is_live_request(qs: dict) -> bool:
     )
 
 
-def _parse_live(qs: dict, client_ip: str) -> bool:
-    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。"""
+def _parse_live(qs: dict, client_ip: str, *, enforce_rate_limit: bool = True) -> bool:
+    """從 qs 解析 live 模式開關，並在 live+有 IP 時執行限流。
+
+    `enforce_rate_limit=False`（#51 codex HIGH 複審：dedup×限流交互）：
+    呼叫端（`_dedup_analyze_call` 的 leader）已經在 dedup 查找**之前**
+    對這個 caller 自己的 IP 呼叫過 `_analyze_enforce_caller_rate_limit()`
+    ，這裡就不能再重複呼叫 `_check_live_rate_limit`——否則同一個邏輯請求
+    的 IP 會被計入限流 bucket 兩次，等於平白把該 IP 的額度砍半。
+    `/analyze`、`/analyze.json` 兩條非 dedup 路由不受影響，維持預設
+    `True`、原樣在這裡做限流。"""
     live = _is_live_request(qs)
-    if live and client_ip:
+    if live and client_ip and enforce_rate_limit:
         _check_live_rate_limit(client_ip)
     return live
 
@@ -2896,7 +2904,7 @@ def _is_real_request(qs: dict, live: bool) -> bool:
     return not _is_sample_request(qs, live)
 
 
-def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
+def _parse_real(qs: dict, client_ip: str, live: bool, *, enforce_rate_limit: bool = True) -> bool:
     """從 qs 解析「真資料·$0」是否生效（預設檔位，見 `_is_real_request`）：
     走真連接器、免 Bedrock。
 
@@ -2911,9 +2919,15 @@ def _parse_real(qs: dict, client_ip: str, live: bool) -> bool:
     就會觸發這條路徑，若沿用 live 的緊門檻，反向代理後所有使用者共用一個
     來源 IP，5 次/60s 就會整批 429。real-off 仍需要限流（防真連接器被
     洪水級高頻打爆），只是門檻改成 DoS 洪水級而非 Bedrock 成本級。
+
+    `enforce_rate_limit=False`（#51 codex HIGH 複審：dedup×限流交互，
+    見 `_parse_live` 同名參數）：`_dedup_analyze_call` 的 leader 已經在
+    dedup 查找之前對這個 caller 自己的 IP 做過
+    `_analyze_enforce_caller_rate_limit()`，這裡跳過避免重複計入同一個
+    IP 的限流 bucket。
     """
     real = _is_real_request(qs, live)
-    if real and client_ip:
+    if real and client_ip and enforce_rate_limit:
         _check_real_rate_limit(client_ip)
     return real
 
@@ -3018,15 +3032,38 @@ def _active_mode(qs: dict) -> str:
     return "real"
 
 
-def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
+def _do_analyze(
+    qs: dict,
+    client_ip: str = "",
+    *,
+    enforce_rate_limit: bool = True,
+    online_stance_force_offline: bool | None = None,
+) -> tuple:
     """單幣分析入口，永遠回傳 (report, evidence, log) 三元組。
 
     只處理 multi_source / hypothesis；comparison 請改用 _do_comparison。
 
     Raises:
         ValueError:        幣種非法 / q 過長 / pipeline 無資料
-        TooManyRequests:   同 IP live 請求超速
+        TooManyRequests:   同 IP live 請求超速（`enforce_rate_limit=True` 時）
         其餘 Exception:    由呼叫方捕捉後回 502
+
+    `enforce_rate_limit=False`（#51 codex HIGH 複審：dedup×限流交互）：
+    只有 `/api/analyze` 的 dedup leader（`_dedup_analyze_call`）會傳
+    `False`——因為 `_handle_api_analyze` 已經在 dedup 查找之前，對這個
+    caller 自己的 IP 做過一次限流（`_analyze_enforce_caller_rate_limit`），
+    這裡不能再重複計入同一個 IP 的 bucket。`/analyze`、`/analyze.json`
+    （非 dedup 的畫面/匯出路由）維持預設 `True`，行為不變。
+
+    `online_stance_force_offline`（#51 codex HIGH 複審 Round 11：key 漏
+    caller-specific online-stance 降級）：`None`（預設，`/analyze`、
+    `/analyze.json` 等非 dedup 路由沿用）維持原行為，這裡自己呼叫
+    `_online_stance_force_offline(client_ip)` 決定要不要 degrade。若
+    傳入具體 `bool`——只有 `/api/analyze` 的 dedup leader 會傳，值是
+    `_handle_api_analyze` 在 dedup 查找之前，已經對這個 caller 自己的
+    `client_ip` 算好（`_analyze_online_stance_force_offline_for_caller`）
+    並納入 dedup key 的同一個判斷結果——直接沿用這個值，不再對同一個
+    IP 重複呼叫、重複消耗 online-stance 限流 bucket。
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     qtype = QuestionType(qs.get("type", ["multi_source"])[0])
@@ -3038,8 +3075,8 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
-    live = _parse_live(qs, client_ip)
-    real = _parse_real(qs, client_ip, live)
+    live = _parse_live(qs, client_ip, enforce_rate_limit=enforce_rate_limit)
+    real = _parse_real(qs, client_ip, live, enforce_rate_limit=enforce_rate_limit)
 
     if coin not in COIN_POOL:
         # 同一批商業級修復：不印 Python tuple repr（如 `('BTC', 'ETH', ...)`）
@@ -3056,7 +3093,12 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
         # 這條（現行測試全部涵蓋的）路徑對 `run()` 的呼叫方式逐字不變，不會
         # 因為既有測試 monkeypatch 的窄簽名 fake_run（無此參數）而炸掉。
         _extra: dict = {}
-        if _online_stance_force_offline(client_ip):
+        _force_offline = (
+            _online_stance_force_offline(client_ip)
+            if online_stance_force_offline is None
+            else online_stance_force_offline
+        )
+        if _force_offline:
             _extra["force_stance_offline"] = True
         report, evidence, log = run(
             coin, query, qtype, data_mode="live", llm_mode="off", **_extra,
@@ -3071,13 +3113,26 @@ def _do_analyze(qs: dict, client_ip: str = "") -> tuple:
     return report, evidence, log
 
 
-def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
+def _do_comparison(
+    qs: dict,
+    client_ip: str = "",
+    *,
+    enforce_rate_limit: bool = True,
+    online_stance_force_offline: bool | None = None,
+) -> tuple:
     """雙幣比較分析入口，回傳 (report_a, evidence_a, report_b, evidence_b, log) 五元組。
 
     Raises:
         ValueError:        無法解析兩個幣種 / q 過長 / pipeline 無資料
-        TooManyRequests:   同 IP live 請求超速
+        TooManyRequests:   同 IP live 請求超速（`enforce_rate_limit=True` 時）
         其餘 Exception:    由呼叫方捕捉後回 502
+
+    `enforce_rate_limit=False`：見 `_do_analyze` 同名參數 docstring，
+    語意完全一致（#51 codex HIGH 複審：dedup×限流交互）。
+
+    `online_stance_force_offline`：見 `_do_analyze` 同名參數 docstring，
+    語意完全一致（#51 codex HIGH 複審 Round 11：key 漏 caller-specific
+    online-stance 降級）。
     """
     coin_raw = (qs.get("coin", ["BTC"])[0]).strip()
     # 商業級修復：表單新增常駐第二個幣種下拉（`coin2`，見 `render_page()`），
@@ -3097,8 +3152,8 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
     if len(query) > 1000:
         raise ValueError(f"問題長度不能超過 1000 字元（目前 {len(query)} 字元）")
 
-    live = _parse_live(qs, client_ip)
-    real = _parse_real(qs, client_ip, live)
+    live = _parse_live(qs, client_ip, enforce_rate_limit=enforce_rate_limit)
+    real = _parse_real(qs, client_ip, live, enforce_rate_limit=enforce_rate_limit)
 
     pair = _parse_comparison_coins(coin_raw, query)
     if pair is None:
@@ -3115,7 +3170,12 @@ def _do_comparison(qs: dict, client_ip: str = "") -> tuple:
         # comparison 兩幣共用同一次請求的限流判定/degrade 決定；同樣只在
         # 真的要 degrade 時才多帶 `force_stance_offline` kwarg。
         _extra: dict = {}
-        if _online_stance_force_offline(client_ip):
+        _force_offline = (
+            _online_stance_force_offline(client_ip)
+            if online_stance_force_offline is None
+            else online_stance_force_offline
+        )
+        if _force_offline:
             _extra["force_stance_offline"] = True
         report_a, evidence_a, report_b, evidence_b, log = run_comparison(
             coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
@@ -3228,6 +3288,622 @@ def _price_provenance_data(evidence: list) -> dict:
     return data
 
 
+# ---------------------------------------------------------------------------
+# #51 /api/analyze server-side idempotency（防重複送出）：Bedrock 開通前最後
+# prereq——護欄 #9（daily cap + 並行原子預留）擋的是「同一 process 內累計花費
+# 超上限」，擋不住「使用者連點兩下、或前端重試造成兩個獨立 request 各自真的
+# 打一次 Bedrock」這種單純重複——兩次都在 cap 之內、各自都合法放行，但語意上
+# 是同一件事被做了兩遍，白白多花一次 token 成本。
+#
+# 做法：in-flight dedup（single-flight coalescing）——**不含**任何
+# post-completion 結果快取（見下方 codex HIGH 複審 Round 12：曾經有過
+# 60 秒 TTL 結果快取，因為會 replay 過時分析結果而移除）。
+#   - 同一 (type, coin[,coin2], query, sample/live/real/token, online-stance
+#     force_offline) 的請求同時有一個正在跑時，後到的相同請求原地等待、
+#     共用同一份真實結果，不各自進 `_do_analyze`/`_do_comparison`（因此也
+#     不會各自呼叫 `_check_live_rate_limit`/`_check_real_rate_limit`，更
+#     不會各自走到 `pipeline.run` 的 `try_reserve_request_budget()`）。
+#   - leader 完成後，把結果發布給**當下這一批**還在等待的 in-flight
+#     follower，然後立刻清掉這把 key 的 in-flight entry——**不**額外把
+#     結果留存供之後才進來的全新請求複用。緊接在後（沒能排進同一輪
+#     in-flight 等待）的下一個請求，會發現 in-flight 已清空，直接成為新
+#     leader、對依賴 fresh 重新呼叫一次。
+#   - key 用 per-key `threading.Event`（不是單一全域鎖），`compute()`
+#     本身（可能是慢速真連接器/Bedrock I/O）在鎖外執行——不同 key 的請求
+#     完全並行，不會被彼此拖慢。
+#
+# codex HIGH 複審（follower 無限阻塞資源耗盡）：leader（真連接器/Bedrock）
+# 卡住/hang 死時，若 follower 的 `event.wait()` 沒有逾時上界，會無限期
+# 阻塞該 server thread——同一 key 的重複請求越多，卡住的 thread 就越多，
+# 一個 degraded 依賴（單純變慢或掛掉）會被放大成整個 server 的 thread
+# 池耗盡（`ThreadingHTTPServer` 每個連線一條 thread）。修法：follower
+# `event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)` bounded
+# wait；逾時未等到結果 → 拋 `_AnalyzeDedupTimeout`，`_handle_api_analyze`
+# 轉成 503 + 可重試訊息（不落回自己真的跑一次——避免「等太久」跟「真的
+# 失敗」混在一起放大 Bedrock 花費／thundering herd；請 client 自行重試，
+# 仍受 #9 護欄與限流保護）。
+#
+# codex HIGH 複審 Round 12（結果 staleness——60 秒 TTL 結果快取 replay
+# 過時分析，#51 最終收斂）：先前版本在 leader 完成後，除了發布給當下
+# in-flight follower，還額外把結果寫進一份共用的 60 秒 TTL 結果快取
+# （key 是「請求內容」），供之後才進來、沒排進同一輪 in-flight 的重複
+# 請求直接複用。但加密市場資料（價格/情緒…）時效敏感：使用者 30 秒後
+# **刻意**重送相同 query 通常是要**最新**資料，"request 內容相等" 不等於
+# "同一個邏輯操作"；60 秒 TTL 快取卻會把第一次跑出來的舊報告原封不動
+# 回給第二次請求，完全不查一次更新的市場資料——這正是 #51 的目標
+# 「防雙送＝防雙倍 Bedrock 花費」被過度延伸成「防雙送＝永遠共用同一份
+# 結果」，兩者不是同一件事。修法：leader 完成、把結果發布給當下這一批
+# in-flight follower 之後，立刻清掉這把 key 的 in-flight entry；之後
+# **循序**進來的新請求（不管是 1 秒後還是 1 小時後）一律 fresh 重新呼叫
+# 依賴，拿到當下最新的市場資料。
+#
+# codex HIGH 複審 Round 12～13（generation fencing / caller-expired-
+# before-claim，已被本輪 Round 14 整段取代，僅存歷史脈絡於 git log）：
+# Round 12～13 為了「leader 存活超過逾時上界就視為 stale、讓新請求取代
+# 它成為新 leader」這件事，引入了一整組機制：全域單調遞增的 generation
+# 編號、「舊世代 -> 新世代」的 supersede 對照表（解決 follower 醒來時
+# 舊世代結果已經被回收但新世代結果還沒被自己追到的交棒 race）、以及
+# 「只給當下已在等待的 follower 讀、附帶記憶體回收用的短寬限期」的
+# per-generation 結果暫存區。這一整組的複雜度，根源都在「試圖偵測並取代
+# 一個可能只是變慢、也可能真的 hang 死的 leader」這件事本身——需要
+# fencing 才能保證「舊 leader 之後才完成時不會覆寫新 leader 的結果」，
+# 需要 supersede 表才能保證「follower 交棒不會漏接」，需要寬限期才能
+# 決定「這筆暫存結果何時可以回收」（5 秒寬限期本身还是牆鐘時間，延遲
+# 超過 5 秒才醒來的 follower 仍有機率 miss 掉、進而誤判成全新請求並
+# 重複觸發一次真實呼叫——見下方 Round 14 說明）。
+#
+# codex HIGH 複審 Round 14（single-flight 物件 + 參照，#51 最終收斂，
+# 徹底移除上述整組機制）：
+#   - **不再嘗試「取代」stale leader**：leader 若真的 hang 死，所有
+#     follower（含它自己這次請求的呼叫端）就只是各自等到自己的
+#     `deadline` 就回 503（見下方），不會有任何 thread 去搶著替補重新
+#     compute()。這個簡化能夠成立，前提是 `bedrock.py` 的主敘事呼叫
+#     現在有硬性 `read_timeout`/`connect_timeout`（見 `bedrock.py`
+#     `_runtime()` 的 `Config`），leader 的 `compute()` 本身有牆鐘時間
+#     上界，不會真的無限期 hang 住整個 process 的一條 thread——leader
+#     compute() 有界，是這整套「不需要取代」設計唯一的正確性前提。
+#   - **每一把 in-flight key 對應「恰好一個」`_AnalyzeFlight` 物件**
+#     （見下方類別定義），取代先前的 `(event, start_ts, generation)`
+#     tuple——這個物件本身的 Python object identity，就是先前
+#     `generation` 整數想表達的東西（「這是哪一輪 leader」），不需要
+#     再另外配一個整數編號、也不需要任何字典去查「這個編號對應的結果
+#     放哪裡」。
+#   - **follower join 時直接持有這個 Flight 物件本身的參照**（存進自己
+#     的區域變數，不是查字典），之後不管等多久才被喚醒，永遠直接讀
+#     `自己手上這個參照.ok` / `.payload`——沒有 dict lookup、沒有
+#     wall-clock TTL、沒有 generation 比對。leader 完成時（持鎖）先寫好
+#     `ok`/`payload` 才 `event.set()`，`threading.Event` 本身的記憶體
+#     屏障保證 follower 的 `event.wait()` 一旦回傳 `True`，讀到的
+#     `ok`/`payload` 一定是完整寫好的值。這個 Flight 物件會不會被
+#     Python 回收，完全取決於是否還有任何一個 follower 的區域變數持有
+#     它的參照——跟牆鐘時間完全無關，Round 12～13 那個「延遲 >5 秒的
+#     follower 醒來時暫存結果已經被寬限期回收、誤判成全新請求、重複
+#     觸發一次真實呼叫」的問題，在架構上直接消失，不需要引入任何 TTL
+#     才能保證安全。
+#   - leader 完成（成功或失敗皆同一條路徑）後，把自己這個 Flight 物件從
+#     `_analyze_dedup_inflight` 移除（讓下一個全新請求發現 key 已清空、
+#     fresh 重新開始）——這個「從字典移除」的動作，跟「已經持有這個
+#     物件參照的 follower 還讀得到結果」完全不衝突：字典只是「怎麼找到
+#     目前這一輪的 Flight」的索引，不是結果本身的存放處，物件被從字典
+#     移除後仍然可以透過任何其他還握著參照的變數繼續存活、繼續被讀取。
+#   - 由於不再有「取代」，`_analyze_dedup_inflight[key]` 在任何時刻**至多
+#     只會有一個** Flight 曾經存在過（下一個 Flight 只會在前一個被同一個
+#     leader 自己清掉、字典變空之後才由新的 leader 建立），不需要
+#     generation fencing 就能保證「不會有兩個 leader 同時發布/覆寫彼此
+#     的結果」——這正是移除整組 generation/supersede/grace 機制之後，
+#     正確性反而更容易論證的地方（見下方 `_dedup_analyze_call` 內
+#     "invariant" 注解）。
+#
+# codex HIGH 複審 Round 15（慢 leader 無 end-to-end deadline、持 key 整段
+# 503-storm）：Round 14 拿掉「取代 stale leader」之後，`bedrock.py` 的
+# `read_timeout`/`connect_timeout` 只 bound 單次 Bedrock 呼叫，**不** bound
+# 整個 `compute()`——`_do_analyze`/`_do_comparison` pipeline 內可能循序打
+# 好幾次連接器/Bedrock（例如比較兩個標的），單次 60s 上界疊加起來仍可能
+# 遠超過 follower 願意等的 45s。此時這把 key 會被這個慢 leader**整段**
+# 佔住，所有同 key 的後續請求（不管是 follower 還是之後才進來的全新
+# 請求）全部卡到 45s 逾時、一起變成 503——雖然不會無限期 hang（Round 14
+# 已保證有界），但仍是一次「看起來像是服務掛了」的 503 storm，且在慢
+# leader 結束前，這把 key 完全無法被任何新請求推進。
+#   - 修法：`_AnalyzeFlight` 記錄 `started_at`（Round 14 就已經有這個
+#     欄位，先前只是沒被用來做任何判斷）。**全新請求**（字典裡已有
+#     entry、但這個 entry 還沒被自己 join 過）在協調 loop 查到現有 entry
+#     時，先檢查 `time.time() - joined_flight.started_at`：若超過
+#     `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`（90 秒，比 follower 等待上限
+#     45 秒更長——確保「這把 key 真的卡住超過任何正常 follower 願意等的
+#     時間」才觸發，不會跟 Round 14 的 follower 逾時搶著動作），就把這個
+#     entry 從字典換成自己全新建立的 `_AnalyzeFlight`，自己成為新 leader、
+#     帶著全新的 deadline 去跑 `compute()`——key 因此重新變成可推進的，
+#     不會被一個慢 leader 卡死到它自己結束為止。
+#   - **fencing 天生、不需要 generation counter**：舊（現在被 orphan 掉的）
+#     leader 完成時，只會寫**它自己手上那個 `_AnalyzeFlight` 物件**的
+#     `ok`/`payload`（`compute()` 的回傳值/例外一定寫回呼叫它的那個
+#     leader 自己的 `my_flight`，不會、也沒有管道去寫另一個物件）——不會
+#     跟新 leader cross-publish。清 in-flight 字典 entry 時，改成「先確認
+#     字典裡現在還是不是我自己這個物件（identity 比對）才 pop」：如果
+#     字典裡已經被新 leader 換掉，pop 就直接跳過，不會誤刪新 leader正在
+#     使用的 entry。新 Flight 是全新物件、跟舊物件在記憶體裡完全隔離，
+#     followers 各自持有自己 join 到的那個物件的參照，讀寫互不干涉——不
+#     需要引入任何整數編號去分辨「這是哪一輪」，物件本身的 identity 就是
+#     answer。
+#   - 已經 join 到舊 Flight 的 follower（在被取代之前就 `event.wait()`
+#     卡在那裡）**不會**被轉去新 leader：它們繼續等自己手上那個舊物件的
+#     `event`，若舊（orphan）leader 之後真的完成，它們一樣讀得到那份
+#     結果（不浪費 orphan leader 已經付出的真實 Bedrock 成本，見 #9 護欄
+#     ——即使被取代了、compute 也還是跑完、算進當日 cap，不會因為被取代就
+#     免費作廢重跑第二次）；若等到自己的 45 秒 deadline 還沒等到，一樣
+#     503（Round 13～14 保留的行為，不受本輪影響）。
+# ---------------------------------------------------------------------------
+
+# follower bounded wait 上界——比單次分析（含真連接器/Bedrock，現已有
+# `bedrock.py` `_runtime()` 的硬性 `read_timeout`/`connect_timeout` 上界，
+# 見上方 Round 14 複審）預期最長時間略長，但仍是有限值，不讓一個掛掉的
+# 依賴無限期拖垮 server threads。Round 14 之後，這個常數**不再**同時身兼
+# 「leader 多久沒完成算 stale、可以被取代」的門檻——leader 是否算 stale
+# 這件事本身已經不存在，這裡純粹是 follower 自己願意等多久的預算。
+_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS = 45.0
+
+# codex HIGH 複審 Round 15：一個 in-flight entry（leader）存活超過這個
+# 門檻，就視為「慢到足以讓新請求接手」——刻意設得比
+# `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`（45 秒，follower 自己願意等的
+# 上限）更長，確保只有「真的比任何正常 follower 都還耐心等的時間更久」
+# 的 entry 才會被取代，避免這個機制在正常（甚至略慢）情況下就搶著動作。
+_ANALYZE_DEDUP_STALE_LEADER_SECONDS = 90.0
+
+_analyze_dedup_lock = threading.Lock()
+
+
+class _AnalyzeFlight:
+    """#51 codex HIGH 複審 Round 14：單一 in-flight「這一輪 leader」物件，
+    取代先前的 `(event, start_ts, generation)` tuple + 全域 generation
+    計數器 + supersede 對照表 + per-generation 結果暫存區（見上方模組頂部
+    大段說明的完整前因後果）。
+
+    `_analyze_dedup_inflight[key]` 在任何時刻最多對應一個這樣的物件；
+    follower join 時把這個物件本身的參照存進自己的區域變數
+    （`_dedup_analyze_call` 裡的 `joined_flight`），之後**永遠**直接讀
+    `joined_flight.ok` / `joined_flight.payload`，不再查任何以 key 或
+    generation 為鍵的字典。這個物件的存活完全由 Python 的 reference
+    counting 決定——只要還有任何一個 follower 的區域變數持有它，它就不會
+    被回收，不管那個 follower 被喚醒的時間點延遲多久，都不存在「結果已經
+    被回收/清掉，误判成全新請求」的問題。
+
+    `ok`/`payload` 由 leader 在持有 `_analyze_dedup_lock` 期間寫入，寫完
+    才呼叫 `event.set()`——`threading.Event` 底層以 `Condition`/lock 實作，
+    `set()` 之前的寫入對之後 `wait()` 返回 `True` 的執行緒可見（happens-
+    before），所以 follower 讀到的一定是完整寫好的值，不會看到寫一半的
+    中間狀態。
+
+    `started_at`（codex HIGH 複審 Round 15 開始實際使用）：這個 leader
+    建立的時間點。全新請求在字典查到現有 entry 時，會拿現在時間跟
+    `started_at` 比較——超過 `_ANALYZE_DEDUP_STALE_LEADER_SECONDS` 就把
+    這個 entry 換成新建的 `_AnalyzeFlight`、自己接手當新 leader（見
+    `_dedup_analyze_call` 內的 stale-entry recovery 段落）。原本這個
+    entry 的 leader 完成時仍然只會寫**自己手上這個物件**（不會、也沒有
+    管道寫到取代它的新物件），對「字典裡的 in-flight entry」的移除也會
+    先比對 identity 才 pop——被取代的舊物件不會、也不能覆寫新物件的結果，
+    這就是「fencing 天生」的意思：不需要另外配一個整數 generation 編號去
+    做比對，物件本身的 identity 就是唯一需要的 fence。
+    """
+
+    __slots__ = ("event", "started_at", "ok", "payload")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.started_at = time.time()
+        self.ok: bool | None = None
+        self.payload: object = None
+
+
+# key -> 目前這把 key 唯一的 `_AnalyzeFlight`（沒有 in-flight 中的請求時
+# 這把 key 不存在於字典裡）。
+_analyze_dedup_inflight: dict[str, "_AnalyzeFlight"] = {}
+
+
+class _AnalyzeDedupTimeout(Exception):
+    """#51 codex HIGH 複審：follower 等待 leader 結果超過
+    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 仍未等到——leader（真連接器/
+    Bedrock）可能單純變慢，也可能已經 hang 死。不落回自己真的跑一次
+    （那樣等於「等太久」跟「真的失敗」處理方式一樣，會在依賴本來就
+    degraded 時放大成 thundering herd/重複 Bedrock 花費），改由
+    `_handle_api_analyze` 轉成 503 + 可重試訊息，交給 client 自行重試
+    （仍受 #9 護欄與既有限流保護）。Round 14 之後：已經 join 到某個
+    `_AnalyzeFlight` 的 follower 逾時就是 503，**不會**自己去「取代」它
+    正在等的那個 leader；leader 本身的 `compute()` 有沒有牆鐘上界，靠的
+    是 `bedrock.py` 的 `Config` timeout，不是這裡的 dedup 層。Round 15
+    補充：這裡指的「不會取代」僅限於「已經 join 到這個 Flight、正在
+    `event.wait()` 的 follower 自己」——**全新**進來、字典查找還沒 join
+    到任何 Flight 的請求，如果現有 entry 已經超過
+    `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`，仍然會接手成為新 leader（見
+    `_dedup_analyze_call`），這跟「等待中的 follower 逾時後自己升級成
+    leader」是兩件不同的事——後者從未存在過、本輪也沒有引入。"""
+
+
+def _analyze_effective_mode(qs: dict) -> str:
+    """算出一次請求**實際會生效**的單一分析檔位：`"live"` / `"real"` /
+    `"sample"`。
+
+    codex HIGH 複審（key 構造正確 canonicalization，收斂前幾輪
+    token/query 糾結，見 `_analyze_dedup_key` docstring 的完整問題背景）：
+    這裡刻意重用跟 `_parse_live`/`_parse_real`（`_do_analyze`/
+    `_do_comparison` 實際呼叫、決定 `pipeline.run` 的 `data_mode`/
+    `llm_mode`/`offline` 的那組函式）**完全相同**的判斷邏輯——只是換成
+    無副作用、不觸發限流的純函式版本（`_is_live_request`/
+    `_is_sample_request`），跟 `_mode_extra_params()` 算自我連結參數用的
+    是同一套（見該函式 docstring），確保「這裡算出來的 mode」跟「pipeline
+    實際執行的 mode」永遠是同一個 source of truth，不會分岔。
+
+    live 優先於 sample，sample 優先於 real（預設檔位）——跟
+    `_is_sample_request`/`_is_real_request` 的優先序完全一致。
+    """
+    live = _is_live_request(qs)
+    if live:
+        return "live"
+    if _is_sample_request(qs, live):
+        return "sample"
+    return "real"
+
+
+def _analyze_dedup_key(
+    *,
+    qtype: QuestionType,
+    coin_key: str,
+    query: str,
+    qs: dict,
+    force_offline: bool = False,
+) -> str:
+    """把一次 `/api/analyze` 請求正規化成 in-flight dedup / 短期結果快取的
+    key：`(type, coin[,coin2], query, effective_mode, force_offline)`
+    （`force_offline`：Round 11 新增，見下方說明）。
+
+    `coin_key`：呼叫端（`_handle_api_analyze`）已完成正規化＋白名單驗證的
+    幣種鍵——單幣是已 `.upper()` 過的 `coin_raw`；comparison 是
+    `_parse_comparison_coins()` 回傳的 `(coin_a, coin_b)` **依請求原始
+    順序** `join(",")`，刻意不排序（codex HIGH 複審：`/api/analyze`
+    comparison 回應是**有序**欄位——`report_a`/`evidence_a`/
+    `price_provenance_a` 描述的是 `coin_a`，`_b` 系列描述 `coin_b`，順序
+    對調語意就不同，不是同一份可互換的結果。若排序正規化成同一把 key，
+    `coin=ETH,coin2=BTC`（`coin_a=ETH,coin_b=BTC`）會跟
+    `coin=BTC,coin2=ETH`（`coin_a=BTC,coin_b=ETH`）命中同一份快取，讓後者
+    的請求者拿到 A/B 對調、實際描述反過來的報告——同順序（同一個
+    `coin_a,coin_b` 序列）的重複請求本來就會命中同一把 key、正常
+    dedup；順序不同視為不同請求，各自跑一次是正確行為，不是「沒
+    dedup 到」。
+
+    `query`：已通過長度驗證的原始字串，**刻意不 `strip()`**（codex MEDIUM
+    複審：key⟺實際執行必須一致）。`_do_analyze`/`_do_comparison` 內部
+    重新讀 `qs.get("q", [...])[0]` 傳給 `pipeline.run`/`run_comparison`
+    時**同樣不 strip**——若這裡對 key 做 strip，`"foo"` 跟 `" foo "`
+    會被誤判成同一把 key、共用同一份 in-flight/快取 entry，但兩者傳給
+    pipeline 的 prompt 其實不同（有無頭尾空白）：先到的那個請求會決定
+    「共用」的實際執行內容與結果，後到的另一個字串不同的請求卻拿到
+    別人 prompt 跑出來的答案——跟先前修 `token` 的 strip 問題同一個
+    道理（見下方 `token` 段落），任何一段只要「key 正規化跟實際判斷/
+    執行不一致」就會讓 dedup 錯誤地把「本該獨立」的兩個請求綁在一起。
+    不做 strip 後，`"foo"` 與 `" foo "` 是不同 key、各自獨立 compute()，
+    正確地各自跑各自的 prompt；沒有空白差異的一般重複請求（多數情況）
+    不受影響，仍正常 dedup。刻意不做大小寫正規化（casefold）——中文
+    查詢字大小寫不影響語意，但英文查詢字大小寫可能承載使用者刻意的
+    語意差異，保守不動。
+
+    `effective_mode`（codex HIGH 複審：key 構造正確 canonicalization，
+    收斂前幾輪 token/query 糾結）：**不再**直接把 `sample`/`live`/`real`/
+    `token` 四個原始 qs 值塞進 key，改用 `_analyze_effective_mode(qs)`
+    算出的單一 `"live"`/`"real"`/`"sample"` 字串。
+
+    先前版本的根本問題：這四個原始欄位裡，有些其實會被**忽略**——
+    `live=1`（且 token 驗證通過）生效時，`sample`/`real` 完全不影響
+    `_do_analyze`/`_do_comparison` 實際呼叫 `pipeline.run` 的方式（live
+    優先，見 `_is_sample_request`/`_is_real_request` 的 `if live: return
+    False`）；`real` 這個 query 參數本身也從來不被 `_is_real_request`
+    讀取（它是「預設檔位」的向後相容顯式寫法，见該函式 docstring）。但
+    先前的 key 卻原封不動把這些「會被忽略／不影響實際執行」的原始值也
+    塞進 key——後果是：
+      - `live=1&token=<TOKEN>&sample=1` 跟 `live=1&token=<TOKEN>&sample=2`
+        （或任何不同的 `sample`/`real` 原始值）**實際執行完全相同**
+        （都是同一次真 Bedrock 呼叫），但因為原始 `sample` 字串不同，
+        舊 key 判成不同 entry、各自獨立 `compute()`——等於讓使用者只要
+        任意變動一個「反正會被忽略」的參數，就能繞過 dedup、重複觸發
+        真 Bedrock 呼叫（重複花費，正是 #51 要防的事）。
+      - real 檔位下同理：`real=1` 跟不帶 `real` 參數（兩者都落在「預設
+        真資料·$0」檔位，`_is_real_request` 根本不讀 `real` 這個 key）
+        實際執行完全相同，舊 key 卻因為原始 `real` 字串不同判成不同
+        entry，讓語意相同的請求需要各自 compute()，多做不必要的重複
+        真連接器呼叫（雖然免費，但仍是「沒 dedup 到」，違反 dedup 的
+        設計目的）。
+
+    修法：key 只保留**跟實際執行結果真正相關**的單一 canonical 欄位
+    `effective_mode`——用跟 `_do_analyze`/`_do_comparison` 呼叫
+    `pipeline.run` 時**完全相同**的判斷邏輯（`_is_live_request`/
+    `_is_sample_request`，見 `_analyze_effective_mode`）算出來，確保
+    「key 相同 ⟺ 實際執行的 data_mode/llm_mode/offline 也相同」這個
+    不變量精確成立，不多不少：
+      - `live=1`（token 驗證通過）不管 `sample`/`real` 帶什麼原始值，
+        `effective_mode` 都是 `"live"`——同一把 key，正確 dedup 成
+        1 次真 Bedrock 呼叫，不再能靠變動被忽略的參數繞過。
+      - `real=1` 跟不帶 `real` 參數（都落在預設真資料檔位）
+        `effective_mode` 都是 `"real"`——同一把 key，同樣正確 dedup。
+      - `sample=1` 精確比對成立時 `effective_mode="sample"`；`live`
+        不成立且 `sample` 不精確等於 `"1"` 時落回 `"real"`——跟
+        `_is_sample_request`/`_is_real_request` 的判斷完全一致。
+      - token 的效果已經被 `effective_mode` 完整捕捉（不需要再單獨把
+        `token` 塞進 key）：`token` 的唯一作用是透過
+        `_is_live_request()` 的 `hmac.compare_digest` 逐位元組比對決定
+        `live` 是否成立——比對通過 ⟹ `effective_mode="live"`；比對失敗
+        （含先前 codex 複審抓到的「尾端多一個空白」case）⟹ 不成立
+        `live`，`effective_mode` 落回 `"real"`（或 `"sample"`）——這正是
+        `effective_mode` 這個單一欄位本來就該捕捉到的差異，不需要額外
+        欄位。
+
+    `qtype`/`coin_key`/`query` 三段維持不變（見上方對應段落：
+    comparison 幣種順序不排序、query 不 strip）。
+
+    序列化格式（codex HIGH 複審：key delimiter 注入跨 mode 碰撞，
+    先前輪次修復，維持不變）：`json.dumps(...)`
+    （`separators=(",", ":")`，緊湊、無空白）序列化成一個有序 list——
+    JSON 字串序列化會對字串內容裡的雙引號、反斜線、控制字元（含
+    `\x1f`）做逃逸，欄位之間的分隔（逗號）只會出現在字串**引號之外**
+    ——user 輸入的原始位元組（`query` 仍是唯一保留的原始使用者輸入
+    欄位）不管含什麼字元，都只能出現在自己那個被逃逸/包住的 JSON
+    字串值裡，不可能偽造出跟別的欄位邊界（含 `effective_mode`
+    這個由伺服器端計算、非 user 直接控制的枚舉字串）重疊的位元組序列。
+    codex HIGH 複審（Round 11：key 漏 caller-specific online-stance
+    降級）：real-mode 執行實際上還依賴一個**跟 caller 的 `client_ip`
+    有關**的變數——`_online_stance_force_offline(client_ip)`（見該函式
+    docstring；#9 online-stance 預算配額硬化：per-IP 的 online-stance
+    專用限流耗盡時，`_do_analyze`/`_do_comparison` 會誠實 degrade 這次
+    請求成 `force_stance_offline=True`，結果內容因此不同）。先前的 key
+    完全沒有捕捉這個變數，導致：(1) 一個 online-stance 配額已耗盡的
+    IP 當 leader 時，它的降級結果會被發布給當下同一把 key 命中的所有
+    in-flight follower——配額本來還很充裕的其他 IP，若剛好在它 compute()
+    期間送出同一把 key 的請求，會被迫共用（join）到這份降級結果；
+    (2) 反過來，配額充裕的 IP 當 leader、產出正常 online-stance 結果，
+    一個配額早就耗盡的 IP 若剛好 join 到同一輪 in-flight，會白拿一份
+    「本來該被 degrade」的結果、完全繞過自己的配額限制，沒有真的消耗
+    到它自己的 online-stance 限流 bucket。兩個方向都違反「per-IP
+    配額」的護欄語意，而且哪個先到、哪個後到決定了另一方拿到什麼結果
+    ——結果依到達順序而定，不是 deterministic。（Round 12 之後：共用
+    的 60 秒 TTL 結果快取已整個移除，只剩 in-flight coalescing——這個
+    污染風險改成只發生在「兩個 IP 剛好同時在等同一輪 compute()」的
+    in-flight 期間，但風險本質跟修法完全不變：仍然是「key 沒捕捉到
+    caller-specific 變數，導致不該共用的請求被迫共用同一份結果」。）
+
+    修法：呼叫端（`_handle_api_analyze`）在算這個 key **之前**，先對
+    這個 caller 自己的 `client_ip` 算一次
+    `_analyze_online_stance_force_offline_for_caller(qs, client_ip)`
+    ——跟 `_do_analyze`/`_do_comparison` 實際執行時判斷 degrade 用的
+    完全同一套邏輯（`effective_mode == "real"` 時才呼叫
+    `_online_stance_force_offline`），把算出來的 `bool` 傳進來當
+    `force_offline` 參數，納入 key 的一部分：同一個 caller 不管最後是
+    leader、follower、還是命中快取，都先用自己的 IP 決定「這次算出來
+    是不是該 degrade」，狀態相同（都耗盡／都可用）的 caller 才會落在
+    同一把 key、正確共用同一份結果；狀態不同（一個耗盡、一個可用）的
+    caller 會落在不同把 key，各自拿到跟自己配額狀態相符的結果，不會
+    互相污染，也不會有任何一方繞過自己的限流。`effective_mode` 不是
+    `"real"` 時，`_do_analyze`/`_do_comparison` 根本不會呼叫
+    `_online_stance_force_offline`（該邏輯整段包在 `if real:` 底下），
+    因此這裡強制把 `force_offline` 正規化成 `False`，不讓呼叫端誤傳的
+    值意外拆散本來該共用同一把 key 的 live/sample 請求（維持「key 只
+    捕捉『實際執行真正用得到』的變數」這個 Round 9 就確立的原則）。
+    """
+    effective_mode = _analyze_effective_mode(qs)
+    effective_force_offline = force_offline if effective_mode == "real" else False
+    return json.dumps(
+        [qtype.value, coin_key, query, effective_mode, effective_force_offline],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
+def _analyze_enforce_caller_rate_limit(qs: dict, client_ip: str) -> None:
+    """#51 codex HIGH 複審（dedup×限流交互，兩個方向都要修）：
+
+    1. 只有 dedup 的 leader 會真的呼叫 `_do_analyze`/`_do_comparison`，
+       因而只有 leader 的 IP 會被 `_check_live_rate_limit`/
+       `_check_real_rate_limit` 檢查、計入 bucket；follower（in-flight
+       join 到 leader 的請求）完全跳過這個檢查——一個已經被限流的 IP，
+       只要送出的請求「碰巧」跟某個正在進行中的合法請求同一把 dedup
+       key，就能繞過自己的限流白拿一份真結果。
+    2. 反過來，若 leader 因為自己 IP 超速而收到 `TooManyRequests`，
+       這個 429 若被當成一般失敗共用給 follower（見 `_dedup_analyze_call`
+       docstring），會讓完全不相干、根本沒超速的其他 IP 平白拿到別人的
+       429（"429-poisoning"）。
+
+    修法：把限流檢查搬到**每一個 caller 自己**、在 dedup 查找
+    （`_analyze_dedup_key`/`_dedup_analyze_call`）之前執行一次——不管
+    這次請求最後是變成 leader、follower、還是直接命中短期快取，都先
+    對這個 caller 自己的 IP 過一次限流；限流本身開銷很小（純記憶體
+    bucket 查表），跟共用「昂貴」的分析結果（真連接器/Bedrock）分開，
+    各司其職。跟 `_parse_live`/`_parse_real` 用完全一致的純判斷邏輯
+    （`_is_live_request`/`_is_real_request`），只是抽出來獨立於
+    leader/follower 之外、對每個 caller 都執行；真正的
+    `_do_analyze`/`_do_comparison`（只有 leader 會呼叫，見
+    `_handle_api_analyze` 傳入的 `enforce_rate_limit=False`）不會再重複
+    檢查同一個 IP，避免同一個邏輯請求的限流額度被計入兩次。
+
+    這個檢查本身完全在 dedup 的 lock/cache 之外執行、不寫入任何共用
+    狀態——429 只回給這個 caller 自己，不可能 poisoning 到別的 IP。
+    """
+    live = _is_live_request(qs)
+    if live and client_ip:
+        _check_live_rate_limit(client_ip)
+    real = _is_real_request(qs, live)
+    if real and client_ip:
+        _check_real_rate_limit(client_ip)
+
+
+def _analyze_online_stance_force_offline_for_caller(qs: dict, client_ip: str) -> bool:
+    """#51 codex HIGH 複審（Round 11：key 漏 caller-specific online-stance
+    降級）：跟 `_analyze_enforce_caller_rate_limit` 同樣的道理——只有
+    dedup 的 leader 會真的呼叫 `_do_analyze`/`_do_comparison`，若
+    online-stance 降級判斷（`_online_stance_force_offline`）繼續留在
+    那裡面才算，就只有 leader 自己的 `client_ip` 會被檢查/計入
+    online-stance 專用限流 bucket，且這個判斷結果只跟 leader 的 IP
+    有關，卻會透過共用 dedup 快取 replay 給狀態完全不同的其他 IP（見
+    `_analyze_dedup_key` docstring 的完整說明）。
+
+    修法：在 dedup 查找之前，對**每一個 caller**（不管最後是 leader、
+    follower、還是命中短期快取）各自的 `client_ip` 先算一次這個判斷，
+    結果納入 `_analyze_dedup_key` 的 `force_offline` 參數；真正的
+    `_do_analyze`/`_do_comparison`（只有 leader 會呼叫到）改傳這裡
+    算好的值（`online_stance_force_offline=` 參數），不會再對同一個
+    IP 重複呼叫 `_online_stance_force_offline`——避免同一個邏輯請求的
+    online-stance 限流額度被消耗兩次。
+
+    只在 `effective_mode == "real"` 時才呼叫 `_online_stance_force_
+    offline`（回傳 `False` 前完全零開銷、不消耗任何 bucket）：跟
+    `_do_analyze`/`_do_comparison` 實際執行時只在 `if real:` 分支底下
+    才會用到這個判斷完全一致——`live`/`sample` 請求既然執行時根本不會
+    走到這段邏輯，這裡也不該白白消耗這個 caller 的 online-stance 配額。
+    """
+    if _analyze_effective_mode(qs) != "real":
+        return False
+    return _online_stance_force_offline(client_ip)
+
+
+def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
+    """#51 server-side idempotency（防重複送出）核心：同一把 `key`
+    （見 `_analyze_dedup_key` docstring）同時只有一個真正在跑
+    `compute()`（single-flight leader），後到的相同請求（follower）原地
+    等待、共用同一份真實結果物件本身——#24 不造假：follower 拿到的不是
+    另外偽造的假資料，就是 leader 那份真結果。
+
+    #9 護欄協同：dedup 判斷在 `compute()` **之前**——被 dedup 掉的
+    follower 完全不會呼叫 `compute()`，因此也不會走到 `pipeline.run` 的
+    `try_reserve_request_budget()` 每日預留——不重複佔用、不重複消耗任何
+    護欄額度，甚至根本不進 Bedrock。
+
+    codex HIGH 複審#2（dedup×限流交互，維持不變）：`_check_live_
+    rate_limit`/`_check_real_rate_limit` 已經搬到 `_handle_api_analyze`
+    呼叫 `_dedup_analyze_call` **之前**，對每一個 caller（leader/
+    follower 都一樣）各自的 IP 執行一次（見
+    `_analyze_enforce_caller_rate_limit`），這裡的 `compute()`
+    （`enforce_rate_limit=False`）理論上不會再自己 raise
+    `TooManyRequests`。
+
+    codex HIGH 複審 Round 12（結果 staleness，#51 一度的收斂）：leader
+    完成（不論成功/失敗）後，結果**不**進任何以「請求內容」為鍵、供之後
+    全新請求複用的共用快取——加密市場資料時效敏感，"request 內容相等"
+    不等於 "同一個邏輯操作"，見模組頂部大段說明。
+
+    codex HIGH 複審 Round 14（single-flight 物件 + 參照，#51 最終收斂，
+    見模組頂部大段說明的完整前因後果，這裡只講協調流程本身）：
+
+    每一把 `key` 在任何時刻最多對應一個 `_AnalyzeFlight` 物件
+    （`_analyze_dedup_inflight[key]`）。協調流程只有兩條路：
+
+      1. 字典裡沒有這把 key 的 entry → 自己原子地建立一個新
+         `_AnalyzeFlight`、寫進字典、成為 leader，跳出協調 loop 去真的
+         `compute()`。
+      2. 字典裡已經有 entry → 把這個物件本身的參照存進 `joined_flight`
+         這個區域變數（不是查字典、不是記一個 generation 編號），在鎖外
+         `joined_flight.event.wait(timeout=剩餘時間)`。等到 → 直接讀
+         `joined_flight.ok`/`joined_flight.payload`（自己手上這個參照的
+         欄位，不重新查字典、不管字典裡現在是不是還放著同一個物件）
+         回傳/`raise`。逾時 → 拋 `_AnalyzeDedupTimeout`（503）。
+
+    先前版本（Round 14）沒有第三條路——leader 若真的 hang 死，所有
+    follower 就是各自等到自己的 `deadline` 回 503。`bedrock.py`
+    `_runtime()` 的硬性 `read_timeout`/`connect_timeout` 確實 bound 了
+    「單次」Bedrock 呼叫，但 `compute()` 本身（`_do_analyze`/
+    `_do_comparison` pipeline，可能循序打好幾次連接器/Bedrock，例如
+    comparison 兩個標的各一次）沒有 end-to-end 上界——多次呼叫疊加起來
+    仍可能遠超過 follower 願意等的 45 秒，這把 key 會被這個慢 leader
+    整段佔住，見模組頂部 Round 15 說明。
+
+    codex HIGH 複審 Round 15（stale-entry recovery，加第三條路）：
+
+      3. 字典裡已經有 entry，但這個 entry 存活時間
+         （`time.time() - joined_flight.started_at`）超過
+         `_ANALYZE_DEDUP_STALE_LEADER_SECONDS`（90 秒）→ 把它從字典換成
+         自己全新建立的 `_AnalyzeFlight`，自己成為新 leader、帶著全新
+         `compute()` 去跑，不落入第 2 條路的 `event.wait()`。
+
+    fencing 天生、不需要 generation counter：舊 entry 被換掉後，原本的
+    leader 之後完成時只會寫**自己手上那個物件**的 `ok`/`payload`（不會
+    也沒有管道寫到新物件），清 in-flight 字典 entry 前也會先比對「字典
+    裡現在是不是還是我自己這個物件」（identity 比對）才 pop——如果已經
+    被換掉，直接跳過，不誤刪新 leader 正在用的 entry。已經 join 到舊
+    Flight 的 follower（在被取代之前就卡在 `event.wait()`）不受影響，
+    繼續讀自己手上那個舊物件，等到舊 leader 真的完成（若在自己的
+    deadline 內）或自己逾時 503（不受本輪影響）。
+
+    invariant（用來論證下方發布邏輯只需要一次 identity 比對、不需要
+    generation fencing 就是正確的）：對任一 leader 自己建立的
+    `_AnalyzeFlight` 物件而言，字典裡這把 key 的 entry 從「這個 leader
+    建立」到「這個 leader 自己完成、pop 掉（或發現已被取代而放棄 pop）」
+    這段期間，可能經歷 0 次或多次「被之後才進來的全新請求判定為 stale
+    並取代」；不管經歷幾次取代，**這個 leader 自己都只寫、只嘗試 pop
+    它自己建立的那個物件**，不曾寫過、也不曾 pop 過任何其他物件——因此
+    「我 pop 的時候，字典裡是不是還是我自己」這一次 identity 比對，就
+    足以保證不會誤刪別人的 entry，不需要整數編號。
+    """
+    deadline = time.time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
+    my_flight: _AnalyzeFlight | None = None
+
+    while True:
+        with _analyze_dedup_lock:
+            joined_flight = _analyze_dedup_inflight.get(key)
+            if joined_flight is None:
+                my_flight = _AnalyzeFlight()
+                _analyze_dedup_inflight[key] = my_flight
+                break
+            # codex HIGH 複審 Round 15：stale-entry recovery——現有 entry
+            # 存活太久（比 follower 自己願意等的 45 秒還久很多），視為慢
+            # 到足以讓新請求接手；在同一次持鎖期間原子地換成自己的新
+            # Flight，避免跟其他同時發現 stale 的 thread 競相取代（第一個
+            # 拿到鎖的取代掉，之後拿到鎖的會看到已經是新 entry、不再視為
+            # stale，落入正常 join-as-follower 路徑）。
+            if time.time() - joined_flight.started_at > _ANALYZE_DEDUP_STALE_LEADER_SECONDS:
+                my_flight = _AnalyzeFlight()
+                _analyze_dedup_inflight[key] = my_flight
+                break
+        # 鎖外等待，避免持鎖期間阻塞其他 caller 對 dedup 狀態的存取。
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise _AnalyzeDedupTimeout(
+                f"分析請求排隊等候逾時（前一個相同請求執行超過"
+                f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
+            )
+        completed = joined_flight.event.wait(timeout=remaining)
+        if not completed:
+            raise _AnalyzeDedupTimeout(
+                f"分析請求排隊等候逾時（前一個相同請求執行超過"
+                f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
+            )
+        # 直接讀自己手上這個參照的欄位——leader 寫 `ok`/`payload` 一定發生
+        # 在 `event.set()` 之前（見 `_AnalyzeFlight` docstring 的
+        # happens-before 說明），這裡讀到的保證是完整寫好的值。不重入
+        # 協調 loop、不重新查字典：不管字典目前是不是已經被清空、或已經
+        # 換了下一輪全新 leader，都跟「我這次 join 到的是哪一輪」無關。
+        if joined_flight.ok:
+            return joined_flight.payload
+        raise joined_flight.payload
+
+    try:
+        result = compute()
+    except Exception as exc:
+        my_flight.ok = False
+        my_flight.payload = exc
+        with _analyze_dedup_lock:
+            # codex HIGH 複審 Round 15：identity 比對過才 pop——如果這把
+            # key 已經被 stale-entry recovery 換成別人的新 Flight，字典
+            # 裡現在存的就不是 `my_flight`，此時絕不能 pop（那樣會誤刪
+            # 新 leader 正在使用的 entry），直接放棄清理即可：反正字典
+            # 裡本來就已經沒有指向我的東西。
+            if _analyze_dedup_inflight.get(key) is my_flight:
+                _analyze_dedup_inflight.pop(key, None)
+        my_flight.event.set()
+        raise
+    my_flight.ok = True
+    my_flight.payload = result
+    with _analyze_dedup_lock:
+        if _analyze_dedup_inflight.get(key) is my_flight:
+            _analyze_dedup_inflight.pop(key, None)
+    my_flight.event.set()
+    return result
+
+
+
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
     `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
@@ -3257,6 +3933,49 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
          內部的連接器/Bedrock/pipeline 呼叫）＋ payload 組裝／信封序列化，
          整段用單一 `except Exception`（含 `ValueError`）接住 → 一律回
          通用 502，不再按例外型別分流成 400。
+
+    #51 server-side idempotency（防重複送出，Bedrock 開通前最後
+    prereq）：驗證通過後、真的呼叫 `_do_analyze`/`_do_comparison` 之前，
+    先算出 `_analyze_dedup_key()`（正規化 `type,coin[,coin2],query,
+    effective_mode,force_offline`——`effective_mode` 是 `live`/`real`/
+    `sample` 三選一的實際生效檔位；`force_offline` 是這個 caller 自己的
+    `client_ip` 在 online-stance 配額上是否已耗盡（Round 11 codex HIGH
+    複審新增），兩者皆見該函式 docstring），透過 `_dedup_analyze_call()`
+    包一層 in-flight dedup（single-flight coalescing，**不含**
+    post-completion 結果快取，見 Round 12 codex HIGH 複審）——同一組
+    參數的並行/極短間隔內重複請求只有第一個（leader）真的觸發依賴呼叫，
+    其餘原地等待、共用同一份真實結果，不會各自再打一次真連接器/
+    Bedrock；leader 完成後 in-flight entry 立刻清空，之後**循序**進來
+    的新請求一律 fresh 重新呼叫，拿當下最新資料。詳見
+    `_dedup_analyze_call()` docstring。
+
+    codex HIGH 複審（dedup×限流交互，兩個方向都要修，見
+    `_analyze_enforce_caller_rate_limit` docstring）：per-IP 限流
+    （`_check_live_rate_limit`/`_check_real_rate_limit`）改成在
+    `_dedup_analyze_call()` **之前**，對每一個 caller（不管最後是
+    leader、follower、還是命中短期快取）各自的 `client_ip` 執行一次；
+    真正呼叫 `_do_analyze`/`_do_comparison`（只有 leader 會執行到）改傳
+    `enforce_rate_limit=False`，避免同一個 caller 的 IP 被重複計入限流
+    bucket 兩次。這樣一來：(1) 沒有任何 caller 能靠共用 leader 的結果
+    繞過自己的限流；(2) 限流本身完全在 dedup 的共用 lock/cache 之外，
+    一個 IP 的 429 不可能透過 dedup 快取 poisoning 到別的 IP（見
+    `_dedup_analyze_call` 對 `TooManyRequests` 的特殊處理）。
+
+    codex HIGH 複審 Round 11（key 漏 caller-specific online-stance
+    降級，見 `_analyze_dedup_key`／`_analyze_online_stance_force_
+    offline_for_caller` docstring）：跟上面 per-IP 限流同樣的道理，
+    `_do_analyze`/`_do_comparison` real-mode 執行時是否 degrade 成
+    `force_stance_offline=True` 也是跟這個 caller 的 `client_ip` 有關
+    的變數，一樣改成在 `dedup_key` 算出來之前，對每一個 caller 各自的
+    `client_ip` 先算一次（`force_offline`），納入 `dedup_key`；真正呼叫
+    `_do_analyze`/`_do_comparison` 改傳算好的
+    `online_stance_force_offline=force_offline`，不會再對同一個 IP
+    重複呼叫 `_online_stance_force_offline`、重複消耗它的 online-stance
+    限流 bucket。這樣一來，online-stance 配額已耗盡跟配額充裕的兩個
+    caller，即使命中同一把 `key` 的其他欄位（type/coin/query/
+    effective_mode 都相同），也會因為 `force_offline` 不同而落在
+    不同的 `dedup_key`、各自拿到跟自己配額狀態相符的結果，不會互相
+    污染、也不會有任何一方繞過自己的限流。
     """
     try:
         qtype = QuestionType(qs.get("type", ["multi_source"])[0])
@@ -3292,11 +4011,43 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "bad_request", f"幣種須為以下其中之一：{'、'.join(COIN_POOL)}"
             )
 
+    # #51 idempotency（codex HIGH 複審修正）：comparison 保留 `pair`
+    # 原始請求順序組 key（`coin_a,coin_b`），刻意不排序——`report_a`/
+    # `report_b` 是有序欄位，`coin=A,B` 與 `coin=B,A` 是 A/B 對調、語意
+    # 不同的兩份報告，不能共用同一份快取（見 `_analyze_dedup_key`
+    # docstring）；單幣直接用已驗證的 `coin_raw`。
+    coin_key = ",".join(pair) if qtype == QuestionType.COMPARISON else coin_raw
+
     # --- 2. 驗證通過後才碰依賴（連接器/Bedrock/pipeline/序列化）---
     try:
+        # codex HIGH 複審（dedup×限流交互）：每個 caller 都先過自己的
+        # 限流，再進 dedup 查找——不管這次請求最後是 leader、follower、
+        # 還是命中短期快取，都不能繞過自己的限流；限流本身完全在
+        # dedup 共用狀態之外，不會被快取/replay 給別的 IP。見
+        # `_analyze_enforce_caller_rate_limit` docstring。
+        _analyze_enforce_caller_rate_limit(qs, client_ip)
+
+        # codex HIGH 複審 Round 11（key 漏 caller-specific online-stance
+        # 降級）：online-stance degrade 判斷也是跟這個 caller 的
+        # `client_ip` 有關、real-mode 執行實際上依賴的變數，必須在
+        # dedup key 算出來**之前**、對這個 caller 自己的 IP 先算一次
+        # （見 `_analyze_online_stance_force_offline_for_caller`／
+        # `_analyze_dedup_key` docstring 的完整說明），才能讓 key 精確
+        # 捕捉「這次請求實際上會拿到 online-stance 結果還是被 degrade」。
+        force_offline = _analyze_online_stance_force_offline_for_caller(qs, client_ip)
+        dedup_key = _analyze_dedup_key(
+            qtype=qtype, coin_key=coin_key, query=query, qs=qs, force_offline=force_offline,
+        )
+
         if qtype == QuestionType.COMPARISON:
-            report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
-                qs, client_ip=client_ip
+            report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+                dedup_key,
+                lambda: _do_comparison(
+                    qs,
+                    client_ip=client_ip,
+                    enforce_rate_limit=False,
+                    online_stance_force_offline=force_offline,
+                ),
             )
             payload = {
                 "version": VERSION,
@@ -3313,7 +4064,15 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "execution_log": log.events,
             }
         else:
-            report, evidence, log = _do_analyze(qs, client_ip=client_ip)
+            report, evidence, log = _dedup_analyze_call(
+                dedup_key,
+                lambda: _do_analyze(
+                    qs,
+                    client_ip=client_ip,
+                    enforce_rate_limit=False,
+                    online_stance_force_offline=force_offline,
+                ),
+            )
             payload = {
                 "version": VERSION,
                 "report": dataclasses.asdict(report),
@@ -3324,6 +4083,11 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "execution_log": log.events,
             }
         return 200, _json_envelope_ok(payload)
+    except _AnalyzeDedupTimeout as exc:
+        # codex HIGH 複審：follower bounded wait 逾時——回可重試的 503，
+        # 不落回自己真的跑一次（見 `_dedup_analyze_call`/`_AnalyzeDedupTimeout`
+        # docstring），交給 client 自行重試。
+        return 503, _json_envelope_err("timeout", str(exc))
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     except Exception:
