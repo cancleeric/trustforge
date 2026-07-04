@@ -237,10 +237,15 @@ fi
 IID=$(printf '%s\n' "$MATCHES" | awk '{print $1}')
 echo "[setup-tls] 目標實例 ${IID}，簽發 ${DOMAIN} 的憑證" >&2
 
+# --parameters 用 file:// JSON 傳，避開 aws CLI shorthand parser 對含逗號/
+# 空白/unicode 的 JSON array 解析失敗（真 AWS 才現的 bug）。
+_TF_PARAMS_FILE=$(mktemp "${TMPDIR:-/tmp}/tf-tls-ssm-params.XXXXXX.json")
+python3 -c 'import json,sys; print(json.dumps({"commands": sys.stdin.read().splitlines()}))' <<<"$CMD" > "${_TF_PARAMS_FILE}"
 CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript \
-  --parameters "commands=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))' <<<"$CMD")" \
+  --parameters "file://${_TF_PARAMS_FILE}" \
   --query 'Command.CommandId' --output text)
+rm -f "${_TF_PARAMS_FILE}"
 aws ssm wait command-executed --region "$REGION" --command-id "$CMDID" --instance-id "$IID" 2>/dev/null || true
 STATUS=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" --query Status --output text)
 if [ "$STATUS" = "Success" ]; then
