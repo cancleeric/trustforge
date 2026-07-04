@@ -26,6 +26,19 @@
 #      `location ^~ /.well-known/acme-challenge/ { root /var/www/certbot;
 #      }` 直接從檔案系統回應，跟 server_name 是不是真實 domain 無關。
 #
+#   4. [codex 複審 MEDIUM，DOMAIN override 跟 nginx.conf 不一致]
+#      setup_tls.sh 以前接受任意合法格式的 DOMAIN 簽憑證，但
+#      deploy/nginx.conf／deploy/cutover_switch.sh 的 server_name/redirect
+#      target/憑證路徑全部寫死 trustforge.hurricanesoft.com.tw——
+#      override 別的 domain 會簽憑證成功、但 cutover 失敗（nginx 還是找
+#      寫死的憑證路徑/hostname）。修法：DOMAIN 只接受寫死的 production
+#      hostname，格式合法但不等於它一律拒絕、不簽。
+#
+#   5. [codex 複審 MEDIUM，next step] 簽發成功後要啟用自動續簽 timer
+#      （`systemctl enable --now certbot-renew.timer`）+ 跑一次
+#      `certbot renew --dry-run` 驗證續簽路徑（webroot acme-challenge
+#      location）真的通，不能簽完就放著不管到期日。
+#
 # 測法：
 #   - 場景 1：hostile DOMAIN（`;`/`$()`/引號/空白）→ 斷言在碰任何 aws 呼叫
 #     前就被 regex 擋下、非零結束、訊息含「DOMAIN 格式不合法」。
@@ -43,6 +56,12 @@
 #   - 場景 6：describe-instances 剛好回 1 筆 → 正常往下跑完，
 #     `ssm send-command`/`get-command-invocation` 被呼叫、Status=Success
 #     時整體 exit 0。
+#   - 場景 7：DOMAIN 格式合法但不是寫死的 production hostname → 斷言被
+#     「必須是 production domain」擋下、非零結束（分別測完全不同的
+#     domain、跟改成子網域兩種 near-miss）。
+#   - 場景 3（延伸）：印出的 CMD 含 `systemctl enable --now
+#     certbot-renew.timer` 跟 `certbot renew --dry-run`（自動續簽 timer +
+#     dry-run 驗證續簽路徑）。
 #
 # 用法：bash deploy/test_setup_tls.sh
 set -euo pipefail
@@ -112,6 +131,31 @@ else
   pass "hostile DOMAIN 沒有任何一個真的被執行（無 side-effect 檔案）"
 fi
 
+# ── 場景 7：合法格式但不是 production domain → 拒絕（codex 複審 MEDIUM）──
+echo "== 場景 7：DOMAIN 格式合法但不是寫死的 production hostname → 拒絕、不簽 =="
+NON_PRODUCTION_DOMAINS=(
+  "example.com"
+  "trustforge.hurricanesoft.com"
+  "staging.trustforge.hurricanesoft.com.tw"
+  "trustforge-hurricanesoft.com.tw"
+)
+for d in "${NON_PRODUCTION_DOMAINS[@]}"; do
+  if run_with_domain "$d"; then
+    fail "非 production domain (${d}) 應該被拒絕，卻成功印出 CMD（exit 0）"
+  else
+    pass "非 production domain (${d}) 被拒絕（非零結束）"
+  fi
+  assert_contains "$(cat "$CAPTURE/err.log")" "必須是 production domain" \
+    "非 production domain (${d}) 錯誤訊息含「必須是 production domain」"
+done
+# 正 production domain 本身要能通過格式+一致性兩關（後面場景 3 會再驗證
+# CMD 內容細節，這裡只驗證「沒被這一關擋下」）。
+if run_with_domain "trustforge.hurricanesoft.com.tw"; then
+  pass "正 production domain（trustforge.hurricanesoft.com.tw）沒有被這一關擋下"
+else
+  fail "正 production domain（trustforge.hurricanesoft.com.tw）不應該被拒絕，卻失敗了 stderr: $(cat "$CAPTURE/err.log")"
+fi
+
 # ── 場景 2：hostile ADMIN_EMAIL ─────────────────────────────────────────
 echo "== 場景 2：hostile ADMIN_EMAIL（;/\`/引號/空白）在碰任何 aws 呼叫前就被擋 =="
 rm -f "$POISON_MARKER"
@@ -170,6 +214,10 @@ assert_not_contains "$CMD_OUT" 'python3-certbot-nginx' \
   "不再安裝 python3-certbot-nginx（不用 --nginx plugin，base certbot 即可）"
 assert_contains "$CMD_OUT" 'mkdir -p /var/www/certbot/.well-known/acme-challenge' \
   "有先確保 webroot 目錄存在（certbot certonly --webroot 前置）"
+assert_contains "$CMD_OUT" 'systemctl enable --now certbot-renew.timer' \
+  "簽發成功後啟用自動續簽 timer（codex 複審 MEDIUM next step）"
+assert_contains "$CMD_OUT" 'certbot renew --dry-run' \
+  "簽發成功後跑 certbot renew --dry-run 驗證續簽路徑（webroot acme-challenge，同一條 location）"
 if bash -n <(printf '%s\n' "$CMD_OUT"); then
   pass "TF_SETUP_TLS_DRY_RUN 印出的 CMD 本身是合法 bash 語法（bash -n 過）"
 else

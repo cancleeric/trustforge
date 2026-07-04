@@ -48,9 +48,25 @@
 #   - `ADMIN_EMAIL` 已設成真實 email（見下方 ⚠️ 佔位提醒——certbot 用它接收
 #     憑證到期/撤銷通知，不能留空或用假信箱）
 #
+# ⛔ **DOMAIN 只接受寫死的 production hostname**（codex 複審 MEDIUM：
+# 本腳本原本接受任意合法格式的 DOMAIN 簽憑證，但 `deploy/nginx.conf`／
+# `deploy/cutover_switch.sh` 的 `REACT_TLS_DOMAIN` 都寫死
+# `trustforge.hurricanesoft.com.tw`——server_name、301 redirect target、
+# 憑證路徑 `/etc/letsencrypt/live/<domain>/` 全部只認這個值。若這裡讓
+# DOMAIN override 成別的網域，certbot 可能簽發成功，但 cutover 後 nginx
+# 仍然只認寫死的那個 domain/憑證路徑——會出現「憑證簽好了、cutover 卻找
+# 不到匹配的 server_name/憑證路徑而失敗」的不一致狀態。採 codex 建議的第
+# 一選項：只收 production domain、拒絕其他任何合法 domain，不參數化整套
+# nginx config，單一 domain 寫死到底最穩。若之後真的要多 domain，才需要
+# 「從同一個 validated DOMAIN 渲染 nginx.conf + cutover_switch.sh」，現在
+# 用不到）——
+#
 # 可調環境變數：
 #   REGION        （預設同 deploy_ec2.sh，ap-southeast-2）
-#   DOMAIN        （預設 trustforge.hurricanesoft.com.tw）
+#   DOMAIN        （唯一合法值：trustforge.hurricanesoft.com.tw，跟
+#                  deploy/nginx.conf／deploy/cutover_switch.sh 的
+#                  REACT_TLS_DOMAIN 一致；傳其他任何 domain 一律拒絕、
+#                  不簽）
 #   ADMIN_EMAIL   （⚠️ 佔位，無預設值——CEO 真跑前必須填一個真實可收信的
 #                  email，見下方用法）
 #   TRUSTFORGE_RUN_CERTBOT（預設空，需設成 "yes" 才會真的跑 certbot）
@@ -65,7 +81,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REGION="${REGION:-ap-southeast-2}"
-DOMAIN="${DOMAIN:-trustforge.hurricanesoft.com.tw}"
+# 跟 deploy/cutover_switch.sh 的 REACT_TLS_DOMAIN 保持同一個字面值——這是
+# 唯一允許簽發的 domain（見上方大段說明，codex 複審 MEDIUM）。
+PRODUCTION_DOMAIN="trustforge.hurricanesoft.com.tw"
+DOMAIN="${DOMAIN:-$PRODUCTION_DOMAIN}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 
 # ---- 嚴格驗證 DOMAIN/ADMIN_EMAIL 格式（codex 複審 HIGH：這兩個值最終會
@@ -79,6 +98,20 @@ if [ -z "$DOMAIN" ] || [ "${#DOMAIN}" -gt 253 ] || ! [[ "$DOMAIN" =~ $DOMAIN_RE 
   echo "❌ [setup-tls] DOMAIN 格式不合法（只允許字母/數字/連字號的合法網域名稱，" >&2
   echo "   例如 trustforge.hurricanesoft.com.tw；不允許空白/引號/\$/反引號/;" >&2
   echo "   等 shell 特殊字元）：DOMAIN=${DOMAIN}" >&2
+  exit 1
+fi
+
+# ---- DOMAIN 必須等於寫死的 production hostname（codex 複審 MEDIUM，見上方
+#      大段說明）：格式合法只是第一關，這裡是第二關——就算格式正確，只要不是
+#      deploy/nginx.conf／deploy/cutover_switch.sh 認得的那個 domain，一律
+#      拒絕，避免「簽發成功、cutover 失敗」的不一致 ----
+if [ "$DOMAIN" != "$PRODUCTION_DOMAIN" ]; then
+  echo "❌ [setup-tls] DOMAIN 必須是 production domain（${PRODUCTION_DOMAIN}），" >&2
+  echo "   拒絕簽發其他 domain（即使格式合法）：DOMAIN=${DOMAIN}" >&2
+  echo "   原因（codex 複審 MEDIUM）：deploy/nginx.conf／" >&2
+  echo "   deploy/cutover_switch.sh 的 server_name/redirect target/憑證路徑" >&2
+  echo "   都寫死 ${PRODUCTION_DOMAIN}，簽發別的 domain 只會讓憑證跟" >&2
+  echo "   cutover 對不上——憑證簽好了、cutover 卻失敗或找不到匹配設定。" >&2
   exit 1
 fi
 
@@ -136,6 +169,14 @@ fi
 # 不會再把 DOMAIN/ADMIN_EMAIL 的值重新拼進其他任何字串位置——即使驗證有
 # 漏網之魚，injected 內容頂多變成 argv[1]/argv[2] 的「資料」，不會被當成
 # shell 語法的一部分執行。
+#
+# ⛔ codex 複審 MEDIUM（next step）：簽發成功後，**啟用自動續簽 timer**
+# （`systemctl enable --now certbot-renew.timer`，不能只裝好 certbot 卻沒
+# 啟用定期續簽，那憑證到期前還是得手動介入）+ 跑一次
+# `certbot renew --dry-run` 驗證續簽路徑真的通（續簽一樣走
+# `certonly --webroot` 的 HTTP-01 challenge，靠的正是三份 nginx conf 新增
+# 的 `location ^~ /.well-known/acme-challenge/` 例外——dry-run 這裡順便就
+# 是那條路徑的端到端驗證）。
 CERTBOT_WEBROOT="/var/www/certbot"
 CMD="set -e
 dnf install -y certbot
@@ -147,7 +188,11 @@ TF_ADMIN_EMAIL=\"\$2\"
 certbot certonly --webroot -w ${CERTBOT_WEBROOT} -d \"\$TF_DOMAIN\" \\
   --non-interactive --agree-tos -m \"\$TF_ADMIN_EMAIL\"
 echo \"[setup-tls] certbot 簽發完成，憑證路徑：/etc/letsencrypt/live/\$TF_DOMAIN/\"
+systemctl enable --now certbot-renew.timer
+echo \"[setup-tls] certbot-renew.timer 已啟用（自動續簽）\"
 systemctl list-timers 'certbot-renew.timer' --no-pager || true
+certbot renew --dry-run
+echo \"[setup-tls] certbot renew --dry-run 通過（續簽路徑，含 webroot acme-challenge location，驗證正常）\"
 REMOTE_TLS_EOF
 "
 
