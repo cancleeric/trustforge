@@ -228,11 +228,13 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 | 2 | `cutover_switch.sh react\|react-http\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react`/`react-http` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止 |
 
 **`react` vs `react-http` 怎麼選**：兩者是同一套 React 前端拓樸，差別只在
-nginx 層有沒有 TLS——**現況 prod 是 bare IP（無 domain），Let's Encrypt/
-certbot 不會對 bare IP 簽發憑證**，此時只能用 `react-http`；等真的有 domain
-+ certbot 簽發的憑證就緒後，才切換用 `react`（TLS 版，含 80→443 redirect +
-HSTS）。python 端 `TRUSTFORGE_CSP_MODE` 兩者都設成 `react`（CSP 指令集本身
-一致，`web.py` 不需要為 `react-http` 多開一個分支）。
+nginx 層有沒有 TLS。**DNS 已就緒**（`trustforge.hurricanesoft.com.tw →
+13.211.110.218`，見 `deploy/nginx.conf`／`deploy/TLS-SETUP.md`）——主線是
+`react`（TLS 版，需先跑 `deploy/setup_tls.sh` 簽出憑證，見下方「完整
+cutover runbook」）；`react-http` 保留當 bare-IP／無 domain 現況、或憑證
+還沒就緒前想先驗證 React 拓樸本身時的 fallback。python 端
+`TRUSTFORGE_CSP_MODE` 兩者都設成 `react`（CSP 指令集本身一致，`web.py`
+不需要為 `react-http` 多開一個分支）。
 
 ### 涉及的 config-gated 環境變數（`src/trustforge/web.py`）
 
@@ -255,19 +257,21 @@ HSTS）。python 端 `TRUSTFORGE_CSP_MODE` 兩者都設成 `react`（CSP 指令�
   導致 `nginx -t`/reload 失敗。TLS 由 `certbot --nginx` 事後自動改寫本檔
   （見 `deploy/TLS-SETUP.md`）。全部（`/`、`/api/*`、`/healthz` 等）原樣
   轉發給 `127.0.0.1:8080`。
-- `deploy/nginx.conf`：cutover 後的目標拓樸（**需要 domain**）。`/` serve
-  React 靜態檔（`frontend/dist`）、`/api/` 轉發給 python，80→443 redirect +
-  HSTS，React 用 CSP 只加在 `location /`（不外溢到 `/api/` 的 JSON 回應）。
-- `deploy/nginx-react-http.conf`：cutover 後的目標拓樸，**HTTP-only 版
-  （bare IP、無 domain 現況用）**。跟 `nginx.conf` 同一套 React 拓樸/CSP
-  指令集，差別只在**只有 port 80、無 TLS、無 301 redirect、無 HSTS**（HSTS
-  只在 HTTPS 下有意義，HTTP-only 站台加了不會生效，故不加）。現況 prod 是
-  bare IP，Let's Encrypt/certbot 不會對 bare IP 簽發憑證，此時用這份；等
-  真的有 domain + 憑證就緒後，再換用 `nginx.conf`（TLS 版）。
+- `deploy/nginx.conf`：cutover 後的目標拓樸，**主線（domain 已就緒）**。
+  `server_name trustforge.hurricanesoft.com.tw`；`/` serve React 靜態檔
+  （`frontend/dist`）、`/api/` 轉發給 python，80→443 redirect + HSTS，
+  React 用 CSP 只加在 `location /`（不外溢到 `/api/` 的 JSON 回應）；
+  `ssl_certificate`/`ssl_certificate_key` 讀
+  `/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/`（見
+  `deploy/TLS-SETUP.md`、`deploy/setup_tls.sh`）。
+- `deploy/nginx-react-http.conf`：同一套 React 拓樸的 **HTTP-only fallback
+  版**（bare IP、無 domain，或憑證還沒簽出來前想先驗證拓樸本身時用）。跟
+  `nginx.conf` 差別只在**只有 port 80、無 TLS、無 301 redirect、無 HSTS**
+  （HSTS 只在 HTTPS 下有意義，HTTP-only 站台加了不會生效，故不加）。
 
   **什麼時候用哪份**（cutover 決策，供 CEO/CISO/CPO 三審參考）：
-  - 現況 bare IP、無 domain → `deploy/cutover_switch.sh react-http`
-  - 已有 domain + certbot 簽發憑證 → `deploy/cutover_switch.sh react`
+  - domain + certbot 簽發憑證已就緒（主線現況）→ `deploy/cutover_switch.sh react`
+  - bare IP、無 domain，或憑證尚未簽出 → `deploy/cutover_switch.sh react-http`（fallback）
   - 緊急回滾／SSR 一週觀察期 → `deploy/cutover_switch.sh legacy`
 
   跟 `nginx.conf` 一樣，`/` 下 CSP/X-Frame-Options 等安全 header 的實際
@@ -292,8 +296,35 @@ HSTS）。python 端 `TRUSTFORGE_CSP_MODE` 兩者都設成 `react`（CSP 指令�
 
 ### TLS
 
-`deploy/TLS-SETUP.md`：只有設定文件 + 指令，**沒有實際簽發憑證**——實際
-`certbot --nginx` 執行留給 netops 在真實 domain 就緒後手動跑。
+`deploy/TLS-SETUP.md` + `deploy/setup_tls.sh`：domain 已就緒
+（`trustforge.hurricanesoft.com.tw → 13.211.110.218`），但**這個任務仍是
+config-only，沒有實際簽發憑證**——`setup_tls.sh` 預設只印出會執行的內容、
+不真的呼叫 `aws ssm`/`certbot`，需同時設
+`TRUSTFORGE_RUN_CERTBOT=yes` + 真實 `ADMIN_EMAIL` 才會真跑（CEO 真部署時
+決定）。**順序鐵則**：certbot 走 HTTP-01 challenge，必須先跑
+`deploy_frontend_nginx.sh`（或已切 `react-http`）讓 nginx 在 80 port 上
+可服務，才能跑 `setup_tls.sh`；反過來（先切 TLS 版 `nginx.conf`）會讓
+nginx 因為憑證檔案不存在而 `nginx -t` 失敗。完整順序見下方「完整 cutover
+runbook」。
+
+### 完整 cutover runbook（react-TLS domain cutover）
+
+1. **DNS**：`trustforge.hurricanesoft.com.tw → 13.211.110.218`（✓ 已完成）。
+2. **deploy legacy**（nginx 在 80 上先服務）：`bash deploy/deploy_frontend_nginx.sh`
+   ——預設啟用 `deploy/nginx-legacy.conf`。
+3. **certbot 簽發**：
+   `ADMIN_EMAIL=<真實 email> TRUSTFORGE_RUN_CERTBOT=yes bash deploy/setup_tls.sh`
+   ——簽出 `/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/{fullchain,privkey}.pem`。
+4. **cutover 到 react（TLS 版）**：
+   `TRUSTFORGE_CUTOVER_CONFIRMED=yes deploy/cutover_switch.sh react`
+   （需 CEO+CISO+CPO 三審 + 老闆簽核）。
+5. **驗證 https**：`curl -I https://trustforge.hurricanesoft.com.tw/`，
+   確認 200 + HSTS/CSP header 皆存在；`cutover_switch.sh` Step 4b 的
+   public smoke check 也會在 cutover 當下自動驗證這件事（見上方「nginx
+   conf 三個變體」段落說明）。
+
+回滾：`deploy/cutover_switch.sh legacy`（秒切回 SSR 全轉發，不動憑證，見
+`deploy/TLS-SETUP.md`「回滾」段落）。
 
 ### `cutover_switch.sh` exit code 慣例（供維運/監控）
 
@@ -320,8 +351,12 @@ send-command`/`get-command-invocation` 那段）會讀 `get-command-invocation`
 
 ```bash
 # 語法檢查
-bash -n deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh
-shellcheck deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh
+bash -n deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh deploy/setup_tls.sh
+shellcheck deploy/deploy_frontend_nginx.sh deploy/cutover_switch.sh deploy/setup_tls.sh
+
+# setup_tls.sh dry-run（不呼叫真 aws ssm/certbot，只印出會執行的遠端指令）
+TF_SETUP_TLS_DRY_RUN=1 ADMIN_EMAIL=test@example.com TRUSTFORGE_RUN_CERTBOT=yes \
+  bash deploy/setup_tls.sh
 
 # nginx conf 語法（本機 brew nginx，legacy/react-http 不需憑證；react 需
 # 暫時自簽憑證才能測 443 block，見 commit message／PR 描述的驗證步驟）

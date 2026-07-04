@@ -348,7 +348,8 @@ if [ "$STATUS" = "Success" ] && [ "$RESPONSE_CODE" = "0" ]; then
   echo "[fe-nginx] 目前拓樸：nginx(legacy, http-only) → python(127.0.0.1:8080)"
   echo "[fe-nginx] 下一步（需三審+簽核）："
   echo "[fe-nginx]   bare-IP 現況（無 domain）：deploy/cutover_switch.sh react-http"
-  echo "[fe-nginx]   有 domain：先 deploy/TLS-SETUP.md 設 TLS，再 deploy/cutover_switch.sh react"
+  echo "[fe-nginx]   有 domain（trustforge.hurricanesoft.com.tw 已指好）："
+  echo "[fe-nginx]     先 deploy/setup_tls.sh 簽 TLS 憑證，再 deploy/cutover_switch.sh react"
   exit 0
 fi
 echo "[fe-nginx] ❌ nginx+python 拓樸部署失敗：CommandId=$CMDID Status=${STATUS} ResponseCode=${RESPONSE_CODE}" >&2

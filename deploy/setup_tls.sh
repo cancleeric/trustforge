@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# TrustForge — Let's Encrypt/certbot 簽發（task #28 Phase 3，react-TLS domain
+# cutover）。
+#
+# ⛔ **順序鐵則（certbot 前 nginx 必須先在 80 可服務 HTTP-01 challenge）**：
+#   1. `deploy/deploy_frontend_nginx.sh` 先跑過至少一次——這一步預設啟用
+#      `deploy/nginx-legacy.conf`（或 bare-IP 現況先切
+#      `deploy/cutover_switch.sh react-http`），讓 nginx 在 80 port 上真的
+#      能服務（SSR 全轉發或 React HTTP-only 版都可以，重點是「nginx 已經
+#      在跑、80 有回應」）。
+#   2. **本腳本**（`deploy/setup_tls.sh`）：對已指到 EC2 的 domain 跑
+#      `certbot --nginx`，走 HTTP-01 challenge（ACME 會打 domain 的 80 port
+#      驗證所有權）——**這一步的前提就是第 1 步的 nginx 已經在 80 上可服務
+#      challenge**，順序反了 certbot 會直接簽發失敗。
+#   3. 簽發成功、憑證就位（`/etc/letsencrypt/live/<domain>/`）後，才執行
+#      `deploy/cutover_switch.sh react`，把 nginx 換成 `deploy/nginx.conf`
+#      （TLS 版，讀取本腳本簽出的憑證路徑）。
+#
+# 本腳本**不是**cutover 的一部分（不改 nginx 的 live symlink/CSP_MODE），
+# 只負責「把憑證簽出來、certbot 順便掛好 nginx 的 443 block（--nginx
+# plugin 行為）+ auto-renew timer」——真正切到 React TLS 拓樸仍是
+# `deploy/cutover_switch.sh react` 的職責，兩者刻意分開（比照
+# `deploy/deploy_frontend_nginx.sh`「架好但不切」／`cutover_switch.sh`
+# 「真正切」的既有分工）。
+#
+# domain：trustforge.hurricanesoft.com.tw（DNS A record 已指到 EC2
+# 13.211.110.218，見 deploy/nginx.conf／deploy/TLS-SETUP.md）。
+#
+# ⛔ **certbot 是否真的執行是可選 step，預設不跑**（config-only 任務，禁真跑
+# AWS/certbot；CEO 真部署時才決定要不要跑）：本腳本預設只印出「會執行什麼」
+# 並中止，只有同時滿足以下兩個條件才會真的透過 SSM 對 EC2 下 certbot 指令：
+#   - `TRUSTFORGE_RUN_CERTBOT=yes`（比照 deploy/cutover_switch.sh 的
+#     `TRUSTFORGE_CUTOVER_CONFIRMED=yes` 慣例，代表「這是刻意要真跑」）
+#   - `ADMIN_EMAIL` 已設成真實 email（見下方 ⚠️ 佔位提醒——certbot 用它接收
+#     憑證到期/撤銷通知，不能留空或用假信箱）
+#
+# 可調環境變數：
+#   REGION        （預設同 deploy_ec2.sh，ap-southeast-2）
+#   DOMAIN        （預設 trustforge.hurricanesoft.com.tw）
+#   ADMIN_EMAIL   （⚠️ 佔位，無預設值——CEO 真跑前必須填一個真實可收信的
+#                  email，見下方用法）
+#   TRUSTFORGE_RUN_CERTBOT（預設空，需設成 "yes" 才會真的跑 certbot）
+#   TF_SETUP_TLS_DRY_RUN=1（測試用逃生口，只印出組好的遠端指令內容、不呼叫
+#                  `aws ssm send-command`，比照 deploy/cutover_switch.sh、
+#                  deploy/deploy_frontend_nginx.sh 同款設計）
+#
+# 用法（CEO 真跑時）：
+#   ADMIN_EMAIL=ops@hurricanesoft.com.tw TRUSTFORGE_RUN_CERTBOT=yes \
+#     bash deploy/setup_tls.sh
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REGION="${REGION:-ap-southeast-2}"
+DOMAIN="${DOMAIN:-trustforge.hurricanesoft.com.tw}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+
+echo "[setup-tls] domain=${DOMAIN} region=${REGION}" >&2
+echo "[setup-tls] 前置確認：deploy/deploy_frontend_nginx.sh（或" >&2
+echo "[setup-tls]   deploy/cutover_switch.sh react-http）已跑過，nginx 目前" >&2
+echo "[setup-tls]   確實在 80 port 上可服務（certbot HTTP-01 challenge 的前提）。" >&2
+
+if [ -z "$ADMIN_EMAIL" ]; then
+  echo "❌ [setup-tls] 未設 ADMIN_EMAIL（⚠️ 佔位，讓 CEO 填一個真實可收信的" >&2
+  echo "   email，certbot 用它接收憑證到期/撤銷通知）。範例：" >&2
+  echo "   ADMIN_EMAIL=ops@hurricanesoft.com.tw TRUSTFORGE_RUN_CERTBOT=yes bash $0" >&2
+  exit 1
+fi
+
+if [ "${TRUSTFORGE_RUN_CERTBOT:-}" != "yes" ]; then
+  echo "❌ [setup-tls] 未設 TRUSTFORGE_RUN_CERTBOT=yes，視為「先看看會跑什麼、" >&2
+  echo "   還不要真的簽」，中止（不做任何 mutation）。確認 nginx 已在 80" >&2
+  echo "   可服務、domain 已指好之後，執行：" >&2
+  echo "   ADMIN_EMAIL=<email> TRUSTFORGE_RUN_CERTBOT=yes $0" >&2
+  exit 1
+fi
+
+# 遠端指令：安裝 certbot 的 nginx plugin + 執行簽發。`--nginx` plugin 會
+# 自動找到目前 live 的 nginx conf 裡 `server_name ${DOMAIN}` 的 server
+# block（此時應是 nginx-legacy.conf 或 nginx-react-http.conf，兩者
+# server_name 都需與 DOMAIN 一致才會被 certbot 認得——見下方 NOTE）並改寫
+# `ssl_certificate`/`ssl_certificate_key`；因為真正的 TLS 拓樸是
+# `deploy/nginx.conf`（cutover_switch.sh react 才會切上去），這裡簽發完
+# 之後不依賴 certbot 幫 legacy/react-http conf 加的 443 block，cutover 時
+# `deploy/nginx.conf` 自己已經寫死讀同一個憑證路徑
+# （/etc/letsencrypt/live/${DOMAIN}/），只要憑證檔案就位即可。
+CMD="set -e
+dnf install -y python3-certbot-nginx
+certbot --nginx -d ${DOMAIN} \\
+  --non-interactive --agree-tos -m ${ADMIN_EMAIL} --redirect
+echo '[setup-tls] certbot 簽發完成，憑證路徑：/etc/letsencrypt/live/${DOMAIN}/'
+systemctl list-timers 'certbot-renew.timer' --no-pager || true
+"
+
+if [ "${TF_SETUP_TLS_DRY_RUN:-}" = "1" ]; then
+  printf '%s' "$CMD"
+  exit 0
+fi
+
+MATCHES=$(aws ec2 describe-instances --region "$REGION" \
+  --filters Name=tag:Name,Values=trustforge-demo \
+    Name=instance-state-name,Values=running \
+  --query 'Reservations[].Instances[].InstanceId' --output text)
+IID=$(printf '%s\n' "$MATCHES" | awk '{print $1}')
+if [ -z "$IID" ] || [ "$IID" = "None" ]; then
+  echo "❌ [setup-tls] 找不到 running 中的 trustforge-demo 實例，中止" >&2
+  exit 1
+fi
+echo "[setup-tls] 目標實例 ${IID}，簽發 ${DOMAIN} 的憑證" >&2
+
+CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
+  --document-name AWS-RunShellScript \
+  --parameters "commands=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))' <<<"$CMD")" \
+  --query 'Command.CommandId' --output text)
+aws ssm wait command-executed --region "$REGION" --command-id "$CMDID" --instance-id "$IID" 2>/dev/null || true
+STATUS=$(aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" --query Status --output text)
+if [ "$STATUS" = "Success" ]; then
+  echo "✅ [setup-tls] 憑證簽發完成（CommandId=${CMDID}），下一步：" >&2
+  echo "   TRUSTFORGE_CUTOVER_CONFIRMED=yes deploy/cutover_switch.sh react" >&2
+  exit 0
+fi
+echo "❌ [setup-tls] 憑證簽發失敗：Status=$STATUS" >&2
+aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" \
+  --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
+exit 1
