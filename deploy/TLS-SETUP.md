@@ -23,8 +23,12 @@ URL 驗證你真的控制這個 domain——**這代表 nginx 必須先在 80 po
 2. **deploy legacy（nginx 在 80 上先服務）**：`bash deploy/deploy_frontend_nginx.sh`
    ——預設啟用 `deploy/nginx-legacy.conf`（SSR 全轉發，HTTP-only）；bare-IP
    現況若已切過 `deploy/cutover_switch.sh react-http` 也可以，重點是 nginx
-   此刻確實在 80 上可服務。
-3. **certbot 簽發**（本文件 + `deploy/setup_tls.sh`，見下）。
+   此刻確實在 80 上可服務。兩份 conf 都已內建
+   `location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }`，
+   HTTP-01 challenge 檔案能直接從檔案系統回應，不需要（也不依賴）
+   `server_name` 是不是真實 domain。
+3. **certbot 簽發**（本文件 + `deploy/setup_tls.sh`，見下——`certonly
+   --webroot`，不用 `--nginx` plugin，見下方說明）。
 4. **cutover 到 react（TLS 版）**：憑證就位後才執行
    `TRUSTFORGE_CUTOVER_CONFIRMED=yes deploy/cutover_switch.sh react`。
 5. **驗證 https**：`curl -I https://trustforge.hurricanesoft.com.tw/`。
@@ -50,22 +54,44 @@ ADMIN_EMAIL=<真實可收信 email，CEO 填> TRUSTFORGE_RUN_CERTBOT=yes \
 腳本內部等效於：
 
 ```bash
-sudo dnf install -y python3-certbot-nginx
-sudo certbot --nginx -d trustforge.hurricanesoft.com.tw \
-  --non-interactive --agree-tos -m <admin email> \
-  --redirect
+sudo dnf install -y certbot
+sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
+sudo certbot certonly --webroot -w /var/www/certbot \
+  -d trustforge.hurricanesoft.com.tw \
+  --non-interactive --agree-tos -m <admin email>
 ```
 
-- `--nginx` plugin 會自動找到**目前 live** 的 nginx conf（此刻是
-  `nginx-legacy.conf` 或 `nginx-react-http.conf`）裡
-  `server_name trustforge.hurricanesoft.com.tw` 的 server block 簽發憑證。
-  真正的 TLS 拓樸 `deploy/nginx.conf` 已經寫死讀
+⛔ **改用 `certonly --webroot`，不用 `--nginx` plugin**（codex 複審 HIGH：
+`--nginx` plugin non-interactive 模式需要精準比對到 `server_name
+trustforge.hurricanesoft.com.tw` 的 server block 才簽得出來，但
+`nginx-legacy.conf`/`nginx-react-http.conf` 目前的 `server_name` 寫死是
+`_`——這兩份 conf 從未被任何部署腳本自動改寫成真實 domain（先前文件誤以為
+會、實際上是遺留的手動步驟，從沒真的自動化），`--nginx` non-interactive
+在這種情況下配對不到，會直接簽發失敗或留下半殘狀態）：
+
+- `certonly --webroot` **只取憑證，完全不碰 nginx config**：HTTP-01
+  challenge 檔案寫進 `/var/www/certbot/.well-known/acme-challenge/`，
+  ACME 伺服器打 `http://trustforge.hurricanesoft.com.tw/.well-known/
+  acme-challenge/<token>` 時，是由 `nginx-legacy.conf`／
+  `nginx-react-http.conf`／`nginx.conf`（cutover 後）裡新增的
+  `location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }`
+  這個 location 直接從檔案系統回應，**跟 `server_name` 是不是 `_` 完全
+  無關**（同一個 port 上只有一個 server block 時，nginx 一律用它服務，
+  不管 Host header 是什麼）——完全繞開 `--nginx` plugin 的 server_name
+  配對問題。
+- `--nginx` plugin 原本還會有的 `--redirect`（自動幫目前 live 的 conf 加
+  80→443 redirect）效果，這裡不需要：真正的 TLS 拓樸/redirect 是
+  `deploy/nginx.conf`（`cutover_switch.sh react` 才會切上去），`certonly`
+  不改 nginx，兩者職責更乾淨地分開。
+- 真正的 TLS 拓樸 `deploy/nginx.conf` 已經寫死讀
   `/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/{fullchain,privkey}.pem`
-  ——不依賴 certbot 幫 legacy/react-http conf 加的東西，只要憑證檔案簽出來
-  就位，之後 `cutover_switch.sh react` 切上去時 `nginx.conf` 就讀得到。
-- `--redirect`：certbot 順便幫「目前 live 的那份 conf」加 80→443
-  redirect；這個副作用不影響後續 cutover（`cutover_switch.sh react` 會
-  整份換成 `deploy/nginx.conf`，覆蓋掉 certbot 這裡順手加的東西）。
+  ——只要憑證檔案簽出來就位，之後 `cutover_switch.sh react` 切上去時
+  `nginx.conf` 就讀得到。
+- **續簽也走同一條路**：`nginx.conf`（cutover 後的 TLS 拓樸）port 80
+  server block 同樣加了 `/.well-known/acme-challenge/` 這個 location（在
+  `return 301 ...` 的 catch-all之前），所以 `certbot-renew.timer` 之後
+  自動續簽時，即使此刻 live 的是 TLS 版 nginx，HTTP-01 challenge 一樣服務
+  得到，不會被 301 redirect 擋掉。
 
 ## 續簽
 

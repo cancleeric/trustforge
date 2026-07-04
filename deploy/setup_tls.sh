@@ -9,16 +9,30 @@
 #      能服務（SSR 全轉發或 React HTTP-only 版都可以，重點是「nginx 已經
 #      在跑、80 有回應」）。
 #   2. **本腳本**（`deploy/setup_tls.sh`）：對已指到 EC2 的 domain 跑
-#      `certbot --nginx`，走 HTTP-01 challenge（ACME 會打 domain 的 80 port
-#      驗證所有權）——**這一步的前提就是第 1 步的 nginx 已經在 80 上可服務
-#      challenge**，順序反了 certbot 會直接簽發失敗。
+#      `certbot certonly --webroot`，走 HTTP-01 challenge（ACME 會打 domain
+#      的 80 port 驗證所有權）——**這一步的前提就是第 1 步的 nginx 已經在
+#      80 上可服務 challenge**，順序反了 certbot 會直接簽發失敗。
 #   3. 簽發成功、憑證就位（`/etc/letsencrypt/live/<domain>/`）後，才執行
 #      `deploy/cutover_switch.sh react`，把 nginx 換成 `deploy/nginx.conf`
 #      （TLS 版，讀取本腳本簽出的憑證路徑）。
 #
+# ⛔ **`certonly --webroot`，不是 `--nginx` plugin**（codex 複審 HIGH）：
+# `--nginx` plugin 在 non-interactive 模式需要精準比對到 `server_name
+# <domain>` 的 server block 才簽得出來，但 `deploy/nginx-legacy.conf`／
+# `deploy/nginx-react-http.conf` 的 `server_name` 一律寫死是 `_`（從未被
+# 任何部署腳本自動改寫成真實 domain——先前文件誤以為 certbot --nginx 會
+# 自動處理，實際上這只是遺留的手動假設，從沒真的自動化），`--nginx`
+# non-interactive 對這種情況配對不到，會直接簽發失敗或留下半殘狀態。改用
+# `certonly --webroot -w /var/www/certbot`：**只取憑證，完全不碰 nginx
+# config**，HTTP-01 challenge 檔案由 `deploy/nginx-legacy.conf`／
+# `deploy/nginx-react-http.conf`／`deploy/nginx.conf`（cutover 後，續簽用）
+# 裡新增的 `location ^~ /.well-known/acme-challenge/ { root
+# /var/www/certbot; }` 直接從檔案系統回應，跟 `server_name` 是不是真實
+# domain 完全無關（同一個 port 上只有一個 server block 時，nginx 一律用
+# 它服務任何 Host）。
+#
 # 本腳本**不是**cutover 的一部分（不改 nginx 的 live symlink/CSP_MODE），
-# 只負責「把憑證簽出來、certbot 順便掛好 nginx 的 443 block（--nginx
-# plugin 行為）+ auto-renew timer」——真正切到 React TLS 拓樸仍是
+# 只負責「把憑證簽出來 + auto-renew timer」——真正切到 React TLS 拓樸仍是
 # `deploy/cutover_switch.sh react` 的職責，兩者刻意分開（比照
 # `deploy/deploy_frontend_nginx.sh`「架好但不切」／`cutover_switch.sh`
 # 「真正切」的既有分工）。
@@ -98,34 +112,40 @@ if [ "${TRUSTFORGE_RUN_CERTBOT:-}" != "yes" ]; then
   exit 1
 fi
 
-# 遠端指令：安裝 certbot 的 nginx plugin + 執行簽發。`--nginx` plugin 會
-# 自動找到目前 live 的 nginx conf 裡 `server_name ${DOMAIN}` 的 server
-# block（此時應是 nginx-legacy.conf 或 nginx-react-http.conf，兩者
-# server_name 都需與 DOMAIN 一致才會被 certbot 認得——見下方 NOTE）並改寫
-# `ssl_certificate`/`ssl_certificate_key`；因為真正的 TLS 拓樸是
-# `deploy/nginx.conf`（cutover_switch.sh react 才會切上去），這裡簽發完
-# 之後不依賴 certbot 幫 legacy/react-http conf 加的 443 block，cutover 時
-# `deploy/nginx.conf` 自己已經寫死讀同一個憑證路徑
-# （/etc/letsencrypt/live/${DOMAIN}/），只要憑證檔案就位即可。
+# 遠端指令：安裝 certbot（base 套件即可，**不裝** python3-certbot-nginx，
+# 這裡不用 `--nginx` plugin）+ 執行 `certonly --webroot` 簽發。
 #
-# ⛔ codex 複審 HIGH（注入防護，defense-in-depth）：DOMAIN/ADMIN_EMAIL 上面
-# 已經過嚴格 regex 驗證，但不只依賴這一層——這裡刻意不把 DOMAIN/ADMIN_EMAIL
-# 到處內插進 script 字串（例如直接寫進 certbot 指令行），而是只在唯一一個
-# 位置把它們當成**兩個獨立、有加引號的 shell 參數**傳給
-# `bash -s -- "${DOMAIN}" "${ADMIN_EMAIL}"`，真正的 certbot 邏輯（用
+# ⛔ codex 複審 HIGH（`--nginx` plugin 配對不到 server_name，見上方大段
+# 說明）：改用 `certonly --webroot -w ${CERTBOT_WEBROOT}`，只取憑證、
+# 完全不碰 nginx config；HTTP-01 challenge 檔案由
+# deploy/nginx-legacy.conf／deploy/nginx-react-http.conf／
+# deploy/nginx.conf 裡新增的 `location ^~ /.well-known/acme-challenge/
+# { root ${CERTBOT_WEBROOT}; }` 直接從檔案系統回應。因為真正的 TLS 拓樸是
+# `deploy/nginx.conf`（cutover_switch.sh react 才會切上去），這裡簽發完
+# 之後不依賴 certbot 改過任何 nginx conf，cutover 時 `deploy/nginx.conf`
+# 自己已經寫死讀同一個憑證路徑（/etc/letsencrypt/live/${DOMAIN}/），只要
+# 憑證檔案就位即可。
+#
+# ⛔ codex 複審另一個 HIGH（注入防護，defense-in-depth）：DOMAIN/ADMIN_EMAIL
+# 上面已經過嚴格 regex 驗證，但不只依賴這一層——這裡刻意不把
+# DOMAIN/ADMIN_EMAIL 到處內插進 script 字串（例如直接寫進 certbot 指令
+# 行），而是只在唯一一個位置把它們當成**兩個獨立、有加引號的 shell 參數**
+# 傳給 `bash -s -- "${DOMAIN}" "${ADMIN_EMAIL}"`，真正的 certbot 邏輯（用
 # `<<'REMOTE_TLS_EOF'`、單引號 heredoc 界定字，本機建構 CMD 字串時完全不
 # 展開）只透過 `$1`/`$2` 這兩個 shell 內建的 positional parameter 取值，
 # 不會再把 DOMAIN/ADMIN_EMAIL 的值重新拼進其他任何字串位置——即使驗證有
 # 漏網之魚，injected 內容頂多變成 argv[1]/argv[2] 的「資料」，不會被當成
 # shell 語法的一部分執行。
+CERTBOT_WEBROOT="/var/www/certbot"
 CMD="set -e
-dnf install -y python3-certbot-nginx
+dnf install -y certbot
+mkdir -p ${CERTBOT_WEBROOT}/.well-known/acme-challenge
 bash -s -- \"${DOMAIN}\" \"${ADMIN_EMAIL}\" <<'REMOTE_TLS_EOF'
 set -e
 TF_DOMAIN=\"\$1\"
 TF_ADMIN_EMAIL=\"\$2\"
-certbot --nginx -d \"\$TF_DOMAIN\" \\
-  --non-interactive --agree-tos -m \"\$TF_ADMIN_EMAIL\" --redirect
+certbot certonly --webroot -w ${CERTBOT_WEBROOT} -d \"\$TF_DOMAIN\" \\
+  --non-interactive --agree-tos -m \"\$TF_ADMIN_EMAIL\"
 echo \"[setup-tls] certbot 簽發完成，憑證路徑：/etc/letsencrypt/live/\$TF_DOMAIN/\"
 systemctl list-timers 'certbot-renew.timer' --no-pager || true
 REMOTE_TLS_EOF

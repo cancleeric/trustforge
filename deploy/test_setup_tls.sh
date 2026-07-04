@@ -15,6 +15,17 @@
 #      deploy/deploy_frontend_nginx.sh 已有的做法，算相符實例數，非
 #      「剛好 1 台」一律 fail-closed 中止、distinct 訊息 + 非零 exit。
 #
+#   3. [certbot --nginx 配對不到 server_name] `certbot --nginx -d <domain>
+#      --non-interactive` 需要 active nginx config 有匹配該 domain 的
+#      `server_name` block，但 deploy/nginx-legacy.conf／
+#      deploy/nginx-react-http.conf 都用 `server_name _;`——`--nginx`
+#      plugin non-interactive 配對不到，會直接簽發失敗/留半殘憑證。修法：
+#      改用 `certbot certonly --webroot -w /var/www/certbot`，只取憑證、
+#      完全不碰 nginx config；HTTP-01 challenge 檔案由三份 nginx conf
+#      （legacy/react-http/react-TLS，續簽也算）裡新增的
+#      `location ^~ /.well-known/acme-challenge/ { root /var/www/certbot;
+#      }` 直接從檔案系統回應，跟 server_name 是不是真實 domain 無關。
+#
 # 測法：
 #   - 場景 1：hostile DOMAIN（`;`/`$()`/引號/空白）→ 斷言在碰任何 aws 呼叫
 #     前就被 regex 擋下、非零結束、訊息含「DOMAIN 格式不合法」。
@@ -149,6 +160,16 @@ assert_not_contains "$CMD_OUT" '-d trustforge.hurricanesoft.com.tw' \
   "certbot -d 那行不再直接內插 DOMAIN 字面值（只透過 \$TF_DOMAIN 引用）"
 assert_not_contains "$CMD_OUT" '-m ops@hurricanesoft.com.tw' \
   "certbot -m 那行不再直接內插 ADMIN_EMAIL 字面值（只透過 \$TF_ADMIN_EMAIL 引用）"
+assert_contains "$CMD_OUT" 'certbot certonly --webroot -w /var/www/certbot' \
+  "改用 certbot certonly --webroot（codex 複審 HIGH：--nginx plugin 對 server_name _ 配對不到會簽發失敗）"
+assert_not_contains "$CMD_OUT" 'certbot --nginx' \
+  "不再用 certbot --nginx plugin"
+assert_not_contains "$CMD_OUT" '--redirect' \
+  "certonly 不需要 --redirect（不碰 nginx config，redirect 交給 deploy/nginx.conf 本身）"
+assert_not_contains "$CMD_OUT" 'python3-certbot-nginx' \
+  "不再安裝 python3-certbot-nginx（不用 --nginx plugin，base certbot 即可）"
+assert_contains "$CMD_OUT" 'mkdir -p /var/www/certbot/.well-known/acme-challenge' \
+  "有先確保 webroot 目錄存在（certbot certonly --webroot 前置）"
 if bash -n <(printf '%s\n' "$CMD_OUT"); then
   pass "TF_SETUP_TLS_DRY_RUN 印出的 CMD 本身是合法 bash 語法（bash -n 過）"
 else

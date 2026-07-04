@@ -254,9 +254,13 @@ cutover runbook」）；`react-http` 保留當 bare-IP／無 domain 現況、或
 
 - `deploy/nginx-legacy.conf`：cutover 前的預設/回滾安全值。**刻意只寫
   HTTP（80）**，不預先手刻 443/TLS——避免部署當下引用尚不存在的憑證檔案
-  導致 `nginx -t`/reload 失敗。TLS 由 `certbot --nginx` 事後自動改寫本檔
-  （見 `deploy/TLS-SETUP.md`）。全部（`/`、`/api/*`、`/healthz` 等）原樣
-  轉發給 `127.0.0.1:8080`。
+  導致 `nginx -t`/reload 失敗。TLS 憑證由 `certbot certonly --webroot`
+  簽發（見 `deploy/TLS-SETUP.md`——**不用** `--nginx` plugin，本檔
+  `server_name _` 從未被自動改寫成真實 domain，`--nginx` non-interactive
+  配對不到會失敗；本檔已內建
+  `location ^~ /.well-known/acme-challenge/` 直接從檔案系統服務 HTTP-01
+  challenge，跟 `server_name` 無關）。全部（`/`、`/api/*`、`/healthz` 等）
+  原樣轉發給 `127.0.0.1:8080`。
 - `deploy/nginx.conf`：cutover 後的目標拓樸，**主線（domain 已就緒）**。
   `server_name trustforge.hurricanesoft.com.tw`；`/` serve React 靜態檔
   （`frontend/dist`）、`/api/` 轉發給 python，80→443 redirect + HSTS，
