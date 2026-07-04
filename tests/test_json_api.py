@@ -1421,6 +1421,138 @@ def test_api_analyze_dedup_key_distinguishes_query_whitespace_variant(monkeypatc
     )
 
 
+def test_api_analyze_dedup_key_no_delimiter_injection_collision(monkeypatch):
+    """codex 複審 HIGH（key delimiter 注入碰撞）：`_analyze_dedup_key` 先前用
+    `"\\x1f".join(...)` 固定分隔字元串接所有欄位——但每一段都是 user 可控
+    的原始輸入（`query`/`sample`/`token`… 皆可含任意位元組，包括 `\\x1f`
+    本身），未逃逸的固定分隔字元串接不保證「不同語意的欄位組合 ⇒ 不同
+    字串」這個 key 必須成立的不變量：只要某個欄位的內容剛好吸收了本該屬於
+    另一個欄位的分隔位元組，兩組完全不同的 (query, sample, live, real,
+    token) 組合就可能被串接成一模一樣的位元組序列，共用同一把 dedup key
+    ——導致其中一個請求的 in-flight/快取結果被另一個完全不相干的請求
+    冒用，且該跑的那次計算被錯誤地抑制掉。
+
+    驗證方法上的誠實揭露：codex 複審訊息裡舉的示意例子（`q=x%1F1`
+    無 `sample` 參數 vs `q=x&sample=1`）經實際逐位元組驗算/程式驗證
+    （見下方 `_legacy_vulnerable_join` 重建），**在目前這個固定 7 欄位
+    join 下並不會真的字串相等**（差恰好 1 個尾端分隔位元組，屬於示意性
+    簡化說法，非本函式實際位元組行為的精確重現）；真正可程式驗證、
+    確實會碰撞的一組具體反例是本測試使用的 `("x\\x1f1", sample="")`
+    vs `("x", sample="1\\x1f")`——兩者串接後位元組序列完全相同（已用
+    `_legacy_vulnerable_join` 重建驗證），足以證明「未逃逸固定分隔字元
+    串接不是 collision-resistant」這個 codex 抓到的根本問題類別確實存在
+    且可被實際觸發，不論示意例子本身是否逐位元組精確。
+
+    修法：key 改用 `json.dumps(...)` 序列化，JSON 字串逃逸使 user 輸入的
+    `\\x1f`／逗號／引號都無法偽造成別的欄位邊界，兩個真正不同的欄位組合
+    在任何情況下都不可能序列化成同一把 key。"""
+    qtype = web.QuestionType("multi_source")
+
+    def _legacy_vulnerable_join(coin_key: str, query: str, qs: dict) -> str:
+        """重建修復前 `_analyze_dedup_key` 的 `"\\x1f".join(...)` 邏輯
+        （不呼叫 production code），僅用於證明「舊格式確實會碰撞」。"""
+        sample_raw = qs.get("sample", [""])[0] or ""
+        live_raw = qs.get("live", [""])[0] or ""
+        real_raw = qs.get("real", [""])[0] or ""
+        token_raw = qs.get("token", [""])[0] or ""
+        return "\x1f".join(
+            (qtype.value, coin_key, query, sample_raw, live_raw, real_raw, token_raw)
+        )
+
+    # --- (1) 真實可驗證的碰撞對：query 含 \x1f（無 sample）vs query 乾淨
+    #     但 sample 欄位本身帶了一個尾端 \x1f 位元組——兩者是完全不同的
+    #     原始輸入（不同 query 字串、不同 sample 原始值），舊格式下卻串接
+    #     成同一把 key。
+    qs_a = {"coin": ["BTC"], "type": ["multi_source"], "q": ["x\x1f1"]}
+    qs_b = {"coin": ["BTC"], "type": ["multi_source"], "q": ["x"], "sample": ["1\x1f"]}
+
+    legacy_key_a = _legacy_vulnerable_join("BTC", "x\x1f1", qs_a)
+    legacy_key_b = _legacy_vulnerable_join("BTC", "x", qs_b)
+    assert legacy_key_a == legacy_key_b, (
+        "重現修復前的問題：這組具體反例在舊版 \\x1f 串接下本該碰撞成同一把 key"
+        f"（legacy_a={legacy_key_a!r}, legacy_b={legacy_key_b!r}）"
+    )
+
+    key_a = web._analyze_dedup_key(qtype=qtype, coin_key="BTC", query="x\x1f1", qs=qs_a)
+    key_b = web._analyze_dedup_key(qtype=qtype, coin_key="BTC", query="x", qs=qs_b)
+    assert key_a != key_b, (
+        "修復後：這組會讓舊格式碰撞的具體反例，用現行 JSON 序列化不該再碰撞"
+        f"（key_a={key_a!r}, key_b={key_b!r}）"
+    )
+
+    # --- (2) codex 複審訊息裡舉的示意例子（無 sample vs 乾淨 sample=1）：
+    #     實測（見上方 docstring）在舊格式下並不真的字串相等，但仍額外
+    #     驗證修復後的 key 保持不同（不因為修復而意外變成相同，屬於基本
+    #     回歸保護，非本輪漏洞的核心重現）。
+    qs_c = {"coin": ["BTC"], "type": ["multi_source"], "q": ["x\x1f1"]}
+    qs_d = {"coin": ["BTC"], "type": ["multi_source"], "q": ["x"], "sample": ["1"]}
+    key_c = web._analyze_dedup_key(qtype=qtype, coin_key="BTC", query="x\x1f1", qs=qs_c)
+    key_d = web._analyze_dedup_key(qtype=qtype, coin_key="BTC", query="x", qs=qs_d)
+    assert key_c != key_d
+
+    # --- (3) 端對端行為驗證：透過 `_handle_api_analyze` 真的送出 (1) 的
+    #     那組真實碰撞反例，斷言各自獨立呼叫 pipeline.run、各自帶對應
+    #     自己 query 的內容，不共用 in-flight/快取、不互相覆寫/抑制對方
+    #     的計算。
+    real_run = pipeline_module.run
+    seen_calls: list[dict] = []
+
+    def _stub_run(coin, query, qtype_arg, *args, **kwargs):
+        seen_calls.append({"query": query, "kwargs": dict(kwargs)})
+        return real_run(coin, query, qtype_arg, *args, **kwargs)
+
+    monkeypatch.setattr(web, "run", _stub_run)
+
+    code_a, _ = web._handle_api_analyze(qs_a, client_ip="10.1.9.1")
+    code_b, _ = web._handle_api_analyze(qs_b, client_ip="10.1.9.2")
+
+    assert code_a == 200 and code_b == 200
+    assert len(seen_calls) == 2, (
+        f"兩個原本會被舊格式誤判成同一把 key 的不同請求，該各自真的呼叫 1 次 "
+        f"pipeline.run（不共用快取/碰撞成 1 次），實際觀察到 {len(seen_calls)} 次："
+        f"{seen_calls!r}"
+    )
+    call_a, call_b = seen_calls[0], seen_calls[1]
+    assert call_a["query"] == "x\x1f1", f"實際觀察到 {call_a['query']!r}"
+    assert call_b["query"] == "x", f"實際觀察到 {call_b['query']!r}"
+
+
+def test_api_analyze_dedup_key_json_serialization_broadly_collision_resistant():
+    """codex 複審 HIGH（key delimiter 注入碰撞）延伸驗證：不只驗證單一
+    具體反例，額外用一批刻意混入 `\\x1f`／逗號／雙引號／反斜線的
+    query／sample／token 組合做交叉組合（cartesian product），斷言所有
+    語意不同的組合（不同的 query,sample,token 三元組）都各自得到獨一
+    無二的 dedup key（無任何一對重複），驗證 JSON 序列化 key 對這整批
+    delimiter-injection 常見手法都具備 collision resistance，不只是
+    修好 codex 舉的那一種。"""
+    qtype = web.QuestionType("multi_source")
+
+    tricky_queries = ["x", "x\x1f1", "\x1f", "x,y", 'x"y', "x\\y", "foo\x1fbar\x1f", ""]
+    tricky_samples = ["", "1", "1\x1f", "\x1f1", ",", '"']
+    tricky_tokens = ["", "abc", "a\x1fb", 'a"b', "a\\b"]
+
+    keys: list[str] = []
+    combos: list[tuple[str, str, str]] = []
+    for query in tricky_queries:
+        for sample in tricky_samples:
+            for token in tricky_tokens:
+                qs = {
+                    "coin": ["BTC"],
+                    "type": ["multi_source"],
+                    "q": [query],
+                    "sample": [sample],
+                    "token": [token],
+                }
+                key = web._analyze_dedup_key(qtype=qtype, coin_key="BTC", query=query, qs=qs)
+                keys.append(key)
+                combos.append((query, sample, token))
+
+    assert len(set(keys)) == len(keys), (
+        f"存在碰撞：{len(keys)} 組不同的 (query,sample,token) 組合只產生了 "
+        f"{len(set(keys))} 把不同的 key，代表 JSON 序列化仍有 collision"
+    )
+
+
 # ---------------------------------------------------------------------------
 # /api/status
 # ---------------------------------------------------------------------------

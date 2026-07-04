@@ -3414,13 +3414,36 @@ def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: di
         避免同樣的「key 正規化跟實際判斷不一致」問題（如 `live=1 `
         尾端多空白，`_is_live_request` 精確比對 `"1"` 會判 False，但
         strip 後 key 卻會跟 `live=1` 撞成同一把）。
+
+    序列化格式（codex HIGH 複審：key delimiter 注入跨 mode 碰撞）：
+    **不用** `"\x1f".join(...)` 這種固定分隔字元串接——因為每一段都是
+    user 可控的原始輸入（`query`/`token` 尤其可含任意位元組），user 若
+    直接送出含 `\x1f` 位元組的 query（例如 `q=x%1F1`），就能讓
+    `(qtype, coin, "x\x1f1", "", "", "", "")` 這組欄位串接出跟
+    `(qtype, coin, "x", "1", "", "", "")`（也就是另一個「query=x、
+    sample=1」的合法請求）一模一樣的字串——兩者用不同分隔位置切出來的
+    欄位不同，但因為分隔字元本身可以被 user 輸入偽造，串接後的**位元組
+    序列**卻可能相同，導致完全不同 mode（有沒有 `sample=1`，也就是
+    離線示範樣本 vs 預設即時真連接器資料）的兩個請求互相碰撞、共用同一
+    把 in-flight/快取 entry——其中一個請求會拿到另一個 mode 的資料源/
+    溯源結果，且該跑的那次計算被錯誤地抑制掉。
+
+    改用 `json.dumps(...)`（`separators=(",", ":")`，緊湊、無空白）序列化
+    成一個有序 list：JSON 字串序列化會對字串內容裡的雙引號、反斜線、
+    控制字元（含 `\x1f`）做逃逸，欄位之間的分隔（逗號）只會出現在
+    字串**引號之外**——user 輸入的原始位元組不管含什麼字元，都只能
+    出現在自己那個被逃逸/包住的 JSON 字串值裡，不可能偽造出跟別的
+    欄位邊界重疊的位元組序列，因此不同語意（不同 query/coin/token/
+    sample/live/real 組合）的請求不可能被序列化碰撞成同一把 key。
     """
     sample_raw = qs.get("sample", [""])[0] or ""
     live_raw = qs.get("live", [""])[0] or ""
     real_raw = qs.get("real", [""])[0] or ""
     token_raw = qs.get("token", [""])[0] or ""
-    return "\x1f".join(
-        (qtype.value, coin_key, query, sample_raw, live_raw, real_raw, token_raw)
+    return json.dumps(
+        [qtype.value, coin_key, query, sample_raw, live_raw, real_raw, token_raw],
+        separators=(",", ":"),
+        ensure_ascii=True,
     )
 
 
