@@ -83,7 +83,12 @@ export interface CrossSourceSignal {
   type: 'divergence' | 'consensus'
   summary: string
   supporting_claim_ids?: string[]
+  /** 原始逐筆明細（去重鍵是 claim_id），供展開查看每一則矛盾主張；
+   *  不代表獨立來源數，計數/去重渲染請用 `distinct_sources`（#13）。 */
   stance_pairs?: StancePair[]
+  /** `stance_pairs` 依 source 在各自陣營（bullish/bearish）內去重後的代表清單，
+   *  同一來源在同一陣營只留一筆——UI 計數/去重渲染的正確資料源頭（#13）。 */
+  distinct_sources?: { bullish: StancePair[]; bearish: StancePair[] }
   objective_direction?: string
   sentiment_direction?: string
 }

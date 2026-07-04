@@ -270,6 +270,76 @@ describe('apiFetch — 巢狀 payload 驗證（trust_radar / price_provenance）
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.data).toEqual(data)
   })
+
+  // #13 codex 追加 MEDIUM：distinct_sources 缺欄位要放行（stale 後端相容，
+  // `groupByStance` 有 client fallback），但存在時形狀畸形要 parse_error
+  // （不可讓 `.map()` 在 render 時直接崩，同 `/costs` 那次教訓）。
+
+  it('cross_source_signal 缺 distinct_sources（舊/stale 後端回應）→ 正常回傳（放行，走 client fallback）', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = {
+      type: 'divergence',
+      summary: '分歧',
+      stance_pairs: [{ source: 'CoinDesk', stance: 'bullish', text: '看漲' }],
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(true)
+  })
+
+  it('cross_source_signal.distinct_sources.bullish 是數字（非陣列）→ parse_error（不 crash，不讓 .map() 炸掉）', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = { type: 'divergence', summary: '分歧' }
+    asMutable(data.report.cross_source_signal).distinct_sources = { bullish: 123, bearish: [] }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
+  it('cross_source_signal.distinct_sources 本身是陣列（非物件）→ parse_error', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = { type: 'divergence', summary: '分歧' }
+    asMutable(data.report.cross_source_signal).distinct_sources = []
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
+  it('cross_source_signal.distinct_sources.bearish 陣列元素缺 source 欄位 → parse_error', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = { type: 'divergence', summary: '分歧' }
+    asMutable(data.report.cross_source_signal).distinct_sources = {
+      bullish: [],
+      bearish: [asMutable({ stance: 'bearish' })],
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
+  it('完整合法的巢狀 AnalyzeData（含正常 distinct_sources）→ 正常回傳', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = {
+      type: 'divergence',
+      summary: '分歧',
+      stance_pairs: [
+        { source: 'CoinDesk', stance: 'bullish', text: '看漲' },
+        { source: 'Decrypt', stance: 'bearish', text: '看跌' },
+      ],
+      distinct_sources: {
+        bullish: [{ source: 'CoinDesk', stance: 'bullish', text: '看漲' }],
+        bearish: [{ source: 'Decrypt', stance: 'bearish', text: '看跌' }],
+      },
+      supporting_claim_ids: ['c1', 'c2'],
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.data).toEqual(data)
+  })
 })
 
 /** 最小合法的 overview coin——對齊後端 `_snapshot_dict()`：evidence 為

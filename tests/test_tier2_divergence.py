@@ -40,6 +40,7 @@ from trustforge.agent.orchestrator import (
     OBJECTIVE_KINDS,
     _SENTIMENT_KINDS,
     _STANCE_PAIR_MIN_TRUST,
+    _dedup_stance_pairs_by_source,
     _detect_stance_pairs,
     build_report,
     detect_cross_source_signal,
@@ -152,6 +153,252 @@ def test_detect_stance_pairs_neutral_stance_fn_excluded():
         _sc("b", "news", "decrypt", "bearish", 0.6, "B"),
     ]
     assert _detect_stance_pairs(scored, _neutral_stance_fn) == []
+
+
+# ---------------------------------------------------------------------------
+# #13：跨源分歧「來源數」按 source 去重（gray plan §1，P0）
+# `_dedup_stance_pairs_by_source` 單元測試 + `detect_cross_source_signal`
+# 端到端 `distinct_sources` 欄位驗收。
+# ---------------------------------------------------------------------------
+
+def test_dedup_stance_pairs_by_source_collapses_same_source_same_stance():
+    """同一來源、同一陣營的兩筆 pair → 去重後只留第一筆代表。"""
+    pairs = [
+        {"source": "coindesk", "stance": "bullish", "claim_id": "a1", "text": "A1"},
+        {"source": "coindesk", "stance": "bullish", "claim_id": "a2", "text": "A2"},
+        {"source": "decrypt", "stance": "bearish", "claim_id": "b1", "text": "B1"},
+    ]
+    result = _dedup_stance_pairs_by_source(pairs)
+    assert set(result.keys()) == {"bullish", "bearish"}
+    assert len(result["bullish"]) == 1
+    assert result["bullish"][0]["claim_id"] == "a1", "保留同陣營同來源中第一筆出現的代表"
+    assert len(result["bearish"]) == 1
+    assert result["bearish"][0]["claim_id"] == "b1"
+
+
+def test_dedup_stance_pairs_by_source_keeps_different_sources_unchanged():
+    """不同來源各一則 → 去重前後筆數不變（回歸鎖，行為逐字相容）。"""
+    pairs = [
+        {"source": "coindesk", "stance": "bullish", "claim_id": "a", "text": "A"},
+        {"source": "decrypt", "stance": "bearish", "claim_id": "b", "text": "B"},
+    ]
+    result = _dedup_stance_pairs_by_source(pairs)
+    assert result == {"bullish": [pairs[0]], "bearish": [pairs[1]]}
+
+
+def test_dedup_stance_pairs_by_source_does_not_dedup_across_camps():
+    """同一來源分屬 bullish/bearish（來源自我矛盾）→ 跨陣營不去重，
+    兩邊各自保留，不誤刪（本輪範圍聲明：只修同陣營重複）。"""
+    pairs = [
+        {"source": "coindesk", "stance": "bullish", "claim_id": "x1", "text": "X1"},
+        {"source": "coindesk", "stance": "bearish", "claim_id": "x2", "text": "X2"},
+    ]
+    result = _dedup_stance_pairs_by_source(pairs)
+    assert len(result["bullish"]) == 1
+    assert len(result["bearish"]) == 1
+    assert result["bullish"][0]["source"] == "coindesk"
+    assert result["bearish"][0]["source"] == "coindesk"
+
+
+def test_dedup_stance_pairs_by_source_empty_input():
+    assert _dedup_stance_pairs_by_source([]) == {"bullish": [], "bearish": []}
+
+
+def test_dedup_stance_pairs_by_source_normalizes_case_and_whitespace():
+    """codex 追加修正：去重 key 用 `source.strip().casefold()`，同一來源的
+    大小寫/前後空白變體（" CoinDesk " / "coindesk" / "COINDESK"）視為同一
+    來源，收斂成 1 筆——顯示仍用原始（第一筆出現時）的 source 字串，不
+    改寫使用者看到的來源名稱。真實不同來源（decrypt）不受影響，仍分開。"""
+    pairs = [
+        {"source": " CoinDesk ", "stance": "bullish", "claim_id": "a1", "text": "A1"},
+        {"source": "coindesk", "stance": "bullish", "claim_id": "a2", "text": "A2"},
+        {"source": "COINDESK", "stance": "bullish", "claim_id": "a3", "text": "A3"},
+        {"source": "decrypt", "stance": "bearish", "claim_id": "b1", "text": "B1"},
+    ]
+    result = _dedup_stance_pairs_by_source(pairs)
+    assert len(result["bullish"]) == 1, "三個大小寫/空白變體應收斂成 1 個獨立來源"
+    assert result["bullish"][0]["source"] == " CoinDesk ", "顯示保留第一筆出現的原始字串，不做正規化改寫"
+    assert len(result["bearish"]) == 1
+    assert result["bearish"][0]["source"] == "decrypt"
+
+
+def test_detect_stance_pairs_normalizes_same_source_case_variant_not_cross_source():
+    """codex 第二輪 HIGH 修正：`CoinDesk`（bullish）與 ` coindesk `（bearish）
+    normalized 後是同一個來源，即使 raw string 不相等，也不該被判定為
+    跨源矛盾配對——否則單一 publisher 用大小寫/空白變體發文，就能撐起一個
+    假的「跨源分歧」，違反獨立性核心承諾。應回空 list（不產生任何配對，
+    這是同源自我矛盾，非跨源矛盾）。"""
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "A"),
+        _sc("b", "news", " coindesk ", "bearish", 0.6, "B"),
+    ]
+    assert _detect_stance_pairs(scored, _contradiction_stance_fn) == []
+
+
+def test_cross_source_signal_same_normalized_source_case_variant_does_not_emit_divergence():
+    """端到端：bullish `CoinDesk` + bearish ` coindesk `（同一 publisher 的
+    大小寫/空白變體，非真跨源，全部主張只涉及 1 個 normalized source）→
+    不 emit 跨源分歧訊號（正規化後 distinct source 數 < 2）。"""
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "看漲敘述 A"),
+        _sc("b", "news", " coindesk ", "bearish", 0.6, "看跌敘述 B"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is None, "同一 publisher 的大小寫/空白變體自我矛盾，不該被判成跨源分歧"
+
+
+def test_cross_source_signal_real_two_distinct_sources_still_emits_divergence():
+    """回歸鎖：真正兩個不同來源（非大小寫變體）→ 正常 emit 跨源分歧，
+    不因本輪修正而誤傷真實跨源矛盾案例。"""
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "看漲敘述 A"),
+        _sc("b", "news", "Decrypt", "bearish", 0.6, "看跌敘述 B"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is not None
+    assert result["type"] == "divergence"
+    assert len(result["stance_pairs"]) == 2
+    assert len(result["distinct_sources"]["bullish"]) == 1
+    assert len(result["distinct_sources"]["bearish"]) == 1
+
+
+def test_cross_source_signal_gate_rejects_degenerate_single_normalized_source_pairs(monkeypatch):
+    """防禦層測試（第二道防線，belt-and-suspenders）：即使 `_detect_stance_pairs`
+    因某種未來改動意外回傳了「只涉及 1 個 normalized source」的退化 pairs
+    （理論上配對層的正規化比對已擋住這種情況——這裡直接 monkeypatch 模擬
+    異常輸入，驗證 `detect_cross_source_signal` 自己的顯式 ≥2 來源檢查
+    獨立生效，不完全依賴單一程式碼路徑撐住整個獨立性承諾），仍不得 emit
+    跨源分歧訊號。"""
+    import trustforge.agent.orchestrator as orch
+
+    def fake_detect_stance_pairs(scored, stance_fn):
+        return [
+            {"source": "CoinDesk", "stance": "bullish", "claim_id": "x1", "text": "X1"},
+            {"source": " coindesk ", "stance": "bearish", "claim_id": "x2", "text": "X2"},
+        ]
+
+    monkeypatch.setattr(orch, "_detect_stance_pairs", fake_detect_stance_pairs)
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "A"),
+        _sc("b", "news", " coindesk ", "bearish", 0.6, "B"),
+    ]
+    result = orch.detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is None, "退化的單一 normalized source pairs 不該被 gate 放行"
+
+
+def test_cross_source_signal_summary_text_consistent_with_distinct_sources_on_case_variant():
+    """codex 第三輪一致性 HIGH 修正：`CoinDesk`/` coindesk `（同一 publisher 的
+    大小寫/空白變體，bullish）各自跟 `Decrypt`（bearish）形成真跨源矛盾配對
+    （兩筆 pair，因為 CoinDesk 與 " coindesk " 同陣營、不會互相配對，但都各自
+    跟 Decrypt 配成矛盾）。`stance_pairs` 明細因此仍有 3 個 raw source 字串
+    （`CoinDesk`、` coindesk `、`Decrypt`），但**使用者看到的 summary 文字**與
+    `distinct_sources` 結構化欄位都必須一致收斂成「CoinDesk + Decrypt」共 2 個
+    來源，不得讓 summary 文字把大小寫變體當成第三個獨立來源列出（否則跟
+    `distinct_sources` 自相矛盾、且顯示文字本身仍有來源膨脹）。"""
+    scored = [
+        _sc("a", "news", "CoinDesk", "bullish", 0.6, "看漲敘述 A"),
+        _sc("b", "news", " coindesk ", "bullish", 0.6, "看漲敘述 B"),
+        _sc("c", "news", "Decrypt", "bearish", 0.6, "看跌敘述 C"),
+    ]
+    pairs = _detect_stance_pairs(scored, _contradiction_stance_fn)
+    assert sorted({p["source"] for p in pairs}) == [" coindesk ", "CoinDesk", "Decrypt"], (
+        "前置條件：stance_pairs 明細本身仍是逐筆 raw source，不做去重"
+    )
+
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is not None
+    assert result["summary"] == (
+        "來源 CoinDesk、Decrypt 對同一議題方向相反，呈背離，建議交叉驗證、留意轉折。"
+    ), "summary 文字須跟 distinct_sources 一樣收斂成 2 個來源，不得把大小寫變體列成第三個來源"
+    assert len(result["distinct_sources"]["bullish"]) == 1
+    assert len(result["distinct_sources"]["bearish"]) == 1
+
+
+def test_cross_source_signal_collision_summary_text_consistent_with_distinct_sources_on_case_variant():
+    """同上，但走「聚合層級同向、情緒面內部矛盾」的 collision summary 分支
+    （line ~535 `stance_sources`）：客觀（onchain）與情緒（news）多數方向都是
+    bullish，但情緒類內部有 CoinDesk/" coindesk "/Decrypt 的跨源矛盾——collision
+    summary 文字一樣要收斂成「CoinDesk + Decrypt」2 個來源，不得列出大小寫
+    變體當成第三個獨立來源。"""
+    scored = [
+        _sc("o1", "onchain", "ChainX", "bullish", 0.6, "客觀 bullish"),
+        _sc("s1", "news", "CoinDesk", "bullish", 0.6, "看漲敘述 A"),
+        _sc("s2", "news", " coindesk ", "bullish", 0.6, "看漲敘述 B"),
+        _sc("s3", "news", "Decrypt", "bearish", 0.6, "看跌敘述 C"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is not None
+    assert result["type"] == "divergence"
+    assert result["summary"] == (
+        "客觀與情緒多數方向雖同為偏多，但來源 CoinDesk、Decrypt 對同一議題方向相反，"
+        "情緒面存在矛盾，呈背離，建議交叉驗證、留意轉折。"
+    )
+    assert len(result["distinct_sources"]["bullish"]) == 1
+    assert len(result["distinct_sources"]["bearish"]) == 1
+
+
+def test_stance_pairs_same_source_same_stance_deduped_in_distinct_sources():
+    """端到端：同一來源兩筆不同 claim、各自與不同對手配對成功、同陣營
+    （bullish）→ `stance_pairs` 原始明細仍列出兩筆（逐字不變，供展開查看），
+    但 `distinct_sources.bullish` 去重後只剩一筆代表；`bearish` 陣營本來
+    就是兩個不同來源，去重後仍是 2（regression：不誤刪不同來源）。
+    """
+    scored = [
+        _sc("a1", "news", "coindesk", "bullish", 0.44, "看漲敘述 A1"),
+        _sc("a2", "news", "coindesk", "bullish", 0.44, "看漲敘述 A2"),
+        _sc("b1", "news", "decrypt", "bearish", 0.44, "看跌敘述 B1"),
+        _sc("b2", "news", "cryptoslate", "bearish", 0.44, "看跌敘述 B2"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is not None
+    assert result["type"] == "divergence"
+
+    # 回歸鎖：stance_pairs 本身不去重，逐筆明細照舊（同來源出現兩次）
+    assert len(result["stance_pairs"]) == 4
+    raw_bullish_sources = [p["source"] for p in result["stance_pairs"] if p["stance"] == "bullish"]
+    assert raw_bullish_sources == ["coindesk", "coindesk"]
+
+    # 去重後：bullish 陣營同一來源只算 1 個獨立來源（修正虛高）
+    assert "distinct_sources" in result
+    assert len(result["distinct_sources"]["bullish"]) == 1
+    assert result["distinct_sources"]["bullish"][0]["source"] == "coindesk"
+    # bearish 陣營本來就是兩個不同來源 → 去重後仍是 2（不誤刪）
+    assert len(result["distinct_sources"]["bearish"]) == 2
+    assert {p["source"] for p in result["distinct_sources"]["bearish"]} == {
+        "decrypt", "cryptoslate",
+    }
+
+
+def test_stance_pairs_self_contradiction_across_camps_not_deduped_in_distinct_sources():
+    """同一來源兩則不同 claim、分屬不同陣營（bullish vs bearish，來源自我
+    矛盾）→ 跨陣營不去重，`distinct_sources` 的 bullish/bearish 各自都
+    看得到該來源（不誤刪，符合 #13 明確排除的範圍聲明）。
+    """
+    scored = [
+        _sc("x1", "news", "coindesk", "bullish", 0.44, "看漲敘述 X1"),
+        _sc("x2", "news", "coindesk", "bearish", 0.44, "看跌敘述 X2"),
+        _sc("y1", "news", "decrypt", "bearish", 0.44, "看跌敘述 Y1"),
+        _sc("y2", "news", "decrypt", "bullish", 0.44, "看漲敘述 Y2"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is not None
+    distinct = result["distinct_sources"]
+    assert "coindesk" in {p["source"] for p in distinct["bullish"]}
+    assert "coindesk" in {p["source"] for p in distinct["bearish"]}
+
+
+def test_stance_pairs_distinct_sources_regression_lock_different_sources_each():
+    """既有「不同來源各一則」案例 → distinct_sources 與 stance_pairs 等長，
+    行為逐字不變（回歸鎖）。"""
+    scored = [
+        _sc("a", "news", "coindesk", "bullish", 0.44, "ETF 淨流入方向 A"),
+        _sc("b", "news", "decrypt", "bearish", 0.44, "ETF 淨流出方向 B"),
+    ]
+    result = detect_cross_source_signal(scored, stance_fn=_contradiction_stance_fn)
+    assert result is not None
+    assert len(result["stance_pairs"]) == 2
+    distinct = result["distinct_sources"]
+    assert len(distinct["bullish"]) + len(distinct["bearish"]) == 2
 
 
 def test_cross_source_signal_stance_pairs_fallback_when_aggregate_inconclusive():

@@ -264,6 +264,17 @@ def _harvest_stance_cost_events(client: BedrockClient, log: ExecutionLog) -> Non
     cost_events.clear()
 
 
+def _normalize_source_key(source: str) -> str:
+    """來源去重/相等比對用的正規化 key：`strip().casefold()`——治大小寫/
+    前後空白變體（`"CoinDesk"` / `" coindesk "` / `"COINDESK"`）。**只用於
+    比對**，顯示一律用原始 `source` 字串，不改寫使用者看到的來源名稱。
+
+    這不是完整 canonical source identity（別名/帳號收斂，見 follow-up
+    issue #72、既有 issue #17）——只治零成本就能修的大小寫/空白層級問題。
+    """
+    return source.strip().casefold()
+
+
 def _detect_stance_pairs(
     scored: list[ScoredClaim],
     stance_fn: Callable[[str, str], str] | None,
@@ -281,6 +292,15 @@ def _detect_stance_pairs(
 
     回傳：扁平 list，內含所有涉及至少一組矛盾配對的主張（跨配對去重），每筆
     `{"source", "stance", "claim_id", "text"}`，供未來 UI 渲染跨源矛盾對照。
+
+    獨立性 invariant（codex #13 追加 HIGH 修正）：「同源」判斷用
+    `_normalize_source_key`（正規化），不是原始字串相等——否則同一個
+    publisher 用大小寫/空白變體（如 `"CoinDesk"` vs `" coindesk "`）發的
+    兩則反向主張，會因為 raw string 不相等而被誤判成「跨來源」矛盾配對，
+    讓單一 publisher 自我矛盾撐起一個假的「跨源分歧」訊號，直接違反本
+    機制「呈現真實跨源背離」的獨立性核心承諾。同一 normalized source 的
+    反向主張視為「同源自我矛盾」，不在本函式範圍內配對（不產生 pair），
+    自然也不會被算進下游任何一個 stance 陣營。
     """
     if stance_fn is None:
         return []
@@ -294,8 +314,8 @@ def _detect_stance_pairs(
     pairs: list[dict] = []
     for i, a in enumerate(eligible):
         for b in eligible[i + 1:]:
-            if a.claim.doc.source == b.claim.doc.source:
-                continue  # 同源不算跨源矛盾
+            if _normalize_source_key(a.claim.doc.source) == _normalize_source_key(b.claim.doc.source):
+                continue  # 同源（含大小寫/空白變體）不算跨源矛盾——同源自我矛盾
             da, db = a.claim.direction, b.claim.direction
             if "neutral" in (da, db) or da == db:
                 continue  # 需方向明確且相反；方向相同或不明不算矛盾
@@ -312,6 +332,85 @@ def _detect_stance_pairs(
                     "text": sc.claim.text,
                 })
     return pairs
+
+
+def _dedup_stance_pairs_by_source(pairs: list[dict]) -> dict[str, list[dict]]:
+    """`_detect_stance_pairs()` 回傳的 `pairs` 是逐筆明細（去重鍵 `claim.id`），
+    同一來源若有兩則不同 claim 各自跟不同對手配對成功，會在 `pairs` 裡出現
+    兩次——這是刻意保留的原始明細（供展開查看），**不是**「獨立來源數」。
+
+    本函式在 `pairs` 之上疊加一層「同一 stance 陣營內按 source 去重」（對照組：
+    `trust.scoring.aggregate` 的 `n_contrarian_sources`、本檔 `aggregate_trust_by_kind`
+    的 `n_sources` 都是用 set/dict 依 `source` 去重，同一模式），修正「同一來源
+    多筆矛盾主張被算成多個獨立來源」的虛高問題：
+
+    - 同一來源在同一 stance（bullish 或 bearish）只保留一筆代表——取該陣營中
+      該來源第一筆出現的 pair（`pairs` 本身依 `_detect_stance_pairs` 的掃描
+      順序產生，是確定性順序，不含隨機性）。
+    - **跨陣營不去重**：同一來源若在 bullish、bearish 都有主張（自我矛盾），
+      兩邊各自保留各自的代表——這是另一個獨立訊號（來源自我矛盾），不該被
+      當成雜訊吃掉，本輪不擴大處理，只維持不誤刪。
+    - 純資料轉換、不改變 `pairs` 原始清單本身（呼叫端仍可用 `pairs` 取得未去重
+      的完整明細）。
+
+    去重 key 正規化（codex #13 追加修正）：比對用 `_normalize_source_key`
+    （`strip().casefold()`），不是原始字串——治掉大小寫/前後空白變體（如
+    `"CoinDesk"` / `" coindesk "` / `"COINDESK"`）被誤判成不同來源這個零
+    成本就能修的洞。**顯示仍用原始 `source` 字串**（保留該陣營中第一筆
+    出現時的大小寫/格式，不改寫使用者看到的來源名稱，只有去重比對走
+    正規化）。與 `_detect_stance_pairs` 判「同源」用的是**同一個**正規化
+    函式，確保「配對層」與「去重層」的獨立性判斷口徑一致（codex 第二輪
+    HIGH：先前只在本函式做正規化、配對層仍比對 raw string，導致同一
+    publisher 的大小寫變體能在配對層被誤判成跨來源，見
+    `_detect_stance_pairs` docstring）。
+
+    這不是完整的 canonical source identity——不同帳號/別名（如
+    `"coindesk"` vs `"coindesk.com"` vs 不同 Twitter 帳號同發行商）仍會被
+    當成不同來源，這是全 repo 已知限制（`trust/scoring.py` 994 行
+    `#17`：`_corroboration` 同源排除也是比對 `source` 字面值，非網域/
+    canonical id）。完整 canonical identity（publisher/account 穩定 ID +
+    別名映射）會同時影響 `scoring.py:1408`、`orchestrator.py:232`、本函式
+    三處來源計數 + ingestion 連接器層，是 repo-wide 工程，刻意不在本輪
+    （#13）擴大處理，見 follow-up issue（repo-wide canonical source
+    identity）。
+    """
+    result: dict[str, list[dict]] = {"bullish": [], "bearish": []}
+    seen: dict[str, set[str]] = {"bullish": set(), "bearish": set()}
+    for p in pairs:
+        stance = p["stance"]
+        if stance not in result:
+            continue  # 理論上不會出現（方向閘已擋掉 neutral），保守略過非 bullish/bearish
+        key = _normalize_source_key(p["source"])
+        if key in seen[stance]:
+            continue
+        seen[stance].add(key)
+        result[stance].append(p)
+    return result
+
+
+def _distinct_source_labels(pairs: list[dict]) -> list[str]:
+    """回傳 `pairs`（跨陣營，不分 bullish/bearish）涉及的來源顯示清單，供組
+    user-visible summary 文字（`f"來源 {'、'.join(...)} 對同一議題..."`）用。
+
+    codex 第三輪一致性 HIGH 修正：先前這裡直接 `sorted({p["source"] for p in
+    pairs})`，是 raw string 去重——`distinct_sources` 欄位已依
+    `_normalize_source_key` 去重收斂成 1 張 CoinDesk 卡，但 summary 文字仍會
+    把 `"CoinDesk"`／`" coindesk "` 兩個大小寫/空白變體當成兩個不同來源列出，
+    造成同一個訊號裡「結構化欄位」與「顯示文字」自相矛盾、且顯示文字本身
+    仍有來源膨脹（使用者讀 summary 會誤以為有更多獨立來源佐證）。
+
+    去重口徑跟 `_dedup_stance_pairs_by_source`／配對層完全一致：用
+    `_normalize_source_key` 比對是否同源，**顯示仍用原始 `source` 字串**（保留
+    該 normalized key 第一次出現時的大小寫/格式，不改寫使用者看到的來源
+    名稱）。去重後依顯示字串排序，確保 summary 文字順序穩定、不受
+    `pairs` 掃描順序影響（跟原本 `sorted(set(...))` 的排序意圖一致）。
+    """
+    seen: dict[str, str] = {}
+    for p in pairs:
+        key = _normalize_source_key(p["source"])
+        if key not in seen:
+            seen[key] = p["source"]
+    return sorted(seen.values())
 
 
 def detect_cross_source_signal(
@@ -347,6 +446,34 @@ def detect_cross_source_signal(
           聚合結果蓋掉。
     - 找不到配對時：完全不影響既有回傳值（含 None、consensus）。
 
+    `stance_pairs` 附加時，一律同步附加 `distinct_sources`（#13 修正）：
+    `{"bullish": [...], "bearish": [...]}`，是 `stance_pairs` 依 source 在
+    各自陣營內去重後的代表清單（見 `_dedup_stance_pairs_by_source`）——
+    `stance_pairs` 本身刻意保留原始逐筆明細（去重鍵是 `claim.id`，供展開
+    查看每一則矛盾主張），**不代表獨立來源數**；「這一輪偵測到幾個獨立
+    來源支持某方向」一律以 `distinct_sources` 為準，呼叫端（UI）計數/去重
+    渲染請讀這個欄位，不要直接對 `stance_pairs` 做 `len()`。
+
+    獨立性 invariant（codex #13 第二輪 HIGH 修正，防禦層）：`stance_pairs`
+    非空時，一律再驗一次「涉及的 normalized source 是否 ≥2 個」——
+    `_detect_stance_pairs` 的配對迴圈已改用正規化比對「同源」（見其
+    docstring），理論上每一筆成功配對本身就保證兩端 normalized source
+    不同，這裡的檢查屬於顯式的第二道防線（belt-and-suspenders，不依賴
+    單一程式碼路徑撐住整個獨立性承諾）：若不足 2 個真正不同來源（理論上
+    不會發生，除非未來改動悄悄破壞了配對層的正規化不變式），一律視同
+    `stance_fn` 沒偵測到任何有效跨源矛盾，不 emit 任何以 stance_pairs 為
+    依據的訊號——不得讓單一 publisher（即使用不同大小寫/空白變體發文）
+    的自我矛盾撐起一個假的「跨源分歧」。
+
+    user-visible source list 一致性（codex #13 第三輪一致性 HIGH 修正）：
+    `summary` 文字裡列出的來源名單（`_stance_pair_signal()` 的 fallback
+    summary、聚合層級同向但情緒面內部矛盾時的 collision summary）一律改用
+    `_distinct_source_labels()`，去重口徑與 `distinct_sources` 欄位完全
+    一致（都是 `_normalize_source_key`）——避免結構化欄位（`distinct_sources`）
+    已把 `CoinDesk`/`" coindesk "` 收斂成 1 筆，但顯示給使用者看的 summary
+    文字卻仍把兩個大小寫/空白變體當成兩個不同來源列出，內部自相矛盾、
+    使用者被誤導以為有更多獨立來源佐證。
+
     守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
     """
     # 只取 trust >= 0.5 的主張
@@ -356,6 +483,12 @@ def detect_cross_source_signal(
     sentiment = [sc for sc in eligible if sc.claim.doc.kind in _SENTIMENT_KINDS]
 
     stance_pairs = _detect_stance_pairs(scored, stance_fn)
+    if stance_pairs:
+        _distinct_norm_sources = {_normalize_source_key(p["source"]) for p in stance_pairs}
+        if len(_distinct_norm_sources) < 2:
+            # 獨立性 invariant 防禦層：真正不同來源不足 2 個，不算跨源分歧
+            # （理論上配對層的正規化比對已擋住此情況，這裡是顯式第二道防線）。
+            stance_pairs = []
 
     def _stance_pair_signal() -> dict | None:
         """聚合層級判不出背離/共識時的備援：若仍偵測到同議題語意矛盾配對，
@@ -363,7 +496,7 @@ def detect_cross_source_signal(
         （逐字等同未提供 stance_fn 時的既有行為）。"""
         if not stance_pairs:
             return None
-        sources = sorted({p["source"] for p in stance_pairs})
+        sources = _distinct_source_labels(stance_pairs)
         return {
             "type": "divergence",
             "objective_direction": None,
@@ -374,6 +507,7 @@ def detect_cross_source_signal(
             ),
             "supporting_claim_ids": [p["claim_id"] for p in stance_pairs],
             "stance_pairs": stance_pairs,
+            "distinct_sources": _dedup_stance_pairs_by_source(stance_pairs),
         }
 
     # 任一類 0 筆 → None（除非有 stance_pairs 備援）
@@ -432,7 +566,7 @@ def detect_cross_source_signal(
     if collision:
         # obj_dir == sent_dir（聚合層級同向），但情緒來源內部已測出矛盾——
         # 矛盾優先，摘要必須反映真背離，不得沿用「訊號一致」敘述。
-        stance_sources = sorted({p["source"] for p in stance_pairs})
+        stance_sources = _distinct_source_labels(stance_pairs)
         summary = (
             f"客觀與情緒多數方向雖同為{obj_label}，"
             f"但來源 {'、'.join(stance_sources)} 對同一議題方向相反，"
@@ -465,6 +599,7 @@ def detect_cross_source_signal(
     }
     if stance_pairs:
         result["stance_pairs"] = stance_pairs
+        result["distinct_sources"] = _dedup_stance_pairs_by_source(stance_pairs)
     return result
 
 
