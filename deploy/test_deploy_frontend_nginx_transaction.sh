@@ -107,9 +107,15 @@ exit 0
 DNFEOF
 chmod +x "$MOCKDIR/dnf"
 
-# ── mock unzip：不解真的 zip，只在 -d 指定的目錄造一個 stub 檔 ─────────────
+# ── mock unzip：不解真的 zip，只在 -d 指定的目錄造一個 stub 檔；可用
+#    MOCK_UNZIP_FAIL=1 模擬下載到一半損毀/中斷（codex 複審 HIGH：驗證
+#    這種中斷完全不該動到現在活著的 frontend/current）────────────────────
 cat > "$MOCKDIR/unzip" <<'UNZIPEOF'
 #!/usr/bin/env bash
+if [ "${MOCK_UNZIP_FAIL:-0}" = "1" ]; then
+  echo "mock unzip: configured to fail（模擬下載/解壓中斷、zip 損毀）" >&2
+  exit 1
+fi
 dir=""
 prev=""
 for a in "$@"; do
@@ -365,6 +371,24 @@ active_port() { grep '^Environment=PORT=' "$SANDBOX/etc/systemd/system/trustforg
 has_bind_host() { grep -q '^Environment=TRUSTFORGE_BIND_HOST=127.0.0.1' "$SANDBOX/etc/systemd/system/trustforge.service" && echo yes || echo no; }
 csp_mode() { grep '^Environment=TRUSTFORGE_CSP_MODE=' "$SANDBOX/etc/systemd/system/trustforge.service" | head -1 | cut -d= -f3; }
 call_count() { cat "$STATE/$1" 2>/dev/null || echo 0; }
+# codex 複審 HIGH（dist swap 原子化）：frontend/current 指到哪個 release
+# 目錄，是判斷「swap 有沒有真的發生/有沒有正確回滾」的唯一依據。
+current_target() {
+  if [ -L "$SANDBOX/opt/trustforge/frontend/current" ]; then
+    readlink "$SANDBOX/opt/trustforge/frontend/current"
+  else
+    echo "(none)"
+  fi
+}
+# 造一份「前一版 release」＋把 frontend/current 指過去——模擬跑前已經有
+# 一次成功部署過（真實情境的常態），才有東西可以驗證 rollback「真的救得
+# 回」，不是每次都從零開始。
+PRIOR_RELEASE_DIR() { echo "$SANDBOX/opt/trustforge/frontend/releases/20260101000000-prior"; }
+seed_prior_release() {
+  mkdir -p "$(PRIOR_RELEASE_DIR)"
+  echo '<html>prior release stub</html>' > "$(PRIOR_RELEASE_DIR)/index.html"
+  ln -sfn "$(PRIOR_RELEASE_DIR)" "$SANDBOX/opt/trustforge/frontend/current"
+}
 
 run_transaction() {
   set +e
@@ -390,6 +414,23 @@ else
 fi
 assert_eq "$(active_conf)" "(none)" "live symlink 仍不存在（沒被動過）"
 assert_eq "$(active_port)" "80" "service file PORT 仍是 80（沒被動過）"
+
+echo "== 場景 1b（codex 複審 HIGH：dist swap 原子化）：Step 1 的 unzip 中斷（模擬下載/解壓中間損毀）→ 完全不動 frontend/current，前一版 release 內容原封不動，非零結束（還沒開始 mutation，不需要也不會觸發回滾）=="
+reset_sandbox
+seed_prior_release
+if run_transaction MOCK_UNZIP_FAIL=1; then
+  fail "unzip（下載/解壓新版 dist）中斷時應該非零結束"
+else
+  pass "unzip（下載/解壓新版 dist）中斷時非零結束"
+fi
+assert_eq "$(current_target)" "$(PRIOR_RELEASE_DIR)" "unzip 中斷時 frontend/current 完全沒被動過，仍指向前一版（新版還沒解壓完就失敗，根本沒進到 Step 4 的 atomic swap）"
+assert_eq "$(cat "$(PRIOR_RELEASE_DIR)/index.html")" "<html>prior release stub</html>" "前一版 release 目錄內容完整未變（沒有任何 rm -rf 動到現在活著的內容——codex 複審 HIGH 核心修復點）"
+if grep -qF "已回滾到跑前狀態" "$STATE/last_run.log"; then
+  fail "unzip 中斷發生在 ERR trap 安裝之前（Step 1），不該（也不需要）觸發 rollback 訊息"
+else
+  pass "unzip 中斷沒有誤觸發 rollback（本來就還沒開始 mutation，跟 dnf install 失敗同類）"
+fi
+assert_eq "$(active_conf)" "(none)" "live symlink（nginx conf.d）也沒被動過"
 
 echo "== 場景 2：Step 2（候選設定驗證，scratch nginx -t）失敗 → 完全不動 live 狀態，非零結束 =="
 reset_sandbox
@@ -454,6 +495,25 @@ else
 fi
 assert_grep_log "已回滾到跑前狀態" "有印回滾完成訊息"
 assert_eq "$(active_conf)" "(none)" "回滾後 live symlink 退回不存在（不留半殘）"
+assert_eq "$(current_target)" "(none)" "回滾後 frontend/current 也退回不存在（跑前本來就沒有，不留半殘的新 release 指標）"
+
+echo "== 場景 7b（codex 複審 HIGH：dist swap 原子化，reload 後失敗）：已配置(post-cutover)+ 有前一版 release 在跑，reload nginx 跟 fallback restart 都失敗 → rollback 要把 frontend/current 切回前一版，前一版內容原封不動、真的可服務 =="
+reset_sandbox
+mkdir -p "$SANDBOX/etc/nginx/trustforge-sites"
+echo "# legacy stub" > "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf"
+ln -sfn "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf" "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
+echo active > "$STATE/svc_nginx_active"
+echo enabled > "$STATE/svc_nginx_enabled"
+seed_prior_release
+if run_transaction MOCK_SYSTEMCTL_RELOAD_NGINX_FAIL_AT=1 MOCK_SYSTEMCTL_RESTART_NGINX_FAIL_AT=1; then
+  fail "已配置情境下 reload+restart nginx 都失敗應該非零結束"
+else
+  pass "已配置情境下 reload+restart nginx 都失敗時非零結束"
+fi
+assert_grep_log "已回滾到跑前狀態" "有印回滾完成訊息"
+assert_eq "$(active_conf)" "legacy.conf" "回滾後 live symlink（nginx conf.d）還原回跑前（本來就指向 legacy.conf）"
+assert_eq "$(current_target)" "$(PRIOR_RELEASE_DIR)" "回滾後 frontend/current 切回前一版 release（Step 4 已經把它 atomic 切到新版，reload 失敗後 ROLLBACK 要切回去）"
+assert_eq "$(cat "$(PRIOR_RELEASE_DIR)/index.html")" "<html>prior release stub</html>" "前一版 release 目錄內容完整未變、真的可服務（從頭到尾沒被碰過，只是指標被切走又切回來）"
 
 echo "== 場景 8：reload nginx 失敗但 fallback 的 restart nginx 成功 → 不觸發回滾 =="
 reset_sandbox
@@ -572,6 +632,8 @@ Environment=TRUSTFORGE_CSP_MODE=react
 EOF
 echo active > "$STATE/svc_nginx_active"
 echo enabled > "$STATE/svc_nginx_enabled"
+seed_prior_release
+PRIOR_TARGET_BEFORE="$(current_target)"
 if run_transaction; then
   pass "idempotent redeploy（react 拓樸已 active）正常結束（exit 0）"
 else
@@ -586,6 +648,16 @@ assert_eq "$(call_count systemctl_restart_trustforge_count)" "0" "沒有多餘�
 assert_eq "$(call_count systemctl_enable_now_nginx_count)" "0" "沒有多餘的 enable --now nginx（nginx 本來就已 enabled+active）"
 assert_grep_log "視為 post-cutover" "有印偵測到 live symlink 已配置（post-cutover）訊息"
 assert_grep_log "現行拓樸：react.conf" "post-switch 完成訊息有標明現行拓樸是 react.conf（不是誤植 legacy）"
+# codex 複審 HIGH（dist swap 原子化）：即使是「只是更新前端 dist」的
+# idempotent 重跑，也該走 atomic symlink 切新版，且前一版目錄保留不刪
+# （供下一次萬一要 rollback 用）。
+if [ "$(current_target)" != "$PRIOR_TARGET_BEFORE" ]; then
+  pass "重跑成功後 frontend/current atomic 切到全新的 release 目錄（不是繼續指著前一版）"
+else
+  fail "重跑成功後 frontend/current 應該切到全新的 release 目錄，而不是仍指著 $PRIOR_TARGET_BEFORE"
+fi
+assert_eq "$(cat "$(PRIOR_RELEASE_DIR)/index.html")" "<html>prior release stub</html>" "前一版 release 目錄保留未刪（供未來 rollback 用）"
+assert_eq "$([ -f "$(current_target)/index.html" ] && echo yes || echo no)" "yes" "新版 release 目錄裡有部署的 dist 內容（index.html 存在）"
 
 echo "== 場景 17（Step 5 healthz retry 有效性）：post-switch healthz 前 2 次失敗、第 3 次才成功（模擬 nginx reload 後極短暫的 worker 交接窗口）→ retry 吸收掉，不該誤觸發 rollback =="
 reset_sandbox

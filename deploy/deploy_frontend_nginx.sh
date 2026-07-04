@@ -211,16 +211,34 @@ DNF_LOG="${TF_BOOTSTRAP_DNF_LOG:-/var/log/tf-nginx-setup.log}"
 
 # ---- Step 1：安裝 nginx + 佈署靜態檔/candidate conf 到 staging 位置
 #      （全部非破壞性，不動目前在跑的 python/nginx，失敗不用回滾）----
+# codex 複審 HIGH（真部署踩到過一次）：以前這裡直接
+# `rm -rf "$OPT_DIR/frontend/dist"` 砍掉「現在活著、nginx 正在 serve」的
+# 那份 dist，才開始下載/解壓新版——這段完全在 Step 3 快照/ERR trap 保護
+# 之外：下載/解壓中間 real user 打進來就是缺檔；下載/解壓本身失敗（網路
+# 中斷、zip 壞掉）active 站直接壞掉、且沒有任何 rollback 機制救得回來
+# （舊 ROLLBACK() 只備份過 SERVICE_FILE/DEFAULT_CONF，從沒備份過 dist 內
+# 容）。改法：下載/解壓到全新的 versioned release 目錄
+# frontend/releases/<ts>-<pid>/，完全不碰現在活著的 frontend/current
+# symlink（也就完全不碰目前 nginx root 指到的內容）——這裡就算失敗，也
+# 只是留下一個半成品 release 目錄被 abandon，live 站毫髮無傷、無需
+# rollback（跟 Step 1 其他步驟失敗一樣安全）。真正的 atomic 切換（把
+# frontend/current 這個 symlink 指到新 release）留到 Step 4，在 ERR trap
+# 保護下才做，失敗可回滾；前一版 release 目錄刻意保留不砍，讓 rollback
+# 切得回去、資產內容真的能還原。
 dnf install -y nginx unzip >"$DNF_LOG" 2>&1
-mkdir -p "$ETC/nginx/trustforge-sites" "$OPT_DIR/frontend"
+mkdir -p "$ETC/nginx/trustforge-sites" "$OPT_DIR/frontend/releases"
 aws s3 cp s3://__BUCKET__/nginx-legacy.conf "$CANDIDATE" --region __REGION__
 aws s3 cp s3://__BUCKET__/nginx-react.conf "$ETC/nginx/trustforge-sites/react.conf" --region __REGION__
 aws s3 cp s3://__BUCKET__/nginx-react-http.conf "$ETC/nginx/trustforge-sites/react-http.conf" --region __REGION__
 aws s3 cp s3://__BUCKET__/nginx-legacy-tls.conf "$ETC/nginx/trustforge-sites/legacy-tls.conf" --region __REGION__
 aws s3 cp s3://__BUCKET__/trustforge_frontend_dist.zip "$OPT_DIR/frontend/dist.zip" --region __REGION__
-rm -rf "$OPT_DIR/frontend/dist" && mkdir -p "$OPT_DIR/frontend/dist"
-unzip -o -q "$OPT_DIR/frontend/dist.zip" -d "$OPT_DIR/frontend/dist"
-echo '[fe-nginx] 已裝 nginx + 佈署靜態檔/candidate conf 到 staging 位置（未動 live conf.d/systemd）'
+CURRENT_LINK="$OPT_DIR/frontend/current"
+RELEASE_TS="$(date -u +%Y%m%d%H%M%S)-$$"
+RELEASE_DIR="$OPT_DIR/frontend/releases/$RELEASE_TS"
+mkdir -p "$RELEASE_DIR"
+unzip -o -q "$OPT_DIR/frontend/dist.zip" -d "$RELEASE_DIR"
+[ -f "$RELEASE_DIR/index.html" ]
+echo "[fe-nginx] 已裝 nginx + 佈署靜態檔/candidate conf 到 staging 位置（新版 dist 在 ${RELEASE_DIR}，未動 live conf.d/systemd/frontend/current）"
 
 # ---- Step 1.5（issue #69）：偵測 live symlink 是否已配置（唯讀，不算
 #      mutation）——決定 Step 2 要驗哪份 candidate、Step 4/5 走「已配置
@@ -236,6 +254,17 @@ else
   PREV_LINK=""
   ACTIVE_CANDIDATE="$CANDIDATE"
   echo '[fe-nginx] 偵測到 live symlink 尚未配置 → 視為初次 bootstrap，套用 legacy 全轉發預設'
+fi
+
+# 同一批唯讀偵測，補記錄 frontend/current（dist）跑前指到哪個 release，
+# 供 Step 4 的 atomic symlink 切換 + ROLLBACK() 還原用（codex 複審 HIGH：
+# dist swap 原子化的一部分——現在活著的 release 目錄本身完全不動，這裡
+# 只是記住指標，rollback 時要能把指標切回去）。
+if [ -L "$CURRENT_LINK" ] && PREV_CURRENT_TARGET="$(readlink "$CURRENT_LINK" 2>/dev/null)" && [ -n "$PREV_CURRENT_TARGET" ]; then
+  PREV_CURRENT_EXISTED=1
+else
+  PREV_CURRENT_EXISTED=0
+  PREV_CURRENT_TARGET=""
 fi
 
 # ---- Step 2：候選設定驗證（scratch harness），完全不動 live conf.d ----
@@ -310,6 +339,21 @@ ROLLBACK() {
     fi
   fi
 
+  # codex 複審 HIGH：dist swap 原子化——frontend/current 這個 symlink 才
+  # 是真正決定 nginx serve 哪份 dist 的指標（前一版 release 目錄本身從
+  # 頭到尾都沒被動過，只要把指標切回去，前一版立刻恢復完整可服務）
+  if [ "$PREV_CURRENT_EXISTED" = 1 ]; then
+    if ! ln -sfn "$PREV_CURRENT_TARGET" "$CURRENT_LINK"; then
+      echo "❌ [fe-nginx] rollback：frontend/current 還原失敗（ln -sfn ${PREV_CURRENT_TARGET} -> ${CURRENT_LINK}）" >&2
+      ROLLBACK_OK=0
+    fi
+  else
+    if ! rm -f "$CURRENT_LINK"; then
+      echo "❌ [fe-nginx] rollback：frontend/current 移除失敗（跑前無 symlink，理應還原成無：${CURRENT_LINK}）" >&2
+      ROLLBACK_OK=0
+    fi
+  fi
+
   if [ "$PREV_DEFAULT_CONF_EXISTED" = 1 ]; then
     if ! cp "$BACKUP_DEFAULT_CONF" "$DEFAULT_CONF"; then
       echo "❌ [fe-nginx] rollback：default.conf 還原失敗" >&2
@@ -361,8 +405,14 @@ trap 'ROLLBACK' ERR
 #      symlink、不改 CSP mode**，只用剛被 Step 1 更新過的 dist/candidate
 #      conf reload 現行拓樸；只有未配置(初次 bootstrap)才做完整的「收斂
 #      python 綁定 + 建 legacy symlink」流程 ----
+# codex 複審 HIGH：dist swap 真正的 atomic 切換點——Step 1 已經把新版
+# dist 解壓驗證(有 index.html)完，Step 2 也驗過 candidate conf，這裡才
+# 是唯一真的把 frontend/current 指到新 release 的地方，且完全在 ERR
+# trap 保護下：後面任何一步失敗，ROLLBACK() 都能把這個 symlink 切回
+# PREV_CURRENT_TARGET，前一版 release 目錄自始至終沒被動過，直接可服務。
+ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 if [ "$PREV_LINK_EXISTED" = 1 ]; then
-  echo "[fe-nginx] 已配置(post-cutover)：保留現有 symlink（$(basename "$PREV_LINK")）與 CSP mode，只驗證+reload"
+  echo "[fe-nginx] 已配置(post-cutover)：保留現有 symlink（$(basename "$PREV_LINK")）與 CSP mode，只切新版 dist（frontend/current -> $(basename "$RELEASE_DIR")）+ 驗證+reload"
   nginx -t
   systemctl reload nginx || systemctl restart nginx
 else
