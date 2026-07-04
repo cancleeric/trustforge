@@ -137,6 +137,26 @@ function isCrossSourceSignal(value: unknown): value is CrossSourceSignal | null 
   if (value.stance_pairs !== undefined) {
     if (!Array.isArray(value.stance_pairs) || !value.stance_pairs.every(isStancePair)) return false
   }
+  // `distinct_sources`（#13 去重欄位）：選填，缺欄位（舊資料/尚未升級的
+  // 後端 stale 快取）放行——`groupByStance` 有 client 端 fallback 自行依
+  // source 去重，這是刻意的向後相容，不可因缺這個欄位就整包 parse_error。
+  // 但**存在時**必須是 `{bullish: StancePair[], bearish: StancePair[]}`
+  // 形狀——`groupByStance` 優先讀這個欄位直接餵進 `SideColumn` 的
+  // `.map()`，畸形值（如 `bullish` 不是陣列）會在 render 時 `.map()` 炸
+  // 掉，跟 `/costs` parse_error 那次同一類洞，故比照 `stance_pairs` 嚴格
+  // 驗證。
+  if (value.distinct_sources !== undefined) {
+    const ds = value.distinct_sources
+    if (
+      !isPlainObject(ds) ||
+      !Array.isArray(ds.bullish) ||
+      !ds.bullish.every(isStancePair) ||
+      !Array.isArray(ds.bearish) ||
+      !ds.bearish.every(isStancePair)
+    ) {
+      return false
+    }
+  }
   if (value.supporting_claim_ids !== undefined && !isStringArray(value.supporting_claim_ids)) {
     return false
   }
