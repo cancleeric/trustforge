@@ -378,3 +378,218 @@ def test_render_evidence_list_blocks_data_uri():
     report, _, _ = web._do_analyze({"coin": ["BTC"], "type": ["multi_source"], "q": ["t"]})
     out = web._render_report(report, ev)
     assert 'href="data:' not in out, "data: URI 不可出現在 href"
+
+
+# ── 前後端分離 Phase 3（task #28，harper CISO 安全審 must-have）───────────────
+# `TRUSTFORGE_TRUST_PROXY`：config-gated 讀 X-Real-IP/X-Forwarded-For。
+
+
+def test_trust_proxy_default_off_ignores_forwarded_headers():
+    """TRUST_PROXY 預設關 → 無論 header 帶什麼，一律回傳直連 IP（行為逐字不變）。"""
+    assert web.TRUST_PROXY is False, "預設必須是關，cutover 前不可誤開"
+    headers = {"X-Real-IP": "1.2.3.4", "X-Forwarded-For": "5.6.7.8, 9.9.9.9"}
+    assert web._resolve_client_ip("10.0.0.1", headers) == "10.0.0.1"
+
+
+def test_trust_proxy_default_off_with_no_headers():
+    """TRUST_PROXY 關、無任何反代 header → 仍回傳直連 IP（現況/直連部署）。"""
+    assert web._resolve_client_ip("203.0.113.9", {}) == "203.0.113.9"
+
+
+def test_trust_proxy_on_prefers_x_real_ip(monkeypatch):
+    """TRUST_PROXY 開 → 優先信任 X-Real-IP（nginx 固定寫死 $remote_addr）。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    headers = {"X-Real-IP": "1.2.3.4", "X-Forwarded-For": "5.6.7.8, 9.9.9.9"}
+    assert web._resolve_client_ip("127.0.0.1", headers) == "1.2.3.4"
+
+
+def test_trust_proxy_on_falls_back_to_x_forwarded_for_first_hop(monkeypatch):
+    """TRUST_PROXY 開、無 X-Real-IP → 退回 X-Forwarded-For，取最左（最原始）一段。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    headers = {"X-Forwarded-For": "5.6.7.8, 9.9.9.9"}
+    assert web._resolve_client_ip("127.0.0.1", headers) == "5.6.7.8"
+
+
+def test_trust_proxy_on_no_headers_falls_back_to_direct_ip(monkeypatch):
+    """TRUST_PROXY 開但兩個 header 都沒帶（例如非 nginx 直打）→ 退回直連 IP。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    assert web._resolve_client_ip("127.0.0.1", {}) == "127.0.0.1"
+
+
+def test_trust_proxy_env_var_gating(monkeypatch):
+    """環境變數解析：只有明確 truthy 值才視為開啟，其餘（含未設/空字串/其他字串）視為關。"""
+    import importlib
+
+    for truthy in ("1", "true", "True", "YES", "on"):
+        monkeypatch.setenv("TRUSTFORGE_TRUST_PROXY", truthy)
+        importlib.reload(web)
+        assert web.TRUST_PROXY is True, f"{truthy!r} 應解析為開啟"
+
+    for falsy in ("0", "false", "no", "", "garbage"):
+        monkeypatch.setenv("TRUSTFORGE_TRUST_PROXY", falsy)
+        importlib.reload(web)
+        assert web.TRUST_PROXY is False, f"{falsy!r} 應解析為關閉"
+
+    monkeypatch.delenv("TRUSTFORGE_TRUST_PROXY", raising=False)
+    importlib.reload(web)
+    assert web.TRUST_PROXY is False, "未設定時預設必須是關"
+
+
+def test_do_get_uses_resolved_client_ip_for_rate_limit(monkeypatch):
+    """do_GET 讀取 client_ip 時走 `_resolve_client_ip`，TRUST_PROXY 開時吃 X-Real-IP。
+
+    用 `/api/status`（`_check_status_rate_limit`）驗證：同一個偽造 X-Real-IP
+    的請求，即使每次直連 IP（client_address）都不同，仍會被視為同一個
+    per-IP bucket（因為 X-Real-IP 相同）——證明限流真的 keyed 在解析後的 IP。
+    """
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    web._status_rate_buckets.clear() if hasattr(web, "_status_rate_buckets") else None
+
+    seen_ips: list[str] = []
+    orig_handle = web._handle_api_status
+
+    def fake_handle_api_status(client_ip):
+        seen_ips.append(client_ip)
+        return 200, "{}"
+
+    monkeypatch.setattr(web, "_handle_api_status", fake_handle_api_status)
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("10.9.9.1", 1)
+    h.path = "/api/status"
+    h.headers = {"X-Real-IP": "42.42.42.42"}
+
+    from io import BytesIO
+    h.wfile = BytesIO()
+    h.send_response = lambda code: None
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    h.client_address = ("10.9.9.2", 1)  # 換一個直連 IP，證明不是用這個 keyed
+    h.do_GET()
+
+    assert seen_ips == ["42.42.42.42"], "應該用 X-Real-IP 而非直連 client_address keyed"
+
+
+# ── CSP_MODE：legacy（預設，byte-identical）／react（cutover 後）───────────────
+
+
+def test_csp_mode_default_is_legacy():
+    assert web.CSP_MODE == "legacy", "預設必須是 legacy，cutover 前不可誤切"
+
+
+def test_send_legacy_csp_byte_identical(monkeypatch):
+    """CSP_MODE=legacy（預設）時，`_send` 送出的 CSP header 必須與 cutover 前逐字相同。"""
+    from io import BytesIO
+
+    monkeypatch.setattr(web, "CSP_MODE", "legacy")
+    h = web.Handler.__new__(web.Handler)
+    h.wfile = BytesIO()
+    captured: list[tuple] = []
+    h.send_response = lambda code: captured.append(("status", code))
+    h.send_header = lambda name, val: captured.append(("header", name, val))
+    h.end_headers = lambda: None
+
+    h._send(200, "ok")
+
+    headers = {name: val for tp in captured if tp[0] == "header" for (_, name, val) in [tp]}
+    assert headers["Content-Security-Policy"] == (
+        "default-src 'none'; "
+        "style-src 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com"
+    )
+    assert "X-Frame-Options" not in headers, "legacy 模式不應新增 X-Frame-Options"
+    assert "Referrer-Policy" not in headers, "legacy 模式不應新增 Referrer-Policy"
+
+
+def test_send_react_csp_and_extra_headers(monkeypatch):
+    """CSP_MODE=react 時，`_send` 套用 harper 新指令集 + X-Frame-Options/Referrer-Policy。"""
+    from io import BytesIO
+
+    monkeypatch.setattr(web, "CSP_MODE", "react")
+    h = web.Handler.__new__(web.Handler)
+    h.wfile = BytesIO()
+    captured: list[tuple] = []
+    h.send_response = lambda code: captured.append(("status", code))
+    h.send_header = lambda name, val: captured.append(("header", name, val))
+    h.end_headers = lambda: None
+
+    h._send(200, "ok")
+
+    headers = {name: val for tp in captured if tp[0] == "header" for (_, name, val) in [tp]}
+    csp = headers["Content-Security-Policy"]
+    for directive in (
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' https://fonts.googleapis.com",
+        "font-src 'self' https://fonts.gstatic.com",
+        "connect-src 'self'",
+        "img-src 'self' data:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ):
+        assert directive in csp, f"react CSP 缺少指令：{directive}"
+    assert headers["X-Frame-Options"] == "DENY"
+    assert headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+
+
+def test_lambda_handler_csp_mode_legacy_default(monkeypatch):
+    monkeypatch.setattr(web, "CSP_MODE", "legacy")
+    resp = lambda_handler._resp(200, "ok", "text/plain")
+    assert resp["headers"]["Content-Security-Policy"] == web._CSP_LEGACY
+    assert "X-Frame-Options" not in resp["headers"]
+
+
+def test_lambda_handler_csp_mode_react(monkeypatch):
+    monkeypatch.setattr(web, "CSP_MODE", "react")
+    resp = lambda_handler._resp(200, "ok", "text/plain")
+    assert resp["headers"]["Content-Security-Policy"] == web._CSP_REACT
+    assert resp["headers"]["X-Frame-Options"] == "DENY"
+    assert resp["headers"]["Referrer-Policy"] == "strict-origin-when-cross-origin"
+
+
+# ── main() 綁定收斂：TRUST_PROXY 開時強制 127.0.0.1 ─────────────────────────
+
+
+def test_main_forces_127_bind_when_trust_proxy_on(monkeypatch):
+    """TRUST_PROXY=1 但 TRUSTFORGE_BIND_HOST 設別的值 → main() 強制收斂成 127.0.0.1。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
+    monkeypatch.setenv("TRUSTFORGE_BIND_HOST", "0.0.0.0")
+
+    captured_addr = {}
+
+    class FakeServer:
+        def __init__(self, addr, handler_cls):
+            captured_addr["addr"] = addr
+
+        def serve_forever(self):
+            pass
+
+    monkeypatch.setattr(web, "ThreadingHTTPServer", FakeServer)
+    web.main()
+
+    assert captured_addr["addr"][0] == "127.0.0.1", (
+        "TRUST_PROXY 開啟時必須強制綁 127.0.0.1，不可信任 TRUSTFORGE_BIND_HOST 亂設"
+    )
+
+
+def test_main_respects_bind_host_when_trust_proxy_off(monkeypatch):
+    """TRUST_PROXY 關（預設）→ 沿用 TRUSTFORGE_BIND_HOST（預設 0.0.0.0，直連部署現況）。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", False)
+    monkeypatch.delenv("TRUSTFORGE_BIND_HOST", raising=False)
+
+    captured_addr = {}
+
+    class FakeServer:
+        def __init__(self, addr, handler_cls):
+            captured_addr["addr"] = addr
+
+        def serve_forever(self):
+            pass
+
+    monkeypatch.setattr(web, "ThreadingHTTPServer", FakeServer)
+    web.main()
+
+    assert captured_addr["addr"][0] == "0.0.0.0"
