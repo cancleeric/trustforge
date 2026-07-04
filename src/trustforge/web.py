@@ -3284,9 +3284,44 @@ def _price_provenance_data(evidence: list) -> dict:
 #   - in-flight entry 額外記 leader 開始時間戳：往後新進來的請求（不是已
 #     經在等待中的 follower）發現該 entry 已超過同一個逾時上界仍未完成，
 #     視為「leader 已死掉/永久 hang 住」的 stale entry，直接取代成為新
-#     leader（不再讓後續所有請求永遠 follow 一個死掉的 leader）；舊
-#     leader 真的（很晚才）完成時，靠身分比對（`entry is (event, ...)`）
-#     確認自己的 entry 是否還在，不會誤刪已經接手的新 leader 的 entry。
+#     leader（不再讓後續所有請求永遠 follow 一個死掉的 leader）。
+#
+# codex HIGH 複審#3（stale-leader 取代新 race）：上面「取代」只解決了
+# 「follower 不會永遠等一個死掉的 leader」，但沒解決「舊 leader 之後
+# 無條件寫共用快取」——舊（stale）leader 其實沒有被 kill、只是被取代成
+# 不再是 in-flight 記錄裡「認可」的那個而已，它自己那個 Python thread
+# 仍在背景繼續跑 `compute()`；若它稍後才完成（例如真的只是很慢，不是
+# 真的 hang 死），先前的程式碼會無條件把它的結果寫進共用快取／清掉
+# in-flight——覆寫掉新 leader 已經算出來的（更新的）結果，讓之後所有
+# 呼叫端都拿到「過時」的 stale 結果。修法（generation/lease token 圍欄）：
+#   - 每次成為某把 key 的 leader（不論是全新 key，還是取代一個 stale
+#     entry），都從單一全域、單調遞增的 `_analyze_dedup_generation_seq`
+#     領一個新的世代編號，隨 in-flight tuple 一起存
+#     `(event, start_ts, generation)`。用全域計數器（而非每把 key 各自的
+#     計數器字典）而不怕記憶體無限增長——不需要額外一個會無限增長的
+#     per-key dict，且世代編號全域唯一、永不重複使用，即使某把 key 的
+#     in-flight/cache 已經清掉很久之後才有新的 leader，也不會跟很久以前
+#     某個仍在背景執行、最終才醒來的 stale leader 世代編號「巧合撞號」。
+#   - leader 發布結果前（成功寫快取、失敗寫快取、清 in-flight 這三件事
+#     都算，統一在同一個檢查點）：在鎖內重新讀 `_analyze_dedup_inflight`
+#     目前存的世代編號，跟自己創建時領到的世代編號比對——**不相等**代表
+#     自己已經被取代（stale），這次寫入整段 no-op（不寫快取、不動
+#     in-flight，因為那已經不是自己的 entry）；只有世代編號仍相符（自己
+#     還是「目前認可」的 leader）才真的發布。`event.set()` 則不受這個
+#     檢查影響、永遠執行——讓當初 join 在這個（已被取代的舊）Event 上的
+#     follower 能提早醒來，落回 fail-safe 分支（見 `_dedup_analyze_call`
+#     docstring）自己去查一次目前的快取／視情況獨立跑一次，而不是傻等到
+#     自己的逾時上界。
+#   - **取捨（刻意接受、不是缺陷）**：Python 原生 thread 沒有辦法從外部
+#     強制 cancel/kill 一個已經在跑的 `compute()`——所以「stale leader
+#     被取代後，兩個 thread 在 45 秒重疊期內同時真的各打一次連接器/
+#     Bedrock」這件事本身**沒有被消除**，只是被 fencing 保證「兩者之中
+#     只有目前世代的那個會被寫進共用快取、服務給後續呼叫端」。這個重複
+#     計算在架構上是罕見事件（只有 leader 真的卡到超過 45 秒門檻才會
+#     觸發取代），且已經被 #9 護欓（每日 $ 上限 + atomic 預留）封頂，不會
+#     無限放大——這裡要修的是「正確性」（絕不發布/服務過時結果），不是
+#     「零重複」（那需要能真正 cancel 執行中 thread 的機制，超出目前
+#     `ThreadingHTTPServer` + 原生 thread 的能力範圍）。
 # ---------------------------------------------------------------------------
 
 _ANALYZE_DEDUP_TTL_SECONDS = 60.0
@@ -3297,9 +3332,15 @@ _ANALYZE_DEDUP_CACHE_MAX = 256
 _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS = 45.0
 
 _analyze_dedup_lock = threading.Lock()
-# key -> (leader 完成時會 set() 的 Event, leader 開始時間戳)
-_analyze_dedup_inflight: dict[str, tuple[threading.Event, float]] = {}
+# key -> (leader 完成時會 set() 的 Event, leader 開始時間戳, leader 的世代編號)
+_analyze_dedup_inflight: dict[str, tuple[threading.Event, float, int]] = {}
 _analyze_dedup_cache: dict[str, tuple[float, tuple[bool, object]]] = {}
+# 全域、單調遞增、永不重複使用的世代編號來源（見上方模組頂部大段說明的
+# codex HIGH 複審#3）；只在持有 `_analyze_dedup_lock` 時讀寫。用單一全域
+# 計數器而非每把 key 各自的計數器字典，避免額外一個會無限增長的 dict，
+# 且保證世代編號全域唯一——不會有「同一把 key 被回收後世代編號重新從頭
+# 算」而跟舊 stale leader 巧合撞號的風險。
+_analyze_dedup_generation_seq = 0
 
 
 class _AnalyzeDedupTimeout(Exception):
@@ -3466,6 +3507,23 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     自己真的跑一次」分支——這正是我們要的：每個 follower 各自的限流
     早就在 `_handle_api_analyze` 前置檢查過了（合格才會走到這裡），
     所以此時獨立跑一次是安全、正確的，不是「沒 dedup 到」。
+
+    codex HIGH 複審#3（stale-leader 取代新 race，見模組頂部大段說明）：
+    「取代」stale in-flight entry 只解決了 follower 不會永遠等一個死掉的
+    leader，沒解決舊（stale）leader 的 Python thread 其實還在背景繼續跑
+    `compute()`、稍後才完成時「無條件」寫共用快取／清 in-flight 的問題
+    ——那會覆寫掉新 leader 已經算出來的結果。修法：leader 創建時從全域
+    單調遞增計數器 `_analyze_dedup_generation_seq` 領一個世代編號，跟
+    in-flight tuple 存在一起；發布前（成功寫快取／失敗寫快取／清
+    in-flight，三件事統一同一個檢查點）重新比對目前 in-flight 存的世代
+    編號是否還等於自己領到的那個——不等於代表自己已被取代（stale），
+    整段發布 no-op（不寫快取、不動 in-flight）；`event.set()` 不受這個
+    檢查影響、永遠執行，讓 join 在這個（已被取代的）Event 上的 follower
+    提早醒來、落回上面的 fail-safe 分支。取捨：Python thread 無法從外部
+    強制 cancel，stale leader 背景仍會把這次 `compute()` 跑完（重複呼叫
+    一次真連接器/Bedrock）——這裡保證的是「不發布/服務過時結果」，不是
+    「零重複呼叫」；重複呼叫本身罕見（只有真的卡超過 45 秒門檻才會被
+    取代）且已受 #9 護欄（每日 $ 上限）封頂。
     """
     now = time.time()
     with _analyze_dedup_lock:
@@ -3478,20 +3536,24 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
 
         inflight = _analyze_dedup_inflight.get(key)
         if inflight is not None:
-            _leader_event, leader_started_at = inflight
+            _leader_event, leader_started_at, _leader_generation = inflight
             if now - leader_started_at > _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS:
                 # leader 早已超過逾時上界仍未完成——很可能已經 hang 死，
-                # 視為 stale，直接取代成為新 leader（見下方寫回段落的
-                # 身分比對，確保舊 leader 很晚才完成時不會誤刪這個新
-                # entry）。
+                # 視為 stale，直接取代成為新 leader（新 leader 會領一個
+                # 新的世代編號；舊 leader 稍後才完成時靠世代編號比對
+                # fencing，見上方 docstring 與下方發布段落）。
                 inflight = None
 
         is_leader = inflight is None
         if is_leader:
             event = threading.Event()
-            _analyze_dedup_inflight[key] = (event, now)
+            global _analyze_dedup_generation_seq
+            _analyze_dedup_generation_seq += 1
+            my_generation = _analyze_dedup_generation_seq
+            _analyze_dedup_inflight[key] = (event, now, my_generation)
         else:
             event = inflight[0]
+            my_generation = None  # follower 不發布，不需要世代編號
 
     if not is_leader:
         completed = event.wait(timeout=_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)
@@ -3507,38 +3569,46 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             if ok:
                 return payload
             raise payload
-        # 兩種情況會落到這裡：(a) 理論上不會發生的極端 race（leader 寫
+        # 三種情況會落到這裡：(a) 理論上不會發生的極端 race（leader 寫
         # 快取跟 set() 事件在同一個 critical path，中間應該看不到空窗）；
-        # (b) leader 遇到 `TooManyRequests`（見下方 except 分支）——那是
-        # caller-specific 的失敗，故意不寫進共用快取，讓每個 follower
-        # 都落到這裡、各自真的跑一次 `compute()`。不管哪種情況，這裡都
-        # 是安全的：follower 自己的限流早已在 `_handle_api_analyze` 呼叫
-        # `_dedup_analyze_call` 之前就通過了，獨立跑一次不會繞過任何
-        # 保護、也不是「沒 dedup 到」。
+        # (b) leader 遇到 `TooManyRequests`——caller-specific 的失敗，故意
+        # 不寫進共用快取；(c) 這個 follower 當初 join 的是一個後來被
+        # generation fencing 判定為 stale、發布被 no-op 掉的舊 leader
+        # （見上方 docstring）。不管哪種情況，這裡都是安全的：follower
+        # 自己的限流早已在 `_handle_api_analyze` 呼叫 `_dedup_analyze_call`
+        # 之前就通過了，獨立跑一次不會繞過任何保護、也不是「沒 dedup 到」。
         return compute()
 
     try:
         result = compute()
     except Exception as exc:
         with _analyze_dedup_lock:
-            if not isinstance(exc, TooManyRequests):
-                # codex HIGH 複審（dedup×限流交互）：`TooManyRequests` 是
-                # caller-specific 的失敗（只跟 leader 自己的 IP/歷史有
-                # 關），絕不能存進共用快取 replay 給其他不相干的 IP
-                # （429-poisoning）——只清 in-flight、正常 raise 給 leader
-                # 自己，讓等待中的 follower 落回上面的 fail-safe 分支各自
-                # 獨立跑一次。
-                _analyze_dedup_cache_put_locked(key, (False, exc))
             current = _analyze_dedup_inflight.get(key)
-            if current is not None and current[0] is event:
+            is_current_leader = current is not None and current[2] == my_generation
+            if is_current_leader:
+                if not isinstance(exc, TooManyRequests):
+                    # codex HIGH 複審（dedup×限流交互）：`TooManyRequests`
+                    # 是 caller-specific 的失敗（只跟 leader 自己的 IP/
+                    # 歷史有關），絕不能存進共用快取 replay 給其他不相干
+                    # 的 IP（429-poisoning）——只清 in-flight、正常 raise
+                    # 給 leader 自己，讓等待中的 follower 落回上面的
+                    # fail-safe 分支各自獨立跑一次。
+                    _analyze_dedup_cache_put_locked(key, (False, exc))
                 _analyze_dedup_inflight.pop(key, None)
+            # else：generation fencing——自己已被取代（stale），這次發布
+            # 整段 no-op：不寫快取（連失敗結果也不寫，過時的失敗一樣不能
+            # 服務給別人）、不動 in-flight（那已經不是自己的 entry，貿然
+            # pop 會誤刪新 leader 的 entry）。
         event.set()
         raise
     with _analyze_dedup_lock:
-        _analyze_dedup_cache_put_locked(key, (True, result))
         current = _analyze_dedup_inflight.get(key)
-        if current is not None and current[0] is event:
+        is_current_leader = current is not None and current[2] == my_generation
+        if is_current_leader:
+            _analyze_dedup_cache_put_locked(key, (True, result))
             _analyze_dedup_inflight.pop(key, None)
+        # else：同上，generation fencing——stale leader 晚到的成功結果，
+        # 一樣不能覆寫已經被取代後的狀態，整段 no-op。
     event.set()
     return result
 

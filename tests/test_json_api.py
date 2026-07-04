@@ -776,7 +776,8 @@ def test_api_analyze_dedup_stalled_leader_entry_becomes_stale_and_replaced(monke
 
     zombie_event = threading.Event()  # 永遠不會被 set() ——模擬死掉的 leader
     stale_started_at = time.time() - 10.0  # 遠遠超過 0.3 秒的逾時上界
-    web._analyze_dedup_inflight[key] = (zombie_event, stale_started_at)
+    zombie_generation = -999  # 刻意用不會跟真正計數器撞號的假世代編號
+    web._analyze_dedup_inflight[key] = (zombie_event, stale_started_at, zombie_generation)
 
     code, body = web._handle_api_analyze(qs, client_ip="10.1.2.2")
 
@@ -785,6 +786,189 @@ def test_api_analyze_dedup_stalled_leader_entry_becomes_stale_and_replaced(monke
     # 殭屍 entry 應該已經被新 leader 的 entry 取代／清掉，不會再殘留。
     current = web._analyze_dedup_inflight.get(key)
     assert current is None or current[0] is not zombie_event
+
+
+def test_dedup_analyze_call_stale_leader_finishing_before_any_replacement_still_published(
+    monkeypatch,
+):
+    """codex HIGH 複審#4（stale-leader 取代新 race，generation fencing）：
+    只有真的「被取代」才需要 fencing——若一個 leader 雖然跑得比逾時門檻
+    久，但從頭到尾都沒有其他請求真的把它取代掉，它自己完成時仍是這把
+    key 唯一、合法的一份結果，必須正常發布/服務，不能因為「超過門檻」
+    這件事本身就一律 no-op（那樣會把單純比較慢、但沒被取代的正常情況
+    也錯殺，等於每次真連接器/Bedrock 剛好跑超過 45 秒都變成永遠拿不到
+    結果）。"""
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
+    key = "dedup-stale-not-yet-replaced-test-key"
+
+    def _compute_a():
+        time.sleep(0.3)  # 故意超過（縮短過的）逾時門檻，但沒有其他請求進來取代
+        return "result-A-slow-but-sole"
+
+    result = web._dedup_analyze_call(key, _compute_a)
+    assert result == "result-A-slow-but-sole"
+
+    cached = web._analyze_dedup_cache.get(key)
+    assert cached is not None and cached[1] == (True, "result-A-slow-but-sole"), (
+        "沒有被任何請求取代的 leader，即使跑得比逾時門檻久，完成後仍應正常發布"
+    )
+    assert key not in web._analyze_dedup_inflight
+
+    # 佐證：緊接著同一把 key 的新請求命中的是 A 自己剛發布的快取，不會
+    # 誤判需要重新跑一次。
+    counter = _CallCounter()
+
+    def _compute_should_not_run():
+        counter.hit()
+        return "should-not-be-called"
+
+    result2 = web._dedup_analyze_call(key, _compute_should_not_run)
+    assert result2 == "result-A-slow-but-sole"
+    assert counter.n == 0
+
+
+def test_dedup_analyze_call_stale_leader_finishing_after_replacement_does_not_overwrite(
+    monkeypatch,
+):
+    """codex HIGH 複審#4（stale-leader 取代新 race，generation fencing）：
+    這是 codex 這輪要修的核心 bug 場景——leader A 卡住超過逾時門檻，
+    新請求偵測到 A 是 stale、取代成為新 leader B，B 很快完成、發布自己
+    的結果並清掉 in-flight；**之後**A 才姍姍來遲真的完成（不是真的 hang
+    死，只是很慢）。斷言：A 完成後，共用快取仍是 B 的結果，沒有被 A
+    覆寫；in-flight 也沒有任何殘留副作用。"""
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
+    key = "dedup-stale-race-after-replacement-test-key"
+
+    a_may_finish = threading.Event()
+    a_result_holder: dict[str, object] = {}
+
+    def _compute_a():
+        a_may_finish.wait(timeout=5)
+        return "result-A"
+
+    def _compute_b():
+        return "result-B"
+
+    def _worker_a():
+        try:
+            a_result_holder["value"] = web._dedup_analyze_call(key, _compute_a)
+        except Exception as exc:  # pragma: no cover - 只在斷言失敗時才有意義
+            a_result_holder["error"] = exc
+
+    a_thread = threading.Thread(target=_worker_a)
+    a_thread.start()
+
+    # 等 A 真的成為 leader（in-flight 出現這把 key）。
+    for _ in range(100):
+        if key in web._analyze_dedup_inflight:
+            break
+        time.sleep(0.02)
+    assert key in web._analyze_dedup_inflight, "leader A 應該已經寫入 in-flight"
+
+    # 等超過（縮短過的）逾時門檻，讓 A 變成 stale。
+    time.sleep(0.3)
+
+    # B 進來，偵測到 A 是 stale、取代成為新 leader，並立刻完成、發布。
+    result_b = web._dedup_analyze_call(key, _compute_b)
+    assert result_b == "result-B"
+    cached = web._analyze_dedup_cache.get(key)
+    assert cached is not None and cached[1] == (True, "result-B")
+    assert key not in web._analyze_dedup_inflight
+
+    # 現在才放 A 完成——A 的 compute() 這時候才真的返回。
+    a_may_finish.set()
+    a_thread.join(timeout=5)
+    assert a_result_holder.get("value") == "result-A", "A 自己應該還是拿到自己真正算出來的結果"
+
+    # 關鍵斷言：A（stale）晚到的完成，不該覆寫 B 已經發布的結果，也不該
+    # 誤清 in-flight（此時 in-flight 早就是空的）。
+    cached_after = web._analyze_dedup_cache.get(key)
+    assert cached_after is not None and cached_after[1] == (True, "result-B"), (
+        f"stale leader A 晚到完成不該覆寫 B 已發布的結果，實際 {cached_after}"
+    )
+    assert key not in web._analyze_dedup_inflight
+
+
+def test_dedup_analyze_call_stale_leader_finishing_while_replacement_still_running_does_not_overwrite(
+    monkeypatch,
+):
+    """codex HIGH 複審#4（stale-leader 取代新 race，generation fencing）：
+    比上一個測試更刁鑽的時序——A 被取代後，在新 leader B **自己都還沒跑
+    完**的期間，A 才姍姍來遲完成。fencing 依賴的是「supersession 是否
+    已經發生」（B 是否已經領到新的世代編號，這在 B 呼叫自己的
+    `compute()` 之前、在鎖內就已經確定），不是「B 自己是否已經跑完」；
+    A 這時候一樣必須是 no-op：不能誤清 B 仍在跑的 in-flight entry，也
+    不能把快取寫成自己的結果冒充「目前」的結果。最後才放 B 完成，斷言
+    最終被發布/服務的是 B 的結果。"""
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
+    key = "dedup-stale-race-during-replacement-test-key"
+
+    a_may_finish = threading.Event()
+    b_may_finish = threading.Event()
+    a_result_holder: dict[str, object] = {}
+    b_result_holder: dict[str, object] = {}
+
+    def _compute_a():
+        a_may_finish.wait(timeout=5)
+        return "result-A"
+
+    def _compute_b():
+        b_may_finish.wait(timeout=5)
+        return "result-B"
+
+    def _worker(compute, holder):
+        try:
+            holder["value"] = web._dedup_analyze_call(key, compute)
+        except Exception as exc:  # pragma: no cover - 只在斷言失敗時才有意義
+            holder["error"] = exc
+
+    a_thread = threading.Thread(target=_worker, args=(_compute_a, a_result_holder))
+    a_thread.start()
+    for _ in range(100):
+        if key in web._analyze_dedup_inflight:
+            break
+        time.sleep(0.02)
+    assert key in web._analyze_dedup_inflight
+    initial_generation = web._analyze_dedup_inflight[key][2]
+
+    time.sleep(0.3)  # 讓 A 超過逾時門檻，變成 stale
+
+    b_thread = threading.Thread(target=_worker, args=(_compute_b, b_result_holder))
+    b_thread.start()
+    # 等 B 真的取代成為新 leader——世代編號跟 A 剛開始那個不同（供
+    # `_dedup_analyze_call` 內部 fencing 比對用，不是靠 B 自己跑完）。
+    for _ in range(100):
+        inflight = web._analyze_dedup_inflight.get(key)
+        if inflight is not None and inflight[2] != initial_generation:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("B 應該已經取代成為新世代的 leader")
+
+    # 這時候 B 還沒完成（b_may_finish 還沒 set），先放 A 完成。
+    a_may_finish.set()
+    a_thread.join(timeout=5)
+    assert a_result_holder.get("value") == "result-A"
+
+    # A 完成、嘗試發布時，B 早已取代（generation 不同）——A 的發布必須是
+    # no-op：不該把 in-flight 清掉（那是 B 的 entry，B 還在跑），也不該
+    # 把快取寫成 A 的結果。
+    assert key in web._analyze_dedup_inflight, "A 不該誤清掉 B 仍在跑的 in-flight entry"
+    cached_while_b_running = web._analyze_dedup_cache.get(key)
+    assert cached_while_b_running is None or cached_while_b_running[1] != (True, "result-A"), (
+        f"A 被取代後晚到完成，不該把快取寫成自己的結果，實際 {cached_while_b_running}"
+    )
+
+    # 現在才放 B 完成——B 才是應該真正發布/被服務的結果。
+    b_may_finish.set()
+    b_thread.join(timeout=5)
+    assert b_result_holder.get("value") == "result-B"
+
+    cached_final = web._analyze_dedup_cache.get(key)
+    assert cached_final is not None and cached_final[1] == (True, "result-B"), (
+        f"最終應該是 replacement（B）的結果被發布/服務，實際 {cached_final}"
+    )
+    assert key not in web._analyze_dedup_inflight
 
 
 def test_api_analyze_dedup_cross_ip_exhausted_ip_blocked_unrelated_ip_unaffected(monkeypatch):
