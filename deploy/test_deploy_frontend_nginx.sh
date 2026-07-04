@@ -205,6 +205,156 @@ assert_contains "$INSTALL_CMD" "rm -f /etc/nginx/conf.d/default.conf" "SSM 安�
 
 rm -rf "$MOCKDIR" "$CAPTURE" "$REPO_ROOT/frontend/dist" "$REPO_ROOT/build/trustforge_frontend_dist.zip"
 
+echo "== 場景 3：X-Real-IP 覆蓋整合測試（harper CISO 建議）=="
+# 目的：deploy/nginx-legacy.conf 裡 `proxy_set_header X-Real-IP $remote_addr;`
+# 是限流繞過防護的關鍵一行——這裡真的起一支本機 nginx（用
+# deploy/nginx-legacy.conf 本尊，非 mock/非 stub）+ 真的本機 python
+# （`TRUSTFORGE_TRUST_PROXY=1`），送帶偽造 X-Real-IP 的請求打 `/api/status`，
+# 斷言：
+#   1. 經過 nginx 的請求，不管客戶端帶什麼偽造 X-Real-IP，nginx 都會覆蓋成
+#      真實來源 IP，所以同一來源短時間內連續打會共用同一個限流 bucket，在
+#      `_STATUS_RATE_MAX=10`／`_STATUS_RATE_WINDOW=30`（見 web.py）內第 11
+#      次觸發 429。
+#   2. 繞過 nginx、直接打 python（`TRUSTFORGE_TRUST_PROXY=1` 沒有 nginx 擋在
+#      前面覆蓋 header 時）：每次用不同偽造 X-Real-IP，各自佔一個獨立
+#      bucket，不會觸發 429——這正是「python 只監聽 127.0.0.1、對外只能經過
+#      nginx」這個安全設計的理由，未來若不小心刪掉 nginx 那行
+#      `proxy_set_header X-Real-IP $remote_addr;`，這裡的斷言 1 會先紅掉。
+#
+# 依賴本機 `nginx`、GNU sed（`gsed`，純測試用途改監聽 port，跟腳本本身無關）。
+# 任一沒裝就跳過本場景（不影響場景 1/2 已經跑完的結果）。
+XRIP_NGINX_PORT=19080
+XRIP_PYTHON_PORT=19081
+XRIP_SKIP=0
+for bin in nginx curl; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "找不到 ${bin}，跳過場景 3（純本機驗證環境依賴，不影響前面場景結果）。" >&2
+    XRIP_SKIP=1
+  fi
+done
+XRIP_GSED_BIN="$(command -v gsed || true)"
+if [ -z "$XRIP_GSED_BIN" ]; then
+  echo "找不到 gsed（GNU sed），跳過場景 3。macOS 可用: brew install gnu-sed" >&2
+  XRIP_SKIP=1
+fi
+
+if [ "$XRIP_SKIP" -eq 0 ]; then
+  XRIP_WORK=$(mktemp -d)
+  XRIP_NGINX_STARTED=""
+  XRIP_PYTHON_PID=""
+
+  xrip_cleanup() {
+    if [ -n "$XRIP_NGINX_STARTED" ]; then
+      nginx -c "$XRIP_WORK/harness.conf" -s stop >/dev/null 2>&1 || true
+    fi
+    if [ -n "$XRIP_PYTHON_PID" ]; then
+      kill "$XRIP_PYTHON_PID" >/dev/null 2>&1 || true
+      wait "$XRIP_PYTHON_PID" 2>/dev/null || true
+    fi
+    rm -rf "$XRIP_WORK"
+  }
+  trap xrip_cleanup EXIT
+
+  mkdir -p "$XRIP_WORK/run"
+  cp "$REPO_ROOT/deploy/nginx-legacy.conf" "$XRIP_WORK/nginx-legacy-patched.conf"
+  "$XRIP_GSED_BIN" -i \
+    -e "s#listen 80;#listen ${XRIP_NGINX_PORT};#" \
+    -e "s#listen \[::\]:80;#listen [::]:${XRIP_NGINX_PORT};#" \
+    -e "s#proxy_pass http://127.0.0.1:8080;#proxy_pass http://127.0.0.1:${XRIP_PYTHON_PORT};#" \
+    "$XRIP_WORK/nginx-legacy-patched.conf"
+
+  cat > "$XRIP_WORK/harness.conf" <<EOF
+worker_processes 1;
+error_log $XRIP_WORK/run/error.log;
+pid $XRIP_WORK/run/nginx.pid;
+events { worker_connections 64; }
+http {
+  include $XRIP_WORK/nginx-legacy-patched.conf;
+}
+EOF
+
+  if nginx -t -c "$XRIP_WORK/harness.conf" >"$XRIP_WORK/nginx_validate.log" 2>&1; then
+    pass_xrip=1
+  else
+    echo "  [FAIL] patched deploy/nginx-legacy.conf 沒通過 nginx -t"
+    cat "$XRIP_WORK/nginx_validate.log"
+    FAIL=$((FAIL + 1))
+    pass_xrip=0
+  fi
+
+  if [ "$pass_xrip" -eq 1 ]; then
+    (
+      cd "$REPO_ROOT"
+      PORT="$XRIP_PYTHON_PORT" TRUSTFORGE_BIND_HOST=127.0.0.1 TRUSTFORGE_TRUST_PROXY=1 \
+        CACHE_BACKEND=json PYTHONPATH=src \
+        exec python3 -m trustforge.web
+    ) >"$XRIP_WORK/python.log" 2>&1 &
+    XRIP_PYTHON_PID=$!
+
+    XRIP_READY=0
+    for _ in $(seq 1 20); do
+      if curl -fsS -o /dev/null "http://127.0.0.1:${XRIP_PYTHON_PORT}/healthz" 2>/dev/null; then
+        XRIP_READY=1
+        break
+      fi
+      sleep 0.2
+    done
+    if [ "$XRIP_READY" -eq 1 ]; then
+      echo "  [PASS] 本機 python /healthz 已就緒"
+      PASS=$((PASS + 1))
+    else
+      echo "  [FAIL] 本機 python /healthz 逾時未就緒"
+      cat "$XRIP_WORK/python.log"
+      FAIL=$((FAIL + 1))
+    fi
+
+    if [ "$XRIP_READY" -eq 1 ]; then
+      nginx -c "$XRIP_WORK/harness.conf"
+      XRIP_NGINX_STARTED="1"
+      sleep 0.5
+
+      echo "  -- 經過 nginx：連續 11 次帶不同偽造 X-Real-IP 打 /api/status --"
+      NGINX_429_SEEN=0
+      for i in $(seq 1 11); do
+        code=$(curl -sS -o /dev/null -w '%{http_code}' \
+          -H "X-Real-IP: 10.99.0.${i}" \
+          "http://127.0.0.1:${XRIP_NGINX_PORT}/api/status")
+        if [ "$i" -eq 11 ] && [ "$code" = "429" ]; then
+          NGINX_429_SEEN=1
+        fi
+      done
+      if [ "$NGINX_429_SEEN" -eq 1 ]; then
+        echo "  [PASS] 經 nginx：第 11 次觸發 429（nginx 覆蓋偽造 X-Real-IP，全部共用真實 IP 的限流 bucket）"
+        PASS=$((PASS + 1))
+      else
+        echo "  [FAIL] 經 nginx：第 11 次沒有觸發 429（預期 nginx 應該覆蓋偽造 X-Real-IP）"
+        FAIL=$((FAIL + 1))
+      fi
+
+      echo "  -- 繞過 nginx：直接打 python，11 次都用不同偽造 X-Real-IP --"
+      DIRECT_429_SEEN=0
+      for i in $(seq 1 11); do
+        code=$(curl -sS -o /dev/null -w '%{http_code}' \
+          -H "X-Real-IP: 10.88.0.${i}" \
+          "http://127.0.0.1:${XRIP_PYTHON_PORT}/api/status")
+        if [ "$code" = "429" ]; then
+          DIRECT_429_SEEN=1
+        fi
+      done
+      if [ "$DIRECT_429_SEEN" -eq 0 ]; then
+        echo "  [PASS] 繞過 nginx：11 個不同偽造 X-Real-IP 各自獨立 bucket，沒有觸發 429（符合預期：python 若對外直接聽會被繞過限流，這正是為何只監聽 127.0.0.1）"
+        PASS=$((PASS + 1))
+      else
+        echo "  [FAIL] 繞過 nginx：不預期地觸發了 429"
+        FAIL=$((FAIL + 1))
+      fi
+    fi
+  fi
+
+  xrip_cleanup
+  trap - EXIT
+fi
+
 echo
 echo "== 結果：$PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
