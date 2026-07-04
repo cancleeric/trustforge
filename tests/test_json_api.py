@@ -70,19 +70,16 @@ def _reset_shared_module_state():
 
 @pytest.fixture(autouse=True)
 def _reset_analyze_dedup_state():
-    """#51 `/api/analyze` server-side idempotency：`_analyze_dedup_inflight`/
-    `_analyze_dedup_follower_result` 是 module-level 狀態（in-flight
-    coalescing 期間、以及 leader 完成當下發布給 follower 的短暫暫存區；
-    世代編號雖然全域唯一不會跨測試撞號，但仍清乾淨避免不必要的殘留），
-    本檔許多測試共用相同的 (coin, query, type) 組合（如
-    `coin=BTC, q="test"`）——不清乾淨會讓後面的測試誤命中前一個測試留下
-    的殘留事件，而不是真的呼叫到當次測試 monkeypatch 的
-    `web.run`/`web.run_comparison`。"""
+    """#51 `/api/analyze` server-side idempotency：`_analyze_dedup_inflight`
+    是唯一的 module-level 狀態（Round 14 codex HIGH 複審之後：single-flight
+    `_AnalyzeFlight` 物件本身由呼叫端的區域變數參照決定存活，不再有任何
+    以世代編號為鍵的暫存字典/計數器需要清），本檔許多測試共用相同的
+    (coin, query, type) 組合（如 `coin=BTC, q="test"`）——不清乾淨會讓
+    後面的測試誤命中前一個測試留下的殘留 in-flight entry，而不是真的呼叫
+    到當次測試 monkeypatch 的 `web.run`/`web.run_comparison`。"""
     web._analyze_dedup_inflight.clear()
-    web._analyze_dedup_follower_result.clear()
     yield
     web._analyze_dedup_inflight.clear()
-    web._analyze_dedup_follower_result.clear()
 
 
 @pytest.fixture
@@ -881,608 +878,284 @@ def test_api_analyze_dedup_stalled_leader_follower_times_out_not_infinite_block(
     )
 
 
-def test_api_analyze_dedup_stalled_leader_entry_becomes_stale_and_replaced(monkeypatch):
-    """codex HIGH 複審（過期/replace stale in-flight entry）：leader
-    掛掉/hang 死、且真的完全沒有觸發任何清理程式碼（例如被強制中斷，
-    不像一般 Exception 有 `except` 分支負責清理）時，該 key 的 in-flight
-    entry 會變成永久卡住的殭屍——後續所有相同請求絕不能永遠 follow 一個
-    死掉的 leader（等到 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 也沒用，
-    因為根本沒有人會 `event.set()`）。
+def test_api_analyze_dedup_zombie_leader_entry_not_replaced_fresh_caller_just_waits_and_503s(
+    monkeypatch,
+):
+    """codex HIGH 複審 Round 14（single-flight 物件 + 參照，#51 最終收斂，
+    移除 stale-leader 取代機制）：先前版本裡，一個「已經存在超過逾時上界、
+    且永遠不會被 `event.set()` 的殭屍 in-flight entry」會被下一個進來的
+    請求偵測為 stale、取而代之成為新 leader，真的重新觸發一次
+    `pipeline.run`。Round 14 之後**刻意移除**這個「取代」行為——leader
+    （不論是真的 hang 死，還是單純很慢）不會再被任何後到的請求取代，
+    所有後到的請求（不管是不是「fresh」）都只是老老實實去 join 這個
+    唯一的 `_AnalyzeFlight`、bounded wait 到自己的 deadline，等不到就回
+    503（見模組頂部大段說明「不需要 replace stale leader」的完整理由：
+    這個簡化能成立，前提是 leader 的 `compute()` 本身已經受
+    `bedrock.py` 的硬性 timeout 限制，不會真的無限期 hang）。
 
-    這裡直接偽造一個「已經存在超過逾時上界、且永遠不會被 set() 的殭屍
-    in-flight entry」，斷言下一個進來的請求會偵測到它是 stale、直接取代
-    成為新 leader，真的重新觸發一次 `pipeline.run`，而不是掛在殭屍
-    entry 上等到天荒地老。"""
+    這裡直接偽造一個「早就存在、且永遠不會被 set() 的殭屍 `_AnalyzeFlight`」
+    ，斷言：(1) 後到的請求**不會**取代它、也**不會**真的觸發
+    `pipeline.run`；(2) 後到的請求只是 join 這個殭屍 Flight，bounded wait
+    到自己的（縮短過的）逾時上界後正常回 503；(3) 殭屍 entry 原封不動留著
+    ——不像 Round 12～13 那樣被清掉/取代。"""
     monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
 
     counter = _CallCounter()
     _wrap_counting_run(monkeypatch, counter)
 
-    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-stale-leader-test"]}
+    qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["dedup-zombie-leader-not-replaced-test"]}
     coin_key = "BTC"
-    query = "dedup-stale-leader-test"
+    query = "dedup-zombie-leader-not-replaced-test"
     key = web._analyze_dedup_key(
         qtype=web.QuestionType("multi_source"), coin_key=coin_key, query=query, qs=qs
     )
 
-    zombie_event = threading.Event()  # 永遠不會被 set() ——模擬死掉的 leader
-    stale_started_at = time.time() - 10.0  # 遠遠超過 0.3 秒的逾時上界
-    zombie_generation = -999  # 刻意用不會跟真正計數器撞號的假世代編號
-    web._analyze_dedup_inflight[key] = (zombie_event, stale_started_at, zombie_generation)
-
-    code, body = web._handle_api_analyze(qs, client_ip="10.1.2.2")
-
-    assert code == 200, f"偵測到 stale entry 後應取代成為新 leader、真的跑出結果，實際 {code} {body}"
-    assert counter.n == 1, f"應該真的觸發 1 次 pipeline.run，而不是繼續等殭屍 leader，實際 {counter.n} 次"
-    # 殭屍 entry 應該已經被新 leader 的 entry 取代／清掉，不會再殘留。
-    current = web._analyze_dedup_inflight.get(key)
-    assert current is None or current[0] is not zombie_event
-
-
-def test_dedup_analyze_call_expired_follower_must_503_not_self_promote_to_leader(monkeypatch):
-    """codex HIGH 複審 Round 13（協調 loop：逾時 follower 自我升級成新
-    leader，defeat 503）：
-
-    原本的 bug：follower 在自己的 `event.wait()` 逾時後，會呼叫
-    `_final_grace_check_before_giving_up()` 做最後一次複查；那個複查在
-    「join 的 in-flight entry 還沒逾時（`grace_remaining > 0`）」時，會
-    先 `grace_event.wait(timeout=grace_remaining)` 再**不論等到什麼**都
-    回傳 `True`，讓呼叫端 `continue` 回協調 loop 頂端重新查一次。但
-    `grace_remaining` 的定義正好是「這個 entry 距離變成 stale 還剩多少
-    時間」——等完這段時間之後，回到 loop 頂端時，這個 entry 幾乎必然
-    「剛好」被判定成 stale（因為兩者用的是同一把量尺：等到 entry 的
-    stale 門檻）。而這個 follower 自己的排隊 deadline 早就已經到期（它
-    是因為 `remaining <= 0` 才走進 grace check 的），若協調 loop 沒有另外
-    檢查「我自己還有沒有資格」，它會直接把自己升級成新 leader、真的去
-    compute() 一次——這就是 codex 抓到的「逾時 follower 取代它 compute()，
-    defeat 503、重疊另一次 Bedrock 呼叫」。
-
-    這裡不依賴天然的多執行緒排程 race（真正並行時，leader/follower 誰先
-    搶到鎖、時間差常常只有微秒等級，天然情境下這個窗口太窄、不穩定），
-    而是直接偽造一個「follower 呼叫當下還沒逾時、但差距刻意設在
-    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 之內某個具體值」的 zombie
-    leader entry，讓 follower 走完整趟「自己等待逾時 → grace check 再等
-    一段 → 回到 loop 頂端」的路徑，確定性地重現 codex 描述的那個交界。
-
-    斷言：follower 必須乖乖回 `_AnalyzeDedupTimeout`（503），絕對不能自己
-    升級成新 leader、真的呼叫一次 `compute()`；thread 有界時間內釋放；
-    偽造的 zombie entry 原封不動留著，交給之後真正 fresh 的請求處理——
-    fresh 請求進來後必須能正常偵測到它是 stale 並取代成功。"""
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 1.0)
-    key = "dedup-expired-follower-vs-stale-boundary-test-key"
-
-    zombie_event = threading.Event()  # 永遠不會被 set() ——模擬真的 hang 死的 leader
-    zombie_generation = -888  # 刻意用不會跟真正計數器撞號的假世代編號
-    # 刻意設在「follower 呼叫當下」之後 0.3 秒——制造 codex 描述的那個
-    # 交界（見上方 docstring）：follower 自己的 deadline（呼叫當下 +
-    # 1.0 秒）到期時，這個 entry 距離變成 stale 還差 0.3 秒（也就是
-    # grace check 算出的 `grace_remaining`），逼 follower 走完整趟
-    # grace-wait 再回頂端，而不是在第一次 grace check 就直接判定「這個
-    # entry 本身也已經逾時/stale，沒東西可 join」而提早回傳 False。
-    web._analyze_dedup_inflight[key] = (
-        zombie_event, time.time() + 0.3, zombie_generation
-    )
-
-    follower_self_promoted_counter = _CallCounter()
-
-    def _compute_follower_if_self_promoted():
-        # 若 follower 真的（錯誤地）自我升級成新 leader，才會呼叫到這裡
-        # ——這代表 bug 重現了、且會真的重複打一次依賴。
-        follower_self_promoted_counter.hit()
-        return "should-not-be-called-follower-self-promoted"
+    zombie_flight = web._AnalyzeFlight()  # event 永遠不會被 set() ——模擬死掉的 leader
+    web._analyze_dedup_inflight[key] = zombie_flight
 
     t0 = time.time()
-    with pytest.raises(web._AnalyzeDedupTimeout):
-        web._dedup_analyze_call(key, _compute_follower_if_self_promoted)
+    code, body = web._handle_api_analyze(qs, client_ip="10.1.2.2")
     elapsed = time.time() - t0
 
-    assert follower_self_promoted_counter.n == 0, (
-        "自己排隊 deadline 已耗盡的 follower，即使剛好碰到 in-flight entry "
-        "被判定 stale 的交界，也絕對不能自我升級成新 leader、真的觸發一次"
-        "重複的 compute()（重複真呼叫 Bedrock/連接器）"
+    assert code == 503, (
+        f"殭屍 leader 不該被取代，後到的請求應該乖乖 bounded wait 到自己的逾時上界後回 503，"
+        f"實際 {code} {body}"
     )
-    # 應該在自己的 deadline（1.0 秒）加上一小段 grace 之後就返回，而不是
-    # 卡住不放（thread 有正常釋放，不是無限阻塞）。
-    assert elapsed < 5.0, f"逾時 follower 應在有界時間內返回 503，實際耗時 {elapsed:.3f}s"
+    assert _envelope(body)["error"]["code"] == "timeout"
+    assert counter.n == 0, (
+        f"後到的請求不該取代殭屍 leader、不該真的觸發 pipeline.run，實際呼叫 {counter.n} 次"
+    )
+    assert elapsed < 3.0, f"應在 bounded wait 上界附近就返回，實際耗時 {elapsed:.3f}s"
 
-    # 偽造的 zombie leader entry 應該原封不動地留著（沒有被這個逾時
-    # follower 誤取代/誤清），交給之後真正 fresh 的請求處理。
     current = web._analyze_dedup_inflight.get(key)
-    assert current is not None and current[0] is zombie_event, (
-        "逾時的 follower 不該動用/取代任何 in-flight entry"
+    assert current is zombie_flight, (
+        "殭屍 entry 應該原封不動留著，不該被後到的請求取代或清掉"
     )
 
-    # 全新、deadline 全新的請求進來，此時這個 zombie leader 一定早已
-    # stale（遠超過 1.0 秒的逾時上界），必須能正常偵測到並取代它、真的
-    # 觸發一次新的 compute()——證明「只有 fresh 請求能取代 stale
-    # leader」這件事沒有被上面的修正誤傷。
-    fresh_counter = _CallCounter()
 
-    def _compute_fresh():
-        fresh_counter.hit()
-        return "result-fresh-replaces-stale"
-
-    result_fresh = web._dedup_analyze_call(key, _compute_fresh)
-    assert result_fresh == "result-fresh-replaces-stale"
-    assert fresh_counter.n == 1, "全新（deadline 全新）的請求應該能正常取代 stale leader"
-    assert key not in web._analyze_dedup_inflight
-
-
-def test_dedup_analyze_call_stale_leader_finishing_before_any_replacement_still_published(
+def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_not_ttl(
     monkeypatch,
 ):
-    """codex HIGH 複審#4（stale-leader 取代新 race，generation fencing）：
-    只有真的「被取代」才需要 fencing——若一個 leader 雖然跑得比逾時門檻
-    久，但從頭到尾都沒有其他請求真的把它取代掉，它自己完成時仍是這把
-    key 唯一、合法的一份結果，必須正常發布/服務，不能因為「超過門檻」
-    這件事本身就一律 no-op（那樣會把單純比較慢、但沒被取代的正常情況
-    也錯殺，等於每次真連接器/Bedrock 剛好跑超過 45 秒都變成永遠拿不到
-    結果）。"""
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
-    key = "dedup-stale-not-yet-replaced-test-key"
+    """codex HIGH 複審 Round 14（single-flight 物件 + 參照，收斂 5 秒
+    wall-clock TTL 讓延遲 follower miss 結果→重複 compute 這個問題）：
 
-    def _compute_a():
-        time.sleep(0.3)  # 故意超過（縮短過的）逾時門檻，但沒有其他請求進來取代
-        return "result-A-slow-but-sole"
+    Round 12～13 的設計裡，follower 醒來（`event.wait()` 返回）後，是靠
+    **重新查一個以世代編號為鍵的字典**（`_analyze_dedup_follower_result`，
+    有 `_ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS=5.0` 秒的寬限期）
+    才能拿到 leader 的結果——若這個 follower 的執行緒在「event 被 set()」
+    到「真的執行到查字典那行程式碼」之間，被作業系統排程延遲超過 5 秒
+    （GIL 競爭、系統忙碌等都可能發生，不需要惡意攻擊），字典裡的暫存
+    結果已經被那個寬限期回收，這個 follower 會誤判成「沒有結果可撿」、
+    落回協調 loop 頂端重新判斷——多半會誤判成全新請求、自己再真的
+    `compute()` 一次，造成重複的真實依賴呼叫（重複花費）。
 
-    result = web._dedup_analyze_call(key, _compute_a)
-    assert result == "result-A-slow-but-sole", (
-        "沒有被任何請求取代的 leader，即使跑得比逾時門檻久，完成後仍應正常回傳給自己"
-    )
-    assert key not in web._analyze_dedup_inflight
+    Round 14 把這個「醒來後去哪裡找結果」的機制，從「查一個有 TTL 的
+    字典」改成「直接讀自己一早就握在手上的 `_AnalyzeFlight` 物件參照」
+    ——這個物件的存活由 Python reference counting 決定，跟牆鐘時間完全
+    無關，結構上不可能再發生「TTL 到期、結果不見了」這件事。
 
-    # Round 12（#51 最終收斂：移除 60 秒 TTL 結果快取，只留 in-flight
-    # coalescing）：緊接著同一把 key 的下一個請求，此時 in-flight 已經
-    # 清空，不是 follower、也沒有任何殘留結果可撿，應該 fresh 重新真的
-    # 跑一次——不再是「命中 A 剛發布的快取」。
+    這裡透過**monkeypatch 這個 follower 實際 join 到的那個 Flight 物件的
+    `event.wait`**，在底層真正的 `wait()` 回傳之後，人為再插入一段刻意
+    設得比舊 TTL（5 秒）更長的延遲（6 秒）才讓呼叫端拿回控制權——精準
+    模擬「follower 真正被喚醒（leader 已經寫好 `ok`/`payload`）到它真正
+    執行後續讀取程式碼之間，被排程延遲超過舊 TTL」這個確切情境。斷言：
+    即使經過這段刻意延長到超過舊 5 秒 TTL 的延遲，這個 follower 仍然拿到
+    正確的結果，且全程只有 leader 那 1 次真的觸發 `compute()`——延遲
+    follower 不會因此誤判成全新請求、不會自己再重複呼叫一次。"""
+    key = "dedup-delayed-follower-flight-reference-test-key"
+    leader_may_finish = threading.Event()
     counter = _CallCounter()
 
-    def _compute_fresh():
+    def _compute_leader():
         counter.hit()
-        return "result-fresh-sequential"
+        leader_may_finish.wait(timeout=10)
+        return "result-from-leader"
 
-    result2 = web._dedup_analyze_call(key, _compute_fresh)
-    assert result2 == "result-fresh-sequential"
-    assert counter.n == 1, "循序的下一個請求應該 fresh 重新真的跑一次，而不是沿用前一次的結果"
+    leader_result_holder: dict[str, object] = {}
+
+    def _worker_leader():
+        leader_result_holder["value"] = web._dedup_analyze_call(key, _compute_leader)
+
+    leader_thread = threading.Thread(target=_worker_leader)
+    leader_thread.start()
+
+    # 等 leader 真的建立好 in-flight entry（成為這把 key 唯一的 leader）。
+    flight = None
+    for _ in range(200):
+        flight = web._analyze_dedup_inflight.get(key)
+        if flight is not None:
+            break
+        time.sleep(0.01)
+    assert flight is not None, "leader 應該已經寫入 in-flight"
+
+    # 在這個 Flight 物件的 event 上動手腳：底層真正的 wait() 一旦真的
+    # 回傳（代表 leader 已經寫好 ok/payload 並呼叫過 event.set()），刻意
+    # 讓呼叫端（follower）多等 6 秒才真的拿回控制權——模擬「follower 真正
+    # 被喚醒到它真的執行到下一行程式碼」之間，被作業系統排程延遲超過
+    # 舊 5 秒 TTL 寬限期的情境。這段延遲刻意設在**底層 wait() 回傳之後**
+    # 才發生，不佔用/展延 follower 自己的 `deadline` 預算判斷（那是在
+    # `_dedup_analyze_call` 呼叫這個 wait() **之前**，用來算
+    # `remaining` 參數的，不受這裡影響）。
+    real_wait = flight.event.wait
+
+    def _delayed_wait(timeout=None):
+        completed = real_wait(timeout=timeout)
+        if completed:
+            time.sleep(6.0)  # 刻意比舊的 5 秒 TTL 寬限期更長
+        return completed
+
+    flight.event.wait = _delayed_wait
+
+    def _compute_follower_if_mistakenly_treated_as_fresh():
+        # 若這個延遲 follower 誤判成全新請求、自己落回去重新 compute()，
+        # 才會呼叫到這裡——代表舊的 TTL-miss race 又發生了。
+        counter.hit()
+        return "should-not-be-called-delayed-follower-mistaken-for-fresh"
+
+    # 把 leader 標記完成（在 follower 開始等待之前先讓它就緒，確保
+    # follower 真的走到「join → wait → 延遲 → 讀取」這條路，而不是自己
+    # 變成 leader）。follower 需要給自己夠長的 deadline，蓋過 6 秒延遲。
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 20.0)
+
+    follower_result_holder: dict[str, object] = {}
+
+    def _worker_follower():
+        follower_result_holder["value"] = web._dedup_analyze_call(
+            key, _compute_follower_if_mistakenly_treated_as_fresh
+        )
+
+    follower_thread = threading.Thread(target=_worker_follower)
+    follower_thread.start()
+    time.sleep(0.2)  # 確保 follower 真的先走到 event.wait() 上
+
+    leader_may_finish.set()
+    leader_thread.join(timeout=10)
+    follower_thread.join(timeout=15)
+
+    assert leader_result_holder.get("value") == "result-from-leader"
+    assert follower_result_holder.get("value") == "result-from-leader", (
+        "延遲超過舊 TTL 的 follower，仍應從自己持有的 Flight 參照正確讀到 "
+        "leader 的結果，而不是誤判成全新請求"
+    )
+    assert counter.n == 1, (
+        f"全程只該有 leader 真的呼叫 1 次 compute()，延遲 follower 不該因為 "
+        f"read-after-wake 的延遲而誤觸發第二次，實際呼叫 {counter.n} 次"
+    )
+    assert key not in web._analyze_dedup_inflight
 
 
-def test_dedup_analyze_call_stale_leader_finishing_after_replacement_does_not_overwrite(
+def test_bedrock_runtime_client_has_hard_read_and_connect_timeout(monkeypatch):
+    """#51 codex HIGH 複審 Round 14（Bedrock 主敘事 hard timeout，dedup
+    「leader compute() 有牆鐘時間上界」這個簡化的正確性前提）：
+    `BedrockClient._runtime()` 先前完全沒有 `Config`/timeout，boto3 預設
+    等於無限期等待。這裡直接 monkeypatch `boto3.client`，斷言真正建置
+    client 時傳入的 `config` 確實帶有預期的
+    `read_timeout=60`/`connect_timeout=10`/`retries={"total_max_attempts":
+    1}`——純本地 mock，不連真 AWS，不花任何錢。"""
+    from trustforge import bedrock as bedrock_module
+
+    captured: dict[str, object] = {}
+
+    class _FakeBoto3Module:
+        @staticmethod
+        def client(service_name, region_name=None, config=None):
+            captured["service_name"] = service_name
+            captured["region_name"] = region_name
+            captured["config"] = config
+            return MagicMock()
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", _FakeBoto3Module())
+
+    client = bedrock_module.BedrockClient(offline=False, stance_offline=True)
+    client._runtime()
+
+    assert captured["service_name"] == "bedrock-runtime"
+    cfg = captured["config"]
+    assert cfg is not None, "應該傳入明確的 Config，不能沿用 boto3 預設（無限期等待）"
+    assert cfg.read_timeout == bedrock_module._NARRATIVE_READ_TIMEOUT_SEC == 60
+    assert cfg.connect_timeout == bedrock_module._NARRATIVE_CONNECT_TIMEOUT_SEC == 10
+    assert cfg.retries == {"total_max_attempts": 1}
+
+
+def test_dedup_analyze_call_leader_bounded_by_bedrock_style_timeout_follower_gets_503(
     monkeypatch,
 ):
-    """codex HIGH 複審#4（stale-leader 取代新 race，generation fencing）：
-    這是 codex 這輪要修的核心 bug 場景——leader A 卡住超過逾時門檻，
-    新請求偵測到 A 是 stale、取代成為新 leader B，B 很快完成、發布自己
-    的結果並清掉 in-flight；**之後**A 才姍姍來遲真的完成（不是真的 hang
-    死，只是很慢）。斷言：B 完成時 in-flight 正確清空、拿到自己的
-    `result-B`；A 之後才姍姍來遲完成時，自己仍拿到自己真正算出來的
-    `result-A`（generation fencing 只影響「要不要發布/清 in-flight」，
-    不影響 leader 自己的直接回傳值），且不會誤動 in-flight（此時早就
-    是空的，不該被 A 的晚到完成意外重新寫入）。"""
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
-    key = "dedup-stale-race-after-replacement-test-key"
+    """#51 codex HIGH 複審 Round 14（leader hang（Bedrock 逾時）→503，
+    dedup×`bedrock.py` timeout 整合）：模擬「leader 的 `compute()` 內部
+    呼叫到一個真的有 `read_timeout` 上界的 Bedrock 連線，該連線卡住直到
+    命中 timeout 才拋出 `botocore.exceptions.ReadTimeoutError`」這個情境
+    ——只 mock 這個行為本身（延遲＋拋出 timeout 專用例外類別），不連真
+    AWS、不花任何錢、不需要真的等到 60 秒。
 
-    a_may_finish = threading.Event()
-    a_result_holder: dict[str, object] = {}
+    斷言兩件事：(1) follower 自己的 dedup bounded wait（縮短過的
+    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`）比這個模擬的 Bedrock
+    timeout 短，會在 leader 的模擬呼叫還沒真的逾時完成之前就先回
+    `_AnalyzeDedupTimeout`（503）——不會被 leader 這條 hang 住的 thread
+    拖著一起等；(2) leader 的模擬呼叫本身**確實有牆鐘時間上界**，最終
+    會拋出 `ReadTimeoutError`（而不是真的無限期 hang 住），驗證「有硬性
+    timeout 的依賴呼叫」這個前提成立——這正是 Round 14 移除 stale-leader
+    取代機制時，用來替代它的正確性保證。"""
+    from botocore.exceptions import ReadTimeoutError
 
-    def _compute_a():
-        a_may_finish.wait(timeout=5)
-        return "result-A"
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
+    key = "dedup-leader-bedrock-style-timeout-test-key"
 
-    def _compute_b():
-        return "result-B"
+    simulated_bedrock_read_timeout_sec = 1.5  # 遠比 0.3 秒 follower 逾時上界長
+    leader_finished = threading.Event()
 
-    def _worker_a():
+    def _compute_leader_simulating_hung_bedrock_call():
+        # 模擬「卡在一個有 read_timeout 上界的 Bedrock 連線」：睡到模擬的
+        # timeout 值才拋出 timeout 專用例外——代表這條呼叫本身有界，不是
+        # 真的無限期 hang。
+        time.sleep(simulated_bedrock_read_timeout_sec)
+        leader_finished.set()
+        raise ReadTimeoutError(endpoint_url="https://bedrock-runtime.mock.invalid/")
+
+    leader_exc_holder: dict[str, object] = {}
+
+    def _worker_leader():
         try:
-            a_result_holder["value"] = web._dedup_analyze_call(key, _compute_a)
-        except Exception as exc:  # pragma: no cover - 只在斷言失敗時才有意義
-            a_result_holder["error"] = exc
+            web._dedup_analyze_call(key, _compute_leader_simulating_hung_bedrock_call)
+        except Exception as exc:  # noqa: BLE001 -- 要能捕捉/斷言確切的例外型別
+            leader_exc_holder["exc"] = exc
 
-    a_thread = threading.Thread(target=_worker_a)
-    a_thread.start()
+    t0 = time.time()
+    leader_thread = threading.Thread(target=_worker_leader)
+    leader_thread.start()
 
-    # 等 A 真的成為 leader（in-flight 出現這把 key）。
-    for _ in range(100):
-        if key in web._analyze_dedup_inflight:
-            break
-        time.sleep(0.02)
-    assert key in web._analyze_dedup_inflight, "leader A 應該已經寫入 in-flight"
-
-    # 等超過（縮短過的）逾時門檻，讓 A 變成 stale。
-    time.sleep(0.3)
-
-    # B 進來，偵測到 A 是 stale、取代成為新 leader，並立刻完成、發布。
-    result_b = web._dedup_analyze_call(key, _compute_b)
-    assert result_b == "result-B"
-    assert key not in web._analyze_dedup_inflight
-
-    # 現在才放 A 完成——A 的 compute() 這時候才真的返回。
-    a_may_finish.set()
-    a_thread.join(timeout=5)
-    assert a_result_holder.get("value") == "result-A", "A 自己應該還是拿到自己真正算出來的結果"
-
-    # 關鍵斷言：A（stale）晚到的完成，不該誤清/誤寫 in-flight（此時
-    # in-flight 早就是空的，B 也早就發布完畢，A 的 generation-fenced
-    # no-op 不該讓 in-flight 意外重新出現這把 key 的殘留 entry）。
-    assert key not in web._analyze_dedup_inflight
-
-
-def test_dedup_analyze_call_stale_leader_finishing_while_replacement_still_running_does_not_overwrite(
-    monkeypatch,
-):
-    """codex HIGH 複審#4（stale-leader 取代新 race，generation fencing）：
-    比上一個測試更刁鑽的時序——A 被取代後，在新 leader B **自己都還沒跑
-    完**的期間，A 才姍姍來遲完成。fencing 依賴的是「supersession 是否
-    已經發生」（B 是否已經領到新的世代編號，這在 B 呼叫自己的
-    `compute()` 之前、在鎖內就已經確定），不是「B 自己是否已經跑完」；
-    A 這時候一樣必須是 no-op：不能誤清 B 仍在跑的 in-flight entry。
-    （Round 12 之後：發布結果的暫存區改成以世代編號為鍵，A 用的是自己
-    的 `initial_generation`、B 用的是自己的世代編號，兩者天生不會互相
-    覆寫，「A 把結果冒充成 B 的目前結果」這個歷史風險已經因為資料結構
-    本身不再存在；仍要驗證的核心風險只剩「A 不該誤清掉 B 仍在跑的
-    in-flight entry」。）最後才放 B 完成，斷言最終真的拿到的是 B 的
-    結果。"""
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.2)
-    key = "dedup-stale-race-during-replacement-test-key"
-
-    a_may_finish = threading.Event()
-    b_may_finish = threading.Event()
-    a_result_holder: dict[str, object] = {}
-    b_result_holder: dict[str, object] = {}
-
-    def _compute_a():
-        a_may_finish.wait(timeout=5)
-        return "result-A"
-
-    def _compute_b():
-        b_may_finish.wait(timeout=5)
-        return "result-B"
-
-    def _worker(compute, holder):
-        try:
-            holder["value"] = web._dedup_analyze_call(key, compute)
-        except Exception as exc:  # pragma: no cover - 只在斷言失敗時才有意義
-            holder["error"] = exc
-
-    a_thread = threading.Thread(target=_worker, args=(_compute_a, a_result_holder))
-    a_thread.start()
-    for _ in range(100):
-        if key in web._analyze_dedup_inflight:
-            break
-        time.sleep(0.02)
-    assert key in web._analyze_dedup_inflight
-    initial_generation = web._analyze_dedup_inflight[key][2]
-
-    time.sleep(0.3)  # 讓 A 超過逾時門檻，變成 stale
-
-    b_thread = threading.Thread(target=_worker, args=(_compute_b, b_result_holder))
-    b_thread.start()
-    # 等 B 真的取代成為新 leader——世代編號跟 A 剛開始那個不同（供
-    # `_dedup_analyze_call` 內部 fencing 比對用，不是靠 B 自己跑完）。
-    for _ in range(100):
-        inflight = web._analyze_dedup_inflight.get(key)
-        if inflight is not None and inflight[2] != initial_generation:
-            break
-        time.sleep(0.02)
-    else:
-        pytest.fail("B 應該已經取代成為新世代的 leader")
-
-    # 這時候 B 還沒完成（b_may_finish 還沒 set），先放 A 完成。
-    a_may_finish.set()
-    a_thread.join(timeout=5)
-    assert a_result_holder.get("value") == "result-A"
-
-    # A 完成、嘗試發布時，B 早已取代（generation 不同）——A 的發布必須是
-    # no-op：不該把 in-flight 清掉（那是 B 的 entry，B 還在跑）。（Round 12
-    # 之後：結果暫存區以世代編號為鍵，A 只可能寫進自己
-    # `initial_generation` 的欄位，天生不會覆寫 B 的結果，這裡不需要再
-    # 額外檢查。）
-    assert key in web._analyze_dedup_inflight, "A 不該誤清掉 B 仍在跑的 in-flight entry"
-
-    # 現在才放 B 完成——B 才是應該真正發布/被服務的結果。
-    b_may_finish.set()
-    b_thread.join(timeout=5)
-    assert b_result_holder.get("value") == "result-B", "最終應該是 replacement（B）真正算出來的結果"
-    assert key not in web._analyze_dedup_inflight
-
-
-def test_dedup_analyze_call_stale_leader_thundering_herd_followers_join_replacement_not_recompute(
-    monkeypatch,
-):
-    """codex HIGH 複審#5（thundering herd）：複審#4 的 generation fencing
-    只保證 stale leader（A）的結果不會被發布/服務，但早期版本的 follower
-    fallback 是「醒來、cache 沒有就直接自己 compute()」——若 A 在
-    replacement（B）已經接手、但**多個** followers 逾時之前完成，會讓
-    每一個原本 join 在 A 上的 follower 各自獨立呼叫一次 compute()（cache
-    剛好是空的，因為 A 的發布被 fence 掉了），N 個 follower 就是 N 次
-    多餘的真連接器/Bedrock 呼叫，直接打爆 single-flight 的成本安全承諾。
-
-    情境：leader A 卡住（模擬慢/hang）；5 個 follower 在 A 還新鮮時
-    join 它的 event；接著把 A 標記成 stale（直接改 in-flight 的時間戳，
-    不用真的等滿逾時門檻，測試更快更確定）；B 進來偵測到 A 是 stale、
-    取代成為新 leader，開始跑但先卡住不完成；這時候放 A 完成——A 的發布
-    被 fence（no-op），但仍會 `event.set()` 喚醒 5 個 follower。斷言：
-    這 5 個 follower 醒來後**不會**各自呼叫 compute()（重入協調 loop、
-    發現 B 是目前活著的 leader、改成 join B），最終全部拿到 B 的結果。
-    整組請求只有 2 個「不可避免」的 leader 執行過 compute()（A 一次 +
-    B 一次），不是 A + 5 個 follower 各自一次（=6 次）。"""
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 5.0)
-    key = "dedup-thundering-herd-test-key"
-
-    a_may_finish = threading.Event()
-    b_may_finish = threading.Event()
-
-    def _compute_a():
-        a_may_finish.wait(timeout=10)
-        return "result-A"
-
-    def _compute_b():
-        b_may_finish.wait(timeout=10)
-        return "result-B"
-
-    follower_counter = _CallCounter()
-
-    def _compute_follower():
-        follower_counter.hit()
-        return "should-not-be-called-by-any-follower"
-
-    a_result_holder: dict[str, object] = {}
-
-    def _worker_a():
-        a_result_holder["value"] = web._dedup_analyze_call(key, _compute_a)
-
-    a_thread = threading.Thread(target=_worker_a)
-    a_thread.start()
-
-    # 等 A 真的成為 leader。
+    # 等 leader 真的建立好 in-flight entry。
     for _ in range(200):
         if key in web._analyze_dedup_inflight:
             break
         time.sleep(0.01)
     else:
-        pytest.fail("leader A 應該已經寫入 in-flight")
-    a_generation = web._analyze_dedup_inflight[key][2]
+        pytest.fail("leader 應該已經寫入 in-flight")
 
-    # 啟動 5 個 follower，讓他們在 A 仍是「新鮮」leader 時 join 它的
-    # event（此時還沒把 A 標成 stale，確保這 5 個 follower 真的走
-    # follower 分支，不是自己搶到 leadership）。
-    n_followers = 5
-    follower_holders: list[dict[str, object]] = [{} for _ in range(n_followers)]
-    follower_threads = []
-    for i in range(n_followers):
-        def _worker_follower(idx=i):
-            follower_holders[idx]["value"] = web._dedup_analyze_call(key, _compute_follower)
+    def _compute_follower_should_not_be_called():
+        raise AssertionError("follower 不該落回自己真的呼叫 compute()")
 
-        t = threading.Thread(target=_worker_follower)
-        follower_threads.append(t)
-        t.start()
-    follower_threads_started = follower_threads
+    with pytest.raises(web._AnalyzeDedupTimeout):
+        web._dedup_analyze_call(key, _compute_follower_should_not_be_called)
+    follower_elapsed = time.time() - t0
 
-    # 給 5 個 follower 一點時間真的進到 event.wait()（走 follower 分支）。
-    time.sleep(0.3)
-
-    # 直接把 A 的 in-flight entry 的開始時間戳改成很久以前，讓下一個
-    # 「偵測」的呼叫端（下面即將建立的 B）判定 A 是 stale、取而代之——
-    # 不需要真的等滿 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`，測試更快
-    # 也更確定（跟既有 `..._entry_becomes_stale_and_replaced` 測試同一種
-    # 手法）。
-    with web._analyze_dedup_lock:
-        current = web._analyze_dedup_inflight.get(key)
-        assert current is not None
-        stale_event, _old_ts, current_generation = current
-        assert current_generation == a_generation
-        web._analyze_dedup_inflight[key] = (
-            stale_event,
-            time.time() - (web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS + 10.0),
-            a_generation,
-        )
-
-    b_result_holder: dict[str, object] = {}
-
-    def _worker_b():
-        b_result_holder["value"] = web._dedup_analyze_call(key, _compute_b)
-
-    b_thread = threading.Thread(target=_worker_b)
-    b_thread.start()
-
-    # 等 B 真的取代成為新世代的 leader。
-    for _ in range(200):
-        inflight = web._analyze_dedup_inflight.get(key)
-        if inflight is not None and inflight[2] != a_generation:
-            break
-        time.sleep(0.01)
-    else:
-        pytest.fail("B 應該已經取代成為新世代的 leader")
-
-    # 這時候讓 A 完成——發布被 generation fencing no-op 掉，但仍會
-    # event.set() 喚醒 5 個原本 join 在 A 上的 follower。
-    a_may_finish.set()
-    a_thread.join(timeout=5)
-    assert a_result_holder.get("value") == "result-A"
-
-    # 給 5 個 follower 一點時間醒來、重新查詢——此時 B 還沒完成
-    # （b_may_finish 還沒 set），關鍵斷言：他們不該各自呼叫 compute()，
-    # 而應該重新 join 到 B 繼續等。
-    time.sleep(0.3)
-    assert follower_counter.n == 0, (
-        f"stale leader 完成喚醒 followers 後，followers 不該各自呼叫 "
-        f"compute()，應該重新 join replacement leader B，實際額外呼叫 "
-        f"{follower_counter.n} 次"
+    assert follower_elapsed < simulated_bedrock_read_timeout_sec, (
+        f"follower 應該在 leader 模擬的 Bedrock timeout（{simulated_bedrock_read_timeout_sec}s）"
+        f"真的觸發之前，就先因為自己的 dedup 逾時上界（0.3s）回 503，"
+        f"實際耗時 {follower_elapsed:.3f}s"
+    )
+    assert not leader_finished.is_set(), (
+        "follower 拿到 503 的當下，leader 模擬的 Bedrock 呼叫應該仍在進行中"
+        "（還沒真的命中它自己的 timeout），佐證 follower 沒有等 leader 完成"
     )
 
-    # 現在放 B 完成。
-    b_may_finish.set()
-    b_thread.join(timeout=5)
-    for t in follower_threads_started:
-        t.join(timeout=5)
-
-    assert b_result_holder.get("value") == "result-B"
-    for idx, holder in enumerate(follower_holders):
-        assert holder.get("value") == "result-B", (
-            f"follower {idx} 應該共用 replacement leader B 的結果，實際 {holder}"
-        )
-    assert follower_counter.n == 0, "全程都不該有任何 follower 自己呼叫過 compute()"
-
-
-def test_dedup_analyze_call_stale_leader_hangs_forever_replacement_wakes_followers_not_503(
-    monkeypatch,
-):
-    """codex MEDIUM 複審（follower liveness，最後一關，見
-    `_dedup_analyze_call` docstring）：上面的 thundering herd 測試裡，
-    stale leader A **之後還是自己完成了**（只是延遲），靠它自己
-    `event.set()` 喚醒 followers——那個測試沒有涵蓋到「A 是真的 hang
-    死、永遠不會自己完成、永遠不會呼叫 event.set()」這個更嚴重的情境。
-
-    本測試模擬：leader A 卡住且**永遠不會**自己完成（`a_may_finish_never`
-    這個 Event 全程刻意不 `.set()`，代表 A 真的 hang 死）；5 個 follower
-    在 A 還新鮮時 join 它的 event；A 被標記 stale 後，B 進來偵測到、取而
-    代之成為新 leader；B 之後成功完成、把結果發布給當下這批 follower
-    （鍵是 B 自己的世代編號）。
-
-    在本輪修復之前：A 被取代時它的舊 Event 從未被 `.set()`，5 個原本
-    join 在 A 上的 follower 只能繼續空等（因為 A 真的不會自己完成），
-    最終各自等到自己那個從函式一開始就固定的 deadline
-    （`_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`）才逾時，回 503——即使 B
-    早就成功把新結果發布出來，這些 follower 對此一無所知。
-
-    修復後應該：B 取代 A 的當下就主動 `.set()` A 的舊 event，5 個
-    follower 幾乎立刻被喚醒、重新進協調 loop，撿到（或 join 到）B 的
-    結果——斷言：(1) 這 5 個 follower **都不會**拋出
-    `_AnalyzeDedupTimeout`（非 503）；(2) 全部拿到 B 的結果
-    `"result-B"`；(3) 全程沒有任何 follower 自己額外呼叫過 compute()；
-    (4) 從 B 取代 A 到 5 個 follower 全部收尾，實際耗費的牆鐘時間遠小於
-    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS`——用來佐證他們是被「取代時
-    signal 舊 event」這個修復喚醒的，不是剛好撞上自己那個原本就會在
-    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 秒後到期的 deadline。
-    """
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 5.0)
-    key = "dedup-follower-liveness-hang-forever-test-key"
-
-    # leader A 永遠不會自己完成——`a_may_finish_never` 全程刻意不 set()，
-    # 模擬真的 hang 死（不像上面 thundering herd 測試那樣之後還是會靠
-    # 自己完成、自己 event.set() 喚醒 followers）。timeout=120 只是保底，
-    # 不是真的預期會被等到。
-    a_may_finish_never = threading.Event()
-
-    def _compute_a():
-        a_may_finish_never.wait(timeout=120)
-        return "result-A-should-never-surface"
-
-    b_may_finish = threading.Event()
-
-    def _compute_b():
-        b_may_finish.wait(timeout=10)
-        return "result-B"
-
-    follower_counter = _CallCounter()
-
-    def _compute_follower():
-        follower_counter.hit()
-        return "should-not-be-called-by-any-follower"
-
-    a_thread = threading.Thread(
-        target=lambda: web._dedup_analyze_call(key, _compute_a), daemon=True
+    leader_thread.join(timeout=5)
+    assert leader_finished.is_set(), "leader 的模擬 Bedrock 呼叫最終應該真的觸發（有界，不是無限期 hang）"
+    assert isinstance(leader_exc_holder.get("exc"), ReadTimeoutError), (
+        f"leader 應該拿到自己模擬呼叫拋出的 ReadTimeoutError，實際 {leader_exc_holder!r}"
     )
-    a_thread.start()
-
-    for _ in range(200):
-        if key in web._analyze_dedup_inflight:
-            break
-        time.sleep(0.01)
-    else:
-        pytest.fail("leader A 應該已經寫入 in-flight")
-    a_generation = web._analyze_dedup_inflight[key][2]
-
-    n_followers = 5
-    follower_holders: list[dict[str, object]] = [{} for _ in range(n_followers)]
-    follower_exceptions: list[dict[str, object]] = [{} for _ in range(n_followers)]
-    follower_threads = []
-    for i in range(n_followers):
-        def _worker_follower(idx=i):
-            try:
-                follower_holders[idx]["value"] = web._dedup_analyze_call(
-                    key, _compute_follower
-                )
-            except Exception as exc:  # noqa: BLE001 -- 要能捕捉/斷言 503 逾時例外
-                follower_exceptions[idx]["exc"] = exc
-
-        t = threading.Thread(target=_worker_follower)
-        follower_threads.append(t)
-        t.start()
-
-    # 給 5 個 follower 一點時間真的進到 event.wait()（走 follower 分支，
-    # join 到的是 A 這個之後永遠不會 set() 的舊 event）。
-    time.sleep(0.3)
-
-    # 把 A 標記成 stale（跟既有 thundering herd 測試同一招：直接改
-    # in-flight 的開始時間戳，不需要真的等滿逾時門檻）。
-    with web._analyze_dedup_lock:
-        current = web._analyze_dedup_inflight.get(key)
-        assert current is not None
-        stale_event, _old_ts, current_generation = current
-        assert current_generation == a_generation
-        web._analyze_dedup_inflight[key] = (
-            stale_event,
-            time.time() - (web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS + 10.0),
-            a_generation,
-        )
-
-    b_result_holder: dict[str, object] = {}
-
-    def _worker_b():
-        b_result_holder["value"] = web._dedup_analyze_call(key, _compute_b)
-
-    replacement_start = time.time()
-    b_thread = threading.Thread(target=_worker_b)
-    b_thread.start()
-
-    # 等 B 真的取代 stale 的 A、成為新世代的 leader——這個取代動作本身
-    # （本輪修復）就會順手 signal A 的舊 event，喚醒 5 個原本 join 在
-    # A 上的 follower。
-    for _ in range(200):
-        inflight = web._analyze_dedup_inflight.get(key)
-        if inflight is not None and inflight[2] != a_generation:
-            break
-        time.sleep(0.01)
-    else:
-        pytest.fail("B 應該已經取代 stale 的 A、成為新世代的 leader")
-
-    # 關鍵：全程刻意不 set(a_may_finish_never)——A 真的 hang 死、永遠不會
-    # 自己完成、永遠不會呼叫 event.set()。若沒有本輪修復（取代 stale
-    # leader 時主動 signal 舊 event），5 個原本 join 在 A 上的 follower
-    # 就只能繼續空等，直到各自的 deadline 到期回 503。
-
-    # 讓 B 完成、發布結果。
-    b_may_finish.set()
-    b_thread.join(timeout=5)
-    assert b_result_holder.get("value") == "result-B"
-
-    for t in follower_threads:
-        t.join(timeout=web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS + 5)
-        assert not t.is_alive(), "follower thread 不該還在等待，應該已經被喚醒並收尾"
-    elapsed_since_replacement = time.time() - replacement_start
-
-    for idx in range(n_followers):
-        assert follower_exceptions[idx] == {}, (
-            f"follower {idx} 不該逾時 503（`_AnalyzeDedupTimeout`），"
-            f"實際拋出例外：{follower_exceptions[idx].get('exc')!r}"
-        )
-        assert follower_holders[idx].get("value") == "result-B", (
-            f"follower {idx} 應該拿到 replacement leader B 的結果，"
-            f"實際：{follower_holders[idx]!r}"
-        )
-    assert follower_counter.n == 0, (
-        f"followers 不該各自呼叫 compute()，實際額外呼叫 {follower_counter.n} 次"
-    )
-    # 佐證 followers 是被「取代時 signal 舊 event」喚醒的，不是剛好等到
-    # 自己原本的 deadline（`_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` = 5 秒）
-    # 才逾時；整段從 B 取代 A 到全部收尾的耗時應該遠小於這個門檻。
-    assert elapsed_since_replacement < web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS, (
-        f"followers 收尾耗時 {elapsed_since_replacement:.3f}s，"
-        f"應該遠小於 deadline 門檻 {web._ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS}s"
-        f"（否則代表是撞上自己的 deadline 而非被 signal 喚醒）"
-    )
-
     assert key not in web._analyze_dedup_inflight
+
+
 
 
 def test_dedup_analyze_call_normal_no_stale_still_single_flight(monkeypatch):

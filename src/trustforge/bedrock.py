@@ -50,6 +50,23 @@ _STANCE_TOOL_NAME = "classify_stance"
 _STANCE_READ_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_READ_TIMEOUT_SEC", "8"))
 _STANCE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_CONNECT_TIMEOUT_SEC", "3"))
 
+# #51 codex HIGH 複審 Round 14（/api/analyze single-flight dedup 的根因
+# 修復）：`_runtime()`（主敘事模型呼叫，`complete()` 走這裡）先前**完全
+# 沒有** timeout 設定——boto3 預設值等於「無限期等待」，代表 leader 若
+# 卡在網路層/上游 hang 住，這條 server thread 會永久卡住，不會自己
+# 超時失敗。這正是 `web.py` 的 `_dedup_analyze_call` 過去需要一整套
+# 「偵測 stale leader 並取代」機制的根本原因——若 leader 呼叫本身有界，
+# 就不需要在 dedup 層另外做取代/generation fencing 來补救一個「本來就不該
+# 無限期 hang」的依賴呼叫。比照 `_stance_runtime()` 的作法加上明確
+# `Config`，但敘事任務（含多輪 orchestrator 呼叫、較長 prompt）本身就比
+# stance 分類慢得多，timeout 需要更寬鬆：預設 `read_timeout=60s`、
+# `connect_timeout=10s`，仍遠短於前端 30 秒（見 CLAUDE.md/前端逾時設定）
+# 疊加 dedup 層 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS=45s` 的既有預算——
+# 不會讓正常、未逾時的真實呼叫提前被打斷。`total_max_attempts=1`
+# 理由同 `_stance_runtime()`：不重試，讓單次呼叫的最壞耗時有確定上界。
+_NARRATIVE_READ_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_NARRATIVE_READ_TIMEOUT_SEC", "60"))
+_NARRATIVE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_NARRATIVE_CONNECT_TIMEOUT_SEC", "10"))
+
 _STANCE_SYSTEM = (
     "你是金融/監管文本的語意立場分類器。給定兩句市場相關敘述 A、B，判斷 B 相對 A 的立場，"
     "只能三選一：\n"
@@ -137,10 +154,25 @@ class BedrockClient:
         self.cost_events: list[dict] = []
 
     def _runtime(self):
+        """#51 codex HIGH 複審 Round 14：主敘事模型呼叫專用 client，見上方
+        `_NARRATIVE_READ_TIMEOUT_SEC`/`_NARRATIVE_CONNECT_TIMEOUT_SEC` 常數
+        註解——加上明確 `Config` 前，這裡沒有任何 timeout 上界（boto3
+        預設等於無限期等待），是 dedup 層過去需要一整套 stale-leader 偵測/
+        取代機制的根因；`total_max_attempts=1` 理由同 `_stance_runtime()`。
+        """
         if self._client is None:
             import boto3  # 延遲匯入：離線模式不需安裝/設定 AWS
+            from botocore.config import Config
 
-            self._client = boto3.client("bedrock-runtime", region_name=self.config.region)
+            self._client = boto3.client(
+                "bedrock-runtime",
+                region_name=self.config.region,
+                config=Config(
+                    read_timeout=_NARRATIVE_READ_TIMEOUT_SEC,
+                    connect_timeout=_NARRATIVE_CONNECT_TIMEOUT_SEC,
+                    retries={"total_max_attempts": 1},
+                ),
+            )
         return self._client
 
     def _stance_runtime(self):
