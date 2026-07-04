@@ -204,6 +204,24 @@ def test_dedup_stance_pairs_by_source_empty_input():
     assert _dedup_stance_pairs_by_source([]) == {"bullish": [], "bearish": []}
 
 
+def test_dedup_stance_pairs_by_source_normalizes_case_and_whitespace():
+    """codex 追加修正：去重 key 用 `source.strip().casefold()`，同一來源的
+    大小寫/前後空白變體（" CoinDesk " / "coindesk" / "COINDESK"）視為同一
+    來源，收斂成 1 筆——顯示仍用原始（第一筆出現時）的 source 字串，不
+    改寫使用者看到的來源名稱。真實不同來源（decrypt）不受影響，仍分開。"""
+    pairs = [
+        {"source": " CoinDesk ", "stance": "bullish", "claim_id": "a1", "text": "A1"},
+        {"source": "coindesk", "stance": "bullish", "claim_id": "a2", "text": "A2"},
+        {"source": "COINDESK", "stance": "bullish", "claim_id": "a3", "text": "A3"},
+        {"source": "decrypt", "stance": "bearish", "claim_id": "b1", "text": "B1"},
+    ]
+    result = _dedup_stance_pairs_by_source(pairs)
+    assert len(result["bullish"]) == 1, "三個大小寫/空白變體應收斂成 1 個獨立來源"
+    assert result["bullish"][0]["source"] == " CoinDesk ", "顯示保留第一筆出現的原始字串，不做正規化改寫"
+    assert len(result["bearish"]) == 1
+    assert result["bearish"][0]["source"] == "decrypt"
+
+
 def test_stance_pairs_same_source_same_stance_deduped_in_distinct_sources():
     """端到端：同一來源兩筆不同 claim、各自與不同對手配對成功、同陣營
     （bullish）→ `stance_pairs` 原始明細仍列出兩筆（逐字不變，供展開查看），

@@ -332,6 +332,22 @@ def _dedup_stance_pairs_by_source(pairs: list[dict]) -> dict[str, list[dict]]:
       當成雜訊吃掉，本輪不擴大處理，只維持不誤刪。
     - 純資料轉換、不改變 `pairs` 原始清單本身（呼叫端仍可用 `pairs` 取得未去重
       的完整明細）。
+
+    去重 key 正規化（codex #13 追加修正）：比對用 `source.strip().casefold()`，
+    不是原始字串——治掉大小寫/前後空白變體（如 `"CoinDesk"` / `" coindesk "` /
+    `"COINDESK"`）被誤判成不同來源這個零成本就能修的洞。**顯示仍用原始
+    `source` 字串**（保留該陣營中第一筆出現時的大小寫/格式，不改寫使用者
+    看到的來源名稱，只有去重比對走正規化）。
+
+    這不是完整的 canonical source identity——不同帳號/別名（如
+    `"coindesk"` vs `"coindesk.com"` vs 不同 Twitter 帳號同發行商）仍會被
+    當成不同來源，這是全 repo 已知限制（`trust/scoring.py` 994 行
+    `#17`：`_corroboration` 同源排除也是比對 `source` 字面值，非網域/
+    canonical id）。完整 canonical identity（publisher/account 穩定 ID +
+    別名映射）會同時影響 `scoring.py:1408`、`orchestrator.py:232`、本函式
+    三處來源計數 + ingestion 連接器層，是 repo-wide 工程，刻意不在本輪
+    （#13）擴大處理，見 follow-up issue（repo-wide canonical source
+    identity）。
     """
     result: dict[str, list[dict]] = {"bullish": [], "bearish": []}
     seen: dict[str, set[str]] = {"bullish": set(), "bearish": set()}
@@ -339,9 +355,10 @@ def _dedup_stance_pairs_by_source(pairs: list[dict]) -> dict[str, list[dict]]:
         stance = p["stance"]
         if stance not in result:
             continue  # 理論上不會出現（方向閘已擋掉 neutral），保守略過非 bullish/bearish
-        if p["source"] in seen[stance]:
+        key = p["source"].strip().casefold()
+        if key in seen[stance]:
             continue
-        seen[stance].add(p["source"])
+        seen[stance].add(key)
         result[stance].append(p)
     return result
 

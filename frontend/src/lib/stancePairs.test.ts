@@ -75,4 +75,20 @@ describe('groupByStance', () => {
     expect(groupByStance(undefined)).toEqual({ bullish: [], bearish: [] })
     expect(groupByStance({})).toEqual({ bullish: [], bearish: [] })
   })
+
+  it('fallback 去重正規化大小寫/空白：" CoinDesk "/"coindesk"/"COINDESK" 收斂成 1', () => {
+    const signal = {
+      stance_pairs: [
+        pair(' CoinDesk ', 'bullish', 'a1'),
+        pair('coindesk', 'bullish', 'a2'),
+        pair('COINDESK', 'bullish', 'a3'),
+        pair('decrypt', 'bearish', 'b1'),
+      ],
+    }
+    const { bullish, bearish } = groupByStance(signal)
+    expect(bullish).toHaveLength(1)
+    expect(bullish[0].source).toBe(' CoinDesk ') // 顯示保留第一筆出現的原始字串
+    expect(bearish).toHaveLength(1)
+    expect(bearish[0].source).toBe('decrypt') // 真實不同來源不受影響
+  })
 })
