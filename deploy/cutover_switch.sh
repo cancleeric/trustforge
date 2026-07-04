@@ -230,18 +230,25 @@ grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
 #      nginx.conf 把 80 port 除 /healthz 外全部 301 導去 https，這段沒驗到
 #      的話，有可能部署出一份 80 port 沒有正確導頁的 conf，使用者打 http
 #      網址進來卻卡住、不會被導去 https，而上面對 https 的檢查完全測不出
-#      這個問題）----
+#      這個問題。故意帶 -H \\\"Host: ${REACT_TLS_DOMAIN}\\\"：探測器/curl 直
+#      接打 IP 時不見得會帶正確 Host，明確帶上才能確保打中的是這個
+#      server_name（同一台機器上若還有其他 vhost/預設 server block，光靠
+#      IP 連線不保證命中我們要驗的這個 server block）——同時這也是
+#      codex 複審 HIGH 抓到的另一個回歸的前提：conf 端 redirect target
+#      以前用 \\\`\$host\\\`，會直接照抄請求時的 Host（不管是不是
+#      canonical），這裡刻意把 Host 設成跟 canonical domain 一致，藉此驗
+#      證 conf 端真的是寫死 literal domain、不是把 \$host 原樣转出去）----
 REDIRECT_HDR=\"\$SMOKE_DIR/redirect-hdr\"
-if ! curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"; then
+if ! curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"Host: ${REACT_TLS_DOMAIN}\" -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"; then
   echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回應（HTTP→HTTPS redirect 是否正常？）\" >&2
 fi
-curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"
+curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"Host: ${REACT_TLS_DOMAIN}\" -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"
 if ! grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"; then
   echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回 301（預期全轉 HTTPS，實際首行：\$(head -1 \"\$REDIRECT_HDR\")）\" >&2
 fi
 grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"
 if ! grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"; then
-  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 的 redirect Location 不是預期的 https://${REACT_TLS_DOMAIN}\" >&2
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 的 redirect Location 不是預期的 https://${REACT_TLS_DOMAIN}（canonical domain，不是 127.0.0.1/其他 Host）\" >&2
 fi
 grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"
 
