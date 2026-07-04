@@ -140,7 +140,27 @@ preload。
 
 ## 回滾
 
-TLS 憑證與 nginx 站台設定（legacy/react/react-http）互相獨立，
+TLS 憑證與 nginx 站台設定（legacy/react/react-http/legacy-tls）互相獨立，
 `deploy/cutover_switch.sh` 只切換站台 conf、不動憑證；憑證出問題（過期/
 吊銷）不影響 legacy⇄react 的切換邏輯，兩者可獨立除錯。緊急回滾：
 `deploy/cutover_switch.sh legacy`（秒切回 SSR 全轉發，不動憑證）。
+
+⛔ **HSTS-safe rollback**（codex 複審 HIGH）：`react`（TLS）cutover 之後
+瀏覽器已經記住一年 HSTS，若這裡切上純 HTTP 版 `nginx-legacy.conf`，回訪過
+的使用者的瀏覽器會直接強制升級成 https、連不到只聽 80 的 legacy——回滾本
+身反而讓事故惡化。`cutover_switch.sh` 因此在 `legacy` 模式下會先偵測
+`/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw/fullchain.pem` 是否
+存在：
+- **存在**（本文件 Step 3 已跑過、憑證已簽發）→ 自動改用
+  `deploy/nginx-legacy-tls.conf`（443 服務同一張憑證、保留 HSTS、80→443
+  canonical redirect + ACME challenge location 續簽用），SSR/API 拓樸跟
+  `nginx-legacy.conf` 完全一樣，只是多包一層 TLS。
+- **不存在**（Step 3 還沒跑，pre-cert ACME bootstrap 現況）→ 維持原本的
+  HTTP-only `nginx-legacy.conf`，行為不變（這是唯一有 HTTP-01 webroot
+  可服務、certbot 才簽得出憑證的階段，本來就不該是 443）。
+
+真的起本機 nginx + python 驗證過「切上 `nginx-legacy-tls.conf` 後 443 仍
+正常 serve SSR、且回應帶 `Strict-Transport-Security` header」，見
+`deploy/test_nginx_legacy_tls_conf.sh`；ACME challenge 在這份 TLS 版底下
+續簽時一樣不受 301 影響，見 `deploy/test_acme_challenge.sh` 的
+`legacy-tls-renewal` 場景。

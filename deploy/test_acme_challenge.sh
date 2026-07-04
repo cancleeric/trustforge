@@ -154,6 +154,11 @@ EOF
 run_acme_scenario "legacy" "nginx-legacy.conf" 18280 0
 run_acme_scenario "react-http" "nginx-react-http.conf" 18380 0
 run_acme_scenario "react-tls-renewal" "nginx.conf" 18480 1
+# codex 複審 HIGH（HSTS-safe legacy 回滾）：legacy-tls 是 react→legacy 回滾
+# 時，憑證已存在情況下改用的 443 版本，續簽時（若 live 的剛好是這份）一樣
+# 得靠這個 acme-challenge 例外才不會被自己的 301 導去 https，見
+# deploy/nginx-legacy-tls.conf、deploy/cutover_switch.sh。
+run_acme_scenario "legacy-tls-renewal" "nginx-legacy-tls.conf" 18580 1
 
 echo
 echo "== 結果：$PASS passed, $FAIL failed =="

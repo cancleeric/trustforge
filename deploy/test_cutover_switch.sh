@@ -101,6 +101,10 @@ reset_sandbox() {
   echo "# legacy conf stub" > "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf"
   echo "# react conf stub" > "$SANDBOX/etc/nginx/trustforge-sites/react.conf"
   echo "# react-http conf stub" > "$SANDBOX/etc/nginx/trustforge-sites/react-http.conf"
+  # legacy-tls conf stub：跟production一致，deploy/deploy_frontend_nginx.sh
+  # 現在會把 deploy/nginx-legacy-tls.conf 也上傳到這個位置（不管憑證存不
+  # 存在都會先放著），cutover_switch.sh 偵測到憑證存在時才會真的選它。
+  echo "# legacy-tls conf stub" > "$SANDBOX/etc/nginx/trustforge-sites/legacy-tls.conf"
   ln -sfn "$SANDBOX/etc/nginx/trustforge-sites/legacy.conf" \
     "$SANDBOX/etc/nginx/conf.d/trustforge.conf"
   cat > "$SANDBOX/etc/systemd/system/trustforge.service" <<'EOF'
@@ -111,6 +115,20 @@ Environment=TRUSTFORGE_TRUST_PROXY=1
 Environment=TRUSTFORGE_CSP_MODE=legacy
 EOF
   rm -rf "${STATE:?}"/*
+}
+
+# ── codex 複審 HIGH（HSTS-safe legacy 回滾）：cutover_switch.sh 偵測
+#    `$ETC/letsencrypt/live/<domain>/fullchain.pem` 是否存在，決定 legacy
+#    模式的 CANDIDATE 是 legacy.conf 還是 legacy-tls.conf；這裡模擬「憑證
+#    已存在／尚未存在」兩種現況，domain 跟 cutover_switch.sh 的
+#    REACT_TLS_DOMAIN 一致 ──────────────────────────────────────────────
+CERT_DIR="$SANDBOX/etc/letsencrypt/live/trustforge.hurricanesoft.com.tw"
+create_fake_cert() {
+  mkdir -p "$CERT_DIR"
+  echo "# fake fullchain（測試用，非真憑證）" > "$CERT_DIR/fullchain.pem"
+}
+remove_fake_cert() {
+  rm -rf "${SANDBOX:?}/etc/letsencrypt"
 }
 
 # gsed（GNU sed）：這支腳本的 `sed -i` 語法是寫給遠端 Amazon Linux（GNU
@@ -862,6 +880,53 @@ else
   cat "$STATE/last_run.log"
 fi
 assert_eq "$(active_conf)" "legacy.conf" "legacy mode cutover 成功，不受 react-http 專屬關卡影響"
+
+echo "== 場景 29：legacy mode，憑證尚未存在（pre-cert ACME bootstrap 現況）→ 維持 HTTP-only legacy.conf，行為不變（codex 複審 HIGH：HSTS-safe rollback，見 nginx-legacy-tls.conf）=="
+reset_sandbox
+remove_fake_cert
+if run_cutover_legacy; then
+  pass "legacy mode 無憑證時正常成功"
+else
+  fail "legacy mode 無憑證時應該正常成功"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "legacy.conf" "無憑證時 legacy 回滾維持 HTTP-only legacy.conf（pre-cert 現況，行為不變）"
+assert_grep_log "尚未偵測到憑證" "有印出尚未偵測到憑證、維持 HTTP-only legacy.conf 的訊息"
+
+echo "== 場景 30：legacy mode，憑證已存在 → 改用 legacy-tls.conf（443 HTTPS 服務 SSR，保留 HSTS，避免破壞回訪過 HTTPS+HSTS 的使用者的回滾）（codex 複審 HIGH）=="
+reset_sandbox
+create_fake_cert
+if run_cutover_legacy; then
+  pass "legacy mode 憑證已存在時正常成功"
+else
+  fail "legacy mode 憑證已存在時應該正常成功"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "legacy-tls.conf" "憑證已存在時 legacy 回滾改用 legacy-tls.conf（443 HTTPS，保留 HSTS）"
+assert_grep_log "偵測到憑證已存在" "有印出偵測到憑證已存在、改用 legacy-tls.conf 的訊息"
+remove_fake_cert
+
+echo "== 場景 31：react（TLS）／react-http mode 不受 legacy 專屬的憑證偵測邏輯影響（就算憑證存在，candidate 仍是 react.conf／react-http.conf，不會被誤導去 legacy-tls.conf）=="
+reset_sandbox
+create_fake_cert
+if run_cutover; then
+  pass "react（TLS）mode 憑證存在時仍正常成功"
+else
+  fail "react（TLS）mode 不該被 legacy 專屬的憑證偵測邏輯影響"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "react.conf" "react（TLS）mode candidate 不受 legacy 憑證偵測邏輯影響，仍是 react.conf"
+
+reset_sandbox
+create_fake_cert
+if run_cutover_http; then
+  pass "react-http mode 憑證存在時仍正常成功"
+else
+  fail "react-http mode 不該被 legacy 專屬的憑證偵測邏輯影響"
+  cat "$STATE/last_run.log"
+fi
+assert_eq "$(active_conf)" "react-http.conf" "react-http mode candidate 不受 legacy 憑證偵測邏輯影響，仍是 react-http.conf"
+remove_fake_cert
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE"
 

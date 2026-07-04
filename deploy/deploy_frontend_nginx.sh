@@ -82,10 +82,13 @@ if [ ! -d frontend/dist ]; then
   exit 1
 fi
 
-# 3) 打包上傳：前端 dist + 三份 nginx conf（直接用 repo 裡實際被
+# 3) 打包上傳：前端 dist + 四份 nginx conf（直接用 repo 裡實際被
 #    `nginx -t` 驗證過的檔案，避免跟 SSM 內嵌字串產生 drift）-------------
-#    legacy=SSR 全轉發、react=React+TLS（有 domain 才能用）、
-#    react-http=React HTTP-only（bare-IP 現況用，見 deploy/nginx-react-http.conf）
+#    legacy=SSR 全轉發（HTTP-only）、react=React+TLS（有 domain 才能用）、
+#    react-http=React HTTP-only（bare-IP 現況用，見 deploy/nginx-react-http.conf）、
+#    legacy-tls=SSR 全轉發（443 HTTPS，保留 HSTS）——codex 複審 HIGH：react→
+#    legacy 緊急回滾時若憑證已存在，cutover_switch.sh 會改選這份，避免
+#    HSTS 破壞 HTTP-only 回滾（見 deploy/nginx-legacy-tls.conf 檔頭註解）。
 DIST_ZIP="$(pwd)/build/trustforge_frontend_dist.zip"
 mkdir -p build
 ( cd frontend/dist && zip -qr "$DIST_ZIP" . )
@@ -96,7 +99,8 @@ aws s3 cp "$DIST_ZIP" "s3://$BUCKET/trustforge_frontend_dist.zip" --region "$REG
 aws s3 cp deploy/nginx-legacy.conf "s3://$BUCKET/nginx-legacy.conf" --region "$REGION" >/dev/null
 aws s3 cp deploy/nginx.conf "s3://$BUCKET/nginx-react.conf" --region "$REGION" >/dev/null
 aws s3 cp deploy/nginx-react-http.conf "s3://$BUCKET/nginx-react-http.conf" --region "$REGION" >/dev/null
-echo "[fe-nginx] 已上傳前端 dist + 三份 nginx conf 到 s3://$BUCKET/" >&2
+aws s3 cp deploy/nginx-legacy-tls.conf "s3://$BUCKET/nginx-legacy-tls.conf" --region "$REGION" >/dev/null
+echo "[fe-nginx] 已上傳前端 dist + 四份 nginx conf 到 s3://$BUCKET/" >&2
 
 # 4) Security group：加開 443（80 應該已由 deploy_ec2.sh 開好）-----------
 VPC=$(aws ec2 describe-vpcs --region "$REGION" --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
@@ -166,6 +170,7 @@ mkdir -p "$ETC/nginx/trustforge-sites" "$OPT_DIR/frontend"
 aws s3 cp s3://__BUCKET__/nginx-legacy.conf "$CANDIDATE" --region __REGION__
 aws s3 cp s3://__BUCKET__/nginx-react.conf "$ETC/nginx/trustforge-sites/react.conf" --region __REGION__
 aws s3 cp s3://__BUCKET__/nginx-react-http.conf "$ETC/nginx/trustforge-sites/react-http.conf" --region __REGION__
+aws s3 cp s3://__BUCKET__/nginx-legacy-tls.conf "$ETC/nginx/trustforge-sites/legacy-tls.conf" --region __REGION__
 aws s3 cp s3://__BUCKET__/trustforge_frontend_dist.zip "$OPT_DIR/frontend/dist.zip" --region __REGION__
 rm -rf "$OPT_DIR/frontend/dist" && mkdir -p "$OPT_DIR/frontend/dist"
 unzip -o -q "$OPT_DIR/frontend/dist.zip" -d "$OPT_DIR/frontend/dist"

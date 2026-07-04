@@ -224,7 +224,7 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 | 階段 | 腳本 | 做什麼 | 預設行為 |
 |------|------|--------|----------|
 | 0（既有） | `deploy_ec2.sh` | 建 EC2、裝 python，port 80 直接對外 | 不變 |
-| 1 | `deploy_frontend_nginx.sh` | 疊加 nginx 層 + 上傳 React dist + **三份** nginx conf 候選（legacy/react/react-http）；python 收斂只聽 `127.0.0.1:8080` | 預設啟用 `nginx-legacy.conf`（全部原樣轉發給 python，功能與階段 0 逐字等價） |
+| 1 | `deploy_frontend_nginx.sh` | 疊加 nginx 層 + 上傳 React dist + **四份** nginx conf 候選（legacy/react/react-http/legacy-tls）；python 收斂只聽 `127.0.0.1:8080` | 預設啟用 `nginx-legacy.conf`（全部原樣轉發給 python，功能與階段 0 逐字等價） |
 | 2 | `cutover_switch.sh react\|react-http\|legacy` | 秒切 nginx conf（symlink）+ 同步 python 的 `TRUSTFORGE_CSP_MODE` | `react`/`react-http` 模式**強制**要求 `TRUSTFORGE_CUTOVER_CONFIRMED=yes`（視為三審+簽核完成的憑證），否則直接中止；`react-http` **另外**預設禁止（見下方），需明確 `TF_ALLOW_INSECURE_HTTP_CUTOVER=yes` 才放行 |
 
 **`react` vs `react-http` 怎麼選**：兩者是同一套 React 前端拓樸，差別只在
@@ -263,7 +263,7 @@ python 端 `TRUSTFORGE_CSP_MODE` `react`/`react-http` 兩者都設成 `react`
   `Referrer-Policy: strict-origin-when-cross-origin`。cutover 前後兩者不
   混用（nginx 端也對應切換）。
 
-### nginx conf 三個變體
+### nginx conf 四個變體
 
 - `deploy/nginx-legacy.conf`：cutover 前的預設/回滾安全值。**刻意只寫
   HTTP（80）**，不預先手刻 443/TLS——避免部署當下引用尚不存在的憑證檔案
@@ -285,11 +285,28 @@ python 端 `TRUSTFORGE_CSP_MODE` `react`/`react-http` 兩者都設成 `react`
   版**（bare IP、無 domain，或憑證還沒簽出來前想先驗證拓樸本身時用）。跟
   `nginx.conf` 差別只在**只有 port 80、無 TLS、無 301 redirect、無 HSTS**
   （HSTS 只在 HTTPS 下有意義，HTTP-only 站台加了不會生效，故不加）。
+- `deploy/nginx-legacy-tls.conf`：`nginx-legacy.conf` 的 **443/TLS 版**，
+  react→legacy 緊急回滾**專用**（codex 複審 HIGH：HSTS-safe rollback）。
+  ⛔ 為什麼需要它：`nginx.conf` 送一年 HSTS，瀏覽器記住後該 domain 之後
+  一年內一律強制走 https，`nginx-legacy.conf` 只監聽 80——若回滾切上純
+  HTTP 版，回訪過（吃過 HSTS）的使用者連不上任何東西，回滾本身失去意義、
+  甚至讓事故惡化。這份 conf 拓樸跟 `nginx-legacy.conf` 完全一樣（SSR/API
+  全部原樣轉發給 python，CSP 由 python 端 `CSP_MODE=legacy` 自己下），差別
+  只在多了 443/TLS + HSTS + 80→443 canonical redirect（跟 `nginx.conf` 的
+  80 server block 設計一致），憑證路徑跟 `nginx.conf` 共用同一張（同一個
+  domain，回滾不需要另外簽）。`cutover_switch.sh` 偵測到
+  `/etc/letsencrypt/live/<domain>/fullchain.pem` 已存在時，legacy 回滾會
+  自動選用這份而不是 HTTP-only 版；還沒簽過憑證的 pre-cert 現況（ACME
+  bootstrap）則維持用 HTTP-only 版，行為不變——偵測邏輯見下方
+  `cutover_switch.sh` 段落。真的起本機 nginx + python 驗證過 443 serve SSR
+  + HSTS header 存在，見 `deploy/test_nginx_legacy_tls_conf.sh`。
 
   **什麼時候用哪份**（cutover 決策，供 CEO/CISO/CPO 三審參考）：
   - domain + certbot 簽發憑證已就緒（主線現況）→ `deploy/cutover_switch.sh react`
   - bare IP、無 domain，或憑證尚未簽出 → `deploy/cutover_switch.sh react-http`（fallback）
-  - 緊急回滾／SSR 一週觀察期 → `deploy/cutover_switch.sh legacy`
+  - 緊急回滾／SSR 一週觀察期 → `deploy/cutover_switch.sh legacy`（憑證已存在
+    時自動改用 `nginx-legacy-tls.conf`，443 服務、保留 HSTS；pre-cert 現況
+    仍是 `nginx-legacy.conf`，HTTP-only）
 
   跟 `nginx.conf` 一樣，`/` 下 CSP/X-Frame-Options 等安全 header 的實際
   生效點是 `location = /index.html`（精確比對），不是 `location /`——
@@ -341,7 +358,12 @@ runbook」。
    conf 三個變體」段落說明）。
 
 回滾：`deploy/cutover_switch.sh legacy`（秒切回 SSR 全轉發，不動憑證，見
-`deploy/TLS-SETUP.md`「回滾」段落）。
+`deploy/TLS-SETUP.md`「回滾」段落）。**cutover 4 步之後**（憑證已存在），
+這裡的 legacy 回滾會自動偵測到 `fullchain.pem` 存在，改用
+`nginx-legacy-tls.conf`（443 服務、保留 HSTS）而不是 HTTP-only 版，避免
+HSTS 讓回訪過的使用者連不上（codex 複審 HIGH，見上方「nginx conf 四個
+變體」段落）；步驟 2（cutover 4 之前、憑證還沒簽發時）的 legacy 仍是
+HTTP-only 版，行為不變。
 
 ### `cutover_switch.sh` exit code 慣例（供維運/監控）
 
@@ -404,9 +426,17 @@ bash deploy/test_nginx_react_conf.sh
 # 安全 header 整合測試（真起本機 nginx + stub dist + 本機 python，純
 # HTTP，額外斷言不帶 HSTS）
 bash deploy/test_nginx_react_http_conf.sh
+
+# deploy/nginx-legacy-tls.conf（legacy 回滾 + TLS，codex 複審 HIGH：
+# HSTS-safe rollback）路由測試（真起本機 nginx + 本機 python SSR，自簽
+# 憑證測 443，斷言 443 真的 proxy SSR + 帶 Strict-Transport-Security
+# header，且 80→443 redirect 用 canonical domain）
+bash deploy/test_nginx_legacy_tls_conf.sh
 ```
 
 ### 回滾
 
 `deploy/cutover_switch.sh legacy`——秒切回 SSR 全轉發，不動 AWS 資源、不
-重建實例。
+重建實例。憑證已存在時自動改用 `nginx-legacy-tls.conf`（443 服務、保留
+HSTS，codex 複審 HIGH：HSTS-safe rollback，見上方「nginx conf 四個變體」）；
+pre-cert 現況仍是 HTTP-only 版，行為不變。

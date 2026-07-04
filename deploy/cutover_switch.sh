@@ -321,6 +321,26 @@ CANDIDATE=\"\$ETC/nginx/trustforge-sites/${MODE}.conf\"
 LIVE_LINK=\"\$ETC/nginx/conf.d/trustforge.conf\"
 SERVICE_FILE=\"\$ETC/systemd/system/trustforge.service\"
 
+# ---- codex 複審 HIGH（HSTS 破壞 HTTP-only legacy 回滾）：deploy/nginx.conf
+#      （react TLS 版）送一年 HSTS，瀏覽器記住後該 domain 之後一年內一律
+#      強制走 https，nginx 端完全看不到 80 port 的請求。legacy.conf 只聽
+#      80——react→legacy 緊急回滾若切上這份，回訪過的使用者連不上任何東西，
+#      回滾本身失去意義。修法：legacy 模式下先偵測憑證是否已存在（同一份
+#      certbot 簽發的憑證，deploy/nginx.conf／deploy/setup_tls.sh 共用同一
+#      路徑），有 → 改用 legacy-tls.conf（443 服務 SSR、保留 HSTS）；沒有
+#      （pre-cert ACME bootstrap 現況，還沒簽過憑證）→ 維持原本 HTTP-only
+#      legacy.conf，行為不變。\$ETC 沿用既有的 sandbox override 慣例（
+#      letsencrypt 憑證路徑本來就在 /etc 底下，不需要另開一個變數） ----
+if [ \"${MODE}\" = \"legacy\" ]; then
+  CERT_FILE=\"\$ETC/letsencrypt/live/${REACT_TLS_DOMAIN}/fullchain.pem\"
+  if [ -f \"\$CERT_FILE\" ]; then
+    CANDIDATE=\"\$ETC/nginx/trustforge-sites/legacy-tls.conf\"
+    echo \"[cutover] 偵測到憑證已存在（\$CERT_FILE），legacy 回滾改用 legacy-tls.conf（443 HTTPS 服務 SSR，保留 HSTS，避免破壞回滾）\" >&2
+  else
+    echo \"[cutover] 尚未偵測到憑證（\$CERT_FILE 不存在），legacy 回滾用 HTTP-only legacy.conf（pre-cert ACME bootstrap 現況）\" >&2
+  fi
+fi
+
 # ---- Step 0：host-wide 交易鎖（codex 三次複審，HIGH：沒有鎖，兩個並行
 #      cutover 呼叫會 race、互相破壞 symlink/service 狀態）——在候選驗證
 #      /記錄切換前狀態**之前**先搶鎖，一路持有到腳本結束（成功收尾或
