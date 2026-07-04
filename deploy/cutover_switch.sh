@@ -7,8 +7,21 @@
 # nginx.sh 已跑過（nginx 層 + 兩份 conf + 前端 dist 都已在實例上）。
 #
 # 用法：
-#   deploy/cutover_switch.sh react    # cutover：nginx 改服務 React 靜態檔
-#   deploy/cutover_switch.sh legacy   # 回滾：換回 SSR 全轉發（緊急用，秒切）
+#   deploy/cutover_switch.sh react       # cutover：nginx 改服務 React 靜態檔
+#                                        # （TLS 版，deploy/nginx.conf，需要
+#                                        # 已有 domain + certbot 簽發的憑證）
+#   deploy/cutover_switch.sh react-http  # cutover：nginx 改服務 React 靜態檔
+#                                        # （HTTP-only 版，deploy/nginx-
+#                                        # react-http.conf，bare-IP 現況、
+#                                        # 無 domain 時用——見 deploy/README.md）
+#                                        # ⛔ codex 複審 HIGH：production 不該用
+#                                        # 這個（無 TLS，MITM 可竄改），預設拒絕，
+#                                        # 需 TF_ALLOW_INSECURE_HTTP_CUTOVER=yes
+#                                        # 才放行（例外路徑）
+#   deploy/cutover_switch.sh legacy      # 回滾：換回 SSR 全轉發（緊急用，秒切）
+#
+# production React 唯一路徑：legacy（ACME challenge）→ deploy/setup_tls.sh
+# 簽發憑證 → react（TLS）cutover。react-http 不是 production 路徑。
 #
 # 做的事（都在同一台既有 EC2 上，透過 SSM，不重建/不動 AWS 資源）——
 # **guarded transaction**（codex 複審，robustness 補強）：
@@ -23,7 +36,18 @@
 #      半殘狀態。
 #   3. 完成後主動驗證：active nginx conf symlink、python 的 CSP_MODE、
 #      `/healthz` 都要確實是目標狀態，任一項對不上也視為失敗、觸發同一套
-#      回滾（而不是命令都跑完就假設成功）。
+#      回滾（而不是命令都跑完就假設成功）。**加上 public nginx（port 80）
+#      smoke check**（codex 五次複審，HIGH：以前完成後驗證只打 python 直連
+#      `127.0.0.1:8080/healthz`，從沒經過 nginx——`nginx -t` 只驗語法，
+#      不證 React dist 目錄真的存在可服務、SPA 路由/try_files 沒壞、
+#      location 沒設錯；dist 缺失/損毀或 nginx 層本身有問題時，python 直連
+#      依然健康，腳本會謊報 cutover 成功、使用者卻看到錯誤）：清除 ERR
+#      trap 之前，legacy 打 `http://127.0.0.1/healthz`（驗 SSR 全轉發鏈路）、
+#      react/react-http 打 `http://127.0.0.1/`＋`/analyze`（驗 React
+#      index.html 真的被服務、含 CSP header 跟 `<div id="root">` dist
+#      特徵、SPA fallback 正常）＋`/api/health`（驗 nginx→python 的
+#      `/api/` proxy 正常）——任一失敗都沿用同一顆 ERR trap 觸發既有
+#      rollback，不是新的失敗路徑，也不會謊報成功。
 #   4. **rollback 本身也不可靠、不可盲目信任**（codex 二次複審，HIGH）：
 #      回滾動作（symlink 還原／CSP_MODE 還原／daemon-reload／restart
 #      trustforge／nginx -t／reload nginx）每一步都個別追蹤成功與否，
@@ -63,25 +87,220 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-}"
-if [ "$MODE" != "react" ] && [ "$MODE" != "legacy" ]; then
-  echo "用法：$0 react|legacy" >&2
+if [ "$MODE" != "react" ] && [ "$MODE" != "react-http" ] && [ "$MODE" != "legacy" ]; then
+  echo "用法：$0 react|react-http|legacy" >&2
   exit 2
+fi
+
+# ---- react-http 預設禁止（codex 複審 HIGH：production 應只走 react(TLS)）--
+# 現在已經有 domain + certbot 憑證（deploy/setup_tls.sh），react-http（React
+# 前端跑在純 HTTP、無 TLS）不該再是 production cutover 的選項——中間人可
+# 竄改沒有 TLS 保護的 JS/API 回應本身，CSP header 只能限制「已收到」的內容
+# 要怎麼執行，擋不住封包被竄改這件事。react-http 唯一合理用途是還沒申請/
+# 生效 domain 時的暫時 bare-IP fallback（見 deploy/README.md），不是常態
+# production 路徑。這裡預設拒絕，需要明確設 TF_ALLOW_INSECURE_HTTP_CUTOVER=
+# yes 才放行（例外路徑）；legacy／react（TLS）完全不受這道關卡影響。
+if [ "$MODE" = "react-http" ] && [ "${TF_ALLOW_INSECURE_HTTP_CUTOVER:-}" != "yes" ]; then
+  echo "❌ [cutover] react-http（純 HTTP、無 TLS）預設禁止用於 production。" >&2
+  echo "   production 請用 react（TLS，需先跑 deploy/setup_tls.sh 簽發憑證）。" >&2
+  echo "   react-http 只是 bare-IP（還沒有 domain）時的暫時 fallback——沒有" >&2
+  echo "   TLS，MITM 可竄改 JS/API 回應內容，CSP 擋不住。" >&2
+  echo "   確定要用（例如還沒有 domain）：" >&2
+  echo "   TF_ALLOW_INSECURE_HTTP_CUTOVER=yes $0 react-http" >&2
+  exit 1
 fi
 
 REGION="${REGION:-ap-southeast-2}"
 
-if [ "$MODE" = "react" ]; then
+# react（TLS）mode 的 public smoke check 要打真正的 domain（見
+# deploy/nginx.conf server_name），不能打 bare 127.0.0.1——TLS conf 把 80
+# port 除 /healthz 外全部 301 導去 https，若 smoke check 打 http://127.0.0.1/
+# 只會拿到 301（curl -f 不把 3xx 當失敗，仍是 exit 0），CSP/body 斷言就會
+# 因為 301 回應本來就沒有這些內容而失敗，永遠觸發 rollback、cutover 永遠
+# 切不成功（codex 複審，HIGH：react smoke check 打 HTTP 但 TLS 把 HTTP 全
+# 301，被 mock 的假 200 掩蓋過去，真環境會 100% rollback）。
+REACT_TLS_DOMAIN="trustforge.hurricanesoft.com.tw"
+
+# react-http 的 python 端 CSP_MODE 跟 react（TLS 版）共用同一個值
+# `react`——web.py::_send() 只認 CSP_MODE == "react"（見模組頂部說明），
+# react-http 只是 nginx 層少了 TLS/redirect/HSTS，前端拓樸/CSP 指令集本身
+# 跟 react 完全一致，故不新增第三個 python 端 CSP_MODE 值，避免 web.py 要
+# 多分支。nginx candidate conf 檔名則是各自獨立的
+# `${MODE}.conf`（react.conf / react-http.conf / legacy.conf）。
+CSP_MODE_ENV="$MODE"
+if [ "$MODE" = "react-http" ]; then
+  CSP_MODE_ENV="react"
+fi
+
+# ---- public nginx smoke check（Step 4b，codex 五次複審，HIGH）----------
+# 以前 Step 4 完成後驗證只打 python 直連 127.0.0.1:8080/healthz，從沒經過
+# nginx。`nginx -t` 只驗語法、不證 dist 目錄存在可服務、SPA 路由/try_files
+# 沒壞、location 沒設錯——candidate conf 語法合法但 React dist 缺失/損毀、
+# 或 nginx 層本身有問題時，python 直連依然健康，腳本照樣宣告 cutover 成功、
+# 使用者卻看到錯誤。這裡在 Step 4「清除 ERR trap 之前」補上打 public
+# nginx endpoint（port 80）的驗證，任一失敗都沿用同一顆 ERR trap 觸發既有
+# rollback（不是新的失敗路徑），legacy／react-http／react（TLS）各用各自拓樸
+# 對應的檢查（legacy 驗 SSR 全轉發、react-http 驗 HTTP 版 React 真的被服務、
+# react（TLS）驗 HTTPS 版 React + HTTP→HTTPS redirect）。跟前面所有段落一樣：
+# `\$`／`\"` 是刻意跳脫、留給遠端 shell 執行時才展開/求值，不在本機構造字串
+# 時就處理掉。
+if [ "$MODE" = "legacy" ]; then
+  PUBLIC_SMOKE_BLOCK="
+# ---- Step 4b：public nginx smoke check（legacy 拓樸，codex 複審 HIGH：cutover
+#      後只驗 python 直連，沒驗 public nginx 面——nginx 面掛掉/conf 有問題時，
+#      python 直連依然健康，腳本會謊報成功。這裡改打 public nginx endpoint
+#      （port 80），在清除 ERR trap 之前失敗會被同一顆 trap 接住觸發 rollback。
+#      legacy 拓樸：nginx location / 全部原樣轉發給 python，用 /healthz 驗證
+#      nginx→python 這段代理鏈路是通的）----
+if ! curl -fsS -o /dev/null http://127.0.0.1/healthz; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx（port 80）/healthz 沒有回應（legacy SSR 全轉發鏈路異常）\" >&2
+fi
+curl -fsS -o /dev/null http://127.0.0.1/healthz
+echo \"[cutover] public nginx smoke check 通過（/healthz 經 nginx 轉發正常）\"
+"
+elif [ "$MODE" = "react-http" ]; then
+  PUBLIC_SMOKE_BLOCK="
+# ---- Step 4b：public nginx smoke check（React 拓樸，HTTP-only／bare-IP
+#      fallback，codex 複審 HIGH：cutover 後只驗 python 直連，沒驗 public
+#      nginx 面——dist 缺失/SPA 路由壞/nginx 面失敗時，python 直連依然健康，
+#      腳本會謊報成功。這裡改打 public nginx endpoint（port 80，沒有 TLS，
+#      跟 react（TLS）版不同，不涉及 301 redirect），任一失敗都在清除 ERR
+#      trap 之前，會被同一顆 trap 接住觸發 rollback，不會謊報成功）----
+SMOKE_DIR=\"/tmp/tf-cutover-smoke-\$\$\"
+mkdir -p \"\$SMOKE_DIR\"
+
+_tf_check_react_page() {
+  local path=\"\$1\" label=\"\$2\"
+  local hdr=\"\$SMOKE_DIR/hdr-\${label}\" body=\"\$SMOKE_DIR/body-\${label}\"
+  if ! curl -fsS -D \"\$hdr\" -o \"\$body\" \"http://127.0.0.1\${path}\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx \${path}（\${label}）沒有 200 回應（React dist 是否缺失/nginx 面是否正常？）\" >&2
+    return 1
+  fi
+  if ! grep -qi \"^content-security-policy:\" \"\$hdr\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx \${path}（\${label}）沒有 CSP header（安全 header 是否真的套用到這個 React 路由？）\" >&2
+    return 1
+  fi
+  if ! grep -q '<div id=\"root\"' \"\$body\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx \${path}（\${label}）回應內容不像 React index.html（dist 是否缺失/損毀？）\" >&2
+    return 1
+  fi
+  return 0
+}
+
+_tf_check_react_page \"/\" \"root\"
+_tf_check_react_page \"/analyze\" \"spa-fallback\"
+
+if ! curl -fsS -o \"\$SMOKE_DIR/api-health-body\" \"http://127.0.0.1/api/health\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（nginx /api/ proxy 是否正常？）\" >&2
+fi
+curl -fsS -o \"\$SMOKE_DIR/api-health-body\" \"http://127.0.0.1/api/health\"
+if ! grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 回應內容不是預期 JSON\" >&2
+fi
+grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
+
+rm -rf \"\$SMOKE_DIR\"
+echo \"[cutover] public nginx smoke check 通過（/、/analyze、/api/health 皆正常且安全 header 有套用）\"
+"
+else
+  # MODE = react（TLS）：nginx.conf 把 80 port 除 /healthz 外全部 301 導去
+  # https（見 deploy/nginx.conf），所以這裡「必須」打 HTTPS（用 --resolve
+  # 把 domain 指回 127.0.0.1，走本機憑證驗證、不用 -k），不能像
+  # react-http 那樣直接打 http://127.0.0.1/（打了只會拿到 301，curl -f
+  # 不把 3xx 當失敗，CSP/body 斷言會因為 301 回應本來就沒有這些內容而
+  # 失敗，變成每次 cutover 都觸發 rollback——codex 複審 HIGH）。額外補一段
+  # HTTP(80)→HTTPS redirect 的驗證，確保 80 port 真的有把非-/healthz 路徑
+  # 導去 https，而不是漏掉/導錯 domain。
+  PUBLIC_SMOKE_BLOCK="
+# ---- Step 4b：public nginx smoke check（React 拓樸，TLS 版，codex 複審
+#      HIGH：cutover 後只驗 python 直連，沒驗 public nginx 面——dist 缺失/
+#      SPA 路由壞/nginx 面失敗時，python 直連依然健康，腳本會謊報成功。這裡
+#      改打 public nginx HTTPS endpoint（--resolve 把 domain 指回
+#      127.0.0.1，走正式簽發的憑證驗證、不加 -k），任一失敗都在清除 ERR
+#      trap 之前，會被同一顆 trap 接住觸發 rollback，不會謊報成功）----
+SMOKE_DIR=\"/tmp/tf-cutover-smoke-\$\$\"
+mkdir -p \"\$SMOKE_DIR\"
+
+_tf_check_react_page() {
+  local path=\"\$1\" label=\"\$2\"
+  local hdr=\"\$SMOKE_DIR/hdr-\${label}\" body=\"\$SMOKE_DIR/body-\${label}\"
+  if ! curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -D \"\$hdr\" -o \"\$body\" \"https://${REACT_TLS_DOMAIN}\${path}\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}\${path}（\${label}）沒有 200 回應（React dist 是否缺失/nginx 面是否正常？）\" >&2
+    return 1
+  fi
+  if ! grep -qi \"^content-security-policy:\" \"\$hdr\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}\${path}（\${label}）沒有 CSP header（安全 header 是否真的套用到這個 React 路由？）\" >&2
+    return 1
+  fi
+  if ! grep -q '<div id=\"root\"' \"\$body\"; then
+    echo \"❌ [cutover] 完成後驗證失敗：public nginx https://${REACT_TLS_DOMAIN}\${path}（\${label}）回應內容不像 React index.html（dist 是否缺失/損毀？）\" >&2
+    return 1
+  fi
+  return 0
+}
+
+_tf_check_react_page \"/\" \"root\"
+_tf_check_react_page \"/analyze\" \"spa-fallback\"
+
+if ! curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o \"\$SMOKE_DIR/api-health-body\" \"https://${REACT_TLS_DOMAIN}/api/health\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 沒有 200 回應（nginx /api/ proxy 是否正常？）\" >&2
+fi
+curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o \"\$SMOKE_DIR/api-health-body\" \"https://${REACT_TLS_DOMAIN}/api/health\"
+if ! grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx /api/health 回應內容不是預期 JSON\" >&2
+fi
+grep -q '\"ok\": true' \"\$SMOKE_DIR/api-health-body\"
+
+# ---- HTTP(80) → HTTPS redirect 驗證（codex 複審 HIGH：react（TLS）的
+#      nginx.conf 把 80 port 除 /healthz 外全部 301 導去 https，這段沒驗到
+#      的話，有可能部署出一份 80 port 沒有正確導頁的 conf，使用者打 http
+#      網址進來卻卡住、不會被導去 https，而上面對 https 的檢查完全測不出
+#      這個問題。故意帶 -H \\\"Host: ${REACT_TLS_DOMAIN}\\\"：探測器/curl 直
+#      接打 IP 時不見得會帶正確 Host，明確帶上才能確保打中的是這個
+#      server_name（同一台機器上若還有其他 vhost/預設 server block，光靠
+#      IP 連線不保證命中我們要驗的這個 server block）——同時這也是
+#      codex 複審 HIGH 抓到的另一個回歸的前提：conf 端 redirect target
+#      以前用 \\\`\$host\\\`，會直接照抄請求時的 Host（不管是不是
+#      canonical），這裡刻意把 Host 設成跟 canonical domain 一致，藉此驗
+#      證 conf 端真的是寫死 literal domain、不是把 \$host 原樣转出去）----
+REDIRECT_HDR=\"\$SMOKE_DIR/redirect-hdr\"
+if ! curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"Host: ${REACT_TLS_DOMAIN}\" -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回應（HTTP→HTTPS redirect 是否正常？）\" >&2
+fi
+curl -fsS -D \"\$REDIRECT_HDR\" -o /dev/null -H \"Host: ${REACT_TLS_DOMAIN}\" -H \"X-TF-Cutover-Check: http-redirect\" \"http://127.0.0.1/\"
+if ! grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 沒有回 301（預期全轉 HTTPS，實際首行：\$(head -1 \"\$REDIRECT_HDR\")）\" >&2
+fi
+grep -qi '^HTTP/[0-9.]* 301' \"\$REDIRECT_HDR\"
+if ! grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"; then
+  echo \"❌ [cutover] 完成後驗證失敗：public nginx port 80 對 / 的 redirect Location 不是預期的 https://${REACT_TLS_DOMAIN}（canonical domain，不是 127.0.0.1/其他 Host）\" >&2
+fi
+grep -qi \"^location: https://${REACT_TLS_DOMAIN}\" \"\$REDIRECT_HDR\"
+
+rm -rf \"\$SMOKE_DIR\"
+echo \"[cutover] public nginx smoke check 通過（HTTPS /、/analyze、/api/health 皆正常且安全 header 有套用，HTTP→HTTPS redirect 也正常）\"
+"
+fi
+
+if [ "$MODE" = "react" ] || [ "$MODE" = "react-http" ]; then
   # 這幾行狀態訊息刻意都印到 stderr（不是 stdout）：`TF_CUTOVER_DRY_RUN=1`
   # 時 stdout 只能是純粹的遠端指令內容（給 test_cutover_switch.sh 用
   # `$(...)` 擷取去本機沙箱執行），混進來會讓擷取到的內容不是合法 shell
   # script。
-  echo "⚠️  即將切換到 React 前端拓樸（cutover）。" >&2
+  echo "⚠️  即將切換到 React 前端拓樸（cutover，mode=${MODE}）。" >&2
   echo "    這一步需要 CEO+CISO+CPO 三審 + 老闆簽核才能執行。" >&2
-  echo "    請確認：deploy/TLS-SETUP.md 的憑證已就緒、" >&2
-  echo "    deploy/nginx.conf 的 ssl_certificate 路徑/domain 跟實際簽發一致。" >&2
+  if [ "$MODE" = "react" ]; then
+    echo "    請確認：deploy/TLS-SETUP.md 的憑證已就緒、" >&2
+    echo "    deploy/nginx.conf 的 ssl_certificate 路徑/domain 跟實際簽發一致。" >&2
+  else
+    echo "    react-http 是 bare-IP（無 domain）現況用的 HTTP-only 版本，" >&2
+    echo "    請確認：deploy/nginx-react-http.conf 已部署到候選位置" >&2
+    echo "    （見 deploy/deploy_frontend_nginx.sh），且現況確實還沒有" >&2
+    echo "    domain/TLS——有 domain 後應改用 react（TLS 版）。" >&2
+  fi
   if [ "${TRUSTFORGE_CUTOVER_CONFIRMED:-}" != "yes" ]; then
     echo "❌ 未設 TRUSTFORGE_CUTOVER_CONFIRMED=yes，視為未取得簽核，中止。" >&2
-    echo "   三審+簽核完成後，執行：TRUSTFORGE_CUTOVER_CONFIRMED=yes $0 react" >&2
+    echo "   三審+簽核完成後，執行：TRUSTFORGE_CUTOVER_CONFIRMED=yes $0 ${MODE}" >&2
     exit 1
   fi
 fi
@@ -101,6 +320,31 @@ ETC=\"\${TF_CUTOVER_ETC:-/etc}\"
 CANDIDATE=\"\$ETC/nginx/trustforge-sites/${MODE}.conf\"
 LIVE_LINK=\"\$ETC/nginx/conf.d/trustforge.conf\"
 SERVICE_FILE=\"\$ETC/systemd/system/trustforge.service\"
+
+# ---- codex 複審 HIGH（HSTS 破壞 HTTP-only legacy 回滾）：deploy/nginx.conf
+#      （react TLS 版）送一年 HSTS，瀏覽器記住後該 domain 之後一年內一律
+#      強制走 https，nginx 端完全看不到 80 port 的請求。legacy.conf 只聽
+#      80——react→legacy 緊急回滾若切上這份，回訪過的使用者連不上任何東西，
+#      回滾本身失去意義。修法：legacy 模式下先偵測憑證是否已存在（同一份
+#      certbot 簽發的憑證，deploy/nginx.conf／deploy/setup_tls.sh 共用同一
+#      路徑），有 → 改用 legacy-tls.conf（443 服務 SSR、保留 HSTS）；沒有
+#      （pre-cert ACME bootstrap 現況，還沒簽過憑證）→ 維持原本 HTTP-only
+#      legacy.conf，行為不變。\$ETC 沿用既有的 sandbox override 慣例（
+#      letsencrypt 憑證路徑本來就在 /etc 底下，不需要另開一個變數） ----
+# CERT_FILE 一律計算（不只 MODE=legacy 才算）：codex 複審 HIGH（自動 trap
+# rollback 繞過 legacy-tls 保護）——react/react-http cutover 失敗時的自動
+# ERR trap rollback（見下方 ROLLBACK()）也需要用同一套憑證偵測邏輯來決定
+# 「切換前是 legacy.conf 的話，回滾要還原成 legacy.conf 還是
+# legacy-tls.conf」，不是只有 explicit「cutover_switch.sh legacy」才要判斷。
+CERT_FILE=\"\$ETC/letsencrypt/live/${REACT_TLS_DOMAIN}/fullchain.pem\"
+if [ \"${MODE}\" = \"legacy\" ]; then
+  if [ -f \"\$CERT_FILE\" ]; then
+    CANDIDATE=\"\$ETC/nginx/trustforge-sites/legacy-tls.conf\"
+    echo \"[cutover] 偵測到憑證已存在（\${CERT_FILE}），legacy 回滾改用 legacy-tls.conf（443 HTTPS 服務 SSR，保留 HSTS，避免破壞回滾）\" >&2
+  else
+    echo \"[cutover] 尚未偵測到憑證（\${CERT_FILE} 不存在），legacy 回滾用 HTTP-only legacy.conf（pre-cert ACME bootstrap 現況）\" >&2
+  fi
+fi
 
 # ---- Step 0：host-wide 交易鎖（codex 三次複審，HIGH：沒有鎖，兩個並行
 #      cutover 呼叫會 race、互相破壞 symlink/service 狀態）——在候選驗證
@@ -157,10 +401,24 @@ ROLLBACK() {
   trap - ERR
   echo \"❌ [cutover] 切換中失敗（exit=\${ec}），回滾到切換前狀態…\" >&2
   local ROLLBACK_OK=1
+  local RESTORE_LINK=\"\$PREV_LINK\"
 
   if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
-    if ! ln -sfn \"\$PREV_LINK\" \"\$LIVE_LINK\"; then
-      echo \"❌ [cutover] rollback：symlink 還原失敗（ln -sfn \${PREV_LINK} -> \${LIVE_LINK}）\" >&2
+    # ---- codex 複審 HIGH（自動 trap rollback 繞過 legacy-tls 保護）：react/
+    #      react-http cutover 在完成 nginx reload 之後、public smoke check
+    #      清掉 ERR trap 之前若失敗，觸發的是這顆自動 ERR trap，不是 explicit
+    #      「cutover_switch.sh legacy」——若只照抄 PREV_LINK 逐字還原，切換前
+    #      是 legacy.conf（HTTP-only）+ 憑證已存在的情況下，會把「這段短暫
+    #      窗口內已經吃到 react 的 HSTS」的使用者回滾後晾在只聽 80 的
+    #      legacy.conf，跟 explicit legacy 回滾同一個問題。修法：這裡跟
+    #      explicit legacy 用同一套 CERT_FILE 偵測，PREV_LINK 是 legacy.conf
+    #      且憑證已存在時，還原目標改成 legacy-tls.conf ----
+    if [ \"\$(basename \"\$PREV_LINK\" 2>/dev/null)\" = \"legacy.conf\" ] && [ -f \"\$CERT_FILE\" ]; then
+      RESTORE_LINK=\"\$ETC/nginx/trustforge-sites/legacy-tls.conf\"
+      echo \"[cutover] rollback：偵測到憑證已存在（\${CERT_FILE}），還原目標從 legacy.conf 改成 legacy-tls.conf（443 HTTPS 服務，避免 HSTS 讓回訪用戶連不上，codex 複審 HIGH）\" >&2
+    fi
+    if ! ln -sfn \"\$RESTORE_LINK\" \"\$LIVE_LINK\"; then
+      echo \"❌ [cutover] rollback：symlink 還原失敗（ln -sfn \${RESTORE_LINK} -> \${LIVE_LINK}）\" >&2
       ROLLBACK_OK=0
     fi
   else
@@ -207,8 +465,8 @@ ROLLBACK() {
   local RB_ACTIVE_LINK
   RB_ACTIVE_LINK=\"\$(readlink \"\$LIVE_LINK\" 2>/dev/null || true)\"
   if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
-    if [ \"\$RB_ACTIVE_LINK\" != \"\$PREV_LINK\" ]; then
-      echo \"❌ [cutover] rollback 驗證失敗：symlink=\$RB_ACTIVE_LINK ≠ 切換前=\$PREV_LINK\" >&2
+    if [ \"\$RB_ACTIVE_LINK\" != \"\$RESTORE_LINK\" ]; then
+      echo \"❌ [cutover] rollback 驗證失敗：symlink=\$RB_ACTIVE_LINK ≠ 還原目標=\$RESTORE_LINK\" >&2
       ROLLBACK_OK=0
     fi
   else
@@ -230,6 +488,16 @@ ROLLBACK() {
     ROLLBACK_OK=0
   fi
 
+  # ---- codex 複審 HIGH：還原成 legacy-tls.conf 時，不能只看 symlink 指對
+  #      路徑就當作成功——實測 443 真的能 serve SSR，不然 HSTS-safe rollback
+  #      只是紙面上正確，回訪用戶還是連不上 ----
+  if [ \"\$RESTORE_LINK\" = \"\$ETC/nginx/trustforge-sites/legacy-tls.conf\" ]; then
+    if ! curl -fsS --resolve \"${REACT_TLS_DOMAIN}:443:127.0.0.1\" -o /dev/null \"https://${REACT_TLS_DOMAIN}/healthz\"; then
+      echo \"❌ [cutover] rollback 驗證失敗：還原成 legacy-tls.conf 後，https://${REACT_TLS_DOMAIN}/healthz（443）沒有回應（HSTS-safe rollback 沒有真的可達）\" >&2
+      ROLLBACK_OK=0
+    fi
+  fi
+
   if [ \"\$ROLLBACK_OK\" = 1 ]; then
     echo \"❌ [cutover] 已回滾到切換前狀態且驗證通過（不留半殘），exit=\$ec\" >&2
     exit \"\$ec\"
@@ -241,8 +509,8 @@ ROLLBACK() {
   #      壞掉，不是單純切換失敗」----
   echo '🆘 [cutover] ROLLBACK-FAILED：自動回滾沒有完全成功，請立即人工介入，不要假設服務已還原！' >&2
   if [ \"\$PREV_LINK_EXISTED\" = 1 ]; then
-    echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期指向：\${PREV_LINK}）\" >&2
-    echo \"      不對就手動修：ln -sfn \${PREV_LINK} \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
+    echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期指向：\${RESTORE_LINK}）\" >&2
+    echo \"      不對就手動修：ln -sfn \${RESTORE_LINK} \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
   else
     echo \"   1) 檢查 nginx symlink：ls -l \${LIVE_LINK}（預期：切換前不存在，應該不存在／已移除）\" >&2
     echo \"      不對就手動修：rm -f \${LIVE_LINK} && nginx -t && systemctl reload nginx\" >&2
@@ -251,7 +519,12 @@ ROLLBACK() {
   echo \"      （預期：\${PREV_MODE_LINE}）\" >&2
   echo '      不對就手動改該行後：systemctl daemon-reload && systemctl restart trustforge' >&2
   echo '   3) 確認服務：curl -fsS http://127.0.0.1:8080/healthz' >&2
-  echo '   4) 確認狀態：systemctl status nginx；systemctl status trustforge' >&2
+  if [ \"\$RESTORE_LINK\" = \"\$ETC/nginx/trustforge-sites/legacy-tls.conf\" ]; then
+    echo \"   4) 確認 HTTPS（HSTS-safe rollback）：curl -fsS --resolve ${REACT_TLS_DOMAIN}:443:127.0.0.1 https://${REACT_TLS_DOMAIN}/healthz\" >&2
+    echo '   5) 確認狀態：systemctl status nginx；systemctl status trustforge' >&2
+  else
+    echo '   4) 確認狀態：systemctl status nginx；systemctl status trustforge' >&2
+  fi
   exit 97
 }
 trap 'ROLLBACK \$?' ERR
@@ -260,7 +533,7 @@ trap 'ROLLBACK \$?' ERR
 #      都會被上面的 ERR trap 接住，自動回滾 ----
 ln -sfn \"\$CANDIDATE\" \"\$LIVE_LINK\"
 nginx -t
-sed -i \"s|^Environment=TRUSTFORGE_CSP_MODE=.*|Environment=TRUSTFORGE_CSP_MODE=${MODE}|\" \"\$SERVICE_FILE\"
+sed -i \"s|^Environment=TRUSTFORGE_CSP_MODE=.*|Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}|\" \"\$SERVICE_FILE\"
 systemctl daemon-reload
 systemctl restart trustforge
 systemctl reload nginx
@@ -275,18 +548,18 @@ fi
 [ \"\$ACTIVE_LINK\" = \"\$CANDIDATE\" ]
 
 ACTIVE_MODE_LINE=\"\$(grep '^Environment=TRUSTFORGE_CSP_MODE=' \"\$SERVICE_FILE\" 2>/dev/null || true)\"
-if [ \"\$ACTIVE_MODE_LINE\" != \"Environment=TRUSTFORGE_CSP_MODE=${MODE}\" ]; then
-  echo \"❌ [cutover] 完成後驗證失敗：CSP_MODE=\$ACTIVE_MODE_LINE ≠ 預期 Environment=TRUSTFORGE_CSP_MODE=${MODE}\" >&2
+if [ \"\$ACTIVE_MODE_LINE\" != \"Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}\" ]; then
+  echo \"❌ [cutover] 完成後驗證失敗：CSP_MODE=\$ACTIVE_MODE_LINE ≠ 預期 Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}\" >&2
 fi
-[ \"\$ACTIVE_MODE_LINE\" = \"Environment=TRUSTFORGE_CSP_MODE=${MODE}\" ]
+[ \"\$ACTIVE_MODE_LINE\" = \"Environment=TRUSTFORGE_CSP_MODE=${CSP_MODE_ENV}\" ]
 
 if ! curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
   echo '❌ [cutover] 完成後驗證失敗：python /healthz 未回應' >&2
 fi
 curl -fsS -o /dev/null http://127.0.0.1:8080/healthz
-
+${PUBLIC_SMOKE_BLOCK}
 trap - ERR
-echo '[cutover] 已切換到 ${MODE}（nginx conf + python CSP_MODE 同步，完成後驗證通過）'
+echo '[cutover] 已切換到 ${MODE}（nginx conf + python CSP_MODE 同步，完成後驗證通過，含 public nginx smoke check）'
 "
 
 # 測試用 dry-run 逃生口：只印出上面組好的遠端指令內容、不真的呼叫
@@ -299,15 +572,24 @@ if [ "${TF_CUTOVER_DRY_RUN:-}" = "1" ]; then
   exit 0
 fi
 
+# codex 複審 HIGH：以前 awk '{print $1}' 在 0 台/多台相符時會靜默選第
+# 一行（0 台時是空字串、多台時默默只挑其中一台）——對到 stale/非 prod 的
+# 實例卻回報 cutover 成功，正牌 prod 完全沒切，事故排查極難察覺。比照
+# deploy/setup_tls.sh 已修的做法：`--query` 多包一層 `[InstanceId]`，讓
+# `--output text` 每個相符實例各自一行，用 `grep -c .` 算出真正的相符數，
+# 非「剛好 1 台」一律 fail-closed 中止、不猜、不亂選，用獨立 exit code
+# （99）跟其他失敗類型區分，方便監控/自動化判斷是哪一種問題。
 MATCHES=$(aws ec2 describe-instances --region "$REGION" \
   --filters Name=tag:Name,Values=trustforge-demo \
     Name=instance-state-name,Values=running \
-  --query 'Reservations[].Instances[].InstanceId' --output text)
-IID=$(printf '%s\n' "$MATCHES" | awk '{print $1}')
-if [ -z "$IID" ] || [ "$IID" = "None" ]; then
-  echo "❌ 找不到 running 中的 trustforge-demo 實例，中止" >&2
-  exit 1
+  --query 'Reservations[].Instances[].[InstanceId]' --output text)
+MATCH_COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
+if [ "$MATCH_COUNT" -ne 1 ]; then
+  echo "❌ [cutover] 找到 ${MATCH_COUNT} 個相符實例（tag Name=trustforge-demo，running），需要剛好 1 個，中止（不會亂猜切到哪一台）。" >&2
+  echo "   0 台：請先確認 EC2 是否真的在跑；多台：請先手動確認/收斂到剛好一台 running 的 trustforge-demo 實例。" >&2
+  exit 99
 fi
+IID=$(printf '%s\n' "$MATCHES" | awk '{print $1}')
 echo "[cutover] 目標實例 ${IID}，切換到 mode=$MODE"
 
 CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
