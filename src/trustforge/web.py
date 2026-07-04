@@ -4078,33 +4078,60 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
                 stale_generation_replaced = None
 
             is_leader = inflight is None
-            if is_leader:
-                event = threading.Event()
-                global _analyze_dedup_generation_seq
-                _analyze_dedup_generation_seq += 1
-                my_generation = _analyze_dedup_generation_seq
-                _analyze_dedup_inflight[key] = (event, now, my_generation)
-                if stale_generation_replaced is not None:
-                    # codex HIGH 複審 Round 12 補丁：記一筆「舊世代已被我
-                    # 取代」，讓卡在舊 leader event 上、稍後才醒來重新搶
-                    # 到鎖的 follower 能追到我這裡（見
-                    # `_analyze_dedup_generation_supersede` 完整說明）。
-                    _analyze_dedup_generation_supersede[stale_generation_replaced] = (
-                        now + _ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS,
-                        my_generation,
-                    )
-            else:
-                event = inflight[0]
-                my_generation = None  # follower 不發布，不需要世代編號
-                # codex HIGH 複審#5 / Round 12：記住這次實際加入等待的是
-                # 哪個世代，供醒來後在迴圈頂端查
-                # `_analyze_dedup_follower_result` 用（見上方檢查）。
-                joined_leader_generation = inflight[2]
+            # codex HIGH 複審 Round 13：這一輪迭代能走到「成為/取代
+            # leader」這條路，通常是因為前一輪 `event.wait()` 逾時後
+            # `_final_grace_check_before_giving_up()` 回了 `True` 讓我們
+            # `continue` 回到這裡——但那個 grace check 只確認「當下有
+            # 東西可以再等一下」，並不保證「我自己排隊等候的 deadline
+            # 還沒到」。若這個 caller 自己的 `deadline` 早就已經過了才
+            # 繞回這裡，絕對不能讓它就地升級成新 leader 去 compute()：
+            # 它已經沒有「還在使用者可接受的等待時間內」這個正當性，讓
+            # 它去 compute() 只會 (1) 使用者早該收到 503 卻繼續被晾著、
+            # (2) 跟真正剛進來的 fresh 請求重疊，多打一次依賴、(3) 若
+            # 依賴仍持續故障/hang，這個執行緒會再被永久卡住一次、永遠
+            # 不釋放。只有「deadline 還沒到」的 fresh 呼叫才有資格取代
+            # stale leader，或在真空時成為新 leader；已逾時的一律視同
+            # 逾時、回 503，且不動用/建立任何 in-flight entry——原本
+            # stale 的 entry（若有）就留著給下一個真正 fresh 的呼叫處理，
+            # 不會因為這裡跳過而遺失。
+            caller_expired_before_claim = is_leader and now >= deadline
+            if not caller_expired_before_claim:
+                if is_leader:
+                    event = threading.Event()
+                    global _analyze_dedup_generation_seq
+                    _analyze_dedup_generation_seq += 1
+                    my_generation = _analyze_dedup_generation_seq
+                    _analyze_dedup_inflight[key] = (event, now, my_generation)
+                    if stale_generation_replaced is not None:
+                        # codex HIGH 複審 Round 12 補丁：記一筆「舊世代已被我
+                        # 取代」，讓卡在舊 leader event 上、稍後才醒來重新搶
+                        # 到鎖的 follower 能追到我這裡（見
+                        # `_analyze_dedup_generation_supersede` 完整說明）。
+                        _analyze_dedup_generation_supersede[stale_generation_replaced] = (
+                            now + _ANALYZE_DEDUP_FOLLOWER_RESULT_GRACE_SECONDS,
+                            my_generation,
+                        )
+                else:
+                    event = inflight[0]
+                    my_generation = None  # follower 不發布，不需要世代編號
+                    # codex HIGH 複審#5 / Round 12：記住這次實際加入等待的是
+                    # 哪個世代，供醒來後在迴圈頂端查
+                    # `_analyze_dedup_follower_result` 用（見上方檢查）。
+                    joined_leader_generation = inflight[2]
 
         if stale_event_to_wake is not None:
             # 鎖外呼叫：`Event.set()` 本身無鎖、執行緒安全，鎖外呼叫純粹是
-            # 為了盡快釋放 `_analyze_dedup_lock`，不影響正確性。
+            # 為了盡快釋放 `_analyze_dedup_lock`。即使「我」自己已經逾時、
+            # 沒資格取代這個 stale leader，還是主動 signal 它的舊
+            # event——純粹是讓其他還沒逾時的 follower 提早發現 leader 已
+            # 死、不用空等到自己的 deadline 才知道，不影響正確性。
             stale_event_to_wake.set()
+
+        if caller_expired_before_claim:
+            raise _AnalyzeDedupTimeout(
+                f"分析請求排隊等候逾時（前一個相同請求執行超過"
+                f"{int(_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS)} 秒），請稍後再試一次"
+            )
 
         if is_leader:
             break  # 跳出協調 loop，往下真的去 compute()

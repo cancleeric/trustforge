@@ -919,6 +919,95 @@ def test_api_analyze_dedup_stalled_leader_entry_becomes_stale_and_replaced(monke
     assert current is None or current[0] is not zombie_event
 
 
+def test_dedup_analyze_call_expired_follower_must_503_not_self_promote_to_leader(monkeypatch):
+    """codex HIGH 複審 Round 13（協調 loop：逾時 follower 自我升級成新
+    leader，defeat 503）：
+
+    原本的 bug：follower 在自己的 `event.wait()` 逾時後，會呼叫
+    `_final_grace_check_before_giving_up()` 做最後一次複查；那個複查在
+    「join 的 in-flight entry 還沒逾時（`grace_remaining > 0`）」時，會
+    先 `grace_event.wait(timeout=grace_remaining)` 再**不論等到什麼**都
+    回傳 `True`，讓呼叫端 `continue` 回協調 loop 頂端重新查一次。但
+    `grace_remaining` 的定義正好是「這個 entry 距離變成 stale 還剩多少
+    時間」——等完這段時間之後，回到 loop 頂端時，這個 entry 幾乎必然
+    「剛好」被判定成 stale（因為兩者用的是同一把量尺：等到 entry 的
+    stale 門檻）。而這個 follower 自己的排隊 deadline 早就已經到期（它
+    是因為 `remaining <= 0` 才走進 grace check 的），若協調 loop 沒有另外
+    檢查「我自己還有沒有資格」，它會直接把自己升級成新 leader、真的去
+    compute() 一次——這就是 codex 抓到的「逾時 follower 取代它 compute()，
+    defeat 503、重疊另一次 Bedrock 呼叫」。
+
+    這裡不依賴天然的多執行緒排程 race（真正並行時，leader/follower 誰先
+    搶到鎖、時間差常常只有微秒等級，天然情境下這個窗口太窄、不穩定），
+    而是直接偽造一個「follower 呼叫當下還沒逾時、但差距刻意設在
+    `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS` 之內某個具體值」的 zombie
+    leader entry，讓 follower 走完整趟「自己等待逾時 → grace check 再等
+    一段 → 回到 loop 頂端」的路徑，確定性地重現 codex 描述的那個交界。
+
+    斷言：follower 必須乖乖回 `_AnalyzeDedupTimeout`（503），絕對不能自己
+    升級成新 leader、真的呼叫一次 `compute()`；thread 有界時間內釋放；
+    偽造的 zombie entry 原封不動留著，交給之後真正 fresh 的請求處理——
+    fresh 請求進來後必須能正常偵測到它是 stale 並取代成功。"""
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 1.0)
+    key = "dedup-expired-follower-vs-stale-boundary-test-key"
+
+    zombie_event = threading.Event()  # 永遠不會被 set() ——模擬真的 hang 死的 leader
+    zombie_generation = -888  # 刻意用不會跟真正計數器撞號的假世代編號
+    # 刻意設在「follower 呼叫當下」之後 0.3 秒——制造 codex 描述的那個
+    # 交界（見上方 docstring）：follower 自己的 deadline（呼叫當下 +
+    # 1.0 秒）到期時，這個 entry 距離變成 stale 還差 0.3 秒（也就是
+    # grace check 算出的 `grace_remaining`），逼 follower 走完整趟
+    # grace-wait 再回頂端，而不是在第一次 grace check 就直接判定「這個
+    # entry 本身也已經逾時/stale，沒東西可 join」而提早回傳 False。
+    web._analyze_dedup_inflight[key] = (
+        zombie_event, time.time() + 0.3, zombie_generation
+    )
+
+    follower_self_promoted_counter = _CallCounter()
+
+    def _compute_follower_if_self_promoted():
+        # 若 follower 真的（錯誤地）自我升級成新 leader，才會呼叫到這裡
+        # ——這代表 bug 重現了、且會真的重複打一次依賴。
+        follower_self_promoted_counter.hit()
+        return "should-not-be-called-follower-self-promoted"
+
+    t0 = time.time()
+    with pytest.raises(web._AnalyzeDedupTimeout):
+        web._dedup_analyze_call(key, _compute_follower_if_self_promoted)
+    elapsed = time.time() - t0
+
+    assert follower_self_promoted_counter.n == 0, (
+        "自己排隊 deadline 已耗盡的 follower，即使剛好碰到 in-flight entry "
+        "被判定 stale 的交界，也絕對不能自我升級成新 leader、真的觸發一次"
+        "重複的 compute()（重複真呼叫 Bedrock/連接器）"
+    )
+    # 應該在自己的 deadline（1.0 秒）加上一小段 grace 之後就返回，而不是
+    # 卡住不放（thread 有正常釋放，不是無限阻塞）。
+    assert elapsed < 5.0, f"逾時 follower 應在有界時間內返回 503，實際耗時 {elapsed:.3f}s"
+
+    # 偽造的 zombie leader entry 應該原封不動地留著（沒有被這個逾時
+    # follower 誤取代/誤清），交給之後真正 fresh 的請求處理。
+    current = web._analyze_dedup_inflight.get(key)
+    assert current is not None and current[0] is zombie_event, (
+        "逾時的 follower 不該動用/取代任何 in-flight entry"
+    )
+
+    # 全新、deadline 全新的請求進來，此時這個 zombie leader 一定早已
+    # stale（遠超過 1.0 秒的逾時上界），必須能正常偵測到並取代它、真的
+    # 觸發一次新的 compute()——證明「只有 fresh 請求能取代 stale
+    # leader」這件事沒有被上面的修正誤傷。
+    fresh_counter = _CallCounter()
+
+    def _compute_fresh():
+        fresh_counter.hit()
+        return "result-fresh-replaces-stale"
+
+    result_fresh = web._dedup_analyze_call(key, _compute_fresh)
+    assert result_fresh == "result-fresh-replaces-stale"
+    assert fresh_counter.n == 1, "全新（deadline 全新）的請求應該能正常取代 stale leader"
+    assert key not in web._analyze_dedup_inflight
+
+
 def test_dedup_analyze_call_stale_leader_finishing_before_any_replacement_still_published(
     monkeypatch,
 ):
