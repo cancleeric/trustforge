@@ -3236,7 +3236,7 @@ def _price_provenance_data(evidence: list) -> dict:
 # 是同一件事被做了兩遍，白白多花一次 token 成本。
 #
 # 做法：in-flight dedup（推薦解法，見下）＋ 短期（60 秒）結果快取。
-#   - 同一 (type, coin[,coin2], query, live/real/token) 的請求同時有一個正在
+#   - 同一 (type, coin[,coin2], query, sample/live/real/token) 的請求同時有一個正在
 #     跑時，後到的相同請求原地等待、共用同一份真實結果，不各自進
 #     `_do_analyze`/`_do_comparison`（因此也不會各自呼叫
 #     `_check_live_rate_limit`/`_check_real_rate_limit`，更不會各自走到
@@ -3258,31 +3258,46 @@ _analyze_dedup_cache: dict[str, tuple[float, tuple[bool, object]]] = {}
 
 def _analyze_dedup_key(*, qtype: QuestionType, coin_key: str, query: str, qs: dict) -> str:
     """把一次 `/api/analyze` 請求正規化成 in-flight dedup / 短期結果快取的
-    key：`(type, coin[,coin2], query, live/real/token)`。
+    key：`(type, coin[,coin2], query, sample/live/real/token)`。
 
     `coin_key`：呼叫端（`_handle_api_analyze`）已完成正規化＋白名單驗證的
     幣種鍵——單幣是已 `.upper()` 過的 `coin_raw`；comparison 是
-    `_parse_comparison_coins()` 回傳的 `(coin_a, coin_b)` 依字母序排序後
-    `join(",")`，讓 `coin=BTC,ETH` 與 `coin=ETH,coin2=BTC` 這種同語意
-    不同參數順序的請求也能命中同一把 key，不會各自 miss。
+    `_parse_comparison_coins()` 回傳的 `(coin_a, coin_b)` **依請求原始
+    順序** `join(",")`，刻意不排序（codex HIGH 複審：`/api/analyze`
+    comparison 回應是**有序**欄位——`report_a`/`evidence_a`/
+    `price_provenance_a` 描述的是 `coin_a`，`_b` 系列描述 `coin_b`，順序
+    對調語意就不同，不是同一份可互換的結果。若排序正規化成同一把 key，
+    `coin=ETH,coin2=BTC`（`coin_a=ETH,coin_b=BTC`）會跟
+    `coin=BTC,coin2=ETH`（`coin_a=BTC,coin_b=ETH`）命中同一份快取，讓後者
+    的請求者拿到 A/B 對調、實際描述反過來的報告——同順序（同一個
+    `coin_a,coin_b` 序列）的重複請求本來就會命中同一把 key、正常
+    dedup；順序不同視為不同請求，各自跑一次是正確行為，不是「沒
+    dedup 到」。
 
     `query`：已通過長度驗證的原始字串，`strip()` 去頭尾空白，避免使用者
     多打/少打空白造成 miss；刻意不做大小寫正規化（casefold）——中文查詢字
     大小寫不影響語意，但英文查詢字大小寫可能承載使用者刻意的語意差異，
     保守不動。
 
-    `live`/`real`/`token`：直接帶原始 qs 值（僅 strip）。這三者決定
-    `_parse_live`/`_parse_real` 最終要不要真的打 Bedrock（`pipeline.run`
-    的 `data_mode`/`llm_mode`）——同一 (type,coin,query) 但這三者不同，
-    代價／結果不同，必須各自獨立 key：否則要嘛把「免費離線請求」跟
-    「已通過 token 驗證的真 Bedrock 請求」誤判成同一把（讓已花錢的真結果
-    被免費請求偷用），要嘛讓兩個都合法的真請求彼此漏 dedup。
+    `sample`/`live`/`real`/`token`：直接帶原始 qs 值（僅 strip）。這四者
+    合起來決定 `_parse_live`/`_parse_real`（進而 `_do_analyze`/
+    `_do_comparison` 呼叫 `pipeline.run` 時的 `data_mode`/`llm_mode`/
+    `offline`）最終落在離線示範沙盒（`sample=1`，固定樣本資料）、
+    「真資料·$0」（預設，即時連接器）、或真 Bedrock（`live=1&token=`）
+    哪一檔——同一 (type,coin,query) 但這四者不同，資料來源/代價/結果都
+    不同，必須各自獨立 key：
+      - 漏帶 `sample` 會讓「離線示範固定樣本」跟「預設真連接器即時資料」
+        誤判成同一把 key，讓其中一種請求吃到另一種資料來源的快取結果；
+      - 漏帶 `live`/`real`/`token` 會把「免費離線/真資料請求」跟「已通過
+        token 驗證的真 Bedrock 請求」誤判成同一把（讓已花錢的真結果被
+        免費請求偷用），或讓兩個都合法的真請求彼此漏 dedup。
     """
+    sample_raw = (qs.get("sample", [""])[0] or "").strip()
     live_raw = (qs.get("live", [""])[0] or "").strip()
     real_raw = (qs.get("real", [""])[0] or "").strip()
     token_raw = (qs.get("token", [""])[0] or "").strip()
     return "\x1f".join(
-        (qtype.value, coin_key, query.strip(), live_raw, real_raw, token_raw)
+        (qtype.value, coin_key, query.strip(), sample_raw, live_raw, real_raw, token_raw)
     )
 
 
@@ -3396,7 +3411,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     #51 server-side idempotency（防重複送出，Bedrock 開通前最後
     prereq）：驗證通過後、真的呼叫 `_do_analyze`/`_do_comparison` 之前，
     先算出 `_analyze_dedup_key()`（正規化 `type,coin[,coin2],query,
-    live/real/token`），透過 `_dedup_analyze_call()` 包一層 in-flight
+    sample/live/real/token`），透過 `_dedup_analyze_call()` 包一層 in-flight
     dedup ＋ 60 秒短期結果快取——同一組參數的重複/並行請求只有第一個
     （leader）真的觸發依賴呼叫，其餘原地等待、共用同一份真實結果，不會
     各自再打一次真連接器/Bedrock。詳見 `_dedup_analyze_call()` docstring。
@@ -3435,10 +3450,12 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "bad_request", f"幣種須為以下其中之一：{'、'.join(COIN_POOL)}"
             )
 
-    # #51 idempotency：comparison 用排序過的 `coin_a,coin_b`（A,B 與 B,A
-    # 同語意，排序後才不會因參數順序不同各自 miss），單幣直接用已驗證的
-    # `coin_raw`。
-    coin_key = ",".join(sorted(pair)) if qtype == QuestionType.COMPARISON else coin_raw
+    # #51 idempotency（codex HIGH 複審修正）：comparison 保留 `pair`
+    # 原始請求順序組 key（`coin_a,coin_b`），刻意不排序——`report_a`/
+    # `report_b` 是有序欄位，`coin=A,B` 與 `coin=B,A` 是 A/B 對調、語意
+    # 不同的兩份報告，不能共用同一份快取（見 `_analyze_dedup_key`
+    # docstring）；單幣直接用已驗證的 `coin_raw`。
+    coin_key = ",".join(pair) if qtype == QuestionType.COMPARISON else coin_raw
     dedup_key = _analyze_dedup_key(qtype=qtype, coin_key=coin_key, query=query, qs=qs)
 
     # --- 2. 驗證通過後才碰依賴（連接器/Bedrock/pipeline/序列化）---

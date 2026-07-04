@@ -515,22 +515,95 @@ def test_api_analyze_dedup_different_coin_or_query_or_type_not_deduped(monkeypat
     )
 
 
-def test_api_analyze_dedup_comparison_coin_order_normalized(monkeypatch):
-    """comparison `coin=BTC,ETH` 與「等價但參數順序不同」的
-    `coin=ETH&coin2=BTC` 應正規化成同一把 dedup key，只真的跑 1 次
-    `pipeline.run_comparison`。"""
+def test_api_analyze_dedup_comparison_preserves_request_order_not_swapped(monkeypatch):
+    """codex HIGH 複審修正：comparison dedup key **不能**排序 coin pair——
+    `/api/analyze` 的 `report_a`/`evidence_a`/`price_provenance_a` 是描述
+    `coin_a` 的**有序**欄位，`_b` 系列描述 `coin_b`；`coin=BTC,ETH`
+    （coin_a=BTC）與 `coin=ETH,coin2=BTC`（coin_a=ETH）是 A/B 對調、語意
+    不同的兩份報告，絕不能共用同一份快取——否則後者會被 dedup 成前者的
+    快取 body，「report_a」實際卻描述 BTC 而非請求的 ETH，A/B 對應錯。
+
+    這裡直接斷言每個回應的 `report_a.coin`／`report_b.coin` 對應**自己
+    請求的順序**，且兩個反序請求各自真的呼叫了 `pipeline.run_comparison`
+    （不是被誤 dedup 成 1 次）。"""
     counter = _CallCounter()
-    _wrap_counting_run_comparison(monkeypatch, counter, delay=0.1)
+    _wrap_counting_run_comparison(monkeypatch, counter)
 
-    qs_a = {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["cmp-dedup-test"]}
-    qs_b = {"coin": ["ETH"], "coin2": ["BTC"], "type": ["comparison"], "q": ["cmp-dedup-test"]}
+    qs_forward = {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["cmp-order-test"]}
+    qs_reversed = {"coin": ["ETH"], "coin2": ["BTC"], "type": ["comparison"], "q": ["cmp-order-test"]}
 
-    code_a, body_a = web._handle_api_analyze(qs_a, client_ip="10.1.1.5")
-    code_b, body_b = web._handle_api_analyze(qs_b, client_ip="10.1.1.6")
+    code_fwd, body_fwd = web._handle_api_analyze(qs_forward, client_ip="10.1.1.5")
+    code_rev, body_rev = web._handle_api_analyze(qs_reversed, client_ip="10.1.1.6")
 
-    assert code_a == 200 and code_b == 200
-    assert counter.n == 1, f"順序不同但語意相同的比較請求應共用同一把 key，實際呼叫 {counter.n} 次"
-    assert body_a == body_b
+    assert code_fwd == 200 and code_rev == 200
+    data_fwd = _envelope(body_fwd)["data"]
+    data_rev = _envelope(body_rev)["data"]
+    assert data_fwd["report_a"]["coin"] == "BTC" and data_fwd["report_b"]["coin"] == "ETH"
+    assert data_rev["report_a"]["coin"] == "ETH" and data_rev["report_b"]["coin"] == "BTC", (
+        "反序請求（coin=ETH,coin2=BTC）的 report_a 應描述 ETH，"
+        "不能被排序過的 dedup key 誤判成正序請求的快取 body（A/B 對調）"
+    )
+    assert counter.n == 2, (
+        f"順序不同的兩個 comparison 請求語意不同（A/B 對調），應各自真的呼叫 "
+        f"pipeline.run_comparison，實際只呼叫 {counter.n} 次"
+    )
+
+
+def test_api_analyze_dedup_comparison_same_order_still_deduped(monkeypatch):
+    """同順序（同一個 coin_a,coin_b 序列）的重複 comparison 請求仍應正常
+    dedup（只跑 1 次）——上一條測試確認的是「順序不同不誤 dedup」，這條
+    反向確認「順序相同該 dedup 的還是有 dedup 到」，避免修正 codex HIGH
+    時矯枉過正變成完全不 dedup comparison。"""
+    counter = _CallCounter()
+    _wrap_counting_run_comparison(monkeypatch, counter)
+
+    qs = {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["cmp-same-order-test"]}
+    code1, body1 = web._handle_api_analyze(qs, client_ip="10.1.1.11")
+    code2, body2 = web._handle_api_analyze(qs, client_ip="10.1.1.12")
+
+    assert code1 == 200 and code2 == 200
+    assert counter.n == 1, f"同順序重複請求應共用同一把 key，實際呼叫 {counter.n} 次"
+    assert body1 == body2
+
+
+def test_api_analyze_dedup_sample_vs_real_not_shared(monkeypatch):
+    """key 已含 `live`/`real`/`token`——離線示範沙盒（`?sample=1`，opt-in，
+    固定樣本資料）跟預設「真資料·$0」檔位（`_is_real_request` 未帶
+    `sample`/`live` 時的預設，見該函式 docstring），即使 coin/query/type
+    完全相同，資料來源本質不同（固定樣本 vs 即時連接器讀取），絕不能共用
+    快取——否則使用者要看樣本 demo 卻拿到（或反過來汙染）即時真資料的
+    快取結果。
+
+    直接驗證兩件事：(1) `_analyze_dedup_key()` 算出的 key 確實不同；
+    (2) 兩次呼叫各自真的觸發 `pipeline.run`（呼叫次數為 2，不是被 dedup
+    成 1 次）。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    qs_sample = {
+        "coin": ["BTC"], "type": ["multi_source"], "q": ["sample-vs-real-test"],
+        "sample": ["1"],
+    }
+    qs_real = {"coin": ["BTC"], "type": ["multi_source"], "q": ["sample-vs-real-test"]}
+
+    key_sample = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC",
+        query="sample-vs-real-test", qs=qs_sample,
+    )
+    key_real = web._analyze_dedup_key(
+        qtype=web.QuestionType("multi_source"), coin_key="BTC",
+        query="sample-vs-real-test", qs=qs_real,
+    )
+    assert key_sample != key_real, "sample 與 real（預設）請求的 dedup key 必須不同"
+
+    code1, _ = web._handle_api_analyze(qs_sample, client_ip="10.1.1.13")
+    code2, _ = web._handle_api_analyze(qs_real, client_ip="10.1.1.14")
+
+    assert code1 == 200 and code2 == 200
+    assert counter.n == 2, (
+        f"sample 與 real（預設）是不同資料來源，不該共用快取，各自都該真的呼叫 "
+        f"pipeline.run，實際只呼叫 {counter.n} 次"
+    )
 
 
 def test_api_analyze_dedup_leader_failure_shared_with_followers(monkeypatch):
