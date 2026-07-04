@@ -112,9 +112,22 @@ class BedrockClient:
     開發/測試信任層管線。
     """
 
-    def __init__(self, config: BedrockConfig | None = None, offline: bool = False):
+    def __init__(
+        self,
+        config: BedrockConfig | None = None,
+        offline: bool = False,
+        stance_offline: bool | None = None,
+    ):
         self.config = config or BedrockConfig()
         self.offline = offline
+        # #9 online-stance 預算配額硬化：`stance_offline` 讓呼叫端能把「stance
+        # 分類呼叫」的離線與否從主敘事 `offline` 解耦——未顯式傳入時預設等於
+        # `offline`（向後相容，行為與加入這個參數前逐字相同）。唯一會傳入不同
+        # 值的呼叫端是 `pipeline.run()`：公開預設 `data_mode=live,
+        # llm_mode=off`（敘事離線）+ `TRUSTFORGE_ONLINE_STANCE` 開關生效時，
+        # 敘事維持 offline=True 省下敘事成本，但 stance 判斷改用真 Bedrock
+        # （`stance_offline=False`）。見 `budget_guard.online_stance_requested`。
+        self.stance_offline = offline if stance_offline is None else stance_offline
         self._client = None
         self._stance_client = None  # W1.5：獨立、短 timeout，不與主敘事模型共用
         # 成本記錄用：classify_stance 在 scoring.py 的 O(n²) 迴圈深處被呼叫，
@@ -213,8 +226,12 @@ class BedrockClient:
         離線批次生成快取（`scripts/gen_stance_cache.py`）**不可**用這個方法——會把
         「呼叫失敗」跟「模型真的判斷 neutral」混為一談，把假 neutral 悄悄寫進
         持久化快取、弱化矛盾偵測。批次生成請改用 `classify_stance_strict()`。
+
+        判斷用 `self.stance_offline`（非 `self.offline`）——#9 online-stance
+        預算配額硬化：兩者預設相同（見 `__init__`），只有 `pipeline.run()`
+        在「敘事離線但 online-stance 開關生效」時才會讓兩者不同值。
         """
-        if self.offline or not self.config.stance_model_id:
+        if self.stance_offline or not self.config.stance_model_id:
             return "neutral"
         try:
             return self._classify_stance_impl(a, b)

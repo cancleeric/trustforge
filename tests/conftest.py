@@ -48,3 +48,30 @@ def _isolate_scheduler_run_log(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "TRUSTFORGE_SCHEDULER_RUN_LOG_PATH", str(tmp_path / "test_scheduler_runs.jsonl")
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_budget_reservation():
+    """#9 codex HIGH（並行 TOCTOU）：`budget_guard.BudgetReservation` 是
+    process-local 全域單例（`_RESERVATION`），跨測試共用同一份記憶體狀態。
+    比照 `_isolate_cost_ledger` 等既有慣例，每個測試前後都歸零，避免某個
+    測試忘記 release（或斷言中途失敗、跳過 release）殘留的「已預留」金額
+    污染到下一個測試。"""
+    from trustforge.budget_guard import _reset_reservation_for_tests
+
+    _reset_reservation_for_tests()
+    yield
+    _reset_reservation_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_unledgered_spend():
+    """#9 codex HIGH（記帳完整性）：`budget_guard._UNLEDGERED_SPEND` 是
+    process-local 全域單例，跨測試共用同一份記憶體狀態。比照
+    `_isolate_budget_reservation`，每個測試前後都歸零，避免某個測試模擬
+    「帳本持久化失敗」殘留的未記帳花費污染到下一個測試。"""
+    from trustforge.budget_guard import _reset_unledgered_spend_for_tests
+
+    _reset_unledgered_spend_for_tests()
+    yield
+    _reset_unledgered_spend_for_tests()

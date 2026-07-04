@@ -17,6 +17,7 @@ import time
 from typing import Callable
 
 from ..bedrock import BedrockClient
+from ..budget_guard import record_unledgered_spend
 from ..execlog import ExecutionLog
 from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
@@ -762,7 +763,16 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     if stance_fn is None:
         from ..trust.scoring import build_stance_fn  # 延遲匯入避免頂層循環
         stance_fn = build_stance_fn(
-            stance_client=None if client.offline else client,
+            # #9 online-stance 預算配額硬化：判斷用 `stance_offline`（非
+            # `offline`）——`pipeline.run()` 在敘事離線但 online-stance 開關
+            # 生效時，會建立 `stance_offline=False` 的 client，讓這裡改傳真
+            # client 給 stance_fn。`getattr` 預設回退到 `client.offline`：
+            # 測試用的 duck-typed fake client（如 test_multistep.py 的
+            # `FakeBedrockClient`）未必有 `stance_offline` 屬性，行為維持
+            # 與加入這個屬性前逐字相同。
+            stance_client=(
+                None if getattr(client, "stance_offline", client.offline) else client
+            ),
             stance_remaining_time_fn=log.remaining,
         )
     # W4 codex 對抗審第 7 輪 [HIGH]（coin-relevance 最後一條輸入路徑）：
@@ -1017,7 +1027,12 @@ def run_agent_pipeline(
     # 另建一份預算，讓「單次執行真呼叫 Bedrock 的配對硬上限」實質變成兩倍、
     # 也讓兩處共用同一份即時剩餘時間（`log.remaining()`）判斷。
     shared_stance_fn = build_stance_fn(
-        stance_client=None if client.offline else client,
+        # #9 online-stance 預算配額硬化：見上方 `build_report` 內同款判斷的
+        # docstring——判斷用 `stance_offline`（非 `offline`），`getattr`
+        # 預設回退到 `client.offline` 維持向後相容。
+        stance_client=(
+            None if getattr(client, "stance_offline", client.offline) else client
+        ),
         stance_remaining_time_fn=log.remaining,
     )
     # W2 啟用（gray `docs/PLAN-w2-enable-final.md`）：truth-discovery 動態來源
@@ -1138,13 +1153,29 @@ def run_agent_pipeline(
         for e in log.events[_log_events_start_idx:]
         if e["tool"] == "llm.cost"
     ]
-    append_run({
+    _run_total_cost_usd = round(sum(c["cost_usd"] for c in _llm_calls), 6)
+    _persisted = append_run({
         "ts": iso_utc(now_fn()),
         "question_type": qtype.value,
         "coin": coin,
         "offline": client.offline,
         "calls": _llm_calls,
-        "total_cost_usd": round(sum(c["cost_usd"] for c in _llm_calls), 6),
+        "total_cost_usd": _run_total_cost_usd,
     })
+    # codex HIGH 追加（記帳完整性）：append_run() 的 primary+fallback 都失敗
+    # 時（storage 唯讀/滿/不可用），這筆真的花掉的成本從未進到帳本——
+    # daily_cost_usd() 讀不到，若不做點什麼，guard 會一直看到「未用預算」，
+    # 讓後續重複請求無限繞過 $3/day cap（見 budget_guard._UnledgeredSpend
+    # docstring）。這裡不影響 report/evidence（帳本仍是非關鍵 side-channel，
+    # 不中斷已算完的分析），只把花費補記到 process-local fail-closed 計數器，
+    # 並留一筆可觀測的 warning log。
+    if not _persisted and _run_total_cost_usd > 0:
+        record_unledgered_spend(_run_total_cost_usd)
+        logging.warning(
+            "run_agent_pipeline: ledger.append_run() 持久化失敗（coin=%s，"
+            "total_cost_usd=%s），已改記到 process-local 未記帳花費計數器"
+            "（budget_guard._UNLEDGERED_SPEND），確保每日 cap 仍算得到這筆花費",
+            coin, _run_total_cost_usd,
+        )
 
     return report, evidence

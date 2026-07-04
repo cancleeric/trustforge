@@ -23,6 +23,55 @@ def test_classify_stance_no_stance_model_id_returns_neutral():
     assert client.classify_stance("A", "B") == "neutral"
 
 
+# ---------------------------------------------------------------------------
+# #9 online-stance 預算配額硬化：`stance_offline` 與敘事 `offline` 解耦
+# ---------------------------------------------------------------------------
+
+def test_stance_offline_defaults_to_narrative_offline_when_not_specified():
+    """未顯式傳入 `stance_offline` 時，向後相容：等同 `offline`（加入這個
+    參數前的行為逐字不變）。"""
+    assert BedrockClient(offline=True).stance_offline is True
+    assert BedrockClient(offline=False).stance_offline is False
+
+
+def test_classify_stance_respects_stance_offline_even_when_narrative_online(monkeypatch):
+    """`offline=False`（敘事線上）但 `stance_offline=True` → stance 判斷仍必須
+    fail-safe 回 neutral，且完全不呼叫 `_stance_runtime()`（不打真 AWS）。"""
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=False, stance_offline=True)
+
+    def _boom_runtime():
+        raise AssertionError("stance_offline=True 時不該建立/呼叫 _stance_runtime()")
+
+    monkeypatch.setattr(client, "_stance_runtime", _boom_runtime)
+    assert client.classify_stance("A", "B") == "neutral"
+
+
+def test_classify_stance_goes_online_when_narrative_offline_but_stance_not(monkeypatch):
+    """`offline=True`（敘事離線，$0）但 `stance_offline=False` → stance 判斷
+    改走真呼叫路徑（用 monkeypatch 換掉 `_stance_runtime()`，不打真 AWS），
+    這是 #9 online-stance 開關生效時的核心解耦行為。"""
+    config = BedrockConfig(stance_model_id="fake-stance-model")
+    client = BedrockClient(config=config, offline=True, stance_offline=False)
+
+    class _FakeRuntime:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [
+                            {"toolUse": {"name": "classify_stance", "input": {"label": "entailment"}}}
+                        ]
+                    }
+                }
+            }
+
+    monkeypatch.setattr(client, "_stance_runtime", lambda: _FakeRuntime())
+    assert client.classify_stance("A", "B") == "entailment"
+    # 敘事本身仍離線，不受影響
+    assert client.offline is True
+
+
 def test_classify_stance_runtime_exception_falls_back_to_neutral(monkeypatch):
     """呼叫失敗（逾時/憑證錯誤等）→ except 一律回 neutral，不 raise、不中斷管線。"""
     config = BedrockConfig(stance_model_id="fake-stance-model")

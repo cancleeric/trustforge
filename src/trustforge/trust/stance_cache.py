@@ -133,7 +133,17 @@ def cached_stance_fn(
         cached = cache.get(a, b)
         if cached is not None:
             return cached  # cache-hit：免費，不消耗預算
-        if client is None or getattr(client, "offline", False):
+        if client is None:
+            return "neutral"
+        # #9 online-stance 預算配額硬化：優先看 `stance_offline`（若存在），
+        # 讓 `pipeline.run()` 能在敘事離線時仍讓 stance 判斷改用真 Bedrock
+        # （見 `bedrock.BedrockClient.__init__` docstring）。duck-typed 測試
+        # client 未必有這個屬性時，回退到既有的 `offline`（向後相容，逐字
+        # 沿用加入這個屬性前的行為）。
+        stance_offline = getattr(client, "stance_offline", None)
+        if stance_offline is None:
+            stance_offline = getattr(client, "offline", False)
+        if stance_offline:
             return "neutral"
         if budget is not None and not budget.take():
             return "neutral"  # 只有「確認需要真呼叫」的這一刻才可能因預算耗盡降級
