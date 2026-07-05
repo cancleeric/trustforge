@@ -630,6 +630,36 @@ def test_classify_pairs_releases_budget_even_when_call_raises(monkeypatch):
     assert release_calls == [0.05]
 
 
+def test_classify_pairs_releases_budget_even_when_ledgering_raises(monkeypatch):
+    """codex 複審第三輪 MEDIUM：`_ledger_single_call_cost()` 與
+    `release_request_budget()` 必須是巢狀 try/finally，不能平行兩行——若入帳
+    本身拋出非預期例外（成本轉型/時間格式化/帳本呼叫失敗），沒有巢狀結構的
+    話 release 不會執行，這筆預留會永久卡在 process-local 的 `_RESERVATION`
+    裡，之後所有呼叫都被誤擋到程序重啟為止。本測試 monkeypatch
+    `_ledger_single_call_cost()` 讓它拋一個非預期例外，斷言：(1) 預留仍然被
+    釋放（`release_request_budget` 有被呼叫）、(2) 原始的入帳例外不被吞、
+    往上傳給呼叫端。"""
+    monkeypatch.setattr(gen_stance_cache, "try_reserve_request_budget", lambda *a, **k: 0.05)
+    release_calls: list = []
+    monkeypatch.setattr(
+        gen_stance_cache, "release_request_budget", lambda amount: release_calls.append(amount)
+    )
+
+    def _boom(client, *, now_fn=None):
+        raise RuntimeError("入帳邏輯本身壞掉了（模擬成本轉型/帳本呼叫失敗）")
+
+    monkeypatch.setattr(gen_stance_cache, "_ledger_single_call_cost", _boom)
+
+    fake_client = _FakeClient(label="entailment")
+    pairs = {"k1": ("a", "b")}
+
+    with pytest.raises(RuntimeError, match="入帳邏輯本身壞掉了"):
+        gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=lambda: True)
+
+    # 真呼叫本身成功，但入帳例外仍必須讓預留被釋放，不能永久卡住。
+    assert release_calls == [0.05]
+
+
 def test_classify_pairs_near_cap_real_budget_guard_blocks_call(monkeypatch):
     """codex HIGH（#84 review 必修 2）near-cap 整合測試：不 mock
     `try_reserve_request_budget()` 本身，改用真的 `budget_guard`（只調環境

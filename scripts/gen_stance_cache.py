@@ -451,6 +451,19 @@ def classify_pairs(
     佔位」，不影響、也不重複計費真實成本，跟 `pipeline.run()` 同慣例）。
     `budget_check is None` 時完全不做任何預留/入帳，逐字沿用未整合 budget
     guard 前的行為。
+
+    codex 複審第三輪 MEDIUM 追加：`_ledger_single_call_cost()` 與
+    `release_request_budget()` 用**巢狀** try/finally，不是同一層平行兩行
+    ——內層 `try` 跑 `_ledger_single_call_cost()`，外層 `finally` 無條件執行
+    `release_request_budget(reservation)`。原因：若入帳過程本身拋出非預期
+    例外（成本轉型、時間格式化、帳本呼叫等），沒有巢狀結構的話，同一層下面
+    那行 `release_request_budget()` 就不會被執行到——這筆預留會永久卡在
+    process-local 的 `_RESERVATION` 裡，之後每次 `try_reserve_request_budget()`
+    都會把它算進「已被佔用的預留」，導致後續所有呼叫被誤擋到程序重啟為止
+    （方向上 fail-closed、不會超支，但是個真的 bug，必須修）。巢狀寫法確保
+    不論 `_ledger_single_call_cost()` 是否拋例外，`release_request_budget()`
+    永遠會執行；入帳例外本身**不吞**，往上傳給呼叫端（跟 `classify_stance_strict`
+    的例外一樣，不在這裡 catch）。
     """
     entries: dict = {}
     for key, (a, b) in pairs.items():
@@ -465,8 +478,10 @@ def classify_pairs(
             label = client.classify_stance_strict(a, b)
         finally:
             if budget_check is not None:
-                _ledger_single_call_cost(client, now_fn=now_fn)
-                release_request_budget(reservation)
+                try:
+                    _ledger_single_call_cost(client, now_fn=now_fn)
+                finally:
+                    release_request_budget(reservation)
         entries[key] = {"label": label, "version": STANCE_CACHE_VERSION}
         print(f"{a[:40]!r} | {b[:40]!r} -> {label}")
     return entries
