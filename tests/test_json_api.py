@@ -14,6 +14,7 @@ tmp_path，不打真 DynamoDB；`/api/analyze` 沿用 `_do_analyze`/`_do_compari
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -35,7 +36,7 @@ from trustforge.ingestion.cache import (
 )
 from trustforge import ledger as ledger_module
 from trustforge.ledger import JsonlLedger
-from trustforge.schema import COIN_POOL, Evidence, QuestionType
+from trustforge.schema import COIN_POOL, QuestionType
 
 
 def _stop_overview_bg_thread_for_test() -> None:
@@ -314,29 +315,72 @@ def test_api_analyze_trust_radar_reflects_manipulation_flag_and_matches_ssr_rend
     `evidence`，防未來走岔計算路徑）；(2) 含操縱旗標（manipulation flag）
     案例，確認 `trust_radar` 正確反映該維度信任值被扣分拉低。
 
+    codex gate 複審（PR #95，測試強度修正）：
+    - 操縱旗標的證據不再手塞 `trust`/`flags`，改讓一組「除了操縱關鍵詞外
+      其餘（來源／kind／時間戳）完全相同」的 flagged／control 文字各自走
+      真正的 `trust.scoring.score()`（經 `agent.orchestrator.
+      _scored_to_evidence` 轉成 `Evidence`，跟生產 pipeline 逐字同一條
+      路徑）——如果生產 `_manipulation_penalty` 未來被誤刪/弱化，flagged
+      分數就不會低於 control，這裡才會真的紅（先前版本手塞 `trust=0.05`
+      是套套邏輯，跟 `_manipulation_penalty` 本身正不正確無關）。
+    - SSR HTML 的比對改用 `_render_trust_radar()` 新增的
+      `data-kind="{kind}"`/`data-trust="{trust:.2f}"` 錨點按 kind 逐列
+      精準解析（純測試錨點，不影響顯示樣式/CSP），不再用「數字在整份
+      HTML 任何地方出現」的裸 substring 判斷（可能撞到別列/證據明細/
+      CSS 而漏掉維度缺失或錯值）。
+
     monkeypatch `web.run`（`_do_analyze`/SSR `/analyze` 內部共用的同一個
     pipeline 入口），讓兩條各自獨立發出的請求拿到逐字相同的 `evidence`，
     才能在同一次測試裡嚴格比對「同一組輸入」下兩條路由的數字，不受
     pipeline 本身非我們要驗證的變異來源干擾。
     """
-    from trustforge.agent.orchestrator import aggregate_trust_by_kind
+    from trustforge.agent.orchestrator import _scored_to_evidence, aggregate_trust_by_kind
+    from trustforge.ingestion.base import Document
+    from trustforge.trust.scoring import Claim, score as scoring_score
+
+    now = time.time()
+
+    # flagged／control 兩個 claim 除了操縱關鍵詞（`_MANIP_PATTERNS`：暴漲／
+    # 百倍／快上車／穩賺）外，來源/kind/時間戳完全相同——分數差異的唯一
+    # 自變量是文字內容，不是手動設定的數字。
+    flagged_doc = Document(
+        id="d-manip", kind="news", source="suspicious-blog",
+        text="XX幣即將暴漲百倍，快上車穩賺不賠", url="", ts=now,
+    )
+    control_doc = Document(
+        id="d-control", kind="news", source="suspicious-blog",
+        text="XX幣近期價格出現一定幅度變化，成交量略增，走勢待觀察", url="", ts=now,
+    )
+    flagged_claim = Claim(id="c-manip", text=flagged_doc.text, doc=flagged_doc)
+    control_claim = Claim(id="c-control", text=control_doc.text, doc=control_doc)
+
+    [flagged_scored] = scoring_score([flagged_claim], now)
+    [control_scored] = scoring_score([control_claim], now)
+    flagged_ev = _scored_to_evidence(flagged_scored, related="radar-manip-test")
+    control_ev = _scored_to_evidence(control_scored, related="radar-manip-test")
+
+    # 真 `trust.scoring.score()` 算出來的：flagged 確實命中操縱關鍵詞，且
+    # 分數確實比除旗標外完全相同的 control 低。
+    assert flagged_ev.flags
+    assert not control_ev.flags
+    assert flagged_ev.trust < control_ev.trust
 
     real_report, real_evidence, real_log = web.run(
         "BTC", "radar manip test", QuestionType.MULTI_SOURCE, offline=True
     )
-    manip_ev = Evidence(
-        source="suspicious-blog",
-        fetched_at="2026-01-01T00:00:00Z",
-        content_reference="馬上暴漲，錯過等一年，限時上車",
-        related_claim=real_evidence[0].related_claim if real_evidence else "c1",
-        kind="news",
-        trust=0.05,
-        flags=["馬上", "暴漲"],
-    )
-    evidence = list(real_evidence) + [manip_ev]
+    evidence_with_manip = list(real_evidence) + [flagged_ev]
+    evidence_without_manip = list(real_evidence) + [control_ev]
+
+    # 除了那一筆證據是否操縱之外，其餘輸入逐字相同 → `aggregate_trust_by_
+    # kind` 聚合出的 news 維度信任值也必須是 flagged 版本更低（同一個真
+    # 聚合函式算出來的差異，不是斷言手塞的絕對值）。
+    dims_with_manip = aggregate_trust_by_kind(evidence_with_manip)
+    dims_without_manip = aggregate_trust_by_kind(evidence_without_manip)
+    assert dims_with_manip["news"]["has_data"] is True
+    assert dims_with_manip["news"]["trust"] < dims_without_manip["news"]["trust"]
 
     def fake_run(coin, query, qtype, **kwargs):
-        return real_report, evidence, real_log
+        return real_report, evidence_with_manip, real_log
 
     monkeypatch.setattr(web, "run", fake_run)
 
@@ -352,22 +396,29 @@ def test_api_analyze_trust_radar_reflects_manipulation_flag_and_matches_ssr_rend
     assert api_code == 200
     data = _envelope(api_body)["data"]
 
-    expected_dims = aggregate_trust_by_kind(evidence)
+    expected_dims = dims_with_manip
     assert data["trust_radar"] == expected_dims
 
-    # 操縱旗標案例：帶 flags 的低分證據把 news 維度平均信任拉低。
-    assert manip_ev.flags
-    assert expected_dims["news"]["has_data"] is True
-    assert expected_dims["news"]["trust"] < 0.5
-
-    # SSR HTML（`_render_trust_radar` 用 f"{trust:.2f}"）跟 JSON
-    # `trust_radar` 欄位的數字逐一相等，不允許任何一邊二次計算產生漂移。
+    # SSR HTML 按 `data-kind`/`data-trust` 錨點逐列解析，跟 JSON
+    # `trust_radar` 的數字逐一相等——不允許任何一邊二次計算產生漂移，
+    # 也不會被別列/證據明細/CSS 裡剛好撞同數字誤判過關。
     for kind, dim in expected_dims.items():
         if dim["has_data"]:
-            assert f'{dim["trust"]:.2f}' in ssr_body, (
-                f"SSR /analyze 缺少 {kind} 維度 trust={dim['trust']:.2f}，"
-                "與 /api/analyze trust_radar 欄位不一致"
+            match = re.search(
+                rf'data-kind="{re.escape(kind)}"[^>]*data-trust="([\d.]+)"',
+                ssr_body,
             )
+            assert match, f"SSR /analyze 找不到 {kind} 維度的 data-kind/data-trust 錨點"
+            assert match.group(1) == f'{dim["trust"]:.2f}', (
+                f"SSR /analyze {kind} 維度數值 {match.group(1)} 與 "
+                f"/api/analyze trust_radar 欄位 {dim['trust']:.2f} 不一致"
+            )
+        else:
+            match = re.search(
+                rf'data-kind="{re.escape(kind)}"[^>]*data-has-data="false"',
+                ssr_body,
+            )
+            assert match, f"SSR /analyze 找不到 {kind} 維度的無資料錨點"
 
 
 def test_api_analyze_invalid_coin_returns_400_generic_message():

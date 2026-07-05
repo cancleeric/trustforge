@@ -1936,6 +1936,14 @@ def _render_trust_radar(dims: dict, evidence: list) -> str:
     - `single_source=True`（gray 抓出 regulatory 僅 SEC 1 源、social 僅
       Reddit 1 源）→ 橘色「⚠ 單一來源」徽章，明確跟多源維度（如 news 12 源）
       區隔開，不包裝成同等可信。
+
+    Issue #85 codex gate 複審（測試強度，PR #95）：每列的容器元素加上
+    `data-kind="{kind}"`（兩種列都有）／`data-trust="{trust:.2f}"`（僅
+    `has_data=True` 的列，`data-has-data="false"` 的列刻意不印 `data-trust`，
+    避免用 0 冒充查過但很低）——純測試錨點，不是新功能：讓測試能按 kind
+    精準解析單一列的數字，不必再用「四捨五入後的字串在整份 HTML 裡搜得到
+    嗎」這種可能撞到別列/證據明細/CSS 的裸 substring 判斷。不影響任何顯示
+    樣式/文案，CSP 不變。
     """
     if not dims:
         return ""
@@ -1957,7 +1965,8 @@ def _render_trust_radar(dims: dict, evidence: list) -> str:
         label = e(str(d.get("label", kind)))
         if not d.get("has_data"):
             rows.append(
-                f'<div style="display:flex;align-items:center;gap:.5rem;'
+                f'<div data-kind="{e(kind)}" data-has-data="false" '
+                f'style="display:flex;align-items:center;gap:.5rem;'
                 f'padding:.3rem 0;opacity:.55;border-bottom:1px solid var(--tf-border)">'
                 f'<span style="width:6.5em;flex:0 0 auto;font-size:.78rem">{label}</span>'
                 f'<span class="tf-bar-wrap" style="flex:1 1 auto;height:9px">'
@@ -1983,7 +1992,9 @@ def _render_trust_radar(dims: dict, evidence: list) -> str:
             for it in detail_items
         )
         rows.append(
-            f'<details style="padding:.3rem 0;border-bottom:1px solid var(--tf-border)">'
+            f'<details data-kind="{e(kind)}" data-has-data="true" '
+            f'data-trust="{trust:.2f}" '
+            f'style="padding:.3rem 0;border-bottom:1px solid var(--tf-border)">'
             f'<summary style="cursor:pointer;display:flex;align-items:center;gap:.5rem">'
             f'<span style="width:6.5em;flex:0 0 auto;font-size:.78rem">{label}</span>'
             f'<span class="tf-bar-wrap" style="flex:1 1 auto;height:9px">'
