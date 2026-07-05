@@ -668,6 +668,77 @@ def test_classify_pairs_near_cap_real_budget_guard_blocks_call(monkeypatch):
     assert excinfo.value.entries == {}
 
 
+def test_classify_pairs_cumulative_batch_spend_visible_to_next_reservation(monkeypatch):
+    """codex 複審第二輪 HIGH：舊版「reservation 逐呼釋放、成本要到 main()
+    finally 才整批入帳」會讓批次內已經真的花掉的錢，在整批寫回帳本之前，
+    對下一次 `try_reserve_request_budget()` 完全隱形——帳本已花 $2.9、cap $3
+    時，只要單呼估算成本低於「批次開始前那份帳本快照」算出的剩餘額度，
+    整批每一呼都用同一份過期快照放行到底，實際累積花費可以無限穿破 cap。
+
+    修法：`classify_pairs()` 現在對每一次成功的真呼叫，在 release 該筆預留
+    **之前**先把這筆真實花費入帳（`_ledger_single_call_cost()`：優先
+    `append_run()` 持久化），讓下一次 `try_reserve_request_budget()` 立即
+    看得到累積花費。本測試斷言：cap $3、帳本已花 $2.9、單呼真實成本 $0.05，
+    5 對候選對批次中，第 3 對起（累積 2.9+0.05+0.05=3.0 已觸頂）在發出真
+    呼叫**之前**就被擋下（`BudgetExhausted`），`classify_stance_strict`
+    只被呼叫 2 次，不是 5 次全部放行。
+    """
+    import time as _time
+
+    from trustforge.schema import iso_utc
+
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "3.0")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", "0.05")
+
+    persisted = gen_stance_cache.append_run({
+        "ts": iso_utc(_time.time()),
+        "question_type": "stance",
+        "coin": "BTC",
+        "offline": False,
+        "calls": [],
+        "total_cost_usd": 2.9,
+    })
+    assert persisted  # 前置條件：帳本已花 $2.9 這件事真的寫進了（隔離後的）帳本
+
+    fake_client = _CostAccruingFakeClient(label="entailment", cost_per_call=0.05)
+    pairs = {f"k{i}": (f"a{i}", f"b{i}") for i in range(5)}
+    budget_check = gen_stance_cache._make_budget_check(fake_client)
+
+    with pytest.raises(gen_stance_cache.BudgetExhausted) as excinfo:
+        gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=budget_check)
+
+    # 只有前 2 呼（累積到剛好 $3.00）真的被放行，第 3 呼起在發出前就被擋下
+    # ——若批次內已花費對 try_reserve 隱形，這裡會變成 5 次全部放行。
+    assert len(fake_client.calls) == 2
+    assert len(excinfo.value.entries) == 2
+
+
+def test_classify_pairs_full_success_ledger_total_equals_actual_spend_no_double_booking(
+    monkeypatch,
+):
+    """防重複記帳（CEO 追加要求）：逐呼即時入帳 + `main()` finally 保底
+    並存時，全成功路徑下帳本收到的總金額必須等於實際花費，不能因為保底
+    邏輯重複處理已經逐呼入帳過的事件而變成兩倍。"""
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        gen_stance_cache, "append_run", lambda record: captured.append(record) or True
+    )
+
+    fake_client = _CostAccruingFakeClient(label="entailment", cost_per_call=0.01)
+    pairs = {"k1": ("a", "b"), "k2": ("c", "d"), "k3": ("e", "f")}
+    budget_check = gen_stance_cache._make_budget_check(fake_client)
+
+    entries = gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=budget_check)
+    # 全成功後，main() 端還會呼叫 _record_batch_cost_to_ledger() 做保底——
+    # 這裡直接模擬同一個 client 銜接到保底路徑，驗證不會重複記帳。
+    gen_stance_cache._record_batch_cost_to_ledger(fake_client)
+
+    assert len(entries) == 3
+    actual_spend = round(0.01 * 3, 6)
+    assert sum(r["total_cost_usd"] for r in captured) == actual_spend  # 不是兩倍
+    assert len(captured) == 3  # 3 對逐呼各自入帳一筆，保底路徑沒有再補第 4 筆
+
+
 # ── issue #84：_record_batch_cost_to_ledger（把批次花費記回帳本）──────────────
 
 
@@ -797,6 +868,11 @@ def test_main_budget_exhausted_mid_batch_writes_partial_result(tmp_path, monkeyp
 
 
 def test_main_records_batch_cost_to_ledger_on_success(tmp_path, monkeypatch):
+    """codex 複審第二輪 HIGH 後：真實花費改成逐呼即時入帳（`classify_pairs()`
+    內 `_ledger_single_call_cost()`），每一對候選對各自成一筆帳本記錄；
+    `main()` finally 的 `_record_batch_cost_to_ledger()` 這時已降級為保底，
+    這兩筆都已經被逐呼流程標記 `_ledgered`，保底邏輯不應該再重複寫一次
+    （防重複記帳：帳本總額必須等於實際花費，不是兩倍）。"""
     out_path = tmp_path / "stance_cache.json"
     monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
     fake_client = _CostAccruingFakeClient(label="entailment", cost_per_call=0.01)
@@ -809,5 +885,8 @@ def test_main_records_batch_cost_to_ledger_on_success(tmp_path, monkeypatch):
     rc = gen_stance_cache.main(["--out", str(out_path)])
 
     assert rc == 0
-    assert len(captured) == 1
-    assert captured[0]["total_cost_usd"] == 0.02  # 2 pairs * 0.01
+    # 2 對候選對逐呼各自入帳一筆，_record_batch_cost_to_ledger() 保底路徑
+    # 不應該再補記第 3 筆（防重複記帳）。
+    assert len(captured) == 2
+    assert all(r["total_cost_usd"] == 0.01 for r in captured)
+    assert sum(r["total_cost_usd"] for r in captured) == 0.02  # 實際花費，不是兩倍

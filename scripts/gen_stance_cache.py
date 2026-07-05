@@ -35,8 +35,10 @@
    失敗的語意不同）。成功／budget 中止的結果依 `cache_key(a, b)` 存成
    `{"label": label, "version": STANCE_CACHE_VERSION}`，跟既有快取檔 merge（舊
    key 保留，新 key 覆蓋/新增）後原子寫入（temp file + rename，避免寫到一半被
-   中斷產生半殘檔）回 `--out`；並把這批真實花費記一筆進跨 run 持久化帳本
-   （`_record_batch_cost_to_ledger()`），讓 #9 cap 之後也算得到。
+   中斷產生半殘檔）回 `--out`；每一次真呼叫成功後會**立刻**把這筆真實花費記進
+   跨 run 持久化帳本（`_ledger_single_call_cost()`），讓 #9 cap 之後（含同一批次
+   內下一次呼叫）馬上算得到，`main()` 收尾的 `_record_batch_cost_to_ledger()`
+   只是保底（見下方 issue #84 追加說明）。
 
 ⚠️ 本檔本身不含任何呼叫入口保護以外的巧門——真正打 AWS 只發生在非 --dry-run 且
 傳入非 offline 的 `BedrockClient` 時。CEO 親手執行前務必確認環境變數
@@ -61,16 +63,22 @@ Issue #84（pre-warm 冪等 + #9 budget guard 硬化）追加：
 2. **budget guard**：真呼叫前用 `_make_budget_check()`（fail-closed 檢查
    `budget_guard.stance_model_priced()`）先擋掉未計價模型；接著
    `classify_pairs()` 對每一次真呼叫另外呼叫
-   `budget_guard.try_reserve_request_budget()`／`release_request_budget()`
-   做 process-local 原子預留（跟 `pipeline.run()` 同一套 #9 機制），額度不足時
-   **呼叫前**就中止剩餘 pair（`BudgetExhausted`，fail-closed，`classify_stance_strict`
-   完全不會被執行），不會繞過 cap（不修改 `budget_guard.py` 本身，只組合它既有
-   的公開函式）。批次完成後（不論全成功／`BudgetExhausted`／一般失敗，只要真的
-   打過 Bedrock）用 `_record_batch_cost_to_ledger()` 把這批真實花費記一筆進跨
-   run 持久化帳本（`ledger.append_run()`），讓之後（含隔天前同一天內）
-   `/api/analyze` 與再次執行本腳本的 cap 判斷都看得到這筆花費；若這筆記帳本身
-   持久化失敗（`append_run()` 回 `False`），改記 `budget_guard.record_unledgered_spend()`
-   並在 stderr 明確警示需人工核對 `/costs`，不靜默丟掉。
+   `budget_guard.try_reserve_request_budget()` 做 process-local 原子預留
+   （跟 `pipeline.run()` 同一套 #9 機制），額度不足時**呼叫前**就中止剩餘
+   pair（`BudgetExhausted`，fail-closed，`classify_stance_strict` 完全不會
+   被執行），不會繞過 cap（不修改 `budget_guard.py` 本身，只組合它既有的
+   公開函式）。**codex 複審第二輪 HIGH 修正**：真呼叫完成後，`release_request_budget()`
+   釋放這筆預留**之前**，先呼叫 `_ledger_single_call_cost()` 把這筆真實花費
+   立刻入帳（優先 `ledger.append_run()` 持久化，失敗則退而求其次
+   `budget_guard.record_unledgered_spend()`）——關閉「批次內已花費對下一次
+   `try_reserve_request_budget()` 隱形」的窗口（先前 release 後、要等整批
+   結束才寫回帳本，同一批次每一呼都用批次開始前的帳本快照當基準，實際
+   累積花費可以無限穿破 cap）。`main()` 收尾的 `_record_batch_cost_to_ledger()`
+   因此降級為**保底**：只處理從未經過逐呼入帳流程的殘餘 `cost_events`（正常
+   路徑下應為空，避免同一筆花費被重複記帳兩次）；若這筆記帳（不論逐呼或
+   保底）本身持久化失敗（`append_run()` 回 `False`），改記
+   `budget_guard.record_unledgered_spend()` 並在 stderr 明確警示需人工核對
+   `/costs`，不靜默丟掉。
 """
 from __future__ import annotations
 
@@ -273,27 +281,100 @@ def _make_budget_check(client: BedrockClient):
     return _check
 
 
-def _record_batch_cost_to_ledger(client: BedrockClient, *, now_fn=time.time) -> None:
-    """把本次批次真的花掉的 Bedrock 成本（`client.cost_events`）記一筆進跨 run
-    持久化帳本（`ledger.append_run()`），讓 #9 `daily_cap_exceeded()` /
-    `daily_cost_usd()` 之後（含 `/api/analyze` 與本腳本下次執行）查詢「今日已
-    花費」時也算得到這批 pre-warm 花費——否則這筆真實花費對預算護欄完全隱形，
-    等於繞過 $3/day cap（issue #84 CEO 追加要求）。
+def _ledger_single_call_cost(
+    client: BedrockClient, *, now_fn=time.time,
+) -> None:
+    """codex 複審第二輪 HIGH：逐呼即時入帳，關閉「批次內已花費對下一次
+    `try_reserve_request_budget()` 隱形」的窗口。
 
-    duck-typed：`client` 沒有 `cost_events` 屬性（單元測試常用的假 client）
-    → 直接 no-op，不影響既有測試。`cost_events` 為空或總花費為 0（如整批全部
-    命中既有快取、本輪完全沒有真呼叫）也不寫，避免帳本塞入無意義的 $0 空記錄。
+    背景：先前只在每次真呼叫前後做 process-local 原子預留
+    （`try_reserve_request_budget`/`release_request_budget`），實際花費卻要
+    等到整批呼叫結束、`main()` 的 `finally` 呼叫
+    `_record_batch_cost_to_ledger()` 才一次寫回帳本——`release_request_budget()`
+    一旦釋放，這筆真的花掉的錢在整批結束前對 `budget_guard.daily_cost_usd()`
+    （下一次 `try_reserve_request_budget()` 據此判斷是否還有餘裕）完全隱形。
+    若帳本已花費逼近 cap（例：cap $3、已花 $2.96），批次內每一呼都只拿「批次
+    開始前」那份固定快照當基準比較，只要單呼估算成本低於快照算出的剩餘額度，
+    就會一路放行到底，實際累積花費可以無限穿破 cap——這不是再補一個條件能
+    解的，必須把「入帳」搬到「release 這筆預留之前」才由構造封閉這個窗口。
 
-    codex HIGH / harper LOW（#84 review 必修 3）修正：比照 `orchestrator.py`
-    的既有慣例——`append_run()` 回傳值代表「這筆真的有花錢的紀錄有沒有真的
-    持久化成功」（可能因磁碟/檔案系統問題連 fallback 都寫失敗），**不能靜默
-    丟掉**。回 `False` 時呼叫 `budget_guard.record_unledgered_spend()` 讓這筆
-    花費至少在 process 記憶體內被 fail-closed 記住（`daily_cost_usd()` 之類
-    的讀取路徑才不會漏算），並在 stderr 印出明確警示，提醒之後要人工核對
-    `/costs`。
+    修法：呼叫端（`classify_pairs()`）在每次真呼叫成功後、`release_request_budget()`
+    之前呼叫本函式，把 `client.cost_events` 最新一筆（這次剛發生、還沒被
+    標記過的那筆）立刻入帳——優先直接 `ledger.append_run()` 持久化這單獨
+    一筆（下一次 `try_reserve_request_budget()` 呼叫 `daily_cost_usd()`
+    重新讀帳本就看得到）；失敗（primary+fallback 皆失敗）則退而求其次呼叫
+    `budget_guard.record_unledgered_spend()`——那正是 `daily_cost_usd()`
+    本來就會加總的 process-local 計數器，一樣能讓「這筆真的花了」對下一次
+    `try_reserve_request_budget()` 立即可見，不留任何窗口，並在 stderr 印出
+    明確警示提醒人工核對 `/costs`。
+
+    在該筆事件上標記 `_ledgered=True`（已持久化進帳本）或 `_ledgered=False`
+    （只進了 process-local 未記帳計數器）——供批次結束時
+    `_record_batch_cost_to_ledger()`（現在降級為保底）判斷要不要跳過，避免
+    同一筆花費被寫進帳本兩次。duck-typed：`client` 沒有 `cost_events`（假
+    client）→ no-op；最新一筆已經被標記過（表示這是「呼叫失敗、cost_events
+    沒有新增」的情況，最後一筆其實是上一次成功呼叫留下的）也直接跳過。
     """
     cost_events = getattr(client, "cost_events", None)
     if not cost_events:
+        return
+    latest = cost_events[-1]
+    if "_ledgered" in latest:
+        return  # 這次真呼叫失敗、cost_events 沒有新增，最後一筆是舊的，跳過
+    cost = round(float(latest.get("cost_usd", 0.0) or 0.0), 6)
+    if cost <= 0:
+        latest["_ledgered"] = True  # 沒有花錢，不需入帳，也不需要保底再處理
+        return
+    persisted = append_run({
+        "ts": iso_utc(now_fn()),
+        "question_type": "stance_prewarm",
+        "coin": "MULTI",
+        "offline": False,
+        "calls": [{
+            "model": latest.get("model"),
+            "tokens_in": latest.get("tokens_in", 0),
+            "tokens_out": latest.get("tokens_out", 0),
+            "cost_usd": latest.get("cost_usd", 0.0),
+        }],
+        "total_cost_usd": cost,
+    })
+    if persisted:
+        latest["_ledgered"] = True
+    else:
+        record_unledgered_spend(cost)
+        print(
+            f"警告：本筆 pre-warm 呼叫花費 ${cost} 未能寫入帳本"
+            "（append_run 失敗，含 fallback），此筆花費未進帳本，人工核對 /costs。",
+            file=sys.stderr,
+        )
+        latest["_ledgered"] = False
+
+
+def _record_batch_cost_to_ledger(client: BedrockClient, *, now_fn=time.time) -> None:
+    """codex 複審第二輪 HIGH 後降級為**保底**：正常路徑（`main()` 一律傳非
+    `None` 的 `budget_check`）下，每一筆真實花費已經由 `classify_pairs()`
+    透過 `_ledger_single_call_cost()` 逐呼即時入帳並標記 `_ledgered`——這裡
+    只處理**從未經過逐呼入帳流程**的殘餘 `cost_events`（`"_ledgered"` 這個
+    key 完全不存在，例如 `budget_check=None` 的舊行為呼叫路徑，或測試直接
+    構造 `cost_events` 而未經 `classify_pairs()`），確保這些呼叫端一樣不會
+    對帳本隱形；已經被逐呼入帳流程處理過的事件（`_ledgered` 為 `True` 或
+    `False` 皆算「處理過」）一律跳過，避免同一筆花費被寫進帳本兩次。
+
+    duck-typed：`client` 沒有 `cost_events` 屬性（單元測試常用的假 client）
+    → 直接 no-op，不影響既有測試。待處理的 `cost_events` 為空或總花費為 0
+    也不寫，避免帳本塞入無意義的 $0 空記錄。
+
+    codex HIGH / harper LOW（#84 review 必修 3）修正：比照 `orchestrator.py`
+    的既有慣例——`append_run()` 回傳值代表「這筆真的有花錢的紀錄有沒有真的
+    持久化成功」，不能靜默丟掉；回 `False` 時呼叫
+    `budget_guard.record_unledgered_spend()` + stderr 明確警示，提醒人工
+    核對 `/costs`。
+    """
+    cost_events = getattr(client, "cost_events", None)
+    if not cost_events:
+        return
+    pending = [e for e in cost_events if "_ledgered" not in e]
+    if not pending:
         return
     calls = [
         {
@@ -302,7 +383,7 @@ def _record_batch_cost_to_ledger(client: BedrockClient, *, now_fn=time.time) -> 
             "tokens_out": e.get("tokens_out", 0),
             "cost_usd": e.get("cost_usd", 0.0),
         }
-        for e in cost_events
+        for e in pending
     ]
     total_cost = round(sum(c["cost_usd"] for c in calls), 6)
     if total_cost <= 0:
@@ -329,6 +410,7 @@ def classify_pairs(
     pairs: dict[str, tuple[str, str]],
     *,
     budget_check=None,
+    now_fn=time.time,
 ) -> dict:
     """對每一對呼叫 `client.classify_stance_strict(a, b)`（**嚴格版**，真呼叫，由
     呼叫端保證 client 非 offline），依 `cache_key` 存成
@@ -357,11 +439,18 @@ def classify_pairs(
     （跟 `pipeline.run()` 保護 `/api/analyze` 用的同一套機制）：拿不到預留
     （額度已被其他 in-flight 呼叫佔滿，或帳本讀取失敗 fail-safe）一律視為
     `BudgetExhausted`——**呼叫前**就中止，`classify_stance_strict` 完全不會
-    被執行。拿到預留後，不論這次呼叫成功與否，都在 `finally` 立刻
-    `budget_guard.release_request_budget()` 釋放（真實花費另由呼叫端的
-    `_record_batch_cost_to_ledger()` 記帳，這裡的「預留」只是暫時佔位，不是
-    重複計費，跟 `pipeline.run()` 同慣例）。`budget_check is None` 時完全不
-    做任何預留，逐字沿用未整合 budget guard 前的行為。
+    被執行。
+
+    codex 複審第二輪 HIGH 追加：拿到預留、真呼叫完成後（不論成功與否），
+    `finally` 內**先**呼叫 `_ledger_single_call_cost()` 把這筆真實花費立刻
+    入帳（見該函式 docstring：關閉「批次內已花費對下一次
+    `try_reserve_request_budget()` 隱形」的窗口——先前是 release 預留後，
+    真實花費要等整批結束才寫回帳本，同一批次內每一呼都只拿批次開始前的
+    帳本快照當基準，實際累積花費可以無限穿破 cap），**再**呼叫
+    `budget_guard.release_request_budget()` 釋放這筆預留（純粹解除「暫時
+    佔位」，不影響、也不重複計費真實成本，跟 `pipeline.run()` 同慣例）。
+    `budget_check is None` 時完全不做任何預留/入帳，逐字沿用未整合 budget
+    guard 前的行為。
     """
     entries: dict = {}
     for key, (a, b) in pairs.items():
@@ -376,6 +465,7 @@ def classify_pairs(
             label = client.classify_stance_strict(a, b)
         finally:
             if budget_check is not None:
+                _ledger_single_call_cost(client, now_fn=now_fn)
                 release_request_budget(reservation)
         entries[key] = {"label": label, "version": STANCE_CACHE_VERSION}
         print(f"{a[:40]!r} | {b[:40]!r} -> {label}")
