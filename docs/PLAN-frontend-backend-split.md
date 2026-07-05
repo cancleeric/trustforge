@@ -123,3 +123,51 @@ P3 cutover+回歸 QA 再 3-5 天，**風險：時間緊繃、無安全邊際**�
 最大風險非技術難度，是「1004 個既有測試」需同步補前端測試/E2E，人力排擠
 決賽其他準備——建議 CTO 執行時**每頁遷移都跑一次既有 SSR 對照截圖**，
 避免資料密度/雷達/W2/PIT 這些既有護城功能在重寫中被漏接。
+
+## 8. 決策定案（Issue #81，CEO 2026-07-06 拍板）
+
+**方案 B 定案：web.py 降為純 `/api/*` API，React SPA 獨立部署（nginx serve
+靜態資產 + `/api/*` 反代 `127.0.0.1:8080`）。SSR 凍結新功能，僅保留
+`cutover_switch.sh legacy` 緊急回滾路徑。** 依據：
+
+- P3 cutover 已於 v0.6.1（`feat/react-tls-domain`）完成上線，非規劃中——
+  本次 PR2（#81）為**驗證既有 cutover 現況 + 補文件定案**，不是重新設計。
+  2026-07-06 CTO 對生產 `https://trustforge.hurricanesoft.com.tw/` 實測
+  （詳見 PR body 附的 curl 原始輸出）：首頁回應為 Vite build 出的
+  `index.html`（`<script type="module" src="/assets/index-*.js">`）、
+  CSP 為 react 模式（`script-src 'self'`，非零-JS 時期的
+  `script-src 'none'`）；`/api/health`、`/healthz` 走 nginx `proxy_pass`
+  到 `127.0.0.1:8080` 皆回 200，且回應同樣帶 react 模式 CSP header——
+  代表 `TRUSTFORGE_CSP_MODE=react` 已在 python 端生效，nginx／python 兩側
+  「同進退」；`/assets/<不存在檔名>` 回 404（非 SPA fallback），確認
+  `try_files` 靜態優先、SPA fallback 只在非靜態路徑生效，與
+  `deploy/nginx.conf` 路由表逐條相符。
+- PR #92（`/analyze`／`/analyze.json` SSR dedup，harper+codex 雙審）審查輪
+  已明確此後 SSR 路由**只補安全/防重複計費類緊急修補**，不再承接新功能，
+  與 P3 cutover 後「SSR 僅供緊急回滾」的定位一致。
+- 對外只留單一公開入口（nginx :443），python 收斂只聽 `127.0.0.1:8080`
+  （見 `src/trustforge/web.py::main()` 的 `TRUSTFORGE_BIND_HOST`／
+  `TRUSTFORGE_TRUST_PROXY` 邏輯，`TRUST_PROXY=1` 時強制收斂綁定避免被繞過
+  直打），避免偽造 `X-Real-IP`/`X-Forwarded-For` 繞過限流。
+
+### 為何不採方案 A（continue SSR、放棄 React 遷移）
+
+Issue #81 曾並列方案 A（維持現有 3149 行 zero-JS SSR、不做前後端分離）。
+定案不採，理由：
+
+- **已驗證的部署鏈路會被推翻**：nginx cutover／TLS／HSTS-safe rollback／
+  `cutover_switch.sh` 五輪複審（含 host-wide lock、SSM ResponseCode 97/98
+  傳遞、absent-symlink rollback 分支）已在生產跑過並驗證過，方案 A 等於
+  丟棄這整條已驗證基建，換回單一 monolith zero-JS 路徑，屬**倒退**而非
+  維持現狀。
+- **決賽前（8/1-2）不宜再增變動面**：現在（7/6）距決賽剩不到 4 週，改採
+  方案 A 需要重新規劃前端 UI（雷達／PIT／confidence gauge 等已在 React
+  端完成的視覺化元件無法沿用零-JS SSR），風險與工作量都高於「維持方案 B
+  現狀 + 凍結 SSR 新功能」。
+- **方案 B 已通過分頁 QA 驗收（P2）**：`## 6` 所列 P1/P2 階段性驗收（首頁／
+  分析結果頁／status／costs／comparison／錯誤頁）已完成資料一致性比對，
+  沒有需要走回頭路的已知缺陷。
+
+**結論**：Issue #81 就此定案為方案 B，本文件與 `deploy/nginx.conf`、
+`deploy/cutover_switch.sh` 為最終依據；後續若要重新開放方案 A 討論，需
+重新走 CEO+CISO+CPO 三審流程，不得逕自變更。
