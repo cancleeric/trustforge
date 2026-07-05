@@ -268,15 +268,15 @@ def test_api_analyze_comparison_envelope():
 
 
 # ---------------------------------------------------------------------------
-# /api/analyze — issue #85：`radar` 欄位（同源 `aggregate_trust_by_kind`／
-# `build_trust_radar`，與 SSR `/analyze` 既有「多維度信任雷達」逐一相等，
-# 含操縱旗標案例）
+# issue #85：鎖定既有 `trust_radar`/`trust_radar_a`/`trust_radar_b`
+# （PR #60、Phase1 JSON API 早已實作、非本 PR 新增）的 SSR↔JSON 同源
+# invariant + 操縱旗標覆蓋回歸測試。
 # ---------------------------------------------------------------------------
 
-def test_api_analyze_radar_field_equals_build_trust_radar_single_and_comparison():
-    """`radar`（單幣）／`radar_a`、`radar_b`（比較）跟既有 `trust_radar*` 欄位
-    是同一個底層函式（`aggregate_trust_by_kind`／`web.build_trust_radar`）對
-    同一份 `evidence` 算出的結果——彼此逐字相等，不會有第二條計算路徑。"""
+def test_api_analyze_trust_radar_field_equals_aggregate_trust_by_kind_single_and_comparison():
+    """`trust_radar`（單幣）／`trust_radar_a`、`trust_radar_b`（比較）都必須是
+    `aggregate_trust_by_kind()` 對同一份 `evidence` 算出的結果——彼此逐字
+    相等，不會有第二條計算路徑（防未來改動誤植走岔）。"""
     from trustforge.agent.orchestrator import aggregate_trust_by_kind
 
     code, body = web._handle_api_analyze(
@@ -285,13 +285,12 @@ def test_api_analyze_radar_field_equals_build_trust_radar_single_and_comparison(
     )
     assert code == 200
     data = _envelope(body)["data"]
-    assert "radar" in data and isinstance(data["radar"], dict)
-    assert data["radar"] == data["trust_radar"]
+    assert "trust_radar" in data and isinstance(data["trust_radar"], dict)
 
     evidence = web._do_analyze(
         {"coin": ["BTC"], "type": ["multi_source"], "q": ["radar test"]}
     )[1]
-    assert data["radar"] == aggregate_trust_by_kind(evidence)
+    assert data["trust_radar"] == aggregate_trust_by_kind(evidence)
 
     code2, body2 = web._handle_api_analyze(
         {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]},
@@ -299,15 +298,21 @@ def test_api_analyze_radar_field_equals_build_trust_radar_single_and_comparison(
     )
     assert code2 == 200
     data2 = _envelope(body2)["data"]
-    assert data2["radar_a"] == data2["trust_radar_a"]
-    assert data2["radar_b"] == data2["trust_radar_b"]
+    evidence_a = web._do_comparison(
+        {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]}
+    )[1]
+    evidence_b = web._do_comparison(
+        {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]}
+    )[3]
+    assert data2["trust_radar_a"] == aggregate_trust_by_kind(evidence_a)
+    assert data2["trust_radar_b"] == aggregate_trust_by_kind(evidence_b)
 
 
-def test_api_analyze_radar_reflects_manipulation_flag_and_matches_ssr_render(monkeypatch):
+def test_api_analyze_trust_radar_reflects_manipulation_flag_and_matches_ssr_render(monkeypatch):
     """驗收標準：(1) 同一組輸入下，SSR `/analyze` HTML 內既有的各維度信任
-    數值與 `/api/analyze` JSON `radar` 欄位數字逐一相等（同源計算，不得二次
-    計算產生漂移）；(2) 含操縱旗標（manipulation flag）案例，確認 `radar`
-    正確反映該維度信任值被拉低。
+    數值與 `/api/analyze` JSON `trust_radar` 欄位數字逐一相等（同函式同
+    `evidence`，防未來走岔計算路徑）；(2) 含操縱旗標（manipulation flag）
+    案例，確認 `trust_radar` 正確反映該維度信任值被扣分拉低。
 
     monkeypatch `web.run`（`_do_analyze`/SSR `/analyze` 內部共用的同一個
     pipeline 入口），讓兩條各自獨立發出的請求拿到逐字相同的 `evidence`，
@@ -348,20 +353,20 @@ def test_api_analyze_radar_reflects_manipulation_flag_and_matches_ssr_render(mon
     data = _envelope(api_body)["data"]
 
     expected_dims = aggregate_trust_by_kind(evidence)
-    assert data["radar"] == expected_dims
+    assert data["trust_radar"] == expected_dims
 
     # 操縱旗標案例：帶 flags 的低分證據把 news 維度平均信任拉低。
     assert manip_ev.flags
     assert expected_dims["news"]["has_data"] is True
     assert expected_dims["news"]["trust"] < 0.5
 
-    # SSR HTML（`_render_trust_radar` 用 f"{trust:.2f}"）跟 JSON `radar`
-    # 欄位的數字逐一相等，不允許任何一邊二次計算產生漂移。
+    # SSR HTML（`_render_trust_radar` 用 f"{trust:.2f}"）跟 JSON
+    # `trust_radar` 欄位的數字逐一相等，不允許任何一邊二次計算產生漂移。
     for kind, dim in expected_dims.items():
         if dim["has_data"]:
             assert f'{dim["trust"]:.2f}' in ssr_body, (
                 f"SSR /analyze 缺少 {kind} 維度 trust={dim['trust']:.2f}，"
-                "與 /api/analyze radar 欄位不一致"
+                "與 /api/analyze trust_radar 欄位不一致"
             )
 
 
