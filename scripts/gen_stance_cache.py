@@ -42,20 +42,35 @@
 傳入非 offline 的 `BedrockClient` 時。CEO 親手執行前務必確認環境變數
 （`BEDROCK_HAIKU_MODEL_ID` / `AWS_REGION` / AWS 憑證）已就緒。
 
+⚠️ **執行時機（issue #76 已知限制）**：#9 budget guard 的花費追蹤是
+**process-local**（帳本快照 + process 內原子預留），不是跨 process 即時共享的
+分散式鎖。若本腳本執行期間，另一個 process（例如正在服務中的
+`/api/analyze`）也在打真 online stance 呼叫，兩邊互相看不到對方「正在花」的
+部分，$3/day cap 有可能被兩邊合計穿破。因此本腳本**應該在維護時段執行，或先
+確認當下沒有並行的 online-stance 真流量**（例如暫停對外服務、或至少確認沒有
+其他人同時手動執行本腳本/觸發 `/api/analyze`）。跨 process 預算可見性本身不在
+本次修復範圍內，見 issue #76。
+
 Issue #84（pre-warm 冪等 + #9 budget guard 硬化）追加：
 1. **冪等**：`main()` 先用 `select_missing_pairs()` 把候選對過濾成「既有持久化
-   快取讀不到 / version 不符」的子集才送進 `classify_pairs()`——已經命中快取的
-   pair 不會重複外呼真 Bedrock（見 `select_missing_pairs` docstring）。若過濾後
-   已無待呼叫 pair，`main()` 直接回傳 0，連 `_build_live_client()`（真 boto3
-   client）都不會建立，確保重複執行零額外 AWS 呼叫/花費。
-2. **budget guard**：真呼叫前用 `_make_budget_check()`（組合既有
-   `budget_guard.stance_model_priced()` / `daily_cap_usd()` / `daily_cost_usd()`，
-   不修改 `budget_guard.py` 本身）逐筆檢查 #9 每日 $3 cap 是否還有餘裕（含本次
-   批次「這一輪已經花掉但還沒寫回帳本」的部分），額度不足立即中止剩餘 pair
-   （`BudgetExhausted`，fail-closed），不會繞過 cap。批次完成後用
-   `_record_batch_cost_to_ledger()` 把這批真實花費記一筆進跨 run 持久化帳本
-   （`ledger.append_run()`），讓之後（含隔天前同一天內）`/api/analyze` 與再次
-   執行本腳本的 cap 判斷都看得到這筆花費，不會對預算護欄隱形。
+   快取讀不到 / version 不符 / label 不合法」的子集才送進 `classify_pairs()`——
+   已經命中快取的 pair 不會重複外呼真 Bedrock（見 `select_missing_pairs`
+   docstring）。若過濾後已無待呼叫 pair，`main()` 直接回傳 0，連
+   `_build_live_client()`（真 boto3 client）都不會建立，確保重複執行零額外 AWS
+   呼叫/花費。
+2. **budget guard**：真呼叫前用 `_make_budget_check()`（fail-closed 檢查
+   `budget_guard.stance_model_priced()`）先擋掉未計價模型；接著
+   `classify_pairs()` 對每一次真呼叫另外呼叫
+   `budget_guard.try_reserve_request_budget()`／`release_request_budget()`
+   做 process-local 原子預留（跟 `pipeline.run()` 同一套 #9 機制），額度不足時
+   **呼叫前**就中止剩餘 pair（`BudgetExhausted`，fail-closed，`classify_stance_strict`
+   完全不會被執行），不會繞過 cap（不修改 `budget_guard.py` 本身，只組合它既有
+   的公開函式）。批次完成後（不論全成功／`BudgetExhausted`／一般失敗，只要真的
+   打過 Bedrock）用 `_record_batch_cost_to_ledger()` 把這批真實花費記一筆進跨
+   run 持久化帳本（`ledger.append_run()`），讓之後（含隔天前同一天內）
+   `/api/analyze` 與再次執行本腳本的 cap 判斷都看得到這筆花費；若這筆記帳本身
+   持久化失敗（`append_run()` 回 `False`），改記 `budget_guard.record_unledgered_spend()`
+   並在 stderr 明確警示需人工核對 `/costs`，不靜默丟掉。
 """
 from __future__ import annotations
 
@@ -72,15 +87,17 @@ sys.path.insert(0, str(_REPO / "src"))
 
 from trustforge.bedrock import BedrockClient  # noqa: E402
 from trustforge.budget_guard import (  # noqa: E402
-    daily_cap_usd,
-    daily_cost_usd,
+    record_unledgered_spend,
+    release_request_budget,
     stance_model_priced,
+    try_reserve_request_budget,
 )
 from trustforge.ingestion.base import collect  # noqa: E402
 from trustforge.ledger import append_run  # noqa: E402
 from trustforge.schema import iso_utc  # noqa: E402
 from trustforge.trust.scoring import Claim, _corroboration_detail  # noqa: E402
 from trustforge.trust.stance_cache import (  # noqa: E402
+    _VALID_LABELS,
     DEFAULT_CACHE_PATH,
     STANCE_CACHE_VERSION,
     cache_key,
@@ -175,20 +192,35 @@ def select_missing_pairs(existing: dict, pairs: dict[str, tuple[str, str]]) -> d
     """Issue #84 冪等：從候選對 `pairs` 中挑出「既有持久化快取 `existing` 讀不到
     有效結果」的子集——即接下來真的需要外呼 `classify_stance_strict` 的 pair。
 
-    判定「已有效快取」只看 `version == STANCE_CACHE_VERSION`（跟
-    `stance_cache.StanceCache.get()` 的 version 失效邏輯一致）；`existing[key]`
-    不是 dict、缺 `version`、或 version 不符（prompt/model 版本已變更，見
-    `stance_cache.py` 模組頂部說明）都視為需要重新分類。
+    判定「已有效快取」跟 `stance_cache.StanceCache.get()` 共用同一套驗證
+    （`entry.get("version") == STANCE_CACHE_VERSION` **且**
+    `entry.get("label") in _VALID_LABELS`）——`existing[key]` 不是 dict、缺
+    `version`、version 不符（prompt/model 版本已變更，見 `stance_cache.py`
+    模組頂部說明）、或 `label` 不是合法值（壞資料，如手動編輯打錯字/舊格式
+    殘留）都視為需要重新分類。
+
+    codex/harper HIGH（#84 review）修正：先前這裡只驗 `version`、不驗
+    `label`——一筆 `version` 相符但 `label` 非法的壞 entry，會被本函式當成
+    「已快取命中」永久跳過（重跑幾次都不會被重新分類/修正），但 runtime
+    真正讀取快取的 `stance_cache.StanceCache.get()` 卻會判定同一筆 `label`
+    不合法而回 `None`（miss，fail-safe 降級 "neutral"）——兩套判準
+    drift，讓這筆壞資料在 pre-warm 眼中「永遠已快取」、卻在真正服務時每次
+    都要重新 fail-safe，且無法透過重跑本腳本自我修復。改成兩者共用
+    `_VALID_LABELS` 這一份驗證，杜絕 drift。
 
     回傳的子集依然是 `{cache_key: (a, b)}`，可直接餵給 `classify_pairs()`——
     呼叫端（`main()`）藉此確保**已經命中快取的 pair 不會重複外呼真 Bedrock**，
-    重複執行本腳本時只會對真正缺漏/過期的 pair 花錢，冪等（見 issue #84）。
+    重複執行本腳本時只會對真正缺漏/過期/壞掉的 pair 花錢，冪等（見 issue #84）。
     """
     missing: dict[str, tuple[str, str]] = {}
     for key, pair in pairs.items():
         entry = existing.get(key)
-        if isinstance(entry, dict) and entry.get("version") == STANCE_CACHE_VERSION:
-            continue  # 已快取命中，version 相符，本輪不重複外呼
+        if (
+            isinstance(entry, dict)
+            and entry.get("version") == STANCE_CACHE_VERSION
+            and entry.get("label") in _VALID_LABELS
+        ):
+            continue  # 已快取命中，version 相符且 label 合法，本輪不重複外呼
         missing[key] = pair
     return missing
 
@@ -211,38 +243,32 @@ class BudgetExhausted(Exception):
 
 
 def _make_budget_check(client: BedrockClient):
-    """組合既有 `budget_guard`（#9 $3/天 cap）公開函式，回傳一個
-    `() -> bool` closure，供 `classify_pairs()` 在每次真呼叫前檢查。
+    """組合既有 `budget_guard` 公開函式，回傳一個 `() -> bool` closure，供
+    `classify_pairs()` 在每次真呼叫前先做一層「model 是否已計價」檢查。
 
-    刻意**不修改 `budget_guard.py` 本身**，只組合它既有的公開函式：
-    - `stance_model_priced()`：這次會用到的 stance model 若未在 `ledger.PRICING`
-      計價表登記，真實單價未知，fail-closed 直接視為「額度不足」（比照
-      `pipeline.run()` 對 unpriced model 的處理）。
-    - `daily_cap_usd()` / `daily_cost_usd()`：目前每日上限與已花費（含跨 run
-      持久化帳本 + `budget_guard._UNLEDGERED_SPEND` 未記帳花費）。帳本讀取失敗
-      時 `daily_cost_usd()` 會 raise，這裡 fail-safe 視為額度不足，不放行。
+    codex/harper HIGH（#84 review 必修 2）修正：這裡原本直接比較「帳本快照
+    已花費 + 本批次 in-flight `client.cost_events`」跟 cap，是**唯讀 peek**——
+    在額度逼近上限（例如只剩 $0.001）時仍可能誤判「還有餘裕」而放行下一次
+    真呼叫，讓 $3/day cap 被穿破；同一個 process 若同時有其他呼叫者在跑，
+    也完全看不到彼此「正在花」的部分（check-then-spend race）。
 
-    額外加總 `client.cost_events`（若存在——真 `BedrockClient` 才有這個屬性；
-    單元測試常用的假 client 沒有，`getattr(..., [])` 直接視為 0，不影響既有測試）
-    「這次批次已經花掉、但還沒寫回帳本」的部分，讓同一次批次內連續多筆真呼叫
-    也不會繞過 cap（不必等整批寫回帳本才看得到），對齊 issue #84 CEO 追加的
-    「pre-warm 外呼必須受 #9 budget guard 約束」要求。
+    「今日 cap 是否還有餘裕」現在改由 `classify_pairs()` 對**每一次真呼叫**
+    呼叫 `budget_guard.try_reserve_request_budget()` 做 process-local 原子
+    預留來把關——跟 `pipeline.run()` 保護 `/api/analyze` 用的**同一套**機制
+    （#9 本來就是為此而建），才是唯一的 authority；這裡不再重複判斷同一件
+    事，避免兩套邏輯彼此 drift。
+
+    這裡只保留 `stance_model_priced()`：這次會用到的 stance model 若未在
+    `ledger.PRICING` 計價表登記，真實單價未知，`try_reserve_request_budget()`
+    的固定保守估值（`request_max_cost_usd()`）就不再是可信的「上界」，必須
+    fail-closed 直接視為不放行（比照 `pipeline.run()` 對 unpriced model 的
+    處理）——這是原子預留機制本身不檢查、獨立於「有沒有錢」的面向。`client`
+    參數保留只是維持既有呼叫簽章（`_make_budget_check(client)`），目前
+    未在函式本體內使用。
     """
 
     def _check() -> bool:
-        if not stance_model_priced():
-            return False
-        cap = daily_cap_usd()
-        if cap <= 0:
-            return False
-        try:
-            spent = daily_cost_usd()
-        except Exception:
-            return False  # fail-safe：帳本讀取失敗，保守視為額度不足
-        in_flight = sum(
-            float(e.get("cost_usd", 0.0) or 0.0) for e in getattr(client, "cost_events", [])
-        )
-        return round(spent + in_flight, 6) < cap
+        return stance_model_priced()
 
     return _check
 
@@ -257,6 +283,14 @@ def _record_batch_cost_to_ledger(client: BedrockClient, *, now_fn=time.time) -> 
     duck-typed：`client` 沒有 `cost_events` 屬性（單元測試常用的假 client）
     → 直接 no-op，不影響既有測試。`cost_events` 為空或總花費為 0（如整批全部
     命中既有快取、本輪完全沒有真呼叫）也不寫，避免帳本塞入無意義的 $0 空記錄。
+
+    codex HIGH / harper LOW（#84 review 必修 3）修正：比照 `orchestrator.py`
+    的既有慣例——`append_run()` 回傳值代表「這筆真的有花錢的紀錄有沒有真的
+    持久化成功」（可能因磁碟/檔案系統問題連 fallback 都寫失敗），**不能靜默
+    丟掉**。回 `False` 時呼叫 `budget_guard.record_unledgered_spend()` 讓這筆
+    花費至少在 process 記憶體內被 fail-closed 記住（`daily_cost_usd()` 之類
+    的讀取路徑才不會漏算），並在 stderr 印出明確警示，提醒之後要人工核對
+    `/costs`。
     """
     cost_events = getattr(client, "cost_events", None)
     if not cost_events:
@@ -273,7 +307,7 @@ def _record_batch_cost_to_ledger(client: BedrockClient, *, now_fn=time.time) -> 
     total_cost = round(sum(c["cost_usd"] for c in calls), 6)
     if total_cost <= 0:
         return
-    append_run({
+    persisted = append_run({
         "ts": iso_utc(now_fn()),
         "question_type": "stance_prewarm",
         "coin": "MULTI",
@@ -281,6 +315,13 @@ def _record_batch_cost_to_ledger(client: BedrockClient, *, now_fn=time.time) -> 
         "calls": calls,
         "total_cost_usd": total_cost,
     })
+    if not persisted:
+        record_unledgered_spend(total_cost)
+        print(
+            f"警告：本批次 pre-warm 花費 ${total_cost} 未能寫入帳本"
+            "（append_run 失敗，含 fallback），此筆花費未進帳本，人工核對 /costs。",
+            file=sys.stderr,
+        )
 
 
 def classify_pairs(
@@ -302,17 +343,40 @@ def classify_pairs(
     這個函式就不會回傳完整的 entries dict，呼叫端也就不會走到 merge + 寫檔那步。
 
     `budget_check`：選用的 `() -> bool` callable（見 `_make_budget_check()`），
-    每次真呼叫前呼叫一次；回 `False`（#9 每日 cap 額度不足）→ 立即中止，拋出
-    `BudgetExhausted(entries)`（攜帶目前已成功完成的部分），**不呼叫**
+    每次真呼叫前呼叫一次；回 `False`（如 stance model 未計價）→ 立即中止，
+    拋出 `BudgetExhausted(entries)`（攜帶目前已成功完成的部分），**不呼叫**
     `classify_stance_strict`，也不當成「呼叫失敗」處理（見 `BudgetExhausted`
-    docstring：兩者收尾語意不同）。預設 `None`（不檢查，逐字沿用既有行為，供
-    既有單元測試直接呼叫 `classify_pairs(client, pairs)` 不受影響）。
+    docstring：兩者收尾語意不同）。預設 `None`（不檢查任何預算，逐字沿用
+    加入 #9 budget guard 整合前的行為，供既有單元測試直接呼叫
+    `classify_pairs(client, pairs)` 不受影響）。
+
+    codex/harper HIGH（#84 review 必修 2）追加：`budget_check` 不是 `None`
+    時（呼叫端明確要求受 #9 cap 約束——`main()` 一律如此），除了上面那次
+    `budget_check()` 檢查，每次真呼叫前**另外**呼叫
+    `budget_guard.try_reserve_request_budget()` 做 process-local 原子預留
+    （跟 `pipeline.run()` 保護 `/api/analyze` 用的同一套機制）：拿不到預留
+    （額度已被其他 in-flight 呼叫佔滿，或帳本讀取失敗 fail-safe）一律視為
+    `BudgetExhausted`——**呼叫前**就中止，`classify_stance_strict` 完全不會
+    被執行。拿到預留後，不論這次呼叫成功與否，都在 `finally` 立刻
+    `budget_guard.release_request_budget()` 釋放（真實花費另由呼叫端的
+    `_record_batch_cost_to_ledger()` 記帳，這裡的「預留」只是暫時佔位，不是
+    重複計費，跟 `pipeline.run()` 同慣例）。`budget_check is None` 時完全不
+    做任何預留，逐字沿用未整合 budget guard 前的行為。
     """
     entries: dict = {}
     for key, (a, b) in pairs.items():
-        if budget_check is not None and not budget_check():
-            raise BudgetExhausted(entries)
-        label = client.classify_stance_strict(a, b)
+        reservation: float | None = None
+        if budget_check is not None:
+            if not budget_check():
+                raise BudgetExhausted(entries)
+            reservation = try_reserve_request_budget()
+            if reservation is None:
+                raise BudgetExhausted(entries)
+        try:
+            label = client.classify_stance_strict(a, b)
+        finally:
+            if budget_check is not None:
+                release_request_budget(reservation)
         entries[key] = {"label": label, "version": STANCE_CACHE_VERSION}
         print(f"{a[:40]!r} | {b[:40]!r} -> {label}")
     return entries
@@ -346,8 +410,20 @@ def _build_live_client() -> BedrockClient:
     return BedrockClient(offline=False)
 
 
+_MAINTENANCE_WINDOW_WARNING = (
+    "警告：#9 budget guard 是 process-local 追蹤（帳本快照 + process 內原子預留），"
+    "不是跨 process 即時共享的分散式鎖（issue #76 已知限制）。請在維護時段執行，"
+    "或先確認當下沒有並行的 online-stance 真流量（例如同時有人在跑 /api/analyze），"
+    "否則 $3/day cap 有可能被兩邊合計穿破。"
+)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0] if __doc__ else "",
+        epilog=_MAINTENANCE_WINDOW_WARNING,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="只列候選對，不呼叫 client、不寫檔",
@@ -393,6 +469,8 @@ def main(argv: list[str] | None = None) -> int:
     client = _build_live_client()  # 真 Bedrock client（CEO 親手執行）
     budget_check = _make_budget_check(client)
     _budget_exhausted = False
+    _classify_failed = False
+    new_entries: dict = {}
     try:
         new_entries = classify_pairs(client, to_call, budget_check=budget_check)
     except BudgetExhausted as exc:
@@ -409,15 +487,23 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:
         # 任一對失敗 → 中止且完全不寫檔，既有快取保持不變（見 classify_pairs docstring）。
+        _classify_failed = True
         print(
             f"錯誤：分類失敗，中止且不寫檔，既有快取保持不變：{exc}",
             file=sys.stderr,
         )
-        return 1
+    finally:
+        # harper/codex HIGH（#84 review 必修 1）：不論全成功／BudgetExhausted／
+        # 一般失敗，只要這次真的呼叫過 Bedrock（`client.cost_events` 非空——即使
+        # 是失敗前已成功的前 k 筆），這筆真實花費都必須先記回帳本，否則下面
+        # `_classify_failed` 為真時直接 `return 1`（不寫 cache 檔）會連帶把「已經
+        # 真的花掉的錢」也從帳本抹除，讓 #9 cap 之後看不到這筆真實支出（見
+        # `_record_batch_cost_to_ledger` docstring；no-op：空 cost_events/假
+        # client，不影響既有測試）。
+        _record_batch_cost_to_ledger(client)
 
-    # 把這批真實花費記回跨 run 持久化帳本，讓 #9 cap 之後也算得到（見
-    # `_record_batch_cost_to_ledger` docstring）；no-op（空 cost_events/假 client）。
-    _record_batch_cost_to_ledger(client)
+    if _classify_failed:
+        return 1
 
     merged = merge_cache(existing, new_entries)
     atomic_write_json(args.out, merged)

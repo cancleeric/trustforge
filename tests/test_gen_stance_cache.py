@@ -52,17 +52,31 @@ class _FlakyFakeClient:
 
     用來驗證 HIGH 修正：任一對失敗 → `classify_pairs`/`main` 必須中止、
     不吞成 neutral、不寫檔。
+
+    #84 review 必修 1（harper/codex HIGH）追加：比照 `_CostAccruingFakeClient`，
+    每一次「成功」的真呼叫（失敗那次不算，跟真 `BedrockClient` 一致——沒判斷出
+    結果就沒有對應的成功呼叫成本事件）都在 `cost_events` 累積一筆固定成本，
+    讓測試能驗證「失敗中止前已經真的花掉的前 k 筆成本，`main()` 仍必須記回
+    帳本」。
     """
 
-    def __init__(self, fail_on: str, label: str = "entailment"):
+    def __init__(self, fail_on: str, label: str = "entailment", cost_per_call: float = 0.01):
         self.fail_on = fail_on
         self.label = label
+        self.cost_per_call = cost_per_call
         self.calls: list[tuple[str, str]] = []
+        self.cost_events: list[dict] = []
 
     def classify_stance_strict(self, a: str, b: str) -> str:
         self.calls.append((a, b))
         if a == self.fail_on or b == self.fail_on:
             raise TimeoutError(f"simulated Bedrock failure on {self.fail_on!r}")
+        self.cost_events.append({
+            "model": "au.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "tokens_in": 10,
+            "tokens_out": 5,
+            "cost_usd": self.cost_per_call,
+        })
         return self.label
 
 
@@ -293,6 +307,35 @@ def test_main_failure_mid_batch_leaves_existing_cache_untouched(tmp_path, monkey
     assert "中止" in captured.err or "中止" in captured.out
 
 
+def test_main_general_failure_still_records_partial_cost_to_ledger(tmp_path, monkeypatch):
+    """harper/codex HIGH（#84 review 必修 1）：一般失敗（非 budget 中止，
+    `except Exception` 分支）中止前，前 k 對已經真的花掉的成本
+    （`client.cost_events`）也必須先記回帳本——不能因為隨後 `return 1`、
+    不寫 cache 檔，就連帶讓這筆真實花費從帳本消失（否則下次查
+    `daily_cost_usd()` 會少算這筆，等於繞過 #9 cap）。改成 `finally` 涵蓋
+    全成功／`BudgetExhausted`／一般失敗所有出場路徑才記帳。
+    """
+    out_path = tmp_path / "stance_cache.json"
+    monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
+    # k1 = ("claim alpha text", "claim beta text") 先成功，k2 因含
+    # "claim delta text" 而失敗——k1 這一筆真實花費必須被記回帳本。
+    fake_client = _FlakyFakeClient(fail_on="claim delta text", cost_per_call=0.01)
+    monkeypatch.setattr(gen_stance_cache, "_build_live_client", lambda: fake_client)
+    captured_ledger: list[dict] = []
+    monkeypatch.setattr(
+        gen_stance_cache, "append_run", lambda record: captured_ledger.append(record) or True
+    )
+
+    rc = gen_stance_cache.main(["--out", str(out_path)])
+
+    assert rc == 1
+    assert not out_path.exists()  # 一般失敗仍然完全不寫 cache 檔，既有語意不變
+    # 但 k1 已經真的花掉的成本必須被記到帳本，不能因失敗中止而消失
+    assert len(captured_ledger) == 1
+    assert captured_ledger[0]["total_cost_usd"] == 0.01
+    assert len(captured_ledger[0]["calls"]) == 1
+
+
 def test_main_success_writes_merged_result_preserving_existing_keys(tmp_path, monkeypatch):
     """全部候選對都成功分類 → 正常 merge 寫入，既有 key 保留，新 key 新增。"""
     out_path = tmp_path / "stance_cache.json"
@@ -412,6 +455,30 @@ def test_select_missing_pairs_treats_malformed_entry_as_missing():
     assert missing == {"k1": ("claim a", "claim b")}
 
 
+def test_select_missing_pairs_treats_missing_label_as_missing():
+    """codex/harper HIGH（#84 review 必修 4）：version 相符但缺 `label` 的壞
+    entry，不可被當成「已快取命中」永久跳過——`StanceCache.get()` 對同一筆
+    entry 會判定為 miss，兩套判準不能 drift。"""
+    existing = {"k1": {"version": STANCE_CACHE_VERSION}}  # 缺 label
+    pairs = {"k1": ("claim a", "claim b")}
+
+    missing = gen_stance_cache.select_missing_pairs(existing, pairs)
+
+    assert missing == {"k1": ("claim a", "claim b")}
+
+
+def test_select_missing_pairs_treats_invalid_label_as_missing():
+    """codex/harper HIGH（#84 review 必修 4）：version 相符但 `label` 不是
+    合法值（如手動編輯打錯字/舊格式殘留）的壞 entry，同樣必須視為 missing，
+    跟 `StanceCache.get()` 的驗證共用同一份 `_VALID_LABELS`。"""
+    existing = {"k1": {"label": "maybe", "version": STANCE_CACHE_VERSION}}
+    pairs = {"k1": ("claim a", "claim b")}
+
+    missing = gen_stance_cache.select_missing_pairs(existing, pairs)
+
+    assert missing == {"k1": ("claim a", "claim b")}
+
+
 def test_select_missing_pairs_empty_when_all_cached():
     existing = {
         "k1": {"label": "entailment", "version": STANCE_CACHE_VERSION},
@@ -468,13 +535,14 @@ def test_classify_pairs_budget_check_blocks_before_any_call():
     assert excinfo.value.entries == {}
 
 
-# ── issue #84：_make_budget_check（組合既有 budget_guard 公開函式）───────────
+# ── issue #84：_make_budget_check（fail-closed 檢查 stance model 是否已計價）──
+#    #84 review 必修 2（codex/harper HIGH）後，cap 是否還有餘裕改交給
+#    classify_pairs() 內的 try_reserve_request_budget() 原子預留把關（見下方
+#    專屬測試區），這裡只剩「model 是否已計價」這一件事。
 
 
-def test_make_budget_check_true_when_cap_has_room(monkeypatch):
+def test_make_budget_check_true_when_model_priced(monkeypatch):
     monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
-    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
-    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
     fake_client = _FakeClient()
 
     check = gen_stance_cache._make_budget_check(fake_client)
@@ -484,8 +552,6 @@ def test_make_budget_check_true_when_cap_has_room(monkeypatch):
 
 def test_make_budget_check_false_when_model_unpriced(monkeypatch):
     monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: False)
-    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
-    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
     fake_client = _FakeClient()
 
     check = gen_stance_cache._make_budget_check(fake_client)
@@ -493,68 +559,113 @@ def test_make_budget_check_false_when_model_unpriced(monkeypatch):
     assert check() is False
 
 
-def test_make_budget_check_false_when_cap_already_spent(monkeypatch):
-    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
-    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
-    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 3.0)
-    fake_client = _FakeClient()
-
-    check = gen_stance_cache._make_budget_check(fake_client)
-
-    assert check() is False
+# ── issue #84 review 必修 2（codex/harper HIGH）：classify_pairs 對每一次
+# 真呼叫做 budget_guard 原子預留／釋放，取代舊版唯讀 peek，杜絕 TOCTOU ────────
 
 
-def test_make_budget_check_false_when_cap_non_positive(monkeypatch):
-    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
-    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 0.0)
-    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
-    fake_client = _FakeClient()
+def test_classify_pairs_reserves_and_releases_budget_around_each_real_call(monkeypatch):
+    """`budget_check` 非 None 時，每次真呼叫前後都應該經過
+    `try_reserve_request_budget()`/`release_request_budget()`，且順序正確：
+    先 reserve 才呼叫真 client、呼叫完才 release。"""
+    events: list[str] = []
 
-    check = gen_stance_cache._make_budget_check(fake_client)
+    def _fake_reserve(*args, **kwargs):
+        events.append("reserve")
+        return 0.05
 
-    assert check() is False
+    def _fake_release(amount):
+        events.append(f"release:{amount}")
 
+    monkeypatch.setattr(gen_stance_cache, "try_reserve_request_budget", _fake_reserve)
+    monkeypatch.setattr(gen_stance_cache, "release_request_budget", _fake_release)
 
-def test_make_budget_check_fail_safe_when_ledger_read_raises(monkeypatch):
-    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
-    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
+    fake_client = _FakeClient(label="entailment")
+    pairs = {"k1": ("a", "b"), "k2": ("c", "d")}
 
-    def _boom():
-        raise RuntimeError("simulated ledger read failure")
+    entries = gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=lambda: True)
 
-    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", _boom)
-    fake_client = _FakeClient()
-
-    check = gen_stance_cache._make_budget_check(fake_client)
-
-    assert check() is False
-
-
-def test_make_budget_check_accounts_in_flight_cost_events(monkeypatch):
-    """同一批次內已經真呼叫、還沒寫回帳本的花費（`client.cost_events`）也要
-    算進去，避免批次內連續多筆呼叫繞過 cap。"""
-    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
-    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
-    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 2.995)
-    fake_client = _CostAccruingFakeClient(cost_per_call=0.01)
-    fake_client.cost_events.append({"cost_usd": 0.01})  # 本批次已花掉一筆
-
-    check = gen_stance_cache._make_budget_check(fake_client)
-
-    # 已花費(帳本 2.995) + 本批次已花(0.01) = 3.005 >= cap(3.0) → False
-    assert check() is False
+    assert entries == {
+        "k1": {"label": "entailment", "version": STANCE_CACHE_VERSION},
+        "k2": {"label": "entailment", "version": STANCE_CACHE_VERSION},
+    }
+    assert events == ["reserve", "release:0.05", "reserve", "release:0.05"]
 
 
-def test_make_budget_check_ignores_missing_cost_events_attr(monkeypatch):
-    """假 client（無 `cost_events` 屬性）不應炸掉——`getattr(..., [])` 視為 0。"""
-    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
-    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
-    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
-    fake_client = _FakeClient()  # 沒有 cost_events 屬性
+def test_classify_pairs_stops_before_call_when_reservation_denied(monkeypatch):
+    """codex HIGH（#84 review 必修 2）：`try_reserve_request_budget()` 回
+    `None`（額度不足/帳本讀取失敗）時，`classify_stance_strict` 完全不會被
+    呼叫——呼叫前就中止，不是呼叫後才發現超支。"""
+    monkeypatch.setattr(gen_stance_cache, "try_reserve_request_budget", lambda *a, **k: None)
+    release_calls: list = []
+    monkeypatch.setattr(
+        gen_stance_cache, "release_request_budget", lambda amount: release_calls.append(amount)
+    )
 
-    check = gen_stance_cache._make_budget_check(fake_client)
+    fake_client = _FakeClient(label="entailment")
+    pairs = {"k1": ("a", "b")}
 
-    assert check() is True
+    with pytest.raises(gen_stance_cache.BudgetExhausted) as excinfo:
+        gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=lambda: True)
+
+    assert fake_client.calls == []  # 真呼叫從未啟動
+    assert excinfo.value.entries == {}
+    assert release_calls == []  # 沒拿到預留，也就沒有東西可釋放
+
+
+def test_classify_pairs_releases_budget_even_when_call_raises(monkeypatch):
+    """真呼叫失敗（raise）時，已經拿到的預留仍必須在 `finally` 被釋放，不能
+    卡住不還（否則額度會被永久佔用，往後的呼叫全部誤判為不足）。"""
+    monkeypatch.setattr(gen_stance_cache, "try_reserve_request_budget", lambda *a, **k: 0.05)
+    release_calls: list = []
+    monkeypatch.setattr(
+        gen_stance_cache, "release_request_budget", lambda amount: release_calls.append(amount)
+    )
+
+    fake_client = _FlakyFakeClient(fail_on="b")
+    pairs = {"k1": ("a", "b")}
+
+    with pytest.raises(TimeoutError):
+        gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=lambda: True)
+
+    assert release_calls == [0.05]
+
+
+def test_classify_pairs_near_cap_real_budget_guard_blocks_call(monkeypatch):
+    """codex HIGH（#84 review 必修 2）near-cap 整合測試：不 mock
+    `try_reserve_request_budget()` 本身，改用真的 `budget_guard`（只調環境
+    變數把每日 cap 壓到幾乎耗盡、並用真 `append_run()` 寫一筆「今天」已花費
+    的歷史紀錄），驗證額度不足時 `classify_stance_strict` 真的從未被
+    呼叫——舊版唯讀 peek 在額度逼近上限時仍可能誤放行，新版原子預留機制
+    必須在呼叫前就擋下。"""
+    import time as _time
+
+    from trustforge.schema import iso_utc
+
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "0.01")
+    # 用真的 append_run() 寫一筆「今天」已花費 $0.009 的歷史紀錄
+    # （TRUSTFORGE_COST_LEDGER_PATH 已由 conftest 的 _isolate_cost_ledger 隔離
+    # 到 tmp_path，不會污染真實帳本）——只剩 $0.001 headroom，遠低於
+    # try_reserve_request_budget() 的單呼保守上界 request_max_cost_usd()
+    # （預設 $0.05），reserve 必然失敗。
+    persisted = gen_stance_cache.append_run({
+        "ts": iso_utc(_time.time()),
+        "question_type": "stance",
+        "coin": "BTC",
+        "offline": False,
+        "calls": [],
+        "total_cost_usd": 0.009,
+    })
+    assert persisted  # 前置條件：這筆歷史花費真的寫進了（隔離後的）帳本
+
+    fake_client = _FakeClient(label="entailment")
+    pairs = {"k1": ("a", "b")}
+    budget_check = gen_stance_cache._make_budget_check(fake_client)
+
+    with pytest.raises(gen_stance_cache.BudgetExhausted) as excinfo:
+        gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=budget_check)
+
+    assert fake_client.calls == []  # 真呼叫從未啟動
+    assert excinfo.value.entries == {}
 
 
 # ── issue #84：_record_batch_cost_to_ledger（把批次花費記回帳本）──────────────
@@ -562,7 +673,12 @@ def test_make_budget_check_ignores_missing_cost_events_attr(monkeypatch):
 
 def test_record_batch_cost_to_ledger_writes_total(monkeypatch):
     captured: list[dict] = []
-    monkeypatch.setattr(gen_stance_cache, "append_run", lambda record: captured.append(record))
+
+    def _fake_append_run(record):
+        captured.append(record)
+        return True  # 持久化成功
+
+    monkeypatch.setattr(gen_stance_cache, "append_run", _fake_append_run)
     fake_client = _CostAccruingFakeClient(cost_per_call=0.01)
     fake_client.cost_events = [
         {"model": "haiku", "tokens_in": 10, "tokens_out": 5, "cost_usd": 0.01},
@@ -576,6 +692,32 @@ def test_record_batch_cost_to_ledger_writes_total(monkeypatch):
     assert record["question_type"] == "stance_prewarm"
     assert record["total_cost_usd"] == 0.022
     assert len(record["calls"]) == 2
+
+
+def test_record_batch_cost_to_ledger_records_unledgered_spend_and_warns_when_append_fails(
+    monkeypatch, capsys
+):
+    """codex HIGH / harper LOW（#84 review 必修 3）：`append_run()` 回 `False`
+    （primary + fallback 皆持久化失敗）時，這筆真實花費不能被靜默丟掉——
+    必須呼叫 `budget_guard.record_unledgered_spend()`（比照 `orchestrator.py`
+    既有慣例，讓 `daily_cost_usd()` 仍算得到這筆花費），並在 stderr 印出
+    明確警示，提醒人工核對 `/costs`。"""
+    from trustforge.budget_guard import daily_cost_usd
+
+    monkeypatch.setattr(gen_stance_cache, "append_run", lambda record: False)
+    fake_client = _CostAccruingFakeClient(cost_per_call=0.02)
+    fake_client.cost_events = [
+        {"model": "haiku", "tokens_in": 10, "tokens_out": 5, "cost_usd": 0.02},
+    ]
+
+    gen_stance_cache._record_batch_cost_to_ledger(fake_client, now_fn=lambda: 1_700_000_000.0)
+
+    captured = capsys.readouterr()
+    assert "未進帳本" in captured.err
+    assert "/costs" in captured.err
+    # 帳本本身沒收到（append_run 回 False），但這筆花費仍必須被
+    # daily_cost_usd() 算進「今日已花費」，不因帳本沒記到就被當沒發生。
+    assert daily_cost_usd() >= 0.02
 
 
 def test_record_batch_cost_to_ledger_noop_when_no_cost_events_attr(monkeypatch):
@@ -660,7 +802,9 @@ def test_main_records_batch_cost_to_ledger_on_success(tmp_path, monkeypatch):
     fake_client = _CostAccruingFakeClient(label="entailment", cost_per_call=0.01)
     monkeypatch.setattr(gen_stance_cache, "_build_live_client", lambda: fake_client)
     captured: list[dict] = []
-    monkeypatch.setattr(gen_stance_cache, "append_run", lambda record: captured.append(record))
+    monkeypatch.setattr(
+        gen_stance_cache, "append_run", lambda record: captured.append(record) or True
+    )
 
     rc = gen_stance_cache.main(["--out", str(out_path)])
 
