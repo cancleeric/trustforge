@@ -3,6 +3,13 @@
 > **版本**：真實已部署架構（2026-06）
 > **競賽硬規則**：僅限 AWS 基礎模型 → 全程走 Amazon Bedrock，不呼叫任何其他供應商
 > **公開主機**：EC2 t3.micro @ ap-southeast-2（雪梨）
+> ⚠️ 下方架構圖／服務對應表的「公開入口」段落寫於 nginx cutover 之前
+> （2026-06，`trustforge.web` 直接聽 port 80）。v0.6.1 起實際拓樸已改為
+> nginx 在前（:80 明碼 + :443 TLS 兩個公開 listener，見下）、python 收斂
+> 只聽 `127.0.0.1:8080`，見「## 前後端分離對外拓樸」一節（Issue #81 定案，
+> 2026-07-06）——此節為目前真實現況，上方圖表為歷史部署基礎
+> （EC2/Bedrock/S3/IAM/SSM 本身沒變，只是多了 nginx 這層公開入口 + 拆出
+> React 靜態資產）。
 
 ---
 
@@ -59,6 +66,68 @@ flowchart TB
 | **SSM Session Manager** | 無金鑰遠端運維（含 Session、Run Command） | 不需開 SSH port，符合 zero-trust；EC2 無 key pair | **已部署**（AmazonSSMManagedInstanceCore） |
 | **CloudWatch Logs** | EC2 systemd/stdout 日誌落地 | 預設收集，可觀測 | **已部署**（預設） |
 | **Lambda** | `trustforge-demo` 函數已部署，可執行 | 部署流程涵蓋（`deploy/deploy_lambda.sh`） | **已部署但 Function URL 403 gated**（免費方案限制）；**不作公開入口，公開入口為 EC2** |
+
+---
+
+## 前後端分離對外拓樸（Issue #81 定案，2026-07-06）
+
+方案 B 定案（詳見 `docs/PLAN-frontend-backend-split.md` §8）：EC2 上
+nginx 取代 python 成為公開入口，python (`trustforge.web`) 收斂只聽
+`127.0.0.1:8080`，不對外。**照 `deploy/nginx.conf` 逐字核對，公開監聽的
+port 實際有兩個**（不是只有 :443）：
+
+```
+:80（IPv4+IPv6，明碼）                          :443（TLS，主要入口，HSTS/CSP）
+ ├─ /healthz  → proxy_pass 127.0.0.1:8080/healthz     ├─ /assets/*、/、/analyze 等靜態路徑
+ │   （明碼直通，供 LB/健康檢查探測，故意不強制走          →  React 靜態 build（Vite dist，SPA fallback）
+ │    301，避免探測器不支援 redirect 誤判服務掛掉）      └─ /api/*、/healthz
+ ├─ /.well-known/acme-challenge/ → 本機檔案                →  proxy_pass 127.0.0.1:8080（python，僅內部監聽）
+ │   （certbot HTTP-01 challenge，含續簽用）
+ └─ 其餘所有路徑 → 301 redirect 到
+     https://trustforge.hurricanesoft.com.tw$request_uri
+```
+
+即 :80 這個 listener 本身仍是公開的（cutover 沒有把它拆掉），只是流量語意
+從「直接把應用流量餵給 python」收斂成「health probe 明碼直通 + ACME
+challenge + 其餘一律 301 轉 443」。Security Group 需同時開放
+**tcp/80、tcp/443**（`deploy/deploy_ec2.sh` 建 SG 時先開 80，
+`deploy/deploy_frontend_nginx.sh` cutover 到 react 拓樸時再加開 443；兩條
+規則都要在，不是把 80 換成 443）。
+
+nginx conf：`deploy/nginx.conf`；cutover 開關：`deploy/cutover_switch.sh`
+（`react`/`react-http`/`legacy` 三態，回滾秒切）。EC2/Bedrock/S3/IAM/SSM
+本身拓樸未變，只是公開入口從 python 直聽單一 port 80，換成 nginx 的
+80+443 雙 listener 分工。
+
+2026-07-06 CTO 對生產實測確認此拓樸已生效（curl 原始輸出見 PR #94／
+`docs/PLAN-frontend-backend-split.md` §8）。
+
+### 現有 API 端點（`/api/*`，web.py `_handle_api_*` 盤點）
+
+| 端點 | 方法 | 對應函式 | 說明 |
+|------|------|---------|------|
+| `/api/health` | GET | `_handle_api_health` | 健康檢查，`{ok,data:{status,version,uptime_seconds}}` |
+| `/api/status` | GET | `_handle_api_status` | 版本/uptime/`bedrock_capable`/`live_token_set` 能力旗標/cache backend 連線健康（primary/fallback、是否 degraded）/資料鮮度矩陣（fresh/stale/missing）；**刻意不含**成本帳本明細／連接器用量／最近排程執行，成本請走 `/api/costs`；依賴（cache backend 建構或鮮度讀取）失敗回 502 |
+| `/api/costs` | GET | `_handle_api_costs` | cost ledger 表 |
+| `/api/overview` | GET | `_handle_api_overview` | 首頁多幣總覽卡；**逐幣**對 cache backend 呼叫 `cache_get(strict=True)`（可能實際打 DynamoDB，讀不到才 fallback 到本地 JSON），非零 I/O；單幣純缺快照時該幣正常跳過（仍 200），backend 建構失敗或 primary+fallback 皆讀取失敗時整個請求回 502 |
+| `/api/history` | GET | `_handle_api_history` | `?coin=BTC` 讀 `get_trust_history()`，PIT 歷史 |
+| `/api/analyze` | GET | `_handle_api_analyze` | 信任分析報告；`?type=comparison` 為雙幣比較分支；與 SSR `/analyze`、`/analyze.json` 共用同一把 dedup key space（#51+#87） |
+| `/healthz` | GET | （非 `/api/*`，nginx 部署腳本健康檢查用） | 純文字 `ok` |
+
+SSR 舊路由（`/`、`/costs`、`/status`、`/analyze`、`/analyze.json`）仍在，
+僅供 `cutover_switch.sh legacy` 緊急回滾，凍結新功能。
+
+### 計劃新增（下一步，#85 多維度信任雷達）
+
+- 後端新增 `agent/orchestrator.py::build_trust_radar()`（尚未存在，待實作）：
+  按 kind（news/onchain/social/regulatory 等）聚合 `TrustScore`，回傳
+  `{avg_trust, claim_count, single_source}`；`single_source: true`
+  （目前 `regulatory`/`social` 各僅 1 個實體來源）需誠實標注。
+- Issue #85 原文寫的落點是 `/analyze.json`（SSR JSON），但依本次 #81 定案
+  「新功能一律走 `/api/*` + React、SSR 凍結」，實際應落在 `/api/analyze`
+  （= `/analyze.json` 的 API 對等版，見上表），回應加 `trust_radar` 欄位，
+  供 React `TrustRadarChart.tsx`（骨架已存在）接線；不新增路由、不回頭
+  加功能到 SSR `/analyze.json`。
 
 ### 未採用服務（舊願景規劃，實際未部署）
 

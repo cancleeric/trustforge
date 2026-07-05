@@ -123,3 +123,64 @@ P3 cutover+回歸 QA 再 3-5 天，**風險：時間緊繃、無安全邊際**�
 最大風險非技術難度，是「1004 個既有測試」需同步補前端測試/E2E，人力排擠
 決賽其他準備——建議 CTO 執行時**每頁遷移都跑一次既有 SSR 對照截圖**，
 避免資料密度/雷達/W2/PIT 這些既有護城功能在重寫中被漏接。
+
+## 8. 決策定案（Issue #81，CEO 2026-07-06 拍板）
+
+**方案 B 定案：web.py 降為純 `/api/*` API，React SPA 獨立部署（nginx serve
+靜態資產 + `/api/*` 反代 `127.0.0.1:8080`）。SSR 凍結新功能，僅保留
+`cutover_switch.sh legacy` 緊急回滾路徑。** 依據：
+
+- P3 cutover 已於 v0.6.1（`feat/react-tls-domain`）完成上線，非規劃中——
+  本次 PR2（#81）為**驗證既有 cutover 現況 + 補文件定案**，不是重新設計。
+  2026-07-06 CTO 對生產 `https://trustforge.hurricanesoft.com.tw/` 實測
+  （詳見 PR body 附的 curl 原始輸出）：首頁回應為 Vite build 出的
+  `index.html`（`<script type="module" src="/assets/index-*.js">`）、
+  CSP 為 react 模式（`script-src 'self'`，非零-JS 時期的
+  `script-src 'none'`）；`/api/health`、`/healthz` 走 nginx `proxy_pass`
+  到 `127.0.0.1:8080` 皆回 200，且回應同樣帶 react 模式 CSP header——
+  代表 `TRUSTFORGE_CSP_MODE=react` 已在 python 端生效，nginx／python 兩側
+  「同進退」；`/assets/<不存在檔名>` 回 404（非 SPA fallback），確認
+  `try_files` 靜態優先、SPA fallback 只在非靜態路徑生效，與
+  `deploy/nginx.conf` 路由表逐條相符。
+- PR #92（`/analyze`／`/analyze.json` SSR dedup，harper+codex 雙審）審查輪
+  已明確此後 SSR 路由**只補安全/防重複計費類緊急修補**，不再承接新功能，
+  與 P3 cutover 後「SSR 僅供緊急回滾」的定位一致。
+- python 收斂只聽 `127.0.0.1:8080`，不對外（見 `src/trustforge/web.py::main()`
+  的 `TRUSTFORGE_BIND_HOST`／`TRUSTFORGE_TRUST_PROXY` 邏輯，`TRUST_PROXY=1`
+  時強制收斂綁定避免被繞過直打），避免偽造 `X-Real-IP`/`X-Forwarded-For`
+  繞過限流。對外實際公開監聽的是 nginx 的 **:80（明碼）+ :443（TLS）兩個
+  listener**（非只有 :443）：:80 保留 `/healthz` 明碼直通與 ACME HTTP-01
+  challenge，其餘一律 301 轉 :443；Security Group 對應也是 tcp/80、tcp/443
+  兩條都要開，細節見 `docs/AWS-ARCHITECTURE.md`「前後端分離對外拓樸」一節。
+
+### 為何不採方案 A（web.py 為主的混合式：由 web.py 直接 serve Vite 靜態資產）
+
+Issue #81 並列的方案 A **不是放棄 React**，而是混合式拓樸：web.py 仍是
+對外唯一入口（SSR 為主），React 只負責雷達／趨勢圖等複雜視覺化，經 Vite
+build 出靜態資產後**由 web.py 自己 serve**（inline `<script>` 載入建置產物），
+不加 nginx 這層。定案不採，理由：
+
+- **等於推翻已上線、多輪 codex 複審過的 cutover 鏈路**：方案 B（nginx serve
+  靜態 + `/api/*` 反代）已於 v0.6.1 上線且目前線上就是這個拓樸（見本文件
+  「決策定案」實測紀錄——`react` 模式的 happy path 已在生產跑通並驗證）；
+  `cutover_switch.sh` 內另外還有 host-wide lock、SSM ResponseCode 97/98
+  傳遞、absent-symlink rollback 分支、TLS/HSTS-safe rollback 等安全網，這
+  些是針對「切換失敗時」的防護分支，經多輪 codex 複審加固，**未見證據
+  顯示曾在生產真的觸發過失敗回滾**——即便如此，改採方案 A 仍必須把整條
+  入口從 nginx 換回 web.py 自己 serve 靜態檔，**是新的變更**，不是「維持
+  現狀」——現狀就是方案 B。
+- **web.py 要新學會兩件事，且都要重新過安全審查**：(1) serve Vite build
+  出的 hashed 靜態資產＋inline `<script>` 載入建置產物，(2) CSP 從目前
+  `CSP_MODE=react` 的 `script-src 'self'`（外部 hashed 檔案、無 inline）
+  退回混合模式（inline script 需要 nonce/hash 或放寬 `script-src`），這兩
+  處都動了 harper（CISO）已審過的安全邊界，需要重新走一輪 CSP 審查，不是
+  零成本切換。
+- **決賽前（8/1-2）不宜再增變動面**：現在（7/6）距決賽剩不到 4 週，方案 B
+  現狀已通過分頁 QA 驗收（`## 6` 所列 P1/P2 首頁／分析結果頁／status／
+  costs／comparison／錯誤頁資料一致性比對），沒有已知缺陷需要靠換架構解
+  決；換成方案 A 純粹是拿已驗證穩定的入口去換一個沒上過生產的新拓樸，風險
+  與工作量都高於「維持方案 B 現狀 + 凍結 SSR 新功能」。
+
+**結論**：Issue #81 就此定案為方案 B，本文件與 `deploy/nginx.conf`、
+`deploy/cutover_switch.sh` 為最終依據；後續若要重新開放方案 A 討論，需
+重新走 CEO+CISO+CPO 三審流程，不得逕自變更。
