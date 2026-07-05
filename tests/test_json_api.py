@@ -82,6 +82,47 @@ def _reset_analyze_dedup_state():
     web._analyze_dedup_inflight.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_analyze_dedup_cache_backend(request, tmp_path, monkeypatch):
+    """test isolation bug 修復（#51/#87 PR1 CEO 追加要求）：`test_api_analyze_
+    dedup_*` 系列測試呼叫 `_handle_api_analyze`/`_do_analyze`/`_do_comparison`
+    時，多數 qs 都沒帶 `live=1`/`sample=1`，因此落在「真資料·$0」預設檔位
+    （`_is_real_request` 判定的 `real=True`），`_do_analyze`/`_do_comparison`
+    這條路徑會呼叫 `run(..., data_mode="live", llm_mode="off", ...)`——
+    `data_mode="live"` 代表 pipeline 真的透過 `CachedSource` 讀連接器快取，
+    預設 backend 是 `get_cache_backend()` 的預設值 `DynamoDBCache`，會打真
+    AWS（見上方模組頂部說明；已實測會出現 `ResourceNotFoundException`／
+    憑證錯誤，證實這幾個測試在沒有真實 AWS 存取權限/資源時無法穩定通過）。
+
+    這批測試驗證的是 dedup 協調層本身（single-flight、per-key lock、
+    follower bounded wait、stale-leader recovery、per-IP 限流交互），跟
+    連接器快取實際打哪個 backend 完全無關，不該隱性依賴本機是否有效的
+    AWS 憑證/資源才能通過——尤其部分測試（如 stalled leader／stale leader
+    recovery）本身就有精細的牆鐘時間預算（`_ANALYZE_DEDUP_LEADER_TIMEOUT_
+    SECONDS` 調小成 0.3 秒），真連接器的網路延遲/重試會直接弄亂這些時間
+    假設，導致測試結果不只是「跑不過」而是「量測到錯誤的行為」。
+
+    修法：跟既有 `json_cache_backend` fixture／`conftest.py::
+    _isolate_connector_cache` 做的事情一致——只對名稱同時含
+    `"analyze"`／`"dedup"` 的測試（涵蓋 `test_api_analyze_dedup_*`、
+    `test_dedup_analyze_call_*`，以及 #51+#87 PR1 新增、驗證 SSR
+    `/analyze`／`/analyze.json` 與跨路由 dedup 的
+    `test_ssr_analyze_dedup_*`／`test_analyze_ssr_*` 系列），強制
+    `CACHE_BACKEND=json`（本地 JSON 檔案 backend，路徑隔離到
+    `tmp_path`，不打任何真雲端服務）。刻意用 `request.node.name` 篩選、
+    只作用在這個子集——不改變 `get_cache_backend()` 本身的生產預設值
+    （仍是 `dynamodb`），也不影響本檔其餘刻意要測試真 `DynamoDBCache`
+    降級行為的測試（如 `_real_broken_backend_with_dead_fallback` 系列，
+    那些測試直接建構 `DynamoDBCache()` 實例並自行 monkeypatch，不經過
+    這個 env 開關）。
+    """
+    name = request.node.name
+    if "analyze" in name and "dedup" in name:
+        monkeypatch.setenv("CACHE_BACKEND", "json")
+        monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
+    yield
+
+
 @pytest.fixture
 def json_cache_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("CACHE_BACKEND", "json")
