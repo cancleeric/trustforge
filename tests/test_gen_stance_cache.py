@@ -66,6 +66,29 @@ class _FlakyFakeClient:
         return self.label
 
 
+class _CostAccruingFakeClient:
+    """比照真 `BedrockClient`，每次真呼叫後在 `cost_events` 累積一筆固定成本，
+    供 issue #84 budget guard 相關測試驗證 `_make_budget_check()` /
+    `_record_batch_cost_to_ledger()` 的行為，仍不匯入/呼叫 boto3。
+    """
+
+    def __init__(self, label: str = "entailment", cost_per_call: float = 0.01):
+        self.label = label
+        self.cost_per_call = cost_per_call
+        self.calls: list[tuple[str, str]] = []
+        self.cost_events: list[dict] = []
+
+    def classify_stance_strict(self, a: str, b: str) -> str:
+        self.calls.append((a, b))
+        self.cost_events.append({
+            "model": "au.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "tokens_in": 10,
+            "tokens_out": 5,
+            "cost_usd": self.cost_per_call,
+        })
+        return self.label
+
+
 # ── 候選對枚舉：overlap 前置閘 + 去重 ────────────────────────────────────────
 
 
@@ -352,3 +375,295 @@ def test_main_cache_os_error_aborts_without_touching_file(tmp_path, monkeypatch)
     with open(out_path, encoding="utf-8") as f:
         assert f.read() == original_content
     assert fake_client.calls == []
+
+
+# ── issue #84：select_missing_pairs 冪等過濾 ─────────────────────────────────
+
+
+def test_select_missing_pairs_skips_valid_cached_entries():
+    existing = {
+        "k1": {"label": "entailment", "version": STANCE_CACHE_VERSION},
+    }
+    pairs = {
+        "k1": ("claim a", "claim b"),
+        "k2": ("claim c", "claim d"),
+    }
+
+    missing = gen_stance_cache.select_missing_pairs(existing, pairs)
+
+    assert missing == {"k2": ("claim c", "claim d")}
+
+
+def test_select_missing_pairs_treats_version_mismatch_as_missing():
+    existing = {"k1": {"label": "entailment", "version": "v0"}}
+    pairs = {"k1": ("claim a", "claim b")}
+
+    missing = gen_stance_cache.select_missing_pairs(existing, pairs)
+
+    assert missing == {"k1": ("claim a", "claim b")}
+
+
+def test_select_missing_pairs_treats_malformed_entry_as_missing():
+    existing = {"k1": "not-a-dict"}
+    pairs = {"k1": ("claim a", "claim b")}
+
+    missing = gen_stance_cache.select_missing_pairs(existing, pairs)
+
+    assert missing == {"k1": ("claim a", "claim b")}
+
+
+def test_select_missing_pairs_empty_when_all_cached():
+    existing = {
+        "k1": {"label": "entailment", "version": STANCE_CACHE_VERSION},
+        "k2": {"label": "neutral", "version": STANCE_CACHE_VERSION},
+    }
+    pairs = {"k1": ("a", "b"), "k2": ("c", "d")}
+
+    assert gen_stance_cache.select_missing_pairs(existing, pairs) == {}
+
+
+# ── issue #84：classify_pairs 的 budget_check 提前中止（保留 partial entries）──
+
+
+def test_classify_pairs_budget_check_none_preserves_old_behavior():
+    """`budget_check` 預設 `None` 時完全不檢查，逐字沿用既有行為（回歸）。"""
+    fake_client = _FakeClient(label="entailment")
+    pairs = {"k1": ("a", "b")}
+
+    entries = gen_stance_cache.classify_pairs(fake_client, pairs)
+
+    assert entries == {"k1": {"label": "entailment", "version": STANCE_CACHE_VERSION}}
+
+
+def test_classify_pairs_stops_early_on_budget_exhausted_keeps_partial_entries():
+    fake_client = _FakeClient(label="entailment")
+    pairs = {
+        "k1": ("claim a", "claim b"),
+        "k2": ("claim c", "claim d"),
+    }
+    calls = {"n": 0}
+
+    def _budget_check() -> bool:
+        calls["n"] += 1
+        return calls["n"] <= 1  # 只放行第一次呼叫，第二次視為額度用盡
+
+    with pytest.raises(gen_stance_cache.BudgetExhausted) as excinfo:
+        gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=_budget_check)
+
+    # 第一對已成功呼叫並保留在 exception 攜帶的 partial entries 中
+    assert fake_client.calls == [("claim a", "claim b")]
+    assert excinfo.value.entries == {
+        "k1": {"label": "entailment", "version": STANCE_CACHE_VERSION}
+    }
+
+
+def test_classify_pairs_budget_check_blocks_before_any_call():
+    fake_client = _FakeClient(label="entailment")
+    pairs = {"k1": ("a", "b")}
+
+    with pytest.raises(gen_stance_cache.BudgetExhausted) as excinfo:
+        gen_stance_cache.classify_pairs(fake_client, pairs, budget_check=lambda: False)
+
+    assert fake_client.calls == []
+    assert excinfo.value.entries == {}
+
+
+# ── issue #84：_make_budget_check（組合既有 budget_guard 公開函式）───────────
+
+
+def test_make_budget_check_true_when_cap_has_room(monkeypatch):
+    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
+    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
+    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
+    fake_client = _FakeClient()
+
+    check = gen_stance_cache._make_budget_check(fake_client)
+
+    assert check() is True
+
+
+def test_make_budget_check_false_when_model_unpriced(monkeypatch):
+    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: False)
+    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
+    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
+    fake_client = _FakeClient()
+
+    check = gen_stance_cache._make_budget_check(fake_client)
+
+    assert check() is False
+
+
+def test_make_budget_check_false_when_cap_already_spent(monkeypatch):
+    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
+    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
+    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 3.0)
+    fake_client = _FakeClient()
+
+    check = gen_stance_cache._make_budget_check(fake_client)
+
+    assert check() is False
+
+
+def test_make_budget_check_false_when_cap_non_positive(monkeypatch):
+    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
+    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 0.0)
+    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
+    fake_client = _FakeClient()
+
+    check = gen_stance_cache._make_budget_check(fake_client)
+
+    assert check() is False
+
+
+def test_make_budget_check_fail_safe_when_ledger_read_raises(monkeypatch):
+    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
+    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
+
+    def _boom():
+        raise RuntimeError("simulated ledger read failure")
+
+    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", _boom)
+    fake_client = _FakeClient()
+
+    check = gen_stance_cache._make_budget_check(fake_client)
+
+    assert check() is False
+
+
+def test_make_budget_check_accounts_in_flight_cost_events(monkeypatch):
+    """同一批次內已經真呼叫、還沒寫回帳本的花費（`client.cost_events`）也要
+    算進去，避免批次內連續多筆呼叫繞過 cap。"""
+    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
+    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
+    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 2.995)
+    fake_client = _CostAccruingFakeClient(cost_per_call=0.01)
+    fake_client.cost_events.append({"cost_usd": 0.01})  # 本批次已花掉一筆
+
+    check = gen_stance_cache._make_budget_check(fake_client)
+
+    # 已花費(帳本 2.995) + 本批次已花(0.01) = 3.005 >= cap(3.0) → False
+    assert check() is False
+
+
+def test_make_budget_check_ignores_missing_cost_events_attr(monkeypatch):
+    """假 client（無 `cost_events` 屬性）不應炸掉——`getattr(..., [])` 視為 0。"""
+    monkeypatch.setattr(gen_stance_cache, "stance_model_priced", lambda: True)
+    monkeypatch.setattr(gen_stance_cache, "daily_cap_usd", lambda: 3.0)
+    monkeypatch.setattr(gen_stance_cache, "daily_cost_usd", lambda: 0.0)
+    fake_client = _FakeClient()  # 沒有 cost_events 屬性
+
+    check = gen_stance_cache._make_budget_check(fake_client)
+
+    assert check() is True
+
+
+# ── issue #84：_record_batch_cost_to_ledger（把批次花費記回帳本）──────────────
+
+
+def test_record_batch_cost_to_ledger_writes_total(monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(gen_stance_cache, "append_run", lambda record: captured.append(record))
+    fake_client = _CostAccruingFakeClient(cost_per_call=0.01)
+    fake_client.cost_events = [
+        {"model": "haiku", "tokens_in": 10, "tokens_out": 5, "cost_usd": 0.01},
+        {"model": "haiku", "tokens_in": 12, "tokens_out": 6, "cost_usd": 0.012},
+    ]
+
+    gen_stance_cache._record_batch_cost_to_ledger(fake_client, now_fn=lambda: 1_700_000_000.0)
+
+    assert len(captured) == 1
+    record = captured[0]
+    assert record["question_type"] == "stance_prewarm"
+    assert record["total_cost_usd"] == 0.022
+    assert len(record["calls"]) == 2
+
+
+def test_record_batch_cost_to_ledger_noop_when_no_cost_events_attr(monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(gen_stance_cache, "append_run", lambda record: captured.append(record))
+    fake_client = _FakeClient()  # 沒有 cost_events 屬性
+
+    gen_stance_cache._record_batch_cost_to_ledger(fake_client)
+
+    assert captured == []
+
+
+def test_record_batch_cost_to_ledger_noop_when_cost_events_empty():
+    fake_client = _CostAccruingFakeClient()
+    fake_client.cost_events = []
+
+    # 不 monkeypatch append_run：若真的呼叫到就會真的寫檔（本測試隔離環境
+    # TRUSTFORGE_COST_LEDGER_PATH 由 conftest 的 autouse fixture 隔離到 tmp_path，
+    # 但這裡直接斷言 no-op，確保空 cost_events 完全不觸碰帳本）。
+    gen_stance_cache._record_batch_cost_to_ledger(fake_client)  # 不應丟例外
+
+
+# ── issue #84：main() 端到端 — 冪等（全命中 → 不建 client）+ budget 提前中止 ──
+
+
+def test_main_all_cached_skips_building_client_entirely(tmp_path, monkeypatch):
+    out_path = tmp_path / "stance_cache.json"
+    out_path.write_text(
+        json.dumps({
+            "k1": {"label": "entailment", "version": STANCE_CACHE_VERSION},
+            "k2": {"label": "neutral", "version": STANCE_CACHE_VERSION},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
+
+    def _must_not_be_called():
+        raise AssertionError("全部命中時不該建立真 client（#84 冪等：零額外外呼）")
+
+    monkeypatch.setattr(gen_stance_cache, "_build_live_client", _must_not_be_called)
+
+    rc = gen_stance_cache.main(["--out", str(out_path)])
+
+    assert rc == 0
+
+
+def test_main_budget_exhausted_mid_batch_writes_partial_result(tmp_path, monkeypatch, capsys):
+    out_path = tmp_path / "stance_cache.json"
+    out_path.write_text(
+        json.dumps({"keep-me": {"label": "contradiction", "version": STANCE_CACHE_VERSION}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
+    fake_client = _FakeClient(label="entailment")
+    monkeypatch.setattr(gen_stance_cache, "_build_live_client", lambda: fake_client)
+
+    calls = {"n": 0}
+
+    def _budget_check_factory(client):
+        def _check() -> bool:
+            calls["n"] += 1
+            return calls["n"] <= 1
+        return _check
+
+    monkeypatch.setattr(gen_stance_cache, "_make_budget_check", _budget_check_factory)
+
+    rc = gen_stance_cache.main(["--out", str(out_path)])
+
+    assert rc == 2  # budget 提前中止的專屬回傳碼
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert written["keep-me"] == {"label": "contradiction", "version": STANCE_CACHE_VERSION}
+    # 只有第一個 pair（k1）成功，k2 因 budget 中止未寫入
+    assert "k1" in written
+    assert "k2" not in written
+    captured = capsys.readouterr()
+    assert "預算" in captured.err
+
+
+def test_main_records_batch_cost_to_ledger_on_success(tmp_path, monkeypatch):
+    out_path = tmp_path / "stance_cache.json"
+    monkeypatch.setattr(gen_stance_cache, "enumerate_candidate_pairs", lambda: _FAKE_PAIRS)
+    fake_client = _CostAccruingFakeClient(label="entailment", cost_per_call=0.01)
+    monkeypatch.setattr(gen_stance_cache, "_build_live_client", lambda: fake_client)
+    captured: list[dict] = []
+    monkeypatch.setattr(gen_stance_cache, "append_run", lambda record: captured.append(record))
+
+    rc = gen_stance_cache.main(["--out", str(out_path)])
+
+    assert rc == 0
+    assert len(captured) == 1
+    assert captured[0]["total_cost_usd"] == 0.02  # 2 pairs * 0.01
