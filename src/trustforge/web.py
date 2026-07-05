@@ -2456,6 +2456,22 @@ def _aggregate_trust_components(evidence: list) -> dict:
     return {k: sums[k] / n for k in keys}
 
 
+def build_trust_radar(evidence: list) -> dict:
+    """Issue #85（多維度信任雷達 API 欄位）：`/api/analyze` 回應 `radar` 欄位的
+    純函式組裝層——直接複用 `aggregate_trust_by_kind()`（`_render_trust_radar()`
+    渲染 SSR `/analyze`「多維度信任雷達」區塊已經在用的同一個函式、同一份
+    `evidence`），刻意**不**重新實作聚合邏輯，確保 SSR HTML 顯示的各維度信任
+    數值與這裡回傳給 JSON API 的數字永遠逐一相等、不會走兩條計算路徑產生
+    漂移。$0：純重新聚合既有 `Evidence.trust`（已含操縱扣分，見
+    `trust.scoring.score()`），不觸發任何連接器/Bedrock 呼叫。
+
+    回傳值結構、鍵集合（`KIND_REPUTATION` 全集）、`has_data`/`single_source`
+    誠實標記皆與 `aggregate_trust_by_kind()` docstring 完全一致，這裡不重複
+    說明。
+    """
+    return aggregate_trust_by_kind(evidence)
+
+
 def _render_run_stats(evidence: list, log=None) -> str:
     """左側 Query Console 面板的「RUN STATS」區塊——只用本次分析已產生的真實
     物件（`evidence`/`log.events`）算出，沒有任何示範/假造欄位（#24）：
@@ -3958,6 +3974,14 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     `evidence` 陣列裡，純渲染層再彙總一次，不多打任何連接器/Bedrock 呼叫
     （$0）。
 
+    Issue #85（多維度信任雷達 API 欄位，#81 定案落點為此 `/api/analyze`，
+    不是 issue 原文寫的 SSR `/analyze.json`，SSR 已凍結新功能）：payload 另外
+    掛上 `radar`（單幣）／`radar_a`、`radar_b`（比較）欄位，透過
+    `build_trust_radar()` 組裝——跟上面已存在的 `trust_radar`/
+    `trust_radar_a`/`trust_radar_b` 是同一份資料、同一個底層函式
+    （`aggregate_trust_by_kind`），刻意保留舊欄位不動（既有前端/測試已依賴），
+    `radar*` 是本輪 issue #85 驗收標準點名的欄位名稱，純新增、不覆蓋。
+
     完全重用 `_do_analyze`/`_do_comparison`（含其內建限流與驗證），不重寫
     分析邏輯。
 
@@ -4110,11 +4134,13 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "report_a": dataclasses.asdict(report_a),
                 "evidence_a": [ev.to_dict() for ev in evidence_a],
                 "trust_radar_a": aggregate_trust_by_kind(evidence_a),
+                "radar_a": build_trust_radar(evidence_a),
                 "trust_components_aggregate_a": _aggregate_trust_components(evidence_a),
                 "price_provenance_a": _price_provenance_data(evidence_a),
                 "report_b": dataclasses.asdict(report_b),
                 "evidence_b": [ev.to_dict() for ev in evidence_b],
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
+                "radar_b": build_trust_radar(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
                 "execution_log": log.events,
@@ -4134,6 +4160,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "report": dataclasses.asdict(report),
                 "evidence": [ev.to_dict() for ev in evidence],
                 "trust_radar": aggregate_trust_by_kind(evidence),
+                "radar": build_trust_radar(evidence),
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
                 "price_provenance": _price_provenance_data(evidence),
                 "execution_log": log.events,

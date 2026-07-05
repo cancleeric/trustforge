@@ -35,7 +35,7 @@ from trustforge.ingestion.cache import (
 )
 from trustforge import ledger as ledger_module
 from trustforge.ledger import JsonlLedger
-from trustforge.schema import COIN_POOL
+from trustforge.schema import COIN_POOL, Evidence, QuestionType
 
 
 def _stop_overview_bg_thread_for_test() -> None:
@@ -265,6 +265,104 @@ def test_api_analyze_comparison_envelope():
         assert f"trust_radar{suffix}" in data
         assert f"trust_components_aggregate{suffix}" in data
         assert f"price_provenance{suffix}" in data
+
+
+# ---------------------------------------------------------------------------
+# /api/analyze — issue #85：`radar` 欄位（同源 `aggregate_trust_by_kind`／
+# `build_trust_radar`，與 SSR `/analyze` 既有「多維度信任雷達」逐一相等，
+# 含操縱旗標案例）
+# ---------------------------------------------------------------------------
+
+def test_api_analyze_radar_field_equals_build_trust_radar_single_and_comparison():
+    """`radar`（單幣）／`radar_a`、`radar_b`（比較）跟既有 `trust_radar*` 欄位
+    是同一個底層函式（`aggregate_trust_by_kind`／`web.build_trust_radar`）對
+    同一份 `evidence` 算出的結果——彼此逐字相等，不會有第二條計算路徑。"""
+    from trustforge.agent.orchestrator import aggregate_trust_by_kind
+
+    code, body = web._handle_api_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["radar test"]},
+        client_ip="10.1.1.1",
+    )
+    assert code == 200
+    data = _envelope(body)["data"]
+    assert "radar" in data and isinstance(data["radar"], dict)
+    assert data["radar"] == data["trust_radar"]
+
+    evidence = web._do_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["radar test"]}
+    )[1]
+    assert data["radar"] == aggregate_trust_by_kind(evidence)
+
+    code2, body2 = web._handle_api_analyze(
+        {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]},
+        client_ip="10.1.1.2",
+    )
+    assert code2 == 200
+    data2 = _envelope(body2)["data"]
+    assert data2["radar_a"] == data2["trust_radar_a"]
+    assert data2["radar_b"] == data2["trust_radar_b"]
+
+
+def test_api_analyze_radar_reflects_manipulation_flag_and_matches_ssr_render(monkeypatch):
+    """驗收標準：(1) 同一組輸入下，SSR `/analyze` HTML 內既有的各維度信任
+    數值與 `/api/analyze` JSON `radar` 欄位數字逐一相等（同源計算，不得二次
+    計算產生漂移）；(2) 含操縱旗標（manipulation flag）案例，確認 `radar`
+    正確反映該維度信任值被拉低。
+
+    monkeypatch `web.run`（`_do_analyze`/SSR `/analyze` 內部共用的同一個
+    pipeline 入口），讓兩條各自獨立發出的請求拿到逐字相同的 `evidence`，
+    才能在同一次測試裡嚴格比對「同一組輸入」下兩條路由的數字，不受
+    pipeline 本身非我們要驗證的變異來源干擾。
+    """
+    from trustforge.agent.orchestrator import aggregate_trust_by_kind
+
+    real_report, real_evidence, real_log = web.run(
+        "BTC", "radar manip test", QuestionType.MULTI_SOURCE, offline=True
+    )
+    manip_ev = Evidence(
+        source="suspicious-blog",
+        fetched_at="2026-01-01T00:00:00Z",
+        content_reference="馬上暴漲，錯過等一年，限時上車",
+        related_claim=real_evidence[0].related_claim if real_evidence else "c1",
+        kind="news",
+        trust=0.05,
+        flags=["馬上", "暴漲"],
+    )
+    evidence = list(real_evidence) + [manip_ev]
+
+    def fake_run(coin, query, qtype, **kwargs):
+        return real_report, evidence, real_log
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    ssr_code, ssr_body = _do_get(
+        "/analyze?coin=BTC&type=multi_source&q=radar+manip+test"
+    )
+    assert ssr_code == 200
+
+    api_code, api_body = web._handle_api_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["radar manip test"]},
+        client_ip="10.1.1.3",
+    )
+    assert api_code == 200
+    data = _envelope(api_body)["data"]
+
+    expected_dims = aggregate_trust_by_kind(evidence)
+    assert data["radar"] == expected_dims
+
+    # 操縱旗標案例：帶 flags 的低分證據把 news 維度平均信任拉低。
+    assert manip_ev.flags
+    assert expected_dims["news"]["has_data"] is True
+    assert expected_dims["news"]["trust"] < 0.5
+
+    # SSR HTML（`_render_trust_radar` 用 f"{trust:.2f}"）跟 JSON `radar`
+    # 欄位的數字逐一相等，不允許任何一邊二次計算產生漂移。
+    for kind, dim in expected_dims.items():
+        if dim["has_data"]:
+            assert f'{dim["trust"]:.2f}' in ssr_body, (
+                f"SSR /analyze 缺少 {kind} 維度 trust={dim['trust']:.2f}，"
+                "與 /api/analyze radar 欄位不一致"
+            )
 
 
 def test_api_analyze_invalid_coin_returns_400_generic_message():
