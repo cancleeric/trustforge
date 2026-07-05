@@ -145,10 +145,13 @@ P3 cutover+回歸 QA 再 3-5 天，**風險：時間緊繃、無安全邊際**�
 - PR #92（`/analyze`／`/analyze.json` SSR dedup，harper+codex 雙審）審查輪
   已明確此後 SSR 路由**只補安全/防重複計費類緊急修補**，不再承接新功能，
   與 P3 cutover 後「SSR 僅供緊急回滾」的定位一致。
-- 對外只留單一公開入口（nginx :443），python 收斂只聽 `127.0.0.1:8080`
-  （見 `src/trustforge/web.py::main()` 的 `TRUSTFORGE_BIND_HOST`／
-  `TRUSTFORGE_TRUST_PROXY` 邏輯，`TRUST_PROXY=1` 時強制收斂綁定避免被繞過
-  直打），避免偽造 `X-Real-IP`/`X-Forwarded-For` 繞過限流。
+- python 收斂只聽 `127.0.0.1:8080`，不對外（見 `src/trustforge/web.py::main()`
+  的 `TRUSTFORGE_BIND_HOST`／`TRUSTFORGE_TRUST_PROXY` 邏輯，`TRUST_PROXY=1`
+  時強制收斂綁定避免被繞過直打），避免偽造 `X-Real-IP`/`X-Forwarded-For`
+  繞過限流。對外實際公開監聽的是 nginx 的 **:80（明碼）+ :443（TLS）兩個
+  listener**（非只有 :443）：:80 保留 `/healthz` 明碼直通與 ACME HTTP-01
+  challenge，其餘一律 301 轉 :443；Security Group 對應也是 tcp/80、tcp/443
+  兩條都要開，細節見 `docs/AWS-ARCHITECTURE.md`「前後端分離對外拓樸」一節。
 
 ### 為何不採方案 A（web.py 為主的混合式：由 web.py 直接 serve Vite 靜態資產）
 
@@ -157,12 +160,15 @@ Issue #81 並列的方案 A **不是放棄 React**，而是混合式拓樸：web
 build 出靜態資產後**由 web.py 自己 serve**（inline `<script>` 載入建置產物），
 不加 nginx 這層。定案不採，理由：
 
-- **等於推翻已上線、五輪複審過的 cutover 鏈路**：方案 B（nginx serve 靜態
-  + `/api/*` 反代）已於 v0.6.1 上線，`cutover_switch.sh` 的 host-wide lock、
-  SSM ResponseCode 97/98 傳遞、absent-symlink rollback 分支、TLS/HSTS-safe
-  rollback 皆已在生產跑過並驗證過（見本文件「決策定案」實測紀錄）。改採
-  方案 A 必須把這整條入口從 nginx 換回 web.py 自己 serve 靜態檔，**是新的
-  變更**，不是「維持現狀」——現狀就是方案 B。
+- **等於推翻已上線、多輪 codex 複審過的 cutover 鏈路**：方案 B（nginx serve
+  靜態 + `/api/*` 反代）已於 v0.6.1 上線且目前線上就是這個拓樸（見本文件
+  「決策定案」實測紀錄——`react` 模式的 happy path 已在生產跑通並驗證）；
+  `cutover_switch.sh` 內另外還有 host-wide lock、SSM ResponseCode 97/98
+  傳遞、absent-symlink rollback 分支、TLS/HSTS-safe rollback 等安全網，這
+  些是針對「切換失敗時」的防護分支，經多輪 codex 複審加固，**未見證據
+  顯示曾在生產真的觸發過失敗回滾**——即便如此，改採方案 A 仍必須把整條
+  入口從 nginx 換回 web.py 自己 serve 靜態檔，**是新的變更**，不是「維持
+  現狀」——現狀就是方案 B。
 - **web.py 要新學會兩件事，且都要重新過安全審查**：(1) serve Vite build
   出的 hashed 靜態資產＋inline `<script>` 載入建置產物，(2) CSP 從目前
   `CSP_MODE=react` 的 `script-src 'self'`（外部 hashed 檔案、無 inline）
