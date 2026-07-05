@@ -150,23 +150,30 @@ P3 cutover+回歸 QA 再 3-5 天，**風險：時間緊繃、無安全邊際**�
   `TRUSTFORGE_TRUST_PROXY` 邏輯，`TRUST_PROXY=1` 時強制收斂綁定避免被繞過
   直打），避免偽造 `X-Real-IP`/`X-Forwarded-For` 繞過限流。
 
-### 為何不採方案 A（continue SSR、放棄 React 遷移）
+### 為何不採方案 A（web.py 為主的混合式：由 web.py 直接 serve Vite 靜態資產）
 
-Issue #81 曾並列方案 A（維持現有 3149 行 zero-JS SSR、不做前後端分離）。
-定案不採，理由：
+Issue #81 並列的方案 A **不是放棄 React**，而是混合式拓樸：web.py 仍是
+對外唯一入口（SSR 為主），React 只負責雷達／趨勢圖等複雜視覺化，經 Vite
+build 出靜態資產後**由 web.py 自己 serve**（inline `<script>` 載入建置產物），
+不加 nginx 這層。定案不採，理由：
 
-- **已驗證的部署鏈路會被推翻**：nginx cutover／TLS／HSTS-safe rollback／
-  `cutover_switch.sh` 五輪複審（含 host-wide lock、SSM ResponseCode 97/98
-  傳遞、absent-symlink rollback 分支）已在生產跑過並驗證過，方案 A 等於
-  丟棄這整條已驗證基建，換回單一 monolith zero-JS 路徑，屬**倒退**而非
-  維持現狀。
-- **決賽前（8/1-2）不宜再增變動面**：現在（7/6）距決賽剩不到 4 週，改採
-  方案 A 需要重新規劃前端 UI（雷達／PIT／confidence gauge 等已在 React
-  端完成的視覺化元件無法沿用零-JS SSR），風險與工作量都高於「維持方案 B
-  現狀 + 凍結 SSR 新功能」。
-- **方案 B 已通過分頁 QA 驗收（P2）**：`## 6` 所列 P1/P2 階段性驗收（首頁／
-  分析結果頁／status／costs／comparison／錯誤頁）已完成資料一致性比對，
-  沒有需要走回頭路的已知缺陷。
+- **等於推翻已上線、五輪複審過的 cutover 鏈路**：方案 B（nginx serve 靜態
+  + `/api/*` 反代）已於 v0.6.1 上線，`cutover_switch.sh` 的 host-wide lock、
+  SSM ResponseCode 97/98 傳遞、absent-symlink rollback 分支、TLS/HSTS-safe
+  rollback 皆已在生產跑過並驗證過（見本文件「決策定案」實測紀錄）。改採
+  方案 A 必須把這整條入口從 nginx 換回 web.py 自己 serve 靜態檔，**是新的
+  變更**，不是「維持現狀」——現狀就是方案 B。
+- **web.py 要新學會兩件事，且都要重新過安全審查**：(1) serve Vite build
+  出的 hashed 靜態資產＋inline `<script>` 載入建置產物，(2) CSP 從目前
+  `CSP_MODE=react` 的 `script-src 'self'`（外部 hashed 檔案、無 inline）
+  退回混合模式（inline script 需要 nonce/hash 或放寬 `script-src`），這兩
+  處都動了 harper（CISO）已審過的安全邊界，需要重新走一輪 CSP 審查，不是
+  零成本切換。
+- **決賽前（8/1-2）不宜再增變動面**：現在（7/6）距決賽剩不到 4 週，方案 B
+  現狀已通過分頁 QA 驗收（`## 6` 所列 P1/P2 首頁／分析結果頁／status／
+  costs／comparison／錯誤頁資料一致性比對），沒有已知缺陷需要靠換架構解
+  決；換成方案 A 純粹是拿已驗證穩定的入口去換一個沒上過生產的新拓樸，風險
+  與工作量都高於「維持方案 B 現狀 + 凍結 SSR 新功能」。
 
 **結論**：Issue #81 就此定案為方案 B，本文件與 `deploy/nginx.conf`、
 `deploy/cutover_switch.sh` 為最終依據；後續若要重新開放方案 A 討論，需
