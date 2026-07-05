@@ -361,12 +361,15 @@ _PAGE = """<!doctype html><html lang="zh-Hant" data-theme="dark"><head><meta cha
     送出沒有成本風險**。現況（離線 sample、`llm_mode=off`）重複送出頂多
     白工重算一次確定性結果，$0 代價，可以接受；但 Bedrock 開啟後
     （`llm_mode=bedrock`）每次重複送出都是真實 token 成本，`:active` 這個
-    best-effort 視覺回饋完全防不住連點/導航中再點造成的重複計費。真正的
-    防重複送出需要 JS 監聽 submit 事件（會破壞現有 strict CSP `default-src
-    'none'`）或 server 端 idempotency key／去重機制，兩者都是架構層級決策
-    （非本輪 CTO 快修範圍），已列為 follow-up 記錄在
-    `docs/OPTIMIZATION-PLAN-weakness.md` 第 5 項，**Bedrock 正式開啟前必須
-    先做**。 */
+    best-effort 視覺回饋完全防不住連點/導航中再點造成的重複計費。
+
+    #51 + #87（issue 併軌，已完成）：真正的 server 端 idempotency key／
+    去重機制已補上——見 `do_GET` 內 `/analyze`、`/analyze.json` 分支套用
+    的 in-flight single-flight dedup（跟 `/api/analyze` 共用同一套
+    `_analyze_dedup_key`/`_dedup_analyze_call`，見 `_handle_api_analyze`
+    docstring）。此處 `:active` CSS 視覺回饋本身沒有變動、依然只是
+    best-effort 的即時視覺提示，**真正**擋住重複計費的是 server 端這層
+    dedup，不是這段 CSS——兩者職責不同，不衝突。 */
  button[type=submit]{{touch-action:manipulation}}
  button[type=submit]:active{{display:flex;align-items:center;justify-content:center;gap:.5rem;cursor:progress;pointer-events:none;background:#1a5fc7}}
  button[type=submit]:active .tf-btn-label{{display:none}}
@@ -3760,6 +3763,49 @@ def _analyze_online_stance_force_offline_for_caller(qs: dict, client_ip: str) ->
     return _online_stance_force_offline(client_ip)
 
 
+def _analyze_dedup_coin_key(qtype: QuestionType, qs: dict, query: str) -> str | None:
+    """#51+#87（SSR `/analyze`／`/analyze.json` 併入既有 dedup）：把請求
+    正規化成 `_analyze_dedup_key()` 用的 `coin_key`——跟 `_handle_api_analyze`
+    內建構 `coin_key` 逐步驟同一套邏輯（single 幣種 `.upper()` + 白名單；
+    comparison 用 `_parse_comparison_coins()` 依請求原始順序 join、不排序，
+    理由見 `_analyze_dedup_key` docstring），確保 `/analyze`、
+    `/analyze.json`、`/api/analyze` 三條路由對同一組參數算出來的 `coin_key`
+    逐字相同——這是「跨路由共用同一把 dedup key space」（#87 要求）成立的
+    前提：`_analyze_dedup_key()` 本身只吃 `(qtype, coin_key, query, qs,
+    force_offline)`，完全不知道呼叫端是哪條路由，只要三條路由都呼叫這個
+    同一個函式算 `coin_key`，key 就自然一致，不需要額外的路由感知邏輯。
+
+    刻意**不 raise**、驗證失敗（幣種不在白名單／無法解析出兩個幣種）一律
+    回傳 `None`：呼叫端（SSR `/analyze` 路由）把 `None` 當成「這次請求不
+    套用 dedup」的訊號，直接落回呼叫 `_do_analyze`/`_do_comparison` 的
+    #51 之前原始呼叫方式，讓兩者各自既有的 `ValueError` 訊息原封不動顯示
+    ——不在這裡另外重造一套錯誤文案，避免使用者因為多了 dedup 分支而看到
+    跟先前不一致的錯誤訊息/行為。
+
+    `_handle_api_analyze` 本身**不**呼叫這個函式——它已經有自己一套回 400
+    JSON 信封的驗證段落（維持原樣不動，避免觸碰已經過多輪 codex 複審、
+    屬於安全關鍵路徑的既有程式碼），這裡只是讓 SSR 路由用同一套正規化
+    邏輯，兩邊各自獨立驗證，但演算法逐步驟一致，保證算出來的 `coin_key`
+    相同。
+    """
+    if qtype == QuestionType.COMPARISON:
+        coin_raw = (qs.get("coin", [""])[0]).strip()
+        coin2_raw = (qs.get("coin2", [""])[0]).strip()
+        if coin2_raw and "," not in coin_raw:
+            coin_raw = f"{coin_raw},{coin2_raw}"
+        try:
+            pair = _parse_comparison_coins(coin_raw, query)
+        except ValueError:
+            return None
+        if pair is None:
+            return None
+        return ",".join(pair)
+    coin_raw = (qs.get("coin", ["BTC"])[0]).strip().upper()
+    if coin_raw not in COIN_POOL:
+        return None
+    return coin_raw
+
+
 def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     """#51 server-side idempotency（防重複送出）核心：同一把 `key`
     （見 `_analyze_dedup_key` docstring）同時只有一個真正在跑
@@ -3913,7 +3959,17 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     （$0）。
 
     完全重用 `_do_analyze`/`_do_comparison`（含其內建限流與驗證），不重寫
-    分析邏輯；既有 `/analyze`、`/analyze.json` 兩條路由原樣不動。
+    分析邏輯。
+
+    #51 + #87（issue 併軌，SSR `/analyze`／`/analyze.json` 防重複計費，
+    見 `do_GET` 內對應段落）：`/analyze`、`/analyze.json` 已改套用跟這裡
+    完全同一套 in-flight dedup（`_analyze_dedup_key`/`_dedup_analyze_call`/
+    `_AnalyzeFlight`），且透過 `_analyze_dedup_coin_key` 跟這裡建構
+    `coin_key` 同一套正規化邏輯，三條路由共用同一把 dedup key space——
+    同一組參數不管打哪條路由，都只會有一個 leader 真的呼叫
+    `_do_analyze`/`_do_comparison`。三條路由各自的請求驗證／輸出格式
+    （HTML／裸 JSON／`{ok,data,error}` 信封）仍完全獨立，這裡指的「共用」
+    僅限 dedup 協調層本身。
 
     codex 複審 HIGH（同分支修復）：`_do_analyze`/`_do_comparison` 內部的
     `ValueError` 其實混雜兩種完全不同性質的情況（見兩者 docstring）——
@@ -4451,8 +4507,12 @@ class Handler(BaseHTTPRequestHandler):
 
         # 前後端分離 Phase 1（task #28）：純新增 JSON API 端點，統一
         # `{ok,data,error}` 信封，見 `_handle_api_*` 系列函式 docstring/
-        # 模組頂部大段說明。⛔ 完全獨立於下方既有 SSR 路由，不改動、不共用
-        # 任何既有分支的程式碼路徑。
+        # 模組頂部大段說明。⛔ 請求驗證／輸出格式渲染完全獨立於下方既有 SSR
+        # 路由，不改動、不共用任何既有渲染分支的程式碼路徑；唯一刻意共用
+        # 的例外是 #51+#87 的 dedup 協調層本身（`_analyze_dedup_key`/
+        # `_dedup_analyze_call`）——`/api/analyze` 與下方 SSR `/analyze`／
+        # `/analyze.json` 共用同一把 dedup key space，見 `_handle_api_analyze`
+        # docstring。
         if u.path == "/api/health":
             code, body = _handle_api_health()
             return self._send(code, body, "application/json; charset=utf-8")
@@ -4518,11 +4578,73 @@ class Handler(BaseHTTPRequestHandler):
             # _active_mode 為純函式（只讀 qs），提前呼叫不影響限流/分析行為。
             active_mode = _active_mode(qs)
 
+            # #51 + #87（issue 併軌）：SSR `/analyze`／`/analyze.json` 套用既有
+            # `/api/analyze` 那套 in-flight single-flight dedup（
+            # `_analyze_dedup_key`/`_dedup_analyze_call`/`_AnalyzeFlight`，見
+            # 模組頂部大段說明與 `_handle_api_analyze` docstring），不另造
+            # 一套——`_analyze_dedup_key()` 只吃 qtype/coin_key/query/qs/
+            # force_offline，跟路由本身無關；這裡用跟 `_handle_api_analyze`
+            # 完全同一套正規化邏輯算出 `coin_key`（`_analyze_dedup_coin_key`），
+            # 保證同一組參數不管打 `/analyze`、`/analyze.json` 還是
+            # `/api/analyze`，都落在同一把 dedup key，達成跨路由 coalescing
+            # （#87 要求：同參數跨路由並發也只執行一次）。
+            #
+            # fail-safe（要求：dedup 機制本身故障時寧可放行也不可讓 `/analyze`
+            # 整條掛掉）：`coin_key`/`dedup_key` 準備階段（純函式，理論上不會
+            # 拋例外，但保守處理）若意外失敗，log 後把 `dedup_key` 降級成
+            # `None`——下方直接落回 #51 之前的原始呼叫方式（`_do_analyze`/
+            # `_do_comparison` 預設 `enforce_rate_limit=True`），不套用 dedup，
+            # 但整條請求仍正常服務，不會因為 dedup 準備失敗而整條 502。找不到
+            # 合法 coin/pair（本來就會在 `_do_analyze`/`_do_comparison` 內部
+            # ValueError）時 `_analyze_dedup_coin_key` 同樣回傳 `None`，同一條
+            # fail-safe 路徑處理，讓既有錯誤訊息原封不動顯示。
+            _dedup_query = qs.get("q", [f"分析該幣種{_DATE_AGNOSTIC_QUERY_SUFFIX}"])[0]
+            dedup_key = None
+            force_offline = False
+            try:
+                coin_key = _analyze_dedup_coin_key(qtype, qs, _dedup_query)
+            except Exception:
+                logging.exception(
+                    "TrustForge /analyze dedup coin_key 準備失敗，"
+                    "fail-safe 放行不套用 dedup"
+                )
+                coin_key = None
+            if coin_key is not None:
+                try:
+                    force_offline = _analyze_online_stance_force_offline_for_caller(
+                        qs, client_ip
+                    )
+                    dedup_key = _analyze_dedup_key(
+                        qtype=qtype, coin_key=coin_key, query=_dedup_query, qs=qs,
+                        force_offline=force_offline,
+                    )
+                except Exception:
+                    logging.exception(
+                        "TrustForge /analyze dedup key 準備失敗，"
+                        "fail-safe 放行不套用 dedup"
+                    )
+                    dedup_key = None
+
             try:
                 if qtype == QuestionType.COMPARISON:
-                    report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
-                        qs, client_ip=client_ip
-                    )
+                    if dedup_key is not None:
+                        # 跟 `_handle_api_analyze` 同樣的道理：每個 caller 先過
+                        # 自己的限流，再進 dedup——不管最後是 leader、follower，
+                        # 都不能繞過自己的限流；真正呼叫 `_do_comparison`（只有
+                        # leader 會執行到）改傳 `enforce_rate_limit=False`，避免
+                        # 同一個 caller 的 IP 被重複計入限流 bucket 兩次。
+                        _analyze_enforce_caller_rate_limit(qs, client_ip)
+                        report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+                            dedup_key,
+                            lambda: _do_comparison(
+                                qs, client_ip=client_ip, enforce_rate_limit=False,
+                                online_stance_force_offline=force_offline,
+                            ),
+                        )
+                    else:
+                        report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
+                            qs, client_ip=client_ip
+                        )
                     query = qs.get("q", [""])[0]
                     if u.path == "/analyze.json":
                         payload = {
@@ -4555,7 +4677,20 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     )
                 else:
-                    report, evidence, log = _do_analyze(qs, client_ip=client_ip)
+                    if dedup_key is not None:
+                        # 同上：leader/follower 都不能繞過自己的限流，只有
+                        # leader 會真的呼叫 `_do_analyze`（改傳
+                        # `enforce_rate_limit=False`，避免重複計入 bucket）。
+                        _analyze_enforce_caller_rate_limit(qs, client_ip)
+                        report, evidence, log = _dedup_analyze_call(
+                            dedup_key,
+                            lambda: _do_analyze(
+                                qs, client_ip=client_ip, enforce_rate_limit=False,
+                                online_stance_force_offline=force_offline,
+                            ),
+                        )
+                    else:
+                        report, evidence, log = _do_analyze(qs, client_ip=client_ip)
                     if u.path == "/analyze.json":
                         payload = {
                             "version": VERSION,
@@ -4584,6 +4719,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(429, page(
                     _render_error_card(
                         "請求過於頻繁", str(exc), retry_href=self.path,
+                    ),
+                    active_mode=active_mode))
+            except _AnalyzeDedupTimeout as exc:
+                # #51+#87：跟 `_handle_api_analyze` 一致——dedup follower
+                # bounded wait 逾時（前一個相同請求執行太久），回可重試的
+                # 503，不落回自己真的跑一次（見 `_dedup_analyze_call`/
+                # `_AnalyzeDedupTimeout` docstring），避免「等太久」跟
+                # 「真的失敗」混在一起放大重複真連接器/Bedrock 呼叫。
+                return self._send(503, page(
+                    _render_error_card(
+                        "服務忙碌中", str(exc), retry_href=self.path,
                     ),
                     active_mode=active_mode))
             except ValueError as exc:

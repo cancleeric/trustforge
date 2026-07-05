@@ -2095,6 +2095,198 @@ def test_api_analyze_dedup_key_json_serialization_broadly_collision_resistant(mo
 
 
 # ---------------------------------------------------------------------------
+# #51 + #87（issue 併軌）：SSR `/analyze`／`/analyze.json` 防重複計費——套用
+# 跟上方 `/api/analyze` 完全同一套 in-flight dedup（`_analyze_dedup_key`/
+# `_dedup_analyze_call`/`_AnalyzeFlight`），且跟 `/api/analyze` 共用同一把
+# dedup key space（`_analyze_dedup_coin_key`，見 `do_GET` 對應段落）。
+# ---------------------------------------------------------------------------
+
+def _do_get_from_ip(path: str, ip: str) -> tuple[int, str]:
+    """比照上方 `_do_get`，但允許指定 `client_address`——SSR 路由的 dedup
+    需要驗證「每個 caller 各自過自己的限流」（見 `_analyze_enforce_caller_
+    rate_limit`），跨 IP 測試需要能各自指定不同的來源 IP。"""
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = (ip, 12345)
+    h.path = path
+    h.wfile = BytesIO()
+    h.headers = Message()
+
+    captured = []
+    h.send_response = lambda code: captured.append(code)
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    body = h.wfile.getvalue().decode("utf-8")
+    return captured[0], body
+
+
+def test_ssr_analyze_dedup_concurrent_identical_requests_call_run_once(monkeypatch):
+    """驗收標準 #1：同參數 `/analyze` 並行連發 3 次，真正呼叫 `pipeline.run`
+    應只有 1 次，其餘 in-flight follower 共用同一份真實結果（回應 HTML
+    body 逐字相同）——跟 `test_api_analyze_dedup_concurrent_identical_
+    requests_call_run_once` 驗證同一件事，換成走 SSR `/analyze` 路由。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter, delay=0.2)
+
+    path = "/analyze?coin=BTC&type=multi_source&q=ssr-dedup-concurrent-test"
+    n_workers = 3
+    barrier = threading.Barrier(n_workers)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        barrier.wait()
+        code, body = _do_get_from_ip(path, "10.2.1.1")
+        with results_lock:
+            results.append((code, body))
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == n_workers
+    assert all(code == 200 for code, _ in results), results
+    assert counter.n == 1, f"應只有 1 次真的呼叫 pipeline.run，實際 {counter.n} 次"
+    bodies = {body for _, body in results}
+    assert len(bodies) == 1, "並行重複請求應共用同一份真實結果"
+
+
+def test_ssr_analyze_json_dedup_concurrent_identical_requests_call_run_once(monkeypatch):
+    """同上，換成 `/analyze.json`（裸 JSON 匯出路由）。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter, delay=0.2)
+
+    path = "/analyze.json?coin=ETH&type=multi_source&q=ssr-json-dedup-concurrent-test"
+    n_workers = 3
+    barrier = threading.Barrier(n_workers)
+    results: list[tuple[int, str]] = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        barrier.wait()
+        code, body = _do_get_from_ip(path, "10.2.1.2")
+        with results_lock:
+            results.append((code, body))
+
+    threads = [threading.Thread(target=_worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == n_workers
+    assert all(code == 200 for code, _ in results), results
+    assert counter.n == 1, f"應只有 1 次真的呼叫 pipeline.run，實際 {counter.n} 次"
+    bodies = {body for _, body in results}
+    assert len(bodies) == 1, "並行重複請求應共用同一份真實結果"
+
+
+def test_ssr_analyze_dedup_sequential_requests_each_fresh_after_previous_completes(monkeypatch):
+    """驗收標準 #2：視窗外（前一次已完成後）的下一次請求應正常觸發新執行
+    ——跟 `/api/analyze` 一致，dedup 只做 in-flight coalescing、**不含**
+    TTL 結果快取（見 `_dedup_analyze_call` docstring Round 12 codex 複審：
+    加密市場資料時效敏感，TTL 快取會 replay 過時分析結果，已被移除）。
+    每一次前一個請求真的執行完成後，之後**循序**進來的下一個請求（不管
+    是 1 秒後還是 30 秒後）一律 fresh 重新呼叫，不吃殘留的 in-flight
+    entry（見 autouse fixture `_reset_analyze_dedup_state`：每個測試前後
+    都會清空 `_analyze_dedup_inflight`，這裡額外直接驗證『同一個 process
+    內連續兩次』這個更貼近真實使用情境的路徑）。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    path = "/analyze?coin=SOL&type=multi_source&q=ssr-dedup-sequential-test"
+    code1, _ = _do_get_from_ip(path, "10.2.1.3")
+    code2, _ = _do_get_from_ip(path, "10.2.1.3")
+
+    assert code1 == 200 and code2 == 200
+    assert counter.n == 2, (
+        f"視窗外（前一次執行完成後）的下一次請求應正常觸發新執行，"
+        f"實際 pipeline.run 只被呼叫 {counter.n} 次"
+    )
+
+
+def test_analyze_ssr_and_api_share_same_cross_route_dedup_key_space(monkeypatch):
+    """驗收標準 #3：跨路由——`/analyze`（SSR）與 `/api/analyze`（JSON）同
+    參數並行送出，也該共用同一把 dedup key、只觸發 1 次真實呼叫。這是
+    #87 對 #51 既有機制的擴充要求：不只 `/api/analyze` 內部去重，`/analyze`
+    ／`/analyze.json`／`/api/analyze` 三條路由要共用同一把 dedup key
+    space（見 `_analyze_dedup_coin_key` docstring）。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter, delay=0.3)
+
+    ssr_path = "/analyze?coin=BTC&type=multi_source&q=cross-route-dedup-test"
+    api_qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["cross-route-dedup-test"]}
+
+    results: list[int] = []
+    results_lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def _worker_ssr():
+        barrier.wait()
+        code, _ = _do_get_from_ip(ssr_path, "10.2.1.4")
+        with results_lock:
+            results.append(code)
+
+    def _worker_api():
+        barrier.wait()
+        code, _ = web._handle_api_analyze(api_qs, client_ip="10.2.1.5")
+        with results_lock:
+            results.append(code)
+
+    t_ssr = threading.Thread(target=_worker_ssr)
+    t_api = threading.Thread(target=_worker_api)
+    t_ssr.start()
+    t_api.start()
+    t_ssr.join(timeout=10)
+    t_api.join(timeout=10)
+
+    assert len(results) == 2
+    assert all(code == 200 for code in results), results
+    assert counter.n == 1, (
+        f"`/analyze` 與 `/api/analyze` 同參數並行請求應共用同一把 dedup key，"
+        f"真正呼叫 pipeline.run 應只有 1 次，實際 {counter.n} 次"
+    )
+
+
+def test_analyze_ssr_dedup_coin_key_matches_api_analyze_coin_key_comparison():
+    """`_analyze_dedup_coin_key`（SSR 路由用）跟 `_handle_api_analyze` 內建構
+    `coin_key` 的既有邏輯，comparison 題型下算出的 `coin_key` 必須逐字
+    相同，這是跨路由共用 dedup key space 成立的前提（見
+    `_analyze_dedup_coin_key` docstring）。"""
+    qtype = web.QuestionType("comparison")
+    qs = {"coin": ["ETH"], "coin2": ["BTC"], "type": ["comparison"], "q": ["x"]}
+    coin_key = web._analyze_dedup_coin_key(qtype, qs, "x")
+    assert coin_key == "ETH,BTC", (
+        "comparison coin_key 應依請求原始順序（coin_a,coin_b）組成，"
+        f"不能排序，實際 {coin_key!r}"
+    )
+
+
+def test_analyze_ssr_dedup_coin_key_invalid_coin_returns_none_fail_safe(monkeypatch):
+    """`_analyze_dedup_coin_key` 找不到合法幣種時回傳 `None`（不 raise）
+    ——SSR `/analyze` 路由據此判斷「這次不套用 dedup」，直接落回原始呼叫
+    方式，讓 `_do_analyze` 既有的 `ValueError` 錯誤訊息原封不動顯示。這裡
+    直接端到端驗證：非法幣種（`DOGE`，非白名單）打 `/analyze` 仍然正常回
+    400 錯誤頁，不會因為新增的 dedup 分支而行為改變，也不會誤觸真依賴
+    呼叫。"""
+    counter = _CallCounter()
+    _wrap_counting_run(monkeypatch, counter)
+
+    qtype = web.QuestionType("multi_source")
+    assert web._analyze_dedup_coin_key(qtype, {"coin": ["DOGE"]}, "x") is None
+
+    code, body = _do_get_from_ip(
+        "/analyze?coin=DOGE&type=multi_source&q=ssr-invalid-coin-test", "10.2.1.6"
+    )
+    assert code == 400, body
+    assert counter.n == 0, "非法幣種不該碰任何依賴呼叫"
+
+
+# ---------------------------------------------------------------------------
 # /api/status
 # ---------------------------------------------------------------------------
 
