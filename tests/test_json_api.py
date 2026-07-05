@@ -2286,6 +2286,59 @@ def test_analyze_ssr_dedup_coin_key_invalid_coin_returns_none_fail_safe(monkeypa
     assert counter.n == 0, "非法幣種不該碰任何依賴呼叫"
 
 
+def test_ssr_analyze_json_dedup_timeout_returns_json_not_html(monkeypatch):
+    """codex MEDIUM 複審修復：`/analyze.json` 是 JSON 端點契約（成功時回
+    `application/json`），dedup follower bounded wait 逾時
+    （`_AnalyzeDedupTimeout`）先前這裡的 except 分支不分路由一律回
+    `page(...)` HTML，導致 `/analyze.json` 違約收到 HTML 而非 JSON。這裡
+    直接監控逾時情境：monkeypatch `web._dedup_analyze_call` 讓它 raise
+    `_AnalyzeDedupTimeout`（模擬 leader 執行太久、follower 等到逾時），
+    斷言 `/analyze.json` 回應的 status、Content-Type、body 三者都符合
+    JSON 端點契約——`/analyze`（HTML 版本）維持原行為不受影響（見下方
+    對照斷言）。"""
+
+    def _raise_timeout(key, compute):
+        raise web._AnalyzeDedupTimeout("模擬 leader 執行逾時，请稍後重試")
+
+    monkeypatch.setattr(web, "_dedup_analyze_call", _raise_timeout)
+
+    def _do_get_capture(path: str, ip: str) -> tuple[int, dict, str]:
+        h = web.Handler.__new__(web.Handler)
+        h.client_address = (ip, 12345)
+        h.path = path
+        h.wfile = BytesIO()
+        h.headers = Message()
+        captured_headers: dict = {}
+        captured = []
+        h.send_response = lambda code: captured.append(code)
+        h.send_header = lambda name, val: captured_headers.setdefault(name, val)
+        h.end_headers = lambda: None
+        h.do_GET()
+        body = h.wfile.getvalue().decode("utf-8")
+        return captured[0], captured_headers, body
+
+    code, headers, body = _do_get_capture(
+        "/analyze.json?coin=BTC&type=multi_source&q=ssr-json-dedup-timeout-test",
+        "10.2.1.7",
+    )
+    assert code == 503, body
+    assert headers["Content-Type"] == "application/json; charset=utf-8", headers
+    parsed = json.loads(body)  # 契約：body 必須是可被 json.loads 解析的合法 JSON
+    assert parsed["ok"] is False
+    assert parsed["error"]["code"] == "timeout"
+
+    # 對照組：`/analyze`（HTML 版本）在同樣的逾時情境下維持原行為（品牌化
+    # HTML 錯誤卡），確認這次修復只精準命中 `/analyze.json`，沒有動到
+    # `/analyze` 既有的 HTML 錯誤頁行為。
+    code_html, headers_html, body_html = _do_get_capture(
+        "/analyze?coin=BTC&type=multi_source&q=ssr-html-dedup-timeout-test",
+        "10.2.1.8",
+    )
+    assert code_html == 503, body_html
+    assert headers_html["Content-Type"] == "text/html; charset=utf-8", headers_html
+    assert "服務忙碌中" in body_html
+
+
 # ---------------------------------------------------------------------------
 # /api/status
 # ---------------------------------------------------------------------------

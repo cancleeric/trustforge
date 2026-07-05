@@ -4727,6 +4727,21 @@ class Handler(BaseHTTPRequestHandler):
                 # 503，不落回自己真的跑一次（見 `_dedup_analyze_call`/
                 # `_AnalyzeDedupTimeout` docstring），避免「等太久」跟
                 # 「真的失敗」混在一起放大重複真連接器/Bedrock 呼叫。
+                #
+                # codex MEDIUM 複審修復：`/analyze.json` 是 JSON 端點契約
+                # （成功時回 `application/json`，見上方 `if u.path ==
+                # "/analyze.json"` 分支），先前這裡不分路由一律回
+                # `page(...)` HTML，導致 follower 逾時時 `/analyze.json`
+                # 違約回了 HTML 而非 JSON。這裡按 `u.path` 分流：
+                # `/analyze.json` 回 JSON 錯誤 body（沿用 `/api/analyze`
+                # 既有的 `_json_envelope_err` 錯誤格式慣例），`/analyze`
+                # 維持原本的 HTML 品牌化錯誤卡。
+                if u.path == "/analyze.json":
+                    return self._send(
+                        503,
+                        _json_envelope_err("timeout", str(exc)),
+                        "application/json; charset=utf-8",
+                    )
                 return self._send(503, page(
                     _render_error_card(
                         "服務忙碌中", str(exc), retry_href=self.path,
