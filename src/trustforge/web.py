@@ -3,8 +3,16 @@
 路由：
   GET /            首頁表單（選幣種/題型/問題）
   GET /healthz     健康檢查（App Runner 用）→ 200 "ok"
+  GET /llms.txt    AI agent 一頁式指南（繁中+英文對照，純讀檔回傳，見 repo
+                   根目錄 `llms.txt`；react/nginx 拓樸下的等效副本見
+                   `frontend/public/llms.txt`）
   GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>][&sample=1] → HTML 報告
   GET /analyze.json 同上參數 → JSON {report, evidence, log}
+
+第三輪 AI 友善（`/api/*` 系列見下方 `_handle_api_*`）另補：
+  GET /api/openapi.yaml  本 API 的 OpenAPI 3.1 spec（純讀檔回傳
+                          `docs/api/openapi.yaml`，逐一對照本檔真實回應
+                          形狀，不是另案文件轉抄）
 
 三檔模式（`data_mode`/`llm_mode` 解耦，見 `pipeline.run`）：
   1. 真資料·$0（**預設**，世界第一重寫 Phase 2 起）：未帶任何 mode 參數即走
@@ -35,6 +43,7 @@ import threading
 import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -4767,6 +4776,9 @@ def _handle_api_status(client_ip: str = "") -> tuple[int, str]:
             # 讓監控端不需要 grep server log 也能看到「dedup 正在悄悄
             # 降級」——見 `_dedup_prep_failure_health`/`_record_dedup_prep_failure`。
             "dedup": _dedup_prep_failure_health(),
+            # AI 友善第三輪：純附加指引欄位，指向本 API 的 OpenAPI spec 與
+            # agent 一頁指南，不影響既有讀取端（多一個鍵，不改既有鍵）。
+            "docs": {"openapi": "/api/openapi.yaml", "llms_txt": "/llms.txt"},
         }
         return 200, _json_envelope_ok(data)
     except Exception:
@@ -4881,6 +4893,71 @@ def _handle_api_health() -> tuple[int, str]:
         return 502, _json_envelope_err("upstream_error", "健康檢查暫時無法讀取，請稍後再試")
 
 
+# ---------------------------------------------------------------------------
+# 第三輪 AI 友善：OpenAPI spec／llms.txt 純靜態回應（純 stdlib 讀檔，見
+# CTO PR「feat/ai-friendly-openapi」）——不重用 `_json_envelope_*`
+# 信封（這兩個端點回的是文件本身，不是 `{ok,data,error}` API payload），
+# 也不是 SSR 頁面渲染路徑，走的是新的 `/api/*` 與站根純附加路徑，不牽動任
+# 何既有渲染分支。
+#
+# repo 根解析比照 `ledger.py::_default_ledger_path()` 既有慣例——**不**在
+# import 當下凍結成模組級常數，改用函式每次呼叫動態讀 `TRUSTFORGE_HOME`：
+#   - 本機/Docker（`Dockerfile` 的 `WORKDIR /app`）：未設 `TRUSTFORGE_HOME`
+#     時 fallback 用 `Path(__file__).resolve().parents[2]`（`web.py` 位於
+#     `src/trustforge/web.py` → parents[2] = repo 根/`/app`）。
+#   - EC2 部署（`deploy/deploy_ec2.sh`）：zip 展開後套件位於
+#     `/opt/trustforge/trustforge/web.py`（**不是** `src/trustforge/...`），
+#     `parents[2]` 會指到 `/opt` 而非 `/opt/trustforge`——systemd unit 已明確
+#     設 `TRUSTFORGE_HOME=/opt/trustforge`，這裡讀那個值即可正確對齊，不能
+#     依賴 fallback 算出來的路徑。
+# 兩種部署都需要把檔案實際帶進去：Docker 見 `Dockerfile` 的
+# `COPY docs ./docs`／`COPY llms.txt ./llms.txt`；EC2 見
+# `deploy/deploy_ec2.sh` 打包 zip 那段一併 `cp -r docs`／`cp llms.txt`。
+# ---------------------------------------------------------------------------
+def _app_root() -> Path:
+    home = os.getenv("TRUSTFORGE_HOME")
+    if home:
+        return Path(home)
+    return Path(__file__).resolve().parents[2]
+
+
+def _handle_openapi_spec() -> tuple[int, str, str]:
+    """`GET /api/openapi.yaml`：純讀檔回傳本 API 的 OpenAPI 3.1 spec——不快
+    取、每次請求即時讀當下部署的檔案內容，避免 spec 與實際部署版本不同步。
+    回傳 `(code, body, content_type)`。檔案缺席（部署漏帶）回 404 純文字，
+    不假裝有 spec 可用。
+    """
+    try:
+        path = _app_root() / "docs" / "api" / "openapi.yaml"
+        text = path.read_text(encoding="utf-8")
+        return 200, text, "application/yaml; charset=utf-8"
+    except Exception:
+        # codex 複審警告：比照其餘 6 個 `/api/*` handler 的防禦邊界慣例
+        # （`except Exception`，不只是 `OSError`）——除了檔案缺席，權限/編碼
+        # 等非預期例外也不該讓 traceback 外洩，一律安全降級成純文字 404。
+        logging.exception("TrustForge /api/openapi.yaml error（spec 檔案讀取失敗）")
+        return 404, "OpenAPI spec 檔案未部署\n", "text/plain; charset=utf-8"
+
+
+def _handle_llms_txt() -> tuple[int, str, str]:
+    """`GET /llms.txt`：純讀檔回傳 agent 一頁式指南（繁中+英文對照）——單一
+    來源為 repo 根 `llms.txt`；react/nginx 拓樸下由 nginx 直接從
+    `frontend/public/llms.txt`（Vite build 進 dist 根目錄）靜態回應，不經過
+    這支 handler，兩份檔案內容須保持一致（見 `tests/test_ai_friendly_api.py`
+    的同步斷言）。檔案缺席回 404 純文字，不假裝有指南可用。
+    """
+    try:
+        path = _app_root() / "llms.txt"
+        text = path.read_text(encoding="utf-8")
+        return 200, text, "text/plain; charset=utf-8"
+    except Exception:
+        # codex 複審警告：比照其餘 6 個 `/api/*` handler 的防禦邊界慣例
+        # （`except Exception`，不只是 `OSError`）——除了檔案缺席，權限/編碼
+        # 等非預期例外也不該讓 traceback 外洩，一律安全降級成純文字 404。
+        logging.exception("TrustForge /llms.txt error（檔案讀取失敗）")
+        return 404, "llms.txt 未部署\n", "text/plain; charset=utf-8"
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra_headers=None):
         b = body.encode("utf-8")
@@ -4941,6 +5018,13 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
 
+        # 第三輪 AI 友善：站根一頁式 agent 指南，純讀檔回傳，見
+        # `_handle_llms_txt` docstring（react/nginx 拓樸下改由 nginx 直接
+        # 從 `frontend/public/llms.txt` 靜態回應，不經過這支 python handler）。
+        if u.path == "/llms.txt":
+            code, body, ctype = _handle_llms_txt()
+            return self._send(code, body, ctype)
+
         # 前後端分離 Phase 1（task #28）：純新增 JSON API 端點，統一
         # `{ok,data,error}` 信封，見 `_handle_api_*` 系列函式 docstring/
         # 模組頂部大段說明。⛔ 請求驗證／輸出格式渲染完全獨立於下方既有 SSR
@@ -4967,6 +5051,12 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/analyze":
             code, body = _handle_api_analyze(qs, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
+        # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
+        # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封
+        # （回的是 spec 文件本身），不設限流（零依賴讀檔，比照 `/api/health`）。
+        if u.path == "/api/openapi.yaml":
+            code, body, ctype = _handle_openapi_spec()
+            return self._send(code, body, ctype)
 
         # CEO 決策（PR #39，收斂）：theme toggle 切換機制（/theme 路由、
         # rtok render cache、cookie 讀寫、header ★ 按鈕）整個拆除——rtok

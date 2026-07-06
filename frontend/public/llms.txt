@@ -1,0 +1,134 @@
+# TrustForge
+
+> 加密市場分析 AI Agent：多源資料 + 可解釋信任評分的信任情報 API。
+> A crypto market trust-intelligence API: multi-source evidence, weighted
+> and explainable, for both humans and AI agents.
+
+## 產品是什麼 / What this is
+
+TrustForge 針對某個幣種（BTC/ETH/SOL/BNB/XRP）的市場問題，彙整多個獨立資料
+來源（價格 OHLCV、鏈上、監管、交易所、新聞、社群、CoinGecko 即時報價/情緒/
+開發活動），逐筆計算信任分（信譽 × 0.5 ＋ 佐證 × 0.25 ＋ 時效 × 0.15 − 操縱
+× 0.40），彙整成結構化報告：事實 → 推論 → 結論，並標明資訊完整度與已知限制。
+TrustForge 不是投資建議工具，是「多源資訊的信任提煉」。
+
+TrustForge aggregates independent evidence (price OHLCV, on-chain,
+regulatory, exchange, news, social, CoinGecko live price/sentiment/dev
+activity) for a coin-level market question, scores each piece of evidence
+(reputation × 0.5 + corroboration × 0.25 + recency × 0.15 − manipulation ×
+0.40), and returns a structured report: facts → inferences → conclusion,
+with an explicit confidence/limits section. This is a trust-distillation
+product, not investment advice.
+
+## 完整契約 / Full contract
+
+- OpenAPI 3.1 spec（逐一對照真實程式碼，非文件轉抄）：`/api/openapi.yaml`
+- Full field-by-field OpenAPI 3.1 spec (mirrors real handler code, not
+  transcribed prose): `/api/openapi.yaml`
+
+## 端點清單 / Endpoints (one line each)
+
+- `GET /api/health` — JSON 健康檢查，零 I/O，無 rate limit / zero-dependency health check, no rate limit
+- `GET /api/status` — 連接器健康/資料鮮度/版本/uptime / connector health, data freshness, version, uptime
+- `GET /api/costs` — 成本帳本累計花費 + 依 model 分組 / cumulative cost ledger by model
+- `GET /api/overview` — 多幣總覽快照，讀既有排程結果 / multi-coin overview snapshots from scheduled jobs
+- `GET /api/history?coin=BTC&days=30` — 單幣按日信任序列，PIT / per-coin daily trust history, point-in-time
+- `GET /api/analyze?coin=BTC&type=multi_source&q=...` — 核心多源分析（見下方模式與限流）/ core multi-source analysis (see modes & rate limits below)
+- `GET /api/openapi.yaml` — 本文件對應的完整 spec（純讀檔回傳，未部署回 404）/ this guide's full OpenAPI spec (served from disk, always current; 404 if not deployed)
+- `GET /llms.txt` — 本文件（此頁，純讀檔回傳，未部署回 404）/ this document (this page, served from disk; 404 if not deployed)
+
+⚠️ **共用限流桶（shared rate-limit bucket）**：`/api/status`、
+`/api/costs`、`/api/overview`、`/api/history` **四個端點共用同一個
+per-IP bucket**（同一 IP 呼叫這四個端點的次數合計，不是各自獨立計數）：
+30 秒滑動視窗內合計最多 10 次——不要以為每個端點各自有 10 次配額。
+`/api/analyze` 是另一組完全獨立的 bucket（見下方），互不扣抵。
+Shared rate-limit bucket: `/api/status`/`/api/costs`/`/api/overview`/
+`/api/history` share **one single** per-IP bucket (calls to these four
+endpoints count against the same pool, not 10 each) — max 10 combined
+requests per IP per 30s window. `/api/analyze` uses a fully separate,
+independent bucket (see below).
+
+## /api/analyze 三檔模式 / three modes
+
+1. 真資料·$0（**預設**，未帶任何 mode 參數即生效，60s 視窗每 IP 60 次）/
+   real data, $0 (**default**, no mode params needed, 60 req / 60s per IP)
+2. 離線示範沙盒 `?sample=1`（樣本資料 + Bedrock stub，$0）/
+   offline sandbox `?sample=1` (sample data + Bedrock stub, $0)
+3. 真 Bedrock `?live=1` + `X-Live-Token` header（60s 視窗每 IP 5 次緊門檻）/
+   real Bedrock `?live=1` + `X-Live-Token` header (5 req / 60s per IP, strict)
+
+## 信封格式 / Envelope
+
+成功 `{"ok": true, "data": {...}}`；失敗 `{"ok": false, "error": {"code",
+"message"}}`，`code` 只會是 `bad_request` / `rate_limited` / `timeout` /
+`upstream_error` 其中之一。同源、不開 CORS、全部唯讀。
+
+Success: `{"ok": true, "data": {...}}`. Failure: `{"ok": false, "error":
+{"code", "message"}}`, where `code` is one of `bad_request` /
+`rate_limited` / `timeout` / `upstream_error`. Same-origin, no CORS,
+read-only.
+
+## 鐵律：缺鍵＝未評估，不是零／安全 / Rule: missing key means "not evaluated", never zero/safe
+
+多個欄位在「沒有算過」時完全省略該鍵，而不是填 0/null 假裝「查過、結果安全」。
+**不可**用 `.get(key, 0)` 這種預設值語意直接拿去做風險判斷。
+
+Several fields are entirely omitted when "not computed", rather than
+being filled with 0/null to pretend a safe/low result. Do **not** read
+these with a default-value fallback (e.g. `.get(key, 0)`) and treat the
+default as a risk verdict.
+
+- `trust_radar.<kind>.trust`：`has_data=false` 時為 `null`，不是 `0` /
+  `null` when `has_data=false`, never `0`.
+- `trust_components_aggregate`：整輪 evidence 都無分項資料時回空物件 `{}` /
+  empty object `{}` when no evidence in the run carries component scores.
+- `/api/overview` 與 `/api/history` 的 `manip_score` / `manip_score_mean`：
+  只有本輪 evidence 算得出操縱分項時才出現，缺席**不代表無操縱風險** /
+  only present when the run's evidence yields a manipulation signal;
+  absence does **not** mean "no manipulation risk".
+- `manip_score`（worst-case `max()`）才是操縱風險 **primary** 訊號，
+  `manip_score_mean` 只是輔助判讀，不參與風險分級 /
+  `manip_score` (worst-case `max()`) is the **primary** manipulation-risk
+  signal; `manip_score_mean` is auxiliary only and never drives risk
+  tiering — one confirmed hit must never be diluted by averaging.
+
+## 信任分 / 資訊完整度 / 棄權（三態）/ Trust score, confidence, and abstention
+
+- `report.calibrated_confidence` 是**簡化版分位數校準**，不是嚴謹 conformal
+  prediction 的覆蓋率承諾——不可轉述成任何形式的正確度百分比或「肯定不會
+  錯」之類的宣稱。
+  `report.calibrated_confidence` is a **simplified quantile calibration**,
+  not a rigorous conformal-prediction coverage promise — never restate it
+  as a correctness percentage or an absolute-certainty claim.
+- `report.decision_state` 三態：`abstain`（校準信心 < 0.35 或去重支撐來源
+  數 < 2，刻意不給方向性結論）／`low_confidence`（有方向但信心偏低）／
+  `normal`。缺鍵一律正規化為 `normal`（保守 fallback）。
+  Three states of `report.decision_state`: `abstain` (calibrated
+  confidence < 0.35 or fewer than 2 independent supporting sources —
+  deliberately withholds a directional conclusion) / `low_confidence`
+  (directional but low confidence) / `normal`. A missing key normalizes
+  to `normal` as a conservative fallback.
+- `report.confidence` 是未校準裸均值，僅供對照，不要單獨拿來判斷風險。
+  `report.confidence` is the raw, uncalibrated mean — for reference only,
+  never use it alone for risk judgments.
+
+## 依賴失敗語意 / Dependency-failure semantics
+
+除 `/api/health` 外，底層 cache/帳本讀取真的失敗（非合法 miss）一律回
+`502 upstream_error`，不會悄悄降級成看起來正常的 `200`。`/api/status` 的
+`cache_backend.degraded`／`primary_connected` 誠實標記 primary→fallback
+降級（fallback 成功仍回 200，但不假裝 primary 正常）。
+
+Except for `/api/health`, a genuine read failure (not a legitimate cache
+miss) always returns `502 upstream_error` — never a silently degraded
+`200`. `/api/status`'s `cache_backend.degraded` / `primary_connected`
+honestly reports primary→fallback degradation (fallback success still
+returns 200, but never claims the primary is healthy when it isn't).
+
+---
+（本檔為 python 直連 SSR 拓樸的站根副本；react/nginx 拓樸下的等效副本見
+`frontend/public/llms.txt`，兩者內容須保持一致。）
+
+(This file is the site-root copy for the direct python/SSR deployment
+topology. The equivalent copy for the react/nginx topology lives at
+`frontend/public/llms.txt`; both must stay byte-identical.)
