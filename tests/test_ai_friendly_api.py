@@ -13,7 +13,9 @@ DynamoDB），`/api/analyze` 走 `sample=1` 離線示範沙盒，不觸發真 Be
 """
 from __future__ import annotations
 
+import inspect
 import json
+import re
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -21,13 +23,44 @@ from pathlib import Path
 import pytest
 
 from trustforge import web
+from trustforge.ingestion.cache import (
+    TRUST_SNAPSHOT_SOURCE,
+    cache_key,
+    cache_set_if_newer,
+    trust_snapshot_history_key,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _OPENAPI_PATH = _REPO_ROOT / "docs" / "api" / "openapi.yaml"
 _LLMS_TXT_ROOT_PATH = _REPO_ROOT / "llms.txt"
 _LLMS_TXT_FRONTEND_PATH = _REPO_ROOT / "frontend" / "public" / "llms.txt"
 
-_OVERCLAIM_TERMS = ("保證", "準確率")
+_OVERCLAIM_TERMS = (
+    "保證",
+    "準確率",
+    "一定準",
+    "100%",
+    "百分之百",
+    "零風險",
+    "保准",
+    "穩賺",
+    "穩賺不賠",
+)
+
+
+def _real_documented_paths() -> set[str]:
+    """從 `web.py::Handler.do_GET` 原始碼推導本次 OpenAPI spec 應該涵蓋的
+    路由集合（`if u.path == "/xxx":` 字面比對），不手動硬編一份清單——
+    codex 複審警告：先前硬編 `/api/*` 清單時 `/llms.txt` 被漏掉，測試名
+    承諾的「涵蓋每個真實路由」實際上沒做到。
+
+    只挑 `/api/*` 與 `/llms.txt`：SSR HTML 頁面路由（`/`、`/status`、
+    `/costs`、`/analyze`、`/analyze.json` 等）不是本 OpenAPI spec 的契約
+    範圍，本就不該出現在 `docs/api/openapi.yaml` 裡。
+    """
+    source = inspect.getsource(web.Handler.do_GET)
+    all_paths = set(re.findall(r'u\.path == "(/[^"]*)"', source))
+    return {p for p in all_paths if p == "/llms.txt" or p.startswith("/api/")}
 
 
 @pytest.fixture(autouse=True)
@@ -86,18 +119,15 @@ def test_do_get_openapi_route_returns_200_yaml():
 
 
 def test_openapi_spec_covers_every_real_handled_path():
-    """spec 必須逐一列出 `do_GET` 實際會處理的每個 `/api/*` 路徑——防止漏寫
-    掉某個端點（code 是 source of truth，不是反過來拿 spec 去 codegen）。"""
+    """spec 必須逐一列出 `do_GET` 實際會處理的每個 `/api/*`／`/llms.txt`
+    路徑——防止漏寫掉某個端點（code 是 source of truth，不是反過來拿 spec
+    去 codegen）。清單從 `do_GET` 原始碼推導（`_real_documented_paths()`），
+    不手動硬編，避免測試名承諾的保護範圍跟真實路由表脫鉤（codex 複審：先前
+    硬編清單漏掉 `/llms.txt`）。"""
+    real_paths = _real_documented_paths()
+    assert "/llms.txt" in real_paths, "推導邏輯本身壞了：/llms.txt 應該要被抓到"
     text = _OPENAPI_PATH.read_text(encoding="utf-8")
-    for path in (
-        "/api/health",
-        "/api/status",
-        "/api/costs",
-        "/api/overview",
-        "/api/history",
-        "/api/analyze",
-        "/api/openapi.yaml",
-    ):
+    for path in real_paths:
         assert f"{path}:" in text, f"spec 缺少路徑 {path}"
 
 
@@ -327,11 +357,112 @@ def test_api_overview_matches_documented_shape(json_cache_backend):
     _assert_shape(data, {"coins": list}, context="/api/overview")
 
 
+def test_api_overview_manip_score_present_and_absent_pass_through_not_defaulted(
+    json_cache_backend,
+):
+    """spec 主打的「缺鍵＝未評估，不是零」鐵律，在這之前只用空陣列驗過形狀
+    ——完全沒驗過 API 層真的 pass-through 這個語意（codex 複審建議）。這裡
+    寫兩筆真快照：BTC 帶 `manip_score`/`manip_score_mean`（正例，值必須
+    原封不動穿透，不能被改名/預設成別的數字）；ETH 完全不帶（負例，回應
+    裡這兩個鍵必須整個不存在，不能悄悄補 `0`）。"""
+    snap_with_manip = {
+        "coin": "BTC",
+        "trust_score": 0.71,
+        "direction": "偏多",
+        "calibrated_confidence": 0.6,
+        "decision_state": "normal",
+        "generated_at": "2026-07-01T00:00:00Z",
+        "manip_score": 0.83,
+        "manip_score_mean": 0.21,
+    }
+    snap_without_manip = {
+        "coin": "ETH",
+        "trust_score": 0.55,
+        "direction": "中性",
+        "calibrated_confidence": 0.45,
+        "decision_state": "low_confidence",
+        "generated_at": "2026-07-01T00:00:00Z",
+    }
+    for coin, snap in (("BTC", snap_with_manip), ("ETH", snap_without_manip)):
+        result = cache_set_if_newer(
+            json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, coin), [snap],
+            fetched_at=1000.0, allow_json_fallback=True,
+        )
+        assert result.ok
+
+    code, body = web._handle_api_overview(client_ip="10.9.9.41")
+    assert code == 200
+    coins = {c["coin"]: c for c in json.loads(body)["data"]["coins"]}
+
+    btc = coins["BTC"]
+    assert btc["manip_score"] == pytest.approx(0.83), "worst-case manip_score 未原封不動穿透"
+    assert btc["manip_score_mean"] == pytest.approx(0.21), "manip_score_mean 未原封不動穿透"
+
+    eth = coins["ETH"]
+    assert "manip_score" not in eth, "ETH 本輪無操縱訊號，manip_score 不該悄悄補值"
+    assert "manip_score_mean" not in eth, "ETH 本輪無操縱訊號，manip_score_mean 不該悄悄補值"
+
+
 def test_api_history_matches_documented_shape(json_cache_backend):
     code, body = web._handle_api_history({"coin": ["BTC"], "days": ["7"]}, client_ip="10.9.9.5")
     assert code == 200
     data = json.loads(body)["data"]
     _assert_shape(data, {"coin": str, "days": int, "history": list}, context="/api/history")
+
+
+def test_api_history_manip_score_present_and_absent_pass_through_not_defaulted(
+    json_cache_backend,
+):
+    """`/api/overview` 那則測試的 `/api/history` 對照版——`HistoryEntry` 的
+    `manip_score`/`manip_score_mean` 缺鍵語意也要在 API 層實測，不能只在
+    `/api/overview` 驗一次就假設兩條路徑行為一致（`get_trust_history()`
+    走的是不同的 cache key/讀取路徑，見 `HistoryEntry` schema 註解）。"""
+    import datetime as _dt
+
+    day = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    snap_with_manip = {
+        "coin": "BTC",
+        "trust_score": 0.71,
+        "direction": "偏多",
+        "calibrated_confidence": 0.6,
+        "decision_state": "normal",
+        "generated_at": f"{day}T00:00:00Z",
+        "manip_score": 0.9,
+        "manip_score_mean": 0.3,
+    }
+    result = cache_set_if_newer(
+        json_cache_backend, trust_snapshot_history_key("BTC", day), [snap_with_manip],
+        fetched_at=1000.0, allow_json_fallback=True,
+    )
+    assert result.ok
+
+    snap_without_manip = {
+        "coin": "ETH",
+        "trust_score": 0.55,
+        "direction": "中性",
+        "calibrated_confidence": 0.45,
+        "decision_state": "low_confidence",
+        "generated_at": f"{day}T00:00:00Z",
+    }
+    result = cache_set_if_newer(
+        json_cache_backend, trust_snapshot_history_key("ETH", day), [snap_without_manip],
+        fetched_at=1000.0, allow_json_fallback=True,
+    )
+    assert result.ok
+
+    code, body = web._handle_api_history({"coin": ["BTC"], "days": ["1"]}, client_ip="10.9.9.51")
+    assert code == 200
+    history = json.loads(body)["data"]["history"]
+    assert len(history) == 1
+    assert history[0]["manip_score"] == pytest.approx(0.9)
+    assert history[0]["manip_score_mean"] == pytest.approx(0.3)
+
+    code, body = web._handle_api_history({"coin": ["ETH"], "days": ["1"]}, client_ip="10.9.9.52")
+    assert code == 200
+    history = json.loads(body)["data"]["history"]
+    assert len(history) == 1
+    assert "manip_score" not in history[0], "ETH 本輪無操縱訊號，manip_score 不該悄悄補值"
+    assert "manip_score_mean" not in history[0], "ETH 本輪無操縱訊號，manip_score_mean 不該悄悄補值"
 
 
 def test_api_history_bad_coin_matches_documented_error_shape(json_cache_backend):

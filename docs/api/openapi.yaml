@@ -56,7 +56,7 @@ info:
        promise）。** `report.calibrated_confidence` 是簡化版分位數校準
        （quantile calibration），**不是**嚴謹 conformal prediction 的覆蓋率
        （coverage）承諾——不可把它包裝或轉述成任何形式的正確度百分比或
-       「一定準」之類的宣稱。信任分/資訊完整度只反映「本輪可取得的多源
+       「肯定不會錯」之類的宣稱。信任分/資訊完整度只反映「本輪可取得的多源
        證據，依既定公式加權後的相對強弱」，**不是**投資建議、不是對未來
        價格走勢的精準度承諾。
 
@@ -85,13 +85,19 @@ info:
        per-IP 滑動視窗 bucket，超過門檻回 `429` + `{"code":"rate_limited"}`，
        訊息內含視窗秒數但**不含** `Retry-After` header（純文字訊息裡的秒數
        即為建議重試等待時間）：
-       - `/api/status` / `/api/costs` / `/api/overview` / `/api/history`：
-         30 秒視窗內每 IP 最多 10 次。
+       - `/api/status`、`/api/costs`、`/api/overview`、`/api/history`
+         **四個端點共用同一個 per-IP bucket**（見
+         `web.py::_check_status_rate_limit`，唯一鍵是 IP，不分端點）：
+         30 秒滑動視窗內，同一 IP 呼叫這四個端點的次數**合計**最多 10 次
+         ——不是「每個端點各自 10 次」。agent 若同時輪詢多個端點，配額是
+         互相扣抵的，須自行控制混合呼叫頻率。
        - `/api/analyze`：依當次生效模式決定——`live=1`（真 Bedrock）走
          60 秒視窗內每 IP 最多 5 次的緊門檻；預設「真資料·$0」模式
          （未帶 `live`/`sample` 參數即生效）走 60 秒視窗內每 IP 最多 60 次
-         的寬鬆門檻（純讀快取/連接器，不打 LLM，成本為 $0）。
-       - `/api/health`：不設限流（零 I/O，無任何 cache/連接器讀取）。
+         的寬鬆門檻（純讀快取/連接器，不打 LLM，成本為 $0）。這組 bucket
+         與上面四個 observability 端點**各自獨立**，互不共用、互不扣抵。
+       - `/api/health`、`/api/openapi.yaml`、`/llms.txt`：不設限流（零 I/O，
+         無任何 cache/連接器讀取，純讀檔或純記憶體運算）。
 
     7. **依賴失敗 → `502`，不是悄悄降級成 `200` 的假資料。** 除
        `/api/health` 外的所有端點，其底層 cache/帳本讀取若真的失敗（非
@@ -113,8 +119,13 @@ info:
     - 任何欄位缺席 → 視為「未評估」，不要假設為 0 或安全。
 
 externalDocs:
-  description: 一頁式 agent 指南（繁中+英文對照），涵蓋本文件濃縮版重點
-  url: /llms.txt
+  description: |
+    一頁式 agent 指南（繁中+英文對照），涵蓋本文件濃縮版重點。正式呼叫請
+    一律讀部署後同源的 `GET /llms.txt`（見上方 `paths./llms.txt` 定義，
+    與本連結內容以 `tests/test_ai_friendly_api.py` 逐字元一致性測試鎖定
+    同步）——這裡刻意用絕對 URL 指回原始碼倉庫版本，供離線瀏覽/版本追蹤，
+    不是要取代同源路徑。
+  url: https://github.com/cancleeric/trustforge/blob/develop/llms.txt
 
 servers:
   - url: /
@@ -521,6 +532,9 @@ paths:
       tags: [meta]
       operationId: getOpenApiSpec
       summary: 本文件本身（純 stdlib 讀檔回傳，永遠反映當下部署的 repo 內容）
+      description: |
+        不設限流（零依賴讀檔，比照 `/api/health`），不套用 `{ok,data,error}`
+        信封——成功回應直接是這份 YAML 文件本身。
       responses:
         "200":
           description: OpenAPI 3.1 spec（YAML）
@@ -528,6 +542,44 @@ paths:
             application/yaml:
               schema:
                 type: string
+        "404":
+          description: |
+            spec 檔案未隨部署帶上（見 `web.py::_handle_openapi_spec`）——純
+            文字 404，不假裝有 spec 可用，不套用 JSON 信封。
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "OpenAPI spec 檔案未部署\n"
+
+  /llms.txt:
+    get:
+      tags: [meta]
+      operationId: getLlmsTxt
+      summary: AI agent 一頁式指南（繁中+英文對照，站根路徑，非 `/api/*` 底下）
+      description: |
+        純 stdlib 讀檔回傳，見 `web.py::_handle_llms_txt`。不設限流（零依賴
+        讀檔），不套用 `{ok,data,error}` 信封。react/nginx 拓樸下這條路由
+        由 nginx 直接靜態回應 `frontend/public/llms.txt`（Vite build 進
+        dist 根目錄），不經過這支 python handler——兩份檔案內容須逐字元
+        一致（見 `tests/test_ai_friendly_api.py::
+        test_llms_txt_root_and_frontend_public_copy_are_byte_identical`）。
+      responses:
+        "200":
+          description: agent 指南純文字（繁中+英文對照）
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: |
+            `llms.txt` 未隨部署帶上——純文字 404，不假裝有指南可用，不套用
+            JSON 信封。
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "llms.txt 未部署\n"
 
 components:
   schemas:
@@ -889,7 +941,7 @@ components:
           type: number
           description: |
             校準後信心值（簡化版分位數校準，**非**嚴謹 conformal prediction
-            覆蓋率承諾，不可轉述成正確度百分比或「一定準」之類的宣稱）。
+            覆蓋率承諾，不可轉述成正確度百分比或「肯定不會錯」之類的宣稱）。
         decision_state:
           type: string
           enum: [abstain, low_confidence, normal]
@@ -1041,8 +1093,16 @@ components:
     HistoryEntry:
       type: object
       description: |
-        `_snapshot_dict()` 原樣內容（見 `OverviewCoinSnapshot`，欄位集合
-        完全相同）另外補上 `date` 欄位。
+        `_snapshot_dict()` 原樣內容（`web.py::get_trust_history()` 直接
+        `dict(docs[0])`，跟 `OverviewCoinSnapshot` 讀的是同一份底層儲存
+        結構）另外補上 `date` 欄位——因此 `reputation_trace`／`manip_score`／
+        `manip_score_mean` 缺席語意跟 `OverviewCoinSnapshot` 完全一致。
+
+        **唯一例外**：`fetched_at_epoch` 只在 `OverviewCoinSnapshot` 出現
+        ——那是 `/api/overview` 額外從 cache envelope 本身的 `fetched_at`
+        欄位另外組裝進去的（不屬於 `_snapshot_dict()` 內容本身），`/api/
+        history` 這裡**永遠不會**帶這個欄位（不是碰巧缺席，是這條路徑
+        本來就不寫）。
       required: [date, coin, trust_score, direction, calibrated_confidence, decision_state, generated_at]
       properties:
         date:
@@ -1061,6 +1121,9 @@ components:
           enum: [abstain, low_confidence, normal]
         generated_at:
           type: string
+        reputation_trace:
+          type: object
+          description: 可能缺席，語意同 `OverviewCoinSnapshot.reputation_trace`
         manip_score:
           type: number
           description: 可能缺席，語意同 `OverviewCoinSnapshot.manip_score`

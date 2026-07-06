@@ -29,13 +29,24 @@ product, not investment advice.
 ## 端點清單 / Endpoints (one line each)
 
 - `GET /api/health` — JSON 健康檢查，零 I/O，無 rate limit / zero-dependency health check, no rate limit
-- `GET /api/status` — 連接器健康/資料鮮度/版本/uptime（30s 視窗每 IP 10 次）/ connector health, data freshness, version, uptime (10 req / 30s per IP)
-- `GET /api/costs` — 成本帳本累計花費 + 依 model 分組（同上限流）/ cumulative cost ledger by model (same rate limit)
-- `GET /api/overview` — 多幣總覽快照，讀既有排程結果（同上限流）/ multi-coin overview snapshots from scheduled jobs (same rate limit)
-- `GET /api/history?coin=BTC&days=30` — 單幣按日信任序列，PIT（同上限流）/ per-coin daily trust history, point-in-time (same rate limit)
+- `GET /api/status` — 連接器健康/資料鮮度/版本/uptime / connector health, data freshness, version, uptime
+- `GET /api/costs` — 成本帳本累計花費 + 依 model 分組 / cumulative cost ledger by model
+- `GET /api/overview` — 多幣總覽快照，讀既有排程結果 / multi-coin overview snapshots from scheduled jobs
+- `GET /api/history?coin=BTC&days=30` — 單幣按日信任序列，PIT / per-coin daily trust history, point-in-time
 - `GET /api/analyze?coin=BTC&type=multi_source&q=...` — 核心多源分析（見下方模式與限流）/ core multi-source analysis (see modes & rate limits below)
-- `GET /api/openapi.yaml` — 本文件對應的完整 spec（純讀檔回傳）/ this guide's full OpenAPI spec (served from disk, always current)
-- `GET /llms.txt` — 本文件（此頁）/ this document (this page)
+- `GET /api/openapi.yaml` — 本文件對應的完整 spec（純讀檔回傳，未部署回 404）/ this guide's full OpenAPI spec (served from disk, always current; 404 if not deployed)
+- `GET /llms.txt` — 本文件（此頁，純讀檔回傳，未部署回 404）/ this document (this page, served from disk; 404 if not deployed)
+
+⚠️ **共用限流桶（shared rate-limit bucket）**：`/api/status`、
+`/api/costs`、`/api/overview`、`/api/history` **四個端點共用同一個
+per-IP bucket**（同一 IP 呼叫這四個端點的次數合計，不是各自獨立計數）：
+30 秒滑動視窗內合計最多 10 次——不要以為每個端點各自有 10 次配額。
+`/api/analyze` 是另一組完全獨立的 bucket（見下方），互不扣抵。
+Shared rate-limit bucket: `/api/status`/`/api/costs`/`/api/overview`/
+`/api/history` share **one single** per-IP bucket (calls to these four
+endpoints count against the same pool, not 10 each) — max 10 combined
+requests per IP per 30s window. `/api/analyze` uses a fully separate,
+independent bucket (see below).
 
 ## /api/analyze 三檔模式 / three modes
 
@@ -84,8 +95,8 @@ default as a risk verdict.
 ## 信任分 / 資訊完整度 / 棄權（三態）/ Trust score, confidence, and abstention
 
 - `report.calibrated_confidence` 是**簡化版分位數校準**，不是嚴謹 conformal
-  prediction 的覆蓋率承諾——不可轉述成任何形式的正確度百分比或「一定準」
-  之類的宣稱。
+  prediction 的覆蓋率承諾——不可轉述成任何形式的正確度百分比或「肯定不會
+  錯」之類的宣稱。
   `report.calibrated_confidence` is a **simplified quantile calibration**,
   not a rigorous conformal-prediction coverage promise — never restate it
   as a correctness percentage or an absolute-certainty claim.

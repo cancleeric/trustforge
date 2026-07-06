@@ -4931,7 +4931,10 @@ def _handle_openapi_spec() -> tuple[int, str, str]:
         path = _app_root() / "docs" / "api" / "openapi.yaml"
         text = path.read_text(encoding="utf-8")
         return 200, text, "application/yaml; charset=utf-8"
-    except OSError:
+    except Exception:
+        # codex 複審警告：比照其餘 6 個 `/api/*` handler 的防禦邊界慣例
+        # （`except Exception`，不只是 `OSError`）——除了檔案缺席，權限/編碼
+        # 等非預期例外也不該讓 traceback 外洩，一律安全降級成純文字 404。
         logging.exception("TrustForge /api/openapi.yaml error（spec 檔案讀取失敗）")
         return 404, "OpenAPI spec 檔案未部署\n", "text/plain; charset=utf-8"
 
@@ -4947,7 +4950,10 @@ def _handle_llms_txt() -> tuple[int, str, str]:
         path = _app_root() / "llms.txt"
         text = path.read_text(encoding="utf-8")
         return 200, text, "text/plain; charset=utf-8"
-    except OSError:
+    except Exception:
+        # codex 複審警告：比照其餘 6 個 `/api/*` handler 的防禦邊界慣例
+        # （`except Exception`，不只是 `OSError`）——除了檔案缺席，權限/編碼
+        # 等非預期例外也不該讓 traceback 外洩，一律安全降級成純文字 404。
         logging.exception("TrustForge /llms.txt error（檔案讀取失敗）")
         return 404, "llms.txt 未部署\n", "text/plain; charset=utf-8"
 
