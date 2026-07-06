@@ -55,12 +55,33 @@ export const MANIP_RISK_UNSCORED_LABEL = '操縱風險未評分'
  * `TRUST_SNAPSHOT_HISTORY_TTL_SECONDS = 90 天`，見
  * `src/trustforge/ingestion/cache.py:271`）所有舊快照過期、新 writer
  * 全面覆寫後，才能安全移除這段 legacy 判斷分支。
+ *
+ * codex 窮舉終審 MEDIUM 修復（越界值穿透成假低風險，第二道防線）：主要
+ * 防線在 `validators.ts::isManipScoreValue`（越界/非有限值在那裡就會讓
+ * 整筆 `OverviewCoin` 判定不合法），這裡額外對 `manipScore`／
+ * `manipScoreMean` 做 `Number.isFinite` + 0..1 範圍檢查、fail-closed 成
+ * `unscored`——防止有任何未來繞過 validator 的呼叫路徑（例如測試、或
+ * 其他直接呼叫這個純函式的呼叫端）把 `NaN`/`Infinity`/負值/大於 1 的值
+ * 餵進門檻比較（負值必然小於任何正門檻，會被誤判成「低操縱風險」，把
+ * 畸形資料偽裝成安全結論）。
  */
+function isValidManipScore(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
 export function manipRiskDisplay(
   manipScore: number | undefined,
   manipScoreMean: number | undefined,
 ): ManipRiskDisplay {
   if (manipScore === undefined) {
+    return { tier: 'unscored', label: MANIP_RISK_UNSCORED_LABEL, color: NEUTRAL_COLOR }
+  }
+  if (!isValidManipScore(manipScore)) {
+    // fail-closed：越界／非有限值視同沒有可信分數，不可套門檻分級。
+    return { tier: 'unscored', label: MANIP_RISK_UNSCORED_LABEL, color: NEUTRAL_COLOR }
+  }
+  if (manipScoreMean !== undefined && !isValidManipScore(manipScoreMean)) {
+    // manipScoreMean 本身越界／非有限，同樣視為不可信資料，fail-closed。
     return { tier: 'unscored', label: MANIP_RISK_UNSCORED_LABEL, color: NEUTRAL_COLOR }
   }
   if (manipScoreMean === undefined) {

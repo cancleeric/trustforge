@@ -54,3 +54,33 @@ describe('isOverviewData — manip_score_mean 選填欄位（#86 codex 複審 HI
     expect(isOverviewData({ coins: [baseCoin({ manip_score_mean: null })] })).toBe(false)
   })
 })
+
+describe('isOverviewData — manip_score／manip_score_mean 越界值拒絕（codex 窮舉終審 MEDIUM 修復）', () => {
+  // 原本只驗 `typeof === 'number'`，`NaN`/`Infinity`/負值/大於 1 的值全部
+  // 是 JS 的 `typeof number`，會通過檢查、一路餵進 `manipRiskDisplay()` 的
+  // 門檻比較——負值必然小於任何正門檻，會被誤判成「低操縱風險」，把畸形
+  // 資料偽裝成一個確定的安全結論。改用 `Number.isFinite` + 0..1 範圍限制
+  // 在 validator 層就擋掉。
+  it('NaN 判定為畸形，回傳 false', () => {
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: NaN })] })).toBe(false)
+    expect(isOverviewData({ coins: [baseCoin({ manip_score_mean: NaN })] })).toBe(false)
+  })
+
+  it('Infinity／-Infinity 判定為畸形，回傳 false', () => {
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: Infinity })] })).toBe(false)
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: -Infinity })] })).toBe(false)
+  })
+
+  it('負值判定為畸形，回傳 false（不可放行成假低風險）', () => {
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: -0.1 })] })).toBe(false)
+  })
+
+  it('大於 1 的值判定為畸形，回傳 false', () => {
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: 1.1 })] })).toBe(false)
+  })
+
+  it('邊界值 0 與 1 皆合法通過', () => {
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: 0 })] })).toBe(true)
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: 1 })] })).toBe(true)
+  })
+})

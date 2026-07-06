@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { getOverview } from '../lib/endpoints'
 import type { OverviewCoin } from '../lib/types'
-import { sortCoinsByTrustScoreDesc } from '../lib/sortCoins'
+import { computeCompetitionRanks, sortCoinsByTrustScoreDesc } from '../lib/sortCoins'
 import OverviewCard from '../components/OverviewCard'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 
@@ -44,6 +44,11 @@ export default function HomePage() {
     }
   }, [])
 
+  // codex 窮舉終審 LOW 修復：平手用 competition ranking（1224 制），見
+  // `computeCompetitionRanks()` docstring；`coins` 已經是
+  // `sortCoinsByTrustScoreDesc()` 排序後的降序陣列，符合該函式前提。
+  const competitionRanks = coins ? computeCompetitionRanks(coins) : []
+
   return (
     <main className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 sm:px-6">
       <section
@@ -75,8 +80,11 @@ export default function HomePage() {
         {!loading && error && <ErrorState code={error.code} message={error.message} />}
         {!loading && !error && coins && coins.length > 0 && (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
+            {/* codex 窮舉終審 LOW 修復：平手用 competition ranking（1224
+                制），不是陣列 index + 1，見 `computeCompetitionRanks()`
+                docstring。*/}
             {coins.map((c, i) => (
-              <OverviewCard key={c.coin} coin={c} rank={i + 1} />
+              <OverviewCard key={c.coin} coin={c} rank={competitionRanks[i]} />
             ))}
           </div>
         )}

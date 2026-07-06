@@ -171,7 +171,7 @@ export function ManipRiskBadge({
     manipScore === undefined
       ? '本輪快照缺 evidence，尚未計算操縱風險（非「已評估、無風險」）'
       : legacy
-        ? '本輪快照為舊版格式（僅含平均值、無 worst-case 輔助欄位），操縱風險暫不顯示，待下次刷新'
+        ? '舊版 manip_score 可能是平均值，缺新版 worst-case 主訊號，操縱風險暫不顯示，待下次刷新'
         : // legacy 為 false 且 manipScoreMean 存在，此分支下 manipScoreMean 必定有值
           `操縱風險（worst-case）${manipScore.toFixed(2)}；平均 ${(manipScoreMean as number).toFixed(2)}（僅供輔助判讀）`
   return (

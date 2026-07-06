@@ -89,3 +89,28 @@ describe('manipRiskDisplay — legacy payload 相容性（codex 複審 delta HIG
     expect(result.legacy).toBeFalsy()
   })
 })
+
+describe('manipRiskDisplay — 越界值 fail-closed（codex 窮舉終審 MEDIUM 修復，第二道防線）', () => {
+  // 主要防線在 `validators.ts::isManipScoreValue`（越界值在那裡就會讓整筆
+  // OverviewCoin 判定不合法），這裡驗證這個純函式本身也不信任呼叫端，
+  // 越界/非有限值一律 fail-closed 成 unscored，不會被門檻比較誤判成低風險。
+  it('負的 manipScore → unscored（不可放行成「低於門檻」的假低風險）', () => {
+    const result = manipRiskDisplay(-0.1, 0.05)
+    expect(result.tier).toBe('unscored')
+  })
+
+  it('大於 1 的 manipScore → unscored', () => {
+    const result = manipRiskDisplay(1.5, 0.5)
+    expect(result.tier).toBe('unscored')
+  })
+
+  it('NaN／Infinity 的 manipScore → unscored', () => {
+    expect(manipRiskDisplay(NaN, 0.1).tier).toBe('unscored')
+    expect(manipRiskDisplay(Infinity, 0.1).tier).toBe('unscored')
+  })
+
+  it('manipScoreMean 越界（manipScore 本身合法）→ 同樣 fail-closed 成 unscored', () => {
+    const result = manipRiskDisplay(0.2, -0.5)
+    expect(result.tier).toBe('unscored')
+  })
+})
