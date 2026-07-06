@@ -15,4 +15,4 @@ run:
     - name: PORT
       value: "8080"
     # 真實 Bedrock：在 App Runner 服務設定加環境變數 BEDROCK_MODEL_ID 與 AWS_REGION，
-    # 並給服務的 instance role 加 bedrock:InvokeModel 權限（見 docs/SUBMISSION-CHECKLIST.md）。
+    # 並給服務的 instance role 加 bedrock:InvokeModel 權限（見 docs/competition/SUBMISSION-CHECKLIST.md）。
