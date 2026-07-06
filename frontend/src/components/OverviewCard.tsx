@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import type { OverviewCoin } from '../lib/types'
+import { normalizeDecisionState, type OverviewCoin } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import { DecisionStateBadge, DirectionBadge, ManipRiskBadge } from './Badges'
 
@@ -29,7 +29,11 @@ export default function OverviewCard({ coin, rank }: Props) {
   // #101：主角數字統一——decision_state 為 abstain/low_confidence 時主角改為
   // 校準後資訊完整度，避免在資料不足/棄權情境仍以信任分當門面；normal 態
   // 主角維持信任分。副標一律雙數字並列並各自掛標籤，兩態下都看得到另一個數字。
-  const isLowInfo = coin.decision_state === 'abstain' || coin.decision_state === 'low_confidence'
+  // #1 修復：legacy 快照／未知 enum 值一律先正規化為 'normal' 再判斷，
+  // 不直接對原始 `coin.decision_state` 做字面值比對（見 `normalizeDecisionState`
+  // docstring）。
+  const decisionState = normalizeDecisionState(coin.decision_state)
+  const isLowInfo = decisionState === 'abstain' || decisionState === 'low_confidence'
   const heroValue = isLowInfo ? coin.calibrated_confidence : coin.trust_score
   const heroLabel = isLowInfo ? '資訊完整度（校準後）' : '信任分'
   const body = (
@@ -51,7 +55,7 @@ export default function OverviewCard({ coin, rank }: Props) {
         資訊完整度（校準後） {coin.calibrated_confidence.toFixed(2)}｜裸均值信任分 {coin.trust_score.toFixed(2)}
       </p>
       <div className="flex flex-wrap items-center gap-1.5">
-        <DecisionStateBadge state={coin.decision_state} />
+        <DecisionStateBadge state={decisionState} />
         <ManipRiskBadge manipScore={coin.manip_score} manipScoreMean={coin.manip_score_mean} />
       </div>
     </div>

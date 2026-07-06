@@ -15,7 +15,7 @@ const EXAMPLE_HREF =
 const STEPS = [
   { badge: '步驟 1/3', title: '事實', body: '從多個獨立來源蒐集客觀資料——價格、鏈上、監管、新聞、社群。' },
   { badge: '步驟 2/3', title: '推論', body: 'Agent 交叉比對事實，標記反方訊號與可能推翻結論的條件。' },
-  { badge: '步驟 3/3', title: '結論', body: '給出市場判斷，並附上校準後信心與完整證據可回溯。' },
+  { badge: '步驟 3/3', title: '結論', body: '給出市場判斷，並附上校準後資訊完整度與完整證據可回溯。' },
 ]
 
 export default function HomePage() {

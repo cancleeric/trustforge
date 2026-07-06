@@ -1,4 +1,4 @@
-import type { DecisionState } from '../lib/types'
+import { normalizeDecisionState, type DecisionState } from '../lib/types'
 import { independenceTier } from '../lib/sourceBrand'
 import { manipRiskDisplay } from '../lib/manipRisk'
 
@@ -29,15 +29,20 @@ export function DirectionBadge({ direction }: { direction: string }) {
 
 const DECISION_STATE_LABEL: Record<DecisionState, string> = {
   abstain: '棄權／資料不足',
-  low_confidence: '低信心',
+  low_confidence: '資訊完整度偏低',
   normal: '正常判斷',
 }
 
+// #1 修復：`state` 可能來自尚未套用 `normalizeDecisionState` 的呼叫端
+// （legacy 快照／未知 enum 值）——這裡再正規化一次當第二道防線，避免
+// 未知值落入下方三元運算的 else 分支被誤判成 abstain 紅色／顯示原始
+// 未知字串，跟「缺失/未知一律正規化為 normal」規則不一致。
 export function DecisionStateBadge({ state }: { state: DecisionState }) {
+  const normalized = normalizeDecisionState(state)
   const color =
-    state === 'normal'
+    normalized === 'normal'
       ? 'var(--color-tf-good)'
-      : state === 'low_confidence'
+      : normalized === 'low_confidence'
         ? 'var(--color-tf-warn)'
         : 'var(--color-tf-bad)'
   return (
@@ -45,7 +50,7 @@ export function DecisionStateBadge({ state }: { state: DecisionState }) {
       className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
       style={pillClasses(color)}
     >
-      {DECISION_STATE_LABEL[state] ?? state}
+      {DECISION_STATE_LABEL[normalized]}
     </span>
   )
 }

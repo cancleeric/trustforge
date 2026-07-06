@@ -656,6 +656,38 @@ def _trust_bar(trust: float) -> str:
     )
 
 
+_DECISION_STATES = ("abstain", "low_confidence", "normal")
+
+
+def _normalize_decision_state(value: str | None) -> str:
+    """#1 修復（legacy 快照炸掉 React overview，SSR 對應側）：缺失
+    （`None`／空字串）或未知（不在三態字面值內）的 `decision_state` 一律
+    正規化為 `"normal"`——跟前端 `normalizeDecisionState()`（`types.ts`）
+    同一套 fallback 規則，版本切換期兩端行為保持一致，不因為某筆 legacy
+    快照缺這個欄位就跑出不可預期的 hero／配色結果。
+    """
+    return value if value in _DECISION_STATES else "normal"
+
+
+def _decision_color(decision_state: str, hero: float) -> str:
+    """#2 修復（low_confidence 顏色語意分裂）：集中一套 state-aware 配色，
+    `_conf_gauge`／`_cmp_conf`（比較頁）共用，跟 React `ConfidenceGauge.
+    bucketColor` 同一套規則：abstain 一律紅、low_confidence 一律琥珀、
+    normal（含缺失/未知值——已由呼叫端正規化，此處也一併兜底）一律按數值
+    分桶。改前 SSR 兩處只按數值門檻分色、完全不看 `decision_state`，
+    導致同一份報告在 React 顯琥珀、SSR 卻顯紅（0.40 邊界值）。
+    """
+    if decision_state == "abstain":
+        return "#f85149"
+    if decision_state == "low_confidence":
+        return "#d9832a"
+    if hero >= 0.7:
+        return "#3fb950"
+    if hero >= 0.45:
+        return "#d9832a"
+    return "#f85149"
+
+
 def _conf_gauge(
     calibrated_confidence: float,
     label: str,
@@ -672,15 +704,14 @@ def _conf_gauge(
     （如既有測試 `web._conf_gauge(0.91, "高信心")`），渲染結果與改動前完全一致。
     """
     raw = calibrated_confidence if raw_confidence is None else raw_confidence
+    # #1 修復：缺失/未知 decision_state 一律先正規化為 normal。
+    decision_state = _normalize_decision_state(decision_state)
     is_low_info = decision_state in ("abstain", "low_confidence")
     hero = calibrated_confidence if is_low_info else raw
     pct = max(0.0, min(1.0, hero))
-    if hero >= 0.7:
-        color = "#3fb950"
-    elif hero >= 0.45:
-        color = "#d9832a"
-    else:
-        color = "#f85149"
+    # #2 修復：配色改走集中的 `_decision_color`（state-aware），不再只按
+    # 數值門檻分桶，跟 React `ConfidenceGauge.bucketColor` 同一套規則。
+    color = _decision_color(decision_state, hero)
     r = 72
     circumference = 2 * math.pi * r
     arc_span = 0.75 * circumference  # 270 度弧，缺口朝下（呼應 dc-handoff 設計稿）
@@ -2851,11 +2882,18 @@ def _render_comparison(
         normal 態主角＝裸均值信任分（`raw`，等同 `report.confidence`），跟
         `_conf_gauge`／React `ConfidenceGauge`/`OverviewCard` 同一套規則。
         副標一律雙數字並列並各自掛標籤。
+
+        #1／#2 修復：`decision_state` 先正規化（缺失/未知→normal），配色改走
+        跟 `_conf_gauge` 共用的 `_decision_color`（state-aware：abstain=紅、
+        low_confidence=琥珀、normal=數值分桶）——改前這裡只按數值門檻分色，
+        跟 React `bucketColor` 對 low_confidence 一律琥珀的規則不一致（同一
+        份報告 0.40 在 React 顯琥珀、SSR 卻顯紅）。
         """
+        decision_state = _normalize_decision_state(decision_state)
         is_low_info = decision_state in ("abstain", "low_confidence")
         hero = calibrated if is_low_info else raw
         pct = max(0, min(100, int(hero * 100)))
-        color = "#3fb950" if hero >= 0.7 else "#d9832a" if hero >= 0.45 else "#f85149"
+        color = _decision_color(decision_state, hero)
         return (
             f'<span style="color:{color};font-weight:600">{html.escape(label)}'
             f"（{hero:.2f}）</span>"

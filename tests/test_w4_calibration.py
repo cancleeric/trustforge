@@ -1095,12 +1095,12 @@ def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_m
 
     report, _evidence = _run_report(brief)
     assert report.direction != "不明"
-    assert "低信心" in report.market_judgment
+    assert "資訊完整度偏低" in report.market_judgment
     assert "不足" not in report.market_judgment
     # [HIGH-1] 結構化三態欄位：decision_state 必須為 "low_confidence"。
     assert report.decision_state == "low_confidence"
     assert report.calibrated_confidence == brief.calibrated_confidence
-    assert report.confidence_label() == "低信心"
+    assert report.confidence_label() == "資訊完整度偏低"
 
 
 def test_e2e_strong_multi_source_evidence_normal_state_unmarked():
@@ -1117,7 +1117,7 @@ def test_e2e_strong_multi_source_evidence_normal_state_unmarked():
 
     report, _evidence = _run_report(brief)
     assert report.direction == "偏多"
-    assert "低信心" not in report.market_judgment
+    assert "資訊完整度偏低" not in report.market_judgment
     assert "不足" not in report.market_judgment
     # [HIGH-1] 結構化三態欄位：decision_state 必須為 "normal"，confidence_label
     # 用校準值分桶（本案例 calibrated 夠高，應落「高」或「中」，不因裸值分桶）。
