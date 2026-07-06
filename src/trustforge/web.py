@@ -1748,18 +1748,27 @@ def _safe_href(url: str) -> str:
     """安全連結產生器：scheme 為 http/https 才輸出 <a>，否則輸出純 html.escape 文字（不可點）。
 
     防護向量：javascript:、data:、vbscript:、file://、大小寫混用（JaVaScRiPt:）、
-    前導空白（ javascript:）、空字串、相對路徑。
+    前導空白（ javascript:）、空字串、相對路徑、control character 插入 scheme
+    中間（`java\\tscript:`/`java\\nscript:`/`java\\x00script:`，見 #11）。
     escape 在任何分支都保留。
     """
+    import re
+
     if not url:
         return html.escape(url)
     # 去除前後空白（前導空白是常見繞過手法：" javascript:alert(1)"）
     normalized = url.strip()
-    parsed = urlparse(normalized)
+    # CISO hardening R2（#11）：scheme 判斷之前先 strip 掉所有 C0 控制字元
+    # （\x00-\x1f）與 DEL（\x7f）。`urlparse` 對 tab/CR/LF 有專屬的相容處理
+    # （會整串移除後才解析），這個行為跟直譯器版本綁在一起、不該當成唯一
+    # 防線；統一先清掉全部控制字元再判斷 scheme，才能穩定防住把 tab/
+    # newline/null 插進 `javascript:` 中間、企圖繞過白名單判斷的變體。
+    stripped = re.sub(r"[\x00-\x1f\x7f]", "", normalized)
+    parsed = urlparse(stripped)
     # 白名單：只允許 http / https（scheme 可能含大寫，統一 lower 比較）
     if parsed.scheme.lower() in {"http", "https"}:
-        escaped_url = html.escape(normalized)
-        escaped_display = html.escape(normalized[:80])
+        escaped_url = html.escape(stripped)
+        escaped_display = html.escape(stripped[:80])
         return (
             f'<a href="{escaped_url}" target="_blank" rel="noopener">'
             f"{escaped_display}</a>"
@@ -2861,11 +2870,46 @@ def _render_comparison(
 
 
 
+def _apply_live_token_header(qs: dict, headers) -> None:
+    """CISO hardening R2（#2a）：live token 改優先讀 `X-Live-Token` request
+    header，query string `?token=` 版本保留一版 deprecation 相容。
+
+    query string 常被瀏覽器歷史記錄／反代 access log／`Referer` header
+    外洩給第三方，`token` 帶在 URL 上是既有的資訊外洩風險；header 不會被
+    這些管道記錄，因此優先信任 header。
+
+    就地修改傳入的 `qs`（唯一寫入點），讓下游 `_is_live_request`/
+    `_mode_extra_params` 等既有邏輯完全不用改——仍然只認 `qs.get("token")`，
+    不必逐一 thread header 進每個純函式簽名。
+
+    - header 有值：覆寫 `qs["token"]`（header 優先，即使 query 也帶了
+      token，也不 fallback，避免兩邊不一致時難以判斷生效的是哪一個）。
+    - header 沒值、query 帶了非空 token：保留舊行為（仍照常運作，7/13
+      工作坊既有 demo 腳本不斷線），但 log warning 提醒遷移。
+    - 兩者都沒帶：不動 `qs`（沿用預設空字串，`_is_live_request` 照舊判定
+      為不成立 live）。
+    """
+    header_token = ""
+    if headers is not None:
+        header_token = (headers.get("X-Live-Token") or "").strip()
+    if header_token:
+        qs["token"] = [header_token]
+        return
+    if qs.get("token", [""])[0]:
+        logging.warning(
+            "TrustForge: query token 已棄用，改用 X-Live-Token header"
+        )
+
+
 def _is_live_request(qs: dict) -> bool:
     """純判斷 live=1 是否成立（HAS_BEDROCK + token 正確），無副作用、不觸發限流。
 
     供 `_parse_live`（有副作用版）與 `_mode_link_suffix`（自我連結用，不能重複
     消耗限流額度）共用同一套判斷邏輯，避免兩處各寫一份、日後改一邊漏改另一邊。
+
+    token 來源（query vs. `X-Live-Token` header）已在 `_apply_live_token_header`
+    （`Handler.do_GET` 解析 qs 後立刻呼叫）統一收斂進 `qs["token"]`，這裡維持
+    單純只讀 `qs`，不需要另外接手 headers。
     """
     req_token = qs.get("token", [""])[0]
     return (
@@ -4494,6 +4538,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
+        # CISO hardening R2（#2a）：live token 唯一收斂點——把 `X-Live-Token`
+        # request header（優先）或 deprecated query `token`（fallback +
+        # warning）就地寫回 `qs["token"]`，下游所有讀 token 的純函式
+        # （`_is_live_request`/`_mode_extra_params`）維持只認 `qs`，不用改。
+        _apply_live_token_header(qs, getattr(self, "headers", {}))
         # `client_address[0]` 是 TCP 對端 IP，用來 keyed per-IP 限流
         # （`_check_live_rate_limit`/`_check_real_rate_limit`/
         # `_check_status_rate_limit`）。這在**直連部署**（沒有 reverse

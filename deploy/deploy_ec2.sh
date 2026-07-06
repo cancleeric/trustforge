@@ -217,11 +217,20 @@ if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
     '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
   aws iam attach-role-policy --role-name "$ROLE" \
     --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null
+  # CISO hardening R2（#2b）：region 收斂——bedrock.py 預設 stance_model_id
+  # 用 `au.` 跨區 inference profile（見 bedrock.py 註解：只能從
+  # ap-southeast-2/4/6 呼叫，AWS 會在這 3 個 region 之間路由底層
+  # foundation-model 呼叫），所以 foundation-model Resource 不能收斂成單一
+  # $REGION，改明確列舉這 3 個白名單 region，不留 region 萬用字元 `*`。
+  # inference-profile 本身是呼叫端 account+region 的資源，用 $ACCT/$REGION
+  # 收斂（每次部署固定打單一 region，不會跨區呼叫）。
   aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
     --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
       {\"Effect\":\"Allow\",\"Action\":\"bedrock:InvokeModel\",\"Resource\":[
-        \"arn:aws:bedrock:*::foundation-model/anthropic.*\",
-        \"arn:aws:bedrock:*:*:inference-profile/*anthropic*\"]},
+        \"arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.*\",
+        \"arn:aws:bedrock:ap-southeast-4::foundation-model/anthropic.*\",
+        \"arn:aws:bedrock:ap-southeast-6::foundation-model/anthropic.*\",
+        \"arn:aws:bedrock:$REGION:$ACCT:inference-profile/*anthropic*\"]},
       {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"}]}" >/dev/null
   aws iam create-instance-profile --instance-profile-name "$ROLE" >/dev/null
   aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" >/dev/null

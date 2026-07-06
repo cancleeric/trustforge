@@ -305,6 +305,21 @@ case "$ALL" in
   "ec2 describe-instances --region"*"PublicIpAddress"*)
     echo "203.0.113.10" ;;
   "iam get-role"*)
+    # CISO hardening R2（#2b）：iam-role-missing 場景故意讓 get-role 回
+    # not-found，逼 deploy_ec2.sh 走「建 IAM 角色」那個分支（含 Bedrock
+    # 收斂 region 的 trustforge-inline policy），其餘場景維持既有假設
+    # （角色已存在，不重複建立）。
+    if [ "$SCENARIO" = "iam-role-missing" ]; then
+      exit 1
+    fi
+    exit 0 ;;
+  "iam create-role"*)
+    exit 0 ;;
+  "iam attach-role-policy"*)
+    exit 0 ;;
+  "iam create-instance-profile"*)
+    exit 0 ;;
+  "iam add-role-to-instance-profile"*)
     exit 0 ;;
   "iam put-role-policy"*)
     # reconcile 用：抓 --policy-name / --policy-document 存起來供斷言（兩條
@@ -438,6 +453,12 @@ else
     "$CAPTURE/iam_policy_first-time_trustforge-dynamodb.txt" "trustforge-connector-cache" \
     "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan,dynamodb:Query"
 fi
+
+# 注意：trustforge-inline（Bedrock）policy 只有在「IAM 角色本來不存在」那個
+# 分支才會建立（見 deploy_ec2.sh 214 行 `if ! aws iam get-role`），first-time/
+# update-in-place 這兩個場景的 mock 都假設角色已存在（跟 dynamodb reconcile
+# 不同，後者每次部署都無條件 reconcile）。專門測 Bedrock region 收斂的斷言
+# 見下方獨立的「場景 5：IAM 角色不存在」。
 
 # codex HIGH（首次建置缺 web healthz gate）：首次建置路徑現在會送 2 次 ssm
 # send-command——call1 是新加的 verify_web_healthz（web 服務本身健康），
@@ -694,6 +715,34 @@ if [ -f "$CAPTURE/ssm_params_call2.txt" ]; then
 else
   echo "  [PASS] 場景 4：healthz gate 正確擋在 --probe 之前，--probe 那次 send-command 根本沒被呼叫（獨立於 scheduler/probe 結果）"
   PASS=$((PASS + 1))
+fi
+
+echo "== 場景 5：IAM 角色不存在（首次真的建角色）→ Bedrock inline policy region 收斂（CISO hardening R2 #2b）=="
+if run_deploy "iam-role-missing"; then
+  echo "  [PASS] IAM 角色不存在時，deploy_ec2.sh 正常建完角色並成功結束"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] IAM 角色不存在時，deploy_ec2.sh 未能成功結束"
+  cat "$CAPTURE/stdout_iam-role-missing.log"
+  FAIL=$((FAIL + 1))
+fi
+
+BEDROCK_POLICY=$(cat "$CAPTURE/iam_policy_iam-role-missing_trustforge-inline.txt" 2>/dev/null || echo "")
+if [ -z "$BEDROCK_POLICY" ]; then
+  echo "  [FAIL] 沒抓到 iam put-role-policy --policy-name trustforge-inline（IAM 角色建立分支沒被跑到）"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.*" "Bedrock policy 列舉 ap-southeast-2 foundation-model"
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-4::foundation-model/anthropic.*" "Bedrock policy 列舉 ap-southeast-4 foundation-model"
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-6::foundation-model/anthropic.*" "Bedrock policy 列舉 ap-southeast-6 foundation-model"
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-2:123456789012:inference-profile/*anthropic*" "inference-profile ARN 收斂到實際部署的 REGION/ACCT（不留萬用字元）"
+  if grep -qF "arn:aws:bedrock:*" "$CAPTURE/iam_policy_iam-role-missing_trustforge-inline.txt"; then
+    echo "  [FAIL] Bedrock policy 仍留有 region 萬用字元 arn:aws:bedrock:*"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] Bedrock policy 不留 region 萬用字元 arn:aws:bedrock:*"
+    PASS=$((PASS + 1))
+  fi
 fi
 
 echo

@@ -40,12 +40,19 @@ ENVVARS="Variables={TRUSTFORGE_HOME=/var/task}"
 #   TRUSTFORGE_LIVE_TOKEN=<自選秘密字串>（live 請求須帶相符的 ?token= 參數）
 #   AWS_REGION=ap-southeast-2
 # 並確保 Lambda 執行角色只有以下最小 bedrock 權限（不需 InvokeModelWithResponseStream）：
+# CISO hardening R2（#2b）：region 收斂——bedrock.py 預設 stance_model_id 用
+# `au.` 跨區 inference profile（只能從 ap-southeast-2/4/6 呼叫，AWS 會在這 3
+# 個 region 之間路由底層 foundation-model 呼叫），foundation-model Resource
+# 明確列舉這 3 個白名單 region，不留 region 萬用字元 `*`；inference-profile
+# 用實際部署的 <REGION>/<ACCOUNT_ID>（單次部署固定打單一 region）。
 #   {
 #     "Effect": "Allow",
 #     "Action": "bedrock:InvokeModel",
 #     "Resource": [
-#       "arn:aws:bedrock:*::foundation-model/anthropic.*",
-#       "arn:aws:bedrock:*:*:inference-profile/*anthropic*"
+#       "arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.*",
+#       "arn:aws:bedrock:ap-southeast-4::foundation-model/anthropic.*",
+#       "arn:aws:bedrock:ap-southeast-6::foundation-model/anthropic.*",
+#       "arn:aws:bedrock:<REGION>:<ACCOUNT_ID>:inference-profile/*anthropic*"
 #     ]
 #   }
 
