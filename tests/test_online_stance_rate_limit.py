@@ -96,6 +96,10 @@ def test_online_stance_force_offline_degrades_not_raises_after_limit(monkeypatch
 # ---------------------------------------------------------------------------
 
 def test_do_analyze_default_switch_off_never_touches_online_stance_bucket(monkeypatch):
+    # 測試套件效能優化：`_ONLINE_STANCE_RATE_MAX` 生產值是 20，這裡逐次真跑
+    # （離線）pipeline，monkeypatch 成小很多的門檻，迴圈次數/斷言都改讀 patch
+    # 後的值，驗證的仍是同一套邏輯，跟門檻實際數字無關。
+    monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     monkeypatch.setattr(web, "online_stance_requested", lambda: False)
@@ -124,7 +128,11 @@ def test_do_analyze_switch_on_passes_force_stance_offline_only_after_limit(monke
     """switch 開啟：前 `_ONLINE_STANCE_RATE_MAX` 次呼叫 `run()` 不帶
     `force_stance_offline`（未超量，行為跟預設相同）；第
     `_ONLINE_STANCE_RATE_MAX + 1` 次才帶 `force_stance_offline=True`
-    （誠實 degrade，而非 429/報錯）。"""
+    （誠實 degrade，而非 429/報錯）。
+
+    測試套件效能優化：`_ONLINE_STANCE_RATE_MAX` monkeypatch 成小很多的門檻，
+    理由同上一測試。"""
+    monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     monkeypatch.setattr(web, "online_stance_requested", lambda: True)
@@ -152,7 +160,11 @@ def test_do_analyze_switch_on_passes_force_stance_offline_only_after_limit(monke
 
 def test_do_analyze_switch_on_returns_200_style_result_not_error_when_over_limit(monkeypatch):
     """超量時 `_do_analyze` 仍正常回傳 (report, evidence, log) 三元組，不 raise，
-    對應 web handler 層應回 HTTP 200（誠實 degrade，不是報錯）。"""
+    對應 web handler 層應回 HTTP 200（誠實 degrade，不是報錯）。
+
+    測試套件效能優化：`_ONLINE_STANCE_RATE_MAX` monkeypatch 成小很多的門檻，
+    理由同上方測試。"""
+    monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     monkeypatch.setattr(web, "online_stance_requested", lambda: True)
@@ -177,7 +189,11 @@ def test_do_analyze_switch_on_returns_200_style_result_not_error_when_over_limit
 
 def test_do_comparison_switch_on_passes_force_stance_offline_only_after_limit(monkeypatch):
     """`_do_comparison` 走同一個 online-stance 限流判定（同一個 client_ip
-    key），驗證兩個入口共用同一組 bucket、行為一致。"""
+    key），驗證兩個入口共用同一組 bucket、行為一致。
+
+    測試套件效能優化：`_ONLINE_STANCE_RATE_MAX` monkeypatch 成小很多的門檻，
+    理由同上方測試。"""
+    monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     monkeypatch.setattr(web, "online_stance_requested", lambda: True)

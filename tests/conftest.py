@@ -22,17 +22,25 @@ def _isolate_cost_ledger(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_connector_cache(tmp_path, monkeypatch):
     """連接器快取（階段2 CachedSource/fetch_scheduler）測試隔離：預設寫入
-    tmp_path，而非真實 repo 的 `out/connector_cache/`。
+    tmp_path，而非真實 repo 的 `out/connector_cache/`，且預設強制走本地
+    JSON backend，而非真實預設值 `DynamoDBCache`。
 
     部分既有測試以 `collect(coin, coin=coin, ...)`（`offline` 預設 False、
-    `sources=None`）呼叫線上路徑，會建立 `CachedSource`。預設 backend 是
-    `DynamoDBCache`（不吃這個 env、也不連真 AWS），但 `cache_get`/`cache_set`
-    fallback 路徑、以及測試裡直接指定 `CACHE_BACKEND=json` 的案例都會落到
-    `JsonCacheBackend`，其路徑吃這個 env。不隔離的話，這些情境會在開發者
-    本機的 `out/connector_cache/` 寫入 JSON 檔案，汙染真實快取目錄。個別
-    測試若要驗證「真實預設路徑」邏輯本身，可自行
-    `monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", ...)` 再覆寫一次。
+    `sources=None`）呼叫線上路徑，會建立 `CachedSource`。`get_cache_backend()`
+    的生產預設是 `DynamoDBCache`；`DynamoDBCache.__init__` 本身不連真 AWS，
+    但 lazy 建立的 boto3 client 一旦被 `cache_get`/`cache_set` 實際呼叫
+    `.get()`/`.set()`，在開發者本機沒有有效 AWS SSO/憑證時，每個
+    (source, coin) key 都要卡 0.6–1.2s 逾時才拋 `LoginRefreshRequired`——
+    掃多源多幣的測試（`/status` 鮮度矩陣、`analyze` 線上路徑）單顆可以拖到
+    數十秒到 150 秒以上，是全套件跑很慢的最大病灶。測試預設本來就不該打
+    真 AWS，比照上面 `_isolate_cost_ledger`（隔離寫入路徑）的邏輯，這裡把
+    「讀取用哪個 backend」也一併鎖死成本地 JSON。個別測試若要驗證「真實
+    預設值就是 dynamodb」本身（如 `test_get_cache_backend_reads_env`），可
+    自行 `monkeypatch.delenv("CACHE_BACKEND", raising=False)` 還原真預設再
+    斷言；只要不呼叫 `.get()`/`.set()`，單純建構 `DynamoDBCache()` 本身不
+    會連真網，不受這個 fixture 影響。
     """
+    monkeypatch.setenv("CACHE_BACKEND", "json")
     monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path / "connector_cache"))
 
 

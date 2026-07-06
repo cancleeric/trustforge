@@ -280,10 +280,16 @@ def test_real_default_requests_rate_limited_at_flood_volume(monkeypatch):
     這是「真資料·$0 成為預設」後最重要的防線，不可回歸成無限流。
 
     用 `_make_fake_run` 強制離線執行 pipeline，理由同上一測試。
+
+    測試套件效能優化：`_REAL_RATE_MAX` 生產值是 60，逐次真跑（離線）pipeline
+    洪水級迴圈很吃測試時間；monkeypatch 成一個小很多的門檻，迴圈次數與斷言
+    都改讀這個 patch 後的值，驗證的仍是「超過門檻才 429」這個邏輯本身，跟
+    門檻實際數字無關。
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
     monkeypatch.setattr(web, "run", _make_fake_run([]))
+    monkeypatch.setattr(web, "_REAL_RATE_MAX", 3)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
     ip = "8.8.4.5"
