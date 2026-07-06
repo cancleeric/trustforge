@@ -19,7 +19,7 @@ Blockworks／mempool.space／Blockchair 等，已逐一 curl
 呼叫端既有語意色（如 evidence 的獨立性 tier 顏色），不偽裝成官方 LOGO、
 不誤導使用者。
 
-CoinGecko 官方 LOGO 查證記錄（docs/PLAN-source-branding.md #24 任務，
+CoinGecko 官方 LOGO 查證記錄（docs/archive/plans/PLAN-source-branding.md #24 任務，
 2026-07 查證）：CoinGecko 官方文件站 https://brand.coingecko.com 確有
 公開「Attribution Guide」（`resources/attribution-guide`），**明文允許**
 第三方在附上超連結＋文字歸屬（"Data provided by CoinGecko" 等）的前提下
@@ -209,7 +209,7 @@ _SOURCE_DISPLAY_NAME: dict[str, str] = {
     "decrypt": "Decrypt",
     "cryptopanic": "CryptoPanic",
     "ohlcv-csv": "OHLCV",
-    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS，
+    # 資料密度第一批（#24，docs/archive/plans/PLAN-data-density.md）新增 6 家新聞 RSS，
     # simple-icons 逐一查證無收錄（見模組 docstring 查證記錄），一律走
     # 中性 fallback 徽章，不偽造官方 LOGO。
     "cointelegraph": "CoinTelegraph",
@@ -218,7 +218,7 @@ _SOURCE_DISPLAY_NAME: dict[str, str] = {
     "bitcoinist": "Bitcoinist",
     "newsbtc": "NewsBTC",
     "dailyhodl": "The Daily Hodl",
-    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞 RSS +
+    # 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）新增 3 家新聞 RSS +
     # 3 個鏈上來源，simple-icons 逐一查證無收錄，一律走中性 fallback 徽章，
     # 不偽造官方 LOGO。
     "theblock": "The Block",
@@ -283,7 +283,7 @@ def _source_brand_key(source: str) -> str:
 # 使用者可見文字顯示名 —— 逐 slug 細粒度，跟上面 icon 用的粗粒度品牌 key
 # 不是同一件事：3 個 coingecko-* 共用同一顆 LOGO icon，但文字要分辨清楚
 # 「這是 CoinGecko 的哪個資料面向」，不能都印成同一句「CoinGecko」，
-# 資訊量會不夠（見 docs/PLAN-source-branding.md 12 slug 對照表）。
+# 資訊量會不夠（見 docs/archive/plans/PLAN-source-branding.md 12 slug 對照表）。
 # ---------------------------------------------------------------------------
 _SOURCE_DISPLAY_NAME_FINE: dict[str, str] = {
     "coingecko-price": "CoinGecko · 即時報價",
@@ -298,14 +298,14 @@ _SOURCE_DISPLAY_NAME_FINE: dict[str, str] = {
     "blockchain-info": "Blockchain.com",
     "sec-gov": "美國 SEC",
     "ohlcv-csv": "HOYA BIT · 官方 OHLCV",
-    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS。
+    # 資料密度第一批（#24，docs/archive/plans/PLAN-data-density.md）新增 6 家新聞 RSS。
     "cointelegraph": "CoinTelegraph",
     "bitcoinmagazine": "Bitcoin Magazine",
     "cryptoslate": "CryptoSlate",
     "bitcoinist": "Bitcoinist",
     "newsbtc": "NewsBTC",
     "dailyhodl": "The Daily Hodl",
-    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞 RSS +
+    # 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）新增 3 家新聞 RSS +
     # 3 個鏈上來源。
     "theblock": "The Block",
     "utoday": "U.Today",
@@ -321,7 +321,7 @@ def source_display_name(source: str) -> str:
 
     任何使用者可見處都應呼叫這支，不得直接印 `ev.source` 原始 slug——這
     正是老闆真 Chrome 看生產頁面時看到 `coingecko-sentiment`/`ohlcv-csv`
-    這種工程師代號的根因（見 docs/PLAN-source-branding.md）。呼叫端仍須
+    這種工程師代號的根因（見 docs/archive/plans/PLAN-source-branding.md）。呼叫端仍須
     自行 `html.escape()`：本函式只負責取名，不負責跳脫（維持跟模組內其
     餘函式一致的分工，呼叫端如 `web.py` 一律用 `e()` 包一層）。
 

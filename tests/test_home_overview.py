@@ -1,4 +1,4 @@
-"""Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：多幣信任快照
+"""Axis C #1（task #23，PLAN docs/archive/plans/PLAN-axisC-snapshots.md）：多幣信任快照
 寫入者 + 首頁總覽正確讀路徑測試。
 
 ⛔ credit-safe 鐵律：全程不觸發任何連接器真抓取、不打真 Bedrock、不打真

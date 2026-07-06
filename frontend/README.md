@@ -1,7 +1,7 @@
 # TrustForge Frontend（Phase 2a）
 
 React + Vite + TypeScript + Tailwind CSS 前後端分離前端骨架，消費既有
-`/api/*` JSON API（見 `../docs/PLAN-frontend-backend-split.md`）。**不影響**
+`/api/*` JSON API（見 `../docs/architecture/PLAN-frontend-backend-split.md`）。**不影響**
 既有 `src/` SSR 後端，純靜態 build 產物。
 
 ## 開發

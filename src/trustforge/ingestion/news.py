@@ -5,7 +5,7 @@
   - Decrypt RSS   https://decrypt.co/feed                          (公開，免 key)
   - CryptoPanic   https://cryptopanic.com/api/v1/posts/            (選用，需 env CRYPTOPANIC_TOKEN)
 
-資料密度第一批（#24，2026-07，見 docs/PLAN-data-density.md，gray 已逐一 curl
+資料密度第一批（#24，2026-07，見 docs/archive/plans/PLAN-data-density.md，gray 已逐一 curl
 驗證 200 OK）——全部 keyless、公開 RSS，複用同一套 `_parse_rss`：
   - CoinTelegraph    https://cointelegraph.com/rss
   - Bitcoin Magazine https://bitcoinmagazine.com/feed
@@ -14,7 +14,7 @@
   - NewsBTC          https://www.newsbtc.com/feed/
   - The Daily Hodl   https://dailyhodl.com/feed/
 
-資料密度第二批（#24，2026-07，見 docs/PLAN-data-density.md，gray 已逐一 curl
+資料密度第二批（#24，2026-07，見 docs/archive/plans/PLAN-data-density.md，gray 已逐一 curl
 驗證 200 OK）——同樣全部 keyless、公開 RSS，複用 `_parse_rss`。The Block／
 Blockworks 的原始網址（`theblock.co`/`blockworks.co`）會 308 轉到下列終點，
 比照 coindesk 教訓直接寫終點 URL，不依賴轉址：

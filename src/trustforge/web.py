@@ -81,7 +81,7 @@ TRUST_PROXY = os.getenv("TRUSTFORGE_TRUST_PROXY", "").strip().lower() in (
 # CISO+CPO 三審+老闆簽核後，才把這個環境變數切成 `react`，套用 harper
 # 訂的新指令集（給 Vite build 出的 React 前端用，允許 `'self'` script/
 # style/connect 等）。同一支程式碼、單一環境變數即可切換，方便快速
-# 回滾（見 `deploy/nginx-react.conf` 與 `docs/PLAN-frontend-backend-split.md`
+# 回滾（見 `deploy/nginx-react.conf` 與 `docs/architecture/PLAN-frontend-backend-split.md`
 # P3 一週觀察期）。
 CSP_MODE = os.getenv("TRUSTFORGE_CSP_MODE", "legacy").strip().lower()
 
@@ -189,7 +189,7 @@ _status_cache: dict[str, float | str] = {"expires_at": 0.0, "html": ""}
 _STATUS_PROBE_SOURCE = "__status_probe__"
 _STATUS_PROBE_COIN = "__status_probe__"
 
-# Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：首頁「多幣總覽」
+# Axis C #1（task #23，PLAN docs/archive/plans/PLAN-axisC-snapshots.md）：首頁「多幣總覽」
 # 正確讀路徑。
 #
 # 第一輪（module 級 TTL 快取 + 鎖內 single-flight，比照 `_status_cache`）
@@ -1919,7 +1919,7 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
 
 
 def _render_trust_radar(dims: dict, evidence: list) -> str:
-    """新核心#2（gray docs/PLAN-multicore-worldfirst.md，task #25）：多維度信任
+    """新核心#2（gray docs/archive/plans/PLAN-multicore-worldfirst.md，task #25）：多維度信任
     區塊（inline CSS，純 stdlib，zero-JS，CSP 不變）。
 
     `dims`：`agent.orchestrator.aggregate_trust_by_kind()` 的回傳值；空 dict
@@ -2107,7 +2107,7 @@ def _render_evidence_list(
         # （非使用者輸入）；fallback 顏色沿用這裡剛算出的 tier 顏色，跟
         # tier pill 視覺語言一致，不另外硬編品牌色。
         src_logo = source_logo_html(ev.source, fallback_color=tier_color)
-        # docs/PLAN-source-branding.md：evidence pill 文字曾經直接印
+        # docs/archive/plans/PLAN-source-branding.md：evidence pill 文字曾經直接印
         # `ev.source` 原始 slug（如 `coingecko-sentiment`），老闆真 Chrome
         # 看到工程師代號 —— 改用 `source_display_name()` 取品牌顯示名，
         # 不得再印裸 slug。仍走 `e()` 跳脫（跟其餘欄位一致，防禦性處理，
@@ -3238,7 +3238,7 @@ def _render_error_card(title: str, detail: str, *, retry_href: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# 前後端分離 Phase 1（task #28，docs/PLAN-frontend-backend-split.md）：純新增
+# 前後端分離 Phase 1（task #28，docs/architecture/PLAN-frontend-backend-split.md）：純新增
 # JSON API 端點，統一 `{ok, data, error}` 信封。⛔ 鐵律：以下函式只新增，
 # 絕不改動既有 SSR HTML 渲染函式（`_render_report`/`_render_home_page`/
 # `_render_status_page`/`_render_costs_page` 等）——那些頁面是 LIVE，逐字

@@ -116,7 +116,7 @@ const FRESHNESS_STATUS_LABEL: Record<'fresh' | 'stale' | 'missing', string> = {
 
 /** `/api/status` 鮮度矩陣單格狀態——語意同 `DecisionStateBadge`
  * （狀態徽章一律用膠囊 `rounded-full`，跟 `TierBadge` 這類分類標籤
- * `rounded` 區分，見 `docs/UXUI-ROUND-01.md` #2 圓角 token 統一建議）。 */
+ * `rounded` 區分，見 `docs/archive/plans/UXUI-ROUND-01.md` #2 圓角 token 統一建議）。 */
 export function FreshnessStatusBadge({ status }: { status: 'fresh' | 'stale' | 'missing' }) {
   const color =
     status === 'fresh'

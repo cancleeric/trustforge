@@ -1,4 +1,4 @@
-"""W2 truth-discovery 動態來源信譽 — 啟用驗收（gray `docs/PLAN-w2-enable-final.md`）。
+"""W2 truth-discovery 動態來源信譽 — 啟用驗收（gray `docs/archive/plans/PLAN-w2-enable-final.md`）。
 
 涵蓋 5 條驗收：
   1. `run_agent_pipeline()` 生產路徑實際以 `dynamic_reputation=True` 呼叫

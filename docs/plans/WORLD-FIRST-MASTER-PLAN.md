@@ -88,7 +88,7 @@ CP值排序：
 
 ## 完成回報
 
-檔案：`/Users/apple/HurricaneSoft/trustforge/docs/WORLD-FIRST-MASTER-PLAN.md`
+檔案：`/Users/apple/HurricaneSoft/trustforge/docs/plans/WORLD-FIRST-MASTER-PLAN.md`
 （覆寫，唯一權威）；同步更新`docs/README.md`索引（補入
 `PLAN-w2-enable-final.md`/`PLAN-data-density.md`/`PLAN-source-branding.md`/
 `PLAN-multicore-worldfirst.md`）。

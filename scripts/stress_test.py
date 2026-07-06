@@ -12,7 +12,7 @@
   - 5 幣(BTC/ETH/SOL/BNB/XRP) × 3 題型矩陣
   - offline 模式：立即跑，驗正確性與降級行為（elapsed 為 pipeline 內部計時，非真實 Bedrock）
   - online 模式：走真實 Bedrock，量真時間；無 env 時自動跳過並在報告中註明
-  - 輸出 docs/STRESS-TEST.md
+  - 輸出 docs/qa/STRESS-TEST.md
 
 純 stdlib + trustforge 本身（無額外依賴）。
 """
@@ -385,7 +385,7 @@ def main() -> int:
     mode_grp.add_argument("--online", action="store_true", default=False,
                           help="online 模式（真實 Bedrock；需 env）")
     parser.add_argument("--no-output", action="store_true",
-                        help="不寫入 docs/STRESS-TEST.md（僅印出）")
+                        help="不寫入 docs/qa/STRESS-TEST.md（僅印出）")
     args = parser.parse_args()
 
     # online 模式：需 TRUSTFORGE_ONLINE=1 或 BEDROCK_MODEL_ID 作為顯式線上授權

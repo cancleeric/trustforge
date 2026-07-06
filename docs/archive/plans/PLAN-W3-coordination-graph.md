@@ -102,7 +102,7 @@ master §3.3 原文寫「✅ 能做，`networkx` Louvain 皆為免費確定性�
 
 ## 附帶：W2 動態來源信譽 wiring
 
-`docs/PLAN-w2-wiring.md` 方案完整（PR-A merge 引擎已就緒、PR-B 接線
+`docs/archive/plans/PLAN-w2-wiring.md` 方案完整（PR-A merge 引擎已就緒、PR-B 接線
 `dynamic_reputation=True`），前提驗證已做（BTC 真樣本 confidence
 0.6125→0.6279 可見變化），零額外 Bedrock 呼叫，**可行，建議與 W3 的
 「#16/#15 小改進」一起排入本輪 CTO 執行**，不受 W3 資料卡結論影響

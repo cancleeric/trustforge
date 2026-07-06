@@ -1,28 +1,55 @@
 # TrustForge docs/
 
-> 本目錄為 TrustForge 的規劃與技術文件索引
+> 本目錄為 TrustForge 的規劃與技術文件索引。文件依生命週期/用途分區：
+> `competition/`（命題與交付規範）、`architecture/`（架構決策）、
+> `plans/`（進行中的活計劃）、`qa/`（測試與研究發現）、`design/`（既有設計資產）、
+> `archive/plans/`（已執行完/被取代的一次性工作單，索引見該目錄 README）。
+>
+> **規矩**：`PLAN-*` 工作單執行完畢或被取代，當輪移入 `archive/plans/`，並在
+> 該目錄的 `README.md` 索引補一行（檔名 + 當初任務 + 結局：已上線版本/被誰取代）。
+
+---
+
+## competition/ — 命題與交付規範
 
 | 文件 | 說明 |
 |------|------|
-| [WORLD-FIRST-MASTER-PLAN.md](WORLD-FIRST-MASTER-PLAN.md) | **三軸+Axis D master 世界第一開發計劃（總綱，唯一權威，v3 2026-07-03 精簡權威版）**：最終標準宣言（多護城核心疊起來）+ A LIVE 現況表（grep/curl/pytest 逐項實證，W2 已啟用+21 源資料密度）+ B 三軸現況＋新 Axis D 多核心擴充（信任雷達/跨幣排行/歷史 PIT/信譽榜排序）+ C 誠實資料卡/gated 清單 + D 下一步連環疊核心序 |
-| [COMPETITION.md](COMPETITION.md) | 命題規格（權威）、評分標準、時程、反作弊鐵則 |
-| [COMPETITION-OFFICIAL.md](COMPETITION-OFFICIAL.md) | 官方附件全文歸檔 + 官方文件間衝突標記（如 AWS 模型約束，待 7/13 向窗口 Mars Li 確認） |
-| [COMPLIANCE-CHECK.md](COMPLIANCE-CHECK.md) | 合規性對照（vs 官方命題文件）：5 能力/交付件/執行限制逐條核對 + 待決策 flag |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 三層管線與信任演算法設計 |
-| [AWS-ARCHITECTURE.md](AWS-ARCHITECTURE.md) | AWS 服務架構（決賽簡報用）|
-| [SUBMISSION-CHECKLIST.md](SUBMISSION-CHECKLIST.md) | 決賽交付清單 |
-| [PROPOSAL.md](PROPOSAL.md) | 競賽企劃書：產品定位、Demo 敘事腳本、評審價值故事 |
-| [DEV-PLAN.md](DEV-PLAN.md) | 開發計劃：分階段 Backlog、必做 vs 加分、里程碑 |
-| [DEV-PLAN-REWRITE.md](DEV-PLAN-REWRITE.md) | 世界第一開發計劃重寫版（Axis A 全文）：老闆 LIVE 親測「離世界第一差很遠」後，針對產品呈現層 + 資料誠實層的分階段重寫計劃（P1-P5，呼應 `WORLD-FIRST-ANALYSIS.md` 演算法深度軸線之外的並行軸線） |
-| [WORLD-FIRST-ANALYSIS.md](WORLD-FIRST-ANALYSIS.md) | 世界第一 gap 分析與策略（Axis B 研究）：四路研究（學術SOTA/crypto大廠/信任UX大廠/issue triage）+ W1-W4 roadmap + 決策日誌 |
-| [PLAN-w2-wiring.md](PLAN-w2-wiring.md) | W2（動態來源信譽 TruthFinder/CRH）接線計劃：前提驗證數據 + 接線方案 + CEO 驗收標準（舊版接線計劃，已被 PLAN-w2-enable-final.md 取代並執行） |
-| [PLAN-w2-enable-final.md](PLAN-w2-enable-final.md) | W2 最終啟用計劃：重新 grep 實證前置硬化已完成、$0/確定性佐證、單一 PR 啟用範圍——**已照此執行並上線（`orchestrator.py:807`）** |
-| [PLAN-data-density.md](PLAN-data-density.md) | 資料密度擴充計劃（老闆決策先做這個再做 W2）：現況源盤點 + 免費真源清單（RSS/鏈上/CryptoPanic/Etherscan/Reddit OAuth）+ 三批次排程——**第一/二批已上線（21 源），第三批待老闆申請 key** |
-| [PLAN-source-branding.md](PLAN-source-branding.md) | 來源品牌化優化計劃：Evidence List slug → 品牌名+原廠 LOGO——**已上線 v0.5.9/v0.5.10** |
-| [PLAN-corroboration.md](PLAN-corroboration.md) | `_corroboration` 深化設計方案（Issue #15 + #4）：停用詞過濾 + 方向閘 |
-| [PLAN-axisC-snapshots.md](PLAN-axisC-snapshots.md) | Axis C #1 執行細案：多幣信任分快照寫入者（`fetch_scheduler.py --snapshot`）+ 首頁總覽正確讀路徑（單一預渲染 blob + TTL/single-flight）——**已上線 v0.5.7** |
-| [PLAN-W3-coordination-graph.md](PLAN-W3-coordination-graph.md) | W3 抗操縱升級到「協同行為圖」可行性評估：grep 逐檔實證判定帳號級二部圖為**資料卡**（連接器無 author 欄位），改列 #16/#15 小改進 + 帳號級圖列 post-competition roadmap |
-| [CONFORMAL-FINDING.md](CONFORMAL-FINDING.md) | W4 Split Conformal Prediction 研究發現：數學實作完成、JOINT coverage 達標，但代理訊號 pseudo-AUC≈0.49（等同隨機）——誠實負結果，不接進 production |
-| [OPTIMIZATION-PLAN-weakness.md](OPTIMIZATION-PLAN-weakness.md) | CEO 兩路批判彙整（核心弱點分析 + UI code-grounded 審查）：Phase1 商業級 UI 快修清單 + Phase2 核心戰略抉擇（效度定位/資料密度/niche，待老闆拍板） |
-| [QA-PLAN.md](QA-PLAN.md) | P-2026 生產 CTA 死互動事故根因分析 + 連結/CTA/表單旅程測試補強計劃（現有 950 測試全綠仍漏抓真實 UX bug 的教訓） |
-| [PLAN-multicore-worldfirst.md](PLAN-multicore-worldfirst.md) | 多核心世界第一擴充計劃（老闆定調：單一信任分撐不起世界第一，要多護城核心疊起來）：grep 實證 Axis C 快照/W2 reputation_trace/21 資料源 kind 分佈現有基礎 → 4 個候選新核心（信任雷達/跨幣排行/歷史 PIT/信譽榜）評估 + 排序 + 建議連環疊前 3 個——**已整合進 WORLD-FIRST-MASTER-PLAN.md v3 Axis D** |
+| [competition/COMPETITION.md](competition/COMPETITION.md) | 命題規格（權威）、評分標準、時程、反作弊鐵則 |
+| [competition/COMPETITION-OFFICIAL.md](competition/COMPETITION-OFFICIAL.md) | 官方附件全文歸檔 + 官方文件間衝突標記（如 AWS 模型約束，待 7/13 向窗口 Mars Li 確認） |
+| [competition/COMPLIANCE-CHECK.md](competition/COMPLIANCE-CHECK.md) | 合規性對照（vs 官方命題文件）：5 能力/交付件/執行限制逐條核對 + 待決策 flag |
+| [competition/SUBMISSION-CHECKLIST.md](competition/SUBMISSION-CHECKLIST.md) | 決賽交付清單 |
+| [competition/PROPOSAL.md](competition/PROPOSAL.md) | 競賽企劃書：產品定位、Demo 敘事腳本、評審價值故事 |
+| [competition/TEAM.md](competition/TEAM.md) | 團隊/角色分工 |
+
+## architecture/ — 架構決策
+
+| 文件 | 說明 |
+|------|------|
+| [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md) | 三層管線與信任演算法設計 |
+| [architecture/AWS-ARCHITECTURE.md](architecture/AWS-ARCHITECTURE.md) | AWS 服務架構（決賽簡報用），含前後端分離對外拓樸 |
+| [architecture/PLAN-frontend-backend-split.md](architecture/PLAN-frontend-backend-split.md) | 前後端分離架構＋遷移計劃：SSR零-JS → React+Vite+TS+Tailwind。**方案 B 已定案（Issue #81，2026-07-06）並上線 v0.6.1**：web.py 降為純 `/api/*` API，React SPA 獨立部署，SSR 凍結新功能僅保留 `cutover_switch.sh legacy` 緊急回滾路徑 |
+
+## plans/ — 進行中的活計劃
+
+| 文件 | 說明 |
+|------|------|
+| [plans/WORLD-FIRST-MASTER-PLAN.md](plans/WORLD-FIRST-MASTER-PLAN.md) | **三軸+Axis D master 世界第一開發計劃（總綱，唯一權威，v3 2026-07-03 精簡權威版）**：最終標準宣言（多護城核心疊起來）+ A LIVE 現況表（grep/curl/pytest 逐項實證）+ B 三軸現況＋新 Axis D 多核心擴充 + C 誠實資料卡/gated 清單 + D 下一步連環疊核心序。仍有未執行項（商業級 UI 4 項狀態需覆核、Axis D #3/#4 等），持續更新中 |
+| [plans/DEV-PLAN.md](plans/DEV-PLAN.md) | 開發計劃：分階段 Backlog、必做 vs 加分、里程碑。**仍有未執行 backlog**：P0-4 HOYA BIT 企業數據連接器，等 7/13 工作坊取得 API 規格後才能接 |
+| [plans/OPTIMIZATION-PLAN-weakness.md](plans/OPTIMIZATION-PLAN-weakness.md) | CEO 兩路批判彙整（核心弱點分析 + UI code-grounded 審查）：Phase1 商業級 UI 快修清單（**注意：清單所列 4 項已在前後端分離 React 重寫中獨立解決，這部分內容已過時，見 `PLAN-next-worldfirst-depth.md` §6 housekeeping 記錄**）+ Phase2 核心戰略抉擇（效度定位/資料密度/niche）——**Phase2 仍待老闆拍板，本文件未關閉** |
+| [plans/PLAN-next-worldfirst-depth.md](plans/PLAN-next-worldfirst-depth.md) | 下一步世界第一深度優化計劃（非-gated 專案）：#13 分歧來源去重、#20 主題切換已執行；**仍有未執行項**：#3 跨幣操縱排行、#15 burst 偵測重新設計（僅排資料探索驗證，未排實作）；§6 記錄 `fix/ui-commercial` 分支已過時、UXUI-ROUND-01.md 稽核項目多數已被 React 重寫吸收等 housekeeping 發現 |
+
+## qa/ — 測試與研究發現
+
+| 文件 | 說明 |
+|------|------|
+| [qa/QA-PLAN.md](qa/QA-PLAN.md) | P-2026 生產 CTA 死互動事故根因分析 + 連結/CTA/表單旅程測試補強計劃（現有測試全綠仍漏抓真實 UX bug 的教訓） |
+| [qa/STRESS-TEST.md](qa/STRESS-TEST.md) | P0-5 壓測結果（5 幣 × 3 題型矩陣，`scripts/stress_test.py` 產出） |
+| [qa/CONFORMAL-FINDING.md](qa/CONFORMAL-FINDING.md) | W4 Split Conformal Prediction 研究發現：數學實作完成、JOINT coverage 達標，但代理訊號 pseudo-AUC≈0.49（等同隨機）——誠實負結果，不接進 production |
+
+## design/
+
+既有設計資產子目錄，原地不動（見 [design/](design/)）。
+
+## archive/plans/ — 已歸檔工作單
+
+已執行完畢或被取代的一次性 `PLAN-*`/研究文件，索引見 [archive/plans/README.md](archive/plans/README.md)。

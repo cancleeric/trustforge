@@ -119,7 +119,7 @@ def test_coingecko_variants_normalize_to_same_brand_key(source_name):
         ("alternative-me-fng", "F&amp;G"),  # `&` 經 html.escape 變 `&amp;`
         ("coingecko-price", "CG"),
         ("ohlcv-csv", "HB"),
-        # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞
+        # 資料密度第一批（#24，docs/archive/plans/PLAN-data-density.md）新增 6 家新聞
         # RSS，simple-icons 逐一查證無收錄，一律 fallback 徽章。
         ("cointelegraph", "CT"),
         ("bitcoinmagazine", "BM"),
@@ -127,7 +127,7 @@ def test_coingecko_variants_normalize_to_same_brand_key(source_name):
         ("bitcoinist", "BI"),
         ("newsbtc", "NB"),
         ("dailyhodl", "DH"),
-        # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞
+        # 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）新增 3 家新聞
         # RSS + 3 個鏈上來源，simple-icons 逐一查證無收錄，一律 fallback 徽章。
         ("theblock", "TB"),
         ("utoday", "UT"),
@@ -289,7 +289,7 @@ def test_home_overview_html_svg_has_no_external_resource_refs(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # 7. source_display_name() —— 12 slug 品牌化顯示名 + 無 slug 洩漏
-#    （docs/PLAN-source-branding.md：老闆真 Chrome 看到 `coingecko-sentiment`/
+#    （docs/archive/plans/PLAN-source-branding.md：老闆真 Chrome 看到 `coingecko-sentiment`/
 #    `ohlcv-csv` 這種工程師代號的直接修法）
 # ---------------------------------------------------------------------------
 
@@ -308,14 +308,14 @@ def test_home_overview_html_svg_has_no_external_resource_refs(monkeypatch):
         ("blockchain-info", "Blockchain.com"),
         ("sec-gov", "美國 SEC"),
         ("ohlcv-csv", "HOYA BIT · 官方 OHLCV"),
-        # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS。
+        # 資料密度第一批（#24，docs/archive/plans/PLAN-data-density.md）新增 6 家新聞 RSS。
         ("cointelegraph", "CoinTelegraph"),
         ("bitcoinmagazine", "Bitcoin Magazine"),
         ("cryptoslate", "CryptoSlate"),
         ("bitcoinist", "Bitcoinist"),
         ("newsbtc", "NewsBTC"),
         ("dailyhodl", "The Daily Hodl"),
-        # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 3 家新聞
+        # 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）新增 3 家新聞
         # RSS + 3 個鏈上來源。
         ("theblock", "The Block"),
         ("utoday", "U.Today"),
@@ -353,7 +353,7 @@ def test_source_display_name_empty_string_does_not_crash():
 def test_evidence_pill_uses_display_name_not_raw_slug():
     """`_render_evidence_list` 的 evidence pill 文字必須是品牌顯示名，
     絕不能出現原始裸 slug（web.py:1809 曾經直接印 `ev.source` 的根因回歸
-    鎖，見 docs/PLAN-source-branding.md）。"""
+    鎖，見 docs/archive/plans/PLAN-source-branding.md）。"""
     evidence = [
         _make_evidence("coingecko-sentiment", kind="social"),
         _make_evidence("ohlcv-csv", kind="price"),
@@ -372,7 +372,7 @@ def test_evidence_pill_uses_display_name_not_raw_slug():
 def test_pipeline_missing_source_message_uses_display_name_not_raw_slug(monkeypatch):
     """report.limits 的「以下來源本輪未取得資料」清單同樣要用品牌顯示名，
     不得印裸 slug（pipeline.py 的 `_failed` 收集邏輯，同一個根因的另一個
-    呈現點，見 docs/PLAN-source-branding.md）。"""
+    呈現點，見 docs/archive/plans/PLAN-source-branding.md）。"""
     from trustforge.ingestion.base import Document
     from trustforge.pipeline import run
     from trustforge.schema import QuestionType

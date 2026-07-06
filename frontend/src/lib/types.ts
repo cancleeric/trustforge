@@ -1,6 +1,6 @@
 // TrustForge API 型別定義——對應後端 `src/trustforge/schema.py` 與
 // `src/trustforge/web.py` `/api/*` 各端點回傳結構（見
-// docs/PLAN-frontend-backend-split.md §2）。所有型別皆為唯讀資料模型，不含
+// docs/architecture/PLAN-frontend-backend-split.md §2）。所有型別皆為唯讀資料模型，不含
 // 任何邏輯；前端只消費、不推導後端未提供的欄位。
 
 /** 統一信封：所有 `/api/*` 端點共用同一種成功/失敗形狀。 */

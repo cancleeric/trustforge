@@ -1,5 +1,5 @@
 // #13：跨源分歧「來源數」按 source 去重——CrossSourceSignalPanel 用的
-// `groupByStance` 單元測試。規格見 docs/PLAN-next-worldfirst-depth.md §1。
+// `groupByStance` 單元測試。規格見 docs/plans/PLAN-next-worldfirst-depth.md §1。
 
 import { describe, expect, it } from 'vitest'
 import { groupByStance } from './stancePairs'

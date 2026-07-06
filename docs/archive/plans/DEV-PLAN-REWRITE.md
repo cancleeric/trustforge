@@ -2,10 +2,10 @@
 
 > 作者：CPO（gray）｜ 觸發：老闆 Eric 親看 EC2 LIVE（http://3.106.220.68/）評語「**一點都不專、離世界第一差很遠**」
 > 依據：老闆親測第一印象 + CEO 兩路批判分析（真缺口 A 產品呈現層 / B 資料誠實層），已對照
-> `src/trustforge/web.py`、`src/trustforge/pipeline.py`、`src/trustforge/ingestion/*`、`docs/WORLD-FIRST-ANALYSIS.md` grounded 逐條核實（見各階段「證據」）。
+> `src/trustforge/web.py`、`src/trustforge/pipeline.py`、`src/trustforge/ingestion/*`、`docs/archive/plans/WORLD-FIRST-ANALYSIS.md` grounded 逐條核實（見各階段「證據」）。
 >
 > ⚠️ **本計劃定位：產品專業度重寫，不是功能打勾清單**。目的是把「判審 3 秒內的第一印象」從
-> 「半成品 demo」翻正成「像世界第一團隊做的東西」。**不碰 `docs/WORLD-FIRST-ANALYSIS.md` 的
+> 「半成品 demo」翻正成「像世界第一團隊做的東西」。**不碰 `docs/archive/plans/WORLD-FIRST-ANALYSIS.md` 的
 > W1-W4 演算法深度軌（跨源佐證/truth-discovery/bridging/校準）**——那條是另一條並行的「引擎深度」
 > 軸線，由 CEO 主責；本計劃是「呈現層 + 資料誠實層」軸線，兩條軸線互不覆蓋、互不阻擋。
 
@@ -23,7 +23,7 @@ CEO 兩路批判分析 grounded 到 code 的結論：**判審打開首頁的前 
 | header 露 dev artifacts | `web.py` header 樣板：`<span class="tf-version">{version}</span>` + `{mode}`（三檔徽章）+ `<a class="tf-costlink" href="/costs">cost ledger {cost_display}</a>`，`_version.py` 目前 `VERSION = "dev"` fallback |
 | 預設 offline sample | `pipeline.py` `_resolve_modes`：`offline=True` → `data_mode="sample", llm_mode="off"`；`web.py` `page(body, active_mode="offline", ...)` 為首頁/`/costs` 預設值；真資料要 `?real=1`（`_is_real_request`） |
 | HOYA OHLCV 過期 | `data/data/BTC_daily_ohlcv.csv` 等 5 檔最後一列 `2026-05-31`；今天 2026-07-02 → **實際落後 32 天**，`web.py` 表單預設文案硬寫「近兩週市場狀況」（`textarea` 預設值、`/analyze` 預設 `q`），32 天前的資料配「近兩週」文案 = 判審一對日期就抓包 |
-| 差異化訊號稀疏 | `orchestrator.py` `flags=list(sc.manip_flags)`／`info_flags=list(sc.info_flags)` 由 `trust.scoring._manipulation_flags` 算出，`docs/PLAN-w2-wiring.md` 明文「本輪不動 `MIN_INDEPENDENT_EVIDENCE`、不加/改樣本資料」→ 真資料下多數查詢確實可能空 |
+| 差異化訊號稀疏 | `orchestrator.py` `flags=list(sc.manip_flags)`／`info_flags=list(sc.info_flags)` 由 `trust.scoring._manipulation_flags` 算出，`docs/archive/plans/PLAN-w2-wiring.md` 明文「本輪不動 `MIN_INDEPENDENT_EVIDENCE`、不加/改樣本資料」→ 真資料下多數查詢確實可能空 |
 | `/status` 已有健康快照可用 | `web.py` `_render_status_page_cached` → `get_freshness_snapshot(backend=cache_backend)`，回傳 `fresh/stale/missing` 矩陣（來源 × 幣種）——**Phase 2 的健康 gate 不用新建，直接復用這個既有機制** |
 
 ---
@@ -134,10 +134,10 @@ CEO 兩路批判分析 grounded 到 code 的結論：**判審打開首頁的前 
 
 ## Phase 4 — 差異化證明：已知觸發 demo case + 誠實的「未觸發」文案
 
-**目標**：操縱🚩/協同訊號是核心賣點（「情報的情報」，`docs/WORLD-FIRST-ANALYSIS.md` §1B 結論），但真資料下多數查詢是空的——賣點沒有自然證明的機會。本階段**不改演算法**（`MIN_INDEPENDENT_EVIDENCE` 等閾值維持不動，遵守 `docs/PLAN-w2-wiring.md` 既有紅線），只做兩件事：找到/固定一個已知會觸發的展示案例、把「未觸發」講清楚而非留白。
+**目標**：操縱🚩/協同訊號是核心賣點（「情報的情報」，`docs/archive/plans/WORLD-FIRST-ANALYSIS.md` §1B 結論），但真資料下多數查詢是空的——賣點沒有自然證明的機會。本階段**不改演算法**（`MIN_INDEPENDENT_EVIDENCE` 等閾值維持不動，遵守 `docs/archive/plans/PLAN-w2-wiring.md` 既有紅線），只做兩件事：找到/固定一個已知會觸發的展示案例、把「未觸發」講清楚而非留白。
 
 ### 改哪些檔
-1. **已知觸發 demo case**：用真資料跑過去一段時間各幣種的分析，找出**真實**（非造假）觸發過 `manip_flags`/`info_flags`（`orchestrator.py` L90/94，來自 `trust.scoring._manipulation_flags`）的查詢組合，記錄下來（幣種、題型、查詢文字、觸發時間點），固定成 Phase 1 首頁範例卡 / `/analyze` 表單的「試試這個」快捷連結。**不得為了觸發而放寬閾值或加樣本資料**（`docs/PLAN-w2-wiring.md` 已有明文紅線，本計劃重申並沿用）。
+1. **已知觸發 demo case**：用真資料跑過去一段時間各幣種的分析，找出**真實**（非造假）觸發過 `manip_flags`/`info_flags`（`orchestrator.py` L90/94，來自 `trust.scoring._manipulation_flags`）的查詢組合，記錄下來（幣種、題型、查詢文字、觸發時間點），固定成 Phase 1 首頁範例卡 / `/analyze` 表單的「試試這個」快捷連結。**不得為了觸發而放寬閾值或加樣本資料**（`docs/archive/plans/PLAN-w2-wiring.md` 已有明文紅線，本計劃重申並沿用）。
 2. **未觸發時的誠實文案**：結果頁若 `flags`/`info_flags` 為空，目前渲染邏輯需確認是否已有明確「未偵測到操縱/協同訊號」的文案，而非該區塊直接消失讓判審以為沒做這功能。若目前是「空 list 就不渲染整段」，改成「本次分析未偵測到操縱／協同訊號」的中性明說（呼應 `orchestrator.py` L239 附近「不代客決策，中性提醒措辭」的既有原則，同一套語氣延伸到這裡）。
 
 ### 可派 CTO 範圍
@@ -153,7 +153,7 @@ CEO 兩路批判分析 grounded 到 code 的結論：**判審打開首頁的前 
 - 若真資料下始終找不到任何已知觸發案例（訊號確實稀疏），**不得為了「有東西展示」放寬閾值或加樣本資料**——若找不到，如實回報「目前真資料樣本量下尚未自然觸發，作為已知限制列入 roadmap」，比造一個假案例更符合誠實原則，也更符合 #24 紅線精神。
 
 ### credit-safe / #24 守則
-- demo case 必須是**真實發生過的觸發**，附時間戳/查詢參數可回溯，不得後補樣本資料製造觸發（直接違反 `docs/PLAN-w2-wiring.md` 已有紅線與 #24）。
+- demo case 必須是**真實發生過的觸發**，附時間戳/查詢參數可回溯，不得後補樣本資料製造觸發（直接違反 `docs/archive/plans/PLAN-w2-wiring.md` 已有紅線與 #24）。
 - 若判審現場重跑同一 demo case 因為市場資料已變化而不再觸發，**誠實標註「歷史觸發快照，即時重跑結果依當下市場資料可能不同」**，不得偽裝成即時保證觸發。
 
 ---
@@ -191,4 +191,4 @@ CEO 兩路批判分析 grounded 到 code 的結論：**判審打開首頁的前 
 4. **Phase 4（差異化 demo case + 誠實未觸發文案）**— 依賴 Phase 2 真資料已預設上線（需要真資料環境才能找/驗證觸發案例），因此排在 Phase 2 之後、可與 Phase 3 並行。
 5. **Phase 5（結果持久化/UI polish/主題）**— 最後，且主題重新開放明確依賴持久化方案落地，不可提前。
 
-> 每階段結束比照既有 SOP：CPO 計劃（本文件）→ CEO 審 → CTO 執行（分支 + PR）→ CEO Chrome 親測驗收（不可只信副手測試綠燈，`docs/WORLD-FIRST-ANALYSIS.md` §6 決策日誌已有慘痛教訓：副手測試綠仍需 CEO 親測抓到真 bug）→ merge → 回報下一階段。
+> 每階段結束比照既有 SOP：CPO 計劃（本文件）→ CEO 審 → CTO 執行（分支 + PR）→ CEO Chrome 親測驗收（不可只信副手測試綠燈，`docs/archive/plans/WORLD-FIRST-ANALYSIS.md` §6 決策日誌已有慘痛教訓：副手測試綠仍需 CEO 親測抓到真 bug）→ merge → 回報下一階段。

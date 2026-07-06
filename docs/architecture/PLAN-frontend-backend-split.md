@@ -151,7 +151,7 @@ P3 cutover+回歸 QA 再 3-5 天，**風險：時間緊繃、無安全邊際**�
   繞過限流。對外實際公開監聽的是 nginx 的 **:80（明碼）+ :443（TLS）兩個
   listener**（非只有 :443）：:80 保留 `/healthz` 明碼直通與 ACME HTTP-01
   challenge，其餘一律 301 轉 :443；Security Group 對應也是 tcp/80、tcp/443
-  兩條都要開，細節見 `docs/AWS-ARCHITECTURE.md`「前後端分離對外拓樸」一節。
+  兩條都要開，細節見 `docs/architecture/AWS-ARCHITECTURE.md`「前後端分離對外拓樸」一節。
 
 ### 為何不採方案 A（web.py 為主的混合式：由 web.py 直接 serve Vite 靜態資產）
 

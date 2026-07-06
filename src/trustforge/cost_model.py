@@ -115,7 +115,7 @@ CONNECTOR_COST_MODEL: dict[str, ConnectorCostModel] = {
         "cryptopanic",
         "公開端點，未申請／未使用付費 developer API key，無官方公開量化硬配額",
     ),
-    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS，
+    # 資料密度第一批（#24，docs/archive/plans/PLAN-data-density.md）新增 6 家新聞 RSS，
     # 全部 keyless 公開 RSS feed，比照 coindesk/decrypt 同款登記方式。
     "cointelegraph": _free_connector(
         "cointelegraph", "公開 RSS feed（https://cointelegraph.com/rss），無官方公開量化硬配額",
@@ -135,7 +135,7 @@ CONNECTOR_COST_MODEL: dict[str, ConnectorCostModel] = {
     "dailyhodl": _free_connector(
         "dailyhodl", "公開 RSS feed（https://dailyhodl.com/feed/），無官方公開量化硬配額",
     ),
-    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 The Block/U.Today/
+    # 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）新增 The Block/U.Today/
     # Blockworks 3 家新聞 RSS，全部 keyless 公開 RSS feed，比照第一批同款登記。
     "theblock": _free_connector(
         "theblock", "公開 RSS feed（https://www.theblock.co/rss.xml），無官方公開量化硬配額",

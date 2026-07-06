@@ -364,7 +364,7 @@ def test_render_comparison_has_trust_bars(monkeypatch):
 # ---------------------------------------------------------------------------
 # 世界第一重寫 Phase 1：首頁不再空白 + header 拔 dev artifacts
 #
-# 背景：`docs/DEV-PLAN-REWRITE.md` Phase 1——判審打開首頁的第一眼不該是黑色
+# 背景：`docs/archive/plans/DEV-PLAN-REWRITE.md` Phase 1——判審打開首頁的第一眼不該是黑色
 # 空白 `.tf-dashboard` + header 露出 `tf-version`/三檔模式徽號/`cost ledger`
 # 這類 dev 內部資訊。這批測試斷言的是「移位」而非「刪除」：dev artifacts
 # 從首頁 header 消失，但版號/模式能力/成本摘要仍完整活在 `/status`（見

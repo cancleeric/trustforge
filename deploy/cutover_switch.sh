@@ -3,7 +3,7 @@
 #
 # ⛔ 這是**唯一**真正把使用者流量切到 React 前端（或切回 SSR）的地方。
 # `react` 模式**需要 CEO+CISO+CPO 三審 + 老闆簽核才能執行**（見
-# docs/PLAN-frontend-backend-split.md P3）。前置：deploy/deploy_frontend_
+# docs/architecture/PLAN-frontend-backend-split.md P3）。前置：deploy/deploy_frontend_
 # nginx.sh 已跑過（nginx 層 + 兩份 conf + 前端 dist 都已在實例上）。
 #
 # 用法：

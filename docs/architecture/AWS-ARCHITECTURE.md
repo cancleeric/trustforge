@@ -71,7 +71,7 @@ flowchart TB
 
 ## 前後端分離對外拓樸（Issue #81 定案，2026-07-06）
 
-方案 B 定案（詳見 `docs/PLAN-frontend-backend-split.md` §8）：EC2 上
+方案 B 定案（詳見 `docs/architecture/PLAN-frontend-backend-split.md` §8）：EC2 上
 nginx 取代 python 成為公開入口，python (`trustforge.web`) 收斂只聽
 `127.0.0.1:8080`，不對外。**照 `deploy/nginx.conf` 逐字核對，公開監聽的
 port 實際有兩個**（不是只有 :443）：
@@ -100,7 +100,7 @@ nginx conf：`deploy/nginx.conf`；cutover 開關：`deploy/cutover_switch.sh`
 80+443 雙 listener 分工。
 
 2026-07-06 CTO 對生產實測確認此拓樸已生效（curl 原始輸出見 PR #94／
-`docs/PLAN-frontend-backend-split.md` §8）。
+`docs/architecture/PLAN-frontend-backend-split.md` §8）。
 
 ### 現有 API 端點（`/api/*`，web.py `_handle_api_*` 盤點）
 
