@@ -150,7 +150,15 @@ export function FreshnessStatusBadge({ status }: { status: 'fresh' | 'stale' | '
  * 徽章，否則「沒評分」跟「評分後風險低」在卡片上無法區分，使用者會把
  * 兩者都誤讀成「安全」（#24 誠實原則，同 `SingleSourceBadge`／
  * `reputation_trace` 選填欄位的 has_data 處理慣例，但這裡刻意選擇「顯示
- * 中性態」而非「完全不渲染」，避免二度混淆）。 */
+ * 中性態」而非「完全不渲染」，避免二度混淆）。
+ *
+ * codex 複審 delta HIGH 修復：分級判斷（含 legacy payload 偵測）全部下放給
+ * `manipRiskDisplay(manipScore, manipScoreMean)`（見該函式 docstring），
+ * 這裡只依 `legacy` 旗標決定 tooltip 文案——legacy payload（有
+ * `manipScore` 但沒有 `manipScoreMean`）代表這包快照是舊 writer 寫的，
+ * `manipScore` 語意不可信（可能仍是舊的平均值），不能直接顯示成
+ * worst-case 數字，故 tooltip 改講「資料格式待刷新」而非硬印一個不可信
+ * 的分數。 */
 export function ManipRiskBadge({
   manipScore,
   manipScoreMean,
@@ -158,13 +166,14 @@ export function ManipRiskBadge({
   manipScore: number | undefined
   manipScoreMean?: number
 }) {
-  const { label, color } = manipRiskDisplay(manipScore)
+  const { label, color, legacy } = manipRiskDisplay(manipScore, manipScoreMean)
   const title =
     manipScore === undefined
       ? '本輪快照缺 evidence，尚未計算操縱風險（非「已評估、無風險」）'
-      : manipScoreMean === undefined
-        ? `操縱風險（worst-case）${manipScore.toFixed(2)}`
-        : `操縱風險（worst-case）${manipScore.toFixed(2)}；平均 ${manipScoreMean.toFixed(2)}（僅供輔助判讀）`
+      : legacy
+        ? '本輪快照為舊版格式（僅含平均值、無 worst-case 輔助欄位），操縱風險暫不顯示，待下次刷新'
+        : // legacy 為 false 且 manipScoreMean 存在，此分支下 manipScoreMean 必定有值
+          `操縱風險（worst-case）${manipScore.toFixed(2)}；平均 ${(manipScoreMean as number).toFixed(2)}（僅供輔助判讀）`
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold"

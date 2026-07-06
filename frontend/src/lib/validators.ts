@@ -89,6 +89,13 @@ function isOverviewCoin(value: unknown): value is OverviewCoin {
     // 慣例——舊格式快照／本輪無 evidence 的快照合法不帶這兩個 key，不要求
     // 必為 number 而誤殺整張總覽卡（`test_snapshot_dict_omits_manip_score_
     // keys_when_no_evidence` 明確斷言此為合法情況）。
+    //
+    // codex 複審 delta HIGH 修復：這裡刻意「只驗形狀、不驗語意」——
+    // `manip_score` 存在但 `manip_score_mean` 缺席（legacy payload：舊
+    // writer 只寫平均值語意的 manip_score）在這裡仍視為合法形狀，不在
+    // validator 層擋掉；真正的「語意不可信、必須降級顯示」判斷下放給
+    // `manipRiskDisplay()`（見 `manipRisk.ts` docstring），因為 validator
+    // 的職責是「JSON 形狀正確嗎」，不是「這個數字現在能不能拿來分級」。
     (value.manip_score === undefined || typeof value.manip_score === 'number') &&
     (value.manip_score_mean === undefined || typeof value.manip_score_mean === 'number') &&
     typeof value.fetched_at_epoch === 'number'
