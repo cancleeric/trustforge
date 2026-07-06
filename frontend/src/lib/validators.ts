@@ -85,11 +85,12 @@ function isOverviewCoin(value: unknown): value is OverviewCoin {
     isDecisionState(value.decision_state) &&
     typeof value.generated_at === 'string' &&
     (value.reputation_trace === undefined || isReputationTrace(value.reputation_trace)) &&
-    // #86：`manip_score` 同 `reputation_trace` 款選填慣例——舊格式快照／
-    // 本輪無 evidence 的快照合法不帶這個 key，不要求必為 number 而誤殺
-    // 整張總覽卡（`test_snapshot_dict_omits_manip_score_key_when_no_
-    // evidence` 明確斷言此為合法情況）。
+    // #86：`manip_score`／`manip_score_mean` 同 `reputation_trace` 款選填
+    // 慣例——舊格式快照／本輪無 evidence 的快照合法不帶這兩個 key，不要求
+    // 必為 number 而誤殺整張總覽卡（`test_snapshot_dict_omits_manip_score_
+    // keys_when_no_evidence` 明確斷言此為合法情況）。
     (value.manip_score === undefined || typeof value.manip_score === 'number') &&
+    (value.manip_score_mean === undefined || typeof value.manip_score_mean === 'number') &&
     typeof value.fetched_at_epoch === 'number'
   )
 }

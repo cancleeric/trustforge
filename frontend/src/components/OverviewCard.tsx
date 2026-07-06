@@ -44,7 +44,7 @@ export default function OverviewCard({ coin, rank }: Props) {
       <p className="tf-num text-xs text-tf-muted">校準信心 {coin.calibrated_confidence.toFixed(2)}</p>
       <div className="flex flex-wrap items-center gap-1.5">
         <DecisionStateBadge state={coin.decision_state} />
-        <ManipRiskBadge manipScore={coin.manip_score} />
+        <ManipRiskBadge manipScore={coin.manip_score} manipScoreMean={coin.manip_score_mean} />
       </div>
     </div>
   )

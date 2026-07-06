@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { getOverview } from '../lib/endpoints'
 import type { OverviewCoin } from '../lib/types'
+import { sortCoinsByTrustScoreDesc } from '../lib/sortCoins'
 import OverviewCard from '../components/OverviewCard'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 
@@ -33,9 +34,9 @@ export default function HomePage() {
       setLoading(false)
       // #86：跨幣信任排行——依 `trust_score` 降序排列，純陣列排序，不推導
       // 後端未提供的欄位（每幣的 trust_score 已是後端算好的真值，這裡只是
-      // 排序展示順序）。`sort` 回傳新陣列前先 `[...res.data.coins]`，避免
-      // 就地改動 API response 物件。
-      if (res.ok) setCoins([...res.data.coins].sort((a, b) => b.trust_score - a.trust_score))
+      // 排序展示順序）。排序邏輯（含平手行為）抽到 `sortCoinsByTrustScoreDesc`
+      // 純函式，見該檔 docstring 與 `sortCoins.test.ts`。
+      if (res.ok) setCoins(sortCoinsByTrustScoreDesc(res.data.coins))
       else setError(res.error)
     })
     return () => {

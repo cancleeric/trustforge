@@ -35,3 +35,22 @@ describe('isOverviewData — manip_score 選填欄位（#86）', () => {
     expect(isOverviewData({ coins: [baseCoin({ manip_score: null })] })).toBe(false)
   })
 })
+
+describe('isOverviewData — manip_score_mean 選填欄位（#86 codex 複審 HIGH 修復追加）', () => {
+  it('key 不存在時仍視為合法（同 manip_score 缺席規則）', () => {
+    expect(isOverviewData({ coins: [baseCoin({ manip_score: 1.0 })] })).toBe(true)
+  })
+
+  it('manip_score 為 worst-case、manip_score_mean 為輔助平均，兩者可同時存在且不要求相等', () => {
+    // 真實情境：15 筆 evidence 裡 1 筆已確認操縱，worst=1.0，mean 遠低於 1.0——
+    // 驗證 validator 不會誤把兩者混為一談或要求數值一致。
+    expect(
+      isOverviewData({ coins: [baseCoin({ manip_score: 1.0, manip_score_mean: 0.067 })] }),
+    ).toBe(true)
+  })
+
+  it('key 存在但型別錯誤時判定為畸形，回傳 false', () => {
+    expect(isOverviewData({ coins: [baseCoin({ manip_score_mean: '0.2' })] })).toBe(false)
+    expect(isOverviewData({ coins: [baseCoin({ manip_score_mean: null })] })).toBe(false)
+  })
+})

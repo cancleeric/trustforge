@@ -129,7 +129,12 @@ def test_snapshot_dict_omits_reputation_trace_key_when_no_evidence():
 
 
 # ---------------------------------------------------------------------------
-# #86：`_calc_avg_manip()` / `_snapshot_dict()` manip_score 擷取
+# #86：`_calc_manip_signal()` / `_snapshot_dict()` manip_score 擷取
+#
+# codex 複審 HIGH 修復：主訊號改為 max（worst-case／any-hit），不是算術
+# 平均——平均會被 evidence 筆數稀釋，讓「15 筆裡 1 筆已確認操縱
+# （manipulation=1.0）」被沖淡成 0.067、誤判低風險。以下測試明確鎖定
+# 「只要有一筆已確認操縱，就不可能算出低風險分數」這個不變量。
 # ---------------------------------------------------------------------------
 
 def _fake_evidence_with_manip(manip: float) -> Evidence:
@@ -143,48 +148,80 @@ def _fake_evidence_with_manip(manip: float) -> Evidence:
     )
 
 
-def test_calc_avg_manip_averages_manipulation_component_across_evidence():
+def test_calc_manip_signal_returns_max_as_worst_and_mean_as_auxiliary():
     evidence = [
         _fake_evidence_with_manip(0.4),
         _fake_evidence_with_manip(0.2),
         _fake_evidence_with_manip(0.0),
     ]
-    assert fetch_scheduler._calc_avg_manip(evidence) == 0.2
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 0.4
+    assert mean == 0.2
 
 
-def test_calc_avg_manip_skips_evidence_without_manipulation_key():
+def test_calc_manip_signal_single_confirmed_hit_is_not_diluted_by_mean():
+    """HIGH invariant：14 筆乾淨 evidence + 1 筆已確認操縱
+    （manipulation=1.0）——平均只有 0.067（會被舊實作誤判低風險
+    < 0.1 門檻），但 worst（主訊號）必須仍是 1.0，不能被稀釋掉。"""
+    evidence = [_fake_evidence_with_manip(0.0) for _ in range(14)]
+    evidence.append(_fake_evidence_with_manip(1.0))
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 1.0
+    assert mean == pytest.approx(1.0 / 15, abs=1e-3)
+    assert mean < 0.1  # 佐證：平均值確實會落在「低風險」門檻之下，凸顯不能拿它當主訊號
+
+
+def test_calc_manip_signal_skips_evidence_without_manipulation_key():
     """沒有 `trust_components`（或缺 `manipulation` 鍵）的舊呼叫端/殘缺
-    `Evidence` 直接跳過，不當成 0 拉低平均。"""
+    `Evidence` 直接跳過，不當成 0 拉低平均／蓋掉 worst。"""
     evidence = [
         _fake_evidence_with_manip(0.6),
         Evidence(source="x", fetched_at="", content_reference="", related_claim=""),
     ]
-    assert fetch_scheduler._calc_avg_manip(evidence) == 0.6
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 0.6
+    assert mean == 0.6
 
 
-def test_calc_avg_manip_returns_none_when_no_data():
+def test_calc_manip_signal_returns_none_when_no_data():
     """`evidence` 為 None／空清單，或逐筆都缺 `manipulation` 分項時，誠實回
     `None`（不是 0.0——0.0 會被誤讀成「查過、確定無操縱」，見 #24 鐵律）。"""
-    assert fetch_scheduler._calc_avg_manip(None) is None
-    assert fetch_scheduler._calc_avg_manip([]) is None
-    assert fetch_scheduler._calc_avg_manip(
+    assert fetch_scheduler._calc_manip_signal(None) is None
+    assert fetch_scheduler._calc_manip_signal([]) is None
+    assert fetch_scheduler._calc_manip_signal(
         [Evidence(source="x", fetched_at="", content_reference="", related_claim="")]
     ) is None
 
 
-def test_snapshot_dict_includes_manip_score_when_evidence_has_it():
+def test_snapshot_dict_includes_manip_score_as_worst_case_when_evidence_has_it():
     report = _fake_report("BTC")
     evidence = [_fake_evidence_with_manip(0.4), _fake_evidence_with_manip(0.2)]
     snap = fetch_scheduler._snapshot_dict("BTC", report, evidence)
-    assert snap["manip_score"] == 0.3
+    assert snap["manip_score"] == 0.4
+    assert snap["manip_score_mean"] == 0.3
 
 
-def test_snapshot_dict_omits_manip_score_key_when_no_evidence():
-    """向後相容：`evidence=None`/空清單時完全不新增 `manip_score` 鍵——
-    跟 `reputation_trace` 同款慣例，讓舊格式快照合法缺席這個欄位。"""
+def test_snapshot_dict_manip_score_reflects_single_confirmed_hit_not_diluted():
+    """端到端鎖定 HIGH invariant：`_snapshot_dict()` 寫入的 `manip_score`
+    在「大量乾淨 evidence + 1 筆已確認操縱」情境下必須是 1.0（高風險），
+    不能因為算術平均被稀釋成低於中風險門檻（0.1）的數字。"""
     report = _fake_report("BTC")
-    assert "manip_score" not in fetch_scheduler._snapshot_dict("BTC", report, None)
-    assert "manip_score" not in fetch_scheduler._snapshot_dict("BTC", report, [])
+    evidence = [_fake_evidence_with_manip(0.0) for _ in range(14)]
+    evidence.append(_fake_evidence_with_manip(1.0))
+    snap = fetch_scheduler._snapshot_dict("BTC", report, evidence)
+    assert snap["manip_score"] == 1.0
+    assert snap["manip_score_mean"] < 0.1
+
+
+def test_snapshot_dict_omits_manip_score_keys_when_no_evidence():
+    """向後相容：`evidence=None`/空清單時完全不新增 `manip_score`／
+    `manip_score_mean` 鍵——跟 `reputation_trace` 同款慣例，讓舊格式快照
+    合法缺席這兩個欄位。"""
+    report = _fake_report("BTC")
+    snap_none = fetch_scheduler._snapshot_dict("BTC", report, None)
+    snap_empty = fetch_scheduler._snapshot_dict("BTC", report, [])
+    assert "manip_score" not in snap_none and "manip_score_mean" not in snap_none
+    assert "manip_score" not in snap_empty and "manip_score_mean" not in snap_empty
 
 
 # ---------------------------------------------------------------------------

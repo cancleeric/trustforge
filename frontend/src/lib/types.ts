@@ -42,12 +42,21 @@ export interface OverviewCoin {
   /** 選填：後端 `_snapshot_dict()` 在該幣本輪無 evidence／無動態信譽
    * trace 時完全不會帶這個 key（非漏資料，見 validators.ts 說明）。 */
   reputation_trace?: Record<string, ReputationTraceEntry>
-  /** #86 選填：跨幣操縱風險排行用的平均操縱懲罰分（`_calc_avg_manip()`，
-   * 對 evidence 逐筆 `trust_components["manipulation"]` 取平均，0～1，越高
-   * 代表操縱風險越高）。舊格式快照（本欄位新增前寫入的）／本輪無
-   * evidence 的快照都合法不帶這個 key（同 `reputation_trace` 慣例，非漏
-   * 資料）——前端遇到缺席時優雅降級：不顯示操縱風險徽章，不假設 0。 */
+  /** #86 選填，codex 複審 HIGH 修復後語意：跨幣操縱風險排行用的
+   * **worst-case（max）操縱懲罰分**（`_calc_manip_signal()`，對 evidence
+   * 逐筆 `trust_components["manipulation"]` 取 `max()`，0～1，越高代表操
+   * 縱風險越高）——刻意不是平均：平均會被 evidence 筆數稀釋，讓「多筆
+   * 乾淨證據裡混一筆已確認操縱」被沖淡成低分，誤判低風險。只要有一筆
+   * 已確認操縱，這個值就會反映出來，見 `lib/manipRisk.ts` 分級邏輯。
+   * 舊格式快照（本欄位新增前寫入的）／本輪無 evidence 的快照都合法不帶
+   * 這個 key（同 `reputation_trace` 慣例，非漏資料）——前端遇到缺席時
+   * 必須顯式標「未評分」中性態（`ManipRiskBadge`），不能悄悄不顯示、更
+   * 不能當成「風險低」。 */
   manip_score?: number
+  /** #86 選填：`manip_score` 同批 evidence 的算術平均，**僅供輔助判讀**
+   * （UI 呈現於徽章 tooltip），不參與風險分級——分級一律只吃
+   * `manip_score`（worst-case）。缺席規則同 `manip_score`。 */
+  manip_score_mean?: number
   fetched_at_epoch: number
 }
 

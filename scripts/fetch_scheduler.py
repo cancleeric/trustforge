@@ -658,10 +658,26 @@ def _reputation_summary(evidence: list) -> dict[str, dict]:
     return summary
 
 
-def _calc_avg_manip(evidence: list) -> float | None:
-    """#86：從 `evidence`（`pipeline.run()` 回傳的第二個值，同 `_reputation_
-    summary()` 這份）逐筆 `trust_components["manipulation"]` 取算術平均，得出
-    本輪快照的平均操縱風險分。
+def _calc_manip_signal(evidence: list) -> tuple[float, float] | None:
+    """#86／codex 複審 HIGH 修復：從 `evidence`（`pipeline.run()` 回傳的第二個
+    值，同 `_reputation_summary()` 這份）逐筆 `trust_components["manipulation"]`
+    算出本輪快照的操縱風險訊號，回傳 `(worst, mean)`。
+
+    codex 複審 HIGH（風險 invariant 定案）：**`worst`（= `max()`，any-hit
+    語意）才是主訊號，不是算術平均**。原始實作用平均值當唯一分數，會被
+    evidence 筆數稀釋——15 筆裡只要有 1 筆已確認操縱（`manipulation=1.0`），
+    平均只剩 0.067，會被 UI 判成「低操縱風險」，把一次確定的操縱訊號洗成
+    假安全訊號；來源數量不對等（例如某來源類型灌爆筆數）還會不成比例
+    稀釋其他來源的訊號。信任產品的操縱風險徽章必須滿足「只要出現一筆
+    已確認操縱，就不可能顯示低風險」這個 invariant，`max()` 是唯一在
+    evidence 筆數/來源分布任意變動下都維持這個 invariant 的聚合方式
+    （見 `test_calc_manip_signal_single_confirmed_hit_is_not_diluted_by_mean`
+    鎖定此不變量）。
+
+    `mean` 一併回傳、寫入快照的 `"manip_score_mean"` 欄位，作**輔助**
+    資訊（供人工判讀「這批證據平均而言如何」，不參與徽章分級判斷，見
+    `frontend/src/lib/manipRisk.ts::manipRiskDisplay()` 只吃 `manip_score`
+    這個 primary 訊號）。
 
     ⛔ $0／不重算：`trust.scoring.score()` 已把「信譽×0.5 + 佐證×0.25 +
     時效×0.15 − 操縱×0.4」的操縱懲罰分項算好、由
@@ -670,17 +686,15 @@ def _calc_avg_manip(evidence: list) -> float | None:
     描述寫的是 `sc.components["manip"]`，但 `"manip"` 只是權重字典 `w` 的
     鍵，`ScoredClaim.components`/`Evidence.trust_components` 實際存的鍵是
     `"manipulation"`，見 `trust/scoring.py::score()`，兩者不可混用）。這裡
-    純粹是對既有結果的重新聚合，計算方式對齊
-    `web.py::_aggregate_trust_components()`／首頁「多維度信任雷達」操縱
-    分項同一套「對 evidence 逐筆 trust_components 取平均」邏輯（#85 review
-    要求：manip 分項需跟雷達系列邏輯保持一致），不是另開一條獨立公式。
+    純粹是對既有結果的重新聚合，不另開一條獨立公式、不重呼叫任何連接器。
 
     誠實標「無資料」（比照 `_reputation_summary()`／`reputation_trace` 欄位
     同款慣例，也對齊 W2 `single_source`／`has_data` 徽章的誠實原則）：
     `evidence` 為 None／空清單，或逐筆都沒有 `manipulation` 分項（理論上
     只要 `evidence` 非空就一定有——這裡仍防禦式檢查，不假設上游契約永遠
-    成立）時回傳 `None`，呼叫端據此完全不寫入 `"manip_score"` 這個鍵，
-    不用 0.0 冒充「查過、確定無操縱」（#24 鐵律）。"""
+    成立）時回傳 `None`，呼叫端據此完全不寫入 `"manip_score"`／
+    `"manip_score_mean"` 這兩個鍵，不用 0.0 冒充「查過、確定無操縱」
+    （#24 鐵律）。"""
     if not evidence:
         return None
     scores: list[float] = []
@@ -691,7 +705,7 @@ def _calc_avg_manip(evidence: list) -> float | None:
         scores.append(float(tc["manipulation"]))
     if not scores:
         return None
-    return round(sum(scores) / len(scores), 3)
+    return round(max(scores), 3), round(sum(scores) / len(scores), 3)
 
 
 def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
@@ -704,11 +718,15 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     來源信譽榜使用。沒有 trace 資料（`evidence=None`/空清單，或該幣本輪
     尚未啟用動態信譽）時完全不新增這個鍵，逐字向後相容，也不補假值。
 
-    #86 追加：`evidence` 可算出平均操縱分（見 `_calc_avg_manip()`）時，多寫
-    `"manip_score"` 欄位，供首頁跨幣信任排行的操縱風險徽章使用。同樣是
-    **追加、非破壞性**欄位——算不出（`evidence` 為 None/空）時完全不新增
-    這個鍵，舊格式快照／本輪無 evidence 的快照都合法缺席，前端
-    （`OverviewCard.tsx`）須優雅降級（不顯示徽章，不假設 0）。"""
+    #86 追加，codex 複審 HIGH 修復（見 `_calc_manip_signal()` docstring）：
+    `evidence` 可算出操縱訊號時，多寫兩個鍵——`"manip_score"`（**worst-case
+    max**，供首頁跨幣信任排行的操縱風險徽章判斷用的 primary 訊號，「只要
+    有一筆已確認操縱就不能顯示低風險」）與 `"manip_score_mean"`（算術
+    平均，僅供輔助判讀，不參與徽章分級）。同樣是**追加、非破壞性**欄位
+    ——算不出（`evidence` 為 None/空）時完全不新增這兩個鍵，舊格式快照／
+    本輪無 evidence 的快照都合法缺席，前端（`OverviewCard.tsx`／
+    `ManipRiskBadge`）須顯式標「未評分」（不是悄悄不顯示、更不是假設
+    0＝安全）。"""
     snap = {
         "coin": coin,
         "trust_score": round(float(report.confidence), 4),
@@ -721,9 +739,11 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
         reputation_trace = _reputation_summary(evidence)
         if reputation_trace:
             snap["reputation_trace"] = reputation_trace
-        manip_score = _calc_avg_manip(evidence)
-        if manip_score is not None:
-            snap["manip_score"] = manip_score
+        manip_signal = _calc_manip_signal(evidence)
+        if manip_signal is not None:
+            manip_worst, manip_mean = manip_signal
+            snap["manip_score"] = manip_worst
+            snap["manip_score_mean"] = manip_mean
     return snap
 
 

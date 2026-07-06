@@ -1,5 +1,6 @@
 import type { DecisionState } from '../lib/types'
 import { independenceTier } from '../lib/sourceBrand'
+import { manipRiskDisplay } from '../lib/manipRisk'
 
 function pillClasses(color: string) {
   return {
@@ -134,33 +135,41 @@ export function FreshnessStatusBadge({ status }: { status: 'fresh' | 'stale' | '
   )
 }
 
-const MANIP_RISK_HIGH_THRESHOLD = 0.3
-const MANIP_RISK_MEDIUM_THRESHOLD = 0.1
-
 /** #86：首頁跨幣信任排行的操縱風險徽章——依 `OverviewCoin.manip_score`
- * （`_calc_avg_manip()`，evidence 逐筆 `trust_components["manipulation"]`
- * 平均）分級：≥0.3 高風險／≥0.1 中風險／其餘低風險。閾值沿用
+ * （`_calc_manip_signal()` 的 worst-case max，見 `lib/manipRisk.ts`
+ * docstring）分級：≥0.3 高風險／≥0.1 中風險／其餘低風險。閾值沿用
  * issue #86 定案數字，跟 `web.py::_render_trust_breakdown` 的操縱分項紅色
  * 判斷（manip>0 即標紅）不同量級——這裡是「多幣排行」的相對分級展示，
- * 非單幣證據明細的逐筆判斷。
+ * 非單幣證據明細的逐筆判斷。分級邏輯本身抽到 `manipRiskDisplay()`（純函式，
+ * 不依賴 React），這個元件只負責渲染，方便 vitest 純單元測試分級/門檻/
+ * 缺分數行為，不需要另裝 RTL/jsdom。
  *
- * `manip_score` 為 `undefined`（本輪無 evidence，或舊格式快照本欄位新增
- * 前寫入）時回傳 `null`、完全不顯示徽章——不能拿「無資料」冒充「低風險」
- * （#24 誠實原則，同 `SingleSourceBadge`／`reputation_trace` 選填欄位的
- * has_data 處理慣例）。 */
-export function ManipRiskBadge({ manipScore }: { manipScore: number | undefined }) {
-  if (manipScore === undefined) return null
-  const [label, color] =
-    manipScore >= MANIP_RISK_HIGH_THRESHOLD
-      ? ['⚠ 高操縱風險', 'var(--color-tf-bad)']
-      : manipScore >= MANIP_RISK_MEDIUM_THRESHOLD
-        ? ['⚡ 中操縱風險', 'var(--color-tf-warn)']
-        : ['✓ 低操縱風險', 'var(--color-tf-good)']
+ * codex 複審 MEDIUM 修復：`manip_score` 為 `undefined`（本輪無
+ * evidence，或舊格式快照本欄位新增前寫入）時**顯式**顯示「操縱風險未
+ * 評分」中性態徽章（中性灰，非低風險的綠色）——不能悄悄不顯示整顆
+ * 徽章，否則「沒評分」跟「評分後風險低」在卡片上無法區分，使用者會把
+ * 兩者都誤讀成「安全」（#24 誠實原則，同 `SingleSourceBadge`／
+ * `reputation_trace` 選填欄位的 has_data 處理慣例，但這裡刻意選擇「顯示
+ * 中性態」而非「完全不渲染」，避免二度混淆）。 */
+export function ManipRiskBadge({
+  manipScore,
+  manipScoreMean,
+}: {
+  manipScore: number | undefined
+  manipScoreMean?: number
+}) {
+  const { label, color } = manipRiskDisplay(manipScore)
+  const title =
+    manipScore === undefined
+      ? '本輪快照缺 evidence，尚未計算操縱風險（非「已評估、無風險」）'
+      : manipScoreMean === undefined
+        ? `操縱風險（worst-case）${manipScore.toFixed(2)}`
+        : `操縱風險（worst-case）${manipScore.toFixed(2)}；平均 ${manipScoreMean.toFixed(2)}（僅供輔助判讀）`
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold"
       style={pillClasses(color)}
-      title={`平均操縱懲罰分 ${manipScore.toFixed(2)}`}
+      title={title}
     >
       {label}
     </span>
