@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { getOverview } from '../lib/endpoints'
 import type { OverviewCoin } from '../lib/types'
+import { computeCompetitionRanks, sortCoinsByTrustScoreDesc } from '../lib/sortCoins'
 import OverviewCard from '../components/OverviewCard'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 
@@ -31,13 +32,22 @@ export default function HomePage() {
       // UI、不覆蓋任何狀態。
       if (controller.signal.aborted) return
       setLoading(false)
-      if (res.ok) setCoins(res.data.coins)
+      // #86：跨幣信任排行——依 `trust_score` 降序排列，純陣列排序，不推導
+      // 後端未提供的欄位（每幣的 trust_score 已是後端算好的真值，這裡只是
+      // 排序展示順序）。排序邏輯（含平手行為）抽到 `sortCoinsByTrustScoreDesc`
+      // 純函式，見該檔 docstring 與 `sortCoins.test.ts`。
+      if (res.ok) setCoins(sortCoinsByTrustScoreDesc(res.data.coins))
       else setError(res.error)
     })
     return () => {
       controller.abort()
     }
   }, [])
+
+  // codex 窮舉終審 LOW 修復：平手用 competition ranking（1224 制），見
+  // `computeCompetitionRanks()` docstring；`coins` 已經是
+  // `sortCoinsByTrustScoreDesc()` 排序後的降序陣列，符合該函式前提。
+  const competitionRanks = coins ? computeCompetitionRanks(coins) : []
 
   return (
     <main className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 sm:px-6">
@@ -70,8 +80,11 @@ export default function HomePage() {
         {!loading && error && <ErrorState code={error.code} message={error.message} />}
         {!loading && !error && coins && coins.length > 0 && (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
-            {coins.map((c) => (
-              <OverviewCard key={c.coin} coin={c} />
+            {/* codex 窮舉終審 LOW 修復：平手用 competition ranking（1224
+                制），不是陣列 index + 1，見 `computeCompetitionRanks()`
+                docstring。*/}
+            {coins.map((c, i) => (
+              <OverviewCard key={c.coin} coin={c} rank={competitionRanks[i]} />
             ))}
           </div>
         )}

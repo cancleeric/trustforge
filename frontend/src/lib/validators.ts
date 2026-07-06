@@ -75,6 +75,21 @@ function isReputationTrace(value: unknown): value is Record<string, ReputationTr
   return isPlainObject(value) && Object.values(value).every(isReputationTraceEntry)
 }
 
+// codex 窮舉終審 MEDIUM 修復（越界值穿透成假低風險）：原本只驗
+// `typeof value.manip_score === 'number'`，`NaN`/`Infinity`/負值/大於 1
+// 的值都會通過 `typeof` 檢查（JS 裡這些全部是 `typeof number`），一路
+// 餵進 `manipRiskDisplay()` 的門檻比較，例如負值必然 < MEDIUM 門檻，會
+// 被誤判成「低操縱風險」——把畸形資料偽裝成一個確定的安全結論，比顯式
+// 「未評分」更危險。改用 `Number.isFinite` 排除 `NaN`/`Infinity`，並限制
+// 在 `_calc_manip_signal()`（後端）保證的合法值域 0..1 內；越界值視同
+// 「這個欄位形狀就是壞的」，讓 `isOverviewCoin` 直接判定不合法（跟其他
+// 欄位型別錯誤時的既有處理方式一致），而不是放行後在下游用 fail-closed
+// 補救——validator 層先擋掉才是治本，`manipRiskDisplay()` 的 fail-closed
+// 是第二道防線（見該函式）。
+function isManipScoreValue(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
 function isOverviewCoin(value: unknown): value is OverviewCoin {
   if (!isPlainObject(value)) return false
   return (
@@ -85,6 +100,20 @@ function isOverviewCoin(value: unknown): value is OverviewCoin {
     isDecisionState(value.decision_state) &&
     typeof value.generated_at === 'string' &&
     (value.reputation_trace === undefined || isReputationTrace(value.reputation_trace)) &&
+    // #86：`manip_score`／`manip_score_mean` 同 `reputation_trace` 款選填
+    // 慣例——舊格式快照／本輪無 evidence 的快照合法不帶這兩個 key，不要求
+    // 必為 number 而誤殺整張總覽卡（`test_snapshot_dict_omits_manip_score_
+    // keys_when_no_evidence` 明確斷言此為合法情況）。
+    //
+    // codex 複審 delta HIGH 修復：「有 manip_score 但無 manip_score_mean」
+    // （legacy payload：舊 writer 只寫平均值語意的 manip_score）在這裡仍
+    // 視為合法形狀（兩欄位是否成對出現不在這裡擋）——那是「哪個版本的
+    // writer 寫的」語意判斷，下放給 `manipRiskDisplay()`（見 `manipRisk.ts`
+    // docstring）。但兩欄位個別的**數值合法性**（是否為 0..1 的有限實數）
+    // 屬於形狀範疇，就在這裡擋（見下方 `isManipScoreValue`），因為 validator
+    // 的職責是「JSON 形狀正確嗎」，不是「這個數字現在能不能拿來分級」。
+    (value.manip_score === undefined || isManipScoreValue(value.manip_score)) &&
+    (value.manip_score_mean === undefined || isManipScoreValue(value.manip_score_mean)) &&
     typeof value.fetched_at_epoch === 'number'
   )
 }

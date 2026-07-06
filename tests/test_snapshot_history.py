@@ -129,6 +129,200 @@ def test_snapshot_dict_omits_reputation_trace_key_when_no_evidence():
 
 
 # ---------------------------------------------------------------------------
+# #86：`_calc_manip_signal()` / `_snapshot_dict()` manip_score 擷取
+#
+# codex 複審 HIGH 修復：主訊號改為 max（worst-case／any-hit），不是算術
+# 平均——平均會被 evidence 筆數稀釋，讓「15 筆裡 1 筆已確認操縱
+# （manipulation=1.0）」被沖淡成 0.067、誤判低風險。以下測試明確鎖定
+# 「只要有一筆已確認操縱，就不可能算出低風險分數」這個不變量。
+# ---------------------------------------------------------------------------
+
+def _fake_evidence_with_manip(manip: float) -> Evidence:
+    """建一筆真 `Evidence`，`trust_components["manipulation"]` 比照
+    `agent.orchestrator._scored_to_evidence()` 實際欄位命名（非 issue #86
+    原始描述誤寫的 `"manip"` 鍵）。"""
+    return Evidence(
+        source="src", fetched_at="2026-07-01T00:00:00Z",
+        content_reference="ref", related_claim="claim",
+        trust_components={"manipulation": manip},
+    )
+
+
+def test_calc_manip_signal_returns_max_as_worst_and_mean_as_auxiliary():
+    evidence = [
+        _fake_evidence_with_manip(0.4),
+        _fake_evidence_with_manip(0.2),
+        _fake_evidence_with_manip(0.0),
+    ]
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 0.4
+    assert mean == 0.2
+
+
+def test_calc_manip_signal_single_confirmed_hit_is_not_diluted_by_mean():
+    """HIGH invariant：14 筆乾淨 evidence + 1 筆已確認操縱
+    （manipulation=1.0）——平均只有 0.067（會被舊實作誤判低風險
+    < 0.1 門檻），但 worst（主訊號）必須仍是 1.0，不能被稀釋掉。"""
+    evidence = [_fake_evidence_with_manip(0.0) for _ in range(14)]
+    evidence.append(_fake_evidence_with_manip(1.0))
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 1.0
+    assert mean == pytest.approx(1.0 / 15, abs=1e-3)
+    assert mean < 0.1  # 佐證：平均值確實會落在「低風險」門檻之下，凸顯不能拿它當主訊號
+
+
+def test_calc_manip_signal_skips_evidence_without_manipulation_key():
+    """沒有 `trust_components`（或缺 `manipulation` 鍵）的舊呼叫端/殘缺
+    `Evidence` 直接跳過，不當成 0 拉低平均／蓋掉 worst。"""
+    evidence = [
+        _fake_evidence_with_manip(0.6),
+        Evidence(source="x", fetched_at="", content_reference="", related_claim=""),
+    ]
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 0.6
+    assert mean == 0.6
+
+
+def test_calc_manip_signal_returns_none_when_no_data():
+    """`evidence` 為 None／空清單，或逐筆都缺 `manipulation` 分項時，誠實回
+    `None`（不是 0.0——0.0 會被誤讀成「查過、確定無操縱」，見 #24 鐵律）。"""
+    assert fetch_scheduler._calc_manip_signal(None) is None
+    assert fetch_scheduler._calc_manip_signal([]) is None
+    assert fetch_scheduler._calc_manip_signal(
+        [Evidence(source="x", fetched_at="", content_reference="", related_claim="")]
+    ) is None
+
+
+def test_snapshot_dict_includes_manip_score_as_worst_case_when_evidence_has_it():
+    report = _fake_report("BTC")
+    evidence = [_fake_evidence_with_manip(0.4), _fake_evidence_with_manip(0.2)]
+    snap = fetch_scheduler._snapshot_dict("BTC", report, evidence)
+    assert snap["manip_score"] == 0.4
+    assert snap["manip_score_mean"] == 0.3
+
+
+def test_snapshot_dict_manip_score_reflects_single_confirmed_hit_not_diluted():
+    """端到端鎖定 HIGH invariant：`_snapshot_dict()` 寫入的 `manip_score`
+    在「大量乾淨 evidence + 1 筆已確認操縱」情境下必須是 1.0（高風險），
+    不能因為算術平均被稀釋成低於中風險門檻（0.1）的數字。"""
+    report = _fake_report("BTC")
+    evidence = [_fake_evidence_with_manip(0.0) for _ in range(14)]
+    evidence.append(_fake_evidence_with_manip(1.0))
+    snap = fetch_scheduler._snapshot_dict("BTC", report, evidence)
+    assert snap["manip_score"] == 1.0
+    assert snap["manip_score_mean"] < 0.1
+
+
+def test_snapshot_dict_omits_manip_score_keys_when_no_evidence():
+    """向後相容：`evidence=None`/空清單時完全不新增 `manip_score`／
+    `manip_score_mean` 鍵——跟 `reputation_trace` 同款慣例，讓舊格式快照
+    合法缺席這兩個欄位。"""
+    report = _fake_report("BTC")
+    snap_none = fetch_scheduler._snapshot_dict("BTC", report, None)
+    snap_empty = fetch_scheduler._snapshot_dict("BTC", report, [])
+    assert "manip_score" not in snap_none and "manip_score_mean" not in snap_none
+    assert "manip_score" not in snap_empty and "manip_score_mean" not in snap_empty
+
+
+# ---------------------------------------------------------------------------
+# codex 窮舉終審 HIGH 修復：非數值 manipulation 中止整批快照
+#
+# 原本 `float(tc["manipulation"])` 對每一筆都直接轉型、沒有例外處理——
+# 單筆 `None`/字串/物件/`NaN`/`Infinity` 就會讓 `float()` 拋例外或算出不
+# 合法值，往上傳到 `_snapshot_dict()`，而當時 `_snapshot_dict()` 呼叫處
+# 只把 `pipeline.run()` 包在 try/except 裡，本身不在保護範圍內——單筆壞
+# 資料會直接把整個 coin loop 炸掉。以下測試鎖定「畸形值只跳過該筆、不
+# 中止整批」，以及「_snapshot_dict() 整體納入 per-coin try/except，即使
+# 未來又有其他欄位算出時炸例外，也只隔離單幣」。
+# ---------------------------------------------------------------------------
+
+def _fake_evidence_with_raw_manip(raw) -> Evidence:
+    """比照 `_fake_evidence_with_manip()`，但直接塞任意值（含畸形值）進
+    `trust_components["manipulation"]`，不經過 `float()` 轉型，模擬
+    `trust_components` 是外部可變 dict、上游契約不保證乾淨的情境。"""
+    return Evidence(
+        source="src", fetched_at="2026-07-01T00:00:00Z",
+        content_reference="ref", related_claim="claim",
+        trust_components={"manipulation": raw},
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "0.5", {"nested": 1}, float("nan"), float("inf"), float("-inf"), True, False],
+)
+def test_calc_manip_signal_skips_malformed_manipulation_value_without_crashing(raw):
+    """`None`/字串/物件/`NaN`/`Infinity`/`bool`（`bool` 是 `int` 子類但
+    語意上不是分數）都不是合法的 0..1 有限實數，該筆直接跳過、不拋例外、
+    不污染 worst/mean，跟一筆乾淨資料混在一起時乾淨資料仍正確算出。"""
+    evidence = [_fake_evidence_with_raw_manip(raw), _fake_evidence_with_manip(0.6)]
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 0.6
+    assert mean == 0.6
+
+
+@pytest.mark.parametrize("raw", [-0.1, 1.1, -1.0, 2.0])
+def test_calc_manip_signal_skips_out_of_range_manipulation_value(raw):
+    """負值／大於 1 的值超出 `trust.scoring.score()` 保證的 0..1 值域，
+    視為畸形資料跳過，不當成合法 worst-case 分數（避免負值把 worst 拉到
+    比乾淨資料更低、或超過 1 的值把 UI 門檻比較弄亂）。"""
+    evidence = [_fake_evidence_with_raw_manip(raw), _fake_evidence_with_manip(0.3)]
+    worst, mean = fetch_scheduler._calc_manip_signal(evidence)
+    assert worst == 0.3
+    assert mean == 0.3
+
+
+def test_calc_manip_signal_returns_none_when_all_manipulation_values_are_malformed():
+    """整批都是畸形值時，誠實回 `None`（比照「完全沒有 manipulation 分項」
+    的既有行為），不是 0.0 冒充「查過、確定無操縱」。"""
+    evidence = [
+        _fake_evidence_with_raw_manip(None),
+        _fake_evidence_with_raw_manip("bad"),
+        _fake_evidence_with_raw_manip(float("nan")),
+    ]
+    assert fetch_scheduler._calc_manip_signal(evidence) is None
+
+
+def test_snapshot_dict_does_not_crash_when_evidence_has_malformed_manipulation_value():
+    """端到端：`evidence` 裡混了畸形 `manipulation` 值，`_snapshot_dict()`
+    正常回傳（不拋例外），且只採計乾淨的那幾筆。"""
+    report = _fake_report("BTC")
+    evidence = [_fake_evidence_with_raw_manip("garbage"), _fake_evidence_with_manip(0.5)]
+    snap = fetch_scheduler._snapshot_dict("BTC", report, evidence)
+    assert snap["manip_score"] == 0.5
+    assert snap["manip_score_mean"] == 0.5
+
+
+def test_run_snapshot_isolates_single_coin_snapshot_dict_failure(monkeypatch, json_cache_backend):
+    """per-coin try/except 防線（defense-in-depth）：即使
+    `_snapshot_dict()` 本身對某一幣意外炸例外（模擬未來又有其他欄位算出
+    時出錯，不是靠 `_calc_manip_signal()` 內部驗證能擋住的情況），只有
+    那一幣被計入失敗、其餘幣別的快照正常寫入，不會像修復前那樣讓單幣
+    的例外中止整個 coin loop。"""
+    day = _utc_ts("2026-07-01T12:00:00")
+    monkeypatch.setattr(time, "time", lambda: day)
+    _patch_pipeline_run(monkeypatch)
+
+    real_snapshot_dict = fetch_scheduler._snapshot_dict
+
+    def flaky_snapshot_dict(coin, report, evidence=None):
+        if coin == "ETH":
+            raise ValueError("模擬未來的其他欄位算出時炸例外")
+        return real_snapshot_dict(coin, report, evidence)
+
+    monkeypatch.setattr(fetch_scheduler, "_snapshot_dict", flaky_snapshot_dict)
+
+    rc = fetch_scheduler.main(["--snapshot", "--coin", "BTC", "--coin", "ETH"])
+
+    # ETH 失敗、BTC 成功——回傳碼因為有失敗幣別而非 0，但不是「整批全滅」。
+    assert rc == 1
+    btc_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"))
+    eth_latest = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "ETH"))
+    assert btc_latest is not None
+    assert eth_latest is None
+
+
+# ---------------------------------------------------------------------------
 # 按日累積歷史（`run_snapshot()` 的歷史 key 寫入）
 # ---------------------------------------------------------------------------
 

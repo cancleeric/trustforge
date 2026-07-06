@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import math
 import os
 import sys
 import time
@@ -658,6 +659,95 @@ def _reputation_summary(evidence: list) -> dict[str, dict]:
     return summary
 
 
+def _calc_manip_signal(evidence: list, coin: str | None = None) -> tuple[float, float] | None:
+    """#86／codex 複審 HIGH 修復：從 `evidence`（`pipeline.run()` 回傳的第二個
+    值，同 `_reputation_summary()` 這份）逐筆 `trust_components["manipulation"]`
+    算出本輪快照的操縱風險訊號，回傳 `(worst, mean)`。
+
+    codex 複審 HIGH（風險 invariant 定案）：**`worst`（= `max()`，any-hit
+    語意）才是主訊號，不是算術平均**。原始實作用平均值當唯一分數，會被
+    evidence 筆數稀釋——15 筆裡只要有 1 筆已確認操縱（`manipulation=1.0`），
+    平均只剩 0.067，會被 UI 判成「低操縱風險」，把一次確定的操縱訊號洗成
+    假安全訊號；來源數量不對等（例如某來源類型灌爆筆數）還會不成比例
+    稀釋其他來源的訊號。信任產品的操縱風險徽章必須滿足「只要出現一筆
+    已確認操縱，就不可能顯示低風險」這個 invariant，`max()` 是唯一在
+    evidence 筆數/來源分布任意變動下都維持這個 invariant 的聚合方式
+    （見 `test_calc_manip_signal_single_confirmed_hit_is_not_diluted_by_mean`
+    鎖定此不變量）。
+
+    `mean` 一併回傳、寫入快照的 `"manip_score_mean"` 欄位，作**輔助**
+    資訊（供人工判讀「這批證據平均而言如何」，不參與徽章分級判斷，見
+    `frontend/src/lib/manipRisk.ts::manipRiskDisplay()` 只吃 `manip_score`
+    這個 primary 訊號）。
+
+    ⛔ $0／不重算：`trust.scoring.score()` 已把「信譽×0.5 + 佐證×0.25 +
+    時效×0.15 − 操縱×0.4」的操縱懲罰分項算好、由
+    `agent.orchestrator._scored_to_evidence()` 逐字複製進每筆
+    `Evidence.trust_components["manipulation"]`（鍵名對照：issue #86 原始
+    描述寫的是 `sc.components["manip"]`，但 `"manip"` 只是權重字典 `w` 的
+    鍵，`ScoredClaim.components`/`Evidence.trust_components` 實際存的鍵是
+    `"manipulation"`，見 `trust/scoring.py::score()`，兩者不可混用）。這裡
+    純粹是對既有結果的重新聚合，不另開一條獨立公式、不重呼叫任何連接器。
+
+    誠實標「無資料」（比照 `_reputation_summary()`／`reputation_trace` 欄位
+    同款慣例，也對齊 W2 `single_source`／`has_data` 徽章的誠實原則）：
+    `evidence` 為 None／空清單，或逐筆都沒有 `manipulation` 分項（理論上
+    只要 `evidence` 非空就一定有——這裡仍防禦式檢查，不假設上游契約永遠
+    成立）時回傳 `None`，呼叫端據此完全不寫入 `"manip_score"`／
+    `"manip_score_mean"` 這兩個鍵，不用 0.0 冒充「查過、確定無操縱」
+    （#24 鐵律）。
+
+    codex 窮舉終審 HIGH 修復（非數值 manipulation 中止整批快照）：原本
+    `float(tc["manipulation"])` 對每一筆都直接轉型、沒有例外處理——單筆
+    髒資料（`None`、字串、物件、`NaN`/`Infinity`……理論上 `trust.scoring.
+    score()` 不該產生，但 `trust_components` 是外部可變的 dict，不假設
+    上游契約永遠成立）就會讓 `float()` 拋例外或算出不合法值，往上傳到
+    `_snapshot_dict()`，而 `_snapshot_dict()` 呼叫處（`--snapshot` 主
+    迴圈）當時只把 `pipeline.run()` 包在 try/except 裡，`_snapshot_dict()`
+    本身不在保護範圍內——單筆壞資料會直接把整個 coin loop 炸掉，波及本輪
+    其他健康的幣。修法：逐筆驗證改成「只接受 0..1 之間的有限實數」（用
+    `math.isfinite()` 擋 `NaN`/`Infinity`，用 `isinstance(x, bool)` 排除
+    `True`/`False`——Python 的 `bool` 是 `int` 子類，`isinstance(x, (int,
+    float))` 會誤放 `bool` 通過），驗證失敗的單筆一律跳過（不中止整批）
+    並印 warning log（帶 `coin` 方便追查是哪一幣、哪個來源寫壞），呼叫端
+    （`--snapshot` 主迴圈）另外把 `_snapshot_dict()` 整體納入 per-coin
+    try/except 作 defense-in-depth（即使未來又有其他欄位算出時炸例外，也
+    只隔離單幣，不會中止整輪排程）。"""
+    if not evidence:
+        return None
+    scores: list[float] = []
+    for ev in evidence:
+        tc = getattr(ev, "trust_components", None) or {}
+        if "manipulation" not in tc:
+            continue
+        raw = tc["manipulation"]
+        # codex 窮舉終審 HIGH 修復：只接受 0..1 之間的有限實數，`bool` 雖是
+        # `int` 子類但語意上不是分數，一併排除；`None`/字串/物件/NaN/
+        # Infinity 一律視為畸形、跳過該筆並記 warning，不讓單筆壞資料中止
+        # 整批快照。
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            print(
+                f"[fetch_scheduler] _calc_manip_signal"
+                f"{f'({coin})' if coin else ''}: 跳過非數值 manipulation "
+                f"分項（型別 {type(raw).__name__}）",
+                file=sys.stderr,
+            )
+            continue
+        value = float(raw)
+        if not math.isfinite(value) or not (0.0 <= value <= 1.0):
+            print(
+                f"[fetch_scheduler] _calc_manip_signal"
+                f"{f'({coin})' if coin else ''}: 跳過越界/非有限 manipulation "
+                f"分項（值 {raw!r}，應為 0..1 之間的有限實數）",
+                file=sys.stderr,
+            )
+            continue
+        scores.append(value)
+    if not scores:
+        return None
+    return round(max(scores), 3), round(sum(scores) / len(scores), 3)
+
+
 def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     """`Report`（真 `pipeline.run()` 結果）→ 快照精華 dict。欄位逐字取自
     既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。
@@ -666,7 +756,17 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     直接丟棄）非空時，順便擷取 W2 reputation_trace 精華（見
     `_reputation_summary()`），寫入 `"reputation_trace"` 欄位，供未來 #4
     來源信譽榜使用。沒有 trace 資料（`evidence=None`/空清單，或該幣本輪
-    尚未啟用動態信譽）時完全不新增這個鍵，逐字向後相容，也不補假值。"""
+    尚未啟用動態信譽）時完全不新增這個鍵，逐字向後相容，也不補假值。
+
+    #86 追加，codex 複審 HIGH 修復（見 `_calc_manip_signal()` docstring）：
+    `evidence` 可算出操縱訊號時，多寫兩個鍵——`"manip_score"`（**worst-case
+    max**，供首頁跨幣信任排行的操縱風險徽章判斷用的 primary 訊號，「只要
+    有一筆已確認操縱就不能顯示低風險」）與 `"manip_score_mean"`（算術
+    平均，僅供輔助判讀，不參與徽章分級）。同樣是**追加、非破壞性**欄位
+    ——算不出（`evidence` 為 None/空）時完全不新增這兩個鍵，舊格式快照／
+    本輪無 evidence 的快照都合法缺席，前端（`OverviewCard.tsx`／
+    `ManipRiskBadge`）須顯式標「未評分」（不是悄悄不顯示、更不是假設
+    0＝安全）。"""
     snap = {
         "coin": coin,
         "trust_score": round(float(report.confidence), 4),
@@ -679,6 +779,11 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
         reputation_trace = _reputation_summary(evidence)
         if reputation_trace:
             snap["reputation_trace"] = reputation_trace
+        manip_signal = _calc_manip_signal(evidence, coin=coin)
+        if manip_signal is not None:
+            manip_worst, manip_mean = manip_signal
+            snap["manip_score"] = manip_worst
+            snap["manip_score_mean"] = manip_mean
     return snap
 
 
@@ -982,7 +1087,21 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
             failures.append(coin)
             continue
 
-        snap = _snapshot_dict(coin, report, evidence)
+        # codex 窮舉終審 HIGH 修復（非數值 manipulation 中止整批快照，第二
+        # 道防線）：`_calc_manip_signal()` 內部已逐筆驗證、跳過畸形值，
+        # 這裡再把 `_snapshot_dict()` 整體納入 per-coin try/except——即使
+        # 未來又有其他欄位算出時炸例外，也只隔離這一幣（計入 `failures`、
+        # 不寫入任何值，同上方 `pipeline_run()` 失敗的處理方式），不會像
+        # 修復前那樣讓單筆壞資料中止整個 coin loop、波及本輪其他健康的幣。
+        try:
+            snap = _snapshot_dict(coin, report, evidence)
+        except Exception as exc:  # noqa: BLE001 — 單幣快照組裝失敗只跳過該
+            # 幣、不中斷其餘幣別，且不寫入任何值——#24 鐵律：不得用假值填補
+            # 失敗的分析結果。
+            print(f"[fetch_scheduler] --snapshot {coin}: _snapshot_dict() 失敗，"
+                  f"略過（{exc}）", file=sys.stderr)
+            failures.append(coin)
+            continue
 
         # codex HIGH（PR #59 review 第五輪，#1 durability 最終閉合）：
         # **先寫 history、才寫 latest/overview**——history 是「按日累積、
