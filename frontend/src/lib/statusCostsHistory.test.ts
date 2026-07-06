@@ -224,9 +224,24 @@ describe('isHistoryData / /api/history', () => {
     if (result.ok) expect(result.data.history).toEqual([])
   })
 
-  it('history 元素 decision_state 不合法 → parse_error', async () => {
+  // #1 修復（PR #103 Round 2，legacy 快照炸掉 React overview）：這裡原本斷言
+  // `decision_state` 為未知字面值（如 `'unknown'`）要整包 parse_error——這正是
+  // CEO 終審指出的 HIGH 問題本身：legacy 快照／版本切換期可能帶尚未認識的
+  // enum 值，跟 SSR（一律當 normal 處理）行為分裂，不該讓單一舊快照拖垮
+  // 整個 `/api/history` 解析。改為斷言「未知字面值仍放行」，真正型別錯誤
+  // （非字串）才 parse_error，跟 `isOverviewData`/`isAnalyzeData` 同一套
+  // 「形狀合法」判準（見 `decisionState.test.ts`）。
+  it('history 元素 decision_state 為未知字面值（legacy/未來新 enum）→ 仍放行，不 parse_error', async () => {
     const data = validHistoryData()
     asMutable(data.history[0]).decision_state = 'unknown'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<HistoryData>('/api/history', undefined, isHistoryData)
+    expect(result.ok).toBe(true)
+  })
+
+  it('history 元素 decision_state 型別錯誤（非字串）→ parse_error', async () => {
+    const data = validHistoryData()
+    asMutable(data.history[0]).decision_state = 123
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
     const result = await apiFetch<HistoryData>('/api/history', undefined, isHistoryData)
     expect(result.ok).toBe(false)

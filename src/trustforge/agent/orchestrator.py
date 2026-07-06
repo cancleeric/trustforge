@@ -142,7 +142,7 @@ def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
     if len(kinds) < 3:
         limits.append(f"資料來源類型僅 {len(kinds)} 類（<3），多源整合度有限，結論不確定性較高。")
     if brief.confidence < 0.5:
-        limits.append("整體信心偏低，支撐證據不足以形成強判斷。")
+        limits.append("整體資訊完整度偏低，支撐證據不足以形成強判斷。")
     if brief.contrarian:
         limits.append(f"存在 {len(brief.contrarian)} 條反方／低信任訊號，已標記但未納入主結論。")
         flips.append("若反方訊號獲得高信任獨立來源佐證，結論可能反轉。")
@@ -725,7 +725,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         direction = "不明"
         head = (
             f"{coin}：現有資料不足以判斷市場方向"
-            f"（支撐證據 {n_supporting} 筆、校準信心 {calibrated:.2f}），"
+            f"（支撐證據 {n_supporting} 筆、校準後資訊完整度 {calibrated:.2f}），"
             "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
         )
     else:
@@ -737,10 +737,10 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         else:
             head = f"{coin} 當前市場狀態判斷：{direction}。"
         if is_low_confidence:
-            head += "（低信心，證據強度有限，僅供參考）"
+            head += "（資訊完整度偏低，證據強度有限，僅供參考）"
     market_judgment = (
-        head + f"（{n_indep} 個獨立來源支撐，整體信心 {brief.confidence:.2f}，"
-        f"校準後信心 {calibrated:.2f}）"
+        head + f"（{n_indep} 個獨立來源支撐，裸均值信任分 {brief.confidence:.2f}，"
+        f"資訊完整度（校準後） {calibrated:.2f}）"
     )
     log.record(
         "judgment.derive",
@@ -878,7 +878,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         else:
             _obs_line = "目前無足夠客觀事實可供觀察，需待更多獨立來源佐證後再評估。"
         inferences = [
-            f"支撐證據僅 {n_supporting} 筆、校準信心 {calibrated:.2f}，"
+            f"支撐證據僅 {n_supporting} 筆、校準後資訊完整度 {calibrated:.2f}，"
             "證據強度不足以支持任何方向性推論。",
             _obs_line,
         ]

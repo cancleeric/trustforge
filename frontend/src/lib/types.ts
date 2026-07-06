@@ -22,6 +22,17 @@ export interface ApiFailure {
 
 export type DecisionState = 'abstain' | 'low_confidence' | 'normal'
 
+/** #1 修復：legacy 快照／版本切換期可能完全缺 `decision_state` 欄位，或帶
+ * 尚未認識的新 enum 字面值——validators.ts 只在「形狀」層面放行這兩種
+ * 情況（不整包 parse_error），實際渲染前一律在這裡正規化為 `'normal'`，
+ * 跟 SSR（`web.py`/`fetch_scheduler.py` 對缺失/未知值一律走 `normal`
+ * 分支的既有行為）同一套 fallback 規則，避免版本切換期兩端行為分裂。
+ * 所有讀取 `decision_state` 來決定 hero 數字／配色／徽章文字的元件都必須
+ * 先經過這個函式，不得直接對原始值做三態比對。 */
+export function normalizeDecisionState(value: unknown): DecisionState {
+  return value === 'abstain' || value === 'low_confidence' ? value : 'normal'
+}
+
 // ── /api/overview ──────────────────────────────────────────────────────────
 
 export interface ReputationTraceEntry {

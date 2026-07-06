@@ -116,7 +116,7 @@ class Report:
         if self.decision_state == "abstain":
             return "棄權／資料不足"
         if self.decision_state == "low_confidence":
-            return "低信心"
+            return "資訊完整度偏低"
         c = self.calibrated_confidence
         return "高" if c >= 0.7 else "中" if c >= 0.45 else "低"
 
@@ -138,7 +138,7 @@ class Report:
         # W4 [HIGH-1]：顯示改用校準值＋三態標籤（confidence_label() 已含三態），
         # 裸值並列供對照、不隱藏（見 dataclass 欄位註解，不砍舊欄位語意）。
         L.append(
-            f"\n**整體信心：{self.confidence_label()}"
+            f"\n**資訊完整度：{self.confidence_label()}"
             f"（校準後 {self.calibrated_confidence:.2f}｜裸均值 {self.confidence:.2f}）**\n"
         )
 
@@ -154,9 +154,9 @@ class Report:
             tags = "".join(f"[E{i}]" for i in b.evidence_idx)
             L.append(f"- **{b.claim}** {tags}\n  - {b.explanation}")
 
-        L.append("\n## 3. 信心說明")
+        L.append("\n## 3. 資訊完整度說明")
         L.append(
-            f"信心程度：**{self.confidence_label()}**"
+            f"資訊完整度：**{self.confidence_label()}**"
             f"（校準後 {self.calibrated_confidence:.2f}｜裸均值 {self.confidence:.2f}）"
         )
         if self.limits:
@@ -231,7 +231,7 @@ def comparison_to_markdown(
     L.append(f"| 市場方向 | {dir_a} | {dir_b} |")
     # W4 [HIGH-1]：改用校準值＋三態標籤（confidence_label() 已含三態）。
     L.append(
-        f"| 整體信心 | {report_a.confidence_label()}（{report_a.calibrated_confidence:.2f}）"
+        f"| 資訊完整度 | {report_a.confidence_label()}（{report_a.calibrated_confidence:.2f}）"
         f" | {report_b.confidence_label()}（{report_b.calibrated_confidence:.2f}）|"
     )
     src_a = len({e.source for e in evidence_a})
@@ -262,7 +262,7 @@ def comparison_to_markdown(
         L.append(
             f"**{rpt.coin}**：{kind_str or '（無）'}"
             f"｜方向：{rpt_dir}"
-            f"｜信心：{rpt.calibrated_confidence:.2f}（{rpt.confidence_label()}）"
+            f"｜資訊完整度：{rpt.calibrated_confidence:.2f}（{rpt.confidence_label()}）"
         )
     L.append("")
 

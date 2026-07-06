@@ -15,7 +15,6 @@ import type {
   CostsData,
   LedgerRunRecord,
   CrossSourceSignal,
-  DecisionState,
   Evidence,
   FreshnessEntry,
   HealthData,
@@ -46,8 +45,17 @@ function isNumberArray(value: unknown): value is number[] {
   return Array.isArray(value) && value.every((v) => typeof v === 'number')
 }
 
-function isDecisionState(value: unknown): value is DecisionState {
-  return value === 'abstain' || value === 'low_confidence' || value === 'normal'
+// #1 修復（legacy 快照炸掉 React overview）：`isDecisionState` 嚴格比對三態
+// 字面值，用在「擋整包 entry」的位置太嚴——legacy 快照／版本切換期可能完全
+// 沒有 `decision_state` 這個 key，或帶尚未認識的新 enum 值，跟 SSR
+// （`fetch_scheduler.py` 對缺失/未知值一律當 normal 處理）行為不一致，會讓
+// 單一舊快照就讓整個 `/api/overview`／`/api/analyze` payload 判定失敗。
+// 這裡只在「形狀」層面放行缺失（`undefined`）與任意字串（含未知字面值）；
+// 真正型別錯誤（數字/物件/陣列等非字串）才擋。實際渲染前一律再用
+// `normalizeDecisionState()`（見 `types.ts`）正規化為 `'normal'`，兩邊
+// 同一套 fallback 規則。
+function isDecisionStateOrLegacy(value: unknown): boolean {
+  return value === undefined || typeof value === 'string'
 }
 
 // ── /api/overview ────────────────────────────────────────────────────────
@@ -97,7 +105,7 @@ function isOverviewCoin(value: unknown): value is OverviewCoin {
     typeof value.trust_score === 'number' &&
     typeof value.direction === 'string' &&
     typeof value.calibrated_confidence === 'number' &&
-    isDecisionState(value.decision_state) &&
+    isDecisionStateOrLegacy(value.decision_state) &&
     typeof value.generated_at === 'string' &&
     (value.reputation_trace === undefined || isReputationTrace(value.reputation_trace)) &&
     // #86：`manip_score`／`manip_score_mean` 同 `reputation_trace` 款選填
@@ -217,7 +225,7 @@ function isReport(value: unknown): value is Report {
     typeof value.direction === 'string' &&
     isCrossSourceSignal(value.cross_source_signal) &&
     typeof value.calibrated_confidence === 'number' &&
-    isDecisionState(value.decision_state)
+    isDecisionStateOrLegacy(value.decision_state)
   )
 }
 
@@ -422,7 +430,7 @@ function isTrustHistoryEntry(value: unknown): value is TrustHistoryEntry {
     typeof value.trust_score === 'number' &&
     typeof value.direction === 'string' &&
     typeof value.calibrated_confidence === 'number' &&
-    isDecisionState(value.decision_state) &&
+    isDecisionStateOrLegacy(value.decision_state) &&
     typeof value.generated_at === 'string' &&
     (value.reputation_trace === undefined || isReputationTrace(value.reputation_trace))
   )

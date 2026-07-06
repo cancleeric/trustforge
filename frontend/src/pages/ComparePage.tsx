@@ -170,7 +170,7 @@ export default function ComparePage() {
       <div>
         <h1 className="text-lg font-semibold text-tf-text">雙幣比較</h1>
         <p className="mt-1 text-xs text-tf-muted">
-          兩份獨立分析並列呈現，各自的信任分/信心/證據互不干擾，供相對強弱比較。
+          兩份獨立分析並列呈現，各自的信任分/資訊完整度/證據互不干擾，供相對強弱比較。
         </p>
       </div>
 

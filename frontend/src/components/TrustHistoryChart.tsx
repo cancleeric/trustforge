@@ -13,7 +13,7 @@ function HistoryTooltip({ active, payload, label }: TooltipContentProps) {
     <div className="rounded border border-tf-border bg-tf-card p-2 text-xs text-tf-text2 shadow">
       <p className="font-semibold text-tf-text">{label}</p>
       <p className="tf-num">信任分 {p.trust_score.toFixed(2)}</p>
-      <p className="tf-num">校準信心 {p.calibrated_confidence.toFixed(2)}</p>
+      <p className="tf-num">資訊完整度（校準後） {p.calibrated_confidence.toFixed(2)}</p>
       <p>{p.direction}</p>
     </div>
   )
@@ -44,7 +44,7 @@ export default function TrustHistoryChart({ history }: Props) {
           <Line
             type="monotone"
             dataKey="calibrated_confidence"
-            name="校準信心"
+            name="資訊完整度（校準後）"
             stroke="var(--color-tf-good)"
             strokeWidth={1.5}
             strokeDasharray="4 3"

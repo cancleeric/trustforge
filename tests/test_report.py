@@ -24,7 +24,7 @@ def test_report_has_required_sections():
     assert report.key_basis, "需有關鍵依據"
     assert 0.0 <= report.confidence <= 1.0
     md = report.to_markdown(evidence)
-    for section in ("結論 / 市場判斷", "關鍵依據", "信心說明", "事實", "推論"):
+    for section in ("結論 / 市場判斷", "關鍵依據", "資訊完整度說明", "事實", "推論"):
         assert section in md
 
 
@@ -53,7 +53,7 @@ def test_btc_judgment_is_bearish_from_data():
 
 
 def test_limits_reported_when_sources_thin():
-    """信心說明須含限制（樣本來源類型有限）。"""
+    """資訊完整度說明須含限制（樣本來源類型有限）。"""
     report, _ = _run()
     assert report.limits, "資料有限時須明確說明限制，不可硬給結論"
 
