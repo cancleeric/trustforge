@@ -253,9 +253,14 @@ def test_web_real_mode_rate_limited_at_real_threshold(monkeypatch):
     """real=1 仍需要限流（防真連接器被洪水級高頻打爆），只是門檻改成
     DoS 洪水級（`_REAL_RATE_MAX`）而非 Bedrock 成本級（`_RATE_MAX`）——
     超過 `_REAL_RATE_MAX` 次才應拋 TooManyRequests（codex HIGH，PR #44）。
+
+    測試套件效能優化：`_REAL_RATE_MAX` 生產值是 60，逐次真跑（離線）pipeline
+    很吃測試時間；monkeypatch 成小很多的門檻，迴圈次數與斷言都改讀這個 patch
+    後的值，驗證的仍是「超過門檻才 429」邏輯本身，跟門檻實際數字無關。
     """
     monkeypatch.setattr(web, "HAS_BEDROCK", False)
     monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.setattr(web, "_REAL_RATE_MAX", 3)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
