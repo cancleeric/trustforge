@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { getHistory } from '../lib/endpoints'
-import { computeTrendDelta } from '../lib/trustTrend'
+import { computeTrendDelta, trendComparisonLabel } from '../lib/trustTrend'
 import type { HistoryData } from '../lib/types'
 import { ErrorState, LoadingState } from './StatusStates'
 
@@ -68,7 +68,7 @@ export default function TrustTrendSection({ coin }: { coin: string }) {
                 {trend.delta > 0 ? '+' : ''}
                 {trend.delta.toFixed(2)}
               </span>{' '}
-              <span className="text-tf-muted">（較昨日）</span>
+              <span className="text-tf-muted">（{trendComparisonLabel(trend.previous, trend.latest)}）</span>
             </p>
           )}
           {trend?.kind === 'no-baseline' && <p className="text-sm text-tf-muted">尚無對比基準</p>}
