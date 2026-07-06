@@ -45,6 +45,16 @@ _OVERCLAIM_TERMS = (
     "保准",
     "穩賺",
     "穩賺不賠",
+    # 雙語文件（llms.txt/openapi.yaml 都是繁中+英文對照），誇大詞庫先前
+    # 只顧中文——英文版一樣要攔（qa-lead 終審 MEDIUM-2：比對大小寫不敏感，
+    # 見下方兩個測試改用 `.lower()`）。
+    "guaranteed",
+    "risk-free",
+    "risk free",
+    "always correct",
+    "sure win",
+    "no risk",
+    "accuracy guaranteed",
 )
 
 
@@ -166,9 +176,9 @@ def test_openapi_spec_documents_missing_key_semantics_for_manip_and_decision_sta
 
 
 def test_openapi_spec_has_no_overclaiming_wording():
-    text = _OPENAPI_PATH.read_text(encoding="utf-8")
+    text = _OPENAPI_PATH.read_text(encoding="utf-8").lower()
     for term in _OVERCLAIM_TERMS:
-        assert term not in text, f"spec 出現誇大詞「{term}」"
+        assert term.lower() not in text, f"spec 出現誇大詞「{term}」"
 
 
 # ---------------------------------------------------------------------------
@@ -229,9 +239,9 @@ def test_llms_txt_covers_required_content():
 
 def test_llms_txt_has_no_overclaiming_wording():
     for path in (_LLMS_TXT_ROOT_PATH, _LLMS_TXT_FRONTEND_PATH):
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8").lower()
         for term in _OVERCLAIM_TERMS:
-            assert term not in text, f"{path} 出現誇大詞「{term}」"
+            assert term.lower() not in text, f"{path} 出現誇大詞「{term}」"
 
 
 # ---------------------------------------------------------------------------

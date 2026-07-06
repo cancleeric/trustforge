@@ -118,15 +118,6 @@ info:
       （那是未校準裸均值，僅供對照）。
     - 任何欄位缺席 → 視為「未評估」，不要假設為 0 或安全。
 
-externalDocs:
-  description: |
-    一頁式 agent 指南（繁中+英文對照），涵蓋本文件濃縮版重點。正式呼叫請
-    一律讀部署後同源的 `GET /llms.txt`（見上方 `paths./llms.txt` 定義，
-    與本連結內容以 `tests/test_ai_friendly_api.py` 逐字元一致性測試鎖定
-    同步）——這裡刻意用絕對 URL 指回原始碼倉庫版本，供離線瀏覽/版本追蹤，
-    不是要取代同源路徑。
-  url: https://github.com/cancleeric/trustforge/blob/develop/llms.txt
-
 servers:
   - url: /
     description: 同源部署（SSR python 直接對外，或 nginx 反代 /api/* 給 python）
