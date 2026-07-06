@@ -53,6 +53,20 @@ class Evidence:
     # 自動扣分必然誤傷合法聯播/引用，故拆成獨立欄位、獨立語意。預設空 list，
     # 向後相容。
     info_flags: list[str] = field(default_factory=list)
+    # W3 前置（資料累積，非偵測）：來源平台公開 username 原文（由
+    # ingestion 連接器寫入 Document.meta["author"]，見
+    # agent.orchestrator._scored_to_evidence）。僅少數源（如 Reddit RSS
+    # `<author>`、新聞 RSS `<author>`/`dc:creator`）有作者欄位；其餘源
+    # 無此概念。不參與 trust 分數、不做任何跨平台關聯，也不在 UI 顯示。
+    #
+    # codex vp-engineering 終審 MEDIUM（PR #107）：型別改 `str | None`、
+    # 預設 `None`（原本 `str = ""`）——空字串會把「來源沒有作者概念」跟
+    # 「來源有作者概念、但這筆碰巧抓不到值」兩種完全不同的情況都抹平成
+    # 同一個 falsy 值，違反本專案「缺鍵=未知」慣例（別的 optional 欄位都是
+    # 用 `None`/缺鍵表達「未知」，不是用空字串冒充）。`None` 才是誠實的
+    # 「未擷取到」，不代表「已確認無作者」。向後相容：舊快照/序列化資料
+    # 反序列化回 Evidence 時缺這個鍵一樣正常（落到預設 `None`）。
+    author: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

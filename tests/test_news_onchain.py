@@ -496,6 +496,86 @@ def test_blockworks_atom_feed_parses_via_shared_parse_rss(monkeypatch):
     assert d.ts > 0
 
 
+DC_CREATOR_RSS_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Bitcoinist</title>
+    <item>
+      <title>Bitcoin BTC eyes breakout above resistance</title>
+      <link>https://bitcoinist.com/btc-breakout</link>
+      <description>Bitcoin BTC shows bullish structure amid rising volume.</description>
+      <pubDate>Wed, 01 Aug 2026 10:00:00 +0000</pubDate>
+      <dc:creator>Jane Analyst</dc:creator>
+    </item>
+  </channel>
+</rss>"""
+
+RSS_AUTHOR_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CoinDesk</title>
+    <item>
+      <title>Bitcoin BTC surges past $70,000</title>
+      <link>https://www.coindesk.com/markets/2026/08/01/btc-surge</link>
+      <description>Bitcoin BTC has surged amid strong institutional demand.</description>
+      <pubDate>Wed, 01 Aug 2026 10:00:00 +0000</pubDate>
+      <author>john@coindesk.com (John Reporter)</author>
+    </item>
+  </channel>
+</rss>"""
+
+ATOM_AUTHOR_FIXTURE = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Blockworks</title>
+  <entry>
+    <title type="html">ETF inflows accelerate amid rate-cut bets</title>
+    <id>https://blockworks.com/news/etf-inflows</id>
+    <link href="https://blockworks.com/news/etf-inflows"/>
+    <summary type="html">Bitcoin BTC ETF inflows accelerate amid rate-cut bets.</summary>
+    <published>2026-08-01T10:00:00.000Z</published>
+    <author><name>Alex Blockworks</name></author>
+  </entry>
+</feed>"""
+
+
+def test_rss_dc_creator_captured_in_meta(monkeypatch):
+    """W3 前置：WordPress 常見 <dc:creator> 存進 meta["author"]（原文）。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: DC_CREATOR_RSS_FIXTURE)
+    docs = news.BitcoinistRSSSource().fetch("BTC", coin="BTC")
+    assert len(docs) == 1
+    assert docs[0].meta.get("author") == "Jane Analyst"
+
+
+def test_rss_author_tag_captured_in_meta(monkeypatch):
+    """W3 前置：RSS 2.0 <author> 存進 meta["author"]（原文，不解析 email/姓名）。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: RSS_AUTHOR_FIXTURE)
+    docs = news.CoinDeskRSSSource().fetch("BTC", coin="BTC")
+    assert len(docs) == 1
+    assert docs[0].meta.get("author") == "john@coindesk.com (John Reporter)"
+
+
+def test_atom_author_name_captured_in_meta(monkeypatch):
+    """W3 前置：Atom <author><name> 存進 meta["author"]。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: ATOM_AUTHOR_FIXTURE)
+    docs = news.BlockworksRSSSource().fetch("BTC", coin="BTC")
+    assert len(docs) == 1
+    assert docs[0].meta.get("author") == "Alex Blockworks"
+
+
+def test_rss_missing_author_no_key_no_crash(monkeypatch):
+    """optional 欄位：無作者標籤時 meta 缺鍵，不補假值、不崩潰（沿用既有
+    RSS_FIXTURE，本來就沒有作者欄位）。"""
+    from trustforge.ingestion import news
+    monkeypatch.setattr(news, "_fetch_url", lambda url: RSS_FIXTURE)
+    docs = news.CoinDeskRSSSource().fetch("BTC", coin="BTC")
+    assert len(docs) >= 1
+    for d in docs:
+        assert "author" not in d.meta
+
+
 def test_news_source_failure_does_not_crash_collect(monkeypatch):
     """連接器逾時/例外 → collect 跳過該來源，不拋例外。"""
     from urllib.error import URLError

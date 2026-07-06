@@ -748,6 +748,53 @@ def _calc_manip_signal(evidence: list, coin: str | None = None) -> tuple[float, 
     return round(max(scores), 3), round(sum(scores) / len(scores), 3)
 
 
+# codex vp-engineering 終審 MEDIUM（PR #107）：見 `_collect_authors()`
+# docstring／函式內註解——單一快照 `"authors"` 清單的防禦性上限。
+_MAX_AUTHORS = 200
+
+
+def _collect_authors(evidence: list) -> list[str]:
+    """W3 前置（資料累積，非偵測）：從 `evidence`（`pipeline.run()` 回傳的
+    第二個值）逐筆擷取 `Evidence.author`（見 `agent.orchestrator.
+    _scored_to_evidence`，來源平台公開 username 原文，由 ingestion.social/
+    news 連接器選填），去重、排序後回傳。
+
+    只累積原始 username 字串本身，**不做任何跨來源/跨平台關聯、不做去
+    識別化以外的任何衍生運算、不影響任何 trust 分數**——單純讓帳號維度
+    資料開始按日留存，供未來 W3 協同操縱偵測演算法使用（本 PR 不包含該
+    演算法）。目前大多數來源（多數 news RSS、onchain、regulatory、
+    hoyabit、price）沒有作者概念，`Evidence.author` 恆為 `None`（codex
+    vp-engineering 終審 MEDIUM，PR #107：型別已改 `str | None = None`，
+    不再用空字串冒充「未知」），該筆直接跳過，回傳空 list 是誠實結果，
+    不代表 bug。
+
+    去重排序後若超過 `_MAX_AUTHORS`（200）筆，截斷保留前 `_MAX_AUTHORS`
+    筆並記 warning（防禦性上限，避免單一快照撞 DynamoDB item 大小上限，
+    見 `_MAX_AUTHORS` 註解）。
+    """
+    authors: set[str] = set()
+    for ev in evidence:
+        author = getattr(ev, "author", None) or ""
+        if author:
+            authors.add(author)
+    result = sorted(authors)
+    if len(result) > _MAX_AUTHORS:
+        # codex vp-engineering 終審 MEDIUM：防禦性上限——單一快照的
+        # authors 清單若無上限，理論上可能被大量不同 username 灌爆，
+        # 撞上 DynamoDB 單一 item 400KB 上限（快照本身還有其他欄位要塞
+        # 進同一個 item）。正常情境（單輪抓取 evidence 通常個位數~幾十
+        # 筆）不會觸發，觸發時截斷保留排序後前 `_MAX_AUTHORS` 筆並記
+        # warning，不讓單一快照無限膨脹。
+        print(
+            f"[fetch_scheduler] _collect_authors: 去重後 authors 數"
+            f"（{len(result)}）超過上限 {_MAX_AUTHORS}，截斷保留前"
+            f" {_MAX_AUTHORS} 筆（排序後）",
+            file=sys.stderr,
+        )
+        result = result[:_MAX_AUTHORS]
+    return result
+
+
 def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     """`Report`（真 `pipeline.run()` 結果）→ 快照精華 dict。欄位逐字取自
     既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。
@@ -766,7 +813,13 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     ——算不出（`evidence` 為 None/空）時完全不新增這兩個鍵，舊格式快照／
     本輪無 evidence 的快照都合法缺席，前端（`OverviewCard.tsx`／
     `ManipRiskBadge`）須顯式標「未評分」（不是悄悄不顯示、更不是假設
-    0＝安全）。"""
+    0＝安全）。
+
+    W3 前置（資料累積，非偵測）：`evidence` 裡有筆帶 `author`（見
+    `_collect_authors()`）時，多寫 `"authors"` 鍵（去重排序後的 username
+    原文 list），讓帳號維度資料開始按日累積。同樣**追加、非破壞性**——
+    目前本 PR 不含任何演算法消費這個鍵，也不在任何 UI 顯示；沒有作者資料
+    時完全不新增這個鍵，不補空 list、不假裝有資料。"""
     snap = {
         "coin": coin,
         "trust_score": round(float(report.confidence), 4),
@@ -784,6 +837,9 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
             manip_worst, manip_mean = manip_signal
             snap["manip_score"] = manip_worst
             snap["manip_score_mean"] = manip_mean
+        authors = _collect_authors(evidence)
+        if authors:
+            snap["authors"] = authors
     return snap
 
 

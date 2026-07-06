@@ -4285,6 +4285,90 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
 
 
 
+# harper CISO 隱私審查附條件修復（PR #107）：W3 前置累積的
+# `Evidence.author`／快照 `"authors"` 鍵是「內部資料累積」用途（供未來 W3
+# 協同操縱偵測），不是要對外公開 API 洩漏來源平台使用者名稱。以下 helper
+# 只在**對外序列化邊界**（`/api/analyze`——含 `type=comparison` 模式、
+# `/analyze.json`、`/api/overview`、`/api/history` 回應組裝處）套用欄位
+# 過濾；`cache`/每日快照本身完全不動、原樣保留 author/authors，供未來
+# 偵測演算法讀取——過濾只發生在「即將寫進 HTTP 回應 body」的最後一步，
+# 不是在資料源頭閹割。
+#
+# 文件修正（codex vp-engineering 終審 LOW）：TrustForge 沒有獨立的
+# `/api/compare` 端點——比較分析走的是 `/api/analyze?type=comparison`，
+# 舊註解誤寫成「`/api/compare`」，這裡與 `ARCHITECTURE.md` 一併修正。
+
+# 欄位守門（codex vp-engineering 終審 LOW，已實測 H1 為活案例）：blocklist
+# 式過濾（只列「要拿掉」的欄位）有結構性弱點——新欄位加進 `Evidence` 時，
+# 若沒人記得同步更新過濾邏輯，預設「未分類 = 直接對外」，容易悄悄洩漏
+# （這次 H1 的 `author` 就是先加進 dataclass、隔一輪才補過濾，中間有
+# 一個入口漏補）。改成明確維護「可對外」/「需過濾」兩個分類集合，供
+# `tests/test_json_api.py` 的欄位守門測試比對：`dataclasses.fields
+# (Evidence)` 任何欄位若不在這兩個集合裡，測試直接紅，不會悄悄放行。
+_EVIDENCE_PUBLIC_FIELDS = frozenset({
+    "source", "fetched_at", "content_reference", "related_claim",
+    "source_url", "kind", "trust", "trust_components", "flags", "info_flags",
+})
+_EVIDENCE_FILTERED_FIELDS = frozenset({"author"})
+
+
+def _public_evidence_dict(ev) -> dict:
+    """`Evidence.to_dict()` 的對外安全版：拿掉 `_EVIDENCE_FILTERED_FIELDS`
+    列出的欄位（目前只有 `author`，來源平台公開 username 原文）——
+    `/api/analyze`（含 `type=comparison` 模式）、`/analyze.json` 這些
+    端點只套 rate-limit、不需認證，任何人都能打，不該把使用者名稱直接
+    洩漏出去。`author` 欄位本身的存在（`Evidence` dataclass／cache/快照）
+    不受影響，只是不進這些端點的回應 body。"""
+    d = ev.to_dict()
+    for field_name in _EVIDENCE_FILTERED_FIELDS:
+        d.pop(field_name, None)
+    return d
+
+
+def _public_snapshot_dict(snap: dict) -> dict:
+    """每日快照 dict 的對外安全版：拿掉 `_collect_authors()` 寫入的
+    `"authors"` 鍵（username 清單）——`/api/overview`、`/api/history` 同樣
+    只套 rate-limit、免認證。回傳淺拷貝，不修改呼叫端傳入的原始 dict（該
+    dict 若來自 cache 讀取結果，呼叫端可能還有其他用途）。"""
+    d = dict(snap)
+    d.pop("authors", None)
+    return d
+
+
+# codex vp-engineering 終審 H1（PR #107，已實測證實）：`/analyze.json`
+# 的裸 JSON payload 組裝（跟 `_handle_api_analyze` 的 `{ok,data,error}`
+# 信封是不同格式、不同用途）曾在兩個入口——`web.py` 這支 `do_GET` 分派器
+# 與 `lambda_handler.py`（Lambda Function URL 生產入口）——各自複製一份
+# `dataclasses.asdict(report)` + `ev.to_dict()`，`lambda_handler.py`
+# 那份忘了套用 `_public_evidence_dict()` 過濾，導致 author 從 Lambda
+# 生產入口原文外洩。根治（不只補兩行 `.pop`）：payload 組裝**只在這裡
+# 寫一份**，`web.py`／`lambda_handler.py` 兩個入口一律呼叫這兩個函式，
+# 不再各自組 dict、不會再分岔。
+
+
+def _build_analyze_json_payload(report, evidence, log) -> dict:
+    """`/analyze.json`（單幣分析）JSON payload——`web.py` SSR 路由與
+    `lambda_handler.py` Function URL 入口共用同一份，見上方說明。"""
+    return {
+        "version": VERSION,
+        "report": dataclasses.asdict(report),
+        "evidence": [_public_evidence_dict(ev) for ev in evidence],
+        "execution_log": log.events,
+    }
+
+
+def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, log) -> dict:
+    """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。"""
+    return {
+        "version": VERSION,
+        "report_a": dataclasses.asdict(report_a),
+        "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
+        "report_b": dataclasses.asdict(report_b),
+        "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
+        "execution_log": log.events,
+    }
+
+
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
     `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
@@ -4443,12 +4527,12 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             payload = {
                 "version": VERSION,
                 "report_a": dataclasses.asdict(report_a),
-                "evidence_a": [ev.to_dict() for ev in evidence_a],
+                "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
                 "trust_radar_a": aggregate_trust_by_kind(evidence_a),
                 "trust_components_aggregate_a": _aggregate_trust_components(evidence_a),
                 "price_provenance_a": _price_provenance_data(evidence_a),
                 "report_b": dataclasses.asdict(report_b),
-                "evidence_b": [ev.to_dict() for ev in evidence_b],
+                "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
@@ -4467,7 +4551,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             payload = {
                 "version": VERSION,
                 "report": dataclasses.asdict(report),
-                "evidence": [ev.to_dict() for ev in evidence],
+                "evidence": [_public_evidence_dict(ev) for ev in evidence],
                 "trust_radar": aggregate_trust_by_kind(evidence),
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
                 "price_provenance": _price_provenance_data(evidence),
@@ -4529,7 +4613,7 @@ def _handle_api_overview(client_ip: str = "") -> tuple[int, str]:
             docs = entry.get("docs") or []
             if not docs or not isinstance(docs[0], dict):
                 continue
-            snap = dict(docs[0])
+            snap = _public_snapshot_dict(docs[0])
             snap["fetched_at_epoch"] = entry.get("fetched_at")
             coins_data.append(snap)
         return 200, _json_envelope_ok({"coins": coins_data})
@@ -4768,6 +4852,7 @@ def _handle_api_history(qs: dict, client_ip: str = "") -> tuple[int, str]:
         history = get_trust_history(
             coin_raw, days, backend=_home_overview_backend(), strict=True
         )
+        history = [_public_snapshot_dict(day) for day in history]
         return 200, _json_envelope_ok({"coin": coin_raw, "days": days, "history": history})
     except Exception:
         logging.exception("TrustForge /api/history error")
@@ -5006,14 +5091,9 @@ class Handler(BaseHTTPRequestHandler):
                         )
                     query = qs.get("q", [""])[0]
                     if u.path == "/analyze.json":
-                        payload = {
-                            "version": VERSION,
-                            "report_a": dataclasses.asdict(report_a),
-                            "evidence_a": [ev.to_dict() for ev in evidence_a],
-                            "report_b": dataclasses.asdict(report_b),
-                            "evidence_b": [ev.to_dict() for ev in evidence_b],
-                            "execution_log": log.events,
-                        }
+                        payload = _build_comparison_json_payload(
+                            report_a, evidence_a, report_b, evidence_b, log
+                        )
                         return self._send(
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
@@ -5051,12 +5131,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         report, evidence, log = _do_analyze(qs, client_ip=client_ip)
                     if u.path == "/analyze.json":
-                        payload = {
-                            "version": VERSION,
-                            "report": dataclasses.asdict(report),
-                            "evidence": [ev.to_dict() for ev in evidence],
-                            "execution_log": log.events,
-                        }
+                        payload = _build_analyze_json_payload(report, evidence, log)
                         return self._send(
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",

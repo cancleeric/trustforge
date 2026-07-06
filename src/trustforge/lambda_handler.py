@@ -9,7 +9,6 @@ live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶對應 token 參數�
 """
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 from urllib.parse import urlencode
@@ -90,14 +89,14 @@ def handler(event, context=None):
                     qs, client_ip=client_ip
                 )
                 if path == "/analyze.json":
-                    payload = {
-                        "version": web.VERSION,
-                        "report_a": dataclasses.asdict(report_a),
-                        "evidence_a": [ev.to_dict() for ev in evidence_a],
-                        "report_b": dataclasses.asdict(report_b),
-                        "evidence_b": [ev.to_dict() for ev in evidence_b],
-                        "execution_log": log.events,
-                    }
+                    # codex vp-engineering 終審 H1（已實測證實 author 從此
+                    # 入口外洩）：payload 組裝改呼叫 web.py 共用函式，跟
+                    # web.py 自己的 `/analyze.json` 路由同一份，不再各自
+                    # 複製、不會分岔（見 `web._build_comparison_json_payload`
+                    # docstring）。
+                    payload = web._build_comparison_json_payload(
+                        report_a, evidence_a, report_b, evidence_b, log
+                    )
                     return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
                                  "application/json; charset=utf-8")
                 query = qs.get("q", [""])[0]
@@ -111,12 +110,8 @@ def handler(event, context=None):
             else:
                 report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
                 if path == "/analyze.json":
-                    payload = {
-                        "version": web.VERSION,
-                        "report": dataclasses.asdict(report),
-                        "evidence": [ev.to_dict() for ev in evidence],
-                        "execution_log": log.events,
-                    }
+                    # 同上：呼叫 web.py 共用函式，不再自己組 payload。
+                    payload = web._build_analyze_json_payload(report, evidence, log)
                     return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
                                  "application/json; charset=utf-8")
                 return _resp(200, web.render_page(web._render_report(report, evidence)),
