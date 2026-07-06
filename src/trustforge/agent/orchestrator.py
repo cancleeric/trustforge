@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from typing import Callable
 
@@ -75,6 +76,40 @@ SYSTEM = (
     "你的任務是把證據行文成可讀推理，不得引入未提供的外部結論。"
 )
 
+# codex vp-engineering 終審 MEDIUM（PR #107，已實測 100KB `<script>` payload
+# 可一路存進 90 天快照——目前唯一防線是「沒人 render 它」，不可接受）：
+# `Document.meta["author"]` 是連接器解析上游 RSS/Atom XML 抓來的**未經信任
+# 輸入**，在進入 `Evidence.author`（進而流進每日快照 `"authors"` 鍵、留存
+# 90 天）之前，這裡是唯一收斂點（news.py／social.py 兩個連接器都經過
+# `_scored_to_evidence`），必須在此把關。
+_AUTHOR_MAX_LEN = 200
+# C0 控制字元（\x00-\x1f）+ DEL（\x7f）+ 尖括號（`<`/`>`，涵蓋 HTML 標籤／
+# script payload）——正常來源平台 username 不會出現這些字元，出現即視為
+# 異常/惡意輸入。
+_AUTHOR_REJECT_RE = re.compile(r"[\x00-\x1f\x7f<>]")
+
+
+def _sanitize_author(raw) -> str | None:
+    """author 健壯性守門：長度上限 200 字、拒收含 HTML 標籤/控制字元的值。
+
+    任一規則觸發即**整筆拒收**（回 `None`，不是截斷/跳脫後照收）：
+      1. 超過 `_AUTHOR_MAX_LEN`——沒有任何來源平台 username 正常長到這樣，
+         不折衷截斷（截斷仍會把巨大 payload 的前 200 字留在快照裡，一樣
+         不安全，直接整筆丟棄才乾淨）。
+      2. 命中 `_AUTHOR_REJECT_RE`（控制字元／`<`／`>`）——一律拒收。
+
+    回傳 `None`（不是空字串）：語意上跟「來源本來就沒有作者概念」不同，
+    但對下游（`_collect_authors()`/`_public_evidence_dict()`）而言效果
+    一致——都不會出現在最終資料裡。
+    """
+    if not raw:
+        return None
+    if len(raw) > _AUTHOR_MAX_LEN:
+        return None
+    if _AUTHOR_REJECT_RE.search(raw):
+        return None
+    return raw
+
 
 def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
     doc = sc.claim.doc
@@ -114,9 +149,11 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         # W3 前置（資料累積，非偵測）：連接器若抓到來源平台公開 username
         # （見 ingestion.social/news 的 `meta["author"]`），原文帶到
         # Evidence；無此欄位的來源（多數 news RSS、onchain、regulatory
-        # 等）`doc.meta.get("author")` 回 None，落到 `""`，缺鍵=未知，
-        # 不填假值。不參與 trust 分數、不做 UI 顯示。
-        author=doc.meta.get("author") or "",
+        # 等）`doc.meta.get("author")` 回 `None`，缺鍵=未知，不填假值。
+        # `_sanitize_author()` 再做一次長度上限/控制字元/HTML 標籤守門
+        # （見其 docstring），未通過一律回 `None`。不參與 trust 分數、
+        # 不做 UI 顯示。
+        author=_sanitize_author(doc.meta.get("author")),
     )
 
 

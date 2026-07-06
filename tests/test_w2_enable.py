@@ -233,14 +233,15 @@ def test_scored_to_evidence_carries_author_from_doc_meta():
 
 def test_scored_to_evidence_author_empty_when_doc_meta_has_no_author():
     """optional 欄位：無 author 概念的來源（多數 news/onchain/regulatory）
-    `doc.meta` 沒有 "author" 鍵時，`Evidence.author` 落到空字串，缺鍵=未知，
-    不補假值。"""
+    `doc.meta` 沒有 "author" 鍵時，`Evidence.author` 落到 `None`（codex
+    vp-engineering 終審 MEDIUM，PR #107：型別已改 `str | None = None`，
+    缺鍵=未知，不再用空字串冒充）。"""
     doc = Document(id="d1", kind="news", source="coindesk", text="t", ts=1.0,
                     meta={"content_reference": "ref"})
     claim = Claim(id="c1", text="t", doc=doc)
     sc = ScoredClaim(claim=claim, trust=0.5, components={"reputation": 0.5})
     ev = _scored_to_evidence(sc, related="測試")
-    assert ev.author == ""
+    assert ev.author is None
 
 
 def test_render_trust_breakdown_shows_reputation_trace_change():

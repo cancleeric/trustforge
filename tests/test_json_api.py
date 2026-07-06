@@ -13,6 +13,7 @@ tmp_path，不打真 DynamoDB；`/api/analyze` 沿用 `_do_analyze`/`_do_compari
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import threading
@@ -3164,6 +3165,92 @@ def test_analyze_json_route_excludes_author(monkeypatch):
     parsed = json.loads(body)
     assert any(ev.get("content_reference") == "ref-leak-test" for ev in parsed["evidence"])
     assert all("author" not in ev for ev in parsed["evidence"])
+
+
+def test_api_analyze_comparison_public_response_excludes_author(monkeypatch):
+    """codex vp-engineering 終審 LOW（PR #107）：`/api/analyze`
+    `type=comparison` 分支（`evidence_a`/`evidence_b`）同樣不得洩漏
+    author——先前 CEO must-have #1 的測試只涵蓋單幣分支，comparison 分支
+    需分開驗證，不能假設「單幣測過等於 comparison 也測過」。"""
+    report_a, evidence_a, report_b, evidence_b, log = web.run_comparison(
+        "BTC", "ETH", "comparison author leak test", offline=True,
+    )
+    authored_ev = Evidence(
+        source="reddit-bitcoin",
+        fetched_at="2026-07-06T00:00:00Z",
+        content_reference="ref-cmp-leak-test",
+        related_claim="comparison author leak test",
+        author="/u/cmp_leak_test_user",
+    )
+    evidence_a = list(evidence_a) + [authored_ev]
+
+    def fake_run_comparison(coin_a, coin_b, query, **kwargs):
+        return report_a, evidence_a, report_b, evidence_b, log
+
+    monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
+
+    code, body = web._handle_api_analyze(
+        {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["comparison author leak test"]},
+        client_ip="10.2.0.4",
+    )
+    assert code == 200
+    data = _envelope(body)["data"]
+    assert any(
+        ev.get("content_reference") == "ref-cmp-leak-test" for ev in data["evidence_a"]
+    )
+    assert all("author" not in ev for ev in data["evidence_a"])
+    assert all("author" not in ev for ev in data["evidence_b"])
+
+
+def test_analyze_json_route_comparison_excludes_author(monkeypatch):
+    """`/analyze.json?type=comparison`（SSR 頁旁的裸 JSON 匯出路由）同樣
+    需要獨立驗證 comparison 分支不洩漏 author。"""
+    report_a, evidence_a, report_b, evidence_b, log = web.run_comparison(
+        "BTC", "ETH", "analyze.json comparison author leak", offline=True,
+    )
+    authored_ev = Evidence(
+        source="reddit-bitcoin",
+        fetched_at="2026-07-06T00:00:00Z",
+        content_reference="ref-cmp-json-leak",
+        related_claim="analyze.json comparison author leak",
+        author="/u/cmp_json_leak_user",
+    )
+    evidence_a = list(evidence_a) + [authored_ev]
+
+    def fake_run_comparison(coin_a, coin_b, query, **kwargs):
+        return report_a, evidence_a, report_b, evidence_b, log
+
+    monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
+
+    code, body = _do_get(
+        "/analyze.json?coin=BTC,ETH&type=comparison&q=analyze.json+comparison+author+leak"
+    )
+    assert code == 200
+    parsed = json.loads(body)
+    assert any(
+        ev.get("content_reference") == "ref-cmp-json-leak" for ev in parsed["evidence_a"]
+    )
+    assert all("author" not in ev for ev in parsed["evidence_a"])
+    assert all("author" not in ev for ev in parsed["evidence_b"])
+
+
+def test_evidence_field_gatekeeper_all_fields_classified():
+    """欄位守門測試（codex vp-engineering 終審 LOW，PR #107，已實測 H1
+    為活案例）：`dataclasses.fields(Evidence)` 的每個欄位都必須被明確
+    分類進 `web._EVIDENCE_PUBLIC_FIELDS` 或 `web._EVIDENCE_FILTERED_FIELDS`
+    其中一個——這是 blocklist 過濾模式失效的結構性防線。新增 Evidence
+    欄位卻忘了分類時，這個測試會紅，逼迫開發者明確決定該欄位的對外
+    可見性，而不是預設「未分類 = 直接對外洩漏」。"""
+    field_names = {f.name for f in dataclasses.fields(Evidence)}
+    classified = web._EVIDENCE_PUBLIC_FIELDS | web._EVIDENCE_FILTERED_FIELDS
+    unclassified = field_names - classified
+    assert not unclassified, f"新欄位未分類（需歸入 public 或 filtered）：{unclassified}"
+    assert not (web._EVIDENCE_PUBLIC_FIELDS & web._EVIDENCE_FILTERED_FIELDS), (
+        "同一欄位不該同時出現在 public 與 filtered 兩個集合"
+    )
+    assert classified == field_names, (
+        "分類集合的合集必須恰等於 Evidence 全部欄位，不多不少"
+    )
 
 
 def test_api_overview_public_response_excludes_authors_but_cache_retains_it(

@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import pytest
 
 from trustforge import lambda_handler, web
+from trustforge.schema import Evidence, QuestionType
 
 
 def _event(path: str, qs: dict | None = None) -> dict:
@@ -123,3 +124,71 @@ def test_lambda_analyze_json_success_unaffected():
     payload = json.loads(resp["body"])
     assert payload["report"]["coin"] == "BTC"
     assert payload["evidence"]
+
+
+# ---------------------------------------------------------------------------
+# codex vp-engineering 終審 H1（PR #107，已實測證實）：`lambda_handler.py`
+# 的 `/analyze.json` 曾各自組 payload、忘了套用 `_public_evidence_dict()`
+# 過濾，導致 author 從 Lambda 生產入口原文外洩。修復後兩入口共用
+# `web._build_analyze_json_payload`/`web._build_comparison_json_payload`，
+# 這裡直接驗證 Lambda 入口本身的回應不含 author（不是只信任 web.py 那邊
+# 的測試——兩個入口曾經分岔過一次，必須各自有回歸測試）。
+# ---------------------------------------------------------------------------
+
+
+def _authored_single(coin="BTC", query="lambda author leak test"):
+    """真的跑一次 `web.run()`，尾端多附一筆帶 `author` 的 `Evidence`，
+    模擬「連接器真的抓到來源平台公開 username」的情境。"""
+    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True)
+    authored_ev = Evidence(
+        source="reddit-bitcoin",
+        fetched_at="2026-07-06T00:00:00Z",
+        content_reference="ref-lambda-leak",
+        related_claim=query,
+        author="/u/lambda_leak_user",
+    )
+    return report, list(evidence) + [authored_ev], log
+
+
+def test_lambda_analyze_json_single_excludes_author(monkeypatch):
+    """单幣 `/analyze.json`：Lambda 回應的每筆 evidence dict 不得含 `author`。"""
+    report, evidence, log = _authored_single()
+
+    def fake_do_analyze(qs, client_ip=""):
+        return report, evidence, log
+
+    monkeypatch.setattr(web, "_do_analyze", fake_do_analyze)
+
+    resp = lambda_handler.handler(
+        _event("/analyze.json",
+               {"coin": "BTC", "type": "multi_source", "q": "lambda author leak test"})
+    )
+    assert resp["statusCode"] == 200
+    payload = json.loads(resp["body"])
+    assert any(ev.get("content_reference") == "ref-lambda-leak" for ev in payload["evidence"])
+    assert all("author" not in ev for ev in payload["evidence"])
+
+
+def test_lambda_analyze_json_comparison_excludes_author(monkeypatch):
+    """comparison `/analyze.json`：evidence_a/evidence_b 皆不得含 `author`。"""
+    report_a, evidence_a, log = _authored_single("BTC", "lambda comparison leak a")
+    report_b, evidence_b, _ = _authored_single("ETH", "lambda comparison leak b")
+
+    def fake_do_comparison(qs, client_ip=""):
+        return report_a, evidence_a, report_b, evidence_b, log
+
+    monkeypatch.setattr(web, "_do_comparison", fake_do_comparison)
+
+    resp = lambda_handler.handler(
+        _event("/analyze.json", {
+            "coin": "BTC", "coin2": "ETH", "type": "comparison",
+            "q": "lambda comparison leak",
+        })
+    )
+    assert resp["statusCode"] == 200
+    payload = json.loads(resp["body"])
+    assert any(
+        ev.get("content_reference") == "ref-lambda-leak" for ev in payload["evidence_a"]
+    )
+    assert all("author" not in ev for ev in payload["evidence_a"])
+    assert all("author" not in ev for ev in payload["evidence_b"])

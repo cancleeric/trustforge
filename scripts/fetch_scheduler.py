@@ -748,6 +748,11 @@ def _calc_manip_signal(evidence: list, coin: str | None = None) -> tuple[float, 
     return round(max(scores), 3), round(sum(scores) / len(scores), 3)
 
 
+# codex vp-engineering 終審 MEDIUM（PR #107）：見 `_collect_authors()`
+# docstring／函式內註解——單一快照 `"authors"` 清單的防禦性上限。
+_MAX_AUTHORS = 200
+
+
 def _collect_authors(evidence: list) -> list[str]:
     """W3 前置（資料累積，非偵測）：從 `evidence`（`pipeline.run()` 回傳的
     第二個值）逐筆擷取 `Evidence.author`（見 `agent.orchestrator.
@@ -758,15 +763,36 @@ def _collect_authors(evidence: list) -> list[str]:
     識別化以外的任何衍生運算、不影響任何 trust 分數**——單純讓帳號維度
     資料開始按日留存，供未來 W3 協同操縱偵測演算法使用（本 PR 不包含該
     演算法）。目前大多數來源（多數 news RSS、onchain、regulatory、
-    hoyabit、price）沒有作者概念，`Evidence.author` 恆為空字串，該筆
-    直接跳過，回傳空 list 是誠實結果，不代表 bug。
+    hoyabit、price）沒有作者概念，`Evidence.author` 恆為 `None`（codex
+    vp-engineering 終審 MEDIUM，PR #107：型別已改 `str | None = None`，
+    不再用空字串冒充「未知」），該筆直接跳過，回傳空 list 是誠實結果，
+    不代表 bug。
+
+    去重排序後若超過 `_MAX_AUTHORS`（200）筆，截斷保留前 `_MAX_AUTHORS`
+    筆並記 warning（防禦性上限，避免單一快照撞 DynamoDB item 大小上限，
+    見 `_MAX_AUTHORS` 註解）。
     """
     authors: set[str] = set()
     for ev in evidence:
-        author = getattr(ev, "author", "") or ""
+        author = getattr(ev, "author", None) or ""
         if author:
             authors.add(author)
-    return sorted(authors)
+    result = sorted(authors)
+    if len(result) > _MAX_AUTHORS:
+        # codex vp-engineering 終審 MEDIUM：防禦性上限——單一快照的
+        # authors 清單若無上限，理論上可能被大量不同 username 灌爆，
+        # 撞上 DynamoDB 單一 item 400KB 上限（快照本身還有其他欄位要塞
+        # 進同一個 item）。正常情境（單輪抓取 evidence 通常個位數~幾十
+        # 筆）不會觸發，觸發時截斷保留排序後前 `_MAX_AUTHORS` 筆並記
+        # warning，不讓單一快照無限膨脹。
+        print(
+            f"[fetch_scheduler] _collect_authors: 去重後 authors 數"
+            f"（{len(result)}）超過上限 {_MAX_AUTHORS}，截斷保留前"
+            f" {_MAX_AUTHORS} 筆（排序後）",
+            file=sys.stderr,
+        )
+        result = result[:_MAX_AUTHORS]
+    return result
 
 
 def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:

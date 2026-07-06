@@ -75,10 +75,13 @@ query
 **蒐集目的**：目前累積帳號維度資料，供未來 W3「協同操縱偵測」演算法使
 用（尚未實作，本 PR 純資料累積前置）。
 
-**蒐集範圍**：僅 `Evidence.author` —— 來源平台**公開** username 原文字
-串（Reddit RSS/Atom `<author>`、新聞 RSS `<author>`/`dc:creator`），連接
-器選填寫入 `Document.meta["author"]`；無作者概念的來源（多數 news、
-onchain、regulatory、hoyabit、price）此欄位恆缺，不補假值。
+**蒐集範圍**：僅 `Evidence.author`（型別 `str | None`，預設 `None`）——
+來源平台**公開** username 原文字串（Reddit RSS/Atom `<author>`、新聞
+RSS `<author>`/`dc:creator`），連接器選填寫入 `Document.meta["author"]`；
+無作者概念的來源（多數 news、onchain、regulatory、hoyabit、price）此欄
+位恆為 `None`，不補假值。收斂點 `agent.orchestrator._sanitize_author()`
+對這個未經信任的上游輸入做健壯性守門：超過 200 字，或含 HTML 標籤
+（`<`/`>`）／控制字元，整筆拒收（回 `None`），不折衷截斷。
 
 **保留**：帳號維度資料只存在於 `Document.meta`/`Evidence.author`/每日
 快照的 `"authors"` 鍵（`scripts/fetch_scheduler.py::_collect_authors()`
@@ -88,11 +91,15 @@ onchain、regulatory、hoyabit、price）此欄位恆缺，不補假值。
 `trust` 分數、不在任何 UI 顯示。
 
 **對外邊界**：`author`/`authors` 僅存在於內部 cache/快照，供未來偵測用；
-`/api/analyze`、`/api/compare`、`/analyze.json`、`/api/overview`、
-`/api/history` 等公開（免認證，僅 rate-limit）JSON 端點對外回應一律在
-序列化邊界過濾掉這兩個欄位（`web._public_evidence_dict()` /
-`web._public_snapshot_dict()`），不會把來源平台使用者名稱洩漏給任意呼叫
-端；內部資料本身不受影響。
+`/api/analyze`（含 `type=comparison` 模式）、`/analyze.json`、
+`/api/overview`、`/api/history` 等公開（免認證，僅 rate-limit）JSON 端
+點對外回應一律在序列化邊界過濾掉這兩個欄位（`web._public_evidence_dict()`
+/ `web._public_snapshot_dict()`），`web.py` SSR 路由與 `lambda_handler.py`
+（Lambda Function URL 生產入口）共用同一份 payload 組裝函式
+（`web._build_analyze_json_payload()` / `web._build_comparison_json_payload()`），
+不會把來源平台使用者名稱洩漏給任意呼叫端；內部資料本身不受影響。
+TrustForge 沒有獨立的 `/api/compare` 端點，比較分析走的是
+`/api/analyze?type=comparison`。
 
 ### 已知殘餘風險（W3 偵測/UI 上線前必須重新評估）
 
