@@ -2870,7 +2870,7 @@ def _render_comparison(
 
 
 
-def _apply_live_token_header(qs: dict, headers) -> None:
+def _apply_live_token_header(qs: dict, headers, query_has_token: bool | None = None) -> None:
     """CISO hardening R2（#2a）：live token 改優先讀 `X-Live-Token` request
     header，query string `?token=` 版本保留一版 deprecation 相容。
 
@@ -2878,37 +2878,44 @@ def _apply_live_token_header(qs: dict, headers) -> None:
     外洩給第三方，`token` 帶在 URL 上是既有的資訊外洩風險；header 不會被
     這些管道記錄，因此優先信任 header。
 
-    就地修改傳入的 `qs`（唯一寫入點），讓下游 `_is_live_request`/
-    `_mode_extra_params` 等既有邏輯完全不用改——仍然只認 `qs.get("token")`，
-    不必逐一 thread header 進每個純函式簽名。
+    就地修改傳入的 `qs`（唯一寫入點），讓下游 `_is_live_request` 等既有
+    邏輯完全不用改——仍然只認 `qs.get("token")`，不必逐一 thread header
+    進每個純函式簽名。`_mode_extra_params()`（自我連結參數）**不**再讀取
+    這裡正規化後的 token（見該函式 PR #99 終審修復），輸出端不會回吐任何
+    來源的 token。
 
     - header 有值：覆寫 `qs["token"]`（header 優先，即使 query 也帶了
       token，也不 fallback，避免兩邊不一致時難以判斷生效的是哪一個）。
-    - header 沒值、query 帶了非空 token：保留舊行為（仍照常運作，7/13
+    - header 沒值、query 帶了 token：保留舊行為（仍照常運作，7/13
       工作坊既有 demo 腳本不斷線），但 log warning 提醒遷移。
     - 兩者都沒帶：不動 `qs`（沿用預設空字串，`_is_live_request` 照舊判定
       為不成立 live）。
 
-    codex/harper 雙審（PR #99 MEDIUM）：只要 query 帶了非空 `token` 就一定
+    codex/harper 雙審（PR #99 MEDIUM）：只要 query 帶了 `token` 就一定
     log warning，不論 header 是否同時有值、是否會覆寫掉它——query token
     一旦出現在 URL 上，就**已經**外洩進 access log／`Referer`，這個風險跟
     header 最終有沒有生效無關；遷移期若只在「header 沒帶」才 warn，會漏掉
     「新舊參數同時帶」這種過渡期最常見的情境，追蹤不到誰還沒把舊參數拔掉。
     warning 訊息本身不印 token 值，避免 log 本身變成另一個外洩管道。
 
-    已知風險（本 PR 不修，另開 ticket）：這裡正規化後寫回的 `qs["token"]`
-    （不論來源是 header 還是 query）之後會被 `_mode_extra_params()` 原樣
-    讀出、拼進頁面「自我連結」（如 `/analyze.json?...&token=...`）的 URL
-    裡回吐給前端——也就是說即使呼叫端改用 header 傳 token，只要伺服器端把
-    它塞回自我連結，還是會讓 token 重新出現在 URL／HTML 裡，回到跟 query
-    版本一樣的外洩面（access log／Referer／使用者複製分享連結）。這是既有
-    `_mode_extra_params` 邏輯的行為，非本次改動引入；本 PR 只在輸入端做
-    header 優先 + 相容 warning，不動輸出端。
+    codex/harper 終審（PR #99 LOW）：`query_has_token` 讓呼叫端可以明確告知
+    「query string 是否帶了 token 這個 key（即使值是空字串）」，跟 `qs` 本身
+    的內容脫鉤——因為呼叫端（`Handler.do_GET`）用的 `parse_qs(u.query)` 預設
+    `keep_blank_values=False`，`?token=` 或裸 `?token`（無 `=`）在解析階段就
+    已經被整個丟掉，`qs` 裡根本不會出現 "token" 這個 key，光看 `qs` 永遠判斷
+    不到這種情況，migration 追蹤會漏報。呼叫端應該額外用
+    `"token" in parse_qs(raw_query, keep_blank_values=True)`（或 Lambda
+    `queryStringParameters` 這種本來就保留空值的 dict 直接 `"token" in raw_qs`）
+    算出這個布林值傳進來。若呼叫端沒傳（`None`，向後相容既有呼叫/測試），
+    退回舊行為：用 `"token" in qs` 判斷（只要 `qs` 裡有這個 key，不論是否有值，
+    都算「query 帶了 token」——不再用 truthiness，避免 `qs = {"token": [""]}`
+    這種手動建構的測試案例被漏判）。
     """
     header_token = ""
     if headers is not None:
         header_token = (headers.get("X-Live-Token") or "").strip()
-    if qs.get("token", [""])[0]:
+    has_query_token = query_has_token if query_has_token is not None else ("token" in qs)
+    if has_query_token:
         logging.warning(
             "TrustForge: query token 已棄用，改用 X-Live-Token header"
         )
@@ -3036,10 +3043,21 @@ def _mode_extra_params(qs: dict) -> dict:
     純函式：只重算跟 `_parse_live`/`_parse_real` 相同的判斷邏輯（`_is_live_request`/
     `_is_real_request`），不呼叫 `_check_live_rate_limit`，才不會讓同一次請求的
     自我連結重複消耗限流額度。
+
+    codex/harper 終審（PR #99 HIGH）：自我連結**一律不帶 token**，即使目前
+    請求是 live 生效的。理由：`_apply_live_token_header` 把 header 正規化
+    寫進 `qs["token"]` 後，這裡若照樣把它塞回連結，header-only 客戶端的
+    token 就會被本函式重新吐回 `/analyze.json` 的 URL——出現在 HTML／
+    瀏覽器歷史／access log／Referer，等於本 PR 剛把 token 從 query 移到
+    header 想堵住的外洩面，又在輸出端原封不動打開，是本 PR 新引入的洩漏
+    （不是 `_mode_extra_params` 既有行為的殘留，先前 #100 fast-follow 的
+    延後裁決不成立）。live 模式的重放改由客戶端在下一次請求時自行重帶
+    `X-Live-Token` header 承擔，自我連結上只留 `live=1` 這個不敏感的模式
+    開關，不含任何憑證。
     """
     live = _is_live_request(qs)
     if live:
-        return {"live": "1", "token": qs.get("token", [""])[0]}
+        return {"live": "1"}
     if _is_sample_request(qs, live):
         return {"sample": "1"}
     return {}
@@ -4556,8 +4574,14 @@ class Handler(BaseHTTPRequestHandler):
         # CISO hardening R2（#2a）：live token 唯一收斂點——把 `X-Live-Token`
         # request header（優先）或 deprecated query `token`（fallback +
         # warning）就地寫回 `qs["token"]`，下游所有讀 token 的純函式
-        # （`_is_live_request`/`_mode_extra_params`）維持只認 `qs`，不用改。
-        _apply_live_token_header(qs, getattr(self, "headers", {}))
+        # （`_is_live_request`）維持只認 `qs`，不用改。
+        # PR #99 終審 LOW：上面 `parse_qs(u.query)` 用預設
+        # `keep_blank_values=False`，`?token=`／裸 `?token` 會被整個丟掉、
+        # `qs` 裡看不到這個 key，warning 會漏報——另外用
+        # `keep_blank_values=True` 重新解析一次只為了判斷「query 是否帶了
+        # token 這個 key」（不影響上面 `qs` 對其他參數的既有預設值語意）。
+        query_has_token = "token" in parse_qs(u.query, keep_blank_values=True)
+        _apply_live_token_header(qs, getattr(self, "headers", {}), query_has_token=query_has_token)
         # `client_address[0]` 是 TCP 對端 IP，用來 keyed per-IP 限流
         # （`_check_live_rate_limit`/`_check_real_rate_limit`/
         # `_check_status_rate_limit`）。這在**直連部署**（沒有 reverse

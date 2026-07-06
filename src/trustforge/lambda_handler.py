@@ -50,10 +50,15 @@ def handler(event, context=None):
     # 同一個 `_apply_live_token_header`（優先 `X-Live-Token` header，query
     # `token` fallback + deprecation warning），維持兩個入口行為一致。
     _lambda_headers = event.get("headers") or {}
+    # PR #99 終審 LOW：`raw_qs`（Lambda 原生 queryStringParameters dict）本來
+    # 就會保留空值 key（`?token=`／裸 `?token` 都會是 `{"token": ""}`），直接用
+    # `"token" in raw_qs` 判斷「query 是否帶了 token」，不看轉出來的 qs 值是否
+    # truthy，避免空值 token 漏 warning。
     web._apply_live_token_header(
         qs,
         {"X-Live-Token": _lambda_headers.get("x-live-token")
          or _lambda_headers.get("X-Live-Token")},
+        query_has_token="token" in raw_qs,
     )
     # 商業級一致性修（codex MEDIUM）：429/502 的「重試」連結要導回同一個請求
     # （比照 EC2 web.py 用 self.path），Lambda 沒有現成的 self.path，用

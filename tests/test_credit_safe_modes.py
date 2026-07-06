@@ -515,10 +515,13 @@ def test_mode_link_suffix_sample():
 
 
 def test_mode_link_suffix_live(monkeypatch):
+    """codex/harper 終審（PR #99 HIGH）：自我連結一律不帶 token，即使目前
+    請求是 live 生效的——只留 `live=1` 這個不敏感的模式開關。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     suffix = web._mode_link_suffix({"live": ["1"], "token": ["secret"]})
-    assert suffix == "&live=1&token=secret"
+    assert suffix == "&live=1"
+    assert "token" not in suffix
 
 
 def test_mode_link_suffix_default_empty():
@@ -526,44 +529,35 @@ def test_mode_link_suffix_default_empty():
 
 
 def test_mode_link_suffix_live_priority_over_real(monkeypatch):
-    """兩者同時給 → live 優先，suffix 只帶 live（不重複帶 real），與 _parse_real 邏輯一致。"""
+    """兩者同時給 → live 優先，suffix 只帶 live（不重複帶 real、不含 token），
+    與 _parse_real 邏輯一致。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     suffix = web._mode_link_suffix({"live": ["1"], "token": ["secret"], "real": ["1"]})
-    assert suffix == "&live=1&token=secret"
+    assert suffix == "&live=1"
 
 
 @pytest.mark.parametrize("token", ["a&b=1", "x+y", "50%off", "id#1", "a=b&c=d"])
-def test_mode_link_suffix_url_encodes_special_char_token_survives_round_trip(
+def test_mode_link_suffix_never_leaks_special_char_token_into_self_link(
     monkeypatch, token
 ):
-    """MEDIUM 修復：token 含 query string 保留字（& + = % #）時，舊版只
-    `html.escape(token)`，未做 URL 編碼——href 尾端會出現未逸出的 `&`/`=`，
-    瀏覽器依 query string 語法解析會在第一個保留字處把 token 截斷，
-    `_active_mode`/`_parse_live` 比對不到正確 token，靜默落回 offline，
-    破壞「畫面顯示的模式＝實際資料來源」的 provenance 保證。
-
-    驗證方式：完整跑一次「URL 編碼 → 嵌進 href → 用 parse_qs 解碼」（模擬瀏覽器
-    點擊該連結後，伺服器端 `do_GET` 用 `parse_qs(urlparse(path).query)` 解析的
-    行為），斷言解出來的 qs 餵給 `_active_mode` 仍正確判定為 `"live"`
-    （而不是靜默退化成 `"offline"`）。
-    """
+    """codex/harper 終審（PR #99 HIGH，取代先前「URL 編碼往返」測試）：自我連結
+    改成一律不帶 token 後，即使 LIVE_TOKEN 本身含 query string 保留字
+    （`& + = % #`），這些特殊字元也不會有機會出現在 href 裡——因為 token
+    根本沒被塞進 suffix／href。驗證：suffix 只有 `&live=1`，href 裡完全
+    找不到 token 值本身、也找不到 `token=` 參數。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", token)
 
     suffix = web._mode_link_suffix({"live": ["1"], "token": [token]})
+    assert suffix == "&live=1"
     href = f"/analyze.json?coin=BTC&type=multi_source&q=test{suffix}"
 
-    # 模擬瀏覽器點擊 href 後，伺服器端 do_GET 用 parse_qs 解析出來的 qs
+    assert token not in href, f"自我連結不應含 token 值，實際 href={href!r}"
+    assert "token=" not in href, f"自我連結不應含 token 參數，實際 href={href!r}"
+    # href 上仍能正確判定為 live（live=1 保留，只是不帶憑證）
     decoded_qs = parse_qs(urlparse(href).query)
-    assert decoded_qs.get("token", [""])[0] == token, (
-        f"token 經 href 往返後應原樣還原，實際 {decoded_qs.get('token')!r}，"
-        f"href={href!r}"
-    )
-    assert web._active_mode(decoded_qs) == "live", (
-        f"含特殊字元 token 往返後應仍判定為 live，實際落回 "
-        f"{web._active_mode(decoded_qs)!r}，href={href!r}"
-    )
+    assert decoded_qs.get("live", [""])[0] == "1"
 
 
 def test_mode_link_suffix_has_no_rate_limit_side_effect(monkeypatch):
@@ -617,8 +611,12 @@ def test_do_analyze_real_mode_json_link_round_trips_without_needing_real_param(m
     assert report2.question_type == report.question_type
 
 
-def test_do_analyze_live_mode_json_link_preserves_live_and_token(monkeypatch):
-    """live 模式報告的下載連結須帶 live=1&token=<token>（token 語意照舊）。"""
+def test_do_analyze_live_mode_json_link_preserves_live_but_not_token(monkeypatch):
+    """codex/harper 終審（PR #99 HIGH）：live 模式報告的下載連結須帶 live=1，
+    但**不得**帶 token——header-only 客戶端的 token 若被回吐進這條連結，
+    就會重新暴露進 HTML／瀏覽器歷史／access log／Referer，是本 PR 把 token
+    從 query 移到 header 後在輸出端重新打開的洩漏面。live 模式重放改由
+    客戶端下次請求自行重帶 X-Live-Token header。"""
     monkeypatch.setattr(web, "HAS_BEDROCK", True)
     monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
@@ -639,7 +637,8 @@ def test_do_analyze_live_mode_json_link_preserves_live_and_token(monkeypatch):
 
     link = _extract_json_link(html_out)
     assert "live=1" in link, f"live 模式的下載連結未帶 live=1：{link}"
-    assert "token=secret" in link, f"live 模式的下載連結未帶 token：{link}"
+    assert "token" not in link, f"live 模式的下載連結不應含 token：{link}"
+    assert "secret" not in html_out, f"整份 HTML 不應出現 token 值：{html_out[:2000]}"
 
 
 def test_do_analyze_default_mode_json_link_has_no_mode_param(monkeypatch):
