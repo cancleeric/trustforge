@@ -1,6 +1,8 @@
 """安全修復測試：token 驗證、per-IP 限流、q 長度上限、例外包裝。"""
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from trustforge import web
@@ -303,6 +305,9 @@ def test_real_default_requests_rate_limited_at_flood_volume(monkeypatch):
     "",                              # 空字串
     "relative/path",                 # 相對路徑（無 scheme）
     "//evil.com/xss",                # protocol-relative
+    "java\tscript:alert(1)",         # #11：scheme 中間插 tab
+    "java\nscript:alert(1)",         # #11：scheme 中間插 newline
+    "java\x00script:alert(1)",       # #11：scheme 中間插 null byte
 ])
 def test_safe_href_blocks_dangerous_scheme(bad_url):
     """_safe_href 對非 http/https URL 不輸出 <a>，且輸出不含原始危險 scheme。"""
@@ -593,3 +598,319 @@ def test_main_respects_bind_host_when_trust_proxy_off(monkeypatch):
     web.main()
 
     assert captured_addr["addr"][0] == "0.0.0.0"
+
+
+# ── CISO hardening R2（#2a）：live token 改優先讀 X-Live-Token header ────────
+# query `?token=` 版本保留一版 deprecation 相容（不斷線 + log warning），見
+# `web._apply_live_token_header`（`Handler.do_GET` 解析 qs 後立刻呼叫的唯一
+# 收斂點）。
+
+
+def test_apply_live_token_header_prefers_header_over_query(caplog):
+    """header 有值 → 覆寫 qs["token"]，即使 query 也帶了不同的 token 且被覆寫掉，
+    仍然生效的是 header 版本。"""
+    qs = {"token": ["old-query-token"]}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {"X-Live-Token": "new-header-token"})
+    assert qs["token"] == ["new-header-token"]
+
+
+def test_apply_live_token_header_header_and_query_both_present_still_warns(caplog):
+    """codex/harper 雙審（PR #99 MEDIUM）：header 跟 query 同時帶 token（過渡期
+    最常見情境），header 覆寫生效，但 query token 已經進了 URL／access log／
+    Referer，外洩風險跟 header 有沒有生效無關——仍必須 log deprecation
+    warning 才能在遷移期追蹤到誰還沒把舊參數拔掉；warning 內容不含 token 值。"""
+    qs = {"token": ["old-query-token"]}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {"X-Live-Token": "new-header-token"})
+    assert qs["token"] == ["new-header-token"], "header 仍應優先生效"
+    warnings = [r.message for r in caplog.records if "已棄用" in r.message]
+    assert warnings, f"header/query 同時帶時仍應 log deprecation warning，實際 {caplog.records!r}"
+    assert all(
+        "old-query-token" not in msg and "new-header-token" not in msg
+        for msg in warnings
+    ), "warning 訊息不應包含任何 token 值"
+
+
+def test_apply_live_token_header_header_present_query_empty_no_warning(caplog):
+    """header 有值、query 完全沒帶 token（非「同時帶」的情境）→ 沒有 query token
+    可外洩，不需要 warn。"""
+    qs = {}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {"X-Live-Token": "new-header-token"})
+    assert qs["token"] == ["new-header-token"]
+    assert not any("已棄用" in r.message for r in caplog.records)
+
+
+def test_apply_live_token_header_falls_back_to_query_with_warning(caplog):
+    """header 沒帶、query 帶 token → 照常運作（qs 不變）但 log deprecation warning。"""
+    qs = {"token": ["legacy-token"]}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {})
+    assert qs["token"] == ["legacy-token"], "沒有 header 時應保留 query token 相容運作"
+    assert any(
+        "query token 已棄用" in r.message and "X-Live-Token" in r.message
+        for r in caplog.records
+    ), f"應 log deprecation warning，實際 {caplog.records!r}"
+
+
+def test_apply_live_token_header_no_token_anywhere_no_warning(caplog):
+    """header 跟 query 都沒帶 token → qs 不變，也不 log warning（沒東西可棄用）。"""
+    qs = {}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {})
+    assert qs == {}
+    assert not any("已棄用" in r.message for r in caplog.records)
+
+
+def test_apply_live_token_header_handles_missing_headers_object():
+    """headers 是 None（極端防呆）不應炸掉，維持既有 query fallback 行為。"""
+    qs = {"token": ["legacy-token"]}
+    web._apply_live_token_header(qs, None)
+    assert qs["token"] == ["legacy-token"]
+
+
+def test_apply_live_token_header_query_has_token_explicit_true_warns_even_if_blank(caplog):
+    """codex/harper 終審（PR #99 LOW）：`query_has_token=True` 明確告知「query
+    帶了 token 這個 key」時，即使 qs 裡對應的值是空字串（`?token=` 或裸
+    `?token` 解析出來的樣子），仍要 log deprecation warning——不能只看
+    truthiness。模擬呼叫端已經用 keep_blank_values=True 判斷過的情境。"""
+    qs = {"token": [""]}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {}, query_has_token=True)
+    warnings = [r.message for r in caplog.records if "已棄用" in r.message]
+    assert warnings, "query_has_token=True 時即使值為空也應 log deprecation warning"
+
+
+def test_apply_live_token_header_qs_has_blank_token_key_warns_via_key_presence(caplog):
+    """未顯式傳 query_has_token（向後相容既有呼叫）時，退回用 `"token" in qs`
+    判斷（key 存在即算，不看 truthiness）——涵蓋呼叫端自己用
+    keep_blank_values=True 手動建構出 `qs = {"token": [""]}` 的情境。"""
+    qs = {"token": [""]}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {})
+    warnings = [r.message for r in caplog.records if "已棄用" in r.message]
+    assert warnings, "qs 裡有 token key（即使值空）就該 warn，不能只看 truthiness 漏報"
+
+
+def test_do_get_api_analyze_query_token_equals_blank_still_warns(monkeypatch, caplog):
+    """端到端（PR #99 LOW 三案例之一）：`?token=`（裸等號、空值）——`parse_qs`
+    預設 `keep_blank_values=False` 會把這個 key 整個丟掉，若只看 `qs` 內容
+    會漏報；`Handler.do_GET` 需另外用 keep_blank_values=True 偵測到這個 key
+    存在，一樣要 log deprecation warning（migration 追蹤不能漏掉這種請求）。
+    """
+    captured: dict = {}
+
+    def fake_handle_api_analyze(qs, client_ip):
+        captured["token"] = qs.get("token", [""])[0]
+        return 200, "{}"
+
+    monkeypatch.setattr(web, "_handle_api_analyze", fake_handle_api_analyze)
+
+    from io import BytesIO
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("10.9.9.1", 1)
+    h.path = "/api/analyze?token="
+    h.headers = {}
+    h.wfile = BytesIO()
+    h.send_response = lambda code: None
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    with caplog.at_level(logging.WARNING):
+        h.do_GET()
+
+    assert captured["token"] == ""
+    warnings = [r.message for r in caplog.records if "已棄用" in r.message]
+    assert warnings, "?token=（空值）也應觸發 deprecation warning，不能因為值是空字串就漏報"
+
+
+def test_do_get_api_analyze_bare_token_no_equals_still_warns(monkeypatch, caplog):
+    """端到端（PR #99 LOW 三案例之二）：裸 `?token`（連 `=` 都沒有）——同樣會被
+    `parse_qs` 預設丟棄，一樣要 log deprecation warning。"""
+    captured: dict = {}
+
+    def fake_handle_api_analyze(qs, client_ip):
+        captured["token"] = qs.get("token", [""])[0]
+        return 200, "{}"
+
+    monkeypatch.setattr(web, "_handle_api_analyze", fake_handle_api_analyze)
+
+    from io import BytesIO
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("10.9.9.1", 1)
+    h.path = "/api/analyze?token"
+    h.headers = {}
+    h.wfile = BytesIO()
+    h.send_response = lambda code: None
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    with caplog.at_level(logging.WARNING):
+        h.do_GET()
+
+    assert captured["token"] == ""
+    warnings = [r.message for r in caplog.records if "已棄用" in r.message]
+    assert warnings, "裸 ?token（無 =）也應觸發 deprecation warning，不能因為 parse_qs 預設丟棄就漏報"
+
+
+def test_do_get_api_analyze_empty_query_valid_header_no_warning(monkeypatch, caplog):
+    """端到端（PR #99 LOW 三案例之三）：完全沒有 query token（連 key 都沒有），
+    只帶合法的 X-Live-Token header → header 正常生效，且不該有 deprecation
+    warning（沒有任何舊參數可棄用，不能誤報）。"""
+    captured: dict = {}
+
+    def fake_handle_api_analyze(qs, client_ip):
+        captured["token"] = qs.get("token", [""])[0]
+        return 200, "{}"
+
+    monkeypatch.setattr(web, "_handle_api_analyze", fake_handle_api_analyze)
+
+    from io import BytesIO
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("10.9.9.1", 1)
+    h.path = "/api/analyze"
+    h.headers = {"X-Live-Token": "valid-header-token"}
+    h.wfile = BytesIO()
+    h.send_response = lambda code: None
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    with caplog.at_level(logging.WARNING):
+        h.do_GET()
+
+    assert captured["token"] == "valid-header-token"
+    assert not any("已棄用" in r.message for r in caplog.records), (
+        "完全沒有 query token、只有 header 時不該誤報 deprecation warning"
+    )
+
+
+def test_lambda_handler_query_token_blank_still_warns(monkeypatch, caplog):
+    """端到端（Lambda 版）：queryStringParameters 帶 `{"token": ""}`（`?token=`
+    或裸 `?token`，API Gateway/Function URL 都會正規化成空字串），raw_qs 本來
+    就保留這個 key，一樣要 log deprecation warning。"""
+    monkeypatch.setattr(lambda_handler.web, "HAS_BEDROCK", False)
+
+    event = {
+        "rawPath": "/healthz",
+        "queryStringParameters": {"token": ""},
+        "headers": {},
+        "requestContext": {"http": {"sourceIp": "1.2.3.4"}},
+    }
+    with caplog.at_level(logging.WARNING):
+        lambda_handler.handler(event)
+
+    warnings = [r.message for r in caplog.records if "已棄用" in r.message]
+    assert warnings, "Lambda 版 query token 為空值時也應 log deprecation warning"
+
+
+def test_mode_extra_params_never_leaks_token_into_self_link(monkeypatch):
+    """codex/harper 終審（PR #99 HIGH，推翻先前「延後修」裁決）：`_mode_extra_params()`
+    先前會把 `qs["token"]`（不論來源是 header 正規化後寫回、還是舊 query）原樣
+    塞進自我連結（如 `/analyze.json?...&token=...`）回吐給前端——header-only
+    客戶端的 token 因此也會被本函式重新暴露進 URL／HTML／瀏覽器歷史／access
+    log／Referer，是本 PR 把 token 從 query 移到 header 之後、在輸出端重新
+    打開的洩漏面，不是既有問題，必須本 PR 修。自我連結一律只留 `live=1`
+    這個不敏感的模式開關，不含任何憑證；live 模式重放改由客戶端下次請求
+    自行重帶 `X-Live-Token` header。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", True)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "secret-token-value")
+
+    qs = {"live": ["1"], "token": ["secret-token-value"]}
+    extra = web._mode_extra_params(qs)
+
+    assert extra == {"live": "1"}, (
+        f"自我連結不應含 token：_mode_extra_params 只該回傳 {{'live': '1'}}，實際 {extra!r}"
+    )
+    assert "token" not in extra
+    href = web._analyze_json_href("BTC", "single", "q", extra)
+    assert "secret-token-value" not in href, f"自我連結 href 不應含 token 值，實際 {href!r}"
+    assert "token=" not in href, f"自我連結 href 不應含 token 參數本身，實際 {href!r}"
+
+
+def test_do_get_api_analyze_prefers_header_token_over_query(monkeypatch):
+    """端到端：`/api/analyze` 走 `Handler.do_GET`，X-Live-Token header 蓋過
+    query `?token=`（同一個請求兩者都帶，header 生效）。"""
+    captured: dict = {}
+
+    def fake_handle_api_analyze(qs, client_ip):
+        captured["token"] = qs.get("token", [""])[0]
+        return 200, "{}"
+
+    monkeypatch.setattr(web, "_handle_api_analyze", fake_handle_api_analyze)
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("10.9.9.1", 1)
+    h.path = "/api/analyze?token=old-query-token"
+    h.headers = {"X-Live-Token": "new-header-token"}
+
+    from io import BytesIO
+
+    h.wfile = BytesIO()
+    h.send_response = lambda code: None
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    assert captured["token"] == "new-header-token"
+
+
+def test_do_get_api_analyze_query_token_still_works_with_warning(monkeypatch, caplog):
+    """端到端：舊式 `?token=` 沒帶 header 時仍照常運作（7/13 工作坊 demo 腳本
+    不斷線），但 log deprecation warning。"""
+    captured: dict = {}
+
+    def fake_handle_api_analyze(qs, client_ip):
+        captured["token"] = qs.get("token", [""])[0]
+        return 200, "{}"
+
+    monkeypatch.setattr(web, "_handle_api_analyze", fake_handle_api_analyze)
+
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = ("10.9.9.1", 1)
+    h.path = "/api/analyze?token=old-query-token"
+    h.headers = {}
+
+    from io import BytesIO
+
+    h.wfile = BytesIO()
+    h.send_response = lambda code: None
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    with caplog.at_level(logging.WARNING):
+        h.do_GET()
+
+    assert captured["token"] == "old-query-token", "沒帶 header 時舊式 query token 仍要能用"
+    assert any(
+        "query token 已棄用" in r.message for r in caplog.records
+    ), f"應 log deprecation warning，實際 {caplog.records!r}"
+
+
+def test_lambda_handler_prefers_x_live_token_header_over_query(monkeypatch):
+    """Lambda Function URL 入口跟 EC2 `web.py` 共用同一顆
+    `_apply_live_token_header`：header 優先於 query（大小寫皆可，Function
+    URL 事件的 header key 一般已是小寫）。"""
+    captured: dict = {}
+
+    # 直接觀察 `_do_analyze` 收到的 qs，不需要跑完整 pipeline；用可預期例外
+    # 提早結束（`lambda_handler` 對 `TooManyRequests` 有現成的 429 分支）。
+    def fake_do_analyze(qs, *a, **k):
+        captured["token"] = qs.get("token", [""])[0]
+        raise web.TooManyRequests("stop-here")
+
+    monkeypatch.setattr(web, "_do_analyze", fake_do_analyze)
+
+    event = {
+        "rawPath": "/analyze",
+        "requestContext": {"http": {"sourceIp": "9.9.9.9"}},
+        "queryStringParameters": {"live": "1", "token": "old-query-token"},
+        "headers": {"x-live-token": "new-header-token"},
+    }
+    lambda_handler.handler(event)
+
+    assert captured["token"] == "new-header-token"

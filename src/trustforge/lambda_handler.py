@@ -45,6 +45,21 @@ def handler(event, context=None):
             or event.get("requestContext", {}).get("http", {}).get("path", "/"))
     raw_qs = event.get("queryStringParameters") or {}
     qs = {k: [v] for k, v in raw_qs.items()}  # 轉成 _do_analyze 期望的 list 形式
+    # CISO hardening R2（#2a）：Function URL headers 是 dict[str, str]（一般
+    # 已是小寫 key），包一層 `.get` 相容大小寫，跟 web.py `Handler.do_GET` 共用
+    # 同一個 `_apply_live_token_header`（優先 `X-Live-Token` header，query
+    # `token` fallback + deprecation warning），維持兩個入口行為一致。
+    _lambda_headers = event.get("headers") or {}
+    # PR #99 終審 LOW：`raw_qs`（Lambda 原生 queryStringParameters dict）本來
+    # 就會保留空值 key（`?token=`／裸 `?token` 都會是 `{"token": ""}`），直接用
+    # `"token" in raw_qs` 判斷「query 是否帶了 token」，不看轉出來的 qs 值是否
+    # truthy，避免空值 token 漏 warning。
+    web._apply_live_token_header(
+        qs,
+        {"X-Live-Token": _lambda_headers.get("x-live-token")
+         or _lambda_headers.get("X-Live-Token")},
+        query_has_token="token" in raw_qs,
+    )
     # 商業級一致性修（codex MEDIUM）：429/502 的「重試」連結要導回同一個請求
     # （比照 EC2 web.py 用 self.path），Lambda 沒有現成的 self.path，用
     # rawPath + 重組 query string 還原。

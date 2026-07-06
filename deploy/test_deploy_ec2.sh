@@ -305,6 +305,21 @@ case "$ALL" in
   "ec2 describe-instances --region"*"PublicIpAddress"*)
     echo "203.0.113.10" ;;
   "iam get-role"*)
+    # CISO hardening R2（#2b）：iam-role-missing 場景故意讓 get-role 回
+    # not-found，逼 deploy_ec2.sh 走「建 IAM 角色」那個分支（含 Bedrock
+    # 收斂 region 的 trustforge-inline policy），其餘場景維持既有假設
+    # （角色已存在，不重複建立）。
+    if [ "$SCENARIO" = "iam-role-missing" ]; then
+      exit 1
+    fi
+    exit 0 ;;
+  "iam create-role"*)
+    exit 0 ;;
+  "iam attach-role-policy"*)
+    exit 0 ;;
+  "iam create-instance-profile"*)
+    exit 0 ;;
+  "iam add-role-to-instance-profile"*)
     exit 0 ;;
   "iam put-role-policy"*)
     # reconcile 用：抓 --policy-name / --policy-document 存起來供斷言（兩條
@@ -439,6 +454,27 @@ else
     "dynamodb:GetItem,dynamodb:PutItem,dynamodb:Scan,dynamodb:Query"
 fi
 
+# codex HIGH（PR #99）：trustforge-inline（Bedrock）policy 曾經只在「IAM 角色
+# 本來不存在」那個分支才會 put-role-policy，導致 update-in-place（角色已存在，
+# 跳過該分支）部署到既有實例時，收斂後的 region 白名單永遠到不了、舊的
+# wildcard 權限會一直留著。修復後 trustforge-inline 跟 dynamodb policy 一樣，
+# 每次部署都無條件 reconcile（put-role-policy 覆寫同名 policy）——這裡跟
+# first-time 一起斷言首次建置路徑也確實會 put 到收斂後的白名單版本。
+BEDROCK_POLICY_FT=$(cat "$CAPTURE/iam_policy_first-time_trustforge-inline.txt" 2>/dev/null || echo "")
+if [ -z "$BEDROCK_POLICY_FT" ]; then
+  echo "  [FAIL] 首次建置：沒抓到 iam put-role-policy --policy-name trustforge-inline"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$BEDROCK_POLICY_FT" "arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.*" "首次建置：Bedrock policy 含 ap-southeast-2 白名單"
+  if grep -qF "arn:aws:bedrock:*" "$CAPTURE/iam_policy_first-time_trustforge-inline.txt"; then
+    echo "  [FAIL] 首次建置：Bedrock policy 仍殘留 region 萬用字元 arn:aws:bedrock:*"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] 首次建置：Bedrock policy 沒有 region 萬用字元"
+    PASS=$((PASS + 1))
+  fi
+fi
+
 # codex HIGH（首次建置缺 web healthz gate）：首次建置路徑現在會送 2 次 ssm
 # send-command——call1 是新加的 verify_web_healthz（web 服務本身健康），
 # call2 才是 verify_fetch_scheduler（DynamoDB probe）。
@@ -483,13 +519,43 @@ else
 fi
 
 echo
-echo "== 場景 2：既有實例 running → update-in-place =="
+echo "== 場景 2：既有實例 running → update-in-place（含 codex HIGH #99 回歸：舊 wildcard policy 會被覆寫）=="
+# codex HIGH（PR #99）：模擬「角色已存在、trustforge-inline 還停留在收斂前的
+# wildcard 版本」——這是真實世界最常見的狀態（角色是舊版腳本建的）。修復前
+# put-role-policy trustforge-inline 只在 get-role 失敗（角色不存在）分支才會
+# 呼叫，update-in-place 走的是角色已存在路徑，永遠不會 reconcile，這份舊檔
+# 會原封不動留著。先手動寫入這份「假舊 policy」，deploy 跑完後斷言檔案內容
+# 已被收斂後的白名單版本覆寫（而不是沒被呼叫、殘留原封不動的舊內容）。
+mkdir -p "$CAPTURE"
+cat > "$CAPTURE/iam_policy_update-in-place_trustforge-inline.txt" <<'OLDPOLICY'
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"bedrock:InvokeModel","Resource":["arn:aws:bedrock:*::foundation-model/anthropic.*","arn:aws:bedrock:*:*:inference-profile/*anthropic*"]},{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::dummy/*"}]}
+OLDPOLICY
 if run_deploy "update-in-place"; then
   echo "  deploy_ec2.sh 執行成功（exit 0）"
 else
   echo "  [FAIL] deploy_ec2.sh update-in-place 場景非零結束"
   cat "$CAPTURE/stdout_update-in-place.log"
   FAIL=$((FAIL + 1))
+fi
+
+# codex HIGH（PR #99）：驗證上面手動寫入的「舊 wildcard policy」確實被這次
+# 部署的 put-role-policy 覆寫掉——若修復失效（trustforge-inline 又縮回只在
+# 建角色分支才呼叫），這份檔案會維持 OLDPOLICY 內容原封不動，下面兩個斷言
+# 就會失敗。
+BEDROCK_POLICY_UP=$(cat "$CAPTURE/iam_policy_update-in-place_trustforge-inline.txt" 2>/dev/null || echo "")
+if [ -z "$BEDROCK_POLICY_UP" ]; then
+  echo "  [FAIL] update-in-place：沒抓到 iam put-role-policy --policy-name trustforge-inline"
+  FAIL=$((FAIL + 1))
+else
+  if grep -qF "arn:aws:bedrock:*" "$CAPTURE/iam_policy_update-in-place_trustforge-inline.txt"; then
+    echo "  [FAIL] update-in-place：Bedrock policy 仍是舊 wildcard 版本，沒被覆寫（codex HIGH 回歸）"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] update-in-place：舊 wildcard Bedrock policy 已被收斂後的白名單版本覆寫"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "$BEDROCK_POLICY_UP" "arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.*" "update-in-place：覆寫後的 Bedrock policy 含 ap-southeast-2 白名單"
+  assert_contains "$BEDROCK_POLICY_UP" "arn:aws:bedrock:ap-southeast-2:123456789012:inference-profile/*anthropic*" "update-in-place：覆寫後的 inference-profile ARN 收斂到 \$REGION:\$ACCT"
 fi
 
 # IAM DynamoDB reconcile：update-in-place 這條路徑也要在 instance 分支之前
@@ -694,6 +760,34 @@ if [ -f "$CAPTURE/ssm_params_call2.txt" ]; then
 else
   echo "  [PASS] 場景 4：healthz gate 正確擋在 --probe 之前，--probe 那次 send-command 根本沒被呼叫（獨立於 scheduler/probe 結果）"
   PASS=$((PASS + 1))
+fi
+
+echo "== 場景 5：IAM 角色不存在（首次真的建角色）→ Bedrock inline policy region 收斂（CISO hardening R2 #2b）=="
+if run_deploy "iam-role-missing"; then
+  echo "  [PASS] IAM 角色不存在時，deploy_ec2.sh 正常建完角色並成功結束"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] IAM 角色不存在時，deploy_ec2.sh 未能成功結束"
+  cat "$CAPTURE/stdout_iam-role-missing.log"
+  FAIL=$((FAIL + 1))
+fi
+
+BEDROCK_POLICY=$(cat "$CAPTURE/iam_policy_iam-role-missing_trustforge-inline.txt" 2>/dev/null || echo "")
+if [ -z "$BEDROCK_POLICY" ]; then
+  echo "  [FAIL] 沒抓到 iam put-role-policy --policy-name trustforge-inline（IAM 角色建立分支沒被跑到）"
+  FAIL=$((FAIL + 1))
+else
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.*" "Bedrock policy 列舉 ap-southeast-2 foundation-model"
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-4::foundation-model/anthropic.*" "Bedrock policy 列舉 ap-southeast-4 foundation-model"
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-6::foundation-model/anthropic.*" "Bedrock policy 列舉 ap-southeast-6 foundation-model"
+  assert_contains "$BEDROCK_POLICY" "arn:aws:bedrock:ap-southeast-2:123456789012:inference-profile/*anthropic*" "inference-profile ARN 收斂到實際部署的 REGION/ACCT（不留萬用字元）"
+  if grep -qF "arn:aws:bedrock:*" "$CAPTURE/iam_policy_iam-role-missing_trustforge-inline.txt"; then
+    echo "  [FAIL] Bedrock policy 仍留有 region 萬用字元 arn:aws:bedrock:*"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] Bedrock policy 不留 region 萬用字元 arn:aws:bedrock:*"
+    PASS=$((PASS + 1))
+  fi
 fi
 
 echo
