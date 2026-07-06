@@ -278,8 +278,8 @@ _corroboration(target, all_claims):
 
 ## 附錄：關聯文件
 
-- `docs/COMPETITION.md` — 評分標準與反作弊鐵則
-- `docs/ARCHITECTURE.md` — 三層管線設計
+- `docs/competition/COMPETITION.md` — 評分標準與反作弊鐵則
+- `docs/architecture/ARCHITECTURE.md` — 三層管線設計
 - `src/trustforge/trust/scoring.py` — 實作目標檔案（L139–153 `_corroboration`）
 - `tests/test_trust_scoring.py` — 受衝擊測試（尤其 L91–130）
 - GitHub Issue #15 — token-overlap 誤判回報

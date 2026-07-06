@@ -223,7 +223,7 @@ checklist（比照 CLAUDE.md「UI 優化工作流程」：Chrome MCP 截圖審�
 
 | 階段 | 內容 | 負責 | 驗收標準 | 優先序 |
 |---|---|---|---|---|
-| Phase 0（已完成，本輪） | 缺口盤點、`docs/QA-PLAN.md`、`tests/test_link_integrity.py` 骨架（3 條測試：死錨點檢查、內部連結 200 檢查、hero CTA regression xfail 標記） | QA | 本文件 + 骨架測試檔可執行且不破壞現有 937 綠燈 | 已完成 |
+| Phase 0（已完成，本輪） | 缺口盤點、`docs/qa/QA-PLAN.md`、`tests/test_link_integrity.py` 骨架（3 條測試：死錨點檢查、內部連結 200 檢查、hero CTA regression xfail 標記） | QA | 本文件 + 骨架測試檔可執行且不破壞現有 937 綠燈 | 已完成 |
 | Phase 1 | (1) 把 `_do_get` 從 `test_web.py` 抽成 `tests/_harness.py` 共用；(2) 把 `test_link_integrity.py` 骨架擴充到涵蓋 `/analyze`、`/costs`、`/status` 四頁全連結矩陣；(3) **修正生產 bug 本身**：hero CTA 改為有意義導向（建議：直接連 `/analyze?...` 帶預設參數的真實分析頁，而非錨點跳轉——同時解掉「桌面零反應」與「死錨點風險」兩個問題根源）；(4) 移除/重寫 `test_web.py:404-407` 那條把 bug 斷言成預期行為的測試 | CTO 實作，QA 驗收 | `test_hero_cta_is_not_pure_dead_end_anchor` 從 xfail 轉為 pass（拿掉 xfail 標記後綠燈）；Chrome checklist 第一項全過 | **P0** |
 | Phase 2 | 表單提交端到端（第 3 節）+ 關鍵使用者旅程 e2e（第 4 節），新增 `tests/test_user_journeys.py` | CTO 實作，QA 驗收 | 至少 4 條旅程測試（首次訪客/完整分析/系統狀態/錯誤路徑）全綠 | P1 |
 | Phase 3 | 覆蓋率量測接入（第 5 節）：`pytest-cov` 依賴、CI gate、分層門檻 | CTO 實作，QA 訂門檻 | CI 顯示覆蓋率報表；`web.py` 覆蓋率較 Phase 0 基準提升（因 Phase 1/2 新測試而自然提升），CI 有 `--cov-fail-under` gate | P1 |

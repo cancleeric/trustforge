@@ -1,7 +1,7 @@
 # W2 接線計劃 — truth-discovery 動態來源信譽上線
 
 > 作者：gray（CPO）｜ 日期：2026-07-01
-> 背景：`docs/WORLD-FIRST-ANALYSIS.md` §5.5/Tier1 roadmap；W2 引擎已在分支
+> 背景：`docs/archive/plans/WORLD-FIRST-ANALYSIS.md` §5.5/Tier1 roadmap；W2 引擎已在分支
 > `feat/w2-dynamic-reputation`（PR #29，4 輪 codex 對抗審，284 測試綠）交付，
 > 但**未合併進 main、也未在任何呼叫點啟用**。CEO 親測發現：
 > `score()` 的 `dynamic_reputation` 預設 `False`；生產路徑
@@ -136,7 +136,7 @@ scored = score(
 | 風險 | 影響面 | 防護 |
 |---|---|---|
 | 既有測試對 `report.confidence`/`trust` 有硬編值斷言 | 已 grep `tests/*.py`：目前**無**任何測試對 confidence/trust 做精確數值 `==` 斷言（僅有 `0<=x<=1` 範圍檢查），BTC/ETH/SOL 相關測試無精確值鎖定 | 合併 PR #29 到 main 後，wiring PR 送測前**重跑全量 `pytest -q`**，人工複查任何新增失敗是否為「數值變動」而非邏輯錯誤 |
-| 已發布 EC2 demo/screenshot（`docs/AWS-ARCHITECTURE.md` 等）標註的舊 confidence 數字 | 文件/簡報用語若引用了具體舊數字，接線後會不一致 | CTO 接線 PR 完成、CEO 親測通過後，**同一輪**檢查 `docs/` 內是否有寫死的 demo 輸出數字，若有另開小 PR 更新（不混進 wiring PR） |
+| 已發布 EC2 demo/screenshot（`docs/architecture/AWS-ARCHITECTURE.md` 等）標註的舊 confidence 數字 | 文件/簡報用語若引用了具體舊數字，接線後會不一致 | CTO 接線 PR 完成、CEO 親測通過後，**同一輪**檢查 `docs/` 內是否有寫死的 demo 輸出數字，若有另開小 PR 更新（不混進 wiring PR） |
 | `reputation_trace` 未傳到 Evidence/Report 就先開關 | 開了但「不可解釋」，違反 W2/roadmap 的可解釋性訴求，評審看不到「為何調整」 | 已在②方案中把「補可解釋性」與「開關」綁進**同一個 PR**，不可分開驗收 |
 | 之後有人為了讓 ETH/SOL「看起來有效果」而調低 `MIN_INDEPENDENT_EVIDENCE` 或加樣本資料 | 重演 #24 式造資料紅線 | 本計劃明文：**本輪不動 `MIN_INDEPENDENT_EVIDENCE`、不加/改 `demo/sample_data`**；若未來要讓 W2 對更多幣種可見，只能靠「真實擴大企業資料規模」（呼應 hoyabit 真連接器），列入 backlog，不在本次範圍 |
 | 開關後 stance_fn 被呼叫兩次的效能/成本疑慮 | 已實測確認共用 memoized cache，非重複真呼叫；仍建議 CTO 在 PR 內附一次 `stress_test.py` 前後對照數字佐證，非只憑程式碼推論 | 見驗收標準第 5 條 |

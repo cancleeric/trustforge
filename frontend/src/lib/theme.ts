@@ -5,7 +5,7 @@
 //
 // 初始主題優先序：localStorage 有效值 > 系統偏好 prefers-color-scheme
 // > dark（向後相容舊 SSR dark-only 的預設行為）。
-// 規格：docs/PLAN-next-worldfirst-depth.md §2。
+// 規格：docs/plans/PLAN-next-worldfirst-depth.md §2。
 //
 // codex 複審 MEDIUM（初始偏好不當成明確選擇）：只從系統偏好推導出的主題
 // **不算使用者選擇**，不可在 mount 就 persist 進 localStorage——否則使用者

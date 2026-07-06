@@ -399,7 +399,7 @@ def test_build_news_sources_no_cryptopanic_when_no_token(monkeypatch):
     assert "CryptoPanicSource" not in types
 
 
-# ── 資料密度第一批（#24，docs/PLAN-data-density.md）：6 家新聞 RSS ───────────
+# ── 資料密度第一批（#24，docs/archive/plans/PLAN-data-density.md）：6 家新聞 RSS ───────────
 
 @pytest.mark.parametrize(
     "source_cls_name,expected_name,expected_url",
@@ -442,7 +442,7 @@ def test_build_news_sources_includes_all_6_new_rss_sources(monkeypatch):
     }
 
 
-# ── 資料密度第二批（#24，docs/PLAN-data-density.md）：The Block/U.Today/
+# ── 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）：The Block/U.Today/
 # Blockworks 3 家新聞 RSS ───────────────────────────────────────────────────
 
 @pytest.mark.parametrize(
@@ -575,7 +575,7 @@ def test_onchain_source_failure_does_not_crash_collect(monkeypatch):
     assert isinstance(docs, list)
 
 
-# ── 資料密度第二批（#24，docs/PLAN-data-density.md）：mempool.space 2 端點 +
+# ── 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）：mempool.space 2 端點 +
 # Blockchair ─────────────────────────────────────────────────────────────────
 
 MPFEES_FIXTURE = b"""{

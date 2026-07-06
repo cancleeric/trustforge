@@ -4,7 +4,7 @@ Axis B #1，2026-07 CEO 決策：本輪不 wire 進 production）**。
 ⚠️ 本模組目前**不被** `agent.orchestrator` 呼叫。production 的三態
 abstain 門檻已改回 `trust.scoring._CALIBRATION_TABLE` 那套簡化分位數
 校準（`agent.orchestrator._ABSTAIN_CALIBRATED_THRESHOLD = 0.35`）。原因
-與完整記錄見 `docs/CONFORMAL-FINDING.md`：gray 細案指定的「同一條 OHLCV
+與完整記錄見 `docs/qa/CONFORMAL-FINDING.md`：gray 細案指定的「同一條 OHLCV
 衍生多技術訊號」不是真異質多來源代理，對方向判斷幾乎無判別力
 （pseudo-AUC≈0.49），套用此模組算出的 τ 會讓 held-out abstain 率衝到
 ~94%（見下方回測結果），等同廢掉功能。本模組保留作為**已完成、可重現
@@ -103,7 +103,7 @@ _CONFORMAL_TAU = 0.9154
 def conformal_abstain_threshold() -> float:
     """回傳硬編的 conformal abstain 門檻 τ（研究工件，⚠️ 目前未被
     `agent.orchestrator` 呼叫，見本模組上方 2026-07 CEO 決策說明與
-    `docs/CONFORMAL-FINDING.md`）。
+    `docs/qa/CONFORMAL-FINDING.md`）。
 
     確定性、免 LLM、零 credit：純常數查詢，同輸入（無輸入）必同輸出。
     比較對象設計上是 `trust.scoring._evidence_strength()` 的**原始值**

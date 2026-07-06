@@ -150,7 +150,7 @@ def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
     return limits, flips
 
 
-# 新核心#2（gray docs/PLAN-multicore-worldfirst.md，task #25）：分維度信任的
+# 新核心#2（gray docs/archive/plans/PLAN-multicore-worldfirst.md，task #25）：分維度信任的
 # 中文標籤。鍵集合刻意不獨立重複維護——候選維度＝`KIND_REPUTATION`（信任評分
 # 唯一吃得到的 kind 全集），新增連接器只要在該表登記一筆 kind，雷達自動多出
 # 一維，這裡只補顯示用的中文標籤（缺標籤時 fallback 用 kind 原字串，不會噴錯）。
@@ -1035,7 +1035,7 @@ def run_agent_pipeline(
         ),
         stance_remaining_time_fn=log.remaining,
     )
-    # W2 啟用（gray `docs/PLAN-w2-enable-final.md`）：truth-discovery 動態來源
+    # W2 啟用（gray `docs/archive/plans/PLAN-w2-enable-final.md`）：truth-discovery 動態來源
     # 信譽由 PR #29 打底、預設關（`scoring.score` 的 `dynamic_reputation:
     # bool = False`，見該處 docstring），本行是全 repo 生產唯一呼叫點正式
     # 開啟。$0 確定性：K 輪迭代與下方 `_reputation_evidence` 都吃同一份

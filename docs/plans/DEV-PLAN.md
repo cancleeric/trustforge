@@ -194,12 +194,12 @@ Step 4: Limitation Review（Bedrock 呼叫 #3，選用）
 1. 安裝 AWS Kiro（VS Code extension 或 standalone）
 2. 用 Kiro 生成 **HOYA BIT 企業數據連接器規格**（7/13 工作坊拿到 API 規格後，立刻用 Kiro 的 spec 功能產出 `ingestion/hoyabit.py` 骨架）
 3. 用 Kiro Hook 驗證 Evidence 格式（每次 commit 確認 evidence.json 欄位完整性）
-4. 在 `docs/AWS-ARCHITECTURE.md` 加入「開發期採用 AWS Kiro」段落 + 截圖
+4. 在 `docs/architecture/AWS-ARCHITECTURE.md` 加入「開發期採用 AWS Kiro」段落 + 截圖
 5. 決賽簡報包含「AWS Kiro 工作流程」一頁（spec → implementation → validation）
 
 **驗收標準：**
 - [ ] 有 Kiro 生成的 spec 檔或 hook 設定檔存在 repo
-- [ ] `docs/AWS-ARCHITECTURE.md` 有更新的 Kiro 段落
+- [ ] `docs/architecture/AWS-ARCHITECTURE.md` 有更新的 Kiro 段落
 - [ ] 決賽簡報有 Kiro slide
 
 ---
@@ -370,7 +370,7 @@ class SECRSSSource(Source):
 - [ ] Bedrock 回應延遲 → 有 timeout 處理，不無限等待
 
 **驗收標準：**
-- [ ] 5 種幣種 × 3 種題型的壓測結果有記錄（文件 `docs/STRESS-TEST.md`）
+- [ ] 5 種幣種 × 3 種題型的壓測結果有記錄（文件 `docs/qa/STRESS-TEST.md`）
 - [ ] 無一次超過 15 分鐘
 - [ ] 失敗降級不拋出未捕獲的 exception
 
@@ -399,7 +399,7 @@ class SECRSSSource(Source):
 1. 解題方向（信任提煉的核心概念）
 2. AI 技術應用（Trust Layer 演算法 + 多步 Bedrock agent）
 3. 數據資料應用（HOYA BIT 企業數據 + 5 類來源）
-4. **AWS 架構圖**（可用 `docs/AWS-ARCHITECTURE.md` 轉為視覺圖）
+4. **AWS 架構圖**（可用 `docs/architecture/AWS-ARCHITECTURE.md` 轉為視覺圖）
 5. AWS Kiro 開發流程（+10%）
 6. Live Demo 網址 + 現場執行錄影連結
 
@@ -477,5 +477,5 @@ Prompt: "判斷以下市場評論是否含有喊單/操縱意圖/機器人特徵
 
 ---
 
-*文件路徑：`docs/DEV-PLAN.md`*
-*對應文件：`docs/PROPOSAL.md`、`docs/COMPETITION.md`、`ROADMAP.md`*
+*文件路徑：`docs/plans/DEV-PLAN.md`*
+*對應文件：`docs/competition/PROPOSAL.md`、`docs/competition/COMPETITION.md`、`ROADMAP.md`*

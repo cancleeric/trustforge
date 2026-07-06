@@ -1,5 +1,5 @@
 // #20 主題切換 — `resolveInitialTheme` 純邏輯單元測試。規格見
-// docs/PLAN-next-worldfirst-depth.md §2。
+// docs/plans/PLAN-next-worldfirst-depth.md §2。
 //
 // codex 複審 MEDIUM（初始偏好不當成明確選擇）：新增 `hasStoredTheme`／
 // `themeFromPrefersLight`／`makeSystemThemeChangeHandler` 的測試，涵蓋

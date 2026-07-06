@@ -20,7 +20,7 @@ export default defineConfig({
   },
   build: {
     // 純靜態輸出，供既有 nginx/EC2 部署方案（見
-    // docs/PLAN-frontend-backend-split.md §5）直接服務，不含 runtime。
+    // docs/architecture/PLAN-frontend-backend-split.md §5）直接服務，不含 runtime。
     outDir: 'dist',
     sourcemap: false,
   },

@@ -106,7 +106,7 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     "coindesk": 15 * 60,
     "decrypt": 15 * 60,
     "cryptopanic": 15 * 60,
-    # 資料密度第一批（#24，docs/PLAN-data-density.md）新增 6 家新聞 RSS，
+    # 資料密度第一批（#24，docs/archive/plans/PLAN-data-density.md）新增 6 家新聞 RSS，
     # 同 coindesk/decrypt 統一 15 分鐘一輪，keyless 公開 RSS 無 rate limit
     # 硬性公告，比照現有新聞源節奏即可。
     "cointelegraph": 15 * 60,
@@ -115,7 +115,7 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     "bitcoinist": 15 * 60,
     "newsbtc": 15 * 60,
     "dailyhodl": 15 * 60,
-    # 資料密度第二批（#24，docs/PLAN-data-density.md）新增 The Block/U.Today/
+    # 資料密度第二批（#24，docs/archive/plans/PLAN-data-density.md）新增 The Block/U.Today/
     # Blockworks 3 家新聞 RSS，同上統一 15 分鐘一輪。
     "theblock": 15 * 60,
     "utoday": 15 * 60,
@@ -204,7 +204,7 @@ COIN_AGNOSTIC_SOURCES = frozenset({"alternative-me-fng", "sec-gov"})
 # key，讓每個幣的 cache 內容天生就「只含自己」，語意與其餘逐幣來源一致。
 COIN_KEYED_BATCH_SOURCES = frozenset({"coingecko-price"})
 
-# Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：多幣信任快照 +
+# Axis C #1（task #23，PLAN docs/archive/plans/PLAN-axisC-snapshots.md）：多幣信任快照 +
 # 首頁總覽正確讀路徑——`scripts/fetch_scheduler.py --snapshot` 這個「寫入者」
 # 與 `web.py::_render_home_page()` 這個「讀路徑」用的 cache key 名稱必須逐字
 # 一致，兩處若各自寫死字串、之後改一邊忘了同步改另一邊，會變成「寫入者寫進
@@ -242,7 +242,7 @@ TRUST_SNAPSHOT_FRESH_WINDOW_SECONDS = stale_after_for(
     TRUST_SNAPSHOT_REFRESH_INTERVAL_SECONDS
 )  # = 45 分鐘
 
-# task #26（docs/PLAN-multicore-worldfirst.md，「新核心#1 持久化寫入基礎：
+# task #26（docs/archive/plans/PLAN-multicore-worldfirst.md，「新核心#1 持久化寫入基礎：
 # 快照按日累積歷史」）：`TRUST_SNAPSHOT_SOURCE` 只存「最新一筆」、每輪覆寫，
 # 完全沒有歷史——這裡加一組**按日**的 key pattern，讓「歷史信任趨勢
 # Point-in-Time」的資料現在就開始累積（UI 晚做沒關係，但寫入現在不開始，

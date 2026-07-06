@@ -249,5 +249,5 @@ HOYA BIT 自定位為「AI Native Exchange OS」：
 
 ---
 
-*文件路徑：`docs/PROPOSAL.md`*
-*對應文件：`docs/DEV-PLAN.md`、`docs/COMPETITION.md`、`docs/ARCHITECTURE.md`*
+*文件路徑：`docs/competition/PROPOSAL.md`*
+*對應文件：`docs/plans/DEV-PLAN.md`、`docs/competition/COMPETITION.md`、`docs/architecture/ARCHITECTURE.md`*

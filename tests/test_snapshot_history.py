@@ -1,4 +1,4 @@
-"""task #26（docs/PLAN-multicore-worldfirst.md，新核心#1 持久化寫入基礎）：
+"""task #26（docs/archive/plans/PLAN-multicore-worldfirst.md，新核心#1 持久化寫入基礎）：
 `--snapshot` 按日累積歷史快照 + `get_trust_history()` 讀取 helper 測試。
 
 ⛔ credit-safe 鐵律：全程 `pipeline.run()` 被 monkeypatch 成樁，不觸發任何

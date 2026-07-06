@@ -166,7 +166,7 @@ def test_collect_skips_failing_source():
 def test_source_failure_reflected_in_limits(monkeypatch):
     """collect 記錄失敗來源 → pipeline.run 應將其加入 report.limits。
 
-    docs/PLAN-source-branding.md：`report.limits` 這句「未取得資料」清單
+    docs/archive/plans/PLAN-source-branding.md：`report.limits` 這句「未取得資料」清單
     已改用 `source_display_name()` 品牌化顯示（不再直接印原始 slug），
     所以這裡斷言要對「顯示名」，同時反向斷言原始裸 slug 不外洩。
     """
@@ -218,7 +218,7 @@ def test_pipeline_does_not_crash_with_failing_source(monkeypatch):
     assert report.market_judgment, "market_judgment 不可空"
     assert evidence, "evidence 不可空"
     # limits 應有 failing-news-src 的品牌顯示名記錄（非原始裸 slug，
-    # 見 docs/PLAN-source-branding.md）
+    # 見 docs/archive/plans/PLAN-source-branding.md）
     from trustforge.brand_logos import source_display_name
 
     limits_text = " ".join(report.limits)
@@ -300,7 +300,7 @@ def test_existing_comparison_unaffected(monkeypatch):
 def test_pipeline_limits_dedup_on_repeated_failure(monkeypatch):
     """同一來源多次記入 _failed → report.limits 不重複出現相同條目。
 
-    docs/PLAN-source-branding.md：斷言改對品牌顯示名（`source_display_name`
+    docs/archive/plans/PLAN-source-branding.md：斷言改對品牌顯示名（`source_display_name`
     的 graceful title-case 降級），因為 limits 句子已不再印原始裸 slug。
     """
     from trustforge.brand_logos import source_display_name

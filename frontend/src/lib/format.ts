@@ -1,5 +1,5 @@
 // 純顯示層格式化 helper——UX Round1 稽核 #6：機器可讀的秒數/epoch 不該
-// 直接丟給終端使用者（見 `docs/UXUI-ROUND-01.md`）。這裡只做格式轉換，
+// 直接丟給終端使用者（見 `docs/archive/plans/UXUI-ROUND-01.md`）。這裡只做格式轉換，
 // 不含任何資料驗證邏輯（那是 `validators.ts` 的職責），輸入皆假設已通過
 // runtime guard。
 

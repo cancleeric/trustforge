@@ -373,5 +373,5 @@ light 模式人工複查對比度。
    排入；**#15 本輪最多只做「資料探索驗證」半天，不做實作**，避免
    重演 W1.5 「規則脆弱、越修越糟」的教訓。
 
-檔案：`/Users/apple/HurricaneSoft/trustforge/docs/PLAN-next-worldfirst-depth.md`
+檔案：`/Users/apple/HurricaneSoft/trustforge/docs/plans/PLAN-next-worldfirst-depth.md`
 （新建）；已同步更新 `docs/README.md` 索引（見下方 diff）。

@@ -1,7 +1,7 @@
 # W2 truth-discovery 動態來源信譽 — 最終啟用計劃
 
 > 作者：gray（CPO）｜日期：2026-07-03
-> 背景：`docs/PLAN-w2-wiring.md`（2026-07-01 舊接線計劃，含前提驗證數據）已審完
+> 背景：`docs/archive/plans/PLAN-w2-wiring.md`（2026-07-01 舊接線計劃，含前提驗證數據）已審完
 > 10 天未執行。本文件是**最終可執行啟用計劃**——重新 grep 實證現況（含 07-01
 > 之後兩天的新增變更：資料密度批次 #54/#55、deploy gate 修正），確認啟用前置
 > 硬化是否真的待辦，並給出一步到位的 CTO 執行範圍。**未改任何程式碼。**
@@ -13,7 +13,7 @@
 - `score()` 簽名 `scoring.py:1116`：`dynamic_reputation: bool = False`（預設關）。
 - 生產唯一呼叫點 `src/trustforge/agent/orchestrator.py:778`：
   `score(claims, now=now_ts, stance_fn=shared_stance_fn)` —— **grep 確認沒有
-  `dynamic_reputation=`**，逐字複核 `docs/PLAN-w2-wiring.md` 07-01 的發現，兩天
+  `dynamic_reputation=`**，逐字複核 `docs/archive/plans/PLAN-w2-wiring.md` 07-01 的發現，兩天
   來零變化：**W2 100% 未接線，仍是唯一差距**。
 - 為何預設關：純粹「方案審完未排執行」，不是引擎有已知缺陷卡著（見下方 #1 發現）。
 

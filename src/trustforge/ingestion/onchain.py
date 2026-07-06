@@ -4,7 +4,7 @@
   - Alternative.me Fear & Greed Index  https://api.alternative.me/fng/?limit=7  (完全免費)
   - Blockchain.info stats              https://api.blockchain.info/stats         (公開，BTC only)
 
-資料密度第二批（#24，2026-07，見 docs/PLAN-data-density.md，gray 已逐一 curl
+資料密度第二批（#24，2026-07，見 docs/archive/plans/PLAN-data-density.md，gray 已逐一 curl
 驗證 200 OK）——全部 keyless、僅 BTC（比照 `BlockchainInfoSource` 非 BTC
 跳過的既有慣例，非全市場通用信號，不列入 `COIN_AGNOSTIC_SOURCES`）：
   - mempool.space 建議手續費   https://mempool.space/api/v1/fees/recommended
@@ -326,7 +326,7 @@ class BlockchairStatsSource(Source):
         # follow-up（非本輪）：跨快取單調性（新 doc ts 不得早於上一輪已快取
         # doc 的 ts）是 scheduler 層的通用增強、該套用到所有來源而不只
         # blockchair，需要獨立設計，已建 issue 追蹤，見
-        # docs/OPTIMIZATION-PLAN-weakness.md 的 follow-up 段落。
+        # docs/plans/OPTIMIZATION-PLAN-weakness.md 的 follow-up 段落。
         now = time.time()
         if ts > now + _FUTURE_SKEW_TOLERANCE_SECONDS:
             raise ValueError(

@@ -1,4 +1,4 @@
-"""新核心#2（gray docs/PLAN-multicore-worldfirst.md，task #25）：多維度信任拆解。
+"""新核心#2（gray docs/archive/plans/PLAN-multicore-worldfirst.md，task #25）：多維度信任拆解。
 
 驗證重點：
 1. `agent.orchestrator.aggregate_trust_by_kind` 按 source kind 分組正確聚合

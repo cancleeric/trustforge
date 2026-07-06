@@ -217,7 +217,7 @@ python3 scripts/fetch_scheduler.py --source reddit-bitcoin --force   # 強制略
 
 > ⛔ 以下腳本只負責「把拓樸架好、隨時可切、但預設不切」。真正把使用者流量
 > 切到 React 前端（cutover）需要 **CEO+CISO+CPO 三審 + 老闆簽核**，見
-> `docs/PLAN-frontend-backend-split.md` P3。本節不涉及任何真實 AWS/生產操作。
+> `docs/architecture/PLAN-frontend-backend-split.md` P3。本節不涉及任何真實 AWS/生產操作。
 
 分三個階段，各自獨立、可回滾：
 

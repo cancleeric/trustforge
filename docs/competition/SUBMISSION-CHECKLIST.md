@@ -32,7 +32,7 @@
    現況：`.env` / token 全走 gitignore，未進版控；仍須掃一遍確認。
 4. **擦掉內部基建references**（公開前不該外露集團內網）：
    - 搜並移除：`YINGdeMacBook-Pro.local`、Gitea 內網 URL、anemone/電話總機、CLAUDE.md 集團架構、C-Suite 代號等。
-   - 受影響檔：`README.md`、`docs/COMPETITION.md`、`docs/AWS-ARCHITECTURE.md`、`ROADMAP.md`。
+   - 受影響檔：`README.md`、`docs/competition/COMPETITION.md`、`docs/architecture/AWS-ARCHITECTURE.md`、`ROADMAP.md`。
    - 建議：公開版 README 只留競賽相關；內部備註移到不公開的 Gitea 鏡像。
 5. **.gitignore 確認**涵蓋：`data/`（若移除）、`.env`、`*.secret`、`out/`、`demo/hoyabit_data/`。
 6. **README 可重現性** 🧑：判斷者要能照 README 跑起來——安裝、設 `AWS_REGION`/`BEDROCK_MODEL_ID`、`--offline` demo、AWS 跑法。
@@ -84,7 +84,7 @@
 7. **加分 +10%** 🧑：開發用 **AWS Kiro**（AI 整合開發環境）。
 
 ### AWS 架構（簡報用）
-見 `docs/AWS-ARCHITECTURE.md`。核心：API Gateway/App Runner → 服務(ingestion→trust→agent) → Bedrock(apac Claude) → S3(artifacts) + CloudWatch(log) → Dashboard。
+見 `docs/architecture/AWS-ARCHITECTURE.md`。核心：API Gateway/App Runner → 服務(ingestion→trust→agent) → Bedrock(apac Claude) → S3(artifacts) + CloudWatch(log) → Dashboard。
 
 ---
 

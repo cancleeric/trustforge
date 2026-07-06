@@ -1,4 +1,4 @@
-"""前後端分離 Phase 1（task #28，docs/PLAN-frontend-backend-split.md）：純新增
+"""前後端分離 Phase 1（task #28，docs/architecture/PLAN-frontend-backend-split.md）：純新增
 JSON API 端點測試。
 
 ⛔ credit-safe 鐵律：`/api/status`／`/api/overview`／`/api/costs`／

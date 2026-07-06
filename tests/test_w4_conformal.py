@@ -5,7 +5,7 @@ wire 進 production**——`trust.conformal`/`scripts/backtest_conformal.py`
 本身數學正確、可重現，但依 gray 細案指定方法論算出的 τ 是「同一條 OHLCV
 衍生多技術訊號」這個非真異質代理訊號的產物（pseudo-AUC≈0.49、對方向
 幾乎無判別力），套進 production 會讓 abstain 率衝到 ~94%（見
-`docs/CONFORMAL-FINDING.md` 完整記錄）。`agent.orchestrator` 的三態
+`docs/qa/CONFORMAL-FINDING.md` 完整記錄）。`agent.orchestrator` 的三態
 abstain 門檻**維持原本的簡化分位數校準**（`_ABSTAIN_CALIBRATED_THRESHOLD
 = 0.35`），不讀這裡的 τ；三態回歸測試在既有 `tests/test_w4_calibration.py`
 即涵蓋，本檔不重複。
@@ -18,7 +18,7 @@ abstain 門檻**維持原本的簡化分位數校準**（`_ABSTAIN_CALIBRATED_TH
      test 集的 JOINT coverage 檢查（P(方向錯 且 strength>τ) ≤ α+餘裕，
      嚴格 `>`）——跟 `trust/conformal.py` 硬編 τ 時附的回測數字互相印證，
      資料/規則變動時這個測試能抓到「硬編常數過時」。
-  4. **邊界反例測試（codex 對抗審發現，見 `docs/CONFORMAL-FINDING.md`
+  4. **邊界反例測試（codex 對抗審發現，見 `docs/qa/CONFORMAL-FINDING.md`
      「邊界語義修正」）**：全 1.0 錯誤樣本、重複分數（ties）、空校準集
      三種邊界情形，鎖住「fallback=`math.inf` ＋ 嚴格 `>`」不會被邊界值
      鑽漏洞誤放行、coverage 上界宣稱仍成立。
@@ -80,7 +80,7 @@ def test_compute_tau_deterministic_same_input_same_output():
 def test_backtest_holdout_joint_coverage_within_alpha_plus_slack():
     """用 `data/data/*.csv` 重跑一次完整回測流程，驗證 held-out test 上
     JOINT coverage：P(方向錯 且 evidence_strength>tau) <= alpha + 餘裕
-    （嚴格 `>`，見 `docs/CONFORMAL-FINDING.md`「邊界語義修正」）。
+    （嚴格 `>`，見 `docs/qa/CONFORMAL-FINDING.md`「邊界語義修正」）。
 
     餘裕（0.03）純粹是有限樣本下的統計波動緩衝，不是放寬保證本身——
     `trust/conformal.py` 硬編的 τ 是無條件進位（保守方向），實測值本該
@@ -128,7 +128,7 @@ def test_backtest_holdout_joint_coverage_within_alpha_plus_slack():
 
 # ---------------------------------------------------------------------------
 # 4. 邊界反例測試（codex 對抗審發現）：fallback=math.inf ＋ 嚴格 `>`
-#    見 `docs/CONFORMAL-FINDING.md`「邊界語義修正」。這些測試鎖住的是
+#    見 `docs/qa/CONFORMAL-FINDING.md`「邊界語義修正」。這些測試鎖住的是
 #    「呼叫端判斷是否通過門檻」的完整邏輯（`strength > tau`），不只是
 #    `compute_tau()` 本身的回傳值。
 # ---------------------------------------------------------------------------

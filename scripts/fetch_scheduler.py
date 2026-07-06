@@ -567,7 +567,7 @@ def run_probe() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Axis C #1（task #23，PLAN docs/PLAN-axisC-snapshots.md）：多幣信任快照寫入者
+# Axis C #1（task #23，PLAN docs/archive/plans/PLAN-axisC-snapshots.md）：多幣信任快照寫入者
 # + 首頁總覽正確讀路徑。
 #
 # 背景：`web.py::_render_home_page()` 曾在 Phase 3 短暫加過「多幣總覽」，
@@ -834,7 +834,7 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     卻還停在舊的」這種單幣局部矛盾。真正的跨 key 原子（DynamoDB
     `TransactWriteItems` 全項單調條件、或 immutable generation + 原子切換
     manifest 指標）屬於重量級架構改動，決定當 follow-up 處理（見
-    `docs/OPTIMIZATION-PLAN-weakness.md` 對應段落 + GitHub issue）——歷史
+    `docs/plans/OPTIMIZATION-PLAN-weakness.md` 對應段落 + GitHub issue）——歷史
     趨勢 UI 目前還沒建、沒有人讀 history，暫態矛盾影響極小，值得先用一個
     收斂矛盾窗的**低成本收窄**頂著，而不是本輪就上重量級方案。
 
@@ -893,7 +893,7 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     或 history 成功但 latest 又跳過）都計入。這樣把「crash 在 history 跟
     latest 之間」的殘餘視窗，從「可能永久弄丟一天歷史」收斂成「latest
     暫時顯示舊資料、下一輪自癒」——真正的跨 key 原子仍是 follow-up
-    （見 GitHub issue #62、`docs/OPTIMIZATION-PLAN-weakness.md`），但這次
+    （見 GitHub issue #62、`docs/plans/OPTIMIZATION-PLAN-weakness.md`），但這次
     重排已經把「不可復原」的那一半風險大幅降低。
 
     codex HIGH（PR #59 review 第六輪，backend-affinity 一致性、#1 最終

@@ -16,7 +16,7 @@
 | 林子彤 | 團隊成員 |
 | 王榆翔（Nicholas） | 團隊成員 |
 
-（詳見 [`docs/TEAM.md`](docs/TEAM.md)）
+（詳見 [`docs/competition/TEAM.md`](docs/competition/TEAM.md)）
 
 ---
 
@@ -64,7 +64,7 @@ TrustForge 的差異化在中間那層 **Trust Layer（信任層）**：
                                                         └────────────────────┘
 ```
 
-詳見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+詳見 [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)。
 
 ---
 
@@ -76,7 +76,7 @@ TrustForge 的差異化在中間那層 **Trust Layer（信任層）**：
 3. 30 小時內（8/1–8/2）繳交：命題連結、企業數據應用、技術架構、生成式 AI 應用、**Live Demo**。
 4. 可佈署實證、現場展示成果。
 
-時程與須知見 [`docs/COMPETITION.md`](docs/COMPETITION.md)。
+時程與須知見 [`docs/competition/COMPETITION.md`](docs/competition/COMPETITION.md)。
 
 ---
 
@@ -124,7 +124,7 @@ PORT=8799 python -m trustforge.web   # → http://127.0.0.1:8799
 #   /analyze     HTML 報告　/analyze.json  JSON（report+evidence+log）　/healthz  健康檢查
 ```
 
-**佈署到 AWS**：推薦 **App Runner 原始碼模式**——連 GitHub repo 即讀 `apprunner.yaml` 自動建置（**雲端建置，本機免 Docker**），給公開 HTTPS Live Demo URL、push 即重佈。設 `BEDROCK_MODEL_ID`+`AWS_REGION` 並給 instance role `bedrock:InvokeModel` 後，帶 `?live=1` 走真實 Bedrock。完整步驟見 [`docs/SUBMISSION-CHECKLIST.md`](docs/SUBMISSION-CHECKLIST.md)。容器路線另附 `Dockerfile`。
+**佈署到 AWS**：推薦 **App Runner 原始碼模式**——連 GitHub repo 即讀 `apprunner.yaml` 自動建置（**雲端建置，本機免 Docker**），給公開 HTTPS Live Demo URL、push 即重佈。設 `BEDROCK_MODEL_ID`+`AWS_REGION` 並給 instance role `bedrock:InvokeModel` 後，帶 `?live=1` 走真實 Bedrock。完整步驟見 [`docs/competition/SUBMISSION-CHECKLIST.md`](docs/competition/SUBMISSION-CHECKLIST.md)。容器路線另附 `Dockerfile`。
 
 ## 交付件（對齊官方）
 
@@ -137,7 +137,7 @@ PORT=8799 python -m trustforge.web   # → http://127.0.0.1:8799
 | 執行紀錄 Execution Log | `out/<coin>/execution_log.jsonl` | 時戳 + 工具呼叫 + 流程，含 15 分鐘預算追蹤 |
 
 > **反作弊鐵則**：市場判斷、證據整合、信任評分由本 pipeline 產生；Bedrock 只負責
-> 把推理「行文」，不得把第三方現成結論當主要結果。詳見 `docs/COMPETITION.md`。
+> 把推理「行文」，不得把第三方現成結論當主要結果。詳見 `docs/competition/COMPETITION.md`。
 
 ---
 
@@ -148,9 +148,9 @@ trustforge/
 ├── README.md
 ├── ROADMAP.md              # 對齊黑客松里程碑
 ├── pyproject.toml
-├── docs/
-│   ├── COMPETITION.md      # 競賽時程 / 須知 / 約束
-│   └── ARCHITECTURE.md     # 三層架構與信任演算法設計
+├── docs/                  # 見 docs/README.md 索引（competition/architecture/plans/qa/design/archive）
+│   ├── competition/COMPETITION.md   # 競賽時程 / 須知 / 約束
+│   └── architecture/ARCHITECTURE.md # 三層架構與信任演算法設計
 ├── src/trustforge/
 │   ├── bedrock.py          # AWS Bedrock runtime 封裝（唯一模型入口）
 │   ├── schema.py           # Coin 池 / 題型 / Evidence / Report（對齊交付規格）

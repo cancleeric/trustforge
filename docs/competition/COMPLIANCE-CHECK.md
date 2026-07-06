@@ -1,6 +1,6 @@
 # TrustForge 合規性對照（vs 官方命題文件）
 
-> 日期：2026-07-01｜依據 `docs/COMPETITION-OFFICIAL.md`（官方權威原文）逐條核對。CEO 查 code 驗證，非假設。
+> 日期：2026-07-01｜依據 `docs/competition/COMPETITION-OFFICIAL.md`（官方權威原文）逐條核對。CEO 查 code 驗證，非假設。
 > 結論：**開發方向正確、4 交付件與 5 能力全數合規**；2 個 flag（AWS 模型約束衝突 / Kiro +10% 未取）。
 
 ## A. 5 能力
