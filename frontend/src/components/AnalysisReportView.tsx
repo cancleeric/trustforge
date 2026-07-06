@@ -7,6 +7,7 @@ import KeyBasisList from './KeyBasisList'
 import CrossSourceSignalPanel from './CrossSourceSignalPanel'
 import EvidenceTable from './EvidenceTable'
 import PriceProvenancePanel from './PriceProvenancePanel'
+import TrustTrendSection from './TrustTrendSection'
 import { DirectionBadge } from './Badges'
 import { LoadingState } from './StatusStates'
 
@@ -42,6 +43,8 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
         />
         <TrustBreakdown data={data.trust_components_aggregate} />
       </div>
+
+      <TrustTrendSection coin={data.report.coin} />
 
       <Suspense fallback={<LoadingState label="雷達圖載入中…" />}>
         <TrustRadarChart radar={data.trust_radar} />
