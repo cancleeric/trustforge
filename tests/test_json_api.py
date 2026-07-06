@@ -30,13 +30,14 @@ from trustforge.ingestion.cache import (
     DynamoDBCache,
     JsonCacheBackend,
     TRUST_SNAPSHOT_SOURCE,
+    cache_get,
     cache_key,
     cache_set_if_newer,
     trust_snapshot_history_key,
 )
 from trustforge import ledger as ledger_module
 from trustforge.ledger import JsonlLedger
-from trustforge.schema import COIN_POOL, QuestionType
+from trustforge.schema import COIN_POOL, Evidence, QuestionType
 
 
 def _stop_overview_bg_thread_for_test() -> None:
@@ -3106,3 +3107,148 @@ def test_ssr_routes_untouched_by_json_api_addition(json_cache_backend):
     assert code == 200
     parsed = json.loads(body)
     assert "report" in parsed and "ok" not in parsed  # 既有 /analyze.json 沒有信封，逐字不變
+
+
+# ---------------------------------------------------------------------------
+# harper CISO 隱私審查附條件修復（PR #107）：公開 JSON 端點不得洩漏
+# Evidence.author / 快照 authors 鍵；內部 cache/快照原樣保留供未來 W3 用。
+# ---------------------------------------------------------------------------
+
+def _real_evidence_plus_authored(coin: str, query: str) -> tuple:
+    """回傳一組真實跑過 `web.run()` 的 (report, evidence, log)，並在
+    evidence 尾端多附一筆帶 `author` 的 `Evidence`——模擬「連接器真的抓到
+    來源平台公開 username」的情境，供三個公開端點測試共用。"""
+    report, evidence, log = web.run(coin, query, QuestionType.MULTI_SOURCE, offline=True)
+    authored_ev = Evidence(
+        source="reddit-bitcoin",
+        fetched_at="2026-07-06T00:00:00Z",
+        content_reference="ref-leak-test",
+        related_claim=query,
+        author="/u/leak_test_user",
+    )
+    return report, list(evidence) + [authored_ev], log
+
+
+def test_api_analyze_public_response_excludes_author(monkeypatch):
+    """CEO must-have #1：`/api/analyze` 對外回應的每筆 evidence dict 不得
+    含 `author` 鍵，即便底層 evidence 真的有 author。"""
+    report, evidence, log = _real_evidence_plus_authored("BTC", "author leak test")
+
+    def fake_run(coin, query, qtype, **kwargs):
+        return report, evidence, log
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    code, body = web._handle_api_analyze(
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["author leak test"]},
+        client_ip="10.2.0.1",
+    )
+    assert code == 200
+    data = _envelope(body)["data"]
+    assert any(ev.get("content_reference") == "ref-leak-test" for ev in data["evidence"])
+    assert all("author" not in ev for ev in data["evidence"])
+
+
+def test_analyze_json_route_excludes_author(monkeypatch):
+    """`/analyze.json`（SSR 頁旁的裸 JSON 匯出路由，同樣免認證公開）也不得
+    洩漏 author——跟 `/api/analyze` 是各自獨立的序列化路徑，需分開驗證。"""
+    report, evidence, log = _real_evidence_plus_authored("BTC", "author leak json route")
+
+    def fake_run(coin, query, qtype, **kwargs):
+        return report, evidence, log
+
+    monkeypatch.setattr(web, "run", fake_run)
+
+    code, body = _do_get("/analyze.json?coin=BTC&type=multi_source&q=author+leak+json+route")
+    assert code == 200
+    parsed = json.loads(body)
+    assert any(ev.get("content_reference") == "ref-leak-test" for ev in parsed["evidence"])
+    assert all("author" not in ev for ev in parsed["evidence"])
+
+
+def test_api_overview_public_response_excludes_authors_but_cache_retains_it(
+    json_cache_backend,
+):
+    """CEO must-have #1：`/api/overview` 對外回應不得含 `authors` 鍵；同一
+    份底層快照本身（cache 原始內容）必須維持原樣，供未來 W3 偵測讀取——
+    過濾只發生在對外序列化邊界，不是閹割資料源頭。"""
+    snap = {
+        "coin": "BTC",
+        "trust_score": 0.6,
+        "authors": ["/u/leak_test_user", "reddit_mod_42"],
+    }
+    result = cache_set_if_newer(
+        json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"), [snap],
+        fetched_at=1000.0, allow_json_fallback=True,
+    )
+    assert result.ok
+
+    code, body = web._handle_api_overview(client_ip="10.2.0.2")
+    assert code == 200
+    data = _envelope(body)["data"]
+    btc = next(c for c in data["coins"] if c["coin"] == "BTC")
+    assert "authors" not in btc
+
+    # 內部快照本身沒被動到——原始 cache 內容仍完整含 authors。
+    raw = cache_get(json_cache_backend, cache_key(TRUST_SNAPSHOT_SOURCE, "BTC"))
+    assert raw["docs"][0]["authors"] == ["/u/leak_test_user", "reddit_mod_42"]
+
+
+def test_api_history_public_response_excludes_authors_but_cache_retains_it(
+    json_cache_backend,
+):
+    """CEO must-have #1：`/api/history` 對外回應每日序列同樣不得含
+    `authors` 鍵；底層按日快照 cache 內容不受影響。"""
+    day = (datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    snap = {
+        "coin": "ETH",
+        "trust_score": 0.5,
+        "authors": ["/u/history_leak_user"],
+    }
+    key = trust_snapshot_history_key("ETH", day)
+    result = cache_set_if_newer(
+        json_cache_backend, key, [snap], fetched_at=1000.0, allow_json_fallback=True,
+    )
+    assert result.ok
+
+    code, body = web._handle_api_history(
+        {"coin": ["ETH"], "days": ["1"]}, client_ip="10.2.0.3"
+    )
+    assert code == 200
+    data = _envelope(body)["data"]
+    assert data["history"], "測資應至少含今天一筆"
+    assert all("authors" not in day_entry for day_entry in data["history"])
+
+    raw = cache_get(json_cache_backend, key)
+    assert raw["docs"][0]["authors"] == ["/u/history_leak_user"]
+
+
+def test_public_evidence_dict_helper_strips_author_keeps_other_fields():
+    """`_public_evidence_dict()` 單元測試：只拿掉 `author`，其餘欄位（含
+    `trust`/`flags`/`content_reference`）原樣保留。"""
+    ev = Evidence(
+        source="reddit-bitcoin",
+        fetched_at="2026-07-06T00:00:00Z",
+        content_reference="ref",
+        related_claim="claim",
+        trust=0.42,
+        author="/u/someone",
+    )
+    d = web._public_evidence_dict(ev)
+    assert "author" not in d
+    assert d["trust"] == 0.42
+    assert d["content_reference"] == "ref"
+    # 原始 Evidence 物件本身不受影響（helper 回傳的是新 dict，非原地修改）。
+    assert ev.author == "/u/someone"
+
+
+def test_public_snapshot_dict_helper_strips_authors_keeps_other_fields():
+    """`_public_snapshot_dict()` 單元測試：只拿掉 `authors`，其餘欄位原樣
+    保留；不修改呼叫端傳入的原始 dict。"""
+    snap = {"coin": "BTC", "trust_score": 0.7, "authors": ["/u/a", "/u/b"]}
+    d = web._public_snapshot_dict(snap)
+    assert "authors" not in d
+    assert d["coin"] == "BTC"
+    assert d["trust_score"] == 0.7
+    # 原始 dict 不被就地修改。
+    assert snap["authors"] == ["/u/a", "/u/b"]

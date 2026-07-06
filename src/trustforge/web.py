@@ -4285,6 +4285,36 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
 
 
 
+# harper CISO 隱私審查附條件修復（PR #107）：W3 前置累積的
+# `Evidence.author`／快照 `"authors"` 鍵是「內部資料累積」用途（供未來 W3
+# 協同操縱偵測），不是要對外公開 API 洩漏來源平台使用者名稱。以下兩個
+# helper 只在**對外序列化邊界**（`/api/analyze`、`/api/overview`、
+# `/api/history` 回應組裝處）套用欄位過濾；`cache`/每日快照本身完全不動、
+# 原樣保留 author/authors，供未來偵測演算法讀取——過濾只發生在「即將寫進
+# HTTP 回應 body」的最後一步，不是在資料源頭閹割。
+
+
+def _public_evidence_dict(ev) -> dict:
+    """`Evidence.to_dict()` 的對外安全版：拿掉 `author`（來源平台公開
+    username 原文）——`/api/analyze`、`/api/compare` 這兩個端點只套
+    rate-limit、不需認證，任何人都能打，不該把使用者名稱直接洩漏出去。
+    `author` 欄位本身的存在（`Evidence` dataclass／cache/快照）不受影響，
+    只是不進這兩個端點的回應 body。"""
+    d = ev.to_dict()
+    d.pop("author", None)
+    return d
+
+
+def _public_snapshot_dict(snap: dict) -> dict:
+    """每日快照 dict 的對外安全版：拿掉 `_collect_authors()` 寫入的
+    `"authors"` 鍵（username 清單）——`/api/overview`、`/api/history` 同樣
+    只套 rate-limit、免認證。回傳淺拷貝，不修改呼叫端傳入的原始 dict（該
+    dict 若來自 cache 讀取結果，呼叫端可能還有其他用途）。"""
+    d = dict(snap)
+    d.pop("authors", None)
+    return d
+
+
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
     `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
@@ -4443,12 +4473,12 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             payload = {
                 "version": VERSION,
                 "report_a": dataclasses.asdict(report_a),
-                "evidence_a": [ev.to_dict() for ev in evidence_a],
+                "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
                 "trust_radar_a": aggregate_trust_by_kind(evidence_a),
                 "trust_components_aggregate_a": _aggregate_trust_components(evidence_a),
                 "price_provenance_a": _price_provenance_data(evidence_a),
                 "report_b": dataclasses.asdict(report_b),
-                "evidence_b": [ev.to_dict() for ev in evidence_b],
+                "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
@@ -4467,7 +4497,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             payload = {
                 "version": VERSION,
                 "report": dataclasses.asdict(report),
-                "evidence": [ev.to_dict() for ev in evidence],
+                "evidence": [_public_evidence_dict(ev) for ev in evidence],
                 "trust_radar": aggregate_trust_by_kind(evidence),
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
                 "price_provenance": _price_provenance_data(evidence),
@@ -4529,7 +4559,7 @@ def _handle_api_overview(client_ip: str = "") -> tuple[int, str]:
             docs = entry.get("docs") or []
             if not docs or not isinstance(docs[0], dict):
                 continue
-            snap = dict(docs[0])
+            snap = _public_snapshot_dict(docs[0])
             snap["fetched_at_epoch"] = entry.get("fetched_at")
             coins_data.append(snap)
         return 200, _json_envelope_ok({"coins": coins_data})
@@ -4768,6 +4798,7 @@ def _handle_api_history(qs: dict, client_ip: str = "") -> tuple[int, str]:
         history = get_trust_history(
             coin_raw, days, backend=_home_overview_backend(), strict=True
         )
+        history = [_public_snapshot_dict(day) for day in history]
         return 200, _json_envelope_ok({"coin": coin_raw, "days": days, "history": history})
     except Exception:
         logging.exception("TrustForge /api/history error")
@@ -5009,9 +5040,9 @@ class Handler(BaseHTTPRequestHandler):
                         payload = {
                             "version": VERSION,
                             "report_a": dataclasses.asdict(report_a),
-                            "evidence_a": [ev.to_dict() for ev in evidence_a],
+                            "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
                             "report_b": dataclasses.asdict(report_b),
-                            "evidence_b": [ev.to_dict() for ev in evidence_b],
+                            "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
                             "execution_log": log.events,
                         }
                         return self._send(
@@ -5054,7 +5085,7 @@ class Handler(BaseHTTPRequestHandler):
                         payload = {
                             "version": VERSION,
                             "report": dataclasses.asdict(report),
-                            "evidence": [ev.to_dict() for ev in evidence],
+                            "evidence": [_public_evidence_dict(ev) for ev in evidence],
                             "execution_log": log.events,
                         }
                         return self._send(
