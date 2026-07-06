@@ -117,6 +117,25 @@ nginx conf：`deploy/nginx.conf`；cutover 開關：`deploy/cutover_switch.sh`
 SSR 舊路由（`/`、`/costs`、`/status`、`/analyze`、`/analyze.json`）仍在，
 僅供 `cutover_switch.sh legacy` 緊急回滾，凍結新功能。
 
+#### `/api/status` `dedup` 欄位監控指引（#93，harper CISO 雙審附帶條件）
+
+- **權威訊號是輪詢 `/api/status.dedup.degraded`**，不是 server log 的
+  `ALERT:` 前綴——`degraded` 即時反映當下滑動視窗真實計數，不受 ALERT
+  log 冷卻期（同一輪 incident 內至多每 5 分鐘一次）影響；`ALERT:` log
+  只作「事故開始那一刻」的首次通知（healthy→degraded 轉換必發），同一輪
+  incident 持續期間的重複失敗不會每次都噴一行，**不可用 log 出現頻率
+  推斷 incident 是否仍在持續**，要看當下狀態一律讀 `degraded` 欄位。
+- **`recent_failures` 數值本身也該另外建監控**（非零持續型）：告警門檻
+  （`alert_threshold`，目前 5 次/5 分鐘）是為了避免偶發單次 fail-open
+  就洗版告警而刻意設的，但這代表**穩定低於門檻的長期低頻回歸**（例如
+  每 5 分鐘固定 4 次，長期不歸零）永遠不會觸發 `degraded`／`ALERT`，是
+  這套「頻率突波」設計刻意留下的盲區——監控端應另建「`recent_failures`
+  是否長期非零」的規則覆蓋這塊，不能只依賴 `degraded` 布林值。
+- **告警規則落地**（CloudWatch metric filter／alarm 訂閱 `ALERT:
+  TrustForge dedup` 前綴、`recent_failures` 非零持續監控）**由 secops
+  後續銷帳**（follow-up issue，CEO 開單追蹤），本次 PR 只負責應用層
+  可觀測性（log＋`/api/status` 欄位），不含實際監控告警規則佈署。
+
 ### 計劃新增（下一步，#85 多維度信任雷達）
 
 - 後端新增 `agent/orchestrator.py::build_trust_radar()`（尚未存在，待實作）：

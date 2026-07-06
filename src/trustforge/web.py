@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import collections
 import dataclasses
 import hmac
 import html
@@ -3930,19 +3931,46 @@ def _analyze_dedup_coin_key(qtype: QuestionType, qs: dict, query: str) -> str | 
 # 真實計數，只節流「log 這件事」本身），也不影響個別失敗仍照樣
 # `logging.warning(..., exc_info=True)` 留下完整 traceback——只節流
 # 「已經 ALERT 過的期間內，要不要再重複噴一次 ALERT ERROR」。
+#
+# 雙審（harper+codex）第二輪補強：
+# 1. **incident 週期重置**（codex MEDIUM）：光靠「距離上次 ALERT 是否
+#    超過冷卻期」判斷會不會噴 ALERT 不夠——如果 degraded 已經真的恢復
+#    （視窗內計數掉回門檻以下），接著在冷卻期尚未過完前又重新惡化，
+#    這是**新的一次事故**，理當立刻 ALERT，不該被舊事故留下的冷卻計時
+#    卡住。改成顯式追蹤 `_dedup_prep_failure_incident_active`：計數掉到
+#    門檻以下＝incident 結束、重置告警資格；下一次 healthy→degraded
+#    轉換一定 ALERT（不看冷卻期）；同一輪 incident 持續中的「重複提醒」
+#    才套用冷卻期。
+# 2. **改用 monotonic clock**（codex MEDIUM）：視窗淘汰／冷卻判斷全部
+#    只用相對時間差，跟 `time.time()`（wall clock，可能因系統時間校正/
+#    NTP 而跳動甚至倒退）無關，理當改用 `time.monotonic()`（不受牆鐘
+#    調整影響，保證單調不減）——wall clock 倒撥會讓已存的舊 timestamp
+#    「看起來還沒過期」（永遠清不掉）或讓冷卻期差值算出負數（等同永久
+#    壓下 ALERT，最壞情境沒 log 出現）。
+# 3. **計數器加硬上限**（harper LOW）：`_dedup_prep_failure_timestamps`
+#    改用 `collections.deque(maxlen=_DEDUP_PREP_FAILURE_MAX_TRACKED)`——
+#    持續性回歸＋高流量下，即使有滑動視窗淘汰，單一視窗內還是可能瞬間
+#    塞進遠超過告警門檻的筆數；deque 的 FIFO 特性（append 順序＝時間
+#    遞增序，因為寫入永遠在同一把鎖內序列化）讓淘汰可以用 `popleft()`
+#    只丟真正過期的最舊項（早停，不必整份重建），`maxlen` 則是最後一道
+#    硬上限，超過就自動丟最舊的——反正早就已經 ALERT 過，多丟幾筆最舊
+#    的不影響「這一輪有沒有 degraded」的判斷。
 # ---------------------------------------------------------------------------
 _DEDUP_PREP_FAILURE_WINDOW_SEC = 300.0  # 5 分鐘滑動視窗
 _DEDUP_PREP_FAILURE_ALERT_THRESHOLD = 5  # 視窗內達此次數 → 升級 ALERT
-_DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC = 300.0  # 同一輪degraded期間至多每 5 分鐘噴一次 ALERT
+_DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC = 300.0  # 同一輪 incident 內至多每 5 分鐘補一次提醒 ALERT
+_DEDUP_PREP_FAILURE_MAX_TRACKED = 1000  # timestamps 硬上限，防止極端高流量下單一視窗內無界成長
 _dedup_prep_failure_lock = threading.Lock()
-_dedup_prep_failure_timestamps: list[float] = []
-_dedup_prep_failure_last_alert_ts = 0.0  # 上次噴 ALERT 的時間（0.0 = 從未噴過）
+_dedup_prep_failure_timestamps: "collections.deque[float]" = collections.deque(
+    maxlen=_DEDUP_PREP_FAILURE_MAX_TRACKED
+)
+_dedup_prep_failure_last_alert_ts = 0.0  # 上次噴 ALERT 的（monotonic）時間，0.0 = 從未噴過
+_dedup_prep_failure_incident_active = False  # 目前是否正處在「已 ALERT 過的 degraded 事故」中
 
 
 def _record_dedup_prep_failure(context: str) -> None:
     """記一筆 dedup coin_key／dedup key 準備失敗（fail-open），頻率達門檻
-    時升級成醒目 `ALERT:` 前綴的 `ERROR` 級 log（同一輪 degraded 期間
-    有冷卻期，見上方模組註解，避免持續性回歸把 log 洗版）。
+    時升級成醒目 `ALERT:` 前綴的 `ERROR` 級 log。
 
     `context` 是給人看的簡短描述（`"coin_key"`／`"dedup_key"`），只用來讓
     ALERT 訊息說明是哪一段準備失敗，不影響計數——兩段共用同一個滑動視窗，
@@ -3950,23 +3978,39 @@ def _record_dedup_prep_failure(context: str) -> None:
     風險，理當合併判斷頻率。呼叫端（SSR `/analyze` 路由的兩個
     `except Exception`）已經各自記過完整 traceback（`logging.warning(...,
     exc_info=True)`），這裡只負責頻率判斷跟 ALERT 升級 log，不重複記錄
-    本體訊息。"""
-    global _dedup_prep_failure_last_alert_ts
-    now = time.time()
+    本體訊息。
+
+    ALERT 觸發規則（見上方模組註解 #1）：healthy→degraded 轉換一定 ALERT
+    （不看冷卻期）；同一輪 incident 持續中的後續失敗才套用冷卻期
+    （`_DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC`），避免持續性回歸把 log
+    洗版。計數掉回門檻以下＝incident 結束，下一次再惡化視為新事故。"""
+    global _dedup_prep_failure_last_alert_ts, _dedup_prep_failure_incident_active
+    now = time.monotonic()
     should_alert = False
     with _dedup_prep_failure_lock:
-        _dedup_prep_failure_timestamps[:] = [
-            ts for ts in _dedup_prep_failure_timestamps
-            if now - ts < _DEDUP_PREP_FAILURE_WINDOW_SEC
-        ]
+        while (
+            _dedup_prep_failure_timestamps
+            and now - _dedup_prep_failure_timestamps[0] >= _DEDUP_PREP_FAILURE_WINDOW_SEC
+        ):
+            _dedup_prep_failure_timestamps.popleft()
         _dedup_prep_failure_timestamps.append(now)
         count = len(_dedup_prep_failure_timestamps)
-        if (
-            count >= _DEDUP_PREP_FAILURE_ALERT_THRESHOLD
-            and now - _dedup_prep_failure_last_alert_ts >= _DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC
-        ):
-            should_alert = True
-            _dedup_prep_failure_last_alert_ts = now
+        degraded_now = count >= _DEDUP_PREP_FAILURE_ALERT_THRESHOLD
+        if degraded_now:
+            if not _dedup_prep_failure_incident_active:
+                # healthy → degraded：新一輪 incident 開始，一定要 ALERT，
+                # 不受冷卻期影響（冷卻期只節流「同一輪 incident 內」的
+                # 重複提醒）。
+                should_alert = True
+                _dedup_prep_failure_incident_active = True
+                _dedup_prep_failure_last_alert_ts = now
+            elif now - _dedup_prep_failure_last_alert_ts >= _DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC:
+                should_alert = True
+                _dedup_prep_failure_last_alert_ts = now
+        else:
+            # 計數已掉回門檻以下：這一輪 incident 結束，重置告警資格，
+            # 下一次 healthy→degraded 轉換要能立刻 ALERT。
+            _dedup_prep_failure_incident_active = False
     if should_alert:
         logging.error(
             "ALERT: TrustForge dedup fail-open 頻率過高（%s 準備失敗，"
@@ -3983,8 +4027,10 @@ def _dedup_prep_failure_health() -> dict:
     自己再算一次「扣掉視窗外過期紀錄」的即時次數，避免長時間沒有新失敗
     時，讀到的還是上次呼叫 `_record_dedup_prep_failure` 時剪過但已經又
     過期的陳舊次數（滑動視窗的剪除動作只在寫入時發生，讀取端需要自己
-    現算一次「以當下時間為準」的視圖）。"""
-    now = time.time()
+    現算一次「以當下時間為準」的視圖）。這裡的 `degraded` 是「當下真實
+    計數是否達門檻」，不受 ALERT log 冷卻期影響——冷卻期只節流 log，
+    監控端要看即時真實狀態一律讀這個欄位，不要用 log 頻率推斷。"""
+    now = time.monotonic()
     with _dedup_prep_failure_lock:
         count = sum(
             1 for ts in _dedup_prep_failure_timestamps
