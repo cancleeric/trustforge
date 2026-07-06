@@ -6,6 +6,12 @@ COPY pyproject.toml ./
 COPY src ./src
 COPY data ./data
 COPY demo ./demo
+# 第三輪 AI 友善：`GET /api/openapi.yaml`／`GET /llms.txt` 是純讀檔回傳（見
+# `src/trustforge/web.py::_handle_openapi_spec`/`_handle_llms_txt`），容器內
+# 必須帶這兩份檔案，否則兩端點在部署環境會 404。只帶 `docs/api`（實際被
+# serve 的部分），不帶整棵 `docs/`（archive/plans/qa 等內部規劃文件不對外）。
+COPY docs/api ./docs/api
+COPY llms.txt ./llms.txt
 RUN pip install --no-cache-dir -e .
 
 ENV PORT=8080

@@ -267,10 +267,17 @@ cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
 # scripts/：排程 fetcher（fetch_scheduler.py）跟著一起打包，否則 systemd timer
 # 在 EC2 上會找不到檔案（見下方 fetch-scheduler.service ExecStart）。
 cp -r scripts "$B/scripts"
+# 第三輪 AI 友善：`GET /api/openapi.yaml`／`GET /llms.txt` 是純讀檔回傳（見
+# `src/trustforge/web.py::_handle_openapi_spec`/`_handle_llms_txt`，路徑解析
+# 靠 systemd unit 已設的 `TRUSTFORGE_HOME=/opt/trustforge`），這兩份檔案不
+# 隨套件走，需另外打包，否則兩端點在 EC2 生產環境會 404。只帶 `docs/api`
+# （實際被 serve 的部分），不帶整棵 `docs/`（archive/plans/qa 等內部規劃
+# 文件不對外）。
+mkdir -p "$B/docs"; cp -r docs/api "$B/docs/api"; cp llms.txt "$B/llms.txt"
 GIT_VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
 printf 'VERSION = "%s"\n' "$GIT_VER" > "$B/trustforge/_version.py"
 echo "[ec2] 版號 = $GIT_VER"
-( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts -x '*/__pycache__/*' ); rm -rf "$B"
+( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts docs llms.txt -x '*/__pycache__/*' ); rm -rf "$B"
 
 aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
   aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \

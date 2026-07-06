@@ -1,0 +1,1096 @@
+openapi: 3.1.0
+info:
+  title: TrustForge JSON API
+  version: "0.2.0"
+  summary: >-
+    加密市場分析 AI Agent 的信任情報 API——多源資料 + 可解釋的信任評分，
+    供人與 AI agent 兩種使用者共同消費同一份結構化契約。
+  description: |
+    # 這份文件是什麼（What this is）
+
+    TrustForge 對某個幣種（`BTC`/`ETH`/`SOL`/`BNB`/`XRP`）的市場問題，彙整多個
+    獨立資料來源（價格 OHLCV、鏈上、監管、交易所、新聞、社群、CoinGecko 即時
+    報價/情緒/開發活動），逐筆計算「信任分」（信譽 × 0.5 ＋ 佐證 × 0.25 ＋
+    時效 × 0.15 − 操縱 × 0.40），再彙整成結構化報告。這份 spec 是本 repo
+    `src/trustforge/web.py` 內 `_handle_api_*` 系列 handler 的**逐一對照**
+    （非另案文件轉抄——AWS-ARCHITECTURE.md 端點表過去曾三處與實際程式碼不符，
+    被 codex 抓出；本檔每個欄位都對照過真實回應）。
+
+    This document is a field-by-field mirror of the actual handler code in
+    `src/trustforge/web.py` (`_handle_api_health` / `_handle_api_status` /
+    `_handle_api_costs` / `_handle_api_overview` / `_handle_api_history` /
+    `_handle_api_analyze`) — not transcribed from prose docs, which have
+    previously drifted from the real responses.
+
+    # 誠實設計鐵律（Honesty invariants — read this before parsing anything）
+
+    1. **缺鍵＝未評估，不是零／安全（Missing key means "not evaluated", never
+       zero or safe）。** 本 API 多處欄位在「沒有算過」時**完全省略該鍵**，
+       而不是填 `0`、`null` 佔位假裝「查過、結果是低風險/低分」。呼叫端
+       （尤其 AI agent）**必須**把「鍵不存在」與「鍵存在但值為 0」視為兩種
+       不同語意，不可用 `.get(key, 0)` 這種預設值語意讀取後直接拿去做風險
+       判斷。典型例子：
+       - `trust_radar.<kind>.trust`：該維度完全沒有證據時是 `null`
+         （`has_data: false`），不是 `0`（`0` 代表「有算過、分數就是 0」，
+         語意完全不同）。
+       - `trust_components_aggregate`：本輪所有證據都沒有 `trust_components`
+         時整個回傳 `{}`（空物件），不是四個鍵各自填 `0`。
+       - `/api/overview` 的 `coins[].manip_score` / `manip_score_mean`：
+         只有在該幣本輪快照的 evidence 內至少一筆算出操縱分項時才會出現這
+         兩個鍵；完全缺席時**不代表「無操縱風險」**，而是「這輪快照沒有可
+         用的操縱訊號」（例如尚未排程過、或該輪 evidence 為空）——UI／agent
+         看到鍵不存在時必須顯示「未評估」，不可預設安全。
+       - `coins[].reputation_trace`：只有在 evidence 帶有動態信譽 trace 時
+         才出現，缺席不代表信譽為 0 或未追蹤。
+
+    2. **`manip_score`（worst-case, `max()`）才是操縱風險的 primary 訊號，
+       不是 `manip_score_mean`。** 15 筆證據里只要有 1 筆已確認操縱
+       （`manipulation=1.0`），平均會被稀釋到看起来很低——這是刻意設計：
+       信任產品的操縱風險徽章必須滿足「只要出現一筆已確認操縱，就不可能
+       顯示低風險」這個不變量，只有 `max()` 能在證據筆數/來源分布任意變動
+       下維持這個不變量。`manip_score_mean` 純粹是輔助判讀（"這批證據平均
+       而言如何"），**不參與**任何風險分級判斷，UI/agent 若只能顯示一個
+       數字，一律顯示 `manip_score`。
+
+    3. **信任分是校準式打分，不是統計承諾（Calibration, not a statistical
+       promise）。** `report.calibrated_confidence` 是簡化版分位數校準
+       （quantile calibration），**不是**嚴謹 conformal prediction 的覆蓋率
+       （coverage）承諾——不可把它包裝或轉述成任何形式的正確度百分比或
+       「一定準」之類的宣稱。信任分/資訊完整度只反映「本輪可取得的多源
+       證據，依既定公式加權後的相對強弱」，**不是**投資建議、不是對未來
+       價格走勢的精準度承諾。
+
+    4. **三態決策（decision_state）：`abstain` / `low_confidence` /
+       `normal`。** `report.decision_state` 由
+       `agent.orchestrator.build_report` 依下列規則之一決定（皆為即時計算
+       的結構化欄位，非事後貼標）：
+       - `abstain`：`calibrated_confidence < 0.35` **或**去重後獨立支撐
+         來源數 `< 2`——代表「證據不足，刻意不給方向性結論」，`report.
+         direction` 固定為 `"不明"`，`market_judgment` 是中性的「資料不足」
+         陳述，不含任何偏多/偏空字眼。
+       - `low_confidence`：非 abstain 且 `calibrated_confidence < 0.5`——
+         有給方向性判斷，但信心偏低。
+       - `normal`：以上皆非——證據強度足以支持一個有信心的方向性判斷。
+       任何舊格式資料（歷史快照/測試手造 Report）缺這個鍵時，讀取端一律
+       正規化為 `"normal"`（向後相容 fallback，不代表真的是高信心，只是
+       「無法判斷三態、假設是正常態」的保守處理）。
+
+    5. **`{ok, data, error}` 統一信封。** 所有 `/api/*` 端點成功一律
+       `{"ok": true, "data": {...}}`；失敗一律
+       `{"ok": false, "error": {"code": "...", "message": "..."}}`，`message`
+       是通用中文訊息（刻意不透傳例外 stacktrace / DynamoDB 錯誤細節，避免
+       洩露內部依賴資訊給大量掃描/爬取的請求）。同源、不開 CORS、全部唯讀。
+
+    6. **Rate limit 語意（見各端點 `429` 回應）：** 依端點分成三組獨立
+       per-IP 滑動視窗 bucket，超過門檻回 `429` + `{"code":"rate_limited"}`，
+       訊息內含視窗秒數但**不含** `Retry-After` header（純文字訊息裡的秒數
+       即為建議重試等待時間）：
+       - `/api/status` / `/api/costs` / `/api/overview` / `/api/history`：
+         30 秒視窗內每 IP 最多 10 次。
+       - `/api/analyze`：依當次生效模式決定——`live=1`（真 Bedrock）走
+         60 秒視窗內每 IP 最多 5 次的緊門檻；預設「真資料·$0」模式
+         （未帶 `live`/`sample` 參數即生效）走 60 秒視窗內每 IP 最多 60 次
+         的寬鬆門檻（純讀快取/連接器，不打 LLM，成本為 $0）。
+       - `/api/health`：不設限流（零 I/O，無任何 cache/連接器讀取）。
+
+    7. **依賴失敗 → `502`，不是悄悄降級成 `200` 的假資料。** 除
+       `/api/health` 外的所有端點，其底層 cache/帳本讀取若真的失敗（非
+       「查無資料」的合法 miss），一律回 `502` +
+       `{"code":"upstream_error"}`，不會回傳看起來正常但其實是佔位/降級
+       的 `200`。唯一例外是 `/api/status` 的 primary→fallback 降級：primary
+       backend（DynamoDB）失敗但本地 `JsonCacheBackend` fallback 讀得到時，
+       仍回 `200`，但會誠實回報 `degraded: true` /
+       `primary_connected: false`（見 `StatusData` schema），不會假裝
+       primary 正常。
+
+    # 給 AI agent 的最短路徑（TL;DR for agents）
+
+    - 先看 `/llms.txt`（一頁式指南，繁中+英文對照）。
+    - 想要一句話分析：`GET /api/analyze?coin=BTC&type=multi_source&q=...`。
+    - 只看信任分/決策狀態就好：讀 `data.report.calibrated_confidence` +
+      `data.report.decision_state`，不要只看 `data.report.confidence`
+      （那是未校準裸均值，僅供對照）。
+    - 任何欄位缺席 → 視為「未評估」，不要假設為 0 或安全。
+
+externalDocs:
+  description: 一頁式 agent 指南（繁中+英文對照），涵蓋本文件濃縮版重點
+  url: /llms.txt
+
+servers:
+  - url: /
+    description: 同源部署（SSR python 直接對外，或 nginx 反代 /api/* 給 python）
+
+tags:
+  - name: meta
+    description: 健康檢查、自我描述
+  - name: analysis
+    description: 核心分析端點
+  - name: observability
+    description: 狀態/成本/總覽/歷史等唯讀觀測端點
+
+paths:
+  /api/health:
+    get:
+      tags: [meta]
+      operationId: getHealth
+      summary: JSON 版健康檢查（零 I/O，無 rate limit）
+      description: |
+        比照既有純文字 `/healthz` 之外，補一個 JSON 版本供偏好 JSON 回應格式
+        的健康檢查探針使用。本端點沒有任何 backend/ledger 依賴，理論上不會
+        回 502，但仍統一包一層防禦邊界。
+      responses:
+        "200":
+          description: 服務存活
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  status: ok
+                  version: dev
+                  uptime_seconds: 123.456
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/status:
+    get:
+      tags: [observability]
+      operationId: getStatus
+      summary: 連接器健康 / 資料鮮度 / 版本 / uptime（不含成本明細，見 /api/costs）
+      description: |
+        比 SSR `/status` 頁更保守：cache backend 探測失敗時**不**回傳原始
+        例外訊息，只回通用訊息（機器可讀 API 更容易被大量掃描，不洩露
+        DynamoDB 錯誤細節）。
+
+        `cache_backend.degraded`／`primary_connected`／`active_backend`：
+        primary（DynamoDB）與本地 `JsonCacheBackend` fallback 之間的降級語意
+        ——fallback 成功仍回 `200`，但如實標記本次回應是降級模式的結果，
+        不會無條件宣稱 primary 連線正常。
+      parameters: []
+      responses:
+        "200":
+          description: 狀態快照（可能為降級模式，見 `cache_backend.degraded`）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/StatusData"
+              example:
+                ok: true
+                data:
+                  version: dev
+                  uptime_seconds: 12.3
+                  bedrock_capable: false
+                  live_token_set: false
+                  cache_backend:
+                    name: JsonCacheBackend
+                    connected: true
+                    primary_connected: true
+                    active_backend: JsonCacheBackend
+                    degraded: false
+                  freshness:
+                    fresh: 0
+                    stale: 0
+                    missing: 115
+                    entries:
+                      - source: alternative-me-fng
+                        coin: BTC
+                        status: missing
+                        fetched_at: null
+                        age_seconds: null
+                  dedup:
+                    healthy: true
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/costs:
+    get:
+      tags: [observability]
+      operationId: getCosts
+      summary: 成本帳本（累計花費 + 依 model 分組明細，有界摘要）
+      description: |
+        直接重用既有帳本 `Ledger.summary()`（20 秒 TTL + single-flight
+        快取，與 `/status`／`/costs` 頁共用同一份真實累計數字）。
+
+        `run_count` 才是帳本真實總筆數；`runs` 只含最近 50 筆
+        （`ledger.SUMMARY_RECENT_RUNS_CAP`）——**不可**用 `runs.length`
+        估算總筆數，帳本 >50 筆時會低估。
+      responses:
+        "200":
+          description: 成本摘要
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LedgerSummary"
+              example:
+                ok: true
+                data:
+                  total_cost_usd: 0.0234
+                  by_model:
+                    au.anthropic.claude-haiku-4-5-20251001-v1:0: 0.0234
+                  by_model_detail:
+                    au.anthropic.claude-haiku-4-5-20251001-v1:0:
+                      cost_usd: 0.0234
+                      tokens_in: 1200
+                      tokens_out: 800
+                  run_count: 3
+                  runs: []
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/overview:
+    get:
+      tags: [observability]
+      operationId: getOverview
+      summary: 多幣總覽（讀既有排程快照，不觸發任何連接器/Bedrock 呼叫）
+      description: |
+        逐幣讀 `scripts/fetch_scheduler.py --snapshot` 既有寫入的
+        `__trust_snapshot__:{coin}` 最新一筆快照，回傳結構化 JSON——刻意
+        不是首頁用的預先渲染 HTML blob。某幣尚未排程寫過快照時，該幣**完全
+        不出現**在 `coins` 陣列裡（不是補一筆空物件）。
+      responses:
+        "200":
+          description: 總覽（`coins` 可能為空陣列，若尚無任何幣排程過快照）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [coins]
+                        properties:
+                          coins:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/OverviewCoinSnapshot"
+              example:
+                ok: true
+                data:
+                  coins:
+                    - coin: BTC
+                      trust_score: 0.625
+                      direction: 不明
+                      calibrated_confidence: 0.4188
+                      decision_state: abstain
+                      generated_at: "2026-07-06T10:19:03Z"
+                      fetched_at_epoch: 1751800743
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/history:
+    get:
+      tags: [observability]
+      operationId: getHistory
+      summary: 單幣 PIT（point-in-time）按日信任序列
+      description: |
+        讀既有排程按日寫入的快照序列，**只讀不寫**、不觸發任何連接器/
+        Bedrock 呼叫。某天沒有排程寫過快照（合法 miss）直接跳過，不補假值
+        ——`history` 陣列長度可能小於 `days`。
+      parameters:
+        - name: coin
+          in: query
+          required: false
+          description: 幣種代碼，須為官方幣種池其中之一，大小寫不敏感（內部會轉大寫）
+          schema:
+            type: string
+            enum: [BTC, ETH, SOL, BNB, XRP]
+        - name: days
+          in: query
+          required: false
+          description: 回看天數，含 `end_date`（預設今天 UTC）當天
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 90
+            default: 30
+      responses:
+        "200":
+          description: 按日信任序列（由舊到新排序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [coin, days, history]
+                        properties:
+                          coin:
+                            type: string
+                          days:
+                            type: integer
+                          history:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/HistoryEntry"
+              example:
+                ok: true
+                data:
+                  coin: BTC
+                  days: 3
+                  history: []
+        "400":
+          description: |
+            `coin` 不在官方幣種池，或 `days` 不是 `[1, 90]` 之間的正整數。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: bad_request
+                  message: "幣種須為以下其中之一：BTC、ETH、SOL、BNB、XRP"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/analyze:
+    get:
+      tags: [analysis]
+      operationId: getAnalyze
+      summary: 核心多源分析（`/analyze.json` 既有輸出的擴充版，統一信封）
+      description: |
+        完全重用既有 `_do_analyze`/`_do_comparison`（含其內建限流與驗證），
+        不重寫分析邏輯，額外補上：雷達（`trust_radar`）／trust_components
+        聚合（`trust_components_aggregate`）／price_provenance——三者輸入
+        都已在既有 `evidence` 陣列裡，純渲染層再彙總一次，不多打任何連接器/
+        Bedrock 呼叫。
+
+        **In-flight dedup（single-flight coalescing）**：同一組
+        `(type, coin[,coin2], q, live/real/token)` 參數短時間內的並行/連續
+        重複請求，只會有一個 leader 真的呼叫底層 pipeline，其餘等待共用同
+        一份真實結果——但**不含**任何 post-completion 結果快取，緊接著的
+        下一次請求仍會拿到最新資料，不會 replay 過時分析結果。
+
+        **三檔模式**（`data_mode`/`llm_mode` 解耦）：
+        1. 真資料·$0（**預設**，未帶任何 mode 參數即生效）：真連接器抓真
+           資料，Bedrock 關閉，$0，60 秒視窗每 IP 最多 60 次。
+        2. 離線示範沙盒（`?sample=1`，opt-in）：樣本資料 + Bedrock stub，
+           $0，未設 AWS 也能跑。
+        3. 真 Bedrock（`?live=1&token=<TOKEN>`，經 `X-Live-Token` header 或
+           已棄用的 `token` query 帶入）：需伺服器已設
+           `TRUSTFORGE_LIVE_TOKEN` 且 token 比對正確（`hmac.compare_digest`），
+           60 秒視窗每 IP 最多 5 次緊門檻。`live` 優先於其餘檔位。
+      parameters:
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [multi_source, hypothesis, comparison]
+            default: multi_source
+        - name: coin
+          in: query
+          required: false
+          description: |
+            單幣題型：幣種代碼（預設 `BTC`，須在官方幣種池）。比較題型：可用
+            `coin=A,B` 一次帶兩個幣，或搭配 `coin2` 分開帶。
+          schema:
+            type: string
+            default: BTC
+        - name: coin2
+          in: query
+          required: false
+          description: 比較分析的第二個幣種（`type=comparison` 時使用，須與 `coin` 不同）
+          schema:
+            type: string
+        - name: q
+          in: query
+          required: false
+          description: 分析問題，最多 1000 字元；未帶時使用內建 date-agnostic 預設問句
+          schema:
+            type: string
+            maxLength: 1000
+        - name: sample
+          in: query
+          required: false
+          description: "`1` 進入離線示範沙盒（見上方三檔模式說明）"
+          schema:
+            type: string
+            enum: ["0", "1"]
+            default: "0"
+        - name: live
+          in: query
+          required: false
+          description: "`1` 搭配有效 token 進入真 Bedrock 模式"
+          schema:
+            type: string
+            enum: ["0", "1"]
+            default: "0"
+        - name: token
+          in: query
+          required: false
+          deprecated: true
+          description: |
+            已棄用——改用 `X-Live-Token` request header。仍相容接受，但會被
+            記一筆 deprecation warning log。
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            單幣題型（`multi_source`/`hypothesis`）回 `AnalyzeSingleData`；
+            `type=comparison` 回 `AnalyzeComparisonData`（欄位皆帶 `_a`/`_b`
+            後綴，`execution_log` 除外，兩幣共用同一份 log）。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/OkEnvelope"
+                      - type: object
+                        properties:
+                          data:
+                            $ref: "#/components/schemas/AnalyzeSingleData"
+                  - allOf:
+                      - $ref: "#/components/schemas/OkEnvelope"
+                      - type: object
+                        properties:
+                          data:
+                            $ref: "#/components/schemas/AnalyzeComparisonData"
+        "400":
+          description: |
+            請求驗證失敗（純參數驗證，零依賴/連接器呼叫之前即擋下）：`type`
+            非法字面值／`q` 超過 1000 字元／`coin` 不在官方幣種池／比較題型
+            未選滿兩個不同的幣種。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: bad_request
+                  message: "問題長度不能超過 1000 字元（目前 1001 字元）"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: |
+            In-flight dedup follower 等待逾時（`_AnalyzeDedupTimeout`）——
+            leader 尚未算完，可重試，交給呼叫端自行重送，**不會**退化成自己
+            真的重跑一次分析。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: timeout
+                  message: "分析仍在處理中，請稍後重試"
+        "502":
+          description: |
+            內部連接器/Bedrock/pipeline 依賴失敗（統一收斂，不再按例外型別
+            分流成 400——上游/依賴失敗不是使用者輸入錯誤）。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: upstream_error
+                  message: "分析服務暫時無法使用，請稍後再試"
+
+  /api/openapi.yaml:
+    get:
+      tags: [meta]
+      operationId: getOpenApiSpec
+      summary: 本文件本身（純 stdlib 讀檔回傳，永遠反映當下部署的 repo 內容）
+      responses:
+        "200":
+          description: OpenAPI 3.1 spec（YAML）
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  schemas:
+    OkEnvelope:
+      type: object
+      required: [ok, data]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        data:
+          description: 端點各自定義的 payload，見各路徑的 `data` schema
+          type: object
+
+    ErrEnvelope:
+      type: object
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                機器可讀錯誤代碼，本 API 目前只會出現：`bad_request` /
+                `rate_limited` / `timeout` / `upstream_error`
+              enum: [bad_request, rate_limited, timeout, upstream_error]
+            message:
+              type: string
+              description: 通用中文訊息，刻意不透傳例外 stacktrace/內部依賴細節
+
+    StatusData:
+      type: object
+      required:
+        - version
+        - uptime_seconds
+        - bedrock_capable
+        - live_token_set
+        - cache_backend
+        - freshness
+        - dedup
+      properties:
+        version:
+          type: string
+        uptime_seconds:
+          type: number
+        bedrock_capable:
+          type: boolean
+        live_token_set:
+          type: boolean
+        cache_backend:
+          type: object
+          required: [name, connected, primary_connected, active_backend, degraded]
+          properties:
+            name:
+              type: string
+              description: primary backend 類名（例如 `DynamoDBCache`/`JsonCacheBackend`）
+            connected:
+              type: boolean
+              description: 與 `primary_connected` 語意一致（收斂後的舊欄位，不再無條件寫 true）
+            primary_connected:
+              type: boolean
+              description: primary backend 是否真的親自答對（沒有任何一格靠 fallback）
+            active_backend:
+              type: string
+              description: 這次請求實際拿資料的 backend 類名；degraded 時等於 `JsonCacheBackend`
+            degraded:
+              type: boolean
+              description: "`primary_connected` 的反面：true 代表這次回應是降級模式的結果"
+        freshness:
+          type: object
+          required: [fresh, stale, missing, entries]
+          properties:
+            fresh:
+              type: integer
+            stale:
+              type: integer
+            missing:
+              type: integer
+            entries:
+              type: array
+              items:
+                type: object
+                required: [source, coin, status]
+                properties:
+                  source:
+                    type: string
+                  coin:
+                    type: string
+                  status:
+                    type: string
+                    enum: [fresh, stale, missing]
+                  fetched_at:
+                    type: [string, "null"]
+                  age_seconds:
+                    type: [number, "null"]
+        dedup:
+          type: object
+          description: dedup coin_key 準備失敗（fail-open）的滑動視窗健康狀態
+        docs:
+          type: object
+          description: |
+            AI-friendliness 指引指標，指向本 spec 與 `/llms.txt`（純附加欄位，
+            不影響既有讀取端）。
+          properties:
+            openapi:
+              type: string
+              const: /api/openapi.yaml
+            llms_txt:
+              type: string
+              const: /llms.txt
+
+    LedgerSummary:
+      type: object
+      required: [total_cost_usd, by_model, by_model_detail, run_count, runs]
+      properties:
+        total_cost_usd:
+          type: number
+          description: 全部歷史紀錄的累計花費（USD），不受 `runs` 有界截斷影響
+        by_model:
+          type: object
+          description: model id → 累計花費（USD），涵蓋全部歷史紀錄
+          additionalProperties:
+            type: number
+        by_model_detail:
+          type: object
+          description: model id → {cost_usd, tokens_in, tokens_out}，涵蓋全部歷史紀錄
+          additionalProperties:
+            type: object
+            required: [cost_usd, tokens_in, tokens_out]
+            properties:
+              cost_usd:
+                type: number
+              tokens_in:
+                type: integer
+              tokens_out:
+                type: integer
+        run_count:
+          type: integer
+          description: 帳本真實總筆數（不受下方 `runs` 有界截斷影響）
+        runs:
+          type: array
+          description: |
+            只含最近 50 筆（`ledger.SUMMARY_RECENT_RUNS_CAP`），**不可**用
+            `runs.length` 估算總筆數
+          items:
+            type: object
+
+    TrustRadarEntry:
+      type: object
+      required: [label, has_data, trust, n_sources, n_evidence, single_source]
+      properties:
+        label:
+          type: string
+          description: 中文維度標籤
+        has_data:
+          type: boolean
+          description: 本次分析是否有任何證據落在這個維度
+        trust:
+          type: [number, "null"]
+          description: |
+            該維度信任分（同 kind 證據的 `trust` 算術平均）。`has_data=false`
+            時**恆為 `null`**——不用 `0` 冒充「有算過、分數低」。
+        n_sources:
+          type: integer
+          description: 去重後的獨立來源數（`Evidence.source` 計）
+        n_evidence:
+          type: integer
+        single_source:
+          type: [boolean, "null"]
+          description: "`n_sources <= 1`；`has_data=false` 時為 `null`"
+
+    TrustComponentsAggregate:
+      type: object
+      description: |
+        對 evidence 逐筆 `trust_components` 取算術平均，供顯示層呈現整體
+        分項分布。**本輪所有 evidence 都沒有 `trust_components` 時，回傳空
+        物件 `{}`**（不是四個鍵各自填 `0`）。
+      properties:
+        reputation:
+          type: number
+        corroboration:
+          type: number
+        recency:
+          type: number
+        manipulation:
+          type: number
+          description: |
+            本輪 evidence 的操縱分項**平均值**——注意這是輔助判讀值，不是
+            worst-case primary 訊號（primary 訊號見 `/api/overview` 的
+            `manip_score`，此處聚合層目前無對應 worst-case 欄位）。
+
+    PriceProvenance:
+      type: object
+      description: |
+        任一來源本輪未取得（cache miss / 429 等）該 key 直接不存在，`ohlcv`／
+        `live` 兩者皆缺時回空物件 `{}`。
+      properties:
+        ohlcv:
+          $ref: "#/components/schemas/PriceProvenanceEntry"
+        live:
+          $ref: "#/components/schemas/PriceProvenanceEntry"
+
+    PriceProvenanceEntry:
+      type: object
+      required: [content_reference, fetched_at, source_url]
+      properties:
+        content_reference:
+          type: string
+        fetched_at:
+          type: string
+        source_url:
+          type: string
+
+    Evidence:
+      type: object
+      required:
+        - source
+        - fetched_at
+        - content_reference
+        - related_claim
+        - source_url
+        - kind
+        - trust
+        - trust_components
+        - flags
+        - info_flags
+      properties:
+        source:
+          type: string
+        fetched_at:
+          type: string
+          description: ISO8601 UTC
+        content_reference:
+          type: string
+        related_claim:
+          type: string
+        source_url:
+          type: string
+        kind:
+          type: string
+          description: price/onchain/regulatory/hoyabit/news/social/price_live/sentiment/dev_activity
+        trust:
+          type: number
+          description: 該筆證據的最終信任分（信譽×0.5 + 佐證×0.25 + 時效×0.15 − 操縱×0.40）
+        trust_components:
+          type: object
+          description: |
+            至少含 `reputation`/`corroboration`/`recency`/`manipulation` 四項
+            分數；動態信譽開啟時另補
+            `reputation_prior`/`reputation_final`/`reputation_agree_n`/
+            `reputation_contradict_n`/`reputation_iterations_run`（可能缺席，
+            視當輪是否啟用動態信譽而定，不代表值為 0）。
+        flags:
+          type: array
+          items:
+            type: string
+          description: |
+            **已判定**操縱關鍵詞命中清單，非空代表這筆證據已反映在
+            `trust_components.manipulation` 扣分裡。
+        info_flags:
+          type: array
+          items:
+            type: string
+          description: |
+            informational-only 中性提示（例如多源文字高度相似）——**不代表
+            已判定操縱、不影響 trust 分數**，純供人工判讀，不可等同 `flags`。
+
+    BasisItem:
+      type: object
+      required: [claim, explanation, evidence_idx]
+      properties:
+        claim:
+          type: string
+        explanation:
+          type: string
+        evidence_idx:
+          type: array
+          items:
+            type: integer
+
+    Report:
+      type: object
+      required:
+        - coin
+        - question_type
+        - question
+        - market_judgment
+        - facts
+        - inferences
+        - key_basis
+        - confidence
+        - limits
+        - could_flip
+        - contrarian
+        - generated_at
+        - direction
+        - cross_source_signal
+        - calibrated_confidence
+        - decision_state
+      properties:
+        coin:
+          type: string
+        question_type:
+          type: string
+          enum: [multi_source, hypothesis, comparison]
+        question:
+          type: string
+        market_judgment:
+          type: string
+        facts:
+          type: array
+          items:
+            type: string
+          description: 事實層（客觀、高信任）
+        inferences:
+          type: array
+          items:
+            type: string
+          description: 推論層（Agent 推理，非外部承諾）
+        key_basis:
+          type: array
+          items:
+            $ref: "#/components/schemas/BasisItem"
+        confidence:
+          type: number
+          description: |
+            裸均值信任分（未校準），僅供對照——顯示/決策一律以
+            `calibrated_confidence` + `decision_state` 為準，不要單獨用這個
+            欄位判斷風險等級。
+        limits:
+          type: array
+          items:
+            type: string
+          description: 已知限制／資料不足說明
+        could_flip:
+          type: array
+          items:
+            type: string
+          description: 可能推翻結論的條件
+        contrarian:
+          type: array
+          items:
+            type: string
+          description: 反方／低信任證據（已標記，未納入主結論）
+        generated_at:
+          type: string
+        direction:
+          type: string
+          description: "偏多/偏空/中性/不明；`decision_state=abstain` 時固定為「不明」"
+        cross_source_signal:
+          type: [object, "null"]
+          description: 跨源訊號背離/共識；無背離/無矛盾配對時為 `null`
+        calibrated_confidence:
+          type: number
+          description: |
+            校準後信心值（簡化版分位數校準，**非**嚴謹 conformal prediction
+            覆蓋率承諾，不可轉述成正確度百分比或「一定準」之類的宣稱）。
+        decision_state:
+          type: string
+          enum: [abstain, low_confidence, normal]
+          description: |
+            三態決策：`calibrated_confidence < 0.35` 或去重支撐來源數 `< 2`
+            → `abstain`；非 abstain 且 `calibrated_confidence < 0.5` →
+            `low_confidence`；其餘 → `normal`。缺鍵（舊格式資料）一律正規化
+            為 `normal`（保守 fallback，不代表真的高信心）。
+
+    AnalyzeSingleData:
+      type: object
+      required:
+        - version
+        - report
+        - evidence
+        - trust_radar
+        - trust_components_aggregate
+        - price_provenance
+        - execution_log
+      properties:
+        version:
+          type: string
+        report:
+          $ref: "#/components/schemas/Report"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/Evidence"
+        trust_radar:
+          type: object
+          description: |
+            鍵集合固定等於 9 個維度全集（price/onchain/regulatory/hoyabit/
+            news/social/price_live/sentiment/dev_activity），不受 evidence
+            內容影響
+          additionalProperties:
+            $ref: "#/components/schemas/TrustRadarEntry"
+        trust_components_aggregate:
+          $ref: "#/components/schemas/TrustComponentsAggregate"
+        price_provenance:
+          $ref: "#/components/schemas/PriceProvenance"
+        execution_log:
+          type: array
+          items:
+            type: object
+            required: [ts, elapsed_sec, tool, params, summary]
+            properties:
+              ts:
+                type: string
+              elapsed_sec:
+                type: number
+              tool:
+                type: string
+              params:
+                type: object
+              summary:
+                type: string
+
+    AnalyzeComparisonData:
+      type: object
+      required:
+        - version
+        - report_a
+        - evidence_a
+        - trust_radar_a
+        - trust_components_aggregate_a
+        - price_provenance_a
+        - report_b
+        - evidence_b
+        - trust_radar_b
+        - trust_components_aggregate_b
+        - price_provenance_b
+        - execution_log
+      properties:
+        version:
+          type: string
+        report_a:
+          $ref: "#/components/schemas/Report"
+        evidence_a:
+          type: array
+          items:
+            $ref: "#/components/schemas/Evidence"
+        trust_radar_a:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/TrustRadarEntry"
+        trust_components_aggregate_a:
+          $ref: "#/components/schemas/TrustComponentsAggregate"
+        price_provenance_a:
+          $ref: "#/components/schemas/PriceProvenance"
+        report_b:
+          $ref: "#/components/schemas/Report"
+        evidence_b:
+          type: array
+          items:
+            $ref: "#/components/schemas/Evidence"
+        trust_radar_b:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/TrustRadarEntry"
+        trust_components_aggregate_b:
+          $ref: "#/components/schemas/TrustComponentsAggregate"
+        price_provenance_b:
+          $ref: "#/components/schemas/PriceProvenance"
+        execution_log:
+          type: array
+          description: 兩幣共用同一份 execution log（同一次請求內先後跑 A、B 兩次分析）
+          items:
+            type: object
+
+    OverviewCoinSnapshot:
+      type: object
+      required: [coin, trust_score, direction, calibrated_confidence, decision_state, generated_at]
+      properties:
+        coin:
+          type: string
+        trust_score:
+          type: number
+          description: 對應 `Report.confidence`（裸均值，非校準值）
+        direction:
+          type: string
+        calibrated_confidence:
+          type: number
+        decision_state:
+          type: string
+          enum: [abstain, low_confidence, normal]
+        generated_at:
+          type: string
+        fetched_at_epoch:
+          type: [number, "null"]
+          description: 快照寫入時的 epoch 秒（cache entry 的 `fetched_at`）
+        reputation_trace:
+          type: object
+          description: |
+            **可能缺席**——只有 evidence 帶有動態信譽 trace 資料時才出現，
+            缺席不代表信譽為 0 或未追蹤。鍵為來源名稱，值含
+            `prior`/`final`/`delta`/`agree_n`/`contradict_n`。
+        manip_score:
+          type: number
+          description: |
+            **可能缺席**——只有本輪 evidence 至少一筆算出操縱分項時才出現。
+            worst-case（`max()`），是操縱風險判斷的 **primary** 訊號。缺席
+            **不代表無操縱風險**，代表本輪快照沒有可用的操縱訊號。
+        manip_score_mean:
+          type: number
+          description: |
+            **可能缺席**（與 `manip_score` 同時出現或同時缺席）——算術平均，
+            僅供輔助判讀，**不參與**任何風險分級。
+
+    HistoryEntry:
+      type: object
+      description: |
+        `_snapshot_dict()` 原樣內容（見 `OverviewCoinSnapshot`，欄位集合
+        完全相同）另外補上 `date` 欄位。
+      required: [date, coin, trust_score, direction, calibrated_confidence, decision_state, generated_at]
+      properties:
+        date:
+          type: string
+          description: "`YYYY-MM-DD`，該筆快照所屬日期（UTC）"
+        coin:
+          type: string
+        trust_score:
+          type: number
+        direction:
+          type: string
+        calibrated_confidence:
+          type: number
+        decision_state:
+          type: string
+          enum: [abstain, low_confidence, normal]
+        generated_at:
+          type: string
+        manip_score:
+          type: number
+          description: 可能缺席，語意同 `OverviewCoinSnapshot.manip_score`
+        manip_score_mean:
+          type: number
+          description: 可能缺席，語意同 `OverviewCoinSnapshot.manip_score_mean`
+
+  responses:
+    RateLimited:
+      description: |
+        per-IP 滑動視窗超過門檻（見本文件頂部「Rate limit 語意」），無
+        `Retry-After` header，秒數寫在 `error.message` 文字裡。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrEnvelope"
+          example:
+            ok: false
+            error:
+              code: rate_limited
+              message: "請求過於頻繁，請 30 秒後再試"
+
+    UpstreamError:
+      description: 底層 cache/帳本/連接器讀取真的失敗（非合法 miss），不透傳例外細節
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrEnvelope"
+          example:
+            ok: false
+            error:
+              code: upstream_error
+              message: "狀態資料暫時無法讀取，請稍後再試"
