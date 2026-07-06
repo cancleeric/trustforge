@@ -1,6 +1,7 @@
 """安全修復測試：token 驗證、per-IP 限流、q 長度上限、例外包裝。"""
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -914,3 +915,170 @@ def test_lambda_handler_prefers_x_live_token_header_over_query(monkeypatch):
     lambda_handler.handler(event)
 
     assert captured["token"] == "new-header-token"
+
+
+
+# ── #93（harper CISO PR #92 審查附帶條件 #1）：dedup fail-open 告警 ─────────
+# `web.py` 裡 SSR `/analyze`／`/analyze.json` 路由準備 dedup coin_key／
+# dedup key 失敗時 fail-open（放行不套用 dedup），先前只有
+# `logging.exception` 默默記一筆。這裡驗證：未達頻率門檻只記一般
+# `WARNING`；達到門檻（`_DEDUP_PREP_FAILURE_ALERT_THRESHOLD` 次／
+# `_DEDUP_PREP_FAILURE_WINDOW_SEC` 秒滑動視窗內）才升級成 `ALERT:`
+# 前綴的 `ERROR` log，且 `/api/status` 的 `dedup` 欄位如實反映
+# `degraded` 狀態，供監控端使用。
+
+def _call_ssr_analyze_for_dedup_alert_test(path_and_query: str, client_ip: str = "10.9.9.9"):
+    """比照本檔既有 `do_GET` fake handler 慣例，打一次 SSR `/analyze.json`。"""
+    from io import BytesIO
+
+    buf = BytesIO()
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = (client_ip, 12345)
+    h.path = path_and_query
+    h.headers = {}
+    h.wfile = buf
+
+    captured_status: list[int] = []
+    h.send_response = lambda code: captured_status.append(code)
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    status = captured_status[-1] if captured_status else None
+    return status, buf.getvalue().decode("utf-8")
+
+
+def test_dedup_prep_failure_below_threshold_only_warning_no_alert(monkeypatch, caplog):
+    """未達 `_DEDUP_PREP_FAILURE_ALERT_THRESHOLD` 次的 dedup coin_key 準備
+    失敗，只該記一般 `WARNING`，不該觸發 `ALERT:` 前綴的 `ERROR` 升級 log
+    ——避免偶發、單次的 fail-open 就洗版告警。"""
+    web._dedup_prep_failure_timestamps.clear()
+    web._dedup_prep_failure_last_alert_ts = 0.0
+
+    def _boom(*a, **kw):
+        raise RuntimeError("dedup coin_key boom")
+
+    monkeypatch.setattr(web, "_analyze_dedup_coin_key", _boom)
+    try:
+        with caplog.at_level(logging.WARNING):
+            for _ in range(web._DEDUP_PREP_FAILURE_ALERT_THRESHOLD - 1):
+                code, _body = _call_ssr_analyze_for_dedup_alert_test(
+                    "/analyze.json?coin=BTC&type=multi_source&q=dedup-alert-below&sample=1"
+                )
+                assert code == 200, "coin_key 準備失敗應 fail-open 放行，不影響請求本身成功"
+
+        alert_errors = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and r.message.startswith("ALERT: TrustForge dedup")
+        ]
+        assert not alert_errors, f"未達門檻不該觸發 ALERT，實際 {caplog.records!r}"
+
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "dedup coin_key 準備失敗" in r.message
+        ]
+        assert len(warnings) == web._DEDUP_PREP_FAILURE_ALERT_THRESHOLD - 1
+
+        health = web._dedup_prep_failure_health()
+        assert health["degraded"] is False
+        assert health["recent_failures"] == web._DEDUP_PREP_FAILURE_ALERT_THRESHOLD - 1
+    finally:
+        web._dedup_prep_failure_timestamps.clear()
+        web._dedup_prep_failure_last_alert_ts = 0.0
+
+
+def test_dedup_prep_failure_reaches_threshold_triggers_alert_and_status_degraded(monkeypatch, caplog):
+    """連續達到 `_DEDUP_PREP_FAILURE_ALERT_THRESHOLD` 次 dedup coin_key
+    準備失敗 → 升級成 `ALERT:` 前綴的 `ERROR` log，且 `/api/status` 的
+    `dedup` 欄位顯示 `degraded: true`（監控端可見，不需要 grep server
+    log）。"""
+    web._dedup_prep_failure_timestamps.clear()
+    web._dedup_prep_failure_last_alert_ts = 0.0
+
+    def _boom(*a, **kw):
+        raise RuntimeError("dedup coin_key boom")
+
+    monkeypatch.setattr(web, "_analyze_dedup_coin_key", _boom)
+    try:
+        with caplog.at_level(logging.WARNING):
+            for _ in range(web._DEDUP_PREP_FAILURE_ALERT_THRESHOLD):
+                code, _body = _call_ssr_analyze_for_dedup_alert_test(
+                    "/analyze.json?coin=BTC&type=multi_source&q=dedup-alert-reach&sample=1"
+                )
+                assert code == 200
+
+        alert_errors = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and r.message.startswith("ALERT: TrustForge dedup")
+        ]
+        assert alert_errors, f"達門檻應觸發 ALERT 前綴 ERROR log，實際 {caplog.records!r}"
+
+        health = web._dedup_prep_failure_health()
+        assert health["degraded"] is True
+        assert health["recent_failures"] >= web._DEDUP_PREP_FAILURE_ALERT_THRESHOLD
+
+        code, body = web._handle_api_status(client_ip="")
+        assert code == 200
+        payload = json.loads(body)
+        assert payload["data"]["dedup"]["degraded"] is True
+    finally:
+        web._dedup_prep_failure_timestamps.clear()
+        web._dedup_prep_failure_last_alert_ts = 0.0
+
+
+def test_dedup_prep_failure_alert_has_cooldown_avoids_log_flood_while_degraded_persists(
+    monkeypatch, caplog
+):
+    """CTO 複審（接手 #93）補充：若 dedup 準備失敗是持續性的（例如真的回歸，
+    往後每個請求都失敗），原始設計會讓「達門檻後的每一次」後續失敗都再噴一行
+    `ALERT:` `ERROR`——高流量下等於每個請求都寫一行 ERROR，把 server log
+    洗版、稀釋掉真正需要人工介入的訊號。這裡驗證：同一輪 degraded 期間，
+    達門檻後再持續失敗，不該重複觸發 ALERT（有冷卻期），但 `/api/status`
+    的 `degraded` 仍要如實反映當下真實狀態（冷卻期只節流 log，不節流
+    健康狀態本身）。"""
+    web._dedup_prep_failure_timestamps.clear()
+    web._dedup_prep_failure_last_alert_ts = 0.0
+
+    def _boom(*a, **kw):
+        raise RuntimeError("dedup coin_key boom")
+
+    monkeypatch.setattr(web, "_analyze_dedup_coin_key", _boom)
+    try:
+        with caplog.at_level(logging.WARNING):
+            # 先打到門檻，觸發第一次 ALERT。
+            for _ in range(web._DEDUP_PREP_FAILURE_ALERT_THRESHOLD):
+                code, _body = _call_ssr_analyze_for_dedup_alert_test(
+                    "/analyze.json?coin=BTC&type=multi_source&q=dedup-alert-cooldown-a&sample=1"
+                )
+                assert code == 200
+
+            first_round_alerts = [
+                r for r in caplog.records
+                if r.levelno == logging.ERROR and r.message.startswith("ALERT: TrustForge dedup")
+            ]
+            assert len(first_round_alerts) == 1, (
+                f"達門檻那一刻應恰好觸發一次 ALERT，實際 {first_round_alerts!r}"
+            )
+
+            # degraded 持續期間（冷卻期內）再打幾次失敗，不該再重複 ALERT。
+            for _ in range(3):
+                code, _body = _call_ssr_analyze_for_dedup_alert_test(
+                    "/analyze.json?coin=BTC&type=multi_source&q=dedup-alert-cooldown-b&sample=1"
+                )
+                assert code == 200
+
+        all_alerts = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR and r.message.startswith("ALERT: TrustForge dedup")
+        ]
+        assert len(all_alerts) == 1, (
+            f"冷卻期內持續失敗不該重複噴 ALERT（避免洗版），實際 {all_alerts!r}"
+        )
+
+        # 但 /api/status 的 degraded 仍要如實反映當下真實狀態，不受冷卻期影響。
+        health = web._dedup_prep_failure_health()
+        assert health["degraded"] is True
+    finally:
+        web._dedup_prep_failure_timestamps.clear()
+        web._dedup_prep_failure_last_alert_ts = 0.0

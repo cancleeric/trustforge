@@ -1609,6 +1609,97 @@ def test_api_analyze_dedup_cross_ip_follower_still_enforces_own_rate_limit(monke
         web._real_rate_buckets.pop(follower_ip, None)
 
 
+def _call_ssr_analyze(path_and_query: str, client_ip: str) -> tuple[int, str]:
+    """透過 `web.Handler.do_GET` 模擬打 SSR `/analyze`／`/analyze.json`
+    路由，不開真 socket（比照 test_security.py 既有 fake handler 慣例：
+    `web.Handler.__new__` + 手動接上 `send_response`/`send_header`/
+    `end_headers`/`wfile`，繞過 `BaseHTTPRequestHandler.__init__` 真正的
+    socket 交握）。回傳 `(status_code, body)`——`body` 是 `.json` 變體回傳
+    的原始 JSON 字串，或一般 `/analyze` 回傳的 HTML（含 429 錯誤卡）。"""
+    buf = BytesIO()
+    h = web.Handler.__new__(web.Handler)
+    h.client_address = (client_ip, 12345)
+    h.path = path_and_query
+    h.headers = {}
+    h.wfile = buf
+
+    captured_status: list[int] = []
+    h.send_response = lambda code: captured_status.append(code)
+    h.send_header = lambda name, val: None
+    h.end_headers = lambda: None
+
+    h.do_GET()
+
+    status = captured_status[-1] if captured_status else None
+    return status, buf.getvalue().decode("utf-8")
+
+
+def test_ssr_analyze_dedup_cross_ip_follower_still_enforces_own_rate_limit(monkeypatch):
+    """#93（harper CISO PR #92 審查附帶條件 #2）：SSR `/analyze`／
+    `/analyze.json` 路由跟 `/api/analyze` 共用同一套 in-flight dedup
+    （`_analyze_dedup_key`/`_dedup_analyze_call`，見 `do_GET` 內
+    `_analyze_dedup_coin_key` 那段），先前只有 `/api/analyze` 有對應的
+    跨 IP 限流測試（見前一個
+    `test_api_analyze_dedup_cross_ip_follower_still_enforces_own_rate_limit`），
+    SSR 路由缺一條端到端測試鎖死同樣的行為。
+
+    模式跟前一個 API 版測試完全對稱：leader_ip（沒被限流）先打
+    `/analyze.json`、進入 compute() 慢慢跑；follower_ip（real 限流
+    bucket 早已用滿）在 leader 還在進行中時打完全相同的 SSR 請求——
+    即使 follower_ip 跟 leader 同一把 dedup key，也不該因為「共用
+    leader 結果」繞過自己的限流，應該被自己的限流擋下（429），而不是
+    拿到 leader 算出來的 200。"""
+    counter = _CallCounter()
+    leader_started = threading.Event()
+    real_run = pipeline_module.run
+
+    def _counting_run(*args, **kwargs):
+        counter.hit()
+        leader_started.set()
+        time.sleep(0.3)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(web, "run", _counting_run)
+
+    leader_ip = "10.1.5.7"
+    follower_ip = "10.1.5.8"
+    web._real_rate_buckets[follower_ip] = [time.time()] * web._REAL_RATE_MAX
+    try:
+        path = "/analyze.json?coin=BTC&type=multi_source&q=ssr-dedup-cross-ip-bypass-test"
+        results: dict[str, tuple[int, str]] = {}
+        results_lock = threading.Lock()
+
+        def _worker(ip):
+            code, body = _call_ssr_analyze(path, ip)
+            with results_lock:
+                results[ip] = (code, body)
+
+        leader_thread = threading.Thread(target=_worker, args=(leader_ip,))
+        leader_thread.start()
+        assert leader_started.wait(timeout=2), "leader（leader_ip）應該很快就進入 compute()"
+
+        follower_thread = threading.Thread(target=_worker, args=(follower_ip,))
+        follower_thread.start()
+
+        leader_thread.join(timeout=10)
+        follower_thread.join(timeout=10)
+
+        assert set(results) == {leader_ip, follower_ip}
+        assert results[leader_ip][0] == 200, (
+            f"leader_ip 沒被限流，應該正常拿到 200，實際 {results[leader_ip]}"
+        )
+        assert results[follower_ip][0] == 429, (
+            f"follower_ip 自己的限流早已用滿，不該靠共用 leader 結果（同一條 "
+            f"SSR dedup key）繞過，實際 {results[follower_ip]}"
+        )
+        assert counter.n == 1, (
+            f"follower_ip 被自己的限流擋下，不該碰 compute()，應恰好 1 次"
+            f"（leader），實際 {counter.n} 次"
+        )
+    finally:
+        web._real_rate_buckets.pop(follower_ip, None)
+
+
 def test_api_analyze_dedup_key_captures_online_stance_force_offline_per_caller(monkeypatch):
     """codex HIGH 複審 Round 11（key 漏 caller-specific online-stance
     降級）：real-mode 執行還依賴 `_online_stance_force_offline(client_ip)`

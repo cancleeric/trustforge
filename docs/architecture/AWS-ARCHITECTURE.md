@@ -107,7 +107,7 @@ nginx conf：`deploy/nginx.conf`；cutover 開關：`deploy/cutover_switch.sh`
 | 端點 | 方法 | 對應函式 | 說明 |
 |------|------|---------|------|
 | `/api/health` | GET | `_handle_api_health` | 健康檢查，`{ok,data:{status,version,uptime_seconds}}` |
-| `/api/status` | GET | `_handle_api_status` | 版本/uptime/`bedrock_capable`/`live_token_set` 能力旗標/cache backend 連線健康（primary/fallback、是否 degraded）/資料鮮度矩陣（fresh/stale/missing）；**刻意不含**成本帳本明細／連接器用量／最近排程執行，成本請走 `/api/costs`；依賴（cache backend 建構或鮮度讀取）失敗回 502 |
+| `/api/status` | GET | `_handle_api_status` | 版本/uptime/`bedrock_capable`/`live_token_set` 能力旗標/cache backend 連線健康（primary/fallback、是否 degraded）/資料鮮度矩陣（fresh/stale/missing）/`dedup`（#93：dedup coin_key／dedup key 準備 fail-open 的滑動視窗健康狀態 `{degraded, recent_failures, window_seconds, alert_threshold}`）；**刻意不含**成本帳本明細／連接器用量／最近排程執行，成本請走 `/api/costs`；依賴（cache backend 建構或鮮度讀取）失敗回 502 |
 | `/api/costs` | GET | `_handle_api_costs` | cost ledger 表 |
 | `/api/overview` | GET | `_handle_api_overview` | 首頁多幣總覽卡；**逐幣**對 cache backend 呼叫 `cache_get(strict=True)`（可能實際打 DynamoDB，讀不到才 fallback 到本地 JSON），非零 I/O；單幣純缺快照時該幣正常跳過（仍 200），backend 建構失敗或 primary+fallback 皆讀取失敗時整個請求回 502 |
 | `/api/history` | GET | `_handle_api_history` | `?coin=BTC` 讀 `get_trust_history()`，PIT 歷史 |

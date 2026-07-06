@@ -3894,6 +3894,110 @@ def _analyze_dedup_coin_key(qtype: QuestionType, qs: dict, query: str) -> str | 
     return coin_raw
 
 
+# ---------------------------------------------------------------------------
+# #93（harper CISO PR #92 審查附帶條件 #1）：dedup coin_key／dedup key
+# 準備階段 fail-open 告警——見 SSR `/analyze`／`/analyze.json` 路由（`do_GET`）
+# 裡包住 `_analyze_dedup_coin_key`/`_analyze_dedup_key` 呼叫的那兩個
+# `except Exception`。
+#
+# fail-open 行為本身（準備失敗時降級成 `dedup_key=None`、不套用 dedup，
+# 但整條請求仍正常放行）是核准的既有取捨，這裡**不改**；只補可觀測性：
+# 先前只有 `logging.exception` 默默記一筆，若日後回歸導致這段長期悄悄
+# 失敗，等同悄悄關掉 #51+#87 防重複計費，只能等 Bedrock 成本異常才會被
+# 人發現。
+#
+# 做法：process 內、純記憶體滑動視窗計數器（跟 `_check_status_rate_limit`
+# 等既有限流 bucket 同一種手法，只是這裡不是要擋請求、是要偵測「頻率」
+# 本身）——`_DEDUP_PREP_FAILURE_WINDOW_SEC` 秒內累計達
+# `_DEDUP_PREP_FAILURE_ALERT_THRESHOLD` 次，才從「一般 warning」升級成
+# 醒目的 `ERROR` 級 + 固定可 grep 前綴 `"ALERT: TrustForge dedup"` 的告警
+# log（監控端可以直接 grep 這個固定前綴建告警規則，不需要解析頻率本身）。
+# 未達門檻的個別失敗改記 `logging.warning`（仍帶 `exc_info=True` 保留完整
+# traceback）——這條路徑是核准的 fail-open，不是未預期的 server error，
+# `warning` 語意更準確；只有真的達到頻率門檻才升級成 `error`。
+#
+# 不引任何外部依賴（純 stdlib `time`/`threading`），跟其餘限流 bucket
+# 一致；純 process-local，多 worker/重啟後計數器歸零，是刻意的
+# trade-off（跟其餘 in-memory rate bucket 一致，不追求跨 process 精確）。
+#
+# CTO 複審（接手 #93）補充：加一道 ALERT log 冷卻期
+# （`_DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC`）。原始設計達門檻後「每一次」
+# 後續失敗都會再噴一行 `ERROR` ALERT——若回歸是持續性的（例如 #51/#87
+# 相關程式碼真的壞掉、往後每個請求都會準備失敗），高流量下這條路徑會
+# 變成每個請求都寫一行 ERROR，等同用 ALERT log 把 server log 洗版，
+# 反而稀釋掉真正需要人工介入的訊號、也增加日誌量／告警噪音成本。冷卻期
+# 不影響 `/api/status` 的 `degraded` 判斷（那裡永遠即時反映當下滑動視窗
+# 真實計數，只節流「log 這件事」本身），也不影響個別失敗仍照樣
+# `logging.warning(..., exc_info=True)` 留下完整 traceback——只節流
+# 「已經 ALERT 過的期間內，要不要再重複噴一次 ALERT ERROR」。
+# ---------------------------------------------------------------------------
+_DEDUP_PREP_FAILURE_WINDOW_SEC = 300.0  # 5 分鐘滑動視窗
+_DEDUP_PREP_FAILURE_ALERT_THRESHOLD = 5  # 視窗內達此次數 → 升級 ALERT
+_DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC = 300.0  # 同一輪degraded期間至多每 5 分鐘噴一次 ALERT
+_dedup_prep_failure_lock = threading.Lock()
+_dedup_prep_failure_timestamps: list[float] = []
+_dedup_prep_failure_last_alert_ts = 0.0  # 上次噴 ALERT 的時間（0.0 = 從未噴過）
+
+
+def _record_dedup_prep_failure(context: str) -> None:
+    """記一筆 dedup coin_key／dedup key 準備失敗（fail-open），頻率達門檻
+    時升級成醒目 `ALERT:` 前綴的 `ERROR` 級 log（同一輪 degraded 期間
+    有冷卻期，見上方模組註解，避免持續性回歸把 log 洗版）。
+
+    `context` 是給人看的簡短描述（`"coin_key"`／`"dedup_key"`），只用來讓
+    ALERT 訊息說明是哪一段準備失敗，不影響計數——兩段共用同一個滑動視窗，
+    因為不管哪一段失敗，都是「dedup 準備失敗、fail-open 放行」同一種
+    風險，理當合併判斷頻率。呼叫端（SSR `/analyze` 路由的兩個
+    `except Exception`）已經各自記過完整 traceback（`logging.warning(...,
+    exc_info=True)`），這裡只負責頻率判斷跟 ALERT 升級 log，不重複記錄
+    本體訊息。"""
+    global _dedup_prep_failure_last_alert_ts
+    now = time.time()
+    should_alert = False
+    with _dedup_prep_failure_lock:
+        _dedup_prep_failure_timestamps[:] = [
+            ts for ts in _dedup_prep_failure_timestamps
+            if now - ts < _DEDUP_PREP_FAILURE_WINDOW_SEC
+        ]
+        _dedup_prep_failure_timestamps.append(now)
+        count = len(_dedup_prep_failure_timestamps)
+        if (
+            count >= _DEDUP_PREP_FAILURE_ALERT_THRESHOLD
+            and now - _dedup_prep_failure_last_alert_ts >= _DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC
+        ):
+            should_alert = True
+            _dedup_prep_failure_last_alert_ts = now
+    if should_alert:
+        logging.error(
+            "ALERT: TrustForge dedup fail-open 頻率過高（%s 準備失敗，"
+            "%d 秒內累計 %d 次，門檻 %d 次）——#51+#87 防重複計費可能長期"
+            "悄悄失效，請立即檢查 dedup coin_key/dedup key 準備邏輯是否回歸",
+            context, int(_DEDUP_PREP_FAILURE_WINDOW_SEC), count,
+            _DEDUP_PREP_FAILURE_ALERT_THRESHOLD,
+        )
+
+
+def _dedup_prep_failure_health() -> dict:
+    """供 `/api/status` 曝光用：目前滑動視窗內的 dedup 準備失敗次數／是否
+    已達 ALERT 門檻（`degraded`）。純讀取、不清除、不重置計數器——這裡
+    自己再算一次「扣掉視窗外過期紀錄」的即時次數，避免長時間沒有新失敗
+    時，讀到的還是上次呼叫 `_record_dedup_prep_failure` 時剪過但已經又
+    過期的陳舊次數（滑動視窗的剪除動作只在寫入時發生，讀取端需要自己
+    現算一次「以當下時間為準」的視圖）。"""
+    now = time.time()
+    with _dedup_prep_failure_lock:
+        count = sum(
+            1 for ts in _dedup_prep_failure_timestamps
+            if now - ts < _DEDUP_PREP_FAILURE_WINDOW_SEC
+        )
+    return {
+        "degraded": count >= _DEDUP_PREP_FAILURE_ALERT_THRESHOLD,
+        "recent_failures": count,
+        "window_seconds": _DEDUP_PREP_FAILURE_WINDOW_SEC,
+        "alert_threshold": _DEDUP_PREP_FAILURE_ALERT_THRESHOLD,
+    }
+
+
 def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     """#51 server-side idempotency（防重複送出）核心：同一把 `key`
     （見 `_analyze_dedup_key` docstring）同時只有一個真正在跑
@@ -4431,6 +4535,11 @@ def _handle_api_status(client_ip: str = "") -> tuple[int, str]:
                 "missing": missing_n,
                 "entries": freshness,
             },
+            # #93（harper CISO PR #92 審查附帶條件 #1）：曝光 dedup
+            # coin_key／dedup key 準備失敗（fail-open）的滑動視窗健康狀態，
+            # 讓監控端不需要 grep server log 也能看到「dedup 正在悄悄
+            # 降級」——見 `_dedup_prep_failure_health`/`_record_dedup_prep_failure`。
+            "dedup": _dedup_prep_failure_health(),
         }
         return 200, _json_envelope_ok(data)
     except Exception:
@@ -4703,10 +4812,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 coin_key = _analyze_dedup_coin_key(qtype, qs, _dedup_query)
             except Exception:
-                logging.exception(
+                # #93：降級成 warning（仍帶 exc_info 保留完整 traceback）——
+                # 這是核准的 fail-open，不是未預期的 server error；頻率達
+                # 門檻時 `_record_dedup_prep_failure` 會另外升級成 ALERT。
+                logging.warning(
                     "TrustForge /analyze dedup coin_key 準備失敗，"
-                    "fail-safe 放行不套用 dedup"
+                    "fail-safe 放行不套用 dedup",
+                    exc_info=True,
                 )
+                _record_dedup_prep_failure("coin_key")
                 coin_key = None
             if coin_key is not None:
                 try:
@@ -4718,10 +4832,13 @@ class Handler(BaseHTTPRequestHandler):
                         force_offline=force_offline,
                     )
                 except Exception:
-                    logging.exception(
+                    # #93：同上，降級成 warning + 頻率門檻 ALERT 升級。
+                    logging.warning(
                         "TrustForge /analyze dedup key 準備失敗，"
-                        "fail-safe 放行不套用 dedup"
+                        "fail-safe 放行不套用 dedup",
+                        exc_info=True,
                     )
+                    _record_dedup_prep_failure("dedup_key")
                     dedup_key = None
 
             try:
