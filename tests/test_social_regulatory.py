@@ -374,6 +374,61 @@ def test_reddit_atom_feed_parsed(monkeypatch):
     assert d.source == "reddit-cryptocurrency"
 
 
+def test_reddit_rss_author_captured_in_meta(monkeypatch):
+    """W3 前置：RSS 2.0 <author> 存進 meta["author"]，原文不剝除前綴。"""
+    from trustforge.ingestion import social
+
+    rss_with_author = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>BTC breaks resistance</title>
+    <link>https://www.reddit.com/r/CryptoCurrency/comments/abc/btc/</link>
+    <description>Bitcoin bulls in control.</description>
+    <pubDate>Sat, 01 Aug 2026 00:00:00 +0000</pubDate>
+    <author>/u/crypto_trader_99</author>
+  </item>
+</channel></rss>"""
+
+    monkeypatch.setattr(social, "_fetch_url", lambda url: rss_with_author)
+    docs = social.RedditCryptoSource("CryptoCurrency").fetch("", coin="")
+    assert len(docs) == 1
+    assert docs[0].meta.get("author") == "/u/crypto_trader_99"
+
+
+def test_reddit_atom_author_captured_in_meta(monkeypatch):
+    """W3 前置：Atom <author><name> 存進 meta["author"]。"""
+    from trustforge.ingestion import social
+
+    atom_with_author = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>r/CryptoCurrency: bitcoin</title>
+  <entry>
+    <title>Bitcoin hits new ATH</title>
+    <link href="https://www.reddit.com/r/CryptoCurrency/comments/xyz/bitcoin_ath/" rel="alternate"/>
+    <updated>2026-08-01T00:00:00+00:00</updated>
+    <summary>BTC breaks all-time high on institutional inflows.</summary>
+    <author><name>/u/hodler_jane</name></author>
+  </entry>
+</feed>"""
+
+    monkeypatch.setattr(social, "_fetch_url", lambda url: atom_with_author)
+    docs = social.RedditCryptoSource("CryptoCurrency").fetch("bitcoin", coin="")
+    assert len(docs) == 1
+    assert docs[0].meta.get("author") == "/u/hodler_jane"
+
+
+def test_reddit_missing_author_no_key_no_crash(monkeypatch):
+    """optional 欄位：無 <author> 時 meta 缺鍵，不補假值、不崩潰（沿用既有
+    REDDIT_FIXTURE，本來就沒有 author 欄位）。"""
+    from trustforge.ingestion import social
+
+    monkeypatch.setattr(social, "_fetch_url", lambda url: REDDIT_FIXTURE)
+    docs = social.RedditCryptoSource("CryptoCurrency").fetch("", coin="")
+    assert len(docs) == 2
+    for d in docs:
+        assert "author" not in d.meta
+
+
 def test_reddit_permalink_no_double_domain(monkeypatch):
     """F: permalink 已含完整 https://www.reddit.com 時，url 不能雙重前綴。"""
     from trustforge.ingestion import social

@@ -14,6 +14,12 @@ NOTE: Reddit 在 cloud IP 可能 403，生產可靠存取需 OAuth（待辦）�
   - query 參數以 urlencode 編碼，防止 &limit=100 等注入改寫請求語義
   - SSRF-safe fetch（見 `safe_fetch.py`）：逐跳驗證（含初始 URL）scheme/
     hostname/port/私有 IP，DNS pinning 杜絕 rebinding，禁自動跟轉
+
+W3 前置（第三輪 PR，資料累積，非偵測）：解析 RSS `<author>`/Atom
+`<author><name>` 帶出來源平台公開 username 原文，寫入
+`Document.meta["author"]`（optional，缺此欄位就不寫鍵，零 schema 破壞）。
+只存原文字串，不剝除前綴、不做任何跨平台關聯或衍生識別，不影響 coin 過
+濾/trust 分數。
 """
 from __future__ import annotations
 
@@ -134,6 +140,15 @@ def _parse_reddit_rss(raw: bytes, coin: str = "", source_name: str = "reddit") -
                 except Exception:
                     created_utc = 0.0
 
+        # --- author（W3 前置，資料累積用；optional，缺鍵=未知）---
+        # RSS 2.0：<author>text</author>；Atom：<author><name>text</name></author>。
+        # 原文存放，不剝除 "/u/" 前綴、不做任何跨平台關聯/衍生識別。
+        author = _text(item.find("author"))
+        if not author:
+            author_el = item.find(f"{{{_ATOM_NS}}}author")
+            if author_el is not None:
+                author = _text(author_el.find(f"{{{_ATOM_NS}}}name"))
+
         # --- coin 過濾：title 或 body 須含幣種關鍵字 ---
         if coin:
             combined_check = (title + " " + selftext).lower()
@@ -145,6 +160,9 @@ def _parse_reddit_rss(raw: bytes, coin: str = "", source_name: str = "reddit") -
             "social-reddit-"
             + hashlib.md5((permalink + title).encode()).hexdigest()[:12]
         )
+        meta = {"content_reference": content_ref}
+        if author:
+            meta["author"] = author
         docs.append(Document(
             id=doc_id,
             kind="social",
@@ -152,7 +170,7 @@ def _parse_reddit_rss(raw: bytes, coin: str = "", source_name: str = "reddit") -
             text=title,
             url=permalink,
             ts=created_utc,
-            meta={"content_reference": content_ref},
+            meta=meta,
         ))
 
     return docs

@@ -748,6 +748,27 @@ def _calc_manip_signal(evidence: list, coin: str | None = None) -> tuple[float, 
     return round(max(scores), 3), round(sum(scores) / len(scores), 3)
 
 
+def _collect_authors(evidence: list) -> list[str]:
+    """W3 前置（資料累積，非偵測）：從 `evidence`（`pipeline.run()` 回傳的
+    第二個值）逐筆擷取 `Evidence.author`（見 `agent.orchestrator.
+    _scored_to_evidence`，來源平台公開 username 原文，由 ingestion.social/
+    news 連接器選填），去重、排序後回傳。
+
+    只累積原始 username 字串本身，**不做任何跨來源/跨平台關聯、不做去
+    識別化以外的任何衍生運算、不影響任何 trust 分數**——單純讓帳號維度
+    資料開始按日留存，供未來 W3 協同操縱偵測演算法使用（本 PR 不包含該
+    演算法）。目前大多數來源（多數 news RSS、onchain、regulatory、
+    hoyabit、price）沒有作者概念，`Evidence.author` 恆為空字串，該筆
+    直接跳過，回傳空 list 是誠實結果，不代表 bug。
+    """
+    authors: set[str] = set()
+    for ev in evidence:
+        author = getattr(ev, "author", "") or ""
+        if author:
+            authors.add(author)
+    return sorted(authors)
+
+
 def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     """`Report`（真 `pipeline.run()` 結果）→ 快照精華 dict。欄位逐字取自
     既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。
@@ -766,7 +787,13 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     ——算不出（`evidence` 為 None/空）時完全不新增這兩個鍵，舊格式快照／
     本輪無 evidence 的快照都合法缺席，前端（`OverviewCard.tsx`／
     `ManipRiskBadge`）須顯式標「未評分」（不是悄悄不顯示、更不是假設
-    0＝安全）。"""
+    0＝安全）。
+
+    W3 前置（資料累積，非偵測）：`evidence` 裡有筆帶 `author`（見
+    `_collect_authors()`）時，多寫 `"authors"` 鍵（去重排序後的 username
+    原文 list），讓帳號維度資料開始按日累積。同樣**追加、非破壞性**——
+    目前本 PR 不含任何演算法消費這個鍵，也不在任何 UI 顯示；沒有作者資料
+    時完全不新增這個鍵，不補空 list、不假裝有資料。"""
     snap = {
         "coin": coin,
         "trust_score": round(float(report.confidence), 4),
@@ -784,6 +811,9 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
             manip_worst, manip_mean = manip_signal
             snap["manip_score"] = manip_worst
             snap["manip_score_mean"] = manip_mean
+        authors = _collect_authors(evidence)
+        if authors:
+            snap["authors"] = authors
     return snap
 
 

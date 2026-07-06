@@ -53,6 +53,14 @@ class Evidence:
     # 自動扣分必然誤傷合法聯播/引用，故拆成獨立欄位、獨立語意。預設空 list，
     # 向後相容。
     info_flags: list[str] = field(default_factory=list)
+    # W3 前置（資料累積，非偵測）：來源平台公開 username 原文（由
+    # ingestion 連接器寫入 Document.meta["author"]，見
+    # agent.orchestrator._scored_to_evidence）。僅少數源（如 Reddit RSS
+    # `<author>`、新聞 RSS `<author>`/`dc:creator`）有作者欄位；其餘源
+    # 無此概念，一律留空字串，不得填假值（缺鍵=未知慣例）。純資料欄位，
+    # 不參與 trust 分數、不做任何跨平台關聯，也不在 UI 顯示。預設空字串，
+    # 向後相容——舊快照/序列化資料反序列化回 Evidence 時缺這個鍵一樣正常。
+    author: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

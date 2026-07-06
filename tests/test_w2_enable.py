@@ -218,6 +218,31 @@ def test_scored_to_evidence_omits_reputation_trace_when_absent():
     )
 
 
+def test_scored_to_evidence_carries_author_from_doc_meta():
+    """W3 前置（資料累積，非偵測）：Document.meta["author"]（見 ingestion.
+    social/news）原文帶到 Evidence.author，不影響其餘欄位。"""
+    doc = Document(
+        id="d1", kind="social", source="reddit-bitcoin", text="t", ts=1.0,
+        meta={"content_reference": "ref", "author": "/u/crypto_trader_99"},
+    )
+    claim = Claim(id="c1", text="t", doc=doc)
+    sc = ScoredClaim(claim=claim, trust=0.5, components={"reputation": 0.5})
+    ev = _scored_to_evidence(sc, related="測試")
+    assert ev.author == "/u/crypto_trader_99"
+
+
+def test_scored_to_evidence_author_empty_when_doc_meta_has_no_author():
+    """optional 欄位：無 author 概念的來源（多數 news/onchain/regulatory）
+    `doc.meta` 沒有 "author" 鍵時，`Evidence.author` 落到空字串，缺鍵=未知，
+    不補假值。"""
+    doc = Document(id="d1", kind="news", source="coindesk", text="t", ts=1.0,
+                    meta={"content_reference": "ref"})
+    claim = Claim(id="c1", text="t", doc=doc)
+    sc = ScoredClaim(claim=claim, trust=0.5, components={"reputation": 0.5})
+    ev = _scored_to_evidence(sc, related="測試")
+    assert ev.author == ""
+
+
 def test_render_trust_breakdown_shows_reputation_trace_change():
     tc = {"reputation": 0.59, "corroboration": 0.5, "recency": 0.8, "manipulation": 0.0,
           "reputation_prior": 0.35, "reputation_final": 0.59,

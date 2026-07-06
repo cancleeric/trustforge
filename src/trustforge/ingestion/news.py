@@ -160,9 +160,17 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
       - **合法路徑**：結構有效的 entries 存在，但依 query/coin 關鍵字
         過濾後一則都不符（那個幣剛好沒新聞）→ 仍是合法結果，回 `[]`，
         不 raise。
+
+    W3 前置（資料累積，非偵測）：若 entry 帶 `<author>`/`<dc:creator>`/
+    Atom `<author><name>`，原文存進 `Document.meta["author"]`（optional，
+    無此欄位就不寫鍵）；不參與 `_entry_is_structurally_valid()` 判斷（沒
+    作者仍是合法新聞），不影響 coin 過濾/trust 分數。
     """
     root = ET.fromstring(raw)
-    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "dc": "http://purl.org/dc/elements/1.1/",
+    }
     items = root.findall(".//item")
     if not items:
         items = root.findall(".//atom:entry", ns)
@@ -191,6 +199,13 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
         desc = (desc_el.text or "").strip() if desc_el is not None else ""
         ts = _parse_ts(pub_el.text) if pub_el is not None and pub_el.text else 0.0
 
+        # --- author（W3 前置，資料累積用；optional，缺鍵=未知）---
+        # RSS <author>（少見，多為 email 格式原文）／WordPress 常見
+        # <dc:creator>／Atom <author><name>。原文存放，不做任何解析/衍生
+        # 識別，不參與結構有效性判斷（entry 沒有作者仍算合法新聞）。
+        author_el = _first(item, "author", "dc:creator", "atom:author/atom:name", ns=ns)
+        author = (author_el.text or "").strip() if author_el is not None else ""
+
         # 子欄位結構驗證：title/link/pubDate 被改名/換 namespace 導致解析
         # 全空的 entry，直接跳過，不計入 valid_entry_count，也絕不發布
         # （無關鍵字模式一樣擋，見下方 valid_entry_count==0 才 raise）。
@@ -208,6 +223,9 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
         snippet = (title + " " + desc)[:120].strip()
 
         doc_id = "news-" + hashlib.md5((source_name + link + title).encode()).hexdigest()[:12]
+        meta = {"content_reference": snippet}
+        if author:
+            meta["author"] = author
         docs.append(Document(
             id=doc_id,
             kind="news",
@@ -215,7 +233,7 @@ def _parse_rss(raw: bytes, source_name: str, query: str, coin: str) -> list[Docu
             text=title or desc[:200],
             url=link,
             ts=ts,
-            meta={"content_reference": snippet},
+            meta=meta,
         ))
 
     if valid_entry_count == 0:

@@ -225,6 +225,71 @@ def test_snapshot_dict_omits_manip_score_keys_when_no_evidence():
 
 
 # ---------------------------------------------------------------------------
+# W3 前置（資料累積，非偵測）：`_collect_authors()` / `_snapshot_dict()`
+# `authors` 鍵擷取
+# ---------------------------------------------------------------------------
+
+def _fake_evidence_with_author(author: str) -> Evidence:
+    """建一筆真 `Evidence`，`author` 欄位比照 `agent.orchestrator.
+    _scored_to_evidence()` 實際填法（來源平台公開 username 原文）。"""
+    return Evidence(
+        source="src", fetched_at="2026-07-01T00:00:00Z",
+        content_reference="ref", related_claim="claim",
+        author=author,
+    )
+
+
+def test_collect_authors_dedups_and_sorts():
+    evidence = [
+        _fake_evidence_with_author("/u/bob"),
+        _fake_evidence_with_author("/u/alice"),
+        _fake_evidence_with_author("/u/bob"),  # 重複，應去重
+    ]
+    assert fetch_scheduler._collect_authors(evidence) == ["/u/alice", "/u/bob"]
+
+
+def test_collect_authors_skips_evidence_without_author():
+    """沒有作者概念的來源（多數 news/onchain/regulatory）`Evidence.author`
+    恆為空字串，該筆直接跳過，不當成假帳號計入。"""
+    evidence = [
+        _fake_evidence_with_author("/u/bob"),
+        Evidence(source="x", fetched_at="", content_reference="", related_claim=""),
+    ]
+    assert fetch_scheduler._collect_authors(evidence) == ["/u/bob"]
+
+
+def test_collect_authors_returns_empty_list_when_no_authors():
+    """全部來源都沒有作者資料時，誠實回空 list，不是 bug。"""
+    evidence = [Evidence(source="x", fetched_at="", content_reference="", related_claim="")]
+    assert fetch_scheduler._collect_authors(evidence) == []
+
+
+def test_snapshot_dict_includes_authors_when_evidence_has_it():
+    report = _fake_report("BTC")
+    evidence = [
+        _fake_evidence_with_author("/u/bob"),
+        _fake_evidence_with_author("/u/alice"),
+    ]
+    snap = fetch_scheduler._snapshot_dict("BTC", report, evidence)
+    assert snap["authors"] == ["/u/alice", "/u/bob"]
+
+
+def test_snapshot_dict_omits_authors_key_when_no_evidence():
+    """向後相容：`evidence=None`/空清單，或全部 evidence 都無 author 時，
+    完全不新增 `authors` 鍵——跟 `reputation_trace`/`manip_score` 同款慣例。"""
+    report = _fake_report("BTC")
+    snap_none = fetch_scheduler._snapshot_dict("BTC", report, None)
+    snap_empty = fetch_scheduler._snapshot_dict("BTC", report, [])
+    snap_no_author = fetch_scheduler._snapshot_dict(
+        "BTC", report,
+        [Evidence(source="x", fetched_at="", content_reference="", related_claim="")],
+    )
+    assert "authors" not in snap_none
+    assert "authors" not in snap_empty
+    assert "authors" not in snap_no_author
+
+
+# ---------------------------------------------------------------------------
 # codex 窮舉終審 HIGH 修復：非數值 manipulation 中止整批快照
 #
 # 原本 `float(tc["manipulation"])` 對每一筆都直接轉型、沒有例外處理——

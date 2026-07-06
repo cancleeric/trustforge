@@ -111,6 +111,12 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         # 供 web.py 用中性樣式渲染（見 trust.scoring._coordination_signals；
         # 空 list 時等同未命中）。
         info_flags=list(sc.info_flags),
+        # W3 前置（資料累積，非偵測）：連接器若抓到來源平台公開 username
+        # （見 ingestion.social/news 的 `meta["author"]`），原文帶到
+        # Evidence；無此欄位的來源（多數 news RSS、onchain、regulatory
+        # 等）`doc.meta.get("author")` 回 None，落到 `""`，缺鍵=未知，
+        # 不填假值。不參與 trust 分數、不做 UI 顯示。
+        author=doc.meta.get("author") or "",
     )
 
 
