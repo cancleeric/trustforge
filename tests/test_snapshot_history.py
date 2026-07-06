@@ -129,6 +129,65 @@ def test_snapshot_dict_omits_reputation_trace_key_when_no_evidence():
 
 
 # ---------------------------------------------------------------------------
+# #86：`_calc_avg_manip()` / `_snapshot_dict()` manip_score 擷取
+# ---------------------------------------------------------------------------
+
+def _fake_evidence_with_manip(manip: float) -> Evidence:
+    """建一筆真 `Evidence`，`trust_components["manipulation"]` 比照
+    `agent.orchestrator._scored_to_evidence()` 實際欄位命名（非 issue #86
+    原始描述誤寫的 `"manip"` 鍵）。"""
+    return Evidence(
+        source="src", fetched_at="2026-07-01T00:00:00Z",
+        content_reference="ref", related_claim="claim",
+        trust_components={"manipulation": manip},
+    )
+
+
+def test_calc_avg_manip_averages_manipulation_component_across_evidence():
+    evidence = [
+        _fake_evidence_with_manip(0.4),
+        _fake_evidence_with_manip(0.2),
+        _fake_evidence_with_manip(0.0),
+    ]
+    assert fetch_scheduler._calc_avg_manip(evidence) == 0.2
+
+
+def test_calc_avg_manip_skips_evidence_without_manipulation_key():
+    """沒有 `trust_components`（或缺 `manipulation` 鍵）的舊呼叫端/殘缺
+    `Evidence` 直接跳過，不當成 0 拉低平均。"""
+    evidence = [
+        _fake_evidence_with_manip(0.6),
+        Evidence(source="x", fetched_at="", content_reference="", related_claim=""),
+    ]
+    assert fetch_scheduler._calc_avg_manip(evidence) == 0.6
+
+
+def test_calc_avg_manip_returns_none_when_no_data():
+    """`evidence` 為 None／空清單，或逐筆都缺 `manipulation` 分項時，誠實回
+    `None`（不是 0.0——0.0 會被誤讀成「查過、確定無操縱」，見 #24 鐵律）。"""
+    assert fetch_scheduler._calc_avg_manip(None) is None
+    assert fetch_scheduler._calc_avg_manip([]) is None
+    assert fetch_scheduler._calc_avg_manip(
+        [Evidence(source="x", fetched_at="", content_reference="", related_claim="")]
+    ) is None
+
+
+def test_snapshot_dict_includes_manip_score_when_evidence_has_it():
+    report = _fake_report("BTC")
+    evidence = [_fake_evidence_with_manip(0.4), _fake_evidence_with_manip(0.2)]
+    snap = fetch_scheduler._snapshot_dict("BTC", report, evidence)
+    assert snap["manip_score"] == 0.3
+
+
+def test_snapshot_dict_omits_manip_score_key_when_no_evidence():
+    """向後相容：`evidence=None`/空清單時完全不新增 `manip_score` 鍵——
+    跟 `reputation_trace` 同款慣例，讓舊格式快照合法缺席這個欄位。"""
+    report = _fake_report("BTC")
+    assert "manip_score" not in fetch_scheduler._snapshot_dict("BTC", report, None)
+    assert "manip_score" not in fetch_scheduler._snapshot_dict("BTC", report, [])
+
+
+# ---------------------------------------------------------------------------
 # 按日累積歷史（`run_snapshot()` 的歷史 key 寫入）
 # ---------------------------------------------------------------------------
 

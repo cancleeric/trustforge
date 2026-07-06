@@ -42,6 +42,12 @@ export interface OverviewCoin {
   /** 選填：後端 `_snapshot_dict()` 在該幣本輪無 evidence／無動態信譽
    * trace 時完全不會帶這個 key（非漏資料，見 validators.ts 說明）。 */
   reputation_trace?: Record<string, ReputationTraceEntry>
+  /** #86 選填：跨幣操縱風險排行用的平均操縱懲罰分（`_calc_avg_manip()`，
+   * 對 evidence 逐筆 `trust_components["manipulation"]` 取平均，0～1，越高
+   * 代表操縱風險越高）。舊格式快照（本欄位新增前寫入的）／本輪無
+   * evidence 的快照都合法不帶這個 key（同 `reputation_trace` 慣例，非漏
+   * 資料）——前端遇到缺席時優雅降級：不顯示操縱風險徽章，不假設 0。 */
+  manip_score?: number
   fetched_at_epoch: number
 }
 

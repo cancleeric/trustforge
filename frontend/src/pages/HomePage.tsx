@@ -31,7 +31,11 @@ export default function HomePage() {
       // UI、不覆蓋任何狀態。
       if (controller.signal.aborted) return
       setLoading(false)
-      if (res.ok) setCoins(res.data.coins)
+      // #86：跨幣信任排行——依 `trust_score` 降序排列，純陣列排序，不推導
+      // 後端未提供的欄位（每幣的 trust_score 已是後端算好的真值，這裡只是
+      // 排序展示順序）。`sort` 回傳新陣列前先 `[...res.data.coins]`，避免
+      // 就地改動 API response 物件。
+      if (res.ok) setCoins([...res.data.coins].sort((a, b) => b.trust_score - a.trust_score))
       else setError(res.error)
     })
     return () => {
@@ -70,8 +74,8 @@ export default function HomePage() {
         {!loading && error && <ErrorState code={error.code} message={error.message} />}
         {!loading && !error && coins && coins.length > 0 && (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
-            {coins.map((c) => (
-              <OverviewCard key={c.coin} coin={c} />
+            {coins.map((c, i) => (
+              <OverviewCard key={c.coin} coin={c} rank={i + 1} />
             ))}
           </div>
         )}

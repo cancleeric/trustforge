@@ -134,6 +134,39 @@ export function FreshnessStatusBadge({ status }: { status: 'fresh' | 'stale' | '
   )
 }
 
+const MANIP_RISK_HIGH_THRESHOLD = 0.3
+const MANIP_RISK_MEDIUM_THRESHOLD = 0.1
+
+/** #86：首頁跨幣信任排行的操縱風險徽章——依 `OverviewCoin.manip_score`
+ * （`_calc_avg_manip()`，evidence 逐筆 `trust_components["manipulation"]`
+ * 平均）分級：≥0.3 高風險／≥0.1 中風險／其餘低風險。閾值沿用
+ * issue #86 定案數字，跟 `web.py::_render_trust_breakdown` 的操縱分項紅色
+ * 判斷（manip>0 即標紅）不同量級——這裡是「多幣排行」的相對分級展示，
+ * 非單幣證據明細的逐筆判斷。
+ *
+ * `manip_score` 為 `undefined`（本輪無 evidence，或舊格式快照本欄位新增
+ * 前寫入）時回傳 `null`、完全不顯示徽章——不能拿「無資料」冒充「低風險」
+ * （#24 誠實原則，同 `SingleSourceBadge`／`reputation_trace` 選填欄位的
+ * has_data 處理慣例）。 */
+export function ManipRiskBadge({ manipScore }: { manipScore: number | undefined }) {
+  if (manipScore === undefined) return null
+  const [label, color] =
+    manipScore >= MANIP_RISK_HIGH_THRESHOLD
+      ? ['⚠ 高操縱風險', 'var(--color-tf-bad)']
+      : manipScore >= MANIP_RISK_MEDIUM_THRESHOLD
+        ? ['⚡ 中操縱風險', 'var(--color-tf-warn)']
+        : ['✓ 低操縱風險', 'var(--color-tf-good)']
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold"
+      style={pillClasses(color)}
+      title={`平均操縱懲罰分 ${manipScore.toFixed(2)}`}
+    >
+      {label}
+    </span>
+  )
+}
+
 /** `/api/status` cache backend 降級旗標——`degraded:true` 代表 primary
  * outage、正在靠本地 `JsonCacheBackend` fallback 撐著（見
  * `_handle_api_status` docstring），必須顯眼標示，不能悄悄回 200 就當沒事。 */

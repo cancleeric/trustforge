@@ -658,6 +658,42 @@ def _reputation_summary(evidence: list) -> dict[str, dict]:
     return summary
 
 
+def _calc_avg_manip(evidence: list) -> float | None:
+    """#86：從 `evidence`（`pipeline.run()` 回傳的第二個值，同 `_reputation_
+    summary()` 這份）逐筆 `trust_components["manipulation"]` 取算術平均，得出
+    本輪快照的平均操縱風險分。
+
+    ⛔ $0／不重算：`trust.scoring.score()` 已把「信譽×0.5 + 佐證×0.25 +
+    時效×0.15 − 操縱×0.4」的操縱懲罰分項算好、由
+    `agent.orchestrator._scored_to_evidence()` 逐字複製進每筆
+    `Evidence.trust_components["manipulation"]`（鍵名對照：issue #86 原始
+    描述寫的是 `sc.components["manip"]`，但 `"manip"` 只是權重字典 `w` 的
+    鍵，`ScoredClaim.components`/`Evidence.trust_components` 實際存的鍵是
+    `"manipulation"`，見 `trust/scoring.py::score()`，兩者不可混用）。這裡
+    純粹是對既有結果的重新聚合，計算方式對齊
+    `web.py::_aggregate_trust_components()`／首頁「多維度信任雷達」操縱
+    分項同一套「對 evidence 逐筆 trust_components 取平均」邏輯（#85 review
+    要求：manip 分項需跟雷達系列邏輯保持一致），不是另開一條獨立公式。
+
+    誠實標「無資料」（比照 `_reputation_summary()`／`reputation_trace` 欄位
+    同款慣例，也對齊 W2 `single_source`／`has_data` 徽章的誠實原則）：
+    `evidence` 為 None／空清單，或逐筆都沒有 `manipulation` 分項（理論上
+    只要 `evidence` 非空就一定有——這裡仍防禦式檢查，不假設上游契約永遠
+    成立）時回傳 `None`，呼叫端據此完全不寫入 `"manip_score"` 這個鍵，
+    不用 0.0 冒充「查過、確定無操縱」（#24 鐵律）。"""
+    if not evidence:
+        return None
+    scores: list[float] = []
+    for ev in evidence:
+        tc = getattr(ev, "trust_components", None) or {}
+        if "manipulation" not in tc:
+            continue
+        scores.append(float(tc["manipulation"]))
+    if not scores:
+        return None
+    return round(sum(scores) / len(scores), 3)
+
+
 def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     """`Report`（真 `pipeline.run()` 結果）→ 快照精華 dict。欄位逐字取自
     既有 `Report` dataclass 欄位，不新造（#24：只寫真分析結果）。
@@ -666,7 +702,13 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
     直接丟棄）非空時，順便擷取 W2 reputation_trace 精華（見
     `_reputation_summary()`），寫入 `"reputation_trace"` 欄位，供未來 #4
     來源信譽榜使用。沒有 trace 資料（`evidence=None`/空清單，或該幣本輪
-    尚未啟用動態信譽）時完全不新增這個鍵，逐字向後相容，也不補假值。"""
+    尚未啟用動態信譽）時完全不新增這個鍵，逐字向後相容，也不補假值。
+
+    #86 追加：`evidence` 可算出平均操縱分（見 `_calc_avg_manip()`）時，多寫
+    `"manip_score"` 欄位，供首頁跨幣信任排行的操縱風險徽章使用。同樣是
+    **追加、非破壞性**欄位——算不出（`evidence` 為 None/空）時完全不新增
+    這個鍵，舊格式快照／本輪無 evidence 的快照都合法缺席，前端
+    （`OverviewCard.tsx`）須優雅降級（不顯示徽章，不假設 0）。"""
     snap = {
         "coin": coin,
         "trust_score": round(float(report.confidence), 4),
@@ -679,6 +721,9 @@ def _snapshot_dict(coin: str, report, evidence: list | None = None) -> dict:
         reputation_trace = _reputation_summary(evidence)
         if reputation_trace:
             snap["reputation_trace"] = reputation_trace
+        manip_score = _calc_avg_manip(evidence)
+        if manip_score is not None:
+            snap["manip_score"] = manip_score
     return snap
 
 
