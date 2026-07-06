@@ -846,8 +846,15 @@ def _render_overview_html(snapshots: list[dict]) -> str:
         trust = float(snap.get("trust_score", 0.0) or 0.0)
         direction = e(str(snap.get("direction", "")))
         calibrated = float(snap.get("calibrated_confidence", 0.0) or 0.0)
-        decision_state = e(str(snap.get("decision_state", "")))
+        decision_state_raw = str(snap.get("decision_state", ""))
+        decision_state = e(decision_state_raw)
         generated_at = e(str(snap.get("generated_at", "")))
+        # #101 主角數字統一：abstain/low_confidence 態主角＝校準後資訊完整度，
+        # normal 態主角＝裸均值信任分（`trust`），跟 `web.py::_conf_gauge`／
+        # React `OverviewCard`/`ConfidenceGauge` 同一套規則。
+        is_low_info = decision_state_raw in ("abstain", "low_confidence")
+        hero_value = calibrated if is_low_info else trust
+        hero_label = "資訊完整度（校準後）" if is_low_info else "信任分"
         href = _overview_card_href(coin_raw)
         tag_open = (
             f'<a class="tf-overview-card" href="{href}" '
@@ -879,9 +886,9 @@ def _render_overview_html(snapshots: list[dict]) -> str:
             tag_open
             + f'<div style="font-weight:700;pointer-events:none">{logo_html}{coin}</div>'
             f'<div style="font-size:.85rem;color:var(--tf-muted);pointer-events:none">'
-            f'信任分 {trust:.2f} · {direction}</div>'
+            f'{hero_label} {hero_value:.2f} · {direction}</div>'
             f'<div style="font-size:.75rem;color:var(--tf-muted2);pointer-events:none">'
-            f'校準信心 {calibrated:.2f} · {decision_state}</div>'
+            f'資訊完整度（校準後） {calibrated:.2f}｜裸均值信任分 {trust:.2f} · {decision_state}</div>'
             f'<div style="font-size:.7rem;color:var(--tf-muted2);pointer-events:none">'
             f'{generated_at}</div>'
             + tag_close

@@ -656,12 +656,28 @@ def _trust_bar(trust: float) -> str:
     )
 
 
-def _conf_gauge(confidence: float, label: str) -> str:
-    """整體信心視覺化：SVG 弧形 Trust Score gauge（270° 弧）+ 大字標籤。"""
-    pct = max(0.0, min(1.0, confidence))
-    if confidence >= 0.7:
+def _conf_gauge(
+    calibrated_confidence: float,
+    label: str,
+    raw_confidence: float | None = None,
+    decision_state: str = "normal",
+) -> str:
+    """資訊完整度視覺化：SVG 弧形 gauge（270° 弧）+ 大字標籤。
+
+    #101 主角數字統一：`decision_state` 為 abstain/low_confidence 時主角＝
+    校準後資訊完整度（`calibrated_confidence`）；normal 時主角＝裸均值信任分
+    （`raw_confidence`，等同 `report.confidence`／後端 `trust_score` 語意）。
+    `raw_confidence` 預設 `None`（＝沿用 `calibrated_confidence`），
+    `decision_state` 預設 `"normal"`——向後相容既有只傳 2 個位置參數的呼叫端
+    （如既有測試 `web._conf_gauge(0.91, "高信心")`），渲染結果與改動前完全一致。
+    """
+    raw = calibrated_confidence if raw_confidence is None else raw_confidence
+    is_low_info = decision_state in ("abstain", "low_confidence")
+    hero = calibrated_confidence if is_low_info else raw
+    pct = max(0.0, min(1.0, hero))
+    if hero >= 0.7:
         color = "#3fb950"
-    elif confidence >= 0.45:
+    elif hero >= 0.45:
         color = "#d9832a"
     else:
         color = "#f85149"
@@ -669,7 +685,7 @@ def _conf_gauge(confidence: float, label: str) -> str:
     circumference = 2 * math.pi * r
     arc_span = 0.75 * circumference  # 270 度弧，缺口朝下（呼應 dc-handoff 設計稿）
     arc_val = arc_span * pct
-    score100 = int(round(confidence * 100))
+    score100 = int(round(hero * 100))
     return (
         f'<div class="tf-conf-wrap" style="display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap">'
         f'<div style="position:relative;width:168px;height:168px;flex-shrink:0">'
@@ -690,7 +706,8 @@ def _conf_gauge(confidence: float, label: str) -> str:
         f'</div>'
         f'<div>'
         f'<div class="tf-conf-big" style="color:{color}">{html.escape(label)}</div>'
-        f'<div style="font-size:.85rem;color:var(--tf-muted)">整體信心指數 {confidence:.2f}</div>'
+        f'<div style="font-size:.85rem;color:var(--tf-muted)">'
+        f'資訊完整度（校準後） {calibrated_confidence:.2f}｜裸均值信任分 {raw:.2f}</div>'
         f'</div>'
         f'</div>'
     )
@@ -2565,7 +2582,12 @@ def _render_run_stats(evidence: list, log=None) -> str:
 
 
 def _render_report(
-    report, evidence, log=None, mode_extra: dict | None = None, show_json_link: bool = True
+    report,
+    evidence,
+    log=None,
+    mode_extra: dict | None = None,
+    show_json_link: bool = True,
+    show_evidence_section: bool = True,
 ) -> str:
     """分析結果渲染為信任儀表板（頂部 hero：大 gauge + Trust Breakdown 並排，
     事實→推論→結論三段階梯卡片 + 信任橫條 + 可展開 evidence）。
@@ -2593,6 +2615,15 @@ def _render_report(
     因此 comparison 場景（見 `_render_comparison`）呼叫內嵌的 `_render_report` 時傳
     `show_json_link=False`，改由 `_render_comparison` 自己用原始雙幣參數
     （`coin=A,B&type=comparison`）組出唯一一條正確的 top-level 下載連結。
+
+    `show_evidence_section`：是否渲染本函式自己的「證據清單（信任橫條 · 點擊
+    展開）」區塊。#12 殘留修復：comparison 頁面已在頂層有雙幣合併證據表
+    （見 `_render_comparison`），若內嵌的兩份單幣詳細分析各自再渲染一次同樣
+    的每列 `<details>` 展開列表，會形成外層「詳細分析」`<details>` 包住內層
+    每筆證據 `<details>` 的雙層巢狀，且同一筆證據被重複渲染兩次。因此
+    comparison 場景呼叫內嵌 `_render_report` 時傳 `show_evidence_section=False`，
+    沿用跟 `show_json_link` 相同的「頂層算好一次、內嵌關掉」模式，兩幣證據
+    仍在頂層合併表可見，不遺漏任何資訊。
     """
     e = html.escape
     # 商業級視覺（Nansen/Messari 級）：幣種標題旁附官方 LOGO（inline SVG，
@@ -2615,7 +2646,15 @@ def _render_report(
     # （confidence_label() 已含三態），避免弱證據 abstain 時裸 confidence
     # （supporting 均值恆為 0 或 >=0.5）讓信心欄仍顯示「中/高」，跟
     # market_judgment 的「資料不足、暫不判斷」矛盾。
-    conf_html = _conf_gauge(report.calibrated_confidence, report.confidence_label())
+    # #101 主角數字統一：多傳 raw_confidence/decision_state，讓 _conf_gauge
+    # 依 decision_state 切換主角（abstain/low_confidence→資訊完整度，
+    # normal→裸均值信任分），跟 React 端 ConfidenceGauge 同一套規則。
+    conf_html = _conf_gauge(
+        report.calibrated_confidence,
+        report.confidence_label(),
+        report.confidence,
+        report.decision_state,
+    )
     agg_tc = _aggregate_trust_components(evidence)
     breakdown_html = _render_trust_breakdown(agg_tc, report.confidence) if agg_tc else ""
     # 新核心#2（task #25）：多維度信任雷達——按 source kind 聚合出分維度信任分，
@@ -2632,6 +2671,18 @@ def _render_report(
         f'<p><a href="{_analyze_json_href(report.coin, report.question_type, report.question, mode_extra)}">'
         f'下載 JSON（report+evidence+log）</a></p>'
         if show_json_link else ""
+    )
+    evidence_section_html = (
+        f"""
+<div class="tf-section">
+  <h3>證據清單（信任橫條 · 點擊展開）</h3>
+  <table>
+    <tr><th>#</th><th>來源 / 摘要</th><th>信任分數</th></tr>
+    {ev_rows}
+  </table>
+</div>
+"""
+        if show_evidence_section else ""
     )
     return f"""
 <div class="tf-dash-hdr">
@@ -2669,7 +2720,7 @@ def _render_report(
 </div>
 
 <div class="tf-section">
-  <h3>信心說明 · 限制</h3>
+  <h3>資訊完整度說明 · 限制</h3>
   <ul>{limits or '<li>&#8212;</li>'}</ul>
   <h4>可能推翻結論的條件</h4>
   <ul>{flips or '<li>&#8212;</li>'}</ul>
@@ -2682,13 +2733,7 @@ def _render_report(
   <ul>{contra or '<li>&#8212;</li>'}</ul>
 </div>
 
-<div class="tf-section">
-  <h3>證據清單（信任橫條 · 點擊展開）</h3>
-  <table>
-    <tr><th>#</th><th>來源 / 摘要</th><th>信任分數</th></tr>
-    {ev_rows}
-  </table>
-</div>
+{evidence_section_html}
 
 {cost_html}
 
@@ -2791,20 +2836,34 @@ def _render_comparison(
     HIGH 根治修復（連結構造根因，見 `_render_report`/`_analyze_json_href`）：
     coin/type/query 一律跟 `mode_extra` 併成同一個 dict、一次 `urlencode`，不再
     逐段 `html.escape` 串接——`query` 含 `& + # % "` 或非 ASCII 中文時同樣受影響。
+
+    #12 殘留修復（雙層巢狀 details）：本函式頂層已有雙幣合併證據清單（見下方
+    「2. 合併證據清單」表），內嵌呼叫 `_render_report(..., show_evidence_section=False)`
+    關掉各自的「證據清單」區塊，避免同一筆證據被渲染兩次、也避免外層
+    「詳細分析」`<details>` 包住內層每筆證據 `<details>` 形成雙層巢狀。
     """
     e = html.escape
     dir_a = report_a.direction or report_a._direction_label()
     dir_b = report_b.direction or report_b._direction_label()
 
-    def _cmp_conf(conf: float, label: str) -> str:
-        pct = max(0, min(100, int(conf * 100)))
-        color = "#3fb950" if conf >= 0.7 else "#d9832a" if conf >= 0.45 else "#f85149"
+    def _cmp_conf(calibrated: float, raw: float, decision_state: str, label: str) -> str:
+        """#101 主角數字統一：abstain/low_confidence 態主角＝校準後資訊完整度，
+        normal 態主角＝裸均值信任分（`raw`，等同 `report.confidence`），跟
+        `_conf_gauge`／React `ConfidenceGauge`/`OverviewCard` 同一套規則。
+        副標一律雙數字並列並各自掛標籤。
+        """
+        is_low_info = decision_state in ("abstain", "low_confidence")
+        hero = calibrated if is_low_info else raw
+        pct = max(0, min(100, int(hero * 100)))
+        color = "#3fb950" if hero >= 0.7 else "#d9832a" if hero >= 0.45 else "#f85149"
         return (
             f'<span style="color:{color};font-weight:600">{html.escape(label)}'
-            f"（{conf:.2f}）</span>"
+            f"（{hero:.2f}）</span>"
             f'<div class="tf-bar-wrap" style="width:100px;margin-top:3px">'
             f'<div class="tf-bar" style="width:{pct}%;background:{color}"></div>'
             f"</div>"
+            f'<div style="font-size:.75rem;color:var(--tf-muted2);margin-top:2px">'
+            f'資訊完整度（校準後） {calibrated:.2f}｜裸均值信任分 {raw:.2f}</div>'
         )
 
     src_a = len({ev.source for ev in evidence_a})
@@ -2839,9 +2898,9 @@ def _render_comparison(
   <table>
     <tr><th>項目</th><th>{e(report_a.coin)}</th><th>{e(report_b.coin)}</th></tr>
     <tr><td>市場方向</td><td>{e(dir_a)}</td><td>{e(dir_b)}</td></tr>
-    <tr><td>整體信心</td>
-        <td>{_cmp_conf(report_a.calibrated_confidence, report_a.confidence_label())}</td>
-        <td>{_cmp_conf(report_b.calibrated_confidence, report_b.confidence_label())}</td></tr>
+    <tr><td>資訊完整度</td>
+        <td>{_cmp_conf(report_a.calibrated_confidence, report_a.confidence, report_a.decision_state, report_a.confidence_label())}</td>
+        <td>{_cmp_conf(report_b.calibrated_confidence, report_b.confidence, report_b.decision_state, report_b.confidence_label())}</td></tr>
     <tr><td>獨立來源數</td><td>{src_a}</td><td>{src_b}</td></tr>
     <tr><td>反方訊號數</td><td>{len(report_a.contrarian)}</td><td>{len(report_b.contrarian)}</td></tr>
   </table>
@@ -2861,10 +2920,10 @@ def _render_comparison(
 {json_link_html}
 
 <details class="tf-section"><summary>&#9654; {e(report_a.coin)} 詳細分析</summary>
-{_render_report(report_a, evidence_a, show_json_link=False)}
+{_render_report(report_a, evidence_a, show_json_link=False, show_evidence_section=False)}
 </details>
 <details class="tf-section"><summary>&#9654; {e(report_b.coin)} 詳細分析</summary>
-{_render_report(report_b, evidence_b, show_json_link=False)}
+{_render_report(report_b, evidence_b, show_json_link=False, show_evidence_section=False)}
 </details>
 """
 
