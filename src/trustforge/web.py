@@ -2888,17 +2888,32 @@ def _apply_live_token_header(qs: dict, headers) -> None:
       工作坊既有 demo 腳本不斷線），但 log warning 提醒遷移。
     - 兩者都沒帶：不動 `qs`（沿用預設空字串，`_is_live_request` 照舊判定
       為不成立 live）。
+
+    codex/harper 雙審（PR #99 MEDIUM）：只要 query 帶了非空 `token` 就一定
+    log warning，不論 header 是否同時有值、是否會覆寫掉它——query token
+    一旦出現在 URL 上，就**已經**外洩進 access log／`Referer`，這個風險跟
+    header 最終有沒有生效無關；遷移期若只在「header 沒帶」才 warn，會漏掉
+    「新舊參數同時帶」這種過渡期最常見的情境，追蹤不到誰還沒把舊參數拔掉。
+    warning 訊息本身不印 token 值，避免 log 本身變成另一個外洩管道。
+
+    已知風險（本 PR 不修，另開 ticket）：這裡正規化後寫回的 `qs["token"]`
+    （不論來源是 header 還是 query）之後會被 `_mode_extra_params()` 原樣
+    讀出、拼進頁面「自我連結」（如 `/analyze.json?...&token=...`）的 URL
+    裡回吐給前端——也就是說即使呼叫端改用 header 傳 token，只要伺服器端把
+    它塞回自我連結，還是會讓 token 重新出現在 URL／HTML 裡，回到跟 query
+    版本一樣的外洩面（access log／Referer／使用者複製分享連結）。這是既有
+    `_mode_extra_params` 邏輯的行為，非本次改動引入；本 PR 只在輸入端做
+    header 優先 + 相容 warning，不動輸出端。
     """
     header_token = ""
     if headers is not None:
         header_token = (headers.get("X-Live-Token") or "").strip()
-    if header_token:
-        qs["token"] = [header_token]
-        return
     if qs.get("token", [""])[0]:
         logging.warning(
             "TrustForge: query token 已棄用，改用 X-Live-Token header"
         )
+    if header_token:
+        qs["token"] = [header_token]
 
 
 def _is_live_request(qs: dict) -> bool:

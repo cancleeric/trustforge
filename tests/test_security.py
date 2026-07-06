@@ -607,8 +607,35 @@ def test_main_respects_bind_host_when_trust_proxy_off(monkeypatch):
 
 
 def test_apply_live_token_header_prefers_header_over_query(caplog):
-    """header 有值 → 覆寫 qs["token"]，即使 query 也帶了不同的 token，且不 warn。"""
+    """header 有值 → 覆寫 qs["token"]，即使 query 也帶了不同的 token 且被覆寫掉，
+    仍然生效的是 header 版本。"""
     qs = {"token": ["old-query-token"]}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {"X-Live-Token": "new-header-token"})
+    assert qs["token"] == ["new-header-token"]
+
+
+def test_apply_live_token_header_header_and_query_both_present_still_warns(caplog):
+    """codex/harper 雙審（PR #99 MEDIUM）：header 跟 query 同時帶 token（過渡期
+    最常見情境），header 覆寫生效，但 query token 已經進了 URL／access log／
+    Referer，外洩風險跟 header 有沒有生效無關——仍必須 log deprecation
+    warning 才能在遷移期追蹤到誰還沒把舊參數拔掉；warning 內容不含 token 值。"""
+    qs = {"token": ["old-query-token"]}
+    with caplog.at_level(logging.WARNING):
+        web._apply_live_token_header(qs, {"X-Live-Token": "new-header-token"})
+    assert qs["token"] == ["new-header-token"], "header 仍應優先生效"
+    warnings = [r.message for r in caplog.records if "已棄用" in r.message]
+    assert warnings, f"header/query 同時帶時仍應 log deprecation warning，實際 {caplog.records!r}"
+    assert all(
+        "old-query-token" not in msg and "new-header-token" not in msg
+        for msg in warnings
+    ), "warning 訊息不應包含任何 token 值"
+
+
+def test_apply_live_token_header_header_present_query_empty_no_warning(caplog):
+    """header 有值、query 完全沒帶 token（非「同時帶」的情境）→ 沒有 query token
+    可外洩，不需要 warn。"""
+    qs = {}
     with caplog.at_level(logging.WARNING):
         web._apply_live_token_header(qs, {"X-Live-Token": "new-header-token"})
     assert qs["token"] == ["new-header-token"]
@@ -641,6 +668,28 @@ def test_apply_live_token_header_handles_missing_headers_object():
     qs = {"token": ["legacy-token"]}
     web._apply_live_token_header(qs, None)
     assert qs["token"] == ["legacy-token"]
+
+
+def test_mode_extra_params_still_leaks_token_into_self_link_known_risk(monkeypatch):
+    """harper（PR #99 小項）：這是**已知風險鎖定測試**，不是要求的行為，只是
+    鎖住現況——`_mode_extra_params()`（既有邏輯，非本 PR 引入）目前仍會把
+    `qs["token"]`（不論來源是 header 正規化後寫回、還是舊 query）原樣塞進
+    自我連結（如 `/analyze.json?...&token=...`）回吐給前端，等於把 token
+    重新暴露進 URL／HTML，回到跟 query 版本一樣的外洩面（access log／
+    Referer／使用者複製分享連結）。修復另有 ticket（CEO 開），這裡只斷言
+    現況行為沒有被未來的改動誤動到語意——若有人「順手」把這裡改成不回吐
+    token，這個測試會失敗，提醒去對照 fast-follow ticket 再決定要不要
+    連帶更新這個鎖定測試。"""
+    monkeypatch.setattr(web, "HAS_BEDROCK", True)
+    monkeypatch.setattr(web, "LIVE_TOKEN", "secret-token-value")
+
+    qs = {"live": ["1"], "token": ["secret-token-value"]}
+    extra = web._mode_extra_params(qs)
+
+    assert extra == {"live": "1", "token": "secret-token-value"}, (
+        "已知風險鎖定：_mode_extra_params 目前仍把 token 原樣回吐進自我連結參數，"
+        "本 PR 不修（修復另有 ticket），此斷言只是防止語意被未來改動誤改而不自知"
+    )
 
 
 def test_do_get_api_analyze_prefers_header_token_over_query(monkeypatch):
