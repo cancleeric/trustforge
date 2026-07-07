@@ -7,6 +7,11 @@
 #   3. update-in-place 對「本來沒有這些 env」的舊實例也會補上（不是只在首次
 #      建置才有）。
 #   4. zip 封包含 scripts/（否則 timer 在 EC2 上會找不到 fetch_scheduler.py）。
+#   5. 管理控制台 PR-5：TRUSTFORGE_ADMIN_TOKEN / TRUSTFORGE_LIVE_TOKEN /
+#      TRUSTFORGE_BEDROCK_DAILY_USD_CAP 三個 env 有值時寫入 systemd、未設時
+#      不寫（fail-closed）且 update-in-place 會把殘留的舊行整行刪除；不合法
+#      token 字元（注入防護）fail-fast；nginx react conf 的 /api/admin/
+#      location 結構（X-Real-IP/XFF 覆寫 + no-store + allowlist 預設註解）。
 #
 # 用法：bash deploy/test_deploy_ec2.sh（在 repo 根目錄或 deploy/ 底下皆可）
 set -euo pipefail
@@ -34,6 +39,106 @@ assert_file_contains() {
     PASS=$((PASS + 1))
   else
     echo "  [FAIL] $desc — 檔案 $file 找不到: $needle"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_not_contains() {
+  # fail-closed 斷言：needle **不得**出現（管理控制台 PR-5：未設 token 時
+  # 「不寫該行」——出現任何一行都算失敗）。
+  local haystack="$1" needle="$2" desc="$3"
+  if grep -qF -- "$needle" <<<"$haystack"; then
+    echo "  [FAIL] $desc — 不該出現卻出現了: $needle"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  fi
+}
+
+assert_unit_env_lines() {
+  # 結構化解析 user-data 裡 trustforge.service 的 heredoc 區塊（不是肉眼
+  # grep 整份 user-data）：斷言指定的 Environment 行「以獨立一行」存在於
+  # unit 區塊內、且 ExecStart 行本身是乾淨獨立一行（抓 ${EXTRA_UNIT_ENV}
+  # 嵌在 ExecStart 前若拼接出錯會黏成同一行的 bug）。
+  local desc="$1" ud_file="$2" expected_csv="$3"
+  local result
+  result=$(python3 - "$ud_file" "$expected_csv" <<'PYEOF'
+import sys
+
+path, expected_csv = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    lines = f.read().splitlines()
+try:
+    start = lines.index("cat > /etc/systemd/system/trustforge.service <<UNIT")
+    end = lines.index("UNIT", start)
+except ValueError:
+    print("NOUNITBLOCK")
+    sys.exit(0)
+unit = lines[start + 1 : end]
+problems = []
+for want in [w for w in expected_csv.split(";") if w]:
+    if want not in unit:
+        problems.append("缺獨立行:" + want)
+if "ExecStart=/usr/bin/python3 -m trustforge.web" not in unit:
+    problems.append("ExecStart 行不乾淨（可能被 EXTRA_UNIT_ENV 黏住）")
+print("MATCH" if not problems else "MISMATCH:" + "|".join(problems))
+PYEOF
+)
+  if [ "$result" = "MATCH" ]; then
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $desc — $result"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_nginx_admin_location() {
+  # 結構化解析 nginx conf 的 `location /api/admin/` 區塊（大括號配對，不是
+  # 對整份檔案 grep——避免斷言到別的 location 裡剛好也有的指令）：斷言
+  # harper 條件 A + M1 的硬化指令都在區塊內、allowlist 預設是註解狀態
+  # （區塊內不得有未註解的 allow/deny）。
+  local desc="$1" conf="$2" needle_csv="$3"
+  local result
+  result=$(python3 - "$conf" "$needle_csv" <<'PYEOF'
+import sys
+
+path, needle_csv = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    lines = f.read().splitlines()
+block, inside = [], False
+for line in lines:
+    stripped = line.strip()
+    if not inside and stripped.startswith("location /api/admin/"):
+        inside = True
+        continue
+    if inside:
+        # 該 location 內沒有巢狀 block（一行一指令、右大括號獨立成行），
+        # 首個獨立 "}" 即區塊結束。
+        if stripped == "}":
+            break
+        block.append(stripped)
+if not inside:
+    print("NOLOCATION")
+    sys.exit(0)
+directives = [l for l in block if l and not l.startswith("#")]
+problems = []
+# needle 以換行分隔（nginx 指令本身含分號，不能用分號當分隔符）
+for want in [w.strip() for w in needle_csv.split("\n") if w.strip()]:
+    if want not in directives:
+        problems.append("缺指令:" + want)
+for d in directives:
+    if d.startswith("allow ") or d.startswith("deny "):
+        problems.append("allowlist 不該預設啟用（未註解）:" + d)
+print("MATCH" if not problems else "MISMATCH:" + "|".join(problems))
+PYEOF
+)
+  if [ "$result" = "MATCH" ]; then
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $desc — $result"
     FAIL=$((FAIL + 1))
   fi
 }
@@ -295,7 +400,7 @@ case "$ALL" in
   "s3 cp"*)
     exit 0 ;;
   "ec2 describe-instances --region"*"Reservations[].Instances[].[InstanceId,State.Name]"*)
-    if [ "$SCENARIO" = "update-in-place" ] || [ "$SCENARIO" = "scheduler-fail" ]; then
+    if [ "$SCENARIO" = "update-in-place" ] || [ "$SCENARIO" = "scheduler-fail" ] || [ "$SCENARIO" = "admin-env-update" ]; then
       printf 'i-0123456789abcdef0\trunning\n'
     else
       printf ''
@@ -390,11 +495,16 @@ chmod +x "$MOCKDIR/aws"
 
 run_deploy() {
   local scenario="$1"
+  shift || true
   # ssm_call_count 是「這次部署送了幾次 ssm send-command」的計數器，每個
   # scenario 各自從 1 開始編號（call1=主設定或首次驗證、call2=update-in-place
   # 額外的 fetch-scheduler 同步驗證），開跑前先清掉避免跨場景疊加。
+  # 管理控制台 PR-5：預設用 `env -u` 隔離外層可能殘留的三個 admin env（避免
+  # 開發機環境讓「未設＝不寫行」的 fail-closed 斷言假 PASS/假 FAIL）；token
+  # 場景用額外參數顯式帶入（例：run_deploy admin-env-first TRUSTFORGE_ADMIN_TOKEN=x）。
   rm -f "$CAPTURE/ssm_call_count"
   TF_TEST_SCENARIO="$scenario" TF_TEST_CAPTURE_DIR="$CAPTURE" PATH="$MOCKDIR:$PATH" \
+    env -u TRUSTFORGE_ADMIN_TOKEN -u TRUSTFORGE_LIVE_TOKEN -u TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$@" \
     bash "$REPO_ROOT/deploy/deploy_ec2.sh" >"$CAPTURE/stdout_$scenario.log" 2>&1
 }
 
@@ -423,6 +533,11 @@ else
   assert_contains "$UD_CONTENT" "systemctl enable --now fetch-scheduler.timer" "user-data: 有 enable --now timer"
   # BEDROCK_MODEL_ID 仍走 \${VAR-} fail-safe，離線測試環境未設 → 應為空
   assert_contains "$UD_CONTENT" "Environment=BEDROCK_MODEL_ID=" "user-data: BEDROCK_MODEL_ID 行仍存在（fail-safe 未動）"
+  # 管理控制台 PR-5 fail-closed：三個 admin env 未設時「不寫該行」（不是寫
+  # 空值行）——admin/live 面在 web.py 端因 env 缺席而全關。
+  assert_not_contains "$UD_CONTENT" "Environment=TRUSTFORGE_ADMIN_TOKEN" "user-data: 未設 TRUSTFORGE_ADMIN_TOKEN → 不寫該行（fail-closed）"
+  assert_not_contains "$UD_CONTENT" "Environment=TRUSTFORGE_LIVE_TOKEN" "user-data: 未設 TRUSTFORGE_LIVE_TOKEN → 不寫該行（fail-closed）"
+  assert_not_contains "$UD_CONTENT" "Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP" "user-data: 未設 TRUSTFORGE_BEDROCK_DAILY_USD_CAP → 不寫該行（吃 budget_guard DEFAULT）"
 fi
 
 # zip 內容檢查（scripts/ 是否有打包進去，否則 timer 在 EC2 上找不到檔案）
@@ -640,6 +755,11 @@ with open('$CAPTURE/remote_script.sh', 'w') as f:
   assert_contains "$REMOTE" 'cat > /etc/systemd/system/fetch-scheduler.timer' "update-in-place: 重寫 fetch-scheduler.timer"
   assert_contains "$REMOTE" 'systemctl enable --now fetch-scheduler.timer' "update-in-place: 確認 timer enabled"
   assert_contains "$REMOTE" 'Environment=AWS_REGION=ap-southeast-2' "update-in-place: fetch-scheduler.service 帶 AWS_REGION（顯式，不吃 cache.py 預設 us-east-1）"
+  # 管理控制台 PR-5 fail-closed：未設三個 admin env 時，update-in-place 要
+  # 把（前次部署可能殘留的）該行**整行刪除**——不是留舊值、也不是寫空值。
+  assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_ADMIN_TOKEN=/d" /etc/systemd/system/trustforge.service' "update-in-place: 未設 ADMIN_TOKEN → 刪除殘留行（fail-closed）"
+  assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_LIVE_TOKEN=/d" /etc/systemd/system/trustforge.service' "update-in-place: 未設 LIVE_TOKEN → 刪除殘留行（fail-closed）"
+  assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=/d" /etc/systemd/system/trustforge.service' "update-in-place: 未設 DAILY_USD_CAP → 刪除殘留行（回到 config/DEFAULT 層）"
 
   # 功能性驗證：4 個 ensure-env 邏輯對「舊實例（完全沒有這些行）」是插入、
   # 對「已經有（值不同）」是取代，且冪等不重複——用真的 GNU sed 語意跑一次
@@ -660,6 +780,8 @@ with open('$CAPTURE/remote_script.sh', 'w') as f:
   fi
   if [ "$USE_GNU_SED" = "1" ]; then
     FAKE_UNIT=$(mktemp)
+    # 管理控制台 PR-5：預埋三行「上次部署殘留的」admin env（stale 值），驗證
+    # 未設 env 的這次部署會把它們整行刪掉（fail-closed），不是留著繼續有效。
     cat > "$FAKE_UNIT" <<'UNITEOF'
 [Unit]
 Description=TrustForge web
@@ -670,6 +792,9 @@ Environment=TRUSTFORGE_HOME=/opt/trustforge
 Environment=AWS_REGION=ap-southeast-2
 Environment=BEDROCK_MODEL_ID=
 Environment=PYTHONPATH=/opt/trustforge
+Environment=TRUSTFORGE_ADMIN_TOKEN=stale-admin-token
+Environment=TRUSTFORGE_LIVE_TOKEN=stale-live-token
+Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=99
 ExecStart=/usr/bin/python3 -m trustforge.web
 Restart=always
 [Install]
@@ -682,6 +807,13 @@ UNITEOF
       bash -c "$LINE"
       bash -c "$LINE"  # 跑兩次驗證冪等
     done
+    # 刪除行（未設 admin env 的 fail-closed 分支）也真的跑一遍
+    DELETE_LINES=$(grep -n '^sed -i "/^Environment=TRUSTFORGE_' "$CAPTURE/remote_script.sh" | cut -d: -f1)
+    for lineno in $DELETE_LINES; do
+      LINE=$(printf '%s\n' "$PATCHED" | sed -n "${lineno}p")
+      bash -c "$LINE"
+      bash -c "$LINE"  # 跑兩次驗證冪等（第二次刪不存在的行也不能爆）
+    done
     DUP_OK=1
     for key in CACHE_BACKEND TRUSTFORGE_CACHE_TABLE TRUSTFORGE_COST_LEDGER_TABLE COST_LEDGER_BACKEND; do
       COUNT=$(grep -c "^Environment=$key=" "$FAKE_UNIT")
@@ -690,8 +822,14 @@ UNITEOF
         DUP_OK=0
       fi
     done
+    for key in TRUSTFORGE_ADMIN_TOKEN TRUSTFORGE_LIVE_TOKEN TRUSTFORGE_BEDROCK_DAILY_USD_CAP; do
+      if grep -q "^Environment=$key=" "$FAKE_UNIT"; then
+        echo "  [FAIL] update-in-place 未設 $key，但殘留的舊行沒被刪掉（fail-closed 失效）"
+        DUP_OK=0
+      fi
+    done
     if [ "$DUP_OK" = "1" ]; then
-      echo "  [PASS] update-in-place ensure-env 對「完全沒有這些行的舊實例」插入正確、重跑冪等不重複"
+      echo "  [PASS] update-in-place ensure-env 插入正確、重跑冪等不重複；未設 admin env 的殘留行真的被刪掉（fail-closed）"
       PASS=$((PASS + 1))
     else
       FAIL=$((FAIL + 1))
@@ -789,6 +927,184 @@ else
     PASS=$((PASS + 1))
   fi
 fi
+
+echo
+echo "== 場景 6：管理控制台 PR-5——admin env 有值（首次建置）→ 寫入 systemd unit =="
+if run_deploy "admin-env-first" \
+     TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1 \
+     TRUSTFORGE_LIVE_TOKEN=test-live-token.B2 \
+     TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1; then
+  echo "  deploy_ec2.sh 執行成功（exit 0）"
+else
+  echo "  [FAIL] admin-env-first 場景非零結束"
+  cat "$CAPTURE/stdout_admin-env-first.log"
+  FAIL=$((FAIL + 1))
+fi
+assert_unit_env_lines \
+  "user-data: 三個 admin env 以獨立行寫入 trustforge.service unit 區塊（結構化解析，非整檔 grep；ExecStart 行未被黏住）" \
+  "$CAPTURE/user_data.sh" \
+  "Environment=TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1;Environment=TRUSTFORGE_LIVE_TOKEN=test-live-token.B2;Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1"
+assert_file_contains "$CAPTURE/stdout_admin-env-first.log" "token 會殘留在 user-data" \
+  "首次建置帶 token 時有印 user-data 殘留警語（建議改走 update-in-place）"
+
+echo
+echo "== 場景 7：管理控制台 PR-5——admin env 有值（update-in-place）→ SSM sed reconcile 寫入 =="
+if run_deploy "admin-env-update" \
+     TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1 \
+     TRUSTFORGE_LIVE_TOKEN=test-live-token.B2 \
+     TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1; then
+  echo "  deploy_ec2.sh 執行成功（exit 0）"
+else
+  echo "  [FAIL] admin-env-update 場景非零結束"
+  cat "$CAPTURE/stdout_admin-env-update.log"
+  FAIL=$((FAIL + 1))
+fi
+SSM_ADMIN_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+if [ -z "$SSM_ADMIN_RAW" ]; then
+  echo "  [FAIL] admin-env-update：沒捕捉到主設定 ssm send-command 的 --parameters"
+  FAIL=$((FAIL + 1))
+else
+  SSM_ADMIN_JSON="${SSM_ADMIN_RAW#commands=}"
+  echo "$SSM_ADMIN_JSON" > "$CAPTURE/ssm_admin.json"
+  # ADMIN_ENV_CMDS 是動態拼進 commands JSON 的片段——最容易壞的就是 JSON
+  # 本身（引號/逗號拼錯），所以跟場景 2 一樣先驗 JSON 合法 + 還原腳本
+  # bash -n，再驗內容。
+  if python3 -c "
+import json
+with open('$CAPTURE/ssm_admin.json') as f:
+    cmds = json.load(f)
+assert isinstance(cmds, list) and len(cmds) > 5, 'commands 陣列太短或格式不對'
+script = chr(10).join(cmds)
+with open('$CAPTURE/remote_script_admin.sh', 'w') as f:
+    f.write(script)
+" 2>"$CAPTURE/json_admin_err.txt"; then
+    echo "  [PASS] admin-env-update：含 ADMIN_ENV_CMDS 片段的 SSM commands 仍是合法 JSON 陣列"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] admin-env-update：SSM commands JSON 解析失敗："
+    cat "$CAPTURE/json_admin_err.txt"
+    FAIL=$((FAIL + 1))
+  fi
+  if bash -n "$CAPTURE/remote_script_admin.sh" 2>"$CAPTURE/bashn_admin_err.txt"; then
+    echo "  [PASS] admin-env-update：還原出的遠端腳本 bash -n 語法合法"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] admin-env-update：還原出的遠端腳本語法錯誤："
+    cat "$CAPTURE/bashn_admin_err.txt"
+    FAIL=$((FAIL + 1))
+  fi
+
+  REMOTE_ADMIN=$(cat "$CAPTURE/remote_script_admin.sh" 2>/dev/null || echo "")
+  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1|" /etc/systemd/system/trustforge.service' "admin-env-update: ADMIN_TOKEN ensure（sed 取代帶正確值）"
+  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_LIVE_TOKEN=test-live-token.B2|" /etc/systemd/system/trustforge.service' "admin-env-update: LIVE_TOKEN ensure（sed 取代帶正確值）"
+  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1|" /etc/systemd/system/trustforge.service' "admin-env-update: DAILY_USD_CAP ensure（sed 取代帶正確值）"
+  assert_not_contains "$REMOTE_ADMIN" 'sed -i "/^Environment=TRUSTFORGE_ADMIN_TOKEN=/d"' "admin-env-update: 有值時不該出現 ADMIN_TOKEN 刪除行"
+  assert_not_contains "$REMOTE_ADMIN" 'sed -i "/^Environment=TRUSTFORGE_LIVE_TOKEN=/d"' "admin-env-update: 有值時不該出現 LIVE_TOKEN 刪除行"
+  assert_not_contains "$REMOTE_ADMIN" 'sed -i "/^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=/d"' "admin-env-update: 有值時不該出現 DAILY_USD_CAP 刪除行"
+
+  # 功能性驗證（同場景 2 的 GNU sed 慣例）：對「完全沒有 admin env 行的
+  # 舊實例 unit」實跑 ensure 邏輯，斷言插入正確、值正確、重跑冪等。
+  if [ "${USE_GNU_SED:-0}" = "1" ]; then
+    FAKE_UNIT_A=$(mktemp)
+    cat > "$FAKE_UNIT_A" <<'UNITEOF'
+[Unit]
+Description=TrustForge web
+[Service]
+Environment=PORT=80
+Environment=BEDROCK_MODEL_ID=
+Environment=PYTHONPATH=/opt/trustforge
+ExecStart=/usr/bin/python3 -m trustforge.web
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+    ENSURE_LINES_A=$(grep -n '^if grep -q' "$CAPTURE/remote_script_admin.sh" | cut -d: -f1)
+    PATCHED_A=$(sed "s#/etc/systemd/system/trustforge.service#$FAKE_UNIT_A#g" "$CAPTURE/remote_script_admin.sh")
+    for lineno in $ENSURE_LINES_A; do
+      LINE=$(printf '%s\n' "$PATCHED_A" | sed -n "${lineno}p")
+      bash -c "$LINE"
+      bash -c "$LINE"  # 跑兩次驗證冪等
+    done
+    ADMIN_ENV_OK=1
+    for kv in "TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1" "TRUSTFORGE_LIVE_TOKEN=test-live-token.B2" "TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1"; do
+      COUNT=$(grep -cF "Environment=$kv" "$FAKE_UNIT_A" || true)
+      if [ "$COUNT" != "1" ]; then
+        echo "  [FAIL] admin-env-update 實跑後 Environment=$kv 出現 $COUNT 次（應為 1）"
+        ADMIN_ENV_OK=0
+      fi
+    done
+    if [ "$ADMIN_ENV_OK" = "1" ]; then
+      echo "  [PASS] admin-env-update：三個 admin env 對舊 unit 實跑插入正確、值正確、重跑冪等不重複"
+      PASS=$((PASS + 1))
+    else
+      FAIL=$((FAIL + 1))
+    fi
+    rm -f "$FAKE_UNIT_A"
+  else
+    echo "  [SKIP] 本機 sed 非 GNU sed，略過 admin env ensure 實跑驗證（同場景 2 的 SKIP 理由）"
+  fi
+fi
+
+echo
+echo "== 場景 8：管理控制台 PR-5——token 含不安全字元 → 本機 fail-fast（注入防護）=="
+# token 值會被嵌進 SSM commands JSON 與遠端 root shell 的 sed 取代式：含引
+# 號/管線/分號等字元必須在打任何 AWS API 之前就中止（不能等到遠端才炸）。
+if run_deploy "bad-token" TRUSTFORGE_ADMIN_TOKEN='evil"tok;en'; then
+  echo "  [FAIL] token 含引號/分號仍回報成功（注入防護失效）——不可接受"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] token 含不安全字元時，deploy_ec2.sh 正確地非零結束"
+  PASS=$((PASS + 1))
+  assert_file_contains "$CAPTURE/stdout_bad-token.log" "不允許字元" "錯誤訊息明確指出字元集限制"
+fi
+if run_deploy "bad-cap" TRUSTFORGE_BEDROCK_DAILY_USD_CAP='1;rm -rf /'; then
+  echo "  [FAIL] cap 含非數字字元仍回報成功（注入防護失效）——不可接受"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] cap 含非數字字元時，deploy_ec2.sh 正確地非零結束"
+  PASS=$((PASS + 1))
+  assert_file_contains "$CAPTURE/stdout_bad-cap.log" "必須是十進位數字" "錯誤訊息明確指出 cap 格式限制"
+fi
+
+echo
+echo "== nginx /api/admin/ 硬化結構檢查（harper 條件 A + M1，管理控制台 PR-5）=="
+# 結構化解析 deploy/nginx.conf（react TLS 版）的 /api/admin/ location 區塊：
+# X-Real-IP/X-Forwarded-For 無條件 $remote_addr 覆寫（admin per-IP lockout
+# 完整性）、no-store（設定快照不快取）、HSTS 重補（add_header 繼承全有全
+# 無）、allowlist 範本預設註解（不硬編 IP）。
+assert_nginx_admin_location \
+  "nginx.conf（react TLS）/api/admin/ location：proxy + IP 覆寫 + no-store + HSTS 重補齊備，allowlist 預設註解" \
+  "$REPO_ROOT/deploy/nginx.conf" \
+  'proxy_pass http://127.0.0.1:8080/api/admin/;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_no_cache 1;
+proxy_cache_bypass 1;
+add_header Cache-Control "no-store" always;
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
+# react-http（明碼）模式：管理面視為禁用——conf 不得提供 /api/admin/
+# location（不給「看起來可用」的明碼管理面），且要有勿設 token 的警語。
+if grep -q "location /api/admin/" "$REPO_ROOT/deploy/nginx-react-http.conf"; then
+  echo "  [FAIL] nginx-react-http.conf（明碼）不該有 /api/admin/ location（管理面在該模式視為禁用）"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] nginx-react-http.conf（明碼）沒有 /api/admin/ location（管理面禁用，符合 harper 條件 A）"
+  PASS=$((PASS + 1))
+fi
+assert_file_contains "$REPO_ROOT/deploy/nginx-react-http.conf" "勿設 TRUSTFORGE_ADMIN_TOKEN" \
+  "nginx-react-http.conf 有「明碼模式勿設 TRUSTFORGE_ADMIN_TOKEN」警語"
+assert_file_contains "$REPO_ROOT/deploy/README.md" "勿設" \
+  "deploy/README.md 有 react-http 模式管理面禁用警語"
+# 憑證邊界鐵則：deploy_ec2.sh 對三個 admin env 只能是 \${VAR-} 純 env 傳遞
+# （無 :-default 寫死值）——腳本本體不得含任何 token 實際值。
+for var in TRUSTFORGE_ADMIN_TOKEN TRUSTFORGE_LIVE_TOKEN TRUSTFORGE_BEDROCK_DAILY_USD_CAP; do
+  if grep -Eq "\\\$\{$var:?-[^}]" "$REPO_ROOT/deploy/deploy_ec2.sh"; then
+    echo "  [FAIL] deploy_ec2.sh 對 $var 寫了預設值（違反憑證邊界：值只能由部署 env 傳入）"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] deploy_ec2.sh 對 $var 無寫死預設值（\${VAR-} 純 env 傳遞）"
+    PASS=$((PASS + 1))
+  fi
+done
 
 echo
 echo "== 結果：PASS=$PASS FAIL=$FAIL =="

@@ -461,3 +461,64 @@ bash deploy/test_nginx_legacy_tls_conf.sh
 重建實例。憑證已存在時自動改用 `nginx-legacy-tls.conf`（443 服務、保留
 HSTS，codex 複審 HIGH：HSTS-safe rollback，見上方「nginx conf 四個變體」）；
 pre-cert 現況仍是 HTTP-only 版，行為不變。
+
+## 管理控制台部署銜接（admin/live token + cap env，管理控制台 PR-5）
+
+### token / cap 怎麼進 systemd（`deploy_ec2.sh`）
+
+`deploy_ec2.sh` 支援三個**由部署當下 shell env 傳入**的變數（⛔ 憑證邊界
+鐵則：腳本與 repo **不含任何 token 實際值**，值由老闆部署時提供）：
+
+| env | 用途 | 未設時（fail-closed） |
+|-----|------|------------------------|
+| `TRUSTFORGE_ADMIN_TOKEN` | 管理面（`/admin` + `/api/admin/*`）opt-in | 不寫該 Environment 行 → `web.py` 管理面全關（404） |
+| `TRUSTFORGE_LIVE_TOKEN` | live 閘 opt-in | 不寫該行 → live 關 |
+| `TRUSTFORGE_BEDROCK_DAILY_USD_CAP` | config store 未設 cap 時的 env fallback 層（`budget_guard.py` 三層順序：config → env → DEFAULT） | 不寫該行 → 吃 DEFAULT |
+
+語意跟 `BEDROCK_MODEL_ID` 的 `${VAR-}` 慣例一致：「未設＝該行完全不寫進
+`trustforge.service`」，**不是寫空值**。update-in-place（既有實例）路徑會
+每次部署 reconcile 這三行——有值＝取代/插入、未設＝**整行刪除**（換言之
+「這次部署沒帶 token」會把上次的 token 行拿掉，管理面回到全關，不會殘留
+舊 token 繼續有效）。
+
+```bash
+# 例：帶 admin token + 日 cap $1 部署（值請老闆當場提供，勿寫進任何檔案）
+TRUSTFORGE_ADMIN_TOKEN=<老闆提供> TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1 \
+  bash deploy/deploy_ec2.sh
+```
+
+注意事項：
+
+- token 值僅接受 `[A-Za-z0-9._~-]`（cap 僅接受十進位數字）——值會被嵌進
+  SSM 遠端指令，含引號/管線等字元一律在本機 fail-fast 中止（注入防護）。
+- ⚠️ **帶 token 建議走 update-in-place**（SSM 直改 unit 檔）：首次建置路徑
+  token 會經 user-data 寫入，殘留在 instance user-data（
+  `ec2:DescribeInstanceAttribute` 可讀）。先離線建機、再帶 token 重跑本
+  腳本（偵測到既有實例即自動走 update-in-place）。
+- token 換發/撤銷：帶新值（或不帶）重跑 `deploy_ec2.sh` 即可，unit 檔會被
+  reconcile + `systemctl restart trustforge`。
+
+### ⛔ /admin 只准在 TLS 模式使用（harper CISO 條件 A）
+
+admin token 走 `X-Admin-Token` header——**明碼 HTTP 下 token 會明文過線**。
+規則：
+
+- 管理面只准在 **TLS 模式**（`nginx.conf` react 版，或 SSR 回滾時的
+  `nginx-legacy-tls.conf`）下使用。
+- **`nginx-react-http.conf`（明碼）模式下管理面視為禁用——該模式勿設
+  `TRUSTFORGE_ADMIN_TOKEN`**（web.py 未設 token = 管理面 fail-closed 全關，
+  正是該模式該有的狀態）。該 conf 也刻意不含 `/api/admin/` location。
+
+### nginx `/api/admin/` 硬化（`deploy/nginx.conf`，harper 條件 A + M1）
+
+react TLS 版 conf 有專屬 `location /api/admin/`（最長前綴優先於 `/api/`）：
+
+- `X-Real-IP`／`X-Forwarded-For` **無條件用 TCP 層 `$remote_addr` 覆寫**
+  （非透傳）——admin per-IP lockout 完整性依賴此（harper M1；本項同時落實
+  task #113 的 netops 項，#113 的 secops 告警項仍開放）。
+- `proxy_no_cache 1; proxy_cache_bypass 1;` + `Cache-Control: no-store`：
+  設定快照不被任何中介/瀏覽器快取。
+- （選配）來源 IP allowlist 範本預設註解在該 location 內：取消
+  `# allow <ADMIN_SOURCE_IP>;` / `# deny all;` 兩行註解、填入老闆固定出口
+  IP、`nginx -t && systemctl reload nginx` 即生效——非名單來源直接 403，
+  token 驗證都碰不到（縱深防禦，IP 浮動時再註解回來即可）。

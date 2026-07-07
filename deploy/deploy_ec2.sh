@@ -15,9 +15,67 @@ REGION="${REGION:-ap-southeast-2}"
 NAME=trustforge
 # ⚠️ credit-safety fail-safe：公開 EC2 預設「離線」(空 model id → 不呼叫 Bedrock、不燒 credit)。
 # 用 `${VAR-}`（非 `:-`）：只有「未設」才空。此腳本目前僅供**離線公開部署**。
-# 註：真正開受控 live 需同時設 BEDROCK_MODEL_ID + 傳 TRUSTFORGE_LIVE_TOKEN 進 systemd
-# (本腳本尚未傳 token → live 完整化為 follow-up；今日離線部署不需要)。
+# 註：真正開受控 live 需同時設 BEDROCK_MODEL_ID + 傳 TRUSTFORGE_LIVE_TOKEN 進 systemd。
 MODEL="${BEDROCK_MODEL_ID-}"
+# 管理控制台 PR-5（部署銜接）：admin/live token + 日花費 cap 的 env 傳遞層。
+# ⛔ 憑證邊界鐵則：本腳本**不含任何 token 實際值**——值一律由部署當下的
+# shell env 傳入（老闆提供），未設（`${VAR-}` 空）＝該 Environment 行完全
+# 不寫進 systemd unit（不是寫空值）→ web.py 端 admin/live 面 fail-closed
+# 全關（見 src/trustforge/web.py `TRUSTFORGE_ADMIN_TOKEN` 未設即 404 語意）。
+#   - TRUSTFORGE_ADMIN_TOKEN：管理面 opt-in（未設＝管理面禁用）
+#   - TRUSTFORGE_LIVE_TOKEN：live 閘 opt-in（未設＝live 關）
+#   - TRUSTFORGE_BEDROCK_DAILY_USD_CAP：config store 未設時的 env fallback
+#     層（見 src/trustforge/budget_guard.py 三層 cap 順序），部署可帶如 1
+ADMIN_TOKEN="${TRUSTFORGE_ADMIN_TOKEN-}"
+LIVE_TOKEN="${TRUSTFORGE_LIVE_TOKEN-}"
+DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
+# 注入防護（值會被嵌進 SSM commands JSON 與遠端 root shell 的 sed 取代式）：
+# token 限 URL-safe 字元集，cap 限十進位數字——含引號/反斜線/管線/空白等
+# 一律在本機就 fail-fast 中止，杜絕「值本身」對遠端腳本做 shell/JSON 注入。
+for _pair in "TRUSTFORGE_ADMIN_TOKEN=$ADMIN_TOKEN" "TRUSTFORGE_LIVE_TOKEN=$LIVE_TOKEN"; do
+  _val="${_pair#*=}"
+  if [ -n "$_val" ] && ! printf '%s' "$_val" | grep -Eq '^[A-Za-z0-9._~-]+$'; then
+    echo "[ec2] ❌ ${_pair%%=*} 含不允許字元（僅接受 [A-Za-z0-9._~-]，避免注入遠端 systemd/sed/JSON），中止" >&2
+    exit 1
+  fi
+done
+if [ -n "$DAILY_CAP" ] && ! printf '%s' "$DAILY_CAP" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+  echo "[ec2] ❌ TRUSTFORGE_BEDROCK_DAILY_USD_CAP 必須是十進位數字（如 1 或 0.5），中止" >&2
+  exit 1
+fi
+# ⚠️ 首次建置路徑的 token 是經 user-data 寫入（EC2 user-data 可被
+# ec2:DescribeInstanceAttribute 讀到、也殘留在 IMDS）——帶 token 的部署建議
+# 走 update-in-place（SSM sed 直改 unit 檔，不經 user-data）；首次建置請先
+# 離線（不帶 token）建機，再跑一次本腳本帶 token 走 update-in-place。
+if [ -n "$ADMIN_TOKEN$LIVE_TOKEN" ]; then
+  echo "[ec2] ⚠️ 偵測到 token env：若走首次建置，token 會殘留在 user-data（建議先離線建機再 update-in-place 帶入）" >&2
+fi
+
+# 首次建置 user-data 的 systemd Environment 追加行：有值才產生該行（行尾含
+# 換行，heredoc 內用 `${EXTRA_UNIT_ENV}ExecStart=...` 緊貼嵌入、未設不留
+# 空行也不留空值行——fail-closed 的「不寫該行」語意）。
+EXTRA_UNIT_ENV=""
+[ -n "$ADMIN_TOKEN" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ADMIN_TOKEN=${ADMIN_TOKEN}
+"
+[ -n "$LIVE_TOKEN" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_LIVE_TOKEN=${LIVE_TOKEN}
+"
+[ -n "$DAILY_CAP" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=${DAILY_CAP}
+"
+
+# update-in-place 用：對單一 Environment 行產生「ensure（有值：sed 取代／
+# 沒有該行就插到 PYTHONPATH 後）或 remove（未設：整行刪除，fail-closed）」
+# 的 SSM commands JSON 片段（含前導逗號），比照既有 CACHE_BACKEND 等四個
+# env 的 grep→sed 慣例，冪等（重跑不重複插入）。
+ssm_env_cmd() {
+  local key="$1" val="$2"
+  if [ -n "$val" ]; then
+    printf ',"if grep -q \\"^Environment=%s=\\" /etc/systemd/system/trustforge.service; then sed -i \\"s|^Environment=%s=.*|Environment=%s=%s|\\" /etc/systemd/system/trustforge.service; else sed -i \\"/^Environment=PYTHONPATH=/a Environment=%s=%s\\" /etc/systemd/system/trustforge.service; fi' "$key" "$key" "$key" "$val" "$key" "$val"
+  else
+    printf ',"sed -i \\"/^Environment=%s=/d\\" /etc/systemd/system/trustforge.service' "$key"
+  fi
+  printf '"'
+}
+ADMIN_ENV_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "$ADMIN_TOKEN")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "$LIVE_TOKEN")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")"
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="trustforge-deploy-${ACCT}"
 ROLE=trustforge-ec2
@@ -354,8 +412,13 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   # 後面插入，兩邊都是同一組固定值，冪等（重跑不會重複插入）。同時（重）寫入
   # fetch-scheduler.service/.timer 並 enable，確保排程 fetcher 在既有實例上
   # 也補上，不會因為是「重用舊機器」就漏掉。
+  # 管理控制台 PR-5：$ADMIN_ENV_CMDS（見檔頭 ssm_env_cmd）同步 reconcile
+  # TRUSTFORGE_ADMIN_TOKEN / TRUSTFORGE_LIVE_TOKEN /
+  # TRUSTFORGE_BEDROCK_DAILY_USD_CAP 三行——有值＝取代或插入，未設＝整行
+  # 刪除（fail-closed：不是留舊值也不是寫空值），跟 BEDROCK_MODEL_ID 的
+  # 「每次部署都重寫成本次的值」同一個精神。
   CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2","[Unit]","Description=TrustForge connector cache fetch scheduler","[Service]","Type=oneshot","WorkingDirectory=/opt/trustforge","Environment=AWS_REGION='"$REGION"'","Environment=PYTHONPATH=/opt/trustforge","Environment=CACHE_BACKEND=dynamodb","Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache","Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger","Environment=COST_LEDGER_BACKEND=dynamodb","ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py","UNIT2","cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3","[Unit]","Description=Run TrustForge fetch scheduler periodically","[Timer]","OnBootSec=1min","OnUnitActiveSec=15min","[Install]","WantedBy=timers.target","UNIT3","systemctl daemon-reload","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi"'"$ADMIN_ENV_CMDS"',"cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2","[Unit]","Description=TrustForge connector cache fetch scheduler","[Service]","Type=oneshot","WorkingDirectory=/opt/trustforge","Environment=AWS_REGION='"$REGION"'","Environment=PYTHONPATH=/opt/trustforge","Environment=CACHE_BACKEND=dynamodb","Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache","Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger","Environment=COST_LEDGER_BACKEND=dynamodb","ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py","UNIT2","cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3","[Unit]","Description=Run TrustForge fetch scheduler periodically","[Timer]","OnBootSec=1min","OnUnitActiveSec=15min","[Install]","WantedBy=timers.target","UNIT3","systemctl daemon-reload","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
     echo "[ec2] ❌ SSM send-command 未取得 CommandId，中止" >&2
@@ -426,7 +489,7 @@ Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
-ExecStart=/usr/bin/python3 -m trustforge.web
+${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3 -m trustforge.web
 Restart=always
 [Install]
 WantedBy=multi-user.target
