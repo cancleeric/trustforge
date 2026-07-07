@@ -154,7 +154,7 @@ def test_compute_admin_token_empty_is_disabled(monkeypatch):
 def test_compute_admin_token_collision_with_live_token_disables(monkeypatch, caplog):
     """§3.2-4：admin==live（非空且相等）→ ERROR log + 視同未設（全關）。"""
     monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", TEST_LIVE_TOKEN)
-    monkeypatch.setattr(web, "LIVE_TOKEN", TEST_LIVE_TOKEN)
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
     with caplog.at_level("ERROR"):
         assert web._compute_admin_token() == ""
     assert any("TRUSTFORGE_ADMIN_TOKEN" in r.message for r in caplog.records)
@@ -162,7 +162,7 @@ def test_compute_admin_token_collision_with_live_token_disables(monkeypatch, cap
 
 def test_compute_admin_token_normal(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", TEST_ADMIN_TOKEN)
-    monkeypatch.setattr(web, "LIVE_TOKEN", TEST_LIVE_TOKEN)
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
     assert web._compute_admin_token() == TEST_ADMIN_TOKEN
 
 
@@ -244,7 +244,7 @@ def test_query_admin_token_not_accepted(admin_enabled):
 
 def test_live_token_header_cannot_open_admin(admin_enabled, monkeypatch):
     """`X-Live-Token` 正確值打 admin → 401（live token 權限層級不同）。"""
-    monkeypatch.setattr(web, "LIVE_TOKEN", TEST_LIVE_TOKEN)
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
     code, _, _ = _request(
         "GET", "/api/admin/config", headers={"X-Live-Token": TEST_LIVE_TOKEN}
     )
@@ -362,15 +362,24 @@ def test_constant_time_compare_uses_fixed_length_digest():
 def test_get_config_shape_and_layers(admin_enabled, monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "2.5")
     monkeypatch.setenv("BEDROCK_MODEL_ID", "anthropic.claude-test")
-    monkeypatch.setattr(web, "LIVE_TOKEN", TEST_LIVE_TOKEN)
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
     _mock_get_config(monkeypatch)
     code, body, _ = _request("GET", "/api/admin/config", token=TEST_ADMIN_TOKEN)
     assert code == 200
     data = json.loads(body)["data"]
-    assert data["daily_cap_usd"] == {"config": 1.0, "env": "2.5", "default": 3.0}
-    assert data["bedrock_enabled"] == {"config": True, "bedrock_model_id_set": True}
+    # PR-3 回填 PR-2 預留的 effective/source 銜接點：config 層有值 →
+    # 三個欄位皆 config 層生效（值取自分析路徑真的在用的同一批函式）
+    assert data["daily_cap_usd"] == {
+        "config": 1.0, "env": "2.5", "default": 3.0,
+        "effective": 1.0, "source": "config",
+    }
+    assert data["bedrock_enabled"] == {
+        "config": True, "bedrock_model_id_set": True,
+        "effective": True, "source": "config",
+    }
     assert data["live_token"] == {
         "config_configured": True, "config_last4": "f2a9", "env_configured": True,
+        "effective_configured": True, "source": "config",
     }
     assert data["version"] == 7
     assert data["updated_by"] == "admin@203.0.113.5"
@@ -378,7 +387,7 @@ def test_get_config_shape_and_layers(admin_enabled, monkeypatch):
 
 def test_get_config_never_leaks_token_material(admin_enabled, monkeypatch):
     """GET 絕不回 live token 明文/完整 hash（env live token 也只回 bool）。"""
-    monkeypatch.setattr(web, "LIVE_TOKEN", TEST_LIVE_TOKEN)
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
     _mock_get_config(monkeypatch, _fake_config(live_token_hash="deadbeef" * 8))
     code, body, _ = _request("GET", "/api/admin/config", token=TEST_ADMIN_TOKEN)
     assert code == 200
@@ -394,7 +403,11 @@ def test_get_config_empty_config_env_fallback_view(admin_enabled, monkeypatch):
     code, body, _ = _request("GET", "/api/admin/config", token=TEST_ADMIN_TOKEN)
     data = json.loads(body)["data"]
     assert code == 200
-    assert data["daily_cap_usd"] == {"config": None, "env": None, "default": 3.0}
+    # PR-3：config/env 皆未設 → effective 落 DEFAULT（$3）、source=default
+    assert data["daily_cap_usd"] == {
+        "config": None, "env": None, "default": 3.0,
+        "effective": 3.0, "source": "default",
+    }
     assert data["exists"] is False
 
 
@@ -568,6 +581,18 @@ def test_put_live_token_rules(admin_enabled, put_recorder, token_literal, expect
     if expect == 400:
         # qa LOW-4：不只驗 status，也驗 error.code
         assert json.loads(body)["error"]["code"] == "bad_request"
+
+
+def test_put_live_token_equal_to_admin_token_rejected(admin_enabled, put_recorder):
+    """PR-3：admin/live token 碰撞檢查延伸到 config 層——啟動期檢查只擋
+    env live token，config 層若允許設成與 admin token 相同，等於讓分析
+    token 與管理 token 合流（§3.2-4 同一條鐵律）→ 400。"""
+    code, body, _ = _put_config(
+        '{"live_token": "%s", "expected_version": 1}' % TEST_ADMIN_TOKEN
+    )
+    assert code == 400
+    assert json.loads(body)["error"]["code"] == "bad_request"
+    assert "changes" not in put_recorder  # 未寫入
 
 
 def test_put_version_conflict_409_with_current_version(admin_enabled, monkeypatch):

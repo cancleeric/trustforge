@@ -17,7 +17,7 @@
 三檔模式（`data_mode`/`llm_mode` 解耦，見 `pipeline.run`）：
   1. 真資料·$0（**預設**，世界第一重寫 Phase 2 起）：未帶任何 mode 參數即走
      真連接器抓真資料（data_mode=live），但 Bedrock 關閉（llm_mode=off）——
-     不依賴 HAS_BEDROCK/token，仍是 $0，credit-safe。這是差異化賣點「真多源
+     不依賴 live 閘/token，仍是 $0，credit-safe。這是差異化賣點「真多源
      信任提煉」第一眼就要被看見，故不再需要 `?real=1` 才能觸發（`?real=1`
      仍相容接受，效果與預設相同）。
   2. 離線示範沙盒（`?sample=1`，opt-in）：樣本資料 + Bedrock stub，未設 AWS
@@ -54,6 +54,7 @@ from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
     DEFAULT_BEDROCK_DAILY_USD_CAP,
+    daily_cap_usd_resolved,
     online_stance_requested,
     warn_if_bedrock_model_unpriced,
 )
@@ -67,13 +68,153 @@ except Exception:
     VERSION = "dev"
 
 PORT = int(os.getenv("PORT", "8080"))
-HAS_BEDROCK = bool(os.getenv("BEDROCK_MODEL_ID"))
 # codex HIGH 追加（unpriced model 破壞 cap）：啟動期就檢查 BEDROCK_MODEL_ID
 # 是否已在計價表登記，未登記只記警告 log（不 crash）——實際 fail-closed
 # 降級離線由 pipeline.run() 每次請求各自判斷，這裡只是讓維運及早在啟動
 # log 發現設定錯誤，不必等第一個公開請求才發現整天都在離線。
 warn_if_bedrock_model_unpriced()
-LIVE_TOKEN = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+
+# ---------------------------------------------------------------------------
+# admin console PR-3（計劃 §5）：live 閘動態化
+# ---------------------------------------------------------------------------
+# v0.7.0 以前這裡是兩個 import 期讀一次的模組常數：
+#   HAS_BEDROCK = bool(os.getenv("BEDROCK_MODEL_ID"))
+#   LIVE_TOKEN  = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+# 管理控制台要能**不重啟**就開關 Bedrock／輪替 live token，判斷必須改成
+# 每請求動態函式（env 也改每次呼叫讀，比照 `budget_guard` 既有慣例：
+# import 期求值一次的 env 讀取會讓「這次請求實際生效的設定」讀到匯入
+# 當時的舊值）。三個判斷入口：
+#
+#   `_bedrock_allowed()`      —— live 閘（config `bedrock_enabled` AND env
+#                                `BEDROCK_MODEL_ID`，雙 fail-closed）
+#   `_live_token_matches()`   —— live token 比對（config hash 有設→用它；
+#                                否則落 env `TRUSTFORGE_LIVE_TOKEN`）
+#   `_live_token_resolved()`  —— 顯示用（/status、/api/status、admin GET）
+#
+# config 層讀取一律走 `admin_config.get_config_cached()`（15s TTL；本
+# process 的 `put_config()` write-through **立即**生效——緊急關閉
+# `bedrock_enabled=false` 後，服務 `/analyze` 的這個 web process 下一個
+# 請求就看到 False，15s TTL 只影響其他 process，而 scheduler 不做 live
+# 分析）。讀取**異常**（不是「未設定」）→ 對閘門一律 fail-closed（無法
+# 確認管理面狀態就不放行真 Bedrock 花費；分析本身照常走離線，不炸）。
+
+_ADMIN_CFG_READ_ERROR = object()  # `_admin_runtime_config()` 讀取失敗 sentinel
+
+# 讀取失敗的短窗負快取（`admin_config` 層刻意不做 negative caching——那是
+# 儲存層的正確決定；這裡是 web 顯示/閘門層的自主權衡）：`/status`、
+# `/api/status` 每次 render 都會讀 config，若部署根本沒有 AWS 憑證/網路
+# （零設定離線 demo，v0.7.0 合法部署形態），沒有負快取時**每個請求**都要
+# 重付一次有界 timeout 的失敗讀 + warning log——v0.7.0 這些頁面是零 AWS
+# 呼叫的。失敗後 `CACHE_TTL_SECONDS`（15s）內直接回 sentinel（閘門
+# fail-closed，保守方向；顯示端如實標示讀取異常），期滿才重試。恢復延遲
+# ≤15s，跟其他 process 看到 config 變更的 TTL 上界一致。
+_admin_cfg_fail_lock = threading.Lock()
+_admin_cfg_fail_until = 0.0  # time.monotonic 基準；0.0＝無失敗窗
+
+
+def _admin_runtime_config(now_fn=time.monotonic):
+    """讀 runtime 管理設定（TTL 快取）。回 `AdminConfig`（可能是「item 不
+    存在」的空 config＝全 None，行為等同 v0.7.0）或 `_ADMIN_CFG_READ_ERROR`
+    （讀取異常——呼叫端對**閘門判斷**一律 fail-closed；cap 的 fallback
+    在 `budget_guard.daily_cap_usd_resolved()` 另行處理，落 env 層）。"""
+    global _admin_cfg_fail_until
+    now = now_fn()
+    with _admin_cfg_fail_lock:
+        if now < _admin_cfg_fail_until:
+            return _ADMIN_CFG_READ_ERROR  # 失敗窗內不重打（見上方負快取說明）
+    try:
+        cfg = admin_config.get_config_cached()
+    except Exception:
+        logging.warning(
+            "TrustForge: admin config 讀取失敗，live 閘 fail-closed（本請求"
+            "不放行真 Bedrock；分析照常走離線），%.0fs 內不重試",
+            admin_config.CACHE_TTL_SECONDS,
+            exc_info=True,
+        )
+        with _admin_cfg_fail_lock:
+            _admin_cfg_fail_until = now_fn() + admin_config.CACHE_TTL_SECONDS
+        return _ADMIN_CFG_READ_ERROR
+    with _admin_cfg_fail_lock:
+        _admin_cfg_fail_until = 0.0
+    return cfg
+
+
+def _reset_admin_cfg_fail_window_for_tests() -> None:
+    """測試專用：清失敗負快取窗（比照 `budget_guard._reset_*` 慣例）。"""
+    global _admin_cfg_fail_until
+    with _admin_cfg_fail_lock:
+        _admin_cfg_fail_until = 0.0
+
+
+def _bedrock_allowed_resolved(cfg=None) -> tuple[bool, str]:
+    """live 閘生效判定 + 來源。回 `(allowed, source)`，source ∈
+    `"env"`（config 未設定過，只看 env——與 v0.7.0 `HAS_BEDROCK` 逐字
+    相同）/ `"config"`（設定過一次後以 config 為準）/
+    `"config_read_error"`（讀取異常，fail-closed False）。
+
+    邏輯＝ config `bedrock_enabled` AND env `BEDROCK_MODEL_ID`（雙
+    fail-closed）：runtime 開關開了但 env 沒設模型 → 沒東西可呼叫，仍
+    False；env 設了模型但管理面明確關閉 → False。先檢查 env 再讀 config
+    ——`BEDROCK_MODEL_ID` 未設的零設定部署（離線 demo）完全不會產生
+    DynamoDB 讀，行為（含零 AWS 呼叫）與 v0.7.0 逐字相同。
+
+    `cfg`：admin GET handler 已持有剛做完 ConsistentRead 的 config 時傳入
+    復用，避免重複讀；一般呼叫端不帶（走 TTL 快取）。"""
+    if not os.getenv("BEDROCK_MODEL_ID"):
+        return False, "env"
+    if cfg is None:
+        cfg = _admin_runtime_config()
+    if cfg is _ADMIN_CFG_READ_ERROR:
+        return False, "config_read_error"
+    if cfg.bedrock_enabled is None:
+        # config 未設定過（item 不存在/欄位未設/壞欄）→ 沿用既有語意：
+        # 只看 env（等同 v0.7.0 HAS_BEDROCK）。設定過一次後以 config 為準。
+        return True, "env"
+    return cfg.bedrock_enabled, "config"
+
+
+def _bedrock_allowed(cfg=None) -> bool:
+    """live 閘：本請求是否允許真 Bedrock。見 `_bedrock_allowed_resolved`。"""
+    return _bedrock_allowed_resolved(cfg)[0]
+
+
+def _live_token_matches(req_token: str, cfg=None) -> bool:
+    """live token 比對（恆定時間）。token 來源兩層：config store 的
+    `live_token_hash` **有設就以它為準**（管理面輪替後 env 舊 token 立即
+    失效，本 process write-through 立即、他 process ≤15s）；config 未設
+    → 落 env `TRUSTFORGE_LIVE_TOKEN`（比對邏輯與 v0.7.0 逐字相同）。
+    config 讀取異常 → fail-closed `False`（無法確認當前有效 token 就不
+    放行——同一次 `_is_live_request` 裡 `_bedrock_allowed` 也已因同一個
+    讀取異常關閘，兩者一致）。兩層皆未設 → `False`（fail-closed）。"""
+    if not isinstance(req_token, str) or not req_token:
+        return False
+    if cfg is None:
+        cfg = _admin_runtime_config()
+    if cfg is _ADMIN_CFG_READ_ERROR:
+        return False
+    if cfg.live_token_hash:
+        return admin_config.verify_live_token(req_token, cfg.live_token_hash)
+    env_token = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+    return bool(env_token) and hmac.compare_digest(req_token, env_token)
+
+
+def _live_token_resolved(cfg=None) -> tuple[bool, str]:
+    """顯示用（/status、/api/status、admin GET 的 effective/source）：
+    live token 是否已設定 + 生效來源。回 `(configured, source)`，source ∈
+    `"config"` / `"env"` / `"none"` / `"config_read_error"`。**不**回傳
+    token 值本身（機敏）。"""
+    if cfg is None:
+        cfg = _admin_runtime_config()
+    if cfg is _ADMIN_CFG_READ_ERROR:
+        return False, "config_read_error"
+    if cfg.live_token_hash:
+        return True, "config"
+    if os.getenv("TRUSTFORGE_LIVE_TOKEN", ""):
+        return True, "env"
+    return False, "none"
+
+
+
 # 累計花費超過此門檻（USD）→ /costs 頁面卡片轉紅告警。未設定則不告警。
 COST_BUDGET_USD = os.getenv("COST_BUDGET_USD")
 
@@ -1107,15 +1248,27 @@ def _render_status_page() -> str:
     e = html.escape
     uptime_html = e(_format_uptime(time.time() - _START_TIME))
 
+    # admin console PR-3：模式能力改讀動態閘（config + env），每次 render
+    # 反映當下生效值（15s TTL / 本 process write-through 立即），不顯示
+    # import 期的過期快照。config 快照讀一次共用，來源一併標示。
+    _status_cfg = _admin_runtime_config()
+    bedrock_ok, bedrock_src = _bedrock_allowed_resolved(_status_cfg)
+    tok_configured, tok_src = _live_token_resolved(_status_cfg)
+    _src_label = {
+        "config": "（config 層生效）",
+        "env": "（env 層生效）",
+        "config_read_error": "（管理設定讀取異常，fail-closed）",
+        "none": "",
+    }
     mode_rows = f"""
       <tr><td>版本</td><td>{e(VERSION)}</td></tr>
-      <tr><td>Bedrock（HAS_BEDROCK）</td>
-          <td style="color:{'#3fb950' if HAS_BEDROCK else 'var(--tf-muted)'}">
-            {'已設定（真 Bedrock 模式可用）' if HAS_BEDROCK else '未設定（僅離線示範／真資料·$0 模式可用）'}
+      <tr><td>Bedrock（live 閘）</td>
+          <td style="color:{'#3fb950' if bedrock_ok else 'var(--tf-muted)'}">
+            {'已啟用（真 Bedrock 模式可用）' if bedrock_ok else '未啟用（僅離線示範／真資料·$0 模式可用）'}{e(_src_label.get(bedrock_src, ''))}
           </td></tr>
       <tr><td>LIVE_TOKEN</td>
-          <td style="color:{'#3fb950' if LIVE_TOKEN else 'var(--tf-muted)'}">
-            {'已設定' if LIVE_TOKEN else '未設定'}
+          <td style="color:{'#3fb950' if tok_configured else 'var(--tf-muted)'}">
+            {'已設定' if tok_configured else '未設定'}{e(_src_label.get(tok_src, ''))}
           </td></tr>
       <tr><td>成本預算門檻（COST_BUDGET_USD）</td>
           <td>{e(COST_BUDGET_USD) if COST_BUDGET_USD else '未設定'}</td></tr>
@@ -2313,7 +2466,9 @@ def _render_header(active_mode: str = "offline", *, minimal: bool = False) -> st
             '</header>'
         )
 
-    live_capable = HAS_BEDROCK
+    # admin console PR-3：live 能力改讀動態閘（config bedrock_enabled AND
+    # env BEDROCK_MODEL_ID），header 徽章不顯示 import 期過期狀態。
+    live_capable = _bedrock_allowed()
     live_is_active = active_mode == "live" and live_capable
 
     def _badge(css_class: str, text: str, is_active: bool) -> str:
@@ -2328,7 +2483,9 @@ def _render_header(active_mode: str = "offline", *, minimal: bool = False) -> st
     if live_capable:
         live_text = "LIVE · 真 Bedrock（?live=1）" if live_is_active else "真 Bedrock（?live=1）"
     else:
-        live_text = "真 Bedrock（未設 BEDROCK_MODEL_ID）"
+        # 未啟用可能是 env 未設模型，也可能是管理面 bedrock_enabled=false
+        # （PR-3 動態閘），徽章統一顯示「未啟用」，細節看 /status。
+        live_text = "真 Bedrock（未啟用）"
 
     mode = (
         _badge("tf-offline", "離線示範", active_mode == "offline")
@@ -3037,7 +3194,7 @@ def _apply_live_token_header(qs: dict, headers, query_has_token: bool | None = N
 
 
 def _is_live_request(qs: dict) -> bool:
-    """純判斷 live=1 是否成立（HAS_BEDROCK + token 正確），無副作用、不觸發限流。
+    """純判斷 live=1 是否成立（live 閘開 + token 正確），無副作用、不觸發限流。
 
     供 `_parse_live`（有副作用版）與 `_mode_link_suffix`（自我連結用，不能重複
     消耗限流額度）共用同一套判斷邏輯，避免兩處各寫一份、日後改一邊漏改另一邊。
@@ -3045,14 +3202,19 @@ def _is_live_request(qs: dict) -> bool:
     token 來源（query vs. `X-Live-Token` header）已在 `_apply_live_token_header`
     （`Handler.do_GET` 解析 qs 後立刻呼叫）統一收斂進 `qs["token"]`，這裡維持
     單純只讀 `qs`，不需要另外接手 headers。
+
+    admin console PR-3：閘門與 token 改動態判斷（`_bedrock_allowed` +
+    `_live_token_matches`，見模組上方 live 閘動態化區塊）。config 快照只讀
+    **一次**共用給兩個判斷（同一請求內閘門與 token 必須看同一份設定，
+    也避免 cache-miss 時付兩次有界 timeout）。`?live=1` 都沒帶就直接短路，
+    不觸發任何 config 讀取——非 live 請求（絕大多數流量）零額外成本，
+    行為與 v0.7.0 相同。
     """
+    if qs.get("live", ["0"])[0] != "1":
+        return False
+    cfg = _admin_runtime_config()
     req_token = qs.get("token", [""])[0]
-    return (
-        HAS_BEDROCK
-        and qs.get("live", ["0"])[0] == "1"
-        and bool(LIVE_TOKEN)
-        and hmac.compare_digest(req_token, LIVE_TOKEN)
-    )
+    return _bedrock_allowed(cfg) and _live_token_matches(req_token, cfg)
 
 
 def _parse_live(qs: dict, client_ip: str, *, enforce_rate_limit: bool = True) -> bool:
@@ -3101,7 +3263,7 @@ def _parse_real(qs: dict, client_ip: str, live: bool, *, enforce_rate_limit: boo
     """從 qs 解析「真資料·$0」是否生效（預設檔位，見 `_is_real_request`）：
     走真連接器、免 Bedrock。
 
-    不依賴 HAS_BEDROCK / token（與 live 檔位互相獨立）；`live` 已成立時
+    不依賴 live 閘（`_bedrock_allowed`）/ token（與 live 檔位互相獨立）；`live` 已成立時
     real 不重複判斷（live 優先，走真 Bedrock 就不必再走真資料免敘事檔）。
 
     real 生效時走**自己獨立**的 per-IP 限流（`_check_real_rate_limit`／
@@ -4759,11 +4921,17 @@ def _handle_api_status(client_ip: str = "") -> tuple[int, str]:
         fresh_n = sum(1 for r in freshness if r.get("status") == "fresh")
         stale_n = sum(1 for r in freshness if r.get("status") == "stale")
         missing_n = sum(1 for r in freshness if r.get("status") == "missing")
+        _api_status_cfg = _admin_runtime_config()  # PR-3：config 快照讀一次共用
         data = {
             "version": VERSION,
             "uptime_seconds": round(time.time() - _START_TIME, 3),
-            "bedrock_capable": bool(HAS_BEDROCK),
-            "live_token_set": bool(LIVE_TOKEN),
+            # admin console PR-3：模式能力改讀動態閘（config + env），
+            # 鍵名不變（API 相容），語意升級為「當下生效」而非 import 期
+            # env 快照——bedrock_capable = live 閘實際開閉（config
+            # bedrock_enabled AND env BEDROCK_MODEL_ID）；live_token_set =
+            # config/env 任一層已設定 token。config 快照讀一次共用。
+            "bedrock_capable": _bedrock_allowed(_api_status_cfg),
+            "live_token_set": _live_token_resolved(_api_status_cfg)[0],
             "cache_backend": {
                 "name": type(cache_backend).__name__,
                 "connected": primary_connected,
@@ -5051,7 +5219,12 @@ def _compute_admin_token() -> str:
     token = os.getenv("TRUSTFORGE_ADMIN_TOKEN", "")
     if not token:
         return ""
-    if LIVE_TOKEN and hmac.compare_digest(token, LIVE_TOKEN):
+    # PR-3：LIVE_TOKEN 模組常數已移除（live 閘動態化），這裡直接讀 env——
+    # 本函式本來就是「啟動期一次」語意，碰撞檢查對象也只針對 env 層
+    # live token（config 層 token 的碰撞由 PUT 驗證擋，見
+    # `_validate_admin_put_payload`）。
+    env_live_token = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+    if env_live_token and hmac.compare_digest(token, env_live_token):
         logging.error(
             "TrustForge: TRUSTFORGE_ADMIN_TOKEN 與 TRUSTFORGE_LIVE_TOKEN 相同——"
             "管理 token 不得與分析 live token 共用（權限層級不同），"
@@ -5148,34 +5321,54 @@ def _admin_config_view(config: "admin_config.AdminConfig") -> dict:
     `live_token_hash` 是機敏欄位；env live token 也只回 configured bool，
     不回值）。
 
-    本 PR（PR-2）只回報各層**原始值**供對照：config 層（管理面寫入的）、
-    env 層（`TRUSTFORGE_BEDROCK_DAILY_USD_CAP` 原始字串，不解析）、default
-    層（`DEFAULT_BEDROCK_DAILY_USD_CAP`）。
+    回報各層**原始值**供對照：config 層（管理面寫入的）、env 層
+    （`TRUSTFORGE_BEDROCK_DAILY_USD_CAP` 原始字串，不解析）、default 層
+    （`DEFAULT_BEDROCK_DAILY_USD_CAP`）。
 
-    TODO(PR-3 銜接點): `effective` / `source` 欄位（config → env → default
-    三層 fallback 的生效值判定）等 `budget_guard.daily_cap_usd()` 三層整合
-    落地後，由 PR-3 在此回填——本層不自行預判 effective，避免與
-    budget_guard 實際採用邏輯分岔（誠實原則：顯示的生效值必須就是分析
-    路徑真的會用的值）。
+    `effective` / `source`（PR-3 回填 PR-2 預留的銜接點）：三層 fallback
+    的生效值判定，**直接呼叫分析路徑真的在用的同一批函式**取值——cap 用
+    `budget_guard.daily_cap_usd_resolved()`、live 閘用
+    `_bedrock_allowed_resolved()`、token 用 `_live_token_resolved()`——
+    不在此自行重算，避免與實際採用邏輯分岔（誠實原則：顯示的生效值必須
+    就是分析路徑真的會用的值）。⚠️ 這批函式走 15s TTL 快取（分析熱路徑
+    的真實視角），而 `config` 欄位來自呼叫端剛做的 ConsistentRead——若
+    另一個 process 在 15s 內剛改過設定，兩者可能短暫不一致，這**如實
+    反映**「本 process 分析路徑此刻真正生效的值」與「庫內最新值」的收斂
+    過程（本 process 自己的 PUT 走 write-through，兩者永遠一致）。
     """
     pub = config.to_public_dict()
+    cap_effective, cap_source = daily_cap_usd_resolved()
+    bedrock_effective, bedrock_source = _bedrock_allowed_resolved()
+    token_configured, token_source = _live_token_resolved()
     return {
         "daily_cap_usd": {
             "config": pub["daily_cap_usd"],
             # env 原始字串（可能是壞值，如實顯示供對照，不在此解析）
             "env": os.getenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP"),
             "default": DEFAULT_BEDROCK_DAILY_USD_CAP,
+            # 生效值＝budget_guard 分析路徑當下真的會用的 cap；source ∈
+            # "config"/"env"/"default"
+            "effective": cap_effective,
+            "source": cap_source,
         },
         "bedrock_enabled": {
             "config": pub["bedrock_enabled"],
-            # 開關與 BEDROCK_MODEL_ID 是 AND 關係（PR-3 落地），這裡先誠實
-            # 回報 env 端是否備妥（只回 bool，不回 model id 值）
+            # 開關與 BEDROCK_MODEL_ID 是 AND 關係（PR-3 落地），誠實回報
+            # env 端是否備妥（只回 bool，不回 model id 值）
             "bedrock_model_id_set": bool(os.getenv("BEDROCK_MODEL_ID")),
+            # 生效值＝live 閘當下實際開閉（`_bedrock_allowed`，AND 後結果）；
+            # source ∈ "config"/"env"/"config_read_error"
+            "effective": bedrock_effective,
+            "source": bedrock_source,
         },
         "live_token": {
             "config_configured": pub["live_token_configured"],
             "config_last4": pub["live_token_last4"],
-            "env_configured": bool(LIVE_TOKEN),
+            "env_configured": bool(os.getenv("TRUSTFORGE_LIVE_TOKEN", "")),
+            # 生效層：config 有 hash → config；否則 env 有值 → env；皆無 →
+            # none（token 值本身絕不回傳）
+            "effective_configured": token_configured,
+            "source": token_source,
         },
         "version": pub["version"],
         "updated_at": pub["updated_at"],
@@ -5286,6 +5479,18 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
                 "bad_request",
                 f"live_token 須為長度 {_ADMIN_LIVE_TOKEN_MIN_LEN} 至 "
                 f"{_ADMIN_LIVE_TOKEN_MAX_LEN} 的可見 ASCII 字串（或 null＝清除）",
+            )
+        # PR-3：admin/live token 碰撞檢查延伸到 config 層——啟動期
+        # `_compute_admin_token` 只擋得住「env live token == admin token」，
+        # 若放任管理面把 config live token 設成與 admin token 相同，等於
+        # 讓分析用 token 與管理 token 合流（權限層級不同，計劃 §3.2-4 的
+        # 同一條鐵律）。恆定時間比對（sha256 定長化，同 `_admin_auth_check`
+        # 慣例）；呼叫端已通過 admin 認證，錯誤訊息可以誠實。
+        if ADMIN_TOKEN and hmac.compare_digest(
+            _hash_for_compare(token), _hash_for_compare(ADMIN_TOKEN)
+        ):
+            return 400, _json_envelope_err(
+                "bad_request", "live_token 不得與管理 token 相同（權限層級不同）"
             )
     return None
 
@@ -5817,9 +6022,13 @@ def main():
         )
         host = "127.0.0.1"
     srv = ThreadingHTTPServer((host, PORT), Handler)
+    # PR-3：啟動 banner 只印 env 層能力（bedrock 實際開閉是動態閘，還要
+    # AND config `bedrock_enabled`）——刻意**不**在啟動路徑呼叫
+    # `_bedrock_allowed()`：那會觸發一次 DynamoDB 讀，無憑證/斷網環境會讓
+    # 啟動多卡最多 ~12s 有界 timeout，離線 demo 起服務不該碰網路。
     print(
         f"TrustForge web on {host}:{PORT}  "
-        f"(bedrock={'live-capable' if HAS_BEDROCK else 'offline'}, "
+        f"(bedrock={'env-live-capable' if os.getenv('BEDROCK_MODEL_ID') else 'offline'}, "
         f"trust_proxy={TRUST_PROXY}, csp_mode={CSP_MODE})",
         flush=True,
     )

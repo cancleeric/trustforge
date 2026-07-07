@@ -53,73 +53,55 @@ def test_page_has_top_header_bar_elements():
     assert 'href="/costs"' in htmlout
 
 
-def test_offline_mode_badge_shows_offline_class():
-    """HAS_BEDROCK=False 時，mode badge 應為 tf-offline，且顯示離線字樣。"""
-    import trustforge.web as web_mod
-    orig = web_mod.HAS_BEDROCK
-    try:
-        web_mod.HAS_BEDROCK = False
-        htmlout = web_mod.render_page("")
-        assert "tf-offline" in htmlout
-        assert "離線" in htmlout
-    finally:
-        web_mod.HAS_BEDROCK = orig
+def test_offline_mode_badge_shows_offline_class(monkeypatch):
+    """live 閘關（BEDROCK_MODEL_ID 未設）時，mode badge 應為 tf-offline，
+    且顯示離線字樣。（PR-3：HAS_BEDROCK 常數已改 `_bedrock_allowed()`
+    動態閘，測試改以 env 控制。）"""
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    htmlout = web.render_page("")
+    assert "tf-offline" in htmlout
+    assert "離線" in htmlout
 
 
-def test_live_mode_badge_shows_live_class():
-    """HAS_BEDROCK=True 且本次請求 active_mode="live" 時，mode badge 應為
-    tf-live active，且顯示 LIVE 字樣。
+def test_live_mode_badge_shows_live_class(monkeypatch):
+    """live 閘開（BEDROCK_MODEL_ID 已設、config 未設定過）且本次請求
+    active_mode="live" 時，mode badge 應為 tf-live active，且顯示 LIVE 字樣。
 
     修法變更（MEDIUM provenance 修復後）：舊版此測試只憑 HAS_BEDROCK 就斷言
     LIVE 字樣一定出現，等同「只要設定就永遠顯示 LIVE」——這正是被回報的誤導
     行為本身，因此改為顯式帶入 active_mode="live" 才斷言 LIVE 出現。
     """
-    import trustforge.web as web_mod
-    orig = web_mod.HAS_BEDROCK
-    try:
-        web_mod.HAS_BEDROCK = True
-        htmlout = web_mod.render_page("", active_mode="live")
-        assert 'class="tf-mode-badge tf-live active"' in htmlout
-        assert "LIVE" in htmlout
-    finally:
-        web_mod.HAS_BEDROCK = orig
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    htmlout = web.render_page("", active_mode="live")
+    assert 'class="tf-mode-badge tf-live active"' in htmlout
+    assert "LIVE" in htmlout
 
 
-def test_default_page_without_active_mode_shows_offline_active_only():
+def test_default_page_without_active_mode_shows_offline_active_only(monkeypatch):
     """未帶 active_mode（如首頁 `/`、`/costs`）→ 預設離線示範為 active，
     真資料／真 Bedrock 兩檔僅渲染成灰色靜態能力標籤（無 active class）。
     """
-    import trustforge.web as web_mod
-    orig = web_mod.HAS_BEDROCK
-    try:
-        web_mod.HAS_BEDROCK = True
-        htmlout = web_mod.render_page("")
-        assert 'class="tf-mode-badge tf-offline active"' in htmlout
-        assert 'class="tf-mode-badge tf-real active"' not in htmlout
-        assert 'class="tf-mode-badge tf-live active"' not in htmlout
-        # LIVE 字樣不應在非 live 請求的畫面出現，否則使用者誤以為本次是真 Bedrock 結果
-        assert "LIVE" not in htmlout
-    finally:
-        web_mod.HAS_BEDROCK = orig
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    htmlout = web.render_page("")
+    assert 'class="tf-mode-badge tf-offline active"' in htmlout
+    assert 'class="tf-mode-badge tf-real active"' not in htmlout
+    assert 'class="tf-mode-badge tf-live active"' not in htmlout
+    # LIVE 字樣不應在非 live 請求的畫面出現，否則使用者誤以為本次是真 Bedrock 結果
+    assert "LIVE" not in htmlout
 
 
-def test_exactly_one_mode_badge_active_per_request():
+def test_exactly_one_mode_badge_active_per_request(monkeypatch):
     """MEDIUM 修復核心斷言：任一 active_mode 狀態下，恰好一個徽章帶 active class
     （不會出現三檔同時 active，也不會一個都沒有）。
     """
     import re
-    import trustforge.web as web_mod
-    orig = web_mod.HAS_BEDROCK
-    try:
-        web_mod.HAS_BEDROCK = True
-        for mode in ("offline", "real", "live"):
-            htmlout = web_mod.render_page("", active_mode=mode)
-            actives = re.findall(r'class="tf-mode-badge [a-z-]+ active"', htmlout)
-            assert len(actives) == 1, (
-                f"active_mode={mode!r} 應恰好 1 個 active 徽章，實際：{actives}"
-            )
-    finally:
-        web_mod.HAS_BEDROCK = orig
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    for mode in ("offline", "real", "live"):
+        htmlout = web.render_page("", active_mode=mode)
+        actives = re.findall(r'class="tf-mode-badge [a-z-]+ active"', htmlout)
+        assert len(actives) == 1, (
+            f"active_mode={mode!r} 應恰好 1 個 active 徽章，實際：{actives}"
+        )
 
 
 # ---------------------------------------------------------------------------

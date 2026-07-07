@@ -6,8 +6,10 @@
 
 1. **每日全域成本上限**（`daily_cap_exceeded`）：讀既有跨 run 持久化成本
    帳本（`ledger.get_ledger()`），彙總「今日」（UTC 日期）所有 run 的
-   `total_cost_usd`，跟 `TRUSTFORGE_BEDROCK_DAILY_USD_CAP`（環境變數可覆寫，
-   **不寫死**——決賽當天可能臨時調高，預設保守值 $3/day）比較。達標即回
+   `total_cost_usd`，跟生效 cap（admin console PR-3 起走三層 fallback：
+   **config store → env `TRUSTFORGE_BEDROCK_DAILY_USD_CAP` → DEFAULT $3**，
+   見 `daily_cap_usd_resolved()`——決賽當天可臨時經管理面/env 調整，
+   **不寫死**）比較。達標即回
    `True`，呼叫端（`pipeline.run`）據此把整輪強制降級成離線 abstain，直到
    隔日 UTC 重置（帳本按日期彙總，天然重置，不需額外狀態）。
 
@@ -30,6 +32,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from . import admin_config
 from .ledger import PRICING, Ledger, get_ledger
 
 # stance model 未設定 `BEDROCK_HAIKU_MODEL_ID` 時的預設值，必須跟
@@ -54,21 +57,68 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in _TRUTHY
 
 
-def daily_cap_usd() -> float:
-    """讀 `TRUSTFORGE_BEDROCK_DAILY_USD_CAP`（USD）。未設定 / 空字串 / 無法
-    解析成浮點數 → 回傳保守預設值 `DEFAULT_BEDROCK_DAILY_USD_CAP`（$3）。"""
+def daily_cap_usd_resolved() -> tuple[float, str]:
+    """每日 cap 的三層 fallback 解析（admin console PR-3，計劃 §5）：
+    **config store → env → DEFAULT（$3）**，每層「未設定/壞值」落下一層。
+    回傳 `(生效值, 來源)`，來源 ∈ `"config"` / `"env"` / `"default"`——
+    `GET /api/admin/config` 的 `effective`/`source` 欄位**必須**呼叫本函式
+    取值（單一事實來源：顯示的生效值就是分析路徑真的會用的值，不得各自
+    重算，避免兩邊邏輯日後分岔）。
+
+    1. **config 層**（`admin_config.get_config_cached()`，15s TTL 快取；
+       本 process 的 `put_config()` write-through 立即生效）：
+       - `daily_cap_usd` 已設定（`_parse_cap` 已保證 finite float）→ 生效。
+         PR-1 儲存層 + PR-2 API 層雙重驗證都不允許負值落庫（cap≤0 的
+         「緊急全關」語意專屬 env 層，config 層走 `bedrock_enabled=false`
+         做緊急關閉），與 env 層語意不衝突。
+       - item 不存在 / 欄位未設定 / 壞欄（`admin_config._parse_cap` 逐欄
+         容錯回 None）→ 落 env 層，行為與 v0.7.0 逐字相同。
+       - **讀取異常**（`AdminConfigReadError`：網路/憑證/throttle——不是
+         「未設定」）→ log warning + 落 env 層。管理面故障不能讓分析路徑
+         整個掛掉；env 層是部署當下就存在的可信 fallback（計劃 §5）。
+       ⚠️ 執行緒安全：`get_config_cached()` 的 cache-miss DynamoDB 讀在
+       admin_config 自己的鎖外執行、自帶有界 timeout（3s/3s/2 attempts）；
+       本函式的呼叫端 `BudgetReservation.try_reserve` 在**進 `_lock` 之前**
+       就完成 `daily_cap_usd()`，慢網路讀絕不會發生在 `_lock` 內。
+    2. **env 層** `TRUSTFORGE_BEDROCK_DAILY_USD_CAP`：語意逐字保留（含
+       cap≤0＝緊急全關訊號）。未設定 / 空字串 / 無法解析 / 非有限 → 落
+       DEFAULT。
+    3. **DEFAULT**：`DEFAULT_BEDROCK_DAILY_USD_CAP`（$3）。
+    """
+    # --- config 層 ---
+    try:
+        cfg = admin_config.get_config_cached()
+    except Exception:
+        _log.warning(
+            "[budget_guard] admin config 讀取失敗，daily cap 落 env 層"
+            "（管理面故障不影響分析路徑；env/DEFAULT 為可信 fallback）",
+            exc_info=True,
+        )
+    else:
+        if cfg.daily_cap_usd is not None:
+            # `admin_config._parse_cap` 已保證 finite；負值被 PR-1 儲存層
+            # + PR-2 API 層雙重擋下不可能落庫，不需在此重複判斷。
+            return cfg.daily_cap_usd, "config"
+    # --- env 層（既有語意逐字保留，勿改）---
     raw = os.getenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP")
     if raw is None or not raw.strip():
-        return DEFAULT_BEDROCK_DAILY_USD_CAP
+        return DEFAULT_BEDROCK_DAILY_USD_CAP, "default"
     try:
         val = float(raw)
     except ValueError:
-        return DEFAULT_BEDROCK_DAILY_USD_CAP
+        return DEFAULT_BEDROCK_DAILY_USD_CAP, "default"
     if not math.isfinite(val):
         # NaN/Inf env → 用保守預設(codex HIGH)。負值/0 保留(cap<=0 是既有
         # 「緊急完全關閉 Bedrock」訊號,由 daily_cap_exceeded 的 cap<=0 分支處理)。
-        return DEFAULT_BEDROCK_DAILY_USD_CAP
-    return val
+        return DEFAULT_BEDROCK_DAILY_USD_CAP, "default"
+    return val, "env"
+
+
+def daily_cap_usd() -> float:
+    """生效的每日 cap（USD）——`daily_cap_usd_resolved()` 的值部分。三層
+    fallback（config → env → DEFAULT $3）見該函式 docstring。既有呼叫端
+    （`daily_cap_exceeded`/`BudgetReservation.try_reserve`）介面不變。"""
+    return daily_cap_usd_resolved()[0]
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +471,7 @@ def online_stance_requested() -> bool:
     1. `TRUSTFORGE_ONLINE_STANCE` 為 truthy（`1`/`true`/`yes`/`on`，大小寫
        不拘）。
     2. `BEDROCK_MODEL_ID` 已設定真模型（非空字串）——沿用既有
-       `web.HAS_BEDROCK` 判斷邏輯的同一個 env，避免只開 stance 開關卻沒
+       `web._bedrock_allowed()` env 分支判斷的同一個 env，避免只開 stance 開關卻沒
        設模型時誤以為已生效。
 
     兩者預設皆未設 → 回 `False`，行為與加入本開關前逐字相同（stance 呼叫

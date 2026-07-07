@@ -33,8 +33,8 @@ def _qs(coin="BTC", qtype="multi_source", q="test", live="0", token="", sample=N
 
 def _patch_live(monkeypatch, token_value="secret"):
     """把 web module 的 HAS_BEDROCK / LIVE_TOKEN 設成 live 可用狀態。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", token_value)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", token_value)
 
 
 def _make_fake_run(calls: list):
@@ -106,8 +106,8 @@ def test_live_correct_token_calls_live_path(monkeypatch):
 def test_live_token_env_not_set_falls_back_to_real(monkeypatch):
     """TRUSTFORGE_LIVE_TOKEN 未設時，任何 token 都不能啟用 live，落回真資料·$0
     （見 `test_live_no_token_falls_back_to_real_not_offline` 說明）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")   # 未設
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)   # 未設
     calls: list = []
     monkeypatch.setattr(web, "run", _make_fake_run(calls))
 
@@ -227,8 +227,8 @@ def test_correct_token_but_no_model_id_stays_offline(monkeypatch):
     走「不採用 LLM narrative」的確定性模板（不含 `[OFFLINE]` 字樣），
     會讓這條測試量到資料面雜訊而非本來要驗的 Bedrock 層行為。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "sek")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "sek")
     report, _, _ = web._do_analyze(
         _qs(live="1", token="sek", sample="1"), client_ip="9.9.9.9"
     )
@@ -262,8 +262,8 @@ def test_real_default_requests_not_rate_limited_at_normal_volume(monkeypatch):
     只驗證限流邏輯本身（純看 client_ip/qs），跟 pipeline 實際抓到什麼資料
     無關，避免測試在 CI/沙盒環境因真連接器 cache miss/逾時而變慢或卡住。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     monkeypatch.setattr(web, "run", _make_fake_run([]))
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
@@ -286,8 +286,8 @@ def test_real_default_requests_rate_limited_at_flood_volume(monkeypatch):
     都改讀這個 patch 後的值，驗證的仍是「超過門檻才 429」這個邏輯本身，跟
     門檻實際數字無關。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     monkeypatch.setattr(web, "run", _make_fake_run([]))
     monkeypatch.setattr(web, "_REAL_RATE_MAX", 3)
     web._rate_buckets.clear()
@@ -799,7 +799,7 @@ def test_lambda_handler_query_token_blank_still_warns(monkeypatch, caplog):
     """端到端（Lambda 版）：queryStringParameters 帶 `{"token": ""}`（`?token=`
     或裸 `?token`，API Gateway/Function URL 都會正規化成空字串），raw_qs 本來
     就保留這個 key，一樣要 log deprecation warning。"""
-    monkeypatch.setattr(lambda_handler.web, "HAS_BEDROCK", False)
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
 
     event = {
         "rawPath": "/healthz",
@@ -823,8 +823,8 @@ def test_mode_extra_params_never_leaks_token_into_self_link(monkeypatch):
     打開的洩漏面，不是既有問題，必須本 PR 修。自我連結一律只留 `live=1`
     這個不敏感的模式開關，不含任何憑證；live 模式重放改由客戶端下次請求
     自行重帶 `X-Live-Token` header。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret-token-value")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret-token-value")
 
     qs = {"live": ["1"], "token": ["secret-token-value"]}
     extra = web._mode_extra_params(qs)
