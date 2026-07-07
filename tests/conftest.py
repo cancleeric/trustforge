@@ -83,3 +83,16 @@ def _isolate_unledgered_spend():
     _reset_unledgered_spend_for_tests()
     yield
     _reset_unledgered_spend_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_admin_config_cache():
+    """admin console PR-1：`admin_config` 的 process 內 TTL 快取
+    （`_cache`）是模組級全域狀態，跨測試共用同一份記憶體。比照
+    `_isolate_budget_reservation` 慣例，每個測試前後都清空，避免某個測試
+    write-through 進快取的設定（或殘留的過期戳）污染到下一個測試。"""
+    from trustforge.admin_config import _reset_admin_config_cache_for_tests
+
+    _reset_admin_config_cache_for_tests()
+    yield
+    _reset_admin_config_cache_for_tests()
