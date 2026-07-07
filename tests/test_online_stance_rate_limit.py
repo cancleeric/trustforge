@@ -100,8 +100,8 @@ def test_do_analyze_default_switch_off_never_touches_online_stance_bucket(monkey
     # （離線）pipeline，monkeypatch 成小很多的門檻，迴圈次數/斷言都改讀 patch
     # 後的值，驗證的仍是同一套邏輯，跟門檻實際數字無關。
     monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     monkeypatch.setattr(web, "online_stance_requested", lambda: False)
 
     captured = []
@@ -133,8 +133,8 @@ def test_do_analyze_switch_on_passes_force_stance_offline_only_after_limit(monke
     測試套件效能優化：`_ONLINE_STANCE_RATE_MAX` monkeypatch 成小很多的門檻，
     理由同上一測試。"""
     monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     monkeypatch.setattr(web, "online_stance_requested", lambda: True)
 
     captured = []
@@ -165,8 +165,8 @@ def test_do_analyze_switch_on_returns_200_style_result_not_error_when_over_limit
     測試套件效能優化：`_ONLINE_STANCE_RATE_MAX` monkeypatch 成小很多的門檻，
     理由同上方測試。"""
     monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     monkeypatch.setattr(web, "online_stance_requested", lambda: True)
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
@@ -194,8 +194,8 @@ def test_do_comparison_switch_on_passes_force_stance_offline_only_after_limit(mo
     測試套件效能優化：`_ONLINE_STANCE_RATE_MAX` monkeypatch 成小很多的門檻，
     理由同上方測試。"""
     monkeypatch.setattr(web, "_ONLINE_STANCE_RATE_MAX", 3)
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     monkeypatch.setattr(web, "online_stance_requested", lambda: True)
 
     captured = []

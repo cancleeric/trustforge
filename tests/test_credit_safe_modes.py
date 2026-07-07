@@ -201,8 +201,8 @@ def test_run_comparison_live_data_off_llm_credit_safe(monkeypatch):
 
 def test_web_real_mode_routes_to_live_data_off_llm(monkeypatch):
     """?real=1：即使 HAS_BEDROCK=False、無 token，也能走 data_mode=live/llm_mode=off。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     captured = {}
 
@@ -228,8 +228,8 @@ def test_web_real_mode_not_rate_limited_by_live_bucket_conflict(monkeypatch):
     cache，不該套跟 Bedrock 花費防線一樣緊的門檻。這裡連續打超過 live 門檻
     （`_RATE_MAX`）次數的 real 請求，仍不應被擋，證明兩組 bucket 互不干擾。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -258,8 +258,8 @@ def test_web_real_mode_rate_limited_at_real_threshold(monkeypatch):
     很吃測試時間；monkeypatch 成小很多的門檻，迴圈次數與斷言都改讀這個 patch
     後的值，驗證的仍是「超過門檻才 429」邏輯本身，跟門檻實際數字無關。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     monkeypatch.setattr(web, "_REAL_RATE_MAX", 3)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
@@ -284,8 +284,8 @@ def test_web_real_mode_without_flag_is_new_default(monkeypatch):
     （data_mode=live, llm_mode=off），不再是離線樣本檔——這正是本輪重寫的
     核心行為變更（見 DEV-PLAN-REWRITE.md Task 1），不是回歸。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     captured = {}
 
@@ -309,8 +309,8 @@ def test_web_sample_flag_still_reaches_offline_sample_path(monkeypatch):
     """`?sample=1`：離線示範沙盒 opt-in，行為與舊版「無參數預設」完全一致
     （只是現在要顯式帶 `sample=1` 才觸發，向後相容既有離線樣本語意）。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     captured = {}
 
@@ -329,8 +329,8 @@ def test_web_sample_flag_still_reaches_offline_sample_path(monkeypatch):
 
 def test_web_live_takes_priority_over_real(monkeypatch):
     """live=1 帶正確 token 時優先於 real=1（同時給兩者 → 走真 Bedrock 檔，非真資料·$0 檔）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -360,8 +360,8 @@ def test_web_live_takes_priority_over_real(monkeypatch):
 def test_web_do_analyze_real_mode_increments_service_counter(monkeypatch):
     """成本會計階段3：real=1（真連接器路徑）要記 1 次「真服務」呼叫，供
     `/status`「快取節省」估算用。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._analyze_service_count = 0
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
@@ -380,8 +380,8 @@ def test_web_do_analyze_real_mode_increments_service_counter(monkeypatch):
 def test_web_do_analyze_sample_flag_does_not_increment_service_counter(monkeypatch):
     """`?sample=1`（離線示範，樣本資料，未觸碰任何連接器/cache）不該計入
     「真服務」次數，否則快取節省估算會被離線 demo 流量污染。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._analyze_service_count = 0
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None):
@@ -398,8 +398,8 @@ def test_web_do_analyze_default_mode_increments_service_counter(monkeypatch):
     """世界第一重寫 Phase 2：不帶任何 mode 參數 → 落在新預設「真資料·$0」，
     要計入「真服務」次數（跟顯式 `?real=1` 行為一致，因為現在就是同一檔位）。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._analyze_service_count = 0
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
@@ -417,8 +417,8 @@ def test_web_do_analyze_default_mode_increments_service_counter(monkeypatch):
 
 def test_web_do_comparison_real_mode(monkeypatch):
     """_do_comparison 同步支援 ?real=1。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     captured = {}
 
@@ -441,8 +441,8 @@ def test_web_do_comparison_real_mode(monkeypatch):
 
 def test_web_do_comparison_real_mode_increments_service_counter_by_two(monkeypatch):
     """comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，記 2 次。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._analyze_service_count = 0
 
     def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
@@ -465,7 +465,7 @@ def test_web_do_comparison_real_mode_increments_service_counter_by_two(monkeypat
 # ---------------------------------------------------------------------------
 
 def test_render_page_shows_three_mode_badges_bedrock_unset(monkeypatch):
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
     htmlout = web.render_page("")
     assert "離線示範" in htmlout
     assert "真資料" in htmlout and "?real=1" in htmlout
@@ -473,7 +473,7 @@ def test_render_page_shows_three_mode_badges_bedrock_unset(monkeypatch):
 
 
 def test_render_page_shows_three_mode_badges_bedrock_set(monkeypatch):
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
     htmlout = web.render_page("")
     assert "離線示範" in htmlout
     assert "真資料" in htmlout and "?real=1" in htmlout
@@ -522,8 +522,8 @@ def test_mode_link_suffix_sample():
 def test_mode_link_suffix_live(monkeypatch):
     """codex/harper 終審（PR #99 HIGH）：自我連結一律不帶 token，即使目前
     請求是 live 生效的——只留 `live=1` 這個不敏感的模式開關。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret")
     suffix = web._mode_link_suffix({"live": ["1"], "token": ["secret"]})
     assert suffix == "&live=1"
     assert "token" not in suffix
@@ -536,8 +536,8 @@ def test_mode_link_suffix_default_empty():
 def test_mode_link_suffix_live_priority_over_real(monkeypatch):
     """兩者同時給 → live 優先，suffix 只帶 live（不重複帶 real、不含 token），
     與 _parse_real 邏輯一致。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret")
     suffix = web._mode_link_suffix({"live": ["1"], "token": ["secret"], "real": ["1"]})
     assert suffix == "&live=1"
 
@@ -551,8 +551,8 @@ def test_mode_link_suffix_never_leaks_special_char_token_into_self_link(
     （`& + = % #`），這些特殊字元也不會有機會出現在 href 裡——因為 token
     根本沒被塞進 suffix／href。驗證：suffix 只有 `&live=1`，href 裡完全
     找不到 token 值本身、也找不到 `token=` 參數。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", token)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", token)
 
     suffix = web._mode_link_suffix({"live": ["1"], "token": [token]})
     assert suffix == "&live=1"
@@ -570,7 +570,7 @@ def test_mode_link_suffix_has_no_rate_limit_side_effect(monkeypatch):
     （do_GET 會在 _do_analyze 內部已判斷一次 real/live 之後，再呼叫本函式重算
     一次同樣的結果字串——若這裡也觸發限流，同一次請求會被錯誤地扣兩次額度）。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
     qs = {"real": ["1"]}
@@ -586,8 +586,8 @@ def test_do_analyze_real_mode_json_link_round_trips_without_needing_real_param(m
     輸出與畫面一致（$0、來源仍是真連接器）。少一個參數，畫面更乾淨，且不影響
     可重現性（因為現在「無參數」本身就是唯一、確定的真資料·$0 檔位）。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -622,8 +622,8 @@ def test_do_analyze_live_mode_json_link_preserves_live_but_not_token(monkeypatch
     就會重新暴露進 HTML／瀏覽器歷史／access log／Referer，是本 PR 把 token
     從 query 移到 header 後在輸出端重新打開的洩漏面。live 模式重放改由
     客戶端下次請求自行重帶 X-Live-Token header。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -648,8 +648,8 @@ def test_do_analyze_live_mode_json_link_preserves_live_but_not_token(monkeypatch
 
 def test_do_analyze_default_mode_json_link_has_no_mode_param(monkeypatch):
     """離線示範（預設，未帶 real/live）：下載連結不應出現任何模式參數（向後相容）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     qs = {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}
     report, evidence, log = web._do_analyze(qs, client_ip="")
@@ -677,8 +677,8 @@ def test_do_comparison_real_mode_json_link_has_both_coins_no_extra_mode_param(mo
     出現在自我連結——本測試改為斷言恰好一條連結、含兩個幣種、且**不**多帶
     任何模式參數（見 `test_mode_link_suffix_real_is_default_no_suffix_needed`）。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return _make_real_docs(coin)
@@ -722,8 +722,8 @@ def test_do_comparison_json_link_actually_follows_to_200_with_both_coins_pair_on
     COIN_POOL 幣名的句子，確保回應對的是 `coin` 參數本身被正確帶了兩個幣，而不是
     `_do_comparison` 從 q 文字裡「意外」解析出兩個幣僥倖過關。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -778,8 +778,8 @@ def test_do_analyze_json_link_round_trips_special_char_query_and_follows_to_200(
     （見 `test_mode_link_suffix_real_is_default_no_suffix_needed`）——請求本身
     仍可顯式帶 `real=1`（向後相容），但產生的下載連結不會多帶這個參數。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -823,8 +823,8 @@ def test_do_comparison_json_link_round_trips_special_char_query_and_follows_to_2
     """HIGH 根治 e2e（比較）：同上一測試，但走 comparison 路徑（q 同樣含
     `& + # % "` 與非 ASCII 中文；coin 配對走 `coin=BTC,ETH` 參數，與 q 內容
     互不干擾）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -873,8 +873,8 @@ def test_active_mode_no_params_request_shows_only_real_active(monkeypatch):
     """世界第一重寫 Phase 2：未帶任何 mode 參數的一般請求 → _active_mode 判為
     real（新預設「真資料·$0」），畫面恰好真資料徽章 active（不再是離線示範）。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -896,8 +896,8 @@ def test_active_mode_no_params_request_shows_only_real_active(monkeypatch):
 def test_active_mode_sample_request_shows_only_offline_active(monkeypatch):
     """`?sample=1`：_active_mode 判為 offline，畫面恰好離線示範徽章 active
     （離線示範沙盒 opt-in，見 `_is_sample_request`）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None):
         import trustforge.pipeline as _pl
@@ -917,8 +917,8 @@ def test_active_mode_sample_request_shows_only_offline_active(monkeypatch):
 
 def test_active_mode_real_request_shows_only_real_active(monkeypatch):
     """?real=1：_active_mode 判為 real，畫面恰好真資料徽章 active（不依賴 HAS_BEDROCK）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
                  data_mode=None, llm_mode=None):
@@ -939,8 +939,8 @@ def test_active_mode_real_request_shows_only_real_active(monkeypatch):
 
 def test_active_mode_live_request_shows_only_live_active(monkeypatch):
     """?live=1&token=<正確 token>：_active_mode 判為 live，畫面恰好真 Bedrock 徽章 active。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -990,8 +990,11 @@ def test_active_mode_matches_exactly_one_badge_across_requests(
     monkeypatch, qs, has_bedrock, live_token, expected
 ):
     """跨多種請求形態，_active_mode 判斷結果與 render_page 畫面恰好一個 active 徽章一致。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", has_bedrock)
-    monkeypatch.setattr(web, "LIVE_TOKEN", live_token)
+    if has_bedrock:
+        monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    else:
+        monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", live_token)
 
     active_mode = web._active_mode(qs)
     assert active_mode == expected
@@ -1035,8 +1038,8 @@ def _run_do_get(path: str, client_ip: str = "1.2.3.4") -> dict:
 
 def test_error_400_real_mode_keeps_real_active_badge(monkeypatch):
     """?real=1 但幣種非法 → 400，錯誤頁仍應標 tf-real active（不落回 offline）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -1051,8 +1054,8 @@ def test_error_400_real_mode_keeps_real_active_badge(monkeypatch):
 
 def test_error_429_live_mode_keeps_live_active_badge(monkeypatch):
     """?live=1&token=<正確 token> 但超過限流 → 429，錯誤頁仍應標 tf-live active（不落回 offline）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
     ip = "10.0.0.2"
@@ -1070,8 +1073,8 @@ def test_error_429_live_mode_keeps_live_active_badge(monkeypatch):
 
 def test_error_502_real_mode_keeps_real_active_badge(monkeypatch):
     """?real=1 時 pipeline 內部丟未預期例外 → 502，錯誤頁仍應標 tf-real active（不落回 offline）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -1092,8 +1095,8 @@ def test_error_502_real_mode_keeps_real_active_badge(monkeypatch):
 def test_error_400_no_params_request_keeps_real_active_badge(monkeypatch):
     """世界第一重寫 Phase 2：一般請求（無 real/live/sample）幣種非法 → 400，
     錯誤頁應維持新預設 tf-real active（不落回舊版 offline）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -1109,8 +1112,8 @@ def test_error_400_no_params_request_keeps_real_active_badge(monkeypatch):
 def test_error_400_sample_request_keeps_offline_active_badge(monkeypatch):
     """`?sample=1` 幣種非法 → 400，錯誤頁維持 tf-offline active（既有離線
     示範沙盒行為不回歸，只是現在要顯式帶 `sample=1`）。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
 
@@ -1154,8 +1157,8 @@ def test_form_default_query_textarea_contains_no_date():
 
 def test_do_analyze_default_query_has_no_date_regardless_of_coin(monkeypatch):
     """`_do_analyze` 省略 q 時的預設文案，不論 coin 為何都不含日期。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     captured = {}
 
     def fake_run(coin, query, qtype, offline=False, data_dir=None,
@@ -1174,8 +1177,8 @@ def test_do_analyze_default_query_has_no_date_regardless_of_coin(monkeypatch):
 
 def test_do_comparison_default_query_has_no_date(monkeypatch):
     """`_do_comparison` 省略 q 時的預設文案不含任何日期。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
     captured = {}
 
     def fake_run_comparison(coin_a, coin_b, query, offline=False, data_dir=None,
@@ -1206,8 +1209,8 @@ def test_form_submit_with_switched_coin_query_still_shows_correct_coin_provenanc
          的基準日期（真實 evidence，非模擬），且不混入刻意設定為不同步的
          BTC 日期——證明沒有跨幣污染。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     # 1. 模擬 zero-JS 首頁 render，拿使用者「沒動過」的 textarea 預填值。
     page_html = web.render_page("")
@@ -1253,8 +1256,8 @@ def test_form_submit_with_switched_coin_query_still_shows_correct_coin_provenanc
 def test_comparison_submit_provenance_shows_each_coins_own_date(monkeypatch, tmp_path):
     """comparison 同理：查詢文字無日期，兩幣各自的結果頁 provenance 各自
     顯示正確、不同步的基準日期，互不污染。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", False)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "")
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
 
     _write_ohlcv_csv(tmp_path, "BTC_daily_ohlcv.csv", ["2026-05-01", "2026-05-31"])
     _write_ohlcv_csv(tmp_path, "ETH_daily_ohlcv.csv", ["2026-06-01", "2026-06-28"])

@@ -6,8 +6,10 @@
 
 1. **每日全域成本上限**（`daily_cap_exceeded`）：讀既有跨 run 持久化成本
    帳本（`ledger.get_ledger()`），彙總「今日」（UTC 日期）所有 run 的
-   `total_cost_usd`，跟 `TRUSTFORGE_BEDROCK_DAILY_USD_CAP`（環境變數可覆寫，
-   **不寫死**——決賽當天可能臨時調高，預設保守值 $3/day）比較。達標即回
+   `total_cost_usd`，跟生效 cap（admin console PR-3 起走三層 fallback：
+   **config store → env `TRUSTFORGE_BEDROCK_DAILY_USD_CAP` → DEFAULT $3**，
+   見 `daily_cap_usd_resolved()`——決賽當天可臨時經管理面/env 調整，
+   **不寫死**）比較。達標即回
    `True`，呼叫端（`pipeline.run`）據此把整輪強制降級成離線 abstain，直到
    隔日 UTC 重置（帳本按日期彙總，天然重置，不需額外狀態）。
 
@@ -30,6 +32,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from . import admin_config
 from .ledger import PRICING, Ledger, get_ledger
 
 # stance model 未設定 `BEDROCK_HAIKU_MODEL_ID` 時的預設值，必須跟
@@ -54,21 +57,93 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in _TRUTHY
 
 
-def daily_cap_usd() -> float:
-    """讀 `TRUSTFORGE_BEDROCK_DAILY_USD_CAP`（USD）。未設定 / 空字串 / 無法
-    解析成浮點數 → 回傳保守預設值 `DEFAULT_BEDROCK_DAILY_USD_CAP`（$3）。"""
+def _env_cap() -> float | None:
+    """env 層 `TRUSTFORGE_BEDROCK_DAILY_USD_CAP` 解析（既有語意逐字保留）：
+    未設定 / 空字串 / 無法解析 / 非有限（NaN/Inf，codex HIGH）→ `None`
+    （呼叫端落下一層）；其餘回 float——**含 ≤0＝緊急全關訊號**（由
+    `daily_cap_exceeded` 的 `cap<=0` 分支處理）。"""
     raw = os.getenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP")
     if raw is None or not raw.strip():
-        return DEFAULT_BEDROCK_DAILY_USD_CAP
+        return None
     try:
         val = float(raw)
     except ValueError:
-        return DEFAULT_BEDROCK_DAILY_USD_CAP
+        return None
     if not math.isfinite(val):
-        # NaN/Inf env → 用保守預設(codex HIGH)。負值/0 保留(cap<=0 是既有
-        # 「緊急完全關閉 Bedrock」訊號,由 daily_cap_exceeded 的 cap<=0 分支處理)。
-        return DEFAULT_BEDROCK_DAILY_USD_CAP
+        return None
     return val
+
+
+def daily_cap_usd_resolved() -> tuple[float, str]:
+    """每日 cap 的三層 fallback 解析（admin console PR-3，計劃 §5）：
+    **config store → env → DEFAULT（$3）**，每層「未設定/壞值」落下一層。
+    回傳 `(生效值, 來源)`，來源 ∈ `"config"` / `"env"` / `"default"`——
+    `GET /api/admin/config` 的 `effective`/`source` 欄位**必須**呼叫本函式
+    取值（單一事實來源：顯示的生效值就是分析路徑真的會用的值，不得各自
+    重算，避免兩邊邏輯日後分岔）。
+
+    ⚠️ **例外：env cap≤0＝kill-switch，最高優先短路**（PR-3 複審 harper
+    M2）：env `TRUSTFORGE_BEDROCK_DAILY_USD_CAP` 解析出 ≤0 時**直接生效**
+    （回 `(該值, "env")`，不讀 config）——「env 設 cap≤0＝緊急全關」是
+    既有維運 SOP 的逃生口，不能被後來才加的 config 層遮蔽（否則 config
+    已設 cap 的部署，緊急時設 env=0 會被 config 蓋掉、kill-switch 失效）。
+    短路同時意味著 kill-switch 生效期間**零 DynamoDB 讀**（緊急關閉不
+    依賴管理面存活）。config 層本來就不允許 cap≤0 落庫（PR-1/PR-2 雙重
+    驗證），語意不衝突。
+
+    1. **config 層**（`admin_config.get_config_cached_failsoft()`，15s TTL
+       快取 + 15s 失敗負快取（PR-3 複審 qa M1：DynamoDB 持續故障時本函式
+       每個 analyze 請求都會走到，沒有負快取就每請求重付一次有界 timeout
+       （~12s）的失敗讀）；本 process 的 `put_config()` write-through 立即
+       生效）：
+       - `daily_cap_usd` 已設定（`_parse_cap` 已保證 finite float）→ 生效。
+         PR-1 儲存層 + PR-2 API 層雙重驗證都不允許負值落庫（cap≤0 的
+         「緊急全關」語意專屬 env 層，config 層走 `bedrock_enabled=false`
+         做緊急關閉），與 env 層語意不衝突。
+       - item 不存在 / 欄位未設定 / 壞欄（`admin_config._parse_cap` 逐欄
+         容錯回 None）→ 落 env 層，行為與 v0.7.0 逐字相同。
+       - **讀取異常**（`AdminConfigReadError`：網路/憑證/throttle/負快取
+         窗內——不是「未設定」）→ log warning + 落 env 層。管理面故障
+         不能讓分析路徑整個掛掉；env 層是部署當下就存在的可信 fallback
+         （計劃 §5）。
+       ⚠️ 執行緒安全：`get_config_cached*()` 的 cache-miss DynamoDB 讀在
+       admin_config 自己的鎖外執行、自帶有界 timeout（3s/3s/2 attempts）；
+       本函式的呼叫端 `BudgetReservation.try_reserve` 在**進 `_lock` 之前**
+       就完成 `daily_cap_usd()`，慢網路讀絕不會發生在 `_lock` 內。
+    2. **env 層** `TRUSTFORGE_BEDROCK_DAILY_USD_CAP`：語意逐字保留（解析
+       見 `_env_cap`；cap≤0 已在最高優先短路生效，不會走到這裡才生效）。
+       未設定 / 空字串 / 無法解析 / 非有限 → 落 DEFAULT。
+    3. **DEFAULT**：`DEFAULT_BEDROCK_DAILY_USD_CAP`（$3）。
+    """
+    env_val = _env_cap()
+    # --- env kill-switch 最高優先短路（harper M2，見 docstring）---
+    if env_val is not None and env_val <= 0:
+        return env_val, "env"
+    # --- config 層 ---
+    try:
+        cfg = admin_config.get_config_cached_failsoft()
+    except Exception:
+        _log.warning(
+            "[budget_guard] admin config 讀取失敗，daily cap 落 env 層"
+            "（管理面故障不影響分析路徑；env/DEFAULT 為可信 fallback）",
+            exc_info=True,
+        )
+    else:
+        if cfg.daily_cap_usd is not None:
+            # `admin_config._parse_cap` 已保證 finite；負值被 PR-1 儲存層
+            # + PR-2 API 層雙重擋下不可能落庫，不需在此重複判斷。
+            return cfg.daily_cap_usd, "config"
+    # --- env 層 ---
+    if env_val is not None:
+        return env_val, "env"
+    return DEFAULT_BEDROCK_DAILY_USD_CAP, "default"
+
+
+def daily_cap_usd() -> float:
+    """生效的每日 cap（USD）——`daily_cap_usd_resolved()` 的值部分。三層
+    fallback（config → env → DEFAULT $3）見該函式 docstring。既有呼叫端
+    （`daily_cap_exceeded`/`BudgetReservation.try_reserve`）介面不變。"""
+    return daily_cap_usd_resolved()[0]
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +489,41 @@ def warn_if_bedrock_model_unpriced() -> None:
         )
 
 
+def _config_bedrock_enabled_gate() -> bool:
+    """config 層 `bedrock_enabled` 對 online-stance 側路的閘（PR-3 複審
+    harper M1）：管理面「緊急關閉」（`bedrock_enabled=false`）必須統一蓋住
+    **所有**真 Bedrock 路徑——`web._bedrock_allowed()` 只閘住 `?live=1`
+    的 narrative 路徑，online-stance（`?real=1` 公開流量、只看 env 開關）
+    若不讀 config，緊急關閉後 stance 分類呼叫仍會打真 Bedrock。
+
+    語意與 `web._bedrock_allowed_resolved()` 的 config 分支一致：
+    - 未設定過（item 不存在/欄位未設/壞欄，`bedrock_enabled is None`）→
+      `True`（只看 env，v0.7.0 語意逐字相同）。
+    - 明確 `False` → 擋；明確 `True` → 放行。
+    - **讀取異常** → fail-closed `False`（無法確認管理面狀態就不放行真
+      Bedrock 花費；分析照常走離線 stance，不炸）。方向跟 cap 的落 env
+      不同是刻意的：cap 有「部署當下就存在的可信 env fallback」，開關的
+      env 側（`BEDROCK_MODEL_ID`）已在呼叫端另行 AND 檢查，這裡管的是
+      「管理面有沒有明確關閉」，讀不到就當作可能已關閉。
+
+    走 `get_config_cached_failsoft()`（15s TTL + 15s 失敗負快取，qa M1）；
+    ⚠️ 執行緒安全：呼叫端（`pipeline.run` 開頭、`web._online_stance_force_
+    offline` 進限流鎖之前）都在任何 lock 之外呼叫，cache-miss 的 DynamoDB
+    讀（有界 timeout）不會發生在計費/限流鎖內——與 cap 讀同一套紀律。"""
+    try:
+        cfg = admin_config.get_config_cached_failsoft()
+    except Exception:
+        _log.warning(
+            "[budget_guard] admin config 讀取失敗，online-stance 閘 fail-closed"
+            "（本輪 stance 維持離線；分析照常）",
+            exc_info=True,
+        )
+        return False
+    if cfg.bedrock_enabled is None:
+        return True
+    return cfg.bedrock_enabled
+
+
 def online_stance_requested() -> bool:
     """online-stance 獨立總開關是否「已請求啟用」。
 
@@ -421,11 +531,19 @@ def online_stance_requested() -> bool:
     1. `TRUSTFORGE_ONLINE_STANCE` 為 truthy（`1`/`true`/`yes`/`on`，大小寫
        不拘）。
     2. `BEDROCK_MODEL_ID` 已設定真模型（非空字串）——沿用既有
-       `web.HAS_BEDROCK` 判斷邏輯的同一個 env，避免只開 stance 開關卻沒
+       `web._bedrock_allowed()` env 分支判斷的同一個 env，避免只開 stance 開關卻沒
        設模型時誤以為已生效。
+    3. config 層 `bedrock_enabled` 未明確關閉（PR-3 複審 harper M1，見
+       `_config_bedrock_enabled_gate`）——管理面緊急關閉統一蓋住 online-
+       stance 這條側路；config 未設定過則行為與 v0.7.0 逐字相同。
 
-    兩者預設皆未設 → 回 `False`，行為與加入本開關前逐字相同（stance 呼叫
-    在敘事離線時維持只讀持久化快取 + fail-safe "neutral"，不會無故打
-    Bedrock）。
+    兩個 env 預設皆未設 → 回 `False`，行為與加入本開關前逐字相同（stance
+    呼叫在敘事離線時維持只讀持久化快取 + fail-safe "neutral"，不會無故打
+    Bedrock）。env 檢查放前面短路：零設定離線 demo（env 皆未設）**完全
+    不會**產生 DynamoDB config 讀，零 AWS 呼叫不變。
     """
-    return _env_flag("TRUSTFORGE_ONLINE_STANCE") and bool(os.getenv("BEDROCK_MODEL_ID"))
+    return (
+        _env_flag("TRUSTFORGE_ONLINE_STANCE")
+        and bool(os.getenv("BEDROCK_MODEL_ID"))
+        and _config_bedrock_enabled_gate()
+    )

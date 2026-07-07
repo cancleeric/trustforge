@@ -1829,8 +1829,8 @@ def test_api_analyze_dedup_key_distinguishes_token_whitespace_suffix(monkeypatch
     樣本資料，$0）；只驗證 dedup key 不同、且兩種請求順序
     （valid-first / whitespace-first）都各自真的呼叫到 `pipeline.run`，
     不是命中彼此的快取。"""
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "secret-token-abc")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret-token-abc")
 
     real_run = pipeline_module.run
     qs_valid = {
@@ -1916,8 +1916,8 @@ def test_api_analyze_dedup_key_live_ignores_sample_real_bypass(monkeypatch):
     ——canonicalization 只收斂「同 mode 內被忽略的雜訊欄位」，不能連
     「真正不同的 mode」都誤判成同一把 key。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "bypass-test-live-token")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "bypass-test-live-token")
 
     real_run = pipeline_module.run
     query = "dedup-effective-mode-bypass-test"
@@ -2258,8 +2258,8 @@ def test_api_analyze_dedup_key_json_serialization_broadly_collision_resistant(mo
        collision-resistant（不會因為兩個不同的 query 或不同的 mode
        意外序列化成同一把 key）。
     """
-    monkeypatch.setattr(web, "HAS_BEDROCK", True)
-    monkeypatch.setattr(web, "LIVE_TOKEN", "broad-test-live-token")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "broad-test-live-token")
     qtype = web.QuestionType("multi_source")
 
     tricky_queries = ["x", "x\x1f1", "\x1f", "x,y", 'x"y', "x\\y", "foo\x1fbar\x1f", ""]

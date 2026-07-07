@@ -583,7 +583,7 @@ paths:
     get:
       tags: [admin]
       operationId: getAdminConfig
-      summary: 讀取管理面運行時設定（config 層當前值 + env/default 原始值對照）
+      summary: 讀取管理面運行時設定（config 層當前值 + env/default 原始值對照 + effective/source 生效判定）
       security:
         - AdminToken: []
       description: |
@@ -591,10 +591,12 @@ paths:
         並附 env 層原始字串（`TRUSTFORGE_BEDROCK_DAILY_USD_CAP`，不解析、
         如實顯示）與 default 層（$3.0）供對照。
 
-        ⚠️ 本版（PR-2）**不含** `effective`/`source` 生效值判定欄位——
-        config → env → default 三層 fallback 與 `budget_guard` 的整合是
-        PR-3 範圍，屆時由 budget_guard 實際採用的同一套邏輯回填，避免
-        「顯示的生效值」與「分析路徑真的用的值」分岔。
+        `effective`/`source` 生效值判定欄位（PR-3 落地）：三層 fallback
+        config → env → default 的生效值，直接取自 `budget_guard`／live 閘
+        實際採用的同一套函式（不另行重算），「顯示的生效值」就是「分析
+        路徑真的用的值」。注意 effective 走分析熱路徑的 15s TTL 快取視角
+        （本 process 的 PUT write-through 立即一致；跨 process 讀到的是
+        ≤15s 內收斂的真實生效值，如實反映傳播狀態）。
 
         token 安全：live token 只回 `config_configured`（bool）＋
         `config_last4`（末 4 碼，短 token 時為 null）＋ `env_configured`
@@ -624,9 +626,9 @@ paths:
               example:
                 ok: true
                 data:
-                  daily_cap_usd: {config: 1.0, env: "3.0", default: 3.0}
-                  bedrock_enabled: {config: true, bedrock_model_id_set: true}
-                  live_token: {config_configured: true, config_last4: "a9f2", env_configured: false}
+                  daily_cap_usd: {config: 1.0, env: "3.0", default: 3.0, effective: 1.0, source: config}
+                  bedrock_enabled: {config: true, bedrock_model_id_set: true, effective: true, source: config}
+                  live_token: {config_configured: true, config_last4: "a9f2", env_configured: false, effective_configured: true, source: config}
                   version: 7
                   updated_at: "2026-07-07T03:00:00+00:00"
                   updated_by: "admin@203.0.113.5"
@@ -909,15 +911,17 @@ components:
     AdminConfigData:
       type: object
       description: |
-        `GET/PUT /api/admin/config` 共用的設定檢視（PR-2：各層原始值對照；
-        `effective`/`source` 生效值判定欄位由 PR-3 隨 budget_guard 三層
-        fallback 整合一起補上）。token 相關只有 configured bool + 末 4 碼，
-        絕無明文/完整 hash。
+        `GET/PUT /api/admin/config` 共用的設定檢視：各層原始值對照 +
+        `effective`/`source` 生效值判定（PR-3 落地：三層 fallback
+        config → env → default，生效值直接取自分析路徑真的在用的同一批
+        函式——`budget_guard.daily_cap_usd_resolved` / `web._bedrock_allowed`
+        ——不另行重算，避免顯示值與實際採用值分岔）。token 相關只有
+        configured bool + 末 4 碼，絕無明文/完整 hash。
       required: [daily_cap_usd, bedrock_enabled, live_token, version, updated_at, updated_by, exists, version_corrupt]
       properties:
         daily_cap_usd:
           type: object
-          required: [config, env, default]
+          required: [config, env, default, effective, source]
           properties:
             config:
               type: [number, "null"]
@@ -928,18 +932,32 @@ components:
             default:
               type: number
               description: 程式內建保守預設（$3.0）
+            effective:
+              type: number
+              description: 分析路徑當下實際生效的 cap（三層 fallback 解析後的值）
+            source:
+              type: string
+              enum: [config, env, default]
+              description: 生效層（config 讀取異常時如實落 env/default）。例外：env cap ≤ 0＝緊急全關 kill-switch，最高優先凌駕 config（此時 source=env、effective ≤ 0，config 有值也不生效）
         bedrock_enabled:
           type: object
-          required: [config, bedrock_model_id_set]
+          required: [config, bedrock_model_id_set, effective, source]
           properties:
             config:
               type: [boolean, "null"]
             bedrock_model_id_set:
               type: boolean
               description: "`BEDROCK_MODEL_ID` env 是否已設（開關與 model id 是 AND 關係，只回 bool 不回值）"
+            effective:
+              type: boolean
+              description: live 閘當下實際開閉（config bedrock_enabled AND env model，AND 後結果）
+            source:
+              type: string
+              enum: [config, env, config_read_error]
+              description: 生效層；config 未設定過＝env（v0.7.0 語意）；config_read_error＝讀取異常 fail-closed。注意 env 亦涵蓋「`BEDROCK_MODEL_ID` 未設 → 直接短路 false、不讀 config」分支（生效與否確實由 env 決定）
         live_token:
           type: object
-          required: [config_configured, config_last4, env_configured]
+          required: [config_configured, config_last4, env_configured, effective_configured, source]
           properties:
             config_configured:
               type: boolean
@@ -949,6 +967,13 @@ components:
             env_configured:
               type: boolean
               description: "`TRUSTFORGE_LIVE_TOKEN` env 是否已設（只回 bool 不回值）"
+            effective_configured:
+              type: boolean
+              description: 生效層是否有 token 可比對（config hash 優先，否則 env；token 值本身絕不回傳）
+            source:
+              type: string
+              enum: [config, env, none, config_read_error]
+              description: 生效層；config 有 hash＝config（env 舊 token 隨即失效）
         version:
           type: [integer, "null"]
           description: CAS 樂觀鎖版本；item 不存在（`exists=false`）時為 null，PUT 傳 `expected_version=0`
@@ -1004,8 +1029,16 @@ components:
           type: number
         bedrock_capable:
           type: boolean
+          description: |
+            live 閘當下實際開閉（PR-3 起為動態閘：config `bedrock_enabled`
+            AND env `BEDROCK_MODEL_ID`，每請求動態判定，不再是啟動時定死
+            的 env 快照）。config 讀取異常時 fail-closed 回 false。
         live_token_set:
           type: boolean
+          description: |
+            live token 是否已設定（PR-3 起動態判定：config store 的 token
+            hash 優先，未設則落 env `TRUSTFORGE_LIVE_TOKEN`；管理面輪替
+            後不需重啟即反映）。只回 bool，token 值/hash 絕不回傳。
         cache_backend:
           type: object
           required: [name, connected, primary_connected, active_backend, degraded]

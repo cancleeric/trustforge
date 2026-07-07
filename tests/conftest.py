@@ -86,13 +86,44 @@ def _isolate_unledgered_spend():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_admin_config_store(monkeypatch):
+    """admin console PR-3：`budget_guard.daily_cap_usd()` 與 web.py live 閘
+    （`_bedrock_allowed`/`_live_token_matches`）的熱路徑現在會走
+    `admin_config.get_config_cached()`——其預設 store lazy 連真 DynamoDB。
+    比照 `_isolate_connector_cache`（測試預設不打真 AWS）：把預設 store 換成
+    「item 不存在」的 in-memory 假表（＝空 config，行為與 v0.7.0 逐字相同）。
+    個別測試要模擬 config 層時，自行 `monkeypatch.setattr(admin_config,
+    "get_config", ...)`（`get_config_cached` 會透過模組全域拿到 patch 後
+    版本）或建自己的 store + mock `_table`（PR-1 測試既有慣例，傳參注入，
+    不受本 fixture 影響）。"""
+    from trustforge import admin_config
+
+    class _EmptyAdminTable:
+        def get_item(self, **kwargs):
+            return {}  # 無 "Item" → 空 config（合法「尚未設定過」狀態）
+
+        def put_item(self, **kwargs):
+            return {}
+
+        def query(self, **kwargs):
+            return {"Items": []}
+
+    store = admin_config.AdminConfigStore()
+    store._table = _EmptyAdminTable()
+    monkeypatch.setattr(admin_config, "_default_store_instance", store)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_admin_config_cache():
     """admin console PR-1：`admin_config` 的 process 內 TTL 快取
     （`_cache`）是模組級全域狀態，跨測試共用同一份記憶體。比照
     `_isolate_budget_reservation` 慣例，每個測試前後都清空，避免某個測試
     write-through 進快取的設定（或殘留的過期戳）污染到下一個測試。"""
     from trustforge.admin_config import _reset_admin_config_cache_for_tests
+    from trustforge.web import _reset_admin_cfg_fail_window_for_tests
 
     _reset_admin_config_cache_for_tests()
+    _reset_admin_cfg_fail_window_for_tests()
     yield
     _reset_admin_config_cache_for_tests()
+    _reset_admin_cfg_fail_window_for_tests()
