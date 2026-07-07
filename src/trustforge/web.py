@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import hashlib
 import hmac
 import html
 import json
@@ -47,10 +48,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from . import admin_config
 from .agent.orchestrator import aggregate_trust_by_kind
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
-from .budget_guard import online_stance_requested, warn_if_bedrock_model_unpriced
+from .budget_guard import (
+    DEFAULT_BEDROCK_DAILY_USD_CAP,
+    online_stance_requested,
+    warn_if_bedrock_model_unpriced,
+)
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
@@ -4958,6 +4964,432 @@ def _handle_llms_txt() -> tuple[int, str, str]:
         return 404, "llms.txt 未部署\n", "text/plain; charset=utf-8"
 
 
+# ---------------------------------------------------------------------------
+# admin console PR-2（計劃 §2/§3，🔴 安全相關——harper CISO + codex 雙審）：
+# `/api/admin/*` 管理面（運行時設定讀寫 + 審計檢視）+ 獨立認證薄層。
+#
+# 認證設計（計劃 §3.2，逐條對應）：
+#   1. 獨立 `TRUSTFORGE_ADMIN_TOKEN` env、header `X-Admin-Token`。**無 query
+#      參數 fallback**——live token 的 query 路徑是 deprecated 中的歷史包袱
+#      （見 `_apply_live_token_header`），admin 不重蹈：token 絕不進 URL/
+#      access log/瀏覽器歷史。
+#   2. 信任根只在 env（restart 才能輪替）——admin token 本身**不做** runtime
+#      可改，否則攻破一次可自我續權（計劃 §3.2-2）。
+#   3. 未設定/空 = 全關（fail-closed）：所有 `/api/admin/*` 的 GET 落到檔尾
+#      既有 404 頁（與任何不存在路徑 byte-identical，連端點存在性都不暴露）；
+#      PUT 回與其他一切路徑相同的 405（見 `do_PUT`——PUT 對不存在路徑本來
+#      就是 405，若這裡改回 404 反而讓 admin 路徑在一片 405 中突出成 oracle）。
+#   4. 啟動期檢查 admin==live token 碰撞（非空且相等）→ ERROR log + 視同
+#      未設定全關，防「拿分析 token 打管理面」（見 `_compute_admin_token`）。
+#   5. 認證失敗一律 401、訊息不區分「未帶」vs「帶錯」（不給 oracle）；比對
+#      恆定時間（`hmac.compare_digest`，且兩邊先各取 sha256 digest 再比對
+#      ——`compare_digest` 對不等長輸入會提早返回洩漏長度資訊，先 hash 成
+#      定長 32 bytes 連 token 長度都不洩）。
+#   6. 認證失敗 per-IP 限流（10 次/5 分鐘/IP，沿用 `_evict_stale_rate_buckets`
+#      既有 bucket 慣例）。⚠️ 刻意採 **lockout-first**（先查失敗鎖定、超限
+#      直接 429 且**不執行** token 比對）而非「先比對再限流」：後者對暴力
+#      猜測是裝飾性的——猜中的那次仍會直接 200 通過，限流只改變錯誤答案的
+#      狀態碼，完全沒有降低猜測速率；lockout-first 才真正把猜測速率壓在
+#      10 次/5 分。代價：鎖定期間同 IP 帶正確 token 也會吃 429（5 分鐘自
+#      癒）——單管理員拓樸下可接受，且比管理面被暴力破解輕得多。
+#      失敗記 log（IP + path），**絕不記 token 值**。
+#   7. 縱深（nginx IP allowlist / no-cache）是 PR-5 部署層選配，不在本層。
+#
+# 端點（計劃 §2）：
+#   GET /api/admin/config —— config 層當前值 + env/default 原始值對照
+#   PUT /api/admin/config —— 部分更新（CAS，`expected_version` 必填）
+#   GET /api/admin/audit  —— 近 N 筆設定變更審計（唯讀，同認證）
+# 儲存/CAS/審計/快取失效全在 `admin_config.py`（PR-1），本層只做路由分派 +
+# 認證 + 請求驗證（web.py 5300+ 行，計劃 §10 明示儲存邏輯不進本檔）。
+# budget_guard 的三層 fallback 生效值整合是 PR-3——本層 GET 只誠實回報
+# 各層原始值，不自行預判 effective（見 `_admin_config_view` TODO）。
+# ---------------------------------------------------------------------------
+
+ADMIN_TOKEN_HEADER = "X-Admin-Token"
+
+# 認證失敗 per-IP 限流（計劃 §3.2-6）：10 次失敗/5 分鐘/IP。獨立 bucket，
+# 不與 live/real/status 共用（保護目標不同：這裡擋的是管理 token 暴力猜測）。
+_ADMIN_AUTH_FAIL_WINDOW = 300
+_ADMIN_AUTH_FAIL_MAX = 10
+_admin_auth_fail_lock = threading.Lock()
+_admin_auth_fail_buckets: dict[str, list[float]] = {}
+
+# 全域（不分 IP）認證失敗 backstop（縱深防禦，PR #112 harper M1）：
+# per-IP lockout 仰賴 nginx 正確設定 X-Real-IP／X-Forwarded-For；若 nginx
+# 失守或設定錯誤，攻擊者可偽造來源 IP 輪替繞過上面的 per-IP bucket。這裡
+# 加一道不看 IP、只看「全站 5 分鐘內失敗總數」的計數，超過門檻即全域短暫
+# 429（不分是誰打的）+ ERROR 告警 log。
+# ⚠️ 這是**縱深防禦、不是主防線**——主防線仍是 256-bit token 的
+# `hmac.compare_digest` 恆定時間比對；此 backstop 只是在主防線之前多一層
+# 「大量失敗代表有異常」的粗粒度煞車，避免 IP 輪替把 per-IP lockout 架空。
+_ADMIN_AUTH_GLOBAL_FAIL_WINDOW = 300
+_ADMIN_AUTH_GLOBAL_FAIL_MAX = 100
+_admin_auth_global_fail_lock = threading.Lock()
+_admin_auth_global_fails: list[float] = []
+
+_ADMIN_PUT_MAX_BODY_BYTES = 4096  # 計劃 §2.2：body 上限 4 KB
+_ADMIN_CAP_MIN_USD = 0.1  # 計劃 §2.2：不允許 ≤0（緊急全關語意保留給 env 逃生口）
+_ADMIN_CAP_MAX_USD = 50.0
+_ADMIN_LIVE_TOKEN_MIN_LEN = 24  # 計劃 §2.2：防手滑設弱 token
+# live token 明文長度上限：防無意義超長輸入（body 4KB 上限之下的第二道），
+# 前端建議產生 64 字元 hex，512 綽綽有餘。
+_ADMIN_LIVE_TOKEN_MAX_LEN = 512
+_ADMIN_AUDIT_DEFAULT_LIMIT = 50
+_ADMIN_AUDIT_MAX_LIMIT = 200  # 計劃 §2.3：limit clamp 上限
+
+
+def _compute_admin_token() -> str:
+    """啟動期解析生效的 admin token（模組載入時呼叫一次，存進
+    `ADMIN_TOKEN`——與 live token 相反，admin token **刻意**維持「重啟才
+    生效」語意：信任根只在 env，輪替 = 改 env + restart，計劃 §3.2-2）。
+
+    - 未設 / 空字串 → `""`（管理面全關，fail-closed，計劃 §3.2-3）。
+    - 與 `TRUSTFORGE_LIVE_TOKEN` 碰撞（非空且相等）→ ERROR log + 視同未設
+      （計劃 §3.2-4：live token 是給分析消費用的，權限層級/持有人集合都
+      不同，絕不允許同一把 token 同時打得動管理面）。
+    """
+    token = os.getenv("TRUSTFORGE_ADMIN_TOKEN", "")
+    if not token:
+        return ""
+    if LIVE_TOKEN and hmac.compare_digest(token, LIVE_TOKEN):
+        logging.error(
+            "TrustForge: TRUSTFORGE_ADMIN_TOKEN 與 TRUSTFORGE_LIVE_TOKEN 相同——"
+            "管理 token 不得與分析 live token 共用（權限層級不同），"
+            "管理面視同未設定（全關）"
+        )
+        return ""
+    return token
+
+
+ADMIN_TOKEN = _compute_admin_token()
+
+
+def _hash_for_compare(token: str) -> bytes:
+    """token 比對前先 sha256 成定長 32 bytes——`hmac.compare_digest` 只對
+    **等長**輸入保證恆定時間（不等長會提早返回，洩漏長度資訊），先 hash
+    再比對連 token 長度都不洩。"""
+    return hashlib.sha256(token.encode("utf-8")).digest()
+
+
+def _admin_auth_check(headers, client_ip: str, path: str) -> tuple[int, str] | None:
+    """`/api/admin/*` 認證守門（呼叫端已確認 `ADMIN_TOKEN` 非空）。
+
+    回 `None` = 認證通過；否則回 `(status, json_body)`。
+
+    順序（見模組上方 admin 區塊說明 #6，lockout-first 的理由）：
+      1. 失敗鎖定：IP 在 5 分鐘視窗內已失敗 ≥10 次，或**全站**（不分 IP）
+         5 分鐘內已失敗 ≥100 次（縱深 backstop，見 `_ADMIN_AUTH_GLOBAL_FAIL_MAX`
+         說明）→ 429，**不執行比對**。
+      2. `hmac.compare_digest`（sha256 定長化後）恆定時間比對 `X-Admin-Token`。
+      3. 失敗 → 記 per-IP bucket + 全域計數 + warning log（IP+path，不記
+         token 值）→ 401，訊息不區分「未帶」vs「帶錯」（不給 oracle）；
+         全域計數觸頂時額外 ERROR 告警（見下）。
+    """
+    now = time.time()
+    with _admin_auth_fail_lock:
+        _evict_stale_rate_buckets(
+            _admin_auth_fail_buckets, _ADMIN_AUTH_FAIL_WINDOW, now,
+            _RATE_LIMIT_MAX_TRACKED_IPS,
+        )
+        fails = [
+            t for t in _admin_auth_fail_buckets.get(client_ip, [])
+            if now - t < _ADMIN_AUTH_FAIL_WINDOW
+        ]
+        _admin_auth_fail_buckets[client_ip] = fails
+        per_ip_locked = len(fails) >= _ADMIN_AUTH_FAIL_MAX
+
+    with _admin_auth_global_fail_lock:
+        cutoff = now - _ADMIN_AUTH_GLOBAL_FAIL_WINDOW
+        while _admin_auth_global_fails and _admin_auth_global_fails[0] < cutoff:
+            _admin_auth_global_fails.pop(0)
+        global_locked = len(_admin_auth_global_fails) >= _ADMIN_AUTH_GLOBAL_FAIL_MAX
+
+    if per_ip_locked or global_locked:
+        return 429, _json_envelope_err(
+            "rate_limited",
+            f"認證失敗次數過多，請 {_ADMIN_AUTH_FAIL_WINDOW} 秒後再試",
+        )
+
+    presented = ""
+    if headers is not None:
+        presented = headers.get(ADMIN_TOKEN_HEADER) or ""
+    if (
+        isinstance(presented, str)
+        and presented
+        and hmac.compare_digest(_hash_for_compare(presented), _hash_for_compare(ADMIN_TOKEN))
+    ):
+        return None
+
+    with _admin_auth_fail_lock:
+        _admin_auth_fail_buckets.setdefault(client_ip, []).append(now)
+    with _admin_auth_global_fail_lock:
+        _admin_auth_global_fails.append(now)
+        cutoff = now - _ADMIN_AUTH_GLOBAL_FAIL_WINDOW
+        while _admin_auth_global_fails and _admin_auth_global_fails[0] < cutoff:
+            _admin_auth_global_fails.pop(0)
+        global_fail_count = len(_admin_auth_global_fails)
+    if global_fail_count >= _ADMIN_AUTH_GLOBAL_FAIL_MAX:
+        # 縱深防禦告警，非主防線：主防線是 256-bit token 恆定時間比對；
+        # 這裡只是全站失敗率異常時多留一道 ERROR 訊號給 secops 盯（例如
+        # nginx X-Real-IP 被繞過、攻擊者用大量來源 IP 分散猜測 token）。
+        logging.error(
+            "TrustForge admin auth 全域失敗率異常：%d 次於 %d 秒內",
+            global_fail_count, _ADMIN_AUTH_GLOBAL_FAIL_WINDOW,
+        )
+    # 失敗記 log：只記 IP + path，絕不記 token 值（計劃 §3.2-6/-8）
+    logging.warning("TrustForge admin 認證失敗 from %s path %s", client_ip, path)
+    # 訊息刻意不區分「未帶 token」vs「token 錯誤」（計劃 §3.2-5，不給 oracle）
+    return 401, _json_envelope_err("unauthorized", "未授權")
+
+
+def _admin_config_view(config: "admin_config.AdminConfig") -> dict:
+    """GET/PUT 共用的設定回應結構（計劃 §2.1）——一律經
+    `AdminConfig.to_public_dict()`（**絕不**直接序列化 `AdminConfig`，
+    `live_token_hash` 是機敏欄位；env live token 也只回 configured bool，
+    不回值）。
+
+    本 PR（PR-2）只回報各層**原始值**供對照：config 層（管理面寫入的）、
+    env 層（`TRUSTFORGE_BEDROCK_DAILY_USD_CAP` 原始字串，不解析）、default
+    層（`DEFAULT_BEDROCK_DAILY_USD_CAP`）。
+
+    TODO(PR-3 銜接點): `effective` / `source` 欄位（config → env → default
+    三層 fallback 的生效值判定）等 `budget_guard.daily_cap_usd()` 三層整合
+    落地後，由 PR-3 在此回填——本層不自行預判 effective，避免與
+    budget_guard 實際採用邏輯分岔（誠實原則：顯示的生效值必須就是分析
+    路徑真的會用的值）。
+    """
+    pub = config.to_public_dict()
+    return {
+        "daily_cap_usd": {
+            "config": pub["daily_cap_usd"],
+            # env 原始字串（可能是壞值，如實顯示供對照，不在此解析）
+            "env": os.getenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP"),
+            "default": DEFAULT_BEDROCK_DAILY_USD_CAP,
+        },
+        "bedrock_enabled": {
+            "config": pub["bedrock_enabled"],
+            # 開關與 BEDROCK_MODEL_ID 是 AND 關係（PR-3 落地），這裡先誠實
+            # 回報 env 端是否備妥（只回 bool，不回 model id 值）
+            "bedrock_model_id_set": bool(os.getenv("BEDROCK_MODEL_ID")),
+        },
+        "live_token": {
+            "config_configured": pub["live_token_configured"],
+            "config_last4": pub["live_token_last4"],
+            "env_configured": bool(LIVE_TOKEN),
+        },
+        "version": pub["version"],
+        "updated_at": pub["updated_at"],
+        "updated_by": pub["updated_by"],
+        "exists": pub["exists"],
+        "version_corrupt": pub["version_corrupt"],
+    }
+
+
+def _handle_api_admin_config_get() -> tuple[int, str]:
+    """`GET /api/admin/config`（計劃 §2.1）。admin 讀走 ConsistentRead
+    （管理面「寫後即讀」場景，見 `admin_config.get_config` docstring）。"""
+    try:
+        config = admin_config.get_config(consistent=True)
+    except Exception:
+        # 比照其餘 /api/* handler 防禦邊界：讀取失敗（含 AdminConfigReadError
+        # 與任何非預期例外）一律通用 502，不透傳例外細節
+        logging.exception("TrustForge /api/admin/config GET error")
+        return 502, _json_envelope_err("upstream_error", "設定暫時無法讀取，請稍後再試")
+    return 200, _json_envelope_ok(_admin_config_view(config))
+
+
+def _read_admin_put_body(headers, rfile) -> tuple[dict | None, tuple[int, str] | None]:
+    """讀取並解析 PUT body（計劃 §2.2：上限 4KB、Content-Type 檢查、解析
+    失敗 400）。回 `(payload, None)` 或 `(None, (status, json_body))`。"""
+    ctype = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        return None, (415, _json_envelope_err(
+            "unsupported_media_type", "Content-Type 須為 application/json"
+        ))
+    length_raw = (headers.get("Content-Length") or "").strip()
+    if not length_raw.isdigit():
+        return None, (411, _json_envelope_err("length_required", "缺少有效的 Content-Length"))
+    length = int(length_raw)
+    if length > _ADMIN_PUT_MAX_BODY_BYTES:
+        return None, (413, _json_envelope_err(
+            "payload_too_large", f"body 上限 {_ADMIN_PUT_MAX_BODY_BYTES} bytes"
+        ))
+    if length == 0:
+        return None, (400, _json_envelope_err("bad_request", "body 不可為空"))
+    try:
+        payload = json.loads(rfile.read(length).decode("utf-8"))
+    except Exception:
+        return None, (400, _json_envelope_err("bad_request", "body 必須是合法 JSON"))
+    if not isinstance(payload, dict):
+        return None, (400, _json_envelope_err("bad_request", "body 必須是 JSON object"))
+    return payload, None
+
+
+_ADMIN_PUT_ALLOWED_FIELDS = frozenset(
+    {"daily_cap_usd", "bedrock_enabled", "live_token", "expected_version"}
+)
+
+
+def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
+    """PUT body 的 server-side 驗證（計劃 §2.2；前端驗證只是 UX）。回
+    `None` = 通過；否則 `(status, json_body)`。"""
+    unknown = set(payload) - _ADMIN_PUT_ALLOWED_FIELDS
+    if unknown:
+        return 400, _json_envelope_err(
+            "bad_request", f"不支援的欄位: {'、'.join(sorted(unknown))}"
+        )
+    if "expected_version" not in payload:
+        return 400, _json_envelope_err("bad_request", "expected_version 必填（CAS 樂觀鎖）")
+    ev = payload["expected_version"]
+    if isinstance(ev, bool) or not isinstance(ev, int) or ev < 0:
+        return 400, _json_envelope_err(
+            "bad_request", "expected_version 必須是非負整數（item 不存在時傳 0）"
+        )
+    if not any(k in payload for k in ("daily_cap_usd", "bedrock_enabled", "live_token")):
+        return 400, _json_envelope_err("bad_request", "至少要提供一個設定欄位")
+
+    if "daily_cap_usd" in payload and payload["daily_cap_usd"] is not None:
+        cap = payload["daily_cap_usd"]
+        # 嚴格數字（bool 是 int 子類，明確排除）；json.loads 預設接受
+        # NaN/Infinity 字面值。
+        # ⚠️ 這裡刻意不呼叫 float(cap) 再比較：巨大整數字面值（如幾百位數的
+        # 整數）轉 float 會拋 OverflowError（QA #112 M1 抓到的真崩潰），
+        # 未捕捉會讓 do_PUT 整個例外、連線中斷、拿不到乾淨的 400。改成直接
+        # 用原始值（int 或 float）跟邊界比較——Python 對「int 跟 float
+        # 比大小」是精確比較，不會為了比較而把巨大 int 轉成 float，所以巨大
+        # int／inf 一樣會被範圍擋下，不會 OverflowError；NaN 跟任何數比較
+        # 恆為 False，範圍檢查會自然判定不合法，isfinite 已不需要另外擋。
+        if (
+            isinstance(cap, bool)
+            or not isinstance(cap, (int, float))
+            or not (_ADMIN_CAP_MIN_USD <= cap <= _ADMIN_CAP_MAX_USD)
+        ):
+            return 400, _json_envelope_err(
+                "invalid_cap",
+                f"daily_cap_usd 須為 {_ADMIN_CAP_MIN_USD} 至 {_ADMIN_CAP_MAX_USD} 之間的數字"
+                "（緊急全關請用 bedrock_enabled=false，不接受 cap ≤ 0）",
+            )
+
+    if "bedrock_enabled" in payload and payload["bedrock_enabled"] is not None:
+        if not isinstance(payload["bedrock_enabled"], bool):  # 嚴格 bool，"true" 字串不算
+            return 400, _json_envelope_err("bad_request", "bedrock_enabled 必須是 bool")
+
+    if "live_token" in payload and payload["live_token"] is not None:
+        token = payload["live_token"]
+        if (
+            not isinstance(token, str)
+            or not (_ADMIN_LIVE_TOKEN_MIN_LEN <= len(token) <= _ADMIN_LIVE_TOKEN_MAX_LEN)
+            # 可見 ASCII（0x21–0x7E，不含空白）：防控制字元/空白/非 ASCII 混入
+            or any(not (0x21 <= ord(c) <= 0x7E) for c in token)
+        ):
+            return 400, _json_envelope_err(
+                "bad_request",
+                f"live_token 須為長度 {_ADMIN_LIVE_TOKEN_MIN_LEN} 至 "
+                f"{_ADMIN_LIVE_TOKEN_MAX_LEN} 的可見 ASCII 字串（或 null＝清除）",
+            )
+    return None
+
+
+def _handle_api_admin_config_put(headers, rfile, client_ip: str) -> tuple[int, str]:
+    """`PUT /api/admin/config`（計劃 §2.2）：部分更新 + CAS。
+
+    成功 → 200 + 與 GET 相同的 data 結構（新狀態）+ `warnings` 陣列；
+    快取失效由 `admin_config.put_config()` 的 write-through 完成，本層
+    不需（也不得）另行操作快取。
+
+    ⚠️ 新 live token 明文**不回顯**：呼叫端（前端產生器）本來就持有明文
+    （是它送來的），回顯只是徒增一次明文出現在回應/攔截面的機會——比
+    計劃 §2.2「明文只在本次回應出現一次」更保守（出現零次）。
+    """
+    payload, err = _read_admin_put_body(headers, rfile)
+    if err is not None:
+        return err
+    err = _validate_admin_put_payload(payload)
+    if err is not None:
+        return err
+
+    changes = {
+        k: payload[k]
+        for k in ("daily_cap_usd", "bedrock_enabled", "live_token")
+        if k in payload
+    }
+    warnings: list[str] = []
+    # 計劃 §2.2：開關開了但 BEDROCK_MODEL_ID 未設 → 仍准寫入，但誠實警告
+    if changes.get("bedrock_enabled") is True and not os.getenv("BEDROCK_MODEL_ID"):
+        warnings.append("BEDROCK_MODEL_ID 未設定，開關開了也不會有真呼叫")
+
+    try:
+        result = admin_config.put_config(
+            changes,
+            payload["expected_version"],
+            actor=f"admin@{client_ip}",
+            user_agent=(headers.get("User-Agent") or None),
+        )
+    except admin_config.VersionConflictError:
+        # 409 附最新 version（計劃 §2.2：前端重載再改）。重讀失敗就回 null，
+        # 不讓「附帶資訊讀不到」升級成整個 409 變 502。
+        latest_version = None
+        try:
+            latest_version = admin_config.get_config(consistent=True).version
+        except Exception:
+            logging.warning("TrustForge admin 409 重讀最新 version 失敗", exc_info=True)
+        return 409, json.dumps(
+            {
+                "ok": False,
+                "error": {
+                    "code": "version_conflict",
+                    "message": "設定已被他人變更，請重新讀取最新設定後再改",
+                    "current_version": latest_version,
+                },
+            },
+            ensure_ascii=False,
+        )
+    except admin_config.VersionCorruptError:
+        # 專屬錯誤碼（計劃/admin_config MEDIUM-3）：與一般 409 明確區分——
+        # 409 暗示「重讀再試即可」，這種損毀狀態重讀也拿不到合法 version，
+        # 需人工修復（SOP 見 admin_config 模組頂部），屬 server 側資料
+        # 完整性問題 → 500
+        logging.error("TrustForge admin config version 欄位損毀，需人工修復（見 admin_config SOP）")
+        return 500, _json_envelope_err(
+            "version_corrupt",
+            "設定 version 欄位損毀，需人工修復後才能再寫入（非並發衝突，重試無效）",
+        )
+    except ValueError:
+        # admin_config._validate_changes 的儲存層驗證（理論上已被上面 API 層
+        # 驗證擋光，防禦縱深）——不透傳內部訊息
+        logging.warning("TrustForge admin PUT 儲存層驗證拒絕", exc_info=True)
+        return 400, _json_envelope_err("bad_request", "設定內容不合法")
+    except Exception:
+        # AdminConfigReadError/AdminConfigWriteError/其他非預期 → 通用 502
+        logging.exception("TrustForge /api/admin/config PUT error")
+        return 502, _json_envelope_err("upstream_error", "設定暫時無法寫入，請稍後再試")
+
+    if result.audit_warning:
+        warnings.append(result.audit_warning)
+    data = _admin_config_view(result.config)
+    data["warnings"] = warnings
+    return 200, _json_envelope_ok(data)
+
+
+def _handle_api_admin_audit(qs: dict) -> tuple[int, str]:
+    """`GET /api/admin/audit`（計劃 §2.3）：近 N 筆設定變更審計，唯讀。
+    `limit` 預設 50，clamp 上限 200（超過不報錯、靜默收斂——唯讀端點，
+    寬鬆處理；非正整數才 400）。"""
+    raw = (qs.get("limit", [str(_ADMIN_AUDIT_DEFAULT_LIMIT)])[0]).strip()
+    if len(raw) > 10 or not raw.isdigit() or int(raw) < 1:
+        return 400, _json_envelope_err(
+            "bad_request",
+            "limit 須為正整數；有效範圍 1-200（超過 200 不會 400，會靜默 clamp 為 200）",
+        )
+    limit = min(int(raw), _ADMIN_AUDIT_MAX_LIMIT)
+    try:
+        records = admin_config.list_audit(limit)
+    except Exception:
+        logging.exception("TrustForge /api/admin/audit error")
+        return 502, _json_envelope_err("upstream_error", "審計紀錄暫時無法讀取，請稍後再試")
+    return 200, _json_envelope_ok({"limit": limit, "records": records})
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra_headers=None):
         b = body.encode("utf-8")
@@ -5024,6 +5456,40 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/llms.txt":
             code, body, ctype = _handle_llms_txt()
             return self._send(code, body, ctype)
+
+        # admin console PR-2（🔴 安全）：`/api/admin/*` 管理面——一律
+        # **先認證、再進任何 handler**（未認證的請求連端點分派都碰不到），
+        # 見 `class Handler` 上方 admin 區塊大段說明。
+        # （`(u.path + "/").startswith(...)` 同時涵蓋 `/api/admin` 裸路徑與
+        # 所有子路徑；`/api/admin` 裸路徑本身不是文件化端點，不用
+        # `u.path == ...` 字面比對是避免被
+        # `test_openapi_spec_covers_every_real_handled_path` 的原始碼掃描
+        # 誤認為「應載入 OpenAPI spec 的真端點」。）
+        if (u.path + "/").startswith("/api/admin/"):
+            if ADMIN_TOKEN:
+                denied = _admin_auth_check(
+                    getattr(self, "headers", {}), client_ip, u.path
+                )
+                if denied is not None:
+                    return self._send(
+                        denied[0], denied[1], "application/json; charset=utf-8"
+                    )
+                if u.path == "/api/admin/config":
+                    code, body = _handle_api_admin_config_get()
+                    return self._send(code, body, "application/json; charset=utf-8")
+                if u.path == "/api/admin/audit":
+                    code, body = _handle_api_admin_audit(qs)
+                    return self._send(code, body, "application/json; charset=utf-8")
+                # 已認證但打到不存在的 admin 子路徑 → JSON 404
+                return self._send(
+                    404,
+                    _json_envelope_err("not_found", "無此管理端點"),
+                    "application/json; charset=utf-8",
+                )
+            # TRUSTFORGE_ADMIN_TOKEN 未設/空/與 live token 碰撞 → 管理面全關
+            # （fail-closed，計劃 §3.2-3）：**刻意不 return**，讓請求自然落到
+            # 檔尾既有 404 頁——與任何不存在路徑的回應 byte-identical，連
+            # 「這裡有管理端點」的存在性都不暴露。
 
         # 前後端分離 Phase 1（task #28）：純新增 JSON API 端點，統一
         # `{ok,data,error}` 信封，見 `_handle_api_*` 系列函式 docstring/
@@ -5290,6 +5756,49 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, page(
             _render_error_card("找不到頁面", "您造訪的網址不存在，請確認網址是否正確。"),
         ))
+
+    def do_PUT(self):
+        """admin console PR-2：整個 server 只有 `PUT /api/admin/config` 一條
+        寫入路徑（計劃 §2.2），其餘路徑一律 405。
+
+        fail-closed 語意（`ADMIN_TOKEN` 未設/空/碰撞時）：admin 路徑回**與
+        其他一切路徑相同的 405**——本 server 對不存在路徑的 PUT 本來就是
+        405（加入本方法前是 501），若這裡特別回 404 反而讓 admin 路徑在
+        一片 405 中突出、洩漏端點存在性（GET 側的「未設 → 404」同理：
+        那邊的 404 頁與任何不存在路徑 byte-identical）。
+        """
+        u = urlparse(self.path)
+        client_ip = _resolve_client_ip(
+            self.client_address[0], getattr(self, "headers", {})
+        )
+        if (u.path + "/").startswith("/api/admin/") and ADMIN_TOKEN:
+            # 與 do_GET 相同：先認證（含失敗鎖定 429），再分派
+            denied = _admin_auth_check(getattr(self, "headers", {}), client_ip, u.path)
+            if denied is not None:
+                return self._send(denied[0], denied[1], "application/json; charset=utf-8")
+            if u.path == "/api/admin/config":
+                code, body = _handle_api_admin_config_put(
+                    getattr(self, "headers", {}), self.rfile, client_ip
+                )
+                return self._send(code, body, "application/json; charset=utf-8")
+            if u.path == "/api/admin/audit":
+                return self._send(
+                    405,
+                    _json_envelope_err("method_not_allowed", "audit 只支援 GET"),
+                    "application/json; charset=utf-8",
+                    extra_headers={"Allow": "GET"},
+                )
+            return self._send(
+                404,
+                _json_envelope_err("not_found", "無此管理端點"),
+                "application/json; charset=utf-8",
+            )
+        return self._send(
+            405,
+            _json_envelope_err("method_not_allowed", "此路徑不支援 PUT"),
+            "application/json; charset=utf-8",
+            extra_headers={"Allow": "GET"},
+        )
 
 
 def main():

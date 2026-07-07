@@ -129,6 +129,13 @@ tags:
     description: 核心分析端點
   - name: observability
     description: 狀態/成本/總覽/歷史等唯讀觀測端點
+  - name: admin
+    description: |
+      管理面（運行時設定 + 審計）——**非公開端點**，僅供管理員使用，
+      刻意不列入 `/llms.txt` agent 指南。`TRUSTFORGE_ADMIN_TOKEN` env
+      未設定時整個 `/api/admin/*` fail-closed 全關：GET 回與任何不存在
+      路徑 byte-identical 的 404 HTML 頁、PUT 回與其他一切路徑相同的
+      405——連端點存在性都不暴露。
 
 paths:
   /api/health:
@@ -572,6 +579,282 @@ paths:
                 type: string
               example: "llms.txt 未部署\n"
 
+  /api/admin/config:
+    get:
+      tags: [admin]
+      operationId: getAdminConfig
+      summary: 讀取管理面運行時設定（config 層當前值 + env/default 原始值對照）
+      security:
+        - AdminToken: []
+      description: |
+        回傳 config 層（管理面寫入、存於 DynamoDB 保留字 item）的當前值，
+        並附 env 層原始字串（`TRUSTFORGE_BEDROCK_DAILY_USD_CAP`，不解析、
+        如實顯示）與 default 層（$3.0）供對照。
+
+        ⚠️ 本版（PR-2）**不含** `effective`/`source` 生效值判定欄位——
+        config → env → default 三層 fallback 與 `budget_guard` 的整合是
+        PR-3 範圍，屆時由 budget_guard 實際採用的同一套邏輯回填，避免
+        「顯示的生效值」與「分析路徑真的用的值」分岔。
+
+        token 安全：live token 只回 `config_configured`（bool）＋
+        `config_last4`（末 4 碼，短 token 時為 null）＋ `env_configured`
+        （bool）——**絕不**回明文或完整 hash。
+
+        認證（所有 `/api/admin/*` 共通）：
+        - header `X-Admin-Token`（`hmac.compare_digest` 恆定時間比對，
+          雙邊先 sha256 定長化，連 token 長度都不洩）。**無 query 參數
+          fallback**——token 絕不進 URL/access log。
+        - 認證失敗一律 401，訊息不區分「未帶」vs「帶錯」（不給 oracle）。
+        - 認證失敗 per-IP 限流：10 次/5 分鐘，超限 429（lockout-first：
+          鎖定期間不執行比對，連正確 token 也 429，5 分鐘自癒）。
+        - `TRUSTFORGE_ADMIN_TOKEN` 未設/空/與 `TRUSTFORGE_LIVE_TOKEN`
+          相同 → 管理面全關（fail-closed），見 admin tag 說明。
+      responses:
+        "200":
+          description: 當前設定（config 層 + env/default 對照）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AdminConfigData"
+              example:
+                ok: true
+                data:
+                  daily_cap_usd: {config: 1.0, env: "3.0", default: 3.0}
+                  bedrock_enabled: {config: true, bedrock_model_id_set: true}
+                  live_token: {config_configured: true, config_last4: "a9f2", env_configured: false}
+                  version: 7
+                  updated_at: "2026-07-07T03:00:00+00:00"
+                  updated_by: "admin@203.0.113.5"
+                  exists: true
+                  version_corrupt: false
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "404":
+          $ref: "#/components/responses/AdminDisabled"
+        "429":
+          $ref: "#/components/responses/AdminAuthRateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+    put:
+      tags: [admin]
+      operationId: putAdminConfig
+      summary: 部分更新運行時設定（CAS 樂觀鎖，`expected_version` 必填）
+      security:
+        - AdminToken: []
+      description: |
+        整個 server 唯一的寫入端點。body 欄位皆選填＝部分更新，但
+        `expected_version` 必填（CAS：先 GET 拿 `version`，衝突回 409
+        附 `current_version`，前端重載再改）。
+
+        - `daily_cap_usd`：`0.1 ≤ x ≤ 50` 的有限數字，否則 400
+          `invalid_cap`。**不接受 ≤ 0**——「cap ≤ 0＝緊急全關」語意保留
+          給 env 逃生口，管理面的「關」統一走 `bedrock_enabled=false`。
+          `null`＝清除 config 層（回落 env/default）。
+        - `bedrock_enabled`：嚴格 bool（`"true"` 字串不算）。`true` 但
+          `BEDROCK_MODEL_ID` env 未設 → 仍寫入，回應 `warnings` 附
+          「開關開了也不會有真呼叫」誠實警告。`null`＝清除 config 層
+          開關（回落下一層：env/default，見 PR-3 budget_guard 整合）。
+        - `live_token`：長度 24–512 的可見 ASCII（0x21–0x7E）明文，
+          server 落庫前轉 sha256（明文不落庫、不進審計、**不回顯**）。
+          `null`＝清除 runtime token（回落 env token）。
+        - body 上限 4 KB（413）、`Content-Type: application/json`（415）、
+          須帶有效 `Content-Length`（411）、JSON 解析失敗/非 object（400）。
+
+        成功 → 200 + 與 GET 相同的 data 結構（新狀態）＋ `warnings`
+        字串陣列（含審計側路寫入失敗的 best-effort 警告），並同步失效
+        本 process 設定快取（write-through）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version]
+              additionalProperties: false
+              properties:
+                daily_cap_usd:
+                  type: [number, "null"]
+                  minimum: 0.1
+                  maximum: 50
+                bedrock_enabled:
+                  type: [boolean, "null"]
+                live_token:
+                  type: [string, "null"]
+                  minLength: 24
+                  maxLength: 512
+                expected_version:
+                  type: integer
+                  minimum: 0
+                  description: 剛讀到的 `version`；item 尚不存在（`exists=false`）時傳 0
+            example:
+              daily_cap_usd: 1.0
+              bedrock_enabled: true
+              expected_version: 7
+      responses:
+        "200":
+          description: 寫入成功，回新狀態（結構同 GET）＋ `warnings`
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/AdminConfigData"
+                          - type: object
+                            required: [warnings]
+                            properties:
+                              warnings:
+                                type: array
+                                items:
+                                  type: string
+        "400":
+          description: |
+            驗證失敗——`invalid_cap`（cap 越界/非有限數/非數字）或
+            `bad_request`（`expected_version` 缺席/不合法、無任何設定
+            欄位、不支援的欄位、bedrock_enabled 非嚴格 bool、live_token
+            不符長度/字元集規則、JSON 解析失敗）。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: invalid_cap
+                  message: "daily_cap_usd 須為 0.1 至 50.0 之間的數字（緊急全關請用 bedrock_enabled=false，不接受 cap ≤ 0）"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "405":
+          $ref: "#/components/responses/AdminDisabledPut"
+        "409":
+          description: |
+            CAS 衝突：`expected_version` 不是當前值（寫入期間有別人先改
+            了設定）。`error.current_version` 附最新 version（重讀失敗時
+            為 null），前端重載最新設定後再改。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ErrEnvelope"
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          current_version:
+                            type: [integer, "null"]
+              example:
+                ok: false
+                error:
+                  code: version_conflict
+                  message: "設定已被他人變更，請重新讀取最新設定後再改"
+                  current_version: 9
+        "411":
+          description: 缺少有效的 `Content-Length`（`length_required`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "413":
+          description: body 超過 4 KB 上限（`payload_too_large`）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "415":
+          description: "`Content-Type` 不是 `application/json`（`unsupported_media_type`）"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "429":
+          $ref: "#/components/responses/AdminAuthRateLimited"
+        "500":
+          description: |
+            `version_corrupt`：config item 的 `version` 欄位損毀（非
+            int）——CAS 對任何 `expected_version` 都不可能成功，重試無效，
+            需人工修復（SOP 見 `admin_config.py` 模組頂部）。刻意與 409
+            區分：409 暗示「重讀再試即可」，這種損毀狀態不行。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: version_corrupt
+                  message: "設定 version 欄位損毀，需人工修復後才能再寫入（非並發衝突，重試無效）"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/admin/audit:
+    get:
+      tags: [admin]
+      operationId: getAdminAudit
+      summary: 近 N 筆設定變更審計（唯讀，同 admin 認證）
+      security:
+        - AdminToken: []
+      description: |
+        時間降序回傳設定變更紀錄（DynamoDB 審計 item，best-effort 雙寫的
+        另一份在 systemd journal）。token 類欄位的 old/new 一律是遮罩值
+        （`"<set>"`/`"<cleared>"`/`"<rotated last4=xxxx>"`），絕無明文/
+        hash。`limit` 有效範圍 1-200、預設 50；超過 200 是**靜默 clamp
+        成 200**（不是 400，唯讀端點寬鬆處理）；非正整數才 400。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: |
+            回看筆數，1 以上整數，預設 50。傳超過 200 的值不會 400，
+            會被靜默 clamp 為 200（故本欄位 schema 不標 `maximum`，
+            避免暗示「超過就錯誤」——實際只有非正整數才是 400）。
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+      responses:
+        "200":
+          description: 審計紀錄（時間降序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [limit, records]
+                        properties:
+                          limit:
+                            type: integer
+                          records:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/AdminAuditRecord"
+        "400":
+          description: "`limit` 非正整數"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "401":
+          $ref: "#/components/responses/AdminUnauthorized"
+        "404":
+          $ref: "#/components/responses/AdminDisabled"
+        "429":
+          $ref: "#/components/responses/AdminAuthRateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
 components:
   schemas:
     OkEnvelope:
@@ -599,12 +882,110 @@ components:
             code:
               type: string
               description: |
-                機器可讀錯誤代碼，本 API 目前只會出現：`bad_request` /
-                `rate_limited` / `timeout` / `upstream_error`
-              enum: [bad_request, rate_limited, timeout, upstream_error]
+                機器可讀錯誤代碼。公開端點只會出現：`bad_request` /
+                `rate_limited` / `timeout` / `upstream_error`；
+                `/api/admin/*` 管理面另有：`unauthorized` / `not_found` /
+                `method_not_allowed` / `invalid_cap` / `version_conflict` /
+                `version_corrupt` / `length_required` / `payload_too_large` /
+                `unsupported_media_type`
+              enum:
+                - bad_request
+                - rate_limited
+                - timeout
+                - upstream_error
+                - unauthorized
+                - not_found
+                - method_not_allowed
+                - invalid_cap
+                - version_conflict
+                - version_corrupt
+                - length_required
+                - payload_too_large
+                - unsupported_media_type
             message:
               type: string
               description: 通用中文訊息，刻意不透傳例外 stacktrace/內部依賴細節
+
+    AdminConfigData:
+      type: object
+      description: |
+        `GET/PUT /api/admin/config` 共用的設定檢視（PR-2：各層原始值對照；
+        `effective`/`source` 生效值判定欄位由 PR-3 隨 budget_guard 三層
+        fallback 整合一起補上）。token 相關只有 configured bool + 末 4 碼，
+        絕無明文/完整 hash。
+      required: [daily_cap_usd, bedrock_enabled, live_token, version, updated_at, updated_by, exists, version_corrupt]
+      properties:
+        daily_cap_usd:
+          type: object
+          required: [config, env, default]
+          properties:
+            config:
+              type: [number, "null"]
+              description: config 層當前值（null＝未設定/已清除）
+            env:
+              type: [string, "null"]
+              description: "`TRUSTFORGE_BEDROCK_DAILY_USD_CAP` env 原始字串（不解析、如實顯示供對照，可能是壞值）"
+            default:
+              type: number
+              description: 程式內建保守預設（$3.0）
+        bedrock_enabled:
+          type: object
+          required: [config, bedrock_model_id_set]
+          properties:
+            config:
+              type: [boolean, "null"]
+            bedrock_model_id_set:
+              type: boolean
+              description: "`BEDROCK_MODEL_ID` env 是否已設（開關與 model id 是 AND 關係，只回 bool 不回值）"
+        live_token:
+          type: object
+          required: [config_configured, config_last4, env_configured]
+          properties:
+            config_configured:
+              type: boolean
+            config_last4:
+              type: [string, "null"]
+              description: 末 4 碼；token 過短（<16 字元）時為 null（避免 last4 洩露過半明文）
+            env_configured:
+              type: boolean
+              description: "`TRUSTFORGE_LIVE_TOKEN` env 是否已設（只回 bool 不回值）"
+        version:
+          type: [integer, "null"]
+          description: CAS 樂觀鎖版本；item 不存在（`exists=false`）時為 null，PUT 傳 `expected_version=0`
+        updated_at:
+          type: [string, "null"]
+        updated_by:
+          type: [string, "null"]
+        exists:
+          type: boolean
+        version_corrupt:
+          type: boolean
+          description: item 存在但 `version` 欄位損毀（需人工修復，見 PUT 的 500 說明）
+
+    AdminAuditRecord:
+      type: object
+      properties:
+        ts:
+          type: [string, "null"]
+        actor:
+          type: [string, "null"]
+          description: "`admin@<client_ip>`（單 token 模型下 actor 粒度＝IP+時間）"
+        changes:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              old: {}
+              new: {}
+          description: token 類欄位 old/new 一律是遮罩值，絕無明文/hash
+        version_from:
+          type: [integer, "null"]
+        version_to:
+          type: [integer, "null"]
+        user_agent:
+          type: [string, "null"]
 
     StatusData:
       type: object
@@ -1148,3 +1529,78 @@ components:
             error:
               code: upstream_error
               message: "狀態資料暫時無法讀取，請稍後再試"
+
+    AdminUnauthorized:
+      description: |
+        `X-Admin-Token` 未帶或不正確——訊息刻意不區分兩種情況（不給
+        oracle）。比對為恆定時間（`hmac.compare_digest`，雙邊 sha256
+        定長化）。失敗會計入 per-IP 失敗限流並記 log（IP+path，不記
+        token 值）。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrEnvelope"
+          example:
+            ok: false
+            error:
+              code: unauthorized
+              message: "未授權"
+
+    AdminDisabled:
+      description: |
+        `TRUSTFORGE_ADMIN_TOKEN` 未設/空/與 `TRUSTFORGE_LIVE_TOKEN` 相同
+        （碰撞視同未設）→ 管理面 fail-closed 全關：GET 回與任何不存在
+        路徑 **byte-identical 的 404 HTML 頁**（非 JSON 信封，連端點
+        存在性都不暴露）。PUT 的全關行為不同、見 `AdminDisabledPut`。
+      content:
+        text/html:
+          schema:
+            type: string
+
+    AdminDisabledPut:
+      description: |
+        `TRUSTFORGE_ADMIN_TOKEN` 未設/空/與 `TRUSTFORGE_LIVE_TOKEN` 相同
+        （碰撞視同未設）→ 管理面 fail-closed 全關。PUT 語境下這台 server
+        對「不存在/未開放的路徑」一律回 405（而非 404）——與 GET 的
+        byte-identical 404 HTML 頁不同語意，故獨立成另一個 response 元件
+        （PR #112 qa M2：先前誤把 GET/PUT 共用同一個 404 元件）。
+      headers:
+        Allow:
+          schema:
+            type: string
+          example: GET
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrEnvelope"
+          example:
+            ok: false
+            error:
+              code: method_not_allowed
+              message: "此路徑不支援 PUT"
+
+    AdminAuthRateLimited:
+      description: |
+        認證失敗 per-IP 限流：5 分鐘視窗內失敗 ≥10 次 → 429（lockout-
+        first：鎖定期間不執行 token 比對，連正確 token 也 429，視窗
+        滑過自癒）。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrEnvelope"
+          example:
+            ok: false
+            error:
+              code: rate_limited
+              message: "認證失敗次數過多，請 300 秒後再試"
+
+  securitySchemes:
+    AdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+      description: |
+        管理面獨立 token（`TRUSTFORGE_ADMIN_TOKEN` env，信任根只在 env、
+        輪替＝改 env + restart）。與分析用 `X-Live-Token` 是**不同權限
+        層級的不同 token**，不可共用（server 啟動期檢查碰撞，相同即
+        全關管理面）。**無 query 參數 fallback**——token 絕不進 URL。
