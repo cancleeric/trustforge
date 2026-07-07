@@ -150,7 +150,10 @@ def _bedrock_allowed_resolved(cfg=None) -> tuple[bool, str]:
     """live 閘生效判定 + 來源。回 `(allowed, source)`，source ∈
     `"env"`（config 未設定過，只看 env——與 v0.7.0 `HAS_BEDROCK` 逐字
     相同）/ `"config"`（設定過一次後以 config 為準）/
-    `"config_read_error"`（讀取異常，fail-closed False）。
+    `"config_read_error"`（讀取異常，fail-closed False）。注意 `"env"`
+    亦涵蓋「`BEDROCK_MODEL_ID` 未設 → 直接短路 `(False, "env")`」分支
+    （此時不讀 config，生效與否確實由 env 決定），不只「config 未設定過
+    的放行」分支。
 
     邏輯＝ config `bedrock_enabled` AND env `BEDROCK_MODEL_ID`（雙
     fail-closed）：runtime 開關開了但 env 沒設模型 → 沒東西可呼叫，仍

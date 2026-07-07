@@ -17,6 +17,9 @@ live 閘動態化測試。
 - 執行緒安全鐵則：config 讀（`get_config_cached`）發生在
   `BudgetReservation._lock` 之外。
 - schema 相容固定驗收：無 config item → 行為與 v0.7.0 逐字相同。
+- 雙審合批修（PR #114 複審）：env cap≤0 kill-switch 最高優先凌駕 config
+  （harper M2）；config `bedrock_enabled=false` 統一蓋住 online-stance
+  側路（harper M1）；budget 路徑 15s 失敗負快取（qa M1）。
 
 ⛔ 全程不打真 AWS：一律 monkeypatch `admin_config.get_config` 或注入
 mock `_table` 的自建 store（PR-1 慣例）；conftest 的
@@ -490,6 +493,169 @@ def test_read_error_negative_cache_window(monkeypatch):
     cfg = web._admin_runtime_config(now_fn=now_fn)
     assert cfg is not web._ADMIN_CFG_READ_ERROR
     assert cfg.bedrock_enabled is True
+
+
+# ---------------------------------------------------------------------------
+# 8. env cap≤0 kill-switch 最高優先（PR #114 複審 harper M2）
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("env_val", ["0", "-1"])
+def test_cap_env_killswitch_overrides_config(monkeypatch, env_val):
+    """驗收固定項（harper M2）：config 設 1.0 + env 設 ≤0 → 生效 ≤0
+    （kill-switch 凌駕 config，「env 設 cap≤0 全關」舊 SOP 在 config 已設
+    的部署不得失效）。`daily_cap_exceeded`/`try_reserve` 同步全關。"""
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", env_val)
+    _mock_config(monkeypatch, AdminConfig(daily_cap_usd=1.0, exists=True))
+    assert budget_guard.daily_cap_usd_resolved() == (float(env_val), "env")
+    assert budget_guard.daily_cap_exceeded() is True
+    assert budget_guard.try_reserve_request_budget() is None
+
+
+def test_cap_env_killswitch_never_reads_config(monkeypatch):
+    """kill-switch 生效期間零 DynamoDB 讀：緊急關閉不依賴管理面存活。"""
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "0")
+
+    def must_not_call(*a, **k):
+        raise AssertionError("env kill-switch 生效時不應讀 admin config")
+
+    monkeypatch.setattr(admin_config, "get_config", must_not_call)
+    assert budget_guard.daily_cap_usd_resolved() == (0.0, "env")
+
+
+def test_cap_env_positive_does_not_shortcircuit_config(monkeypatch):
+    """反向保護：只有 ≤0 走 kill-switch 短路；env 正值仍照三層順序被
+    config 蓋過（不得把整個 env 層都提到 config 之前）。"""
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "0.5")
+    _mock_config(monkeypatch, AdminConfig(daily_cap_usd=1.0, exists=True))
+    assert budget_guard.daily_cap_usd_resolved() == (1.0, "config")
+
+
+# ---------------------------------------------------------------------------
+# 9. config bedrock_enabled 統一蓋住 online-stance 側路（PR #114 複審
+#    harper M1）：緊急關閉後 ?real=1 流量不得再打真 Bedrock
+# ---------------------------------------------------------------------------
+def _enable_stance_env(monkeypatch) -> None:
+    monkeypatch.setenv("TRUSTFORGE_ONLINE_STANCE", "1")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+
+
+def test_stance_blocked_when_config_disables_bedrock(monkeypatch):
+    """驗收固定項（harper M1）：bedrock_enabled=false → online-stance 也
+    被擋（緊急關閉統一蓋所有真 Bedrock 路徑，不只 ?live=1 主路徑）。"""
+    _enable_stance_env(monkeypatch)
+    _mock_config(monkeypatch, AdminConfig(bedrock_enabled=False, exists=True))
+    assert budget_guard.online_stance_requested() is False
+
+
+def test_stance_config_unset_follows_env_only(monkeypatch):
+    """schema 相容：config 未設定過（item 不存在）→ 只看 env，行為與
+    v0.7.0 逐字相同。"""
+    _enable_stance_env(monkeypatch)
+    _mock_config(monkeypatch, AdminConfig())
+    assert budget_guard.online_stance_requested() is True
+
+
+def test_stance_config_true_allows(monkeypatch):
+    _enable_stance_env(monkeypatch)
+    _mock_config(monkeypatch, AdminConfig(bedrock_enabled=True, exists=True))
+    assert budget_guard.online_stance_requested() is True
+
+
+def test_stance_config_read_error_fail_closed(monkeypatch, caplog):
+    """config 讀取異常 → stance 側路 fail-closed（無法確認管理面是否已
+    緊急關閉，就不放行真 Bedrock 花費），與 `web._bedrock_allowed` 的
+    read-error 方向一致。"""
+    _enable_stance_env(monkeypatch)
+    _mock_config_read_error(monkeypatch)
+    with caplog.at_level("WARNING"):
+        assert budget_guard.online_stance_requested() is False
+    assert any("fail-closed" in r.getMessage() for r in caplog.records)
+
+
+def test_stance_env_off_never_reads_config(monkeypatch):
+    """零設定離線 demo（stance env 開關未設）不得產生任何 config 讀取
+    （零 DynamoDB/AWS 呼叫，行為與 v0.7.0 逐字相同）。"""
+    monkeypatch.delenv("TRUSTFORGE_ONLINE_STANCE", raising=False)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+
+    def must_not_call(*a, **k):
+        raise AssertionError("stance env 開關未設時不應讀 admin config")
+
+    monkeypatch.setattr(admin_config, "get_config", must_not_call)
+    assert budget_guard.online_stance_requested() is False
+
+
+def test_stance_pipeline_side_path_blocked_when_config_disabled(monkeypatch):
+    """pipeline 放行處（`pipeline.run` 的 `_online_stance_wanted`）依賴的
+    是同一個 `online_stance_requested()`——config 關閉時 web 限流入口
+    `_online_stance_force_offline` 也直接短路回 False（stance 根本不會
+    啟用，不需限流）。"""
+    _enable_stance_env(monkeypatch)
+    _mock_config(monkeypatch, AdminConfig(bedrock_enabled=False, exists=True))
+    assert web._online_stance_force_offline("203.0.113.9") is False
+
+
+# ---------------------------------------------------------------------------
+# 10. budget 路徑失敗負快取（PR #114 複審 qa M1）：DynamoDB 持續故障時
+#     不得讓每個 analyze（含純離線）都重付一次有界 timeout 的失敗讀
+# ---------------------------------------------------------------------------
+def test_budget_path_negative_cache_no_flood(monkeypatch):
+    """讀取失敗後 15s 窗內，`daily_cap_usd_resolved()` 不再重打儲存層
+    （呼叫次數不增），且照樣落 env（fail-safe 行為不變）。"""
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "2.5")
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise AdminConfigReadError("dynamodb down")
+
+    monkeypatch.setattr(admin_config, "get_config", boom)
+    assert budget_guard.daily_cap_usd_resolved() == (2.5, "env")
+    assert calls["n"] == 1
+    # 失敗窗內：不重打儲存層，直接落 env
+    assert budget_guard.daily_cap_usd_resolved() == (2.5, "env")
+    assert budget_guard.daily_cap_usd_resolved() == (2.5, "env")
+    assert calls["n"] == 1
+    # stance 側路共用同一個負快取窗：也不重打，fail-closed
+    monkeypatch.setenv("TRUSTFORGE_ONLINE_STANCE", "1")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
+    assert budget_guard.online_stance_requested() is False
+    assert calls["n"] == 1
+
+
+def test_failsoft_window_expiry_and_recovery(monkeypatch):
+    """`get_config_cached_failsoft` 窗語意：失敗窗內 raise 不打儲存層；
+    期滿重試；成功清窗、回真 config（恢復延遲 ≤15s）。"""
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise AdminConfigReadError("dynamodb down")
+
+    monkeypatch.setattr(admin_config, "get_config", boom)
+    fake_now = [1000.0]
+    now_fn = lambda: fake_now[0]  # noqa: E731
+
+    with pytest.raises(AdminConfigReadError):
+        admin_config.get_config_cached_failsoft(now_fn=now_fn)
+    assert calls["n"] == 1
+    # 窗內：raise 但不重打（呼叫次數不變）
+    fake_now[0] += 1.0
+    with pytest.raises(AdminConfigReadError):
+        admin_config.get_config_cached_failsoft(now_fn=now_fn)
+    assert calls["n"] == 1
+    # 窗滿：重試（仍失敗 → 續窗）
+    fake_now[0] += admin_config.CACHE_TTL_SECONDS + 0.1
+    with pytest.raises(AdminConfigReadError):
+        admin_config.get_config_cached_failsoft(now_fn=now_fn)
+    assert calls["n"] == 2
+    # 恢復：儲存層修好 → 窗滿重試成功、清窗、回真 config
+    _mock_config(monkeypatch, AdminConfig(daily_cap_usd=1.0, exists=True))
+    fake_now[0] += admin_config.CACHE_TTL_SECONDS + 0.1
+    cfg = admin_config.get_config_cached_failsoft(now_fn=now_fn)
+    assert cfg.daily_cap_usd == 1.0
+    # 窗已清：下一次呼叫不被負快取擋（TTL 正快取直接回，同樣不 raise）
+    cfg2 = admin_config.get_config_cached_failsoft(now_fn=now_fn)
+    assert cfg2.daily_cap_usd == 1.0
 
 
 def test_admin_view_never_contains_token_material(monkeypatch):

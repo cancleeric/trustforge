@@ -475,11 +475,64 @@ def _store_cache(config: AdminConfig, now_fn=time.monotonic) -> None:
 
 def _reset_admin_config_cache_for_tests() -> None:
     """測試隔離用（比照 `budget_guard._reset_reservation_for_tests` 慣例，
-    由 `tests/conftest.py` autouse fixture 每測前後呼叫）。"""
+    由 `tests/conftest.py` autouse fixture 每測前後呼叫）。一併清
+    `get_config_cached_failsoft()` 的失敗負快取窗。"""
+    global _fail_window_until
     with _cache_lock:
         _cache["config"] = None
         _cache["expires_at"] = 0.0
         _cache["generation"] = 0
+    with _fail_window_lock:
+        _fail_window_until = 0.0
+
+
+# ---------------------------------------------------------------------------
+# opt-in 失敗負快取（PR-3 複審 qa M1）：budget 熱路徑專用
+#
+# `get_config_cached()` 本身刻意**不做** negative caching（儲存層誠實 raise，
+# 由各呼叫端自主權衡）。web 顯示/閘門層已有自己的 15s 失敗窗
+# （`web._admin_cfg_fail_until`），但 budget 路徑（`budget_guard.
+# daily_cap_usd_resolved()` → `pipeline.daily_cap_exceeded()`，**每個**
+# analyze 請求都走、含純離線檔位）先前直呼 `get_config_cached()`——DynamoDB
+# 持續故障（斷網/憑證失效/throttle）時，每個請求都要重付一次有界 timeout
+# （connect 3s + read 3s × 2 attempts，最壞 ~12s）的失敗讀，等於管理面故障
+# 對所有分析流量加上秒級延遲洪水。budget_guard 不能 import web 拿它的失敗窗
+# （web import budget_guard，會循環），所以在本層提供這個 **opt-in** 包裝：
+# 失敗後 `CACHE_TTL_SECONDS`（15s）窗內直接 raise `AdminConfigReadError`
+# （不打 DynamoDB，呼叫端 except 落 env/fail-closed，跟真失敗同一條路徑），
+# 期滿才重試；成功即清窗。恢復延遲 ≤15s，與 TTL 收斂上界一致。
+# ---------------------------------------------------------------------------
+_fail_window_lock = threading.Lock()
+_fail_window_until = 0.0  # time.monotonic 基準；0.0＝無失敗窗
+
+
+def get_config_cached_failsoft(
+    store: AdminConfigStore | None = None, now_fn=time.monotonic
+) -> AdminConfig:
+    """`get_config_cached()` 的失敗負快取版（opt-in，budget 熱路徑用）。
+
+    行為：讀取失敗 → 記 15s 失敗窗並照樣 raise（呼叫端 fail-safe 邏輯
+    不變）；失敗窗內的後續呼叫**不打 DynamoDB**、直接 raise
+    `AdminConfigReadError`（呼叫端同一條 except 路徑落 env/fail-closed）；
+    讀取成功 → 清窗、回傳 config。`now_fn` 須與 `get_config_cached()`
+    同一個時鐘家族（預設 `time.monotonic`，見上方 TTL 快取區說明）。"""
+    global _fail_window_until
+    now = now_fn()
+    with _fail_window_lock:
+        if now < _fail_window_until:
+            raise AdminConfigReadError(
+                "admin config 失敗負快取窗內（前次讀取失敗，"
+                f"{CACHE_TTL_SECONDS:.0f}s 內不重試 DynamoDB）"
+            )
+    try:
+        config = get_config_cached(store, now_fn=now_fn)
+    except Exception:
+        with _fail_window_lock:
+            _fail_window_until = now_fn() + CACHE_TTL_SECONDS
+        raise
+    with _fail_window_lock:
+        _fail_window_until = 0.0
+    return config
 
 
 # ---------------------------------------------------------------------------
