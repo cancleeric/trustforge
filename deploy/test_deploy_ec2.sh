@@ -537,7 +537,7 @@ case "$ALL" in
     exit 0 ;;
   "ec2 describe-instances --region"*"Reservations[].Instances[].[InstanceId,State.Name]"*)
     case "$SCENARIO" in
-      update-in-place|scheduler-fail|update-in-place-token-prefix)
+      update-in-place|scheduler-fail|update-in-place-token-prefix|update-in-place-cap)
         printf 'i-0123456789abcdef0\trunning\n' ;;
       *)
         printf '' ;;
@@ -777,6 +777,28 @@ else
 fi
 
 echo
+echo "== 場景 1b：首次建置 + 帶 TRUSTFORGE_BEDROCK_DAILY_USD_CAP + TRUSTFORGE_TOKEN_SSM_PREFIX → ExecStart 完整性守門（assert_unit_env_lines）=="
+
+if run_deploy "first-time-cap-prefix" TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5 TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtime; then
+  echo "  [INFO] first-time-cap-prefix 首次建置部署成功，開始驗證 user-data 內 ExecStart 完整性"
+else
+  echo "  [FAIL] first-time-cap-prefix deploy 回傳非零 exit code，深入原因待查"
+  cat "$CAPTURE/stdout_first-time-cap-prefix.log"
+  FAIL=$((FAIL + 1))
+fi
+
+assert_unit_env_lines \
+  "CAP+PREFIX 都有值時，兩行 Environment 各自獨立存在、且 ExecStart 沒被拼黏壞" \
+  "$CAPTURE/user_data.sh" \
+  "Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5;Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtime"
+
+UD_CONTENT_1B="$(cat "$CAPTURE/user_data.sh")"
+
+assert_contains "$UD_CONTENT_1B" "ExecStart=/usr/bin/python3 -m trustforge.web" "user-data 含乾淨獨立的 ExecStart 行"
+
+assert_not_contains "$UD_CONTENT_1B" "TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtimeExecStart" "user-data 不含 PREFIX 與 ExecStart 黏在一起的壞字串"
+
+echo
 echo "== 場景 2：既有實例 running → update-in-place（含 codex HIGH #99 回歸：舊 wildcard policy 會被覆寫）=="
 # codex HIGH（PR #99）：模擬「角色已存在、trustforge-inline 還停留在收斂前的
 # wildcard 版本」——這是真實世界最常見的狀態（角色是舊版腳本建的）。修復前
@@ -902,8 +924,8 @@ with open('$CAPTURE/remote_script.sh', 'w') as f:
   # 完全不接受值了，unconditional 傳空字串給 ssm_env_cmd 只是為了刪掉舊機制
   # 殘留的該行（這才是本 PR 的安全價值：token 離開 unit 檔落點）；CAP 才是
   # 真正有「未設」概念的 opt-in 欄位。
-  assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_ADMIN_TOKEN=/d" /etc/systemd/system/trustforge.service' "update-in-place: PR-B 遷移：unconditional 刪除 #119 殘留行（deploy 已不接受此值）"
-  assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_LIVE_TOKEN=/d" /etc/systemd/system/trustforge.service' "update-in-place: PR-B 遷移：unconditional 刪除 #119 殘留行（deploy 已不接受此值）"
+  assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_ADMIN_TOKEN=/d" /etc/systemd/system/trustforge.service' "update-in-place: PR-B 遷移：unconditional 刪除 #119 殘留行 TRUSTFORGE_ADMIN_TOKEN（deploy 已不接受此值）"
+  assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_LIVE_TOKEN=/d" /etc/systemd/system/trustforge.service' "update-in-place: PR-B 遷移：unconditional 刪除 #119 殘留行 TRUSTFORGE_LIVE_TOKEN（deploy 已不接受此值）"
   assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=/d" /etc/systemd/system/trustforge.service' "update-in-place: 未設 DAILY_USD_CAP → 刪除殘留行（回到 config/DEFAULT 層）"
   assert_contains "$REMOTE" 'sed -i "/^Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=/d" /etc/systemd/system/trustforge.service' "update-in-place: 未設 TOKEN_SSM_PREFIX → 刪除殘留行（app 端 fallback env）"
 
@@ -1095,6 +1117,138 @@ UNITEOF2
   else
     echo "  [SKIP] 本機 sed 非 GNU sed（macOS 內建 BSD sed 對 'a' 指令語法不同），
           略過 TOKEN_SSM_PREFIX ensure 實跑驗證，已用 CI/EC2 實際跑的 GNU sed 4.10 (Homebrew gnu-sed) 驗過"
+  fi
+fi
+
+echo
+echo "== 場景 2c：既有實例 update-in-place + 設定 TRUSTFORGE_BEDROCK_DAILY_USD_CAP → ensure/取代分支真實跑（CAP 正值路徑，vp-eng 補測）=="
+
+if run_deploy "update-in-place-cap" TRUSTFORGE_BEDROCK_DAILY_USD_CAP=3.5; then
+  echo "  deploy_ec2.sh 執行成功（exit 0）"
+else
+  echo "  [FAIL] deploy_ec2.sh update-in-place + CAP 場景非零結束"
+  cat "$CAPTURE/stdout_update-in-place-cap.log"
+  FAIL=$((FAIL + 1))
+fi
+
+SSM_RAW_CAP=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+if [ -z "$SSM_RAW_CAP" ]; then
+  echo "  [FAIL] 沒捕捉到 SSM send-command 的 --parameters"
+  FAIL=$((FAIL + 1))
+else
+  SSM_CAP_JSON="${SSM_RAW_CAP#commands=}"
+  echo "$SSM_CAP_JSON" > "$CAPTURE/ssm_cap.json"
+  if python3 -c "
+import json, sys
+with open('$CAPTURE/ssm_cap.json') as f:
+    raw = f.read()
+cmds = json.loads(raw)
+assert isinstance(cmds, list) and len(cmds) > 5, 'commands 陣列太短或格式不對'
+script = chr(10).join(cmds)
+with open('$CAPTURE/remote_script_cap.sh', 'w') as f:
+    f.write(script)
+" 2>"$CAPTURE/json_err_cap.txt"; then
+    echo "  [PASS] SSM commands 是合法 JSON 陣列"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] SSM commands JSON 解析失敗："
+    cat "$CAPTURE/json_err_cap.txt"
+    FAIL=$((FAIL + 1))
+  fi
+
+  if bash -n "$CAPTURE/remote_script_cap.sh" 2>"$CAPTURE/bashn_err_cap.txt"; then
+    echo "  [PASS] 還原出的遠端腳本 bash -n 語法合法"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] 還原出的遠端腳本語法錯誤："
+    cat "$CAPTURE/bashn_err_cap.txt"
+    FAIL=$((FAIL + 1))
+  fi
+
+  REMOTE_CAP=$(cat "$CAPTURE/remote_script_cap.sh" 2>/dev/null || echo "")
+  assert_contains "$REMOTE_CAP" 'Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=3.5|" /etc/systemd/system/trustforge.service' "update-in-place + CAP：ensure 片段明文 sed 取代（非機敏值，不經 SSM 變數間接層）"
+  if printf '%s\n' "$REMOTE_CAP" | grep -qF 'sed -i "/^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=/d"'; then
+    echo "  [FAIL] update-in-place + CAP：有設值卻仍出現刪除行（應走 ensure 取代分支）"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] update-in-place + CAP：有設值，不含該 key 的刪除行"
+    PASS=$((PASS + 1))
+  fi
+
+  if [ "$USE_GNU_SED" = "1" ]; then
+    ENSURE_LINES_CAP=$(grep -n '^if grep -q' "$CAPTURE/remote_script_cap.sh" | cut -d: -f1)
+
+    FAKE_UNIT_CAP_INSERT=$(mktemp)
+    cat > "$FAKE_UNIT_CAP_INSERT" <<'UNITEOF_CAP_INSERT'
+[Unit]
+Description=TrustForge web
+[Service]
+Environment=PYTHONPATH=/opt/trustforge
+ExecStart=/usr/bin/python3 -m trustforge.web
+[Install]
+WantedBy=multi-user.target
+UNITEOF_CAP_INSERT
+    PATCHED_CAP_INS=$(sed "s#/etc/systemd/system/trustforge.service#$FAKE_UNIT_CAP_INSERT#g" "$CAPTURE/remote_script_cap.sh")
+    for lineno in $ENSURE_LINES_CAP; do
+      LINE=$(printf '%s\n' "$PATCHED_CAP_INS" | sed -n "${lineno}p")
+      bash -c "$LINE"
+      bash -c "$LINE"
+    done
+    CAP_INS_OK=1
+    COUNT_CAP_INS=$(grep -c "^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=" "$FAKE_UNIT_CAP_INSERT")
+    if [ "$COUNT_CAP_INS" != "1" ]; then
+      echo "  [FAIL] update-in-place + CAP（插入情境）：套用後該 key 出現 $COUNT_CAP_INS 次（應為 1，從無到有插入失敗或沒冪等）"
+      CAP_INS_OK=0
+    fi
+    if ! grep -q "^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=3.5$" "$FAKE_UNIT_CAP_INSERT"; then
+      echo "  [FAIL] update-in-place + CAP（插入情境）：值不是 3.5（從無到有插入失敗）"
+      CAP_INS_OK=0
+    fi
+    if [ "$CAP_INS_OK" = "1" ]; then
+      echo "  [PASS] update-in-place + CAP（插入情境）：從無到有插入 Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=3.5，重跑冪等只出現 1 次"
+      PASS=$((PASS + 1))
+    else
+      FAIL=$((FAIL + 1))
+    fi
+    rm -f "$FAKE_UNIT_CAP_INSERT"
+
+    FAKE_UNIT_CAP_REPLACE=$(mktemp)
+    cat > "$FAKE_UNIT_CAP_REPLACE" <<'UNITEOF_CAP_REPLACE'
+[Unit]
+Description=TrustForge web
+[Service]
+Environment=PYTHONPATH=/opt/trustforge
+Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=99
+ExecStart=/usr/bin/python3 -m trustforge.web
+[Install]
+WantedBy=multi-user.target
+UNITEOF_CAP_REPLACE
+    PATCHED_CAP_REP=$(sed "s#/etc/systemd/system/trustforge.service#$FAKE_UNIT_CAP_REPLACE#g" "$CAPTURE/remote_script_cap.sh")
+    for lineno in $ENSURE_LINES_CAP; do
+      LINE=$(printf '%s\n' "$PATCHED_CAP_REP" | sed -n "${lineno}p")
+      bash -c "$LINE"
+      bash -c "$LINE"
+    done
+    CAP_REP_OK=1
+    COUNT_CAP_REP=$(grep -c "^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=" "$FAKE_UNIT_CAP_REPLACE")
+    if [ "$COUNT_CAP_REP" != "1" ]; then
+      echo "  [FAIL] update-in-place + CAP（取代情境）：套用後該 key 出現 $COUNT_CAP_REP 次（應為 1，舊值沒被取代或重複插入）"
+      CAP_REP_OK=0
+    fi
+    if ! grep -q "^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=3.5$" "$FAKE_UNIT_CAP_REPLACE"; then
+      echo "  [FAIL] update-in-place + CAP（取代情境）：舊值 99 沒被取代成 3.5"
+      CAP_REP_OK=0
+    fi
+    if [ "$CAP_REP_OK" = "1" ]; then
+      echo "  [PASS] update-in-place + CAP（取代情境）：從舊值 99 換成新值 3.5，重跑冪等只出現 1 次"
+      PASS=$((PASS + 1))
+    else
+      FAIL=$((FAIL + 1))
+    fi
+    rm -f "$FAKE_UNIT_CAP_REPLACE"
+  else
+    echo "  [SKIP] 本機 sed 非 GNU sed（macOS 內建 BSD sed 對 'a' 指令語法不同），
+          略過 CAP ensure 實跑驗證，已用 CI/EC2 實際跑的 GNU sed 4.10 (Homebrew gnu-sed) 驗過"
   fi
 fi
 
