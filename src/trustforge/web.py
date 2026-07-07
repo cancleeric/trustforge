@@ -182,6 +182,42 @@ def _bedrock_allowed(cfg=None) -> bool:
     return _bedrock_allowed_resolved(cfg)[0]
 
 
+def _live_token_effective_layer(cfg=None) -> tuple[str, object]:
+    """判斷 live token 當前生效層與其值（供比對/顯示共用，避免兩處各自
+    重複實作三層優先序導致 source 標籤與實際生效層脫勾）。
+
+    三層優先序與 `_live_token_matches` / `_live_token_resolved` 原本各自
+    實作的邏輯逐字相容：
+    1. config store 的 `live_token_hash` 有設 → `(config, hash)`（管理面
+       輪替後舊 token 立即失效，本 process write-through 立即、他 process
+       ≤15s）。
+    2. config 未設 → SSM bootstrap 層模組常數 `_LIVE_TOKEN_SSM_BOOTSTRAP`
+       有值 → `(ssm, token)`（啟動期已解析好，runtime token SSM 讀取計劃
+       PR-A §3.3，熱路徑零 SSM 呼叫）。
+    3. SSM 層也未提供（`None`，含未設 `TRUSTFORGE_TOKEN_SSM_PREFIX` 的零
+       設定情境）→ env `TRUSTFORGE_LIVE_TOKEN` 有值 → `(env, token)`。
+    4. 皆無 → `(none, None)`。
+
+    config 讀取異常 → `(config_read_error, None)`（fail-closed：無法確認
+    當前有效 token 就不放行——同一次 `_is_live_request` 裡 `_bedrock_allowed`
+    也已因同一個讀取異常關閘，兩者一致）。
+
+    回傳的 `value` 僅供 `_live_token_matches` 內部比對使用，呼叫端不得
+    將其外洩到 log 或 status 回應（機敏）。"""
+    if cfg is None:
+        cfg = _admin_runtime_config()
+    if cfg is _ADMIN_CFG_READ_ERROR:
+        return "config_read_error", None
+    if cfg.live_token_hash:
+        return "config", cfg.live_token_hash
+    if _LIVE_TOKEN_SSM_BOOTSTRAP is not None:
+        return "ssm", _LIVE_TOKEN_SSM_BOOTSTRAP
+    env_token = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+    if env_token:
+        return "env", env_token
+    return "none", None
+
+
 def _live_token_matches(req_token: str, cfg=None) -> bool:
     """live token 比對（恆定時間）。token 來源三層：config store 的
     `live_token_hash` **有設就以它為準**（管理面輪替後舊 token 立即
@@ -193,39 +229,34 @@ def _live_token_matches(req_token: str, cfg=None) -> bool:
     每次呼叫都重讀，維持旗標未設時的零行為變化）。config 讀取異常 →
     fail-closed `False`（無法確認當前有效 token 就不放行——同一次
     `_is_live_request` 裡 `_bedrock_allowed` 也已因同一個讀取異常關閘，
-    兩者一致）。三層皆未設 → `False`（fail-closed）。"""
+    兩者一致）。三層皆未設 → `False`（fail-closed）。
+
+    三層優先序判斷統一由 `_live_token_effective_layer` 提供，避免本函式
+    與 `_live_token_resolved` 兩處各自維護一份導致未來改一邊漏改一邊。"""
     if not isinstance(req_token, str) or not req_token:
         return False
-    if cfg is None:
-        cfg = _admin_runtime_config()
-    if cfg is _ADMIN_CFG_READ_ERROR:
+    source, value = _live_token_effective_layer(cfg)
+    if source in ("config_read_error", "none"):
         return False
-    if cfg.live_token_hash:
-        return admin_config.verify_live_token(req_token, cfg.live_token_hash)
-    if _LIVE_TOKEN_SSM_BOOTSTRAP is not None:
-        return hmac.compare_digest(req_token, _LIVE_TOKEN_SSM_BOOTSTRAP)
-    env_token = os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
-    return bool(env_token) and hmac.compare_digest(req_token, env_token)
+    if source == "config":
+        return admin_config.verify_live_token(req_token, value)
+    # ssm / env：value 在這兩個 source 下保證是非空字串（已由
+    # `_live_token_effective_layer` 的 source 判定保證），req_token 上面
+    # 已做過 isinstance/非空檢查，可直接餵給 `hmac.compare_digest`。
+    return hmac.compare_digest(req_token, value)
 
 
 def _live_token_resolved(cfg=None) -> tuple[bool, str]:
     """顯示用（/status、/api/status、admin GET 的 effective/source）：
     live token 是否已設定 + 生效來源。回 `(configured, source)`，source ∈
     `"config"` / `"ssm"` / `"env"` / `"none"` / `"config_read_error"`。
-    **不**回傳 token 值本身（機敏）。"""
-    if cfg is None:
-        cfg = _admin_runtime_config()
-    if cfg is _ADMIN_CFG_READ_ERROR:
-        return False, "config_read_error"
-    if cfg.live_token_hash:
-        return True, "config"
-    # 三層判斷誠實反映生效來源：SSM bootstrap 常數有值 → "ssm"；否則 env
-    # 有值 → "env"；皆無 → "none"（runtime token SSM 讀取計劃 PR-A §3.3）。
-    if _LIVE_TOKEN_SSM_BOOTSTRAP:
-        return True, "ssm"
-    if os.getenv("TRUSTFORGE_LIVE_TOKEN", ""):
-        return True, "env"
-    return False, "none"
+    **不**回傳 token 值本身（機敏）。
+
+    三層優先序判斷統一由 `_live_token_effective_layer` 提供，與
+    `_live_token_matches` 共用同一份邏輯，確保 source 標籤與實際生效層
+    永遠一致。"""
+    source, _value = _live_token_effective_layer(cfg)
+    return source not in ("none", "config_read_error"), source
 
 
 
@@ -5237,7 +5268,7 @@ def _resolve_bootstrap_token(ssm_name: str, env_var: str) -> str:
     return os.getenv(env_var, "")
 
 
-def _compute_admin_token() -> str:
+def _compute_admin_token(live_bootstrap: str) -> str:
     """啟動期解析生效的 admin token（模組載入時呼叫一次，存進
     `ADMIN_TOKEN`——與 live token 相反，admin token **刻意**維持「重啟才
     生效」語意：信任根只在 env/SSM，輪替 = SSM put --overwrite 或改 env +
@@ -5247,16 +5278,21 @@ def _compute_admin_token() -> str:
     - 與 live token 的 bootstrap 層 resolved 值碰撞（非空且相等）→ ERROR
       log + 視同未設（計劃 §3.2-4：live token 是給分析消費用的，權限層級/
       持有人集合都不同，絕不允許同一把 token 同時打得動管理面）。
-    """
+
+    安全修正：`live_bootstrap` 參數由呼叫端在模組層級從**唯一一次**
+    `ssm_params.get_runtime_token("live-token")` 結果推導（SSM 有值用 SSM
+    值，否則 fallback `os.getenv("TRUSTFORGE_LIVE_TOKEN", "")`）後傳入。
+    舊版在函式內透過 `_resolve_bootstrap_token("live-token", ...)` **第二
+    次**呼叫 `ssm_params.get_runtime_token("live-token")`，與模組層那次是
+    兩次獨立網路呼叫——EC2 開機網路不穩時一次成功一次失敗會讓兩次結果不
+    一致，若 admin token 恰等於其中一次讀到的 live token 值但不等於另一
+    次，碰撞檢查會**靜默漏偵測**（無 error log），破壞「同一把 token 不能
+    同時打得動管理面 + 分析面」的安全不變式。現在改成只讀一次後，碰撞檢
+    查對象與 `_LIVE_TOKEN_SSM_BOOTSTRAP`（runtime 比對實際使用的 SSM 分量）
+    必定同源，不再有兩次讀取不一致的風險。"""
     token = _resolve_bootstrap_token("admin-token", "TRUSTFORGE_ADMIN_TOKEN")
     if not token:
         return ""
-    # runtime token SSM 讀取計劃 PR-A：碰撞檢查對象從「env live token」升級
-    # 為「live token 的 bootstrap 層 resolved 值」（SSM 有值比 SSM、否則比
-    # env）——兩把 token 都搬進 SSM 後碰撞檢查依然有效，不會只比對 env 層
-    # 而漏掉 SSM 層（config 層 token 的碰撞另由 PUT 驗證擋，見
-    # `_validate_admin_put_payload`）。
-    live_bootstrap = _resolve_bootstrap_token("live-token", "TRUSTFORGE_LIVE_TOKEN")
     if live_bootstrap and hmac.compare_digest(token, live_bootstrap):
         logging.error(
             "TrustForge: TRUSTFORGE_ADMIN_TOKEN 與 TRUSTFORGE_LIVE_TOKEN 相同——"
@@ -5267,21 +5303,27 @@ def _compute_admin_token() -> str:
     return token
 
 
-ADMIN_TOKEN = _compute_admin_token()
-# runtime token SSM 讀取計劃 PR-A §3.3：live token bootstrap 層的 **SSM
-# 分量**——啟動期讀一次（`None` = 未設 `TRUSTFORGE_TOKEN_SSM_PREFIX` /
-# `ParameterNotFound` / 讀取失敗，零 AWS 呼叫或已重試耗盡），之後
-# `_live_token_matches`/`_live_token_resolved` 只讀這個模組常數，**不再
-# 重打 SSM**（熱路徑零 SSM 呼叫鐵則）。
-#
-# ⚠️ 刻意**不**把 env fallback 一併凍結進這個常數：舊版 `_live_token_matches`
-# 對 env 層是「每次呼叫都 `os.getenv`」（見本檔上方模組註解——env 在
-# systemd 存活期雖是靜態值，但程式碼歷來允許 process 內動態改變，測試套件
-# 也依賴這個語意逐測試 `monkeypatch.setenv` 切換）。若把 env 也凍結成模組
-# 常數，會讓「SSM 旗標未設 → 應與 v0.8.0 逐字相同」這句話在測試可觀察的
-# 層面破功。拆成兩層：SSM 分量凍結（滿足熱路徑零 SSM），env 分量仍每次
-# 呼叫 `os.getenv`（旗標未設時零行為變化，含測試可觀察的動態語意）。
+# ── 啟動期初始化（順序敏感）─────────────────────────────────────────
+# live-token 的 SSM 讀取**只做一次**：`_LIVE_TOKEN_SSM_BOOTSTRAP` 維持
+# 「只代表 SSM 這一分量、SSM 未設/失敗為 `None`」語意，**不**做 env
+# fallback——runtime 比對路徑（`_live_token_effective_layer`）靠這個
+# `None` 來分辨要走 SSM 分支還是 env 分支；若把 env fallback 值塞進去，
+# 會讓 `_live_token_resolved` 的 source 標籤從 "env" 誤判成 "ssm"，並
+# 破壞旗標未設時的零行為變化。
 _LIVE_TOKEN_SSM_BOOTSTRAP: str | None = ssm_params.get_runtime_token("live-token")
+
+# 從上面**唯一一次** SSM 讀取結果推導 live token 的 bootstrap 層 resolved
+# 值（SSM 有值用 SSM 值，否則 fallback env `TRUSTFORGE_LIVE_TOKEN`）。
+# 這個 resolved 值只餵給 `_compute_admin_token` 做碰撞檢查，**不**賦值給
+# `_LIVE_TOKEN_SSM_BOOTSTRAP`（兩者語意不同：前者含 env fallback、後者
+# 只有 SSM 分量）。不再第二次呼叫 `ssm_params.get_runtime_token`。
+_LIVE_TOKEN_BOOTSTRAP_RESOLVED: str = (
+    _LIVE_TOKEN_SSM_BOOTSTRAP
+    if _LIVE_TOKEN_SSM_BOOTSTRAP is not None
+    else os.getenv("TRUSTFORGE_LIVE_TOKEN", "")
+)
+
+ADMIN_TOKEN = _compute_admin_token(_LIVE_TOKEN_BOOTSTRAP_RESOLVED)
 
 
 def _hash_for_compare(token: str) -> bytes:

@@ -23,6 +23,13 @@ set -euo pipefail
 #   - 字元集鐵則：非空值必須符合 ^[A-Za-z0-9._~-]+$（用 bash 原生 [[ =~ ]]，
 #     不用 grep -q，因為 grep 逐行匹配對多行輸入有繞過漏洞）。
 #   - 長度下限 ≥ 24 字元（比照 web.py _ADMIN_LIVE_TOKEN_MIN_LEN = 24）。
+#   - 長度上限 ≤ 512 字元（比照 web.py _ADMIN_LIVE_TOKEN_MAX_LEN = 512，
+#     與 PUT /api/admin/config 的 live_token 上限對稱一致）。
+#   - 【啟動期凍結提醒】SSM / env bootstrap 分量是「啟動期凍結」的：
+#     跑完本腳本後，admin token 需要重啟 TrustForge process 才會生效
+#     （live token 的 SSM/env 分量也是啟動期凍結，但 config 層──
+#     /admin 主控台──才是唯一的動態即時生效路徑）。請勿跑完腳本後
+#     誤以為 admin/live token（SSM/env 這兩層）會立刻生效卻沒重啟。
 #
 # 與 deploy_ec2.sh 部署期臨時參數的差異（重要）：
 #   - deploy_ec2.sh 管理的是 /trustforge/deploy/* 「部署期臨時參數」，
@@ -51,6 +58,9 @@ set -euo pipefail
 
 REGION="${REGION:-ap-southeast-2}"
 PREFIX="${TRUSTFORGE_TOKEN_SSM_PREFIX:-/trustforge/runtime}"
+# 去掉尾端斜線，避免使用者帶尾斜線（如 /trustforge/runtime/）時
+# 組出雙斜線參數名（//trustforge/runtime//admin-token）。
+PREFIX="${PREFIX%/}"
 
 # token 值一律來自呼叫當下的 env，不寫死、不讀檔。
 ADMIN_TOKEN="${TRUSTFORGE_ADMIN_TOKEN-}"
@@ -69,11 +79,11 @@ fi
 #   - umask 077 + mktemp 建 0600 暫存檔
 #   - JSON 寫進暫存檔，用 --cli-input-json file:// 傳給 aws
 #     （避免 token 出現在 argv / process list）
-#   - 用完即刪暫存檔
+#   - 用完即刪暫存檔；另加 trap 作為中斷時（SIGINT / SIGTERM）的最後防線
 #
 # 差異：本函式 JSON body 含 "Overwrite": true，支援常駐參數輪替覆寫。
 #
-# 【再次強調】本函式只清理「本機暫存檔」，不刪除 SSM 參數，也沒有 trap。
+# 【再次強調】本函式的 trap 只清理「本機暫存檔」，不刪除 SSM 參數。
 #            常駐參數絕對不能被自動刪除。
 # ----------------------------------------------------------------------------
 put_runtime_secure_param() {
@@ -93,9 +103,26 @@ put_runtime_secure_param() {
     return 1
   fi
 
+  # 長度上限 ≤ 512 字元（比照 web.py _ADMIN_LIVE_TOKEN_MAX_LEN = 512）。
+  if [[ ${#val} -gt 512 ]]; then
+    echo "錯誤：參數 $pname 的值長度超過上限（最多 512 字元，目前 ${#val}）。未執行 put。" >&2
+    return 1
+  fi
+
   # 建 0600 暫存檔，寫 JSON body（含 Overwrite: true）。
   local tmp
   tmp="$(umask 077 && mktemp)"
+  # trap 作為中斷時（SIGINT / SIGTERM / script EXIT）的最後防線，確保暫存檔
+  # 被清除。正常 / 失敗路徑仍保留明確的 rm -f "$tmp"（見下方），兩者並存
+  # 不衝突——函式每次呼叫都會在自己走完之前明確 rm 掉暫存檔，trap 只在
+  # 異常中斷時才真正派上用場。
+  # 注意：此 trap 只清本機暫存檔，不刪除 SSM 參數。
+  # 注意：tmp 是函式局部變數，函式返回後即不存在。EXIT trap 在整個 shell
+  # 結束時才觸發，此時 tmp 已 out-of-scope。在 set -u 底下裸引用 $tmp 會
+  # 觸發 unbound variable 錯誤，因此用 ${tmp:-} 安全展開（未定義時為空字串，
+  # rm -f "" 是安全的 no-op）。
+  trap 'rm -f "${tmp:-}"' EXIT INT TERM
+
   printf '{"Name":"%s","Value":"%s","Type":"SecureString","Overwrite":true}' \
     "$pname" "$val" > "$tmp"
 
@@ -113,11 +140,11 @@ put_runtime_secure_param() {
         --resource-type "Parameter" \
         --resource-id "$pname" \
         --tags "Key=app,Value=trustforge" >/dev/null 2>&1; then
-    echo "警告：add-tags-to-resource 失敗：$pname（tag 僅盤點用途，不中止；參數已成功 put）。" >&2
+    echo "警告：add-tags-to-resource 失敗：${pname}（tag 僅盤點用途，不中止；參數已成功 put）。" >&2
   fi
 
   # 只印參數名稱，絕不印 token 值。
-  echo "已 put 常駐 SecureString 參數：$pname（region=${REGION}, overwrite=true, tag=app:trustforge）"
+  echo "已 put 常駐 SecureString 參數：${pname}（region=${REGION}, overwrite=true, tag=app:trustforge）"
 }
 
 # 依序處理有值的 token（admin / live 可能只帶一個）。

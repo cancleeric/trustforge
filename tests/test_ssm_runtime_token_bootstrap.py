@@ -86,21 +86,29 @@ def test_resolve_bootstrap_token_ssm_none_env_unset_returns_empty(monkeypatch):
 # ── 2. _compute_admin_token ───────────────────────────────────────────
 
 def test_compute_admin_token_ssm_overrides_env(monkeypatch):
-    """SSM admin-token 有值 → 蓋過 env TRUSTFORGE_ADMIN_TOKEN（即使 env 也設了不同值）。"""
+    """SSM admin-token 有值 → 蓋過 env TRUSTFORGE_ADMIN_TOKEN（即使 env 也設了不同值）。
+
+    PR-A Critical 修正後 `_compute_admin_token` 改吃 `live_bootstrap`
+    參數（呼叫端只讀一次 live-token bootstrap 值後傳入，不再由本函式
+    內部自己再打一次 SSM）——測試比照這個呼叫慣例，用
+    `_resolve_bootstrap_token("live-token", ...)` 算出同一份值再傳入。
+    """
     monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", ENV_ADMIN_TOKEN)
     monkeypatch.setattr(
         ssm_params,
         "get_runtime_token",
         lambda name: SSM_ADMIN_TOKEN if name == "admin-token" else None,
     )
-    assert web._compute_admin_token() == SSM_ADMIN_TOKEN
+    live_bootstrap = web._resolve_bootstrap_token("live-token", "TRUSTFORGE_LIVE_TOKEN")
+    assert web._compute_admin_token(live_bootstrap) == SSM_ADMIN_TOKEN
 
 
 def test_compute_admin_token_ssm_none_uses_env(monkeypatch):
     """SSM 回 None（未設旗標/讀取失敗）→ 落 env，與既有行為相同。"""
     monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", ENV_ADMIN_TOKEN)
     monkeypatch.setattr(ssm_params, "get_runtime_token", lambda name: None)
-    assert web._compute_admin_token() == ENV_ADMIN_TOKEN
+    live_bootstrap = web._resolve_bootstrap_token("live-token", "TRUSTFORGE_LIVE_TOKEN")
+    assert web._compute_admin_token(live_bootstrap) == ENV_ADMIN_TOKEN
 
 
 # ── 3. 碰撞矩陣 ──────────────────────────────────────────────────────
@@ -113,8 +121,9 @@ def test_compute_admin_token_collision_ssm_admin_eq_ssm_live(monkeypatch, caplog
         "get_runtime_token",
         lambda name: same_token if name in ("admin-token", "live-token") else None,
     )
+    live_bootstrap = web._resolve_bootstrap_token("live-token", "TRUSTFORGE_LIVE_TOKEN")
     with caplog.at_level("ERROR"):
-        assert web._compute_admin_token() == ""
+        assert web._compute_admin_token(live_bootstrap) == ""
     assert any("TRUSTFORGE_ADMIN_TOKEN" in r.message for r in caplog.records)
     assert not any(same_token in r.message for r in caplog.records)
 
@@ -127,8 +136,9 @@ def test_compute_admin_token_collision_ssm_admin_eq_env_live(monkeypatch, caplog
         "get_runtime_token",
         lambda name: SSM_ADMIN_TOKEN if name == "admin-token" else None,
     )
+    live_bootstrap = web._resolve_bootstrap_token("live-token", "TRUSTFORGE_LIVE_TOKEN")
     with caplog.at_level("ERROR"):
-        assert web._compute_admin_token() == ""
+        assert web._compute_admin_token(live_bootstrap) == ""
     assert any("TRUSTFORGE_ADMIN_TOKEN" in r.message for r in caplog.records)
     assert not any(SSM_ADMIN_TOKEN in r.message for r in caplog.records)
 
@@ -216,3 +226,53 @@ def test_live_token_hot_path_never_calls_ssm(monkeypatch):
         assert web._live_token_matches(SSM_LIVE_TOKEN) is True
         assert web._live_token_matches("wrong-token-1234567890") is False
         assert web._live_token_resolved() == (True, "ssm")
+
+
+# ── 6. 模組載入時 live-token SSM 恰讀一次：避免雙讀分岔造成 admin/live token 靜默碰撞 ──
+
+
+def test_module_init_reads_live_token_ssm_exactly_once_no_split_brain(monkeypatch):
+    import importlib
+
+    live_token_call_count = {"count": 0}
+
+    def fake_get_runtime_token(name):
+        if name == "admin-token":
+            return None
+        if name == "live-token":
+            live_token_call_count["count"] += 1
+            if live_token_call_count["count"] == 1:
+                return "seq-first-read-1111111111111111"
+            return "seq-second-read-2222222222222222"
+        raise AssertionError(f"未預期的 get_runtime_token 呼叫：name={name!r}")
+
+    monkeypatch.setattr(ssm_params, "get_runtime_token", fake_get_runtime_token)
+    monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", "seq-second-read-2222222222222222")
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
+
+    try:
+        importlib.reload(web)
+
+        assert live_token_call_count["count"] == 1, (
+            f"live-token 在模組載入時應該恰好被呼叫 1 次（修正後單次讀取保證同源），"
+            f"實際被呼叫了 {live_token_call_count['count']} 次——若 >1 代表舊版雙讀分岔 bug 回歸"
+        )
+        assert web._LIVE_TOKEN_SSM_BOOTSTRAP == "seq-first-read-1111111111111111", (
+            "_LIVE_TOKEN_SSM_BOOTSTRAP 必須等於唯一一次讀取到的值（第一次讀到的值），"
+            f"實際為 {web._LIVE_TOKEN_SSM_BOOTSTRAP!r}"
+        )
+        assert web.ADMIN_TOKEN == "seq-second-read-2222222222222222", (
+            "ADMIN_TOKEN 應正常生效：碰撞檢查比對的對象是唯一一次讀到的第一次值，"
+            "與 admin token（= 第二次讀取的值）不相等，故不誤判碰撞；"
+            f"實際 ADMIN_TOKEN={web.ADMIN_TOKEN!r}"
+        )
+        assert web._live_token_matches("seq-second-read-2222222222222222") is False, (
+            "關鍵安全斷言：admin token 的值（= 第二次讀取的值）不得同時被視為有效 live token。"
+            "若此斷言失敗，代表 _LIVE_TOKEN_SSM_BOOTSTRAP 被第二次讀取的值污染（雙讀分岔），"
+            "admin token 意外通過 live token 驗證——即舊版 Critical 漏洞回歸"
+        )
+    finally:
+        monkeypatch.undo()
+        monkeypatch.delenv("TRUSTFORGE_ADMIN_TOKEN", raising=False)
+        monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
+        importlib.reload(web)

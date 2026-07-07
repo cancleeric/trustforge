@@ -17,6 +17,7 @@ Handler 呼叫慣例比照 `tests/test_json_api.py::_do_get`（`Handler.__new__`
 from __future__ import annotations
 
 import json
+import os
 from email.message import Message
 from io import BytesIO
 
@@ -143,12 +144,17 @@ def _put_config(
 
 def test_compute_admin_token_unset_is_disabled(monkeypatch):
     monkeypatch.delenv("TRUSTFORGE_ADMIN_TOKEN", raising=False)
-    assert web._compute_admin_token() == ""
+    # PR-A Critical 修正後 `_compute_admin_token` 改吃 `live_bootstrap` 參數
+    # （由呼叫端在模組層級「只讀一次」live-token bootstrap 值後傳入，見
+    # web.py `_LIVE_TOKEN_BOOTSTRAP_RESOLVED` 的初始化順序），這裡比照該
+    # 路徑：SSM 未設（本測試未動 TRUSTFORGE_TOKEN_SSM_PREFIX）→ 直接用
+    # env `TRUSTFORGE_LIVE_TOKEN` 當 live_bootstrap。
+    assert web._compute_admin_token(os.getenv("TRUSTFORGE_LIVE_TOKEN", "")) == ""
 
 
 def test_compute_admin_token_empty_is_disabled(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", "")
-    assert web._compute_admin_token() == ""
+    assert web._compute_admin_token(os.getenv("TRUSTFORGE_LIVE_TOKEN", "")) == ""
 
 
 def test_compute_admin_token_collision_with_live_token_disables(monkeypatch, caplog):
@@ -156,14 +162,14 @@ def test_compute_admin_token_collision_with_live_token_disables(monkeypatch, cap
     monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", TEST_LIVE_TOKEN)
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
     with caplog.at_level("ERROR"):
-        assert web._compute_admin_token() == ""
+        assert web._compute_admin_token(os.getenv("TRUSTFORGE_LIVE_TOKEN", "")) == ""
     assert any("TRUSTFORGE_ADMIN_TOKEN" in r.message for r in caplog.records)
 
 
 def test_compute_admin_token_normal(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", TEST_ADMIN_TOKEN)
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", TEST_LIVE_TOKEN)
-    assert web._compute_admin_token() == TEST_ADMIN_TOKEN
+    assert web._compute_admin_token(os.getenv("TRUSTFORGE_LIVE_TOKEN", "")) == TEST_ADMIN_TOKEN
 
 
 # ---------------------------------------------------------------------------
