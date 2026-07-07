@@ -17,6 +17,10 @@ export interface ApiFailure {
     code: string
     message: string
     retry_href?: string
+    /** `/api/admin/config` PUT 409（`version_conflict`）專用：最新
+     * version（後端衝突後重讀失敗時為 null）——管理頁重載最新設定後
+     * 再改，見 `AdminPage.tsx` 409 處理。 */
+    current_version?: number | null
   }
 }
 
@@ -288,4 +292,87 @@ export interface HistoryData {
   coin: string
   days: number
   history: TrustHistoryEntry[]
+}
+
+// ── /api/admin/* ────────────────────────────────────────────────────────────
+// 對應 `web.py::_admin_config_view()`（GET/PUT 共用）與
+// `_handle_api_admin_audit()`；完整契約見 docs/api/openapi.yaml admin tag。
+// token 相關欄位只有 configured bool + 末 4 碼——後端絕不回明文/hash，
+// 前端型別層面也不允許出現這種欄位。
+
+/** `daily_cap_usd` 三層對照：config（管理面寫入）/ env（原始字串，可能是
+ * 壞值，如實顯示）/ default（$3.0），`effective`/`source` 是分析路徑當下
+ * 真正生效的值與層級（後端直接取自 budget_guard 同一批函式，非重算）。
+ * `source` 保持寬字串（enum 可能演進，如 env kill-switch 分支），渲染端
+ * 只做徽章顯示、不做窮舉比對。 */
+export interface AdminCapView {
+  config: number | null
+  env: string | null
+  default: number
+  effective: number
+  source: string
+}
+
+export interface AdminBedrockView {
+  config: boolean | null
+  /** `BEDROCK_MODEL_ID` env 是否已設（開關與 model id 是 AND 關係，只回 bool）。 */
+  bedrock_model_id_set: boolean
+  /** live 閘當下實際開閉（AND 後結果）。 */
+  effective: boolean
+  source: string
+}
+
+export interface AdminLiveTokenView {
+  config_configured: boolean
+  /** 末 4 碼；token 過短時後端回 null（避免 last4 洩露過半明文）。 */
+  config_last4: string | null
+  env_configured: boolean
+  effective_configured: boolean
+  source: string
+}
+
+export interface AdminConfigData {
+  daily_cap_usd: AdminCapView
+  bedrock_enabled: AdminBedrockView
+  live_token: AdminLiveTokenView
+  /** CAS 樂觀鎖版本；item 不存在（`exists=false`）時為 null，PUT 傳 0。 */
+  version: number | null
+  updated_at: string | null
+  updated_by: string | null
+  exists: boolean
+  version_corrupt: boolean
+  /** 只在 PUT 200 回應出現（如「BEDROCK_MODEL_ID 未設定…」誠實警告、
+   * 審計側路寫入失敗的 best-effort 警告）。 */
+  warnings?: string[]
+}
+
+/** PUT body 的部分更新欄位（`expected_version` 由 endpoints 層自動附上）。
+ * 值 `null`＝清除該 config 層欄位（回落 env/default）。 */
+export interface AdminConfigChanges {
+  daily_cap_usd?: number | null
+  bedrock_enabled?: boolean | null
+  live_token?: string | null
+}
+
+export interface AdminAuditChange {
+  field: string
+  /** token 類欄位 old/new 是後端遮罩值（`"<set>"`/`"<cleared>"`/
+   * `"<rotated last4=xxxx>"`），絕無明文——前端顯示層再轉成「已輪替」等
+   * 中文字樣（見 `adminConsole.ts::formatAuditValue`）。 */
+  old?: unknown
+  new?: unknown
+}
+
+export interface AdminAuditRecord {
+  ts: string | null
+  actor: string | null
+  changes: AdminAuditChange[]
+  version_from: number | null
+  version_to: number | null
+  user_agent: string | null
+}
+
+export interface AdminAuditData {
+  limit: number
+  records: AdminAuditRecord[]
 }
