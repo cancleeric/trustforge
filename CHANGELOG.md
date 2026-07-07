@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.8.0 — 2026-07-07
+
+管理控制台（運行時設定）+ SecureString token 傳遞。開真 Bedrock 前的線上調控與部署安全前置。
+
+### 管理控制台（新）
+- **設定儲存層**（#111）：`admin_config` — DynamoDB 保留字 item 存 config，CAS 樂觀鎖、審計軌跡（token 遮罩）、15s TTL 快取 write-through。
+- **admin API + 認證**（#112）：獨立 `TRUSTFORGE_ADMIN_TOKEN`（header-only、compare_digest、未設→404 fail-closed、admin≠live token 拒啟）、失敗 lockout + 全域 backstop、GET/PUT/audit 三端點。
+- **三層 cap + live 閘動態化**（#114）：每日 cap `config → env → DEFAULT($3)` 三層；`HAS_BEDROCK`/`LIVE_TOKEN` 從模組級常數改每請求動態；kill-switch 完整化（env cap≤0 凌駕 config、`bedrock_enabled=false` 統一擋 online-stance、budget 負快取）。
+- **React /admin 頁**（#116）：token 閘（記憶體儲存禁 localStorage）、cap/Bedrock 開關（二次確認）、live token 一次性顯示、來源徽章（config/env/default）、審計表格。
+- **部署銜接**（#117）：三 env 進 systemd（`${VAR-}` fail-closed）、nginx `/api/admin/` 硬化（X-Real-IP 覆寫、no-store）、react-http 明碼模式技術封鎖 admin。
+
+### 安全
+- **SecureString token 傳遞**（#119）：admin/live token 改經 SSM Parameter Store SecureString——值不進 command history/user-data/argv，遠端 `get-parameter --with-decryption` + trap 清理（失敗可見）。IAM 窄範圍（前綴 ARN + `kms:ViaService`）。
+
+_全程副手雙審（CISO + QA/VP-Eng）+ CEO 親測（含 Chrome Playwright）。_
+
 ## v0.7.0 — 2026-07-07
 
 開真 Bedrock 前的護欄工程、前後端架構定案、W3 資料前置與 AI 友善介面。
