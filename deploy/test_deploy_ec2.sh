@@ -61,6 +61,20 @@ assert_not_contains() {
   fi
 }
 
+assert_line_exact() {
+  # vp-eng LOW：子字串比對（grep -qF 抓到 "/admin-token" 這種前綴/後綴片段就
+  # 算過）換成整行完整比對（grep -qxF）——needle 必須是 haystack 裡「獨立一
+  # 整行」跟它一字不差，避免將來參數命名規則微調時，子字串巧合仍誤判通過。
+  local haystack="$1" needle="$2" desc="$3"
+  if grep -qxF -- "$needle" <<<"$haystack"; then
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $desc — 找不到完全相符的整行: $needle"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 assert_unit_env_lines() {
   # 結構化解析 user-data 裡 trustforge.service 的 heredoc 區塊（不是肉眼
   # grep 整份 user-data）：斷言指定的 Environment 行「以獨立一行」存在於
@@ -765,7 +779,11 @@ case "$ALL" in
     # not-found，逼 deploy_ec2.sh 走「建 IAM 角色」那個分支（含 Bedrock
     # 收斂 region 的 trustforge-inline policy），其餘場景維持既有假設
     # （角色已存在，不重複建立）。
-    if [ "$SCENARIO" = "iam-role-missing" ]; then
+    # #119 vp-eng：sigint-token/sigterm-token 場景借用同一條「新建角色」分支
+    # ——deploy_ec2.sh 建完 instance profile 後有一段真實本機 sleep 12（等
+    # profile 生效），此時 SecureString 已 put 完成，正好是送 SIGINT/SIGTERM
+    # 驗證 trap 清理的穩定窗口，不必額外埋測試專用的 sleep hook。
+    if [ "$SCENARIO" = "iam-role-missing" ] || [ "$SCENARIO" = "sigint-token" ] || [ "$SCENARIO" = "sigterm-token" ]; then
       exit 1
     fi
     exit 0 ;;
@@ -1723,8 +1741,12 @@ else
   PASS=$((PASS + 1))
 fi
 DELETED_HFT=$(cat "$CAPTURE/ssm_deleted_healthz-fail-token.log" 2>/dev/null || echo "")
-assert_contains "$DELETED_HFT" "/admin-token" "healthz-fail-token：admin-token 參數被 trap delete"
-assert_contains "$DELETED_HFT" "/live-token" "healthz-fail-token：live-token 參數被 trap delete"
+# vp-eng LOW：不用子字串（"/admin-token"）比對，改抓 put 當下實際捕捉到的
+# 完整參數名，用 grep -qxF 整行精準比對，避免子字串巧合誤判。
+HFT_ADMIN_NAME=$(python3 -c "import json;print(json.load(open('$CAPTURE/ssm_put_healthz-fail-token_1.json'))['Name'])" 2>/dev/null || echo "MISSING_HFT_ADMIN")
+HFT_LIVE_NAME=$(python3 -c "import json;print(json.load(open('$CAPTURE/ssm_put_healthz-fail-token_2.json'))['Name'])" 2>/dev/null || echo "MISSING_HFT_LIVE")
+assert_line_exact "$DELETED_HFT" "$HFT_ADMIN_NAME" "healthz-fail-token：admin-token 參數（${HFT_ADMIN_NAME}）被 trap delete（整行精準比對）"
+assert_line_exact "$DELETED_HFT" "$HFT_LIVE_NAME" "healthz-fail-token：live-token 參數（${HFT_LIVE_NAME}）被 trap delete（整行精準比對）"
 UD15=$(cat "$CAPTURE/user_data.sh" 2>/dev/null || echo "")
 assert_not_contains "$UD15" "hz-admin-token.H1" "healthz-fail-token：user-data 不含 admin token 值"
 assert_not_contains "$UD15" "hz-live-token.H2" "healthz-fail-token：user-data 不含 live token 值"
@@ -1855,6 +1877,73 @@ for var in TRUSTFORGE_ADMIN_TOKEN TRUSTFORGE_LIVE_TOKEN TRUSTFORGE_BEDROCK_DAILY
     PASS=$((PASS + 1))
   fi
 done
+
+echo
+echo "== #119 vp-eng LOW：SIGINT/SIGTERM 實送——驗證 trap 對真訊號、不只 EXIT/set -e =="
+# 背景 `&` 過的 bash job 在無 job control 的非互動 shell 下，SIGINT/SIGQUIT
+# 依 POSIX 規則會被設成 ignore-on-entry；一旦如此，被 exec 出來的腳本自己
+# `trap ... INT` 也**救不回來**（POSIX：signals ignored on entry to a
+# non-interactive shell 不可再被 trap/reset）——這是背景任務語意本身，親測
+# 過（純 `( script.sh & )` 送 kill -INT，trap 完全不會跑，內部 sleep 照跑到
+# 底、腳本自然結束）。用一個非 shell 的 python3 launcher，在 exec 進
+# env/bash 之前把 SIGINT/SIGTERM 重設回 SIG_DFL，讓 deploy_ec2.sh 對這兩個
+# signal 是「正常未忽略」狀態進場，忠實模擬人真的按 Ctrl-C／systemd 送
+# SIGTERM。窗口借用 sigint-token/sigterm-token 場景的「iam-role-missing」
+# 分支：SecureString 已 put 完，正卡在等 instance profile 生效的本機真
+# sleep 12——輪詢 put 檔案出現再送訊號，不用固定秒數睡眠，避免 flaky。
+run_deploy_signal() {
+  local scenario="$1" sig="$2"; shift 2
+  rm -f "$CAPTURE/ssm_call_count" "$CAPTURE/ssm_deleted_${scenario}.log"
+  rm -f "$CAPTURE"/ssm_put_${scenario}_*.json "$CAPTURE/ssm_put_count_${scenario}"
+  (
+    TF_TEST_SCENARIO="$scenario" TF_TEST_CAPTURE_DIR="$CAPTURE" PATH="$MOCKDIR:$PATH" \
+      python3 -c '
+import os, sys, signal
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+os.execvp(sys.argv[1], sys.argv[1:])
+' env -u TRUSTFORGE_ADMIN_TOKEN -u TRUSTFORGE_LIVE_TOKEN -u TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$@" \
+      bash "$REPO_ROOT/deploy/deploy_ec2.sh" >"$CAPTURE/stdout_$scenario.log" 2>&1
+  ) &
+  local pid=$! i
+  for i in $(seq 1 100); do
+    [ -f "$CAPTURE/ssm_put_${scenario}_1.json" ] && break
+    sleep 0.1
+  done
+  kill "-$sig" "$pid" 2>/dev/null || true
+  wait "$pid"
+  echo $?
+}
+
+echo
+echo "== 場景 20：#119——SIGINT 送達，trap 一樣清 SecureString 參數（exit 130） =="
+SIGINT_RC=$(run_deploy_signal "sigint-token" INT TRUSTFORGE_ADMIN_TOKEN=sig-admin-token.S1 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1)
+if [ "$SIGINT_RC" = "130" ]; then
+  echo "  [PASS] sigint-token：deploy_ec2.sh 收到 SIGINT 後以 130 結束"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] sigint-token：exit code=${SIGINT_RC}（預期 130）"
+  cat "$CAPTURE/stdout_sigint-token.log"
+  FAIL=$((FAIL + 1))
+fi
+DELETED_SIGINT=$(cat "$CAPTURE/ssm_deleted_sigint-token.log" 2>/dev/null || echo "")
+SIGINT_NAME=$(python3 -c "import json;print(json.load(open('$CAPTURE/ssm_put_sigint-token_1.json'))['Name'])" 2>/dev/null || echo "MISSING_SIGINT_PUT")
+assert_line_exact "$DELETED_SIGINT" "$SIGINT_NAME" "sigint-token：admin token 參數（${SIGINT_NAME}）被 trap 刪除"
+
+echo
+echo "== 場景 21：#119——SIGTERM 送達，trap 一樣清 SecureString 參數（exit 143） =="
+SIGTERM_RC=$(run_deploy_signal "sigterm-token" TERM TRUSTFORGE_ADMIN_TOKEN=sig-admin-token.S2 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1)
+if [ "$SIGTERM_RC" = "143" ]; then
+  echo "  [PASS] sigterm-token：deploy_ec2.sh 收到 SIGTERM 後以 143 結束"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] sigterm-token：exit code=${SIGTERM_RC}（預期 143）"
+  cat "$CAPTURE/stdout_sigterm-token.log"
+  FAIL=$((FAIL + 1))
+fi
+DELETED_SIGTERM=$(cat "$CAPTURE/ssm_deleted_sigterm-token.log" 2>/dev/null || echo "")
+SIGTERM_NAME=$(python3 -c "import json;print(json.load(open('$CAPTURE/ssm_put_sigterm-token_1.json'))['Name'])" 2>/dev/null || echo "MISSING_SIGTERM_PUT")
+assert_line_exact "$DELETED_SIGTERM" "$SIGTERM_NAME" "sigterm-token：admin token 參數（${SIGTERM_NAME}）被 trap 刪除"
 
 echo
 echo "== 結果：PASS=$PASS FAIL=$FAIL =="

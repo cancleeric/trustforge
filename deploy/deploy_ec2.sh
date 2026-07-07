@@ -186,10 +186,33 @@ fi
 # sweep_residual_ssm_params：殘留最多活到下一次部署）。
 CREATED_SSM_PARAMS=""
 SECURE_PUT_TMP=""
+
+# harper C-1：delete 失敗絕不可靜默——deployer 缺 DeleteParameter 權限或被
+# throttle 時，SecureString 會無限期殘留且零可見性，等於白做 SecureString。
+# ParameterNotFound（本來就不存在，冪等的一部分）才靜默；其他任何錯誤一律印
+# 明確警告 + 參數名 + 可直接複製的人工刪除指令，方便 on-call 立即補救。
+_delete_ssm_param_verbose() {
+  local _p="$1" _out _rc
+  if _out="$(aws ssm delete-parameter --region "$REGION" --name "$_p" 2>&1)"; then
+    _rc=0
+  else
+    _rc=$?
+  fi
+  if [ "$_rc" -ne 0 ]; then
+    case "$_out" in
+      *ParameterNotFound*) : ;;
+      *)
+        echo "[ec2] ⚠️⚠️ SecureString 參數 ${_p} 刪除失敗，可能殘留！請立即人工確認並刪除：aws ssm delete-parameter --region ${REGION} --name ${_p}" >&2
+        echo "[ec2]    刪除失敗原因：${_out}" >&2
+        ;;
+    esac
+  fi
+}
+
 cleanup_ssm_params() {
   local _p
   for _p in $CREATED_SSM_PARAMS; do
-    aws ssm delete-parameter --region "$REGION" --name "$_p" >/dev/null 2>&1 || true
+    _delete_ssm_param_verbose "$_p"
   done
   CREATED_SSM_PARAMS=""
   if [ -n "$SECURE_PUT_TMP" ]; then
@@ -206,12 +229,16 @@ trap 'trap - EXIT; cleanup_ssm_params; exit 143' TERM
 # （umask 077 + mktemp），用 --cli-input-json file:// 傳給 aws；tmpfile 用完
 # 即刪，失敗路徑由 trap 補刪。JSON 拼接安全：值已通過 [A-Za-z0-9._~-] 驗證，
 # 不含引號/反斜線。不帶 --overwrite：撞名 → put 失敗 → set -e 中止（fail-loud）。
+# vp-eng：先登記到 CREATED_SSM_PARAMS 再 put（不是 put 成功回傳後才登記）。
+# 若 put 已在伺服器端建好參數、但回應途中網路斷線導致 aws 回非零，舊寫法會
+# 「參數存在卻沒登記」→ trap 漏刪 → 殘留只能等下次 sweep；trap 對不存在的
+# 參數本來就冪等（|| true / ParameterNotFound 靜默），先登記零成本、只贏不輸。
 put_secure_param() {
   local pname="$1" val="$2"
+  CREATED_SSM_PARAMS="$CREATED_SSM_PARAMS $pname"
   SECURE_PUT_TMP="$(umask 077 && mktemp)"
   printf '{"Name":"%s","Value":"%s","Type":"SecureString"}' "$pname" "$val" > "$SECURE_PUT_TMP"
   aws ssm put-parameter --region "$REGION" --cli-input-json "file://$SECURE_PUT_TMP" >/dev/null
-  CREATED_SSM_PARAMS="$CREATED_SSM_PARAMS $pname"
   rm -f "$SECURE_PUT_TMP"
   SECURE_PUT_TMP=""
 }
@@ -232,7 +259,7 @@ sweep_residual_ssm_params() {
   for _p in $_names; do
     [ "$_p" = "None" ] && continue
     echo "[ec2] ⚠️ 發現上次部署異常殘留的 SSM 參數 ${_p}（kill -9/斷電級殘留），刪除自癒" >&2
-    aws ssm delete-parameter --region "$REGION" --name "$_p" >/dev/null 2>&1 || true
+    _delete_ssm_param_verbose "$_p"
   done
 }
 sweep_residual_ssm_params
