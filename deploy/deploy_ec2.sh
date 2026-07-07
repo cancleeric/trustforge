@@ -497,6 +497,12 @@ fi
 # （IAM 對 kms:Decrypt 只認 key ARN，alias ARN 不會匹配），故 Resource `*`
 # + Condition kms:ViaService=ssm.$REGION.amazonaws.com 收斂：只有「經同區
 # SSM 服務發起」的 decrypt 才放行，直接打 KMS API 解任何東西都不行。
+# PR-A（runtime token SSM 讀取）：再補一條「獨立」的 ssm:GetParameter
+# 語句，Resource 鎖死 `parameter/trustforge/runtime/*`（app 啟動期讀
+# admin/live token 用的常駐參數前綴），跟上面 `deploy/*` 那條各自獨立、
+# 不合併成單一 Resource 陣列，避免未來其中一個前綴需要調整範圍時互相
+# 牽動。kms:Decrypt 沿用同一條既有語句（同一支 AWS 託管 key、同一個
+# ViaService 收斂條件），runtime/* 讀取不需要新增任何 KMS 權限。
 echo "[ec2] reconcile Bedrock/S3 IAM inline policy（${ROLE}）…"
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
@@ -507,6 +513,7 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
       \"arn:aws:bedrock:$REGION:$ACCT:inference-profile/*anthropic*\"]},
     {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"},
     {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"},
+    {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/runtime/*\"},
     {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}}]}" >/dev/null
 # DynamoDB 最小權限：每次部署都 reconcile（put-role-policy 覆寫同名 policy，
 # 冪等安全），鎖死兩個 table 各自的 ARN，不給萬用 Resource "*"。

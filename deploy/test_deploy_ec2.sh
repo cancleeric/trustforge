@@ -464,9 +464,10 @@ PYEOF
 }
 
 assert_inline_ssm_kms_stmts() {
-  # #119（CEO gate：IAM 窄範圍）：結構化解析 trustforge-inline policy——
-  # ssm:GetParameter 的 Resource 必須「恰好」是 parameter/trustforge/deploy/*
-  # 前綴 ARN（不是 "*" 也不是更寬前綴）；kms:Decrypt 必須帶
+  # #119/PR-A（CEO gate：IAM 窄範圍）：結構化解析 trustforge-inline policy——
+  # 必須恰好有兩條獨立的 ssm:GetParameter statement，Resource 集合恰好是
+  # {parameter/trustforge/deploy/*, parameter/trustforge/runtime/*}（不是
+  # "*" 也不是更寬前綴、也不能多或少一條）；kms:Decrypt 必須帶
   # kms:ViaService=ssm.$REGION.amazonaws.com 條件（alias 不能直接當 IAM
   # Resource 比對，用 ViaService 收斂「只有經同區 SSM 服務」的 decrypt）。
   local desc="$1" file="$2"
@@ -483,23 +484,34 @@ path = sys.argv[1]
 with open(path) as f:
     doc = json.load(f)
 problems = []
-ssm_stmt = kms_stmt = None
+ssm_stmts = []
+kms_stmt = None
 for stmt in doc.get("Statement", []):
     actions = stmt.get("Action", [])
     if isinstance(actions, str):
         actions = [actions]
     if "ssm:GetParameter" in actions:
-        ssm_stmt = stmt
+        ssm_stmts.append(stmt)
     if "kms:Decrypt" in actions:
         kms_stmt = stmt
-if ssm_stmt is None:
-    problems.append("缺 ssm:GetParameter statement")
+if len(ssm_stmts) != 2:
+    problems.append("ssm:GetParameter statement 數量應為 2，實際為:" + str(len(ssm_stmts)))
 else:
-    if ssm_stmt.get("Action") != "ssm:GetParameter" and ssm_stmt.get("Action") != ["ssm:GetParameter"]:
-        problems.append("ssm statement 夾帶其他 Action:" + str(ssm_stmt.get("Action")))
-    res = ssm_stmt.get("Resource")
-    if res != "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/deploy/*":
-        problems.append("ssm:GetParameter Resource 未鎖前綴 ARN:" + str(res))
+    expected = {
+        "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/deploy/*",
+        "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/runtime/*",
+    }
+    actual = set()
+    for stmt in ssm_stmts:
+        actions = stmt.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        res = stmt.get("Resource")
+        if actions != ["ssm:GetParameter"]:
+            problems.append("ssm statement (Resource=" + str(res) + ") 夾帶其他 Action:" + str(stmt.get("Action")))
+        actual.add(res)
+    if actual != expected:
+        problems.append("ssm:GetParameter Resource 集合不符，實際:" + str(actual))
 if kms_stmt is None:
     problems.append("缺 kms:Decrypt statement")
 else:
@@ -1665,12 +1677,13 @@ with open('$CAPTURE/remote_script_mixed.sh', 'w') as f:
 fi
 
 echo
-echo "== 場景 12：#119——trustforge-inline IAM 窄範圍（ssm:GetParameter 前綴 ARN + kms:Decrypt ViaService）=="
+echo "== 場景 12：#119/PR-A——trustforge-inline IAM 窄範圍（ssm:GetParameter deploy/* + runtime/* 前綴 ARN + kms:Decrypt ViaService）=="
 # CEO gate（IAM 面）：兩條部署路徑 + 建角色路徑 reconcile 出來的
 # trustforge-inline 都必須含窄範圍語句——不依賴 AmazonSSMManagedInstanceCore
-# 恰好放行的巧合。結構化解析，Resource 錯一個字元都算 FAIL。
+# 恰好放行的巧合。結構化解析，Resource 錯一個字元都算 FAIL。PR-A 新增
+# runtime/* 這條獨立語句後，policy 裡應恰好有兩條 ssm:GetParameter。
 assert_inline_ssm_kms_stmts \
-  "首次建置：trustforge-inline 含 ssm:GetParameter（鎖 parameter/trustforge/deploy/*）+ kms:Decrypt（ViaService=ssm.<region>）" \
+  "首次建置：trustforge-inline 含兩條 ssm:GetParameter（鎖 parameter/trustforge/deploy/* 與 runtime/*）+ kms:Decrypt（ViaService=ssm.<region>）" \
   "$CAPTURE/iam_policy_first-time_trustforge-inline.txt"
 assert_inline_ssm_kms_stmts \
   "update-in-place：trustforge-inline 同樣被 reconcile 成含窄範圍 ssm/kms 語句（既有角色也吃得到）" \

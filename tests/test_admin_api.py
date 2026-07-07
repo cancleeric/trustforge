@@ -404,6 +404,8 @@ def test_get_config_shape_and_layers(admin_enabled, monkeypatch):
     }
     assert data["live_token"] == {
         "config_configured": True, "config_last4": "f2a9", "env_configured": True,
+        # runtime token SSM 讀取計劃 PR-A：未設 TRUSTFORGE_TOKEN_SSM_PREFIX → False
+        "ssm_configured": False,
         "effective_configured": True, "source": "config",
     }
     assert data["version"] == 7
