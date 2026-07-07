@@ -151,6 +151,11 @@ export default function AdminPage() {
     setFreshLiveToken(null)
     setNotice([])
     setSaveError(null)
+    setAuditError(null)
+    // qa L1 安全防呆：Bedrock 二次確認 dialog 開著時被踢回閘門，若不重置，
+    // 重新解鎖後 dialog 會直接呈現在「確認開啟」狀態——等於一鍵開真
+    // Bedrock，繞過原本要求的二次確認。
+    setConfirmBedrockOn(false)
   }, [])
 
   // 進頁時若 sessionStorage 有殘留 token → 自動驗證（GET config）；401 就
@@ -200,7 +205,16 @@ export default function AdminPage() {
 
   /** PUT 共用：成功 → 套用新 config + warnings + 重抓審計；409 → 依契約
    * 重新 GET 最新設定並提示「已被他人變更，已重載」；401 → 回到閘門。 */
-  async function doPut(changes: AdminConfigChanges): Promise<AdminConfigData | null> {
+  /** `extraFailureHint`：qa L3——像「輪替 live token」這種寫入結果不確定
+   * 的操作（逾時/網路錯誤時無法得知伺服器端是否真的已寫入新值），失敗
+   * 訊息要額外提醒使用者「勿假設舊 token 仍有效」，不能讓人誤以為失敗＝
+   * 沒改動、繼續用舊 token。只附加在「一般失敗」分支（網路/逾時/驗證等
+   * 非 409/401 情況）——409/401 分支語意已明確（重載/回閘門），不需要
+   * 這個額外提醒。 */
+  async function doPut(
+    changes: AdminConfigChanges,
+    extraFailureHint?: string,
+  ): Promise<AdminConfigData | null> {
     if (!token || !config) return null
     setSaving(true)
     setSaveError(null)
@@ -220,6 +234,13 @@ export default function AdminPage() {
       if (latest.ok) {
         applyConfig(latest.data)
         setNotice(['設定已被他人變更，已重新載入最新設定——請確認後再送出一次'])
+      } else if (latest.error.code === 'unauthorized') {
+        // qa L2：409 重讀期間 token 可能已失效（被輪替/管理面關閉），
+        // 這時不能只顯示 saveError 停在解鎖畫面——與 PUT 401 分支一致，
+        // 一律 lock() 回閘門，不留一個「token 其實已失效但畫面還開著」
+        // 的假解鎖狀態。
+        lock()
+        setGateError(latest.error)
       } else {
         setSaveError(latest.error)
       }
@@ -231,7 +252,11 @@ export default function AdminPage() {
       setGateError(res.error)
       return null
     }
-    setSaveError(res.error)
+    setSaveError(
+      extraFailureHint
+        ? { code: res.error.code, message: `${res.error.message}（${extraFailureHint}）` }
+        : res.error,
+    )
     return null
   }
 
@@ -246,7 +271,10 @@ export default function AdminPage() {
 
   async function rotateLiveToken() {
     const plaintext = generateLiveToken()
-    const updated = await doPut({ live_token: plaintext })
+    const updated = await doPut(
+      { live_token: plaintext },
+      '請重試輪替，勿假設舊 token 仍有效——伺服器端寫入結果不確定',
+    )
     if (updated) {
       setFreshLiveToken(plaintext)
       setCopied(false)
@@ -284,7 +312,12 @@ export default function AdminPage() {
           <form onSubmit={unlock} className="flex flex-col gap-3">
             <input
               type="password"
-              autoComplete="off"
+              // harper LOW / qa L5：`autoComplete="off"` 對現代瀏覽器的密碼
+              // 管理器幾乎無效，反而抑制不了「要不要儲存這個密碼」的提示
+              // ——違反本頁「token 不落任何持久儲存」的哲學（讓瀏覽器密碼
+              // 管理器存了 admin token，等於繞過我們刻意不用 localStorage
+              // 的防線）。`"new-password"` 是瀏覽器公認會抑制儲存提示的值。
+              autoComplete="new-password"
               value={tokenInput}
               onChange={(e) => setTokenInput(e.target.value)}
               placeholder="貼上管理 token"
@@ -485,6 +518,11 @@ export default function AdminPage() {
             <code className="tf-num mt-2 block break-all rounded bg-tf-card p-2 text-xs text-tf-text">
               {freshLiveToken}
             </code>
+            {/* harper LOW：剪貼簿是明文常駐面（其他 app/擴充功能可能讀取），
+                提示使用者盡快貼入目的地並清空，降低停留時間。 */}
+            <p className="mt-1 text-xs text-tf-muted">
+              複製後請儘速貼入目的地並清空剪貼簿——剪貼簿內容可能被其他應用程式讀取。
+            </p>
             <div className="mt-2 flex items-center gap-2">
               <button type="button" onClick={copyFreshToken} className={BTN_PRIMARY}>
                 {copied ? '已複製' : '複製'}

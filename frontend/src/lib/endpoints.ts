@@ -115,6 +115,10 @@ export function getHistory(params: HistoryParams, signal?: AbortSignal): Promise
 // 認證一律走 `X-Admin-Token` header（絕不進 URL/query——query 會落
 // access log；同後端 `web.py` admin 區塊紀律）。token 由呼叫端（AdminPage）
 // 持有於 React state / sessionStorage，見 `adminConsole.ts`。
+//
+// qa L4：三個 admin 端點一律 `cache: 'no-store'`——設定快照含 cap/
+// last4/version 等易失真資訊，不得進瀏覽器 heuristic cache/bfcache（後端
+// no-cache response header 另歸 PR-5，這裡是前端側雙邊防禦）。
 
 export function getAdminConfig(
   adminToken: string,
@@ -124,6 +128,7 @@ export function getAdminConfig(
     signal,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     headers: { 'X-Admin-Token': adminToken },
+    cache: 'no-store',
   })
 }
 
@@ -143,6 +148,7 @@ export function putAdminConfig(
     method: 'PUT',
     headers: { 'X-Admin-Token': adminToken },
     jsonBody: { ...changes, expected_version: expectedVersion },
+    cache: 'no-store',
   })
 }
 
@@ -154,5 +160,6 @@ export function getAdminAudit(
     signal,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     headers: { 'X-Admin-Token': adminToken },
+    cache: 'no-store',
   })
 }

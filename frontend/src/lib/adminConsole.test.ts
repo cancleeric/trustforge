@@ -5,7 +5,7 @@
 // 持久竊取面，任何 src/ 原始碼出現都直接打紅）。
 
 /// <reference types="node" />
-import { readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -179,41 +179,83 @@ describe('adminConsole — sourceLabel', () => {
 
 // ── ⛔ 禁 localStorage 靜態掃描（token 儲存策略防回歸）───────────────────
 //
-// 範圍刻意限定在 admin 面相關檔案：`lib/theme.ts` 對「主題偏好」使用
-// localStorage 是既有且合法的（非機敏值），不在禁令範圍。admin token 面
-// （token 進出的每一個檔案）則一律禁——localStorage 無期限持久化，一次
-// XSS 就能竊走之後每次造訪都有效的管理 token。比對 pattern 是「實際使用」
-// （`localStorage.` / `localStorage[` / `window.localStorage`），不誤殺
-// 註解裡解釋政策的敘述文字。
+// CEO Round（harper 條件B / qa M1）修復：舊版只掃固定 4 個檔案 + 單一
+// `localStorage\s*[.[]` regex，`window['localStorage']`、
+// `globalThis.localStorage`、解構賦值（`const { localStorage } = window`）、
+// 未來新增的 admin 檔案都繞得過——形同虛設。改成比照
+// `noLegacyConfidenceWording.test.ts` 的 `collectSourceFiles`：**整個 src/**
+// 掃描（排除 `__fixtures__/`/`node_modules/`、`*.test.ts(x)`），只有
+// `lib/theme.ts` 白名單豁免（主題偏好使用 localStorage 是既有且合法的
+// 非機敏值用途，不在 admin token 禁令範圍）。
+//
+// pattern 涵蓋四種實際使用形式（非窮舉字面比對，而是「取得/存取
+// localStorage」的語法形狀）：
+//   1. 直接呼叫：`localStorage.getItem(...)` / `localStorage['x']`
+//   2. 物件屬性存取：`window.localStorage` / `globalThis.localStorage`
+//      （`\.localStorage\b`，不要求後面一定接 `.`/`[`，涵蓋
+//      `const ls = window.localStorage` 這種賦值後不再串接的寫法）
+//   3. 字串鍵值 bracket 存取：`window['localStorage']` /
+//      `globalThis["localStorage"]`（不管前面接哪個物件，只要
+//      `[...'localStorage'...]` 這個形狀出現就算）
+//   4. 解構賦值：`const { localStorage } = window`（大括號內出現
+//      `localStorage` 識別字）
+// 這裡刻意不比對「裸字」`\blocalStorage\b`（不要求前後任何存取語法）——
+// 本檔與 `adminConsole.ts`/`AdminPage.tsx` 的中文註解本身會提及
+// 「localStorage」字樣說明政策，裸字比對會把這些說明性註解也打成違規。
+// 上述 4 種 pattern 都要求真實的存取/解構語法，不會誤殺純文字敘述。
 
-const ADMIN_SURFACE_FILES = [
-  'lib/adminConsole.ts',
-  'lib/apiClient.ts',
-  'lib/endpoints.ts',
-  'pages/AdminPage.tsx',
+const WHITELISTED_RELATIVE_PATHS = new Set(['lib/theme.ts'])
+
+const LOCAL_STORAGE_USAGE_PATTERNS: RegExp[] = [
+  /\blocalStorage\s*[.[]/, // localStorage.xxx / localStorage['xxx']
+  /\.localStorage\b/, // window.localStorage / globalThis.localStorage（任何物件）
+  /\[\s*['"]localStorage['"]\s*\]/, // window['localStorage'] / globalThis["localStorage"]
+  /\{[^}]*\blocalStorage\b[^}]*\}\s*=/, // const { localStorage } = window（解構）
 ]
 
-const LOCAL_STORAGE_USAGE = /(?:window\s*\.\s*)?localStorage\s*[.[]/
+function usesLocalStorage(line: string): boolean {
+  return LOCAL_STORAGE_USAGE_PATTERNS.some((re) => re.test(line))
+}
 
-describe('token 儲存策略 — admin 面禁止 localStorage（XSS 持久竊取面）', () => {
-  it('admin token 進出的檔案不得實際使用 localStorage', () => {
+function collectSourceFiles(dir: string): string[] {
+  const files: string[] = []
+  for (const entry of readdirSync(dir)) {
+    if (entry === '__fixtures__' || entry === 'node_modules') continue
+    const full = path.join(dir, entry)
+    const stat = statSync(full)
+    if (stat.isDirectory()) {
+      files.push(...collectSourceFiles(full))
+    } else if (/\.(ts|tsx)$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
+      files.push(full)
+    }
+  }
+  return files
+}
+
+describe('token 儲存策略 — src/ 全域禁止 localStorage（XSS 持久竊取面）', () => {
+  it('src/ 所有 .ts/.tsx 原始碼（測試檔除外、theme.ts 白名單除外）不得使用 localStorage', () => {
     const SRC_ROOT = path.resolve(__dirname, '..')
     const violations: string[] = []
-    for (const rel of ADMIN_SURFACE_FILES) {
-      const full = path.join(SRC_ROOT, rel)
-      // 檔案必須存在——admin 面檔案被改名/移走時這個守門測試要跟著更新，
-      // 而不是靜默變成掃空氣。
-      expect(statSync(full).isFile()).toBe(true)
-      const lines = readFileSync(full, 'utf-8').split('\n')
+    for (const file of collectSourceFiles(SRC_ROOT)) {
+      const rel = path.relative(SRC_ROOT, file)
+      if (WHITELISTED_RELATIVE_PATHS.has(rel)) continue
+      const lines = readFileSync(file, 'utf-8').split('\n')
       lines.forEach((line, i) => {
-        if (LOCAL_STORAGE_USAGE.test(line)) {
+        if (usesLocalStorage(line)) {
           violations.push(`${rel}:${i + 1}: ${line.trim()}`)
         }
       })
     }
     expect(
       violations,
-      `發現 localStorage 使用（admin token 儲存策略禁止）：\n${violations.join('\n')}`,
+      `發現 localStorage 使用（admin token 儲存策略禁止；如為 theme.ts 主題偏好用途請確認已在白名單）：\n${violations.join('\n')}`,
     ).toEqual([])
+  })
+
+  it('theme.ts 本身確實使用 localStorage（白名單非死條目——若 theme.ts 改寫不再用，應移除白名單）', () => {
+    const SRC_ROOT = path.resolve(__dirname, '..')
+    const themeFile = path.join(SRC_ROOT, 'lib/theme.ts')
+    const lines = readFileSync(themeFile, 'utf-8').split('\n')
+    expect(lines.some(usesLocalStorage)).toBe(true)
   })
 })

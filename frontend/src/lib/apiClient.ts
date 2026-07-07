@@ -80,6 +80,12 @@ export interface ApiFetchOptions {
   /** 有值時 `JSON.stringify` 後作為 request body 送出，並自動帶
    * `Content-Type: application/json`（後端 PUT 415/411 檢查所需）。 */
   jsonBody?: unknown
+  /** qa L4：admin 端點（設定快照含 cap/last4/version 等機敏或易失真
+   * 資訊）要求 `'no-store'`，不進瀏覽器 heuristic cache/bfcache——後端
+   * no-cache response header 另歸 PR-5，這裡是前端側雙邊防禦，任一邊
+   * 生效都足以避免拿到「看起來成功但其實是快取的舊管理設定」。一般
+   * `/api/*` 讀取端點不受影響（預設沿用 fetch 標準快取行為）。 */
+  cache?: RequestCache
 }
 
 export async function apiFetch<T>(
@@ -124,6 +130,7 @@ export async function apiFetch<T>(
     method: options.method ?? 'GET',
     headers: requestHeaders,
     signal: controller.signal,
+    ...(options.cache ? { cache: options.cache } : {}),
   }
   if (options.jsonBody !== undefined) {
     requestHeaders['Content-Type'] = 'application/json'
