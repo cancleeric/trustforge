@@ -15,9 +15,115 @@ REGION="${REGION:-ap-southeast-2}"
 NAME=trustforge
 # ⚠️ credit-safety fail-safe：公開 EC2 預設「離線」(空 model id → 不呼叫 Bedrock、不燒 credit)。
 # 用 `${VAR-}`（非 `:-`）：只有「未設」才空。此腳本目前僅供**離線公開部署**。
-# 註：真正開受控 live 需同時設 BEDROCK_MODEL_ID + 傳 TRUSTFORGE_LIVE_TOKEN 進 systemd
-# (本腳本尚未傳 token → live 完整化為 follow-up；今日離線部署不需要)。
+# 註：真正開受控 live 需同時設 BEDROCK_MODEL_ID + 傳 TRUSTFORGE_LIVE_TOKEN 進 systemd。
 MODEL="${BEDROCK_MODEL_ID-}"
+# 管理控制台 PR-5（部署銜接）：admin/live token + 日花費 cap 的 env 傳遞層。
+# ⛔ 憑證邊界鐵則：本腳本**不含任何 token 實際值**——值一律由部署當下的
+# shell env 傳入（老闆提供），未設（`${VAR-}` 空）＝該 Environment 行完全
+# 不寫進 systemd unit（不是寫空值）→ web.py 端 admin/live 面 fail-closed
+# 全關（見 src/trustforge/web.py `TRUSTFORGE_ADMIN_TOKEN` 未設即 404 語意）。
+#   - TRUSTFORGE_ADMIN_TOKEN：管理面 opt-in（未設＝管理面禁用）
+#   - TRUSTFORGE_LIVE_TOKEN：live 閘 opt-in（未設＝live 關）
+#   - TRUSTFORGE_BEDROCK_DAILY_USD_CAP：config store 未設時的 env fallback
+#     層（見 src/trustforge/budget_guard.py 三層 cap 順序），部署可帶如 1
+ADMIN_TOKEN="${TRUSTFORGE_ADMIN_TOKEN-}"
+LIVE_TOKEN="${TRUSTFORGE_LIVE_TOKEN-}"
+DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
+# 注入防護（值會被嵌進 SSM commands JSON 與遠端 root shell 的 sed 取代式）：
+# token 限 URL-safe 字元集，cap 限十進位數字——含引號/反斜線/管線/空白等
+# 一律在本機就 fail-fast 中止，杜絕「值本身」對遠端腳本做 shell/JSON 注入。
+# harper CISO L-1：原本用 `printf '%s' "$_val" | grep -Eq '^...$'` 有換行
+# 繞過——grep 逐行比對，`-q` 只要「任一行」整行符合字元集就回傳成功，值若
+# 含換行（例如 `good\n;rm -rf /`），第一行 `good` 單獨看合法，grep -q 就會
+# 誤判整個值合法，換行後夾帶的惡意內容完全沒被擋到。改用 bash `[[ =~ ]]`：
+# 這裡的 `^`/`$` 錨定的是整個字串（沒有 grep 那種逐行模式），字元集本身又
+# 不含換行字元，只要值裡有任何一個換行，`+` 就無法從頭到尾連續匹配，整個
+# 比對必然失敗——沒有「切成多行、挑一行過關」這條路。
+for _pair in "TRUSTFORGE_ADMIN_TOKEN=$ADMIN_TOKEN" "TRUSTFORGE_LIVE_TOKEN=$LIVE_TOKEN"; do
+  _val="${_pair#*=}"
+  if [ -n "$_val" ] && ! [[ "$_val" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+    echo "[ec2] ❌ ${_pair%%=*} 含不允許字元（僅接受 [A-Za-z0-9._~-]，避免注入遠端 systemd/sed/JSON），中止" >&2
+    exit 1
+  fi
+done
+if [ -n "$DAILY_CAP" ] && ! [[ "$DAILY_CAP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "[ec2] ❌ TRUSTFORGE_BEDROCK_DAILY_USD_CAP 必須是十進位數字（如 1 或 0.5），中止" >&2
+  exit 1
+fi
+# ⚠️ 首次建置路徑的 token 是經 user-data 寫入（EC2 user-data 可被
+# ec2:DescribeInstanceAttribute 讀到、也殘留在 IMDS）——帶 token 的部署必須
+# 走 update-in-place（SSM sed 直改 unit 檔，不經 user-data）；首次建置請先
+# 離線（不帶 token）建機，再跑一次本腳本帶 token 走 update-in-place。硬性
+# 擋點在下面（先查一次既有實例判斷是否為首次建置，查無既有實例且帶
+# token、未設 `TRUSTFORGE_ALLOW_USERDATA_TOKEN=1` 就直接中止，見 harper
+# CISO M-2 那段）。
+if [ -n "$ADMIN_TOKEN$LIVE_TOKEN" ]; then
+  echo "[ec2] ⚠️ 偵測到 token env：若判定走首次建置，且未設 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1，腳本會在建立/修改任何資源前中止（token 不可經 user-data 殘留）" >&2
+fi
+
+# 首次建置 user-data 的 systemd Environment 追加行：有值才產生該行（行尾含
+# 換行，heredoc 內用 `${EXTRA_UNIT_ENV}ExecStart=...` 緊貼嵌入、未設不留
+# 空行也不留空值行——fail-closed 的「不寫該行」語意）。
+EXTRA_UNIT_ENV=""
+[ -n "$ADMIN_TOKEN" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_ADMIN_TOKEN=${ADMIN_TOKEN}
+"
+[ -n "$LIVE_TOKEN" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_LIVE_TOKEN=${LIVE_TOKEN}
+"
+[ -n "$DAILY_CAP" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=${DAILY_CAP}
+"
+
+# update-in-place 用：對單一 Environment 行產生「ensure（有值：sed 取代／
+# 沒有該行就插到 PYTHONPATH 後）或 remove（未設：整行刪除，fail-closed）」
+# 的 SSM commands JSON 片段（含前導逗號），比照既有 CACHE_BACKEND 等四個
+# env 的 grep→sed 慣例，冪等（重跑不重複插入）。
+ssm_env_cmd() {
+  local key="$1" val="$2"
+  if [ -n "$val" ]; then
+    printf ',"if grep -q \\"^Environment=%s=\\" /etc/systemd/system/trustforge.service; then sed -i \\"s|^Environment=%s=.*|Environment=%s=%s|\\" /etc/systemd/system/trustforge.service; else sed -i \\"/^Environment=PYTHONPATH=/a Environment=%s=%s\\" /etc/systemd/system/trustforge.service; fi' "$key" "$key" "$key" "$val" "$key" "$val"
+  else
+    printf ',"sed -i \\"/^Environment=%s=/d\\" /etc/systemd/system/trustforge.service' "$key"
+  fi
+  printf '"'
+}
+ADMIN_ENV_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "$ADMIN_TOKEN")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "$LIVE_TOKEN")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")"
+
+# harper CISO M-2：先查一次既有實例，才能判斷「這次到底會不會走首次建置」
+# ——這是全腳本第一個 aws 呼叫（在此之前只做過本機 regex 驗證，零 aws 呼叫），
+# 純唯讀（describe-instances），跟下面第 3) 節「既有實例？」分流判斷共用
+# 同一份結果（不重複查兩次）。EIP 已附著在 tag Name=trustforge-demo 的既有
+# 實例上；只要不 terminate 該實例，EIP 就會一直留在上面（stop/start 也保留
+# 附著，不用重綁）→ 查到就重用，不建新的。「查詢失敗（憑證/throttle/網路）」
+# 與「真的無既有實例」必須分開處理：查詢失敗一律中止，絕不能落到下面的建置
+# 流程，否則會建出重複實例（defeat 防 sprawl）。注意：本腳本自己建議「停
+# 實例省 credit」，停止狀態很常見，所以要查「所有非 terminated」的相符實例
+# （不能只查 running，否則 stopped 的 production 會被誤判成無實例 → 建
+# 重複 + 拋棄 EIP）。
+if ! MATCHES=$(aws ec2 describe-instances --region "$REGION" \
+  --filters Name=tag:Name,Values=trustforge-demo \
+    Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped \
+  --query 'Reservations[].Instances[].[InstanceId,State.Name]' --output text); then
+  echo "[ec2] ❌ 查詢既有實例失敗（describe-instances 非零結束），中止避免建重複實例" >&2
+  exit 1
+fi
+MATCH_COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
+
+# harper CISO M-2（首建帶 token 硬擋，非僅印警告）：查無既有實例（等同下面
+# 第 3) 節之後會判定走「首次建置」）且帶了 admin/live token，token 會經
+# user-data 永久殘留（EC2 user-data 可被 ec2:DescribeInstanceAttribute 讀
+# 到、也殘留在 IMDS）——直接中止，不再只印警告放行。此時腳本只打過上面
+# 這一個唯讀 describe-instances 查詢，還沒碰過 IAM/S3/security group/
+# run-instances 等任何會建立或修改資源的 AWS API（也還沒打
+# `aws sts get-caller-identity`）。若既有實例數 >1（下面第 3) 節會判定為
+# 異常並中止）或恰好 1（update-in-place，token 走 SSM sed 直改 unit 檔、
+# 不經 user-data，無殘留風險），都不受此擋限制。逃生口：明確知情、願意
+# 承擔 user-data 殘留風險，設 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1 覆寫。
+if [ "$MATCH_COUNT" -eq 0 ] && [ -n "$ADMIN_TOKEN$LIVE_TOKEN" ] && [ "${TRUSTFORGE_ALLOW_USERDATA_TOKEN:-}" != "1" ]; then
+  echo "[ec2] ❌ 查無既有實例（將走首次建置）且帶了 TRUSTFORGE_ADMIN_TOKEN/TRUSTFORGE_LIVE_TOKEN：token 會經 user-data 永久殘留，中止（尚未呼叫任何會建立/修改資源的 AWS API）" >&2
+  echo "[ec2]    請先離線建機（不帶 token 跑一次本腳本），確認有既有實例後，再帶 token 重跑本腳本走 update-in-place（SSM 直改 unit 檔，不經 user-data）" >&2
+  echo "[ec2]    明確知情、願意承擔 user-data 殘留風險 → 設 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1 覆寫此擋" >&2
+  exit 1
+fi
+
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="trustforge-deploy-${ACCT}"
 ROLE=trustforge-ec2
@@ -288,20 +394,9 @@ echo "[ec2] 已上傳 s3://$BUCKET/trustforge_app.zip"
 # 3) 既有實例？→ update-in-place（重用現有 EC2，不 run-instances）-----------
 # EIP 已附著在 tag Name=trustforge-demo 的既有實例上；只要不 terminate 該實例，
 # EIP 就會一直留在上面（stop/start 也保留附著，不用重綁）→ 查到就重用，不建新的。
-# 「查詢失敗（憑證/throttle/網路）」與「真的無既有實例」必須分開處理：查詢失敗
-# 一律中止，絕不能落到下面的建置流程，否則會建出重複實例（defeat 防 sprawl）。
-# 注意：本腳本自己建議「停實例省 credit」，停止狀態很常見，所以要查「所有非
-# terminated」的相符實例（不能只查 running，否則 stopped 的 production 會被
-# 誤判成無實例 → 建重複 + 拋棄 EIP）。
-if ! MATCHES=$(aws ec2 describe-instances --region "$REGION" \
-  --filters Name=tag:Name,Values=trustforge-demo \
-    Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped \
-  --query 'Reservations[].Instances[].[InstanceId,State.Name]' --output text); then
-  echo "[ec2] ❌ 查詢既有實例失敗（describe-instances 非零結束），中止避免建重複實例" >&2
-  exit 1
-fi
-MATCH_COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
-
+# harper CISO M-2：實際查詢（describe-instances）與 $MATCHES/$MATCH_COUNT 的
+# 計算已提前到檔頭（見「首建帶 token 硬擋」那段），這裡不再重查一次——只
+# 消費那裡算好的變數，接手做分流判斷。
 if [ "$MATCH_COUNT" -gt 1 ]; then
   echo "[ec2] ❌ 找到 $MATCH_COUNT 個相符實例（tag Name=trustforge-demo，非 terminated），無法安全判斷，中止" >&2
   printf '%s\n' "$MATCHES" >&2
@@ -354,8 +449,16 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   # 後面插入，兩邊都是同一組固定值，冪等（重跑不會重複插入）。同時（重）寫入
   # fetch-scheduler.service/.timer 並 enable，確保排程 fetcher 在既有實例上
   # 也補上，不會因為是「重用舊機器」就漏掉。
+  # 管理控制台 PR-5：$ADMIN_ENV_CMDS（見檔頭 ssm_env_cmd）同步 reconcile
+  # TRUSTFORGE_ADMIN_TOKEN / TRUSTFORGE_LIVE_TOKEN /
+  # TRUSTFORGE_BEDROCK_DAILY_USD_CAP 三行——有值＝取代或插入，未設＝整行
+  # 刪除（fail-closed：不是留舊值也不是寫空值），跟 BEDROCK_MODEL_ID 的
+  # 「每次部署都重寫成本次的值」同一個精神。緊接著 `chmod 600` 該 unit 檔
+  # （harper CISO L-4）：預設 644 world-readable，若帶了 token 就等於本機
+  # 任何帳號都能用 cat 讀到，每次部署都無條件收緊一次（冪等，不管這次有沒
+  # 有帶 token）。
   CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2","[Unit]","Description=TrustForge connector cache fetch scheduler","[Service]","Type=oneshot","WorkingDirectory=/opt/trustforge","Environment=AWS_REGION='"$REGION"'","Environment=PYTHONPATH=/opt/trustforge","Environment=CACHE_BACKEND=dynamodb","Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache","Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger","Environment=COST_LEDGER_BACKEND=dynamodb","ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py","UNIT2","cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3","[Unit]","Description=Run TrustForge fetch scheduler periodically","[Timer]","OnBootSec=1min","OnUnitActiveSec=15min","[Install]","WantedBy=timers.target","UNIT3","systemctl daemon-reload","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi"'"$ADMIN_ENV_CMDS"',"chmod 600 /etc/systemd/system/trustforge.service","cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2","[Unit]","Description=TrustForge connector cache fetch scheduler","[Service]","Type=oneshot","WorkingDirectory=/opt/trustforge","Environment=AWS_REGION='"$REGION"'","Environment=PYTHONPATH=/opt/trustforge","Environment=CACHE_BACKEND=dynamodb","Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache","Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger","Environment=COST_LEDGER_BACKEND=dynamodb","ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py","UNIT2","cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3","[Unit]","Description=Run TrustForge fetch scheduler periodically","[Timer]","OnBootSec=1min","OnUnitActiveSec=15min","[Install]","WantedBy=timers.target","UNIT3","systemctl daemon-reload","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
     echo "[ec2] ❌ SSM send-command 未取得 CommandId，中止" >&2
@@ -426,11 +529,17 @@ Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
-ExecStart=/usr/bin/python3 -m trustforge.web
+${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3 -m trustforge.web
 Restart=always
 [Install]
 WantedBy=multi-user.target
 UNIT
+# harper CISO L-4：systemd unit 檔預設權限通常是 644（world-readable），
+# 而這份 unit 若有帶 admin/live token（明碼寫在 unit 檔的環境變數行裡），
+# 本機任何登入帳號都能用 cat 這個檔案讀到 token——收緊成 600（僅 root 可
+# 讀寫），不管這次有沒有帶 token 都一律收緊（防禦性、冪等，也涵蓋往後有人
+# 重跑帶 token 更新的情況）。
+chmod 600 /etc/systemd/system/trustforge.service
 # 排程 fetcher（scripts/fetch_scheduler.py）：唯一打真連接器 API 的地方，寫入
 # DynamoDB cache 供上面 web 進程讀。單一 timer 每 15min 觸發一次「全部來源」，
 # 由腳本內建的新鮮度守門依各源 refresh 間隔自行決定該不該真的打（見
@@ -472,9 +581,16 @@ echo "[ec2] AMI=$AMI 啟動 ${INSTANCE_TYPE}…"
 # 的重試/短時間並行競態會被 AWS 去重合併成同一個實例；跨小時的正常重跑則會拿
 # 到新 token，不會被舊 token 卡住誤判成「已存在」（見檔頭 TOCTOU 假設說明）。
 CLIENT_TOKEN="trustforge-demo-$(date -u +%Y%m%dT%H)"
+# harper CISO L-3：--metadata-options HttpTokens=required 強制 IMDSv2（拒絕
+# IMDSv1 明碼 GET）——若這台 EC2 上跑的應用有 SSRF 漏洞，攻擊者能誘使伺服器
+# 對內發請求，IMDSv1 只要一個 GET 就能撈到 instance profile 憑證；IMDSv2
+# 要求先 PUT 換一次性 session token 才能讀，SSRF 若不能自訂 HTTP method/
+# header（多數 SSRF 只能控制 URL），就打不到 IMDS 憑證，等於堵掉「SSRF →
+# 偷 instance role 憑證」這條路。
 IID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" \
   --instance-type "$INSTANCE_TYPE" --iam-instance-profile Name=$ROLE \
   --security-group-ids "$SGID" --associate-public-ip-address \
+  --metadata-options HttpTokens=required \
   --user-data "file://$UD" --client-token "$CLIENT_TOKEN" \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=trustforge-demo}]' \
   --query 'Instances[0].InstanceId' --output text)
