@@ -464,75 +464,69 @@ pre-cert 現況仍是 HTTP-only 版，行為不變。
 
 ## 管理控制台部署銜接（admin/live token + cap env，管理控制台 PR-5）
 
-### token / cap 怎麼進 systemd（`deploy_ec2.sh`）
+### PR-B：runtime token 改由 app 自己在啟動期從 SSM 讀（#119 完全退場）
 
-`deploy_ec2.sh` 支援三個**由部署當下 shell env 傳入**的變數（⛔ 憑證邊界
-鐵則：腳本與 repo **不含任何 token 實際值**，值由老闆部署時提供）：
+`deploy_ec2.sh` **不再接受、也不再傳遞任何 token 實際值**。token 值改成
+**一次性**用 `deploy/put_runtime_tokens.sh` 寫入常駐 SSM SecureString 參數
+（`/trustforge/runtime/{admin,live}-token`，預設前綴可用
+`TRUSTFORGE_TOKEN_SSM_PREFIX` 覆寫），之後 app 行程啟動時自己去讀（見
+`src/trustforge/ssm_params.py::get_runtime_token()`）。部署（`deploy_ec2.sh`）
+只需要告訴 app「去哪個前綴讀」，而不是「讀什麼值」：
 
-| env | 用途 | 未設時（fail-closed） |
-|-----|------|------------------------|
-| `TRUSTFORGE_ADMIN_TOKEN` | 管理面（`/admin` + `/api/admin/*`）opt-in | 不寫該 Environment 行 → `web.py` 管理面全關（404） |
-| `TRUSTFORGE_LIVE_TOKEN` | live 閘 opt-in | 不寫該行 → live 關 |
+```bash
+# 一次性（或輪替時）：老闆/CEO 手動執行，把 token 值寫進常駐 SSM 參數
+# （本機 shell env 傳值，值永遠不進 repo/腳本本體，也不進 process list）
+TRUSTFORGE_ADMIN_TOKEN=<老闆提供> TRUSTFORGE_LIVE_TOKEN=<老闆提供> \
+  bash deploy/put_runtime_tokens.sh
+
+# 平時部署：deploy_ec2.sh 只帶一個非機敏的 opt-in 旗標（純路徑字串，值本身
+# 不是機密——真正機敏的 token 值已經在上一步進了 SSM，不再經過這支腳本）
+TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtime TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1 \
+  bash deploy/deploy_ec2.sh
+```
+
+`deploy_ec2.sh` 支援兩個**由部署當下 shell env 傳入**的變數（⛔ 憑證邊界
+鐵則：腳本與 repo **不含任何 token 實際值**，`TRUSTFORGE_TOKEN_SSM_PREFIX`
+本身只是路徑字串、不是機敏值）：
+
+| env | 用途 | 未設時 |
+|-----|------|--------|
+| `TRUSTFORGE_TOKEN_SSM_PREFIX` | 告訴 app 去哪個 SSM 前綴讀 admin/live token（非機敏、opt-in） | 不寫該 Environment 行 → app 端 `get_runtime_token()` 直接回傳 `None`（零 boto3 匯入/零 AWS 呼叫），fallback 走既有的 env-based token（零設定不變式，向下相容） |
 | `TRUSTFORGE_BEDROCK_DAILY_USD_CAP` | config store 未設 cap 時的 env fallback 層（`budget_guard.py` 三層順序：config → env → DEFAULT） | 不寫該行 → 吃 DEFAULT |
 
 語意跟 `BEDROCK_MODEL_ID` 的 `${VAR-}` 慣例一致：「未設＝該行完全不寫進
 `trustforge.service`」，**不是寫空值**。update-in-place（既有實例）路徑會
-每次部署 reconcile 這三行——有值＝取代/插入、未設＝**整行刪除**（換言之
-「這次部署沒帶 token」會把上次的 token 行拿掉，管理面回到全關，不會殘留
-舊 token 繼續有效）。
+每次部署 reconcile 這兩行——有值＝取代/插入、未設＝**整行刪除**。
 
-```bash
-# 例：帶 admin token + 日 cap $1 部署（值請老闆當場提供，勿寫進任何檔案）
-TRUSTFORGE_ADMIN_TOKEN=<老闆提供> TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1 \
-  bash deploy/deploy_ec2.sh
-```
+### 遷移：#119 時代殘留的 token 環境變數行會被自動清掉
 
-### #119：token 傳遞走 SSM Parameter Store SecureString（harper CISO M-1）
+舊版（#119 機制）曾經把 `TRUSTFORGE_ADMIN_TOKEN`/`TRUSTFORGE_LIVE_TOKEN`
+**token 值本身**寫進 `trustforge.service` 的 `Environment=` 行。這是本 PR
+的核心安全價值：**token 從此離開 unit 檔落點**。update-in-place 每次部署
+都會無條件對這兩個 key 執行整行刪除（不管這次部署有沒有帶
+`TRUSTFORGE_TOKEN_SSM_PREFIX`），把舊機制留下的殘留行清乾淨，不需要人工
+介入或額外的一次性遷移腳本。
 
-token **值**不再出現在 SSM Run Command 的 commands JSON、user-data、或任何
-aws CLI argv——那些地方只剩「參數名」。生命週期（對操作者透明，部署指令
-不變）：
-
-1. 本機字元集驗證通過後，先 sweep `/trustforge/deploy/` 前綴殘留（上次部署
-   被 kill -9/斷電時 trap 沒跑到的自癒，正常情況下該前綴永遠是空的）。
-2. 對有值的 token `put-parameter --type SecureString`（KMS 用 AWS 託管
-   `alias/aws/ssm`），參數名 `/trustforge/deploy/<RUN_ID>/{admin,live}-token`
-   （RUN_ID＝UTC 時戳+PID，每次部署唯一；不帶 `--overwrite`，撞名
-   fail-loud）。值經 `--cli-input-json file://`（0600 tmpfile）傳遞，不進
-   process list。
-3. 遠端（SSM commands / 首建 override 的 user-data）只嵌參數名，執行時
-   `get-parameter --with-decryption` 取值 + case 二次字元集驗證後寫 unit。
-   `GetParameter` 的 CloudTrail 事件只記參數名不記值。
-4. 部署結束（成功或**任何失敗**）trap 一律 `delete-parameter`——參數存活
-   視窗＝單次部署時長（分鐘級），不留殘留。
-
-IAM：`trustforge-inline` 每次部署 reconcile 時同步帶兩條窄範圍語句——
-`ssm:GetParameter` 鎖 `arn:aws:ssm:<region>:<acct>:parameter/trustforge/deploy/*`、
-`kms:Decrypt` 帶 `kms:ViaService=ssm.<region>.amazonaws.com` 條件（alias 不能
-直接當 IAM Resource 比對）。本機部署者需要 `ssm:PutParameter`／
-`ssm:DeleteParameter`／`ssm:GetParametersByPath`（同前綴 ARN）——現行部署者
-本來就以高權限跑（腳本內含 `iam put-role-policy`），無需另行授權；此清單供
-日後收斂部署者權限時查用。
-
-⚠️ **#119 上線後的首次生產部署必須使用全新 token**：舊 token 值曾走過明文
-commands（SSM command history 保留約 30 天可讀），視同已暴露，一律作廢換新。
-
-真部署後抽查清單：`aws ssm get-parameters-by-path --path /trustforge/deploy/
---recursive` 必須為空；`aws ssm list-commands` 最新 SendCommand 的 commands
-只見參數名；`/admin` token 閘功能回歸正常。
+IAM：本 PR **刻意不動** IAM（風險收斂，留給 PR-C）。`trustforge-inline`
+既有的 `ssm:GetParameter`（鎖 `parameter/trustforge/deploy/*`，#119 部署期
+臨時參數用）語句維持不變，即使部署邏輯已經不再使用它；app 啟動期讀
+`parameter/trustforge/runtime/*` 常駐參數所需的權限已在 PR-A 隨
+`ssm_params.py` 一併補上（見 `deploy_ec2.sh` 內 `trustforge-inline` policy
+的 PR-A 註解），跟這裡的部署期 IAM 各自獨立。
 
 注意事項：
 
-- token 值僅接受 `[A-Za-z0-9._~-]`（cap 僅接受十進位數字）——值最終仍會
-  進遠端 sed 取代式與 systemd unit，含引號/管線等字元一律在本機 fail-fast
-  中止（注入防護；遠端取回後還有第二道同字元集 case 驗證）。
-- ⚠️ **帶 token 建議走 update-in-place**（SSM 直改 unit 檔）：首次建置路徑
-  預設硬擋帶 token（harper M-2）。override（`TRUSTFORGE_ALLOW_USERDATA_TOKEN=1`）
-  路徑的 user-data 自 #119 起也只嵌參數名、開機時 get-parameter 取值，
-  user-data 本體不再殘留 token 值。先離線建機、再帶 token 重跑本腳本
-  （偵測到既有實例即自動走 update-in-place）仍是建議做法。
-- token 換發/撤銷：帶新值（或不帶）重跑 `deploy_ec2.sh` 即可，unit 檔會被
-  reconcile + `systemctl restart trustforge`。
+- `TRUSTFORGE_TOKEN_SSM_PREFIX` 僅接受 `[A-Za-z0-9._/~-]`（cap 僅接受十進
+  位數字）——值最終仍會進遠端 sed 取代式與 systemd unit，含引號/分號等
+  字元一律在本機 fail-fast 中止（注入防護）。
+- token 值本身**不再經過 `deploy_ec2.sh`**：換發/撤銷 token 一律重跑
+  `deploy/put_runtime_tokens.sh`（`Overwrite: true`，可重複執行），app 需要
+  重啟才會讀到新值（`systemctl restart trustforge`；`put_runtime_tokens.sh`
+  本身不負責重啟，見該腳本內「啟動期凍結提醒」）。
+- **勿設**（do-not-set）`TRUSTFORGE_ADMIN_TOKEN`/`TRUSTFORGE_LIVE_TOKEN`
+  作為 `deploy_ec2.sh` 的呼叫環境——這兩個變數在 PR-B 起對 `deploy_ec2.sh`
+  完全無效（腳本已不讀取這兩個名字），值只應該出現在呼叫
+  `put_runtime_tokens.sh` 的當下 shell env。
 
 ### ⛔ /admin 只准在 TLS 模式使用（harper CISO 條件 A）
 
