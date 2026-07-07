@@ -5014,6 +5014,19 @@ _ADMIN_AUTH_FAIL_MAX = 10
 _admin_auth_fail_lock = threading.Lock()
 _admin_auth_fail_buckets: dict[str, list[float]] = {}
 
+# 全域（不分 IP）認證失敗 backstop（縱深防禦，PR #112 harper M1）：
+# per-IP lockout 仰賴 nginx 正確設定 X-Real-IP／X-Forwarded-For；若 nginx
+# 失守或設定錯誤，攻擊者可偽造來源 IP 輪替繞過上面的 per-IP bucket。這裡
+# 加一道不看 IP、只看「全站 5 分鐘內失敗總數」的計數，超過門檻即全域短暫
+# 429（不分是誰打的）+ ERROR 告警 log。
+# ⚠️ 這是**縱深防禦、不是主防線**——主防線仍是 256-bit token 的
+# `hmac.compare_digest` 恆定時間比對；此 backstop 只是在主防線之前多一層
+# 「大量失敗代表有異常」的粗粒度煞車，避免 IP 輪替把 per-IP lockout 架空。
+_ADMIN_AUTH_GLOBAL_FAIL_WINDOW = 300
+_ADMIN_AUTH_GLOBAL_FAIL_MAX = 100
+_admin_auth_global_fail_lock = threading.Lock()
+_admin_auth_global_fails: list[float] = []
+
 _ADMIN_PUT_MAX_BODY_BYTES = 4096  # 計劃 §2.2：body 上限 4 KB
 _ADMIN_CAP_MIN_USD = 0.1  # 計劃 §2.2：不允許 ≤0（緊急全關語意保留給 env 逃生口）
 _ADMIN_CAP_MAX_USD = 50.0
@@ -5064,10 +5077,13 @@ def _admin_auth_check(headers, client_ip: str, path: str) -> tuple[int, str] | N
     回 `None` = 認證通過；否則回 `(status, json_body)`。
 
     順序（見模組上方 admin 區塊說明 #6，lockout-first 的理由）：
-      1. 失敗鎖定：IP 在 5 分鐘視窗內已失敗 ≥10 次 → 429，**不執行比對**。
+      1. 失敗鎖定：IP 在 5 分鐘視窗內已失敗 ≥10 次，或**全站**（不分 IP）
+         5 分鐘內已失敗 ≥100 次（縱深 backstop，見 `_ADMIN_AUTH_GLOBAL_FAIL_MAX`
+         說明）→ 429，**不執行比對**。
       2. `hmac.compare_digest`（sha256 定長化後）恆定時間比對 `X-Admin-Token`。
-      3. 失敗 → 記 bucket + warning log（IP+path，不記 token 值）→ 401，
-         訊息不區分「未帶」vs「帶錯」（不給 oracle）。
+      3. 失敗 → 記 per-IP bucket + 全域計數 + warning log（IP+path，不記
+         token 值）→ 401，訊息不區分「未帶」vs「帶錯」（不給 oracle）；
+         全域計數觸頂時額外 ERROR 告警（見下）。
     """
     now = time.time()
     with _admin_auth_fail_lock:
@@ -5080,11 +5096,19 @@ def _admin_auth_check(headers, client_ip: str, path: str) -> tuple[int, str] | N
             if now - t < _ADMIN_AUTH_FAIL_WINDOW
         ]
         _admin_auth_fail_buckets[client_ip] = fails
-        if len(fails) >= _ADMIN_AUTH_FAIL_MAX:
-            return 429, _json_envelope_err(
-                "rate_limited",
-                f"認證失敗次數過多，請 {_ADMIN_AUTH_FAIL_WINDOW} 秒後再試",
-            )
+        per_ip_locked = len(fails) >= _ADMIN_AUTH_FAIL_MAX
+
+    with _admin_auth_global_fail_lock:
+        cutoff = now - _ADMIN_AUTH_GLOBAL_FAIL_WINDOW
+        while _admin_auth_global_fails and _admin_auth_global_fails[0] < cutoff:
+            _admin_auth_global_fails.pop(0)
+        global_locked = len(_admin_auth_global_fails) >= _ADMIN_AUTH_GLOBAL_FAIL_MAX
+
+    if per_ip_locked or global_locked:
+        return 429, _json_envelope_err(
+            "rate_limited",
+            f"認證失敗次數過多，請 {_ADMIN_AUTH_FAIL_WINDOW} 秒後再試",
+        )
 
     presented = ""
     if headers is not None:
@@ -5098,6 +5122,20 @@ def _admin_auth_check(headers, client_ip: str, path: str) -> tuple[int, str] | N
 
     with _admin_auth_fail_lock:
         _admin_auth_fail_buckets.setdefault(client_ip, []).append(now)
+    with _admin_auth_global_fail_lock:
+        _admin_auth_global_fails.append(now)
+        cutoff = now - _ADMIN_AUTH_GLOBAL_FAIL_WINDOW
+        while _admin_auth_global_fails and _admin_auth_global_fails[0] < cutoff:
+            _admin_auth_global_fails.pop(0)
+        global_fail_count = len(_admin_auth_global_fails)
+    if global_fail_count >= _ADMIN_AUTH_GLOBAL_FAIL_MAX:
+        # 縱深防禦告警，非主防線：主防線是 256-bit token 恆定時間比對；
+        # 這裡只是全站失敗率異常時多留一道 ERROR 訊號給 secops 盯（例如
+        # nginx X-Real-IP 被繞過、攻擊者用大量來源 IP 分散猜測 token）。
+        logging.error(
+            "TrustForge admin auth 全域失敗率異常：%d 次於 %d 秒內",
+            global_fail_count, _ADMIN_AUTH_GLOBAL_FAIL_WINDOW,
+        )
     # 失敗記 log：只記 IP + path，絕不記 token 值（計劃 §3.2-6/-8）
     logging.warning("TrustForge admin 認證失敗 from %s path %s", client_ip, path)
     # 訊息刻意不區分「未帶 token」vs「token 錯誤」（計劃 §3.2-5，不給 oracle）
@@ -5213,12 +5251,18 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
     if "daily_cap_usd" in payload and payload["daily_cap_usd"] is not None:
         cap = payload["daily_cap_usd"]
         # 嚴格數字（bool 是 int 子類，明確排除）；json.loads 預設接受
-        # NaN/Infinity 字面值，isfinite 必須擋
+        # NaN/Infinity 字面值。
+        # ⚠️ 這裡刻意不呼叫 float(cap) 再比較：巨大整數字面值（如幾百位數的
+        # 整數）轉 float 會拋 OverflowError（QA #112 M1 抓到的真崩潰），
+        # 未捕捉會讓 do_PUT 整個例外、連線中斷、拿不到乾淨的 400。改成直接
+        # 用原始值（int 或 float）跟邊界比較——Python 對「int 跟 float
+        # 比大小」是精確比較，不會為了比較而把巨大 int 轉成 float，所以巨大
+        # int／inf 一樣會被範圍擋下，不會 OverflowError；NaN 跟任何數比較
+        # 恆為 False，範圍檢查會自然判定不合法，isfinite 已不需要另外擋。
         if (
             isinstance(cap, bool)
             or not isinstance(cap, (int, float))
-            or not math.isfinite(float(cap))
-            or not (_ADMIN_CAP_MIN_USD <= float(cap) <= _ADMIN_CAP_MAX_USD)
+            or not (_ADMIN_CAP_MIN_USD <= cap <= _ADMIN_CAP_MAX_USD)
         ):
             return 400, _json_envelope_err(
                 "invalid_cap",
@@ -5333,7 +5377,10 @@ def _handle_api_admin_audit(qs: dict) -> tuple[int, str]:
     寬鬆處理；非正整數才 400）。"""
     raw = (qs.get("limit", [str(_ADMIN_AUDIT_DEFAULT_LIMIT)])[0]).strip()
     if len(raw) > 10 or not raw.isdigit() or int(raw) < 1:
-        return 400, _json_envelope_err("bad_request", "limit 須為正整數")
+        return 400, _json_envelope_err(
+            "bad_request",
+            "limit 須為正整數；有效範圍 1-200（超過 200 不會 400，會靜默 clamp 為 200）",
+        )
     limit = min(int(raw), _ADMIN_AUDIT_MAX_LIMIT)
     try:
         records = admin_config.list_audit(limit)

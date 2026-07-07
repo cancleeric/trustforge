@@ -657,7 +657,8 @@ paths:
           `null`＝清除 config 層（回落 env/default）。
         - `bedrock_enabled`：嚴格 bool（`"true"` 字串不算）。`true` 但
           `BEDROCK_MODEL_ID` env 未設 → 仍寫入，回應 `warnings` 附
-          「開關開了也不會有真呼叫」誠實警告。
+          「開關開了也不會有真呼叫」誠實警告。`null`＝清除 config 層
+          開關（回落下一層：env/default，見 PR-3 budget_guard 整合）。
         - `live_token`：長度 24–512 的可見 ASCII（0x21–0x7E）明文，
           server 落庫前轉 sha256（明文不落庫、不進審計、**不回顯**）。
           `null`＝清除 runtime token（回落 env token）。
@@ -731,8 +732,8 @@ paths:
                   message: "daily_cap_usd 須為 0.1 至 50.0 之間的數字（緊急全關請用 bedrock_enabled=false，不接受 cap ≤ 0）"
         "401":
           $ref: "#/components/responses/AdminUnauthorized"
-        "404":
-          $ref: "#/components/responses/AdminDisabled"
+        "405":
+          $ref: "#/components/responses/AdminDisabledPut"
         "409":
           description: |
             CAS 衝突：`expected_version` 不是當前值（寫入期間有別人先改
@@ -805,16 +806,19 @@ paths:
         時間降序回傳設定變更紀錄（DynamoDB 審計 item，best-effort 雙寫的
         另一份在 systemd journal）。token 類欄位的 old/new 一律是遮罩值
         （`"<set>"`/`"<cleared>"`/`"<rotated last4=xxxx>"`），絕無明文/
-        hash。`limit` 預設 50；超過 200 靜默 clamp 成 200（唯讀端點，
-        寬鬆處理）；非正整數 400。
+        hash。`limit` 有效範圍 1-200、預設 50；超過 200 是**靜默 clamp
+        成 200**（不是 400，唯讀端點寬鬆處理）；非正整數才 400。
       parameters:
         - name: limit
           in: query
           required: false
+          description: |
+            回看筆數，1 以上整數，預設 50。傳超過 200 的值不會 400，
+            會被靜默 clamp 為 200（故本欄位 schema 不標 `maximum`，
+            避免暗示「超過就錯誤」——實際只有非正整數才是 400）。
           schema:
             type: integer
             minimum: 1
-            maximum: 200
             default: 50
       responses:
         "200":
@@ -1547,11 +1551,33 @@ components:
         `TRUSTFORGE_ADMIN_TOKEN` 未設/空/與 `TRUSTFORGE_LIVE_TOKEN` 相同
         （碰撞視同未設）→ 管理面 fail-closed 全關：GET 回與任何不存在
         路徑 **byte-identical 的 404 HTML 頁**（非 JSON 信封，連端點
-        存在性都不暴露）；PUT 則回與其他一切路徑相同的 405。
+        存在性都不暴露）。PUT 的全關行為不同、見 `AdminDisabledPut`。
       content:
         text/html:
           schema:
             type: string
+
+    AdminDisabledPut:
+      description: |
+        `TRUSTFORGE_ADMIN_TOKEN` 未設/空/與 `TRUSTFORGE_LIVE_TOKEN` 相同
+        （碰撞視同未設）→ 管理面 fail-closed 全關。PUT 語境下這台 server
+        對「不存在/未開放的路徑」一律回 405（而非 404）——與 GET 的
+        byte-identical 404 HTML 頁不同語意，故獨立成另一個 response 元件
+        （PR #112 qa M2：先前誤把 GET/PUT 共用同一個 404 元件）。
+      headers:
+        Allow:
+          schema:
+            type: string
+          example: GET
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrEnvelope"
+          example:
+            ok: false
+            error:
+              code: method_not_allowed
+              message: "此路徑不支援 PUT"
 
     AdminAuthRateLimited:
       description: |

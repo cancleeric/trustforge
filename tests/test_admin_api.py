@@ -39,11 +39,13 @@ TEST_LIVE_TOKEN = "unit-test-live-token-fedcba9876543210"
 
 @pytest.fixture(autouse=True)
 def _reset_admin_auth_buckets():
-    """認證失敗 per-IP bucket 測試隔離（比照 `test_json_api.py` 清
-    `_status_rate_buckets` 的慣例）。"""
+    """認證失敗 per-IP bucket + 全域 backstop 計數測試隔離（比照
+    `test_json_api.py` 清 `_status_rate_buckets` 的慣例）。"""
     web._admin_auth_fail_buckets.clear()
+    web._admin_auth_global_fails.clear()
     yield
     web._admin_auth_fail_buckets.clear()
+    web._admin_auth_global_fails.clear()
 
 
 @pytest.fixture
@@ -289,6 +291,44 @@ def test_auth_failure_lockout_429(admin_enabled, monkeypatch):
     assert code == 200
 
 
+def test_admin_auth_global_failure_backstop_429(admin_enabled, monkeypatch, caplog):
+    """縱深防禦 backstop（PR #112 harper M1）：per-IP lockout 仰賴 nginx
+    正確設定來源 IP；若攻擊者能偽造來源 IP 輪替（每個 IP 都壓在 per-IP
+    門檻之下），個別 IP 永遠不會觸發 per-IP 429。這裡驗證全站（不分 IP）
+    累計失敗數達門檻後，*任何*後續請求（含全新、從未失敗過的 IP，也含
+    帶正確 token 的請求）一律 429，且有 ERROR 告警 log。
+    此 backstop 是縱深、非主防線——主防線仍是 token 恆定時間比對。
+    """
+    _mock_get_config(monkeypatch)
+    caplog.set_level("ERROR")
+    per_ip_fail_budget = web._ADMIN_AUTH_FAIL_MAX - 1  # 每個 IP 都不觸發 per-IP lockout
+    total_fails = 0
+    ip_index = 0
+    while total_fails < web._ADMIN_AUTH_GLOBAL_FAIL_MAX:
+        ip = f"10.1.0.{ip_index}"
+        ip_index += 1
+        for _ in range(per_ip_fail_budget):
+            if total_fails >= web._ADMIN_AUTH_GLOBAL_FAIL_MAX:
+                break
+            code, _, _ = _request(
+                "GET", "/api/admin/config", token="bad-token-xxxxxxxxxxxxxxxxxxxx", ip=ip
+            )
+            assert code == 401
+            total_fails += 1
+    assert total_fails == web._ADMIN_AUTH_GLOBAL_FAIL_MAX
+    # 第 100 次失敗當下就該觸發 ERROR 告警（不用等下一次請求才發現）
+    assert any("全域失敗率異常" in r.getMessage() for r in caplog.records)
+
+    # 全新、從未失敗過的 IP，帶「正確」token 一樣被擋——這正是全域
+    # backstop 的重點：不分是誰、也不看 token 對不對，全站失敗率
+    # 異常就先煞車。
+    code, body, _ = _request(
+        "GET", "/api/admin/config", token=TEST_ADMIN_TOKEN, ip="192.0.2.99"
+    )
+    assert code == 429
+    assert json.loads(body)["error"]["code"] == "rate_limited"
+
+
 def test_auth_failure_log_has_ip_but_never_token(admin_enabled, caplog):
     with caplog.at_level("WARNING"):
         _request("GET", "/api/admin/config", token="super-secret-wrong-token-xyz")
@@ -413,6 +453,9 @@ def test_put_success(admin_enabled, put_recorder, monkeypatch):
     ("0", 400),           # 不允許 ≤0（緊急全關語意保留給 env 逃生口）
     ('"abc"', 400),
     ("true", 400),        # bool 是 int 子類，嚴格排除
+    ("9" * 400, 400),     # PR #112 qa M1 回歸：巨大整數字面值不得讓
+                           # float(cap) 拋未捕捉 OverflowError（曾導致
+                           # do_PUT 整個炸掉、連線斷、拿不到乾淨的 400）
 ])
 def test_put_cap_bounds(admin_enabled, put_recorder, cap_literal, expect):
     code, body, _ = _put_config(
@@ -441,11 +484,37 @@ def test_put_expected_version_required(admin_enabled, put_recorder):
 
 @pytest.mark.parametrize("ev_literal", ["-1", "true", '"7"', "1.5", "null"])
 def test_put_expected_version_must_be_nonneg_int(admin_enabled, put_recorder, ev_literal):
-    code, _, _ = _put_config(
+    code, body, _ = _put_config(
         '{"daily_cap_usd": 1.0, "expected_version": %s}' % ev_literal
     )
     assert code == 400
+    assert json.loads(body)["error"]["code"] == "bad_request"  # qa LOW-4：不只驗 status
     assert "changes" not in put_recorder
+
+
+def test_put_expected_version_zero_creates_fresh_config(admin_enabled, monkeypatch):
+    """qa LOW-4 正向測試：`expected_version=0`（全新/空環境，item 尚不
+    存在）經 API 層一路傳到 `admin_config.put_config()`，成功建立 config
+    item——先前只間接用 `put_recorder` 驗過『0 不會被驗證擋掉』，沒有
+    專門驗證 0 這個值本身會原樣送到儲存層（CAS「item_not_exists」語意
+    的 API 入口）。"""
+    calls: dict = {}
+
+    def fake_put(changes, expected_version, actor, *, user_agent=None, **kw):
+        calls["expected_version"] = expected_version
+        calls["changes"] = changes
+        return PutConfigResult(
+            config=_fake_config(version=1, exists=True), audit_warning=None
+        )
+
+    monkeypatch.setattr(web.admin_config, "put_config", fake_put)
+    code, body, _ = _put_config('{"daily_cap_usd": 1.0, "expected_version": 0}')
+    assert code == 200
+    data = json.loads(body)["data"]
+    assert data["version"] == 1
+    assert data["exists"] is True
+    assert calls["expected_version"] == 0
+    assert calls["changes"] == {"daily_cap_usd": 1.0}
 
 
 def test_put_no_change_fields_400(admin_enabled, put_recorder):
@@ -496,6 +565,9 @@ def test_put_live_token_rules(admin_enabled, put_recorder, token_literal, expect
         '{"live_token": %s, "expected_version": 1}' % token_literal
     )
     assert code == expect, f"live_token={token_literal!r} 應回 {expect}: {body}"
+    if expect == 400:
+        # qa LOW-4：不只驗 status，也驗 error.code
+        assert json.loads(body)["error"]["code"] == "bad_request"
 
 
 def test_put_version_conflict_409_with_current_version(admin_enabled, monkeypatch):
@@ -508,6 +580,28 @@ def test_put_version_conflict_409_with_current_version(admin_enabled, monkeypatc
     parsed = json.loads(body)
     assert parsed["error"]["code"] == "version_conflict"
     assert parsed["error"]["current_version"] == 9
+
+
+def test_put_version_conflict_409_reread_failure_current_version_null(
+    admin_enabled, monkeypatch
+):
+    """qa LOW-4：409 時重讀最新 version 這件事本身也失敗（例如 DynamoDB
+    暫時不可用）→ `current_version` 必須是 null，不能讓「附帶資訊讀不到」
+    整個升級成 502（既有 `test_put_version_conflict_409_with_current_version`
+    只測了重讀成功的分支，這裡補重讀失敗的分支）。"""
+    def fake_put(*a, **k):
+        raise VersionConflictError(7)
+
+    def fake_get_config(*a, **k):
+        raise AdminConfigReadError("dynamodb 暫時不可用")
+
+    monkeypatch.setattr(web.admin_config, "put_config", fake_put)
+    monkeypatch.setattr(web.admin_config, "get_config", fake_get_config)
+    code, body, _ = _put_config('{"daily_cap_usd": 1.0, "expected_version": 7}')
+    assert code == 409
+    parsed = json.loads(body)
+    assert parsed["error"]["code"] == "version_conflict"
+    assert parsed["error"]["current_version"] is None
 
 
 def test_put_version_corrupt_500_distinct_code(admin_enabled, monkeypatch):
@@ -526,6 +620,20 @@ def test_put_write_error_502(admin_enabled, monkeypatch):
     code, body, _ = _put_config('{"daily_cap_usd": 1.0, "expected_version": 7}')
     assert code == 502
     assert "throttled" not in body
+
+
+def test_put_config_value_error_maps_to_400(admin_enabled, monkeypatch):
+    """qa LOW-4：`admin_config.put_config` 拋裸 `ValueError`（儲存層防禦
+    縱深驗證拒絕，理論上已被 API 層驗證擋光，但仍需正確映射）→ 400
+    `bad_request`，不透傳內部訊息、不誤判成 502。"""
+    def fake_put(*a, **k):
+        raise ValueError("internal storage-layer validation detail should not leak")
+    monkeypatch.setattr(web.admin_config, "put_config", fake_put)
+    code, body, _ = _put_config('{"daily_cap_usd": 1.0, "expected_version": 7}')
+    assert code == 400
+    parsed = json.loads(body)
+    assert parsed["error"]["code"] == "bad_request"
+    assert "internal storage-layer validation detail" not in body
 
 
 def test_put_audit_warning_propagated(admin_enabled, monkeypatch):
