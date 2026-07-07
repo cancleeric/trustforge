@@ -143,6 +143,48 @@ PYEOF
   fi
 }
 
+assert_nginx_admin_blocked_with_404() {
+  # harper M-3 = vp-eng M-1 複審修正：早期版本以為「省略 /api/admin/
+  # location」就等於禁用，這是錯的（會落入下面較短前綴的 /api/ 照樣
+  # proxy）。結構化解析 `location ^~ /api/admin/` 區塊，斷言該區塊「唯一」
+  # 動作是 `return 404;`（技術性封鎖，不是靠省略 location 這種消極假設）。
+  local desc="$1" conf="$2"
+  local result
+  result=$(python3 - "$conf" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.read().splitlines()
+block, inside = [], False
+for line in lines:
+    stripped = line.strip()
+    if not inside and stripped.startswith("location ^~ /api/admin/"):
+        inside = True
+        continue
+    if inside:
+        if stripped == "}":
+            break
+        block.append(stripped)
+if not inside:
+    print("NOLOCATION")
+    sys.exit(0)
+directives = [l for l in block if l and not l.startswith("#")]
+if directives == ["return 404;"]:
+    print("MATCH")
+else:
+    print("MISMATCH:" + "|".join(directives))
+PYEOF
+)
+  if [ "$result" = "MATCH" ]; then
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $desc — $result"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 assert_zip_contains() {
   local zip="$1" needle="$2" desc="$3"
   # ⚠️ 不要直接 `unzip -l | grep -q`：pipefail 下 grep -q 一找到就提早關管線，
@@ -378,6 +420,10 @@ SCENARIO="${TF_TEST_SCENARIO:?TF_TEST_SCENARIO not set}"
 args=("$@")
 join() { local IFS=' '; echo "$*"; }
 ALL="$(join "${args[@]}")"
+# harper CISO M-2：無條件記下「這次部署跑過的每一次 aws 呼叫」（不管哪個
+# case 分支吃到），供上層斷言「首建帶 token 無 override 時，中止前只打過
+# 幾次 aws」（不能只靠肉眼看 stdout，要能結構化數呼叫次數/內容）。
+echo "$ALL" >> "$CAPTURE_DIR/aws_calls_${SCENARIO}.log"
 
 find_after() {
   # 印出 argv 中緊接在 $1 flag 後面的值
@@ -400,7 +446,7 @@ case "$ALL" in
   "s3 cp"*)
     exit 0 ;;
   "ec2 describe-instances --region"*"Reservations[].Instances[].[InstanceId,State.Name]"*)
-    if [ "$SCENARIO" = "update-in-place" ] || [ "$SCENARIO" = "scheduler-fail" ] || [ "$SCENARIO" = "admin-env-update" ]; then
+    if [ "$SCENARIO" = "update-in-place" ] || [ "$SCENARIO" = "scheduler-fail" ] || [ "$SCENARIO" = "admin-env-update" ] || [ "$SCENARIO" = "admin-env-mixed" ]; then
       printf 'i-0123456789abcdef0\trunning\n'
     else
       printf ''
@@ -929,11 +975,15 @@ else
 fi
 
 echo
-echo "== 場景 6：管理控制台 PR-5——admin env 有值（首次建置）→ 寫入 systemd unit =="
+echo "== 場景 6：管理控制台 PR-5——admin env 有值（首次建置 + 明確 override）→ 寫入 systemd unit =="
+# harper CISO M-2：首建 + token 現在預設硬擋（見場景 9），這裡明確帶
+# TRUSTFORGE_ALLOW_USERDATA_TOKEN=1（逃生口）才能繼續驗證「寫入 unit」這條
+# 既有行為——不是繞過新擋，是驗證擋跟寫入邏輯彼此獨立、沒有互相干擾。
 if run_deploy "admin-env-first" \
      TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1 \
      TRUSTFORGE_LIVE_TOKEN=test-live-token.B2 \
-     TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1; then
+     TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1 \
+     TRUSTFORGE_ALLOW_USERDATA_TOKEN=1; then
   echo "  deploy_ec2.sh 執行成功（exit 0）"
 else
   echo "  [FAIL] admin-env-first 場景非零結束"
@@ -944,7 +994,7 @@ assert_unit_env_lines \
   "user-data: 三個 admin env 以獨立行寫入 trustforge.service unit 區塊（結構化解析，非整檔 grep；ExecStart 行未被黏住）" \
   "$CAPTURE/user_data.sh" \
   "Environment=TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1;Environment=TRUSTFORGE_LIVE_TOKEN=test-live-token.B2;Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1"
-assert_file_contains "$CAPTURE/stdout_admin-env-first.log" "token 會殘留在 user-data" \
+assert_file_contains "$CAPTURE/stdout_admin-env-first.log" "user-data 殘留" \
   "首次建置帶 token 時有印 user-data 殘留警語（建議改走 update-in-place）"
 
 echo
@@ -1056,6 +1106,16 @@ else
   PASS=$((PASS + 1))
   assert_file_contains "$CAPTURE/stdout_bad-token.log" "不允許字元" "錯誤訊息明確指出字元集限制"
 fi
+# vp-eng M-2：字元集驗證是全腳本第一段檢查（在新的「首建 token 硬擋」查
+# 既有實例之前），中止時應該連那一次唯讀 describe-instances 查詢都還沒打過
+# ——零 aws 呼叫，比首建硬擋（見場景 9）更早。
+if [ -f "$CAPTURE/aws_calls_bad-token.log" ]; then
+  echo "  [FAIL] token 字元集檢查中止前，不該有任何 aws 呼叫，但抓到：$(cat "$CAPTURE/aws_calls_bad-token.log")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] token 字元集檢查中止在任何 aws 呼叫之前（零 aws 呼叫）"
+  PASS=$((PASS + 1))
+fi
 if run_deploy "bad-cap" TRUSTFORGE_BEDROCK_DAILY_USD_CAP='1;rm -rf /'; then
   echo "  [FAIL] cap 含非數字字元仍回報成功（注入防護失效）——不可接受"
   FAIL=$((FAIL + 1))
@@ -1063,6 +1123,180 @@ else
   echo "  [PASS] cap 含非數字字元時，deploy_ec2.sh 正確地非零結束"
   PASS=$((PASS + 1))
   assert_file_contains "$CAPTURE/stdout_bad-cap.log" "必須是十進位數字" "錯誤訊息明確指出 cap 格式限制"
+fi
+if [ -f "$CAPTURE/aws_calls_bad-cap.log" ]; then
+  echo "  [FAIL] cap 字元集檢查中止前，不該有任何 aws 呼叫，但抓到：$(cat "$CAPTURE/aws_calls_bad-cap.log")"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] cap 字元集檢查中止在任何 aws 呼叫之前（零 aws 呼叫）"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== 場景 9：管理控制台 PR-5——首建帶 token、無 override → 硬性中止（harper CISO M-2）=="
+# 早期版本只印警告就放行，token 會經 user-data 永久殘留。這裡斷言：查無既有
+# 實例（scenario 名不在 mock 的 update-in-place 名單內）+ 帶 ADMIN_TOKEN、
+# 未設 TRUSTFORGE_ALLOW_USERDATA_TOKEN → 非零結束，且中止前只打過一次 aws
+# （唯讀 describe-instances 既有實例查詢，用來判斷是否為首次建置）——沒碰過
+# 任何會建立/修改資源的 API（iam/s3/security-group/run-instances 都沒被
+# 呼叫到）。
+if run_deploy "first-build-token-hardfail" TRUSTFORGE_ADMIN_TOKEN=would-leak-into-userdata; then
+  echo "  [FAIL] 首建帶 token 無 override 仍回報成功（M-2 擋失效）——不可接受"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] 首建帶 token 無 override 時，deploy_ec2.sh 正確地非零結束"
+  PASS=$((PASS + 1))
+fi
+assert_file_contains "$CAPTURE/stdout_first-build-token-hardfail.log" \
+  "查無既有實例（將走首次建置）且帶了" \
+  "錯誤訊息明確指出：查無既有實例（首次建置）且帶了 token"
+assert_file_contains "$CAPTURE/stdout_first-build-token-hardfail.log" \
+  "TRUSTFORGE_ALLOW_USERDATA_TOKEN=1" \
+  "錯誤訊息有指出明確逃生口 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1"
+AWSCALLS_HF=$(cat "$CAPTURE/aws_calls_first-build-token-hardfail.log" 2>/dev/null || echo "")
+AWSCALLS_HF_COUNT=$(printf '%s\n' "$AWSCALLS_HF" | grep -c . || true)
+if [ "$AWSCALLS_HF_COUNT" != "1" ]; then
+  echo "  [FAIL] 首建 token 硬擋應該只打過 1 次 aws 呼叫（唯讀既有實例查詢），實際打了 $AWSCALLS_HF_COUNT 次：$AWSCALLS_HF"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] 首建 token 硬擋中止前，全腳本只打過 1 次 aws 呼叫（唯讀既有實例查詢）"
+  PASS=$((PASS + 1))
+fi
+assert_contains "$AWSCALLS_HF" "ec2 describe-instances" "首建 token 硬擋前唯一打過的 aws 呼叫是 ec2 describe-instances（既有實例查詢）"
+assert_not_contains "$AWSCALLS_HF" "sts get-caller-identity" "首建 token 硬擋在 aws sts get-caller-identity 之前就中止（尚未取得帳號）"
+assert_not_contains "$AWSCALLS_HF" "iam " "首建 token 硬擋在任何 IAM 呼叫之前就中止"
+assert_not_contains "$AWSCALLS_HF" "s3 " "首建 token 硬擋在任何 S3 呼叫之前就中止"
+assert_not_contains "$AWSCALLS_HF" "run-instances" "首建 token 硬擋在 run-instances 之前就中止（不會建出帶 token 的 user-data 實例）"
+
+echo
+echo "== 場景 10：管理控制台 PR-5——首建帶 token + 明確 override → 放行（逃生口）=="
+if run_deploy "first-build-token-override" \
+     TRUSTFORGE_ADMIN_TOKEN=override-admin-token.Z1 \
+     TRUSTFORGE_ALLOW_USERDATA_TOKEN=1; then
+  echo "  [PASS] 首建帶 token + TRUSTFORGE_ALLOW_USERDATA_TOKEN=1 時，deploy_ec2.sh 正常放行並成功結束"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] 首建帶 token + override 應該放行，但非零結束了"
+  cat "$CAPTURE/stdout_first-build-token-override.log"
+  FAIL=$((FAIL + 1))
+fi
+assert_unit_env_lines \
+  "場景 10：override 放行後，user-data 仍正確寫入 ADMIN_TOKEN（override 只解除硬擋，不影響既有 fail-closed 寫入邏輯）" \
+  "$CAPTURE/user_data.sh" \
+  "Environment=TRUSTFORGE_ADMIN_TOKEN=override-admin-token.Z1"
+
+echo
+echo "== 場景 11：管理控制台 PR-5——mixed 部分設（ADMIN 設+LIVE 未設+CAP 設）+ 取代 stale 值分支功能實跑（vp-eng M-2）=="
+# 早期測試只驗證過「插入到全新 unit（原本沒有這幾行）」（場景 7）跟「刪除
+# stale 值」（場景 2，未設情境）兩條路徑，沒驗證過「既有值 → sed 取代成新
+# 值」這個 if 分支是否真的正確取代（而非重複插入或誤刪其他行）。這裡故意
+# 只設 ADMIN_TOKEN + CAP（LIVE_TOKEN 刻意不設），先斷言 commands JSON 對三
+# 個 env 分別產生正確的 ensure/delete 指令（交錯出現），再對一份「三個 key
+# 都已有舊值」的假 unit 實跑 GNU sed，驗證 ADMIN_TOKEN/CAP 的舊值被正確取代
+# 成新值（而不是插入變成第二行），LIVE_TOKEN 的舊值被整行刪除。
+if run_deploy "admin-env-mixed" \
+     TRUSTFORGE_ADMIN_TOKEN=mixed-new-admin.M1 \
+     TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5; then
+  echo "  deploy_ec2.sh 執行成功（exit 0）"
+else
+  echo "  [FAIL] admin-env-mixed 場景非零結束"
+  cat "$CAPTURE/stdout_admin-env-mixed.log"
+  FAIL=$((FAIL + 1))
+fi
+SSM_MIXED_RAW=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+if [ -z "$SSM_MIXED_RAW" ]; then
+  echo "  [FAIL] admin-env-mixed：沒捕捉到主設定 ssm send-command 的 --parameters"
+  FAIL=$((FAIL + 1))
+else
+  SSM_MIXED_JSON="${SSM_MIXED_RAW#commands=}"
+  echo "$SSM_MIXED_JSON" > "$CAPTURE/ssm_mixed.json"
+  if python3 -c "
+import json
+with open('$CAPTURE/ssm_mixed.json') as f:
+    cmds = json.load(f)
+assert isinstance(cmds, list) and len(cmds) > 5, 'commands 陣列太短或格式不對'
+script = chr(10).join(cmds)
+with open('$CAPTURE/remote_script_mixed.sh', 'w') as f:
+    f.write(script)
+" 2>"$CAPTURE/json_mixed_err.txt"; then
+    echo "  [PASS] admin-env-mixed：含 ADMIN_ENV_CMDS 片段的 SSM commands 仍是合法 JSON 陣列"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] admin-env-mixed：SSM commands JSON 解析失敗："
+    cat "$CAPTURE/json_mixed_err.txt"
+    FAIL=$((FAIL + 1))
+  fi
+  if bash -n "$CAPTURE/remote_script_mixed.sh" 2>"$CAPTURE/bashn_mixed_err.txt"; then
+    echo "  [PASS] admin-env-mixed：還原出的遠端腳本 bash -n 語法合法"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] admin-env-mixed：還原出的遠端腳本語法錯誤："
+    cat "$CAPTURE/bashn_mixed_err.txt"
+    FAIL=$((FAIL + 1))
+  fi
+
+  REMOTE_MIXED=$(cat "$CAPTURE/remote_script_mixed.sh" 2>/dev/null || echo "")
+  assert_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_ADMIN_TOKEN=mixed-new-admin.M1|" /etc/systemd/system/trustforge.service' "admin-env-mixed: ADMIN_TOKEN ensure（有設）"
+  assert_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5|" /etc/systemd/system/trustforge.service' "admin-env-mixed: CAP ensure（有設）"
+  assert_contains "$REMOTE_MIXED" 'sed -i "/^Environment=TRUSTFORGE_LIVE_TOKEN=/d"' "admin-env-mixed: LIVE_TOKEN delete（未設，交錯出現在 ensure 之間）"
+  assert_not_contains "$REMOTE_MIXED" 'sed -i "/^Environment=TRUSTFORGE_ADMIN_TOKEN=/d"' "admin-env-mixed: 有設時不該出現 ADMIN_TOKEN 刪除行"
+  assert_not_contains "$REMOTE_MIXED" 'sed -i "/^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=/d"' "admin-env-mixed: 有設時不該出現 CAP 刪除行"
+  assert_not_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_LIVE_TOKEN=.*|" /etc/systemd/system/trustforge.service' "admin-env-mixed: 未設時不該出現 LIVE_TOKEN ensure（取代/插入）行"
+
+  if [ "${USE_GNU_SED:-0}" = "1" ]; then
+    FAKE_UNIT_MIXED=$(mktemp)
+    cat > "$FAKE_UNIT_MIXED" <<'UNITEOF'
+[Unit]
+Description=TrustForge web
+[Service]
+Environment=PORT=80
+Environment=BEDROCK_MODEL_ID=
+Environment=PYTHONPATH=/opt/trustforge
+Environment=TRUSTFORGE_ADMIN_TOKEN=stale-mixed-admin-OLD
+Environment=TRUSTFORGE_LIVE_TOKEN=stale-mixed-live-OLD
+Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=99
+ExecStart=/usr/bin/python3 -m trustforge.web
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+    ENSURE_LINES_MIXED=$(grep -n '^if grep -q' "$CAPTURE/remote_script_mixed.sh" | cut -d: -f1)
+    PATCHED_MIXED=$(sed "s#/etc/systemd/system/trustforge.service#$FAKE_UNIT_MIXED#g" "$CAPTURE/remote_script_mixed.sh")
+    for lineno in $ENSURE_LINES_MIXED; do
+      LINE=$(printf '%s\n' "$PATCHED_MIXED" | sed -n "${lineno}p")
+      bash -c "$LINE"
+      bash -c "$LINE"  # 跑兩次驗證冪等
+    done
+    DELETE_LINES_MIXED=$(grep -n '^sed -i "/^Environment=TRUSTFORGE_' "$CAPTURE/remote_script_mixed.sh" | cut -d: -f1)
+    for lineno in $DELETE_LINES_MIXED; do
+      LINE=$(printf '%s\n' "$PATCHED_MIXED" | sed -n "${lineno}p")
+      bash -c "$LINE"
+      bash -c "$LINE"  # 跑兩次驗證冪等
+    done
+    MIXED_OK=1
+    ADMIN_COUNT=$(grep -cF "Environment=TRUSTFORGE_ADMIN_TOKEN=" "$FAKE_UNIT_MIXED" || true)
+    if [ "$ADMIN_COUNT" != "1" ] || ! grep -qF "Environment=TRUSTFORGE_ADMIN_TOKEN=mixed-new-admin.M1" "$FAKE_UNIT_MIXED"; then
+      echo "  [FAIL] admin-env-mixed 實跑後 ADMIN_TOKEN 取代 stale 值失敗（行數=$ADMIN_COUNT，或值不對）"
+      MIXED_OK=0
+    fi
+    CAP_COUNT=$(grep -cF "Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=" "$FAKE_UNIT_MIXED" || true)
+    if [ "$CAP_COUNT" != "1" ] || ! grep -qF "Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5" "$FAKE_UNIT_MIXED"; then
+      echo "  [FAIL] admin-env-mixed 實跑後 CAP 取代 stale 值失敗（行數=$CAP_COUNT，或值不對）"
+      MIXED_OK=0
+    fi
+    if grep -qF "Environment=TRUSTFORGE_LIVE_TOKEN=" "$FAKE_UNIT_MIXED"; then
+      echo "  [FAIL] admin-env-mixed 實跑後 LIVE_TOKEN stale 值沒被刪除"
+      MIXED_OK=0
+    fi
+    if [ "$MIXED_OK" = "1" ]; then
+      echo "  [PASS] admin-env-mixed：對「三個 key 都已有 stale 舊值」的既有 unit 實跑——ADMIN_TOKEN/CAP 正確取代成新值（非插入重複）、LIVE_TOKEN 正確整行刪除，且重跑冪等"
+      PASS=$((PASS + 1))
+    else
+      FAIL=$((FAIL + 1))
+    fi
+    rm -f "$FAKE_UNIT_MIXED"
+  else
+    echo "  [SKIP] 本機 sed 非 GNU sed，略過 mixed admin env 實跑驗證（同場景 2 的 SKIP 理由）"
+  fi
 fi
 
 echo
@@ -1081,19 +1315,18 @@ proxy_no_cache 1;
 proxy_cache_bypass 1;
 add_header Cache-Control "no-store" always;
 add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
-# react-http（明碼）模式：管理面視為禁用——conf 不得提供 /api/admin/
-# location（不給「看起來可用」的明碼管理面），且要有勿設 token 的警語。
-if grep -q "location /api/admin/" "$REPO_ROOT/deploy/nginx-react-http.conf"; then
-  echo "  [FAIL] nginx-react-http.conf（明碼）不該有 /api/admin/ location（管理面在該模式視為禁用）"
-  FAIL=$((FAIL + 1))
-else
-  echo "  [PASS] nginx-react-http.conf（明碼）沒有 /api/admin/ location（管理面禁用，符合 harper 條件 A）"
-  PASS=$((PASS + 1))
-fi
+# react-http（明碼）模式：管理面「技術封鎖」（harper M-3 = vp-eng M-1 複審
+# 修正）——早期版本誤以為「省略 /api/admin/ location」就等於禁用，其實會
+# 落入下面較短前綴的 /api/ 照樣 proxy 給 python；現在改成 nginx 主動
+# `location ^~ /api/admin/ { return 404; }` 技術性封死，且仍要有勿設 token
+# 的警語（雙重防護，非單一防線）。
+assert_nginx_admin_blocked_with_404 \
+  "nginx-react-http.conf（明碼）/api/admin/ 技術封鎖：location ^~ 優先於 /api/，唯一動作 return 404" \
+  "$REPO_ROOT/deploy/nginx-react-http.conf"
 assert_file_contains "$REPO_ROOT/deploy/nginx-react-http.conf" "勿設 TRUSTFORGE_ADMIN_TOKEN" \
   "nginx-react-http.conf 有「明碼模式勿設 TRUSTFORGE_ADMIN_TOKEN」警語"
 assert_file_contains "$REPO_ROOT/deploy/README.md" "勿設" \
-  "deploy/README.md 有 react-http 模式管理面禁用警語"
+  "deploy/README.md 有 react-http 模式管理面技術封鎖 + 勿設 token 警語"
 # 憑證邊界鐵則：deploy_ec2.sh 對三個 admin env 只能是 \${VAR-} 純 env 傳遞
 # （無 :-default 寫死值）——腳本本體不得含任何 token 實際值。
 for var in TRUSTFORGE_ADMIN_TOKEN TRUSTFORGE_LIVE_TOKEN TRUSTFORGE_BEDROCK_DAILY_USD_CAP; do

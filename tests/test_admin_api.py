@@ -215,11 +215,36 @@ def _mock_get_config(monkeypatch, config=None):
 
 
 def test_no_header_401(admin_enabled):
-    code, body, _ = _request("GET", "/api/admin/config")
+    code, body, headers = _request("GET", "/api/admin/config")
     assert code == 401
     parsed = json.loads(body)
     assert parsed["ok"] is False
     assert parsed["error"]["code"] == "unauthorized"
+    # harper CISO L-2：`/api/admin/*` 一律 no-store，即使是認證失敗（401）
+    # 的回應——瀏覽器/中介快取都不該留存管理面回應內容。
+    assert headers.get("Cache-Control") == "no-store"
+
+
+def test_cache_control_no_store_on_success_and_unknown_subpath(admin_enabled, monkeypatch):
+    """harper CISO L-2：`_send()` 這個唯一出口對 `/api/admin/` 下的每條路徑
+    （成功 200、未知子路徑 404）都補 `Cache-Control: no-store`，不管跑的是
+    哪份 nginx conf——app 層是最後一道防線。"""
+    _mock_get_config(monkeypatch)
+    code, _, headers = _request("GET", "/api/admin/config", token=TEST_ADMIN_TOKEN)
+    assert code == 200
+    assert headers.get("Cache-Control") == "no-store"
+
+    code, _, headers = _request("GET", "/api/admin/nope", token=TEST_ADMIN_TOKEN)
+    assert code == 404
+    assert headers.get("Cache-Control") == "no-store"
+
+
+def test_cache_control_no_store_not_applied_outside_admin_path(admin_enabled, monkeypatch):
+    """反向驗證：這個新加的 no-store 邏輯只認 `/api/admin/` 前綴，不該
+    誤傷其他路徑（避免過度寬鬆的字串比對意外擴大範圍）。"""
+    code, _, headers = _request("GET", "/healthz")
+    assert code == 200
+    assert headers.get("Cache-Control") != "no-store"
 
 
 def test_wrong_token_401(admin_enabled):

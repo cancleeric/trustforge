@@ -505,9 +505,15 @@ admin token 走 `X-Admin-Token` header——**明碼 HTTP 下 token 會明文過
 
 - 管理面只准在 **TLS 模式**（`nginx.conf` react 版，或 SSR 回滾時的
   `nginx-legacy-tls.conf`）下使用。
-- **`nginx-react-http.conf`（明碼）模式下管理面視為禁用——該模式勿設
-  `TRUSTFORGE_ADMIN_TOKEN`**（web.py 未設 token = 管理面 fail-closed 全關，
-  正是該模式該有的狀態）。該 conf 也刻意不含 `/api/admin/` location。
+- **`nginx-react-http.conf`（明碼）模式下管理面技術封鎖**（harper CISO
+  M-3 = vp-eng 複審 M-1 修正）：該 conf 內含
+  `location ^~ /api/admin/ { return 404; }`，`/api/admin/*` 一律在 nginx
+  層直接 404、不會轉發給 python——⚠️ 早期版本誤以為「不寫該 location」
+  就等於禁用，但省略 location 只會讓請求落入下面泛用的 `location /api/`
+  照樣 proxy 給 python，若誤設了 token，管理面會在明碼 HTTP 上全開；現在
+  是用 nginx 主動 404 技術性封死，不只是「刻意不寫」。該模式仍**勿設
+  `TRUSTFORGE_ADMIN_TOKEN`**（web.py 未設 token = app 層也 fail-closed 全
+  關，雙重防護，非單一防線）。
 
 ### nginx `/api/admin/` 硬化（`deploy/nginx.conf`，harper 條件 A + M1）
 
@@ -522,3 +528,9 @@ react TLS 版 conf 有專屬 `location /api/admin/`（最長前綴優先於 `/ap
   `# allow <ADMIN_SOURCE_IP>;` / `# deny all;` 兩行註解、填入老闆固定出口
   IP、`nginx -t && systemctl reload nginx` 即生效——非名單來源直接 403，
   token 驗證都碰不到（縱深防禦，IP 浮動時再註解回來即可）。
+
+`Cache-Control: no-store` 另在 `src/trustforge/web.py::_send()` 集中補一層
+（harper L-2）：只要路徑落在 `/api/admin/` 下，這個唯一的回應出口一律加此
+header，不管跑的是哪份 nginx conf（react TLS／react-http／legacy-tls）—— nginx
+層的 `proxy_no_cache`/`no-store` 若有哪份 conf 漏配，app 層仍是最後一道
+防線。

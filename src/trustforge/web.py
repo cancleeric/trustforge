@@ -5614,6 +5614,21 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_header("Content-Security-Policy", _CSP_LEGACY)
         self.send_header("X-Content-Type-Options", "nosniff")
+        # 管理控制台 PR-5 補強（harper L-2）：`/api/admin/*` 的所有回應一律
+        # 補 `Cache-Control: no-store`——集中在這個唯一的 `_send()` 出口做，
+        # 而不是散落在各 admin handler call site，才能同時涵蓋 GET
+        # config/audit、PUT config、認證失敗、未知子路徑 404 等每一條路徑，
+        # 也不受「跑的是哪份 nginx conf（react TLS / react-http / legacy-tls）」
+        # 影響——就算未來某份 conf 忘了下 proxy_no_cache/no-store，app 層這裡
+        # 仍是最後一道防線。用 `self.path`（含 query）取路徑部分比對，跟本
+        # 檔既有 `(u.path + "/").startswith("/api/admin/")` 同一種寫法。用
+        # getattr 防禦：正常請求流程 BaseHTTPRequestHandler 一定會先設好
+        # `self.path` 才呼叫得到 `_send()`；但既有單元測試會用
+        # `Handler.__new__(Handler)` 繞過 `__init__` 直接戳 `_send()`（未走
+        # 真實請求流程，沒有 `self.path`），這裡不因此讓那些測試炸掉。
+        _send_path = urlparse(getattr(self, "path", "") or "").path
+        if (_send_path + "/").startswith("/api/admin/"):
+            self.send_header("Cache-Control", "no-store")
         for name, val in (extra_headers or {}).items():
             self.send_header(name, val)
         self.end_headers()
