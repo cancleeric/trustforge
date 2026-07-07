@@ -487,14 +487,50 @@ TRUSTFORGE_ADMIN_TOKEN=<老闆提供> TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1 \
   bash deploy/deploy_ec2.sh
 ```
 
+### #119：token 傳遞走 SSM Parameter Store SecureString（harper CISO M-1）
+
+token **值**不再出現在 SSM Run Command 的 commands JSON、user-data、或任何
+aws CLI argv——那些地方只剩「參數名」。生命週期（對操作者透明，部署指令
+不變）：
+
+1. 本機字元集驗證通過後，先 sweep `/trustforge/deploy/` 前綴殘留（上次部署
+   被 kill -9/斷電時 trap 沒跑到的自癒，正常情況下該前綴永遠是空的）。
+2. 對有值的 token `put-parameter --type SecureString`（KMS 用 AWS 託管
+   `alias/aws/ssm`），參數名 `/trustforge/deploy/<RUN_ID>/{admin,live}-token`
+   （RUN_ID＝UTC 時戳+PID，每次部署唯一；不帶 `--overwrite`，撞名
+   fail-loud）。值經 `--cli-input-json file://`（0600 tmpfile）傳遞，不進
+   process list。
+3. 遠端（SSM commands / 首建 override 的 user-data）只嵌參數名，執行時
+   `get-parameter --with-decryption` 取值 + case 二次字元集驗證後寫 unit。
+   `GetParameter` 的 CloudTrail 事件只記參數名不記值。
+4. 部署結束（成功或**任何失敗**）trap 一律 `delete-parameter`——參數存活
+   視窗＝單次部署時長（分鐘級），不留殘留。
+
+IAM：`trustforge-inline` 每次部署 reconcile 時同步帶兩條窄範圍語句——
+`ssm:GetParameter` 鎖 `arn:aws:ssm:<region>:<acct>:parameter/trustforge/deploy/*`、
+`kms:Decrypt` 帶 `kms:ViaService=ssm.<region>.amazonaws.com` 條件（alias 不能
+直接當 IAM Resource 比對）。本機部署者需要 `ssm:PutParameter`／
+`ssm:DeleteParameter`／`ssm:GetParametersByPath`（同前綴 ARN）——現行部署者
+本來就以高權限跑（腳本內含 `iam put-role-policy`），無需另行授權；此清單供
+日後收斂部署者權限時查用。
+
+⚠️ **#119 上線後的首次生產部署必須使用全新 token**：舊 token 值曾走過明文
+commands（SSM command history 保留約 30 天可讀），視同已暴露，一律作廢換新。
+
+真部署後抽查清單：`aws ssm get-parameters-by-path --path /trustforge/deploy/
+--recursive` 必須為空；`aws ssm list-commands` 最新 SendCommand 的 commands
+只見參數名；`/admin` token 閘功能回歸正常。
+
 注意事項：
 
-- token 值僅接受 `[A-Za-z0-9._~-]`（cap 僅接受十進位數字）——值會被嵌進
-  SSM 遠端指令，含引號/管線等字元一律在本機 fail-fast 中止（注入防護）。
+- token 值僅接受 `[A-Za-z0-9._~-]`（cap 僅接受十進位數字）——值最終仍會
+  進遠端 sed 取代式與 systemd unit，含引號/管線等字元一律在本機 fail-fast
+  中止（注入防護；遠端取回後還有第二道同字元集 case 驗證）。
 - ⚠️ **帶 token 建議走 update-in-place**（SSM 直改 unit 檔）：首次建置路徑
-  token 會經 user-data 寫入，殘留在 instance user-data（
-  `ec2:DescribeInstanceAttribute` 可讀）。先離線建機、再帶 token 重跑本
-  腳本（偵測到既有實例即自動走 update-in-place）。
+  預設硬擋帶 token（harper M-2）。override（`TRUSTFORGE_ALLOW_USERDATA_TOKEN=1`）
+  路徑的 user-data 自 #119 起也只嵌參數名、開機時 get-parameter 取值，
+  user-data 本體不再殘留 token 值。先離線建機、再帶 token 重跑本腳本
+  （偵測到既有實例即自動走 update-in-place）仍是建議做法。
 - token 換發/撤銷：帶新值（或不帶）重跑 `deploy_ec2.sh` 即可，unit 檔會被
   reconcile + `systemctl restart trustforge`。
 

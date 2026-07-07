@@ -12,6 +12,11 @@
 #      不寫（fail-closed）且 update-in-place 會把殘留的舊行整行刪除；不合法
 #      token 字元（注入防護）fail-fast；nginx react conf 的 /api/admin/
 #      location 結構（X-Real-IP/XFF 覆寫 + no-store + allowlist 預設註解）。
+#   6. #119（harper CISO M-1）：admin/live token 值改走 SSM SecureString 一次
+#      性搬運——值不進 SSM commands / user-data / aws argv（只嵌參數名）、
+#      put 結構（SecureString、無 Overwrite）、失敗必刪（trap）、backstop
+#      sweep 自癒、RUN_ID 唯一、delete 冪等、遠端二次字元集驗證擋惡意值、
+#      trustforge-inline 補窄範圍 ssm:GetParameter/kms:Decrypt。
 #
 # 用法：bash deploy/test_deploy_ec2.sh（在 repo 根目錄或 deploy/ 底下皆可）
 set -euo pipefail
@@ -403,6 +408,305 @@ with open('$work/healthz.sh', 'w') as f:
   rm -rf "$work"
 }
 
+assert_securestring_put_json() {
+  # #119：結構化解析 put-parameter 的 --cli-input-json 檔（不是肉眼 grep）：
+  # Name 前綴/後綴正確、Type=SecureString、Value 正確、且**沒有** Overwrite
+  # key（撞名要 fail-loud，不能靜默覆蓋）。
+  local desc="$1" file="$2" name_suffix="$3" expected_val="$4"
+  local result
+  if [ ! -f "$file" ]; then
+    echo "  [FAIL] $desc — 找不到 put-parameter 捕捉檔 $file"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  result=$(python3 - "$file" "$name_suffix" "$expected_val" <<'PYEOF'
+import json, sys
+
+path, suffix, expected_val = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    doc = json.load(f)
+problems = []
+name = doc.get("Name", "")
+if not name.startswith("/trustforge/deploy/"):
+    problems.append("Name 前綴不對:" + name)
+if not name.endswith(suffix):
+    problems.append("Name 後綴不對(期望 %s):%s" % (suffix, name))
+if doc.get("Type") != "SecureString":
+    problems.append("Type 不是 SecureString:" + str(doc.get("Type")))
+if doc.get("Value") != expected_val:
+    problems.append("Value 不符期望")
+if "Overwrite" in doc:
+    problems.append("不該帶 Overwrite（撞名要 fail-loud）")
+print("MATCH" if not problems else "MISMATCH:" + "|".join(problems))
+PYEOF
+)
+  if [ "$result" = "MATCH" ]; then
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $desc — $result"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_inline_ssm_kms_stmts() {
+  # #119（CEO gate：IAM 窄範圍）：結構化解析 trustforge-inline policy——
+  # ssm:GetParameter 的 Resource 必須「恰好」是 parameter/trustforge/deploy/*
+  # 前綴 ARN（不是 "*" 也不是更寬前綴）；kms:Decrypt 必須帶
+  # kms:ViaService=ssm.$REGION.amazonaws.com 條件（alias 不能直接當 IAM
+  # Resource 比對，用 ViaService 收斂「只有經同區 SSM 服務」的 decrypt）。
+  local desc="$1" file="$2"
+  local result
+  if [ ! -f "$file" ]; then
+    echo "  [FAIL] $desc — 找不到 policy 捕捉檔 $file"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  result=$(python3 - "$file" <<'PYEOF'
+import json, sys
+
+path = sys.argv[1]
+with open(path) as f:
+    doc = json.load(f)
+problems = []
+ssm_stmt = kms_stmt = None
+for stmt in doc.get("Statement", []):
+    actions = stmt.get("Action", [])
+    if isinstance(actions, str):
+        actions = [actions]
+    if "ssm:GetParameter" in actions:
+        ssm_stmt = stmt
+    if "kms:Decrypt" in actions:
+        kms_stmt = stmt
+if ssm_stmt is None:
+    problems.append("缺 ssm:GetParameter statement")
+else:
+    if ssm_stmt.get("Action") != "ssm:GetParameter" and ssm_stmt.get("Action") != ["ssm:GetParameter"]:
+        problems.append("ssm statement 夾帶其他 Action:" + str(ssm_stmt.get("Action")))
+    res = ssm_stmt.get("Resource")
+    if res != "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/deploy/*":
+        problems.append("ssm:GetParameter Resource 未鎖前綴 ARN:" + str(res))
+if kms_stmt is None:
+    problems.append("缺 kms:Decrypt statement")
+else:
+    if kms_stmt.get("Action") != "kms:Decrypt" and kms_stmt.get("Action") != ["kms:Decrypt"]:
+        problems.append("kms statement 夾帶其他 Action:" + str(kms_stmt.get("Action")))
+    via = (kms_stmt.get("Condition", {}).get("StringEquals", {}).get("kms:ViaService"))
+    if via != "ssm.ap-southeast-2.amazonaws.com":
+        problems.append("kms:Decrypt 缺 ViaService=ssm.<region> 條件:" + str(via))
+print("MATCH" if not problems else "MISMATCH:" + "|".join(problems))
+PYEOF
+)
+  if [ "$result" = "MATCH" ]; then
+    echo "  [PASS] $desc"
+    PASS=$((PASS + 1))
+  else
+    echo "  [FAIL] $desc — $result"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+_make_remote_env_mockbin() {
+  # #119 共用：建 mock bin（aws get-parameter 依 --name 回 RTEST_ADMIN_VAL/
+  # RTEST_LIVE_VAL；systemctl/journalctl/curl/sleep/unzip 全 no-op），給
+  # assert_remote_admin_env_behavior / assert_userdata_fetch_behavior 用。
+  local mockbin="$1"
+  mkdir -p "$mockbin"
+  cat >"$mockbin/aws" <<'EOAWS'
+#!/usr/bin/env bash
+ALL="$*"
+case "$ALL" in
+  *"ssm get-parameter"*"admin-token"*) printf '%s\n' "${RTEST_ADMIN_VAL-}" ;;
+  *"ssm get-parameter"*"live-token"*) printf '%s\n' "${RTEST_LIVE_VAL-}" ;;
+  *) exit 0 ;;
+esac
+EOAWS
+  chmod +x "$mockbin/aws"
+  local tool
+  for tool in systemctl journalctl curl sleep unzip; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$mockbin/$tool"
+    chmod +x "$mockbin/$tool"
+  done
+}
+
+assert_remote_admin_env_behavior() {
+  # #119：把捕捉到的 update-in-place 主設定 SSM 遠端腳本**完整實跑**（不是只
+  # 看字串像不像）：mock aws（get-parameter 依參數名回假值，模擬 SecureString
+  # 取值）、systemctl/curl 等 no-op、sed 用真 GNU sed、unit 檔路徑 patch 到
+  # 暫存檔——直接斷言腳本 exit code 與 unit 檔最終內容（get → case 驗證 →
+  # ensure/replace/delete 全鏈路）。惡意值場景（含 ; 引號等）斷言 exit 非零
+  # 且值沒落進 unit（遠端二次字元集驗證真的有效）。
+  # 參數：desc script_file admin_val live_val expect_rc expect_once_csv reject_csv
+  #（expect_once_csv：分號分隔、每行必須恰好出現 1 次；reject_csv：不得出現）
+  local desc="$1" script_file="$2" admin_val="$3" live_val="$4" expect_rc="$5" expect_csv="$6" reject_csv="$7"
+  if [ "${USE_GNU_SED:-0}" != "1" ]; then
+    echo "  [SKIP] $desc — 本機非 GNU sed，略過遠端腳本實跑"
+    return
+  fi
+  if [ ! -f "$script_file" ]; then
+    echo "  [FAIL] $desc — 找不到還原出的遠端腳本 $script_file"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  local work mockbin unitf rc
+  work=$(mktemp -d)
+  mockbin="$work/bin"
+  _make_remote_env_mockbin "$mockbin"
+  mkdir -p "$work/opt"
+  unitf="$work/trustforge.service"
+  cat > "$unitf" <<'UNITEOF'
+[Unit]
+Description=TrustForge web
+[Service]
+Environment=PORT=80
+Environment=BEDROCK_MODEL_ID=
+Environment=PYTHONPATH=/opt/trustforge
+Environment=TRUSTFORGE_ADMIN_TOKEN=stale-admin-OLD
+Environment=TRUSTFORGE_LIVE_TOKEN=stale-live-OLD
+Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=99
+ExecStart=/usr/bin/python3 -m trustforge.web
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+  sed -e "s#/etc/systemd/system/trustforge.service#$unitf#g" \
+      -e "s#/etc/systemd/system/fetch-scheduler#$work/fetch-scheduler#g" \
+      -e "s#/opt/trustforge#$work/opt#g" \
+      "$script_file" > "$work/remote_run.sh"
+  set +e
+  RTEST_ADMIN_VAL="$admin_val" RTEST_LIVE_VAL="$live_val" PATH="$mockbin:$PATH" \
+    bash "$work/remote_run.sh" >"$work/stdout.log" 2>"$work/stderr.log"
+  rc=$?
+  if [ "$rc" = "0" ] && [ "$expect_rc" = "0" ]; then
+    # 成功場景再跑第二次驗證冪等（replace 分支重入不重複插入）
+    RTEST_ADMIN_VAL="$admin_val" RTEST_LIVE_VAL="$live_val" PATH="$mockbin:$PATH" \
+      bash "$work/remote_run.sh" >>"$work/stdout.log" 2>>"$work/stderr.log"
+    rc=$?
+  fi
+  set -e
+  local ok=1 want
+  if [ "$rc" != "$expect_rc" ]; then
+    echo "  [FAIL] $desc — 遠端腳本實跑 exit=${rc}，預期 $expect_rc"
+    sed 's/^/    stderr: /' "$work/stderr.log"
+    ok=0
+  fi
+  if [ -n "$expect_csv" ]; then
+    local OLDIFS="$IFS"
+    IFS=';'
+    for want in $expect_csv; do
+      IFS="$OLDIFS"
+      local cnt
+      cnt=$(grep -cF -- "$want" "$unitf" || true)
+      if [ "$cnt" != "1" ]; then
+        echo "  [FAIL] $desc — unit 檔中「${want}」出現 $cnt 次（應恰好 1 次）"
+        ok=0
+      fi
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  fi
+  if [ -n "$reject_csv" ]; then
+    local OLDIFS2="$IFS"
+    IFS=';'
+    for want in $reject_csv; do
+      IFS="$OLDIFS2"
+      if grep -qF -- "$want" "$unitf"; then
+        echo "  [FAIL] $desc — unit 檔不該出現卻出現了:「${want}」"
+        ok=0
+      fi
+      IFS=';'
+    done
+    IFS="$OLDIFS2"
+  fi
+  if [ "$ok" = "1" ]; then
+    echo "  [PASS] ${desc}（實跑 exit=${rc}，unit 檔內容符合預期）"
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$work"
+}
+
+assert_userdata_fetch_behavior() {
+  # #119 首建 override 路徑：從捕捉到的 user-data 抽出 set +x..set -x 之間的
+  # SecureString 取值片段（可能多段：admin+live），對「沒有 admin env 行」的
+  # 假 unit 實跑（mock aws 回假值、真 GNU sed 插入），斷言 exit code 與插入
+  # 結果——連逃生口路徑的 get → case 驗證 → 插入鏈路都真的跑過。
+  local desc="$1" ud_file="$2" admin_val="$3" live_val="$4" expect_rc="$5" expect_csv="$6" reject_csv="$7"
+  if [ "${USE_GNU_SED:-0}" != "1" ]; then
+    echo "  [SKIP] $desc — 本機非 GNU sed，略過 user-data 片段實跑"
+    return
+  fi
+  local work mockbin unitf rc
+  work=$(mktemp -d)
+  mockbin="$work/bin"
+  _make_remote_env_mockbin "$mockbin"
+  unitf="$work/trustforge.service"
+  cat > "$unitf" <<'UNITEOF'
+[Unit]
+Description=TrustForge web
+[Service]
+Environment=PORT=80
+Environment=PYTHONPATH=/opt/trustforge
+ExecStart=/usr/bin/python3 -m trustforge.web
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+  sed -n '/^set +x$/,/^set -x$/p' "$ud_file" | \
+    sed "s#/etc/systemd/system/trustforge.service#$unitf#g" > "$work/fetch_run.sh"
+  if [ ! -s "$work/fetch_run.sh" ]; then
+    echo "  [FAIL] $desc — user-data 內沒抽到 set +x..set -x 取值片段"
+    FAIL=$((FAIL + 1))
+    rm -rf "$work"
+    return
+  fi
+  set +e
+  RTEST_ADMIN_VAL="$admin_val" RTEST_LIVE_VAL="$live_val" PATH="$mockbin:$PATH" \
+    bash "$work/fetch_run.sh" >"$work/stdout.log" 2>"$work/stderr.log"
+  rc=$?
+  set -e
+  local ok=1 want
+  if [ "$rc" != "$expect_rc" ]; then
+    echo "  [FAIL] $desc — user-data 片段實跑 exit=${rc}，預期 $expect_rc"
+    sed 's/^/    stderr: /' "$work/stderr.log"
+    ok=0
+  fi
+  if [ -n "$expect_csv" ]; then
+    local OLDIFS="$IFS"
+    IFS=';'
+    for want in $expect_csv; do
+      IFS="$OLDIFS"
+      local cnt
+      cnt=$(grep -cF -- "$want" "$unitf" || true)
+      if [ "$cnt" != "1" ]; then
+        echo "  [FAIL] $desc — unit 檔中「${want}」出現 $cnt 次（應恰好 1 次）"
+        ok=0
+      fi
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  fi
+  if [ -n "$reject_csv" ]; then
+    local OLDIFS2="$IFS"
+    IFS=';'
+    for want in $reject_csv; do
+      IFS="$OLDIFS2"
+      if grep -qF -- "$want" "$unitf"; then
+        echo "  [FAIL] $desc — unit 檔不該出現卻出現了:「${want}」"
+        ok=0
+      fi
+      IFS=';'
+    done
+    IFS="$OLDIFS2"
+  fi
+  if [ "$ok" = "1" ]; then
+    echo "  [PASS] ${desc}（實跑 exit=${rc}，unit 檔內容符合預期）"
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$work"
+}
+
 MOCKDIR=$(mktemp -d)
 CAPTURE=$(mktemp -d)
 trap 'rm -rf "$MOCKDIR" "$CAPTURE"' EXIT
@@ -446,11 +750,12 @@ case "$ALL" in
   "s3 cp"*)
     exit 0 ;;
   "ec2 describe-instances --region"*"Reservations[].Instances[].[InstanceId,State.Name]"*)
-    if [ "$SCENARIO" = "update-in-place" ] || [ "$SCENARIO" = "scheduler-fail" ] || [ "$SCENARIO" = "admin-env-update" ] || [ "$SCENARIO" = "admin-env-mixed" ]; then
-      printf 'i-0123456789abcdef0\trunning\n'
-    else
-      printf ''
-    fi ;;
+    case "$SCENARIO" in
+      update-in-place|scheduler-fail|admin-env-update|admin-env-mixed|scheduler-fail-token|runid-unique|delete-notfound|sweep-residual)
+        printf 'i-0123456789abcdef0\trunning\n' ;;
+      *)
+        printf '' ;;
+    esac ;;
   "ec2 describe-instances --region"*"length(Reservations[].Instances[])"*)
     echo 1 ;;
   "ec2 describe-instances --region"*"PublicIpAddress"*)
@@ -487,6 +792,38 @@ case "$ALL" in
     exit 0 ;;
   "ssm describe-instance-information"*)
     echo "Online" ;;
+  "ssm get-parameters-by-path"*)
+    # #119 backstop sweep：預設回空（前綴下無殘留）；sweep-residual 場景第一次
+    # 查詢回兩個假殘留參數名（模擬上次部署被 kill -9 留下的），之後回空。
+    # ⚠️ 此 case 必須排在下面 "ssm get-parameter"* 之前（前綴會誤匹配）。
+    if [ "$SCENARIO" = "sweep-residual" ] && [ ! -f "$CAPTURE_DIR/sweep_done_${SCENARIO}" ]; then
+      touch "$CAPTURE_DIR/sweep_done_${SCENARIO}"
+      printf '/trustforge/deploy/20260101T000000Z-99999/admin-token\t/trustforge/deploy/20260101T000000Z-99999/live-token\n'
+    fi
+    exit 0 ;;
+  "ssm put-parameter"*)
+    # #119：token 走 --cli-input-json file://tmpfile（防 argv 洩漏）。呼叫當下
+    # 把 JSON 檔複製出來供斷言（呼叫端 aws 返回後就會 rm 掉 tmpfile）；每個
+    # 場景自己的計數器（跨兩次部署不歸零，供 RUN_ID 唯一性場景比對 4 份 put）。
+    CIJ=$(find_after --cli-input-json)
+    PF="${CIJ#file://}"
+    PN=1
+    if [ -f "$CAPTURE_DIR/ssm_put_count_${SCENARIO}" ]; then
+      PN=$(($(cat "$CAPTURE_DIR/ssm_put_count_${SCENARIO}") + 1))
+    fi
+    echo "$PN" > "$CAPTURE_DIR/ssm_put_count_${SCENARIO}"
+    cp "$PF" "$CAPTURE_DIR/ssm_put_${SCENARIO}_${PN}.json"
+    exit 0 ;;
+  "ssm delete-parameter"*)
+    # #119：記錄被刪參數名（trap 清理 / sweep 自癒都會走到）；delete-notfound
+    # 場景模擬 ParameterNotFound（aws CLI exit 254），斷言 cleanup 冪等容忍。
+    DN=$(find_after --name)
+    echo "$DN" >> "$CAPTURE_DIR/ssm_deleted_${SCENARIO}.log"
+    if [ "$SCENARIO" = "delete-notfound" ]; then
+      echo "ParameterNotFound" >&2
+      exit 254
+    fi
+    exit 0 ;;
   "ec2 describe-vpcs"*)
     echo "vpc-0123456789abcdef0" ;;
   "ec2 describe-security-groups"*)
@@ -527,7 +864,14 @@ case "$ALL" in
     # scheduler 的 --probe）根本沒被呼叫到——healthz gate 獨立擋在 probe 之前。
     if [ "$SCENARIO" = "scheduler-fail" ] && [ "$CMDID_ARG" = "cmd-call2" ]; then
       echo "Failed"
-    elif [ "$SCENARIO" = "healthz-fail" ] && [ "$CMDID_ARG" = "cmd-call1" ]; then
+    elif [ "$SCENARIO" = "scheduler-fail-token" ] && { [ "$CMDID_ARG" = "cmd-call2" ] || [ "$CMDID_ARG" = "cmd-call3" ]; }; then
+      # #119 場景 14：update-in-place 帶 token 的 fetch-scheduler 驗證失敗——
+      # call2/call3 一起標 Failed。現行 verify_fetch_scheduler 是 seed
+      # （fire-and-forget、不輪詢）+ probe（真 gate）兩次 send-command，gate
+      # 那次的編號會因 seed 存在與否漂移；兩個都失敗可穩定命中真 gate，
+      # 不依賴編號假設（目的只是逼出「帶 token 且部署失敗」→ 驗 trap 清理）。
+      echo "Failed"
+    elif { [ "$SCENARIO" = "healthz-fail" ] || [ "$SCENARIO" = "healthz-fail-token" ]; } && [ "$CMDID_ARG" = "cmd-call1" ]; then
       echo "Failed"
     else
       echo "Success"
@@ -990,12 +1334,54 @@ else
   cat "$CAPTURE/stdout_admin-env-first.log"
   FAIL=$((FAIL + 1))
 fi
+# #119：cap（非機敏）仍以獨立行直接寫在 unit 區塊；admin/live token 值不再
+# 出現在 user-data 任何地方——改為 set +x 包住的 get-parameter 取值片段
+# （只嵌參數名），開機時才插入 unit。
 assert_unit_env_lines \
-  "user-data: 三個 admin env 以獨立行寫入 trustforge.service unit 區塊（結構化解析，非整檔 grep；ExecStart 行未被黏住）" \
+  "user-data: cap 以獨立行寫入 unit 區塊（ExecStart 行未被黏住）；admin/live 不在 heredoc 內（#119）" \
   "$CAPTURE/user_data.sh" \
-  "Environment=TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1;Environment=TRUSTFORGE_LIVE_TOKEN=test-live-token.B2;Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1"
+  "Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1"
+UD6=$(cat "$CAPTURE/user_data.sh" 2>/dev/null || echo "")
+assert_not_contains "$UD6" "test-admin-token.A1" "user-data: 不含 ADMIN_TOKEN 值（#119：值不落 user-data）"
+assert_not_contains "$UD6" "test-live-token.B2" "user-data: 不含 LIVE_TOKEN 值（#119）"
+assert_contains "$UD6" "/trustforge/deploy/" "user-data: 含 SecureString 參數名前綴（只嵌名不嵌值）"
+assert_contains "$UD6" "/admin-token" "user-data: 含 admin-token 參數名"
+assert_contains "$UD6" "/live-token" "user-data: 含 live-token 參數名"
+assert_contains "$UD6" "aws ssm get-parameter" "user-data: 開機時 get-parameter 取值"
+assert_contains "$UD6" "--with-decryption" "user-data: get-parameter 帶 --with-decryption"
+assert_contains "$UD6" 'set +x' "user-data: 取值片段前有 set +x（防 xtrace 把 token 值寫進 cloud-init log 落盤）"
+assert_contains "$UD6" '*[!A-Za-z0-9._~-]*' "user-data: 取回值有 case 二次字元集驗證（防存活視窗內被換值）"
 assert_file_contains "$CAPTURE/stdout_admin-env-first.log" "user-data 殘留" \
   "首次建置帶 token 時有印 user-data 殘留警語（建議改走 update-in-place）"
+# put 側：admin/live 各 put 一次 SecureString（cap 不 put），結構正確
+assert_securestring_put_json "場景 6：put #1 = admin-token SecureString（Name/Type/Value 正確、無 Overwrite）" \
+  "$CAPTURE/ssm_put_admin-env-first_1.json" "/admin-token" "test-admin-token.A1"
+assert_securestring_put_json "場景 6：put #2 = live-token SecureString" \
+  "$CAPTURE/ssm_put_admin-env-first_2.json" "/live-token" "test-live-token.B2"
+if [ -f "$CAPTURE/ssm_put_admin-env-first_3.json" ]; then
+  echo "  [FAIL] 場景 6：put 次數超過 2（cap 不該走 SecureString）"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] 場景 6：恰好 put 2 個參數（admin+live；cap 維持明文不 put）"
+  PASS=$((PASS + 1))
+fi
+# 成功結束後 trap 清理：兩個參數名都被 delete（用完即刪）
+DELETED6=$(cat "$CAPTURE/ssm_deleted_admin-env-first.log" 2>/dev/null || echo "")
+assert_contains "$DELETED6" "/admin-token" "場景 6：部署成功結束後 admin-token 參數被 delete（trap 用完即刪）"
+assert_contains "$DELETED6" "/live-token" "場景 6：live-token 參數被 delete"
+# user-data 取值片段功能實跑（get → case 驗證 → sed 插入全鏈路）
+assert_userdata_fetch_behavior \
+  "場景 6：user-data 片段實跑——mock get-parameter 回正常值 → admin/live 正確插入 unit（值來自參數，非 user-data 本文）" \
+  "$CAPTURE/user_data.sh" "test-admin-token.A1" "test-live-token.B2" 0 \
+  "Environment=TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1;Environment=TRUSTFORGE_LIVE_TOKEN=test-live-token.B2" ""
+assert_userdata_fetch_behavior \
+  "場景 6：user-data 片段實跑——mock 回惡意值（含 ; 引號）→ exit 非零且值不落 unit（遠端二次驗證有效）" \
+  "$CAPTURE/user_data.sh" 'evil";rm -rf /;"' "test-live-token.B2" 1 \
+  "" 'evil'
+assert_userdata_fetch_behavior \
+  "場景 6：user-data 片段實跑——mock 回空值（取值失敗）→ exit 非零 fail-loud" \
+  "$CAPTURE/user_data.sh" "" "test-live-token.B2" 1 \
+  "" "Environment=TRUSTFORGE_ADMIN_TOKEN"
 
 echo
 echo "== 場景 7：管理控制台 PR-5——admin env 有值（update-in-place）→ SSM sed reconcile 寫入 =="
@@ -1045,53 +1431,41 @@ with open('$CAPTURE/remote_script_admin.sh', 'w') as f:
   fi
 
   REMOTE_ADMIN=$(cat "$CAPTURE/remote_script_admin.sh" 2>/dev/null || echo "")
-  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1|" /etc/systemd/system/trustforge.service' "admin-env-update: ADMIN_TOKEN ensure（sed 取代帶正確值）"
-  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_LIVE_TOKEN=test-live-token.B2|" /etc/systemd/system/trustforge.service' "admin-env-update: LIVE_TOKEN ensure（sed 取代帶正確值）"
-  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1|" /etc/systemd/system/trustforge.service' "admin-env-update: DAILY_USD_CAP ensure（sed 取代帶正確值）"
+  # #119：token 值不再出現在遠端腳本——只嵌參數名，遠端 get-parameter 取值
+  # 進 shell 變數 TF_SSM_VAL，case 二次字元集驗證後才 sed 進 unit。
+  assert_not_contains "$REMOTE_ADMIN" "test-admin-token.A1" "admin-env-update: 遠端腳本不含 ADMIN_TOKEN 值（#119：commands 只嵌參數名）"
+  assert_not_contains "$REMOTE_ADMIN" "test-live-token.B2" "admin-env-update: 遠端腳本不含 LIVE_TOKEN 值（#119）"
+  assert_contains "$REMOTE_ADMIN" "/trustforge/deploy/" "admin-env-update: 遠端腳本含 SecureString 參數名前綴"
+  assert_contains "$REMOTE_ADMIN" "/admin-token" "admin-env-update: 遠端腳本含 admin-token 參數名"
+  assert_contains "$REMOTE_ADMIN" "/live-token" "admin-env-update: 遠端腳本含 live-token 參數名"
+  assert_contains "$REMOTE_ADMIN" "aws ssm get-parameter" "admin-env-update: 遠端有 get-parameter 取值"
+  assert_contains "$REMOTE_ADMIN" "--with-decryption" "admin-env-update: get-parameter 帶 --with-decryption"
+  assert_contains "$REMOTE_ADMIN" '*[!A-Za-z0-9._~-]*' "admin-env-update: 遠端有 case 二次字元集驗證（防存活視窗內被換值）"
+  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_ADMIN_TOKEN=${TF_SSM_VAL}|" /etc/systemd/system/trustforge.service' "admin-env-update: ADMIN_TOKEN ensure（sed 取代值來自遠端變數，非本機字面值）"
+  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_LIVE_TOKEN=${TF_SSM_VAL}|" /etc/systemd/system/trustforge.service' "admin-env-update: LIVE_TOKEN ensure（同上）"
+  # cap 非機敏維持明文字面值傳遞（#119 明確不動）
+  assert_contains "$REMOTE_ADMIN" 'Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1|" /etc/systemd/system/trustforge.service' "admin-env-update: DAILY_USD_CAP ensure（cap 維持明文，#119 不動）"
   assert_not_contains "$REMOTE_ADMIN" 'sed -i "/^Environment=TRUSTFORGE_ADMIN_TOKEN=/d"' "admin-env-update: 有值時不該出現 ADMIN_TOKEN 刪除行"
   assert_not_contains "$REMOTE_ADMIN" 'sed -i "/^Environment=TRUSTFORGE_LIVE_TOKEN=/d"' "admin-env-update: 有值時不該出現 LIVE_TOKEN 刪除行"
   assert_not_contains "$REMOTE_ADMIN" 'sed -i "/^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=/d"' "admin-env-update: 有值時不該出現 DAILY_USD_CAP 刪除行"
 
-  # 功能性驗證（同場景 2 的 GNU sed 慣例）：對「完全沒有 admin env 行的
-  # 舊實例 unit」實跑 ensure 邏輯，斷言插入正確、值正確、重跑冪等。
-  if [ "${USE_GNU_SED:-0}" = "1" ]; then
-    FAKE_UNIT_A=$(mktemp)
-    cat > "$FAKE_UNIT_A" <<'UNITEOF'
-[Unit]
-Description=TrustForge web
-[Service]
-Environment=PORT=80
-Environment=BEDROCK_MODEL_ID=
-Environment=PYTHONPATH=/opt/trustforge
-ExecStart=/usr/bin/python3 -m trustforge.web
-[Install]
-WantedBy=multi-user.target
-UNITEOF
-    ENSURE_LINES_A=$(grep -n '^if grep -q' "$CAPTURE/remote_script_admin.sh" | cut -d: -f1)
-    PATCHED_A=$(sed "s#/etc/systemd/system/trustforge.service#$FAKE_UNIT_A#g" "$CAPTURE/remote_script_admin.sh")
-    for lineno in $ENSURE_LINES_A; do
-      LINE=$(printf '%s\n' "$PATCHED_A" | sed -n "${lineno}p")
-      bash -c "$LINE"
-      bash -c "$LINE"  # 跑兩次驗證冪等
-    done
-    ADMIN_ENV_OK=1
-    for kv in "TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1" "TRUSTFORGE_LIVE_TOKEN=test-live-token.B2" "TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1"; do
-      COUNT=$(grep -cF "Environment=$kv" "$FAKE_UNIT_A" || true)
-      if [ "$COUNT" != "1" ]; then
-        echo "  [FAIL] admin-env-update 實跑後 Environment=$kv 出現 $COUNT 次（應為 1）"
-        ADMIN_ENV_OK=0
-      fi
-    done
-    if [ "$ADMIN_ENV_OK" = "1" ]; then
-      echo "  [PASS] admin-env-update：三個 admin env 對舊 unit 實跑插入正確、值正確、重跑冪等不重複"
-      PASS=$((PASS + 1))
-    else
-      FAIL=$((FAIL + 1))
-    fi
-    rm -f "$FAKE_UNIT_A"
-  else
-    echo "  [SKIP] 本機 sed 非 GNU sed，略過 admin env ensure 實跑驗證（同場景 2 的 SKIP 理由）"
-  fi
+  # 功能性驗證（#119 版）：不再逐行抽 ensure 指令（token 值已改為遠端變數，
+  # 單行抽跑會拿不到 TF_SSM_VAL），改為整支遠端腳本端到端實跑——mock aws
+  # get-parameter 依參數名回假值、真 GNU sed 落 unit，斷言取代正確、冪等、
+  # 惡意值被遠端二次驗證擋下（assert_remote_admin_env_behavior 內含）。
+  assert_remote_admin_env_behavior \
+    "admin-env-update：遠端腳本端到端實跑——admin/live 取自 SecureString 假值、cap 明文，stale 舊值被正確取代且重跑冪等" \
+    "$CAPTURE/remote_script_admin.sh" "test-admin-token.A1" "test-live-token.B2" 0 \
+    "Environment=TRUSTFORGE_ADMIN_TOKEN=test-admin-token.A1;Environment=TRUSTFORGE_LIVE_TOKEN=test-live-token.B2;Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=1" \
+    "stale-admin-OLD;stale-live-OLD"
+  assert_remote_admin_env_behavior \
+    "admin-env-update：遠端 get-parameter 回惡意值（含 ; 引號）→ 腳本 exit 非零且惡意值不落 unit（case 二次驗證有效）" \
+    "$CAPTURE/remote_script_admin.sh" 'evil";rm -rf /;"' "test-live-token.B2" 1 \
+    "" "evil"
+  assert_remote_admin_env_behavior \
+    "admin-env-update：遠端 get-parameter 回空值（取值失敗）→ 腳本 exit 非零 fail-loud" \
+    "$CAPTURE/remote_script_admin.sh" "" "test-live-token.B2" 1 \
+    "" ""
 fi
 
 echo
@@ -1180,10 +1554,25 @@ else
   cat "$CAPTURE/stdout_first-build-token-override.log"
   FAIL=$((FAIL + 1))
 fi
-assert_unit_env_lines \
-  "場景 10：override 放行後，user-data 仍正確寫入 ADMIN_TOKEN（override 只解除硬擋，不影響既有 fail-closed 寫入邏輯）" \
-  "$CAPTURE/user_data.sh" \
-  "Environment=TRUSTFORGE_ADMIN_TOKEN=override-admin-token.Z1"
+# #119：override 只解除 M-2 硬擋；user-data 本文不再含 token 值，只嵌
+# admin-token 參數名（LIVE 未設 → fail-closed：連參數名/取值片段都沒有）。
+UD10=$(cat "$CAPTURE/user_data.sh" 2>/dev/null || echo "")
+assert_not_contains "$UD10" "override-admin-token.Z1" "場景 10：user-data 不含 ADMIN_TOKEN 值（#119：override 路徑也只嵌參數名）"
+assert_contains "$UD10" "/admin-token" "場景 10：user-data 含 admin-token 參數名 + 取值片段"
+assert_not_contains "$UD10" "/live-token" "場景 10：LIVE 未設 → user-data 無 live-token 參數名（fail-closed 逐層保留）"
+assert_securestring_put_json "場景 10：put #1 = admin-token SecureString（值只進參數）" \
+  "$CAPTURE/ssm_put_first-build-token-override_1.json" "/admin-token" "override-admin-token.Z1"
+if [ -f "$CAPTURE/ssm_put_first-build-token-override_2.json" ]; then
+  echo "  [FAIL] 場景 10：LIVE 未設卻多 put 了第二個參數（fail-closed 失效）"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] 場景 10：LIVE 未設 → 只 put 1 個參數（fail-closed：未設不 put）"
+  PASS=$((PASS + 1))
+fi
+assert_userdata_fetch_behavior \
+  "場景 10：user-data 片段實跑——admin 取值插入正確（值來自參數）" \
+  "$CAPTURE/user_data.sh" "override-admin-token.Z1" "" 0 \
+  "Environment=TRUSTFORGE_ADMIN_TOKEN=override-admin-token.Z1" ""
 
 echo
 echo "== 場景 11：管理控制台 PR-5——mixed 部分設（ADMIN 設+LIVE 未設+CAP 設）+ 取代 stale 值分支功能實跑（vp-eng M-2）=="
@@ -1236,67 +1625,195 @@ with open('$CAPTURE/remote_script_mixed.sh', 'w') as f:
   fi
 
   REMOTE_MIXED=$(cat "$CAPTURE/remote_script_mixed.sh" 2>/dev/null || echo "")
-  assert_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_ADMIN_TOKEN=mixed-new-admin.M1|" /etc/systemd/system/trustforge.service' "admin-env-mixed: ADMIN_TOKEN ensure（有設）"
-  assert_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5|" /etc/systemd/system/trustforge.service' "admin-env-mixed: CAP ensure（有設）"
+  assert_not_contains "$REMOTE_MIXED" "mixed-new-admin.M1" "admin-env-mixed: 遠端腳本不含 ADMIN_TOKEN 值（#119）"
+  assert_contains "$REMOTE_MIXED" "/admin-token" "admin-env-mixed: ADMIN_TOKEN ensure 改為參數名 + 遠端取值（有設）"
+  assert_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_ADMIN_TOKEN=${TF_SSM_VAL}|" /etc/systemd/system/trustforge.service' "admin-env-mixed: ADMIN_TOKEN sed 取代值來自遠端變數"
+  assert_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5|" /etc/systemd/system/trustforge.service' "admin-env-mixed: CAP ensure（有設，明文不動）"
   assert_contains "$REMOTE_MIXED" 'sed -i "/^Environment=TRUSTFORGE_LIVE_TOKEN=/d"' "admin-env-mixed: LIVE_TOKEN delete（未設，交錯出現在 ensure 之間）"
+  assert_not_contains "$REMOTE_MIXED" "/live-token" "admin-env-mixed: LIVE 未設 → 遠端腳本無 live-token 參數名（未設不 get）"
   assert_not_contains "$REMOTE_MIXED" 'sed -i "/^Environment=TRUSTFORGE_ADMIN_TOKEN=/d"' "admin-env-mixed: 有設時不該出現 ADMIN_TOKEN 刪除行"
   assert_not_contains "$REMOTE_MIXED" 'sed -i "/^Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=/d"' "admin-env-mixed: 有設時不該出現 CAP 刪除行"
-  assert_not_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_LIVE_TOKEN=.*|" /etc/systemd/system/trustforge.service' "admin-env-mixed: 未設時不該出現 LIVE_TOKEN ensure（取代/插入）行"
+  assert_not_contains "$REMOTE_MIXED" 'Environment=TRUSTFORGE_LIVE_TOKEN=${TF_SSM_VAL}' "admin-env-mixed: 未設時不該出現 LIVE_TOKEN ensure（取代/插入）行"
 
-  if [ "${USE_GNU_SED:-0}" = "1" ]; then
-    FAKE_UNIT_MIXED=$(mktemp)
-    cat > "$FAKE_UNIT_MIXED" <<'UNITEOF'
-[Unit]
-Description=TrustForge web
-[Service]
-Environment=PORT=80
-Environment=BEDROCK_MODEL_ID=
-Environment=PYTHONPATH=/opt/trustforge
-Environment=TRUSTFORGE_ADMIN_TOKEN=stale-mixed-admin-OLD
-Environment=TRUSTFORGE_LIVE_TOKEN=stale-mixed-live-OLD
-Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=99
-ExecStart=/usr/bin/python3 -m trustforge.web
-[Install]
-WantedBy=multi-user.target
-UNITEOF
-    ENSURE_LINES_MIXED=$(grep -n '^if grep -q' "$CAPTURE/remote_script_mixed.sh" | cut -d: -f1)
-    PATCHED_MIXED=$(sed "s#/etc/systemd/system/trustforge.service#$FAKE_UNIT_MIXED#g" "$CAPTURE/remote_script_mixed.sh")
-    for lineno in $ENSURE_LINES_MIXED; do
-      LINE=$(printf '%s\n' "$PATCHED_MIXED" | sed -n "${lineno}p")
-      bash -c "$LINE"
-      bash -c "$LINE"  # 跑兩次驗證冪等
-    done
-    DELETE_LINES_MIXED=$(grep -n '^sed -i "/^Environment=TRUSTFORGE_' "$CAPTURE/remote_script_mixed.sh" | cut -d: -f1)
-    for lineno in $DELETE_LINES_MIXED; do
-      LINE=$(printf '%s\n' "$PATCHED_MIXED" | sed -n "${lineno}p")
-      bash -c "$LINE"
-      bash -c "$LINE"  # 跑兩次驗證冪等
-    done
-    MIXED_OK=1
-    ADMIN_COUNT=$(grep -cF "Environment=TRUSTFORGE_ADMIN_TOKEN=" "$FAKE_UNIT_MIXED" || true)
-    if [ "$ADMIN_COUNT" != "1" ] || ! grep -qF "Environment=TRUSTFORGE_ADMIN_TOKEN=mixed-new-admin.M1" "$FAKE_UNIT_MIXED"; then
-      echo "  [FAIL] admin-env-mixed 實跑後 ADMIN_TOKEN 取代 stale 值失敗（行數=$ADMIN_COUNT，或值不對）"
-      MIXED_OK=0
-    fi
-    CAP_COUNT=$(grep -cF "Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=" "$FAKE_UNIT_MIXED" || true)
-    if [ "$CAP_COUNT" != "1" ] || ! grep -qF "Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5" "$FAKE_UNIT_MIXED"; then
-      echo "  [FAIL] admin-env-mixed 實跑後 CAP 取代 stale 值失敗（行數=$CAP_COUNT，或值不對）"
-      MIXED_OK=0
-    fi
-    if grep -qF "Environment=TRUSTFORGE_LIVE_TOKEN=" "$FAKE_UNIT_MIXED"; then
-      echo "  [FAIL] admin-env-mixed 實跑後 LIVE_TOKEN stale 值沒被刪除"
-      MIXED_OK=0
-    fi
-    if [ "$MIXED_OK" = "1" ]; then
-      echo "  [PASS] admin-env-mixed：對「三個 key 都已有 stale 舊值」的既有 unit 實跑——ADMIN_TOKEN/CAP 正確取代成新值（非插入重複）、LIVE_TOKEN 正確整行刪除，且重跑冪等"
-      PASS=$((PASS + 1))
-    else
-      FAIL=$((FAIL + 1))
-    fi
-    rm -f "$FAKE_UNIT_MIXED"
+  # #119 版功能實跑：不再逐行抽 ensure 指令（token 取代值已改為遠端變數
+  # TF_SSM_VAL，單行抽跑拿不到值），改為整支遠端腳本端到端實跑——seed unit
+  # 三個 key 都有 stale 舊值：ADMIN 取代成 SecureString 取回的新值、CAP 取代
+  # 成明文新值、LIVE 未設整行刪除，且重跑冪等（成功場景 harness 內跑兩次）。
+  assert_remote_admin_env_behavior \
+    "admin-env-mixed：遠端腳本端到端實跑——ADMIN/CAP stale 值正確取代、LIVE stale 行整行刪除、重跑冪等" \
+    "$CAPTURE/remote_script_mixed.sh" "mixed-new-admin.M1" "unused-live-should-not-be-fetched" 0 \
+    "Environment=TRUSTFORGE_ADMIN_TOKEN=mixed-new-admin.M1;Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=2.5" \
+    "stale-admin-OLD;stale-live-OLD;Environment=TRUSTFORGE_LIVE_TOKEN=;unused-live-should-not-be-fetched"
+fi
+
+echo
+echo "== 場景 12：#119——trustforge-inline IAM 窄範圍（ssm:GetParameter 前綴 ARN + kms:Decrypt ViaService）=="
+# CEO gate（IAM 面）：兩條部署路徑 + 建角色路徑 reconcile 出來的
+# trustforge-inline 都必須含窄範圍語句——不依賴 AmazonSSMManagedInstanceCore
+# 恰好放行的巧合。結構化解析，Resource 錯一個字元都算 FAIL。
+assert_inline_ssm_kms_stmts \
+  "首次建置：trustforge-inline 含 ssm:GetParameter（鎖 parameter/trustforge/deploy/*）+ kms:Decrypt（ViaService=ssm.<region>）" \
+  "$CAPTURE/iam_policy_first-time_trustforge-inline.txt"
+assert_inline_ssm_kms_stmts \
+  "update-in-place：trustforge-inline 同樣被 reconcile 成含窄範圍 ssm/kms 語句（既有角色也吃得到）" \
+  "$CAPTURE/iam_policy_update-in-place_trustforge-inline.txt"
+assert_inline_ssm_kms_stmts \
+  "IAM 角色不存在（首次建角色）：trustforge-inline 亦含窄範圍 ssm/kms 語句" \
+  "$CAPTURE/iam_policy_iam-role-missing_trustforge-inline.txt"
+
+echo
+echo "== 場景 13：#119——fail-closed：未設 token 的部署零 put-parameter =="
+for sc in first-time update-in-place; do
+  if [ -f "$CAPTURE/ssm_put_${sc}_1.json" ]; then
+    echo "  [FAIL] ${sc}：未設 token 卻 put 了 SecureString 參數（fail-closed 失效）"
+    FAIL=$((FAIL + 1))
   else
-    echo "  [SKIP] 本機 sed 非 GNU sed，略過 mixed admin env 實跑驗證（同場景 2 的 SKIP 理由）"
+    echo "  [PASS] ${sc}：未設 token → 零 put-parameter（不 put → 遠端不 get → 刪行，逐層 fail-closed）"
+    PASS=$((PASS + 1))
   fi
+  if grep -qF "ssm put-parameter" "$CAPTURE/aws_calls_${sc}.log" 2>/dev/null; then
+    echo "  [FAIL] ${sc}：aws 呼叫紀錄出現 put-parameter"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  [PASS] ${sc}：aws 呼叫紀錄無 put-parameter"
+    PASS=$((PASS + 1))
+  fi
+done
+
+echo
+echo "== 場景 14：#119——帶 token 部署中途失敗 → trap 必刪本次參數（失敗清理鐵則）=="
+# update-in-place 帶 token、verify_fetch_scheduler（call2）失敗 → 腳本非零
+# 結束，且兩個剛 put 的參數名都必須出現在 delete 紀錄（EXIT trap 生效）。
+if run_deploy "scheduler-fail-token" \
+     TRUSTFORGE_ADMIN_TOKEN=fail-admin-token.F1 \
+     TRUSTFORGE_LIVE_TOKEN=fail-live-token.F2; then
+  echo "  [FAIL] scheduler-fail-token：驗證失敗仍回報成功（exit 0）——不可接受"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] scheduler-fail-token：帶 token 且驗證失敗時，deploy_ec2.sh 正確地非零結束"
+  PASS=$((PASS + 1))
+fi
+DELETED_SFT=$(cat "$CAPTURE/ssm_deleted_scheduler-fail-token.log" 2>/dev/null || echo "")
+SFT_CLEAN_OK=1
+for i in 1 2; do
+  PUT_NAME=$(python3 -c "import json;print(json.load(open('$CAPTURE/ssm_put_scheduler-fail-token_${i}.json'))['Name'])" 2>/dev/null || echo "MISSING_PUT_${i}")
+  if ! grep -qxF "$PUT_NAME" <<<"$DELETED_SFT"; then
+    echo "  [FAIL] scheduler-fail-token：put 的參數 ${PUT_NAME} 沒被 trap delete（殘留！）"
+    SFT_CLEAN_OK=0
+  fi
+done
+if [ "$SFT_CLEAN_OK" = "1" ]; then
+  echo "  [PASS] scheduler-fail-token：部署失敗後，本次 put 的 admin/live 兩參數都被 trap delete（不留殘留）"
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== 場景 15：#119——首建 override 帶 token、healthz 失敗 → trap 亦刪參數 =="
+rm -f "$CAPTURE/ssm_params_call2.txt"
+if run_deploy "healthz-fail-token" \
+     TRUSTFORGE_ADMIN_TOKEN=hz-admin-token.H1 \
+     TRUSTFORGE_LIVE_TOKEN=hz-live-token.H2 \
+     TRUSTFORGE_ALLOW_USERDATA_TOKEN=1; then
+  echo "  [FAIL] healthz-fail-token：healthz 失敗仍回報成功——不可接受"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] healthz-fail-token：首建 override 帶 token 且 healthz 失敗時，正確地非零結束"
+  PASS=$((PASS + 1))
+fi
+DELETED_HFT=$(cat "$CAPTURE/ssm_deleted_healthz-fail-token.log" 2>/dev/null || echo "")
+assert_contains "$DELETED_HFT" "/admin-token" "healthz-fail-token：admin-token 參數被 trap delete"
+assert_contains "$DELETED_HFT" "/live-token" "healthz-fail-token：live-token 參數被 trap delete"
+UD15=$(cat "$CAPTURE/user_data.sh" 2>/dev/null || echo "")
+assert_not_contains "$UD15" "hz-admin-token.H1" "healthz-fail-token：user-data 不含 admin token 值"
+assert_not_contains "$UD15" "hz-live-token.H2" "healthz-fail-token：user-data 不含 live token 值"
+
+echo
+echo "== 場景 16：#119——RUN_ID 唯一性：同 session 兩次部署，參數名不重複 =="
+# put 不帶 --overwrite：若兩次部署撞名，第二次 put 會失敗（fail-loud）。
+# RUN_ID＝秒級時戳+PID，run_deploy 每次是新 bash 行程（PID 不同），兩次
+# put 的參數名必須不同。
+run_deploy "runid-unique" TRUSTFORGE_ADMIN_TOKEN=uniq-token.U1 || {
+  echo "  [FAIL] runid-unique 第一次部署非零結束"; cat "$CAPTURE/stdout_runid-unique.log"; FAIL=$((FAIL + 1)); }
+run_deploy "runid-unique" TRUSTFORGE_ADMIN_TOKEN=uniq-token.U1 || {
+  echo "  [FAIL] runid-unique 第二次部署非零結束"; cat "$CAPTURE/stdout_runid-unique.log"; FAIL=$((FAIL + 1)); }
+NAME_R1=$(python3 -c "import json;print(json.load(open('$CAPTURE/ssm_put_runid-unique_1.json'))['Name'])" 2>/dev/null || echo "MISSING1")
+NAME_R2=$(python3 -c "import json;print(json.load(open('$CAPTURE/ssm_put_runid-unique_2.json'))['Name'])" 2>/dev/null || echo "MISSING2")
+if [ "$NAME_R1" = "MISSING1" ] || [ "$NAME_R2" = "MISSING2" ]; then
+  echo "  [FAIL] runid-unique：沒抓到兩次部署各自的 put-parameter"
+  FAIL=$((FAIL + 1))
+elif [ "$NAME_R1" = "$NAME_R2" ]; then
+  echo "  [FAIL] runid-unique：兩次部署 put 了相同參數名 ${NAME_R1}（RUN_ID 沒起作用，撞名會 fail-loud 炸掉重跑）"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] runid-unique：兩次部署參數名不同（${NAME_R1} ≠ ${NAME_R2}）"
+  PASS=$((PASS + 1))
+fi
+
+echo
+echo "== 場景 17：#119——delete 冪等：ParameterNotFound（exit 254）不拖垮部署 =="
+if run_deploy "delete-notfound" TRUSTFORGE_ADMIN_TOKEN=del-token.D1; then
+  echo "  [PASS] delete-notfound：trap delete 遇 ParameterNotFound（mock exit 254）部署仍成功結束（|| true 冪等容忍）"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] delete-notfound：delete 失敗把部署拖垮成非零（cleanup 該冪等容忍）"
+  cat "$CAPTURE/stdout_delete-notfound.log"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
+echo "== 場景 18：#119——backstop sweep：上次異常殘留參數被自癒刪除 =="
+# 不帶 token 的部署（sweep 無條件跑）：mock 讓 get-parameters-by-path 第一次
+# 回兩個假殘留名 → 斷言有印警告、殘留被 delete、部署照常成功。
+if run_deploy "sweep-residual"; then
+  echo "  [PASS] sweep-residual：部署成功結束（sweep 自癒不擋主流程）"
+  PASS=$((PASS + 1))
+else
+  echo "  [FAIL] sweep-residual：部署非零結束"
+  cat "$CAPTURE/stdout_sweep-residual.log"
+  FAIL=$((FAIL + 1))
+fi
+DELETED_SW=$(cat "$CAPTURE/ssm_deleted_sweep-residual.log" 2>/dev/null || echo "")
+assert_contains "$DELETED_SW" "/trustforge/deploy/20260101T000000Z-99999/admin-token" "sweep-residual：殘留 admin-token 被 sweep delete"
+assert_contains "$DELETED_SW" "/trustforge/deploy/20260101T000000Z-99999/live-token" "sweep-residual：殘留 live-token 被 sweep delete"
+assert_file_contains "$CAPTURE/stdout_sweep-residual.log" "殘留" "sweep-residual：有印殘留警告訊息"
+
+echo
+echo "== 場景 19：#119——token 值不進任何本機 aws argv（含 put 改走 cli-input-json）=="
+ARGV_OK=1
+while IFS='|' read -r sc val; do
+  [ -f "$CAPTURE/aws_calls_${sc}.log" ] || continue
+  if grep -qF -- "$val" "$CAPTURE/aws_calls_${sc}.log"; then
+    echo "  [FAIL] ${sc}：token 值「${val}」出現在 aws argv 紀錄（process list 洩漏）"
+    ARGV_OK=0
+  fi
+done <<'SCENVALS'
+admin-env-first|test-admin-token.A1
+admin-env-first|test-live-token.B2
+admin-env-update|test-admin-token.A1
+admin-env-update|test-live-token.B2
+admin-env-mixed|mixed-new-admin.M1
+first-build-token-override|override-admin-token.Z1
+scheduler-fail-token|fail-admin-token.F1
+scheduler-fail-token|fail-live-token.F2
+healthz-fail-token|hz-admin-token.H1
+healthz-fail-token|hz-live-token.H2
+runid-unique|uniq-token.U1
+delete-notfound|del-token.D1
+SCENVALS
+if [ "$ARGV_OK" = "1" ]; then
+  echo "  [PASS] 全部帶 token 場景：token 值不出現在任何一次 aws 呼叫的 argv（put 走 --cli-input-json tmpfile）"
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+fi
+if grep -qiF -- "--overwrite" "$CAPTURE/aws_calls_admin-env-update.log" 2>/dev/null; then
+  echo "  [FAIL] put-parameter 帶了 --overwrite（撞名要 fail-loud，不能靜默覆蓋）"
+  FAIL=$((FAIL + 1))
+else
+  echo "  [PASS] put-parameter 不帶 --overwrite（撞名 fail-loud）"
+  PASS=$((PASS + 1))
 fi
 
 echo
