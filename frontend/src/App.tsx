@@ -6,6 +6,7 @@ import ComparePage from './pages/ComparePage'
 import StatusPage from './pages/StatusPage'
 import CostsPage from './pages/CostsPage'
 import HistoryPage from './pages/HistoryPage'
+import AdminPage from './pages/AdminPage'
 import NotFoundPage from './pages/NotFoundPage'
 
 export default function App() {
@@ -20,6 +21,10 @@ export default function App() {
           <Route path="/status" element={<StatusPage />} />
           <Route path="/costs" element={<CostsPage />} />
           <Route path="/history" element={<HistoryPage />} />
+          {/* 管理控制台（PR-4）：刻意不進 Header 主導覽（不對公開流量
+              宣傳管理入口；真正的守門是後端 X-Admin-Token 認證+fail-closed，
+              不是路徑隱蔽）。 */}
+          <Route path="/admin" element={<AdminPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </div>

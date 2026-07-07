@@ -1,5 +1,7 @@
 import { ANALYZE_TIMEOUT_MS, apiFetch, DEFAULT_TIMEOUT_MS } from './apiClient'
 import {
+  isAdminAuditData,
+  isAdminConfigData,
   isAnalyzeData,
   isComparisonAnalyzeData,
   isCostsData,
@@ -9,6 +11,9 @@ import {
   isStatusData,
 } from './validators'
 import type {
+  AdminAuditData,
+  AdminConfigChanges,
+  AdminConfigData,
   AnalyzeData,
   ApiEnvelope,
   ComparisonAnalyzeData,
@@ -103,5 +108,58 @@ export function getHistory(params: HistoryParams, signal?: AbortSignal): Promise
   return apiFetch<HistoryData>('/api/history', { ...params }, isHistoryData, {
     signal,
     timeoutMs: DEFAULT_TIMEOUT_MS,
+  })
+}
+
+// ── /api/admin/*（管理控制台，PR-4）──────────────────────────────────────
+// 認證一律走 `X-Admin-Token` header（絕不進 URL/query——query 會落
+// access log；同後端 `web.py` admin 區塊紀律）。token 由呼叫端（AdminPage）
+// 持有於 React state / sessionStorage，見 `adminConsole.ts`。
+//
+// qa L4：三個 admin 端點一律 `cache: 'no-store'`——設定快照含 cap/
+// last4/version 等易失真資訊，不得進瀏覽器 heuristic cache/bfcache（後端
+// no-cache response header 另歸 PR-5，這裡是前端側雙邊防禦）。
+
+export function getAdminConfig(
+  adminToken: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AdminConfigData>> {
+  return apiFetch<AdminConfigData>('/api/admin/config', undefined, isAdminConfigData, {
+    signal,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    headers: { 'X-Admin-Token': adminToken },
+    cache: 'no-store',
+  })
+}
+
+/** 部分更新（CAS）：`expectedVersion` 必須是剛 GET 到的 `version`
+ * （item 尚不存在——`exists=false`、`version=null`——時傳 0）。409
+ * `version_conflict` 由呼叫端重載最新設定後再改（`error.current_version`
+ * 附最新 version，重讀失敗時為 null）。 */
+export function putAdminConfig(
+  adminToken: string,
+  changes: AdminConfigChanges,
+  expectedVersion: number,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AdminConfigData>> {
+  return apiFetch<AdminConfigData>('/api/admin/config', undefined, isAdminConfigData, {
+    signal,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    method: 'PUT',
+    headers: { 'X-Admin-Token': adminToken },
+    jsonBody: { ...changes, expected_version: expectedVersion },
+    cache: 'no-store',
+  })
+}
+
+export function getAdminAudit(
+  adminToken: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AdminAuditData>> {
+  return apiFetch<AdminAuditData>('/api/admin/audit', undefined, isAdminAuditData, {
+    signal,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    headers: { 'X-Admin-Token': adminToken },
+    cache: 'no-store',
   })
 }

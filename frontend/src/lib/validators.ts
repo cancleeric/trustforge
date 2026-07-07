@@ -7,6 +7,12 @@
 // 完整鏡像驗證（那是 `types.ts` 的靜態型別職責）。
 
 import type {
+  AdminAuditData,
+  AdminAuditRecord,
+  AdminBedrockView,
+  AdminCapView,
+  AdminConfigData,
+  AdminLiveTokenView,
   AnalyzeData,
   BasisItem,
   CacheBackendStatus,
@@ -443,5 +449,87 @@ export function isHistoryData(value: unknown): value is HistoryData {
     typeof value.days === 'number' &&
     Array.isArray(value.history) &&
     value.history.every(isTrustHistoryEntry)
+  )
+}
+
+// ── /api/admin/* ─────────────────────────────────────────────────────────
+// 對應 `web.py::_admin_config_view()`；管理頁每個欄位都會直接渲染
+// effective/source/updated_*，缺欄或型別錯就整包 parse_error（不讓半成品
+// 設定狀態進表單——管理面顯示錯值比白屏更危險：可能誤導管理員做出錯誤
+// 的開關/額度決策）。`source` 只驗字串不窮舉 enum（後端可能演進出新層
+// 級字面值，如 env kill-switch/config_read_error，顯示層原樣渲染即可）。
+
+function isAdminCapView(value: unknown): value is AdminCapView {
+  return (
+    isPlainObject(value) &&
+    (value.config === null || typeof value.config === 'number') &&
+    (value.env === null || typeof value.env === 'string') &&
+    typeof value.default === 'number' &&
+    typeof value.effective === 'number' &&
+    typeof value.source === 'string'
+  )
+}
+
+function isAdminBedrockView(value: unknown): value is AdminBedrockView {
+  return (
+    isPlainObject(value) &&
+    (value.config === null || typeof value.config === 'boolean') &&
+    typeof value.bedrock_model_id_set === 'boolean' &&
+    typeof value.effective === 'boolean' &&
+    typeof value.source === 'string'
+  )
+}
+
+function isAdminLiveTokenView(value: unknown): value is AdminLiveTokenView {
+  return (
+    isPlainObject(value) &&
+    typeof value.config_configured === 'boolean' &&
+    (value.config_last4 === null || typeof value.config_last4 === 'string') &&
+    typeof value.env_configured === 'boolean' &&
+    typeof value.effective_configured === 'boolean' &&
+    typeof value.source === 'string'
+  )
+}
+
+export function isAdminConfigData(value: unknown): value is AdminConfigData {
+  return (
+    isPlainObject(value) &&
+    isAdminCapView(value.daily_cap_usd) &&
+    isAdminBedrockView(value.bedrock_enabled) &&
+    isAdminLiveTokenView(value.live_token) &&
+    (value.version === null || typeof value.version === 'number') &&
+    (value.updated_at === null || typeof value.updated_at === 'string') &&
+    (value.updated_by === null || typeof value.updated_by === 'string') &&
+    typeof value.exists === 'boolean' &&
+    typeof value.version_corrupt === 'boolean' &&
+    // PUT 200 才帶 warnings；GET 合法缺席。存在但形狀畸形（非字串陣列）
+    // 要擋——頁面會逐條渲染 warnings，不能讓 `.map()` 在 render 時炸掉。
+    (value.warnings === undefined || isStringArray(value.warnings))
+  )
+}
+
+function isAdminAuditRecord(value: unknown): value is AdminAuditRecord {
+  if (!isPlainObject(value)) return false
+  if (value.ts !== null && typeof value.ts !== 'string') return false
+  if (value.actor !== null && typeof value.actor !== 'string') return false
+  if (!Array.isArray(value.changes)) return false
+  for (const change of value.changes) {
+    // `old`/`new` 刻意不限型別（cap 是數字、開關是 bool、token 是遮罩
+    // 字串、清除是 null——顯示層用 formatAuditValue 統一轉字串），但
+    // entry 本身必須是帶 `field` 字串的物件，否則表格渲染直接讀爆。
+    if (!isPlainObject(change) || typeof change.field !== 'string') return false
+  }
+  if (value.version_from !== null && typeof value.version_from !== 'number') return false
+  if (value.version_to !== null && typeof value.version_to !== 'number') return false
+  if (value.user_agent !== null && typeof value.user_agent !== 'string') return false
+  return true
+}
+
+export function isAdminAuditData(value: unknown): value is AdminAuditData {
+  return (
+    isPlainObject(value) &&
+    typeof value.limit === 'number' &&
+    Array.isArray(value.records) &&
+    value.records.every(isAdminAuditRecord)
   )
 }

@@ -41,16 +41,23 @@ function cancelledFailure(): ApiFailure {
   return { ok: false, error: { code: 'cancelled', message: '請求已取消' } }
 }
 
-/** `ok:false` 分支的信封本身也要驗證，不能盲信後端一定附 `error.code`/`message`。 */
-function isValidFailureEnvelope(
-  value: Record<string, unknown>,
-): value is { ok: false; error: { code: string; message: string; retry_href?: string } } {
+/** `ok:false` 分支的信封本身也要驗證，不能盲信後端一定附 `error.code`/`message`。
+ * `current_version` 是 `/api/admin/config` PUT 409（`version_conflict`）專用
+ * 附帶欄位（後端重讀失敗時為 null）——存在但型別畸形一樣整包轉
+ * parse_error，不讓管理頁拿到假 version 去做下一次 CAS。 */
+function isValidFailureEnvelope(value: Record<string, unknown>): value is {
+  ok: false
+  error: { code: string; message: string; retry_href?: string; current_version?: number | null }
+} {
   const err = value.error
   return (
     isPlainObject(err) &&
     typeof err.code === 'string' &&
     typeof err.message === 'string' &&
-    (err.retry_href === undefined || typeof err.retry_href === 'string')
+    (err.retry_href === undefined || typeof err.retry_href === 'string') &&
+    (err.current_version === undefined ||
+      err.current_version === null ||
+      typeof err.current_version === 'number')
   )
 }
 
@@ -64,6 +71,21 @@ export interface ApiFetchOptions {
    * （見 `timeoutFailure`）。各端點依實際回應時間給不同預設值，見
    * `DEFAULT_TIMEOUT_MS` / `ANALYZE_TIMEOUT_MS` 與 `endpoints.ts`。 */
   timeoutMs?: number
+  /** `/api/admin/config` 寫入用；預設 GET。 */
+  method?: 'GET' | 'PUT'
+  /** 額外 request headers（如 `X-Admin-Token`）——認證 token 一律走
+   * header、絕不進 URL/query（query 會落 access log/瀏覽歷史，見後端
+   * `web.py` admin 區塊「token 絕不進 URL」原則，前端同一條紀律）。 */
+  headers?: Record<string, string>
+  /** 有值時 `JSON.stringify` 後作為 request body 送出，並自動帶
+   * `Content-Type: application/json`（後端 PUT 415/411 檢查所需）。 */
+  jsonBody?: unknown
+  /** qa L4：admin 端點（設定快照含 cap/last4/version 等機敏或易失真
+   * 資訊）要求 `'no-store'`，不進瀏覽器 heuristic cache/bfcache——後端
+   * no-cache response header 另歸 PR-5，這裡是前端側雙邊防禦，任一邊
+   * 生效都足以避免拿到「看起來成功但其實是快取的舊管理設定」。一般
+   * `/api/*` 讀取端點不受影響（預設沿用 fetch 標準快取行為）。 */
+  cache?: RequestCache
 }
 
 export async function apiFetch<T>(
@@ -100,10 +122,25 @@ export async function apiFetch<T>(
     controller.abort()
   }, timeoutMs)
 
+  const requestHeaders: Record<string, string> = {
+    Accept: 'application/json',
+    ...(options.headers ?? {}),
+  }
+  const init: RequestInit = {
+    method: options.method ?? 'GET',
+    headers: requestHeaders,
+    signal: controller.signal,
+    ...(options.cache ? { cache: options.cache } : {}),
+  }
+  if (options.jsonBody !== undefined) {
+    requestHeaders['Content-Type'] = 'application/json'
+    init.body = JSON.stringify(options.jsonBody)
+  }
+
   let res: Response | undefined
   let body: unknown
   try {
-    res = await fetch(url, { headers: { Accept: 'application/json' }, signal: controller.signal })
+    res = await fetch(url, init)
     body = await res.json()
   } catch (err) {
     if (timedOut) return timeoutFailure(timeoutMs)
