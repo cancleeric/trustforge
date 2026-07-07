@@ -15,23 +15,28 @@ REGION="${REGION:-ap-southeast-2}"
 NAME=trustforge
 # ⚠️ credit-safety fail-safe：公開 EC2 預設「離線」(空 model id → 不呼叫 Bedrock、不燒 credit)。
 # 用 `${VAR-}`（非 `:-`）：只有「未設」才空。此腳本目前僅供**離線公開部署**。
-# 註：真正開受控 live 需同時設 BEDROCK_MODEL_ID + 傳 TRUSTFORGE_LIVE_TOKEN 進 systemd。
+# 註：真正開受控 live 需同時設 BEDROCK_MODEL_ID + 讓 app 拿得到 TRUSTFORGE_LIVE_TOKEN
+# （PR-B 起本腳本不再傳遞 token 值，見下方 TRUSTFORGE_TOKEN_SSM_PREFIX 說明）。
 MODEL="${BEDROCK_MODEL_ID-}"
-# 管理控制台 PR-5（部署銜接）：admin/live token + 日花費 cap 的 env 傳遞層。
-# ⛔ 憑證邊界鐵則：本腳本**不含任何 token 實際值**——值一律由部署當下的
-# shell env 傳入（老闆提供），未設（`${VAR-}` 空）＝該 Environment 行完全
-# 不寫進 systemd unit（不是寫空值）→ web.py 端 admin/live 面 fail-closed
-# 全關（見 src/trustforge/web.py `TRUSTFORGE_ADMIN_TOKEN` 未設即 404 語意）。
-#   - TRUSTFORGE_ADMIN_TOKEN：管理面 opt-in（未設＝管理面禁用）
-#   - TRUSTFORGE_LIVE_TOKEN：live 閘 opt-in（未設＝live 關）
+# 管理控制台 PR-5（部署銜接）：日花費 cap + token SSM 前綴旗標的 env 傳遞層。
+# ⛔ 憑證邊界鐵則：本腳本**不含任何 token 實際值**——PR-B 起 admin/live
+# token 值不再由 deploy 搬運，改由 app（web.py）啟動期自行從 SSM Parameter
+# Store 讀取。deploy 只傳一個非機敏的 opt-in 旗標 TRUSTFORGE_TOKEN_SSM_PREFIX
+# （SSM 參數名前綴，純路徑字串、非機敏），告訴 app 去 prefix 底下取
+# admin-token / live-token。未設（`${VAR-}` 空）＝該 Environment 行完全
+# 不寫進 systemd unit（不是寫空值）→ app 端看不到前綴 → 落回 env fallback
+# （TRUSTFORGE_ADMIN_TOKEN/TRUSTFORGE_LIVE_TOKEN，向後相容舊部署）。
+#   - TRUSTFORGE_TOKEN_SSM_PREFIX：token SSM 路徑前綴 opt-in（未設＝app 走
+#     env fallback；app 啟動期以此前綴 get-parameter 取 token 值，見
+#     src/trustforge/ssm_params.py）
 #   - TRUSTFORGE_BEDROCK_DAILY_USD_CAP：config store 未設時的 env fallback
 #     層（見 src/trustforge/budget_guard.py 三層 cap 順序），部署可帶如 1
-ADMIN_TOKEN="${TRUSTFORGE_ADMIN_TOKEN-}"
-LIVE_TOKEN="${TRUSTFORGE_LIVE_TOKEN-}"
+TOKEN_SSM_PREFIX="${TRUSTFORGE_TOKEN_SSM_PREFIX-}"
 DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
 # 注入防護（值會被嵌進 SSM commands JSON 與遠端 root shell 的 sed 取代式）：
-# token 限 URL-safe 字元集，cap 限十進位數字——含引號/反斜線/管線/空白等
-# 一律在本機就 fail-fast 中止，杜絕「值本身」對遠端腳本做 shell/JSON 注入。
+# prefix 限 SSM 參數名字元集（含 `/` 路徑分隔），cap 限十進位數字——含引號/
+# 反斜線/管線/空白等一律在本機就 fail-fast 中止，杜絕「值本身」對遠端腳本
+# 做 shell/JSON 注入。
 # harper CISO L-1：原本用 `printf '%s' "$_val" | grep -Eq '^...$'` 有換行
 # 繞過——grep 逐行比對，`-q` 只要「任一行」整行符合字元集就回傳成功，值若
 # 含換行（例如 `good\n;rm -rf /`），第一行 `good` 單獨看合法，grep -q 就會
@@ -39,71 +44,24 @@ DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
 # 這裡的 `^`/`$` 錨定的是整個字串（沒有 grep 那種逐行模式），字元集本身又
 # 不含換行字元，只要值裡有任何一個換行，`+` 就無法從頭到尾連續匹配，整個
 # 比對必然失敗——沒有「切成多行、挑一行過關」這條路。
-for _pair in "TRUSTFORGE_ADMIN_TOKEN=$ADMIN_TOKEN" "TRUSTFORGE_LIVE_TOKEN=$LIVE_TOKEN"; do
-  _val="${_pair#*=}"
-  if [ -n "$_val" ] && ! [[ "$_val" =~ ^[A-Za-z0-9._~-]+$ ]]; then
-    echo "[ec2] ❌ ${_pair%%=*} 含不允許字元（僅接受 [A-Za-z0-9._~-]，避免注入遠端 systemd/sed/JSON），中止" >&2
-    exit 1
-  fi
-done
+if [ -n "$TOKEN_SSM_PREFIX" ] && ! [[ "$TOKEN_SSM_PREFIX" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
+  echo "[ec2] ❌ TRUSTFORGE_TOKEN_SSM_PREFIX 含不允許字元（僅接受 [A-Za-z0-9._/~-]，避免注入遠端 systemd/sed/JSON），中止" >&2
+  exit 1
+fi
 if [ -n "$DAILY_CAP" ] && ! [[ "$DAILY_CAP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   echo "[ec2] ❌ TRUSTFORGE_BEDROCK_DAILY_USD_CAP 必須是十進位數字（如 1 或 0.5），中止" >&2
   exit 1
 fi
-# ⚠️ 首次建置路徑的 token 是經 user-data 寫入（EC2 user-data 可被
-# ec2:DescribeInstanceAttribute 讀到、也殘留在 IMDS）——帶 token 的部署必須
-# 走 update-in-place（SSM sed 直改 unit 檔，不經 user-data）；首次建置請先
-# 離線（不帶 token）建機，再跑一次本腳本帶 token 走 update-in-place。硬性
-# 擋點在下面（先查一次既有實例判斷是否為首次建置，查無既有實例且帶
-# token、未設 `TRUSTFORGE_ALLOW_USERDATA_TOKEN=1` 就直接中止，見 harper
-# CISO M-2 那段）。
-if [ -n "$ADMIN_TOKEN$LIVE_TOKEN" ]; then
-  echo "[ec2] ⚠️ 偵測到 token env：若判定走首次建置，且未設 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1，腳本會在建立/修改任何資源前中止（token 不可經 user-data 殘留）" >&2
-fi
-
-# ---- #119 SecureString 搬運通道：參數命名（harper CISO M-1）----------------
-# admin/live 兩個 token 值不再進 SSM commands / user-data / aws argv，改走
-# SSM Parameter Store SecureString 一次性搬運：本機 put（--cli-input-json
-# tmpfile，防 argv 洩漏）→ 遠端只拿「參數名」get-parameter --with-decryption
-# 取值 → 部署結束（成功或失敗）trap 一律 delete，不留殘留。
-# RUN_ID＝UTC 秒級時戳+PID：同機快速重跑/並發不同名；put 不帶 --overwrite，
-# 萬一撞名 put 直接失敗 fail-loud，不會靜默覆蓋另一個部署行程的 token
-# （檔頭已聲明假設單人循序部署，此為縱深防護，不是支援並行）。
-# cap（TRUSTFORGE_BEDROCK_DAILY_USD_CAP）非機敏（純數字、已嚴格驗證）維持
-# 明文傳遞不動。
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-SSM_PARAM_PREFIX="/trustforge/deploy"
-P_ADMIN="${SSM_PARAM_PREFIX}/${RUN_ID}/admin-token"
-P_LIVE="${SSM_PARAM_PREFIX}/${RUN_ID}/live-token"
 
 # 首次建置 user-data 的 systemd Environment 追加行：有值才產生該行（行尾含
 # 換行，heredoc 內用 `${EXTRA_UNIT_ENV}ExecStart=...` 緊貼嵌入、未設不留
-# 空行也不留空值行——fail-closed 的「不寫該行」語意）。#119 起這裡只剩
-# 非機敏的 cap；admin/live token 改由 user-data 內 get-parameter 取值插入
-# （見下面 EXTRA_UNIT_FETCH），user-data 本體不再含任何 token 值。
+# 空行也不留空值行——fail-closed 的「不寫該行」語意）。cap 與 token SSM 前綴
+# 均為非機敏值，可直接寫入 user-data；admin/live token 值不再經 deploy 傳遞
+# （PR-B 起改由 app 啟動期自行從 SSM 讀取，見上）。
 EXTRA_UNIT_ENV=""
 [ -n "$DAILY_CAP" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=${DAILY_CAP}
 "
-
-# #119 首建 override（TRUSTFORGE_ALLOW_USERDATA_TOKEN=1，M-2 逃生口）路徑的
-# user-data 片段：開機時以 instance role 憑證 get-parameter --with-decryption
-# 取回 token、case 二次字元集驗證（防存活視窗內被換值）後插入 unit 檔——
-# 連逃生口路徑都只嵌參數名，user-data 不再落 token 值（暴露面 5 消滅）。
-# 片段前後 set +x / set -x：user-data 整體跑在 set -x 下，不關 trace 的話
-# sed argv 展開後的 token 值會被 xtrace 寫進 /var/log/cloud-init-output.log
-# 落盤。取值失敗或字元集非法 → exit 1 fail-loud（服務不會 enable，部署端
-# verify_web_healthz gate 會擋下並讓整體部署失敗 → trap 刪參數）。
-# 時序：user-data 於首次開機執行，參數由本機 trap 在腳本結束才刪，而腳本會
-# 等 healthz + fetch-scheduler 兩個 gate 過才結束 → 取參數時參數必然還在。
-userdata_secure_env_cmd() {
-  local key="$1" val="$2" pname="$3"
-  [ -n "$val" ] || return 0
-  printf 'set +x\nTF_SSM_VAL=$(aws ssm get-parameter --region %s --name %s --with-decryption --query Parameter.Value --output text)\ncase "$TF_SSM_VAL" in ""|*[!A-Za-z0-9._~-]*) echo "[ec2] %s 的 SecureString 取回值字元集非法，中止" >&2; exit 1;; esac\nsed -i "/^Environment=PYTHONPATH=/a Environment=%s=${TF_SSM_VAL}" /etc/systemd/system/trustforge.service\nunset TF_SSM_VAL\nset -x' "$REGION" "$pname" "$key" "$key"
-}
-EXTRA_UNIT_FETCH=""
-[ -n "$ADMIN_TOKEN" ] && EXTRA_UNIT_FETCH="${EXTRA_UNIT_FETCH}$(userdata_secure_env_cmd TRUSTFORGE_ADMIN_TOKEN "$ADMIN_TOKEN" "$P_ADMIN")
-"
-[ -n "$LIVE_TOKEN" ] && EXTRA_UNIT_FETCH="${EXTRA_UNIT_FETCH}$(userdata_secure_env_cmd TRUSTFORGE_LIVE_TOKEN "$LIVE_TOKEN" "$P_LIVE")
+[ -n "$TOKEN_SSM_PREFIX" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX}
 "
 
 # update-in-place 用：對單一 Environment 行產生「ensure（有值：sed 取代／
@@ -119,37 +77,27 @@ ssm_env_cmd() {
   fi
   printf '"'
 }
-# #119：token 版 ensure——與 ssm_env_cmd 同一套 grep→sed 冪等慣例，但 sed 的
-# 取代值不再是「本機拼進 JSON 的字面值」，而是遠端 shell 變數 ${TF_SSM_VAL}
-# （遠端 get-parameter --with-decryption 取回）。commands JSON 只含參數名，
-# token 值不進 SSM command history / CloudTrail / orchestration 落盤（harper
-# M-1 暴露面 1/2/3；GetParameter 的 CloudTrail 事件只記參數名不記值）。取回
-# 後 case 純 builtin 二次字元集驗證（防禦縱深：防有 PutParameter 權限的其他
-# 主體在分鐘級存活視窗內換值做注入；空值也擋＝取值失敗 fail-loud）。未設
-# 分支與 ssm_env_cmd 完全相同（整行刪除）——fail-closed 語意逐層保留：
-# 未設 token → 不 put 參數 → 遠端不 get → 刪殘留行，管理面/live 全關。
-ssm_secure_env_cmd() {
-  local key="$1" val="$2" pname="$3"
-  if [ -n "$val" ]; then
-    printf ',"TF_SSM_VAL=$(aws ssm get-parameter --region %s --name %s --with-decryption --query Parameter.Value --output text)","case \\"$TF_SSM_VAL\\" in \\"\\"|*[!A-Za-z0-9._~-]*) echo \\"[ec2] %s 的 SecureString 取回值字元集非法，中止\\" >&2; exit 1;; esac","if grep -q \\"^Environment=%s=\\" /etc/systemd/system/trustforge.service; then sed -i \\"s|^Environment=%s=.*|Environment=%s=${TF_SSM_VAL}|\\" /etc/systemd/system/trustforge.service; else sed -i \\"/^Environment=PYTHONPATH=/a Environment=%s=${TF_SSM_VAL}\\" /etc/systemd/system/trustforge.service; fi"' \
-      "$REGION" "$pname" "$key" "$key" "$key" "$key" "$key"
-  else
-    printf ',"sed -i \\"/^Environment=%s=/d\\" /etc/systemd/system/trustforge.service"' "$key"
-  fi
-}
-ADMIN_ENV_CMDS="$(ssm_secure_env_cmd TRUSTFORGE_ADMIN_TOKEN "$ADMIN_TOKEN" "$P_ADMIN")$(ssm_secure_env_cmd TRUSTFORGE_LIVE_TOKEN "$LIVE_TOKEN" "$P_LIVE")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")"
 
-# harper CISO M-2：先查一次既有實例，才能判斷「這次到底會不會走首次建置」
-# ——這是全腳本第一個 aws 呼叫（在此之前只做過本機 regex 驗證，零 aws 呼叫），
-# 純唯讀（describe-instances），跟下面第 3) 節「既有實例？」分流判斷共用
-# 同一份結果（不重複查兩次）。EIP 已附著在 tag Name=trustforge-demo 的既有
-# 實例上；只要不 terminate 該實例，EIP 就會一直留在上面（stop/start 也保留
-# 附著，不用重綁）→ 查到就重用，不建新的。「查詢失敗（憑證/throttle/網路）」
-# 與「真的無既有實例」必須分開處理：查詢失敗一律中止，絕不能落到下面的建置
-# 流程，否則會建出重複實例（defeat 防 sprawl）。注意：本腳本自己建議「停
-# 實例省 credit」，停止狀態很常見，所以要查「所有非 terminated」的相符實例
-# （不能只查 running，否則 stopped 的 production 會被誤判成無實例 → 建
-# 重複 + 拋棄 EIP）。
+# update-in-place SSM commands：runtime token PR-B 遷移邏輯 + cap/prefix
+# ensure/delete。遷移：無論本次有無帶旗標，先無條件刪除既有實例 unit 檔裡
+# #119 時代殘留的 TRUSTFORGE_ADMIN_TOKEN / TRUSTFORGE_LIVE_TOKEN 整行——這是
+# 本次 PR 的安全價值所在（token 離開 unit 檔的落地點，改由 app 啟動期自行從
+# SSM 讀取）。這兩段刪除透過呼叫 ssm_env_cmd 傳空字串觸發 else 分支，輸出格式
+# 與既有 delete 慣例完全一致（同一套 JSON commands 陣列拼接）。接著 cap 與
+# token SSM 前綴走標準 ensure/delete（有值 sed 取代／插入，未設整行刪除）。
+UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")"
+
+# 先查一次既有實例，才能判斷「這次到底會不會走首次建置」——這是全腳本第一個
+# aws 呼叫（在此之前只做過本機 regex 驗證，零 aws 呼叫），純唯讀
+# （describe-instances），跟下面第 3) 節「既有實例？」分流判斷共用同一份
+# 結果（不重複查兩次）。EIP 已附著在 tag Name=trustforge-demo 的既有實例上；
+# 只要不 terminate 該實例，EIP 就會一直留在上面（stop/start 也保留附著，不用
+# 重綁）→ 查到就重用，不建新的。「查詢失敗（憑證/throttle/網路）」與「真的
+# 無既有實例」必須分開處理：查詢失敗一律中止，絕不能落到下面的建置流程，
+# 否則會建出重複實例（defeat 防 sprawl）。注意：本腳本自己建議「停實例省
+# credit」，停止狀態很常見，所以要查「所有非 terminated」的相符實例（不能只
+# 查 running，否則 stopped 的 production 會被誤判成無實例 → 建重複 + 拋棄
+# EIP）。
 if ! MATCHES=$(aws ec2 describe-instances --region "$REGION" \
   --filters Name=tag:Name,Values=trustforge-demo \
     Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped \
@@ -158,121 +106,6 @@ if ! MATCHES=$(aws ec2 describe-instances --region "$REGION" \
   exit 1
 fi
 MATCH_COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
-
-# harper CISO M-2（首建帶 token 硬擋，非僅印警告）：查無既有實例（等同下面
-# 第 3) 節之後會判定走「首次建置」）且帶了 admin/live token，token 會經
-# user-data 永久殘留（EC2 user-data 可被 ec2:DescribeInstanceAttribute 讀
-# 到、也殘留在 IMDS）——直接中止，不再只印警告放行。此時腳本只打過上面
-# 這一個唯讀 describe-instances 查詢，還沒碰過 IAM/S3/security group/
-# run-instances 等任何會建立或修改資源的 AWS API（也還沒打
-# `aws sts get-caller-identity`）。若既有實例數 >1（下面第 3) 節會判定為
-# 異常並中止）或恰好 1（update-in-place，token 走 SSM sed 直改 unit 檔、
-# 不經 user-data，無殘留風險），都不受此擋限制。逃生口：明確知情、願意
-# 承擔 user-data 殘留風險，設 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1 覆寫。
-if [ "$MATCH_COUNT" -eq 0 ] && [ -n "$ADMIN_TOKEN$LIVE_TOKEN" ] && [ "${TRUSTFORGE_ALLOW_USERDATA_TOKEN:-}" != "1" ]; then
-  echo "[ec2] ❌ 查無既有實例（將走首次建置）且帶了 TRUSTFORGE_ADMIN_TOKEN/TRUSTFORGE_LIVE_TOKEN：token 會經 user-data 永久殘留，中止（尚未呼叫任何會建立/修改資源的 AWS API）" >&2
-  echo "[ec2]    請先離線建機（不帶 token 跑一次本腳本），確認有既有實例後，再帶 token 重跑本腳本走 update-in-place（SSM 直改 unit 檔，不經 user-data）" >&2
-  echo "[ec2]    明確知情、願意承擔 user-data 殘留風險 → 設 TRUSTFORGE_ALLOW_USERDATA_TOKEN=1 覆寫此擋" >&2
-  exit 1
-fi
-
-# ---- #119 失敗清理鐵則：trap + sweep 雙保險 ---------------------------------
-# 鐵則：部署任一步失敗，本次 put 的 SecureString 參數必須被刪，不留殘留。
-# trap 在第一次 put-parameter 之前註冊（put 成功後才註冊會留下「put 成功、
-# 註冊前失敗」的漏清窗口）；EXIT 涵蓋 set -e 中止與顯式 exit，另掛 INT/TERM
-# 涵蓋 Ctrl-C / kill。cleanup 對不存在的參數冪等（|| true 容忍
-# ParameterNotFound），且不改寫原 exit code（trap 內不呼叫 exit 0）。
-# kill -9 / 斷電級 trap 救不到的殘留，由每次部署開頭的 sweep 自癒（下面
-# sweep_residual_ssm_params：殘留最多活到下一次部署）。
-CREATED_SSM_PARAMS=""
-SECURE_PUT_TMP=""
-
-# harper C-1：delete 失敗絕不可靜默——deployer 缺 DeleteParameter 權限或被
-# throttle 時，SecureString 會無限期殘留且零可見性，等於白做 SecureString。
-# ParameterNotFound（本來就不存在，冪等的一部分）才靜默；其他任何錯誤一律印
-# 明確警告 + 參數名 + 可直接複製的人工刪除指令，方便 on-call 立即補救。
-_delete_ssm_param_verbose() {
-  local _p="$1" _out _rc
-  if _out="$(aws ssm delete-parameter --region "$REGION" --name "$_p" 2>&1)"; then
-    _rc=0
-  else
-    _rc=$?
-  fi
-  if [ "$_rc" -ne 0 ]; then
-    case "$_out" in
-      *ParameterNotFound*) : ;;
-      *)
-        echo "[ec2] ⚠️⚠️ SecureString 參數 ${_p} 刪除失敗，可能殘留！請立即人工確認並刪除：aws ssm delete-parameter --region ${REGION} --name ${_p}" >&2
-        echo "[ec2]    刪除失敗原因：${_out}" >&2
-        ;;
-    esac
-  fi
-}
-
-cleanup_ssm_params() {
-  local _p
-  for _p in $CREATED_SSM_PARAMS; do
-    _delete_ssm_param_verbose "$_p"
-  done
-  CREATED_SSM_PARAMS=""
-  if [ -n "$SECURE_PUT_TMP" ]; then
-    rm -f "$SECURE_PUT_TMP" || true
-    SECURE_PUT_TMP=""
-  fi
-}
-trap cleanup_ssm_params EXIT
-trap 'trap - EXIT; cleanup_ssm_params; exit 130' INT
-trap 'trap - EXIT; cleanup_ssm_params; exit 143' TERM
-
-# 本機 put 側 process list 防護（harper M-1 暴露面 4）：token 值不進 aws
-# argv——printf 是 bash builtin（無 argv 暴露），把 JSON 寫進 0600 tmpfile
-# （umask 077 + mktemp），用 --cli-input-json file:// 傳給 aws；tmpfile 用完
-# 即刪，失敗路徑由 trap 補刪。JSON 拼接安全：值已通過 [A-Za-z0-9._~-] 驗證，
-# 不含引號/反斜線。不帶 --overwrite：撞名 → put 失敗 → set -e 中止（fail-loud）。
-# vp-eng：先登記到 CREATED_SSM_PARAMS 再 put（不是 put 成功回傳後才登記）。
-# 若 put 已在伺服器端建好參數、但回應途中網路斷線導致 aws 回非零，舊寫法會
-# 「參數存在卻沒登記」→ trap 漏刪 → 殘留只能等下次 sweep；trap 對不存在的
-# 參數本來就冪等（|| true / ParameterNotFound 靜默），先登記零成本、只贏不輸。
-put_secure_param() {
-  local pname="$1" val="$2"
-  CREATED_SSM_PARAMS="$CREATED_SSM_PARAMS $pname"
-  SECURE_PUT_TMP="$(umask 077 && mktemp)"
-  printf '{"Name":"%s","Value":"%s","Type":"SecureString"}' "$pname" "$val" > "$SECURE_PUT_TMP"
-  aws ssm put-parameter --region "$REGION" --cli-input-json "file://$SECURE_PUT_TMP" >/dev/null
-  rm -f "$SECURE_PUT_TMP"
-  SECURE_PUT_TMP=""
-}
-
-# backstop sweep：上次部署若被 kill -9/斷電（trap 沒機會跑），殘留參數最多
-# 活到這裡——單人循序部署前提下，此刻 /trustforge/deploy/ 前綴底下不該有
-# 任何東西，有就是上次異常殘留，印警告後刪除自癒。sweep 查詢失敗（權限/
-# 網路）只印警告不中止：唯讀性質的自癒步驟，主要清理路徑已由 trap 覆蓋，
-# 不該擋部署主流程。
-sweep_residual_ssm_params() {
-  local _names _p
-  if ! _names=$(aws ssm get-parameters-by-path --region "$REGION" \
-      --path "${SSM_PARAM_PREFIX}/" --recursive \
-      --query 'Parameters[].Name' --output text 2>/dev/null); then
-    echo "[ec2] ⚠️ 殘留 SecureString 參數 sweep 查詢失敗（不中止；本次部署的參數仍由 trap 清理）" >&2
-    return 0
-  fi
-  for _p in $_names; do
-    [ "$_p" = "None" ] && continue
-    echo "[ec2] ⚠️ 發現上次部署異常殘留的 SSM 參數 ${_p}（kill -9/斷電級殘留），刪除自癒" >&2
-    _delete_ssm_param_verbose "$_p"
-  done
-}
-sweep_residual_ssm_params
-
-# 有值才 put（fail-closed 第一層：未設 token → 不 put → 遠端不 get → 刪行）
-if [ -n "$ADMIN_TOKEN" ]; then
-  echo "[ec2] TRUSTFORGE_ADMIN_TOKEN → SecureString ${P_ADMIN}（一次性搬運，部署結束即刪）"
-  put_secure_param "$P_ADMIN" "$ADMIN_TOKEN"
-fi
-if [ -n "$LIVE_TOKEN" ]; then
-  echo "[ec2] TRUSTFORGE_LIVE_TOKEN → SecureString ${P_LIVE}（一次性搬運，部署結束即刪）"
-  put_secure_param "$P_LIVE" "$LIVE_TOKEN"
-fi
 
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="trustforge-deploy-${ACCT}"
@@ -561,9 +394,9 @@ echo "[ec2] 已上傳 s3://$BUCKET/trustforge_app.zip"
 # 3) 既有實例？→ update-in-place（重用現有 EC2，不 run-instances）-----------
 # EIP 已附著在 tag Name=trustforge-demo 的既有實例上；只要不 terminate 該實例，
 # EIP 就會一直留在上面（stop/start 也保留附著，不用重綁）→ 查到就重用，不建新的。
-# harper CISO M-2：實際查詢（describe-instances）與 $MATCHES/$MATCH_COUNT 的
-# 計算已提前到檔頭（見「首建帶 token 硬擋」那段），這裡不再重查一次——只
-# 消費那裡算好的變數，接手做分流判斷。
+# 實際查詢（describe-instances）與 $MATCHES/$MATCH_COUNT 的計算已提前到檔頭
+# （見上方 UNIT_ENV_RECONCILE_CMDS 之後那段），這裡不再重查一次——只消費那裡
+# 算好的變數，接手做分流判斷。
 if [ "$MATCH_COUNT" -gt 1 ]; then
   echo "[ec2] ❌ 找到 $MATCH_COUNT 個相符實例（tag Name=trustforge-demo，非 terminated），無法安全判斷，中止" >&2
   printf '%s\n' "$MATCHES" >&2
@@ -616,16 +449,17 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   # 後面插入，兩邊都是同一組固定值，冪等（重跑不會重複插入）。同時（重）寫入
   # fetch-scheduler.service/.timer 並 enable，確保排程 fetcher 在既有實例上
   # 也補上，不會因為是「重用舊機器」就漏掉。
-  # 管理控制台 PR-5：$ADMIN_ENV_CMDS（見檔頭 ssm_env_cmd）同步 reconcile
-  # TRUSTFORGE_ADMIN_TOKEN / TRUSTFORGE_LIVE_TOKEN /
-  # TRUSTFORGE_BEDROCK_DAILY_USD_CAP 三行——有值＝取代或插入，未設＝整行
-  # 刪除（fail-closed：不是留舊值也不是寫空值），跟 BEDROCK_MODEL_ID 的
-  # 「每次部署都重寫成本次的值」同一個精神。緊接著 `chmod 600` 該 unit 檔
-  # （harper CISO L-4）：預設 644 world-readable，若帶了 token 就等於本機
-  # 任何帳號都能用 cat 讀到，每次部署都無條件收緊一次（冪等，不管這次有沒
-  # 有帶 token）。
+  # 管理控制台 PR-5：$UNIT_ENV_RECONCILE_CMDS（見檔頭 ssm_env_cmd）同步
+  # reconcile 兩件事——(1) 遷移：無條件刪除 unit 檔裡 #119 時代殘留的
+  # TRUSTFORGE_ADMIN_TOKEN / TRUSTFORGE_LIVE_TOKEN 整行（本 PR 的安全價值：
+  # token 離開 unit 檔落地點，改由 app 啟動期自行從 SSM 讀取）；(2)
+  # TRUSTFORGE_BEDROCK_DAILY_USD_CAP / TRUSTFORGE_TOKEN_SSM_PREFIX 兩行——
+  # 有值＝取代或插入，未設＝整行刪除（fail-closed：不是留舊值也不是寫空
+  # 值），跟 BEDROCK_MODEL_ID 的「每次部署都重寫成本次的值」同一個精神。
+  # 緊接著 `chmod 600` 該 unit 檔（harper CISO L-4）：預設 644
+  # world-readable，每次部署都無條件收緊一次（冪等）。
   CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi"'"$ADMIN_ENV_CMDS"',"chmod 600 /etc/systemd/system/trustforge.service","cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2","[Unit]","Description=TrustForge connector cache fetch scheduler","[Service]","Type=oneshot","WorkingDirectory=/opt/trustforge","Environment=AWS_REGION='"$REGION"'","Environment=PYTHONPATH=/opt/trustforge","Environment=CACHE_BACKEND=dynamodb","Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache","Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger","Environment=COST_LEDGER_BACKEND=dynamodb","ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py","UNIT2","cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3","[Unit]","Description=Run TrustForge fetch scheduler periodically","[Timer]","OnBootSec=1min","OnUnitActiveSec=15min","[Install]","WantedBy=timers.target","UNIT3","systemctl daemon-reload","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi"'"$UNIT_ENV_RECONCILE_CMDS"',"chmod 600 /etc/systemd/system/trustforge.service","cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2","[Unit]","Description=TrustForge connector cache fetch scheduler","[Service]","Type=oneshot","WorkingDirectory=/opt/trustforge","Environment=AWS_REGION='"$REGION"'","Environment=PYTHONPATH=/opt/trustforge","Environment=CACHE_BACKEND=dynamodb","Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache","Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger","Environment=COST_LEDGER_BACKEND=dynamodb","ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py","UNIT2","cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3","[Unit]","Description=Run TrustForge fetch scheduler periodically","[Timer]","OnBootSec=1min","OnUnitActiveSec=15min","[Install]","WantedBy=timers.target","UNIT3","systemctl daemon-reload","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
     echo "[ec2] ❌ SSM send-command 未取得 CommandId，中止" >&2
@@ -707,7 +541,7 @@ UNIT
 # 讀寫），不管這次有沒有帶 token 都一律收緊（防禦性、冪等，也涵蓋往後有人
 # 重跑帶 token 更新的情況）。
 chmod 600 /etc/systemd/system/trustforge.service
-${EXTRA_UNIT_FETCH}# 排程 fetcher（scripts/fetch_scheduler.py）：唯一打真連接器 API 的地方，寫入
+# 排程 fetcher（scripts/fetch_scheduler.py）：唯一打真連接器 API 的地方，寫入
 # DynamoDB cache 供上面 web 進程讀。單一 timer 每 15min 觸發一次「全部來源」，
 # 由腳本內建的新鮮度守門依各源 refresh 間隔自行決定該不該真的打（見
 # deploy/README.md「排程 fetcher」章節，方式 A）。
