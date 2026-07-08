@@ -1,6 +1,10 @@
 import { Link, NavLink } from 'react-router-dom'
 import ThemeToggle from './ThemeToggle'
 
+// build 時由 CD workflow 注入（VITE_GIT_SHA，見 .github/workflows/deploy-frontend.yml），
+// 讓「線上 bundle 對應哪個 commit」可在畫面上直接確認；本機開發未設時 fallback 'dev'。
+const GIT_SHA = (import.meta.env.VITE_GIT_SHA || 'dev').slice(0, 7)
+
 const NAV_ITEMS = [
   { to: '/analyze', label: '分析' },
   { to: '/compare', label: '比較' },
@@ -36,7 +40,10 @@ export default function Header() {
         ))}
       </nav>
 
-      <span className="hidden rounded-md border border-tf-muted/40 px-2 py-0.5 text-xs text-tf-muted sm:inline">v0.6.5</span>
+      <span
+        title="部署版本（git sha）"
+        className="hidden rounded-md border border-tf-muted/40 px-2 py-0.5 text-xs text-tf-muted sm:inline"
+      >{`v0.6.5 · ${GIT_SHA}`}</span>
       <ThemeToggle />
     </header>
   )

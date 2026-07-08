@@ -462,6 +462,142 @@ bash deploy/test_nginx_legacy_tls_conf.sh
 HSTS，codex 複審 HIGH：HSTS-safe rollback，見上方「nginx conf 四個變體」）；
 pre-cert 現況仍是 HTTP-only 版，行為不變。
 
+## 前端 CD（`.github/workflows/deploy-frontend.yml`，手動觸發）
+
+> 消掉「前端改動要在本機手動跑 `deploy_frontend_nginx.sh`、還會撞本機 AWS
+> session 過期」的痛點：改成 GitHub Actions 手動按鈕觸發部署，複用同一支
+> `deploy/deploy_frontend_nginx.sh`（不重寫部署邏輯），AWS 認證走 OIDC（不放
+> 長期 AWS access key 進 GitHub secret）。**觸發方式刻意是
+> `workflow_dispatch`（手動），不是 push develop 自動部署**——一個壞 merge
+> 就直接上生產風險太高，人為 gate 保留，只是把「按鈕」搬到 GitHub 上。
+
+### 一次性前置（🧑 老闆做，AI 不碰 IAM/OIDC）
+
+這是 IAM trust boundary，AI 只寫文件、不執行。老闆需要在 GitHub repo
+設定＋AWS Console／CLI 完成以下設定，完成後把 role ARN 存進 GitHub repo
+secret，workflow 才跑得動：
+
+0. **建 GitHub environment `production` + 設 required reviewers**（harper
+   複審 MEDIUM：把「觸發」跟「放行」分成兩個人——任何人按了
+   `Run workflow` 只是送出請求，job 實際執行前還要卡在 environment
+   protection rule，需要指定 reviewer 手動核准才會真的跑）：
+   1. GitHub repo → Settings → Environments → **New environment**，名稱
+      填 `production`（要跟 `deploy-frontend.yml` 裡 `environment:
+      production` 完全一致，大小寫敏感）。
+   2. 勾選 **Required reviewers**，加入至少 1 位審核人（建議跟觸發者不同
+      人；老闆自己審或指定信任的人選）。
+   3.（可選但建議）**Deployment branches**：限制只有 `main`／`develop`
+      能用這個 environment，避免任意分支也能跑到生產部署。
+   - 設定完成後，`workflow_dispatch` 觸發只是「排隊等待核准」，job 真正
+     assume AWS role 之前會先卡在這一關，即使觸發者的 GitHub 帳號被盜、
+     或誤點按鈕，沒有 reviewer 核准也不會動到生產。
+1. **建 GitHub OIDC identity provider**（若帳號內尚未建過，一次性）：
+   ```bash
+   aws iam create-open-id-connect-provider \
+     --url https://token.actions.githubusercontent.com \
+     --client-id-list sts.amazonaws.com \
+     --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+   ```
+2. **建部署專用 IAM role**，trust policy **鎖到 GitHub environment
+   `production`**（`sub` condition，**不是**鎖整個 repo 的任何分支/
+   workflow）：
+   ```bash
+   cat > trust-policy.json <<'JSON'
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Principal": { "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com" },
+       "Action": "sts:AssumeRoleWithWebIdentity",
+       "Condition": {
+         "StringEquals": {
+           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+           "token.actions.githubusercontent.com:sub": "repo:cancleeric/trustforge:environment:production"
+         }
+       }
+     }]
+   }
+   JSON
+   aws iam create-role --role-name trustforge-frontend-deploy \
+     --assume-role-policy-document file://trust-policy.json
+   ```
+   > ⚠️ **收斂說明（harper 複審 MEDIUM，這是本文件最重要的一條）**：
+   > 最初草稿的 `sub` 用 `StringLike: "repo:cancleeric/trustforge:*"`——這
+   > 個萬用字元會讓 repo 內**任何分支、任何 workflow、任何 PR**都能換到
+   > 這個能碰生產的 role，跟這個 workflow 有沒有走 `environment:
+   > production`、有沒有 required reviewers 核准完全無關（OIDC token 的
+   > `sub` 只跟觸發來源有關，不會自動繼承 environment gate）。改成
+   > `StringEquals` 精確鎖
+   > `repo:cancleeric/trustforge:environment:production`（注意這裡改用
+   > `StringEquals` 不是 `StringLike`，因為不再需要萬用字元）之後，AWS
+   > 端會強制要求這次 assume-role 的 GitHub token **一定來自已經通過
+   > environment `production` 核准關卡**的 job——就算有人在其他 workflow
+   > 或分支拿到 `id-token: write` 權限，`sub` 對不上也換不到這個 role。
+   > 這條 trust policy 收斂跟上面的「GitHub environment + required
+   > reviewers」設定是**一體兩面**：environment 設定沒做，`sub` 這個值
+   > 根本不會出現在 OIDC token 裡，trust policy 永遠比對失敗；`sub` 沒鎖
+   > 到 environment，environment 的核准關卡再怎麼設也擋不住其他分支/
+   > workflow 直接換到 role。兩者缺一不可。
+3. **permission policy 限定 `deploy_frontend_nginx.sh` 實際會用到的最小
+   集合**（別給 `*:*`）——腳本實際呼叫的 AWS API：`sts:GetCallerIdentity`、
+   `ec2:DescribeInstances`／`StartInstances`／`DescribeVpcs`／
+   `DescribeSecurityGroups`／`AuthorizeSecurityGroupIngress`（⚠️ harper
+   複審 LOW：`AuthorizeSecurityGroupIngress` 這個 API 沒有 resource-level
+   permission 可以限制「哪個 security group」，只能靠 IAM condition
+   `ec2:ResourceTag` 或直接把 GroupId 寫進 `Resource` ARN——實際套用時
+   務必用 `Condition` 或 `Resource` 鎖定 `deploy_ec2.sh` 建立的那個
+   `trustforge-ec2-sg`（腳本用 `Name=trustforge-ec2-sg` tag 查出來的那
+   個 SG），不要給這個 action 全帳號範圍的萬用 resource，否則等於能對
+   帳號內任何 security group 開洞）、
+   `s3:HeadBucket`／`CreateBucket`／`PutObject`（限
+   `trustforge-deploy-<ACCOUNT_ID>` bucket）、`ssm:SendCommand`／
+   `GetCommandInvocation`（限 `AWS-RunShellScript` document + tag
+   `Name=trustforge-demo` 的實例）：
+   ```bash
+   # <policy.json> 是老闆依上述 API 清單自行撰寫/核定的最小權限 policy 檔
+   # （repo 內刻意不放現成的 policy JSON，避免文件與實際套用內容 drift；
+   # 需要草稿可請 CTO 依上述 API 清單產出草稿供老闆審，但正式套用是老闆的
+   # gate，不是 AI 執行）
+   aws iam put-role-policy --role-name trustforge-frontend-deploy \
+     --policy-name trustforge-frontend-deploy-inline \
+     --policy-document file://<policy.json>
+   ```
+4. **把 role ARN 存進 GitHub repo secret**（Settings → Secrets and
+   variables → Actions → New repository secret）：
+   - Name：`AWS_DEPLOY_ROLE_ARN`
+   - Value：`arn:aws:iam::<ACCOUNT_ID>:role/trustforge-frontend-deploy`
+
+以上全部完成前，`deploy-frontend.yml` 的 `Configure AWS credentials (OIDC)`
+step 會因為讀不到有效的 `secrets.AWS_DEPLOY_ROLE_ARN`、或 environment 核准
+沒過、或 assume-role 被 trust policy 的 `sub` 條件拒絕而直接失敗——這是
+刻意的 fail-closed，不是 bug。
+
+### 平時：Actions 頁按 Run workflow 即部署
+
+1. GitHub repo → Actions 分頁 → 選 **Deploy Frontend** workflow。
+2. 右上 **Run workflow**，`confirm` 選 `yes`（選 `no` 或不選會被
+   workflow 內建的確認檢查擋下、直接 `exit 1` 中止，不會誤觸發部署）。
+3. 因為 `deploy` job 掛了 `environment: production`，觸發後 job 會停在
+   「Waiting for review」，需要前置設定裡指定的 reviewer 到該次 run 的頁面
+   按 **Approve and deploy** 才會真的往下跑（觸發者跟核准者建議不同人）。
+4. 同一時間只會有一個部署在跑（`concurrency: deploy-frontend`，新觸發的
+   run 會排隊、不會取消正在跑的），跑完後 log 最後一行會印出這次部署的
+   git short sha，供比對。
+
+### 部署版本標記（curl 驗證線上 bundle 對應哪個 commit）
+
+build 時 workflow 會把當次 checkout 的 git short sha 透過 `VITE_GIT_SHA`
+環境變數注入 Vite build（`import.meta.env.VITE_GIT_SHA`），前端
+`Header.tsx` 右上角版本徽章（`v0.6.5 · <sha>`，hover 有 tooltip）會顯示；
+bundle 本身也會逐字含有這個 sha 字串，不用起瀏覽器也能直接驗證：
+
+```bash
+# 方式一：肉眼看網站右上角版本徽章
+# 方式二：curl 拉下 bundle，grep 是否含有預期的 commit sha
+curl -s https://trustforge.hurricanesoft.com.tw/ | grep -o 'assets/index-[^"]*\.js'
+curl -s https://trustforge.hurricanesoft.com.tw/assets/index-<hash>.js | grep -o '<期望的 7 碼 sha>'
+```
+
 ## 管理控制台部署銜接（admin/live token + cap env，管理控制台 PR-5）
 
 ### PR-B：runtime token 改由 app 自己在啟動期從 SSM 讀（#119 完全退場）
