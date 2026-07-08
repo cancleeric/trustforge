@@ -1,0 +1,72 @@
+name: "Deploy Frontend"
+
+on:
+  workflow_dispatch:
+    # 手動觸發 TrustForge 前端生產部署
+    inputs:
+      confirm:
+        type: choice
+        options:
+          - "no"
+          - "yes"
+        default: "no"
+        description: "確認要部署到生產環境"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC: 允許向 AWS 請求短期憑證
+      contents: read
+    steps:
+      - name: Abort if not confirmed
+        if: github.event.inputs.confirm != 'yes'
+        run: |
+          echo "確認參數為 'no'，中止部署。請在 workflow_dispatch 選擇 'yes' 才能繼續。"
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Compute short git sha
+        id: gitsha
+        run: |
+          echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "VITE_GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        env:
+          # 把 git sha 注入前端，方便在 UI 上辨識目前部署版本
+          VITE_GIT_SHA: ${{ steps.gitsha.outputs.sha }}
+        run: npm run build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # 走 OIDC，不需長期 AWS access key
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: Deploy frontend
+        # 複用既有部署腳本，避免在 workflow 重複實作部署邏輯
+        # 部署腳本內部（非 dry-run）會重新 npm ci && npm run build，
+        # 透過 $GITHUB_ENV 設定的 VITE_GIT_SHA 可自動帶入該次 build
+        run: bash deploy/deploy_frontend_nginx.sh
+        env:
+          REGION: ap-southeast-2
+
+      - name: Deployment done
+        run: |
+          echo "部署完成。git sha: ${{ steps.gitsha.outputs.sha }}"
