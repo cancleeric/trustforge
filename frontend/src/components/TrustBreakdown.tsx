@@ -18,26 +18,27 @@ export default function TrustBreakdown({ data }: { data: TrustComponentsAggregat
       <ul className="flex flex-col gap-3">
         {DIMENSION_META.map(({ key, label, why }) => {
           const value = data[key] ?? 0
+          const clamped = Math.max(0, Math.min(1, value))
           const isRisk = key === 'manipulation'
           const barColor = isRisk
-            ? value > 0.3
+            ? clamped > 0.3
               ? 'var(--color-tf-bad)'
               : 'var(--color-tf-good)'
-            : value >= 0.6
+            : clamped >= 0.6
               ? 'var(--color-tf-good)'
-              : value >= 0.35
+              : clamped >= 0.35
                 ? 'var(--color-tf-warn)'
                 : 'var(--color-tf-bad)'
           return (
             <li key={key}>
               <div className="mb-1 flex items-baseline justify-between text-xs">
                 <span className="font-semibold text-tf-text">{label}</span>
-                <span className="tf-num text-tf-muted">{(value * 100).toFixed(0)}%</span>
+                <span className="tf-num text-tf-muted">{(clamped * 100).toFixed(0)}%</span>
               </div>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-tf-border">
                 <div
                   className="h-full rounded-full"
-                  style={{ width: `${Math.max(0, Math.min(1, value)) * 100}%`, backgroundColor: barColor }}
+                  style={{ width: `${clamped * 100}%`, backgroundColor: barColor }}
                 />
               </div>
               <p className="mt-1 text-[0.72rem] leading-snug text-tf-muted">{why}</p>
