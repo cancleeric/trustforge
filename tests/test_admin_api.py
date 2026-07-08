@@ -606,7 +606,12 @@ def test_put_bedrock_enabled_without_model_id_writes_with_warning(
     ("null", 200),                 # null＝清除 runtime token（回落 env）
     ("12345", 400),                # 非字串
 ])
-def test_put_live_token_rules(admin_enabled, put_recorder, token_literal, expect):
+def test_put_live_token_rules(admin_enabled, put_recorder, monkeypatch, token_literal, expect):
+    # harper MEDIUM-1（issue #1）新增的傳輸層檢查跟本測試要驗的格式驗證
+    # 規則是兩個不同關注點——這裡固定 TRUST_PROXY=True（模擬有 TLS 反代
+    # 保護的安全部署），讓本測試只測格式驗證本身；傳輸層檢查本身另有專屬
+    # 測試見 `test_put_live_token_rejected_when_trust_proxy_off` 等。
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
     code, body, _ = _put_config(
         '{"live_token": %s, "expected_version": 1}' % token_literal
     )
@@ -616,16 +621,60 @@ def test_put_live_token_rules(admin_enabled, put_recorder, token_literal, expect
         assert json.loads(body)["error"]["code"] == "bad_request"
 
 
-def test_put_live_token_equal_to_admin_token_rejected(admin_enabled, put_recorder):
+def test_put_live_token_equal_to_admin_token_rejected(admin_enabled, put_recorder, monkeypatch):
     """PR-3：admin/live token 碰撞檢查延伸到 config 層——啟動期檢查只擋
     env live token，config 層若允許設成與 admin token 相同，等於讓分析
-    token 與管理 token 合流（§3.2-4 同一條鐵律）→ 400。"""
+    token 與管理 token 合流（§3.2-4 同一條鐵律）→ 400。
+
+    固定 TRUST_PROXY=True：本測試驗的是碰撞檢查，不是 harper MEDIUM-1 的
+    傳輸層檢查（後者順序在碰撞檢查之前，TRUST_PROXY=False 會被那道檢查
+    先擋下、蓋掉本測試想驗的 400 bad_request）。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
     code, body, _ = _put_config(
         '{"live_token": "%s", "expected_version": 1}' % TEST_ADMIN_TOKEN
     )
     assert code == 400
     assert json.loads(body)["error"]["code"] == "bad_request"
     assert "changes" not in put_recorder  # 未寫入
+
+
+# ── harper MEDIUM-1（issue #1 CISO High 複審）：admin 動態設 live_token 的
+#    傳輸層 fail-closed 檢查 ────────────────────────────────────────────────
+
+
+def test_put_live_token_rejected_when_trust_proxy_off(admin_enabled, put_recorder, monkeypatch):
+    """TRUST_PROXY 未開（無法確認有 TLS 反代保護）時，動態設定 live_token
+    一律拒絕（跟 main() 啟動期檢查同立場）。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", False)
+    monkeypatch.delenv("TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN", raising=False)
+    code, body, _ = _put_config(
+        '{"live_token": "%s", "expected_version": 1}' % ("a" * 24)
+    )
+    assert code == 403
+    assert json.loads(body)["error"]["code"] == "insecure_transport"
+    assert "changes" not in put_recorder  # 未寫入
+
+
+def test_put_live_token_allowed_with_explicit_insecure_opt_out(admin_enabled, put_recorder, monkeypatch):
+    """明確設 TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN=1 opt-out 時放行（本機/
+    離線 demo 用），跟 main() 啟動期檢查同一款 opt-out。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", False)
+    monkeypatch.setenv("TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN", "1")
+    code, _body, _ = _put_config(
+        '{"live_token": "%s", "expected_version": 1}' % ("a" * 24)
+    )
+    assert code == 200
+    assert put_recorder["changes"] == {"live_token": "a" * 24}
+
+
+def test_put_live_token_clear_not_blocked_when_trust_proxy_off(admin_enabled, put_recorder, monkeypatch):
+    """清除 live_token（傳 null）不受本檢查影響——清除只會降低風險，不該被
+    擋（本檢查只作用於「payload 真的要設定一個非 null 值」的情境）。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", False)
+    monkeypatch.delenv("TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN", raising=False)
+    code, _body, _ = _put_config('{"live_token": null, "expected_version": 1}')
+    assert code == 200
+    assert put_recorder["changes"] == {"live_token": None}
 
 
 def test_put_version_conflict_409_with_current_version(admin_enabled, monkeypatch):
@@ -706,9 +755,11 @@ def test_put_audit_warning_propagated(admin_enabled, monkeypatch):
     assert any("審計" in w for w in json.loads(body)["data"]["warnings"])
 
 
-def test_put_response_never_echoes_live_token_plaintext(admin_enabled, put_recorder):
+def test_put_response_never_echoes_live_token_plaintext(admin_enabled, put_recorder, monkeypatch):
     """新 token 明文不回顯（比計劃「只出現一次」更保守：出現零次——呼叫端
-    本來就持有明文）。"""
+    本來就持有明文）。固定 TRUST_PROXY=True：本測試驗的是回顯行為，不是
+    harper MEDIUM-1 傳輸層檢查。"""
+    monkeypatch.setattr(web, "TRUST_PROXY", True)
     plaintext = "brand-new-live-token-0123456789abcdef"
     code, body, _ = _put_config(
         '{"live_token": "%s", "expected_version": 1}' % plaintext

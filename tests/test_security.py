@@ -192,6 +192,11 @@ def test_web_handler_502_on_unexpected_exception(monkeypatch):
 
 
 # ── 8. per-IP 限流：同 IP 連發超過 _RATE_MAX 次 live → TooManyRequests ────────
+# 注意：本檔這批限流測試目前實際測試的是 fallback（process-local 滑動視窗）
+# 分支，而非 DynamoDB 主路徑，此行為受 `tests/conftest.py` 中的 autouse
+# fixture `_isolate_rate_limit_store` 所控制。DynamoDB 主路徑本身的測試請
+# 參見 `tests/test_rate_limit_store.py` 與
+# `tests/test_live_rate_limit_dynamodb_integration.py`。
 
 def test_rate_limit_triggers_after_max_requests(monkeypatch):
     """同一 IP 在 60s 窗格內超過 _RATE_MAX 次 live → TooManyRequests。"""

@@ -49,6 +49,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import admin_config
+from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
@@ -706,7 +707,42 @@ def _evict_stale_rate_buckets(
 
 
 def _check_live_rate_limit(ip: str) -> None:
-    """IP 在滑動視窗內超過 _RATE_MAX 次 live 請求 → raise TooManyRequests。"""
+    """IP 在（DynamoDB 跨實例共享、或 fallback 的單機滑動視窗）內超過
+    `_RATE_MAX` 次 live 請求 → raise TooManyRequests。
+
+    issue #1（CISO High）：Lambda Function URL 併發時可能同時起多個各自獨立
+    的執行環境，各自的 process 記憶體 `_rate_buckets` 互不可見——純
+    process-local 限流在多實例部署下形同虛設（同一 IP 實際配額可能被放大到
+    N 倍併發實例數）。改成優先呼叫 `rate_limit_store`（DynamoDB 原子條件式
+    固定視窗計數器，沿用 `admin_config`/`ingestion.cache` 既有 CAS 慣例、
+    重用同一張 `trustforge-connector-cache` 表，零建表/schema 異動）：多個
+    執行個體對同一視窗 key 的遞增在 DynamoDB 端序列化，是真正跨實例共享的
+    計數，不會被併發實例放大。
+
+    `rate_limit_store.RateLimitBackendError`（DynamoDB 憑證/網路/throttle
+    等真的連不上或操作失敗，非「已達限額」）→ fallback 回
+    `_check_live_rate_limit_local`（本護欄加入前逐字相同的 process-local
+    滑動視窗邏輯）。刻意不 fail-open：DynamoDB 不可用時至少單機內仍會擋，
+    不會變成完全不限流（`rate_limit_store.RateLimitStore` docstring 同一
+    設計原則）。"""
+    try:
+        allowed = rate_limit_store.try_increment("live", ip, _RATE_WINDOW, _RATE_MAX)
+    except rate_limit_store.RateLimitBackendError as exc:
+        logging.warning(
+            "TrustForge live rate limit DynamoDB 後端不可用，fallback 回 "
+            "process-local 限流: %s", exc
+        )
+        _check_live_rate_limit_local(ip)
+        return
+    if not allowed:
+        raise TooManyRequests(f"請求過於頻繁，請 {_RATE_WINDOW} 秒後再試")
+
+
+def _check_live_rate_limit_local(ip: str) -> None:
+    """`_check_live_rate_limit` 的 process-local fallback 實作：DynamoDB 共享
+    計數器不可用時使用。邏輯與加入 DynamoDB 護欄前逐字相同，維持既有測試對
+    `_rate_buckets` 直接操作/斷言的相容性（IP 在滑動視窗內超過 `_RATE_MAX`
+    次 live 請求 → raise TooManyRequests）。"""
     now = time.time()
     with _rate_lock:
         _evict_stale_rate_buckets(_rate_buckets, _RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS)
@@ -3238,6 +3274,40 @@ def _apply_live_token_header(qs: dict, headers, query_has_token: bool | None = N
         qs["token"] = [header_token]
 
 
+def _live_token_over_insecure_transport(qs: dict, headers) -> bool:
+    """判斷這次帶有 live token 的請求是否**已可信地確認**經由明文 HTTP
+    （非 HTTPS）連線送達（issue #1 CISO High 第二部分：EC2 live token
+    在明文 HTTP 下可能外洩）。
+
+    保守採 fail-closed 但不誤擋原則：只有在有明確證據下才判定為不安全。
+
+    - 這次請求根本沒帶 token（`qs["token"]` 為空）→ 不檢查，直接 `False`
+      （沒有 token 就沒有外洩風險）。
+    - `TRUST_PROXY` 為假 → 直接 `False`：沒有可信賴的反代時，
+      `X-Forwarded-Proto` 可能是使用者自己偽造的，保守起見不能拿來當作
+      「已確認不安全」的依據，否則會讓直連部署下每個帶 token 的請求都被
+      誤擋；那種「完全沒有可信賴反代」的情境改由 `main()` 啟動期的靜態
+      檢查把關（LIVE_TOKEN 有設但 `TRUST_PROXY` 未開時直接拒絕啟動），
+      這裡不重複處理。
+    - `TRUST_PROXY` 為真時才讀 `X-Forwarded-Proto`（nginx 在每一種 conf
+      變體，不論 TLS 與否，都固定 `proxy_set_header X-Forwarded-Proto
+      $scheme;` 忠實轉發，此時才可信）：header 缺失/空值 → 沒有明確證據，
+      保守不判定為不安全（`False`）；值非 `"https"` → 已確認明文 HTTP，
+      回傳 `True`，呼叫端應拒絕這次請求，避免 live token 繼續在明文連線上
+      被使用/比對。
+    """
+    if not qs.get("token", [""])[0]:
+        return False
+    if not TRUST_PROXY:
+        return False
+    if headers is None:
+        return False
+    proto = (headers.get("X-Forwarded-Proto") or "").strip().lower()
+    if not proto:
+        return False
+    return proto != "https"
+
+
 def _is_live_request(qs: dict) -> bool:
     """純判斷 live=1 是否成立（live 閘開 + token 正確），無副作用、不觸發限流。
 
@@ -5574,6 +5644,25 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
                 f"live_token 須為長度 {_ADMIN_LIVE_TOKEN_MIN_LEN} 至 "
                 f"{_ADMIN_LIVE_TOKEN_MAX_LEN} 的可見 ASCII 字串（或 null＝清除）",
             )
+        # harper MEDIUM-1（issue #1 CISO High 複審）：動態設定 live_token
+        # 須與 `main()` 啟動期的靜態檢查同一立場——啟動期只擋得住「啟動時
+        # 就有 token」的情境，管理員事後才透過這條路徑動態設定 live token
+        # 會完全繞過那道防護。`TRUST_PROXY` 未開時（無法確認有 nginx TLS
+        # 反代保護）fail-closed 拒絕，同款 `TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN`
+        # opt-out（供本機/離線 demo 使用）。清除 token（payload 傳 null）
+        # 不受影響——本檢查在外層 `is not None` 判斷內，只擋「設定」不擋
+        # 「清除」。
+        if not TRUST_PROXY and os.getenv(
+            "TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN", ""
+        ).strip().lower() not in ("1", "true", "yes"):
+            return 403, _json_envelope_err(
+                "insecure_transport",
+                "TRUSTFORGE_TRUST_PROXY 未開，無法確認有 TLS 反代保護，"
+                "拒絕透過 admin 動態設定 live_token（明文 HTTP 外洩風險，"
+                "issue #1 CISO High harper MEDIUM-1）。解法一：啟用 TRUST_PROXY；"
+                "解法二：設 TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN=1 明確 opt-out"
+                "（供本機/離線 demo 使用）。",
+            )
         # PR-3：admin/live token 碰撞檢查延伸到 config 層——啟動期
         # `_compute_admin_token` 只擋得住「env live token == admin token」，
         # 若放任管理面把 config live token 設成與 admin token 相同，等於
@@ -5760,6 +5849,28 @@ class Handler(BaseHTTPRequestHandler):
         # 是為了相容既有測試用 `Handler.__new__` 建構的最小化 mock（不走
         # 真 socket handshake，不會有 `.headers`）。
         client_ip = _resolve_client_ip(self.client_address[0], getattr(self, "headers", {}))
+
+        # issue #1（CISO High 第二部分）：這次請求帶了 live token，且已可信
+        # 地確認（`TRUST_PROXY=1` 時才信任 nginx 忠實轉發的
+        # `X-Forwarded-Proto`）是經明文 HTTP、非 HTTPS 送達——技術性拒絕，
+        # 不讓帶 token 的請求繼續往下處理（避免 token 在明文連線上被
+        # 使用/比對）。見 `_live_token_over_insecure_transport` docstring。
+        if _live_token_over_insecure_transport(qs, getattr(self, "headers", {})):
+            logging.warning(
+                "TrustForge: live token 請求經明文 HTTP 送達，已拒絕 "
+                "（TRUST_PROXY=1 且 X-Forwarded-Proto != https）"
+            )
+            return self._send(
+                403,
+                render_page(
+                    _render_error_card(
+                        "請改用 HTTPS",
+                        "偵測到這個帶 live token 的請求經由不安全的明文連線"
+                        "送達，已拒絕。請改用 HTTPS 連線再試一次。",
+                    )
+                ),
+                "text/html; charset=utf-8",
+            )
 
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
@@ -6130,6 +6241,25 @@ def main():
             host,
         )
         host = "127.0.0.1"
+    # issue #1（CISO High 第二部分）：live token 有設定，但 `TRUST_PROXY`
+    # 未開——代表這個 process 沒有可信賴的方式知道自己是不是被 nginx TLS
+    # 反代保護在前，可能是直連部署、完全沒有 TLS，live token 有明文 HTTP
+    # 外洩風險。fail-closed 設計：比照本模組其它 DynamoDB/config 讀取失敗
+    # 一律 fail-closed 的一貫方向，無法確認有 TLS 反代保護時直接拒絕啟動，
+    # 而不是預設放行只記警告。`TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN=1` 是
+    # 給本機/離線 demo 想在無反代情況下測試 live 模式的明確 opt-out。
+    if _LIVE_TOKEN_BOOTSTRAP_RESOLVED and not TRUST_PROXY and \
+            os.getenv("TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN", "").strip().lower() not in ("1", "true", "yes"):
+        raise SystemExit(
+            "TrustForge: 拒絕啟動——偵測到 live token 已設定（SSM 或 "
+            "TRUSTFORGE_LIVE_TOKEN），但 TRUSTFORGE_TRUST_PROXY 未開，"
+            "無法確認有 nginx TLS 反代在前，live token 可能經明文 HTTP "
+            "外洩（issue #1 CISO High）。\n"
+            "請改用 nginx TLS 反代並設 TRUSTFORGE_TRUST_PROXY=1；"
+            "或移除 live token 僅供離線示範。\n"
+            "若要在無反代情況下測試 live 模式，請明確設 "
+            "TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN=1。"
+        )
     srv = ThreadingHTTPServer((host, PORT), Handler)
     # PR-3：啟動 banner 只印 env 層能力（bedrock 實際開閉是動態閘，還要
     # AND config `bedrock_enabled`）——刻意**不**在啟動路徑呼叫
