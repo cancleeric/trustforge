@@ -114,6 +114,27 @@ def _isolate_admin_config_store(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_rate_limit_store(monkeypatch):
+    """issue #1（CISO High）：`web._check_live_rate_limit` 現在優先呼叫
+    `rate_limit_store`（DynamoDB 跨實例共享限流計數器），其預設 store lazy
+    連真 DynamoDB。比照 `_isolate_admin_config_store`（測試預設不打真
+    AWS）：把預設 store 換成「一律回報後端不可用」的假 store，讓
+    `_check_live_rate_limit` 每次都吃到 `RateLimitBackendError` 並 fallback
+    回 `_check_live_rate_limit_local`（DynamoDB 護欄加入前逐字相同的
+    process-local 滑動視窗邏輯）——保證全套件既有的限流測試（直接操作/斷言
+    `web._rate_buckets`）行為不變。個別測試要驗證 DynamoDB 共享計數器本身
+    時，自建 `rate_limit_store.RateLimitStore` + 假 `_table`（見
+    `test_rate_limit_store.py`），不受本 fixture 影響。"""
+    from trustforge import rate_limit_store
+
+    class _AlwaysUnavailableStore:
+        def try_increment(self, bucket, key, window_seconds, max_requests, *, now=None):
+            raise rate_limit_store.RateLimitBackendError("測試環境預設不打真 DynamoDB")
+
+    monkeypatch.setattr(rate_limit_store, "_default_store_instance", _AlwaysUnavailableStore())
+
+
+@pytest.fixture(autouse=True)
 def _isolate_admin_config_cache():
     """admin console PR-1：`admin_config` 的 process 內 TTL 快取
     （`_cache`）是模組級全域狀態，跨測試共用同一份記憶體。比照
