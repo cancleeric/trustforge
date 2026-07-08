@@ -27,33 +27,94 @@ REDDIT_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
 REDDIT_EMPTY_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel></channel></rss>"""
 
-SEC_ATOM_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <title>SEC EDGAR Current Events</title>
-  <entry>
-    <title>SEC Charges Cryptocurrency Exchange for Securities Violations</title>
-    <link href="https://www.sec.gov/news/press-release/2026-100" rel="alternate"/>
-    <updated>2026-08-01T10:00:00Z</updated>
-    <summary>The SEC today charged a cryptocurrency exchange for failing to register as a national securities exchange.</summary>
-  </entry>
-  <entry>
-    <title>Annual Report Filing by Company XYZ</title>
-    <link href="https://www.sec.gov/news/press-release/2026-101" rel="alternate"/>
-    <updated>2026-08-01T09:00:00Z</updated>
-    <summary>Standard annual 10-K filing covering traditional manufacturing operations.</summary>
-  </entry>
-</feed>"""
+# ── SEC EDGAR 全文檢索 API fixture（JSON，取代舊版 Atom XML）───────────────────
 
-SEC_ATOM_NO_CRYPTO_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <title>SEC EDGAR</title>
-  <entry>
-    <title>Regular Annual Report Filing</title>
-    <link href="https://www.sec.gov/news/press-release/2026-200" rel="alternate"/>
-    <updated>2026-08-01T10:00:00Z</updated>
-    <summary>Company files annual 10-K report covering traditional manufacturing operations.</summary>
-  </entry>
-</feed>"""
+REGULATORY_FTS_FIXTURE = b"""{
+  "hits": {
+    "total": {"value": 2, "relation": "eq"},
+    "hits": [
+      {
+        "_id": "0001234567-26-000090:btc-risk-factors.htm",
+        "_source": {
+          "ciks": ["0001234567"],
+          "display_names": ["Acme Holdings Inc. (ACME)"],
+          "form": "8-K",
+          "file_date": "2026-08-01",
+          "items": ["1.01", "2.01"]
+        }
+      },
+      {
+        "_id": "0007654321-26-000055:eth-treasury.htm",
+        "_source": {
+          "ciks": ["0007654321"],
+          "display_names": ["Globex Corp (GX)"],
+          "form": "10-K",
+          "file_date": "2026-07-28",
+          "items": []
+        }
+      }
+    ]
+  }
+}"""
+
+REGULATORY_FTS_NO_HITS_FIXTURE = b"""{
+  "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}
+}"""
+
+REGULATORY_FTS_MISSING_CIK_FIXTURE = b"""{
+  "hits": {
+    "total": {"value": 2, "relation": "eq"},
+    "hits": [
+      {
+        "_id": "0001234567-26-000090:btc-risk-factors.htm",
+        "_source": {
+          "ciks": ["0001234567"],
+          "display_names": ["Acme Holdings Inc. (ACME)"],
+          "form": "8-K",
+          "file_date": "2026-08-01",
+          "items": ["1.01"]
+        }
+      },
+      {
+        "_id": "0007654321-26-000055:eth-treasury.htm",
+        "_source": {
+          "display_names": ["No-CIK Filer"],
+          "form": "10-K",
+          "file_date": "2026-07-28",
+          "items": []
+        }
+      }
+    ]
+  }
+}"""
+
+REGULATORY_FTS_MALFORMED_ID_FIXTURE = b"""{
+  "hits": {
+    "total": {"value": 2, "relation": "eq"},
+    "hits": [
+      {
+        "_id": "0001234567-26-000090:btc-risk-factors.htm",
+        "_source": {
+          "ciks": ["0001234567"],
+          "display_names": ["Acme Holdings Inc. (ACME)"],
+          "form": "8-K",
+          "file_date": "2026-08-01",
+          "items": []
+        }
+      },
+      {
+        "_id": "no-colon-here",
+        "_source": {
+          "ciks": ["0007654321"],
+          "display_names": ["Globex Corp (GX)"],
+          "form": "10-K",
+          "file_date": "2026-07-28",
+          "items": []
+        }
+      }
+    ]
+  }
+}"""
 
 _RSS_MINIMAL = b"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -167,13 +228,13 @@ def test_reddit_invalid_subreddit_raises():
         RedditCryptoSource("WallStreetBets")
 
 
-# ── regulatory.py 測試 ────────────────────────────────────────────────────────
+# ── regulatory.py 測試（SEC EDGAR 全文檢索 API / JSON）────────────────────────
 
 def test_sec_document_fields(monkeypatch):
     """SEC 文件必須有 kind=regulatory / source=sec-gov / url 含 sec.gov / ts > 0。"""
     from trustforge.ingestion import regulatory
-    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
-    docs = regulatory.SECRSSSource().fetch("", coin="")
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
     assert len(docs) >= 1
     d = docs[0]
     assert d.kind == "regulatory"
@@ -184,57 +245,77 @@ def test_sec_document_fields(monkeypatch):
     assert len(d.meta["content_reference"]) <= 120
 
 
-def test_sec_crypto_keyword_filter_excludes_non_crypto(monkeypatch):
-    """SEC feed 全非加密條目 → 回傳空 list。"""
-    from trustforge.ingestion import regulatory
-    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_NO_CRYPTO_FIXTURE)
-    docs = regulatory.SECRSSSource().fetch("", coin="")
-    assert docs == []
-
-
-def test_sec_mixed_feed_keeps_only_crypto(monkeypatch):
-    """混合 feed：1 含加密 + 1 不含 → 只回傳 1 筆。"""
-    from trustforge.ingestion import regulatory
-    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
-    docs = regulatory.SECRSSSource().fetch("", coin="")
-    assert len(docs) == 1
-    # 確認保留的是加密相關條目
-    content = (docs[0].text + " " + docs[0].meta["content_reference"]).lower()
-    assert "crypto" in content or "bitcoin" in content or "digital asset" in content
-
-
 def test_sec_url_points_to_sec_gov(monkeypatch):
-    """所有 SEC 文件的 url 必須含 sec.gov 域名。"""
+    """所有 SEC 文件的 url 必須是 https://www.sec.gov/Archives/edgar/data/... 開頭。"""
     from trustforge.ingestion import regulatory
-    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
-    docs = regulatory.SECRSSSource().fetch("", coin="")
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
     for d in docs:
-        assert "sec.gov" in d.url
+        assert d.url.startswith("https://www.sec.gov/Archives/edgar/data/")
 
 
 def test_sec_timestamp_parsed(monkeypatch):
-    """SEC 文件的 ts 應從 <updated> ISO 8601 正確解析。"""
+    """SEC 文件的 ts 應從 file_date (YYYY-MM-DD) 解析成 UTC epoch。"""
+    from datetime import datetime, timezone
     from trustforge.ingestion import regulatory
-    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
-    docs = regulatory.SECRSSSource().fetch("", coin="")
-    assert docs[0].ts > 0
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
+    assert len(docs) >= 1
+    expected = datetime.strptime("2026-08-01", "%Y-%m-%d").replace(
+        tzinfo=timezone.utc
+    ).timestamp()
+    assert docs[0].ts == expected
 
 
 def test_sec_source_failure_does_not_crash(monkeypatch):
-    """SECRSSSource 連線失敗 → collect 跳過不崩。"""
+    """SECFullTextSearchSource 連線失敗 → collect 跳過不崩。"""
     from urllib.error import URLError
     from trustforge.ingestion import regulatory, base
     monkeypatch.setattr(
         regulatory, "_fetch_url",
         lambda url: (_ for _ in ()).throw(URLError("timeout")),
     )
-    src = regulatory.SECRSSSource()
+    src = regulatory.SECFullTextSearchSource()
     docs = base.collect("BTC", coin="BTC", sources=[src], offline=False)
     assert isinstance(docs, list)  # 不拋例外
 
 
+def test_sec_dedup_across_query_terms(monkeypatch):
+    """fetch 對 3 個查詢詞發請求後用 doc.id 去重；同 fixture 三次回傳同一組 hits，
+    回傳 Document 數量應等於 fixture 內不重複 _id 數量，而非 hits * 3。"""
+    from trustforge.ingestion import regulatory
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
+    import json as _json
+    fixture = _json.loads(REGULATORY_FTS_FIXTURE)
+    unique_ids = {h["_id"] for h in fixture["hits"]["hits"]}
+    assert len(docs) == len(unique_ids)
+    assert len(unique_ids) == 2
+
+
+def test_sec_hit_missing_cik_skipped(monkeypatch):
+    """hit 缺 _source.ciks（或空陣列）時應被跳過，不崩、不產生空 url Document。"""
+    from trustforge.ingestion import regulatory
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_MISSING_CIK_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
+    assert len(docs) == 1
+    for d in docs:
+        assert "sec.gov" in d.url
+        assert d.url != ""
+
+
+def test_sec_hit_malformed_id_skipped(monkeypatch):
+    """hit 的 _id 沒有冒號（格式不符）時應被跳過，不崩。"""
+    from trustforge.ingestion import regulatory
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_MALFORMED_ID_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
+    assert len(docs) == 1
+    for d in docs:
+        assert "sec.gov" in d.url
+
+
 def test_build_regulatory_sources():
-    """build_regulatory_sources 應回傳 1 個 SECRSSSource，name=sec-gov。"""
+    """build_regulatory_sources 應回傳 1 個來源，name=sec-gov / kind=regulatory。"""
     from trustforge.ingestion.regulatory import build_regulatory_sources
     sources = build_regulatory_sources()
     assert len(sources) == 1
@@ -265,7 +346,8 @@ def test_collect_online_includes_social_and_regulatory(monkeypatch, tmp_path):
     monkeypatch.setattr(news, "_fetch_url", lambda url: _RSS_MINIMAL)
     monkeypatch.setattr(onchain, "_fetch_url", lambda url: _FNG_MINIMAL)
     monkeypatch.setattr(social, "_fetch_url", lambda url: REDDIT_FIXTURE)
-    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
+    # 新版 regulatory._fetch_url 對每個查詢詞會被呼叫 3 次，回同一份 JSON fixture
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_FIXTURE)
     monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
 
     backend = cache_mod.JsonCacheBackend(tmp_path / "cache.json")
@@ -454,8 +536,8 @@ def test_reddit_permalink_no_double_domain(monkeypatch):
 def test_sec_industry_level_marked(monkeypatch):
     """E: SEC 文件必須在 meta 標示 regulatory_scope=industry-level（業界級監管背景）。"""
     from trustforge.ingestion import regulatory
-    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: SEC_ATOM_FIXTURE)
-    docs = regulatory.SECRSSSource().fetch("", coin="")
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
     assert len(docs) >= 1
     for d in docs:
         assert d.meta.get("regulatory_scope") == "industry-level", (
