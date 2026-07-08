@@ -1,4 +1,4 @@
-import { PolarAngleAxis, PolarGrid, Radar, RadarChart, ResponsiveContainer, Tooltip } from 'recharts'
+import { PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip } from 'recharts'
 import type { TooltipContentProps } from 'recharts'
 import type { TrustRadar } from '../lib/types'
 import { SingleSourceBadge } from './Badges'
@@ -58,6 +58,7 @@ export default function TrustRadarChart({ radar }: Props) {
           <RadarChart data={chartData} outerRadius="70%">
             <PolarGrid stroke="var(--color-tf-border)" />
             <PolarAngleAxis dataKey="label" tick={{ fill: 'var(--color-tf-muted)', fontSize: 11 }} />
+            <PolarRadiusAxis angle={90} domain={[0, 1]} tick={false} axisLine={false} />
             <Radar
               dataKey="trust"
               stroke="var(--color-tf-accent)"
