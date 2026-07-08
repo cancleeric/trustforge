@@ -473,9 +473,24 @@ pre-cert 現況仍是 HTTP-only 版，行為不變。
 
 ### 一次性前置（🧑 老闆做，AI 不碰 IAM/OIDC）
 
-這是 IAM trust boundary，AI 只寫文件、不執行。老闆需要在 AWS Console／CLI
-完成以下設定，完成後把 role ARN 存進 GitHub repo secret，workflow 才跑得動：
+這是 IAM trust boundary，AI 只寫文件、不執行。老闆需要在 GitHub repo
+設定＋AWS Console／CLI 完成以下設定，完成後把 role ARN 存進 GitHub repo
+secret，workflow 才跑得動：
 
+0. **建 GitHub environment `production` + 設 required reviewers**（harper
+   複審 MEDIUM：把「觸發」跟「放行」分成兩個人——任何人按了
+   `Run workflow` 只是送出請求，job 實際執行前還要卡在 environment
+   protection rule，需要指定 reviewer 手動核准才會真的跑）：
+   1. GitHub repo → Settings → Environments → **New environment**，名稱
+      填 `production`（要跟 `deploy-frontend.yml` 裡 `environment:
+      production` 完全一致，大小寫敏感）。
+   2. 勾選 **Required reviewers**，加入至少 1 位審核人（建議跟觸發者不同
+      人；老闆自己審或指定信任的人選）。
+   3.（可選但建議）**Deployment branches**：限制只有 `main`／`develop`
+      能用這個 environment，避免任意分支也能跑到生產部署。
+   - 設定完成後，`workflow_dispatch` 觸發只是「排隊等待核准」，job 真正
+     assume AWS role 之前會先卡在這一關，即使觸發者的 GitHub 帳號被盜、
+     或誤點按鈕，沒有 reviewer 核准也不會動到生產。
 1. **建 GitHub OIDC identity provider**（若帳號內尚未建過，一次性）：
    ```bash
    aws iam create-open-id-connect-provider \
@@ -483,8 +498,9 @@ pre-cert 現況仍是 HTTP-only 版，行為不變。
      --client-id-list sts.amazonaws.com \
      --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
    ```
-2. **建部署專用 IAM role**，trust policy **限定本 repo**（`sub` condition
-   鎖 `repo:cancleeric/trustforge:*`，不要開放給任何 repo/任何 workflow）：
+2. **建部署專用 IAM role**，trust policy **鎖到 GitHub environment
+   `production`**（`sub` condition，**不是**鎖整個 repo 的任何分支/
+   workflow）：
    ```bash
    cat > trust-policy.json <<'JSON'
    {
@@ -494,8 +510,10 @@ pre-cert 現況仍是 HTTP-only 版，行為不變。
        "Principal": { "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com" },
        "Action": "sts:AssumeRoleWithWebIdentity",
        "Condition": {
-         "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-         "StringLike":   { "token.actions.githubusercontent.com:sub": "repo:cancleeric/trustforge:*" }
+         "StringEquals": {
+           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+           "token.actions.githubusercontent.com:sub": "repo:cancleeric/trustforge:environment:production"
+         }
        }
      }]
    }
@@ -503,10 +521,34 @@ pre-cert 現況仍是 HTTP-only 版，行為不變。
    aws iam create-role --role-name trustforge-frontend-deploy \
      --assume-role-policy-document file://trust-policy.json
    ```
+   > ⚠️ **收斂說明（harper 複審 MEDIUM，這是本文件最重要的一條）**：
+   > 最初草稿的 `sub` 用 `StringLike: "repo:cancleeric/trustforge:*"`——這
+   > 個萬用字元會讓 repo 內**任何分支、任何 workflow、任何 PR**都能換到
+   > 這個能碰生產的 role，跟這個 workflow 有沒有走 `environment:
+   > production`、有沒有 required reviewers 核准完全無關（OIDC token 的
+   > `sub` 只跟觸發來源有關，不會自動繼承 environment gate）。改成
+   > `StringEquals` 精確鎖
+   > `repo:cancleeric/trustforge:environment:production`（注意這裡改用
+   > `StringEquals` 不是 `StringLike`，因為不再需要萬用字元）之後，AWS
+   > 端會強制要求這次 assume-role 的 GitHub token **一定來自已經通過
+   > environment `production` 核准關卡**的 job——就算有人在其他 workflow
+   > 或分支拿到 `id-token: write` 權限，`sub` 對不上也換不到這個 role。
+   > 這條 trust policy 收斂跟上面的「GitHub environment + required
+   > reviewers」設定是**一體兩面**：environment 設定沒做，`sub` 這個值
+   > 根本不會出現在 OIDC token 裡，trust policy 永遠比對失敗；`sub` 沒鎖
+   > 到 environment，environment 的核准關卡再怎麼設也擋不住其他分支/
+   > workflow 直接換到 role。兩者缺一不可。
 3. **permission policy 限定 `deploy_frontend_nginx.sh` 實際會用到的最小
    集合**（別給 `*:*`）——腳本實際呼叫的 AWS API：`sts:GetCallerIdentity`、
    `ec2:DescribeInstances`／`StartInstances`／`DescribeVpcs`／
-   `DescribeSecurityGroups`／`AuthorizeSecurityGroupIngress`、
+   `DescribeSecurityGroups`／`AuthorizeSecurityGroupIngress`（⚠️ harper
+   複審 LOW：`AuthorizeSecurityGroupIngress` 這個 API 沒有 resource-level
+   permission 可以限制「哪個 security group」，只能靠 IAM condition
+   `ec2:ResourceTag` 或直接把 GroupId 寫進 `Resource` ARN——實際套用時
+   務必用 `Condition` 或 `Resource` 鎖定 `deploy_ec2.sh` 建立的那個
+   `trustforge-ec2-sg`（腳本用 `Name=trustforge-ec2-sg` tag 查出來的那
+   個 SG），不要給這個 action 全帳號範圍的萬用 resource，否則等於能對
+   帳號內任何 security group 開洞）、
    `s3:HeadBucket`／`CreateBucket`／`PutObject`（限
    `trustforge-deploy-<ACCOUNT_ID>` bucket）、`ssm:SendCommand`／
    `GetCommandInvocation`（限 `AWS-RunShellScript` document + tag
@@ -526,15 +568,21 @@ pre-cert 現況仍是 HTTP-only 版，行為不變。
    - Value：`arn:aws:iam::<ACCOUNT_ID>:role/trustforge-frontend-deploy`
 
 以上全部完成前，`deploy-frontend.yml` 的 `Configure AWS credentials (OIDC)`
-step 會因為讀不到有效的 `secrets.AWS_DEPLOY_ROLE_ARN` 或 assume-role 被
-trust policy 拒絕而直接失敗——這是刻意的 fail-closed，不是 bug。
+step 會因為讀不到有效的 `secrets.AWS_DEPLOY_ROLE_ARN`、或 environment 核准
+沒過、或 assume-role 被 trust policy 的 `sub` 條件拒絕而直接失敗——這是
+刻意的 fail-closed，不是 bug。
 
 ### 平時：Actions 頁按 Run workflow 即部署
 
 1. GitHub repo → Actions 分頁 → 選 **Deploy Frontend** workflow。
 2. 右上 **Run workflow**，`confirm` 選 `yes`（選 `no` 或不選會被
    workflow 內建的確認檢查擋下、直接 `exit 1` 中止，不會誤觸發部署）。
-3. 跑完後 log 最後一行會印出這次部署的 git short sha，供比對。
+3. 因為 `deploy` job 掛了 `environment: production`，觸發後 job 會停在
+   「Waiting for review」，需要前置設定裡指定的 reviewer 到該次 run 的頁面
+   按 **Approve and deploy** 才會真的往下跑（觸發者跟核准者建議不同人）。
+4. 同一時間只會有一個部署在跑（`concurrency: deploy-frontend`，新觸發的
+   run 會排隊、不會取消正在跑的），跑完後 log 最後一行會印出這次部署的
+   git short sha，供比對。
 
 ### 部署版本標記（curl 驗證線上 bundle 對應哪個 commit）
 

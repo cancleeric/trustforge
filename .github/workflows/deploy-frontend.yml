@@ -15,6 +15,14 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
+    # 避免兩個部署同時競態覆寫 S3、也避免正在跑的部署被新觸發的 workflow 取消，
+    # 因為部署腳本內部有 ERR trap 回滾機制，半途被殺掉會跳過回滾邏輯，所以是排隊而非取消。
+    concurrency:
+      group: deploy-frontend
+      cancel-in-progress: false
+    # 防止 npm ci / AWS API / OIDC 卡住吃滿 GitHub Actions 預設的 360 分鐘 timeout
+    timeout-minutes: 20
     permissions:
       id-token: write   # OIDC: 允許向 AWS 請求短期憑證
       contents: read
@@ -26,10 +34,10 @@ jobs:
           exit 1
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: 'npm'
@@ -41,19 +49,8 @@ jobs:
           echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "VITE_GIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build
-        working-directory: frontend
-        env:
-          # 把 git sha 注入前端，方便在 UI 上辨識目前部署版本
-          VITE_GIT_SHA: ${{ steps.gitsha.outputs.sha }}
-        run: npm run build
-
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           # 走 OIDC，不需長期 AWS access key
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
