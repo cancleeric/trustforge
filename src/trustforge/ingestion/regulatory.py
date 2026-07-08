@@ -25,6 +25,12 @@
 pipeline limits 會反映；本次修法目的是把「加密占比極低的全站 feed」
 換成「對 filing 全文做關鍵字檢索」，讓真正有加密相關內容的 filing
 能被命中，而不是改變「平時可能 0 筆」這個本質。
+
+content_reference 說明：efts.sec.gov 全文檢索 API 的回應中沒有
+highlight/snippet 欄位（人工 curl 驗證），無法直接取用命中的內文片段；
+因此改將「命中的查詢詞（matched query term）」放進 content_reference
+最前面（`[matched:"..."]`），讓使用者一眼看出該筆 filing 與加密
+關鍵字的關聯性，同時在 meta 新增 `matched_term` 鍵以供程式化使用。
 """
 from __future__ import annotations
 
@@ -96,7 +102,7 @@ def _extract_filing_url(hit_id: str, cik: str) -> str:
     )
 
 
-def _parse_fts_hit(hit: dict) -> Document | None:
+def _parse_fts_hit(hit: dict, term: str) -> Document | None:
     """解析單筆 hits.hits[] 元素；缺欄位或無法拼 URL 時回 None（不 raise）。"""
     if not isinstance(hit, dict):
         return None
@@ -132,9 +138,9 @@ def _parse_fts_hit(hit: dict) -> Document | None:
     if file_date:
         title += f"({file_date})"
 
-    combined = title
+    combined = f'[matched:"{term}"] {title}'
     if items:
-        combined = f"{title} items:{','.join(items)}"
+        combined = f'{combined} items:{",".join(items)}'
     content_reference = combined[:120].strip()
 
     ts = 0.0
@@ -152,6 +158,7 @@ def _parse_fts_hit(hit: dict) -> Document | None:
         "content_reference": content_reference,
         "regulatory_scope": "industry-level",
         "form_type": form,
+        "matched_term": term,
     }
 
     return Document(
@@ -194,7 +201,7 @@ class SECFullTextSearchSource(Source):
                     hits_list = raw_hits if isinstance(raw_hits, list) else []
 
             for hit in hits_list:
-                doc = _parse_fts_hit(hit)
+                doc = _parse_fts_hit(hit, term)
                 if doc is None:
                     continue
                 if doc.id in seen_ids:

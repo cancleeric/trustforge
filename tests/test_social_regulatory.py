@@ -243,6 +243,8 @@ def test_sec_document_fields(monkeypatch):
     assert d.ts > 0
     assert d.meta.get("content_reference")
     assert len(d.meta["content_reference"]) <= 120
+    assert d.meta.get("matched_term") in regulatory._QUERY_TERMS
+    assert f'matched:"{d.meta["matched_term"]}"' in d.meta["content_reference"]
 
 
 def test_sec_url_points_to_sec_gov(monkeypatch):
@@ -312,6 +314,95 @@ def test_sec_hit_malformed_id_skipped(monkeypatch):
     assert len(docs) == 1
     for d in docs:
         assert "sec.gov" in d.url
+
+
+def test_sec_content_reference_includes_matched_term(monkeypatch):
+    from trustforge.ingestion import regulatory
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
+    assert len(docs) >= 1
+    for d in docs:
+        assert d.meta.get("matched_term")
+        assert d.meta["matched_term"] in d.meta["content_reference"]
+
+
+def test_sec_search_url_has_required_params(monkeypatch):
+    from urllib.parse import urlparse, parse_qs
+    from datetime import datetime
+    from trustforge.ingestion import regulatory
+
+    captured_urls = []
+
+    def _mock_fetch(url: str) -> bytes:
+        captured_urls.append(url)
+        return REGULATORY_FTS_FIXTURE
+
+    monkeypatch.setattr(regulatory, "_fetch_url", _mock_fetch)
+    regulatory.SECFullTextSearchSource().fetch("", coin="")
+
+    assert len(captured_urls) == 3
+
+    q_values = set()
+    for url in captured_urls:
+        parsed = parse_qs(urlparse(url).query)
+        assert parsed["forms"] == ["8-K,10-K,10-Q,S-1"]
+        assert "startdt" in parsed
+        assert len(parsed["startdt"][0]) == 10
+        datetime.strptime(parsed["startdt"][0], "%Y-%m-%d")
+        assert "enddt" in parsed
+        assert len(parsed["enddt"][0]) == 10
+        datetime.strptime(parsed["enddt"][0], "%Y-%m-%d")
+        assert "q" in parsed
+        q_values.add(parsed["q"][0].strip('"'))
+
+    assert q_values == set(regulatory._QUERY_TERMS)
+
+
+def test_sec_cap_at_20_sorted_by_ts(monkeypatch):
+    from datetime import datetime, timezone
+    from trustforge.ingestion import regulatory
+
+    def _build_hits_fixture(prefix: str, day_start: int, count: int) -> bytes:
+        import json as _json
+        hits = []
+        for i in range(count):
+            day = day_start + i
+            hit_id = f"000{prefix}000{i:02d}-26-0000{i:02d}:cap-test-{prefix}-{i:02d}.htm"
+            hits.append({
+                "_id": hit_id,
+                "_source": {
+                    "ciks": [f"000{1000000 + int(prefix) * 100 + i}"],
+                    "display_names": [f"CapTest {prefix} Co {i}"],
+                    "form": "8-K",
+                    "file_date": f"2026-06-{day:02d}",
+                    "items": [],
+                },
+            })
+        return _json.dumps({"hits": {"total": {"value": count, "relation": "eq"}, "hits": hits}}).encode()
+
+    def _mock_fetch(url: str) -> bytes:
+        if "bitcoin" in url:
+            return _build_hits_fixture("1", 1, 8)
+        if "cryptocurrency" in url:
+            return _build_hits_fixture("2", 9, 8)
+        if "ethereum" in url:
+            return _build_hits_fixture("3", 17, 8)
+        return b'{"hits": {"hits": []}}'
+
+    monkeypatch.setattr(regulatory, "_fetch_url", _mock_fetch)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
+
+    assert len(docs) == 20
+    assert docs == sorted(docs, key=lambda d: d.ts, reverse=True)
+    min_ts = datetime.strptime("2026-06-05", "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+    assert min(d.ts for d in docs) == min_ts
+
+
+def test_sec_no_hits_returns_empty(monkeypatch):
+    from trustforge.ingestion import regulatory
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: REGULATORY_FTS_NO_HITS_FIXTURE)
+    docs = regulatory.SECFullTextSearchSource().fetch("", coin="")
+    assert docs == []
 
 
 def test_build_regulatory_sources():
