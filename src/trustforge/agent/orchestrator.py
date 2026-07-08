@@ -342,8 +342,13 @@ def _independent_source_keys(sources: Iterable[str | None]) -> set[str]:
     不計入結果、不拋例外——呼叫端資料可能是缺 `source` 欄位的 schema drift
     情境（見 `Evidence.source`/`Document.source` 皆為必填 `str`，理論上不該
     出現 None，這裡是防禦性寫法，不假設呼叫端一定守約）。
+
+    falsy 過濾在正規化**之後**做（而非之前）：正規化前非空的字串，正規化後
+    可能變空（例如純空白字串 `" "` 經 `.strip().casefold()` 後變 `""`）——
+    這種「正規化後才變空」的情況也要視為沒有來源、防禦性跳過，不能被誤判成
+    一個幽靈獨立來源（qa-lead LOW-3）。
     """
-    return {_normalize_source_key(s) for s in sources if s}
+    return {k for s in sources if s and (k := _normalize_source_key(s))}
 
 
 def _count_independent_sources(sources: Iterable[str | None]) -> int:

@@ -85,6 +85,19 @@ def test_independent_source_keys_preserves_truly_distinct_sources():
     assert count == 2, f"期望 count=2，實得 {count}"
 
 
+def test_independent_source_keys_does_not_count_whitespace_only_as_ghost_source():
+    """qa-lead LOW-3 回歸：純空白字串 " " 在 `if s` 過濾時是 truthy（非空
+    字串），但正規化（`.strip().casefold()`）後會變成 ""——這種「正規化後
+    才變空」的情況也要被視為沒有來源，不能被誤判成一個幽靈獨立來源。
+    `_independent_source_keys([" ", "CoinDesk"])` 應只得 {"coindesk"}
+    （count=1），而不是誤把 " " 正規化後的空字串也算進去變成 2。"""
+    sources = [" ", "CoinDesk"]
+    keys = _independent_source_keys(sources)
+    count = _count_independent_sources(sources)
+    assert keys == {"coindesk"}, f"期望 {{'coindesk'}}（純空白不計幽靈來源），實得 {keys}"
+    assert count == 1, f"期望 count=1，實得 {count}"
+
+
 # ─── 2. aggregate_trust_by_kind 不變量 ─────────────────────────────
 
 def test_aggregate_trust_by_kind_same_source_variants_yields_single_source():
