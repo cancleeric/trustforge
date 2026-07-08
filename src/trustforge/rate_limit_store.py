@@ -22,6 +22,14 @@
 `_check_live_rate_limit`）據此 fallback 回 process-local 限流，避免整個限流
 機制 fail-open（單機/DynamoDB 不可用時退化為「至少單機內仍會擋」，不是「完全
 不擋」）。
+
+⚠️ vp-eng review LOW（accepted trade-off，非 bug）：本模組的主路徑採用
+DynamoDB 固定視窗計數，其語意與 fallback 路徑的 process-local 滑動視窗
+不盡相同——固定視窗在邊界附近可能允許短時間內出現接近 2 倍 `max_requests`
+的突發流量，滑動視窗則無此邊界效應。這是刻意接受的取捨：以固定視窗換取
+「單一 DynamoDB item 上原子條件式遞增」的簡單性，真正的跨行程滑動視窗
+需要更複雜的分散式資料結構，超出本次修復範圍。兩條路徑的限流嚴格度本不
+必逐字相同，只要核心不變量「限流效果不會被多實例部署放大」成立即可。
 """
 from __future__ import annotations
 
@@ -91,6 +99,11 @@ class RateLimitStore:
             raise `RateLimitBackendError` — DynamoDB 操作本身失敗（非條件不成立），
                     呼叫端應 fallback 回 process-local 限流。
         """
+        # vp-eng review LOW：max_requests<=0 是 kill-switch 語意，
+        # not_exists() 分支不能讓它的第一次請求恆真放行，故前置直接擋下。
+        if max_requests <= 0:
+            return False
+
         resolved_now = now if now is not None else time.time()
         window_start = int(resolved_now // window_seconds) * window_seconds
         norm_key = key if key else _UNKNOWN_KEY_SENTINEL

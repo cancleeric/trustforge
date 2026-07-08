@@ -8,6 +8,9 @@ resource 實際送出請求前用的是同一顆 builder）把 `try_increment()`
 語意本身，不是憑空自己另訂一套規則。"""
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from trustforge import rate_limit_store
@@ -17,11 +20,19 @@ class _FakeDynamoDBTable:
     """極簡假 DynamoDB Table，只支援 `RateLimitStore.try_increment` 實際會
     送出的 `update_item` 呼叫形狀（ADD request_count + SET ttl
     if_not_exists，條件式 = not_exists(request_count) OR request_count <
-    max）。"""
+    max）。
+
+    `self._lock` 保護「讀現有 item → 檢查 condition → 寫回新 item」整段關鍵
+    區段，正確模擬真實 DynamoDB 對單一 item 寫入是原子序列化的保證——vp-eng
+    review Suggestion 併發原子性驗證需要這把鎖：moto 的 DynamoDB backend目前
+    沒有內部鎖（已檢查 moto/dynamodb/models/__init__.py 原始碼確認、並用
+    50-thread 直打 moto 重現過真實 over-admission race），無法用來可靠驗證
+    併發原子性，所以併發測試改用這個有鎖的 fake table，而不是 moto。"""
 
     def __init__(self) -> None:
         self._items: dict[tuple[str, str], dict] = {}
         self.call_count = 0
+        self._lock = threading.Lock()
 
     def update_item(
         self,
@@ -44,27 +55,28 @@ class _FakeDynamoDBTable:
         # 本模組唯一會送出的條件形狀只有一個數值佔位符（threshold）。
         threshold = list(cond_values.values())[0]
 
-        existing = self._items.get(key_tuple)
-        item_exists = existing is not None and "request_count" in existing
-        current_count = existing.get("request_count", 0) if existing else 0
+        with self._lock:
+            existing = self._items.get(key_tuple)
+            item_exists = existing is not None and "request_count" in existing
+            current_count = existing.get("request_count", 0) if existing else 0
 
-        condition_ok = (not item_exists) or (current_count < threshold)
-        if not condition_ok:
-            raise ClientError(
-                {
-                    "Error": {
-                        "Code": "ConditionalCheckFailedException",
-                        "Message": "The conditional request failed",
-                    }
-                },
-                "UpdateItem",
-            )
+            condition_ok = (not item_exists) or (current_count < threshold)
+            if not condition_ok:
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "ConditionalCheckFailedException",
+                            "Message": "The conditional request failed",
+                        }
+                    },
+                    "UpdateItem",
+                )
 
-        new_item = dict(existing) if existing else dict(Key)
-        new_item["request_count"] = current_count + ExpressionAttributeValues[":incr"]
-        if "ttl" not in new_item:
-            new_item["ttl"] = ExpressionAttributeValues[":ttl_val"]
-        self._items[key_tuple] = new_item
+            new_item = dict(existing) if existing else dict(Key)
+            new_item["request_count"] = current_count + ExpressionAttributeValues[":incr"]
+            if "ttl" not in new_item:
+                new_item["ttl"] = ExpressionAttributeValues[":ttl_val"]
+            self._items[key_tuple] = new_item
         return {}
 
 
@@ -105,6 +117,57 @@ def test_allows_up_to_max_then_blocks_without_further_incrementing():
     # 第 6 次被拒絕，不應該把計數器繼續往上加。
     key = ("__ratelimit_live__", f"1.2.3.4:{int(now // 60) * 60}")
     assert table._items[key]["request_count"] == 5
+
+
+def test_max_requests_zero_denies_even_first_request():
+    """vp-eng review LOW：max_requests<=0 是 kill-switch 語意——item 完全不
+    存在時 `not_exists()` 分支恆真，若不加前置判斷，第一次請求會被誤放行。
+    這裡確認：max_requests=0 時，就算是全新的 key（item 尚不存在），第一次
+    呼叫也要被拒絕，且完全不打 DynamoDB（不浪費一次註定失敗的網路呼叫）。"""
+    table = _FakeDynamoDBTable()
+    store = _make_store(table)
+    assert store.try_increment("live", "brand-new-key", 60, 0, now=1.0) is False
+    assert table.call_count == 0
+
+
+def test_max_requests_negative_also_denies():
+    table = _FakeDynamoDBTable()
+    store = _make_store(table)
+    assert store.try_increment("live", "brand-new-key", 60, -1, now=1.0) is False
+    assert table.call_count == 0
+
+
+def test_concurrent_atomicity_no_fail_open():
+    """vp-eng review Suggestion 併發原子性驗證，DynamoDB 真實行為對單一 item
+    寫入是序列化的，`_FakeDynamoDBTable` 加鎖後正確模擬這個保證；moto 的
+    DynamoDB backend 目前沒有內部鎖（已檢查 moto/dynamodb/models/__init__.py
+    原始碼確認，且用 50-thread 直打 moto 重現過真實 over-admission race：
+    true_count 落在 14～32 之間而非精確 10），無法用來可靠驗證併發原子性，
+    所以這條測試改用有鎖的 fake table，而不是 moto（moto smoke test 見
+    `tests/test_rate_limit_store_moto_smoke.py`，範圍限定在驗證 boto3 呼叫
+    語法本身合法，不含併發斷言）。"""
+    fake_table = _FakeDynamoDBTable()
+    store = _make_store(fake_table)
+
+    bucket = "live"
+    key = "concurrent-test-key"
+    n_workers = 50
+    barrier = threading.Barrier(n_workers)
+
+    def _call() -> bool:
+        barrier.wait()
+        return store.try_increment(
+            bucket, key, window_seconds=60, max_requests=10, now=1000.0
+        )
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = [executor.submit(_call) for _ in range(n_workers)]
+        results = [fut.result() for fut in futures]
+
+    true_count = sum(1 for r in results if r is True)
+    false_count = sum(1 for r in results if r is False)
+    assert true_count == 10
+    assert false_count == 40
 
 
 def test_window_rollover_resets_counter():

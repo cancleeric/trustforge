@@ -5644,6 +5644,25 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
                 f"live_token 須為長度 {_ADMIN_LIVE_TOKEN_MIN_LEN} 至 "
                 f"{_ADMIN_LIVE_TOKEN_MAX_LEN} 的可見 ASCII 字串（或 null＝清除）",
             )
+        # harper MEDIUM-1（issue #1 CISO High 複審）：動態設定 live_token
+        # 須與 `main()` 啟動期的靜態檢查同一立場——啟動期只擋得住「啟動時
+        # 就有 token」的情境，管理員事後才透過這條路徑動態設定 live token
+        # 會完全繞過那道防護。`TRUST_PROXY` 未開時（無法確認有 nginx TLS
+        # 反代保護）fail-closed 拒絕，同款 `TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN`
+        # opt-out（供本機/離線 demo 使用）。清除 token（payload 傳 null）
+        # 不受影響——本檢查在外層 `is not None` 判斷內，只擋「設定」不擋
+        # 「清除」。
+        if not TRUST_PROXY and os.getenv(
+            "TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN", ""
+        ).strip().lower() not in ("1", "true", "yes"):
+            return 403, _json_envelope_err(
+                "insecure_transport",
+                "TRUSTFORGE_TRUST_PROXY 未開，無法確認有 TLS 反代保護，"
+                "拒絕透過 admin 動態設定 live_token（明文 HTTP 外洩風險，"
+                "issue #1 CISO High harper MEDIUM-1）。解法一：啟用 TRUST_PROXY；"
+                "解法二：設 TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN=1 明確 opt-out"
+                "（供本機/離線 demo 使用）。",
+            )
         # PR-3：admin/live token 碰撞檢查延伸到 config 層——啟動期
         # `_compute_admin_token` 只擋得住「env live token == admin token」，
         # 若放任管理面把 config live token 設成與 admin token 相同，等於
