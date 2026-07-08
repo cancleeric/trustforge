@@ -15,7 +15,7 @@ import logging
 import math
 import re
 import time
-from typing import Callable
+from typing import Callable, Iterable
 
 from ..bedrock import BedrockClient
 from ..budget_guard import record_unledgered_spend
@@ -273,7 +273,9 @@ def aggregate_trust_by_kind(evidence: list[Evidence]) -> dict[str, dict]:
                 "single_source": None,
             }
             continue
-        sources = {ev.source for ev in kind_evidence}
+        # issue #106：改用 `_independent_source_keys`（正規化去重，見其
+        # docstring）——同一來源大小寫/空白變體不再被誤判成不同獨立來源。
+        sources = _independent_source_keys(ev.source for ev in kind_evidence)
         avg_trust = sum(ev.trust for ev in kind_evidence) / len(kind_evidence)
         out[kind] = {
             "label": label,
@@ -317,6 +319,43 @@ def _normalize_source_key(source: str) -> str:
     issue #72、既有 issue #17）——只治零成本就能修的大小寫/空白層級問題。
     """
     return source.strip().casefold()
+
+
+def _independent_source_keys(sources: Iterable[str | None]) -> set[str]:
+    """「同一來源只算一個獨立聲音」不變量的唯一收斂實作（issue #106）。
+
+    供本模組三處呼叫端共用：
+    (a) `aggregate_trust_by_kind` 算 `n_sources`
+    (b) `detect_cross_source_signal` 算 `obj_sources`/`sent_sources`
+    (c) `build_report` 算 `n_indep`（直接餵 W4 abstain 三態判斷）
+
+    先前這三處各自用 raw `{x.source for x in items}` 做 set 去重，沒有套用
+    `_normalize_source_key` 正規化，導致同一 publisher 的大小寫/空白變體（如
+    `"CoinDesk"` / `" coindesk "`）會被誤判成不同的獨立來源，虛增獨立來源
+    計數。本函式統一收斂三處口徑（跟 `_detect_stance_pairs`／
+    `_dedup_stance_pairs_by_source`／`_distinct_source_labels` 既有的
+    `_normalize_source_key` 去重口徑對齊，不造第二套真相），避免同一份資料在
+    不同呼叫端算出不同的「獨立來源數」，也避免同源灌水虛增 n_indep 讓本該
+    abstain 的判斷沒有 abstain。
+
+    對 falsy 項目（None、空字串）防禦性跳過，不呼叫 `_normalize_source_key`、
+    不計入結果、不拋例外——呼叫端資料可能是缺 `source` 欄位的 schema drift
+    情境（見 `Evidence.source`/`Document.source` 皆為必填 `str`，理論上不該
+    出現 None，這裡是防禦性寫法，不假設呼叫端一定守約）。
+
+    falsy 過濾在正規化**之後**做（而非之前）：正規化前非空的字串，正規化後
+    可能變空（例如純空白字串 `" "` 經 `.strip().casefold()` 後變 `""`）——
+    這種「正規化後才變空」的情況也要視為沒有來源、防禦性跳過，不能被誤判成
+    一個幽靈獨立來源（qa-lead LOW-3）。
+    """
+    return {k for s in sources if s and (k := _normalize_source_key(s))}
+
+
+def _count_independent_sources(sources: Iterable[str | None]) -> int:
+    """`_independent_source_keys` 的計數版本，供只需要數量（不需要 set 本身，
+    例如 `n_indep`）的呼叫端使用。
+    """
+    return len(_independent_source_keys(sources))
 
 
 def _detect_stance_pairs(
@@ -579,8 +618,10 @@ def detect_cross_source_signal(
         return _stance_pair_signal()
 
     # 兩類 source 合計 < 2 → None（除非有 stance_pairs 備援）
-    obj_sources = {sc.claim.doc.source for sc in objective}
-    sent_sources = {sc.claim.doc.source for sc in sentiment}
+    # issue #106：改用 `_independent_source_keys`（正規化去重）——同一來源
+    # 大小寫/空白變體不再被誤判成兩個獨立來源、虛增「合計 source 數」。
+    obj_sources = _independent_source_keys(sc.claim.doc.source for sc in objective)
+    sent_sources = _independent_source_keys(sc.claim.doc.source for sc in sentiment)
     if len(obj_sources | sent_sources) < 2:
         return _stance_pair_signal()
 
@@ -748,7 +789,14 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     # judgment 敘事本就需要這個值，這裡只是提前算好、重複使用同一份，不
     # 重算 trust、不新增資料源）——單源不論產生幾句 claim，仍只算 1 份獨立
     # 來源，需要 ≥2 個不同來源才可能脫離 abstain。
-    n_indep = len({sc.claim.doc.source for sc in brief.supporting})
+    # issue #106 追加修正：原本這裡跟 `_evidence_strength` 一樣是 raw
+    # `{x.source for x in items}` 去重，沒套 `_normalize_source_key` 正規化
+    # ——同一來源大小寫/空白變體（`"CoinDesk"` vs `" coindesk "`）仍會被
+    # 誤判成 2 個獨立來源，虛增 n_indep，直接餵進下面 abstain 三態判斷，
+    # 可能讓該 abstain 的判斷因為「同源灌水」沒有 abstain。改用共用的
+    # `_count_independent_sources`（`_normalize_source_key` 正規化去重），
+    # 跟 `aggregate_trust_by_kind`/`detect_cross_source_signal` 同一口徑。
+    n_indep = _count_independent_sources(sc.claim.doc.source for sc in brief.supporting)
     is_abstain = (
         calibrated < _ABSTAIN_CALIBRATED_THRESHOLD or n_indep < _ABSTAIN_MIN_SUPPORTING
     )
