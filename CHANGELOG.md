@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.9.0 — 2026-07-08
+
+生產上線 + 上線後優化 + 信任品質與資料真實產出。
+
+### 安全 / 部署
+- **runtime token 讀取**（PR-A/B）：admin/live token 改 app 啟動期從 SSM Parameter Store SecureString 讀，**不落 systemd unit 檔**（消除 systemctl-show 洩漏面）；opt-in 旗標守零設定離線不變式；deploy 退場 #119 部署期 token 搬運。
+- **CISO High 限流+HTTPS**（#1）：Lambda 跨實例限流從 process-dict 改 DynamoDB 共享原子計數（多實例生效、fail-closed）；live token 傳輸層強制 HTTPS（含 admin 動態設 token 的 HTTP 守門）。
+
+### 前端部署自動化
+- **CI 前端 gate**（#125）：合併前必過 `build/test/lint`；順帶修 3 個既有隱形 CI 紅（pythonpath、py3.11）。
+- **CD 自動部署**（#128）：workflow_dispatch + OIDC + environment required reviewers + concurrency + **git sha 版本標記**（線上 bundle 對應哪個 commit 一 curl 可驗）。
+- **前端渲染測試機制**（#126）：@testing-library/react + 邊界值測試，含雷達 regression guard。
+
+### UI 正確性
+- **信任雷達絕對刻度**（#124）：`PolarRadiusAxis domain=[0,1]`，每維度畫在真實位置、跨幣可比較。
+- **% 文字 clamp 統一**（#126）：異常值不再顯示 >100%。
+
+### 信任誠實性 / 資料
+- **獨立來源去重不變量**（#106）：同源大小寫/空白灌水不再虛增獨立計數、不再讓「該棄權的判斷沒棄權」；3 處統一共用正規化函式。
+- **SEC 監管 feed 真實產出**（#9）：改 EDGAR 全文檢索，加密相關命中 **0→20** 真實 filing；content_reference 帶命中詞（使用者看得出為何判定加密相關）。
+
+_全程 GLM-5.2 產碼 + 副手雙審（CISO/QA/VP-Eng）+ CEO 親測（含 Chrome Playwright、moto 併發壓測）。_
+
 ## v0.8.0 — 2026-07-07
 
 管理控制台（運行時設定）+ SecureString token 傳遞。開真 Bedrock 前的線上調控與部署安全前置。
