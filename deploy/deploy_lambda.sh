@@ -37,7 +37,7 @@ echo "[deploy] zip = $ZIP ($(du -h "$ZIP" | cut -f1))"
 ENVVARS="Variables={TRUSTFORGE_HOME=/var/task}"
 # 要真實 Bedrock / live 模式時，在呼叫前 export 以下變數再執行本腳本：
 #   BEDROCK_MODEL_ID=au.anthropic.claude-sonnet-4-6（或 apac.* inference profile）
-#   TRUSTFORGE_LIVE_TOKEN=<自選秘密字串>（live 請求須帶相符的 ?token= 參數）
+#   TRUSTFORGE_LIVE_TOKEN=<自選秘密字串>（live 請求須帶相符的 X-Live-Token header，query ?token= 已不再支援）
 #   AWS_REGION=ap-southeast-2
 # 並確保 Lambda 執行角色只有以下最小 bedrock 權限（不需 InvokeModelWithResponseStream）：
 # CISO hardening R2（#2b）：region 收斂——bedrock.py 預設 stance_model_id 用

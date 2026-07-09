@@ -3222,12 +3222,10 @@ def _render_comparison(
 
 
 def _apply_live_token_header(qs: dict, headers, query_has_token: bool | None = None) -> None:
-    """CISO hardening R2（#2a）：live token 改優先讀 `X-Live-Token` request
-    header，query string `?token=` 版本保留一版 deprecation 相容。
-
-    query string 常被瀏覽器歷史記錄／反代 access log／`Referer` header
-    外洩給第三方，`token` 帶在 URL 上是既有的資訊外洩風險；header 不會被
-    這些管道記錄，因此優先信任 header。
+    """CISO hardening R3（#2a，issue #134）：live token 只認 `X-Live-Token`
+    request header，query string `?token=` 支援已正式移除（PR #99 起的
+    deprecation 過渡期已過，即使 HTTPS 下 query token 仍會外洩進 URL
+    瀏覽器歷史／反代 access log／跨站 `Referer`，不再接受任何 fallback）。
 
     就地修改傳入的 `qs`（唯一寫入點），讓下游 `_is_live_request` 等既有
     邏輯完全不用改——仍然只認 `qs.get("token")`，不必逐一 thread header
@@ -3235,21 +3233,19 @@ def _apply_live_token_header(qs: dict, headers, query_has_token: bool | None = N
     這裡正規化後的 token（見該函式 PR #99 終審修復），輸出端不會回吐任何
     來源的 token。
 
-    - header 有值：覆寫 `qs["token"]`（header 優先，即使 query 也帶了
-      token，也不 fallback，避免兩邊不一致時難以判斷生效的是哪一個）。
-    - header 沒值、query 帶了 token：保留舊行為（仍照常運作，7/13
-      工作坊既有 demo 腳本不斷線），但 log warning 提醒遷移。
-    - 兩者都沒帶：不動 `qs`（沿用預設空字串，`_is_live_request` 照舊判定
-      為不成立 live）。
+    - header 有值：`qs["token"] = [header_token]`（唯一生效來源）。
+    - header 沒值（缺失或空字串）：不論 query 是否帶了 token，一律
+      `qs.pop("token", None)` 清掉——不再有任何 fallback，讓下游
+      `_is_live_request` 一定判定為沒有 token（未帶 header 的請求不會被
+      query token 頂替生效）。
 
-    codex/harper 雙審（PR #99 MEDIUM）：只要 query 帶了 `token` 就一定
-    log warning，不論 header 是否同時有值、是否會覆寫掉它——query token
-    一旦出現在 URL 上，就**已經**外洩進 access log／`Referer`，這個風險跟
-    header 最終有沒有生效無關；遷移期若只在「header 沒帶」才 warn，會漏掉
-    「新舊參數同時帶」這種過渡期最常見的情境，追蹤不到誰還沒把舊參數拔掉。
-    warning 訊息本身不印 token 值，避免 log 本身變成另一個外洩管道。
+    只要偵測到 query 帶了 `token`，仍會 log 一行 WARNING（訊息不含 token
+    值，避免 log 本身變成另一個外洩管道），但語意從舊版「已棄用、仍可用」
+    改為「支援已移除、直接忽略」，方便維運從 log 追蹤誰還在打 legacy
+    client（沿用 PR #99 MEDIUM 的判斷時機：不論 header 是否同時有值都要
+    warn，因為 query token 一旦出現在 URL 上就已經外洩）。
 
-    codex/harper 終審（PR #99 LOW）：`query_has_token` 讓呼叫端可以明確告知
+    `query_has_token`（沿用 PR #99 LOW 的收斂）讓呼叫端可以明確告知
     「query string 是否帶了 token 這個 key（即使值是空字串）」，跟 `qs` 本身
     的內容脫鉤——因為呼叫端（`Handler.do_GET`）用的 `parse_qs(u.query)` 預設
     `keep_blank_values=False`，`?token=` 或裸 `?token`（無 `=`）在解析階段就
@@ -3268,10 +3264,12 @@ def _apply_live_token_header(qs: dict, headers, query_has_token: bool | None = N
     has_query_token = query_has_token if query_has_token is not None else ("token" in qs)
     if has_query_token:
         logging.warning(
-            "TrustForge: query token 已棄用，改用 X-Live-Token header"
+            "TrustForge: query token 支援已移除，忽略 ?token=，請改用 X-Live-Token header"
         )
     if header_token:
         qs["token"] = [header_token]
+    else:
+        qs.pop("token", None)
 
 
 def _live_token_over_insecure_transport(qs: dict, headers) -> bool:
@@ -5820,9 +5818,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
-        # CISO hardening R2（#2a）：live token 唯一收斂點——把 `X-Live-Token`
-        # request header（優先）或 deprecated query `token`（fallback +
-        # warning）就地寫回 `qs["token"]`，下游所有讀 token 的純函式
+        # CISO hardening R3（#2a, issue #134）：live token 唯一收斂點——只認
+        # `X-Live-Token` request header，寫回 `qs["token"]`；header 缺失時
+        # 一律清掉 `qs["token"]`（即使 query 帶了 `?token=` 也不再 fallback
+        # 生效，只 log warning）。下游所有讀 token 的純函式
         # （`_is_live_request`）維持只認 `qs`，不用改。
         # PR #99 終審 LOW：上面 `parse_qs(u.query)` 用預設
         # `keep_blank_values=False`，`?token=`／裸 `?token` 會被整個丟掉、
