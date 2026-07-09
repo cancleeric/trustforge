@@ -558,6 +558,18 @@ def detect_cross_source_signal(
     使用者被誤導以為有更多獨立來源佐證。
 
     守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
+
+    `sentiment_source_count`（issue #21，CISO-LOW，僅出現在 obj_dir/sent_dir
+    主分支回傳值，`_stance_pair_signal()` 備援分支不附加）：情緒類（news/
+    social/sentiment）這一輪算出 `sent_dir` 時實際涉及的獨立來源數
+    （`len(sent_sources)`，`sent_sources` 用 `_independent_source_keys` 正規化
+    去重，跟上面「兩類 source 合計 < 2」判斷同一份資料）。純展示用透明化
+    欄位，**不影響** `sent_dir`/`signal_type`/`summary` 等既有計算——單一
+    高佐證 social 源在高 corr(≈1.0)+高 recency 時 trust 可達門檻以上，若情緒
+    類僅此一源即可用 100% 票重主導 `sent_dir`，觸發虛假背離/共識框。緩解
+    方式選「不抑制訊號、只補透明度」（CPO/CISO 三審定案）：UI（見
+    `CrossSourceSignalPanel`）在 `sentiment_source_count == 1` 時顯示「單一
+    來源主導」徽章，多源時不顯示，訊號本身照常呈現。
     """
     # 只取 trust >= 0.5 的主張
     eligible = [sc for sc in scored if sc.trust >= 0.5]
@@ -681,6 +693,13 @@ def detect_cross_source_signal(
         "sentiment_direction": sent_dir,
         "summary": summary,
         "supporting_claim_ids": supporting_ids,
+        # issue #21（CISO-LOW）：純展示用透明化欄位，不影響上面任何分數/方向
+        # 計算——UI 讀這個數字判斷是否顯示「單一來源主導」徽章（見
+        # `CrossSourceSignalPanel`）。單一高佐證 social 源在高
+        # corr/recency 時可能以 100% 票重主導 `sent_dir`，這裡把「情緒類
+        # 這一輪實際有幾個獨立來源」誠實攤開，不抑制訊號本身（守 TrustForge
+        # 透明哲學），只補足「這個結論的證據廣度」讓使用者自行判讀。
+        "sentiment_source_count": len(sent_sources),
     }
     if stance_pairs:
         result["stance_pairs"] = stance_pairs

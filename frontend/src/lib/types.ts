@@ -121,6 +121,14 @@ export interface CrossSourceSignal {
   distinct_sources?: { bullish: StancePair[]; bearish: StancePair[] }
   objective_direction?: string
   sentiment_direction?: string
+  /** issue #21（CISO-LOW）：情緒類（news/social/sentiment）這一輪算出
+   *  `sentiment_direction` 時實際涉及的獨立來源數。純展示透明化欄位，不
+   *  影響任何分數/方向計算——只在 `agent.orchestrator.detect_cross_
+   *  source_signal` 的 obj_dir/sent_dir 主分支回傳值出現，`_stance_pair_
+   *  signal()` 備援分支（已保證 >=2 獨立來源）不會有這個欄位。`=== 1` 時
+   *  UI 顯示「單一來源主導」透明徽章，提醒該類判定目前只有 1 個獨立來源
+   *  佐證，避免被誤讀成多源共識/背離。 */
+  sentiment_source_count?: number
 }
 
 export interface Report {

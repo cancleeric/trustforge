@@ -103,13 +103,21 @@ export function InfoFlagBadge({ infoFlags }: { infoFlags: string[] }) {
   )
 }
 
-export function SingleSourceBadge() {
+/** `label`/`title` 皆選填，預設值＝原本雷達圖單維度用法（向後相容，既有
+ * `<SingleSourceBadge />` 呼叫端不用改）。issue #21（CISO-LOW）
+ * `CrossSourceSignalPanel` 重用本徽章、自訂文案，標示「情緒類跨源訊號
+ * 這一輪只有 1 個獨立來源」——跟雷達圖「單一維度只有 1 來源」語意不同，
+ * 故開放自訂而非另造一顆重複元件。 */
+export function SingleSourceBadge({
+  label = '單源',
+  title = '此維度目前僅有單一來源支撐，尚未有跨源互證',
+}: { label?: string; title?: string } = {}) {
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_14%,transparent)] px-1.5 py-0.5 text-[0.65rem] font-semibold text-tf-warn"
-      title="此維度目前僅有單一來源支撐，尚未有跨源互證"
+      title={title}
     >
-      單源
+      {label}
     </span>
   )
 }

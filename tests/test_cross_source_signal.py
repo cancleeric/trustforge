@@ -241,6 +241,73 @@ def test_render_consensus_has_blue():
     assert "共識" in htmlout, "共識框應含『共識』文字"
 
 
+# ---------------------------------------------------------------------------
+# issue #21（CISO-LOW）：sentiment_source_count 透明化欄位
+# 純展示用，驗證只加欄位、不動既有分數/方向計算（T1/T2/T6 既有斷言不變）。
+# ---------------------------------------------------------------------------
+
+def test_sentiment_source_count_single_source():
+    """情緒類只有 1 個獨立來源（單一 social 源）時，count 應為 1，供 UI
+    顯示「單一來源主導」徽章。"""
+    scored = [
+        _sc("obj1", "price",  "binance",  "bearish", 0.90),
+        _sc("sen1", "social", "reddit",   "bullish", 0.60),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is not None
+    assert result["sentiment_source_count"] == 1
+    # 加欄位不動既有計算：type/方向不受影響
+    assert result["type"] == "divergence"
+    assert result["sentiment_direction"] == "bullish"
+
+
+def test_sentiment_source_count_multiple_sources():
+    """情緒類有 2 個以上獨立來源（news + social）時，count >= 2，不應顯示徽章。"""
+    scored = [
+        _sc("obj1", "onchain",    "glassnode",  "bullish", 0.80),
+        _sc("obj2", "price",      "binance",    "bullish", 0.75),
+        _sc("sen1", "news",       "coindesk",   "bearish", 0.65),
+        _sc("sen2", "social",     "twitter",    "bearish", 0.55),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is not None
+    assert result["sentiment_source_count"] == 2
+    # 加欄位不動既有計算：沿用 T1 的既有斷言
+    assert result["type"] == "divergence"
+    assert result["sentiment_direction"] == "bearish"
+
+
+def test_sentiment_source_count_two_social_sources_same_direction():
+    """情緒類 2 筆不同來源的 social claim（同方向）時，count == 2。"""
+    scored = [
+        _sc("obj1", "regulatory", "sec",      "bullish", 0.85),
+        _sc("sen1", "social",     "reddit",   "bullish", 0.70),
+        _sc("sen2", "social",     "twitter",  "bullish", 0.65),
+    ]
+    result = detect_cross_source_signal(scored)
+    assert result is not None
+    assert result["sentiment_source_count"] == 2
+    assert result["type"] == "consensus"
+
+
+def test_sentiment_source_count_absent_in_stance_pair_fallback():
+    """`_stance_pair_signal()` 備援分支（聚合層級任一類 0 筆/neutral，但有
+    stance_pairs）不附加 sentiment_source_count——該分支本就保證 stance_pairs
+    涉及 >=2 個獨立來源，不需要標記單一來源主導。"""
+    scored = [
+        _sc("obj1", "onchain", "glassnode", "neutral", 0.80),
+        _sc("sen1", "news",    "coindesk",  "bearish", 0.70),
+        _sc("sen2", "social",  "twitter",   "bullish", 0.65),
+    ]
+
+    def stance_fn(_a: str, _b: str) -> str:
+        return "contradiction"
+
+    result = detect_cross_source_signal(scored, stance_fn=stance_fn)
+    assert result is not None
+    assert "sentiment_source_count" not in result
+
+
 def test_render_no_signal_no_cross_section():
     """cross_source_signal=None 時，HTML 中不應出現跨源訊號區塊。"""
     from trustforge import web

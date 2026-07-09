@@ -1,5 +1,6 @@
 import type { CrossSourceSignal, StancePair } from '../lib/types'
 import { groupByStance } from '../lib/stancePairs'
+import { SingleSourceBadge } from './Badges'
 
 function SideColumn({ label, color, items }: { label: string; color: string; items: StancePair[] }) {
   return (
@@ -32,6 +33,14 @@ export default function CrossSourceSignalPanel({ signal }: { signal: CrossSource
       <h3 className="mb-3 text-sm font-semibold text-tf-text">跨源分歧 / 共識</h3>
       {signal === null && (
         <p className="text-xs text-tf-muted">目前未偵測到同議題、跨源、語意矛盾的顯著訊號。</p>
+      )}
+      {signal !== null && signal.sentiment_source_count === 1 && (
+        <div className="mb-2">
+          <SingleSourceBadge
+            label="單一來源主導"
+            title="情緒類（news/social）訊號這一輪僅有 1 個獨立來源佐證，此類別判定可能被單一來源主導，參考性較低，建議留意其他管道佐證。"
+          />
+        </div>
       )}
       {signal !== null && signal.type === 'consensus' && (
         <div className="rounded-lg border border-tf-good p-3" style={{ backgroundColor: 'color-mix(in srgb, var(--color-tf-good) 8%, transparent)' }}>
