@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.10.0 — 2026-07-10
+
+安全清理 + 跨源訊號透明度。
+
+### 安全
+- **移除 live token `?token=` query fallback**（#134, PR #136）：只認 `X-Live-Token` header；codex 對抗審抓到的 429/502 錯誤頁 retry 連結 token 反射（web.py/lambda 三處）一併修復（`_sanitized_retry_href`）；lambda header 查找改大小寫不敏感；openapi/docstring 清除過時 query token 說法。
+
+### 跨源訊號透明度
+- **單一來源主導徽章**（#21, PR #135）：`detect_cross_source_signal` 新增純展示欄位 `sentiment_source_count`（sent_sources 與 stance_pairs 來源聯集、正規化去重）；前端 `CrossSourceSignalPanel` 於 count==1 顯示「單一來源主導」徽章；validator 選填相容舊快照。同源大小寫/空白灌水去重測試 + validator 整鏈前端測試補齊（別名 canonicalization 留 #72）。
+
+### 版控整理
+- 刪除 8 支已被取代的殘枝分支（origin 6 + PR 分支 2）與 Gitea 鏡像 7 支殘枝；分支模型收斂為 develop / main / release/*。
+
+
 ## v0.9.0 — 2026-07-08
 
 生產上線 + 上線後優化 + 信任品質與資料真實產出。
