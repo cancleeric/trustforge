@@ -340,6 +340,38 @@ describe('apiFetch — 巢狀 payload 驗證（trust_radar / price_provenance）
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.data).toEqual(data)
   })
+
+  // issue #21（CISO-LOW）必補 3：`sentiment_source_count` 選填數字欄位——
+  // 缺欄位（`_stance_pair_signal()` 備援分支/舊快照）要放行，存在時型別
+  // 不對（如字串 `'1'`）要 parse_error，不能悄悄放行讓 `=== 1` 永遠比對
+  // 失敗、徽章悄悄漏顯示（同本檔其餘欄位一貫慣例）。
+
+  it('cross_source_signal 缺 sentiment_source_count（舊/stale 後端回應）→ 正常回傳', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = { type: 'consensus', summary: '共識' }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(true)
+  })
+
+  it('cross_source_signal.sentiment_source_count 是數字 1 → 正常回傳', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = { type: 'consensus', summary: '共識', sentiment_source_count: 1 }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.data).toEqual(data)
+  })
+
+  it('cross_source_signal.sentiment_source_count 是字串 "1"（非數字）→ parse_error', async () => {
+    const data = validAnalyzeData()
+    data.report.cross_source_signal = { type: 'consensus', summary: '共識' }
+    asMutable(data.report.cross_source_signal).sentiment_source_count = '1'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
 })
 
 /** 最小合法的 overview coin——對齊後端 `_snapshot_dict()`：evidence 為

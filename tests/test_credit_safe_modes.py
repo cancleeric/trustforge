@@ -1012,17 +1012,21 @@ def test_active_mode_matches_exactly_one_badge_across_requests(
 # ---------------------------------------------------------------------------
 
 
-def _run_do_get(path: str, client_ip: str = "1.2.3.4") -> dict:
+def _run_do_get(path: str, client_ip: str = "1.2.3.4", headers: dict | None = None) -> dict:
     """呼叫 `Handler.do_GET` 但不建立真實 socket。
 
     `BaseHTTPRequestHandler.do_GET` 的邏輯只讀 `self.path` / `self.client_address`，
     並透過 `self._send(code, body, ctype)` 輸出——用 `__new__` 跳過
     socketserver 的連線初始化，並以 instance attribute 覆寫 `_send` 攔截輸出，
     不需要真的開 socket／起 HTTP server。
+
+    `headers`：issue #134 起 live token 只認 `X-Live-Token` header（query
+    `?token=` 已不再生效），需要帶合法 token 的測試改用此參數。
     """
     h = web.Handler.__new__(web.Handler)
     h.path = path
     h.client_address = (client_ip, 55555)
+    h.headers = headers if headers is not None else {}
     captured: dict = {}
 
     def fake_send(code, body, ctype="text/html; charset=utf-8", extra_headers=None):
@@ -1053,7 +1057,9 @@ def test_error_400_real_mode_keeps_real_active_badge(monkeypatch):
 
 
 def test_error_429_live_mode_keeps_live_active_badge(monkeypatch):
-    """?live=1&token=<正確 token> 但超過限流 → 429，錯誤頁仍應標 tf-live active（不落回 offline）。"""
+    """?live=1 + X-Live-Token header 正確 但超過限流 → 429，錯誤頁仍應標 tf-live
+    active（不落回 offline）。issue #134 起 live token 只認 header，query
+    `?token=` 已不再生效。"""
     monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "secret")
     web._rate_buckets.clear()
@@ -1063,7 +1069,9 @@ def test_error_429_live_mode_keeps_live_active_badge(monkeypatch):
         web._check_live_rate_limit(ip)  # 灌爆同一 IP 的限流桶
 
     result = _run_do_get(
-        "/analyze?coin=BTC&type=multi_source&q=t&live=1&token=secret", client_ip=ip
+        "/analyze?coin=BTC&type=multi_source&q=t&live=1",
+        client_ip=ip,
+        headers={"X-Live-Token": "secret"},
     )
 
     assert result["code"] == 429

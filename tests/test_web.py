@@ -640,3 +640,36 @@ def test_do_get_costs_route_header_unchanged():
     _, body = _do_get("/costs")
     assert 'class="tf-version"' in body
     assert "cost ledger" in body
+
+
+# ---------------------------------------------------------------------------
+# codex 對抗審修復（#134 fast-follow）：429/502 錯誤頁 retry 連結不得反射
+# legacy `?token=` query（即使該 fallback 已被 header-only 取代）。
+# ---------------------------------------------------------------------------
+
+def test_analyze_429_retry_href_strips_legacy_token(monkeypatch):
+    def _raise(*a, **k):
+        raise web.TooManyRequests("請求過於頻繁，請稍後再試")
+
+    monkeypatch.setattr(web, "_do_analyze", _raise)
+
+    code, body = _do_get(
+        "/analyze?coin=BTC&type=multi_source&token=super-secret-value"
+    )
+    assert code == 429
+    assert "super-secret-value" not in body
+    # 其餘參數仍保留在重試連結裡（coin/type），只是不含 token
+    assert "coin=BTC" in body
+    assert "token=" not in body
+
+
+def test_analyze_502_retry_href_strips_legacy_token(monkeypatch):
+    def _raise(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(web, "_do_analyze", _raise)
+
+    code, body = _do_get("/analyze?coin=ETH&token=another-secret")
+    assert code == 502
+    assert "another-secret" not in body
+    assert "token=" not in body
