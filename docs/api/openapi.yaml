@@ -400,8 +400,8 @@ paths:
            資料，Bedrock 關閉，$0，60 秒視窗每 IP 最多 60 次。
         2. 離線示範沙盒（`?sample=1`，opt-in）：樣本資料 + Bedrock stub，
            $0，未設 AWS 也能跑。
-        3. 真 Bedrock（`?live=1&token=<TOKEN>`，經 `X-Live-Token` header 或
-           已棄用的 `token` query 帶入）：需伺服器已設
+        3. 真 Bedrock（`?live=1`，須以 `X-Live-Token` header 帶入 token；
+           query `?token=` 已移除，不再支援）：需伺服器已設
            `TRUSTFORGE_LIVE_TOKEN` 且 token 比對正確（`hmac.compare_digest`），
            60 秒視窗每 IP 最多 5 次緊門檻。`live` 優先於其餘檔位。
       parameters:
@@ -450,15 +450,6 @@ paths:
             type: string
             enum: ["0", "1"]
             default: "0"
-        - name: token
-          in: query
-          required: false
-          deprecated: true
-          description: |
-            已棄用——改用 `X-Live-Token` request header。仍相容接受，但會被
-            記一筆 deprecation warning log。
-          schema:
-            type: string
       responses:
         "200":
           description: |

@@ -16,7 +16,7 @@ from trustforge import lambda_handler, web
 from trustforge.schema import Evidence, QuestionType
 
 
-def _event(path: str, qs: dict | None = None) -> dict:
+def _event(path: str, qs: dict | None = None, headers: dict | None = None) -> dict:
     """組一個 Lambda Function URL（payload v2）事件。"""
     event = {
         "rawPath": path,
@@ -24,6 +24,8 @@ def _event(path: str, qs: dict | None = None) -> dict:
     }
     if qs is not None:
         event["queryStringParameters"] = qs
+    if headers is not None:
+        event["headers"] = headers
     return event
 
 
@@ -89,6 +91,71 @@ def test_lambda_502_uses_brand_error_card_with_retry(monkeypatch):
     expected_retry_href = html.escape(f"/analyze?{urlencode(qs)}")
     assert f'href="{expected_retry_href}"' in body
     assert "boom" not in body  # 未預期例外不回顯原始訊息（既有縱深防禦不變）
+
+
+# ---------------------------------------------------------------------------
+# codex 對抗審修復（#134 fast-follow）：retry_href 不得反射 legacy ?token=
+# ---------------------------------------------------------------------------
+
+def test_lambda_429_retry_href_strips_legacy_token(monkeypatch):
+    def _raise(*a, **k):
+        raise web.TooManyRequests("請求過於頻繁，請稍後再試")
+    monkeypatch.setattr(web, "_do_analyze", _raise)
+
+    qs = {"coin": "BTC", "type": "multi_source", "token": "super-secret-value"}
+    resp = lambda_handler.handler(_event("/analyze", qs))
+
+    assert resp["statusCode"] == 429
+    body = resp["body"]
+    assert "super-secret-value" not in body  # token 值不得出現在錯誤頁任何地方
+    # 其餘參數仍原樣保留在重試連結（重試仍指回同一請求，只是不帶憑證）
+    expected_retry_href = html.escape(
+        f"/analyze?{urlencode({'coin': 'BTC', 'type': 'multi_source'})}"
+    )
+    assert f'href="{expected_retry_href}"' in body
+
+
+def test_lambda_502_retry_href_strips_legacy_token(monkeypatch):
+    def _raise(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(web, "_do_analyze", _raise)
+
+    qs = {"coin": "ETH", "token": "another-secret"}
+    resp = lambda_handler.handler(_event("/analyze", qs))
+
+    assert resp["statusCode"] == 502
+    body = resp["body"]
+    assert "another-secret" not in body
+    expected_retry_href = html.escape(f"/analyze?{urlencode({'coin': 'ETH'})}")
+    assert f'href="{expected_retry_href}"' in body
+
+
+# ---------------------------------------------------------------------------
+# codex 對抗審修復（#134 fast-follow）：X-Live-Token header 查找大小寫不敏感
+# ---------------------------------------------------------------------------
+
+def test_lambda_live_token_header_case_insensitive_upper(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "correct-token")
+    captured_qs = {}
+
+    def _fake_do_analyze(qs, client_ip=None):
+        captured_qs.update(qs)
+        return (object(), [], [])
+
+    monkeypatch.setattr(web, "_do_analyze", _fake_do_analyze)
+    monkeypatch.setattr(
+        web, "_render_report", lambda report, evidence: "<html>ok</html>"
+    )
+
+    event = _event(
+        "/analyze",
+        {"coin": "BTC", "live": "1"},
+        headers={"X-LIVE-TOKEN": "correct-token"},
+    )
+    resp = lambda_handler.handler(event)
+
+    assert resp["statusCode"] == 200
+    assert captured_qs.get("token") == ["correct-token"]
 
 
 # ---------------------------------------------------------------------------

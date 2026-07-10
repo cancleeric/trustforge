@@ -100,10 +100,12 @@ def _request(path: str, *, headers: dict | None = None, ip: str = "203.0.113.1")
 
 
 def test_do_get_rejects_live_token_over_plain_http(monkeypatch):
+    """issue #134 起 live token 只認 `X-Live-Token` header（query `?token=`
+    已不再生效），這裡改用 header 帶 token 觸發明文 HTTP 拒絕檢查。"""
     monkeypatch.setattr(web, "TRUST_PROXY", True)
     status, body = _request(
-        "/analyze?live=1&token=secret&coin=BTC&q=x",
-        headers={"X-Forwarded-Proto": "http"},
+        "/analyze?live=1&coin=BTC&q=x",
+        headers={"X-Forwarded-Proto": "http", "X-Live-Token": "secret"},
     )
     assert status == 403
     assert "secret" not in body  # token 本身不可回顯
@@ -114,8 +116,8 @@ def test_do_get_allows_live_token_over_https(monkeypatch):
     不在本測試斷言範圍——這裡只確認不是被 403 擋掉）。"""
     monkeypatch.setattr(web, "TRUST_PROXY", True)
     status, _body = _request(
-        "/analyze?live=1&token=secret&coin=BTC&q=x",
-        headers={"X-Forwarded-Proto": "https"},
+        "/analyze?live=1&coin=BTC&q=x",
+        headers={"X-Forwarded-Proto": "https", "X-Live-Token": "secret"},
     )
     assert status != 403
 
