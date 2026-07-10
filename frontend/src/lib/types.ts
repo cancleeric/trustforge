@@ -122,12 +122,19 @@ export interface CrossSourceSignal {
   objective_direction?: string
   sentiment_direction?: string
   /** issue #21（CISO-LOW）：情緒類（news/social/sentiment）這一輪算出
-   *  `sentiment_direction` 時實際涉及的獨立來源數。純展示透明化欄位，不
+   *  `sentiment_direction` 時實際涉及的獨立來源數（後端 `sent_sources |
+   *  stance_pairs 來源` 聯集，見 PR #135 R1 修法）。純展示透明化欄位，不
    *  影響任何分數/方向計算——只在 `agent.orchestrator.detect_cross_
    *  source_signal` 的 obj_dir/sent_dir 主分支回傳值出現，`_stance_pair_
    *  signal()` 備援分支（已保證 >=2 獨立來源）不會有這個欄位。`=== 1` 時
    *  UI 顯示「單一來源主導」透明徽章，提醒該類判定目前只有 1 個獨立來源
-   *  佐證，避免被誤讀成多源共識/背離。 */
+   *  佐證，避免被誤讀成多源共識/背離。
+   *
+   *  Normalized string key count：計數用後端 `_normalize_source_key`
+   *  （`strip().casefold()`）正規化去重，只收斂同一 publisher 的大小寫/
+   *  空白變體（如 `"CoinDesk"`/`" coindesk "`），**不解 publisher 別名**
+   *  （如 `coindesk` vs `coindesk.com` 仍視為 2 個不同來源）——別名映射見
+   *  follow-up issue #72，本輪不做 canonicalization。 */
   sentiment_source_count?: number
 }
 
