@@ -6,7 +6,8 @@
   GET /llms.txt    AI agent 一頁式指南（繁中+英文對照，純讀檔回傳，見 repo
                    根目錄 `llms.txt`；react/nginx 拓樸下的等效副本見
                    `frontend/public/llms.txt`）
-  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1&token=<TOKEN>][&sample=1] → HTML 報告
+  GET /analyze     ?coin=BTC&q=...&type=multi_source[&live=1][&sample=1] → HTML 報告
+                   （live 模式需帶 `X-Live-Token` header，query `?token=` 已移除）
   GET /analyze.json 同上參數 → JSON {report, evidence, log}
 
 第三輪 AI 友善（`/api/*` 系列見下方 `_handle_api_*`）另補：
@@ -46,7 +47,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from . import admin_config
 from . import rate_limit_store
@@ -3670,6 +3671,25 @@ def _do_comparison(
     return report_a, evidence_a, report_b, evidence_b, log
 
 
+def _sanitized_retry_href(path: str) -> str:
+    """codex 對抗審修復（#134 fast-follow）：錯誤頁「重試」連結先前直接拿
+    `self.path`（含原始 query）回顯進 HTML——若請求帶了 legacy `?token=secret`
+    （即使該 fallback 已被 header-only 取代、下游不再採信這個 query 值），
+    這串 query 仍會原封不動出現在 429/503/502 錯誤頁的重試連結、瀏覽器歷史、
+    access log／Referer 裡，等於把憑證性參數又從輸出端洩漏回去（跟
+    `_mode_extra_params` 上一輪修的問題同源）。
+
+    這裡在組 retry_href 前，把 `token`（以及未來若出現的其他憑證性參數，
+    目前僅此一個）從 query string 中移除，其餘參數（coin/type/q/live/sample
+    等）原樣保留，讓「重試」仍指回同一個請求（只是不再帶著憑證）。
+    """
+    u = urlparse(path)
+    qs = parse_qs(u.query, keep_blank_values=True)
+    qs.pop("token", None)
+    new_query = urlencode(qs, doseq=True)
+    return urlunparse((u.scheme, u.netloc, u.path, u.params, new_query, u.fragment))
+
+
 def _render_error_card(title: str, detail: str, *, retry_href: str | None = None) -> str:
     """商業級修復：統一錯誤頁品牌卡片，取代原本裸 `<p style='color:#c00'>...</p>`
     /純 `<p>404</p>`——4xx/5xx 一律走這裡，維持 `.tf-section` 卡片視覺（跟
@@ -6132,7 +6152,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 「重試」直接導回同一個請求。
                 return self._send(429, page(
                     _render_error_card(
-                        "請求過於頻繁", str(exc), retry_href=self.path,
+                        "請求過於頻繁", str(exc), retry_href=_sanitized_retry_href(self.path),
                     ),
                     active_mode=active_mode))
             except _AnalyzeDedupTimeout as exc:
@@ -6158,7 +6178,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 return self._send(503, page(
                     _render_error_card(
-                        "服務忙碌中", str(exc), retry_href=self.path,
+                        "服務忙碌中", str(exc), retry_href=_sanitized_retry_href(self.path),
                     ),
                     active_mode=active_mode))
             except ValueError as exc:
@@ -6174,7 +6194,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, page(
                     _render_error_card(
                         "服務暫時無法使用", "分析服務暫時無法使用，請稍後再試",
-                        retry_href=self.path,
+                        retry_href=_sanitized_retry_href(self.path),
                     ),
                     active_mode=active_mode))
         return self._send(404, page(

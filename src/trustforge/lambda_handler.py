@@ -5,7 +5,8 @@
 
 部署：handler = trustforge.lambda_handler.handler
 環境變數：TRUSTFORGE_HOME=/var/task；要真實 Bedrock 再設 BEDROCK_MODEL_ID + AWS_REGION。
-live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶對應 token 參數。
+live 模式須額外設 TRUSTFORGE_LIVE_TOKEN，且請求帶 `X-Live-Token` header
+（query `?token=` fallback 已移除，只認 header）。
 """
 from __future__ import annotations
 
@@ -50,20 +51,34 @@ def handler(event, context=None):
     # `X-Live-Token` header，query `token` 不再 fallback，只 log warning），
     # 維持兩個入口行為一致。
     _lambda_headers = event.get("headers") or {}
+    # codex 對抗審 LOW（#134 fast-follow）：Function URL headers 雖然「一般」
+    # 是小寫 key，但不是契約保證（不同 runtime/測試呼叫端仍可能帶大小寫混雜
+    # 的 key，如 `X-LIVE-TOKEN`），先前只認 `x-live-token`/`X-Live-Token` 兩種
+    # 固定拼法，其餘大小寫組合會被漏掉。這裡改成把所有 header key 正規化成
+    # 小寫再查找，涵蓋任意大小寫拼法。
+    _lambda_headers_lower = {
+        (k or "").lower(): v for k, v in _lambda_headers.items()
+    }
     # PR #99 終審 LOW：`raw_qs`（Lambda 原生 queryStringParameters dict）本來
     # 就會保留空值 key（`?token=`／裸 `?token` 都會是 `{"token": ""}`），直接用
     # `"token" in raw_qs` 判斷「query 是否帶了 token」，不看轉出來的 qs 值是否
     # truthy，避免空值 token 漏 warning。
     web._apply_live_token_header(
         qs,
-        {"X-Live-Token": _lambda_headers.get("x-live-token")
-         or _lambda_headers.get("X-Live-Token")},
+        {"X-Live-Token": _lambda_headers_lower.get("x-live-token")},
         query_has_token="token" in raw_qs,
     )
     # 商業級一致性修（codex MEDIUM）：429/502 的「重試」連結要導回同一個請求
     # （比照 EC2 web.py 用 self.path），Lambda 沒有現成的 self.path，用
     # rawPath + 重組 query string 還原。
-    retry_href = path if not raw_qs else f"{path}?{urlencode(raw_qs)}"
+    #
+    # codex 對抗審 MEDIUM（#134 fast-follow）：`raw_qs` 若帶了 legacy
+    # `?token=secret`（即使該 fallback 已被 header-only 取代、下游不再採信
+    # 這個 query 值），先前這裡原樣把它塞回 retry_href，一樣會把憑證性參數
+    # 反射進 429/502 錯誤頁的重試連結（跟 web.py `self.path` 那三處同源問題）。
+    # 這裡組 retry_href 前先濾掉 `token` key。
+    _retry_qs = {k: v for k, v in raw_qs.items() if k != "token"}
+    retry_href = path if not _retry_qs else f"{path}?{urlencode(_retry_qs)}"
 
     # 取 client IP（Lambda Function URL v2 requestContext）
     client_ip = (
