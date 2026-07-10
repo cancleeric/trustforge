@@ -103,6 +103,11 @@ class Report:
     # 語意矛盾」的主張配對時才會出現（見該函式 docstring）；無背離/無矛盾配對
     # 時完全不填，既有讀取 cross_source_signal 的程式碼（含本檔 to_markdown、
     # web.py render）不受影響。供未來 UI 渲染跨源矛盾對照用，本次不消費此欄位。
+    #
+    # issue #21（CISO-LOW）新增選填 key：cross_source_signal["sentiment_source_
+    # count"]（int）——情緒類這一輪主導方向涉及的獨立來源數，純展示透明化
+    # 欄位，不影響任何分數/方向計算，見 agent.orchestrator.
+    # detect_cross_source_signal docstring。
 
     # W4 codex 對抗審第 2 輪 [HIGH-1] 修正：三態 abstain/低信心/正常判斷用的是
     # `trust.scoring.aggregate()` 算出的 `calibrated_confidence`（見

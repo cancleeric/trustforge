@@ -558,6 +558,36 @@ def detect_cross_source_signal(
     使用者被誤導以為有更多獨立來源佐證。
 
     守 HOYA「不代客決策」：summary 使用中性提醒措辭，嚴禁決策字眼。
+
+    `sentiment_source_count`（issue #21，CISO-LOW，僅出現在 obj_dir/sent_dir
+    主分支回傳值，`_stance_pair_signal()` 備援分支不附加，該分支已保證
+    stance_pairs ≥2 獨立來源）：這個 result 實際引用到的情緒類（news/
+    social/sentiment）獨立來源數——`len(sent_sources | stance_pair_sentiment_
+    sources)`：`sent_sources` 是 trust>=0.5 聚合投票用的來源（跟上面「兩類
+    source 合計 < 2」判斷同一份資料）；`stance_pair_sentiment_sources` 是
+    `stance_pairs` 非空時額外併入的來源（R1 退修，見下段）。皆用
+    `_independent_source_keys`／`_normalize_source_key`（`strip().casefold()`）
+    正規化字串 key 去重——**只治大小寫/空白變體**（如 `"CoinDesk"`/
+    `" coindesk "` 收斂成同一 key），**不解 publisher 別名**（如 `coindesk`
+    vs `coindesk.com` 仍視為 2 個不同來源）；別名 canonicalization 見
+    follow-up issue #72，本輪不做。
+
+    純展示用透明化欄位，**不影響** `sent_dir`/`signal_type`/`summary` 等既有
+    計算——單一高佐證 social 源在高 corr(≈1.0)+高 recency 時 trust 可達門檻
+    以上，若情緒類僅此一源即可用 100% 票重主導 `sent_dir`，觸發虛假背離/
+    共識框。緩解方式選「不抑制訊號、只補透明度」（CPO/CISO 三審定案）：UI
+    （見 `CrossSourceSignalPanel`）在 `sentiment_source_count == 1` 時顯示
+    「單一來源主導」徽章，多源時不顯示，訊號本身照常呈現。
+
+    為何要併入 `stance_pair_sentiment_sources`（PR #135 R1 退修，dev-manager
+    實測重現、CEO 退修必修 1）：`_detect_stance_pairs` 用較寬鬆的
+    `_STANCE_PAIR_MIN_TRUST`（0.35）掃描矛盾配對，比 `sent_sources` 的
+    trust>=0.5 門檻低——若只算 `sent_sources`，可能出現「一筆 trust 落在
+    [0.35, 0.5) 的來源沒進聚合投票、count 只算到 1」，但 `stance_pairs`
+    非空時一律附加進本 result（collision 分支的 summary 甚至具名列出這些
+    來源），使徽章宣稱「單一來源」跟同一畫面的 summary/stance_pairs 明明
+    列出 2 個以上來源自相矛盾。改成聯集後，徽章宣稱與本 result 引用到的
+    來源集合永遠一致。
     """
     # 只取 trust >= 0.5 的主張
     eligible = [sc for sc in scored if sc.trust >= 0.5]
@@ -675,12 +705,40 @@ def detect_cross_source_signal(
         if _p["claim_id"] not in supporting_ids:
             supporting_ids.append(_p["claim_id"])
 
+    # issue #21 R1 退修（CEO/dev-manager 實測重現，codex 彙整）：
+    # `sentiment_source_count` 不能只算 `sent_sources`（trust>=0.5 聚合投票
+    # 用的來源），否則會跟 `_detect_stance_pairs`（門檻 `_STANCE_PAIR_MIN_
+    # TRUST`=0.35，比聚合投票寬）抓到的矛盾配對脫鉤：一筆 trust 落在
+    # [0.35, 0.5) 的情緒來源不會進 `sentiment`/`sent_sources`，但只要跟另一
+    # 筆情緒來源方向相反且 `stance_fn` 判定矛盾，仍會被 `_detect_stance_
+    # pairs` 抓進 `stance_pairs`——而 `stance_pairs` 非空時一律附加進本
+    # result（collision 分支的 summary 甚至會具名列出這些來源）。若計數
+    # 只看 `sent_sources`，會出現「count=1 顯示『單一來源主導』徽章，但
+    # summary/stance_pairs 明明列出 2 個矛盾來源」的自相矛盾——徽章宣稱
+    # 必須跟同一個 result 裡實際引用到的來源集合一致，故改為兩者聯集。
+    # `_detect_stance_pairs` 只掃描 `_SENTIMENT_KINDS`（見其 docstring），
+    # 故 stance_pairs 的來源必屬情緒類，併入不會誤把客觀類來源算進本欄位。
+    stance_pair_sentiment_sources = (
+        _independent_source_keys(p["source"] for p in stance_pairs) if stance_pairs else set()
+    )
+    sentiment_source_count = len(sent_sources | stance_pair_sentiment_sources)
+
     result = {
         "type": signal_type,
         "objective_direction": obj_dir,
         "sentiment_direction": sent_dir,
         "summary": summary,
         "supporting_claim_ids": supporting_ids,
+        # issue #21（CISO-LOW）：純展示用透明化欄位，不影響上面任何分數/方向
+        # 計算——UI 讀這個數字判斷是否顯示「單一來源主導」徽章（見
+        # `CrossSourceSignalPanel`）。單一高佐證 social 源在高
+        # corr/recency 時可能以 100% 票重主導 `sent_dir`，這裡把「情緒類
+        # 這一輪實際有幾個獨立來源」誠實攤開，不抑制訊號本身（守 TrustForge
+        # 透明哲學），只補足「這個結論的證據廣度」讓使用者自行判讀。用
+        # `_normalize_source_key`（strip+casefold）正規化去重的 key count，
+        # 不解 publisher 別名（如 `coindesk` vs `coindesk.com` 視為不同來
+        # 源）——別名映射見 follow-up issue #72，本輪不做 canonicalization。
+        "sentiment_source_count": sentiment_source_count,
     }
     if stance_pairs:
         result["stance_pairs"] = stance_pairs

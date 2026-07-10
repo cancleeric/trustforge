@@ -209,6 +209,17 @@ function isCrossSourceSignal(value: unknown): value is CrossSourceSignal | null 
   if (value.sentiment_direction !== undefined && typeof value.sentiment_direction !== 'string') {
     return false
   }
+  // issue #21：`sentiment_source_count` 選填（僅主分支回傳值才有，
+  // `_stance_pair_signal()` 備援分支/舊快照皆可能沒有這個 key，放行缺
+  // 欄位）；存在時 `CrossSourceSignalPanel` 直接拿去做 `=== 1` 比較，畸形
+  // 型別（如字串/物件）不會 throw 但會讓判斷永遠是 false 而悄悄漏顯示徽章
+  // ——比照本檔其餘欄位慣例，型別不對就整包 parse_error，不悄悄放行。
+  if (
+    value.sentiment_source_count !== undefined &&
+    typeof value.sentiment_source_count !== 'number'
+  ) {
+    return false
+  }
   return true
 }
 
