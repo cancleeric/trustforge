@@ -871,6 +871,10 @@ class CacheWriteResult(NamedTuple):
       仍為 `True`（這不是失敗，backend 正常運作，只是這次沒有真的寫入新
       內容），呼叫端不應把它算進失敗清單。一般 `cache_set()` 一律
       `skipped=False`（它沒有條件判斷，寫就是寫）。
+    - `monotonic_blocked`：`cache_set_monotonic()` 專用——這次寫入中，因為
+      「incoming doc 的 `ts` 比快取裡同 id 的 doc 舊」而被擋下、沒有回灌的
+      doc 數（供應商回舊版 / 時光倒流）。`ok`/`skipped` 語意不變，這只是
+      一筆觀測訊號，供排程 log 顯示「這輪有一批比快取還舊的資料被擋掉」。
     """
 
     ok: bool
@@ -878,6 +882,7 @@ class CacheWriteResult(NamedTuple):
     backend: str
     error: str | None = None
     skipped: bool = False
+    monotonic_blocked: int = 0
 
 
 def cache_set(
@@ -977,6 +982,136 @@ def cache_set_if_newer(
             ok=False, used_fallback=False, backend=backend_name,
             error=f"{err}; fallback JsonCacheBackend 也失敗：{exc2}",
         )
+
+
+def _doc_signature(d: dict[str, Any]) -> tuple:
+    """把一筆 doc dict 壓成可雜湊的簽章，供合併後「集合是否相等」比對（#56
+    doc 層級單調合併用）。只取會影響「這篇內容本身是否變了」的欄位，不含
+    會隨每次 fetch 變動的瞬時欄位（簽章本身已含 `ts`，更新時間戳視為變更）。"""
+    return (
+        str(d.get("id", "")),
+        str(d.get("kind", "")),
+        str(d.get("source", "")),
+        str(d.get("text", "")),
+        str(d.get("url", "")),
+        float(d.get("ts", 0.0) or 0.0),
+        json.dumps(d.get("meta") or {}, sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _docsets_equal(a: list[dict[str, Any]], b: list[dict[str, Any]]) -> bool:
+    """兩份 doc 清單在「內容」上是否完全一致（忽略順序）。見 `_doc_signature`。"""
+    if len(a) != len(b):
+        return False
+    return {_doc_signature(d) for d in a} == {_doc_signature(d) for d in b}
+
+
+def merge_docs_monotonic(
+    existing_docs: list[dict[str, Any]],
+    incoming_docs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """#56 跨快取單調性——doc 層級合併：依 `id` 把 incoming 與既有快取合併，
+    個別 doc 的 `ts`（上游發佈時間戳）**只允許變新、不允許變舊**。
+
+    語意（「新 doc ts 不得早於既有快取 doc」）：
+      - incoming 的 id 在快取裡不存在 → 收錄（全新內容）。
+      - incoming 的 id 已存在，且 `incoming.ts > cached.ts` → 用 incoming
+        （更新，內容本就該刷新）。
+      - incoming 的 id 已存在，且 `incoming.ts <= cached.ts` → **保留既有較
+        新值，不回灌**（供應商回舊版 / 時光倒流被擋下）。這正是 #56 要防的
+        根因：上游偶爾會回傳比我們已經存著的還舊的版本（舊 RSS 項目重新
+        排到前面、API 回源到舊快照等），若無條件整批覆寫，會把「已經拿到
+        的新資料」倒退成舊資料。
+
+    `ts` 相等時取 incoming（內容可能有非時間戳層面的微修正，視為同代刷新，
+    不退回既有；與「不得早於」的語意一致——相等不算「早於」）。
+
+    回傳 `(merged_docs, blocked_count)`：`merged_docs` 依「先既有、後新 id」
+    的順序拼回（保留既有 doc 的相對位置，新增 id 接在後面）；`blocked_count`
+    是被擋下、沒回灌的舊版 doc 數。
+    """
+    if not existing_docs:
+        # 無既有快取：全部 incoming 皆為新內容
+        return list(incoming_docs), 0
+
+    by_id: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for d in existing_docs:
+        did = str(d.get("id", ""))
+        if did not in by_id:
+            by_id[did] = d
+            order.append(did)
+
+    blocked = 0
+    for d in incoming_docs:
+        did = str(d.get("id", ""))
+        cur = by_id.get(did)
+        if cur is None:
+            by_id[did] = d
+            order.append(did)
+        else:
+            cur_ts = float(cur.get("ts", 0.0) or 0.0)
+            new_ts = float(d.get("ts", 0.0) or 0.0)
+            if new_ts < cur_ts:
+                # 供應商回舊版 doc：新 doc 時間戳比快取舊，禁止回灌，保留既有
+                blocked += 1
+                continue
+            by_id[did] = d  # 更新或相等 → 取 incoming
+
+    merged = [by_id[i] for i in order]
+    return merged, blocked
+
+
+def cache_set_monotonic(
+    backend: CacheBackend, key: str, docs: list[dict[str, Any]], fetched_at: float,
+    ttl_seconds: float | None = None,
+    allow_json_fallback: bool | None = None,
+) -> CacheWriteResult:
+    """#56 跨快取單調性通用修——`cache_set()` 的 doc 層級單調版本。
+
+    寫入前先讀既有快取、用 `merge_docs_monotonic()` 合併，**個別 doc 的 `ts`
+    只允許變新、不允許變舊**：供應商若回傳比快取還舊的版本，該 doc 不被
+    回灌、保留既有較新值（構造場景「供應商回舊版 doc」→ 被擋下不回灌）。
+
+    ⚠️ 與 `cache_set_if_newer()`（只比整把 key 的 `fetched_at`，供歷史快照
+    用）的不同：本函式是 **doc 層級**的單調保護——genuine 每一篇內容的
+    上游時間戳都不回灌，**覆蓋所有拿上游時間戳的來源**（news/social/onchain/
+    regulatory/coingecko），不限特定 key 類型。這正是 #56「通用修」的範圍：
+    把它接到 `scripts/fetch_scheduler.py::run_once()` 的每個寫入點，所有來源
+    的每篇 doc 都自動獲得「時光不倒流」保護。
+
+    行為：
+      - 合併後集合與既有快取完全一致（incoming 全被擋、無新 id）→ 視同無
+        變化，`skipped=True`，**不**更新 `fetched_at`（避免「這次 fetch 拿
+        到 stale 資料」去延長新鮮窗——誠實反映「這輪沒有新東西」）。
+      - 否則普通 `cache_set()` 寫入合併結果（fallback / 失敗語意與
+        `cache_set()` 完全一致），`monotonic_blocked` 標示被擋下的舊版 doc
+        數供觀測。
+    """
+    existing = cache_get(backend, key)
+    existing_docs = (existing or {}).get("docs") or [] if existing else []
+    merged, blocked = merge_docs_monotonic(existing_docs, docs)
+    if blocked > 0:
+        print(
+            f"[cache] monotonic: key={key!r} 擋下 {blocked} 篇比快取舊的 doc"
+            f"（供應商回舊版 / 時光倒流，已保留較新值）",
+            file=sys.stderr,
+        )
+    if existing_docs and blocked == len(docs) and _docsets_equal(existing_docs, merged):
+        # 合併結果與既有快取逐篇一致：這輪沒有新內容（只回收到舊版 doc），
+        # 跳過寫入、不刷新 fetched_at（誠實標示「無新資料」）。
+        return CacheWriteResult(
+            ok=True, used_fallback=False, backend=type(backend).__name__,
+            error=None, skipped=True, monotonic_blocked=blocked,
+        )
+    result = cache_set(
+        backend, key, merged, fetched_at, ttl_seconds=ttl_seconds,
+        allow_json_fallback=allow_json_fallback,
+    )
+    return CacheWriteResult(
+        ok=result.ok, used_fallback=result.used_fallback, backend=result.backend,
+        error=result.error, skipped=result.skipped, monotonic_blocked=blocked,
+    )
 
 
 class CachedSource(Source):
