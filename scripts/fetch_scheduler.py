@@ -92,6 +92,7 @@ from trustforge.ingestion.cache import (  # noqa: E402
     cache_key,
     cache_set,
     cache_set_if_newer,
+    cache_set_monotonic,
     doc_to_dict,
     get_cache_backend,
     snapshot_history_date,
@@ -275,7 +276,7 @@ def run_once(
             now = time.time()
             broadcast_failed: list[str] = []
             for c in coins:
-                result = cache_set(
+                result = cache_set_monotonic(
                     backend, cache_key(name, c), payload, fetched_at=now, ttl_seconds=stale_after
                 )
                 if not result.ok:
@@ -330,7 +331,7 @@ def run_once(
             total_docs = 0
             for c in coins:
                 payload = [doc_to_dict(d) for d in docs_by_coin[c]]
-                result = cache_set(
+                result = cache_set_monotonic(
                     backend, cache_key(name, c), payload, fetched_at=now, ttl_seconds=stale_after
                 )
                 if not result.ok:
@@ -364,7 +365,7 @@ def run_once(
                 print(f"[fetch_scheduler] {name}[{c}]: 真呼叫失敗，略過（{exc}）", file=sys.stderr)
                 failures.append(f"{name}:{c}")
                 continue
-            result = cache_set(
+            result = cache_set_monotonic(
                 backend, cache_key(name, c), [doc_to_dict(d) for d in docs],
                 fetched_at=time.time(), ttl_seconds=stale_after,
             )
