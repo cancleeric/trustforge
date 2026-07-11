@@ -133,7 +133,8 @@ def test_cap_try_reserve_respects_config_layer(monkeypatch):
     _mock_config(monkeypatch, AdminConfig(daily_cap_usd=1.0, exists=True))
     admin_config._reset_admin_config_cache_for_tests()  # 換 config 後清快取
     amount = budget_guard.try_reserve_request_budget(ledger)
-    assert amount == budget_guard.DEFAULT_REQUEST_MAX_USD
+    # 預留金額 = 真實 worst-case 預估（D2.5/#76，取代固定 $0.05 上界）
+    assert amount == budget_guard.request_max_cost_usd()
     budget_guard.release_request_budget(amount)
 
 
