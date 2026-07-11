@@ -172,6 +172,52 @@ def test_trust_breakdown_has_why_caption():
     assert out.count("WHY") == 4, "四分項應各有一行 WHY caption"
 
 
+def test_trust_breakdown_partial_none_renders_neutral_not_zero():
+    """三態誠實合約（#106 D0.4「未評估 ≠ 零」）partial-None 表面：manipulation
+    為 None（本輪未評估操縱），其餘三個分項有值時，SSR 絕不能把操縱畫成 0%
+    假條、也不能給「未偵測到操縱風險信號」這類誤導 WHY 文案——必須渲染「暫無
+    評分」中性態，口徑與前端 `TrustBreakdown` 對齊。"""
+    tc = {"reputation": 0.8, "corroboration": 0.7, "recency": 0.6, "manipulation": None}
+    out = web._render_trust_breakdown(tc, trust=0.5)
+    # 中性態標記出現（操縱維度）
+    assert "暫無評分" in out
+    # 有評分的三個維度仍正常顯示數值
+    assert "0.80" in out and "0.70" in out and "0.60" in out
+    # 操縱維度不得出現 0 冒充：無 0% 操縱條、無「0.00」操縱值、無誤導 WHY
+    assert "操縱扣分" not in out, "未評估操縱不得畫 0% 扣分條"
+    assert "未偵測到操縱風險信號" not in out, "未評估操縱不得給誤導 WHY 文案"
+    # 操縱值不應以 0.00 冒充
+    manip_section = out[out.index("操縱"):]
+    assert "0.00" not in manip_section.split("WHY")[0], "未評估操縱不得顯示 0.00 數值"
+
+
+def test_trust_breakdown_all_none_shows_single_neutral_block():
+    """四項皆 None（完全無資料）仍顯式整塊「暫無評分」，不崩、不補 0。"""
+    tc = {"reputation": None, "corroboration": None, "recency": None, "manipulation": None}
+    out = web._render_trust_breakdown(tc, trust=0.0)
+    assert "暫無評分" in out
+    assert "0.00" not in out
+
+
+# eye breaking-changes 標記開發分支移除了 develop 上的
+# `test_aggregate_trust_components_empty_when_no_data`（舊口徑：無資料回 `{}`）。
+# 本 PR（#106 三態誠實合約）刻意把行為改成「回 4 鍵全 None dict」，舊測試斷言
+# `== {}` 已不成立；下面這條等效守衛鎖定**新**契約，確保「完全無資料」場景仍有
+# 守衛（4 鍵皆為 None、絕不出現 0、結構穩定供前端 validator 消費）。
+def test_aggregate_trust_components_no_data_guard_four_null_keys():
+    """完全無資料（整輪無 evidence 或全無 trust_components）→ `_aggregate_
+    trust_components` 回傳全部 4 鍵、值皆 None，不得回空 dict、不得補 0。"""
+    ev = [Evidence(source="a", fetched_at="t", content_reference="c", related_claim="x", trust=0.5)]
+    agg = web._aggregate_trust_components(ev)
+    assert set(agg.keys()) == {"reputation", "corroboration", "recency", "manipulation"}
+    assert all(v is None for v in agg.values())
+    assert 0 not in agg.values(), "未評估分項絕不可補 0"
+    empty = web._aggregate_trust_components([])
+    assert set(empty.keys()) == {"reputation", "corroboration", "recency", "manipulation"}
+    assert all(v is None for v in empty.values())
+
+
+
 # ---------------------------------------------------------------------------
 # XSS regression（dark 樣式包裝後，逃逸點仍必須擋住）
 # ---------------------------------------------------------------------------

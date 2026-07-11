@@ -3396,8 +3396,9 @@ def test_three_state_honesty_components_no_evidence_serializes_null_not_zero():
     # 分項聚合必為 JSON null，不得是 0
     assert all(parsed["trust_components_aggregate"][k] is None
                for k in parsed["trust_components_aggregate"])
-    assert "0" not in body.split('"trust_components_aggregate"')[1].split("}")[0] or \
-        '"trust": 0' not in body  # 確認沒有把未評估填成 0
+    # 逐鍵明確斷言每個分項都是 JSON null（非 0、非缺鍵），確認未評估不被填成 0
+    for k in parsed["trust_components_aggregate"]:
+        assert parsed["trust_components_aggregate"][k] is None
 
 
 def test_three_state_honesty_components_aggregate_structure_is_stable_all_keys(monkeypatch):

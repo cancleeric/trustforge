@@ -303,15 +303,19 @@ function isPriceProvenance(value: unknown): value is PriceProvenance {
 
 function isTrustComponentsAggregate(value: unknown): value is TrustComponentsAggregate {
   // #106 D0.4 三態誠實合約：4 個分項鍵必須都存在（結構穩定，便於渲染），
-  // 但每個值允許 `number | null`——`null` 是「本輪未評估」的誠實標記，
-  // 不是缺鍵、也不是 0 冒充。若某分項是 0，那是有意義的「評了但零分」，
-  // 仍為合法 number；若為 null，呼叫端必須顯式渲染「暫無評分」。
+  // 但每個值允許 `number | null | undefined`——`null`/`undefined` 都是
+  // 「本輪未評估」的誠實標記（後端恆回 4 鍵 `null`，但前端 `TrustBreakdown`
+  // 同時接住 `undefined` 以容錯舊/部分快取），不是缺鍵、也不是 0 冒充。
+  // 若某分項是 0，那是有意義的「評了但零分」，仍為合法 number；若為
+  // null/undefined，呼叫端必須顯式渲染「暫無評分」。
+  const isComponent = (v: unknown) =>
+    v === undefined || v === null || typeof v === 'number'
   return (
     isPlainObject(value) &&
-    (value.reputation === null || typeof value.reputation === 'number') &&
-    (value.corroboration === null || typeof value.corroboration === 'number') &&
-    (value.recency === null || typeof value.recency === 'number') &&
-    (value.manipulation === null || typeof value.manipulation === 'number')
+    isComponent(value.reputation) &&
+    isComponent(value.corroboration) &&
+    isComponent(value.recency) &&
+    isComponent(value.manipulation)
   )
 }
 

@@ -2109,10 +2109,17 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
             return 0.0
         return x if (x == x and x not in (float("inf"), float("-inf"))) else 0.0
 
-    rep   = _f(tc.get("reputation",    0.0))
-    corr  = _f(tc.get("corroboration", 0.0))
-    rec   = _f(tc.get("recency",       0.0))
-    manip = _f(tc.get("manipulation",  0.0))
+    # 三態誠實合約（#106 D0.4「未評估 ≠ 零」）：保留每個分項的**原始值**
+    # （可能為 None），下游據此判斷「未評估」與否；需要數值時才用 `_f` 轉
+    # float，None 不併進 composite 條、不畫 0% 條、不給誤導 WHY 文案。
+    rep_raw   = tc.get("reputation")
+    corr_raw  = tc.get("corroboration")
+    rec_raw   = tc.get("recency")
+    manip_raw = tc.get("manipulation")
+    rep   = _f(rep_raw)
+    corr  = _f(corr_raw)
+    rec   = _f(rec_raw)
+    manip = _f(manip_raw)
 
     def mini_bar(val: float, color: str) -> str:
         pct = max(0, min(100, int(val * 100)))
@@ -2122,12 +2129,34 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
             f'</span>'
         )
 
-    # manip>0 一律紅色 #cb2431（回歸測試鎖定的顏色碼，勿改）；manip==0 用中性灰
-    manip_color  = "#cb2431" if manip > 0 else "var(--tf-muted)"
-    manip_weight = "font-weight:600;" if manip > 0 else ""
+    # manip>0 一律紅色 #cb2431（回歸測試鎖定的顏色碼，勿改）；manip==0 或
+    # 未評估（None）用中性灰。None 時不強調紅色／不加粗，避免暗示「已評分且無風險」。
+    manip_color  = "#cb2431" if (manip_raw is not None and manip > 0) else "var(--tf-muted)"
+    manip_weight = "font-weight:600;" if (manip_raw is not None and manip > 0) else ""
 
     corr_text  = "✓ 有獨立來源交叉佐證" if corr > 0 else "— 無交叉佐證"
     corr_color = "#3fb950"              if corr > 0 else "var(--tf-muted)"
+
+    def _dim_row(is_unscored, label, val, bar_color, weight, why,
+                 val_color="var(--tf-text)", val_weight="", trace_html=""):
+        """逐維度渲染。未評估（None）維度渲染「暫無評分」中性態：不畫 0% 條、
+        不給誤導 WHY 文案；有評分時才畫 mini bar + WHY caption，口徑與前端
+        `TrustBreakdown` 對齊（見 frontend/src/components/TrustBreakdown.tsx）。"""
+        if is_unscored:
+            return (
+                f'<div><span style="white-space:nowrap">'
+                f'<span style="color:var(--tf-muted)">{label}</span> '
+                f'<span style="color:var(--tf-muted2)">暫無評分</span></span></div>'
+            )
+        return (
+            f'<div><span style="white-space:nowrap">'
+            f'<span style="color:var(--tf-muted)">{label}</span> '
+            f'{mini_bar(val, bar_color)} '
+            f'<span style="color:{val_color};{val_weight}">{val:.2f}</span>'
+            f'<span style="color:var(--tf-muted2)"> {weight}</span></span>'
+            f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why)}</div>'
+            f'{trace_html}</div>'
+        )
 
     # ---- WHY caption：純由既有 float 值推導的白話說明，不新增資料欄位 ----
     why_rep = "高信譽來源佐證" if rep >= 0.7 else ("中等信譽來源" if rep >= 0.4 else "低信譽來源，需查證")
@@ -2160,40 +2189,73 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
             f'{e(trace_text)}</div>'
         )
 
-    # ---- composite stacked bar：僅信譽/佐證/時效三個正向分項疊加；
-    # 操縱不可並列成正向第四塊，改在下方以獨立紅色 deficit bar（靠右生長、代表扣分）呈現，
+    # ---- composite stacked bar：僅信譽/佐證/時效三個正向分項疊加（且**僅納入
+    # 有評分的分項**，未評估 None 不併成 0 貢獻）；操縱不可並列成正向第四塊，
+    # 改在下方以獨立紅色 deficit bar（靠右生長、代表扣分）呈現——**僅在操縱
+    # 有評分時**才出現，未評估時不畫 0% 操縱條（三態誠實合約 #106 D0.4）。
     # 對應真實公式：信任 = 信譽×0.5 + 佐證×0.25 + 時效×0.15 − 操縱×0.4 ----
     pos_weight = 0.5 + 0.25 + 0.15
-    rep_c, corr_c, rec_c = rep * 0.5, corr * 0.25, rec * 0.15
 
     def _seg_pct(contrib: float) -> float:
         return max(0.0, min(100.0, contrib / pos_weight * 100))
 
-    manip_deficit = manip * 0.4
+    pos_segments = ""
+    pos_contrib = 0.0
+    if rep_raw is not None:
+        rep_c = rep * 0.5
+        pos_contrib += rep_c
+        pos_segments += (
+            f'<span style="height:100%;width:{_seg_pct(rep_c):.1f}%;background:#3fb950" '
+            f'title="信譽 {rep:.2f}×0.50"></span>'
+        )
+    if corr_raw is not None:
+        corr_c = corr * 0.25
+        pos_contrib += corr_c
+        pos_segments += (
+            f'<span style="height:100%;width:{_seg_pct(corr_c):.1f}%;background:#1f6feb" '
+            f'title="佐證 {corr:.2f}×0.25"></span>'
+        )
+    if rec_raw is not None:
+        rec_c = rec * 0.15
+        pos_contrib += rec_c
+        pos_segments += (
+            f'<span style="height:100%;width:{_seg_pct(rec_c):.1f}%;background:#8957e5" '
+            f'title="時效 {rec:.2f}×0.15"></span>'
+        )
+
     stacked_bar = (
         f'<div style="display:flex;height:14px;width:100%;background:var(--tf-bg);'
         f'border-radius:4px;overflow:hidden;border:1px solid var(--tf-border)">'
-        f'<span style="height:100%;width:{_seg_pct(rep_c):.1f}%;background:#3fb950" '
-        f'title="信譽 {rep:.2f}×0.50"></span>'
-        f'<span style="height:100%;width:{_seg_pct(corr_c):.1f}%;background:#1f6feb" '
-        f'title="佐證 {corr:.2f}×0.25"></span>'
-        f'<span style="height:100%;width:{_seg_pct(rec_c):.1f}%;background:#8957e5" '
-        f'title="時效 {rec:.2f}×0.15"></span>'
+        f'{pos_segments}'
         f'</div>'
         f'<div style="display:flex;justify-content:space-between;font-size:.65rem;'
         f'color:var(--tf-muted2);margin-top:.15rem">'
-        f'<span>0</span><span>正向合計 {(rep_c + corr_c + rec_c):.2f}</span>'
+        f'<span>0</span><span>正向合計 {pos_contrib:.2f}</span>'
         f'<span>{pos_weight:.2f}</span></div>'
-        f'<div style="display:flex;height:8px;width:100%;background:var(--tf-bg);'
-        f'border-radius:4px;overflow:hidden;border:1px solid rgba(203,36,49,.4);margin-top:.35rem" '
-        f'title="操縱扣分 −{manip_deficit:.2f}">'
-        f'<span style="margin-left:auto;height:100%;'
-        f'width:{max(0.0, min(100.0, manip * 100)):.1f}%;background:#cb2431"></span>'
-        f'</div>'
-        f'<div style="color:#cb2431;font-size:.65rem;margin-top:.1rem">'
-        f'扣分：操縱 {manip:.2f} × 0.40 = −{manip_deficit:.2f}</div>'
     )
+    # 操縱扣分條：三態誠實合約——未評估（None）時**完全不出現**（不畫 0% 假條、
+    # 不給「未偵測到操縱風險信號」誤導文案），由下方逐維度「暫無評分」中性態表達。
+    if manip_raw is not None:
+        manip_deficit = manip * 0.4
+        stacked_bar += (
+            f'<div style="display:flex;height:8px;width:100%;background:var(--tf-bg);'
+            f'border-radius:4px;overflow:hidden;border:1px solid rgba(203,36,49,.4);margin-top:.35rem" '
+            f'title="操縱扣分 −{manip_deficit:.2f}">'
+            f'<span style="margin-left:auto;height:100%;'
+            f'width:{max(0.0, min(100.0, manip * 100)):.1f}%;background:#cb2431"></span>'
+            f'</div>'
+            f'<div style="color:#cb2431;font-size:.65rem;margin-top:.1rem">'
+            f'扣分：操縱 {manip:.2f} × 0.40 = −{manip_deficit:.2f}</div>'
+        )
 
+    rows = (
+        _dim_row(rep_raw is None, "信譽", rep, "#3fb950", "×0.50", why_rep,
+                 trace_html=rep_trace_html)
+        + _dim_row(corr_raw is None, "佐證", corr, "#1f6feb", "×0.25", why_corr)
+        + _dim_row(rec_raw is None, "時效", rec, "#8957e5", "×0.15", why_rec)
+        + _dim_row(manip_raw is None, "操縱", manip, "#cb2431", "×0.40", why_manip,
+                   val_color=manip_color, val_weight=manip_weight)
+    )
     return (
         f'<div style="margin:.35rem 0;padding:.5rem .6rem;background:var(--tf-inset);'
         f'border-radius:6px;border:1px solid var(--tf-border);font-size:.78rem">'
@@ -2201,35 +2263,7 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         f'信任分析（信譽×0.50 + 佐證×0.25 + 時效×0.15 − 操縱×0.40）</div>'
         f'{stacked_bar}'
         f'<div style="display:flex;flex-direction:column;gap:.3rem;margin-top:.5rem">'
-        # 信譽
-        f'<div><span style="white-space:nowrap">'
-        f'<span style="color:var(--tf-muted)">信譽</span> '
-        f'{mini_bar(rep, "#3fb950")} '
-        f'<span style="color:var(--tf-text)">{rep:.2f}</span>'
-        f'<span style="color:var(--tf-muted2)"> ×0.50</span></span>'
-        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rep)}</div>'
-        f'{rep_trace_html}</div>'
-        # 佐證
-        f'<div><span style="white-space:nowrap">'
-        f'<span style="color:var(--tf-muted)">佐證</span> '
-        f'{mini_bar(corr, "#1f6feb")} '
-        f'<span style="color:var(--tf-text)">{corr:.2f}</span>'
-        f'<span style="color:var(--tf-muted2)"> ×0.25</span></span>'
-        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_corr)}</div></div>'
-        # 時效
-        f'<div><span style="white-space:nowrap">'
-        f'<span style="color:var(--tf-muted)">時效</span> '
-        f'{mini_bar(rec, "#8957e5")} '
-        f'<span style="color:var(--tf-text)">{rec:.2f}</span>'
-        f'<span style="color:var(--tf-muted2)"> ×0.15</span></span>'
-        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_rec)}</div></div>'
-        # 操縱（紅色扣分方向，非正向第四塊）
-        f'<div><span style="white-space:nowrap">'
-        f'<span style="color:var(--tf-muted)">操縱</span> '
-        f'{mini_bar(manip, "#cb2431")} '
-        f'<span style="color:{manip_color};{manip_weight}">{manip:.2f}</span>'
-        f'<span style="color:var(--tf-muted2)"> ×0.40</span></span>'
-        f'<div style="color:var(--tf-muted2);font-size:.7rem;padding-left:.2rem">WHY {e(why_manip)}</div></div>'
+        f'{rows}'
         f'</div>'
         f'<div style="margin-top:.4rem">'
         f'<span style="color:var(--tf-muted2)">→</span> '
