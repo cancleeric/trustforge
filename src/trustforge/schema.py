@@ -96,6 +96,14 @@ class Report:
     generated_at: str
     direction: str = ""             # 結構化方向欄位（偏多/偏空/中性），由 build_report 填入
     cross_source_signal: dict | None = field(default=None)  # 跨源訊號背離/共識，由 orchestrator 填入
+    # Phase 1 獨特洞察層（#24/#15/#21/#72）：非顯而易見、可驗證的信任洞察清單
+    # （聰明錢背離 / 操縱爆量 / 來源自我矛盾），由 `agent.orchestrator.build_report`
+    # 呼叫 `trust.insights.detect_insights` 填入。每條洞察攜「兩個以上貢獻來源 +
+    # 方向 + 強度 + 資料覆蓋閘」，覆蓋不足標 "insufficient"/「無法判定」，絕不
+    # 硬湊（承接 Phase 0 三態誠實合約）。型別為 `trust.insights.Insight` 清單，
+    # 此處刻意只用寬型別（不 import `Insight` dataclass）避免 schema↔insights
+    # 循環依賴；序列化成 JSON 時 `dataclasses.asdict` 會遞迴展開嵌套 dataclass。
+    insights: list | None = field(default=None)  # Phase 1 獨特洞察層，由 orchestrator 填入
     # 結構逐字沿用（不新增 dataclass 欄位，向後相容）。Tier2（真實分歧樣本）新增
     # 一個「選填」key：cross_source_signal["stance_pairs"]（list[dict]，
     # 每筆 {"source", "stance", "claim_id", "text"}）——只在
@@ -195,6 +203,17 @@ class Report:
             ids = sig.get("supporting_claim_ids", [])
             if ids:
                 L.append(f"佐證 claim_ids：{', '.join(ids)}")
+
+        if self.insights:
+            L.append("\n## 獨特洞察層（非顯而易見、可驗證）")
+            for ins in self.insights:
+                cov = "（覆蓋不足：無法判定）" if ins.coverage == "insufficient" else ""
+                L.append(f"### {ins.title}{cov}")
+                L.append(ins.summary)
+                for c in ins.contributions:
+                    L.append(f"- 貢獻來源：{c.source}（{c.kind}）"
+                             f"｜方向：{c.direction}｜信任：{c.trust}")
+                    L.append(f"  - {c.text}")
 
         if self.contrarian:
             L.append("\n## 反方 / 低信任證據（已標記，未納入主結論）")

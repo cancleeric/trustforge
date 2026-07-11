@@ -5,6 +5,7 @@ import TrustBreakdown from './TrustBreakdown'
 import FactsInferenceLadder from './FactsInferenceLadder'
 import KeyBasisList from './KeyBasisList'
 import CrossSourceSignalPanel from './CrossSourceSignalPanel'
+import InsightExplainabilityPanel from './InsightExplainabilityPanel'
 import EvidenceTable from './EvidenceTable'
 import PriceProvenancePanel from './PriceProvenancePanel'
 import TrustTrendSection from './TrustTrendSection'
@@ -59,6 +60,8 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
       <KeyBasisList items={data.report.key_basis} />
 
       <CrossSourceSignalPanel signal={data.report.cross_source_signal} />
+
+      <InsightExplainabilityPanel insights={data.report.insights} />
 
       <PriceProvenancePanel priceProvenance={data.price_provenance} evidence={data.evidence} />
 

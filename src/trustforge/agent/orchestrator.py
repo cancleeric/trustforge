@@ -1061,6 +1061,15 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     report_cross_signal = cross_signal
     if is_abstain and cross_signal and cross_signal.get("objective_direction") is not None:
         report_cross_signal = None
+    # Phase 1 獨特洞察層（#24/#15/#21/#72）：純函式、免 LLM，只讀 score() 已
+    # 算好的 `scored` 全集 + `brief`，產出非顯而易見、可驗證的洞察（聰明錢
+    # 背離 / 操縱爆量 / 來源自我矛盾）。每條洞察攜「兩個以上貢獻來源 + 方向 +
+    # 強度 + 資料覆蓋閘」，覆蓋不足標「無法判定」，絕不硬湊（承接 Phase 0
+    # 三態誠實合約）。與 cross_source_signal 同層級、互補但不重疊——cross_source
+    # 是客觀 vs 情緒背離，這裡是更深、更可被抽查的維度。
+    from ..trust.insights import detect_insights
+    report_insights = detect_insights(brief, scored if scored is not None else brief.supporting + brief.contrarian, coin, qtype)
+
     report = Report(
         coin=coin, question_type=qtype.value, question=query,
         market_judgment=market_judgment, facts=facts, inferences=inferences,
@@ -1070,6 +1079,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         generated_at=iso_utc(now_fn()),
         direction=direction,
         cross_source_signal=report_cross_signal,
+        insights=report_insights,
         # W4 codex 對抗審第 2 輪 [HIGH-1]：結構化校準值＋三態，供 UI／
         # analyze.json 消費端辨態，不必再各自重算門檻（見 schema.Report
         # 欄位註解）。
