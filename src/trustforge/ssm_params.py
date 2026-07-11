@@ -101,6 +101,34 @@ def get_runtime_token(
         return None
 
     full_name = f"{prefix}/{name}"
+
+    # #121.7：systemd `LoadCredential` 優先讀取層。當 app 由帶 `LoadCredential=`
+    # 的 unit 啟動時，systemd（或部署期 `setup_runtime_credentials.sh`）會把 SSM
+    # SecureString 以 0600 寫進 tmpfs（`CREDENTIALS_DIRECTORY` 指向的目錄，非
+    # 持久磁碟、不在 argv / process list），檔名為 `trustforge-<name>`。優先從
+    # 該檔讀取（真正的 tmpfs 路徑），讀不到 / 檔案缺失 / 異常才 fallback 回 SSM
+    # （向後相容，且避免「glue 半套」造成的假安全感——這一層讓整條機制是完整
+    # 可用的，而不是只有寫入端、app 卻從不讀）。
+    cred_dir = os.getenv("CREDENTIALS_DIRECTORY")
+    if cred_dir:
+        cred_file = os.path.join(cred_dir, f"trustforge-{name}")
+        try:
+            with open(cred_file, "r", encoding="utf-8") as _fh:
+                value = _fh.read().strip()
+            if value:
+                return value
+            logger.warning("systemd credential 檔為空：%s（fallback SSM）", cred_file)
+        except FileNotFoundError:
+            logger.warning(
+                "systemd credential 檔不存在：%s（fallback SSM）", cred_file
+            )
+        except OSError as exc:
+            logger.warning(
+                "讀取 systemd credential 檔失敗：%s（fallback SSM）: %s",
+                cred_file,
+                exc,
+            )
+
     client = _get_or_create_client()
 
     for attempt in range(max_attempts):
@@ -161,15 +189,27 @@ def sweep_deploy_parameters(
     """
     try:
         client = _get_or_create_client()
-        resp = client.describe_parameters(
-            ParameterFilters=[{"Key": "Path", "Values": [prefix]}]
-        )
+        # #121.6：describe_parameters 單次最多回 50 筆，參數多頁時必須跟
+        # NextToken 分頁，否則後面幾頁的殘留參數會被漏清（多頁部署期參數
+        # 存在時尤其危險——舊 token 殘留到下次部署）。這裡迴圈收斂到沒有
+        # NextToken 為止。
+        params: list[dict] = []
+        next_token: str | None = None
+        while True:
+            kwargs: dict = {"ParameterFilters": [{"Key": "Path", "Values": [prefix]}]}
+            if next_token:
+                kwargs["NextToken"] = next_token
+            resp = client.describe_parameters(**kwargs)
+            params.extend(resp.get("Parameters", []) or [])
+            next_token = resp.get("NextToken")
+            if not next_token:
+                break
     except Exception as exc:
         logger.warning("SSM sweep 列舉失敗（跳過）：%s", exc, exc_info=True)
         return []
     now = now_fn()
     deleted: list[str] = []
-    for p in resp.get("Parameters", []) or []:
+    for p in params:
         name = p.get("Name")
         if not name:
             continue

@@ -321,3 +321,91 @@ def test_load_credential_line_format() -> None:
         "live-token", cred_dir="/run/creds"
     )
     assert cred_line2 == "LoadCredential=trustforge-live-token:/run/creds/live-token"
+
+
+class FakePagedSweepClient:
+    """模擬 `describe_parameters` 分多頁回傳（#121.6 NextToken 迴圈）。
+
+    第一頁回 2 筆 + NextToken，第二頁回剩餘 2 筆（其中含過期項）。
+    """
+
+    def __init__(self) -> None:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        now = _dt.now(_tz.utc)
+        self._pages = [
+            (
+                [
+                    {"Name": "/trustforge/deploy/a", "LastModifiedDate": now - _td(seconds=10)},
+                    {"Name": "/trustforge/deploy/b", "LastModifiedDate": now - _td(seconds=7200)},
+                ],
+                "tok2",
+            ),
+            (
+                [
+                    {"Name": "/trustforge/deploy/c", "LastModifiedDate": now - _td(seconds=20)},
+                    {"Name": "/trustforge/deploy/d", "LastModifiedDate": now - _td(seconds=9000)},
+                ],
+                None,
+            ),
+        ]
+        self.calls = 0
+        self.deleted: list[str] = []
+
+    def describe_parameters(self, **kwargs) -> dict:
+        page = self._pages[self.calls]
+        if self.calls == 1:
+            # 第二頁必須帶上第一頁回傳的 NextToken（驗證迴圈有收斂地跟頁）
+            assert kwargs.get("NextToken") == "tok2", kwargs
+        self.calls += 1
+        return {"Parameters": page[0], "NextToken": page[1]}
+
+    def delete_parameter(self, **kwargs) -> None:
+        self.deleted.append(kwargs["Name"])
+
+
+def test_sweep_paginates_next_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#121.6：describe_parameters 多頁時必須跟 NextToken 分頁，所有頁的過期
+    殘留參數都應被清掉（不漏清後面幾頁）。"""
+    fake = FakePagedSweepClient()
+    ssm_params.set_client_for_tests(fake)
+
+    deleted = ssm_params.sweep_deploy_parameters("/trustforge/deploy", max_age_seconds=3600.0)
+    # 兩頁都列舉過（NextToken 迴圈生效）
+    assert fake.calls == 2
+    # 過期的 b / d 都被清掉
+    assert set(deleted) == {"/trustforge/deploy/b", "/trustforge/deploy/d"}
+
+
+def test_get_runtime_token_prefers_credentials_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#121.7：app 端優先從 `$CREDENTIALS_DIRECTORY/trustforge-<name>` 讀取
+    tmpfs 上的 token；有該檔就回其值（不呼叫 SSM），實現 LoadCredential 真實
+    讀取層，避免「glue 半套」的假安全感。"""
+    prefix = "/trustforge/runtime"
+    secret = "CREDFILETOKEN1234567890abcdef"
+    cred_dir = tmp_path / "creds"
+    cred_dir.mkdir()
+    (cred_dir / "trustforge-admin-token").write_text(secret, encoding="utf-8")
+    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(cred_dir))
+    # 即便 SSM client 被設成會回傳另一個值，也應優先回 cred 檔
+    ssm_params.set_client_for_tests(
+        FakeSSMClient(return_value={"Parameter": {"Value": "SSM_VALUE_SHOULD_NOT_WIN"}})
+    )
+    assert ssm_params.get_runtime_token("admin-token") == secret
+
+
+def test_get_runtime_token_cred_file_missing_falls_back_to_ssm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#121.7：cred 檔不存在時，app 優雅 fallback 回 SSM 讀取（向後相容）。"""
+    prefix = "/trustforge/runtime"
+    ssm_val = "SSMVALUE1234567890abcdef"
+    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "empty"))
+    ssm_params.set_client_for_tests(
+        FakeSSMClient(return_value={"Parameter": {"Value": ssm_val}})
+    )
+    assert ssm_params.get_runtime_token("admin-token") == ssm_val

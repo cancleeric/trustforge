@@ -700,3 +700,92 @@ react TLS 版 conf 有專屬 `location /api/admin/`（最長前綴優先於 `/ap
 header，不管跑的是哪份 nginx conf（react TLS／react-http／legacy-tls）—— nginx
 層的 `proxy_no_cache`/`no-store` 若有哪份 conf 漏配，app 層仍是最後一道
 防線。
+
+## #75 多實例 budget 預留（DynamoDB 表 + 最小權限 IAM + 可見降級）
+
+`budget_guard` 在 `TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb` 時，對所有實例共用
+一張 `trustforge-budget-guard` 表做原子 conditional 預留（多實例部署才安全的
+每日 `$N` 上限）。部署腳本 `deploy_ec2.sh` 現在會在 IAM/表 reconcile 階段自動：
+
+1. 呼叫 `deploy/setup_budget_guard_dynamodb.sh` 建表（PK `source_id` String /
+   SK `coin` String，PAY_PER_REQUEST + TTL on `ttl`）。
+2. 掛**最小權限** IAM policy `trustforge-budget-guard` 到 `trustforge-ec2` 角色，
+   只含對該表 ARN 的 `dynamodb:UpdateItem` / `dynamodb:GetItem`（**絕不**
+   `dynamodb:*`）。可用 `TRUSTFORGE_BUDGET_COUNTER_TABLE` 覆寫表名。
+3. 確認表存在，不存在就 fail-closed 中止部署（不讓「多實例保護靜默失效」被當
+   成成功）。
+
+### 殘餘風險（必讀）
+
+若表不存在 / 實例角色未掛 `trustforge-budget-guard` IAM policy / DynamoDB 不可用，
+`try_reserve` 會拋 `BudgetBackendError`，app **fallback 回 process-local 預留**
+（單 process 內仍安全），但**多實例保護在這段期間暫時失效**——多 process/多機
+部署時各 process 的 reserved 互不可見，每日 `$N` 硬上限可能被並行撐爆成 N 倍。
+
+**這不是靜默降級**：app 每次偵測到後端失效，都會送一條 CloudWatch 指標
+`BudgetGuardMultiInstanceProtectionDisabled`（不受 `TRUSTFORGE_CW_METRICS` opt-in
+限制）並記 warning log，證明多實例保護已失效。維運應對該指標建告警、定期查
+`/api/status`。後端恢復後，下一次 `try_reserve` 走 DynamoDB 路徑，原子收斂自動
+恢復。
+
+## #104 dedup fail-open 告警（部署清單強制項）
+
+`deploy/put_dedup_alarm.sh` 建的 CloudWatch Alarm 監控
+`DedupFailOpenRecentFailures`（見 `src/trustforge/cloudwatch_metrics.py`、`web.py::
+_record_dedup_prep_failure`），指標超過門檻（預設 5）即觸發，讓重複計費/去重失效
+（#51+#87 fail-open）可被即時看見。
+
+**demo 部署清單強制兩件事，否則告警形同虛設：**
+
+1. **`TRUSTFORGE_CW_METRICS=1` 必須開啟**（app 端 opt-in，否則不送指標、Alarm
+   永遠收不到數據）。`deploy_ec2.sh` 對公開 demo 預設已開（=1），實例角色也補了
+   `cloudwatch:PutMetricData`。
+2. **必設 `TRUSTFORGE_DEDUP_ALARM_SNS=<arn:aws:sns:...>`**。有 SNS 時 Alarm 觸發才
+   真的發通知；未設則 Alarm 仍會建立（純狀態可視、可在 CloudWatch 控制台看到），
+   但**不發任何通知**——腳本絕不會再把非法的 Logs ARN 塞進 `--alarm-actions`
+   （那會讓 `set -e` 下的建表失敗、Alarm 整個建不出來，舊版 codex 打回的主因）。
+   傳入非 `arn:aws:sns:*` 的值會直接 `exit 1` 要求修正。
+
+```bash
+# 建 Alarm（先設 SNS topic）
+REGION=ap-southeast-2 TRUSTFORGE_CW_NAMESPACE=TrustForge \
+  TRUSTFORGE_DEDUP_ALARM_SNS=arn:aws:sns:ap-southeast-2:<ACCT>:trustforge-alerts \
+  ./deploy/put_dedup_alarm.sh
+```
+
+## #121 runtime token SSM/KMS（LoadCredential 讀取層 + sweep + KMS 收斂）
+
+### LoadCredential 讀取層（#121.7，完整實作）
+
+app 端 `src/trustforge/ssm_params.py::get_runtime_token` 現在**優先從
+`$CREDENTIALS_DIRECTORY/<name>` 讀取** tmpfs 上的 token（由
+`deploy/setup_runtime_credentials.sh` 在 unit 的 `ExecStartPre` 把 SSM
+SecureString 以 0600 寫進 `/run/trustforge-credentials/<name>`），讀不到才
+fallback 回 SSM 讀取（向後相容、避免假安全感）。`deploy_ec2.sh` 會在 unit 寫入
+`Environment=CREDENTIALS_DIRECTORY=/run/trustforge-credentials` 與
+`ExecStartPre=/opt/trustforge/deploy/setup_runtime_credentials.sh`（既有實例
+經 `scripts/reconcile_trustforge_unit.sh` 補上，冪等）。token 全程不落持久磁碟、
+不進 argv / process list。
+
+### 部署期參數 sweep（#121.6，現已接線）
+
+`sweep_deploy_parameters`（清理 `/trustforge/deploy/*` 超時殘留參數）原本從未被
+呼叫。現經 `scripts/sweep_deploy_parameters.sh`（unit 的 `ExecStartPre`，非致命）
+接線執行；`describe_parameters` 已加 `NextToken` 分頁迴圈，多頁參數不會漏清。
+
+### KMS EncryptionContext 收斂（#121.9）
+
+`put_runtime_tokens.sh` 設定 `TRUSTFORGE_TOKEN_KMS_KEY_ID` 時，SSM 以該 CMK 加密
+SecureString 並自動帶入 EncryptionContext `aws:ssm:parameter-arn`。CMK 的 key
+policy 應收斂解密權限（見 `put_runtime_tokens.sh` 輸出的片段）：
+
+```json
+"Condition": { "StringEquals": {
+  "kms:EncryptionContext:aws:ssm:parameter-arn":
+  "arn:aws:ssm:<region>:<acct>:parameter/trustforge/runtime/*" } }
+```
+
+收斂後只有「經 SSM 且目標為該前綴參數」的解密才被放行，直接用 KMS API 解任意
+東西都不符此 condition 而被拒。`setup_runtime_credentials.sh` 與
+`put_runtime_tokens.sh` 的 region 預設一致（均 `ap-southeast-2`）。
+

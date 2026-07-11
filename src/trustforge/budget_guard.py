@@ -454,10 +454,19 @@ def try_reserve_request_budget(
         ok = backend.try_reserve(spent_daily=spent, cost=cost, cap=cap, now=now_fn())
     except BudgetBackendError:
         # 後端不可用：fallback 回 process-local 預留（不 fail-open 成完全不擋）。
+        # 【CISO #75 可見性】多實例預留保護在這段期間**暫時失效**：各 process
+        # 各自 process-local 計數互不可見，多實例部署的每日硬上限可能被並行撐
+        # 爆成 N 倍。已送 CloudWatch 指標 + 記 warning，絕不靜默降級。
         _log.warning(
-            "[budget_guard] DynamoDB budget counter 不可用，fallback 回 process-local 預留",
+            "[budget_guard] DynamoDB budget counter 不可用，fallback 回 process-local 預留"
+            "【CISO #75 殘餘風險】多實例保護已暫時失效：多 process/多機部署時各"
+            " process 的 process-local 預留互不可見，每日 $N 硬上限可能被並行撐爆成"
+            " N 倍；請檢查 trustforge-budget-guard 表是否存在、實例角色是否掛載"
+            " trustforge-budget-guard IAM policy、DynamoDB 是否可用。已送出 CloudWatch"
+            " 指標 BudgetGuardMultiInstanceProtectionDisabled 標記此降級。",
             exc_info=True,
         )
+        _maybe_emit_budget_backend_down_metric(now_fn())
         return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
     return cost if ok else None
 
@@ -476,6 +485,15 @@ def release_request_budget(amount: float | None) -> None:
     try:
         backend.release(amount)
     except BudgetBackendError:
+        # 【CISO #75 可見性】釋放也失敗 → 同樣證明多實例後端不可用，送指標
+        # + 記 warning，不靜默。process-local 仍做 reconcile。
+        _log.warning(
+            "[budget_guard] DynamoDB budget counter 釋放失敗（後端不可用），"
+            "【CISO #75 殘餘風險】多實例保護已暫時失效（同 try_reserve 路徑說明）。"
+            "已送出 CloudWatch 指標 BudgetGuardMultiInstanceProtectionDisabled。",
+            exc_info=True,
+        )
+        _maybe_emit_budget_backend_down_metric()
         _RESERVATION.release(amount)
 
 
@@ -485,6 +503,50 @@ def _reset_reservation_for_tests() -> None:
     呼叫。"""
     with _RESERVATION._lock:
         _RESERVATION._reserved = 0.0
+
+
+# ---------------------------------------------------------------------------
+# #75 CISO 可見性：DynamoDB 後端失效時送指標 + 警告（避免靜默降級）
+# ---------------------------------------------------------------------------
+# 背景：啟用 `TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb` 後，若表不存在 / 實例
+# 角色未掛 `trustforge-budget-guard` IAM policy / DynamoDB 不可用，
+# `try_reserve` 會拋 `BudgetBackendError`，呼叫端 fallback 回 process-local
+# `BudgetReservation`。**但 process-local 只擋單 process 內的並行 race，多實例
+# （多 process／多機器）部署時各 process 的 reserved 互不可見，每日 `$N` 硬上限
+# 會被並行撐爆成 N 倍**——這正是 #75 原本要解的多實例風險，靜默 fallback 等於
+# 把保護關掉卻不讓維運發現。因此這裡**不靜默**：每次偵測到後端失效，都送一條
+# CloudWatch 指標 `BudgetGuardMultiInstanceProtectionDisabled` 並記 warning log，
+# 證明多實例保護已失效。
+#
+# 殘餘風險（必須記錄）：DynamoDB 不可用期間，多實例預留上限暫時失效，退化回
+# 「每個 process 各自 process-local 計數」——單 process 內仍安全，跨 process
+# 的每日上限在這段時間內無法強制收斂（見 `budget_counter.py` docstring）。後端
+# 恢復後，下一次 `try_reserve` 走 DynamoDB 路徑，原子收斂自動恢復。
+_BUDGET_BACKEND_DOWN_METRIC_COOLDOWN = 300.0
+_last_backend_down_metric_ts = 0.0
+_backend_down_metric_lock = threading.Lock()
+
+
+def _maybe_emit_budget_backend_down_metric(now: float | None = None) -> None:
+    """per-process 冷卻後送出一條 `BudgetGuardMultiInstanceProtectionDisabled`
+    指標（證明多實例保護已失效）。冷卻避免每個請求都打一次 CloudWatch 造成
+    風暴；冷卻期內只送一次，但 warning log（呼叫端）仍每次都記，確保可被看見。
+    """
+    global _last_backend_down_metric_ts
+    now = now if now is not None else time.time()
+    with _backend_down_metric_lock:
+        if now - _last_backend_down_metric_ts < _BUDGET_BACKEND_DOWN_METRIC_COOLDOWN:
+            return
+        _last_backend_down_metric_ts = now
+    try:
+        from . import cloudwatch_metrics
+
+        cloudwatch_metrics.emit_budget_guard_backend_down()
+    except Exception:
+        _log.warning(
+            "[budget_guard] 送出 budget guard 後端失效指標時發生例外",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

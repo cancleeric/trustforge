@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_NAMESPACE = "TrustForge"
 METRIC_NAME = "DedupFailOpenRecentFailures"
+# #75 CISO 可見性指標：當 `TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb` 但表/ IAM /
+# DynamoDB 不可用（BudgetBackendError）時送出的降級警報，證明「多實例預留保護
+# 已失效、已靜默 fallback 回 process-local」。這條指標**不受** `TRUSTFORGE_CW_
+# METRICS` opt-in 限制（它是降級警報、不是觀測旁路），但由呼叫端
+# `budget_guard` 做 per-process 冷卻避免風暴。
+BUDGET_GUARD_BACKEND_DOWN_METRIC = "BudgetGuardMultiInstanceProtectionDisabled"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 _client: Any = None
@@ -69,6 +75,43 @@ def set_client_for_tests(client: Any) -> None:
     global _client
     with _client_lock:
         _client = client
+
+
+def emit_budget_guard_backend_down(
+    *, namespace: str | None = None, now: datetime | None = None
+) -> bool:
+    """#75 CISO 可見性要求：多實例 budget 預留的 DynamoDB 後端不可用時，送出
+    一條 CloudWatch 指標，證明「多實例保護已失效」（已靜默 fallback 回
+    process-local）。
+
+    這條指標**不**受 `TRUSTFORGE_CW_METRICS` opt-in 限制——它是降級警報，刻意
+    要「不管有沒有開一般指標上報都看得到」，避免多實例保護失效被靜默吞掉。
+    失敗絕不 raise（只記 warning）。冷卻由呼叫端 `budget_guard` 負責，避免
+    每個請求都打一次 CloudWatch。
+    """
+    ts = now if now is not None else datetime.now(timezone.utc)
+    metric_data = [
+        {
+            "MetricName": BUDGET_GUARD_BACKEND_DOWN_METRIC,
+            "Dimensions": [{"Name": "Service", "Value": "trustforge"}],
+            "Timestamp": ts,
+            "Value": 1,
+            "Unit": "Count",
+        }
+    ]
+    try:
+        _get_or_create_client().put_metric_data(
+            Namespace=namespace or DEFAULT_NAMESPACE,
+            MetricData=metric_data,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "[cloudwatch_metrics] 送出 budget guard 後端失效指標失敗: %s",
+            exc,
+            exc_info=True,
+        )
+        return False
 
 
 def emit_dedup_fail_open_metric(

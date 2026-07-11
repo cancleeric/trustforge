@@ -115,17 +115,29 @@ put_runtime_secure_param() {
 
   # 建 0600 暫存檔，寫 JSON body（含 Overwrite: true）。指定 KMS key 時一併
   # 帶入 KeyId（啟用客戶自管 KMS key + EncryptionContext 收斂解密權限）。
+  # 【#121.8 JSON 注入修復】絕不再用 printf 裸插 token / KMS_KEY_ID 進 JSON——
+  # 任何含引號 / 反斜線 / 控制字元的輸入都會破壞 JSON 結構（即便本腳本已在前面
+  # 用字元集正則擋掉非法 token，KMS_KEY_ID 是 ARN/alias 不在該正則範圍內，仍
+  # 可能被注入）。改用 python（值經環境變數傳入，不用 shell 插值）做 json.dumps
+  # 正確轉義，產出語法合法的 JSON。
   local tmp
   tmp="$(umask 077 && mktemp)"
   trap 'rm -f "${tmp:-}"' EXIT INT TERM
 
-  local keyid_field=""
-  if [[ -n "$KMS_KEY_ID" ]]; then
-    keyid_field=",\"KeyId\":\"$KMS_KEY_ID\""
-  fi
-
-  printf '{"Name":"%s","Value":"%s","Type":"SecureString","Overwrite":true%s}' \
-    "$pname" "$val" "$keyid_field" > "$tmp"
+  TF_PARAM_NAME="$pname" TF_PARAM_VAL="$val" TF_PARAM_KEYID="$KMS_KEY_ID" \
+    python3 - <<'PY' > "$tmp" || { rm -f "$tmp"; echo "錯誤：組裝 JSON body 失敗：$pname" >&2; return 1; }
+import json, os
+doc = {
+    "Name": os.environ["TF_PARAM_NAME"],
+    "Value": os.environ["TF_PARAM_VAL"],
+    "Type": "SecureString",
+    "Overwrite": True,
+}
+keyid = os.environ.get("TF_PARAM_KEYID")
+if keyid:
+    doc["KeyId"] = keyid
+sys.stdout.write(json.dumps(doc))
+PY
 
   # put 參數（不開 verbose，stdout/stderr 不含 token 值）。
   if ! aws ssm put-parameter --region "$REGION" --cli-input-json "file://$tmp" >/dev/null; then
@@ -159,3 +171,20 @@ fi
 
 echo "完成。"
 echo "提醒：這些是常駐參數（/trustforge/runtime/*），不會被部署腳本的 trap / sweep 清除。若需輪替，重跑本腳本即可（Overwrite: true）。"
+
+# #121.9：客戶自管 KMS key 的 key policy 收斂提醒（與 setup_runtime_credentials.sh
+# 讀取端、ssm_params.py 讀取端共用同一套 EncryptionContext 語意）。
+if [[ -n "$KMS_KEY_ID" ]]; then
+  ACCT="${ACCT:-$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo '<acct>')}"
+  echo "──────────────────────────────────────────────────────────────────────"
+  echo "已用客戶自管 KMS key 加密 SecureString：$KMS_KEY_ID"
+  echo "請確認該 CMK 的 key policy 允許本角色 kms:Decrypt，並（建議）以 condition"
+  echo "收斂解密權限——SSM 寫入 SecureString 時會自動帶入 EncryptionContext"
+  echo "aws:ssm:parameter-arn，收斂後只有「經 SSM 且目標為該前綴參數」的解密才被放行："
+  echo '  "Condition": { "StringEquals": {'
+  echo '    "kms:EncryptionContext:aws:ssm:parameter-arn":'
+  echo "    \"arn:aws:ssm:${REGION}:${ACCT}:parameter/trustforge/runtime/*\" } }"
+  echo "（直接用 KMS API 解任意東西都不符此 condition，被拒。詳見 deploy/README.md"
+  echo "「#121 runtime token KMS EncryptionContext 收斂」章節。）"
+  echo "──────────────────────────────────────────────────────────────────────"
+fi
