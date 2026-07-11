@@ -33,6 +33,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -69,16 +71,30 @@ def set_client_for_tests(client: Any) -> None:
         _CLIENT = client
 
 
-def get_runtime_token(name: str) -> str | None:
+def get_runtime_token(
+    name: str,
+    *,
+    max_attempts: int = 5,
+    backoff_base: float = 0.2,
+    backoff_cap: float = 2.0,
+) -> str | None:
     """從 SSM Parameter Store 讀取常駐 token。
 
     參數：
         name: token 邏輯名稱，例如 "admin-token" 或 "live-token"。
+        max_attempts / backoff_base / backoff_cap：#121 follow-up 的 IAM 傳播
+            重試——實例角色 / SSM / KMS 權限剛建立後，短時間內 `get_parameter`
+            可能拿到暫時性的 `AccessDeniedException` / `ThrottlingException`
+            （IAM 最終一致傳播尚未收斂）。這類錯誤指數退避重試
+            （`backoff_base * 2**i`，上限 `backoff_cap`，預設最多 5 次、總退避
+            約 3.8s），待傳播完成後即可讀到；重試耗盡才視同失敗回 None。非
+            暫時性錯誤（ParameterNotFound / 一般例外）不重試，直接回 None。
 
     回傳：
         token 字串；若此層未提供（未設定 TRUSTFORGE_TOKEN_SSM_PREFIX、參數不
         存在、值為空字串、或任何讀取錯誤）則回傳 None。本函式絕不 raise，讓
-        呼叫端自行 fallback（見模組 docstring 失敗語意）。
+        呼叫端自行 fallback（見模組 docstring 失敗語意）。token 值**絕不**出
+        現在任何 log / 例外訊息中。
     """
     prefix = os.getenv("TRUSTFORGE_TOKEN_SSM_PREFIX")
     if not prefix:
@@ -86,22 +102,98 @@ def get_runtime_token(name: str) -> str | None:
 
     full_name = f"{prefix}/{name}"
 
+    client = _get_or_create_client()
+
+    for attempt in range(max_attempts):
+        try:
+            resp = client.get_parameter(Name=full_name, WithDecryption=True)
+            value = resp.get("Parameter", {}).get("Value")
+        except Exception as exc:
+            from botocore.exceptions import ClientError
+
+            code = (
+                exc.response.get("Error", {}).get("Code")
+                if isinstance(exc, ClientError)
+                else ""
+            )
+            # #121：暫時性錯誤（IAM 傳播 / throttle）→ 退避重試。
+            if code in (
+                "ThrottlingException",
+                "Throttling",
+                "AccessDeniedException",
+                "AccessDenied",
+            ):
+                if attempt < max_attempts - 1:
+                    time.sleep(min(backoff_base * (2 ** attempt), backoff_cap))
+                    continue
+                logger.warning(
+                    "SSM 讀取重試耗盡（IAM 傳播/Throttle）：%s", full_name, exc_info=True
+                )
+                return None
+            if code == "ParameterNotFound":
+                logger.warning("SSM parameter not found: %s", full_name)
+                return None
+            logger.error("Failed to read SSM parameter: %s", full_name, exc_info=True)
+            return None
+        if not value:
+            return None
+        return value
+    return None
+
+
+# ---------------------------------------------------------------------------
+# #121 follow-up：部署期臨時參數的時間窗 sweep
+# ---------------------------------------------------------------------------
+def sweep_deploy_parameters(
+    prefix: str = "/trustforge/deploy",
+    *,
+    max_age_seconds: float = 3600.0,
+    now_fn: Any = time.time,
+) -> list[str]:
+    """清理「部署期臨時參數」（`/trustforge/deploy/*`）中超過時間窗、早該被
+    trap 清掉卻因異常中斷而殘留的項目（#121 sweep 時間窗優化）。
+
+    常駐參數（`/trustforge/runtime/*`）**不**在此函式清掃範圍（見
+    `put_runtime_tokens.sh` 的禁止事項說明）——那類參數若被自動刪除會讓線上
+    服務啟動時讀不到 token 而整個掛掉。
+
+    回傳被刪除的參數全名清單（供呼叫端記 log / 斷言）。SSM 讀寫失敗只記
+    warning、不 raise（sweep 是維運收尾動作，不該因為 SSM 暫時不可用而炸）。
+    """
     try:
         client = _get_or_create_client()
-        resp = client.get_parameter(Name=full_name, WithDecryption=True)
-        value = resp.get("Parameter", {}).get("Value")
+        # #121.6：describe_parameters 單次最多回 50 筆，參數多頁時必須跟
+        # NextToken 分頁，否則後面幾頁的殘留參數會被漏清（多頁部署期參數
+        # 存在時尤其危險——舊 token 殘留到下次部署）。這裡迴圈收斂到沒有
+        # NextToken 為止。
+        params: list[dict] = []
+        next_token: str | None = None
+        while True:
+            kwargs: dict = {"ParameterFilters": [{"Key": "Path", "Values": [prefix]}]}
+            if next_token:
+                kwargs["NextToken"] = next_token
+            resp = client.describe_parameters(**kwargs)
+            params.extend(resp.get("Parameters", []) or [])
+            next_token = resp.get("NextToken")
+            if not next_token:
+                break
     except Exception as exc:
-        from botocore.exceptions import ClientError
-
-        if (
-            isinstance(exc, ClientError)
-            and exc.response.get("Error", {}).get("Code") == "ParameterNotFound"
-        ):
-            logger.warning("SSM parameter not found: %s", full_name)
-            return None
-        logger.error("Failed to read SSM parameter: %s", full_name, exc_info=True)
-        return None
-
-    if not value:
-        return None
-    return value
+        logger.warning("SSM sweep 列舉失敗（跳過）：%s", exc, exc_info=True)
+        return []
+    now = now_fn()
+    deleted: list[str] = []
+    for p in params:
+        name = p.get("Name")
+        if not name:
+            continue
+        lm = p.get("LastModifiedDate")
+        if lm is None:
+            continue
+        ts = lm.timestamp() if isinstance(lm, datetime) else float(lm)
+        if now - ts > max_age_seconds:
+            try:
+                client.delete_parameter(Name=name)
+                deleted.append(name)
+            except Exception as exc:
+                logger.warning("SSM sweep 刪除失敗：%s", name, exc_info=True)
+    return deleted

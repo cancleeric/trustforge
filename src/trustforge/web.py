@@ -4493,6 +4493,20 @@ def _record_dedup_prep_failure(context: str) -> None:
             _DEDUP_PREP_FAILURE_ALERT_THRESHOLD,
         )
 
+    # #104：把滑動視窗內失敗次數作為數值 CloudWatch 指標送出，讓重複計費/
+    # 去重失效可被即時看見（不依賴 log 解析）。lazy import：未啟用時
+    # `emit_dedup_fail_open_metric` 是 no-op，不 import boto3、不連 AWS，不
+    # 影響離線 demo 與既有 ALERT log 路徑。失敗絕不 raise（觀測性旁路）。
+    try:
+        from .cloudwatch_metrics import emit_dedup_fail_open_metric
+
+        emit_dedup_fail_open_metric(count)
+    except Exception:
+        logging.warning(
+            "TrustForge dedup fail-open 指標上報失敗（觀測性旁路，不影響請求）",
+            exc_info=True,
+        )
+
 
 def _dedup_prep_failure_health() -> dict:
     """供 `/api/status` 曝光用：目前滑動視窗內的 dedup 準備失敗次數／是否

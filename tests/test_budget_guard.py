@@ -412,3 +412,96 @@ def test_caps_reject_non_finite_env(monkeypatch):
     assert budget_guard.daily_cap_usd() == budget_guard.DEFAULT_BEDROCK_DAILY_USD_CAP
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", "inf")
     assert budget_guard.request_max_cost_usd() == budget_guard.DEFAULT_REQUEST_MAX_USD
+
+
+# ---------------------------------------------------------------------------
+# #75 CISO 可見性：DynamoDB 後端失效時送 CloudWatch 指標 + 不靜默降級
+# ---------------------------------------------------------------------------
+
+class _BrokenBudgetCounter:
+    """模擬 `DynamoDBBudgetCounter` 後端不可用：try_reserve / release 都拋
+    `BudgetBackendError`（budget_guard 應 fallback 回 process-local，並送
+    `BudgetGuardMultiInstanceProtectionDisabled` 指標）。"""
+
+    def try_reserve(self, *, spent_daily=0.0, cost=0.1, cap=1.0, now=None):
+        from trustforge.budget_counter import BudgetBackendError
+
+        raise BudgetBackendError("simulated DynamoDB down")
+
+    def release(self, amount, *, now=None):
+        from trustforge.budget_counter import BudgetBackendError
+
+        raise BudgetBackendError("simulated DynamoDB down")
+
+
+class _FakeCW:
+    def __init__(self):
+        self.calls = []
+
+    def put_metric_data(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def test_budget_guard_backend_down_emits_metric_and_falls_back(
+    monkeypatch, caplog
+):
+    """#75：DynamoDB 後端不可用時——(1) 不 fail-open：fallback 回 process-local
+    預留、第一筆仍成功；(2) 送 CloudWatch 指標 BudgetGuardMultiInstanceProtectionDisabled；
+    (3) 記 warning log（證明多實例保護已暫時失效、非靜默降級）。"""
+    import logging
+
+    from trustforge import budget_guard, budget_counter, cloudwatch_metrics
+    from trustforge.budget_counter import BudgetBackendError
+
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "1.0")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", "0.1")
+    budget_guard._reset_reservation_for_tests()
+    monkeypatch.setattr(
+        budget_counter, "_default_counter", lambda: _BrokenBudgetCounter()
+    )
+    fake_cw = _FakeCW()
+    cloudwatch_metrics.set_client_for_tests(fake_cw)
+    monkeypatch.setattr(budget_guard, "_last_backend_down_metric_ts", 0.0)
+
+    with caplog.at_level(logging.WARNING, logger="trustforge.budget_guard"):
+        cost = budget_guard.try_reserve_request_budget()
+    assert cost is not None, "後端失效應 fallback 回 process-local 預留"
+    assert "多實例保護已暫時失效" in caplog.text
+    metric_calls = [c for c in fake_cw.calls if c.get("MetricData")]
+    assert metric_calls, "應送出 BudgetGuardMultiInstanceProtectionDisabled 指標"
+    assert (
+        metric_calls[0]["MetricData"][0]["MetricName"]
+        == cloudwatch_metrics.BUDGET_GUARD_BACKEND_DOWN_METRIC
+    )
+    # release 也失敗 → 同樣送指標（冷卻期內不重複送）
+    budget_guard.release_request_budget(cost)
+    # 冷卻：同一瞬間只送一次（reserve 已送，release 在冷卻內不重送）
+    assert len([c for c in fake_cw.calls if c.get("MetricData")]) == 1
+
+
+def test_budget_guard_backend_down_metric_cooldown(monkeypatch):
+    """#75：per-process 冷卻——兩次後端失效（不同瞬間）只各送一次指標，不風暴。"""
+    from trustforge import budget_guard, budget_counter, cloudwatch_metrics
+
+    monkeypatch.setenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "dynamodb")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "1.0")
+    monkeypatch.setenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", "0.1")
+    budget_guard._reset_reservation_for_tests()
+    monkeypatch.setattr(
+        budget_counter, "_default_counter", lambda: _BrokenBudgetCounter()
+    )
+    fake_cw = _FakeCW()
+    cloudwatch_metrics.set_client_for_tests(fake_cw)
+    # 初始冷卻戳設在很遠的過去，確保第一次（now=0）的呼叫能真的送指標
+    monkeypatch.setattr(budget_guard, "_last_backend_down_metric_ts", -1000.0)
+
+    # 第一次（now=0）：送指標
+    budget_guard.try_reserve_request_budget(now_fn=lambda: 0.0)
+    # 第二次（now=10，仍在 300s 冷卻內）：不重送
+    budget_guard.try_reserve_request_budget(now_fn=lambda: 10.0)
+    # 第三次（now=400，冷卻過期）：再送一次
+    budget_guard.try_reserve_request_budget(now_fn=lambda: 400.0)
+
+    sent = [c for c in fake_cw.calls if c.get("MetricData")]
+    assert len(sent) == 2, f"冷卻內只應送 2 次，實際 {len(sent)}"

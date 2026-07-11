@@ -33,6 +33,15 @@ MODEL="${BEDROCK_MODEL_ID-}"
 #     層（見 src/trustforge/budget_guard.py 三層 cap 順序），部署可帶如 1
 TOKEN_SSM_PREFIX="${TRUSTFORGE_TOKEN_SSM_PREFIX-}"
 DAILY_CAP="${TRUSTFORGE_BEDROCK_DAILY_USD_CAP-}"
+# #75：多實例 budget 預留後端。demo（公開 EC2）預設開啟 dynamodb（多實例部署
+# 才安全的原子計數）；若表/IAM/DynamoDB 不可用，app 會 fallback 回 process-local
+# 並送 CloudWatch 指標 BudgetGuardMultiInstanceProtectionDisabled 標記降級（不
+# 靜默）。純本地離線開發可設 TRUSTFORGE_BUDGET_GUARD_BACKEND=local 關掉。
+BUDGET_BACKEND="${TRUSTFORGE_BUDGET_GUARD_BACKEND:-dynamodb}"
+# #104.5：demo 強制開啟 CloudWatch 指標上報（dedup fail-open 告警 + #75 後端
+# 失效指標都靠它）。未設視同 1（開）。若不想送指標設 TRUSTFORGE_CW_METRICS=0。
+CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
+COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
 # 注入防護（值會被嵌進 SSM commands JSON 與遠端 root shell 的 sed 取代式）：
 # prefix 限 SSM 參數名字元集（含 `/` 路徑分隔），cap 限十進位數字——含引號/
 # 反斜線/管線/空白等一律在本機就 fail-fast 中止，杜絕「值本身」對遠端腳本
@@ -63,6 +72,14 @@ EXTRA_UNIT_ENV=""
 "
 [ -n "$TOKEN_SSM_PREFIX" ] && EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=${TOKEN_SSM_PREFIX}
 "
+# #75 / #104.5：demo 預設開啟的多實例預留後端 + CloudWatch 指標上報（值已帶
+# 預設，故無論呼叫端有無設都寫入該行；非機敏值，可直接寫入 user-data / unit）。
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_GUARD_BACKEND=${BUDGET_BACKEND}
+"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_COUNTER_TABLE=${COUNTER_TABLE}
+"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_CW_METRICS=${CW_METRICS}
+"
 
 # update-in-place 用：對單一 Environment 行產生「ensure（有值：sed 取代／
 # 沒有該行就插到 PYTHONPATH 後）或 remove（未設：整行刪除，fail-closed）」
@@ -85,7 +102,7 @@ ssm_env_cmd() {
 # SSM 讀取）。這兩段刪除透過呼叫 ssm_env_cmd 傳空字串觸發 else 分支，輸出格式
 # 與既有 delete 慣例完全一致（同一套 JSON commands 陣列拼接）。接著 cap 與
 # token SSM 前綴走標準 ensure/delete（有值 sed 取代／插入，未設整行刪除）。
-UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")"
+UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")"
 
 # 先查一次既有實例，才能判斷「這次到底會不會走首次建置」——這是全腳本第一個
 # aws 呼叫（在此之前只做過本機 regex 驗證，零 aws 呼叫），純唯讀
@@ -308,7 +325,18 @@ if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
     --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null
   aws iam create-instance-profile --instance-profile-name "$ROLE" >/dev/null
   aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" >/dev/null
-  echo "[ec2] 等 instance profile 生效…"; sleep 12
+  # #121 IAM 傳播重試：instance profile 剛建立後，EC2/SSM 端不一定立刻可見，
+  # 固定 sleep 12s 在區域延遲較高時可能仍不足。改為有界重試：直到
+  # get-instance-profile 真的回傳才繼續（最多 ~30s），避免 instance 啟動後
+  # SSM 讀 token 因 AccessDenied 傳播未到而失敗（應用端 get_runtime_token
+  # 另有指數退避重試作為第二道防線）。
+  echo "[ec2] 等待 instance profile 傳播收斂…"
+  for _i in $(seq 1 30); do
+    if aws iam get-instance-profile --instance-profile-name "$ROLE" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
 fi
 # trustforge-inline（Bedrock + S3）最小權限：每次部署都 reconcile（put-role-policy
 # 覆寫同名 policy，冪等安全），跟下面 DynamoDB policy 用同一套模式——不能只放在
@@ -348,6 +376,14 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
     {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"},
     {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/runtime/*\"},
     {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}}]}" >/dev/null
+# #104.5：dedup fail-open 告警 + #75 後端失效指標都走 CloudWatch
+# put_metric_data，必須給實例角色 `cloudwatch:PutMetricData`（該 action 無
+# resource-level 權限，只能給 Resource "*"；僅用於送出自定義觀測/降級指標，
+# 不影響其他 AWS 資源）。TRUSTFORGE_CW_METRICS=1 會在 unit 內開啟（見下）。
+echo "[ec2] reconcile CloudWatch 指標上報 IAM inline policy（${ROLE}）…"
+aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-cloudwatch \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":\"cloudwatch:PutMetricData\",\"Resource\":\"*\"}]}" >/dev/null
 # DynamoDB 最小權限：每次部署都 reconcile（put-role-policy 覆寫同名 policy，
 # 冪等安全），鎖死兩個 table 各自的 ARN，不給萬用 Resource "*"。
 echo "[ec2] reconcile DynamoDB IAM inline policy（${ROLE}）…"
@@ -366,6 +402,22 @@ for T in trustforge-connector-cache trustforge-cost-ledger; do
   fi
 done
 
+# #75：建立 budget guard 表 + 掛最小權限 IAM（多實例預留保護）。這支腳本不寫
+# 任何 token，只建表 + put-role-policy（鎖該表 ARN 的 UpdateItem/GetItem）。
+# 表不存在就建、IAM 每次 reconcile（冪等）。建完確認表真的存在，否則多實例
+# 保護會靜默失效（app 端會送 BudgetGuardMultiInstanceProtectionDisabled 指標
+# 標記此降級，但部署不該把這種狀態當成功）。
+echo "[ec2] 建立 budget guard 表 + IAM（#75）…"
+if ! "$(dirname "$0")/setup_budget_guard_dynamodb.sh"; then
+  echo "[ec2] ❌ budget guard 表/IAM 建置失敗，中止部署" >&2
+  exit 1
+fi
+BG_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
+if ! aws dynamodb describe-table --region "$REGION" --table-name "$BG_TABLE" >/dev/null 2>&1; then
+  echo "[ec2] ❌ DynamoDB 表 $BG_TABLE 在 $REGION 不存在，budget 多實例保護會失效，中止部署" >&2
+  exit 1
+fi
+
 # 2) 打包 + 上傳 S3 -----------------------------------------------------------
 echo "[ec2] 打包應用 zip…"
 B=$(mktemp -d); ZIP="$(pwd)/build/trustforge_app.zip"; mkdir -p build
@@ -373,6 +425,10 @@ cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
 # scripts/：排程 fetcher（fetch_scheduler.py）跟著一起打包，否則 systemd timer
 # 在 EC2 上會找不到檔案（見下方 fetch-scheduler.service ExecStart）。
 cp -r scripts "$B/scripts"
+# deploy/：reconcile_trustforge_unit.sh 等部署期 glue 需在 EC2 上由 unit 的
+# ExecStartPre 呼叫，故一併打包（不含任何 token 值，只含腳本邏輯）。reconcile
+# 腳本本身會再呼叫 scripts/sweep_deploy_parameters.sh。
+cp -r deploy "$B/deploy"
 # 第三輪 AI 友善：`GET /api/openapi.yaml`／`GET /llms.txt` 是純讀檔回傳（見
 # `src/trustforge/web.py::_handle_openapi_spec`/`_handle_llms_txt`，路徑解析
 # 靠 systemd unit 已設的 `TRUSTFORGE_HOME=/opt/trustforge`），這兩份檔案不
@@ -383,7 +439,7 @@ mkdir -p "$B/docs"; cp -r docs/api "$B/docs/api"; cp llms.txt "$B/llms.txt"
 GIT_VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
 printf 'VERSION = "%s"\n' "$GIT_VER" > "$B/trustforge/_version.py"
 echo "[ec2] 版號 = $GIT_VER"
-( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts docs llms.txt -x '*/__pycache__/*' ); rm -rf "$B"
+( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts deploy docs llms.txt -x '*/__pycache__/*' ); rm -rf "$B"
 
 aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
   aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
@@ -482,6 +538,25 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
       --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
   fi
+  # #121.6：reconcile 既有實例的 trustforge.service，補上 sweep_deploy_parameters
+  # ExecStartPre（冪等，已存在就跳過）。runtime token 直接由 app 啟動期從 SSM
+  # 讀取（SSM 路徑，已移除 systemd tmpfs 憑證層）。接著 daemon-reload + restart
+  # 讓 unit 變更生效。
+  rid=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","bash /opt/trustforge/scripts/reconcile_trustforge_unit.sh","systemctl daemon-reload","systemctl restart trustforge"]' \
+    --query 'Command.CommandId' --output text)
+  if [ -z "$rid" ] || [ "$rid" = "None" ]; then
+    echo "[ec2] ❌ unit reconcile 用 SSM send-command 未取得 CommandId，中止" >&2
+    exit 1
+  fi
+  rstatus=$(poll_ssm_terminal_status "$rid" "$IID" 120 5) || true
+  if [ "$rstatus" != "Success" ]; then
+    echo "[ec2] ❌ unit reconcile 失敗：SSM CommandId=$rid Status=${rstatus}" >&2
+    aws ssm get-command-invocation --region "$REGION" --command-id "$rid" --instance-id "$IID" \
+      --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
+    exit 1
+  fi
+  echo "[ec2] ✅ 既有實例 unit 已 reconcile（sweep）"
   # 主要 config SSM 成功不代表 fetch-scheduler 真的能跑（IAM 權限不足只有實
   # 際執行才會露餡）：再同步跑一次，非成功就讓整支腳本 exit 非零。
   verify_fetch_scheduler "$IID"
@@ -507,6 +582,10 @@ fi
 echo "[ec2] SG=$SGID VPC=$VPC"
 
 # 5) user-data（開機自動裝 + 跑）---------------------------------------------
+# runtime token 由 app 啟動期直接從 SSM Parameter Store（SecureString + KMS，
+# WithDecryption）讀取——不經 argv / env / 持久碟 / 日誌，fail-closed。本 user-data
+# 不含任何 token 值與 systemd tmpfs 憑證層（該層經 codex-review 第三輪實測確認在
+# 真實部署路徑完全失效且有「假安全感 + 服務起不來」風險，已移除並回退 SSM 路徑）。
 UD=$(mktemp)
 cat > "$UD" <<EOF
 #!/bin/bash
@@ -530,6 +609,8 @@ Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
+# #121.6：部署期臨時 SSM 參數時間窗 sweep（非致命，失敗不擋啟動）。
+ExecStartPre=/opt/trustforge/scripts/sweep_deploy_parameters.sh
 ${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3 -m trustforge.web
 Restart=always
 [Install]

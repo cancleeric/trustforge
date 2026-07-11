@@ -65,6 +65,10 @@ PREFIX="${PREFIX%/}"
 # token 值一律來自呼叫當下的 env，不寫死、不讀檔。
 ADMIN_TOKEN="${TRUSTFORGE_ADMIN_TOKEN-}"
 LIVE_TOKEN="${TRUSTFORGE_LIVE_TOKEN-}"
+# 選用：客戶自管 KMS key ARN/alias。指定後 SSM 以該 key 加密 SecureString，
+# 並自動套用 EncryptionContext（aws:ssm:parameter-arn），由 key policy 收斂
+# 解密權限（#121：kms EncryptionContext 強化）。未設則用 AWS 託管預設 key。
+KMS_KEY_ID="${TRUSTFORGE_TOKEN_KMS_KEY_ID-}"
 
 # 兩者至少要有一個非空，否則沒事可做。
 if [[ -z "$ADMIN_TOKEN" && -z "$LIVE_TOKEN" ]]; then
@@ -109,22 +113,31 @@ put_runtime_secure_param() {
     return 1
   fi
 
-  # 建 0600 暫存檔，寫 JSON body（含 Overwrite: true）。
+  # 建 0600 暫存檔，寫 JSON body（含 Overwrite: true）。指定 KMS key 時一併
+  # 帶入 KeyId（啟用客戶自管 KMS key + EncryptionContext 收斂解密權限）。
+  # 【#121.8 JSON 注入修復】絕不再用 printf 裸插 token / KMS_KEY_ID 進 JSON——
+  # 任何含引號 / 反斜線 / 控制字元的輸入都會破壞 JSON 結構（即便本腳本已在前面
+  # 用字元集正則擋掉非法 token，KMS_KEY_ID 是 ARN/alias 不在該正則範圍內，仍
+  # 可能被注入）。改用 python（值經環境變數傳入，不用 shell 插值）做 json.dumps
+  # 正確轉義，產出語法合法的 JSON。
   local tmp
   tmp="$(umask 077 && mktemp)"
-  # trap 作為中斷時（SIGINT / SIGTERM / script EXIT）的最後防線，確保暫存檔
-  # 被清除。正常 / 失敗路徑仍保留明確的 rm -f "$tmp"（見下方），兩者並存
-  # 不衝突——函式每次呼叫都會在自己走完之前明確 rm 掉暫存檔，trap 只在
-  # 異常中斷時才真正派上用場。
-  # 注意：此 trap 只清本機暫存檔，不刪除 SSM 參數。
-  # 注意：tmp 是函式局部變數，函式返回後即不存在。EXIT trap 在整個 shell
-  # 結束時才觸發，此時 tmp 已 out-of-scope。在 set -u 底下裸引用 $tmp 會
-  # 觸發 unbound variable 錯誤，因此用 ${tmp:-} 安全展開（未定義時為空字串，
-  # rm -f "" 是安全的 no-op）。
   trap 'rm -f "${tmp:-}"' EXIT INT TERM
 
-  printf '{"Name":"%s","Value":"%s","Type":"SecureString","Overwrite":true}' \
-    "$pname" "$val" > "$tmp"
+  TF_PARAM_NAME="$pname" TF_PARAM_VAL="$val" TF_PARAM_KEYID="$KMS_KEY_ID" \
+    python3 - <<'PY' > "$tmp" || { rm -f "$tmp"; echo "錯誤：組裝 JSON body 失敗：$pname" >&2; return 1; }
+import json, os, sys
+doc = {
+    "Name": os.environ["TF_PARAM_NAME"],
+    "Value": os.environ["TF_PARAM_VAL"],
+    "Type": "SecureString",
+    "Overwrite": True,
+}
+keyid = os.environ.get("TF_PARAM_KEYID")
+if keyid:
+    doc["KeyId"] = keyid
+sys.stdout.write(json.dumps(doc))
+PY
 
   # put 參數（不開 verbose，stdout/stderr 不含 token 值）。
   if ! aws ssm put-parameter --region "$REGION" --cli-input-json "file://$tmp" >/dev/null; then
@@ -158,3 +171,20 @@ fi
 
 echo "完成。"
 echo "提醒：這些是常駐參數（/trustforge/runtime/*），不會被部署腳本的 trap / sweep 清除。若需輪替，重跑本腳本即可（Overwrite: true）。"
+
+# #121.9：客戶自管 KMS key 的 key policy 收斂提醒（與 ssm_params.py 讀取端共用
+# 同一套 EncryptionContext 語意；runtime token 由 app 啟動期經 SSM 讀取）。
+if [[ -n "$KMS_KEY_ID" ]]; then
+  ACCT="${ACCT:-$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo '<acct>')}"
+  echo "──────────────────────────────────────────────────────────────────────"
+  echo "已用客戶自管 KMS key 加密 SecureString：$KMS_KEY_ID"
+  echo "請確認該 CMK 的 key policy 允許本角色 kms:Decrypt，並（建議）以 condition"
+  echo "收斂解密權限——SSM 寫入 SecureString 時會自動帶入 EncryptionContext"
+  echo "aws:ssm:parameter-arn，收斂後只有「經 SSM 且目標為該前綴參數」的解密才被放行："
+  echo '  "Condition": { "StringEquals": {'
+  echo '    "kms:EncryptionContext:aws:ssm:parameter-arn":'
+  echo "    \"arn:aws:ssm:${REGION}:${ACCT}:parameter/trustforge/runtime/*\" } }"
+  echo "（直接用 KMS API 解任意東西都不符此 condition，被拒。詳見 deploy/README.md"
+  echo "「#121 runtime token KMS EncryptionContext 收斂」章節。）"
+  echo "──────────────────────────────────────────────────────────────────────"
+fi
