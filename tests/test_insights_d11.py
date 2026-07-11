@@ -85,10 +85,12 @@ def test_d11_aggregation_returns_list_and_serializes():
         [_ret(-3.3), _vol(25)],
         "BTC", QuestionType.MULTI_SOURCE,
     )
-    assert isinstance(insights, list) and len(insights) == 1
+    assert isinstance(insights, list) and len(insights) >= 1
+    types = {ins.insight_type for ins in insights}
+    assert "smart_money_divergence" in types, "應含聰明錢背離洞察"
     import dataclasses, json
-    blob = dataclasses.asdict(insights[0])
-    assert json.dumps(blob, ensure_ascii=False), "asdict + json 不應拋"
+    for ins in insights:
+        assert json.dumps(dataclasses.asdict(ins), ensure_ascii=False), "asdict + json 不應拋"
 
 
 def test_d11_build_report_carries_insights():

@@ -248,6 +248,159 @@ def detect_smart_money_divergence(
 
 
 # ---------------------------------------------------------------------------
+# D1.2 操縱風險（同步滑動視窗爆量）— 重啟停用中的 W3 burst 偵測
+# ---------------------------------------------------------------------------
+# 歷史（見 trust.scoring._coordination_burst_flags / CTO 複查註解）：W3 burst 指標
+# 因 4 輪 codex 對抗審持續挖出缺陷（中位數自含候選、固定牆鐘分桶、baseline 未對齊、
+# **「只評估各源『最大窗』漏掉後續同窗 baseline 偏低的小爆量」**）被停用。本函式
+# 採**多來源同步滑動視窗**修正方案重啟，專治最後一個未修缺陷：
+#
+#   不再只選「絕對數量最大」的單一視窗算 ratio——改為對每個來源在**每一個候選
+#   視窗起點**都評估 ratio（同步對齊到其他來源的同窗計數當 baseline），取全域最大
+#   ratio。這樣「絕對數量較小、但相對當下 baseline 更異常」的視窗才不會被漏掉。
+#
+# 誠實守則（呼應 #24 不虛增、不除零、不誤判）：
+#   - 稀疏來源／主張數過少 → 同步視窗 baseline 不可靠 → 回 coverage="insufficient"
+#     （summary 標「樣本不足，無法評估」），絕不硬湊一個看似確定的結論。
+#   - 候選視窗絕對數量 < 下限（避免極小樣本的極端比值誤觸發）。
+#   - 同窗其他來源中位數 <= 0 → 跳過該視窗（不除零、不讓「基準為 0」讓任何
+#     >=1 則主張都被判爆量）。
+#   - 本指標為**資訊型警示、不併入 trust 扣分**（與 W3 informational-only 定調
+#     一致）：單源爆量可能是操縱，也可能是 legit 重大事件密集報導，需人工判讀。
+
+_BURST_WINDOW_SEC = 3600.0        # 同步滑動視窗（60 分鐘）
+_BURST_RATIO = 3.0                # 單源視窗內相異主張數 > 同窗其餘來源中位數的幾倍才觸發
+_BURST_MIN_ABS_COUNT = 4          # 候選視窗最小絕對相異主張數（防極小樣本極端比值）
+_BURST_MIN_TOTAL_CLAIMS = 6       # 整池最小主張數（稀疏閘）
+_BURST_MIN_SOURCES = 2            # 至少需 2 個來源才能比較
+
+
+def _median(xs: list[float]) -> float:
+    if not xs:
+        return 0.0
+    s = sorted(xs)
+    n = len(s)
+    m = n // 2
+    return s[m] if n % 2 else (s[m - 1] + s[m]) / 2.0
+
+
+def _distinct_in_window(ordered: list[ScoredClaim], start_ts: float, end_ts: float) -> int:
+    """數出 `doc.ts ∈ [start_ts, end_ts)` 區間內的相異 `c.claim.text` 數。"""
+    return len({c.claim.text for c in ordered if start_ts <= c.claim.doc.ts < end_ts})
+
+
+def detect_manipulation_burst(scored: Iterable[ScoredClaim]) -> Insight | None:
+    """D1.2：多來源同步滑動視窗單源爆量偵測（修正版，重啟 W3 burst）。
+
+    回傳：
+      - 觸發 → coverage="covered" 的操縱風險洞察（資訊型，不扣分）。
+      - 樣本過於稀疏（來源 < 2 或主張總數 < 下限）→ coverage="insufficient"、
+        summary 標「樣本不足，無法評估」，強度 0（誠實不出假陰/假陽）。
+      - 樣本充足但無爆量 → None（誠實不出洞察，不污染面板）。
+    """
+    claims_by_source: dict[str, list[ScoredClaim]] = {}
+    for sc in scored:
+        claims_by_source.setdefault(sc.claim.doc.source, []).append(sc)
+
+    sources = list(claims_by_source)
+    total = sum(len(v) for v in claims_by_source.values())
+
+    if len(sources) < _BURST_MIN_SOURCES or total < _BURST_MIN_TOTAL_CLAIMS:
+        return Insight(
+            insight_type="manipulation_burst",
+            title="操縱風險：單源爆量（同步滑動視窗）",
+            summary=(
+                "來源數或主張數過少，同步滑動視窗的跨源 baseline 不可靠，"
+                "無法評估單源爆量，故標註「樣本不足，無法評估」。"
+            ),
+            direction="neutral",
+            strength=0.0,
+            coverage=COVERAGE_INSUFFICIENT,
+            coverage_reason="來源/主張數過少，同步滑動視窗基準不可靠。",
+            contributions=[],
+            claim_ids=[],
+            meta={},
+        )
+
+    ordered_by_source = {
+        s: sorted(v, key=lambda c: (c.claim.doc.ts, c.claim.id))
+        for s, v in claims_by_source.items()
+    }
+
+    best_ratio = 0.0
+    best: tuple | None = None  # (source, start_ts, cnt, median, window_claims)
+
+    for s, ordered in ordered_by_source.items():
+        n = len(ordered)
+        for i in range(n):
+            start_ts = ordered[i].claim.doc.ts
+            end_ts = start_ts + _BURST_WINDOW_SEC
+            cnt = _distinct_in_window(ordered, start_ts, end_ts)
+            # 最小絕對數量閘：避免極小樣本的極端比值誤觸發。
+            if cnt < _BURST_MIN_ABS_COUNT:
+                continue
+            # 同步對齊：其他每個來源在「同一段時間窗」內各自發了幾則相異主張。
+            others = [
+                float(_distinct_in_window(o, start_ts, end_ts))
+                for os_, o in ordered_by_source.items()
+                if os_ != s
+            ]
+            if not others:
+                continue
+            median = _median(others)
+            # 不除零、不讓「基準為 0」讓任何 >=1 則主張都被判爆量。
+            if median <= 0:
+                continue
+            ratio = cnt / median
+            # 取「全域最大 ratio」的視窗（含絕對數量較小但相對更異常的視窗）。
+            if ratio > _BURST_RATIO and ratio > best_ratio:
+                best_ratio = ratio
+                window_claims = [c for c in ordered if start_ts <= c.claim.doc.ts < end_ts]
+                best = (s, start_ts, cnt, median, window_claims)
+
+    if best is None:
+        return None
+
+    s, _start_ts, cnt, median, window_claims = best
+    strength = round(min(1.0, best_ratio / (2 * _BURST_RATIO)), 3)
+    win_min = int(_BURST_WINDOW_SEC // 60)
+    burst_trust = round(max((c.trust for c in window_claims), default=0.0), 3)
+    burst_contrib = InsightContribution(
+        source=s,
+        kind=window_claims[0].claim.doc.kind,
+        claim_id=window_claims[0].claim.id,
+        text=f"來源 {s} 在 {win_min} 分鐘同步視窗內發出 {cnt} 則相異主張",
+        direction="neutral",
+        trust=burst_trust,
+    )
+    baseline_contrib = InsightContribution(
+        source="(其餘來源)",
+        kind="aggregated",
+        claim_id=None,
+        text=f"同窗對照其餘來源中位數 {median:g} 則（比值 {best_ratio:.1f}×，閾值 {_BURST_RATIO:.0f}×）",
+        direction="neutral",
+        trust=0.0,
+    )
+    return Insight(
+        insight_type="manipulation_burst",
+        title="操縱風險：單源爆量（同步滑動視窗）",
+        summary=(
+            f"來源 {s} 在 {win_min} 分鐘同步視窗內發出 {cnt} 則相異主張，同窗其餘來源"
+            f"中位數僅 {median:g} 則（比值 {best_ratio:.1f}×，超過 {_BURST_RATIO:.0f}× 閾值）。"
+            "此為資訊型警示（不併入信任扣分），需結合其他訊號人工判讀是否為協同操縱。"
+        ),
+        direction="neutral",
+        strength=strength,
+        coverage=COVERAGE_COVERED,
+        coverage_reason="",
+        contributions=[burst_contrib, baseline_contrib],
+        claim_ids=[c.claim.id for c in window_claims][:10],
+        meta={"ratio": round(best_ratio, 3), "cnt": cnt, "median": median,
+              "window_sec": _BURST_WINDOW_SEC},
+    )
+
+
+# ---------------------------------------------------------------------------
 # 洞察聚合入口
 # ---------------------------------------------------------------------------
 
@@ -274,6 +427,10 @@ def detect_insights(
     if sm is not None:
         insights.append(sm)
 
-    # D1.2（操縱爆量）/ D1.4（來源自我矛盾）由後續 PR 在此接續註冊。
+    burst = detect_manipulation_burst(coin_relevant)
+    if burst is not None:
+        insights.append(burst)
+
+    # D1.4（來源自我矛盾）由後續 PR 在此接續註冊。
 
     return insights
