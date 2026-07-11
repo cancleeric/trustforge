@@ -184,7 +184,7 @@ def test_prefix_set_generic_exception_returns_none_and_errors(
 
 
 # ---------------------------------------------------------------------------
-# #121 follow-up：IAM 傳播重試 / sweep / systemd credentials / token 不回吐
+# #121 follow-up：IAM 傳播重試 / sweep / token 不回吐
 # ---------------------------------------------------------------------------
 
 
@@ -313,21 +313,6 @@ def test_sweep_deletes_only_expired_deploy_params(
     assert "/trustforge/runtime/admin-token" not in fake.deleted
 
 
-def test_load_credential_line_format() -> None:
-    """systemd `LoadCredential=` 行格式正確（tmpfs 路徑，非持久磁碟 / argv）。
-
-    來源檔名必須帶 `trustforge-` 前綴，對齊 setup_runtime_credentials.sh 寫入的
-    `/run/trustforge-credentials/trustforge-<name>` 與 app 讀取層
-    `$CREDENTIALS_DIRECTORY/trustforge-<name>`（#121.7 時序修正後三者嚴格一致）。
-    """
-    line = ssm_params.runtime_token_load_credential_line("admin-token")
-    assert line == "LoadCredential=trustforge-admin-token:/run/trustforge-credentials/trustforge-admin-token"
-    cred_line2 = ssm_params.runtime_token_load_credential_line(
-        "live-token", cred_dir="/run/creds"
-    )
-    assert cred_line2 == "LoadCredential=trustforge-live-token:/run/creds/trustforge-live-token"
-
-
 class FakePagedSweepClient:
     """模擬 `describe_parameters` 分多頁回傳（#121.6 NextToken 迴圈）。
 
@@ -380,37 +365,3 @@ def test_sweep_paginates_next_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fake.calls == 2
     # 過期的 b / d 都被清掉
     assert set(deleted) == {"/trustforge/deploy/b", "/trustforge/deploy/d"}
-
-
-def test_get_runtime_token_prefers_credentials_directory(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """#121.7：app 端優先從 `$CREDENTIALS_DIRECTORY/trustforge-<name>` 讀取
-    tmpfs 上的 token；有該檔就回其值（不呼叫 SSM），實現 LoadCredential 真實
-    讀取層，避免「glue 半套」的假安全感。"""
-    prefix = "/trustforge/runtime"
-    secret = "CREDFILETOKEN1234567890abcdef"
-    cred_dir = tmp_path / "creds"
-    cred_dir.mkdir()
-    (cred_dir / "trustforge-admin-token").write_text(secret, encoding="utf-8")
-    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
-    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(cred_dir))
-    # 即便 SSM client 被設成會回傳另一個值，也應優先回 cred 檔
-    ssm_params.set_client_for_tests(
-        FakeSSMClient(return_value={"Parameter": {"Value": "SSM_VALUE_SHOULD_NOT_WIN"}})
-    )
-    assert ssm_params.get_runtime_token("admin-token") == secret
-
-
-def test_get_runtime_token_cred_file_missing_falls_back_to_ssm(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """#121.7：cred 檔不存在時，app 優雅 fallback 回 SSM 讀取（向後相容）。"""
-    prefix = "/trustforge/runtime"
-    ssm_val = "SSMVALUE1234567890abcdef"
-    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
-    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "empty"))
-    ssm_params.set_client_for_tests(
-        FakeSSMClient(return_value={"Parameter": {"Value": ssm_val}})
-    )
-    assert ssm_params.get_runtime_token("admin-token") == ssm_val

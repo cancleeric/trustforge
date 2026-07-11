@@ -102,33 +102,6 @@ def get_runtime_token(
 
     full_name = f"{prefix}/{name}"
 
-    # #121.7：systemd `LoadCredential` 優先讀取層。當 app 由帶 `LoadCredential=`
-    # 的 unit 啟動時，systemd（或部署期 `setup_runtime_credentials.sh`）會把 SSM
-    # SecureString 以 0600 寫進 tmpfs（`CREDENTIALS_DIRECTORY` 指向的目錄，非
-    # 持久磁碟、不在 argv / process list），檔名為 `trustforge-<name>`。優先從
-    # 該檔讀取（真正的 tmpfs 路徑），讀不到 / 檔案缺失 / 異常才 fallback 回 SSM
-    # （向後相容，且避免「glue 半套」造成的假安全感——這一層讓整條機制是完整
-    # 可用的，而不是只有寫入端、app 卻從不讀）。
-    cred_dir = os.getenv("CREDENTIALS_DIRECTORY")
-    if cred_dir:
-        cred_file = os.path.join(cred_dir, f"trustforge-{name}")
-        try:
-            with open(cred_file, "r", encoding="utf-8") as _fh:
-                value = _fh.read().strip()
-            if value:
-                return value
-            logger.warning("systemd credential 檔為空：%s（fallback SSM）", cred_file)
-        except FileNotFoundError:
-            logger.warning(
-                "systemd credential 檔不存在：%s（fallback SSM）", cred_file
-            )
-        except OSError as exc:
-            logger.warning(
-                "讀取 systemd credential 檔失敗：%s（fallback SSM）: %s",
-                cred_file,
-                exc,
-            )
-
     client = _get_or_create_client()
 
     for attempt in range(max_attempts):
@@ -169,7 +142,7 @@ def get_runtime_token(
 
 
 # ---------------------------------------------------------------------------
-# #121 follow-up：部署期臨時參數的時間窗 sweep + systemd credentials 整合
+# #121 follow-up：部署期臨時參數的時間窗 sweep
 # ---------------------------------------------------------------------------
 def sweep_deploy_parameters(
     prefix: str = "/trustforge/deploy",
@@ -224,25 +197,3 @@ def sweep_deploy_parameters(
             except Exception as exc:
                 logger.warning("SSM sweep 刪除失敗：%s", name, exc_info=True)
     return deleted
-
-
-def runtime_token_load_credential_line(
-    name: str, *, cred_dir: str = "/run/trustforge-credentials"
-) -> str:
-    """#121 follow-up（systemd credentials 整合）：產生 systemd unit 的
-    `LoadCredential=` 行，讓 TrustForge process 從 **tmpfs**（`/run`，非持久
-    磁碟、不在 argv、不在 user-data）讀取開機期由 SSM 寫入的 token。
-
-    回傳字串形如：
-        `LoadCredential=trustforge-admin-token:/run/trustforge-credentials/trustforge-admin-token`
-
-    憑證來源檔由部署期獨立 oneshot unit（trustforge-credentials.service，
-    Before=trustforge.service）呼叫 `setup_runtime_credentials.sh` 寫入
-    `<cred_dir>/trustforge-<name>`（tmpfs）；systemd 在 trustforge.service
-    啟動前將該來源檔內容載入、暴露於 `$CREDENTIALS_DIRECTORY/trustforge-<name>`
-    （檔名與 credential 名稱都帶 `trustforge-` 前綴，與 app 讀取層
-    `get_runtime_token` 的 `$CREDENTIALS_DIRECTORY/trustforge-<name>` 完全一致）。
-    token 全程不落持久磁碟、不進 argv / process list。
-    """
-    cred_name = f"trustforge-{name}"
-    return f"LoadCredential={cred_name}:{cred_dir}/{cred_name}"

@@ -172,8 +172,8 @@ fi
 echo "完成。"
 echo "提醒：這些是常駐參數（/trustforge/runtime/*），不會被部署腳本的 trap / sweep 清除。若需輪替，重跑本腳本即可（Overwrite: true）。"
 
-# #121.9：客戶自管 KMS key 的 key policy 收斂提醒（與 setup_runtime_credentials.sh
-# 讀取端、ssm_params.py 讀取端共用同一套 EncryptionContext 語意）。
+# #121.9：客戶自管 KMS key 的 key policy 收斂提醒（與 ssm_params.py 讀取端共用
+# 同一套 EncryptionContext 語意；runtime token 由 app 啟動期經 SSM 讀取）。
 if [[ -n "$KMS_KEY_ID" ]]; then
   ACCT="${ACCT:-$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo '<acct>')}"
   echo "──────────────────────────────────────────────────────────────────────"

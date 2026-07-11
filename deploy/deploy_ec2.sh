@@ -425,9 +425,9 @@ cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
 # scripts/：排程 fetcher（fetch_scheduler.py）跟著一起打包，否則 systemd timer
 # 在 EC2 上會找不到檔案（見下方 fetch-scheduler.service ExecStart）。
 cp -r scripts "$B/scripts"
-# deploy/：setup_runtime_credentials.sh / reconcile_trustforge_unit.sh 等部署期
-# glue 需在 EC2 上由 unit 的 ExecStartPre 呼叫，故一併打包（不含任何 token 值，
-# 只含腳本邏輯）。reconcile 腳本本身會再呼叫 scripts/sweep_deploy_parameters.sh。
+# deploy/：reconcile_trustforge_unit.sh 等部署期 glue 需在 EC2 上由 unit 的
+# ExecStartPre 呼叫，故一併打包（不含任何 token 值，只含腳本邏輯）。reconcile
+# 腳本本身會再呼叫 scripts/sweep_deploy_parameters.sh。
 cp -r deploy "$B/deploy"
 # 第三輪 AI 友善：`GET /api/openapi.yaml`／`GET /llms.txt` 是純讀檔回傳（見
 # `src/trustforge/web.py::_handle_openapi_spec`/`_handle_llms_txt`，路徑解析
@@ -538,13 +538,12 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
       --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
   fi
-  # #121.6 / #121.7：reconcile 既有實例的 trustforge.service，補上 LoadCredential
-  # 讀取層（trustforge-credentials.service 獨立 oneshot 在啟動前寫好 tmpfs 憑證檔
-  # + Wants/After 拉起）與 sweep_deploy_parameters ExecStartPre（冪等，已存在就跳過）；
-  # 並把 /opt/trustforge/deploy/trustforge-credentials.service 佈署到
-  # /etc/systemd/system/ 且 enable --now。接著 daemon-reload + restart 讓 unit 變更生效。
+  # #121.6：reconcile 既有實例的 trustforge.service，補上 sweep_deploy_parameters
+  # ExecStartPre（冪等，已存在就跳過）。runtime token 直接由 app 啟動期從 SSM
+  # 讀取（SSM 路徑，已移除 systemd tmpfs 憑證層）。接著 daemon-reload + restart
+  # 讓 unit 變更生效。
   rid=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","bash /opt/trustforge/scripts/reconcile_trustforge_unit.sh","cp -f /opt/trustforge/deploy/trustforge-credentials.service /etc/systemd/system/trustforge-credentials.service","chmod 600 /etc/systemd/system/trustforge-credentials.service","systemctl daemon-reload","systemctl enable --now trustforge-credentials.service","systemctl restart trustforge"]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","bash /opt/trustforge/scripts/reconcile_trustforge_unit.sh","systemctl daemon-reload","systemctl restart trustforge"]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$rid" ] || [ "$rid" = "None" ]; then
     echo "[ec2] ❌ unit reconcile 用 SSM send-command 未取得 CommandId，中止" >&2
@@ -557,7 +556,7 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
       --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
     exit 1
   fi
-  echo "[ec2] ✅ 既有實例 unit 已 reconcile（LoadCredential 讀取層 + sweep）"
+  echo "[ec2] ✅ 既有實例 unit 已 reconcile（sweep）"
   # 主要 config SSM 成功不代表 fetch-scheduler 真的能跑（IAM 權限不足只有實
   # 際執行才會露餡）：再同步跑一次，非成功就讓整支腳本 exit 非零。
   verify_fetch_scheduler "$IID"
@@ -583,22 +582,10 @@ fi
 echo "[ec2] SG=$SGID VPC=$VPC"
 
 # 5) user-data（開機自動裝 + 跑）---------------------------------------------
-# #121.7：開機期把 SSM token 寫進 tmpfs，由獨立 oneshot unit
-# trustforge-credentials.service（Before=trustforge.service）在 trustforge.service
-# 啟動「前」完成；這裡用 ssm_params 的 runtime_token_load_credential_line 產生
-# LoadCredential= 行（與 app 讀取層 / setup 腳本寫入檔名嚴格對齊，避免「隔離測試
-# 假綠」——生產環境真注入這幾行）。
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-mapfile -t _LC < <(python3 - <<'PY'
-import sys
-sys.path.insert(0, "${_SCRIPT_DIR}/../src")
-from trustforge.ssm_params import runtime_token_load_credential_line as _f
-print(_f("admin-token"))
-print(_f("live-token"))
-PY
-)
-LC_ADMIN="${_LC[0]:-}"
-LC_LIVE="${_LC[1]:-}"
+# runtime token 由 app 啟動期直接從 SSM Parameter Store（SecureString + KMS，
+# WithDecryption）讀取——不經 argv / env / 持久碟 / 日誌，fail-closed。本 user-data
+# 不含任何 token 值與 systemd tmpfs 憑證層（該層經 codex-review 第三輪實測確認在
+# 真實部署路徑完全失效且有「假安全感 + 服務起不來」風險，已移除並回退 SSM 路徑）。
 UD=$(mktemp)
 cat > "$UD" <<EOF
 #!/bin/bash
@@ -612,11 +599,6 @@ cat > /etc/systemd/system/trustforge.service <<UNIT
 [Unit]
 Description=TrustForge web
 After=network.target
-# #121.7：憑證由獨立 oneshot unit（trustforge-credentials.service，Before=
-# trustforge.service）在啟動「前」寫好 tmpfs 憑證檔，這裡 Wants+After 確保它被
-# 拉起且先於本 unit 完成，LoadCredential 載入時檔案已就緒。
-Wants=trustforge-credentials.service
-After=trustforge-credentials.service
 [Service]
 Environment=PORT=80
 Environment=TRUSTFORGE_HOME=/opt/trustforge
@@ -627,13 +609,6 @@ Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
-# #121.7：開機期把 SSM token 寫進 tmpfs、由 trustforge-credentials.service 產生、
-# app 經 CREDENTIALS_DIRECTORY 讀取（setup 未設前綴時 no-op；token 全程不落
-# 持久磁碟）。LoadCredential= 行由 ssm_params.runtime_token_load_credential_line
-# 產生（嚴格對齊 app 讀取層 $CREDENTIALS_DIRECTORY/trustforge-<name>）。
-Environment=CREDENTIALS_DIRECTORY=/run/trustforge-credentials
-$LC_ADMIN
-$LC_LIVE
 # #121.6：部署期臨時 SSM 參數時間窗 sweep（非致命，失敗不擋啟動）。
 ExecStartPre=/opt/trustforge/scripts/sweep_deploy_parameters.sh
 ${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3 -m trustforge.web
@@ -647,26 +622,6 @@ UNIT
 # 讀寫），不管這次有沒有帶 token 都一律收緊（防禦性、冪等，也涵蓋往後有人
 # 重跑帶 token 更新的情況）。
 chmod 600 /etc/systemd/system/trustforge.service
-# #121.7：獨立 oneshot unit——在 trustforge.service 啟動前把 SSM token 寫進
-# tmpfs（Before=trustforge.service）。不要用 ExecStartPre 產憑證檔（systemd 在
-# ExecStartPre 之前就載入 LoadCredential，那時檔案還不存在）。
-cat > /etc/systemd/system/trustforge-credentials.service <<CREDUNIT
-[Unit]
-Description=TrustForge runtime credential materialization (tmpfs)
-Before=trustforge.service
-DefaultDependencies=no
-ConditionPathExists=/opt/trustforge/deploy/setup_runtime_credentials.sh
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-Environment=CRED_DIR=/run/trustforge-credentials
-ExecStart=/opt/trustforge/deploy/setup_runtime_credentials.sh
-
-[Install]
-WantedBy=multi-user.target
-CREDUNIT
-chmod 600 /etc/systemd/system/trustforge-credentials.service
 # 排程 fetcher（scripts/fetch_scheduler.py）：唯一打真連接器 API 的地方，寫入
 # DynamoDB cache 供上面 web 進程讀。單一 timer 每 15min 觸發一次「全部來源」，
 # 由腳本內建的新鮮度守門依各源 refresh 間隔自行決定該不該真的打（見
@@ -695,7 +650,6 @@ OnUnitActiveSec=15min
 WantedBy=timers.target
 UNIT3
 systemctl daemon-reload && systemctl enable --now trustforge >>/var/log/tf-setup.log 2>&1
-systemctl enable --now trustforge-credentials.service >>/var/log/tf-setup.log 2>&1
 systemctl enable --now fetch-scheduler.timer >>/var/log/tf-setup.log 2>&1
 EOF
 

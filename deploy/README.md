@@ -753,19 +753,21 @@ REGION=ap-southeast-2 TRUSTFORGE_CW_NAMESPACE=TrustForge \
   ./deploy/put_dedup_alarm.sh
 ```
 
-## #121 runtime token SSM/KMS（LoadCredential 讀取層 + sweep + KMS 收斂）
+## #121 runtime token SSM/KMS（sweep + KMS 收斂）
 
-### LoadCredential 讀取層（#121.7，完整實作）
+### runtime token 機制 = SSM Parameter Store 讀取（不含 systemd tmpfs 憑證層）
 
-app 端 `src/trustforge/ssm_params.py::get_runtime_token` 現在**優先從
-`$CREDENTIALS_DIRECTORY/<name>` 讀取** tmpfs 上的 token（由
-`deploy/setup_runtime_credentials.sh` 在 unit 的 `ExecStartPre` 把 SSM
-SecureString 以 0600 寫進 `/run/trustforge-credentials/<name>`），讀不到才
-fallback 回 SSM 讀取（向後相容、避免假安全感）。`deploy_ec2.sh` 會在 unit 寫入
-`Environment=CREDENTIALS_DIRECTORY=/run/trustforge-credentials` 與
-`ExecStartPre=/opt/trustforge/deploy/setup_runtime_credentials.sh`（既有實例
-經 `scripts/reconcile_trustforge_unit.sh` 補上，冪等）。token 全程不落持久磁碟、
-不進 argv / process list。
+app 端 `src/trustforge/ssm_params.py::get_runtime_token` 於啟動期直接從 SSM
+Parameter Store 讀取 SecureString 型態的 runtime token（admin-token /
+live-token），啟動時經 SSM `get_parameter --with-decryption` 讀取，全程**不落
+argv / env / 持久碟 / 日誌**，fail-closed（讀不到就回 None，由呼叫端 fallback）。
+
+> ⚠️ 歷史：曾有 #121.7 的 systemd `LoadCredential` + tmpfs 憑證層（獨立 oneshot
+> unit 在啟動前把 SSM token 寫進 tmpfs、app 經 `$CREDENTIALS_DIRECTORY` 讀取）。
+> 經 codex-review 第三輪實測確認，該層在真實部署路徑（全新 EC2 user-data、
+> update-in-place reconcile）完全失效，且有「假安全感 + 服務起不來」風險。**已
+> 移除並回退到上述 SSM 路徑**（兩位審查員均認證 SSM 路徑安全）。sweep 與 KMS
+> 收斂不受影響。
 
 ### 部署期參數 sweep（#121.6，現已接線）
 
@@ -786,6 +788,6 @@ policy 應收斂解密權限（見 `put_runtime_tokens.sh` 輸出的片段）：
 ```
 
 收斂後只有「經 SSM 且目標為該前綴參數」的解密才被放行，直接用 KMS API 解任意
-東西都不符此 condition 而被拒。`setup_runtime_credentials.sh` 與
-`put_runtime_tokens.sh` 的 region 預設一致（均 `ap-southeast-2`）。
+東西都不符此 condition 而被拒。`put_runtime_tokens.sh` 與 `ssm_params.py` 的
+region 預設一致（均 `ap-southeast-2`）。
 
