@@ -65,6 +65,10 @@ PREFIX="${PREFIX%/}"
 # token 值一律來自呼叫當下的 env，不寫死、不讀檔。
 ADMIN_TOKEN="${TRUSTFORGE_ADMIN_TOKEN-}"
 LIVE_TOKEN="${TRUSTFORGE_LIVE_TOKEN-}"
+# 選用：客戶自管 KMS key ARN/alias。指定後 SSM 以該 key 加密 SecureString，
+# 並自動套用 EncryptionContext（aws:ssm:parameter-arn），由 key policy 收斂
+# 解密權限（#121：kms EncryptionContext 強化）。未設則用 AWS 託管預設 key。
+KMS_KEY_ID="${TRUSTFORGE_TOKEN_KMS_KEY_ID-}"
 
 # 兩者至少要有一個非空，否則沒事可做。
 if [[ -z "$ADMIN_TOKEN" && -z "$LIVE_TOKEN" ]]; then
@@ -109,22 +113,19 @@ put_runtime_secure_param() {
     return 1
   fi
 
-  # 建 0600 暫存檔，寫 JSON body（含 Overwrite: true）。
+  # 建 0600 暫存檔，寫 JSON body（含 Overwrite: true）。指定 KMS key 時一併
+  # 帶入 KeyId（啟用客戶自管 KMS key + EncryptionContext 收斂解密權限）。
   local tmp
   tmp="$(umask 077 && mktemp)"
-  # trap 作為中斷時（SIGINT / SIGTERM / script EXIT）的最後防線，確保暫存檔
-  # 被清除。正常 / 失敗路徑仍保留明確的 rm -f "$tmp"（見下方），兩者並存
-  # 不衝突——函式每次呼叫都會在自己走完之前明確 rm 掉暫存檔，trap 只在
-  # 異常中斷時才真正派上用場。
-  # 注意：此 trap 只清本機暫存檔，不刪除 SSM 參數。
-  # 注意：tmp 是函式局部變數，函式返回後即不存在。EXIT trap 在整個 shell
-  # 結束時才觸發，此時 tmp 已 out-of-scope。在 set -u 底下裸引用 $tmp 會
-  # 觸發 unbound variable 錯誤，因此用 ${tmp:-} 安全展開（未定義時為空字串，
-  # rm -f "" 是安全的 no-op）。
   trap 'rm -f "${tmp:-}"' EXIT INT TERM
 
-  printf '{"Name":"%s","Value":"%s","Type":"SecureString","Overwrite":true}' \
-    "$pname" "$val" > "$tmp"
+  local keyid_field=""
+  if [[ -n "$KMS_KEY_ID" ]]; then
+    keyid_field=",\"KeyId\":\"$KMS_KEY_ID\""
+  fi
+
+  printf '{"Name":"%s","Value":"%s","Type":"SecureString","Overwrite":true%s}' \
+    "$pname" "$val" "$keyid_field" > "$tmp"
 
   # put 參數（不開 verbose，stdout/stderr 不含 token 值）。
   if ! aws ssm put-parameter --region "$REGION" --cli-input-json "file://$tmp" >/dev/null; then

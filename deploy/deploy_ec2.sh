@@ -308,7 +308,18 @@ if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
     --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null
   aws iam create-instance-profile --instance-profile-name "$ROLE" >/dev/null
   aws iam add-role-to-instance-profile --instance-profile-name "$ROLE" --role-name "$ROLE" >/dev/null
-  echo "[ec2] 等 instance profile 生效…"; sleep 12
+  # #121 IAM 傳播重試：instance profile 剛建立後，EC2/SSM 端不一定立刻可見，
+  # 固定 sleep 12s 在區域延遲較高時可能仍不足。改為有界重試：直到
+  # get-instance-profile 真的回傳才繼續（最多 ~30s），避免 instance 啟動後
+  # SSM 讀 token 因 AccessDenied 傳播未到而失敗（應用端 get_runtime_token
+  # 另有指數退避重試作為第二道防線）。
+  echo "[ec2] 等待 instance profile 傳播收斂…"
+  for _i in $(seq 1 30); do
+    if aws iam get-instance-profile --instance-profile-name "$ROLE" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
 fi
 # trustforge-inline（Bedrock + S3）最小權限：每次部署都 reconcile（put-role-policy
 # 覆寫同名 policy，冪等安全），跟下面 DynamoDB policy 用同一套模式——不能只放在

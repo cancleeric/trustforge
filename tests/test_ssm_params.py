@@ -36,7 +36,13 @@ class FakeSSMClient:
     def get_parameter(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         if self._side_effect is not None:
-            raise self._side_effect
+            if isinstance(self._side_effect, list):
+                exc_or_val = self._side_effect.pop(0)
+            else:
+                exc_or_val = self._side_effect
+            if isinstance(exc_or_val, BaseException):
+                raise exc_or_val
+            return exc_or_val
         if self._return_value is None:
             return {}
         return self._return_value
@@ -175,3 +181,143 @@ def test_prefix_set_generic_exception_returns_none_and_errors(
     assert any(full_name in r.getMessage() for r in errors), (
         f"ERROR 日誌應含參數全名 {full_name}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #121 follow-up：IAM 傳播重試 / sweep / systemd credentials / token 不回吐
+# ---------------------------------------------------------------------------
+
+
+def test_iam_propagation_retry_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """實例角色剛建立、IAM 傳播尚未收斂 → 第一次 `AccessDeniedException`，退避
+    重試後第二次成功讀到 token（#121 IAM 傳播重試）。"""
+    prefix = "/trustforge/runtime"
+    denied = _make_client_error("AccessDeniedException", "propagating")
+    fake = FakeSSMClient(
+        side_effect=[denied, {"Parameter": {"Name": f"{prefix}/admin-token", "Value": "tok-val"}}]
+    )
+    ssm_params.set_client_for_tests(fake)
+    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
+
+    result = ssm_params.get_runtime_token("admin-token", max_attempts=3, backoff_base=0)
+    assert result == "tok-val"
+    assert len(fake.calls) == 2
+
+
+def test_throttling_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ThrottlingException` 同屬暫時性錯誤，應退避重試。"""
+    prefix = "/trustforge/runtime"
+    throttled = _make_client_error("ThrottlingException", "slow down")
+    fake = FakeSSMClient(
+        side_effect=[throttled, {"Parameter": {"Name": f"{prefix}/live-token", "Value": "lt"}}]
+    )
+    ssm_params.set_client_for_tests(fake)
+    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
+
+    assert ssm_params.get_runtime_token("live-token", max_attempts=3, backoff_base=0) == "lt"
+    assert len(fake.calls) == 2
+
+
+def test_iam_propagation_retry_exhausted_returns_none(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """重試耗盡（仍拿不到）視同失敗回 None，不 raise。"""
+    prefix = "/trustforge/runtime"
+    denied = _make_client_error("AccessDeniedException", "still propagating")
+    fake = FakeSSMClient(side_effect=[denied, denied, denied])
+    ssm_params.set_client_for_tests(fake)
+    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
+
+    with caplog.at_level(logging.WARNING, logger="trustforge.ssm_params"):
+        result = ssm_params.get_runtime_token("admin-token", max_attempts=3, backoff_base=0)
+    assert result is None
+    assert len(fake.calls) == 3
+    assert any("重試耗盡" in r.getMessage() for r in caplog.records)
+
+
+def test_parameter_not_found_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ParameterNotFound` 是非暫時性錯誤，不應重試，直接回 None。"""
+    prefix = "/trustforge/runtime"
+    fake = FakeSSMClient(side_effect=_make_client_error("ParameterNotFound", "nope"))
+    ssm_params.set_client_for_tests(fake)
+    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
+
+    assert ssm_params.get_runtime_token("admin-token", max_attempts=3, backoff_base=0) is None
+    assert len(fake.calls) == 1
+
+
+def test_token_value_never_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#121：runtime token 絕不回吐——讀取成功時，token 值不得出現在任何 log
+    訊息中（含例外）。"""
+    prefix = "/trustforge/runtime"
+    secret = "SUPERSECRET1234567890abcdef"
+    fake = FakeSSMClient(
+        return_value={"Parameter": {"Name": f"{prefix}/admin-token", "Value": secret}}
+    )
+    ssm_params.set_client_for_tests(fake)
+    monkeypatch.setenv("TRUSTFORGE_TOKEN_SSM_PREFIX", prefix)
+
+    with caplog.at_level(logging.DEBUG, logger="trustforge.ssm_params"):
+        result = ssm_params.get_runtime_token("admin-token")
+    assert result == secret
+    assert secret not in caplog.text
+
+
+class FakeSweepClient:
+    """模擬 SSM client 的 `describe_parameters` / `delete_parameter`（只涵蓋
+    `sweep_deploy_parameters` 實際會呼叫的形狀）。"""
+
+    def __init__(self) -> None:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        now = _dt.now(_tz.utc)
+        self._params = [
+            {"Name": "/trustforge/deploy/fresh", "LastModifiedDate": now - _td(seconds=10)},
+            {"Name": "/trustforge/deploy/stale", "LastModifiedDate": now - _td(seconds=7200)},
+            # 常駐參數不在 deploy 路徑下，sweep 不該碰
+            {"Name": "/trustforge/runtime/admin-token", "LastModifiedDate": now - _td(seconds=99999)},
+        ]
+        self.deleted: list[str] = []
+
+    def describe_parameters(self, **kwargs) -> dict:
+        # 模擬 SSM Path 過濾：只回傳名稱以指定 prefix 開頭的參數（真實 AWS
+        # `describe_parameters` 的 `ParameterFilters` Path 行為）。
+        prefix = ""
+        for f in kwargs.get("ParameterFilters", []) or []:
+            if f.get("Key") == "Path":
+                prefix = f.get("Values", [[""]])[0] if isinstance(f.get("Values"), list) else ""
+                if isinstance(f.get("Values"), list) and f["Values"]:
+                    prefix = f["Values"][0]
+        return {
+            "Parameters": [p for p in self._params if p["Name"].startswith(prefix)]
+        }
+
+    def delete_parameter(self, **kwargs) -> None:
+        self.deleted.append(kwargs["Name"])
+
+
+def test_sweep_deletes_only_expired_deploy_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sweep 只刪除 `deploy/*` 路徑下、超過時間窗的殘留參數；常駐參數與尚未
+    過期的參數不動。"""
+    fake = FakeSweepClient()
+    ssm_params.set_client_for_tests(fake)
+
+    deleted = ssm_params.sweep_deploy_parameters(
+        "/trustforge/deploy", max_age_seconds=3600.0
+    )
+    assert deleted == ["/trustforge/deploy/stale"]
+    assert "/trustforge/runtime/admin-token" not in fake.deleted
+
+
+def test_load_credential_line_format() -> None:
+    """systemd `LoadCredential=` 行格式正確（tmpfs 路徑，非持久磁碟 / argv）。"""
+    line = ssm_params.runtime_token_load_credential_line("admin-token")
+    assert line == "LoadCredential=trustforge-admin-token:/run/trustforge-credentials/admin-token"
+    cred_line2 = ssm_params.runtime_token_load_credential_line(
+        "live-token", cred_dir="/run/creds"
+    )
+    assert cred_line2 == "LoadCredential=trustforge-live-token:/run/creds/live-token"

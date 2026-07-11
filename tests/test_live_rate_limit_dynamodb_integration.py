@@ -11,7 +11,7 @@ import pytest
 from trustforge import rate_limit_store
 from trustforge import web
 
-from test_rate_limit_store import _FakeDynamoDBTable, _make_store
+from tests.test_rate_limit_store import _FakeDynamoDBTable, _make_store
 
 
 def test_check_live_rate_limit_uses_dynamodb_when_available(monkeypatch):
