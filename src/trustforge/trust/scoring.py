@@ -817,6 +817,26 @@ class _StanceBudget:
         return True
 
 
+def _directional_word_polarities(text: str) -> tuple[set[str], set[str]]:
+    """回傳 (asserted, negated) 兩組方向詞，供交叉佐證的否定閘（#4）使用。
+
+    - asserted：出現且「未被否定」的方向詞（如「上漲」）。
+    - negated：出現且「被否定」的方向詞（如「不會上漲」→ 上漲 入 negated）。
+
+    用途：同一方向詞一方 asserted、另一方 negated → 語意對立（「X 上漲」vs
+    「X 不會上漲」），即便 `_infer_direction` 因否定把被否定那方判成 neutral、
+    通過 `_direction_compatible` 快路徑，也不該被誤計為獨立佐證。"""
+    asserted: set[str] = set()
+    negated: set[str] = set()
+    for w in _BULLISH_WORDS + _BEARISH_WORDS:
+        for m in re.finditer(re.escape(w), text):
+            if _NEG_RX.search(text[max(0, m.start() - 4): m.start()]):
+                negated.add(w)
+            else:
+                asserted.add(w)
+    return asserted, negated
+
+
 def _corroboration_detail(
     target: Claim,
     all_claims: list[Claim],
@@ -874,10 +894,19 @@ def _corroboration_detail(
         if c_key in independent_sources:
             continue
         ct = _normalize(c.text) - DOMAIN_STOP
-        overlap = len(tt & ct) / len(tt)
-        if overlap < 0.4:
+        inter = len(tt & ct)
+        if not inter:
+            continue
+        if inter / len(tt) < 0.4:
             continue
         if not _direction_compatible(target.direction, c.direction):
+            continue
+        # issue #4 否定詞語意偵測：同一方向詞一方 asserted、另一方 negated →
+        # 語意對立（如「BTC 上漲」vs「BTC 不會上漲」），即使被否定方因
+        # `_infer_direction` 判成 neutral、通過上方方向閘，也不計為獨立佐證。
+        tgt_asserted, tgt_negated = _directional_word_polarities(target.text)
+        cand_asserted, cand_negated = _directional_word_polarities(c.text)
+        if (tgt_asserted & cand_negated) or (cand_asserted & tgt_negated):
             continue
         if stance_fn is None:
             if require_entailment:
