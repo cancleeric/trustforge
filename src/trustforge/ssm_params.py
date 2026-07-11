@@ -234,13 +234,15 @@ def runtime_token_load_credential_line(
     磁碟、不在 argv、不在 user-data）讀取開機期由 SSM 寫入的 token。
 
     回傳字串形如：
-        `LoadCredential=trustforge-admin-token:/run/trustforge-credentials/admin-token`
+        `LoadCredential=trustforge-admin-token:/run/trustforge-credentials/trustforge-admin-token`
 
-    部署腳本（`deploy_ec2.sh` user-data）負責在開機期把 SSM 的 SecureString
-    以 0600 寫進 `<cred_dir>/<name>`（tmpfs），本函式只產生對應的
-    `LoadCredential=` 行供 unit 檔引用；app 端則經
-    `$CREDENTIALS_DIRECTORY/<name>` 讀取（見 web.py / admin_config.py 的
-    SSM-env 相容層）。token 全程不落持久磁碟、不進 argv / process list。
+    憑證來源檔由部署期獨立 oneshot unit（trustforge-credentials.service，
+    Before=trustforge.service）呼叫 `setup_runtime_credentials.sh` 寫入
+    `<cred_dir>/trustforge-<name>`（tmpfs）；systemd 在 trustforge.service
+    啟動前將該來源檔內容載入、暴露於 `$CREDENTIALS_DIRECTORY/trustforge-<name>`
+    （檔名與 credential 名稱都帶 `trustforge-` 前綴，與 app 讀取層
+    `get_runtime_token` 的 `$CREDENTIALS_DIRECTORY/trustforge-<name>` 完全一致）。
+    token 全程不落持久磁碟、不進 argv / process list。
     """
     cred_name = f"trustforge-{name}"
-    return f"LoadCredential={cred_name}:{cred_dir}/{name}"
+    return f"LoadCredential={cred_name}:{cred_dir}/{cred_name}"

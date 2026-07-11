@@ -314,13 +314,18 @@ def test_sweep_deletes_only_expired_deploy_params(
 
 
 def test_load_credential_line_format() -> None:
-    """systemd `LoadCredential=` 行格式正確（tmpfs 路徑，非持久磁碟 / argv）。"""
+    """systemd `LoadCredential=` 行格式正確（tmpfs 路徑，非持久磁碟 / argv）。
+
+    來源檔名必須帶 `trustforge-` 前綴，對齊 setup_runtime_credentials.sh 寫入的
+    `/run/trustforge-credentials/trustforge-<name>` 與 app 讀取層
+    `$CREDENTIALS_DIRECTORY/trustforge-<name>`（#121.7 時序修正後三者嚴格一致）。
+    """
     line = ssm_params.runtime_token_load_credential_line("admin-token")
-    assert line == "LoadCredential=trustforge-admin-token:/run/trustforge-credentials/admin-token"
+    assert line == "LoadCredential=trustforge-admin-token:/run/trustforge-credentials/trustforge-admin-token"
     cred_line2 = ssm_params.runtime_token_load_credential_line(
         "live-token", cred_dir="/run/creds"
     )
-    assert cred_line2 == "LoadCredential=trustforge-live-token:/run/creds/live-token"
+    assert cred_line2 == "LoadCredential=trustforge-live-token:/run/creds/trustforge-live-token"
 
 
 class FakePagedSweepClient:

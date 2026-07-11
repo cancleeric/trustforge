@@ -126,7 +126,7 @@ put_runtime_secure_param() {
 
   TF_PARAM_NAME="$pname" TF_PARAM_VAL="$val" TF_PARAM_KEYID="$KMS_KEY_ID" \
     python3 - <<'PY' > "$tmp" || { rm -f "$tmp"; echo "錯誤：組裝 JSON body 失敗：$pname" >&2; return 1; }
-import json, os
+import json, os, sys
 doc = {
     "Name": os.environ["TF_PARAM_NAME"],
     "Value": os.environ["TF_PARAM_VAL"],

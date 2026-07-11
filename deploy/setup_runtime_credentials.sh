@@ -3,12 +3,19 @@
 # setup_runtime_credentials.sh  (#121 systemd credentials 整合 glue)
 #
 # 用途：
-#   在 TrustForge systemd unit 啟動前（ExecStartPre）呼叫，把 SSM Parameter
-#   Store 的 SecureString runtime token（admin-token / live-token）以 0600 寫入
-#   **tmpfs 憑證目錄**（預設 /run/trustforge-credentials，非持久磁碟、不在
-#   argv、不在 user-data），供 unit 的 `LoadCredential=` 引用。app 端經
-#   `$CREDENTIALS_DIRECTORY/<name>` 讀取（見 web.py / admin_config.py 的
-#   SSM-env 相容層）。
+#   在 TrustForge 啟動前由獨立 oneshot unit（trustforge-credentials.service，
+#   Before=trustforge.service）呼叫，把 SSM Parameter Store 的 SecureString
+#   runtime token（admin-token / live-token）以 0600 寫入 **tmpfs 憑證目錄**
+#   （預設 /run/trustforge-credentials，非持久磁碟、不在 argv、不在 user-data），
+#   檔名為 `trustforge-<name>`。該檔隨後由 trustforge.service 的
+#   `LoadCredential=trustforge-<name>:<cred_dir>/trustforge-<name>` 載入，
+#   systemd 把內容暴露於 `$CREDENTIALS_DIRECTORY/trustforge-<name>`，app 端經
+#   該路徑讀取（見 src/trustforge/ssm_params.py::get_runtime_token 與 web.py /
+#   admin_config.py 的 SSM-env 相容層）。
+#
+#   注意：檔名必須是 `trustforge-<name>`（帶前綴），與 app 讀取層
+#   `$CREDENTIALS_DIRECTORY/trustforge-<name>` 及 `LoadCredential=` 的
+#   credential 名稱一致——三者缺一提早對齊，否則 app 讀不到 token。
 #
 # 這讓 runtime token 全程不落持久磁碟、不進 process list / argv，且開機期
 # 由 SSM 動態取得（輪替後重啟即生效）。對應 Python 端產生 `LoadCredential=`
@@ -29,10 +36,12 @@
 # 在 deploy_ec2.sh 的 trustforge.service unit 中啟用（當 TRUSTFORGE_TOKEN_SSM_
 # PREFIX 有值時）：
 #   [Service]
-#   ExecStartPre=/opt/trustforge/deploy/setup_runtime_credentials.sh
-#   LoadCredential=trustforge-admin-token:/run/trustforge-credentials/admin-token
-#   LoadCredential=trustforge-live-token:/run/trustforge-credentials/live-token
+#   LoadCredential=trustforge-admin-token:/run/trustforge-credentials/trustforge-admin-token
+#   LoadCredential=trustforge-live-token:/run/trustforge-credentials/trustforge-live-token
 #   Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtime
+#
+#   # 憑證檔由獨立 oneshot unit trustforge-credentials.service（Before=trustforge.service）
+#   # 在 trustforge.service 啟動「前」產生，故 LoadCredential 載入時檔案已存在。
 #
 # 執行（通常由 systemd 自動呼叫，亦可手動演練）：
 #   TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtime \
@@ -53,7 +62,7 @@ fi
 install -d -m 0700 "$CRED_DIR"
 
 for name in admin-token live-token; do
-  target="$CRED_DIR/$name"
+  target="$CRED_DIR/trustforge-$name"
   tmp="$(umask 077 && mktemp)"
   # trap 最後防線：寫入失敗也要清掉半成品暫存檔，不留空/半截 token 檔。
   trap 'rm -f "${tmp:-}"' EXIT INT TERM
@@ -76,7 +85,7 @@ for name in admin-token live-token; do
     exit 1
   fi
 
-  # 原子替換為 0600 憑證檔。
+  # 原子替換為 0600 憑證檔（檔名帶 trustforge- 前綴，對齊 app 讀取層 / LoadCredential）。
   chmod 0600 "$tmp"
   mv -f "$tmp" "$target"
   echo "已寫入 tmpfs 憑證：$target（0600）"
