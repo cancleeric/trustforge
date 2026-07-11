@@ -104,6 +104,11 @@ class Report:
     # 此處刻意只用寬型別（不 import `Insight` dataclass）避免 schema↔insights
     # 循環依賴；序列化成 JSON 時 `dataclasses.asdict` 會遞迴展開嵌套 dataclass。
     insights: list | None = field(default=None)  # Phase 1 獨特洞察層，由 orchestrator 填入
+    # Phase 1 D1.5 假設驗證題型結構化正反方：顯式 pro/con 證據帳本綁定 Evidence
+    # List（pro = 支持方 evidence 索引；con = 反方 evidence 索引），並附信心限制
+    # 聲明（不過度宣稱預測力，承接 Phase 0 誠實定位）。僅在 qtype==HYPOTHESIS 時
+    # 由 `agent.orchestrator.build_report` 填入；其他題型為 None（選填、向前相容）。
+    hypothesis_ledger: dict | None = field(default=None)  # D1.5 假設驗證正反方帳本，由 orchestrator 填入
     # 結構逐字沿用（不新增 dataclass 欄位，向後相容）。Tier2（真實分歧樣本）新增
     # 一個「選填」key：cross_source_signal["stance_pairs"]（list[dict]，
     # 每筆 {"source", "stance", "claim_id", "text"}）——只在
@@ -214,6 +219,13 @@ class Report:
                     L.append(f"- 貢獻來源：{c.source}（{c.kind}）"
                              f"｜方向：{c.direction}｜信任：{c.trust}")
                     L.append(f"  - {c.text}")
+
+        if self.hypothesis_ledger:
+            hl = self.hypothesis_ledger
+            L.append("\n## 假設驗證：正反方證據對照")
+            L.append(f"- 支持方（pro）證據索引：{', '.join('E'+str(i) for i in hl.get('pro', [])) or '（無）'}")
+            L.append(f"- 反方（con）證據索引：{', '.join('E'+str(i) for i in hl.get('con', [])) or '（無）'}")
+            L.append(f"- 信心限制：{hl.get('confidence_limit', '')}")
 
         if self.contrarian:
             L.append("\n## 反方 / 低信任證據（已標記，未納入主結論）")

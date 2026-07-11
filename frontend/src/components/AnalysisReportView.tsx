@@ -6,6 +6,7 @@ import FactsInferenceLadder from './FactsInferenceLadder'
 import KeyBasisList from './KeyBasisList'
 import CrossSourceSignalPanel from './CrossSourceSignalPanel'
 import InsightExplainabilityPanel from './InsightExplainabilityPanel'
+import HypothesisLedgerPanel from './HypothesisLedgerPanel'
 import EvidenceTable from './EvidenceTable'
 import PriceProvenancePanel from './PriceProvenancePanel'
 import TrustTrendSection from './TrustTrendSection'
@@ -62,6 +63,8 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
       <CrossSourceSignalPanel signal={data.report.cross_source_signal} />
 
       <InsightExplainabilityPanel insights={data.report.insights} />
+
+      <HypothesisLedgerPanel ledger={data.report.hypothesis_ledger} evidence={data.evidence} />
 
       <PriceProvenancePanel priceProvenance={data.price_provenance} evidence={data.evidence} />
 

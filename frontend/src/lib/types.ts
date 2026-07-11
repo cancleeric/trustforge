@@ -159,6 +159,8 @@ export interface Report {
    * "insufficient"、summary 含「無法判定」，UI 必須顯式標註、不補 0。選填：
    * 舊快照／本欄位新增前的報告合法不帶（前端視為 []）。 */
   insights?: Insight[]
+  /** D1.5 假設驗證題型結構化正反方帳本（見 `HypothesisLedger`）。選填。 */
+  hypothesis_ledger?: HypothesisLedger | null
   calibrated_confidence: number
   decision_state: DecisionState
 }
@@ -189,6 +191,15 @@ export interface Insight {
   contributions: InsightContribution[]
   claim_ids: string[]
   meta?: Record<string, unknown>
+}
+
+/** D1.5 假設驗證題型結構化正反方帳本：顯式 pro/con 證據綁定 Evidence List
+ * （`pro`/`con` 為 evidence 陣列索引，對應前端證據清單的 E{i}），並附信心限制
+ * 聲明（不過度宣稱預測力）。僅 `question_type === "hypothesis"` 時由後端填入。 */
+export interface HypothesisLedger {
+  pro: number[]
+  con: number[]
+  confidence_limit: string
 }
 
 export interface TrustRadarDimension {
