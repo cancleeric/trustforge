@@ -27,7 +27,7 @@ from typing import Iterable
 
 from ..ingestion.base import _matches_coin
 from ..schema import QuestionType
-from ..trust.scoring import ScoredClaim, TrustedBrief
+from ..trust.scoring import ScoredClaim, TrustedBrief, _canonical_source
 
 # 誠實覆蓋閘狀態值
 COVERAGE_COVERED = "covered"
@@ -401,6 +401,72 @@ def detect_manipulation_burst(scored: Iterable[ScoredClaim]) -> Insight | None:
 
 
 # ---------------------------------------------------------------------------
+# D1.4 來源自我矛盾（不確定性信號）— #21 / #72
+# ---------------------------------------------------------------------------
+# 同一來源同時出現 bullish + bearish 主張 → 該來源當下訊號「自我矛盾」，屬
+# 不確定性信號（不是已判定的操縱，也不是背離，而是「這個來源自己左右互搏、
+# 不可獨立採信」）。前端以「自我矛盾」徽章呈現（見 InsightExplainabilityPanel）。
+#
+# issue #72 收口：同源判斷用 `_canonical_source` 正規化（大小寫/空白變體收斂
+# 成同一 key），避免 `"CoinDesk"` / `" coindesk "` 被誤判成兩個不同來源而漏掉
+# 自我矛盾。僅看「明確方向」的主張（neutral 不計），且信任需過基本門檻避免
+# 純雜訊觸發。
+_SELF_CONTRA_MIN_TRUST = 0.35
+
+
+def detect_source_self_contradiction(scored: Iterable[ScoredClaim]) -> list[Insight]:
+    """D1.4：掃描每個（正規化後的）來源，若同時含 bullish 與 bearish 主張，
+    產出一條「來源自我矛盾」不確定性洞察。可能多個來源各自矛盾 → 每源一條。"""
+    by_src: dict[str, list[ScoredClaim]] = {}
+    for sc in scored:
+        if sc.claim.direction not in ("bullish", "bearish"):
+            continue
+        if sc.trust < _SELF_CONTRA_MIN_TRUST:
+            continue
+        by_src.setdefault(_canonical_source(sc.claim.doc.source), []).append(sc)
+
+    out: list[Insight] = []
+    for _src_key, claims in by_src.items():
+        bull = [c for c in claims if c.claim.direction == "bullish"]
+        bear = [c for c in claims if c.claim.direction == "bearish"]
+        if not bull or not bear:
+            continue
+        b0, r0 = bull[0], bear[0]
+        strength = round(min(1.0, 0.4 + 0.1 * (len(bull) + len(bear))), 3)
+        contributions = [
+            InsightContribution(
+                source=b0.claim.doc.source, kind=b0.claim.doc.kind,
+                claim_id=b0.claim.id, text=b0.claim.text,
+                direction="bullish", trust=round(b0.trust, 3),
+            ),
+            InsightContribution(
+                source=r0.claim.doc.source, kind=r0.claim.doc.kind,
+                claim_id=r0.claim.id, text=r0.claim.text,
+                direction="bearish", trust=round(r0.trust, 3),
+            ),
+        ]
+        claim_ids = [c.claim.id for c in (bull + bear)]
+        out.append(Insight(
+            insight_type="source_self_contradiction",
+            title="來源自我矛盾（不確定性信號）",
+            summary=(
+                f"來源 {b0.claim.doc.source} 同時出現看多與看空主張"
+                f"（{len(bull)} 則偏多 / {len(bear)} 則偏空），構成自我矛盾——"
+                "該來源當下訊號不可獨立採信，建議以其他獨立來源交叉驗證。"
+            ),
+            direction="ambiguous",
+            strength=strength,
+            coverage=COVERAGE_COVERED,
+            coverage_reason="",
+            contributions=contributions,
+            claim_ids=claim_ids,
+            meta={"source": b0.claim.doc.source, "n_bullish": len(bull),
+                  "n_bearish": len(bear)},
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 洞察聚合入口
 # ---------------------------------------------------------------------------
 
@@ -431,6 +497,7 @@ def detect_insights(
     if burst is not None:
         insights.append(burst)
 
-    # D1.4（來源自我矛盾）由後續 PR 在此接續註冊。
+    # D1.4 來源自我矛盾：可能多個來源各自矛盾，逐條附加。
+    insights.extend(detect_source_self_contradiction(coin_relevant))
 
     return insights

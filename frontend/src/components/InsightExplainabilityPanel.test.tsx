@@ -58,4 +58,27 @@ describe('InsightExplainabilityPanel', () => {
     expect(screen.queryByText('洞察強度')).not.toBeInTheDocument()
     expect(screen.getByText(/誠實閘：缺少成交量趨勢事實/)).toBeInTheDocument()
   })
+
+  it('source_self_contradiction 洞察顯示「來源自我矛盾」徽章', () => {
+    render(
+      <InsightExplainabilityPanel
+        insights={[
+          makeInsight({
+            insight_type: 'source_self_contradiction',
+            title: '來源自我矛盾（不確定性信號）',
+            summary: '來源 coindesk 同時出現看多與看空主張（1 則偏多 / 1 則偏空），構成自我矛盾。',
+            direction: 'ambiguous',
+            strength: 0.5,
+            contributions: [
+              { source: 'coindesk', kind: 'news', claim_id: 'coindesk-bullish#0', text: 'BTC 上看 70000', direction: 'bullish', trust: 0.6 },
+              { source: 'coindesk', kind: 'news', claim_id: 'coindesk-bearish#0', text: 'BTC 恐跌至 50000', direction: 'bearish', trust: 0.6 },
+            ],
+            claim_ids: ['coindesk-bullish#0', 'coindesk-bearish#0'],
+            meta: { source: 'coindesk', n_bullish: 1, n_bearish: 1 },
+          }),
+        ]}
+      />
+    )
+    expect(screen.getByText('來源自我矛盾')).toBeInTheDocument()
+  })
 })

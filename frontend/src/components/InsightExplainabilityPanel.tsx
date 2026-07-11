@@ -47,7 +47,11 @@ function InsightCard({ ins }: { ins: Insight }) {
     <div className="rounded-lg border border-tf-border bg-tf-card p-3">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className="text-sm font-semibold text-tf-text">{ins.title}</span>
-        {insufficient ? (
+        {ins.insight_type === 'source_self_contradiction' ? (
+          <span className="rounded-full border border-tf-warn px-2 py-0.5 text-[0.7rem] font-semibold text-tf-warn">
+            來源自我矛盾
+          </span>
+        ) : insufficient ? (
           <span className="rounded-full border border-tf-warn px-2 py-0.5 text-[0.7rem] font-semibold text-tf-warn">
             無法判定（樣本不足）
           </span>
