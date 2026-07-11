@@ -45,12 +45,22 @@ from .base import Document, Source
 
 _MAX_BYTES = 512 * 1024   # 512 KB
 _TIMEOUT = 5
-_UA = "TrustForge-Hackathon research contact@hurricanesoft.com.tw"
+_UA = "TrustForge-Hackathon research contact@hurricanessoft.com.tw"
 
 _BASE_URL = "https://efts.sec.gov/LATEST/search-index"
 _FORMS = "8-K,10-K,10-Q,S-1"
 _LOOKBACK_DAYS = 30
-_QUERY_TERMS = ("bitcoin", "cryptocurrency", "ethereum")
+# issue #133：詞表覆蓋率擴充。原始 3 詞（bitcoin/ethereum/cryptocurrency）只命中
+# 極窄的加密相關 filing 子集。擴充為「具名幣 + 通用加密概念詞」組合，提升加密
+# 相關 filing 的召回率（recall）。`fetch()` 會對每個詞各打一次 API、再依 doc.id
+# 去重（見 `test_sec_dedup_across_query_terms`），所以擴詞不會產生重複 Document，
+# 只會把更多真正加密相關的 filing 拉進來；`_MAX_DOCS` 上限仍兜住總量。
+# ⚠️ 保守原則：只收「明確加密相關」的詞，避免過度泛化到與加密無關的財報。
+_QUERY_TERMS = (
+    "bitcoin", "ethereum", "cryptocurrency", "crypto",
+    "stablecoin", "blockchain", "defi", "web3",
+    "solana", "xrp", "dogecoin", "digital asset",
+)
 _REQUEST_DELAY_SECONDS = 0.1
 _MAX_DOCS = 20
 
@@ -103,35 +113,49 @@ def _extract_filing_url(hit_id: str, cik: str) -> str:
 
 
 def _parse_fts_hit(hit: dict, term: str) -> Document | None:
-    """解析單筆 hits.hits[] 元素；缺欄位或無法拼 URL 時回 None（不 raise）。"""
+    """解析單筆 hits.hits[] 元素；缺欄位或無法拼 URL 時回 None（不 raise）。
+
+    issue #133 型別防禦：對每個欄位做明確型別檢查，任何關鍵欄位型別不符
+    （如 `ciks` 不是 list、`_id` 不是 str、`display_names`/`items` 夾雜非 str
+    元素、`form`/`file_date` 非 str）一律視為 malformed → 回 None，絕不讓
+    型別錯誤往上炸到 `fetch()` 的批次迴圈（見下方單詞失敗隔離）。"""
     if not isinstance(hit, dict):
         return None
     hit_id = hit.get("_id")
-    if not hit_id:
+    if not isinstance(hit_id, str) or not hit_id:
         return None
     source = hit.get("_source")
     if not isinstance(source, dict):
         return None
 
     ciks = source.get("ciks")
-    if not ciks or not isinstance(ciks, list):
+    if not isinstance(ciks, list) or not ciks:
         return None
-    cik = ciks[0]
+    # 只取第一個可解析的 str CIK；其餘忽略（防禦非 str 元素，如 int/None）
+    cik = next((c for c in ciks if isinstance(c, str) and c), None)
+    if not cik:
+        return None
     filing_url = _extract_filing_url(hit_id, cik)
     if not filing_url:
         return None
 
     display_names = source.get("display_names")
-    if isinstance(display_names, list) and display_names:
-        company = display_names[0]
+    if isinstance(display_names, list):
+        # 過濾非 str 元素，避免 f-string 拼接或下游誤用型別
+        company_names = [d for d in display_names if isinstance(d, str) and d]
+        company = company_names[0] if company_names else "Unknown filer"
     else:
         company = "Unknown filer"
 
-    form = source.get("form") or ""
-    file_date = source.get("file_date") or ""
+    form = source.get("form")
+    form = form if isinstance(form, str) else ""
+    file_date = source.get("file_date")
+    file_date = file_date if isinstance(file_date, str) else ""
 
     items = source.get("items")
-    if not isinstance(items, list):
+    if isinstance(items, list):
+        items = [i for i in items if isinstance(i, str)]
+    else:
         items = []
 
     title = f"{company} — {form} filing"
@@ -185,22 +209,27 @@ class SECFullTextSearchSource(Source):
 
         for idx, term in enumerate(_QUERY_TERMS):
             url = _build_search_url(term, startdt, enddt)
-            raw = self._fetch_url_term(url)
+            # issue #133 單詞失敗隔離：一詞炸（網路逾時 / SSRF 攔截 / HTTP 錯誤 /
+            # 回應非 JSON）不拖累整批——該詞跳過、其餘詞照常檢索。避免「一個詞
+            # 失敗讓整個 SEC 監管 feed 歸零」的單點崩潰。
+            try:
+                raw = self._fetch_url_term(url)
+            except Exception:
+                continue
             try:
                 data = json.loads(raw)
             except (ValueError, TypeError):
-                data = None
+                continue
             if not isinstance(data, dict):
-                hits_list: list[dict] = []
-            else:
-                hits_obj = data.get("hits")
-                if not isinstance(hits_obj, dict):
-                    hits_list = []
-                else:
-                    raw_hits = hits_obj.get("hits", [])
-                    hits_list = raw_hits if isinstance(raw_hits, list) else []
+                continue
+            hits_obj = data.get("hits")
+            if not isinstance(hits_obj, dict):
+                continue
+            raw_hits = hits_obj.get("hits", [])
+            if not isinstance(raw_hits, list):
+                continue
 
-            for hit in hits_list:
+            for hit in raw_hits:
                 doc = _parse_fts_hit(hit, term)
                 if doc is None:
                     continue

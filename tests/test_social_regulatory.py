@@ -340,7 +340,7 @@ def test_sec_search_url_has_required_params(monkeypatch):
     monkeypatch.setattr(regulatory, "_fetch_url", _mock_fetch)
     regulatory.SECFullTextSearchSource().fetch("", coin="")
 
-    assert len(captured_urls) == 3
+    assert len(captured_urls) == len(regulatory._QUERY_TERMS)
 
     q_values = set()
     for url in captured_urls:
