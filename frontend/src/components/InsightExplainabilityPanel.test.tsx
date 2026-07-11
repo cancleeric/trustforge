@@ -81,4 +81,22 @@ describe('InsightExplainabilityPanel', () => {
     )
     expect(screen.getByText('來源自我矛盾')).toBeInTheDocument()
   })
+
+  it('covered 洞察顯示「數值溯源」深層回溯（meta 原始數值）', () => {
+    render(
+      <InsightExplainabilityPanel
+        insights={[
+          makeInsight({
+            meta: { price_return_pct: -3.3, volume_trend_pct: 25, proxy_note: '代理說明' },
+          }),
+        ]}
+      />
+    )
+    const summary = screen.getByText('數值溯源（深層回溯原始數值）')
+    expect(summary).toBeInTheDocument()
+    // 點開 details 後應出現 meta 原始數值
+    summary.click()
+    expect(screen.getByText(/price_return_pct：-3.3/)).toBeInTheDocument()
+    expect(screen.getByText(/volume_trend_pct：25/)).toBeInTheDocument()
+  })
 })

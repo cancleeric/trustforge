@@ -89,6 +89,21 @@ function InsightCard({ ins }: { ins: Insight }) {
           <ContributionRow key={i} c={c} />
         ))}
       </ul>
+
+      {ins.meta && Object.keys(ins.meta).length > 0 && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-[0.7rem] text-tf-link">
+            數值溯源（深層回溯原始數值）
+          </summary>
+          <ul className="mt-1 space-y-0.5 text-[0.7rem] text-tf-muted">
+            {Object.entries(ins.meta).map(([k, v]) => (
+              <li key={k}>
+                {k}：{typeof v === 'number' ? String(v) : String(v)}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   )
 }
