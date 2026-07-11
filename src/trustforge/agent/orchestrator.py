@@ -1061,6 +1061,40 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     report_cross_signal = cross_signal
     if is_abstain and cross_signal and cross_signal.get("objective_direction") is not None:
         report_cross_signal = None
+    # Phase 1 獨特洞察層（#24/#15/#21/#72）：純函式、免 LLM，只讀 score() 已
+    # 算好的 `scored` 全集 + `brief`，產出非顯而易見、可驗證的洞察（聰明錢
+    # 背離 / 操縱爆量 / 來源自我矛盾）。每條洞察攜「兩個以上貢獻來源 + 方向 +
+    # 強度 + 資料覆蓋閘」，覆蓋不足標「無法判定」，絕不硬湊（承接 Phase 0
+    # 三態誠實合約）。與 cross_source_signal 同層級、互補但不重疊——cross_source
+    # 是客觀 vs 情緒背離，這裡是更深、更可被抽查的維度。
+    from ..trust.insights import detect_insights
+    report_insights = detect_insights(brief, scored if scored is not None else brief.supporting + brief.contrarian, coin, qtype)
+
+    # D1.5 假設驗證題型結構化正反方：顯式 pro/con 證據帳本綁定 Evidence List
+    # （pro = 支持方 evidence 索引；con = 反方 evidence 索引），並附信心限制聲明
+    # （不過度宣稱預測力，承接 Phase 0 誠實定位）。僅在 HYPOTHESIS 題型計算。
+    hypothesis_ledger = None
+    if qtype == QuestionType.HYPOTHESIS:
+        pro_idx = [i for i, ev in enumerate(evidence) if ev.related_claim == judgment_tag]
+        con_idx = [i for i, ev in enumerate(evidence) if ev.related_claim == "反方／低信任訊號"]
+        confidence_limit = (
+            "本驗證為「假設對照」而非預測：僅基於現有證據的正反方對照，"
+            "不宣稱預測力；證據強度有限（校準值偏低或獨立來源不足）時，"
+            "正反方對照僅供參考，不構成方向性結論。"
+        )
+        hypothesis_ledger = {"pro": pro_idx, "con": con_idx, "confidence_limit": confidence_limit}
+        # 不過度宣稱：把正反方對照與信心限制明寫進報告（abstain 時放 limits，
+        # 否則放 inferences），確保 reviewer 一眼看到「這只是對照、不是預測」。
+        ledger_line = (
+            f"假設驗證正反方對照：支持方 {len(pro_idx)} 筆證據、反方 {len(con_idx)} 筆證據"
+            f"（詳見證據清單索引 E{pro_idx[0] if pro_idx else '—'}…／"
+            f"E{con_idx[0] if con_idx else '—'}…）。{confidence_limit}"
+        )
+        if is_abstain:
+            limits.append(ledger_line)
+        else:
+            inferences.append(ledger_line)
+
     report = Report(
         coin=coin, question_type=qtype.value, question=query,
         market_judgment=market_judgment, facts=facts, inferences=inferences,
@@ -1070,6 +1104,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         generated_at=iso_utc(now_fn()),
         direction=direction,
         cross_source_signal=report_cross_signal,
+        insights=report_insights,
+        hypothesis_ledger=hypothesis_ledger,
         # W4 codex 對抗審第 2 輪 [HIGH-1]：結構化校準值＋三態，供 UI／
         # analyze.json 消費端辨態，不必再各自重算門檻（見 schema.Report
         # 欄位註解）。
