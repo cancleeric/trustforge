@@ -153,8 +153,53 @@ export interface Report {
   generated_at: string
   direction: string
   cross_source_signal: CrossSourceSignal | null
+  /** Phase 1 獨特洞察層（#24/#15/#21/#72）：非顯而易見、可驗證的信任洞察
+   * 清單。每條攜「兩個以上貢獻來源 + 方向 + 強度 + 資料覆蓋閘」，供前端
+   * InsightExplainabilityPanel 渲染可解釋溯源。覆蓋不足時 `coverage` 為
+   * "insufficient"、summary 含「無法判定」，UI 必須顯式標註、不補 0。選填：
+   * 舊快照／本欄位新增前的報告合法不帶（前端視為 []）。 */
+  insights?: Insight[]
+  /** D1.5 假設驗證題型結構化正反方帳本（見 `HypothesisLedger`）。選填。 */
+  hypothesis_ledger?: HypothesisLedger | null
   calibrated_confidence: number
   decision_state: DecisionState
+}
+
+/** 洞察的一個貢獻來源（InsightExplainabilityPanel 最小單元）。 */
+export interface InsightContribution {
+  source: string
+  kind: string
+  claim_id?: string | null
+  text: string
+  /** 該貢獻提供的方向性信號：bullish / bearish / neutral。 */
+  direction: string
+  trust: number
+}
+
+/** 一條可驗證、非顯而易見的獨特洞察（見 `trust/insights.py`）。 */
+export interface Insight {
+  insight_type: string
+  title: string
+  summary: string
+  /** 整體淨方向：bullish / bearish / neutral / ambiguous。 */
+  direction: string
+  /** 0–1 誠實強度；覆蓋不足時固定 0。 */
+  strength: number
+  /** "covered" | "insufficient"（見誠實覆蓋閘）。 */
+  coverage: string
+  coverage_reason: string
+  contributions: InsightContribution[]
+  claim_ids: string[]
+  meta?: Record<string, unknown>
+}
+
+/** D1.5 假設驗證題型結構化正反方帳本：顯式 pro/con 證據綁定 Evidence List
+ * （`pro`/`con` 為 evidence 陣列索引，對應前端證據清單的 E{i}），並附信心限制
+ * 聲明（不過度宣稱預測力）。僅 `question_type === "hypothesis"` 時由後端填入。 */
+export interface HypothesisLedger {
+  pro: number[]
+  con: number[]
+  confidence_limit: string
 }
 
 export interface TrustRadarDimension {
