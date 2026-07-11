@@ -311,14 +311,19 @@ def _harvest_stance_cost_events(client: BedrockClient, log: ExecutionLog) -> Non
 
 
 def _normalize_source_key(source: str) -> str:
-    """來源去重/相等比對用的正規化 key：`strip().casefold()`——治大小寫/
-    前後空白變體（`"CoinDesk"` / `" coindesk "` / `"COINDESK"`）。**只用於
-    比對**，顯示一律用原始 `source` 字串，不改寫使用者看到的來源名稱。
+    """來源去重/相等比對用的正規化 key。
 
-    這不是完整 canonical source identity（別名/帳號收斂，見 follow-up
-    issue #72、既有 issue #17）——只治零成本就能修的大小寫/空白層級問題。
+    委託給 `trust.scoring._canonical_source`（issue #72 repo-wide canonical
+    source identity 的**唯一**真相來源）：先 `strip().casefold()` 治大小寫/
+    前後空白變體（`"CoinDesk"` / `" coindesk "` / `"COINDESK"`），再套別名
+    收斂（如 `coindesk.com` → `coindesk`、`twitter` → `x`）。**只用於比對**，
+    顯示一律用原始 `source` 字串，不改寫使用者看到的來源名稱。
+
+    保留此函式名僅為向後相容既有呼叫端；新程式碼可直接用 `_canonical_source`。
     """
-    return source.strip().casefold()
+    from trustforge.trust.scoring import _canonical_source
+
+    return _canonical_source(source)
 
 
 def _independent_source_keys(sources: Iterable[str | None]) -> set[str]:

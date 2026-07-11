@@ -216,7 +216,10 @@ def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) ->
     prior = float(override) if override is not None else base
     if dynamic_map is None:
         return prior
-    return dynamic_map.get(c.doc.source, prior)
+    # issue #72/#132：dynamic_map 的 key 是 canonical source（見
+    # `_iterate_source_reputation` 分組口徑），查表也走 canonical，避免同源
+    # 大小寫/空白變體查不到先驗值、被誤當成未知來源。
+    return dynamic_map.get(_canonical_source(c.doc.source), prior)
 
 
 def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
@@ -373,6 +376,63 @@ def _manipulation_flags(c: Claim) -> list[str]:
 
 def _normalize(s: str) -> set[str]:
     return {t for t in re.findall(r"[\w一-鿿]+", s.lower()) if len(t) > 1}
+
+
+# --- 來源身分正規化（issue #72：repo-wide canonical source identity）------
+# 全倉「同一來源只算一個獨立聲音」不變量的唯一真相來源。`_corroboration_detail`/
+# `_evidence_strength`/`_iterate_source_reputation` 與 `agent.orchestrator` 三處
+# 去重口徑都必須走這裡，不允許各自再發明一套（見 issue #106 收口與本 PR #72）。
+#
+# 正規化分兩層：
+#   1. 零成本層：`strip().casefold()`——治大小寫/前後空白變體
+#     （`"CoinDesk"` / `" coindesk "` / `"COINDESK"` 收斂成 `coindesk`）。
+#   2. 別名層（#72 本輪實作）：同一發布實體的不同呈現（域名形式、平台更名、
+#      帳號別名）收斂到同一個 canonical key。
+#
+# ⚠️ 保守白名單原則：只有「確定是同一發布實體」的變體才收斂，絕不反向——不
+# 能把真正不同的來源併成一個，否則反而會「虛減」獨立來源數、讓回音室被誤判
+# 成跨源互證。新增別名請附註為何是同一實體。
+_SOURCE_ALIASES: dict[str, str] = {
+    # 域名形式 → 裸發布者名（同一家媒體的 RSS/網站/APP 可能帶不同後綴）
+    "coindesk.com": "coindesk",
+    "cointelegraph.com": "cointelegraph",
+    "theblock.co": "theblock",
+    "theblock": "theblock",
+    "reuters.com": "reuters",
+    "bloomberg.com": "bloomberg",
+    "bitcoinmagazine.com": "bitcoinmagazine",
+    "newsbtc.com": "newsbtc",
+    "cryptoslate.com": "cryptoslate",
+    "decrypt.co": "decrypt",
+    "utoday.com": "utoday",
+    # 平台更名 / 帳號別名：Twitter → X 是同一平臺的更名，視為同一來源。
+    "twitter": "x",
+    "x.com": "x",
+    # 監管機關官方單一源（regulatory.py 固定 `sec-gov`；其他呈現視為同一機關）。
+    "sec edgar": "sec-gov",
+    "sec": "sec-gov",
+    "sec.gov": "sec-gov",
+}
+
+
+def _canonical_source(source: str | None) -> str:
+    """repo-wide 唯一來源身分正規化（issue #72 收口）。
+
+    回傳 canonical key：先 `strip().casefold()`，再套 `_SOURCE_ALIASES` 別名
+    收斂。falsy（None / 空字串 / 純空白經 strip 後變空）直接回傳原樣（空字串），
+    呼叫端負責決定是否視為幽靈來源——本函式只做「身分正規化」，不做「是否
+    計入」的判斷（後者由 `_independent_source_keys` 等聚合層決定），職責單一、
+    便於單元測試。
+
+    只用於「比對/去重/計數」，顯示一律保留原始 `source` 字串（見
+    `_normalize_source_key` 既有約定）。
+    """
+    if not source:
+        return ""
+    key = source.strip().casefold()
+    if not key:
+        return ""
+    return _SOURCE_ALIASES.get(key, key)
 
 
 def _direction_compatible(d1: str, d2: str) -> bool:
@@ -803,10 +863,15 @@ def _corroboration_detail(
     contradicting_sources: set[str] = set()
     if not tt:
         return independent_sources, contradicting_sources
+    # issue #72 / #132：同源排除與「已計入來源」去重都用 canonical key，
+    # 否則同一來源的大小寫/空白變體（如 `"CoinDesk"` vs `" coindesk "`）會被
+    # 誤判成不同來源，讓同源轉發/重複發文灌水成多個「獨立佐證」。
+    target_key = _canonical_source(target.doc.source)
     for c in all_claims:
-        if c.doc.source == target.doc.source:
+        c_key = _canonical_source(c.doc.source)
+        if c_key == target_key:
             continue
-        if c.doc.source in independent_sources:
+        if c_key in independent_sources:
             continue
         ct = _normalize(c.text) - DOMAIN_STOP
         overlap = len(tt & ct) / len(tt)
@@ -818,18 +883,18 @@ def _corroboration_detail(
             if require_entailment:
                 # W2：沒有可用的分類器，無法驗證語意——保守排除，不當佐證。
                 continue
-            independent_sources.add(c.doc.source)
+            independent_sources.add(c_key)
             continue
         label = stance_fn(target.text, c.text)
         if label == "contradiction":
-            contradicting_sources.add(c.doc.source)
+            contradicting_sources.add(c_key)
             continue
         if require_entailment:
             if label == "entailment":
-                independent_sources.add(c.doc.source)
+                independent_sources.add(c_key)
             # "neutral"（genuine 或 fail-safe，無法區分）：W2 不採信，兩個集合都不進。
             continue
-        independent_sources.add(c.doc.source)
+        independent_sources.add(c_key)
     return independent_sources, contradicting_sources
 
 
@@ -1004,11 +1069,14 @@ def _iterate_source_reputation(
         return {}
 
     # SR⁰ 與每 source 的代表 kind（deterministic：claims 出現順序第一筆）
+    # issue #72/#132：分組 key 走 canonical source，與 `_corroboration_detail`
+    # 回傳的 agree/contra union 口徑一致——否則同源大小寫/空白變體會讓 W2 投票
+    # 對不上、動態信譽靜默失效。
     sr0: dict[str, float] = {}
     kind_of: dict[str, str] = {}
     claims_by_source: dict[str, list[Claim]] = {}
     for c in claims:
-        s = c.doc.source
+        s = _canonical_source(c.doc.source)
         if s not in sr0:
             sr0[s] = _source_reputation(c)
             kind_of[s] = c.doc.kind
@@ -1231,8 +1299,12 @@ def score(
         evidence = _reputation_evidence(claims, stance_fn=stance_fn)
         trace_meta: dict = {}
         sr0_for_trace: dict[str, float] = {}
+        raw_source_of: dict[str, str] = {}
         for c in claims:
-            sr0_for_trace.setdefault(c.doc.source, _source_reputation(c))
+            s = _canonical_source(c.doc.source)
+            if s not in sr0_for_trace:
+                sr0_for_trace[s] = _source_reputation(c)
+                raw_source_of[s] = c.doc.source
         dynamic_map = _iterate_source_reputation(
             claims,
             now,
@@ -1245,7 +1317,7 @@ def score(
         iterations_run = trace_meta.get("iterations_run", 0)
         by_source: dict[str, list[Claim]] = {}
         for c in claims:
-            by_source.setdefault(c.doc.source, []).append(c)
+            by_source.setdefault(_canonical_source(c.doc.source), []).append(c)
         trace_by_source = {}
         for s, s_claims in by_source.items():
             agree_sources: set[str] = set()
@@ -1255,7 +1327,7 @@ def score(
                 agree_sources |= agree
                 contra_sources |= contra
             trace_by_source[s] = {
-                "source": s,
+                "source": raw_source_of.get(s, s),
                 "prior": round(sr0_for_trace.get(s, 0.0), 4),
                 "final": round(dynamic_map.get(s, sr0_for_trace.get(s, 0.0)), 4),
                 "agree_n": len(agree_sources),
@@ -1279,7 +1351,7 @@ def score(
                 components={"reputation": rep, "corroboration": corr,
                             "recency": rec, "manipulation": manip},
                 reputation_trace=(
-                    trace_by_source.get(c.doc.source) if trace_by_source is not None else None
+                    trace_by_source.get(_canonical_source(c.doc.source)) if trace_by_source is not None else None
                 ),
                 manip_flags=_manipulation_flags(c),
                 # W3：文字相似度透明化 flag，informational-only，回填
@@ -1396,7 +1468,7 @@ def _evidence_strength(
     修法：dominance 的分子分母都改用「該側涉及的獨立來源數」（同一來源
     無論產生幾句 claim，只算一份），跟 `indep_factor` 既有的去重口徑一致
     （`n_indep` 本就已是去重來源數，直接複用）。"""
-    n_indep = len({sc.claim.doc.source for sc in supporting})
+    n_indep = len({_canonical_source(sc.claim.doc.source) for sc in supporting})
     n_kinds = len({sc.claim.doc.kind for sc in supporting})
 
     indep_factor = max(0.0, min(
@@ -1405,7 +1477,7 @@ def _evidence_strength(
     diversity_factor = max(0.0, min(
         (n_kinds - 1) / (_KIND_DIVERSITY_SATURATION - 1), 1.0
     ))
-    n_contrarian_sources = len({sc.claim.doc.source for sc in contrarian})
+    n_contrarian_sources = len({_canonical_source(sc.claim.doc.source) for sc in contrarian})
     total_sources = n_indep + n_contrarian_sources
     dominance = (n_indep / total_sources) if total_sources > 0 else 0.0
 
