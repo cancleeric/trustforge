@@ -45,14 +45,35 @@ describe('TrustBreakdown', () => {
     expect(screen.queryByText('-10%')).not.toBeInTheDocument()
   })
 
-  it('falls back to 0% for manipulation when the field is missing', () => {
+  it('renders 暫無評分 (not 0%) when manipulation component is missing/null', () => {
     const partial = {
       reputation: 0.5,
       corroboration: 0.5,
       recency: 0.5,
+      manipulation: null,
     } as unknown as TrustComponentsAggregate
     render(<TrustBreakdown data={partial} />)
-    expect(getPercentText('操縱風險')).toBe('0%')
+    expect(screen.getByText('暫無評分')).toBeInTheDocument()
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
+  it('renders 暫無評分 for EVERY dimension when the whole aggregate is null (no evidence)', () => {
+    const unscored = {
+      reputation: null,
+      corroboration: null,
+      recency: null,
+      manipulation: null,
+    } as unknown as TrustComponentsAggregate
+    const { container } = render(<TrustBreakdown data={unscored} />)
+    const labels = container.textContent ?? ''
+    expect(labels).not.toMatch(/\d+%/)
+    expect(screen.getAllByText('暫無評分').length).toBe(4)
+  })
+
+  it('does NOT treat evaluated-zero as unscored: 0% is shown explicitly', () => {
+    render(<TrustBreakdown data={{ ...baseData, reputation: 0 }} />)
+    expect(getPercentText('信譽')).toBe('0%')
+    expect(screen.queryByText('暫無評分')).not.toBeInTheDocument()
   })
 
   it('clamps every dimension within [0, 100]% when multiple fields are abnormal', () => {

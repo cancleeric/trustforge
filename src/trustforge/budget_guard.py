@@ -33,6 +33,7 @@ import time
 from datetime import datetime, timezone
 
 from . import admin_config
+from .budget_counter import BudgetBackendError, DynamoDBBudgetCounter
 from .ledger import PRICING, Ledger, get_ledger
 
 # stance model 未設定 `BEDROCK_HAIKU_MODEL_ID` 時的預設值，必須跟
@@ -402,18 +403,98 @@ class BudgetReservation:
 _RESERVATION = BudgetReservation()
 
 
+def _budget_counter_backend() -> DynamoDBBudgetCounter | None:
+    """選擇 budget 預留的後端：env `TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb`
+    時回傳共享 `DynamoDBBudgetCounter`（多實例安全，見 #75）；其餘（含未設定）
+    回傳 `None`，呼叫端走 process-local `BudgetReservation`（單 process 部署
+    足夠，預設行為不變）。
+
+    後端不可用（`BudgetBackendError`）時由呼叫端 fallback 回 process-local，
+    不讓預留整個 fail-open——但「選擇哪個後端」本身不是錯誤，這裡只做 env
+    判斷，不碰網路。
+    """
+    if os.getenv("TRUSTFORGE_BUDGET_GUARD_BACKEND", "local").strip().lower() == "dynamodb":
+        from .budget_counter import _default_counter
+
+        return _default_counter()
+    return None
+
+
 def try_reserve_request_budget(
     ledger: Ledger | None = None, *, now_fn=time.time
 ) -> float | None:
     """對外入口：`pipeline.run()` 在放行真 Bedrock（narrative 或
-    online-stance）前呼叫，見 `BudgetReservation.try_reserve` docstring。"""
-    return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
+    online-stance）前呼叫。
+
+    #75：啟用 DynamoDB 後端（`TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb`）時，
+    預留走跨實例共享的原子 conditional counter（所有 process 共用同一份
+    `reserved_total`），多實例部署不再各自計數、互不見而超支；後端暫時不可用
+    時 fallback 回 process-local `BudgetReservation`（至少單 process 內仍
+    擋），不讓預留整個 fail-open。預設（未設 env）行為與修 #75 前逐字相同
+    （純 process-local）。
+    """
+    backend = _budget_counter_backend()
+    if backend is None:
+        return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
+
+    cap = daily_cap_usd()
+    if cap <= 0:
+        return None
+    cost = request_max_cost_usd()
+    try:
+        spent = daily_cost_usd(ledger, now_fn=now_fn)
+    except Exception:
+        _log.warning(
+            "[budget_guard] DynamoDB 預留路徑：每日成本帳本讀取失敗，fail-safe "
+            "拒絕本次預留（本輪 Bedrock 強制離線）",
+            exc_info=True,
+        )
+        return None
+    try:
+        ok = backend.try_reserve(spent_daily=spent, cost=cost, cap=cap, now=now_fn())
+    except BudgetBackendError:
+        # 後端不可用：fallback 回 process-local 預留（不 fail-open 成完全不擋）。
+        # 【CISO #75 可見性】多實例預留保護在這段期間**暫時失效**：各 process
+        # 各自 process-local 計數互不可見，多實例部署的每日硬上限可能被並行撐
+        # 爆成 N 倍。已送 CloudWatch 指標 + 記 warning，絕不靜默降級。
+        _log.warning(
+            "[budget_guard] DynamoDB budget counter 不可用，fallback 回 process-local 預留"
+            "【CISO #75 殘餘風險】多實例保護已暫時失效：多 process/多機部署時各"
+            " process 的 process-local 預留互不可見，每日 $N 硬上限可能被並行撐爆成"
+            " N 倍；請檢查 trustforge-budget-guard 表是否存在、實例角色是否掛載"
+            " trustforge-budget-guard IAM policy、DynamoDB 是否可用。已送出 CloudWatch"
+            " 指標 BudgetGuardMultiInstanceProtectionDisabled 標記此降級。",
+            exc_info=True,
+        )
+        _maybe_emit_budget_backend_down_metric(now_fn())
+        return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
+    return cost if ok else None
 
 
 def release_request_budget(amount: float | None) -> None:
-    """對外入口：pipeline 完成或失敗後呼叫，釋放預留（見
-    `BudgetReservation.release`）。"""
-    _RESERVATION.release(amount)
+    """對外入口：pipeline 完成或失敗後呼叫，釋放預留。
+
+    #75：若走 DynamoDB 後端，釋放回共享的 `reserved_total`；後端不可用只記
+    warning、不 raise（reconcile 失敗不該讓 pipeline 炸）。process-local
+    路徑行為不變。
+    """
+    backend = _budget_counter_backend()
+    if backend is None or amount is None:
+        _RESERVATION.release(amount)
+        return
+    try:
+        backend.release(amount)
+    except BudgetBackendError:
+        # 【CISO #75 可見性】釋放也失敗 → 同樣證明多實例後端不可用，送指標
+        # + 記 warning，不靜默。process-local 仍做 reconcile。
+        _log.warning(
+            "[budget_guard] DynamoDB budget counter 釋放失敗（後端不可用），"
+            "【CISO #75 殘餘風險】多實例保護已暫時失效（同 try_reserve 路徑說明）。"
+            "已送出 CloudWatch 指標 BudgetGuardMultiInstanceProtectionDisabled。",
+            exc_info=True,
+        )
+        _maybe_emit_budget_backend_down_metric()
+        _RESERVATION.release(amount)
 
 
 def _reset_reservation_for_tests() -> None:
@@ -422,6 +503,50 @@ def _reset_reservation_for_tests() -> None:
     呼叫。"""
     with _RESERVATION._lock:
         _RESERVATION._reserved = 0.0
+
+
+# ---------------------------------------------------------------------------
+# #75 CISO 可見性：DynamoDB 後端失效時送指標 + 警告（避免靜默降級）
+# ---------------------------------------------------------------------------
+# 背景：啟用 `TRUSTFORGE_BUDGET_GUARD_BACKEND=dynamodb` 後，若表不存在 / 實例
+# 角色未掛 `trustforge-budget-guard` IAM policy / DynamoDB 不可用，
+# `try_reserve` 會拋 `BudgetBackendError`，呼叫端 fallback 回 process-local
+# `BudgetReservation`。**但 process-local 只擋單 process 內的並行 race，多實例
+# （多 process／多機器）部署時各 process 的 reserved 互不可見，每日 `$N` 硬上限
+# 會被並行撐爆成 N 倍**——這正是 #75 原本要解的多實例風險，靜默 fallback 等於
+# 把保護關掉卻不讓維運發現。因此這裡**不靜默**：每次偵測到後端失效，都送一條
+# CloudWatch 指標 `BudgetGuardMultiInstanceProtectionDisabled` 並記 warning log，
+# 證明多實例保護已失效。
+#
+# 殘餘風險（必須記錄）：DynamoDB 不可用期間，多實例預留上限暫時失效，退化回
+# 「每個 process 各自 process-local 計數」——單 process 內仍安全，跨 process
+# 的每日上限在這段時間內無法強制收斂（見 `budget_counter.py` docstring）。後端
+# 恢復後，下一次 `try_reserve` 走 DynamoDB 路徑，原子收斂自動恢復。
+_BUDGET_BACKEND_DOWN_METRIC_COOLDOWN = 300.0
+_last_backend_down_metric_ts = 0.0
+_backend_down_metric_lock = threading.Lock()
+
+
+def _maybe_emit_budget_backend_down_metric(now: float | None = None) -> None:
+    """per-process 冷卻後送出一條 `BudgetGuardMultiInstanceProtectionDisabled`
+    指標（證明多實例保護已失效）。冷卻避免每個請求都打一次 CloudWatch 造成
+    風暴；冷卻期內只送一次，但 warning log（呼叫端）仍每次都記，確保可被看見。
+    """
+    global _last_backend_down_metric_ts
+    now = now if now is not None else time.time()
+    with _backend_down_metric_lock:
+        if now - _last_backend_down_metric_ts < _BUDGET_BACKEND_DOWN_METRIC_COOLDOWN:
+            return
+        _last_backend_down_metric_ts = now
+    try:
+        from . import cloudwatch_metrics
+
+        cloudwatch_metrics.emit_budget_guard_backend_down()
+    except Exception:
+        _log.warning(
+            "[budget_guard] 送出 budget guard 後端失效指標時發生例外",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------

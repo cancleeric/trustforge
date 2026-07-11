@@ -3339,3 +3339,75 @@ def test_public_snapshot_dict_helper_strips_authors_keeps_other_fields():
     assert d["trust_score"] == 0.7
     # 原始 dict 不被就地修改。
     assert snap["authors"] == ["/u/a", "/u/b"]
+
+
+# ---------------------------------------------------------------------------
+# issue #106 D0.4「三態誠實合約全表面鎖定」：未評估 ≠ 零。
+# 構造「某維度完全缺資料」輸入，斷言 report / API / 序列化三個表面都不產生 0 分、
+# 且標記為未評估（null / has_data=False）。
+# ---------------------------------------------------------------------------
+
+def test_three_state_honesty_radar_missing_kind_is_null_not_zero():
+    """`aggregate_trust_by_kind`：某 kind 完全缺 evidence 時，`trust` 必為 None、
+    `has_data` 必為 False、`n_sources` 必為 0——絕不補 0 冒充「查過但很低」。"""
+    from trustforge.agent.orchestrator import aggregate_trust_by_kind
+
+    # 只有 news 一種 kind 的 evidence，其餘 kind 全缺資料。
+    evidence = [
+        Evidence(source="coindesk", fetched_at="t", content_reference="r1",
+                 related_claim="c1", kind="news", trust=0.8),
+    ]
+    dims = aggregate_trust_by_kind(evidence)
+    # 有資料的 kind
+    assert dims["news"]["has_data"] is True
+    assert dims["news"]["trust"] is not None
+    # 完全缺資料的 kind（按 KIND_REPUTATION 全集）
+    for kind, d in dims.items():
+        if kind == "news":
+            continue
+        assert d["has_data"] is False, f"{kind} 應標記為無資料"
+        assert d["trust"] is None, f"{kind} 未評估維度 trust 必為 None，不得是 0"
+        assert d["n_sources"] == 0
+        assert d["trust"] != 0
+
+
+def test_three_state_honesty_components_no_evidence_serializes_null_not_zero():
+    """`_aggregate_trust_components` 在完全無分項資料時回全 None，經 API 信封
+    JSON 序列化後該欄位為 `null`（不是 0），前端 validator 可辨「未評估」。"""
+    from trustforge.agent.orchestrator import aggregate_trust_by_kind
+
+    # 無 trust_components 的 evidence（模擬本輪無可用分項資料）→ 全 None。
+    evidence = [
+        Evidence(source="a", fetched_at="t", content_reference="c",
+                 related_claim="x", kind="news", trust=0.5),
+    ]
+    agg = web._aggregate_trust_components(evidence)
+    assert all(v is None for v in agg.values()), "未評估分項必須為 None"
+    # 經 JSON 信封序列化（與 /api/analyze payload 同一套 json.dumps）。
+    payload = {
+        "trust_radar": aggregate_trust_by_kind(evidence),
+        "trust_components_aggregate": agg,
+    }
+    body = json.dumps(payload)
+    parsed = json.loads(body)
+    # radar 缺資料維度的 trust 必為 JSON null
+    missing = [k for k, d in parsed["trust_radar"].items() if k != "news"]
+    assert all(parsed["trust_radar"][k]["trust"] is None for k in missing)
+    # 分項聚合必為 JSON null，不得是 0
+    assert all(parsed["trust_components_aggregate"][k] is None
+               for k in parsed["trust_components_aggregate"])
+    # 逐鍵明確斷言每個分項都是 JSON null（非 0、非缺鍵），確認未評估不被填成 0
+    for k in parsed["trust_components_aggregate"]:
+        assert parsed["trust_components_aggregate"][k] is None
+
+
+def test_three_state_honesty_components_aggregate_structure_is_stable_all_keys(monkeypatch):
+    """整輪無 evidence 時，`_aggregate_trust_components([])` 仍回傳**全部 4 個鍵**、
+    值皆為 null（非缺鍵、非 0）。結構穩定讓 `/api/analyze` 的 JSON 形狀不隨
+    資料量變動，前端 `validators.isTrustComponentsAggregate` 不必對缺鍵特例分支。"""
+    agg = web._aggregate_trust_components([])
+    assert set(agg.keys()) == {"reputation", "corroboration", "recency", "manipulation"}
+    assert all(agg[k] is None for k in agg)
+    # 序列化後確認是 JSON null（不是 0、不是缺鍵）。
+    tc = json.loads(json.dumps({"trust_components_aggregate": agg}))["trust_components_aggregate"]
+    assert all(tc[k] is None for k in tc)
