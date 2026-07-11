@@ -194,7 +194,7 @@ export interface Insight {
 }
 
 /** D1.5 假設驗證題型結構化正反方帳本：顯式 pro/con 證據綁定 Evidence List
- * （`pro`/`con` 為 evidence 陣列索引，對應前端證據清單的 E{i}），並附信心限制
+ * （`pro`/`con` 為 evidence 陣列索引，對應前端證據清單的 E{i}），並附資訊完整度限制
  * 聲明（不過度宣稱預測力）。僅 `question_type === "hypothesis"` 時由後端填入。 */
 export interface HypothesisLedger {
   pro: number[]
