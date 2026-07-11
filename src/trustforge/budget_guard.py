@@ -300,35 +300,142 @@ def daily_cap_exceeded(ledger: Ledger | None = None, *, now_fn=time.time) -> boo
 # 並行請求彼此能看到對方「正在花」的部分，不再只看到同一份歷史總額。
 
 DEFAULT_REQUEST_MAX_USD = 0.05
-"""單次 `/api/analyze` 請求「最壞情況」可能觸發的 Bedrock 花費保守上界
-（USD）。寧可估高擋掉合法請求，也不能低估讓並行 race 有機可乘。
+"""單次 `/api/analyze` 請求預留金額的**安全下界**（USD），不再是預設估值。
 
-估算依據：
-- narrative 敘事呼叫最多 1 次：`BEDROCK_MAX_TOKENS`（預設 1024）輸出，用
-  `ledger.PRICING` 最貴的模型單價（sonnet-4-6：input $3/1M、output
-  $15/1M）估算，單次約 $0.02～$0.03。
-- online-stance 分類呼叫（`scoring.py` O(n²) 迴圈、cache-miss 才真打，
-  maxTokens=128、較便宜的 haiku 單價）同一請求可能觸發多筆，疊一截安全
-  邊際。
-兩者加總取整到 $0.05。可用 `TRUSTFORGE_BEDROCK_REQUEST_MAX_USD`（env）
-覆寫——不寫死，決賽現場依 `/costs` 觀察到的真實單次花費調整。
+背景（D2.5 / #76）：原本 `request_max_cost_usd()` 固定回傳這個 $0.05 當
+作「最壞情況」保守上界。但 $0.05 對已計價模型（sonnet/haiku）其實是**低估**
+——並行 race 下仍可能被撐爆。#76 改用 `estimate_request_max_cost_usd()`
+以「實際模型單價 × 各段落 worst-case token 用量」算出真實上界（通常約
+$0.13～$0.17，見該函式）。本常數退居**安全下界**：`request_max_cost_usd()`
+回傳 `max(計算值, DEFAULT_REQUEST_MAX_USD)`，確保異常配置（如全部模型都
+unpriced、計算值退化為 0）時仍有 $0.05 下界擋住，不讓預留金額變 0 而
+bypass 每日 cap。仍可用 `TRUSTFORGE_BEDROCK_REQUEST_MAX_USD`（env）明確
+覆寫（決賽現場依 `/costs` 觀察到的真實單次花費調整，優先於計算值）。
 """
 
 
 def request_max_cost_usd() -> float:
-    """讀 `TRUSTFORGE_BEDROCK_REQUEST_MAX_USD`（USD）。未設定 / 空字串 / 無法
-    解析成浮點數 → 回傳保守預設值 `DEFAULT_REQUEST_MAX_USD`（$0.05）。"""
+    """讀 `TRUSTFORGE_BEDROCK_REQUEST_MAX_USD`（USD）。設定了合法非負有限值
+    → 直接採用（operator 可明確覆寫預估值）；未設定 / 空字串 / 無法解析 /
+    非有限 / 負值 → 改用 `estimate_request_max_cost_usd()` 的真實
+    worst-case 預估值（D2.5 / #76，取代原本固定 $0.05 的保守上界），並與
+    `DEFAULT_REQUEST_MAX_USD`（$0.05）取大當作安全下界，避免異常配置讓
+    預留金額退化為 0 而 bypass 每日 cap。"""
     raw = os.getenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD")
-    if raw is None or not raw.strip():
-        return DEFAULT_REQUEST_MAX_USD
-    try:
-        val = float(raw)
-    except ValueError:
-        return DEFAULT_REQUEST_MAX_USD
-    if not math.isfinite(val) or val < 0:
-        # NaN/Inf/負值 env → 用保守預設(codex HIGH:別讓壞 env 破壞 cap)
-        return DEFAULT_REQUEST_MAX_USD
-    return val
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw)
+        except ValueError:
+            val = None
+        if val is not None and math.isfinite(val) and val >= 0:
+            return val
+        # 壞 env → 落到計算值（不再回退固定 $0.05）
+    return max(estimate_request_max_cost_usd(), DEFAULT_REQUEST_MAX_USD)
+
+
+# ---------------------------------------------------------------------------
+# D2.5 / #76（真實 worst-case accounting 取代固定 $0.05）：單次 /api/analyze
+# 請求「最壞情況」可能觸發的 Bedrock 花費保守上界，改以「實際會用到的模型
+# 單價 × 各段落 worst-case token 用量」估算，不再手填固定 $0.05。
+# ---------------------------------------------------------------------------
+# narrative 敘事呼叫的 worst-case 輸入 token 數保守上界。env 可覆寫（決賽現場
+# 依實測調整）。
+#
+# 來源核實（codex ①）：真實 narrative 敘事呼叫只有 `agent.orchestrator` 的
+# Step3（narrative_with_citations），其 prompt 由「幣種/題型/問題 + 我方判斷
+# + 最多 8 條 claim_refs（每條 `claim.text[:100]`） + 跨源訊號摘要（選填）+
+# 1-2 句指令」組成，實測實際輸入遠小於 500 token。這裡保守取 8000 作為
+# **上限**（而非「典型值」），方向是「多估、不會漏估」——fail-closed 預留
+# 偏多只會更保守、不會撐破每日 cap。若未來叙事 prompt 真的開始拼接多源 doc，
+# 這個常數必須同步重新核實、調高，否則會變成低估。
+_NARRATIVE_WORST_CASE_INPUT_TOKENS = int(
+    os.getenv("TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS", "8000")
+)
+# online-stance 分類呼叫的 worst-case 輸入 token 數（每筆 claim 的上下文）。
+_STANCE_WORST_CASE_INPUT_TOKENS = int(
+    os.getenv("TRUSTFORGE_WC_STANCE_INPUT_TOKENS", "1500")
+)
+# bedrock.py classify_stance 固定 maxTokens=128（見該模組常數註解）。
+_STANCE_MAX_OUTPUT_TOKENS = 128
+
+# Comparison 倍數（codex ① worst-case 低估修正）：`run_comparison()`（pipeline）
+# 對兩個幣各自呼叫一次完整的 `run()`，每次 `run()` 都跑一次 narrative +
+# 一次 `score()`（score 內含 online-stance 呼叫），因此 comparison 請求的
+# 真實 worst-case 呼叫上限 = 單幣的 `_COMPARISON_MULTIPLIER` 倍。原本
+# `estimate_request_max_cost_usd()` 只算單幣倍數、且 stance 手填上界 60 與
+# `scoring.DEFAULT_STANCE_PAIR_BUDGET`(=40) 脫鉤，導致 comparison 預留遠低於
+# 真實最壞花費、並發 comparison 可撐破 #9 每日 cap。這裡把倍數與 stance 上界
+# 都從真實呼叫圖推導。
+_COMPARISON_MULTIPLIER = 2
+
+
+def _narrative_worst_case_max_calls(*, comparison: bool = False) -> int:
+    """單次 `run()` 最多 1 次 narrative 敘事呼叫；comparison 模式
+    （`run_comparison`：A、B 各一次 `run`）乘上 `_COMPARISON_MULTIPLIER`。"""
+    return _COMPARISON_MULTIPLIER if comparison else 1
+
+
+def _stance_worst_case_max_calls(*, comparison: bool = False) -> int:
+    """單次 `run()` 的 online-stance worst-case 真呼叫次數上界，直接取自
+    `scoring.DEFAULT_STANCE_PAIR_BUDGET`（`score()` 內 `_StanceBudget` 的封頂
+    值，cache-miss 才真打；取該值即真實上界，不再手填與呼叫圖脫鉤的常數）。
+    comparison 模式乘上 `_COMPARISON_MULTIPLIER`（兩幣各跑一次 `run`）。
+    env `TRUSTFORGE_WC_STANCE_MAX_CALLS` 仍可整體覆寫（決賽現場依實測調整）。"""
+    from .trust.scoring import DEFAULT_STANCE_PAIR_BUDGET
+
+    per_run = int(
+        os.getenv("TRUSTFORGE_WC_STANCE_MAX_CALLS", "") or DEFAULT_STANCE_PAIR_BUDGET
+    )
+    return (_COMPARISON_MULTIPLIER if comparison else 1) * per_run
+
+
+def _narrative_worst_case_model_id() -> str | None:
+    mid = os.getenv("BEDROCK_MODEL_ID")
+    return mid if mid else None
+
+
+def _stance_worst_case_model_id() -> str | None:
+    # online-stance 實際用的 model 與 `stance_model_priced()` 完全一致。
+    return os.getenv("BEDROCK_HAIKU_MODEL_ID") or _DEFAULT_STANCE_MODEL_ID
+
+
+def estimate_request_max_cost_usd(*, for_comparison: bool = False) -> float:
+    """D2.5 / #76：單次 `/api/analyze` 請求真實 worst-case Bedrock 花費上界。
+
+    以「實際會用到的模型單價（`ledger.PRICING`，換模型/region 自動跟著變）
+    × 各段落 worst-case token 用量」估算，取代原本固定 $0.05 估值：
+      - narrative：最多 `_narrative_worst_case_max_calls()` 次敘事呼叫，輸出
+        上限 `BEDROCK_MAX_TOKENS`，輸入取 `_NARRATIVE_WORST_CASE_INPUT_TOKENS`
+        保守上界。
+      - online-stance：最多 `_stance_worst_case_max_calls()` 次、每次
+        `maxTokens=128`，輸入取 `_STANCE_WORST_CASE_INPUT_TOKENS`。
+
+    `for_comparison=True`：請求走 comparison 模式（`run_comparison` 對兩幣各
+    跑一次完整 `run()`），narrative 與 stance 上限都要乘上
+    `_COMPARISON_MULTIPLIER`（codex ① worst-case 低估修正：原本只算單幣、且
+    stance 手填上界 60 與真實呼叫圖 `scoring.DEFAULT_STANCE_PAIR_BUDGET`(=40)
+    脫鉤，comparison 預留遠低於真實最壞花費）。單幣模式的預估預設值（`False`）
+    不變，對既有的 per-`run()` 預留呼叫端行為向後相容。
+
+    模型不在 `PRICING` 時該段落貢獻 0（與 `narrative_model_priced`/
+    `stance_model_priced` 的 fail-closed 一致：unpriced 本來就會被 guard
+    擋下、不真的花這段錢）。回傳四捨五入到 6 位的 USD。
+    """
+    from .ledger import estimate_cost
+
+    max_tokens = int(os.getenv("BEDROCK_MAX_TOKENS", "1024"))
+    n_model = _narrative_worst_case_model_id()
+    s_model = _stance_worst_case_model_id()
+    cost = 0.0
+    # narrative：comparison 模式乘上 _COMPARISON_MULTIPLIER
+    cost += _narrative_worst_case_max_calls(comparison=for_comparison) * estimate_cost(
+        n_model, _NARRATIVE_WORST_CASE_INPUT_TOKENS, max_tokens
+    )
+    # online-stance：comparison 模式乘上 _COMPARISON_MULTIPLIER
+    cost += _stance_worst_case_max_calls(comparison=for_comparison) * estimate_cost(
+        s_model, _STANCE_WORST_CASE_INPUT_TOKENS, _STANCE_MAX_OUTPUT_TOKENS
+    )
+    return round(cost, 6)
 
 
 class BudgetReservation:

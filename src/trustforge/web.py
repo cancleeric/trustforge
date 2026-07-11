@@ -4083,6 +4083,17 @@ class _AnalyzeDedupTimeout(Exception):
     leader」是兩件不同的事——後者從未存在過、本輪也沒有引入。"""
 
 
+class _AnalyzeDedupLeaseBusy(Exception):
+    """#51/#87 延伸（D2.5 durable idempotency lease）：leader 在 `compute()`
+    之前去跨實例共享的 lease backend 原子 `try_acquire` 租約，若發現這把
+    dedup key 的租約已經被**另一個實例**持有（且未過期）→ 表示「同一件事
+    正在別的實例上算」，本實例不該重複 `compute()`（避免多實例各自打一次
+    Bedrock 重複計費），改拋這個例外，由呼叫端轉成可重試的 429/503（交給
+    client 稍後重試；同一把 key 正常結束會立即 release 租約，循序進來的
+    相同請求仍會 fresh 重新計算，不會被 TTL 卡住）。見
+    `trustforge.idempotency_lease`。"""
+
+
 def _analyze_effective_mode(qs: dict) -> str:
     """算出一次請求**實際會生效**的單一分析檔位：`"live"` / `"real"` /
     `"sample"`。
@@ -4650,6 +4661,28 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             return joined_flight.payload
         raise joined_flight.payload
 
+    # --- D2.5 跨實例 durable idempotency lease ---
+    # 成為 leader 後、真的 `compute()` 之前，先去跨實例共享的 lease backend
+    # 原子取得這把 key 的租約：只有拿到租約的實例才 `compute()`，避免多實例
+    # 各自成為自己 process 的 leader、重複打 Bedrock 計費（#9 每日 cap 擋
+    # 不住這種語意重複）。拿不到（別的實例已持有且未過期）→ 自己不該
+    # compute，清掉剛建立的 flight 並回可重試（_AnalyzeDedupLeaseBusy）。
+    from .idempotency_lease import analyze_lease_ttl_seconds, get_lease_backend, new_owner_id
+
+    _lease_owner = new_owner_id()
+    _lease_acquired = get_lease_backend().try_acquire(
+        key, _lease_owner, analyze_lease_ttl_seconds()
+    )
+    if not _lease_acquired:
+        # 租約被別的實例佔用：清掉自己剛建立的 flight（這把 key 在字典裡若
+        # 還是我自己這個物件才 pop，避免誤刪別人正在用的 entry），回可重試。
+        with _analyze_dedup_lock:
+            if _analyze_dedup_inflight.get(key) is my_flight:
+                _analyze_dedup_inflight.pop(key, None)
+        raise _AnalyzeDedupLeaseBusy(
+            f"相同分析請求正在其他實例執行中（dedup key={key!r}），請稍後再試"
+        )
+
     try:
         result = compute()
     except Exception as exc:
@@ -4664,6 +4697,7 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             if _analyze_dedup_inflight.get(key) is my_flight:
                 _analyze_dedup_inflight.pop(key, None)
         my_flight.event.set()
+        get_lease_backend().release(key, _lease_owner)
         raise
     my_flight.ok = True
     my_flight.payload = result
@@ -4671,6 +4705,7 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
         if _analyze_dedup_inflight.get(key) is my_flight:
             _analyze_dedup_inflight.pop(key, None)
     my_flight.event.set()
+    get_lease_backend().release(key, _lease_owner)
     return result
 
 
@@ -4953,6 +4988,10 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
         # 不落回自己真的跑一次（見 `_dedup_analyze_call`/`_AnalyzeDedupTimeout`
         # docstring），交給 client 自行重試。
         return 503, _json_envelope_err("timeout", str(exc))
+    except _AnalyzeDedupLeaseBusy as exc:
+        # D2.5：跨實例 durable lease 忙碌（同一把 key 正在別的實例算）→
+        # 回可重試的 429，本實例不重複 compute（避免多實例重複計費）。
+        return 429, _json_envelope_err("conflict", str(exc))
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     except Exception:
@@ -6257,6 +6296,21 @@ class Handler(BaseHTTPRequestHandler):
                         "application/json; charset=utf-8",
                     )
                 return self._send(503, page(
+                    _render_error_card(
+                        "服務忙碌中", str(exc), retry_href=_sanitized_retry_href(self.path),
+                    ),
+                    active_mode=active_mode))
+            except _AnalyzeDedupLeaseBusy as exc:
+                # D2.5：跨實例 durable lease 忙碌（同一把 key 正在別的實例
+                # 算）→ 回可重試的 429，本實例不重複 compute（避免多實例
+                # 重複計費），與 `_handle_api_analyze` 同款處理。
+                if u.path == "/analyze.json":
+                    return self._send(
+                        429,
+                        _json_envelope_err("conflict", str(exc)),
+                        "application/json; charset=utf-8",
+                    )
+                return self._send(429, page(
                     _render_error_card(
                         "服務忙碌中", str(exc), retry_href=_sanitized_retry_href(self.path),
                     ),

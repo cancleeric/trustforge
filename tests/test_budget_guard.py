@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import math
+
 import pytest
 
 import trustforge.budget_guard as bg
@@ -411,7 +413,10 @@ def test_caps_reject_non_finite_env(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "nan")
     assert budget_guard.daily_cap_usd() == budget_guard.DEFAULT_BEDROCK_DAILY_USD_CAP
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", "inf")
-    assert budget_guard.request_max_cost_usd() == budget_guard.DEFAULT_REQUEST_MAX_USD
+    # 壞 env → 落到計算值（真實 worst-case 預估，D2.5/#76），為正有限值
+    # （不再回退固定 $0.05 上界）
+    _val = budget_guard.request_max_cost_usd()
+    assert _val > 0 and math.isfinite(_val)
 
 
 # ---------------------------------------------------------------------------
