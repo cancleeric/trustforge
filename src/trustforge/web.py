@@ -2085,10 +2085,24 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
     """
     if not tc:
         return ""
+    # 三態誠實合約（#106 D0.4「未評估 ≠ 零」）：若本次分析**完全沒有任何**
+    # 分項資料（所有分項皆為 None，例如整輪無 evidence，後端
+    # `_aggregate_trust_components` 已改回全 None），不補 0、不畫假的 0% 條、
+    # 不顯示「0.00 ×0.50」誤導成「評了但零分」，改顯式「暫無評分」，跟 API
+    # 回傳的 `null` 與前端 `TrustBreakdown` 的「暫無評分」中性態口徑一致。
+    if all(v is None for v in tc.values()):
+        return (
+            '<div style="margin:.35rem 0;padding:.5rem .6rem;background:var(--tf-inset);'
+            'border-radius:6px;border:1px solid var(--tf-border);font-size:.78rem;'
+            'color:var(--tf-muted)">信任分項拆解：暫無評分'
+            '（本輪無可用信任分項資料，未以 0 分冒充）</div>'
+        )
     e = html.escape
 
     def _f(v) -> float:
         # 防禦：None/非數字/NaN/Inf → 0.0（trust_components 理應為合法 float，但不信任輸入）
+        if v is None:
+            return 0.0
         try:
             x = float(v)
         except (TypeError, ValueError):
@@ -2760,23 +2774,41 @@ def _aggregate_trust_components(evidence: list) -> dict:
     的「Trust Breakdown」並排面板顯示。不新增資料欄位、不改真實信任公式——
     每筆 evidence 的 trust/trust_components 仍是 pipeline 算出的原值，這裡只是
     純視覺呈現用的算術平均，供使用者一眼看整體分項分布。
+
+    ⛔ 三態誠實合約（#106 D0.4「未評估 ≠ 零」）：回傳 dict **永遠含 4 個鍵**
+    （reputation/corroboration/recency/manipulation），但某個分項在本次分析
+    **完全沒有可信資料**時（例如整輪無 evidence、或所有 evidence 的
+    trust_components 都缺該鍵）該鍵的值為 `None`——**絕不回退成 0**，避免把
+    「沒評分」誤讀成「評了但 0 分／風險極低」。這跟 `aggregate_trust_by_kind`
+    對缺資料維度回 `trust=None` 的口徑完全一致（見其 docstring「誠實顯示無
+    資料」段）。呼叫端（SSR `_render_trust_breakdown`／前端 `TrustBreakdown`）
+    必須把 `None` 渲染成「暫無評分」中性態，不得補 0。
+
+    注意：回傳 dict 永遠含全部 4 鍵（即便全為 None），是為了讓 `/api/analyze`
+    的 JSON 結構穩定、前端 `validators.isTrustComponentsAggregate` 不必對「缺
+    鍵」做特例分支；「未評估」語意由 `None` 值本身表達，而非缺鍵。
     """
     keys = ("reputation", "corroboration", "recency", "manipulation")
     sums = {k: 0.0 for k in keys}
-    n = 0
+    counts = {k: 0 for k in keys}
     for ev in evidence:
         tc = getattr(ev, "trust_components", None) or {}
         if not tc:
             continue
-        n += 1
         for k in keys:
+            v = tc.get(k)
+            if v is None:
+                # 該 evidence 這個分項缺資料：不補 0、不計入平均，保持其 None。
+                continue
             try:
-                sums[k] += float(tc.get(k, 0.0))
+                fv = float(v)
             except (TypeError, ValueError):
-                pass
-    if n == 0:
-        return {}
-    return {k: sums[k] / n for k in keys}
+                continue
+            sums[k] += fv
+            counts[k] += 1
+    return {
+        k: (round(sums[k] / counts[k], 3) if counts[k] > 0 else None) for k in keys
+    }
 
 
 def _render_run_stats(evidence: list, log=None) -> str:

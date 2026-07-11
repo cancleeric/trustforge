@@ -304,11 +304,37 @@ def test_aggregate_trust_components_pure_average_no_mutation():
     assert ev[1].trust_components == orig_b
 
 
-def test_aggregate_trust_components_empty_when_no_data():
-    """全部 evidence 都沒有 trust_components 時，回傳空 dict（不崩、不誤導顯示）。"""
+def test_aggregate_trust_components_unscored_is_null_not_zero():
+    """三態誠實合約（#106 D0.4「未評估 ≠ 零」）：本輪完全無 evidence 時，
+    `_aggregate_trust_components` 必須回傳**全部 4 個鍵、值皆為 None**，
+    不得回空 dict（會被前端 validator 拒為缺鍵）、更不得補 0 冒充「評了但零分」。
+    """
     ev = [Evidence(source="a", fetched_at="t", content_reference="c", related_claim="x", trust=0.5)]
-    assert web._aggregate_trust_components(ev) == {}
-    assert web._aggregate_trust_components([]) == {}
+    agg = web._aggregate_trust_components(ev)
+    assert set(agg.keys()) == {"reputation", "corroboration", "recency", "manipulation"}
+    assert all(v is None for v in agg.values())
+
+    empty = web._aggregate_trust_components([])
+    assert set(empty.keys()) == {"reputation", "corroboration", "recency", "manipulation"}
+    assert all(v is None for v in empty.values())
+    # 絕不能出現 0（0 會被誤讀成「評了但零分／風險極低」）
+    assert 0 not in empty.values()
+
+
+def test_aggregate_trust_components_missing_key_per_dimension_is_null():
+    """某分項在部分 evidence 缺鍵時，該分項聚合為 None 而非補 0。"""
+    ev = [
+        Evidence(source="a", fetched_at="t", content_reference="c", related_claim="x",
+                 trust=0.8, trust_components={"reputation": 0.9, "corroboration": 1.0,
+                                              "recency": 0.5}),  # 缺 manipulation
+        Evidence(source="b", fetched_at="t", content_reference="c", related_claim="x",
+                 trust=0.4, trust_components={"reputation": 0.5, "corroboration": 0.0,
+                                              "recency": 0.5}),  # 缺 manipulation
+    ]
+    agg = web._aggregate_trust_components(ev)
+    assert agg["manipulation"] is None
+    assert agg["reputation"] == 0.7
+    assert agg["corroboration"] == 0.5
 
 
 # ---------------------------------------------------------------------------
