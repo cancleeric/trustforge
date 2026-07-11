@@ -365,12 +365,34 @@ describe('apiFetch — 巢狀 payload 驗證（trust_radar / price_provenance）
 
   it('cross_source_signal.sentiment_source_count 是字串 "1"（非數字）→ parse_error', async () => {
     const data = validAnalyzeData()
-    data.report.cross_source_signal = { type: 'consensus', summary: '共識' }
+    data.report.cross_source_signal = { type: 'consensus', summary: '共議' }
     asMutable(data.report.cross_source_signal).sentiment_source_count = '1'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
     const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
+  // issue #106 D0.4 三態誠實合約「未評估 ≠ 零」：本輪無可用分項資料時，
+  // 後端回傳的 `trust_components_aggregate` 4 個分項值皆為 null（絕非 0）。
+  // `isAnalyzeData` 必須放行這種「未評分」形狀，不能過嚴把整張分析卡誤殺成
+  // parse_error；前端 `TrustBreakdown` 再把 null 渲染成「暫無評分」中性態。
+  it('trust_components_aggregate 全為 null（未評分）→ 正常回傳，不被當成畸形', async () => {
+    const data = validAnalyzeData()
+    data.trust_components_aggregate = {
+      reputation: null,
+      corroboration: null,
+      recency: null,
+      manipulation: null,
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const tc = result.data.trust_components_aggregate
+      expect(tc.reputation).toBeNull()
+      expect(tc.manipulation).toBeNull()
+    }
   })
 })
 

@@ -169,11 +169,16 @@ export interface TrustRadarDimension {
 /** key 為維度代號（price/onchain/regulatory/hoyabit/news/social/... ）。 */
 export type TrustRadar = Record<string, TrustRadarDimension>
 
+/** #106 D0.4 三態誠實合約：每個分項都是 `number | null`——`null` 表示「本輪
+ * 完全沒有該分項的可信資料」，**不等於 0**。後端 `_aggregate_trust_components`
+ * 永遠回傳 4 個鍵（結構穩定、便於 validator 與渲染），某分項未評估時其值為
+ * `null`（絕不補 0）。前端消費端（含 `TrustBreakdown`）遇到 `null` 必須顯式
+ * 渲染「暫無評分」中性態，不得補 0 冒充「評了但零分／風險極低」。 */
 export interface TrustComponentsAggregate {
-  reputation: number
-  corroboration: number
-  recency: number
-  manipulation: number
+  reputation: number | null
+  corroboration: number | null
+  recency: number | null
+  manipulation: number | null
 }
 
 export interface PriceProvenanceEntry {

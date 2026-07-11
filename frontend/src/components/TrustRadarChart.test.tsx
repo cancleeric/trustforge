@@ -52,4 +52,24 @@ describe('TrustRadarChart', () => {
 
     expect(container.querySelector('.recharts-polar-radius-axis')).not.toBeNull()
   })
+
+  // issue #106 D0.4 三態誠實合約「未評估 ≠ 零」：部分維度缺資料時，該維度
+  // 必須顯式列在「尚無資料的維度」清單、且**不**被當成 0 分畫進雷達圖
+  // （domain=[0,1] 只承載真實評分維度）。
+  it('部分維度缺資料時應列出未評估維度、且不得把缺資料維度當 0 分畫入雷達', () => {
+    const radar: TrustRadar = {
+      price: makeDim({ label: '價格', trust: 0.8 }),
+      onchain: makeDim({ label: '鏈上', has_data: false, trust: null }),
+      news: makeDim({ label: '新聞', has_data: false, trust: null }),
+    }
+
+    const { container } = render(<TrustRadarChart radar={radar} />)
+
+    // 缺資料維度必須顯式標示（不得消失、不得冒充 0 分）
+    expect(screen.getByText(/尚無資料的維度：鏈上、新聞/)).toBeDefined()
+    // 雷達圖仍正常渲染（domain=[0,1] 只承載真實評分維度）
+    expect(container.querySelector('.recharts-polar-radius-axis')).not.toBeNull()
+    // 缺資料維度不會被補 0 混進圖表數據
+    expect(container.textContent).not.toMatch(/鏈上.*0\.00|新聞.*0\.00/)
+  })
 })

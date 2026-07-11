@@ -17,7 +17,9 @@ export default function TrustBreakdown({ data }: { data: TrustComponentsAggregat
       <h3 className="mb-3 text-sm font-semibold text-tf-text">信任拆解（逐項 WHY）</h3>
       <ul className="flex flex-col gap-3">
         {DIMENSION_META.map(({ key, label, why }) => {
-          const value = data[key] ?? 0
+          const raw = data[key]
+          const isUnscored = raw === null || raw === undefined
+          const value = isUnscored ? 0 : raw
           const clamped = Math.max(0, Math.min(1, value))
           const isRisk = key === 'manipulation'
           const barColor = isRisk
@@ -33,7 +35,11 @@ export default function TrustBreakdown({ data }: { data: TrustComponentsAggregat
             <li key={key}>
               <div className="mb-1 flex items-baseline justify-between text-xs">
                 <span className="font-semibold text-tf-text">{label}</span>
-                <span className="tf-num text-tf-muted">{(clamped * 100).toFixed(0)}%</span>
+                {isUnscored ? (
+                  <span className="text-tf-muted">暫無評分</span>
+                ) : (
+                  <span className="tf-num text-tf-muted">{(clamped * 100).toFixed(0)}%</span>
+                )}
               </div>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-tf-border">
                 <div
