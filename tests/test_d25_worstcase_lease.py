@@ -21,6 +21,7 @@ from trustforge.idempotency_lease import (
     analyze_lease_ttl_seconds,
     set_lease_backend,
 )
+from trustforge.trust.scoring import DEFAULT_STANCE_PAIR_BUDGET
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,61 @@ def test_estimate_request_max_cost_includes_narrative_when_priced(monkeypatch):
     monkeypatch.setenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-sonnet-4-6")
     with_narrative = budget_guard.estimate_request_max_cost_usd()
     assert with_narrative > without_narrative
+
+
+# --- codex ① worst-case 低估修正：comparison 倍數必須被正確推導 ---
+def test_worst_case_call_graph_multiplier(monkeypatch):
+    """從呼叫圖推導 worst-case 呼叫上限：單幣 1 次 narrative / 1×stance_budget；
+    comparison（run_comparison 兩幣各跑一次 run）2 次 narrative / 2×stance_budget。
+    """
+    monkeypatch.delenv("TRUSTFORGE_WC_STANCE_MAX_CALLS", raising=False)
+    # 單幣模式
+    assert budget_guard._narrative_worst_case_max_calls(comparison=False) == 1
+    assert (
+        budget_guard._stance_worst_case_max_calls(comparison=False)
+        == DEFAULT_STANCE_PAIR_BUDGET
+    )
+    # comparison 模式：narrative 上限 = 2、stance 上限 = 2 × DEFAULT_STANCE_PAIR_BUDGET
+    assert budget_guard._narrative_worst_case_max_calls(comparison=True) == 2
+    assert (
+        budget_guard._stance_worst_case_max_calls(comparison=True)
+        == 2 * DEFAULT_STANCE_PAIR_BUDGET
+    )
+
+
+def test_estimate_comparison_at_least_double_single(monkeypatch):
+    """comparison 模式的 worst-case 預估必須 >= 單幣模式的 2 倍（codex ①：
+    原本只算單幣、stance 手填上界 60 與真實呼叫圖脫鉤，comparison 預留遠低
+    於真實最壞花費）。narrative + stance 都設成已計價模型，讓倍數真的反映。"""
+    monkeypatch.delenv("TRUSTFORGE_BEDROCK_REQUEST_MAX_USD", raising=False)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-sonnet-4-6")
+    single = budget_guard.estimate_request_max_cost_usd(for_comparison=False)
+    comp = budget_guard.estimate_request_max_cost_usd(for_comparison=True)
+    assert single > 0
+    assert comp >= 2 * single
+    # 直接斷言 stance 上限確實 = 80（2 × 40）：以 haiku 單價反推次數。
+    from trustforge.ledger import estimate_cost, PRICING
+
+    s_model = budget_guard._stance_worst_case_model_id()
+    per_call = estimate_cost(
+        s_model,
+        budget_guard._STANCE_WORST_CASE_INPUT_TOKENS,
+        budget_guard._STANCE_MAX_OUTPUT_TOKENS,
+    )
+    assert per_call > 0
+    assert round(comp - single, 6) >= round(per_call * DEFAULT_STANCE_PAIR_BUDGET, 6)
+
+
+def test_estimate_single_mode_default_backward_compatible(monkeypatch):
+    """無參數呼叫維持單幣語意（向後相容 per-run 預留呼叫端），stance 上限
+    為單一 run 的 DEFAULT_STANCE_PAIR_BUDGET，而非舊的手填 60。"""
+    monkeypatch.delenv("TRUSTFORGE_WC_STANCE_MAX_CALLS", raising=False)
+    monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
+    assert budget_guard.estimate_request_max_cost_usd() > 0
+    assert (
+        budget_guard._stance_worst_case_max_calls(comparison=False)
+        == DEFAULT_STANCE_PAIR_BUDGET
+    )
 
 
 def test_request_max_cost_env_override_takes_precedence(monkeypatch):
@@ -91,6 +147,18 @@ def test_lease_backend_expired_lease_can_be_reacquired(tmp_path):
 
 def test_lease_ttl_default_is_15_minutes():
     assert analyze_lease_ttl_seconds() == 15 * 60
+
+
+def test_lease_try_acquire_oserror_is_failsafe(monkeypatch, tmp_path):
+    """codex ⑤：JsonLeaseBackend.try_acquire 若 `_write` 拋 OSError（磁碟滿/
+    權限不足），必須 fail-safe 回 False（視同拿不到租約），不能讓異常冒泡到
+    `web._dedup_analyze_call` 導致 in-memory flight 洩漏。"""
+    b = JsonLeaseBackend(tmp_path / "lease_oserr.json")
+    monkeypatch.setattr(
+        b, "_write", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+    )
+    # 不應 raise；回 False（呼叫端會清理 flight 並回 429）
+    assert b.try_acquire("k", "owner-A", 900) is False
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import tempfile
 import time
@@ -78,6 +79,9 @@ def new_owner_id() -> str:
     pid 用於「同 process 接手」判定（見模組頂部），uuid 用於精確 release
     比對（避免接手後的舊 leader 誤刪新 leader 租約）。"""
     return f"{os.getpid()}:{uuid.uuid4().hex}"
+
+
+_log = logging.getLogger(__name__)
 
 
 def _owner_pid(owner_id: str) -> str:
@@ -148,6 +152,24 @@ class JsonLeaseBackend(LeaseBackend):
             raise
 
     def try_acquire(self, key: str, owner_id: str, ttl_seconds: int) -> bool:
+        # codex ⑤ fail-safe 可用性：磁碟滿 / 權限不足等會讓 `_write` 拋
+        # `OSError`，若直接冒泡，`web._dedup_analyze_call` 的 lease 段（在
+        # `try_acquire` 與「拿到租約才 compute」之間）沒有 catch，異常會一路
+        # 衝出、導致剛建立的 `my_flight` 永遠不被 pop → in-memory flight 洩漏
+        # （後續同 key 請求永遠 coalesce 進一條死掉的 leader）。這裡把 OSError
+        # 視同「拿不到租約」回 `False`，由呼叫端既有的 `if not _lease_acquired`
+        # 分支清理 flight 並回可重試 429（fail-safe，不 crash 也不洩漏）。
+        try:
+            return self._try_acquire_locked(key, owner_id, ttl_seconds)
+        except OSError:
+            _log.warning(
+                "[idempotency_lease] JsonLeaseBackend.try_acquire 寫入失敗（磁碟滿/權限不足），"
+                "fail-safe 視同未取得租約（本請求不 compute，回 429 由呼叫端處理）",
+                exc_info=True,
+            )
+            return False
+
+    def _try_acquire_locked(self, key: str, owner_id: str, ttl_seconds: int) -> bool:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)

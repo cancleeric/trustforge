@@ -338,8 +338,16 @@ def request_max_cost_usd() -> float:
 # 請求「最壞情況」可能觸發的 Bedrock 花費保守上界，改以「實際會用到的模型
 # 單價 × 各段落 worst-case token 用量」估算，不再手填固定 $0.05。
 # ---------------------------------------------------------------------------
-# narrative 敘事呼叫的 worst-case 輸入 token 數（提示 + 多源 doc 拼接的保守
-# 上界）。env 可覆寫（決賽現場依實測調整）。
+# narrative 敘事呼叫的 worst-case 輸入 token 數保守上界。env 可覆寫（決賽現場
+# 依實測調整）。
+#
+# 來源核實（codex ①）：真實 narrative 敘事呼叫只有 `agent.orchestrator` 的
+# Step3（narrative_with_citations），其 prompt 由「幣種/題型/問題 + 我方判斷
+# + 最多 8 條 claim_refs（每條 `claim.text[:100]`） + 跨源訊號摘要（選填）+
+# 1-2 句指令」組成，實測實際輸入遠小於 500 token。這裡保守取 8000 作為
+# **上限**（而非「典型值」），方向是「多估、不會漏估」——fail-closed 預留
+# 偏多只會更保守、不會撐破每日 cap。若未來叙事 prompt 真的開始拼接多源 doc，
+# 這個常數必須同步重新核實、調高，否則會變成低估。
 _NARRATIVE_WORST_CASE_INPUT_TOKENS = int(
     os.getenv("TRUSTFORGE_WC_NARRATIVE_INPUT_TOKENS", "8000")
 )
@@ -347,13 +355,38 @@ _NARRATIVE_WORST_CASE_INPUT_TOKENS = int(
 _STANCE_WORST_CASE_INPUT_TOKENS = int(
     os.getenv("TRUSTFORGE_WC_STANCE_INPUT_TOKENS", "1500")
 )
-# online-stance 單次請求最多觸發的真呼叫次數上界（scoring O(n²) 迴圈、
-# cache-miss 才真打；取保守上界，實際通常遠少）。
-_STANCE_WORST_CASE_MAX_CALLS = int(
-    os.getenv("TRUSTFORGE_WC_STANCE_MAX_CALLS", "60")
-)
 # bedrock.py classify_stance 固定 maxTokens=128（見該模組常數註解）。
 _STANCE_MAX_OUTPUT_TOKENS = 128
+
+# Comparison 倍數（codex ① worst-case 低估修正）：`run_comparison()`（pipeline）
+# 對兩個幣各自呼叫一次完整的 `run()`，每次 `run()` 都跑一次 narrative +
+# 一次 `score()`（score 內含 online-stance 呼叫），因此 comparison 請求的
+# 真實 worst-case 呼叫上限 = 單幣的 `_COMPARISON_MULTIPLIER` 倍。原本
+# `estimate_request_max_cost_usd()` 只算單幣倍數、且 stance 手填上界 60 與
+# `scoring.DEFAULT_STANCE_PAIR_BUDGET`(=40) 脫鉤，導致 comparison 預留遠低於
+# 真實最壞花費、並發 comparison 可撐破 #9 每日 cap。這裡把倍數與 stance 上界
+# 都從真實呼叫圖推導。
+_COMPARISON_MULTIPLIER = 2
+
+
+def _narrative_worst_case_max_calls(*, comparison: bool = False) -> int:
+    """單次 `run()` 最多 1 次 narrative 敘事呼叫；comparison 模式
+    （`run_comparison`：A、B 各一次 `run`）乘上 `_COMPARISON_MULTIPLIER`。"""
+    return _COMPARISON_MULTIPLIER if comparison else 1
+
+
+def _stance_worst_case_max_calls(*, comparison: bool = False) -> int:
+    """單次 `run()` 的 online-stance worst-case 真呼叫次數上界，直接取自
+    `scoring.DEFAULT_STANCE_PAIR_BUDGET`（`score()` 內 `_StanceBudget` 的封頂
+    值，cache-miss 才真打；取該值即真實上界，不再手填與呼叫圖脫鉤的常數）。
+    comparison 模式乘上 `_COMPARISON_MULTIPLIER`（兩幣各跑一次 `run`）。
+    env `TRUSTFORGE_WC_STANCE_MAX_CALLS` 仍可整體覆寫（決賽現場依實測調整）。"""
+    from .trust.scoring import DEFAULT_STANCE_PAIR_BUDGET
+
+    per_run = int(
+        os.getenv("TRUSTFORGE_WC_STANCE_MAX_CALLS", "") or DEFAULT_STANCE_PAIR_BUDGET
+    )
+    return (_COMPARISON_MULTIPLIER if comparison else 1) * per_run
 
 
 def _narrative_worst_case_model_id() -> str | None:
@@ -366,15 +399,24 @@ def _stance_worst_case_model_id() -> str | None:
     return os.getenv("BEDROCK_HAIKU_MODEL_ID") or _DEFAULT_STANCE_MODEL_ID
 
 
-def estimate_request_max_cost_usd() -> float:
+def estimate_request_max_cost_usd(*, for_comparison: bool = False) -> float:
     """D2.5 / #76：單次 `/api/analyze` 請求真實 worst-case Bedrock 花費上界。
 
     以「實際會用到的模型單價（`ledger.PRICING`，換模型/region 自動跟著變）
     × 各段落 worst-case token 用量」估算，取代原本固定 $0.05 估值：
-      - narrative：最多 1 次敘事呼叫，輸出上限 `BEDROCK_MAX_TOKENS`，輸入取
-        `_NARRATIVE_WORST_CASE_INPUT_TOKENS` 保守上界。
-      - online-stance：最多 `_STANCE_WORST_CASE_MAX_CALLS` 次、每次
+      - narrative：最多 `_narrative_worst_case_max_calls()` 次敘事呼叫，輸出
+        上限 `BEDROCK_MAX_TOKENS`，輸入取 `_NARRATIVE_WORST_CASE_INPUT_TOKENS`
+        保守上界。
+      - online-stance：最多 `_stance_worst_case_max_calls()` 次、每次
         `maxTokens=128`，輸入取 `_STANCE_WORST_CASE_INPUT_TOKENS`。
+
+    `for_comparison=True`：請求走 comparison 模式（`run_comparison` 對兩幣各
+    跑一次完整 `run()`），narrative 與 stance 上限都要乘上
+    `_COMPARISON_MULTIPLIER`（codex ① worst-case 低估修正：原本只算單幣、且
+    stance 手填上界 60 與真實呼叫圖 `scoring.DEFAULT_STANCE_PAIR_BUDGET`(=40)
+    脫鉤，comparison 預留遠低於真實最壞花費）。單幣模式的預估預設值（`False`）
+    不變，對既有的 per-`run()` 預留呼叫端行為向後相容。
+
     模型不在 `PRICING` 時該段落貢獻 0（與 `narrative_model_priced`/
     `stance_model_priced` 的 fail-closed 一致：unpriced 本來就會被 guard
     擋下、不真的花這段錢）。回傳四捨五入到 6 位的 USD。
@@ -385,10 +427,12 @@ def estimate_request_max_cost_usd() -> float:
     n_model = _narrative_worst_case_model_id()
     s_model = _stance_worst_case_model_id()
     cost = 0.0
-    # narrative：最多 1 次
-    cost += estimate_cost(n_model, _NARRATIVE_WORST_CASE_INPUT_TOKENS, max_tokens)
-    # online-stance：最多 N 次
-    cost += _STANCE_WORST_CASE_MAX_CALLS * estimate_cost(
+    # narrative：comparison 模式乘上 _COMPARISON_MULTIPLIER
+    cost += _narrative_worst_case_max_calls(comparison=for_comparison) * estimate_cost(
+        n_model, _NARRATIVE_WORST_CASE_INPUT_TOKENS, max_tokens
+    )
+    # online-stance：comparison 模式乘上 _COMPARISON_MULTIPLIER
+    cost += _stance_worst_case_max_calls(comparison=for_comparison) * estimate_cost(
         s_model, _STANCE_WORST_CASE_INPUT_TOKENS, _STANCE_MAX_OUTPUT_TOKENS
     )
     return round(cost, 6)
