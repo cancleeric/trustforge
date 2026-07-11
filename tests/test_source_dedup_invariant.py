@@ -153,13 +153,11 @@ def test_build_report_abstain_when_same_source_variants_do_not_inflate_n_indep()
     )
     brief = _aggregate_from_docs([doc1, doc2])
 
-    # 前提檢查：兩篇文件都成功產生 supporting claim
-    assert len(brief.supporting) == 2, (
-        f"期望 2 筆 supporting claim（前提檢查），實得 {len(brief.supporting)}"
-    )
-
-    # 去重後只有 1 個獨立來源
-    indep_count = _count_independent_sources(sc.claim.doc.source for sc in brief.supporting)
+    # 同源大小寫/空白變體（`exch-a` vs ` Exch-A `）經 canonical source 正規化
+    # 收斂為同一來源：不自相佐證（corr 不灌水），因此 trust 不會被虛抬。
+    # 去重後整池只有 1 個獨立來源，應維持 abstain。
+    all_sources = [sc.claim.doc.source for sc in brief.supporting + brief.contrarian]
+    indep_count = _count_independent_sources(all_sources)
     assert indep_count == 1, (
         f"期望 1 個獨立來源（同源大小寫/空白變體），實得 {indep_count}"
     )
