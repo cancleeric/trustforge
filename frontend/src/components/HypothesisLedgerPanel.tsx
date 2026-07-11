@@ -53,7 +53,7 @@ export default function HypothesisLedgerPanel({
         </div>
       </div>
       <p className="mt-3 rounded border border-tf-warn/50 bg-tf-warn/5 p-2 text-[0.7rem] text-tf-warn">
-        信心限制：{ledger.confidence_limit}
+        侷限說明：{ledger.confidence_limit}
       </p>
     </div>
   )

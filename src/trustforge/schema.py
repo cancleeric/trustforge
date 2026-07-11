@@ -225,7 +225,7 @@ class Report:
             L.append("\n## 假設驗證：正反方證據對照")
             L.append(f"- 支持方（pro）證據索引：{', '.join('E'+str(i) for i in hl.get('pro', [])) or '（無）'}")
             L.append(f"- 反方（con）證據索引：{', '.join('E'+str(i) for i in hl.get('con', [])) or '（無）'}")
-            L.append(f"- 信心限制：{hl.get('confidence_limit', '')}")
+            L.append(f"- 侷限說明：{hl.get('confidence_limit', '')}")
 
         if self.contrarian:
             L.append("\n## 反方 / 低信任證據（已標記，未納入主結論）")

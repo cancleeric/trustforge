@@ -1079,7 +1079,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         con_idx = [i for i, ev in enumerate(evidence) if ev.related_claim == "反方／低信任訊號"]
         confidence_limit = (
             "本驗證為「假設對照」而非預測：僅基於現有證據的正反方對照，"
-            "不宣稱預測力；證據強度有限（校準信心偏低或獨立來源不足）時，"
+            "不宣稱預測力；證據強度有限（校準值偏低或獨立來源不足）時，"
             "正反方對照僅供參考，不構成方向性結論。"
         )
         hypothesis_ledger = {"pro": pro_idx, "con": con_idx, "confidence_limit": confidence_limit}
