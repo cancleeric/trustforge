@@ -261,7 +261,30 @@ class DynamoDBLeaseBackend(LeaseBackend):
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 return False
-            raise
+            # codex ⑤ fail-safe 可用性（與 JsonLeaseBackend 的 OSError 處理同
+            # 源）：ProvisionedThroughputExceeded / 網路超時等非條件衝突的
+            # ClientError 若直接冒泡，`web._dedup_analyze_call` 的 lease 段（在
+            # `try_acquire` 與「拿到租約才 compute」之間）沒有 catch，異常會
+            # 一路衝出、導致剛建立的 `my_flight` 永遠不被 pop → in-memory flight
+            # 洩漏（後續同 key 請求永遠 coalesce 進一條死掉的 leader）。這裡把
+            # 這類非「被別人持有」的錯誤視同「拿不到租約」回 `False`，由呼叫端
+            # 既有的 `if not _lease_acquired` 分支清理 flight 並回可重試 429
+            # （fail-safe，不 crash 也不洩漏）。注意：成功取得租約的 `return True`
+            # 在 try 內、錯誤才落進 except，絕不會把成功誤判為失敗。
+            _log.warning(
+                "[idempotency_lease] DynamoDBLeaseBackend.try_acquire 非條件衝突錯誤（"
+                "ProvisionedThroughputExceeded/網路超時等），fail-safe 視同未取得租約"
+                "（本請求不 compute，回 429 由呼叫端處理）",
+                exc_info=True,
+            )
+            return False
+        except Exception:  # noqa: BLE001 — AWS 抖動（非 ClientError 的網路/逾時）同樣 fail-safe
+            _log.warning(
+                "[idempotency_lease] DynamoDBLeaseBackend.try_acquire 未預期例外，"
+                "fail-safe 視同未取得租約（本請求不 compute，回 429 由呼叫端處理）",
+                exc_info=True,
+            )
+            return False
 
     def release(self, key: str, owner_id: str) -> None:
         from boto3.dynamodb.conditions import Attr

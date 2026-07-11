@@ -17,6 +17,7 @@ import pytest
 
 from trustforge import budget_guard
 from trustforge.idempotency_lease import (
+    DynamoDBLeaseBackend,
     JsonLeaseBackend,
     analyze_lease_ttl_seconds,
     set_lease_backend,
@@ -159,6 +160,54 @@ def test_lease_try_acquire_oserror_is_failsafe(monkeypatch, tmp_path):
     )
     # 不應 raise；回 False（呼叫端會清理 flight 並回 429）
     assert b.try_acquire("k", "owner-A", 900) is False
+
+
+def test_dynamodb_try_acquire_non_conditional_clienterror_is_failsafe(monkeypatch):
+    """codex ⑤（dynamodb 路徑）：`put_item` 拋**非** ConditionalCheckFailed
+    的 ClientError（ProvisionedThroughputExceeded / 網路超時等 AWS 抖動）必須
+    fail-safe 回 False（視同拿不到租約），不能讓異常冒泡到
+    `web._dedup_analyze_call` 導致 in-memory flight 洩漏（與 json 路徑同源
+    bug）。成功取得租約（`return True`）在 try 內，絕不被誤判為失敗。"""
+    from types import SimpleNamespace
+
+    from botocore.exceptions import ClientError
+
+    calls = {"n": 0}
+
+    def put_item_throughput_exceeded(**kwargs):
+        calls["n"] += 1
+        raise ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException",
+                       "Message": "rate exceeded"}},
+            "PutItem",
+        )
+
+    fake_table = SimpleNamespace(put_item=put_item_throughput_exceeded)
+    b = DynamoDBLeaseBackend(table_name="x", region="us-east-1")
+    monkeypatch.setattr(b, "_get_table", lambda: fake_table)
+
+    # 不應 raise；回 False（呼叫端會清理 flight 並回 429）
+    assert b.try_acquire("k", "owner-A", 900) is False
+    assert calls["n"] == 1
+
+
+def test_dynamodb_try_acquire_generic_exception_is_failsafe(monkeypatch):
+    """codex ⑤（dynamodb 路徑）：`put_item` 拋非 ClientError 的一般 Exception
+    （網路逾時底層 / 連線 reset 等）同樣必須 fail-safe 回 False，不洩漏 flight。"""
+    from types import SimpleNamespace
+
+    calls = {"n": 0}
+
+    def put_item_generic_error(**kwargs):
+        calls["n"] += 1
+        raise RuntimeError("connection reset by peer")
+
+    fake_table = SimpleNamespace(put_item=put_item_generic_error)
+    b = DynamoDBLeaseBackend(table_name="x", region="us-east-1")
+    monkeypatch.setattr(b, "_get_table", lambda: fake_table)
+
+    assert b.try_acquire("k", "owner-B", 900) is False
+    assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------
