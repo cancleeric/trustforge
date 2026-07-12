@@ -38,6 +38,16 @@ def _vol(vol_pct: float) -> ScoredClaim:
                      "bullish" if vol_pct > 0 else "neutral")
 
 
+def _price_sc_meta(doc_id: str, text: str, direction: str, meta: dict,
+                   trust: float = 0.9) -> ScoredClaim:
+    base = {"trading_pair": "BTC/USDT"}
+    base.update(meta)
+    doc = Document(id=doc_id, kind="price", source="ohlcv-csv", text=text, ts=1.0,
+                   meta=base)
+    claim = Claim(id=f"{doc_id}#0", text=text, doc=doc, direction=direction)
+    return ScoredClaim(claim=claim, trust=trust)
+
+
 def test_d11_covered_bullish_divergence():
     ins = detect_smart_money_divergence([_ret(-3.3), _vol(25)], "BTC")
     assert ins is not None
@@ -112,3 +122,49 @@ def test_d11_build_report_carries_insights():
     assert isinstance(report, Report)
     assert isinstance(report.insights, list) and len(report.insights) >= 1
     assert report.insights[0].insight_type == "smart_money_divergence"
+
+
+def test_d11_structured_ret_pct_preferred():
+    """結構化 meta['ret_pct'] 優先於正則：即便文字不含「報酬 N%」格式，也能正確讀值。"""
+    ret = _price_sc_meta("price-BTC-ret",
+                         "BTC 區間收盤從 60000 來到 57000，跌幅明顯。",
+                         "bearish", {"ret_pct": -5.0})
+    vol = _price_sc_meta("price-BTC-volume",
+                         "BTC 成交量近期明顯放大。",
+                         "bullish", {"volume_trend_pct": 22.0})
+    ins = detect_smart_money_divergence([ret, vol], "BTC")
+    assert ins is not None
+    assert ins.coverage != COVERAGE_INSUFFICIENT
+    assert ins.meta.get("price_return_pct") == -5.0, "應讀結構化 ret_pct，而非靜默回 None"
+    assert ins.meta.get("volume_trend_pct") == 22.0, "應讀結構化 volume_trend_pct"
+
+
+def test_d11_real_drop_missed_by_regex_not_silent_none():
+    """對抗 [issue #150]：真實 -5% 跌幅若文字格式游離正則（無「報酬 N%」字樣），
+    舊實作 ret_val 落為 0.0 → 盤整 → 靜默回 None 假裝「無背離」。改讀結構化
+    meta['ret_pct'] 後應正確產出洞察（covered 或 insufficient），絕不靜默回 None。"""
+    ret = _price_sc_meta("price-BTC-ret",
+                         "BTC 近區間下挫約五個百分點。",  # 正則抽不到 -5
+                         "bearish", {"ret_pct": -5.0})
+    vol = _price_sc_meta("price-BTC-volume",
+                         "BTC 成交量變化 +30%。",  # 無「變化 N%」標準字樣，但有結構化欄位
+                         "bullish", {"volume_trend_pct": 30.0})
+    ins = detect_smart_money_divergence([ret, vol], "BTC")
+    assert ins is not None, "結構化欄位存在時絕不應靜默回 None"
+    assert ins.coverage != COVERAGE_INSUFFICIENT
+    assert ins.direction == "bullish"
+    assert "無法判定" not in ins.summary
+
+
+def test_d11_ret_value_unparseable_explicit_insufficient():
+    """對抗 [issue #150]：有價格報酬事實但結構化/正則都抽不到數值，舊實作
+    ret_val=0.0 → 盤整 → 靜默回 None。新實作必須明確標註「無法判定」（insufficient），
+    不靜默回 None、不偽裝無背離。"""
+    ret = _price_sc("price-BTC-ret",
+                    "BTC 價格近期波動劇烈，方向尚不明朗。",  # 無數值可抽
+                    "neutral")
+    ins = detect_smart_money_divergence([ret], "BTC")
+    assert ins is not None, "有價格事實卻抽不到值，應明確標註而非靜默回 None"
+    assert ins.coverage == COVERAGE_INSUFFICIENT
+    assert "無法判定" in ins.summary
+    assert ins.strength == 0.0

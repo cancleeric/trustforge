@@ -98,12 +98,12 @@ def price_facts(coin: str, bars: list[Bar], window: int = 14,
     pair = f"{coin}/USDT"
     period = f"{start.date}~{end.date}"
 
-    def fact(fid: str, text: str, ref: str) -> Document:
+    def fact(fid: str, text: str, ref: str, **extra_meta: float) -> Document:
         return Document(
             id=fid, kind="price", source="ohlcv-csv",
             text=text, url="", ts=ts,
             meta={"content_reference": ref, "trading_pair": pair,
-                  "date_range": period, "source_file": source_file},
+                  "date_range": period, "source_file": source_file, **extra_meta},
         )
 
     direction = "上漲" if ret > 1 else "下跌" if ret < -1 else "盤整"
@@ -111,11 +111,13 @@ def price_facts(coin: str, bars: list[Bar], window: int = 14,
         fact(f"price-{coin}-ret",
              f"{coin} 近 {len(seg)} 日收盤從 {start.close:g} 變動至 {end.close:g}，"
              f"報酬 {ret:+.1f}%，呈{direction}。",
-             f"{pair} {period} close {start.close:g}->{end.close:g} ({ret:+.1f}%)"),
+             f"{pair} {period} close {start.close:g}->{end.close:g} ({ret:+.1f}%)",
+             ret_pct=ret),
         fact(f"price-{coin}-vol",
              f"{coin} 近 {len(seg)} 日日報酬波動度約 {vol:.1f}%，區間高低 {lo:g}~{hi:g}。",
              f"{pair} {period} daily-return stdev {vol:.2f}%, range {lo:g}-{hi:g}"),
         fact(f"price-{coin}-volume",
              f"{coin} 近期成交量相對區間初期變化 {vol_trend:+.0f}%。",
-             f"{pair} {period} volume trend {vol_trend:+.1f}% (recent3 vs first3)"),
+             f"{pair} {period} volume trend {vol_trend:+.1f}% (recent3 vs first3)",
+             volume_trend_pct=vol_trend),
     ]

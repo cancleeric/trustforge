@@ -88,6 +88,29 @@ _VOL_ID_SUFFIX = "-volume"
 _RET_RE = re.compile(r"報酬\s*([+-]?\d+(?:\.\d+)?)\s*%")
 _VOL_RE = re.compile(r"變化\s*([+-]?\d+(?:\.\d+)?)\s*%")
 
+
+def _extract_ret_pct(ret_claim: ScoredClaim) -> float | None:
+    """從價格報酬事實抽取數值，最長優先讀結構化欄位。
+
+    優先讀 `doc.meta["ret_pct"]`（由 ingestion/prices.price_facts 產生的結構化
+    數值欄位），避免對句子正則的脆弱依賴；無結構化欄位時 fallback 到正則
+    （向後相容未帶結構化欄位的舊價格事實）。兩者皆抽不到回 None（呼叫端應
+    明確標註「無法解析」，禁止靜默回 None 假裝無背離）。"""
+    meta_val = ret_claim.claim.doc.meta.get("ret_pct")
+    if isinstance(meta_val, (int, float)) and not isinstance(meta_val, bool):
+        return float(meta_val)
+    m = _RET_RE.search(ret_claim.claim.text)
+    return float(m.group(1)) if m else None
+
+
+def _extract_vol_pct(vol_claim: ScoredClaim) -> float | None:
+    """從成交量趨勢事實抽取數值，最長優先讀結構化欄位（見 `_extract_ret_pct`）。"""
+    meta_val = vol_claim.claim.doc.meta.get("volume_trend_pct")
+    if isinstance(meta_val, (int, float)) and not isinstance(meta_val, bool):
+        return float(meta_val)
+    m = _VOL_RE.search(vol_claim.claim.text)
+    return float(m.group(1)) if m else None
+
 # 誠實宣告：平台目前沒有真實的鏈上淨流入/累積資料源（onchain 連接器只提供
 # FNG / 手續費 / 難度 / 區塊統計，不含交易所淨流入）。以「成交量趨勢」作為
 # 鏈上吸籌的保守代理，必須在洞察裡明講，不能偽裝成「真實淨流入」。
@@ -115,10 +138,17 @@ def detect_smart_money_divergence(
 
     誠實閘：
       - 缺價格報酬事實 → 不產生洞察（無資料不硬湊）。
+      - 價格報酬數值無法解析（結構化欄位與正則皆未命中）→ 不靜默回 None，
+        coverage="insufficient"，summary 標「無法判定」（issue #150：真實跌幅被
+        正則漏抓時，靜默 None 會偽裝成「無背離」誤導使用者）。
       - 價格未下跌（上漲/盤整）→ 不成立，不產生洞察。
-      - 價格下跌但成交量未上升 → coverage="insufficient"，summary 標「無法判定」，
-        強度 0.0（下跌過程成交量未增，不能確認是吸籌還是單純拋售）。
+      - 價格下跌但成交量未上升/數值無法解析 → coverage="insufficient"，summary 標
+        「無法判定」，強度 0.0（下跌過程成交量未增，不能確認是吸籌還是單純拋售）。
       - 價格下跌且成交量上升 → coverage="covered"，強度依跌幅與量增幅度保守計算。
+
+    數值來源：優先讀 `doc.meta` 結構化欄位（ret_pct / volume_trend_pct，由
+    ingestion/prices.price_facts 產生），避免對句子正則的脆弱依賴；無結構化欄位
+    時 fallback 到正則（向後相容舊價格事實）。
 
     兩個貢獻來源（D1.3 對照）：價格報酬（bearish）+ 成交量趨勢（bullish），
     方向相反，正是「背離」的本質。
@@ -132,8 +162,36 @@ def detect_smart_money_divergence(
         # 無價格報酬事實：缺資料，誠實不出洞察（不假裝「無背離」）。
         return None
 
-    m = _RET_RE.search(ret_claim.claim.text)
-    ret_val = float(m.group(1)) if m else 0.0
+    # 讀結構化數值欄位（優先）或正則 fallback；兩者皆抽不到 → 明確標註無法解析，
+    # 絕不靜默回 None（issue #150：真實跌幅若被正則漏抓，靜默 None 會偽裝成
+    # 「無背離」，誤導使用者）。
+    ret_val = _extract_ret_pct(ret_claim)
+    if ret_val is None:
+        return Insight(
+            insight_type="smart_money_divergence",
+            title="聰明錢背離（鏈上吸籌 vs 價格下跌）",
+            summary=(
+                f"{coin_u} 存在價格報酬事實，但報酬數值無法解析（結構化欄位與正則"
+                "皆未命中），無法判定是否下跌及是否伴隨鏈上吸籌，故標註「無法判定」。"
+            ),
+            direction="ambiguous",
+            strength=0.0,
+            coverage=COVERAGE_INSUFFICIENT,
+            coverage_reason="價格報酬數值無法解析，無法判斷方向。",
+            contributions=[
+                InsightContribution(
+                    source=ret_claim.claim.doc.source,
+                    kind=ret_claim.claim.doc.kind,
+                    claim_id=ret_claim.claim.id,
+                    text=ret_claim.claim.text,
+                    direction="neutral",
+                    trust=round(ret_claim.trust, 3),
+                )
+            ],
+            claim_ids=[ret_claim.claim.id],
+            meta={"proxy_note": _SMART_MONEY_PROXY_NOTE},
+        )
+
     price_dir = "下跌" if ret_val < -1 else ("上漲" if ret_val > 1 else "盤整")
 
     if price_dir != "下跌":
@@ -166,8 +224,42 @@ def detect_smart_money_divergence(
             meta={"price_return_pct": ret_val, "proxy_note": _SMART_MONEY_PROXY_NOTE},
         )
 
-    vm = _VOL_RE.search(vol_claim.claim.text)
-    vol_val = float(vm.group(1)) if vm else 0.0
+    vol_val = _extract_vol_pct(vol_claim)
+    if vol_val is None:
+        # 成交量趨勢數值無法解析（結構化/正則皆失敗）→ 無法確認吸籌，誠實標註無法判定。
+        return Insight(
+            insight_type="smart_money_divergence",
+            title="聰明錢背離（鏈上吸籌 vs 價格下跌）",
+            summary=(
+                f"{coin_u} 價格下跌 {abs(ret_val):.1f}%，但成交量趨勢數值無法解析"
+                "（結構化欄位與正則皆未命中），無法確認鏈上吸籌（聰明錢），"
+                "故標註「無法判定」。"
+            ),
+            direction="ambiguous",
+            strength=0.0,
+            coverage=COVERAGE_INSUFFICIENT,
+            coverage_reason="成交量趨勢數值無法解析，無法確認吸籌。",
+            contributions=[
+                InsightContribution(
+                    source=ret_claim.claim.doc.source,
+                    kind=ret_claim.claim.doc.kind,
+                    claim_id=ret_claim.claim.id,
+                    text=ret_claim.claim.text,
+                    direction="bearish",
+                    trust=round(ret_claim.trust, 3),
+                ),
+                InsightContribution(
+                    source=vol_claim.claim.doc.source,
+                    kind=vol_claim.claim.doc.kind,
+                    claim_id=vol_claim.claim.id,
+                    text=vol_claim.claim.text,
+                    direction="neutral",
+                    trust=round(vol_claim.trust, 3),
+                ),
+            ],
+            claim_ids=[ret_claim.claim.id, vol_claim.claim.id],
+            meta={"price_return_pct": ret_val, "proxy_note": _SMART_MONEY_PROXY_NOTE},
+        )
 
     if vol_val <= 0:
         # 價格跌但量未增：無法確認吸籌（可能是單純拋售），誠實標註無法判定。
