@@ -223,6 +223,25 @@ assert_zip_contains() {
   fi
 }
 
+find_ssm_call_by_marker() {
+  # issue #118（probe call 編號漂移）：deploy_ec2.sh 的 SSM send-command 編號
+  # 會因部署邏輯調整而漂移——例如 verify_fetch_scheduler 把 seed 與 --probe
+  # 拆成兩支獨立 command（seed 是 fire-and-forget、probe 才是 gate）、
+  # update-in-place 路徑又多拆一支 unit reconcile restart。硬編號
+  # ssm_params_call2.txt 會失準（probe 現在落在 call3/call4）。改為「按內容
+  # 標記搜尋所有已捕捉的 ssm_params_call*.txt」，回傳第一個含指定標記的檔案
+  # 路徑（找不到則空）。這讓 gate 斷言對 call 編號漂移免疫，只認語意標記。
+  local marker="$1" file
+  for file in "$CAPTURE"/ssm_params_call*.txt; do
+    [ -f "$file" ] || continue
+    if grep -qF -- "$marker" "$file"; then
+      printf '%s' "$file"
+      return 0
+    fi
+  done
+  return 1
+}
+
 assert_ddb_action_set() {
   # 結構化解析 IAM policy JSON（不是肉眼字串 grep）：找出 Resource 為指定
   # table 的那個 statement，斷言它的 Action 集合「恰好等於」期望值——用來
@@ -616,9 +635,16 @@ case "$ALL" in
     # （verify_web_healthz）回 Failed（模擬 systemctl is-active/curl healthz
     # 失敗），藉此斷言部署會非零結束、且第二次 send-command（verify_fetch_
     # scheduler 的 --probe）根本沒被呼叫到——healthz gate 獨立擋在 probe 之前。
-    if [ "$SCENARIO" = "scheduler-fail" ] && [ "$CMDID_ARG" = "cmd-call2" ]; then
+    # issue #118：改為「按內容標記」判斷該次 send-command 是不是 probe /
+    # healthz gate，而非硬編號 cmd-call2 / cmd-call1——deploy_ec2.sh 的 SSM
+    # call 編號會因部署邏輯調整漂移（seed 與 probe 拆成兩支、update-in-place
+    # 多拆一支 unit reconcile restart），硬編號會讓 scheduler-fail /
+    # healthz-fail 模擬打錯對象，gate 防護因此形同虛設。
+    N="${CMDID_ARG#cmd-call}"
+    PARAMFILE="$CAPTURE_DIR/ssm_params_call${N}.txt"
+    if [ "$SCENARIO" = "scheduler-fail" ] && grep -qF "fetch_scheduler.py --probe" "$PARAMFILE" 2>/dev/null; then
       echo "Failed"
-    elif [ "$SCENARIO" = "healthz-fail" ] && [ "$CMDID_ARG" = "cmd-call1" ]; then
+    elif [ "$SCENARIO" = "healthz-fail" ] && grep -qF "curl -fsS http://localhost/healthz" "$PARAMFILE" 2>/dev/null; then
       echo "Failed"
     else
       echo "Success"
@@ -643,6 +669,12 @@ run_deploy() {
   # fail-closed 斷言假 PASS/假 FAIL）；PR-B 起場景改用旗標傳遞、不再傳 token
   # 值（例：run_deploy update-in-place TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtime）。
   rm -f "$CAPTURE/ssm_call_count"
+  # issue #118：每個 scenario 各自從 1 開始編號 send-command，但舊的
+  # ssm_params_call*.txt（例如上一個 scenario 留下的 call3/call4 probe）不會
+  # 被覆寫，會殘留在共享的 CAPTURE 目錄裡，讓 find_ssm_call_by_marker 搜到
+  # 過期內容而誤判。這裡先把上一個 scenario 的 call 捕捉檔清掉，確保只看到
+  # 本次 scenario 自己送出的 send-command。
+  rm -f "$CAPTURE"/ssm_params_call*.txt
   TF_TEST_SCENARIO="$scenario" TF_TEST_CAPTURE_DIR="$CAPTURE" PATH="$MOCKDIR:$PATH" \
     env -u TRUSTFORGE_ADMIN_TOKEN -u TRUSTFORGE_LIVE_TOKEN -u TRUSTFORGE_BEDROCK_DAILY_USD_CAP -u TRUSTFORGE_TOKEN_SSM_PREFIX "$@" \
     bash "$REPO_ROOT/deploy/deploy_ec2.sh" >"$CAPTURE/stdout_$scenario.log" 2>&1
@@ -736,7 +768,7 @@ fi
 # codex HIGH（首次建置缺 web healthz gate）：首次建置路徑現在會送 2 次 ssm
 # send-command——call1 是新加的 verify_web_healthz（web 服務本身健康），
 # call2 才是 verify_fetch_scheduler（DynamoDB probe）。
-VERIFY_FT_HEALTHZ=$(cat "$CAPTURE/ssm_params_call1.txt" 2>/dev/null || echo "")
+VERIFY_FT_HEALTHZ=$(cat "$(find_ssm_call_by_marker 'curl -fsS http://localhost/healthz')" 2>/dev/null || echo "")
 if [ -z "$VERIFY_FT_HEALTHZ" ]; then
   echo "  [FAIL] 首次建置：沒捕捉到 web healthz 同步驗證的 ssm send-command"
   FAIL=$((FAIL + 1))
@@ -753,14 +785,14 @@ else
     "$VERIFY_FT_HEALTHZ" 0 0 0
 fi
 
-VERIFY_FT=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
+VERIFY_FT_SEED=$(cat "$(find_ssm_call_by_marker 'systemctl start fetch-scheduler.service')" 2>/dev/null || echo "")
+VERIFY_FT=$(cat "$(find_ssm_call_by_marker 'fetch_scheduler.py --probe')" 2>/dev/null || echo "")
 if [ -z "$VERIFY_FT" ]; then
-  echo "  [FAIL] 首次建置：沒捕捉到 fetch-scheduler 同步驗證的 ssm send-command"
+  echo "  [FAIL] 首次建置：沒捕捉到 fetch-scheduler --probe 同步驗證的 ssm send-command"
   FAIL=$((FAIL + 1))
 else
-  assert_contains "$VERIFY_FT" "systemctl start fetch-scheduler.service" "首次建置：同步觸發 systemctl start fetch-scheduler.service"
-  assert_contains "$VERIFY_FT" "fetch-scheduler.service ] && break" "首次建置：有等 unit 檔存在（容忍 user-data 還沒跑完）"
-  assert_contains "$VERIFY_FT" "journalctl -u fetch-scheduler" "首次建置：失敗時有印 journal"
+  assert_contains "$VERIFY_FT_SEED" "systemctl start fetch-scheduler.service" "首次建置：同步觸發 systemctl start fetch-scheduler.service（best-effort seed，fire-and-forget）"
+  assert_contains "$VERIFY_FT_SEED" "journalctl -u fetch-scheduler" "首次建置：seed 失敗時有印 journal"
   # codex HIGH-3：不能只靠一般排程（可能因 cache 全新鮮 0 次真呼叫仍成功）
   # 當成 R/W 驗證，必須真的另外跑一次不依賴 freshness 的 --probe。
   assert_contains "$VERIFY_FT" "fetch_scheduler.py --probe" "首次建置：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
@@ -859,12 +891,13 @@ fi
 
 # 排程 fetcher 同步驗證：update-in-place 這條路徑主設定 SSM 成功後，還會
 # 再送第二次 send-command（call2）同步跑 fetch-scheduler 驗證。
-VERIFY_UP=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
+VERIFY_UP_SEED=$(cat "$(find_ssm_call_by_marker 'systemctl start fetch-scheduler.service')" 2>/dev/null || echo "")
+VERIFY_UP=$(cat "$(find_ssm_call_by_marker 'fetch_scheduler.py --probe')" 2>/dev/null || echo "")
 if [ -z "$VERIFY_UP" ]; then
-  echo "  [FAIL] update-in-place：沒捕捉到 fetch-scheduler 同步驗證的第二次 ssm send-command"
+  echo "  [FAIL] update-in-place：沒捕捉到 fetch-scheduler --probe 同步驗證的 ssm send-command"
   FAIL=$((FAIL + 1))
 else
-  assert_contains "$VERIFY_UP" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service"
+  assert_contains "$VERIFY_UP_SEED" "systemctl start fetch-scheduler.service" "update-in-place：主設定成功後同步觸發 systemctl start fetch-scheduler.service（best-effort seed，fire-and-forget）"
   assert_contains "$VERIFY_UP" "fetch_scheduler.py --probe" "update-in-place：有另外跑 fetch_scheduler.py --probe（不只靠 freshness-skip 的一般排程）"
   assert_verify_gate_behavior \
     "update-in-place：一般排程失敗（模擬 reddit 429）但 --probe 通過 → gate 仍判定成功（exit0，不再 false-fail）" \
@@ -1255,15 +1288,15 @@ fi
 echo
 echo "== 場景 3：fetch-scheduler 同步驗證失敗（模擬 DynamoDB IAM 權限不足）=="
 # 模擬「主設定 SSM 成功，但實際跑 fetch-scheduler 卻失敗」（HIGH 修的核心情境：
-# 只 enable timer 不代表真的能寫進 DynamoDB）。mock 讓 call2（驗證那次）回
-# Failed，斷言整支 deploy_ec2.sh 必須非零結束、不能誤報成功。
+# 只 enable timer 不代表真的能寫進 DynamoDB）。mock 讓「含 --probe 標記」的那次
+# send-command（無論編號幾）回 Failed，斷言整支 deploy_ec2.sh 必須非零結束、不能誤報成功。
 if run_deploy "scheduler-fail"; then
   echo "  [FAIL] fetch-scheduler 驗證失敗時，deploy_ec2.sh 仍回報成功（exit 0）——不可接受"
   FAIL=$((FAIL + 1))
 else
   echo "  [PASS] fetch-scheduler 驗證失敗時，deploy_ec2.sh 正確地非零結束"
   PASS=$((PASS + 1))
-  if grep -qF "fetch-scheduler 同步驗證失敗" "$CAPTURE/stdout_scheduler-fail.log"; then
+  if grep -qF "fetch-scheduler probe 同步驗證失敗" "$CAPTURE/stdout_scheduler-fail.log"; then
     echo "  [PASS] 失敗訊息明確（含 fetch-scheduler 同步驗證失敗 字樣）"
     PASS=$((PASS + 1))
   else
@@ -1276,17 +1309,16 @@ fi
 # codex HIGH-3：確認會被判定失敗的那次 send-command，內容真的包含 --probe——
 # 證明失敗判定是掛在「一般排程 + probe」的組合驗證上，不是舊版只驗
 # systemctl start（無參數、可能因 cache 全新鮮而假成功）那條路。
-SCHED_FAIL_CONTENT=$(cat "$CAPTURE/ssm_params_call2.txt" 2>/dev/null || echo "")
+SCHED_FAIL_CONTENT=$(cat "$(find_ssm_call_by_marker 'fetch_scheduler.py --probe')" 2>/dev/null || echo "")
 assert_contains "$SCHED_FAIL_CONTENT" "fetch_scheduler.py --probe" "場景 3：判定失敗的那次驗證，內容包含 --probe（不是只靠 freshness-skip 的一般排程）"
 
 echo
 echo "== 場景 4：首次建置 web healthz 驗證失敗（codex HIGH，模擬 systemctl/curl 失敗）=="
 # 模擬「user-data 建完 scheduler unit 之後，web 服務其實沒起來」（本次修的
 # HIGH 核心情境：舊版首次建置只驗 DynamoDB probe，probe 過就報成功，公開
-# 服務卻是壞的）。mock 讓 call1（新加的 verify_web_healthz）回 Failed，斷言
-# 整支 deploy_ec2.sh 必須非零結束、且 call2（--probe）根本沒被呼叫到——
+# 服務卻是壞的）。mock 讓 call1（verify_web_healthz）回 Failed，斷言
+# 整支 deploy_ec2.sh 必須非零結束、且 --probe 那次 send-command 根本沒被呼叫——
 # healthz gate 獨立擋在 probe 之前，不受 probe 會不會過影響。
-rm -f "$CAPTURE/ssm_params_call2.txt"
 if run_deploy "healthz-fail"; then
   echo "  [FAIL] web healthz 驗證失敗時，deploy_ec2.sh 仍回報成功（exit 0）——不可接受"
   FAIL=$((FAIL + 1))
@@ -1303,8 +1335,11 @@ else
   fi
 fi
 
-if [ -f "$CAPTURE/ssm_params_call2.txt" ]; then
-  echo "  [FAIL] 場景 4：healthz gate 沒擋住，--probe 那次 send-command（call2）仍被呼叫到了"
+# issue #118：healthz gate 獨立擋在 --probe 之前，探針那次 send-command 根本
+# 不該被送出。改為「跨所有已捕捉的 ssm call 搜尋 --probe 標記」，對 call 編號
+# 漂移免疫（不再硬查 ssm_params_call2.txt）。
+if find_ssm_call_by_marker 'fetch_scheduler.py --probe' >/dev/null 2>&1; then
+  echo "  [FAIL] 場景 4：healthz gate 沒擋住，--probe 那次 send-command 仍被呼叫到了"
   FAIL=$((FAIL + 1))
 else
   echo "  [PASS] 場景 4：healthz gate 正確擋在 --probe 之前，--probe 那次 send-command 根本沒被呼叫（獨立於 scheduler/probe 結果）"
