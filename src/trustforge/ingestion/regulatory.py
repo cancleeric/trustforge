@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -43,9 +44,14 @@ from urllib.parse import urlencode
 from . import safe_fetch
 from .base import Document, Source
 
+_log = logging.getLogger(__name__)
+
 _MAX_BYTES = 512 * 1024   # 512 KB
 _TIMEOUT = 5
-_UA = "TrustForge-Hackathon research contact@hurricanessoft.com.tw"
+# #141 對外合規：此 User-Agent 會隨每次請求送給 SEC（SEC 規範要求帶聯絡資訊）。
+# 網域修正 `hurricanessoft`（多一個 s，拼字錯誤）→ `hurricanesoft`，避免對外
+# 送出錯誤聯絡網域、也避免 SEC 端以 UA 不合規理由限流／封鎖。
+_UA = "TrustForge-Hackathon research contact@hurricanesoft.com.tw"
 
 _BASE_URL = "https://efts.sec.gov/LATEST/search-index"
 _FORMS = "8-K,10-K,10-Q,S-1"
@@ -63,6 +69,26 @@ _QUERY_TERMS = (
 )
 _REQUEST_DELAY_SECONDS = 0.1
 _MAX_DOCS = 20
+
+
+class RegulatoryFTSUnavailable(RuntimeError):
+    """SEC EDGAR 全文檢索「整體不可用」（所有查詢詞都抓取/解析失敗）時拋出。
+
+    #141 可觀測性修法：先前所有查詢詞失敗會靜默回空清單，讓監管訊號無聲流失，
+    下游只看到「0 筆」而**無法區分**兩種截然不同的情況：
+      1. 本來就沒有相關 filing（正常低頻，合法的空結果）；
+      2. FTS 整個掛掉（網路/上游/格式全壞）——這才是需要被看見的降級。
+
+    改為在「全部查詢詞都失敗」時拋出本例外，交由上游既有降級機制如實反映
+    「FTS 不可用」而非靜默：
+      - `base.collect()` 的 `try/except` + `_failed` → `report.limits` 會補一句
+        「以下來源本輪未取得資料，不納入計算：SEC…」，讓 abstain 可解釋；
+      - `scripts/fetch_scheduler.py` 的 `failures` 計數 → cron/監控可見。
+
+    ⚠️ 只有「全部」查詢詞失敗才拋（＝FTS 整體不可用）。部分查詢詞失敗仍回傳
+    其餘詞的命中（部分降級），只記 log + 計數、不拋——維持 #133「單詞失敗隔離」
+    精神，避免單一詞失敗就讓整個監管來源歸零。
+    """
 
 
 def _fetch_url(url: str) -> bytes:
@@ -202,50 +228,132 @@ class SECFullTextSearchSource(Source):
     kind = "regulatory"
     name = "sec-gov"
 
+    def __init__(self) -> None:
+        # #141 可觀測性狀態：每次 fetch() 後更新，供「直接持有此來源實例」者
+        # （測試、排程器診斷）不必解析 log 就能檢視 FTS 本輪健康度。上游正式的
+        # 「不可用」訊號仍走 raise RegulatoryFTSUnavailable → collect._failed /
+        # scheduler.failures（見該例外 docstring）。
+        self.last_attempts: int = 0        # 本輪嘗試的查詢詞數
+        self.last_failures: int = 0        # 抓取/解析失敗的查詢詞數
+        self.last_failed_terms: list[str] = []  # 失敗的查詢詞清單
+        self.last_degraded: bool = False   # 本輪是否有任何查詢詞失敗（部分或全部）
+
     def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
         startdt, enddt = _date_window()
         docs: list[Document] = []
         seen_ids: set[str] = set()
+        attempts = 0
+        failed_terms: list[str] = []
 
         for idx, term in enumerate(_QUERY_TERMS):
+            attempts += 1
             url = _build_search_url(term, startdt, enddt)
-            # issue #133 單詞失敗隔離：一詞炸（網路逾時 / SSRF 攔截 / HTTP 錯誤 /
-            # 回應非 JSON）不拖累整批——該詞跳過、其餘詞照常檢索。避免「一個詞
-            # 失敗讓整個 SEC 監管 feed 歸零」的單點崩潰。
-            try:
-                raw = self._fetch_url_term(url)
-            except Exception:
-                continue
-            try:
-                data = json.loads(raw)
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            hits_obj = data.get("hits")
-            if not isinstance(hits_obj, dict):
-                continue
-            raw_hits = hits_obj.get("hits", [])
-            if not isinstance(raw_hits, list):
-                continue
-
-            for hit in raw_hits:
-                doc = _parse_fts_hit(hit, term)
-                if doc is None:
-                    continue
-                if doc.id in seen_ids:
-                    continue
-                seen_ids.add(doc.id)
-                docs.append(doc)
+            # issue #133 單詞失敗隔離 + #141 可觀測性：一詞炸（網路逾時 / SSRF
+            # 攔截 / HTTP 錯誤 / 回應非 JSON / 結構不符）不拖累整批——但**不再靜默
+            # 吞錯**：每種失敗都由 `_fetch_term_hits` 記 WARNING（含命中詞、來源、
+            # 例外類型）並回 None，這裡計入 `failed_terms` 供降級判斷與計數。
+            raw_hits = self._fetch_term_hits(term, url)
+            if raw_hits is None:
+                failed_terms.append(term)
+            else:
+                for hit in raw_hits:
+                    doc = _parse_fts_hit(hit, term)
+                    if doc is None:
+                        continue
+                    if doc.id in seen_ids:
+                        continue
+                    seen_ids.add(doc.id)
+                    docs.append(doc)
 
             if idx < len(_QUERY_TERMS) - 1:
                 time.sleep(_REQUEST_DELAY_SECONDS)
+
+        self._record_fetch_stats(attempts, failed_terms, len(docs))
+
+        # #141 降級處理：全部查詢詞都失敗 → FTS 整體不可用 → 拋例外讓上游知道
+        # （而非靜默回空清單，把「FTS 掛掉」誤當成「本來就沒有相關 filing」）。
+        if attempts > 0 and len(failed_terms) == attempts:
+            raise RegulatoryFTSUnavailable(
+                f"SEC EDGAR FTS 全數查詢詞失敗（{len(failed_terms)}/{attempts}）；"
+                f"來源={self.name}，失敗詞={failed_terms}"
+            )
 
         if len(docs) > _MAX_DOCS:
             docs.sort(key=lambda d: d.ts, reverse=True)
             docs = docs[:_MAX_DOCS]
 
         return docs
+
+    def _record_fetch_stats(
+        self, attempts: int, failed_terms: list[str], doc_count: int
+    ) -> None:
+        """更新可觀測狀態 + 對部分/全部降級各記一筆彙總 WARNING（#141）。"""
+        self.last_attempts = attempts
+        self.last_failures = len(failed_terms)
+        self.last_failed_terms = list(failed_terms)
+        self.last_degraded = bool(failed_terms)
+
+        if not failed_terms:
+            return
+        if len(failed_terms) == attempts and attempts > 0:
+            _log.warning(
+                "SEC EDGAR FTS 全數查詢詞失敗（%d/%d）→ FTS 不可用；"
+                "source=%s failed_terms=%s",
+                len(failed_terms), attempts, self.name, failed_terms,
+            )
+        else:
+            _log.warning(
+                "SEC EDGAR FTS 部分降級：%d/%d 查詢詞失敗，仍回傳其餘詞命中 %d 筆；"
+                "source=%s failed_terms=%s",
+                len(failed_terms), attempts, doc_count, self.name, failed_terms,
+            )
+
+    def _fetch_term_hits(self, term: str, url: str) -> list | None:
+        """抓取並解析單一查詢詞的 FTS 回應，回傳 hits 清單；任何失敗回 None 並記 log。
+
+        #141：先前這些失敗分支是靜默 `continue`，導致監管訊號無聲流失、判斷掉
+        abstain 也無法解釋。改為每種失敗都以 WARNING 記錄命中詞、來源、例外類型/
+        原因，供 log-based 告警與事後診斷。回 None 代表「該詞失敗」（供呼叫端計數/
+        降級判斷）；回 list（含空 list）代表「該詞成功」——**空 list 是合法的
+        『查無相關 filing』，不算失敗**（低頻監管來源常態）。
+        """
+        try:
+            raw = self._fetch_url_term(url)
+        except Exception as exc:  # noqa: BLE001 — 單詞失敗隔離，但改為記錄而非靜默
+            _log.warning(
+                "SEC EDGAR FTS 抓取失敗：term=%r source=%s error_type=%s error=%s",
+                term, self.name, type(exc).__name__, exc,
+            )
+            return None
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            _log.warning(
+                "SEC EDGAR FTS 回應非合法 JSON：term=%r source=%s error_type=%s",
+                term, self.name, type(exc).__name__,
+            )
+            return None
+        if not isinstance(data, dict):
+            _log.warning(
+                "SEC EDGAR FTS 回應頂層非物件：term=%r source=%s got=%s",
+                term, self.name, type(data).__name__,
+            )
+            return None
+        hits_obj = data.get("hits")
+        if not isinstance(hits_obj, dict):
+            _log.warning(
+                "SEC EDGAR FTS 回應缺 hits 物件：term=%r source=%s got=%s",
+                term, self.name, type(hits_obj).__name__,
+            )
+            return None
+        raw_hits = hits_obj.get("hits", [])
+        if not isinstance(raw_hits, list):
+            _log.warning(
+                "SEC EDGAR FTS hits.hits 非陣列：term=%r source=%s got=%s",
+                term, self.name, type(raw_hits).__name__,
+            )
+            return None
+        return raw_hits
 
     def _fetch_url_term(self, url: str) -> bytes:
         """內部 helper，呼叫模組層 _fetch_url（方便測試沿用既有 monkeypatch 慣例）。"""

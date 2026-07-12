@@ -161,3 +161,144 @@ def test_collect_still_works_with_isolated_failure(monkeypatch):
     assert isinstance(docs, list)
     sec_docs = [d for d in docs if d.source == "sec-gov"]
     assert len(sec_docs) == len(terms) - 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #141 可觀測性 + 降級旗標：FTS 失敗不再靜默吞錯
+#   (a) 失敗時 log 明確記錄（含命中詞、來源、例外類型）
+#   (b) 失敗計數 / 可觀測狀態
+#   (c) 全數失敗時拋 RegulatoryFTSUnavailable，上游（collect._failed）看得到
+#   (d) UA typo 修正（hurricanessoft → hurricanesoft，對外送 SEC）
+#   關鍵不變式：空結果（查無 filing）是合法低頻，不算降級、不拋。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_user_agent_domain_typo_fixed():
+    """(d) 送給 SEC 的 User-Agent 網域拼字修正：hurricanessoft → hurricanesoft。"""
+    assert "hurricanessoft" not in regulatory._UA, "錯誤網域 hurricanessoft 不應再出現"
+    assert "hurricanesoft.com.tw" in regulatory._UA, "應為正確網域 hurricanesoft.com.tw"
+
+
+def test_all_terms_fail_raises_fts_unavailable(monkeypatch):
+    """(c) 全部查詢詞都失敗（FTS 整體不可用）→ 拋 RegulatoryFTSUnavailable，
+    而非靜默回空清單（把『FTS 掛掉』誤當成『本來就沒有相關 filing』）。"""
+    monkeypatch.setattr(
+        regulatory, "_fetch_url",
+        lambda url: (_ for _ in ()).throw(URLError("total outage")),
+    )
+    import pytest
+    src = regulatory.SECFullTextSearchSource()
+    with pytest.raises(regulatory.RegulatoryFTSUnavailable):
+        src.fetch("", coin="")
+    # (b) 可觀測狀態：全數失敗
+    assert src.last_attempts == len(regulatory._QUERY_TERMS)
+    assert src.last_failures == len(regulatory._QUERY_TERMS)
+    assert src.last_degraded is True
+    assert set(src.last_failed_terms) == set(regulatory._QUERY_TERMS)
+
+
+def test_all_terms_fail_surfaces_to_upstream_via_collect(monkeypatch):
+    """(c) 上游可見：全數失敗經 collect 時，來源名稱會進 `_failed`（→ pipeline
+    會補進 report.limits，讓 abstain 可解釋），而不是靜默漏掉整個監管來源。"""
+    monkeypatch.setattr(
+        regulatory, "_fetch_url",
+        lambda url: (_ for _ in ()).throw(URLError("total outage")),
+    )
+    src = regulatory.SECFullTextSearchSource()
+    failed: list[str] = []
+    docs = collect("BTC", coin="BTC", sources=[src], offline=False, _failed=failed)
+    # 不崩、回 list（collect 既有 try/except 接住）
+    assert isinstance(docs, list)
+    assert not [d for d in docs if d.source == "sec-gov"]
+    # 上游降級旗標：sec-gov 被記為本輪未取得資料
+    assert "sec-gov" in failed
+
+
+def test_fetch_failure_is_logged_with_term_and_exception_type(monkeypatch, caplog):
+    """(a) 失敗時有明確 log：含命中詞（term）、來源（source）、例外類型。"""
+    import logging as _logging
+    monkeypatch.setattr(
+        regulatory, "_fetch_url",
+        lambda url: (_ for _ in ()).throw(URLError("boom-timeout")),
+    )
+    src = regulatory.SECFullTextSearchSource()
+    with caplog.at_level(_logging.WARNING, logger="trustforge.ingestion.regulatory"):
+        try:
+            src.fetch("", coin="")
+        except regulatory.RegulatoryFTSUnavailable:
+            pass
+    text = caplog.text
+    assert "抓取失敗" in text, "應記錄抓取失敗事件"
+    assert "URLError" in text, "log 應含例外類型（error_type）"
+    assert "sec-gov" in text, "log 應含來源名稱"
+    # 至少一個查詢詞名稱出現在 log（含命中詞）
+    assert any(t in text for t in regulatory._QUERY_TERMS), "log 應含命中詞 term"
+    # 全數失敗的彙總 log 也在
+    assert "FTS 不可用" in text
+
+
+def test_parse_failure_is_logged(monkeypatch, caplog):
+    """(a) 回應非合法 JSON 的失敗也要記 log，不再靜默 continue。"""
+    import logging as _logging
+    monkeypatch.setattr(regulatory, "_fetch_url", lambda url: b"<<< not json >>>")
+    src = regulatory.SECFullTextSearchSource()
+    with caplog.at_level(_logging.WARNING, logger="trustforge.ingestion.regulatory"):
+        try:
+            src.fetch("", coin="")
+        except regulatory.RegulatoryFTSUnavailable:
+            pass
+    assert "非合法 JSON" in caplog.text
+
+
+def test_partial_failure_degrades_but_does_not_raise(monkeypatch, caplog):
+    """(b)(c) 部分查詢詞失敗：仍回傳其餘詞命中（不拋），但標記 degraded + 計數 +
+    記彙總 log。維持 #133 單詞失敗隔離精神。"""
+    import logging as _logging
+    terms = regulatory._QUERY_TERMS
+    calls = {"n": 0}
+
+    def _mock_fetch(url: str) -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise URLError("only first term fails")
+        return _single_hit_fixture(calls["n"] - 1)
+
+    monkeypatch.setattr(regulatory, "_fetch_url", _mock_fetch)
+    src = regulatory.SECFullTextSearchSource()
+    with caplog.at_level(_logging.WARNING, logger="trustforge.ingestion.regulatory"):
+        docs = src.fetch("", coin="")  # 不應拋
+    assert len(docs) == len(terms) - 1
+    assert src.last_degraded is True
+    assert src.last_failures == 1
+    assert src.last_attempts == len(terms)
+    assert len(src.last_failed_terms) == 1
+    assert "部分降級" in caplog.text
+
+
+def test_empty_result_is_not_degraded_and_does_not_raise(monkeypatch):
+    """關鍵不變式：所有查詢詞都成功但查無 filing（合法低頻）→ 回空清單、
+    不算降級、不拋。避免把『正常無命中』誤報成『FTS 不可用』。"""
+    monkeypatch.setattr(
+        regulatory, "_fetch_url",
+        lambda url: b'{"hits": {"hits": []}}',
+    )
+    src = regulatory.SECFullTextSearchSource()
+    docs = src.fetch("", coin="")  # 不拋
+    assert docs == []
+    assert src.last_degraded is False
+    assert src.last_failures == 0
+    assert src.last_attempts == len(regulatory._QUERY_TERMS)
+
+
+def test_healthy_fetch_resets_observability_state(monkeypatch):
+    """回歸：健康抓取（有命中）→ 可觀測狀態為非降級、零失敗。"""
+    monkeypatch.setattr(
+        regulatory, "_fetch_url",
+        lambda url: _single_hit_fixture(0),
+    )
+    src = regulatory.SECFullTextSearchSource()
+    docs = src.fetch("", coin="")
+    assert len(docs) >= 1
+    assert src.last_degraded is False
+    assert src.last_failures == 0
+    assert src.last_failed_terms == []
