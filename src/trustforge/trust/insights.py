@@ -503,12 +503,44 @@ def detect_manipulation_burst(scored: Iterable[ScoredClaim]) -> Insight | None:
 # 成同一 key），避免 `"CoinDesk"` / `" coindesk "` 被誤判成兩個不同來源而漏掉
 # 自我矛盾。僅看「明確方向」的主張（neutral 不計），且信任需過基本門檻避免
 # 純雜訊觸發。
+#
+# issue #149 時間窗閘：bullish 與 bearish 必須落在同一時間窗（`_SELF_CONTRA_
+# WINDOW_SEC`，預設 24h）內才判自我矛盾；跨時間窗的翻多/翻空是正常觀點演進，
+# 不應被誣告為自我矛盾（見下方 `_contradicts_within_window`）。ts<=0（未知
+# 時間戳）無法證明「同時」，保守不計。
 _SELF_CONTRA_MIN_TRUST = 0.35
+# 時間窗閘（issue #149）：同一來源必須在 _SELF_CONTRA_WINDOW_SEC 內「同時」出現
+# bullish 與 bearish 主張，才判「自我矛盾」。跨時間窗（如早期看多、後期翻空）
+# 是正常觀點演進，不應被誣告為自我矛盾。ts<=0（未知時間戳）無法證明「同時」，
+# 保守不計為矛盾（寧可漏判也不誣告來源）。
+_SELF_CONTRA_WINDOW_SEC = 24 * 3600.0
+
+
+def _contradicts_within_window(bull: list[ScoredClaim], bear: list[ScoredClaim]) -> bool:
+    """兩組主張是否至少有一對在時間窗內同時存在（可判自我矛盾）。
+
+    只在兩邊 ts 皆為合法正數、且 |ts_bull - ts_bear| <= 時間窗時才成立；
+    ts<=0（未知）視為無法證明同時，不計。"""
+    for b in bull:
+        bt = b.claim.doc.ts
+        if not bt or bt <= 0:
+            continue
+        for r in bear:
+            rt = r.claim.doc.ts
+            if not rt or rt <= 0:
+                continue
+            if abs(bt - rt) <= _SELF_CONTRA_WINDOW_SEC:
+                return True
+    return False
 
 
 def detect_source_self_contradiction(scored: Iterable[ScoredClaim]) -> list[Insight]:
     """D1.4：掃描每個（正規化後的）來源，若同時含 bullish 與 bearish 主張，
-    產出一條「來源自我矛盾」不確定性洞察。可能多個來源各自矛盾 → 每源一條。"""
+    產出一條「來源自我矛盾」不確定性洞察。可能多個來源各自矛盾 → 每源一條。
+
+    時間窗閘（issue #149）：bullish 與 bearish 主張必須落在同一時間窗內
+    （`_contradicts_within_window`）才算自我矛盾；跨時間窗的翻多/翻空屬正常
+    觀點演進，不誣告來源。"""
     by_src: dict[str, list[ScoredClaim]] = {}
     for sc in scored:
         if sc.claim.direction not in ("bullish", "bearish"):
@@ -522,6 +554,9 @@ def detect_source_self_contradiction(scored: Iterable[ScoredClaim]) -> list[Insi
         bull = [c for c in claims if c.claim.direction == "bullish"]
         bear = [c for c in claims if c.claim.direction == "bearish"]
         if not bull or not bear:
+            continue
+        if not _contradicts_within_window(bull, bear):
+            # 跨時間窗：多/空主張分散在時間窗外，屬正常觀點演進，不誣告自我矛盾。
             continue
         b0, r0 = bull[0], bear[0]
         strength = round(min(1.0, 0.4 + 0.1 * (len(bull) + len(bear))), 3)
