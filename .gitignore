@@ -6,6 +6,11 @@ venv/
 build/
 dist/
 .pytest_cache/
+# #91 覆蓋率工具產物（addopts 一律帶 --cov）：不進版控
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 .DS_Store
 .env
 # 企業數據（HOYA BIT）不進版控
