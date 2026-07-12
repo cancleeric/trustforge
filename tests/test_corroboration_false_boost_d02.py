@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from trustforge.ingestion.base import Document
-from trustforge.trust.scoring import Claim, _corroboration
+from trustforge.trust.scoring import Claim, _corroboration, _directional_word_polarities
 
 
 def _doc(id_: str, source: str, text: str) -> Document:
@@ -31,6 +31,28 @@ def test_negation_opposition_excludes_corroboration():
     cand = _claim("c", "reuters", "BTC 不會上漲 突破 阻力")
     corr = _corroboration(tgt, [tgt, cand], stance_fn=None)
     assert corr == 0.0, f"否定對立不應計為佐證，corr 應=0，實得 {corr}"
+
+
+def test_directional_word_polarities_longest_first_dedup():
+    """[issue #142] 最長優先去重：'上漲' 含子字串 '漲'，前者被計入後，子字串
+    '漲' 不應重複計入 asserted（避免子串交叉）。"""
+    asserted, negated = _directional_word_polarities("BTC 上漲 突破 阻力")
+    assert "上漲" in asserted
+    assert "突破" in asserted
+    assert "漲" not in asserted, "子字串 '漲' 應被最長優先去重，不重複計入"
+    assert "阻力" not in negated
+
+
+def test_substring_cross_does_not_kill_same_direction_corroboration():
+    """[issue #142] 對抗：target 斷言長詞 '上漲'，candidate 另用不同看多詞 '反彈'
+    但仍同向（共享 突破/阻力 → overlap>=0.4），且 candidate 在別處否定了子字串
+    '漲'（'不會漲'）。舊實作會把 target 的 '漲'（'上漲' 子串）與 candidate 的
+    negated '漲' 交叉，誤殺這條真正同向佐證（corr==0，under-corroboration）；
+    最長優先去重後 target 的 asserted 不再含 '漲'，交叉消失，corr>0。"""
+    tgt = _claim("t", "coindesk", "BTC 上漲 突破 阻力")
+    cand = _claim("c", "reuters", "BTC 反彈 突破 阻力 但不會漲")
+    corr = _corroboration(tgt, [tgt, cand], stance_fn=None)
+    assert corr > 0.0, f"真正同向（上漲≈反彈，皆偏多）應計佐證，子串交叉不應誤殺，實得 {corr}"
 
 
 def test_negation_opposition_both_directions():
