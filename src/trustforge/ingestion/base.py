@@ -66,6 +66,12 @@ class Source:
 # fail-closed 設計——絕不會因為「忘了設」而誤關真實源。
 _SOURCE_ENABLED_OVERRIDES: dict[str, bool] = {}
 
+# issue #154：尚未接真實 API 的 stub 源預設 disabled（與通行 fail-closed
+# 「真實源預設全 ON」互補——未完工的 stub 在 spec 到位前絕不啟用，避免佔位
+# 資料被當真實高權威）。管理端經 `set_source_enabled_override(name, True)`
+# （或 admin_config disabled_sources 反向排除）明確啟用後才納入。
+_DEFAULT_DISABLED_SOURCES: frozenset[str] = frozenset({"hoyabit-ticker"})
+
 
 def set_source_enabled_override(name: str, enabled: bool) -> None:
     """明確覆寫某源的啟用狀態（admin_config / 啟動初始化 / 測試用）。"""
@@ -73,8 +79,16 @@ def set_source_enabled_override(name: str, enabled: bool) -> None:
 
 
 def get_source_enabled(name: str) -> bool:
-    """回傳某源是否啟用。預設 True（fail-closed：沒被明確 disabled 就啟用）。"""
-    return _SOURCE_ENABLED_OVERRIDES.get(name, True)
+    """回傳某源是否啟用。
+
+    - 若曾被 `set_source_enabled_override` 明確覆寫，以 override 為準（含把
+      預設 disabled 的 stub 反向啟用）。
+    - 否則：預設 disabled 清單（如 hoyabit-ticker）內的源回 False；其餘真實源
+      回 True（fail-closed：沒被明確 disabled 就啟用）。
+    """
+    if name in _SOURCE_ENABLED_OVERRIDES:
+        return _SOURCE_ENABLED_OVERRIDES[name]
+    return name not in _DEFAULT_DISABLED_SOURCES
 
 
 def reset_source_enabled_overrides() -> None:
@@ -230,6 +244,7 @@ def collect(query: str, coin: str | None = None,
             from .social import build_social_sources
             from .regulatory import build_regulatory_sources
             from .coingecko import build_coingecko_sources
+            from .hoyabit import build_hoyabit_sources
             from .cache import CachedSource
             raw_sources = (
                 build_news_sources()
@@ -237,6 +252,7 @@ def collect(query: str, coin: str | None = None,
                 + build_social_sources()
                 + build_regulatory_sources()
                 + build_coingecko_sources()
+                + build_hoyabit_sources()
             )
             # 階段2（cache + 排程 fetcher）：產品路徑一律讀快取，不直接打真連接器
             # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程
