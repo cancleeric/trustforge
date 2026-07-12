@@ -1133,6 +1133,7 @@ class CachedSource(Source):
         self._wrapped = wrapped
         self.kind = wrapped.kind
         self.name = wrapped.name
+        self.enabled = getattr(wrapped, "enabled", True)
         self.ttl_seconds = (
             ttl_seconds if ttl_seconds is not None
             else DEFAULT_STALE_AFTER_SECONDS.get(wrapped.name, DEFAULT_STALE_AFTER_FALLBACK_SECONDS)

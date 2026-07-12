@@ -49,9 +49,53 @@ class Source:
 
     kind: str = "news"
     name: str = "base"
+    # issue #155 per-source 通路開關：預設 enabled（fail-closed 預設全 ON）。
+    # 任何源「沒被明確 disabled」就照常納入；只有 `set_source_enabled_override`
+    # 或 admin_config 的 disabled_sources 明確關掉，才跳過。誤配置/漏配置時
+    # 傾向「繼續抓真實資料」，而非「悄悄關掉真實源」。
+    enabled: bool = True
 
     def fetch(self, query: str, coin: str = "") -> list[Document]:  # pragma: no cover - 介面
         raise NotImplementedError
+
+
+# ── per-source 通路開關（issue #155，fail-closed 預設全 ON）──────────────────
+# 單一 override 真值來源：`get_source_enabled(name)` 預設回 True（啟用）；只有
+# 明確呼叫 `set_source_enabled_override(name, False)` 或 `sync_source_enabled_from_admin()`
+# 從 admin_config 讀到該源在 disabled_sources 裡，才回 False（跳過）。這是
+# fail-closed 設計——絕不會因為「忘了設」而誤關真實源。
+_SOURCE_ENABLED_OVERRIDES: dict[str, bool] = {}
+
+
+def set_source_enabled_override(name: str, enabled: bool) -> None:
+    """明確覆寫某源的啟用狀態（admin_config / 啟動初始化 / 測試用）。"""
+    _SOURCE_ENABLED_OVERRIDES[name] = bool(enabled)
+
+
+def get_source_enabled(name: str) -> bool:
+    """回傳某源是否啟用。預設 True（fail-closed：沒被明確 disabled 就啟用）。"""
+    return _SOURCE_ENABLED_OVERRIDES.get(name, True)
+
+
+def reset_source_enabled_overrides() -> None:
+    """測試隔離用：清空所有 override。"""
+    _SOURCE_ENABLED_OVERRIDES.clear()
+
+
+def sync_source_enabled_from_admin(store=None) -> None:
+    """從 admin_config 讀 disabled_sources，套用為 override（seam）。
+
+    預設 admin_config 未設定 disabled_sources（= None）→ 全空 → 所有源維持
+    enabled。admin_config 寫入 disabled_sources（如 ["coindesk"]）後，這裡
+    把對應源標成 disabled，collect() 隨即跳過。
+    """
+    from .. import admin_config
+
+    config = admin_config.get_config(store)
+    disabled = getattr(config, "disabled_sources", None)
+    if disabled:
+        for name in disabled:
+            _SOURCE_ENABLED_OVERRIDES[name] = False
 
 
 def _alias_in(alias: str, text: str) -> bool:
@@ -198,6 +242,10 @@ def collect(query: str, coin: str | None = None,
             # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程
             # 任務裡發生。見 .cache 模組頂部說明。
             sources = [CachedSource(s) for s in raw_sources]
+    # issue #155 per-source 通路開關（fail-closed 預設全 ON）：disabled 的源
+    # 不納入。作用於「顯式傳入的 sources」與「線上/離線預設組裝」兩條路徑，
+    # 單一過濾點，確保 admin_config / override 關掉的源在任何呼叫方式下都被跳過。
+    sources = [s for s in sources if get_source_enabled(getattr(s, "name", ""))]
     _coin = coin or ""
     for s in sources:
         try:
