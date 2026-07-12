@@ -107,7 +107,11 @@ ADMIN_CONFIG_COIN = "_"
 ADMIN_AUDIT_SOURCE = "__admin_audit__"
 
 # 可透過本層寫入的設定欄位（`live_token` 收明文、落庫轉 hash+last4）
-_ALLOWED_CHANGE_FIELDS = frozenset({"daily_cap_usd", "bedrock_enabled", "live_token"})
+# issue #155：新增 `disabled_sources`——admin 可明確關掉個別真實連接器
+# （如 ["coindesk"]）；預設空（= 全啟用，fail-closed：忘了設也不會誤關真實源）。
+_ALLOWED_CHANGE_FIELDS = frozenset(
+    {"daily_cap_usd", "bedrock_enabled", "live_token", "disabled_sources"}
+)
 
 # process 內 TTL 快取窗（秒）——計劃 §1.4 定 15s
 CACHE_TTL_SECONDS = 15.0
@@ -187,6 +191,9 @@ class AdminConfig:
     bedrock_enabled: bool | None = None
     live_token_hash: str | None = None
     live_token_last4: str | None = None
+    # issue #155：被明確關掉的連接器名稱集合（如 {"coindesk", "sec-gov"}）。
+    # 預設 None（= 空，全啟用，fail-closed）。落庫成排序後的 list；讀回轉 frozenset。
+    disabled_sources: set[str] | None = None
     version: int | None = None
     updated_at: str | None = None
     updated_by: str | None = None
@@ -205,6 +212,7 @@ class AdminConfig:
             "bedrock_enabled": self.bedrock_enabled,
             "live_token_last4": self.live_token_last4,
             "live_token_configured": self.live_token_hash is not None,
+            "disabled_sources": sorted(self.disabled_sources) if self.disabled_sources else [],
             "version": self.version,
             "updated_at": self.updated_at,
             "updated_by": self.updated_by,
@@ -347,6 +355,24 @@ def _parse_str(raw: Any, field: str, *, sensitive: bool = False) -> str | None:
     return raw
 
 
+def _parse_set(raw: Any, field: str) -> set[str] | None:
+    """issue #155：把 DynamoDB 讀回的 `disabled_sources`（list）轉成
+    frozenset[str]；None/非 list/含非字串元素一律視為未設定（None），不拖垮
+    整包（逐欄容錯，同 `_parse_cap` 等）。空 list 視為未設定（= 全啟用）。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        _log.warning("[admin_config] %s 不是 list/set（%r），視為未設定", field, type(raw).__name__)
+        return None
+    out: set[str] = set()
+    for v in raw:
+        if isinstance(v, str) and v:
+            out.add(v)
+        else:
+            _log.warning("[admin_config] %s 元素非非空字串（%r），忽略", field, v)
+    return frozenset(out) if out else None
+
+
 def _parse_version(raw: Any) -> int | None:
     if raw is None:
         return None
@@ -376,6 +402,7 @@ def _config_from_item(item: dict[str, Any]) -> AdminConfig:
         live_token_last4=_parse_str(
             item.get("live_token_last4"), "live_token_last4", sensitive=True
         ),
+        disabled_sources=_parse_set(item.get("disabled_sources"), "disabled_sources"),
         version=version,
         updated_at=_parse_str(item.get("updated_at"), "updated_at"),
         updated_by=_parse_str(item.get("updated_by"), "updated_by"),
@@ -585,6 +612,14 @@ def _validate_changes(changes: dict[str, Any]) -> None:
         token = changes["live_token"]
         if not isinstance(token, str) or not token:
             raise ValueError("live_token 必須是非空字串（或 None＝清除）")
+    if "disabled_sources" in changes:
+        ds = changes["disabled_sources"]
+        if ds is not None:
+            if not isinstance(ds, (list, tuple, set, frozenset)):
+                raise ValueError("disabled_sources 必須是 list/set（或 None＝清除）")
+            for v in ds:
+                if not isinstance(v, str) or not v:
+                    raise ValueError("disabled_sources 元素必須是非空字串")
 
 
 def put_config(
@@ -664,11 +699,17 @@ def put_config(
         else:
             new_hash = hash_live_token(plaintext)
             # 短 token 不落 last4（vp-eng review MEDIUM-1）：見
-            # `_SHORT_TOKEN_LAST4_THRESHOLD` 說明，避免短明文被 last4
-            # 洩露過半甚至全部內容。
+            # `_SHORT_TOKEN_LAST4_THRESHOLD` 說明，避免短明文被 last4 洩漏過半甚至全部內容。
             new_last4 = (
                 plaintext[-4:] if len(plaintext) >= _SHORT_TOKEN_LAST4_THRESHOLD else None
             )
+
+    # issue #155：disabled_sources 合併（None＝清除，回復全啟用 fail-closed）。
+    new_disabled = current.disabled_sources
+    if "disabled_sources" in changes:
+        raw_ds = changes["disabled_sources"]
+        new_disabled = None if raw_ds is None else frozenset(raw_ds)
+
 
     item: dict[str, Any] = {
         "source_id": ADMIN_CONFIG_SOURCE,
@@ -686,6 +727,8 @@ def put_config(
         item["live_token_hash"] = new_hash
     if new_last4 is not None:
         item["live_token_last4"] = new_last4
+    if new_disabled:  # 非空集合才寫入（空/None 一律不寫＝全啟用）
+        item["disabled_sources"] = sorted(new_disabled)
 
     from boto3.dynamodb.conditions import Attr  # 延遲匯入，同 boto3 lazy 慣例
     from botocore.exceptions import ClientError
@@ -724,6 +767,12 @@ def put_config(
             current.live_token_hash is not None, changes["live_token"], new_last4
         )
         change_entries.append({"field": "live_token", "old": old_masked, "new": new_masked})
+    if "disabled_sources" in changes:
+        change_entries.append({
+            "field": "disabled_sources",
+            "old": sorted(current.disabled_sources) if current.disabled_sources else [],
+            "new": sorted(new_disabled) if new_disabled else [],
+        })
 
     # journal（logging → systemd journal）先寫：最便宜、幾乎不會失敗，
     # DynamoDB 審計掛了也至少有這一份（計劃 §6-2）
@@ -762,6 +811,7 @@ def put_config(
         bedrock_enabled=new_enabled,
         live_token_hash=new_hash,
         live_token_last4=new_last4,
+        disabled_sources=new_disabled,
         version=version_to,
         updated_at=now_iso,
         updated_by=actor,

@@ -209,6 +209,10 @@ def _parse_fts_hit(hit: dict, term: str) -> Document | None:
         "regulatory_scope": "industry-level",
         "form_type": form,
         "matched_term": term,
+        # issue #155：live 路徑（真實 SEC EDGAR FTS）產出的 Document 標
+        # `live_source=True`，與離線樣本區分（見 news.py 同標記說明）。這只是
+        # meta 標記，不影響 scoring 權威（權威仍走 kind reputation）。
+        "live_source": True,
     }
 
     return Document(
