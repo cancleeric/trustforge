@@ -825,15 +825,39 @@ def _directional_word_polarities(text: str) -> tuple[set[str], set[str]]:
 
     用途：同一方向詞一方 asserted、另一方 negated → 語意對立（「X 上漲」vs
     「X 不會上漲」），即便 `_infer_direction` 因否定把被否定那方判成 neutral、
-    通過 `_direction_compatible` 快路徑，也不該被誤計為獨立佐證。"""
-    asserted: set[str] = set()
-    negated: set[str] = set()
+    通過 `_direction_compatible` 快路徑，也不該被誤計為獨立佐證。
+
+    最長優先去重（複用 `_infer_direction` 邏輯，issue #142）：先收集所有候選
+    (start, end, word)，依詞長降序、同長度依位置升序排序，短詞若落在已消耗區間
+    （即它是某個更長方向詞的子字串，如「漲」⊂「上漲」）則不計——避免子串交叉
+    誤殺真正同向佐證（under-corroboration）。否定閘仍逐詞判定。
+    """
+    candidates: list[tuple[int, int, str]] = []
     for w in _BULLISH_WORDS + _BEARISH_WORDS:
         for m in re.finditer(re.escape(w), text):
-            if _NEG_RX.search(text[max(0, m.start() - 4): m.start()]):
-                negated.add(w)
-            else:
-                asserted.add(w)
+            candidates.append((m.start(), m.end(), w))
+
+    # 最長優先（與 `_infer_direction` 同款排序），短詞子串不重複計
+    candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
+
+    consumed: list[tuple[int, int]] = []
+    def _overlaps(s: int, e: int) -> bool:
+        return any(s < ce and e > cs for cs, ce in consumed)
+
+    kept: list[tuple[int, int, str]] = []
+    for start, end, w in candidates:
+        if _overlaps(start, end):
+            continue
+        consumed.append((start, end))
+        kept.append((start, end, w))
+
+    asserted: set[str] = set()
+    negated: set[str] = set()
+    for start, end, w in kept:
+        if _NEG_RX.search(text[max(0, start - 4): start]):
+            negated.add(w)
+        else:
+            asserted.add(w)
     return asserted, negated
 
 
