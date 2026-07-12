@@ -149,6 +149,116 @@ def _reset_admin_cfg_fail_window_for_tests() -> None:
         _admin_cfg_fail_until = 0.0
 
 
+# ---------------------------------------------------------------------------
+# 請求級 config 快照（issue #115，security）
+# ---------------------------------------------------------------------------
+# 問題：同一請求內，`_is_live_request` / `_is_real_request` / `_is_sample_request`
+# 與 live token 比對（`_bedrock_allowed` / `_live_token_matches` /
+# `_live_token_effective_layer`）先前各自獨立呼叫 `_admin_runtime_config()`
+# 重算 config。若管理面在「一次請求的生命週期內」被外部改動（例如 admin
+# 輪替 live token、切 `bedrock_enabled`），會出現「前半段判 live、後半段因
+# config 變動判 real」的時序不一致；極端下 live 結果落到 real-mode key 被
+# $0 命中（#115 核心 bug）。
+#
+# 修法：請求入口（`do_GET` / `lambda_handler.handler`，在
+# `_apply_live_token_header` 收斂 token 之後、尚未分流 live/real 之前）解析
+# 一次 config 快照，凍結 `cfg` 與由此推導的 `live`/`real`/`sample` 判定，
+# 貫穿整個請求生命週期；後續所有需要判斷 live/real 的純函式一律優先讀
+# 這份快照，不再重算 config。對外行為（live/real 分流結果）逐字不變，只
+# 消除內部時序不一致。
+#
+# 隔離保證（併發 / 多 worker，見下方安全對抗審）：
+# 快照存放在 `threading.local()`——`ThreadingHTTPServer` 每個請求跑在獨立
+# thread，天然隔離、不會跨請求串味；多 worker 是獨立 process，更不可能
+# 共享。Lambda 單實例同時只處理一個事件，也不串味。未經 `_begin_
+# request_snapshot` 設定的上下文（如單元測試直接呼叫 `_is_live_request(qs)`）
+# 一律回退成「當次呼叫現讀 config」的舊行為，與既有測試完全相容。
+_request_snapshot_local = threading.local()
+
+
+class _RequestConfigSnapshot:
+    """一次請求內凍結的 config 快照 + 由其推導的 live/real/sample 判定。
+
+    機敏值（token 明文）**絕不**存進快照——快照只存已經驗證過的
+    `live`/`real`/`sample` 布林結果與 `cfg`（AdminConfig 物件，其
+    `live_token_hash` 是雜湊後的值，非明文 token）。"""
+
+    __slots__ = ("cfg", "live", "real", "sample")
+
+    def __init__(self, cfg, live, real, sample):
+        self.cfg = cfg
+        self.live = live
+        self.real = real
+        self.sample = sample
+
+
+def _current_request_snapshot():
+    """回傳當前 thread 的請求快照；未設則 `None`（呼叫端應回退現讀）。"""
+    return getattr(_request_snapshot_local, "snap", None)
+
+
+def _resolve_cfg(cfg):
+    """`cfg is None` 時優先回傳當前請求快照的 `cfg`（若存在），否則現讀
+    `_admin_runtime_config()`。讓 `_bedrock_allowed` / `_live_token_matches` /
+    `_live_token_effective_layer` 在請求內一律看同一份凍結 config。"""
+    if cfg is not None:
+        return cfg
+    snap = _current_request_snapshot()
+    if snap is not None:
+        return snap.cfg
+    return _admin_runtime_config()
+
+
+def _compute_live_from_cfg(qs: dict, cfg) -> bool:
+    """從凍結的 `cfg` 推導 live 是否成立（live 閘開 + token 正確），與
+    `_is_live_request` 舊邏輯逐字相同，只是 `cfg` 由呼叫端傳入（已凍結）。"""
+    if qs.get("live", ["0"])[0] != "1":
+        return False
+    req_token = qs.get("token", [""])[0]
+    return _bedrock_allowed(cfg) and _live_token_matches(req_token, cfg)
+
+
+def _begin_request_snapshot(qs: dict) -> None:
+    """請求入口：解析一次 config 快照並凍結 live/real/sample 判定。
+
+    必須在 `_apply_live_token_header` 收斂 token 之後呼叫（此時 `qs`
+    裡的 `token` 已是唯一的生效來源），且要在任何 live/real 分流之前。
+    同一 thread 重複呼叫會直接覆寫（天然支援「下一個請求重新凍結」，
+    也順帶處理 thread 重用作為同一 worker 服務多請求時的隔離）。"""
+    cfg = _admin_runtime_config()
+    live = _compute_live_from_cfg(qs, cfg)
+    sample = _is_sample_request(qs, live)
+    real = _is_real_request(qs, live)
+    _request_snapshot_local.snap = _RequestConfigSnapshot(cfg, live, real, sample)
+
+
+def _end_request_snapshot() -> None:
+    """請求結束清理（可選）。`ThreadingHTTPServer` 每請求獨立 thread，
+    下個請求 `_begin_request_snapshot` 會直接覆寫，正常部署不依賴本清理；
+    提供它是為了讓測試 / 長生命週期 thread 能顯式釋放快照。"""
+    _request_snapshot_local.snap = None
+
+
+class _request_snapshot_scope:
+    """`with web.request_snapshot(qs):` 上下文管理器（測試 / 手動用）。"""
+
+    def __init__(self, qs):
+        self.qs = qs
+
+    def __enter__(self):
+        _begin_request_snapshot(self.qs)
+        return self
+
+    def __exit__(self, *exc):
+        _end_request_snapshot()
+        return False
+
+
+def request_snapshot(qs: dict):
+    """公開上下文管理器：凍結一次請求的 config 快照，離開時清理。"""
+    return _request_snapshot_scope(qs)
+
+
 def _bedrock_allowed_resolved(cfg=None) -> tuple[bool, str]:
     """live 閘生效判定 + 來源。回 `(allowed, source)`，source ∈
     `"env"`（config 未設定過，只看 env——與 v0.7.0 `HAS_BEDROCK` 逐字
@@ -168,8 +278,7 @@ def _bedrock_allowed_resolved(cfg=None) -> tuple[bool, str]:
     復用，避免重複讀；一般呼叫端不帶（走 TTL 快取）。"""
     if not os.getenv("BEDROCK_MODEL_ID"):
         return False, "env"
-    if cfg is None:
-        cfg = _admin_runtime_config()
+    cfg = _resolve_cfg(cfg)
     if cfg is _ADMIN_CFG_READ_ERROR:
         return False, "config_read_error"
     if cfg.bedrock_enabled is None:
@@ -206,8 +315,7 @@ def _live_token_effective_layer(cfg=None) -> tuple[str, object]:
 
     回傳的 `value` 僅供 `_live_token_matches` 內部比對使用，呼叫端不得
     將其外洩到 log 或 status 回應（機敏）。"""
-    if cfg is None:
-        cfg = _admin_runtime_config()
+    cfg = _resolve_cfg(cfg)
     if cfg is _ADMIN_CFG_READ_ERROR:
         return "config_read_error", None
     if cfg.live_token_hash:
@@ -3389,7 +3497,18 @@ def _is_live_request(qs: dict) -> bool:
     也避免 cache-miss 時付兩次有界 timeout）。`?live=1` 都沒帶就直接短路，
     不觸發任何 config 讀取——非 live 請求（絕大多數流量）零額外成本，
     行為與 v0.7.0 相同。
+
+    issue #115（security）：請求入口（`do_GET` / `lambda_handler.handler`）
+    已先凍結一次 config 快照（見 `_begin_request_snapshot`）。本函式優先讀
+    該快照的 `live` 判定——若當前 thread 處於某請求快照內，一律回傳
+    快照的 `live`，**不**再各自重算 config，從而消除「同一次請求內前半段
+    判 live、後半段因 config 被外部改動判 real」的時序不一致。未處於快照
+    內的呼叫（如單元測試直接呼叫）回退成現讀 config 的舊行為，與既有
+    測試完全相容。
     """
+    snap = _current_request_snapshot()
+    if snap is not None:
+        return snap.live
     if qs.get("live", ["0"])[0] != "1":
         return False
     cfg = _admin_runtime_config()
@@ -6010,6 +6129,20 @@ class Handler(BaseHTTPRequestHandler):
                 "text/html; charset=utf-8",
             )
 
+        # issue #115（security）：請求入口凍結一次 config 快照（含 live
+        # token / mode 判定），貫穿後續所有 live/real 判斷，消除同一次
+        # 請求內「前半段判 live、後半段因 config 被外部改動判 real」的
+        # 時序不一致。須在 `_apply_live_token_header` 收斂 token 之後、
+        # 任何 live/real 分流之前呼叫。`ThreadingHTTPServer` 每請求獨立
+        # thread，下個請求會再次覆寫快照，天然隔離（見 `_begin_
+        # request_snapshot` docstring）。
+        _begin_request_snapshot(qs)
+        try:
+            return self._do_GET_impl(u, qs, client_ip)
+        finally:
+            _end_request_snapshot()
+
+    def _do_GET_impl(self, u, qs, client_ip):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
 

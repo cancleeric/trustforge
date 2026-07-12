@@ -68,97 +68,109 @@ def handler(event, context=None):
         {"X-Live-Token": _lambda_headers_lower.get("x-live-token")},
         query_has_token="token" in raw_qs,
     )
-    # 商業級一致性修（codex MEDIUM）：429/502 的「重試」連結要導回同一個請求
-    # （比照 EC2 web.py 用 self.path），Lambda 沒有現成的 self.path，用
-    # rawPath + 重組 query string 還原。
-    #
-    # codex 對抗審 MEDIUM（#134 fast-follow）：`raw_qs` 若帶了 legacy
-    # `?token=secret`（即使該 fallback 已被 header-only 取代、下游不再採信
-    # 這個 query 值），先前這裡原樣把它塞回 retry_href，一樣會把憑證性參數
-    # 反射進 429/502 錯誤頁的重試連結（跟 web.py `self.path` 那三處同源問題）。
-    # 這裡組 retry_href 前先濾掉 `token` key。
-    _retry_qs = {k: v for k, v in raw_qs.items() if k != "token"}
-    retry_href = path if not _retry_qs else f"{path}?{urlencode(_retry_qs)}"
+    # issue #115（security）：請求入口凍結一次 config 快照（含 live
+    # token / mode 判定），貫穿後續所有 live/real 判斷，消除同一次
+    # 請求內「前半段判 live、後半段因 config 被外部改動判 real」的
+    # 時序不一致。須在 `_apply_live_token_header` 收斂 token 之後、
+    # 任何 live/real 分流之前呼叫。Lambda 單實例同時只處理一個事件，
+    # 下個事件會再次覆寫快照，天然隔離（見 `web._begin_request_snapshot`
+    # docstring）。
+    web._begin_request_snapshot(qs)
+    try:
+        # 商業級一致性修（codex MEDIUM）：429/502 的「重試」連結要導回同一個請求
+        # （比照 EC2 web.py 用 self.path），Lambda 沒有現成的 self.path，用
+        # rawPath + 重組 query string 還原。
+        #
+        # codex 對抗審 MEDIUM（#134 fast-follow）：`raw_qs` 若帶了 legacy
+        # `?token=secret`（即使該 fallback 已被 header-only 取代、下游不再採信
+        # 這個 query 值），先前這裡原樣把它塞回 retry_href，一樣會把憑證性參數
+        # 反射進 429/502 錯誤頁的重試連結（跟 web.py `self.path` 那三處同源問題）。
+        # 這裡組 retry_href 前先濾掉 `token` key。
+        _retry_qs = {k: v for k, v in raw_qs.items() if k != "token"}
+        retry_href = path if not _retry_qs else f"{path}?{urlencode(_retry_qs)}"
 
-    # 取 client IP（Lambda Function URL v2 requestContext）
-    client_ip = (
-        event.get("requestContext", {}).get("http", {}).get("sourceIp", "")
-        or event.get("requestContext", {}).get("identity", {}).get("sourceIp", "")
-        or ""
-    )
+        # 取 client IP（Lambda Function URL v2 requestContext）
+        client_ip = (
+            event.get("requestContext", {}).get("http", {}).get("sourceIp", "")
+            or event.get("requestContext", {}).get("identity", {}).get("sourceIp", "")
+            or ""
+        )
 
-    if path == "/healthz":
-        return _resp(200, "ok", "text/plain; charset=utf-8")
+        if path == "/healthz":
+            return _resp(200, "ok", "text/plain; charset=utf-8")
 
-    if path in ("/analyze", "/analyze.json"):
-        # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
-        from .schema import QuestionType
-        qtype_raw = qs.get("type", ["multi_source"])[0]
-        try:
-            qtype = QuestionType(qtype_raw)
-        except ValueError:
-            qtype = QuestionType.MULTI_SOURCE
+        if path in ("/analyze", "/analyze.json"):
+            # 提前解析 qtype 以便分流，不依賴回傳 tuple 長度
+            from .schema import QuestionType
+            qtype_raw = qs.get("type", ["multi_source"])[0]
+            try:
+                qtype = QuestionType(qtype_raw)
+            except ValueError:
+                qtype = QuestionType.MULTI_SOURCE
 
-        try:
-            if qtype == QuestionType.COMPARISON:
-                report_a, evidence_a, report_b, evidence_b, log = web._do_comparison(
-                    qs, client_ip=client_ip
-                )
-                if path == "/analyze.json":
-                    # codex vp-engineering 終審 H1（已實測證實 author 從此
-                    # 入口外洩）：payload 組裝改呼叫 web.py 共用函式，跟
-                    # web.py 自己的 `/analyze.json` 路由同一份，不再各自
-                    # 複製、不會分岔（見 `web._build_comparison_json_payload`
-                    # docstring）。
-                    payload = web._build_comparison_json_payload(
-                        report_a, evidence_a, report_b, evidence_b, log
+            try:
+                if qtype == QuestionType.COMPARISON:
+                    report_a, evidence_a, report_b, evidence_b, log = web._do_comparison(
+                        qs, client_ip=client_ip
                     )
-                    return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
-                                 "application/json; charset=utf-8")
-                query = qs.get("q", [""])[0]
-                return _resp(
-                    200,
-                    web.render_page(
-                        web._render_comparison(report_a, evidence_a, report_b, evidence_b, query)
-                    ),
-                    "text/html; charset=utf-8",
-                )
-            else:
-                report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
-                if path == "/analyze.json":
-                    # 同上：呼叫 web.py 共用函式，不再自己組 payload。
-                    payload = web._build_analyze_json_payload(report, evidence, log)
-                    return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
-                                 "application/json; charset=utf-8")
-                return _resp(200, web.render_page(web._render_report(report, evidence)),
+                    if path == "/analyze.json":
+                        # codex vp-engineering 終審 H1（已實測證實 author 從此
+                        # 入口外洩）：payload 組裝改呼叫 web.py 共用函式，跟
+                        # web.py 自己的 `/analyze.json` 路由同一份，不再各自
+                        # 複製、不會分岔（見 `web._build_comparison_json_payload`
+                        # docstring）。
+                        payload = web._build_comparison_json_payload(
+                            report_a, evidence_a, report_b, evidence_b, log
+                        )
+                        return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
+                                     "application/json; charset=utf-8")
+                    query = qs.get("q", [""])[0]
+                    return _resp(
+                        200,
+                        web.render_page(
+                            web._render_comparison(report_a, evidence_a, report_b, evidence_b, query)
+                        ),
+                        "text/html; charset=utf-8",
+                    )
+                else:
+                    report, evidence, log = web._do_analyze(qs, client_ip=client_ip)
+                    if path == "/analyze.json":
+                        # 同上：呼叫 web.py 共用函式，不再自己組 payload。
+                        payload = web._build_analyze_json_payload(report, evidence, log)
+                        return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
+                                     "application/json; charset=utf-8")
+                    return _resp(200, web.render_page(web._render_report(report, evidence)),
+                                 "text/html; charset=utf-8")
+            except web.TooManyRequests as exc:
+                # 商業級一致性修（codex MEDIUM）：HTML 錯誤分支改用跟 EC2 web.py
+                # 一致的品牌錯誤卡（`_render_error_card`），不再是裸紅字 `<p>`。
+                # JSON 端點（machine-readable）不在此分支，格式不動。
+                return _resp(429,
+                             web.render_page(
+                                 web._render_error_card(
+                                     "請求過於頻繁", str(exc), retry_href=retry_href)),
                              "text/html; charset=utf-8")
-        except web.TooManyRequests as exc:
-            # 商業級一致性修（codex MEDIUM）：HTML 錯誤分支改用跟 EC2 web.py
-            # 一致的品牌錯誤卡（`_render_error_card`），不再是裸紅字 `<p>`。
-            # JSON 端點（machine-readable）不在此分支，格式不動。
-            return _resp(429,
-                         web.render_page(
-                             web._render_error_card(
-                                 "請求過於頻繁", str(exc), retry_href=retry_href)),
-                         "text/html; charset=utf-8")
-        except ValueError as exc:
-            return _resp(400,
-                         web.render_page(
-                             web._render_error_card("輸入有誤", str(exc))),
-                         "text/html; charset=utf-8")
-        except Exception:
-            logging.exception("TrustForge Lambda analyze error")
-            return _resp(502,
-                         web.render_page(
-                             web._render_error_card(
-                                 "服務暫時無法使用", "分析服務暫時無法使用，請稍後再試",
-                                 retry_href=retry_href)),
-                         "text/html; charset=utf-8")
+            except ValueError as exc:
+                return _resp(400,
+                             web.render_page(
+                                 web._render_error_card("輸入有誤", str(exc))),
+                             "text/html; charset=utf-8")
+            except Exception:
+                logging.exception("TrustForge Lambda analyze error")
+                return _resp(502,
+                             web.render_page(
+                                 web._render_error_card(
+                                     "服務暫時無法使用", "分析服務暫時無法使用，請稍後再試",
+                                     retry_href=retry_href)),
+                             "text/html; charset=utf-8")
 
-    if path == "/":
-        return _resp(200, web.render_page(""), "text/html; charset=utf-8")
-    return _resp(404,
-                 web.render_page(
-                     web._render_error_card(
-                         "找不到頁面", "您造訪的網址不存在，請確認網址是否正確。")),
-                 "text/html; charset=utf-8")
+        if path == "/":
+            return _resp(200, web.render_page(""), "text/html; charset=utf-8")
+        return _resp(404,
+                     web.render_page(
+                         web._render_error_card(
+                             "找不到頁面", "您造訪的網址不存在，請確認網址是否正確。")),
+                     "text/html; charset=utf-8")
+
+    finally:
+        web._end_request_snapshot()

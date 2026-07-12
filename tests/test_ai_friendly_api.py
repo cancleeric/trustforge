@@ -68,8 +68,15 @@ def _real_documented_paths() -> set[str]:
     `/costs`、`/analyze`、`/analyze.json` 等）不是本 OpenAPI spec 的契約
     範圍，本就不該出現在 `docs/api/openapi.yaml` 裡。
     """
-    source = inspect.getsource(web.Handler.do_GET)
-    all_paths = set(re.findall(r'u\.path == "(/[^"]*)"', source))
+    # 路由分派碼現分散在 `do_GET`（薄包裝：凍結 config 快照 +
+    # try/finally 清理）與 `do_GET_impl`（實際分派）兩個方法——兩者
+    # 都掃，避免 #115 重構把路由搬進 `_do_GET_impl` 後掃描漏掉端點。
+    sources = [inspect.getsource(web.Handler.do_GET)]
+    if hasattr(web.Handler, "_do_GET_impl"):
+        sources.append(inspect.getsource(web.Handler._do_GET_impl))
+    all_paths = set()
+    for source in sources:
+        all_paths |= set(re.findall(r'u\.path == "(/[^"]*)"', source))
     return {p for p in all_paths if p == "/llms.txt" or p.startswith("/api/")}
 
 
