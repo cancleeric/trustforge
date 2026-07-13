@@ -13,6 +13,7 @@ import PriceProvenancePanel from './PriceProvenancePanel'
 import TrustTrendSection from './TrustTrendSection'
 import { DirectionBadge } from './Badges'
 import { LoadingState } from './StatusStates'
+import HermesExecutionPanel from './HermesExecutionPanel'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
@@ -52,6 +53,13 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
       <Suspense fallback={<LoadingState label="雷達圖載入中…" />}>
         <TrustRadarChart radar={data.trust_radar} />
       </Suspense>
+
+      <HermesExecutionPanel
+        execution={data.execution}
+        events={data.execution_log}
+        report={data.report}
+        evidence={data.evidence}
+      />
 
       <FactsInferenceLadder
         facts={data.report.facts}

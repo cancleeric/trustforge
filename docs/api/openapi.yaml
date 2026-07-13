@@ -1193,6 +1193,8 @@ components:
           type: string
         source_url:
           type: string
+        data_lineage:
+          $ref: "#/components/schemas/DataLineage"
 
     Evidence:
       type: object
@@ -1247,6 +1249,50 @@ components:
           description: |
             informational-only 中性提示（例如多源文字高度相似）——**不代表
             已判定操縱、不影響 trust 分數**，純供人工判讀，不可等同 `flags`。
+        data_lineage:
+          $ref: "#/components/schemas/DataLineage"
+
+    DataLineage:
+      type: object
+      description: 檔案型資料（例如主辦提供的五年 OHLCV）之可重現資料血緣；非檔案型 Evidence 可缺席。
+      required: [dataset_role, dataset_name, file, sha256, rows, coverage, analysis_window, trading_pair, time_basis, interval, price_unit, columns]
+      properties:
+        dataset_role:
+          type: string
+          enum: [competition_baseline, local_ohlcv]
+        dataset_name:
+          type: string
+        dataset_generated_at:
+          type: string
+        file:
+          type: string
+        sha256:
+          type: string
+          description: CSV 原始位元組的 SHA-256，供抽查檔案未遭替換。
+        rows:
+          type: integer
+        coverage:
+          type: object
+          required: [start_date, end_date]
+          properties:
+            start_date:
+              type: string
+            end_date:
+              type: string
+        analysis_window:
+          type: string
+        trading_pair:
+          type: string
+        time_basis:
+          type: string
+        interval:
+          type: string
+        price_unit:
+          type: string
+        columns:
+          type: array
+          items:
+            type: string
 
     BasisItem:
       type: object
@@ -1356,6 +1402,7 @@ components:
         - trust_radar
         - trust_components_aggregate
         - price_provenance
+        - execution
         - execution_log
       properties:
         version:
@@ -1378,6 +1425,8 @@ components:
           $ref: "#/components/schemas/TrustComponentsAggregate"
         price_provenance:
           $ref: "#/components/schemas/PriceProvenance"
+        execution:
+          $ref: "#/components/schemas/ExecutionManifest"
         execution_log:
           type: array
           items:
@@ -1392,6 +1441,25 @@ components:
                 type: string
               params:
                 type: object
+                properties:
+                  hermes:
+                    type: object
+                    required: [run_id, agent, node_id, node_label, node_order, status]
+                    properties:
+                      run_id:
+                        type: string
+                      agent:
+                        type: string
+                        enum: [hermes]
+                      node_id:
+                        type: string
+                      node_label:
+                        type: string
+                      node_order:
+                        type: integer
+                      status:
+                        type: string
+                        enum: [started, observed, completed]
               summary:
                 type: string
 
@@ -1409,6 +1477,7 @@ components:
         - trust_radar_b
         - trust_components_aggregate_b
         - price_provenance_b
+        - execution
         - execution_log
       properties:
         version:
@@ -1441,11 +1510,42 @@ components:
           $ref: "#/components/schemas/TrustComponentsAggregate"
         price_provenance_b:
           $ref: "#/components/schemas/PriceProvenance"
+        execution:
+          $ref: "#/components/schemas/ExecutionManifest"
         execution_log:
           type: array
           description: 兩幣共用同一份 execution log（同一次請求內先後跑 A、B 兩次分析）
           items:
             type: object
+
+    ExecutionManifest:
+      type: object
+      required: [agent, run_id, started_at, elapsed_sec, budget_sec, nodes]
+      properties:
+        agent:
+          type: string
+          enum: [hermes]
+        run_id:
+          type: string
+        started_at:
+          type: string
+        elapsed_sec:
+          type: number
+        budget_sec:
+          type: integer
+          enum: [900]
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [id, label, order]
+            properties:
+              id:
+                type: string
+              label:
+                type: string
+              order:
+                type: integer
 
     OverviewCoinSnapshot:
       type: object

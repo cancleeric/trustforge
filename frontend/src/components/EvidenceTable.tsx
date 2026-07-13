@@ -28,6 +28,11 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
           <div className="mt-2 space-y-1 text-xs text-tf-text2">
             <p>{ev.content_reference}</p>
             <p className="text-tf-muted">關聯主張：{ev.related_claim}</p>
+            {ev.data_lineage && (
+              <p className="break-all text-tf-muted">
+                資料血緣：{ev.data_lineage.file}｜{ev.data_lineage.coverage.start_date}~{ev.data_lineage.coverage.end_date}｜SHA-256 {ev.data_lineage.sha256}
+              </p>
+            )}
             {href ? (
               <a href={href} target="_blank" rel="noreferrer noopener" className="text-tf-link underline">
                 來源連結 &#8599;

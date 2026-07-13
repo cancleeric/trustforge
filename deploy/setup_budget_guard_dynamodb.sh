@@ -81,6 +81,10 @@ if ! aws dynamodb describe-table --region "$REGION" --table-name "$TABLE" >/dev/
       AttributeName=coin,KeyType=RANGE \
     --billing-mode PAY_PER_REQUEST \
     >/dev/null
+  # DynamoDB create is asynchronous.  TTL changes issued while the table is
+  # still CREATING fail with ResourceInUseException and used to abort an
+  # otherwise healthy deployment on its first run.
+  aws dynamodb wait table-exists --region "$REGION" --table-name "$TABLE"
   # 啟用 TTL（屬性名 ttl）→ 過期日期的 item 自動回收（見 budget_counter.py
   # _TTL_BUFFER_SECONDS）。
   aws dynamodb update-time-to-live --region "$REGION" \

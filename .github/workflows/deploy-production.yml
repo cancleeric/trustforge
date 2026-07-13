@@ -1,0 +1,74 @@
+name: Deploy Production
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Immutable release tag (vX.Y.Z) to deploy"
+        required: true
+        type: string
+
+jobs:
+  verify-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: trustforge-production
+      cancel-in-progress: false
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: pip install -e ".[dev]"
+      - name: Verify backend and Hermes QA contract
+        env:
+          TRUSTFORGE_BEDROCK_DAILY_USD_CAP: "0"
+        run: |
+          pytest -q
+          python scripts/run_question_bank.py --limit 24 --out out/release/question-bank-results.json
+      - name: Verify immutable release version
+        run: python scripts/release_version.py --verify --ref "${{ inputs.ref || github.ref_name }}"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          npm run test
+          npm run lint
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+      - name: Deploy backend to EC2 through SSM
+        run: bash deploy/deploy_ec2.sh
+        env:
+          REGION: ap-southeast-2
+      - name: Deploy frontend to EC2 nginx
+        run: bash deploy/deploy_frontend_nginx.sh
+        env:
+          REGION: ap-southeast-2
+      - name: Upload release QA evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-qa-${{ github.sha }}
+          path: out/release/question-bank-results.json
+          if-no-files-found: error

@@ -74,6 +74,9 @@ class Evidence:
     # 破壞合約（codex 對抗審 Medium 修正）。`None` 表示無動態信譽 trace
     # （`dynamic_reputation=False` 或舊資料），向後相容。
     reputation_mode: str | None = None
+    # 價格基準（特別是主辦五年 OHLCV）可重現性：檔名、SHA-256、列數、完整
+    # 覆蓋期、分析窗口與 schema。None 代表非檔案型 Evidence，並非資料遺漏。
+    data_lineage: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -245,6 +248,26 @@ class Report:
         for i, e in enumerate(evidence):
             ref = e.content_reference.replace("|", "\\|")[:80]
             L.append(f"| E{i} | {e.source} | {e.fetched_at} | {e.trust:.2f} | {ref} |")
+
+        lineage_items = [e.data_lineage for e in evidence if e.data_lineage]
+        if lineage_items:
+            # The same official CSV generates several price facts; render each
+            # dataset/window combination once so the report stays readable and
+            # an auditor can still reproduce every numerical claim.
+            seen: set[tuple[str, str]] = set()
+            L.append("\n## 資料血緣 / 可重現性")
+            for lineage in lineage_items:
+                key = (str(lineage.get("sha256", "")), str(lineage.get("analysis_window", "")))
+                if key in seen:
+                    continue
+                seen.add(key)
+                coverage = lineage.get("coverage", {})
+                L.append(
+                    f"- {lineage.get('dataset_name', '')}｜{lineage.get('file', '')}｜"
+                    f"完整期間 {coverage.get('start_date', '')}~{coverage.get('end_date', '')}｜"
+                    f"本次窗口 {lineage.get('analysis_window', '')}｜"
+                    f"{lineage.get('rows', '')} 日｜SHA-256 `{lineage.get('sha256', '')}`"
+                )
         return "\n".join(L)
 
 

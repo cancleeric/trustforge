@@ -29,10 +29,19 @@ export default function PriceProvenancePanel({ priceProvenance, evidence }: Prop
             <ul className="space-y-2">
               {historyEntries.map(([key, entry]) => {
                 const href = safeHref(entry.source_url)
+                const lineage = entry.data_lineage
                 return (
                   <li key={key} className="rounded border border-tf-border p-2 text-xs">
                     <p className="tf-num text-tf-text2">{entry.content_reference}</p>
                     <p className="mt-1 text-tf-muted">{entry.fetched_at}</p>
+                    {lineage && (
+                      <dl className="mt-2 grid grid-cols-1 gap-1 border-t border-tf-border pt-2 text-tf-muted">
+                        <div><dt className="inline">官方資料包：</dt><dd className="inline">{lineage.dataset_name}</dd></div>
+                        <div><dt className="inline">完整期間：</dt><dd className="inline tf-num">{lineage.coverage.start_date} ~ {lineage.coverage.end_date}（{lineage.rows} 日）</dd></div>
+                        <div><dt className="inline">本次窗口：</dt><dd className="inline tf-num">{lineage.analysis_window}</dd></div>
+                        <div className="break-all"><dt className="inline">SHA-256：</dt><dd className="inline font-mono">{lineage.sha256}</dd></div>
+                      </dl>
+                    )}
                     {href && (
                       <a href={href} target="_blank" rel="noreferrer noopener" className="text-tf-link underline">
                         來源連結 &#8599;

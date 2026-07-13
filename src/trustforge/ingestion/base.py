@@ -8,9 +8,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Iterator
 
 # 資料根目錄：預設為 repo 根（src 上一層）；Lambda 等打包環境用 TRUSTFORGE_HOME 覆寫
 # （Lambda 把 trustforge/ data/ demo/ 都放在 /var/task，設 TRUSTFORGE_HOME=/var/task）。
@@ -72,6 +75,43 @@ _SOURCE_ENABLED_OVERRIDES: dict[str, bool] = {}
 # （或 admin_config disabled_sources 反向排除）明確啟用後才納入。
 _DEFAULT_DISABLED_SOURCES: frozenset[str] = frozenset({"hoyabit-ticker"})
 
+# collect() is also used directly by older callers and tests.  A ContextVar lets
+# pipeline.run attach an ExecutionLog without changing that long-standing public
+# signature or leaking a log across concurrent requests.
+_ACTIVE_EXECUTION_LOG: ContextVar[Any | None] = ContextVar("trustforge_execution_log", default=None)
+
+
+@contextmanager
+def execution_log_context(log: Any) -> Iterator[None]:
+    token = _ACTIVE_EXECUTION_LOG.set(log)
+    try:
+        yield
+    finally:
+        _ACTIVE_EXECUTION_LOG.reset(token)
+
+
+def _record_source_event(
+    source: str, kind: str, coin: str, started: float, document_count: int,
+    outcome: str, *, data_mode: str, error_type: str | None = None,
+) -> None:
+    """Record one source boundary without exposing local paths or error text."""
+    log = _ACTIVE_EXECUTION_LOG.get()
+    if log is None:
+        return
+    params = {
+        "source": source,
+        "kind": kind,
+        "coin": coin,
+        "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        "document_count": document_count,
+        "outcome": outcome,
+        "data_mode": data_mode,
+    }
+    if error_type:
+        params["error_type"] = error_type
+    summary = f"{source}：{outcome}，{document_count} documents，{params['duration_ms']:.1f} ms"
+    log.record("ingestion.source", params=params, summary=summary)
+
 
 def set_source_enabled_override(name: str, enabled: bool) -> None:
     """明確覆寫某源的啟用狀態（admin_config / 啟動初始化 / 測試用）。"""
@@ -88,6 +128,11 @@ def get_source_enabled(name: str) -> bool:
     """
     if name in _SOURCE_ENABLED_OVERRIDES:
         return _SOURCE_ENABLED_OVERRIDES[name]
+    # HOYA BIT becomes a real source only after the organizer-provided HTTPS
+    # contract is configured.  Keeping the default disabled prevents the old
+    # placeholder from ever acquiring first-party trust by accident.
+    if name == "hoyabit-ticker" and os.getenv("TRUSTFORGE_HOYABIT_TICKER_URL", "").strip():
+        return True
     return name not in _DEFAULT_DISABLED_SOURCES
 
 
@@ -218,7 +263,7 @@ def collect(query: str, coin: str | None = None,
 
     # 1. 價格事實（官方基準 OHLCV）
     if coin:
-        from .prices import load_ohlcv, price_facts
+        from .prices import load_ohlcv, ohlcv_lineage, price_facts
         # 顯式 data_dir 優先；否則官方資料存在就用官方，再退合成樣本（offline）。
         if data_dir:
             d = data_dir
@@ -229,9 +274,25 @@ def collect(query: str, coin: str | None = None,
         else:
             d = None
         if d:
-            bars = load_ohlcv(coin, d)
-            docs.extend(price_facts(coin, bars, source_file=f"{coin.upper()}_daily_ohlcv.csv",
-                                    ts=_latest_bar_ts(bars)))
+            started = time.perf_counter()
+            try:
+                bars = load_ohlcv(coin, d)
+                lineage = ohlcv_lineage(coin, d, bars)
+                price_docs = price_facts(
+                    coin, bars, source_file=lineage.get("file", f"{coin.upper()}_daily_ohlcv.csv"),
+                    ts=_latest_bar_ts(bars), data_lineage=lineage,
+                )
+                docs.extend(price_docs)
+                _record_source_event(
+                    "official-ohlcv", "price", coin, started, len(price_docs),
+                    "ok" if price_docs else "empty", data_mode="sample" if offline else "official",
+                )
+            except Exception as exc:
+                _record_source_event(
+                    "official-ohlcv", "price", coin, started, 0, "failed",
+                    data_mode="sample" if offline else "official", error_type=type(exc).__name__,
+                )
+                raise
 
     # 2. 文件型來源
     if sources is None:
@@ -264,12 +325,24 @@ def collect(query: str, coin: str | None = None,
     sources = [s for s in sources if get_source_enabled(getattr(s, "name", ""))]
     _coin = coin or ""
     for s in sources:
+        started = time.perf_counter()
+        source_name = getattr(s, "name", str(s))
+        source_kind = getattr(s, "kind", "unknown")
         try:
-            docs.extend(s.fetch(query, coin=_coin))
-        except Exception:
+            source_docs = s.fetch(query, coin=_coin)
+            docs.extend(source_docs)
+            _record_source_event(
+                source_name, source_kind, _coin, started, len(source_docs),
+                "ok" if source_docs else "empty", data_mode="sample" if offline else "cache",
+            )
+        except Exception as exc:
             # 單一來源失敗（逾時 / 網路錯誤）→ 跳過不崩，其他來源照常
+            _record_source_event(
+                source_name, source_kind, _coin, started, 0, "failed",
+                data_mode="sample" if offline else "cache", error_type=type(exc).__name__,
+            )
             if _failed is not None:
-                _failed.append(getattr(s, "name", str(s)))
+                _failed.append(source_name)
     return docs
 
 
