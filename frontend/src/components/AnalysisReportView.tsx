@@ -8,6 +8,7 @@ import CrossSourceSignalPanel from './CrossSourceSignalPanel'
 import InsightExplainabilityPanel from './InsightExplainabilityPanel'
 import HypothesisLedgerPanel from './HypothesisLedgerPanel'
 import EvidenceTable from './EvidenceTable'
+import EvidenceTrailPanel from './EvidenceTrailPanel'
 import PriceProvenancePanel from './PriceProvenancePanel'
 import TrustTrendSection from './TrustTrendSection'
 import { DirectionBadge } from './Badges'
@@ -100,6 +101,8 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
           </ul>
         </div>
       )}
+
+      <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
 
       <h3 className="text-sm font-semibold text-tf-text">證據清單</h3>
       <EvidenceTable evidence={data.evidence} />
