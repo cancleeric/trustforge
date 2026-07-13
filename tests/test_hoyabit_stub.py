@@ -87,3 +87,14 @@ def test_hoyabit_api_methods_not_implemented():
     for method in ("get_depth", "get_orderbook", "get_trades"):
         with pytest.raises(NotImplementedError):
             getattr(src, method)("BTC")
+
+
+def test_hoyabit_configured_connector_emits_real_document(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_HOYABIT_TICKER_URL", "https://api.hoyabit.example/ticker")
+    monkeypatch.setattr(safe_fetch, "fetch_url", lambda *_args, **_kwargs: b'{"data":{"symbol":"BTCUSDT","last":"123.4","change_24h":"1.5"}}')
+    source = HoyaBitSource()
+    docs = source.fetch("BTC", "BTC")
+    assert source.enabled is True
+    assert docs[0].meta["live_source"] is True
+    assert docs[0].meta["price"] == 123.4
+    assert "sample" not in docs[0].meta

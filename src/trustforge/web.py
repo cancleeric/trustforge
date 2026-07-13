@@ -2184,12 +2184,15 @@ def _safe_href(url: str) -> str:
     return html.escape(url)
 
 
-def _render_trust_breakdown(tc: dict, trust: float) -> str:
+def _render_trust_breakdown(tc: dict, trust: float, reputation_mode: str | None = None) -> str:
     """信任分項拆解 HTML 區塊（inline CSS，純 stdlib，免 JS）。
 
     顯示四分項（信譽/佐證/時效/操縱）＋公式 ＋ 佐證白話說明。
     tc 為空 dict（舊資料）→ 回空字串，優雅略過，不崩。
     操縱分項 > 0 時以紅色標示。
+    `reputation_mode`：`Evidence.reputation_mode` 同層兄弟欄位（非
+    `trust_components` 內的字串），用於選擇 DS/entailment 文案；預設
+    "entailment"。
     """
     if not tc:
         return ""
@@ -2283,15 +2286,30 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         rep_prior, rep_final = _f(tc.get("reputation_prior")), _f(tc.get("reputation_final"))
         agree_n = tc.get("reputation_agree_n", 0)
         contra_n = tc.get("reputation_contradict_n", 0)
+        rep_mode = reputation_mode or "entailment"
         if abs(rep_final - rep_prior) > 1e-9:
             arrow = "↑" if rep_final > rep_prior else "↓"
-            contra_part = f"，{contra_n} 源矛盾" if contra_n else ""
-            trace_text = (
-                f"動態信譽 {arrow}：{rep_prior:.2f}→{rep_final:.2f}"
-                f"（{agree_n} 源互證{contra_part}）"
-            )
+            if rep_mode == "ds_em":
+                # 離線 DS EM fallback：標註「DS 共識收斂」，不與線上 entailment
+                # 互證混為一談（DS 是統計共識信心，非預測力、未解決 #167 AUC）。
+                contra_part = f"，{contra_n} 源分歧" if contra_n else ""
+                trace_text = (
+                    f"動態信譽 {arrow}：{rep_prior:.2f}→{rep_final:.2f}"
+                    f"（DS 共識收斂（統計一致性，非價格預測），{agree_n} 源達標{contra_part}）"
+                )
+            else:
+                contra_part = f"，{contra_n} 源矛盾" if contra_n else ""
+                trace_text = (
+                    f"動態信譽 {arrow}：{rep_prior:.2f}→{rep_final:.2f}"
+                    f"（{agree_n} 源互證{contra_part}）"
+                )
         else:
-            trace_text = f"動態信譽：{rep_prior:.2f}（樣本不足或無互證/矛盾，維持先驗）"
+            if rep_mode == "ds_em":
+                trace_text = (
+                    f"動態信譽：{rep_prior:.2f}（DS 共識收斂（統計一致性，非價格預測），信譽維持先驗）"
+                )
+            else:
+                trace_text = f"動態信譽：{rep_prior:.2f}（樣本不足或無互證/矛盾，維持先驗）"
         rep_trace_html = (
             f'<div style="color:var(--tf-muted2);font-size:.68rem;padding-left:.2rem">'
             f'{e(trace_text)}</div>'
@@ -2601,7 +2619,7 @@ def _render_evidence_list(
             f'<div class="tf-ev-body">'
             f"<p style='margin:.3rem 0;font-size:.85rem;color:var(--tf-text2)'>{e(ev.content_reference)}</p>"
             f"<p style='margin:.3rem 0;font-size:.82rem;color:var(--tf-muted)'>URL: {url_html}</p>"
-            f"{_render_trust_breakdown(ev.trust_components, ev.trust)}"
+            f"{_render_trust_breakdown(ev.trust_components, ev.trust, ev.reputation_mode)}"
             f"</div>"
             f"</details>"
             f"</td>"
@@ -2643,10 +2661,25 @@ def _render_price_provenance(evidence: list) -> str:
         return ""
     rows = []
     if ohlcv_ev is not None:
+        lineage = getattr(ohlcv_ev, "data_lineage", None) or {}
+        lineage_html = ""
+        if lineage:
+            coverage = lineage.get("coverage", {})
+            checksum = lineage.get("sha256", "")
+            lineage_html = (
+                "<br><span class='tf-ev-date'>"
+                f"資料包：{e(str(lineage.get('dataset_name', '')))}｜"
+                f"檔案：{e(str(lineage.get('file', '')))}｜"
+                f"完整期間：{e(str(coverage.get('start_date', '')))}~{e(str(coverage.get('end_date', '')))}｜"
+                f"列數：{e(str(lineage.get('rows', '')))}｜"
+                f"SHA-256：{e(str(checksum)[:16])}…"
+                "</span>"
+            )
         rows.append(
             "<p style='margin:.4rem 0'><b>HOYA 官方基準 OHLCV</b>（歷史基準，非即時）："
             f"{e(ohlcv_ev.content_reference)}"
-            f"<br><span class='tf-ev-date'>基準資料時間：{e(ohlcv_ev.fetched_at)}</span></p>"
+            f"<br><span class='tf-ev-date'>基準資料時間：{e(ohlcv_ev.fetched_at)}</span>"
+            f"{lineage_html}</p>"
         )
     if live_ev is not None:
         rows.append(
@@ -3116,7 +3149,11 @@ def _render_report(
         report.decision_state,
     )
     agg_tc = _aggregate_trust_components(evidence)
-    breakdown_html = _render_trust_breakdown(agg_tc, report.confidence) if agg_tc else ""
+    # 聚合視圖的 mode：任一 evidence 走 DS EM 分支即標註 "ds_em"（與個別視圖
+    # 一致），否則 "entailment"。mode 取自 `Evidence.reputation_mode` 兄弟欄位
+    # （非 trust_components 內字串）。
+    agg_mode = "ds_em" if any(e.reputation_mode == "ds_em" for e in evidence) else "entailment"
+    breakdown_html = _render_trust_breakdown(agg_tc, report.confidence, agg_mode) if agg_tc else ""
     # 新核心#2（task #25）：多維度信任雷達——按 source kind 聚合出分維度信任分，
     # 純渲染層重新聚合既有 evidence.trust，不多打任何呼叫（$0）。
     radar_html = _render_trust_radar(aggregate_trust_by_kind(evidence), evidence)
@@ -3962,6 +3999,7 @@ def _price_provenance_data(evidence: list) -> dict:
             "content_reference": ohlcv_ev.content_reference,
             "fetched_at": ohlcv_ev.fetched_at,
             "source_url": ohlcv_ev.source_url,
+            "data_lineage": getattr(ohlcv_ev, "data_lineage", None),
         }
     if live_ev is not None:
         data["live"] = {
@@ -4852,6 +4890,10 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
 _EVIDENCE_PUBLIC_FIELDS = frozenset({
     "source", "fetched_at", "content_reference", "related_claim",
     "source_url", "kind", "trust", "trust_components", "flags", "info_flags",
+    "data_lineage",
+    # W2 動態信譽模式標註（非敏感字串標註，可對外；等同 trust_components 層級
+    # 的透明化資訊，只是放在 trust_components 之外的兄弟欄位）。
+    "reputation_mode",
 })
 _EVIDENCE_FILTERED_FIELDS = frozenset({"author"})
 
@@ -4897,6 +4939,7 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
         "version": VERSION,
         "report": dataclasses.asdict(report),
         "evidence": [_public_evidence_dict(ev) for ev in evidence],
+        "execution": log.manifest(),
         "execution_log": log.events,
     }
 
@@ -4909,6 +4952,7 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
         "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
         "report_b": dataclasses.asdict(report_b),
         "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
+        "execution": log.manifest(),
         "execution_log": log.events,
     }
 
@@ -5080,6 +5124,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
+                "execution": log.manifest(),
                 "execution_log": log.events,
             }
         else:
@@ -5099,6 +5144,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_radar": aggregate_trust_by_kind(evidence),
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
                 "price_provenance": _price_provenance_data(evidence),
+                "execution": log.manifest(),
                 "execution_log": log.events,
             }
         return 200, _json_envelope_ok(payload)

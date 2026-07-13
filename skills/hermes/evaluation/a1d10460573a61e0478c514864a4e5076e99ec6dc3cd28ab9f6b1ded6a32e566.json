@@ -1,0 +1,1 @@
+{"family":"evaluation","name":"baseline-evaluation-policy","rules":["Separate fixture QA from online measurements.","Reject future leakage."]}

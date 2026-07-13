@@ -65,8 +65,18 @@ class Evidence:
     # 同一個 falsy 值，違反本專案「缺鍵=未知」慣例（別的 optional 欄位都是
     # 用 `None`/缺鍵表達「未知」，不是用空字串冒充）。`None` 才是誠實的
     # 「未擷取到」，不代表「已確認無作者」。向後相容：舊快照/序列化資料
-    # 反序列化回 Evidence 時缺這個鍵一樣正常（落到預設 `None`）。
+    # 反序列化回 Evidence 時缺這個欄位一樣正常（落到預設 `None`）。
     author: str | None = None
+    # W2 可解釋性：動態信譽的運算模式標註（`"ds_em"` = 離線 Dawid-Skene EM
+    # fallback；`"entailment"` = 線上有真語意互證）。這是**字串標註**，刻意
+    # 放在 `trust_components` 的**同層兄弟欄位**、不塞進 `trust_components`
+    # 本身——後者合約約定只放數值（API 消費者假設遍歷得到數值），放字串會
+    # 破壞合約（codex 對抗審 Medium 修正）。`None` 表示無動態信譽 trace
+    # （`dynamic_reputation=False` 或舊資料），向後相容。
+    reputation_mode: str | None = None
+    # 價格基準（特別是主辦五年 OHLCV）可重現性：檔名、SHA-256、列數、完整
+    # 覆蓋期、分析窗口與 schema。None 代表非檔案型 Evidence，並非資料遺漏。
+    data_lineage: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -238,6 +248,26 @@ class Report:
         for i, e in enumerate(evidence):
             ref = e.content_reference.replace("|", "\\|")[:80]
             L.append(f"| E{i} | {e.source} | {e.fetched_at} | {e.trust:.2f} | {ref} |")
+
+        lineage_items = [e.data_lineage for e in evidence if e.data_lineage]
+        if lineage_items:
+            # The same official CSV generates several price facts; render each
+            # dataset/window combination once so the report stays readable and
+            # an auditor can still reproduce every numerical claim.
+            seen: set[tuple[str, str]] = set()
+            L.append("\n## 資料血緣 / 可重現性")
+            for lineage in lineage_items:
+                key = (str(lineage.get("sha256", "")), str(lineage.get("analysis_window", "")))
+                if key in seen:
+                    continue
+                seen.add(key)
+                coverage = lineage.get("coverage", {})
+                L.append(
+                    f"- {lineage.get('dataset_name', '')}｜{lineage.get('file', '')}｜"
+                    f"完整期間 {coverage.get('start_date', '')}~{coverage.get('end_date', '')}｜"
+                    f"本次窗口 {lineage.get('analysis_window', '')}｜"
+                    f"{lineage.get('rows', '')} 日｜SHA-256 `{lineage.get('sha256', '')}`"
+                )
         return "\n".join(L)
 
 

@@ -17,8 +17,9 @@ from .budget_guard import (
     try_reserve_request_budget,
 )
 from .execlog import ExecutionLog
-from .ingestion.base import collect
+from .ingestion.base import collect, execution_log_context
 from .schema import COIN_POOL, Evidence, QuestionType, Report
+from .skills import run_skill_manifest
 
 
 _DATA_MODES = ("live", "sample")
@@ -119,13 +120,17 @@ def run(coin: str, query: str, qtype: QuestionType,
     )
 
     log = _log if _log is not None else ExecutionLog()
+    # Freeze the selected outer-skill revisions at run start.  This is audit
+    # data, not a runtime override of the deterministic Trust Layer.
+    log.record("hermes.skills", params=run_skill_manifest(), summary="Hermes outer skill revisions frozen for this run")
     log.record(
         "ingestion.collect",
         params={"coin": coin, "offline": collect_offline,
                 "data_mode": data_mode, "llm_mode": llm_mode},
     )
     _failed: list[str] = []
-    docs = collect(query, coin=coin, offline=collect_offline, data_dir=data_dir, _failed=_failed)
+    with execution_log_context(log):
+        docs = collect(query, coin=coin, offline=collect_offline, data_dir=data_dir, _failed=_failed)
     if not docs:
         raise ValueError("無資料：offline 請確認 demo/sample_data 與 data/，線上請接連接器")
 

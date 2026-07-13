@@ -100,6 +100,24 @@ export interface Evidence {
   flags: string[]
   /** W3：中性資訊提示（如高相似度叢集），不代表操縱判定、不影響 trust。 */
   info_flags: string[]
+  /** 官方 CSV/檔案型資料的可重現血緣；非檔案來源不帶此欄位。 */
+  data_lineage?: DataLineage | null
+}
+
+export interface DataLineage {
+  dataset_role: string
+  dataset_name: string
+  dataset_generated_at: string
+  file: string
+  sha256: string
+  rows: number
+  coverage: { start_date: string; end_date: string }
+  analysis_window: string
+  trading_pair: string
+  time_basis: string
+  interval: string
+  price_unit: string
+  columns: string[]
 }
 
 export interface StancePair {
@@ -230,6 +248,7 @@ export interface PriceProvenanceEntry {
   content_reference: string
   fetched_at: string
   source_url: string
+  data_lineage?: DataLineage | null
 }
 
 /** key 目前觀察到如 "ohlcv"；後端未固定列舉，保留 string 索引。 */
@@ -242,7 +261,26 @@ export interface AnalyzeData {
   trust_radar: TrustRadar
   trust_components_aggregate: TrustComponentsAggregate
   price_provenance: PriceProvenance
-  execution_log: unknown[]
+  /** Hermes workflow envelope. Optional while old cached responses age out. */
+  execution?: ExecutionManifest
+  execution_log: ExecutionEvent[]
+}
+
+export interface ExecutionManifest {
+  agent: 'hermes'
+  run_id: string
+  started_at: string
+  elapsed_sec: number
+  budget_sec: number
+  nodes: Array<{ id: string; label: string; order: number }>
+}
+
+export interface ExecutionEvent {
+  ts: string
+  elapsed_sec: number
+  tool: string
+  params: Record<string, unknown>
+  summary: string
 }
 
 /** `/api/analyze?type=comparison`：`report`/`evidence`/... 全套欄位各出現
@@ -261,7 +299,8 @@ export interface ComparisonAnalyzeData {
   trust_radar_b: TrustRadar
   trust_components_aggregate_b: TrustComponentsAggregate
   price_provenance_b: PriceProvenance
-  execution_log: unknown[]
+  execution?: ExecutionManifest
+  execution_log: ExecutionEvent[]
 }
 
 // ── /api/health ──────────────────────────────────────────────────────────

@@ -1,30 +1,19 @@
 #!/usr/bin/env bash
-# TrustForge pre-push：本地測試綠才放行 push；綠了就用 AWS CLI 部署（CD）。
+# TrustForge pre-push：只做本地品質閘；production CD 只由受保護 release tag
+# 的 GitHub Actions workflow 觸發，不能因任意開發分支 push 自動部署。
 # 啟用：git config core.hooksPath .githooks
 # 略過部署：TRUSTFORGE_NO_CD=1 git push
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "[pre-push] 跑 pytest…"
-if ! PYTHONPATH=src python3 -m pytest -q; then
+PYTHON="python3"
+if [ -x .venv/bin/python ]; then PYTHON=.venv/bin/python; fi
+echo "[pre-push] pytest interpreter: ${PYTHON}"
+if ! PYTHONPATH=src "$PYTHON" -m pytest -q; then
   echo "[pre-push] ❌ 測試未過 → 阻擋 push（修綠再推）"
   exit 1
 fi
 echo "[pre-push] ✅ 測試綠"
 
-if [ "${TRUSTFORGE_NO_CD:-0}" = "1" ]; then
-  echo "[pre-push] TRUSTFORGE_NO_CD=1 → 跳過 CD"; exit 0
-fi
-
-# CD：tests 綠後部署。aws 未設定則跳過（不擋 push）。
-if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
-  echo "[pre-push] CD → deploy/deploy_lambda.sh"
-  if bash deploy/deploy_lambda.sh; then
-    echo "[pre-push] ✅ 部署完成"
-  else
-    echo "[pre-push] ⚠️ 部署失敗（push 仍放行；請查 AWS 設定 / ROLE_ARN）"
-  fi
-else
-  echo "[pre-push] ⏭  略過 CD：aws CLI 未安裝或未設定憑證（測試已綠，push 放行）"
-fi
+echo "[pre-push] release CD 由 GitHub production workflow 處理"
 exit 0

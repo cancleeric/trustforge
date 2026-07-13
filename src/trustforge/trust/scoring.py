@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document, _matches_coin, _mentions_coin
+from ..ingestion.base import Document, _coins_mentioned, _matches_coin, _mentions_coin
+from .dawid_skene import LABELS as _DS_LABELS, em_source_reliability
 from .stance_cache import cached_stance_fn
 
 # W1.5（#15）+ CEO/codex 對抗審修正：線上 stance 呼叫預算（防 O(n²) 呼叫無上限打
@@ -445,6 +446,23 @@ def _direction_compatible(d1: str, d2: str) -> bool:
     if "neutral" in (d1, d2):
         return True
     return d1 == d2
+
+
+def _claim_coin(c: Claim) -> str:
+    """派生 claim 所屬幣別：優先 `doc.meta["coin"]`（見 schema `Document` 註解——
+    幣別在 `doc.meta["coin"]` 非 `doc.coin`），退 `_coins_mentioned(doc.id+text)`。
+    兩者皆缺則回空字串；空字串下 DS 的 `(coin, window)` key 仍成立，只是 coin
+    維度退化成單一 bucket——不影響 EM 收斂，只是失去跨幣分群。
+
+    確定性：提及多幣時取 `sorted()` 第一個，不受 set 迭代順序影響。
+    """
+    explicit = c.doc.meta.get("coin")
+    if explicit:
+        return str(explicit).strip().upper()
+    mentioned = _coins_mentioned(c.doc.id + " " + c.doc.text)
+    if mentioned:
+        return sorted(mentioned)[0]
+    return ""
 
 
 # --- W3：確定性協同操縱偵測（免 LLM，見 scoring.py 頂部 docstring 分項公式）------
@@ -1007,6 +1025,7 @@ MAX_REPUTATION_ITERATIONS = 5           # 硬上限，即使呼叫端傳更大�
 REPUTATION_CONVERGENCE_EPS = 0.01       # max|SR^t - SR^(t-1)| < eps 提早停
 DEFAULT_REPUTATION_ALPHA = 0.55         # SR^t = α·SR⁰ + (1-α)·agreement_score
 MIN_INDEPENDENT_EVIDENCE = 3            # 獨立佐證+矛盾來源聯集 < 3 → 該 source 強制 α=1
+DS_MIN_RATERS_PER_ITEM = 2               # DS EM：每 item 至少幾個 rater 才納入可靠度估計
 
 
 def _stable_sigmoid(x: float, clamp: float = 30.0) -> float:
@@ -1055,6 +1074,7 @@ def _iterate_source_reputation(
     alpha: float = DEFAULT_REPUTATION_ALPHA,
     evidence: dict[str, tuple[set[str], set[str]]] | None = None,
     trace_out: dict | None = None,
+    offline: bool = False,
 ) -> dict[str, float]:
     """W2：bounded 迭代動態來源信譽。純函式、無隨機性 → 同輸入必同輸出。
 
@@ -1176,6 +1196,74 @@ def _iterate_source_reputation(
         for s in claims_by_source
     }
 
+    # -------------------------------------------------------------------------
+    # #182 DS EM 離線 fallback 分支
+    # -------------------------------------------------------------------------
+    # 真實觸發條件（只認「離線 / 語意未驗證」）：`offline=True` **且** 所有 source
+    # 的有效 entailment 佐證聯集皆為空（即無任何一筆真語意 `entailment` 流進 W2）。
+    # 這與「線上模型真跑但判定 neutral」/`budget 耗盡 fail-safe neutral` 嚴格區分：
+    # 後兩者 `offline=False`（有真分類器在），不應降級到 DS、仍維持先驗（回歸鎖）。
+    # 只有「根本沒有語意驗證能力」的離線路徑，才改用 DS 對「多源方向標籤的統計
+    # 共識」估算可靠度——這是誠實的替代，不是預測力（見 dawid_skene.py 紅線）。
+    #
+    # DS 分支**不偽造** agree/contra 聯集、不重跑 overlap/方向/stance；直接把每
+    # 來源可靠度 r(source) 當作 Step B 的 `agreement_score` 直喂。DS 自備小樣本
+    # 守門（來源數<3 或某 item rater<min → 該來源 r=0.5），因此**繞過**線上
+    # `MIN_INDEPENDENT_EVIDENCE` 閘（否則離線 DS 會再製 no-op），但仍保留 alpha
+    # 預設（不強制 α=1）。
+    any_entailment = any(
+        (agree_union_of[s] or contra_union_of[s]) for s in claims_by_source
+    )
+    ds_mode = bool(offline) and not any_entailment
+    ds_agree_n: dict[str, int] = {}
+    ds_contradict_n: dict[str, int] = {}
+    agreement_override: dict[str, float] | None = None
+    ds_meta: dict = {}
+    if ds_mode:
+        # 構造 votes：key=(coin, window)，value={canonical source: direction}
+        votes: dict[tuple, dict[str, str]] = {}
+        for c in claims:
+            coin = _claim_coin(c)
+            # 非有限 ts（NaN/inf/0，見 `_recency_decay` 防禦）視為同一 window 0，
+            # 不讓 math.floor 對 NaN/inf 炸 OverflowError。
+            window = math.floor(c.doc.ts / 86400.0) if (c.doc.ts and math.isfinite(c.doc.ts)) else 0
+            key = (coin, window)
+            s = _canonical_source(c.doc.source)
+            votes.setdefault(key, {})[s] = c.direction
+        reliability, _cm, _post, ds_meta = em_source_reliability(
+            votes, min_raters_per_item=DS_MIN_RATERS_PER_ITEM
+        )
+        # 每 item 的參與來源數與多數票方向（確定性：sorted + LABELS 順序平手）
+        item_raters: dict[tuple, list[str]] = {}
+        item_majority: dict[tuple, str] = {}
+        for key, sv in votes.items():
+            raters = sorted(sv.keys())
+            item_raters[key] = raters
+            counts = {lab: 0 for lab in _DS_LABELS}
+            for lab in sv.values():
+                if lab in counts:
+                    counts[lab] += 1
+            item_majority[key] = max(_DS_LABELS, key=lambda l: (counts[l], -_DS_LABELS.index(l)))
+        # 每 source 的 DS trace 指標：
+        #   agree_n       = 該 source 參與的「達標 item」（rater≥min）數
+        #   contradict_n  = 該 source 與所屬 item 多數票方向不一致的次數
+        for s in claims_by_source:
+            ds_agree_n[s] = 0
+            ds_contradict_n[s] = 0
+        for key, sv in votes.items():
+            raters = item_raters[key]
+            majority = item_majority[key]
+            well_rated = len(raters) >= DS_MIN_RATERS_PER_ITEM
+            for s, lab in sv.items():
+                if well_rated:
+                    ds_agree_n[s] += 1
+                if lab != majority:
+                    ds_contradict_n[s] += 1
+        # r(source) 直喂 Step B 的 agreement_score；退化來源（r=0.5）由下方強制
+        # α=1 處理（r=0.5 等價先驗，不動信譽）。
+        agreement_override = {s: reliability.get(s, 0.5) for s in claims_by_source}
+        ds_fallback = set(ds_meta.get("fallback_sources", []))
+
     # codex 對抗審修正（第 2 輪 HIGH，PR #29）：`avg_temp_by_source`（該來源投給
     # 其他來源的「票權」）必須以「內容不同的主張種類」為單位平均，不能被同一來源
     # 重複貼同一條 claim（尤其是刻意重貼「自己最高 trust」那條）拉抬——否則即使
@@ -1236,14 +1324,41 @@ def _iterate_source_reputation(
         # process / PYTHONHASHSEED 下都得到逐位元相同的結果。
         new_sr: dict[str, float] = {}
         for s in claims_by_source:
-            net = math.fsum(
-                avg_temp_by_source.get(s2, 0.5) for s2 in sorted(agree_union_of[s])
-            ) - math.fsum(
-                avg_temp_by_source.get(s2, 0.5) for s2 in sorted(contra_union_of[s])
-            )
-            agreement_score = _stable_sigmoid(net)
-            a = alpha_of[s]
-            blended = a * sr0[s] + (1.0 - a) * agreement_score
+            if agreement_override is not None:
+                # DS EM 分支：r(source) 直接當 agreement_score。**任何 r=0.5
+                # 的來源**（退化或 balanced 等非退化）等價先驗 → 強制 α=1 不
+                # 動信譽；只有 r > 0.5 保留 alpha 預設（繞過線上
+                # MIN_INDEPENDENT_EVIDENCE 閘，DS 自備小樣本）。
+                #
+                # 保守原則（#24 誠實 + 離線 fallback 語意）：離線 DS 只擁有「多源
+                # 方向標籤的統計共識」，沒有真語意驗證，因此**只能共識上調**信譽
+                # （一致性越高的來源越可信），**絕不因無驗證就下調**來源——下調必須
+                # 有真 entailment 佐證（線上路径）。若 r 會把 final 拉低於 SR⁰，
+                # 維持 SR⁰（等同不動該來源）。這讓離線 DS 成為「在無驗證下給一個比
+                # 先驗略好的共識排序上調」，而不會把既有離線行為（final==prior）惡化。
+                agreement_score = agreement_override[s]
+                # A（codex 對抗審 High 修正）：「r=0.5 必須真正先驗等價」——
+                # 只要該來源的 DS 自評 `r(source) == 0.5`（**無論是否為 DS 退化
+                # 來源**，例如 balanced 來源也會得到 r=0.5），就強制 α=1.0，
+                # 信譽完全維持先驗 SR⁰、不被 DS 影響（「DS 說中性 = 信譽不動」）。
+                # 只有 `r > 0.5`（真有共識技能）才按原 `alpha` 做上調混合；
+                # `r < 0.5` 的來源在下方 `max(blended_raw, sr0[s])` 維持先驗
+                # （保守原則：離線 DS 無真語意驗證，絕不因無驗證就下調信譽）。
+                # 這取代原本「只有 ds_fallback_sources 才 α=1」的過窄守門——
+                # 舊邏輯會讓 r=0.5 的非退化來源仍以 α=0.55 混入、把低先驗來源
+                # 上調（如 social 0.35→0.4175），違反「r=0.5=先驗等價」。
+                a = 1.0 if agreement_score == 0.5 else alpha
+                blended_raw = a * sr0[s] + (1.0 - a) * agreement_score
+                blended = max(blended_raw, sr0[s])
+            else:
+                net = math.fsum(
+                    avg_temp_by_source.get(s2, 0.5) for s2 in sorted(agree_union_of[s])
+                ) - math.fsum(
+                    avg_temp_by_source.get(s2, 0.5) for s2 in sorted(contra_union_of[s])
+                )
+                agreement_score = _stable_sigmoid(net)
+                a = alpha_of[s]
+                blended = a * sr0[s] + (1.0 - a) * agreement_score
             floor = _reputation_floor(kind_of[s])
             new_sr[s] = max(floor, min(1.0, blended))
 
@@ -1254,6 +1369,11 @@ def _iterate_source_reputation(
 
     if trace_out is not None:
         trace_out["iterations_run"] = iterations_run
+        trace_out["mode"] = "ds_em" if ds_mode else "entailment"
+        if ds_mode:
+            trace_out["ds_agree_n"] = ds_agree_n
+            trace_out["ds_contradict_n"] = ds_contradict_n
+            trace_out["ds_fallback_sources"] = sorted(ds_meta.get("fallback_sources", []))
     return sr
 
 
@@ -1290,6 +1410,7 @@ def score(
     dynamic_reputation: bool = False,
     reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
     stance_fn: Callable[[str, str], str] | None = None,
+    offline: bool = False,
 ) -> list[ScoredClaim]:
     """`stance_client`：具備 `classify_stance(a, b) -> str` 方法的物件（如 BedrockClient），
     或 None。
@@ -1324,11 +1445,24 @@ def score(
     `require_entailment` 說明）——`stance_fn` 回傳 `"neutral"`（含離線/未設
     模型/timeout/malformed/cache miss/預算耗盡等 fail-safe，回傳值層級無法
     區分「真中立」與「沒驗證成功」）一律不採信、不計入樣本。生產預設
-    `llm_mode=off` 時幾乎所有配對都是 fail-safe neutral，**W2 因此在離線模式
-    下對信譽是 no-op**（`agree_n`/`contradict_n` 皆 0，`final == prior`）——
+    `llm_mode=off` 時幾乎所有配對都是 fail-safe neutral，線上 W2 因此在離線模式
+    下對信譽是 no-op（`agree_n`/`contradict_n` 皆 0，`final == prior`）——
     這是刻意、誠實的行為：沒有真的做過語意驗證，就不動信譽，只有真連上
     Bedrock/W1.5 語意分類且判定為 `entailment` 時才會上調；`"contradiction"`
     不受影響（fail-safe 絕不會產生 `"contradiction"`，見上述函式）。
+
+    **#182 DS EM 離線 fallback**：當 `offline=True` **且** 沒有任何一筆真
+    `entailment` 流進 W2（所有 source 的佐證聯集皆空）時，線上 truth-discovery
+    無法計分，改由 `dawid_skene.em_source_reliability` 對「多源方向標籤的統計
+    共識」估算每來源可靠度 `r(source)`，直接當 `agreement_score` 餵進 Step B
+    混合公式（見 `_iterate_source_reputation` 分支 docstring）。這是離線路徑的
+    誠實替代——**不是預測力、未解決 #167 AUC**，UI 標註「DS 共識收斂」而非
+    「互證」。線上有 entailment 佐證時完全不走這條分支，行為不變。
+
+    `offline`：選填，預設 `False`。由 `agent.orchestrator` 傳入 `client.offline`
+    （離線敘事 = 無語意驗證能力）。僅在 `offline=True` 且無 entailment 時觸發
+    DS fallback；`offline=False`（有真分類器，無論判定 neutral 或 budget 耗盡）
+    仍維持先驗、不觸發 DS（回歸鎖）。
 
     `stance_fn`：選填。若提供，直接使用此函式（跳過用 `stance_client`/
     `stance_pair_budget`/`stance_remaining_time_fn` 另建一份），供呼叫端
@@ -1371,26 +1505,37 @@ def score(
             iterations=reputation_iterations,
             evidence=evidence,
             trace_out=trace_meta,
+            offline=offline,
         )
         iterations_run = trace_meta.get("iterations_run", 0)
+        ds_mode = trace_meta.get("mode") == "ds_em"
         by_source: dict[str, list[Claim]] = {}
         for c in claims:
             by_source.setdefault(_canonical_source(c.doc.source), []).append(c)
         trace_by_source = {}
         for s, s_claims in by_source.items():
-            agree_sources: set[str] = set()
-            contra_sources: set[str] = set()
-            for c in s_claims:
-                agree, contra = evidence.get(c.id, (set(), set()))
-                agree_sources |= agree
-                contra_sources |= contra
+            if ds_mode:
+                # DS EM 模式：agree_n=參與的達標 item 數、contradict_n=與所屬
+                # item 多數票方向不一致次數（不偽造 agree/contra 聯集）。
+                agree_n = trace_meta.get("ds_agree_n", {}).get(s, 0)
+                contradict_n = trace_meta.get("ds_contradict_n", {}).get(s, 0)
+            else:
+                agree_sources: set[str] = set()
+                contra_sources: set[str] = set()
+                for c in s_claims:
+                    agree, contra = evidence.get(c.id, (set(), set()))
+                    agree_sources |= agree
+                    contra_sources |= contra
+                agree_n = len(agree_sources)
+                contradict_n = len(contra_sources)
             trace_by_source[s] = {
                 "source": raw_source_of.get(s, s),
                 "prior": round(sr0_for_trace.get(s, 0.0), 4),
                 "final": round(dynamic_map.get(s, sr0_for_trace.get(s, 0.0)), 4),
-                "agree_n": len(agree_sources),
-                "contradict_n": len(contra_sources),
+                "agree_n": agree_n,
+                "contradict_n": contradict_n,
                 "iterations_run": iterations_run,
+                "mode": trace_meta.get("mode", "entailment"),
             }
 
     out: list[ScoredClaim] = []

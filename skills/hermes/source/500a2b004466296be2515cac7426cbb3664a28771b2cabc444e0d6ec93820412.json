@@ -1,0 +1,1 @@
+{"family":"source","name":"baseline-source-policy","rules":["Use allowlisted sources only.","Retain published_at, fetched_at and snapshot_at."]}

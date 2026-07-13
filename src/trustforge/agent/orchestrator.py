@@ -116,13 +116,20 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
     ref = doc.meta.get("content_reference") or sc.claim.text[:120]
     trust_components = {k: round(v, 3) for k, v in sc.components.items()}
     # W2 可解釋性接線：`dynamic_reputation=True` 時 `sc.reputation_trace` 會帶
-    # 該來源的 {source, prior, final, agree_n, contradict_n, iterations_run}
-    # （見 trust.scoring.score docstring）。刻意只挑數值欄位併入
-    # `trust_components`（維持該 dict 既有 str→number 契約，`source` 字串已
+    # 該來源的 {source, prior, final, agree_n, contradict_n, iterations_run, mode}
+    # （見 trust.scoring.score docstring）。刻意只挑**數值**欄位併入
+    # `trust_components`（維持該 dict 既存 str→number 契約，`source` 字串已
     # 有 `Evidence.source` 承載，不重複塞）——讓 web.py 既有的
     # `_render_trust_breakdown` 不必改資料型別就能多顯示「為什麼信譽變動」。
     # `dynamic_reputation=False`（例如舊測試/其他呼叫點）時 `reputation_trace`
     # 為 None，這裡完全不新增鍵，逐字向後相容。
+    #
+    # `mode`（字串 `"ds_em"`/`"entailment"`）**不放進** `trust_components`——
+    # 那是破壞 API 合約的字串污染（codex 對抗審 Medium 修正）。改放到
+    # `Evidence.reputation_mode` 同層兄弟欄位，`_public_evidence_dict()` 與
+    # web `_render_trust_breakdown` 都從那裡取 mode，而 `trust_components`
+    # 保持純數值。
+    rep_mode = None
     if sc.reputation_trace is not None:
         trace = sc.reputation_trace
         trust_components["reputation_prior"] = round(trace["prior"], 3)
@@ -130,6 +137,7 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         trust_components["reputation_agree_n"] = trace["agree_n"]
         trust_components["reputation_contradict_n"] = trace["contradict_n"]
         trust_components["reputation_iterations_run"] = trace["iterations_run"]
+        rep_mode = trace.get("mode", "entailment")
     return Evidence(
         source=doc.source,
         fetched_at=iso_utc(doc.ts),
@@ -154,6 +162,9 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         # （見其 docstring），未通過一律回 `None`。不參與 trust 分數、
         # 不做 UI 顯示。
         author=_sanitize_author(doc.meta.get("author")),
+        # W2 動態信譽模式標註（同層兄弟欄位，不污染 `trust_components`）。
+        reputation_mode=rep_mode,
+        data_lineage=doc.meta.get("data_lineage") or None,
     )
 
 
@@ -1239,6 +1250,7 @@ def run_agent_pipeline(
         now=now_ts,
         stance_fn=shared_stance_fn,
         dynamic_reputation=True,
+        offline=getattr(client, "offline", False),
     )
     # score() 跑完、Step2 交叉佐證矛盾閘可能觸發的 stance 呼叫都已發生，
     # 這裡統一收割進 log、並清空 client.cost_events，避免下個 run 重複計費。

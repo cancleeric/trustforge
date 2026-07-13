@@ -660,8 +660,9 @@ def test_eth_multi_source_evidence_facts_count_pinned():
     """
     report, evidence, log = run("ETH", "ETH 現況", QuestionType.MULTI_SOURCE, offline=True)
 
-    assert len(report.facts) == 7
-    assert len(evidence) == 13
+    assert len(report.facts) == 8
+    assert any("官方基準完整歷史涵蓋" in fact for fact in report.facts)
+    assert len(evidence) == 14
     # 誠實反映真實（示範）資料：目前 demo 資料集裡 ETH 沒有真實跨源矛盾樣本，
     # 不應再出現任何背離訊號（無背離就是無，不強行製造）。
     assert report.cross_source_signal is None
@@ -700,8 +701,9 @@ def test_eth_analysis_stable_across_query_wording(query: str):
     （用注入的合成矛盾 claim 驗證）。
     """
     report, evidence, log = run("ETH", query, QuestionType.MULTI_SOURCE, offline=True)
-    assert len(report.facts) == 7, f"query={query!r} facts 數應穩定為 7，實得 {len(report.facts)}"
-    assert len(evidence) == 13, f"query={query!r} evidence 數應穩定為 13，實得 {len(evidence)}"
+    assert len(report.facts) == 8, f"query={query!r} facts 數應穩定為 8，實得 {len(report.facts)}"
+    assert any("官方基準完整歷史涵蓋" in fact for fact in report.facts)
+    assert len(evidence) == 14, f"query={query!r} evidence 數應穩定為 14，實得 {len(evidence)}"
     assert report.cross_source_signal is None, (
         f"query={query!r} 應誠實反映真實資料無背離，實得 {report.cross_source_signal}"
     )

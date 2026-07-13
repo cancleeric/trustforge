@@ -62,6 +62,7 @@ Exit code：`0` 全部成功（或本來就沒有目標要跑）；`1` 表示至
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import html
 import math
 import os
@@ -104,10 +105,12 @@ from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
+from trustforge.ingestion.hoyabit import build_hoyabit_sources  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
 from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
+from trustforge.replay import capture_source_snapshot  # noqa: E402
 
 
 def build_registry() -> dict[str, Source]:
@@ -119,6 +122,7 @@ def build_registry() -> dict[str, Source]:
         + build_social_sources()
         + build_regulatory_sources()
         + build_coingecko_sources()
+        + build_hoyabit_sources()
     )
     return {s.name: s for s in sources}
 
@@ -381,6 +385,53 @@ def run_once(
             if effective_stagger > 0:
                 time.sleep(effective_stagger)
 
+    return results, failures
+
+
+def run_once_parallel(
+    source_names: list[str] | None, coins: list[str], backend: CacheBackend, force: bool,
+    interval_overrides: dict[str, float], stagger: float, dry_run: bool, *,
+    max_workers: int = 1, total_budget_sec: float = 15 * 60,
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """Bounded source-level parallel prefetch.
+
+    A source remains the ownership unit: one worker performs all of that
+    source's coin/broadcast writes before returning.  Snapshot capture starts
+    only after every worker has joined, so no archive can observe a half-finished
+    fetch cycle.  Timeout is a supervisor boundary; unfinished work is reported
+    as a failed source rather than silently treated as fresh.
+    """
+    registry = build_registry()
+    targets = source_names if source_names else sorted(registry)
+    if max_workers <= 1 or len(targets) <= 1:
+        return run_once(targets, coins, backend, force, interval_overrides, stagger, dry_run)
+    started = time.monotonic()
+    results: list[tuple[str, int]] = []
+    failures: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tf-fetch") as pool:
+        futures = {
+            pool.submit(run_once, [name], coins, backend, force, interval_overrides, stagger, dry_run): name
+            for name in targets
+        }
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=total_budget_sec):
+                name = futures[future]
+                try:
+                    source_results, source_failures = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[fetch_scheduler] {name}: parallel worker failed ({type(exc).__name__})", file=sys.stderr)
+                    failures.append(name)
+                    continue
+                results.extend(source_results)
+                failures.extend(source_failures)
+        except concurrent.futures.TimeoutError:
+            pass
+        for future, name in futures.items():
+            if not future.done():
+                future.cancel()
+                failures.append(f"{name}:cycle-timeout")
+    elapsed = time.monotonic() - started
+    print(f"[fetch_scheduler] parallel cycle: workers={max_workers} elapsed={elapsed:.2f}s budget={total_budget_sec:.0f}s")
     return results, failures
 
 
@@ -1143,7 +1194,21 @@ def run_snapshot(coins: list[str], backend: CacheBackend, dry_run: bool) -> int:
     # cache 寫入失敗）分開，讓「這輪全部幣都被更新的並行排程超車而跳過」
     # 不會被回傳碼誤判成「這輪排程失敗」（見下方總覽 blob 段落）。
     skipped_coins: list[str] = []
+    source_names = list(build_registry())
     for coin in coins:
+        source_capture = capture_source_snapshot(
+            backend, coin, source_names, captured_at=run_now,
+        )
+        if not source_capture.ok or source_capture.used_fallback:
+            print(f"[fetch_scheduler] --snapshot {coin}: source snapshot 未 durable 寫入"
+                  f"（backend={source_capture.backend}）：{source_capture.error}，略過 trust snapshot",
+                  file=sys.stderr)
+            failures.append(f"{coin}:source-snapshot")
+            continue
+        if source_capture.skipped:
+            print(f"[fetch_scheduler] --snapshot {coin}: 當日 source snapshot 已有較新資料，略過")
+            skipped_coins.append(coin)
+            continue
         try:
             report, evidence, _log = pipeline_run(
                 coin, _SNAPSHOT_QUERY, QuestionType.MULTI_SOURCE,
@@ -1397,6 +1462,8 @@ def main(argv: list[str] | None = None) -> int:
              "CoinGecko 逐幣來源另有 6 秒下限，取兩者較大值，見 "
              "_COINGECKO_STAGGER_FLOOR_SECONDS）",
     )
+    parser.add_argument("--parallelism", type=int, default=1, help="bounded concurrent source workers (default: 1)")
+    parser.add_argument("--total-budget-sec", type=float, default=15 * 60, help="whole fetch-cycle timeout (max: 900)")
     parser.add_argument(
         "--dry-run", action="store_true",
         help="只列出這次會呼叫哪些 (來源, 幣別)，不真的打 API、不寫快取",
@@ -1425,6 +1492,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.parallelism < 1:
+        parser.error("--parallelism must be >= 1")
+    if not 1 <= args.total_budget_sec <= 15 * 60:
+        parser.error("--total-budget-sec must be 1..900")
+
     if args.probe:
         return run_probe()
 
@@ -1446,8 +1518,9 @@ def main(argv: list[str] | None = None) -> int:
         interval_overrides = {n: args.interval for n in target_names}
 
     backend = get_cache_backend()
-    results, failures = run_once(
+    results, failures = run_once_parallel(
         args.sources, coins, backend, args.force, interval_overrides, args.stagger, args.dry_run,
+        max_workers=args.parallelism, total_budget_sec=args.total_budget_sec,
     )
     total_docs = sum(n for _, n in results)
     print(f"[fetch_scheduler] 完成：{len(results)} 個 (來源,幣別) 目標實際呼叫/廣播成功，"
