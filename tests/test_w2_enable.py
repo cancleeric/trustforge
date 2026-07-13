@@ -120,13 +120,21 @@ def test_run_agent_pipeline_dynamic_reputation_offline_triggers_ds_em():
         docs=docs, client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1.0), now_fn=lambda: 1.0,
     )
-    ds_evs = [e for e in evidence if "reputation_mode" in e.trust_components]
-    assert ds_evs, "reputation_trace 未接線進 Evidence.trust_components——W2 未真正啟用"
+    ds_evs = [e for e in evidence if e.reputation_mode == "ds_em"]
+    assert ds_evs, "reputation_mode 未接線進 Evidence（W2 未真正啟用 DS EM 分支）"
     for ev in ds_evs:
-        tc = ev.trust_components
-        assert tc["reputation_mode"] == "ds_em", (
-            f"{ev.source}：離線無 entailment 應走 DS EM 分支，實際 mode={tc['reputation_mode']}"
+        # `reputation_mode` 是 `trust_components` 的同層兄弟欄位（字串標註），
+        # 不應出現在純數值的 trust_components 內（codex 對抗審 Medium 修正）。
+        assert "reputation_mode" not in ev.trust_components, (
+            f"{ev.source}：reputation_mode 不應污染 trust_components（須純數值）"
         )
+        assert all(isinstance(v, (int, float)) for v in ev.trust_components.values()), (
+            f"{ev.source}：trust_components 內存在非數值欄位"
+        )
+        assert ev.reputation_mode == "ds_em", (
+            f"{ev.source}：離線無 entailment 應走 DS EM 分支，實際 mode={ev.reputation_mode}"
+        )
+        tc = ev.trust_components
         assert tc["reputation_agree_n"] > 0, (
             f"{ev.source}：DS 模式下 agree_n（達標 item 參與數）應 > 0，實際 {tc['reputation_agree_n']}"
         )

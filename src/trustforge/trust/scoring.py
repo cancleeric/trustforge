@@ -1325,8 +1325,9 @@ def _iterate_source_reputation(
         new_sr: dict[str, float] = {}
         for s in claims_by_source:
             if agreement_override is not None:
-                # DS EM 分支：r(source) 直接當 agreement_score。退化來源（r=0.5）
-                # 等價先驗 → 強制 α=1 不動信譽；其餘保留 alpha 預設（繞過線上
+                # DS EM 分支：r(source) 直接當 agreement_score。**任何 r=0.5
+                # 的來源**（退化或 balanced 等非退化）等價先驗 → 強制 α=1 不
+                # 動信譽；只有 r > 0.5 保留 alpha 預設（繞過線上
                 # MIN_INDEPENDENT_EVIDENCE 閘，DS 自備小樣本）。
                 #
                 # 保守原則（#24 誠實 + 離線 fallback 語意）：離線 DS 只擁有「多源
@@ -1336,7 +1337,17 @@ def _iterate_source_reputation(
                 # 維持 SR⁰（等同不動該來源）。這讓離線 DS 成為「在無驗證下給一個比
                 # 先驗略好的共識排序上調」，而不會把既有離線行為（final==prior）惡化。
                 agreement_score = agreement_override[s]
-                a = 1.0 if s in ds_fallback else alpha
+                # A（codex 對抗審 High 修正）：「r=0.5 必須真正先驗等價」——
+                # 只要該來源的 DS 自評 `r(source) == 0.5`（**無論是否為 DS 退化
+                # 來源**，例如 balanced 來源也會得到 r=0.5），就強制 α=1.0，
+                # 信譽完全維持先驗 SR⁰、不被 DS 影響（「DS 說中性 = 信譽不動」）。
+                # 只有 `r > 0.5`（真有共識技能）才按原 `alpha` 做上調混合；
+                # `r < 0.5` 的來源在下方 `max(blended_raw, sr0[s])` 維持先驗
+                # （保守原則：離線 DS 無真語意驗證，絕不因無驗證就下調信譽）。
+                # 這取代原本「只有 ds_fallback_sources 才 α=1」的過窄守門——
+                # 舊邏輯會讓 r=0.5 的非退化來源仍以 α=0.55 混入、把低先驗來源
+                # 上調（如 social 0.35→0.4175），違反「r=0.5=先驗等價」。
+                a = 1.0 if agreement_score == 0.5 else alpha
                 blended_raw = a * sr0[s] + (1.0 - a) * agreement_score
                 blended = max(blended_raw, sr0[s])
             else:
