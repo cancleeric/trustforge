@@ -12,11 +12,11 @@ function distinctSourceCount(evidence: Evidence[]): number {
 }
 
 function manipulationFlagCount(evidence: Evidence[]): number {
-  return evidence.filter((e) => e.flags.length > 0).length
+  return evidence.filter((e) => (e.flags?.length ?? 0) > 0).length
 }
 
 function infoFlagCount(evidence: Evidence[]): number {
-  return evidence.filter((e) => e.info_flags.length > 0).length
+  return evidence.filter((e) => (e.info_flags?.length ?? 0) > 0).length
 }
 
 function StatCard({
@@ -81,12 +81,17 @@ export default function EvidenceTrailPanel({
       <h3 className="mb-3 text-sm font-semibold text-tf-text">信任溯源概覽</h3>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <StatCard label="證據總筆數" value={String(evidence.length)} color="var(--color-tf-text)" />
-        <StatCard label="獨立來源數" value={String(sources)} color="var(--color-tf-text)" />
+        <StatCard
+          label="獨立來源數"
+          value={String(sources)}
+          color="var(--color-tf-text)"
+          sub="對證據清單來源去重（與後端評分 canonical 來源數口徑不同）"
+        />
         <StatCard
           label="操縱紅旗筆數"
           value={String(manipFlags)}
           color="var(--color-tf-bad)"
-          sub={manipFlags > 0 ? '已確認操縱，反映在信任分' : '無紅旗'}
+          sub={manipFlags > 0 ? '操縱關鍵詞命中（已反映於信任分）' : '無紅旗'}
         />
         <StatCard
           label="中性相似提示筆數"

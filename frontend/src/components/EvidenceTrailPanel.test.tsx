@@ -40,6 +40,26 @@ describe('EvidenceTrailPanel — 真實欄位聚合（#171 第 2 項）', () => 
     expect(screen.getByText('中性相似提示筆數').parentElement?.querySelector('.tf-num')?.textContent).toBe('2')
   })
 
+  it('flags/info_flags 為 undefined 時仍正常渲染不 throw，筆數顯示 0（崩潰防禦回歸鎖）', () => {
+    // validator 正常會擋掉缺鍵，但元件本身不依賴外部契約：用 as any 模擬
+    // flags/info_flags 缺席的髒資料，確認元件不崩、且計數回退為 0。
+    const dirty = {
+      source: 'coindesk',
+      fetched_at: '2026-07-04T00:00:00Z',
+      content_reference: 'ref',
+      related_claim: 'claim',
+      source_url: '',
+      kind: 'news',
+      trust: 0.8,
+      trust_components: {},
+    } as any
+    const evidence: Evidence[] = [dirty, { ...dirty, source: 'coingecko-price' } as any]
+    expect(() => render(<EvidenceTrailPanel evidence={evidence} signal={null} />)).not.toThrow()
+
+    expect(screen.getByText('操縱紅旗筆數').parentElement?.querySelector('.tf-num')?.textContent).toBe('0')
+    expect(screen.getByText('中性相似提示筆數').parentElement?.querySelector('.tf-num')?.textContent).toBe('0')
+  })
+
   it('cross_source_signal=null 時渲染「無法判定」，不補 0（防造假回歸）', () => {
     const evidence: Evidence[] = [makeEvidence(), makeEvidence({ source: 'coingecko-price' })]
     render(<EvidenceTrailPanel evidence={evidence} signal={null} />)
