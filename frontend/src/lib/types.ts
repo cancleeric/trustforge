@@ -100,6 +100,24 @@ export interface Evidence {
   flags: string[]
   /** W3：中性資訊提示（如高相似度叢集），不代表操縱判定、不影響 trust。 */
   info_flags: string[]
+  /** 官方 CSV/檔案型資料的可重現血緣；非檔案來源不帶此欄位。 */
+  data_lineage?: DataLineage | null
+}
+
+export interface DataLineage {
+  dataset_role: string
+  dataset_name: string
+  dataset_generated_at: string
+  file: string
+  sha256: string
+  rows: number
+  coverage: { start_date: string; end_date: string }
+  analysis_window: string
+  trading_pair: string
+  time_basis: string
+  interval: string
+  price_unit: string
+  columns: string[]
 }
 
 export interface StancePair {
@@ -230,6 +248,7 @@ export interface PriceProvenanceEntry {
   content_reference: string
   fetched_at: string
   source_url: string
+  data_lineage?: DataLineage | null
 }
 
 /** key 目前觀察到如 "ohlcv"；後端未固定列舉，保留 string 索引。 */

@@ -218,7 +218,7 @@ def collect(query: str, coin: str | None = None,
 
     # 1. 價格事實（官方基準 OHLCV）
     if coin:
-        from .prices import load_ohlcv, price_facts
+        from .prices import load_ohlcv, ohlcv_lineage, price_facts
         # 顯式 data_dir 優先；否則官方資料存在就用官方，再退合成樣本（offline）。
         if data_dir:
             d = data_dir
@@ -230,8 +230,11 @@ def collect(query: str, coin: str | None = None,
             d = None
         if d:
             bars = load_ohlcv(coin, d)
-            docs.extend(price_facts(coin, bars, source_file=f"{coin.upper()}_daily_ohlcv.csv",
-                                    ts=_latest_bar_ts(bars)))
+            lineage = ohlcv_lineage(coin, d, bars)
+            docs.extend(price_facts(
+                coin, bars, source_file=lineage.get("file", f"{coin.upper()}_daily_ohlcv.csv"),
+                ts=_latest_bar_ts(bars), data_lineage=lineage,
+            ))
 
     # 2. 文件型來源
     if sources is None:

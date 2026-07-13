@@ -2661,10 +2661,25 @@ def _render_price_provenance(evidence: list) -> str:
         return ""
     rows = []
     if ohlcv_ev is not None:
+        lineage = getattr(ohlcv_ev, "data_lineage", None) or {}
+        lineage_html = ""
+        if lineage:
+            coverage = lineage.get("coverage", {})
+            checksum = lineage.get("sha256", "")
+            lineage_html = (
+                "<br><span class='tf-ev-date'>"
+                f"資料包：{e(str(lineage.get('dataset_name', '')))}｜"
+                f"檔案：{e(str(lineage.get('file', '')))}｜"
+                f"完整期間：{e(str(coverage.get('start_date', '')))}~{e(str(coverage.get('end_date', '')))}｜"
+                f"列數：{e(str(lineage.get('rows', '')))}｜"
+                f"SHA-256：{e(str(checksum)[:16])}…"
+                "</span>"
+            )
         rows.append(
             "<p style='margin:.4rem 0'><b>HOYA 官方基準 OHLCV</b>（歷史基準，非即時）："
             f"{e(ohlcv_ev.content_reference)}"
-            f"<br><span class='tf-ev-date'>基準資料時間：{e(ohlcv_ev.fetched_at)}</span></p>"
+            f"<br><span class='tf-ev-date'>基準資料時間：{e(ohlcv_ev.fetched_at)}</span>"
+            f"{lineage_html}</p>"
         )
     if live_ev is not None:
         rows.append(
@@ -3984,6 +3999,7 @@ def _price_provenance_data(evidence: list) -> dict:
             "content_reference": ohlcv_ev.content_reference,
             "fetched_at": ohlcv_ev.fetched_at,
             "source_url": ohlcv_ev.source_url,
+            "data_lineage": getattr(ohlcv_ev, "data_lineage", None),
         }
     if live_ev is not None:
         data["live"] = {
@@ -4874,6 +4890,7 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
 _EVIDENCE_PUBLIC_FIELDS = frozenset({
     "source", "fetched_at", "content_reference", "related_claim",
     "source_url", "kind", "trust", "trust_components", "flags", "info_flags",
+    "data_lineage",
     # W2 動態信譽模式標註（非敏感字串標註，可對外；等同 trust_components 層級
     # 的透明化資訊，只是放在 trust_components 之外的兄弟欄位）。
     "reputation_mode",

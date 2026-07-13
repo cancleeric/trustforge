@@ -1193,6 +1193,8 @@ components:
           type: string
         source_url:
           type: string
+        data_lineage:
+          $ref: "#/components/schemas/DataLineage"
 
     Evidence:
       type: object
@@ -1247,6 +1249,50 @@ components:
           description: |
             informational-only 中性提示（例如多源文字高度相似）——**不代表
             已判定操縱、不影響 trust 分數**，純供人工判讀，不可等同 `flags`。
+        data_lineage:
+          $ref: "#/components/schemas/DataLineage"
+
+    DataLineage:
+      type: object
+      description: 檔案型資料（例如主辦提供的五年 OHLCV）之可重現資料血緣；非檔案型 Evidence 可缺席。
+      required: [dataset_role, dataset_name, file, sha256, rows, coverage, analysis_window, trading_pair, time_basis, interval, price_unit, columns]
+      properties:
+        dataset_role:
+          type: string
+          enum: [competition_baseline, local_ohlcv]
+        dataset_name:
+          type: string
+        dataset_generated_at:
+          type: string
+        file:
+          type: string
+        sha256:
+          type: string
+          description: CSV 原始位元組的 SHA-256，供抽查檔案未遭替換。
+        rows:
+          type: integer
+        coverage:
+          type: object
+          required: [start_date, end_date]
+          properties:
+            start_date:
+              type: string
+            end_date:
+              type: string
+        analysis_window:
+          type: string
+        trading_pair:
+          type: string
+        time_basis:
+          type: string
+        interval:
+          type: string
+        price_unit:
+          type: string
+        columns:
+          type: array
+          items:
+            type: string
 
     BasisItem:
       type: object

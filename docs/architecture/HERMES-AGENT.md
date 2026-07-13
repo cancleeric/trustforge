@@ -20,6 +20,13 @@ Every analysis has one `run_id` and uses the same five observable nodes:
 5. **Report delivery**: produce the Final Report, Evidence List, and Execution
    Log within the 15-minute budget.
 
+The supplied five-year OHLCV baseline is not treated as an opaque CSV. Hermes
+records the dataset name, safe filename, SHA-256, row count, full UTC coverage,
+schema, and exact analysis window on every price Evidence item. The report also
+includes a full-history fact (cumulative return and maximum drawdown) alongside
+the short-window market observation, so a reviewer can distinguish historical
+context from the specific window used for the market judgment.
+
 ## Audit contract
 
 Each Execution Log event keeps the stable top-level schema (`ts`, elapsed time,

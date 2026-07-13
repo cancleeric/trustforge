@@ -164,6 +164,7 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         author=_sanitize_author(doc.meta.get("author")),
         # W2 動態信譽模式標註（同層兄弟欄位，不污染 `trust_components`）。
         reputation_mode=rep_mode,
+        data_lineage=doc.meta.get("data_lineage") or None,
     )
 
 
