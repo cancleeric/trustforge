@@ -374,6 +374,8 @@ export interface CostsData {
   by_model_detail: Record<string, CostModelDetail>
   run_count: number
   runs: LedgerRunRecord[]
+  offset?: number
+  limit?: number
 }
 
 // ── /api/history ─────────────────────────────────────────────────────────

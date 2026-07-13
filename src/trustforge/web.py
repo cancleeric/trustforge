@@ -5377,7 +5377,7 @@ def _handle_api_status(client_ip: str = "") -> tuple[int, str]:
         return 502, _json_envelope_err("upstream_error", "狀態資料暫時無法讀取，請稍後再試")
 
 
-def _handle_api_costs(client_ip: str = "") -> tuple[int, str]:
+def _handle_api_costs(qs: dict | None = None, client_ip: str = "") -> tuple[int, str]:
     """`/api/costs`：成本帳本 JSON 化版本——直接重用 `_get_ledger_summary()`
     （既有 20 秒 TTL + single-flight 快取，`/status`／`/costs` 頁共用同一份
     真實累計數字），不新增查詢語意。套用 `_check_status_rate_limit`（理由同
@@ -5398,7 +5398,21 @@ def _handle_api_costs(client_ip: str = "") -> tuple[int, str]:
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     try:
-        return 200, _json_envelope_ok(_get_ledger_summary())
+        qs = qs or {}
+        raw_offset = (qs.get("offset", ["0"])[0]).strip()
+        raw_limit = (qs.get("limit", ["50"])[0]).strip()
+        if not raw_offset.isdigit() or not raw_limit.isdigit():
+            return 400, _json_envelope_err("bad_request", "offset 與 limit 須為非負整數")
+        offset, limit = int(raw_offset), int(raw_limit)
+        if not 1 <= limit <= 100:
+            return 400, _json_envelope_err("bad_request", "limit 須介於 1 到 100")
+        summary = dict(_get_ledger_summary())
+        records = get_ledger().read_all()
+        newest_first = list(reversed(records))
+        summary["runs"] = newest_first[offset:offset + limit]
+        summary["offset"] = offset
+        summary["limit"] = limit
+        return 200, _json_envelope_ok(summary)
     except Exception:
         logging.exception("TrustForge /api/costs error")
         return 502, _json_envelope_err("upstream_error", "成本資料暫時無法讀取，請稍後再試")
@@ -6248,7 +6262,7 @@ class Handler(BaseHTTPRequestHandler):
             code, body = _handle_api_status(client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/costs":
-            code, body = _handle_api_costs(client_ip)
+            code, body = _handle_api_costs(qs, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/overview":
             code, body = _handle_api_overview(client_ip)

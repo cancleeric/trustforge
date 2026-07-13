@@ -38,6 +38,8 @@ jobs:
           TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 python scripts/run_question_bank.py --limit 24 --out out/release/question-bank-results.json
       - name: Verify immutable release version
         run: python scripts/release_version.py --verify --ref "${{ inputs.ref || github.ref_name }}"
+      - name: Run local server release smoke
+        run: bash scripts/local_release_smoke.sh
       - name: Set up Node
         uses: actions/setup-node@v4
         with:

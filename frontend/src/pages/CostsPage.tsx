@@ -38,14 +38,14 @@ function ByModelTable({ data }: { data: CostsData }) {
   )
 }
 
-// codex HIGH（成本端點可擴展性）：`data.runs` 現在是後端有界的「最近 N 筆」
+// `data.runs` is one page of the append-only ledger, newest first.
 // （非全量帳本），這裡照原始寫入順序反轉成「最新在前」再渲染，跟 SSR
 // `_render_costs_page()` 的 `list(reversed(runs))` 邏輯一致。
 function RecentRunsTable({ runs }: { runs: LedgerRunRecord[] }) {
   if (runs.length === 0) {
     return <p className="text-sm text-tf-muted">目前尚無 run 紀錄。</p>
   }
-  const recent = [...runs].reverse()
+  const recent = runs
   return (
     <div className="overflow-x-auto rounded-lg border border-tf-border bg-tf-card">
       <table className="w-full min-w-[480px] border-collapse text-left text-sm">
@@ -81,12 +81,13 @@ export default function CostsPage() {
   const [data, setData] = useState<CostsData | null>(null)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
+  const [offset, setOffset] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true)
     setError(null)
-    getCosts(controller.signal).then((res) => {
+    getCosts(offset, controller.signal).then((res) => {
       if (controller.signal.aborted) return
       setLoading(false)
       if (res.ok) {
@@ -100,7 +101,7 @@ export default function CostsPage() {
     return () => {
       controller.abort()
     }
-  }, [])
+  }, [offset])
 
   return (
     <main className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6">
@@ -123,9 +124,13 @@ export default function CostsPage() {
 
           <section>
             <h3 className="mb-2 text-sm font-semibold text-tf-text">
-              Per-run 明細（最近 {data.runs.length} 筆，最新在前）
+              Per-run 明細（第 {(data.offset ?? 0) + 1}–{Math.min((data.offset ?? 0) + data.runs.length, data.run_count)} 筆，共 {data.run_count.toLocaleString()} 筆）
             </h3>
             <RecentRunsTable runs={data.runs} />
+            <div className="mt-3 flex items-center justify-between">
+              <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>較新</button>
+              <button type="button" disabled={offset + data.runs.length >= data.run_count} onClick={() => setOffset(offset + 50)}>較舊</button>
+            </div>
           </section>
         </>
       )}

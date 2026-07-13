@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.13.6 — 2026-07-13
+
+- Preserve the append-only cost ledger while exposing its complete history through bounded pages instead of a 50-run-only view.
+- Require a locally started TrustForge server to pass health, overview, and paged-cost smoke checks before production CD.
+- Add the TrustForge-owned Hermes Execution Journey skill specification.
+
 ## v0.13.5 — 2026-07-13
 
 - Reclaim dead local JSON analysis leases after a service restart and keep conflict responses free of internal dedup keys.
