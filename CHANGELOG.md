@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.13.7 — 2026-07-13
+
+- Make the release smoke server use the repository virtual environment when available and CI's installed `python3` otherwise.
+- Fail fast with the server startup log when the local release preflight cannot start, keeping a failed preflight out of production.
+
 ## v0.13.6 — 2026-07-13
 
 - Preserve the append-only cost ledger while exposing its complete history through bounded pages instead of a 50-run-only view.
