@@ -44,6 +44,9 @@ describe('ConfidenceGauge tierLabel', () => {
     const ariaLabel = screen.getByRole('img').getAttribute('aria-label') ?? ''
     expect(ariaLabel).toContain('95%')
     expect(ariaLabel).toContain('信任分')
+    // 視覺上的 95% 也必須有可見欄位名稱，不能只藏在 aria-label；否則容易被
+    // 誤讀成下方 0.50 的資訊完整度。
+    expect(screen.getByText('信任分')).toBeInTheDocument()
     // 分層明示為「資訊完整度」（源自 calibrated=0.5→中），不得出現「信任等級」誤導字樣
     expect(screen.getByText('資訊完整度：中')).toBeInTheDocument()
     expect(screen.queryByText(/信任等級/)).not.toBeInTheDocument()

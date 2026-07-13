@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.13.9 — 2026-07-13
+
+- Label the analysis gauge's visible primary metric so a raw trust score is not mistaken for calibrated information completeness.
+
 ## v0.13.8 — 2026-07-13
 
 - Keep the package runtime version synchronized with release metadata so the immutable release QA contract remains valid.

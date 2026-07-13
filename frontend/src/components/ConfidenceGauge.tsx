@@ -38,6 +38,7 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
 
   return (
     <div className="flex flex-col items-center gap-2 rounded-lg border border-tf-border bg-tf-card p-4">
+      <p className="tf-num text-xs font-semibold text-tf-muted">{heroLabel}</p>
       <svg
         viewBox="0 0 140 80"
         width={180}
