@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.13.2 — 2026-07-13
+
+- Correct the production Hermes timer Skill Registry root to `skills/hermes`, so its baseline policy set resolves before each autonomous cycle.
+
 ## v0.13.1 — 2026-07-13
 
 Production delivery repair for the Hermes Agent release.
