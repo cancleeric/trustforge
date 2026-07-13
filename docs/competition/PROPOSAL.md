@@ -213,7 +213,7 @@ HOYA BIT 自定位為「AI Native Exchange OS」：
 
 | HOYA BIT 理念 | TrustForge 實作 |
 |--------------|----------------|
-| 不代替決策 | 輸出資訊完整度區間 + 反方證據，明確說「這是輔助判斷」 |
+| 不代替決策 | 輸出資訊完整度分級 + 反方證據，明確說「這是輔助判斷」 |
 | 決策確認機制 | `could_flip` 條件列表——交易者知道什麼情況下要重評 |
 | 資訊透明度 | 每個結論帶 claim_id，回溯到原始來源 URL + 時間戳 |
 | 企業數據整合 | HOYA BIT 行情/深度作為最高信任來源（kind=hoyabit, rep=0.85） |
@@ -243,7 +243,7 @@ HOYA BIT 自定位為「AI Native Exchange OS」：
 | 主題切合 30% | Trust Layer 就是「信任提煉」的技術實作 | RAG 摘要，無來源區分 |
 | 技術可行 25% | 三層 pipeline + Bedrock tool-use agent + AWS 架構 | 單次 ChatGPT API 呼叫 |
 | 商業應用 20% | 可直接接入 HOYA BIT 企業數據，白標 Trust API | 無明確商業路徑 |
-| 創意 15% | 操縱偵測 + 交叉佐證去回音室 + 資訊完整度區間 | 表面摘要 |
+| 創意 15% | 關鍵詞層級可疑用語標記 + 協同發文密集度資訊型警示（informational-only，不影響信任分） + 交叉佐證去回音室 + 資訊完整度分級 | 表面摘要 |
 | 完成度 10% | 15 分鐘內完整輸出 4 交付件 | 通常只有報告 |
 | AWS Kiro +10% | 採用 Kiro 作為開發 IDE，spec 生成 + 連接器規格 | 未採用 |
 
