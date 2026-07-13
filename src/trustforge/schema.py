@@ -65,8 +65,15 @@ class Evidence:
     # 同一個 falsy 值，違反本專案「缺鍵=未知」慣例（別的 optional 欄位都是
     # 用 `None`/缺鍵表達「未知」，不是用空字串冒充）。`None` 才是誠實的
     # 「未擷取到」，不代表「已確認無作者」。向後相容：舊快照/序列化資料
-    # 反序列化回 Evidence 時缺這個鍵一樣正常（落到預設 `None`）。
+    # 反序列化回 Evidence 時缺這個欄位一樣正常（落到預設 `None`）。
     author: str | None = None
+    # W2 可解釋性：動態信譽的運算模式標註（`"ds_em"` = 離線 Dawid-Skene EM
+    # fallback；`"entailment"` = 線上有真語意互證）。這是**字串標註**，刻意
+    # 放在 `trust_components` 的**同層兄弟欄位**、不塞進 `trust_components`
+    # 本身——後者合約約定只放數值（API 消費者假設遍歷得到數值），放字串會
+    # 破壞合約（codex 對抗審 Medium 修正）。`None` 表示無動態信譽 trace
+    # （`dynamic_reputation=False` 或舊資料），向後相容。
+    reputation_mode: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
