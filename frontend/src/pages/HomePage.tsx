@@ -1,27 +1,28 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getOverview } from '../lib/endpoints'
-import type { OverviewCoin } from '../lib/types'
+import { getOverview, getStatus } from '../lib/endpoints'
+import type { OverviewCoin, StatusData } from '../lib/types'
 import { computeCompetitionRanks, sortCoinsByTrustScoreDesc } from '../lib/sortCoins'
 import OverviewCard from '../components/OverviewCard'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 
 const HERO_HREF = '/analyze?coin=BTC&type=multi_source&q=' + encodeURIComponent('分析BTC近期市場狀況，整合多源資料')
-const EXAMPLE_HREF =
-  '/analyze?coin=BTC&type=multi_source&q=' +
-  encodeURIComponent('分析該幣種近期市場狀況，整合多源資料') +
-  '&sample=1'
-
-const STEPS = [
-  { badge: '步驟 1/3', title: '事實', body: '從多個獨立來源蒐集客觀資料——價格、鏈上、監管、新聞、社群。' },
-  { badge: '步驟 2/3', title: '推論', body: 'Agent 交叉比對事實，標記反方訊號與可能推翻結論的條件。' },
-  { badge: '步驟 3/3', title: '結論', body: '給出市場判斷，並附上校準後資訊完整度與完整證據可回溯。' },
-]
+function SourceHealth({ status }: { status: StatusData | null }) {
+  if (!status) return <span className="text-xs text-tf-muted">來源狀態載入中</span>
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+      <span className="text-tf-good"><span className="tf-num font-semibold">{status.freshness.fresh}</span> 新鮮</span>
+      <span className="text-tf-warn"><span className="tf-num font-semibold">{status.freshness.stale}</span> 過期</span>
+      <span className="text-tf-muted"><span className="tf-num font-semibold">{status.freshness.missing}</span> 缺席</span>
+    </div>
+  )
+}
 
 export default function HomePage() {
   const [coins, setCoins] = useState<OverviewCoin[] | null>(null)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
+  const [status, setStatus] = useState<StatusData | null>(null)
 
   useEffect(() => {
     // 卸載時真的 abort 底層 fetch（不只是忽略回應）：省下無謂的網路等待，
@@ -44,38 +45,52 @@ export default function HomePage() {
     }
   }, [])
 
+  useEffect(() => {
+    const controller = new AbortController()
+    void getStatus(controller.signal).then((res) => {
+      if (!controller.signal.aborted && res.ok) setStatus(res.data)
+    })
+    return () => controller.abort()
+  }, [])
+
   // codex 窮舉終審 LOW 修復：平手用 competition ranking（1224 制），見
   // `computeCompetitionRanks()` docstring；`coins` 已經是
   // `sortCoinsByTrustScoreDesc()` 排序後的降序陣列，符合該函式前提。
   const competitionRanks = coins ? computeCompetitionRanks(coins) : []
 
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 sm:px-6">
-      <section
-        className="rounded-xl border p-6 sm:p-10"
-        style={{
-          borderColor: 'var(--color-tf-accent)',
-          background:
-            'linear-gradient(135deg, color-mix(in srgb, var(--color-tf-accent) 10%, transparent), color-mix(in srgb, var(--color-tf-accent) 2%, transparent))',
-        }}
-      >
-        <h1 className="text-2xl font-bold leading-snug text-tf-text sm:text-3xl">
-          多源市場情報的信任提煉——不只給分數，給你為什麼
-        </h1>
-        <p className="mt-3 max-w-2xl text-sm text-tf-text2 sm:text-base">
-          TrustForge 整合價格、鏈上、監管、新聞、社群多個獨立來源，逐項拆解信任來源，
-          而不是丟一個黑箱分數給你。
-        </p>
-        <Link
-          to={HERO_HREF}
-          className="mt-5 inline-flex items-center gap-1 rounded-md bg-tf-accent px-4 py-2 text-sm font-semibold text-white no-underline hover:opacity-90"
-        >
-          立即開始分析 &#8594;
-        </Link>
+    <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6">
+      <section className="border-b border-tf-border pb-5">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase text-tf-link">Hermes market desk</p>
+            <h1 className="mt-1 text-2xl font-bold text-tf-text">市場快照</h1>
+            <p className="mt-1 text-sm text-tf-text2">固定五幣的最新可稽核快照；點選任一幣種查看來源、推理與證據。</p>
+          </div>
+          <Link
+            to={HERO_HREF}
+            className="inline-flex items-center gap-1 rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-white no-underline hover:opacity-90"
+          >
+            新增分析 &#8594;
+          </Link>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-l-2 border-tf-accent bg-tf-card px-3 py-2.5">
+          <div>
+            <p className="text-xs font-semibold text-tf-text">來源快取健康度</p>
+            <p className="mt-0.5 text-xs text-tf-muted">以最近一次已封存 snapshot 計算；缺席不會被當成中性資料。</p>
+          </div>
+          <SourceHealth status={status} />
+        </div>
       </section>
 
       <section>
-        <h2 className="mb-3 text-lg font-semibold text-tf-text">多幣信任總覽</h2>
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-semibold text-tf-text">多幣總覽</h2>
+            <p className="mt-0.5 text-xs text-tf-muted">依信任分排序；資訊完整度反映本次可用、可交叉驗證資料的充分程度。</p>
+          </div>
+          <Link to="/status" className="text-xs font-semibold text-tf-link no-underline hover:underline">查看所有來源狀態 &#8594;</Link>
+        </div>
         {loading && <LoadingState label="總覽載入中…" />}
         {!loading && error && <ErrorState code={error.code} message={error.message} />}
         {!loading && !error && coins && coins.length > 0 && (
@@ -93,29 +108,9 @@ export default function HomePage() {
         )}
       </section>
 
-      <section>
-        <h2 className="mb-3 text-lg font-semibold text-tf-text">怎麼運作</h2>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {STEPS.map((s) => (
-            <div key={s.badge} className="rounded-lg border border-tf-border bg-tf-card p-4">
-              <span className="mb-2 inline-block rounded-full bg-tf-accent/20 px-2 py-0.5 text-[0.68rem] font-mono font-semibold text-tf-link">
-                {s.badge}
-              </span>
-              <p className="text-sm font-semibold text-tf-text">{s.title}</p>
-              <p className="mt-1 text-xs text-tf-muted">{s.body}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section>
-        <Link
-          to={EXAMPLE_HREF}
-          className="inline-flex items-center gap-1 rounded-md border border-tf-border px-4 py-2 text-sm font-semibold text-tf-text no-underline hover:border-tf-accent"
-        >
-          看範例報告 &#8594;
-        </Link>
-      </section>
+      <p className="border-t border-tf-border pt-4 text-xs text-tf-muted">
+        Hermes 工作流：資料快照 → 來源驗證 → 信任推理 → 證據綁定 → 可回溯報告
+      </p>
     </main>
   )
 }

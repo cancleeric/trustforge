@@ -88,6 +88,27 @@ def _owner_pid(owner_id: str) -> str:
     return owner_id.split(":", 1)[0]
 
 
+def _owner_process_is_alive(owner_id: str) -> bool:
+    """Return whether a numeric local owner PID still exists.
+
+    JSON leases are host-local. A service restart can otherwise leave a dead
+    PID blocking the same analysis until its full crash TTL expires.
+    Non-numeric owner ids are test/external identifiers and remain conservative.
+    """
+    try:
+        pid = int(_owner_pid(owner_id))
+        if pid <= 0:
+            return True
+        os.kill(pid, 0)
+    except ValueError:
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class LeaseBackend(ABC):
     """跨實例 durable 租約最小介面。"""
 
@@ -180,8 +201,10 @@ class JsonLeaseBackend(LeaseBackend):
                 if existing is not None and now < float(existing.get("expires_at", 0.0)):
                     # 仍被持有：同 process（pid 相同）→ 自己人接手，允許重取；
                     # 別的 process（pid 不同）→ 擋下。
-                    if _owner_pid(existing.get("owner_id", "")) != _owner_pid(owner_id):
-                        return False
+                    existing_owner = str(existing.get("owner_id", ""))
+                    if _owner_pid(existing_owner) != _owner_pid(owner_id):
+                        if _owner_process_is_alive(existing_owner):
+                            return False
                 data[key] = {
                     "owner_id": owner_id,
                     "acquired_at": now,

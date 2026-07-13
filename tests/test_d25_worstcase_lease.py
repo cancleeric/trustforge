@@ -146,6 +146,17 @@ def test_lease_backend_expired_lease_can_be_reacquired(tmp_path):
     assert b2.try_acquire(key, "owner-B", 900)
 
 
+def test_json_lease_dead_owner_pid_is_reclaimed_without_waiting_for_ttl(tmp_path):
+    """Deploy restart 遺留的本機 dead PID 不得卡住完整 15 分鐘 lease TTL。"""
+    b = JsonLeaseBackend(tmp_path / "dead_owner.json")
+    key = "BTC-analysis"
+    b.path.write_text(
+        '{"BTC-analysis":{"owner_id":"999999999:dead","expires_at":9999999999}}',
+        encoding="utf-8",
+    )
+    assert b.try_acquire(key, "12345:new-owner", 900)
+
+
 def test_lease_ttl_default_is_15_minutes():
     assert analyze_lease_ttl_seconds() == 15 * 60
 

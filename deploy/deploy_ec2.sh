@@ -129,6 +129,10 @@ BUCKET="trustforge-deploy-${ACCT}"
 ROLE=trustforge-ec2
 SG=trustforge-ec2-sg
 INSTANCE_TYPE="${INSTANCE_TYPE:-t3.micro}"
+# Bootstrap provisions IAM and DynamoDB and is deliberately reserved for a
+# privileged operator. Release CD deploys only into the already-provisioned
+# production account through its narrow OIDC role.
+BOOTSTRAP="${TRUSTFORGE_BOOTSTRAP:-1}"
 
 echo "[ec2] 帳號 $ACCT / 區域 $REGION / 模型 ${MODEL:-<離線,無BEDROCK_MODEL_ID,不燒credit>}"
 
@@ -317,6 +321,7 @@ verify_web_healthz() {
 # 放在「既有實例？」分支判斷之前的共用段：IAM 是從部署主機用 aws cli 直接做
 # （不經 SSM），首次建置跟 update-in-place 兩條路徑都會先跑過這裡，確保腳本
 # 對 DynamoDB 權限自足——不依賴「CEO 手動補過一次 IAM」這種外部前提。
+if [ "$BOOTSTRAP" = "1" ]; then
 if ! aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
   echo "[ec2] 建 IAM 角色 ${ROLE}…"
   aws iam create-role --role-name "$ROLE" --assume-role-policy-document \
@@ -416,6 +421,9 @@ BG_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
 if ! aws dynamodb describe-table --region "$REGION" --table-name "$BG_TABLE" >/dev/null 2>&1; then
   echo "[ec2] ❌ DynamoDB 表 $BG_TABLE 在 $REGION 不存在，budget 多實例保護會失效，中止部署" >&2
   exit 1
+fi
+else
+  echo "[ec2] skip AWS bootstrap (TRUSTFORGE_BOOTSTRAP=${BOOTSTRAP}); using provisioned production infrastructure"
 fi
 
 # 2) 打包 + 上傳 S3 -----------------------------------------------------------

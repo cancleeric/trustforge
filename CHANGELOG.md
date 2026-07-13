@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.13.9 — 2026-07-13
+
+- Label the analysis gauge's visible primary metric so a raw trust score is not mistaken for calibrated information completeness.
+
+## v0.13.8 — 2026-07-13
+
+- Keep the package runtime version synchronized with release metadata so the immutable release QA contract remains valid.
+
+## v0.13.7 — 2026-07-13
+
+- Make the release smoke server use the repository virtual environment when available and CI's installed `python3` otherwise.
+- Fail fast with the server startup log when the local release preflight cannot start, keeping a failed preflight out of production.
+
+## v0.13.6 — 2026-07-13
+
+- Preserve the append-only cost ledger while exposing its complete history through bounded pages instead of a 50-run-only view.
+- Require a locally started TrustForge server to pass health, overview, and paged-cost smoke checks before production CD.
+- Add the TrustForge-owned Hermes Execution Journey skill specification.
+
+## v0.13.5 — 2026-07-13
+
+- Reclaim dead local JSON analysis leases after a service restart and keep conflict responses free of internal dedup keys.
+
+## v0.13.4 — 2026-07-13
+
+- Render the header release from the live health contract and inject the commit SHA at frontend build time; remove the stale hard-coded version badge.
+
+## v0.13.3 — 2026-07-13
+
+- Treat a partially unavailable source refresh as a logged degraded Hermes node, while continuing the bounded workflow with available evidence.
+- Split privileged AWS bootstrap from OIDC release CD, so a release tag deploys through the pre-provisioned production infrastructure.
+
+## v0.13.2 — 2026-07-13
+
+- Correct the production Hermes timer Skill Registry root to `skills/hermes`, so its baseline policy set resolves before each autonomous cycle.
+
+## v0.13.1 — 2026-07-13
+
+Production delivery repair for the Hermes Agent release.
+
+- Isolate the zero-cost question-bank check from the normal backend QA budget contract.
+- Package skills and executable deployment scripts, and resolve the deployed Skill Registry root from its artifact location.
+
+## v0.13.0 — 2026-07-13
+
+Hermes Agent 可稽核自動化與受控外框進化。
+
+- 五節點 Execution Log、來源級耗時／結果、240 題原創驗證題庫。
+- 五年 OHLCV lineage、source archive、歷史 replay 與 T+1/T+7/T+14 outcome diagnostic。
+- Outer Skill Registry：source / analysis / report / evaluation / improvement 五類 hash artifact，stage / sandbox / approve / rollback。
+- Hermes 預取 timer、cache freshness artifact、受 15 分鐘預算控制的來源並行化。
+- Historical Backfill 基礎：以 `published_at <= T` 回填，明確標示 `backfilled_archive`，拒絕 future leakage。
+- release tag 版控閘：package / changelog / tag 必須一致，dirty release 直接拒絕。
+
 ## v0.12.0 — 2026-07-12
 
 信任引擎技術債收口 + 可觀測性 + 測試/CI 品質閘。本輪多為 follow-up issue 的深化修復。

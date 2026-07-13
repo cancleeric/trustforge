@@ -101,7 +101,12 @@ if [ "${TF_BOOTSTRAP_DRY_RUN:-}" = "1" ]; then
   echo "[fe-nginx]（dry-run）略過本機 npm build/zip 打包與真的 aws s3 cp 上傳，只組遠端指令內容，不寫入真的 S3 bucket" >&2
 else
   echo "[fe-nginx] build 前端（npm ci && npm run build）…" >&2
-  ( cd frontend && npm ci && npm run build )
+  (
+    cd frontend
+    export VITE_GIT_SHA="${VITE_GIT_SHA:-$(git rev-parse --short HEAD)}"
+    export VITE_RELEASE_VERSION="${VITE_RELEASE_VERSION:-v$(sed -n 's/^version = "\(.*\)"/\1/p' ../pyproject.toml)}"
+    npm ci && npm run build
+  )
   if [ ! -d frontend/dist ]; then
     echo "[fe-nginx] ❌ frontend/dist 不存在，build 失敗" >&2
     exit 1

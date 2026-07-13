@@ -436,6 +436,8 @@ export function isCostsData(value: unknown): value is CostsData {
   if (!isPlainObject(value)) return false
   if (typeof value.total_cost_usd !== 'number') return false
   if (typeof value.run_count !== 'number') return false
+  if (value.offset !== undefined && typeof value.offset !== 'number') return false
+  if (value.limit !== undefined && typeof value.limit !== 'number') return false
   if (!isPlainObject(value.by_model)) return false
   if (!Object.values(value.by_model).every((v) => typeof v === 'number')) return false
   if (!isPlainObject(value.by_model_detail)) return false

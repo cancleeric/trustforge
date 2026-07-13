@@ -151,19 +151,21 @@ export default function StatusPage() {
   }, [])
 
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6 sm:px-6">
-      <h1 className="text-lg font-semibold text-tf-text">系統狀態</h1>
+    <main className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6">
+      <div className="border-b border-tf-border pb-4">
+        <p className="font-mono text-xs font-semibold uppercase text-tf-link">Runtime observability</p>
+        <h1 className="mt-1 text-2xl font-bold text-tf-text">系統狀態</h1>
+        <p className="mt-1 text-sm text-tf-text2">快取連線與來源新鮮度的即時監控；異常資料會排在清單前方。</p>
+      </div>
 
       {loading && <LoadingState label="狀態載入中…" />}
       {!loading && statusError && <ErrorState code={statusError.code} message={statusError.message} />}
       {!loading && !statusError && status && (
         <>
-          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-tf-border bg-tf-card p-4">
-            <span className="text-sm text-tf-text2">版本 {status.version}</span>
-            <span className="tf-num text-sm text-tf-text2">運行時間 {formatUptime(status.uptime_seconds)}</span>
-            <span className="text-sm text-tf-text2">
-              Bedrock：{status.bedrock_capable ? '可用' : '未啟用'}
-            </span>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">部署版本</p><p className="mt-1 font-mono text-sm font-semibold text-tf-text">{status.version}</p></div>
+            <div className="border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">服務運行時間</p><p className="tf-num mt-1 text-sm font-semibold text-tf-text">{formatUptime(status.uptime_seconds)}</p></div>
+            <div className="border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">LLM runtime</p><p className="mt-1 text-sm font-semibold text-tf-text">Bedrock：{status.bedrock_capable ? '可用' : '未啟用'}</p></div>
           </div>
 
           <div className="rounded-lg border border-tf-border bg-tf-card p-4">

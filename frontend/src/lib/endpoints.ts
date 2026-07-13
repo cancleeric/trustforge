@@ -92,9 +92,11 @@ export function getStatus(signal?: AbortSignal): Promise<ApiEnvelope<StatusData>
   })
 }
 
-export function getCosts(signal?: AbortSignal): Promise<ApiEnvelope<CostsData>> {
-  return apiFetch<CostsData>('/api/costs', undefined, isCostsData, {
-    signal,
+export function getCosts(offsetOrSignal: number | AbortSignal = 0, signal?: AbortSignal): Promise<ApiEnvelope<CostsData>> {
+  const offset = typeof offsetOrSignal === 'number' ? offsetOrSignal : 0
+  const requestSignal = typeof offsetOrSignal === 'number' ? signal : offsetOrSignal
+  return apiFetch<CostsData>('/api/costs', { offset, limit: 50 }, isCostsData, {
+    signal: requestSignal,
     timeoutMs: DEFAULT_TIMEOUT_MS,
   })
 }

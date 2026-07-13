@@ -46,6 +46,14 @@ def main(argv: list[str] | None = None) -> int:
             [sys.executable, *action["argv"]], cwd=REPO, timeout=max(1, int(remaining)), check=False,
         )
         if result.returncode:
+            if action["tool"] == "refresh_sources":
+                # Connectors can be partially unavailable while the archive and
+                # remaining sources still produce an auditable usable snapshot.
+                print(
+                    f"[hermes_cycle] refresh_sources degraded ({result.returncode}); continuing",
+                    file=sys.stderr,
+                )
+                continue
             print(f"[hermes_cycle] {action['tool']} failed ({result.returncode})", file=sys.stderr)
             return result.returncode
     print(f"[hermes_cycle] completed in {time.monotonic() - started:.2f}s")

@@ -51,6 +51,11 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
         onSubmit({ coin, type, q })
       }}
     >
+      <div className="border-b border-tf-border pb-3">
+        <p className="font-mono text-xs font-semibold uppercase text-tf-link">Run configuration</p>
+        <h2 className="mt-1 text-sm font-semibold text-tf-text">設定本次分析</h2>
+        <p className="mt-1 text-xs text-tf-muted">送出後會建立獨立 run，來源與執行紀錄不會覆蓋既有結果。</p>
+      </div>
       <div>
         <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-coin">
           幣種
@@ -70,7 +75,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
       </div>
       <div>
         <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-type">
-          題型
+          分析模式
         </label>
         <select
           id="qc-type"
@@ -111,7 +116,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
         type="submit"
         className="rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-white hover:opacity-90"
       >
-        Run analysis <span className="tf-num opacity-70">&#8629;</span>
+        執行分析 <span className="tf-num opacity-70">&#8594;</span>
       </button>
     </form>
   )

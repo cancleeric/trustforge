@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { normalizeDecisionState, type OverviewCoin } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import { DecisionStateBadge, DirectionBadge, ManipRiskBadge } from './Badges'
+import { formatEpoch } from '../lib/format'
 
 interface Props {
   coin: OverviewCoin
@@ -26,18 +27,11 @@ function overviewCardHref(coin: string): string | null {
 
 export default function OverviewCard({ coin, rank }: Props) {
   const href = overviewCardHref(coin.coin)
-  // #101：主角數字統一——decision_state 為 abstain/low_confidence 時主角改為
-  // 校準後資訊完整度，避免在資料不足/棄權情境仍以信任分當門面；normal 態
-  // 主角維持信任分。副標一律雙數字並列並各自掛標籤，兩態下都看得到另一個數字。
-  // #1 修復：legacy 快照／未知 enum 值一律先正規化為 'normal' 再判斷，
-  // 不直接對原始 `coin.decision_state` 做字面值比對（見 `normalizeDecisionState`
-  // docstring）。
+  // 每張卡固定並列兩個具名數值，不再依狀態互換主角；跨幣掃讀時相同位置
+  // 永遠是相同指標。legacy 值仍先正規化為 normal。
   const decisionState = normalizeDecisionState(coin.decision_state)
-  const isLowInfo = decisionState === 'abstain' || decisionState === 'low_confidence'
-  const heroValue = isLowInfo ? coin.calibrated_confidence : coin.trust_score
-  const heroLabel = isLowInfo ? '資訊完整度（校準後）' : '信任分'
   const body = (
-    <div className="flex h-full flex-col gap-2 rounded-lg border border-tf-border bg-tf-card p-4 transition hover:border-tf-accent hover:shadow-[0_4px_14px_color-mix(in_srgb,var(--color-tf-accent)_18%,transparent)]">
+    <div className="flex h-full flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4 transition hover:border-tf-accent hover:shadow-[0_4px_14px_color-mix(in_srgb,var(--color-tf-accent)_18%,transparent)]">
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-1.5">
           {rank !== undefined && (
@@ -47,17 +41,21 @@ export default function OverviewCard({ coin, rank }: Props) {
         </span>
         <DirectionBadge direction={coin.direction} />
       </div>
-      <div className="tf-num flex items-baseline gap-1">
-        <span className="text-2xl font-bold text-tf-text">{heroValue.toFixed(2)}</span>
-        <span className="text-xs text-tf-muted">{heroLabel}</span>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="border-l-2 border-tf-link pl-2">
+          <p className="text-[0.68rem] font-semibold text-tf-muted">信任分</p>
+          <p className="tf-num mt-0.5 text-2xl font-bold text-tf-text">{coin.trust_score.toFixed(2)}</p>
+        </div>
+        <div className="border-l-2 border-tf-good pl-2">
+          <p className="text-[0.68rem] font-semibold text-tf-muted">資訊完整度</p>
+          <p className="tf-num mt-0.5 text-2xl font-bold text-tf-text">{coin.calibrated_confidence.toFixed(2)}</p>
+        </div>
       </div>
-      <p className="tf-num text-xs text-tf-muted">
-        資訊完整度（校準後） {coin.calibrated_confidence.toFixed(2)}｜裸均值信任分 {coin.trust_score.toFixed(2)}
-      </p>
       <div className="flex flex-wrap items-center gap-1.5">
         <DecisionStateBadge state={decisionState} />
         <ManipRiskBadge manipScore={coin.manip_score} manipScoreMean={coin.manip_score_mean} />
       </div>
+      <p className="tf-num mt-auto text-[0.68rem] text-tf-muted">快照 {formatEpoch(coin.fetched_at_epoch)}</p>
     </div>
   )
 

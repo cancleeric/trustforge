@@ -167,9 +167,10 @@ export default function ComparePage() {
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6">
-      <div>
-        <h1 className="text-lg font-semibold text-tf-text">雙幣比較</h1>
-        <p className="mt-1 text-xs text-tf-muted">
+      <div className="border-b border-tf-border pb-4">
+        <p className="font-mono text-xs font-semibold uppercase text-tf-link">Parallel Hermes runs</p>
+        <h1 className="mt-1 text-2xl font-bold text-tf-text">雙幣比較</h1>
+        <p className="mt-1 text-sm text-tf-text2">
           兩份獨立分析並列呈現，各自的信任分/資訊完整度/證據互不干擾，供相對強弱比較。
         </p>
       </div>

@@ -61,8 +61,18 @@ export default function AnalyzePage() {
   }
 
   return (
-    <main className="mx-auto grid max-w-6xl grid-cols-1 gap-4 px-4 py-6 sm:px-6 lg:grid-cols-[280px_1fr]">
-      <aside>
+    <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-3 border-b border-tf-border pb-4">
+        <div>
+          <p className="font-mono text-xs font-semibold uppercase text-tf-link">Hermes analysis run</p>
+          <h1 className="mt-1 text-2xl font-bold text-tf-text">分析工作區</h1>
+          <p className="mt-1 text-sm text-tf-text2">每次執行固定一個 run，保留來源、節點、證據與輸出供後續稽核。</p>
+        </div>
+        <p className="font-mono text-xs text-tf-muted">asset: {params.coin} · mode: {params.type}</p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[288px_minmax(0,1fr)]">
+      <aside className="lg:sticky lg:top-4 lg:self-start">
         <QueryConsole initial={{ coin: params.coin, type: params.type, q: params.q }} onSubmit={handleSubmit} />
       </aside>
 
@@ -71,6 +81,7 @@ export default function AnalyzePage() {
         {!loading && error && <ErrorState code={error.code} message={error.message} />}
         {!loading && !error && data && <AnalysisReportView data={data} />}
       </section>
+      </div>
     </main>
   )
 }

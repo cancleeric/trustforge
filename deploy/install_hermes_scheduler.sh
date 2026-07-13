@@ -23,7 +23,7 @@ Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
 Environment=SCHEDULER_RUN_LOG_BACKEND=dynamodb
 Environment=TRUSTFORGE_SCHEDULER_RUN_TABLE=trustforge-scheduler-runs
-Environment=TRUSTFORGE_SKILL_ROOT=$APP_DIR/skills
+Environment=TRUSTFORGE_SKILL_ROOT=$APP_DIR/skills/hermes
 ExecStart=/usr/bin/python3 scripts/hermes_cycle.py --max-budget-sec 900
 UNIT
 
