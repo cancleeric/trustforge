@@ -425,10 +425,14 @@ cp -r src/trustforge "$B/trustforge"; cp -r data "$B/data"; cp -r demo "$B/demo"
 # scripts/：排程 fetcher（fetch_scheduler.py）跟著一起打包，否則 systemd timer
 # 在 EC2 上會找不到檔案（見下方 fetch-scheduler.service ExecStart）。
 cp -r scripts "$B/scripts"
+cp -r skills "$B/skills"
 # deploy/：reconcile_trustforge_unit.sh 等部署期 glue 需在 EC2 上由 unit 的
 # ExecStartPre 呼叫，故一併打包（不含任何 token 值，只含腳本邏輯）。reconcile
 # 腳本本身會再呼叫 scripts/sweep_deploy_parameters.sh。
 cp -r deploy "$B/deploy"
+# Source-control mode bits are not guaranteed for shell helpers in every local
+# checkout.  systemd ExecStartPre requires an executable bit after unzip.
+chmod +x "$B/scripts/"*.sh "$B/deploy/"*.sh
 # 第三輪 AI 友善：`GET /api/openapi.yaml`／`GET /llms.txt` 是純讀檔回傳（見
 # `src/trustforge/web.py::_handle_openapi_spec`/`_handle_llms_txt`，路徑解析
 # 靠 systemd unit 已設的 `TRUSTFORGE_HOME=/opt/trustforge`），這兩份檔案不
@@ -439,7 +443,7 @@ mkdir -p "$B/docs"; cp -r docs/api "$B/docs/api"; cp llms.txt "$B/llms.txt"
 GIT_VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
 printf 'VERSION = "%s"\n' "$GIT_VER" > "$B/trustforge/_version.py"
 echo "[ec2] 版號 = $GIT_VER"
-( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts deploy docs llms.txt -x '*/__pycache__/*' ); rm -rf "$B"
+( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts skills deploy docs llms.txt -x '*/__pycache__/*' ); rm -rf "$B"
 
 aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null || \
   aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
@@ -515,7 +519,7 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   # 緊接著 `chmod 600` 該 unit 檔（harper CISO L-4）：預設 644
   # world-readable，每次部署都無條件收緊一次（冪等）。
   CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi"'"$UNIT_ENV_RECONCILE_CMDS"',"chmod 600 /etc/systemd/system/trustforge.service","cat > /etc/systemd/system/fetch-scheduler.service <<UNIT2","[Unit]","Description=TrustForge connector cache fetch scheduler","[Service]","Type=oneshot","WorkingDirectory=/opt/trustforge","Environment=AWS_REGION='"$REGION"'","Environment=PYTHONPATH=/opt/trustforge","Environment=CACHE_BACKEND=dynamodb","Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache","Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger","Environment=COST_LEDGER_BACKEND=dynamodb","ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py","UNIT2","cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3","[Unit]","Description=Run TrustForge fetch scheduler periodically","[Timer]","OnBootSec=1min","OnUnitActiveSec=15min","[Install]","WantedBy=timers.target","UNIT3","systemctl daemon-reload","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/trustforge_app.zip ./app.zip --region '"$REGION"'","unzip -o app.zip","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi"'"$UNIT_ENV_RECONCILE_CMDS"',"chmod 600 /etc/systemd/system/trustforge.service","bash deploy/install_hermes_scheduler.sh","systemctl restart trustforge","systemctl enable --now fetch-scheduler.timer","for i in $(seq 1 12); do systemctl is-active --quiet trustforge && curl -fsS http://localhost/healthz >/dev/null 2>&1 && exit 0; sleep 3; done; echo \"[ec2] healthz 檢查失敗\"; journalctl -u trustforge -n 40 --no-pager; exit 1"]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
     echo "[ec2] ❌ SSM send-command 未取得 CommandId，中止" >&2
@@ -651,6 +655,7 @@ WantedBy=timers.target
 UNIT3
 systemctl daemon-reload && systemctl enable --now trustforge >>/var/log/tf-setup.log 2>&1
 systemctl enable --now fetch-scheduler.timer >>/var/log/tf-setup.log 2>&1
+bash /opt/trustforge/deploy/install_hermes_scheduler.sh >>/var/log/tf-setup.log 2>&1
 EOF
 
 # 6) AMI + 啟動實例 -----------------------------------------------------------

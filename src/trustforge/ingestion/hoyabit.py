@@ -1,105 +1,122 @@
-"""HOYA BIT 連接器 interface / stub（issue #154，待 7/13 企業數據工作坊 spec）。
+"""HOYA BIT connector with a fail-closed, organizer-configured contract.
 
-⚠️ 這是**佔位 stub**，不是真實連接器。7/13 工作坊給出 HOYA BIT 官方 API
-spec（OHLCV / orderbook / trades 端點）後，才接真實呼叫。在 spec 到位前：
-
-  - 預設 `enabled=False`：**不啟用**。避免誤把佔位 sample 資料當成真實高
-    權威（hoyabit kind 聲譽 0.85，見 `trust/scoring.KIND_REPUTATION`）污染
-    信任計算。只有管理端明確呼叫
-    `base.set_source_enabled_override("hoyabit-ticker", True)`（或經
-    admin_config 的 disabled_sources 反向排除）才會納入。
-  - `fetch()` 回的佔位 Document **必定標 `meta["sample"]=True`** 且
-    `meta["stub"]=True`——任何下游消費者都應把 `meta["sample"]=True` 視為
-    「非真實資料、不可當權威」。codex 對抗審重點：stub 絕不發出任何真實
-    外部 HTTP 請求（disabled 時零副作用；啟用時也只回佔位、不偷打 API）。
-  - `get_depth()/get_orderbook()/get_trades()` 這些真實 API 方法**尚未實作**
-    ，暫回 `NotImplementedError`（spec 到位才補真實呼叫，且必須走
-    `safe_fetch` 的 SSRF-safe fetch，沿用各連接器既有慣例）。
-
-social/Reddit 經 `social.RedditCryptoSource` 真實接線 `search.rss`
-（SSRF-safe，見 social.py），已納入生產 collect（base.build_social_sources）；
-但雲端 IP 常遭 Reddit 403，多數時候空手降級跳過，非「完全沒接」。本 hoyabit
-模組僅專指交易所一手行情佔位，與 social 來源互不隸屬。
+No endpoint is guessed or bundled.  Until the official HTTPS ticker URL is
+provided in ``TRUSTFORGE_HOYABIT_TICKER_URL`` this remains the old disabled
+sample stub.  Once configured, the scheduler fetches it through the shared
+SSRF-safe transport and emits first-party Evidence with explicit freshness.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
+from typing import Any
 
+from . import safe_fetch
 from .base import Document, Source, get_source_enabled
 
 _log = logging.getLogger(__name__)
+_MAX_BYTES = 512 * 1024
+_TIMEOUT = 8
+_UA = "TrustForge/1.0 (HOYA BIT connector)"
 
 
 class HoyaBitSource(Source):
-    """HOYA BIT 交易所連接器 stub（issue #154，待 7/13 spec 接真實）。
-
-    預設 disabled（不接真實 API 前不啟用）。`fetch()` 回標 sample 的佔位
-    Document，**絕不發出任何真實外部 HTTP 請求**（codex 對抗審重點：stub
-    不會誤發真實外部請求、disabled 時零副作用、啟用時也只回佔位不偷打 API）。
-    """
-
     kind = "hoyabit"
     name = "hoyabit-ticker"
-    # 預設 disabled：與通行 fail-closed（真實源預設 ON，見 #155）互補——這裡是
-    # 「未接真實 API 前絕不啟用」，避免佔位資料被當真實高權威。只有管理端
-    # 明確啟用才納入。
-    enabled = False
 
     def __init__(self) -> None:
         super().__init__()
-        self.last_attempts: int = 0
-        self.last_failures: int = 0
-        self.last_degraded: bool = False
-        # 預設不啟用（見 class 屬性說明）；用 get_source_enabled 取當下真值，
-        # 與 collect 過濾邏輯單一真值來源一致。
-        self.enabled: bool = get_source_enabled(self.name)
+        self.endpoint = os.getenv("TRUSTFORGE_HOYABIT_TICKER_URL", "").strip()
+        self.token = os.getenv("TRUSTFORGE_HOYABIT_API_TOKEN", "").strip()
+        self.enabled = bool(self.endpoint) and get_source_enabled(self.name)
+        self.last_attempts = 0
+        self.last_failures = 0
+        self.last_degraded = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.endpoint)
+
+    def _headers(self) -> dict[str, str] | None:
+        return {"Authorization": f"Bearer {self.token}"} if self.token else None
+
+    @staticmethod
+    def _numeric(value: Any, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            candidate = value.get(key) if isinstance(value, dict) else None
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+                return float(candidate)
+            if isinstance(candidate, str):
+                try:
+                    return float(candidate)
+                except ValueError:
+                    pass
+        return None
+
+    def _extract(self, payload: Any, coin: str) -> tuple[float, float | None, dict[str, Any]]:
+        # Contract adapters deliberately accept only common ticker envelopes;
+        # malformed data fails closed and preserves the prior cache.
+        entries: list[Any]
+        if isinstance(payload, list):
+            entries = payload
+        elif isinstance(payload, dict):
+            data = payload.get("data", payload.get("result", payload))
+            entries = data if isinstance(data, list) else [data]
+        else:
+            raise ValueError("HOYA BIT response must be an object or list")
+        target = coin.upper()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            symbol = str(entry.get("symbol", entry.get("market", entry.get("pair", "")))).upper()
+            if symbol and target not in symbol:
+                continue
+            price = self._numeric(entry, ("last", "last_price", "price", "close"))
+            if price is None or price <= 0:
+                continue
+            change = self._numeric(entry, ("change_24h", "price_change_percent_24h", "percent_change_24h"))
+            return price, change, entry
+        raise ValueError(f"HOYA BIT ticker has no valid {target} price")
 
     def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
-        """stub 佔位：回 1 筆標 sample 的 Document，**不**打任何真實 API。
-
-        ⚠️ 這不是真實資料——`meta["sample"]=True` 必須被下游視為「非權威」。
-        待 7/13 spec 到位，這個方法會改成打 HOYA BIT 真實端點、回真實
-        Document（當時 `meta["sample"]` 不應出現，且必須走 `safe_fetch`
-        的 SSRF-safe fetch）。
-        """
         self.last_attempts += 1
-        is_enabled = get_source_enabled(self.name)
-        _log.info(
-            "HOYA BIT stub fetch 被呼叫（coin=%r, query=%r）：尚未接真實 API，"
-            "回佔位 sample Document，不發出任何外部請求",
-            coin or "", query or "",
-        )
-        meta = {
-            # 關鍵安全標記：這筆是佔位 sample，下游絕不可當真實高權威
-            "sample": True,
-            "stub": True,
-            "disabled": not is_enabled,
-            "content_reference": "HOYA BIT connector stub（未接真實 API）",
-        }
+        if not self.configured:
+            return [Document(
+                id="hoyabit-stub-placeholder", kind=self.kind, source=self.name,
+                text="HOYA BIT connector stub — 未設定官方 API，此為佔位 sample 資料", url="", ts=0.0,
+                meta={"sample": True, "stub": True, "disabled": not get_source_enabled(self.name),
+                      "content_reference": "HOYA BIT connector stub（未設定官方 API）"},
+            )]
+        if not coin:
+            raise ValueError("HOYA BIT connector requires an explicit coin")
+        try:
+            raw = safe_fetch.fetch_url(self.endpoint, user_agent=_UA, extra_headers=self._headers(), timeout=_TIMEOUT, max_bytes=_MAX_BYTES)
+            price, change, raw_entry = self._extract(json.loads(raw), coin)
+        except Exception:
+            self.last_failures += 1
+            self.last_degraded = True
+            raise
+        now = time.time()
+        change_text = f"；24h {change:+.2f}%" if change is not None else ""
         return [Document(
-            id="hoyabit-stub-placeholder",
-            kind=self.kind,
-            source=self.name,
-            text="HOYA BIT connector stub — 未接真實 API，此為佔位 sample 資料",
-            url="",
-            ts=0.0,
-            meta=meta,
+            id=f"hoyabit-{coin.upper()}-{int(now)}", kind=self.kind, source=self.name,
+            text=f"HOYA BIT {coin.upper()} ticker：價格 {price:g}{change_text}", url=self.endpoint, ts=now,
+            meta={"live_source": True, "provider": "HOYA BIT", "coin": coin.upper(), "price": price,
+                  "change_24h_pct": change, "raw_fields": sorted(raw_entry)[:32],
+                  "content_reference": f"HOYA BIT official ticker {coin.upper()} price={price:g}"},
         )]
 
     def get_depth(self, coin: str) -> list[Document]:
-        """待 7/13 spec：HOYA BIT orderbook depth 端點。尚未實作。"""
-        raise NotImplementedError("HOYA BIT get_depth 尚未實作（待 7/13 spec）")
+        raise NotImplementedError("HOYA BIT depth contract is not configured")
 
     def get_orderbook(self, coin: str) -> list[Document]:
-        """待 7/13 spec：HOYA BIT orderbook 端點。尚未實作。"""
-        raise NotImplementedError("HOYA BIT get_orderbook 尚未實作（待 7/13 spec）")
+        raise NotImplementedError("HOYA BIT orderbook contract is not configured")
 
     def get_trades(self, coin: str) -> list[Document]:
-        """待 7/13 spec：HOYA BIT trades 端點。尚未實作。"""
-        raise NotImplementedError("HOYA BIT get_trades 尚未實作（待 7/13 spec）")
+        raise NotImplementedError("HOYA BIT trades contract is not configured")
 
 
 def build_hoyabit_sources() -> list[Source]:
-    """回傳 HOYA BIT 連接器（預設 disabled stub）。註冊進 base.collect() 線上
-    分支，但需明確 enabled 才納入（default disabled，見 HoyaBitSource）。"""
     return [HoyaBitSource()]

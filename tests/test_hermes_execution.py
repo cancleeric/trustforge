@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from trustforge.execlog import ExecutionLog, HERMES_NODES
+from trustforge.ingestion.base import OfflineSampleSource, execution_log_context, collect
 
 
 def test_hermes_events_have_stable_run_and_node_context():
@@ -38,3 +39,23 @@ def test_hermes_manifest_and_jsonl_are_auditable():
     ]
     event = json.loads(log.to_jsonl())
     assert event["params"]["hermes"]["node_id"] == "source_ingestion"
+
+
+def test_each_source_boundary_records_safe_latency_and_outcome():
+    log = ExecutionLog(run_id="hermes-source-run")
+    with execution_log_context(log):
+        collect(
+            "分析 BTC", coin="BTC", offline=True,
+            sources=[OfflineSampleSource("regulatory", "government-announcements")],
+        )
+
+    events = [event for event in log.events if event["tool"] == "ingestion.source"]
+    assert [event["params"]["source"] for event in events] == [
+        "official-ohlcv", "government-announcements",
+    ]
+    for event in events:
+        params = event["params"]
+        assert params["outcome"] == "ok"
+        assert params["duration_ms"] >= 0
+        assert params["document_count"] >= 0
+        assert params["hermes"]["node_id"] == "source_ingestion"

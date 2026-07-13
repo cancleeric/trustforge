@@ -21,6 +21,11 @@ const event: ExecutionEvent = {
   params: { hermes: { run_id: 'hermes-test-run', agent: 'hermes', node_id: 'source_ingestion', node_label: '來源蒐集', node_order: 1, status: 'completed' } },
 }
 
+const sourceEvent: ExecutionEvent = {
+  ts: '2026-07-13T00:00:01Z', elapsed_sec: 1.2, tool: 'ingestion.source', summary: 'sec-edgar：ok，2 documents，48.0 ms',
+  params: { source: 'sec-edgar', kind: 'regulatory', outcome: 'ok', document_count: 2, duration_ms: 48, hermes: { run_id: 'hermes-test-run', agent: 'hermes', node_id: 'source_ingestion', node_label: '來源蒐集', node_order: 1, status: 'completed' } },
+}
+
 const report = {
   coin: 'BTC', question: '分析 BTC', market_judgment: '中性', facts: [], inferences: [], key_basis: [],
   confidence: 0.5, calibrated_confidence: 0.5, decision_state: 'normal', limits: [], could_flip: [],
@@ -30,11 +35,13 @@ const report = {
 
 describe('HermesExecutionPanel', () => {
   it('renders the stable agent graph and auditable run id', () => {
-    render(<HermesExecutionPanel execution={execution} events={[event]} report={report} evidence={[] as Evidence[]} />)
+    render(<HermesExecutionPanel execution={execution} events={[event, sourceEvent]} report={report} evidence={[] as Evidence[]} />)
     expect(screen.getByText('Hermes Agent')).toBeInTheDocument()
     expect(screen.getByText(/hermes-test-run/)).toBeInTheDocument()
     expect(screen.getAllByText('來源蒐集').length).toBeGreaterThan(0)
     expect(screen.getAllByText('報告交付').length).toBeGreaterThan(0)
     expect(screen.getByText('來源完成')).toBeInTheDocument()
+    expect(screen.getByText('sec-edgar')).toBeInTheDocument()
+    expect(screen.getByText('48.0 ms')).toBeInTheDocument()
   })
 })

@@ -25,6 +25,18 @@ function eventNode(event: ExecutionEvent) {
   return { id: 'report_delivery', label: '報告交付', status: 'observed', runId: undefined }
 }
 
+function sourceDetails(event: ExecutionEvent) {
+  if (event.tool !== 'ingestion.source') return null
+  const params = event.params
+  return {
+    source: typeof params.source === 'string' ? params.source : 'unknown',
+    kind: typeof params.kind === 'string' ? params.kind : 'unknown',
+    durationMs: typeof params.duration_ms === 'number' ? params.duration_ms : null,
+    documentCount: typeof params.document_count === 'number' ? params.document_count : null,
+    outcome: typeof params.outcome === 'string' ? params.outcome : 'observed',
+  }
+}
+
 function download(name: string, body: string, type: string) {
   const href = URL.createObjectURL(new Blob([body], { type }))
   const a = document.createElement('a')
@@ -87,6 +99,7 @@ export default function HermesExecutionPanel({
     const haystack = `${event.tool} ${event.summary} ${eventNode(event).label}`.toLowerCase()
     return (nodeFilter === 'all' || eventNode(event).id === nodeFilter) && haystack.includes(query.toLowerCase())
   }), [events, nodeFilter, query])
+  const sourceEvents = events.map(sourceDetails).filter((item): item is NonNullable<typeof item> => item !== null)
 
   return (
     <section className="rounded-lg border border-tf-border bg-tf-card p-4" aria-label="Hermes Agent execution">
@@ -106,11 +119,12 @@ export default function HermesExecutionPanel({
         {nodes.slice().sort((a, b) => a.order - b.order).map((node) => {
           const nodeEvents = events.filter((event) => eventNode(event).id === node.id)
           const done = nodeEvents.some((event) => eventNode(event).status === 'completed') || node.id === 'report_delivery' && events.some((event) => event.tool === 'report.done')
+          const failed = nodeEvents.some((event) => eventNode(event).status === 'failed')
           return (
-            <li key={node.id} className={`border p-3 ${done ? 'border-tf-good/70 bg-tf-good/10' : 'border-tf-border bg-tf-bg/40'}`}>
+            <li key={node.id} className={`border p-3 ${failed ? 'border-tf-bad/70 bg-tf-bad/10' : done ? 'border-tf-good/70 bg-tf-good/10' : 'border-tf-border bg-tf-bg/40'}`}>
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono text-xs text-tf-muted">0{node.order}</span>
-                <span className={`text-xs font-semibold ${done ? 'text-tf-good' : 'text-tf-muted'}`}>{done ? '完成' : '等待'}</span>
+                <span className={`text-xs font-semibold ${failed ? 'text-tf-bad' : done ? 'text-tf-good' : 'text-tf-muted'}`}>{failed ? '部分失敗' : done ? '完成' : '等待'}</span>
               </div>
               <p className="mt-2 text-sm font-semibold text-tf-text">{node.label}</p>
               <p className="mt-1 text-xs text-tf-muted">{nodeEvents.length} events</p>
@@ -118,6 +132,18 @@ export default function HermesExecutionPanel({
           )
         })}
       </ol>
+
+      {sourceEvents.length > 0 && <div className="mt-4 overflow-auto border border-tf-border" aria-label="來源執行明細">
+        <div className="grid min-w-[520px] grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr] gap-2 border-b border-tf-border bg-tf-bg/50 px-3 py-2 text-xs font-semibold text-tf-muted">
+          <span>來源</span><span>狀態</span><span>文件</span><span>耗時</span>
+        </div>
+        {sourceEvents.map((item, index) => <div key={`${item.source}-${index}`} className="grid min-w-[520px] grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr] gap-2 border-b border-tf-border px-3 py-2 text-xs last:border-b-0">
+          <span className="font-mono text-tf-text">{item.source} <span className="text-tf-muted">{item.kind}</span></span>
+          <span className={item.outcome === 'failed' ? 'text-tf-bad' : item.outcome === 'ok' ? 'text-tf-good' : 'text-tf-muted'}>{item.outcome}</span>
+          <span className="text-tf-text2">{item.documentCount ?? '-'}</span>
+          <span className="font-mono text-tf-text2">{item.durationMs === null ? '-' : `${item.durationMs.toFixed(1)} ms`}</span>
+        </div>)}
+      </div>}
 
       <div className="mt-5 flex flex-wrap items-end gap-2 border-t border-tf-border pt-4">
         <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-tf-muted">

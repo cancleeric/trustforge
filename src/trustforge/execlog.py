@@ -30,7 +30,7 @@ HERMES_NODES = (
 def _node_for_event(tool: str, params: dict) -> tuple[str, str, int]:
     """Map low-level events to the stable Hermes workflow graph."""
     step = params.get("step")
-    if tool in {"ingestion.collect", "session.start"}:
+    if tool in {"ingestion.collect", "ingestion.source", "session.start"}:
         return HERMES_NODES[0]
     if step == 1 or tool == "pipeline.step1.start":
         return HERMES_NODES[1]
@@ -41,7 +41,9 @@ def _node_for_event(tool: str, params: dict) -> tuple[str, str, int]:
     return HERMES_NODES[4]
 
 
-def _status_for_event(tool: str) -> str:
+def _status_for_event(tool: str, params: dict) -> str:
+    if params.get("outcome") == "failed":
+        return "failed"
     if tool.endswith(".start"):
         return "started"
     if tool in {
@@ -82,7 +84,7 @@ class ExecutionLog:
                 "node_id": node_id,
                 "node_label": node_label,
                 "node_order": node_order,
-                "status": _status_for_event(tool),
+                "status": _status_for_event(tool, params),
             },
         }
         self.events.append({
@@ -135,4 +137,8 @@ class ExecutionLog:
                 {"id": node_id, "label": label, "order": order}
                 for node_id, label, order in HERMES_NODES
             ],
+            "skill_revisions": next(
+                (event["params"] for event in self.events if event["tool"] == "hermes.skills"),
+                {"outer_skills": [], "core_controls": "not-recorded"},
+            ),
         }

@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    tags: ["v*"]
   pull_request:
     branches: [main, develop]
 
@@ -53,3 +54,29 @@ jobs:
         run: npm run test
       - name: Lint
         run: npm run lint
+
+  competition-qa:
+    name: Competition QA gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Run bounded original question bank
+        env:
+          # The fixture-only gate must not contact the production admin-config
+          # store or reserve Bedrock budget. Online measurement is separate.
+          TRUSTFORGE_BEDROCK_DAILY_USD_CAP: "0"
+        run: >-
+          python scripts/run_question_bank.py --limit 24
+          --out out/ci/question-bank-results.json
+      - name: Upload QA result
+        uses: actions/upload-artifact@v4
+        with:
+          name: question-bank-results
+          path: out/ci/question-bank-results.json
+          if-no-files-found: error

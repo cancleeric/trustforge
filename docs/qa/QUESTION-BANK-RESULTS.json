@@ -1,0 +1,2455 @@
+{
+  "mode": "offline",
+  "case_count": 240,
+  "passed": 240,
+  "failed": 0,
+  "latency_sec": {
+    "p50": 0.0191,
+    "p95": 0.0402
+  },
+  "source_latency_ms": {
+    "hoyabit": {
+      "p50": 0.1,
+      "p95": 0.4,
+      "samples": 360
+    },
+    "news": {
+      "p50": 0.2,
+      "p95": 0.5,
+      "samples": 360
+    },
+    "official-ohlcv": {
+      "p50": 5.0,
+      "p95": 11.8,
+      "samples": 360
+    },
+    "onchain": {
+      "p50": 0.2,
+      "p95": 0.8,
+      "samples": 360
+    },
+    "regulatory": {
+      "p50": 0.1,
+      "p95": 0.4,
+      "samples": 360
+    },
+    "social": {
+      "p50": 0.2,
+      "p95": 0.5,
+      "samples": 360
+    }
+  },
+  "source_outcomes": {
+    "hoyabit:empty": 144,
+    "hoyabit:ok": 216,
+    "news:ok": 360,
+    "official-ohlcv:ok": 360,
+    "onchain:empty": 216,
+    "onchain:ok": 144,
+    "regulatory:ok": 360,
+    "social:empty": 144,
+    "social:ok": 216
+  },
+  "results": [
+    {
+      "id": "ms-btc-01",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 1.0359,
+      "pipeline_elapsed_sec": 0.03336191177368164,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-02",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0357,
+      "pipeline_elapsed_sec": 0.035069942474365234,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-03",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0206,
+      "pipeline_elapsed_sec": 0.019121885299682617,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-04",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0229,
+      "pipeline_elapsed_sec": 0.022294044494628906,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-05",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.022,
+      "pipeline_elapsed_sec": 0.01777935028076172,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-06",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0232,
+      "pipeline_elapsed_sec": 0.021930217742919922,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-07",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0229,
+      "pipeline_elapsed_sec": 0.022244930267333984,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-08",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0135,
+      "pipeline_elapsed_sec": 0.013020753860473633,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-09",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0133,
+      "pipeline_elapsed_sec": 0.012747764587402344,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-10",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0145,
+      "pipeline_elapsed_sec": 0.014011144638061523,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-11",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0125,
+      "pipeline_elapsed_sec": 0.012037277221679688,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-btc-12",
+      "type": "multi_source",
+      "coins": "BTC",
+      "elapsed_sec": 0.0132,
+      "pipeline_elapsed_sec": 0.012007951736450195,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-01",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0124,
+      "pipeline_elapsed_sec": 0.011919975280761719,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-02",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0127,
+      "pipeline_elapsed_sec": 0.012207746505737305,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-03",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0139,
+      "pipeline_elapsed_sec": 0.013405084609985352,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-04",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0172,
+      "pipeline_elapsed_sec": 0.01677393913269043,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-05",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0166,
+      "pipeline_elapsed_sec": 0.015376806259155273,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-06",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0126,
+      "pipeline_elapsed_sec": 0.01202082633972168,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-07",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0126,
+      "pipeline_elapsed_sec": 0.01213383674621582,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-08",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0136,
+      "pipeline_elapsed_sec": 0.013099908828735352,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-09",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0134,
+      "pipeline_elapsed_sec": 0.012839078903198242,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-10",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0128,
+      "pipeline_elapsed_sec": 0.012324094772338867,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-11",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0122,
+      "pipeline_elapsed_sec": 0.011646032333374023,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-btc-12",
+      "type": "hypothesis",
+      "coins": "BTC",
+      "elapsed_sec": 0.0124,
+      "pipeline_elapsed_sec": 0.011861085891723633,
+      "evidence_count": 15,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-01",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0115,
+      "pipeline_elapsed_sec": 0.010983943939208984,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-02",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0111,
+      "pipeline_elapsed_sec": 0.01055288314819336,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-03",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0161,
+      "pipeline_elapsed_sec": 0.015529870986938477,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-04",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0114,
+      "pipeline_elapsed_sec": 0.010854005813598633,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-05",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0119,
+      "pipeline_elapsed_sec": 0.011326074600219727,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-06",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.011,
+      "pipeline_elapsed_sec": 0.01050877571105957,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-07",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0163,
+      "pipeline_elapsed_sec": 0.015614748001098633,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-08",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0402,
+      "pipeline_elapsed_sec": 0.03935098648071289,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-09",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0226,
+      "pipeline_elapsed_sec": 0.021604061126708984,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-10",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0432,
+      "pipeline_elapsed_sec": 0.042526960372924805,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-11",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.019,
+      "pipeline_elapsed_sec": 0.01818704605102539,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-eth-12",
+      "type": "multi_source",
+      "coins": "ETH",
+      "elapsed_sec": 0.0135,
+      "pipeline_elapsed_sec": 0.012353897094726562,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-01",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0117,
+      "pipeline_elapsed_sec": 0.010972976684570312,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-02",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0113,
+      "pipeline_elapsed_sec": 0.010569095611572266,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-03",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0244,
+      "pipeline_elapsed_sec": 0.023790836334228516,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-04",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0227,
+      "pipeline_elapsed_sec": 0.021366119384765625,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-05",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0151,
+      "pipeline_elapsed_sec": 0.013410091400146484,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-06",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0163,
+      "pipeline_elapsed_sec": 0.015626192092895508,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-07",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0213,
+      "pipeline_elapsed_sec": 0.020518779754638672,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-08",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0127,
+      "pipeline_elapsed_sec": 0.011569976806640625,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-09",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0179,
+      "pipeline_elapsed_sec": 0.01733231544494629,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-10",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0147,
+      "pipeline_elapsed_sec": 0.014062166213989258,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-11",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0116,
+      "pipeline_elapsed_sec": 0.010965108871459961,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-eth-12",
+      "type": "hypothesis",
+      "coins": "ETH",
+      "elapsed_sec": 0.0106,
+      "pipeline_elapsed_sec": 0.010004997253417969,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-01",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0128,
+      "pipeline_elapsed_sec": 0.012188196182250977,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-02",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0101,
+      "pipeline_elapsed_sec": 0.009531974792480469,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-03",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0104,
+      "pipeline_elapsed_sec": 0.009685039520263672,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-04",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0109,
+      "pipeline_elapsed_sec": 0.00985097885131836,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-05",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0094,
+      "pipeline_elapsed_sec": 0.008753061294555664,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-06",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0088,
+      "pipeline_elapsed_sec": 0.00816798210144043,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-07",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0086,
+      "pipeline_elapsed_sec": 0.008079290390014648,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-08",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.009,
+      "pipeline_elapsed_sec": 0.008383989334106445,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-09",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.009,
+      "pipeline_elapsed_sec": 0.008428573608398438,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-10",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0086,
+      "pipeline_elapsed_sec": 0.007952213287353516,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-11",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.012,
+      "pipeline_elapsed_sec": 0.011365890502929688,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-sol-12",
+      "type": "multi_source",
+      "coins": "SOL",
+      "elapsed_sec": 0.0148,
+      "pipeline_elapsed_sec": 0.014021158218383789,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-01",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0206,
+      "pipeline_elapsed_sec": 0.018923044204711914,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-02",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0204,
+      "pipeline_elapsed_sec": 0.018762826919555664,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-03",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0127,
+      "pipeline_elapsed_sec": 0.010875940322875977,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-04",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0146,
+      "pipeline_elapsed_sec": 0.013443946838378906,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-05",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0111,
+      "pipeline_elapsed_sec": 0.010442018508911133,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-06",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0116,
+      "pipeline_elapsed_sec": 0.01023411750793457,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-07",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0169,
+      "pipeline_elapsed_sec": 0.015674114227294922,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-08",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0107,
+      "pipeline_elapsed_sec": 0.009805917739868164,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-09",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0135,
+      "pipeline_elapsed_sec": 0.01283407211303711,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-10",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0143,
+      "pipeline_elapsed_sec": 0.013202905654907227,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-11",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.0147,
+      "pipeline_elapsed_sec": 0.01265096664428711,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-sol-12",
+      "type": "hypothesis",
+      "coins": "SOL",
+      "elapsed_sec": 0.016,
+      "pipeline_elapsed_sec": 0.011966943740844727,
+      "evidence_count": 10,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-01",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0174,
+      "pipeline_elapsed_sec": 0.016253948211669922,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-02",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0118,
+      "pipeline_elapsed_sec": 0.00912785530090332,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-03",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0097,
+      "pipeline_elapsed_sec": 0.008858203887939453,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-04",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0085,
+      "pipeline_elapsed_sec": 0.007845163345336914,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-05",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0095,
+      "pipeline_elapsed_sec": 0.008671045303344727,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-06",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0083,
+      "pipeline_elapsed_sec": 0.0076177120208740234,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-07",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0084,
+      "pipeline_elapsed_sec": 0.007714986801147461,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-08",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0083,
+      "pipeline_elapsed_sec": 0.00767207145690918,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-09",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0085,
+      "pipeline_elapsed_sec": 0.007838010787963867,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-10",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0124,
+      "pipeline_elapsed_sec": 0.011745929718017578,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-11",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.01,
+      "pipeline_elapsed_sec": 0.00863790512084961,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-bnb-12",
+      "type": "multi_source",
+      "coins": "BNB",
+      "elapsed_sec": 0.0089,
+      "pipeline_elapsed_sec": 0.008198261260986328,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-01",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0083,
+      "pipeline_elapsed_sec": 0.007597208023071289,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-02",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0084,
+      "pipeline_elapsed_sec": 0.007713794708251953,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-03",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0083,
+      "pipeline_elapsed_sec": 0.007639169692993164,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-04",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0085,
+      "pipeline_elapsed_sec": 0.007790088653564453,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-05",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0086,
+      "pipeline_elapsed_sec": 0.007929086685180664,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-06",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.02,
+      "pipeline_elapsed_sec": 0.01799798011779785,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-07",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0111,
+      "pipeline_elapsed_sec": 0.008702993392944336,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-08",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0096,
+      "pipeline_elapsed_sec": 0.008615970611572266,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-09",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0084,
+      "pipeline_elapsed_sec": 0.007715940475463867,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-10",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.007466793060302734,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-11",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0083,
+      "pipeline_elapsed_sec": 0.0075719356536865234,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-bnb-12",
+      "type": "hypothesis",
+      "coins": "BNB",
+      "elapsed_sec": 0.0085,
+      "pipeline_elapsed_sec": 0.007606029510498047,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-01",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0088,
+      "pipeline_elapsed_sec": 0.008111953735351562,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-02",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.0074732303619384766,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-03",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.009,
+      "pipeline_elapsed_sec": 0.008152008056640625,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-04",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0087,
+      "pipeline_elapsed_sec": 0.007869958877563477,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-05",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0085,
+      "pipeline_elapsed_sec": 0.0077419281005859375,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-06",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0081,
+      "pipeline_elapsed_sec": 0.00733184814453125,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-07",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.007505893707275391,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-08",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.007402896881103516,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-09",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.007542133331298828,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-10",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0081,
+      "pipeline_elapsed_sec": 0.0073451995849609375,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-11",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0084,
+      "pipeline_elapsed_sec": 0.007668972015380859,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "ms-xrp-12",
+      "type": "multi_source",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.0073778629302978516,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-01",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0084,
+      "pipeline_elapsed_sec": 0.007654905319213867,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-02",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0081,
+      "pipeline_elapsed_sec": 0.007364749908447266,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-03",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.008,
+      "pipeline_elapsed_sec": 0.007306814193725586,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-04",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0081,
+      "pipeline_elapsed_sec": 0.007356882095336914,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-05",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.00750422477722168,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-06",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0081,
+      "pipeline_elapsed_sec": 0.007326841354370117,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-07",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.0074160099029541016,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-08",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0081,
+      "pipeline_elapsed_sec": 0.007340908050537109,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-09",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0082,
+      "pipeline_elapsed_sec": 0.0074350833892822266,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-10",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0089,
+      "pipeline_elapsed_sec": 0.007938861846923828,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-11",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0086,
+      "pipeline_elapsed_sec": 0.007850885391235352,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "hy-xrp-12",
+      "type": "hypothesis",
+      "coins": "XRP",
+      "elapsed_sec": 0.0115,
+      "pipeline_elapsed_sec": 0.00864100456237793,
+      "evidence_count": 7,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-01",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.031,
+      "pipeline_elapsed_sec": 0.027586936950683594,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-02",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0254,
+      "pipeline_elapsed_sec": 0.02535223960876465,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-03",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0236,
+      "pipeline_elapsed_sec": 0.02360391616821289,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-04",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0236,
+      "pipeline_elapsed_sec": 0.02355504035949707,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-05",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0411,
+      "pipeline_elapsed_sec": 0.04113888740539551,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-06",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0323,
+      "pipeline_elapsed_sec": 0.03228592872619629,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-07",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0238,
+      "pipeline_elapsed_sec": 0.02378702163696289,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-08",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.027,
+      "pipeline_elapsed_sec": 0.02698993682861328,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-09",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0266,
+      "pipeline_elapsed_sec": 0.026599884033203125,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-10",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0244,
+      "pipeline_elapsed_sec": 0.024354934692382812,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-11",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0273,
+      "pipeline_elapsed_sec": 0.027298927307128906,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-eth-12",
+      "type": "comparison",
+      "coins": "BTC/ETH",
+      "elapsed_sec": 0.0236,
+      "pipeline_elapsed_sec": 0.02363300323486328,
+      "evidence_count": 29,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-01",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0211,
+      "pipeline_elapsed_sec": 0.02106189727783203,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-02",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0216,
+      "pipeline_elapsed_sec": 0.021574974060058594,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-03",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0223,
+      "pipeline_elapsed_sec": 0.02226400375366211,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-04",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0213,
+      "pipeline_elapsed_sec": 0.0213472843170166,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-05",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0214,
+      "pipeline_elapsed_sec": 0.021417856216430664,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-06",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0214,
+      "pipeline_elapsed_sec": 0.021351099014282227,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-07",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0227,
+      "pipeline_elapsed_sec": 0.022691965103149414,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-08",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0246,
+      "pipeline_elapsed_sec": 0.024644136428833008,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-09",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0316,
+      "pipeline_elapsed_sec": 0.0316009521484375,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-10",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0231,
+      "pipeline_elapsed_sec": 0.02313399314880371,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-11",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0292,
+      "pipeline_elapsed_sec": 0.029217958450317383,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-sol-12",
+      "type": "comparison",
+      "coins": "BTC/SOL",
+      "elapsed_sec": 0.0247,
+      "pipeline_elapsed_sec": 0.02474498748779297,
+      "evidence_count": 25,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-01",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0222,
+      "pipeline_elapsed_sec": 0.022201061248779297,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-02",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.025,
+      "pipeline_elapsed_sec": 0.024953842163085938,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-03",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0216,
+      "pipeline_elapsed_sec": 0.02161097526550293,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-04",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.022,
+      "pipeline_elapsed_sec": 0.022001981735229492,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-05",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0231,
+      "pipeline_elapsed_sec": 0.023126602172851562,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-06",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0231,
+      "pipeline_elapsed_sec": 0.023144960403442383,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-07",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0487,
+      "pipeline_elapsed_sec": 0.0487368106842041,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-08",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0212,
+      "pipeline_elapsed_sec": 0.021225929260253906,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-09",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0209,
+      "pipeline_elapsed_sec": 0.020941972732543945,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-10",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.029,
+      "pipeline_elapsed_sec": 0.029020309448242188,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-11",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.0234,
+      "pipeline_elapsed_sec": 0.023401975631713867,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-bnb-12",
+      "type": "comparison",
+      "coins": "BTC/BNB",
+      "elapsed_sec": 0.022,
+      "pipeline_elapsed_sec": 0.02199101448059082,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-01",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0218,
+      "pipeline_elapsed_sec": 0.021837949752807617,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-02",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0208,
+      "pipeline_elapsed_sec": 0.02082681655883789,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-03",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0209,
+      "pipeline_elapsed_sec": 0.02088618278503418,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-04",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0217,
+      "pipeline_elapsed_sec": 0.02166295051574707,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-05",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0206,
+      "pipeline_elapsed_sec": 0.020637989044189453,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-06",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0435,
+      "pipeline_elapsed_sec": 0.04346489906311035,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-07",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.2546,
+      "pipeline_elapsed_sec": 0.2546517848968506,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-08",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.1677,
+      "pipeline_elapsed_sec": 0.16739392280578613,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-09",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0342,
+      "pipeline_elapsed_sec": 0.03412795066833496,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-10",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0343,
+      "pipeline_elapsed_sec": 0.03428387641906738,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-11",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.1047,
+      "pipeline_elapsed_sec": 0.10468316078186035,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-btc-xrp-12",
+      "type": "comparison",
+      "coins": "BTC/XRP",
+      "elapsed_sec": 0.0512,
+      "pipeline_elapsed_sec": 0.051175832748413086,
+      "evidence_count": 22,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-01",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0299,
+      "pipeline_elapsed_sec": 0.029919862747192383,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-02",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0247,
+      "pipeline_elapsed_sec": 0.024671077728271484,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-03",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.026,
+      "pipeline_elapsed_sec": 0.025960922241210938,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-04",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0223,
+      "pipeline_elapsed_sec": 0.022342920303344727,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-05",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.023,
+      "pipeline_elapsed_sec": 0.023042917251586914,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-06",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0239,
+      "pipeline_elapsed_sec": 0.023929834365844727,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-07",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0329,
+      "pipeline_elapsed_sec": 0.03293204307556152,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-08",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0386,
+      "pipeline_elapsed_sec": 0.03863072395324707,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-09",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0258,
+      "pipeline_elapsed_sec": 0.02582716941833496,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-10",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.028,
+      "pipeline_elapsed_sec": 0.02797985076904297,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-11",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0251,
+      "pipeline_elapsed_sec": 0.02505779266357422,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-sol-12",
+      "type": "comparison",
+      "coins": "ETH/SOL",
+      "elapsed_sec": 0.0249,
+      "pipeline_elapsed_sec": 0.02494215965270996,
+      "evidence_count": 24,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-01",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0212,
+      "pipeline_elapsed_sec": 0.02119278907775879,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-02",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0198,
+      "pipeline_elapsed_sec": 0.019749879837036133,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-03",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0226,
+      "pipeline_elapsed_sec": 0.022565126419067383,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-04",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0235,
+      "pipeline_elapsed_sec": 0.023540973663330078,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-05",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0248,
+      "pipeline_elapsed_sec": 0.024796247482299805,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-06",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0236,
+      "pipeline_elapsed_sec": 0.023570775985717773,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-07",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0207,
+      "pipeline_elapsed_sec": 0.02071404457092285,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-08",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0239,
+      "pipeline_elapsed_sec": 0.023921966552734375,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-09",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0252,
+      "pipeline_elapsed_sec": 0.025245189666748047,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-10",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0238,
+      "pipeline_elapsed_sec": 0.02384209632873535,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-11",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0393,
+      "pipeline_elapsed_sec": 0.039309024810791016,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-bnb-12",
+      "type": "comparison",
+      "coins": "ETH/BNB",
+      "elapsed_sec": 0.0277,
+      "pipeline_elapsed_sec": 0.027677059173583984,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-01",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0269,
+      "pipeline_elapsed_sec": 0.026912689208984375,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-02",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0289,
+      "pipeline_elapsed_sec": 0.02891087532043457,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-03",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0252,
+      "pipeline_elapsed_sec": 0.02523016929626465,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-04",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0216,
+      "pipeline_elapsed_sec": 0.02163982391357422,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-05",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0208,
+      "pipeline_elapsed_sec": 0.02083873748779297,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-06",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.125,
+      "pipeline_elapsed_sec": 0.12500405311584473,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-07",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0249,
+      "pipeline_elapsed_sec": 0.024890899658203125,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-08",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0356,
+      "pipeline_elapsed_sec": 0.035568952560424805,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-09",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0236,
+      "pipeline_elapsed_sec": 0.023635149002075195,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-10",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0239,
+      "pipeline_elapsed_sec": 0.023887157440185547,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-11",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0235,
+      "pipeline_elapsed_sec": 0.023529052734375,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-eth-xrp-12",
+      "type": "comparison",
+      "coins": "ETH/XRP",
+      "elapsed_sec": 0.0236,
+      "pipeline_elapsed_sec": 0.023607254028320312,
+      "evidence_count": 21,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-01",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0202,
+      "pipeline_elapsed_sec": 0.020152807235717773,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-02",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0218,
+      "pipeline_elapsed_sec": 0.021806955337524414,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-03",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0186,
+      "pipeline_elapsed_sec": 0.018635988235473633,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-04",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0193,
+      "pipeline_elapsed_sec": 0.019333839416503906,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-05",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0213,
+      "pipeline_elapsed_sec": 0.021255970001220703,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-06",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0183,
+      "pipeline_elapsed_sec": 0.018311023712158203,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-07",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0185,
+      "pipeline_elapsed_sec": 0.01851820945739746,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-08",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0187,
+      "pipeline_elapsed_sec": 0.018688678741455078,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-09",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0186,
+      "pipeline_elapsed_sec": 0.018599271774291992,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-10",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0185,
+      "pipeline_elapsed_sec": 0.01848578453063965,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-11",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0182,
+      "pipeline_elapsed_sec": 0.018249034881591797,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-bnb-12",
+      "type": "comparison",
+      "coins": "SOL/BNB",
+      "elapsed_sec": 0.0186,
+      "pipeline_elapsed_sec": 0.0186460018157959,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-01",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.1228,
+      "pipeline_elapsed_sec": 0.1228187084197998,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-02",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0475,
+      "pipeline_elapsed_sec": 0.04748797416687012,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-03",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0341,
+      "pipeline_elapsed_sec": 0.03406810760498047,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-04",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0203,
+      "pipeline_elapsed_sec": 0.02034282684326172,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-05",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0197,
+      "pipeline_elapsed_sec": 0.019720077514648438,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-06",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0185,
+      "pipeline_elapsed_sec": 0.018529891967773438,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-07",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0196,
+      "pipeline_elapsed_sec": 0.019613265991210938,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-08",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0202,
+      "pipeline_elapsed_sec": 0.020167112350463867,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-09",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0196,
+      "pipeline_elapsed_sec": 0.01955723762512207,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-10",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.026,
+      "pipeline_elapsed_sec": 0.02596879005432129,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-11",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0209,
+      "pipeline_elapsed_sec": 0.020936012268066406,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-sol-xrp-12",
+      "type": "comparison",
+      "coins": "SOL/XRP",
+      "elapsed_sec": 0.0193,
+      "pipeline_elapsed_sec": 0.019270896911621094,
+      "evidence_count": 17,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-01",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0193,
+      "pipeline_elapsed_sec": 0.019279003143310547,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-02",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0183,
+      "pipeline_elapsed_sec": 0.01827692985534668,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-03",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0179,
+      "pipeline_elapsed_sec": 0.017899036407470703,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-04",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.023,
+      "pipeline_elapsed_sec": 0.02296614646911621,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-05",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0191,
+      "pipeline_elapsed_sec": 0.0190889835357666,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-06",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0184,
+      "pipeline_elapsed_sec": 0.01835799217224121,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-07",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.022,
+      "pipeline_elapsed_sec": 0.022011995315551758,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-08",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0203,
+      "pipeline_elapsed_sec": 0.020259857177734375,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-09",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0179,
+      "pipeline_elapsed_sec": 0.0178530216217041,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-10",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0174,
+      "pipeline_elapsed_sec": 0.01743006706237793,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-11",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0173,
+      "pipeline_elapsed_sec": 0.017331838607788086,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    },
+    {
+      "id": "cp-bnb-xrp-12",
+      "type": "comparison",
+      "coins": "BNB/XRP",
+      "elapsed_sec": 0.0179,
+      "pipeline_elapsed_sec": 0.017858028411865234,
+      "evidence_count": 14,
+      "gaps": [],
+      "pass": true
+    }
+  ]
+}
