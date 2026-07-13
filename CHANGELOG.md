@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.12.0 — 2026-07-12
+
+信任引擎技術債收口 + 可觀測性 + 測試/CI 品質閘。本輪多為 follow-up issue 的深化修復。
+
+### 信任引擎正確性
+- **D1.1 聰明錢背離改讀結構化數值欄位**（#150）：不再用正則從句子抽報酬值，漏抓不再靜默回 `None`。
+- **D1.4 來源自我矛盾加時間窗閘**（#149）：跨時間窗翻轉不再誣告來源自我矛盾。
+- **`_directional_word_polarities` 最長優先去重**（#142）：消除子串交叉誤殺真正同向佐證。
+
+### 可觀測性 / 安全
+- **SEC EDGAR FTS 可觀測性**（#141）：失敗不再靜默吞錯，加降級旗標與計數，監管訊號流失可見。
+- **請求入口解析 config 快照下傳**（#115）：消除 live/real 跨快照不一致（請求內多點重算）。
+- **HOYA BIT 連接器 interface/stub 契約**（#154）：定義連接器介面與 stub 契約（真實資料接線待 7/13 工作坊 spec，追蹤於 #167）。
+
+### 測試 / CI 品質閘
+- **CI Bedrock timeout 回歸測試 + 覆蓋率下限 75%**（#91）：pytest-cov gate。
+- **DynamoDB 400KB 邊界 + 生產限流常數鎖**（#110）：補齊技術債斷言覆蓋。
+- **復活 deploy gate**（#118）：修 `test_deploy_ec2.sh` probe call 編號漂移（既有 9 FAIL）。
+
+## v0.11.0 — 2026-07-11
+
+deadline-aware pipeline + 跨快取單調性 + 洞察可解釋性 + 公網 live demo 安全基線。
+
+### 核心 / 信任引擎
+- **D2.5 deadline-aware pipeline**（#5, #78, #76）：真實 worst-case accounting + durable lease。
+- **跨快取單調性通用修**（#56）：doc 層級「時光不倒流」，跨快取一致。
+- **D1.3 洞察可解釋性面板**（#24）：兩貢獻來源對照 + 深層數值溯源。
+- **三態誠實合約全表面鎖定**（#106）。
+- **corroboration 虛抬雙修**（#15, #4）：否定詞語意偵測 + token-overlap 閘。
+- **SEC EDGAR FTS 深化**（#133）：詞表擴充 + 型別防禦 + 單詞失敗隔離。
+- **repo-wide canonical source identity + scoring dedup 收口**（#72）。
+
+### 安全
+- **公網 live demo 安全基線**（D0.5, #121/#75/#104）。
+
+### 前端 / 措辭
+- **移除殘留「信心」措辭**（#3）：types.ts 等，CI `noLegacyConfidenceWording` 前端測試轉綠。
+
 ## v0.10.0 — 2026-07-10
 
 安全清理 + 跨源訊號透明度。

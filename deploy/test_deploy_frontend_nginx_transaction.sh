@@ -55,6 +55,15 @@ if [ -z "$GSED_BIN" ]; then
   exit 0
 fi
 
+# issue #74：CMDS 現在 Step 0 有 host-wide `flock -n`（跟 cutover_switch.sh
+# 共用同一把鎖）。沒有真的 flock 就無法忠實重播遠端腳本，整份跳過（不是
+# 假裝通過）。Amazon Linux 預設就有；macOS 可用 brew install flock。
+if ! command -v flock >/dev/null 2>&1; then
+  echo "找不到 flock，無法重播含 host-wide 交易鎖的遠端腳本，跳過本測試。" >&2
+  echo "（macOS 可用: brew install flock；Amazon Linux 預設已有）" >&2
+  exit 0
+fi
+
 PASS=0
 FAIL=0
 
@@ -411,6 +420,7 @@ run_transaction() {
   env PATH="$MOCKDIR:$PATH" MOCK_STATE_DIR="$STATE" \
     TF_BOOTSTRAP_ETC="$SANDBOX/etc" TF_BOOTSTRAP_OPT="$SANDBOX/opt/trustforge" \
     TF_BOOTSTRAP_DNF_LOG="$STATE/dnf.log" \
+    TF_CUTOVER_LOCK="$STATE/tf-cutover.lock" \
     TF_BOOTSTRAP_SMOKE_RETRIES=2 TF_BOOTSTRAP_SMOKE_DELAY=0 "$@" \
     bash -c "$CMD_TRANSACTION" >"$STATE/last_run.log" 2>&1
   local ec=$?
@@ -748,6 +758,87 @@ else
   pass "healthz retry 第 3 次成功後沒有誤觸發 rollback（裸重複探測確認已移除）"
 fi
 assert_eq "$(call_count curl_public_healthz_call_count)" "3" "healthz 恰好只被打 3 次就結束（若還有裸重複探測會是 4 次、且第 4 次會撞上 FAIL_CALLS 而誤觸發 rollback）"
+
+echo "== 場景 18（issue #74：deploy 並行防禦，host-wide flock）：鎖已被持有（模擬另一個 deploy/cutover 正在同 host 進行）→ reject，exit=98，完全不做任何 mutation =="
+reset_sandbox
+seed_prior_release
+BOOT_LOCKFILE="$STATE/tf-cutover.lock"
+rm -f "$STATE/holder_ready"
+(
+  exec 9>"$BOOT_LOCKFILE"
+  flock 9
+  : > "$STATE/holder_ready"
+  sleep 5
+) &
+HOLDER_PID=$!
+for _ in $(seq 1 50); do
+  [ -f "$STATE/holder_ready" ] && break
+  sleep 0.1
+done
+if [ ! -f "$STATE/holder_ready" ]; then
+  fail "測試設置失敗：背景 holder 沒有在時限內拿到鎖（測試環境問題，非受測程式問題）"
+fi
+if run_transaction; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "98" "鎖被持有時 reject，exit=98（跟一般失敗 exit=1、ROLLBACK-FAILED exit=97 都不同）"
+assert_grep_log "另一個 deploy/cutover 正在進行中" "有印 distinct 的『另一個 deploy/cutover 正在進行中』訊息"
+assert_eq "$(active_conf)" "(none)" "鎖被持有時完全沒動 live symlink（連 dnf install/候選驗證都沒開始）"
+assert_eq "$(active_port)" "80" "鎖被持有時完全沒動 service file PORT（零 mutation）"
+assert_eq "$(current_target)" "$(PRIOR_RELEASE_DIR)" "鎖被持有時完全沒動 frontend/current（前一版 release 指標原封不動）"
+if grep -qF "已回滾到跑前狀態" "$STATE/last_run.log"; then
+  fail "拿不到鎖發生在任何 mutation/ERR trap 安裝之前（Step 0），不該（也不需要）觸發 rollback 訊息"
+else
+  pass "拿不到鎖沒有誤觸發 rollback（Step 0 就中止，零 mutation）"
+fi
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+rm -f "$BOOT_LOCKFILE" "$STATE/holder_ready"
+
+echo "== 場景 18b（issue #74）：沒有並行衝突時正常取得鎖、執行、exit 0；結束後鎖確實釋放（不卡死下一次呼叫）=="
+reset_sandbox
+if run_transaction; then
+  pass "沒有並行衝突時正常取得鎖、執行、exit 0"
+else
+  fail "沒有並行衝突時應該正常結束"
+  cat "$STATE/last_run.log" >&2
+fi
+if ( exec 9>"$STATE/tf-cutover.lock"; flock -n 9 ); then
+  pass "run_transaction 結束後鎖確實釋放（能被重新取得，不會卡死下一次呼叫）"
+else
+  fail "run_transaction 結束後鎖沒有釋放（會卡死下一次呼叫，是嚴重的 bug）"
+fi
+
+echo "== 場景 18c（issue #74：與 cutover 共用同一把鎖，同 host 真的互斥）：cutover 用的預設 lock（tf-cutover.lock）被持有 → deploy bootstrap 一樣 reject，證明兩者不是各鎖各的 =="
+reset_sandbox
+# run_transaction 已把 TF_CUTOVER_LOCK 設成 $STATE/tf-cutover.lock，跟
+# cutover_switch.sh 用的是同一個 env var／同一把鎖。只要這把鎖被 cutover
+# 那邊持有，deploy 就必須讓路（#74 的核心不變式：共用鎖才真的互斥）。
+CUTOVER_LOCKFILE="$STATE/tf-cutover.lock"
+rm -f "$STATE/holder_ready"
+(
+  exec 9>"$CUTOVER_LOCKFILE"
+  flock 9
+  : > "$STATE/holder_ready"
+  sleep 5
+) &
+HOLDER_PID=$!
+for _ in $(seq 1 50); do
+  [ -f "$STATE/holder_ready" ] && break
+  sleep 0.1
+done
+if run_transaction; then
+  RC_EC=0
+else
+  RC_EC=$?
+fi
+assert_eq "$RC_EC" "98" "cutover 持有共用鎖時，deploy bootstrap reject exit=98（證明共用同一把鎖、同 host 互斥，#74 核心）"
+assert_eq "$(active_conf)" "(none)" "cutover 持有鎖時 deploy 完全沒動 live symlink"
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+rm -f "$CUTOVER_LOCKFILE" "$STATE/holder_ready"
 
 rm -rf "$MOCKDIR" "$SANDBOX" "$STATE" "$CAPTURE"
 

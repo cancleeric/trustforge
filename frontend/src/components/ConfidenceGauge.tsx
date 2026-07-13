@@ -1,5 +1,6 @@
 import { normalizeDecisionState, type DecisionState } from '../lib/types'
 import { bucketColor } from '../lib/decisionColor'
+import { tierLabel, TONE_COLOR } from '../lib/tierLabel'
 import { DecisionStateBadge } from './Badges'
 
 interface Props {
@@ -24,6 +25,15 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
   const heroLabel = isLowInfo ? '資訊完整度（校準後）' : '信任分'
   const pct = Math.max(0, Math.min(1, heroValue))
   const color = bucketColor(decisionState, heroValue)
+  // #171：離散分層標籤——一律吃後端對齊的 `calibrated_confidence`（資訊完整度），
+  // 不是 gauge 大字 hero（normal 態 hero=rawConfidence 信任分）。因此本分層**正名為
+  // 「資訊完整度」分層**，與下方「資訊完整度（校準後）」數字同源、可對照驗證，
+  // 不冠「信任等級」以免被誤讀成上方信任分的分級（codex 對抗審 H-1：normal 態
+  // 大字 95%＋等級「中」同框、raw/calibrated 兩來源互打的穿幫風險）。
+  const tier = tierLabel(decisionState, calibratedConfidence)
+  // normal 態明示分層主體＝資訊完整度；abstain/low_confidence 的 label 本身即
+  // 自我描述的狀態語（棄權／資料不足、資訊完整度偏低），不再加前綴。
+  const tierText = isLowInfo ? tier.label : `資訊完整度：${tier.label}`
   const dash = CIRCUMFERENCE * pct
 
   return (
@@ -62,6 +72,13 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
           {(pct * 100).toFixed(0)}%
         </text>
       </svg>
+      <p
+        className="tf-num text-lg font-bold leading-none"
+        style={{ color: TONE_COLOR[tier.tone] }}
+        aria-label={tierText}
+      >
+        {tierText}
+      </p>
       <DecisionStateBadge state={decisionState} />
       <p className="tf-num text-xs text-tf-muted">
         資訊完整度（校準後） {calibratedConfidence.toFixed(2)}｜裸均值信任分 {rawConfidence.toFixed(2)}
