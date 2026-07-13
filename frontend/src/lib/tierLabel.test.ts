@@ -45,6 +45,23 @@ describe('tierLabel', () => {
     expect(tierLabel('', 0.1)).toEqual({ label: '低', tone: 'bad' })
   })
 
+  // ── 異常值防禦（L-1/L-2）：對齊後端 confidence_label() 的 Python 語意 ──
+  // NaN >= 0.7/0.45 皆 False → 落「低」（與後端 `nan >= 0.7` False 一致）；
+  // Infinity → 高；負值 → 低；>1 → 高。展示層 gauge 另有 pct clamp 處理顯示值。
+  it('normal hero=NaN 落「低」tone=bad（對齊後端 nan 比較語意，不誤標高）', () => {
+    expect(tierLabel('normal', Number.NaN)).toEqual({ label: '低', tone: 'bad' })
+  })
+
+  it('normal hero=Infinity 落「高」、-Infinity 落「低」', () => {
+    expect(tierLabel('normal', Number.POSITIVE_INFINITY)).toEqual({ label: '高', tone: 'good' })
+    expect(tierLabel('normal', Number.NEGATIVE_INFINITY)).toEqual({ label: '低', tone: 'bad' })
+  })
+
+  it('normal hero 負值/超過 1 仍依門檻分桶（-0.1→低、1.5→高）', () => {
+    expect(tierLabel('normal', -0.1)).toEqual({ label: '低', tone: 'bad' })
+    expect(tierLabel('normal', 1.5)).toEqual({ label: '高', tone: 'good' })
+  })
+
   // ── tone → 顏色 token 映射對齊 decisionColor / Badges 既有用法 ──
   it('TONE_COLOR 映射 good/warn/bad 到既有 css var token', () => {
     expect(TONE_COLOR.good).toBe('var(--color-tf-good)')

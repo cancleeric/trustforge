@@ -3,15 +3,15 @@ import { render, screen } from '@testing-library/react'
 import ConfidenceGauge from './ConfidenceGauge'
 import type { DecisionState } from '../lib/types'
 
-const TIER_LABEL = (label: string) => screen.getByLabelText(`信任等級：${label}`)
+const TIER_LABEL = (label: string) => screen.getByLabelText(label)
 
 describe('ConfidenceGauge tierLabel', () => {
   it('normal 態依 calibratedConfidence 分桶：0.7→高(good)', () => {
     render(
       <ConfidenceGauge calibratedConfidence={0.7} rawConfidence={0.5} decisionState="normal" />,
     )
-    const el = TIER_LABEL('高')
-    expect(el.textContent).toBe('信任等級：高')
+    const el = TIER_LABEL('資訊完整度：高')
+    expect(el.textContent).toBe('資訊完整度：高')
     expect(el).toHaveStyle({ color: 'var(--color-tf-good)' })
   })
 
@@ -19,8 +19,8 @@ describe('ConfidenceGauge tierLabel', () => {
     render(
       <ConfidenceGauge calibratedConfidence={0.5} rawConfidence={0.95} decisionState="normal" />,
     )
-    const el = TIER_LABEL('中')
-    expect(el.textContent).toBe('信任等級：中')
+    const el = TIER_LABEL('資訊完整度：中')
+    expect(el.textContent).toBe('資訊完整度：中')
     expect(el).toHaveStyle({ color: 'var(--color-tf-warn)' })
   })
 
@@ -28,9 +28,26 @@ describe('ConfidenceGauge tierLabel', () => {
     render(
       <ConfidenceGauge calibratedConfidence={0.4} rawConfidence={0.95} decisionState="normal" />,
     )
-    const el = TIER_LABEL('低')
-    expect(el.textContent).toBe('信任等級：低')
+    const el = TIER_LABEL('資訊完整度：低')
+    expect(el.textContent).toBe('資訊完整度：低')
     expect(el).toHaveStyle({ color: 'var(--color-tf-bad)' })
+  })
+
+  // codex 對抗審 H-1 回歸：normal 態大字(信任分 raw%)與分層(資訊完整度 calibrated)
+  // 同框時不得自相矛盾——分層正名為「資訊完整度」，明確不是上方信任分的分級。
+  it('H-1 回歸：大字信任分 95% 與「資訊完整度：中」同框、不冒充信任分等級', () => {
+    render(
+      <ConfidenceGauge calibratedConfidence={0.5} rawConfidence={0.95} decisionState="normal" />,
+    )
+    // 大字 gauge 顯示信任分 95%（hero=raw）
+    const ariaLabel = screen.getByRole('img').getAttribute('aria-label') ?? ''
+    expect(ariaLabel).toContain('95%')
+    expect(ariaLabel).toContain('信任分')
+    // 分層明示為「資訊完整度」（源自 calibrated=0.5→中），不得出現「信任等級」誤導字樣
+    expect(screen.getByText('資訊完整度：中')).toBeInTheDocument()
+    expect(screen.queryByText(/信任等級/)).not.toBeInTheDocument()
+    // 下方對照數字同源可驗：資訊完整度（校準後）0.50
+    expect(screen.getByText(/資訊完整度（校準後） 0\.50/)).toBeInTheDocument()
   })
 
   it('abstain 態：層標回「棄權／資料不足」(bad)、百分比仍顯示 hero=calibrated', () => {
