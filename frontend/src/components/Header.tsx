@@ -9,6 +9,7 @@ const GIT_SHA = (import.meta.env.VITE_GIT_SHA || 'dev').slice(0, 7)
 const BUILD_VERSION = import.meta.env.VITE_RELEASE_VERSION || 'build'
 
 const NAV_ITEMS = [
+  { to: '/', label: '總覽' },
   { to: '/analyze', label: '分析' },
   { to: '/compare', label: '比較' },
   { to: '/history', label: '歷史趨勢' },
@@ -36,7 +37,7 @@ export default function Header() {
         className="inline-flex items-center gap-1 text-base font-bold text-tf-text no-underline"
       >
         <span className="text-tf-link">&#9670;</span>
-        Trust<span className="text-tf-link">Forge</span>
+        Trust<span className="text-tf-link">Forge</span><span className="hidden text-xs font-medium text-tf-muted sm:inline">/ Hermes</span>
       </Link>
 
       <nav aria-label="主導覽" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">

@@ -14,15 +14,14 @@ const STROKE = 12
 const CIRCUMFERENCE = Math.PI * RADIUS // 半圓弧長
 
 export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, decisionState: rawDecisionState }: Props) {
-  // #101：主角數字統一——abstain/low_confidence 態主角＝校準後資訊完整度，
-  // normal 態主角＝裸均值信任分（`rawConfidence`，等同後端 `trust_score`），
-  // 跟 OverviewCard/首頁卡/比較頁同一套規則，避免同一幣在不同頁面主角不一致。
   // #1 修復：legacy 快照／未知 enum 值一律先正規化為 'normal'（見
   // `normalizeDecisionState` docstring），跟 SSR 同一套 fallback 規則。
   const decisionState = normalizeDecisionState(rawDecisionState)
-  const isLowInfo = decisionState === 'abstain' || decisionState === 'low_confidence'
-  const heroValue = isLowInfo ? calibratedConfidence : rawConfidence
-  const heroLabel = isLowInfo ? '資訊完整度（校準後）' : '信任分'
+  // 儀表只呈現一個固定概念：資料足夠程度。先前 normal 態切到裸均值信任分，
+  // 但下方仍顯示「資訊完整度」分層，視覺上會像兩個互相矛盾的百分比。
+  // 信任分保留在下方獨立欄位，使用者可直接比對，不把它誤讀為預測機率。
+  const heroValue = calibratedConfidence
+  const heroLabel = '資訊完整度（校準後）'
   const pct = Math.max(0, Math.min(1, heroValue))
   const color = bucketColor(decisionState, heroValue)
   // #171：離散分層標籤——一律吃後端對齊的 `calibrated_confidence`（資訊完整度），
@@ -33,7 +32,7 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
   const tier = tierLabel(decisionState, calibratedConfidence)
   // normal 態明示分層主體＝資訊完整度；abstain/low_confidence 的 label 本身即
   // 自我描述的狀態語（棄權／資料不足、資訊完整度偏低），不再加前綴。
-  const tierText = isLowInfo ? tier.label : `資訊完整度：${tier.label}`
+  const tierText = decisionState === 'normal' ? `資訊完整度：${tier.label}` : tier.label
   const dash = CIRCUMFERENCE * pct
 
   return (
@@ -82,7 +81,7 @@ export default function ConfidenceGauge({ calibratedConfidence, rawConfidence, d
       </p>
       <DecisionStateBadge state={decisionState} />
       <p className="tf-num text-xs text-tf-muted">
-        資訊完整度（校準後） {calibratedConfidence.toFixed(2)}｜裸均值信任分 {rawConfidence.toFixed(2)}
+        信任分 {rawConfidence.toFixed(2)}｜資訊完整度 {calibratedConfidence.toFixed(2)}
       </p>
     </div>
   )

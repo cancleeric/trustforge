@@ -37,6 +37,15 @@ function sourceDetails(event: ExecutionEvent) {
   }
 }
 
+function nodeSummary(events: ExecutionEvent[], nodeId: string) {
+  const nodeEvents = events.filter((event) => eventNode(event).id === nodeId)
+  const elapsed = nodeEvents.map((event) => event.elapsed_sec).filter(Number.isFinite)
+  const duration = elapsed.length > 1 ? Math.max(...elapsed) - Math.min(...elapsed) : 0
+  const failed = nodeEvents.some((event) => eventNode(event).status === 'failed')
+  const completed = nodeEvents.some((event) => eventNode(event).status === 'completed')
+  return { nodeEvents, duration, failed, completed }
+}
+
 function download(name: string, body: string, type: string) {
   const href = URL.createObjectURL(new Blob([body], { type }))
   const a = document.createElement('a')
@@ -100,40 +109,52 @@ export default function HermesExecutionPanel({
     return (nodeFilter === 'all' || eventNode(event).id === nodeFilter) && haystack.includes(query.toLowerCase())
   }), [events, nodeFilter, query])
   const sourceEvents = events.map(sourceDetails).filter((item): item is NonNullable<typeof item> => item !== null)
+  const successfulSources = sourceEvents.filter((item) => item.outcome === 'ok').length
+  const failedSources = sourceEvents.filter((item) => item.outcome === 'failed').length
 
   return (
     <section className="rounded-lg border border-tf-border bg-tf-card p-4" aria-label="Hermes Agent execution">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">Hermes Agent</p>
-          <h2 className="mt-1 text-base font-semibold text-tf-text">可追溯執行工作流</h2>
+          <h2 className="mt-1 text-base font-semibold text-tf-text">執行旅程</h2>
+          <p className="mt-1 text-xs text-tf-text2">來源蒐集到報告交付的每一個節點都保留在本次 run 中。</p>
           <p className="mt-1 font-mono text-xs text-tf-muted">run_id: {normalizedExecution.run_id}</p>
         </div>
         <div className="text-right text-xs text-tf-muted">
           <div>{normalizedExecution.elapsed_sec.toFixed(2)}s / {normalizedExecution.budget_sec}s</div>
-          <div>{events.length} 個可查詢事件</div>
+          <div>{events.length} events · {successfulSources} sources ok{failedSources ? ` · ${failedSources} failed` : ''}</div>
         </div>
       </div>
 
-      <ol className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-5">
+      <ol className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-5" aria-label="Hermes 執行節點">
         {nodes.slice().sort((a, b) => a.order - b.order).map((node) => {
-          const nodeEvents = events.filter((event) => eventNode(event).id === node.id)
-          const done = nodeEvents.some((event) => eventNode(event).status === 'completed') || node.id === 'report_delivery' && events.some((event) => event.tool === 'report.done')
-          const failed = nodeEvents.some((event) => eventNode(event).status === 'failed')
+          const { nodeEvents, duration, failed, completed } = nodeSummary(events, node.id)
+          const done = completed || node.id === 'report_delivery' && events.some((event) => event.tool === 'report.done')
           return (
-            <li key={node.id} className={`border p-3 ${failed ? 'border-tf-bad/70 bg-tf-bad/10' : done ? 'border-tf-good/70 bg-tf-good/10' : 'border-tf-border bg-tf-bg/40'}`}>
+            <li key={node.id} className={`relative border p-3 ${failed ? 'border-tf-bad/70 bg-tf-bad/10' : done ? 'border-tf-good/70 bg-tf-good/10' : 'border-tf-border bg-tf-bg/40'}`}>
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono text-xs text-tf-muted">0{node.order}</span>
                 <span className={`text-xs font-semibold ${failed ? 'text-tf-bad' : done ? 'text-tf-good' : 'text-tf-muted'}`}>{failed ? '部分失敗' : done ? '完成' : '等待'}</span>
               </div>
               <p className="mt-2 text-sm font-semibold text-tf-text">{node.label}</p>
-              <p className="mt-1 text-xs text-tf-muted">{nodeEvents.length} events</p>
+              <div className="mt-2 flex items-center justify-between gap-2 text-xs text-tf-muted">
+                <span>{nodeEvents.length} events</span>
+                <span className="tf-num">{duration > 0 ? `${duration.toFixed(2)}s` : '—'}</span>
+              </div>
             </li>
           )
         })}
       </ol>
 
-      {sourceEvents.length > 0 && <div className="mt-4 overflow-auto border border-tf-border" aria-label="來源執行明細">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-tf-text">來源執行明細</h3>
+          <p className="mt-0.5 text-xs text-tf-muted">每個來源的取得結果、文件數與網路耗時。</p>
+        </div>
+        <span className="text-xs text-tf-muted">{sourceEvents.length} 個來源事件</span>
+      </div>
+      {sourceEvents.length > 0 ? <div className="mt-2 overflow-auto border border-tf-border" aria-label="來源執行明細">
         <div className="grid min-w-[520px] grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr] gap-2 border-b border-tf-border bg-tf-bg/50 px-3 py-2 text-xs font-semibold text-tf-muted">
           <span>來源</span><span>狀態</span><span>文件</span><span>耗時</span>
         </div>
@@ -143,7 +164,7 @@ export default function HermesExecutionPanel({
           <span className="text-tf-text2">{item.documentCount ?? '-'}</span>
           <span className="font-mono text-tf-text2">{item.durationMs === null ? '-' : `${item.durationMs.toFixed(1)} ms`}</span>
         </div>)}
-      </div>}
+      </div> : <div className="mt-2 border border-dashed border-tf-border px-3 py-4 text-sm text-tf-muted">本次 run 沒有可呈現的來源事件；完整事件 log 仍可下載檢查。</div>}
 
       <div className="mt-5 flex flex-wrap items-end gap-2 border-t border-tf-border pt-4">
         <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-tf-muted">
