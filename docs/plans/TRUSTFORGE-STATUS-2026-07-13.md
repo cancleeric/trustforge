@@ -55,14 +55,18 @@
 - **測試覆蓋扎實**：81 個測試檔案、約 1735 個測試函式，核心 scoring 邏輯
   有 73 個測試把關，對「完整度 10%」與「技術可行性 25%」有實質支撐，
   可在 pitch 中量化引用。
-- **市場差異化敘事成立**：Nansen / LunarCrush / Arkham 均無統一信任分數，
-  各自單一領域自信、要用戶自行交叉比對——TrustForge 的自動化整合是
-  真實的技術空白地帶，GitHub 上也找不到「加密＋信譽評分＋溯源鏈」的
-  整合型競品，這個「創意 15%」的敘事本身站得住。
-- **學術背書可借力**：Pub-Guard-LLM（分層信譽評分法）、ProvenanceGuard
-  （命名「cross-source conflation」失效模式，可主動點名防禦，展現技術
-  深度）、"Cited but Not Verified"（11-57% 引用幻覺率，作為「為什麼需要
-  Trust Layer」的痛點數據）三者皆可直接引用提升可信度。
+- **市場差異化敘事成立（須修正措辭）**：Nansen / LunarCrush（Galaxy Score）/
+   Arkham 各自都有單一領域的統一分數，因此「競品無統一分數」的說法**不實，
+   必須刪除**。真實的技術空白是：現有競品都「給結論／給分數，但不提供可溯源、
+   防 cross-source conflation 的證據鏈」——TrustForge 的自動化可追溯整合是
+   真實空白地帶，這個「創意 15%」的敘事才站得住（詳見
+   docs/pitch/COMPETITIVE-WHITESPACE.md）。
+- **學術背書可借力（限實查證真實文獻）**：僅 *ProvenanceGuard*（arXiv:2606.18037，
+   命名「cross-source conflation」失效模式，可主動點名防禦，展現技術深度）、
+   *How LLMs Cite and Why It Matters*（arXiv:2603.03299，Naser 2026，引用幻覺率
+   11.4%–56.8%，作為「為什麼需要 Trust Layer」痛點數據）二者可直接引用提升
+   可信度。⚠️ 不存在名為 "Cited but Not Verified" 的論文；Pub-Guard-LLM
+   （arXiv:2502.15429）是生醫撤稿偵測，禁用於本專題背書。
 
 ---
 
