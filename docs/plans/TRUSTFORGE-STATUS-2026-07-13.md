@@ -94,3 +94,23 @@
 
 以上四項細節與建議行動已整理於同目錄
 `OPTIMIZATION-PLAN-2026-07-13.md`。
+
+---
+
+## 附錄：留存備查（已修正之原始誤導文字，勿再用）
+
+> 以下為本文件初版經查證不成立、已於正文修正的原始寫法，留存作為誠信稽核軌跡，
+> **不得再出現於任何 pitch / 文件**。
+
+1. 原第 3 項（市場差異化）：
+   > 「Nansen / LunarCrush / Arkham 均無統一信任分數，各自單一領域自信、要用戶自行
+   > 交叉比對——TrustForge 的自動化整合是真實的技術空白地帶…」
+   → 修正：LunarCrush 有 Galaxy Score 統一分數，該說法事實錯誤，已改為
+     「現有競品都給結論／分數，但不提供可溯源、防 cross-source conflation 的證據鏈」。
+
+2. 原第 3 項（學術背書）：
+   > 「Pub-Guard-LLM（分層信譽評分法）、ProvenanceGuard（…）、"Cited but Not Verified"
+   > （11-57% 引用幻覺率…）三者皆可直接引用提升可信度。」
+   → 修正：無 "Cited but Not Verified" 此論文；Pub-Guard-LLM（arXiv:2502.15429）為生醫
+     撤稿偵測，禁用於本題背書；僅保留 ProvenanceGuard（arXiv:2606.18037）與
+     arXiv:2603.03299（Naser 2026, 11.4%–56.8%）為可用真實來源。
