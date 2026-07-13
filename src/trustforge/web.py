@@ -4922,6 +4922,7 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
         "version": VERSION,
         "report": dataclasses.asdict(report),
         "evidence": [_public_evidence_dict(ev) for ev in evidence],
+        "execution": log.manifest(),
         "execution_log": log.events,
     }
 
@@ -4934,6 +4935,7 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
         "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
         "report_b": dataclasses.asdict(report_b),
         "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
+        "execution": log.manifest(),
         "execution_log": log.events,
     }
 
@@ -5105,6 +5107,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
+                "execution": log.manifest(),
                 "execution_log": log.events,
             }
         else:
@@ -5124,6 +5127,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_radar": aggregate_trust_by_kind(evidence),
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
                 "price_provenance": _price_provenance_data(evidence),
+                "execution": log.manifest(),
                 "execution_log": log.events,
             }
         return 200, _json_envelope_ok(payload)

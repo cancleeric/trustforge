@@ -242,7 +242,26 @@ export interface AnalyzeData {
   trust_radar: TrustRadar
   trust_components_aggregate: TrustComponentsAggregate
   price_provenance: PriceProvenance
-  execution_log: unknown[]
+  /** Hermes workflow envelope. Optional while old cached responses age out. */
+  execution?: ExecutionManifest
+  execution_log: ExecutionEvent[]
+}
+
+export interface ExecutionManifest {
+  agent: 'hermes'
+  run_id: string
+  started_at: string
+  elapsed_sec: number
+  budget_sec: number
+  nodes: Array<{ id: string; label: string; order: number }>
+}
+
+export interface ExecutionEvent {
+  ts: string
+  elapsed_sec: number
+  tool: string
+  params: Record<string, unknown>
+  summary: string
 }
 
 /** `/api/analyze?type=comparison`：`report`/`evidence`/... 全套欄位各出現
@@ -261,7 +280,8 @@ export interface ComparisonAnalyzeData {
   trust_radar_b: TrustRadar
   trust_components_aggregate_b: TrustComponentsAggregate
   price_provenance_b: PriceProvenance
-  execution_log: unknown[]
+  execution?: ExecutionManifest
+  execution_log: ExecutionEvent[]
 }
 
 // ── /api/health ──────────────────────────────────────────────────────────

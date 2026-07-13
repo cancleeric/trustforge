@@ -1,6 +1,6 @@
-# TrustForge（信源熔爐）
+# TrustForge Hermes（信源熔爐）
 
-> 加密市場分析 AI Agent — **多源資訊的信任提煉**
+> Hermes 加密市場分析 AI Agent — **多源資訊的信任提煉**
 > 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽 ｜ 黑客組
 > 命題：【智慧金融：HOYA BIT】加密市場分析 AI Agent：多源資訊的信任提煉
 > 出品：HurricaneSoft（颶風軟體）
