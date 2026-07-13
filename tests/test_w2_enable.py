@@ -65,35 +65,82 @@ def _small_sample_docs() -> list[Document]:
 # 1) 生產路徑真的啟用了 dynamic_reputation=True
 # ---------------------------------------------------------------------------
 
-def test_run_agent_pipeline_dynamic_reputation_offline_is_honest_noop():
-    """codex 對抗審 [HIGH，#24] 修正後反轉：`run_agent_pipeline()`（生產唯一
-    呼叫點、預設離線 `client=BedrockClient(offline=True)`）啟用 W2 後，離線
-    模式下 `stance_client=None`，任何配對都 fail-safe 回 `"neutral"`——W2
-    只認真 `entailment`，沒有真的跑過語意分類，信譽**必須維持先驗**，
-    `reputation_agree_n`/`reputation_contradict_n` 皆為 0。
+def _ds_trigger_docs() -> list[Document]:
+    """觸發 DS EM 離線 fallback 的合成 docs（#182）。
 
-    這是 codex 抓到的 HIGH：舊版（修正前）把離線 fail-safe neutral 誤當
-    agreement，讓沒有真驗證的離線 demo 也顯示信譽上升，虛增信任訊號，違反
-    #24。此測試取代舊版同名測試（原本斷言離線信譽會上升，依賴該 bug 行為）。
+    4+ 來源、coin=BTC、跨多個 window 且涵蓋 bullish/bearish/neutral 三類方向，
+    讓 Dawid-Skene EM 能在「無真 entailment」的離線路徑下，從多源方向標籤的
+    統計共識估算每來源可靠度（而非 no-op）。各來源與「多數票共識」的一致率
+    不同（A 全對 / B 錯 1 窗 / C 錯 2 窗），預期 DS 可靠度 r(A)>r(B)>r(C)、
+    final 隨投票分布變化。
+
+    全合成、禁捏造歷史（#24）：方向由關鍵詞決定，投票分布由本函式控制。
     """
-    docs = _shared_text_docs()
-    report, evidence = run_agent_pipeline(
+    txt = {
+        "bullish": "BTC 上漲突破阻力",
+        "bearish": "BTC 下跌跌破支撐",
+        "neutral": "BTC 區間盤整觀望",
+    }
+    true_by_window = {0: "bullish", 1: "bearish", 2: "neutral",
+                      3: "bullish", 4: "bearish", 5: "neutral"}
+    # 每來源對第 w 窗投出的方向：A 全對；B 第 3 窗錯；C 第 0、1 窗錯。
+    vote = {
+        "glassnode": lambda w: true_by_window[w],
+        "coindesk": lambda w: "bearish" if w == 3 else true_by_window[w],
+        "x-analyst": lambda w: ("bearish" if w == 0 else
+                                "bullish" if w == 1 else true_by_window[w]),
+    }
+    kind_of = {"glassnode": "onchain", "coindesk": "news", "x-analyst": "social"}
+    docs = []
+    for w in range(6):
+        for src, fn in vote.items():
+            docs.append(_doc(f"{src}-{w}", kind_of[src], src, txt[fn(w)],
+                             ts=w * 86400.0))
+    return docs
+
+
+def test_run_agent_pipeline_dynamic_reputation_offline_triggers_ds_em():
+    """#182 反轉舊版 no-op 語意：生產路徑預設離線（`client=BedrockClient(offline=True)`）
+    且無任何真 `entailment` 流進 W2 時，W2 不再是誠實 no-op，而是觸發 **Dawid-Skene
+    EM 離線 fallback**（DS 共識收斂）來估每來源可靠度，並餵進 Step B 混合公式。
+
+    斷言：
+    - `reputation_mode == "ds_em"`（trace 標註走 DS 分支，非 entailment 路徑）。
+    - `reputation_agree_n > 0`（DS 模式下 agree_n = 該 source 參與的達標 item 數）。
+    - `reputation_final` 隨投票分布變化（最一致來源 glassnode 的 final 明顯高於其
+      prior；各來源 final 不全相等）。
+
+    ⚠️ 誠實紅線：本測試驗證的是「離線觸發 DS、信譽被 DS 共識調整」，**不**宣稱 DS
+    具備預測力或解決 #167 AUC——DS 產出是「多源方向標籤的統計共識信心」，UI 標註
+    「DS 共識收斂」。線上有 entailment 佐證時仍走舊路（見其他回歸鎖）。
+    """
+    docs = _ds_trigger_docs()
+    _report, evidence = run_agent_pipeline(
         query="分析 BTC", coin="BTC", qtype=QuestionType.MULTI_SOURCE,
         docs=docs, client=BedrockClient(offline=True),
         log=ExecutionLog(now_fn=lambda: 1.0), now_fn=lambda: 1.0,
     )
-    social_ev = next(e for e in evidence if e.source == "x-analyst")
-    assert "reputation_prior" in social_ev.trust_components, (
-        "reputation_trace 未接線進 Evidence.trust_components——W2 未真正啟用"
+    ds_evs = [e for e in evidence if "reputation_mode" in e.trust_components]
+    assert ds_evs, "reputation_trace 未接線進 Evidence.trust_components——W2 未真正啟用"
+    for ev in ds_evs:
+        tc = ev.trust_components
+        assert tc["reputation_mode"] == "ds_em", (
+            f"{ev.source}：離線無 entailment 應走 DS EM 分支，實際 mode={tc['reputation_mode']}"
+        )
+        assert tc["reputation_agree_n"] > 0, (
+            f"{ev.source}：DS 模式下 agree_n（達標 item 參與數）應 > 0，實際 {tc['reputation_agree_n']}"
+        )
+
+    glass = next(e for e in ds_evs if e.source == "glassnode")
+    gtc = glass.trust_components
+    assert gtc["reputation_final"] > gtc["reputation_prior"], (
+        f"最一致來源 glassnode 應被 DS 共識上調：prior={gtc['reputation_prior']} "
+        f"final={gtc['reputation_final']}"
     )
-    assert social_ev.trust_components["reputation_final"] == social_ev.trust_components["reputation_prior"], (
-        "離線模式沒有真的跑過語意分類（全部 fail-safe neutral），"
-        "x-analyst 動態信譽必須誠實維持先驗，不可虛增"
+    finals = {e.source: e.trust_components["reputation_final"] for e in ds_evs}
+    assert len(set(round(v, 4) for v in finals.values())) > 1, (
+        f"DS 可靠度應隨投票分布分化（final 不全相等），實際 {finals}"
     )
-    assert social_ev.trust_components["reputation_agree_n"] == 0, (
-        "離線 fail-safe neutral 不可被當成 agreement 計入 agree_n"
-    )
-    assert social_ev.trust_components["reputation_contradict_n"] == 0
 
 
 def test_dynamic_reputation_rises_only_with_genuine_entailment_client():

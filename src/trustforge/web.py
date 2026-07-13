@@ -2283,15 +2283,30 @@ def _render_trust_breakdown(tc: dict, trust: float) -> str:
         rep_prior, rep_final = _f(tc.get("reputation_prior")), _f(tc.get("reputation_final"))
         agree_n = tc.get("reputation_agree_n", 0)
         contra_n = tc.get("reputation_contradict_n", 0)
+        rep_mode = tc.get("reputation_mode", "entailment")
         if abs(rep_final - rep_prior) > 1e-9:
             arrow = "↑" if rep_final > rep_prior else "↓"
-            contra_part = f"，{contra_n} 源矛盾" if contra_n else ""
-            trace_text = (
-                f"動態信譽 {arrow}：{rep_prior:.2f}→{rep_final:.2f}"
-                f"（{agree_n} 源互證{contra_part}）"
-            )
+            if rep_mode == "ds_em":
+                # 離線 DS EM fallback：標註「DS 共識收斂」，不與線上 entailment
+                # 互證混為一談（DS 是統計共識信心，非預測力、未解決 #167 AUC）。
+                contra_part = f"，{contra_n} 源分歧" if contra_n else ""
+                trace_text = (
+                    f"動態信譽 {arrow}：{rep_prior:.2f}→{rep_final:.2f}"
+                    f"（DS 共識收斂，{agree_n} 源達標{contra_part}）"
+                )
+            else:
+                contra_part = f"，{contra_n} 源矛盾" if contra_n else ""
+                trace_text = (
+                    f"動態信譽 {arrow}：{rep_prior:.2f}→{rep_final:.2f}"
+                    f"（{agree_n} 源互證{contra_part}）"
+                )
         else:
-            trace_text = f"動態信譽：{rep_prior:.2f}（樣本不足或無互證/矛盾，維持先驗）"
+            if rep_mode == "ds_em":
+                trace_text = (
+                    f"動態信譽：{rep_prior:.2f}（DS 共識收斂，信譽維持先驗）"
+                )
+            else:
+                trace_text = f"動態信譽：{rep_prior:.2f}（樣本不足或無互證/矛盾，維持先驗）"
         rep_trace_html = (
             f'<div style="color:var(--tf-muted2);font-size:.68rem;padding-left:.2rem">'
             f'{e(trace_text)}</div>'

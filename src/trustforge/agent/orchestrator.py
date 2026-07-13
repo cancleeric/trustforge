@@ -130,6 +130,7 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
         trust_components["reputation_agree_n"] = trace["agree_n"]
         trust_components["reputation_contradict_n"] = trace["contradict_n"]
         trust_components["reputation_iterations_run"] = trace["iterations_run"]
+        trust_components["reputation_mode"] = trace.get("mode", "entailment")
     return Evidence(
         source=doc.source,
         fetched_at=iso_utc(doc.ts),
@@ -1239,6 +1240,7 @@ def run_agent_pipeline(
         now=now_ts,
         stance_fn=shared_stance_fn,
         dynamic_reputation=True,
+        offline=getattr(client, "offline", False),
     )
     # score() 跑完、Step2 交叉佐證矛盾閘可能觸發的 stance 呼叫都已發生，
     # 這裡統一收割進 log、並清空 client.cost_events，避免下個 run 重複計費。
