@@ -64,7 +64,7 @@
 | H-18 | 成本帳本保留、備份與匯出 | `v0.13.6` 已把 50 筆改為分頁檢視，但「可看見」不等於「永久可復原」 | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
 | H-19 | Production durable lease backend | 現行單機 JSON lease 可自癒 dead PID；多實例時必須使用 DynamoDB lease，否則跨 host dedup 不成立 | 建表/IAM、`TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb`、multi-instance contention test 全綠 |
 | H-20 | Connector reliability policy | Reddit cloud IP OAuth、來源 rate-limit/backoff、允許來源失效的降級規則尚未形成正式 SLA | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
-| H-21 | Hermes Execution Journey implementation | 已有自有 skill specification，尚未做成正式產品的 execution journey UI | 資料驅動五節點視覺、無動畫 fallback、run-bound evidence links、desktop/mobile QA；不改 Trust Layer |
+| H-21 | Hermes Execution Journey implementation | **實作完成，待 release production QA。** `/analyze` 已把資料驅動五節點、來源結果/耗時、run-bound Evidence/Log 下載置於結論後第一段；無事件時有誠實 empty state | release 後以真實資料完成 desktop/mobile 截圖與互動 smoke；不改 Trust Layer |
 
 ## 明確不做 / 不可越線
 

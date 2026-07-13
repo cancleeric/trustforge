@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { getCosts } from '../lib/endpoints'
 import type { CostsData, LedgerRunRecord } from '../lib/types'
-import { formatUsd } from '../lib/format'
+import { formatTimestamp, formatUsd } from '../lib/format'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 
 function ByModelTable({ data }: { data: CostsData }) {
@@ -61,7 +61,7 @@ function RecentRunsTable({ runs }: { runs: LedgerRunRecord[] }) {
         <tbody className="divide-y divide-tf-border">
           {recent.map((run, i) => (
             <tr key={`${run.ts}-${i}`}>
-              <td className="px-3 py-2 text-tf-text2">{run.ts}</td>
+              <td className="tf-num whitespace-nowrap px-3 py-2 text-tf-text2" title={run.ts}>{formatTimestamp(run.ts)}</td>
               <td className="px-3 py-2 text-tf-text2">{run.coin ?? '—'}</td>
               <td className="px-3 py-2 text-tf-text2">
                 {run.question_type ?? '—'}
@@ -104,8 +104,12 @@ export default function CostsPage() {
   }, [offset])
 
   return (
-    <main className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6">
-      <h1 className="text-lg font-semibold text-tf-text">成本帳本</h1>
+    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6">
+      <div className="border-b border-tf-border pb-4">
+        <p className="font-mono text-xs font-semibold uppercase text-tf-link">Append-only ledger</p>
+        <h1 className="mt-1 text-2xl font-bold text-tf-text">成本帳本</h1>
+        <p className="mt-1 text-sm text-tf-text2">跨 run 的 LLM 呼叫成本與 token 用量；明細以分頁讀取，歷史資料不會被截斷。</p>
+      </div>
 
       {loading && <LoadingState label="成本資料載入中…" />}
       {!loading && error && <ErrorState code={error.code} message={error.message} />}
@@ -127,9 +131,10 @@ export default function CostsPage() {
               Per-run 明細（第 {(data.offset ?? 0) + 1}–{Math.min((data.offset ?? 0) + data.runs.length, data.run_count)} 筆，共 {data.run_count.toLocaleString()} 筆）
             </h3>
             <RecentRunsTable runs={data.runs} />
-            <div className="mt-3 flex items-center justify-between">
-              <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>較新</button>
-              <button type="button" disabled={offset + data.runs.length >= data.run_count} onClick={() => setOffset(offset + 50)}>較舊</button>
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))} className="rounded border border-tf-border px-3 py-1.5 text-sm font-semibold text-tf-text disabled:cursor-not-allowed disabled:opacity-40">較新</button>
+              <span className="text-xs text-tf-muted">每頁 50 筆</span>
+              <button type="button" disabled={offset + data.runs.length >= data.run_count} onClick={() => setOffset(offset + 50)} className="rounded border border-tf-border px-3 py-1.5 text-sm font-semibold text-tf-text disabled:cursor-not-allowed disabled:opacity-40">較舊</button>
             </div>
           </section>
         </>

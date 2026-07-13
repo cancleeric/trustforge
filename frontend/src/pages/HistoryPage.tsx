@@ -46,11 +46,12 @@ export default function HistoryPage() {
   }, [coin, days])
 
   return (
-    <main className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6">
-      <div>
-        <h1 className="text-lg font-semibold text-tf-text">歷史信任趨勢（PIT）</h1>
-        <p className="mt-1 text-xs text-tf-muted">
-          信任分隨時間變化的 point-in-time 序列，不是單點快照——排程每日寫入一筆。
+    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6">
+      <div className="border-b border-tf-border pb-4">
+        <p className="font-mono text-xs font-semibold uppercase text-tf-link">Point-in-time archive</p>
+        <h1 className="mt-1 text-2xl font-bold text-tf-text">歷史信任趨勢</h1>
+        <p className="mt-1 text-sm text-tf-text2">
+          每日快照的 point-in-time 序列，用來看資料充分度與信任分如何變化；不是預測價格的保證。
         </p>
       </div>
 

@@ -14,6 +14,7 @@ import TrustTrendSection from './TrustTrendSection'
 import { DirectionBadge } from './Badges'
 import { LoadingState } from './StatusStates'
 import HermesExecutionPanel from './HermesExecutionPanel'
+import { formatTimestamp } from '../lib/format'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
@@ -27,32 +28,40 @@ const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
 export default function AnalysisReportView({ data, heading }: { data: AnalyzeData; heading?: string }) {
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-tf-border bg-tf-card p-4">
-        {heading && (
-          <span className="rounded-full border border-tf-accent px-2 py-0.5 text-xs font-semibold text-tf-link">
-            {heading}
-          </span>
-        )}
-        <h1 className="text-xl font-bold text-tf-text">{data.report.coin}</h1>
-        <DirectionBadge direction={data.report.direction} />
-        <span className="text-xs text-tf-muted">生成於 {data.report.generated_at}</span>
-        <span className="text-xs text-tf-muted">版本 {data.version}</span>
+      <div className="border-b border-tf-border pb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          {heading && (
+            <span className="rounded-full border border-tf-accent px-2 py-0.5 text-xs font-semibold text-tf-link">
+              {heading}
+            </span>
+          )}
+          <h2 className="text-xl font-bold text-tf-text">{data.report.coin}</h2>
+          <DirectionBadge direction={data.report.direction} />
+          <span className="font-mono text-xs text-tf-muted">run {data.execution?.run_id ?? 'legacy-run'}</span>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-tf-muted">
+          <span title={data.report.generated_at}>生成於 {formatTimestamp(data.report.generated_at)}</span>
+          <span>{data.evidence.length} 筆可追溯證據</span>
+          <span>版本 {data.version}</span>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[220px_1fr]">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
         <ConfidenceGauge
           calibratedConfidence={data.report.calibrated_confidence}
           rawConfidence={data.report.confidence}
           decisionState={data.report.decision_state}
         />
-        <TrustBreakdown data={data.trust_components_aggregate} />
+        <section className="border-l-2 border-tf-accent bg-tf-card p-4" aria-label="市場結論">
+          <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">市場結論</p>
+          <p className="mt-2 text-base font-semibold leading-7 text-tf-text">{data.report.market_judgment}</p>
+          <div className="mt-4 grid grid-cols-3 gap-2 border-t border-tf-border pt-3 text-xs">
+            <div><p className="text-tf-muted">事實</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.facts.length}</p></div>
+            <div><p className="text-tf-muted">推論</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.inferences.length}</p></div>
+            <div><p className="text-tf-muted">反方訊號</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.contrarian.length}</p></div>
+          </div>
+        </section>
       </div>
-
-      <TrustTrendSection coin={data.report.coin} />
-
-      <Suspense fallback={<LoadingState label="雷達圖載入中…" />}>
-        <TrustRadarChart radar={data.trust_radar} />
-      </Suspense>
 
       <HermesExecutionPanel
         execution={data.execution}
@@ -60,6 +69,14 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
         report={data.report}
         evidence={data.evidence}
       />
+
+      <TrustBreakdown data={data.trust_components_aggregate} />
+
+      <TrustTrendSection coin={data.report.coin} />
+
+      <Suspense fallback={<LoadingState label="雷達圖載入中…" />}>
+        <TrustRadarChart radar={data.trust_radar} />
+      </Suspense>
 
       <FactsInferenceLadder
         facts={data.report.facts}

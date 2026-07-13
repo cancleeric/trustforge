@@ -44,6 +44,19 @@ export function formatEpoch(epochSeconds: number | null): string {
   return `${mm}/${dd} ${hh}:${mi}`
 }
 
+/** ISO 時間戳（帳本等 append-only 記錄）→ 本地「MM/DD HH:mm」。 */
+export function formatTimestamp(value: string | null | undefined): string {
+  if (!value) return '—'
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return '—'
+  const d = new Date(timestamp)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${mm}/${dd} ${hh}:${mi}`
+}
+
 /** 成本金額格式化：固定 4 位小數（多數 run 成本落在 $0.00xx 量級，2 位
  * 小數會全部顯示成 $0.00 失去區分度），千分位不需要（金額量級小）。 */
 export function formatUsd(value: number): string {
