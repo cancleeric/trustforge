@@ -198,6 +198,29 @@ fi
 # 已修正）。
 CMDS=$(cat <<'CMDEOF'
 set -e
+
+# ---- Step 0：host-wide 交易鎖（issue #74，deploy 並行防禦）──────────────
+# 這支 bootstrap 跟 deploy/cutover_switch.sh 都會在**同一台 EC2 host** 上動
+# live 的 nginx symlink／systemd service／conf 檔——兩者並行（或兩個 bootstrap
+# 並行）就會 race、互相破壞彼此的 guarded transaction 中間狀態（symlink 指到
+# 一半、service file 被兩邊 sed 交錯改）。比照 cutover_switch.sh 的 Step 0
+# host-wide flock：在候選驗證／記錄跑前狀態／任何 mutation **之前**先搶一個
+# host-wide 的 `flock -n`，一路持有到腳本結束（成功收尾或 ROLLBACK 完成）才
+# 靠 process 結束自動釋放 fd。拿不到鎖就直接中止，零 mutation、exit 98。
+#
+# ⚠️ lock 路徑刻意跟 cutover_switch.sh **共用同一個**（同一 env var
+# TF_CUTOVER_LOCK、同一預設 /var/lock/tf-cutover.lock）——這正是 #74 的重點：
+# 唯有 deploy 跟 cutover 搶同一把鎖，兩者在同 host 才真的互斥。若各用各的 lock
+# 檔，flock 形同虛設、race 依舊。生產環境不設 TF_CUTOVER_LOCK，兩支腳本都用
+# /var/lock/tf-cutover.lock（行為一致）；沙箱測試把兩者一起覆寫成 sandbox 內
+# 路徑即可。
+LOCKFILE="${TF_CUTOVER_LOCK:-/var/lock/tf-cutover.lock}"
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+  echo "❌ [fe-nginx] 另一個 deploy/cutover 正在進行中（拿不到 host-wide lock：${LOCKFILE}），本次不做任何變更，直接中止。" >&2
+  exit 98
+fi
+
 ETC="${TF_BOOTSTRAP_ETC:-/etc}"
 OPT_DIR="${TF_BOOTSTRAP_OPT:-/opt/trustforge}"
 LIVE_LINK="$ETC/nginx/conf.d/trustforge.conf"
