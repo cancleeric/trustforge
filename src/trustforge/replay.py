@@ -123,12 +123,19 @@ def store_backfilled_source_snapshot(
             raise ValueError("backfill source requires name and document list")
         copied = []
         for document in documents:
-            if not isinstance(document, dict) or not document.get("published_at"):
-                raise ValueError("backfilled documents require published_at")
+            required = ("published_at", "retrieved_at", "provider", "license", "content_sha256")
+            if not isinstance(document, dict) or not all(document.get(field) for field in required):
+                raise ValueError("backfilled documents require published_at, retrieved_at, provider, license, content_sha256")
             # Callers supply ISO publication time; only past information is legal.
             published = datetime.fromisoformat(str(document["published_at"]).replace("Z", "+00:00")).timestamp()
             if published > snapshot_epoch:
                 raise ValueError("backfilled document crosses historical run boundary")
+            hash_payload = {key: value for key, value in document.items() if key != "content_sha256"}
+            actual_hash = hashlib.sha256(
+                json.dumps(hash_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if str(document["content_sha256"]) != actual_hash:
+                raise ValueError("backfilled document content hash mismatch")
             copied.append(dict(document))
         normalized_sources.append({"source": name, "fetched_at": None, "documents": copied})
     manifest_text = json.dumps(provider_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

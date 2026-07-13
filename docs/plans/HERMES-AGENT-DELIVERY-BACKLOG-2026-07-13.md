@@ -45,7 +45,7 @@
 
 | ID | 待辦 | 目前工作 | 驗收條件 | 依賴 |
 |---|---|---|---|---|
-| H-13a | Historical Backfill Foundation | **進行中。** 定義歷史來源輸入、`published_at` 切片、資料授權與 `backfilled_archive` 血緣 | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；拒絕時間不明資料 | 歷史來源/API |
+| H-13a | Historical Backfill Foundation | **程式契約完成，待匯入授權資料。** importer 強制 provider、`published_at`、actual `retrieved_at`、license、content hash，並標記 `backfilled_archive` | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；拒絕時間不明資料 | 歷史來源/API |
 | H-13b | Daily Hermes Replay | **待 H-13a。** 從五年前首日逐日建立 source snapshot，跑 claim -> trust -> Evidence -> report | 每日 run 有完整 execution log，僅選 `published_at <= T` | H-13a |
 | H-13c | Outcome Labeling | **待 H-13b。** 對 T+1/T+7/T+14 接官方 OHLCV outcome | 每個 eligible run 可追溯 outcome window 與資料 lineage | H-13b |
 
@@ -61,8 +61,8 @@
 | ID | 待辦 | 為何必須做 | 驗收條件 |
 |---|---|---|---|
 | H-17 | Production interaction smoke / zero-downtime deploy | API smoke 已納入 release；仍需瀏覽器層驗證 analyze、conflict recovery、Hermes log 與成本翻頁，且 deploy restart 不可讓使用者撞到 502 | staging + production canary 截圖/API evidence；rolling 或 maintenance-safe 切換不產生公開 5xx |
-| H-18 | 成本帳本保留、備份與匯出 | `v0.13.6` 已把 50 筆改為分頁檢視，但「可看見」不等於「永久可復原」 | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
-| H-19 | Production durable lease backend | 現行單機 JSON lease 可自癒 dead PID；多實例時必須使用 DynamoDB lease，否則跨 host dedup 不成立 | 建表/IAM、`TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb`、multi-instance contention test 全綠 |
+| H-18 | 成本帳本保留、備份與匯出 | **程式與 SOP 完成，待 AWS 實施證據。** JSONL/CSV export、manifest hash、verify、不可覆寫 restore drill、PITR verify/enable 工具已完成 | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
+| H-19 | Production durable lease backend | **程式與 bootstrap 完成，待 AWS 建表／production 驗證。** 新增 PAY_PER_REQUEST + TTL table、最小 IAM 與 service env 接線 | 建表/IAM、`TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb`、multi-instance contention test 全綠 |
 | H-20 | Connector reliability policy | Reddit cloud IP OAuth、來源 rate-limit/backoff、允許來源失效的降級規則尚未形成正式 SLA | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
 | H-21 | Hermes Execution Journey implementation | **實作完成，待 release production QA。** `/analyze` 已把資料驅動五節點、來源結果/耗時、run-bound Evidence/Log 下載置於結論後第一段；無事件時有誠實 empty state | release 後以真實資料完成 desktop/mobile 截圖與互動 smoke；不改 Trust Layer |
 

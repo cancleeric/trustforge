@@ -28,6 +28,12 @@ from trustforge.ledger import (
     estimate_cost,
     get_ledger,
 )
+from trustforge.ledger_archive import (
+    export_csv,
+    export_jsonl,
+    restore_jsonl_archive,
+    verify_jsonl_archive,
+)
 from trustforge.schema import QuestionType
 
 
@@ -141,6 +147,43 @@ def test_jsonl_ledger_persistence_across_new_instances(tmp_path):
     assert len(records) == 1
     assert records[0]["coin"] == "BTC"
     assert records[0]["total_cost_usd"] == 0.5
+
+
+def test_ledger_jsonl_archive_verify_and_restore_drill(tmp_path):
+    ledger = JsonlLedger(tmp_path / "source.jsonl")
+    ledger.append({"run_id": "r1", "ts": "2026-07-14T00:00:00Z", "coin": "BTC", "calls": [], "total_cost_usd": 0.12})
+    archive = tmp_path / "archive.jsonl"
+    manifest = export_jsonl(ledger, archive)
+    assert manifest["record_count"] == 1
+    assert verify_jsonl_archive(archive)["verified"] is True
+    restored = tmp_path / "restored.jsonl"
+    result = restore_jsonl_archive(archive, restored)
+    assert result["restored"] is True
+    assert JsonlLedger(restored).read_all() == ledger.read_all()
+
+
+def test_ledger_archive_detects_tampering_and_refuses_overwrite(tmp_path):
+    ledger = JsonlLedger(tmp_path / "source.jsonl")
+    ledger.append({"run_id": "r1", "ts": "2026-07-14T00:00:00Z", "calls": [], "total_cost_usd": 0.12})
+    archive = tmp_path / "archive.jsonl"
+    export_jsonl(ledger, archive)
+    archive.write_text(archive.read_text(encoding="utf-8") + '{"tampered":true}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        verify_jsonl_archive(archive)
+    target = tmp_path / "existing.jsonl"
+    target.write_text("keep", encoding="utf-8")
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        restore_jsonl_archive(archive, target)
+
+
+def test_ledger_csv_archive_has_manifest_and_retains_calls(tmp_path):
+    ledger = JsonlLedger(tmp_path / "source.jsonl")
+    ledger.append({"run_id": "r1", "ts": "2026-07-14T00:00:00Z", "calls": [{"model": "m"}], "total_cost_usd": 0.12})
+    archive = tmp_path / "archive.csv"
+    manifest = export_csv(ledger, archive)
+    assert manifest["format"] == "csv"
+    assert archive.with_suffix(".csv.manifest.json").is_file()
+    assert "calls_json" in archive.read_text(encoding="utf-8")
 
 
 def test_jsonl_ledger_read_all_missing_file_returns_empty(tmp_path):

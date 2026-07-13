@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Import licensed historical source records into leakage-safe daily archives.
 
-Input is JSONL, one object per document: coin, source, published_at, text, url,
-provider and license. Current web search/RSS output is deliberately not accepted
+Input is JSONL, one object per document: coin, source, published_at, retrieved_at,
+text, url, provider and license. Current web search/RSS output is deliberately not accepted
 as a substitute for a historical provider record.
 """
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -24,6 +25,13 @@ def _epoch(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+def _content_hash(document: dict) -> str:
+    payload = {key: value for key, value in document.items() if key != "content_sha256"}
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
@@ -39,12 +47,15 @@ def main(argv: list[str] | None = None) -> int:
         raw = json.loads(line)
         if str(raw.get("coin", "")).upper() != args.coin:
             continue
-        for key in ("source", "published_at", "text", "provider", "license"):
+        for key in ("source", "published_at", "retrieved_at", "text", "provider", "license"):
             if not raw.get(key):
                 raise ValueError(f"historical input missing {key}")
         published = _epoch(str(raw["published_at"]))
+        _epoch(str(raw["retrieved_at"]))
         day = datetime.fromtimestamp(published, tz=timezone.utc).strftime("%Y-%m-%d")
-        grouped[day][str(raw["source"])].append(dict(raw))
+        document = dict(raw)
+        document["content_sha256"] = _content_hash(document)
+        grouped[day][str(raw["source"])].append(document)
         providers[str(raw["provider"])] = {"provider": raw["provider"], "license": raw["license"]}
     backend = get_cache_backend(); date = start
     written = 0
