@@ -3,6 +3,79 @@ import { render, screen } from '@testing-library/react'
 import ConfidenceGauge from './ConfidenceGauge'
 import type { DecisionState } from '../lib/types'
 
+const TIER_LABEL = (label: string) => screen.getByLabelText(label)
+
+describe('ConfidenceGauge tierLabel', () => {
+  it('normal 態依 calibratedConfidence 分桶：0.7→高(good)', () => {
+    render(
+      <ConfidenceGauge calibratedConfidence={0.7} rawConfidence={0.5} decisionState="normal" />,
+    )
+    const el = TIER_LABEL('資訊完整度：高')
+    expect(el.textContent).toBe('資訊完整度：高')
+    expect(el).toHaveStyle({ color: 'var(--color-tf-good)' })
+  })
+
+  it('normal 態：calibratedConfidence=0.5→中(warn)，即便 rawConfidence 偏高也不影響', () => {
+    render(
+      <ConfidenceGauge calibratedConfidence={0.5} rawConfidence={0.95} decisionState="normal" />,
+    )
+    const el = TIER_LABEL('資訊完整度：中')
+    expect(el.textContent).toBe('資訊完整度：中')
+    expect(el).toHaveStyle({ color: 'var(--color-tf-warn)' })
+  })
+
+  it('normal 態：calibratedConfidence=0.4→低(bad)', () => {
+    render(
+      <ConfidenceGauge calibratedConfidence={0.4} rawConfidence={0.95} decisionState="normal" />,
+    )
+    const el = TIER_LABEL('資訊完整度：低')
+    expect(el.textContent).toBe('資訊完整度：低')
+    expect(el).toHaveStyle({ color: 'var(--color-tf-bad)' })
+  })
+
+  // codex 對抗審 H-1 回歸：normal 態大字(信任分 raw%)與分層(資訊完整度 calibrated)
+  // 同框時不得自相矛盾——分層正名為「資訊完整度」，明確不是上方信任分的分級。
+  it('H-1 回歸：大字信任分 95% 與「資訊完整度：中」同框、不冒充信任分等級', () => {
+    render(
+      <ConfidenceGauge calibratedConfidence={0.5} rawConfidence={0.95} decisionState="normal" />,
+    )
+    // 大字 gauge 顯示信任分 95%（hero=raw）
+    const ariaLabel = screen.getByRole('img').getAttribute('aria-label') ?? ''
+    expect(ariaLabel).toContain('95%')
+    expect(ariaLabel).toContain('信任分')
+    // 分層明示為「資訊完整度」（源自 calibrated=0.5→中），不得出現「信任等級」誤導字樣
+    expect(screen.getByText('資訊完整度：中')).toBeInTheDocument()
+    expect(screen.queryByText(/信任等級/)).not.toBeInTheDocument()
+    // 下方對照數字同源可驗：資訊完整度（校準後）0.50
+    expect(screen.getByText(/資訊完整度（校準後） 0\.50/)).toBeInTheDocument()
+  })
+
+  it('abstain 態：層標回「棄權／資料不足」(bad)、百分比仍顯示 hero=calibrated', () => {
+    render(
+      <ConfidenceGauge calibratedConfidence={0.8} rawConfidence={0.5} decisionState="abstain" />,
+    )
+    const el = TIER_LABEL('棄權／資料不足')
+    expect(el).toHaveStyle({ color: 'var(--color-tf-bad)' })
+    // 既有連續百分比仍保留（abstain 態 hero=calibratedConfidence=0.8→80%）
+    const ariaLabel = screen.getByRole('img').getAttribute('aria-label') ?? ''
+    expect(ariaLabel).toContain('80%')
+  })
+
+  it('low_confidence 態：層標回「資訊完整度偏低」(warn)，百分比仍顯示', () => {
+    render(
+      <ConfidenceGauge
+        calibratedConfidence={0.3}
+        rawConfidence={0.5}
+        decisionState="low_confidence"
+      />,
+    )
+    const el = TIER_LABEL('資訊完整度偏低')
+    expect(el).toHaveStyle({ color: 'var(--color-tf-warn)' })
+    const ariaLabel = screen.getByRole('img').getAttribute('aria-label') ?? ''
+    expect(ariaLabel).toContain('30%')
+  })
+})
+
 describe('ConfidenceGauge', () => {
   it('normal 狀態下 rawConfidence=0 顯示 0%', () => {
     render(
