@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.13.1 — 2026-07-13
+
+Production delivery repair for the Hermes Agent release.
+
+- Isolate the zero-cost question-bank check from the normal backend QA budget contract.
+- Package skills and executable deployment scripts, and resolve the deployed Skill Registry root from its artifact location.
+
 ## v0.13.0 — 2026-07-13
 
 Hermes Agent 可稽核自動化與受控外框進化。
