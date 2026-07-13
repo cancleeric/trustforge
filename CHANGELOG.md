@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.13.0 — 2026-07-13
+
+Hermes Agent 可稽核自動化與受控外框進化。
+
+- 五節點 Execution Log、來源級耗時／結果、240 題原創驗證題庫。
+- 五年 OHLCV lineage、source archive、歷史 replay 與 T+1/T+7/T+14 outcome diagnostic。
+- Outer Skill Registry：source / analysis / report / evaluation / improvement 五類 hash artifact，stage / sandbox / approve / rollback。
+- Hermes 預取 timer、cache freshness artifact、受 15 分鐘預算控制的來源並行化。
+- Historical Backfill 基礎：以 `published_at <= T` 回填，明確標示 `backfilled_archive`，拒絕 future leakage。
+- release tag 版控閘：package / changelog / tag 必須一致，dirty release 直接拒絕。
+
 ## v0.12.0 — 2026-07-12
 
 信任引擎技術債收口 + 可觀測性 + 測試/CI 品質閘。本輪多為 follow-up issue 的深化修復。
