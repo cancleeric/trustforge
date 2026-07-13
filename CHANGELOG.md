@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.13.8 — 2026-07-13
+
+- Keep the package runtime version synchronized with release metadata so the immutable release QA contract remains valid.
+
 ## v0.13.7 — 2026-07-13
 
 - Make the release smoke server use the repository virtual environment when available and CI's installed `python3` otherwise.
