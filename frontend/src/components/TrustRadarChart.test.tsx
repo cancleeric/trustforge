@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import TrustRadarChart from './TrustRadarChart'
 import type { TrustRadar, TrustRadarDimension } from '../lib/types'
@@ -16,6 +17,49 @@ function makeDim(overrides: Partial<TrustRadarDimension> = {}): TrustRadarDimens
 }
 
 describe('TrustRadarChart', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    Element.prototype.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          width: 400,
+          height: 300,
+          top: 0,
+          left: 0,
+          bottom: 300,
+          right: 400,
+          x: 0,
+          y: 0,
+          toJSON() {},
+        }) as DOMRect,
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    Element.prototype.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          width: 0,
+          height: 0,
+          top: 0,
+          left: 0,
+          bottom: 0,
+          right: 0,
+          x: 0,
+          y: 0,
+          toJSON() {},
+        }) as DOMRect,
+    )
+  })
+
   it('多維度有資料時應正常渲染且包含 PolarRadiusAxis', () => {
     const radar: TrustRadar = {
       price: makeDim({ label: '價格', trust: 0.8 }),
