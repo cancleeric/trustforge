@@ -18,8 +18,8 @@
 | ID | 待辦 | 現況 / 缺口 | 驗收條件 | 依賴 |
 |---|---|---|---|---|
 | H-01 | HOYA BIT 真實 connector | **程式完成，待官方 endpoint/憑證。** 新 connector 僅在 `TRUSTFORGE_HOYABIT_TICKER_URL` 設定後啟用，SSRF-safe、cache/scheduler/Execution Log/Evidence 齊備；未設定維持 disabled stub | 取得官方 contract 後以允許測資/真資料驗證 | 官方規格/憑證 |
-| H-02 | 正式資料預取部署 | **部署工件完成，待 AWS 執行。** `deploy/install_hermes_scheduler.sh` 會安裝 15 分鐘 `hermes-cycle.timer`，cycle 依序預取、archive、snapshot、freshness dashboard、diagnostic | EC2 timer 啟用；五幣每輪 archive/snapshot 可查 | AWS 權限 |
-| H-03 | AWS release CD 啟用 | **workflow 完成，待 AWS/GitHub production 設定與首次 run。** 本機 AWS session 已過期，未嘗試繞過認證 | GitHub production approval、OIDC role 最小權限完成；以 release tag 實跑一次 | GitHub/AWS 管理權限 |
+| H-02 | 正式資料預取部署 | **部分完成。** EC2 timer 已安裝；需連續觀察五幣 archive/snapshot 與 degraded connector 結果，確認不是只完成安裝 | 連續 7 天每輪 archive/snapshot 可查、來源失敗率與 freshness 有 evidence | AWS/runtime 觀測 |
+| H-03 | AWS release CD 啟用 | **完成。** `v0.13.3` 已完成 GitHub OIDC、QA、SSM backend 與 nginx frontend 的正式 CD；`v0.13.6` 起另加 local server smoke gate | 每個 release tag 可重複通過 | GitHub/AWS 管理權限 |
 | H-04 | 版本治理自動化 | **完成。** `scripts/release_version.py` 強制 tag=`pyproject`=`CHANGELOG`，拒絕 dirty release；CD gate 已接入 | release tag 驗證通過 | H-03 |
 | H-05 | 線上資料 QA 基準 | 240 題全綠僅代表 offline fixture；AWS 本機登入也未恢復 | 憑證/配額確認後跑 `--online --all`；輸出與 offline 結果分開保存，來源 p95/失敗率可稽核 | H-01、AWS/provider 憑證 |
 | H-06 | Wiki 正式同步 | **完成。** Wiki page `3145` 已建立並記錄同步時間 | 已驗證 | Wiki token |
@@ -55,6 +55,16 @@
 | H-14 | 小型 confidence calibrator | 以 H-13c 回填產生至少 100 筆、跨市場狀態、leakage-safe 的 eligible outcome；另留 time-separated holdout | 比較 logistic regression/isotonic；只在 holdout 改善 calibration 時採用；不稱作 LLM 預測能力 |
 | H-15 | Dawid-Skene offline fallback | 有足夠同 coin/time bucket 多來源 direction votes | deterministic EM 收斂、樣本不足守門、既有 Bedrock stance 路徑不回歸；只改善統計共識，不宣稱方向預測 |
 | H-16 | LLM/小模型訓練評估 | 數千筆人工檢核 trajectory 與清楚任務標註 | 先做 teacher/student 或 Bedrock customization feasibility study；成本、資料授權、區域、holdout safety 全部通過才訓練 |
+
+## 新增缺口（2026-07-13 production audit）
+
+| ID | 待辦 | 為何必須做 | 驗收條件 |
+|---|---|---|---|
+| H-17 | Production interaction smoke / zero-downtime deploy | API smoke 已納入 release；仍需瀏覽器層驗證 analyze、conflict recovery、Hermes log 與成本翻頁，且 deploy restart 不可讓使用者撞到 502 | staging + production canary 截圖/API evidence；rolling 或 maintenance-safe 切換不產生公開 5xx |
+| H-18 | 成本帳本保留、備份與匯出 | `v0.13.6` 已把 50 筆改為分頁檢視，但「可看見」不等於「永久可復原」 | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
+| H-19 | Production durable lease backend | 現行單機 JSON lease 可自癒 dead PID；多實例時必須使用 DynamoDB lease，否則跨 host dedup 不成立 | 建表/IAM、`TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb`、multi-instance contention test 全綠 |
+| H-20 | Connector reliability policy | Reddit cloud IP OAuth、來源 rate-limit/backoff、允許來源失效的降級規則尚未形成正式 SLA | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
+| H-21 | Hermes Execution Journey implementation | 已有自有 skill specification，尚未做成正式產品的 execution journey UI | 資料驅動五節點視覺、無動畫 fallback、run-bound evidence links、desktop/mobile QA；不改 Trust Layer |
 
 ## 明確不做 / 不可越線
 
