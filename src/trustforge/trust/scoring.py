@@ -101,6 +101,9 @@ DOMAIN_STOP: set[str] = {
 }
 
 # 操縱訊號關鍵詞（啟發式；正式版可換 Bedrock 分類器）。
+# ⚠️ 誠實聲明（issue #177-A）：這是**關鍵詞層級表面比對**，非行為/統計/協同
+# 操縱偵測；只要換詞（如把「暴漲」改成「大漲」）即可繞過。僅作「可疑用語標記」
+# 併入有限信任扣分（components["manipulation"]），**不代表「已判定操縱」**。
 _MANIP_PATTERNS = [
     r"to the moon", r"暴漲", r"翻倍", r"\bshill\b", r"喊單", r"穩賺",
     r"financial advice", r"\bpump\b", r"快上車", r"百倍",
@@ -129,7 +132,8 @@ class ScoredClaim:
     # Tier2 可解釋 UX：操縱關鍵詞命中原文清單（由 `_manipulation_flags` 填入，
     # 供 `agent.orchestrator._scored_to_evidence` 回填 `Evidence.flags`）。
     # 預設空 list，不影響既有以 keyword 建構 ScoredClaim 的呼叫點/相等性比較。
-    # 這是「確定判定為操縱」的紅旗，會反映在 `components["manipulation"]`。
+    # 這是「關鍵詞層級可疑用語標記」（非操縱判定），會反映在
+    # `components["manipulation"]`。
     manip_flags: list[str] = field(default_factory=list)
     # W3：informational-only 透明化 flag（由 `_coordination_signals` 填入，供
     # `agent.orchestrator._scored_to_evidence` 回填 `Evidence.info_flags`）。
@@ -341,6 +345,7 @@ def _manip_hits(text: str) -> list[str]:
 
 
 def _manipulation_penalty(c: Claim, extra_hits: int = 0) -> float:
+    # ⚠️ 誠實聲明（issue #177-A）：關鍵詞層級啟發式；非行為/統計操縱偵測。
     # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
     hits = _manip_hits(c.text)
     # 社群來源的操縱訊號加重

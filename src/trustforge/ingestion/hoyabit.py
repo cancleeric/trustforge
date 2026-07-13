@@ -16,9 +16,10 @@ spec（OHLCV / orderbook / trades 端點）後，才接真實呼叫。在 spec �
     ，暫回 `NotImplementedError`（spec 到位才補真實呼叫，且必須走
     `safe_fetch` 的 SSRF-safe fetch，沿用各連接器既有慣例）。
 
-social（Reddit）部分：**已確認不接**（Reddit 2025-11 終止 self-service，
-見 milestone 收斂指示）。本模組與整條管線都不含任何 social/Reddit 真實或
-stub 連接器——`hoyabit` 是唯一的「待接真實 API」佔位，專指交易所一手行情。
+social/Reddit 經 `social.RedditCryptoSource` 真實接線 `search.rss`
+（SSRF-safe，見 social.py），已納入生產 collect（base.build_social_sources）；
+但雲端 IP 常遭 Reddit 403，多數時候空手降級跳過，非「完全沒接」。本 hoyabit
+模組僅專指交易所一手行情佔位，與 social 來源互不隸屬。
 """
 from __future__ import annotations
 
