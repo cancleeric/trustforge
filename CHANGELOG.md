@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.13.5 — 2026-07-13
+
+- Reclaim dead local JSON analysis leases after a service restart and keep conflict responses free of internal dedup keys.
+
 ## v0.13.4 — 2026-07-13
 
 - Render the header release from the live health contract and inject the commit SHA at frontend build time; remove the stale hard-coded version badge.

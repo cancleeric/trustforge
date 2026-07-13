@@ -4837,7 +4837,7 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             if _analyze_dedup_inflight.get(key) is my_flight:
                 _analyze_dedup_inflight.pop(key, None)
         raise _AnalyzeDedupLeaseBusy(
-            f"相同分析請求正在其他實例執行中（dedup key={key!r}），請稍後再試"
+            "相同分析正在處理中，請稍候再試"
         )
 
     try:
