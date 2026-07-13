@@ -33,11 +33,9 @@ jobs:
       - name: Install Python dependencies
         run: pip install -e ".[dev]"
       - name: Verify backend and Hermes QA contract
-        env:
-          TRUSTFORGE_BEDROCK_DAILY_USD_CAP: "0"
         run: |
           pytest -q
-          python scripts/run_question_bank.py --limit 24 --out out/release/question-bank-results.json
+          TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 python scripts/run_question_bank.py --limit 24 --out out/release/question-bank-results.json
       - name: Verify immutable release version
         run: python scripts/release_version.py --verify --ref "${{ inputs.ref || github.ref_name }}"
       - name: Set up Node
