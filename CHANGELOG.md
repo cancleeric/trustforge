@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.13.3 — 2026-07-13
+
+- Treat a partially unavailable source refresh as a logged degraded Hermes node, while continuing the bounded workflow with available evidence.
+- Split privileged AWS bootstrap from OIDC release CD, so a release tag deploys through the pre-provisioned production infrastructure.
+
 ## v0.13.2 — 2026-07-13
 
 - Correct the production Hermes timer Skill Registry root to `skills/hermes`, so its baseline policy set resolves before each autonomous cycle.

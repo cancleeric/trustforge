@@ -60,6 +60,7 @@ jobs:
         run: bash deploy/deploy_ec2.sh
         env:
           REGION: ap-southeast-2
+          TRUSTFORGE_BOOTSTRAP: "0"
       - name: Deploy frontend to EC2 nginx
         run: bash deploy/deploy_frontend_nginx.sh
         env:
