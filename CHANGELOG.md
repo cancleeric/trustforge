@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.13.4 — 2026-07-13
+
+- Render the header release from the live health contract and inject the commit SHA at frontend build time; remove the stale hard-coded version badge.
+
 ## v0.13.3 — 2026-07-13
 
 - Treat a partially unavailable source refresh as a logged degraded Hermes node, while continuing the bounded workflow with available evidence.

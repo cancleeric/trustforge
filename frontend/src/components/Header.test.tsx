@@ -10,6 +10,7 @@ describe('Header 版本徽章', () => {
 
   it('VITE_GIT_SHA 有值時，版本徽章顯示 git sha 前 7 碼', async () => {
     vi.stubEnv('VITE_GIT_SHA', 'abc1234def')
+    vi.stubEnv('VITE_RELEASE_VERSION', 'v9.9.9')
     vi.resetModules()
     const { default: Header } = await import('./Header')
 
@@ -19,12 +20,13 @@ describe('Header 版本徽章', () => {
       </MemoryRouter>
     )
 
-    const badge = screen.getByTitle('部署版本（git sha）')
-    expect(badge.textContent).toBe('v0.6.5 · abc1234')
+    const badge = screen.getByTitle('部署版本（release / git sha）')
+    expect(badge.textContent).toBe('v9.9.9 · abc1234')
   })
 
   it('VITE_GIT_SHA 未設定（空字串）時，版本徽章 fallback 顯示 dev', async () => {
     vi.stubEnv('VITE_GIT_SHA', '')
+    vi.stubEnv('VITE_RELEASE_VERSION', 'v9.9.9')
     vi.resetModules()
     const { default: Header } = await import('./Header')
 
@@ -34,7 +36,7 @@ describe('Header 版本徽章', () => {
       </MemoryRouter>
     )
 
-    const badge = screen.getByTitle('部署版本（git sha）')
-    expect(badge.textContent).toBe('v0.6.5 · dev')
+    const badge = screen.getByTitle('部署版本（release / git sha）')
+    expect(badge.textContent).toBe('v9.9.9 · dev')
   })
 })
