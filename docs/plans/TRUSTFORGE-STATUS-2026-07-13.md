@@ -17,13 +17,12 @@
    直接衝擊「技術可行性 25%」與「命題契合度 30%」兩大項。
    → 必須在決賽前拍板、且**只能由 CEO/Eric 決定**的敘事策略問題。
 
-2. **文件與實際進度嚴重脫節，若不修正會在評審面前自曝其短。**
-   ROADMAP.md 全部未勾選，但實際已完成 admin console、生產部署、CI/CD、
-   多輪信任評分優化——文件遠遠落後實際。CHANGELOG.md 停在 v0.10.0
-   （7/10），最新到 db6950b（7/12）還有 15+ commit 未記錄，其中最關鍵的
-   **HOYA BIT 連接器 stub contract** 完全沒被記錄在案。評審規則明確要求
-   「關鍵結論可追溯」，文件狀態本身就是可追溯性的一部分，目前狀態經不起
-   檢視。
+2. **文件與實際進度脫節（已於本輪修正，留存備查）**：初版狀態盤點時
+   ROADMAP.md 全部未勾選、CHANGELOG.md 停在 v0.10.0 且缺 15+ commit。
+   此缺口已透過 **#174（同 PR #175）** 補齊：ROADMAP 對齊至 M1–M4 實際進度、
+   CHANGELOG 補 v0.11.0/v0.12.0 並記錄 HOYA BIT stub contract 等關鍵項。
+   下方數字若與最新 ROADMAP/CHANGELOG 不一致，以該二檔為準。
+
 
 3. **HOYA BIT 連接器目前是 stub（`enabled=False`）**，而今天正是
    HOYA BIT 企業數據工作坊。這是命題契合度的核心依據來源，若決賽時仍是
@@ -35,8 +34,8 @@
 
 | 項目 | 文件/宣稱狀態 | 實際狀態 | 落差評級 |
 |------|--------------|---------|---------|
-| ROADMAP M1-M4 | 全部未勾選 | 實際已完成遠超記載內容 | 中（低估自己，會讓評審低估專案成熟度） |
-| CHANGELOG | 停在 v0.10.0（7/10） | 最新 db6950b（7/12），15+ commit 未寫入 | 高（可追溯性缺口，含最關鍵的 HOYA BIT stub commit） |
+| ROADMAP M1-M4 | 初版全部未勾選 | **已於 #174 對齊至實際進度（M1–M4）** | 已修正（原中評級，現落差消除） |
+| CHANGELOG | 初版停在 v0.10.0（7/10） | **已於 #174 補 v0.11.0/v0.12.0 並補 HOYA BIT stub 等關鍵 commit** | 已修正（原高評級，現落差消除） |
 | HOYA BIT 連接器 | README/pitch 可能暗示已整合企業數據源 | `ingestion/hoyabit.py` 是 stub，`enabled=False`，等今天規格 | **高（命題契合度核心依據，最需優先處理）** |
 | Trust Score 預測力 | 對外敘事若暗示「預測市場方向」 | 內部 QA 已證實 AUC≈0.49＝隨機 | **高（誠信與技術可行性雙重風險）** |
 | W2 動態信譽/W3 coordination/conformal prediction | 程式碼存在完整實作，給人「功能齊全」印象 | 三者皆未接入生產（各自因 Bedrock 依賴／統計缺陷／回測無效而停用） | 中（demo 被問「這功能有在跑嗎」需誠實話術） |
@@ -52,9 +51,10 @@
 - **Frontend Trust Layer UI 生態已完整**：TrustBreakdown / ConfidenceGauge /
   TrustRadarChart / CrossSourceSignalPanel / EvidenceTable 等元件皆存在且
   符合 README 宣稱，是視覺化 demo 的本錢，不需重做，只需包裝敘事。
-- **測試覆蓋扎實**：81 個測試檔案、約 1735 個測試函式，核心 scoring 邏輯
-  有 73 個測試把關，對「完整度 10%」與「技術可行性 25%」有實質支撐，
-  可在 pitch 中量化引用。
+- **測試覆蓋扎實（以 CI 實跑為準）**：後端 pytest **2015 passed / 6 skipped**
+  （coverage 93%），前端 vitest **245 passed**；核心 scoring 邏輯有多輪測試把關，
+  對「完整度 10%」與「技術可行性 25%」有實質支撐，可在 pitch 中量化引用。
+  （註：初版寫的「81 檔 / 1735 函式」為早期估計，現已不符，以 CI 數字為準。）
 - **市場差異化敘事成立（須修正措辭）**：Nansen / LunarCrush（Galaxy Score）/
    Arkham 各自都有單一領域的統一分數，因此「競品無統一分數」的說法**不實，
    必須刪除**。真實的技術空白是：現有競品都「給結論／給分數，但不提供可溯源、
