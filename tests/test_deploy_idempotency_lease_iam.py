@@ -35,3 +35,34 @@ def test_idempotency_lease_policy_honors_table_override():
     assert _policy("lease-table-canary")["Statement"][0]["Resource"].endswith(
         "table/lease-table-canary"
     )
+
+
+def test_idempotency_lease_setup_is_repeatable_when_ttl_is_enabled(tmp_path):
+    """A second deploy must not fail because DynamoDB TTL is already enabled."""
+    calls = tmp_path / "aws-calls.log"
+    fake_aws = tmp_path / "aws"
+    fake_aws.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"printf '%s\\n' \"$*\" >> {calls!s}\n"
+        "case \"$*\" in\n"
+        "  'sts get-caller-identity '*) echo 123456789012 ;;\n"
+        "  'dynamodb describe-table '*) exit 0 ;;\n"
+        "  'dynamodb describe-time-to-live '*) echo ENABLED ;;\n"
+        "  'iam put-role-policy '*) exit 0 ;;\n"
+        "  *) echo \"unexpected aws call: $*\" >&2; exit 9 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_aws.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "dynamodb update-time-to-live" not in calls.read_text(encoding="utf-8")

@@ -47,8 +47,14 @@ fi
 
 # TTL is a crash-recovery aid.  Correctness comes from the conditional lease
 # expression, because DynamoDB's TTL deletion is deliberately asynchronous.
-aws dynamodb update-time-to-live --region "$REGION" --table-name "$TABLE" \
-  --time-to-live-specification Enabled=true,AttributeName=ttl >/dev/null
+# `update-time-to-live` rejects an already-enabled attribute, so explicitly
+# treat ENABLED/ENABLING as the desired idempotent state for repeat deploys.
+TTL_STATUS="$(aws dynamodb describe-time-to-live --region "$REGION" --table-name "$TABLE" \
+  --query 'TimeToLiveDescription.TimeToLiveStatus' --output text)"
+if [[ "$TTL_STATUS" != "ENABLED" && "$TTL_STATUS" != "ENABLING" ]]; then
+  aws dynamodb update-time-to-live --region "$REGION" --table-name "$TABLE" \
+    --time-to-live-specification Enabled=true,AttributeName=ttl >/dev/null
+fi
 aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-idempotency-lease \
   --policy-document "$POLICY" >/dev/null
 echo "idempotency lease table and least-privilege instance policy are ready: $TABLE_ARN"
