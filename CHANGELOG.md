@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.14.4 — 2026-07-14
+
+- Stop a coin-scoped connector's remaining calls for the current cycle after
+  an explicit HTTP 429, while retaining every deferred stale target in the
+  scheduler failure record.
+- Add production evidence for the four-worker prefetch path and its first
+  observed provider reliability gaps.
+
 ## v0.14.3 — 2026-07-14
 
 - Fix the packaged Hermes scheduler service to pass `TRUSTFORGE_HOME`, so its
