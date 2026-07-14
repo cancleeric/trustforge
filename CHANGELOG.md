@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.14.1 — 2026-07-14
+
+- Add a verifiable, append-only cost-ledger archive workflow: JSONL/CSV export,
+  integrity manifest, non-overwriting restore drill, DynamoDB PITR verification,
+  and versioned off-table archive evidence.
+- Provision the DynamoDB-backed shared analysis lease required for cross-instance
+  idempotency, including TTL and least-privilege instance-role policy.
+- Require provider, license, publication time, actual retrieval time, and a
+  deterministic content hash for historical-backfill documents.
+
 ## v0.14.0 — 2026-07-14
 
 - Refresh TrustForge into a compact Hermes market desk: fixed-named trust and information-completeness metrics, source-cache health, and a direct operational analysis entry point.
