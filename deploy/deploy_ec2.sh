@@ -668,7 +668,8 @@ Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
-ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py
+ExecStartPre=/usr/bin/python3 scripts/fetch_scheduler.py --probe
+ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py --allow-partial
 UNIT2
 cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3
 [Unit]

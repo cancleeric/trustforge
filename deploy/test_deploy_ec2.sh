@@ -1442,7 +1442,7 @@ echo "== nginx /api/admin/ 硬化結構檢查（harper 條件 A + M1，管理控
 assert_nginx_admin_location \
   "nginx.conf（react TLS）/api/admin/ location：proxy + IP 覆寫 + no-store + HSTS 重補齊備，allowlist 預設註解" \
   "$REPO_ROOT/deploy/nginx.conf" \
-  'proxy_pass http://127.0.0.1:8080/api/admin/;
+  'proxy_pass http://trustforge_backend/api/admin/;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $remote_addr;
 proxy_no_cache 1;

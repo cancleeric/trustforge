@@ -1512,6 +1512,12 @@ def main(argv: list[str] | None = None) -> int:
              "獨立 cron line、cadence 見 SNAPSHOT_REFRESH_INTERVAL_SECONDS。"
              "可與 --dry-run 合併使用，只列出會跑哪些幣、不真的呼叫",
     )
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help="排程服務模式：至少一個目標成功時將上游部分失敗視為 degraded "
+             "success；零成功仍非零退出。production unit 必須先以 --probe "
+             "驗證 cache/ledger 基建，避免把 DynamoDB 故障誤當上游降級。",
+    )
     args = parser.parse_args(argv)
 
     if args.parallelism < 1:
@@ -1583,6 +1589,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[fetch_scheduler] 有 {len(failures)} 個目標本次未成功刷新快取"
               f"（真呼叫失敗或真呼叫成功但 cache 寫入失敗，細節見上方訊息）："
               f"{failures}", file=sys.stderr)
+        if args.allow_partial and results:
+            print(
+                "[fetch_scheduler] 部分來源降級，但已有成功資料寫入；"
+                "--allow-partial 回傳成功，完整缺口已保存在 scheduler run log。",
+                file=sys.stderr,
+            )
+            return 0
         return 1
     return 0
 

@@ -94,3 +94,6 @@ def test_production_workflow_wraps_backend_deploy():
     workflow = (ROOT / ".github" / "workflows" / "deploy-production.yml").read_text()
     assert "scripts/monitor_deploy_health.sh" in workflow
     assert "out/release/deploy-health-canary.jsonl" in workflow
+    assert workflow.index("Deploy frontend to EC2 nginx") < workflow.index(
+        "Deploy backend to EC2 through SSM"
+    )

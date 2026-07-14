@@ -83,6 +83,40 @@ def test_main_source_calls_empty_when_no_results(monkeypatch):
     assert captured["source_calls"] == {}
 
 
+def test_allow_partial_returns_success_when_some_targets_refresh(monkeypatch):
+    monkeypatch.setattr(
+        fetch_scheduler,
+        "run_once",
+        lambda *a, **k: ([("coindesk:BTC", 3)], ["reddit-cryptocurrency:BTC"]),
+    )
+    monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: object())
+    monkeypatch.setattr(fetch_scheduler, "append_scheduler_run", lambda _record: None)
+    monkeypatch.setattr(
+        fetch_scheduler,
+        "build_registry",
+        lambda: {"coindesk": object(), "reddit-cryptocurrency": object()},
+    )
+
+    assert fetch_scheduler.main(["--allow-partial"]) == 0
+
+
+def test_allow_partial_still_fails_when_nothing_refreshes(monkeypatch):
+    monkeypatch.setattr(
+        fetch_scheduler,
+        "run_once",
+        lambda *a, **k: ([], ["coindesk:BTC", "reddit-cryptocurrency:BTC"]),
+    )
+    monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: object())
+    monkeypatch.setattr(fetch_scheduler, "append_scheduler_run", lambda _record: None)
+    monkeypatch.setattr(
+        fetch_scheduler,
+        "build_registry",
+        lambda: {"coindesk": object(), "reddit-cryptocurrency": object()},
+    )
+
+    assert fetch_scheduler.main(["--allow-partial"]) == 1
+
+
 def test_parallel_prefetch_runs_source_workers_concurrently(monkeypatch):
     """來源是 ownership 邊界，但不同來源不可悄悄退化為序列執行。"""
 

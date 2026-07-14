@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.14.8 — 2026-07-14
+
+- Add a health-checked temporary backend on port 8081 and nginx backup upstream routing so production backend restarts do not interrupt public requests.
+- Distinguish scheduler upstream degradation from total failure: production probes DynamoDB first, records partial source failures, and remains healthy when usable data was written.
+
 ## v0.14.7 — 2026-07-14
 
 - Isolate read-only UI rate limits by endpoint so normal navigation across overview, status, history, and costs cannot exhaust one shared allowance.
