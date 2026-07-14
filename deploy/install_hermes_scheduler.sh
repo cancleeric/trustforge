@@ -15,6 +15,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=$APP_DIR
+Environment=TRUSTFORGE_HOME=$APP_DIR
 Environment=AWS_REGION=$REGION
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
