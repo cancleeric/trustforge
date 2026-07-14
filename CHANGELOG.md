@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.14.2 — 2026-07-14
+
+- Start the Hermes scheduler immediately after installation and keep a bounded
+  autonomous cycle running when individual source refreshes degrade.
+- Make the shared DynamoDB idempotency-lease bootstrap repeatable when TTL is
+  already enabled; validate the deployed service environment contract.
+- Strengthen local release smoke by isolating its cache backend and executing
+  a complete Hermes analysis with Evidence, five nodes, and Execution Log.
+
 ## v0.14.1 — 2026-07-14
 
 - Add a verifiable, append-only cost-ledger archive workflow: JSONL/CSV export,
