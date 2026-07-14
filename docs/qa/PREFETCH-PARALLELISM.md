@@ -40,3 +40,19 @@ source that receives an explicit HTTP 429 stops calling that source for the
 remaining coins in the current cycle. Every deferred stale target is still
 reported as failed, so cooldown reduces provider pressure without hiding
 freshness gaps. Production verification remains pending the next release.
+
+## 2026-07-14 v0.14.4 verification
+
+- Production health reported `v0.14.4`; timer remained enabled and active.
+- The full Hermes cycle completed successfully in 51.03 seconds and wrote all
+  five trust snapshots.
+- `reddit-cryptocurrency:BTC` succeeded with 24 documents.
+- `reddit-cryptocurrency:ETH` returned HTTP 429. The scheduler immediately
+  deferred SOL, BNB and XRP, recorded all four targets as failed, and emitted
+  the `HTTP 429 cooldown` audit message. No remaining Reddit call was made.
+- `reddit-bitcoin` remained fresh and generated no live provider traffic.
+
+This verifies the source-scoped cooldown in production. CoinGecko showed that
+separate source workers sharing one provider can still encounter independent
+429 responses; provider-wide cooldown coordination remains a follow-up and is
+not claimed complete by this release.
