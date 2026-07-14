@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.14.0 — 2026-07-14
+
+- Refresh TrustForge into a compact Hermes market desk: fixed-named trust and information-completeness metrics, source-cache health, and a direct operational analysis entry point.
+- Make the report's primary gauge always represent calibrated information completeness; show trust score independently so a decision state never changes the meaning of a percentage.
+- Put the data-driven five-node Hermes execution journey, source outcomes, document counts, durations, and run-bound report/Evidence/Log downloads directly after the conclusion.
+- Improve supporting operational pages with consistent headings, human-readable timestamps, and preserved paginated cost-ledger history.
+- Archive the superseded 2026-07-01 delivery checklist and update the authoritative Hermes delivery backlog and UX release evidence.
+
 ## v0.13.9 — 2026-07-13
 
 - Label the analysis gauge's visible primary metric so a raw trust score is not mistaken for calibrated information completeness.
