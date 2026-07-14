@@ -85,9 +85,9 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 |---|---|---|---|
 | H-17 | Production interaction smoke / zero-downtime deploy | **本機 smoke 與瀏覽器驗證完成。** `local_release_smoke.sh` 以 `CACHE_BACKEND=json` 隔離本機驗測，實跑 health/overview/cost pagination 與 BTC `/api/analyze`、Evidence、五個 Hermes nodes、Execution Log；2026-07-14 已在 1440px 與 390px 驗證分析頁、成本帳本，沒有橫向溢位或 browser error。仍需 staging/production canary、conflict recovery 與 deploy restart 行為 | staging + production canary 截圖/API evidence；rolling 或 maintenance-safe 切換不產生公開 5xx |
 | H-18 | 成本帳本保留、備份與匯出 | **完成。** DynamoDB PITR 已啟用；716 筆 JSONL export/hash verify/non-overwrite restore drill 已完成；AES256 + S3 versioning off-table archive evidence 已記於 `docs/qa/COST-LEDGER-DURABILITY.md` | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
-| H-19 | Production durable lease backend | **production 環境已生效，service-level canary 待排程。** 2026-07-14 已確認 `trustforge-analyze-leases` 為 ACTIVE/PAY_PER_REQUEST、TTL=`ttl` ENABLED；`trustforge-ec2` 最小 policy 僅含 Get/Put/Delete；兩個真 DynamoDB backend contention/release/reacquire 全綠。`v0.14.3` EC2 service 已確認載入 `TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb` 與 `TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases`。下一步是隔離的 service-level concurrent canary，不可用人為重複請求干擾正式分析 | production release 後確認 `TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb` + table env、service-level contention test 全綠 |
+| H-19 | Production durable lease backend | **完成。** 2026-07-14 已確認 `trustforge-analyze-leases` 為 ACTIVE/PAY_PER_REQUEST、TTL=`ttl` ENABLED；`trustforge-ec2` 最小 policy 僅含 Get/Put/Delete；真 DynamoDB backend contention/release/reacquire 全綠。`v0.14.6` 隔離的 service-level concurrent canary 兩個請求皆 HTTP 200，且共用同一 `run_id=hermes-ec4c16d8f648`，證明沒有重複分析。證據見 `docs/qa/PRODUCTION-INTERACTION-CANARY.md` | 已驗證 |
 | H-20 | Connector reliability policy | **來源內 cooldown 已在 production 驗證；CoinGecko provider-wide 協調已上線並通過無 429 正常路徑。** `v0.14.5` cycle 的 CoinGecko price 與 stale SOL/BNB/XRP detail 全部成功，沒有 429；provider 序列化 fetch 43.46 秒、完整 cycle 68.37 秒、五幣快照 5/5、exit 0。首個 429 後阻止其他 worker 發出第二次 HTTP 的分支不對 live API 人為觸發，由雙 worker concurrency regression 保證。仍需累積連續七輪來源失敗率 evidence | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
-| H-21 | Hermes Execution Journey implementation | **實作完成，待 release production QA。** `/analyze` 已把資料驅動五節點、來源結果/耗時、run-bound Evidence/Log 下載置於結論後第一段；無事件時有誠實 empty state | release 後以真實資料完成 desktop/mobile 截圖與互動 smoke；不改 Trust Layer |
+| H-21 | Hermes Execution Journey implementation | **實作、正式 API 與下載 artifact 驗收完成，正式 viewport 截圖待補。** `/analyze` 已把資料驅動五節點、來源結果/耗時、run-bound Evidence/Log 下載置於結論後第一段；`v0.14.6` 正式 bundle 已確認下載名為標準 `execution-log.json`，正式分析回傳 13 筆 Evidence 與完整 execution。2026-07-14 瀏覽器控制通道初始化衝突，故不冒充已有 production desktop/mobile 截圖 | 補正式 desktop/mobile 截圖；互動/API evidence 見 `docs/qa/PRODUCTION-INTERACTION-CANARY.md`；不改 Trust Layer |
 
 ## 明確不做 / 不可越線
 
@@ -100,6 +100,7 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 
 `H-01 -> H-02 -> H-05 -> H-10/H-11 -> H-17 -> H-19 -> H-20 -> H-13a -> H-13b -> H-13c -> H-14/H-16`
 
-H-03、H-04、H-06、H-07～H-09、H-12、H-15、H-18 與 H-21 已完成。H-14/H-16
+H-03、H-04、H-06、H-07～H-09、H-12、H-15、H-18 與 H-19 已完成。H-21
+僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
 在系統穩定化、資料累積與預算核准前均保持 deferred；任何 P2 項目不得因為急於
 「訓練模型」跳過資料累積與 held-out 驗證。
