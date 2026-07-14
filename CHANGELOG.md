@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.14.5 — 2026-07-14
+
+- Coordinate all CoinGecko source workers through one provider lock covering
+  throttle state, HTTP results and process caches.
+- Stop all remaining CoinGecko HTTP calls for the scheduler process after the
+  provider's first explicit HTTP 429.
+
 ## v0.14.4 — 2026-07-14
 
 - Stop a coin-scoped connector's remaining calls for the current cycle after
