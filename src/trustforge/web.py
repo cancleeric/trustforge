@@ -886,23 +886,31 @@ def _check_real_rate_limit(ip: str) -> None:
         _real_rate_buckets[ip] = ts
 
 
-def _check_status_rate_limit(ip: str) -> None:
+def _check_status_rate_limit(ip: str, scope: str = "status") -> None:
     """`/status` 專用 per-IP 限流（獨立 bucket，見模組頂部 `_STATUS_RATE_*`
     常數）：IP 在滑動視窗內超過 `_STATUS_RATE_MAX` 次請求 → raise
     `TooManyRequests`。防的是「資料鮮度矩陣逐 (source,coin) 讀 cache 的頁面
     被當 DoS 高頻打」，跟 `_check_live_rate_limit` 保護真連接器/Bedrock 配額
     的目的不同，故不共用同一組 bucket/門檻（但共用同一套 `_evict_stale_rate_buckets`
     上限保護邏輯）。"""
+    # Read-only UI endpoints must not consume one shared allowance. A normal
+    # navigation sequence loads overview, status and history in quick
+    # succession; sharing the raw IP key made those independent screens rate
+    # limit each other. Keep one bounded store while namespacing its keys.
+    bucket_key = f"{scope}:{ip}"
     now = time.time()
     with _status_rate_lock:
         _evict_stale_rate_buckets(
             _status_rate_buckets, _STATUS_RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS
         )
-        ts = [t for t in _status_rate_buckets.get(ip, []) if now - t < _STATUS_RATE_WINDOW]
+        ts = [
+            t for t in _status_rate_buckets.get(bucket_key, [])
+            if now - t < _STATUS_RATE_WINDOW
+        ]
         if len(ts) >= _STATUS_RATE_MAX:
             raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
         ts.append(now)
-        _status_rate_buckets[ip] = ts
+        _status_rate_buckets[bucket_key] = ts
 
 
 def _check_online_stance_rate_limit(ip: str) -> None:
@@ -1613,7 +1621,7 @@ def _handle_status(client_ip: str = "") -> tuple[int, str]:
     固定 dark，這裡不再需要接受/轉傳 `theme`/`theme_toggle_href` 參數。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "status-page")
     except TooManyRequests as exc:
         # 商業級修復：跟 `/analyze` 錯誤頁一致，統一走品牌化錯誤卡（見
         # `_render_error_card`），不留一處裸紅字例外。
@@ -5191,7 +5199,7 @@ def _handle_api_overview(client_ip: str = "") -> tuple[int, str]:
     單純 miss（某幣還沒排程寫過快照）維持原樣正常跳過，回 200 該幣缺席。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "overview")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
 
@@ -5314,7 +5322,7 @@ def _handle_api_status(client_ip: str = "") -> tuple[int, str]:
     降級 metadata；primary+fallback 都失敗才 502。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "status-api")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
 
@@ -5394,7 +5402,7 @@ def _handle_api_costs(qs: dict | None = None, client_ip: str = "") -> tuple[int,
     讀 `run_count`，不可用 `runs.length` 估算（帳本 >50 筆時會低估）。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "costs")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     try:
@@ -5444,7 +5452,7 @@ def _handle_api_history(qs: dict, client_ip: str = "") -> tuple[int, str]:
     + 較短的 history 陣列。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "history")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
 
@@ -6128,7 +6136,14 @@ class Handler(BaseHTTPRequestHandler):
         for name, val in (extra_headers or {}).items():
             self.send_header(name, val)
         self.end_headers()
-        self.wfile.write(b)
+        try:
+            self.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser can cancel an in-flight analysis when the user
+            # navigates away. nginx records that as 499; it is not a server
+            # failure and should not emit a traceback that obscures real
+            # production errors.
+            return
 
     def log_message(self, *a):  # 靜音預設存取日誌
         pass

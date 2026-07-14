@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.14.7 — 2026-07-14
+
+- Isolate read-only UI rate limits by endpoint so normal navigation across overview, status, history, and costs cannot exhaust one shared allowance.
+- Treat browser-cancelled responses as normal client disconnects instead of emitting misleading `BrokenPipeError` tracebacks.
+
 ## v0.14.6 — 2026-07-14
 
 - Export the user-facing Hermes execution log as a standard `.json` envelope
