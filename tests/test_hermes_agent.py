@@ -16,6 +16,8 @@ def test_autonomous_cycle_uses_fixed_pool_and_existing_scheduler_actions():
     plan = autonomous_cycle_plan(["BTC", "ETH"])
     assert plan["coins"] == ["BTC", "ETH"]
     assert [item["tool"] for item in plan["actions"]] == [
-        "refresh_sources", "build_snapshots", "cache_freshness_dashboard", "diagnose_improvement",
+        "refresh_sources", "build_snapshots", "cache_freshness_dashboard", "measure_quality",
+        "replay_history", "replay_history", "diagnose_improvement",
     ]
     assert "--snapshot" in plan["actions"][1]["argv"]
+    assert plan["actions"][3]["argv"][-1] == "out/question-bank-latest.json"

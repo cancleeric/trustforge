@@ -31,7 +31,7 @@
 | H-07 | Outer Skill Registry | **完成。** 五類 immutable hash artifact，正式 run 開始時凍結 revision 並寫入 Execution Log/manifest；核心 override 被拒絕 | 已測試 | H-04 |
 | H-08 | Skill staging sandbox | **完成。** `scripts/run_skill_sandbox.py` 對候選 artifact 跑題庫，選用 replay；不會 activation | 已測試 | H-07 |
 | H-09 | Rollback 實際生效 | **完成。** approved/rollback pointer 被 runtime resolver 讀取，新 run manifest 顯示選定 hash | 已測試 | H-07、H-08 |
-| H-10 | 自動改善例行輸入 | `diagnose_improvement` 可讀 scheduler，題庫/replay JSON 仍需人工提供 | 排程定期產生 online QA 與各幣 replay reports；diagnostic 自動消費並建立 proposal queue | H-02、H-05 |
+| H-10 | 自動改善例行輸入 | **部分完成。** Hermes cycle 已自動產生 bounded 24 題 regression measurement 與各幣 replay artifact，再由 diagnostic 消費；online QA 保持 H-05 的明確 quota/credential gate | 排程定期產生 online QA 與各幣 replay reports；diagnostic 自動消費並建立 proposal queue | H-02、H-05 |
 | H-11 | 來源預取並行化 | **程式完成，待 AWS 壓測。** scheduler 有 `--parallelism`、900s total budget、source-owner worker 與 join-before-snapshot 邊界 | 壓力測試證明快於序列且可回溯 | H-02 |
 | H-12 | Cache freshness dashboard | **完成（資料 artifact）。** `scripts/cache_freshness_dashboard.py` 產出五幣×來源 fresh/stale/missing、age、document count、scheduler failure labels；Hermes cycle 自動執行 | 已測試 | H-02 |
 
