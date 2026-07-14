@@ -42,5 +42,5 @@ WantedBy=timers.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable hermes-cycle.timer
-echo "Hermes timer installed. Start with: systemctl start hermes-cycle.service"
+systemctl enable --now hermes-cycle.timer
+echo "Hermes timer installed and active. Inspect with: systemctl list-timers hermes-cycle.timer"

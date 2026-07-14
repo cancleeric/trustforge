@@ -18,7 +18,7 @@
 | ID | 待辦 | 現況 / 缺口 | 驗收條件 | 依賴 |
 |---|---|---|---|---|
 | H-01 | HOYA BIT 真實 connector | **程式完成，待官方 endpoint/憑證。** 新 connector 僅在 `TRUSTFORGE_HOYABIT_TICKER_URL` 設定後啟用，SSRF-safe、cache/scheduler/Execution Log/Evidence 齊備；未設定維持 disabled stub | 取得官方 contract 後以允許測資/真資料驗證 | 官方規格/憑證 |
-| H-02 | 正式資料預取部署 | **部分完成。** EC2 timer 已安裝；需連續觀察五幣 archive/snapshot 與 degraded connector 結果，確認不是只完成安裝 | 連續 7 天每輪 archive/snapshot 可查、來源失敗率與 freshness 有 evidence | AWS/runtime 觀測 |
+| H-02 | 正式資料預取部署 | **修正待 release canary。** 2026-07-14 production audit 證實 `fetch-scheduler.timer` 正常，但 `hermes-cycle.timer` 雖 enabled 卻 inactive，且舊 cycle 曾因局部 connector 失敗退出；當次仍寫入 9 筆 archive。installer 已改為 `enable --now`，cycle 對 `refresh_sources` 局部失敗保留 degraded evidence 並繼續後續節點。下一次受驗 release 必須啟動 timer，再連續觀察 | 連續 7 天每輪 archive/snapshot 可查、來源失敗率與 freshness 有 evidence | AWS/runtime 觀測 |
 | H-03 | AWS release CD 啟用 | **完成。** `v0.13.3` 已完成 GitHub OIDC、QA、SSM backend 與 nginx frontend 的正式 CD；`v0.13.6` 起另加 local server smoke gate | 每個 release tag 可重複通過 | GitHub/AWS 管理權限 |
 | H-04 | 版本治理自動化 | **完成。** `scripts/release_version.py` 強制 tag=`pyproject`=`CHANGELOG`，拒絕 dirty release；CD gate 已接入 | release tag 驗證通過 | H-03 |
 | H-05 | 線上資料 QA 基準 | 240 題全綠僅代表 offline fixture；AWS 本機登入也未恢復 | 憑證/配額確認後跑 `--online --all`；輸出與 offline 結果分開保存，來源 p95/失敗率可稽核 | H-01、AWS/provider 憑證 |
