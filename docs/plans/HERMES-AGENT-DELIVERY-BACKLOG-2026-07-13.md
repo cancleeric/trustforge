@@ -61,7 +61,7 @@
 | ID | 待辦 | 為何必須做 | 驗收條件 |
 |---|---|---|---|
 | H-17 | Production interaction smoke / zero-downtime deploy | API smoke 已納入 release；仍需瀏覽器層驗證 analyze、conflict recovery、Hermes log 與成本翻頁，且 deploy restart 不可讓使用者撞到 502 | staging + production canary 截圖/API evidence；rolling 或 maintenance-safe 切換不產生公開 5xx |
-| H-18 | 成本帳本保留、備份與匯出 | **程式與 SOP 完成，待 AWS 實施證據。** JSONL/CSV export、manifest hash、verify、不可覆寫 restore drill、PITR verify/enable 工具已完成 | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
+| H-18 | 成本帳本保留、備份與匯出 | **完成。** DynamoDB PITR 已啟用；716 筆 JSONL export/hash verify/non-overwrite restore drill 已完成；AES256 + S3 versioning off-table archive evidence 已記於 `docs/qa/COST-LEDGER-DURABILITY.md` | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
 | H-19 | Production durable lease backend | **程式與 bootstrap 完成，待 AWS 建表／production 驗證。** 新增 PAY_PER_REQUEST + TTL table、最小 IAM 與 service env 接線 | 建表/IAM、`TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb`、multi-instance contention test 全綠 |
 | H-20 | Connector reliability policy | Reddit cloud IP OAuth、來源 rate-limit/backoff、允許來源失效的降級規則尚未形成正式 SLA | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
 | H-21 | Hermes Execution Journey implementation | **實作完成，待 release production QA。** `/analyze` 已把資料驅動五節點、來源結果/耗時、run-bound Evidence/Log 下載置於結論後第一段；無事件時有誠實 empty state | release 後以真實資料完成 desktop/mobile 截圖與互動 smoke；不改 Trust Layer |
