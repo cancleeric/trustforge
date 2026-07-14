@@ -35,6 +35,7 @@ def _number(value: Any) -> float:
 def diagnose(
     *,
     scheduler_runs: Iterable[dict[str, Any]] = (),
+    connector_reliability: dict[str, Any] | None = None,
     question_bank: dict[str, Any] | None = None,
     replay: dict[str, Any] | None = None,
     generated_at: str | None = None,
@@ -47,9 +48,24 @@ def diagnose(
         failures = Counter(
             str(label) for run in failed_runs for label in (run.get("failures") or [])
         )
+        reliability_rows = []
+        if connector_reliability:
+            reliability_rows = [
+                {
+                    "source": row.get("source"),
+                    "failure_rate": row.get("failure_rate"),
+                    "consecutive_successes": row.get("consecutive_successes", 0),
+                }
+                for row in connector_reliability.get("sources", [])
+                if row.get("attempted_runs", 0) and not row.get("meets_reliability_gate", False)
+            ]
         proposals.append(ImprovementProposal(
             id="source-reliability-investigation", area="data-acquisition", severity="high",
-            evidence={"failed_runs": len(failed_runs), "failure_labels": dict(sorted(failures.items()))},
+            evidence={
+                "failed_runs": len(failed_runs),
+                "failure_labels": dict(sorted(failures.items())),
+                "sources_below_gate": reliability_rows,
+            },
             proposed_experiment="Reproduce the failing source in a sandbox; add a bounded retry, fallback, or freshness rule only after a regression test.",
             success_metric="Seven consecutive scheduled cycles with zero failures for the affected source.",
         ))
@@ -104,7 +120,12 @@ def diagnose(
     return {
         "agent": "hermes", "kind": "self_improvement_diagnostic", "generated_at": timestamp,
         "automation_boundary": "propose, test in sandbox, require human approval; never self-apply production changes",
-        "inputs": {"scheduler_runs": len(runs), "question_bank": question_bank is not None, "replay": replay is not None},
+        "inputs": {
+            "scheduler_runs": len(runs),
+            "connector_reliability": connector_reliability is not None,
+            "question_bank": question_bank is not None,
+            "replay": replay is not None,
+        },
         "proposals": [asdict(proposal) for proposal in proposals],
         "status": "attention_required" if proposals else "healthy_or_insufficient_evidence",
     }

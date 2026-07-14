@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.11 — 2026-07-14
+
+- Add a deterministic connector-reliability node to every bounded Hermes cycle, measuring actual attempts, failures, failure rates and seven-success streak gates without counting freshness skips as successes.
+- Feed the reliability artifact into approval-gated self-improvement diagnostics so degraded providers become explicit, reviewable experiments instead of hidden scheduler noise.
+- Record three consecutive zero-interruption production deployments with 96 public health probes as the completion evidence for H-17.
+
 ## v0.14.10 — 2026-07-14
 
 - Include both the `/trustforge/deploy` parent parameter path and its children in the path-scoped EC2 role policy, matching AWS `GetParametersByPath` authorization semantics.
