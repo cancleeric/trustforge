@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.14.12 — 2026-07-15
+
+- Complete the Hermes Galaxy UI integration around the official BTC/ETH/SOL/BNB/XRP pool, removing fiat design placeholders from the production dashboard.
+- Read the displayed release version and cumulative cost from live APIs, and route Transmit actions into a real evidence-bound analysis instead of a simulated timer.
+- Keep dashboard browsing read-only and cost-free: coin focus changes reuse one overview snapshot and never trigger formal analysis or Bedrock calls.
+- Add keyboard-operable galaxy controls, derived-breakdown disclosure, Hermes visual treatment across analysis forms, and five-coin model regression coverage.
+
 ## v0.14.11 — 2026-07-14
 
 - Add a deterministic connector-reliability node to every bounded Hermes cycle, measuring actual attempts, failures, failure rates and seven-success streak gates without counting freshness skips as successes.

@@ -1,12 +1,12 @@
 interface HermesTopBarProps {
-  costLedger?: number
+  costLedger?: number | null
   version?: string
   systemId?: string
 }
 
 export default function HermesTopBar({
-  costLedger = 0.0142,
-  version = 'v0.6.0 · GALAXY',
+  costLedger = null,
+  version = 'loading · GALAXY',
   systemId = 'SYS·HRM-01',
 }: HermesTopBarProps) {
   return (
@@ -36,7 +36,7 @@ export default function HermesTopBar({
         <span style={{ width: 6, height: 6, transform: 'rotate(45deg)', background: 'var(--color-hermes-amber)', animation: 'hermes-pulse 2.4s infinite' }} />HERMES: ACTIVE
       </span>
       <div style={{ flex: 1 }} />
-      <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>COST LEDGER <b style={{ color: 'var(--color-hermes-cyan)' }}>${costLedger.toFixed(4)}</b></span>
+      <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>COST LEDGER <b style={{ color: 'var(--color-hermes-cyan)' }}>{costLedger === null ? 'SYNCING' : `$${costLedger.toFixed(4)}`}</b></span>
     </div>
   )
 }

@@ -9,6 +9,7 @@ interface HermesLeftRailProps {
   qtypes: string[]
   query: string
   submitLabel: string
+  disabled?: boolean
   onType: (v: string) => void
   onQuery: (v: string) => void
   onSubmit: () => void
@@ -16,7 +17,7 @@ interface HermesLeftRailProps {
 
 export default function HermesLeftRail({
   model, uplinkLatency = '2.4s', hermesMessage, hasOrder, qtype, qtypes, query, submitLabel,
-  onType, onQuery, onSubmit,
+  onType, onQuery, onSubmit, disabled = false,
 }: HermesLeftRailProps) {
   const { tierCounts, coins } = model
   return (
@@ -31,7 +32,7 @@ export default function HermesLeftRail({
       <div>
         <div style={{ fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 9 }}>GALAXY TELEMETRY</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 7, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderRadius: 6, padding: '10px 12px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>Currencies tracked</span><span style={{ color: 'var(--color-hermes-tx)' }}>{coins.length}</span></div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>Assets tracked</span><span style={{ color: 'var(--color-hermes-tx)' }}>{coins.length}</span></div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>Healthy</span><span style={{ color: TIER_COLOR.healthy }}>{tierCounts.healthy}</span></div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>Moderate</span><span style={{ color: TIER_COLOR.moderate }}>{tierCounts.moderate}</span></div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>Danger</span><span style={{ color: TIER_COLOR.danger }}>{tierCounts.danger}</span></div>
@@ -88,7 +89,8 @@ export default function HermesLeftRail({
 
         <button
           onClick={onSubmit}
-          style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: 'var(--color-hermes-amber)', border: 'none', borderRadius: 5, color: '#1a1206', fontWeight: 700, fontSize: 12, padding: 9, cursor: 'pointer', transition: 'filter .15s, transform .08s' }}
+          disabled={disabled}
+          style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: 'var(--color-hermes-amber)', border: 'none', borderRadius: 5, color: '#1a1206', fontWeight: 700, fontSize: 12, padding: 9, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? .55 : 1, transition: 'filter .15s, transform .08s' }}
           onMouseEnter={(e) => (e.currentTarget.style.filter = 'brightness(1.12)')}
           onMouseLeave={(e) => (e.currentTarget.style.filter = 'none')}
           onMouseDown={(e) => (e.currentTarget.style.transform = 'scale(.96)')}

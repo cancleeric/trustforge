@@ -52,7 +52,7 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
           rawConfidence={data.report.confidence}
           decisionState={data.report.decision_state}
         />
-        <section className="border-l-2 border-tf-accent bg-tf-card p-4" aria-label="市場結論">
+        <section className="hermes-clip border-l-2 border-tf-accent bg-tf-card p-4" aria-label="市場結論">
           <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">市場結論</p>
           <p className="mt-2 text-base font-semibold leading-7 text-tf-text">{data.report.market_judgment}</p>
           <div className="mt-4 grid grid-cols-3 gap-2 border-t border-tf-border pt-3 text-xs">

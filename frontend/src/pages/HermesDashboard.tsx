@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import HermesTopBar from '../hermes/HermesTopBar'
 import HermesLeftRail from '../hermes/HermesLeftRail'
 import HermesRightRail from '../hermes/HermesRightRail'
@@ -6,14 +7,14 @@ import CurrencyGalaxy from '../hermes/CurrencyGalaxy'
 import StageBar from '../hermes/StageBar'
 import StageDrilldown from '../hermes/StageDrilldown'
 import { buildGalaxyModel, deriveSelected, type GalaxyCoin, type GalaxyModel } from '../lib/hermesData'
-import { getOverview } from '../lib/endpoints'
+import { getOverview, getCosts, getHealth } from '../lib/endpoints'
 import '../hermes/hermes.css'
 
 const QTYPES = ['Risk assessment', 'Market sentiment', 'Fundamentals', 'News verification', 'Price catalyst']
 
 export default function HermesDashboard() {
   const [model, setModel] = useState<GalaxyModel | null>(null)
-  const [selectedId, setSelectedId] = useState('usd')
+  const [selectedId, setSelectedId] = useState('btc')
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [selectedStage, setSelectedStage] = useState<string | null>(null)
   const [phase, setPhase] = useState<'ready' | 'loading'>('ready')
@@ -22,12 +23,15 @@ export default function HermesDashboard() {
   const [query, setQuery] = useState('Assess overall trust posture and flag any emerging manipulation risk.')
   const [typedLen, setTypedLen] = useState(0)
   const [focusPulse, setFocusPulse] = useState(false)
-  const [displayScore, setDisplayScore] = useState(93)
+  const [displayScore, setDisplayScore] = useState(0)
+  const [runtimeVersion, setRuntimeVersion] = useState('loading')
+  const [costLedger, setCostLedger] = useState<number | null>(null)
   const [scale, setScale] = useState(1)
   const [boot, setBoot] = useState({ topbar: false, left: false, galaxy: false, right: false, bottom: false })
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const byIdRef = useRef<Record<string, GalaxyCoin>>({})
+  const navigate = useNavigate()
 
   // ── 縮放（設計稿 1440×900 等比縮放置中） ──
   useEffect(() => {
@@ -42,7 +46,7 @@ export default function HermesDashboard() {
     const tierText = sel.tier === 'healthy' ? 'HIGH TRUST' : sel.tier === 'moderate' ? 'MODERATE TRUST' : 'LOW TRUST'
     return ph === 'loading'
       ? `Analyzing ${sel.full}… cross-referencing ${scanned} sources.`
-      : `Tracking ${sel.full}. Composite confidence ${sel.score}/100 — ${tierText}. ` +
+      : `Tracking ${sel.full}. Composite trust score ${sel.score}/100 — ${tierText}. ` +
         (sel.tier === 'healthy' ? 'Signal is clean; no action required.'
           : sel.tier === 'moderate' ? 'Recommend monitoring divergence before increasing exposure.'
             : 'Advise caution — integrity signals are degraded.')
@@ -51,7 +55,6 @@ export default function HermesDashboard() {
   const typeTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const scoreTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const submitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const bootTimers = useRef<ReturnType<typeof setTimeout>[]>([])
 
   const startTyping = useCallback((sel: GalaxyCoin, ph: 'ready' | 'loading') => {
@@ -94,7 +97,7 @@ export default function HermesDashboard() {
         const m = buildGalaxyModel(env.data)
         byIdRef.current = m.byId
         setModel(m)
-        setDisplayScore(m.byId[selectedId]?.score ?? 93)
+        setDisplayScore(m.byId[selectedId]?.score ?? 0)
       } else {
         // 後端未就緒：回退設計稿預設，畫面照樣成立
         const m = buildGalaxyModel(null)
@@ -108,7 +111,20 @@ export default function HermesDashboard() {
       setModel(m)
     })
     return () => controller.abort()
-  }, [selectedId])
+  // overview 是一次性快照；切換焦點只讀本地 model，不重打 API/rate limit。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Top bar 不顯示設計稿假值：版本與累計成本都讀正式 API。
+  useEffect(() => {
+    const controller = new AbortController()
+    Promise.all([getHealth(controller.signal), getCosts(controller.signal)]).then(([health, costs]) => {
+      if (controller.signal.aborted) return
+      setRuntimeVersion(health.ok ? health.data.version : 'unavailable')
+      if (costs.ok) setCostLedger(costs.data.total_cost_usd)
+    })
+    return () => controller.abort()
+  }, [])
 
   // ── boot 進場動畫 ──
   useEffect(() => {
@@ -137,15 +153,19 @@ export default function HermesDashboard() {
       if (typeTimer.current) clearInterval(typeTimer.current)
       if (scoreTimer.current) clearInterval(scoreTimer.current)
       if (pulseTimer.current) clearTimeout(pulseTimer.current)
-      if (submitTimer.current) clearTimeout(submitTimer.current)
     }
   }, [])
 
   const onSubmit = useCallback(() => {
+    if (!query.trim()) return
     setPhase('loading')
-    if (submitTimer.current) clearTimeout(submitTimer.current)
-    submitTimer.current = setTimeout(() => { setPhase('ready'); setLastOrder(true) }, 1600)
-  }, [])
+    setLastOrder(true)
+    const type = qtype === 'Fundamentals' ? 'hypothesis' : 'multi_source'
+    const search = new URLSearchParams({
+      coin: selectedId.toUpperCase(), type, q: query.trim(),
+    })
+    navigate(`/analyze?${search.toString()}`)
+  }, [navigate, qtype, query, selectedId])
 
   if (!model) {
     return (
@@ -157,6 +177,7 @@ export default function HermesDashboard() {
 
   const selCoin = model.byId[selectedId]
   const derivation = deriveSelected(selCoin)
+
   const hermesFull = buildHermesMessage(selCoin, phase)
   const hermesMessage = hermesFull.slice(0, typedLen)
 
@@ -172,7 +193,9 @@ export default function HermesDashboard() {
         <div style={{ position: 'absolute', left: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(232,179,77,.5)', borderLeft: '2px solid rgba(232,179,77,.5)', boxShadow: '-2px 2px 10px rgba(232,179,77,.18)' }} />
         <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
 
-        <div style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}><HermesTopBar /></div>
+        <div style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
+          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · GALAXY`} />
+        </div>
 
         <div style={{ opacity: boot.left ? 1 : 0, clipPath: boot.left ? 'inset(0 0 0% 0)' : 'inset(0 0 100% 0)', transition: 'opacity .5s ease-out, clip-path .5s ease-out' }}>
           <HermesLeftRail
@@ -186,6 +209,7 @@ export default function HermesDashboard() {
             onType={setQtype}
             onQuery={setQuery}
             onSubmit={onSubmit}
+            disabled={!query.trim() || phase === 'loading'}
           />
         </div>
 
@@ -204,6 +228,7 @@ export default function HermesDashboard() {
           <HermesRightRail
             selCoin={selCoin}
             components={derivation.components}
+            derived
             derivation={derivation}
             onOpenComposite={() => setSelectedStage('composite')}
             onOpenDivergence={() => setSelectedStage('divergence')}

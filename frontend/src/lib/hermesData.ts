@@ -1,11 +1,11 @@
 // HERMES 整站 redesign — 資料映射層。
 //
 // 把後端 `/api/overview` 的 `OverviewCoin[]` 對應成設計稿的「貨幣星系」模型
-// （7 個固定軌道身份：USD 核心 + 6 顆行星），並衍生 telemetry / 階段管線 /
+// （競賽固定五幣：BTC 核心 + 4 顆行星），並衍生 telemetry / 階段管線 /
 // 信任分項 / 跨源背離等視覺所需結構。
 //
-// 設計稿把 7 個身份「焊死」在固定軌道位置（USD 恆為核心，BTC/ETH 內環、
-// EUR/JPY 中環、CNY/TWD 外環），所以視覺佈局不隨資料增減而漂移；分數與
+// 視覺把五幣焊死在固定軌道位置（BTC 核心，ETH/SOL 內環、BNB/XRP 外環），
+// 所以視覺佈局不隨資料增減而漂移；分數與
 // 色階才由真實 trust_score 驅動。overview 沒有某幣時，回退到設計稿預設值，
 // 讓離線 / 後端未就緒時畫面依然成立（非憑空造假，而是設計稿內建的合理預設）。
 
@@ -36,7 +36,7 @@ export function tierOf(score: number): HermesTier {
   return 'danger'
 }
 
-export type OrbitId = 'core' | 'A' | 'B' | 'C'
+export type OrbitId = 'core' | 'A' | 'B'
 
 export interface GalaxyIdentity {
   id: string
@@ -49,20 +49,18 @@ export interface GalaxyIdentity {
   pos: 'top' | 'bottom'
 }
 
-// 固定軌道佈局（移植自設計稿的 orbit ring A/B/C + USD core）。
+// 固定軌道佈局（econ 只控制相對視覺尺寸，不是即時市值）。
 export const GALAXY_IDENTITIES: GalaxyIdentity[] = [
-  { id: 'usd', name: 'USD', full: 'US Dollar', econ: 100, orbit: 'core', pos: 'top' },
-  { id: 'btc', name: 'BTC', full: 'Bitcoin', econ: 42, orbit: 'A', pos: 'top' },
-  { id: 'eth', name: 'ETH', full: 'Ethereum', econ: 34, orbit: 'A', pos: 'bottom' },
-  { id: 'eur', name: 'EUR', full: 'Euro', econ: 85, orbit: 'B', pos: 'top' },
-  { id: 'jpy', name: 'JPY', full: 'Japanese Yen', econ: 65, orbit: 'B', pos: 'bottom' },
-  { id: 'cny', name: 'CNY', full: 'Chinese Yuan', econ: 80, orbit: 'C', pos: 'top' },
-  { id: 'twd', name: 'TWD', full: 'Taiwan Dollar', econ: 12, orbit: 'C', pos: 'bottom' },
+  { id: 'btc', name: 'BTC', full: 'Bitcoin', econ: 100, orbit: 'core', pos: 'top' },
+  { id: 'eth', name: 'ETH', full: 'Ethereum', econ: 72, orbit: 'A', pos: 'top' },
+  { id: 'sol', name: 'SOL', full: 'Solana', econ: 46, orbit: 'A', pos: 'bottom' },
+  { id: 'bnb', name: 'BNB', full: 'BNB', econ: 52, orbit: 'B', pos: 'top' },
+  { id: 'xrp', name: 'XRP', full: 'XRP', econ: 48, orbit: 'B', pos: 'bottom' },
 ]
 
 // 設計稿內建預設分數（overview 缺資料時的回退，非即時真值）。
 const FALLBACK_SCORES: Record<string, number> = {
-  usd: 93, eur: 86, jpy: 83, btc: 75, eth: 74, twd: 70, cny: 49,
+  btc: 59, eth: 57, sol: 57, bnb: 57, xrp: 56,
 }
 
 // 4 個信任分項標籤（權重 30/30/20/20，移植自設計稿）。

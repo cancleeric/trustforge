@@ -4,12 +4,13 @@ interface HermesRightRailProps {
   selCoin: GalaxyCoin
   components: TrustComponent[]
   derivation: SelectedDerivation
+  derived?: boolean
   onOpenComposite: () => void
   onOpenDivergence: () => void
 }
 
 export default function HermesRightRail({
-  selCoin, components, derivation, onOpenComposite, onOpenDivergence,
+  selCoin, components, derivation, derived, onOpenComposite, onOpenDivergence,
 }: HermesRightRailProps) {
   const { score, tier, full } = selCoin
   const scoreColor = TIER_COLOR[tier]
@@ -53,7 +54,14 @@ export default function HermesRightRail({
 
       {/* breakdown */}
       <div className="hermes-clip" style={{ flex: 1, minHeight: 0, background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '12px 14px', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 10 }}>TRUST BREAKDOWN</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 10 }}>
+          TRUST BREAKDOWN
+          {derived && (
+            <span title="Derived from overview score; run analysis for evidence-bound components" style={{ color: 'var(--color-hermes-amber)', fontSize: 8.5 }}>
+              OVERVIEW PROXY
+            </span>
+          )}
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
           {components.map((comp) => (
             <div key={comp.label} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

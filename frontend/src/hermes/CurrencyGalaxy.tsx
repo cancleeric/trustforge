@@ -10,7 +10,7 @@ interface CurrencyGalaxyProps {
   onHover: (id: string | null) => void
 }
 
-const RING_SIZE: Record<Exclude<OrbitId, 'core'>, number> = { A: 240, B: 320, C: 400 }
+const RING_SIZE: Record<Exclude<OrbitId, 'core'>, number> = { A: 270, B: 390 }
 
 function sizeOf(econ: number): number {
   return Math.round(10 + econ * 0.26)
@@ -46,6 +46,8 @@ export default function CurrencyGalaxy({
     const color = TIER_COLOR[tier]
     return {
       position: 'absolute',
+      border: 'none',
+      padding: 0,
       left: '50%',
       top: coin.pos === 'top' ? 0 : '100%',
       width: size,
@@ -61,23 +63,26 @@ export default function CurrencyGalaxy({
     }
   }
 
-  const usdIsHover = hoveredId === 'usd'
-  const usdIsSel = selectedId === 'usd'
-  const usdSize = 122
+  const coreIsHover = hoveredId === 'btc'
+  const coreIsSel = selectedId === 'btc'
+  const coreSize = 122
 
   const ring = (orbit: Exclude<OrbitId, 'core'>, rot: string, spin: string, ids: [string, string]) => (
     <div
       style={{
         position: 'absolute', left: 0, top: 0, width: RING_SIZE[orbit], height: RING_SIZE[orbit],
         margin: -RING_SIZE[orbit] / 2, borderRadius: '50%',
-        border: `1px solid ${orbit === 'C' ? 'rgba(232,179,77,.22)' : 'rgba(77,216,224,.28)'}`,
+        border: `1px solid ${orbit === 'B' ? 'rgba(232,179,77,.22)' : 'rgba(77,216,224,.28)'}`,
         transformStyle: 'preserve-3d',
         transform: rot,
-        boxShadow: orbit === 'C' ? '0 0 26px rgba(232,179,77,.05) inset' : '0 0 22px rgba(77,216,224,.06) inset',
+        boxShadow: orbit === 'B' ? '0 0 26px rgba(232,179,77,.05) inset' : '0 0 22px rgba(77,216,224,.06) inset',
       }}
     >
       <div style={{ position: 'absolute', inset: 0, transformStyle: 'preserve-3d', animation: `${spin} 40s linear infinite` }}>
-        <div
+        <button
+          type="button"
+          aria-label={`Focus ${c(ids[0]).full}`}
+          aria-pressed={ids[0] === selectedId}
           onClick={() => onSelect(ids[0])}
           onMouseEnter={() => onHover(ids[0])}
           onMouseLeave={() => onHover(null)}
@@ -86,8 +91,11 @@ export default function CurrencyGalaxy({
           {c(ids[0]).tier === 'danger' && (
             <div style={{ position: 'absolute', left: '50%', top: '50%', width: '180%', height: '180%', border: '1px dashed var(--color-hermes-red)', borderRadius: '50%', transform: 'translate(-50%,-50%)', animation: 'hermes-unstable-rotate 5s linear infinite', opacity: 0.6 }} />
           )}
-        </div>
-        <div
+        </button>
+        <button
+          type="button"
+          aria-label={`Focus ${c(ids[1]).full}`}
+          aria-pressed={ids[1] === selectedId}
           onClick={() => onSelect(ids[1])}
           onMouseEnter={() => onHover(ids[1])}
           onMouseLeave={() => onHover(null)}
@@ -133,13 +141,16 @@ export default function CurrencyGalaxy({
           const color = TIER_COLOR[coin.tier]
           const isSel = coin.id === selectedId
           return (
-            <div
+            <button
+              type="button"
+              aria-label={`Focus ${coin.full}`}
+              aria-pressed={isSel}
               key={coin.id}
               onClick={() => onSelect(coin.id)}
               onMouseEnter={() => onHover(coin.id)}
               onMouseLeave={() => onHover(null)}
               style={{
-                cursor: 'pointer', fontSize: 10, fontWeight: 700, letterSpacing: '.5px',
+                cursor: 'pointer', fontFamily: 'inherit', fontSize: 10, fontWeight: 700, letterSpacing: '.5px',
                 color: isSel ? '#02121a' : color,
                 background: isSel ? color : 'var(--color-hermes-inset)',
                 border: `1px solid ${color}`, borderRadius: 4, padding: '4px 8px',
@@ -149,7 +160,7 @@ export default function CurrencyGalaxy({
               onMouseUp={(e) => (e.currentTarget.style.transform = 'none')}
             >
               {coin.name}
-            </div>
+            </button>
           )
         })}
       </div>
@@ -157,20 +168,26 @@ export default function CurrencyGalaxy({
       {/* 3D galaxy assembly */}
       <div style={{ position: 'absolute', left: '50%', top: '54%', width: 460, height: 460, perspective: 1100, transform: 'translate(-50%,-50%)' }}>
         <div style={{ position: 'absolute', left: '50%', top: '50%', width: 0, height: 0, transformStyle: 'preserve-3d' }}>
-          {ring('C', 'rotateX(66deg) rotateZ(-18deg)', 'hermes-orbit-spin-rev', ['cny', 'twd'])}
-          {ring('B', 'rotateX(72deg) rotateZ(24deg)', 'hermes-orbit-spin-rev', ['eur', 'jpy'])}
-          {ring('A', 'rotateX(64deg) rotateZ(10deg)', 'hermes-orbit-spin', ['btc', 'eth'])}
+          {ring('B', 'rotateX(66deg) rotateZ(-18deg)', 'hermes-orbit-spin-rev', ['bnb', 'xrp'])}
+          {ring('A', 'rotateX(64deg) rotateZ(10deg)', 'hermes-orbit-spin', ['eth', 'sol'])}
 
-          {/* USD core star */}
+          {/* BTC core star */}
           <div
-            onClick={() => onSelect('usd')}
-            onMouseEnter={() => onHover('usd')}
+            role="button"
+            tabIndex={0}
+            aria-label="Focus Bitcoin"
+            aria-pressed={coreIsSel}
+            onClick={() => onSelect('btc')}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') onSelect('btc')
+            }}
+            onMouseEnter={() => onHover('btc')}
             onMouseLeave={() => onHover(null)}
             style={{
-              position: 'absolute', left: 0, top: 0, width: usdSize, height: usdSize, margin: -usdSize / 2,
+              position: 'absolute', left: 0, top: 0, width: coreSize, height: coreSize, margin: -coreSize / 2,
               borderRadius: '50%', background: gradientOf('healthy', HERMES_CYAN),
               boxShadow: '0 0 46px 8px rgba(95,227,221,.55), 0 0 100px 24px rgba(232,179,77,.16)',
-              transform: `scale(${usdIsHover ? 1.12 : usdIsSel ? 1.06 : 1})`,
+              transform: `scale(${coreIsHover ? 1.12 : coreIsSel ? 1.06 : 1})`,
               cursor: 'pointer', transition: 'transform .18s, box-shadow .18s',
               animation: 'hermes-core-glow 4.5s ease-in-out infinite',
             }}

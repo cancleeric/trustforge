@@ -45,7 +45,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
 
   return (
     <form
-      className="flex flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4"
+      className="hermes-clip flex flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4"
       onSubmit={(e) => {
         e.preventDefault()
         onSubmit({ coin, type, q })
