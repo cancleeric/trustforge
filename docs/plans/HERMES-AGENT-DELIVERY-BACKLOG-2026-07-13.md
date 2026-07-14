@@ -83,7 +83,7 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 
 | ID | 待辦 | 為何必須做 | 驗收條件 |
 |---|---|---|---|
-| H-17 | Production interaction smoke / zero-downtime deploy | **本機 smoke、瀏覽器驗證與 CD 連續健康 gate 完成，待正式發版取證與雙 backend 切換。** `local_release_smoke.sh` 實跑 health/overview/cost pagination、BTC analyze、Evidence、五個 Hermes nodes、Execution Log；1440px/390px 無溢位或 browser error。`monitor_deploy_health.sh` 已包住 production backend deploy，部署前/中/後每 250ms 探測公開 API，任何非 2xx/連線失敗會擋下 CD 並上傳 JSONL evidence；中斷測試已證明 fail-closed。單一 systemd process 的 restart 仍非真正 zero-downtime，不冒充已完成藍綠切換 | 下一版 release 產出 production canary evidence；後續以雙 backend + nginx atomic switch 消除 restart 窗口 |
+| H-17 | Production interaction smoke / zero-downtime deploy | **完成。** `local_release_smoke.sh` 覆蓋 health/overview/cost pagination、BTC analyze、Evidence、五個 Hermes nodes 與 Execution Log。正式 nginx 使用 8080 primary + 8081 health-checked backup；`v0.14.8`、`v0.14.9`、`v0.14.10` 三次 CD 共保存 96 筆部署前/中/後公開 health 探測，全部 HTTP 200、curl exit 0，無中斷。證據見 `docs/qa/ZERO-DOWNTIME-DEPLOY.md` | 已驗證 |
 | H-18 | 成本帳本保留、備份與匯出 | **完成。** DynamoDB PITR 已啟用；716 筆 JSONL export/hash verify/non-overwrite restore drill 已完成；AES256 + S3 versioning off-table archive evidence 已記於 `docs/qa/COST-LEDGER-DURABILITY.md` | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
 | H-19 | Production durable lease backend | **完成。** 2026-07-14 已確認 `trustforge-analyze-leases` 為 ACTIVE/PAY_PER_REQUEST、TTL=`ttl` ENABLED；`trustforge-ec2` 最小 policy 僅含 Get/Put/Delete；真 DynamoDB backend contention/release/reacquire 全綠。`v0.14.6` 隔離的 service-level concurrent canary 兩個請求皆 HTTP 200，且共用同一 `run_id=hermes-ec4c16d8f648`，證明沒有重複分析。證據見 `docs/qa/PRODUCTION-INTERACTION-CANARY.md` | 已驗證 |
 | H-20 | Connector reliability policy | **來源內 cooldown 已在 production 驗證；CoinGecko provider-wide 協調已上線並通過無 429 正常路徑。** `v0.14.5` cycle 的 CoinGecko price 與 stale SOL/BNB/XRP detail 全部成功，沒有 429；provider 序列化 fetch 43.46 秒、完整 cycle 68.37 秒、五幣快照 5/5、exit 0。首個 429 後阻止其他 worker 發出第二次 HTTP 的分支不對 live API 人為觸發，由雙 worker concurrency regression 保證。仍需累積連續七輪來源失敗率 evidence | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
@@ -100,7 +100,7 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 
 `H-01 -> H-02 -> H-05 -> H-10/H-11 -> H-17 -> H-19 -> H-20 -> H-13a -> H-13b -> H-13c -> H-14/H-16`
 
-H-03、H-04、H-06、H-07～H-09、H-12、H-15、H-18 與 H-19 已完成。H-21
+H-03、H-04、H-06、H-07～H-09、H-12、H-15、H-17～H-19 已完成。H-21
 僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
 在系統穩定化、資料累積與預算核准前均保持 deferred；任何 P2 項目不得因為急於
 「訓練模型」跳過資料累積與 held-out 驗證。
