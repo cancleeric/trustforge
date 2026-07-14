@@ -56,3 +56,11 @@ This verifies the source-scoped cooldown in production. CoinGecko showed that
 separate source workers sharing one provider can still encounter independent
 429 responses; provider-wide cooldown coordination remains a follow-up and is
 not claimed complete by this release.
+
+The follow-up is implemented on `develop`: all CoinGecko request paths now
+share one re-entrant provider lock covering throttle state, HTTP result and
+process caches. The first explicit CoinGecko 429 closes the provider for the
+rest of that scheduler process, so another CoinGecko source worker receives the
+same rate-limit failure without making a second HTTP request. Sequential and
+two-worker concurrency regression tests pass; production verification remains
+pending the next release.

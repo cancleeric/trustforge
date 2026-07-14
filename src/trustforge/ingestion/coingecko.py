@@ -85,7 +85,9 @@ import hashlib
 import json
 import math
 import os
+import threading
 import time
+from urllib.error import HTTPError
 
 from . import safe_fetch
 from .base import Document, Source
@@ -209,6 +211,11 @@ _coin_detail_failed: dict[str, BaseException] = {}
 # 任何真請求。用 `time.monotonic()` 而非 `time.time()`：不受系統時鐘調整
 # 影響，節流間隔的量測才可靠。
 _last_request_monotonic: float | None = None
+# CoinGecko sentiment/dev/price are separate source workers but share one host
+# quota. Keep throttle, request result and process caches behind one re-entrant
+# lock so parallel workers cannot both pass the same rate-limit window.
+_provider_request_lock = threading.RLock()
+_provider_rate_limit_error: HTTPError | None = None
 
 # keyless：官方 5-15 req/min 保守下限是 5/min，12 秒間隔對應剛好 5 次/分鐘
 # 的節奏，是老闆/codex 指定的安全值。
@@ -222,11 +229,13 @@ def reset_process_cache() -> None:
     """清空上述所有記憶體快取/節流狀態。供測試在案例之間重置，避免快取
     內容跨測試案例殘留污染；正常執行（`scripts/fetch_scheduler.py`）每次
     都是全新 process，不需要呼叫這個函式。"""
-    global _price_response_cache, _last_request_monotonic
-    _price_response_cache = None
-    _coin_detail_cache.clear()
-    _coin_detail_failed.clear()
-    _last_request_monotonic = None
+    global _price_response_cache, _last_request_monotonic, _provider_rate_limit_error
+    with _provider_request_lock:
+        _price_response_cache = None
+        _coin_detail_cache.clear()
+        _coin_detail_failed.clear()
+        _last_request_monotonic = None
+        _provider_rate_limit_error = None
 
 
 def _min_interval_seconds() -> float:
@@ -280,11 +289,20 @@ def _fetch_url(url: str, extra_headers: dict[str, str] | None = None) -> bytes:
     Source，送出請求前一律先過這道節流，節流之後才交給 SSRF-safe 的
     `safe_fetch.fetch_url` 實際送出請求。
     """
-    _throttle_before_request()
-    return safe_fetch.fetch_url(
-        url, user_agent=_UA, extra_headers=extra_headers,
-        timeout=_TIMEOUT, max_bytes=_MAX_BYTES,
-    )
+    global _provider_rate_limit_error
+    with _provider_request_lock:
+        if _provider_rate_limit_error is not None:
+            raise _provider_rate_limit_error
+        _throttle_before_request()
+        try:
+            return safe_fetch.fetch_url(
+                url, user_agent=_UA, extra_headers=extra_headers,
+                timeout=_TIMEOUT, max_bytes=_MAX_BYTES,
+            )
+        except HTTPError as exc:
+            if exc.code == 429:
+                _provider_rate_limit_error = exc
+            raise
 
 
 def _coin_detail_url(coingecko_id: str) -> str:
@@ -300,10 +318,11 @@ def _get_price_data() -> dict:
     """`_PRICE_URL` 的記憶體快取版：本輪（process 生命週期）第一次呼叫才
     真的打 API，之後直接複用，讓 5 幣共用同一次呼叫（見模組頂部說明）。"""
     global _price_response_cache
-    if _price_response_cache is None:
-        raw = _fetch_url(_PRICE_URL, _api_key_headers())
-        _price_response_cache = json.loads(raw)
-    return _price_response_cache
+    with _provider_request_lock:
+        if _price_response_cache is None:
+            raw = _fetch_url(_PRICE_URL, _api_key_headers())
+            _price_response_cache = json.loads(raw)
+        return _price_response_cache
 
 
 def _get_coin_detail(coingecko_id: str) -> dict:
@@ -315,18 +334,19 @@ def _get_coin_detail(coingecko_id: str) -> dict:
     /限流的請求（sentiment/dev 共用同一端點，第一個 Source 先失敗時，第
     二個 Source 不會把同一個請求再送一次，變相省下共享節流器的一個間隔
     窗口）。"""
-    if coingecko_id in _coin_detail_cache:
-        return _coin_detail_cache[coingecko_id]
-    if coingecko_id in _coin_detail_failed:
-        raise _coin_detail_failed[coingecko_id]
-    try:
-        raw = _fetch_url(_coin_detail_url(coingecko_id), _api_key_headers())
-        data = json.loads(raw)
-    except Exception as exc:
-        _coin_detail_failed[coingecko_id] = exc
-        raise
-    _coin_detail_cache[coingecko_id] = data
-    return data
+    with _provider_request_lock:
+        if coingecko_id in _coin_detail_cache:
+            return _coin_detail_cache[coingecko_id]
+        if coingecko_id in _coin_detail_failed:
+            raise _coin_detail_failed[coingecko_id]
+        try:
+            raw = _fetch_url(_coin_detail_url(coingecko_id), _api_key_headers())
+            data = json.loads(raw)
+        except Exception as exc:
+            _coin_detail_failed[coingecko_id] = exc
+            raise
+        _coin_detail_cache[coingecko_id] = data
+        return data
 
 
 class CoinGeckoPriceSource(Source):
