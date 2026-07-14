@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.14.9 — 2026-07-14
+
+- Replace account-wide SSM parameter discovery in startup cleanup with path-scoped `GetParametersByPath` pagination.
+- Grant the EC2 role read/delete access only to `/trustforge/deploy/*`, eliminating non-fatal startup AccessDenied tracebacks without exposing runtime tokens or unrelated parameter metadata.
+
 ## v0.14.8 — 2026-07-14
 
 - Add a health-checked temporary backend on port 8081 and nginx backup upstream routing so production backend restarts do not interrupt public requests.

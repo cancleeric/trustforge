@@ -487,8 +487,12 @@ else:
         if isinstance(actions, str):
             actions = [actions]
         res = stmt.get("Resource")
-        if actions != ["ssm:GetParameter"]:
-            problems.append("ssm statement (Resource=" + str(res) + ") 夾帶其他 Action:" + str(stmt.get("Action")))
+        if str(res).endswith("parameter/trustforge/deploy/*"):
+            expected_actions = {"ssm:GetParameter", "ssm:GetParametersByPath", "ssm:DeleteParameter"}
+        else:
+            expected_actions = {"ssm:GetParameter"}
+        if set(actions) != expected_actions:
+            problems.append("ssm statement (Resource=" + str(res) + ") Action 不符:" + str(stmt.get("Action")))
         actual.add(res)
     if actual != expected:
         problems.append("ssm:GetParameter Resource 集合不符，實際:" + str(actual))

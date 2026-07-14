@@ -387,7 +387,7 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
       \"arn:aws:bedrock:ap-southeast-6::foundation-model/anthropic.*\",
       \"arn:aws:bedrock:$REGION:$ACCT:inference-profile/*anthropic*\"]},
     {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"},
-    {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"ssm:GetParameter\",\"ssm:GetParametersByPath\",\"ssm:DeleteParameter\"],\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"},
     {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/runtime/*\"},
     {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}}]}" >/dev/null
 # #104.5：dedup fail-open 告警 + #75 後端失效指標都走 CloudWatch
