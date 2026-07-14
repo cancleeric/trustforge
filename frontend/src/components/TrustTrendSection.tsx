@@ -48,7 +48,7 @@ export default function TrustTrendSection({ coin }: { coin: string }) {
   const trend = data ? computeTrendDelta(data.history) : null
 
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <h3 className="mb-2 text-sm font-semibold text-tf-text">信任趨勢</h3>
 
       {loading && <LoadingState label="信任趨勢載入中…" />}

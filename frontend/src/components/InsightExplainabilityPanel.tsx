@@ -44,7 +44,7 @@ function InsightCard({ ins }: { ins: Insight }) {
   const insufficient = ins.coverage === 'insufficient'
   const strengthPct = Math.round((ins.strength || 0) * 100)
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-3">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-3">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className="text-sm font-semibold text-tf-text">{ins.title}</span>
         {ins.insight_type === 'source_self_contradiction' ? (
@@ -111,14 +111,14 @@ function InsightCard({ ins }: { ins: Insight }) {
 export default function InsightExplainabilityPanel({ insights }: { insights: Insight[] | undefined }) {
   if (!insights || insights.length === 0) {
     return (
-      <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+      <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
         <h3 className="mb-2 text-sm font-semibold text-tf-text">獨特洞察層（可解釋溯源）</h3>
         <p className="text-xs text-tf-muted">目前未偵測到非顯而易見、可驗證的獨特洞察。</p>
       </div>
     )
   }
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <h3 className="mb-3 text-sm font-semibold text-tf-text">獨特洞察層（可解釋溯源）</h3>
       <div className="flex flex-col gap-3">
         {insights.map((ins, i) => (

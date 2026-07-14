@@ -114,7 +114,7 @@ export default function HermesExecutionPanel({
   const failedSources = sourceEvents.filter((item) => item.outcome === 'failed').length
 
   return (
-    <section className="rounded-lg border border-tf-border bg-tf-card p-4" aria-label="Hermes Agent execution">
+    <section className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4" aria-label="Hermes Agent execution">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">Hermes Agent</p>

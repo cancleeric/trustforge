@@ -8,7 +8,7 @@ interface Props {
 
 function Step({ badge, title, children }: { badge: string; title: string; children: ReactNode }) {
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <div className="mb-2 flex items-center gap-2">
         <span className="rounded-full bg-tf-accent/20 px-2 py-0.5 text-[0.68rem] font-mono font-semibold text-tf-link">
           {badge}

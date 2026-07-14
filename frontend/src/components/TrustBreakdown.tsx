@@ -13,7 +13,7 @@ const DIMENSION_META: {
 
 export default function TrustBreakdown({ data }: { data: TrustComponentsAggregate }) {
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <h3 className="mb-3 text-sm font-semibold text-tf-text">信任拆解（逐項 WHY）</h3>
       <ul className="flex flex-col gap-3">
         {DIMENSION_META.map(({ key, label, why }) => {

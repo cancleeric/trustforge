@@ -20,7 +20,7 @@ export default function HypothesisLedgerPanel({
 }) {
   if (!ledger) return null
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <h3 className="mb-2 text-sm font-semibold text-tf-text">假設驗證：正反方證據對照</h3>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-lg border p-3" style={{ borderColor: 'var(--color-tf-good)' }}>

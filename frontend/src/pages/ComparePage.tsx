@@ -166,7 +166,7 @@ export default function ComparePage() {
   }
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6">
+    <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Parallel Hermes runs</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">雙幣比較</h1>

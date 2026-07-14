@@ -29,7 +29,7 @@ function SideColumn({ label, color, items }: { label: string; color: string; ite
 
 export default function CrossSourceSignalPanel({ signal }: { signal: CrossSourceSignal | null }) {
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <h3 className="mb-3 text-sm font-semibold text-tf-text">跨源分歧 / 共識</h3>
       {signal === null && (
         <p className="text-xs text-tf-muted">目前未偵測到同議題、跨源、語意矛盾的顯著訊號。</p>

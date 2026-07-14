@@ -46,7 +46,7 @@ export default function HistoryPage() {
   }, [coin, days])
 
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6">
+    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Point-in-time archive</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">歷史信任趨勢</h1>
@@ -55,7 +55,7 @@ export default function HistoryPage() {
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-tf-border bg-tf-card p-4">
+      <div className="flex flex-wrap items-center gap-3 hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
         <div>
           <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="hist-coin">
             幣種
@@ -95,7 +95,7 @@ export default function HistoryPage() {
       {loading && <LoadingState label={`${coin} 歷史資料載入中…`} />}
       {!loading && error && <ErrorState code={error.code} message={error.message} />}
       {!loading && !error && data && data.history.length === 0 && (
-        <div className="rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">
+        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">
           {coin} 歷史累積中——排程尚未寫入任何按日快照，稍後再回來看看。
         </div>
       )}
@@ -105,7 +105,7 @@ export default function HistoryPage() {
         </div>
       )}
       {!loading && !error && data && data.history.length > 0 && (
-        <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
           <Suspense fallback={<LoadingState label="趨勢圖載入中…" />}>
             <TrustHistoryChart history={data.history} />
           </Suspense>

@@ -299,7 +299,7 @@ export default function AdminPage() {
   // ── 閘門畫面 ────────────────────────────────────────────────────────
   if (!token || !config) {
     return (
-      <main className="mx-auto flex max-w-md flex-col gap-4 px-4 py-10 sm:px-6">
+      <main className="mx-auto flex max-w-md flex-col gap-4 px-4 py-10 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
         <h1 className="text-lg font-semibold text-tf-text">管理控制台</h1>
         <p className="text-sm text-tf-muted">
           本頁需要管理 token（<code>TRUSTFORGE_ADMIN_TOKEN</code>，與 live token
@@ -341,7 +341,7 @@ export default function AdminPage() {
   const capCheck = validateCapInput(capInput)
 
   return (
-    <main className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6">
+    <main className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold text-tf-text">管理控制台</h1>
         <div className="flex items-center gap-3 text-xs text-tf-muted">

@@ -1,0 +1,103 @@
+/* ===========================================================================
+   TrustForge · HERMES 整站 redesign — 視覺語言基底
+   配色/字型 token 在 index.css 的 @theme（hermes-*）；此檔收 keyframes、
+   scanline/毛玻璃外觀、panel clip-path 與共用工具類。元件本體多採 inline
+   style 以 1:1 貼合設計稿，此處只放「無法用 inline 表達」的動畫/偽元素。
+   =========================================================================== */
+
+.hermes-root {
+  font-family: var(--font-hermes-mono);
+  color: var(--color-hermes-tx);
+  background: #02040a;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── 整站換膚核心：把既有 `tf-*` token 重對應到 HERMES 視覺語言。
+   所有沿用 `bg-tf-card` / `text-tf-text` / `border-tf-border` … 的舊元件
+   只要包在 `.hermes-surface` 之下，就整批變成 HERMES 暗色，不需逐檔改。
+   HERMES 是暗色優先設計，故套用後即為暗色（不受 light 主題影響）。 ── */
+.hermes-surface {
+  --color-tf-bg: #050810;
+  --color-tf-card: #0d141e;
+  --color-tf-border: #1c2b3a;
+  --color-tf-text: #dce9f2;
+  --color-tf-text2: #7f97ab;
+  --color-tf-muted: #526375;
+  --color-tf-muted2: #526375;
+  --color-tf-accent: #4dd8e0;
+  --color-tf-link: #4dd8e0;
+  --color-tf-good: #4dd8e0;
+  --color-tf-warn: #e8b34d;
+  --color-tf-bad: #ff5f5f;
+}
+
+.hermes-root ::-webkit-scrollbar { width: 8px; height: 8px; }
+.hermes-root ::-webkit-scrollbar-track { background: transparent; }
+.hermes-root ::-webkit-scrollbar-thumb { background: var(--color-hermes-bd2); border-radius: 4px; }
+.hermes-root ::selection { background: rgba(77, 216, 224, 0.3); }
+
+/* ── 共用面板：切角外框（設計稿 polygon clip） ── */
+.hermes-clip {
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+}
+.hermes-clip-sm {
+  clip-path: polygon(8px 0, 100% 0, 100% 100%, 0 100%, 0 8px);
+}
+.hermes-clip-lg {
+  clip-path: polygon(16px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 16px);
+}
+
+/* ── 毛玻璃面板底色 ── */
+.hermes-glass {
+  background: rgba(10, 16, 24, 0.55);
+  backdrop-filter: blur(10px);
+}
+
+/* ── keyframes（逐字移植自設計稿，名稱加 hermes- 前綴避免與他處衝突） ── */
+@keyframes hermes-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes hermes-core-glow {
+  0%, 100% { opacity: 0.85; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 1; transform: translate(-50%, -50%) scale(1.06); }
+}
+@keyframes hermes-orbit-spin { from { transform: rotateZ(0deg); } to { transform: rotateZ(360deg); } }
+@keyframes hermes-orbit-spin-rev { from { transform: rotateZ(360deg); } to { transform: rotateZ(0deg); } }
+@keyframes hermes-flicker {
+  0%, 19%, 21%, 54%, 56%, 100% { opacity: 1; }
+  20%, 55% { opacity: 0.5; }
+}
+@keyframes hermes-unstable-rotate {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+@keyframes hermes-alert-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 95, 95, 0.5); }
+  50% { box-shadow: 0 0 22px 4px rgba(255, 95, 95, 0.35); }
+}
+@keyframes hermes-panel-in { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes hermes-drift-1 { from { background-position: 0 0; } to { background-position: -260px 140px; } }
+@keyframes hermes-drift-2 { from { background-position: 0 0; } to { background-position: 220px -160px; } }
+@keyframes hermes-drift-3 { from { background-position: 0 0; } to { background-position: -140px -90px; } }
+@keyframes hermes-holo-sweep { 0% { transform: translateY(-100%); } 100% { transform: translateY(720px); } }
+@keyframes hermes-select-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1); }
+  50% { box-shadow: inset 0 0 20px 2px var(--pulse-color, rgba(255, 255, 255, 0.3)); }
+}
+@keyframes hermes-hermes-breathe { 0%, 100% { transform: scale(1); opacity: 0.9; } 50% { transform: scale(1.08); opacity: 1; } }
+
+/* 行星 hover / 選取時的 focus 濾鏡（由 inline style 套用 filter） */
+.hermes-galaxy-focus { filter: brightness(1.35) saturate(1.3); }
+
+/* 進場 boot 動畫：左右欄從底部展開 */
+@keyframes hermes-clip-up { from { clip-path: inset(0 0 100% 0); } to { clip-path: inset(0 0 0% 0); } }
+
+/* 表格列 hover 輝光（HERMES 風格：青色左側描邊 + 淡青底） */
+.hermes-row-hover { transition: background-color .12s ease, box-shadow .12s ease; }
+.hermes-row-hover:hover {
+  background-color: rgba(77, 216, 224, 0.06);
+  box-shadow: inset 2px 0 0 var(--color-tf-link);
+}
+
+/* 尊重 reduce-motion：關掉所有裝飾動畫，資訊層不受影響 */
+@media (prefers-reduced-motion: reduce) {
+  .hermes-root * { animation: none !important; transition: none !important; }
+}

@@ -61,11 +61,19 @@ export default function AnalyzePage() {
   }
 
   return (
-    <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+    <main
+      className="relative mx-auto max-w-7xl px-4 py-6 sm:px-6"
+      style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 70%)', minHeight: 'calc(100vh - 57px)' }}
+    >
+      <div
+        className="pointer-events-none absolute inset-0 z-0"
+        style={{ background: 'repeating-linear-gradient(rgba(255,255,255,.012) 0px,rgba(255,255,255,.012) 1px,transparent 1px,transparent 3px)' }}
+      />
+      <div className="relative z-10">
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3 border-b border-tf-border pb-4">
         <div>
-          <p className="font-mono text-xs font-semibold uppercase text-tf-link">Hermes analysis run</p>
-          <h1 className="mt-1 text-2xl font-bold text-tf-text">分析工作區</h1>
+          <p className="font-mono text-xs font-semibold uppercase tracking-[1.6px] text-tf-link">Hermes analysis run</p>
+          <h1 className="mt-1 text-2xl font-bold text-tf-text">分析工作區 <span className="text-tf-link">· BRIDGE</span></h1>
           <p className="mt-1 text-sm text-tf-text2">每次執行固定一個 run，保留來源、節點、證據與輸出供後續稽核。</p>
         </div>
         <p className="font-mono text-xs text-tf-muted">asset: {params.coin} · mode: {params.type}</p>
@@ -81,6 +89,7 @@ export default function AnalyzePage() {
         {!loading && error && <ErrorState code={error.code} message={error.message} />}
         {!loading && !error && data && <AnalysisReportView data={data} />}
       </section>
+      </div>
       </div>
     </main>
   )

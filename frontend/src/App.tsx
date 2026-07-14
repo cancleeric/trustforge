@@ -1,7 +1,7 @@
-import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Header from './components/Header'
 import ErrorBoundary from './components/ErrorBoundary'
-import HomePage from './pages/HomePage'
+import HermesDashboard from './pages/HermesDashboard'
 import AnalyzePage from './pages/AnalyzePage'
 import ComparePage from './pages/ComparePage'
 import StatusPage from './pages/StatusPage'
@@ -22,7 +22,10 @@ function RoutedContent() {
   return (
     <ErrorBoundary key={location.pathname}>
       <Routes>
-        <Route path="/" element={<HomePage />} />
+        {/* HERMES 整站 redesign 旗艦頁：取代舊首頁，自帶全屏 bridge 外殼。 */}
+        <Route path="/" element={<HermesDashboard />} />
+        {/* 舊首頁（HomePage）已由旗艦 / 取代，redirect 避免重複入口。 */}
+        <Route path="/home" element={<Navigate to="/" replace />} />
         <Route path="/analyze" element={<AnalyzePage />} />
         <Route path="/compare" element={<ComparePage />} />
         <Route path="/status" element={<StatusPage />} />
@@ -38,13 +41,24 @@ function RoutedContent() {
   )
 }
 
+function Shell() {
+  const location = useLocation()
+  // HERMES 頁自帶全屏 bridge 頂欄，不再套用舊 Header。
+  const showHeader = location.pathname !== '/'
+  // hermes-surface 把全站沿用 `tf-*` token 的元件整批重對應到 HERMES 暗色
+  // 視覺語言（見 hermes/hermes.css）；HERMES 首頁用 inline hermes-* 色，不受影響。
+  return (
+    <div className="hermes-surface min-h-screen bg-tf-bg">
+      {showHeader && <Header />}
+      <RoutedContent />
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-tf-bg">
-        <Header />
-        <RoutedContent />
-      </div>
+      <Shell />
     </BrowserRouter>
   )
 }

@@ -22,7 +22,7 @@ function sortedEntries(entries: FreshnessEntry[]): FreshnessEntry[] {
 
 function StatCard({ label, value, color }: { label: string; value: number; color?: string }) {
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <p className="text-xs text-tf-muted">{label}</p>
       <p className="tf-num mt-1 text-2xl font-bold" style={color ? { color } : undefined}>
         {value}
@@ -34,7 +34,7 @@ function StatCard({ label, value, color }: { label: string; value: number; color
 function FreshnessMatrix({ entries }: { entries: FreshnessEntry[] }) {
   const rows = sortedEntries(entries)
   return (
-    <div className="overflow-x-auto rounded-lg border border-tf-border bg-tf-card">
+    <div className="hermes-clip overflow-x-auto rounded-lg border border-tf-border bg-tf-card">
       <table className="w-full min-w-[560px] border-collapse text-left text-sm">
         <thead>
           <tr className="border-b border-tf-border text-xs text-tf-muted">
@@ -47,7 +47,7 @@ function FreshnessMatrix({ entries }: { entries: FreshnessEntry[] }) {
         </thead>
         <tbody className="divide-y divide-tf-border">
           {rows.map((e) => (
-            <tr key={`${e.source}-${e.coin}`}>
+              <tr key={`${e.source}-${e.coin}`} className="hermes-row-hover">
               <td className="whitespace-nowrap px-3 py-2 text-tf-text">{e.source}</td>
               <td className="px-3 py-2 text-tf-text2">{e.coin}</td>
               <td className="px-3 py-2">
@@ -73,7 +73,7 @@ function CostSummaryCard({
   costsLoading: boolean
 }) {
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-tf-text">成本摘要</h3>
         <Link to="/costs" className="text-xs text-tf-link underline">
@@ -151,7 +151,7 @@ export default function StatusPage() {
   }, [])
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6">
+    <main className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Runtime observability</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">系統狀態</h1>
@@ -163,12 +163,12 @@ export default function StatusPage() {
       {!loading && !statusError && status && (
         <>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">部署版本</p><p className="mt-1 font-mono text-sm font-semibold text-tf-text">{status.version}</p></div>
-            <div className="border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">服務運行時間</p><p className="tf-num mt-1 text-sm font-semibold text-tf-text">{formatUptime(status.uptime_seconds)}</p></div>
-            <div className="border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">LLM runtime</p><p className="mt-1 text-sm font-semibold text-tf-text">Bedrock：{status.bedrock_capable ? '可用' : '未啟用'}</p></div>
+            <div className="hermes-clip border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">部署版本</p><p className="mt-1 font-mono text-sm font-semibold text-tf-text">{status.version}</p></div>
+            <div className="hermes-clip border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">服務運行時間</p><p className="tf-num mt-1 text-sm font-semibold text-tf-text">{formatUptime(status.uptime_seconds)}</p></div>
+            <div className="hermes-clip border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">LLM runtime</p><p className="mt-1 text-sm font-semibold text-tf-text">Bedrock：{status.bedrock_capable ? '可用' : '未啟用'}</p></div>
           </div>
 
-          <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+          <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
             <h3 className="mb-2 text-sm font-semibold text-tf-text">Cache Backend</h3>
             <div className="flex flex-wrap items-center gap-2 text-sm text-tf-text2">
               <span>

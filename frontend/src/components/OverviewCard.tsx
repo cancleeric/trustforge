@@ -31,7 +31,7 @@ export default function OverviewCard({ coin, rank }: Props) {
   // 永遠是相同指標。legacy 值仍先正規化為 normal。
   const decisionState = normalizeDecisionState(coin.decision_state)
   const body = (
-    <div className="flex h-full flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4 transition hover:border-tf-accent hover:shadow-[0_4px_14px_color-mix(in_srgb,var(--color-tf-accent)_18%,transparent)]">
+    <div className="hermes-clip flex h-full flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4 transition hover:border-tf-accent hover:shadow-[0_4px_14px_color-mix(in_srgb,var(--color-tf-accent)_18%,transparent)]">
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-1.5">
           {rank !== undefined && (
