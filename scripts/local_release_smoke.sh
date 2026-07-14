@@ -23,7 +23,8 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$ROOT"
-PORT="$PORT" TRUSTFORGE_BIND_HOST=127.0.0.1 "$PYTHON" -m trustforge.web >"$LOG" 2>&1 &
+PORT="$PORT" TRUSTFORGE_BIND_HOST=127.0.0.1 CACHE_BACKEND=json \
+  "$PYTHON" -m trustforge.web >"$LOG" 2>&1 &
 PID=$!
 READY=0
 for _ in $(seq 1 20); do

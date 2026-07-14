@@ -83,7 +83,7 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 
 | ID | 待辦 | 為何必須做 | 驗收條件 |
 |---|---|---|---|
-| H-17 | Production interaction smoke / zero-downtime deploy | **本機 smoke 強化完成。** `local_release_smoke.sh` 現在會起真 HTTP server，驗證 health/overview/cost pagination，並實跑 BTC `/api/analyze`、Evidence、五個 Hermes nodes 與 Execution Log；仍需 staging/production 瀏覽器驗證、conflict recovery 與 deploy restart 行為 | staging + production canary 截圖/API evidence；rolling 或 maintenance-safe 切換不產生公開 5xx |
+| H-17 | Production interaction smoke / zero-downtime deploy | **本機 smoke 與瀏覽器驗證完成。** `local_release_smoke.sh` 以 `CACHE_BACKEND=json` 隔離本機驗測，實跑 health/overview/cost pagination 與 BTC `/api/analyze`、Evidence、五個 Hermes nodes、Execution Log；2026-07-14 已在 1440px 與 390px 驗證分析頁、成本帳本，沒有橫向溢位或 browser error。仍需 staging/production canary、conflict recovery 與 deploy restart 行為 | staging + production canary 截圖/API evidence；rolling 或 maintenance-safe 切換不產生公開 5xx |
 | H-18 | 成本帳本保留、備份與匯出 | **完成。** DynamoDB PITR 已啟用；716 筆 JSONL export/hash verify/non-overwrite restore drill 已完成；AES256 + S3 versioning off-table archive evidence 已記於 `docs/qa/COST-LEDGER-DURABILITY.md` | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
 | H-19 | Production durable lease backend | **程式與 bootstrap 完成，待 AWS 建表／production 驗證。** 新增 PAY_PER_REQUEST + TTL table、最小 IAM 與 service env 接線 | 建表/IAM、`TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb`、multi-instance contention test 全綠 |
 | H-20 | Connector reliability policy | **Policy 完成，待 online observation。** `docs/qa/CONNECTOR-RELIABILITY-POLICY.md` 定義 owner、credential boundary、quota/backoff、failure budget 與 degrade response；仍需 H-02/H-05 的真實觀測 evidence | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
