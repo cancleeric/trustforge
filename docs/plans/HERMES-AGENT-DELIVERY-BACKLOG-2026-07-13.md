@@ -45,7 +45,7 @@
 
 | ID | 待辦 | 目前工作 | 驗收條件 | 依賴 |
 |---|---|---|---|---|
-| H-13a | Historical Backfill Foundation | **程式契約完成，待匯入授權資料。** importer 強制 provider、`published_at`、actual `retrieved_at`、license、content hash，並標記 `backfilled_archive` | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；拒絕時間不明資料 | 歷史來源/API |
+| H-13a | Historical Backfill Foundation | **程式契約完成，待匯入授權資料。** importer 強制 provider、`published_at`、actual `retrieved_at`、license、content hash，並標記 `backfilled_archive`。2026-07-14 已盤點本機：僅有五年 OHLCV，沒有可用 historical raw-source archive，OHLCV 不可冒充來源資料 | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；拒絕時間不明資料 | 歷史來源/API |
 | H-13b | Daily Hermes Replay | **Runner 完成，待 H-13a 資料。** `run_daily_hermes_replay.py` / `run_historical_replay_batch.py` 只讀 archive，執行 claim -> trust -> Evidence -> report，缺 snapshot 誠實記錄 | 每日 run 有完整 execution log，僅選 `published_at <= T` | H-13a |
 | H-13c | Outcome Labeling | **程式完成，待 H-13b 資料。** `label_replay_outcomes.py` 對 T+1/T+7/T+14 接官方 OHLCV outcome；缺未來 bar 時誠實標為 unavailable | 每個 eligible run 可追溯 outcome window 與資料 lineage | H-13b |
 
