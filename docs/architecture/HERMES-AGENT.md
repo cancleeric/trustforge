@@ -59,6 +59,14 @@ is trained, `calibrated_confidence` remains **information completeness**, not a
 validated prediction probability; its Brier result is labelled a diagnostic
 proxy, never a competition forecast claim.
 
+When historical outcomes meet the data gate, Hermes may evaluate an explainable
+small calibrator (`sklearn-logreg` or isotonic), rather than prematurely
+fine-tuning an LLM. The candidate must be submitted through the group ModelHub
+training/registry process with an immutable dataset manifest, chronological
+train/holdout split, feature contract, metrics, model hash, and rollback target.
+ModelHub availability does not relax the replay time boundary or authorize a
+candidate to become active without a holdout improvement.
+
 Source archives begin accumulating after deployment. Older daily trust
 snapshots can be outcome-scored, but cannot be promoted to full raw-source
 replay evidence unless their matching archived source snapshot exists.

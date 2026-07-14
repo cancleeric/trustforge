@@ -47,14 +47,32 @@
 |---|---|---|---|---|
 | H-13a | Historical Backfill Foundation | **程式契約完成，待匯入授權資料。** importer 強制 provider、`published_at`、actual `retrieved_at`、license、content hash，並標記 `backfilled_archive` | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；拒絕時間不明資料 | 歷史來源/API |
 | H-13b | Daily Hermes Replay | **Runner 完成，待 H-13a 資料。** `run_daily_hermes_replay.py` / `run_historical_replay_batch.py` 只讀 archive，執行 claim -> trust -> Evidence -> report，缺 snapshot 誠實記錄 | 每日 run 有完整 execution log，僅選 `published_at <= T` | H-13a |
-| H-13c | Outcome Labeling | **待 H-13b。** 對 T+1/T+7/T+14 接官方 OHLCV outcome | 每個 eligible run 可追溯 outcome window 與資料 lineage | H-13b |
+| H-13c | Outcome Labeling | **程式完成，待 H-13b 資料。** `label_replay_outcomes.py` 對 T+1/T+7/T+14 接官方 OHLCV outcome；缺未來 bar 時誠實標為 unavailable | 每個 eligible run 可追溯 outcome window 與資料 lineage | H-13b |
 
 | ID | 待辦 | 啟動門檻 | 驗收條件 |
 |---|---|---|---|
 | H-13 | Raw-source historical replay | H-13a/H-13b 完成 | 對歷史日 T 以當時 archive 實跑完整 source -> claim -> trust -> evidence workflow；拒絕任何 T 後資料 |
-| H-14 | 小型 confidence calibrator | **Gate 完成，待資料。** 僅在至少 100 筆 eligible outcome 且 time-separated holdout 存在時允許候選模型實驗 | 比較 logistic regression/isotonic；只在 holdout 改善 calibration 時採用；不稱作 LLM 預測能力 |
+| H-14 | 小型 confidence calibrator | **Gate 完成，待資料與 ModelHub 送件通道。** 僅在至少 100 筆 eligible outcome 且 time-separated holdout 存在時允許候選模型實驗；候選為 `sklearn-logreg` / isotonic，不是 LLM | 比較 logistic regression/isotonic；只在 holdout 改善 calibration 時採用；不稱作 LLM 預測能力 |
 | H-15 | Dawid-Skene offline fallback | 有足夠同 coin/time bucket 多來源 direction votes | deterministic EM 收斂、樣本不足守門、既有 Bedrock stance 路徑不回歸；只改善統計共識，不宣稱方向預測 |
-| H-16 | LLM/小模型訓練評估 | 數千筆人工檢核 trajectory 與清楚任務標註 | 先做 teacher/student 或 Bedrock customization feasibility study；成本、資料授權、區域、holdout safety 全部通過才訓練 |
+| H-16 | LLM/小模型訓練評估 | **ModelHub 登記路徑已盤點，尚不可送件。** 先累積數千筆人工檢核 trajectory 與清楚任務標註；不可因已有 ModelHub 而跳過 H-14 的可解釋小模型 | 先做 teacher/student 或 Bedrock customization feasibility study；成本、資料授權、區域、holdout safety 全部通過才訓練 |
+
+### ModelHub 訓練登記準備（H-14 / H-16 共用）
+
+已於 2026-07-14 透過 Headscale 讀取 `hurricanecore/modelhub` Wiki 與集團
+ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 registry 的正式
+中心；TrustForge 未來訓練不可繞過此路徑直接把候選模型升上 production。
+
+| 項目 | 已知做法 | TrustForge 啟動前仍需完成 |
+|---|---|---|
+| 送件入口 | UI `:3950/submit`；現行服務整合優先使用 `POST /api/submissions/`（X-Api-Key）；舊訓練排程文件另列 `POST /api/v1/models/{slug}/training` | 由 ModelHub `:8950/docs` / 當前原始碼確認唯一正式契約，禁止猜測或同時送兩次 |
+| 資料合約 | `backfilled_archive`、replay、outcome 及特徵須保留 provider、published/retrieved time、license、content hash 與 OHLCV lineage | H-13a/H-13b 產出至少 100 筆 eligible、時間分離的 outcome；LLM 類另需數千筆人工檢核標註 |
+| 候選模型 | H-14 僅允許 `sklearn-logreg` 與 isotonic；ModelHub 已支援可登記的小模型架構 | 建立可重現 dataset manifest、feature contract、chronological train/holdout split 與 baseline 指標 |
+| 驗收與回退 | 只有 holdout calibration 改善的候選可進 registry；正式 run 仍由 deterministic Trust Layer 決定 | 登記 validation metrics、資料版本、模型 hash、skill revision；保留上一版 active calibrator 與 rollback pointer |
+| 網路/權限 | Headscale 可讀 Wiki；本機 `apple-32` 到目前 `eric-mac` 的 ModelHub `:8950` 尚無可用 ACL，未取得 TrustForge 專用 X-Api-Key | 由 HurricaneCore 開放 `apple-32 -> ModelHub TCP 3950/8950`，核發最小 scope key 並存 Vault；完成 health、Swagger、dry-run submission 驗證 |
+
+訓練資源優先序為 Kaggle GPU（每次不超過 9 小時）→ Lightning AI → 內網 CUDA
+主機 → 本機 MPS。訓練完成後必須保留輸出、驗收結果與 registry version；不得把
+未通過 holdout 的模型或資料洩漏模型登記為 active。
 
 ## 新增缺口（2026-07-13 production audit）
 
