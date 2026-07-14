@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.14.3 — 2026-07-14
+
+- Fix the packaged Hermes scheduler service to pass `TRUSTFORGE_HOME`, so its
+  bounded offline quality measurement can read the shipped sample data.
+
 ## v0.14.2 — 2026-07-14
 
 - Start the Hermes scheduler immediately after installation and keep a bounded
