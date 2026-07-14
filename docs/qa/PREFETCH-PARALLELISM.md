@@ -64,3 +64,18 @@ rest of that scheduler process, so another CoinGecko source worker receives the
 same rate-limit failure without making a second HTTP request. Sequential and
 two-worker concurrency regression tests pass; production verification remains
 pending the next release.
+
+## 2026-07-14 v0.14.5 verification
+
+- Production health reported `v0.14.5`; the Hermes cycle exited successfully.
+- CoinGecko returned no HTTP 429 in this cycle. The price batch wrote five
+  documents and the stale SOL/BNB/XRP detail requests produced both dev and
+  sentiment documents through the shared detail cache.
+- The provider-serialized fetch phase took 43.46 seconds; the complete Hermes
+  cycle took 68.37 seconds, remaining well below the 900 second budget.
+- Five of five trust snapshots were written.
+
+The production path verifies that the shared provider lock and cache operate
+without a rate-limit event. The provider-close branch is not artificially
+triggered against the live API; its no-second-HTTP guarantee is covered by the
+two-worker concurrency regression test.
