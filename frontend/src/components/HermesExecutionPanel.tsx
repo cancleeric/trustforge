@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { Evidence, ExecutionEvent, ExecutionManifest, Report } from '../lib/types'
+import { executionLogDownload } from '../lib/executionLogDownload'
 
 const NODE_FALLBACK = [
   { id: 'source_ingestion', label: '來源蒐集', order: 1 },
@@ -180,7 +181,10 @@ export default function HermesExecutionPanel({
         </label>
         <button onClick={() => download(`${normalizedExecution.run_id}-report.md`, reportMarkdown(report), 'text/markdown;charset=utf-8')} className="rounded border border-tf-link px-3 py-1.5 text-sm font-semibold text-tf-link">報告</button>
         <button onClick={() => download(`${normalizedExecution.run_id}-evidence.json`, JSON.stringify(evidence, null, 2), 'application/json')} className="rounded border border-tf-link px-3 py-1.5 text-sm font-semibold text-tf-link">Evidence</button>
-        <button onClick={() => download(`${normalizedExecution.run_id}-execution-log.jsonl`, events.map((event) => JSON.stringify(event)).join('\n'), 'application/x-ndjson')} className="rounded border border-tf-link px-3 py-1.5 text-sm font-semibold text-tf-link">Log</button>
+        <button onClick={() => {
+          const artifact = executionLogDownload(normalizedExecution, events)
+          download(artifact.name, artifact.body, artifact.type)
+        }} className="rounded border border-tf-link px-3 py-1.5 text-sm font-semibold text-tf-link">Log</button>
       </div>
 
       <div className="mt-3 max-h-64 overflow-auto border border-tf-border">
