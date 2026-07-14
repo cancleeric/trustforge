@@ -52,7 +52,7 @@
 | ID | 待辦 | 啟動門檻 | 驗收條件 |
 |---|---|---|---|
 | H-13 | Raw-source historical replay | H-13a/H-13b 完成 | 對歷史日 T 以當時 archive 實跑完整 source -> claim -> trust -> evidence workflow；拒絕任何 T 後資料 |
-| H-14 | 小型 confidence calibrator | 以 H-13c 回填產生至少 100 筆、跨市場狀態、leakage-safe 的 eligible outcome；另留 time-separated holdout | 比較 logistic regression/isotonic；只在 holdout 改善 calibration 時採用；不稱作 LLM 預測能力 |
+| H-14 | 小型 confidence calibrator | **Gate 完成，待資料。** 僅在至少 100 筆 eligible outcome 且 time-separated holdout 存在時允許候選模型實驗 | 比較 logistic regression/isotonic；只在 holdout 改善 calibration 時採用；不稱作 LLM 預測能力 |
 | H-15 | Dawid-Skene offline fallback | 有足夠同 coin/time bucket 多來源 direction votes | deterministic EM 收斂、樣本不足守門、既有 Bedrock stance 路徑不回歸；只改善統計共識，不宣稱方向預測 |
 | H-16 | LLM/小模型訓練評估 | 數千筆人工檢核 trajectory 與清楚任務標註 | 先做 teacher/student 或 Bedrock customization feasibility study；成本、資料授權、區域、holdout safety 全部通過才訓練 |
 
