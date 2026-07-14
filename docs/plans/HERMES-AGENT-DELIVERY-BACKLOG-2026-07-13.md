@@ -32,7 +32,7 @@
 | H-08 | Skill staging sandbox | **完成。** `scripts/run_skill_sandbox.py` 對候選 artifact 跑題庫，選用 replay；不會 activation | 已測試 | H-07 |
 | H-09 | Rollback 實際生效 | **完成。** approved/rollback pointer 被 runtime resolver 讀取，新 run manifest 顯示選定 hash | 已測試 | H-07、H-08 |
 | H-10 | 自動改善例行輸入 | **部分完成。** Hermes cycle 已自動產生 bounded 24 題 regression measurement 與各幣 replay artifact，再由 diagnostic 消費；online QA 保持 H-05 的明確 quota/credential gate | 排程定期產生 online QA 與各幣 replay reports；diagnostic 自動消費並建立 proposal queue | H-02、H-05 |
-| H-11 | 來源預取並行化 | **程式完成，待 AWS 壓測。** scheduler 有 `--parallelism`、900s total budget、source-owner worker 與 join-before-snapshot 邊界 | 壓力測試證明快於序列且可回溯 | H-02 |
+| H-11 | 來源預取並行化 | **production 路徑與 deterministic 對照完成。** `v0.14.3` 正式 cycle 使用 4 個 source-owner workers，在 25.40 秒內完成 32 個成功目標、131 筆文件，之後才寫入五幣快照 5/5；完整 cycle 49.83 秒。新增時序回歸測試證明三來源並行不會退化為序列。證據見 `docs/qa/PREFETCH-PARALLELISM.md`；因本輪已有 429，不為了 benchmark 強制重打線上來源 | 壓力測試證明快於序列且可回溯 | H-02 |
 | H-12 | Cache freshness dashboard | **完成（資料 artifact）。** `scripts/cache_freshness_dashboard.py` 產出五幣×來源 fresh/stale/missing、age、document count、scheduler failure labels；Hermes cycle 自動執行 | 已測試 | H-02 |
 
 ## P2：五年歷史回填與核心研究
@@ -86,7 +86,7 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 | H-17 | Production interaction smoke / zero-downtime deploy | **本機 smoke 與瀏覽器驗證完成。** `local_release_smoke.sh` 以 `CACHE_BACKEND=json` 隔離本機驗測，實跑 health/overview/cost pagination 與 BTC `/api/analyze`、Evidence、五個 Hermes nodes、Execution Log；2026-07-14 已在 1440px 與 390px 驗證分析頁、成本帳本，沒有橫向溢位或 browser error。仍需 staging/production canary、conflict recovery 與 deploy restart 行為 | staging + production canary 截圖/API evidence；rolling 或 maintenance-safe 切換不產生公開 5xx |
 | H-18 | 成本帳本保留、備份與匯出 | **完成。** DynamoDB PITR 已啟用；716 筆 JSONL export/hash verify/non-overwrite restore drill 已完成；AES256 + S3 versioning off-table archive evidence 已記於 `docs/qa/COST-LEDGER-DURABILITY.md` | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
 | H-19 | Production durable lease backend | **production 環境已生效，service-level canary 待排程。** 2026-07-14 已確認 `trustforge-analyze-leases` 為 ACTIVE/PAY_PER_REQUEST、TTL=`ttl` ENABLED；`trustforge-ec2` 最小 policy 僅含 Get/Put/Delete；兩個真 DynamoDB backend contention/release/reacquire 全綠。`v0.14.3` EC2 service 已確認載入 `TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb` 與 `TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases`。下一步是隔離的 service-level concurrent canary，不可用人為重複請求干擾正式分析 | production release 後確認 `TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb` + table env、service-level contention test 全綠 |
-| H-20 | Connector reliability policy | **Policy 完成，待 online observation。** `docs/qa/CONNECTOR-RELIABILITY-POLICY.md` 定義 owner、credential boundary、quota/backoff、failure budget 與 degrade response；仍需 H-02/H-05 的真實觀測 evidence | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
+| H-20 | Connector reliability policy | **Policy 完成，已取得第一輪 online observation。** `v0.14.3` cycle 成功寫入 32 個目標、131 筆文件，但 CryptoSlate 1、CoinGecko 1、Reddit 6 個目標收到 HTTP 429；流程安全降級並保留快取。下一步依 provider 分離 quota/backoff，觀察重複輪次失敗率；證據見 `docs/qa/PREFETCH-PARALLELISM.md` | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查 |
 | H-21 | Hermes Execution Journey implementation | **實作完成，待 release production QA。** `/analyze` 已把資料驅動五節點、來源結果/耗時、run-bound Evidence/Log 下載置於結論後第一段；無事件時有誠實 empty state | release 後以真實資料完成 desktop/mobile 截圖與互動 smoke；不改 Trust Layer |
 
 ## 明確不做 / 不可越線
