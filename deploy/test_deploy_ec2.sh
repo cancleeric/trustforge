@@ -478,6 +478,7 @@ if len(ssm_stmts) != 2:
     problems.append("ssm:GetParameter statement 數量應為 2，實際為:" + str(len(ssm_stmts)))
 else:
     expected = {
+        "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/deploy",
         "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/deploy/*",
         "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/runtime/*",
     }
@@ -486,14 +487,16 @@ else:
         actions = stmt.get("Action", [])
         if isinstance(actions, str):
             actions = [actions]
-        res = stmt.get("Resource")
-        if str(res).endswith("parameter/trustforge/deploy/*"):
+        resources = stmt.get("Resource")
+        if isinstance(resources, str):
+            resources = [resources]
+        if any(str(res).endswith("parameter/trustforge/deploy/*") for res in resources):
             expected_actions = {"ssm:GetParameter", "ssm:GetParametersByPath", "ssm:DeleteParameter"}
         else:
             expected_actions = {"ssm:GetParameter"}
         if set(actions) != expected_actions:
-            problems.append("ssm statement (Resource=" + str(res) + ") Action 不符:" + str(stmt.get("Action")))
-        actual.add(res)
+            problems.append("ssm statement (Resource=" + str(resources) + ") Action 不符:" + str(stmt.get("Action")))
+        actual.update(resources)
     if actual != expected:
         problems.append("ssm:GetParameter Resource 集合不符，實際:" + str(actual))
 if kms_stmt is None:

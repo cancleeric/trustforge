@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.14.10 — 2026-07-14
+
+- Include both the `/trustforge/deploy` parent parameter path and its children in the path-scoped EC2 role policy, matching AWS `GetParametersByPath` authorization semantics.
+- Add deployment-policy regression coverage so startup SSM cleanup remains least-privilege and traceback-free after infrastructure reconciliation.
+
 ## v0.14.9 — 2026-07-14
 
 - Replace account-wide SSM parameter discovery in startup cleanup with path-scoped `GetParametersByPath` pagination.
