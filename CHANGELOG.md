@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.14.6 — 2026-07-14
+
+- Export the user-facing Hermes execution log as a standard `.json` envelope
+  containing the execution manifest and event array instead of an NDJSON file.
+- Retain the internal append-only JSONL storage contracts used by audit and
+  scheduler tooling.
+
 ## v0.14.5 — 2026-07-14
 
 - Coordinate all CoinGecko source workers through one provider lock covering
