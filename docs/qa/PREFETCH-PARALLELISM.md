@@ -35,3 +35,8 @@ are verified. A forced sequential live comparison is intentionally excluded:
 it would consume provider quota after a recorded 429 event and would not be a
 responsible production benchmark.
 
+The first remediation is implemented after this observation: a coin-scoped
+source that receives an explicit HTTP 429 stops calling that source for the
+remaining coins in the current cycle. Every deferred stale target is still
+reported as failed, so cooldown reduces provider pressure without hiding
+freshness gaps. Production verification remains pending the next release.

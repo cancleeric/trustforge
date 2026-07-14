@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
+from urllib.error import HTTPError
 
 import pytest
 
@@ -1302,6 +1303,36 @@ def test_main_returns_nonzero_exit_code_when_all_sources_fetch_fails(monkeypatch
         "--source", "coindesk", "--source", "decrypt", "--coin", "BTC", "--force",
     ])
     assert rc == 1
+
+
+def test_scheduler_429_stops_remaining_coin_calls_and_reports_gaps(monkeypatch, tmp_path, capsys):
+    """首個明確 429 後停止同來源後續呼叫，避免把 provider 限流放大。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    rate_limited = _FakeSource(
+        "reddit-cryptocurrency",
+        kind="social",
+        raise_exc=HTTPError("https://www.reddit.com", 429, "Too Many Requests", {}, None),
+    )
+    _patch_registry(monkeypatch, [rate_limited])
+
+    results, failures = fetch_scheduler.run_once(
+        None,
+        ["BTC", "ETH", "SOL"],
+        backend,
+        force=True,
+        interval_overrides={},
+        stagger=0,
+        dry_run=False,
+    )
+
+    assert results == []
+    assert rate_limited.calls == [("", "BTC")]
+    assert failures == [
+        "reddit-cryptocurrency:BTC",
+        "reddit-cryptocurrency:ETH",
+        "reddit-cryptocurrency:SOL",
+    ]
+    assert "HTTP 429 cooldown" in capsys.readouterr().err
 
 
 def test_scheduler_unknown_source_name_skips_without_crash(tmp_path, capsys):

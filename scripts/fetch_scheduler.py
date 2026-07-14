@@ -69,6 +69,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -176,6 +177,11 @@ def _effective_stagger(name: str, stagger: float) -> float:
     if name.startswith("coingecko-"):
         return max(stagger, _COINGECKO_STAGGER_FLOOR_SECONDS)
     return stagger
+
+
+def _is_http_429(exc: Exception) -> bool:
+    """Return whether a connector failure is an explicit provider rate limit."""
+    return isinstance(exc, HTTPError) and exc.code == 429
 
 
 def run_once(
@@ -355,7 +361,7 @@ def run_once(
                 results.append((name, total_docs))
             continue
 
-        for c in coins:
+        for coin_index, c in enumerate(coins):
             if not force and _is_fresh(backend, name, c, refresh_interval):
                 print(f"[fetch_scheduler] {name}[{c}]: 未達 refresh 間隔（{refresh_interval:.0f}s），略過")
                 continue
@@ -368,6 +374,22 @@ def run_once(
                 # 但仍要計入 failures（codex HIGH-1），理由同上方 coin-agnostic 分支。
                 print(f"[fetch_scheduler] {name}[{c}]: 真呼叫失敗，略過（{exc}）", file=sys.stderr)
                 failures.append(f"{name}:{c}")
+                if _is_http_429(exc):
+                    deferred: list[str] = []
+                    for remaining_coin in coins[coin_index + 1:]:
+                        if not force and _is_fresh(
+                            backend, name, remaining_coin, refresh_interval
+                        ):
+                            continue
+                        deferred.append(remaining_coin)
+                        failures.append(f"{name}:{remaining_coin}")
+                    if deferred:
+                        print(
+                            f"[fetch_scheduler] {name}: HTTP 429 cooldown，"
+                            f"本輪停止後續幣別真呼叫（未刷新：{deferred}）",
+                            file=sys.stderr,
+                        )
+                    break
                 continue
             result = cache_set_monotonic(
                 backend, cache_key(name, c), [doc_to_dict(d) for d in docs],
