@@ -26,6 +26,7 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
 
   return (
     <div
+      className="hermes-stage-bar"
       style={{
         position: 'absolute', left: 0, bottom: 0, width: 1440, height: 120, zIndex: 8,
         background: 'rgba(10,16,24,.6)', backdropFilter: 'blur(10px)', borderTop: '1px solid var(--color-hermes-bd)',
@@ -33,13 +34,16 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
       }}
     >
       {stages.map((st) => (
-        <div
+        <button
+          type="button"
+          aria-pressed={selectedStage === st.id}
           key={st.id}
           onClick={() => onSelectStage(st.id)}
           className="hermes-clip-sm"
           style={{
             cursor: 'pointer', width: 220, height: st.h, background: st.bg, border: `1px solid ${st.border}`,
             borderBottom: 'none', borderRadius: '8px 8px 0 0', padding: '10px 14px',
+            fontFamily: 'inherit', textAlign: 'left',
             transition: 'transform .12s, border-color .15s, background .15s',
             ['--pulse-color' as string]: st.color, animation: st.pulseAnim,
           }}
@@ -57,7 +61,7 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
             <span style={{ fontSize: 17, fontWeight: 600, color: st.color }}>{st.metric}</span>
             <span style={{ fontSize: 9.5, color: 'var(--color-hermes-tx3)' }}>{st.unit}</span>
           </div>
-        </div>
+        </button>
       ))}
     </div>
   )

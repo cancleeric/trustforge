@@ -69,6 +69,7 @@ export default function CurrencyGalaxy({
 
   const ring = (orbit: Exclude<OrbitId, 'core'>, rot: string, spin: string, ids: [string, string]) => (
     <div
+      className="hermes-galaxy"
       style={{
         position: 'absolute', left: 0, top: 0, width: RING_SIZE[orbit], height: RING_SIZE[orbit],
         margin: -RING_SIZE[orbit] / 2, borderRadius: '50%',

@@ -23,6 +23,7 @@ export default function HermesLeftRail({
   return (
     <div
       className="hermes-glass"
+      data-region="left-rail"
       style={{
         position: 'absolute', left: 0, top: 44, width: 300, height: 736, zIndex: 5,
         borderRight: '1px solid var(--color-hermes-bd)', padding: '14px 16px',

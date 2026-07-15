@@ -24,7 +24,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
 
   return (
     <div
-      className="hermes-clip-lg"
+      className="hermes-clip-lg hermes-stage-drilldown"
       style={{
         position: 'absolute', left: 640, top: 70, width: 490, height: 610, zIndex: 20,
         background: 'rgba(8,14,22,.92)', backdropFilter: 'blur(6px)', border: `1px solid ${color}`,
@@ -35,7 +35,10 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--color-hermes-bd)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
           <span style={{ fontSize: 15, color }}>{icon}</span>
-          <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--color-hermes-tx)' }}>{selCoin.full} — {label}</span>
+          <div>
+            <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--color-hermes-tx)' }}>{selCoin.full} — {label}</span>
+            <div style={{ marginTop: 3, fontSize: 8.5, letterSpacing: '.8px', color: 'var(--color-hermes-amber)' }}>OVERVIEW PROXY · RUN ANALYSIS FOR EVIDENCE-BOUND TRACE</div>
+          </div>
         </div>
         <button
           onClick={onClose}

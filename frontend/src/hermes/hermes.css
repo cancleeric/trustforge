@@ -101,3 +101,98 @@
 @media (prefers-reduced-motion: reduce) {
   .hermes-root * { animation: none !important; transition: none !important; }
 }
+
+/* 樣品是固定 1440×900 舞台；正式 Web UI 在窄螢幕改為可讀的縱向工作台。 */
+@media (max-width: 900px) {
+  .hermes-dashboard {
+    display: block !important;
+    height: auto !important;
+    min-height: 100vh;
+    overflow: auto !important;
+  }
+
+  .hermes-frame {
+    width: 100% !important;
+    height: auto !important;
+    min-height: 100vh;
+    transform: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+  }
+
+  .hermes-topbar,
+  [data-region='left-rail'],
+  .hermes-galaxy,
+  .hermes-right-rail,
+  .hermes-stage-bar {
+    position: relative !important;
+    inset: auto !important;
+    width: 100% !important;
+  }
+
+  .hermes-topbar {
+    height: auto !important;
+    min-height: 52px;
+    flex-wrap: wrap;
+    gap: 8px !important;
+    padding: 10px 14px !important;
+  }
+
+  .hermes-topbar-nav {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  [data-region='left-rail'],
+  .hermes-right-rail {
+    height: auto !important;
+    min-height: 520px;
+    border: 0 !important;
+    border-bottom: 1px solid var(--color-hermes-bd) !important;
+  }
+
+  .hermes-galaxy {
+    height: 600px !important;
+    border-bottom: 1px solid var(--color-hermes-bd);
+  }
+
+  .hermes-stage-bar {
+    height: auto !important;
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch !important;
+    gap: 8px !important;
+    padding: 14px !important;
+  }
+
+  .hermes-stage-bar > button {
+    width: 100% !important;
+    height: 96px !important;
+    border-bottom: 1px solid var(--color-hermes-bd) !important;
+    border-radius: 6px !important;
+  }
+
+  .hermes-stage-drilldown {
+    position: fixed !important;
+    inset: 8vh 12px auto 12px !important;
+    width: auto !important;
+    height: 84vh !important;
+    z-index: 50 !important;
+  }
+}
+
+@media (max-width: 520px) {
+  .hermes-topbar > span:nth-of-type(1),
+  .hermes-topbar > span:nth-of-type(2) {
+    display: none !important;
+  }
+
+  .hermes-galaxy {
+    height: 520px !important;
+  }
+
+  .hermes-stage-bar {
+    grid-template-columns: 1fr;
+  }
+}

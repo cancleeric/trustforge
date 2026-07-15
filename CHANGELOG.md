@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.14.13 — 2026-07-15
+
+- Turn the Hermes Galaxy sample into a complete operational workspace with direct navigation to analysis, comparison, history, source health and the full cost ledger.
+- Make every workflow stage a semantic, keyboard-operable control with an explicit drilldown and disclosure when dashboard values are overview proxies rather than evidence-bound run results.
+- Add responsive desktop, tablet and mobile layouts that preserve the galaxy, source rail, trust breakdown and execution stages without fixed-canvas clipping.
+- Add regression coverage for the flagship navigation contract while retaining read-only, cost-free dashboard browsing.
+
 ## v0.14.12 — 2026-07-15
 
 - Complete the Hermes Galaxy UI integration around the official BTC/ETH/SOL/BNB/XRP pool, removing fiat design placeholders from the production dashboard.
