@@ -1,4 +1,5 @@
 import { HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
+import { useHermesI18n } from './hermesI18n'
 
 interface StageBarProps {
   selCoin: GalaxyCoin
@@ -10,6 +11,7 @@ interface StageBarProps {
 const ARC_H = [72, 64, 80, 64, 72]
 
 export default function StageBar({ selCoin, derivation, selectedStage, onSelectStage }: StageBarProps) {
+  const { t } = useHermesI18n()
   const divColor = derivation.divColor
   const stages = STAGE_DEFS.map((s, i) => {
     const isSel = selectedStage === s.id
@@ -20,7 +22,10 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
       border: isSel ? color : 'var(--color-hermes-bd)',
       bg: isSel ? 'var(--color-hermes-hover)' : 'var(--color-hermes-card)',
       pulseAnim: isSel ? 'hermes-select-pulse 1.8s ease-in-out infinite' : 'none',
-      metric: m?.metric ?? '', unit: m?.unit ?? '',
+      metric: m?.metric ?? '',
+      unit: s.id === 'scan' ? t('scanned') : s.id === 'filter' ? t('passed') : s.id === 'crossverify' ? t('divergenceUnit') : s.id === 'manipulation' ? t('flagged') : m?.unit ?? '',
+      step: `${t('stage')} ${i + 1}`,
+      label: s.id === 'scan' ? t('scan') : s.id === 'filter' ? t('filter') : s.id === 'crossverify' ? t('crossverify') : s.id === 'manipulation' ? t('manipulation') : t('composite'),
     }
   })
 

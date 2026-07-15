@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.14.14 — 2026-07-15
+
+- Add first-class Traditional Chinese and English localization to the Hermes workspace, defaulting the operational UI to Traditional Chinese.
+- Localize navigation, telemetry, agent controls, trust breakdowns, galaxy interaction cues and all five execution-stage surfaces while preserving product, asset and protocol names.
+- Add an in-product language switch and persist the non-sensitive locale preference with a SameSite cookie without weakening the global ban on localStorage.
+- Add regression coverage for the default Chinese navigation, live English switching and locale persistence contract.
+
 ## v0.14.13 — 2026-07-15
 
 - Turn the Hermes Galaxy sample into a complete operational workspace with direct navigation to analysis, comparison, history, source health and the full cost ledger.

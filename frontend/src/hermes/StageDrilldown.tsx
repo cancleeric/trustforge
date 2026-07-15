@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
+import { useHermesI18n } from './hermesI18n'
 
 interface StageDrilldownProps {
   selCoin: GalaxyCoin
@@ -9,11 +10,12 @@ interface StageDrilldownProps {
 }
 
 export default function StageDrilldown({ selCoin, derivation, selectedStage, onClose }: StageDrilldownProps) {
+  const { t } = useHermesI18n()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
   const isDivergence = selectedStage === 'divergence'
   const selDef = !isDivergence ? STAGE_DEFS.find((s) => s.id === selectedStage) : null
-  const label = isDivergence ? 'Cross-Source Divergence' : selDef?.label ?? ''
+  const label = isDivergence ? t('divergence') : selectedStage === 'scan' ? t('scan') : selectedStage === 'filter' ? t('filter') : selectedStage === 'crossverify' ? t('crossverify') : selectedStage === 'manipulation' ? t('manipulation') : t('composite')
   const icon = isDivergence ? '⚠' : selDef?.icon ?? ''
   const color = isDivergence ? HERMES_RED : selectedStage === 'manipulation' ? HERMES_AMBER
     : selectedStage === 'crossverify' ? derivation.divColor
@@ -21,6 +23,8 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
         : HERMES_CYAN
 
   const toggle = (key: string) => setExpanded((e) => ({ ...e, [key]: !e[key] }))
+  const componentLabel = (value: string) => value === 'Reputation' ? t('reputation') : value === 'Corroboration' ? t('corroboration') : value === 'Recency' ? t('recency') : t('resistance')
+  const reasoningKind = (value: string) => value === 'FACTS' ? t('facts') : value === 'INFERENCE' ? t('inference') : t('conclusion')
 
   return (
     <div
@@ -37,7 +41,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
           <span style={{ fontSize: 15, color }}>{icon}</span>
           <div>
             <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--color-hermes-tx)' }}>{selCoin.full} — {label}</span>
-            <div style={{ marginTop: 3, fontSize: 8.5, letterSpacing: '.8px', color: 'var(--color-hermes-amber)' }}>OVERVIEW PROXY · RUN ANALYSIS FOR EVIDENCE-BOUND TRACE</div>
+            <div style={{ marginTop: 3, fontSize: 8.5, letterSpacing: '.8px', color: 'var(--color-hermes-amber)' }}>{t('proxyTrace')}</div>
           </div>
         </div>
         <button
@@ -45,7 +49,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
           style={{ background: 'transparent', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx2)', fontSize: 10, padding: '4px 9px', cursor: 'pointer' }}
           onMouseEnter={(e) => { e.currentTarget.style.borderColor = color; e.currentTarget.style.color = 'var(--color-hermes-tx)' }}
           onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--color-hermes-bd2)'; e.currentTarget.style.color = 'var(--color-hermes-tx2)' }}
-        >CLOSE ✕</button>
+        >{t('close')} ✕</button>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 18px' }}>
@@ -75,13 +79,13 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
         {selectedStage === 'filter' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div>
-              <div style={{ fontSize: 10, color: HERMES_CYAN, letterSpacing: 1, marginBottom: 7 }}>PASSED · {derivation.passedCount}</div>
+              <div style={{ fontSize: 10, color: HERMES_CYAN, letterSpacing: 1, marginBottom: 7 }}>{t('passed')} · {derivation.passedCount}</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {derivation.passedItems.map((p) => <span key={p} style={{ fontSize: 11, color: 'var(--color-hermes-tx)', background: 'rgba(77,216,224,.13)', border: '1px solid rgba(77,216,224,.4)', borderRadius: 5, padding: '5px 9px' }}>{p}</span>)}
               </div>
             </div>
             <div>
-              <div style={{ fontSize: 10, color: HERMES_RED, letterSpacing: 1, marginBottom: 7 }}>FLAGGED / DROPPED · {derivation.flaggedCount}</div>
+              <div style={{ fontSize: 10, color: HERMES_RED, letterSpacing: 1, marginBottom: 7 }}>{t('dropped')} · {derivation.flaggedCount}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {derivation.droppedItems.map((d) => (
                   <div key={d.name} style={{ fontSize: 11.5, color: 'var(--color-hermes-tx)', background: 'rgba(255,95,95,.14)', border: '1px solid rgba(255,95,95,.45)', borderRadius: 6, padding: '7px 10px' }}>
@@ -95,7 +99,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
 
         {(selectedStage === 'crossverify' || isDivergence) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 10.5, color: derivation.divColor, background: derivation.divDim, border: `1px solid ${derivation.divBd}`, borderRadius: 5, padding: '4px 9px', width: 'fit-content' }}>DIVERGENCE · Δ {derivation.divergence}%</div>
+            <div style={{ fontSize: 10.5, color: derivation.divColor, background: derivation.divDim, border: `1px solid ${derivation.divBd}`, borderRadius: 5, padding: '4px 9px', width: 'fit-content' }}>{t('divergenceUnit')} · Δ {derivation.divergence}%</div>
             {derivation.crossItems.map((cv, i) => (
               <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 5, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: `3px solid ${cv.color}`, borderRadius: '0 6px 6px 0', padding: '9px 12px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
@@ -110,7 +114,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
 
         {selectedStage === 'manipulation' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 11.5, color: 'var(--color-hermes-tx2)' }}>Flagged channel: <b style={{ color: 'var(--color-hermes-tx)' }}>Social Sentiment Scanner</b></div>
+            <div style={{ fontSize: 11.5, color: 'var(--color-hermes-tx2)' }}>{t('flaggedChannel')}: <b style={{ color: 'var(--color-hermes-tx)' }}>Social Sentiment Scanner</b></div>
             {derivation.manipulationItems.map((m, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 11.5, color: 'var(--color-hermes-tx)', background: 'rgba(255,95,95,.14)', border: '1px solid rgba(255,95,95,.45)', borderRadius: 6, padding: '8px 11px' }}>
                 <span style={{ color: HERMES_RED }}>✕</span><span>{m}</span>
@@ -124,16 +128,16 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
             {derivation.components.map((c) => (
               <div key={c.label} style={{ display: 'flex', flexDirection: 'column', gap: 4, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderRadius: 6, padding: '9px 12px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{ fontWeight: 600, fontSize: 11.5, flex: 1, color: 'var(--color-hermes-tx)' }}>{c.label}</span>
-                  <span style={{ fontSize: 9.5, color: 'var(--color-hermes-tx3)' }}>wt {c.weight}%</span>
+                  <span style={{ fontWeight: 600, fontSize: 11.5, flex: 1, color: 'var(--color-hermes-tx)' }}>{componentLabel(c.label)}</span>
+                  <span style={{ fontSize: 9.5, color: 'var(--color-hermes-tx3)' }}>{t('weight')} {c.weight}%</span>
                   <span style={{ fontSize: 12, fontWeight: 600, color: c.barColor, width: 28, textAlign: 'right' }}>{c.score}</span>
                 </div>
               </div>
             ))}
-            <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginTop: 6 }}>REASONING TRACE</div>
+            <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginTop: 6 }}>{t('reasoningTrace')}</div>
             {derivation.steps.map((stp, i) => (
               <div key={i} style={{ marginLeft: stp.indent, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: `3px solid ${stp.color}`, borderRadius: '0 6px 6px 0', padding: '9px 12px' }}>
-                <div style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: 1, color: stp.color, marginBottom: 5 }}>{stp.kind}</div>
+                <div style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: 1, color: stp.color, marginBottom: 5 }}>{reasoningKind(stp.kind)}</div>
                 <p style={{ margin: 0, fontSize: 11.5, lineHeight: 1.5, color: 'var(--color-hermes-tx)' }}>{stp.text}</p>
               </div>
             ))}

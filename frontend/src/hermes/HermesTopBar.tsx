@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { useHermesI18n } from './hermesI18n'
 
 interface HermesTopBarProps {
   costLedger?: number | null
@@ -6,19 +7,16 @@ interface HermesTopBarProps {
   systemId?: string
 }
 
-const NAV_ITEMS = [
-  { to: '/analyze', label: 'ANALYZE' },
-  { to: '/compare', label: 'COMPARE' },
-  { to: '/history', label: 'HISTORY' },
-  { to: '/status', label: 'SOURCES' },
-  { to: '/costs', label: 'COSTS' },
-]
-
 export default function HermesTopBar({
   costLedger = null,
   version = 'loading · GALAXY',
   systemId = 'SYS·HRM-01',
 }: HermesTopBarProps) {
+  const { locale, setLocale, t } = useHermesI18n()
+  const navItems = [
+    { to: '/analyze', label: t('analyze') }, { to: '/compare', label: t('compare') },
+    { to: '/history', label: t('history') }, { to: '/status', label: t('sources') }, { to: '/costs', label: t('costs') },
+  ]
   return (
     <div
       className="hermes-topbar"
@@ -41,13 +39,13 @@ export default function HermesTopBar({
       <span style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1 }}>✛ {systemId}</span>
       <span style={{ fontSize: 10, color: 'var(--color-hermes-tx3)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 4, padding: '2px 7px' }}>{version}</span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--color-hermes-cyan)', background: 'rgba(77,216,224,.13)', border: '1px solid rgba(77,216,224,.4)', borderRadius: 4, padding: '2px 8px' }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-hermes-cyan)', animation: 'hermes-pulse 1.8s infinite' }} />LIVE UPLINK
+        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-hermes-cyan)', animation: 'hermes-pulse 1.8s infinite' }} />{t('liveUplink')}
       </span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--color-hermes-amber)', background: 'rgba(232,179,77,.13)', border: '1px solid rgba(232,179,77,.4)', borderRadius: 4, padding: '2px 8px' }}>
-        <span style={{ width: 6, height: 6, transform: 'rotate(45deg)', background: 'var(--color-hermes-amber)', animation: 'hermes-pulse 2.4s infinite' }} />HERMES: ACTIVE
+        <span style={{ width: 6, height: 6, transform: 'rotate(45deg)', background: 'var(--color-hermes-amber)', animation: 'hermes-pulse 2.4s infinite' }} />HERMES: {t('active')}
       </span>
-      <nav className="hermes-topbar-nav" aria-label="Hermes workspace navigation" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-        {NAV_ITEMS.map((item) => (
+      <nav className="hermes-topbar-nav" aria-label={t('navigation')} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        {navItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -62,7 +60,10 @@ export default function HermesTopBar({
         ))}
       </nav>
       <div style={{ flex: 1 }} />
-      <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>COST LEDGER <b style={{ color: 'var(--color-hermes-cyan)' }}>{costLedger === null ? 'SYNCING' : `$${costLedger.toFixed(4)}`}</b></span>
+      <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} style={{ background: 'transparent', border: '1px solid var(--color-hermes-bd2)', borderRadius: 4, color: 'var(--color-hermes-tx2)', fontFamily: 'inherit', fontSize: 9, padding: '3px 7px', cursor: 'pointer' }}>
+        {locale === 'zh-TW' ? 'EN' : '繁中'}
+      </button>
+      <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>{t('costLedger')} <b style={{ color: 'var(--color-hermes-cyan)' }}>{costLedger === null ? t('syncing') : `$${costLedger.toFixed(4)}`}</b></span>
     </div>
   )
 }

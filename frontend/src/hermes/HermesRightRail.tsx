@@ -1,4 +1,5 @@
-import { TIER_COLOR, TIER_LABEL, type GalaxyCoin, type SelectedDerivation, type TrustComponent } from '../lib/hermesData'
+import { TIER_COLOR, type GalaxyCoin, type SelectedDerivation, type TrustComponent } from '../lib/hermesData'
+import { useHermesI18n } from './hermesI18n'
 
 interface HermesRightRailProps {
   selCoin: GalaxyCoin
@@ -12,9 +13,10 @@ interface HermesRightRailProps {
 export default function HermesRightRail({
   selCoin, components, derivation, derived, onOpenComposite, onOpenDivergence,
 }: HermesRightRailProps) {
+  const { t } = useHermesI18n()
   const { score, tier, full } = selCoin
   const scoreColor = TIER_COLOR[tier]
-  const scoreLabel = TIER_LABEL[tier]
+  const scoreLabel = tier === 'healthy' ? t('highTrust') : tier === 'moderate' ? t('moderateTrust') : t('lowTrust')
   const scoreDim = tier === 'healthy' ? 'rgba(77,216,224,.13)' : tier === 'moderate' ? 'rgba(232,179,77,.13)' : 'rgba(255,95,95,.14)'
 
   const C = 2 * Math.PI * 80
@@ -24,6 +26,7 @@ export default function HermesRightRail({
 
   const divDock = derivation
   const dockColor = divDock.divColor
+  const componentLabel = (label: string) => label === 'Reputation' ? t('reputation') : label === 'Corroboration' ? t('corroboration') : label === 'Recency' ? t('recency') : t('resistance')
 
   return (
     <div
@@ -34,11 +37,11 @@ export default function HermesRightRail({
         display: 'flex', flexDirection: 'column', gap: 12,
       }}
     >
-      <div style={{ fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx2)' }}>FOCUSED: <b style={{ color: 'var(--color-hermes-cyan)' }}>{full}</b></div>
+      <div style={{ fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx2)' }}>{t('focused')}: <b style={{ color: 'var(--color-hermes-cyan)' }}>{full}</b></div>
 
       {/* gauge */}
       <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-        <div style={{ alignSelf: 'flex-start', fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 6 }}>TRUST SCORE</div>
+        <div style={{ alignSelf: 'flex-start', fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 6 }}>{t('trustScore')}</div>
         <div style={{ position: 'relative', width: 140, height: 140 }}>
           <svg viewBox="0 0 200 200" width="140" height="140">
             <circle cx="100" cy="100" r="80" fill="none" style={{ stroke: 'var(--color-hermes-bd2)' } as React.CSSProperties} strokeWidth="16" strokeLinecap="round" strokeDasharray={arcTrack} transform="rotate(135 100 100)" />
@@ -55,10 +58,10 @@ export default function HermesRightRail({
       {/* breakdown */}
       <div className="hermes-clip" style={{ flex: 1, minHeight: 0, background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '12px 14px', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 10 }}>
-          TRUST BREAKDOWN
+          {t('trustBreakdown')}
           {derived && (
-            <span title="Derived from overview score; run analysis for evidence-bound components" style={{ color: 'var(--color-hermes-amber)', fontSize: 8.5 }}>
-              OVERVIEW PROXY
+            <span title={t('proxyTitle')} style={{ color: 'var(--color-hermes-amber)', fontSize: 8.5 }}>
+              {t('overviewProxy')}
             </span>
           )}
         </div>
@@ -67,7 +70,7 @@ export default function HermesRightRail({
             <div key={comp.label} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ width: 7, height: 7, borderRadius: 2, background: comp.barColor, flexShrink: 0 }} />
-                <span style={{ fontSize: 11.5, color: 'var(--color-hermes-tx)', flex: 1 }}>{comp.label}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--color-hermes-tx)', flex: 1 }}>{componentLabel(comp.label)}</span>
                 <span style={{ fontSize: 12, fontWeight: 600, color: comp.barColor }}>{comp.score}</span>
               </div>
               <div style={{ height: 4, width: '100%', background: 'var(--color-hermes-inset)', borderRadius: 2, overflow: 'hidden' }}>
@@ -82,7 +85,7 @@ export default function HermesRightRail({
           onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--color-hermes-cyan)'; e.currentTarget.style.color = 'var(--color-hermes-tx)' }}
           onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--color-hermes-bd2)'; e.currentTarget.style.color = 'var(--color-hermes-tx2)' }}
         >
-          FULL BREAKDOWN + REASONING →
+          {t('fullBreakdown')} →
         </button>
       </div>
 
@@ -99,12 +102,12 @@ export default function HermesRightRail({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
           <span style={{ color: dockColor, fontSize: 13 }}>⚠</span>
-          <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}>CROSS-SOURCE DIVERGENCE</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}>{t('divergence')}</span>
         </div>
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
-          {tier === 'healthy' ? `Alignment nominal · Δ ${divDock.divergence}% — tap to review`
-            : tier === 'moderate' ? `Monitor divergence · Δ ${divDock.divergence}% — tap to review`
-              : `Conflict detected · Δ ${divDock.divergence}% — tap to review`}
+          {tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
+            : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
+              : `${t('conflict')} · Δ ${divDock.divergence}% — ${t('tapReview')}`}
         </div>
       </div>
     </div>

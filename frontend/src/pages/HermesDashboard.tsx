@@ -9,18 +9,23 @@ import StageDrilldown from '../hermes/StageDrilldown'
 import { buildGalaxyModel, deriveSelected, type GalaxyCoin, type GalaxyModel } from '../lib/hermesData'
 import { getOverview, getCosts, getHealth } from '../lib/endpoints'
 import '../hermes/hermes.css'
-
-const QTYPES = ['Risk assessment', 'Market sentiment', 'Fundamentals', 'News verification', 'Price catalyst']
+import { HermesI18nProvider, useHermesI18n } from '../hermes/hermesI18n'
 
 export default function HermesDashboard() {
+  return <HermesI18nProvider><HermesDashboardContent /></HermesI18nProvider>
+}
+
+function HermesDashboardContent() {
+  const { locale, t } = useHermesI18n()
+  const qtypes = [t('risk'), t('sentiment'), t('fundamentals'), t('news'), t('catalyst')]
   const [model, setModel] = useState<GalaxyModel | null>(null)
   const [selectedId, setSelectedId] = useState('btc')
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [selectedStage, setSelectedStage] = useState<string | null>(null)
   const [phase, setPhase] = useState<'ready' | 'loading'>('ready')
   const [lastOrder, setLastOrder] = useState(false)
-  const [qtype, setQtype] = useState(QTYPES[0])
-  const [query, setQuery] = useState('Assess overall trust posture and flag any emerging manipulation risk.')
+  const [qtype, setQtype] = useState(t('risk'))
+  const [query, setQuery] = useState(t('defaultQuery'))
   const [typedLen, setTypedLen] = useState(0)
   const [focusPulse, setFocusPulse] = useState(false)
   const [displayScore, setDisplayScore] = useState(0)
@@ -43,14 +48,17 @@ export default function HermesDashboard() {
 
   const buildHermesMessage = useCallback((sel: GalaxyCoin, ph: 'ready' | 'loading'): string => {
     const scanned = Math.round(60 + sel.econ * 0.9)
-    const tierText = sel.tier === 'healthy' ? 'HIGH TRUST' : sel.tier === 'moderate' ? 'MODERATE TRUST' : 'LOW TRUST'
+    const tierText = sel.tier === 'healthy' ? t('highTrust') : sel.tier === 'moderate' ? t('moderateTrust') : t('lowTrust')
+    if (locale === 'zh-TW') return ph === 'loading'
+      ? `正在分析 ${sel.full}，交叉核對 ${scanned} 個來源…`
+      : `正在追蹤 ${sel.full}。綜合信任分數 ${sel.score}/100，${tierText}。${sel.tier === 'healthy' ? '訊號乾淨，目前不需處置。' : sel.tier === 'moderate' ? '建議在增加曝險前持續監控來源分歧。' : '完整性訊號下降，建議謹慎。'}`
     return ph === 'loading'
       ? `Analyzing ${sel.full}… cross-referencing ${scanned} sources.`
       : `Tracking ${sel.full}. Composite trust score ${sel.score}/100 — ${tierText}. ` +
         (sel.tier === 'healthy' ? 'Signal is clean; no action required.'
           : sel.tier === 'moderate' ? 'Recommend monitoring divergence before increasing exposure.'
             : 'Advise caution — integrity signals are degraded.')
-  }, [])
+  }, [locale, t])
 
   const typeTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const scoreTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -160,17 +168,17 @@ export default function HermesDashboard() {
     if (!query.trim()) return
     setPhase('loading')
     setLastOrder(true)
-    const type = qtype === 'Fundamentals' ? 'hypothesis' : 'multi_source'
+    const type = qtype === t('fundamentals') ? 'hypothesis' : 'multi_source'
     const search = new URLSearchParams({
       coin: selectedId.toUpperCase(), type, q: query.trim(),
     })
     navigate(`/analyze?${search.toString()}`)
-  }, [navigate, qtype, query, selectedId])
+  }, [navigate, qtype, query, selectedId, t])
 
   if (!model) {
     return (
       <div className="hermes-root" style={{ width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#02040a', color: 'var(--color-hermes-tx2)' }}>
-        INITIALIZING HERMES BRIDGE…
+        {t('initializing')}
       </div>
     )
   }
@@ -194,7 +202,7 @@ export default function HermesDashboard() {
         <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
 
         <div style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · GALAXY`} />
+          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} />
         </div>
 
         <div style={{ opacity: boot.left ? 1 : 0, clipPath: boot.left ? 'inset(0 0 0% 0)' : 'inset(0 0 100% 0)', transition: 'opacity .5s ease-out, clip-path .5s ease-out' }}>
@@ -203,9 +211,9 @@ export default function HermesDashboard() {
             hermesMessage={hermesMessage}
             hasOrder={lastOrder}
             qtype={qtype}
-            qtypes={QTYPES}
+            qtypes={qtypes}
             query={query}
-            submitLabel={phase === 'loading' ? 'TRANSMITTING…' : 'TRANSMIT TO HERMES'}
+            submitLabel={phase === 'loading' ? t('transmitting') : t('transmit')}
             onType={setQtype}
             onQuery={setQuery}
             onSubmit={onSubmit}
@@ -250,7 +258,7 @@ export default function HermesDashboard() {
 
         {loadError && (
           <div style={{ position: 'absolute', left: 50, top: 50, zIndex: 30, fontSize: 10, color: 'var(--color-hermes-amber)', background: 'rgba(232,179,77,.13)', border: '1px solid rgba(232,179,77,.4)', borderRadius: 6, padding: '6px 10px' }}>
-            ⚠ UPLINK DEGRADED — showing design preview ({loadError})
+            ⚠ {t('degraded')} ({loadError})
           </div>
         )}
       </div>

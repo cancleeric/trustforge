@@ -1,5 +1,6 @@
 import { TIER_COLOR, type GalaxyCoin, type GalaxyModel, type OrbitId } from '../lib/hermesData'
 import { HERMES_CYAN } from '../lib/hermesData'
+import { useHermesI18n } from './hermesI18n'
 
 interface CurrencyGalaxyProps {
   model: GalaxyModel
@@ -33,6 +34,7 @@ function shadowOf(tier: GalaxyCoin['tier'], c: string, active: boolean): string 
 export default function CurrencyGalaxy({
   model, selectedId, hoveredId, focusPulse, onSelect, onHover,
 }: CurrencyGalaxyProps) {
+  const { t } = useHermesI18n()
   const c = (id: string) => model.byId[id]
 
   const planetStyle = (id: string): React.CSSProperties => {
@@ -82,7 +84,7 @@ export default function CurrencyGalaxy({
       <div style={{ position: 'absolute', inset: 0, transformStyle: 'preserve-3d', animation: `${spin} 40s linear infinite` }}>
         <button
           type="button"
-          aria-label={`Focus ${c(ids[0]).full}`}
+          aria-label={`${t('focus')} ${c(ids[0]).full}`}
           aria-pressed={ids[0] === selectedId}
           onClick={() => onSelect(ids[0])}
           onMouseEnter={() => onHover(ids[0])}
@@ -95,7 +97,7 @@ export default function CurrencyGalaxy({
         </button>
         <button
           type="button"
-          aria-label={`Focus ${c(ids[1]).full}`}
+          aria-label={`${t('focus')} ${c(ids[1]).full}`}
           aria-pressed={ids[1] === selectedId}
           onClick={() => onSelect(ids[1])}
           onMouseEnter={() => onHover(ids[1])}
@@ -144,7 +146,7 @@ export default function CurrencyGalaxy({
           return (
             <button
               type="button"
-              aria-label={`Focus ${coin.full}`}
+              aria-label={`${t('focus')} ${coin.full}`}
               aria-pressed={isSel}
               key={coin.id}
               onClick={() => onSelect(coin.id)}
@@ -176,7 +178,7 @@ export default function CurrencyGalaxy({
           <div
             role="button"
             tabIndex={0}
-            aria-label="Focus Bitcoin"
+            aria-label={`${t('focus')} Bitcoin`}
             aria-pressed={coreIsSel}
             onClick={() => onSelect('btc')}
             onKeyDown={(event) => {
@@ -204,12 +206,12 @@ export default function CurrencyGalaxy({
             <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 7 }}>
               <span style={{ fontSize: 10.5, letterSpacing: '.8px', color: TIER_COLOR[readoutC.tier], textTransform: 'uppercase' }}>{readoutC.full}</span>
               <span style={{ fontSize: 16, fontWeight: 600, color: '#fff' }}>{readoutC.score}</span>
-              <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,.45)' }}>/ 100 · {readoutC.tier === 'healthy' ? 'HIGH' : readoutC.tier === 'moderate' ? 'MODERATE' : 'LOW'}</span>
+              <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,.45)' }}>/ 100 · {readoutC.tier === 'healthy' ? t('highTrust') : readoutC.tier === 'moderate' ? t('moderateTrust') : t('lowTrust')}</span>
             </div>
-            <div style={{ fontSize: 11, color: 'rgba(255,255,255,.55)' }}>Economic weight {readoutC.econ} · click again to re-focus</div>
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,.55)' }}>{t('economicWeight')} {readoutC.econ} · {t('refocus')}</div>
           </div>
         ) : (
-          <span style={{ fontSize: 10, letterSpacing: '.6px', color: 'rgba(255,255,255,.3)' }}>click a planet to focus the bridge on that currency</span>
+          <span style={{ fontSize: 10, letterSpacing: '.6px', color: 'rgba(255,255,255,.3)' }}>{t('focusHint')}</span>
         )}
       </div>
     </div>
