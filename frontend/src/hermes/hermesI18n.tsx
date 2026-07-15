@@ -18,6 +18,7 @@ const messages = {
     scanned: '已掃描', passed: '已通過', divergenceUnit: '分歧', flagged: '已標記', close: '關閉', proxyTrace: '總覽代理值 · 執行正式分析以取得證據綁定軌跡',
     dropped: '已標記／排除', flaggedChannel: '異常通道', reasoningTrace: '推理軌跡', weight: '權重',
     reputation: '來源信譽', corroboration: '交叉佐證', recency: '資料時效', resistance: '抗操縱能力', facts: '事實', inference: '推論', conclusion: '結論',
+    liveTelemetry: '即時遙測', sourceCount: '可用來源', integrity: '完整性', signalState: '訊號狀態', stable: '穩定', watch: '監控', degradedState: '下降',
     degraded: '連線品質下降，正在顯示可用快照',
   },
   en: {
@@ -34,6 +35,7 @@ const messages = {
     scanned: 'scanned', passed: 'passed', divergenceUnit: 'divergence', flagged: 'flagged', close: 'CLOSE', proxyTrace: 'OVERVIEW PROXY · RUN ANALYSIS FOR EVIDENCE-BOUND TRACE',
     dropped: 'FLAGGED / DROPPED', flaggedChannel: 'Flagged channel', reasoningTrace: 'REASONING TRACE', weight: 'wt', degraded: 'UPLINK DEGRADED — showing available snapshot',
     reputation: 'Reputation', corroboration: 'Corroboration', recency: 'Recency', resistance: 'Manipulation resistance', facts: 'FACTS', inference: 'INFERENCE', conclusion: 'CONCLUSION',
+    liveTelemetry: 'LIVE TELEMETRY', sourceCount: 'Sources', integrity: 'Integrity', signalState: 'Signal state', stable: 'STABLE', watch: 'WATCH', degradedState: 'DEGRADED',
   },
 } as const
 

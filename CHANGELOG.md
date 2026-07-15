@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.14.15 — 2026-07-15
+
+- Raise the Hermes bridge visual fidelity with layered star-core shells, expanding energy rings, planetary specular and latitude surfaces, and low-trust fracture and broken-ring states.
+- Add a live hover telemetry HUD that exposes score, usable-source count, economic weight and signal state without navigating away from the galaxy.
+- Add structural viewport rails and an in-place drilldown focus scrim so all five evidence stages read as a unified fixed bridge console.
+- Correct the core animation transform contract so focus scaling and glow animation no longer compete for the same positioning transform.
+
 ## v0.14.14 — 2026-07-15
 
 - Add first-class Traditional Chinese and English localization to the Hermes workspace, defaulting the operational UI to Traditional Chinese.

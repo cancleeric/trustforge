@@ -37,6 +37,14 @@ export default function CurrencyGalaxy({
   const { t } = useHermesI18n()
   const c = (id: string) => model.byId[id]
 
+  const planetSurface = (id: string) => (
+    <>
+      <span className="hermes-planet-specular" />
+      <span className="hermes-planet-latitude" />
+      {c(id).tier === 'danger' && <><span className="hermes-planet-crack crack-a" /><span className="hermes-planet-crack crack-b" /><span className="hermes-broken-ring" /></>}
+    </>
+  )
+
   const planetStyle = (id: string): React.CSSProperties => {
     const coin = c(id)
     const isHover = id === hoveredId
@@ -91,9 +99,7 @@ export default function CurrencyGalaxy({
           onMouseLeave={() => onHover(null)}
           style={planetStyle(ids[0])}
         >
-          {c(ids[0]).tier === 'danger' && (
-            <div style={{ position: 'absolute', left: '50%', top: '50%', width: '180%', height: '180%', border: '1px dashed var(--color-hermes-red)', borderRadius: '50%', transform: 'translate(-50%,-50%)', animation: 'hermes-unstable-rotate 5s linear infinite', opacity: 0.6 }} />
-          )}
+          {planetSurface(ids[0])}
         </button>
         <button
           type="button"
@@ -103,7 +109,7 @@ export default function CurrencyGalaxy({
           onMouseEnter={() => onHover(ids[1])}
           onMouseLeave={() => onHover(null)}
           style={planetStyle(ids[1])}
-        />
+        >{planetSurface(ids[1])}</button>
       </div>
     </div>
   )
@@ -137,6 +143,16 @@ export default function CurrencyGalaxy({
         <span style={{ fontSize: 10, letterSpacing: '1.8px', color: 'rgba(220,240,245,.4)' }}>BRIDGE MAIN VIEWPORT</span>
         <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(230,244,248,.9)' }}>Global Currency Galaxy</span>
       </div>
+
+      {readoutC && (
+        <div className="hermes-live-telemetry hermes-clip-sm" style={{ position: 'absolute', right: 22, top: 18, zIndex: 5, width: 174, padding: '10px 12px', background: 'rgba(5,12,20,.76)', border: `1px solid ${TIER_COLOR[readoutC.tier]}`, backdropFilter: 'blur(8px)', boxShadow: `inset 0 0 18px ${TIER_COLOR[readoutC.tier]}18` }}>
+          <div style={{ fontSize: 8.5, letterSpacing: '1.2px', color: TIER_COLOR[readoutC.tier], marginBottom: 7 }}>{t('liveTelemetry')} · {readoutC.name}</div>
+          <div className="hermes-telemetry-row"><span>{t('trustScore')}</span><b>{readoutC.score}/100</b></div>
+          <div className="hermes-telemetry-row"><span>{t('sourceCount')}</span><b>{Math.round(60 + readoutC.econ * .9)}</b></div>
+          <div className="hermes-telemetry-row"><span>{t('economicWeight')}</span><b>{readoutC.econ}</b></div>
+          <div className="hermes-telemetry-row"><span>{t('signalState')}</span><b style={{ color: TIER_COLOR[readoutC.tier] }}>{readoutC.tier === 'healthy' ? t('stable') : readoutC.tier === 'moderate' ? t('watch') : t('degradedState')}</b></div>
+        </div>
+      )}
 
       {/* quick currency selector strip */}
       <div style={{ position: 'absolute', left: 26, top: 44, display: 'flex', gap: 6, zIndex: 4 }}>
@@ -175,9 +191,8 @@ export default function CurrencyGalaxy({
           {ring('A', 'rotateX(64deg) rotateZ(10deg)', 'hermes-orbit-spin', ['eth', 'sol'])}
 
           {/* BTC core star */}
-          <div
-            role="button"
-            tabIndex={0}
+          <button
+            type="button"
             aria-label={`${t('focus')} Bitcoin`}
             aria-pressed={coreIsSel}
             onClick={() => onSelect('btc')}
@@ -187,14 +202,20 @@ export default function CurrencyGalaxy({
             onMouseEnter={() => onHover('btc')}
             onMouseLeave={() => onHover(null)}
             style={{
-              position: 'absolute', left: 0, top: 0, width: coreSize, height: coreSize, margin: -coreSize / 2,
+              position: 'absolute', left: 0, top: 0, width: coreSize, height: coreSize, margin: -coreSize / 2, padding: 0, border: 0,
               borderRadius: '50%', background: gradientOf('healthy', HERMES_CYAN),
               boxShadow: '0 0 46px 8px rgba(95,227,221,.55), 0 0 100px 24px rgba(232,179,77,.16)',
               transform: `scale(${coreIsHover ? 1.12 : coreIsSel ? 1.06 : 1})`,
               cursor: 'pointer', transition: 'transform .18s, box-shadow .18s',
-              animation: 'hermes-core-glow 4.5s ease-in-out infinite',
+              animation: 'hermes-core-glow 4.5s ease-in-out infinite', overflow: 'visible',
             }}
-          />
+          >
+            <span className="hermes-core-highlight" />
+            <span className="hermes-core-band band-a" />
+            <span className="hermes-core-band band-b" />
+            <span className="hermes-core-energy-ring ring-a" />
+            <span className="hermes-core-energy-ring ring-b" />
+          </button>
           <div style={{ position: 'absolute', left: 0, top: 0, width: 170, height: 170, margin: -85, borderRadius: '50%', background: 'radial-gradient(circle,rgba(95,227,221,.16) 0%,rgba(95,227,221,0) 70%)', pointerEvents: 'none' }} />
         </div>
       </div>

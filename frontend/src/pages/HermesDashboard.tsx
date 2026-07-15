@@ -248,12 +248,10 @@ function HermesDashboardContent() {
         </div>
 
         {selectedStage && (
-          <StageDrilldown
-            selCoin={selCoin}
-            derivation={derivation}
-            selectedStage={selectedStage}
-            onClose={() => setSelectedStage(null)}
-          />
+          <>
+            <button className="hermes-drilldown-scrim" type="button" aria-label={t('close')} onClick={() => setSelectedStage(null)} />
+            <StageDrilldown selCoin={selCoin} derivation={derivation} selectedStage={selectedStage} onClose={() => setSelectedStage(null)} />
+          </>
         )}
 
         {loadError && (
