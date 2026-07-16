@@ -53,7 +53,7 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
         </dl></section>
         <section className="llm-review-state"><h3>LLM 對抗審查</h3><b>{data?.automation.llm_review.status ?? 'not_run'}</b><p>比對量測證據、候選差異、資料洩漏、回歸與回退缺口。LLM 無核准權。</p></section>
         <section className="durable-upgrade-queue"><h3>SQLITE 候選佇列</h3><b>{data?.automation.durable_queue.proposal_count ?? 0} proposals</b><p>{data?.automation.durable_queue.durable ? '重啟後保留 proposal、LLM verdict 與 gate 狀態' : '佇列目前不可用'}</p></section>
-        <section className="historical-source-matrix"><h3>五年來源回填</h3><p>只把可追溯的歷史資料送入每日 replay；近期 RSS 不冒充歷史封存。</p><div>{data?.automation.historical_sources.map((source) => <article key={source.source}><span>{source.source}</span><b className={source.status}>{source.status}</b><small>{source.coverage}</small></article>)}</div></section>
+        <section className="historical-source-matrix"><h3>五年來源回填</h3><p>只把可追溯的歷史資料送入每日 replay；近期 RSS 不冒充歷史封存。</p><div>{(data?.automation.historical_sources ?? []).map((source) => <article key={source.source}><span>{source.source}</span><b className={source.status}>{source.status}</b><small>{source.coverage}</small></article>)}</div></section>
       </aside>
       <div className="upgrade-topology">
         {data?.core_package ? <section className="trust-kernel-package">

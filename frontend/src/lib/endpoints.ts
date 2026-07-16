@@ -128,7 +128,7 @@ export interface HermesUpgradeData {
     mode: string; measurements: Record<string, unknown>
     llm_review: { status: string; reviews: Array<Record<string, unknown>>; can_activate: false }
     durable_queue: { durable: boolean; proposal_count: number; proposals: Array<{ proposal_id: string; area: string; severity: string; state: string; created_at: number; updated_at: number }>; reviews: Array<Record<string, unknown>>; sandbox_runs: Array<Record<string, unknown>>; decisions: Array<Record<string, unknown>> }
-    historical_sources: Array<{ source: string; kind: string; strategy: string; status: string; coverage: string; terms: string }>
+    historical_sources?: Array<{ source: string; kind: string; strategy: string; status: string; coverage: string; terms: string }>
     stages: Array<{ id: string; state: string }>
   }
   core_package: {
