@@ -49,3 +49,59 @@ def test_upgrade_queue_rejects_approval_without_passed_sandbox(tmp_path):
         queue.decide("p", "approve", "operator", "too early")
     rejected = queue.decide("p", "reject", "operator", "unsafe candidate")
     assert rejected["state"] == "rejected"
+
+
+def test_real_sandbox_runner_persists_result_to_upgrade_queue(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "run_skill_sandbox.py"
+    spec = importlib.util.spec_from_file_location("run_skill_sandbox", script)
+    assert spec and spec.loader
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    queue_path = tmp_path / "upgrade.sqlite3"
+    queue = UpgradeQueue(queue_path)
+    queue.sync_diagnostic({"proposals": [{"id": "candidate-1", "area": "analysis", "severity": "medium"}]})
+    artifact = tmp_path / "candidate.json"
+    artifact.write_text(json.dumps({"family": "analysis", "rules": ["bounded"]}), encoding="utf-8")
+    output = tmp_path / "sandbox.json"
+    monkeypatch.setattr(runner, "_run", lambda argv: {"argv": argv, "returncode": 0, "stdout_tail": "ok", "stderr_tail": ""})
+    monkeypatch.setattr(runner, "write_artifact", lambda candidate: (runner.artifact_hash(candidate), artifact))
+
+    assert runner.main([str(artifact), "--proposal-id", "candidate-1", "--queue-db", str(queue_path), "--out", str(output)]) == 0
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert result["queue_run"]["state"] == "sandbox_passed"
+    status = UpgradeQueue(queue_path).status()
+    assert status["proposals"][0]["state"] == "sandbox_passed"
+    assert status["sandbox_runs"][0]["artifact_hash"].startswith("sha256:")
+
+
+def test_approved_sandbox_candidate_requires_explicit_activation(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "run_skill_sandbox.py"
+    spec = importlib.util.spec_from_file_location("run_skill_sandbox_activation", script)
+    assert spec and spec.loader
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    queue_path = tmp_path / "upgrade.sqlite3"
+    skill_root = tmp_path / "skills"
+    log_path = tmp_path / "skill_changes.jsonl"
+    monkeypatch.setenv("TRUSTFORGE_SKILL_ROOT", str(skill_root))
+    monkeypatch.setattr(runner, "_run", lambda argv: {"argv": argv, "returncode": 0, "stdout_tail": "ok", "stderr_tail": ""})
+    artifact = tmp_path / "candidate.json"
+    artifact.write_text(json.dumps({"family": "analysis", "rules": ["bounded"]}), encoding="utf-8")
+    queue = UpgradeQueue(queue_path)
+    queue.sync_diagnostic({"proposals": [{"id": "candidate-2", "area": "analysis", "severity": "medium"}]})
+
+    assert runner.main([str(artifact), "--proposal-id", "candidate-2", "--queue-db", str(queue_path), "--out", str(tmp_path / "result.json")]) == 0
+    decision = queue.decide("candidate-2", "approve", "reviewer", "sandbox green")
+    assert decision["activated"] is False
+    activation = queue.activate("candidate-2", "release-operator", "approved release", log_path=log_path)
+    assert activation["state"] == "activated"
+    assert UpgradeQueue(queue_path).status()["activations"][0]["actor"] == "release-operator"
