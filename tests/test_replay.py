@@ -76,3 +76,30 @@ def test_backfill_rejects_missing_provenance(tmp_path):
             backend, "BTC", "2021-07-01", [{"source": "government", "documents": [{"published_at": "2021-06-30T10:00:00Z"}]}],
             snapshot_epoch=boundary, provider_manifest={"providers": []},
         )
+
+
+def test_backfill_merges_multiple_providers_without_overwriting_same_day(tmp_path):
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, 23, 59, 59, tzinfo=timezone.utc).timestamp()
+
+    def document(identifier, provider):
+        value = {"id": identifier, "text": identifier, "provider": provider, "license": "public-record",
+                 "published_at": "2021-07-01T10:00:00Z", "retrieved_at": "2026-07-16T00:00:00Z"}
+        value["content_sha256"] = hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return value
+
+    first = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "sec-gov", "documents": [document("sec-1", "SEC")]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "SEC", "license": "public-record"}]}, retrieved_at=100.0,
+    )
+    second = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "alternative-me-fng", "documents": [document("fng-1", "Alternative.me")]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "Alternative.me", "license": "attribution"}]}, retrieved_at=101.0,
+    )
+    assert first.ok and second.ok
+    snapshot = load_source_snapshot(backend, "BTC", "2021-07-01")
+    assert snapshot is not None
+    assert {source["source"] for source in snapshot["sources"]} == {"sec-gov", "alternative-me-fng"}
+    assert {provider["provider"] for provider in snapshot["provider_manifest"]["providers"]} == {"SEC", "Alternative.me"}

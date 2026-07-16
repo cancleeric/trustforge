@@ -138,6 +138,32 @@ def store_backfilled_source_snapshot(
                 raise ValueError("backfilled document content hash mismatch")
             copied.append(dict(document))
         normalized_sources.append({"source": name, "fetched_at": None, "documents": copied})
+    key = source_snapshot_history_key(coin, date)
+    existing_entry = cache_get(backend, key)
+    existing = None
+    if existing_entry and isinstance(existing_entry.get("docs"), list) and existing_entry["docs"]:
+        candidate = existing_entry["docs"][0]
+        if isinstance(candidate, dict) and candidate.get("archive_type") == "backfilled_archive":
+            existing = candidate
+    if existing:
+        by_source = {str(item.get("source")): dict(item) for item in existing.get("sources", []) if isinstance(item, dict) and item.get("source")}
+        for incoming in normalized_sources:
+            name = incoming["source"]
+            current = by_source.get(name, {"source": name, "fetched_at": None, "documents": []})
+            documents = {
+                str(document.get("content_sha256")): document
+                for document in current.get("documents", []) if isinstance(document, dict) and document.get("content_sha256")
+            }
+            documents.update({str(document["content_sha256"]): document for document in incoming["documents"]})
+            current["documents"] = list(documents.values())
+            by_source[name] = current
+        normalized_sources = list(by_source.values())
+        providers = {
+            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")): item
+            for item in (existing.get("provider_manifest", {}).get("providers", []) + provider_manifest.get("providers", []))
+            if isinstance(item, dict)
+        }
+        provider_manifest = {"providers": list(providers.values())}
     manifest_text = json.dumps(provider_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     snapshot = {
         "coin": coin.upper(), "snapshot_at": iso_utc(snapshot_epoch), "snapshot_epoch": snapshot_epoch,
@@ -146,6 +172,6 @@ def store_backfilled_source_snapshot(
         "sources": normalized_sources, "missing_sources": [],
     }
     return cache_set_if_newer(
-        backend, source_snapshot_history_key(coin, date), [snapshot], fetched_at=retrieved_at or time.time(),
+        backend, key, [snapshot], fetched_at=retrieved_at or time.time(),
         ttl_seconds=SOURCE_SNAPSHOT_HISTORY_TTL_SECONDS, allow_json_fallback=False,
     )
