@@ -114,7 +114,7 @@ export function getAnalysisFlow(signal?: AbortSignal): Promise<ApiEnvelope<Analy
 }
 
 export interface HermesUpgradeModule {
-  id: string; name: string; slot: string; family: string; revision: string; version: string
+  id: string; name: string; plane: string; channel: string; family: string; revision: string; version: string
   origin: string; state: 'locked' | 'active' | 'candidate'; recursive_upgrade: false; automatic_apply: false
   proposals: Array<{ id: string; area: string; severity: string; proposed_experiment: string; success_metric: string }>
   history: Array<Record<string, unknown>>
@@ -123,12 +123,13 @@ export interface HermesUpgradeData {
   agent: 'hermes'; kind: 'upgrade_control_plane'; metaphor: 'modular_flagship'
   core_policy: string; outer_policy: string; recursive_upgrade: false
   diagnostic: { status: string; generated_at: string | null; proposal_count: number }
+  planes: string[]
   modules: HermesUpgradeModule[]
 }
 export function getHermesUpgrades(signal?: AbortSignal): Promise<ApiEnvelope<HermesUpgradeData>> {
   const valid = (value: unknown): value is HermesUpgradeData => !!value && typeof value === 'object' &&
     (value as HermesUpgradeData).agent === 'hermes' && Array.isArray((value as HermesUpgradeData).modules) &&
-    (value as HermesUpgradeData).modules.length === 6
+    (value as HermesUpgradeData).modules.length >= 10
   return apiFetch('/api/hermes-upgrades', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 

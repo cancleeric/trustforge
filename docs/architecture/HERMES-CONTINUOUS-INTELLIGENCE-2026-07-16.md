@@ -54,11 +54,14 @@ outside autonomous mutation.
 
 ### Flagship upgrade control plane
 
-The modular flagship is a truthful read-only projection, not a gamified level
-counter. `GET /api/hermes-upgrades` maps six ship hardpoints to the packaged
-Trust core and five immutable outer-skill families. The UI shows actual content
-revision/hash, baseline or approved origin, append-only change history, and
-diagnostic sandbox candidates.
+The flagship is a metaphor only. The actual WebUI is an upgrade topology, not a
+literal six-hardpoint ship or a gamified level counter. `GET
+/api/hermes-upgrades` currently inventories 15 versioned modules across Data
+Plane, Intelligence, Trust Kernel, Delivery, and Operations. It includes the
+packaged core, five immutable outer-skill families, release artifacts and model
+gates. The UI shows actual content revision/hash, baseline or approved origin,
+append-only change history, diagnostic sandbox candidates and each module's
+upgrade channel.
 
 The activation path is `diagnose -> sandbox -> validation -> human approval ->
 active pointer -> rollback`. The Trust core is packaged and versioned so it can

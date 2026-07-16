@@ -18,12 +18,22 @@ from .skills import run_skill_manifest
 
 
 MODULES = (
-    ("scan", "掃描陣列", "艦艏 · BOW ARRAY", "source", ("data-acquisition",)),
-    ("filter", "過濾矩陣", "前甲板 · FORE DECK", "evaluation", ("question-retrieval",)),
-    ("core", "信任核心", "艦體中央 · TRUST CORE", None, ()),
-    ("verify", "驗證核心", "艦橋塔 · BRIDGE", "analysis", ("analysis-orchestration", "historical-calibration")),
-    ("detect", "偵測砲塔", "上甲板 · TURRET", "improvement", ("execution-efficiency",)),
-    ("engine", "報告引擎", "艦尾 · MAIN ENGINE", "report", ("report-evidence-log",)),
+    # id, label, plane, upgrade channel, outer family, implementation paths, proposal areas
+    ("connectors", "來源連接器", "DATA PLANE", "sandbox-policy", "source", ("src/trustforge/ingestion",), ("data-acquisition", "execution-efficiency")),
+    ("snapshots", "不可變快照", "DATA PLANE", "reviewed-release", None, ("src/trustforge/analysis_flow.py", "src/trustforge/replay.py"), ()),
+    ("scheduler", "持續排程與佇列", "DATA PLANE", "sandbox-policy", "improvement", ("src/trustforge/analysis_flow.py",), ("analysis-orchestration",)),
+    ("question-rag", "題目 RAG 與對話記憶", "INTELLIGENCE", "reviewed-release", None, ("src/trustforge/analysis_flow.py",), ("question-retrieval",)),
+    ("claim-extraction", "主張抽取", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/agent/orchestrator.py",), ()),
+    ("analysis-policy", "分析策略", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/skills.py",), ("historical-calibration",)),
+    ("model-routing", "模型與校準器", "INTELLIGENCE", "model-gate", None, ("src/trustforge/modelhub_training.py", "src/trustforge/calibrator_gate.py"), ("historical-calibration",)),
+    ("time-boundary", "時間邊界", "TRUST KERNEL", "core-release", None, ("src/trustforge/replay.py",), ()),
+    ("trust-scoring", "Trust 計分核心", "TRUST KERNEL", "core-release", None, ("src/trustforge/trust/scoring.py",), ()),
+    ("evidence-contract", "Evidence 綁定契約", "TRUST KERNEL", "core-release", None, ("src/trustforge/schema.py",), ()),
+    ("reporting", "報告與交付契約", "DELIVERY", "sandbox-policy", "report", ("src/trustforge/pipeline.py",), ("report-evidence-log",)),
+    ("evaluation", "評測題庫與回放", "DELIVERY", "sandbox-policy", "evaluation", ("src/trustforge/question_bank.py", "src/trustforge/historical_replay.py"), ()),
+    ("cost-governance", "成本與預算治理", "OPERATIONS", "reviewed-release", None, ("src/trustforge/budget_guard.py", "src/trustforge/ledger.py"), ()),
+    ("observability-ui", "觀測與管理介面", "OPERATIONS", "reviewed-release", None, ("frontend/src/pages/HermesDashboard.tsx",), ()),
+    ("improvement", "改善診斷器", "OPERATIONS", "sandbox-policy", "improvement", ("src/trustforge/improvement.py",), ()),
 )
 
 
@@ -37,6 +47,20 @@ def _core_hash() -> str:
         path = _root() / relative
         digest.update(relative.encode())
         if path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _paths_hash(paths: tuple[str, ...]) -> str:
+    digest = hashlib.sha256()
+    for relative in paths:
+        path = _root() / relative
+        digest.update(relative.encode())
+        if path.is_dir():
+            for child in sorted(path.rglob("*.py")):
+                digest.update(str(child.relative_to(_root())).encode())
+                digest.update(child.read_bytes())
+        elif path.is_file():
             digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -58,22 +82,28 @@ def upgrade_status() -> dict[str, Any]:
     diagnostic = _diagnostic()
     proposals = diagnostic.get("proposals") if isinstance(diagnostic.get("proposals"), list) else []
     modules = []
-    for module_id, name, slot, family, areas in MODULES:
+    for module_id, name, plane, channel, family, paths, areas in MODULES:
         related = [p for p in proposals if isinstance(p, dict) and p.get("area") in areas]
-        if family is None:
-            revision = _core_hash()
+        if channel == "core-release":
+            revision = _paths_hash(paths) or _core_hash()
             origin = "packaged-core"
             state = "locked"
             history_rows: list[dict[str, Any]] = []
-        else:
+        elif family is not None:
             resolved = outer[family]
             revision = str(resolved["revision"])
             origin = str(resolved["origin"])
             history_rows = [r for r in history if r.get("skill_id") == f"outer-{family}"][-8:]
             staged = any(r.get("action") == "staged" and r.get("skill_hash") != revision for r in history_rows)
             state = "candidate" if staged or related else "active"
+        else:
+            revision = _paths_hash(paths)
+            origin = "versioned-release"
+            history_rows = []
+            state = "candidate" if related else "active"
         modules.append({
-            "id": module_id, "name": name, "slot": slot, "family": family or "trust-core",
+            "id": module_id, "name": name, "plane": plane, "channel": channel,
+            "family": family or ("trust-core" if channel == "core-release" else "release-artifact"),
             "revision": revision, "version": revision[:8], "origin": origin, "state": state,
             "recursive_upgrade": False, "automatic_apply": False,
             "proposals": related, "history": history_rows,
@@ -85,5 +115,6 @@ def upgrade_status() -> dict[str, Any]:
         "recursive_upgrade": False, "diagnostic": {
             "status": diagnostic.get("status"), "generated_at": diagnostic.get("generated_at"),
             "proposal_count": len(proposals),
-        }, "modules": modules,
+        }, "planes": ["DATA PLANE", "INTELLIGENCE", "TRUST KERNEL", "DELIVERY", "OPERATIONS"],
+        "modules": modules,
     }
