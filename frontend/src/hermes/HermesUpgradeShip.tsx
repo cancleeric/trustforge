@@ -24,6 +24,17 @@ export default function HermesUpgradeShip({ data, loading, onClose }: Props) {
     </header>
     <div className="upgrade-control-body">
       {loading && !data ? <div className="ship-loading">讀取版本與提案…</div> : null}
+      <aside className="upgrade-automation-rail">
+        <header><span>AUTONOMOUS OUTER LOOP</span><b>資料驅動調校</b><small>Trust 核心不在自動調校範圍</small></header>
+        <div className="automation-stages">{data?.automation.stages.map((stage, index) => <div key={stage.id}><i>{String(index + 1).padStart(2, '0')}</i><span>{stage.id}</span><b className={stage.state}>{stage.state}</b></div>)}</div>
+        <section><h3>觀測資料</h3><dl>
+          <div><dt>JOBS</dt><dd>{String(data?.automation.measurements.job_count ?? '—')}</dd></div>
+          <div><dt>FAILED</dt><dd>{String(data?.automation.measurements.failed_jobs ?? '—')}</dd></div>
+          <div><dt>RETRIED</dt><dd>{String(data?.automation.measurements.retried_jobs ?? '—')}</dd></div>
+          <div><dt>SIMILAR Q</dt><dd>{data?.automation.measurements.similar_question_rate == null ? '—' : `${Math.round(Number(data.automation.measurements.similar_question_rate) * 100)}%`}</dd></div>
+        </dl></section>
+        <section className="llm-review-state"><h3>LLM 對抗審查</h3><b>{data?.automation.llm_review.status ?? 'not_run'}</b><p>比對量測證據、候選差異、資料洩漏、回歸與回退缺口。LLM 無核准權。</p></section>
+      </aside>
       <div className="upgrade-topology">
         {data?.core_package ? <section className="trust-kernel-package">
           <header><span>INDEPENDENT VERSIONED CORE</span><b>{data.core_package.name}</b><em>{data.core_package.state}</em></header>

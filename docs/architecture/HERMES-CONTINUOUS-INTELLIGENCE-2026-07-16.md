@@ -75,6 +75,15 @@ be upgraded through a normal reviewed branch/release, but outer artifacts
 cannot override it. Recursive self-upgrade and automatic deployment are
 explicitly disabled.
 
+The upgrade view owns the complete bridge while open: the left rail shows the
+continuous observe/measure/propose/LLM-review/sandbox/human-gate loop and its
+durable measurements; the center shows module topology; the right rail shows
+the selected artifact, candidate, success gate and reviewer findings.
+`review_hermes_upgrades.py` runs after diagnostics in every autonomous cycle.
+It uses the configured Bedrock model for adversarial evidence/candidate review,
+but its output always has `can_activate=false`. With no model configured the
+state is explicitly `waiting_model_configuration`.
+
 ## Remaining external gates
 
 - Production connector reliability needs seven consecutive successful observed

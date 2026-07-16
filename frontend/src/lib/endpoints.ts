@@ -124,6 +124,11 @@ export interface HermesUpgradeData {
   core_policy: string; outer_policy: string; recursive_upgrade: false
   diagnostic: { status: string; generated_at: string | null; proposal_count: number }
   coverage: { registered: number; complete: boolean }
+  automation: {
+    mode: string; measurements: Record<string, unknown>
+    llm_review: { status: string; reviews: Array<Record<string, unknown>>; can_activate: false }
+    stages: Array<{ id: string; state: string }>
+  }
   core_package: {
     id: string; name: string; version: string; revision: string; state: string; controls: string[]
     upgrade_channel: string; external_upgrade: { status: string; adapter: string | null; automatic_activation: false }

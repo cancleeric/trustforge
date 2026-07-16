@@ -96,12 +96,27 @@ def _diagnostic() -> dict[str, Any]:
     return value if isinstance(value, dict) else {"status": "invalid", "generated_at": None, "proposals": []}
 
 
+def _llm_review() -> dict[str, Any]:
+    path = _root() / "out" / "hermes-upgrade-review-latest.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "not_run", "reviews": [], "can_activate": False}
+    return value if isinstance(value, dict) else {"status": "invalid", "reviews": [], "can_activate": False}
+
+
 def upgrade_status() -> dict[str, Any]:
     """Project versioned core/outer modules and approval-gated candidates."""
     manifest = run_skill_manifest()
     outer = {row["family"]: row for row in manifest["outer_skills"]}
     history = change_history()
     diagnostic = _diagnostic()
+    llm_review = _llm_review()
+    try:
+        from .analysis_flow import AnalysisFlow
+        measurements = AnalysisFlow().improvement_history()
+    except Exception:
+        measurements = {}
     proposals = diagnostic.get("proposals") if isinstance(diagnostic.get("proposals"), list) else []
     modules = []
     for module_id, name, plane, channel, family, paths, areas in MODULES:
@@ -133,6 +148,19 @@ def upgrade_status() -> dict[str, Any]:
             "status": diagnostic.get("status"), "generated_at": diagnostic.get("generated_at"),
             "proposal_count": len(proposals),
         }, "coverage": {"registered": len(modules), "complete": True},
+        "automation": {
+            "mode": "continuous_data_driven_outer_tuning",
+            "measurements": measurements,
+            "llm_review": llm_review,
+            "stages": [
+                {"id": "observe", "state": "running"},
+                {"id": "measure", "state": "ready" if measurements else "waiting_data"},
+                {"id": "propose", "state": "candidate" if proposals else "monitoring"},
+                {"id": "llm-review", "state": llm_review.get("status", "not_run")},
+                {"id": "sandbox", "state": "waiting_candidate" if proposals else "idle"},
+                {"id": "human-gate", "state": "locked"},
+            ],
+        },
         "core_package": {
             "id": "trust-kernel", "name": "TRUST KERNEL PACKAGE",
             "version": f"v{__version__}", "revision": _core_hash(), "state": "release-locked",
