@@ -1,8 +1,30 @@
 # TrustForge Hermes Agent Delivery Backlog
 
 > 唯一權威：本文件列出 2026-07-13 對話中已決定、但尚未完整落地的項目。
-> 狀態基準：`feature/hermes-agent-observability` 工作樹。每項完成後須更新本表、
+> 狀態基準：`develop@94eda81`（2026-07-16，PR #190 五年來源回填與 PR #194
+> rolling-upgrade payload 相容性均已合併）。每項完成後須更新本表、
 > 測試、Evidence/Execution Log（如適用）與版本紀錄；不可只在對話中宣稱完成。
+
+## 2026-07-16 現行未完成摘要
+
+以下只列仍需工作或外部條件的項目。沒有列出的 H-項目維持完成，不重開。
+
+| 優先 | ID | 尚未完成 | 類型 | 下一個可驗收成果 |
+|---|---|---|---|---|
+| P0 | H-01 | HOYA BIT 正式 endpoint、auth 與真資料 contract 尚未取得 | 外部阻擋 | 以正式規格完成 online connector canary |
+| P0 | H-02 | production archive/snapshot 與來源可靠性尚缺連續 7 天 evidence | 持續觀測 | 7 天逐輪 archive、snapshot、freshness、failure artifact |
+| P0 | H-05 | 240 題 online QA 尚未在正式憑證／配額下完整執行 | 憑證／成本 gate | 保存獨立 online report、來源 p95 與失敗率 |
+| P1 | H-10 | diagnostic 尚未定期取得 online QA；offline/replay/freshness 已接通 | 依賴 H-05 | scheduler 定期產生並消費 online QA artifact |
+| P1 | H-20 | CoinGecko／Reddit production reliability gate 尚未達連續 7 次成功 | 外部來源觀測 | 每來源七次真實 attempt 連續成功，不用 freshness skip 灌數 |
+| P1 | H-21 | Execution Journey 正式 desktop/mobile viewport evidence 尚未封存 | 可直接執行 | 正式 viewport 截圖與互動紀錄進 `docs/qa/` |
+| P2 | H-13a | 五年多來源仍缺 SEC filing 全文、CoinGecko range、on-chain 歷史、新聞／Reddit archive；目前只有 Alternative.me 完整歷史與 SEC metadata-only | 開發＋外部契約 | coverage report 按來源／幣／日顯示 ready、missing、gated |
+| P2 | H-13b | runner 已完成，但尚未用足量五年 raw-source archive 跑完整 daily replay | 依賴 H-13a | 每日 run 具完整五階 execution log 且無 T 後資料 |
+| P2 | H-13c | outcome 程式已完成，尚待 H-13b 產生足量 eligible runs | 依賴 H-13b | T+1/T+7/T+14 lineage 與可稽核 coverage |
+| Deferred | H-14/H-16 | calibrator／模型 fitting 暫緩；資料量、holdout、ModelHub ACL/API key 均未過 gate | 明確延後 | H-13 至少 100 筆 eligible outcome 後才重新評估 |
+
+目前可直接繼續開發、不等待外部憑證的順序：`H-21 viewport evidence -> H-13a
+coverage report -> SEC filing 受控下載/全文 adapter -> H-13b replay batch evidence`。
+HOYA、CoinGecko plan、新聞／Reddit archive 與 ModelHub 權限不得用假資料繞過。
 
 ## 已完成基線（不重做）
 
@@ -12,6 +34,13 @@
   outcome diagnostic。
 - bounded autonomous cycle、改善提案、skill change append-only log，以及
   release-tag CD workflow 定義。
+- continuous SQLite 五階流水線、題目 RAG／Hermes 對話記憶、durable
+  retry/DLQ、原子快照發布與 read-only workspace。
+- 31 個外框模組與獨立版本化 Trust Kernel、sandbox evidence、人工 release
+  gate、active pointer／rollback；模組卡同時顯示 release version 與 content hash。
+- 五年來源 capability matrix、Alternative.me 歷史 adapter、SEC quarterly
+  metadata-only adapter、同日多 provider 合併，以及 rolling frontend/backend
+  payload 相容性。
 
 ## P0：比賽與上線前必須完成
 
@@ -102,11 +131,14 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 - 不將 offline fixture latency 稱為 online crawler SLA，也不將資訊完整度稱為預測機率。
 - 不直接引入 Nous Hermes 或其他外部專案程式碼；只借鑑可驗證的架構概念。
 
-## 執行順序
+## 執行順序（2026-07-16 更新）
 
-`H-01 -> H-02 -> H-05 -> H-10/H-11 -> H-17 -> H-19 -> H-20 -> H-13a -> H-13b -> H-13c -> H-14/H-16`
+`H-21 evidence -> H-13a coverage/full-text -> H-13b -> H-13c`
 
-H-03、H-04、H-06、H-07～H-09、H-12、H-15、H-17～H-19 已完成。H-21
-僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
+並行外部 gate：`H-01 + H-02 + H-05 -> H-10 + H-20`。
+`H-14/H-16` 只有在 H-13 產生足量 leakage-safe outcome 後才解除 deferred。
+
+H-03、H-04、H-06～H-09、H-11、H-12、H-15、H-17～H-19、H-22～H-27
+已完成。H-21 僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
 在系統穩定化、資料累積與預算核准前均保持 deferred；任何 P2 項目不得因為急於
 「訓練模型」跳過資料累積與 held-out 驗證。
