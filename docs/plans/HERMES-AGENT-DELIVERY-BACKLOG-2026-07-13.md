@@ -43,9 +43,9 @@ evidence。重複票須先留言指向 canonical issue，才可關閉。
 | #197 | H-13b、H-14 | 被 #198 與 eligible outcomes 阻擋 | production wiring 前先完成 leakage-safe replay 與 holdout discrimination；無判別力不得啟用 |
 | #196 | H-14 | 明確 deferred | 至少 100 筆 eligible outcomes 後比較 logistic/isotonic/conformal，holdout 改善才採用 |
 | #195 | H-13c、H-14 | **需修正 issue 敘述，不照原題實作** | 外部 outcome 可校準來源可靠性／abstain；Trust 分數仍是證據可靠性與資訊完整度，禁止宣稱價格方向預測機率 |
-| #191 | H-28 | 立即處理 | retrieval context 標 `source_tier=historical_non_evidentiary`，外部文字做字元／長度限制並有惡意 payload 測試 |
+| #191 | H-28 | PR #201 已實作，待合併 | retrieval context 標 `source_tier=historical_non_evidentiary`；UI 明示非 Evidence；外部文字有格式、字元／長度限制與惡意 payload 測試 |
 | #192 | H-28 | 疑似已由 `safe_fetch` 滿足，待測試銷帳 | 固定 `CERT_REQUIRED`、`check_hostname=true`、SNI 使用原 hostname 的回歸測試；測試與審查合併後關閉 |
-| #193 | H-28 | 立即處理 | user question、retrieval data 與 system instruction 分區；注入字串不得取得工具／政策控制權 |
+| #193 | H-28 | PR #201 已實作，待合併 | user question／claim data 與 system instruction 以 JSON data boundary 分區；指令型字串軟遮蔽並寫入 execution log，不得改變 Trust 結果 |
 | #8、#153 | H-20 Reddit OAuth | #8 為 canonical 外部阻擋；#153 為重複候選 | 取得 production OAuth/IP 配額並連續 7 次真實成功；先在 #153 留 canonical 連結再關閉重複票 |
 | #104、#113 | H-29 | production ops 驗收 | CloudWatch dedup/recent_failures alarm、nginx `X-Real-IP` 與 admin 告警演練全部有正式 evidence |
 | #169 | 產品／比賽決策 | 需 Eric 拍板，不是程式缺陷 | 記錄是否投入 AWS Kiro bonus 與理由；決策完成即關閉 |

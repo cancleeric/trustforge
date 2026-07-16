@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+import re
+import unicodedata
 
 from .schema import COIN_POOL, iso_utc
 
@@ -24,6 +26,19 @@ def historical_source_capabilities() -> list[dict[str, str]]:
 
 _SEC_KEYWORDS = {"BTC": ("bitcoin",), "ETH": ("ethereum",)}
 _SEC_MARKET_KEYWORDS = ("crypto", "blockchain", "digital asset")
+_SAFE_EXTERNAL_RE = re.compile(r"[^\w\s.,&'()\-+/]", re.UNICODE)
+_FNG_CLASSIFICATIONS = {
+    "extreme fear": "Extreme Fear", "fear": "Fear", "neutral": "Neutral",
+    "greed": "Greed", "extreme greed": "Extreme Greed",
+}
+
+
+def _safe_external_label(value: Any, *, max_length: int, fallback: str = "unknown") -> str:
+    """Bound an upstream label before it can enter a stored text template."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = " ".join(normalized.split())
+    normalized = _SAFE_EXTERNAL_RE.sub("", normalized).strip()
+    return normalized[:max_length].rstrip() or fallback
 
 
 def parse_sec_master_index(text: str, *, retrieved_at: float,
@@ -42,6 +57,11 @@ def parse_sec_master_index(text: str, *, retrieved_at: float,
         if len(parts) != 5:
             continue
         cik, company, form, filed, filename = (part.strip() for part in parts)
+        company = _safe_external_label(company, max_length=160)
+        form = _safe_external_label(form, max_length=24)
+        cik = _safe_external_label(cik, max_length=20)
+        if not re.fullmatch(r"[A-Za-z0-9._/-]{1,240}", filename):
+            continue
         try:
             filed_at = datetime.strptime(filed, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
         except ValueError:
@@ -84,7 +104,10 @@ def parse_alternative_me_history(payload: dict[str, Any], *, retrieved_at: float
         if not start_epoch <= timestamp <= end_epoch or not 0 <= value <= 100:
             continue
         published = iso_utc(timestamp)
-        classification = str(entry.get("value_classification", "unknown"))
+        raw_classification = _safe_external_label(
+            entry.get("value_classification", "unknown"), max_length=32,
+        )
+        classification = _FNG_CLASSIFICATIONS.get(raw_classification.casefold(), "unknown")
         for coin in COIN_POOL:
             rows.append({
                 "coin": coin, "source": "alternative-me-fng", "kind": "sentiment",

@@ -87,7 +87,10 @@ export default function HermesLeftRail({
           ) : null}
           {!!questionContext?.matches.length && (
             <div style={{ borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
-              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 5 }}>RAG · 相似歷史題目</div>
+              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 2 }}>RAG · 相似歷史題目</div>
+              <div role="note" style={{ fontSize: 8.5, lineHeight: 1.35, color: 'var(--color-hermes-amber)', marginBottom: 5 }}>
+                歷史參考 · 非本次 Evidence，不參與信任評分
+              </div>
               {questionContext.matches.slice(0, 3).map((match) => (
                 <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
                   style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10, lineHeight: 1.35, padding: '5px 2px', cursor: 'pointer' }}>
