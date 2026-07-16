@@ -13,7 +13,7 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
   const isLow = ev.trust < 0.3
   const href = safeHref(ev.source_url)
   return (
-    <tr id={`evidence-${idx}`} className={isLow ? 'bg-tf-bad/5' : undefined}>
+    <tr id={`evidence-${idx}`} className={`hermes-row-hover ${isLow ? 'bg-tf-bad/5' : ''}`}>
       <td className="tf-num whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">E{idx}</td>
       <td className="px-3 py-2 align-top">
         <details>
@@ -72,7 +72,7 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
 
 export default function EvidenceTable({ evidence }: { evidence: Evidence[] }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-tf-border bg-tf-card">
+    <div className="overflow-x-auto hermes-clip rounded-lg border border-tf-border bg-tf-card">
       <table className="w-full border-collapse text-left">
         <thead>
           <tr className="border-b border-tf-border text-xs text-tf-muted">

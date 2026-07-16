@@ -266,7 +266,7 @@ def test_token_value_never_logged(
 
 
 class FakeSweepClient:
-    """模擬 SSM client 的 `describe_parameters` / `delete_parameter`（只涵蓋
+    """模擬 SSM client 的 `get_parameters_by_path` / `delete_parameter`（只涵蓋
     `sweep_deploy_parameters` 實際會呼叫的形狀）。"""
 
     def __init__(self) -> None:
@@ -281,15 +281,10 @@ class FakeSweepClient:
         ]
         self.deleted: list[str] = []
 
-    def describe_parameters(self, **kwargs) -> dict:
-        # 模擬 SSM Path 過濾：只回傳名稱以指定 prefix 開頭的參數（真實 AWS
-        # `describe_parameters` 的 `ParameterFilters` Path 行為）。
-        prefix = ""
-        for f in kwargs.get("ParameterFilters", []) or []:
-            if f.get("Key") == "Path":
-                prefix = f.get("Values", [[""]])[0] if isinstance(f.get("Values"), list) else ""
-                if isinstance(f.get("Values"), list) and f["Values"]:
-                    prefix = f["Values"][0]
+    def get_parameters_by_path(self, **kwargs) -> dict:
+        prefix = kwargs["Path"]
+        assert kwargs["Recursive"] is True
+        assert kwargs["WithDecryption"] is False
         return {
             "Parameters": [p for p in self._params if p["Name"].startswith(prefix)]
         }
@@ -314,7 +309,7 @@ def test_sweep_deletes_only_expired_deploy_params(
 
 
 class FakePagedSweepClient:
-    """模擬 `describe_parameters` 分多頁回傳（#121.6 NextToken 迴圈）。
+    """模擬 `get_parameters_by_path` 分多頁回傳（#121.6 NextToken 迴圈）。
 
     第一頁回 2 筆 + NextToken，第二頁回剩餘 2 筆（其中含過期項）。
     """
@@ -342,7 +337,7 @@ class FakePagedSweepClient:
         self.calls = 0
         self.deleted: list[str] = []
 
-    def describe_parameters(self, **kwargs) -> dict:
+    def get_parameters_by_path(self, **kwargs) -> dict:
         page = self._pages[self.calls]
         if self.calls == 1:
             # 第二頁必須帶上第一頁回傳的 NextToken（驗證迴圈有收斂地跟頁）
@@ -355,7 +350,7 @@ class FakePagedSweepClient:
 
 
 def test_sweep_paginates_next_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#121.6：describe_parameters 多頁時必須跟 NextToken 分頁，所有頁的過期
+    """#121.6：get_parameters_by_path 多頁時必須跟 NextToken 分頁，所有頁的過期
     殘留參數都應被清掉（不漏清後面幾頁）。"""
     fake = FakePagedSweepClient()
     ssm_params.set_client_for_tests(fake)

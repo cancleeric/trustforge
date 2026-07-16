@@ -1,8 +1,11 @@
 """W-coingecko：CoinGecko 真實加密資料源整合測試 — CI 不打真網路（monkeypatch _fetch_url）。"""
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import threading
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -1164,11 +1167,67 @@ def test_reset_process_cache_clears_failure_cache_and_throttle_state():
 
     coingecko._coin_detail_failed["bitcoin"] = RuntimeError("boom")
     coingecko._last_request_monotonic = 123.0
+    coingecko._provider_rate_limit_error = HTTPError(
+        "https://api.coingecko.com", 429, "Too Many Requests", {}, None
+    )
 
     coingecko.reset_process_cache()
 
     assert coingecko._coin_detail_failed == {}
     assert coingecko._last_request_monotonic is None
+    assert coingecko._provider_rate_limit_error is None
+
+
+def test_provider_429_blocks_other_coingecko_sources_without_second_http_call(monkeypatch):
+    """A 429 from one CoinGecko source closes the provider for this process cycle."""
+    from urllib.error import HTTPError
+    from trustforge.ingestion import coingecko
+
+    calls: list[str] = []
+
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
+        calls.append(url)
+        raise HTTPError(url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
+
+    with pytest.raises(HTTPError) as first:
+        coingecko.CoinGeckoSentimentSource().fetch("", coin="BTC")
+    with pytest.raises(HTTPError) as second:
+        coingecko.CoinGeckoDevSource().fetch("", coin="ETH")
+
+    assert first.value.code == 429
+    assert second.value.code == 429
+    assert len(calls) == 1
+
+
+def test_provider_lock_serializes_parallel_sources_before_429(monkeypatch):
+    """Parallel source workers cannot both enter the CoinGecko HTTP boundary."""
+    from trustforge.ingestion import coingecko
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def _fake_fetch_url(url, *, user_agent, extra_headers=None, timeout=None, max_bytes=None):
+        calls.append(url)
+        entered.set()
+        assert release.wait(timeout=2)
+        raise HTTPError(url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(coingecko.safe_fetch, "fetch_url", _fake_fetch_url)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(coingecko.CoinGeckoSentimentSource().fetch, "", "BTC")
+        assert entered.wait(timeout=2)
+        second = pool.submit(coingecko.CoinGeckoDevSource().fetch, "", "ETH")
+        release.set()
+        with pytest.raises(HTTPError):
+            first.result(timeout=2)
+        with pytest.raises(HTTPError):
+            second.result(timeout=2)
+
+    assert len(calls) == 1
 
 
 # ── fetch_scheduler.py 接線測試 ────────────────────────────────────────────────

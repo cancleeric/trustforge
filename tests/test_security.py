@@ -519,6 +519,21 @@ def test_send_legacy_csp_byte_identical(monkeypatch):
     assert "Referrer-Policy" not in headers, "legacy 模式不應新增 Referrer-Policy"
 
 
+def test_send_ignores_client_disconnect():
+    class DisconnectedWriter:
+        def write(self, _data):
+            raise BrokenPipeError(32, "broken pipe")
+
+    h = web.Handler.__new__(web.Handler)
+    h.wfile = DisconnectedWriter()
+    h.send_response = lambda _code: None
+    h.send_header = lambda _name, _value: None
+    h.end_headers = lambda: None
+
+    # Navigating away from an in-flight request is not a server error.
+    assert h._send(200, "ok") is None
+
+
 def test_send_react_csp_and_extra_headers(monkeypatch):
     """CSP_MODE=react 時，`_send` 套用 harper 新指令集 + X-Frame-Options/Referrer-Policy。"""
     from io import BytesIO

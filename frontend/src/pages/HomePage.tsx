@@ -59,7 +59,7 @@ export default function HomePage() {
   const competitionRanks = coins ? computeCompetitionRanks(coins) : []
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6">
+    <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <section className="border-b border-tf-border pb-5">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>

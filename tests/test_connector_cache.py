@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
+from urllib.error import HTTPError
 
 import pytest
 
@@ -48,6 +50,7 @@ from trustforge.ingestion.cache import (
     CacheWriteResult,
     DynamoDBCache,
     JsonCacheBackend,
+    SQLiteCacheBackend,
     cache_get,
     cache_key,
     cache_set,
@@ -166,10 +169,31 @@ def test_get_cache_backend_reads_env(monkeypatch, tmp_path):
     monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("CACHE_BACKEND", "json")
     assert isinstance(get_cache_backend(), JsonCacheBackend)
+    monkeypatch.setenv("CACHE_BACKEND", "sqlite")
+    monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(tmp_path / "trustforge.sqlite3"))
+    assert isinstance(get_cache_backend(), SQLiteCacheBackend)
     monkeypatch.setenv("CACHE_BACKEND", "dynamodb")
     assert isinstance(get_cache_backend(), DynamoDBCache)
     monkeypatch.delenv("CACHE_BACKEND", raising=False)
     assert isinstance(get_cache_backend(), DynamoDBCache)  # 預設 dynamodb
+
+
+def test_sqlite_backend_roundtrip_and_monotonic_write(tmp_path):
+    backend = SQLiteCacheBackend(tmp_path / "trustforge.sqlite3")
+    try:
+        backend.set("coindesk:BTC", [{"id": "new"}], fetched_at=2.0)
+        assert backend.get("coindesk:BTC") == {
+            "docs": [{"id": "new"}], "fetched_at": 2.0,
+        }
+        assert not backend.set_if_newer(
+            "coindesk:BTC", [{"id": "old"}], fetched_at=1.0,
+        )
+        assert backend.set_if_newer(
+            "coindesk:BTC", [{"id": "newer"}], fetched_at=3.0,
+        )
+        assert backend.get("coindesk:BTC")["docs"] == [{"id": "newer"}]
+    finally:
+        backend.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1304,6 +1328,36 @@ def test_main_returns_nonzero_exit_code_when_all_sources_fetch_fails(monkeypatch
     assert rc == 1
 
 
+def test_scheduler_429_stops_remaining_coin_calls_and_reports_gaps(monkeypatch, tmp_path, capsys):
+    """首個明確 429 後停止同來源後續呼叫，避免把 provider 限流放大。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    rate_limited = _FakeSource(
+        "reddit-cryptocurrency",
+        kind="social",
+        raise_exc=HTTPError("https://www.reddit.com", 429, "Too Many Requests", {}, None),
+    )
+    _patch_registry(monkeypatch, [rate_limited])
+
+    results, failures = fetch_scheduler.run_once(
+        None,
+        ["BTC", "ETH", "SOL"],
+        backend,
+        force=True,
+        interval_overrides={},
+        stagger=0,
+        dry_run=False,
+    )
+
+    assert results == []
+    assert rate_limited.calls == [("", "BTC")]
+    assert failures == [
+        "reddit-cryptocurrency:BTC",
+        "reddit-cryptocurrency:ETH",
+        "reddit-cryptocurrency:SOL",
+    ]
+    assert "HTTP 429 cooldown" in capsys.readouterr().err
+
+
 def test_scheduler_unknown_source_name_skips_without_crash(tmp_path, capsys):
     backend = JsonCacheBackend(tmp_path / "cache.json")
     results, failures = fetch_scheduler.run_once(
@@ -2132,6 +2186,32 @@ def test_freshness_snapshot_default_covers_all_known_sources_and_coin_pool(tmp_p
     coins_seen = {row["coin"] for row in snapshot}
     assert sources_seen == set(DEFAULT_REFRESH_INTERVAL_SECONDS)
     assert coins_seen == set(COIN_POOL)
+
+
+def test_json_backend_reuses_parsed_snapshot_until_atomic_replace(monkeypatch, tmp_path):
+    """A status matrix must not parse the complete JSON file once per cache key."""
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({"coindesk:BTC": {"docs": [], "fetched_at": 1.0}}))
+    backend = JsonCacheBackend(path)
+    original_read_text = Path.read_text
+    reads = 0
+
+    def counted_read_text(self, *args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    assert backend.get("coindesk:BTC") is not None
+    assert backend.get("coindesk:ETH") is None
+    assert reads == 1
+
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(json.dumps({"coindesk:ETH": {"docs": [], "fetched_at": 2.0}}))
+    os.replace(replacement, path)
+
+    assert backend.get("coindesk:ETH") is not None
+    assert reads == 2
 
 
 def test_freshness_snapshot_does_not_call_wrapped_source_fetch(tmp_path):

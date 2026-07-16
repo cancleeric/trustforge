@@ -58,18 +58,23 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ap-southeast-2
-      - name: Deploy backend to EC2 through SSM
-        run: bash deploy/deploy_ec2.sh
-        env:
-          REGION: ap-southeast-2
-          TRUSTFORGE_BOOTSTRAP: "0"
       - name: Deploy frontend to EC2 nginx
         run: bash deploy/deploy_frontend_nginx.sh
         env:
           REGION: ap-southeast-2
+      - name: Deploy backend to EC2 through SSM
+        run: >-
+          bash scripts/monitor_deploy_health.sh
+          https://trustforge.hurricanesoft.com.tw/api/health --
+          bash deploy/deploy_ec2.sh
+        env:
+          REGION: ap-southeast-2
+          TRUSTFORGE_BOOTSTRAP: "0"
       - name: Upload release QA evidence
         uses: actions/upload-artifact@v4
         with:
           name: release-qa-${{ github.sha }}
-          path: out/release/question-bank-results.json
+          path: |
+            out/release/question-bank-results.json
+            out/release/deploy-health-canary.jsonl
           if-no-files-found: error

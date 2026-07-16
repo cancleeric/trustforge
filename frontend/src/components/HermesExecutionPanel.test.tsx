@@ -3,6 +3,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import HermesExecutionPanel from './HermesExecutionPanel'
+import { executionLogDownload } from '../lib/executionLogDownload'
 import type { Evidence, ExecutionEvent, ExecutionManifest, Report } from '../lib/types'
 
 const execution: ExecutionManifest = {
@@ -43,5 +44,15 @@ describe('HermesExecutionPanel', () => {
     expect(screen.getByText('來源完成')).toBeInTheDocument()
     expect(screen.getByText('sec-edgar')).toBeInTheDocument()
     expect(screen.getByText('48.0 ms')).toBeInTheDocument()
+  })
+
+  it('exports a standard JSON execution envelope', () => {
+    const artifact = executionLogDownload(execution, [event, sourceEvent])
+    const payload = JSON.parse(artifact.body)
+    expect(artifact.name).toBe('hermes-test-run-execution-log.json')
+    expect(artifact.type).toBe('application/json')
+    expect(payload.execution.run_id).toBe('hermes-test-run')
+    expect(payload.events).toHaveLength(2)
+    expect(payload.events[1].tool).toBe('ingestion.source')
   })
 })

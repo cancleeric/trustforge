@@ -74,10 +74,11 @@ onchain/regulatory 各有 rate limit，reddit 尤其容易 429/封鎖）。真�
    - ⚠️ 沒建表/沒憑證時：**讀**（`cache_get`）會自動 fallback 讀本地 JSON；
      **寫**（`cache_set`）預設**不會**自動 fallback（見下方「cache 寫入失敗
      不能被靜默吞掉」），排程會回報明確失敗、exit 非零。
-2. 若暫不上 DynamoDB，設定 `CACHE_BACKEND=json` 直接用本地 JSON 檔即可（單機
-   demo/小流量夠用；多台排程機/多台產品機不共用磁碟時不適用，資料不會同步）。
-   這種情況下 JSON 本身就是 primary backend，不是「fallback」，寫入失敗一樣
-   會誠實回報失敗。
+2. 本機開發設定 `CACHE_BACKEND=sqlite`，Web 與排程共用
+   `out/trustforge.sqlite3`（可用 `TRUSTFORGE_SQLITE_PATH` 覆寫）。舊版 JSON
+   快取可用 `python scripts/migrate_json_cache_to_sqlite.py` 一次搬入；SQLite
+   使用 WAL，適合本機 Web 與排程並行讀寫。多台產品機仍使用 DynamoDB，不能
+   共享單機 SQLite 檔案。
 
 ### refresh 間隔 vs 硬過期時限——刻意分開，別設成一樣
 
@@ -109,14 +110,17 @@ DynamoDB）失敗時（憑證過期/IAM 少權限/網路問題），**視為這�
 只有寫入的那台排程機看得到資料，產品讀取路徑（走 DynamoDB）完全看不到，會
 變成「DynamoDB 早就掛了但監控說一切正常」的假象。
 
-dev/CI 沒有真 AWS、想要「即使 DynamoDB 打不到，也有一個真正能用的本地快取」
-時，才明確開啟這個 opt-in：
+dev/CI 沒有真 AWS、想要本地持久快取時，直接用 SQLite；只有相容舊環境時才
+使用 JSON fallback：
 
 ```bash
-# 方式一：env（不用改 code）
+# 本機 primary backend（推薦）
+CACHE_BACKEND=sqlite python3 scripts/fetch_scheduler.py
+
+# 相容舊環境：env（不用改 code）
 TRUSTFORGE_CACHE_JSON_FALLBACK=1 python3 scripts/fetch_scheduler.py
 
-# 方式二：直接用 JSON 當 primary backend（本來就不是 fallback，不受這個 opt-in 限制）
+# 相容舊環境：直接用 JSON 當 primary backend
 CACHE_BACKEND=json python3 scripts/fetch_scheduler.py
 ```
 
@@ -790,4 +794,3 @@ policy 應收斂解密權限（見 `put_runtime_tokens.sh` 輸出的片段）：
 收斂後只有「經 SSM 且目標為該前綴參數」的解密才被放行，直接用 KMS API 解任意
 東西都不符此 condition 而被拒。`put_runtime_tokens.sh` 與 `ssm_params.py` 的
 region 預設一致（均 `ap-southeast-2`）。
-

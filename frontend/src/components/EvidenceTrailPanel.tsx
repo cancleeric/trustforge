@@ -31,7 +31,7 @@ function StatCard({
   sub?: string
 }) {
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-3">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-3">
       <p className="text-[0.7rem] font-medium text-tf-muted">{label}</p>
       <p className="tf-num mt-1 text-2xl font-bold leading-none" style={{ color }}>
         {value}
@@ -77,7 +77,7 @@ export default function EvidenceTrailPanel({
   }
 
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <h3 className="mb-3 text-sm font-semibold text-tf-text">信任溯源概覽</h3>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <StatCard label="證據總筆數" value={String(evidence.length)} color="var(--color-tf-text)" />

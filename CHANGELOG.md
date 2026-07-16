@@ -1,5 +1,113 @@
 # Changelog
 
+## v0.14.15 — 2026-07-15
+
+- Raise the Hermes bridge visual fidelity with layered star-core shells, expanding energy rings, planetary specular and latitude surfaces, and low-trust fracture and broken-ring states.
+- Add a live hover telemetry HUD that exposes score, usable-source count, economic weight and signal state without navigating away from the galaxy.
+- Add structural viewport rails and an in-place drilldown focus scrim so all five evidence stages read as a unified fixed bridge console.
+- Correct the core animation transform contract so focus scaling and glow animation no longer compete for the same positioning transform.
+
+## v0.14.14 — 2026-07-15
+
+- Add first-class Traditional Chinese and English localization to the Hermes workspace, defaulting the operational UI to Traditional Chinese.
+- Localize navigation, telemetry, agent controls, trust breakdowns, galaxy interaction cues and all five execution-stage surfaces while preserving product, asset and protocol names.
+- Add an in-product language switch and persist the non-sensitive locale preference with a SameSite cookie without weakening the global ban on localStorage.
+- Add regression coverage for the default Chinese navigation, live English switching and locale persistence contract.
+
+## v0.14.13 — 2026-07-15
+
+- Turn the Hermes Galaxy sample into a complete operational workspace with direct navigation to analysis, comparison, history, source health and the full cost ledger.
+- Make every workflow stage a semantic, keyboard-operable control with an explicit drilldown and disclosure when dashboard values are overview proxies rather than evidence-bound run results.
+- Add responsive desktop, tablet and mobile layouts that preserve the galaxy, source rail, trust breakdown and execution stages without fixed-canvas clipping.
+- Add regression coverage for the flagship navigation contract while retaining read-only, cost-free dashboard browsing.
+
+## v0.14.12 — 2026-07-15
+
+- Complete the Hermes Galaxy UI integration around the official BTC/ETH/SOL/BNB/XRP pool, removing fiat design placeholders from the production dashboard.
+- Read the displayed release version and cumulative cost from live APIs, and route Transmit actions into a real evidence-bound analysis instead of a simulated timer.
+- Keep dashboard browsing read-only and cost-free: coin focus changes reuse one overview snapshot and never trigger formal analysis or Bedrock calls.
+- Add keyboard-operable galaxy controls, derived-breakdown disclosure, Hermes visual treatment across analysis forms, and five-coin model regression coverage.
+
+## v0.14.11 — 2026-07-14
+
+- Add a deterministic connector-reliability node to every bounded Hermes cycle, measuring actual attempts, failures, failure rates and seven-success streak gates without counting freshness skips as successes.
+- Feed the reliability artifact into approval-gated self-improvement diagnostics so degraded providers become explicit, reviewable experiments instead of hidden scheduler noise.
+- Record three consecutive zero-interruption production deployments with 96 public health probes as the completion evidence for H-17.
+
+## v0.14.10 — 2026-07-14
+
+- Include both the `/trustforge/deploy` parent parameter path and its children in the path-scoped EC2 role policy, matching AWS `GetParametersByPath` authorization semantics.
+- Add deployment-policy regression coverage so startup SSM cleanup remains least-privilege and traceback-free after infrastructure reconciliation.
+
+## v0.14.9 — 2026-07-14
+
+- Replace account-wide SSM parameter discovery in startup cleanup with path-scoped `GetParametersByPath` pagination.
+- Grant the EC2 role read/delete access only to `/trustforge/deploy/*`, eliminating non-fatal startup AccessDenied tracebacks without exposing runtime tokens or unrelated parameter metadata.
+
+## v0.14.8 — 2026-07-14
+
+- Add a health-checked temporary backend on port 8081 and nginx backup upstream routing so production backend restarts do not interrupt public requests.
+- Distinguish scheduler upstream degradation from total failure: production probes DynamoDB first, records partial source failures, and remains healthy when usable data was written.
+
+## v0.14.7 — 2026-07-14
+
+- Isolate read-only UI rate limits by endpoint so normal navigation across overview, status, history, and costs cannot exhaust one shared allowance.
+- Treat browser-cancelled responses as normal client disconnects instead of emitting misleading `BrokenPipeError` tracebacks.
+
+## v0.14.6 — 2026-07-14
+
+- Export the user-facing Hermes execution log as a standard `.json` envelope
+  containing the execution manifest and event array instead of an NDJSON file.
+- Retain the internal append-only JSONL storage contracts used by audit and
+  scheduler tooling.
+
+## v0.14.5 — 2026-07-14
+
+- Coordinate all CoinGecko source workers through one provider lock covering
+  throttle state, HTTP results and process caches.
+- Stop all remaining CoinGecko HTTP calls for the scheduler process after the
+  provider's first explicit HTTP 429.
+
+## v0.14.4 — 2026-07-14
+
+- Stop a coin-scoped connector's remaining calls for the current cycle after
+  an explicit HTTP 429, while retaining every deferred stale target in the
+  scheduler failure record.
+- Add production evidence for the four-worker prefetch path and its first
+  observed provider reliability gaps.
+
+## v0.14.3 — 2026-07-14
+
+- Fix the packaged Hermes scheduler service to pass `TRUSTFORGE_HOME`, so its
+  bounded offline quality measurement can read the shipped sample data.
+
+## v0.14.2 — 2026-07-14
+
+- Start the Hermes scheduler immediately after installation and keep a bounded
+  autonomous cycle running when individual source refreshes degrade.
+- Make the shared DynamoDB idempotency-lease bootstrap repeatable when TTL is
+  already enabled; validate the deployed service environment contract.
+- Strengthen local release smoke by isolating its cache backend and executing
+  a complete Hermes analysis with Evidence, five nodes, and Execution Log.
+
+## v0.14.1 — 2026-07-14
+
+- Add a verifiable, append-only cost-ledger archive workflow: JSONL/CSV export,
+  integrity manifest, non-overwriting restore drill, DynamoDB PITR verification,
+  and versioned off-table archive evidence.
+- Provision the DynamoDB-backed shared analysis lease required for cross-instance
+  idempotency, including TTL and least-privilege instance-role policy.
+- Require provider, license, publication time, actual retrieval time, and a
+  deterministic content hash for historical-backfill documents.
+
+## v0.14.0 — 2026-07-14
+
+- Refresh TrustForge into a compact Hermes market desk: fixed-named trust and information-completeness metrics, source-cache health, and a direct operational analysis entry point.
+- Make the report's primary gauge always represent calibrated information completeness; show trust score independently so a decision state never changes the meaning of a percentage.
+- Put the data-driven five-node Hermes execution journey, source outcomes, document counts, durations, and run-bound report/Evidence/Log downloads directly after the conclusion.
+- Improve supporting operational pages with consistent headings, human-readable timestamps, and preserved paginated cost-ledger history.
+- Archive the superseded 2026-07-01 delivery checklist and update the authoritative Hermes delivery backlog and UX release evidence.
+
 ## v0.13.9 — 2026-07-13
 
 - Label the analysis gauge's visible primary metric so a raw trust score is not mistaken for calibrated information completeness.

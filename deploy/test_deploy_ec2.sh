@@ -478,6 +478,7 @@ if len(ssm_stmts) != 2:
     problems.append("ssm:GetParameter statement 數量應為 2，實際為:" + str(len(ssm_stmts)))
 else:
     expected = {
+        "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/deploy",
         "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/deploy/*",
         "arn:aws:ssm:ap-southeast-2:123456789012:parameter/trustforge/runtime/*",
     }
@@ -486,10 +487,16 @@ else:
         actions = stmt.get("Action", [])
         if isinstance(actions, str):
             actions = [actions]
-        res = stmt.get("Resource")
-        if actions != ["ssm:GetParameter"]:
-            problems.append("ssm statement (Resource=" + str(res) + ") 夾帶其他 Action:" + str(stmt.get("Action")))
-        actual.add(res)
+        resources = stmt.get("Resource")
+        if isinstance(resources, str):
+            resources = [resources]
+        if any(str(res).endswith("parameter/trustforge/deploy/*") for res in resources):
+            expected_actions = {"ssm:GetParameter", "ssm:GetParametersByPath", "ssm:DeleteParameter"}
+        else:
+            expected_actions = {"ssm:GetParameter"}
+        if set(actions) != expected_actions:
+            problems.append("ssm statement (Resource=" + str(resources) + ") Action 不符:" + str(stmt.get("Action")))
+        actual.update(resources)
     if actual != expected:
         problems.append("ssm:GetParameter Resource 集合不符，實際:" + str(actual))
 if kms_stmt is None:
@@ -595,6 +602,10 @@ case "$ALL" in
       exit 254
     fi
     exit 0 ;;
+  "dynamodb describe-time-to-live"*)
+    # lease bootstrap 的重跑路徑：TTL 已啟用時不可再呼叫 update，否則 AWS
+    # 會回 ValidationException。以真實狀態回應，確保 mock 不掩蓋該契約。
+    echo "ENABLED" ;;
   "ssm describe-instance-information"*)
     echo "Online" ;;
   "ec2 describe-vpcs"*)
@@ -698,6 +709,8 @@ else
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache" "user-data: trustforge.service 有 TRUSTFORGE_CACHE_TABLE"
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger" "user-data: trustforge.service 有 TRUSTFORGE_COST_LEDGER_TABLE"
   assert_contains "$UD_CONTENT" "Environment=COST_LEDGER_BACKEND=dynamodb" "user-data: trustforge.service 有 COST_LEDGER_BACKEND"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb" "user-data: trustforge.service 有 shared lease backend"
+  assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases" "user-data: trustforge.service 有 shared lease table"
   assert_contains "$UD_CONTENT" "fetch-scheduler.service" "user-data: 有寫 fetch-scheduler.service"
   assert_contains "$UD_CONTENT" "fetch-scheduler.timer" "user-data: 有寫 fetch-scheduler.timer"
   assert_contains "$UD_CONTENT" "ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py" "user-data: fetch-scheduler ExecStart 正確"
@@ -949,10 +962,10 @@ with open('$CAPTURE/remote_script.sh', 'w') as f:
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache' "update-in-place: 補 TRUSTFORGE_CACHE_TABLE"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger' "update-in-place: 補 TRUSTFORGE_COST_LEDGER_TABLE"
   assert_contains "$REMOTE" 'Environment=COST_LEDGER_BACKEND=dynamodb' "update-in-place: 補 COST_LEDGER_BACKEND"
-  assert_contains "$REMOTE" 'cat > /etc/systemd/system/fetch-scheduler.service' "update-in-place: 重寫 fetch-scheduler.service"
-  assert_contains "$REMOTE" 'cat > /etc/systemd/system/fetch-scheduler.timer' "update-in-place: 重寫 fetch-scheduler.timer"
+  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb' "update-in-place: 補 shared lease backend"
+  assert_contains "$REMOTE" 'Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases' "update-in-place: 補 shared lease table"
+  assert_contains "$REMOTE" 'bash deploy/install_hermes_scheduler.sh' "update-in-place: 呼叫 Hermes scheduler installer"
   assert_contains "$REMOTE" 'systemctl enable --now fetch-scheduler.timer' "update-in-place: 確認 timer enabled"
-  assert_contains "$REMOTE" 'Environment=AWS_REGION=ap-southeast-2' "update-in-place: fetch-scheduler.service 帶 AWS_REGION（顯式，不吃 cache.py 預設 us-east-1）"
   # PR-B（#119 退場遷移清理）：ADMIN_TOKEN/LIVE_TOKEN 這兩個 key deploy 已經
   # 完全不接受值了，unconditional 傳空字串給 ssm_env_cmd 只是為了刪掉舊機制
   # 殘留的該行（這才是本 PR 的安全價值：token 離開 unit 檔落點）；CAP 才是
@@ -1436,7 +1449,7 @@ echo "== nginx /api/admin/ 硬化結構檢查（harper 條件 A + M1，管理控
 assert_nginx_admin_location \
   "nginx.conf（react TLS）/api/admin/ location：proxy + IP 覆寫 + no-store + HSTS 重補齊備，allowlist 預設註解" \
   "$REPO_ROOT/deploy/nginx.conf" \
-  'proxy_pass http://127.0.0.1:8080/api/admin/;
+  'proxy_pass http://trustforge_backend/api/admin/;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $remote_addr;
 proxy_no_cache 1;

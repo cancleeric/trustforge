@@ -1,7 +1,11 @@
 from datetime import datetime, timezone
+import hashlib
+import json
+
+import pytest
 
 from trustforge.ingestion.cache import JsonCacheBackend, cache_key, cache_set
-from trustforge.replay import capture_source_snapshot, load_source_snapshot
+from trustforge.replay import capture_source_snapshot, load_source_snapshot, store_backfilled_source_snapshot
 
 
 def test_source_snapshot_preserves_per_source_time_and_explicit_missing_sources(tmp_path):
@@ -41,3 +45,34 @@ def test_source_snapshot_rejects_same_day_data_captured_after_run_start(tmp_path
     assert load_source_snapshot(
         backend, "BTC", "2026-07-13", at_or_before=captured,
     ) is not None
+
+
+def test_backfill_requires_full_provenance_and_valid_content_hash(tmp_path):
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    document = {
+        "id": "archive-1", "text": "historical announcement", "provider": "example",
+        "license": "public-record", "published_at": "2021-06-30T10:00:00Z",
+        "retrieved_at": "2026-07-14T00:00:00Z",
+    }
+    document["content_sha256"] = hashlib.sha256(
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    result = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "government", "documents": [document]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+    )
+    assert result.ok
+    snapshot = load_source_snapshot(backend, "BTC", "2021-07-01", at_or_before=boundary)
+    assert snapshot is not None
+    assert snapshot["archive_type"] == "backfilled_archive"
+
+
+def test_backfill_rejects_missing_provenance(tmp_path):
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    with pytest.raises(ValueError, match="content_sha256"):
+        store_backfilled_source_snapshot(
+            backend, "BTC", "2021-07-01", [{"source": "government", "documents": [{"published_at": "2021-06-30T10:00:00Z"}]}],
+            snapshot_epoch=boundary, provider_manifest={"providers": []},
+        )

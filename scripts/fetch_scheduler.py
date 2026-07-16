@@ -28,12 +28,13 @@
     # 只列出這次會呼叫哪些 (來源, 幣別)，不真的打 API / 不寫快取
     python3 scripts/fetch_scheduler.py --dry-run
 
-    # 切換 cache backend（預設沿用 cache.py 的 CACHE_BACKEND env，dynamodb|json；
+    # 切換 cache backend（預設沿用 cache.py 的 CACHE_BACKEND env，
+    # dynamodb|sqlite|json；
     # 預設 dynamodb）。primary backend 寫入失敗時，預設**不會**自動 fallback
     # 寫本地 JSON（避免假成功，見 codex HIGH-2）；exit code 非零代表有目標
     # 沒有真的持久化，cron/監控應據此告警。dev/CI 沒有真 AWS、想要一個真正
     # 能用的本地快取時，才明確開 opt-in：
-    CACHE_BACKEND=json python3 scripts/fetch_scheduler.py
+    CACHE_BACKEND=sqlite python3 scripts/fetch_scheduler.py
     # 或維持 CACHE_BACKEND=dynamodb，但允許失敗時 fallback 寫本地 JSON：
     TRUSTFORGE_CACHE_JSON_FALLBACK=1 python3 scripts/fetch_scheduler.py
 
@@ -69,6 +70,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -89,6 +91,7 @@ from trustforge.ingestion.cache import (  # noqa: E402
     CacheBackend,
     DynamoDBCache,
     JsonCacheBackend,
+    SQLiteCacheBackend,
     cache_get,
     cache_key,
     cache_set,
@@ -176,6 +179,11 @@ def _effective_stagger(name: str, stagger: float) -> float:
     if name.startswith("coingecko-"):
         return max(stagger, _COINGECKO_STAGGER_FLOOR_SECONDS)
     return stagger
+
+
+def _is_http_429(exc: Exception) -> bool:
+    """Return whether a connector failure is an explicit provider rate limit."""
+    return isinstance(exc, HTTPError) and exc.code == 429
 
 
 def run_once(
@@ -355,7 +363,7 @@ def run_once(
                 results.append((name, total_docs))
             continue
 
-        for c in coins:
+        for coin_index, c in enumerate(coins):
             if not force and _is_fresh(backend, name, c, refresh_interval):
                 print(f"[fetch_scheduler] {name}[{c}]: 未達 refresh 間隔（{refresh_interval:.0f}s），略過")
                 continue
@@ -368,6 +376,22 @@ def run_once(
                 # 但仍要計入 failures（codex HIGH-1），理由同上方 coin-agnostic 分支。
                 print(f"[fetch_scheduler] {name}[{c}]: 真呼叫失敗，略過（{exc}）", file=sys.stderr)
                 failures.append(f"{name}:{c}")
+                if _is_http_429(exc):
+                    deferred: list[str] = []
+                    for remaining_coin in coins[coin_index + 1:]:
+                        if not force and _is_fresh(
+                            backend, name, remaining_coin, refresh_interval
+                        ):
+                            continue
+                        deferred.append(remaining_coin)
+                        failures.append(f"{name}:{remaining_coin}")
+                    if deferred:
+                        print(
+                            f"[fetch_scheduler] {name}: HTTP 429 cooldown，"
+                            f"本輪停止後續幣別真呼叫（未刷新：{deferred}）",
+                            file=sys.stderr,
+                        )
+                    break
                 continue
             result = cache_set_monotonic(
                 backend, cache_key(name, c), [doc_to_dict(d) for d in docs],
@@ -464,6 +488,8 @@ def _probe_cache_backend() -> CacheBackend:
     backend = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
     if backend == "json":
         return JsonCacheBackend()
+    if backend == "sqlite":
+        return SQLiteCacheBackend()
     return DynamoDBCache(
         connect_timeout=_PROBE_DYNAMODB_CONNECT_TIMEOUT_SECONDS,
         read_timeout=_PROBE_DYNAMODB_READ_TIMEOUT_SECONDS,
@@ -1490,6 +1516,12 @@ def main(argv: list[str] | None = None) -> int:
              "獨立 cron line、cadence 見 SNAPSHOT_REFRESH_INTERVAL_SECONDS。"
              "可與 --dry-run 合併使用，只列出會跑哪些幣、不真的呼叫",
     )
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help="排程服務模式：至少一個目標成功時將上游部分失敗視為 degraded "
+             "success；零成功仍非零退出。production unit 必須先以 --probe "
+             "驗證 cache/ledger 基建，避免把 DynamoDB 故障誤當上游降級。",
+    )
     args = parser.parse_args(argv)
 
     if args.parallelism < 1:
@@ -1561,6 +1593,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[fetch_scheduler] 有 {len(failures)} 個目標本次未成功刷新快取"
               f"（真呼叫失敗或真呼叫成功但 cache 寫入失敗，細節見上方訊息）："
               f"{failures}", file=sys.stderr)
+        if args.allow_partial and results:
+            print(
+                "[fetch_scheduler] 部分來源降級，但已有成功資料寫入；"
+                "--allow-partial 回傳成功，完整缺口已保存在 scheduler run log。",
+                file=sys.stderr,
+            )
+            return 0
         return 1
     return 0
 

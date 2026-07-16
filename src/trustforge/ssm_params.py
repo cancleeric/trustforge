@@ -162,17 +162,19 @@ def sweep_deploy_parameters(
     """
     try:
         client = _get_or_create_client()
-        # #121.6：describe_parameters 單次最多回 50 筆，參數多頁時必須跟
+        # Use the path-scoped API instead of DescribeParameters. The latter
+        # requires account-wide metadata permission and cannot be restricted
+        # to TrustForge's deploy prefix.
         # NextToken 分頁，否則後面幾頁的殘留參數會被漏清（多頁部署期參數
         # 存在時尤其危險——舊 token 殘留到下次部署）。這裡迴圈收斂到沒有
         # NextToken 為止。
         params: list[dict] = []
         next_token: str | None = None
         while True:
-            kwargs: dict = {"ParameterFilters": [{"Key": "Path", "Values": [prefix]}]}
+            kwargs: dict = {"Path": prefix, "Recursive": True, "WithDecryption": False}
             if next_token:
                 kwargs["NextToken"] = next_token
-            resp = client.describe_parameters(**kwargs)
+            resp = client.get_parameters_by_path(**kwargs)
             params.extend(resp.get("Parameters", []) or [])
             next_token = resp.get("NextToken")
             if not next_token:

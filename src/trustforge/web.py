@@ -121,6 +121,12 @@ def _admin_runtime_config(now_fn=time.monotonic):
     （讀取異常——呼叫端對**閘門判斷**一律 fail-closed；cap 的 fallback
     在 `budget_guard.daily_cap_usd_resolved()` 另行處理，落 env 層）。"""
     global _admin_cfg_fail_until
+    if os.getenv("TRUSTFORGE_DISABLE_ADMIN_CONFIG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return admin_config.AdminConfig()
     now = now_fn()
     with _admin_cfg_fail_lock:
         if now < _admin_cfg_fail_until:
@@ -467,7 +473,10 @@ _real_rate_buckets: dict[str, list[float]] = {}
 # `/status` 專用 per-IP 限流：獨立於上面 live/real 的 bucket，避免互相干擾
 # （/status 是唯讀觀測端點，不消耗真連接器/Bedrock 配額，門檻可以更寬鬆）。
 _STATUS_RATE_WINDOW = 30
-_STATUS_RATE_MAX = 10
+_STATUS_RATE_MAX = max(
+    10,
+    int(os.getenv("TRUSTFORGE_STATUS_RATE_MAX", "10")),
+)
 _status_rate_lock = threading.Lock()
 _status_rate_buckets: dict[str, list[float]] = {}
 
@@ -886,23 +895,31 @@ def _check_real_rate_limit(ip: str) -> None:
         _real_rate_buckets[ip] = ts
 
 
-def _check_status_rate_limit(ip: str) -> None:
+def _check_status_rate_limit(ip: str, scope: str = "status") -> None:
     """`/status` 專用 per-IP 限流（獨立 bucket，見模組頂部 `_STATUS_RATE_*`
     常數）：IP 在滑動視窗內超過 `_STATUS_RATE_MAX` 次請求 → raise
     `TooManyRequests`。防的是「資料鮮度矩陣逐 (source,coin) 讀 cache 的頁面
     被當 DoS 高頻打」，跟 `_check_live_rate_limit` 保護真連接器/Bedrock 配額
     的目的不同，故不共用同一組 bucket/門檻（但共用同一套 `_evict_stale_rate_buckets`
     上限保護邏輯）。"""
+    # Read-only UI endpoints must not consume one shared allowance. A normal
+    # navigation sequence loads overview, status and history in quick
+    # succession; sharing the raw IP key made those independent screens rate
+    # limit each other. Keep one bounded store while namespacing its keys.
+    bucket_key = f"{scope}:{ip}"
     now = time.time()
     with _status_rate_lock:
         _evict_stale_rate_buckets(
             _status_rate_buckets, _STATUS_RATE_WINDOW, now, _RATE_LIMIT_MAX_TRACKED_IPS
         )
-        ts = [t for t in _status_rate_buckets.get(ip, []) if now - t < _STATUS_RATE_WINDOW]
+        ts = [
+            t for t in _status_rate_buckets.get(bucket_key, [])
+            if now - t < _STATUS_RATE_WINDOW
+        ]
         if len(ts) >= _STATUS_RATE_MAX:
             raise TooManyRequests(f"請求過於頻繁，請 {_STATUS_RATE_WINDOW} 秒後再試")
         ts.append(now)
-        _status_rate_buckets[ip] = ts
+        _status_rate_buckets[bucket_key] = ts
 
 
 def _check_online_stance_rate_limit(ip: str) -> None:
@@ -1613,7 +1630,7 @@ def _handle_status(client_ip: str = "") -> tuple[int, str]:
     固定 dark，這裡不再需要接受/轉傳 `theme`/`theme_toggle_href` 參數。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "status-page")
     except TooManyRequests as exc:
         # 商業級修復：跟 `/analyze` 錯誤頁一致，統一走品牌化錯誤卡（見
         # `_render_error_card`），不留一處裸紅字例外。
@@ -1890,11 +1907,11 @@ def _home_overview_backend():
     同一套判斷邏輯，只是 dynamodb 分支多帶三個 timeout 參數）：`json` 分支
     是本機檔案 I/O，本來就不會 hang，不需要 timeout。
     """
-    from .ingestion.cache import DynamoDBCache, JsonCacheBackend
+    from .ingestion.cache import DynamoDBCache, get_cache_backend
 
     backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
-    if backend_name == "json":
-        return JsonCacheBackend()
+    if backend_name != "dynamodb":
+        return get_cache_backend()
     return DynamoDBCache(
         connect_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
         read_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
@@ -1922,11 +1939,11 @@ def _status_cache_backend():
     同一套判斷邏輯，只是 dynamodb 分支多帶三個 timeout 參數）：`json` 分支
     是本機檔案 I/O，本來就不會 hang，不需要 timeout。
     """
-    from .ingestion.cache import DynamoDBCache, JsonCacheBackend
+    from .ingestion.cache import DynamoDBCache, get_cache_backend
 
     backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
-    if backend_name == "json":
-        return JsonCacheBackend()
+    if backend_name != "dynamodb":
+        return get_cache_backend()
     return DynamoDBCache(
         connect_timeout=_STATUS_CACHE_CONNECT_TIMEOUT_SECONDS,
         read_timeout=_STATUS_CACHE_READ_TIMEOUT_SECONDS,
@@ -4957,6 +4974,214 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
     }
 
 
+def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
+    """Read-only Hermes worker/queue telemetry. UI polling never starts analysis."""
+    try:
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow() as flow:
+            return 200, _json_envelope_ok(flow.status())
+    except Exception:
+        logging.exception("TrustForge /api/analysis-flow error")
+        return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
+
+
+def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
+    """Read-only, version-backed Hermes ship/module upgrade projection."""
+    try:
+        from .upgrade_control import upgrade_status
+        return 200, _json_envelope_ok(upgrade_status())
+    except Exception:
+        logging.exception("TrustForge /api/hermes-upgrades error")
+        return 502, _json_envelope_err("upgrade_control_unavailable", "Hermes 升級控制面暫時無法讀取")
+
+
+def _handle_api_admin_upgrade_queue() -> tuple[int, str]:
+    """Authenticated durable proposal/sandbox/decision audit projection."""
+    try:
+        from .upgrade_queue import UpgradeQueue
+        return 200, _json_envelope_ok(UpgradeQueue().status())
+    except Exception:
+        logging.exception("TrustForge admin upgrade queue GET error")
+        return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法讀取")
+
+
+def _handle_api_admin_upgrade_action(headers, rfile, action: str) -> tuple[int, str]:
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        from .upgrade_queue import UpgradeQueue
+        queue = UpgradeQueue()
+        if action == "sandbox":
+            allowed = {"proposal_id", "passed", "artifact_hash", "details"}
+            if set(payload) - allowed or not isinstance(payload.get("passed"), bool):
+                return 400, _json_envelope_err("bad_request", "sandbox 欄位或 passed 型別不合法")
+            result = queue.record_sandbox(
+                str(payload.get("proposal_id", "")), payload["passed"],
+                str(payload.get("artifact_hash", "")), payload.get("details"),
+            )
+        else:
+            allowed = {"proposal_id", "decision", "actor", "reason"}
+            if set(payload) - allowed:
+                return 400, _json_envelope_err("bad_request", "decision 含不支援欄位")
+            result = queue.decide(
+                str(payload.get("proposal_id", "")), str(payload.get("decision", "")),
+                str(payload.get("actor", "")), str(payload.get("reason", "")),
+            )
+        return 200, _json_envelope_ok(result)
+    except KeyError:
+        return 404, _json_envelope_err("proposal_not_found", "找不到升級候選")
+    except ValueError as exc:
+        return 409, _json_envelope_err("invalid_upgrade_transition", str(exc))
+    except Exception:
+        logging.exception("TrustForge admin upgrade action error")
+        return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法寫入")
+
+
+def _handle_api_analysis_snapshot(qs: dict) -> tuple[int, str]:
+    """Return only the latest atomically published result for coin/mode."""
+    coin = qs.get("coin", ["BTC"])[0].upper()
+    mode = qs.get("mode", ["risk"])[0]
+    if coin not in COIN_POOL:
+        return 400, _json_envelope_err("invalid_coin", "不支援的幣種")
+    try:
+        from .analysis_flow import AnalysisFlow, MODES
+        if mode not in MODES:
+            return 400, _json_envelope_err("invalid_mode", "不支援的分析模式")
+        question = qs.get("q", [""])[0].strip() or None
+        with AnalysisFlow() as flow:
+            payload = flow.latest(coin, mode, question)
+        if payload is None:
+            return 404, _json_envelope_err("snapshot_pending", "此分析快照尚未發布")
+        return 200, _json_envelope_ok(payload)
+    except Exception:
+        logging.exception("TrustForge /api/analysis-snapshot error")
+        return 502, _json_envelope_err("analysis_snapshot_unavailable", "分析快照暫時無法讀取")
+
+
+def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
+    """Retrieve prior Hermes dialogue/results; this endpoint never starts work."""
+    coin = qs.get("coin", ["BTC"])[0].upper()
+    mode = qs.get("mode", ["risk"])[0]
+    question = qs.get("q", [""])[0].strip()
+    try:
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow() as flow:
+            return 200, _json_envelope_ok(flow.question_context(coin, mode, question))
+    except ValueError as exc:
+        return 400, _json_envelope_err("bad_request", str(exc))
+    except Exception:
+        logging.exception("TrustForge analysis question context error")
+        return 502, _json_envelope_err("analysis_memory_unavailable", "Hermes 題目記憶暫時無法讀取")
+
+
+def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[int, str]:
+    """Register analysis intent; workers consume it asynchronously from the latest snapshot."""
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error
+    assert payload is not None
+    if set(payload) - {"coin", "mode", "question"}:
+        return 400, _json_envelope_err("bad_request", "只接受 coin、mode、question")
+    try:
+        _check_status_rate_limit(client_ip, "analysis-write")
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow() as flow:
+            question_id, job_id = flow.register_question(
+                str(payload.get("coin", "")), str(payload.get("mode", "")), str(payload.get("question", "")),
+            )
+        return 202, _json_envelope_ok({"question_id": question_id, "job_id": job_id, "state": "queued" if job_id else "registered"})
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+    except ValueError as exc:
+        return 400, _json_envelope_err("bad_request", str(exc))
+    except Exception:
+        logging.exception("TrustForge /api/analysis-question error")
+        return 502, _json_envelope_err("analysis_queue_unavailable", "分析排程暫時無法寫入")
+
+
+def _handle_api_analysis_comparison_question(headers, rfile, client_ip: str = "") -> tuple[int, str]:
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None: return error
+    assert payload is not None
+    try:
+        _check_status_rate_limit(client_ip, "analysis-write")
+        coin = str(payload.get("coin", "")).upper()
+        coin2 = str(payload.get("coin2", "")).upper()
+        question = str(payload.get("question", "")).strip()
+        if coin == coin2: raise ValueError("comparison coins must differ")
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow() as flow:
+            a = flow.register_question(coin, "comparison", question)
+            b = flow.register_question(coin2, "comparison", question)
+        return 202, _json_envelope_ok({"question_ids": [a[0], b[0]], "job_ids": [a[1], b[1]], "state": "queued"})
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+    except ValueError as exc:
+        return 400, _json_envelope_err("bad_request", str(exc))
+    except Exception:
+        logging.exception("TrustForge comparison queue error")
+        return 502, _json_envelope_err("analysis_queue_unavailable", "比較排程暫時無法寫入")
+
+
+def _handle_api_comparison_snapshot(qs: dict) -> tuple[int, str]:
+    coin, coin2 = qs.get("coin", [""])[0].upper(), qs.get("coin2", [""])[0].upper()
+    question = qs.get("q", [""])[0].strip()
+    try:
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow() as flow:
+            a, b = flow.latest(coin, "comparison", question), flow.latest(coin2, "comparison", question)
+        if not a or not b: return 404, _json_envelope_err("snapshot_pending", "比較快照尚未發布")
+        data = {
+            "version": a["version"],
+            "report_a": a["report"], "evidence_a": a["evidence"], "trust_radar_a": a["trust_radar"],
+            "trust_components_aggregate_a": a["trust_components_aggregate"], "price_provenance_a": a["price_provenance"],
+            "report_b": b["report"], "evidence_b": b["evidence"], "trust_radar_b": b["trust_radar"],
+            "trust_components_aggregate_b": b["trust_components_aggregate"], "price_provenance_b": b["price_provenance"],
+            "execution": {"run_id": f"{a['execution']['run_id']}+{b['execution']['run_id']}", "nodes": a["execution"]["nodes"]},
+            "execution_log": a["execution_log"] + b["execution_log"],
+        }
+        return 200, _json_envelope_ok(data)
+    except Exception:
+        logging.exception("TrustForge comparison snapshot error")
+        return 502, _json_envelope_err("analysis_snapshot_unavailable", "比較快照暫時無法讀取")
+
+
+def _handle_api_analysis_journey(qs: dict) -> tuple[int, str]:
+    try:
+        from .analysis_flow import AnalysisFlow
+        raw = qs.get("limit", ["50"])[0]
+        limit = int(raw) if raw.isdigit() else 50
+        with AnalysisFlow() as flow:
+            return 200, _json_envelope_ok(flow.journey(limit=limit))
+    except Exception:
+        logging.exception("TrustForge analysis journey error")
+        return 502, _json_envelope_err("analysis_journey_unavailable", "執行旅程暫時無法讀取")
+
+
+def _handle_api_analysis_requeue(headers, rfile, client_ip: str = "") -> tuple[int, str]:
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None: return error
+    assert payload is not None
+    try:
+        _check_status_rate_limit(client_ip, "analysis-write")
+        from .analysis_flow import AnalysisFlow
+        job_id = str(payload.get("job_id", "")).strip()
+        if not job_id: raise ValueError("job_id required")
+        with AnalysisFlow() as flow:
+            if not flow.requeue_dead_letter(job_id):
+                return 404, _json_envelope_err("not_found", "找不到死信工作")
+        return 202, _json_envelope_ok({"job_id": job_id, "state": "queued"})
+    except TooManyRequests as exc:
+        return 429, _json_envelope_err("rate_limited", str(exc))
+    except ValueError as exc:
+        return 400, _json_envelope_err("bad_request", str(exc))
+    except Exception:
+        logging.exception("TrustForge analysis requeue error")
+        return 502, _json_envelope_err("analysis_queue_unavailable", "重新排程失敗")
+
+
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
     `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
@@ -5191,7 +5416,7 @@ def _handle_api_overview(client_ip: str = "") -> tuple[int, str]:
     單純 miss（某幣還沒排程寫過快照）維持原樣正常跳過，回 200 該幣缺席。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "overview")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
 
@@ -5314,7 +5539,7 @@ def _handle_api_status(client_ip: str = "") -> tuple[int, str]:
     降級 metadata；primary+fallback 都失敗才 502。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "status-api")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
 
@@ -5394,7 +5619,7 @@ def _handle_api_costs(qs: dict | None = None, client_ip: str = "") -> tuple[int,
     讀 `run_count`，不可用 `runs.length` 估算（帳本 >50 筆時會低估）。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "costs")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     try:
@@ -5444,7 +5669,7 @@ def _handle_api_history(qs: dict, client_ip: str = "") -> tuple[int, str]:
     + 較短的 history 陣列。
     """
     try:
-        _check_status_rate_limit(client_ip)
+        _check_status_rate_limit(client_ip, "history")
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
 
@@ -6128,7 +6353,14 @@ class Handler(BaseHTTPRequestHandler):
         for name, val in (extra_headers or {}).items():
             self.send_header(name, val)
         self.end_headers()
-        self.wfile.write(b)
+        try:
+            self.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser can cancel an in-flight analysis when the user
+            # navigates away. nginx records that as 499; it is not a server
+            # failure and should not emit a traceback that obscures real
+            # production errors.
+            return
 
     def log_message(self, *a):  # 靜音預設存取日誌
         pass
@@ -6236,6 +6468,9 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/admin/audit":
                     code, body = _handle_api_admin_audit(qs)
                     return self._send(code, body, "application/json; charset=utf-8")
+                if u.path == "/api/admin/hermes-upgrades":
+                    code, body = _handle_api_admin_upgrade_queue()
+                    return self._send(code, body, "application/json; charset=utf-8")
                 # 已認證但打到不存在的 admin 子路徑 → JSON 404
                 return self._send(
                     404,
@@ -6269,6 +6504,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/history":
             code, body = _handle_api_history(qs, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-flow":
+            code, body = _handle_api_analysis_flow(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/hermes-upgrades":
+            code, body = _handle_api_hermes_upgrades(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-snapshot":
+            code, body = _handle_api_analysis_snapshot(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-question-context":
+            code, body = _handle_api_analysis_question_context(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/comparison-snapshot":
+            code, body = _handle_api_comparison_snapshot(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-journey":
+            code, body = _handle_api_analysis_journey(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analyze":
             code, body = _handle_api_analyze(qs, client_ip)
@@ -6570,6 +6823,37 @@ class Handler(BaseHTTPRequestHandler):
             "application/json; charset=utf-8",
             extra_headers={"Allow": "GET"},
         )
+
+    def do_POST(self):
+        """Analysis intent is the only public write; it queues work and never computes inline."""
+        u = urlparse(self.path)
+        client_ip = _resolve_client_ip(self.client_address[0], getattr(self, "headers", {}))
+        if (u.path + "/").startswith("/api/admin/") and ADMIN_TOKEN:
+            denied = _admin_auth_check(getattr(self, "headers", {}), client_ip, u.path)
+            if denied is not None:
+                return self._send(denied[0], denied[1], "application/json; charset=utf-8")
+            actions = {
+                "/api/admin/hermes-upgrade-sandbox": "sandbox",
+                "/api/admin/hermes-upgrade-decision": "decision",
+            }
+            if u.path in actions:
+                code, body = _handle_api_admin_upgrade_action(
+                    getattr(self, "headers", {}), self.rfile, actions[u.path]
+                )
+                return self._send(code, body, "application/json; charset=utf-8")
+            return self._send(404, _json_envelope_err("not_found", "無此管理端點"),
+                              "application/json; charset=utf-8")
+        if u.path == "/api/analysis-question":
+            code, body = _handle_api_analysis_question(getattr(self, "headers", {}), self.rfile, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-comparison-question":
+            code, body = _handle_api_analysis_comparison_question(getattr(self, "headers", {}), self.rfile, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-requeue":
+            code, body = _handle_api_analysis_requeue(getattr(self, "headers", {}), self.rfile, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        return self._send(405, _json_envelope_err("method_not_allowed", "此路徑不支援 POST"),
+                          "application/json; charset=utf-8", extra_headers={"Allow": "GET"})
 
 
 def main():

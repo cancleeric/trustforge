@@ -1,0 +1,519 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import HermesTopBar from '../hermes/HermesTopBar'
+import HermesLeftRail from '../hermes/HermesLeftRail'
+import HermesRightRail from '../hermes/HermesRightRail'
+import CurrencyGalaxy from '../hermes/CurrencyGalaxy'
+import StageBar from '../hermes/StageBar'
+import StageDrilldown from '../hermes/StageDrilldown'
+import { buildGalaxyModel, deriveSelected, HERMES_AMBER, HERMES_CYAN, HERMES_RED, tierOf, type GalaxyCoin, type GalaxyModel, type TrustComponent } from '../lib/hermesData'
+import { getOverview, getCosts, getHealth, getAnalysisFlow, getAnalysisJourney, getAnalysisQuestionContext, getHermesUpgrades, type AnalysisFlowData, type AnalysisJourneyData, type AnalysisQuestionContext, type HermesUpgradeData } from '../lib/endpoints'
+import '../hermes/hermes.css'
+import { useHermesI18n } from '../hermes/hermesI18n'
+import HermesModuleDeck, { type HermesWorkspaceModule } from '../hermes/HermesModuleDeck'
+import type { BridgeHologramData } from '../components/BridgeHologramContext'
+import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
+
+export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
+
+export default function HermesDashboard() {
+  const { locale, t } = useHermesI18n()
+  const qtypes = [t('risk'), t('sentiment'), t('fundamentals'), t('news'), t('catalyst')]
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedCoin = searchParams.get('coin')?.toLowerCase()
+  const [model, setModel] = useState<GalaxyModel>(() => buildGalaxyModel(null))
+  const [, setOverviewRevision] = useState('boot')
+  const [selectedId, setSelectedId] = useState(() =>
+    requestedCoin && ['btc', 'eth', 'sol', 'bnb', 'xrp'].includes(requestedCoin) ? requestedCoin : 'btc',
+  )
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [selectedStage, setSelectedStage] = useState<string | null>(null)
+  const [phase, setPhase] = useState<'ready' | 'loading'>('ready')
+  const [lastOrder, setLastOrder] = useState(false)
+  const [startupStep, setStartupStep] = useState(0)
+  const [moduleTelemetry, setModuleTelemetry] = useState<BridgeHologramData | null>(null)
+  const [analysisFlow, setAnalysisFlow] = useState<AnalysisFlowData | null>(null)
+  const [analysisJourney, setAnalysisJourney] = useState<AnalysisJourneyData | null>(null)
+  const [questionContext, setQuestionContext] = useState<AnalysisQuestionContext | null>(null)
+  const [shipOpen, setShipOpen] = useState(false)
+  const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
+  const [upgradeLoading, setUpgradeLoading] = useState(false)
+  const [qtype, setQtype] = useState(t('risk'))
+  const [query, setQuery] = useState(t('defaultQuery'))
+  const [typedLen, setTypedLen] = useState(0)
+  const [focusPulse, setFocusPulse] = useState(false)
+  const [displayScore, setDisplayScore] = useState(0)
+  const displayScoreRef = useRef(0)
+  const [runtimeVersion, setRuntimeVersion] = useState('snapshot')
+  const [costLedger, setCostLedger] = useState<number | null>(null)
+  const [startupComplete, setStartupComplete] = useState(false)
+  const [serviceMonitor, setServiceMonitor] = useState<Record<string, ServiceMonitorState>>({
+    overview: 'checking', health: 'checking', sources: 'checking', history: 'checking', costs: 'checking',
+  })
+  const [boot, setBoot] = useState({ topbar: false, left: false, galaxy: false, right: false, bottom: false })
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const requestedModule = searchParams.get('workspace')
+  const [activeModule, setActiveModule] = useState<HermesWorkspaceModule | null>(
+    requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
+      ? requestedModule : null,
+  )
+  const activeQuestionMode = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))]
+
+  const toggleShip = useCallback(() => {
+    if (shipOpen) { setShipOpen(false); return }
+    setShipOpen(true); setUpgradeLoading(true)
+    void getHermesUpgrades().then((result) => { if (result.ok) setUpgradeData(result.data) }).finally(() => setUpgradeLoading(false))
+  }, [shipOpen])
+
+  const refreshUpgrades = useCallback(() => {
+    setUpgradeLoading(true)
+    void getHermesUpgrades().then((result) => { if (result.ok) setUpgradeData(result.data) }).finally(() => setUpgradeLoading(false))
+  }, [])
+
+  const byIdRef = useRef<Record<string, GalaxyCoin>>(model.byId)
+
+  useEffect(() => {
+    if (requestedCoin && model.byId[requestedCoin] && requestedCoin !== selectedId) {
+      setSelectedId(requestedCoin)
+    }
+  }, [model.byId, requestedCoin, selectedId])
+
+  const selectCoin = useCallback((id: string) => {
+    setSelectedId(id)
+    const next = new URLSearchParams(searchParams)
+    next.set('coin', id.toUpperCase())
+    setSearchParams(next, { replace: true })
+  }, [searchParams, setSearchParams])
+
+  // Boot sequence is presentation, never an availability gate. Slow or failed
+  // channels continue reporting through the bridge monitor after entry.
+  useEffect(() => {
+    const timers = [1, 2, 3, 4, 5].map((step) => window.setTimeout(() => setStartupStep(step), step * 280))
+    timers.push(window.setTimeout(() => setStartupComplete(true), 1800))
+    return () => timers.forEach(window.clearTimeout)
+  }, [])
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setQuestionContext(null)
+      return
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      void getAnalysisQuestionContext(selectedId.toUpperCase(), activeQuestionMode, query.trim(), controller.signal).then((result) => {
+        if (!controller.signal.aborted && result.ok) setQuestionContext(result.data)
+      })
+    }, 250)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [activeQuestionMode, query, selectedId])
+
+  useEffect(() => {
+    let active = true
+    let timer: number | undefined
+    let controller: AbortController | null = null
+    const poll = async () => {
+      controller = new AbortController()
+      const result = await getAnalysisJourney(controller.signal)
+      if (active && result.ok) setAnalysisJourney(result.data)
+      if (active) timer = window.setTimeout(() => void poll(), 5000)
+    }
+    void poll()
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    let timer: number | undefined
+    let controller: AbortController | null = null
+    const poll = async () => {
+      controller = new AbortController()
+      const result = await getAnalysisFlow(controller.signal)
+      if (active && result.ok) setAnalysisFlow(result.data)
+      if (active) timer = window.setTimeout(() => void poll(), 1500)
+    }
+    void poll()
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
+  }, [])
+
+  const buildHermesMessage = useCallback((sel: GalaxyCoin, ph: 'ready' | 'loading'): string => {
+    const scanned = Math.round(60 + sel.econ * 0.9)
+    const tierText = sel.tier === 'healthy' ? t('highTrust') : sel.tier === 'moderate' ? t('moderateTrust') : t('lowTrust')
+    if (locale === 'zh-TW') return ph === 'loading'
+      ? `正在分析 ${sel.full}，交叉核對 ${scanned} 個來源…`
+      : `正在追蹤 ${sel.full}。綜合信任分數 ${sel.score}/100，${tierText}。${sel.tier === 'healthy' ? '訊號乾淨，目前不需處置。' : sel.tier === 'moderate' ? '建議在增加曝險前持續監控來源分歧。' : '完整性訊號下降，建議謹慎。'}`
+    return ph === 'loading'
+      ? `Analyzing ${sel.full}… cross-referencing ${scanned} sources.`
+      : `Tracking ${sel.full}. Composite trust score ${sel.score}/100 — ${tierText}. ` +
+        (sel.tier === 'healthy' ? 'Signal is clean; no action required.'
+          : sel.tier === 'moderate' ? 'Recommend monitoring divergence before increasing exposure.'
+            : 'Advise caution — integrity signals are degraded.')
+  }, [locale, t])
+
+  const typeTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const scoreTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bootTimers = useRef<ReturnType<typeof setTimeout>[]>([])
+
+  const startTyping = useCallback((sel: GalaxyCoin, ph: 'ready' | 'loading') => {
+    if (typeTimer.current) clearInterval(typeTimer.current)
+    setTypedLen(0)
+    const full = buildHermesMessage(sel, ph)
+    typeTimer.current = setInterval(() => {
+      setTypedLen((prev) => {
+        const next = Math.min(full.length, prev + 2)
+        if (next >= full.length && typeTimer.current) clearInterval(typeTimer.current)
+        return next
+      })
+    }, 18)
+  }, [buildHermesMessage])
+
+  const animateScoreTo = useCallback((target: number) => {
+    if (scoreTimer.current) clearInterval(scoreTimer.current)
+    const start = displayScoreRef.current
+    const t0 = Date.now()
+    const dur = 500
+    scoreTimer.current = setInterval(() => {
+      const t = Math.min(1, (Date.now() - t0) / dur)
+      const next = Math.round(start + (target - start) * t)
+      displayScoreRef.current = next
+      setDisplayScore(next)
+      if (t >= 1 && scoreTimer.current) clearInterval(scoreTimer.current)
+    }, 25)
+  }, [])
+
+  const triggerFocusPulse = useCallback(() => {
+    setFocusPulse(true)
+    if (pulseTimer.current) clearTimeout(pulseTimer.current)
+    pulseTimer.current = setTimeout(() => setFocusPulse(false), 500)
+  }, [])
+
+  // 常駐系統永遠先顯示 last-known-good/fallback，再於背景持續刷新。
+  useEffect(() => {
+    const fallback = buildGalaxyModel(null)
+    byIdRef.current = fallback.byId
+    setModel(fallback)
+    const controllers = new Set<AbortController>()
+    const refresh = () => {
+      const controller = new AbortController()
+      controllers.add(controller)
+      void getOverview(controller.signal).then((env) => {
+        controllers.delete(controller)
+        if (controller.signal.aborted) return
+        if (!env.ok) {
+          setServiceMonitor((current) => ({ ...current, overview: 'error' }))
+          setLoadError(env.error.message)
+          return
+        }
+        const m = buildGalaxyModel(env.data)
+        setOverviewRevision(env.data.coins.map((coin) => `${coin.coin}:${coin.generated_at}`).join('|'))
+        byIdRef.current = m.byId
+        setModel(m)
+        setServiceMonitor((current) => ({ ...current, overview: 'ok' }))
+        setLoadError(null)
+        const initialScore = m.byId[selectedId]?.score ?? 0
+        displayScoreRef.current = initialScore
+        setDisplayScore(initialScore)
+      }).catch(() => {
+        setServiceMonitor((current) => ({ ...current, overview: 'error' }))
+        setLoadError('overview uplink unavailable')
+      })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 30_000)
+    return () => {
+      window.clearInterval(timer)
+      controllers.forEach((controller) => controller.abort())
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /*
+   * 版本與成本同樣背景輪詢；失敗時保留上一筆，不把 HUD 退回 loading。
+   */
+  useEffect(() => {
+    const controllers = new Set<AbortController>()
+    const refresh = () => {
+      const controller = new AbortController()
+      controllers.add(controller)
+      void Promise.all([getHealth(controller.signal), getCosts(controller.signal)]).then(([health, costs]) => {
+        controllers.delete(controller)
+        if (controller.signal.aborted) return
+        if (health.ok) setRuntimeVersion(health.data.version)
+        if (costs.ok) setCostLedger(costs.data.total_cost_usd)
+        setServiceMonitor((current) => ({
+          ...current,
+          health: health.ok ? 'ok' : 'error',
+          costs: costs.ok ? 'ok' : 'error',
+        }))
+        if (!health.ok || !costs.ok) {
+          setLoadError(!health.ok ? health.error.message : !costs.ok ? costs.error.message : 'service uplink unavailable')
+        }
+      }).catch(() => {
+        setServiceMonitor((current) => ({ ...current, health: 'error', costs: 'error' }))
+        setLoadError('service uplink unavailable')
+      })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 15_000)
+    return () => {
+      window.clearInterval(timer)
+      controllers.forEach((controller) => controller.abort())
+    }
+  }, [])
+
+  // 啟動時完整自檢；進入艦橋後持續監控所有唯讀系統通道。
+  useEffect(() => {
+    const controllers = new Set<AbortController>()
+    const inspect = () => {
+      const controller = new AbortController()
+      controllers.add(controller)
+      const checks = {
+        sources: '/api/status',
+        history: '/api/history?coin=BTC&days=30',
+      }
+      void Promise.all(Object.entries(checks).map(async ([name, url]) => {
+        try {
+          const response = await fetch(url, { signal: controller.signal, cache: 'no-store', headers: { Accept: 'application/json' } })
+          const envelope: unknown = await response.json()
+          if (!response.ok || typeof envelope !== 'object' || envelope === null || !('ok' in envelope) || envelope.ok !== true || !('data' in envelope)) {
+            return [name, 'error'] as const
+          }
+          const data = envelope.data
+          if (typeof data !== 'object' || data === null) return [name, 'error'] as const
+          if (name === 'sources' && 'freshness' in data && typeof data.freshness === 'object' && data.freshness !== null) {
+            const freshness = data.freshness as Record<string, unknown>
+            const fresh = typeof freshness.fresh === 'number' ? freshness.fresh : 0
+            const stale = typeof freshness.stale === 'number' ? freshness.stale : 0
+            const missing = typeof freshness.missing === 'number' ? freshness.missing : 0
+            if (fresh === 0 && stale === 0 && missing > 0) return [name, 'empty'] as const
+            if (stale > 0 || missing > 0) return [name, 'stale'] as const
+          }
+          if (name === 'history' && 'history' in data && Array.isArray(data.history) && data.history.length === 0) {
+            return [name, 'empty'] as const
+          }
+          return [name, 'ok'] as const
+        } catch {
+          return [name, 'error'] as const
+        }
+      })).then((entries) => {
+        controllers.delete(controller)
+        if (controller.signal.aborted) return
+        setServiceMonitor((current) => ({ ...current, ...Object.fromEntries(entries) }))
+      })
+    }
+    inspect()
+    const timer = window.setInterval(inspect, 10_000)
+    return () => {
+      window.clearInterval(timer)
+      controllers.forEach((controller) => controller.abort())
+    }
+  }, [])
+
+  // ── boot 進場動畫 ──
+  useEffect(() => {
+    const timers = bootTimers.current
+    const stage = (key: keyof typeof boot, delay: number) =>
+      timers.push(setTimeout(() => setBoot((b) => ({ ...b, [key]: true })), delay))
+    stage('topbar', 0); stage('left', 150); stage('galaxy', 320); stage('right', 620); stage('bottom', 880)
+    timers.push(setTimeout(() => {
+      if (byIdRef.current[selectedId]) startTyping(byIdRef.current[selectedId], phase)
+    }, 1150))
+    return () => { timers.forEach(clearTimeout) }
+  }, [startTyping, phase, selectedId])
+
+  // ── 切幣 / 階段變化 → 重算分數動畫 + typing ──
+  useEffect(() => {
+    if (!model) return
+    const sel = model.byId[selectedId]
+    if (!sel) return
+    animateScoreTo(sel.score)
+    triggerFocusPulse()
+    startTyping(sel, phase)
+  }, [selectedId, model, phase, animateScoreTo, triggerFocusPulse, startTyping])
+
+  useEffect(() => {
+    return () => {
+      if (typeTimer.current) clearInterval(typeTimer.current)
+      if (scoreTimer.current) clearInterval(scoreTimer.current)
+      if (pulseTimer.current) clearTimeout(pulseTimer.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!selectedStage) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSelectedStage(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [selectedStage])
+
+  const onSubmit = useCallback(() => {
+    if (!query.trim()) return
+    setPhase('loading')
+    setLastOrder(true)
+    const type = qtype === t('fundamentals') ? 'hypothesis' : 'multi_source'
+    const search = new URLSearchParams({
+      coin: selectedId.toUpperCase(), type, q: query.trim(),
+    })
+    search.set('mode', ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))])
+    search.set('workspace', 'analyze')
+    setSearchParams(search)
+    setActiveModule('analyze')
+  }, [qtype, qtypes, query, selectedId, setSearchParams, t])
+
+  useEffect(() => {
+    if (moduleTelemetry) setPhase('ready')
+  }, [moduleTelemetry])
+
+  const openModule = useCallback((module: HermesWorkspaceModule) => {
+    if (activeModule === module) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('workspace')
+      setSearchParams(next)
+      setActiveModule(null)
+      return
+    }
+    // Top-bar navigation opens a clean workspace. Analysis parameters from a
+    // previous module must never leak into another module and trigger work.
+    const next = new URLSearchParams({ workspace: module, coin: selectedId.toUpperCase() })
+    setSearchParams(next)
+    setActiveModule(module)
+  }, [activeModule, searchParams, selectedId, setSearchParams])
+
+  const closeModule = useCallback(() => {
+    const next = new URLSearchParams(searchParams)
+    next.delete('workspace')
+    setSearchParams(next)
+    setActiveModule(null)
+  }, [searchParams, setSearchParams])
+
+  const selCoin = model.byId[selectedId]
+  const derivation = deriveSelected(selCoin)
+  const telemetryScore = moduleTelemetry?.trustScore == null
+    ? null
+    : Math.round((moduleTelemetry.trustScore <= 1 ? moduleTelemetry.trustScore * 100 : moduleTelemetry.trustScore))
+  const hudCoin: GalaxyCoin = telemetryScore == null ? selCoin : {
+    ...selCoin,
+    name: moduleTelemetry?.primaryLabel || selCoin.name,
+    full: moduleTelemetry?.primaryLabel || selCoin.full,
+    score: telemetryScore,
+    tier: tierOf(telemetryScore),
+  }
+  const hudDerivation = deriveSelected(hudCoin)
+  const componentColor = (score: number) => score >= 75 ? HERMES_CYAN : score >= 50 ? HERMES_AMBER : HERMES_RED
+  const rawComponents = moduleTelemetry?.componentScores
+  const hudComponents: TrustComponent[] = rawComponents ? [
+    ['Reputation', rawComponents.reputation, 30],
+    ['Corroboration', rawComponents.corroboration, 30],
+    ['Recency', rawComponents.recency, 20],
+    ['Manipulation resistance', rawComponents.resistance, 20],
+  ].map(([label, value, weight]) => {
+    const score = value == null ? 0 : Math.round(Number(value) * 100)
+    return { label: String(label), score, weight: Number(weight), barColor: componentColor(score) }
+  }) : derivation.components
+
+  const hermesFull = buildHermesMessage(selCoin, phase)
+  const telemetryMessage = telemetryScore == null
+    ? null
+    : locale === 'zh-TW'
+      ? `${hudCoin.full} 本次執行完成。綜合信任分數 ${telemetryScore}/100，${hudCoin.tier === 'healthy' ? t('highTrust') : hudCoin.tier === 'moderate' ? t('moderateTrust') : t('lowTrust')}。右側拆解與下方能量管線已鎖定本次 run。`
+      : `${hudCoin.full} run complete. Composite trust score ${telemetryScore}/100. The right breakdown and engine pipeline are locked to this run.`
+  const hermesMessage = telemetryMessage ?? hermesFull.slice(0, typedLen)
+  const failedServices = Object.entries(serviceMonitor).filter(([, state]) => state === 'error').map(([name]) => name)
+  const globalError = failedServices.length ? `${failedServices.join(', ')} uplink unavailable` : loadError
+
+  if (!startupComplete) {
+    const bootLabels = locale === 'zh-TW'
+      ? ['核心初始化', '快照載入', '工作流掛載', '遙測介面', '艦橋就緒']
+      : ['CORE INIT', 'SNAPSHOT LOAD', 'WORKFLOW MOUNT', 'TELEMETRY UI', 'BRIDGE READY']
+    return (
+      <div className="hermes-startup" role="status" aria-live="polite">
+        <div className="hermes-startup-core"><i /><b /></div>
+        <strong>TRUSTFORGE HERMES</strong>
+        <span>{locale === 'zh-TW' ? '系統啟動與模組載入' : 'SYSTEM STARTUP & MODULE LOAD'}</span>
+        <div className="hermes-startup-progress"><i style={{ width: `${(startupStep / 5) * 100}%` }} /></div>
+        <small>{startupStep} / 5 · {bootLabels[Math.max(0, startupStep - 1)]}</small>
+      </div>
+    )
+  }
+
+  return (
+    <div className="hermes-root hermes-dashboard" style={{ width: '100vw', height: '100dvh', overflow: 'hidden', background: '#02040a' }}>
+      <div className="hermes-frame" style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden', background: 'radial-gradient(ellipse at 50% 30%,#0b1420 0%,#02040a 72%)', color: 'var(--color-hermes-tx)', border: '1px solid rgba(140,190,210,.08)', boxShadow: '0 60px 160px rgba(0,0,0,.7)' }}>
+        {/* scanline + vignette */}
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, background: 'repeating-linear-gradient(rgba(255,255,255,.015) 0px,rgba(255,255,255,.015) 1px,transparent 1px,transparent 3px)' }} />
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, boxShadow: 'inset 0 0 160px rgba(0,0,0,.65)' }} />
+        {/* corner brackets */}
+        <div style={{ position: 'absolute', left: 6, top: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderTop: '2px solid rgba(77,216,224,.55)', borderLeft: '2px solid rgba(77,216,224,.55)', boxShadow: '-2px -2px 10px rgba(77,216,224,.2)' }} />
+        <div style={{ position: 'absolute', right: 6, top: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderTop: '2px solid rgba(232,179,77,.5)', borderRight: '2px solid rgba(232,179,77,.5)', boxShadow: '2px -2px 10px rgba(232,179,77,.18)' }} />
+        <div style={{ position: 'absolute', left: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(232,179,77,.5)', borderLeft: '2px solid rgba(232,179,77,.5)', boxShadow: '-2px 2px 10px rgba(232,179,77,.18)' }} />
+        <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
+
+        <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
+          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} />
+        </div>
+
+        <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>
+          <HermesLeftRail
+            model={model}
+            hermesMessage={hermesMessage}
+            hasOrder={lastOrder}
+            qtype={qtype}
+            qtypes={qtypes}
+            query={query}
+            submitLabel={phase === 'loading' ? 'Hermes 自動分析中…' : '立即重新分析'}
+            onType={setQtype}
+            onQuery={setQuery}
+            onSubmit={onSubmit}
+            disabled={!query.trim() || phase === 'loading'}
+            serviceMonitor={serviceMonitor}
+            questionContext={questionContext}
+            onRecallQuestion={setQuery}
+          />
+        </div>
+
+        <div className="hermes-boot-layer" style={{ opacity: boot.galaxy ? 1 : 0, transition: 'opacity .6s ease-out' }}>
+          <CurrencyGalaxy
+            model={model}
+            selectedId={selectedId}
+            hoveredId={hoveredId}
+            focusPulse={focusPulse}
+            onSelect={selectCoin}
+            onHover={setHoveredId}
+          />
+        </div>
+
+        <div className="hermes-boot-layer" style={{ opacity: boot.right ? 1 : 0, transition: 'opacity .5s ease-out' }}>
+          <HermesRightRail
+            selCoin={hudCoin}
+            components={hudComponents}
+            displayScore={telemetryScore ?? displayScore}
+            derived={!rawComponents}
+            flow={analysisFlow}
+            journey={analysisJourney}
+            derivation={hudDerivation}
+            onOpenComposite={() => setSelectedStage('composite')}
+            onOpenDivergence={() => setSelectedStage('divergence')}
+          />
+        </div>
+
+        <div className="hermes-boot-layer" style={{ opacity: boot.bottom ? 1 : 0, transition: 'opacity .5s ease-out' }}>
+          <StageBar flow={analysisFlow} mode={activeModule} telemetry={moduleTelemetry} activity={{ status: phase, coin: selectedId.toUpperCase(), mode: qtype, question: query.trim() }} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onSelectStage={(id) => setSelectedStage((s) => (s === id ? null : id))} />
+        </div>
+
+        {selectedStage && (
+          <>
+            <button className="hermes-drilldown-scrim" type="button" aria-label={t('close')} onClick={() => setSelectedStage(null)} />
+            <StageDrilldown journey={analysisJourney} flow={analysisFlow} selCoin={selCoin} derivation={derivation} selectedStage={selectedStage} onClose={() => setSelectedStage(null)} />
+          </>
+        )}
+
+        {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} />}
+
+        {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />}
+
+      </div>
+    </div>
+  )
+}

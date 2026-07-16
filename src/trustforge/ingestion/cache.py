@@ -64,8 +64,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
@@ -88,6 +90,14 @@ def _default_cache_dir() -> Path:
 def _default_json_path() -> Path:
     return Path(
         os.getenv("TRUSTFORGE_CACHE_JSON_PATH", str(_default_cache_dir() / "connector_cache.json"))
+    )
+
+
+def _default_sqlite_path() -> Path:
+    """本機持久化資料庫；JSON 僅保留為匯入/故障備援。"""
+    home = Path(os.getenv("TRUSTFORGE_HOME", str(Path(__file__).resolve().parents[3])))
+    return Path(
+        os.getenv("TRUSTFORGE_SQLITE_PATH", str(home / "out" / "trustforge.sqlite3"))
     )
 
 
@@ -459,15 +469,43 @@ class JsonCacheBackend(CacheBackend):
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path is not None else _default_json_path()
+        self._read_cache_lock = threading.RLock()
+        self._read_cache_signature: tuple[int, int, int] | None = None
+        self._read_cache_data: dict[str, Any] | None = None
+
+    def _file_signature(self) -> tuple[int, int, int] | None:
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return None
+        return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
     def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-        return data if isinstance(data, dict) else {}
+        """Load one immutable-on-read snapshot and reuse it until the file changes.
+
+        The status matrix reads every source/coin cell from the same JSON file.  The
+        old implementation parsed the whole file once per cell (currently 115
+        parses of a ~2 MB file per request), which made local observability slow
+        enough to cascade into frontend timeouts.  The scheduler replaces this file
+        atomically, so inode/mtime/size form a cheap invalidation signature.
+        """
+        with self._read_cache_lock:
+            signature = self._file_signature()
+            if signature is None:
+                self._read_cache_signature = None
+                self._read_cache_data = {}
+                return self._read_cache_data
+            if signature == self._read_cache_signature and self._read_cache_data is not None:
+                return self._read_cache_data
+
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+            resolved = data if isinstance(data, dict) else {}
+            self._read_cache_signature = self._file_signature()
+            self._read_cache_data = resolved
+            return resolved
 
     def get(self, key: str, *, consistent_read: bool = False) -> dict[str, Any] | None:
         del consistent_read  # 單一本機 JSON 檔案，本來就沒有最終一致性問題
@@ -508,7 +546,9 @@ class JsonCacheBackend(CacheBackend):
         在各自的鎖臨界區內呼叫，避免 `set_if_newer()` 呼叫 `self.set()` 時
         對同一把鎖再巢狀 `open()`/`flock()` 一次（語意上容易搞混，直接用
         不拿鎖的內部版本更清楚，不依賴 flock 對同執行緒重入的細節）。"""
-        data = self._load()
+        # Copy-on-write: `_load()` may return the shared read snapshot.  Mutating it
+        # before `os.replace()` succeeds would expose data that is not on disk yet.
+        data = dict(self._load())
         data[key] = {"docs": docs, "fetched_at": fetched_at}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
@@ -545,13 +585,6 @@ class JsonCacheBackend(CacheBackend):
         self, key: str, docs: list[dict[str, Any]], fetched_at: float,
         ttl_seconds: float | None = None,
     ) -> bool:
-        """`fcntl.flock` 包住整段「讀目前值 → 比較 `fetched_at` → （可能）
-        覆寫」臨界區，跨行程/跨執行緒序列化——避免兩個重疊排程各自照著自己
-        讀到的（尚未看到對方較新一筆的）舊狀態判斷「該覆寫」，把較新的值
-        蓋回舊值（lost update，同 `JsonlSchedulerRunLog._update_pointers_locked`
-        docstring 說明的坑）。覆寫時呼叫 `_set_unlocked()`（**不是**
-        `self.set()`）——鎖已經在這個 `with` 區塊裡拿著，避免對同一把鎖再
-        巢狀 `open()`/`flock()` 一次。"""
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -563,6 +596,127 @@ class JsonCacheBackend(CacheBackend):
                 return True
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+class SQLiteCacheBackend(CacheBackend):
+    """本機正式 cache backend。
+
+    使用 SQLite WAL，讓 Web 的並行讀取與 15 分鐘排程寫入可共用同一資料庫；
+    每個 key 是 `(source_id, coin)`，內容仍維持既有 docs/fetched_at 契約。
+    """
+
+    def __init__(self, path: str | Path | None = None):
+        self.path = Path(path) if path is not None else _default_sqlite_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(
+            self.path, timeout=10.0, check_same_thread=False, isolation_level=None,
+        )
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=10000")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS connector_cache (
+                source_id TEXT NOT NULL,
+                coin TEXT NOT NULL,
+                docs_json TEXT NOT NULL,
+                fetched_at REAL NOT NULL,
+                expires_at REAL,
+                PRIMARY KEY (source_id, coin)
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_connector_cache_fetched_at "
+            "ON connector_cache(fetched_at)"
+        )
+
+    @staticmethod
+    def _split_key(key: str) -> tuple[str, str]:
+        source_id, separator, coin = key.partition(":")
+        if not separator or not source_id or not coin:
+            raise ValueError(f"invalid cache key: {key!r}")
+        return source_id, coin
+
+    def get(self, key: str, *, consistent_read: bool = False) -> dict[str, Any] | None:
+        del consistent_read  # SQLite 讀取本身具交易一致性
+        source_id, coin = self._split_key(key)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT docs_json, fetched_at FROM connector_cache "
+                "WHERE source_id = ? AND coin = ?",
+                (source_id, coin),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            docs = json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(docs, list):
+            return None
+        return {"docs": docs, "fetched_at": float(row[1])}
+
+    def set(
+        self, key: str, docs: list[dict[str, Any]], fetched_at: float,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        source_id, coin = self._split_key(key)
+        expires_at = fetched_at + ttl_seconds if ttl_seconds is not None else None
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO connector_cache
+                    (source_id, coin, docs_json, fetched_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, coin) DO UPDATE SET
+                    docs_json = excluded.docs_json,
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at
+                """,
+                (source_id, coin, json.dumps(docs, ensure_ascii=False), fetched_at, expires_at),
+            )
+
+    def set_if_newer(
+        self, key: str, docs: list[dict[str, Any]], fetched_at: float,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        source_id, coin = self._split_key(key)
+        expires_at = fetched_at + ttl_seconds if ttl_seconds is not None else None
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO connector_cache
+                    (source_id, coin, docs_json, fetched_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, coin) DO UPDATE SET
+                    docs_json = excluded.docs_json,
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at
+                WHERE excluded.fetched_at > connector_cache.fetched_at
+                """,
+                (source_id, coin, json.dumps(docs, ensure_ascii=False), fetched_at, expires_at),
+            )
+        return cursor.rowcount > 0
+
+    def close(self) -> None:
+        with self._lock:
+            conn = self._conn
+            if conn is None:
+                return
+            self._conn = None
+            conn.close()
+
+    def __del__(self) -> None:
+        # Tests and short-lived CLI commands do not always own the backend long
+        # enough to use a context manager.  Release SQLite deterministically
+        # when the backend itself is collected instead of relying on the
+        # interpreter to close the raw connection at shutdown.
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class DynamoDBCache(CacheBackend):
@@ -726,7 +880,7 @@ class DynamoDBCache(CacheBackend):
 
 
 def get_cache_backend() -> CacheBackend:
-    """依 env `CACHE_BACKEND`（`dynamodb`|`json`，**預設 `dynamodb`**）選
+    """依 env `CACHE_BACKEND`（`dynamodb`|`sqlite`|`json`）選
     backend。
 
     選 `dynamodb` 本身不會 raise（`DynamoDBCache.__init__` 只讀 env、不連
@@ -738,7 +892,11 @@ def get_cache_backend() -> CacheBackend:
     backend = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
     if backend == "json":
         return JsonCacheBackend()
-    return DynamoDBCache()
+    if backend == "sqlite":
+        return SQLiteCacheBackend()
+    if backend == "dynamodb":
+        return DynamoDBCache()
+    raise ValueError(f"unsupported CACHE_BACKEND: {backend!r}")
 
 
 class CacheReadFailure(Exception):

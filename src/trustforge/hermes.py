@@ -50,9 +50,12 @@ HERMES_TOOLS = (
     HermesTool("archive_source_snapshot", "Persist source documents with published_at, fetched_at and snapshot_at.", "autonomous", 5),
     HermesTool("build_snapshots", "Build one trust snapshot per allowed coin from cache only.", "autonomous", 1),
     HermesTool("cache_freshness_dashboard", "Publish durable cache age, gaps and scheduler-health state.", "autonomous", 1),
+    HermesTool("measure_connector_reliability", "Measure per-source failure rate and seven-attempt success gates.", "autonomous", 1),
+    HermesTool("measure_quality", "Run bounded offline regression and replay measurements for improvement diagnostics.", "autonomous", 1),
     HermesTool("read_snapshot", "Read a snapshot at or before formal-run start time.", "formal", 5),
     HermesTool("replay_history", "Join point-in-time decisions to later official OHLCV outcomes.", "offline", 5),
     HermesTool("diagnose_improvement", "Turn QA, scheduler, and replay evidence into approval-gated experiments.", "autonomous", 1),
+    HermesTool("review_upgrades", "Use Bedrock to adversarially compare measured evidence and upgrade candidates; never approve deployment.", "autonomous", 1),
     HermesTool("extract_claims", "Use Bedrock to extract structured claims from selected evidence.", "formal", 1),
     HermesTool("classify_stance", "Use Bedrock for bounded semantic stance classification.", "formal", 1),
     HermesTool("assemble_report", "Use Bedrock only to narrate pipeline-derived findings with citations.", "formal", 1),
@@ -92,7 +95,14 @@ def autonomous_cycle_plan(coins: tuple[str, ...] | list[str] | None = None) -> d
             {"tool": "refresh_sources", "argv": ["scripts/fetch_scheduler.py", "--parallelism", "4", "--total-budget-sec", str(RUNTIME_BUDGET_SEC), *sum((["--coin", coin] for coin in selected), [])]},
             {"tool": "build_snapshots", "argv": ["scripts/fetch_scheduler.py", "--snapshot", *sum((["--coin", coin] for coin in selected), [])]},
             {"tool": "cache_freshness_dashboard", "argv": ["scripts/cache_freshness_dashboard.py"]},
+            {"tool": "measure_connector_reliability", "argv": ["scripts/connector_reliability_report.py"]},
+            {"tool": "measure_quality", "argv": ["scripts/run_question_bank.py", "--limit", "24", "--out", "out/question-bank-latest.json"]},
+            *[
+                {"tool": "replay_history", "argv": ["scripts/run_historical_replay.py", "--coin", coin, "--out", f"out/historical-replay-{coin.lower()}.json"]}
+                for coin in selected
+            ],
             {"tool": "diagnose_improvement", "argv": ["scripts/diagnose_hermes.py"]},
+            {"tool": "review_upgrades", "argv": ["scripts/review_hermes_upgrades.py"]},
         ],
         "formal_run_boundary": "A formal run reads only source/snapshot records at or before its run_started_at.",
     }

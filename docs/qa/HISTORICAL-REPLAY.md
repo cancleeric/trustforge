@@ -20,6 +20,13 @@ Formal replay supplies an `at_or_before` boundary. The reader rejects any
 archive captured after it, including one from the same UTC date. A missing date
 is returned as missing; current cache data must never be used to backfill it.
 
+Historical imports use `scripts/historical_backfill.py`. Every imported
+document must include its provider, license/contract, `published_at`, actual
+`retrieved_at`, and content. The importer records a deterministic
+`content_sha256`; the archive writer rejects missing or mismatched provenance.
+The import's retrieval date remains distinct from the historical analysis
+boundary and must never be presented as a contemporaneous fetch.
+
 ## Runbook
 
 Run the bounded autonomous collection cycle in production scheduling:

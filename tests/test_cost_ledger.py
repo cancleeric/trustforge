@@ -24,9 +24,16 @@ from trustforge.ledger import (
     DynamoDBLedger,
     Ledger,
     JsonlLedger,
+    SQLiteLedger,
     append_run,
     estimate_cost,
     get_ledger,
+)
+from trustforge.ledger_archive import (
+    export_csv,
+    export_jsonl,
+    restore_jsonl_archive,
+    verify_jsonl_archive,
 )
 from trustforge.schema import QuestionType
 
@@ -141,6 +148,68 @@ def test_jsonl_ledger_persistence_across_new_instances(tmp_path):
     assert len(records) == 1
     assert records[0]["coin"] == "BTC"
     assert records[0]["total_cost_usd"] == 0.5
+
+
+def test_sqlite_ledger_append_and_persist_across_instances(tmp_path):
+    path = tmp_path / "trustforge.sqlite3"
+    first = SQLiteLedger(path)
+    first.append({"run_id": "run-1", "ts": "t1", "coin": "BTC", "calls": [], "total_cost_usd": 0.5})
+    first.append({"run_id": "run-2", "ts": "t2", "coin": "ETH", "calls": [], "total_cost_usd": 0.25})
+
+    records = SQLiteLedger(path).read_all()
+    assert [record["run_id"] for record in records] == ["run-1", "run-2"]
+    assert SQLiteLedger(path).summary()["total_cost_usd"] == pytest.approx(0.75)
+
+
+def test_sqlite_ledger_rejects_duplicate_run_id(tmp_path):
+    ledger = SQLiteLedger(tmp_path / "trustforge.sqlite3")
+    record = {"run_id": "same", "ts": "t1", "calls": [], "total_cost_usd": 0.0}
+    ledger.append(record)
+    with pytest.raises(Exception):
+        ledger.append(record)
+
+
+def test_get_ledger_selects_sqlite(monkeypatch, tmp_path):
+    monkeypatch.setenv("COST_LEDGER_BACKEND", "sqlite")
+    monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(tmp_path / "trustforge.sqlite3"))
+    assert isinstance(get_ledger(), SQLiteLedger)
+
+
+def test_ledger_jsonl_archive_verify_and_restore_drill(tmp_path):
+    ledger = JsonlLedger(tmp_path / "source.jsonl")
+    ledger.append({"run_id": "r1", "ts": "2026-07-14T00:00:00Z", "coin": "BTC", "calls": [], "total_cost_usd": 0.12})
+    archive = tmp_path / "archive.jsonl"
+    manifest = export_jsonl(ledger, archive)
+    assert manifest["record_count"] == 1
+    assert verify_jsonl_archive(archive)["verified"] is True
+    restored = tmp_path / "restored.jsonl"
+    result = restore_jsonl_archive(archive, restored)
+    assert result["restored"] is True
+    assert JsonlLedger(restored).read_all() == ledger.read_all()
+
+
+def test_ledger_archive_detects_tampering_and_refuses_overwrite(tmp_path):
+    ledger = JsonlLedger(tmp_path / "source.jsonl")
+    ledger.append({"run_id": "r1", "ts": "2026-07-14T00:00:00Z", "calls": [], "total_cost_usd": 0.12})
+    archive = tmp_path / "archive.jsonl"
+    export_jsonl(ledger, archive)
+    archive.write_text(archive.read_text(encoding="utf-8") + '{"tampered":true}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        verify_jsonl_archive(archive)
+    target = tmp_path / "existing.jsonl"
+    target.write_text("keep", encoding="utf-8")
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        restore_jsonl_archive(archive, target)
+
+
+def test_ledger_csv_archive_has_manifest_and_retains_calls(tmp_path):
+    ledger = JsonlLedger(tmp_path / "source.jsonl")
+    ledger.append({"run_id": "r1", "ts": "2026-07-14T00:00:00Z", "calls": [{"model": "m"}], "total_cost_usd": 0.12})
+    archive = tmp_path / "archive.csv"
+    manifest = export_csv(ledger, archive)
+    assert manifest["format"] == "csv"
+    assert archive.with_suffix(".csv.manifest.json").is_file()
+    assert "calls_json" in archive.read_text(encoding="utf-8")
 
 
 def test_jsonl_ledger_read_all_missing_file_returns_empty(tmp_path):

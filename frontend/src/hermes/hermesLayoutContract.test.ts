@@ -1,0 +1,81 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { describe, expect, it } from 'vitest'
+
+describe('Hermes responsive bridge layout contract', () => {
+  it('uses the viewport without a fixed canvas or page scrolling', () => {
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
+    const drilldown = readFileSync(path.join(__dirname, 'StageDrilldown.tsx'), 'utf8')
+
+    expect(dashboard).toContain("height: '100dvh'")
+    expect(dashboard).toContain("width: '100%', height: '100%'")
+    expect(dashboard).not.toContain('width: 1440, height: 900')
+    expect(dashboard).not.toContain('transform: `scale(${scale})`')
+    expect(dashboard).not.toContain('window.innerWidth / 1440')
+    expect(dashboard).not.toContain("clipPath: boot.left")
+    expect(dashboard).not.toContain("clipPath: boot.right")
+    expect(css).toContain('.hermes-boot-layer')
+    expect(css).toContain('@media (max-width:900px)')
+    expect(css).not.toContain('transform: none !important')
+    expect(css).not.toContain("position: relative !important")
+    expect(dashboard).not.toContain("left: 50, top: 50")
+    expect(dashboard).toContain('degradedMessage={globalError}')
+    expect(css).toContain('--hermes-rail:clamp(')
+    expect(css).toContain('right: calc(var(--hermes-right-rail) + 18px)')
+    expect(css).toContain('z-index: 50')
+    expect(css).toContain('width: min(490px, calc(100% - var(--hermes-rail) - var(--hermes-right-rail) - 36px))')
+    expect(css).toContain('background:linear-gradient(180deg,#050b13,#03080f)')
+    expect(drilldown).not.toContain('left: 640')
+    expect(dashboard).toContain('window.setInterval(refresh, 30_000)')
+    expect(dashboard).toContain('useState<GalaxyModel>(() => buildGalaxyModel(null))')
+    expect(dashboard).toContain('系統啟動與模組載入')
+    expect(dashboard).toContain('startupStep / 5')
+    expect(dashboard).not.toContain('CHANNELS VERIFIED')
+    expect(dashboard).toContain('serviceMonitor={serviceMonitor}')
+    expect(dashboard).toContain('<HermesUpgradeShip')
+    expect(dashboard).toContain('getHermesUpgrades')
+    expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('禁止遞回升級')
+    expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('LLM 對抗審查')
+    expect(css).toContain('left:18px;right:18px')
+  })
+
+  it('does not restart the Hermes report for every score counter frame', () => {
+    const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
+
+    expect(dashboard).toContain('const displayScoreRef = useRef(0)')
+    expect(dashboard).toContain('const start = displayScoreRef.current')
+    expect(dashboard).not.toContain('}, [displayScore])')
+  })
+
+  it('provides real light tokens for every non-dashboard Hermes route', () => {
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const app = readFileSync(path.join(__dirname, '..', 'App.tsx'), 'utf8')
+
+    expect(app).toContain('<HermesI18nProvider>')
+    expect(css).toContain(":root[data-theme='light'] .hermes-surface")
+    expect(css).toContain(":root[data-theme='light'] .app-header")
+  })
+
+  it('keeps every inner route inside the hologram bridge workspace', () => {
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const app = readFileSync(path.join(__dirname, '..', 'App.tsx'), 'utf8')
+    const shell = readFileSync(path.join(__dirname, '..', 'components', 'BridgeWorkspaceShell.tsx'), 'utf8')
+
+    expect(app).toContain('<BridgeWorkspaceShell><RoutedContent /></BridgeWorkspaceShell>')
+    expect(shell).toContain('bridge-hologram-bay')
+    expect(shell).toContain('bridge-engine-deck')
+    expect(shell).toContain('HERMES ENGINE')
+    expect(css).toContain('.bridge-route-viewport > main')
+    expect(css).toContain('.bridge-holo-display')
+    expect(shell).toContain("pathname === '/compare'")
+    expect(shell).toContain("pathname === '/history'")
+    expect(shell).toContain("pathname === '/status'")
+    expect(shell).toContain("pathname === '/costs'")
+    expect(css).toContain('.hermes-module-hologram')
+    expect(css).toContain('.module-holo-core')
+    expect(css).toContain('.hermes-energy-conduit')
+    expect(css).toContain('@keyframes hermes-energy-flow')
+    expect(readFileSync(path.join(__dirname, 'HermesModuleDeck.tsx'), 'utf8')).not.toContain('AWAITING DATA')
+  })
+})

@@ -3,19 +3,19 @@
 ⚠️ 不與 `execlog.py` 混淆：`ExecutionLog` 是「單次 run 內」的執行紀錄
 （`llm.cost` 事件、15 分鐘預算追蹤），本檔是「跨 run」累積帳本 —— 每次
 `run_agent_pipeline` 收尾把該 run 的成本彙總寫一筆，讓 WebUI `/costs`
-能看到歷史所有 run 的累計花費，即使伺服器程序重啟也能重讀（JSONL 檔案
-持久化；DynamoDB backend 見下方，可跨機器/跨容器重建也不失）。
+能看到歷史所有 run 的累計花費，即使伺服器程序重啟也能重讀（本機使用
+SQLite；DynamoDB backend 見下方，可跨機器/跨容器重建也不失）。
 
 Backend 可插拔（CEO 架構決策）：
   - `Ledger`：最小介面（`append` / `read_all`），呼叫端只依賴介面，換 backend
     不用改呼叫碼。
-  - `JsonlLedger`：本 PR 唯一實作，append-only JSONL 檔案。離線/測試/開發預設。
-    ⚠️ EC2 容器重建即失（非真持久），僅供本機/單機部署與測試用。
+  - `SQLiteLedger`：本機開發預設，使用 WAL 與唯一 run_id 保存完整成本帳本。
+  - `JsonlLedger`：相容既有 append-only JSONL 帳本與資料遷移。
   - `DynamoDBLedger`：線上持久用實作（本 PR 只寫 code + mock 測試，**不打真
     AWS、不建表**）。需先建表 + 賦予執行環境（EC2 instance role / Lambda
     execution role）dynamodb:PutItem / dynamodb:Scan 權限，兩者皆完成後才由
     CEO 另立步驟切 `COST_LEDGER_BACKEND=dynamodb` 真正啟用。
-  - `get_ledger()` 依 env `COST_LEDGER_BACKEND`（jsonl|dynamodb，預設 jsonl）
+  - `get_ledger()` 依 env `COST_LEDGER_BACKEND`（sqlite|jsonl|dynamodb，預設 jsonl）
     選 backend；`append_run()` 對 DynamoDB 等 backend 呼叫失敗（缺憑證/表未建/
     網路問題）一律 fallback 寫 JsonlLedger，確保帳本永遠可寫、pipeline 不因
     帳本故障而中斷。
@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
+import threading
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -186,6 +189,72 @@ class JsonlLedger(Ledger):
                 continue  # 損毀行跳過，不讓整個帳本讀取失敗
             if isinstance(rec, dict):
                 records.append(rec)
+        return records
+
+
+class SQLiteLedger(Ledger):
+    """本機 append-only SQLite 成本帳本。
+
+    使用 WAL 讓 WebUI 讀取與背景排程寫入可以並行；payload 保留完整 record，
+    不把會持續演進的成本欄位拆成僵硬欄位。``sequence`` 是唯一排序依據，
+    ``run_id`` 唯一約束防止重複匯入同一筆歷史紀錄。
+    """
+
+    def __init__(self, path: str | Path | None = None):
+        home = Path(os.getenv("TRUSTFORGE_HOME", str(Path(__file__).resolve().parents[2])))
+        default_path = Path(os.getenv("TRUSTFORGE_SQLITE_PATH", str(home / "out" / "trustforge.sqlite3")))
+        self.path = Path(path) if path is not None else default_path
+        self._lock = threading.RLock()
+        self._ensure_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=10.0)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=10000")
+        return connection
+
+    def _ensure_schema(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cost_ledger (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL UNIQUE,
+                        ts TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )
+                    """
+                )
+
+    def append(self, record: dict[str, Any]) -> None:
+        payload = dict(record)
+        run_id = str(payload.get("run_id") or uuid.uuid4().hex)
+        payload["run_id"] = run_id
+        ts = str(payload.get("ts") or datetime.now(timezone.utc).isoformat())
+        payload["ts"] = ts
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with self._lock, closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    "INSERT INTO cost_ledger (run_id, ts, payload_json) VALUES (?, ?, ?)",
+                    (run_id, ts, encoded),
+                )
+
+    def read_all(self) -> list[dict[str, Any]]:
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM cost_ledger ORDER BY sequence ASC"
+            ).fetchall()
+        records: list[dict[str, Any]] = []
+        for (payload_json,) in rows:
+            try:
+                record = json.loads(payload_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(record, dict):
+                records.append(record)
         return records
 
 
@@ -413,7 +482,7 @@ class DynamoDBLedger(Ledger):
 
 
 def get_ledger() -> Ledger:
-    """依 env `COST_LEDGER_BACKEND`（jsonl|dynamodb，預設 jsonl）選 backend。
+    """依 env `COST_LEDGER_BACKEND`（jsonl|sqlite|dynamodb）選 backend。
 
     選 `dynamodb` 本身不會 raise（`DynamoDBLedger.__init__` 只讀 env、不連
     AWS），實際是否可用（憑證/表是否存在）要到 `append`/`read_all` 呼叫時才
@@ -422,6 +491,8 @@ def get_ledger() -> Ledger:
     backend = os.getenv("COST_LEDGER_BACKEND", "jsonl").strip().lower()
     if backend == "dynamodb":
         return DynamoDBLedger()
+    if backend == "sqlite":
+        return SQLiteLedger()
     return JsonlLedger()
 
 
@@ -464,8 +535,8 @@ def append_run(record: dict[str, Any], ledger: Ledger | None = None) -> bool:
         print(f"[ledger] WARNING: append 失敗（backend={type(target).__name__}）：{exc}",
               file=sys.stderr)
 
-    if isinstance(target, JsonlLedger):
-        return False  # 同一顆 JsonlLedger 剛失敗，換個新實例打同路徑必再失敗，判定總失敗
+    if isinstance(target, (JsonlLedger, SQLiteLedger)):
+        return False  # 本機持久層失敗時不偷偷改寫另一種儲存格式
 
     try:
         JsonlLedger().append(record)

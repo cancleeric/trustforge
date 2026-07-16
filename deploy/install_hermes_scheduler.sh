@@ -15,6 +15,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=$APP_DIR
+Environment=TRUSTFORGE_HOME=$APP_DIR
 Environment=AWS_REGION=$REGION
 Environment=PYTHONPATH=$APP_DIR
 Environment=CACHE_BACKEND=dynamodb
@@ -42,5 +43,7 @@ WantedBy=timers.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable hermes-cycle.timer
-echo "Hermes timer installed. Start with: systemctl start hermes-cycle.service"
+systemctl enable --now hermes-cycle.timer
+bash "$APP_DIR/deploy/install_fetch_scheduler.sh"
+bash "$APP_DIR/deploy/prepare_backend_deploy_backup.sh"
+echo "Hermes timer installed and active. Inspect with: systemctl list-timers hermes-cycle.timer"

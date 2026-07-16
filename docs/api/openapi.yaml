@@ -377,6 +377,164 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/analysis-flow:
+    get:
+      tags: [observability]
+      operationId: getAnalysisFlow
+      summary: Hermes 五階流水線的即時 worker 與排隊狀態
+      description: 唯讀觀測；輪詢此端點不會建立或啟動分析。
+      responses:
+        "200":
+          description: 各階段目前幣別、模式、題目、snapshot、排隊數與重試數
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/hermes-upgrades:
+    get:
+      tags: [observability]
+      operationId: getHermesUpgrades
+      summary: Hermes 艦體模塊版本與升級控制面
+      description: |
+        唯讀投影正式的核心封裝 hash、外層 skill revision、診斷提案與
+        append-only 核准／回退紀錄。此端點不能核准、部署或觸發遞回升級。
+      responses:
+        "200":
+          description: 31 個外框模塊與獨立 Trust Kernel 套件的真實版本、升級通道與候選狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/analysis-snapshot:
+    get:
+      tags: [analysis]
+      operationId: getAnalysisSnapshot
+      summary: 讀取最新原子發布的預分析快照
+      description: 切換幣別或模式只讀結果，不會觸發分析。
+      parameters:
+        - in: query
+          name: coin
+          schema: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        - in: query
+          name: mode
+          schema: {type: string, enum: [risk, sentiment, fundamentals, news, catalyst]}
+      responses:
+        "200":
+          description: 已完成的分析快照
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "404":
+          description: 指定矩陣尚未發布
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/analysis-question:
+    post:
+      tags: [analysis]
+      operationId: registerAnalysisQuestion
+      summary: 登記持續分析題目
+      description: 只登記分析意圖並排入最新 snapshot；請求本身不等待分析完成。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [coin, mode, question]
+              properties:
+                coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+                mode: {type: string, enum: [risk, sentiment, fundamentals, news, catalyst]}
+                question: {type: string, minLength: 1, maxLength: 1000}
+      responses:
+        "202":
+          description: 題目已登記並排程
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/analysis-question-context:
+    get:
+      tags: [analysis]
+      operationId: getAnalysisQuestionContext
+      summary: 從 SQLite 題目與完成快照檢索 Hermes 對話記憶
+      description: 唯讀 RAG；回傳相似歷史題目、既有結論與 snapshot/run lineage，不會啟動分析。
+      parameters:
+        - in: query
+          name: coin
+          required: true
+          schema: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        - in: query
+          name: mode
+          required: true
+          schema: {type: string, enum: [risk, sentiment, fundamentals, news, catalyst, comparison]}
+        - in: query
+          name: q
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 1000}
+      responses:
+        "200":
+          description: 相似題目、歷史回答、對話與 lineage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/analysis-comparison-question:
+    post:
+      tags: [analysis]
+      operationId: registerAnalysisComparison
+      summary: 登記雙幣持續比較題目
+      responses:
+        "202": {description: 兩個獨立比較分析包已排程}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+
+  /api/comparison-snapshot:
+    get:
+      tags: [analysis]
+      operationId: getComparisonSnapshot
+      summary: 讀取兩邊皆完成的原子比較快照
+      responses:
+        "200": {description: 已發布的雙幣比較結果}
+        "404": {description: 任一邊仍在分析}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+
+  /api/analysis-journey:
+    get:
+      tags: [observability]
+      operationId: getAnalysisJourney
+      summary: 完整 job、stage、attempt 與 dead-letter 執行旅程
+      responses:
+        "200": {description: 可稽核的流水線歷史}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+
+  /api/analysis-requeue:
+    post:
+      tags: [analysis]
+      operationId: requeueAnalysisDeadLetter
+      summary: 將死信工作從 immutable snapshot 重新排程
+      responses:
+        "202": {description: 已重新排程}
+        "404": {description: 找不到死信工作}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+
   /api/analyze:
     get:
       tags: [analysis]
@@ -847,6 +1005,70 @@ paths:
           $ref: "#/components/responses/AdminAuthRateLimited"
         "502":
           $ref: "#/components/responses/UpstreamError"
+
+  /api/admin/hermes-upgrades:
+    get:
+      tags: [admin]
+      operationId: getAdminHermesUpgrades
+      summary: 讀取持久化升級候選、sandbox 與人工決策稽核鏈
+      security: [{AdminToken: []}]
+      responses:
+        "200":
+          description: SQLite 升級佇列完整狀態
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OkEnvelope"}
+        "401": {$ref: "#/components/responses/AdminUnauthorized"}
+        "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+
+  /api/admin/hermes-upgrade-sandbox:
+    post:
+      tags: [admin]
+      operationId: recordAdminHermesUpgradeSandbox
+      summary: 寫入候選 artifact 的 sandbox 驗證結果（不會啟用）
+      security: [{AdminToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposal_id, passed, artifact_hash]
+              properties:
+                proposal_id: {type: string}
+                passed: {type: boolean}
+                artifact_hash: {type: string}
+                details: {type: object}
+      responses:
+        "200": {description: Sandbox 結果已持久化}
+        "401": {$ref: "#/components/responses/AdminUnauthorized"}
+        "409": {description: 候選狀態不允許此轉換}
+        "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
+
+  /api/admin/hermes-upgrade-decision:
+    post:
+      tags: [admin]
+      operationId: decideAdminHermesUpgrade
+      summary: 人工核准或拒絕候選；核准不等於自動部署
+      security: [{AdminToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposal_id, decision, actor, reason]
+              properties:
+                proposal_id: {type: string}
+                decision: {type: string, enum: [approve, reject]}
+                actor: {type: string}
+                reason: {type: string}
+      responses:
+        "200": {description: 人工決策已寫入不可覆寫稽核紀錄}
+        "401": {$ref: "#/components/responses/AdminUnauthorized"}
+        "409": {description: 核准前尚未通過 sandbox 或已有終局決策}
+        "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
 
 components:
   schemas:

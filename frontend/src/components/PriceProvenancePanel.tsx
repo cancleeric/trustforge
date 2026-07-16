@@ -18,7 +18,7 @@ export default function PriceProvenancePanel({ priceProvenance, evidence }: Prop
   if (historyEntries.length === 0 && liveEntries.length === 0) return null
 
   return (
-    <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+    <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
       <h3 className="mb-3 text-sm font-semibold text-tf-text">價格溯源：歷史 vs 現價</h3>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>

@@ -559,6 +559,20 @@ def test_status_rate_limit_independent_from_live_rate_limit(json_cache_backend):
     ip = "7.7.7.8"
     web._rate_buckets.clear()
     web._real_rate_buckets.clear()
+
+
+def test_read_only_endpoint_rate_limits_are_independent():
+    """Normal navigation must not make overview/status/history rate-limit each other."""
+    ip = "7.7.7.80"
+    for _ in range(web._STATUS_RATE_MAX):
+        web._check_status_rate_limit(ip, "overview")
+    with pytest.raises(web.TooManyRequests):
+        web._check_status_rate_limit(ip, "overview")
+
+    # The same browser can still load every other read-only screen.
+    web._check_status_rate_limit(ip, "status-api")
+    web._check_status_rate_limit(ip, "history")
+    web._check_status_rate_limit(ip, "costs")
     # 灌爆 live 限流 bucket
     for _ in range(web._RATE_MAX):
         web._check_live_rate_limit(ip)

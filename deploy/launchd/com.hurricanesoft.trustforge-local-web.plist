@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hurricanesoft.trustforge-local-web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/apple/HurricaneSoft/trustforge/.venv/bin/python</string>
+    <string>-m</string>
+    <string>trustforge.web</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/apple/HurricaneSoft/trustforge</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key><string>/Users/apple/HurricaneSoft/trustforge/src</string>
+    <key>CACHE_BACKEND</key><string>sqlite</string>
+    <key>COST_LEDGER_BACKEND</key><string>sqlite</string>
+    <key>TRUSTFORGE_SQLITE_PATH</key><string>/Users/apple/HurricaneSoft/trustforge/out/trustforge.sqlite3</string>
+    <key>TRUSTFORGE_BIND_HOST</key><string>127.0.0.1</string>
+    <key>TRUSTFORGE_DISABLE_ADMIN_CONFIG</key><string>1</string>
+    <key>TRUSTFORGE_STATUS_RATE_MAX</key><string>120</string>
+    <key>TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN</key><string>1</string>
+    <key>PORT</key><string>8799</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/apple/HurricaneSoft/trustforge/out/logs/trustforge-local-web.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/apple/HurricaneSoft/trustforge/out/logs/trustforge-local-web.err.log</string>
+</dict>
+</plist>

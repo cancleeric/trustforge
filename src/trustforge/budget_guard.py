@@ -120,6 +120,15 @@ def daily_cap_usd_resolved() -> tuple[float, str]:
     # --- env kill-switch 最高優先短路（harper M2，見 docstring）---
     if env_val is not None and env_val <= 0:
         return env_val, "env"
+    # Local/offline development must not probe the production admin table.
+    if os.getenv("TRUSTFORGE_DISABLE_ADMIN_CONFIG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        if env_val is not None:
+            return env_val, "env"
+        return DEFAULT_BEDROCK_DAILY_USD_CAP, "default"
     # --- config 層 ---
     try:
         cfg = admin_config.get_config_cached_failsoft()

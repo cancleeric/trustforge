@@ -76,3 +76,8 @@ def active_revision(skill_id: str, records: list[dict[str, Any]] | None = None, 
         if record.get("skill_id") == skill_id and record.get("action") in {"approved", "rolled_back"}:
             return str(record.get("skill_hash"))
     return None
+
+
+def change_history(*, log_path: Path | None = None) -> list[dict[str, Any]]:
+    """Return the append-only outer-skill history for read-only control planes."""
+    return _read(log_path or default_log_path())

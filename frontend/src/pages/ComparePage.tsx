@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { getComparison } from '../lib/endpoints'
+import { getComparisonSnapshot, registerAnalysisComparison } from '../lib/endpoints'
 import type { ComparisonParams } from '../lib/endpoints'
 import type { ComparisonAnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import AnalysisReportView from '../components/AnalysisReportView'
 import { ErrorState, LoadingState } from '../components/StatusStates'
+import { useBridgeHologram } from '../components/BridgeHologramContext'
+import CoinSelect from '../components/CoinSelect'
 
 function defaultQuery(coin: string, coin2: string): string {
   return `比較${coin}與${coin2}近期市場狀況，整合多源資料`
@@ -44,6 +46,12 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
     setQueryEdited(false)
   }, [initial.coin, initial.coin2, initial.q])
 
+  useEffect(() => {
+    if (sameCoin || !q.trim()) return
+    const timer = window.setTimeout(() => onSubmit({ coin, coin2, q: q.trim() }), 350)
+    return () => window.clearTimeout(timer)
+  }, [coin, coin2, onSubmit, q, sameCoin])
+
   function handleCoinChange(next: string) {
     setCoin(next)
     if (!queryEdited) setQ(defaultQuery(next, coin2))
@@ -61,7 +69,7 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
 
   return (
     <form
-      className="flex flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4"
+      className="hermes-clip flex flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4"
       onSubmit={(e) => {
         e.preventDefault()
         if (sameCoin) return
@@ -69,40 +77,8 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
       }}
     >
       <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="cmp-coin">
-            幣種 A
-          </label>
-          <select
-            id="cmp-coin"
-            value={coin}
-            onChange={(e) => handleCoinChange(e.target.value)}
-            className="w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
-          >
-            {COIN_POOL.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="cmp-coin2">
-            幣種 B
-          </label>
-          <select
-            id="cmp-coin2"
-            value={coin2}
-            onChange={(e) => handleCoin2Change(e.target.value)}
-            className="w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
-          >
-            {COIN_POOL.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        </div>
+        <CoinSelect id="cmp-coin" label="幣種 A" value={coin} onChange={handleCoinChange} />
+        <CoinSelect id="cmp-coin2" label="幣種 B" value={coin2} onChange={handleCoin2Change} />
       </div>
       {sameCoin && (
         <p className="text-xs text-tf-bad" role="alert">
@@ -133,40 +109,79 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
 }
 
 export default function ComparePage() {
+  const { setData: setHologramData } = useBridgeHologram()
   const [searchParams, setSearchParams] = useSearchParams()
   const params = paramsFromSearch(searchParams)
 
   const [data, setData] = useState<ComparisonAnalyzeData | null>(null)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
+  const [requestNonce, setRequestNonce] = useState(0)
+  const hasExplicitRequest = searchParams.has('q')
 
   useEffect(() => {
+    if (!hasExplicitRequest) {
+      setLoading(false)
+      setError(null)
+      setData(null)
+      return
+    }
+    setHologramData(data ? {
+      primaryLabel: data.report_a.coin,
+      secondaryLabel: data.report_b.coin,
+      primaryValue: data.report_a.calibrated_confidence,
+      secondaryValue: data.report_b.calibrated_confidence,
+      total: data.evidence_a.length + data.evidence_b.length,
+      trustScore: data.report_a.calibrated_confidence,
+      componentScores: {
+        reputation: data.trust_components_aggregate_a.reputation,
+        corroboration: data.trust_components_aggregate_a.corroboration,
+        recency: data.trust_components_aggregate_a.recency,
+        resistance: data.trust_components_aggregate_a.manipulation == null ? null : 1 - data.trust_components_aggregate_a.manipulation,
+      },
+    } : null)
+    return () => setHologramData(null)
+  }, [data, hasExplicitRequest, setHologramData])
+
+  useEffect(() => {
+    if (!hasExplicitRequest) return
     const controller = new AbortController()
     setLoading(true)
     setError(null)
-    getComparison(params, controller.signal).then((res) => {
+    const read = () => getComparisonSnapshot(params, controller.signal).then((res) => {
       if (controller.signal.aborted) return
       setLoading(false)
       if (res.ok) {
         setData(res.data)
         setError(null)
       } else {
-        setData(null)
+        if (res.error.code === 'snapshot_pending') { setLoading(true); return }
         setError(res.error)
       }
     })
+    void read()
+    const poll = window.setInterval(() => void read(), 1500)
     return () => {
+      window.clearInterval(poll)
       controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.coin, params.coin2, params.q])
+  }, [hasExplicitRequest, params.coin, params.coin2, params.q, requestNonce])
 
-  const handleSubmit = (values: FormState) => {
+  useEffect(() => {
+    if (error?.code !== 'network_error') return
+    const timer = window.setTimeout(() => setError(null), 1800)
+    return () => window.clearTimeout(timer)
+  }, [error])
+
+  const handleSubmit = useCallback((values: FormState) => {
     setSearchParams({ coin: values.coin, coin2: values.coin2, q: values.q })
-  }
+    void registerAnalysisComparison(values)
+    setRequestNonce((value) => value + 1)
+  }, [setSearchParams])
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6">
+    <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Parallel Hermes runs</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">雙幣比較</h1>
@@ -177,9 +192,15 @@ export default function ComparePage() {
 
       <CompareForm initial={{ coin: params.coin, coin2: params.coin2, q: params.q }} onSubmit={handleSubmit} />
 
-      {loading && <LoadingState label={`比較 ${params.coin} / ${params.coin2} 中…`} />}
-      {!loading && error && <ErrorState code={error.code} message={error.message} />}
-      {!loading && !error && data && (
+      {loading && !data && <LoadingState label={`讀取 ${params.coin} / ${params.coin2} 比較快照中…`} />}
+      {loading && data && <div className="hermes-analysis-pending" role="status"><i />Hermes 正在更新比較快照；目前保留上一個完整結果。</div>}
+      {!loading && error && !data && <ErrorState code={error.code} message={error.message} />}
+      {!loading && !error && !data && (
+        <div className="hermes-clip border border-tf-border bg-tf-card p-5 text-sm text-tf-text2">
+          選擇兩個市場後按下「比較分析」。開啟工作區不會自動執行兩次分析。
+        </div>
+      )}
+      {data && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <AnalysisReportView
             heading={`幣種 A · ${data.report_a.coin}`}

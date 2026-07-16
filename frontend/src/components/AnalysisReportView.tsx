@@ -52,7 +52,7 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
           rawConfidence={data.report.confidence}
           decisionState={data.report.decision_state}
         />
-        <section className="border-l-2 border-tf-accent bg-tf-card p-4" aria-label="市場結論">
+        <section className="hermes-clip border-l-2 border-tf-accent bg-tf-card p-4" aria-label="市場結論">
           <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">市場結論</p>
           <p className="mt-2 text-base font-semibold leading-7 text-tf-text">{data.report.market_judgment}</p>
           <div className="mt-4 grid grid-cols-3 gap-2 border-t border-tf-border pt-3 text-xs">
@@ -95,7 +95,7 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
       <PriceProvenancePanel priceProvenance={data.price_provenance} evidence={data.evidence} />
 
       {data.report.limits.length > 0 && (
-        <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
           <h3 className="mb-2 text-sm font-semibold text-tf-text">已知限制 / 資料不足</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.limits.map((l, i) => (
@@ -106,7 +106,7 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
       )}
 
       {data.report.could_flip.length > 0 && (
-        <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
           <h3 className="mb-2 text-sm font-semibold text-tf-text">可能推翻結論的條件</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.could_flip.map((l, i) => (
@@ -117,7 +117,7 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
       )}
 
       {data.report.contrarian.length > 0 && (
-        <div className="rounded-lg border border-tf-border bg-tf-card p-4">
+        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
           <h3 className="mb-2 text-sm font-semibold text-tf-text">反方 / 低信任證據（已標記，未納入主結論）</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.contrarian.map((l, i) => (

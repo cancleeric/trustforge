@@ -42,6 +42,11 @@ BUDGET_BACKEND="${TRUSTFORGE_BUDGET_GUARD_BACKEND:-dynamodb}"
 # 失效指標都靠它）。未設視同 1（開）。若不想送指標設 TRUSTFORGE_CW_METRICS=0。
 CW_METRICS="${TRUSTFORGE_CW_METRICS:-1}"
 COUNTER_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
+# H-19: web instances must share this lease table.  It prevents duplicate
+# analysis/LLM work when the load balancer sends matching requests to different
+# workers.  Provisioning remains in the privileged bootstrap path below.
+LEASE_BACKEND="${TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND:-dynamodb}"
+LEASE_TABLE="${TRUSTFORGE_LEASE_TABLE:-trustforge-analyze-leases}"
 # 注入防護（值會被嵌進 SSM commands JSON 與遠端 root shell 的 sed 取代式）：
 # prefix 限 SSM 參數名字元集（含 `/` 路徑分隔），cap 限十進位數字——含引號/
 # 反斜線/管線/空白等一律在本機就 fail-fast 中止，杜絕「值本身」對遠端腳本
@@ -80,6 +85,10 @@ EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_BUDGET_COUNTER_TABLE=${C
 "
 EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_CW_METRICS=${CW_METRICS}
 "
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=${LEASE_BACKEND}
+"
+EXTRA_UNIT_ENV="${EXTRA_UNIT_ENV}Environment=TRUSTFORGE_LEASE_TABLE=${LEASE_TABLE}
+"
 
 # update-in-place 用：對單一 Environment 行產生「ensure（有值：sed 取代／
 # 沒有該行就插到 PYTHONPATH 後）或 remove（未設：整行刪除，fail-closed）」
@@ -102,7 +111,7 @@ ssm_env_cmd() {
 # SSM 讀取）。這兩段刪除透過呼叫 ssm_env_cmd 傳空字串觸發 else 分支，輸出格式
 # 與既有 delete 慣例完全一致（同一套 JSON commands 陣列拼接）。接著 cap 與
 # token SSM 前綴走標準 ensure/delete（有值 sed 取代／插入，未設整行刪除）。
-UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")"
+UNIT_ENV_RECONCILE_CMDS="$(ssm_env_cmd TRUSTFORGE_ADMIN_TOKEN "")$(ssm_env_cmd TRUSTFORGE_LIVE_TOKEN "")$(ssm_env_cmd TRUSTFORGE_BEDROCK_DAILY_USD_CAP "$DAILY_CAP")$(ssm_env_cmd TRUSTFORGE_TOKEN_SSM_PREFIX "$TOKEN_SSM_PREFIX")$(ssm_env_cmd TRUSTFORGE_BUDGET_GUARD_BACKEND "$BUDGET_BACKEND")$(ssm_env_cmd TRUSTFORGE_BUDGET_COUNTER_TABLE "$COUNTER_TABLE")$(ssm_env_cmd TRUSTFORGE_CW_METRICS "$CW_METRICS")$(ssm_env_cmd TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND "$LEASE_BACKEND")$(ssm_env_cmd TRUSTFORGE_LEASE_TABLE "$LEASE_TABLE")"
 
 # 先查一次既有實例，才能判斷「這次到底會不會走首次建置」——這是全腳本第一個
 # aws 呼叫（在此之前只做過本機 regex 驗證，零 aws 呼叫），純唯讀
@@ -378,7 +387,7 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name trustforge-inline \
       \"arn:aws:bedrock:ap-southeast-6::foundation-model/anthropic.*\",
       \"arn:aws:bedrock:$REGION:$ACCT:inference-profile/*anthropic*\"]},
     {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"},
-    {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"ssm:GetParameter\",\"ssm:GetParametersByPath\",\"ssm:DeleteParameter\"],\"Resource\":[\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy\",\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/deploy/*\"]},
     {\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"arn:aws:ssm:$REGION:$ACCT:parameter/trustforge/runtime/*\"},
     {\"Effect\":\"Allow\",\"Action\":\"kms:Decrypt\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"ssm.$REGION.amazonaws.com\"}}}]}" >/dev/null
 # #104.5：dedup fail-open 告警 + #75 後端失效指標都走 CloudWatch
@@ -415,6 +424,15 @@ done
 echo "[ec2] 建立 budget guard 表 + IAM（#75）…"
 if ! "$(dirname "$0")/setup_budget_guard_dynamodb.sh"; then
   echo "[ec2] ❌ budget guard 表/IAM 建置失敗，中止部署" >&2
+  exit 1
+fi
+echo "[ec2] 建立 durable idempotency lease 表 + IAM（H-19）…"
+if ! "$(dirname "$0")/setup_idempotency_lease_dynamodb.sh"; then
+  echo "[ec2] ❌ idempotency lease 表/IAM 建置失敗，中止部署" >&2
+  exit 1
+fi
+if ! aws dynamodb describe-table --region "$REGION" --table-name "$LEASE_TABLE" >/dev/null 2>&1; then
+  echo "[ec2] ❌ DynamoDB lease 表 $LEASE_TABLE 在 $REGION 不存在，中止部署" >&2
   exit 1
 fi
 BG_TABLE="${TRUSTFORGE_BUDGET_COUNTER_TABLE:-trustforge-budget-guard}"
@@ -650,7 +668,8 @@ Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
-ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py
+ExecStartPre=/usr/bin/python3 scripts/fetch_scheduler.py --probe
+ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py --allow-partial
 UNIT2
 cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3
 [Unit]

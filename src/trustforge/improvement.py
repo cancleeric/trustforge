@@ -35,8 +35,10 @@ def _number(value: Any) -> float:
 def diagnose(
     *,
     scheduler_runs: Iterable[dict[str, Any]] = (),
+    connector_reliability: dict[str, Any] | None = None,
     question_bank: dict[str, Any] | None = None,
     replay: dict[str, Any] | None = None,
+    analysis_history: dict[str, Any] | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     """Turn observed deficits into reviewable experiments, never live edits."""
@@ -47,9 +49,24 @@ def diagnose(
         failures = Counter(
             str(label) for run in failed_runs for label in (run.get("failures") or [])
         )
+        reliability_rows = []
+        if connector_reliability:
+            reliability_rows = [
+                {
+                    "source": row.get("source"),
+                    "failure_rate": row.get("failure_rate"),
+                    "consecutive_successes": row.get("consecutive_successes", 0),
+                }
+                for row in connector_reliability.get("sources", [])
+                if row.get("attempted_runs", 0) and not row.get("meets_reliability_gate", False)
+            ]
         proposals.append(ImprovementProposal(
             id="source-reliability-investigation", area="data-acquisition", severity="high",
-            evidence={"failed_runs": len(failed_runs), "failure_labels": dict(sorted(failures.items()))},
+            evidence={
+                "failed_runs": len(failed_runs),
+                "failure_labels": dict(sorted(failures.items())),
+                "sources_below_gate": reliability_rows,
+            },
             proposed_experiment="Reproduce the failing source in a sandbox; add a bounded retry, fallback, or freshness rule only after a regression test.",
             success_metric="Seven consecutive scheduled cycles with zero failures for the affected source.",
         ))
@@ -100,11 +117,40 @@ def diagnose(
                     success_metric="Holdout calibration error improves while no future source or OHLCV data crosses the run boundary.",
                 ))
 
+    if analysis_history is not None:
+        total = int(_number(analysis_history.get("job_count")))
+        failed = int(_number(analysis_history.get("failed_jobs")))
+        retried = int(_number(analysis_history.get("retried_jobs")))
+        if total >= 20 and (failed / total >= 0.05 or retried / total >= 0.1):
+            proposals.append(ImprovementProposal(
+                id="analysis-flow-reliability", area="analysis-orchestration", severity="high",
+                evidence={"jobs": total, "failed_jobs": failed, "retried_jobs": retried,
+                          "stages": analysis_history.get("stages", [])},
+                proposed_experiment="Replay the dominant failing or retrying stage from immutable snapshots in the skill sandbox; change only its bounded outer orchestration policy.",
+                success_metric="Failure rate below 5% and retry rate below 10% on the same time-separated replay set.",
+            ))
+        pairs = int(_number(analysis_history.get("compared_question_pairs")))
+        similar_rate = _number(analysis_history.get("similar_question_rate"))
+        if pairs >= 10 and similar_rate >= 0.35:
+            proposals.append(ImprovementProposal(
+                id="question-retrieval-diversification", area="question-retrieval", severity="medium",
+                evidence={"compared_pairs": pairs, "similar_question_rate": similar_rate,
+                          "active_questions": int(_number(analysis_history.get("active_question_count")))},
+                proposed_experiment="Use retrieved historical questions and covered evidence facets to generate a deduplicated candidate set in sandbox; preserve the original user question verbatim.",
+                success_metric="Similar-question rate below 35% while the question-bank Evidence and audit contract remains fully green.",
+            ))
+
     timestamp = generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "agent": "hermes", "kind": "self_improvement_diagnostic", "generated_at": timestamp,
         "automation_boundary": "propose, test in sandbox, require human approval; never self-apply production changes",
-        "inputs": {"scheduler_runs": len(runs), "question_bank": question_bank is not None, "replay": replay is not None},
+        "inputs": {
+            "scheduler_runs": len(runs),
+            "connector_reliability": connector_reliability is not None,
+            "question_bank": question_bank is not None,
+            "replay": replay is not None,
+            "analysis_history": analysis_history is not None,
+        },
         "proposals": [asdict(proposal) for proposal in proposals],
         "status": "attention_required" if proposals else "healthy_or_insufficient_evidence",
     }
