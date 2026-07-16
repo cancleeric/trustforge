@@ -20,9 +20,13 @@ def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply
 
     data = upgrade_control.upgrade_status()
 
-    assert len(data["modules"]) == 15
-    assert data["planes"] == ["DATA PLANE", "INTELLIGENCE", "TRUST KERNEL", "DELIVERY", "OPERATIONS"]
+    assert len(data["modules"]) == 31
+    assert data["coverage"] == {"registered": 31, "complete": True}
+    assert data["planes"] == ["DATA PLANE", "INTELLIGENCE", "DELIVERY", "OPERATIONS"]
     assert data["recursive_upgrade"] is False
     assert all(m["automatic_apply"] is False and m["recursive_upgrade"] is False for m in data["modules"])
-    assert next(m for m in data["modules"] if m["id"] == "trust-scoring")["state"] == "locked"
+    assert data["core_package"]["version"].startswith("v")
+    assert data["core_package"]["state"] == "release-locked"
+    assert len(data["core_package"]["controls"]) == 6
+    assert data["core_package"]["external_upgrade"]["status"] == "reserved"
     assert next(m for m in data["modules"] if m["id"] == "scheduler")["state"] == "candidate"

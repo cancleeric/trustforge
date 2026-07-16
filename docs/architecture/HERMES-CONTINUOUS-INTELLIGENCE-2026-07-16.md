@@ -56,12 +56,18 @@ outside autonomous mutation.
 
 The flagship is a metaphor only. The actual WebUI is an upgrade topology, not a
 literal six-hardpoint ship or a gamified level counter. `GET
-/api/hermes-upgrades` currently inventories 15 versioned modules across Data
-Plane, Intelligence, Trust Kernel, Delivery, and Operations. It includes the
-packaged core, five immutable outer-skill families, release artifacts and model
-gates. The UI shows actual content revision/hash, baseline or approved origin,
+/api/hermes-upgrades` inventories 31 versioned outer modules across Data Plane,
+Intelligence, Delivery, and Operations. It includes five immutable outer-skill
+families, reviewed release artifacts and model gates. The UI shows actual
+content revision/hash, baseline or approved origin,
 append-only change history, diagnostic sandbox candidates and each module's
 upgrade channel.
+
+Trust controls are independently packaged as one `TRUST KERNEL PACKAGE` with a
+single semantic version and content hash. Its six controls are displayed in the
+same control area but do not masquerade as outer modules. A future external
+upgrade adapter is reserved in the contract; it is currently disconnected and
+can never auto-activate a candidate.
 
 The activation path is `diagnose -> sandbox -> validation -> human approval ->
 active pointer -> rollback`. The Trust core is packaged and versioned so it can

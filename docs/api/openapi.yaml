@@ -403,7 +403,7 @@ paths:
         append-only 核准／回退紀錄。此端點不能核准、部署或觸發遞回升級。
       responses:
         "200":
-          description: 五層升級拓撲中所有模塊的真實版本、升級通道與候選狀態
+          description: 31 個外框模塊與獨立 Trust Kernel 套件的真實版本、升級通道與候選狀態
           content:
             application/json:
               schema:

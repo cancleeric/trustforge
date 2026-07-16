@@ -20,11 +20,17 @@ export default function HermesUpgradeShip({ data, loading, onClose }: Props) {
     <header className="hermes-upgrade-head">
       <span className="ship-mark">⬡</span><strong>HERMES UPGRADE CONTROL</strong>
       <small>模塊拓撲 · 真實版本 · sandbox 候選 · release gate</small><i />
-      <span className="ship-projection">{modules.length || '—'} MODULES</span><button type="button" onClick={onClose}>關閉 ×</button>
+      <span className="ship-projection">CORE + {modules.length || '—'} OUTER MODULES</span><button type="button" onClick={onClose}>關閉 ×</button>
     </header>
     <div className="upgrade-control-body">
       {loading && !data ? <div className="ship-loading">讀取版本與提案…</div> : null}
       <div className="upgrade-topology">
+        {data?.core_package ? <section className="trust-kernel-package">
+          <header><span>INDEPENDENT VERSIONED CORE</span><b>{data.core_package.name}</b><em>{data.core_package.state}</em></header>
+          <div className="kernel-version"><strong>{data.core_package.version}</strong><code>{data.core_package.revision}</code><span>{data.core_package.upgrade_channel}</span></div>
+          <div className="kernel-controls">{data.core_package.controls.map((control) => <i key={control}>◆ {control}</i>)}</div>
+          <footer><b>外接升級介面：{data.core_package.external_upgrade.status}</b><span>尚未連接 adapter；未來候選也必須經核心 release gate</span></footer>
+        </section> : null}
         {planes.map(({ plane, modules: rows }) => <section className={`upgrade-plane plane-${plane.toLowerCase().replace(' ', '-')}`} key={plane}>
           <header><b>{plane}</b><span>{rows.length} modules</span></header>
           <div>{rows.map((module) => <button type="button" key={module.id} onClick={() => setSelected(module.id)} className={`${module.state} ${active?.id === module.id ? 'selected' : ''}`}>
@@ -47,7 +53,7 @@ export default function HermesUpgradeShip({ data, loading, onClose }: Props) {
           <section className="upgrade-proposals"><h3>目前候選</h3>{active.proposals.length ? active.proposals.map((proposal) => <article key={proposal.id}><b>{proposal.id}</b><span>{proposal.severity}</span><p>{proposal.proposed_experiment}</p><small>成功門檻：{proposal.success_metric}</small></article>) : <p>沒有待核准候選；目前版本持續運行。</p>}</section>
         </> : null}
       </aside>
-      <footer className="upgrade-policy-bar"><b>{data?.diagnostic.proposal_count ?? 0} CANDIDATES</b><span>diagnose → sandbox → validation → human approval → active pointer → rollback</span><em>禁止遞回升級 · 禁止自動部署</em></footer>
+      <footer className="upgrade-policy-bar"><b>{data?.coverage.registered ?? 0} OUTER / {data?.diagnostic.proposal_count ?? 0} CANDIDATES</b><span>diagnose → sandbox → validation → human approval → active pointer → rollback</span><em>TRUST KERNEL {data?.core_package.version ?? '—'} · 禁止遞回升級</em></footer>
     </div>
   </section>
 }

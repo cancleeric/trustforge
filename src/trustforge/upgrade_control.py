@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .skill_changes import change_history
 from .skills import run_skill_manifest
 
@@ -20,20 +21,41 @@ from .skills import run_skill_manifest
 MODULES = (
     # id, label, plane, upgrade channel, outer family, implementation paths, proposal areas
     ("connectors", "來源連接器", "DATA PLANE", "sandbox-policy", "source", ("src/trustforge/ingestion",), ("data-acquisition", "execution-efficiency")),
-    ("snapshots", "不可變快照", "DATA PLANE", "reviewed-release", None, ("src/trustforge/analysis_flow.py", "src/trustforge/replay.py"), ()),
-    ("scheduler", "持續排程與佇列", "DATA PLANE", "sandbox-policy", "improvement", ("src/trustforge/analysis_flow.py",), ("analysis-orchestration",)),
+    ("connector-routing", "連接器路由與 fallback", "DATA PLANE", "sandbox-policy", "source", ("src/trustforge/ingestion/safe_fetch.py",), ("data-acquisition",)),
+    ("source-frequency", "來源頻率與 timeout", "DATA PLANE", "sandbox-policy", "source", ("src/trustforge/scheduler_log.py",), ("execution-efficiency",)),
+    ("normalization-dedup", "正規化與去重", "DATA PLANE", "reviewed-release", None, ("src/trustforge/ingestion/base.py", "src/trustforge/ingestion/cache.py"), ()),
+    ("snapshots", "不可變快照生成", "DATA PLANE", "reviewed-release", None, ("src/trustforge/analysis_flow.py", "src/trustforge/replay.py"), ()),
+    ("cache-freshness", "快取與鮮度策略", "DATA PLANE", "reviewed-release", None, ("src/trustforge/freshness.py", "src/trustforge/ingestion/cache.py"), ()),
+    ("scheduler", "併發、backpressure 與 DLQ", "DATA PLANE", "sandbox-policy", "improvement", ("src/trustforge/analysis_flow.py",), ("analysis-orchestration",)),
+    ("prompt-templates", "Prompt 與任務模板", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/agent/orchestrator.py",), ()),
+    ("tool-routing", "Agent 工具與技能路由", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/hermes.py", "src/trustforge/skills.py"), ()),
     ("question-rag", "題目 RAG 與對話記憶", "INTELLIGENCE", "reviewed-release", None, ("src/trustforge/analysis_flow.py",), ("question-retrieval",)),
+    ("rag-index", "Embedding 與索引策略", "INTELLIGENCE", "model-gate", None, ("src/trustforge/analysis_flow.py",), ("question-retrieval",)),
+    ("rag-reranker", "Reranker 與分面生成", "INTELLIGENCE", "model-gate", None, ("src/trustforge/analysis_flow.py",), ("question-retrieval",)),
     ("claim-extraction", "主張抽取", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/agent/orchestrator.py",), ()),
+    ("contrarian-search", "反方證據搜尋", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/agent/orchestrator.py",), ()),
+    ("manipulation-detection", "操縱與協同偵測", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/trust/insights.py",), ()),
     ("analysis-policy", "分析策略", "INTELLIGENCE", "sandbox-policy", "analysis", ("src/trustforge/skills.py",), ("historical-calibration",)),
-    ("model-routing", "模型與校準器", "INTELLIGENCE", "model-gate", None, ("src/trustforge/modelhub_training.py", "src/trustforge/calibrator_gate.py"), ("historical-calibration",)),
-    ("time-boundary", "時間邊界", "TRUST KERNEL", "core-release", None, ("src/trustforge/replay.py",), ()),
-    ("trust-scoring", "Trust 計分核心", "TRUST KERNEL", "core-release", None, ("src/trustforge/trust/scoring.py",), ()),
-    ("evidence-contract", "Evidence 綁定契約", "TRUST KERNEL", "core-release", None, ("src/trustforge/schema.py",), ()),
-    ("reporting", "報告與交付契約", "DELIVERY", "sandbox-policy", "report", ("src/trustforge/pipeline.py",), ("report-evidence-log",)),
-    ("evaluation", "評測題庫與回放", "DELIVERY", "sandbox-policy", "evaluation", ("src/trustforge/question_bank.py", "src/trustforge/historical_replay.py"), ()),
+    ("model-routing", "模型選擇與 active route", "INTELLIGENCE", "model-gate", None, ("src/trustforge/modelhub_training.py",), ("historical-calibration",)),
+    ("calibration-abstain", "校準器與 abstain", "INTELLIGENCE", "model-gate", None, ("src/trustforge/calibration.py", "src/trustforge/calibrator_gate.py"), ("historical-calibration",)),
+    ("evidence-assembly", "Evidence 組裝", "DELIVERY", "sandbox-policy", "report", ("src/trustforge/pipeline.py", "src/trustforge/execlog.py"), ("report-evidence-log",)),
+    ("reporting", "報告敘事與交付", "DELIVERY", "sandbox-policy", "report", ("src/trustforge/pipeline.py",), ("report-evidence-log",)),
+    ("citation-localization", "引用、語言與格式", "DELIVERY", "sandbox-policy", "report", ("src/trustforge/pipeline.py",), ()),
+    ("evaluation", "評測題庫與品質 gate", "DELIVERY", "sandbox-policy", "evaluation", ("src/trustforge/question_bank.py",), ()),
+    ("historical-replay", "歷史回放與回歸門檻", "DELIVERY", "sandbox-policy", "evaluation", ("src/trustforge/historical_replay.py", "src/trustforge/replay.py"), ("historical-calibration",)),
     ("cost-governance", "成本與預算治理", "OPERATIONS", "reviewed-release", None, ("src/trustforge/budget_guard.py", "src/trustforge/ledger.py"), ()),
+    ("rate-resource-policy", "速率限制與資源配額", "OPERATIONS", "reviewed-release", None, ("src/trustforge/rate_limit_store.py", "src/trustforge/budget_counter.py"), ()),
     ("observability-ui", "觀測與管理介面", "OPERATIONS", "reviewed-release", None, ("frontend/src/pages/HermesDashboard.tsx",), ()),
+    ("alert-policy", "告警與操作流程", "OPERATIONS", "reviewed-release", None, ("src/trustforge/cloudwatch_metrics.py",), ()),
+    ("memory-policy", "h-obsidian 記憶策略", "OPERATIONS", "reviewed-release", None, ("docs/architecture/HERMES-CONTINUOUS-INTELLIGENCE-2026-07-16.md",), ()),
+    ("security-masking", "權限、審計與遮罩", "OPERATIONS", "core-adjacent-release", None, ("src/trustforge/web.py", "src/trustforge/admin_config.py"), ()),
+    ("schema-compatibility", "Schema migration 與相容性", "OPERATIONS", "reviewed-release", None, ("src/trustforge/schema.py",), ()),
     ("improvement", "改善診斷器", "OPERATIONS", "sandbox-policy", "improvement", ("src/trustforge/improvement.py",), ()),
+)
+
+CORE_CONTROLS = (
+    "Point-in-time 時間邊界", "Evidence 必填契約", "正式 run 隔離",
+    "可重現性與稽核鏈", "歷史結論不得冒充新 Evidence", "禁止自動部署與遞回升級",
 )
 
 
@@ -84,12 +106,7 @@ def upgrade_status() -> dict[str, Any]:
     modules = []
     for module_id, name, plane, channel, family, paths, areas in MODULES:
         related = [p for p in proposals if isinstance(p, dict) and p.get("area") in areas]
-        if channel == "core-release":
-            revision = _paths_hash(paths) or _core_hash()
-            origin = "packaged-core"
-            state = "locked"
-            history_rows: list[dict[str, Any]] = []
-        elif family is not None:
+        if family is not None:
             resolved = outer[family]
             revision = str(resolved["revision"])
             origin = str(resolved["origin"])
@@ -103,7 +120,7 @@ def upgrade_status() -> dict[str, Any]:
             state = "candidate" if related else "active"
         modules.append({
             "id": module_id, "name": name, "plane": plane, "channel": channel,
-            "family": family or ("trust-core" if channel == "core-release" else "release-artifact"),
+            "family": family or "release-artifact",
             "revision": revision, "version": revision[:8], "origin": origin, "state": state,
             "recursive_upgrade": False, "automatic_apply": False,
             "proposals": related, "history": history_rows,
@@ -115,6 +132,13 @@ def upgrade_status() -> dict[str, Any]:
         "recursive_upgrade": False, "diagnostic": {
             "status": diagnostic.get("status"), "generated_at": diagnostic.get("generated_at"),
             "proposal_count": len(proposals),
-        }, "planes": ["DATA PLANE", "INTELLIGENCE", "TRUST KERNEL", "DELIVERY", "OPERATIONS"],
+        }, "coverage": {"registered": len(modules), "complete": True},
+        "core_package": {
+            "id": "trust-kernel", "name": "TRUST KERNEL PACKAGE",
+            "version": f"v{__version__}", "revision": _core_hash(), "state": "release-locked",
+            "controls": list(CORE_CONTROLS), "upgrade_channel": "reviewed-core-release",
+            "external_upgrade": {"status": "reserved", "adapter": None, "automatic_activation": False},
+        },
+        "planes": ["DATA PLANE", "INTELLIGENCE", "DELIVERY", "OPERATIONS"],
         "modules": modules,
     }

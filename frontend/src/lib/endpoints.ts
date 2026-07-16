@@ -123,13 +123,18 @@ export interface HermesUpgradeData {
   agent: 'hermes'; kind: 'upgrade_control_plane'; metaphor: 'modular_flagship'
   core_policy: string; outer_policy: string; recursive_upgrade: false
   diagnostic: { status: string; generated_at: string | null; proposal_count: number }
+  coverage: { registered: number; complete: boolean }
+  core_package: {
+    id: string; name: string; version: string; revision: string; state: string; controls: string[]
+    upgrade_channel: string; external_upgrade: { status: string; adapter: string | null; automatic_activation: false }
+  }
   planes: string[]
   modules: HermesUpgradeModule[]
 }
 export function getHermesUpgrades(signal?: AbortSignal): Promise<ApiEnvelope<HermesUpgradeData>> {
   const valid = (value: unknown): value is HermesUpgradeData => !!value && typeof value === 'object' &&
     (value as HermesUpgradeData).agent === 'hermes' && Array.isArray((value as HermesUpgradeData).modules) &&
-    (value as HermesUpgradeData).modules.length >= 10
+    (value as HermesUpgradeData).modules.length >= 25 && !!(value as HermesUpgradeData).core_package
   return apiFetch('/api/hermes-upgrades', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 
