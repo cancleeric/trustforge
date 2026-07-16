@@ -924,3 +924,19 @@ def test_admin_upgrade_queue_get_is_authenticated(admin_enabled, monkeypatch, tm
     code, response, _ = _request("GET", "/api/admin/hermes-upgrades", token=TEST_ADMIN_TOKEN)
     assert code == 200
     assert json.loads(response)["data"]["durable"] is True
+
+
+def test_upgrade_activation_endpoint_is_authenticated_and_explicit(admin_enabled, monkeypatch):
+    from trustforge.upgrade_queue import UpgradeQueue
+
+    called = {}
+    def activate(self, proposal_id, actor, reason):
+        called.update(proposal_id=proposal_id, actor=actor, reason=reason)
+        return {"proposal_id": proposal_id, "state": "activated", "revision": "abc"}
+    monkeypatch.setattr(UpgradeQueue, "activate", activate)
+    body = json.dumps({"proposal_id": "p", "actor": "release-operator", "reason": "reviewed"})
+    assert _request("POST", "/api/admin/hermes-upgrade-activate", body=body)[0] == 401
+    code, response, _ = _request("POST", "/api/admin/hermes-upgrade-activate", token=TEST_ADMIN_TOKEN, body=body)
+    assert code == 200
+    assert json.loads(response)["data"]["state"] == "activated"
+    assert called == {"proposal_id": "p", "actor": "release-operator", "reason": "reviewed"}

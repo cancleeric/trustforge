@@ -13,6 +13,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from trustforge.skills import artifact_hash, validate_artifact, write_artifact  # noqa: E402
+from trustforge.upgrade_queue import UpgradeQueue  # noqa: E402
 
 
 def _run(argv: list[str]) -> dict:
@@ -27,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=REPO / "out" / "skill-sandbox.json")
     parser.add_argument("--with-replay", action="store_true")
     parser.add_argument("--replay-coin", default="BTC")
+    parser.add_argument("--proposal-id", help="Persist the real sandbox result to this durable upgrade proposal")
+    parser.add_argument("--queue-db", type=Path, help="SQLite queue path; defaults to TRUSTFORGE_SQLITE_PATH")
     args = parser.parse_args(argv)
     candidate = json.loads(args.artifact.read_text(encoding="utf-8"))
     if not isinstance(candidate, dict):
@@ -46,6 +49,14 @@ def main(argv: list[str] | None = None) -> int:
         "passed": qa["returncode"] == 0 and (replay is None or replay["returncode"] == 0),
         "activation": "not activated; use manage_skill_change.py approve with this evidence after human review",
     }
+    if args.proposal_id:
+        queue = UpgradeQueue(args.queue_db)
+        result["queue_run"] = queue.record_sandbox(
+            args.proposal_id,
+            bool(result["passed"]),
+            f"sha256:{artifact_hash(candidate)}",
+            {"runner": "run_skill_sandbox.py", **result},
+        )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
