@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.15.0 — 2026-07-16
+
+- Add a continuous, snapshot-isolated Hermes analysis pipeline so ingestion can enqueue fresh work while prior packages advance through later stages.
+- Persist jobs, questions, snapshots, stage events, retries and execution timing in SQLite, with RAG-backed question reuse and auditable run manifests.
+- Unify asset selection and URL state across analysis, comparison and history views while keeping completed snapshots visible during background refresh.
+- Expose real pipeline telemetry, queue state and per-stage activity in the workspace instead of reusing presentation-only trust metrics.
+- Add governed outer-module upgrade diagnosis, sandbox candidates and a version-locked Trust Kernel boundary with human approval and rollback controls.
+- Stabilize local polling and service startup, and expand regression coverage for continuous analysis, upgrade governance and workspace synchronization.
+
 ## v0.14.15 — 2026-07-15
 
 - Raise the Hermes bridge visual fidelity with layered star-core shells, expanding energy rings, planetary specular and latitude surfaces, and low-trust fracture and broken-ring states.

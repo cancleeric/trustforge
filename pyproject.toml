@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trustforge"
-version = "0.14.15"
+version = "0.15.0"
 description = "加密市場分析 AI Agent：多源資訊的信任提煉（AWS Bedrock）"
 requires-python = ">=3.11"
 dependencies = [
