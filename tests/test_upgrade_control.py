@@ -29,4 +29,7 @@ def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply
     assert data["core_package"]["state"] == "release-locked"
     assert len(data["core_package"]["controls"]) == 6
     assert data["core_package"]["external_upgrade"]["status"] == "reserved"
+    sources = {row["source"]: row for row in data["automation"]["historical_sources"]}
+    assert sources["alternative-me-fng"]["status"] == "ready"
+    assert sources["news-rss-group"]["status"] == "archive_required"
     assert next(m for m in data["modules"] if m["id"] == "scheduler")["state"] == "candidate"

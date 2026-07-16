@@ -16,6 +16,7 @@ from typing import Any
 from . import __version__
 from .skill_changes import change_history
 from .skills import run_skill_manifest
+from .historical_sources import historical_source_capabilities
 
 
 MODULES = (
@@ -159,6 +160,7 @@ def upgrade_status() -> dict[str, Any]:
             "measurements": measurements,
             "llm_review": llm_review,
             "durable_queue": durable_queue,
+            "historical_sources": historical_source_capabilities(),
             "stages": [
                 {"id": "observe", "state": "running"},
                 {"id": "measure", "state": "ready" if measurements else "waiting_data"},
