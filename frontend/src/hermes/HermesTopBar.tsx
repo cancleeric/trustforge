@@ -9,6 +9,7 @@ interface HermesTopBarProps {
   onModuleSelect?: (module: HermesWorkspaceModule) => void
   onHome?: () => void
   degradedMessage?: string | null
+  onToggleShip?: () => void
 }
 
 export default function HermesTopBar({
@@ -19,6 +20,7 @@ export default function HermesTopBar({
   onModuleSelect,
   onHome,
   degradedMessage = null,
+  onToggleShip,
 }: HermesTopBarProps) {
   const { locale, setLocale, t } = useHermesI18n()
   const navItems = [
@@ -71,6 +73,7 @@ export default function HermesTopBar({
         ))}
       </nav>
       <div style={{ flex: 1 }} />
+      <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>⬡ 艦體升級</button>
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} style={{ background: 'transparent', border: '1px solid var(--color-hermes-bd2)', borderRadius: 4, color: 'var(--color-hermes-tx2)', fontFamily: 'inherit', fontSize: 9, padding: '3px 7px', cursor: 'pointer' }}>
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>

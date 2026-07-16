@@ -393,6 +393,24 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/hermes-upgrades:
+    get:
+      tags: [observability]
+      operationId: getHermesUpgrades
+      summary: Hermes 艦體模塊版本與升級控制面
+      description: |
+        唯讀投影正式的核心封裝 hash、外層 skill revision、診斷提案與
+        append-only 核准／回退紀錄。此端點不能核准、部署或觸發遞回升級。
+      responses:
+        "200":
+          description: 六個艦體掛點的真實版本與候選狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/analysis-snapshot:
     get:
       tags: [analysis]

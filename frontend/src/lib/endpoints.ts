@@ -113,6 +113,25 @@ export function getAnalysisFlow(signal?: AbortSignal): Promise<ApiEnvelope<Analy
   return apiFetch<AnalysisFlowData>('/api/analysis-flow', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 
+export interface HermesUpgradeModule {
+  id: string; name: string; slot: string; family: string; revision: string; version: string
+  origin: string; state: 'locked' | 'active' | 'candidate'; recursive_upgrade: false; automatic_apply: false
+  proposals: Array<{ id: string; area: string; severity: string; proposed_experiment: string; success_metric: string }>
+  history: Array<Record<string, unknown>>
+}
+export interface HermesUpgradeData {
+  agent: 'hermes'; kind: 'upgrade_control_plane'; metaphor: 'modular_flagship'
+  core_policy: string; outer_policy: string; recursive_upgrade: false
+  diagnostic: { status: string; generated_at: string | null; proposal_count: number }
+  modules: HermesUpgradeModule[]
+}
+export function getHermesUpgrades(signal?: AbortSignal): Promise<ApiEnvelope<HermesUpgradeData>> {
+  const valid = (value: unknown): value is HermesUpgradeData => !!value && typeof value === 'object' &&
+    (value as HermesUpgradeData).agent === 'hermes' && Array.isArray((value as HermesUpgradeData).modules) &&
+    (value as HermesUpgradeData).modules.length === 6
+  return apiFetch('/api/hermes-upgrades', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
+}
+
 export function getAnalysisJourney(signal?: AbortSignal): Promise<ApiEnvelope<AnalysisJourneyData>> {
   const valid = (value: unknown): value is AnalysisJourneyData => !!value && typeof value === 'object' &&
     Array.isArray((value as AnalysisJourneyData).jobs) && Array.isArray((value as AnalysisJourneyData).dead_letters)

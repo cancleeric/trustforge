@@ -52,6 +52,20 @@ observe -> propose -> sandbox/replay -> human approval -> versioned activation
 Trust weights, completed reports, models, production code and deployment remain
 outside autonomous mutation.
 
+### Flagship upgrade control plane
+
+The modular flagship is a truthful read-only projection, not a gamified level
+counter. `GET /api/hermes-upgrades` maps six ship hardpoints to the packaged
+Trust core and five immutable outer-skill families. The UI shows actual content
+revision/hash, baseline or approved origin, append-only change history, and
+diagnostic sandbox candidates.
+
+The activation path is `diagnose -> sandbox -> validation -> human approval ->
+active pointer -> rollback`. The Trust core is packaged and versioned so it can
+be upgraded through a normal reviewed branch/release, but outer artifacts
+cannot override it. Recursive self-upgrade and automatic deployment are
+explicitly disabled.
+
 ## Remaining external gates
 
 - Production connector reliability needs seven consecutive successful observed

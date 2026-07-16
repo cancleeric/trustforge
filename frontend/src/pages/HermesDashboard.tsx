@@ -7,11 +7,12 @@ import CurrencyGalaxy from '../hermes/CurrencyGalaxy'
 import StageBar from '../hermes/StageBar'
 import StageDrilldown from '../hermes/StageDrilldown'
 import { buildGalaxyModel, deriveSelected, HERMES_AMBER, HERMES_CYAN, HERMES_RED, tierOf, type GalaxyCoin, type GalaxyModel, type TrustComponent } from '../lib/hermesData'
-import { getOverview, getCosts, getHealth, getAnalysisFlow, getAnalysisJourney, getAnalysisQuestionContext, type AnalysisFlowData, type AnalysisJourneyData, type AnalysisQuestionContext } from '../lib/endpoints'
+import { getOverview, getCosts, getHealth, getAnalysisFlow, getAnalysisJourney, getAnalysisQuestionContext, getHermesUpgrades, type AnalysisFlowData, type AnalysisJourneyData, type AnalysisQuestionContext, type HermesUpgradeData } from '../lib/endpoints'
 import '../hermes/hermes.css'
 import { useHermesI18n } from '../hermes/hermesI18n'
 import HermesModuleDeck, { type HermesWorkspaceModule } from '../hermes/HermesModuleDeck'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
+import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
@@ -34,6 +35,9 @@ export default function HermesDashboard() {
   const [analysisFlow, setAnalysisFlow] = useState<AnalysisFlowData | null>(null)
   const [analysisJourney, setAnalysisJourney] = useState<AnalysisJourneyData | null>(null)
   const [questionContext, setQuestionContext] = useState<AnalysisQuestionContext | null>(null)
+  const [shipOpen, setShipOpen] = useState(false)
+  const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
+  const [upgradeLoading, setUpgradeLoading] = useState(false)
   const [qtype, setQtype] = useState(t('risk'))
   const [query, setQuery] = useState(t('defaultQuery'))
   const [typedLen, setTypedLen] = useState(0)
@@ -54,6 +58,12 @@ export default function HermesDashboard() {
       ? requestedModule : null,
   )
   const activeQuestionMode = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))]
+
+  const toggleShip = useCallback(() => {
+    if (shipOpen) { setShipOpen(false); return }
+    setShipOpen(true); setUpgradeLoading(true)
+    void getHermesUpgrades().then((result) => { if (result.ok) setUpgradeData(result.data) }).finally(() => setUpgradeLoading(false))
+  }, [shipOpen])
 
   const byIdRef = useRef<Record<string, GalaxyCoin>>(model.byId)
 
@@ -427,7 +437,7 @@ export default function HermesDashboard() {
         <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} />
+          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} />
         </div>
 
         <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>
@@ -486,6 +496,8 @@ export default function HermesDashboard() {
         )}
 
         {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} />}
+
+        {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} />}
 
       </div>
     </div>

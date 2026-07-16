@@ -4984,6 +4984,16 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
 
 
+def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
+    """Read-only, version-backed Hermes ship/module upgrade projection."""
+    try:
+        from .upgrade_control import upgrade_status
+        return 200, _json_envelope_ok(upgrade_status())
+    except Exception:
+        logging.exception("TrustForge /api/hermes-upgrades error")
+        return 502, _json_envelope_err("upgrade_control_unavailable", "Hermes 升級控制面暫時無法讀取")
+
+
 def _handle_api_analysis_snapshot(qs: dict) -> tuple[int, str]:
     """Return only the latest atomically published result for coin/mode."""
     coin = qs.get("coin", ["BTC"])[0].upper()
@@ -6444,6 +6454,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/hermes-upgrades":
+            code, body = _handle_api_hermes_upgrades(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-snapshot":
             code, body = _handle_api_analysis_snapshot(qs)

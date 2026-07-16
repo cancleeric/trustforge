@@ -33,6 +33,9 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(dashboard).toContain('startupStep / 5')
     expect(dashboard).not.toContain('CHANNELS VERIFIED')
     expect(dashboard).toContain('serviceMonitor={serviceMonitor}')
+    expect(dashboard).toContain('<HermesUpgradeShip')
+    expect(dashboard).toContain('getHermesUpgrades')
+    expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('禁止遞回升級')
   })
 
   it('does not restart the Hermes report for every score counter frame', () => {
