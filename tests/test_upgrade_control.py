@@ -25,6 +25,7 @@ def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply
     assert data["planes"] == ["DATA PLANE", "INTELLIGENCE", "DELIVERY", "OPERATIONS"]
     assert data["recursive_upgrade"] is False
     assert all(m["automatic_apply"] is False and m["recursive_upgrade"] is False for m in data["modules"])
+    assert all(m["version"].startswith("v") and len(m["revision_short"]) == 8 for m in data["modules"])
     assert data["core_package"]["version"].startswith("v")
     assert data["core_package"]["state"] == "release-locked"
     assert len(data["core_package"]["controls"]) == 6

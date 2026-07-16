@@ -143,7 +143,8 @@ def upgrade_status() -> dict[str, Any]:
         modules.append({
             "id": module_id, "name": name, "plane": plane, "channel": channel,
             "family": family or "release-artifact",
-            "revision": revision, "version": revision[:8], "origin": origin, "state": state,
+            "revision": revision, "revision_short": revision[:8],
+            "version": f"v{__version__}", "origin": origin, "state": state,
             "recursive_upgrade": False, "automatic_apply": False,
             "proposals": related, "history": history_rows,
         })

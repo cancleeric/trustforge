@@ -114,7 +114,7 @@ export function getAnalysisFlow(signal?: AbortSignal): Promise<ApiEnvelope<Analy
 }
 
 export interface HermesUpgradeModule {
-  id: string; name: string; plane: string; channel: string; family: string; revision: string; version: string
+  id: string; name: string; plane: string; channel: string; family: string; revision: string; revision_short: string; version: string
   origin: string; state: 'locked' | 'active' | 'candidate'; recursive_upgrade: false; automatic_apply: false
   proposals: Array<{ id: string; area: string; severity: string; proposed_experiment: string; success_metric: string }>
   history: Array<Record<string, unknown>>

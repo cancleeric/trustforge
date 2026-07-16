@@ -65,7 +65,7 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
         {planes.map(({ plane, modules: rows }) => <section className={`upgrade-plane plane-${plane.toLowerCase().replace(' ', '-')}`} key={plane}>
           <header><b>{plane}</b><span>{rows.length} modules</span></header>
           <div>{rows.map((module) => <button type="button" key={module.id} onClick={() => setSelected(module.id)} className={`${module.state} ${active?.id === module.id ? 'selected' : ''}`}>
-            <i /><span><strong>{module.name}</strong><small>{module.id}</small></span><code>{module.version}</code>
+            <i /><span><strong>{module.name}</strong><small>{module.id}</small></span><code className="module-release"><b>{module.version}</b><small>{module.revision_short}</small></code>
           </button>)}</div>
         </section>)}
       </div>
@@ -74,7 +74,8 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
           <div className="upgrade-inspector-title"><span>{active.plane}</span><b>{active.name}</b><em className={active.state}>{active.state}</em></div>
           <dl>
             <div><dt>MODULE ID</dt><dd>{active.id}</dd></div><div><dt>CHANNEL</dt><dd>{channelLabel[active.channel] ?? active.channel}</dd></div>
-            <div><dt>ARTIFACT</dt><dd>{active.family}</dd></div><div><dt>ORIGIN</dt><dd>{active.origin}</dd></div>
+            <div><dt>ARTIFACT</dt><dd>{active.family}</dd></div><div><dt>RELEASE VERSION</dt><dd><code>{active.version}</code></dd></div>
+            <div><dt>ORIGIN</dt><dd>{active.origin}</dd></div>
             <div className="wide"><dt>REVISION / CONTENT HASH</dt><dd><code>{active.revision}</code></dd></div>
           </dl>
           <section className="upgrade-path"><h3>升級邊界</h3>{active.channel === 'core-release'
