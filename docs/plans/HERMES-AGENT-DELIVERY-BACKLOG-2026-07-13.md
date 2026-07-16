@@ -19,7 +19,7 @@
 | P1 | H-21 | Execution Journey 正式 desktop/mobile viewport evidence 尚未封存 | 可直接執行 | 正式 viewport 截圖與互動紀錄進 `docs/qa/` |
 | P1 | H-28 | RAG／prompt 邊界仍有 source tier、文字正規化與指令隔離缺口（#191、#193）；TLS issue #192 需以回歸測試銷帳 | 可直接執行 | 不可信內容有明確 tier、長度／字元限制與 prompt data boundary；TLS hostname/certificate verification 測試固定 |
 | P1 | H-29 | CloudWatch dedup/recent_failures 與 admin cutover 網路／告警證據尚未完整銷帳（#104、#113） | production ops gate | 正式 alarm、X-Real-IP、admin 告警規則與演練 evidence |
-| P1 | H-30 | stub／空函式掃描只有人工 umbrella issue，尚未成為 CI 可執行 gate（#200） | 可直接執行 | allowlist 化掃描器與 CI artifact；新增空殼會 fail |
+| P1 | H-30 | stub／空函式掃描 CI gate 已於 PR #201 實作；umbrella child issues 仍各自追蹤 | 待合併 | allowlist 使用穩定 symbol；新增空殼或已完成但未移除 allowlist 都會 fail，CI 保存 JSON artifact |
 | P2 | H-13a | 五年多來源仍缺 SEC filing 全文、CoinGecko range、on-chain 歷史、新聞／Reddit archive；目前只有 Alternative.me 完整歷史與 SEC metadata-only | 開發＋外部契約 | coverage report 按來源／幣／日顯示 ready、missing、gated |
 | P2 | H-13b | runner 已完成，但尚未用足量五年 raw-source archive 跑完整 daily replay | 依賴 H-13a | 每日 run 具完整五階 execution log 且無 T 後資料 |
 | P2 | H-13c | outcome 程式已完成，尚待 H-13b 產生足量 eligible runs | 依賴 H-13b | T+1/T+7/T+14 lineage 與可稽核 coverage |
