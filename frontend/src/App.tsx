@@ -1,5 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import Header from './components/Header'
+import BridgeWorkspaceShell from './components/BridgeWorkspaceShell'
 import ErrorBoundary from './components/ErrorBoundary'
 import HermesDashboard from './pages/HermesDashboard'
 import AnalyzePage from './pages/AnalyzePage'
@@ -9,6 +9,7 @@ import CostsPage from './pages/CostsPage'
 import HistoryPage from './pages/HistoryPage'
 import AdminPage from './pages/AdminPage'
 import NotFoundPage from './pages/NotFoundPage'
+import { HermesI18nProvider } from './hermes/hermesI18n'
 
 /**
  * #172 codex 對抗審 HIGH 修正：ErrorBoundary 不會自動 reset，若不隨路由變化
@@ -43,22 +44,25 @@ function RoutedContent() {
 
 function Shell() {
   const location = useLocation()
-  // HERMES 頁自帶全屏 bridge 頂欄，不再套用舊 Header。
-  const showHeader = location.pathname !== '/'
+  // 首頁是完整市場艦橋；其餘功能頁進入共用的艦橋工作站外殼。
+  const isHermesBridge = location.pathname === '/'
   // hermes-surface 把全站沿用 `tf-*` token 的元件整批重對應到 HERMES 暗色
   // 視覺語言（見 hermes/hermes.css）；HERMES 首頁用 inline hermes-* 色，不受影響。
   return (
     <div className="hermes-surface min-h-screen bg-tf-bg">
-      {showHeader && <Header />}
-      <RoutedContent />
+      {isHermesBridge ? <RoutedContent /> : (
+        <BridgeWorkspaceShell><RoutedContent /></BridgeWorkspaceShell>
+      )}
     </div>
   )
 }
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Shell />
-    </BrowserRouter>
+    <HermesI18nProvider>
+      <BrowserRouter>
+        <Shell />
+      </BrowserRouter>
+    </HermesI18nProvider>
   )
 }

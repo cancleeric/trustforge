@@ -4,7 +4,8 @@ import { getCosts, getStatus } from '../lib/endpoints'
 import type { CostsData, FreshnessEntry, StatusData } from '../lib/types'
 import { formatAge, formatEpoch, formatUptime, formatUsd } from '../lib/format'
 import { DegradedBadge, FreshnessStatusBadge } from '../components/Badges'
-import { ErrorState, LoadingState } from '../components/StatusStates'
+import { ErrorState } from '../components/StatusStates'
+import { useBridgeHologram } from '../components/BridgeHologramContext'
 
 // 鮮度矩陣預設排序：把需要注意的格子排前面（missing 沒資料最該關注、
 // stale 次之、fresh 最後），而不是照 API 回傳原始順序（逐 source × coin
@@ -98,6 +99,7 @@ function CostSummaryCard({
 }
 
 export default function StatusPage() {
+  const { setData: setHologramData } = useBridgeHologram()
   const [status, setStatus] = useState<StatusData | null>(null)
   const [statusError, setStatusError] = useState<{ code: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
@@ -105,6 +107,22 @@ export default function StatusPage() {
   const [costs, setCosts] = useState<CostsData | null>(null)
   const [costsError, setCostsError] = useState<{ code: string; message: string } | null>(null)
   const [costsLoading, setCostsLoading] = useState(true)
+  const [statusRetryNonce, setStatusRetryNonce] = useState(0)
+  const [costsRetryNonce, setCostsRetryNonce] = useState(0)
+
+  useEffect(() => {
+    if (!status) {
+      setHologramData(null)
+      return
+    }
+    const total = status.freshness.fresh + status.freshness.stale + status.freshness.missing
+    setHologramData({
+      total,
+      primaryValue: total ? status.freshness.fresh / total : 0,
+      status: status.cache_backend.degraded ? 'DEGRADED' : 'UPLINK NOMINAL',
+    })
+    return () => setHologramData(null)
+  }, [status, setHologramData])
 
   // 狀態獨立請求：主 loading 只取決於 getStatus，資料一到就立即渲染，
   // 不受成本 API（無界 runs 陣列、可能延遲/逾時）拖累。
@@ -126,7 +144,13 @@ export default function StatusPage() {
     return () => {
       controller.abort()
     }
-  }, [])
+  }, [statusRetryNonce])
+
+  useEffect(() => {
+    if (statusError?.code !== 'network_error') return
+    const timer = window.setTimeout(() => setStatusRetryNonce((value) => value + 1), 1800)
+    return () => window.clearTimeout(timer)
+  }, [statusError])
 
   // 成本獨立請求：各自的 AbortController/timeout，pending/timeout/error
   // 只反映在 CostSummaryCard 自己的區塊，不影響上面已渲染的狀態內容。
@@ -148,7 +172,13 @@ export default function StatusPage() {
     return () => {
       controller.abort()
     }
-  }, [])
+  }, [costsRetryNonce])
+
+  useEffect(() => {
+    if (costsError?.code !== 'network_error') return
+    const timer = window.setTimeout(() => setCostsRetryNonce((value) => value + 1), 1800)
+    return () => window.clearTimeout(timer)
+  }, [costsError])
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
@@ -158,7 +188,7 @@ export default function StatusPage() {
         <p className="mt-1 text-sm text-tf-text2">快取連線與來源新鮮度的即時監控；異常資料會排在清單前方。</p>
       </div>
 
-      {loading && <LoadingState label="狀態載入中…" />}
+      {loading && null}
       {!loading && statusError && <ErrorState code={statusError.code} message={statusError.message} />}
       {!loading && !statusError && status && (
         <>
@@ -186,6 +216,11 @@ export default function StatusPage() {
 
           <section>
             <h3 className="mb-2 text-sm font-semibold text-tf-text">連接器資料鮮度</h3>
+            {status.freshness.fresh === 0 && status.freshness.stale === 0 && status.freshness.missing > 0 && (
+              <div className="mb-3 border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
+                API 與快取服務可連線，但目前掛載的資料庫沒有來源快照。本機開發預設使用獨立 JSON cache；需以 AWS DynamoDB 模式啟動，才會讀到雲端每 15 分鐘累積的資料。
+              </div>
+            )}
             <div className="mb-3 grid grid-cols-3 gap-3">
               <StatCard label="新鮮" value={status.freshness.fresh} color="var(--color-tf-good)" />
               <StatCard label="過期" value={status.freshness.stale} color="var(--color-tf-warn)" />

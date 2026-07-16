@@ -1,5 +1,7 @@
 import { TIER_COLOR, type GalaxyModel } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
+import type { ServiceMonitorState } from '../pages/HermesDashboard'
+import type { AnalysisQuestionContext } from '../lib/endpoints'
 
 interface HermesLeftRailProps {
   model: GalaxyModel
@@ -11,6 +13,9 @@ interface HermesLeftRailProps {
   query: string
   submitLabel: string
   disabled?: boolean
+  serviceMonitor?: Record<string, ServiceMonitorState>
+  questionContext?: AnalysisQuestionContext | null
+  onRecallQuestion?: (question: string) => void
   onType: (v: string) => void
   onQuery: (v: string) => void
   onSubmit: () => void
@@ -18,7 +23,8 @@ interface HermesLeftRailProps {
 
 export default function HermesLeftRail({
   model, uplinkLatency = '2.4s', hermesMessage, hasOrder, qtype, qtypes, query, submitLabel,
-  onType, onQuery, onSubmit, disabled = false,
+  onType, onQuery, onSubmit, disabled = false, serviceMonitor = {},
+  questionContext = null, onRecallQuestion,
 }: HermesLeftRailProps) {
   const { t } = useHermesI18n()
   const { tierCounts, coins } = model
@@ -27,7 +33,7 @@ export default function HermesLeftRail({
       className="hermes-glass"
       data-region="left-rail"
       style={{
-        position: 'absolute', left: 0, top: 44, width: 300, height: 736, zIndex: 5,
+        position: 'absolute', left: 0, top: 'var(--hermes-top)', width: 'var(--hermes-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
         borderRight: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
         display: 'flex', flexDirection: 'column', gap: 12,
       }}
@@ -40,6 +46,12 @@ export default function HermesLeftRail({
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('moderate')}</span><span style={{ color: TIER_COLOR.moderate }}>{tierCounts.moderate}</span></div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('danger')}</span><span style={{ color: TIER_COLOR.danger }}>{tierCounts.danger}</span></div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('latency')}</span><span style={{ color: 'var(--color-hermes-tx)' }}>{uplinkLatency}</span></div>
+          <div className="hermes-service-monitor" aria-label="system link monitor">
+            {Object.entries(serviceMonitor).map(([name, state]) => {
+              const label = state === 'ok' ? 'UP' : state === 'empty' ? 'NO DATA' : state === 'stale' ? 'DEGRADED' : state === 'error' ? 'DOWN' : 'CHECK'
+              return <span key={name} className={`is-${state}`} title={`${name}: ${label}`}><i />{name} · {label}</span>
+            })}
+          </div>
         </div>
       </div>
 
@@ -58,14 +70,30 @@ export default function HermesLeftRail({
         </div>
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
-          <div style={{ background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: '2px solid var(--color-hermes-amber)', borderRadius: '0 6px 6px 0', padding: '9px 11px' }}>
-            <div style={{ fontSize: 9, color: 'var(--color-hermes-amber)', letterSpacing: 1, marginBottom: 4 }}>HERMES</div>
-            <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--color-hermes-tx)' }}>{hermesMessage}</div>
+          <div style={{ minHeight: 82, flexShrink: 0, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: '2px solid var(--color-hermes-amber)', borderRadius: '0 6px 6px 0', padding: '9px 11px', overflow: 'hidden' }}>
+            <div style={{ fontSize: 9, color: 'var(--color-hermes-amber)', letterSpacing: 1, marginBottom: 4 }}>{t('agentOutput')}</div>
+            <div aria-label={t('agentOutput')} style={{ maxHeight: 62, overflowY: 'auto', fontSize: 11.5, lineHeight: 1.5, color: 'var(--color-hermes-tx)', overflowWrap: 'anywhere' }}>{hermesMessage}</div>
           </div>
-          {hasOrder && (
+          {(questionContext?.conversation.length || hasOrder) ? (
             <div style={{ background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 6, padding: '8px 11px', alignSelf: 'flex-end', maxWidth: '92%' }}>
-              <div style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1, marginBottom: 3 }}>{t('transmitted')}</div>
-              <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx2)' }}>&gt; {qtype}: {query}</div>
+              <div style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1, marginBottom: 3 }}>對話記憶 · SQLITE</div>
+              {(questionContext?.conversation.slice(-3) ?? []).map((message) => (
+                <div key={message.message_id} style={{ fontSize: 10.5, lineHeight: 1.4, color: message.role === 'hermes' ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-tx2)', marginTop: 4 }}>
+                  {message.role === 'hermes' ? 'HERMES' : 'YOU'} › {message.content}
+                </div>
+              ))}
+              {!questionContext?.conversation.length && <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx2)' }}>&gt; {qtype}: {query}</div>}
+            </div>
+          ) : null}
+          {!!questionContext?.matches.length && (
+            <div style={{ borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
+              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 5 }}>RAG · 相似歷史題目</div>
+              {questionContext.matches.slice(0, 3).map((match) => (
+                <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
+                  style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10, lineHeight: 1.35, padding: '5px 2px', cursor: 'pointer' }}>
+                  <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{match.mode} · {match.question}
+                </button>
+              ))}
             </div>
           )}
         </div>

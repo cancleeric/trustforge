@@ -1,77 +1,105 @@
 import { HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
+import type { HermesWorkspaceModule } from './HermesModuleDeck'
+import type { BridgeHologramData } from '../components/BridgeHologramContext'
+import type { AnalysisFlowData } from '../lib/endpoints'
 
 interface StageBarProps {
   selCoin: GalaxyCoin
   derivation: SelectedDerivation
   selectedStage: string | null
   onSelectStage: (id: string) => void
+  mode?: HermesWorkspaceModule | null
+  telemetry?: BridgeHologramData | null
+  activity?: { status: 'ready' | 'loading'; coin: string; mode: string; question: string }
+  flow?: AnalysisFlowData | null
 }
 
-const ARC_H = [72, 64, 80, 64, 72]
-
-export default function StageBar({ selCoin, derivation, selectedStage, onSelectStage }: StageBarProps) {
-  const { t } = useHermesI18n()
-  const divColor = derivation.divColor
-  const stages = STAGE_DEFS.map((s, i) => {
-    const isSel = selectedStage === s.id
-    const color = i === 2 ? divColor : s.id === 'manipulation' ? HERMES_AMBER : s.id === 'composite' ? TIER_COLOR_OF(selCoin) : HERMES_CYAN
-    const m = derivation.stageMetrics[s.id]
+export default function StageBar({ selCoin, derivation, selectedStage, onSelectStage, mode = null, telemetry = null, activity, flow }: StageBarProps) {
+  const { locale, t } = useHermesI18n()
+  const moduleLabels: Record<HermesWorkspaceModule, [string, string, string, string, string]> = locale === 'zh-TW' ? {
+    analyze: ['來源蒐集', '主張抽取', '信任推理', '證據綁定', '報告交付'],
+    compare: ['市場 A', '市場 B', '基準正規化', '差異向量', '比較結論'],
+    history: ['歷史封存', '時間切片', '每日回放', '結果回標', '校準趨勢'],
+    status: ['來源連線', '快取狀態', '資料鮮度', '異常告警', '系統健康'],
+    costs: ['呼叫收集', '模型分組', 'Token 計量', '帳本封存', '累計成本'],
+  } : {
+    analyze: ['SOURCE INTAKE', 'CLAIM EXTRACTION', 'TRUST REASONING', 'EVIDENCE BINDING', 'REPORT DELIVERY'],
+    compare: ['MARKET A', 'MARKET B', 'NORMALIZE', 'DELTA VECTOR', 'VERDICT'],
+    history: ['ARCHIVE', 'TIME SLICE', 'DAILY REPLAY', 'OUTCOME LABEL', 'CALIBRATION'],
+    status: ['UPLINK', 'CACHE', 'FRESHNESS', 'ALERTS', 'HEALTH'],
+    costs: ['CALLS', 'MODELS', 'TOKENS', 'LEDGER', 'TOTAL COST'],
+  }
+  const liveFlow = flow?.stages.some((stage) => stage.current || stage.queued > 0)
+  const engineStages = mode === 'analyze' && liveFlow ? flow?.stages.map((stage) => ({
+    id: stage.id,
+    label: moduleLabels.analyze[flow.stages.indexOf(stage)],
+    metric: String(stage.current ? 1 : 0),
+    unit: stage.next_retry_at
+      ? `排隊 ${stage.queued} · ${Math.max(0, Math.ceil(stage.next_retry_at - Date.now() / 1000))}s 後重試`
+      : `${stage.current ? '處理中' : '待命'} · 排隊 ${stage.queued} · 重試 ${stage.current?.retry_count ?? 0}`,
+    status: stage.current ? 'pending' as const : 'completed' as const,
+  })) : mode === 'analyze' ? telemetry?.pipelineStages : undefined
+  const currentWork = flow?.stages.find((stage) => stage.current)?.current
+  const stages = STAGE_DEFS.map((stage, index) => {
+    const metric = derivation.stageMetrics[stage.id]
+    const engine = engineStages?.[index]
     return {
-      ...s, color, h: ARC_H[i],
-      border: isSel ? color : 'var(--color-hermes-bd)',
-      bg: isSel ? 'var(--color-hermes-hover)' : 'var(--color-hermes-card)',
-      pulseAnim: isSel ? 'hermes-select-pulse 1.8s ease-in-out infinite' : 'none',
-      metric: m?.metric ?? '',
-      unit: s.id === 'scan' ? t('scanned') : s.id === 'filter' ? t('passed') : s.id === 'crossverify' ? t('divergenceUnit') : s.id === 'manipulation' ? t('flagged') : m?.unit ?? '',
-      step: `${t('stage')} ${i + 1}`,
-      label: s.id === 'scan' ? t('scan') : s.id === 'filter' ? t('filter') : s.id === 'crossverify' ? t('crossverify') : s.id === 'manipulation' ? t('manipulation') : t('composite'),
+      ...stage,
+      color: engine ? engine.status === 'failed' ? HERMES_RED : engine.status === 'completed' ? HERMES_CYAN : HERMES_AMBER : mode ? HERMES_AMBER : index === 2 ? derivation.divColor : stage.id === 'manipulation' ? HERMES_AMBER : stage.id === 'composite' ? tierColor(selCoin) : HERMES_CYAN,
+      metric: engine?.metric ?? (mode ? '--' : metric?.metric ?? '--'),
+      unit: engine?.unit ?? (mode ? (locale === 'zh-TW' ? '等待執行' : 'PENDING') : stage.id === 'scan' ? t('scanned') : stage.id === 'filter' ? t('passed') : stage.id === 'crossverify' ? t('divergenceUnit') : stage.id === 'manipulation' ? t('flagged') : metric?.unit ?? ''),
+      label: engine?.label ?? (mode ? moduleLabels[mode][index] : stage.id === 'scan' ? t('scan') : stage.id === 'filter' ? t('filter') : stage.id === 'crossverify' ? t('crossverify') : stage.id === 'manipulation' ? t('manipulation') : t('composite')),
     }
   })
 
   return (
-    <div
-      className="hermes-stage-bar"
-      style={{
-        position: 'absolute', left: 0, bottom: 0, width: 1440, height: 120, zIndex: 8,
-        background: 'rgba(10,16,24,.6)', backdropFilter: 'blur(10px)', borderTop: '1px solid var(--color-hermes-bd)',
-        display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 14, padding: '0 40px 12px',
-      }}
-    >
-      {stages.map((st) => (
-        <button
-          type="button"
-          aria-pressed={selectedStage === st.id}
-          key={st.id}
-          onClick={() => onSelectStage(st.id)}
-          className="hermes-clip-sm"
-          style={{
-            cursor: 'pointer', width: 220, height: st.h, background: st.bg, border: `1px solid ${st.border}`,
-            borderBottom: 'none', borderRadius: '8px 8px 0 0', padding: '10px 14px',
-            fontFamily: 'inherit', textAlign: 'left',
-            transition: 'transform .12s, border-color .15s, background .15s',
-            ['--pulse-color' as string]: st.color, animation: st.pulseAnim,
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.transform = 'translateY(-4px)')}
-          onMouseLeave={(e) => (e.currentTarget.style.transform = 'none')}
-          onMouseDown={(e) => (e.currentTarget.style.transform = 'translateY(-1px) scale(.98)')}
-          onMouseUp={(e) => (e.currentTarget.style.transform = 'translateY(-4px)')}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
-            <span style={{ fontSize: 13, color: st.color, width: 16, textAlign: 'center' }}>{st.icon}</span>
-            <span style={{ fontSize: 9.5, letterSpacing: 1, color: 'var(--color-hermes-tx3)' }}>{st.step}</span>
-          </div>
-          <div style={{ fontWeight: 700, fontSize: 11.5, color: 'var(--color-hermes-tx)', marginBottom: 4 }}>{st.label}</div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
-            <span style={{ fontSize: 17, fontWeight: 600, color: st.color }}>{st.metric}</span>
-            <span style={{ fontSize: 9.5, color: 'var(--color-hermes-tx3)' }}>{st.unit}</span>
-          </div>
-        </button>
-      ))}
-    </div>
+    <section className="hermes-energy-deck" aria-label={locale === 'zh-TW' ? 'Hermes 能量管線' : 'Hermes energy pipeline'}>
+      <div className="hermes-engine-activity" role="status" aria-live="polite">
+        <i className={currentWork || activity?.status === 'loading' ? 'is-running' : 'is-complete'} />
+        <b>{currentWork ? 'ANALYZING' : telemetry?.runId ? 'SNAPSHOT LOCKED' : 'CONTINUOUS'}</b>
+        <span>{currentWork?.coin ?? activity?.coin ?? selCoin.name}</span>
+        <span>{currentWork?.mode ?? telemetry?.analysisMode ?? activity?.mode ?? mode ?? 'multi_source'}</span>
+        <strong title={currentWork?.question ?? telemetry?.question ?? activity?.question}>{currentWork?.question ?? telemetry?.question ?? activity?.question ?? '等待有效題目'}</strong>
+        {currentWork?.snapshot_id && <small>snapshot {currentWork.snapshot_id}</small>}
+        {telemetry?.snapshotAt && <small>snapshot {telemetry.snapshotAt}</small>}
+        {telemetry?.runId && <small>run {telemetry.runId}</small>}
+      </div>
+      <div className="hermes-energy-conduit" aria-hidden="true">
+        <i className="hermes-energy-packet packet-a" />
+        <i className="hermes-energy-packet packet-b" />
+        <i className="hermes-energy-packet packet-c" />
+      </div>
+      <div className="hermes-energy-nodes">
+        {stages.map((stage, index) => {
+          const selected = selectedStage === stage.id
+          return (
+            <button
+              type="button"
+              key={stage.id}
+              aria-pressed={selected}
+              onClick={() => onSelectStage(stage.id)}
+              className={`hermes-energy-station${selected ? ' is-selected' : ''}`}
+              style={{ '--station-color': stage.color } as React.CSSProperties}
+            >
+              <span className="hermes-energy-index">0{index + 1}</span>
+              <i className="hermes-energy-junction"><b /></i>
+              <span className="hermes-energy-copy">
+                <strong>{stage.label}</strong>
+                <small><b>{stage.metric}</b> {stage.unit}</small>
+              </span>
+            </button>
+          )
+        })}
+      </div>
+      <div className="hermes-engine" aria-label="Hermes Engine">
+        <span className="hermes-engine-rings"><i /><b /></span>
+        <span><strong>HERMES</strong><small>ENGINE · CONTINUOUS</small></span>
+      </div>
+    </section>
   )
 }
 
-function TIER_COLOR_OF(coin: GalaxyCoin): string {
+function tierColor(coin: GalaxyCoin): string {
   return coin.tier === 'healthy' ? HERMES_CYAN : coin.tier === 'moderate' ? HERMES_AMBER : HERMES_RED
 }

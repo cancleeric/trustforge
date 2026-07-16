@@ -28,3 +28,14 @@ def test_diagnostic_blocks_calibrator_proposal_until_leakage_safe_sample_gate_is
     report = diagnose(replay={"available_snapshot_count": 4, "horizons": {}}, generated_at="2026-07-13T00:00:00Z")
 
     assert [item["id"] for item in report["proposals"]] == ["calibration-data-accumulation"]
+
+
+def test_analysis_history_can_propose_outer_framework_experiments_but_never_apply_them():
+    report = diagnose(analysis_history={
+        "job_count": 40, "failed_jobs": 3, "retried_jobs": 6,
+        "active_question_count": 20, "compared_question_pairs": 30,
+        "similar_question_rate": 0.5, "stages": [{"stage": "trust_reasoning", "failures": 3}],
+    }, generated_at="2026-07-16T00:00:00Z")
+    proposals = {item["id"]: item for item in report["proposals"]}
+    assert {"analysis-flow-reliability", "question-retrieval-diversification"} <= proposals.keys()
+    assert all(item["approval_required"] and not item["automatic_apply"] for item in proposals.values())

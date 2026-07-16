@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { getAnalyze } from '../lib/endpoints'
+import { getAnalysisSnapshot, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeParams } from '../lib/endpoints'
 import type { AnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import QueryConsole, { type QueryValues } from '../components/QueryConsole'
 import AnalysisReportView from '../components/AnalysisReportView'
 import { ErrorState, LoadingState } from '../components/StatusStates'
+import { useBridgeHologram } from '../components/BridgeHologramContext'
 
 function defaultQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
@@ -21,20 +22,75 @@ function paramsFromSearch(sp: URLSearchParams): AnalyzeParams {
 }
 
 export default function AnalyzePage() {
+  const { setData: setHologramData } = useBridgeHologram()
   const [searchParams, setSearchParams] = useSearchParams()
   const params = paramsFromSearch(searchParams)
 
   const [data, setData] = useState<AnalyzeData | null>(null)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
+  const [requestNonce, setRequestNonce] = useState(0)
+  const mode = searchParams.get('mode') || (params.type === 'hypothesis' ? 'fundamentals' : 'risk')
+  const hasExplicitRequest = true
 
   useEffect(() => {
+    if (!hasExplicitRequest) {
+      setLoading(false)
+      setError(null)
+      setData(null)
+      return
+    }
+    setHologramData(data ? {
+      question: params.q,
+      analysisMode: params.type,
+      snapshotAt: data.report.generated_at,
+      runId: data.execution?.run_id,
+      primaryLabel: data.report.coin,
+      primaryValue: data.report.calibrated_confidence,
+      total: data.evidence.length,
+      status: data.report.decision_state,
+      trustScore: data.report.calibrated_confidence,
+      componentScores: {
+        reputation: data.trust_components_aggregate.reputation,
+        corroboration: data.trust_components_aggregate.corroboration,
+        recency: data.trust_components_aggregate.recency,
+        resistance: data.trust_components_aggregate.manipulation == null ? null : 1 - data.trust_components_aggregate.manipulation,
+      },
+      pipelineStages: (data.execution?.nodes ?? []).slice().sort((a, b) => a.order - b.order).map((node) => {
+        const events = data.execution_log.filter((event) => {
+          const hermes = event.params.hermes
+          return typeof hermes === 'object' && hermes !== null && 'node_id' in hermes && hermes.node_id === node.id
+        })
+        const states = events.map((event) => {
+          const hermes = event.params.hermes
+          return typeof hermes === 'object' && hermes !== null && 'status' in hermes ? hermes.status : undefined
+        })
+        const failed = states.includes('failed')
+        const completed = states.includes('completed') || (node.id === 'report_delivery' && data.execution_log.some((event) => event.tool === 'report.done'))
+        const elapsed = events.map((event) => event.elapsed_sec).filter(Number.isFinite)
+        const duration = elapsed.length > 1 ? Math.max(...elapsed) - Math.min(...elapsed) : elapsed[0] ?? 0
+        return {
+          id: node.id,
+          label: node.label,
+          metric: String(events.length),
+          unit: `事件 · ${duration.toFixed(2)}s`,
+          status: failed ? 'failed' as const : completed ? 'completed' as const : 'pending' as const,
+        }
+      }),
+    } : null)
+    return () => setHologramData(null)
+  }, [data, hasExplicitRequest, setHologramData])
+
+  useEffect(() => {
+    if (!hasExplicitRequest) return
     // 真的 abort 底層 fetch（不只是忽略回應）：參數變更/卸載時中止「已被
     // 取代」的舊請求，避免它晚到覆蓋新狀態（race），也省下無謂的等待。
     const controller = new AbortController()
+    // Snapshot swap 必須原子化：保留上一個完整結果直到新結果抵達，避免
+    // 中央、右欄與能量管線各自先清空再補回而連續閃爍。
     setLoading(true)
     setError(null)
-    getAnalyze(params, controller.signal).then((res) => {
+    const read = () => getAnalysisSnapshot(params.coin, mode, controller.signal, params.q).then((res) => {
       // 已被取消（cleanup）——這是被取代的舊請求，靜默捨棄，不當錯誤
       // UI、不覆蓋新狀態。逾時（backend stall）不會走到這裡，會正常落到
       // 下面的 res.ok===false 分支顯示錯誤狀態。
@@ -44,20 +100,37 @@ export default function AnalyzePage() {
         setData(res.data)
         setError(null)
       } else {
-        setData(null)
+        if (res.error.code === 'snapshot_pending') {
+          setLoading(true)
+          return
+        }
         setError(res.error)
       }
     })
+    void read()
+    const poll = window.setInterval(() => void read(), 1500)
     return () => {
+      window.clearInterval(poll)
       controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.coin, params.type, params.q, params.sample])
+  }, [hasExplicitRequest, mode, params.coin, params.q, requestNonce])
+
+  useEffect(() => {
+    if (error?.code !== 'network_error') return
+    const timer = window.setTimeout(() => setError(null), 1800)
+    return () => window.clearTimeout(timer)
+  }, [error])
 
   const handleSubmit = (values: QueryValues) => {
-    const next: Record<string, string> = { coin: values.coin, type: values.type, q: values.q }
+    const next: Record<string, string> = {
+      coin: values.coin, type: values.type, q: values.q,
+      mode: values.mode,
+    }
     if (params.sample) next.sample = params.sample
     setSearchParams(next)
+    void registerAnalysisQuestion(values.coin, next.mode, values.q.trim())
+    setRequestNonce((value) => value + 1)
   }
 
   return (
@@ -81,13 +154,27 @@ export default function AnalyzePage() {
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-[288px_minmax(0,1fr)]">
       <aside className="lg:sticky lg:top-4 lg:self-start">
-        <QueryConsole initial={{ coin: params.coin, type: params.type, q: params.q }} onSubmit={handleSubmit} />
+        <QueryConsole initial={{ coin: params.coin, type: params.type, mode, q: params.q }} onSubmit={handleSubmit} />
       </aside>
 
       <section className="flex flex-col gap-4">
-        {loading && <LoadingState label={`分析 ${params.coin} 中…`} />}
-        {!loading && error && <ErrorState code={error.code} message={error.message} />}
-        {!loading && !error && data && <AnalysisReportView data={data} />}
+        {loading && !data && <LoadingState label={`讀取 ${params.coin} 分析快照中…`} />}
+        {loading && data && (
+          <div className="hermes-analysis-pending" role="status" aria-live="polite">
+            <i /> Hermes 正在分析新的資料快照；目前保留顯示上一個完整結果，完成後會一次切換。
+          </div>
+        )}
+        {!loading && error && !data && <ErrorState code={error.code} message={error.message} />}
+        {data && (
+          <div key={data.execution?.run_id ?? `${data.report.coin}-${data.report.generated_at}`} className="hermes-data-swap" aria-busy={loading}>
+            <AnalysisReportView data={data} />
+          </div>
+        )}
+        {!loading && !error && !data && (
+          <div className="hermes-clip border border-tf-border bg-tf-card p-5 text-sm text-tf-text2">
+            Hermes 正在載入這組幣種、模式與題目的最新預分析快照；此按鈕只供立即重跑。
+          </div>
+        )}
       </section>
       </div>
       </div>

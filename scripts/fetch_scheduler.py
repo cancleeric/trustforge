@@ -28,12 +28,13 @@
     # 只列出這次會呼叫哪些 (來源, 幣別)，不真的打 API / 不寫快取
     python3 scripts/fetch_scheduler.py --dry-run
 
-    # 切換 cache backend（預設沿用 cache.py 的 CACHE_BACKEND env，dynamodb|json；
+    # 切換 cache backend（預設沿用 cache.py 的 CACHE_BACKEND env，
+    # dynamodb|sqlite|json；
     # 預設 dynamodb）。primary backend 寫入失敗時，預設**不會**自動 fallback
     # 寫本地 JSON（避免假成功，見 codex HIGH-2）；exit code 非零代表有目標
     # 沒有真的持久化，cron/監控應據此告警。dev/CI 沒有真 AWS、想要一個真正
     # 能用的本地快取時，才明確開 opt-in：
-    CACHE_BACKEND=json python3 scripts/fetch_scheduler.py
+    CACHE_BACKEND=sqlite python3 scripts/fetch_scheduler.py
     # 或維持 CACHE_BACKEND=dynamodb，但允許失敗時 fallback 寫本地 JSON：
     TRUSTFORGE_CACHE_JSON_FALLBACK=1 python3 scripts/fetch_scheduler.py
 
@@ -90,6 +91,7 @@ from trustforge.ingestion.cache import (  # noqa: E402
     CacheBackend,
     DynamoDBCache,
     JsonCacheBackend,
+    SQLiteCacheBackend,
     cache_get,
     cache_key,
     cache_set,
@@ -486,6 +488,8 @@ def _probe_cache_backend() -> CacheBackend:
     backend = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
     if backend == "json":
         return JsonCacheBackend()
+    if backend == "sqlite":
+        return SQLiteCacheBackend()
     return DynamoDBCache(
         connect_timeout=_PROBE_DYNAMODB_CONNECT_TIMEOUT_SECONDS,
         read_timeout=_PROBE_DYNAMODB_READ_TIMEOUT_SECONDS,

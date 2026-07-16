@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { getCosts } from '../lib/endpoints'
 import type { CostsData, LedgerRunRecord } from '../lib/types'
 import { formatTimestamp, formatUsd } from '../lib/format'
-import { ErrorState, LoadingState } from '../components/StatusStates'
+import { ErrorState } from '../components/StatusStates'
+import { useBridgeHologram } from '../components/BridgeHologramContext'
 
 function ByModelTable({ data }: { data: CostsData }) {
   const models = Object.keys(data.by_model_detail)
@@ -78,10 +79,21 @@ function RecentRunsTable({ runs }: { runs: LedgerRunRecord[] }) {
 }
 
 export default function CostsPage() {
+  const { setData: setHologramData } = useBridgeHologram()
   const [data, setData] = useState<CostsData | null>(null)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [offset, setOffset] = useState(0)
+  const [retryNonce, setRetryNonce] = useState(0)
+
+  useEffect(() => {
+    setHologramData(data ? {
+      primaryValue: data.total_cost_usd,
+      total: data.run_count,
+      status: `${Object.keys(data.by_model).length} MODELS`,
+    } : null)
+    return () => setHologramData(null)
+  }, [data, setHologramData])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -101,7 +113,13 @@ export default function CostsPage() {
     return () => {
       controller.abort()
     }
-  }, [offset])
+  }, [offset, retryNonce])
+
+  useEffect(() => {
+    if (error?.code !== 'network_error') return
+    const timer = window.setTimeout(() => setRetryNonce((value) => value + 1), 1800)
+    return () => window.clearTimeout(timer)
+  }, [error])
 
   return (
     <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
@@ -111,7 +129,7 @@ export default function CostsPage() {
         <p className="mt-1 text-sm text-tf-text2">跨 run 的 LLM 呼叫成本與 token 用量；明細以分頁讀取，歷史資料不會被截斷。</p>
       </div>
 
-      {loading && <LoadingState label="成本資料載入中…" />}
+      {loading && null}
       {!loading && error && <ErrorState code={error.code} message={error.message} />}
       {!loading && !error && data && (
         <>
