@@ -127,6 +127,7 @@ export interface HermesUpgradeData {
   automation: {
     mode: string; measurements: Record<string, unknown>
     llm_review: { status: string; reviews: Array<Record<string, unknown>>; can_activate: false }
+    durable_queue: { durable: boolean; proposal_count: number; proposals: Array<Record<string, unknown>>; reviews: Array<Record<string, unknown>> }
     stages: Array<{ id: string; state: string }>
   }
   core_package: {

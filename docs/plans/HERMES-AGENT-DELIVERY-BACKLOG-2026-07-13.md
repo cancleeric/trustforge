@@ -91,6 +91,8 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 | H-22 | Continuous snapshot analysis matrix | **完成（2026-07-16）。** SQLite snapshot 隔離、五階重疊 worker、持久重試/DLQ、全幣×全模式×活動題目自動排程；UI 只讀原子發布快照 | daemon 重啟續跑、各階段可見 coin/mode/question/snapshot/queue/duration/retry；完整回歸通過 |
 | H-23 | Question RAG and Hermes dialogue memory | **完成第一版（2026-07-16）。** SQLite 活動題目、完成結論、run/snapshot lineage 與對話成為可檢索記憶；中英 bigram/token ranking，不依賴外部 embedding；run log 標記 non-evidentiary retrieval | 左側可查看/召回相似問題；歷史結論不進 Trust Evidence；API/測試/OpenAPI 齊備 |
 | H-24 | Historical outer-framework diagnostics | **完成第一版（2026-07-16）。** analysis jobs/stage duration/failure/retry/question similarity 正式接入 bounded diagnostic | 只產生 approval-gated sandbox proposal，`automatic_apply=false`，不得改核心或自行部署 |
+| H-25 | Durable upgrade proposal queue | **完成（2026-07-16）。** diagnostic proposals 與 Bedrock adversarial verdict 寫入共用 SQLite；重啟後保留狀態，WebUI 顯示 durable queue。LLM 永遠 `can_activate=false` | proposal/review 可跨程序重啟查閱；diagnostic refresh 不覆蓋既有 review state |
+| H-26 | Local frontend service durability | **完成（2026-07-16）。** `4174` Vite frontend 與 `8799` backend 分別由 launchd KeepAlive；API proxy 已實測 | `curl /` 與 `/api/hermes-upgrades` 回 200，程序退出後由 launchd 重啟 |
 
 ## 明確不做 / 不可越線
 

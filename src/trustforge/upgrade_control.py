@@ -117,6 +117,11 @@ def upgrade_status() -> dict[str, Any]:
         measurements = AnalysisFlow().improvement_history()
     except Exception:
         measurements = {}
+    try:
+        from .upgrade_queue import UpgradeQueue
+        durable_queue = UpgradeQueue().status()
+    except Exception:
+        durable_queue = {"durable": False, "proposal_count": 0, "proposals": [], "reviews": []}
     proposals = diagnostic.get("proposals") if isinstance(diagnostic.get("proposals"), list) else []
     modules = []
     for module_id, name, plane, channel, family, paths, areas in MODULES:
@@ -152,6 +157,7 @@ def upgrade_status() -> dict[str, Any]:
             "mode": "continuous_data_driven_outer_tuning",
             "measurements": measurements,
             "llm_review": llm_review,
+            "durable_queue": durable_queue,
             "stages": [
                 {"id": "observe", "state": "running"},
                 {"id": "measure", "state": "ready" if measurements else "waiting_data"},

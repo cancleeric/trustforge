@@ -11,6 +11,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from trustforge.bedrock import BedrockClient, BedrockConfig  # noqa: E402
 from trustforge.upgrade_review import review  # noqa: E402
+from trustforge.upgrade_queue import UpgradeQueue  # noqa: E402
 
 
 def main() -> int:
@@ -25,6 +26,7 @@ def main() -> int:
         result = review(diagnostic, lambda system, prompt: client.complete(system=system, prompt=prompt).text)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    UpgradeQueue().record_reviews(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

@@ -84,6 +84,11 @@ It uses the configured Bedrock model for adversarial evidence/candidate review,
 but its output always has `can_activate=false`. With no model configured the
 state is explicitly `waiting_model_configuration`.
 
+Upgrade proposals and LLM verdicts are also copied into the shared SQLite
+store. This durable queue survives process restarts and diagnostic refreshes do
+not erase a prior review state. JSON reports remain export artifacts, not the
+control-plane source of truth.
+
 ## Remaining external gates
 
 - Production connector reliability needs seven consecutive successful observed

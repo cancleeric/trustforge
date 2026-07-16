@@ -34,6 +34,7 @@ export default function HermesUpgradeShip({ data, loading, onClose }: Props) {
           <div><dt>SIMILAR Q</dt><dd>{data?.automation.measurements.similar_question_rate == null ? '—' : `${Math.round(Number(data.automation.measurements.similar_question_rate) * 100)}%`}</dd></div>
         </dl></section>
         <section className="llm-review-state"><h3>LLM 對抗審查</h3><b>{data?.automation.llm_review.status ?? 'not_run'}</b><p>比對量測證據、候選差異、資料洩漏、回歸與回退缺口。LLM 無核准權。</p></section>
+        <section className="durable-upgrade-queue"><h3>SQLITE 候選佇列</h3><b>{data?.automation.durable_queue.proposal_count ?? 0} proposals</b><p>{data?.automation.durable_queue.durable ? '重啟後保留 proposal、LLM verdict 與 gate 狀態' : '佇列目前不可用'}</p></section>
       </aside>
       <div className="upgrade-topology">
         {data?.core_package ? <section className="trust-kernel-package">
