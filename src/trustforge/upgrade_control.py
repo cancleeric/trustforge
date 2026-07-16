@@ -114,7 +114,8 @@ def upgrade_status() -> dict[str, Any]:
     llm_review = _llm_review()
     try:
         from .analysis_flow import AnalysisFlow
-        measurements = AnalysisFlow().improvement_history()
+        with AnalysisFlow() as flow:
+            measurements = flow.improvement_history()
     except Exception:
         measurements = {}
     try:

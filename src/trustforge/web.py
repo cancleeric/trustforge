@@ -4978,7 +4978,8 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
     """Read-only Hermes worker/queue telemetry. UI polling never starts analysis."""
     try:
         from .analysis_flow import AnalysisFlow
-        return 200, _json_envelope_ok(AnalysisFlow().status())
+        with AnalysisFlow() as flow:
+            return 200, _json_envelope_ok(flow.status())
     except Exception:
         logging.exception("TrustForge /api/analysis-flow error")
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
@@ -5049,7 +5050,8 @@ def _handle_api_analysis_snapshot(qs: dict) -> tuple[int, str]:
         if mode not in MODES:
             return 400, _json_envelope_err("invalid_mode", "不支援的分析模式")
         question = qs.get("q", [""])[0].strip() or None
-        payload = AnalysisFlow().latest(coin, mode, question)
+        with AnalysisFlow() as flow:
+            payload = flow.latest(coin, mode, question)
         if payload is None:
             return 404, _json_envelope_err("snapshot_pending", "此分析快照尚未發布")
         return 200, _json_envelope_ok(payload)
@@ -5065,7 +5067,8 @@ def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
     question = qs.get("q", [""])[0].strip()
     try:
         from .analysis_flow import AnalysisFlow
-        return 200, _json_envelope_ok(AnalysisFlow().question_context(coin, mode, question))
+        with AnalysisFlow() as flow:
+            return 200, _json_envelope_ok(flow.question_context(coin, mode, question))
     except ValueError as exc:
         return 400, _json_envelope_err("bad_request", str(exc))
     except Exception:
@@ -5084,9 +5087,10 @@ def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[
     try:
         _check_status_rate_limit(client_ip, "analysis-write")
         from .analysis_flow import AnalysisFlow
-        question_id, job_id = AnalysisFlow().register_question(
-            str(payload.get("coin", "")), str(payload.get("mode", "")), str(payload.get("question", "")),
-        )
+        with AnalysisFlow() as flow:
+            question_id, job_id = flow.register_question(
+                str(payload.get("coin", "")), str(payload.get("mode", "")), str(payload.get("question", "")),
+            )
         return 202, _json_envelope_ok({"question_id": question_id, "job_id": job_id, "state": "queued" if job_id else "registered"})
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
@@ -5108,9 +5112,9 @@ def _handle_api_analysis_comparison_question(headers, rfile, client_ip: str = ""
         question = str(payload.get("question", "")).strip()
         if coin == coin2: raise ValueError("comparison coins must differ")
         from .analysis_flow import AnalysisFlow
-        flow = AnalysisFlow()
-        a = flow.register_question(coin, "comparison", question)
-        b = flow.register_question(coin2, "comparison", question)
+        with AnalysisFlow() as flow:
+            a = flow.register_question(coin, "comparison", question)
+            b = flow.register_question(coin2, "comparison", question)
         return 202, _json_envelope_ok({"question_ids": [a[0], b[0]], "job_ids": [a[1], b[1]], "state": "queued"})
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
@@ -5126,8 +5130,8 @@ def _handle_api_comparison_snapshot(qs: dict) -> tuple[int, str]:
     question = qs.get("q", [""])[0].strip()
     try:
         from .analysis_flow import AnalysisFlow
-        flow = AnalysisFlow()
-        a, b = flow.latest(coin, "comparison", question), flow.latest(coin2, "comparison", question)
+        with AnalysisFlow() as flow:
+            a, b = flow.latest(coin, "comparison", question), flow.latest(coin2, "comparison", question)
         if not a or not b: return 404, _json_envelope_err("snapshot_pending", "比較快照尚未發布")
         data = {
             "version": a["version"],
@@ -5149,7 +5153,8 @@ def _handle_api_analysis_journey(qs: dict) -> tuple[int, str]:
         from .analysis_flow import AnalysisFlow
         raw = qs.get("limit", ["50"])[0]
         limit = int(raw) if raw.isdigit() else 50
-        return 200, _json_envelope_ok(AnalysisFlow().journey(limit=limit))
+        with AnalysisFlow() as flow:
+            return 200, _json_envelope_ok(flow.journey(limit=limit))
     except Exception:
         logging.exception("TrustForge analysis journey error")
         return 502, _json_envelope_err("analysis_journey_unavailable", "執行旅程暫時無法讀取")
@@ -5164,8 +5169,9 @@ def _handle_api_analysis_requeue(headers, rfile, client_ip: str = "") -> tuple[i
         from .analysis_flow import AnalysisFlow
         job_id = str(payload.get("job_id", "")).strip()
         if not job_id: raise ValueError("job_id required")
-        if not AnalysisFlow().requeue_dead_letter(job_id):
-            return 404, _json_envelope_err("not_found", "找不到死信工作")
+        with AnalysisFlow() as flow:
+            if not flow.requeue_dead_letter(job_id):
+                return 404, _json_envelope_err("not_found", "找不到死信工作")
         return 202, _json_envelope_ok({"job_id": job_id, "state": "queued"})
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))

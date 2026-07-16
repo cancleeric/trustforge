@@ -659,6 +659,12 @@ class AnalysisFlow:
             except sqlite3.Error: pass
         self._local.conn = None
 
+    def __enter__(self) -> "AnalysisFlow":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
     def __del__(self):
         try: self.close()
         except Exception: pass

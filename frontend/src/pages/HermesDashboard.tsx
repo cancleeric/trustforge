@@ -109,21 +109,30 @@ export default function HermesDashboard() {
 
   useEffect(() => {
     let active = true
-    const poll = () => void getAnalysisJourney().then((result) => {
+    let timer: number | undefined
+    let controller: AbortController | null = null
+    const poll = async () => {
+      controller = new AbortController()
+      const result = await getAnalysisJourney(controller.signal)
       if (active && result.ok) setAnalysisJourney(result.data)
-    })
-    poll(); const timer = window.setInterval(poll, 5000)
-    return () => { active = false; window.clearInterval(timer) }
+      if (active) timer = window.setTimeout(() => void poll(), 5000)
+    }
+    void poll()
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
   }, [])
 
   useEffect(() => {
     let active = true
-    const poll = () => void getAnalysisFlow().then((result) => {
+    let timer: number | undefined
+    let controller: AbortController | null = null
+    const poll = async () => {
+      controller = new AbortController()
+      const result = await getAnalysisFlow(controller.signal)
       if (active && result.ok) setAnalysisFlow(result.data)
-    })
-    poll()
-    const timer = window.setInterval(poll, 1500)
-    return () => { active = false; window.clearInterval(timer) }
+      if (active) timer = window.setTimeout(() => void poll(), 1500)
+    }
+    void poll()
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
   }, [])
 
   const buildHermesMessage = useCallback((sel: GalaxyCoin, ph: 'ready' | 'loading'): string => {
