@@ -29,8 +29,8 @@
 | ID | 待辦 | 現況 / 缺口 | 驗收條件 | 依賴 |
 |---|---|---|---|---|
 | H-07 | Outer Skill Registry | **完成。** 五類 immutable hash artifact，正式 run 開始時凍結 revision 並寫入 Execution Log/manifest；核心 override 被拒絕 | 已測試 | H-04 |
-| H-08 | Skill staging sandbox | **完成。** `scripts/run_skill_sandbox.py` 對候選 artifact 跑題庫，選用 replay；不會 activation | 已測試 | H-07 |
-| H-09 | Rollback 實際生效 | **完成。** approved/rollback pointer 被 runtime resolver 讀取，新 run manifest 顯示選定 hash | 已測試 | H-07、H-08 |
+| H-08 | Skill staging sandbox | **完成。** `scripts/run_skill_sandbox.py` 對候選 artifact 跑題庫，選用 replay，並以 `--proposal-id` 將真實 pass/fail、artifact hash 與 runner evidence 寫回 durable SQLite queue；不會自行 activation | 已測試 | H-07 |
+| H-09 | Rollback 實際生效 | **完成。** 人工 decision 僅核准、不啟用；另由 authenticated activation API 將已核准 artifact 寫入 append-only active pointer，rollback 只接受先前核准 revision。runtime resolver 與新 run manifest 讀取選定 hash | 已測試 | H-07、H-08 |
 | H-10 | 自動改善例行輸入 | **部分完成。** Hermes cycle 已自動產生 bounded 24 題 regression、各幣 replay、cache freshness 與 connector reliability artifact，再由 diagnostic 消費並建立 approval-gated proposal；online QA 保持 H-05 的明確 quota/credential gate | 排程定期產生 online QA 與各幣 replay reports；diagnostic 自動消費並建立 proposal queue | H-02、H-05 |
 | H-11 | 來源預取並行化 | **production 路徑與 deterministic 對照完成。** `v0.14.3` 正式 cycle 使用 4 個 source-owner workers，在 25.40 秒內完成 32 個成功目標、131 筆文件，之後才寫入五幣快照 5/5；完整 cycle 49.83 秒。新增時序回歸測試證明三來源並行不會退化為序列。證據見 `docs/qa/PREFETCH-PARALLELISM.md`；因本輪已有 429，不為了 benchmark 強制重打線上來源 | 壓力測試證明快於序列且可回溯 | H-02 |
 | H-12 | Cache freshness dashboard | **完成（資料 artifact）。** `scripts/cache_freshness_dashboard.py` 產出五幣×來源 fresh/stale/missing、age、document count、scheduler failure labels；Hermes cycle 自動執行 | 已測試 | H-02 |

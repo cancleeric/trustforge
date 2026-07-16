@@ -5021,12 +5021,28 @@ def _handle_api_admin_upgrade_action(headers, rfile, action: str) -> tuple[int, 
                 str(payload.get("proposal_id", "")), payload["passed"],
                 str(payload.get("artifact_hash", "")), payload.get("details"),
             )
-        else:
+        elif action == "decision":
             allowed = {"proposal_id", "decision", "actor", "reason"}
             if set(payload) - allowed:
                 return 400, _json_envelope_err("bad_request", "decision 含不支援欄位")
             result = queue.decide(
                 str(payload.get("proposal_id", "")), str(payload.get("decision", "")),
+                str(payload.get("actor", "")), str(payload.get("reason", "")),
+            )
+        elif action == "activate":
+            allowed = {"proposal_id", "actor", "reason"}
+            if set(payload) - allowed:
+                return 400, _json_envelope_err("bad_request", "activation 含不支援欄位")
+            result = queue.activate(
+                str(payload.get("proposal_id", "")), str(payload.get("actor", "")),
+                str(payload.get("reason", "")),
+            )
+        else:
+            allowed = {"proposal_id", "target_revision", "actor", "reason"}
+            if set(payload) - allowed:
+                return 400, _json_envelope_err("bad_request", "rollback 含不支援欄位")
+            result = queue.rollback(
+                str(payload.get("proposal_id", "")), str(payload.get("target_revision", "")),
                 str(payload.get("actor", "")), str(payload.get("reason", "")),
             )
         return 200, _json_envelope_ok(result)
@@ -6835,6 +6851,8 @@ class Handler(BaseHTTPRequestHandler):
             actions = {
                 "/api/admin/hermes-upgrade-sandbox": "sandbox",
                 "/api/admin/hermes-upgrade-decision": "decision",
+                "/api/admin/hermes-upgrade-activate": "activate",
+                "/api/admin/hermes-upgrade-rollback": "rollback",
             }
             if u.path in actions:
                 code, body = _handle_api_admin_upgrade_action(
