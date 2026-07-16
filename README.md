@@ -118,8 +118,10 @@ pytest -q
 ## Live Demo（web 服務）
 
 ```bash
-# 本機起 Live Demo（純 stdlib，預設離線模式，免 AWS 即可看完整管線）
-PORT=8799 python -m trustforge.web   # → http://127.0.0.1:8799
+# 本機起 Live Demo（SQLite 共用快取，免 AWS 即可看完整管線）
+CACHE_BACKEND=sqlite PORT=8799 python -m trustforge.web   # → http://127.0.0.1:8799
+# 首次由舊版 JSON 升級時先執行：
+# python scripts/migrate_json_cache_to_sqlite.py
 #   /            首頁表單（選幣種/題型/問題）
 #   /analyze     HTML 報告　/analyze.json  JSON（report+evidence+log）　/healthz  健康檢查
 ```

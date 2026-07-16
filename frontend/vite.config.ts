@@ -4,9 +4,9 @@ import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 //
-// dev proxy：把 /api/* 轉給後端（預設指向 live API，credit-safe：純轉發不落地
-// 任何資料；本機起後端時可用 VITE_API_PROXY_TARGET 覆寫成 http://127.0.0.1:8080）。
-const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://13.211.110.218'
+// dev proxy：開發環境預設只連本機 API，避免本機 UI 悄悄依賴 AWS。
+// 需要連其他環境時再明確設定 VITE_API_PROXY_TARGET。
+const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8799'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

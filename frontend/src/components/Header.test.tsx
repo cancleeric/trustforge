@@ -13,10 +13,11 @@ describe('Header 版本徽章', () => {
     vi.stubEnv('VITE_RELEASE_VERSION', 'v9.9.9')
     vi.resetModules()
     const { default: Header } = await import('./Header')
+    const { HermesI18nProvider } = await import('../hermes/hermesI18n')
 
     render(
       <MemoryRouter>
-        <Header />
+        <HermesI18nProvider><Header /></HermesI18nProvider>
       </MemoryRouter>
     )
 
@@ -29,10 +30,11 @@ describe('Header 版本徽章', () => {
     vi.stubEnv('VITE_RELEASE_VERSION', 'v9.9.9')
     vi.resetModules()
     const { default: Header } = await import('./Header')
+    const { HermesI18nProvider } = await import('../hermes/hermesI18n')
 
     render(
       <MemoryRouter>
-        <Header />
+        <HermesI18nProvider><Header /></HermesI18nProvider>
       </MemoryRouter>
     )
 

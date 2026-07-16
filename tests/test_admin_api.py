@@ -121,6 +121,8 @@ def _request(
         h.do_GET()
     elif method == "PUT":
         h.do_PUT()
+    elif method == "POST":
+        h.do_POST()
     else:
         raise AssertionError(f"unsupported method {method}")
     return captured[0], h.wfile.getvalue().decode("utf-8"), sent_headers
@@ -898,3 +900,27 @@ def test_audit_read_error_502(admin_enabled, monkeypatch):
     code, body, _ = _request("GET", "/api/admin/audit", token=TEST_ADMIN_TOKEN)
     assert code == 502
     assert "query failed" not in body
+
+
+def test_upgrade_gate_requires_auth_and_passed_sandbox(admin_enabled, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(tmp_path / "upgrades.sqlite3"))
+    from trustforge.upgrade_queue import UpgradeQueue
+    UpgradeQueue().sync_diagnostic({"proposals": [{"id": "p", "area": "x", "severity": "high"}]})
+    body = json.dumps({"proposal_id": "p", "decision": "approve", "actor": "qa", "reason": "green"})
+    assert _request("POST", "/api/admin/hermes-upgrade-decision", body=body)[0] == 401
+    code, response, _ = _request("POST", "/api/admin/hermes-upgrade-decision", token=TEST_ADMIN_TOKEN, body=body)
+    assert code == 409
+    assert json.loads(response)["error"]["code"] == "invalid_upgrade_transition"
+    sandbox = json.dumps({"proposal_id": "p", "passed": True, "artifact_hash": "sha256:abc", "details": {"tests": 24}})
+    assert _request("POST", "/api/admin/hermes-upgrade-sandbox", token=TEST_ADMIN_TOKEN, body=sandbox)[0] == 200
+    code, response, _ = _request("POST", "/api/admin/hermes-upgrade-decision", token=TEST_ADMIN_TOKEN, body=body)
+    assert code == 200
+    assert json.loads(response)["data"]["activated"] is False
+
+
+def test_admin_upgrade_queue_get_is_authenticated(admin_enabled, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(tmp_path / "upgrades.sqlite3"))
+    assert _request("GET", "/api/admin/hermes-upgrades")[0] == 401
+    code, response, _ = _request("GET", "/api/admin/hermes-upgrades", token=TEST_ADMIN_TOKEN)
+    assert code == 200
+    assert json.loads(response)["data"]["durable"] is True

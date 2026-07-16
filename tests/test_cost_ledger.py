@@ -24,6 +24,7 @@ from trustforge.ledger import (
     DynamoDBLedger,
     Ledger,
     JsonlLedger,
+    SQLiteLedger,
     append_run,
     estimate_cost,
     get_ledger,
@@ -147,6 +148,31 @@ def test_jsonl_ledger_persistence_across_new_instances(tmp_path):
     assert len(records) == 1
     assert records[0]["coin"] == "BTC"
     assert records[0]["total_cost_usd"] == 0.5
+
+
+def test_sqlite_ledger_append_and_persist_across_instances(tmp_path):
+    path = tmp_path / "trustforge.sqlite3"
+    first = SQLiteLedger(path)
+    first.append({"run_id": "run-1", "ts": "t1", "coin": "BTC", "calls": [], "total_cost_usd": 0.5})
+    first.append({"run_id": "run-2", "ts": "t2", "coin": "ETH", "calls": [], "total_cost_usd": 0.25})
+
+    records = SQLiteLedger(path).read_all()
+    assert [record["run_id"] for record in records] == ["run-1", "run-2"]
+    assert SQLiteLedger(path).summary()["total_cost_usd"] == pytest.approx(0.75)
+
+
+def test_sqlite_ledger_rejects_duplicate_run_id(tmp_path):
+    ledger = SQLiteLedger(tmp_path / "trustforge.sqlite3")
+    record = {"run_id": "same", "ts": "t1", "calls": [], "total_cost_usd": 0.0}
+    ledger.append(record)
+    with pytest.raises(Exception):
+        ledger.append(record)
+
+
+def test_get_ledger_selects_sqlite(monkeypatch, tmp_path):
+    monkeypatch.setenv("COST_LEDGER_BACKEND", "sqlite")
+    monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(tmp_path / "trustforge.sqlite3"))
+    assert isinstance(get_ledger(), SQLiteLedger)
 
 
 def test_ledger_jsonl_archive_verify_and_restore_drill(tmp_path):

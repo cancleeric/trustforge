@@ -1,0 +1,32 @@
+import json
+
+from trustforge import upgrade_control
+
+
+def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply(monkeypatch, tmp_path):
+    report = tmp_path / "improvement.json"
+    report.write_text(json.dumps({
+        "status": "attention_required", "generated_at": "2026-07-16T00:00:00Z",
+        "proposals": [{"id": "analysis-flow-reliability", "area": "analysis-orchestration",
+                       "severity": "high", "proposed_experiment": "sandbox replay",
+                       "success_metric": "retry rate below threshold"}],
+    }))
+    monkeypatch.setenv("TRUSTFORGE_IMPROVEMENT_REPORT", str(report))
+    monkeypatch.setattr(upgrade_control, "change_history", lambda: [])
+    monkeypatch.setattr(upgrade_control, "run_skill_manifest", lambda: {
+        "outer_skills": [{"family": family, "revision": family * 12, "origin": "baseline"}
+                         for family in ("source", "analysis", "report", "evaluation", "improvement")]
+    })
+
+    data = upgrade_control.upgrade_status()
+
+    assert len(data["modules"]) == 31
+    assert data["coverage"] == {"registered": 31, "complete": True}
+    assert data["planes"] == ["DATA PLANE", "INTELLIGENCE", "DELIVERY", "OPERATIONS"]
+    assert data["recursive_upgrade"] is False
+    assert all(m["automatic_apply"] is False and m["recursive_upgrade"] is False for m in data["modules"])
+    assert data["core_package"]["version"].startswith("v")
+    assert data["core_package"]["state"] == "release-locked"
+    assert len(data["core_package"]["controls"]) == 6
+    assert data["core_package"]["external_upgrade"]["status"] == "reserved"
+    assert next(m for m in data["modules"] if m["id"] == "scheduler")["state"] == "candidate"

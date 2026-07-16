@@ -55,6 +55,7 @@ HERMES_TOOLS = (
     HermesTool("read_snapshot", "Read a snapshot at or before formal-run start time.", "formal", 5),
     HermesTool("replay_history", "Join point-in-time decisions to later official OHLCV outcomes.", "offline", 5),
     HermesTool("diagnose_improvement", "Turn QA, scheduler, and replay evidence into approval-gated experiments.", "autonomous", 1),
+    HermesTool("review_upgrades", "Use Bedrock to adversarially compare measured evidence and upgrade candidates; never approve deployment.", "autonomous", 1),
     HermesTool("extract_claims", "Use Bedrock to extract structured claims from selected evidence.", "formal", 1),
     HermesTool("classify_stance", "Use Bedrock for bounded semantic stance classification.", "formal", 1),
     HermesTool("assemble_report", "Use Bedrock only to narrate pipeline-derived findings with citations.", "formal", 1),
@@ -101,6 +102,7 @@ def autonomous_cycle_plan(coins: tuple[str, ...] | list[str] | None = None) -> d
                 for coin in selected
             ],
             {"tool": "diagnose_improvement", "argv": ["scripts/diagnose_hermes.py"]},
+            {"tool": "review_upgrades", "argv": ["scripts/review_hermes_upgrades.py"]},
         ],
         "formal_run_boundary": "A formal run reads only source/snapshot records at or before its run_started_at.",
     }

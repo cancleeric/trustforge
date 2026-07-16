@@ -120,7 +120,7 @@ export default function CurrencyGalaxy({
   return (
     <div
       style={{
-        position: 'absolute', left: 300, top: 44, width: 840, height: 736, overflow: 'hidden',
+        position: 'absolute', left: 'var(--hermes-rail)', right: 'var(--hermes-right-rail)', top: 'var(--hermes-top)', bottom: 'var(--hermes-bottom)', overflow: 'hidden',
         background: 'radial-gradient(ellipse at 50% 44%,#0d1c2a 0%,#050a12 70%)',
         filter: focusPulse ? 'brightness(1.35) saturate(1.3)' : 'brightness(1) saturate(1)',
         transition: 'filter .4s ease-out',
@@ -155,7 +155,7 @@ export default function CurrencyGalaxy({
       )}
 
       {/* quick currency selector strip */}
-      <div style={{ position: 'absolute', left: 26, top: 44, display: 'flex', gap: 6, zIndex: 4 }}>
+      <div style={{ position: 'absolute', left: 26, top: 68, display: 'flex', gap: 6, zIndex: 4 }}>
         {model.coins.map((coin) => {
           const color = TIER_COLOR[coin.tier]
           const isSel = coin.id === selectedId

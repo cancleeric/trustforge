@@ -55,6 +55,115 @@ export function getAnalyze(params: AnalyzeParams, signal?: AbortSignal): Promise
   })
 }
 
+/** Read an already-published Hermes result. This endpoint never starts work. */
+export function getAnalysisSnapshot(coin: string, mode: string, signal?: AbortSignal, q?: string): Promise<ApiEnvelope<AnalyzeData>> {
+  return apiFetch<AnalyzeData>('/api/analysis-snapshot', { coin, mode, q }, isAnalyzeData, {
+    signal,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+  })
+}
+
+interface AnalysisQuestionReceipt { question_id: string; job_id: string | null; state: string }
+export function registerAnalysisQuestion(coin: string, mode: string, question: string): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
+  const valid = (value: unknown): value is AnalysisQuestionReceipt => !!value && typeof value === 'object' &&
+    typeof (value as AnalysisQuestionReceipt).question_id === 'string' &&
+    ((value as AnalysisQuestionReceipt).job_id === null || typeof (value as AnalysisQuestionReceipt).job_id === 'string') &&
+    typeof (value as AnalysisQuestionReceipt).state === 'string'
+  return apiFetch('/api/analysis-question', undefined, valid, {
+    method: 'POST', jsonBody: { coin, mode, question }, timeoutMs: DEFAULT_TIMEOUT_MS,
+  })
+}
+
+export interface AnalysisQuestionMatch {
+  question_id: string; coin: string; mode: string; question: string; similarity: number
+  answer: string | null; snapshot_id: string | null; job_id: string | null; published_at: number | null
+}
+export interface AnalysisConversationMessage {
+  message_id: string; role: 'user' | 'hermes'; content: string; question_id: string | null
+  job_id: string | null; snapshot_id: string | null; created_at: number
+}
+export interface AnalysisQuestionContext {
+  query: string; matches: AnalysisQuestionMatch[]; conversation: AnalysisConversationMessage[]; retrieval: string
+}
+export function getAnalysisQuestionContext(coin: string, mode: string, question: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisQuestionContext>> {
+  const valid = (value: unknown): value is AnalysisQuestionContext => !!value && typeof value === 'object' &&
+    Array.isArray((value as AnalysisQuestionContext).matches) && Array.isArray((value as AnalysisQuestionContext).conversation)
+  return apiFetch('/api/analysis-question-context', { coin, mode, q: question }, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
+}
+
+export interface AnalysisFlowStage {
+  id: string
+  queued: number
+  next_retry_at?: number | null
+  current: null | { coin: string; mode: string; question: string; snapshot_id: string; started_at: number; retry_count: number; error: string | null }
+}
+export interface AnalysisFlowData { agent: string; state: string; stages: AnalysisFlowStage[]; updated_at: string }
+export interface AnalysisJourneyAttempt { attempt_id: string; job_id: string; stage: string; attempt: number; state: string; started_at: number; finished_at: number; duration_sec: number; retryable: number; error: string | null }
+export interface AnalysisJourneyJob { job_id: string; coin: string; mode: string; question: string; snapshot_id: string; state: string; current_stage: string; retry_count: number; error: string | null; updated_at: number; attempts: AnalysisJourneyAttempt[]; stages: Array<Record<string, unknown>> }
+export interface AnalysisDeadLetter { job_id: string; stage: string; coin: string; mode: string; question: string; snapshot_id: string; attempts: number; error: string; failed_at: number }
+export interface AnalysisJourneyData { jobs: AnalysisJourneyJob[]; dead_letters: AnalysisDeadLetter[]; updated_at: string }
+
+export function getAnalysisFlow(signal?: AbortSignal): Promise<ApiEnvelope<AnalysisFlowData>> {
+  const valid = (value: unknown): value is AnalysisFlowData => {
+    if (!value || typeof value !== 'object') return false
+    const data = value as AnalysisFlowData
+    return data.agent === 'hermes' && Array.isArray(data.stages) && data.stages.every((stage) =>
+      typeof stage.id === 'string' && typeof stage.queued === 'number' && (stage.current === null || typeof stage.current === 'object'))
+  }
+  return apiFetch<AnalysisFlowData>('/api/analysis-flow', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
+}
+
+export interface HermesUpgradeModule {
+  id: string; name: string; plane: string; channel: string; family: string; revision: string; version: string
+  origin: string; state: 'locked' | 'active' | 'candidate'; recursive_upgrade: false; automatic_apply: false
+  proposals: Array<{ id: string; area: string; severity: string; proposed_experiment: string; success_metric: string }>
+  history: Array<Record<string, unknown>>
+}
+export interface HermesUpgradeData {
+  agent: 'hermes'; kind: 'upgrade_control_plane'; metaphor: 'modular_flagship'
+  core_policy: string; outer_policy: string; recursive_upgrade: false
+  diagnostic: { status: string; generated_at: string | null; proposal_count: number }
+  coverage: { registered: number; complete: boolean }
+  automation: {
+    mode: string; measurements: Record<string, unknown>
+    llm_review: { status: string; reviews: Array<Record<string, unknown>>; can_activate: false }
+    durable_queue: { durable: boolean; proposal_count: number; proposals: Array<{ proposal_id: string; area: string; severity: string; state: string; created_at: number; updated_at: number }>; reviews: Array<Record<string, unknown>>; sandbox_runs: Array<Record<string, unknown>>; decisions: Array<Record<string, unknown>> }
+    stages: Array<{ id: string; state: string }>
+  }
+  core_package: {
+    id: string; name: string; version: string; revision: string; state: string; controls: string[]
+    upgrade_channel: string; external_upgrade: { status: string; adapter: string | null; automatic_activation: false }
+  }
+  planes: string[]
+  modules: HermesUpgradeModule[]
+}
+export function getHermesUpgrades(signal?: AbortSignal): Promise<ApiEnvelope<HermesUpgradeData>> {
+  const valid = (value: unknown): value is HermesUpgradeData => !!value && typeof value === 'object' &&
+    (value as HermesUpgradeData).agent === 'hermes' && Array.isArray((value as HermesUpgradeData).modules) &&
+    (value as HermesUpgradeData).modules.length >= 25 && !!(value as HermesUpgradeData).core_package
+  return apiFetch('/api/hermes-upgrades', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
+}
+
+export function postHermesUpgradeDecision(adminToken: string, proposalId: string, decision: 'approve' | 'reject', actor: string, reason: string) {
+  const valid = (value: unknown): value is { proposal_id: string; state: string; activated: false } => !!value && typeof value === 'object' && typeof (value as { proposal_id?: unknown }).proposal_id === 'string'
+  return apiFetch('/api/admin/hermes-upgrade-decision', undefined, valid, {
+    method: 'POST', headers: { 'X-Admin-Token': adminToken },
+    jsonBody: { proposal_id: proposalId, decision, actor, reason }, cache: 'no-store',
+  })
+}
+
+export function getAnalysisJourney(signal?: AbortSignal): Promise<ApiEnvelope<AnalysisJourneyData>> {
+  const valid = (value: unknown): value is AnalysisJourneyData => !!value && typeof value === 'object' &&
+    Array.isArray((value as AnalysisJourneyData).jobs) && Array.isArray((value as AnalysisJourneyData).dead_letters)
+  return apiFetch('/api/analysis-journey', { limit: 100 }, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
+}
+
+export function requeueAnalysis(jobId: string): Promise<ApiEnvelope<{ job_id: string; state: string }>> {
+  const valid = (value: unknown): value is { job_id: string; state: string } => !!value && typeof value === 'object' &&
+    typeof (value as { job_id: unknown }).job_id === 'string' && typeof (value as { state: unknown }).state === 'string'
+  return apiFetch('/api/analysis-requeue', undefined, valid, { method: 'POST', jsonBody: { job_id: jobId }, timeoutMs: DEFAULT_TIMEOUT_MS })
+}
+
 export function getHealth(signal?: AbortSignal): Promise<ApiEnvelope<HealthData>> {
   return apiFetch<HealthData>('/api/health', undefined, isHealthData, {
     signal,
@@ -83,6 +192,22 @@ export function getComparison(
     isComparisonAnalyzeData,
     { signal, timeoutMs: ANALYZE_TIMEOUT_MS },
   )
+}
+
+export function registerAnalysisComparison(params: ComparisonParams): Promise<ApiEnvelope<{ question_ids: string[]; job_ids: (string | null)[]; state: string }>> {
+  const valid = (value: unknown): value is { question_ids: string[]; job_ids: (string | null)[]; state: string } => {
+    if (!value || typeof value !== 'object') return false
+    const data = value as { question_ids: unknown; job_ids: unknown; state: unknown }
+    return Array.isArray(data.question_ids) && data.question_ids.every((x) => typeof x === 'string') &&
+      Array.isArray(data.job_ids) && data.job_ids.every((x) => x === null || typeof x === 'string') && typeof data.state === 'string'
+  }
+  return apiFetch('/api/analysis-comparison-question', undefined, valid, {
+    method: 'POST', jsonBody: { coin: params.coin, coin2: params.coin2, question: params.q }, timeoutMs: DEFAULT_TIMEOUT_MS,
+  })
+}
+
+export function getComparisonSnapshot(params: ComparisonParams, signal?: AbortSignal): Promise<ApiEnvelope<ComparisonAnalyzeData>> {
+  return apiFetch('/api/comparison-snapshot', { coin: params.coin, coin2: params.coin2, q: params.q }, isComparisonAnalyzeData, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 
 export function getStatus(signal?: AbortSignal): Promise<ApiEnvelope<StatusData>> {

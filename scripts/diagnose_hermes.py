@@ -11,8 +11,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from trustforge.improvement import diagnose  # noqa: E402
+from trustforge.analysis_flow import AnalysisFlow  # noqa: E402
 from trustforge.scheduler_log import get_recent_scheduler_runs  # noqa: E402
 from trustforge.schema import COIN_POOL  # noqa: E402
+from trustforge.upgrade_queue import UpgradeQueue  # noqa: E402
 
 
 def _read_json(path: Path | None) -> dict | None:
@@ -51,9 +53,11 @@ def main(argv: list[str] | None = None) -> int:
         scheduler_runs=get_recent_scheduler_runs(args.recent_runs),
         connector_reliability=_read_json(args.connector_reliability),
         question_bank=_read_json(question_bank), replay=replay,
+        analysis_history=AnalysisFlow().improvement_history(),
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    UpgradeQueue().sync_diagnostic(report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

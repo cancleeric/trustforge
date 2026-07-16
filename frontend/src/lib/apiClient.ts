@@ -72,7 +72,7 @@ export interface ApiFetchOptions {
    * `DEFAULT_TIMEOUT_MS` / `ANALYZE_TIMEOUT_MS` 與 `endpoints.ts`。 */
   timeoutMs?: number
   /** `/api/admin/config` 寫入用；預設 GET。 */
-  method?: 'GET' | 'PUT'
+  method?: 'GET' | 'POST' | 'PUT'
   /** 額外 request headers（如 `X-Admin-Token`）——認證 token 一律走
    * header、絕不進 URL/query（query 會落 access log/瀏覽歷史，見後端
    * `web.py` admin 區塊「token 絕不進 URL」原則，前端同一條紀律）。 */
