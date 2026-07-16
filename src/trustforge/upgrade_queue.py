@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ class UpgradeQueue:
     def __init__(self, path: Path | None = None):
         self.path = path or default_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._db() as db:
+        with closing(self._db()) as db, db:
             db.executescript("""
             CREATE TABLE IF NOT EXISTS upgrade_proposals (
               proposal_id TEXT PRIMARY KEY, area TEXT NOT NULL, severity TEXT NOT NULL,
@@ -36,7 +37,7 @@ class UpgradeQueue:
 
     def sync_diagnostic(self, report: dict[str, Any]) -> int:
         now, count = time.time(), 0
-        with self._db() as db:
+        with closing(self._db()) as db, db:
             for item in report.get("proposals", []):
                 if not isinstance(item, dict) or not item.get("id"):
                     continue
@@ -52,7 +53,7 @@ class UpgradeQueue:
 
     def record_reviews(self, result: dict[str, Any]) -> int:
         now, count = time.time(), 0
-        with self._db() as db:
+        with closing(self._db()) as db, db:
             for item in result.get("reviews", []):
                 if not isinstance(item, dict) or not item.get("proposal_id"):
                     continue
@@ -66,7 +67,7 @@ class UpgradeQueue:
         return count
 
     def status(self, limit: int = 50) -> dict[str, Any]:
-        with self._db() as db:
+        with closing(self._db()) as db:
             proposals = [dict(row) for row in db.execute(
                 "SELECT proposal_id,area,severity,state,created_at,updated_at FROM upgrade_proposals ORDER BY updated_at DESC LIMIT ?", (limit,))]
             reviews = [dict(row) for row in db.execute(
