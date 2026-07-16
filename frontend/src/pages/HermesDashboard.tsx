@@ -65,6 +65,11 @@ export default function HermesDashboard() {
     void getHermesUpgrades().then((result) => { if (result.ok) setUpgradeData(result.data) }).finally(() => setUpgradeLoading(false))
   }, [shipOpen])
 
+  const refreshUpgrades = useCallback(() => {
+    setUpgradeLoading(true)
+    void getHermesUpgrades().then((result) => { if (result.ok) setUpgradeData(result.data) }).finally(() => setUpgradeLoading(false))
+  }, [])
+
   const byIdRef = useRef<Record<string, GalaxyCoin>>(model.byId)
 
   useEffect(() => {
@@ -497,7 +502,7 @@ export default function HermesDashboard() {
 
         {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} />}
 
-        {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} />}
+        {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />}
 
       </div>
     </div>

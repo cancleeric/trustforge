@@ -1,20 +1,38 @@
 import { useMemo, useState } from 'react'
-import type { HermesUpgradeData } from '../lib/endpoints'
+import { postHermesUpgradeDecision, type HermesUpgradeData } from '../lib/endpoints'
+import { loadSessionToken } from '../lib/adminConsole'
 
-interface Props { data: HermesUpgradeData | null; loading: boolean; onClose: () => void }
+interface Props { data: HermesUpgradeData | null; loading: boolean; onClose: () => void; onRefresh: () => void }
 
 const channelLabel: Record<string, string> = {
   'sandbox-policy': 'SANDBOX POLICY', 'reviewed-release': 'REVIEWED RELEASE',
   'model-gate': 'MODEL GATE', 'core-release': 'CORE RELEASE',
 }
 
-export default function HermesUpgradeShip({ data, loading, onClose }: Props) {
+export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }: Props) {
   const [selected, setSelected] = useState<string | null>(null)
+  const [actor, setActor] = useState('')
+  const [reason, setReason] = useState('')
+  const [gateMessage, setGateMessage] = useState('')
+  const [gateBusy, setGateBusy] = useState(false)
   const modules = data?.modules ?? []
   const active = modules.find((module) => module.id === selected) ?? modules[0] ?? null
   const planes = useMemo(() => (data?.planes ?? []).map((plane) => ({
     plane, modules: modules.filter((module) => module.plane === plane),
   })), [data?.planes, modules])
+  const candidate = active?.proposals[0]
+  const durable = candidate ? data?.automation.durable_queue.proposals.find((row) => row.proposal_id === candidate.id) : null
+
+  async function decide(decision: 'approve' | 'reject') {
+    const token = loadSessionToken()
+    if (!candidate || !token) { setGateMessage('請先到管理頁解鎖 Admin Token。'); return }
+    if (!actor.trim() || !reason.trim()) { setGateMessage('操作者與理由皆為必填。'); return }
+    setGateBusy(true)
+    const result = await postHermesUpgradeDecision(token, candidate.id, decision, actor.trim(), reason.trim())
+    setGateBusy(false)
+    setGateMessage(result.ok ? `${candidate.id} 已${decision === 'approve' ? '核准' : '拒絕'}；尚未自動啟用。` : result.error.message)
+    if (result.ok) onRefresh()
+  }
 
   return <section className="hermes-upgrade-overlay" role="dialog" aria-modal="true" aria-label="Hermes 升級控制面">
     <header className="hermes-upgrade-head">
@@ -63,6 +81,7 @@ export default function HermesUpgradeShip({ data, loading, onClose }: Props) {
             : active.channel === 'model-gate' ? <p>候選模型必須通過時間切分 holdout、校準改善與 ModelHub 核准，才能切換 active pointer。</p>
               : <p>診斷只建立候選；sandbox 回放與驗收成功後，由人員核准版本指標，並保留上一版回退。</p>}</section>
           <section className="upgrade-proposals"><h3>目前候選</h3>{active.proposals.length ? active.proposals.map((proposal) => <article key={proposal.id}><b>{proposal.id}</b><span>{proposal.severity}</span><p>{proposal.proposed_experiment}</p><small>成功門檻：{proposal.success_metric}</small></article>) : <p>沒有待核准候選；目前版本持續運行。</p>}</section>
+          {candidate ? <section className="upgrade-human-gate"><h3>人工 RELEASE GATE</h3><b>SQLITE STATE · {durable?.state ?? 'unknown'}</b><input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="操作者／審查人" /><textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="核准或拒絕理由" /><div><button disabled={gateBusy || durable?.state !== 'sandbox_passed'} onClick={() => void decide('approve')}>核准候選</button><button disabled={gateBusy || durable?.state === 'approved' || durable?.state === 'rejected'} onClick={() => void decide('reject')}>拒絕候選</button></div><p>{gateMessage || '只有 sandbox_passed 可核准；核准也不會自動部署。'}</p></section> : null}
         </> : null}
       </aside>
       <footer className="upgrade-policy-bar"><b>{data?.coverage.registered ?? 0} OUTER / {data?.diagnostic.proposal_count ?? 0} CANDIDATES</b><span>diagnose → sandbox → validation → human approval → active pointer → rollback</span><em>TRUST KERNEL {data?.core_package.version ?? '—'} · 禁止遞回升級</em></footer>

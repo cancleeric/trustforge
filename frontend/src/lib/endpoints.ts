@@ -127,7 +127,7 @@ export interface HermesUpgradeData {
   automation: {
     mode: string; measurements: Record<string, unknown>
     llm_review: { status: string; reviews: Array<Record<string, unknown>>; can_activate: false }
-    durable_queue: { durable: boolean; proposal_count: number; proposals: Array<Record<string, unknown>>; reviews: Array<Record<string, unknown>> }
+    durable_queue: { durable: boolean; proposal_count: number; proposals: Array<{ proposal_id: string; area: string; severity: string; state: string; created_at: number; updated_at: number }>; reviews: Array<Record<string, unknown>>; sandbox_runs: Array<Record<string, unknown>>; decisions: Array<Record<string, unknown>> }
     stages: Array<{ id: string; state: string }>
   }
   core_package: {
@@ -142,6 +142,14 @@ export function getHermesUpgrades(signal?: AbortSignal): Promise<ApiEnvelope<Her
     (value as HermesUpgradeData).agent === 'hermes' && Array.isArray((value as HermesUpgradeData).modules) &&
     (value as HermesUpgradeData).modules.length >= 25 && !!(value as HermesUpgradeData).core_package
   return apiFetch('/api/hermes-upgrades', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
+}
+
+export function postHermesUpgradeDecision(adminToken: string, proposalId: string, decision: 'approve' | 'reject', actor: string, reason: string) {
+  const valid = (value: unknown): value is { proposal_id: string; state: string; activated: false } => !!value && typeof value === 'object' && typeof (value as { proposal_id?: unknown }).proposal_id === 'string'
+  return apiFetch('/api/admin/hermes-upgrade-decision', undefined, valid, {
+    method: 'POST', headers: { 'X-Admin-Token': adminToken },
+    jsonBody: { proposal_id: proposalId, decision, actor, reason }, cache: 'no-store',
+  })
 }
 
 export function getAnalysisJourney(signal?: AbortSignal): Promise<ApiEnvelope<AnalysisJourneyData>> {

@@ -4994,6 +4994,50 @@ def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("upgrade_control_unavailable", "Hermes 升級控制面暫時無法讀取")
 
 
+def _handle_api_admin_upgrade_queue() -> tuple[int, str]:
+    """Authenticated durable proposal/sandbox/decision audit projection."""
+    try:
+        from .upgrade_queue import UpgradeQueue
+        return 200, _json_envelope_ok(UpgradeQueue().status())
+    except Exception:
+        logging.exception("TrustForge admin upgrade queue GET error")
+        return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法讀取")
+
+
+def _handle_api_admin_upgrade_action(headers, rfile, action: str) -> tuple[int, str]:
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error is not None:
+        return error
+    assert payload is not None
+    try:
+        from .upgrade_queue import UpgradeQueue
+        queue = UpgradeQueue()
+        if action == "sandbox":
+            allowed = {"proposal_id", "passed", "artifact_hash", "details"}
+            if set(payload) - allowed or not isinstance(payload.get("passed"), bool):
+                return 400, _json_envelope_err("bad_request", "sandbox 欄位或 passed 型別不合法")
+            result = queue.record_sandbox(
+                str(payload.get("proposal_id", "")), payload["passed"],
+                str(payload.get("artifact_hash", "")), payload.get("details"),
+            )
+        else:
+            allowed = {"proposal_id", "decision", "actor", "reason"}
+            if set(payload) - allowed:
+                return 400, _json_envelope_err("bad_request", "decision 含不支援欄位")
+            result = queue.decide(
+                str(payload.get("proposal_id", "")), str(payload.get("decision", "")),
+                str(payload.get("actor", "")), str(payload.get("reason", "")),
+            )
+        return 200, _json_envelope_ok(result)
+    except KeyError:
+        return 404, _json_envelope_err("proposal_not_found", "找不到升級候選")
+    except ValueError as exc:
+        return 409, _json_envelope_err("invalid_upgrade_transition", str(exc))
+    except Exception:
+        logging.exception("TrustForge admin upgrade action error")
+        return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法寫入")
+
+
 def _handle_api_analysis_snapshot(qs: dict) -> tuple[int, str]:
     """Return only the latest atomically published result for coin/mode."""
     coin = qs.get("coin", ["BTC"])[0].upper()
@@ -6418,6 +6462,9 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/admin/audit":
                     code, body = _handle_api_admin_audit(qs)
                     return self._send(code, body, "application/json; charset=utf-8")
+                if u.path == "/api/admin/hermes-upgrades":
+                    code, body = _handle_api_admin_upgrade_queue()
+                    return self._send(code, body, "application/json; charset=utf-8")
                 # 已認證但打到不存在的 admin 子路徑 → JSON 404
                 return self._send(
                     404,
@@ -6775,6 +6822,21 @@ class Handler(BaseHTTPRequestHandler):
         """Analysis intent is the only public write; it queues work and never computes inline."""
         u = urlparse(self.path)
         client_ip = _resolve_client_ip(self.client_address[0], getattr(self, "headers", {}))
+        if (u.path + "/").startswith("/api/admin/") and ADMIN_TOKEN:
+            denied = _admin_auth_check(getattr(self, "headers", {}), client_ip, u.path)
+            if denied is not None:
+                return self._send(denied[0], denied[1], "application/json; charset=utf-8")
+            actions = {
+                "/api/admin/hermes-upgrade-sandbox": "sandbox",
+                "/api/admin/hermes-upgrade-decision": "decision",
+            }
+            if u.path in actions:
+                code, body = _handle_api_admin_upgrade_action(
+                    getattr(self, "headers", {}), self.rfile, actions[u.path]
+                )
+                return self._send(code, body, "application/json; charset=utf-8")
+            return self._send(404, _json_envelope_err("not_found", "無此管理端點"),
+                              "application/json; charset=utf-8")
         if u.path == "/api/analysis-question":
             code, body = _handle_api_analysis_question(getattr(self, "headers", {}), self.rfile, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")

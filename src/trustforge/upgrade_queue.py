@@ -28,6 +28,16 @@ class UpgradeQueue:
               review_id INTEGER PRIMARY KEY AUTOINCREMENT, proposal_id TEXT NOT NULL,
               reviewer TEXT NOT NULL, verdict TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS upgrade_sandbox_runs (
+              run_id INTEGER PRIMARY KEY AUTOINCREMENT, proposal_id TEXT NOT NULL,
+              passed INTEGER NOT NULL, artifact_hash TEXT NOT NULL,
+              payload_json TEXT NOT NULL, created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS upgrade_decisions (
+              decision_id INTEGER PRIMARY KEY AUTOINCREMENT, proposal_id TEXT NOT NULL,
+              actor TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT NOT NULL,
+              payload_json TEXT NOT NULL, created_at REAL NOT NULL
+            );
             """)
 
     def _db(self) -> sqlite3.Connection:
@@ -72,4 +82,57 @@ class UpgradeQueue:
                 "SELECT proposal_id,area,severity,state,created_at,updated_at FROM upgrade_proposals ORDER BY updated_at DESC LIMIT ?", (limit,))]
             reviews = [dict(row) for row in db.execute(
                 "SELECT proposal_id,reviewer,verdict,created_at FROM upgrade_reviews ORDER BY review_id DESC LIMIT ?", (limit,))]
-        return {"durable": True, "proposal_count": len(proposals), "proposals": proposals, "reviews": reviews}
+            sandbox_runs = [dict(row) for row in db.execute(
+                "SELECT run_id,proposal_id,passed,artifact_hash,created_at FROM upgrade_sandbox_runs ORDER BY run_id DESC LIMIT ?", (limit,))]
+            decisions = [dict(row) for row in db.execute(
+                "SELECT decision_id,proposal_id,actor,decision,reason,created_at FROM upgrade_decisions ORDER BY decision_id DESC LIMIT ?", (limit,))]
+        return {"durable": True, "proposal_count": len(proposals), "proposals": proposals,
+                "reviews": reviews, "sandbox_runs": sandbox_runs, "decisions": decisions}
+
+    def record_sandbox(self, proposal_id: str, passed: bool, artifact_hash: str,
+                       details: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Persist a bounded sandbox result; this never activates a candidate."""
+        proposal_id, artifact_hash = proposal_id.strip(), artifact_hash.strip()
+        if not proposal_id or not artifact_hash:
+            raise ValueError("proposal_id and artifact_hash are required")
+        now = time.time()
+        with closing(self._db()) as db, db:
+            row = db.execute("SELECT state FROM upgrade_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if row is None:
+                raise KeyError(proposal_id)
+            if row["state"] in {"approved", "rejected"}:
+                raise ValueError("terminal proposal cannot be sandboxed")
+            payload = details if isinstance(details, dict) else {}
+            cursor = db.execute("""INSERT INTO upgrade_sandbox_runs
+                (proposal_id,passed,artifact_hash,payload_json,created_at) VALUES (?,?,?,?,?)""",
+                (proposal_id, int(passed), artifact_hash,
+                 json.dumps(payload, ensure_ascii=False, sort_keys=True), now))
+            state = "sandbox_passed" if passed else "sandbox_failed"
+            db.execute("UPDATE upgrade_proposals SET state=?,updated_at=? WHERE proposal_id=?",
+                       (state, now, proposal_id))
+        return {"run_id": cursor.lastrowid, "proposal_id": proposal_id, "state": state,
+                "passed": passed, "artifact_hash": artifact_hash}
+
+    def decide(self, proposal_id: str, decision: str, actor: str, reason: str) -> dict[str, Any]:
+        """Record the human gate. Approval requires the latest sandbox to pass."""
+        proposal_id, decision, actor, reason = (value.strip() for value in (proposal_id, decision, actor, reason))
+        if decision not in {"approve", "reject"} or not actor or not reason:
+            raise ValueError("decision, actor and reason are required")
+        now = time.time()
+        with closing(self._db()) as db, db:
+            row = db.execute("SELECT state FROM upgrade_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if row is None:
+                raise KeyError(proposal_id)
+            if row["state"] in {"approved", "rejected"}:
+                raise ValueError("proposal already has a terminal decision")
+            if decision == "approve" and row["state"] != "sandbox_passed":
+                raise ValueError("approval requires a passed sandbox")
+            state = "approved" if decision == "approve" else "rejected"
+            payload = {"previous_state": row["state"]}
+            cursor = db.execute("""INSERT INTO upgrade_decisions
+                (proposal_id,actor,decision,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)""",
+                (proposal_id, actor, decision, reason, json.dumps(payload, sort_keys=True), now))
+            db.execute("UPDATE upgrade_proposals SET state=?,updated_at=? WHERE proposal_id=?",
+                       (state, now, proposal_id))
+        return {"decision_id": cursor.lastrowid, "proposal_id": proposal_id, "state": state,
+                "decision": decision, "actor": actor, "reason": reason, "activated": False}

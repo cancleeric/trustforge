@@ -1006,6 +1006,70 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/admin/hermes-upgrades:
+    get:
+      tags: [admin]
+      operationId: getAdminHermesUpgrades
+      summary: 讀取持久化升級候選、sandbox 與人工決策稽核鏈
+      security: [{AdminToken: []}]
+      responses:
+        "200":
+          description: SQLite 升級佇列完整狀態
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OkEnvelope"}
+        "401": {$ref: "#/components/responses/AdminUnauthorized"}
+        "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+
+  /api/admin/hermes-upgrade-sandbox:
+    post:
+      tags: [admin]
+      operationId: recordAdminHermesUpgradeSandbox
+      summary: 寫入候選 artifact 的 sandbox 驗證結果（不會啟用）
+      security: [{AdminToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposal_id, passed, artifact_hash]
+              properties:
+                proposal_id: {type: string}
+                passed: {type: boolean}
+                artifact_hash: {type: string}
+                details: {type: object}
+      responses:
+        "200": {description: Sandbox 結果已持久化}
+        "401": {$ref: "#/components/responses/AdminUnauthorized"}
+        "409": {description: 候選狀態不允許此轉換}
+        "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
+
+  /api/admin/hermes-upgrade-decision:
+    post:
+      tags: [admin]
+      operationId: decideAdminHermesUpgrade
+      summary: 人工核准或拒絕候選；核准不等於自動部署
+      security: [{AdminToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposal_id, decision, actor, reason]
+              properties:
+                proposal_id: {type: string}
+                decision: {type: string, enum: [approve, reject]}
+                actor: {type: string}
+                reason: {type: string}
+      responses:
+        "200": {description: 人工決策已寫入不可覆寫稽核紀錄}
+        "401": {$ref: "#/components/responses/AdminUnauthorized"}
+        "409": {description: 核准前尚未通過 sandbox 或已有終局決策}
+        "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
+
 components:
   schemas:
     OkEnvelope:
