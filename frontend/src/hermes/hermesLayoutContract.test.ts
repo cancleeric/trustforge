@@ -37,6 +37,7 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(dashboard).toContain('getHermesUpgrades')
     expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('禁止遞回升級')
     expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('LLM 對抗審查')
+    expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('(data?.automation.historical_sources ?? []).map')
     expect(css).toContain('left:18px;right:18px')
   })
 
