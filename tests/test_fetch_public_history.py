@@ -30,3 +30,23 @@ def test_fetch_alternative_me_writes_provenance_complete_jsonl(monkeypatch, tmp_
     assert all(row["published_at"].startswith("2021-06-01") for row in rows)
     assert all(row["retrieved_at"] != row["published_at"] for row in rows)
     assert all(row["provider"] == "Alternative.me" and row["license"] for row in rows)
+
+
+def test_fetch_sec_quarterly_indexes_with_explicit_user_agent(monkeypatch, tmp_path):
+    master = b"header\nCIK|Company Name|Form Type|Date Filed|Filename\n-----\n100|Bitcoin Depot Inc|10-K|2021-06-01|edgar/data/100/abc.txt\n"
+    calls = []
+
+    def fetch(url, **kwargs):
+        calls.append((url, kwargs["user_agent"]))
+        return master
+
+    monkeypatch.setattr(fetch_public_history, "fetch_url", fetch)
+    output = tmp_path / "sec.jsonl"
+    assert fetch_public_history.main([
+        "--source", "sec-gov", "--from-date", "2021-06-01", "--to-date", "2021-06-30",
+        "--user-agent", "TrustForge research ops@example.com", "--out", str(output),
+    ]) == 0
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["coin"] == "BTC"
+    assert rows[0]["match_scope"] == "metadata_only"
+    assert calls == [("https://www.sec.gov/Archives/edgar/full-index/2021/QTR2/master.idx", "TrustForge research ops@example.com")]

@@ -20,7 +20,7 @@ provider；相同 content hash 去重。無正式歷史介面或授權的來源�
 | 來源 | 歷史策略 | 狀態 |
 |---|---|---|
 | Alternative.me Fear & Greed | 官方完整歷史 API | ready |
-| SEC EDGAR | dated search / 官方 bulk archive | implementing |
+| SEC EDGAR | 官方 quarterly master index | ready-partial（metadata-only，不宣稱全文命中） |
 | CoinGecko market range | range API | credential/plan gated |
 | 新聞 RSS | publisher archive 或授權資料集 | recent RSS 不可回填五年 |
 | Reddit | 官方 archive 或授權資料集 | recent RSS 不可回填五年 |
@@ -50,3 +50,16 @@ python scripts/fetch_public_history.py \
 
 輸出可交給既有 `scripts/historical_backfill.py` 匯入。網路失敗、provider 格式錯誤
 或空區間都必須顯式失敗或回報零筆，不得生成推測資料。
+
+SEC quarterly index 需要符合 SEC automated-access policy 的識別 user agent：
+
+```bash
+python scripts/fetch_public_history.py \
+  --source sec-gov --from-date 2021-06-01 --to-date 2026-05-31 \
+  --user-agent "Organization contact@example.com" \
+  --out out/history/sec-gov-metadata.jsonl
+```
+
+此 adapter 只依 company/form metadata 過濾，輸出會標記
+`match_scope=metadata_only`。它補的是官方申報索引 lineage，不等同全文搜尋；
+全文 Evidence 仍需後續受控下載 filing 或正式全文 archive adapter。
