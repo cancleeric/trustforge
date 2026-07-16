@@ -130,5 +130,7 @@ def test_question_rag_prefers_same_coin_and_mode(tmp_path):
     flow.register_question("BTC", "risk", "BTC 市場風險與來源分歧", enqueue=False)
     flow.register_question("ETH", "news", "ETH 市場風險與來源分歧", enqueue=False)
     matches = flow.question_context("BTC", "risk", "市場風險與來源分歧")["matches"]
+    assert matches
+    assert {match["source_tier"] for match in matches} == {"historical_non_evidentiary"}
     assert matches[0]["coin"] == "BTC"
     assert matches[0]["mode"] == "risk"

@@ -10,6 +10,7 @@ codex 對抗審第 3 輪 HIGH 安全發現：第 2 輪只驗證了「轉址目�
 from __future__ import annotations
 
 import socket
+import ssl
 
 import pytest
 
@@ -67,9 +68,10 @@ def _make_fake_connection_factory(responses: list[_FakeHTTPResponse]):
     connections` 記錄每次建立的假連線物件，供斷言 pinned_ip/host/headers。"""
     connections: list[_FakeConnection] = []
 
-    def _factory(pinned_ip, host, port, timeout=None):
+    def _factory(pinned_ip, host, port, timeout=None, context=None):
         idx = len(connections)
         conn = _FakeConnection(responses[idx], pinned_ip, host, port)
+        conn.tls_context = context
         connections.append(conn)
         return conn
 
@@ -84,6 +86,15 @@ def _fake_getaddrinfo_returning(*ips: str):
 
 
 PUBLIC_IP = "93.184.216.34"  # example.com 的真實公開 IP（僅當測試字面值，不會真的連線）
+
+
+def test_verified_tls_context_requires_certificate_and_hostname_verification():
+    context = safe_fetch._verified_tls_context()
+
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    if hasattr(ssl, "TLSVersion"):
+        assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
 # ── 初始 URL 驗證（codex HIGH：這是本輪修復的核心，之前完全沒驗）────────────
@@ -237,7 +248,7 @@ class _FlakyThenOkConnection:
         self._response = response
         self._attempted = attempted
 
-    def __call__(self, pinned_ip, host, port, timeout=None):
+    def __call__(self, pinned_ip, host, port, timeout=None, context=None):
         self._attempted.append(pinned_ip)
         return _FlakyThenOkConnectionInstance(pinned_ip, pinned_ip in self._unreachable_ips, self._response)
 
@@ -391,6 +402,8 @@ def test_fetch_url_success_no_redirect(monkeypatch):
     conn = factory.connections[0]
     assert conn.pinned_ip == PUBLIC_IP
     assert conn.host == "example.com"
+    assert conn.tls_context.verify_mode == ssl.CERT_REQUIRED
+    assert conn.tls_context.check_hostname is True
     assert conn.requested["headers"]["User-Agent"] == "MyUA/1.0"
 
 
