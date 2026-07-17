@@ -77,6 +77,7 @@ export function registerAnalysisQuestion(coin: string, mode: string, question: s
 export interface AnalysisQuestionMatch {
   question_id: string; coin: string; mode: string; question: string; similarity: number
   answer: string | null; snapshot_id: string | null; job_id: string | null; published_at: number | null
+  source_tier: 'historical_non_evidentiary'
 }
 export interface AnalysisConversationMessage {
   message_id: string; role: 'user' | 'hermes'; content: string; question_id: string | null
@@ -87,7 +88,9 @@ export interface AnalysisQuestionContext {
 }
 export function getAnalysisQuestionContext(coin: string, mode: string, question: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisQuestionContext>> {
   const valid = (value: unknown): value is AnalysisQuestionContext => !!value && typeof value === 'object' &&
-    Array.isArray((value as AnalysisQuestionContext).matches) && Array.isArray((value as AnalysisQuestionContext).conversation)
+    Array.isArray((value as AnalysisQuestionContext).matches) &&
+    (value as AnalysisQuestionContext).matches.every((match) => match.source_tier === 'historical_non_evidentiary') &&
+    Array.isArray((value as AnalysisQuestionContext).conversation)
   return apiFetch('/api/analysis-question-context', { coin, mode, q: question }, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 

@@ -1,8 +1,64 @@
 # TrustForge Hermes Agent Delivery Backlog
 
 > 唯一權威：本文件列出 2026-07-13 對話中已決定、但尚未完整落地的項目。
-> 狀態基準：`feature/hermes-agent-observability` 工作樹。每項完成後須更新本表、
+> 狀態基準：`develop@94eda81`（2026-07-16，PR #190 五年來源回填與 PR #194
+> rolling-upgrade payload 相容性均已合併）。每項完成後須更新本表、
 > 測試、Evidence/Execution Log（如適用）與版本紀錄；不可只在對話中宣稱完成。
+
+## 2026-07-16 現行未完成摘要
+
+以下只列仍需工作或外部條件的項目。沒有列出的 H-項目維持完成，不重開。
+
+| 優先 | ID | 尚未完成 | 類型 | 下一個可驗收成果 |
+|---|---|---|---|---|
+| P0 | H-01 | HOYA BIT 正式 endpoint、auth 與真資料 contract 尚未取得 | 外部阻擋 | 以正式規格完成 online connector canary |
+| P0 | H-02 | production archive/snapshot 與來源可靠性尚缺連續 7 天 evidence | 持續觀測 | 7 天逐輪 archive、snapshot、freshness、failure artifact |
+| P0 | H-05 | 240 題 online QA 尚未在正式憑證／配額下完整執行 | 憑證／成本 gate | 保存獨立 online report、來源 p95 與失敗率 |
+| P1 | H-10 | diagnostic 尚未定期取得 online QA；offline/replay/freshness 已接通 | 依賴 H-05 | scheduler 定期產生並消費 online QA artifact |
+| P1 | H-20 | CoinGecko／Reddit production reliability gate 尚未達連續 7 次成功 | 外部來源觀測 | 每來源七次真實 attempt 連續成功，不用 freshness skip 灌數 |
+| P1 | H-21 | Execution Journey 正式 desktop/mobile viewport evidence 尚未封存 | 可直接執行 | 正式 viewport 截圖與互動紀錄進 `docs/qa/` |
+| P1 | H-28 | RAG／prompt 邊界仍有 source tier、文字正規化與指令隔離缺口（#191、#193）；TLS issue #192 需以回歸測試銷帳 | 可直接執行 | 不可信內容有明確 tier、長度／字元限制與 prompt data boundary；TLS hostname/certificate verification 測試固定 |
+| P1 | H-29 | CloudWatch dedup/recent_failures 與 admin cutover 網路／告警證據尚未完整銷帳（#104、#113） | production ops gate | 正式 alarm、X-Real-IP、admin 告警規則與演練 evidence |
+| P1 | H-30 | stub／空函式掃描 CI gate 已於 PR #201 實作；umbrella child issues 仍各自追蹤 | 待合併 | allowlist 使用穩定 symbol；新增空殼或已完成但未移除 allowlist 都會 fail，CI 保存 JSON artifact |
+| P2 | H-13a | 五年多來源仍缺 SEC filing 全文、CoinGecko range、on-chain 歷史、新聞／Reddit archive；目前只有 Alternative.me 完整歷史與 SEC metadata-only | 開發＋外部契約 | coverage report 按來源／幣／日顯示 ready、missing、gated |
+| P2 | H-13b | runner 已完成，但尚未用足量五年 raw-source archive 跑完整 daily replay | 依賴 H-13a | 每日 run 具完整五階 execution log 且無 T 後資料 |
+| P2 | H-13c | outcome 程式已完成，尚待 H-13b 產生足量 eligible runs | 依賴 H-13b | T+1/T+7/T+14 lineage 與可稽核 coverage |
+| Deferred | H-14/H-16 | calibrator／模型 fitting 暫緩；資料量、holdout、ModelHub ACL/API key 均未過 gate | 明確延後 | H-13 至少 100 筆 eligible outcome 後才重新評估 |
+
+目前可直接繼續開發、不等待外部憑證的順序：`H-21 viewport evidence -> H-13a
+coverage report -> SEC filing 受控下載/全文 adapter -> H-13b replay batch evidence`。
+HOYA、CoinGecko plan、新聞／Reddit archive 與 ModelHub 權限不得用假資料繞過。
+
+## GitHub open issue 對照（2026-07-16）
+
+本節是 GitHub issue 與本文件的唯一對照。2026-07-16 核對共有 **17 個 open
+issues**；issue 不可只因列入本表就關閉，必須有合併 commit、測試或外部驗收
+evidence。重複票須先留言指向 canonical issue，才可關閉。
+
+| Issues | 對應工作 | 判定 | 下一步／關閉條件 |
+|---|---|---|---|
+| #200 | H-30；同時作 #191～#199 umbrella | 保持 open | 建立可執行 stub scan、allowlist 與 CI artifact；所有 child issue 銷帳後才關 |
+| #167、#199、#154 | H-01 HOYA BIT | #167 保存正式接線驗收；#199 保存技術缺口；#154 為舊 spec-blocked 重複候選 | 取得官方 endpoint/auth/schema 後完成 online canary；先在 #154 留 canonical 連結再關閉重複票 |
+| #198 | H-13a | 開發中 | 連接器保存 point-in-time 異質歷史序列，coverage report 可顯示 ready/missing/gated |
+| #197 | H-13b、H-14 | 被 #198 與 eligible outcomes 阻擋 | production wiring 前先完成 leakage-safe replay 與 holdout discrimination；無判別力不得啟用 |
+| #196 | H-14 | 明確 deferred | 至少 100 筆 eligible outcomes 後比較 logistic/isotonic/conformal，holdout 改善才採用 |
+| #195 | H-13c、H-14 | **需修正 issue 敘述，不照原題實作** | 外部 outcome 可校準來源可靠性／abstain；Trust 分數仍是證據可靠性與資訊完整度，禁止宣稱價格方向預測機率 |
+| #191 | H-28 | PR #201 已實作，待合併 | retrieval context 標 `source_tier=historical_non_evidentiary`；UI 明示非 Evidence；外部文字有格式、字元／長度限制與惡意 payload 測試 |
+| #192 | H-28 | 疑似已由 `safe_fetch` 滿足，待測試銷帳 | 固定 `CERT_REQUIRED`、`check_hostname=true`、SNI 使用原 hostname 的回歸測試；測試與審查合併後關閉 |
+| #193 | H-28 | PR #201 已實作，待合併 | user question／claim data 與 system instruction 以 JSON data boundary 分區；指令型字串軟遮蔽並寫入 execution log，不得改變 Trust 結果 |
+| #8、#153 | H-20 Reddit OAuth | #8 為 canonical 外部阻擋；#153 為重複候選 | 取得 production OAuth/IP 配額並連續 7 次真實成功；先在 #153 留 canonical 連結再關閉重複票 |
+| #104、#113 | H-29 | production ops 驗收 | CloudWatch dedup/recent_failures alarm、nginx `X-Real-IP` 與 admin 告警演練全部有正式 evidence |
+| #169 | 產品／比賽決策 | 需 Eric 拍板，不是程式缺陷 | 記錄是否投入 AWS Kiro bonus 與理由；決策完成即關閉 |
+| #170 | 外部規則確認 | 需 Mars Li／owner 回覆，不是程式缺陷 | 留存 AWS model 限制的權威答覆與日期；確認後關閉 |
+
+### Issue 執行批次
+
+1. **安全批次：** #191、#192、#193 → H-28；完成測試後逐票附 PR/evidence。
+2. **歷史資料批次：** #198 → H-13a，再解除 #197；#196、#195 保持資料 gate。
+3. **外部 connector 批次：** #167/#199 與 #8；不得用 fixture 冒充 online canary。
+4. **營運批次：** #104、#113 → H-29；只接受 production evidence。
+5. **治理批次：** #200 → H-30；#154、#153 依 canonical 流程整理重複票。
+6. **人員決策：** #169、#170 交由 owner 留下可稽核結論，不混入程式完成率。
 
 ## 已完成基線（不重做）
 
@@ -12,6 +68,13 @@
   outcome diagnostic。
 - bounded autonomous cycle、改善提案、skill change append-only log，以及
   release-tag CD workflow 定義。
+- continuous SQLite 五階流水線、題目 RAG／Hermes 對話記憶、durable
+  retry/DLQ、原子快照發布與 read-only workspace。
+- 31 個外框模組與獨立版本化 Trust Kernel、sandbox evidence、人工 release
+  gate、active pointer／rollback；模組卡同時顯示 release version 與 content hash。
+- 五年來源 capability matrix、Alternative.me 歷史 adapter、SEC quarterly
+  metadata-only adapter、同日多 provider 合併，以及 rolling frontend/backend
+  payload 相容性。
 
 ## P0：比賽與上線前必須完成
 
@@ -102,11 +165,14 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 - 不將 offline fixture latency 稱為 online crawler SLA，也不將資訊完整度稱為預測機率。
 - 不直接引入 Nous Hermes 或其他外部專案程式碼；只借鑑可驗證的架構概念。
 
-## 執行順序
+## 執行順序（2026-07-16 更新）
 
-`H-01 -> H-02 -> H-05 -> H-10/H-11 -> H-17 -> H-19 -> H-20 -> H-13a -> H-13b -> H-13c -> H-14/H-16`
+`H-28 security -> H-30 stub CI gate -> H-21 evidence -> H-13a coverage/full-text -> H-13b -> H-13c`
 
-H-03、H-04、H-06、H-07～H-09、H-12、H-15、H-17～H-19 已完成。H-21
-僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
+並行 production／外部 gate：`H-29` 與 `H-01 + H-02 + H-05 -> H-10 + H-20`。
+`H-14/H-16` 只有在 H-13 產生足量 leakage-safe outcome 後才解除 deferred。
+
+H-03、H-04、H-06～H-09、H-11、H-12、H-15、H-17～H-19、H-22～H-27
+已完成。H-21 僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
 在系統穩定化、資料累積與預算核准前均保持 deferred；任何 P2 項目不得因為急於
 「訓練模型」跳過資料累積與 held-out 驗證。

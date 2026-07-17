@@ -239,6 +239,7 @@ class AnalysisFlow:
                 "question": row["question"], "similarity": round(min(similarity, 1.0), 4),
                 "answer": judgment, "snapshot_id": row["snapshot_id"], "job_id": row["job_id"],
                 "published_at": row["published_at"],
+                "source_tier": "historical_non_evidentiary",
             })
         candidates.sort(key=lambda item: (item["similarity"], item["published_at"] or 0), reverse=True)
         conversation = [dict(row) for row in self._conn().execute("""
