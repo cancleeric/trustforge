@@ -71,6 +71,16 @@ class SourceEventArchive:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quarantined_source_records (
+                quarantine_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, coin TEXT NOT NULL,
+                fetched_at REAL NOT NULL, reason_codes_json TEXT NOT NULL,
+                document_json TEXT NOT NULL, content_hash TEXT NOT NULL,
+                scheduler_run_id TEXT NOT NULL, created_at REAL NOT NULL
+            )
+            """
+        )
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(source_events)")}
         if "fetch_duration_ms" not in columns:
             self._conn.execute("ALTER TABLE source_events ADD COLUMN fetch_duration_ms REAL")
@@ -78,6 +88,15 @@ class SourceEventArchive:
             "CREATE INDEX IF NOT EXISTS idx_source_events_lookup "
             "ON source_events(source_id, coin, fetched_at)"
         )
+        for table in ("quarantined_source_records",):
+            self._conn.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS {table}_no_update
+                BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
+            self._conn.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS {table}_no_delete
+                BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"""
+            )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_source_events_hash "
             "ON source_events(content_hash)"
@@ -146,6 +165,31 @@ class SourceEventArchive:
                 ),
             )
         return event_id
+
+    def append_quarantine(
+        self, *, source_id: str, coin: str, fetched_at: float, document: Document,
+        reason_codes: Iterable[str], scheduler_run_id: str,
+    ) -> str:
+        payload = json.dumps(doc_to_dict(document), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        quarantine_id = f"quarantine-{uuid.uuid4().hex[:20]}"
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO quarantined_source_records VALUES(?,?,?,?,?,?,?,?,?)",
+                (quarantine_id, source_id, coin.upper(), fetched_at,
+                 json.dumps(sorted(set(reason_codes)), ensure_ascii=False), payload,
+                 hashlib.sha256(payload.encode("utf-8")).hexdigest(), scheduler_run_id, time.time()),
+            )
+        return quarantine_id
+
+    def quarantine_count(self, *, source_id: str | None = None) -> int:
+        with self._lock:
+            if source_id is None:
+                row = self._conn.execute("SELECT count(*) FROM quarantined_source_records").fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT count(*) FROM quarantined_source_records WHERE source_id=?", (source_id,),
+                ).fetchone()
+        return int(row[0])
 
     def observability_snapshot(self, *, window_seconds: float = 86400.0, now: float | None = None) -> list[dict[str, Any]]:
         """Return deterministic per-source Bronze volume, freshness and latency metrics."""

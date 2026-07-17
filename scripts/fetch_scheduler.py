@@ -116,6 +116,7 @@ from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
 from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
 from trustforge.replay import capture_source_snapshot  # noqa: E402
 from trustforge.source_archive import SourceEventArchive  # noqa: E402
+from trustforge.data_quality import validate_documents  # noqa: E402
 
 
 def build_registry() -> dict[str, Source]:
@@ -275,6 +276,24 @@ def run_once(
         )
         return True
 
+    def quality_gate(source: Source, coin: str, docs: list[Document], now: float) -> list[Document]:
+        """Quarantine invalid records before Bronze and latest cache projection."""
+        assert archive is not None
+        accepted, quarantined = validate_documents(docs, now=now)
+        for item in quarantined:
+            archive.append_quarantine(
+                source_id=source.name, coin=coin, fetched_at=now,
+                document=item.document, reason_codes=item.reason_codes,
+                scheduler_run_id=cycle_id,
+            )
+        if quarantined:
+            print(
+                f"[fetch_scheduler] {source.name}[{coin or 'GLOBAL'}]: "
+                f"{len(quarantined)} 筆未通過品質閘，已隔離",
+                file=sys.stderr,
+            )
+        return accepted
+
     for name in targets:
         source = registry.get(name)
         if source is None:
@@ -316,6 +335,11 @@ def run_once(
             payload = [doc_to_dict(d) for d in docs]
             now = time.time()
             try:
+                original_count = len(docs)
+                docs = quality_gate(source, "", docs, now)
+                if original_count and not docs:
+                    raise ValueError("all fetched documents failed quality gates")
+                payload = [doc_to_dict(d) for d in docs]
                 archive_fetch(source, "", docs, now, stale_after, fetch_duration_ms)
             except Exception as exc:  # noqa: BLE001 — Bronze 失敗時不可更新 latest projection
                 print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
@@ -367,6 +391,10 @@ def run_once(
                 continue
             now = time.time()
             try:
+                original_count = len(docs)
+                docs = quality_gate(source, "", docs, now)
+                if original_count and not docs:
+                    raise ValueError("all fetched documents failed quality gates")
                 archive_fetch(source, "", docs, now, stale_after, fetch_duration_ms)
             except Exception as exc:  # noqa: BLE001
                 print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
@@ -440,6 +468,10 @@ def run_once(
                 continue
             now = time.time()
             try:
+                original_count = len(docs)
+                docs = quality_gate(source, c, docs, now)
+                if original_count and not docs:
+                    raise ValueError("all fetched documents failed quality gates")
                 archive_fetch(source, c, docs, now, stale_after, fetch_duration_ms)
             except Exception as exc:  # noqa: BLE001
                 print(f"[fetch_scheduler] {name}[{c}]: source_events 封存失敗（{exc}）", file=sys.stderr)

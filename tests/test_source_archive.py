@@ -56,6 +56,20 @@ def test_source_archive_rejects_updates_and_deletes(tmp_path) -> None:
         archive._conn.execute("DELETE FROM source_events WHERE event_id = ?", (event_id,))
 
 
+def test_quarantine_is_append_only_and_counted(tmp_path) -> None:
+    archive = SourceEventArchive(tmp_path / "archive.sqlite3")
+    document = Document(id="bad", kind="news", source="unit", text="", ts=100.0)
+    quarantine_id = archive.append_quarantine(
+        source_id="unit", coin="BTC", fetched_at=200.0, document=document,
+        reason_codes=["missing_text"], scheduler_run_id="cycle-1",
+    )
+    assert archive.quarantine_count(source_id="unit") == 1
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        archive._conn.execute(
+            "DELETE FROM quarantined_source_records WHERE quarantine_id=?", (quarantine_id,),
+        )
+
+
 def test_scheduler_does_not_update_latest_cache_when_bronze_archive_fails(tmp_path, monkeypatch) -> None:
     class Source:
         name = "unit-source"
