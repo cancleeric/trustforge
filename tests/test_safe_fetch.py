@@ -97,6 +97,25 @@ def test_verified_tls_context_requires_certificate_and_hostname_verification():
         assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
+def test_verified_tls_context_loads_certifi_bundle(monkeypatch):
+    calls = []
+    original = safe_fetch.ssl.create_default_context
+
+    def capture(*args, **kwargs):
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(safe_fetch.ssl, "create_default_context", capture)
+
+    context = safe_fetch._verified_tls_context()
+
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert calls == [{
+        "purpose": ssl.Purpose.SERVER_AUTH,
+        "cafile": safe_fetch.certifi.where(),
+    }]
+
+
 # ── 初始 URL 驗證（codex HIGH：這是本輪修復的核心，之前完全沒驗）────────────
 
 def test_initial_url_private_ip_rejected_before_any_connection(monkeypatch):

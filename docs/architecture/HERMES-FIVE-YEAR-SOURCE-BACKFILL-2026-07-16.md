@@ -20,11 +20,12 @@ provider；相同 content hash 去重。無正式歷史介面或授權的來源�
 | 來源 | 歷史策略 | 狀態 |
 |---|---|---|
 | Alternative.me Fear & Greed | 官方完整歷史 API | ready |
+| Blockchain.com Charts | 官方歷史圖表 API；BTC 交易數／算力／難度 | ready（BTC only） |
 | SEC EDGAR | 官方 quarterly master index | ready-partial（metadata-only，不宣稱全文命中） |
 | CoinGecko market range | range API | credential/plan gated |
 | 新聞 RSS | publisher archive 或授權資料集 | recent RSS 不可回填五年 |
 | Reddit | 官方 archive 或授權資料集 | recent RSS 不可回填五年 |
-| current-state on-chain | historical chart/block/dataset API | 需逐 provider adapter |
+| 其他 current-state on-chain | historical chart/block/dataset API | 需逐 provider adapter |
 | HOYA ticker | 正式 endpoint 與資料契約 | blocked |
 
 能力矩陣由 `trustforge.historical_sources` 投影到 Hermes Upgrade Control，讓管理者
@@ -67,6 +68,19 @@ python scripts/fetch_public_history.py \
 
 輸出可交給既有 `scripts/historical_backfill.py` 匯入。網路失敗、provider 格式錯誤
 或空區間都必須顯式失敗或回報零筆，不得生成推測資料。
+
+BTC 鏈上歷史 adapter 使用 Blockchain.com 官方 Charts API，chart 名稱固定白名單，
+不接受使用者傳入 URL：
+
+```bash
+python scripts/fetch_public_history.py \
+  --source blockchain-com-charts \
+  --from-date 2021-07-17 --to-date 2026-07-17 \
+  --out out/history/blockchain-com-charts.jsonl
+```
+
+2026-07-17 實測三個指標各取得 1,823 日；供應商缺日原樣保存。詳見
+`docs/qa/HISTORICAL-BLOCKCHAIN-CHARTS-BACKFILL-2026-07-17.md`。
 
 SEC quarterly index 需要符合 SEC automated-access policy 的識別 user agent：
 

@@ -20,6 +20,9 @@
 
 - URL、hostname 與 chart 名稱均由程式固定，經現有 HTTPS、憑證驗證、DNS
   pinning 與 SSRF 防護抓取。
+- 實抓發現 macOS framework Python 的系統 CA 不完整；正式 fetch helper 已改用
+  certifi Mozilla CA bundle，仍維持 `CERT_REQUIRED`、hostname verification 與
+  TLS 1.2 下限。修正後以 2026-07-15 單日三指標 smoke 實測成功，不需關閉驗證。
 - Provider 回應的名稱與單位不進 Evidence；顯示文字使用本地固定 label。
 - 非有限值、負值、未知 chart 與錯誤 envelope 一律拒絕。
 - Capability 宣告 `coins=[BTC]`；外框缺口診斷不會把這個 BTC-only 來源誤報

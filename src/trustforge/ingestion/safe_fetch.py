@@ -86,6 +86,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import certifi
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 
@@ -98,7 +99,12 @@ def _verified_tls_context() -> ssl.SSLContext:
     Keeping this explicit makes certificate and hostname verification auditable;
     callers cannot silently replace it with an unverified context.
     """
-    context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+    # macOS framework Python and minimal containers do not always expose a
+    # complete system trust store.  Use certifi's Mozilla CA bundle; verification
+    # remains mandatory and callers still cannot inject an unverified context.
+    context = ssl.create_default_context(
+        purpose=ssl.Purpose.SERVER_AUTH, cafile=certifi.where(),
+    )
     context.verify_mode = ssl.CERT_REQUIRED
     context.check_hostname = True
     if hasattr(ssl, "TLSVersion"):
