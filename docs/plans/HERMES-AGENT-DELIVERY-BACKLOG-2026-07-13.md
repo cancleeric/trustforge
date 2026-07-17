@@ -41,9 +41,9 @@ HOYA、CoinGecko plan、新聞／Reddit archive 與 ModelHub 權限不得用假�
 - 明確 deferred 2 個：H-14、H-16；依使用者決策暫不做 fitting，且資料／ModelHub
   gate 尚未通過。
 
-另有兩項整合工作不算程式缺口：H-31/H-32 已在本分支完成但尚未合併；GitHub
-issue 最新留言仍需 authenticated private-repository access。以上項目不能由本機
-程式碼或假資料宣告完成。
+H-31/H-32 已由本機 merge commit `5664bf7` 合併進 `develop`，不再是本機整合
+缺口；遠端 push／PR 與 GitHub issue 最新留言仍需 authenticated
+private-repository access。以上外部項目不能由本機程式碼或假資料宣告完成。
 
 ### Issue 收件匣與問題回覆駐列
 
@@ -187,7 +187,7 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 | H-25 | Durable upgrade proposal queue | **完成（2026-07-16）。** diagnostic proposals 與 Bedrock adversarial verdict 寫入共用 SQLite；重啟後保留狀態，WebUI 顯示 durable queue。LLM 永遠 `can_activate=false` | proposal/review 可跨程序重啟查閱；diagnostic refresh 不覆蓋既有 review state |
 | H-26 | Local frontend service durability | **完成（2026-07-16）。** `4174` Vite frontend 與 `8799` backend 分別由 launchd KeepAlive；API proxy 已實測 | `curl /` 與 `/api/hermes-upgrades` 回 200，程序退出後由 launchd 重啟 |
 | H-27 | Upgrade sandbox / human release gate | **完成第一版（2026-07-16）。** SQLite 持久化 sandbox artifact hash、結果與人工 approve/reject 稽核；只有最新狀態為 `sandbox_passed` 才能核准，終局決策不可覆寫。管理 WebUI 沿用分頁級 Admin Token，核准永遠 `activated=false` | Admin API 與 WebUI 可查狀態、操作者及理由；公開端點無寫權；不允許自動部署 |
-| H-31 | Continuous pipeline runtime self-healing | **完成，待合併（2026-07-17）。** worker watchdog 會以 immutable snapshot 重建遺失工作；local launchd 每階段 4 workers。與 H-32 API 資源修復同在 `codex/h21-runtime-evidence@6b66570`，完整回歸已通過 | 合併 commit 後以 runtime evidence 銷帳；手機 viewport 仍依優先序最後驗收 |
+| H-31 | Continuous pipeline runtime self-healing | **完成並已合併本機 develop（2026-07-17）。** worker watchdog 會以 immutable snapshot 重建遺失工作；local launchd 每階段 4 workers。H-31/H-32 commits 已由 merge `5664bf7` 進入 `develop`，合併後關鍵回歸 108 passed | 遠端 push／PR 待 authenticated repository access；本機程式與整合已銷帳 |
 
 ## 明確不做 / 不可越線
 
@@ -209,7 +209,7 @@ H-03、H-04、H-06～H-09、H-11、H-12、H-15、H-17～H-21、H-22～H-28、H-3
 「訓練模型」跳過資料累積與 held-out 驗證。
 # 2026-07-17 本機 API 資源雪崩
 
-`H-32`：**修復完成，待 PR。** 一般 Chrome 證實主因是無界 Web request
+`H-32`：**修復完成並已合併本機 develop（merge `5664bf7`），遠端 PR 待認證。** 一般 Chrome 證實主因是無界 Web request
 threads、逐請求 SQLite 連線/schema 初始化與 journey N+1 查詢，輪詢放大後
 形成 5 GB 行程雪崩；另補嚴格 local CORS allowlist。已加入 32-request 上限、
 共用 SQLite backend、read-only projection、journey 4-query bulk read，並以
