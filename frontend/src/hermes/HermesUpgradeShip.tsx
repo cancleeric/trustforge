@@ -15,7 +15,7 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
   const [reason, setReason] = useState('')
   const [gateMessage, setGateMessage] = useState('')
   const [gateBusy, setGateBusy] = useState(false)
-  const modules = data?.modules ?? []
+  const modules = useMemo(() => data?.modules ?? [], [data?.modules])
   const active = modules.find((module) => module.id === selected) ?? modules[0] ?? null
   const planes = useMemo(() => (data?.planes ?? []).map((plane) => ({
     plane, modules: modules.filter((module) => module.plane === plane),

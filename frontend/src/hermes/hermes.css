@@ -236,6 +236,8 @@
 
 /* 主艦橋內嵌工作台：所有分析資料留在首頁，不再跳離星系艙。 */
 .hermes-module-deck { position:absolute; z-index:18; inset:44px 300px 120px; overflow:hidden; color:var(--color-hermes-tx); background:linear-gradient(180deg,#050b13,#03080f); border:1px solid rgba(77,216,224,.38); box-shadow:0 0 35px rgba(0,0,0,.78),inset 0 0 45px rgba(77,216,224,.035); clip-path:polygon(14px 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%,0 14px); animation:hermes-module-open .22s ease-out; }
+.hermes-dashboard.is-module-open .hermes-module-hologram { animation-play-state:paused!important; filter:none; }
+.hermes-dashboard.is-qa-mode *, .hermes-dashboard.is-qa-mode *::before, .hermes-dashboard.is-qa-mode *::after { animation-play-state:paused!important; transition-duration:.001ms!important; }
 .hermes-module-deck::before { content:''; position:absolute; inset:34px 0 0; z-index:0; pointer-events:none; background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(77,216,224,.018) 3px 4px),radial-gradient(circle at 50% 80%,rgba(77,216,224,.08),transparent 48%); }
 .hermes-module-deck-header { position:relative; z-index:2; height:34px; display:flex; align-items:center; gap:16px; padding:0 12px; border-bottom:1px solid rgba(77,216,224,.23); background:rgba(9,17,27,.96); font-size:8px; letter-spacing:1.2px; }
 .hermes-module-deck-header span { color:var(--color-hermes-cyan); }
