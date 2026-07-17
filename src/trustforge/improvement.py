@@ -38,6 +38,7 @@ def diagnose(
     connector_reliability: dict[str, Any] | None = None,
     question_bank: dict[str, Any] | None = None,
     replay: dict[str, Any] | None = None,
+    historical_coverage: dict[str, Any] | None = None,
     analysis_history: dict[str, Any] | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
@@ -117,6 +118,53 @@ def diagnose(
                     success_metric="Holdout calibration error improves while no future source or OHLCV data crosses the run boundary.",
                 ))
 
+    if historical_coverage is not None:
+        coins = historical_coverage.get("coins") or {}
+        capabilities = {
+            str(row.get("source")): row for row in (historical_coverage.get("capabilities") or [])
+            if isinstance(row, dict) and row.get("source")
+        }
+        actionable_sources = {
+            source_id for source_id, row in capabilities.items()
+            if row.get("status") in {"ready", "ready_partial"}
+        }
+        source_gaps: dict[str, dict[str, Any]] = {}
+        for source_id in sorted(actionable_sources):
+            per_coin = {}
+            supported_coins = capabilities[source_id].get("coins")
+            for coin, coin_row in sorted(coins.items()):
+                if isinstance(supported_coins, list) and coin not in supported_coins:
+                    continue
+                source_row = (coin_row.get("sources") or {}).get(source_id) or {}
+                coverage = _number(source_row.get("coverage"))
+                if coverage < 1:
+                    per_coin[str(coin)] = {
+                        "days": int(_number(source_row.get("days"))),
+                        "coverage": coverage,
+                    }
+            if per_coin:
+                source_gaps[source_id] = {"status": capabilities[source_id].get("status"), "coins": per_coin}
+        missing_snapshot_days = {
+            str(coin): list(row.get("missing_dates") or [])
+            for coin, row in sorted(coins.items()) if row.get("missing_dates")
+        }
+        if source_gaps or missing_snapshot_days:
+            proposals.append(ImprovementProposal(
+                id="historical-archive-coverage", area="data-acquisition", severity="high",
+                evidence={
+                    "from_date": historical_coverage.get("from_date"),
+                    "to_date": historical_coverage.get("to_date"),
+                    "source_gaps": source_gaps,
+                    "missing_snapshot_days": missing_snapshot_days,
+                    "gated_sources": sorted(
+                        source_id for source_id, row in capabilities.items()
+                        if row.get("status") not in {"ready", "ready_partial"}
+                    ),
+                },
+                proposed_experiment="Backfill only licensed, time-bounded source gaps in a sandbox; preserve missing days and contractual gates instead of synthesizing Evidence.",
+                success_metric="Actual SQLite daily coverage increases with unchanged point-in-time, provider, license, and content-hash checks.",
+            ))
+
     if analysis_history is not None:
         total = int(_number(analysis_history.get("job_count")))
         failed = int(_number(analysis_history.get("failed_jobs")))
@@ -149,6 +197,7 @@ def diagnose(
             "connector_reliability": connector_reliability is not None,
             "question_bank": question_bank is not None,
             "replay": replay is not None,
+            "historical_coverage": historical_coverage is not None,
             "analysis_history": analysis_history is not None,
         },
         "proposals": [asdict(proposal) for proposal in proposals],

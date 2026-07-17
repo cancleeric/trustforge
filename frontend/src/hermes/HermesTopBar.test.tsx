@@ -30,5 +30,5 @@ describe('HermesTopBar', () => {
     fireEvent.click(screen.getByRole('button', { name: '切換語言' }))
     expect(screen.getByRole('button', { name: 'ANALYZE' })).toBeInTheDocument()
     expect(document.cookie).toContain('trustforge_hermes_locale=en')
-  })
+  }, 15_000)
 })

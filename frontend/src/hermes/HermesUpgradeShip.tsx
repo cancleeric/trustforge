@@ -15,7 +15,7 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
   const [reason, setReason] = useState('')
   const [gateMessage, setGateMessage] = useState('')
   const [gateBusy, setGateBusy] = useState(false)
-  const modules = data?.modules ?? []
+  const modules = useMemo(() => data?.modules ?? [], [data?.modules])
   const active = modules.find((module) => module.id === selected) ?? modules[0] ?? null
   const planes = useMemo(() => (data?.planes ?? []).map((plane) => ({
     plane, modules: modules.filter((module) => module.plane === plane),
@@ -53,6 +53,7 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
         </dl></section>
         <section className="llm-review-state"><h3>LLM 對抗審查</h3><b>{data?.automation.llm_review.status ?? 'not_run'}</b><p>比對量測證據、候選差異、資料洩漏、回歸與回退缺口。LLM 無核准權。</p></section>
         <section className="durable-upgrade-queue"><h3>SQLITE 候選佇列</h3><b>{data?.automation.durable_queue.proposal_count ?? 0} proposals</b><p>{data?.automation.durable_queue.durable ? '重啟後保留 proposal、LLM verdict 與 gate 狀態' : '佇列目前不可用'}</p></section>
+        <section className="historical-source-matrix"><h3>五年來源回填</h3><p>只把可追溯的歷史資料送入每日 replay；近期 RSS 不冒充歷史封存。</p><div>{(data?.automation.historical_sources ?? []).map((source) => <article key={source.source}><span>{source.source}</span><b className={source.status}>{source.status}</b><small>{source.coverage}</small></article>)}</div></section>
       </aside>
       <div className="upgrade-topology">
         {data?.core_package ? <section className="trust-kernel-package">
@@ -64,7 +65,7 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
         {planes.map(({ plane, modules: rows }) => <section className={`upgrade-plane plane-${plane.toLowerCase().replace(' ', '-')}`} key={plane}>
           <header><b>{plane}</b><span>{rows.length} modules</span></header>
           <div>{rows.map((module) => <button type="button" key={module.id} onClick={() => setSelected(module.id)} className={`${module.state} ${active?.id === module.id ? 'selected' : ''}`}>
-            <i /><span><strong>{module.name}</strong><small>{module.id}</small></span><code>{module.version}</code>
+            <i /><span><strong>{module.name}</strong><small>{module.id}</small></span><code className="module-release"><b>{module.version}</b><small>{module.revision_short}</small></code>
           </button>)}</div>
         </section>)}
       </div>
@@ -73,7 +74,8 @@ export default function HermesUpgradeShip({ data, loading, onClose, onRefresh }:
           <div className="upgrade-inspector-title"><span>{active.plane}</span><b>{active.name}</b><em className={active.state}>{active.state}</em></div>
           <dl>
             <div><dt>MODULE ID</dt><dd>{active.id}</dd></div><div><dt>CHANNEL</dt><dd>{channelLabel[active.channel] ?? active.channel}</dd></div>
-            <div><dt>ARTIFACT</dt><dd>{active.family}</dd></div><div><dt>ORIGIN</dt><dd>{active.origin}</dd></div>
+            <div><dt>ARTIFACT</dt><dd>{active.family}</dd></div><div><dt>RELEASE VERSION</dt><dd><code>{active.version}</code></dd></div>
+            <div><dt>ORIGIN</dt><dd>{active.origin}</dd></div>
             <div className="wide"><dt>REVISION / CONTENT HASH</dt><dd><code>{active.revision}</code></dd></div>
           </dl>
           <section className="upgrade-path"><h3>升級邊界</h3>{active.channel === 'core-release'

@@ -22,11 +22,17 @@ from .ingestion.cache import (
 from .schema import iso_utc
 
 SOURCE_SNAPSHOT_HISTORY_SOURCE = "__source_snapshot_history__"
+SOURCE_SNAPSHOT_BACKFILL_SOURCE = "__source_snapshot_backfill__"
 SOURCE_SNAPSHOT_HISTORY_TTL_SECONDS = 5 * 366 * 24 * 60 * 60
 
 
 def source_snapshot_history_key(coin: str, date_str: str) -> str:
     return cache_key(SOURCE_SNAPSHOT_HISTORY_SOURCE, f"{coin.upper()}:{date_str}")
+
+
+def source_snapshot_backfill_key(coin: str, date_str: str) -> str:
+    """Keep retrieved-later archives isolated from forward-captured snapshots."""
+    return cache_key(SOURCE_SNAPSHOT_BACKFILL_SOURCE, f"{coin.upper()}:{date_str}")
 
 
 def capture_source_snapshot(
@@ -84,6 +90,7 @@ def load_source_snapshot(
     date: str,
     *,
     at_or_before: float | None = None,
+    archive_type: str | None = None,
 ) -> dict[str, Any] | None:
     """Load a captured source set without fetching or synthesizing data.
 
@@ -91,11 +98,27 @@ def load_source_snapshot(
     is deliberately unavailable, even when its daily key matches the requested
     date.  This closes the common same-day future-leakage hole.
     """
-    entry = cache_get(backend, source_snapshot_history_key(coin, date))
+    keys = [source_snapshot_history_key(coin, date)]
+    if archive_type == "backfilled_archive":
+        keys = [source_snapshot_backfill_key(coin, date), source_snapshot_history_key(coin, date)]
+    else:
+        keys.append(source_snapshot_backfill_key(coin, date))
+    entry = None
+    snapshot = None
+    for key in keys:
+        candidate_entry = cache_get(backend, key)
+        docs = candidate_entry.get("docs") if candidate_entry else None
+        if not docs or not isinstance(docs[0], dict):
+            continue
+        candidate = dict(docs[0])
+        if archive_type is not None and candidate.get("archive_type") != archive_type:
+            continue
+        entry = candidate_entry
+        snapshot = candidate
+        break
     docs = entry.get("docs") if entry else None
-    if not docs or not isinstance(docs[0], dict):
+    if not docs or snapshot is None:
         return None
-    snapshot = dict(docs[0])
     snapshot_epoch = float(snapshot.get("snapshot_epoch", 0.0) or 0.0)
     if at_or_before is not None and (not snapshot_epoch or snapshot_epoch > at_or_before):
         return None
@@ -138,6 +161,32 @@ def store_backfilled_source_snapshot(
                 raise ValueError("backfilled document content hash mismatch")
             copied.append(dict(document))
         normalized_sources.append({"source": name, "fetched_at": None, "documents": copied})
+    key = source_snapshot_backfill_key(coin, date)
+    existing_entry = cache_get(backend, key)
+    existing = None
+    if existing_entry and isinstance(existing_entry.get("docs"), list) and existing_entry["docs"]:
+        candidate = existing_entry["docs"][0]
+        if isinstance(candidate, dict) and candidate.get("archive_type") == "backfilled_archive":
+            existing = candidate
+    if existing:
+        by_source = {str(item.get("source")): dict(item) for item in existing.get("sources", []) if isinstance(item, dict) and item.get("source")}
+        for incoming in normalized_sources:
+            name = incoming["source"]
+            current = by_source.get(name, {"source": name, "fetched_at": None, "documents": []})
+            documents = {
+                str(document.get("content_sha256")): document
+                for document in current.get("documents", []) if isinstance(document, dict) and document.get("content_sha256")
+            }
+            documents.update({str(document["content_sha256"]): document for document in incoming["documents"]})
+            current["documents"] = list(documents.values())
+            by_source[name] = current
+        normalized_sources = list(by_source.values())
+        providers = {
+            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")): item
+            for item in (existing.get("provider_manifest", {}).get("providers", []) + provider_manifest.get("providers", []))
+            if isinstance(item, dict)
+        }
+        provider_manifest = {"providers": list(providers.values())}
     manifest_text = json.dumps(provider_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     snapshot = {
         "coin": coin.upper(), "snapshot_at": iso_utc(snapshot_epoch), "snapshot_epoch": snapshot_epoch,
@@ -146,6 +195,6 @@ def store_backfilled_source_snapshot(
         "sources": normalized_sources, "missing_sources": [],
     }
     return cache_set_if_newer(
-        backend, source_snapshot_history_key(coin, date), [snapshot], fetched_at=retrieved_at or time.time(),
+        backend, key, [snapshot], fetched_at=retrieved_at or time.time(),
         ttl_seconds=SOURCE_SNAPSHOT_HISTORY_TTL_SECONDS, allow_json_fallback=False,
     )

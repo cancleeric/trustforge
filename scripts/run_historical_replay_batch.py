@@ -21,7 +21,12 @@ def main() -> int:
     start, end = date.fromisoformat(args.from_date), date.fromisoformat(args.to_date)
     if end < start: parser.error("--to-date must be on or after --from-date")
     backend = get_cache_backend()
-    results, skipped = replay_date_range(args.coin, start, end, query=args.query, load_snapshot=lambda coin, day: load_source_snapshot(backend, coin, day))
+    results, skipped = replay_date_range(
+        args.coin, start, end, query=args.query,
+        load_snapshot=lambda coin, day: load_source_snapshot(
+            backend, coin, day, archive_type="backfilled_archive",
+        ),
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for result in results:
         day = str(result["snapshot_at"])[:10]

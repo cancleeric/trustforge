@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { getHistory } from '../lib/endpoints'
 import type { HistoryData } from '../lib/types'
@@ -25,11 +25,13 @@ export default function HistoryPage() {
   const { coin, days } = paramsFromSearch(searchParams)
 
   const [data, setData] = useState<HistoryData | null>(null)
+  const dataRef = useRef<HistoryData | null>(null)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [retryNonce, setRetryNonce] = useState(0)
 
   useEffect(() => {
+    dataRef.current = data
     setHologramData(data ? {
       primaryLabel: data.coin,
       total: data.history.length,
@@ -44,12 +46,13 @@ export default function HistoryPage() {
     const controller = new AbortController()
     // Keep the previous complete snapshot mounted during the atomic swap. Label
     // it explicitly so it cannot be mistaken for the newly selected coin.
-    if (data) setHologramData({
-      primaryLabel: data.coin,
-      total: data.history.length,
-      points: data.history.map((entry) => entry.trust_score),
-      primaryValue: data.history.at(-1)?.trust_score,
-      trustScore: data.history.at(-1)?.trust_score,
+    const previous = dataRef.current
+    if (previous) setHologramData({
+      primaryLabel: previous.coin,
+      total: previous.history.length,
+      points: previous.history.map((entry) => entry.trust_score),
+      primaryValue: previous.history.at(-1)?.trust_score,
+      trustScore: previous.history.at(-1)?.trust_score,
       status: `切換至 ${coin} 中 · 顯示上一快照`,
     })
     setLoading(true)
@@ -67,7 +70,7 @@ export default function HistoryPage() {
     return () => {
       controller.abort()
     }
-  }, [coin, days, retryNonce])
+  }, [coin, days, retryNonce, setHologramData])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return

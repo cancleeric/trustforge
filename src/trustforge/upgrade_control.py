@@ -16,6 +16,7 @@ from typing import Any
 from . import __version__
 from .skill_changes import change_history
 from .skills import run_skill_manifest
+from .historical_sources import historical_source_capabilities
 
 
 MODULES = (
@@ -105,6 +106,20 @@ def _llm_review() -> dict[str, Any]:
     return value if isinstance(value, dict) else {"status": "invalid", "reviews": [], "can_activate": False}
 
 
+def _historical_coverage() -> dict[str, Any]:
+    path = Path(os.getenv(
+        "TRUSTFORGE_HISTORICAL_COVERAGE_REPORT",
+        str(_root() / "out" / "historical-coverage-latest.json"),
+    ))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "not_generated", "from_date": None, "to_date": None, "coins": {}}
+    if not isinstance(value, dict):
+        return {"status": "invalid", "from_date": None, "to_date": None, "coins": {}}
+    return {"status": "measured", **value}
+
+
 def upgrade_status() -> dict[str, Any]:
     """Project versioned core/outer modules and approval-gated candidates."""
     manifest = run_skill_manifest()
@@ -112,6 +127,7 @@ def upgrade_status() -> dict[str, Any]:
     history = change_history()
     diagnostic = _diagnostic()
     llm_review = _llm_review()
+    historical_coverage = _historical_coverage()
     try:
         from .analysis_flow import AnalysisFlow
         with AnalysisFlow() as flow:
@@ -142,7 +158,8 @@ def upgrade_status() -> dict[str, Any]:
         modules.append({
             "id": module_id, "name": name, "plane": plane, "channel": channel,
             "family": family or "release-artifact",
-            "revision": revision, "version": revision[:8], "origin": origin, "state": state,
+            "revision": revision, "revision_short": revision[:8],
+            "version": f"v{__version__}", "origin": origin, "state": state,
             "recursive_upgrade": False, "automatic_apply": False,
             "proposals": related, "history": history_rows,
         })
@@ -159,6 +176,8 @@ def upgrade_status() -> dict[str, Any]:
             "measurements": measurements,
             "llm_review": llm_review,
             "durable_queue": durable_queue,
+            "historical_sources": historical_source_capabilities(),
+            "historical_coverage": historical_coverage,
             "stages": [
                 {"id": "observe", "state": "running"},
                 {"id": "measure", "state": "ready" if measurements else "waiting_data"},

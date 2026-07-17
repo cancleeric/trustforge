@@ -567,6 +567,72 @@ def test_send_react_csp_and_extra_headers(monkeypatch):
     assert headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
 
 
+def test_local_cors_reflects_only_explicit_allowlisted_api_origin(monkeypatch):
+    from io import BytesIO
+
+    monkeypatch.setenv(
+        "TRUSTFORGE_CORS_ALLOW_ORIGINS",
+        "http://127.0.0.1:4174,http://localhost:4174,*,file://unsafe",
+    )
+    h = web.Handler.__new__(web.Handler)
+    h.path = "/api/history?coin=BTC&days=30"
+    h.headers = {"Origin": "http://127.0.0.1:4174"}
+    h.wfile = BytesIO()
+    captured: list[tuple] = []
+    h.send_response = lambda code: captured.append(("status", code))
+    h.send_header = lambda name, val: captured.append(("header", name, val))
+    h.end_headers = lambda: None
+
+    h._send(200, "{}", "application/json; charset=utf-8")
+
+    headers = {item[1]: item[2] for item in captured if item[0] == "header"}
+    assert headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:4174"
+    assert headers["Vary"] == "Origin"
+    assert "*" not in web._cors_allowlist()
+
+
+def test_cors_is_closed_for_unknown_origin_and_non_api_path(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_CORS_ALLOW_ORIGINS", "http://127.0.0.1:4174")
+    assert web._cors_headers("/api/health", {"Origin": "https://evil.example"}) == {}
+    assert web._cors_headers("/", {"Origin": "http://127.0.0.1:4174"}) == {}
+
+
+def test_request_limit_fails_fast_instead_of_spawning_unbounded_threads():
+    class Request:
+        def __init__(self):
+            self.response = b""
+
+        def sendall(self, value):
+            self.response += value
+
+    class Server:
+        def __init__(self):
+            self.accepted = []
+            self.closed = []
+
+        def process_request(self, request, client_address):
+            # Deliberately keep the first slot occupied.
+            self.accepted.append((request, client_address))
+
+        def process_request_thread(self, request, client_address):
+            return None
+
+        def shutdown_request(self, request):
+            self.closed.append(request)
+
+    server = Server()
+    web._install_request_limit(server, limit=1)
+    first, overloaded = Request(), Request()
+
+    server.process_request(first, ("127.0.0.1", 1))
+    server.process_request(overloaded, ("127.0.0.1", 2))
+
+    assert len(server.accepted) == 1
+    assert overloaded in server.closed
+    assert b"503 Service Unavailable" in overloaded.response
+    assert b"Retry-After: 2" in overloaded.response
+
+
 def test_lambda_handler_csp_mode_legacy_default(monkeypatch):
     monkeypatch.setattr(web, "CSP_MODE", "legacy")
     resp = lambda_handler._resp(200, "ok", "text/plain")

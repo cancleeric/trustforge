@@ -79,7 +79,7 @@ export default function AnalyzePage() {
       }),
     } : null)
     return () => setHologramData(null)
-  }, [data, hasExplicitRequest, setHologramData])
+  }, [data, hasExplicitRequest, params.q, params.type, setHologramData])
 
   useEffect(() => {
     if (!hasExplicitRequest) return

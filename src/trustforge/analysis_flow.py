@@ -29,6 +29,7 @@ from .ingestion.base import collect
 from .ingestion.cache import doc_from_dict, doc_to_dict
 from .schema import COIN_POOL, QuestionType, iso_utc
 from .trust.scoring import aggregate, build_stance_fn, score
+from .feature_store import TrustFeatureStore
 
 STAGES = ("source_ingestion", "claim_extraction", "trust_reasoning", "evidence_assembly", "report_delivery")
 MODES: dict[str, tuple[QuestionType, str]] = {
@@ -39,6 +40,7 @@ MODES: dict[str, tuple[QuestionType, str]] = {
     "catalyst": (QuestionType.HYPOTHESIS, "檢驗{coin}近期催化因素是否足以改變現有判斷。"),
 }
 QUESTION_TYPES = {**{mode: item[0] for mode, item in MODES.items()}, "comparison": QuestionType.COMPARISON}
+QUEUE_CAPACITY = 500
 
 
 def _question_terms(value: str) -> set[str]:
@@ -61,9 +63,12 @@ def _db_path(path: str | Path | None = None) -> Path:
 
 
 class AnalysisFlow:
-    def __init__(self, path: str | Path | None = None, *, workers_per_stage: int = 1):
+    def __init__(self, path: str | Path | None = None, *, workers_per_stage: int = 1,
+                 readonly: bool = False):
         self.path = _db_path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.readonly = readonly
+        if not readonly:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.workers_per_stage = max(1, workers_per_stage)
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []
@@ -73,15 +78,25 @@ class AnalysisFlow:
         self._threads: list[threading.Thread] = []
         self._timers: list[threading.Timer] = []
         self._adopted: set[str] = set()
-        self._init_schema()
+        if not readonly:
+            self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(self.path, timeout=10, isolation_level=None, check_same_thread=False)
+            target: str | Path = self.path
+            kwargs: dict[str, Any] = {}
+            if self.readonly:
+                target = f"file:{self.path}?mode=ro"
+                kwargs["uri"] = True
+            conn = sqlite3.connect(
+                target, timeout=2 if self.readonly else 10,
+                isolation_level=None, check_same_thread=False, **kwargs,
+            )
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=10000")
+            if not self.readonly:
+                conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(f"PRAGMA busy_timeout={2000 if self.readonly else 10000}")
             self._local.conn = conn
             with self._connections_lock: self._connections.append(conn)
         return conn
@@ -143,7 +158,27 @@ class AnalysisFlow:
         );
         CREATE INDEX IF NOT EXISTS idx_analysis_conversation_lookup
           ON analysis_conversation(coin, mode, created_at DESC);
+        CREATE TABLE IF NOT EXISTS analysis_lineage_events (
+          event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL,
+          snapshot_id TEXT, job_id TEXT, stage TEXT,
+          entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+          parent_type TEXT, parent_id TEXT, metadata_json TEXT NOT NULL,
+          created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_analysis_lineage_job
+          ON analysis_lineage_events(job_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_lineage_snapshot
+          ON analysis_lineage_events(snapshot_id, created_at);
+        CREATE TRIGGER IF NOT EXISTS analysis_lineage_no_update
+          BEFORE UPDATE ON analysis_lineage_events BEGIN
+            SELECT RAISE(ABORT, 'analysis_lineage_events is append-only');
+          END;
+        CREATE TRIGGER IF NOT EXISTS analysis_lineage_no_delete
+          BEFORE DELETE ON analysis_lineage_events BEGIN
+            SELECT RAISE(ABORT, 'analysis_lineage_events is append-only');
+          END;
         """)
+        TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
         # memory existed. Deterministic IDs make this migration restart-safe.
         conn.execute("""
@@ -163,6 +198,42 @@ class AnalysisFlow:
                 (f"message-{row['job_id']}", row["coin"], row["mode"], "hermes", content,
                  None, row["job_id"], row["snapshot_id"], row["published_at"]),
             )
+
+    def _append_lineage(
+        self, event_type: str, *, entity_type: str, entity_id: str,
+        snapshot_id: str | None = None, job_id: str | None = None,
+        stage: str | None = None, parent_type: str | None = None,
+        parent_id: str | None = None, metadata: dict[str, Any] | None = None,
+    ) -> str:
+        event_id = f"lineage-{uuid.uuid4().hex[:20]}"
+        self._conn().execute(
+            "INSERT INTO analysis_lineage_events VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (event_id, event_type, snapshot_id, job_id, stage, entity_type, entity_id,
+             parent_type, parent_id,
+             json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True), time.time()),
+        )
+        return event_id
+
+    def lineage(self, *, job_id: str | None = None, snapshot_id: str | None = None,
+                limit: int = 500) -> list[dict[str, Any]]:
+        if not job_id and not snapshot_id:
+            raise ValueError("job_id or snapshot_id is required")
+        clauses, params = [], []
+        if job_id:
+            clauses.append("job_id=?"); params.append(job_id)
+        if snapshot_id:
+            clauses.append("snapshot_id=?"); params.append(snapshot_id)
+        params.append(max(1, min(limit, 2000)))
+        rows = self._conn().execute(
+            f"SELECT * FROM analysis_lineage_events WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at,event_id LIMIT ?", params,
+        ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item.pop("metadata_json"))
+            output.append(item)
+        return output
 
     def register_question(self, coin: str, mode: str, question: str, *, enqueue: bool = True) -> tuple[str, str | None]:
         """Persist an active question and enqueue it against the latest committed snapshot."""
@@ -239,6 +310,7 @@ class AnalysisFlow:
                 "question": row["question"], "similarity": round(min(similarity, 1.0), 4),
                 "answer": judgment, "snapshot_id": row["snapshot_id"], "job_id": row["job_id"],
                 "published_at": row["published_at"],
+                "source_tier": "historical_non_evidentiary",
             })
         candidates.sort(key=lambda item: (item["similarity"], item["published_at"] or 0), reverse=True)
         conversation = [dict(row) for row in self._conn().execute("""
@@ -255,11 +327,19 @@ class AnalysisFlow:
         if row is None or mode not in QUESTION_TYPES:
             raise ValueError("unknown snapshot or mode")
         qtype = QUESTION_TYPES[mode]
+        # Idempotency must be checked before capacity.  Otherwise a full queue
+        # prevents refresh_once() from revisiting the same immutable snapshot
+        # and filling matrix entries that did not fit during the previous pass.
+        if self._conn().execute(
+            "SELECT 1 FROM analysis_jobs WHERE snapshot_id=? AND coin=? AND mode=? AND question=?",
+            (snapshot_id, row["coin"], mode, question),
+        ).fetchone():
+            return None
         pending = self._conn().execute(
             "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')",
         ).fetchone()[0]
-        if pending >= 500:
-            raise RuntimeError("analysis queue capacity reached")
+        if pending >= QUEUE_CAPACITY:
+            return None
         job_id, now = f"flow-{uuid.uuid4().hex[:16]}", time.time()
         cur = self._conn().execute(
             "INSERT OR IGNORE INTO analysis_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -268,6 +348,12 @@ class AnalysisFlow:
         if not cur.rowcount:
             return None
         self._checkpoint(job_id, STAGES[0], "queued")
+        self._append_lineage(
+            "job_enqueued", entity_type="analysis_job", entity_id=job_id,
+            snapshot_id=snapshot_id, job_id=job_id,
+            parent_type="snapshot", parent_id=snapshot_id,
+            metadata={"coin": row["coin"], "mode": mode, "question_type": qtype.value},
+        )
         self._queues[STAGES[0]].put({"job_id": job_id})
         self._adopted.add(job_id)
         return job_id
@@ -281,10 +367,16 @@ class AnalysisFlow:
         encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         revision = hashlib.sha256(encoded.encode()).hexdigest()
         snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
-        self._conn().execute(
+        cursor = self._conn().execute(
             "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
             (snapshot_id, coin, time.time(), revision, encoded, len(raw)),
         )
+        if cursor.rowcount:
+            self._append_lineage(
+                "snapshot_created", entity_type="snapshot", entity_id=snapshot_id,
+                snapshot_id=snapshot_id,
+                metadata={"coin": coin, "source_revision": revision, "document_count": len(raw)},
+            )
         return snapshot_id
 
     def enqueue_matrix(self, snapshot_id: str, *, questions: dict[str, str] | None = None) -> list[str]:
@@ -323,9 +415,70 @@ class AnalysisFlow:
         self.recover()
         for stage in STAGES:
             for index in range(self.workers_per_stage):
-                thread = threading.Thread(target=self._worker, args=(stage,), name=f"hermes-{stage}-{index}", daemon=True)
-                thread.start(); self._threads.append(thread)
+                self._spawn_worker(stage, index)
         self.adopt_due_retries()
+
+    def _spawn_worker(self, stage: str, index: int) -> None:
+        thread = threading.Thread(
+            target=self._worker, args=(stage,),
+            name=f"hermes-{stage}-{index}", daemon=True,
+        )
+        thread.start()
+        self._threads.append(thread)
+
+    def _restart_from_snapshot(self, job_ids: list[str]) -> int:
+        restarted = 0
+        for job_id in job_ids:
+            self._conn().execute("DELETE FROM analysis_retry_queue WHERE job_id=?", (job_id,))
+            self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (job_id,))
+            self._checkpoint(job_id, STAGES[0], "queued")
+            self._queues[STAGES[0]].put({"job_id": job_id})
+            self._adopted.add(job_id)
+            restarted += 1
+        return restarted
+
+    def reconcile_runtime(self) -> dict[str, int]:
+        """Repair dead workers and durable rows whose in-memory package vanished.
+
+        Intermediate Python objects are intentionally not persisted.  A lost
+        package therefore restarts from its immutable snapshot rather than
+        pretending the recorded stage can resume with missing state.
+        """
+        repaired = {"workers": 0, "jobs": 0}
+        for stage in STAGES:
+            prefix = f"hermes-{stage}-"
+            live = [thread for thread in self._threads if thread.name.startswith(prefix) and thread.is_alive()]
+            stage_was_unstaffed = not live
+            if len(live) < self.workers_per_stage:
+                # A running row owned by a dead stage worker has no recoverable
+                # in-memory package. Only reset it when no worker for that stage
+                # survived, avoiding duplicate work with multi-worker stages.
+                if not live:
+                    lost = self._conn().execute(
+                        "SELECT job_id FROM analysis_stage_runs WHERE stage=? AND state='running'",
+                        (stage,),
+                    ).fetchall()
+                    repaired["jobs"] += self._restart_from_snapshot([row["job_id"] for row in lost])
+                for index in range(len(live), self.workers_per_stage):
+                    self._spawn_worker(stage, index)
+                    repaired["workers"] += 1
+
+            # A durable queued row with an empty process queue is orphaned.  For
+            # non-first stages its package cannot be reconstructed in place.
+            if stage_was_unstaffed and stage != STAGES[0] and self._queues[stage].empty():
+                running = self._conn().execute(
+                    "SELECT count(*) FROM analysis_stage_runs WHERE stage=? AND state='running'",
+                    (stage,),
+                ).fetchone()[0]
+                if not running:
+                    orphaned = self._conn().execute(
+                        "SELECT job_id FROM analysis_stage_runs WHERE stage=? AND state='queued'",
+                        (stage,),
+                    ).fetchall()
+                    repaired["jobs"] += self._restart_from_snapshot([row["job_id"] for row in orphaned])
+        if repaired["workers"] or repaired["jobs"]:
+            logging.warning("Hermes runtime reconciled: %s", repaired)
+        return repaired
 
     def recover(self) -> None:
         # Runtime payloads are deliberately not pickled. Restart from immutable snapshot.
@@ -335,6 +488,8 @@ class AnalysisFlow:
           AND job_id NOT IN (SELECT job_id FROM analysis_dead_letters)
         """).fetchall()
         for row in rows:
+            if row["job_id"] in self._adopted:
+                continue
             self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (row["job_id"],))
             self._checkpoint(row["job_id"], STAGES[0], "queued")
             self._queues[STAGES[0]].put({"job_id": row["job_id"]})
@@ -379,10 +534,23 @@ class AnalysisFlow:
             except queue.Empty: continue
             started = time.time(); job_id = package["job_id"]
             self._checkpoint(job_id, stage, "running", started=started)
+            job = self._job(job_id)
+            self._append_lineage(
+                "stage_started", entity_type="stage_run", entity_id=f"{job_id}:{stage}",
+                snapshot_id=job["snapshot_id"], job_id=job_id, stage=stage,
+                parent_type="analysis_job", parent_id=job_id,
+            )
             try:
                 package = getattr(self, f"_stage_{stage}")(package)
                 events = len(package.get("log").events) if package.get("log") else 0
-                self._checkpoint(job_id, stage, "completed", started=started, duration=time.time()-started, events=events)
+                duration = time.time() - started
+                self._checkpoint(job_id, stage, "completed", started=started, duration=duration, events=events)
+                self._append_lineage(
+                    "stage_completed", entity_type="stage_run", entity_id=f"{job_id}:{stage}",
+                    snapshot_id=job["snapshot_id"], job_id=job_id, stage=stage,
+                    parent_type="analysis_job", parent_id=job_id,
+                    metadata={"duration_sec": duration, "event_count": events},
+                )
                 pos = STAGES.index(stage)
                 if pos + 1 < len(STAGES):
                     next_stage = STAGES[pos + 1]; self._checkpoint(job_id, next_stage, "queued")
@@ -398,6 +566,13 @@ class AnalysisFlow:
                 package.setdefault("retries", {})[stage] = retry
                 retryable = not isinstance(exc, (ValueError, TypeError, KeyError))
                 duration = time.time() - started
+                self._append_lineage(
+                    "stage_failed", entity_type="stage_attempt",
+                    entity_id=f"{job_id}:{stage}:{retry}", snapshot_id=job["snapshot_id"],
+                    job_id=job_id, stage=stage, parent_type="analysis_job", parent_id=job_id,
+                    metadata={"duration_sec": duration, "retry": retry,
+                              "retryable": retryable, "error_type": type(exc).__name__},
+                )
                 self._conn().execute(
                     "INSERT INTO analysis_stage_attempts VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (f"attempt-{uuid.uuid4().hex[:16]}", job_id, stage, retry, "failed", started,
@@ -496,6 +671,27 @@ class AnalysisFlow:
         try:
             self._conn().execute("INSERT OR REPLACE INTO analysis_results VALUES(?,?,?,?,?,?,?,?)",
                                  (f"result-{job['job_id']}", job["job_id"], job["snapshot_id"], job["coin"], job["mode"], job["question"], json.dumps(payload, ensure_ascii=False), now))
+            self._append_lineage(
+                "result_published", entity_type="analysis_result",
+                entity_id=f"result-{job['job_id']}", snapshot_id=job["snapshot_id"],
+                job_id=job["job_id"], stage="report_delivery",
+                parent_type="analysis_job", parent_id=job["job_id"],
+                metadata={"report_schema_version": payload["report"].get("schema_version"),
+                          "evidence_count": len(evidence)},
+            )
+            trusts = [float(item.trust) for item in evidence]
+            TrustFeatureStore(connection=self._conn(), initialize=False).put_many(
+                feature_set="analysis_trust.v1", entity_key=job["coin"],
+                features={
+                    "calibrated_confidence": payload["report"].get("calibrated_confidence", 0.0),
+                    "raw_confidence": payload["report"].get("confidence", 0.0),
+                    "evidence_count": len(evidence),
+                    "average_evidence_trust": sum(trusts) / len(trusts) if trusts else 0.0,
+                    "independent_source_count": len({item.source for item in evidence}),
+                },
+                event_time=now, available_at=now, snapshot_id=job["snapshot_id"],
+                run_id=job["job_id"], source_reference=f"result-{job['job_id']}",
+            )
             answer = payload["report"].get("market_judgment") or "分析完成"
             self._conn().execute(
                 "INSERT OR REPLACE INTO analysis_conversation VALUES(?,?,?,?,?,?,?,?,?)",
@@ -520,20 +716,40 @@ class AnalysisFlow:
             stages.append({"id": stage, "queued": queued, "current": dict(running) if running else None,
                            "next_retry_at": retry})
         dead = self._conn().execute("SELECT count(*) FROM analysis_dead_letters").fetchone()[0]
+        pending = self._conn().execute(
+            "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')",
+        ).fetchone()[0]
         return {"agent": "hermes", "state": "continuous", "stages": stages,
+                "queue": {"pending": pending, "capacity": QUEUE_CAPACITY,
+                          "backpressure": pending >= QUEUE_CAPACITY},
                 "dead_letter_count": dead, "updated_at": iso_utc(time.time())}
 
     def journey(self, *, limit: int = 50) -> dict[str, Any]:
         jobs = [dict(row) for row in self._conn().execute(
             "SELECT * FROM analysis_jobs ORDER BY updated_at DESC LIMIT ?", (max(1, min(limit, 200)),),
         ).fetchall()]
+        # Avoid the former 2N+2 query pattern (202 queries for the dashboard's
+        # limit=100). Under polling, several callers could hold hundreds of
+        # SQLite statements/connections long enough to trigger a retry storm.
+        # Fetch both child collections in two bounded set queries instead.
+        stages_by_job: dict[str, list[dict[str, Any]]] = {job["job_id"]: [] for job in jobs}
+        attempts_by_job: dict[str, list[dict[str, Any]]] = {job["job_id"]: [] for job in jobs}
+        if jobs:
+            ids = list(stages_by_job)
+            placeholders = ",".join("?" for _ in ids)
+            for row in self._conn().execute(
+                f"SELECT * FROM analysis_stage_runs WHERE job_id IN ({placeholders}) "
+                "ORDER BY job_id,queue_entered_at", ids,
+            ).fetchall():
+                stages_by_job[row["job_id"]].append(dict(row))
+            for row in self._conn().execute(
+                f"SELECT * FROM analysis_stage_attempts WHERE job_id IN ({placeholders}) "
+                "ORDER BY job_id,started_at", ids,
+            ).fetchall():
+                attempts_by_job[row["job_id"]].append(dict(row))
         for job in jobs:
-            job["stages"] = [dict(row) for row in self._conn().execute(
-                "SELECT * FROM analysis_stage_runs WHERE job_id=? ORDER BY queue_entered_at", (job["job_id"],),
-            ).fetchall()]
-            job["attempts"] = [dict(row) for row in self._conn().execute(
-                "SELECT * FROM analysis_stage_attempts WHERE job_id=? ORDER BY started_at", (job["job_id"],),
-            ).fetchall()]
+            job["stages"] = stages_by_job[job["job_id"]]
+            job["attempts"] = attempts_by_job[job["job_id"]]
         dead = [dict(row) for row in self._conn().execute(
             "SELECT * FROM analysis_dead_letters ORDER BY failed_at DESC LIMIT ?", (max(1, min(limit, 200)),),
         ).fetchall()]
@@ -626,7 +842,12 @@ class AnalysisFlow:
         return json.loads(row[0]) if row else None
 
     def refresh_once(self) -> list[str]:
-        """Snapshot every coin; unchanged document hashes are idempotent, changed ones enqueue all active questions."""
+        """Snapshot every coin and incrementally fill its idempotent analysis matrix.
+
+        Revisiting an unchanged snapshot is intentional: when the durable queue is
+        full, later refreshes enqueue the matrix entries that previously could not
+        fit.  Existing jobs are protected by the database uniqueness constraint.
+        """
         jobs: list[str] = []
         for coin in COIN_POOL:
             try:
@@ -634,11 +855,7 @@ class AnalysisFlow:
             except Exception:
                 logging.exception("Hermes snapshot refresh failed for %s; other coins continue", coin)
                 continue
-            previous = self._conn().execute(
-                "SELECT snapshot_id FROM analysis_jobs WHERE coin=? ORDER BY created_at DESC LIMIT 1", (coin,),
-            ).fetchone()
-            if previous is None or previous[0] != snapshot_id:
-                jobs.extend(self.enqueue_matrix(snapshot_id))
+            jobs.extend(self.enqueue_matrix(snapshot_id))
         return jobs
 
     def join(self) -> None:

@@ -77,6 +77,7 @@ export function registerAnalysisQuestion(coin: string, mode: string, question: s
 export interface AnalysisQuestionMatch {
   question_id: string; coin: string; mode: string; question: string; similarity: number
   answer: string | null; snapshot_id: string | null; job_id: string | null; published_at: number | null
+  source_tier: 'historical_non_evidentiary'
 }
 export interface AnalysisConversationMessage {
   message_id: string; role: 'user' | 'hermes'; content: string; question_id: string | null
@@ -87,7 +88,9 @@ export interface AnalysisQuestionContext {
 }
 export function getAnalysisQuestionContext(coin: string, mode: string, question: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisQuestionContext>> {
   const valid = (value: unknown): value is AnalysisQuestionContext => !!value && typeof value === 'object' &&
-    Array.isArray((value as AnalysisQuestionContext).matches) && Array.isArray((value as AnalysisQuestionContext).conversation)
+    Array.isArray((value as AnalysisQuestionContext).matches) &&
+    (value as AnalysisQuestionContext).matches.every((match) => match.source_tier === 'historical_non_evidentiary') &&
+    Array.isArray((value as AnalysisQuestionContext).conversation)
   return apiFetch('/api/analysis-question-context', { coin, mode, q: question }, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 
@@ -114,7 +117,7 @@ export function getAnalysisFlow(signal?: AbortSignal): Promise<ApiEnvelope<Analy
 }
 
 export interface HermesUpgradeModule {
-  id: string; name: string; plane: string; channel: string; family: string; revision: string; version: string
+  id: string; name: string; plane: string; channel: string; family: string; revision: string; revision_short: string; version: string
   origin: string; state: 'locked' | 'active' | 'candidate'; recursive_upgrade: false; automatic_apply: false
   proposals: Array<{ id: string; area: string; severity: string; proposed_experiment: string; success_metric: string }>
   history: Array<Record<string, unknown>>
@@ -128,6 +131,7 @@ export interface HermesUpgradeData {
     mode: string; measurements: Record<string, unknown>
     llm_review: { status: string; reviews: Array<Record<string, unknown>>; can_activate: false }
     durable_queue: { durable: boolean; proposal_count: number; proposals: Array<{ proposal_id: string; area: string; severity: string; state: string; created_at: number; updated_at: number }>; reviews: Array<Record<string, unknown>>; sandbox_runs: Array<Record<string, unknown>>; decisions: Array<Record<string, unknown>> }
+    historical_sources?: Array<{ source: string; kind: string; strategy: string; status: string; coverage: string; terms: string }>
     stages: Array<{ id: string; state: string }>
   }
   core_package: {

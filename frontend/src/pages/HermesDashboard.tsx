@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import HermesTopBar from '../hermes/HermesTopBar'
 import HermesLeftRail from '../hermes/HermesLeftRail'
@@ -18,7 +18,10 @@ export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error
 
 export default function HermesDashboard() {
   const { locale, t } = useHermesI18n()
-  const qtypes = [t('risk'), t('sentiment'), t('fundamentals'), t('news'), t('catalyst')]
+  const qtypes = useMemo(
+    () => [t('risk'), t('sentiment'), t('fundamentals'), t('news'), t('catalyst')],
+    [t],
+  )
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedCoin = searchParams.get('coin')?.toLowerCase()
   const [model, setModel] = useState<GalaxyModel>(() => buildGalaxyModel(null))
@@ -53,11 +56,18 @@ export default function HermesDashboard() {
   const [boot, setBoot] = useState({ topbar: false, left: false, galaxy: false, right: false, bottom: false })
   const [loadError, setLoadError] = useState<string | null>(null)
   const requestedModule = searchParams.get('workspace')
+  const qaMode = searchParams.get('qa') === '1' || searchParams.get('reducedMotion') === '1'
   const [activeModule, setActiveModule] = useState<HermesWorkspaceModule | null>(
     requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
       ? requestedModule : null,
   )
   const activeQuestionMode = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))]
+
+  useEffect(() => {
+    const valid = requestedModule === 'analyze' || requestedModule === 'compare' ||
+      requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
+    setActiveModule(valid ? requestedModule : null)
+  }, [requestedModule])
 
   const toggleShip = useCallback(() => {
     if (shipOpen) { setShipOpen(false); return }
@@ -115,11 +125,11 @@ export default function HermesDashboard() {
       controller = new AbortController()
       const result = await getAnalysisJourney(controller.signal)
       if (active && result.ok) setAnalysisJourney(result.data)
-      if (active) timer = window.setTimeout(() => void poll(), 5000)
+      if (active) timer = window.setTimeout(() => void poll(), activeModule ? 15_000 : 5000)
     }
     void poll()
     return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
-  }, [])
+  }, [activeModule])
 
   useEffect(() => {
     let active = true
@@ -129,11 +139,11 @@ export default function HermesDashboard() {
       controller = new AbortController()
       const result = await getAnalysisFlow(controller.signal)
       if (active && result.ok) setAnalysisFlow(result.data)
-      if (active) timer = window.setTimeout(() => void poll(), 1500)
+      if (active) timer = window.setTimeout(() => void poll(), activeModule ? 10_000 : 1500)
     }
     void poll()
     return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
-  }, [])
+  }, [activeModule])
 
   const buildHermesMessage = useCallback((sel: GalaxyCoin, ph: 'ready' | 'loading'): string => {
     const scanned = Math.round(60 + sel.econ * 0.9)
@@ -267,10 +277,10 @@ export default function HermesDashboard() {
     const inspect = () => {
       const controller = new AbortController()
       controllers.add(controller)
-      const checks = {
+      const checks: Record<string, string> = {
         sources: '/api/status',
-        history: '/api/history?coin=BTC&days=30',
       }
+      if (activeModule !== 'history') checks.history = '/api/history?coin=BTC&days=30'
       void Promise.all(Object.entries(checks).map(async ([name, url]) => {
         try {
           const response = await fetch(url, { signal: controller.signal, cache: 'no-store', headers: { Accept: 'application/json' } })
@@ -302,12 +312,12 @@ export default function HermesDashboard() {
       })
     }
     inspect()
-    const timer = window.setInterval(inspect, 10_000)
+    const timer = window.setInterval(inspect, activeModule ? 30_000 : 10_000)
     return () => {
       window.clearInterval(timer)
       controllers.forEach((controller) => controller.abort())
     }
-  }, [])
+  }, [activeModule])
 
   // ── boot 進場動畫 ──
   useEffect(() => {
@@ -439,7 +449,7 @@ export default function HermesDashboard() {
   }
 
   return (
-    <div className="hermes-root hermes-dashboard" style={{ width: '100vw', height: '100dvh', overflow: 'hidden', background: '#02040a' }}>
+    <div className={`hermes-root hermes-dashboard${activeModule ? ' is-module-open' : ''}${qaMode ? ' is-qa-mode' : ''}`} style={{ width: '100vw', height: '100dvh', overflow: 'hidden', background: '#02040a' }}>
       <div className="hermes-frame" style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden', background: 'radial-gradient(ellipse at 50% 30%,#0b1420 0%,#02040a 72%)', color: 'var(--color-hermes-tx)', border: '1px solid rgba(140,190,210,.08)', boxShadow: '0 60px 160px rgba(0,0,0,.7)' }}>
         {/* scanline + vignette */}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, background: 'repeating-linear-gradient(rgba(255,255,255,.015) 0px,rgba(255,255,255,.015) 1px,transparent 1px,transparent 3px)' }} />
@@ -473,16 +483,18 @@ export default function HermesDashboard() {
           />
         </div>
 
-        <div className="hermes-boot-layer" style={{ opacity: boot.galaxy ? 1 : 0, transition: 'opacity .6s ease-out' }}>
-          <CurrencyGalaxy
-            model={model}
-            selectedId={selectedId}
-            hoveredId={hoveredId}
-            focusPulse={focusPulse}
-            onSelect={selectCoin}
-            onHover={setHoveredId}
-          />
-        </div>
+        {!activeModule && (
+          <div className="hermes-boot-layer" data-region="galaxy" style={{ opacity: boot.galaxy ? 1 : 0, transition: 'opacity .6s ease-out' }}>
+            <CurrencyGalaxy
+              model={model}
+              selectedId={selectedId}
+              hoveredId={hoveredId}
+              focusPulse={focusPulse}
+              onSelect={selectCoin}
+              onHover={setHoveredId}
+            />
+          </div>
+        )}
 
         <div className="hermes-boot-layer" style={{ opacity: boot.right ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <HermesRightRail

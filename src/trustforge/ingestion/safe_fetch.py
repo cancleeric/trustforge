@@ -85,10 +85,31 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import socket
+import ssl
+import certifi
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+
+def _verified_tls_context() -> ssl.SSLContext:
+    """Return the only TLS policy accepted by external connectors.
+
+    Keeping this explicit makes certificate and hostname verification auditable;
+    callers cannot silently replace it with an unverified context.
+    """
+    # macOS framework Python and minimal containers do not always expose a
+    # complete system trust store.  Use certifi's Mozilla CA bundle; verification
+    # remains mandatory and callers still cannot inject an unverified context.
+    context = ssl.create_default_context(
+        purpose=ssl.Purpose.SERVER_AUTH, cafile=certifi.where(),
+    )
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.check_hostname = True
+    if hasattr(ssl, "TLSVersion"):
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
 
 
 class SSRFBlockedError(HTTPError):
@@ -207,6 +228,7 @@ def fetch_url(
     if not allowed_hostname:
         raise SSRFBlockedError(url, "URL 缺少 hostname")
     current_url = url
+    tls_context = _verified_tls_context()
 
     for hop in range(max_redirects + 1):
         hostname, pinned_ips, port = _validate_hop(current_url, allowed_hostname)
@@ -223,7 +245,9 @@ def fetch_url(
         conn = None
         last_connect_error: OSError | None = None
         for pinned_ip in pinned_ips:
-            candidate = _PinnedHTTPSConnection(pinned_ip, hostname, port, timeout=timeout)
+            candidate = _PinnedHTTPSConnection(
+                pinned_ip, hostname, port, timeout=timeout, context=tls_context,
+            )
             try:
                 candidate.request("GET", path, headers=headers)
                 resp = candidate.getresponse()

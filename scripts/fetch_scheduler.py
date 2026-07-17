@@ -69,6 +69,7 @@ import math
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -114,6 +115,8 @@ from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
 from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
 from trustforge.replay import capture_source_snapshot  # noqa: E402
+from trustforge.source_archive import SourceEventArchive  # noqa: E402
+from trustforge.data_quality import validate_documents  # noqa: E402
 
 
 def build_registry() -> dict[str, Source]:
@@ -194,6 +197,8 @@ def run_once(
     interval_overrides: dict[str, float],
     stagger: float,
     dry_run: bool,
+    archive: SourceEventArchive | None = None,
+    scheduler_run_id: str | None = None,
 ) -> tuple[list[tuple[str, int]], list[str]]:
     """對指定來源 x 幣別各跑一次「新鮮度守門 → 真呼叫 → 寫快取」。
 
@@ -247,6 +252,47 @@ def run_once(
     targets = source_names if source_names else sorted(registry)
     results: list[tuple[str, int]] = []
     failures: list[str] = []
+    cycle_id = scheduler_run_id or f"scheduler-{uuid.uuid4()}"
+    if not dry_run and archive is None:
+        archive = SourceEventArchive()
+
+    def archive_fetch(
+        source: Source, coin: str, docs: list[Document], now: float,
+        stale_after: float, fetch_duration_ms: float,
+    ) -> bool:
+        """Persist Bronze truth before the mutable latest-value cache projection."""
+        assert archive is not None
+        archive.append_fetch(
+            source_id=source.name,
+            source_kind=source.kind,
+            coin=coin,
+            documents=docs,
+            fetched_at=now,
+            expires_at=now + stale_after,
+            fetch_run_id=f"fetch-{uuid.uuid4()}",
+            scheduler_run_id=cycle_id,
+            quality_state="accepted" if docs else "empty",
+            fetch_duration_ms=fetch_duration_ms,
+        )
+        return True
+
+    def quality_gate(source: Source, coin: str, docs: list[Document], now: float) -> list[Document]:
+        """Quarantine invalid records before Bronze and latest cache projection."""
+        assert archive is not None
+        accepted, quarantined = validate_documents(docs, now=now)
+        for item in quarantined:
+            archive.append_quarantine(
+                source_id=source.name, coin=coin, fetched_at=now,
+                document=item.document, reason_codes=item.reason_codes,
+                scheduler_run_id=cycle_id,
+            )
+        if quarantined:
+            print(
+                f"[fetch_scheduler] {source.name}[{coin or 'GLOBAL'}]: "
+                f"{len(quarantined)} 筆未通過品質閘，已隔離",
+                file=sys.stderr,
+            )
+        return accepted
 
     for name in targets:
         source = registry.get(name)
@@ -276,7 +322,9 @@ def run_once(
                       f"廣播寫入 {len(coins)} 個幣別 key")
                 continue
             try:
+                fetch_started = time.perf_counter()
                 docs = source.fetch("", coin="")
+                fetch_duration_ms = (time.perf_counter() - fetch_started) * 1000.0
             except Exception as exc:  # noqa: BLE001 — 排程任務單點失敗不中斷整批，
                 # 但仍要計入 failures（codex HIGH-1）：真呼叫失敗（逾時/429/
                 # 憑證錯/上游故障）不能只印警告就當沒事——若全部來源都這樣失敗，
@@ -286,6 +334,17 @@ def run_once(
                 continue
             payload = [doc_to_dict(d) for d in docs]
             now = time.time()
+            try:
+                original_count = len(docs)
+                docs = quality_gate(source, "", docs, now)
+                if original_count and not docs:
+                    raise ValueError("all fetched documents failed quality gates")
+                payload = [doc_to_dict(d) for d in docs]
+                archive_fetch(source, "", docs, now, stale_after, fetch_duration_ms)
+            except Exception as exc:  # noqa: BLE001 — Bronze 失敗時不可更新 latest projection
+                print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
+                failures.append(name)
+                continue
             broadcast_failed: list[str] = []
             for c in coins:
                 result = cache_set_monotonic(
@@ -321,7 +380,9 @@ def run_once(
                       f"依 meta['coin'] 分流寫入 {len(coins)} 個幣別 key")
                 continue
             try:
+                fetch_started = time.perf_counter()
                 docs = source.fetch("", coin="")
+                fetch_duration_ms = (time.perf_counter() - fetch_started) * 1000.0
             except Exception as exc:  # noqa: BLE001 — 理由同 coin-agnostic 分支（codex HIGH-1）：
                 # 只呼叫一次，失敗也只算一次失敗，不會像舊版逐幣迴圈那樣對同一個
                 # 已限流的端點重複觸發（見本函式 docstring「生產事故修復」說明）。
@@ -329,6 +390,16 @@ def run_once(
                 failures.append(name)
                 continue
             now = time.time()
+            try:
+                original_count = len(docs)
+                docs = quality_gate(source, "", docs, now)
+                if original_count and not docs:
+                    raise ValueError("all fetched documents failed quality gates")
+                archive_fetch(source, "", docs, now, stale_after, fetch_duration_ms)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
+                failures.append(name)
+                continue
             # 依每筆 Document 自帶的 meta["coin"] 分流（不是廣播同一份完整
             # 結果）：非白名單/缺 coin 標記的文件直接捨棄，不落地進任何一個
             # cache key（正常情況下不該發生——來源實作保證回傳的每筆都帶
@@ -371,7 +442,9 @@ def run_once(
                 print(f"[fetch_scheduler] (dry-run) {name}[{c}]: 會呼叫真 API")
                 continue
             try:
+                fetch_started = time.perf_counter()
                 docs = source.fetch("", coin=c)
+                fetch_duration_ms = (time.perf_counter() - fetch_started) * 1000.0
             except Exception as exc:  # noqa: BLE001 — 單點失敗不中斷整批，
                 # 但仍要計入 failures（codex HIGH-1），理由同上方 coin-agnostic 分支。
                 print(f"[fetch_scheduler] {name}[{c}]: 真呼叫失敗，略過（{exc}）", file=sys.stderr)
@@ -393,9 +466,20 @@ def run_once(
                         )
                     break
                 continue
+            now = time.time()
+            try:
+                original_count = len(docs)
+                docs = quality_gate(source, c, docs, now)
+                if original_count and not docs:
+                    raise ValueError("all fetched documents failed quality gates")
+                archive_fetch(source, c, docs, now, stale_after, fetch_duration_ms)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[fetch_scheduler] {name}[{c}]: source_events 封存失敗（{exc}）", file=sys.stderr)
+                failures.append(f"{name}:{c}")
+                continue
             result = cache_set_monotonic(
                 backend, cache_key(name, c), [doc_to_dict(d) for d in docs],
-                fetched_at=time.time(), ttl_seconds=stale_after,
+                fetched_at=now, ttl_seconds=stale_after,
             )
             if not result.ok:
                 print(f"[fetch_scheduler] {name}[{c}]: cache 寫入失敗"

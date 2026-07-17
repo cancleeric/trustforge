@@ -31,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Diagnose Hermes deficits; emits proposals only")
     parser.add_argument("--question-bank", type=Path)
     parser.add_argument("--replay", type=Path)
+    parser.add_argument(
+        "--historical-coverage", type=Path,
+        default=REPO / "out" / "historical-coverage-latest.json",
+    )
     parser.add_argument("--recent-runs", type=int, default=30)
     parser.add_argument(
         "--connector-reliability", type=Path,
@@ -53,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         scheduler_runs=get_recent_scheduler_runs(args.recent_runs),
         connector_reliability=_read_json(args.connector_reliability),
         question_bank=_read_json(question_bank), replay=replay,
+        historical_coverage=_read_json(args.historical_coverage),
         analysis_history=AnalysisFlow().improvement_history(),
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)

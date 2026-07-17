@@ -21,7 +21,9 @@
     <key>TRUSTFORGE_BIND_HOST</key><string>127.0.0.1</string>
     <key>TRUSTFORGE_DISABLE_ADMIN_CONFIG</key><string>1</string>
     <key>TRUSTFORGE_STATUS_RATE_MAX</key><string>120</string>
+    <key>TRUSTFORGE_WEB_MAX_ACTIVE_REQUESTS</key><string>32</string>
     <key>TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN</key><string>1</string>
+    <key>TRUSTFORGE_CORS_ALLOW_ORIGINS</key><string>http://127.0.0.1:4174,http://localhost:4174</string>
     <key>PORT</key><string>8799</string>
   </dict>
   <key>RunAtLoad</key><true/>

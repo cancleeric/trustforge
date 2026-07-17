@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.16.0 — 2026-07-17
+
+- Version Document, Evidence and Report contracts with machine-readable JSON Schema and a CI compatibility gate.
+- Preserve every connector fetch in immutable `source_events` before updating the latest-value cache, with per-source freshness, volume, duplicate and p50/p95 observability.
+- Add deterministic data-quality gates and append-only quarantine records so invalid batches cannot contaminate snapshots or analysis.
+- Persist immutable snapshot-to-result analysis lineage and fix duplicate in-process recovery that previously executed every queued stage twice.
+- Materialize completed analysis into an append-only, point-in-time correct Trust Feature Store for leakage-safe replay and future evaluation.
+- Define measured SQLite-to-Parquet/DuckDB-to-Iceberg migration thresholds without introducing premature dual-write state.
+- Suspend the hidden galaxy and its animation while a workspace module is open, slow redundant polling, synchronize workspace state from the URL, and keep coin/right-rail snapshot swaps atomic to eliminate flashing and stale labels.
+- Add a fixed-allowlist Blockchain.com Charts historical adapter for BTC daily
+  transaction count, hash rate and difficulty, preserving provider gaps and
+  provenance instead of synthesizing missing Evidence.
+- Import 5,469 on-chain observations across 1,823 days into isolated SQLite
+  backfill snapshots and replay all 1,827 BTC daily boundaries; the five-coin
+  audited replay set now contains 9,131 valid runs.
+- Scope historical capability gaps by supported asset so a BTC-only source is
+  not reported as missing for ETH, SOL, BNB or XRP.
+- Use certifi's verified CA store for portable external HTTPS while retaining
+  mandatory certificate/hostname checks, TLS 1.2 and DNS pinning.
+
 ## v0.14.15 — 2026-07-15
 
 - Raise the Hermes bridge visual fidelity with layered star-core shells, expanding energy rings, planetary specular and latitude surfaces, and low-trust fracture and broken-ring states.

@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
+from .data_contracts import EVIDENCE_SCHEMA_VERSION, REPORT_SCHEMA_VERSION
+
 # 官方幣種池
 COIN_POOL = ("BTC", "ETH", "SOL", "BNB", "XRP")
 
@@ -36,6 +38,7 @@ class Evidence:
     fetched_at: str          # ISO8601 UTC
     content_reference: str   # 引用片段 / 區間 / 數值 / 查詢條件
     related_claim: str
+    schema_version: str = EVIDENCE_SCHEMA_VERSION
     source_url: str = ""
     kind: str = ""           # price/onchain/regulatory/hoyabit/news/social
     trust: float = 0.0
@@ -104,6 +107,7 @@ class Report:
     could_flip: list[str]           # 可能推翻結論的條件
     contrarian: list[str]           # 反方 / 低信任證據
     generated_at: str
+    schema_version: str = REPORT_SCHEMA_VERSION
     direction: str = ""             # 結構化方向欄位（偏多/偏空/中性），由 build_report 填入
     cross_source_signal: dict | None = field(default=None)  # 跨源訊號背離/共識，由 orchestrator 填入
     # Phase 1 獨特洞察層（#24/#15/#21/#72）：非顯而易見、可驗證的信任洞察清單

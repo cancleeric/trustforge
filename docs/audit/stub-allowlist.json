@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "allowed": [
+    {
+      "symbol": "trustforge.ingestion.base.Source.fetch",
+      "kind": "not_implemented",
+      "reason": "Abstract connector interface; concrete sources must implement fetch."
+    },
+    {
+      "symbol": "trustforge.ingestion.hoyabit.HoyaBitSource.get_depth",
+      "kind": "not_implemented",
+      "reason": "Issue #199; official HOYA BIT depth contract is not available."
+    },
+    {
+      "symbol": "trustforge.ingestion.hoyabit.HoyaBitSource.get_orderbook",
+      "kind": "not_implemented",
+      "reason": "Issue #199; official HOYA BIT orderbook contract is not available."
+    },
+    {
+      "symbol": "trustforge.ingestion.hoyabit.HoyaBitSource.get_trades",
+      "kind": "not_implemented",
+      "reason": "Issue #199; official HOYA BIT trades contract is not available."
+    },
+    {
+      "symbol": "trustforge.web.Handler.log_message",
+      "kind": "pass",
+      "reason": "Intentional BaseHTTPRequestHandler access-log suppression; application errors use structured logging."
+    }
+  ]
+}

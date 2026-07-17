@@ -75,6 +75,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
+from ..data_contracts import DOCUMENT_SCHEMA_VERSION
 from .base import Document, Source
 
 # ---------------------------------------------------------------------------
@@ -386,6 +387,7 @@ def cache_key(source_name: str, coin: str | None) -> str:
 def doc_to_dict(doc: Document) -> dict[str, Any]:
     """`Document` → 可 JSON 序列化的 dict（供 cache backend 寫入）。"""
     return {
+        "schema_version": doc.schema_version,
         "id": doc.id, "kind": doc.kind, "source": doc.source,
         "text": doc.text, "url": doc.url, "ts": doc.ts, "meta": doc.meta,
     }
@@ -399,6 +401,7 @@ def doc_from_dict(d: dict[str, Any]) -> Document:
         text=str(d.get("text", "")), url=str(d.get("url", "")),
         ts=float(d.get("ts", 0.0) or 0.0),
         meta=d.get("meta") if isinstance(d.get("meta"), dict) else {},
+        schema_version=str(d.get("schema_version") or DOCUMENT_SCHEMA_VERSION),
     )
 
 
