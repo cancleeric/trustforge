@@ -123,13 +123,16 @@ export default function AnalyzePage() {
   }, [error])
 
   const handleSubmit = (values: QueryValues) => {
-    const next: Record<string, string> = {
-      coin: values.coin, type: values.type, q: values.q,
-      mode: values.mode,
-    }
-    if (params.sample) next.sample = params.sample
+    const next = new URLSearchParams()
+    const workspace = searchParams.get('workspace')
+    if (workspace) next.set('workspace', workspace)
+    next.set('coin', values.coin)
+    next.set('type', values.type)
+    next.set('q', values.q)
+    next.set('mode', values.mode)
+    if (params.sample) next.set('sample', params.sample)
     setSearchParams(next)
-    void registerAnalysisQuestion(values.coin, next.mode, values.q.trim())
+    void registerAnalysisQuestion(values.coin, values.mode, values.q.trim())
     setRequestNonce((value) => value + 1)
   }
 

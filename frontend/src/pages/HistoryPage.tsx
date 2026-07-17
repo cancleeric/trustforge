@@ -23,6 +23,14 @@ export default function HistoryPage() {
   const { setData: setHologramData } = useBridgeHologram()
   const [searchParams, setSearchParams] = useSearchParams()
   const { coin, days } = paramsFromSearch(searchParams)
+  const updateParams = (nextCoin: string, nextDays: string | number) => {
+    const next = new URLSearchParams()
+    const workspace = searchParams.get('workspace')
+    if (workspace) next.set('workspace', workspace)
+    next.set('coin', nextCoin)
+    next.set('days', String(nextDays))
+    setSearchParams(next)
+  }
 
   const [data, setData] = useState<HistoryData | null>(null)
   const dataRef = useRef<HistoryData | null>(null)
@@ -89,7 +97,7 @@ export default function HistoryPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-3 hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-        <CoinSelect id="hist-coin" value={coin} onChange={(next) => setSearchParams({ coin: next, days: String(days) })} />
+        <CoinSelect id="hist-coin" value={coin} onChange={(next) => updateParams(next, days)} />
         <div>
           <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="hist-days">
             區間
@@ -97,7 +105,7 @@ export default function HistoryPage() {
           <select
             id="hist-days"
             value={days}
-            onChange={(e) => setSearchParams({ coin, days: e.target.value })}
+            onChange={(e) => updateParams(coin, e.target.value)}
             className="rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
           >
             {DAY_OPTIONS.map((d) => (

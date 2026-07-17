@@ -9,6 +9,9 @@
 - Keep the History workspace mounted on transient `rate_limited`/API errors,
   showing a non-blocking warning while preserving the last complete trend
   snapshot instead of blanking the module after tab or coin changes.
+- Preserve Hermes `workspace` URL state when embedded analysis, comparison and
+  history modules write their own query parameters, preventing top-bar
+  navigation from opening a module that immediately closes itself.
 
 ## v0.16.1 — 2026-07-17
 

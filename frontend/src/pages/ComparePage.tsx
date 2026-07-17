@@ -175,10 +175,16 @@ export default function ComparePage() {
   }, [error])
 
   const handleSubmit = useCallback((values: FormState) => {
-    setSearchParams({ coin: values.coin, coin2: values.coin2, q: values.q })
+    const next = new URLSearchParams()
+    const workspace = searchParams.get('workspace')
+    if (workspace) next.set('workspace', workspace)
+    next.set('coin', values.coin)
+    next.set('coin2', values.coin2)
+    next.set('q', values.q)
+    setSearchParams(next)
     void registerAnalysisComparison(values)
     setRequestNonce((value) => value + 1)
-  }, [setSearchParams])
+  }, [searchParams, setSearchParams])
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
