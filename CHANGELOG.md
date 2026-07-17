@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.16.1 — 2026-07-17
+
+- Install the `certifi` runtime dependency during EC2 update-in-place and
+  first-boot deployment paths so the fetch-scheduler probe can import the
+  portable HTTPS trust store before validating DynamoDB cache and cost-ledger
+  access.
+
 ## v0.16.0 — 2026-07-17
 
 - Version Document, Evidence and Report contracts with machine-readable JSON Schema and a CI compatibility gate.

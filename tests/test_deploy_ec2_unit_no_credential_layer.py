@@ -51,3 +51,10 @@ def test_deploy_ec2_produced_unit_has_no_credential_layer() -> None:
         assert token not in unit, (
             f"deploy_ec2.sh 產出的 unit 仍含憑證層標記：{token!r}"
         )
+
+
+@pytest.mark.skipif(not _DEPLOY_EC2.exists(), reason="deploy_ec2.sh 不存在")
+def test_deploy_ec2_installs_runtime_https_dependencies() -> None:
+    script = _DEPLOY_EC2.read_text(encoding="utf-8")
+    assert "pip3 install boto3 certifi" in script
+    assert "pip3 install boto3 >>/var/log/tf-setup.log" not in script
