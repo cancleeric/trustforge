@@ -157,6 +157,25 @@ class AnalysisFlow:
         );
         CREATE INDEX IF NOT EXISTS idx_analysis_conversation_lookup
           ON analysis_conversation(coin, mode, created_at DESC);
+        CREATE TABLE IF NOT EXISTS analysis_lineage_events (
+          event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL,
+          snapshot_id TEXT, job_id TEXT, stage TEXT,
+          entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+          parent_type TEXT, parent_id TEXT, metadata_json TEXT NOT NULL,
+          created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_analysis_lineage_job
+          ON analysis_lineage_events(job_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_lineage_snapshot
+          ON analysis_lineage_events(snapshot_id, created_at);
+        CREATE TRIGGER IF NOT EXISTS analysis_lineage_no_update
+          BEFORE UPDATE ON analysis_lineage_events BEGIN
+            SELECT RAISE(ABORT, 'analysis_lineage_events is append-only');
+          END;
+        CREATE TRIGGER IF NOT EXISTS analysis_lineage_no_delete
+          BEFORE DELETE ON analysis_lineage_events BEGIN
+            SELECT RAISE(ABORT, 'analysis_lineage_events is append-only');
+          END;
         """)
         # Backfill the dialogue surface for databases created before conversation
         # memory existed. Deterministic IDs make this migration restart-safe.
@@ -177,6 +196,42 @@ class AnalysisFlow:
                 (f"message-{row['job_id']}", row["coin"], row["mode"], "hermes", content,
                  None, row["job_id"], row["snapshot_id"], row["published_at"]),
             )
+
+    def _append_lineage(
+        self, event_type: str, *, entity_type: str, entity_id: str,
+        snapshot_id: str | None = None, job_id: str | None = None,
+        stage: str | None = None, parent_type: str | None = None,
+        parent_id: str | None = None, metadata: dict[str, Any] | None = None,
+    ) -> str:
+        event_id = f"lineage-{uuid.uuid4().hex[:20]}"
+        self._conn().execute(
+            "INSERT INTO analysis_lineage_events VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (event_id, event_type, snapshot_id, job_id, stage, entity_type, entity_id,
+             parent_type, parent_id,
+             json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True), time.time()),
+        )
+        return event_id
+
+    def lineage(self, *, job_id: str | None = None, snapshot_id: str | None = None,
+                limit: int = 500) -> list[dict[str, Any]]:
+        if not job_id and not snapshot_id:
+            raise ValueError("job_id or snapshot_id is required")
+        clauses, params = [], []
+        if job_id:
+            clauses.append("job_id=?"); params.append(job_id)
+        if snapshot_id:
+            clauses.append("snapshot_id=?"); params.append(snapshot_id)
+        params.append(max(1, min(limit, 2000)))
+        rows = self._conn().execute(
+            f"SELECT * FROM analysis_lineage_events WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at,event_id LIMIT ?", params,
+        ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item.pop("metadata_json"))
+            output.append(item)
+        return output
 
     def register_question(self, coin: str, mode: str, question: str, *, enqueue: bool = True) -> tuple[str, str | None]:
         """Persist an active question and enqueue it against the latest committed snapshot."""
@@ -291,6 +346,12 @@ class AnalysisFlow:
         if not cur.rowcount:
             return None
         self._checkpoint(job_id, STAGES[0], "queued")
+        self._append_lineage(
+            "job_enqueued", entity_type="analysis_job", entity_id=job_id,
+            snapshot_id=snapshot_id, job_id=job_id,
+            parent_type="snapshot", parent_id=snapshot_id,
+            metadata={"coin": row["coin"], "mode": mode, "question_type": qtype.value},
+        )
         self._queues[STAGES[0]].put({"job_id": job_id})
         self._adopted.add(job_id)
         return job_id
@@ -304,10 +365,16 @@ class AnalysisFlow:
         encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         revision = hashlib.sha256(encoded.encode()).hexdigest()
         snapshot_id = f"snap-{coin.lower()}-{revision[:16]}"
-        self._conn().execute(
+        cursor = self._conn().execute(
             "INSERT OR IGNORE INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
             (snapshot_id, coin, time.time(), revision, encoded, len(raw)),
         )
+        if cursor.rowcount:
+            self._append_lineage(
+                "snapshot_created", entity_type="snapshot", entity_id=snapshot_id,
+                snapshot_id=snapshot_id,
+                metadata={"coin": coin, "source_revision": revision, "document_count": len(raw)},
+            )
         return snapshot_id
 
     def enqueue_matrix(self, snapshot_id: str, *, questions: dict[str, str] | None = None) -> list[str]:
@@ -419,6 +486,8 @@ class AnalysisFlow:
           AND job_id NOT IN (SELECT job_id FROM analysis_dead_letters)
         """).fetchall()
         for row in rows:
+            if row["job_id"] in self._adopted:
+                continue
             self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (row["job_id"],))
             self._checkpoint(row["job_id"], STAGES[0], "queued")
             self._queues[STAGES[0]].put({"job_id": row["job_id"]})
@@ -463,10 +532,23 @@ class AnalysisFlow:
             except queue.Empty: continue
             started = time.time(); job_id = package["job_id"]
             self._checkpoint(job_id, stage, "running", started=started)
+            job = self._job(job_id)
+            self._append_lineage(
+                "stage_started", entity_type="stage_run", entity_id=f"{job_id}:{stage}",
+                snapshot_id=job["snapshot_id"], job_id=job_id, stage=stage,
+                parent_type="analysis_job", parent_id=job_id,
+            )
             try:
                 package = getattr(self, f"_stage_{stage}")(package)
                 events = len(package.get("log").events) if package.get("log") else 0
-                self._checkpoint(job_id, stage, "completed", started=started, duration=time.time()-started, events=events)
+                duration = time.time() - started
+                self._checkpoint(job_id, stage, "completed", started=started, duration=duration, events=events)
+                self._append_lineage(
+                    "stage_completed", entity_type="stage_run", entity_id=f"{job_id}:{stage}",
+                    snapshot_id=job["snapshot_id"], job_id=job_id, stage=stage,
+                    parent_type="analysis_job", parent_id=job_id,
+                    metadata={"duration_sec": duration, "event_count": events},
+                )
                 pos = STAGES.index(stage)
                 if pos + 1 < len(STAGES):
                     next_stage = STAGES[pos + 1]; self._checkpoint(job_id, next_stage, "queued")
@@ -482,6 +564,13 @@ class AnalysisFlow:
                 package.setdefault("retries", {})[stage] = retry
                 retryable = not isinstance(exc, (ValueError, TypeError, KeyError))
                 duration = time.time() - started
+                self._append_lineage(
+                    "stage_failed", entity_type="stage_attempt",
+                    entity_id=f"{job_id}:{stage}:{retry}", snapshot_id=job["snapshot_id"],
+                    job_id=job_id, stage=stage, parent_type="analysis_job", parent_id=job_id,
+                    metadata={"duration_sec": duration, "retry": retry,
+                              "retryable": retryable, "error_type": type(exc).__name__},
+                )
                 self._conn().execute(
                     "INSERT INTO analysis_stage_attempts VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (f"attempt-{uuid.uuid4().hex[:16]}", job_id, stage, retry, "failed", started,
@@ -580,6 +669,14 @@ class AnalysisFlow:
         try:
             self._conn().execute("INSERT OR REPLACE INTO analysis_results VALUES(?,?,?,?,?,?,?,?)",
                                  (f"result-{job['job_id']}", job["job_id"], job["snapshot_id"], job["coin"], job["mode"], job["question"], json.dumps(payload, ensure_ascii=False), now))
+            self._append_lineage(
+                "result_published", entity_type="analysis_result",
+                entity_id=f"result-{job['job_id']}", snapshot_id=job["snapshot_id"],
+                job_id=job["job_id"], stage="report_delivery",
+                parent_type="analysis_job", parent_id=job["job_id"],
+                metadata={"report_schema_version": payload["report"].get("schema_version"),
+                          "evidence_count": len(evidence)},
+            )
             answer = payload["report"].get("market_judgment") or "分析完成"
             self._conn().execute(
                 "INSERT OR REPLACE INTO analysis_conversation VALUES(?,?,?,?,?,?,?,?,?)",

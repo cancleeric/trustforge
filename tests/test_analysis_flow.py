@@ -32,6 +32,27 @@ def test_matrix_is_snapshot_isolated_and_atomically_published(tmp_path, monkeypa
     assert flow.status()["stages"] == [
         {"id": stage, "queued": 0, "current": None, "next_retry_at": None} for stage in STAGES
     ]
+    events = flow.lineage(job_id=jobs[0])
+    assert events[0]["event_type"] == "job_enqueued"
+    assert [event["stage"] for event in events if event["event_type"] == "stage_completed"] == list(STAGES)
+    published = next(event for event in events if event["event_type"] == "result_published")
+    assert published["parent_id"] == jobs[0]
+    assert published["metadata"]["report_schema_version"] == "1.0.0"
+
+
+def test_lineage_snapshot_event_is_idempotent_and_events_are_immutable(tmp_path, monkeypatch):
+    docs = _docs()
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: docs)
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    assert flow.create_snapshot("BTC") == snapshot
+    events = flow.lineage(snapshot_id=snapshot)
+    assert [event["event_type"] for event in events] == ["snapshot_created"]
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        flow._conn().execute(
+            "UPDATE analysis_lineage_events SET entity_id='changed' WHERE event_id=?",
+            (events[0]["event_id"],),
+        )
 
 
 def test_same_snapshot_matrix_is_idempotent(tmp_path, monkeypatch):
