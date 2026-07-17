@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.14.16 — 2026-07-17
+
+- Add a fixed-allowlist Blockchain.com Charts historical adapter for BTC daily
+  transaction count, hash rate and difficulty, preserving provider gaps and
+  provenance instead of synthesizing missing Evidence.
+- Import 5,469 on-chain observations across 1,823 days into isolated SQLite
+  backfill snapshots and replay all 1,827 BTC daily boundaries; the five-coin
+  audited replay set now contains 9,131 valid runs.
+- Scope historical capability gaps by supported asset so a BTC-only source is
+  not reported as missing for ETH, SOL, BNB or XRP.
+- Use certifi's verified CA store for portable external HTTPS while retaining
+  mandatory certificate/hostname checks, TLS 1.2 and DNS pinning.
+
 ## v0.14.15 — 2026-07-15
 
 - Raise the Hermes bridge visual fidelity with layered star-core shells, expanding energy rings, planetary specular and latitude surfaces, and low-trust fracture and broken-ring states.
