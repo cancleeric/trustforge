@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.14.17 — 2026-07-17
+
+- Version Document, Evidence and Report contracts with machine-readable JSON Schema and a CI compatibility gate.
+- Preserve every connector fetch in immutable `source_events` before updating the latest-value cache, with per-source freshness, volume, duplicate and p50/p95 observability.
+- Add deterministic data-quality gates and append-only quarantine records so invalid batches cannot contaminate snapshots or analysis.
+- Persist immutable snapshot-to-result analysis lineage and fix duplicate in-process recovery that previously executed every queued stage twice.
+- Materialize completed analysis into an append-only, point-in-time correct Trust Feature Store for leakage-safe replay and future evaluation.
+- Define measured SQLite-to-Parquet/DuckDB-to-Iceberg migration thresholds without introducing premature dual-write state.
+
 ## v0.14.16 — 2026-07-17
 
 - Add a fixed-allowlist Blockchain.com Charts historical adapter for BTC daily
