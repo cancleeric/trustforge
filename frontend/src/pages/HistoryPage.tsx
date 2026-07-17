@@ -111,17 +111,20 @@ export default function HistoryPage() {
 
       {loading && null}
       {!loading && error && !data && <ErrorState code={error.code} message={error.message} />}
-      {!error && data && data.history.length === 0 && (
+      {error && data && (
+        <ErrorState code={error.code} message={`${error.message}；目前保留上一個完整快照。`} />
+      )}
+      {data && data.history.length === 0 && (
         <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">
           {coin} 在目前掛載的資料庫中沒有歷史快照。本機開發預設使用獨立 JSON cache；切換至 AWS DynamoDB 資料源後，才會顯示雲端排程累積的紀錄。
         </div>
       )}
-      {!error && data && data.history.length > 0 && data.history.length < 3 && (
+      {data && data.history.length > 0 && data.history.length < 3 && (
         <div className="rounded-lg border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
           目前僅累積 {data.history.length} 筆資料點，趨勢線尚不具代表性，持續累積中。
         </div>
       )}
-      {!error && data && data.history.length > 0 && (
+      {data && data.history.length > 0 && (
         <div key={`${data.coin}-${days}`} className={`hermes-data-swap hermes-clip rounded-lg border border-tf-border bg-tf-card p-4${loading ? ' is-refreshing' : ''}`}>
           <Suspense fallback={<LoadingState label="趨勢圖載入中…" />}>
             <TrustHistoryChart history={data.history} />

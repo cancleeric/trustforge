@@ -6,6 +6,9 @@
   SQLite flow store has not been created yet, preventing fresh or in-flight
   production deployments from surfacing transient `/api/analysis-flow` and
   `/api/analysis-journey` 502 responses.
+- Keep the History workspace mounted on transient `rate_limited`/API errors,
+  showing a non-blocking warning while preserving the last complete trend
+  snapshot instead of blanking the module after tab or coin changes.
 
 ## v0.16.1 — 2026-07-17
 
