@@ -42,7 +42,9 @@ def historical_coverage_report(backend, start: date, end: date) -> dict[str, Any
         document_count: dict[str, int] = {}
         day = start
         while day <= end:
-            snapshot = load_source_snapshot(backend, coin, day.isoformat())
+            snapshot = load_source_snapshot(
+                backend, coin, day.isoformat(), archive_type="backfilled_archive",
+            )
             if snapshot is not None:
                 snapshot_days += 1
                 for source in snapshot.get("sources", []):

@@ -5,6 +5,11 @@ from trustforge import upgrade_control
 
 def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply(monkeypatch, tmp_path):
     report = tmp_path / "improvement.json"
+    coverage = tmp_path / "coverage.json"
+    coverage.write_text(json.dumps({
+        "from_date": "2021-07-17", "to_date": "2026-07-17",
+        "coins": {"BTC": {"snapshot_days": 1826, "expected_days": 1827}},
+    }))
     report.write_text(json.dumps({
         "status": "attention_required", "generated_at": "2026-07-16T00:00:00Z",
         "proposals": [{"id": "analysis-flow-reliability", "area": "analysis-orchestration",
@@ -12,6 +17,7 @@ def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply
                        "success_metric": "retry rate below threshold"}],
     }))
     monkeypatch.setenv("TRUSTFORGE_IMPROVEMENT_REPORT", str(report))
+    monkeypatch.setenv("TRUSTFORGE_HISTORICAL_COVERAGE_REPORT", str(coverage))
     monkeypatch.setattr(upgrade_control, "change_history", lambda: [])
     monkeypatch.setattr(upgrade_control, "run_skill_manifest", lambda: {
         "outer_skills": [{"family": family, "revision": family * 12, "origin": "baseline"}
@@ -34,4 +40,6 @@ def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply
     assert sources["alternative-me-fng"]["status"] == "ready"
     assert sources["sec-gov"]["status"] == "ready_partial"
     assert sources["news-rss-group"]["status"] == "archive_required"
+    assert data["automation"]["historical_coverage"]["status"] == "measured"
+    assert data["automation"]["historical_coverage"]["coins"]["BTC"]["snapshot_days"] == 1826
     assert next(m for m in data["modules"] if m["id"] == "scheduler")["state"] == "candidate"

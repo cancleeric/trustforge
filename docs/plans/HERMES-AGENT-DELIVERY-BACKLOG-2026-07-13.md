@@ -20,17 +20,30 @@ regression，H-21 viewport evidence 排在本輪最後。
 | P0 | H-05 | 240 題 online QA 尚未在正式憑證／配額下完整執行 | 憑證／成本 gate | 保存獨立 online report、來源 p95 與失敗率 |
 | P1 | H-10 | diagnostic 尚未定期取得 online QA；offline/replay/freshness 已接通 | 依賴 H-05 | scheduler 定期產生並消費 online QA artifact |
 | P1 | H-20 | CoinGecko／Reddit production reliability gate 尚未達連續 7 次成功 | 外部來源觀測 | 每來源七次真實 attempt 連續成功，不用 freshness skip 灌數 |
-| Last | H-21 | Execution Journey 正式 desktop/mobile viewport evidence 尚未封存 | 最後執行 | 核心、外框與五年資料 gate 完成後，才封存正式 viewport 截圖與互動紀錄 |
 | P1 | H-29 | CloudWatch dedup/recent_failures 與 admin cutover 網路／告警證據尚未完整銷帳（#104、#113） | production ops gate | 正式 alarm、X-Real-IP、admin 告警規則與演練 evidence |
 | P0 | H-13a | 五年多來源仍缺 SEC filing 全文、CoinGecko range、on-chain 歷史、新聞／Reddit archive；Alternative.me 已實際匯入 1,826 天 × 5 幣，不再只是 adapter ready | 核心資料＋外部契約 | coverage report 按來源／幣／日量測 actual/missing/gated；逐來源補齊 |
-| P2 | H-13b | runner 已完成，但尚未用足量五年 raw-source archive 跑完整 daily replay | 依賴 H-13a | 每日 run 具完整五階 execution log 且無 T 後資料 |
-| P2 | H-13c | outcome 程式已完成，尚待 H-13b 產生足量 eligible runs | 依賴 H-13b | T+1/T+7/T+14 lineage 與可稽核 coverage |
+| P2 | H-13b | 現有 Alternative.me archive 的五幣五年 replay 已完成 9,130 runs；多來源重跑仍依賴 H-13a | 部分完成／依賴 H-13a | 新來源加入後重跑；每 run 維持完整 execution log 且無 T 後資料 |
+| P2 | H-13c | 9,130 replay 已完成 T+1/T+7/T+14 labeling，但 eligible=0，因單一情緒來源的正式方向為「不明」 | 資料 gate | 異質來源加入後產生可稽核 directional outcomes；禁止假造方向 |
 | Deferred | H-14/H-16 | calibrator／模型 fitting 暫緩；資料量、holdout、ModelHub ACL/API key 均未過 gate | 明確延後 | H-13 至少 100 筆 eligible outcome 後才重新評估 |
 
 目前可直接繼續開發、不等待外部憑證的順序：`H-31/H-32 runtime core -> H-13a
 actual coverage -> H-24/H-25 outer diagnostics consume coverage/replay -> H-13b replay
-batch evidence -> H-21 mobile viewport evidence`。
+batch evidence`。H-21 已依要求在上述核心工作後完成，不再列入未完成駐列。
 HOYA、CoinGecko plan、新聞／Reddit archive 與 ModelHub 權限不得用假資料繞過。
+
+### 本機可執行工作完成後的剩餘數量
+
+仍開放 **11 個 H-ID**：
+
+- 外部契約／正式環境／連續觀測 6 個：H-01、H-02、H-05、H-10、H-20、H-29。
+- 多來源歷史資料鏈 3 個：H-13a、H-13b、H-13c；現有 Alternative.me archive
+  已完成 9,130 replay，但其他來源與 eligible directional outcomes 尚未取得。
+- 明確 deferred 2 個：H-14、H-16；依使用者決策暫不做 fitting，且資料／ModelHub
+  gate 尚未通過。
+
+另有兩項整合工作不算程式缺口：H-31/H-32 已在本分支完成但尚未合併；GitHub
+issue 最新留言仍需 authenticated private-repository access。以上項目不能由本機
+程式碼或假資料宣告完成。
 
 ### Issue 收件匣與問題回覆駐列
 
@@ -131,8 +144,8 @@ evidence。重複票須先留言指向 canonical issue，才可關閉。
 | ID | 待辦 | 目前工作 | 驗收條件 | 依賴 |
 |---|---|---|---|---|
 | H-13a | Historical Backfill Foundation | **真實回填已開始。** 2021-07-17～2026-07-17 的 Alternative.me exporter 產出 9,130 rows，已匯入 BTC/ETH/SOL/BNB/XRP 各 1,826 個 daily snapshots；actual coverage 是 1,826/1,827（缺 2024-10-26），不是 100%。`report_historical_coverage.py` 逐幣、逐來源、逐日量測資料庫真實封存與缺日，ready label 不計入 coverage。SEC adapter 仍是 metadata-only；CoinGecko、新聞／Reddit、on-chain、HOYA 仍受契約或歷史 endpoint gate | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；actual coverage 明列缺日；逐來源補齊且禁止用能力標籤冒充資料 | 歷史來源/API |
-| H-13b | Daily Hermes Replay | **Runner 完成，待 H-13a 資料。** `run_daily_hermes_replay.py` / `run_historical_replay_batch.py` 只讀 archive，執行 claim -> trust -> Evidence -> report，缺 snapshot 誠實記錄 | 每日 run 有完整 execution log，僅選 `published_at <= T` | H-13a |
-| H-13c | Outcome Labeling | **程式完成，待 H-13b 資料。** `label_replay_outcomes.py` 對 T+1/T+7/T+14 接官方 OHLCV outcome；缺未來 bar 時誠實標為 unavailable | 每個 eligible run 可追溯 outcome window 與資料 lineage | H-13b |
+| H-13b | Daily Hermes Replay | **現有 archive 已全量執行。** 五幣各 1,826 日，共 9,130 runs；audit 驗證 `invalid=0`，唯一缺日為 2024-10-26。live/backfill key 已分離，歷史 runner 只讀 `backfilled_archive`。多來源全量仍待 H-13a | 新來源加入後同樣全量重跑；每日 run 有完整 execution log，僅選 `published_at <= T` | H-13a |
+| H-13c | Outcome Labeling | **現有 replay 已全量執行。** T+1/T+7/T+14 lineage 產出完成，但 Alternative.me 單一情緒來源的方向皆為「不明」，故 eligible=0 並維持 unavailable | 異質來源加入後產生可稽核 directional outcomes；不得把資訊完整度或情緒值冒充方向 | H-13b |
 
 | ID | 待辦 | 啟動門檻 | 驗收條件 |
 |---|---|---|---|
@@ -167,14 +180,14 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 | H-18 | 成本帳本保留、備份與匯出 | **完成。** DynamoDB PITR 已啟用；716 筆 JSONL export/hash verify/non-overwrite restore drill 已完成；AES256 + S3 versioning off-table archive evidence 已記於 `docs/qa/COST-LEDGER-DURABILITY.md` | DynamoDB PITR/backup、保留年限、CSV/JSONL export、restore drill、帳本完整性 hash 全部有 SOP/evidence |
 | H-19 | Production durable lease backend | **完成。** 2026-07-14 已確認 `trustforge-analyze-leases` 為 ACTIVE/PAY_PER_REQUEST、TTL=`ttl` ENABLED；`trustforge-ec2` 最小 policy 僅含 Get/Put/Delete；真 DynamoDB backend contention/release/reacquire 全綠。`v0.14.6` 隔離的 service-level concurrent canary 兩個請求皆 HTTP 200，且共用同一 `run_id=hermes-ec4c16d8f648`，證明沒有重複分析。證據見 `docs/qa/PRODUCTION-INTERACTION-CANARY.md` | 已驗證 |
 | H-20 | Connector reliability policy | **政策與自動量測完成，production gate 尚未全綠。** 來源內 cooldown 與 CoinGecko provider-wide 協調已上線；Hermes cycle 現自動從 durable scheduler runs 產出每來源 attempted/success/failed、failure rate、最新失敗與連續成功輪數，只有七次實際嘗試連續成功才過 gate，freshness skip 不灌成功；diagnostic 自動把未達標來源寫入 approval-gated proposal。2026-07-14 production 仍觀察到 CoinGecko/Reddit 429，故不可宣稱完成 | 每來源 owner、憑證、quota、retry/backoff、failure budget、fallback 記錄可查；受影響來源連續七次實際嘗試成功 |
-| H-21 | Hermes Execution Journey implementation | **實作、正式 API 與下載 artifact 驗收完成，正式 viewport 截圖待補。** `/analyze` 已把資料驅動五節點、來源結果/耗時、run-bound Evidence/Log 下載置於結論後第一段；`v0.14.6` 正式 bundle 已確認下載名為標準 `execution-log.json`，正式分析回傳 13 筆 Evidence 與完整 execution。2026-07-14 瀏覽器控制通道初始化衝突，故不冒充已有 production desktop/mobile 截圖 | 補正式 desktop/mobile 截圖；互動/API evidence 見 `docs/qa/PRODUCTION-INTERACTION-CANARY.md`；不改 Trust Layer |
+| H-21 | Hermes Execution Journey implementation | **完成（2026-07-17）。** `/analyze` 的五節點、來源耗時、run-bound Evidence/Log 與正式下載已驗收；另以一般 Google Chrome CDP 封存 1600×1200 desktop 與 390×844 mobile 歷史頁證據。Mobile 隱藏次要 rail，核心內容與五節點全在 viewport 內 | 證據見 `docs/qa/HERMES-HISTORY-VIEWPORT-EVIDENCE-2026-07-17.md` 與 `docs/qa/PRODUCTION-INTERACTION-CANARY.md`；不改 Trust Layer |
 | H-22 | Continuous snapshot analysis matrix | **完成（2026-07-16）。** SQLite snapshot 隔離、五階重疊 worker、持久重試/DLQ、全幣×全模式×活動題目自動排程；UI 只讀原子發布快照 | daemon 重啟續跑、各階段可見 coin/mode/question/snapshot/queue/duration/retry；完整回歸通過 |
 | H-23 | Question RAG and Hermes dialogue memory | **完成第一版（2026-07-16）。** SQLite 活動題目、完成結論、run/snapshot lineage 與對話成為可檢索記憶；中英 bigram/token ranking，不依賴外部 embedding；run log 標記 non-evidentiary retrieval | 左側可查看/召回相似問題；歷史結論不進 Trust Evidence；API/測試/OpenAPI 齊備 |
-| H-24 | Historical outer-framework diagnostics | **完成第一版（2026-07-16）。** analysis jobs/stage duration/failure/retry/question similarity 正式接入 bounded diagnostic | 只產生 approval-gated sandbox proposal，`automatic_apply=false`，不得改核心或自行部署 |
+| H-24 | Historical outer-framework diagnostics | **完成第二版（2026-07-17）。** analysis jobs/stage duration/failure/retry/question similarity 加上 SQLite actual historical coverage；Hermes 已從真實缺日、SEC 0 coverage 與 gated sources 產生 `historical-archive-coverage` 候選 | 只產生 approval-gated sandbox proposal，`automatic_apply=false`，不得改核心或自行部署 |
 | H-25 | Durable upgrade proposal queue | **完成（2026-07-16）。** diagnostic proposals 與 Bedrock adversarial verdict 寫入共用 SQLite；重啟後保留狀態，WebUI 顯示 durable queue。LLM 永遠 `can_activate=false` | proposal/review 可跨程序重啟查閱；diagnostic refresh 不覆蓋既有 review state |
 | H-26 | Local frontend service durability | **完成（2026-07-16）。** `4174` Vite frontend 與 `8799` backend 分別由 launchd KeepAlive；API proxy 已實測 | `curl /` 與 `/api/hermes-upgrades` 回 200，程序退出後由 launchd 重啟 |
 | H-27 | Upgrade sandbox / human release gate | **完成第一版（2026-07-16）。** SQLite 持久化 sandbox artifact hash、結果與人工 approve/reject 稽核；只有最新狀態為 `sandbox_passed` 才能核准，終局決策不可覆寫。管理 WebUI 沿用分頁級 Admin Token，核准永遠 `activated=false` | Admin API 與 WebUI 可查狀態、操作者及理由；公開端點無寫權；不允許自動部署 |
-| H-31 | Continuous pipeline runtime self-healing | **PR 開發中（2026-07-17）。** 真實本地驗證發現 500 個 durable jobs 因階段 worker／記憶體 package 遺失停在 queued，拖累 8799 API。新增 worker watchdog：worker 消失時以 immutable snapshot 重建遺失工作；local launchd 每階段 4 workers，維持五階重疊且增加吞吐 | worker 異常退出後無須人工 kickstart；queued/running 持續下降；API 與 desktop/mobile viewport 可正常驗收 |
+| H-31 | Continuous pipeline runtime self-healing | **完成，待合併（2026-07-17）。** worker watchdog 會以 immutable snapshot 重建遺失工作；local launchd 每階段 4 workers。與 H-32 API 資源修復同在 `codex/h21-runtime-evidence@6b66570`，完整回歸已通過 | 合併 commit 後以 runtime evidence 銷帳；手機 viewport 仍依優先序最後驗收 |
 
 ## 明確不做 / 不可越線
 
@@ -185,12 +198,12 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 
 ## 執行順序（2026-07-17 更新）
 
-`H-31/H-32 core -> H-13a actual archive/coverage -> H-24/H-25 outer improvement inputs -> H-13b -> H-13c -> H-21 mobile evidence`
+`H-31/H-32 core -> H-13a actual archive/coverage -> H-24/H-25 outer improvement inputs -> H-13b -> H-13c`
 
 並行 production／外部 gate：`H-29` 與 `H-01 + H-02 + H-05 -> H-10 + H-20`。
 `H-14/H-16` 只有在 H-13 產生足量 leakage-safe outcome 後才解除 deferred。
 
-H-03、H-04、H-06～H-09、H-11、H-12、H-15、H-17～H-19、H-22～H-28、H-30
+H-03、H-04、H-06～H-09、H-11、H-12、H-15、H-17～H-21、H-22～H-28、H-30
 已完成。H-21 僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
 在系統穩定化、資料累積與預算核准前均保持 deferred；任何 P2 項目不得因為急於
 「訓練模型」跳過資料累積與 held-out 驗證。

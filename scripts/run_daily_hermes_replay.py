@@ -16,7 +16,9 @@ def main() -> int:
     parser.add_argument("--query", default="回放當日多源市場資訊")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    snapshot = load_source_snapshot(get_cache_backend(), args.coin, args.date)
+    snapshot = load_source_snapshot(
+        get_cache_backend(), args.coin, args.date, archive_type="backfilled_archive",
+    )
     if snapshot is None:
         parser.error("archived snapshot not found")
     result = replay_snapshot(snapshot, query=args.query)

@@ -51,6 +51,11 @@ python scripts/report_historical_coverage.py \
 報告逐幣保存 `expected_days`、`snapshot_days`、`missing_dates`，並逐來源保存
 days、coverage 與 document count。`ready` 只表示 adapter 能力，不表示資料存在。
 
+Forward-captured live snapshot 與 retrieved-later backfill 使用不同 cache namespace：
+`__source_snapshot_history__` 與 `__source_snapshot_backfill__`。歷史 replay 必須
+明確指定 `archive_type=backfilled_archive`；同日 live 資料不得因 fetched time
+較新而遮蔽、合併或污染回填 archive。
+
 第一個 adapter：
 
 ```bash

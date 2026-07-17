@@ -22,11 +22,23 @@ provenance-complete JSONL，再匯入本地 SQLite immutable daily snapshots。
 Reddit archive、HOYA 仍是 missing/gated/blocked，不得以 ready 標籤或 OHLCV
 冒充來源級 Evidence。
 
-## Replay smoke
+## 完整 replay 與 outcome 結果
 
-BTC 2021-07-17～2021-07-23 已以 immutable snapshots 執行七個 daily replay，
-輸出在 `out/replay/alternative-me-smoke-btc/`，共七個 daily JSON 與一個 index，
-`skipped=[]`。這證明匯入資料可進 replay，但不代表五年全幣完整 batch 已完成。
+2021-07-17～2026-07-17 已對五幣執行完整離線 replay：
+
+- BTC/ETH/SOL/BNB/XRP 各成功 1,826 日，共 9,130 個 replay。
+- 每幣唯一 skipped 都是 `2024-10-26: snapshot_missing`。
+- `scripts/audit_historical_replay_batch.py` 驗證 9,130 個 artifact 全部為
+  `backfilled_archive`，且 Execution Log 同時包含 `historical_replay.start` 與
+  `historical_replay.done`；`invalid=0`。
+- audit artifact：`out/replay/five-year-audit.json`。
+- T+1/T+7/T+14 outcome labeling 各產生 1,826 rows × 5 幣；目前 eligible 全為
+  0，因 Alternative.me 單一市場情緒來源不足以產生 `偏多/偏空` 的正式方向判斷，
+  Hermes 誠實輸出「不明」。這不能用假方向補標，也不解除 calibrator gate。
+
+首次完整 replay 另揭露同日 live snapshot 與 backfill 共用 key 的污染風險；已將
+`__source_snapshot_history__` 與 `__source_snapshot_backfill__` 分離。歷史 runner
+明確只讀 `archive_type=backfilled_archive`，2026-07-17 隔離回歸已通過。
 
 ## 重現命令
 
@@ -41,6 +53,9 @@ TRUSTFORGE_SQLITE_PATH="$PWD/out/trustforge.sqlite3" \
 .venv/bin/python scripts/report_historical_coverage.py \
   --from-date 2021-07-17 --to-date 2026-07-17 \
   --out out/history/historical-coverage-2021-07-17_2026-07-17.json
+
+.venv/bin/python scripts/audit_historical_replay_batch.py \
+  --replay-root out/replay --out out/replay/five-year-audit.json
 ```
 
 `historical_coverage_report` 只計算 SQLite 中真正存在的 snapshot/source/document，
