@@ -66,10 +66,14 @@ class SourceEventArchive:
                 scheduler_run_id TEXT NOT NULL,
                 quality_state TEXT NOT NULL,
                 document_count INTEGER NOT NULL,
+                fetch_duration_ms REAL,
                 created_at REAL NOT NULL
             )
             """
         )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(source_events)")}
+        if "fetch_duration_ms" not in columns:
+            self._conn.execute("ALTER TABLE source_events ADD COLUMN fetch_duration_ms REAL")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_source_events_lookup "
             "ON source_events(source_id, coin, fetched_at)"
@@ -107,6 +111,7 @@ class SourceEventArchive:
         fetch_run_id: str | None = None,
         scheduler_run_id: str | None = None,
         quality_state: str = "accepted",
+        fetch_duration_ms: float | None = None,
     ) -> str:
         docs = list(documents)
         payload = [doc_to_dict(doc) for doc in docs]
@@ -126,8 +131,8 @@ class SourceEventArchive:
                     raw_payload_json, raw_payload_ref, payload_format, content_hash,
                     canonical_url, source_url, http_status, etag, last_modified,
                     content_type, fetch_run_id, scheduler_run_id, quality_state,
-                    document_count, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    document_count, fetch_duration_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id, SOURCE_EVENT_SCHEMA_VERSION, DOCUMENT_SCHEMA_VERSION,
@@ -137,10 +142,52 @@ class SourceEventArchive:
                     first_meta.get("canonical_url"), docs[0].url if docs else None,
                     first_meta.get("http_status"), first_meta.get("etag"),
                     first_meta.get("last_modified"), first_meta.get("content_type"),
-                    fetch_id, scheduler_id, quality_state, len(docs), time.time(),
+                    fetch_id, scheduler_id, quality_state, len(docs), fetch_duration_ms, time.time(),
                 ),
             )
         return event_id
+
+    def observability_snapshot(self, *, window_seconds: float = 86400.0, now: float | None = None) -> list[dict[str, Any]]:
+        """Return deterministic per-source Bronze volume, freshness and latency metrics."""
+        boundary = float(now if now is not None else time.time()) - window_seconds
+        self._conn.row_factory = sqlite3.Row
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source_id, fetched_at, content_hash, document_count, quality_state, "
+                "fetch_duration_ms FROM source_events WHERE fetched_at >= ? ORDER BY source_id, fetched_at",
+                (boundary,),
+            ).fetchall()
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["source_id"]), []).append(row)
+        current = float(now if now is not None else time.time())
+        output: list[dict[str, Any]] = []
+        for source_id, source_rows in sorted(grouped.items()):
+            durations = sorted(
+                float(row["fetch_duration_ms"]) for row in source_rows
+                if row["fetch_duration_ms"] is not None
+            )
+            hashes = [str(row["content_hash"]) for row in source_rows]
+
+            def percentile(values: list[float], ratio: float) -> float | None:
+                if not values:
+                    return None
+                rank = max(1, int(len(values) * ratio + 0.999999))
+                return values[min(len(values) - 1, rank - 1)]
+
+            latest = max(float(row["fetched_at"]) for row in source_rows)
+            output.append({
+                "source": source_id,
+                "fetches": len(source_rows),
+                "documents": sum(int(row["document_count"]) for row in source_rows),
+                "empty_fetches": sum(str(row["quality_state"]) == "empty" for row in source_rows),
+                "latest_fetched_at": latest,
+                "freshness_age_seconds": max(0.0, current - latest),
+                "duplicate_fetch_ratio": round(1.0 - len(set(hashes)) / len(hashes), 4),
+                "latency_p50_ms": percentile(durations, 0.50),
+                "latency_p95_ms": percentile(durations, 0.95),
+            })
+        return output
 
     def get(self, event_id: str) -> dict[str, Any] | None:
         self._conn.row_factory = sqlite3.Row
@@ -166,3 +213,8 @@ class SourceEventArchive:
                 conn, self._conn = self._conn, None
                 conn.close()
 
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

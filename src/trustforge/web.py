@@ -5022,7 +5022,7 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
 # `tests/test_json_api.py` 的欄位守門測試比對：`dataclasses.fields
 # (Evidence)` 任何欄位若不在這兩個集合裡，測試直接紅，不會悄悄放行。
 _EVIDENCE_PUBLIC_FIELDS = frozenset({
-    "source", "fetched_at", "content_reference", "related_claim",
+    "schema_version", "source", "fetched_at", "content_reference", "related_claim",
     "source_url", "kind", "trust", "trust_components", "flags", "info_flags",
     "data_lineage",
     # W2 動態信譽模式標註（非敏感字串標註，可對外；等同 trust_components 層級

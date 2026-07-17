@@ -20,10 +20,12 @@ def test_source_archive_preserves_duplicate_fetches_and_lineage(tmp_path) -> Non
     first = archive.append_fetch(
         source_id="unit", source_kind="news", coin="BTC", documents=[document],
         fetched_at=200.0, expires_at=300.0, fetch_run_id="fetch-1", scheduler_run_id="cycle-1",
+        fetch_duration_ms=12.0,
     )
     second = archive.append_fetch(
         source_id="unit", source_kind="news", coin="BTC", documents=[document],
         fetched_at=201.0, expires_at=301.0, fetch_run_id="fetch-2", scheduler_run_id="cycle-2",
+        fetch_duration_ms=20.0,
     )
     assert first != second
     assert archive.count(source_id="unit") == 2
@@ -33,6 +35,13 @@ def test_source_archive_preserves_duplicate_fetches_and_lineage(tmp_path) -> Non
     assert row["document_count"] == 1
     assert row["fetch_run_id"] == "fetch-1"
     assert json.loads(row["raw_payload_json"])[0]["schema_version"] == "1.0.0"
+    metrics = archive.observability_snapshot(window_seconds=1000, now=250.0)[0]
+    assert metrics["fetches"] == 2
+    assert metrics["documents"] == 2
+    assert metrics["freshness_age_seconds"] == 49.0
+    assert metrics["duplicate_fetch_ratio"] == 0.5
+    assert metrics["latency_p50_ms"] == 12.0
+    assert metrics["latency_p95_ms"] == 20.0
 
 
 def test_source_archive_rejects_updates_and_deletes(tmp_path) -> None:

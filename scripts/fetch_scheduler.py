@@ -255,7 +255,10 @@ def run_once(
     if not dry_run and archive is None:
         archive = SourceEventArchive()
 
-    def archive_fetch(source: Source, coin: str, docs: list[Document], now: float, stale_after: float) -> bool:
+    def archive_fetch(
+        source: Source, coin: str, docs: list[Document], now: float,
+        stale_after: float, fetch_duration_ms: float,
+    ) -> bool:
         """Persist Bronze truth before the mutable latest-value cache projection."""
         assert archive is not None
         archive.append_fetch(
@@ -268,6 +271,7 @@ def run_once(
             fetch_run_id=f"fetch-{uuid.uuid4()}",
             scheduler_run_id=cycle_id,
             quality_state="accepted" if docs else "empty",
+            fetch_duration_ms=fetch_duration_ms,
         )
         return True
 
@@ -299,7 +303,9 @@ def run_once(
                       f"廣播寫入 {len(coins)} 個幣別 key")
                 continue
             try:
+                fetch_started = time.perf_counter()
                 docs = source.fetch("", coin="")
+                fetch_duration_ms = (time.perf_counter() - fetch_started) * 1000.0
             except Exception as exc:  # noqa: BLE001 — 排程任務單點失敗不中斷整批，
                 # 但仍要計入 failures（codex HIGH-1）：真呼叫失敗（逾時/429/
                 # 憑證錯/上游故障）不能只印警告就當沒事——若全部來源都這樣失敗，
@@ -310,7 +316,7 @@ def run_once(
             payload = [doc_to_dict(d) for d in docs]
             now = time.time()
             try:
-                archive_fetch(source, "", docs, now, stale_after)
+                archive_fetch(source, "", docs, now, stale_after, fetch_duration_ms)
             except Exception as exc:  # noqa: BLE001 — Bronze 失敗時不可更新 latest projection
                 print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
                 failures.append(name)
@@ -350,7 +356,9 @@ def run_once(
                       f"依 meta['coin'] 分流寫入 {len(coins)} 個幣別 key")
                 continue
             try:
+                fetch_started = time.perf_counter()
                 docs = source.fetch("", coin="")
+                fetch_duration_ms = (time.perf_counter() - fetch_started) * 1000.0
             except Exception as exc:  # noqa: BLE001 — 理由同 coin-agnostic 分支（codex HIGH-1）：
                 # 只呼叫一次，失敗也只算一次失敗，不會像舊版逐幣迴圈那樣對同一個
                 # 已限流的端點重複觸發（見本函式 docstring「生產事故修復」說明）。
@@ -359,7 +367,7 @@ def run_once(
                 continue
             now = time.time()
             try:
-                archive_fetch(source, "", docs, now, stale_after)
+                archive_fetch(source, "", docs, now, stale_after, fetch_duration_ms)
             except Exception as exc:  # noqa: BLE001
                 print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
                 failures.append(name)
@@ -406,7 +414,9 @@ def run_once(
                 print(f"[fetch_scheduler] (dry-run) {name}[{c}]: 會呼叫真 API")
                 continue
             try:
+                fetch_started = time.perf_counter()
                 docs = source.fetch("", coin=c)
+                fetch_duration_ms = (time.perf_counter() - fetch_started) * 1000.0
             except Exception as exc:  # noqa: BLE001 — 單點失敗不中斷整批，
                 # 但仍要計入 failures（codex HIGH-1），理由同上方 coin-agnostic 分支。
                 print(f"[fetch_scheduler] {name}[{c}]: 真呼叫失敗，略過（{exc}）", file=sys.stderr)
@@ -430,7 +440,7 @@ def run_once(
                 continue
             now = time.time()
             try:
-                archive_fetch(source, c, docs, now, stale_after)
+                archive_fetch(source, c, docs, now, stale_after, fetch_duration_ms)
             except Exception as exc:  # noqa: BLE001
                 print(f"[fetch_scheduler] {name}[{c}]: source_events 封存失敗（{exc}）", file=sys.stderr)
                 failures.append(f"{name}:{c}")

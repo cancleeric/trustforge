@@ -46,3 +46,19 @@ def test_success_streak_stops_at_most_recent_failure():
     assert row["source"] == "reddit"
     assert row["consecutive_successes"] == 2
     assert row["meets_reliability_gate"] is False
+
+
+def test_reliability_report_merges_bronze_freshness_volume_and_latency():
+    report = build_reliability_report(
+        [],
+        source_metrics=[{
+            "source": "onchain", "fetches": 4, "documents": 12, "empty_fetches": 1,
+            "freshness_age_seconds": 120.0, "duplicate_fetch_ratio": 0.25,
+            "latency_p50_ms": 80.0, "latency_p95_ms": 2500.0,
+        }],
+    )
+    row = report["sources"][0]
+    assert row["source"] == "onchain"
+    assert row["documents"] == 12
+    assert row["freshness_slo_met"] is True
+    assert row["latency_slo_met"] is False
