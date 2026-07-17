@@ -81,6 +81,9 @@ class AnalysisFlow:
         if not readonly:
             self._init_schema()
 
+    def _readonly_store_missing(self) -> bool:
+        return self.readonly and not self.path.exists()
+
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
         if conn is None:
@@ -278,6 +281,8 @@ class AnalysisFlow:
         coin, mode, question = coin.upper(), mode.strip(), question.strip()
         if coin not in COIN_POOL or mode not in QUESTION_TYPES or not question:
             raise ValueError("valid coin, mode and question required")
+        if self._readonly_store_missing():
+            return {"query": question, "matches": [], "conversation": [], "retrieval": "sqlite_char_bigram_v1"}
         rows = self._conn().execute("""
           SELECT q.question_id,q.coin,q.mode,q.question,q.updated_at,
                  r.snapshot_id,r.job_id,r.payload_json,r.published_at
@@ -705,6 +710,11 @@ class AnalysisFlow:
         return package
 
     def status(self) -> dict[str, Any]:
+        if self._readonly_store_missing():
+            return {"agent": "hermes", "state": "continuous",
+                    "stages": [{"id": stage, "queued": 0, "current": None, "next_retry_at": None} for stage in STAGES],
+                    "queue": {"pending": 0, "capacity": QUEUE_CAPACITY, "backpressure": False},
+                    "dead_letter_count": 0, "updated_at": iso_utc(time.time())}
         stages = []
         for stage in STAGES:
             running = self._conn().execute("""SELECT j.coin,j.mode,j.question,j.snapshot_id,s.started_at,s.retry_count,s.error
@@ -725,6 +735,8 @@ class AnalysisFlow:
                 "dead_letter_count": dead, "updated_at": iso_utc(time.time())}
 
     def journey(self, *, limit: int = 50) -> dict[str, Any]:
+        if self._readonly_store_missing():
+            return {"jobs": [], "dead_letters": [], "updated_at": iso_utc(time.time())}
         jobs = [dict(row) for row in self._conn().execute(
             "SELECT * FROM analysis_jobs ORDER BY updated_at DESC LIMIT ?", (max(1, min(limit, 200)),),
         ).fetchall()]
@@ -834,6 +846,8 @@ class AnalysisFlow:
         return counts
 
     def latest(self, coin: str, mode: str, question: str | None = None) -> dict | None:
+        if self._readonly_store_missing():
+            return None
         sql = "SELECT payload_json FROM analysis_results WHERE coin=? AND mode=?"
         params: list[Any] = [coin.upper(), mode]
         if question:

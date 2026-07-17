@@ -231,6 +231,16 @@ def test_readonly_projection_skips_schema_writes_and_reads_existing_state(tmp_pa
         assert context["matches"][0]["coin"] == "BTC"
 
     missing = tmp_path / "missing.sqlite3"
-    with pytest.raises(sqlite3.OperationalError):
-        AnalysisFlow(missing, readonly=True).status()
+    with AnalysisFlow(missing, readonly=True) as reader:
+        status = reader.status()
+        journey = reader.journey()
+        context = reader.question_context("BTC", "risk", "BTC 來源是否分歧")
+        latest = reader.latest("BTC", "risk")
+    assert status["queue"]["pending"] == 0
+    assert all(stage["queued"] == 0 and stage["current"] is None for stage in status["stages"])
+    assert journey["jobs"] == []
+    assert journey["dead_letters"] == []
+    assert context["matches"] == []
+    assert context["conversation"] == []
+    assert latest is None
     assert not missing.exists()

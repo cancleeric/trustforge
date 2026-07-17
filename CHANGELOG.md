@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.16.2 — 2026-07-17
+
+- Make read-only Hermes analysis projections return empty telemetry when the
+  SQLite flow store has not been created yet, preventing fresh or in-flight
+  production deployments from surfacing transient `/api/analysis-flow` and
+  `/api/analysis-journey` 502 responses.
+
 ## v0.16.1 — 2026-07-17
 
 - Install the `certifi` runtime dependency during EC2 update-in-place and
