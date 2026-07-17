@@ -47,6 +47,7 @@ def test_actual_historical_gaps_feed_outer_proposals_without_synthesizing_eviden
         "capabilities": [
             {"source": "alternative-me-fng", "status": "ready"},
             {"source": "sec-gov", "status": "ready_partial"},
+            {"source": "blockchain-com-charts", "status": "ready", "coins": ["BTC"]},
             {"source": "coingecko-market-range", "status": "credential_gated"},
         ],
         "coins": {
@@ -57,6 +58,10 @@ def test_actual_historical_gaps_feed_outer_proposals_without_synthesizing_eviden
                     "sec-gov": {"days": 0, "coverage": 0},
                 },
             },
+            "ETH": {
+                "missing_dates": [],
+                "sources": {"blockchain-com-charts": {"days": 0, "coverage": 0}},
+            },
         },
     }, generated_at="2026-07-17T00:00:00Z")
 
@@ -64,4 +69,5 @@ def test_actual_historical_gaps_feed_outer_proposals_without_synthesizing_eviden
     assert proposal["automatic_apply"] is False
     assert proposal["evidence"]["missing_snapshot_days"] == {"BTC": ["2024-10-26"]}
     assert proposal["evidence"]["source_gaps"]["sec-gov"]["coins"]["BTC"]["coverage"] == 0
+    assert "ETH" not in proposal["evidence"]["source_gaps"]["blockchain-com-charts"]["coins"]
     assert proposal["evidence"]["gated_sources"] == ["coingecko-market-range"]

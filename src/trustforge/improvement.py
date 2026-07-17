@@ -131,7 +131,10 @@ def diagnose(
         source_gaps: dict[str, dict[str, Any]] = {}
         for source_id in sorted(actionable_sources):
             per_coin = {}
+            supported_coins = capabilities[source_id].get("coins")
             for coin, coin_row in sorted(coins.items()):
+                if isinstance(supported_coins, list) and coin not in supported_coins:
+                    continue
                 source_row = (coin_row.get("sources") or {}).get(source_id) or {}
                 coverage = _number(source_row.get("coverage"))
                 if coverage < 1:

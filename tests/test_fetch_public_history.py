@@ -50,3 +50,26 @@ def test_fetch_sec_quarterly_indexes_with_explicit_user_agent(monkeypatch, tmp_p
     assert len(rows) == 1 and rows[0]["coin"] == "BTC"
     assert rows[0]["match_scope"] == "metadata_only"
     assert calls == [("https://www.sec.gov/Archives/edgar/full-index/2021/QTR2/master.idx", "TrustForge research ops@example.com")]
+
+
+def test_fetch_blockchain_charts_uses_fixed_metric_allowlist(monkeypatch, tmp_path):
+    calls = []
+
+    def fetch(url, **kwargs):
+        calls.append(url)
+        return json.dumps({"values": [{"x": 1622505600, "y": 42}]}).encode()
+
+    monkeypatch.setattr(fetch_public_history, "fetch_url", fetch)
+    monkeypatch.setattr(fetch_public_history.time, "time", lambda: 1770000000.0)
+    output = tmp_path / "blockchain.jsonl"
+
+    assert fetch_public_history.main([
+        "--source", "blockchain-com-charts", "--from-date", "2021-06-01",
+        "--to-date", "2021-06-01", "--out", str(output),
+    ]) == 0
+
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 3 and {row["metric"] for row in rows} == {
+        "n-transactions", "hash-rate", "difficulty",
+    }
+    assert all("sampled=false" in url and "timespan=1days" in url for url in calls)

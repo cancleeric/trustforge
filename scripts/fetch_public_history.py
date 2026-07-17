@@ -13,7 +13,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from trustforge.historical_sources import parse_alternative_me_history, parse_sec_master_index  # noqa: E402
+from trustforge.historical_sources import (  # noqa: E402
+    BLOCKCHAIN_CHARTS,
+    parse_alternative_me_history,
+    parse_blockchain_chart_history,
+    parse_sec_master_index,
+)
 from trustforge.ingestion.safe_fetch import fetch_url  # noqa: E402
 
 
@@ -36,7 +41,10 @@ def _quarters(start: datetime, end: datetime):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", choices=("alternative-me-fng", "sec-gov"), required=True)
+    parser.add_argument(
+        "--source", choices=("alternative-me-fng", "blockchain-com-charts", "sec-gov"),
+        required=True,
+    )
     parser.add_argument("--from-date", required=True)
     parser.add_argument("--to-date", required=True)
     parser.add_argument("--out", type=Path, required=True)
@@ -51,6 +59,23 @@ def main(argv: list[str] | None = None) -> int:
         raw = fetch_url("https://api.alternative.me/fng/?limit=0", user_agent="TrustForge/1.0 historical-research", timeout=15, max_bytes=5_000_000)
         payload = json.loads(raw)
         rows = parse_alternative_me_history(payload, retrieved_at=retrieved_at, start_epoch=start, end_epoch=end)
+    elif args.source == "blockchain-com-charts":
+        rows = []
+        day_count = (datetime.fromisoformat(args.to_date) - datetime.fromisoformat(args.from_date)).days + 1
+        for chart_name in BLOCKCHAIN_CHARTS:
+            url = (
+                f"https://api.blockchain.info/charts/{chart_name}"
+                f"?start={args.from_date}&timespan={day_count}days&format=json&sampled=false"
+            )
+            raw = fetch_url(
+                url, user_agent="TrustForge/1.0 historical-research",
+                timeout=30, max_bytes=16_000_000,
+            )
+            rows.extend(parse_blockchain_chart_history(
+                json.loads(raw), chart_name=chart_name, retrieved_at=retrieved_at,
+                start_epoch=start, end_epoch=end,
+            ))
+        rows.sort(key=lambda row: (row["published_at"], row["metric"]))
     else:
         if not args.user_agent.strip():
             parser.error("--user-agent or TRUSTFORGE_SEC_USER_AGENT is required for sec-gov")

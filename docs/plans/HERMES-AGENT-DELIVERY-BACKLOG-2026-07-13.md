@@ -1,8 +1,8 @@
 # TrustForge Hermes Agent Delivery Backlog
 
 > 唯一權威：本文件列出 2026-07-13 對話中已決定、但尚未完整落地的項目。
-> 狀態基準：`develop@94eda81`（2026-07-16，PR #190 五年來源回填與 PR #194
-> rolling-upgrade payload 相容性均已合併）。每項完成後須更新本表、
+> 狀態基準：本機 `develop@ce03080` 加上 2026-07-17 Blockchain.com 歷史鏈上
+> adapter 工作樹（遠端同步仍受 repository auth gate）。每項完成後須更新本表、
 > 測試、Evidence/Execution Log（如適用）與版本紀錄；不可只在對話中宣稱完成。
 
 ## 2026-07-17 現行未完成摘要與開發駐列
@@ -21,9 +21,9 @@ regression，H-21 viewport evidence 排在本輪最後。
 | P1 | H-10 | diagnostic 尚未定期取得 online QA；offline/replay/freshness 已接通 | 依賴 H-05 | scheduler 定期產生並消費 online QA artifact |
 | P1 | H-20 | CoinGecko／Reddit production reliability gate 尚未達連續 7 次成功 | 外部來源觀測 | 每來源七次真實 attempt 連續成功，不用 freshness skip 灌數 |
 | P1 | H-29 | CloudWatch dedup/recent_failures 與 admin cutover 網路／告警證據尚未完整銷帳（#104、#113） | production ops gate | 正式 alarm、X-Real-IP、admin 告警規則與演練 evidence |
-| P0 | H-13a | 五年多來源仍缺 SEC filing 全文、CoinGecko range、on-chain 歷史、新聞／Reddit archive；Alternative.me 已實際匯入 1,826 天 × 5 幣，不再只是 adapter ready | 核心資料＋外部契約 | coverage report 按來源／幣／日量測 actual/missing/gated；逐來源補齊 |
-| P2 | H-13b | 現有 Alternative.me archive 的五幣五年 replay 已完成 9,130 runs；多來源重跑仍依賴 H-13a | 部分完成／依賴 H-13a | 新來源加入後重跑；每 run 維持完整 execution log 且無 T 後資料 |
-| P2 | H-13c | 9,130 replay 已完成 T+1/T+7/T+14 labeling，但 eligible=0，因單一情緒來源的正式方向為「不明」 | 資料 gate | 異質來源加入後產生可稽核 directional outcomes；禁止假造方向 |
+| P0 | H-13a | Alternative.me 已匯入 1,826 天 × 5 幣；Blockchain.com 三條官方 BTC 鏈上指標已匯入 1,823 天／5,469 documents。仍缺 SEC filing 全文、其他幣鏈上、CoinGecko range、新聞／Reddit archive | 核心資料＋外部契約 | coverage report 按來源／幣／日量測 actual/missing/gated；逐來源補齊 |
+| P2 | H-13b | 新鏈上資料加入後 BTC 已重跑 1,827 日、零 skipped；五幣合計 9,131 runs。其他幣多來源重跑仍依賴 H-13a | 部分完成／依賴 H-13a | 新來源加入後重跑；每 run 維持完整 execution log 且無 T 後資料 |
+| P2 | H-13c | 9,131 replay 已完成 T+1/T+7/T+14 labeling；eligible 仍為 0，pipeline 沒把鏈上觀察或情緒值假造為價格方向 | 資料 gate | 取得有正式 directional contract 的異質來源後產生可稽核 outcomes；禁止假造方向 |
 | Deferred | H-14/H-16 | calibrator／模型 fitting 暫緩；資料量、holdout、ModelHub ACL/API key 均未過 gate | 明確延後 | H-13 至少 100 筆 eligible outcome 後才重新評估 |
 
 目前可直接繼續開發、不等待外部憑證的順序：`H-31/H-32 runtime core -> H-13a
@@ -36,8 +36,9 @@ HOYA、CoinGecko plan、新聞／Reddit archive 與 ModelHub 權限不得用假�
 仍開放 **11 個 H-ID**：
 
 - 外部契約／正式環境／連續觀測 6 個：H-01、H-02、H-05、H-10、H-20、H-29。
-- 多來源歷史資料鏈 3 個：H-13a、H-13b、H-13c；現有 Alternative.me archive
-  已完成 9,130 replay，但其他來源與 eligible directional outcomes 尚未取得。
+- 多來源歷史資料鏈 3 個：H-13a、H-13b、H-13c；Alternative.me 加上 BTC
+  Blockchain.com 鏈上 archive 已完成 9,131 replay，但其他幣異質來源與 eligible
+  directional outcomes 尚未取得。
 - 明確 deferred 2 個：H-14、H-16；依使用者決策暫不做 fitting，且資料／ModelHub
   gate 尚未通過。
 
@@ -47,8 +48,8 @@ private-repository access。以上外部項目不能由本機程式碼或假資�
 
 ### Issue 收件匣與問題回覆駐列
 
-1. `#198`：以 actual coverage report 與 Alternative.me 匯入證據更新 H-13a；再解除
-   `#197` 的 replay/holdout 前置阻擋。
+1. `#198`：以 actual coverage report、Alternative.me 與 Blockchain.com BTC
+   鏈上匯入證據更新 H-13a；`#197` 仍受 eligible directional outcome gate 阻擋。
 2. `#191/#192/#193/#200`：PR #201 的 commit `601d5fa` 已在本地 `develop`；程式
    gate 已完成。取得 authenticated issue access 後附上 commit/test evidence、回答
    新留言並核對逐票 closure，不因程式已合併就猜測 GitHub 狀態。
@@ -143,9 +144,9 @@ evidence。重複票須先留言指向 canonical issue，才可關閉。
 
 | ID | 待辦 | 目前工作 | 驗收條件 | 依賴 |
 |---|---|---|---|---|
-| H-13a | Historical Backfill Foundation | **真實回填已開始。** 2021-07-17～2026-07-17 的 Alternative.me exporter 產出 9,130 rows，已匯入 BTC/ETH/SOL/BNB/XRP 各 1,826 個 daily snapshots；actual coverage 是 1,826/1,827（缺 2024-10-26），不是 100%。`report_historical_coverage.py` 逐幣、逐來源、逐日量測資料庫真實封存與缺日，ready label 不計入 coverage。SEC adapter 仍是 metadata-only；CoinGecko、新聞／Reddit、on-chain、HOYA 仍受契約或歷史 endpoint gate | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；actual coverage 明列缺日；逐來源補齊且禁止用能力標籤冒充資料 | 歷史來源/API |
-| H-13b | Daily Hermes Replay | **現有 archive 已全量執行。** 五幣各 1,826 日，共 9,130 runs；audit 驗證 `invalid=0`，唯一缺日為 2024-10-26。live/backfill key 已分離，歷史 runner 只讀 `backfilled_archive`。多來源全量仍待 H-13a | 新來源加入後同樣全量重跑；每日 run 有完整 execution log，僅選 `published_at <= T` | H-13a |
-| H-13c | Outcome Labeling | **現有 replay 已全量執行。** T+1/T+7/T+14 lineage 產出完成，但 Alternative.me 單一情緒來源的方向皆為「不明」，故 eligible=0 並維持 unavailable | 異質來源加入後產生可稽核 directional outcomes；不得把資訊完整度或情緒值冒充方向 | H-13b |
+| H-13a | Historical Backfill Foundation | **第二個真實來源已落地。** Alternative.me 產出 9,130 rows（1,826 日 × 5 幣）。Blockchain.com 官方 Charts API 另產出 BTC 交易數、算力、難度共 5,469 rows／1,823 天；缺日為 2025-11-13～15 與尚未日結的 2026-07-17，均原樣保留。兩源日期聯集使 BTC snapshot coverage 達 1,827/1,827；其他四幣仍為 1,826/1,827。`report_historical_coverage.py` 逐幣、逐來源、逐日量測，且外框診斷只對 capability 聲明支援的幣種報 gap。SEC adapter 仍是 metadata-only；其他幣鏈上、CoinGecko、新聞／Reddit、HOYA 仍受契約或歷史 endpoint gate | 每筆有 provider、published_at、retrieved_at、license/contract、content hash；actual coverage 明列缺日；逐來源補齊且禁止用能力標籤冒充資料 | 歷史來源/API |
+| H-13b | Daily Hermes Replay | **新增來源後已全量重跑 BTC。** BTC 1,827 日零 skipped，其他四幣各 1,826 日；五幣合計 9,131 runs，audit `complete=true`、`invalid=0`。live/backfill key 分離，runner 只讀 `backfilled_archive` | 新來源加入後同樣全量重跑；每日 run 有完整 execution log，僅選 `published_at <= T` | H-13a |
+| H-13c | Outcome Labeling | **9,131 replay 的 T+1/T+7/T+14 lineage 已完成。** 新增鏈上觀察後仍沒有符合正式 directional contract 的輸出，因此 eligible=0 並維持 unavailable；沒有把資訊完整度、情緒值或鏈上數值冒充方向 | 有正式方向語意的異質來源加入後產生可稽核 directional outcomes；不得把資訊完整度或原始指標冒充方向 | H-13b |
 
 | ID | 待辦 | 啟動門檻 | 驗收條件 |
 |---|---|---|---|

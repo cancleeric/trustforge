@@ -15,12 +15,13 @@ HISTORICAL_SOURCE_CAPABILITIES = (
     {"source": "coingecko-market-range", "kind": "market", "strategy": "dated_range_api", "status": "credential_gated", "coverage": "plan_dependent", "terms": "CoinGecko API plan terms"},
     {"source": "news-rss-group", "kind": "news", "strategy": "provider_archive_or_licensed_dataset", "status": "archive_required", "coverage": "rss_is_recent_only", "terms": "per-publisher terms"},
     {"source": "reddit", "kind": "social", "strategy": "official_archive_or_licensed_dataset", "status": "archive_required", "coverage": "rss_is_recent_only", "terms": "Reddit data terms"},
-    {"source": "onchain-current-group", "kind": "onchain", "strategy": "historical_chart_block_or_dataset_api", "status": "historical_endpoint_required", "coverage": "current_endpoints_are_not_history", "terms": "per-provider terms"},
+    {"source": "blockchain-com-charts", "kind": "onchain", "strategy": "official_charts_history_api", "status": "ready", "coverage": "provider_available_history", "terms": "Blockchain.com API Terms", "coins": ["BTC"]},
+    {"source": "onchain-current-group", "kind": "onchain", "strategy": "current_observation_only", "status": "historical_endpoint_required", "coverage": "current_endpoints_are_not_history", "terms": "per-provider terms"},
     {"source": "hoyabit-ticker", "kind": "market", "strategy": "official_contract", "status": "blocked", "coverage": "unknown", "terms": "official endpoint and contract required"},
 )
 
 
-def historical_source_capabilities() -> list[dict[str, str]]:
+def historical_source_capabilities() -> list[dict[str, Any]]:
     return [dict(item) for item in HISTORICAL_SOURCE_CAPABILITIES]
 
 
@@ -93,6 +94,14 @@ _SAFE_EXTERNAL_RE = re.compile(r"[^\w\s.,&'()\-+/]", re.UNICODE)
 _FNG_CLASSIFICATIONS = {
     "extreme fear": "Extreme Fear", "fear": "Fear", "neutral": "Neutral",
     "greed": "Greed", "extreme greed": "Extreme Greed",
+}
+
+# Fixed upstream identifiers and local labels keep provider-controlled chart metadata
+# out of Evidence text.  These are BTC-only daily network observations.
+BLOCKCHAIN_CHARTS = {
+    "n-transactions": {"label": "confirmed transactions", "unit": "transactions"},
+    "hash-rate": {"label": "network hash rate", "unit": "TH/s"},
+    "difficulty": {"label": "mining difficulty", "unit": "difficulty"},
 }
 
 
@@ -181,3 +190,44 @@ def parse_alternative_me_history(payload: dict[str, Any], *, retrieved_at: float
                 "scope": "market-wide", "value": value, "classification": classification,
             })
     return sorted(rows, key=lambda row: (row["published_at"], row["coin"]))
+
+
+def parse_blockchain_chart_history(
+    payload: dict[str, Any], *, chart_name: str, retrieved_at: float,
+    start_epoch: float, end_epoch: float,
+) -> list[dict[str, Any]]:
+    """Convert one official Blockchain.com chart to bounded BTC Evidence rows."""
+    config = BLOCKCHAIN_CHARTS.get(chart_name)
+    if config is None:
+        raise ValueError(f"unsupported Blockchain.com chart: {chart_name}")
+    if not isinstance(payload, dict) or not isinstance(payload.get("values"), list):
+        raise ValueError(f"blockchain-com-charts/{chart_name}: invalid response envelope")
+    retrieved = iso_utc(retrieved_at)
+    url = f"https://api.blockchain.info/charts/{chart_name}"
+    rows: list[dict[str, Any]] = []
+    for point in payload["values"]:
+        if not isinstance(point, dict):
+            continue
+        try:
+            timestamp = float(point.get("x"))
+            value = float(point.get("y"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not start_epoch <= timestamp <= end_epoch
+            or value != value
+            or value in (float("inf"), float("-inf"))
+            or value < 0
+        ):
+            continue
+        value_text = str(int(value)) if value.is_integer() else format(value, ".12g")
+        rows.append({
+            "coin": "BTC", "source": "blockchain-com-charts", "kind": "onchain",
+            "published_at": iso_utc(timestamp), "retrieved_at": retrieved,
+            "text": f"BTC {config['label']}: {value_text} {config['unit']}",
+            "url": url, "provider": "Blockchain.com",
+            "license": "Public Charts API; verify Blockchain.com API Terms",
+            "scope": "asset", "metric": chart_name, "unit": config["unit"],
+            "value": value,
+        })
+    return sorted(rows, key=lambda row: (row["published_at"], row["metric"]))

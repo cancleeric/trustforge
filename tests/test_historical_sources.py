@@ -6,6 +6,7 @@ from trustforge.historical_sources import (
     historical_coverage_report,
     historical_source_capabilities,
     parse_alternative_me_history,
+    parse_blockchain_chart_history,
     parse_sec_master_index,
 )
 from trustforge.ingestion.cache import SQLiteCacheBackend
@@ -17,6 +18,7 @@ def test_historical_capability_matrix_never_calls_recent_rss_an_archive():
     assert matrix["sec-gov"]["strategy"] == "official_quarterly_master_index"
     assert matrix["sec-gov"]["status"] == "ready_partial"
     assert matrix["news-rss-group"]["status"] == "archive_required"
+    assert matrix["blockchain-com-charts"]["coins"] == ["BTC"]
     assert matrix["hoyabit-ticker"]["status"] == "blocked"
 
 
@@ -80,6 +82,38 @@ def test_alternative_me_history_rejects_instruction_shaped_classification():
 
     assert rows and {row["classification"] for row in rows} == {"unknown"}
     assert all("script" not in row["text"].lower() and len(row["text"]) < 100 for row in rows)
+
+
+def test_blockchain_chart_history_is_bounded_validated_and_btc_only():
+    day = datetime(2022, 1, 2, tzinfo=timezone.utc).timestamp()
+    payload = {"name": "provider label is not trusted", "values": [
+        {"x": day, "y": 250000},
+        {"x": day + 86400, "y": -1},
+        {"x": "bad", "y": 1},
+    ]}
+
+    rows = parse_blockchain_chart_history(
+        payload, chart_name="n-transactions", retrieved_at=day + 100,
+        start_epoch=day, end_epoch=day + 86400,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["coin"] == "BTC" and rows[0]["scope"] == "asset"
+    assert rows[0]["metric"] == "n-transactions" and rows[0]["value"] == 250000
+    assert "provider label" not in rows[0]["text"]
+
+
+def test_blockchain_chart_history_rejects_unknown_chart_and_bad_envelope():
+    day = datetime(2022, 1, 2, tzinfo=timezone.utc).timestamp()
+    try:
+        parse_blockchain_chart_history(
+            {"values": []}, chart_name="unknown", retrieved_at=day,
+            start_epoch=day, end_epoch=day,
+        )
+    except ValueError as exc:
+        assert "unsupported" in str(exc)
+    else:
+        raise AssertionError("unknown chart must be rejected")
 
 
 def test_sec_master_index_parser_is_metadata_only_and_time_bounded():
