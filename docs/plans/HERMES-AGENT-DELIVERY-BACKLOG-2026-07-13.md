@@ -157,6 +157,7 @@ ModelHub SOP。ModelHub 是訓練需求、Kaggle 調度、驗收與版本 regist
 | H-25 | Durable upgrade proposal queue | **完成（2026-07-16）。** diagnostic proposals 與 Bedrock adversarial verdict 寫入共用 SQLite；重啟後保留狀態，WebUI 顯示 durable queue。LLM 永遠 `can_activate=false` | proposal/review 可跨程序重啟查閱；diagnostic refresh 不覆蓋既有 review state |
 | H-26 | Local frontend service durability | **完成（2026-07-16）。** `4174` Vite frontend 與 `8799` backend 分別由 launchd KeepAlive；API proxy 已實測 | `curl /` 與 `/api/hermes-upgrades` 回 200，程序退出後由 launchd 重啟 |
 | H-27 | Upgrade sandbox / human release gate | **完成第一版（2026-07-16）。** SQLite 持久化 sandbox artifact hash、結果與人工 approve/reject 稽核；只有最新狀態為 `sandbox_passed` 才能核准，終局決策不可覆寫。管理 WebUI 沿用分頁級 Admin Token，核准永遠 `activated=false` | Admin API 與 WebUI 可查狀態、操作者及理由；公開端點無寫權；不允許自動部署 |
+| H-31 | Continuous pipeline runtime self-healing | **PR 開發中（2026-07-17）。** 真實本地驗證發現 500 個 durable jobs 因階段 worker／記憶體 package 遺失停在 queued，拖累 8799 API。新增 worker watchdog：worker 消失時以 immutable snapshot 重建遺失工作；local launchd 每階段 4 workers，維持五階重疊且增加吞吐 | worker 異常退出後無須人工 kickstart；queued/running 持續下降；API 與 desktop/mobile viewport 可正常驗收 |
 
 ## 明確不做 / 不可越線
 
@@ -176,3 +177,11 @@ H-03、H-04、H-06～H-09、H-11、H-12、H-15、H-17～H-19、H-22～H-27
 已完成。H-21 僅剩 production desktop/mobile 截圖 evidence。H-14/H-16
 在系統穩定化、資料累積與預算核准前均保持 deferred；任何 P2 項目不得因為急於
 「訓練模型」跳過資料累積與 held-out 驗證。
+# 2026-07-17 本機 API 資源雪崩
+
+`H-32`：**修復完成，待 PR。** 一般 Chrome 證實主因是無界 Web request
+threads、逐請求 SQLite 連線/schema 初始化與 journey N+1 查詢，輪詢放大後
+形成 5 GB 行程雪崩；另補嚴格 local CORS allowlist。已加入 32-request 上限、
+共用 SQLite backend、read-only projection、journey 4-query bulk read，並以
+七端點並發、15-request 短壓及 BTC/ETH 一般 Chrome 截圖驗收。正式診斷見
+[`docs/qa/HERMES-LOCAL-API-FAILED-FETCH-ANALYSIS-2026-07-17.md`](../qa/HERMES-LOCAL-API-FAILED-FETCH-ANALYSIS-2026-07-17.md)。
