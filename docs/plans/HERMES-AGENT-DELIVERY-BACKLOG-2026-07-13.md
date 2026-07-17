@@ -1,8 +1,8 @@
 # TrustForge Hermes Agent Delivery Backlog
 
 > 唯一權威：本文件列出 2026-07-13 對話中已決定、但尚未完整落地的項目。
-> 狀態基準：本機 `develop@ce03080` 加上 2026-07-17 Blockchain.com 歷史鏈上
-> adapter 工作樹（遠端同步仍受 repository auth gate）。每項完成後須更新本表、
+> 狀態基準：本機 `develop@40765e0`（TrustForge v0.14.16；遠端同步仍受
+> repository auth gate）。每項完成後須更新本表、
 > 測試、Evidence/Execution Log（如適用）與版本紀錄；不可只在對話中宣稱完成。
 
 ## 2026-07-17 現行未完成摘要與開發駐列

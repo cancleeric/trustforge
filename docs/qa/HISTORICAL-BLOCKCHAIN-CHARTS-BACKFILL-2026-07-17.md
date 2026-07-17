@@ -15,6 +15,10 @@
   `complete=true`、`invalid=0`。
 - Outcome：BTC 1,827 labels；T+1/T+7/T+14 eligible 均為 0。鏈上原始數值
   沒有被錯誤解讀為價格方向。
+- 完整 backend suite：2,136 passed、6 skipped；sandbox 內僅兩項 loopback bind
+  測試因權限失敗，於允許 bind 的環境重跑該檔為 3 passed。總覆蓋率 90.46%。
+- 本機 API smoke：`/api/hermes-upgrades` 回報 BTC snapshot 1,827/1,827、
+  Blockchain.com 1,823 日／5,469 documents；前端 `4174` 回 HTTP 200。
 
 ## 安全與語意邊界
 
