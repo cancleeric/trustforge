@@ -1,6 +1,15 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+import hashlib
+import json
 
-from trustforge.historical_sources import historical_source_capabilities, parse_alternative_me_history, parse_sec_master_index
+from trustforge.historical_sources import (
+    historical_coverage_report,
+    historical_source_capabilities,
+    parse_alternative_me_history,
+    parse_sec_master_index,
+)
+from trustforge.ingestion.cache import SQLiteCacheBackend
+from trustforge.replay import store_backfilled_source_snapshot
 
 
 def test_historical_capability_matrix_never_calls_recent_rss_an_archive():
@@ -9,6 +18,40 @@ def test_historical_capability_matrix_never_calls_recent_rss_an_archive():
     assert matrix["sec-gov"]["status"] == "ready_partial"
     assert matrix["news-rss-group"]["status"] == "archive_required"
     assert matrix["hoyabit-ticker"]["status"] == "blocked"
+
+
+def test_historical_coverage_measures_archives_not_ready_labels(tmp_path):
+    backend = SQLiteCacheBackend(tmp_path / "coverage.sqlite3")
+    boundary = datetime(2021, 7, 17, 23, 59, 59, tzinfo=timezone.utc).timestamp()
+    document = {
+        "published_at": "2021-07-17T00:00:00Z",
+        "retrieved_at": "2026-07-17T00:00:00Z",
+        "provider": "Alternative.me", "license": "attribution required",
+        "content_sha256": "", "text": "Fear and Greed 20",
+        "source": "alternative-me-fng",
+    }
+    hash_payload = {key: value for key, value in document.items() if key != "content_sha256"}
+    document["content_sha256"] = hashlib.sha256(
+        json.dumps(hash_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-17",
+        [{"source": "alternative-me-fng", "documents": [document]}],
+        snapshot_epoch=boundary,
+        provider_manifest={"providers": [{"provider": "Alternative.me", "license": "attribution required"}]},
+    ).ok
+
+    report = historical_coverage_report(backend, date(2021, 7, 17), date(2021, 7, 18))
+
+    assert report["coins"]["BTC"]["snapshot_days"] == 1
+    assert report["coins"]["BTC"]["missing_dates"] == ["2021-07-18"]
+    assert report["coins"]["BTC"]["sources"]["alternative-me-fng"] == {
+        "days": 1, "coverage": 0.5, "documents": 1,
+    }
+    assert report["coins"]["ETH"]["snapshot_days"] == 0
+    assert report["coins"]["ETH"]["sources"]["alternative-me-fng"]["coverage"] == 0
+    assert next(item for item in report["capabilities"] if item["source"] == "alternative-me-fng")["observed"] is True
+    assert next(item for item in report["capabilities"] if item["source"] == "sec-gov")["observed"] is False
 
 
 def test_alternative_me_history_is_filtered_and_expanded_as_market_wide():

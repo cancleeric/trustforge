@@ -39,6 +39,18 @@ provider；相同 content hash 去重。無正式歷史介面或授權的來源�
 4. 缺來源仍記錄 missing，不用今天的搜尋結果補造過去。
 5. 等來源覆蓋與 outcome gate 達標後，才重新評估校準器或其他 fitting。
 
+覆蓋率必須從 SQLite 真實 archive 量測，不可從 capability matrix 推算：
+
+```bash
+CACHE_BACKEND=sqlite TRUSTFORGE_SQLITE_PATH="$PWD/out/trustforge.sqlite3" \
+python scripts/report_historical_coverage.py \
+  --from-date 2021-07-17 --to-date 2026-07-17 \
+  --out out/history/historical-coverage-2021-07-17_2026-07-17.json
+```
+
+報告逐幣保存 `expected_days`、`snapshot_days`、`missing_dates`，並逐來源保存
+days、coverage 與 document count。`ready` 只表示 adapter 能力，不表示資料存在。
+
 第一個 adapter：
 
 ```bash
