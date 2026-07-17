@@ -69,6 +69,7 @@ import math
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -114,6 +115,7 @@ from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
 from trustforge.scheduler_log import append_scheduler_run  # noqa: E402
 from trustforge.replay import capture_source_snapshot  # noqa: E402
+from trustforge.source_archive import SourceEventArchive  # noqa: E402
 
 
 def build_registry() -> dict[str, Source]:
@@ -194,6 +196,8 @@ def run_once(
     interval_overrides: dict[str, float],
     stagger: float,
     dry_run: bool,
+    archive: SourceEventArchive | None = None,
+    scheduler_run_id: str | None = None,
 ) -> tuple[list[tuple[str, int]], list[str]]:
     """對指定來源 x 幣別各跑一次「新鮮度守門 → 真呼叫 → 寫快取」。
 
@@ -247,6 +251,25 @@ def run_once(
     targets = source_names if source_names else sorted(registry)
     results: list[tuple[str, int]] = []
     failures: list[str] = []
+    cycle_id = scheduler_run_id or f"scheduler-{uuid.uuid4()}"
+    if not dry_run and archive is None:
+        archive = SourceEventArchive()
+
+    def archive_fetch(source: Source, coin: str, docs: list[Document], now: float, stale_after: float) -> bool:
+        """Persist Bronze truth before the mutable latest-value cache projection."""
+        assert archive is not None
+        archive.append_fetch(
+            source_id=source.name,
+            source_kind=source.kind,
+            coin=coin,
+            documents=docs,
+            fetched_at=now,
+            expires_at=now + stale_after,
+            fetch_run_id=f"fetch-{uuid.uuid4()}",
+            scheduler_run_id=cycle_id,
+            quality_state="accepted" if docs else "empty",
+        )
+        return True
 
     for name in targets:
         source = registry.get(name)
@@ -286,6 +309,12 @@ def run_once(
                 continue
             payload = [doc_to_dict(d) for d in docs]
             now = time.time()
+            try:
+                archive_fetch(source, "", docs, now, stale_after)
+            except Exception as exc:  # noqa: BLE001 — Bronze 失敗時不可更新 latest projection
+                print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
+                failures.append(name)
+                continue
             broadcast_failed: list[str] = []
             for c in coins:
                 result = cache_set_monotonic(
@@ -329,6 +358,12 @@ def run_once(
                 failures.append(name)
                 continue
             now = time.time()
+            try:
+                archive_fetch(source, "", docs, now, stale_after)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[fetch_scheduler] {name}: source_events 封存失敗（{exc}）", file=sys.stderr)
+                failures.append(name)
+                continue
             # 依每筆 Document 自帶的 meta["coin"] 分流（不是廣播同一份完整
             # 結果）：非白名單/缺 coin 標記的文件直接捨棄，不落地進任何一個
             # cache key（正常情況下不該發生——來源實作保證回傳的每筆都帶
@@ -393,9 +428,16 @@ def run_once(
                         )
                     break
                 continue
+            now = time.time()
+            try:
+                archive_fetch(source, c, docs, now, stale_after)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[fetch_scheduler] {name}[{c}]: source_events 封存失敗（{exc}）", file=sys.stderr)
+                failures.append(f"{name}:{c}")
+                continue
             result = cache_set_monotonic(
                 backend, cache_key(name, c), [doc_to_dict(d) for d in docs],
-                fetched_at=time.time(), ttl_seconds=stale_after,
+                fetched_at=now, ttl_seconds=stale_after,
             )
             if not result.ok:
                 print(f"[fetch_scheduler] {name}[{c}]: cache 寫入失敗"

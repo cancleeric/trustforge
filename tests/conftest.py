@@ -42,6 +42,9 @@ def _isolate_connector_cache(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("CACHE_BACKEND", "json")
     monkeypatch.setenv("TRUSTFORGE_CACHE_DIR", str(tmp_path / "connector_cache"))
+    monkeypatch.setenv(
+        "TRUSTFORGE_SOURCE_ARCHIVE_PATH", str(tmp_path / "source_events.sqlite3")
+    )
 
 
 @pytest.fixture(autouse=True)
