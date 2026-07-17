@@ -29,6 +29,7 @@ from .ingestion.base import collect
 from .ingestion.cache import doc_from_dict, doc_to_dict
 from .schema import COIN_POOL, QuestionType, iso_utc
 from .trust.scoring import aggregate, build_stance_fn, score
+from .feature_store import TrustFeatureStore
 
 STAGES = ("source_ingestion", "claim_extraction", "trust_reasoning", "evidence_assembly", "report_delivery")
 MODES: dict[str, tuple[QuestionType, str]] = {
@@ -177,6 +178,7 @@ class AnalysisFlow:
             SELECT RAISE(ABORT, 'analysis_lineage_events is append-only');
           END;
         """)
+        TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
         # memory existed. Deterministic IDs make this migration restart-safe.
         conn.execute("""
@@ -676,6 +678,19 @@ class AnalysisFlow:
                 parent_type="analysis_job", parent_id=job["job_id"],
                 metadata={"report_schema_version": payload["report"].get("schema_version"),
                           "evidence_count": len(evidence)},
+            )
+            trusts = [float(item.trust) for item in evidence]
+            TrustFeatureStore(connection=self._conn(), initialize=False).put_many(
+                feature_set="analysis_trust.v1", entity_key=job["coin"],
+                features={
+                    "calibrated_confidence": payload["report"].get("calibrated_confidence", 0.0),
+                    "raw_confidence": payload["report"].get("confidence", 0.0),
+                    "evidence_count": len(evidence),
+                    "average_evidence_trust": sum(trusts) / len(trusts) if trusts else 0.0,
+                    "independent_source_count": len({item.source for item in evidence}),
+                },
+                event_time=now, available_at=now, snapshot_id=job["snapshot_id"],
+                run_id=job["job_id"], source_reference=f"result-{job['job_id']}",
             )
             answer = payload["report"].get("market_judgment") or "分析完成"
             self._conn().execute(

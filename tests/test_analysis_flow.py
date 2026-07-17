@@ -38,6 +38,13 @@ def test_matrix_is_snapshot_isolated_and_atomically_published(tmp_path, monkeypa
     published = next(event for event in events if event["event_type"] == "result_published")
     assert published["parent_id"] == jobs[0]
     assert published["metadata"]["report_schema_version"] == "1.0.0"
+    features = flow._conn().execute(
+        "SELECT feature_name FROM trust_feature_values WHERE run_id=? ORDER BY feature_name", (jobs[0],),
+    ).fetchall()
+    assert [row[0] for row in features] == [
+        "average_evidence_trust", "calibrated_confidence", "evidence_count",
+        "independent_source_count", "raw_confidence",
+    ]
 
 
 def test_lineage_snapshot_event_is_idempotent_and_events_are_immutable(tmp_path, monkeypatch):
