@@ -8,6 +8,7 @@
 - Persist immutable snapshot-to-result analysis lineage and fix duplicate in-process recovery that previously executed every queued stage twice.
 - Materialize completed analysis into an append-only, point-in-time correct Trust Feature Store for leakage-safe replay and future evaluation.
 - Define measured SQLite-to-Parquet/DuckDB-to-Iceberg migration thresholds without introducing premature dual-write state.
+- Suspend the hidden galaxy and its animation while a workspace module is open, slow redundant polling, synchronize workspace state from the URL, and keep coin/right-rail snapshot swaps atomic to eliminate flashing and stale labels.
 
 ## v0.14.16 — 2026-07-17
 

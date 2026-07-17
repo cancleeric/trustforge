@@ -1,7 +1,7 @@
 # TrustForge Hermes Agent Delivery Backlog
 
 > 唯一權威：本文件列出 2026-07-13 對話中已決定、但尚未完整落地的項目。
-> 狀態基準：本機 `develop@1f1749a`（TrustForge v0.14.17 開發列）。每項完成後須更新本表、
+> 狀態基準：本機 `develop@7e4b949`（TrustForge v0.14.17 開發列）。每項完成後須更新本表、
 > 測試、Evidence/Execution Log（如適用）與版本紀錄；不可只在對話中宣稱完成。
 
 ## 2026-07-17 現行未完成摘要與開發駐列
@@ -10,7 +10,7 @@
 
 | Issue | 狀態 | 已落地／剩餘 |
 |---|---|---|
-| #208 | 進行中 umbrella | #209～#215 已逐項落地；後續只由實際量測觸發儲存層升級 |
+| #208 | 完成 | #209～#215 已逐項落地；後續儲存層升級由 #214 的實際量測門檻觸發 |
 | #209 | 完成 | Document/Evidence/Report v1、JSON Schema、契約 artifact、CI compatibility gate（`619f2ba`） |
 | #210 | 完成 | source volume/freshness/duplicate/p50/p95/failure/SLO observability（`65ef349`） |
 | #211 | 完成 | immutable snapshot→job→stage→result lineage；並修正重複收養造成的雙重分析（`facae3a`） |
@@ -18,11 +18,12 @@
 | #213 | 完成 | schema/null/time/duplicate 品質閘、不可變 quarantine、全壞批次不覆蓋 cache（`1570f2f`） |
 | #214 | 路線完成／依門檻啟動 | SQLite→sealed Parquet/DuckDB→S3 Iceberg 的量測門檻、核對與安全邊界已定義 |
 | #215 | 完成 | 每次真 fetch 先 append-only `source_events`，成功後才更新 latest cache（`718faf5`） |
-| #207 | 排在核心之後 | frontend overlay/display performance；依使用者指定維持 mobile 最後驗收 |
+| #207 | 完成（desktop 核心） | 模組開啟時卸載隱藏 galaxy、停止背景動畫、降低重複 polling、URL workspace 同步、幣種／右欄原子快照切換（`7e4b949`）；mobile 仍依優先序最後驗收 |
 
 本輪資料主線已從「latest cache」改成可稽核 Bronze → quality → snapshot → lineage →
-point-in-time feature 的完整鏈。下一個本機核心工作回到 H-13a：擴充合法可取得的
-五年異質來源與 actual coverage；外框 diagnostic 接收上述真實品質與可靠性指標。
+point-in-time feature 的完整鏈；desktop overlay/display regression 也已銷帳。下一個
+本機核心工作回到 H-13a：擴充五年異質來源與 actual coverage；外框 diagnostic
+接收上述真實品質與可靠性指標。
 
 使用者確認的優先順序是：**核心功能 → 可自動改善的外框擴充 → 五年歷史資料 →
 手機版驗收**。手機版不得卡在核心與資料工作中間；除非出現阻斷使用的 mobile
