@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.hurricanesoft.trustforge-ceo-sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/apple/HurricaneSoft/trustforge/.venv/bin/python</string>
+    <string>scripts/ceo_sweep.py</string>
+    <string>--out</string><string>out/ceo-sweep-latest.json</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/apple/HurricaneSoft/trustforge</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key><string>/Users/apple/HurricaneSoft/trustforge/src</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/logs/trustforge-ceo-sweep.log</string>
+  <key>StandardErrorPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/logs/trustforge-ceo-sweep.err.log</string>
+</dict>
+</plist>

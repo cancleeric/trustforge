@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { getComparisonSnapshot, registerAnalysisComparison } from '../lib/endpoints'
 import type { ComparisonParams } from '../lib/endpoints'
@@ -35,34 +35,41 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
   // 這個旗標會在下方「URL 變了就整個表單重新對齊」的 effect 裡重置，
   // 代表「送出/瀏覽器上下頁」都算開啟一輪新的表單狀態。
   const [queryEdited, setQueryEdited] = useState(false)
+  const userChangedRef = useRef(false)
   const sameCoin = coin === coin2
 
   // 瀏覽器上下頁（或外部導覽帶新的 coin/coin2/q 進來）：URL 是唯一事實來源，
   // 把整個表單（含 queryEdited 旗標）重新對齊，避免可見控件跟網址/報告脫節。
+  // 只在使用者改動後 debounce 同步；初次 mount / URL 對齊不能自動 submit。
   useEffect(() => {
     setCoin(initial.coin)
     setCoin2(initial.coin2)
     setQ(initial.q)
     setQueryEdited(false)
+    userChangedRef.current = false
   }, [initial.coin, initial.coin2, initial.q])
 
   useEffect(() => {
+    if (!userChangedRef.current) return
     if (sameCoin || !q.trim()) return
     const timer = window.setTimeout(() => onSubmit({ coin, coin2, q: q.trim() }), 350)
     return () => window.clearTimeout(timer)
   }, [coin, coin2, onSubmit, q, sameCoin])
 
   function handleCoinChange(next: string) {
+    userChangedRef.current = true
     setCoin(next)
     if (!queryEdited) setQ(defaultQuery(next, coin2))
   }
 
   function handleCoin2Change(next: string) {
+    userChangedRef.current = true
     setCoin2(next)
     if (!queryEdited) setQ(defaultQuery(coin, next))
   }
 
   function handleQChange(next: string) {
+    userChangedRef.current = true
     setQ(next)
     setQueryEdited(true)
   }

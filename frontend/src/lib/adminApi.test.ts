@@ -27,6 +27,12 @@ function validAdminConfigData(): AdminConfigData {
       effective: false,
       source: 'config',
     },
+    hermes_autonomy_enabled: {
+      config: false,
+      env: null,
+      effective: false,
+      source: 'config',
+    },
     live_token: {
       config_configured: true,
       config_last4: 'ab12',

@@ -3,6 +3,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
+import { registerAnalysisQuestion } from '../lib/endpoints'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
 import HermesDashboard from './HermesDashboard'
 
@@ -34,5 +35,6 @@ describe('HermesDashboard workspace navigation', () => {
     await new Promise((resolve) => window.setTimeout(resolve, 450))
 
     expect(screen.getByRole('region', { name: 'analyze workspace' })).toBeInTheDocument()
+    expect(registerAnalysisQuestion).not.toHaveBeenCalled()
   }, 15_000)
 })

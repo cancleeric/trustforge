@@ -18,6 +18,7 @@
     <key>CACHE_BACKEND</key><string>sqlite</string>
     <key>COST_LEDGER_BACKEND</key><string>sqlite</string>
     <key>TRUSTFORGE_SQLITE_PATH</key><string>/Users/apple/HurricaneSoft/trustforge/out/trustforge.sqlite3</string>
+    <key>TRUSTFORGE_HERMES_AUTONOMY_ENABLED</key><string>1</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

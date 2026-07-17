@@ -12,6 +12,10 @@
 - Preserve Hermes `workspace` URL state when embedded analysis, comparison and
   history modules write their own query parameters, preventing top-bar
   navigation from opening a module that immediately closes itself.
+- Stop Analyze/Compare workspaces from auto-submitting on initial mount, removing
+  the visible jump caused by debounce URL rewrites immediately after opening.
+- Add a Hermes autonomous-work kill switch with production default-off behavior,
+  while keeping local launchd analysis flow explicitly enabled for development.
 
 ## v0.16.1 — 2026-07-17
 

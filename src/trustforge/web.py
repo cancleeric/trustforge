@@ -5219,6 +5219,10 @@ def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[
         return 400, _json_envelope_err("bad_request", "只接受 coin、mode、question")
     try:
         _check_status_rate_limit(client_ip, "analysis-write")
+        from .hermes import autonomy_enabled
+        enabled, source = autonomy_enabled()
+        if not enabled:
+            return 409, _json_envelope_err("automation_disabled", f"Hermes 自動工作已關閉（{source}）")
         from .analysis_flow import AnalysisFlow
         with AnalysisFlow() as flow:
             question_id, job_id = flow.register_question(
@@ -5240,6 +5244,10 @@ def _handle_api_analysis_comparison_question(headers, rfile, client_ip: str = ""
     assert payload is not None
     try:
         _check_status_rate_limit(client_ip, "analysis-write")
+        from .hermes import autonomy_enabled
+        enabled, source = autonomy_enabled()
+        if not enabled:
+            return 409, _json_envelope_err("automation_disabled", f"Hermes 自動工作已關閉（{source}）")
         coin = str(payload.get("coin", "")).upper()
         coin2 = str(payload.get("coin2", "")).upper()
         question = str(payload.get("question", "")).strip()
@@ -6173,6 +6181,8 @@ def _admin_config_view(config: "admin_config.AdminConfig") -> dict:
     cap_effective, cap_source = daily_cap_usd_resolved()
     bedrock_effective, bedrock_source = _bedrock_allowed_resolved()
     token_configured, token_source = _live_token_resolved()
+    from .hermes import autonomy_enabled
+    autonomy_effective, autonomy_source = autonomy_enabled()
     return {
         "daily_cap_usd": {
             "config": pub["daily_cap_usd"],
@@ -6207,6 +6217,12 @@ def _admin_config_view(config: "admin_config.AdminConfig") -> dict:
             # env 有值 → env；皆無 → none（token 值本身絕不回傳）
             "effective_configured": token_configured,
             "source": token_source,
+        },
+        "hermes_autonomy_enabled": {
+            "config": pub["hermes_autonomy_enabled"],
+            "env": os.getenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED"),
+            "effective": autonomy_effective,
+            "source": autonomy_source,
         },
         "version": pub["version"],
         "updated_at": pub["updated_at"],
@@ -6257,7 +6273,7 @@ def _read_admin_put_body(headers, rfile) -> tuple[dict | None, tuple[int, str] |
 
 
 _ADMIN_PUT_ALLOWED_FIELDS = frozenset(
-    {"daily_cap_usd", "bedrock_enabled", "live_token", "expected_version"}
+    {"daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token", "expected_version"}
 )
 
 
@@ -6276,7 +6292,7 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
         return 400, _json_envelope_err(
             "bad_request", "expected_version 必須是非負整數（item 不存在時傳 0）"
         )
-    if not any(k in payload for k in ("daily_cap_usd", "bedrock_enabled", "live_token")):
+    if not any(k in payload for k in ("daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token")):
         return 400, _json_envelope_err("bad_request", "至少要提供一個設定欄位")
 
     if "daily_cap_usd" in payload and payload["daily_cap_usd"] is not None:
@@ -6304,6 +6320,10 @@ def _validate_admin_put_payload(payload: dict) -> tuple[int, str] | None:
     if "bedrock_enabled" in payload and payload["bedrock_enabled"] is not None:
         if not isinstance(payload["bedrock_enabled"], bool):  # 嚴格 bool，"true" 字串不算
             return 400, _json_envelope_err("bad_request", "bedrock_enabled 必須是 bool")
+
+    if "hermes_autonomy_enabled" in payload and payload["hermes_autonomy_enabled"] is not None:
+        if not isinstance(payload["hermes_autonomy_enabled"], bool):
+            return 400, _json_envelope_err("bad_request", "hermes_autonomy_enabled 必須是 bool")
 
     if "live_token" in payload and payload["live_token"] is not None:
         token = payload["live_token"]
@@ -6372,7 +6392,7 @@ def _handle_api_admin_config_put(headers, rfile, client_ip: str) -> tuple[int, s
 
     changes = {
         k: payload[k]
-        for k in ("daily_cap_usd", "bedrock_enabled", "live_token")
+        for k in ("daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token")
         if k in payload
     }
     warnings: list[str] = []

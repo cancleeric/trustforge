@@ -7,6 +7,7 @@ boundary between continuous research and a reproducible formal analysis run.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 
 from .execlog import RUNTIME_BUDGET_SEC
 from .schema import COIN_POOL
@@ -63,12 +64,48 @@ HERMES_TOOLS = (
 )
 
 
+def _parse_bool(raw: str | None) -> bool | None:
+    if raw is None or raw.strip() == "":
+        return None
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def autonomy_enabled() -> tuple[bool, str]:
+    """Return whether scheduled Hermes autonomous work may run.
+
+    Production deployments use DynamoDB-backed services, so the unset default is
+    fail-closed there. Local development remains enabled unless explicitly
+    disabled.
+    """
+    try:
+        from .admin_config import get_config_cached
+
+        configured = get_config_cached().hermes_autonomy_enabled
+        if configured is not None:
+            return configured, "config"
+    except Exception:
+        if os.getenv("CACHE_BACKEND", "").strip().lower() == "dynamodb":
+            return False, "config_read_error"
+    env_value = _parse_bool(os.getenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED"))
+    if env_value is not None:
+        return env_value, "env"
+    if os.getenv("CACHE_BACKEND", "").strip().lower() == "dynamodb":
+        return False, "production_default"
+    return True, "local_default"
+
+
 def manifest() -> dict:
     """Return the stable, serializable Hermes agent declaration."""
     return {
         "agent": "hermes",
         "autonomy": {
             "mode": "bounded_scheduled_research",
+            "enabled": autonomy_enabled()[0],
             "coin_pool": list(COIN_POOL),
             "max_cycle_budget_sec": RUNTIME_BUDGET_SEC,
             "cross_run_memory": "research snapshots only; formal conclusions are run-isolated",

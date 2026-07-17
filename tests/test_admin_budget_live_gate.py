@@ -453,6 +453,7 @@ def test_admin_view_effective_source_env_layer(monkeypatch):
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "2.5")
     monkeypatch.setenv("BEDROCK_MODEL_ID", "test-bedrock-model")
     monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", ENV_TOKEN)
+    monkeypatch.setenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", "0")
     _mock_config(monkeypatch, AdminConfig())
     view = web._admin_config_view(AdminConfig())
     assert view["daily_cap_usd"]["effective"] == 2.5
@@ -461,6 +462,8 @@ def test_admin_view_effective_source_env_layer(monkeypatch):
     assert view["bedrock_enabled"]["source"] == "env"
     assert view["live_token"]["effective_configured"] is True
     assert view["live_token"]["source"] == "env"
+    assert view["hermes_autonomy_enabled"]["effective"] is False
+    assert view["hermes_autonomy_enabled"]["source"] == "env"
 
 
 def test_read_error_negative_cache_window(monkeypatch):

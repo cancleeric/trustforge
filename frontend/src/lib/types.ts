@@ -440,6 +440,12 @@ export interface AdminLiveTokenView {
 export interface AdminConfigData {
   daily_cap_usd: AdminCapView
   bedrock_enabled: AdminBedrockView
+  hermes_autonomy_enabled: {
+    config: boolean | null
+    env: string | null
+    effective: boolean
+    source: string
+  }
   live_token: AdminLiveTokenView
   /** CAS 樂觀鎖版本；item 不存在（`exists=false`）時為 null，PUT 傳 0。 */
   version: number | null
@@ -457,6 +463,7 @@ export interface AdminConfigData {
 export interface AdminConfigChanges {
   daily_cap_usd?: number | null
   bedrock_enabled?: boolean | null
+  hermes_autonomy_enabled?: boolean | null
   live_token?: string | null
 }
 

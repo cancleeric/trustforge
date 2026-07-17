@@ -118,6 +118,7 @@ def test_get_config_parses_good_item():
 
     assert config.daily_cap_usd == 1.0  # 字串 "1.0" → float roundtrip
     assert config.bedrock_enabled is True
+    assert config.hermes_autonomy_enabled is None
     assert config.live_token_hash == GOOD_ITEM["live_token_hash"]
     assert config.live_token_last4 == "xxxx"
     assert config.version == 7
@@ -220,6 +221,7 @@ def test_put_config_writes_cas_item_with_incremented_version():
     assert config_call.kwargs["ConditionExpression"] == Attr("version").eq(7)
     # 未變更欄位沿用當前值（部分更新不清掉其他欄）
     assert item["bedrock_enabled"] is True
+    assert "hermes_autonomy_enabled" not in item
     assert item["live_token_hash"] == GOOD_ITEM["live_token_hash"]
 
     assert result.config.daily_cap_usd == 2.5
@@ -246,6 +248,25 @@ def test_put_config_first_write_on_empty_store():
     assert "daily_cap_usd" not in item  # 未設定欄位不寫入
     assert result.config.version == 1
     assert config_call.kwargs["ConditionExpression"] == Attr("version").not_exists()
+
+
+def test_put_config_writes_hermes_autonomy_toggle():
+    store, mock_table = _store_with_mock_table()
+    mock_table.get_item.return_value = {"Item": dict(GOOD_ITEM)}
+
+    result = put_config(
+        {"hermes_autonomy_enabled": False}, expected_version=7, actor="admin@1.2.3.4", store=store
+    )
+
+    config_item = mock_table.put_item.call_args_list[0].kwargs["Item"]
+    audit_item = mock_table.put_item.call_args_list[1].kwargs["Item"]
+    assert config_item["hermes_autonomy_enabled"] is False
+    assert result.config.hermes_autonomy_enabled is False
+    assert {
+        "field": "hermes_autonomy_enabled",
+        "old": None,
+        "new": False,
+    } in json.loads(audit_item["changes_json"])
 
 
 def test_put_config_cas_conflict_raises_dedicated_error():
@@ -328,6 +349,7 @@ def test_put_config_non_cas_write_failure_raises_write_error():
         {"daily_cap_usd": -1.0},  # 負值：儲存層防禦縱深（vp-eng review LOW-8）
         {"daily_cap_usd": -0.01},
         {"bedrock_enabled": "true"},  # 嚴格 bool
+        {"hermes_autonomy_enabled": "true"},  # 嚴格 bool
         {"live_token": ""},  # 空 token（清除要用 None）
         {"live_token": 123},
     ],

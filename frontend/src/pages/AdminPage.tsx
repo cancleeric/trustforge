@@ -337,6 +337,7 @@ export default function AdminPage() {
   // ── 已解鎖畫面 ──────────────────────────────────────────────────────
   const cap = config.daily_cap_usd
   const bedrock = config.bedrock_enabled
+  const hermesAutonomy = config.hermes_autonomy_enabled
   const liveToken = config.live_token
   const capCheck = validateCapInput(capInput)
 
@@ -489,6 +490,43 @@ export default function AdminPage() {
             )}
           </div>
         )}
+      </SectionCard>
+
+      <SectionCard title="Hermes 自動工作開關">
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-tf-text2">
+          <span>
+            目前生效：
+            <strong className={hermesAutonomy.effective ? 'text-tf-warn' : 'text-tf-text'}>
+              {hermesAutonomy.effective ? '自動巡航中（可能產生成本）' : '已停止自動工作'}
+            </strong>
+          </span>
+          <SourceBadge source={hermesAutonomy.source} />
+        </div>
+        <p className="mb-3 text-xs text-tf-muted">
+          控制 Hermes cycle、continuous analysis worker 與分析題目佇列。production 未設定時預設關閉；本機未設定時預設開啟。
+          env 原始值：{hermesAutonomy.env !== null ? `「${hermesAutonomy.env}」` : '未設定'}。
+        </p>
+        <div className="flex gap-2">
+          {hermesAutonomy.effective ? (
+            <button
+              type="button"
+              disabled={saving || config.version_corrupt}
+              onClick={() => doPut({ hermes_autonomy_enabled: false })}
+              className={BTN_PRIMARY}
+            >
+              關閉自動工作
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={saving || config.version_corrupt}
+              onClick={() => doPut({ hermes_autonomy_enabled: true })}
+              className={BTN_PLAIN}
+            >
+              開啟自動工作…
+            </button>
+          )}
+        </div>
       </SectionCard>
 
       {/* §4-2 live token 管理 */}
