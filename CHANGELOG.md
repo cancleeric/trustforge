@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.14.17 — 2026-07-17
+## v0.16.0 — 2026-07-17
 
 - Version Document, Evidence and Report contracts with machine-readable JSON Schema and a CI compatibility gate.
 - Preserve every connector fetch in immutable `source_events` before updating the latest-value cache, with per-source freshness, volume, duplicate and p50/p95 observability.
@@ -9,9 +9,6 @@
 - Materialize completed analysis into an append-only, point-in-time correct Trust Feature Store for leakage-safe replay and future evaluation.
 - Define measured SQLite-to-Parquet/DuckDB-to-Iceberg migration thresholds without introducing premature dual-write state.
 - Suspend the hidden galaxy and its animation while a workspace module is open, slow redundant polling, synchronize workspace state from the URL, and keep coin/right-rail snapshot swaps atomic to eliminate flashing and stale labels.
-
-## v0.14.16 — 2026-07-17
-
 - Add a fixed-allowlist Blockchain.com Charts historical adapter for BTC daily
   transaction count, hash rate and difficulty, preserving provider gaps and
   provenance instead of synthesizing missing Evidence.
