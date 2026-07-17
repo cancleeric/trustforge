@@ -23,6 +23,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run tests
         run: pytest -q
+      - name: Verify versioned data contracts
+        run: python scripts/check_data_contracts.py
       - name: Reject untracked production stubs
         run: python scripts/scan_source_stubs.py --out out/ci/stub-scan.json
       - name: Upload stub scan

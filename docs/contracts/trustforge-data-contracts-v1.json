@@ -1,0 +1,227 @@
+{
+  "Document": {
+    "$id": "https://trustforge.local/contracts/document/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "kind": {
+        "type": "string"
+      },
+      "meta": {
+        "type": "object"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "source": {
+        "type": "string"
+      },
+      "text": {
+        "type": "string"
+      },
+      "ts": {
+        "type": "number"
+      },
+      "url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "id",
+      "kind",
+      "source",
+      "text",
+      "url",
+      "ts",
+      "meta"
+    ],
+    "title": "TrustForge Document",
+    "type": "object"
+  },
+  "Evidence": {
+    "$id": "https://trustforge.local/contracts/evidence/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "author": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "content_reference": {
+        "type": "string"
+      },
+      "data_lineage": {
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "fetched_at": {
+        "type": "string"
+      },
+      "flags": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "info_flags": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "kind": {
+        "type": "string"
+      },
+      "related_claim": {
+        "type": "string"
+      },
+      "reputation_mode": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "source": {
+        "type": "string"
+      },
+      "source_url": {
+        "type": "string"
+      },
+      "trust": {
+        "type": "number"
+      },
+      "trust_components": {
+        "type": "object"
+      }
+    },
+    "required": [
+      "schema_version",
+      "source",
+      "fetched_at",
+      "content_reference",
+      "related_claim",
+      "source_url",
+      "kind",
+      "trust",
+      "trust_components"
+    ],
+    "title": "TrustForge Evidence",
+    "type": "object"
+  },
+  "Report": {
+    "$id": "https://trustforge.local/contracts/report/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "calibrated_confidence": {
+        "type": "number"
+      },
+      "coin": {
+        "type": "string"
+      },
+      "confidence": {
+        "type": "number"
+      },
+      "contrarian": {
+        "type": "array"
+      },
+      "could_flip": {
+        "type": "array"
+      },
+      "cross_source_signal": {
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "decision_state": {
+        "enum": [
+          "abstain",
+          "low_confidence",
+          "normal"
+        ]
+      },
+      "direction": {
+        "type": "string"
+      },
+      "facts": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "generated_at": {
+        "type": "string"
+      },
+      "hypothesis_ledger": {
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "inferences": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "insights": {
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "key_basis": {
+        "items": {
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "limits": {
+        "type": "array"
+      },
+      "market_judgment": {
+        "type": "string"
+      },
+      "question": {
+        "type": "string"
+      },
+      "question_type": {
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      }
+    },
+    "required": [
+      "schema_version",
+      "coin",
+      "question_type",
+      "question",
+      "market_judgment",
+      "facts",
+      "inferences",
+      "key_basis",
+      "confidence",
+      "limits",
+      "could_flip",
+      "contrarian",
+      "generated_at",
+      "calibrated_confidence",
+      "decision_state"
+    ],
+    "title": "TrustForge Report",
+    "type": "object"
+  }
+}

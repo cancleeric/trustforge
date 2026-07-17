@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from ..data_contracts import DOCUMENT_SCHEMA_VERSION
+
 # 資料根目錄：預設為 repo 根（src 上一層）；Lambda 等打包環境用 TRUSTFORGE_HOME 覆寫
 # （Lambda 把 trustforge/ data/ demo/ 都放在 /var/task，設 TRUSTFORGE_HOME=/var/task）。
 _HOME = Path(os.getenv("TRUSTFORGE_HOME", Path(__file__).resolve().parents[3]))
@@ -42,6 +44,7 @@ class Document:
     kind: str            # SOURCE_KINDS 之一
     source: str          # 來源名稱，如 "coindesk" / "hoyabit-ticker"
     text: str            # 原文
+    schema_version: str = DOCUMENT_SCHEMA_VERSION
     url: str = ""
     ts: float = 0.0      # epoch 秒；用於時效衰減
     meta: dict = field(default_factory=dict)
