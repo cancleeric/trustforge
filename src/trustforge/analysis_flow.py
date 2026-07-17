@@ -39,6 +39,7 @@ MODES: dict[str, tuple[QuestionType, str]] = {
     "catalyst": (QuestionType.HYPOTHESIS, "檢驗{coin}近期催化因素是否足以改變現有判斷。"),
 }
 QUESTION_TYPES = {**{mode: item[0] for mode, item in MODES.items()}, "comparison": QuestionType.COMPARISON}
+QUEUE_CAPACITY = 500
 
 
 def _question_terms(value: str) -> set[str]:
@@ -61,9 +62,12 @@ def _db_path(path: str | Path | None = None) -> Path:
 
 
 class AnalysisFlow:
-    def __init__(self, path: str | Path | None = None, *, workers_per_stage: int = 1):
+    def __init__(self, path: str | Path | None = None, *, workers_per_stage: int = 1,
+                 readonly: bool = False):
         self.path = _db_path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.readonly = readonly
+        if not readonly:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.workers_per_stage = max(1, workers_per_stage)
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []
@@ -73,15 +77,25 @@ class AnalysisFlow:
         self._threads: list[threading.Thread] = []
         self._timers: list[threading.Timer] = []
         self._adopted: set[str] = set()
-        self._init_schema()
+        if not readonly:
+            self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(self.path, timeout=10, isolation_level=None, check_same_thread=False)
+            target: str | Path = self.path
+            kwargs: dict[str, Any] = {}
+            if self.readonly:
+                target = f"file:{self.path}?mode=ro"
+                kwargs["uri"] = True
+            conn = sqlite3.connect(
+                target, timeout=2 if self.readonly else 10,
+                isolation_level=None, check_same_thread=False, **kwargs,
+            )
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=10000")
+            if not self.readonly:
+                conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(f"PRAGMA busy_timeout={2000 if self.readonly else 10000}")
             self._local.conn = conn
             with self._connections_lock: self._connections.append(conn)
         return conn
@@ -256,11 +270,19 @@ class AnalysisFlow:
         if row is None or mode not in QUESTION_TYPES:
             raise ValueError("unknown snapshot or mode")
         qtype = QUESTION_TYPES[mode]
+        # Idempotency must be checked before capacity.  Otherwise a full queue
+        # prevents refresh_once() from revisiting the same immutable snapshot
+        # and filling matrix entries that did not fit during the previous pass.
+        if self._conn().execute(
+            "SELECT 1 FROM analysis_jobs WHERE snapshot_id=? AND coin=? AND mode=? AND question=?",
+            (snapshot_id, row["coin"], mode, question),
+        ).fetchone():
+            return None
         pending = self._conn().execute(
             "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')",
         ).fetchone()[0]
-        if pending >= 500:
-            raise RuntimeError("analysis queue capacity reached")
+        if pending >= QUEUE_CAPACITY:
+            return None
         job_id, now = f"flow-{uuid.uuid4().hex[:16]}", time.time()
         cur = self._conn().execute(
             "INSERT OR IGNORE INTO analysis_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -324,9 +346,70 @@ class AnalysisFlow:
         self.recover()
         for stage in STAGES:
             for index in range(self.workers_per_stage):
-                thread = threading.Thread(target=self._worker, args=(stage,), name=f"hermes-{stage}-{index}", daemon=True)
-                thread.start(); self._threads.append(thread)
+                self._spawn_worker(stage, index)
         self.adopt_due_retries()
+
+    def _spawn_worker(self, stage: str, index: int) -> None:
+        thread = threading.Thread(
+            target=self._worker, args=(stage,),
+            name=f"hermes-{stage}-{index}", daemon=True,
+        )
+        thread.start()
+        self._threads.append(thread)
+
+    def _restart_from_snapshot(self, job_ids: list[str]) -> int:
+        restarted = 0
+        for job_id in job_ids:
+            self._conn().execute("DELETE FROM analysis_retry_queue WHERE job_id=?", (job_id,))
+            self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (job_id,))
+            self._checkpoint(job_id, STAGES[0], "queued")
+            self._queues[STAGES[0]].put({"job_id": job_id})
+            self._adopted.add(job_id)
+            restarted += 1
+        return restarted
+
+    def reconcile_runtime(self) -> dict[str, int]:
+        """Repair dead workers and durable rows whose in-memory package vanished.
+
+        Intermediate Python objects are intentionally not persisted.  A lost
+        package therefore restarts from its immutable snapshot rather than
+        pretending the recorded stage can resume with missing state.
+        """
+        repaired = {"workers": 0, "jobs": 0}
+        for stage in STAGES:
+            prefix = f"hermes-{stage}-"
+            live = [thread for thread in self._threads if thread.name.startswith(prefix) and thread.is_alive()]
+            stage_was_unstaffed = not live
+            if len(live) < self.workers_per_stage:
+                # A running row owned by a dead stage worker has no recoverable
+                # in-memory package. Only reset it when no worker for that stage
+                # survived, avoiding duplicate work with multi-worker stages.
+                if not live:
+                    lost = self._conn().execute(
+                        "SELECT job_id FROM analysis_stage_runs WHERE stage=? AND state='running'",
+                        (stage,),
+                    ).fetchall()
+                    repaired["jobs"] += self._restart_from_snapshot([row["job_id"] for row in lost])
+                for index in range(len(live), self.workers_per_stage):
+                    self._spawn_worker(stage, index)
+                    repaired["workers"] += 1
+
+            # A durable queued row with an empty process queue is orphaned.  For
+            # non-first stages its package cannot be reconstructed in place.
+            if stage_was_unstaffed and stage != STAGES[0] and self._queues[stage].empty():
+                running = self._conn().execute(
+                    "SELECT count(*) FROM analysis_stage_runs WHERE stage=? AND state='running'",
+                    (stage,),
+                ).fetchone()[0]
+                if not running:
+                    orphaned = self._conn().execute(
+                        "SELECT job_id FROM analysis_stage_runs WHERE stage=? AND state='queued'",
+                        (stage,),
+                    ).fetchall()
+                    repaired["jobs"] += self._restart_from_snapshot([row["job_id"] for row in orphaned])
+        if repaired["workers"] or repaired["jobs"]:
+            logging.warning("Hermes runtime reconciled: %s", repaired)
+        return repaired
 
     def recover(self) -> None:
         # Runtime payloads are deliberately not pickled. Restart from immutable snapshot.
@@ -521,20 +604,40 @@ class AnalysisFlow:
             stages.append({"id": stage, "queued": queued, "current": dict(running) if running else None,
                            "next_retry_at": retry})
         dead = self._conn().execute("SELECT count(*) FROM analysis_dead_letters").fetchone()[0]
+        pending = self._conn().execute(
+            "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')",
+        ).fetchone()[0]
         return {"agent": "hermes", "state": "continuous", "stages": stages,
+                "queue": {"pending": pending, "capacity": QUEUE_CAPACITY,
+                          "backpressure": pending >= QUEUE_CAPACITY},
                 "dead_letter_count": dead, "updated_at": iso_utc(time.time())}
 
     def journey(self, *, limit: int = 50) -> dict[str, Any]:
         jobs = [dict(row) for row in self._conn().execute(
             "SELECT * FROM analysis_jobs ORDER BY updated_at DESC LIMIT ?", (max(1, min(limit, 200)),),
         ).fetchall()]
+        # Avoid the former 2N+2 query pattern (202 queries for the dashboard's
+        # limit=100). Under polling, several callers could hold hundreds of
+        # SQLite statements/connections long enough to trigger a retry storm.
+        # Fetch both child collections in two bounded set queries instead.
+        stages_by_job: dict[str, list[dict[str, Any]]] = {job["job_id"]: [] for job in jobs}
+        attempts_by_job: dict[str, list[dict[str, Any]]] = {job["job_id"]: [] for job in jobs}
+        if jobs:
+            ids = list(stages_by_job)
+            placeholders = ",".join("?" for _ in ids)
+            for row in self._conn().execute(
+                f"SELECT * FROM analysis_stage_runs WHERE job_id IN ({placeholders}) "
+                "ORDER BY job_id,queue_entered_at", ids,
+            ).fetchall():
+                stages_by_job[row["job_id"]].append(dict(row))
+            for row in self._conn().execute(
+                f"SELECT * FROM analysis_stage_attempts WHERE job_id IN ({placeholders}) "
+                "ORDER BY job_id,started_at", ids,
+            ).fetchall():
+                attempts_by_job[row["job_id"]].append(dict(row))
         for job in jobs:
-            job["stages"] = [dict(row) for row in self._conn().execute(
-                "SELECT * FROM analysis_stage_runs WHERE job_id=? ORDER BY queue_entered_at", (job["job_id"],),
-            ).fetchall()]
-            job["attempts"] = [dict(row) for row in self._conn().execute(
-                "SELECT * FROM analysis_stage_attempts WHERE job_id=? ORDER BY started_at", (job["job_id"],),
-            ).fetchall()]
+            job["stages"] = stages_by_job[job["job_id"]]
+            job["attempts"] = attempts_by_job[job["job_id"]]
         dead = [dict(row) for row in self._conn().execute(
             "SELECT * FROM analysis_dead_letters ORDER BY failed_at DESC LIMIT ?", (max(1, min(limit, 200)),),
         ).fetchall()]
@@ -627,7 +730,12 @@ class AnalysisFlow:
         return json.loads(row[0]) if row else None
 
     def refresh_once(self) -> list[str]:
-        """Snapshot every coin; unchanged document hashes are idempotent, changed ones enqueue all active questions."""
+        """Snapshot every coin and incrementally fill its idempotent analysis matrix.
+
+        Revisiting an unchanged snapshot is intentional: when the durable queue is
+        full, later refreshes enqueue the matrix entries that previously could not
+        fit.  Existing jobs are protected by the database uniqueness constraint.
+        """
         jobs: list[str] = []
         for coin in COIN_POOL:
             try:
@@ -635,11 +743,7 @@ class AnalysisFlow:
             except Exception:
                 logging.exception("Hermes snapshot refresh failed for %s; other coins continue", coin)
                 continue
-            previous = self._conn().execute(
-                "SELECT snapshot_id FROM analysis_jobs WHERE coin=? ORDER BY created_at DESC LIMIT 1", (coin,),
-            ).fetchone()
-            if previous is None or previous[0] != snapshot_id:
-                jobs.extend(self.enqueue_matrix(snapshot_id))
+            jobs.extend(self.enqueue_matrix(snapshot_id))
         return jobs
 
     def join(self) -> None:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import time
+import sqlite3
+
+import plistlib
+import pytest
 
 from trustforge.analysis_flow import AnalysisFlow, MODES, STAGES
 from trustforge.ingestion.base import Document
@@ -36,6 +40,23 @@ def test_same_snapshot_matrix_is_idempotent(tmp_path, monkeypatch):
     snapshot = flow.create_snapshot("BTC")
     assert len(flow.enqueue_matrix(snapshot)) == len(MODES)
     assert flow.enqueue_matrix(snapshot) == []
+
+
+def test_full_queue_is_normal_backpressure_and_refresh_fills_missing_matrix(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    monkeypatch.setattr("trustforge.analysis_flow.QUEUE_CAPACITY", 2)
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+
+    assert len(flow.enqueue_matrix(snapshot)) == 2
+    assert flow.status()["queue"] == {"pending": 2, "capacity": 2, "backpressure": True}
+
+    # Free one durable slot. The next normal refresh revisits the same snapshot,
+    # skips existing entries, and fills exactly one previously omitted mode.
+    first = flow._conn().execute("SELECT job_id FROM analysis_jobs ORDER BY created_at LIMIT 1").fetchone()[0]
+    flow._conn().execute("UPDATE analysis_jobs SET state='completed' WHERE job_id=?", (first,))
+    assert len(flow.refresh_once()) == 1
+    assert flow._conn().execute("SELECT count(*) FROM analysis_jobs").fetchone()[0] == 3
 
 
 def test_registered_question_is_adopted_and_reanalyzed_on_new_snapshot(tmp_path, monkeypatch):
@@ -134,3 +155,54 @@ def test_question_rag_prefers_same_coin_and_mode(tmp_path):
     assert {match["source_tier"] for match in matches} == {"historical_non_evidentiary"}
     assert matches[0]["coin"] == "BTC"
     assert matches[0]["mode"] == "risk"
+
+
+def test_runtime_reconciles_orphaned_intermediate_stage_from_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    job_id = flow.enqueue_job(snapshot, "risk", "BTC 來源是否分歧")
+    assert job_id
+    # Simulate a process losing its in-memory package after durably checkpointing
+    # an intermediate stage. The source queue from enqueue_job is deliberately
+    # drained so reconciliation has one unambiguous package to rebuild.
+    flow._queues["source_ingestion"].get_nowait()
+    flow._queues["source_ingestion"].task_done()
+    flow._checkpoint(job_id, "claim_extraction", "queued")
+    monkeypatch.setattr(flow, "_spawn_worker", lambda *_args: None)
+
+    repaired = flow.reconcile_runtime()
+
+    assert repaired["jobs"] == 1
+    job = flow._job(job_id)
+    assert job["current_stage"] == "source_ingestion"
+    assert flow._queues["source_ingestion"].qsize() == 1
+    assert flow._conn().execute(
+        "SELECT count(*) FROM analysis_stage_runs WHERE job_id=? AND stage='claim_extraction'",
+        (job_id,),
+    ).fetchone()[0] == 0
+    flow.stop()
+
+
+def test_local_daemon_runs_overlapping_workers_per_stage():
+    with open("deploy/launchd/com.hurricanesoft.trustforge-analysis-flow.plist", "rb") as handle:
+        arguments = plistlib.load(handle)["ProgramArguments"]
+
+    index = arguments.index("--workers-per-stage")
+    assert int(arguments[index + 1]) >= 2
+
+
+def test_readonly_projection_skips_schema_writes_and_reads_existing_state(tmp_path):
+    path = tmp_path / "flow.sqlite3"
+    writer = AnalysisFlow(path)
+    writer.register_question("BTC", "risk", "BTC 來源是否分歧", enqueue=False)
+    writer.close()
+
+    with AnalysisFlow(path, readonly=True) as reader:
+        context = reader.question_context("BTC", "risk", "BTC 來源是否分歧")
+        assert context["matches"][0]["coin"] == "BTC"
+
+    missing = tmp_path / "missing.sqlite3"
+    with pytest.raises(sqlite3.OperationalError):
+        AnalysisFlow(missing, readonly=True).status()
+    assert not missing.exists()

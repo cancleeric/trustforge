@@ -1,7 +1,7 @@
 """Capabilities and parsers for point-in-time historical source backfill."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 import re
 import unicodedata
@@ -22,6 +22,69 @@ HISTORICAL_SOURCE_CAPABILITIES = (
 
 def historical_source_capabilities() -> list[dict[str, str]]:
     return [dict(item) for item in HISTORICAL_SOURCE_CAPABILITIES]
+
+
+def historical_coverage_report(backend, start: date, end: date) -> dict[str, Any]:
+    """Measure actual daily archives; capability labels never count as data."""
+    if end < start:
+        raise ValueError("end must be on or after start")
+    from .replay import load_source_snapshot
+
+    capabilities = {item["source"]: dict(item) for item in HISTORICAL_SOURCE_CAPABILITIES}
+    total_days = (end - start).days + 1
+    by_coin: dict[str, dict[str, Any]] = {}
+    observed_sources: set[str] = set()
+    for coin in COIN_POOL:
+        snapshot_days = 0
+        missing_dates: list[str] = []
+        coin_observed_sources: set[str] = set()
+        source_days: dict[str, int] = {}
+        document_count: dict[str, int] = {}
+        day = start
+        while day <= end:
+            snapshot = load_source_snapshot(
+                backend, coin, day.isoformat(), archive_type="backfilled_archive",
+            )
+            if snapshot is not None:
+                snapshot_days += 1
+                for source in snapshot.get("sources", []):
+                    if not isinstance(source, dict) or not source.get("source"):
+                        continue
+                    source_id = str(source["source"])
+                    observed_sources.add(source_id)
+                    coin_observed_sources.add(source_id)
+                    source_days[source_id] = source_days.get(source_id, 0) + 1
+                    documents = source.get("documents")
+                    if isinstance(documents, list):
+                        document_count[source_id] = document_count.get(source_id, 0) + len(documents)
+            else:
+                missing_dates.append(day.isoformat())
+            day += timedelta(days=1)
+        by_coin[coin] = {
+            "expected_days": total_days,
+            "snapshot_days": snapshot_days,
+            "snapshot_coverage": round(snapshot_days / total_days, 6),
+            "missing_dates": missing_dates,
+            "sources": {
+                source_id: {
+                    "days": source_days.get(source_id, 0),
+                    "coverage": round(source_days.get(source_id, 0) / total_days, 6),
+                    "documents": document_count.get(source_id, 0),
+                }
+                for source_id in sorted(set(capabilities) | coin_observed_sources)
+            },
+        }
+    return {
+        "from_date": start.isoformat(), "to_date": end.isoformat(),
+        "expected_days": total_days, "coins": by_coin,
+        "capabilities": [
+            {**capabilities.get(source_id, {
+                "source": source_id, "kind": "unknown", "strategy": "unregistered",
+                "status": "unregistered", "coverage": "measured_archive_only", "terms": "unknown",
+            }), "observed": source_id in observed_sources}
+            for source_id in sorted(set(capabilities) | observed_sources)
+        ],
+    }
 
 
 _SEC_KEYWORDS = {"BTC": ("bitcoin",), "ETH": ("ethereum",)}

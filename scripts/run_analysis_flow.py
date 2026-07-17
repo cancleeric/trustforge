@@ -23,6 +23,7 @@ def main() -> int:
         signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
         while not stopping:
             try:
+                flow.reconcile_runtime()
                 flow.adopt_pending()
                 flow.adopt_due_retries()
                 flow.refresh_once()

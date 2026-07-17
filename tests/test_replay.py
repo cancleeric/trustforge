@@ -103,3 +103,38 @@ def test_backfill_merges_multiple_providers_without_overwriting_same_day(tmp_pat
     assert snapshot is not None
     assert {source["source"] for source in snapshot["sources"]} == {"sec-gov", "alternative-me-fng"}
     assert {provider["provider"] for provider in snapshot["provider_manifest"]["providers"]} == {"SEC", "Alternative.me"}
+
+
+def test_backfill_is_isolated_from_same_day_live_snapshot(tmp_path):
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2026, 7, 17, 23, 59, 59, tzinfo=timezone.utc).timestamp()
+    cache_set(
+        backend, cache_key("hoyabit-ticker", "BTC"),
+        [{"id": "live", "text": "live only"}], fetched_at=boundary - 10,
+    )
+    assert capture_source_snapshot(
+        backend, "BTC", ["hoyabit-ticker"], captured_at=boundary - 5,
+    ).ok
+    archive = {
+        "id": "archive", "text": "historical", "provider": "Alternative.me",
+        "license": "attribution", "published_at": "2026-07-17T00:00:00Z",
+        "retrieved_at": "2026-07-18T00:00:00Z",
+    }
+    archive["content_sha256"] = hashlib.sha256(
+        json.dumps(archive, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert store_backfilled_source_snapshot(
+        backend, "BTC", "2026-07-17",
+        [{"source": "alternative-me-fng", "documents": [archive]}],
+        snapshot_epoch=boundary,
+        provider_manifest={"providers": [{"provider": "Alternative.me"}]},
+    ).ok
+
+    live = load_source_snapshot(backend, "BTC", "2026-07-17")
+    backfill = load_source_snapshot(
+        backend, "BTC", "2026-07-17", archive_type="backfilled_archive",
+    )
+    assert live is not None and live.get("archive_type") is None
+    assert live["sources"][0]["source"] == "hoyabit-ticker"
+    assert backfill is not None and backfill["archive_type"] == "backfilled_archive"
+    assert backfill["sources"][0]["source"] == "alternative-me-fng"

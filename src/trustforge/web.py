@@ -71,6 +71,87 @@ except Exception:
     VERSION = "dev"
 
 PORT = int(os.getenv("PORT", "8080"))
+
+
+# The stdlib ThreadingHTTPServer has no worker bound: a slow SQLite read plus
+# browser polling can otherwise create one thread per retry until the process
+# exhausts memory.  The limit is installed on the server instance in `main()`
+# (instead of replacing ThreadingHTTPServer) so existing embedders/tests that
+# provide a compatible server factory keep working.
+_WEB_MAX_ACTIVE_REQUESTS = max(
+    4, min(128, int(os.getenv("TRUSTFORGE_WEB_MAX_ACTIVE_REQUESTS", "32")))
+)
+
+
+def _install_request_limit(server, limit: int = _WEB_MAX_ACTIVE_REQUESTS) -> None:
+    """Bound active request threads and fail fast with 503 under overload."""
+    if not hasattr(server, "process_request") or not hasattr(server, "process_request_thread"):
+        return
+    slots = threading.BoundedSemaphore(limit)
+    original_process = server.process_request
+    original_thread = server.process_request_thread
+
+    def process_request(request, client_address):
+        if not slots.acquire(blocking=False):
+            body = b'{"ok":false,"error":{"code":"server_busy","message":"Hermes API is busy; retry shortly"}}'
+            response = (
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json; charset=utf-8\r\n"
+                b"Cache-Control: no-store\r\n"
+                b"Retry-After: 2\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii")
+                + body
+            )
+            try:
+                request.sendall(response)
+            except OSError:
+                pass
+            finally:
+                server.shutdown_request(request)
+            return
+        try:
+            original_process(request, client_address)
+        except Exception:
+            slots.release()
+            raise
+
+    def process_request_thread(request, client_address):
+        try:
+            return original_thread(request, client_address)
+        finally:
+            slots.release()
+
+    server.process_request = process_request
+    server.process_request_thread = process_request_thread
+
+
+def _cors_allowlist() -> frozenset[str]:
+    """Return the explicit API Origin allowlist; empty keeps same-origin only.
+
+    This is intentionally runtime-resolved so launchd/container configuration can
+    change without widening the production default at import time. Wildcards and
+    non-HTTP(S) origins are ignored rather than reflected.
+    """
+    values = os.getenv("TRUSTFORGE_CORS_ALLOW_ORIGINS", "").split(",")
+    return frozenset(
+        value.strip().rstrip("/") for value in values
+        if value.strip().startswith(("http://", "https://")) and "*" not in value
+    )
+
+
+def _cors_headers(path: str, headers: Any) -> dict[str, str]:
+    if not (path + "/").startswith("/api/"):
+        return {}
+    origin = str(headers.get("Origin", "")).strip().rstrip("/")
+    if not origin or origin not in _cors_allowlist():
+        return {}
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+        "Access-Control-Allow-Headers": "Accept, Content-Type, X-Admin-Token, X-Live-Token",
+        "Access-Control-Max-Age": "600",
+        "Vary": "Origin",
+    }
 # codex HIGH 追加（unpriced model 破壞 cap）：啟動期就檢查 BEDROCK_MODEL_ID
 # 是否已在計價表登記，未登記只記警告 log（不 crash）——實際 fail-closed
 # 降級離線由 pipeline.run() 每次請求各自判斷，這裡只是讓維運及早在啟動
@@ -1896,6 +1977,42 @@ def _example_analyze_href() -> str:
     return html.escape(f"/analyze?{urlencode(params)}")
 
 
+_web_cache_backend_lock = threading.Lock()
+_web_cache_backend = None
+_web_cache_backend_key: tuple[str, str] | None = None
+
+
+def _shared_web_cache_backend():
+    """Reuse one thread-safe local backend instead of one SQLite connection/request.
+
+    `SQLiteCacheBackend` already serializes access with an RLock.  Reusing it
+    avoids hundreds of connection statement caches and repeated WAL setup when
+    the dashboard polls several endpoints concurrently.  Non-SQLite test/fake
+    backends remain uncached to preserve their existing lifecycle semantics.
+    """
+    from .ingestion.cache import SQLiteCacheBackend, get_cache_backend
+
+    global _web_cache_backend, _web_cache_backend_key
+    key = (
+        os.getenv("CACHE_BACKEND", "dynamodb").strip().lower(),
+        os.getenv("TRUSTFORGE_SQLITE_PATH", ""),
+    )
+    with _web_cache_backend_lock:
+        if _web_cache_backend is not None and _web_cache_backend_key == key:
+            return _web_cache_backend
+        candidate = get_cache_backend()
+        if isinstance(candidate, SQLiteCacheBackend):
+            old = _web_cache_backend
+            _web_cache_backend = candidate
+            _web_cache_backend_key = key
+            if old is not None and old is not candidate:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+        return candidate
+
+
 def _home_overview_backend():
     """首頁總覽讀路徑專用 cache backend：短 timeout（見
     `_HOME_OVERVIEW_TIMEOUT_SECONDS`），跟 `get_cache_backend()`（給排程器／
@@ -1907,11 +2024,11 @@ def _home_overview_backend():
     同一套判斷邏輯，只是 dynamodb 分支多帶三個 timeout 參數）：`json` 分支
     是本機檔案 I/O，本來就不會 hang，不需要 timeout。
     """
-    from .ingestion.cache import DynamoDBCache, get_cache_backend
+    from .ingestion.cache import DynamoDBCache
 
     backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
     if backend_name != "dynamodb":
-        return get_cache_backend()
+        return _shared_web_cache_backend()
     return DynamoDBCache(
         connect_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
         read_timeout=_HOME_OVERVIEW_TIMEOUT_SECONDS,
@@ -1939,11 +2056,11 @@ def _status_cache_backend():
     同一套判斷邏輯，只是 dynamodb 分支多帶三個 timeout 參數）：`json` 分支
     是本機檔案 I/O，本來就不會 hang，不需要 timeout。
     """
-    from .ingestion.cache import DynamoDBCache, get_cache_backend
+    from .ingestion.cache import DynamoDBCache
 
     backend_name = os.getenv("CACHE_BACKEND", "dynamodb").strip().lower()
     if backend_name != "dynamodb":
-        return get_cache_backend()
+        return _shared_web_cache_backend()
     return DynamoDBCache(
         connect_timeout=_STATUS_CACHE_CONNECT_TIMEOUT_SECONDS,
         read_timeout=_STATUS_CACHE_READ_TIMEOUT_SECONDS,
@@ -4978,7 +5095,7 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
     """Read-only Hermes worker/queue telemetry. UI polling never starts analysis."""
     try:
         from .analysis_flow import AnalysisFlow
-        with AnalysisFlow() as flow:
+        with AnalysisFlow(readonly=True) as flow:
             return 200, _json_envelope_ok(flow.status())
     except Exception:
         logging.exception("TrustForge /api/analysis-flow error")
@@ -5066,7 +5183,7 @@ def _handle_api_analysis_snapshot(qs: dict) -> tuple[int, str]:
         if mode not in MODES:
             return 400, _json_envelope_err("invalid_mode", "不支援的分析模式")
         question = qs.get("q", [""])[0].strip() or None
-        with AnalysisFlow() as flow:
+        with AnalysisFlow(readonly=True) as flow:
             payload = flow.latest(coin, mode, question)
         if payload is None:
             return 404, _json_envelope_err("snapshot_pending", "此分析快照尚未發布")
@@ -5083,7 +5200,7 @@ def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
     question = qs.get("q", [""])[0].strip()
     try:
         from .analysis_flow import AnalysisFlow
-        with AnalysisFlow() as flow:
+        with AnalysisFlow(readonly=True) as flow:
             return 200, _json_envelope_ok(flow.question_context(coin, mode, question))
     except ValueError as exc:
         return 400, _json_envelope_err("bad_request", str(exc))
@@ -5146,7 +5263,7 @@ def _handle_api_comparison_snapshot(qs: dict) -> tuple[int, str]:
     question = qs.get("q", [""])[0].strip()
     try:
         from .analysis_flow import AnalysisFlow
-        with AnalysisFlow() as flow:
+        with AnalysisFlow(readonly=True) as flow:
             a, b = flow.latest(coin, "comparison", question), flow.latest(coin2, "comparison", question)
         if not a or not b: return 404, _json_envelope_err("snapshot_pending", "比較快照尚未發布")
         data = {
@@ -5169,7 +5286,7 @@ def _handle_api_analysis_journey(qs: dict) -> tuple[int, str]:
         from .analysis_flow import AnalysisFlow
         raw = qs.get("limit", ["50"])[0]
         limit = int(raw) if raw.isdigit() else 50
-        with AnalysisFlow() as flow:
+        with AnalysisFlow(readonly=True) as flow:
             return 200, _json_envelope_ok(flow.journey(limit=limit))
     except Exception:
         logging.exception("TrustForge analysis journey error")
@@ -6366,10 +6483,13 @@ class Handler(BaseHTTPRequestHandler):
         _send_path = urlparse(getattr(self, "path", "") or "").path
         if (_send_path + "/").startswith("/api/admin/"):
             self.send_header("Cache-Control", "no-store")
+        cors_headers = _cors_headers(_send_path, getattr(self, "headers", {}))
+        for name, val in cors_headers.items():
+            self.send_header(name, val)
         for name, val in (extra_headers or {}).items():
             self.send_header(name, val)
-        self.end_headers()
         try:
+            self.end_headers()
             self.wfile.write(b)
         except (BrokenPipeError, ConnectionResetError):
             # The browser can cancel an in-flight analysis when the user
@@ -6380,6 +6500,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):  # 靜音預設存取日誌
         pass
+
+    def do_OPTIONS(self):
+        path = urlparse(getattr(self, "path", "") or "").path
+        cors_headers = _cors_headers(path, getattr(self, "headers", {}))
+        if not cors_headers:
+            return self._send(
+                403,
+                _json_envelope_err("cors_origin_denied", "此 Origin 未獲本 API 授權"),
+                "application/json; charset=utf-8",
+            )
+        return self._send(204, "", "text/plain; charset=utf-8")
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -6909,6 +7040,7 @@ def main():
             "TRUSTFORGE_ALLOW_INSECURE_LIVE_TOKEN=1。"
         )
     srv = ThreadingHTTPServer((host, PORT), Handler)
+    _install_request_limit(srv)
     # PR-3：啟動 banner 只印 env 層能力（bedrock 實際開閉是動態閘，還要
     # AND config `bedrock_enabled`）——刻意**不**在啟動路徑呼叫
     # `_bedrock_allowed()`：那會觸發一次 DynamoDB 讀，無憑證/斷網環境會讓

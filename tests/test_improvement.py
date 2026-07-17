@@ -39,3 +39,29 @@ def test_analysis_history_can_propose_outer_framework_experiments_but_never_appl
     proposals = {item["id"]: item for item in report["proposals"]}
     assert {"analysis-flow-reliability", "question-retrieval-diversification"} <= proposals.keys()
     assert all(item["approval_required"] and not item["automatic_apply"] for item in proposals.values())
+
+
+def test_actual_historical_gaps_feed_outer_proposals_without_synthesizing_evidence():
+    report = diagnose(historical_coverage={
+        "from_date": "2021-07-17", "to_date": "2026-07-17",
+        "capabilities": [
+            {"source": "alternative-me-fng", "status": "ready"},
+            {"source": "sec-gov", "status": "ready_partial"},
+            {"source": "coingecko-market-range", "status": "credential_gated"},
+        ],
+        "coins": {
+            "BTC": {
+                "missing_dates": ["2024-10-26"],
+                "sources": {
+                    "alternative-me-fng": {"days": 1826, "coverage": 0.999453},
+                    "sec-gov": {"days": 0, "coverage": 0},
+                },
+            },
+        },
+    }, generated_at="2026-07-17T00:00:00Z")
+
+    proposal = next(item for item in report["proposals"] if item["id"] == "historical-archive-coverage")
+    assert proposal["automatic_apply"] is False
+    assert proposal["evidence"]["missing_snapshot_days"] == {"BTC": ["2024-10-26"]}
+    assert proposal["evidence"]["source_gaps"]["sec-gov"]["coins"]["BTC"]["coverage"] == 0
+    assert proposal["evidence"]["gated_sources"] == ["coingecko-market-range"]
