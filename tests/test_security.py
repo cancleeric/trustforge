@@ -237,7 +237,25 @@ def test_correct_token_but_no_model_id_stays_offline(monkeypatch):
     report, _, _ = web._do_analyze(
         _qs(live="1", token="sek", sample="1"), client_ip="9.9.9.9"
     )
-    assert any("[OFFLINE]" in i for i in report.inferences)
+    assert all("[OFFLINE]" not in i and "would answer" not in i for i in report.inferences)
+    assert any("未執行線上模型生成" in i for i in report.inferences)
+    assert any("離線示範樣本資料" in limit for limit in report.limits)
+
+
+def test_public_analysis_job_hides_internal_exception_details():
+    internal = {
+        "job_id": "job-1",
+        "state": "failed",
+        "error": "AccessDeniedException: arn:aws:dynamodb:secret-table /Users/private/app.py",
+    }
+
+    public = web._public_analysis_job(internal)
+
+    assert internal["error"].startswith("AccessDeniedException")
+    assert public["error"] == "分析工作執行失敗，請稍後重試。"
+    assert public["error_code"] == "analysis_job_failed"
+    assert "AccessDenied" not in str(public)
+    assert "/Users/" not in str(public)
 
 
 def test_sample_requests_never_rate_limited():

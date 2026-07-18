@@ -135,8 +135,7 @@ def daily_cap_usd_resolved() -> tuple[float, str]:
     except Exception:
         _log.warning(
             "[budget_guard] admin config 讀取失敗，daily cap 落 env 層"
-            "（管理面故障不影響分析路徑；env/DEFAULT 為可信 fallback）",
-            exc_info=True,
+            "（管理面故障不影響分析路徑；env/DEFAULT 為可信 fallback）"
         )
     else:
         if cfg.daily_cap_usd is not None:

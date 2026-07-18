@@ -481,6 +481,10 @@ describe('apiFetch — 真實 live API 回應（curl 存下的 fixture，驗 gua
   it('live /api/analyze（sample=1）回應 → 正常通過，不是 parse_error', async () => {
     const envelope = loadFixtureEnvelope('live-analyze.json')
     expect(envelope.ok).toBe(true)
+    const serialized = JSON.stringify(envelope)
+    expect(serialized).not.toContain('[OFFLINE]')
+    expect(serialized).not.toContain('would answer')
+    expect(serialized).toContain('未執行線上模型生成')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, envelope)))
     const result = await apiFetch<AnalyzeData>('/api/analyze', undefined, isAnalyzeData)
     expect(result.ok).toBe(true)
