@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.16.4 — 2026-07-18
+
+- fix: 發布分析快照查詢修正
+
 ## v0.16.3 — 2026-07-18
 
 - fix: 修復首頁模組面板閃現消失 bug（requestedModule effect 不再意外關閉面板）
