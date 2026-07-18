@@ -218,7 +218,9 @@ export default function StatusPage() {
             <h3 className="mb-2 text-sm font-semibold text-tf-text">連接器資料鮮度</h3>
             {status.freshness.fresh === 0 && status.freshness.stale === 0 && status.freshness.missing > 0 && (
               <div className="mb-3 border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
-                API 與快取服務可連線，但目前掛載的資料庫沒有來源快照。本機開發預設使用獨立 JSON cache；需以 AWS DynamoDB 模式啟動，才會讀到雲端每 15 分鐘累積的資料。
+                <p className="font-semibold">服務正常，但尚未收到來源快照</p>
+                <p className="mt-1 text-tf-text2">這是「尚無資料」，不是來源故障。可先回首頁執行一次分析，或等待排程累積資料。</p>
+                <a href="/" className="mt-2 inline-flex rounded border border-tf-warn px-2 py-1 font-semibold text-tf-warn no-underline">回首頁選擇分析任務</a>
               </div>
             )}
             <div className="mb-3 grid grid-cols-3 gap-3">

@@ -124,7 +124,9 @@ export default function HistoryPage() {
       )}
       {data && data.history.length === 0 && (
         <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">
-          {coin} 在目前掛載的資料庫中沒有歷史快照。本機開發預設使用獨立 JSON cache；切換至 AWS DynamoDB 資料源後，才會顯示雲端排程累積的紀錄。
+          <p className="font-semibold text-tf-text">{coin} 尚未累積歷史快照</p>
+          <p className="mt-2">這不代表信任分數為零；完成分析並累積快照後，這裡才會顯示變化趨勢。</p>
+          <a href="/" className="mt-4 inline-flex rounded border border-tf-accent px-3 py-2 font-semibold text-tf-link no-underline hover:bg-[color-mix(in_srgb,var(--color-tf-accent)_8%,transparent)]">回首頁選擇分析任務</a>
         </div>
       )}
       {data && data.history.length > 0 && data.history.length < 3 && (

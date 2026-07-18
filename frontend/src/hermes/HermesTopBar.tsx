@@ -30,8 +30,11 @@ export default function HermesTopBar({
 }: HermesTopBarProps) {
   const { locale, setLocale, t } = useHermesI18n()
   const navItems = [
-    { id: 'analyze' as const, label: t('analyze') }, { id: 'compare' as const, label: t('compare') },
-    { id: 'history' as const, label: t('history') }, { id: 'status' as const, label: t('sources') }, { id: 'costs' as const, label: t('costs') },
+    { id: 'analyze' as const, label: t('analyze'), description: locale === 'zh-TW' ? '找出風險、原因與可追溯證據' : 'Find risks, reasons, and traceable evidence' },
+    { id: 'compare' as const, label: t('compare'), description: locale === 'zh-TW' ? '並排比較兩個資產的可信狀態' : 'Compare two assets side by side' },
+    { id: 'history' as const, label: t('history'), description: locale === 'zh-TW' ? '查看信任與資料完整度如何變化' : 'Review trust and completeness over time' },
+    { id: 'status' as const, label: t('sources'), description: locale === 'zh-TW' ? '確認資料來源是否正常更新' : 'Check whether sources are updating' },
+    { id: 'costs' as const, label: t('costs'), description: locale === 'zh-TW' ? '查看分析使用量與模型費用' : 'Review analysis usage and model cost' },
   ]
   return (
     <div
@@ -65,8 +68,11 @@ export default function HermesTopBar({
           <button
             type="button"
             key={item.id}
+            className="hermes-nav-item"
             onClick={() => onModuleSelect?.(item.id)}
             aria-pressed={activeModule === item.id}
+            aria-description={item.description}
+            data-description={item.description}
             style={{
               color: activeModule === item.id ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-tx2)',
               fontSize: 9, letterSpacing: '.7px', textDecoration: 'none', padding: '4px 6px',
