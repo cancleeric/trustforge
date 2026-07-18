@@ -111,7 +111,7 @@ def build_report() -> dict:
     }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "ceo_sweep_plan_and_dispatch",
+        "mode": "ceo_sweep_recommendation",
         "cadence": "1 hour",
         WORLD_FIRST_BAR: {
             "question": "這一輪是否讓 TrustForge 更接近世界第一？",
@@ -124,7 +124,8 @@ def build_report() -> dict:
         "e2e": e2e,
         "issues": issues,
         "prs": prs,
-        "decision": "plan_dispatch_and_develop_after_ceo_gate_no_auto_merge",
+        "decision": "recommend_plan_and_dispatch_for_interactive_ceo_execution",
+        "execution_status": "not_executed_by_sweep",
     }
 
 

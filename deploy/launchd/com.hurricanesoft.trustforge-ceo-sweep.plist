@@ -20,7 +20,7 @@
     <key>TRUSTFORGE_BEDROCK_DAILY_USD_CAP</key><string>0</string>
   </dict>
   <key>RunAtLoad</key><false/>
-  <key>StartInterval</key><integer>1800</integer>
+  <key>StartInterval</key><integer>3600</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/ceo-cycle/launchd.out.log</string>
   <key>StandardErrorPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/ceo-cycle/launchd.err.log</string>

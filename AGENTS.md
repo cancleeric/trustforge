@@ -26,7 +26,10 @@ review section in addition to the normal review record.
 
 ## CEO Development Cycle
 
-The local CEO sweep runs hourly. Each unfinished-issue round follows this order:
+The local CEO sweep runs hourly and produces a recommendation report only. It
+does not invoke agents, approve plans, edit code, merge, or deploy. When an
+interactive CEO agent consumes that report, each unfinished-issue round follows
+this order:
 
 1. gray (CPO) writes a scoped development or optimization plan.
 2. CEO reviews the plan and must approve it before implementation starts.
