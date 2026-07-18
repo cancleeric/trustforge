@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { getAnalysisSnapshot, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
+import { getAnalyze } from '../lib/endpoints'
 import type { AnalyzeParams } from '../lib/endpoints'
 import type { AnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
@@ -86,74 +86,25 @@ export default function AnalyzePage() {
     const controller = new AbortController()
     setLoading(true)
     setError(null)
-    if (params.sample) {
-      void getAnalyze({
-        coin: params.coin,
-        type: params.type,
-        q: params.q,
-        sample: params.sample,
-      }, controller.signal).then((res) => {
-        if (controller.signal.aborted) return
-        setLoading(false)
-        if (res.ok) {
-          setData(res.data)
-          setError(null)
-        } else {
-          setError(res.error)
-        }
-      })
-      return () => controller.abort()
-    }
-
-    let poll: number | undefined
-    let questionRegistered = false
-    let stopped = false
-    let inFlight = false
-    const scheduleNext = () => {
-      if (!stopped && !controller.signal.aborted) poll = window.setTimeout(readSnapshot, 5000)
-    }
-    const readSnapshot = () => {
-      if (inFlight || stopped || controller.signal.aborted) return
-      inFlight = true
-      void getAnalysisSnapshot(params.coin, mode, controller.signal, params.q).then(async (res) => {
-        if (controller.signal.aborted) return
-        if (res.ok) {
-          stopped = true
-          setLoading(false)
-          setData(res.data)
-          setError(null)
-          return
-        }
-        if (res.error.code === 'snapshot_pending') {
-          setLoading(true)
-          if (!questionRegistered) {
-            questionRegistered = true
-            const queued = await registerAnalysisQuestion(params.coin, mode, params.q.trim(), controller.signal)
-            if (controller.signal.aborted) return
-            if (!queued.ok) {
-              stopped = true
-              setLoading(false)
-              setError(queued.error)
-              return
-            }
-          }
-          scheduleNext()
-          return
-        }
-        stopped = true
-        setLoading(false)
+    // 手動送出是獨立的 on-demand run，不能受 Hermes 背景排程開關影響。
+    // `/api/analyze` 本身已有來源限流、in-flight 去重與 Bedrock 預算護欄。
+    void getAnalyze({
+      coin: params.coin,
+      type: params.type,
+      q: params.q,
+      sample: params.sample,
+    }, controller.signal).then((res) => {
+      if (controller.signal.aborted) return
+      setLoading(false)
+      if (res.ok) {
+        setData(res.data)
+        setError(null)
+      } else {
         setError(res.error)
-      }).finally(() => {
-        inFlight = false
-      })
-    }
-    readSnapshot()
-    return () => {
-      stopped = true
-      if (poll !== undefined) window.clearTimeout(poll)
-      controller.abort()
-    }
-  }, [hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce])
+      }
+    })
+    return () => controller.abort()
+  }, [hasExplicitRequest, params.coin, params.q, params.sample, params.type, requestNonce])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return
