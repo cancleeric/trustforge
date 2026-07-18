@@ -16,8 +16,8 @@
   merge gate。
 - #207、#209、#215 在 `develop` 已有對應 commits 與測試，但 GitHub issue 仍 open；
   下一步先補 evidence / closure，而不是重做已完成工作。
-- 30 分鐘 CEO sweep 是主動計劃與派工流程：可 triage、派 owner、準備 code work、
-  補 evidence；不得自動 merge 或 deploy。
+- 每小時 CEO sweep 只產生 triage 與派工建議；互動式 CEO 審查後才可派 owner、
+  準備 code work 或補 evidence，且不得自動 merge 或 deploy。
 
 ### 2026-07-17 新 Data Engineering issues
 

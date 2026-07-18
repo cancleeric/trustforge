@@ -56,10 +56,10 @@ def build_report() -> dict:
     ]
     development_plan = {
         "cpo_plan_required": True,
-        "cpo_owner": "gray",
+        "proposed_cpo_owner": "gray",
         "ceo_review_required_before_implementation": True,
-        "ceo_role": "final_plan_gate_and_execution_dispatch",
-        "operating_mode": "active_issue_pr_development",
+        "proposed_ceo_role": "final_plan_gate_and_execution_dispatch",
+        "operating_mode": "recommendation_only",
         "priority_order": [
             "open PRs with failing CI or missing reviewer",
             "open PRs with green CI but missing approval",
@@ -68,7 +68,7 @@ def build_report() -> dict:
             "unfinished development plan milestones",
             "new e2e coverage gaps",
         ],
-        "development_dispatch": [
+        "proposed_development_dispatch": [
             {"owner": "gray", "role": "CPO", "action": "write scoped development or optimization plan before implementation"},
             {"owner": "ceo", "role": "CEO", "action": "approve or reject the plan before code work starts"},
             {"owner": "deputy-analysis", "role": "background subagent", "action": "analyze issue, PR, branch, CI and e2e evidence"},
@@ -81,10 +81,10 @@ def build_report() -> dict:
             "/codex-review required before merge",
             "security changes require harper plus /codex-review",
         ],
-        "automation_boundary": "may plan, triage, assign, prepare code work and draft evidence; must not merge or deploy without gates",
+        "automation_boundary": "inventory and recommend only; an interactive CEO must plan, approve, dispatch, verify, merge and deploy",
     }
     cpo_plan = {
-        "author": "gray",
+        "proposed_author": "gray",
         "objective": "continue developing and optimizing TrustForge toward world-class demo and engineering depth",
         "required_sections": [
             "ranked execution queue",
@@ -103,7 +103,7 @@ def build_report() -> dict:
         ],
     }
     ceo_review = {
-        "decision": "approved_for_triage_and_planning_only",
+        "required_decision": "pending_interactive_ceo_review",
         "implementation_gate": "CEO must approve a scoped CPO plan before code changes in each round",
         "progress_report_rule": "report after each milestone or after more than three PRs",
         "ollama_coding_endpoint": "http://yingdemacbook-pro.local:11434/",

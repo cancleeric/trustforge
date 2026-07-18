@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import plistlib
 from pathlib import Path
 
@@ -32,3 +33,9 @@ def test_ceo_sweep_is_truthful_about_recommendation_only(monkeypatch):
     assert report["mode"] == "ceo_sweep_recommendation"
     assert report["execution_status"] == "not_executed_by_sweep"
     assert "interactive_ceo_execution" in report["decision"]
+    assert report["cpo_plan"]["proposed_author"] == "gray"
+    assert report["ceo_review"]["required_decision"] == "pending_interactive_ceo_review"
+    assert report["development_plan"]["operating_mode"] == "recommendation_only"
+    serialized = json.dumps(report).lower()
+    assert "approved_for" not in serialized
+    assert '"author"' not in serialized
