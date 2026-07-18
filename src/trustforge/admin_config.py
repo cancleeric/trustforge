@@ -719,6 +719,18 @@ def put_config(
         raw_ds = changes["disabled_sources"]
         new_disabled = None if raw_ds is None else frozenset(raw_ds)
 
+    # 相同設定不應產生新版本或稽核紀錄。這尤其重要於二態開關：管理面
+    # 重送「開啟」時，紀錄必須保留真正的狀態轉換，而不是出現「開 → 開」。
+    if (
+        new_cap == current.daily_cap_usd
+        and new_enabled == current.bedrock_enabled
+        and new_autonomy == current.hermes_autonomy_enabled
+        and new_hash == current.live_token_hash
+        and new_last4 == current.live_token_last4
+        and new_disabled == current.disabled_sources
+    ):
+        return PutConfigResult(config=current, audit_warning=None)
+
 
     item: dict[str, Any] = {
         "source_id": ADMIN_CONFIG_SOURCE,

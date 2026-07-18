@@ -84,7 +84,11 @@ def autonomy_enabled() -> tuple[bool, str]:
     disabled.
     """
     control = runtime_control()
-    if not control.enabled:
+    # Production 的未設定預設必須維持關閉，但管理面明確寫入的設定就是
+    # production 啟動的授權來源。不能在讀 config 前先被
+    # ``production_default`` 短路，否則 admin 顯示已開、執行端永遠不會啟動。
+    # 環境層明確關閉與 production_guard 則仍是最高優先的緊急護欄。
+    if not control.enabled and control.source != "production_default":
         return False, control.source
     try:
         from .admin_config import get_config_cached
@@ -95,6 +99,8 @@ def autonomy_enabled() -> tuple[bool, str]:
     except Exception:
         if os.getenv("CACHE_BACKEND", "").strip().lower() == "dynamodb":
             return False, "config_read_error"
+    if not control.enabled:
+        return False, control.source
     env_value = _parse_bool(os.getenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED"))
     if env_value is not None:
         return env_value, "env"

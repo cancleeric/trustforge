@@ -269,6 +269,20 @@ def test_put_config_writes_hermes_autonomy_toggle():
     } in json.loads(audit_item["changes_json"])
 
 
+def test_put_config_identical_toggle_is_not_audited_or_versioned():
+    store, mock_table = _store_with_mock_table()
+    item = dict(GOOD_ITEM)
+    item["hermes_autonomy_enabled"] = True
+    mock_table.get_item.return_value = {"Item": item}
+
+    result = put_config(
+        {"hermes_autonomy_enabled": True}, expected_version=7, actor="admin@1.2.3.4", store=store
+    )
+
+    assert result.config.version == 7
+    assert mock_table.put_item.call_count == 0
+
+
 def test_put_config_cas_conflict_raises_dedicated_error():
     """CAS 衝突（別人先改了）→ 專屬例外（PR-2 據此回 409），不是一般錯誤。"""
     store, mock_table = _store_with_mock_table()

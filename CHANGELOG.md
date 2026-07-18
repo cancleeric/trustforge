@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.16.9 — 2026-07-18
+
+- fix: production 的 Hermes 管理開關現在可覆寫「未設定時預設關閉」，同時保留環境層緊急停用護欄。
+- fix: 相同設定重送不再增加設定版本或產生「開 → 開」這類無效稽核紀錄。
+
 ## v0.16.8 — 2026-07-18
 
 - fix: production deploy 傳入 runtime token SSM prefix，讓管理面 API 可讀取 admin token。

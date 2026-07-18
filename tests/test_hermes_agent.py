@@ -1,3 +1,5 @@
+from trustforge import admin_config
+from trustforge.admin_config import AdminConfig
 from trustforge.hermes import autonomy_enabled, autonomous_cycle_plan, manifest
 from trustforge.schema import COIN_POOL
 
@@ -45,3 +47,22 @@ def test_autonomy_defaults_local_on_and_production_off(monkeypatch, tmp_path):
 
     monkeypatch.setenv("TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS", "1")
     assert autonomy_enabled() == (True, "env")
+
+
+def test_production_admin_autonomy_setting_overrides_only_unset_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_RUNTIME_STATE_PATH", str(tmp_path / "runtime.json"))
+    monkeypatch.setenv("CACHE_BACKEND", "dynamodb")
+    monkeypatch.delenv("TRUSTFORGE_RUNTIME_SWITCH", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", raising=False)
+    monkeypatch.setattr(
+        admin_config,
+        "get_config_cached",
+        lambda: AdminConfig(hermes_autonomy_enabled=True, exists=True, version=1),
+    )
+
+    assert autonomy_enabled() == (True, "config")
+
+    # Explicit runtime protection must continue to override the admin setting.
+    monkeypatch.setenv("TRUSTFORGE_RUNTIME_SWITCH", "off")
+    assert autonomy_enabled() == (False, "env")
