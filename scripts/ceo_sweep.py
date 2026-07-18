@@ -112,7 +112,7 @@ def build_report() -> dict:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": "ceo_sweep_plan_and_dispatch",
-        "cadence": "30 minutes",
+        "cadence": "1 hour",
         WORLD_FIRST_BAR: {
             "question": "這一輪是否讓 TrustForge 更接近世界第一？",
             "answer": "Only count work that improves production reliability, evidence quality, e2e coverage, data depth, security, cost control, or demo readiness.",

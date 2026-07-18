@@ -24,3 +24,17 @@ must still complete every review and release gate; do not silently skip a gate.
 Security and cost-sensitive changes require an explicit security/adversarial
 review section in addition to the normal review record.
 
+## CEO Development Cycle
+
+The local CEO sweep runs hourly. Each unfinished-issue round follows this order:
+
+1. gray (CPO) writes a scoped development or optimization plan.
+2. CEO reviews the plan and must approve it before implementation starts.
+3. Background deputies analyze and implement while the CEO thread stays interactive.
+4. Coding assistance should prefer `http://yingdemacbook-pro.local:11434/` when
+   reachable; it is coding-only and receives no secrets or deployment authority.
+5. Every PR names a reviewer and completes the reviewer attestation, eye scan,
+   and `/codex-review` adversarial gate before merge.
+6. Security changes additionally require harper (CISO) review.
+7. Report after every milestone or after more than three PRs.
+8. Only personally verified behavior may be reported complete.
