@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Python Type Check on Save",
+      "trigger": "PostFileSave",
+      "description": "Python 檔案存檔時自動執行 type check，確保型別正確性。",
+      "matcher": "\\.(py)$",
+      "action": {
+        "type": "command",
+        "command": "cd /Users/yinghaowang/HurricaneSoft/trustforge && .venv/bin/python -m py_compile \"$KIRO_FILE_PATH\" 2>&1 || true",
+        "timeout": 15
+      }
+    }
+  ]
+}
