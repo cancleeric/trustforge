@@ -38,6 +38,8 @@ export default function TrustRadarChart({ radar }: Props) {
       <div className="rounded-lg border border-tf-border bg-tf-card p-4">
         <h3 className="mb-2 text-sm font-semibold text-tf-text">多維度信任雷達</h3>
         <p className="text-xs text-tf-muted">目前尚無任何維度累積足夠資料，暫無法繪製雷達圖。</p>
+        <p className="mt-1 text-xs text-tf-muted">這代表尚未評分，不是所有維度都是零分。</p>
+        <a href="/" className="mt-3 inline-flex rounded border border-tf-accent px-2.5 py-1.5 text-xs font-semibold text-tf-link no-underline">回首頁選擇分析任務</a>
       </div>
     )
   }
