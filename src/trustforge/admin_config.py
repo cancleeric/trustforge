@@ -110,7 +110,7 @@ ADMIN_AUDIT_SOURCE = "__admin_audit__"
 # issue #155：新增 `disabled_sources`——admin 可明確關掉個別真實連接器
 # （如 ["coindesk"]）；預設空（= 全啟用，fail-closed：忘了設也不會誤關真實源）。
 _ALLOWED_CHANGE_FIELDS = frozenset(
-    {"daily_cap_usd", "bedrock_enabled", "live_token", "disabled_sources"}
+    {"daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token", "disabled_sources"}
 )
 
 # process 內 TTL 快取窗（秒）——計劃 §1.4 定 15s
@@ -189,6 +189,7 @@ class AdminConfig:
 
     daily_cap_usd: float | None = None
     bedrock_enabled: bool | None = None
+    hermes_autonomy_enabled: bool | None = None
     live_token_hash: str | None = None
     live_token_last4: str | None = None
     # issue #155：被明確關掉的連接器名稱集合（如 {"coindesk", "sec-gov"}）。
@@ -210,6 +211,7 @@ class AdminConfig:
         return {
             "daily_cap_usd": self.daily_cap_usd,
             "bedrock_enabled": self.bedrock_enabled,
+            "hermes_autonomy_enabled": self.hermes_autonomy_enabled,
             "live_token_last4": self.live_token_last4,
             "live_token_configured": self.live_token_hash is not None,
             "disabled_sources": sorted(self.disabled_sources) if self.disabled_sources else [],
@@ -396,6 +398,7 @@ def _config_from_item(item: dict[str, Any]) -> AdminConfig:
     return AdminConfig(
         daily_cap_usd=_parse_cap(item.get("daily_cap_usd")),
         bedrock_enabled=_parse_bool(item.get("bedrock_enabled"), "bedrock_enabled"),
+        hermes_autonomy_enabled=_parse_bool(item.get("hermes_autonomy_enabled"), "hermes_autonomy_enabled"),
         live_token_hash=_parse_str(
             item.get("live_token_hash"), "live_token_hash", sensitive=True
         ),
@@ -608,6 +611,9 @@ def _validate_changes(changes: dict[str, Any]) -> None:
     if "bedrock_enabled" in changes and changes["bedrock_enabled"] is not None:
         if not isinstance(changes["bedrock_enabled"], bool):
             raise ValueError("bedrock_enabled 必須是 bool")
+    if "hermes_autonomy_enabled" in changes and changes["hermes_autonomy_enabled"] is not None:
+        if not isinstance(changes["hermes_autonomy_enabled"], bool):
+            raise ValueError("hermes_autonomy_enabled 必須是 bool")
     if "live_token" in changes and changes["live_token"] is not None:
         token = changes["live_token"]
         if not isinstance(token, str) or not token:
@@ -689,6 +695,9 @@ def put_config(
     new_enabled = current.bedrock_enabled
     if "bedrock_enabled" in changes:
         new_enabled = changes["bedrock_enabled"]
+    new_autonomy = current.hermes_autonomy_enabled
+    if "hermes_autonomy_enabled" in changes:
+        new_autonomy = changes["hermes_autonomy_enabled"]
     new_hash = current.live_token_hash
     new_last4 = current.live_token_last4
     if "live_token" in changes:
@@ -723,6 +732,8 @@ def put_config(
         item["daily_cap_usd"] = str(new_cap)  # 金額字串存，避免 Decimal/float 歧義
     if new_enabled is not None:
         item["bedrock_enabled"] = new_enabled
+    if new_autonomy is not None:
+        item["hermes_autonomy_enabled"] = new_autonomy
     if new_hash is not None:
         item["live_token_hash"] = new_hash
     if new_last4 is not None:
@@ -761,6 +772,10 @@ def put_config(
     if "bedrock_enabled" in changes:
         change_entries.append(
             {"field": "bedrock_enabled", "old": current.bedrock_enabled, "new": new_enabled}
+        )
+    if "hermes_autonomy_enabled" in changes:
+        change_entries.append(
+            {"field": "hermes_autonomy_enabled", "old": current.hermes_autonomy_enabled, "new": new_autonomy}
         )
     if "live_token" in changes:
         old_masked, new_masked = _mask_token_change(
@@ -809,6 +824,7 @@ def put_config(
     new_config = AdminConfig(
         daily_cap_usd=new_cap,
         bedrock_enabled=new_enabled,
+        hermes_autonomy_enabled=new_autonomy,
         live_token_hash=new_hash,
         live_token_last4=new_last4,
         disabled_sources=new_disabled,

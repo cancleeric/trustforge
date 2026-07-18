@@ -512,11 +512,22 @@ function isAdminLiveTokenView(value: unknown): value is AdminLiveTokenView {
   )
 }
 
+function isAdminHermesAutonomyView(value: unknown): value is AdminConfigData['hermes_autonomy_enabled'] {
+  return (
+    isPlainObject(value) &&
+    (value.config === null || typeof value.config === 'boolean') &&
+    (value.env === null || typeof value.env === 'string') &&
+    typeof value.effective === 'boolean' &&
+    typeof value.source === 'string'
+  )
+}
+
 export function isAdminConfigData(value: unknown): value is AdminConfigData {
   return (
     isPlainObject(value) &&
     isAdminCapView(value.daily_cap_usd) &&
     isAdminBedrockView(value.bedrock_enabled) &&
+    isAdminHermesAutonomyView(value.hermes_autonomy_enabled) &&
     isAdminLiveTokenView(value.live_token) &&
     (value.version === null || typeof value.version === 'number') &&
     (value.updated_at === null || typeof value.updated_at === 'string') &&

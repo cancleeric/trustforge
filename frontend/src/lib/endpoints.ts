@@ -64,13 +64,13 @@ export function getAnalysisSnapshot(coin: string, mode: string, signal?: AbortSi
 }
 
 interface AnalysisQuestionReceipt { question_id: string; job_id: string | null; state: string }
-export function registerAnalysisQuestion(coin: string, mode: string, question: string): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
+export function registerAnalysisQuestion(coin: string, mode: string, question: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
   const valid = (value: unknown): value is AnalysisQuestionReceipt => !!value && typeof value === 'object' &&
     typeof (value as AnalysisQuestionReceipt).question_id === 'string' &&
     ((value as AnalysisQuestionReceipt).job_id === null || typeof (value as AnalysisQuestionReceipt).job_id === 'string') &&
     typeof (value as AnalysisQuestionReceipt).state === 'string'
   return apiFetch('/api/analysis-question', undefined, valid, {
-    method: 'POST', jsonBody: { coin, mode, question }, timeoutMs: DEFAULT_TIMEOUT_MS,
+    signal, method: 'POST', jsonBody: { coin, mode, question }, timeoutMs: DEFAULT_TIMEOUT_MS,
   })
 }
 

@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 from .pipeline import run, run_comparison
+from .runtime_control import runtime_control, set_runtime_enabled
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 
 
@@ -98,6 +99,29 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_control(args: argparse.Namespace) -> int:
+    if args.action in {"start", "stop"}:
+        control = set_runtime_enabled(
+            args.action == "start",
+            reason=args.reason or f"trustforge control {args.action}",
+            actor="cli",
+        )
+    else:
+        control = runtime_control()
+    status = "enabled" if control.enabled else "disabled"
+    print(
+        f"runtime {status} "
+        f"(source={control.source}, production={control.production}, "
+        f"production_continuous_allowed={control.production_continuous_allowed})"
+    )
+    print(f"state={control.state_path}")
+    if control.reason:
+        print(f"reason={control.reason}")
+    if args.json:
+        print(json.dumps(control.__dict__, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="trustforge",
@@ -121,6 +145,12 @@ def main(argv=None) -> int:
     a.add_argument("--out", default="out", help="輸出目錄（預設 out/）")
     a.add_argument("--quiet", action="store_true", help="不印出完整報告")
     a.set_defaults(func=cmd_analyze)
+
+    c = sub.add_parser("control", help="啟動/停止本機 runtime switch；production continuous work 預設關閉")
+    c.add_argument("action", choices=["start", "stop", "status"])
+    c.add_argument("--reason", default="", help="寫入 runtime switch 的原因")
+    c.add_argument("--json", action="store_true", help="輸出 JSON 狀態")
+    c.set_defaults(func=cmd_control)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):

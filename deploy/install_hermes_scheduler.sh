@@ -25,16 +25,17 @@ Environment=COST_LEDGER_BACKEND=dynamodb
 Environment=SCHEDULER_RUN_LOG_BACKEND=dynamodb
 Environment=TRUSTFORGE_SCHEDULER_RUN_TABLE=trustforge-scheduler-runs
 Environment=TRUSTFORGE_SKILL_ROOT=$APP_DIR/skills/hermes
+Environment=TRUSTFORGE_HERMES_AUTONOMY_ENABLED=0
 ExecStart=/usr/bin/python3 scripts/hermes_cycle.py --max-budget-sec 900
 UNIT
 
 install -m 0644 /dev/stdin "$UNIT_DIR/hermes-cycle.timer" <<'UNIT'
 [Unit]
-Description=Run TrustForge Hermes prefetch cycle every 15 minutes
+Description=Run TrustForge Hermes preflight cycle every 30 minutes when enabled
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=15min
+OnUnitActiveSec=30min
 Persistent=true
 RandomizedDelaySec=20s
 
@@ -46,4 +47,4 @@ systemctl daemon-reload
 systemctl enable --now hermes-cycle.timer
 bash "$APP_DIR/deploy/install_fetch_scheduler.sh"
 bash "$APP_DIR/deploy/prepare_backend_deploy_backup.sh"
-echo "Hermes timer installed and active. Inspect with: systemctl list-timers hermes-cycle.timer"
+echo "Hermes timer installed. Autonomy is disabled by default in production; enable via admin config or TRUSTFORGE_HERMES_AUTONOMY_ENABLED=1. Inspect with: systemctl list-timers hermes-cycle.timer"

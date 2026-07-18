@@ -5,6 +5,7 @@ import signal
 import time
 import logging
 from trustforge.analysis_flow import AnalysisFlow
+from trustforge.hermes import autonomy_enabled
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Hermes continuous pre-analysis flow")
@@ -13,6 +14,10 @@ def main() -> int:
     p.add_argument("--daemon", action="store_true")
     p.add_argument("--poll-seconds", type=float, default=15.0)
     args = p.parse_args()
+    enabled, source = autonomy_enabled()
+    if not enabled:
+        print(f"[run_analysis_flow] autonomy disabled ({source}); no analysis workers started")
+        return 0
     flow = AnalysisFlow(workers_per_stage=args.workers_per_stage)
     flow.start()
     if args.daemon:

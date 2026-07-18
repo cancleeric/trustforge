@@ -118,6 +118,27 @@ pytest -q
 ## Live Demo（web 服務）
 
 ```bash
+./scripts/trustforge_control.sh start
+./scripts/trustforge_control.sh status
+./scripts/trustforge_control.sh stop
+```
+
+`start` 只啟動本機 web runtime 與本機 runtime switch；不會自動打開 Bedrock。
+生產環境的 Hermes continuous cycle 預設關閉，避免測試或排程把費用燒光。
+若真的要在 production 跑背景循環，必須同時設定：
+
+```bash
+export TRUSTFORGE_RUNTIME_SWITCH=on
+export TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS=1
+```
+
+緊急停止 Bedrock 成本仍使用最高優先 kill switch：
+
+```bash
+export TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0
+```
+
+```bash
 # 本機起 Live Demo（SQLite 共用快取，免 AWS 即可看完整管線）
 CACHE_BACKEND=sqlite PORT=8799 python -m trustforge.web   # → http://127.0.0.1:8799
 # 首次由舊版 JSON 升級時先執行：

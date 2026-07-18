@@ -24,6 +24,7 @@ from io import BytesIO
 import pytest
 
 from trustforge import web
+from trustforge import hermes
 from trustforge.admin_config import (
     AdminConfig,
     AdminConfigReadError,
@@ -940,3 +941,16 @@ def test_upgrade_activation_endpoint_is_authenticated_and_explicit(admin_enabled
     assert code == 200
     assert json.loads(response)["data"]["state"] == "activated"
     assert called == {"proposal_id": "p", "actor": "release-operator", "reason": "reviewed"}
+
+
+def test_analysis_question_write_is_blocked_when_hermes_autonomy_disabled(monkeypatch):
+    monkeypatch.setattr(hermes, "autonomy_enabled", lambda: (False, "config"))
+    monkeypatch.setattr(web, "_check_status_rate_limit", lambda *args, **kwargs: None)
+    code, body, _ = _request(
+        "POST",
+        "/api/analysis-question",
+        body=json.dumps({"coin": "BTC", "mode": "risk", "question": "test"}),
+    )
+    payload = json.loads(body)
+    assert code == 409
+    assert payload["error"]["code"] == "automation_disabled"

@@ -60,7 +60,7 @@ _STANCE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_CONNECT_TIMEOUT_S
 # 無限期 hang」的依賴呼叫。比照 `_stance_runtime()` 的作法加上明確
 # `Config`，但敘事任務（含多輪 orchestrator 呼叫、較長 prompt）本身就比
 # stance 分類慢得多，timeout 需要更寬鬆：預設 `read_timeout=60s`、
-# `connect_timeout=10s`，仍遠短於前端 30 秒（見 CLAUDE.md/前端逾時設定）
+# `connect_timeout=10s`，仍短於前端 90 秒（見 `frontend/src/lib/apiClient.ts`）
 # 疊加 dedup 層 `_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS=45s` 的既有預算——
 # 不會讓正常、未逾時的真實呼叫提前被打斷。`total_max_attempts=1`
 # 理由同 `_stance_runtime()`：不重試，讓單次呼叫的最壞耗時有確定上界。

@@ -23,6 +23,7 @@ export default function HermesDashboard() {
     [t],
   )
   const [searchParams, setSearchParams] = useSearchParams()
+  const qaMode = searchParams.get('qa') === '1' || searchParams.get('reducedMotion') === '1'
   const requestedCoin = searchParams.get('coin')?.toLowerCase()
   const [model, setModel] = useState<GalaxyModel>(() => buildGalaxyModel(null))
   const [, setOverviewRevision] = useState('boot')
@@ -49,29 +50,17 @@ export default function HermesDashboard() {
   const displayScoreRef = useRef(0)
   const [runtimeVersion, setRuntimeVersion] = useState('snapshot')
   const [costLedger, setCostLedger] = useState<number | null>(null)
-  const [startupComplete, setStartupComplete] = useState(false)
+  const [startupComplete, setStartupComplete] = useState(qaMode)
   const [serviceMonitor, setServiceMonitor] = useState<Record<string, ServiceMonitorState>>({
     overview: 'checking', health: 'checking', sources: 'checking', history: 'checking', costs: 'checking',
   })
   const [boot, setBoot] = useState({ topbar: false, left: false, galaxy: false, right: false, bottom: false })
   const [loadError, setLoadError] = useState<string | null>(null)
   const requestedModule = searchParams.get('workspace')
-  const qaMode = searchParams.get('qa') === '1' || searchParams.get('reducedMotion') === '1'
-  const [activeModule, setActiveModule] = useState<HermesWorkspaceModule | null>(
+  const activeModule: HermesWorkspaceModule | null =
     requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
-      ? requestedModule : null,
-  )
+      ? requestedModule : null
   const activeQuestionMode = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))]
-
-  useEffect(() => {
-    const valid = requestedModule === 'analyze' || requestedModule === 'compare' ||
-      requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
-    // 只在 URL 明確帶 workspace 時同步打開，不因 workspace 被其他
-    // searchParams 操作意外清除就關閉已打開的面板（修正面板閃現消失 bug）。
-    if (valid) {
-      setActiveModule(requestedModule)
-    }
-  }, [requestedModule])
 
   const toggleShip = useCallback(() => {
     if (shipOpen) { setShipOpen(false); return }
@@ -102,10 +91,15 @@ export default function HermesDashboard() {
   // Boot sequence is presentation, never an availability gate. Slow or failed
   // channels continue reporting through the bridge monitor after entry.
   useEffect(() => {
+    if (qaMode) {
+      setStartupComplete(true)
+      setStartupStep(5)
+      return
+    }
     const timers = [1, 2, 3, 4, 5].map((step) => window.setTimeout(() => setStartupStep(step), step * 280))
     timers.push(window.setTimeout(() => setStartupComplete(true), 1800))
     return () => timers.forEach(window.clearTimeout)
-  }, [])
+  }, [qaMode])
 
   useEffect(() => {
     if (!query.trim()) {
@@ -373,7 +367,6 @@ export default function HermesDashboard() {
     search.set('mode', ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))])
     search.set('workspace', 'analyze')
     setSearchParams(search)
-    setActiveModule('analyze')
   }, [qtype, qtypes, query, selectedId, setSearchParams, t])
 
   useEffect(() => {
@@ -385,21 +378,18 @@ export default function HermesDashboard() {
       const next = new URLSearchParams(searchParams)
       next.delete('workspace')
       setSearchParams(next)
-      setActiveModule(null)
       return
     }
     // Top-bar navigation opens a clean workspace. Analysis parameters from a
     // previous module must never leak into another module and trigger work.
     const next = new URLSearchParams({ workspace: module, coin: selectedId.toUpperCase() })
     setSearchParams(next)
-    setActiveModule(module)
   }, [activeModule, searchParams, selectedId, setSearchParams])
 
   const closeModule = useCallback(() => {
     const next = new URLSearchParams(searchParams)
     next.delete('workspace')
     setSearchParams(next)
-    setActiveModule(null)
   }, [searchParams, setSearchParams])
 
   const selCoin = model.byId[selectedId]

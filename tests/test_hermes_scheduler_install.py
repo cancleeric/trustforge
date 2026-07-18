@@ -15,6 +15,8 @@ def test_hermes_scheduler_sets_packaged_home_and_starts_timer():
     script = SCRIPT.read_text(encoding="utf-8")
 
     assert "Environment=TRUSTFORGE_HOME=$APP_DIR" in script
+    assert "Environment=TRUSTFORGE_HERMES_AUTONOMY_ENABLED=0" in script
+    assert "OnUnitActiveSec=30min" in script
     assert "systemctl enable --now hermes-cycle.timer" in script
     assert "install_fetch_scheduler.sh" in script
 

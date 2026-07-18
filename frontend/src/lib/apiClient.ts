@@ -15,7 +15,7 @@ import { isPlainObject } from './validators'
 /** 一般端點（overview/health，讀 cache，應該很快）預設逾時。 */
 export const DEFAULT_TIMEOUT_MS = 10_000
 /** 分析端點（真分析，可能觸發真連接器）需要較長逾時。 */
-export const ANALYZE_TIMEOUT_MS = 30_000
+export const ANALYZE_TIMEOUT_MS = 90_000
 
 function networkFailure(message: string): ApiFailure {
   return { ok: false, error: { code: 'network_error', message } }

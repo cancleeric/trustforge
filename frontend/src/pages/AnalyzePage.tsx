@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { getAnalyze } from '../lib/endpoints'
+import { getAnalysisSnapshot, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeParams } from '../lib/endpoints'
 import type { AnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
@@ -31,7 +31,7 @@ export default function AnalyzePage() {
   const [loading, setLoading] = useState(false)
   const [requestNonce, setRequestNonce] = useState(0)
   const mode = searchParams.get('mode') || (params.type === 'hypothesis' ? 'fundamentals' : 'risk')
-  const hasExplicitRequest = true
+  const hasExplicitRequest = searchParams.has('q') || searchParams.get('sample') === '1'
 
   useEffect(() => {
     if (!hasExplicitRequest) {
@@ -83,29 +83,77 @@ export default function AnalyzePage() {
 
   useEffect(() => {
     if (!hasExplicitRequest) return
-    // 每次送出都直接執行分析，不依賴背景快照是否已先建立；參數變更或卸載時
-    // 中止被取代的請求，避免舊回應覆蓋新 run。
     const controller = new AbortController()
-    // 保留上一個完整結果直到新的分析完成，避免畫面閃爍。
     setLoading(true)
     setError(null)
-    void getAnalyze({
-      coin: params.coin,
-      type: params.type,
-      q: params.q,
-      sample: params.sample,
-    }, controller.signal).then((res) => {
-      if (controller.signal.aborted) return
-      setLoading(false)
-      if (res.ok) {
-        setData(res.data)
-        setError(null)
-      } else {
+    if (params.sample) {
+      void getAnalyze({
+        coin: params.coin,
+        type: params.type,
+        q: params.q,
+        sample: params.sample,
+      }, controller.signal).then((res) => {
+        if (controller.signal.aborted) return
+        setLoading(false)
+        if (res.ok) {
+          setData(res.data)
+          setError(null)
+        } else {
+          setError(res.error)
+        }
+      })
+      return () => controller.abort()
+    }
+
+    let poll: number | undefined
+    let questionRegistered = false
+    let stopped = false
+    let inFlight = false
+    const scheduleNext = () => {
+      if (!stopped && !controller.signal.aborted) poll = window.setTimeout(readSnapshot, 5000)
+    }
+    const readSnapshot = () => {
+      if (inFlight || stopped || controller.signal.aborted) return
+      inFlight = true
+      void getAnalysisSnapshot(params.coin, mode, controller.signal, params.q).then(async (res) => {
+        if (controller.signal.aborted) return
+        if (res.ok) {
+          stopped = true
+          setLoading(false)
+          setData(res.data)
+          setError(null)
+          return
+        }
+        if (res.error.code === 'snapshot_pending') {
+          setLoading(true)
+          if (!questionRegistered) {
+            questionRegistered = true
+            const queued = await registerAnalysisQuestion(params.coin, mode, params.q.trim(), controller.signal)
+            if (controller.signal.aborted) return
+            if (!queued.ok) {
+              stopped = true
+              setLoading(false)
+              setError(queued.error)
+              return
+            }
+          }
+          scheduleNext()
+          return
+        }
+        stopped = true
+        setLoading(false)
         setError(res.error)
-      }
-    })
-    return () => controller.abort()
-  }, [hasExplicitRequest, params.coin, params.q, params.sample, params.type, requestNonce])
+      }).finally(() => {
+        inFlight = false
+      })
+    }
+    readSnapshot()
+    return () => {
+      stopped = true
+      if (poll !== undefined) window.clearTimeout(poll)
+      controller.abort()
+    }
+  }, [hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return
@@ -114,11 +162,14 @@ export default function AnalyzePage() {
   }, [error])
 
   const handleSubmit = (values: QueryValues) => {
-    const next: Record<string, string> = {
-      coin: values.coin, type: values.type, q: values.q,
-      mode: values.mode,
-    }
-    if (params.sample) next.sample = params.sample
+    const next = new URLSearchParams()
+    const workspace = searchParams.get('workspace')
+    if (workspace) next.set('workspace', workspace)
+    next.set('coin', values.coin)
+    next.set('type', values.type)
+    next.set('q', values.q)
+    next.set('mode', values.mode)
+    if (params.sample) next.set('sample', params.sample)
     setSearchParams(next)
     setRequestNonce((value) => value + 1)
   }

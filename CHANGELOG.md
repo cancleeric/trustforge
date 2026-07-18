@@ -19,6 +19,23 @@
 - feat: 建立 Kiro 配置（steering 規範 + hooks 自動化品質控管）
 - fix: 同步 frontend package-lock.json 修復 CI npm ci 失敗
 
+## v0.16.2 — 2026-07-17
+
+- Make read-only Hermes analysis projections return empty telemetry when the
+  SQLite flow store has not been created yet, preventing fresh or in-flight
+  production deployments from surfacing transient `/api/analysis-flow` and
+  `/api/analysis-journey` 502 responses.
+- Keep the History workspace mounted on transient `rate_limited`/API errors,
+  showing a non-blocking warning while preserving the last complete trend
+  snapshot instead of blanking the module after tab or coin changes.
+- Preserve Hermes `workspace` URL state when embedded analysis, comparison and
+  history modules write their own query parameters, preventing top-bar
+  navigation from opening a module that immediately closes itself.
+- Stop Analyze/Compare workspaces from auto-submitting on initial mount, removing
+  the visible jump caused by debounce URL rewrites immediately after opening.
+- Add a Hermes autonomous-work kill switch with production default-off behavior,
+  while keeping local launchd analysis flow explicitly enabled for development.
+
 ## v0.16.1 — 2026-07-17
 
 - Install the `certifi` runtime dependency during EC2 update-in-place and

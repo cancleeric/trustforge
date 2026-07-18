@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REGION="${REGION:-ap-southeast-2}"
-NAME="${TRUSTFORGE_SCHEDULE_NAME:-trustforge-hermes-cycle-15m}"
+NAME="${TRUSTFORGE_SCHEDULE_NAME:-trustforge-hermes-cycle-30m}"
 ROLE="${TRUSTFORGE_SCHEDULER_ROLE:-trustforge-eventbridge-scheduler}"
 QUEUE="${TRUSTFORGE_SCHEDULER_DLQ:-trustforge-scheduler-dlq}"
 INSTANCE_ID="${TRUSTFORGE_INSTANCE_ID:-}"
@@ -16,7 +16,7 @@ if [ -z "$INSTANCE_ID" ]; then
 fi
 [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ] || { echo "No running trustforge-demo instance" >&2; exit 1; }
 
-echo "Scheduler target: $INSTANCE_ID, every 15 minutes (UTC), SSM RunCommand"
+echo "Scheduler target: $INSTANCE_ID, every 30 minutes (UTC), SSM RunCommand"
 [ "$APPLY" = "--apply" ] || { echo "Dry run only. Re-run with --apply to create/update AWS resources."; exit 0; }
 
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
@@ -34,12 +34,12 @@ INPUT=$(printf '{"DocumentName":"AWS-RunShellScript","InstanceIds":["%s"],"Param
 TARGET="{\"Arn\":\"arn:aws:scheduler:::aws-sdk:ssm:sendCommand\",\"RoleArn\":\"arn:aws:iam::$ACCOUNT:role/$ROLE\",\"Input\":$(printf '%s' "$INPUT" | jq -Rs .),\"DeadLetterConfig\":{\"Arn\":\"$QUEUE_ARN\"}}"
 if aws scheduler get-schedule --region "$REGION" --name "$NAME" >/dev/null 2>&1; then
   aws scheduler update-schedule --region "$REGION" --name "$NAME" \
-  --schedule-expression 'cron(0/15 * * * ? *)' --schedule-expression-timezone UTC \
+  --schedule-expression 'cron(0/30 * * * ? *)' --schedule-expression-timezone UTC \
   --flexible-time-window Mode=OFF --state ENABLED \
   --target "$TARGET" >/dev/null
 else
   aws scheduler create-schedule --region "$REGION" --name "$NAME" \
-    --schedule-expression 'cron(0/15 * * * ? *)' --schedule-expression-timezone UTC \
+    --schedule-expression 'cron(0/30 * * * ? *)' --schedule-expression-timezone UTC \
     --flexible-time-window Mode=OFF --state ENABLED --target "$TARGET" >/dev/null
 fi
 

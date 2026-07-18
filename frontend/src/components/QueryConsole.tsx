@@ -39,6 +39,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
   // 「送出/瀏覽器上下頁」會在下方 effect 裡重置，視為開啟一輪新的表單狀態。
   const [queryEdited, setQueryEdited] = useState(false)
   const submitRef = useRef(onSubmit)
+  const userChangedRef = useRef(false)
   useEffect(() => { submitRef.current = onSubmit }, [onSubmit])
 
   // 瀏覽器上下頁（或外部導覽帶新的 coin/type/q 進來）：URL 是唯一事實來源，
@@ -49,17 +50,20 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
     setMode(initial.mode)
     setQ(initial.q)
     setQueryEdited(false)
+    userChangedRef.current = false
   }, [initial.coin, initial.mode, initial.type, initial.q])
 
-  // Hermes 預分析：表單不是提交閘門。幣種／模式／題目只要形成非空穩定
-  // 狀態就同步到 URL 並開始讀取該快照；短 debounce 避免逐鍵送出。
+  // Hermes 預分析：只在使用者改動表單後 debounce 同步。初次 mount / URL
+  // 對齊不得自動 submit，否則 top-bar 開啟工作區會立刻改 URL 並造成跳動。
   useEffect(() => {
+    if (!userChangedRef.current) return
     if (!q.trim()) return
     const timer = window.setTimeout(() => submitRef.current({ coin, type, mode, q: q.trim() }), 350)
     return () => window.clearTimeout(timer)
   }, [coin, mode, q, type])
 
   function handleCoinChange(next: string) {
+    userChangedRef.current = true
     setCoin(next)
     if (!queryEdited) setQ(defaultAnalyzeQuery(next))
   }
@@ -86,6 +90,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
           id="qc-type"
           value={mode}
           onChange={(e) => {
+            userChangedRef.current = true
             const next = ANALYSIS_MODES.find((item) => item.value === e.target.value) ?? ANALYSIS_MODES[0]
             setMode(next.value)
             setType(next.type)
@@ -114,6 +119,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
           id="qc-q"
           value={q}
           onChange={(e) => {
+            userChangedRef.current = true
             setQ(e.target.value)
             setQueryEdited(true)
           }}

@@ -28,6 +28,16 @@ delegates to the existing hardened fetch scheduler to refresh allowed crawler
 sources and then builds cache-only trust snapshots. It has a fixed budget, fixed
 coin pool, fixed tool call count, and no unbounded network access.
 
+Runtime control is fail-closed for production. Local development defaults to
+enabled and can be paused with `trustforge control stop` or
+`scripts/trustforge_control.sh stop`, which writes the local runtime state file.
+Production is treated as any process with `TRUSTFORGE_ENV=production` or
+`CACHE_BACKEND=dynamodb`; in that environment `scripts/hermes_cycle.py` skips
+all scheduled work unless both `TRUSTFORGE_RUNTIME_SWITCH=on` and
+`TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS=1` are present. The web service may stay
+up for demo traffic, but continuous source refresh / replay / Bedrock review
+must be explicitly enabled and separately budgeted.
+
 The formal competition run remains isolated: it selects only source records and
 snapshots at or before `run_started_at`. Autonomous research memory may improve
 freshness and provide historical replay inputs, but it cannot silently inject a
