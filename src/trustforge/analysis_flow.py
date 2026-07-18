@@ -44,6 +44,7 @@ QUESTION_TYPES = {**{mode: item[0] for mode, item in MODES.items()}, "comparison
 QUEUE_CAPACITY = 500
 MANUAL_PRIORITY = 0
 SCHEDULED_PRIORITY = 100
+MANUAL_DEDUP_WINDOW_SEC = 300
 
 
 def _question_terms(value: str) -> set[str]:
@@ -76,14 +77,10 @@ class AnalysisFlow:
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
-        # Only the first stage accepts durable jobs from other processes.  A
-        # priority queue here lets an arriving manual request run before any
-        # waiting scheduled work, while work already in a stage is never
-        # interrupted or discarded.
-        self._queues = {
-            stage: queue.PriorityQueue() if stage == STAGES[0] else queue.Queue()
-            for stage in STAGES
-        }
+        # Every stage boundary is a safe handoff point. Priority queues preserve
+        # manual priority through the complete flow without interrupting work
+        # that is already executing.
+        self._queues = {stage: queue.PriorityQueue() for stage in STAGES}
         self._queue_sequence = itertools.count()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -261,7 +258,7 @@ class AnalysisFlow:
     def register_question(self, coin: str, mode: str, question: str, *, enqueue: bool = True,
                           origin: str = "scheduled") -> tuple[str, str | None]:
         """Persist an active question and enqueue it against the latest committed snapshot."""
-        coin, mode, question = coin.upper(), mode.strip(), question.strip()
+        coin, mode, question = coin.strip().upper(), mode.strip(), question.strip()
         if coin not in COIN_POOL or mode not in QUESTION_TYPES:
             raise ValueError("unsupported coin or mode")
         if not question or len(question) > 1000:
@@ -303,8 +300,16 @@ class AnalysisFlow:
         """
         # Validate and persist the intent before collecting live sources.  Bad
         # input must never trigger a chargeable/network ingestion attempt.
+        coin, mode, question = coin.strip().upper(), mode.strip(), question.strip()
         question_id, _ = self.register_question(coin, mode, question, enqueue=False)
-        coin = coin.upper()
+        existing = self._conn().execute("""
+          SELECT job_id FROM analysis_jobs
+          WHERE coin=? AND mode=? AND question=? AND origin='manual'
+          AND state IN ('queued','running','completed') AND created_at>=?
+          ORDER BY created_at DESC LIMIT 1
+        """, (coin, mode, question, time.time() - MANUAL_DEDUP_WINDOW_SEC)).fetchone()
+        if existing:
+            return question_id, existing["job_id"]
         snapshot_id = self.create_snapshot(coin, query=question)
         job_id = self.enqueue_job(snapshot_id, mode, question, origin="manual")
         if job_id is None:
@@ -469,11 +474,9 @@ class AnalysisFlow:
                              (job_state, stage, error, now, job_id))
 
     def _put_package(self, stage: str, package: dict[str, Any]) -> None:
-        if stage == STAGES[0]:
-            priority = int(package.get("priority", self._job(package["job_id"])["priority"]))
-            self._queues[stage].put((priority, next(self._queue_sequence), package))
-        else:
-            self._queues[stage].put(package)
+        priority = int(package.get("priority", self._job(package["job_id"])["priority"]))
+        package["priority"] = priority
+        self._queues[stage].put((priority, next(self._queue_sequence), package))
 
     def start(self) -> None:
         self.recover()
@@ -598,8 +601,7 @@ class AnalysisFlow:
         while not self._stop.is_set():
             try: package = self._queues[stage].get(timeout=.2)
             except queue.Empty: continue
-            if stage == STAGES[0]:
-                _, _, package = package
+            _, _, package = package
             started = time.time(); job_id = package["job_id"]
             self._checkpoint(job_id, stage, "running", started=started)
             job = self._job(job_id)
@@ -817,8 +819,8 @@ class AnalysisFlow:
           SELECT count(*) FROM analysis_jobs
           WHERE state='queued' AND current_stage=?
           AND (priority < ? OR (priority=? AND created_at < ?))
-        """, (STAGES[0], item["priority"], item["priority"], item["created_at"])).fetchone()[0]
-        item["queue_position"] = ahead + 1 if item["state"] == "queued" and item["current_stage"] == STAGES[0] else None
+        """, (item["current_stage"], item["priority"], item["priority"], item["created_at"])).fetchone()[0]
+        item["queue_position"] = ahead + 1 if item["state"] == "queued" else None
         return item
 
     def journey(self, *, limit: int = 50) -> dict[str, Any]:

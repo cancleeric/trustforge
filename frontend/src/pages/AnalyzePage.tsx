@@ -43,6 +43,7 @@ export default function AnalyzePage() {
       return
     }
     setHologramData(data ? {
+      analysis: data,
       question: params.q,
       analysisMode: params.type,
       snapshotAt: data.report.generated_at,
@@ -51,7 +52,7 @@ export default function AnalyzePage() {
       primaryValue: data.report.calibrated_confidence,
       total: data.evidence.length,
       status: data.report.decision_state,
-      trustScore: data.report.calibrated_confidence,
+      trustScore: data.report.confidence,
       componentScores: {
         reputation: data.trust_components_aggregate.reputation,
         corroboration: data.trust_components_aggregate.corroboration,

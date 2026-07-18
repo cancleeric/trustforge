@@ -1,7 +1,9 @@
 // oxlint-disable react/only-export-components
 import { createContext, useContext, type ReactNode } from 'react'
+import type { AnalyzeData } from '../lib/types'
 
 export type BridgeHologramData = {
+  analysis?: AnalyzeData
   question?: string
   analysisMode?: string
   snapshotAt?: string

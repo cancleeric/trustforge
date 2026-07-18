@@ -63,9 +63,10 @@ const FALLBACK_SCORES: Record<string, number> = {
   btc: 59, eth: 57, sol: 57, bnb: 57, xrp: 56,
 }
 
-// 4 個信任分項標籤（權重 30/30/20/20，移植自設計稿）。
+// 與 trust/scoring.py DEFAULT_WEIGHTS 對齊。最後一項是操縱懲罰係數；UI
+// 顯示 resistance = 1 - manipulation，但不可另造一套設計稿權重。
 export const COMPONENT_LABELS = ['Reputation', 'Corroboration', 'Recency', 'Manipulation resistance']
-export const COMPONENT_WEIGHTS = [30, 30, 20, 20]
+export const COMPONENT_WEIGHTS = [50, 25, 15, 40]
 
 export interface TrustComponent {
   label: string

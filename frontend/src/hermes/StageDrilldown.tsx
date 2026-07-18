@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
+import { COMPONENT_WEIGHTS, HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import { requeueAnalysis, type AnalysisFlowData, type AnalysisJourneyData } from '../lib/endpoints'
+import type { BridgeHologramData } from '../components/BridgeHologramContext'
 
 interface StageDrilldownProps {
   selCoin: GalaxyCoin
@@ -10,9 +11,10 @@ interface StageDrilldownProps {
   onClose: () => void
   flow?: AnalysisFlowData | null
   journey?: AnalysisJourneyData | null
+  telemetry?: BridgeHologramData | null
 }
 
-export default function StageDrilldown({ selCoin, derivation, selectedStage, onClose, flow, journey }: StageDrilldownProps) {
+export default function StageDrilldown({ selCoin, derivation: fallbackDerivation, selectedStage, onClose, flow, journey, telemetry }: StageDrilldownProps) {
   const { t } = useHermesI18n()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
@@ -21,7 +23,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
   const label = isDivergence ? t('divergence') : selectedStage === 'scan' ? t('scan') : selectedStage === 'filter' ? t('filter') : selectedStage === 'crossverify' ? t('crossverify') : selectedStage === 'manipulation' ? t('manipulation') : t('composite')
   const icon = isDivergence ? '⚠' : selDef?.icon ?? ''
   const color = isDivergence ? HERMES_RED : selectedStage === 'manipulation' ? HERMES_AMBER
-    : selectedStage === 'crossverify' ? derivation.divColor
+    : selectedStage === 'crossverify' ? fallbackDerivation.divColor
       : selectedStage === 'composite' ? (selCoin.tier === 'healthy' ? HERMES_CYAN : selCoin.tier === 'moderate' ? HERMES_AMBER : HERMES_RED)
         : HERMES_CYAN
 
@@ -29,11 +31,47 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
   const componentLabel = (value: string) => value === 'Reputation' ? t('reputation') : value === 'Corroboration' ? t('corroboration') : value === 'Recency' ? t('recency') : t('resistance')
   const reasoningKind = (value: string) => value === 'FACTS' ? t('facts') : value === 'INFERENCE' ? t('inference') : t('conclusion')
   const stageIndex = Math.max(0, STAGE_DEFS.findIndex((stage) => stage.id === selectedStage))
-  const liveStage = flow?.stages[stageIndex]
+  const liveStage = telemetry?.runId ? undefined : flow?.stages[stageIndex]
   const stageId = liveStage?.id
   const recentAttempts = journey?.jobs.flatMap((job) => job.coin === selCoin.name && stageId
     ? job.attempts.filter((attempt) => attempt.stage === stageId).map((attempt) => ({ ...attempt, question: job.question, snapshot: job.snapshot_id })) : []).slice(0, 8) ?? []
   const deadLetters = journey?.dead_letters.filter((item) => item.coin === selCoin.name && item.stage === stageId) ?? []
+  const analysis = telemetry?.analysis
+  const completedStage = telemetry?.pipelineStages?.[stageIndex]
+  const evidence = analysis?.evidence ?? []
+  const passedEvidence = evidence.filter((item) => item.flags.length === 0)
+  const flaggedEvidence = evidence.filter((item) => item.flags.length > 0)
+  const aggregate = analysis?.trust_components_aggregate
+  const actualComponents = aggregate ? [
+    { label: 'Reputation', value: aggregate.reputation, weight: COMPONENT_WEIGHTS[0] },
+    { label: 'Corroboration', value: aggregate.corroboration, weight: COMPONENT_WEIGHTS[1] },
+    { label: 'Recency', value: aggregate.recency, weight: COMPONENT_WEIGHTS[2] },
+    { label: 'Manipulation resistance', value: aggregate.manipulation == null ? null : 1 - aggregate.manipulation, weight: COMPONENT_WEIGHTS[3] },
+  ].filter((item): item is { label: string; value: number; weight: number } => item.value !== null)
+    .map((item) => ({ label: item.label, score: Math.round(item.value * 100), weight: item.weight })) : []
+  const report = analysis?.report
+  const derivation = analysis ? {
+    ...fallbackDerivation,
+    scanned: evidence.length,
+    passedCount: passedEvidence.length,
+    flaggedCount: flaggedEvidence.length,
+    scanItems: evidence.map((item) => ({
+      name: item.source,
+      time: new Date(item.fetched_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      credibility: Math.round(item.trust * 100),
+      note: item.content_reference,
+    })),
+    passedItems: passedEvidence.map((item) => item.source),
+    droppedItems: flaggedEvidence.map((item) => ({ name: item.source, reason: item.flags.join(', ') })),
+    crossItems: (report?.key_basis ?? []).slice(0, 4).map((item) => ({ stance: 'EVIDENCE', claim: item.claim, source: item.explanation, color: HERMES_CYAN })),
+    manipulationItems: flaggedEvidence.flatMap((item) => item.flags.map((flag) => `${item.source}: ${flag}`)),
+    components: actualComponents.map((item) => ({ ...item, barColor: item.score >= 75 ? HERMES_CYAN : item.score >= 50 ? HERMES_AMBER : HERMES_RED })),
+    steps: [
+      ...(report?.facts ?? []).slice(0, 2).map((text) => ({ kind: 'FACTS', indent: 0, color: HERMES_CYAN, text })),
+      ...(report?.inferences ?? []).slice(0, 2).map((text) => ({ kind: 'INFERENCE', indent: 22, color: HERMES_AMBER, text })),
+      ...(report ? [{ kind: 'CONCLUSION', indent: 44, color: HERMES_CYAN, text: report.market_judgment }] : []),
+    ],
+  } : fallbackDerivation
 
   return (
     <div
@@ -64,18 +102,20 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 18px' }}>
-        {liveStage && (
+        {(liveStage || completedStage) && (
           <div style={{ marginBottom: 14, padding: 12, border: '1px solid var(--color-hermes-bd2)', background: 'rgba(4,10,17,.96)', borderRadius: 6, fontSize: 11, lineHeight: 1.7 }}>
-            <div style={{ color: HERMES_CYAN, fontWeight: 700 }}>HERMES WORKER · {liveStage.id}</div>
-            <div>狀態：{liveStage.current ? '處理中' : '待命'}　排隊：{liveStage.queued}</div>
-            {liveStage.next_retry_at && <div style={{ color: HERMES_AMBER }}>下次重試：{new Date(liveStage.next_retry_at * 1000).toLocaleTimeString()}</div>}
-            {liveStage.current ? <>
+            <div style={{ color: HERMES_CYAN, fontWeight: 700 }}>HERMES WORKER · {liveStage?.id ?? completedStage?.id}</div>
+            <div>狀態：{liveStage?.current ? '處理中' : completedStage?.status === 'completed' ? '本次執行已完成' : completedStage?.status === 'failed' ? '本次執行失敗' : '待命'}　排隊：{liveStage?.queued ?? 0}</div>
+            {liveStage?.next_retry_at && <div style={{ color: HERMES_AMBER }}>下次重試：{new Date(liveStage.next_retry_at * 1000).toLocaleTimeString()}</div>}
+            {liveStage?.current ? <>
               <div>幣別：{liveStage.current.coin}　模式：{liveStage.current.mode}</div>
               <div>題目：{liveStage.current.question}</div>
               <div>Snapshot：{liveStage.current.snapshot_id}</div>
               <div>開始：{new Date(liveStage.current.started_at * 1000).toLocaleTimeString()}　重試：{liveStage.current.retry_count}</div>
               {liveStage.current.error && <div style={{ color: HERMES_RED }}>錯誤：{liveStage.current.error}</div>}
-            </> : <div style={{ color: 'var(--color-hermes-tx3)' }}>目前沒有執行包；新 snapshot 或活動題目進入後會自動接手。</div>}
+            </> : completedStage?.status === 'completed'
+              ? <div style={{ color: 'var(--color-hermes-tx3)' }}>run {telemetry?.runId} · {completedStage.metric} {completedStage.unit}</div>
+              : <div style={{ color: 'var(--color-hermes-tx3)' }}>目前沒有執行工作。</div>}
           </div>
         )}
         {(recentAttempts.length > 0 || deadLetters.length > 0) && (
@@ -93,6 +133,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
         )}
         {selectedStage === 'scan' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {analysis && <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)', marginBottom: 4 }}>本次報告保留的 {evidence.length} 筆可追溯證據；不代表來源蒐集階段的原始文件總數。</div>}
             {derivation.scanItems.map((it, i) => {
               const key = `${selCoin.id}_${i}`
               const open = !!expanded[key]
@@ -117,13 +158,13 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
         {selectedStage === 'filter' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div>
-              <div style={{ fontSize: 10, color: HERMES_CYAN, letterSpacing: 1, marginBottom: 7 }}>{t('passed')} · {derivation.passedCount}</div>
+              <div style={{ fontSize: 10, color: HERMES_CYAN, letterSpacing: 1, marginBottom: 7 }}>{analysis ? '無操縱旗標' : t('passed')} · {derivation.passedCount}</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {derivation.passedItems.map((p) => <span key={p} style={{ fontSize: 11, color: 'var(--color-hermes-tx)', background: 'rgba(77,216,224,.13)', border: '1px solid rgba(77,216,224,.4)', borderRadius: 5, padding: '5px 9px' }}>{p}</span>)}
               </div>
             </div>
             <div>
-              <div style={{ fontSize: 10, color: HERMES_RED, letterSpacing: 1, marginBottom: 7 }}>{t('dropped')} · {derivation.flaggedCount}</div>
+              <div style={{ fontSize: 10, color: HERMES_RED, letterSpacing: 1, marginBottom: 7 }}>{analysis ? '有操縱旗標' : t('dropped')} · {derivation.flaggedCount}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {derivation.droppedItems.map((d) => (
                   <div key={d.name} style={{ fontSize: 11.5, color: 'var(--color-hermes-tx)', background: 'rgba(255,95,95,.14)', border: '1px solid rgba(255,95,95,.45)', borderRadius: 6, padding: '7px 10px' }}>
@@ -137,7 +178,9 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
 
         {(selectedStage === 'crossverify' || isDivergence) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 10.5, color: derivation.divColor, background: derivation.divDim, border: `1px solid ${derivation.divBd}`, borderRadius: 5, padding: '4px 9px', width: 'fit-content' }}>{t('divergenceUnit')} · Δ {derivation.divergence}%</div>
+            <div style={{ fontSize: 10.5, color: derivation.divColor, background: derivation.divDim, border: `1px solid ${derivation.divBd}`, borderRadius: 5, padding: '4px 9px', width: 'fit-content' }}>
+              {analysis ? report?.cross_source_signal?.summary ?? '本次沒有形成可報告的跨來源訊號' : `${t('divergenceUnit')} · Δ ${derivation.divergence}%`}
+            </div>
             {derivation.crossItems.map((cv, i) => (
               <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 5, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: `3px solid ${cv.color}`, borderRadius: '0 6px 6px 0', padding: '9px 12px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
@@ -152,7 +195,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
 
         {selectedStage === 'manipulation' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 11.5, color: 'var(--color-hermes-tx2)' }}>{t('flaggedChannel')}: <b style={{ color: 'var(--color-hermes-tx)' }}>Social Sentiment Scanner</b></div>
+            <div style={{ fontSize: 11.5, color: 'var(--color-hermes-tx2)' }}>{t('flaggedChannel')}: <b style={{ color: 'var(--color-hermes-tx)' }}>{analysis ? [...new Set(flaggedEvidence.map((item) => item.source))].join(', ') || '本次無確定操縱旗標' : 'Social Sentiment Scanner'}</b></div>
             {derivation.manipulationItems.map((m, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 11.5, color: 'var(--color-hermes-tx)', background: 'rgba(255,95,95,.14)', border: '1px solid rgba(255,95,95,.45)', borderRadius: 6, padding: '8px 11px' }}>
                 <span style={{ color: HERMES_RED }}>✕</span><span>{m}</span>

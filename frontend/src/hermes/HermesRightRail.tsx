@@ -1,6 +1,7 @@
 import { TIER_COLOR, type GalaxyCoin, type SelectedDerivation, type TrustComponent } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import type { AnalysisFlowData, AnalysisJourneyData } from '../lib/endpoints'
+import type { CrossSourceSignal } from '../lib/types'
 
 interface HermesRightRailProps {
   selCoin: GalaxyCoin
@@ -10,12 +11,13 @@ interface HermesRightRailProps {
   derived?: boolean
   flow?: AnalysisFlowData | null
   journey?: AnalysisJourneyData | null
+  crossSignal?: CrossSourceSignal | null
   onOpenComposite: () => void
   onOpenDivergence: () => void
 }
 
 export default function HermesRightRail({
-  selCoin, components, derivation, displayScore, derived, flow, journey, onOpenComposite, onOpenDivergence,
+  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, onOpenComposite, onOpenDivergence,
 }: HermesRightRailProps) {
   const { t } = useHermesI18n()
   const { score, tier, full } = selCoin
@@ -126,7 +128,8 @@ export default function HermesRightRail({
           <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}>{t('divergence')}</span>
         </div>
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
-          {tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
+          {crossSignal ? `${crossSignal.summary} — ${t('tapReview')}`
+            : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
             : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
               : `${t('conflict')} · Δ ${divDock.divergence}% — ${t('tapReview')}`}
         </div>
