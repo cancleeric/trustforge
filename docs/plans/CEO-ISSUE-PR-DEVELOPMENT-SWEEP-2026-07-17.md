@@ -50,7 +50,10 @@ Merge 前仍缺：
 
 `develop` 已含 `718faf5 feat: archive connector fetches as immutable events`，包含 append-only `source_events`、fetch scheduler 接線與測試。下一步是向 issue 補 commit/test evidence；若 #218 合併後 main 含該 commit，可關閉。
 
-## 30 分鐘 CEO Sweep 規格
+## 每小時 CEO Sweep 建議報告規格
+
+排程只盤點並輸出待互動式 CEO 審查的建議，不會自行核准、派代理、改 code、
+merge 或 deploy。
 
 每輪自問自答：
 

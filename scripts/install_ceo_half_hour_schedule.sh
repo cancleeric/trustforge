@@ -36,7 +36,7 @@ cat >"$PLIST" <<PLIST
     <string>0</string>
   </dict>
   <key>StartInterval</key>
-  <integer>1800</integer>
+  <integer>3600</integer>
   <key>RunAtLoad</key>
   <false/>
   <key>WorkingDirectory</key>
@@ -51,5 +51,5 @@ PLIST
 
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "installed $LABEL every 1800s"
+echo "installed $LABEL every 3600s"
 echo "$PLIST"
