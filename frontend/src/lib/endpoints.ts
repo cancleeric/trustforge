@@ -63,15 +63,30 @@ export function getAnalysisSnapshot(coin: string, mode: string, signal?: AbortSi
   })
 }
 
-interface AnalysisQuestionReceipt { question_id: string; job_id: string | null; state: string }
+export interface AnalysisQuestionReceipt { question_id: string; job_id: string | null; state: string; origin: 'manual' }
 export function registerAnalysisQuestion(coin: string, mode: string, question: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
   const valid = (value: unknown): value is AnalysisQuestionReceipt => !!value && typeof value === 'object' &&
     typeof (value as AnalysisQuestionReceipt).question_id === 'string' &&
     ((value as AnalysisQuestionReceipt).job_id === null || typeof (value as AnalysisQuestionReceipt).job_id === 'string') &&
-    typeof (value as AnalysisQuestionReceipt).state === 'string'
+    typeof (value as AnalysisQuestionReceipt).state === 'string' &&
+    (value as AnalysisQuestionReceipt).origin === 'manual'
   return apiFetch('/api/analysis-question', undefined, valid, {
     signal, method: 'POST', jsonBody: { coin, mode, question }, timeoutMs: DEFAULT_TIMEOUT_MS,
   })
+}
+
+export interface AnalysisJobStatus {
+  job_id: string; state: 'queued' | 'running' | 'completed' | 'failed'; current_stage: string
+  error: string | null; origin: 'manual' | 'scheduled'; priority: number; queue_position: number | null
+  result: AnalyzeData | null
+}
+export function getAnalysisJob(jobId: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisJobStatus>> {
+  const valid = (value: unknown): value is AnalysisJobStatus => !!value && typeof value === 'object' &&
+    typeof (value as AnalysisJobStatus).job_id === 'string' &&
+    typeof (value as AnalysisJobStatus).state === 'string' &&
+    typeof (value as AnalysisJobStatus).current_stage === 'string' &&
+    ((value as AnalysisJobStatus).result === null || isAnalyzeData((value as AnalysisJobStatus).result))
+  return apiFetch('/api/analysis-job', { job_id: jobId }, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 
 export interface AnalysisQuestionMatch {

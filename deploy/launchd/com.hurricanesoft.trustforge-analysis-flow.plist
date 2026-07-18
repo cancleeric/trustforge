@@ -9,7 +9,8 @@
     <string>scripts/run_analysis_flow.py</string>
     <string>--daemon</string>
     <string>--workers-per-stage</string><string>4</string>
-    <string>--poll-seconds</string><string>15</string>
+    <string>--poll-seconds</string><string>2</string>
+    <string>--schedule-seconds</string><string>1800</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/apple/HurricaneSoft/trustforge</string>
   <key>EnvironmentVariables</key>

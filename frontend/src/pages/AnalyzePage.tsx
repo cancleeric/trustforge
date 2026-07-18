@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { getAnalyze } from '../lib/endpoints'
+import { getAnalysisJob, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeParams } from '../lib/endpoints'
+import type { AnalysisJobStatus } from '../lib/endpoints'
 import type { AnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import QueryConsole, { type QueryValues } from '../components/QueryConsole'
@@ -29,6 +30,7 @@ export default function AnalyzePage() {
   const [data, setData] = useState<AnalyzeData | null>(null)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [manualJob, setManualJob] = useState<AnalysisJobStatus | null>(null)
   const [requestNonce, setRequestNonce] = useState(0)
   const mode = searchParams.get('mode') || (params.type === 'hypothesis' ? 'fundamentals' : 'risk')
   const hasExplicitRequest = searchParams.has('q') || searchParams.get('sample') === '1'
@@ -86,25 +88,49 @@ export default function AnalyzePage() {
     const controller = new AbortController()
     setLoading(true)
     setError(null)
-    // 手動送出是獨立的 on-demand run，不能受 Hermes 背景排程開關影響。
-    // `/api/analyze` 本身已有來源限流、in-flight 去重與 Bedrock 預算護欄。
-    void getAnalyze({
-      coin: params.coin,
-      type: params.type,
-      q: params.q,
-      sample: params.sample,
-    }, controller.signal).then((res) => {
+    setManualJob(null)
+    if (params.sample) {
+      void getAnalyze({ coin: params.coin, type: params.type, q: params.q, sample: params.sample }, controller.signal).then((res) => {
+        if (controller.signal.aborted) return
+        setLoading(false)
+        if (res.ok) setData(res.data)
+        else setError(res.error)
+      })
+      return () => controller.abort()
+    }
+    const poll = (jobId: string) => {
+      void getAnalysisJob(jobId, controller.signal).then((res) => {
+        if (controller.signal.aborted) return
+        if (!res.ok) {
+          setLoading(false)
+          setError(res.error)
+          return
+        }
+        setManualJob(res.data)
+        if (res.data.state === 'completed' && res.data.result) {
+          setData(res.data.result)
+          setLoading(false)
+        } else if (res.data.state === 'failed') {
+          setLoading(false)
+          setError({ code: 'analysis_failed', message: res.data.error || '分析工作失敗' })
+        } else {
+          window.setTimeout(() => poll(jobId), 1200)
+        }
+      })
+    }
+    // Explicit manual runs are durable high-priority jobs. The scheduler switch
+    // controls only scheduled jobs, so it cannot disable this path.
+    void registerAnalysisQuestion(params.coin, mode, params.q, controller.signal).then((res) => {
       if (controller.signal.aborted) return
-      setLoading(false)
-      if (res.ok) {
-        setData(res.data)
-        setError(null)
-      } else {
-        setError(res.error)
+      if (!res.ok || !res.data.job_id) {
+        setLoading(false)
+        setError(res.ok ? { code: 'analysis_queue_unavailable', message: '分析工作尚未建立' } : res.error)
+        return
       }
+      poll(res.data.job_id)
     })
     return () => controller.abort()
-  }, [hasExplicitRequest, params.coin, params.q, params.sample, params.type, requestNonce])
+  }, [hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return
@@ -150,7 +176,9 @@ export default function AnalyzePage() {
           </aside>
 
           <section className="flex flex-col gap-4">
-            {loading && !data && <LoadingState label={`Hermes 正在分析 ${params.coin}…`} />}
+            {loading && !data && <LoadingState label={manualJob
+              ? `手動優先處理中：${manualJob.current_stage}${manualJob.queue_position ? `（佇列第 ${manualJob.queue_position} 位）` : ''}`
+              : `Hermes 正在建立 ${params.coin} 的手動分析工作…`} />}
             {loading && data && (
               <div className="hermes-analysis-pending" role="status" aria-live="polite">
                 <i /> Hermes 正在分析新的資料快照；目前保留顯示上一個完整結果，完成後會一次切換。

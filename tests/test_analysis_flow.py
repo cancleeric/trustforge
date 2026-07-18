@@ -77,7 +77,7 @@ def test_full_queue_is_normal_backpressure_and_refresh_fills_missing_matrix(tmp_
     snapshot = flow.create_snapshot("BTC")
 
     assert len(flow.enqueue_matrix(snapshot)) == 2
-    assert flow.status()["queue"] == {"pending": 2, "capacity": 2, "backpressure": True}
+    assert flow.status()["queue"] == {"pending": 2, "capacity": 2, "backpressure": True, "manual_pending": 0}
 
     # Free one durable slot. The next normal refresh revisits the same snapshot,
     # skips existing entries, and fills exactly one previously omitted mode.
@@ -106,6 +106,39 @@ def test_registered_question_is_adopted_and_reanalyzed_on_new_snapshot(tmp_path,
     next_flow.join(); next_flow.stop()
     assert next_jobs
     assert flow.latest("BTC", "risk", question)["snapshot_id"] != snapshot
+
+
+def test_manual_job_precedes_waiting_scheduled_work_and_records_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    scheduled = flow.enqueue_job(snapshot, "risk", "scheduled work")
+    _, manual = flow.submit_manual("BTC", "risk", "manual work")
+
+    assert scheduled and manual
+    priority, _, package = flow._queues["source_ingestion"].get_nowait()
+    flow._queues["source_ingestion"].task_done()
+    assert priority == 0
+    assert package["job_id"] == manual
+    job = flow._job(manual)
+    assert (job["origin"], job["priority"]) == ("manual", 0)
+    assert flow.job_status(manual)["queue_position"] == 1
+    flow.stop()
+
+
+def test_invalid_manual_job_never_collects_sources(tmp_path, monkeypatch):
+    called = False
+    def collect(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return _docs()
+    monkeypatch.setattr("trustforge.analysis_flow.collect", collect)
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+
+    with pytest.raises(ValueError, match="question must contain"):
+        flow.submit_manual("BTC", "risk", "")
+
+    assert called is False
 
 
 def test_nonretryable_failure_enters_dead_letter_with_attempt_history(tmp_path, monkeypatch):
@@ -194,7 +227,7 @@ def test_runtime_reconciles_orphaned_intermediate_stage_from_snapshot(tmp_path, 
     # Simulate a process losing its in-memory package after durably checkpointing
     # an intermediate stage. The source queue from enqueue_job is deliberately
     # drained so reconciliation has one unambiguous package to rebuild.
-    flow._queues["source_ingestion"].get_nowait()
+    _, _, _ = flow._queues["source_ingestion"].get_nowait()
     flow._queues["source_ingestion"].task_done()
     flow._checkpoint(job_id, "claim_extraction", "queued")
     monkeypatch.setattr(flow, "_spawn_worker", lambda *_args: None)
@@ -218,6 +251,8 @@ def test_local_daemon_runs_overlapping_workers_per_stage():
 
     index = arguments.index("--workers-per-stage")
     assert int(arguments[index + 1]) >= 2
+    index = arguments.index("--schedule-seconds")
+    assert int(arguments[index + 1]) == 1800
 
 
 def test_readonly_projection_skips_schema_writes_and_reads_existing_state(tmp_path):

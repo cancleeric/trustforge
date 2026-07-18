@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -41,6 +42,8 @@ MODES: dict[str, tuple[QuestionType, str]] = {
 }
 QUESTION_TYPES = {**{mode: item[0] for mode, item in MODES.items()}, "comparison": QuestionType.COMPARISON}
 QUEUE_CAPACITY = 500
+MANUAL_PRIORITY = 0
+SCHEDULED_PRIORITY = 100
 
 
 def _question_terms(value: str) -> set[str]:
@@ -73,7 +76,15 @@ class AnalysisFlow:
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
-        self._queues = {stage: queue.Queue() for stage in STAGES}
+        # Only the first stage accepts durable jobs from other processes.  A
+        # priority queue here lets an arriving manual request run before any
+        # waiting scheduled work, while work already in a stage is never
+        # interrupted or discarded.
+        self._queues = {
+            stage: queue.PriorityQueue() if stage == STAGES[0] else queue.Queue()
+            for stage in STAGES
+        }
+        self._queue_sequence = itertools.count()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._timers: list[threading.Timer] = []
@@ -181,6 +192,15 @@ class AnalysisFlow:
             SELECT RAISE(ABORT, 'analysis_lineage_events is append-only');
           END;
         """)
+        # SQLite deployments created before manual priority support need an
+        # additive migration.  Defaults preserve the previous scheduled-job
+        # semantics for every existing row.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(analysis_jobs)").fetchall()}
+        if "origin" not in columns:
+            conn.execute("ALTER TABLE analysis_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'scheduled'")
+        if "priority" not in columns:
+            conn.execute(f"ALTER TABLE analysis_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT {SCHEDULED_PRIORITY}")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_priority ON analysis_jobs(state,priority,created_at)")
         TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
         # memory existed. Deterministic IDs make this migration restart-safe.
@@ -238,7 +258,8 @@ class AnalysisFlow:
             output.append(item)
         return output
 
-    def register_question(self, coin: str, mode: str, question: str, *, enqueue: bool = True) -> tuple[str, str | None]:
+    def register_question(self, coin: str, mode: str, question: str, *, enqueue: bool = True,
+                          origin: str = "scheduled") -> tuple[str, str | None]:
         """Persist an active question and enqueue it against the latest committed snapshot."""
         coin, mode, question = coin.upper(), mode.strip(), question.strip()
         if coin not in COIN_POOL or mode not in QUESTION_TYPES:
@@ -269,7 +290,29 @@ class AnalysisFlow:
         snap = self._conn().execute(
             "SELECT snapshot_id FROM analysis_snapshots WHERE coin=? ORDER BY created_at DESC LIMIT 1", (coin,),
         ).fetchone()
-        job_id = self.enqueue_job(snap[0], mode, question) if snap and enqueue else None
+        job_id = self.enqueue_job(snap[0], mode, question, origin=origin) if snap and enqueue else None
+        return question_id, job_id
+
+    def submit_manual(self, coin: str, mode: str, question: str) -> tuple[str, str | None]:
+        """Create a high-priority, snapshot-isolated job for an explicit user run.
+
+        This deliberately does not consult the Hermes autonomy toggle: that
+        toggle controls scheduled refresh creation only.  The normal snapshot
+        ingestion and downstream pipeline remain subject to their existing
+        source, Bedrock and cost controls.
+        """
+        # Validate and persist the intent before collecting live sources.  Bad
+        # input must never trigger a chargeable/network ingestion attempt.
+        question_id, _ = self.register_question(coin, mode, question, enqueue=False)
+        coin = coin.upper()
+        snapshot_id = self.create_snapshot(coin, query=question)
+        job_id = self.enqueue_job(snapshot_id, mode, question, origin="manual")
+        if job_id is None:
+            existing = self._conn().execute(
+                "SELECT job_id FROM analysis_jobs WHERE snapshot_id=? AND coin=? AND mode=? AND question=?",
+                (snapshot_id, coin, mode, question),
+            ).fetchone()
+            job_id = existing["job_id"] if existing else None
         return question_id, job_id
 
     def question_context(self, coin: str, mode: str, question: str, *, limit: int = 5) -> dict[str, Any]:
@@ -327,11 +370,14 @@ class AnalysisFlow:
         return {"query": question, "matches": candidates[:max(1, min(limit, 10))],
                 "conversation": conversation, "retrieval": "sqlite_char_bigram_v1"}
 
-    def enqueue_job(self, snapshot_id: str, mode: str, question: str) -> str | None:
+    def enqueue_job(self, snapshot_id: str, mode: str, question: str, *, origin: str = "scheduled") -> str | None:
         row = self._conn().execute("SELECT coin FROM analysis_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
         if row is None or mode not in QUESTION_TYPES:
             raise ValueError("unknown snapshot or mode")
+        if origin not in {"manual", "scheduled"}:
+            raise ValueError("unsupported analysis job origin")
         qtype = QUESTION_TYPES[mode]
+        priority = MANUAL_PRIORITY if origin == "manual" else SCHEDULED_PRIORITY
         # Idempotency must be checked before capacity.  Otherwise a full queue
         # prevents refresh_once() from revisiting the same immutable snapshot
         # and filling matrix entries that did not fit during the previous pass.
@@ -347,8 +393,12 @@ class AnalysisFlow:
             return None
         job_id, now = f"flow-{uuid.uuid4().hex[:16]}", time.time()
         cur = self._conn().execute(
-            "INSERT OR IGNORE INTO analysis_jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (job_id, snapshot_id, row["coin"], mode, question, qtype.value, "queued", STAGES[0], 0, None, now, now),
+            """INSERT OR IGNORE INTO analysis_jobs(
+                 job_id,snapshot_id,coin,mode,question,question_type,state,current_stage,retry_count,error,
+                 created_at,updated_at,origin,priority
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (job_id, snapshot_id, row["coin"], mode, question, qtype.value, "queued", STAGES[0], 0, None,
+             now, now, origin, priority),
         )
         if not cur.rowcount:
             return None
@@ -357,9 +407,10 @@ class AnalysisFlow:
             "job_enqueued", entity_type="analysis_job", entity_id=job_id,
             snapshot_id=snapshot_id, job_id=job_id,
             parent_type="snapshot", parent_id=snapshot_id,
-            metadata={"coin": row["coin"], "mode": mode, "question_type": qtype.value},
+            metadata={"coin": row["coin"], "mode": mode, "question_type": qtype.value,
+                      "origin": origin, "priority": priority},
         )
-        self._queues[STAGES[0]].put({"job_id": job_id})
+        self._put_package(STAGES[0], {"job_id": job_id, "priority": priority})
         self._adopted.add(job_id)
         return job_id
 
@@ -398,7 +449,7 @@ class AnalysisFlow:
                 (coin, mode),
             ).fetchall()
             for item in active:
-                job_id = self.enqueue_job(snapshot_id, mode, item["question"])
+                job_id = self.enqueue_job(snapshot_id, mode, item["question"], origin="scheduled")
                 if job_id: jobs.append(job_id)
         return jobs
 
@@ -413,8 +464,16 @@ class AnalysisFlow:
           finished_at=excluded.finished_at, duration_sec=excluded.duration_sec,
           event_count=excluded.event_count, retry_count=excluded.retry_count, error=excluded.error
         """, (job_id, stage, state, now, started, now if state in {"completed", "failed"} else None, duration, events, retry, error))
+        job_state = "failed" if state == "failed" else "queued" if state == "queued" else "running"
         self._conn().execute("UPDATE analysis_jobs SET state=?,current_stage=?,error=?,updated_at=? WHERE job_id=?",
-                             ("running" if state != "failed" else "failed", stage, error, now, job_id))
+                             (job_state, stage, error, now, job_id))
+
+    def _put_package(self, stage: str, package: dict[str, Any]) -> None:
+        if stage == STAGES[0]:
+            priority = int(package.get("priority", self._job(package["job_id"])["priority"]))
+            self._queues[stage].put((priority, next(self._queue_sequence), package))
+        else:
+            self._queues[stage].put(package)
 
     def start(self) -> None:
         self.recover()
@@ -437,7 +496,7 @@ class AnalysisFlow:
             self._conn().execute("DELETE FROM analysis_retry_queue WHERE job_id=?", (job_id,))
             self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (job_id,))
             self._checkpoint(job_id, STAGES[0], "queued")
-            self._queues[STAGES[0]].put({"job_id": job_id})
+            self._put_package(STAGES[0], {"job_id": job_id})
             self._adopted.add(job_id)
             restarted += 1
         return restarted
@@ -491,13 +550,14 @@ class AnalysisFlow:
           SELECT job_id FROM analysis_jobs WHERE state IN ('queued','running','failed')
           AND job_id NOT IN (SELECT job_id FROM analysis_retry_queue)
           AND job_id NOT IN (SELECT job_id FROM analysis_dead_letters)
+          ORDER BY priority ASC, created_at ASC
         """).fetchall()
         for row in rows:
             if row["job_id"] in self._adopted:
                 continue
             self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (row["job_id"],))
             self._checkpoint(row["job_id"], STAGES[0], "queued")
-            self._queues[STAGES[0]].put({"job_id": row["job_id"]})
+            self._put_package(STAGES[0], {"job_id": row["job_id"]})
             self._adopted.add(row["job_id"])
 
     def adopt_pending(self) -> int:
@@ -507,13 +567,14 @@ class AnalysisFlow:
           JOIN analysis_jobs j USING(job_id)
           WHERE s.stage=? AND s.state='queued' AND j.current_stage=?
           AND s.job_id NOT IN (SELECT job_id FROM analysis_retry_queue)
+          ORDER BY j.priority ASC, s.queue_entered_at ASC
         """, (STAGES[0], STAGES[0])).fetchall()
         adopted = 0
         for row in rows:
             job_id = row["job_id"]
             if job_id in self._adopted: continue
             self._adopted.add(job_id)
-            self._queues[STAGES[0]].put({"job_id": job_id})
+            self._put_package(STAGES[0], {"job_id": job_id})
             adopted += 1
         return adopted
 
@@ -523,7 +584,7 @@ class AnalysisFlow:
             (job_id, stage, time.time()),
         )
         if not cursor.rowcount: return False
-        self._queues[STAGES[0]].put({"job_id": job_id})
+        self._put_package(STAGES[0], {"job_id": job_id})
         self._adopted.add(job_id)
         return True
 
@@ -537,6 +598,8 @@ class AnalysisFlow:
         while not self._stop.is_set():
             try: package = self._queues[stage].get(timeout=.2)
             except queue.Empty: continue
+            if stage == STAGES[0]:
+                _, _, package = package
             started = time.time(); job_id = package["job_id"]
             self._checkpoint(job_id, stage, "running", started=started)
             job = self._job(job_id)
@@ -559,7 +622,7 @@ class AnalysisFlow:
                 pos = STAGES.index(stage)
                 if pos + 1 < len(STAGES):
                     next_stage = STAGES[pos + 1]; self._checkpoint(job_id, next_stage, "queued")
-                    self._queues[next_stage].put(package)
+                    self._put_package(next_stage, package)
                 else:
                     self._conn().execute(
                         "UPDATE analysis_jobs SET state='completed',error=NULL,updated_at=? WHERE job_id=?",
@@ -600,7 +663,7 @@ class AnalysisFlow:
                             "DELETE FROM analysis_retry_queue WHERE job_id=? AND stage=? AND next_retry_at<=?",
                             (job_id, stage, time.time()),
                         )
-                        if cursor.rowcount: self._queues[stage].put(package)
+                        if cursor.rowcount: self._put_package(stage, package)
                     timer = threading.Timer(delay, release_in_process)
                     timer.daemon = True; timer.start()
                     self._timers.append(timer)
@@ -717,7 +780,7 @@ class AnalysisFlow:
                     "dead_letter_count": 0, "updated_at": iso_utc(time.time())}
         stages = []
         for stage in STAGES:
-            running = self._conn().execute("""SELECT j.coin,j.mode,j.question,j.snapshot_id,s.started_at,s.retry_count,s.error
+            running = self._conn().execute("""SELECT j.coin,j.mode,j.question,j.snapshot_id,j.origin,j.priority,s.started_at,s.retry_count,s.error
               FROM analysis_stage_runs s JOIN analysis_jobs j USING(job_id) WHERE s.stage=? AND s.state='running' ORDER BY s.started_at LIMIT 1""", (stage,)).fetchone()
             queued = self._conn().execute("SELECT count(*) FROM analysis_stage_runs WHERE stage=? AND state='queued'", (stage,)).fetchone()[0]
             retry = self._conn().execute(
@@ -729,10 +792,34 @@ class AnalysisFlow:
         pending = self._conn().execute(
             "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')",
         ).fetchone()[0]
+        queued_manual = self._conn().execute(
+            "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running') AND origin='manual'",
+        ).fetchone()[0]
         return {"agent": "hermes", "state": "continuous", "stages": stages,
                 "queue": {"pending": pending, "capacity": QUEUE_CAPACITY,
-                          "backpressure": pending >= QUEUE_CAPACITY},
+                          "backpressure": pending >= QUEUE_CAPACITY,
+                          "manual_pending": queued_manual},
                 "dead_letter_count": dead, "updated_at": iso_utc(time.time())}
+
+    def job_status(self, job_id: str) -> dict[str, Any] | None:
+        """Return one durable job and its atomically published report, if ready."""
+        if self._readonly_store_missing():
+            return None
+        job = self._conn().execute("SELECT * FROM analysis_jobs WHERE job_id=?", (job_id,)).fetchone()
+        if job is None:
+            return None
+        item = dict(job)
+        result = self._conn().execute(
+            "SELECT payload_json FROM analysis_results WHERE job_id=?", (job_id,),
+        ).fetchone()
+        item["result"] = json.loads(result["payload_json"]) if result else None
+        ahead = self._conn().execute("""
+          SELECT count(*) FROM analysis_jobs
+          WHERE state='queued' AND current_stage=?
+          AND (priority < ? OR (priority=? AND created_at < ?))
+        """, (STAGES[0], item["priority"], item["priority"], item["created_at"])).fetchone()[0]
+        item["queue_position"] = ahead + 1 if item["state"] == "queued" and item["current_stage"] == STAGES[0] else None
+        return item
 
     def journey(self, *, limit: int = 50) -> dict[str, Any]:
         if self._readonly_store_missing():

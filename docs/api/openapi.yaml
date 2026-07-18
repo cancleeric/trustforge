@@ -436,12 +436,42 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/analysis-job:
+    get:
+      tags: [analysis]
+      operationId: getAnalysisJob
+      summary: 讀取單一持久化分析工作的進度與完成報告
+      description: |
+        唯讀狀態投影。回傳高優先手動工作或低優先排程工作的目前節點、
+        佇列位置、錯誤與完成後原子發布的報告；不會建立或啟動工作。
+      parameters:
+        - in: query
+          name: job_id
+          required: true
+          schema: {type: string, maxLength: 100}
+      responses:
+        "200":
+          description: 工作狀態；完成時 data.result 為完整分析報告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: 找不到指定工作
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/analysis-question:
     post:
       tags: [analysis]
       operationId: registerAnalysisQuestion
-      summary: 登記持續分析題目
-      description: 只登記分析意圖並排入最新 snapshot；請求本身不等待分析完成。
+      summary: 建立高優先手動分析工作
+      description: |
+        建立新的不可變資料 snapshot 與高優先工作。此路徑不受 Hermes
+        自動排程開關影響，但仍受來源、Bedrock 與每日成本護欄約束；請求
+        本身不等待分析完成，使用 analysis-job 追蹤結果。
       requestBody:
         required: true
         content:

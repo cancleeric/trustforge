@@ -25,6 +25,7 @@ import pytest
 
 from trustforge import web
 from trustforge import hermes
+from trustforge import analysis_flow
 from trustforge.admin_config import (
     AdminConfig,
     AdminConfigReadError,
@@ -943,14 +944,19 @@ def test_upgrade_activation_endpoint_is_authenticated_and_explicit(admin_enabled
     assert called == {"proposal_id": "p", "actor": "release-operator", "reason": "reviewed"}
 
 
-def test_analysis_question_write_is_blocked_when_hermes_autonomy_disabled(monkeypatch):
+def test_manual_analysis_question_is_allowed_when_hermes_autonomy_disabled(monkeypatch):
     monkeypatch.setattr(hermes, "autonomy_enabled", lambda: (False, "config"))
     monkeypatch.setattr(web, "_check_status_rate_limit", lambda *args, **kwargs: None)
+    class Flow:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def submit_manual(self, *_args): return "question-1", "flow-1"
+    monkeypatch.setattr(analysis_flow, "AnalysisFlow", Flow)
     code, body, _ = _request(
         "POST",
         "/api/analysis-question",
         body=json.dumps({"coin": "BTC", "mode": "risk", "question": "test"}),
     )
     payload = json.loads(body)
-    assert code == 409
-    assert payload["error"]["code"] == "automation_disabled"
+    assert code == 202
+    assert payload["data"] == {"question_id": "question-1", "job_id": "flow-1", "state": "queued", "origin": "manual"}

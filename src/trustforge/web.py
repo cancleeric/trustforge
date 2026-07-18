@@ -5197,6 +5197,22 @@ def _handle_api_analysis_snapshot(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_snapshot_unavailable", "分析快照暫時無法讀取")
 
 
+def _handle_api_analysis_job(qs: dict) -> tuple[int, str]:
+    job_id = qs.get("job_id", [""])[0].strip()
+    if not job_id or len(job_id) > 100:
+        return 400, _json_envelope_err("bad_request", "job_id 不合法")
+    try:
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow(readonly=True) as flow:
+            job = flow.job_status(job_id)
+        if job is None:
+            return 404, _json_envelope_err("job_not_found", "找不到分析工作")
+        return 200, _json_envelope_ok(job)
+    except Exception:
+        logging.exception("TrustForge /api/analysis-job error")
+        return 502, _json_envelope_err("analysis_job_unavailable", "分析工作狀態暫時無法讀取")
+
+
 def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
     """Retrieve prior Hermes dialogue/results; this endpoint never starts work."""
     coin = qs.get("coin", ["BTC"])[0].upper()
@@ -5214,7 +5230,7 @@ def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
 
 
 def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[int, str]:
-    """Register analysis intent; workers consume it asynchronously from the latest snapshot."""
+    """Create a high-priority manual analysis job, independent of scheduling."""
     payload, error = _read_admin_put_body(headers, rfile)
     if error is not None:
         return error
@@ -5223,16 +5239,13 @@ def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[
         return 400, _json_envelope_err("bad_request", "只接受 coin、mode、question")
     try:
         _check_status_rate_limit(client_ip, "analysis-write")
-        from .hermes import autonomy_enabled
-        enabled, source = autonomy_enabled()
-        if not enabled:
-            return 409, _json_envelope_err("automation_disabled", f"Hermes 自動工作已關閉（{source}）")
         from .analysis_flow import AnalysisFlow
         with AnalysisFlow() as flow:
-            question_id, job_id = flow.register_question(
+            question_id, job_id = flow.submit_manual(
                 str(payload.get("coin", "")), str(payload.get("mode", "")), str(payload.get("question", "")),
             )
-        return 202, _json_envelope_ok({"question_id": question_id, "job_id": job_id, "state": "queued" if job_id else "registered"})
+        return 202, _json_envelope_ok({"question_id": question_id, "job_id": job_id,
+                                       "state": "queued" if job_id else "registered", "origin": "manual"})
     except TooManyRequests as exc:
         return 429, _json_envelope_err("rate_limited", str(exc))
     except ValueError as exc:
@@ -6738,6 +6751,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-snapshot":
             code, body = _handle_api_analysis_snapshot(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/analysis-job":
+            code, body = _handle_api_analysis_job(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-question-context":
             code, body = _handle_api_analysis_question_context(qs)
