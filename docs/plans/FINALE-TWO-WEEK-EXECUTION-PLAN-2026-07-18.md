@@ -38,17 +38,17 @@ Required final state:
 
 ## Ordered Work
 
-| Order | Issue | Owner Role | Dependency | Exit Evidence |
+| Order | Issue | Execution Stream | Dependency | Exit Evidence |
 | --- | --- | --- | --- | --- |
-| 1 | #219 | Runtime/backend | none | Manual and scheduled jobs share durable priority contract; manual worker wake-up and dedup tests. |
-| 2 | #221 | Runtime/ops | #219 for final priority assertion | Three production cadence records; start/stop propagation; scheduler telemetry. |
-| 3 | #202 | Release/Bedrock | #170 or recorded policy assumption | One non-offline BTC artifact with model, cost and no placeholder. |
-| 4 | #203 | QA/data | #202 | Five coins x three modes online matrix, p95 and explicit source degradation. |
-| 5 | #199 | Integration/frontend | none | HOYA status is truthful when contract/env is absent; startup self-check and tests. |
-| 6 | #206 | Frontend/product | #202 state contract | No traceback, raw network failure or offline placeholder in demo surface. |
-| 7 | #104, #113 | Security/ops | production access | Alarm, trusted client-IP and admin alerting evidence. |
-| 8 | #204 | QA/release | 1-7 | Desktop/mobile captures and full recorded run at a release tag. |
-| 9 | #205 | Security/release | human public/private decision | Secret/internal-reference scan and submission checklist. |
+| 1 | #219 | Runtime | none | Manual and scheduled jobs share durable priority contract; manual worker wake-up and dedup tests. |
+| 2 | #221 | Runtime | #219 for final priority assertion | Three production cadence records; start/stop propagation; scheduler telemetry. |
+| 3 | #202 | Release evidence | #170 or recorded policy assumption | One non-offline BTC artifact with model, cost and no placeholder. |
+| 4 | #203 | Release evidence | #202 | Five coins x three modes online matrix, p95 and explicit source degradation. |
+| 5 | #199 | Product truthfulness | none | HOYA status is truthful when contract/env is absent; startup self-check and tests. |
+| 6 | #206 | Product truthfulness | #202 state contract | No traceback, raw network failure or offline placeholder in demo surface. |
+| 7 | #104, #113 | Operations evidence | production access | Alarm, trusted client-IP and admin alerting evidence. |
+| 8 | #204 | Release evidence | 1-7 | Desktop/mobile captures and full recorded run at a release tag. |
+| 9 | #205 | Submission safety | human public/private decision | Secret/internal-reference scan and submission checklist. |
 
 ## Parallel Lanes
 
@@ -83,9 +83,9 @@ They depend on genuine heterogeneous historical coverage and leakage-safe,
 eligible outcomes. #8 and #167 are external connector dependencies. They must
 not be represented as completed until their real credentials/contracts exist.
 
-## Multi-Developer Rules
+## Execution Rules
 
-1. One issue, one branch, one accountable owner role.
+1. Issues remain unassigned; we jointly work them in this fixed order.
 2. Every pull request references its issue and states dependency impact.
 3. Runtime changes require backend tests plus a production-safe smoke plan.
 4. Security and cost changes require adversarial review before merge.
