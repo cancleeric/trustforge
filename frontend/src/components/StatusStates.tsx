@@ -32,7 +32,7 @@ export function ErrorState({ code, message }: { code: string; message: string })
         <p className="font-semibold" style={{ color: tone }}>{title} <span className="font-mono opacity-70">{code}</span></p>
         <p className="truncate text-xs text-tf-text2">{message}</p>
       </div>
-      <button className="tf-error-retry" type="button" title="重新整理" aria-label="重新整理" onClick={() => window.location.reload()}>↻</button>
+      <button className="tf-error-retry" type="button" title="重新整理" onClick={() => window.location.reload()}>↻ 重新嘗試</button>
     </div>
   )
 }

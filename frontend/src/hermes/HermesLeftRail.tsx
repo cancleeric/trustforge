@@ -3,6 +3,7 @@ import { useHermesI18n } from './hermesI18n'
 import type { ServiceMonitorState } from '../pages/HermesDashboard'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
 import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
+import GlossaryTerm from '../components/GlossaryTerm'
 
 interface HermesLeftRailProps {
   model: GalaxyModel
@@ -106,7 +107,7 @@ export default function HermesLeftRail({
           ) : null}
           {!!questionContext?.matches.length && (
             <div style={{ borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
-              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 2 }}>RAG · 相似歷史題目</div>
+              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 2 }}><GlossaryTerm term="rag" label="相似歷史題目" compact /></div>
               <div role="note" style={{ fontSize: 8.5, lineHeight: 1.35, color: 'var(--color-hermes-amber)', marginBottom: 5 }}>
                 歷史參考 · 非本次 Evidence，不參與信任評分
               </div>
