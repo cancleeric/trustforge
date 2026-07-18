@@ -839,6 +839,12 @@ class AnalysisFlow:
         if question:
             sql += " AND question=?"; params.append(question.strip())
         row = self._conn().execute(sql + " ORDER BY published_at DESC LIMIT 1", params).fetchone()
+        if row is None and question:
+            # Fallback: 精確 question 沒匹配到時，退回只用 coin+mode 取最新結果
+            row = self._conn().execute(
+                "SELECT payload_json FROM analysis_results WHERE coin=? AND mode=? ORDER BY published_at DESC LIMIT 1",
+                [coin.upper(), mode],
+            ).fetchone()
         return json.loads(row[0]) if row else None
 
     def refresh_once(self) -> list[str]:
