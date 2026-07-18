@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
+import json
 import signal
 import time
 import logging
@@ -12,16 +13,27 @@ def main() -> int:
     p.add_argument("--coin", action="append", default=[])
     p.add_argument("--workers-per-stage", type=int, default=1)
     p.add_argument("--daemon", action="store_true")
+    p.add_argument("--enqueue-scheduled", action="store_true",
+                   help="run one bounded scheduled enqueue cycle and exit")
     p.add_argument("--poll-seconds", type=float, default=15.0)
     p.add_argument("--schedule-seconds", type=float, default=1800.0,
                    help="minimum interval between low-priority scheduled refreshes")
     args = p.parse_args()
     flow = AnalysisFlow(workers_per_stage=args.workers_per_stage)
+    if args.enqueue_scheduled:
+        enabled, source = autonomy_enabled()
+        try:
+            result = flow.scheduled_cycle(
+                enabled=enabled, config_source=source, interval_sec=args.schedule_seconds,
+            )
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        finally:
+            flow.close()
+        return 0
     flow.start()
     if args.daemon:
         stopping = False
         last_prune = 0.0
-        next_scheduled_refresh = 0.0
         def stop(*_args):
             nonlocal stopping; stopping = True
         signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
@@ -30,19 +42,6 @@ def main() -> int:
                 flow.reconcile_runtime()
                 flow.adopt_pending()
                 flow.adopt_due_retries()
-                # The switch controls only low-priority scheduled snapshots.
-                # Workers stay alive to serve durable manual jobs immediately.
-                enabled, source = autonomy_enabled()
-                now = time.monotonic()
-                if enabled and now >= next_scheduled_refresh:
-                    flow.refresh_once()
-                    next_scheduled_refresh = now + max(60.0, args.schedule_seconds)
-                else:
-                    if not enabled:
-                        # Re-enabling starts one fresh scheduled cycle without
-                        # delaying manual adoption or retaining stale timing.
-                        next_scheduled_refresh = 0.0
-                        logging.debug("Hermes scheduled refresh paused (%s); manual queue remains active", source)
                 if time.time() - last_prune >= 86400:
                     flow.prune(); last_prune = time.time()
             except Exception:

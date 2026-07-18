@@ -87,6 +87,65 @@ def test_full_queue_is_normal_backpressure_and_refresh_fills_missing_matrix(tmp_
     assert flow._conn().execute("SELECT count(*) FROM analysis_jobs").fetchone()[0] == 3
 
 
+def test_disabled_scheduled_cycle_is_audited_without_enqueuing(tmp_path):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+
+    run = flow.scheduled_cycle(enabled=False, config_source="production_default")
+
+    assert run["state"] == "skipped"
+    assert run["skip_reason"] == "automation_disabled"
+    assert run["job_count"] == 0
+    assert run["jobs"] == []
+    assert 1700 < run["next_run_at"] - run["started_at"] < 1900
+
+
+def test_manual_pending_has_priority_over_scheduled_cycle(tmp_path, monkeypatch):
+    calls = 0
+
+    def collect_docs(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return _docs()
+
+    monkeypatch.setattr("trustforge.analysis_flow.collect", collect_docs)
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    _, manual_job = flow.submit_manual("BTC", "risk", "優先處理手動分析")
+    assert manual_job
+
+    run = flow.scheduled_cycle(enabled=True, config_source="admin_config")
+
+    assert run["state"] == "skipped"
+    assert run["skip_reason"] == "manual_pending"
+    assert calls == 1
+
+
+def test_scheduled_cycle_binds_jobs_to_durable_run(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+
+    run = flow.scheduled_cycle(enabled=True, config_source="admin_config")
+
+    assert run["state"] == "completed"
+    assert run["job_count"] == len(MODES) * 5
+    assert len(run["jobs"]) == run["job_count"]
+    assert flow._conn().execute(
+        "SELECT count(*) FROM analysis_jobs WHERE scheduler_run_id=?",
+        (run["scheduler_run_id"],),
+    ).fetchone()[0] == run["job_count"]
+    assert flow.status()["scheduler"]["recent_runs"][0]["scheduler_run_id"] == run["scheduler_run_id"]
+
+
+def test_stale_scheduler_run_is_projected_as_timed_out(tmp_path):
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    started = time.time() - 901
+    flow._conn().execute(
+        "INSERT INTO analysis_scheduler_runs VALUES(?,?,?,?,?,?,?,?,?)",
+        ("stale", "running", started, None, started + 1800, "timer", 0, None, None),
+    )
+
+    assert flow.scheduler_status()["recent_runs"][0]["state"] == "timed_out"
+
+
 def test_registered_question_is_adopted_and_reanalyzed_on_new_snapshot(tmp_path, monkeypatch):
     docs = _docs()
     monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: docs)
@@ -294,6 +353,16 @@ def test_local_daemon_runs_overlapping_workers_per_stage():
     assert int(arguments[index + 1]) == 1800
 
 
+def test_production_analysis_scheduler_is_bounded_and_timer_driven():
+    installer = open("deploy/install_hermes_scheduler.sh", encoding="utf-8").read()
+
+    daemon_line = next(line for line in installer.splitlines() if "run_analysis_flow.py --daemon" in line)
+    assert "--schedule-seconds" not in daemon_line
+    assert "run_analysis_flow.py --enqueue-scheduled --schedule-seconds 1800" in installer
+    assert "OnUnitActiveSec=30min" in installer
+    assert "TimeoutStartSec=900" in installer
+
+
 def test_readonly_projection_skips_schema_writes_and_reads_existing_state(tmp_path):
     path = tmp_path / "flow.sqlite3"
     writer = AnalysisFlow(path)
@@ -318,3 +387,14 @@ def test_readonly_projection_skips_schema_writes_and_reads_existing_state(tmp_pa
     assert context["conversation"] == []
     assert latest is None
     assert not missing.exists()
+
+
+def test_readonly_pre_scheduler_database_returns_empty_scheduler_state(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE analysis_jobs(job_id TEXT)")
+    connection.commit()
+    connection.close()
+
+    with AnalysisFlow(path, readonly=True) as reader:
+        assert reader.scheduler_status() == {"next_run_at": None, "recent_runs": []}

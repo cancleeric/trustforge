@@ -115,7 +115,17 @@ export interface AnalysisFlowStage {
   next_retry_at?: number | null
   current: null | { coin: string; mode: string; question: string; snapshot_id: string; started_at: number; retry_count: number; error: string | null }
 }
-export interface AnalysisFlowData { agent: string; state: string; stages: AnalysisFlowStage[]; updated_at: string }
+export interface AnalysisSchedulerJob { job_id: string; snapshot_id: string; state: string; result_id: string | null }
+export interface AnalysisSchedulerRun {
+  scheduler_run_id: string; state: string; started_at: number; finished_at: number | null
+  next_run_at: number; config_source: string; job_count: number; skip_reason: string | null
+  error: string | null; cost_usd: number; completed_jobs: number; failed_jobs: number
+  jobs: AnalysisSchedulerJob[]
+}
+export interface AnalysisFlowData {
+  agent: string; state: string; stages: AnalysisFlowStage[]; updated_at: string
+  scheduler?: { next_run_at: number | null; recent_runs: AnalysisSchedulerRun[] }
+}
 export interface AnalysisJourneyAttempt { attempt_id: string; job_id: string; stage: string; attempt: number; state: string; started_at: number; finished_at: number; duration_sec: number; retryable: number; error: string | null }
 export interface AnalysisJourneyJob { job_id: string; coin: string; mode: string; question: string; snapshot_id: string; state: string; current_stage: string; retry_count: number; error: string | null; updated_at: number; attempts: AnalysisJourneyAttempt[]; stages: Array<Record<string, unknown>> }
 export interface AnalysisDeadLetter { job_id: string; stage: string; coin: string; mode: string; question: string; snapshot_id: string; attempts: number; error: string; failed_at: number }
@@ -127,6 +137,8 @@ export function getAnalysisFlow(signal?: AbortSignal): Promise<ApiEnvelope<Analy
     const data = value as AnalysisFlowData
     return data.agent === 'hermes' && Array.isArray(data.stages) && data.stages.every((stage) =>
       typeof stage.id === 'string' && typeof stage.queued === 'number' && (stage.current === null || typeof stage.current === 'object'))
+      && (data.scheduler === undefined || (typeof data.scheduler === 'object' && data.scheduler !== null
+        && Array.isArray(data.scheduler.recent_runs)))
   }
   return apiFetch<AnalysisFlowData>('/api/analysis-flow', undefined, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }

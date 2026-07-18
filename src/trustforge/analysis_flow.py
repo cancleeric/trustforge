@@ -162,6 +162,12 @@ class AnalysisFlow:
           attempt INTEGER NOT NULL, error TEXT NOT NULL,
           PRIMARY KEY(job_id, stage)
         );
+        CREATE TABLE IF NOT EXISTS analysis_scheduler_runs (
+          scheduler_run_id TEXT PRIMARY KEY, state TEXT NOT NULL,
+          started_at REAL NOT NULL, finished_at REAL, next_run_at REAL NOT NULL,
+          config_source TEXT NOT NULL, job_count INTEGER NOT NULL DEFAULT 0,
+          skip_reason TEXT, error TEXT
+        );
         CREATE TABLE IF NOT EXISTS analysis_conversation (
           message_id TEXT PRIMARY KEY, coin TEXT NOT NULL, mode TEXT NOT NULL,
           role TEXT NOT NULL, content TEXT NOT NULL, question_id TEXT,
@@ -197,6 +203,8 @@ class AnalysisFlow:
             conn.execute("ALTER TABLE analysis_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'scheduled'")
         if "priority" not in columns:
             conn.execute(f"ALTER TABLE analysis_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT {SCHEDULED_PRIORITY}")
+        if "scheduler_run_id" not in columns:
+            conn.execute("ALTER TABLE analysis_jobs ADD COLUMN scheduler_run_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_priority ON analysis_jobs(state,priority,created_at)")
         TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
@@ -375,7 +383,8 @@ class AnalysisFlow:
         return {"query": question, "matches": candidates[:max(1, min(limit, 10))],
                 "conversation": conversation, "retrieval": "sqlite_char_bigram_v1"}
 
-    def enqueue_job(self, snapshot_id: str, mode: str, question: str, *, origin: str = "scheduled") -> str | None:
+    def enqueue_job(self, snapshot_id: str, mode: str, question: str, *, origin: str = "scheduled",
+                    scheduler_run_id: str | None = None) -> str | None:
         row = self._conn().execute("SELECT coin FROM analysis_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
         if row is None or mode not in QUESTION_TYPES:
             raise ValueError("unknown snapshot or mode")
@@ -400,10 +409,10 @@ class AnalysisFlow:
         cur = self._conn().execute(
             """INSERT OR IGNORE INTO analysis_jobs(
                  job_id,snapshot_id,coin,mode,question,question_type,state,current_stage,retry_count,error,
-                 created_at,updated_at,origin,priority
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 created_at,updated_at,origin,priority,scheduler_run_id
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, snapshot_id, row["coin"], mode, question, qtype.value, "queued", STAGES[0], 0, None,
-             now, now, origin, priority),
+             now, now, origin, priority, scheduler_run_id),
         )
         if not cur.rowcount:
             return None
@@ -440,7 +449,8 @@ class AnalysisFlow:
             )
         return snapshot_id
 
-    def enqueue_matrix(self, snapshot_id: str, *, questions: dict[str, str] | None = None) -> list[str]:
+    def enqueue_matrix(self, snapshot_id: str, *, questions: dict[str, str] | None = None,
+                       scheduler_run_id: str | None = None) -> list[str]:
         row = self._conn().execute("SELECT coin FROM analysis_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
         if row is None:
             raise ValueError("unknown snapshot")
@@ -454,7 +464,10 @@ class AnalysisFlow:
                 (coin, mode),
             ).fetchall()
             for item in active:
-                job_id = self.enqueue_job(snapshot_id, mode, item["question"], origin="scheduled")
+                job_id = self.enqueue_job(
+                    snapshot_id, mode, item["question"], origin="scheduled",
+                    scheduler_run_id=scheduler_run_id,
+                )
                 if job_id: jobs.append(job_id)
         return jobs
 
@@ -779,6 +792,7 @@ class AnalysisFlow:
             return {"agent": "hermes", "state": "continuous",
                     "stages": [{"id": stage, "queued": 0, "current": None, "next_retry_at": None} for stage in STAGES],
                     "queue": {"pending": 0, "capacity": QUEUE_CAPACITY, "backpressure": False},
+                    "scheduler": {"next_run_at": None, "recent_runs": []},
                     "dead_letter_count": 0, "updated_at": iso_utc(time.time())}
         stages = []
         for stage in STAGES:
@@ -801,6 +815,7 @@ class AnalysisFlow:
                 "queue": {"pending": pending, "capacity": QUEUE_CAPACITY,
                           "backpressure": pending >= QUEUE_CAPACITY,
                           "manual_pending": queued_manual},
+                "scheduler": self.scheduler_status(),
                 "dead_letter_count": dead, "updated_at": iso_utc(time.time())}
 
     def job_status(self, job_id: str) -> dict[str, Any] | None:
@@ -950,7 +965,7 @@ class AnalysisFlow:
             ).fetchone()
         return json.loads(row[0]) if row else None
 
-    def refresh_once(self) -> list[str]:
+    def refresh_once(self, *, scheduler_run_id: str | None = None) -> list[str]:
         """Snapshot every coin and incrementally fill its idempotent analysis matrix.
 
         Revisiting an unchanged snapshot is intentional: when the durable queue is
@@ -964,8 +979,89 @@ class AnalysisFlow:
             except Exception:
                 logging.exception("Hermes snapshot refresh failed for %s; other coins continue", coin)
                 continue
-            jobs.extend(self.enqueue_matrix(snapshot_id))
+            jobs.extend(self.enqueue_matrix(snapshot_id, scheduler_run_id=scheduler_run_id))
         return jobs
+
+    def scheduled_cycle(self, *, enabled: bool, config_source: str,
+                        interval_sec: float = 1800.0) -> dict[str, Any]:
+        """Run one bounded scheduler enqueue cycle and persist its disposition."""
+        started = time.time()
+        run_id = f"analysis-scheduler-{uuid.uuid4().hex[:16]}"
+        next_run_at = started + max(60.0, interval_sec)
+        self._conn().execute(
+            "INSERT INTO analysis_scheduler_runs VALUES(?,?,?,?,?,?,?,?,?)",
+            (run_id, "running", started, None, next_run_at, config_source, 0, None, None),
+        )
+        try:
+            if not enabled:
+                state, jobs, reason = "skipped", [], "automation_disabled"
+            else:
+                manual_pending = self._conn().execute(
+                    "SELECT count(*) FROM analysis_jobs WHERE origin='manual' AND state IN ('queued','running')",
+                ).fetchone()[0]
+                if manual_pending:
+                    state, jobs, reason = "skipped", [], "manual_pending"
+                else:
+                    jobs = self.refresh_once(scheduler_run_id=run_id)
+                    state, reason = "completed", None if jobs else "no_new_jobs"
+            self._conn().execute(
+                """UPDATE analysis_scheduler_runs SET state=?,finished_at=?,job_count=?,skip_reason=?
+                   WHERE scheduler_run_id=?""",
+                (state, time.time(), len(jobs), reason, run_id),
+            )
+        except Exception as exc:
+            self._conn().execute(
+                """UPDATE analysis_scheduler_runs SET state='failed',finished_at=?,error=?
+                   WHERE scheduler_run_id=?""",
+                (time.time(), f"{type(exc).__name__}: {exc}"[:1000], run_id),
+            )
+            raise
+        return self.scheduler_status(limit=1)["recent_runs"][0]
+
+    def scheduler_status(self, *, limit: int = 10) -> dict[str, Any]:
+        if self._readonly_store_missing():
+            return {"next_run_at": None, "recent_runs": []}
+        try:
+            rows = self._conn().execute(
+                "SELECT * FROM analysis_scheduler_runs ORDER BY started_at DESC LIMIT ?",
+                (max(1, min(limit, 50)),),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if self.readonly and "no such table" in str(exc):
+                return {"next_run_at": None, "recent_runs": []}
+            raise
+        runs = []
+        now = time.time()
+        for row in rows:
+            item = dict(row)
+            if item["state"] == "running" and now - item["started_at"] > 900:
+                item["state"] = "timed_out"
+            jobs = self._conn().execute(
+                """SELECT j.job_id,j.snapshot_id,j.state,r.result_id,r.payload_json
+                   FROM analysis_jobs j LEFT JOIN analysis_results r USING(job_id)
+                   WHERE j.scheduler_run_id=? ORDER BY j.created_at""",
+                (item["scheduler_run_id"],),
+            ).fetchall()
+            cost_usd = 0.0
+            visible_jobs = []
+            for job in jobs:
+                visible = dict(job)
+                payload_json = visible.pop("payload_json", None)
+                if payload_json:
+                    try:
+                        payload = json.loads(payload_json)
+                        for event in payload.get("execution_log", []):
+                            if event.get("tool") == "llm.cost":
+                                cost_usd += float(event.get("params", {}).get("cost_usd", 0.0))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        logging.warning("Invalid result payload while calculating scheduler cost: %s", visible["job_id"])
+                visible_jobs.append(visible)
+            item["jobs"] = visible_jobs
+            item["cost_usd"] = round(cost_usd, 6)
+            item["completed_jobs"] = sum(job["state"] == "completed" for job in visible_jobs)
+            item["failed_jobs"] = sum(job["state"] in {"failed", "dead_letter"} for job in visible_jobs)
+            runs.append(item)
+        return {"next_run_at": runs[0]["next_run_at"] if runs else None, "recent_runs": runs}
 
     def join(self) -> None:
         for stage in STAGES: self._queues[stage].join()
