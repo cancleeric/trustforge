@@ -66,7 +66,11 @@ export default function HermesDashboard() {
   useEffect(() => {
     const valid = requestedModule === 'analyze' || requestedModule === 'compare' ||
       requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
-    setActiveModule(valid ? requestedModule : null)
+    // 只在 URL 明確帶 workspace 時同步打開，不因 workspace 被其他
+    // searchParams 操作意外清除就關閉已打開的面板（修正面板閃現消失 bug）。
+    if (valid) {
+      setActiveModule(requestedModule)
+    }
   }, [requestedModule])
 
   const toggleShip = useCallback(() => {
@@ -154,9 +158,9 @@ export default function HermesDashboard() {
     return ph === 'loading'
       ? `Analyzing ${sel.full}… cross-referencing ${scanned} sources.`
       : `Tracking ${sel.full}. Composite trust score ${sel.score}/100 — ${tierText}. ` +
-        (sel.tier === 'healthy' ? 'Signal is clean; no action required.'
-          : sel.tier === 'moderate' ? 'Recommend monitoring divergence before increasing exposure.'
-            : 'Advise caution — integrity signals are degraded.')
+      (sel.tier === 'healthy' ? 'Signal is clean; no action required.'
+        : sel.tier === 'moderate' ? 'Recommend monitoring divergence before increasing exposure.'
+          : 'Advise caution — integrity signals are degraded.')
   }, [locale, t])
 
   const typeTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -234,7 +238,7 @@ export default function HermesDashboard() {
       window.clearInterval(timer)
       controllers.forEach((controller) => controller.abort())
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /*
