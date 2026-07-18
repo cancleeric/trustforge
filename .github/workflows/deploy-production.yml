@@ -70,6 +70,7 @@ jobs:
         env:
           REGION: ap-southeast-2
           TRUSTFORGE_BOOTSTRAP: "0"
+          TRUSTFORGE_TOKEN_SSM_PREFIX: /trustforge/runtime
       - name: Upload release QA evidence
         uses: actions/upload-artifact@v4
         with:

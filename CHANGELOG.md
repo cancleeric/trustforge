@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.16.8 — 2026-07-18
+
+- fix: production deploy 傳入 runtime token SSM prefix，讓管理面 API 可讀取 admin token。
+- fix: 將 Hermes 自動工作關閉顯示為成本保護暫停狀態，而非服務異常。
+
 ## v0.16.7 — 2026-07-18
 
 - fix: 生產 Analyze 工作區改走快照與排程路徑，避免 30 秒長分析 timeout。

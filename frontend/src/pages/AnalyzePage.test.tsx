@@ -47,13 +47,14 @@ describe('AnalyzePage production-safe execution', () => {
     expect(getAnalyze).not.toHaveBeenCalled()
   })
 
-  it('shows queue errors instead of loading forever when production automation is disabled', async () => {
+  it('shows automation disabled as a paused cost-control state instead of a service failure', async () => {
     vi.mocked(registerAnalysisQuestion).mockResolvedValueOnce({
       ok: false,
       error: { code: 'automation_disabled', message: 'Hermes 自動工作已關閉（production_default）' },
     })
     renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
 
+    expect(await screen.findByText(/自動工作已暫停/)).toBeInTheDocument()
     expect(await screen.findByText(/automation_disabled/)).toBeInTheDocument()
     expect(screen.getByText('Hermes 自動工作已關閉（production_default）')).toBeInTheDocument()
   })
