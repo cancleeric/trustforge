@@ -2,6 +2,7 @@ import { TIER_COLOR, type GalaxyCoin, type SelectedDerivation, type TrustCompone
 import { useHermesI18n } from './hermesI18n'
 import type { AnalysisFlowData, AnalysisJourneyData } from '../lib/endpoints'
 import type { CrossSourceSignal } from '../lib/types'
+import GlossaryTerm, { type GlossaryKey } from '../components/GlossaryTerm'
 
 interface HermesRightRailProps {
   selCoin: GalaxyCoin
@@ -37,6 +38,7 @@ export default function HermesRightRail({
   const divDock = derivation
   const dockColor = divDock.divColor
   const componentLabel = (label: string) => label === 'Reputation' ? t('reputation') : label === 'Corroboration' ? t('corroboration') : label === 'Recency' ? t('recency') : t('resistance')
+  const componentGlossary = (label: string): GlossaryKey => label === 'Reputation' ? 'reputation' : label === 'Corroboration' ? 'corroboration' : label === 'Recency' ? 'recency' : 'manipulation'
 
   return (
     <div
@@ -51,7 +53,7 @@ export default function HermesRightRail({
 
       {/* gauge */}
       <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-        <div style={{ alignSelf: 'flex-start', fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 6 }}>{t('trustScore')}</div>
+        <div style={{ alignSelf: 'flex-start', fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx3)', marginBottom: 6 }}><GlossaryTerm term="trustScore" label={t('trustScore')} compact /></div>
         <div style={{ position: 'relative', width: 140, height: 140 }}>
           <svg viewBox="0 0 200 200" width="140" height="140">
             <circle cx="100" cy="100" r="80" fill="none" style={{ stroke: 'var(--color-hermes-bd2)' } as React.CSSProperties} strokeWidth="16" strokeLinecap="round" strokeDasharray={arcTrack} transform="rotate(135 100 100)" />
@@ -83,9 +85,7 @@ export default function HermesRightRail({
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 10 }}>
           {t('trustBreakdown')}
           {derived && (
-            <span title={t('proxyTitle')} style={{ color: 'var(--color-hermes-amber)', fontSize: 8.5 }}>
-              {t('overviewProxy')}
-            </span>
+            <GlossaryTerm term="proxy" label={t('overviewProxy')} compact />
           )}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
@@ -93,7 +93,7 @@ export default function HermesRightRail({
             <div key={comp.label} data-testid={`right-rail-component-${comp.label.toLowerCase().replaceAll(' ', '-')}`} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ width: 7, height: 7, borderRadius: 2, background: comp.barColor, flexShrink: 0 }} />
-                <span style={{ fontSize: 11.5, color: 'var(--color-hermes-tx)', flex: 1 }}>{componentLabel(comp.label)}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--color-hermes-tx)', flex: 1 }}><GlossaryTerm term={componentGlossary(comp.label)} label={componentLabel(comp.label)} compact /></span>
                 <span style={{ fontSize: 12, fontWeight: 600, color: comp.barColor }}>{comp.score}</span>
               </div>
               <div style={{ height: 4, width: '100%', background: 'var(--color-hermes-inset)', borderRadius: 2, overflow: 'hidden' }}>
@@ -125,7 +125,7 @@ export default function HermesRightRail({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
           <span style={{ color: dockColor, fontSize: 13 }}>⚠</span>
-          <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}>{t('divergence')}</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}><GlossaryTerm term="divergence" label={t('divergence')} compact /></span>
         </div>
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
           {crossSignal ? `${crossSignal.summary} — ${t('tapReview')}`
