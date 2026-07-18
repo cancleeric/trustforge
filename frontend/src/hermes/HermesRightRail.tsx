@@ -27,8 +27,6 @@ export default function HermesRightRail({
   const gaugeScore = displayScore ?? score
   const activeStages = flow?.stages.filter((stage) => stage.current) ?? []
   const queued = flow?.stages.reduce((sum, stage) => sum + stage.queued, 0) ?? 0
-  const latestSchedule = flow?.scheduler?.recent_runs[0]
-  const nextSchedule = flow?.scheduler?.next_run_at
   const latestJob = journey?.jobs.find((job) => job.coin === selCoin.name || job.coin === selCoin.id?.toUpperCase())
 
   const C = 2 * Math.PI * 80
@@ -77,12 +75,6 @@ export default function HermesRightRail({
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: 'var(--color-hermes-tx2)', fontSize: 9.5 }}>
           <span>排隊 {queued}</span><span>{latestJob ? `${latestJob.mode} · ${latestJob.state}` : '等待此幣快照'}</span>
-        </div>
-        <div style={{ marginTop: 7, color: 'var(--color-hermes-tx2)', fontSize: 9.5, lineHeight: 1.45 }}>
-          <div>排程 {latestSchedule ? `${latestSchedule.state} · ${latestSchedule.job_count} jobs` : '尚無紀錄'}</div>
-          <div>{nextSchedule ? `下次 ${new Date(nextSchedule * 1000).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false })}` : '下次時間待定'}</div>
-          {latestSchedule?.skip_reason && <div>略過：{latestSchedule.skip_reason}</div>}
-          {latestSchedule?.error && <div style={{ color: 'var(--color-hermes-red)' }}>{latestSchedule.error}</div>}
         </div>
       </div>
 

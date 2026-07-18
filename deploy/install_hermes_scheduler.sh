@@ -66,7 +66,7 @@ Environment=COST_LEDGER_BACKEND=dynamodb
 Environment=SCHEDULER_RUN_LOG_BACKEND=dynamodb
 Environment=TRUSTFORGE_SCHEDULER_RUN_TABLE=trustforge-scheduler-runs
 Environment=TRUSTFORGE_SKILL_ROOT=$APP_DIR/skills/hermes
-ExecStart=/usr/bin/python3 scripts/run_analysis_flow.py --daemon --workers-per-stage 2 --poll-seconds 2
+ExecStart=/usr/bin/python3 scripts/run_analysis_flow.py --daemon --workers-per-stage 2 --poll-seconds 2 --schedule-seconds 1800
 Restart=always
 RestartSec=3
 
@@ -74,46 +74,9 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
-install -m 0644 /dev/stdin "$UNIT_DIR/trustforge-analysis-scheduler.service" <<UNIT
-[Unit]
-Description=TrustForge bounded scheduled analysis enqueue
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=$APP_DIR
-Environment=TRUSTFORGE_HOME=$APP_DIR
-Environment=AWS_REGION=$REGION
-Environment=PYTHONPATH=$APP_DIR
-Environment=CACHE_BACKEND=dynamodb
-Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
-Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
-Environment=COST_LEDGER_BACKEND=dynamodb
-Environment=TRUSTFORGE_SKILL_ROOT=$APP_DIR/skills/hermes
-ExecStart=/usr/bin/python3 scripts/run_analysis_flow.py --enqueue-scheduled --schedule-seconds 1800
-TimeoutStartSec=900
-UNIT
-
-install -m 0644 /dev/stdin "$UNIT_DIR/trustforge-analysis-scheduler.timer" <<'UNIT'
-[Unit]
-Description=Run TrustForge scheduled analysis every 30 minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=30min
-Persistent=true
-RandomizedDelaySec=20s
-Unit=trustforge-analysis-scheduler.service
-
-[Install]
-WantedBy=timers.target
-UNIT
-
 systemctl daemon-reload
 systemctl enable --now hermes-cycle.timer
 systemctl enable --now trustforge-analysis-flow.service
-systemctl enable --now trustforge-analysis-scheduler.timer
 bash "$APP_DIR/deploy/install_fetch_scheduler.sh"
 bash "$APP_DIR/deploy/prepare_backend_deploy_backup.sh"
-echo "Hermes timers installed. Autonomy is disabled by default in production; enable via admin config or TRUSTFORGE_HERMES_AUTONOMY_ENABLED=1. Inspect with: systemctl list-timers hermes-cycle.timer trustforge-analysis-scheduler.timer"
+echo "Hermes timer installed. Autonomy is disabled by default in production; enable via admin config or TRUSTFORGE_HERMES_AUTONOMY_ENABLED=1. Inspect with: systemctl list-timers hermes-cycle.timer"
