@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from trustforge.execlog import RUNTIME_BUDGET_SEC
 from trustforge.hermes import autonomy_enabled, autonomous_cycle_plan, manifest
+from trustforge.runtime_control import runtime_control
 from trustforge.schema import COIN_POOL
 
 
@@ -30,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.max_budget_sec <= RUNTIME_BUDGET_SEC:
         parser.error(f"--max-budget-sec must be 1..{RUNTIME_BUDGET_SEC}")
+    control = runtime_control()
+    if not control.enabled:
+        print(f"[hermes_cycle] runtime disabled ({control.source}); no scheduled work executed")
+        return 0
     enabled, source = autonomy_enabled()
     if not enabled:
         print(f"[hermes_cycle] autonomy disabled ({source}); no scheduled work executed")

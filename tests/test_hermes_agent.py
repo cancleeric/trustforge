@@ -26,6 +26,9 @@ def test_autonomous_cycle_uses_fixed_pool_and_existing_scheduler_actions():
 
 
 def test_autonomy_defaults_local_on_and_production_off(monkeypatch):
+    monkeypatch.delenv("TRUSTFORGE_RUNTIME_SWITCH", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_ENV", raising=False)
     monkeypatch.delenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", raising=False)
     monkeypatch.setenv("CACHE_BACKEND", "json")
     assert autonomy_enabled() == (True, "local_default")
@@ -34,4 +37,10 @@ def test_autonomy_defaults_local_on_and_production_off(monkeypatch):
     assert autonomy_enabled() == (False, "production_default")
 
     monkeypatch.setenv("TRUSTFORGE_HERMES_AUTONOMY_ENABLED", "1")
+    assert autonomy_enabled() == (False, "production_default")
+
+    monkeypatch.setenv("TRUSTFORGE_RUNTIME_SWITCH", "on")
+    assert autonomy_enabled() == (False, "production_guard")
+
+    monkeypatch.setenv("TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS", "1")
     assert autonomy_enabled() == (True, "env")

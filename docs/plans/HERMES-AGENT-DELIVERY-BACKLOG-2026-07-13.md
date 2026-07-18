@@ -6,6 +6,19 @@
 
 ## 2026-07-17 現行未完成摘要與開發駐列
 
+### 2026-07-17 夜間 CEO issue / PR sweep
+
+本輪優先處理 PR / issue，而不是另開新主線。權威執行計劃見
+`docs/plans/CEO-ISSUE-PR-DEVELOPMENT-SWEEP-2026-07-17.md`。
+
+- PR #218 是 v0.16.2 生產 bugfix release blocker；CI 已綠、merge state
+  `CLEAN`，但 reviewer approval、eye scan、`/codex-review` 與安全/成本雙審仍是
+  merge gate。
+- #207、#209、#215 在 `develop` 已有對應 commits 與測試，但 GitHub issue 仍 open；
+  下一步先補 evidence / closure，而不是重做已完成工作。
+- 30 分鐘 CEO sweep 是主動計劃與派工流程：可 triage、派 owner、準備 code work、
+  補 evidence；不得自動 merge 或 deploy。
+
 ### 2026-07-17 新 Data Engineering issues
 
 | Issue | 狀態 | 已落地／剩餘 |

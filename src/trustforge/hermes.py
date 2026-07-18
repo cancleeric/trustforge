@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 import os
 
 from .execlog import RUNTIME_BUDGET_SEC
+from .runtime_control import runtime_control
 from .schema import COIN_POOL
 from .skills import run_skill_manifest
 
@@ -82,6 +83,9 @@ def autonomy_enabled() -> tuple[bool, str]:
     fail-closed there. Local development remains enabled unless explicitly
     disabled.
     """
+    control = runtime_control()
+    if not control.enabled:
+        return False, control.source
     try:
         from .admin_config import get_config_cached
 

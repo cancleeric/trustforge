@@ -5,20 +5,24 @@
   <key>Label</key><string>com.hurricanesoft.trustforge-ceo-sweep</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/apple/HurricaneSoft/trustforge/.venv/bin/python</string>
-    <string>scripts/ceo_sweep.py</string>
-    <string>--out</string><string>out/ceo-sweep-latest.json</string>
+    <string>/bin/zsh</string>
+    <string>/Users/apple/HurricaneSoft/trustforge/scripts/run_ceo_cycle.sh</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/apple/HurricaneSoft/trustforge</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PYTHONPATH</key><string>/Users/apple/HurricaneSoft/trustforge/src</string>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>TRUSTFORGE_HOME</key><string>/Users/apple/HurricaneSoft/trustforge</string>
+    <key>TRUSTFORGE_ENV</key><string>local</string>
+    <key>CACHE_BACKEND</key><string>json</string>
+    <key>TRUSTFORGE_DISABLE_ADMIN_CONFIG</key><string>1</string>
+    <key>TRUSTFORGE_BEDROCK_DAILY_USD_CAP</key><string>0</string>
   </dict>
-  <key>RunAtLoad</key><true/>
+  <key>RunAtLoad</key><false/>
   <key>StartInterval</key><integer>1800</integer>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/logs/trustforge-ceo-sweep.log</string>
-  <key>StandardErrorPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/logs/trustforge-ceo-sweep.err.log</string>
+  <key>StandardOutPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/ceo-cycle/launchd.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/apple/HurricaneSoft/trustforge/out/ceo-cycle/launchd.err.log</string>
 </dict>
 </plist>
