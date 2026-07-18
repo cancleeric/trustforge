@@ -39,7 +39,7 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(dashboard).toContain('{!activeModule && (')
     expect(dashboard).toContain('activeModule ? 10_000 : 1500')
     expect(dashboard).toContain("activeModule !== 'history'")
-    expect(dashboard).toContain('setActiveModule(valid ? requestedModule : null)')
+    expect(dashboard).toContain('setActiveModule(requestedModule)')
     expect(dashboard).toContain("qaMode ? ' is-qa-mode' : ''")
     expect(css).toContain('.hermes-dashboard.is-qa-mode')
     expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('禁止遞回升級')
