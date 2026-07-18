@@ -2,6 +2,7 @@ import { TIER_COLOR, type GalaxyModel } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import type { ServiceMonitorState } from '../pages/HermesDashboard'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
+import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
 
 interface HermesLeftRailProps {
   model: GalaxyModel
@@ -19,12 +20,17 @@ interface HermesLeftRailProps {
   onType: (v: string) => void
   onQuery: (v: string) => void
   onSubmit: () => void
+  beginnerMode?: boolean
+  recommendedMode?: AnalysisModeId
+  onChooseIntent?: (mode: AnalysisModeId, question: string) => void
+  onApplyRecommendedMode?: (mode: AnalysisModeId) => void
 }
 
 export default function HermesLeftRail({
   model, uplinkLatency = '2.4s', hermesMessage, hasOrder, qtype, qtypes, query, submitLabel,
   onType, onQuery, onSubmit, disabled = false, serviceMonitor = {},
   questionContext = null, onRecallQuestion,
+  beginnerMode = false, recommendedMode = 'risk', onChooseIntent, onApplyRecommendedMode,
 }: HermesLeftRailProps) {
   const { t } = useHermesI18n()
   const { tierCounts, coins } = model
@@ -38,7 +44,7 @@ export default function HermesLeftRail({
         display: 'flex', flexDirection: 'column', gap: 12,
       }}
     >
-      <div>
+      {!beginnerMode && <div>
         <div style={{ fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 9 }}>{t('telemetry')}</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 7, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderRadius: 6, padding: '10px 12px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('tracked')}</span><span style={{ color: 'var(--color-hermes-tx)' }}>{coins.length}</span></div>
@@ -53,13 +59,26 @@ export default function HermesLeftRail({
             })}
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* HERMES CONSOLE */}
       <div
         className="hermes-clip"
         style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
       >
+        {beginnerMode && (
+          <div className="hermes-intent-picker">
+            <div className="hermes-intent-title">我想做什麼？</div>
+            <p>選一個目的，Hermes 會替你準備問題與分析方式。</p>
+            <div>
+              {BEGINNER_INTENTS.map((intent) => (
+                <button key={intent.id} type="button" onClick={() => onChooseIntent?.(intent.mode, intent.question)} title={intent.description}>
+                  <b>{intent.label}</b><span>{intent.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
           <div style={{ position: 'relative', width: 24, height: 24, flexShrink: 0, animation: 'hermes-hermes-breathe 3.2s ease-in-out infinite' }}>
             <div style={{ position: 'absolute', inset: 0, clipPath: 'polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)', border: '1.5px solid var(--color-hermes-amber)', animation: 'hermes-orbit-spin 9s linear infinite' }} />
@@ -120,6 +139,14 @@ export default function HermesLeftRail({
           rows={2}
           style={{ width: '100%', resize: 'none', background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 11.5, lineHeight: 1.5, padding: '8px 10px', marginBottom: 10 }}
         />
+
+        {beginnerMode && qtype !== qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)] && (
+          <button type="button" className="hermes-mode-suggestion" onClick={() => onApplyRecommendedMode?.(recommendedMode)}>
+            建議改用「{qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)]}」分析
+          </button>
+        )}
+
+        {beginnerMode && <div className="hermes-analysis-expectation">將使用目前可用的多來源資料進行「{qtype}」，整理可信程度、主要原因與不確定性。</div>}
 
         <button
           onClick={onSubmit}

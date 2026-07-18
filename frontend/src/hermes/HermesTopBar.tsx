@@ -10,6 +10,9 @@ interface HermesTopBarProps {
   onHome?: () => void
   degradedMessage?: string | null
   onToggleShip?: () => void
+  onHelp?: () => void
+  beginnerMode?: boolean
+  onBeginnerModeChange?: (enabled: boolean) => void
 }
 
 export default function HermesTopBar({
@@ -21,6 +24,9 @@ export default function HermesTopBar({
   onHome,
   degradedMessage = null,
   onToggleShip,
+  onHelp,
+  beginnerMode = false,
+  onBeginnerModeChange,
 }: HermesTopBarProps) {
   const { locale, setLocale, t } = useHermesI18n()
   const navItems = [
@@ -55,7 +61,7 @@ export default function HermesTopBar({
         <span style={{ width: 6, height: 6, transform: 'rotate(45deg)', background: 'var(--color-hermes-amber)', animation: 'hermes-pulse 2.4s infinite' }} />HERMES: {t('active')}
       </span>
       <nav className="hermes-topbar-nav" aria-label={t('navigation')} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-        {navItems.map((item) => (
+        {navItems.filter((item) => !beginnerMode || item.id === 'analyze').map((item) => (
           <button
             type="button"
             key={item.id}
@@ -73,11 +79,15 @@ export default function HermesTopBar({
         ))}
       </nav>
       <div style={{ flex: 1 }} />
-      <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>⬡ 艦體升級</button>
+      <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
+        {beginnerMode ? '新手模式' : '完整模式'}
+      </button>
+      <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label="開啟新手說明">？ 說明</button>
+      {!beginnerMode && <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>⬡ 艦體升級</button>}
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} style={{ background: 'transparent', border: '1px solid var(--color-hermes-bd2)', borderRadius: 4, color: 'var(--color-hermes-tx2)', fontFamily: 'inherit', fontSize: 9, padding: '3px 7px', cursor: 'pointer' }}>
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>
-      <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>{t('costLedger')} <b style={{ color: 'var(--color-hermes-cyan)' }}>{costLedger === null ? '--' : `$${costLedger.toFixed(4)}`}</b></span>
+      {!beginnerMode && <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>{t('costLedger')} <b style={{ color: 'var(--color-hermes-cyan)' }}>{costLedger === null ? '--' : `$${costLedger.toFixed(4)}`}</b></span>}
     </div>
   )
 }

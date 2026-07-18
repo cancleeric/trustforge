@@ -13,6 +13,8 @@ import { useHermesI18n } from '../hermes/hermesI18n'
 import HermesModuleDeck, { type HermesWorkspaceModule } from '../hermes/HermesModuleDeck'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
+import HermesOnboarding from '../hermes/HermesOnboarding'
+import { recommendAnalysisMode, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
@@ -40,6 +42,8 @@ export default function HermesDashboard() {
   const [analysisJourney, setAnalysisJourney] = useState<AnalysisJourneyData | null>(null)
   const [questionContext, setQuestionContext] = useState<AnalysisQuestionContext | null>(null)
   const [shipOpen, setShipOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
   const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
   const [qtype, setQtype] = useState(t('risk'))
@@ -61,6 +65,28 @@ export default function HermesDashboard() {
     requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
       ? requestedModule : null
   const activeQuestionMode = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))]
+  const recommendedMode = recommendAnalysisMode(query)
+
+  const setExperienceMode = useCallback((enabled: boolean) => {
+    setBeginnerMode(enabled)
+    document.cookie = `trustforge_hermes_experience=${enabled ? 'beginner' : 'full'}; Max-Age=31536000; Path=/; SameSite=Lax`
+  }, [])
+
+  const applyAnalysisMode = useCallback((mode: AnalysisModeId) => {
+    const index = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(mode)
+    setQtype(qtypes[index])
+  }, [qtypes])
+
+  const chooseIntent = useCallback((mode: AnalysisModeId, question: string) => {
+    applyAnalysisMode(mode)
+    setQuery(question)
+  }, [applyAnalysisMode])
+
+  useEffect(() => {
+    if (searchParams.get('tour') === '1' || shouldShowHermesOnboarding()) setOnboardingOpen(true)
+    // Onboarding is intentionally evaluated once per page entry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const toggleShip = useCallback(() => {
     if (shipOpen) { setShipOpen(false); return }
@@ -455,7 +481,7 @@ export default function HermesDashboard() {
         <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} />
+          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} />
         </div>
 
         <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>
@@ -474,6 +500,10 @@ export default function HermesDashboard() {
             serviceMonitor={serviceMonitor}
             questionContext={questionContext}
             onRecallQuestion={setQuery}
+            beginnerMode={beginnerMode}
+            recommendedMode={recommendedMode}
+            onChooseIntent={chooseIntent}
+            onApplyRecommendedMode={applyAnalysisMode}
           />
         </div>
 
@@ -519,6 +549,8 @@ export default function HermesDashboard() {
         {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} />}
 
         {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />}
+
+        <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
 
       </div>
     </div>

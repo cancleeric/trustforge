@@ -15,6 +15,7 @@ import { DirectionBadge } from './Badges'
 import { LoadingState } from './StatusStates'
 import HermesExecutionPanel from './HermesExecutionPanel'
 import { formatTimestamp } from '../lib/format'
+import PlainLanguageResultSummary from './PlainLanguageResultSummary'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
@@ -46,6 +47,8 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
         </div>
       </div>
 
+      <PlainLanguageResultSummary data={data} />
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
         <ConfidenceGauge
           calibratedConfidence={data.report.calibrated_confidence}
@@ -63,20 +66,17 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
         </section>
       </div>
 
-      <HermesExecutionPanel
-        execution={data.execution}
-        events={data.execution_log}
-        report={data.report}
-        evidence={data.evidence}
-      />
-
-      <TrustBreakdown data={data.trust_components_aggregate} />
-
-      <TrustTrendSection coin={data.report.coin} />
-
-      <Suspense fallback={<LoadingState label="雷達圖載入中…" />}>
-        <TrustRadarChart radar={data.trust_radar} />
-      </Suspense>
+      <details id="technical-analysis" className="hermes-technical-details hermes-clip border border-tf-border bg-tf-card">
+        <summary>查看完整技術分析 <span>執行管線、信任拆解、趨勢與雷達圖</span></summary>
+        <div className="flex flex-col gap-4 p-4">
+          <HermesExecutionPanel execution={data.execution} events={data.execution_log} report={data.report} evidence={data.evidence} />
+          <TrustBreakdown data={data.trust_components_aggregate} />
+          <TrustTrendSection coin={data.report.coin} />
+          <Suspense fallback={<LoadingState label="雷達圖載入中…" />}>
+            <TrustRadarChart radar={data.trust_radar} />
+          </Suspense>
+        </div>
+      </details>
 
       <FactsInferenceLadder
         facts={data.report.facts}
@@ -84,7 +84,7 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
         marketJudgment={data.report.market_judgment}
       />
 
-      <KeyBasisList items={data.report.key_basis} />
+      <div id="key-basis"><KeyBasisList items={data.report.key_basis} /></div>
 
       <CrossSourceSignalPanel signal={data.report.cross_source_signal} />
 
@@ -95,7 +95,7 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
       <PriceProvenancePanel priceProvenance={data.price_provenance} evidence={data.evidence} />
 
       {data.report.limits.length > 0 && (
-        <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
+        <div id="known-limits" className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
           <h3 className="mb-2 text-sm font-semibold text-tf-text">已知限制 / 資料不足</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.limits.map((l, i) => (
@@ -129,8 +129,10 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
 
       <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
 
-      <h3 className="text-sm font-semibold text-tf-text">證據清單</h3>
-      <EvidenceTable evidence={data.evidence} />
+      <div id="evidence-list">
+        <h3 className="mb-3 text-sm font-semibold text-tf-text">證據清單</h3>
+        <EvidenceTable evidence={data.evidence} />
+      </div>
     </div>
   )
 }
