@@ -39,3 +39,11 @@ def test_ceo_sweep_is_truthful_about_recommendation_only(monkeypatch):
     serialized = json.dumps(report).lower()
     assert "approved_for" not in serialized
     assert '"author"' not in serialized
+
+
+def test_active_docs_do_not_claim_old_ceo_sweep_contract():
+    paths = [ROOT / "docs/README.md", *(ROOT / "docs/plans").glob("*.md"), *(ROOT / "docs/qa").glob("*.md")]
+    text = "\n".join(path.read_text() for path in paths)
+
+    assert "30 分鐘 CEO sweep" not in text
+    assert "30 分鐘 sweep" not in text
