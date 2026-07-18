@@ -72,6 +72,10 @@ except Exception:
 
 PORT = int(os.getenv("PORT", "8080"))
 
+# Swagger UI 開關：僅開發環境啟用，生產環境預設關閉。
+# 設定 TRUSTFORGE_SWAGGER=1 才會啟用 /docs 路由。
+SWAGGER_ENABLED = os.getenv("TRUSTFORGE_SWAGGER", "0") == "1"
+
 
 # The stdlib ThreadingHTTPServer has no worker bound: a slow SQLite read plus
 # browser polling can otherwise create one thread per retry until the process
@@ -5884,6 +5888,33 @@ def _app_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _swagger_ui_html() -> str:
+    """回傳嵌入 Swagger UI（CDN）的 HTML 頁面，指向 /api/openapi.yaml。"""
+    return """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>TrustForge API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>body{margin:0;padding:0;}</style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: '/api/openapi.yaml',
+      dom_id: '#swagger-ui',
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: 'BaseLayout',
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 def _handle_openapi_spec() -> tuple[int, str, str]:
     """`GET /api/openapi.yaml`：純讀檔回傳本 API 的 OpenAPI 3.1 spec——不快
     取、每次請求即時讀當下部署的檔案內容，避免 spec 與實際部署版本不同步。
@@ -6498,6 +6529,26 @@ class Handler(BaseHTTPRequestHandler):
             # production errors.
             return
 
+    def _send_swagger_ui(self):
+        """回傳 Swagger UI 頁面，使用寬鬆 CSP 允許 CDN 資源載入。"""
+        body = _swagger_ui_html().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline' https://unpkg.com; "
+            "img-src 'self' data: https://unpkg.com; "
+            "connect-src 'self'",
+        )
+        self.send_header("X-Content-Type-Options", "nosniff")
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def log_message(self, *a):  # 靜音預設存取日誌
         pass
 
@@ -6584,6 +6635,13 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET_impl(self, u, qs, client_ip):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
+
+        # Swagger UI：以 CDN 載入的互動式 API 文件瀏覽器，讀取
+        # `/api/openapi.yaml` 並以視覺化方式呈現所有端點。
+        # 需要獨立 CSP（允許 unpkg CDN + inline script），不走 _send() 預設的
+        # 嚴格 CSP。生產環境預設關閉（TRUSTFORGE_SWAGGER=1 才啟用）。
+        if u.path == "/docs" and SWAGGER_ENABLED:
+            return self._send_swagger_ui()
 
         # 第三輪 AI 友善：站根一頁式 agent 指南，純讀檔回傳，見
         # `_handle_llms_txt` docstring（react/nginx 拓樸下改由 nginx 直接
