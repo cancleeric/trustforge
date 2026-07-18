@@ -219,6 +219,22 @@ class BedrockClient:
                 "BEDROCK_MODEL_ID 未設定。競賽期間請設為 8/1 現場公告之 AWS Bedrock 模型 id。"
             )
 
+        # --- AgentCore / strands 切換（#W-agentcore）：env TRUSTFORGE_AGENTCORE=1
+        # 時改走 strands.BedrockModel。lazy import 在 bridge 模組內，未設 env 時
+        # 完全不會 import strands，現有 boto3 路徑行為不變。offline 分支已在上方
+        # 直接 return，不會走到這裡。
+        if os.getenv("TRUSTFORGE_AGENTCORE") == "1":
+            from .agentcore_llm_bridge import build_bridge  # noqa: PLC0415
+
+            bridge = build_bridge(
+                region=self.config.region,
+                narrative_model_id=self.config.model_id,
+                stance_model_id=self.config.stance_model_id,
+                max_tokens=self.config.max_tokens,
+                agentcore_model_id=os.getenv("AGENTCORE_MODEL_ID") or None,
+            )
+            return bridge.complete(system=system, prompt=prompt)
+
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": self.config.max_tokens,
@@ -332,6 +348,33 @@ class BedrockClient:
             ],
             "toolChoice": {"tool": {"name": _STANCE_TOOL_NAME}},
         }
+
+        # --- AgentCore / strands 切換（#W-agentcore）：env TRUSTFORGE_AGENTCORE=1
+        # 時改走 strands.BedrockModel（強制 tool_use，事件流解析 label）。lazy import
+        # 在 bridge 模組內，未設 env 時不會 import strands，現有 boto3 路徑不變。
+        # offline / stance_offline 分支已在 classify_stance 層直接 return，不會進此函式。
+        if os.getenv("TRUSTFORGE_AGENTCORE") == "1":
+            from .agentcore_llm_bridge import build_bridge  # noqa: PLC0415
+
+            bridge = build_bridge(
+                region=self.config.region,
+                narrative_model_id=self.config.model_id,
+                stance_model_id=self.config.stance_model_id,
+                max_tokens=self.config.max_tokens,
+                agentcore_model_id=os.getenv("AGENTCORE_MODEL_ID") or None,
+            )
+            label, usage = bridge.classify_stance_raw(_STANCE_SYSTEM, user_text)
+            tokens_in = int(usage.get("inputTokens", 0) or 0)
+            tokens_out = int(usage.get("outputTokens", 0) or 0)
+            self.cost_events.append({
+                "model": self.config.stance_model_id,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": estimate_cost(self.config.stance_model_id, tokens_in, tokens_out),
+            })
+            if label in _STANCE_LABELS:
+                return label
+            raise ValueError("classify_stance: 回應內容缺少合法的 toolUse.label")
 
         resp = self._stance_runtime().converse(
             modelId=self.config.stance_model_id,
