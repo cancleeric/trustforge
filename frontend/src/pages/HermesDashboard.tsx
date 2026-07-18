@@ -511,7 +511,7 @@ export default function HermesDashboard() {
         {selectedStage && (
           <>
             <button className="hermes-drilldown-scrim" type="button" aria-label={t('close')} onClick={() => setSelectedStage(null)} />
-            <StageDrilldown journey={analysisJourney} flow={analysisFlow} selCoin={selCoin} derivation={derivation} selectedStage={selectedStage} onClose={() => setSelectedStage(null)} />
+            <StageDrilldown telemetry={moduleTelemetry} journey={analysisJourney} flow={analysisFlow} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onClose={() => setSelectedStage(null)} />
           </>
         )}
 

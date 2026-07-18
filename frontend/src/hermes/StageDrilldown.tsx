@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import { requeueAnalysis, type AnalysisFlowData, type AnalysisJourneyData } from '../lib/endpoints'
+import type { BridgeHologramData } from '../components/BridgeHologramContext'
 
 interface StageDrilldownProps {
   selCoin: GalaxyCoin
@@ -10,9 +11,10 @@ interface StageDrilldownProps {
   onClose: () => void
   flow?: AnalysisFlowData | null
   journey?: AnalysisJourneyData | null
+  telemetry?: BridgeHologramData | null
 }
 
-export default function StageDrilldown({ selCoin, derivation, selectedStage, onClose, flow, journey }: StageDrilldownProps) {
+export default function StageDrilldown({ selCoin, derivation: fallbackDerivation, selectedStage, onClose, flow, journey, telemetry }: StageDrilldownProps) {
   const { t } = useHermesI18n()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
@@ -21,7 +23,7 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
   const label = isDivergence ? t('divergence') : selectedStage === 'scan' ? t('scan') : selectedStage === 'filter' ? t('filter') : selectedStage === 'crossverify' ? t('crossverify') : selectedStage === 'manipulation' ? t('manipulation') : t('composite')
   const icon = isDivergence ? '⚠' : selDef?.icon ?? ''
   const color = isDivergence ? HERMES_RED : selectedStage === 'manipulation' ? HERMES_AMBER
-    : selectedStage === 'crossverify' ? derivation.divColor
+    : selectedStage === 'crossverify' ? fallbackDerivation.divColor
       : selectedStage === 'composite' ? (selCoin.tier === 'healthy' ? HERMES_CYAN : selCoin.tier === 'moderate' ? HERMES_AMBER : HERMES_RED)
         : HERMES_CYAN
 
@@ -34,6 +36,47 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
   const recentAttempts = journey?.jobs.flatMap((job) => job.coin === selCoin.name && stageId
     ? job.attempts.filter((attempt) => attempt.stage === stageId).map((attempt) => ({ ...attempt, question: job.question, snapshot: job.snapshot_id })) : []).slice(0, 8) ?? []
   const deadLetters = journey?.dead_letters.filter((item) => item.coin === selCoin.name && item.stage === stageId) ?? []
+  const analysis = telemetry?.analysis
+  const completedStage = telemetry?.pipelineStages?.[stageIndex]
+  const evidence = analysis?.evidence ?? []
+  const passedEvidence = evidence.filter((item) => item.flags.length === 0)
+  const flaggedEvidence = evidence.filter((item) => item.flags.length > 0)
+  const aggregate = analysis?.trust_components_aggregate
+  const actualComponents = aggregate ? [
+    { label: 'Reputation', value: aggregate.reputation, weight: 30 },
+    { label: 'Corroboration', value: aggregate.corroboration, weight: 30 },
+    { label: 'Recency', value: aggregate.recency, weight: 20 },
+    { label: 'Manipulation resistance', value: aggregate.manipulation == null ? null : 1 - aggregate.manipulation, weight: 20 },
+  ].filter((item): item is { label: string; value: number; weight: number } => item.value !== null)
+    .map((item) => ({ label: item.label, score: Math.round(item.value * 100), weight: item.weight })) : []
+  const report = analysis?.report
+  const bullishCount = report?.cross_source_signal?.distinct_sources?.bullish.length ?? 0
+  const bearishCount = report?.cross_source_signal?.distinct_sources?.bearish.length ?? 0
+  const directionalCount = bullishCount + bearishCount
+  const actualDivergence = directionalCount ? Math.round((Math.min(bullishCount, bearishCount) / directionalCount) * 100) : 0
+  const derivation = analysis ? {
+    ...fallbackDerivation,
+    scanned: evidence.length,
+    passedCount: passedEvidence.length,
+    flaggedCount: flaggedEvidence.length,
+    divergence: actualDivergence,
+    scanItems: evidence.map((item) => ({
+      name: item.source,
+      time: new Date(item.fetched_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      credibility: Math.round(item.trust * 100),
+      note: item.content_reference,
+    })),
+    passedItems: passedEvidence.map((item) => item.source),
+    droppedItems: flaggedEvidence.map((item) => ({ name: item.source, reason: item.flags.join(', ') })),
+    crossItems: (report?.key_basis ?? []).slice(0, 4).map((item) => ({ stance: 'EVIDENCE', claim: item.claim, source: item.explanation, color: HERMES_CYAN })),
+    manipulationItems: flaggedEvidence.flatMap((item) => item.flags.map((flag) => `${item.source}: ${flag}`)),
+    components: actualComponents.map((item) => ({ ...item, barColor: item.score >= 75 ? HERMES_CYAN : item.score >= 50 ? HERMES_AMBER : HERMES_RED })),
+    steps: [
+      ...(report?.facts ?? []).slice(0, 2).map((text) => ({ kind: 'FACTS', indent: 0, color: HERMES_CYAN, text })),
+      ...(report?.inferences ?? []).slice(0, 2).map((text) => ({ kind: 'INFERENCE', indent: 22, color: HERMES_AMBER, text })),
+      ...(report ? [{ kind: 'CONCLUSION', indent: 44, color: HERMES_CYAN, text: report.market_judgment }] : []),
+    ],
+  } : fallbackDerivation
 
   return (
     <div
@@ -64,18 +107,20 @@ export default function StageDrilldown({ selCoin, derivation, selectedStage, onC
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 18px' }}>
-        {liveStage && (
+        {(liveStage || completedStage) && (
           <div style={{ marginBottom: 14, padding: 12, border: '1px solid var(--color-hermes-bd2)', background: 'rgba(4,10,17,.96)', borderRadius: 6, fontSize: 11, lineHeight: 1.7 }}>
-            <div style={{ color: HERMES_CYAN, fontWeight: 700 }}>HERMES WORKER · {liveStage.id}</div>
-            <div>狀態：{liveStage.current ? '處理中' : '待命'}　排隊：{liveStage.queued}</div>
-            {liveStage.next_retry_at && <div style={{ color: HERMES_AMBER }}>下次重試：{new Date(liveStage.next_retry_at * 1000).toLocaleTimeString()}</div>}
-            {liveStage.current ? <>
+            <div style={{ color: HERMES_CYAN, fontWeight: 700 }}>HERMES WORKER · {liveStage?.id ?? completedStage?.id}</div>
+            <div>狀態：{liveStage?.current ? '處理中' : completedStage?.status === 'completed' ? '本次執行已完成' : completedStage?.status === 'failed' ? '本次執行失敗' : '待命'}　排隊：{liveStage?.queued ?? 0}</div>
+            {liveStage?.next_retry_at && <div style={{ color: HERMES_AMBER }}>下次重試：{new Date(liveStage.next_retry_at * 1000).toLocaleTimeString()}</div>}
+            {liveStage?.current ? <>
               <div>幣別：{liveStage.current.coin}　模式：{liveStage.current.mode}</div>
               <div>題目：{liveStage.current.question}</div>
               <div>Snapshot：{liveStage.current.snapshot_id}</div>
               <div>開始：{new Date(liveStage.current.started_at * 1000).toLocaleTimeString()}　重試：{liveStage.current.retry_count}</div>
               {liveStage.current.error && <div style={{ color: HERMES_RED }}>錯誤：{liveStage.current.error}</div>}
-            </> : <div style={{ color: 'var(--color-hermes-tx3)' }}>目前沒有執行包；新 snapshot 或活動題目進入後會自動接手。</div>}
+            </> : completedStage?.status === 'completed'
+              ? <div style={{ color: 'var(--color-hermes-tx3)' }}>run {telemetry?.runId} · {completedStage.metric} {completedStage.unit}</div>
+              : <div style={{ color: 'var(--color-hermes-tx3)' }}>目前沒有執行工作。</div>}
           </div>
         )}
         {(recentAttempts.length > 0 || deadLetters.length > 0) && (

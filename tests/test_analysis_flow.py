@@ -126,6 +126,45 @@ def test_manual_job_precedes_waiting_scheduled_work_and_records_origin(tmp_path,
     flow.stop()
 
 
+def test_manual_priority_is_preserved_at_later_stage_boundaries(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    scheduled = flow.enqueue_job(snapshot, "risk", "scheduled work")
+    _, manual = flow.submit_manual("ETH", "risk", "manual work")
+
+    assert scheduled and manual
+    flow._put_package("trust_reasoning", {"job_id": scheduled})
+    flow._put_package("trust_reasoning", {"job_id": manual})
+    priority, _, package = flow._queues["trust_reasoning"].get_nowait()
+    flow._queues["trust_reasoning"].task_done()
+    assert priority == 0
+    assert package["job_id"] == manual
+    flow.stop()
+
+
+def test_repeated_manual_request_reuses_recent_job_without_collecting_again(tmp_path, monkeypatch):
+    calls = 0
+
+    def collect(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return _docs()
+
+    monkeypatch.setattr("trustforge.analysis_flow.collect", collect)
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    question = "BTC 是否出現新的跨來源分歧？"
+    _, first = flow.submit_manual("BTC", "risk", question)
+    _, second = flow.submit_manual(" btc ", " risk ", f" {question} ")
+
+    assert first == second
+    assert calls == 1
+    assert flow._conn().execute(
+        "SELECT count(*) FROM analysis_jobs WHERE origin='manual'",
+    ).fetchone()[0] == 1
+    flow.stop()
+
+
 def test_invalid_manual_job_never_collects_sources(tmp_path, monkeypatch):
     called = False
     def collect(*_args, **_kwargs):

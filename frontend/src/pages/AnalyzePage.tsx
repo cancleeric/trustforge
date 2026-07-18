@@ -43,6 +43,7 @@ export default function AnalyzePage() {
       return
     }
     setHologramData(data ? {
+      analysis: data,
       question: params.q,
       analysisMode: params.type,
       snapshotAt: data.report.generated_at,
