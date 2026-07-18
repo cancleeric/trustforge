@@ -965,6 +965,8 @@ with open('$CAPTURE/remote_script.sh', 'w') as f:
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_IDEMPOTENCY_LEASE_BACKEND=dynamodb' "update-in-place: 補 shared lease backend"
   assert_contains "$REMOTE" 'Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases' "update-in-place: 補 shared lease table"
   assert_contains "$REMOTE" 'bash deploy/install_hermes_scheduler.sh' "update-in-place: 呼叫 Hermes scheduler installer"
+  assert_contains "$REMOTE" 'systemctl restart trustforge-analysis-flow.service' "update-in-place: 重啟 durable analysis-flow worker"
+  assert_contains "$REMOTE" 'systemctl is-active --quiet trustforge-analysis-flow' "update-in-place: analysis-flow worker 是部署健康 gate"
   assert_contains "$REMOTE" 'systemctl enable --now fetch-scheduler.timer' "update-in-place: 確認 timer enabled"
   # PR-B（#119 退場遷移清理）：ADMIN_TOKEN/LIVE_TOKEN 這兩個 key deploy 已經
   # 完全不接受值了，unconditional 傳空字串給 ssm_env_cmd 只是為了刪掉舊機制

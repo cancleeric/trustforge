@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.16.12 — 2026-07-18
+
+- fix: production 現在安裝並重啟常駐 `trustforge-analysis-flow` worker；手動分析工作不再只入列卻沒有 consumer。
+- fix: backend deploy health gate 現在同時確認 web 與 analysis-flow worker 都存活。
+
 ## v0.16.11 — 2026-07-18
 
 - fix: 手動分析改為可持久化的高優先工作；不再依賴既有 snapshot 或受 Hermes 自動排程開關影響。
