@@ -14,7 +14,8 @@ import HermesModuleDeck, { type HermesWorkspaceModule } from '../hermes/HermesMo
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
 import HermesOnboarding from '../hermes/HermesOnboarding'
-import { recommendAnalysisMode, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
+import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
+import HermesFirstRun from '../hermes/HermesFirstRun'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
@@ -43,6 +44,7 @@ export default function HermesDashboard() {
   const [questionContext, setQuestionContext] = useState<AnalysisQuestionContext | null>(null)
   const [shipOpen, setShipOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [firstRunOpen, setFirstRunOpen] = useState(() => !qaMode && shouldShowHermesOnboarding() && searchParams.get('tour') !== '1')
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
   const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
@@ -83,10 +85,25 @@ export default function HermesDashboard() {
   }, [applyAnalysisMode])
 
   useEffect(() => {
-    if (searchParams.get('tour') === '1' || shouldShowHermesOnboarding()) setOnboardingOpen(true)
+    if (searchParams.get('tour') === '1') setOnboardingOpen(true)
     // Onboarding is intentionally evaluated once per page entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const leaveFirstRun = useCallback(() => {
+    rememberHermesOnboarding()
+    setFirstRunOpen(false)
+  }, [])
+
+  const startFirstRun = useCallback((coin: string, mode: AnalysisModeId, question: string) => {
+    rememberHermesOnboarding()
+    setFirstRunOpen(false)
+    setPhase('loading')
+    setLastOrder(true)
+    setSelectedId(coin.toLowerCase())
+    const type = mode === 'fundamentals' ? 'hypothesis' : 'multi_source'
+    setSearchParams({ coin, type, q: question, mode, workspace: 'analyze' })
+  }, [setSearchParams])
 
   const toggleShip = useCallback(() => {
     if (shipOpen) { setShipOpen(false); return }
@@ -467,6 +484,8 @@ export default function HermesDashboard() {
       </div>
     )
   }
+
+  if (firstRunOpen) return <HermesFirstRun onStart={startFirstRun} onSkip={leaveFirstRun} />
 
   return (
     <div className={`hermes-root hermes-dashboard${activeModule ? ' is-module-open' : ''}${qaMode ? ' is-qa-mode' : ''}`} style={{ width: '100vw', height: '100dvh', overflow: 'hidden', background: '#02040a' }}>
