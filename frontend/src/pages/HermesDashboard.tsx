@@ -152,9 +152,9 @@ export default function HermesDashboard() {
     return ph === 'loading'
       ? `Analyzing ${sel.full}… cross-referencing ${scanned} sources.`
       : `Tracking ${sel.full}. Composite trust score ${sel.score}/100 — ${tierText}. ` +
-        (sel.tier === 'healthy' ? 'Signal is clean; no action required.'
-          : sel.tier === 'moderate' ? 'Recommend monitoring divergence before increasing exposure.'
-            : 'Advise caution — integrity signals are degraded.')
+      (sel.tier === 'healthy' ? 'Signal is clean; no action required.'
+        : sel.tier === 'moderate' ? 'Recommend monitoring divergence before increasing exposure.'
+          : 'Advise caution — integrity signals are degraded.')
   }, [locale, t])
 
   const typeTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -232,7 +232,7 @@ export default function HermesDashboard() {
       window.clearInterval(timer)
       controllers.forEach((controller) => controller.abort())
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /*

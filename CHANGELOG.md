@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.16.5 — 2026-07-18
+
+- fix: 發布分析快照查詢修正
+
+## v0.16.4 — 2026-07-18
+
+- fix: 發布分析快照查詢修正
+
+## v0.16.3 — 2026-07-18
+
+- fix: 修復首頁模組面板閃現消失 bug（requestedModule effect 不再意外關閉面板）
+- feat: 新增 /docs Swagger UI（TRUSTFORGE_SWAGGER=1 啟用，生產預設關閉）
+- feat: 建立 Kiro 配置（steering 規範 + hooks 自動化品質控管）
+- fix: 同步 frontend package-lock.json 修復 CI npm ci 失敗
+
 ## v0.16.2 — 2026-07-17
 
 - Make read-only Hermes analysis projections return empty telemetry when the
