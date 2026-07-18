@@ -25,7 +25,8 @@ def test_autonomous_cycle_uses_fixed_pool_and_existing_scheduler_actions():
     assert plan["actions"][4]["argv"][-1] == "out/question-bank-latest.json"
 
 
-def test_autonomy_defaults_local_on_and_production_off(monkeypatch):
+def test_autonomy_defaults_local_on_and_production_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTFORGE_RUNTIME_STATE_PATH", str(tmp_path / "runtime.json"))
     monkeypatch.delenv("TRUSTFORGE_RUNTIME_SWITCH", raising=False)
     monkeypatch.delenv("TRUSTFORGE_ALLOW_PRODUCTION_CONTINUOUS", raising=False)
     monkeypatch.delenv("TRUSTFORGE_ENV", raising=False)
