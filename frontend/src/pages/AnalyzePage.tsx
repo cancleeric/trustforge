@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { getAnalyze } from '../lib/endpoints'
+import { getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeParams } from '../lib/endpoints'
 import type { AnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
