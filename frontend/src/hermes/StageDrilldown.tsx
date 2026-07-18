@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
+import { COMPONENT_WEIGHTS, HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import { requeueAnalysis, type AnalysisFlowData, type AnalysisJourneyData } from '../lib/endpoints'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
@@ -31,7 +31,7 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
   const componentLabel = (value: string) => value === 'Reputation' ? t('reputation') : value === 'Corroboration' ? t('corroboration') : value === 'Recency' ? t('recency') : t('resistance')
   const reasoningKind = (value: string) => value === 'FACTS' ? t('facts') : value === 'INFERENCE' ? t('inference') : t('conclusion')
   const stageIndex = Math.max(0, STAGE_DEFS.findIndex((stage) => stage.id === selectedStage))
-  const liveStage = flow?.stages[stageIndex]
+  const liveStage = telemetry?.runId ? undefined : flow?.stages[stageIndex]
   const stageId = liveStage?.id
   const recentAttempts = journey?.jobs.flatMap((job) => job.coin === selCoin.name && stageId
     ? job.attempts.filter((attempt) => attempt.stage === stageId).map((attempt) => ({ ...attempt, question: job.question, snapshot: job.snapshot_id })) : []).slice(0, 8) ?? []
@@ -43,23 +43,18 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
   const flaggedEvidence = evidence.filter((item) => item.flags.length > 0)
   const aggregate = analysis?.trust_components_aggregate
   const actualComponents = aggregate ? [
-    { label: 'Reputation', value: aggregate.reputation, weight: 30 },
-    { label: 'Corroboration', value: aggregate.corroboration, weight: 30 },
-    { label: 'Recency', value: aggregate.recency, weight: 20 },
-    { label: 'Manipulation resistance', value: aggregate.manipulation == null ? null : 1 - aggregate.manipulation, weight: 20 },
+    { label: 'Reputation', value: aggregate.reputation, weight: COMPONENT_WEIGHTS[0] },
+    { label: 'Corroboration', value: aggregate.corroboration, weight: COMPONENT_WEIGHTS[1] },
+    { label: 'Recency', value: aggregate.recency, weight: COMPONENT_WEIGHTS[2] },
+    { label: 'Manipulation resistance', value: aggregate.manipulation == null ? null : 1 - aggregate.manipulation, weight: COMPONENT_WEIGHTS[3] },
   ].filter((item): item is { label: string; value: number; weight: number } => item.value !== null)
     .map((item) => ({ label: item.label, score: Math.round(item.value * 100), weight: item.weight })) : []
   const report = analysis?.report
-  const bullishCount = report?.cross_source_signal?.distinct_sources?.bullish.length ?? 0
-  const bearishCount = report?.cross_source_signal?.distinct_sources?.bearish.length ?? 0
-  const directionalCount = bullishCount + bearishCount
-  const actualDivergence = directionalCount ? Math.round((Math.min(bullishCount, bearishCount) / directionalCount) * 100) : 0
   const derivation = analysis ? {
     ...fallbackDerivation,
     scanned: evidence.length,
     passedCount: passedEvidence.length,
     flaggedCount: flaggedEvidence.length,
-    divergence: actualDivergence,
     scanItems: evidence.map((item) => ({
       name: item.source,
       time: new Date(item.fetched_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -138,6 +133,7 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
         )}
         {selectedStage === 'scan' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {analysis && <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)', marginBottom: 4 }}>本次報告保留的 {evidence.length} 筆可追溯證據；不代表來源蒐集階段的原始文件總數。</div>}
             {derivation.scanItems.map((it, i) => {
               const key = `${selCoin.id}_${i}`
               const open = !!expanded[key]
@@ -162,13 +158,13 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
         {selectedStage === 'filter' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div>
-              <div style={{ fontSize: 10, color: HERMES_CYAN, letterSpacing: 1, marginBottom: 7 }}>{t('passed')} · {derivation.passedCount}</div>
+              <div style={{ fontSize: 10, color: HERMES_CYAN, letterSpacing: 1, marginBottom: 7 }}>{analysis ? '無操縱旗標' : t('passed')} · {derivation.passedCount}</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {derivation.passedItems.map((p) => <span key={p} style={{ fontSize: 11, color: 'var(--color-hermes-tx)', background: 'rgba(77,216,224,.13)', border: '1px solid rgba(77,216,224,.4)', borderRadius: 5, padding: '5px 9px' }}>{p}</span>)}
               </div>
             </div>
             <div>
-              <div style={{ fontSize: 10, color: HERMES_RED, letterSpacing: 1, marginBottom: 7 }}>{t('dropped')} · {derivation.flaggedCount}</div>
+              <div style={{ fontSize: 10, color: HERMES_RED, letterSpacing: 1, marginBottom: 7 }}>{analysis ? '有操縱旗標' : t('dropped')} · {derivation.flaggedCount}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {derivation.droppedItems.map((d) => (
                   <div key={d.name} style={{ fontSize: 11.5, color: 'var(--color-hermes-tx)', background: 'rgba(255,95,95,.14)', border: '1px solid rgba(255,95,95,.45)', borderRadius: 6, padding: '7px 10px' }}>
@@ -182,7 +178,9 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
 
         {(selectedStage === 'crossverify' || isDivergence) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 10.5, color: derivation.divColor, background: derivation.divDim, border: `1px solid ${derivation.divBd}`, borderRadius: 5, padding: '4px 9px', width: 'fit-content' }}>{t('divergenceUnit')} · Δ {derivation.divergence}%</div>
+            <div style={{ fontSize: 10.5, color: derivation.divColor, background: derivation.divDim, border: `1px solid ${derivation.divBd}`, borderRadius: 5, padding: '4px 9px', width: 'fit-content' }}>
+              {analysis ? report?.cross_source_signal?.summary ?? '本次沒有形成可報告的跨來源訊號' : `${t('divergenceUnit')} · Δ ${derivation.divergence}%`}
+            </div>
             {derivation.crossItems.map((cv, i) => (
               <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 5, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: `3px solid ${cv.color}`, borderRadius: '0 6px 6px 0', padding: '9px 12px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
@@ -197,7 +195,7 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
 
         {selectedStage === 'manipulation' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 11.5, color: 'var(--color-hermes-tx2)' }}>{t('flaggedChannel')}: <b style={{ color: 'var(--color-hermes-tx)' }}>Social Sentiment Scanner</b></div>
+            <div style={{ fontSize: 11.5, color: 'var(--color-hermes-tx2)' }}>{t('flaggedChannel')}: <b style={{ color: 'var(--color-hermes-tx)' }}>{analysis ? [...new Set(flaggedEvidence.map((item) => item.source))].join(', ') || '本次無確定操縱旗標' : 'Social Sentiment Scanner'}</b></div>
             {derivation.manipulationItems.map((m, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 11.5, color: 'var(--color-hermes-tx)', background: 'rgba(255,95,95,.14)', border: '1px solid rgba(255,95,95,.45)', borderRadius: 6, padding: '8px 11px' }}>
                 <span style={{ color: HERMES_RED }}>✕</span><span>{m}</span>

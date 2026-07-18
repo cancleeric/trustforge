@@ -6,7 +6,7 @@ import HermesRightRail from '../hermes/HermesRightRail'
 import CurrencyGalaxy from '../hermes/CurrencyGalaxy'
 import StageBar from '../hermes/StageBar'
 import StageDrilldown from '../hermes/StageDrilldown'
-import { buildGalaxyModel, deriveSelected, HERMES_AMBER, HERMES_CYAN, HERMES_RED, tierOf, type GalaxyCoin, type GalaxyModel, type TrustComponent } from '../lib/hermesData'
+import { buildGalaxyModel, COMPONENT_WEIGHTS, deriveSelected, HERMES_AMBER, HERMES_CYAN, HERMES_RED, tierOf, type GalaxyCoin, type GalaxyModel, type TrustComponent } from '../lib/hermesData'
 import { getOverview, getCosts, getHealth, getAnalysisFlow, getAnalysisJourney, getAnalysisQuestionContext, getHermesUpgrades, type AnalysisFlowData, type AnalysisJourneyData, type AnalysisQuestionContext, type HermesUpgradeData } from '../lib/endpoints'
 import '../hermes/hermes.css'
 import { useHermesI18n } from '../hermes/hermesI18n'
@@ -408,10 +408,10 @@ export default function HermesDashboard() {
   const componentColor = (score: number) => score >= 75 ? HERMES_CYAN : score >= 50 ? HERMES_AMBER : HERMES_RED
   const rawComponents = moduleTelemetry?.componentScores
   const hudComponents: TrustComponent[] = rawComponents ? [
-    ['Reputation', rawComponents.reputation, 30],
-    ['Corroboration', rawComponents.corroboration, 30],
-    ['Recency', rawComponents.recency, 20],
-    ['Manipulation resistance', rawComponents.resistance, 20],
+    ['Reputation', rawComponents.reputation, COMPONENT_WEIGHTS[0]],
+    ['Corroboration', rawComponents.corroboration, COMPONENT_WEIGHTS[1]],
+    ['Recency', rawComponents.recency, COMPONENT_WEIGHTS[2]],
+    ['Manipulation resistance', rawComponents.resistance, COMPONENT_WEIGHTS[3]],
   ].map(([label, value, weight]) => {
     const score = value == null ? 0 : Math.round(Number(value) * 100)
     return { label: String(label), score, weight: Number(weight), barColor: componentColor(score) }
@@ -498,6 +498,7 @@ export default function HermesDashboard() {
             derived={!rawComponents}
             flow={analysisFlow}
             journey={analysisJourney}
+            crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
             derivation={hudDerivation}
             onOpenComposite={() => setSelectedStage('composite')}
             onOpenDivergence={() => setSelectedStage('divergence')}

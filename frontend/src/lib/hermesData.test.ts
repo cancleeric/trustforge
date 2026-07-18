@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildGalaxyModel, GALAXY_IDENTITIES } from './hermesData'
+import { buildGalaxyModel, COMPONENT_WEIGHTS, GALAXY_IDENTITIES } from './hermesData'
 import type { OverviewData } from './types'
 
 describe('Hermes competition galaxy', () => {
@@ -20,5 +20,9 @@ describe('Hermes competition galaxy', () => {
     expect(model.byId.eth.score).toBe(58)
     expect(model.coins).toHaveLength(5)
     expect(model.byId.usd).toBeUndefined()
+  })
+
+  it('uses the production trust scoring coefficients', () => {
+    expect(COMPONENT_WEIGHTS).toEqual([50, 25, 15, 40])
   })
 })

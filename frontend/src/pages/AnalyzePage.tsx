@@ -52,7 +52,7 @@ export default function AnalyzePage() {
       primaryValue: data.report.calibrated_confidence,
       total: data.evidence.length,
       status: data.report.decision_state,
-      trustScore: data.report.calibrated_confidence,
+      trustScore: data.report.confidence,
       componentScores: {
         reputation: data.trust_components_aggregate.reputation,
         corroboration: data.trust_components_aggregate.corroboration,

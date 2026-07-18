@@ -30,7 +30,7 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
     status: ['UPLINK', 'CACHE', 'FRESHNESS', 'ALERTS', 'HEALTH'],
     costs: ['CALLS', 'MODELS', 'TOKENS', 'LEDGER', 'TOTAL COST'],
   }
-  const liveFlow = flow?.stages.some((stage) => stage.current || stage.queued > 0)
+  const liveFlow = !telemetry?.runId && flow?.stages.some((stage) => stage.current || stage.queued > 0)
   const engineStages = mode === 'analyze' && liveFlow ? flow?.stages.map((stage) => ({
     id: stage.id,
     label: moduleLabels.analyze[flow.stages.indexOf(stage)],
@@ -40,7 +40,7 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
       : `${stage.current ? '處理中' : '待命'} · 排隊 ${stage.queued} · 重試 ${stage.current?.retry_count ?? 0}`,
     status: stage.current ? 'pending' as const : 'completed' as const,
   })) : mode === 'analyze' ? telemetry?.pipelineStages : undefined
-  const currentWork = flow?.stages.find((stage) => stage.current)?.current
+  const currentWork = telemetry?.runId ? undefined : flow?.stages.find((stage) => stage.current)?.current
   const stages = STAGE_DEFS.map((stage, index) => {
     const metric = derivation.stageMetrics[stage.id]
     const engine = engineStages?.[index]
