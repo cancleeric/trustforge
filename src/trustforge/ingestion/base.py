@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+from urllib.parse import urlsplit
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -121,6 +122,21 @@ def set_source_enabled_override(name: str, enabled: bool) -> None:
     _SOURCE_ENABLED_OVERRIDES[name] = bool(enabled)
 
 
+def is_valid_hoyabit_endpoint(value: str) -> bool:
+    """Accept only credential-free HTTPS endpoints with a real hostname."""
+    try:
+        parsed = urlsplit(value.strip())
+        parsed.port
+        return (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except ValueError:
+        return False
+
+
 def get_source_enabled(name: str) -> bool:
     """回傳某源是否啟用。
 
@@ -129,12 +145,16 @@ def get_source_enabled(name: str) -> bool:
     - 否則：預設 disabled 清單（如 hoyabit-ticker）內的源回 False；其餘真實源
       回 True（fail-closed：沒被明確 disabled 就啟用）。
     """
+    if name == "hoyabit-ticker" and not is_valid_hoyabit_endpoint(
+        os.getenv("TRUSTFORGE_HOYABIT_TICKER_URL", "")
+    ):
+        return False
     if name in _SOURCE_ENABLED_OVERRIDES:
         return _SOURCE_ENABLED_OVERRIDES[name]
     # HOYA BIT becomes a real source only after the organizer-provided HTTPS
     # contract is configured.  Keeping the default disabled prevents the old
     # placeholder from ever acquiring first-party trust by accident.
-    if name == "hoyabit-ticker" and os.getenv("TRUSTFORGE_HOYABIT_TICKER_URL", "").strip():
+    if name == "hoyabit-ticker":
         return True
     return name not in _DEFAULT_DISABLED_SOURCES
 
