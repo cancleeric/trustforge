@@ -696,7 +696,8 @@ def test_complete_offline_returns_llmresult_zero_tokens():
     assert result.input_tokens == 0
     assert result.output_tokens == 0
     assert result.model_id is None
-    assert "[OFFLINE]" in result.text
+    assert result.text == "離線模式未執行線上模型生成。"
+    assert "would answer" not in result.text
 
 
 class _FakeInvokeBody:

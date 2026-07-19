@@ -207,12 +207,16 @@ class BedrockClient:
     def complete(self, system: str, prompt: str) -> LLMResult:
         """單輪文字生成。回傳 `LLMResult`（文字輸出 + token 用量，供成本記錄用）。
 
-        離線模式：回傳佔位文字，token=0、model_id=None（呼叫端仍可記一筆 $0 成本，
-        讓帳本看得到「此 run 離線」）。
+        離線模式：回傳固定狀態文字，token=0、model_id=None。不得回顯 prompt
+        或產生看似模型回答的內容；呼叫端仍可記一筆 $0 成本。
         """
         if self.offline:
-            text = f"[OFFLINE] (model={self.config.model_id or 'unset'}) would answer:\n{prompt[:280]}"
-            return LLMResult(text=text, input_tokens=0, output_tokens=0, model_id=None)
+            return LLMResult(
+                text="離線模式未執行線上模型生成。",
+                input_tokens=0,
+                output_tokens=0,
+                model_id=None,
+            )
 
         if not self.config.model_id:
             raise RuntimeError(

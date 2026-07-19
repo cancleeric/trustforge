@@ -223,7 +223,6 @@ def _admin_runtime_config(now_fn=time.monotonic):
             "TrustForge: admin config 讀取失敗，live 閘 fail-closed（本請求"
             "不放行真 Bedrock；分析照常走離線），%.0fs 內不重試",
             admin_config.CACHE_TTL_SECONDS,
-            exc_info=True,
         )
         with _admin_cfg_fail_lock:
             _admin_cfg_fail_until = now_fn() + admin_config.CACHE_TTL_SECONDS
@@ -5100,7 +5099,7 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
     try:
         from .analysis_flow import AnalysisFlow
         with AnalysisFlow(readonly=True) as flow:
-            return 200, _json_envelope_ok(flow.status())
+            return 200, _json_envelope_ok(_public_analysis_diagnostics(flow.status()))
     except Exception:
         logging.exception("TrustForge /api/analysis-flow error")
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
@@ -5207,10 +5206,49 @@ def _handle_api_analysis_job(qs: dict) -> tuple[int, str]:
             job = flow.job_status(job_id)
         if job is None:
             return 404, _json_envelope_err("job_not_found", "找不到分析工作")
-        return 200, _json_envelope_ok(job)
+        return 200, _json_envelope_ok(_public_analysis_job(job))
     except Exception:
         logging.exception("TrustForge /api/analysis-job error")
         return 502, _json_envelope_err("analysis_job_unavailable", "分析工作狀態暫時無法讀取")
+
+
+def _public_analysis_job(job: dict) -> dict:
+    """Return a browser-safe job projection while preserving internal diagnostics."""
+    public = dict(job)
+    if public.get("error"):
+        terminal = public.get("state") in {"failed", "dead_letter"}
+        public["error_code"] = "analysis_job_failed" if terminal else "analysis_job_retrying"
+        public["error"] = (
+            "分析工作執行失敗，請稍後重試。"
+            if terminal else "分析工作暫時中斷，系統將自動重試。"
+        )
+    else:
+        public["error_code"] = None
+    return public
+
+
+def _public_analysis_diagnostics(payload):
+    """Redact durable worker failures from public flow and journey payloads."""
+    if isinstance(payload, list):
+        return [_public_analysis_diagnostics(item) for item in payload]
+    if not isinstance(payload, dict):
+        return payload
+
+    public = {key: _public_analysis_diagnostics(value) for key, value in payload.items()}
+    if public.get("error"):
+        terminal = public.get("state") in {"failed", "dead_letter"} or (
+            "failed_at" in public
+        )
+        public["error_code"] = (
+            "analysis_job_failed" if terminal else "analysis_job_retrying"
+        )
+        public["error"] = (
+            "分析工作執行失敗，請稍後重試。"
+            if terminal else "分析工作暫時中斷，系統將自動重試。"
+        )
+    elif "error" in public:
+        public["error_code"] = None
+    return public
 
 
 def _handle_api_analysis_question_context(qs: dict) -> tuple[int, str]:
@@ -5312,7 +5350,9 @@ def _handle_api_analysis_journey(qs: dict) -> tuple[int, str]:
         raw = qs.get("limit", ["50"])[0]
         limit = int(raw) if raw.isdigit() else 50
         with AnalysisFlow(readonly=True) as flow:
-            return 200, _json_envelope_ok(flow.journey(limit=limit))
+            return 200, _json_envelope_ok(
+                _public_analysis_diagnostics(flow.journey(limit=limit))
+            )
     except Exception:
         logging.exception("TrustForge analysis journey error")
         return 502, _json_envelope_err("analysis_journey_unavailable", "執行旅程暫時無法讀取")

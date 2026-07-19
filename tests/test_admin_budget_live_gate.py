@@ -467,7 +467,7 @@ def test_admin_view_effective_source_env_layer(monkeypatch, tmp_path):
     assert view["hermes_autonomy_enabled"]["source"] == "env"
 
 
-def test_read_error_negative_cache_window(monkeypatch):
+def test_read_error_negative_cache_window(monkeypatch, caplog):
     """web 層讀取失敗負快取：失敗後 15s 窗內不重打儲存層（零 AWS 部署的
     /status、/api/status 不因每請求重付失敗讀而變慢），窗內閘門維持
     fail-closed；期滿重試、成功後窗清除。"""
@@ -483,6 +483,8 @@ def test_read_error_negative_cache_window(monkeypatch):
 
     assert web._admin_runtime_config(now_fn=now_fn) is web._ADMIN_CFG_READ_ERROR
     assert calls["n"] == 1
+    assert any("admin config 讀取失敗" in record.message for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
     # 窗內：不重打（呼叫次數不變），仍回 sentinel（fail-closed）
     fake_now[0] += 1.0
     assert web._admin_runtime_config(now_fn=now_fn) is web._ADMIN_CFG_READ_ERROR
@@ -603,7 +605,7 @@ def test_stance_pipeline_side_path_blocked_when_config_disabled(monkeypatch):
 # 10. budget 路徑失敗負快取（PR #114 複審 qa M1）：DynamoDB 持續故障時
 #     不得讓每個 analyze（含純離線）都重付一次有界 timeout 的失敗讀
 # ---------------------------------------------------------------------------
-def test_budget_path_negative_cache_no_flood(monkeypatch):
+def test_budget_path_negative_cache_no_flood(monkeypatch, caplog):
     """讀取失敗後 15s 窗內，`daily_cap_usd_resolved()` 不再重打儲存層
     （呼叫次數不增），且照樣落 env（fail-safe 行為不變）。"""
     monkeypatch.setenv("TRUSTFORGE_BEDROCK_DAILY_USD_CAP", "2.5")
@@ -616,6 +618,8 @@ def test_budget_path_negative_cache_no_flood(monkeypatch):
     monkeypatch.setattr(admin_config, "get_config", boom)
     assert budget_guard.daily_cap_usd_resolved() == (2.5, "env")
     assert calls["n"] == 1
+    assert any("admin config 讀取失敗" in record.message for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
     # 失敗窗內：不重打儲存層，直接落 env
     assert budget_guard.daily_cap_usd_resolved() == (2.5, "env")
     assert budget_guard.daily_cap_usd_resolved() == (2.5, "env")
