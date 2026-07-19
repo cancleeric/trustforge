@@ -19,6 +19,30 @@ import HermesFirstRun from '../hermes/HermesFirstRun'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
+function AgentCoreStatusBar() {
+  const [status, setStatus] = useState<'connected' | 'disconnected' | 'checking'>('checking')
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const resp = await fetch('/api/health', { signal: AbortSignal.timeout(3000) })
+        setStatus(resp.ok ? 'connected' : 'disconnected')
+      } catch {
+        setStatus('disconnected')
+      }
+    }
+    check()
+    const id = setInterval(check, 15000)
+    return () => clearInterval(id)
+  }, [])
+  const color = status === 'connected' ? '#4ade80' : status === 'disconnected' ? '#f87171' : '#fbbf24'
+  const label = status === 'connected' ? '● AgentCore Connected' : status === 'disconnected' ? '○ AgentCore Offline' : '◐ Checking...'
+  return (
+    <div style={{ position: 'fixed', top: 8, right: 16, zIndex: 9999, background: 'rgba(13,17,23,0.9)', border: `1px solid ${color}`, borderRadius: 6, padding: '4px 12px', fontFamily: 'monospace', fontSize: 11, color }}>
+      {label}
+    </div>
+  )
+}
+
 export default function HermesDashboard() {
   const { locale, t } = useHermesI18n()
   const qtypes = useMemo(
@@ -502,6 +526,9 @@ export default function HermesDashboard() {
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} />
         </div>
+
+        {/* AgentCore connection status */}
+        <AgentCoreStatusBar />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <HermesLeftRail
