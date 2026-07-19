@@ -962,6 +962,26 @@ def test_scheduler_calls_registered_source_fetch(monkeypatch, tmp_path):
     assert src.calls == [("", "BTC"), ("", "ETH")]
 
 
+def test_scheduler_skips_disabled_source_without_refreshing_cache(monkeypatch, tmp_path):
+    from trustforge.ingestion import base
+
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    src = _FakeSource("hoyabit-ticker", kind="hoyabit")
+    monkeypatch.setattr(src, "enabled", False)
+    base.set_source_enabled_override("hoyabit-ticker", False)
+    _patch_registry(monkeypatch, [src])
+
+    results, failures = fetch_scheduler.run_once(
+        ["hoyabit-ticker"], ["BTC"], backend, force=True,
+        interval_overrides={}, stagger=0, dry_run=False,
+    )
+
+    assert results == []
+    assert failures == []
+    assert src.calls == []
+    assert backend.get(cache_key("hoyabit-ticker", "BTC")) is None
+
+
 def test_scheduler_coin_agnostic_source_fetches_once_broadcasts_all_coins(monkeypatch, tmp_path):
     backend = JsonCacheBackend(tmp_path / "cache.json")
     name = next(iter(COIN_AGNOSTIC_SOURCES))
