@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 WORLD_FIRST_BAR = "world_first_progress"
+DEPENDENCY_PATTERNS = (
+    re.compile(r"(?:depends on|blocked by|requires)\s+#(\d+)", re.IGNORECASE),
+    re.compile(r"(?:相依|阻擋於|需要)\s*#(\d+)", re.IGNORECASE),
+)
+PRIORITY_LABELS = {
+    "production": 0,
+    "bug": 1,
+    "security": 2,
+    "release": 3,
+    "e2e": 4,
+    "cost": 5,
+}
 
 
 def _run(args: list[str]) -> tuple[bool, str]:
@@ -36,9 +49,56 @@ def _e2e_inventory() -> dict:
     return {"test_files": len(files), "workflow_like_tests": e2e_like}
 
 
-def build_report() -> dict:
+def _label_names(issue: dict) -> set[str]:
+    return {
+        str(label.get("name", "")).strip().lower()
+        for label in issue.get("labels", [])
+        if isinstance(label, dict)
+    }
+
+
+def _dependencies(issue: dict) -> list[int]:
+    body = str(issue.get("body", ""))
+    return sorted({int(match) for pattern in DEPENDENCY_PATTERNS for match in pattern.findall(body)})
+
+
+def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[dict]:
+    """Select distinct runnable issues; agents still validate dependencies before coding."""
+    if not isinstance(issues, list):
+        return []
+    active_heads = {
+        str(pr.get("headRefName", ""))
+        for pr in prs if isinstance(pr, dict)
+    } if isinstance(prs, list) else set()
+    candidates = []
+    for issue in issues:
+        if not isinstance(issue, dict) or "number" not in issue:
+            continue
+        number = int(issue["number"])
+        labels = _label_names(issue)
+        dependencies = _dependencies(issue)
+        issue_ref = re.compile(rf"(?:^|[-_/])(?:issue-)?{number}(?:[-_/]|$)")
+        active_branch = next((head for head in active_heads if issue_ref.search(head)), None)
+        priority = min((PRIORITY_LABELS[label] for label in labels if label in PRIORITY_LABELS), default=20)
+        candidates.append((priority, number, issue, dependencies, active_branch))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [
+        {
+            "lane": lane,
+            "issue": number,
+            "title": str(issue.get("title", "")),
+            "dependencies": dependencies,
+            "dependency_check": "agent_must_confirm_closed_before_implementation",
+            "action": "continue_pr" if active_branch else "start_issue",
+            "active_branch": active_branch,
+        }
+        for lane, (_, number, issue, dependencies, active_branch) in enumerate(candidates[:max_lanes], start=1)
+    ]
+
+
+def build_report(max_lanes: int = 1) -> dict:
     prs = _json_cmd(["gh", "pr", "list", "--state", "open", "--json", "number,title,headRefName,baseRefName,reviewRequests,mergeStateStatus,statusCheckRollup"])
-    issues = _json_cmd(["gh", "issue", "list", "--state", "open", "--limit", "20", "--json", "number,title,labels,updatedAt"])
+    issues = _json_cmd(["gh", "issue", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,labels,updatedAt"])
     e2e = _e2e_inventory()
     questions = [
         {
@@ -59,7 +119,7 @@ def build_report() -> dict:
         "proposed_cpo_owner": "gray",
         "ceo_review_required_before_implementation": True,
         "proposed_ceo_role": "final_plan_gate_and_execution_dispatch",
-        "operating_mode": "recommendation_only",
+        "operating_mode": "unattended_scoped_issue_lanes",
         "priority_order": [
             "open PRs with failing CI or missing reviewer",
             "open PRs with green CI but missing approval",
@@ -81,7 +141,7 @@ def build_report() -> dict:
             "/codex-review required before merge",
             "security changes require harper plus /codex-review",
         ],
-        "automation_boundary": "inventory and recommend only; an interactive CEO must plan, approve, dispatch, verify, merge and deploy",
+        "automation_boundary": "runner may dispatch issue lanes; production, main merges, releases, secrets and cost changes remain forbidden",
     }
     cpo_plan = {
         "proposed_author": "gray",
@@ -103,15 +163,15 @@ def build_report() -> dict:
         ],
     }
     ceo_review = {
-        "required_decision": "pending_interactive_ceo_review",
-        "implementation_gate": "CEO must approve a scoped CPO plan before code changes in each round",
+        "required_decision": "per_lane_auto_review_after_gray_plan",
+        "implementation_gate": "Each lane must record CEO APPROVED after Gray's scoped plan before code changes",
         "progress_report_rule": "report after each milestone or after more than three PRs",
         "ollama_coding_endpoint": "http://yingdemacbook-pro.local:11434/",
         "ollama_boundary": "use only for coding assistance when reachable; do not use for non-code secrets or deployment authority",
     }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "ceo_sweep_recommendation",
+        "mode": "ceo_continuous_development_inventory",
         "cadence": "1 hour",
         WORLD_FIRST_BAR: {
             "question": "這一輪是否讓 TrustForge 更接近世界第一？",
@@ -124,16 +184,18 @@ def build_report() -> dict:
         "e2e": e2e,
         "issues": issues,
         "prs": prs,
-        "decision": "recommend_plan_and_dispatch_for_interactive_ceo_execution",
-        "execution_status": "not_executed_by_sweep",
+        "execution_queue": build_execution_queue(issues, prs, max_lanes),
+        "decision": "dispatch_scoped_lanes_after_gray_plan_and_ceo_auto_review",
+        "execution_status": "inventory_complete_runner_dispatch_pending",
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run active CEO issue/PR planning sweep")
     parser.add_argument("--out", type=Path, default=REPO / "out" / "ceo-sweep-latest.json")
+    parser.add_argument("--max-lanes", type=int, default=1)
     args = parser.parse_args(argv)
-    report = build_report()
+    report = build_report(max_lanes=max(1, args.max_lanes))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False, indent=2))
