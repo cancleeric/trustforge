@@ -6,6 +6,7 @@ import { formatAge, formatEpoch, formatUptime, formatUsd } from '../lib/format'
 import { DegradedBadge, FreshnessStatusBadge } from '../components/Badges'
 import { ErrorState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
+import GlossaryTerm from '../components/GlossaryTerm'
 
 // 鮮度矩陣預設排序：把需要注意的格子排前面（missing 沒資料最該關注、
 // stale 次之、fresh 最後），而不是照 API 回傳原始順序（逐 source × coin
@@ -41,7 +42,7 @@ function FreshnessMatrix({ entries }: { entries: FreshnessEntry[] }) {
           <tr className="border-b border-tf-border text-xs text-tf-muted">
             <th className="px-3 py-2 font-medium">來源</th>
             <th className="px-3 py-2 font-medium">幣種</th>
-            <th className="px-3 py-2 font-medium">狀態</th>
+            <th className="px-3 py-2 font-medium"><GlossaryTerm term="freshness" label="狀態" compact /></th>
             <th className="tf-num px-3 py-2 text-right font-medium">最後更新</th>
             <th className="tf-num px-3 py-2 text-right font-medium">寫入時間</th>
           </tr>
@@ -181,7 +182,7 @@ export default function StatusPage() {
   }, [costsError])
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
+    <main className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Runtime observability</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">系統狀態</h1>
@@ -195,7 +196,7 @@ export default function StatusPage() {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="hermes-clip border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">部署版本</p><p className="mt-1 font-mono text-sm font-semibold text-tf-text">{status.version}</p></div>
             <div className="hermes-clip border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">服務運行時間</p><p className="tf-num mt-1 text-sm font-semibold text-tf-text">{formatUptime(status.uptime_seconds)}</p></div>
-            <div className="hermes-clip border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted">LLM runtime</p><p className="mt-1 text-sm font-semibold text-tf-text">Bedrock：{status.bedrock_capable ? '可用' : '未啟用'}</p></div>
+            <div className="hermes-clip border border-tf-border bg-tf-card p-3"><p className="text-xs text-tf-muted"><GlossaryTerm term="llmRuntime" label="LLM runtime" compact /></p><p className="mt-1 text-sm font-semibold text-tf-text">Bedrock：{status.bedrock_capable ? '可用' : '未啟用'}</p></div>
           </div>
 
           <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
@@ -215,7 +216,9 @@ export default function StatusPage() {
           </div>
 
           <section>
-            <h3 className="mb-2 text-sm font-semibold text-tf-text">連接器資料鮮度</h3>
+            <h3 className="mb-2 text-sm font-semibold text-tf-text">
+              <GlossaryTerm term="connector" label="連接器" compact />資料<GlossaryTerm term="freshness" label="鮮度" compact />
+            </h3>
             {status.freshness.fresh === 0 && status.freshness.stale === 0 && status.freshness.missing > 0 && (
               <div className="mb-3 border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
                 <p className="font-semibold">服務正常，但尚未收到來源快照</p>

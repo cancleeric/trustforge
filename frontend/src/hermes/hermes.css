@@ -18,6 +18,10 @@
    HERMES 是暗色優先設計，故套用後即為暗色（不受 light 主題影響）。 ── */
 .hermes-surface {
   --color-tf-bg: #050810;
+  --color-tf-bg-hero: #0a1420;
+  --color-tf-panel: #0a1018;
+  --color-tf-well: #070c14;
+  --color-tf-hover: #111a26;
   --color-tf-card: #0d141e;
   --color-tf-border: #1c2b3a;
   --color-tf-text: #dce9f2;
@@ -29,6 +33,9 @@
   --color-tf-good: #4dd8e0;
   --color-tf-warn: #e8b34d;
   --color-tf-bad: #ff5f5f;
+  /* 設計稿獨立的「成功/高信任」綠，跟 cyan accent 區分（trust band
+     70-100 用綠，跟 cyan 的資訊型強調色語意不同）。 */
+  --color-tf-green: #46c98b;
 }
 
 .app-header {
@@ -39,6 +46,10 @@
 
 :root[data-theme='light'] .hermes-surface {
   --color-tf-bg: #eef3f7;
+  --color-tf-bg-hero: #e4ebf1;
+  --color-tf-panel: #e4ebf1;
+  --color-tf-well: #dbe4ec;
+  --color-tf-hover: #d3dee7;
   --color-tf-card: #ffffff;
   --color-tf-border: #c5d2dc;
   --color-tf-text: #14212b;
@@ -50,6 +61,7 @@
   --color-tf-good: #16794a;
   --color-tf-warn: #8a5b00;
   --color-tf-bad: #c52e3a;
+  --color-tf-green: #16794a;
 }
 
 :root[data-theme='light'] .app-header {

@@ -107,7 +107,8 @@ function CompareForm({ initial, onSubmit }: { initial: FormState; onSubmit: (val
       <button
         type="submit"
         disabled={sameCoin}
-        className="rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded-[8px] px-5 py-[13px] text-[13px] font-bold tracking-[0.06em] text-tf-bg transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        style={{ background: 'linear-gradient(135deg,var(--color-tf-accent),#3bc0c8)', boxShadow: '0 0 20px rgba(77,216,224,0.25)' }}
       >
         比較分析 <span className="tf-num opacity-70">&#8629;</span>
       </button>
@@ -194,7 +195,7 @@ export default function ComparePage() {
   }, [searchParams, setSearchParams])
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
+    <main className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Parallel Hermes runs</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">雙幣比較</h1>

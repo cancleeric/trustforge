@@ -21,6 +21,7 @@ const messages = {
     liveTelemetry: '即時遙測', sourceCount: '可用來源', integrity: '完整性', signalState: '訊號狀態', stable: '穩定', watch: '監控', degradedState: '下降',
     agentOutput: 'Hermes 主動報告',
     degraded: '連線品質下降，正在顯示可用快照',
+    help: '說明', settings: '設定', notifications: '通知',
   },
   en: {
     analyze: 'ANALYZE', compare: 'COMPARE', history: 'HISTORY', sources: 'SOURCES', costs: 'COSTS', galaxy: 'GALAXY',
@@ -38,6 +39,7 @@ const messages = {
     reputation: 'Reputation', corroboration: 'Corroboration', recency: 'Recency', resistance: 'Manipulation resistance', facts: 'FACTS', inference: 'INFERENCE', conclusion: 'CONCLUSION',
     liveTelemetry: 'LIVE TELEMETRY', sourceCount: 'Sources', integrity: 'Integrity', signalState: 'Signal state', stable: 'STABLE', watch: 'WATCH', degradedState: 'DEGRADED',
     agentOutput: 'HERMES ACTIVE REPORT',
+    help: 'HELP', settings: 'SETTINGS', notifications: 'NOTIFICATIONS',
   },
 } as const
 

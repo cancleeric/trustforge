@@ -44,6 +44,11 @@ export default function HermesOnboarding({ open, onClose }: { open: boolean; onC
         <h2 id="hermes-onboarding-title">{item.title}</h2>
         <p>{item.body}</p>
         <div className="hermes-onboarding-hint">💡 {item.hint}</div>
+        {step === steps.length - 1 && (
+          <a href="/help" className="hermes-onboarding-help-link" style={{ color: 'var(--color-tf-link)', fontSize: '0.8125rem' }}>
+            查看完整說明 →
+          </a>
+        )}
         <div className="hermes-onboarding-progress" aria-label={`第 ${step + 1} 步，共 ${steps.length} 步`}>
           {steps.map((_, index) => <i key={index} className={index === step ? 'is-active' : ''} />)}
         </div>
