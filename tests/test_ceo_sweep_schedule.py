@@ -4,6 +4,9 @@ import importlib.util
 import json
 import os
 import plistlib
+import stat
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,6 +37,8 @@ def test_ceo_sweep_template_and_installer_are_half_hourly_without_editing_host_p
     assert "<integer>3600</integer>" not in template
     assert "every 1800s" in installer
     assert "deprecated" not in installer.lower()
+    assert "install_launch_agent.py" in installer
+    assert "sed " not in installer
     assert "install_ceo_half_hour_schedule.sh" in compatibility_wrapper
 
 
@@ -49,6 +54,8 @@ def test_ceo_health_watchdog_launch_agent_is_independent_and_five_minutes():
     assert "codex" not in template_path.read_text().lower()
     assert "launchctl bootout" in installer
     assert "launchctl bootstrap" in installer
+    assert "install_launch_agent.py" in installer
+    assert "sed " not in installer
     assert "install_ceo_health_watchdog.sh" not in (ROOT / "scripts/run_ceo_cycle.sh").read_text()
 
 
@@ -109,6 +116,143 @@ def test_ceo_health_watchdog_writes_alert_atomically_and_clears_when_fresh(tmp_p
     assert not alert.exists()
 
 
+def test_ceo_health_watchdog_uses_active_heartbeat_until_run_timeout(tmp_path, monkeypatch):
+    module = _load_script("ceo_health_watchdog_active", "ceo_health_watchdog.py")
+    monkeypatch.setattr(module, "_pid_alive", lambda _pid: True)
+    now = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    status = tmp_path / "status.json"
+    heartbeat = tmp_path / "heartbeat.json"
+    heartbeat.write_text(json.dumps({"heartbeat_at": (now - timedelta(minutes=4)).isoformat()}))
+    status.write_text(
+        json.dumps(
+            {
+                "updated_at": (now - timedelta(hours=2)).isoformat(),
+                "active": {"pid": 123, "started_at": (now - timedelta(minutes=20)).isoformat(), "heartbeat_path": str(heartbeat)},
+            }
+        )
+    )
+    os.utime(status, ((now - timedelta(hours=2)).timestamp(),) * 2)
+
+    assert module.health_diagnostics(status, now=now)["reason"] == "cycle_active"
+    stale_now = now + timedelta(minutes=6)
+    assert module.health_diagnostics(status, now=stale_now)["reason"] == "active_run_timeout"
+
+
+def test_runtime_guard_permissions_symlinks_and_stale_lock(tmp_path, monkeypatch):
+    module = _load_script("ceo_runtime_guard_security", "ceo_runtime_guard.py")
+    secure_dir = tmp_path / "secure"
+    secure_file = secure_dir / "output.log"
+    module.secure_file(secure_file)
+    assert stat.S_IMODE(secure_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(secure_file.stat().st_mode) == 0o600
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        module.secure_directory(link)
+
+    lock = secure_dir / "lock"
+    old = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+    assert module.acquire_lock(lock, pid=99999, now=old, stale_seconds=60)["acquired"]
+    monkeypatch.setattr(module, "_pid_alive", lambda _pid: False)
+    recovered = module.acquire_lock(lock, pid=1234, now=old + timedelta(minutes=2), stale_seconds=60)
+    assert recovered["acquired"] and recovered["pid"] == 1234
+    secure_file.write_text("Authorization: Bearer ghp_supersecret\n")
+    module.redact_file(secure_file)
+    assert "ghp_supersecret" not in secure_file.read_text()
+    assert stat.S_IMODE(secure_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"agent_exit": 124, "before": "a", "after": "b", "descendant": True, "clean": True}, "agent_exit_124"),
+        ({"agent_exit": 0, "before": "a", "after": "a", "descendant": True, "clean": True}, "no_new_commit"),
+        ({"agent_exit": 0, "before": "a", "after": "b", "descendant": False, "clean": True}, "invalid_commit_history"),
+        ({"agent_exit": 0, "before": "a", "after": "b", "descendant": True, "clean": False}, "dirty_after_agent"),
+    ],
+)
+def test_progress_requires_successful_agent_verified_commit_and_clean_lane(kwargs, reason):
+    module = _load_script(f"ceo_runtime_progress_{reason}", "ceo_runtime_guard.py")
+    assert module.classify_progress(**kwargs) == {"progress": False, "reason": reason}
+
+
+def test_progress_accepts_only_new_verified_commit():
+    module = _load_script("ceo_runtime_progress_success", "ceo_runtime_guard.py")
+    assert module.classify_progress(agent_exit=0, before="a", after="b", descendant=True, clean=True) == {
+        "progress": True, "reason": "new_verified_commit", "commit": "b",
+    }
+
+
+def test_runtime_guard_validates_git_common_dir_and_rejects_symlink_lane(tmp_path):
+    module = _load_script("ceo_runtime_guard_git", "ceo_runtime_guard.py")
+    repo = tmp_path / "repo"
+    lane = tmp_path / "lane"
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True)
+    (repo / "README").write_text("test\n")
+    subprocess.run(["git", "-C", str(repo), "add", "README"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(lane)], check=True, capture_output=True)
+
+    assert module.validate_lane(repo, lane)["valid"] is True
+    lane_link = tmp_path / "lane-link"
+    lane_link.symlink_to(lane, target_is_directory=True)
+    with pytest.raises(ValueError, match="canonical|symlink"):
+        module.validate_lane(repo, lane_link)
+
+
+def test_plist_installer_handles_xml_characters_atomically_and_rejects_symlink(tmp_path):
+    module = _load_script("install_launch_agent_security", "install_launch_agent.py")
+    root = tmp_path / "repo&|<name>"
+    (root / "scripts").mkdir(parents=True)
+    python = Path(sys.executable).resolve()
+    codex = root / "codex&|"
+    gh = root / "gh<cli>"
+    codex.write_text("")
+    gh.write_text("")
+    destination_dir = tmp_path / "Launch&|Agents"
+    destination_dir.mkdir()
+    destination = destination_dir / "sweep.plist"
+
+    payload = module.payload("sweep", root, python, codex, gh)
+    module.prepare_logs(payload)
+    module.install_plist(destination, payload)
+
+    parsed = plistlib.loads(destination.read_bytes())
+    assert parsed["WorkingDirectory"] == str(root)
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert stat.S_IMODE((root / "out/ceo-cycle").stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "out/ceo-cycle/launchd.out.log").stat().st_mode) == 0o600
+    assert not list(destination_dir.glob(".sweep.plist.*"))
+    symlink = destination_dir / "linked.plist"
+    symlink.symlink_to(destination)
+    with pytest.raises(ValueError, match="symlink"):
+        module.install_plist(symlink, payload)
+
+
+def test_agent_environment_excludes_cloud_github_and_production_variables(tmp_path):
+    module = _load_script("ceo_agent_exec_environment", "ceo_agent_exec.py")
+    environment = module.isolated_environment(
+        path="/usr/bin:/bin", codex_home="/safe/codex", lane="1", issue="283", home=tmp_path,
+    )
+
+    assert set(environment) == {"PATH", "HOME", "LANG", "CODEX_HOME", "TRUSTFORGE_CEO_LANE", "TRUSTFORGE_CEO_ISSUE"}
+    assert not any(key.startswith(("AWS", "GH_", "GITHUB", "TRUSTFORGE_ENV")) for key in environment)
+    source = tmp_path / "source-codex"
+    source.mkdir()
+    (source / "auth.json").write_text('{"token":"secret"}')
+    isolated = module.prepare_minimal_codex_home(source, tmp_path / "agent-home")
+    assert isolated is not None
+    assert {path.name for path in isolated.iterdir()} == {"auth.json"}
+    assert stat.S_IMODE((isolated / "auth.json").stat().st_mode) == 0o600
+    module.remove_minimal_codex_home(isolated)
+    assert not isolated.exists()
+
+
 def test_ceo_sweep_builds_continuous_development_inventory(monkeypatch):
     spec = importlib.util.spec_from_file_location("ceo_sweep", ROOT / "scripts/ceo_sweep.py")
     assert spec and spec.loader
@@ -131,22 +275,22 @@ def test_ceo_sweep_builds_continuous_development_inventory(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("failed_command", "source"),
+    "source",
     [
-        (("pr", "open"), "open_prs"),
-        (("issue", "open"), "open_issues"),
-        (("pr", "merged"), "merged_prs"),
+        "open_prs",
+        "open_issues",
+        "merged_prs",
     ],
 )
-def test_ceo_sweep_fails_closed_for_each_inventory_query(monkeypatch, failed_command, source):
+def test_ceo_sweep_fails_closed_for_each_inventory_query(monkeypatch, source):
     spec = importlib.util.spec_from_file_location(f"ceo_sweep_failure_{source}", ROOT / "scripts/ceo_sweep.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
     def fake_json_cmd(args):
-        state = args[args.index("--state") + 1]
-        if args[1] == failed_command[0] and state == failed_command[1]:
+        command_source = "merged_prs" if args[1] == "api" else ("open_prs" if args[1] == "pr" else "open_issues")
+        if command_source == source:
             return {"error": f"{source} unavailable", "args": args}
         return []
 
@@ -212,6 +356,36 @@ def test_execution_queue_skips_tracking_and_evidence_only_issues():
     queue = module.build_execution_queue(issues, [], max_lanes=4)
 
     assert [item["issue"] for item in queue] == [3, 4]
+
+
+def test_execution_queue_excludes_open_dependencies_and_keeps_all_candidates():
+    module = _load_script("ceo_sweep_dependencies", "ceo_sweep.py")
+    issues = [
+        {"number": 1, "title": "dependent", "body": "Blocked by #2", "labels": []},
+        {"number": 2, "title": "external dependency", "body": "", "labels": [{"name": "blocked-external"}]},
+        *[{"number": number, "title": f"candidate {number}", "body": "", "labels": []} for number in range(3, 11)],
+    ]
+
+    queue = module.build_execution_queue(issues, [], max_lanes=1)
+
+    assert [item["issue"] for item in queue] == list(range(3, 11))
+
+
+def test_merged_pr_pagination_indexes_more_than_one_hundred_results():
+    module = _load_script("ceo_sweep_pages", "ceo_sweep.py")
+    pages = [
+        [
+            {"number": number, "body": f"Fixes #{number}", "head": {"ref": f"fix/issue-{number}"}, "base": {"ref": "develop"}, "merged_at": "2026-07-20T00:00:00Z"}
+            for number in range(start, end)
+        ]
+        for start, end in ((1, 101), (101, 121))
+    ]
+
+    normalized = module._normalize_merged_pr_pages(pages)
+    ownership = module.merged_pr_ownership(normalized)
+
+    assert len(normalized) == 120
+    assert set(ownership) == set(range(1, 121))
 
 
 def test_lane_guard_bounds_concurrency_by_load():
@@ -321,6 +495,27 @@ def test_watchdog_recovers_from_corrupt_status(tmp_path):
     assert json.loads(status.read_text()) == state
 
 
+def test_cycle_status_records_completed_failed_and_history(tmp_path):
+    module = _load_script("ceo_cycle_state_history", "ceo_cycle_state.py")
+    events = "\n".join(
+        [
+            'dispatched\t1',
+            'completed\t1\t{"lane":1,"commit":"abc","dispatched_at":"2026-07-20T01:00:00Z","commit_at":"2026-07-20T01:05:00Z"}',
+            'failed\t2\t{"lane":2,"reason":"no_new_commit","dispatched_at":"2026-07-20T01:01:00Z"}',
+            'progress\t1',
+        ]
+    )
+    payload = module.payload_from_events(events, process_success=False, load_diagnostics={"capacity": 2})
+
+    state = module.record_cycle(tmp_path / "status.json", **payload)
+
+    assert state["completed"][0]["commit"] == "abc"
+    assert state["failed"][0]["reason"] == "no_new_commit"
+    assert state["history"]["last_dispatch_at"] == "2026-07-20T01:01:00Z"
+    assert state["history"]["last_commit_at"] == "2026-07-20T01:05:00Z"
+    assert state["active"] is False
+
+
 def test_cycle_event_payload_preserves_blocked_lane_paths():
     spec = importlib.util.spec_from_file_location("ceo_cycle_state_events", ROOT / "scripts/ceo_cycle_state.py")
     assert spec and spec.loader
@@ -361,9 +556,19 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
     prompt = (ROOT / "scripts/prompts/ceo-development-loop.md").read_text().lower()
 
     assert "worktree add --detach" in runner
-    assert "approval_policy=\"never\"" in runner
-    assert "sandbox_workspace_write.network_access=true" in runner
-    assert "--sandbox workspace-write" in runner
+    launcher = (ROOT / "scripts/ceo_agent_exec.py").read_text()
+    assert 'approval_policy="never"' in launcher
+    assert "sandbox_workspace_write.network_access=false" in launcher
+    assert '"--sandbox", "workspace-write"' in launcher
+    assert "timeout=args.timeout_seconds" in launcher
+    assert "umask 077" in runner
+    assert "TRUSTFORGE_CEO_MAX_LANES:-1" in runner
+    assert "worktree add" in runner and "if ! git" in runner
+    assert "fetch origin develop" in runner and "if ! git" in runner
+    assert "checkout --detach" in runner
+    assert "merge-base --is-ancestor" in runner
+    progress_helper = (ROOT / "scripts/ceo_runtime_guard.py").read_text()
+    assert "dirty_after_agent" in progress_helper and "no_new_commit" in progress_helper
     assert '"inventory_failed"' in runner
     assert "[WARNING]" in runner
     assert "[CRITICAL]" in runner
@@ -377,7 +582,7 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
     installer = (ROOT / "scripts/install_ceo_half_hour_schedule.sh").read_text()
     template = (ROOT / "scripts/templates/com.hurricanesoft.trustforge-ceo-sweep.plist.in").read_text()
     assert "command -v gh" in installer
-    assert "__PATH__" in template
+    assert "install_launch_agent.py" in installer
 
 
 def test_ci_is_manual_and_pre_push_is_full_local_gate():

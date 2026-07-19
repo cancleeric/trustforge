@@ -16,15 +16,12 @@ if [[ ! -x "$GH_BIN" ]]; then
   echo "gh executable not found: $GH_BIN" >&2
   exit 2
 fi
-LAUNCH_PATH="$(dirname "$CODEX_BIN"):$(dirname "$GH_BIN"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-
-mkdir -p "$HOME/Library/LaunchAgents" "$ROOT/out/ceo-cycle"
-sed \
-  -e "s|__ROOT__|$ROOT|g" \
-  -e "s|__PYTHON__|$PYTHON_BIN|g" \
-  -e "s|__CODEX__|$CODEX_BIN|g" \
-  -e "s|__PATH__|$LAUNCH_PATH|g" \
-  "$ROOT/scripts/templates/com.hurricanesoft.trustforge-ceo-sweep.plist.in" >"$PLIST"
+ROOT="$($PYTHON_BIN -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$ROOT")" || exit 2
+PYTHON_BIN="$($PYTHON_BIN -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$PYTHON_BIN")" || exit 2
+CODEX_BIN="$($PYTHON_BIN -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$CODEX_BIN")" || exit 2
+GH_BIN="$($PYTHON_BIN -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$GH_BIN")" || exit 2
+"$PYTHON_BIN" "$ROOT/scripts/install_launch_agent.py" \
+  --kind sweep --root "$ROOT" --python "$PYTHON_BIN" --codex "$CODEX_BIN" --gh "$GH_BIN" --destination "$PLIST" || exit 2
 
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"

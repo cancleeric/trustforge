@@ -14,11 +14,10 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 2
 fi
 
-mkdir -p "$HOME/Library/LaunchAgents" "$ROOT/out/ceo-cycle"
-sed \
-  -e "s|__ROOT__|$ROOT|g" \
-  -e "s|__PYTHON__|$PYTHON_BIN|g" \
-  "$ROOT/scripts/templates/com.hurricanesoft.trustforge-ceo-health-watchdog.plist.in" >"$PLIST"
+ROOT="$($PYTHON_BIN -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$ROOT")" || exit 2
+PYTHON_BIN="$($PYTHON_BIN -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$PYTHON_BIN")" || exit 2
+"$PYTHON_BIN" "$ROOT/scripts/install_launch_agent.py" \
+  --kind watchdog --root "$ROOT" --python "$PYTHON_BIN" --destination "$PLIST" || exit 2
 
 launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
