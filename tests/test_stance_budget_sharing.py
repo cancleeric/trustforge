@@ -240,6 +240,7 @@ def test_run_agent_pipeline_step25_stance_cost_is_harvested_into_ledger(monkeypa
         docs=docs, client=client, log=log, now_fn=lambda: 1000.0,
     )
 
+    assert any("線上模型生成失敗" in limit for limit in report.limits)
     assert client.cost_events == [], "Step 2.5 收割後 client.cost_events 應清空，避免重複計費"
 
     cost_events = [e for e in log.events if e["tool"] == "llm.cost"]
