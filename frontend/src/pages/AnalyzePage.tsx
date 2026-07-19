@@ -22,7 +22,7 @@ function paramsFromSearch(sp: URLSearchParams): AnalyzeParams {
   return { coin, type, q, sample }
 }
 
-export default function AnalyzePage() {
+export default function AnalyzePage({ embedded = false }: { embedded?: boolean }) {
   const { setData: setHologramData } = useBridgeHologram()
   const [searchParams, setSearchParams] = useSearchParams()
   const params = paramsFromSearch(searchParams)
@@ -32,8 +32,30 @@ export default function AnalyzePage() {
   const [loading, setLoading] = useState(false)
   const [manualJob, setManualJob] = useState<AnalysisJobStatus | null>(null)
   const [requestNonce, setRequestNonce] = useState(0)
+  const [embeddedComposer, setEmbeddedComposer] = useState(() =>
+    embedded && window.matchMedia('(max-width: 560px)').matches,
+  )
   const mode = searchParams.get('mode') || (params.type === 'hypothesis' ? 'fundamentals' : 'risk')
+  const jobId = searchParams.get('job')
   const hasExplicitRequest = searchParams.has('q') || searchParams.get('sample') === '1'
+
+  useEffect(() => {
+    if (!embedded) {
+      setEmbeddedComposer(false)
+      return
+    }
+    const media = window.matchMedia('(max-width: 560px)')
+    const syncComposer = () => setEmbeddedComposer(media.matches)
+    syncComposer()
+    if (media.addEventListener) media.addEventListener('change', syncComposer)
+    else media.addListener(syncComposer)
+    return () => {
+      if (media.removeEventListener) media.removeEventListener('change', syncComposer)
+      else media.removeListener(syncComposer)
+    }
+  }, [embedded])
+
+  const showComposer = !embedded || embeddedComposer
 
   useEffect(() => {
     if (!hasExplicitRequest) {
@@ -85,26 +107,63 @@ export default function AnalyzePage() {
   }, [data, hasExplicitRequest, params.q, params.type, setHologramData])
 
   useEffect(() => {
-    if (!hasExplicitRequest) return
+    if (!hasExplicitRequest || !params.sample) return
     const controller = new AbortController()
     setLoading(true)
     setError(null)
     setManualJob(null)
-    if (params.sample) {
-      void getAnalyze({ coin: params.coin, type: params.type, q: params.q, sample: params.sample }, controller.signal).then((res) => {
-        if (controller.signal.aborted) return
+    void getAnalyze({ coin: params.coin, type: params.type, q: params.q, sample: params.sample }, controller.signal).then((res) => {
+      if (controller.signal.aborted) return
+      setLoading(false)
+      if (res.ok) setData(res.data)
+      else setError(res.error)
+    })
+    return () => controller.abort()
+  }, [hasExplicitRequest, params.coin, params.q, params.sample, params.type, requestNonce])
+
+  useEffect(() => {
+    if (!hasExplicitRequest || params.sample || jobId) return
+    const controller = new AbortController()
+    setLoading(true)
+    setError(null)
+    setManualJob(null)
+    void registerAnalysisQuestion(params.coin, mode, params.q, controller.signal).then((res) => {
+      if (controller.signal.aborted) return
+      if (!res.ok || !res.data.job_id) {
         setLoading(false)
-        if (res.ok) setData(res.data)
-        else setError(res.error)
-      })
-      return () => controller.abort()
-    }
+        setError(res.ok ? { code: 'analysis_queue_unavailable', message: '分析工作尚未建立' } : res.error)
+        return
+      }
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('job', res.data.job_id as string)
+        return next
+      }, { replace: true })
+    })
+    return () => controller.abort()
+  }, [hasExplicitRequest, jobId, mode, params.coin, params.q, params.sample, requestNonce, setSearchParams])
+
+  useEffect(() => {
+    if (!jobId || params.sample) return
+    const controller = new AbortController()
+    setLoading(true)
+    setError(null)
+    setData(null)
+    setManualJob(null)
     const poll = (jobId: string) => {
       void getAnalysisJob(jobId, controller.signal).then((res) => {
         if (controller.signal.aborted) return
         if (!res.ok) {
           setLoading(false)
           setError(res.error)
+          return
+        }
+        const sameCoin = res.data.coin.trim().toUpperCase() === params.coin.trim().toUpperCase()
+        const sameMode = res.data.mode.trim() === mode.trim()
+        const sameQuestion = res.data.question.trim() === params.q.trim()
+        if (!sameCoin || !sameMode || !sameQuestion) {
+          setLoading(false)
+          setError({ code: 'analysis_job_mismatch', message: '分析工作與目前請求不一致' })
           return
         }
         setManualJob(res.data)
@@ -119,19 +178,9 @@ export default function AnalyzePage() {
         }
       })
     }
-    // Explicit manual runs are durable high-priority jobs. The scheduler switch
-    // controls only scheduled jobs, so it cannot disable this path.
-    void registerAnalysisQuestion(params.coin, mode, params.q, controller.signal).then((res) => {
-      if (controller.signal.aborted) return
-      if (!res.ok || !res.data.job_id) {
-        setLoading(false)
-        setError(res.ok ? { code: 'analysis_queue_unavailable', message: '分析工作尚未建立' } : res.error)
-        return
-      }
-      poll(res.data.job_id)
-    })
+    poll(jobId)
     return () => controller.abort()
-  }, [hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce])
+  }, [jobId, mode, params.coin, params.q, params.sample])
 
   useEffect(() => {
     if (error?.code !== 'network_error') return
@@ -140,6 +189,7 @@ export default function AnalyzePage() {
   }, [error])
 
   const handleSubmit = (values: QueryValues) => {
+    if (loading) return
     const next = new URLSearchParams()
     const workspace = searchParams.get('workspace')
     if (workspace) next.set('workspace', workspace)
@@ -148,8 +198,11 @@ export default function AnalyzePage() {
     next.set('q', values.q)
     next.set('mode', values.mode)
     if (params.sample) next.set('sample', params.sample)
-    setSearchParams(next)
-    setRequestNonce((value) => value + 1)
+    if (!jobId && next.toString() === searchParams.toString()) {
+      setRequestNonce((value) => value + 1)
+    } else {
+      setSearchParams(next)
+    }
   }
 
   return (
@@ -171,10 +224,12 @@ export default function AnalyzePage() {
           <p className="font-mono text-xs text-tf-muted">asset: {params.coin} · mode: {params.type}</p>
         </div>
 
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[288px_minmax(0,1fr)]">
-          <aside className="lg:sticky lg:top-4 lg:self-start">
-            <QueryConsole initial={{ coin: params.coin, type: params.type, mode, q: params.q }} onSubmit={handleSubmit} />
-          </aside>
+        <div className={`grid grid-cols-1 gap-5${showComposer ? ' lg:grid-cols-[288px_minmax(0,1fr)]' : ''}`}>
+          {showComposer && (
+            <aside className="lg:sticky lg:top-4 lg:self-start">
+              <QueryConsole initial={{ coin: params.coin, type: params.type, mode, q: params.q }} onSubmit={handleSubmit} disabled={loading} />
+            </aside>
+          )}
 
           <section className="flex flex-col gap-4">
             {loading && !data && <LoadingState label={manualJob

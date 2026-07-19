@@ -124,6 +124,14 @@ export default function HermesDashboard() {
     }
   }, [model.byId, requestedCoin, selectedId])
 
+  useEffect(() => {
+    const mode = searchParams.get('mode')
+    const modeIndex = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(mode ?? '')
+    setQtype(modeIndex >= 0 ? qtypes[modeIndex] : qtypes[0])
+    const nextQuery = searchParams.get('q')
+    setQuery(nextQuery ?? `分析${(requestedCoin ?? 'btc').toUpperCase()}近期市場狀況，整合多源資料`)
+  }, [qtypes, requestedCoin, searchParams])
+
   const selectCoin = useCallback((id: string) => {
     setSelectedId(id)
     const next = new URLSearchParams(searchParams)
@@ -403,7 +411,7 @@ export default function HermesDashboard() {
     if (!query.trim()) return
     setPhase('loading')
     setLastOrder(true)
-    const type = qtype === t('fundamentals') ? 'hypothesis' : 'multi_source'
+    const type = qtype === t('fundamentals') || qtype === t('catalyst') ? 'hypothesis' : 'multi_source'
     const search = new URLSearchParams({
       coin: selectedId.toUpperCase(), type, q: query.trim(),
     })

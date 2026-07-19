@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 import sqlite3
+import fcntl
+import threading
 
 import plistlib
 import pytest
@@ -163,6 +165,91 @@ def test_repeated_manual_request_reuses_recent_job_without_collecting_again(tmp_
         "SELECT count(*) FROM analysis_jobs WHERE origin='manual'",
     ).fetchone()[0] == 1
     flow.stop()
+
+
+def test_concurrent_manual_request_is_deduplicated_across_flow_instances(tmp_path, monkeypatch):
+    calls = 0
+    collect_started = threading.Event()
+    contention_seen = threading.Event()
+    release_collect = threading.Event()
+    real_flock = fcntl.flock
+    def observed_flock(fd, operation):
+        try:
+            return real_flock(fd, operation)
+        except BlockingIOError:
+            contention_seen.set()
+            raise
+
+    def collect(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        collect_started.set()
+        assert release_collect.wait(timeout=5)
+        return _docs()
+
+    monkeypatch.setattr("trustforge.analysis_flow.collect", collect)
+    monkeypatch.setattr("trustforge.analysis_flow.fcntl.flock", observed_flock)
+    path = tmp_path / "flow.sqlite3"
+    flows = [AnalysisFlow(path), AnalysisFlow(path)]
+    question = "BTC 是否出現新的跨來源分歧？"
+    results: list[tuple[str, str | None]] = []
+    threads = [
+        threading.Thread(target=lambda flow=flow: results.append(flow.submit_manual("BTC", "risk", question)))
+        for flow in flows
+    ]
+
+    threads[0].start()
+    assert collect_started.wait(timeout=5)
+    threads[1].start()
+    assert contention_seen.wait(timeout=5)
+    assert calls == 1
+    release_collect.set()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert len(results) == 2
+    assert results[0][1] == results[1][1]
+    assert calls == 1
+    assert flows[0]._conn().execute(
+        "SELECT count(*) FROM analysis_jobs WHERE origin='manual'",
+    ).fetchone()[0] == 1
+    for flow in flows:
+        flow.stop()
+
+
+def test_different_manual_request_keys_collect_concurrently(tmp_path, monkeypatch):
+    collectors = threading.Barrier(2)
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def collect(*_args, **_kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        collectors.wait(timeout=5)
+        return _docs()
+
+    monkeypatch.setattr("trustforge.analysis_flow.collect", collect)
+    path = tmp_path / "flow.sqlite3"
+    flows = [AnalysisFlow(path), AnalysisFlow(path)]
+    results: list[tuple[str, str | None]] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(flows[0].submit_manual("BTC", "risk", "BTC risk"))),
+        threading.Thread(target=lambda: results.append(flows[1].submit_manual("ETH", "risk", "ETH risk"))),
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert calls == 2
+    assert len(results) == 2
+    assert results[0][1] != results[1][1]
+    for flow in flows:
+        flow.stop()
 
 
 def test_invalid_manual_job_never_collects_sources(tmp_path, monkeypatch):
