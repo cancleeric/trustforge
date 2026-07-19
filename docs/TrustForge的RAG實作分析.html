@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrustForge 中的 RAG 實作分析</title>
+<style>
+  :root {
+    --r: #7c3aed;
+    --a: #2563eb;
+    --g: #16a34a;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --text: #1e293b;
+    --muted: #64748b;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    padding: 24px 16px;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  header {
+    text-align: center;
+    background: linear-gradient(135deg, var(--r), var(--a), var(--g));
+    color: #fff;
+    border-radius: 16px;
+    padding: 36px 24px;
+    margin-bottom: 28px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.12);
+  }
+  header h1 { font-size: 26px; margin-bottom: 10px; }
+  header p { opacity: .92; font-size: 14px; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.04);
+  }
+  h2 {
+    font-size: 20px;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h2::before {
+    content: "";
+    width: 6px; height: 22px;
+    background: linear-gradient(var(--r), var(--g));
+    border-radius: 3px;
+  }
+  h3 { font-size: 16px; margin: 14px 0 8px; color: #334155; }
+  p { margin-bottom: 12px; color: #334155; font-size: 15px; }
+  code {
+    background: #f1f5f9;
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-size: 13px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    color: #be185d;
+  }
+  .lead {
+    background: #f5f3ff;
+    border-left: 4px solid var(--r);
+    padding: 14px 16px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .warn {
+    background: #fffbeb;
+    border-left: 4px solid #f59e0b;
+    padding: 14px 16px;
+    border-radius: 8px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0 4px;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 10px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f1f5f9; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  ul, ol { margin-left: 22px; font-size: 15px; margin-bottom: 12px; }
+  li { margin-bottom: 6px; }
+  .fileref {
+    background: # eff6ff;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+  }
+  .fileref h3 { margin-top: 0; color: var(--a); }
+  .summary {
+    background: linear-gradient(135deg, #f5f3ff, #eff6ff);
+    border: 1px solid #ddd6fe;
+    border-radius: 12px;
+    padding: 18px;
+  }
+  .summary p { color: #334155; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 10px;
+  }
+  @media (max-width: 640px) {
+    header h1 { font-size: 21px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>TrustForge 中的 RAG 實作分析</h1>
+    <p>專案內部技術分析（非科普） · 最後檢視：2026-07-19</p>
+  </header>
+
+  <section>
+    <h2>1. 核心結論</h2>
+    <div class="lead">
+      <p>本專案目前並<strong>未使用</strong>傳統向量資料庫（Chroma / FAISS / Pinecone）或 embedding 模型。現有的「RAG」是一套<strong>輕量、確定性、可審計的「相似歷史題目檢索」</strong>，基於 SQLite + 中文字元 bigram + Jaccard 相似度。</p>
+    </div>
+    <ul>
+      <li>確定性的「相似歷史題目檢索」，而非基於向量空間的語義檢索。</li>
+      <li>用 <strong>SQLite + 字元 bigram + Jaccard 相似度</strong> 取代 embedding / 向量餘弦相似度。</li>
+      <li>檢索結果標記為 <code>historical_non_evidentiary（非證據性）</code>：只作為參考，不參與信任評分，不餵進 LLM 的證據鏈。</li>
+      <li>刻意避開需要外部 embedding 服務，以保證可審計、可離線、成本可控。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>2. RAG 核心實作（檢索 / 嵌入替代方案）</h2>
+    <div class="fileref">
+      <h3>檔案：src/trustforge/analysis_flow.py</h3>
+    </div>
+    <table>
+      <thead>
+        <tr><th>位置</th><th>名稱</th><th>說明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>L50-55</code></td><td><code>_question_terms()</code></td><td>「語言無關檢索特徵」：中英混合問題的中文字元 bigram + 英數詞彙切分（取代 embedding）</td></tr>
+        <tr><td><code>L58-62</code></td><td><code>_question_similarity()</code></td><td>Jaccard 相似度 <code>|A∩B| / |A∪B|</code>（取代向量餘弦相似度）</td></tr>
+        <tr><td><code>L323-376</code></td><td><code>AnalysisFlow.question_context()</code></td><td><b>主檢索函式</b>：從 <code>analysis_questions</code> + <code>analysis_results</code> 取最近 300 筆，計算相似度（同 coin +0.12、同 mode +0.08），回傳 <code>matches</code>、<code>conversation</code>、<code>retrieval="sqlite_char_bigram_v1"</code></td></tr>
+        <tr><td><code>L692</code></td><td><code>_stage_source_ingestion()</code></td><td>呼叫 <code>question_context(...)</code> 並寫入 <code>package["retrieval_context"]</code>，執行日誌標記為 <code>retrieval.question_memory</code></td></tr>
+        <tr><td><code>L737</code></td><td>—</td><td>結果進入分析結果 payload 的 <code>retrieval_context</code> 欄位，回傳前端</td></tr>
+      </tbody>
+    </table>
+    <p><b>儲存層</b>：SQLite（<code>out/trustforge.sqlite3</code>），相關表 <code>analysis_questions</code>、<code>analysis_results</code>、<code>analysis_conversation</code>（DDL 在 <code>L143-148</code> 與附近）。</p>
+  </section>
+
+  <section>
+    <h2>3. RAG 被呼叫的業務流程</h2>
+    <ul>
+      <li><b>分析管線（Hermes 分析）</b>：<code>analysis_flow.py</code> 的 <code>_stage_source_ingestion</code>（L692）在每次分析 job 的「源收集」階段自動檢索相似歷史題目。</li>
+      <li><b>公開 API</b>：<code>src/trustforge/web.py</code>
+        <ul>
+          <li><code>L5254-5262</code> <code>_handle_api_analysis_question_context()</code> → 直接呼叫 <code>flow.question_context()</code>，提供類似 <code>/api/analysis/question-context</code> 的端點（前端可獨立查詢）。</li>
+          <li><code>L6799</code> 路由分發。</li>
+        </ul>
+      </li>
+      <li><b>前端</b>：<code>frontend/src/lib/endpoints.ts</code>
+        <ul>
+          <li><code>L103-109</code> <code>getAnalysisQuestionContext()</code> 型別與呼叫，並強制校驗 <code>matches[].source_tier === 'historical_non_evidentiary'</code>。</li>
+          <li>用詞顯示為「相似歷史題目」（<code>frontend/src/components/GlossaryTerm.tsx</code> L3, L14；<code>HermesLeftRail.tsx</code> L110）。</li>
+        </ul>
+      </li>
+      <li><b>自我優化（CEO sweep）</b>：<code>src/trustforge/improvement.py</code> <code>L181-187</code> 讀取 <code>similar_question_rate</code>，產出 <code>question-retrieval-diversification</code> 改進提案（題目檢索多樣化）。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>4. 向量資料庫 / 嵌入模型狀態</h2>
+    <ul>
+      <li><b>目前</b>：無向量庫、無 embedding 模型。檢索 = SQLite + 字元 bigram + Jaccard。</li>
+      <li><b>規劃中但被閘住</b>（<code>upgrade_control.py</code>）：
+        <ul>
+          <li><code>L34</code> <code>rag-index</code>「Embedding 與索引策略」— 狀態 <code>model-gate</code>（未實作）。</li>
+          <li><code>L35</code> <code>rag-reranker</code>「Reranker 與分面生成」— 狀態 <code>model-gate</code>（未實作）。</li>
+          <li><code>L33</code> <code>question-rag</code>「題目 RAG 與對話記憶」— 狀態 <code>reviewed-release</code>（已上線，即目前的 bigram 方案）。</li>
+        </ul>
+      </li>
+      <li>全倉搜尋 <code>chroma / faiss / pinecone / sentence_transformers / langchain / llamaindex / CohereRerank</code> 等 <strong>零命中</strong>。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>5. 相關文件</h2>
+    <ul>
+      <li><code>docs/RAG說明.md</code> — RAG 技術科普入門文（非實作文件）。</li>
+      <li><code>docs/architecture/HERMES-CONTINUOUS-INTELLIGENCE-2026-07-16.md</code> <code>L22-45</code> — 說明檢索端點用確定性 ranking 混合中英問題，且歷史結論明確為 <code>non-evidentiary</code>。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>6. 總結</h2>
+    <div class="summary">
+      <p>專案目前的「RAG」是一個<strong>輕量、確定性、可審計的「相似歷史題目檢索」</strong>：在 Hermes 加密貨幣分析流程的源收集階段，從 SQLite 撈取過往分析題目，用<strong>字元 bigram + Jaccard 相似度</strong>（而非 embedding / 向量庫）找出最相近的歷史問題與其已發布結論，作為<strong>非證據性參考</strong>附在分析結果裡（幫助使用者看連續性與過往覆蓋），<strong>不參與信任評分、不餵進 LLM 的證據鏈</strong>。真正的 embedding 索引（<code>rag-index</code>）與 reranker（<code>rag-reranker</code>）已在升級清單中被列為 <code>model-gate</code>，尚未實作。</p>
+    </div>
+  </section>
+
+  <footer>TrustForge 中的 RAG 實作分析 · 內部技術文件</footer>
+
+</div>
+</body>
+</html>
