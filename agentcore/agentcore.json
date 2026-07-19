@@ -17,8 +17,7 @@
       "networkMode": "PUBLIC",
       "protocol": "HTTP",
       "requestHeaderAllowlist": [
-        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id",
-        "Authorization"
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"
       ]
     }
   ],

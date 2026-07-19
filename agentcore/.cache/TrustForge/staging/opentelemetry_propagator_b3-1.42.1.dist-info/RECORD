@@ -1,0 +1,10 @@
+opentelemetry/propagators/b3/__init__.py,sha256=XxgpqIHNrlgcgsPtew_v9j2KifIMemrruIUv01Ncyfc,6146
+opentelemetry/propagators/b3/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+opentelemetry/propagators/b3/version/__init__.py,sha256=3tbde9nkXJYFoTNzB4WvXxjNo3RK8ExqfSe-QJ6VV1Y,100
+opentelemetry_propagator_b3-1.42.1.dist-info/INSTALLER,sha256=5hhM4Q4mYTT9z6QB6PGpUAW81PGNFrYrdXMj4oM_6ak,2
+opentelemetry_propagator_b3-1.42.1.dist-info/METADATA,sha256=pL5CAj9iatTsmiER6ZZn00xwO3oXvbKgLjeZgu7O-dg,1577
+opentelemetry_propagator_b3-1.42.1.dist-info/RECORD,,
+opentelemetry_propagator_b3-1.42.1.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+opentelemetry_propagator_b3-1.42.1.dist-info/WHEEL,sha256=QccIxa26bgl1E6uMy58deGWi-0aeIkkangHcxk2kWfw,87
+opentelemetry_propagator_b3-1.42.1.dist-info/entry_points.txt,sha256=L55tL-D0kPx4LODFdGZdcyr3efqem1BZ3OEz_b5nhpA,129
+opentelemetry_propagator_b3-1.42.1.dist-info/licenses/LICENSE,sha256=xx0jnfkXJvxRnG63LTGOxlggYnIysveWIZ6H3PNdCrQ,11357

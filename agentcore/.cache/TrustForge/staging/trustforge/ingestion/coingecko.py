@@ -1,0 +1,558 @@
+"""CoinGecko 真實加密貨幣資料連接器（W-coingecko，CEO 審核 gray 計劃）。
+
+來源白名單（寫死，防 SSRF；比照 `onchain.py` 慣例）：
+  - 現價（免費端點，1 次呼叫涵蓋全部 5 幣）：
+      GET https://api.coingecko.com/api/v3/simple/price
+          ?ids=bitcoin,ethereum,solana,binancecoin,ripple&vs_currencies=usd
+          &include_24hr_change=true&include_market_cap=true
+          &include_last_updated_at=true
+  - 社群情緒 + 開發活動（免費端點，每幣 1 次呼叫，同一回應同時含兩種資料）：
+      GET https://api.coingecko.com/api/v3/coins/{id}
+          ?localization=false&tickers=false&market_data=false
+          &community_data=false&developer_data=true
+      → `sentiment_votes_up_percentage` / `sentiment_votes_down_percentage`
+        （CoinGeckoSentimentSource）+ `developer_data.{stars,forks,
+        commit_count_4_weeks}`（CoinGeckoDevSource）。
+      `community_data` free tier 恆為 null，不使用。
+
+高效抓取（老闆修正：keyless 5-15 req/min 足夠，不必靠 key 硬撐量）：
+  排程一輪（5 幣）合計只需 **≈6 次真呼叫**：
+    - 現價 1 次（回應本身就涵蓋全 5 幣，`CoinGeckoPriceSource` 內部用
+      `_get_price_data()` 記憶體快取，同一輪內不管被呼叫幾次都只真的打
+      一次 API）。
+    - coins/{id} 詳情每幣 1 次（`_get_coin_detail(gid)` 記憶體快取）：
+      `CoinGeckoSentimentSource` 與 `CoinGeckoDevSource` 打同一個端點，
+      同一輪內任一個先呼叫時真的打 API 並快取，另一個直接複用快取內容，
+      **同一幣的 coin-detail 一輪只打一次**，不會各自獨立重打成 2 次。
+  這兩個記憶體快取都是「單一 process 生命週期」的模組級變數：
+  `scripts/fetch_scheduler.py` 每次執行都是全新 process，快取自然歸零，
+  不會有跨輪髒資料殘留的疑慮；平常測試需要在每個測試案例間重置（見
+  `reset_process_cache()`）。
+
+生產事故修復（2026-07：CoinGecko keyless 仍 429，見 `_throttle_before_request`）：
+  上面「≈6 次真呼叫」只保證**次數**少，沒保證**節奏**。舊版只有各 Source
+  獨立的排程間隔（`fetch_scheduler.py` 的 `--stagger`/CoinGecko stagger
+  下限），互不共享——若排程順序先跑完 `coingecko-dev`（5 幣 detail，
+  間隔 6 秒：t=0/6/12/18/24）再跑 `coingecko-price`（1 次，COIN_KEYED_
+  BATCH，t≈30），30 秒內仍發生 6 次真請求，換算 12 次/分鐘，keyless
+  5-15 req/min 的保守下限（5/min）依然可能撞到。
+  修法：**整個 CoinGecko host 用一個共享的節流器**（`_fetch_url` 內部呼叫
+  `_throttle_before_request()`）——不論是 price 還是 coin-detail、不論
+  屬於哪個 Source，只要是「實際打出去」的真 HTTP 請求，彼此之間都強制
+  間隔至少 `_min_interval_seconds()` 秒（keyless 12 秒 → 任兩次真請求
+  最多 5 次/分鐘的節奏；有 key 放寬到 2 秒 → 30 次/分鐘的節奏，仍保守，
+  不留 burst 空間）。這是「以實際請求為單位」的節流，不是「排程間隔」：
+  即使排程順序改變、即使多個 Source 交錯呼叫，只要真的打了一次 HTTP
+  請求就會更新共享的最後請求時間戳，下一次真請求（不論來自哪個
+  Source）都要等滿間隔。
+  另外，`_get_coin_detail()` 新增失敗結果的記憶體快取（`_coin_detail_failed`）：
+  sentiment/dev 共用同一個 coins/{id} 端點，若第一個呼叫的 Source 該幣
+  失敗（如 429），失敗結果本輪內會被記住，第二個 Source 對同一幣不會
+  再重打一次已知失敗/限流的請求（避免舊版「成功才快取」讓失敗被下一個
+  共用端點的 Source 重打，變相把節流開的窗口又多用掉一次）。
+
+5 幣對映（COIN_POOL 代碼 -> CoinGecko coin id）：
+  BTC->bitcoin, ETH->ethereum, SOL->solana, BNB->binancecoin, XRP->ripple
+其餘幣種一律視為非目標，`fetch()` 靜默跳過（回傳 []），不會現串任意 URL。
+
+Demo API key（選用，keyless 已足夠，key 只是錦上添花）：
+  官方文件：keyless public API 5-15 calls/min；上面的高效抓取策略把一輪
+  壓到 ≈6 次、排程間隔 300 秒（見 `cache.py`），平均 <1.2 次/分鐘，keyless
+  綽綽有餘。仍支援選用的免費 Demo key（`COINGECKO_API_KEY` env）以防未來
+  幣種擴充或排程加密：有值才透過 **`x-cg-demo-api-key` 請求 header**
+  （非 URL query param）隨請求送出；**沒有設 env 時完全不受影響，退回
+  keyless 呼叫**（不報錯，不加該 header）。
+  ⚠️ key 是 secret：只從 env 讀，絕不 hardcode，絕不寫進
+  `Document.url`/`meta`/log（避免留痕外洩）——**URL 全程（含實際發出的
+  HTTP request）一律乾淨、不含 key**，key 只透過 header 傳遞，不會被
+  proxy/tracing/access-log/例外訊息裡常見的「記錄請求 URL」路徑意外側錄
+  外洩（codex 對抗審 HIGH 修正：query param 版本即使 `Document.url` 乾淨，
+  `Request.full_url` 實際仍含 key，一樣有外洩風險）。
+
+安全措施（同 onchain.py）：
+  - timeout 5 秒 / 回應大小上限 512 KB（超過截斷）
+  - 固定 User-Agent
+  - 不接受外部傳入 URL；URL 只由本檔內建的白名單常數 + 5 幣白名單映射組成
+  - SSRF-safe fetch（見 `safe_fetch.py`，codex 對抗審第 3 輪 HIGH 修復）：
+    逐跳驗證（含初始 URL）scheme/hostname/port/私有 IP，DNS pinning 杜絕
+    「檢查」與「連線」之間的 rebinding 窗口，禁自動跟轉——與本模組原有的
+    共享節流器（`_throttle_before_request`）為正交機制，兩者在 `_fetch_url`
+    這個唯一出口疊加生效，互不影響。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import threading
+import time
+from urllib.error import HTTPError
+
+from . import safe_fetch
+from .base import Document, Source
+
+_MAX_BYTES = 512 * 1024   # 512 KB
+_TIMEOUT = 5
+_UA = "TrustForge/1.0 (research)"
+
+# 社群情緒多空票數差距門檻（百分點）：達到門檻才在文字裡採用單一方向的
+# 明確措辭，讓 trust.scoring._infer_direction 能推出正確主導方向；差距不足
+# 門檻視為五五波、維持中性語意（見 CoinGeckoSentimentSource.fetch）。
+_SENTIMENT_DOMINANCE_THRESHOLD = 5.0
+
+# codex HIGH（呼應 #24 不造假，Tier2 收斂最後一根）：24h 漲跌幅合理範圍。
+# 這 5 個目標幣（BTC/ETH/SOL/BNB/XRP）皆為大型主流幣，真實 24h 漲跌幅超過
+# ±100% 幾乎必屬單位換算錯亂/API 異常等壞資料，不是真實行情——超出範圍
+# 一律視為不可用，交由呼叫端退回 N/A、不下方向判斷，避免把壞資料捏造成
+# 「真實大漲/大跌」。
+_MAX_PLAUSIBLE_CHANGE_PCT = 100.0
+
+# codex HIGH（呼應 #24 不造假，Tier2 收斂最後一根）：`last_updated_at` 只驗
+# 「有限」不夠——未來時間戳（例如遠未來/超大 epoch）會讓
+# `trust.scoring._recency_decay` 把「now - ts」算出負值，被 `max(0.0, ...)`
+# clamp 成 0 齡 → recency=1.0（最高信任），等於把壞資料捏造成「剛剛發生、
+# 最新鮮」的觀測，讓它更容易主導客觀類方向、扭曲背離/共識判定。改為只接受
+# 「合理範圍內的過去 epoch」：不早於 `_MIN_PLAUSIBLE_EPOCH`（避免 0/極小值
+# 這類明顯異常），也不晚於「呼叫當下 + 時鐘偏差容忍」（避免未來時間戳）；
+# 超出範圍一律退回 `fallback_now`（本地呼叫當下時間，真實、有限、非未來）。
+_MIN_PLAUSIBLE_EPOCH = 1_577_836_800.0  # 2020-01-01T00:00:00Z（保守下限，只用來擋明顯異常值）
+_CLOCK_SKEW_TOLERANCE_SEC = 300.0  # 容許的時鐘偏差：未來 5 分鐘內視為可能的正常時鐘漂移
+
+
+def _finite_num(
+    v: object,
+    lo: float | None = None,
+    hi: float | None = None,
+    exclusive_lo: bool = False,
+) -> float | None:
+    """CoinGecko 數值欄位共用有限驗證（codex MEDIUM x2，呼應 #24 不造假）：
+    有限數字（非 bool/非數值/NaN/inf 一律拒收），選用值域檢查。
+
+    這是所有 CoinGecko 數值欄位（現價 usd、市值 usd_market_cap、24h 漲跌幅
+    usd_24h_change、更新時間 last_updated_at、情緒投票百分比）共用的單一
+    驗證入口——一次收斂，避免像前兩輪那樣逐欄位各補一次、漏掉沒補到的欄位
+    （如這次的 `usd`）又被同類壞資料捏造成看似合理的觀測（如「現價 nan
+    USD」仍被當成有效客觀事實送進背離偵測）。
+
+    - `bool` 是 `int` 子類但語意上不是數字，明確排除。
+    - `NaN`/`inf`/`-inf` 一律視為不可用（`>`/`<` 比較會悄悄吃掉這些壞值，
+      落入某個分支被誤判成看似合理的觀測，等於把壞資料捏造成訊號）。
+    - `lo`/`hi`：選用的值域檢查（含邊界）；`exclusive_lo=True` 時 `lo`
+      本身也視為不合格（例如現價必須 > 0，0 或負值不是合法現價）。
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    fv = float(v)
+    if not math.isfinite(fv):
+        return None
+    if lo is not None:
+        if exclusive_lo and fv <= lo:
+            return None
+        if not exclusive_lo and fv < lo:
+            return None
+    if hi is not None and fv > hi:
+        return None
+    return fv
+
+
+def _valid_pct(v: object) -> float | None:
+    """驗證「有限數字且落在 0–100」的百分比欄位（情緒投票用），其餘一律回
+    None（不造假）——partial/malformed API 回應（單邊缺、非數值、NaN/inf、
+    超出 0–100 範圍）不得被硬轉成「明確方向」的觀測。"""
+    return _finite_num(v, lo=0.0, hi=100.0)
+
+
+def _valid_change_pct(v: object) -> float | None:
+    """驗證 24h 漲跌幅欄位：必須是有限數字，且落在合理範圍
+    ±`_MAX_PLAUSIBLE_CHANGE_PCT`（見模組頂部說明：這 5 個大型主流幣真實
+    24h 漲跌幅超過 ±100% 幾乎必屬壞資料）。超出範圍一律回 None，交由
+    呼叫端退回 N/A、不下方向判斷。"""
+    return _finite_num(v, lo=-_MAX_PLAUSIBLE_CHANGE_PCT, hi=_MAX_PLAUSIBLE_CHANGE_PCT)
+
+# Demo API key env（選用；keyless 已足夠，見模組頂部說明）。只從 env 讀，
+# 絕不 hardcode。實際 key 由 CEO 另立步驟在部署環境（systemd/EC2）設定，
+# 本檔不經手真實 key 值。
+_API_KEY_ENV = "COINGECKO_API_KEY"
+
+# 5 幣白名單：COIN_POOL 代碼 -> CoinGecko coin id（見 schema.COIN_POOL）。
+_COINGECKO_IDS: dict[str, str] = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "BNB": "binancecoin",
+    "XRP": "ripple",
+}
+
+_PRICE_URL = (
+    "https://api.coingecko.com/api/v3/simple/price"
+    "?ids=" + ",".join(_COINGECKO_IDS.values())
+    + "&vs_currencies=usd&include_24hr_change=true&include_market_cap=true"
+    + "&include_last_updated_at=true"
+)
+
+# --- 單一 process 生命週期的記憶體快取（高效抓取，見模組頂部說明）--------
+# 現價：一輪內不管被呼叫幾次（fetch_scheduler 逐幣呼叫 CoinGeckoPriceSource
+# 5 次）都只真的打一次 API；`None` 代表本輪尚未打過。
+_price_response_cache: dict | None = None
+# coins/{id} 詳情：以 coingecko id 為 key，sentiment 與 dev 兩個 Source
+# 共用同一份，任一個先呼叫時才真的打 API。
+_coin_detail_cache: dict[str, dict] = {}
+# coins/{id} 詳情「失敗」結果的記憶體快取（生產事故修復：見模組頂部「去重」
+# 說明）：以 coingecko id 為 key，記住本輪內該幣的 coins/{id} 呼叫已經失敗
+# 過（如 429/timeout）；sentiment 與 dev 共用同一個端點，第二個 Source 對
+# 同一幣不會再重打一次已知失敗的請求（改為重新拋出同一個例外，行為對呼叫
+# 端等價，只是不再多打一次真 HTTP）。
+_coin_detail_failed: dict[str, BaseException] = {}
+
+# 生產事故修復：整個 CoinGecko host 共享的節流器（見模組頂部說明）。
+# `_last_request_monotonic` 記錄「最近一次真 HTTP 請求」的單調時鐘時間戳，
+# price/coin-detail 不分 Source 共用同一份狀態；`None` 代表本輪尚未打過
+# 任何真請求。用 `time.monotonic()` 而非 `time.time()`：不受系統時鐘調整
+# 影響，節流間隔的量測才可靠。
+_last_request_monotonic: float | None = None
+# CoinGecko sentiment/dev/price are separate source workers but share one host
+# quota. Keep throttle, request result and process caches behind one re-entrant
+# lock so parallel workers cannot both pass the same rate-limit window.
+_provider_request_lock = threading.RLock()
+_provider_rate_limit_error: HTTPError | None = None
+
+# keyless：官方 5-15 req/min 保守下限是 5/min，12 秒間隔對應剛好 5 次/分鐘
+# 的節奏，是老闆/codex 指定的安全值。
+_MIN_INTERVAL_KEYLESS_SECONDS = 12.0
+# 有 key：30 req/min，2 秒間隔對應剛好 30 次/分鐘的節奏，同樣保守取整除
+# 值，不留任何 burst 空間。
+_MIN_INTERVAL_WITH_KEY_SECONDS = 2.0
+
+
+def reset_process_cache() -> None:
+    """清空上述所有記憶體快取/節流狀態。供測試在案例之間重置，避免快取
+    內容跨測試案例殘留污染；正常執行（`scripts/fetch_scheduler.py`）每次
+    都是全新 process，不需要呼叫這個函式。"""
+    global _price_response_cache, _last_request_monotonic, _provider_rate_limit_error
+    with _provider_request_lock:
+        _price_response_cache = None
+        _coin_detail_cache.clear()
+        _coin_detail_failed.clear()
+        _last_request_monotonic = None
+        _provider_rate_limit_error = None
+
+
+def _min_interval_seconds() -> float:
+    """依是否設定 `COINGECKO_API_KEY` 決定共享節流間隔（見模組頂部「生產
+    事故修復」說明）：keyless 12 秒、有 key 2 秒。"""
+    return _MIN_INTERVAL_WITH_KEY_SECONDS if _api_key_headers() else _MIN_INTERVAL_KEYLESS_SECONDS
+
+
+def _throttle_before_request() -> None:
+    """在每次真 HTTP 請求送出前呼叫：確保跟「上一次真請求」（不論是哪個
+    Source/哪個端點）之間至少間隔 `_min_interval_seconds()` 秒，不足則
+    同步 `time.sleep()` 補足。這是整個 CoinGecko host 共享的單一節流狀態
+    （見模組頂部「生產事故修復」說明），不是各 Source 各自獨立的排程
+    間隔——不論排程呼叫順序為何，只要是真請求就受同一份狀態節流。"""
+    global _last_request_monotonic
+    now = time.monotonic()
+    if _last_request_monotonic is not None:
+        wait = _min_interval_seconds() - (now - _last_request_monotonic)
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+    _last_request_monotonic = now
+
+
+def _api_key_headers() -> dict[str, str]:
+    """若設定 `COINGECKO_API_KEY` env，回傳含 `x-cg-demo-api-key` 的請求
+    header 字典供 `_fetch_url` 附加；未設定則回傳空字典（keyless 降級，
+    不報錯、不加該 header）。
+
+    ⚠️ key 一律透過 HTTP header 傳遞，**絕不**附加在 URL query param 上
+    （避免 proxy/tracing/access-log/例外訊息等常見「記錄請求 URL」路徑
+    side-channel 側錄外洩）；`Document.url`/`meta`/log 一律只存乾淨 URL，
+    與此函式回傳值無關。
+    """
+    key = os.environ.get(_API_KEY_ENV, "").strip()
+    if not key:
+        return {}
+    return {"x-cg-demo-api-key": key}
+
+
+def _fetch_url(url: str, extra_headers: dict[str, str] | None = None) -> bytes:
+    """帶 timeout / 大小上限 / User-Agent 的 SSRF-safe GET（見
+    `safe_fetch.py`：逐跳驗證含初始 URL、DNS pinning、禁自動跟轉）。
+
+    `extra_headers`（如有）會與固定 `User-Agent` 一併附加在請求 header
+    上；URL 本身不受影響、一律保持乾淨（不含任何 secret）。
+
+    這是本模組所有真 HTTP 請求（現價 + coins/{id} 詳情）唯一的出口，因此
+    也是整個 CoinGecko host 共享節流器（`_throttle_before_request`，見
+    模組頂部「生產事故修復」說明）的唯一掛載點——不論呼叫端是哪個
+    Source，送出請求前一律先過這道節流，節流之後才交給 SSRF-safe 的
+    `safe_fetch.fetch_url` 實際送出請求。
+    """
+    global _provider_rate_limit_error
+    with _provider_request_lock:
+        if _provider_rate_limit_error is not None:
+            raise _provider_rate_limit_error
+        _throttle_before_request()
+        try:
+            return safe_fetch.fetch_url(
+                url, user_agent=_UA, extra_headers=extra_headers,
+                timeout=_TIMEOUT, max_bytes=_MAX_BYTES,
+            )
+        except HTTPError as exc:
+            if exc.code == 429:
+                _provider_rate_limit_error = exc
+            raise
+
+
+def _coin_detail_url(coingecko_id: str) -> str:
+    """coins/{id} 詳情端點 URL（social/developer_data 開，其餘關閉省流量）。"""
+    return (
+        f"https://api.coingecko.com/api/v3/coins/{coingecko_id}"
+        "?localization=false&tickers=false&market_data=false"
+        "&community_data=false&developer_data=true"
+    )
+
+
+def _get_price_data() -> dict:
+    """`_PRICE_URL` 的記憶體快取版：本輪（process 生命週期）第一次呼叫才
+    真的打 API，之後直接複用，讓 5 幣共用同一次呼叫（見模組頂部說明）。"""
+    global _price_response_cache
+    with _provider_request_lock:
+        if _price_response_cache is None:
+            raw = _fetch_url(_PRICE_URL, _api_key_headers())
+            _price_response_cache = json.loads(raw)
+        return _price_response_cache
+
+
+def _get_coin_detail(coingecko_id: str) -> dict:
+    """`_coin_detail_url(coingecko_id)` 的記憶體快取版：sentiment 與 dev
+    兩個 Source 共用，同一幣本輪只真的打一次 API（見模組頂部說明）。
+
+    生產事故修復：失敗結果也快取（`_coin_detail_failed`）——若本輪內這個
+    幣已經失敗過一次，直接重新拋出同一個例外，**不再重打**一次已知失敗
+    /限流的請求（sentiment/dev 共用同一端點，第一個 Source 先失敗時，第
+    二個 Source 不會把同一個請求再送一次，變相省下共享節流器的一個間隔
+    窗口）。"""
+    with _provider_request_lock:
+        if coingecko_id in _coin_detail_cache:
+            return _coin_detail_cache[coingecko_id]
+        if coingecko_id in _coin_detail_failed:
+            raise _coin_detail_failed[coingecko_id]
+        try:
+            raw = _fetch_url(_coin_detail_url(coingecko_id), _api_key_headers())
+            data = json.loads(raw)
+        except Exception as exc:
+            _coin_detail_failed[coingecko_id] = exc
+            raise
+        _coin_detail_cache[coingecko_id] = data
+        return data
+
+
+class CoinGeckoPriceSource(Source):
+    """CoinGecko 即時現價（simple/price，免費端點，1 次呼叫涵蓋 5 幣）。
+
+    `coin` 指定單一目標時只回傳該幣的 Document；`coin` 為空字串時（全市場
+    通用查詢）回傳 5 幣各一筆，皆帶顯式 `meta["coin"]`（避免被
+    `base._matches_coin()` 誤判成「全市場通用、每幣都納入」的兜底分支——
+    現價本質上是幣種特定資料，不是市場通用訊號）。非白名單幣種一律跳過。
+    """
+    kind = "price_live"
+    name = "coingecko-price"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        targets = [coin.upper()] if coin else list(_COINGECKO_IDS)
+        targets = [t for t in targets if t in _COINGECKO_IDS]
+        if not targets:
+            return []
+        data = _get_price_data()
+        fallback_now = time.time()
+        docs: list[Document] = []
+        for code in targets:
+            gid = _COINGECKO_IDS[code]
+            entry = data.get(gid)
+            if not isinstance(entry, dict):
+                continue
+            # 修（codex MEDIUM #3，呼應 #24 不造假，收斂整個數值欄位驗證類別）：
+            # 原本 `usd` 只擋 None，NaN/inf/字串/bool/負值/零都會被當成「有效
+            # 現價」直接寫進 ref（如「現價 nan USD」）——`price_live` 是
+            # OBJECTIVE_KINDS、會進 `detect_cross_source_signal`，壞現價因此
+            # 變成內部看似合理、實則無效的客觀觀測，可能製造假背離/假共識。
+            # 現價是這個 Document 存在的唯一理由，不合格就不產這筆 Document
+            # （不是退 N/A 續產——退化成 N/A 對「現價」欄位沒有意義）。
+            price_val = _finite_num(entry.get("usd"), lo=0.0, exclusive_lo=True)
+            if price_val is None:
+                continue
+            change_24h = entry.get("usd_24h_change")
+            mcap_val = _finite_num(entry.get("usd_market_cap"), lo=0.0)
+            mcap_str = f"{mcap_val:,.0f}" if mcap_val is not None else "N/A"
+            # 修（codex HIGH，Tier2 同批修正）：原本只寫數字「+8.20%」，不含
+            # trust.scoring._infer_direction 認得的方向詞（上漲/下跌等），導致
+            # price_live 主張永遠推斷成 neutral——即使漲跌幅再大，客觀類的
+            # 信任加權主導方向也恆為 neutral，detect_cross_source_signal 永遠
+            # 拒收，背離/共識判定形同虛設。改為依漲跌幅正負附上明確方向詞
+            # （持平則不附，維持中性語意，符合實際盤況）。
+            #
+            # 再修（codex MEDIUM，呼應 #24 不造假）：`change_24h > 0`/`< 0` 對
+            # NaN 兩者皆為 False，會落入 else 的「持平」分支——等於把壞資料
+            # （NaN/inf）捏造成一個看似合理的「持平」觀測。改用 `_valid_change_pct`
+            # 先擋非數值/NaN/inf，不合格一律退回 N/A、不下任何方向判斷。
+            change_val = _valid_change_pct(change_24h)
+            if change_val is not None:
+                if change_val > 0:
+                    change_str = f"{change_val:+.2f}%（上漲）"
+                elif change_val < 0:
+                    change_str = f"{change_val:+.2f}%（下跌）"
+                else:
+                    change_str = f"{change_val:+.2f}%（持平）"
+            else:
+                change_str = "N/A"
+            ref = f"{code} 現價 {price_val} USD，24h 變動 {change_str}，市值 {mcap_str} USD"
+            doc_id = "coingecko-price-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
+            # 優先用 API 回應本身的 last_updated_at（真正的鮮度來源，反映該筆
+            # 報價實際成立的時間點）；缺欄位/壞值才退回本地呼叫當下時間。
+            #
+            # 修（codex HIGH，呼應 #24 不造假，Tier2 收斂最後一根）：原本只驗
+            # 「有限」，未來時間戳/超大 epoch 會讓 `_recency_decay` 把負齡
+            # clamp 成 0 → recency=1.0（最高信任），等於把壞資料捏造成「最新
+            # 鮮」的觀測。改為只接受「合理範圍內的過去 epoch」：不早於
+            # `_MIN_PLAUSIBLE_EPOCH`（擋 0/極小值），也不晚於「本次呼叫時間 +
+            # 時鐘偏差容忍」（擋未來時間戳）；超出範圍/NaN/inf/非數值一律退回
+            # `fallback_now`（真實、有限、非未來的本地時間，不捏造鮮度）。
+            #
+            # 再修（codex HIGH，容忍範圍內近未來仍拿滿分 recency）：時鐘偏差
+            # 容忍讓 `now+1s ~ now+300s` 的戳通過上面的合理範圍檢查（接受為
+            # 真實資料、不誤拒），但 `_recency_decay` 對「未來」時間戳一樣會
+            # 把負齡 clamp 成 0 → recency=1.0 最高信任。驗證通過後再對儲存值
+            # 取 `min(validated_ts, fallback_now)`：容忍時鐘誤差但不讓任何
+            # 未來時間點被當成「現在」以外更新的鮮度來源。
+            last_updated_val = _finite_num(
+                entry.get("last_updated_at"),
+                lo=_MIN_PLAUSIBLE_EPOCH,
+                hi=fallback_now + _CLOCK_SKEW_TOLERANCE_SEC,
+            )
+            ts = min(last_updated_val, fallback_now) if last_updated_val is not None else fallback_now
+            docs.append(Document(
+                id=doc_id,
+                kind=self.kind,
+                source=self.name,
+                text=ref,
+                url=_PRICE_URL,
+                ts=ts,
+                meta={"content_reference": ref, "coin": code},
+            ))
+        return docs
+
+
+class CoinGeckoSentimentSource(Source):
+    """CoinGecko 社群情緒投票百分比（coins/{id}，每幣 1 次呼叫，與
+    `CoinGeckoDevSource` 共用同一份記憶體快取，見模組頂部說明）。
+
+    `coin` 必須是白名單 5 幣之一才知道要打哪個 id 的端點；空字串或非白名單
+    幣種一律跳過（回傳 []）——與 `CoinGeckoPriceSource` 不同，此端點無法一次
+    呼叫涵蓋多幣，沒有明確目標幣就無法決定要呼叫哪個 URL。
+    """
+    kind = "sentiment"
+    name = "coingecko-sentiment"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        code = coin.upper()
+        gid = _COINGECKO_IDS.get(code)
+        if gid is None:
+            return []
+        detail_url = _coin_detail_url(gid)
+        data = _get_coin_detail(gid)
+        up = data.get("sentiment_votes_up_percentage")
+        down = data.get("sentiment_votes_down_percentage")
+        if up is None and down is None:
+            return []
+        # 修（codex HIGH，Tier2）：原本文字固定同時寫「看漲 X%，看跌 Y%」，
+        # 導致 trust.scoring._infer_direction 對「看漲」「看跌」各計一次而
+        # 永遠打平回 neutral，使 detect_cross_source_signal 拒收、背離永不
+        # 觸發——把 sentiment 加進 _SENTIMENT_KINDS 形同虛設。改為依多空數字
+        # 的實際主導方向組字：差距達門檻才用單一方向詞描述（另一側只給數字、
+        # 不帶任何方向關鍵詞，避免又被計成平手）；差距不足門檻維持中性語意。
+        #
+        # 再修（codex MEDIUM，呼應 #24 不造假）：上一版對「只有單邊票數」的
+        # 情況直接捏出 ±100pp 差距、硬發強方向詞——partial/malformed API
+        # 回應（單邊缺、非數值、NaN/inf、超出 0–100 範圍）因此會被偽裝成
+        # 強烈的多空觀測，進而製造假背離。改為用 `_valid_pct` 嚴格驗證：
+        # 兩邊都必須是有限數字且落在 0–100，才進入方向判斷；只要有一邊不合格，
+        # 一律回中性語意的 data-quality 措辭，絕不捏造方向。比較也改嚴格
+        # `>`/`<`（原 `>=`/`<=` 會把剛好等於門檻的 5pp 也算方向，不符合
+        # 「僅 > 5pp 才算」的規格）。
+        up_val = _valid_pct(up)
+        down_val = _valid_pct(down)
+        up_str = f"{up_val:.1f}%" if up_val is not None else "N/A"
+        down_str = f"{down_val:.1f}%" if down_val is not None else "N/A"
+        if up_val is None or down_val is None:
+            ref = f"{code} 社群情緒投票：資料不完整或無效（看漲 {up_str}，看跌 {down_str}），暫無法判斷方向"
+        else:
+            diff = up_val - down_val
+            if diff > _SENTIMENT_DOMINANCE_THRESHOLD:
+                ref = f"{code} 社群情緒偏多：看漲 {up_str}（多數意見），另有 {down_str} 持保留看法"
+            elif diff < -_SENTIMENT_DOMINANCE_THRESHOLD:
+                ref = f"{code} 社群情緒偏空：看跌 {down_str}（多數意見），另有 {up_str} 持保留看法"
+            else:
+                ref = f"{code} 社群情緒投票：看漲 {up_str}，看跌 {down_str}"
+        doc_id = "coingecko-sentiment-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
+        return [Document(
+            id=doc_id,
+            kind=self.kind,
+            source=self.name,
+            text=ref,
+            url=detail_url,
+            ts=time.time(),
+            meta={"content_reference": ref, "coin": code},
+        )]
+
+
+class CoinGeckoDevSource(Source):
+    """CoinGecko 開發活動（coins/{id} 的 developer_data，每幣 1 次呼叫，與
+    `CoinGeckoSentimentSource` 共用同一份記憶體快取，見模組頂部說明）。
+
+    與 `CoinGeckoSentimentSource` 打同一個端點（回應本身同時含兩種資料）；
+    兩者仍是獨立 Source（不同 kind/cache key/refresh 節奏，見 `cache.py`），
+    只是底層 HTTP 呼叫透過 `_get_coin_detail()` 共用一次，換取「兩個獨立
+    可排程/降級的 Source」與「同一幣一輪只打一次 API」兩者兼得。
+    """
+    kind = "dev_activity"
+    name = "coingecko-dev"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:
+        code = coin.upper()
+        gid = _COINGECKO_IDS.get(code)
+        if gid is None:
+            return []
+        detail_url = _coin_detail_url(gid)
+        data = _get_coin_detail(gid)
+        dev = data.get("developer_data")
+        if not isinstance(dev, dict):
+            return []
+        stars = dev.get("stars")
+        forks = dev.get("forks")
+        commits = dev.get("commit_count_4_weeks")
+        if stars is None and forks is None and commits is None:
+            return []
+        stars_str = stars if stars is not None else "N/A"
+        forks_str = forks if forks is not None else "N/A"
+        commits_str = commits if commits is not None else "N/A"
+        ref = (
+            f"{code} 開發活動：GitHub stars {stars_str}，forks {forks_str}，"
+            f"近 4 週 commits {commits_str}"
+        )
+        doc_id = "coingecko-dev-" + hashlib.md5(f"{code}-{ref}".encode()).hexdigest()[:12]
+        return [Document(
+            id=doc_id,
+            kind=self.kind,
+            source=self.name,
+            text=ref,
+            url=detail_url,
+            ts=time.time(),
+            meta={"content_reference": ref, "coin": code},
+        )]
+
+
+def build_coingecko_sources() -> list[Source]:
+    """回傳所有已啟用的 CoinGecko 連接器。"""
+    return [CoinGeckoPriceSource(), CoinGeckoSentimentSource(), CoinGeckoDevSource()]

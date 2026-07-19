@@ -27,7 +27,7 @@ function AgentCoreStatusBar() {
         const resp = await fetch('/agentcore/invocations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: '' }),
+          body: JSON.stringify({ prompt: 'ping' }),
           signal: AbortSignal.timeout(5000),
         })
         setStatus(resp.status > 0 ? 'connected' : 'disconnected')

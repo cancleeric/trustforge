@@ -1,0 +1,11 @@
+opentelemetry/instrumentation/starlette/__init__.py,sha256=ggd-fU_mTxf2AsH36UvsMfA3-vUo1yCGo_DPssMZsLc,15308
+opentelemetry/instrumentation/starlette/package.py,sha256=h989f5_2Eji9zYfZobrnVj1n8YWB3azZlURvQZ9DX44,142
+opentelemetry/instrumentation/starlette/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+opentelemetry/instrumentation/starlette/version.py,sha256=uXYZtmFEjxyPMh_7-NE_fhMq7ge4Q9QsJNtZsYoitAo,100
+opentelemetry_instrumentation_starlette-0.63b1.dist-info/INSTALLER,sha256=5hhM4Q4mYTT9z6QB6PGpUAW81PGNFrYrdXMj4oM_6ak,2
+opentelemetry_instrumentation_starlette-0.63b1.dist-info/METADATA,sha256=WOgCELPD8dvo2oGtsluqFkZ6iz5K69aOiZ3sCm02rs0,2198
+opentelemetry_instrumentation_starlette-0.63b1.dist-info/RECORD,,
+opentelemetry_instrumentation_starlette-0.63b1.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+opentelemetry_instrumentation_starlette-0.63b1.dist-info/WHEEL,sha256=QccIxa26bgl1E6uMy58deGWi-0aeIkkangHcxk2kWfw,87
+opentelemetry_instrumentation_starlette-0.63b1.dist-info/entry_points.txt,sha256=DYqdyYxsCNoDgdbJxww6iORrghT_ivu9UpF9_B0D-CA,103
+opentelemetry_instrumentation_starlette-0.63b1.dist-info/licenses/LICENSE,sha256=xx0jnfkXJvxRnG63LTGOxlggYnIysveWIZ6H3PNdCrQ,11357

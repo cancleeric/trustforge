@@ -1,1 +1,30 @@
-{"targets": {}}
+{
+  "targets": {
+    "default": {
+      "resources": {
+        "runtimes": {
+          "TrustForge": {
+            "runtimeId": "TrustForge_TrustForge-FKZYQk6XYN",
+            "runtimeArn": "arn:aws:bedrock-agentcore:us-west-2:320566125702:runtime/TrustForge_TrustForge-FKZYQk6XYN",
+            "roleArn": "arn:aws:iam::320566125702:role/AgentCore-TrustForge-defa-ApplicationAgentTrustForg-EZSLZkT42au7"
+          }
+        },
+        "memories": {
+          "UserPreferences": {
+            "memoryId": "TrustForge_UserPreferences-87myrp9QZP",
+            "memoryArn": "arn:aws:bedrock-agentcore:us-west-2:320566125702:memory/TrustForge_UserPreferences-87myrp9QZP"
+          }
+        },
+        "onlineEvalConfigs": {
+          "QualityMonitor": {
+            "onlineEvaluationConfigId": "TrustForge_QualityMonitor-6bZWZLHY23",
+            "onlineEvaluationConfigArn": "arn:aws:bedrock-agentcore:us-west-2:320566125702:online-evaluation-config/TrustForge_QualityMonitor-6bZWZLHY23",
+            "agent": "TrustForge"
+          }
+        },
+        "stackName": "AgentCore-TrustForge-default",
+        "deployHash": "f325573b51e415dc"
+      }
+    }
+  }
+}

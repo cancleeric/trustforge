@@ -79,20 +79,28 @@ def analyze_market(
     result_parts = [
         f"# 分析報告: {coin.upper()}",
         f"問題: {query}",
-        f"信任分數: {report.confidence:.2f}" if hasattr(report, 'confidence') else "",
+        f"信任分數: {report.confidence:.2f}",
+        f"信任等級: {report.confidence_label}",
+        f"市場判斷: {report.market_judgment}",
         f"資料模式: {data_mode} | LLM: {llm_mode}",
         "",
-        "## 摘要",
-        report.narrative if hasattr(report, 'narrative') else str(report),
-        "",
-        f"## 證據來源 ({len(evidence)} 筆)",
+        "## 關鍵事實",
     ]
+    for fact in (report.facts or [])[:5]:
+        result_parts.append(f"  - {fact}")
+
+    result_parts.append("")
+    result_parts.append(f"## 證據來源 ({len(evidence)} 筆)")
 
     for i, ev in enumerate(evidence[:10], 1):
-        source = getattr(ev, 'source', 'unknown')
-        trust = getattr(ev, 'trust_score', 0)
-        text = getattr(ev, 'text', str(ev))[:100]
+        source = getattr(ev, 'source', 'unknown') or 'unknown'
+        trust = getattr(ev, 'trust_score', 0) or 0
+        text = (getattr(ev, 'text', str(ev)) or str(ev))[:100]
         result_parts.append(f"  {i}. [{source}] (信任: {trust:.2f}) {text}")
+
+    if report.cross_source_signal:
+        result_parts.append("")
+        result_parts.append(f"## 跨來源分歧: {report.cross_source_signal}")
 
     return "\n".join(result_parts)
 
@@ -113,33 +121,21 @@ def list_supported_coins() -> str:
 
 tools = [analyze_market, list_supported_coins]
 
-_agent = None
-
-
-def get_or_create_agent(session_id: str = "default", actor_id: str = "anonymous"):
-    global _agent
-    if _agent is None:
-        session_manager = get_memory_session_manager(session_id, actor_id)
-        _agent = Agent(
-            model=load_model(),
-            system_prompt=SYSTEM_PROMPT,
-            tools=tools,
-            session_manager=session_manager,
-        )
-    return _agent
-
 
 @app.entrypoint
 async def invoke(payload, context):
     log.info("Invoking TrustForge Agent...")
 
-    session_id = context.session_id or "default-session"
-    # 從 custom header 或 JWT 取 user_id
-    headers = context.request_headers or {}
-    actor_id = headers.get("x-amzn-bedrock-agentcore-runtime-custom-user-id", "anonymous")
+    # 每次 request 建新 agent，避免前一輪對話的空 content 污染 messages history
+    agent = Agent(
+        model=load_model(),
+        system_prompt=SYSTEM_PROMPT,
+        tools=tools,
+    )
 
-    agent = get_or_create_agent(session_id, actor_id)
-    prompt = payload.get("prompt", "")
+    prompt = payload.get("prompt", "hello")
+    if not prompt or not prompt.strip():
+        prompt = "hello"
 
     stream = agent.stream_async(prompt)
     async for event in stream:
