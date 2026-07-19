@@ -16,12 +16,14 @@ DEPENDENCY_PATTERNS = (
     re.compile(r"(?:相依|阻擋於|需要)\s*#(\d+)", re.IGNORECASE),
 )
 PRIORITY_LABELS = {
+    "p0-critical": 0,
+    "ready-now": 1,
     "production": 0,
-    "bug": 1,
-    "security": 2,
-    "release": 3,
-    "e2e": 4,
-    "cost": 5,
+    "bug": 2,
+    "security": 3,
+    "release": 4,
+    "e2e": 5,
+    "cost": 6,
 }
 
 
@@ -79,6 +81,8 @@ def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[d
         dependencies = _dependencies(issue)
         issue_ref = re.compile(rf"(?:^|[-_/])(?:issue-)?{number}(?:[-_/]|$)")
         active_branch = next((head for head in active_heads if issue_ref.search(head)), None)
+        if "blocked-external" in labels and active_branch is None:
+            continue
         priority = min((PRIORITY_LABELS[label] for label in labels if label in PRIORITY_LABELS), default=20)
         candidates.append((priority, number, issue, dependencies, active_branch))
     candidates.sort(key=lambda item: (item[0], item[1]))

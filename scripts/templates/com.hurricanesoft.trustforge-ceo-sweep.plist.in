@@ -6,6 +6,7 @@
   <key>EnvironmentVariables</key><dict>
     <key>TRUSTFORGE_HOME</key><string>__ROOT__</string>
     <key>TRUSTFORGE_PYTHON</key><string>__PYTHON__</string>
+    <key>TRUSTFORGE_CODEX</key><string>__CODEX__</string>
     <key>TRUSTFORGE_ENV</key><string>local</string>
     <key>TRUSTFORGE_DISABLE_ADMIN_CONFIG</key><string>1</string>
     <key>TRUSTFORGE_BEDROCK_DAILY_USD_CAP</key><string>0</string>

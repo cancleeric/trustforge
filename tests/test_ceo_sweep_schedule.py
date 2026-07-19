@@ -63,6 +63,23 @@ def test_execution_queue_is_prioritized_dependency_aware_and_continues_active_pr
     assert queue[1]["lane"] == 2
 
 
+def test_execution_queue_skips_external_blockers_without_active_pr():
+    spec = importlib.util.spec_from_file_location("ceo_sweep_blockers", ROOT / "scripts/ceo_sweep.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    issues = [
+        {"number": 8, "title": "credentials", "body": "", "labels": [{"name": "blocked-external"}]},
+        {"number": 9, "title": "continue", "body": "", "labels": [{"name": "blocked-external"}]},
+        {"number": 10, "title": "ready", "body": "", "labels": [{"name": "ready-now"}]},
+    ]
+
+    queue = module.build_execution_queue(issues, [{"headRefName": "fix/issue-9-continue"}], max_lanes=3)
+
+    assert [item["issue"] for item in queue] == [10, 9]
+    assert queue[1]["action"] == "continue_pr"
+
+
 def test_lane_guard_bounds_concurrency_by_load():
     spec = importlib.util.spec_from_file_location("ceo_lane_guard", ROOT / "scripts/ceo_lane_guard.py")
     assert spec and spec.loader
