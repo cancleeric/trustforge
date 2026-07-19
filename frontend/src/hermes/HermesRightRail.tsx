@@ -47,6 +47,7 @@ export default function HermesRightRail({
         position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
         borderLeft: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
         display: 'flex', flexDirection: 'column', gap: 12,
+        overflowY: 'auto',
       }}
     >
       <div style={{ fontSize: 10, letterSpacing: '1.2px', color: 'var(--color-hermes-tx2)' }}>{t('focused')}: <b style={{ color: 'var(--color-hermes-cyan)' }}>{full}</b></div>
@@ -130,8 +131,8 @@ export default function HermesRightRail({
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
           {crossSignal ? `${crossSignal.summary} — ${t('tapReview')}`
             : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
-            : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
-              : `${t('conflict')} · Δ ${divDock.divergence}% — ${t('tapReview')}`}
+              : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
+                : `${t('conflict')} · Δ ${divDock.divergence}% — ${t('tapReview')}`}
         </div>
       </div>
     </div>
