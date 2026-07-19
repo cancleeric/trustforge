@@ -7140,6 +7140,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    from .ingestion.hoyabit import log_hoyabit_startup_status
+
+    log_hoyabit_startup_status()
     # 前後端分離 Phase 3（task #28，harper 安全審 must-have）：`TRUST_PROXY`
     # 開啟時，代表部署拓樸是「nginx 對外、python 只對內」，此時**強制**把
     # 監聽 host 收斂成 127.0.0.1——即使 `TRUSTFORGE_BIND_HOST` 被設成別的

@@ -15,6 +15,13 @@ import logging
 from urllib.parse import urlencode
 
 from . import web
+from .ingestion.hoyabit import log_hoyabit_startup_status
+
+
+# Lambda has no conventional server ``main``; module initialization is its
+# cold-start boundary.  This emits configuration status only and performs no
+# network request.
+log_hoyabit_startup_status()
 
 
 def _resp(code, body, ctype):

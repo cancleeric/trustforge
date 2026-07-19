@@ -22,6 +22,31 @@ _TIMEOUT = 8
 _UA = "TrustForge/1.0 (HOYA BIT connector)"
 
 
+def log_hoyabit_startup_status() -> bool:
+    """Log whether the HOYA BIT online truth baseline is actually available.
+
+    This check is deliberately configuration-only: startup must not probe an
+    undocumented endpoint or expose its value.  ``False`` means operators must
+    treat HOYA BIT online data as unavailable; the historical OHLCV dataset is
+    a separate, explicitly labelled baseline.
+    """
+    endpoint_configured = bool(os.getenv("TRUSTFORGE_HOYABIT_TICKER_URL", "").strip())
+    enabled = get_source_enabled(HoyaBitSource.name)
+    if not endpoint_configured or not enabled:
+        reasons = []
+        if not endpoint_configured:
+            reasons.append("TRUSTFORGE_HOYABIT_TICKER_URL 未設定")
+        if not enabled:
+            reasons.append("hoyabit-ticker disabled")
+        _log.warning(
+            "HOYA BIT 真值基準未接：%s；ticker 不會提供即時真實資料，"
+            "depth/orderbook/trades 仍等待官方合約（issue #167）",
+            "、".join(reasons),
+        )
+        return False
+    return True
+
+
 class HoyaBitSource(Source):
     kind = "hoyabit"
     name = "hoyabit-ticker"

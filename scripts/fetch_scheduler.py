@@ -109,7 +109,7 @@ from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
-from trustforge.ingestion.hoyabit import build_hoyabit_sources  # noqa: E402
+from trustforge.ingestion.hoyabit import build_hoyabit_sources, log_hoyabit_startup_status  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
@@ -1607,6 +1607,8 @@ def main(argv: list[str] | None = None) -> int:
              "驗證 cache/ledger 基建，避免把 DynamoDB 故障誤當上游降級。",
     )
     args = parser.parse_args(argv)
+
+    log_hoyabit_startup_status()
 
     if args.parallelism < 1:
         parser.error("--parallelism must be >= 1")

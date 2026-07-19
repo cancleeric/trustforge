@@ -15,7 +15,11 @@ from __future__ import annotations
 import pytest
 
 from trustforge.ingestion import base, safe_fetch
-from trustforge.ingestion.hoyabit import HoyaBitSource, build_hoyabit_sources
+from trustforge.ingestion.hoyabit import (
+    HoyaBitSource,
+    build_hoyabit_sources,
+    log_hoyabit_startup_status,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -98,3 +102,27 @@ def test_hoyabit_configured_connector_emits_real_document(monkeypatch):
     assert docs[0].meta["live_source"] is True
     assert docs[0].meta["price"] == 123.4
     assert "sample" not in docs[0].meta
+
+
+def test_startup_self_check_warns_when_endpoint_is_missing(monkeypatch, caplog):
+    monkeypatch.delenv("TRUSTFORGE_HOYABIT_TICKER_URL", raising=False)
+
+    assert log_hoyabit_startup_status() is False
+    assert "HOYA BIT 真值基準未接" in caplog.text
+    assert "TRUSTFORGE_HOYABIT_TICKER_URL 未設定" in caplog.text
+    assert "depth/orderbook/trades" in caplog.text
+
+
+def test_startup_self_check_warns_when_configured_source_is_disabled(monkeypatch, caplog):
+    monkeypatch.setenv("TRUSTFORGE_HOYABIT_TICKER_URL", "https://api.hoyabit.example/ticker")
+    base.set_source_enabled_override("hoyabit-ticker", False)
+
+    assert log_hoyabit_startup_status() is False
+    assert "hoyabit-ticker disabled" in caplog.text
+
+
+def test_startup_self_check_accepts_configured_enabled_ticker(monkeypatch, caplog):
+    monkeypatch.setenv("TRUSTFORGE_HOYABIT_TICKER_URL", "https://api.hoyabit.example/ticker")
+
+    assert log_hoyabit_startup_status() is True
+    assert "HOYA BIT 真值基準未接" not in caplog.text

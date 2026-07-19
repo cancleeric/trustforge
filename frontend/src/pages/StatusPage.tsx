@@ -64,6 +64,17 @@ function FreshnessMatrix({ entries }: { entries: FreshnessEntry[] }) {
   )
 }
 
+export function HoyaBitIntegrationNotice() {
+  return (
+    <div className="mb-3 rounded-lg border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_8%,transparent)] p-3 text-xs" role="status">
+      <p className="font-semibold text-tf-warn">HOYA BIT：部分接</p>
+      <p className="mt-1 text-tf-text2">
+        官方歷史 OHLCV 基準已提供；線上 ticker 仍須部署端設定官方 endpoint，depth／orderbook／trades 則等待官方合約。未設定時不會列為即時真值來源。
+      </p>
+    </div>
+  )
+}
+
 function CostSummaryCard({
   costs,
   costsError,
@@ -216,6 +227,7 @@ export default function StatusPage() {
 
           <section>
             <h3 className="mb-2 text-sm font-semibold text-tf-text">連接器資料鮮度</h3>
+            <HoyaBitIntegrationNotice />
             {status.freshness.fresh === 0 && status.freshness.stale === 0 && status.freshness.missing > 0 && (
               <div className="mb-3 border border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_8%,transparent)] p-3 text-xs text-tf-warn" role="status">
                 <p className="font-semibold">服務正常，但尚未收到來源快照</p>
