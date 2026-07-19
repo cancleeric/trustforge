@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# TrustForge pre-push：只做本地品質閘；production CD 只由受保護 release tag
-# 的 GitHub Actions workflow 觸發，不能因任意開發分支 push 自動部署。
+# TrustForge pre-push local quality gate. CI is intentionally local-first;
+# production CD remains a separate protected release workflow.
 # 啟用：git config core.hooksPath .githooks
 # 略過部署：TRUSTFORGE_NO_CD=1 git push
 set -uo pipefail
@@ -9,11 +9,29 @@ cd "$(git rev-parse --show-toplevel)"
 PYTHON="python3"
 if [ -x .venv/bin/python ]; then PYTHON=.venv/bin/python; fi
 echo "[pre-push] pytest interpreter: ${PYTHON}"
-if ! PYTHONPATH=src "$PYTHON" -m pytest -q; then
-  echo "[pre-push] ❌ 測試未過 → 阻擋 push（修綠再推）"
-  exit 1
+run_gate() {
+  label="$1"
+  shift
+  echo "[pre-push] running: $label"
+  if ! "$@"; then
+    echo "[pre-push] FAILED: $label"
+    exit 1
+  fi
+}
+
+run_gate "backend tests" env PYTHONPATH=src "$PYTHON" -m pytest -q
+run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
+run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json
+run_gate "competition QA" env TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 "$PYTHON" scripts/run_question_bank.py --limit 24 --out out/pre-push/question-bank-results.json
+if [ ! -x frontend/node_modules/.bin/vitest ]; then
+  run_gate "frontend dependencies" npm --prefix frontend ci
 fi
-echo "[pre-push] ✅ 測試綠"
+run_gate "frontend tests" npm --prefix frontend test -- --run
+run_gate "frontend lint" npm --prefix frontend run lint
+run_gate "frontend build" npm --prefix frontend run build
+run_gate "diff check" git diff --check
+
+echo "[pre-push] all local quality gates passed"
 
 echo "[pre-push] release CD 由 GitHub production workflow 處理"
 exit 0
