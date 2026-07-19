@@ -1630,18 +1630,21 @@ def main(argv: list[str] | None = None) -> int:
         backend = get_cache_backend()
         return run_snapshot(coins, backend, args.dry_run)
 
-    # Scheduler is a separate process from the admin web service. Load the
-    # durable source controls before building or executing the registry; a
-    # read failure is intentionally fatal so an unknown disable state cannot
-    # result in external calls or a falsely fresh cache.
-    sync_source_enabled_from_admin()
-    log_hoyabit_startup_status()
-
     registry = build_registry()
     if args.list_sources:
         for name in sorted(registry):
             print(name)
         return 0
+
+    if not args.dry_run:
+        # Scheduler is a separate process from the admin web service. Load the
+        # durable controls immediately before a real fetch; a read failure is
+        # intentionally fatal so an unknown disable state cannot result in
+        # external calls or a falsely fresh cache. Introspection and dry-run
+        # remain network-free by contract.
+        sync_source_enabled_from_admin()
+        log_hoyabit_startup_status()
+        registry = build_registry()
 
     interval_overrides: dict[str, float] = {}
     if args.interval is not None:

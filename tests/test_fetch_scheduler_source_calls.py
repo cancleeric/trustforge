@@ -59,12 +59,31 @@ def test_main_dry_run_does_not_write_scheduler_run_log(monkeypatch):
     monkeypatch.setattr(fetch_scheduler, "run_once", fake_run_once)
     monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: object())
     monkeypatch.setattr(fetch_scheduler, "append_scheduler_run", fake_append_scheduler_run)
+    monkeypatch.setattr(
+        fetch_scheduler,
+        "sync_source_enabled_from_admin",
+        lambda: (_ for _ in ()).throw(AssertionError("dry-run must not read admin config")),
+    )
     monkeypatch.setattr(fetch_scheduler, "build_registry", lambda: {"coindesk": object()})
 
     rc = fetch_scheduler.main(["--dry-run"])
 
     assert rc == 0
     assert calls["n"] == 0
+
+
+def test_list_sources_does_not_read_admin_config(monkeypatch, capsys):
+    monkeypatch.setattr(
+        fetch_scheduler,
+        "sync_source_enabled_from_admin",
+        lambda: (_ for _ in ()).throw(AssertionError("list must not read admin config")),
+    )
+    monkeypatch.setattr(
+        fetch_scheduler, "build_registry", lambda: {"coindesk": object()}
+    )
+
+    assert fetch_scheduler.main(["--list-sources"]) == 0
+    assert "coindesk" in capsys.readouterr().out
 
 
 def test_main_source_calls_empty_when_no_results(monkeypatch):
