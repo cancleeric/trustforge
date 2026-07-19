@@ -258,6 +258,28 @@ def test_public_analysis_job_hides_internal_exception_details():
     assert "/Users/" not in str(public)
 
 
+def test_public_analysis_diagnostics_hides_nested_exception_details():
+    secret = "AccessDeniedException: arn:aws:bedrock:secret /Users/private/app.py"
+    internal = {
+        "stages": [{"current": {"state": "running", "error": secret}}],
+        "jobs": [{
+            "state": "failed", "error": secret,
+            "attempts": [{"state": "failed", "error": secret}],
+            "stages": [{"state": "queued", "error": secret}],
+        }],
+        "dead_letters": [{"failed_at": 1.0, "error": secret}],
+    }
+
+    public = web._public_analysis_diagnostics(internal)
+
+    assert secret in str(internal)
+    assert "AccessDenied" not in str(public)
+    assert "/Users/" not in str(public)
+    assert public["jobs"][0]["error_code"] == "analysis_job_failed"
+    assert public["dead_letters"][0]["error_code"] == "analysis_job_failed"
+    assert public["stages"][0]["current"]["error_code"] == "analysis_job_retrying"
+
+
 def test_sample_requests_never_rate_limited():
     """`?sample=1` 離線示範沙盒不消耗 per-IP 限流 bucket（高頻 demo 不會誤觸 429）。
 

@@ -1022,6 +1022,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         f"{_cross_note}{_instruction}"
     )
     _t_step3 = log._now()
+    narrative_service_failed = False
     try:
         _result_step3 = client.complete(system=SYSTEM, prompt=prompt)
         narrative = _result_step3.text
@@ -1041,6 +1042,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         # Bedrock 失敗 → 用結構化判斷當行文降級,不中斷管線(且仍記錄此步 log)
         # 呼叫未成功、無 usage 數字 → 不記成本
         narrative = f"[行文服務暫時無法使用,以下為結構化判斷] {market_judgment}"
+        narrative_service_failed = True
     _step3_elapsed = round(log._now() - _t_step3, 2)
     log.record(
         "bedrock.complete",
@@ -1085,6 +1087,10 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         ]
 
     limits, flips = _derive_limits(brief)
+    if narrative_service_failed:
+        limits.append(
+            "本次線上模型生成失敗；報告已降級為結構化規則與可追溯證據結果。"
+        )
     # W4 codex 對抗審第 3 輪 [HIGH]：cross_signal 的 summary 在有真實客觀/情緒
     # 主導方向可判定時（`objective_direction`/`sentiment_direction` 皆非
     # None——consensus／divergence／collision 三種類型皆屬此類，見
