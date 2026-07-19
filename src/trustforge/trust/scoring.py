@@ -71,6 +71,12 @@ KIND_REPUTATION = {
     "price_live": 0.90,
     "sentiment": 0.50,
     "dev_activity": 0.50,
+    # 鯨魚/名人交易信號（celebrity-whale-trades spec）：
+    # - whale_onchain：鏈上可驗證的大額轉帳，客觀事實但非一手交易所數據
+    # - celebrity_trade：已標記錢包/名人公開交易，意見型需佐證（未驗證者
+    #   在 _source_reputation 中動態降級至 social 等級 0.35）
+    "whale_onchain": 0.88,
+    "celebrity_trade": 0.50,
 }
 
 
@@ -82,6 +88,14 @@ def _reputation_floor(kind: str) -> float:
     → floor≈0.105，等同 social 下限，不給未知來源類型更高保障）。
     """
     return round(0.3 * KIND_REPUTATION.get(kind, 0.35), 4)
+
+
+# 各 kind 的 recency 半衰期（小時）。鯨魚/名人交易信號時效性極強（市場秒級反應），
+# 使用 2 小時半衰期；一般來源沿用預設 12 小時（不列入此 map，走 _recency_decay 預設）。
+KIND_HALFLIFE_HOURS: dict[str, float] = {
+    "whale_onchain": 2.0,       # 鯨魚鏈上轉帳：市場反應極快
+    "celebrity_trade": 2.0,     # 名人交易宣告：時效同鯨魚
+}
 
 # 域內停用詞（Domain Stopwords）：加密市場每篇分析都有、對「是否在說同一件事」無鑑別力的詞。
 # 這些詞從 overlap 計算中完全排除，讓佐證判斷只依賴具體/稀有的內容詞。
@@ -214,8 +228,15 @@ def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) ->
     W2：傳入 `dynamic_map`（`{source: SR}`，見 `_iterate_source_reputation`）時，
     改用該來源的動態信譽；若該來源不在 map 中（理論上不會發生，防禦性寫法），
     回退為先驗值，不 raise。
+
+    名人交易降級（celebrity-whale-trades spec R3）：celebrity_trade kind 中，
+    meta["verified_onchain"]=False 的未驗證宣告自動降級至 social 等級 0.35，
+    防止未經鏈上驗證的名人喊單獲得過高信任。
     """
     base = KIND_REPUTATION.get(c.doc.kind, 0.5)
+    # 名人交易動態降級：未經鏈上驗證者降至 social 等級
+    if c.doc.kind == "celebrity_trade" and not c.doc.meta.get("verified_onchain", False):
+        base = KIND_REPUTATION.get("social", 0.35)
     # 來源層級覆寫（白名單/黑名單）
     override = c.doc.meta.get("reputation")
     prior = float(override) if override is not None else base
@@ -227,8 +248,12 @@ def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) ->
     return dynamic_map.get(_canonical_source(c.doc.source), prior)
 
 
-def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
+def _recency_decay(c: Claim, now: float, half_life_h: float | None = None) -> float:
     """指數衰減；加密資訊半衰期短，預設 12 小時。ts=0 視為未知→中性 0.5。
+
+    `half_life_h=None`（預設）：自動依 `c.doc.kind` 查 `KIND_HALFLIFE_HOURS`，
+    未列入的 kind 使用 12.0 小時預設值。鯨魚/名人交易信號使用 2 小時的加速
+    衰減（市場秒級反應，見 celebrity-whale-trades spec R4）。
 
     #12（全域防禦，呼應 #24 不虛增）：`age_h = (now - ts) / 3600` 未來時間戳
     （`ts > now`，如壞資料/時鐘偏差/偽造 pubDate）會算出負值。舊實作用
@@ -260,6 +285,8 @@ def _recency_decay(c: Claim, now: float, half_life_h: float = 12.0) -> float:
     `ingestion/coingecko.py` 的 `_finite_num` 同款 `math.isfinite` 防禦慣例，
     保持一致）。
     """
+    if half_life_h is None:
+        half_life_h = KIND_HALFLIFE_HOURS.get(c.doc.kind, 12.0)
     if not c.doc.ts:
         return 0.5
     if not math.isfinite(c.doc.ts) or not math.isfinite(now):
