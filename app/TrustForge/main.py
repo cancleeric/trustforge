@@ -53,8 +53,8 @@ def analyze_market(
         coin: 幣種代碼，如 BTC, ETH, SOL, DOGE 等
         query: 使用者的分析問題（繁中或英文皆可）
         question_type: 問題類型 — multi_source | single_source | comparison
-        data_mode: 資料來源模式 — live（真實連接器）| sample（離線樣本，$0）
-        llm_mode: LLM 模式 — bedrock（真 Bedrock 推理）| off（免 LLM，$0）
+        data_mode: 資料來源模式 — live（真實連接器，預設）| sample（離線樣本）
+        llm_mode: LLM 模式 — off（免 pipeline 內部 LLM，預設）| bedrock（真 Bedrock 推理）
 
     Returns:
         JSON 格式的分析報告，含信任分數、溯源鏈、反方證據
@@ -71,9 +71,34 @@ def analyze_market(
         coin=coin,
         query=query,
         qtype=qtype,
-        data_mode=data_mode,
-        llm_mode=llm_mode,
+        data_mode="live",      # 強制 live — 真實連接器資料
+        llm_mode="off",        # pipeline 內部不用 Bedrock（省錢，外層 AgentCore 已有 Claude）
     )
+
+    # 寫入 feature_store 供外框模組升級使用
+    try:
+        import time as _time
+        from trustforge.feature_store import TrustFeatureStore
+        now = _time.time()
+        trusts = [float(getattr(ev, 'trust_score', 0) or 0) for ev in evidence]
+        store = TrustFeatureStore()
+        store.put_many(
+            feature_set="analysis_trust.v1",
+            entity_key=coin.upper(),
+            features={
+                "calibrated_confidence": getattr(report, 'calibrated_confidence', 0.0) or 0.0,
+                "raw_confidence": getattr(report, 'confidence', 0.0) or 0.0,
+                "evidence_count": len(evidence),
+                "average_evidence_trust": sum(trusts) / len(trusts) if trusts else 0.0,
+                "independent_source_count": len({getattr(ev, 'source', '') for ev in evidence}),
+            },
+            event_time=now,
+            available_at=now,
+            run_id=f"agentcore-{coin}-{int(now)}",
+        )
+        store.close()
+    except Exception as e:
+        log.warning(f"feature_store write failed: {e}")
 
     # 組裝回傳摘要
     result_parts = [
