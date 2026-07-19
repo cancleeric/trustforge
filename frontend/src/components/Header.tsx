@@ -11,6 +11,7 @@ const BUILD_VERSION = import.meta.env.VITE_RELEASE_VERSION || 'build'
 
 export default function Header() {
   const [releaseVersion, setReleaseVersion] = useState(BUILD_VERSION)
+  const [agentcoreStatus, setAgentcoreStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking')
   const { locale, setLocale, t } = useHermesI18n()
   const navItems = [
     { to: '/', label: 'HERMES' }, { to: '/analyze', label: t('analyze') },
@@ -26,6 +27,32 @@ export default function Header() {
       // Keep the build-time value visible if the health endpoint is briefly unavailable.
     })
     return () => controller.abort()
+  }, [])
+
+  // AgentCore connectivity check
+  useEffect(() => {
+    const checkAgentCore = async () => {
+      try {
+        const resp = await fetch('/api/agentcore/health', { signal: AbortSignal.timeout(3000) })
+        setAgentcoreStatus(resp.ok ? 'connected' : 'disconnected')
+      } catch {
+        // Try direct agentcore dev endpoint
+        try {
+          const resp = await fetch('http://127.0.0.1:8080/invocations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: '' }),
+            signal: AbortSignal.timeout(3000),
+          })
+          setAgentcoreStatus(resp.status !== 0 ? 'connected' : 'disconnected')
+        } catch {
+          setAgentcoreStatus('disconnected')
+        }
+      }
+    }
+    checkAgentCore()
+    const interval = setInterval(checkAgentCore, 15000)
+    return () => clearInterval(interval)
   }, [])
 
   return (
@@ -68,6 +95,18 @@ export default function Header() {
         title="部署版本（release / git sha）"
         className="hidden rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted sm:inline"
       >{`${releaseVersion} · ${GIT_SHA}`}</span>
+      <span
+        title={`AgentCore: ${agentcoreStatus}`}
+        className={`hidden rounded px-2 py-0.5 font-mono text-xs sm:inline ${
+          agentcoreStatus === 'connected'
+            ? 'border border-green-500/40 text-green-400'
+            : agentcoreStatus === 'disconnected'
+            ? 'border border-red-500/40 text-red-400'
+            : 'border border-yellow-500/40 text-yellow-400'
+        }`}
+      >
+        {agentcoreStatus === 'connected' ? '● AgentCore' : agentcoreStatus === 'disconnected' ? '○ AgentCore OFF' : '◐ Checking...'}
+      </span>
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} className="rounded border border-tf-border bg-transparent px-2 py-1 font-mono text-xs text-tf-muted hover:text-tf-text">
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>
