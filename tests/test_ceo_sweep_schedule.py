@@ -105,6 +105,10 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
     assert "merge develop to main" in prompt
     assert "secrets" in prompt
     assert "cost caps" in prompt
+    installer = (ROOT / "scripts/install_ceo_hourly_schedule.sh").read_text()
+    template = (ROOT / "scripts/templates/com.hurricanesoft.trustforge-ceo-sweep.plist.in").read_text()
+    assert "command -v gh" in installer
+    assert "__PATH__" in template
 
 
 def test_active_docs_do_not_claim_old_ceo_sweep_contract():
