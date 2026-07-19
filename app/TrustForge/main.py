@@ -14,6 +14,7 @@ if _SRC_PATH not in sys.path:
 from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from model.load import load_model
+from memory.session import get_memory_session_manager
 
 app = BedrockAgentCoreApp()
 log = app.logger
@@ -115,13 +116,15 @@ tools = [analyze_market, list_supported_coins]
 _agent = None
 
 
-def get_or_create_agent():
+def get_or_create_agent(session_id: str = "default", actor_id: str = "anonymous"):
     global _agent
     if _agent is None:
+        session_manager = get_memory_session_manager(session_id, actor_id)
         _agent = Agent(
             model=load_model(),
             system_prompt=SYSTEM_PROMPT,
             tools=tools,
+            session_manager=session_manager,
         )
     return _agent
 
@@ -129,7 +132,13 @@ def get_or_create_agent():
 @app.entrypoint
 async def invoke(payload, context):
     log.info("Invoking TrustForge Agent...")
-    agent = get_or_create_agent()
+
+    session_id = context.session_id or "default-session"
+    # 從 custom header 或 JWT 取 user_id
+    headers = context.request_headers or {}
+    actor_id = headers.get("x-amzn-bedrock-agentcore-runtime-custom-user-id", "anonymous")
+
+    agent = get_or_create_agent(session_id, actor_id)
     prompt = payload.get("prompt", "")
 
     stream = agent.stream_async(prompt)

@@ -18,11 +18,41 @@
       "protocol": "HTTP"
     }
   ],
-  "memories": [],
+  "memories": [
+    {
+      "name": "UserPreferences",
+      "eventExpiryDuration": 30,
+      "strategies": [
+        {
+          "type": "SEMANTIC",
+          "namespaceTemplates": [
+            "/users/{actorId}/facts"
+          ]
+        },
+        {
+          "type": "SUMMARIZATION",
+          "namespaceTemplates": [
+            "/summaries/{actorId}/{sessionId}"
+          ]
+        }
+      ]
+    }
+  ],
   "knowledgeBases": [],
   "credentials": [],
   "evaluators": [],
-  "onlineEvalConfigs": [],
+  "onlineEvalConfigs": [
+    {
+      "name": "QualityMonitor",
+      "agent": "TrustForge",
+      "evaluators": [
+        "Builtin.GoalSuccessRate",
+        "Builtin.Correctness"
+      ],
+      "samplingRate": 100,
+      "enableOnCreate": true
+    }
+  ],
   "agentCoreGateways": [],
   "policyEngines": [],
   "configBundles": [],
