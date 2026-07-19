@@ -16,6 +16,11 @@ export default defineConfig({
         target: apiProxyTarget,
         changeOrigin: true,
       },
+      '/agentcore': {
+        target: 'http://127.0.0.1:8080',
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/agentcore/, ''),
+      },
     },
   },
   build: {
