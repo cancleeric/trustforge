@@ -24,14 +24,19 @@ function AgentCoreStatusBar() {
   useEffect(() => {
     const check = async () => {
       try {
-        const resp = await fetch('/api/health', { signal: AbortSignal.timeout(3000) })
-        setStatus(resp.ok ? 'connected' : 'disconnected')
+        const resp = await fetch('http://127.0.0.1:8080/invocations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: '' }),
+          signal: AbortSignal.timeout(5000),
+        })
+        setStatus(resp.status > 0 ? 'connected' : 'disconnected')
       } catch {
         setStatus('disconnected')
       }
     }
     check()
-    const id = setInterval(check, 15000)
+    const id = setInterval(check, 30000)
     return () => clearInterval(id)
   }, [])
   const color = status === 'connected' ? '#4ade80' : status === 'disconnected' ? '#f87171' : '#fbbf24'
