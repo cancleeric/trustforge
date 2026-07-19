@@ -80,6 +80,23 @@ def test_execution_queue_skips_external_blockers_without_active_pr():
     assert queue[1]["action"] == "continue_pr"
 
 
+def test_execution_queue_skips_tracking_and_evidence_only_issues():
+    spec = importlib.util.spec_from_file_location("ceo_sweep_non_coding", ROOT / "scripts/ceo_sweep.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    issues = [
+        {"number": 1, "title": "[P0] delivery 總控", "body": "", "labels": [{"name": "P0-critical"}]},
+        {"number": 2, "title": "demo evidence", "body": "", "labels": [{"name": "needs-evidence"}]},
+        {"number": 3, "title": "ready subset", "body": "", "labels": [{"name": "ready-now"}]},
+        {"number": 4, "title": "bug", "body": "", "labels": [{"name": "bug"}]},
+    ]
+
+    queue = module.build_execution_queue(issues, [], max_lanes=4)
+
+    assert [item["issue"] for item in queue] == [3, 4]
+
+
 def test_lane_guard_bounds_concurrency_by_load():
     spec = importlib.util.spec_from_file_location("ceo_lane_guard", ROOT / "scripts/ceo_lane_guard.py")
     assert spec and spec.loader
@@ -106,10 +123,28 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
     assert "merge develop to main" in prompt
     assert "secrets" in prompt
     assert "cost caps" in prompt
+    assert "never bypass that hook" in prompt
     installer = (ROOT / "scripts/install_ceo_hourly_schedule.sh").read_text()
     template = (ROOT / "scripts/templates/com.hurricanesoft.trustforge-ceo-sweep.plist.in").read_text()
     assert "command -v gh" in installer
     assert "__PATH__" in template
+
+
+def test_ci_is_manual_and_pre_push_is_full_local_gate():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    hook = (ROOT / ".githooks/pre-push").read_text()
+
+    assert "workflow_dispatch:" in workflow
+    assert "pull_request:" not in workflow
+    assert "backend tests" in hook
+    assert "data contracts" in hook
+    assert "source stub scan" in hook
+    assert "competition QA" in hook
+    assert "frontend dependencies" in hook
+    assert "frontend tests" in hook
+    assert "frontend lint" in hook
+    assert "frontend build" in hook
+    assert "git diff --check" in hook
 
 
 def test_active_docs_do_not_claim_old_ceo_sweep_contract():

@@ -86,7 +86,11 @@ def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[d
         active_branch = next((head for head in active_heads if issue_ref.search(head)), None)
         if "blocked-external" in labels and active_branch is None:
             continue
+        if "needs-evidence" in labels and active_branch is None:
+            continue
         priority = min((PRIORITY_LABELS[label] for label in labels if label in PRIORITY_LABELS), default=20)
+        if "ready-now" in labels:
+            priority = 0
         candidates.append((priority, number, issue, dependencies, active_branch))
     candidates.sort(key=lambda item: (item[0], item[1]))
     return [
