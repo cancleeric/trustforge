@@ -77,7 +77,7 @@ from urllib.parse import urlencode
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "src"))
 
-from trustforge.ingestion.base import Document, Source  # noqa: E402
+from trustforge.ingestion.base import Document, Source, get_source_enabled  # noqa: E402
 from trustforge.ingestion.cache import (  # noqa: E402
     COIN_AGNOSTIC_SOURCES,
     COIN_KEYED_BATCH_SOURCES,
@@ -109,7 +109,7 @@ from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
-from trustforge.ingestion.hoyabit import build_hoyabit_sources  # noqa: E402
+from trustforge.ingestion.hoyabit import build_hoyabit_sources, log_hoyabit_startup_status  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
 from trustforge.ledger import DynamoDBLedger, JsonlLedger, get_ledger  # noqa: E402
 from trustforge.schema import COIN_POOL, QuestionType  # noqa: E402
@@ -299,6 +299,9 @@ def run_once(
         if source is None:
             print(f"[fetch_scheduler] 未知來源：{name!r}（略過；"
                   f"可用：{sorted(registry)}）", file=sys.stderr)
+            continue
+        if not getattr(source, "enabled", True) or not get_source_enabled(name):
+            print(f"[fetch_scheduler] {name}: source disabled，略過")
             continue
         refresh_interval = interval_overrides.get(
             name, DEFAULT_REFRESH_INTERVAL_SECONDS.get(name, DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS)
@@ -1607,6 +1610,8 @@ def main(argv: list[str] | None = None) -> int:
              "驗證 cache/ledger 基建，避免把 DynamoDB 故障誤當上游降級。",
     )
     args = parser.parse_args(argv)
+
+    log_hoyabit_startup_status()
 
     if args.parallelism < 1:
         parser.error("--parallelism must be >= 1")
