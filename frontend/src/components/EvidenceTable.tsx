@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import type { Evidence } from '../lib/types'
 import { sourceDisplayName } from '../lib/sourceBrand'
 import { safeHref } from '../lib/safeHref'
 import { FlagBadge, InfoFlagBadge, LowTrustBadge, TierBadge } from './Badges'
+import SnapshotModal from './SnapshotModal'
 
 function trustColor(trust: number): string {
   if (trust < 0.3) return 'var(--color-tf-bad)'
@@ -12,6 +14,7 @@ function trustColor(trust: number): string {
 function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
   const isLow = ev.trust < 0.3
   const href = safeHref(ev.source_url)
+  const [showSnapshot, setShowSnapshot] = useState(false)
   return (
     <tr id={`evidence-${idx}`} className={`hermes-row-hover ${isLow ? 'bg-tf-bad/5' : ''}`}>
       <td className="tf-num whitespace-nowrap px-3 py-2 align-top text-xs text-tf-muted">E{idx}</td>
@@ -40,6 +43,15 @@ function EvidenceRow({ ev, idx }: { ev: Evidence; idx: number }) {
             ) : (
               <span className="text-tf-muted">&#8212; 無有效來源連結</span>
             )}
+            {' '}
+            <button
+              type="button"
+              onClick={(e) => { e.preventDefault(); setShowSnapshot(true) }}
+              className="text-tf-link underline"
+            >
+              原始快照 &#8599;
+            </button>
+            {showSnapshot && <SnapshotModal ev={ev} onClose={() => setShowSnapshot(false)} />}
             {Object.keys(ev.trust_components).length > 0 && (
               <dl className="tf-num grid grid-cols-2 gap-x-3 gap-y-0.5 pt-1 text-[0.68rem] text-tf-muted sm:grid-cols-3">
                 {Object.entries(ev.trust_components).map(([k, v]) => (

@@ -30,9 +30,9 @@ export default function Header() {
 
   return (
     <header
-      className="app-header flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-tf-border bg-tf-card px-4 py-2.5 sm:px-6"
+      className="app-header flex min-h-[52px] flex-wrap items-stretch gap-x-4 gap-y-2 border-b border-tf-border bg-tf-card px-4 py-2 sm:px-6"
     >
-      <Link to="/" className="inline-flex items-center gap-2 no-underline">
+      <Link to="/" className="inline-flex items-center gap-2 self-center no-underline">
         <span
           style={{
             width: 16, height: 16, position: 'relative', transform: 'rotate(45deg)',
@@ -46,32 +46,45 @@ export default function Header() {
         </span>
       </Link>
 
-      <nav aria-label="主導覽" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+      <nav aria-label="主導覽" className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
             end={item.to === '/'}
             className={({ isActive }) =>
-              `whitespace-nowrap rounded px-2 py-1 font-mono text-xs uppercase tracking-wider no-underline transition ${
+              `relative flex h-full items-center whitespace-nowrap rounded px-2 font-mono text-xs uppercase tracking-wider no-underline transition ${
                 isActive ? 'font-semibold text-tf-link' : 'text-tf-muted hover:text-tf-text'
               }`
             }
             style={({ isActive }) => (isActive ? { textShadow: '0 0 8px rgba(77,216,224,.45)' } : {})}
           >
-            {item.label}
+            {({ isActive }) => (
+              <>
+                {item.label}
+                {/* 錨在 nav 的底部（自身 h-full 撐滿 header 高度），不是靠
+                    padding-bottom 撐出間距——設計稿要求的 5 個核心頁籤才有
+                    這條線，Admin/Settings 不在 navItems 裡故天生沒有。 */}
+                {isActive && <span className="absolute inset-x-1 bottom-0 h-[2px] bg-tf-link" aria-hidden="true" />}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>
 
       <span
         title="部署版本（release / git sha）"
-        className="hidden rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted sm:inline"
+        className="hidden self-center rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted sm:inline"
       >{`${releaseVersion} · ${GIT_SHA}`}</span>
-      <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} className="rounded border border-tf-border bg-transparent px-2 py-1 font-mono text-xs text-tf-muted hover:text-tf-text">
+      <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} className="self-center rounded border border-tf-border bg-transparent px-2 py-1 font-mono text-xs text-tf-muted hover:text-tf-text">
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>
-      <ThemeToggle />
+      <Link to="/help" className="self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
+        ? {t('help')}
+      </Link>
+      <span className="self-center">
+        <ThemeToggle />
+      </span>
     </header>
   )
 }

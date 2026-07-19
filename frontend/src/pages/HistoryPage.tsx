@@ -6,6 +6,7 @@ import { COIN_POOL } from '../lib/constants'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
 import CoinSelect from '../components/CoinSelect'
+import GlossaryTerm from '../components/GlossaryTerm'
 
 // recharts 體積大，比照 `TrustRadarChart` 慣例 code-split 成獨立 chunk。
 const TrustHistoryChart = lazy(() => import('../components/TrustHistoryChart'))
@@ -87,12 +88,12 @@ export default function HistoryPage() {
   }, [error])
 
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
+    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Point-in-time archive</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">歷史信任趨勢</h1>
         <p className="mt-1 text-sm text-tf-text2">
-          每日快照的 point-in-time 序列，用來看資料充分度與信任分如何變化；不是預測價格的保證。
+          每日快照的 point-in-time 序列，用來看<GlossaryTerm term="dataSufficiency" label="資料充分度" compact />與<GlossaryTerm term="trustScore" label="信任分" compact />如何變化；不是預測價格的保證。
         </p>
       </div>
 
@@ -139,6 +140,9 @@ export default function HistoryPage() {
           <Suspense fallback={<LoadingState label="趨勢圖載入中…" />}>
             <TrustHistoryChart history={data.history} />
           </Suspense>
+          <p className="mt-2 text-xs text-tf-muted">
+            虛線為每日<GlossaryTerm term="confidenceInterval" label="完整度區間" compact />校準後的落點，區間越窄代表當天估計越穩定。
+          </p>
         </div>
       )}
     </main>

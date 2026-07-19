@@ -16,6 +16,7 @@ import { LoadingState } from './StatusStates'
 import HermesExecutionPanel from './HermesExecutionPanel'
 import { formatTimestamp } from '../lib/format'
 import PlainLanguageResultSummary from './PlainLanguageResultSummary'
+import GlossaryTerm from './GlossaryTerm'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
@@ -25,8 +26,10 @@ const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
  * （雙幣並列，各自渲染一份 `report_a`/`report_b`）共用同一顆元件，兩邊
  * 讀到的資料形狀完全相同（皆為 `AnalyzeData`），避免同一份渲染邏輯分岔
  * 維護兩份。`heading` 可選——比較頁需要在標題列多加一個幣種角色標籤
- * （「幣種 A」/「幣種 B」），單幣頁不需要。 */
-export default function AnalysisReportView({ data, heading }: { data: AnalyzeData; heading?: string }) {
+ * （「幣種 A」/「幣種 B」），單幣頁不需要。`mode` 亦可選——來自請求參數
+ * （`AnalyzeParams['type']`），非 `AnalyzeData` 回應本身的欄位，單純用來
+ * 在標題列顯示本次分析用的模式（呼應設計稿 R2 mode: multi_source 標籤）。 */
+export default function AnalysisReportView({ data, heading, mode }: { data: AnalyzeData; heading?: string; mode?: string }) {
   return (
     <div className="flex flex-col gap-4">
       <div className="border-b border-tf-border pb-4">
@@ -40,10 +43,16 @@ export default function AnalysisReportView({ data, heading }: { data: AnalyzeDat
           <DirectionBadge direction={data.report.direction} />
           <span className="font-mono text-xs text-tf-muted">run {data.execution?.run_id ?? 'legacy-run'}</span>
         </div>
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-tf-muted">
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-tf-muted">
           <span title={data.report.generated_at}>生成於 {formatTimestamp(data.report.generated_at)}</span>
           <span>{data.evidence.length} 筆可追溯證據</span>
           <span>版本 {data.version}</span>
+          {mode === 'multi_source' && (
+            <span>mode: <GlossaryTerm term="multiSource" label="multi_source" compact /></span>
+          )}
+          <a href="/help" className="ml-auto text-tf-link no-underline hover:underline">
+            查看完整說明 →
+          </a>
         </div>
       </div>
 

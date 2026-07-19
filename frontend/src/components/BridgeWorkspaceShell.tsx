@@ -11,6 +11,9 @@ const WORKSPACES: Record<string, { code: string; zh: string; en: string; channel
   '/status': { code: 'SRC-04', zh: '來源監控台', en: 'SOURCE CONTROL', channel: 'UPLINK' },
   '/costs': { code: 'CST-05', zh: '成本帳本台', en: 'COST LEDGER', channel: 'LEDGER' },
   '/admin': { code: 'ADM-09', zh: '管理控制台', en: 'ADMIN CONTROL', channel: 'RESTRICTED' },
+  '/settings': { code: 'SET-08', zh: '系統設定', en: 'CONTROL PANEL', channel: 'CONFIG' },
+  '/help': { code: 'HLP-10', zh: '說明中心', en: 'HELP CENTER', channel: 'HELP CENTER' },
+  '/notifications': { code: 'NTF-11', zh: '通知中心', en: 'NOTIFICATION CENTER', channel: 'NOTIFICATION' },
 }
 
 const ENERGY_STAGES = ['SOURCE', 'FILTER', 'VERIFY', 'TRUST', 'REPORT']

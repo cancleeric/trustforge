@@ -4,6 +4,7 @@ import type { CostsData, LedgerRunRecord } from '../lib/types'
 import { formatTimestamp, formatUsd } from '../lib/format'
 import { ErrorState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
+import GlossaryTerm from '../components/GlossaryTerm'
 
 function ByModelTable({ data }: { data: CostsData }) {
   const models = Object.keys(data.by_model_detail)
@@ -16,8 +17,8 @@ function ByModelTable({ data }: { data: CostsData }) {
         <thead>
           <tr className="border-b border-tf-border text-xs text-tf-muted">
             <th className="px-3 py-2 font-medium">Model</th>
-            <th className="tf-num px-3 py-2 text-right font-medium">輸入 tokens</th>
-            <th className="tf-num px-3 py-2 text-right font-medium">輸出 tokens</th>
+            <th className="tf-num px-3 py-2 text-right font-medium">輸入 <GlossaryTerm term="tokenUsage" label="tokens" compact /></th>
+            <th className="tf-num px-3 py-2 text-right font-medium">輸出 <GlossaryTerm term="tokenUsage" label="tokens" compact /></th>
             <th className="tf-num px-3 py-2 text-right font-medium">成本</th>
           </tr>
         </thead>
@@ -122,7 +123,7 @@ export default function CostsPage() {
   }, [error])
 
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 72%)', minHeight: 'calc(100vh - 57px)' }}>
+    <main className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Append-only ledger</p>
         <h1 className="mt-1 text-2xl font-bold text-tf-text">成本帳本</h1>
@@ -150,9 +151,9 @@ export default function CostsPage() {
             </h3>
             <RecentRunsTable runs={data.runs} />
             <div className="mt-3 flex items-center justify-between gap-3">
-              <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))} className="rounded border border-tf-border px-3 py-1.5 text-sm font-semibold text-tf-text disabled:cursor-not-allowed disabled:opacity-40">較新</button>
+              <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))} className="rounded-[7px] border border-tf-border px-[10px] py-[10px] text-xs font-semibold text-tf-muted disabled:cursor-not-allowed disabled:opacity-40">較新</button>
               <span className="text-xs text-tf-muted">每頁 50 筆</span>
-              <button type="button" disabled={offset + data.runs.length >= data.run_count} onClick={() => setOffset(offset + 50)} className="rounded border border-tf-border px-3 py-1.5 text-sm font-semibold text-tf-text disabled:cursor-not-allowed disabled:opacity-40">較舊</button>
+              <button type="button" disabled={offset + data.runs.length >= data.run_count} onClick={() => setOffset(offset + 50)} className="rounded-[7px] border border-tf-border px-[10px] py-[10px] text-xs font-semibold text-tf-muted disabled:cursor-not-allowed disabled:opacity-40">較舊</button>
             </div>
           </section>
         </>

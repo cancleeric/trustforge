@@ -155,7 +155,7 @@ export default function AnalyzePage() {
   return (
     <main
       className="relative mx-auto max-w-7xl px-4 py-6 sm:px-6"
-      style={{ background: 'radial-gradient(ellipse at 50% 0%,#0b1420 0%,#050810 70%)', minHeight: 'calc(100vh - 57px)' }}
+      style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}
     >
       <div
         className="pointer-events-none absolute inset-0 z-0"
@@ -188,7 +188,7 @@ export default function AnalyzePage() {
             {!loading && error && !data && <ErrorState code={error.code} message={error.message} />}
             {data && (
               <div key={data.execution?.run_id ?? `${data.report.coin}-${data.report.generated_at}`} className="hermes-data-swap" aria-busy={loading}>
-                <AnalysisReportView data={data} />
+                <AnalysisReportView data={data} mode={params.type} />
               </div>
             )}
             {!loading && !error && !data && (

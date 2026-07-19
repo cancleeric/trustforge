@@ -489,7 +489,7 @@ export default function HermesDashboard() {
 
   return (
     <div className={`hermes-root hermes-dashboard${activeModule ? ' is-module-open' : ''}${qaMode ? ' is-qa-mode' : ''}`} style={{ width: '100vw', height: '100dvh', overflow: 'hidden', background: '#02040a' }}>
-      <div className="hermes-frame" style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden', background: 'radial-gradient(ellipse at 50% 30%,#0b1420 0%,#02040a 72%)', color: 'var(--color-hermes-tx)', border: '1px solid rgba(140,190,210,.08)', boxShadow: '0 60px 160px rgba(0,0,0,.7)' }}>
+      <div className="hermes-frame" style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden', background: 'radial-gradient(ellipse at 50% 30%,var(--color-hermes-bg-hero) 0%,#02040a 72%)', color: 'var(--color-hermes-tx)', border: '1px solid rgba(140,190,210,.08)', boxShadow: '0 60px 160px rgba(0,0,0,.7)' }}>
         {/* scanline + vignette */}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, background: 'repeating-linear-gradient(rgba(255,255,255,.015) 0px,rgba(255,255,255,.015) 1px,transparent 1px,transparent 3px)' }} />
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2, boxShadow: 'inset 0 0 160px rgba(0,0,0,.65)' }} />

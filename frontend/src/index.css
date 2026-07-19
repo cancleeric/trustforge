@@ -19,6 +19,11 @@
   --color-hermes-cyan: #4dd8e0;
   --color-hermes-amber: #e8b34d;
   --color-hermes-red: #ff5f5f;
+  /* R2 深色艦橋設計稿新增：跟 cyan 分開的「成功/高信任」綠，以及首頁
+     hero 區漸層起點色（先前各頁徒手寫 #0b1420，跟設計稿定值 #0a1420
+     差一碼，這裡補上正式 token 讓後續改用 var() 取代硬編 hex）。 */
+  --color-hermes-green: #46c98b;
+  --color-hermes-bg-hero: #0a1420;
 
   --font-hermes-sans: 'IBM Plex Sans', system-ui, sans-serif;
   --font-hermes-mono: 'IBM Plex Mono', ui-monospace, Consolas, monospace;
@@ -38,6 +43,14 @@
   --color-tf-good: #3fb950;
   --color-tf-warn: #d9832a;
   --color-tf-bad: #f85149;
+  /* R2 深色艦橋設計稿新增（讓 Tailwind 在此註冊對應 utility class，實際顯示
+     值由 `.hermes-surface` 的 `--color-tf-*` remap 蓋過，見 hermes.css）。
+     base 值僅供未套 `.hermes-surface` 情境的 fallback，取跟 bg/card 相近色。 */
+  --color-tf-panel: #0d1117;
+  --color-tf-well: #090c10;
+  --color-tf-hover: #1c2128;
+  --color-tf-green: #3fb950;
+  --color-tf-bg-hero: #0d1117;
 
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
