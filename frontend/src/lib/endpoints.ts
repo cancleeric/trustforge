@@ -78,6 +78,7 @@ export function registerAnalysisQuestion(coin: string, mode: string, question: s
 export interface AnalysisJobStatus {
   job_id: string; state: 'queued' | 'running' | 'completed' | 'failed'; current_stage: string
   error: string | null; origin: 'manual' | 'scheduled'; priority: number; queue_position: number | null
+  error_code?: 'analysis_job_failed' | 'analysis_job_retrying' | null
   result: AnalyzeData | null
 }
 export function getAnalysisJob(jobId: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisJobStatus>> {

@@ -1035,6 +1035,8 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
                 _result_step3.model_id, _result_step3.input_tokens, _result_step3.output_tokens
             ),
         )
+        if client.offline:
+            narrative = "本次未執行線上模型生成；結論由結構化規則與可追溯證據產生。"
     except Exception:
         # Bedrock 失敗 → 用結構化判斷當行文降級,不中斷管線(且仍記錄此步 log)
         # 呼叫未成功、無 usage 數字 → 不記成本

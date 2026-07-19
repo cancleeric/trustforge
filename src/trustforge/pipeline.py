@@ -219,6 +219,14 @@ def run(coin: str, query: str, qtype: QuestionType,
             "本次未使用線上深度分析（本 IP 線上分析請求過於頻繁，已自動降級"
             "為離線分析）。"
         )
+    if data_mode == "sample":
+        report.limits.append(
+            "本次使用離線示範樣本資料，不代表即時市場資料。"
+        )
+    if llm_mode == "off":
+        report.limits.append(
+            "本次未使用線上模型生成；推論由結構化規則與可追溯證據產生。"
+        )
     # 世界第一重寫 Phase 2「缺源優雅處理」：collect 階段失敗的來源（cache
     # miss / 429 / 逾時等）合併成**單一**中性句子補入 report.limits，讓評審
     # 看得到資料缺口、但不是一排逐來源的刺眼「無法取得，已跳過」——單一
