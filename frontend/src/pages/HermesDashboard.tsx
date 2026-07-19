@@ -42,7 +42,7 @@ function AgentCoreStatusBar() {
   const color = status === 'connected' ? '#4ade80' : status === 'disconnected' ? '#f87171' : '#fbbf24'
   const label = status === 'connected' ? '● AgentCore Connected' : status === 'disconnected' ? '○ AgentCore Offline' : '◐ Checking...'
   return (
-    <div style={{ position: 'fixed', top: 8, right: 16, zIndex: 9999, background: 'rgba(13,17,23,0.9)', border: `1px solid ${color}`, borderRadius: 6, padding: '4px 12px', fontFamily: 'monospace', fontSize: 11, color }}>
+    <div style={{ position: 'fixed', bottom: 8, left: 16, zIndex: 9999, background: 'rgba(13,17,23,0.9)', border: `1px solid ${color}`, borderRadius: 6, padding: '4px 12px', fontFamily: 'monospace', fontSize: 11, color }}>
       {label}
     </div>
   )
