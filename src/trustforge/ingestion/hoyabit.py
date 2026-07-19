@@ -116,10 +116,10 @@ class HoyaBitSource(Source):
 
     def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
         self.last_attempts += 1
-        if not self.configured:
+        if not self.configured or not get_source_enabled(self.name):
             self.last_failures += 1
             self.last_degraded = True
-            _log.warning("HOYA BIT ticker unavailable: valid HTTPS endpoint is not configured")
+            _log.warning("HOYA BIT ticker unavailable: endpoint is invalid or source is disabled")
             return []
         if not coin:
             raise ValueError("HOYA BIT connector requires an explicit coin")

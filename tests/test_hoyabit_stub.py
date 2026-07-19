@@ -75,6 +75,22 @@ def test_hoyabit_unconfigured_makes_no_external_call(monkeypatch):
     assert docs == []
 
 
+def test_hoyabit_disabled_runtime_makes_no_external_call(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_HOYABIT_TICKER_URL", "https://api.hoyabit.example/ticker")
+    base.set_source_enabled_override("hoyabit-ticker", False)
+    called = {"n": 0}
+
+    def _boom(url, **kwargs):
+        called["n"] += 1
+        raise AssertionError(f"disabled source must not call external API: {url}")
+
+    monkeypatch.setattr(safe_fetch, "fetch_url", _boom)
+    source = HoyaBitSource()
+    assert source.enabled is False
+    assert source.fetch("BTC", coin="BTC") == []
+    assert called["n"] == 0
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
