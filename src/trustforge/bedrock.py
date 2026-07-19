@@ -370,11 +370,12 @@ class BedrockClient:
             label, usage = bridge.classify_stance_raw(_STANCE_SYSTEM, user_text)
             tokens_in = int(usage.get("inputTokens", 0) or 0)
             tokens_out = int(usage.get("outputTokens", 0) or 0)
+            effective_model_id = os.getenv("AGENTCORE_MODEL_ID") or self.config.stance_model_id
             self.cost_events.append({
-                "model": self.config.stance_model_id,
+                "model": effective_model_id,
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
-                "cost_usd": estimate_cost(self.config.stance_model_id, tokens_in, tokens_out),
+                "cost_usd": estimate_cost(effective_model_id, tokens_in, tokens_out),
             })
             if label in _STANCE_LABELS:
                 return label
