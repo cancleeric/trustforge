@@ -73,6 +73,7 @@ LOG_FILE="$LOG_DIR/$STAMP.log"
       export TRUSTFORGE_CEO_LANE="$lane" TRUSTFORGE_CEO_ISSUE="$issue"
       "$CODEX_BIN" exec --ephemeral --ignore-user-config \
         -c 'approval_policy="never"' \
+        -c 'sandbox_workspace_write.network_access=true' \
         --sandbox workspace-write \
         -C "$lane_dir" \
         -o "$output" \

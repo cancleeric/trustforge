@@ -98,6 +98,7 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
 
     assert "worktree add --detach" in runner
     assert "approval_policy=\"never\"" in runner
+    assert "sandbox_workspace_write.network_access=true" in runner
     assert "--sandbox workspace-write" in runner
     assert "gray (cpo)" in prompt
     assert "act as ceo" in prompt
