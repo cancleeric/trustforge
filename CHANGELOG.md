@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.16.13 — 2026-07-19
+
+- feat: 第一次使用改為任務優先聚焦模式，並補齊新手教學、用途說明、名詞解釋、可行動空狀態與白話結果摘要。
+- fix: 離線／資料不足狀態不再呈現為正式模型結論或低風險，公開 API 的背景工作錯誤統一遮罩內部細節。
+- feat: 新增 opt-in AgentCore/strands LLM bridge；預設 Bedrock 路徑不變，並以實際生效模型記錄成本。
+
 ## v0.16.12 — 2026-07-18
 
 - fix: production 現在安裝並重啟常駐 `trustforge-analysis-flow` worker；手動分析工作不再只入列卻沒有 consumer。
