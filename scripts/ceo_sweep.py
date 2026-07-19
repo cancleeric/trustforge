@@ -25,6 +25,11 @@ PRIORITY_LABELS = {
     "e2e": 5,
     "cost": 6,
 }
+CLOSING_ISSUE_PATTERN = re.compile(
+    r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b"
+)
+BRANCH_ISSUE_PATTERN = re.compile(r"(?:^|[-_/])issue-(\d+)(?:[-_/]|$)", re.IGNORECASE)
+FALLBACKS_PER_LANE = 3
 
 
 def _run(args: list[str]) -> tuple[bool, str]:
@@ -43,6 +48,15 @@ def _json_cmd(args: list[str]) -> object:
         return json.loads(out)
     except json.JSONDecodeError:
         return {"error": "invalid json", "output": out[:1000], "args": args}
+
+
+def _inventory_error(source: str, value: object) -> dict | None:
+    if not isinstance(value, dict) or "error" not in value:
+        return None
+    summary = {"source": source, "error": str(value.get("error", "unknown error"))[:500]}
+    if "output" in value:
+        summary["output"] = str(value["output"])[:500]
+    return summary
 
 
 def _e2e_inventory() -> dict:
@@ -64,7 +78,46 @@ def _dependencies(issue: dict) -> list[int]:
     return sorted({int(match) for pattern in DEPENDENCY_PATTERNS for match in pattern.findall(body)})
 
 
-def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[dict]:
+def merged_pr_ownership(prs: object) -> dict[int, list[dict]]:
+    """Index issues explicitly owned by PRs merged to develop."""
+    ownership: dict[int, list[dict]] = {}
+    if not isinstance(prs, list):
+        return ownership
+    for pr in prs:
+        if not isinstance(pr, dict) or pr.get("baseRefName") != "develop" or not pr.get("mergedAt"):
+            continue
+        numbers = {int(value) for value in CLOSING_ISSUE_PATTERN.findall(str(pr.get("body", "")))}
+        branch_match = BRANCH_ISSUE_PATTERN.search(str(pr.get("headRefName", "")))
+        if branch_match:
+            numbers.add(int(branch_match.group(1)))
+        evidence = {
+            "pr": pr.get("number"),
+            "head": pr.get("headRefName"),
+            "merged_at": pr.get("mergedAt"),
+        }
+        for number in numbers:
+            ownership.setdefault(number, []).append(evidence)
+    return ownership
+
+
+def classify_issues(issues: object, ownership: dict[int, list[dict]]) -> object:
+    if not isinstance(issues, list):
+        return issues
+    classified = []
+    for issue in issues:
+        if not isinstance(issue, dict) or "number" not in issue:
+            classified.append(issue)
+            continue
+        item = dict(issue)
+        evidence = ownership.get(int(issue["number"]))
+        if evidence:
+            item["development_status"] = "implemented_waiting_release"
+            item["implementation_evidence"] = evidence
+        classified.append(item)
+    return classified
+
+
+def build_execution_queue(issues: object, prs: object, max_lanes: int, ownership: dict[int, list[dict]] | None = None) -> list[dict]:
     """Select distinct runnable issues; agents still validate dependencies before coding."""
     if not isinstance(issues, list):
         return []
@@ -77,6 +130,8 @@ def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[d
         if not isinstance(issue, dict) or "number" not in issue:
             continue
         number = int(issue["number"])
+        if ownership and number in ownership:
+            continue
         title = str(issue.get("title", ""))
         if title.startswith(("[Decision]", "[Plan]")) or "總控" in title:
             continue
@@ -103,13 +158,27 @@ def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[d
             "action": "continue_pr" if active_branch else "start_issue",
             "active_branch": active_branch,
         }
-        for lane, (_, number, issue, dependencies, active_branch) in enumerate(candidates[:max_lanes], start=1)
+        for lane, (_, number, issue, dependencies, active_branch) in enumerate(
+            candidates[: max_lanes * FALLBACKS_PER_LANE], start=1
+        )
     ]
 
 
 def build_report(max_lanes: int = 1) -> dict:
     prs = _json_cmd(["gh", "pr", "list", "--state", "open", "--json", "number,title,headRefName,baseRefName,reviewRequests,mergeStateStatus,statusCheckRollup"])
     issues = _json_cmd(["gh", "issue", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,labels,updatedAt"])
+    merged_prs = _json_cmd(["gh", "pr", "list", "--state", "merged", "--base", "develop", "--limit", "100", "--json", "number,body,headRefName,baseRefName,mergedAt"])
+    inventory_errors = [
+        error
+        for error in (
+            _inventory_error("open_prs", prs),
+            _inventory_error("open_issues", issues),
+            _inventory_error("merged_prs", merged_prs),
+        )
+        if error is not None
+    ]
+    ownership = merged_pr_ownership(merged_prs)
+    issues = classify_issues(issues, ownership)
     e2e = _e2e_inventory()
     questions = [
         {
@@ -183,7 +252,7 @@ def build_report(max_lanes: int = 1) -> dict:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": "ceo_continuous_development_inventory",
-        "cadence": "1 hour",
+        "cadence": "30 minutes",
         WORLD_FIRST_BAR: {
             "question": "這一輪是否讓 TrustForge 更接近世界第一？",
             "answer": "Only count work that improves production reliability, evidence quality, e2e coverage, data depth, security, cost control, or demo readiness.",
@@ -195,9 +264,11 @@ def build_report(max_lanes: int = 1) -> dict:
         "e2e": e2e,
         "issues": issues,
         "prs": prs,
-        "execution_queue": build_execution_queue(issues, prs, max_lanes),
+        "merged_pr_ownership": ownership,
+        "inventory_errors": inventory_errors,
+        "execution_queue": [] if inventory_errors else build_execution_queue(issues, prs, max_lanes, ownership),
         "decision": "dispatch_scoped_lanes_after_gray_plan_and_ceo_auto_review",
-        "execution_status": "inventory_complete_runner_dispatch_pending",
+        "execution_status": "inventory_failed" if inventory_errors else "inventory_complete_runner_dispatch_pending",
     }
 
 
