@@ -130,6 +130,7 @@ def is_valid_hoyabit_endpoint(value: str) -> bool:
         return (
             parsed.scheme == "https"
             and bool(parsed.hostname)
+            and parsed.port in (None, 443)
             and parsed.username is None
             and parsed.password is None
         )

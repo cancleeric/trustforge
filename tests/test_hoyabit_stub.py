@@ -82,6 +82,7 @@ def test_hoyabit_unconfigured_makes_no_external_call(monkeypatch):
         "not-a-url",
         "https://user:secret@api.example/ticker",
         "https://api.example:bad/ticker",
+        "https://api.example:8443/ticker",
     ],
 )
 def test_hoyabit_rejects_unsafe_endpoint(monkeypatch, endpoint):
