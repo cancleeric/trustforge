@@ -93,11 +93,11 @@ export default function Header() {
 
       <span
         title="部署版本（release / git sha）"
-        className="hidden rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted sm:inline"
+        className="rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted"
       >{`${releaseVersion} · ${GIT_SHA}`}</span>
       <span
         title={`AgentCore: ${agentcoreStatus}`}
-        className={`hidden rounded px-2 py-0.5 font-mono text-xs sm:inline ${
+        className={`rounded px-2 py-0.5 font-mono text-xs ${
           agentcoreStatus === 'connected'
             ? 'border border-green-500/40 text-green-400'
             : agentcoreStatus === 'disconnected'
