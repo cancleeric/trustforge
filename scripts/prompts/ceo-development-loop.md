@@ -12,6 +12,8 @@ Mandatory sequence:
 4. If an open PR already owns the issue, fetch and continue its branch without rewriting
    history. Otherwise create a branch from the detached `origin/develop` head named
    `codex/issue-<number>-<short-slug>`. Implement the smallest complete change with tests.
+   For coding assistance, prefer `http://yingdemacbook-pro.local:11434/` when reachable;
+   use it only for code and never send secrets, deployment data, or non-code material.
 5. Run focused tests, lint/build where applicable, and `git diff --check`. Perform an eye
    scan for UI changes. Run a commit-bound adversarial review and fix every finding.
 6. Commit and open or update a PR targeting `develop`, linked to the issue. Record the Gray
@@ -28,3 +30,5 @@ Hard boundaries:
   an action requires permission or falls outside workspace-write.
 - Do not report completion unless behavior was personally verified. A failed external gate
   remains a blocker, never a synthetic pass.
+- Report progress after each milestone or after more than three PRs; do not wait for the
+  entire backlog to finish.

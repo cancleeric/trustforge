@@ -77,6 +77,9 @@ def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[d
         if not isinstance(issue, dict) or "number" not in issue:
             continue
         number = int(issue["number"])
+        title = str(issue.get("title", ""))
+        if title.startswith(("[Decision]", "[Plan]")) or "總控" in title:
+            continue
         labels = _label_names(issue)
         dependencies = _dependencies(issue)
         issue_ref = re.compile(rf"(?:^|[-_/])(?:issue-)?{number}(?:[-_/]|$)")

@@ -87,7 +87,8 @@ def test_lane_guard_bounds_concurrency_by_load():
     spec.loader.exec_module(module)
 
     assert module.lane_capacity(8, 2.0, 6, 0.85) == 4
-    assert module.lane_capacity(8, 7.0, 6, 0.85) == 0
+    assert module.lane_capacity(8, 7.0, 6, 0.85) == 1
+    assert module.lane_capacity(8, 12.0, 6, 0.85) == 0
     assert module.lane_capacity(8, 0.0, 2, 0.85) == 2
 
 

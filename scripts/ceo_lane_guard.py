@@ -11,7 +11,9 @@ def lane_capacity(cpu_count: int, load_1m: float, max_lanes: int, max_load_per_c
         return 0
     load_budget = cpu_count * max_load_per_cpu
     spare = max(0.0, load_budget - load_1m)
-    return min(max_lanes, max(1, int(spare))) if load_1m < load_budget else 0
+    if load_1m >= cpu_count * 1.5:
+        return 0
+    return min(max_lanes, max(1, int(spare)))
 
 
 def main() -> int:
