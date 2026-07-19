@@ -8,6 +8,9 @@ import StatusPage from './pages/StatusPage'
 import CostsPage from './pages/CostsPage'
 import HistoryPage from './pages/HistoryPage'
 import AdminPage from './pages/AdminPage'
+import SettingsPage from './pages/SettingsPage'
+import HelpCenterPage from './pages/HelpCenterPage'
+import NotificationsPage from './pages/NotificationsPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { HermesI18nProvider } from './hermes/hermesI18n'
 
@@ -36,6 +39,11 @@ function RoutedContent() {
             宣傳管理入口；真正的守門是後端 X-Admin-Token 認證+fail-closed，
             不是路徑隱蔽）。 */}
         <Route path="/admin" element={<AdminPage />} />
+        {/* Settings 比照 Admin：刻意不進 Header 主導覽（沿用子頁面 sub-header
+            麵包屑辨識當前位置，見 BridgeWorkspaceShell 的 bridge-module-heading）。 */}
+        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/help" element={<HelpCenterPage />} />
+        <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </ErrorBoundary>

@@ -129,7 +129,8 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
       </div>
       <button
         type="submit"
-        className="rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-white hover:opacity-90"
+        className="rounded-[8px] px-5 py-[13px] text-[13px] font-bold tracking-[0.06em] text-tf-bg hover:opacity-90"
+        style={{ background: 'linear-gradient(135deg,var(--color-tf-accent),#3bc0c8)', boxShadow: '0 0 20px rgba(77,216,224,0.25)' }}
       >
         立即重新分析 <span className="tf-num opacity-70">&#8594;</span>
       </button>

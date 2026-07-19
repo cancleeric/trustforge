@@ -1,16 +1,22 @@
+import type { ReactNode } from 'react'
 import type { TrustComponentsAggregate } from '../lib/types'
 import GlossaryTerm, { type GlossaryKey } from './GlossaryTerm'
 
 const DIMENSION_META: {
   key: keyof TrustComponentsAggregate
   label: string
-  why: string
+  why: ReactNode
   glossary: GlossaryKey
 }[] = [
   { key: 'reputation', label: '信譽', why: '來源過去的可靠表現與跨來源核對結果', glossary: 'reputation' },
   { key: 'corroboration', label: '交叉佐證', why: '彼此獨立的來源是否支持同一主張', glossary: 'corroboration' },
   { key: 'recency', label: '資料時效', why: '資料距離現在的時間與更新狀態', glossary: 'recency' },
-  { key: 'manipulation', label: '操縱風險', why: '命中喊單、誇大承諾等操縱訊號的比例，越低越好', glossary: 'manipulation' },
+  {
+    key: 'manipulation', label: '操縱風險', glossary: 'manipulation',
+    why: (
+      <>命中<GlossaryTerm term="washTrading" label="wash-trading" compact />、<GlossaryTerm term="spoofing" label="spoofing" compact /> 等操縱訊號的比例，越低越好</>
+    ),
+  },
 ]
 
 export default function TrustBreakdown({ data }: { data: TrustComponentsAggregate }) {
