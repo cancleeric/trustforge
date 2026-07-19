@@ -982,6 +982,44 @@ def test_scheduler_skips_disabled_source_without_refreshing_cache(monkeypatch, t
     assert backend.get(cache_key("hoyabit-ticker", "BTC")) is None
 
 
+def test_scheduler_main_loads_admin_disabled_sources_before_fetch(monkeypatch, tmp_path):
+    from trustforge import admin_config
+    from trustforge.ingestion import base, safe_fetch
+    from trustforge.ingestion.hoyabit import HoyaBitSource
+
+    monkeypatch.setenv(
+        "TRUSTFORGE_HOYABIT_TICKER_URL", "https://api.hoyabit.example/ticker"
+    )
+    monkeypatch.setattr(
+        admin_config,
+        "get_config",
+        lambda *_args, **_kwargs: admin_config.AdminConfig(
+            disabled_sources={"hoyabit-ticker"}
+        ),
+    )
+    calls = {"n": 0}
+
+    def _unexpected_fetch(url, **kwargs):
+        calls["n"] += 1
+        raise AssertionError(f"admin-disabled source made an external call: {url}")
+
+    monkeypatch.setattr(safe_fetch, "fetch_url", _unexpected_fetch)
+    source = HoyaBitSource()
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    monkeypatch.setattr(fetch_scheduler, "build_registry", lambda: {source.name: source})
+    monkeypatch.setattr(fetch_scheduler, "get_cache_backend", lambda: backend)
+    monkeypatch.setattr(fetch_scheduler, "append_scheduler_run", lambda _record: None)
+
+    rc = fetch_scheduler.main([
+        "--source", "hoyabit-ticker", "--coin", "BTC", "--force"
+    ])
+
+    assert rc == 0
+    assert base.get_source_enabled("hoyabit-ticker") is False
+    assert calls["n"] == 0
+    assert backend.get(cache_key("hoyabit-ticker", "BTC")) is None
+
+
 def test_scheduler_coin_agnostic_source_fetches_once_broadcasts_all_coins(monkeypatch, tmp_path):
     backend = JsonCacheBackend(tmp_path / "cache.json")
     name = next(iter(COIN_AGNOSTIC_SOURCES))

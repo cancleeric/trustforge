@@ -77,7 +77,12 @@ from urllib.parse import urlencode
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "src"))
 
-from trustforge.ingestion.base import Document, Source, get_source_enabled  # noqa: E402
+from trustforge.ingestion.base import (  # noqa: E402
+    Document,
+    Source,
+    get_source_enabled,
+    sync_source_enabled_from_admin,
+)
 from trustforge.ingestion.cache import (  # noqa: E402
     COIN_AGNOSTIC_SOURCES,
     COIN_KEYED_BATCH_SOURCES,
@@ -1611,8 +1616,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    log_hoyabit_startup_status()
-
     if args.parallelism < 1:
         parser.error("--parallelism must be >= 1")
     if not 1 <= args.total_budget_sec <= 15 * 60:
@@ -1632,6 +1635,16 @@ def main(argv: list[str] | None = None) -> int:
         for name in sorted(registry):
             print(name)
         return 0
+
+    if not args.dry_run:
+        # Scheduler is a separate process from the admin web service. Load the
+        # durable controls immediately before a real fetch; a read failure is
+        # intentionally fatal so an unknown disable state cannot result in
+        # external calls or a falsely fresh cache. Introspection and dry-run
+        # remain network-free by contract.
+        sync_source_enabled_from_admin()
+        log_hoyabit_startup_status()
+        registry = build_registry()
 
     interval_overrides: dict[str, float] = {}
     if args.interval is not None:
