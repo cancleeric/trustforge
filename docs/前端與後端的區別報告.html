@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>前端與後端的區別 —— 技術入門科普報告</title>
+<style>
+  :root {
+    --front: #2563eb;
+    --back: #16a34a;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --text: #1e293b;
+    --muted: #64748b;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    padding: 24px 16px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  header {
+    text-align: center;
+    background: linear-gradient(135deg, var(--front), var(--back));
+    color: #fff;
+    border-radius: 16px;
+    padding: 40px 24px;
+    margin-bottom: 28px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.12);
+  }
+  header h1 { font-size: 28px; margin-bottom: 10px; }
+  header p { opacity: .92; font-size: 14px; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.04);
+  }
+  h2 {
+    font-size: 20px;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h2::before {
+    content: "";
+    width: 6px; height: 22px;
+    background: linear-gradient(var(--front), var(--back));
+    border-radius: 3px;
+  }
+  p { margin-bottom: 12px; color: #334155; }
+  .lead {
+    background: #eff6ff;
+    border-left: 4px solid var(--front);
+    padding: 14px 16px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .analogy {
+    background: #f0fdf4;
+    border-left: 4px solid var(--back);
+    padding: 14px 16px;
+    border-radius: 8px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0 4px;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 10px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f1f5f9; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .tech-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .tech-card {
+    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+  }
+  .tech-card.front { background: #eff6ff; border-color: #bfdbfe; }
+  .tech-card.back { background: #f0fdf4; border-color: #bbf7d0; }
+  .tech-card h3 { margin-bottom: 10px; font-size: 16px; }
+  .tech-card.front h3 { color: var(--front); }
+  .tech-card.back h3 { color: var(--back); }
+  .tech-card ul { margin-left: 18px; font-size: 14px; }
+  ol.steps {
+    margin-left: 20px;
+    font-size: 15px;
+  }
+  ol.steps li { margin-bottom: 8px; }
+  .myth {
+    background: #fef2f2;
+    border-left: 4px solid #ef4444;
+    padding: 14px 16px;
+    border-radius: 8px;
+  }
+  .quiz {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
+  }
+  .quiz .q {
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    font-size: 14px;
+  }
+  .quiz .q b { color: var(--text); }
+  .summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .summary .box {
+    border-radius: 12px;
+    padding: 18px;
+    color: #fff;
+  }
+  .summary .box.front { background: var(--front); }
+  .summary .box.back { background: var(--back); }
+  .summary .box h3 { margin-bottom: 8px; font-size: 17px; }
+  .summary .box p { color: #fff; opacity: .95; font-size: 14px; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 10px;
+  }
+  @media (max-width: 640px) {
+    .tech-grid, .quiz, .summary { grid-template-columns: 1fr; }
+    header h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>前端與後端的區別</h1>
+    <p>技術入門科普報告 · 面向零基礎 / 剛接觸軟體開發的朋友</p>
+  </header>
+
+  <section>
+    <h2>1. 一句話理解</h2>
+    <div class="lead">
+      <p><b>前端（Frontend）</b>：你眼睛能看到、手指能點到的一切介面。你在瀏覽器或 App 裡看到的按鈕、文字、圖片、動畫，都來自前端。</p>
+      <p><b>後端（Backend）</b>：你看不到、但在背後默默幹活的「發動機」。它負責存資料、算邏輯、管權限，把前端要的內容準備好再送過來。</p>
+    </div>
+    <div class="analogy">
+      <p><b>類比</b>：前端像餐廳的「菜單和餐桌」，後端像「廚房」。你（用戶）看菜單點菜（前端操作），廚房在後廚炒菜備餐（後端處理），最後服務生把菜端上來（資料返回）。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. 核心職責對比</h2>
+    <table>
+      <thead>
+        <tr><th>維度</th><th>前端</th><th>後端</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>用戶能否直接看到</td><td>能，介面就是前端</td><td>不能，藏在伺服器裡</td></tr>
+        <tr><td>主要任務</td><td>展示資訊、接收輸入、互動體驗</td><td>資料處理、業務邏輯、安全認證</td></tr>
+        <tr><td>執行位置</td><td>用戶的瀏覽器 / 手機 App</td><td>遠端伺服器 / 雲主機</td></tr>
+        <tr><td>關心什麼</td><td>好不好看、卡不卡、點得爽不爽</td><td>穩不穩、快不快、資料對不對、安不安全</td></tr>
+        <tr><td>典型資料</td><td>頁面佈局、顏色、動畫</td><td>用戶帳號、訂單、文章內容</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>3. 用到的技術不一樣</h2>
+    <div class="tech-grid">
+      <div class="tech-card front">
+        <h3>前端常用技術</h3>
+        <ul>
+          <li><b>HTML</b>：網頁的「骨架」，定義有什麼內容。</li>
+          <li><b>CSS</b>：網頁的「皮膚」，定義長什麼樣。</li>
+          <li><b>JavaScript</b>：網頁的「神經」，讓頁面能互動。</li>
+          <li>常見框架：React、Vue、Angular。</li>
+        </ul>
+      </div>
+      <div class="tech-card back">
+        <h3>後端常用技術</h3>
+        <ul>
+          <li><b>程式語言</b>：Java、Python、Go、Node.js、PHP。</li>
+          <li><b>資料庫</b>：MySQL、PostgreSQL、MongoDB。</li>
+          <li><b>伺服器</b>：Nginx、Apache、雲執行環境。</li>
+          <li>常見框架：Spring Boot、Django、Express。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. 它們怎麼配合工作？</h2>
+    <ol class="steps">
+      <li>你在前端點擊「登入」按鈕。</li>
+      <li>前端把「帳號 + 密碼」打包，透過網路發給後端（這叫一次 <b>請求 / Request</b>）。</li>
+      <li>後端收到後，查資料庫核對密碼是否正確，然後生成一張「通行證」（Token）。</li>
+      <li>後端把結果回傳給前端（這叫一次 <b>回應 / Response</b>）。</li>
+      <li>前端收到後，顯示「登入成功」，並記住這張通行證，之後的操作都帶著它。</li>
+    </ol>
+    <p>這個「前端發請求 → 後端處理 → 返回結果」的循環，就是幾乎所有網際網路應用程式的基本運轉方式。</p>
+  </section>
+
+  <section>
+    <h2>5. 一個常見誤區</h2>
+    <div class="myth">
+      <p>❌「前端就是做頁面的，後端就是寫程式的。」</p>
+      <p>其實<b>兩邊都寫程式</b>，只是寫在不同地方、用不同語言、解決不同問題。前端工程師也要寫大量邏輯（表單驗證、頁面狀態管理），後端工程師也要考慮介面怎麼設計得讓前端好用。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>6. 誰更適合你？</h2>
+    <div class="quiz">
+      <div class="q"><b>偏前端</b><br>喜歡視覺、設計、用戶體驗，看到自己做的介面被大家用會覺得爽。</div>
+      <div class="q"><b>偏後端</b><br>喜歡邏輯、資料、系統架構，享受把複雜問題拆清楚。</div>
+      <div class="q"><b>全端</b><br>兩者都有興趣、想全端打通 → 全端工程師（Full-stack）。</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>7. 總結</h2>
+    <div class="summary">
+      <div class="box front">
+        <h3>前端</h3>
+        <p>用戶看得到的介面。<br>關鍵字：展示、互動、體驗。<br>位置：瀏覽器 / App。</p>
+      </div>
+      <div class="box back">
+        <h3>後端</h3>
+        <p>用戶看不到的發動機。<br>關鍵字：資料、邏輯、安全。<br>位置：伺服器。</p>
+      </div>
+    </div>
+    <p style="margin-top:14px;">前端和後端不是對立關係，而是<b>同一款產品的兩面</b>，缺一個都做不出能用的軟體。理解它們的分工與協作，是踏入軟體開發世界的第一步。</p>
+  </section>
+
+  <footer>前端與後端的區別 · 技術入門科普報告</footer>
+
+</div>
+</body>
+</html>

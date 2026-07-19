@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG 是什麼？—— 技術入門科普報告</title>
+<style>
+  :root {
+    --r: #7c3aed;
+    --a: #2563eb;
+    --g: #16a34a;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --text: #1e293b;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    padding: 24px 16px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  header {
+    text-align: center;
+    background: linear-gradient(135deg, var(--r), var(--a), var(--g));
+    color: #fff;
+    border-radius: 16px;
+    padding: 40px 24px;
+    margin-bottom: 28px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.12);
+  }
+  header h1 { font-size: 28px; margin-bottom: 10px; }
+  header p { opacity: .92; font-size: 14px; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.04);
+  }
+  h2 {
+    font-size: 20px;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  h2::before {
+    content: "";
+    width: 6px; height: 22px;
+    background: linear-gradient(var(--r), var(--g));
+    border-radius: 3px;
+  }
+  p { margin-bottom: 12px; color: #334155; }
+  .lead {
+    background: #f5f3ff;
+    border-left: 4px solid var(--r);
+    padding: 14px 16px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .analogy {
+    background: #f0fdf4;
+    border-left: 4px solid var(--g);
+    padding: 14px 16px;
+    border-radius: 8px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0 4px;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 10px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f1f5f9; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .rag-steps {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .phase {
+    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+  }
+  .phase.build { background: #f5f3ff; border-color: #ddd6fe; }
+  .phase.ask { background: #eff6ff; border-color: #bfdbfe; }
+  .phase h3 { margin-bottom: 10px; font-size: 16px; }
+  .phase ol { margin-left: 18px; font-size: 14px; }
+  .phase ol li { margin-bottom: 6px; }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin: 14px 0;
+  }
+  .flow .node {
+    background: #1e293b;
+    color: #fff;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 14px;
+    flex: 1;
+    text-align: center;
+    min-width: 120px;
+  }
+  .flow .node.r { background: var(--r); }
+  .flow .node.a { background: var(--a); }
+  .flow .node.g { background: var(--g); }
+  .flow .arrow { color: var(--muted, #64748b); font-size: 20px; }
+  .example {
+    background: #fffbeb;
+    border-left: 4px solid #f59e0b;
+    padding: 14px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+  }
+  .myth {
+    background: #fef2f2;
+    border-left: 4px solid #ef4444;
+    padding: 14px 16px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+  }
+  .summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .summary .box {
+    border-radius: 12px;
+    padding: 18px;
+    color: #fff;
+  }
+  .summary .box.llm { background: #64748b; }
+  .summary .box.rag { background: linear-gradient(135deg, var(--r), var(--g)); }
+  .summary .box h3 { margin-bottom: 8px; font-size: 17px; }
+  .summary .box p { color: #fff; opacity: .95; font-size: 14px; }
+  footer {
+    text-align: center;
+    color: var(--muted, #64748b);
+    font-size: 13px;
+    margin-top: 10px;
+  }
+  @media (max-width: 640px) {
+    .rag-steps, .summary { grid-template-columns: 1fr; }
+    header h1 { font-size: 22px; }
+    .flow { flex-direction: column; }
+    .flow .arrow { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>RAG 是什麼？</h1>
+    <p>技術入門科普報告 · 面向零基礎 / 剛接觸 AI 的朋友</p>
+  </header>
+
+  <section>
+    <h2>1. 一句話理解</h2>
+    <div class="lead">
+      <p><b>RAG</b> = <b>R</b>etrieval（檢索）+ <b>A</b>ugmented（增強）+ <b>G</b>eneration（生成），中文叫「檢索增強生成」。</p>
+      <ul style="margin-left:18px;font-size:15px;">
+        <li><b>R 檢索</b>：先去資料庫裡「找」相關資訊。</li>
+        <li><b>A 增強</b>：把找到的資訊「餵」給 AI。</li>
+        <li><b>G 生成</b>：AI 基於這些資訊「寫」出答案。</li>
+      </ul>
+    </div>
+    <div class="analogy">
+      <p><b>類比</b>：RAG 就像開卷考試。普通 AI 是「閉卷」——只能靠記憶答題，記錯或沒學過就瞎編；RAG 是「開卷」——遇到不會的，先翻書（檢索），再結合書上的內容作答（生成）。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. 為什麼需要 RAG？</h2>
+    <table>
+      <thead>
+        <tr><th>問題</th><th>說明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>知識過期</td><td>模型訓練完就固定了，之後發生的事它不知道。</td></tr>
+        <tr><td>不懂你的私貨</td><td>公司的內部文件、你的個人筆記，模型從沒見過。</td></tr>
+        <tr><td>會瞎編（幻覺）</td><td>不知道時就容易編一個聽起來合理的錯誤答案。</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:12px;">RAG 的做法是：<b>不硬塞進模型，而是在回答時臨時去查最新、最相關的資料</b>，讓答案有「出處」。</p>
+  </section>
+
+  <section>
+    <h2>3. RAG 是怎麼工作的？</h2>
+    <div class="flow">
+      <div class="node r">① 檢索 Retrieval</div>
+      <span class="arrow">→</span>
+      <div class="node a">② 增強 Augment</div>
+      <span class="arrow">→</span>
+      <div class="node g">③ 生成 Generation</div>
+    </div>
+    <div class="rag-steps">
+      <div class="phase build">
+        <h3>階段一：建庫（離線）</h3>
+        <ol>
+          <li>把文件（PDF、網頁、筆記）拆成小段。</li>
+          <li>用「嵌入模型」把每段變成一串數字（向量），像發一張「語義指紋」。</li>
+          <li>把所有向量存入「向量資料庫」，方便按意思快速查找。</li>
+        </ol>
+      </div>
+      <div class="phase ask">
+        <h3>階段二：問答（線上）</h3>
+        <ol>
+          <li>用戶提問，如「報銷政策是什麼？」</li>
+          <li><b>檢索</b>：把問題變向量，去庫裡找最相似的幾段。</li>
+          <li><b>增強</b>：檢索到的資料 + 問題，拼成提示詞。</li>
+          <li><b>生成</b>：AI 看著資料寫出有依據的答案。</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. 一個最小例子</h2>
+    <div class="example">
+      <p><b>用戶問</b>：「2026 年的退款規則是怎樣的？」</p>
+      <p><b>RAG 先檢索到</b>：公司文件寫「2026 年起，未拆封商品 30 天內可退」。</p>
+      <p><b>AI 回答</b>：「根據公司最新文件，2026 年起未拆封商品可在購買後 30 天內退貨。」</p>
+      <p>注意：答案引用了「最新文件」的內容，而不是憑空猜。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>5. RAG 的常見誤區</h2>
+    <div class="myth">
+      <p>❌「RAG 就是把資料全塞進提示詞裡。」</p>
+      <p>資料很多時根本塞不下，又慢又貴。RAG 的精髓是<b>先精準檢索出最相關的幾段，再餵給模型</b>——只給「對的」，不給「多的」。</p>
+    </div>
+    <div class="myth">
+      <p>❌「有了 RAG 就再也不會答錯。」</p>
+      <p>RAG 大幅降低幻覺，但如果檢索到錯誤資料，或資料本身過時，AI 仍可能答錯。「檢索品質」和「資料新鮮度」是關鍵。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>6. RAG 適合用在哪？</h2>
+    <ul style="margin-left:18px;font-size:15px;">
+      <li>企業知識庫問答（內部文件、客服）。</li>
+      <li>個人筆記 / 文獻助手（基於你自己的資料回答）。</li>
+      <li>任何需要「最新」或「私有」資訊的場景。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>7. 總結</h2>
+    <div class="summary">
+      <div class="box llm">
+        <h3>普通 LLM</h3>
+        <p>知識來自訓練時記下的（固定、可能過期）。<br>容易瞎編。<br>類比：閉卷考試。</p>
+      </div>
+      <div class="box rag">
+        <h3>RAG</h3>
+        <p>知識來自臨時檢索的資料（新鮮、可私有）。<br>大幅減少幻覺。<br>類比：開卷考試。</p>
+      </div>
+    </div>
+    <p style="margin-top:14px;"><b>RAG = 先查資料，再讓 AI 回答。</b> 它是讓 AI 從「憑記憶猜」變成「看證據答」的關鍵技術，也是今天絕大多數實用 AI 應用的底層支柱。</p>
+  </section>
+
+  <footer>RAG 是什麼？· 技術入門科普報告 · 延伸：向量資料庫 / 嵌入模型 / Prompt 工程</footer>
+
+</div>
+</body>
+</html>
