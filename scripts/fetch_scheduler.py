@@ -77,7 +77,7 @@ from urllib.parse import urlencode
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "src"))
 
-from trustforge.ingestion.base import Document, Source  # noqa: E402
+from trustforge.ingestion.base import Document, Source, get_source_enabled  # noqa: E402
 from trustforge.ingestion.cache import (  # noqa: E402
     COIN_AGNOSTIC_SOURCES,
     COIN_KEYED_BATCH_SOURCES,
@@ -299,6 +299,9 @@ def run_once(
         if source is None:
             print(f"[fetch_scheduler] 未知來源：{name!r}（略過；"
                   f"可用：{sorted(registry)}）", file=sys.stderr)
+            continue
+        if not getattr(source, "enabled", True) or not get_source_enabled(name):
+            print(f"[fetch_scheduler] {name}: source disabled，略過")
             continue
         refresh_interval = interval_overrides.get(
             name, DEFAULT_REFRESH_INTERVAL_SECONDS.get(name, DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS)
