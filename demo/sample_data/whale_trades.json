@@ -1,0 +1,167 @@
+[
+  {
+    "id": "whale-alert-btc-outflow-001",
+    "kind": "whale_onchain",
+    "source": "whale-alert",
+    "text": "BTC 鯨魚大額轉帳：1,500 BTC（約 97,500,000 USD）從 Binance 轉至未知錢包，轉出交易所（囤積訊號，偏多）",
+    "url": "https://whale-alert.io/transaction/bitcoin/abc123def456",
+    "ts": 1721280000.0,
+    "meta": {
+      "coin": "BTC",
+      "amount_usd": 97500000,
+      "amount": 1500,
+      "direction": "exchange_outflow",
+      "from": "Binance",
+      "to": "unknown_wallet",
+      "content_reference": "BTC 鯨魚大額轉帳：1,500 BTC（約 97,500,000 USD）從 Binance 轉至未知錢包"
+    }
+  },
+  {
+    "id": "whale-alert-btc-inflow-002",
+    "kind": "whale_onchain",
+    "source": "whale-alert",
+    "text": "BTC 鯨魚大額轉帳：800 BTC（約 52,000,000 USD）從未知錢包轉至 Coinbase，轉入交易所（賣壓訊號，偏空）",
+    "url": "https://whale-alert.io/transaction/bitcoin/def789ghi012",
+    "ts": 1721283600.0,
+    "meta": {
+      "coin": "BTC",
+      "amount_usd": 52000000,
+      "amount": 800,
+      "direction": "exchange_inflow",
+      "from": "unknown_wallet",
+      "to": "Coinbase",
+      "content_reference": "BTC 鯨魚大額轉帳：800 BTC（約 52,000,000 USD）從未知錢包轉至 Coinbase"
+    }
+  },
+  {
+    "id": "whale-alert-eth-outflow-003",
+    "kind": "whale_onchain",
+    "source": "whale-alert",
+    "text": "ETH 鯨魚大額轉帳：25,000 ETH（約 87,500,000 USD）從 Kraken 轉至未知錢包，轉出交易所（囤積訊號，偏多）",
+    "url": "https://whale-alert.io/transaction/ethereum/eth456abc789",
+    "ts": 1721287200.0,
+    "meta": {
+      "coin": "ETH",
+      "amount_usd": 87500000,
+      "amount": 25000,
+      "direction": "exchange_outflow",
+      "from": "Kraken",
+      "to": "unknown_wallet",
+      "content_reference": "ETH 鯨魚大額轉帳：25,000 ETH（約 87,500,000 USD）從 Kraken 轉至未知錢包"
+    }
+  },
+  {
+    "id": "whale-alert-btc-transfer-004",
+    "kind": "whale_onchain",
+    "source": "whale-alert",
+    "text": "BTC 鯨魚大額轉帳：2,000 BTC（約 130,000,000 USD）從未知錢包轉至未知錢包，鯨魚間轉帳",
+    "url": "https://whale-alert.io/transaction/bitcoin/xyz999aaa111",
+    "ts": 1721290800.0,
+    "meta": {
+      "coin": "BTC",
+      "amount_usd": 130000000,
+      "amount": 2000,
+      "direction": "whale_transfer",
+      "from": "unknown_wallet",
+      "to": "unknown_wallet",
+      "content_reference": "BTC 鯨魚大額轉帳：2,000 BTC（約 130,000,000 USD）從未知錢包轉至未知錢包"
+    }
+  },
+  {
+    "id": "arkham-saylor-buy-005",
+    "kind": "celebrity_trade",
+    "source": "arkham-intel",
+    "text": "已標記錢包（MicroStrategy）買入 BTC（約 150,000,000 USD），鏈上已驗證（看漲訊號：名人買入）",
+    "url": "https://platform.arkhamintelligence.com/explorer/tx/ms_tx_001",
+    "ts": 1721294400.0,
+    "meta": {
+      "coin": "BTC",
+      "amount_usd": 150000000,
+      "verified_onchain": true,
+      "entity": "MicroStrategy",
+      "action": "buy",
+      "content_reference": "已標記錢包（MicroStrategy）買入 BTC（約 150,000,000 USD），鏈上已驗證"
+    }
+  },
+  {
+    "id": "arkham-jump-sell-006",
+    "kind": "celebrity_trade",
+    "source": "arkham-intel",
+    "text": "已標記錢包（Jump Trading）賣出 ETH（約 45,000,000 USD），鏈上已驗證（看跌訊號：名人賣出）",
+    "url": "https://platform.arkhamintelligence.com/explorer/tx/jump_tx_002",
+    "ts": 1721298000.0,
+    "meta": {
+      "coin": "ETH",
+      "amount_usd": 45000000,
+      "verified_onchain": true,
+      "entity": "Jump Trading",
+      "action": "sell",
+      "content_reference": "已標記錢包（Jump Trading）賣出 ETH（約 45,000,000 USD），鏈上已驗證"
+    }
+  },
+  {
+    "id": "arkham-unverified-007",
+    "kind": "celebrity_trade",
+    "source": "arkham-intel",
+    "text": "已標記錢包（疑似 Sun Yuchen）買入 SOL（約 8,000,000 USD），未經鏈上驗證（看漲訊號：名人買入）",
+    "url": "https://platform.arkhamintelligence.com/explorer/tx/sun_tx_003",
+    "ts": 1721301600.0,
+    "meta": {
+      "coin": "SOL",
+      "amount_usd": 8000000,
+      "verified_onchain": false,
+      "entity": "疑似 Sun Yuchen",
+      "action": "buy",
+      "content_reference": "已標記錢包（疑似 Sun Yuchen）買入 SOL（約 8,000,000 USD），未經鏈上驗證"
+    }
+  },
+  {
+    "id": "arkham-grayscale-sell-008",
+    "kind": "celebrity_trade",
+    "source": "arkham-intel",
+    "text": "已標記錢包（Grayscale）賣出 BTC（約 200,000,000 USD），鏈上已驗證（看跌訊號：名人賣出）",
+    "url": "https://platform.arkhamintelligence.com/explorer/tx/gray_tx_004",
+    "ts": 1721305200.0,
+    "meta": {
+      "coin": "BTC",
+      "amount_usd": 200000000,
+      "verified_onchain": true,
+      "entity": "Grayscale",
+      "action": "sell",
+      "content_reference": "已標記錢包（Grayscale）賣出 BTC（約 200,000,000 USD），鏈上已驗證"
+    }
+  },
+  {
+    "id": "whale-alert-sol-outflow-009",
+    "kind": "whale_onchain",
+    "source": "whale-alert",
+    "text": "SOL 鯨魚大額轉帳：150,000 SOL（約 22,500,000 USD）從 OKX 轉至未知錢包，轉出交易所（囤積訊號，偏多）",
+    "url": "https://whale-alert.io/transaction/solana/sol_tx_005",
+    "ts": 1721308800.0,
+    "meta": {
+      "coin": "SOL",
+      "amount_usd": 22500000,
+      "amount": 150000,
+      "direction": "exchange_outflow",
+      "from": "OKX",
+      "to": "unknown_wallet",
+      "content_reference": "SOL 鯨魚大額轉帳：150,000 SOL（約 22,500,000 USD）從 OKX 轉至未知錢包"
+    }
+  },
+  {
+    "id": "arkham-unverified-kol-010",
+    "kind": "celebrity_trade",
+    "source": "arkham-intel",
+    "text": "已標記錢包（某 KOL）買入 BNB（約 3,500,000 USD），未經鏈上驗證（看漲訊號：名人買入）",
+    "url": "https://platform.arkhamintelligence.com/explorer/tx/kol_tx_006",
+    "ts": 1721312400.0,
+    "meta": {
+      "coin": "BNB",
+      "amount_usd": 3500000,
+      "verified_onchain": false,
+      "entity": "某 KOL",
+      "action": "buy",
+      "content_reference": "已標記錢包（某 KOL）買入 BNB（約 3,500,000 USD），未經鏈上驗證"
+    }
+  }
+]

@@ -5105,6 +5105,59 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
 
 
+def _handle_api_budget_governance() -> tuple[int, str]:
+    """Read-only budget governance state (#279). No admin token required.
+
+    Exposes cap, source, today's spend, remaining, kill-switch, online-stance —
+    the governance metadata that /api/costs does not provide.
+    """
+    try:
+        cap, cap_source = daily_cap_usd_resolved()
+        try:
+            spent = _budget_spent_today()
+        except Exception:
+            spent = None
+        remaining = round(cap - (spent or 0), 6) if spent is not None else None
+        exceeded = spent is not None and spent >= cap if cap > 0 else (cap <= 0)
+        kill_switch = cap <= 0
+        stance = online_stance_requested()
+        model_configured = bool(os.getenv("BEDROCK_MODEL_ID", "").strip())
+        # Governance layers breakdown
+        from .budget_guard import _env_cap, DEFAULT_BEDROCK_DAILY_USD_CAP
+        env_val = _env_cap()
+        config_val = None
+        try:
+            cfg = admin_config.get_config_cached_failsoft()
+            config_val = cfg.daily_cap_usd
+        except Exception:
+            pass
+        data = {
+            "daily_cap_usd": cap,
+            "daily_cap_source": cap_source,
+            "spent_today_usd": spent,
+            "remaining_today_usd": remaining,
+            "cap_exceeded": exceeded,
+            "online_stance_enabled": stance,
+            "bedrock_model_configured": model_configured,
+            "kill_switch_active": kill_switch,
+            "governance_layers": {
+                "config": config_val,
+                "env": env_val,
+                "default": DEFAULT_BEDROCK_DAILY_USD_CAP,
+            },
+        }
+        return 200, _json_envelope_ok(data)
+    except Exception:
+        logging.exception("TrustForge /api/budget-governance error")
+        return 502, _json_envelope_err("budget_governance_error", "預算治理狀態暫時無法讀取")
+
+
+def _budget_spent_today() -> float:
+    """Helper: read today's Bedrock spend from ledger."""
+    from .budget_guard import daily_cost_usd
+    return daily_cost_usd()
+
+
 def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
     """Read-only, version-backed Hermes ship/module upgrade projection."""
     try:
@@ -6785,6 +6838,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/budget-governance":
+            code, body = _handle_api_budget_governance()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/hermes-upgrades":
             code, body = _handle_api_hermes_upgrades(qs)

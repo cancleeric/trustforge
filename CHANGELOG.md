@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.16.15 — 2026-07-19
+
+- fix: HOYA BIT 即時真值來源在 endpoint 未設定、不安全或被停用時改為 fail closed，不再產生佔位證據。
+- fix: 排程器不再將停用來源記錄為成功刷新，且不寫入 cache 或 archive。
+- security: HOYA BIT endpoint 限定為無憑證的 HTTPS/443，Evidence URL 移除 query 與憑證資訊。
+
+## v0.16.14 — 2026-07-19
+
+- fix: 發布分析快照查詢修正
+
 ## v0.16.13 — 2026-07-19
 
 - feat: 第一次使用改為任務優先聚焦模式，並補齊新手教學、用途說明、名詞解釋、可行動空狀態與白話結果摘要。
