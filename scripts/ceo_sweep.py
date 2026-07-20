@@ -6,6 +6,8 @@ import argparse
 import json
 import re
 import subprocess
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +27,14 @@ PRIORITY_LABELS = {
     "e2e": 5,
     "cost": 6,
 }
+SECRET_KEY_PATTERN = re.compile(r"(?:token|secret|password|authorization|api[_-]?key)", re.IGNORECASE)
+SECRET_VALUE_PATTERN = re.compile(
+    r"(?i)(?:bearer\s+\S+|gh[opsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AKIA[A-Z0-9]{16}|(?:token|password|secret|api[_-]?key)\s*[:=]\s*\S+)"
+)
+CLOSING_ISSUE_PATTERN = re.compile(
+    r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b"
+)
+BRANCH_ISSUE_PATTERN = re.compile(r"(?:^|[-_/])issue-(\d+)(?:[-_/]|$)", re.IGNORECASE)
 
 
 def _run(args: list[str]) -> tuple[bool, str]:
@@ -43,6 +53,51 @@ def _json_cmd(args: list[str]) -> object:
         return json.loads(out)
     except json.JSONDecodeError:
         return {"error": "invalid json", "output": out[:1000], "args": args}
+
+
+def _inventory_error(source: str, value: object) -> dict | None:
+    if not isinstance(value, dict) or "error" not in value:
+        return None
+    summary = {"source": source, "error": redact_sensitive(str(value.get("error", "unknown error")))[:500]}
+    if "output" in value:
+        summary["output"] = redact_sensitive(str(value["output"]))[:500]
+    return summary
+
+
+def redact_sensitive(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if SECRET_KEY_PATTERN.search(str(key)) else redact_sensitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return SECRET_VALUE_PATTERN.sub("[REDACTED]", value)
+    return value
+
+
+def _normalize_merged_pr_pages(value: object) -> object:
+    if isinstance(value, dict) and "error" in value:
+        return value
+    if not isinstance(value, list):
+        return {"error": "merged PR response is not a list"}
+    pages = value if value and all(isinstance(page, list) for page in value) else [value]
+    normalized = []
+    for page in pages:
+        for pr in page:
+            if not isinstance(pr, dict) or not pr.get("merged_at") or pr.get("base", {}).get("ref") != "develop":
+                continue
+            normalized.append(
+                {
+                    "number": pr.get("number"),
+                    "body": pr.get("body", ""),
+                    "headRefName": pr.get("head", {}).get("ref", ""),
+                    "baseRefName": "develop",
+                    "mergedAt": pr.get("merged_at"),
+                }
+            )
+    return normalized
 
 
 def _e2e_inventory() -> dict:
@@ -64,7 +119,46 @@ def _dependencies(issue: dict) -> list[int]:
     return sorted({int(match) for pattern in DEPENDENCY_PATTERNS for match in pattern.findall(body)})
 
 
-def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[dict]:
+def merged_pr_ownership(prs: object) -> dict[int, list[dict]]:
+    """Index issues explicitly owned by PRs merged to develop."""
+    ownership: dict[int, list[dict]] = {}
+    if not isinstance(prs, list):
+        return ownership
+    for pr in prs:
+        if not isinstance(pr, dict) or pr.get("baseRefName") != "develop" or not pr.get("mergedAt"):
+            continue
+        numbers = {int(value) for value in CLOSING_ISSUE_PATTERN.findall(str(pr.get("body", "")))}
+        branch_match = BRANCH_ISSUE_PATTERN.search(str(pr.get("headRefName", "")))
+        if branch_match:
+            numbers.add(int(branch_match.group(1)))
+        evidence = {
+            "pr": pr.get("number"),
+            "head": pr.get("headRefName"),
+            "merged_at": pr.get("mergedAt"),
+        }
+        for number in numbers:
+            ownership.setdefault(number, []).append(evidence)
+    return ownership
+
+
+def classify_issues(issues: object, ownership: dict[int, list[dict]]) -> object:
+    if not isinstance(issues, list):
+        return issues
+    classified = []
+    for issue in issues:
+        if not isinstance(issue, dict) or "number" not in issue:
+            classified.append(issue)
+            continue
+        item = dict(issue)
+        evidence = ownership.get(int(issue["number"]))
+        if evidence:
+            item["development_status"] = "implemented_waiting_release"
+            item["implementation_evidence"] = evidence
+        classified.append(item)
+    return classified
+
+
+def build_execution_queue(issues: object, prs: object, max_lanes: int, ownership: dict[int, list[dict]] | None = None) -> list[dict]:
     """Select distinct runnable issues; agents still validate dependencies before coding."""
     if not isinstance(issues, list):
         return []
@@ -72,16 +166,25 @@ def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[d
         str(pr.get("headRefName", ""))
         for pr in prs if isinstance(pr, dict)
     } if isinstance(prs, list) else set()
+    open_issue_numbers = {
+        int(issue["number"])
+        for issue in issues
+        if isinstance(issue, dict) and "number" in issue
+    }
     candidates = []
     for issue in issues:
         if not isinstance(issue, dict) or "number" not in issue:
             continue
         number = int(issue["number"])
+        if ownership and number in ownership:
+            continue
         title = str(issue.get("title", ""))
         if title.startswith(("[Decision]", "[Plan]")) or "總控" in title:
             continue
         labels = _label_names(issue)
         dependencies = _dependencies(issue)
+        if open_issue_numbers.intersection(dependencies):
+            continue
         issue_ref = re.compile(rf"(?:^|[-_/])(?:issue-)?{number}(?:[-_/]|$)")
         active_branch = next((head for head in active_heads if issue_ref.search(head)), None)
         if "blocked-external" in labels and active_branch is None:
@@ -103,13 +206,32 @@ def build_execution_queue(issues: object, prs: object, max_lanes: int) -> list[d
             "action": "continue_pr" if active_branch else "start_issue",
             "active_branch": active_branch,
         }
-        for lane, (_, number, issue, dependencies, active_branch) in enumerate(candidates[:max_lanes], start=1)
+        for lane, (_, number, issue, dependencies, active_branch) in enumerate(candidates, start=1)
     ]
 
 
 def build_report(max_lanes: int = 1) -> dict:
     prs = _json_cmd(["gh", "pr", "list", "--state", "open", "--json", "number,title,headRefName,baseRefName,reviewRequests,mergeStateStatus,statusCheckRollup"])
     issues = _json_cmd(["gh", "issue", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,labels,updatedAt"])
+    merged_prs = _normalize_merged_pr_pages(
+        _json_cmd(
+            [
+                "gh", "api", "--paginate", "--slurp",
+                "repos/{owner}/{repo}/pulls?state=closed&base=develop&per_page=100",
+            ]
+        )
+    )
+    inventory_errors = [
+        error
+        for error in (
+            _inventory_error("open_prs", prs),
+            _inventory_error("open_issues", issues),
+            _inventory_error("merged_prs", merged_prs),
+        )
+        if error is not None
+    ]
+    ownership = merged_pr_ownership(merged_prs)
+    issues = classify_issues(issues, ownership)
     e2e = _e2e_inventory()
     questions = [
         {
@@ -183,7 +305,7 @@ def build_report(max_lanes: int = 1) -> dict:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": "ceo_continuous_development_inventory",
-        "cadence": "1 hour",
+        "cadence": "30 minutes",
         WORLD_FIRST_BAR: {
             "question": "這一輪是否讓 TrustForge 更接近世界第一？",
             "answer": "Only count work that improves production reliability, evidence quality, e2e coverage, data depth, security, cost control, or demo readiness.",
@@ -195,9 +317,11 @@ def build_report(max_lanes: int = 1) -> dict:
         "e2e": e2e,
         "issues": issues,
         "prs": prs,
-        "execution_queue": build_execution_queue(issues, prs, max_lanes),
+        "merged_pr_ownership": ownership,
+        "inventory_errors": inventory_errors,
+        "execution_queue": [] if inventory_errors else build_execution_queue(issues, prs, max_lanes, ownership),
         "decision": "dispatch_scoped_lanes_after_gray_plan_and_ceo_auto_review",
-        "execution_status": "inventory_complete_runner_dispatch_pending",
+        "execution_status": "inventory_failed" if inventory_errors else "inventory_complete_runner_dispatch_pending",
     }
 
 
@@ -206,10 +330,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=REPO / "out" / "ceo-sweep-latest.json")
     parser.add_argument("--max-lanes", type=int, default=1)
     args = parser.parse_args(argv)
-    report = build_report(max_lanes=max(1, args.max_lanes))
+    report = redact_sensitive(build_report(max_lanes=max(1, args.max_lanes)))
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if args.out.is_symlink():
+        print(f"refusing symlink output: {args.out}")
+        return 2
+    fd, temporary = tempfile.mkstemp(prefix=f".{args.out.name}.", dir=args.out.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, args.out)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(
+        json.dumps(
+            {
+                "execution_status": report["execution_status"],
+                "inventory_errors": report["inventory_errors"],
+                "queue_candidates": len(report["execution_queue"]),
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 

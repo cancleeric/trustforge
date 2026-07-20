@@ -26,7 +26,7 @@ review section in addition to the normal review record.
 
 ## CEO Development Cycle
 
-The local CEO sweep runs hourly and produces a recommendation report only. It
+The local CEO sweep runs every 30 minutes and produces a recommendation report only. It
 does not invoke agents, approve plans, edit code, merge, or deploy. When an
 interactive CEO agent consumes that report, each unfinished-issue round follows
 this order:
