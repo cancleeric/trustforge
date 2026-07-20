@@ -738,6 +738,58 @@ paths:
                               next_retry_at:
                                 nullable: true
 
+  /api/prompt-versions:
+    get:
+      tags: [meta]
+      operationId: getPromptVersions
+      summary: 當前所有 prompt template 的版本 hash（SHA-256）
+      description: |
+        暴露 orchestrator 中每個可識別的 prompt template 的名稱、用途與
+        SHA-256 hash，可用於比對「這次產出是用哪個版本的 prompt」。
+        不需 admin token、不觸發任何連接器/Bedrock 呼叫（純記憶體計算）。
+      responses:
+        "200":
+          description: prompt template 版本清單
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [templates]
+                        properties:
+                          templates:
+                            type: array
+                            items:
+                              type: object
+                              required: [name, purpose, sha256_hash]
+                              properties:
+                                name:
+                                  type: string
+                                  description: prompt template 的識別名稱
+                                purpose:
+                                  type: string
+                                  description: 用途說明
+                                sha256_hash:
+                                  type: string
+                                  description: 模板內容的 SHA-256 hex digest
+              example:
+                ok: true
+                data:
+                  templates:
+                    - name: SYSTEM
+                      purpose: "Step 3 帶溯源行文的 system prompt"
+                      sha256_hash: "abc123..."
+                    - name: _STEP4_SYSTEM
+                      purpose: "Step 4 限制複審的 system prompt"
+                      sha256_hash: "def456..."
+                    - name: orchestrator_module
+                      purpose: "agent/orchestrator.py 整體檔案 hash"
+                      sha256_hash: "789ghi..."
+
   /api/analyze:
     get:
       tags: [analysis]
