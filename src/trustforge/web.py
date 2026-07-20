@@ -5105,6 +5105,27 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
 
 
+
+def _handle_api_improvement_diagnostics() -> tuple[int, str]:
+    """Read-only improvement diagnostics (#278). Returns latest diagnose output."""
+    try:
+        report_path = Path(os.getenv(
+            "TRUSTFORGE_HOME",
+            str(Path(__file__).resolve().parents[2]),
+        )) / "out" / "hermes-improvement-latest.json"
+        if not report_path.is_file():
+            return 200, _json_envelope_ok({
+                "status": "no_diagnostic_available",
+                "proposals": [],
+                "message": "尚無診斷報告。執行 scripts/diagnose_hermes.py 或等待 daemon 自動產出。",
+            })
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        return 200, _json_envelope_ok(payload)
+    except Exception:
+        logging.exception("TrustForge /api/improvement-diagnostics error")
+        return 502, _json_envelope_err("improvement_unavailable", "改善診斷暫時無法讀取")
+
+
 def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
     """Read-only, version-backed Hermes ship/module upgrade projection."""
     try:
@@ -6785,6 +6806,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/improvement-diagnostics":
+            code, body = _handle_api_improvement_diagnostics()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/hermes-upgrades":
             code, body = _handle_api_hermes_upgrades(qs)

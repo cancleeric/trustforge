@@ -393,6 +393,24 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/improvement-diagnostics:
+    get:
+      tags: [observability]
+      operationId: getImprovementDiagnostics
+      summary: Hermes 自我改善診斷報告
+      description: |
+        唯讀。回傳最新一次 `scripts/diagnose_hermes.py` 產出的改善提案。
+        若尚無報告則回 `{"status": "no_diagnostic_available"}`。
+      responses:
+        "200":
+          description: 改善診斷報告（proposals 列表 + 輸入來源摘要）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/hermes-upgrades:
     get:
       tags: [observability]
