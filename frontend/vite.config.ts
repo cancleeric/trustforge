@@ -4,9 +4,15 @@ import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 //
-// dev proxy：開發環境預設只連本機 API，避免本機 UI 悄悄依賴 AWS。
-// 需要連其他環境時再明確設定 VITE_API_PROXY_TARGET。
+// dev proxy 雙路由：
+// /api → web.py (port 8799)
+// /agentcore → AgentCore dev server (port 8080)
+// /invocations → AgentCore dev server (port 8080)
+//
+// 開發環境預設只連本機，避免本機 UI 悄悄依賴 AWS。
+// 需要連其他環境時再明確設定 VITE_API_PROXY_TARGET（僅影響 /api）。
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8799'
+const agentcoreTarget = 'http://127.0.0.1:8080'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -17,11 +23,12 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/agentcore': {
-        target: 'http://127.0.0.1:8080',
+        target: agentcoreTarget,
         changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/agentcore/, ''),
       },
       '/invocations': {
-        target: 'http://127.0.0.1:8080',
+        target: agentcoreTarget,
         changeOrigin: true,
       },
     },

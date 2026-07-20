@@ -21,3 +21,4 @@ out/
 .apikey
 .eye-cache/
 .claude/
+.cli/
