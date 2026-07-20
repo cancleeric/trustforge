@@ -2191,6 +2191,12 @@
   }
 }
 
+/* embedded analyze workspace：左欄可見時隱藏中央 QueryConsole 避免重複 composer；
+   手機 ≤560px 左欄隱藏時 QueryConsole 必須保留作為唯一入口。 */
+@media (min-width:561px) {
+  .hidden-when-left-rail-visible { display:none !important; }
+}
+
 @media (max-width:560px) {
   .hermes-frame {
     --hermes-rail: 0px;
