@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrustForge Hermes — Sign In</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', 'Fira Code', monospace; background: #0d1117; min-height: 100vh; display: flex; align-items: center; justify-content: center; color: #c9d1d9; }
+.login-card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 48px 40px; text-align: center; max-width: 420px; width: 100%; }
+.login-card .logo { font-size: 48px; margin-bottom: 16px; }
+.login-card h1 { font-size: 22px; font-weight: 600; color: #f0f6fc; margin-bottom: 4px; }
+.login-card .subtitle { color: #f7931a; font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.login-card p { color: #8b949e; font-size: 13px; margin-bottom: 32px; line-height: 1.6; }
+.login-btn { display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #f7931a, #f59e0b); color: #0d1117; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 600; transition: all 0.2s; }
+.login-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(247, 147, 26, 0.3); }
+.footer { margin-top: 24px; font-size: 11px; color: #484f58; }
+.trust-badge { display: inline-block; margin-top: 16px; padding: 4px 12px; background: #1c2128; border: 1px solid #30363d; border-radius: 20px; font-size: 11px; color: #7ee787; }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <div class="logo">🔥</div>
+  <h1>TrustForge Hermes</h1>
+  <div class="subtitle">多源資訊的信任提煉</div>
+  <p>Sign in to access AI-powered crypto market analysis with trust scoring, source provenance, and cross-validation.</p>
+  <a href="{{ login_url }}" class="login-btn">🔐 Sign in with AWS Cognito</a>
+  <div class="trust-badge">✓ Powered by Amazon Bedrock AgentCore</div>
+  <div class="footer">HurricaneSoft | 2026 雲湧智生黑客松</div>
+</div>
+</body>
+</html>
