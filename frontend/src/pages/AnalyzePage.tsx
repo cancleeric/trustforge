@@ -171,8 +171,10 @@ export default function AnalyzePage() {
           <p className="font-mono text-xs text-tf-muted">asset: {params.coin} · mode: {params.type}</p>
         </div>
 
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[288px_minmax(0,1fr)]">
-          <aside className="lg:sticky lg:top-4 lg:self-start">
+        <div className={`grid grid-cols-1 gap-5${!searchParams.get('workspace') ? ' lg:grid-cols-[288px_minmax(0,1fr)]' : ''}`}>
+          {/* 桌面 embedded 時（workspace 參數存在 + 左欄可見），隱藏 QueryConsole 避免重複 composer。
+              手機 ≤560px 左欄被 CSS 隱藏，此時 QueryConsole 必須保留作為唯一入口。 */}
+          <aside className={`lg:sticky lg:top-4 lg:self-start${searchParams.get('workspace') ? ' hidden-when-left-rail-visible' : ''}`}>
             <QueryConsole initial={{ coin: params.coin, type: params.type, mode, q: params.q }} onSubmit={handleSubmit} />
           </aside>
 
