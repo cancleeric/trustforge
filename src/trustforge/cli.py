@@ -122,6 +122,108 @@ def cmd_control(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill(args: argparse.Namespace) -> int:
+    from .backfill import (
+        BackfillWorker, backfill_enabled, set_backfill_enabled,
+    )
+
+    coins = (
+        [c.strip().upper() for c in args.coin.split(",") if c.strip()]
+        if args.coin else None
+    )
+
+    if args.action == "plan":
+        worker = BackfillWorker(
+            coins=coins, start_date=args.start, end_date=args.end,
+            data_dir=args.data_dir,
+        )
+        plan = worker.plan()
+        total = sum(plan.values())
+        print(f"回填計畫：共 {total} 天")
+        for coin, days in plan.items():
+            print(f"  {coin}: {days} 天")
+        worker.close()
+        return 0
+
+    if args.action == "status":
+        worker = BackfillWorker(
+            coins=coins, start_date=args.start, end_date=args.end,
+            data_dir=args.data_dir,
+        )
+        status = worker.status()
+        if args.json:
+            print(json.dumps(status, ensure_ascii=False, indent=2))
+        else:
+            ctrl = backfill_enabled()
+            state = "啟用" if ctrl.enabled else "停用"
+            print(f"回填系統：{state}（source={ctrl.source}）")
+            print(f"進度：{status['total_completed']}/{status['total_days']}"
+                  f"（{status['progress_pct']}%）")
+            print(f"剩餘：{status['total_remaining']} 天")
+            for coin, p in status["per_coin"].items():
+                last = p.get("last_completed_date") or "—"
+                print(f"  {coin}: {p['completed_days']}/{p['total_days']}"
+                      f"  最後={last}  狀態={p['state']}")
+        worker.close()
+        return 0
+
+    if args.action == "stop":
+        set_backfill_enabled(False, reason="cli stop", actor="cli")
+        print("回填已停止（state file 已寫入 enabled=false）")
+        return 0
+
+    if args.action == "reset-failed":
+        worker = BackfillWorker(
+            coins=coins, start_date=args.start, end_date=args.end,
+            data_dir=args.data_dir,
+        )
+        count = worker.reset_failed()
+        print(f"已重設 {count} 個失敗任務為 pending")
+        worker.close()
+        return 0
+
+    # action == "start"
+    set_backfill_enabled(True, reason="cli start", actor="cli")
+    worker = BackfillWorker(
+        coins=coins, start_date=args.start, end_date=args.end,
+        batch_size=args.batch_size, interval_sec=args.interval,
+        data_dir=args.data_dir,
+    )
+    seeded = worker.seed_tasks()
+    plan = worker.plan()
+    total = sum(plan.values())
+    print(f"回填啟動：{total} 天目標，新增 {seeded} 個任務")
+
+    if args.daemon:
+        import signal
+        print("前台持續執行中（Ctrl+C 停止）...")
+        stopping = False
+
+        def _stop(*_a: object) -> None:
+            nonlocal stopping
+            stopping = True
+
+        signal.signal(signal.SIGINT, _stop)
+        signal.signal(signal.SIGTERM, _stop)
+        worker.start_daemon()
+        while not stopping and worker.is_running:
+            import time as _time
+            _time.sleep(1)
+        worker.close()
+        print("回填已結束")
+    else:
+        # 跑一個 batch 然後退出
+        results = worker.run_batch()
+        completed = sum(1 for r in results if r.state == "completed")
+        failed = sum(1 for r in results if r.state == "failed")
+        print(f"本批完成：{completed} 成功, {failed} 失敗, {len(results)} 處理")
+        status = worker.status()
+        print(f"總進度：{status['total_completed']}/{status['total_days']}"
+              f"（{status['progress_pct']}%）")
+        worker.close()
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="trustforge",
@@ -151,6 +253,18 @@ def main(argv=None) -> int:
     c.add_argument("--reason", default="", help="寫入 runtime switch 的原因")
     c.add_argument("--json", action="store_true", help="輸出 JSON 狀態")
     c.set_defaults(func=cmd_control)
+
+    bf = sub.add_parser("backfill", help="歷史回填系統：用 5 年 OHLCV 逐日產 snapshot 累積校準資料")
+    bf.add_argument("action", choices=["start", "stop", "status", "plan", "reset-failed"])
+    bf.add_argument("--coin", default=None, help="幣種（逗號分隔，如 BTC,ETH；預設全部）")
+    bf.add_argument("--start", default=None, help="起始日 YYYY-MM-DD（預設 2021-07-01）")
+    bf.add_argument("--end", default=None, help="結束日 YYYY-MM-DD（預設今天）")
+    bf.add_argument("--batch-size", type=int, default=30, help="每輪處理天數")
+    bf.add_argument("--interval", type=float, default=5.0, help="批次間隔秒數")
+    bf.add_argument("--daemon", action="store_true", help="前台持續執行（Ctrl+C 停止）")
+    bf.add_argument("--json", action="store_true", help="輸出 JSON")
+    bf.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
+    bf.set_defaults(func=cmd_backfill)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):
