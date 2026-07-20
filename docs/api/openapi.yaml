@@ -590,6 +590,56 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/evidence-quality:
+    get:
+      tags: [observability]
+      operationId: getEvidenceQuality
+      summary: Evidence 組裝品質追蹤
+      description: |
+        唯讀。從最近 20 個已完成 analysis jobs 讀取 evidence 統計，計算品質指標：
+        completeness（必填欄位齊全率）、source_diversity（來源多樣性）、
+        avg_evidence_count（平均 evidence 筆數）、freshness_avg_seconds（平均資料齡）。
+      responses:
+        "200":
+          description: Evidence 品質指標
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok, no_data]
+                          jobs_sampled:
+                            type: integer
+                          total_evidence:
+                            type: integer
+                          unique_sources:
+                            type: integer
+                          completeness:
+                            type: number
+                            nullable: true
+                            description: 必填欄位（source/fetched_at/content_reference/related_claim）非空比例 0-1
+                          source_diversity:
+                            type: number
+                            nullable: true
+                            description: unique source 數 / total evidence 數 0-1
+                          avg_evidence_count:
+                            type: number
+                            nullable: true
+                            description: 平均每個 job 的 evidence 筆數
+                          freshness_avg_seconds:
+                            type: number
+                            nullable: true
+                            description: 平均資料齡（秒，fetched_at 到目前）
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/alerts-operations:
     get:
       tags: [observability]
