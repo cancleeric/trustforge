@@ -29,8 +29,13 @@ from pathlib import Path
 from typing import Any
 
 from .historical_replay import replay_snapshot
+from .ingestion.cache import (
+    cache_set_if_newer,
+    get_cache_backend,
+    trust_snapshot_history_key,
+)
 from .ingestion.prices import Bar, load_ohlcv
-from .replay import source_snapshot_backfill_key
+from .replay import source_snapshot_backfill_key, SOURCE_SNAPSHOT_HISTORY_TTL_SECONDS
 from .schema import COIN_POOL, iso_utc
 
 logger = logging.getLogger(__name__)
@@ -315,10 +320,16 @@ class BackfillWorker:
                 return result
 
             # 跑 replay（offline，不用 Bedrock）
-            replay_snapshot(
+            replay_result = replay_snapshot(
                 snapshot,
                 query=f"回填分析 {coin} {date_str} 市場信任狀態",
             )
+
+            # 將 replay 結果寫入 trust_snapshot_history_key，讓
+            # get_trust_history() 能讀到（格式對齊 fetch_scheduler.py
+            # _snapshot_dict()：cache_get() → entry['docs'][0]）。
+            self._persist_to_trust_history(coin, date_str, replay_result, snapshot)
+
             duration = time.time() - start_time
             doc_count = sum(
                 len(s.get("documents", []))
@@ -426,6 +437,58 @@ class BackfillWorker:
             "archive_type": "backfilled_archive",
             "sources": sources,
         }
+
+    def _persist_to_trust_history(
+        self,
+        coin: str,
+        date_str: str,
+        replay_result: dict[str, Any],
+        snapshot: dict[str, Any],
+    ) -> None:
+        """將 replay 結果寫入 trust_snapshot_history_key。
+
+        格式對齊 fetch_scheduler.py::_snapshot_dict()，確保
+        get_trust_history() 能正確讀取（它讀 entry['docs'][0]）。
+
+        明確標註 archive_type=backfilled_archive，與 forward-captured 區分。
+        TTL 用 5 年（對齊 SOURCE_SNAPSHOT_HISTORY_TTL_SECONDS）——回填歷史
+        需要長期保留供校準使用。
+        """
+        report = replay_result.get("report", {})
+
+        # 組裝與 _snapshot_dict() 一致的格式
+        snap: dict[str, Any] = {
+            "coin": coin,
+            "trust_score": round(float(report.get("confidence", 0)), 4),
+            "direction": report.get("direction", "neutral"),
+            "calibrated_confidence": round(
+                float(report.get("calibrated_confidence", 0)), 4,
+            ),
+            "decision_state": report.get("decision_state", ""),
+            "generated_at": report.get("generated_at", iso_utc(time.time())),
+            "archive_type": "backfilled_archive",
+            "snapshot_epoch": snapshot.get("snapshot_epoch", 0),
+            "snapshot_at": snapshot.get("snapshot_at", ""),
+        }
+
+        backend = get_cache_backend()
+        key = trust_snapshot_history_key(coin, date_str)
+        fetched_at = float(snapshot.get("snapshot_epoch", 0))
+
+        write_result = cache_set_if_newer(
+            backend, key, [snap], fetched_at=fetched_at,
+            ttl_seconds=SOURCE_SNAPSHOT_HISTORY_TTL_SECONDS,
+        )
+        if not write_result.ok:
+            logger.warning(
+                "Backfill trust history write failed for %s %s: %s",
+                coin, date_str, write_result.error,
+            )
+        elif write_result.skipped:
+            logger.debug(
+                "Backfill trust history skipped (newer exists) for %s %s",
+                coin, date_str,
+            )
 
     # ─── Daemon 模式 ──────────────────────────────────────────────────────
 
