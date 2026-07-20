@@ -77,6 +77,7 @@ export function registerAnalysisQuestion(coin: string, mode: string, question: s
 
 export interface AnalysisJobStatus {
   job_id: string; state: 'queued' | 'running' | 'completed' | 'failed'; current_stage: string
+  coin: string; mode: string; question: string
   error: string | null; origin: 'manual' | 'scheduled'; priority: number; queue_position: number | null
   error_code?: 'analysis_job_failed' | 'analysis_job_retrying' | null
   result: AnalyzeData | null
@@ -86,6 +87,9 @@ export function getAnalysisJob(jobId: string, signal?: AbortSignal): Promise<Api
     typeof (value as AnalysisJobStatus).job_id === 'string' &&
     typeof (value as AnalysisJobStatus).state === 'string' &&
     typeof (value as AnalysisJobStatus).current_stage === 'string' &&
+    typeof (value as AnalysisJobStatus).coin === 'string' &&
+    typeof (value as AnalysisJobStatus).mode === 'string' &&
+    typeof (value as AnalysisJobStatus).question === 'string' &&
     ((value as AnalysisJobStatus).result === null || isAnalyzeData((value as AnalysisJobStatus).result))
   return apiFetch('/api/analysis-job', { job_id: jobId }, valid, { signal, timeoutMs: DEFAULT_TIMEOUT_MS })
 }

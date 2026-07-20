@@ -9,17 +9,20 @@ worker.  Interrupted packages are safely restarted from their immutable snapshot
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import itertools
 import json
 import logging
 import math
+import os
 import queue
 import re
 import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +48,45 @@ QUEUE_CAPACITY = 500
 MANUAL_PRIORITY = 0
 SCHEDULED_PRIORITY = 100
 MANUAL_DEDUP_WINDOW_SEC = 300
+MANUAL_LOCK_TIMEOUT_SEC = 90
+
+
+@contextmanager
+def _manual_dedup_lock(db_path: Path, canonical_key: str):
+    lock_dir = db_path.parent / ".manual-locks"
+    lock_dir.mkdir(mode=0o700, exist_ok=True)
+    digest = hashlib.sha256(canonical_key.encode()).hexdigest()
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    dir_fd = os.open(lock_dir, dir_flags)
+    fd = -1
+    try:
+        directory = os.fstat(dir_fd)
+        if directory.st_uid != os.getuid():
+            raise PermissionError("manual analysis lock directory has an unexpected owner")
+        os.fchmod(dir_fd, 0o700)
+        file_flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+        fd = os.open(f"{digest}.lock", file_flags, 0o600, dir_fd=dir_fd)
+        lock_file = os.fstat(fd)
+        if lock_file.st_uid != os.getuid():
+            raise PermissionError("manual analysis lock file has an unexpected owner")
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + MANUAL_LOCK_TIMEOUT_SEC
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("manual analysis deduplication lock timed out")
+                time.sleep(0.05)
+        yield
+    finally:
+        if fd >= 0:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        os.close(dir_fd)
 
 
 def _question_terms(value: str) -> set[str]:
@@ -302,23 +344,25 @@ class AnalysisFlow:
         # input must never trigger a chargeable/network ingestion attempt.
         coin, mode, question = coin.strip().upper(), mode.strip(), question.strip()
         question_id, _ = self.register_question(coin, mode, question, enqueue=False)
-        existing = self._conn().execute("""
-          SELECT job_id FROM analysis_jobs
-          WHERE coin=? AND mode=? AND question=? AND origin='manual'
-          AND state IN ('queued','running','completed') AND created_at>=?
-          ORDER BY created_at DESC LIMIT 1
-        """, (coin, mode, question, time.time() - MANUAL_DEDUP_WINDOW_SEC)).fetchone()
-        if existing:
-            return question_id, existing["job_id"]
-        snapshot_id = self.create_snapshot(coin, query=question)
-        job_id = self.enqueue_job(snapshot_id, mode, question, origin="manual")
-        if job_id is None:
-            existing = self._conn().execute(
-                "SELECT job_id FROM analysis_jobs WHERE snapshot_id=? AND coin=? AND mode=? AND question=?",
-                (snapshot_id, coin, mode, question),
-            ).fetchone()
-            job_id = existing["job_id"] if existing else None
-        return question_id, job_id
+        canonical_key = f"{coin}\0{mode}\0{question}"
+        with _manual_dedup_lock(self.path, canonical_key):
+            existing = self._conn().execute("""
+              SELECT job_id FROM analysis_jobs
+              WHERE coin=? AND mode=? AND question=? AND origin='manual'
+              AND state IN ('queued','running','completed') AND created_at>=?
+              ORDER BY created_at DESC LIMIT 1
+            """, (coin, mode, question, time.time() - MANUAL_DEDUP_WINDOW_SEC)).fetchone()
+            if existing:
+                return question_id, existing["job_id"]
+            snapshot_id = self.create_snapshot(coin, query=question)
+            job_id = self.enqueue_job(snapshot_id, mode, question, origin="manual")
+            if job_id is None:
+                existing = self._conn().execute(
+                    "SELECT job_id FROM analysis_jobs WHERE snapshot_id=? AND coin=? AND mode=? AND question=?",
+                    (snapshot_id, coin, mode, question),
+                ).fetchone()
+                job_id = existing["job_id"] if existing else None
+            return question_id, job_id
 
     def question_context(self, coin: str, mode: str, question: str, *, limit: int = 5) -> dict[str, Any]:
         """Retrieve semantically similar prior questions and their published answers.

@@ -49,7 +49,9 @@ export default function HermesModuleDeck({
           <span className="module-holo-core">{module === 'costs' ? `$${(data?.primaryValue ?? 0).toFixed(4)}` : data?.primaryValue != null ? `${Math.round(data.primaryValue * 100)}%` : module.slice(0, 3).toUpperCase()}</span>
           <span className="module-holo-caption">{data?.primaryLabel || module.toUpperCase()} · {data?.total ?? 0} SIGNALS</span>
         </div>
-        <div className="hermes-module-deck-scroll"><Module /></div>
+        <div className="hermes-module-deck-scroll">
+          {module === 'analyze' ? <AnalyzePage embedded /> : <Module />}
+        </div>
       </section>
     </BridgeHologramProvider>
   )
