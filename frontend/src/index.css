@@ -115,3 +115,20 @@ body {
 .tf-glossary-popover b,.tf-glossary-popover span { display: block; }
 .tf-glossary-popover b { margin-bottom: 3px; color: var(--color-tf-text); }
 .hermes-right-rail .tf-glossary-popover { left: auto; right: 0; }
+
+/* ── Reduced Motion（issue #231）──────────────────────────────────
+   data-reduced-motion attribute on <html> = user-toggled low-motion mode.
+   This supplements the hermes.css @media (prefers-reduced-motion) for
+   non-hermes-root scoped elements (bridge workspace, general pages). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+:root[data-reduced-motion] *, :root[data-reduced-motion] *::before, :root[data-reduced-motion] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
