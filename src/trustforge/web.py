@@ -5523,6 +5523,118 @@ def _handle_api_delivery_status() -> tuple[int, str]:
     return 200, _json_envelope_ok(data)
 
 
+def _handle_api_memory_strategy() -> tuple[int, str]:
+    """GET /api/memory-strategy — h-obsidian 記憶策略模組接入觀測層 (#275)。
+
+    暴露 Hermes agent 的記憶策略狀態：
+    - strategy: 從 hermes.manifest()['autonomy'] 讀取跨跑間記憶規則
+    - snapshot_stats: 從 AnalysisFlow(readonly=True) 的 analysis_snapshots 表讀取統計
+    - backfill_stats: 從 backfill.py 的 BackfillWorker DB 讀取（DB 不存在回 null）
+
+    不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。
+    """
+    data: dict = {}
+
+    # --- strategy: 從 hermes.manifest()['autonomy'] 讀取 ---
+    try:
+        from .hermes import manifest as hermes_manifest
+
+        autonomy = hermes_manifest().get("autonomy", {})
+        data["strategy"] = {
+            "cross_run_memory": autonomy.get(
+                "cross_run_memory",
+                "research snapshots only; formal conclusions are run-isolated",
+            ),
+            "formal_run_rule": autonomy.get(
+                "formal_run_rule",
+                "select only snapshots and source records at or before run_started_at",
+            ),
+            "no_unbounded_network_access": autonomy.get("no_unbounded_network_access", True),
+        }
+    except Exception:
+        data["strategy"] = {
+            "cross_run_memory": "research snapshots only; formal conclusions are run-isolated",
+            "formal_run_rule": "select only snapshots and source records at or before run_started_at",
+            "no_unbounded_network_access": True,
+        }
+
+    # --- snapshot_stats: 從 AnalysisFlow analysis_snapshots 表讀取 ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            if flow._readonly_store_missing():
+                data["snapshot_stats"] = None
+            else:
+                conn = flow._conn()
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM analysis_snapshots"
+                ).fetchone()[0]
+                coins_rows = conn.execute(
+                    "SELECT DISTINCT coin FROM analysis_snapshots ORDER BY coin"
+                ).fetchall()
+                coins_covered = [row[0] for row in coins_rows]
+                oldest_row = conn.execute(
+                    "SELECT MIN(created_at) FROM analysis_snapshots"
+                ).fetchone()
+                newest_row = conn.execute(
+                    "SELECT MAX(created_at) FROM analysis_snapshots"
+                ).fetchone()
+                oldest_at = oldest_row[0] if oldest_row and oldest_row[0] else None
+                newest_at = newest_row[0] if newest_row and newest_row[0] else None
+                # Convert epoch to ISO string if available
+                from datetime import datetime, timezone
+
+                oldest_iso = (
+                    datetime.fromtimestamp(oldest_at, tz=timezone.utc).isoformat()
+                    if oldest_at else None
+                )
+                newest_iso = (
+                    datetime.fromtimestamp(newest_at, tz=timezone.utc).isoformat()
+                    if newest_at else None
+                )
+                data["snapshot_stats"] = {
+                    "total_snapshots": total,
+                    "coins_covered": coins_covered,
+                    "oldest_snapshot_at": oldest_iso,
+                    "newest_snapshot_at": newest_iso,
+                }
+    except Exception:
+        data["snapshot_stats"] = None
+
+    # --- backfill_stats: 從 backfill.py DB 讀取 ---
+    try:
+        from .backfill import _db_path as backfill_db_path
+
+        bf_path = backfill_db_path()
+        if not bf_path.exists():
+            data["backfill_stats"] = None
+        else:
+            import sqlite3
+
+            conn = sqlite3.connect(
+                f"file:{bf_path}?mode=ro", uri=True, timeout=2,
+                isolation_level=None, check_same_thread=False,
+            )
+            try:
+                completed = conn.execute(
+                    "SELECT COUNT(*) FROM backfill_tasks WHERE state='completed'"
+                ).fetchone()[0]
+                pending = conn.execute(
+                    "SELECT COUNT(*) FROM backfill_tasks WHERE state='pending'"
+                ).fetchone()[0]
+                data["backfill_stats"] = {
+                    "total_completed": completed,
+                    "total_pending": pending,
+                }
+            finally:
+                conn.close()
+    except Exception:
+        data["backfill_stats"] = None
+
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_alerts_operations() -> tuple[int, str]:
     """Read-only alert state + operational runbook references (#274)."""
     try:
@@ -7422,6 +7534,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/delivery-status":
             code, body = _handle_api_delivery_status()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/memory-strategy":
+            code, body = _handle_api_memory_strategy()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/alerts-operations":
             code, body = _handle_api_alerts_operations()

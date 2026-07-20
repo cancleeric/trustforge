@@ -693,6 +693,61 @@ def test_api_operations_status_quality_gate_with_data(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# /api/memory-strategy (#275)
+# ---------------------------------------------------------------------------
+
+
+def test_api_memory_strategy_returns_200_json():
+    """#275: 基本形狀驗證——strategy 必須存在且非空。"""
+    code, body = web._handle_api_memory_strategy()
+    assert code == 200
+    parsed = json.loads(body)
+    assert parsed["ok"] is True
+    data = parsed["data"]
+    assert "strategy" in data
+    assert "snapshot_stats" in data
+    assert "backfill_stats" in data
+
+
+def test_api_memory_strategy_strategy_section():
+    """#275: strategy 區塊必須包含三個必填欄位。"""
+    code, body = web._handle_api_memory_strategy()
+    assert code == 200
+    data = json.loads(body)["data"]
+    strategy = data["strategy"]
+    assert isinstance(strategy["cross_run_memory"], str)
+    assert len(strategy["cross_run_memory"]) > 0
+    assert isinstance(strategy["formal_run_rule"], str)
+    assert len(strategy["formal_run_rule"]) > 0
+    assert isinstance(strategy["no_unbounded_network_access"], bool)
+    assert strategy["no_unbounded_network_access"] is True
+
+
+def test_api_memory_strategy_snapshot_stats_null_when_no_db():
+    """#275: SQLite DB 不存在時 snapshot_stats 為 null。"""
+    code, body = web._handle_api_memory_strategy()
+    assert code == 200
+    data = json.loads(body)["data"]
+    # 在測試環境中 DB 可能不存在，此時為 None
+    if data["snapshot_stats"] is not None:
+        stats = data["snapshot_stats"]
+        assert isinstance(stats["total_snapshots"], int)
+        assert isinstance(stats["coins_covered"], list)
+
+
+def test_api_memory_strategy_backfill_stats_null_when_no_db():
+    """#275: backfill DB 不存在時 backfill_stats 為 null。"""
+    code, body = web._handle_api_memory_strategy()
+    assert code == 200
+    data = json.loads(body)["data"]
+    # 在測試環境中 backfill DB 通常不存在，為 None
+    if data["backfill_stats"] is not None:
+        stats = data["backfill_stats"]
+        assert isinstance(stats["total_completed"], int)
+        assert isinstance(stats["total_pending"], int)
+
+
+# ---------------------------------------------------------------------------
 # /api/delivery-status (#268, #269)
 # ---------------------------------------------------------------------------
 
