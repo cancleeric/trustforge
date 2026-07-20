@@ -5505,6 +5505,46 @@ def _handle_api_analysis_requeue(headers, rfile, client_ip: str = "") -> tuple[i
         return 502, _json_envelope_err("analysis_queue_unavailable", "重新排程失敗")
 
 
+def _handle_api_intelligence_status() -> tuple[int, str]:
+    """Intelligence plane observability (#259, #262, #265).
+
+    Read-only, no admin token required. Exposes:
+      - skills: outer skill manifest (from trustforge.skills)
+      - tools: Hermes tool registry (from trustforge.hermes)
+      - claim_extraction: latest claim_extraction stage state from AnalysisFlow
+    """
+    data: dict = {}
+    # --- skills (#265) ---
+    try:
+        from .skills import run_skill_manifest
+        data["skills"] = run_skill_manifest()
+    except Exception:
+        data["skills"] = None
+
+    # --- tools (#259) ---
+    try:
+        from .hermes import HERMES_TOOLS
+        from dataclasses import asdict
+        data["tools"] = [asdict(t) for t in HERMES_TOOLS]
+    except Exception:
+        data["tools"] = None
+
+    # --- claim_extraction (#262) ---
+    try:
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow(readonly=True) as flow:
+            status = flow.status()
+            stages = status.get("stages") or []
+            ce_stage = next(
+                (s for s in stages if s.get("id") == "claim_extraction"), None
+            )
+            data["claim_extraction"] = ce_stage
+    except Exception:
+        data["claim_extraction"] = None
+
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
     `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
@@ -7001,6 +7041,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-journey":
             code, body = _handle_api_analysis_journey(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/intelligence-status":
+            code, body = _handle_api_intelligence_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analyze":
             code, body = _handle_api_analyze(qs, client_ip)
