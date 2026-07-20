@@ -744,6 +744,83 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/memory-strategy:
+    get:
+      tags: [observability]
+      operationId: getMemoryStrategy
+      summary: Hermes 記憶策略狀態與快照統計（#275）
+      description: |
+        唯讀。暴露 Hermes agent 的記憶策略（跨跑間共享研究快照、formal
+        conclusions 跑間隔離）、analysis_snapshots 表統計、backfill 進度。
+        不需 admin token、不觸發連接器/Bedrock 呼叫。
+      responses:
+        "200":
+          description: 記憶策略狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [strategy]
+                        properties:
+                          strategy:
+                            type: object
+                            required: [cross_run_memory, formal_run_rule, no_unbounded_network_access]
+                            properties:
+                              cross_run_memory:
+                                type: string
+                              formal_run_rule:
+                                type: string
+                              no_unbounded_network_access:
+                                type: boolean
+                          snapshot_stats:
+                            type: object
+                            nullable: true
+                            description: analysis_snapshots 表統計；DB 不存在時為 null
+                            properties:
+                              total_snapshots:
+                                type: integer
+                              coins_covered:
+                                type: array
+                                items:
+                                  type: string
+                              oldest_snapshot_at:
+                                type: string
+                                nullable: true
+                              newest_snapshot_at:
+                                type: string
+                                nullable: true
+                          backfill_stats:
+                            type: object
+                            nullable: true
+                            description: backfill_tasks 統計；DB 不存在時為 null
+                            properties:
+                              total_completed:
+                                type: integer
+                              total_pending:
+                                type: integer
+              example:
+                ok: true
+                data:
+                  strategy:
+                    cross_run_memory: "research snapshots only; formal conclusions are run-isolated"
+                    formal_run_rule: "select only snapshots and source records at or before run_started_at"
+                    no_unbounded_network_access: true
+                  snapshot_stats:
+                    total_snapshots: 42
+                    coins_covered: ["BTC", "ETH"]
+                    oldest_snapshot_at: "2026-07-01T00:00:00+00:00"
+                    newest_snapshot_at: "2026-07-20T06:00:00+00:00"
+                  backfill_stats:
+                    total_completed: 100
+                    total_pending: 50
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/alerts-operations:
     get:
       tags: [observability]
