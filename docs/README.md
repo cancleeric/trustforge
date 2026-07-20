@@ -59,3 +59,8 @@
 ## archive/plans/ — 已歸檔工作單
 
 已執行完畢或被取代的一次性 `PLAN-*`/研究文件，索引見 [archive/plans/README.md](archive/plans/README.md)。
+
+## 2026-07-20 additions
+
+- [External Sources And Evidence Independence Plan](plans/EXTERNAL-SOURCES-EVIDENCE-INDEPENDENCE-PLAN-2026-07-20.md)
+- [RAG Model Gate Decision](decisions/RAG-MODEL-GATE-DECISION-2026-07-20.md)
