@@ -50,6 +50,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from . import admin_config
+from . import backend_registry
 from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
@@ -7261,6 +7262,35 @@ def _handle_api_admin_config_put(headers, rfile, client_ip: str) -> tuple[int, s
     return 200, _json_envelope_ok(data)
 
 
+def _handle_api_admin_backend_providers_get() -> tuple[int, str]:
+    return 200, _json_envelope_ok(backend_registry.provider_snapshot())
+
+
+def _handle_api_admin_backend_provider_post(headers, rfile) -> tuple[int, str]:
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error:
+        return error
+    key = str(payload.get("key", ""))
+    provider = str(payload.get("provider", ""))
+    try:
+        snapshot = backend_registry.set_provider(key, provider)
+    except ValueError:
+        return 400, _json_envelope_err("bad_request", "backend provider key/provider 不合法")
+    return 200, _json_envelope_ok(snapshot)
+
+
+def _handle_api_admin_backend_providers_all_post(headers, rfile) -> tuple[int, str]:
+    payload, error = _read_admin_put_body(headers, rfile)
+    if error:
+        return error
+    provider = str(payload.get("provider", ""))
+    try:
+        snapshot = backend_registry.set_all_providers(provider)
+    except ValueError:
+        return 400, _json_envelope_err("bad_request", "backend provider 不合法")
+    return 200, _json_envelope_ok(snapshot)
+
+
 def _handle_api_admin_audit(qs: dict) -> tuple[int, str]:
     """`GET /api/admin/audit`（計劃 §2.3）：近 N 筆設定變更審計，唯讀。
     `limit` 預設 50，clamp 上限 200（超過不報錯、靜默收斂——唯讀端點，
@@ -7470,6 +7500,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 if u.path == "/api/admin/config":
                     code, body = _handle_api_admin_config_get()
+                    return self._send(code, body, "application/json; charset=utf-8")
+                if u.path == "/api/admin/backend-providers":
+                    code, body = _handle_api_admin_backend_providers_get()
                     return self._send(code, body, "application/json; charset=utf-8")
                 if u.path == "/api/admin/audit":
                     code, body = _handle_api_admin_audit(qs)
@@ -7880,6 +7913,12 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/admin/hermes-upgrade-activate": "activate",
                 "/api/admin/hermes-upgrade-rollback": "rollback",
             }
+            if u.path == "/api/admin/backend-provider":
+                code, body = _handle_api_admin_backend_provider_post(getattr(self, "headers", {}), self.rfile)
+                return self._send(code, body, "application/json; charset=utf-8")
+            if u.path == "/api/admin/backend-providers-all":
+                code, body = _handle_api_admin_backend_providers_all_post(getattr(self, "headers", {}), self.rfile)
+                return self._send(code, body, "application/json; charset=utf-8")
             if u.path in actions:
                 code, body = _handle_api_admin_upgrade_action(
                     getattr(self, "headers", {}), self.rfile, actions[u.path]
