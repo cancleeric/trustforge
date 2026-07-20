@@ -57,6 +57,7 @@ from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
     DEFAULT_BEDROCK_DAILY_USD_CAP,
+    daily_cap_exceeded,
     daily_cap_usd_resolved,
     online_stance_requested,
     warn_if_bedrock_model_unpriced,
@@ -5106,6 +5107,69 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
 
 
 
+def _handle_api_alerts_operations() -> tuple[int, str]:
+    """Read-only alert state + operational runbook references (#274).
+
+    Surfaces current in-process alert state and operational thresholds
+    so the admin panel can display live degradation signals.
+    """
+    try:
+        # Dedup fail-open state
+        dedup_incident = False
+        dedup_recent_failures = 0
+        try:
+            dedup_incident = _dedup_prep_failure_incident_active
+            with _dedup_prep_failure_lock:
+                now = time.monotonic()
+                dedup_recent_failures = sum(
+                    1 for ts in _dedup_prep_failure_timestamps
+                    if now - ts <= _DEDUP_PREP_FAILURE_WINDOW_SEC
+                )
+        except Exception:
+            pass
+
+        # Budget state
+        budget_exceeded = False
+        try:
+            budget_exceeded = daily_cap_exceeded()
+        except Exception:
+            pass
+
+        # CW metrics enabled
+        cw_enabled = os.getenv("TRUSTFORGE_CW_METRICS", "").strip().lower() in {
+            "1", "true", "yes", "on", "dynamodb",
+        }
+
+        data = {
+            "alerts": {
+                "dedup_fail_open": {
+                    "incident_active": dedup_incident,
+                    "recent_failures": dedup_recent_failures,
+                    "threshold": _DEDUP_PREP_FAILURE_ALERT_THRESHOLD,
+                    "window_sec": _DEDUP_PREP_FAILURE_WINDOW_SEC,
+                    "cooldown_sec": _DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC,
+                },
+                "budget_cap_exceeded": {
+                    "active": budget_exceeded,
+                },
+            },
+            "observability": {
+                "cloudwatch_metrics_enabled": cw_enabled,
+                "log_alert_prefix": "ALERT: TrustForge",
+            },
+            "runbooks": {
+                "dedup_fail_open": "deploy/put_dedup_alarm.sh — CloudWatch Alarm 設定；確認 DynamoDB 表存活",
+                "budget_exceeded": "設 TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 緊急全關；或調高 cap 後隔日 UTC 自動重置",
+                "bedrock_offline": "確認 BEDROCK_MODEL_ID 環境變數已設、AWS 憑證有效、region 正確",
+            },
+        }
+        return 200, _json_envelope_ok(data)
+    except Exception:
+        logging.exception("TrustForge /api/alerts-operations error")
+        return 502, _json_envelope_err("alerts_unavailable", "告警狀態暫時無法讀取")
+
+
+
 def _handle_api_improvement_diagnostics() -> tuple[int, str]:
     """Read-only improvement diagnostics (#278). Returns latest diagnose output."""
     try:
@@ -6806,6 +6870,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/alerts-operations":
+            code, body = _handle_api_alerts_operations()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/improvement-diagnostics":
             code, body = _handle_api_improvement_diagnostics()

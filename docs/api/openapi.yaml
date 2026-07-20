@@ -393,6 +393,24 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/alerts-operations:
+    get:
+      tags: [observability]
+      operationId: getAlertsOperations
+      summary: 告警狀態與操作流程（runbook）參考
+      description: |
+        唯讀。暴露目前 in-process 的告警狀態（dedup fail-open incident、
+        budget exceeded）、觀測性旁路設定、以及操作流程 runbook 參考。
+      responses:
+        "200":
+          description: 告警狀態與操作流程
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/improvement-diagnostics:
     get:
       tags: [observability]
