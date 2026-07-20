@@ -99,6 +99,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_smoke(args: argparse.Namespace) -> int:
+    """Bedrock smoke test：驗證 AWS Bedrock 連線可用（issue #202）。"""
+    # 直接使用 smoke 模組的邏輯（避免依賴 scripts/ 路徑）
+    from .smoke import run_smoke
+    return run_smoke(out_dir=args.out)
+
+
 def cmd_control(args: argparse.Namespace) -> int:
     if args.action in {"start", "stop"}:
         control = set_runtime_enabled(
@@ -253,6 +260,10 @@ def main(argv=None) -> int:
     c.add_argument("--reason", default="", help="寫入 runtime switch 的原因")
     c.add_argument("--json", action="store_true", help="輸出 JSON 狀態")
     c.set_defaults(func=cmd_control)
+
+    s = sub.add_parser("smoke", help="Bedrock smoke test：驗證 AWS Bedrock 連線可用")
+    s.add_argument("--out", default="out", help="Artifact 輸出目錄（預設 out/）")
+    s.set_defaults(func=cmd_smoke)
 
     bf = sub.add_parser("backfill", help="歷史回填系統：用 5 年 OHLCV 逐日產 snapshot 累積校準資料")
     bf.add_argument("action", choices=["start", "stop", "status", "plan", "reset-failed"])
