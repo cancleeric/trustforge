@@ -2191,10 +2191,13 @@
   }
 }
 
-/* embedded analyze workspace：左欄可見時隱藏中央 QueryConsole 避免重複 composer；
-   手機 ≤560px 左欄隱藏時 QueryConsole 必須保留作為唯一入口。 */
+/* embedded analyze workspace：限定在 .hermes-frame（dashboard）內，左欄可見時
+   隱藏中央 QueryConsole 避免重複 composer。standalone /analyze 不含 .hermes-frame，
+   不受影響。手機 ≤560px 左欄被 CSS 隱藏，此規則不生效，QueryConsole 保留。 */
 @media (min-width:561px) {
-  .hidden-when-left-rail-visible { display:none !important; }
+  .hermes-frame .hidden-when-left-rail-visible {
+    display: none !important;
+  }
 }
 
 @media (max-width:560px) {
