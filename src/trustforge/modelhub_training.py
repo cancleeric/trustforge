@@ -13,6 +13,9 @@ _FEATURE_CONTRACT = (
     "coin",
     "direction",
 )
+_ACTIVE_MODEL_ROUTE = "bedrock-direct"
+_CANDIDATE_MODEL_ROUTE = "agentcore-gateway"
+_ROUTE_DEPENDENCIES = ("historical-calibration", "rag-index", "rag-reranker")
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -94,3 +97,30 @@ def build_calibrator_training_package(label_documents: Iterable[dict[str, Any]],
         "forbidden": ["future_leakage", "automatic_activation", "prediction_probability_claim"],
     }
     return result
+
+
+def model_route_gate_status(
+    gates: dict[str, dict[str, Any]] | None = None,
+    *,
+    active_route: str = _ACTIVE_MODEL_ROUTE,
+    candidate_route: str = _CANDIDATE_MODEL_ROUTE,
+) -> dict[str, Any]:
+    """Project whether the active model route can move behind AgentCore."""
+    gate_map = gates or {}
+    checks: list[dict[str, Any]] = []
+    for dependency in _ROUTE_DEPENDENCIES:
+        status = str((gate_map.get(dependency) or {}).get("status", "missing"))
+        passed = status in {"pass", "ready", "ready_for_dry_run"}
+        checks.append({"dependency": dependency, "status": status, "passed": passed})
+
+    ready = all(check["passed"] for check in checks)
+    return {
+        "kind": "model_route_gate_status",
+        "status": "ready_for_route_dry_run" if ready else "locked",
+        "active_route": active_route,
+        "candidate_route": candidate_route,
+        "route_gate": "dry_run_only" if ready else "locked_until_dependencies_pass",
+        "dependencies": checks,
+        "automatic_apply": False,
+        "requires_human_approval": True,
+    }
