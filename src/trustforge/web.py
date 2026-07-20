@@ -57,6 +57,7 @@ from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
     DEFAULT_BEDROCK_DAILY_USD_CAP,
+    daily_cap_exceeded,
     daily_cap_usd_resolved,
     online_stance_requested,
     warn_if_bedrock_model_unpriced,
@@ -5158,6 +5159,77 @@ def _budget_spent_today() -> float:
     return daily_cost_usd()
 
 
+
+def _handle_api_improvement_diagnostics() -> tuple[int, str]:
+    """Read-only improvement diagnostics (#278). Returns latest diagnose output."""
+    try:
+        report_path = Path(os.getenv(
+            "TRUSTFORGE_HOME",
+            str(Path(__file__).resolve().parents[2]),
+        )) / "out" / "hermes-improvement-latest.json"
+        if not report_path.is_file():
+            return 200, _json_envelope_ok({
+                "status": "no_diagnostic_available",
+                "proposals": [],
+                "message": "尚無診斷報告。執行 scripts/diagnose_hermes.py 或等待 daemon 自動產出。",
+            })
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        return 200, _json_envelope_ok(payload)
+    except Exception:
+        logging.exception("TrustForge /api/improvement-diagnostics error")
+        return 502, _json_envelope_err("improvement_unavailable", "改善診斷暫時無法讀取")
+
+
+def _handle_api_alerts_operations() -> tuple[int, str]:
+    """Read-only alert state + operational runbook references (#274)."""
+    try:
+        dedup_incident = False
+        dedup_recent_failures = 0
+        try:
+            dedup_incident = _dedup_prep_failure_incident_active
+            with _dedup_prep_failure_lock:
+                now = time.monotonic()
+                dedup_recent_failures = sum(
+                    1 for ts in _dedup_prep_failure_timestamps
+                    if now - ts <= _DEDUP_PREP_FAILURE_WINDOW_SEC
+                )
+        except Exception:
+            pass
+        budget_exceeded = False
+        try:
+            budget_exceeded = daily_cap_exceeded()
+        except Exception:
+            pass
+        cw_enabled = os.getenv("TRUSTFORGE_CW_METRICS", "").strip().lower() in {
+            "1", "true", "yes", "on", "dynamodb",
+        }
+        data = {
+            "alerts": {
+                "dedup_fail_open": {
+                    "incident_active": dedup_incident,
+                    "recent_failures": dedup_recent_failures,
+                    "threshold": _DEDUP_PREP_FAILURE_ALERT_THRESHOLD,
+                    "window_sec": _DEDUP_PREP_FAILURE_WINDOW_SEC,
+                    "cooldown_sec": _DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC,
+                },
+                "budget_cap_exceeded": {"active": budget_exceeded},
+            },
+            "observability": {
+                "cloudwatch_metrics_enabled": cw_enabled,
+                "log_alert_prefix": "ALERT: TrustForge",
+            },
+            "runbooks": {
+                "dedup_fail_open": "deploy/put_dedup_alarm.sh — CloudWatch Alarm 設定",
+                "budget_exceeded": "設 TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 緊急全關",
+                "bedrock_offline": "確認 BEDROCK_MODEL_ID + AWS 憑證",
+            },
+        }
+        return 200, _json_envelope_ok(data)
+    except Exception:
+        logging.exception("TrustForge /api/alerts-operations error")
+        return 502, _json_envelope_err("alerts_unavailable", "告警狀態暫時無法讀取")
+
+
 def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
     """Read-only, version-backed Hermes ship/module upgrade projection."""
     try:
@@ -6841,6 +6913,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/budget-governance":
             code, body = _handle_api_budget_governance()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/improvement-diagnostics":
+            code, body = _handle_api_improvement_diagnostics()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/alerts-operations":
+            code, body = _handle_api_alerts_operations()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/hermes-upgrades":
             code, body = _handle_api_hermes_upgrades(qs)
