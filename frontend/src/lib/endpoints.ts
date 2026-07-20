@@ -1,4 +1,4 @@
-import { ANALYZE_TIMEOUT_MS, apiFetch, DEFAULT_TIMEOUT_MS } from './apiClient'
+import { ANALYZE_TIMEOUT_MS, apiFetch, DEFAULT_TIMEOUT_MS, REGISTER_TIMEOUT_MS } from './apiClient'
 import {
   isAdminAuditData,
   isAdminConfigData,
@@ -71,7 +71,7 @@ export function registerAnalysisQuestion(coin: string, mode: string, question: s
     typeof (value as AnalysisQuestionReceipt).state === 'string' &&
     (value as AnalysisQuestionReceipt).origin === 'manual'
   return apiFetch('/api/analysis-question', undefined, valid, {
-    signal, method: 'POST', jsonBody: { coin, mode, question }, timeoutMs: DEFAULT_TIMEOUT_MS,
+    signal, method: 'POST', jsonBody: { coin, mode, question }, timeoutMs: REGISTER_TIMEOUT_MS,
   })
 }
 
@@ -185,7 +185,7 @@ export function getAnalysisJourney(signal?: AbortSignal): Promise<ApiEnvelope<An
 export function requeueAnalysis(jobId: string): Promise<ApiEnvelope<{ job_id: string; state: string }>> {
   const valid = (value: unknown): value is { job_id: string; state: string } => !!value && typeof value === 'object' &&
     typeof (value as { job_id: unknown }).job_id === 'string' && typeof (value as { state: unknown }).state === 'string'
-  return apiFetch('/api/analysis-requeue', undefined, valid, { method: 'POST', jsonBody: { job_id: jobId }, timeoutMs: DEFAULT_TIMEOUT_MS })
+  return apiFetch('/api/analysis-requeue', undefined, valid, { method: 'POST', jsonBody: { job_id: jobId }, timeoutMs: REGISTER_TIMEOUT_MS })
 }
 
 export function getHealth(signal?: AbortSignal): Promise<ApiEnvelope<HealthData>> {
@@ -226,7 +226,7 @@ export function registerAnalysisComparison(params: ComparisonParams): Promise<Ap
       Array.isArray(data.job_ids) && data.job_ids.every((x) => x === null || typeof x === 'string') && typeof data.state === 'string'
   }
   return apiFetch('/api/analysis-comparison-question', undefined, valid, {
-    method: 'POST', jsonBody: { coin: params.coin, coin2: params.coin2, question: params.q }, timeoutMs: DEFAULT_TIMEOUT_MS,
+    method: 'POST', jsonBody: { coin: params.coin, coin2: params.coin2, question: params.q }, timeoutMs: REGISTER_TIMEOUT_MS,
   })
 }
 

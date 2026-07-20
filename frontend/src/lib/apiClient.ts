@@ -16,6 +16,9 @@ import { isPlainObject } from './validators'
 export const DEFAULT_TIMEOUT_MS = 10_000
 /** 分析端點（真分析，可能觸發真連接器）需要較長逾時。 */
 export const ANALYZE_TIMEOUT_MS = 90_000
+/** 分析註冊/寫入端點：可能觸發 AnalysisFlow 初始化（含 DynamoDB 連線），
+ * 離線模式 timeout/fallback 也需時間收斂，比一般讀取端點寬鬆。(#245) */
+export const REGISTER_TIMEOUT_MS = 30_000
 
 function networkFailure(message: string): ApiFailure {
   return { ok: false, error: { code: 'network_error', message } }
