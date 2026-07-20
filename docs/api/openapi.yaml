@@ -412,6 +412,38 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/improvement-diagnostics:
+    get:
+      tags: [observability]
+      operationId: getImprovementDiagnostics
+      summary: Hermes 自我改善診斷報告
+      description: 唯讀。回傳最新 diagnose_hermes.py 產出的改善提案。
+      responses:
+        "200":
+          description: 改善診斷報告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/alerts-operations:
+    get:
+      tags: [observability]
+      operationId: getAlertsOperations
+      summary: 告警狀態與操作流程 runbook
+      description: 唯讀。暴露 dedup fail-open incident、budget exceeded、runbook 參考。
+      responses:
+        "200":
+          description: 告警狀態與 runbook
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/hermes-upgrades:
     get:
       tags: [observability]
