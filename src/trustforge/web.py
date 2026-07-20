@@ -5437,6 +5437,92 @@ def _handle_api_evidence_quality() -> tuple[int, str]:
         return 502, _json_envelope_err("evidence_quality_unavailable", "Evidence 品質指標暫時無法讀取")
 
 
+def _handle_api_delivery_status() -> tuple[int, str]:
+    """GET /api/delivery-status — Delivery plane: 報告敘事品質與引用格式追蹤
+    (#268, #269)。
+
+    report_narrative: 從 AnalysisFlow(readonly=True) 讀取最近 10 個 completed
+    jobs，提取報告摘要資訊（coin, mode, word_count, has_contrarian_evidence,
+    has_provenance）。
+    citation_format: 從 run_skill_manifest() 讀取 report/evaluation 相關
+    outer skill 的 revision。
+    """
+    data: dict = {}
+
+    # --- #268: report_narrative ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        latest_reports: list[dict] = []
+        with AnalysisFlow(readonly=True) as flow:
+            if not flow._readonly_store_missing():
+                conn = flow._conn()
+                rows = conn.execute(
+                    "SELECT payload_json, coin, mode FROM analysis_results "
+                    "ORDER BY published_at DESC LIMIT 10",
+                ).fetchall()
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    report = payload.get("report", {})
+                    evidence_list = payload.get("evidence", [])
+                    # word_count: market_judgment + facts + inferences 合計字數
+                    text_parts = [report.get("market_judgment", "")]
+                    text_parts.extend(report.get("facts", []))
+                    text_parts.extend(report.get("inferences", []))
+                    word_count = sum(len(p) for p in text_parts if p)
+                    # has_contrarian_evidence: contrarian 非空
+                    has_contrarian = bool(report.get("contrarian"))
+                    # has_provenance: 至少一筆 evidence 有 source_url
+                    has_provenance = any(
+                        ev.get("source_url") for ev in evidence_list
+                    )
+                    latest_reports.append({
+                        "coin": row["coin"],
+                        "mode": row["mode"],
+                        "word_count": word_count,
+                        "has_contrarian_evidence": has_contrarian,
+                        "has_provenance": has_provenance,
+                    })
+        data["report_narrative"] = {
+            "latest_reports": latest_reports,
+            "delivery_version": VERSION,
+        }
+    except Exception as exc:
+        data["report_narrative"] = {
+            "latest_reports": [],
+            "delivery_version": VERSION,
+            "error": f"讀取失敗: {type(exc).__name__}",
+        }
+
+    # --- #269: citation_format ---
+    try:
+        from .skills import run_skill_manifest
+
+        manifest = run_skill_manifest()
+        outer_skills = manifest.get("outer_skills", [])
+        # 提取 report/evaluation 相關 skill entries
+        citation_skills = [
+            {"family": s["family"], "revision": s["revision"], "origin": s["origin"]}
+            for s in outer_skills
+            if s.get("family") in ("report", "evaluation")
+        ]
+        data["citation_format"] = {
+            "skills": citation_skills,
+            "status": "active",
+        }
+    except Exception as exc:
+        data["citation_format"] = {
+            "skills": [],
+            "status": "error",
+            "error": f"讀取失敗: {type(exc).__name__}",
+        }
+
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_alerts_operations() -> tuple[int, str]:
     """Read-only alert state + operational runbook references (#274)."""
     try:
@@ -7333,6 +7419,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/evidence-quality":
             code, body = _handle_api_evidence_quality()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/delivery-status":
+            code, body = _handle_api_delivery_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/alerts-operations":
             code, body = _handle_api_alerts_operations()

@@ -690,3 +690,49 @@ def test_api_operations_status_quality_gate_with_data(tmp_path, monkeypatch):
         assert isinstance(qg["total"], int)
         assert isinstance(qg["passed"], int)
         assert isinstance(qg["failed"], int)
+
+
+# ---------------------------------------------------------------------------
+# /api/delivery-status (#268, #269)
+# ---------------------------------------------------------------------------
+
+
+def test_api_delivery_status_returns_200_json():
+    """#268/#269: 基本形狀驗證——兩個區塊（report_narrative/citation_format）都必須存在。"""
+    code, body = web._handle_api_delivery_status()
+    assert code == 200
+    parsed = json.loads(body)
+    assert parsed["ok"] is True
+    data = parsed["data"]
+    assert "report_narrative" in data
+    assert "citation_format" in data
+
+
+def test_api_delivery_status_report_narrative_shape():
+    """#268: report_narrative 包含 latest_reports（list）和 delivery_version。"""
+    code, body = web._handle_api_delivery_status()
+    assert code == 200
+    data = json.loads(body)["data"]
+    rn = data["report_narrative"]
+    assert "latest_reports" in rn
+    assert isinstance(rn["latest_reports"], list)
+    assert "delivery_version" in rn
+    assert isinstance(rn["delivery_version"], str)
+    assert len(rn["delivery_version"]) > 0
+
+
+def test_api_delivery_status_citation_format_shape():
+    """#269: citation_format 包含 skills（list）和 status。"""
+    code, body = web._handle_api_delivery_status()
+    assert code == 200
+    data = json.loads(body)["data"]
+    cf = data["citation_format"]
+    assert "skills" in cf
+    assert isinstance(cf["skills"], list)
+    assert "status" in cf
+    assert cf["status"] in ("active", "error")
+    # 每個 skill entry 要有 family/revision/origin
+    for skill in cf["skills"]:
+        assert skill["family"] in ("report", "evaluation")
+        assert isinstance(skill["revision"], str)
+        assert skill["origin"] in ("baseline", "approved")

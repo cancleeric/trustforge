@@ -640,6 +640,110 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/delivery-status:
+    get:
+      tags: [observability]
+      operationId: getDeliveryStatus
+      summary: 報告敘事品質與引用格式追蹤（#268, #269）
+      description: |
+        唯讀。合併兩個 delivery plane 觀測面向：
+        - `report_narrative` (#268)：最近 10 個已完成 analysis jobs 的報告摘要
+          （coin, mode, word_count, has_contrarian_evidence, has_provenance）
+          與交付版本號。
+        - `citation_format` (#269)：outer skill manifest 中 report/evaluation
+          相關 skill 的 revision 與狀態。
+
+        不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。
+      responses:
+        "200":
+          description: Delivery plane 狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          report_narrative:
+                            type: object
+                            required: [latest_reports, delivery_version]
+                            properties:
+                              latest_reports:
+                                type: array
+                                items:
+                                  type: object
+                                  required: [coin, mode, word_count, has_contrarian_evidence, has_provenance]
+                                  properties:
+                                    coin:
+                                      type: string
+                                    mode:
+                                      type: string
+                                    word_count:
+                                      type: integer
+                                      description: market_judgment + facts + inferences 合計字元數
+                                    has_contrarian_evidence:
+                                      type: boolean
+                                      description: 報告是否包含反方證據
+                                    has_provenance:
+                                      type: boolean
+                                      description: 至少一筆 evidence 帶 source_url 溯源
+                              delivery_version:
+                                type: string
+                                description: 當前部署版本號
+                              error:
+                                type: string
+                                description: 讀取失敗時的錯誤摘要（正常時不存在）
+                          citation_format:
+                            type: object
+                            required: [skills, status]
+                            properties:
+                              skills:
+                                type: array
+                                items:
+                                  type: object
+                                  required: [family, revision, origin]
+                                  properties:
+                                    family:
+                                      type: string
+                                      enum: [report, evaluation]
+                                    revision:
+                                      type: string
+                                      description: SHA-256 artifact hash
+                                    origin:
+                                      type: string
+                                      enum: [baseline, approved]
+                              status:
+                                type: string
+                                enum: [active, error]
+                              error:
+                                type: string
+                                description: 讀取失敗時的錯誤摘要（正常時不存在）
+              example:
+                ok: true
+                data:
+                  report_narrative:
+                    latest_reports:
+                      - coin: BTC
+                        mode: risk
+                        word_count: 1234
+                        has_contrarian_evidence: true
+                        has_provenance: true
+                    delivery_version: dev
+                  citation_format:
+                    skills:
+                      - family: report
+                        revision: "abc123..."
+                        origin: baseline
+                      - family: evaluation
+                        revision: "def456..."
+                        origin: baseline
+                    status: active
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/alerts-operations:
     get:
       tags: [observability]
