@@ -171,7 +171,13 @@ def sync_source_enabled_from_admin(store=None) -> None:
     預設 admin_config 未設定 disabled_sources（= None）→ 全空 → 所有源維持
     enabled。admin_config 寫入 disabled_sources（如 ["coindesk"]）後，這裡
     把對應源標成 disabled，collect() 隨即跳過。
+
+    TRUSTFORGE_DISABLE_ADMIN_CONFIG=1 時跳過（本機無 DynamoDB 也能跑排程器）。
     """
+    import os
+    if os.getenv("TRUSTFORGE_DISABLE_ADMIN_CONFIG", "").strip().lower() in ("1", "true", "yes"):
+        return
+
     from .. import admin_config
 
     config = admin_config.get_config(store)
