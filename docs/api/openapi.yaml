@@ -1015,6 +1015,42 @@ paths:
                   code: upstream_error
                   message: "分析服務暫時無法使用，請稍後再試"
 
+  /api/operations-status:
+    get:
+      tags: [operations]
+      operationId: getOperationsStatus
+      summary: Operations plane 合併觀測端點（schema/auth_audit/quality_gate）
+      description: |
+        暴露三個面向：
+        1. schema (#277)：SQLite schema 版本、table 列表、相容性狀態。
+        2. auth_audit (#276)：admin token 是否已設、live token 是否已設、
+           trust proxy 狀態、bind host——**只暴露 boolean，絕不暴露 token 值**。
+        3. quality_gate (#270)：最新 question-bank-latest.json 評測結果摘要。
+      responses:
+        "200":
+          description: Operations 狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  schema:
+                    sqlite_path: "out/trustforge.sqlite3"
+                    tables: ["analysis_snapshots", "analysis_jobs", "analysis_results"]
+                    table_count: 3
+                    user_version: 0
+                    status: "ok"
+                  auth_audit:
+                    admin_token_set: true
+                    live_token_set: false
+                    trust_proxy: false
+                    bind_host: "0.0.0.0"
+                  quality_gate:
+                    status: "no_data"
+                    source: "out/question-bank-latest.json"
+
   /api/openapi.yaml:
     get:
       tags: [meta]

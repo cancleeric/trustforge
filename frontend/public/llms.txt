@@ -34,6 +34,7 @@ product, not investment advice.
 - `GET /api/overview` — 多幣總覽快照，讀既有排程結果 / multi-coin overview snapshots from scheduled jobs
 - `GET /api/history?coin=BTC&days=30` — 單幣按日信任序列，PIT / per-coin daily trust history, point-in-time
 - `GET /api/analyze?coin=BTC&type=multi_source&q=...` — 核心多源分析（見下方模式與限流）/ core multi-source analysis (see modes & rate limits below)
+- `GET /api/operations-status` — Operations plane：schema 版本/權限審計/品質 gate / schema version, auth audit (booleans only), quality gate status
 - `GET /api/openapi.yaml` — 本文件對應的完整 spec（純讀檔回傳，未部署回 404）/ this guide's full OpenAPI spec (served from disk, always current; 404 if not deployed)
 - `GET /llms.txt` — 本文件（此頁，純讀檔回傳，未部署回 404）/ this document (this page, served from disk; 404 if not deployed)
 

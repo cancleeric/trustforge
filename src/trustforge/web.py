@@ -5095,6 +5095,74 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
     }
 
 
+def _handle_api_operations_status() -> tuple[int, str]:
+    """GET /api/operations-status — Operations plane: schema migration 追蹤 (#277)、
+    權限審計 (#276)、品質 gate 狀態 (#270)。
+
+    ⚠️ 安全注意（#276）：auth_audit 只暴露 boolean（token 是否已設），
+    **絕不暴露 token 值本身**。
+    """
+    data: dict = {}
+
+    # --- #277: schema migration 與相容性追蹤 ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            conn = flow._conn()
+            tables = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                ).fetchall()
+            ]
+            # 讀 user_version pragma 當作 schema 版本追蹤
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            data["schema"] = {
+                "sqlite_path": str(flow.path),
+                "tables": tables,
+                "table_count": len(tables),
+                "user_version": user_version,
+                "status": "ok",
+            }
+    except Exception as exc:
+        data["schema"] = {"status": "error", "error": str(type(exc).__name__)}
+
+    # --- #276: 權限審計（只暴露 boolean，絕不暴露值） ---
+    data["auth_audit"] = {
+        "admin_token_set": bool(os.getenv("TRUSTFORGE_ADMIN_TOKEN", "").strip()),
+        "live_token_set": bool(os.getenv("TRUSTFORGE_LIVE_TOKEN", "").strip()),
+        "trust_proxy": TRUST_PROXY,
+        "bind_host": os.getenv("TRUSTFORGE_BIND_HOST", "0.0.0.0"),
+    }
+
+    # --- #270: 評測題庫品質 gate ---
+    try:
+        qb_path = Path(__file__).resolve().parents[2] / "out" / "question-bank-latest.json"
+        if qb_path.is_file():
+            import json as _json
+
+            qb_data = _json.loads(qb_path.read_text(encoding="utf-8"))
+            # 摘要：pass/fail 計數
+            results = qb_data if isinstance(qb_data, list) else qb_data.get("results", [])
+            total = len(results)
+            passed = sum(1 for r in results if r.get("pass") or r.get("passed"))
+            data["quality_gate"] = {
+                "status": "ok",
+                "source": str(qb_path),
+                "total": total,
+                "passed": passed,
+                "failed": total - passed,
+                "pass_rate": round(passed / total, 4) if total > 0 else None,
+            }
+        else:
+            data["quality_gate"] = {"status": "no_data", "source": str(qb_path)}
+    except Exception as exc:
+        data["quality_gate"] = {"status": "error", "error": str(type(exc).__name__)}
+
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
     """Read-only Hermes worker/queue telemetry. UI polling never starts analysis."""
     try:
@@ -7138,6 +7206,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/history":
             code, body = _handle_api_history(qs, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/operations-status":
+            code, body = _handle_api_operations_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
