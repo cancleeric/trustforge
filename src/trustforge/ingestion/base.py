@@ -274,6 +274,37 @@ class OfflineSampleSource(Source):
         return docs
 
 
+class _WhaleOfflineSampleSource(Source):
+    """從 demo/sample_data/whale_trades.json 讀取鯨魚/名人交易離線樣本。
+
+    whale_trades.json 包含兩種 kind（whale_onchain 和 celebrity_trade），
+    此 Source 在載入時按 self.kind 過濾，只回傳對應 kind 的文件。
+    """
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.name = f"whale-trades-offline-{kind}"
+
+    def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
+        f = SAMPLE_DIR / "whale_trades.json"
+        if not f.exists():
+            return []
+        raw = json.loads(f.read_text(encoding="utf-8"))
+        docs = [
+            Document(
+                id=d["id"], kind=d.get("kind", self.kind),
+                source=d.get("source", self.name),
+                text=d["text"], url=d.get("url", ""), ts=d.get("ts", 0.0),
+                meta=d.get("meta", {}),
+            )
+            for d in raw
+            if d.get("kind") == self.kind
+        ]
+        if coin:
+            docs = [d for d in docs if _matches_coin(d, coin)]
+        return docs
+
+
 def collect(query: str, coin: str | None = None,
             sources: Iterable[Source] | None = None,
             offline: bool = False, data_dir=None,
@@ -322,6 +353,10 @@ def collect(query: str, coin: str | None = None,
     if sources is None:
         if offline:
             sources = [OfflineSampleSource(k, k) for k in SOURCE_KINDS]
+            # 鯨魚/名人交易離線樣本（whale_trades.json 含兩種 kind，
+            # 用專用的 WhaleOfflineSampleSource 載入並按 kind 過濾）
+            sources.append(_WhaleOfflineSampleSource("whale_onchain"))
+            sources.append(_WhaleOfflineSampleSource("celebrity_trade"))
         else:
             # 線上模式：延遲匯入以避免循環依賴
             from .news import build_news_sources
@@ -330,6 +365,7 @@ def collect(query: str, coin: str | None = None,
             from .regulatory import build_regulatory_sources
             from .coingecko import build_coingecko_sources
             from .hoyabit import build_hoyabit_sources
+            from .whale_trades import build_whale_sources
             from .cache import CachedSource
             raw_sources = (
                 build_news_sources()
@@ -338,6 +374,7 @@ def collect(query: str, coin: str | None = None,
                 + build_regulatory_sources()
                 + build_coingecko_sources()
                 + build_hoyabit_sources()
+                + build_whale_sources()
             )
             # 階段2（cache + 排程 fetcher）：產品路徑一律讀快取，不直接打真連接器
             # API（rate-limit 風險），真呼叫只在 scripts/fetch_scheduler.py 排程

@@ -43,6 +43,7 @@ export default function HermesLeftRail({
         position: 'absolute', left: 0, top: 'var(--hermes-top)', width: 'var(--hermes-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
         borderRight: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
         display: 'flex', flexDirection: 'column', gap: 12,
+        overflowY: 'auto',
       }}
     >
       {!beginnerMode && <div>
@@ -65,7 +66,7 @@ export default function HermesLeftRail({
       {/* HERMES CONSOLE */}
       <div
         className="hermes-clip"
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
       >
         {beginnerMode && (
           <div className="hermes-intent-picker">
