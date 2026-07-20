@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any, Iterable
 
-from .calibrator_gate import evaluate_calibrator_gate
+from .calibrator_gate import calibrator_model_gate_status, evaluate_calibrator_gate
 
 _CANDIDATES = ("sklearn-logreg", "isotonic")
 _FEATURE_CONTRACT = (
@@ -62,6 +62,7 @@ def build_calibrator_training_package(label_documents: Iterable[dict[str, Any]],
         },
         "feature_contract": list(_FEATURE_CONTRACT),
         "gate": gate,
+        "model_gate_status": calibrator_model_gate_status(rows),
         "rollback": {"strategy": "keep_current_calibrator_active", "activation": "human_approval_after_holdout_improvement"},
         "modelhub_submission_draft": {
             "product": "trustforge",
