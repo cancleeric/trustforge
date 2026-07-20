@@ -163,6 +163,82 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/rate-limit-status:
+    get:
+      tags: [observability]
+      operationId: getRateLimitStatus
+      summary: 速率限制狀態與統計（唯讀觀測，不需 admin token）
+      description: |
+        暴露目前各限流 bucket（live / real / status / online_stance）的設定值
+        （window / max）與即時統計（追蹤 IP 數、視窗內請求數）。不暴露完整 IP
+        位址，僅回傳聚合計數。供前端或監控層掌握限流健康狀況。
+      responses:
+        "200":
+          description: 各 bucket 的設定與即時統計
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          buckets:
+                            type: object
+                            additionalProperties:
+                              type: object
+                              properties:
+                                window_seconds:
+                                  type: integer
+                                max_requests_per_ip:
+                                  type: integer
+                                stats:
+                                  type: object
+                                  properties:
+                                    active_ips:
+                                      type: integer
+                                    total_requests_in_window:
+                                      type: integer
+                                    tracked_ips:
+                                      type: integer
+                          max_tracked_ips:
+                            type: integer
+              example:
+                ok: true
+                data:
+                  buckets:
+                    live:
+                      window_seconds: 60
+                      max_requests_per_ip: 5
+                      stats:
+                        active_ips: 2
+                        total_requests_in_window: 7
+                        tracked_ips: 3
+                    real:
+                      window_seconds: 60
+                      max_requests_per_ip: 60
+                      stats:
+                        active_ips: 1
+                        total_requests_in_window: 3
+                        tracked_ips: 1
+                    status:
+                      window_seconds: 30
+                      max_requests_per_ip: 10
+                      stats:
+                        active_ips: 0
+                        total_requests_in_window: 0
+                        tracked_ips: 0
+                    online_stance:
+                      window_seconds: 3600
+                      max_requests_per_ip: 20
+                      stats:
+                        active_ips: 0
+                        total_requests_in_window: 0
+                        tracked_ips: 0
+                  max_tracked_ips: 5000
+
   /api/status:
     get:
       tags: [observability]

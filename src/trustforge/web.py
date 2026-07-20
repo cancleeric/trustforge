@@ -6024,6 +6024,63 @@ def _handle_api_history(qs: dict, client_ip: str = "") -> tuple[int, str]:
         return 502, _json_envelope_err("upstream_error", "歷史資料暫時無法讀取，請稍後再試")
 
 
+def _handle_api_rate_limit_status() -> tuple[int, str]:
+    """`/api/rate-limit-status`：暴露目前各限流 bucket 的設定與即時統計。
+
+    唯讀觀測端點，不需 admin token。回傳每個 bucket 的設定值（window/max）
+    以及目前追蹤的 IP 數量與各 IP 的計數（不暴露完整 IP，只暴露計數）。
+    """
+    now = time.time()
+
+    def _bucket_stats(
+        buckets: dict[str, list[float]], window: float, lock: threading.Lock
+    ) -> dict[str, Any]:
+        with lock:
+            active_ips = 0
+            total_requests = 0
+            for ts_list in buckets.values():
+                active = [t for t in ts_list if now - t < window]
+                if active:
+                    active_ips += 1
+                    total_requests += len(active)
+            return {
+                "active_ips": active_ips,
+                "total_requests_in_window": total_requests,
+                "tracked_ips": len(buckets),
+            }
+
+    data = {
+        "buckets": {
+            "live": {
+                "window_seconds": _RATE_WINDOW,
+                "max_requests_per_ip": _RATE_MAX,
+                "stats": _bucket_stats(_rate_buckets, _RATE_WINDOW, _rate_lock),
+            },
+            "real": {
+                "window_seconds": _REAL_RATE_WINDOW,
+                "max_requests_per_ip": _REAL_RATE_MAX,
+                "stats": _bucket_stats(_real_rate_buckets, _REAL_RATE_WINDOW, _real_rate_lock),
+            },
+            "status": {
+                "window_seconds": _STATUS_RATE_WINDOW,
+                "max_requests_per_ip": _STATUS_RATE_MAX,
+                "stats": _bucket_stats(_status_rate_buckets, _STATUS_RATE_WINDOW, _status_rate_lock),
+            },
+            "online_stance": {
+                "window_seconds": _ONLINE_STANCE_RATE_WINDOW,
+                "max_requests_per_ip": _ONLINE_STANCE_RATE_MAX,
+                "stats": _bucket_stats(
+                    _online_stance_rate_buckets,
+                    _ONLINE_STANCE_RATE_WINDOW,
+                    _online_stance_rate_lock,
+                ),
+            },
+        },
+        "max_tracked_ips": _RATE_LIMIT_MAX_TRACKED_IPS,
+    }
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_health() -> tuple[int, str]:
     """`/api/health`：JSON 版健康檢查，補在既有純文字 `/healthz` 之外（見
     `Handler.do_GET`）——同樣零 I/O、不設限流，供偏好 JSON 回應格式的健康
@@ -6712,6 +6769,10 @@ class Handler(BaseHTTPRequestHandler):
         _send_path = urlparse(getattr(self, "path", "") or "").path
         if (_send_path + "/").startswith("/api/admin/"):
             self.send_header("Cache-Control", "no-store")
+        # issue #273：所有 /api/* 回應帶版本 header，前端可在每次 API call
+        # 檢查後端版本是否與預期一致，防止前後端版本 drift。
+        if _send_path.startswith("/api/"):
+            self.send_header("X-TrustForge-Version", VERSION)
         cors_headers = _cors_headers(_send_path, getattr(self, "headers", {}))
         for name, val in cors_headers.items():
             self.send_header(name, val)
@@ -6895,6 +6956,9 @@ class Handler(BaseHTTPRequestHandler):
         # docstring。
         if u.path == "/api/health":
             code, body = _handle_api_health()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/rate-limit-status":
+            code, body = _handle_api_rate_limit_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/status":
             code, body = _handle_api_status(client_ip)
