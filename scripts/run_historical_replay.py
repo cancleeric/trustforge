@@ -13,6 +13,7 @@ sys.path.insert(0, str(REPO / "src"))
 from trustforge.calibration import replay_report  # noqa: E402
 from trustforge.ingestion.cache import get_cache_backend, get_trust_history  # noqa: E402
 from trustforge.ingestion.prices import load_ohlcv  # noqa: E402
+from trustforge.replay_regression import evaluate_replay_regression_gate  # noqa: E402
 from trustforge.schema import COIN_POOL  # noqa: E402
 
 
@@ -29,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
 
     snapshots = get_trust_history(args.coin, args.days, get_cache_backend(), end_date=args.end_date)
     report = replay_report(args.coin, snapshots, load_ohlcv(args.coin, args.data_dir))
+    report["regression_gate"] = evaluate_replay_regression_gate(report)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
         Path(args.out).write_text(rendered + "\n", encoding="utf-8")

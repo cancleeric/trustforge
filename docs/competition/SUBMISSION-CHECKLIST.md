@@ -81,6 +81,17 @@
    - 🧑 Reddit/Bluesky 等 API key 放 **Secrets Manager**（App Password 真人辦、不經 AI）。
 5. 🧑 **成本護欄**：billing 現「數據不可用」（新帳號）→ 設 **AWS Budgets** 告警。Bedrock 按 token 計費，單次跑便宜，但開發迭代用 Sonnet 控成本。
 6. **交付**：Live Demo 部署網址 + 現場執行錄影（含私有 key 流程要錄全）+ 4 交付件（report/evidence/log/code）。
+
+   After #312 writes the live Bedrock run to `out/artifacts/bedrock-live-run/`, build the judge-ready zip with:
+
+   ```bash
+   python scripts/package_finale_submission.py \
+     --source-dir out/artifacts/bedrock-live-run \
+     --output-dir out/submission \
+     --demo-url "$TRUSTFORGE_LIVE_DEMO_URL"
+   ```
+
+   The packager verifies `report.md`, `evidence.json`, `execution_log.jsonl`, rejects `[OFFLINE]` reports, requires a Bedrock invoke trace, scans the three public artifacts for common secret patterns, and includes a `repo.tar.gz` snapshot plus `manifest.json` in `out/submission/finale-submission.zip`.
 7. **加分 +10%** 🧑：開發用 **AWS Kiro**（AI 整合開發環境）。
 
 ### AWS 架構（簡報用）
