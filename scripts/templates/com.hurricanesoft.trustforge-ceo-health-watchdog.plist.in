@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.hurricanesoft.trustforge-ceo-health-watchdog</string>
+  <key>ProgramArguments</key><array>
+    <string>__PYTHON__</string>
+    <string>__ROOT__/scripts/ceo_health_watchdog.py</string>
+    <string>--status</string><string>__ROOT__/out/ceo-cycle/status.json</string>
+    <string>--alert</string><string>__ROOT__/out/ceo-cycle/health-alert.json</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>Umask</key><integer>63</integer>
+  <key>WorkingDirectory</key><string>__ROOT__</string>
+  <key>StandardOutPath</key><string>__ROOT__/out/ceo-cycle/health-watchdog.out.log</string>
+  <key>StandardErrorPath</key><string>__ROOT__/out/ceo-cycle/health-watchdog.err.log</string>
+</dict></plist>
