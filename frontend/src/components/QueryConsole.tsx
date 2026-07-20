@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import CoinSelect from './CoinSelect'
 
@@ -20,6 +20,7 @@ const ANALYSIS_MODES = [
 interface Props {
   initial: QueryValues
   onSubmit: (values: QueryValues) => void
+  disabled?: boolean
 }
 
 // 單幣分析的預設問題文字——跟 `AnalyzePage.tsx::paramsFromSearch` 是同一份
@@ -30,7 +31,7 @@ function defaultAnalyzeQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
 }
 
-export default function QueryConsole({ initial, onSubmit }: Props) {
+export default function QueryConsole({ initial, onSubmit, disabled = false }: Props) {
   const [coin, setCoin] = useState(initial.coin)
   const [type, setType] = useState(initial.type)
   const [mode, setMode] = useState(initial.mode)
@@ -38,10 +39,6 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
   // 使用者是否手動編輯過問題欄——一旦編輯過，換幣就不再覆蓋掉他打的字；
   // 「送出/瀏覽器上下頁」會在下方 effect 裡重置，視為開啟一輪新的表單狀態。
   const [queryEdited, setQueryEdited] = useState(false)
-  const submitRef = useRef(onSubmit)
-  const userChangedRef = useRef(false)
-  useEffect(() => { submitRef.current = onSubmit }, [onSubmit])
-
   // 瀏覽器上下頁（或外部導覽帶新的 coin/type/q 進來）：URL 是唯一事實來源，
   // 把整個表單（含 queryEdited 旗標）重新對齊，避免可見控件跟網址/報告脫節。
   useEffect(() => {
@@ -50,20 +47,9 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
     setMode(initial.mode)
     setQ(initial.q)
     setQueryEdited(false)
-    userChangedRef.current = false
   }, [initial.coin, initial.mode, initial.type, initial.q])
 
-  // Hermes 預分析：只在使用者改動表單後 debounce 同步。初次 mount / URL
-  // 對齊不得自動 submit，否則 top-bar 開啟工作區會立刻改 URL 並造成跳動。
-  useEffect(() => {
-    if (!userChangedRef.current) return
-    if (!q.trim()) return
-    const timer = window.setTimeout(() => submitRef.current({ coin, type, mode, q: q.trim() }), 350)
-    return () => window.clearTimeout(timer)
-  }, [coin, mode, q, type])
-
   function handleCoinChange(next: string) {
-    userChangedRef.current = true
     setCoin(next)
     if (!queryEdited) setQ(defaultAnalyzeQuery(next))
   }
@@ -73,6 +59,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
       className="hermes-clip flex flex-col gap-3 rounded-lg border border-tf-border bg-tf-card p-4"
       onSubmit={(e) => {
         e.preventDefault()
+        if (disabled) return
         onSubmit({ coin, type, mode, q })
       }}
     >
@@ -90,7 +77,6 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
           id="qc-type"
           value={mode}
           onChange={(e) => {
-            userChangedRef.current = true
             const next = ANALYSIS_MODES.find((item) => item.value === e.target.value) ?? ANALYSIS_MODES[0]
             setMode(next.value)
             setType(next.type)
@@ -119,7 +105,6 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
           id="qc-q"
           value={q}
           onChange={(e) => {
-            userChangedRef.current = true
             setQ(e.target.value)
             setQueryEdited(true)
           }}
@@ -129,6 +114,7 @@ export default function QueryConsole({ initial, onSubmit }: Props) {
       </div>
       <button
         type="submit"
+        disabled={disabled}
         className="rounded-[8px] px-5 py-[13px] text-[13px] font-bold tracking-[0.06em] text-tf-bg hover:opacity-90"
         style={{ background: 'linear-gradient(135deg,var(--color-tf-accent),#3bc0c8)', boxShadow: '0 0 20px rgba(77,216,224,0.25)' }}
       >
