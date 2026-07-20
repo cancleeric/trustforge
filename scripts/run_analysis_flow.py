@@ -12,12 +12,36 @@ def main() -> int:
     p.add_argument("--coin", action="append", default=[])
     p.add_argument("--workers-per-stage", type=int, default=1)
     p.add_argument("--daemon", action="store_true")
+    p.add_argument("--backfill", action="store_true",
+                   help="同時啟動歷史回填 worker（daemon 模式下獨立 thread）")
+    p.add_argument("--backfill-batch-size", type=int, default=30,
+                   help="回填每輪處理天數")
+    p.add_argument("--backfill-interval", type=float, default=5.0,
+                   help="回填批次間隔秒數")
+    p.add_argument("--backfill-start-date", default=None,
+                   help="回填起始日 YYYY-MM-DD")
+    p.add_argument("--backfill-end-date", default=None,
+                   help="回填結束日 YYYY-MM-DD")
     p.add_argument("--poll-seconds", type=float, default=15.0)
     p.add_argument("--schedule-seconds", type=float, default=1800.0,
                    help="minimum interval between low-priority scheduled refreshes")
     args = p.parse_args()
     flow = AnalysisFlow(workers_per_stage=args.workers_per_stage)
     flow.start()
+
+    # ── 歷史回填 worker（獨立 daemon thread，不阻擋 analysis flow）────────
+    backfill_worker = None
+    if args.backfill:
+        from trustforge.backfill import BackfillWorker
+        backfill_worker = BackfillWorker(
+            coins=args.coin or None,
+            start_date=args.backfill_start_date,
+            end_date=args.backfill_end_date,
+            batch_size=args.backfill_batch_size,
+            interval_sec=args.backfill_interval,
+        )
+        backfill_worker.start_daemon()
+
     if args.daemon:
         stopping = False
         last_prune = 0.0
@@ -50,15 +74,21 @@ def main() -> int:
             deadline = time.monotonic() + max(0.5, args.poll_seconds)
             while not stopping and time.monotonic() < deadline: time.sleep(.25)
         flow.join(); flow.stop()
+        if backfill_worker:
+            backfill_worker.close()
     else:
         enabled, source = autonomy_enabled()
         if not enabled:
             print(f"[run_analysis_flow] scheduled analysis disabled ({source}); no batch refresh started")
+            if backfill_worker:
+                backfill_worker.close()
             flow.stop()
             return 0
         for coin in args.coin or ["BTC", "ETH", "SOL", "BNB", "XRP"]:
             flow.enqueue_matrix(flow.create_snapshot(coin))
         flow.join(); flow.stop()
+        if backfill_worker:
+            backfill_worker.close()
     return 0
 
 if __name__ == "__main__": raise SystemExit(main())
