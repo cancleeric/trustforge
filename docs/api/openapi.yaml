@@ -692,6 +692,52 @@ paths:
         "404": {description: 找不到死信工作}
         "502": {$ref: "#/components/responses/UpstreamError"}
 
+  /api/intelligence-status:
+    get:
+      tags: [observability]
+      operationId: getIntelligenceStatus
+      summary: Intelligence plane 觀測（技能/工具/主張抽取狀態）
+      description: |
+        合併三個觀測面向：outer skill manifest、Hermes 工具註冊表、最近一次
+        claim_extraction stage 狀態。唯讀，不需 admin token。
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          skills:
+                            description: "outer skill manifest（`trustforge.skills.run_skill_manifest()` 結果），讀取失敗時為 null"
+                            nullable: true
+                          tools:
+                            description: "Hermes 工具清單（`trustforge.hermes.HERMES_TOOLS`），讀取失敗時為 null"
+                            type: array
+                            nullable: true
+                            items:
+                              type: object
+                              properties:
+                                name: {type: string}
+                                description: {type: string}
+                                scope: {type: string}
+                                max_concurrency: {type: integer}
+                          claim_extraction:
+                            description: "最近一次 claim_extraction stage 狀態（從 AnalysisFlow SQLite），讀取失敗時為 null"
+                            nullable: true
+                            type: object
+                            properties:
+                              id: {type: string}
+                              queued: {type: integer}
+                              current:
+                                nullable: true
+                              next_retry_at:
+                                nullable: true
+
   /api/analyze:
     get:
       tags: [analysis]
