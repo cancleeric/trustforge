@@ -393,6 +393,25 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/budget-governance:
+    get:
+      tags: [observability]
+      operationId: getBudgetGovernance
+      summary: 預算治理狀態（cap、已花費、剩餘、kill-switch、online-stance）
+      description: |
+        唯讀。暴露預算護欄的完整治理狀態：每日上限、來源、今日已花費、
+        剩餘額度、是否超限、kill-switch 是否啟動、online-stance 是否啟用。
+        不需 admin token。
+      responses:
+        "200":
+          description: 預算治理狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/hermes-upgrades:
     get:
       tags: [observability]
