@@ -17,6 +17,7 @@ from . import __version__
 from .skill_changes import change_history
 from .skills import run_skill_manifest
 from .historical_sources import historical_source_capabilities
+from .module_status import observability_snapshot
 
 
 MODULES = (
@@ -171,6 +172,7 @@ def upgrade_status() -> dict[str, Any]:
             "status": diagnostic.get("status"), "generated_at": diagnostic.get("generated_at"),
             "proposal_count": len(proposals),
         }, "coverage": {"registered": len(modules), "complete": True},
+        "module_observability": observability_snapshot(),
         "automation": {
             "mode": "continuous_data_driven_outer_tuning",
             "measurements": measurements,
