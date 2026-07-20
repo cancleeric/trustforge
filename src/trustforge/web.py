@@ -5545,6 +5545,53 @@ def _handle_api_intelligence_status() -> tuple[int, str]:
     return 200, _json_envelope_ok(data)
 
 
+def _handle_api_prompt_versions() -> tuple[int, str]:
+    """GET /api/prompt-versions：暴露當前所有 prompt template 的版本資訊。
+
+    回傳每個可識別的 prompt template 的名稱、用途描述與 SHA-256 hash，
+    供外部比對「這次產出是用哪個版本的 prompt」。不需 admin token、不觸發
+    任何連接器/Bedrock 呼叫（純記憶體計算）。
+    """
+    from .agent import orchestrator as _orch
+
+    templates: list[dict] = []
+
+    # 1. SYSTEM — 主行文 system prompt
+    templates.append({
+        "name": "SYSTEM",
+        "purpose": "Step 3 帶溯源行文的 system prompt（指示 LLM 只依據已信任加權證據作答）",
+        "sha256_hash": hashlib.sha256(_orch.SYSTEM.encode("utf-8")).hexdigest(),
+    })
+
+    # 2. _STEP4_SYSTEM — 限制複審 system prompt
+    templates.append({
+        "name": "_STEP4_SYSTEM",
+        "purpose": "Step 4 限制複審的 system prompt（審查報告限制是否完整）",
+        "sha256_hash": hashlib.sha256(_orch._STEP4_SYSTEM.encode("utf-8")).hexdigest(),
+    })
+
+    # 3. _PROMPT_INJECTION_RE — prompt injection 偵測正則
+    templates.append({
+        "name": "_PROMPT_INJECTION_RE",
+        "purpose": "Prompt injection 偵測正則表達式（用於 untrusted 資料過濾）",
+        "sha256_hash": hashlib.sha256(
+            _orch._PROMPT_INJECTION_RE.pattern.encode("utf-8")
+        ).hexdigest(),
+    })
+
+    # 4. orchestrator.py 整體檔案 hash（捕捉 inline f-string prompt 變更）
+    orch_path = Path(_orch.__file__)
+    if orch_path.exists():
+        orch_bytes = orch_path.read_bytes()
+        templates.append({
+            "name": "orchestrator_module",
+            "purpose": "agent/orchestrator.py 整體檔案 hash（含所有 inline prompt template）",
+            "sha256_hash": hashlib.sha256(orch_bytes).hexdigest(),
+        })
+
+    return 200, _json_envelope_ok({"templates": templates})
+
+
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
     """`/api/analyze`：`/analyze.json` 既有輸出的擴充版，統一
     `{ok,data,error}` 信封 + 補上雷達（`aggregate_trust_by_kind`）／
@@ -7044,6 +7091,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/intelligence-status":
             code, body = _handle_api_intelligence_status()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/prompt-versions":
+            code, body = _handle_api_prompt_versions()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analyze":
             code, body = _handle_api_analyze(qs, client_ip)
