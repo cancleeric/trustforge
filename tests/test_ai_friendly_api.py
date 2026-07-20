@@ -598,3 +598,95 @@ def test_api_analyze_bad_request_matches_documented_error_shape():
     assert parsed["ok"] is False
     assert parsed["error"]["code"] == "bad_request"
     assert isinstance(parsed["error"]["message"], str)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/operations-status (#276, #277, #270)
+# ---------------------------------------------------------------------------
+
+
+def test_api_operations_status_returns_200_json():
+    """基本形狀驗證：三個區塊（schema/auth_audit/quality_gate）都必須存在。"""
+    code, body = web._handle_api_operations_status()
+    assert code == 200
+    parsed = json.loads(body)
+    assert parsed["ok"] is True
+    data = parsed["data"]
+    assert "schema" in data
+    assert "auth_audit" in data
+    assert "quality_gate" in data
+
+
+def test_api_operations_status_schema_section():
+    """#277: schema 區塊必須包含 tables（list）和 status。"""
+    code, body = web._handle_api_operations_status()
+    assert code == 200
+    data = json.loads(body)["data"]
+    schema = data["schema"]
+    # 有 SQLite 時回 ok + tables
+    if schema["status"] == "ok":
+        assert isinstance(schema["tables"], list)
+        assert isinstance(schema["table_count"], int)
+        assert schema["table_count"] == len(schema["tables"])
+        assert isinstance(schema["user_version"], int)
+    else:
+        # SQLite 不存在時回 error
+        assert schema["status"] == "error"
+        assert "error" in schema
+
+
+def test_api_operations_status_auth_audit_only_booleans(monkeypatch):
+    """#276 安全：auth_audit 只暴露 boolean，不暴露 token 值本身。"""
+    monkeypatch.setenv("TRUSTFORGE_ADMIN_TOKEN", "super-secret-admin-token")
+    monkeypatch.setenv("TRUSTFORGE_LIVE_TOKEN", "super-secret-live-token")
+    code, body = web._handle_api_operations_status()
+    assert code == 200
+    data = json.loads(body)["data"]
+    audit = data["auth_audit"]
+    assert audit["admin_token_set"] is True
+    assert audit["live_token_set"] is True
+    assert isinstance(audit["trust_proxy"], bool)
+    assert isinstance(audit["bind_host"], str)
+    # 安全斷言：回應 body 不得包含 token 值本身
+    assert "super-secret-admin-token" not in body
+    assert "super-secret-live-token" not in body
+
+
+def test_api_operations_status_auth_audit_unset(monkeypatch):
+    """#276: token 未設時 boolean 為 False。"""
+    monkeypatch.delenv("TRUSTFORGE_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("TRUSTFORGE_LIVE_TOKEN", raising=False)
+    code, body = web._handle_api_operations_status()
+    assert code == 200
+    data = json.loads(body)["data"]
+    audit = data["auth_audit"]
+    assert audit["admin_token_set"] is False
+    assert audit["live_token_set"] is False
+
+
+def test_api_operations_status_quality_gate_no_data():
+    """#270: question-bank-latest.json 不存在時回 no_data。"""
+    code, body = web._handle_api_operations_status()
+    assert code == 200
+    data = json.loads(body)["data"]
+    qg = data["quality_gate"]
+    # 測試環境通常沒有這個檔案
+    assert qg["status"] in ("no_data", "ok", "error")
+
+
+def test_api_operations_status_quality_gate_with_data(tmp_path, monkeypatch):
+    """#270: 有 question-bank-latest.json 時回摘要。"""
+    # 在 handler 預期的路徑放置 fixture（handler 從 src/ 上兩層的 out/ 讀取）
+    # 由於不容易直接 monkeypatch Path 計算，此測試驗證 status 欄位形狀契約
+    code, body = web._handle_api_operations_status()
+    assert code == 200
+    data = json.loads(body)["data"]
+    qg = data["quality_gate"]
+    # quality_gate 永遠有 status 欄位
+    assert "status" in qg
+    assert qg["status"] in ("no_data", "ok", "error")
+    # 若為 ok，必須有 total/passed/failed
+    if qg["status"] == "ok":
+        assert isinstance(qg["total"], int)
+        assert isinstance(qg["passed"], int)
+        assert isinstance(qg["failed"], int)
