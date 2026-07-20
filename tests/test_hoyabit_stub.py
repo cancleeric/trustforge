@@ -113,7 +113,7 @@ def test_hoyabit_api_methods_not_implemented():
     """真實 API 方法尚未實作，暫回 NotImplementedError（待 7/13 spec）。"""
     src = HoyaBitSource()
     for method in ("get_depth", "get_orderbook", "get_trades"):
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(NotImplementedError, match="尚未開發"):
             getattr(src, method)("BTC")
 
 
@@ -152,3 +152,32 @@ def test_startup_self_check_accepts_configured_enabled_ticker(monkeypatch, caplo
 
     assert log_hoyabit_startup_status() is True
     assert "HOYA BIT 真值基準未接" not in caplog.text
+
+
+def test_hoyabit_status_unconfigured():
+    """status() 在未設 endpoint 時回傳誠實的「未接入」狀態。"""
+    src = HoyaBitSource()
+    status = src.status()
+    assert status["source"] == "hoyabit"
+    assert status["ticker"]["status"] == "not_connected"
+    assert status["ticker"]["configured"] is False
+    assert "官方 endpoint 未接入" in status["ticker"]["note"]
+    assert status["depth"]["status"] == "not_implemented"
+    assert status["orderbook"]["status"] == "not_implemented"
+    assert status["trades"]["status"] == "not_implemented"
+    assert "部分接入" in status["overall"]
+    assert "待 env" in status["overall"]
+
+
+def test_hoyabit_status_configured(monkeypatch):
+    """status() 在已設 endpoint 時回傳「已接」。"""
+    monkeypatch.setenv("TRUSTFORGE_HOYABIT_TICKER_URL", "https://api.hoyabit.example/ticker")
+    src = HoyaBitSource()
+    status = src.status()
+    assert status["ticker"]["status"] == "active"
+    assert status["ticker"]["configured"] is True
+    assert status["ticker"]["enabled"] is True
+    assert "已接入" in status["ticker"]["note"]
+    # depth/orderbook/trades 仍未實作
+    assert status["depth"]["status"] == "not_implemented"
+    assert "已接" in status["overall"]

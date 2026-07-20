@@ -1,9 +1,14 @@
 """HOYA BIT connector with a fail-closed, organizer-configured contract.
 
 No endpoint is guessed or bundled.  Until the official HTTPS ticker URL is
-provided in ``TRUSTFORGE_HOYABIT_TICKER_URL`` this remains the old disabled
-sample stub.  Once configured, the scheduler fetches it through the shared
-SSRF-safe transport and emits first-party Evidence with explicit freshness.
+provided in ``TRUSTFORGE_HOYABIT_TICKER_URL`` this remains disabled.
+Once configured, the scheduler fetches it through the shared SSRF-safe
+transport and emits first-party Evidence with explicit freshness.
+
+接入狀態誠實化（issue #199）：
+  - ticker：待 env ``TRUSTFORGE_HOYABIT_TICKER_URL`` 設定後啟用
+  - depth / orderbook / trades：待官方 API 規格（issue #167）
+  - 未設定時不回傳假資料、不假裝已接
 """
 from __future__ import annotations
 
@@ -141,14 +146,66 @@ class HoyaBitSource(Source):
                   "content_reference": f"HOYA BIT official ticker {coin.upper()} price={price:g}"},
         )]
 
+    # ── 深度合約（待官方 API 規格，issue #167 / #199）─────────────────────
+    # 這些方法明確標註「待開發」狀態，不回傳假資料、不假裝已接。
+
     def get_depth(self, coin: str) -> list[Document]:
-        raise NotImplementedError("HOYA BIT depth contract is not configured")
+        """HOYA BIT depth 合約：尚未接入，等待官方 API 規格（issue #167）。"""
+        raise NotImplementedError(
+            "HOYA BIT depth 合約尚未開發：官方 API 規格待 HOYA BIT 提供。"
+            "此方法為預留介面，目前無法提供真實深度資料。"
+        )
 
     def get_orderbook(self, coin: str) -> list[Document]:
-        raise NotImplementedError("HOYA BIT orderbook contract is not configured")
+        """HOYA BIT orderbook 合約：尚未接入，等待官方 API 規格（issue #167）。"""
+        raise NotImplementedError(
+            "HOYA BIT orderbook 合約尚未開發：官方 API 規格待 HOYA BIT 提供。"
+            "此方法為預留介面，目前無法提供真實委託簿資料。"
+        )
 
     def get_trades(self, coin: str) -> list[Document]:
-        raise NotImplementedError("HOYA BIT trades contract is not configured")
+        """HOYA BIT trades 合約：尚未接入，等待官方 API 規格（issue #167）。"""
+        raise NotImplementedError(
+            "HOYA BIT trades 合約尚未開發：官方 API 規格待 HOYA BIT 提供。"
+            "此方法為預留介面，目前無法提供真實成交紀錄。"
+        )
+
+    def status(self) -> dict[str, Any]:
+        """回傳 HOYA BIT 各合約的誠實狀態摘要（issue #199）。
+
+        用途：啟動自檢、健康檢查、前端 source-status 面板。
+        """
+        ticker_configured = self.configured
+        ticker_enabled = ticker_configured and get_source_enabled(self.name)
+        return {
+            "source": "hoyabit",
+            "ticker": {
+                "status": "active" if ticker_enabled else "not_connected",
+                "configured": ticker_configured,
+                "enabled": ticker_enabled,
+                "note": (
+                    "即時 ticker 已接入" if ticker_enabled
+                    else "官方 endpoint 未接入（TRUSTFORGE_HOYABIT_TICKER_URL 未設定或無效）"
+                ),
+            },
+            "depth": {
+                "status": "not_implemented",
+                "note": "待官方 API 規格（issue #167）",
+            },
+            "orderbook": {
+                "status": "not_implemented",
+                "note": "待官方 API 規格（issue #167）",
+            },
+            "trades": {
+                "status": "not_implemented",
+                "note": "待官方 API 規格（issue #167）",
+            },
+            "overall": (
+                "📋 部分接入（ticker "
+                + ("已接" if ticker_enabled else "待 env")
+                + "，depth/orderbook/trades 待開發）"
+            ),
+        }
 
 
 def build_hoyabit_sources() -> list[Source]:
