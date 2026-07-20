@@ -231,6 +231,12 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_security_gate(args: argparse.Namespace) -> int:
+    """投稿前安全掃描（issue #205）。"""
+    from .security_gate import run_security_gate
+    return run_security_gate(out_dir=args.out)
+
+
 def cmd_qa_matrix(args: argparse.Namespace) -> int:
     """QA mini matrix：5 幣 × 3 題型退化檢查（issue #203）。"""
     from .qa_matrix import main as qa_main
@@ -282,6 +288,10 @@ def main(argv=None) -> int:
     bf.add_argument("--json", action="store_true", help="輸出 JSON")
     bf.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
     bf.set_defaults(func=cmd_backfill)
+
+    sg = sub.add_parser("security-gate", help="投稿前安全掃描：secret / 內網 reference 檢查")
+    sg.add_argument("--out", default="out", help="報告輸出目錄（預設 out/）")
+    sg.set_defaults(func=cmd_security_gate)
 
     qa = sub.add_parser("qa-matrix", help="QA mini matrix：5 幣 × 3 題型退化檢查")
     qa.add_argument("--offline", action="store_true", help="使用離線樣本資料（免 AWS）")
