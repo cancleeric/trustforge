@@ -245,7 +245,11 @@ def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) ->
     # issue #72/#132：dynamic_map 的 key 是 canonical source（見
     # `_iterate_source_reputation` 分組口徑），查表也走 canonical，避免同源
     # 大小寫/空白變體查不到先驗值、被誤當成未知來源。
-    return dynamic_map.get(_canonical_source(c.doc.source), prior)
+    dynamic_sr = dynamic_map.get(_canonical_source(c.doc.source), prior)
+    # 名人交易動態降級：即使 dynamic_map 給了較高信譽，未驗證者仍不得超過 social 等級
+    if c.doc.kind == "celebrity_trade" and not c.doc.meta.get("verified_onchain", False):
+        return min(dynamic_sr, KIND_REPUTATION.get("social", 0.35))
+    return dynamic_sr
 
 
 def _recency_decay(c: Claim, now: float, half_life_h: float | None = None) -> float:

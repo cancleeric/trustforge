@@ -2139,12 +2139,8 @@
 
 @media (max-width:1024px) {
   .hermes-frame {
-    --hermes-rail: clamp(200px, 22vw, 240px);
-    --hermes-right-rail: 0px;
-  }
-
-  .hermes-right-rail {
-    display: none !important;
+    --hermes-rail: clamp(180px, 18vw, 210px);
+    --hermes-right-rail: clamp(170px, 17vw, 200px);
   }
 }
 
