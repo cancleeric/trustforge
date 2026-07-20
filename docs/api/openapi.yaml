@@ -453,6 +453,92 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/data-plane-status:
+    get:
+      tags: [observability]
+      operationId: getDataPlaneStatus
+      summary: 資料層合併觀測（快取鮮度 + 快照狀態 + 操縱偵測模組）
+      description: |
+        合併三個觀測面向（issues #256, #257, #264）：
+        - `cache_freshness`：各來源 × 各幣種的快取鮮度狀態統計。
+        - `snapshots`：AnalysisFlow 中各幣種最新 snapshot 狀態。
+        - `manipulation_detection`：操縱偵測模組能力描述與可用偵測器清單。
+
+        不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。任一子區塊
+        讀取失敗時回傳 partial result（帶 error 欄位說明），不讓整個端點 502。
+      responses:
+        "200":
+          description: 資料層合併觀測狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          cache_freshness:
+                            type: object
+                            description: 快取鮮度摘要（freshness.dashboard 輸出）
+                          snapshots:
+                            type: object
+                            description: 各幣種最新 analysis snapshot 狀態
+                            properties:
+                              coins:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    snapshot_id:
+                                      type: string
+                                    coin:
+                                      type: string
+                                    document_count:
+                                      type: integer
+                                    created_at:
+                                      type: number
+                          manipulation_detection:
+                            type: object
+                            description: 操縱偵測模組能力描述
+                            properties:
+                              available_detectors:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    name:
+                                      type: string
+                                    description:
+                                      type: string
+                              note:
+                                type: string
+              example:
+                ok: true
+                data:
+                  cache_freshness:
+                    observed_at_epoch: 1721000000
+                    summary: {fresh: 10, stale: 5, missing: 100}
+                    rows: []
+                    recent_scheduler_runs: 0
+                    failure_labels: {}
+                  snapshots:
+                    coins:
+                      - snapshot_id: "snap-btc-abc123"
+                        coin: BTC
+                        document_count: 42
+                        created_at: 1721000000
+                  manipulation_detection:
+                    available_detectors:
+                      - name: smart_money_divergence
+                        description: "聰明錢背離（鏈上吸籌 vs 價格下跌）"
+                      - name: manipulation_burst
+                        description: "操縱風險：單源爆量（同步滑動視窗）"
+                      - name: source_self_contradiction
+                        description: "來源自我矛盾（不確定性信號）"
+                    note: "偵測結果在每次 /api/analyze 執行時即時產生，本端點僅暴露模組能力描述。"
+
   /api/analysis-flow:
     get:
       tags: [observability]

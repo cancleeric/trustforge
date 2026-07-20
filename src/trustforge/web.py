@@ -5106,6 +5106,86 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
 
 
+def _handle_api_data_plane_status() -> tuple[int, str]:
+    """GET /api/data-plane-status — 合併觀測端點（issues #256, #257, #264）。
+
+    暴露三個面向：
+      1. cache_freshness (#257)：快取鮮度摘要（各來源 × 各幣種鮮度狀態統計）。
+      2. snapshots (#256)：AnalysisFlow 中最新 snapshot 狀態（各幣種最新
+         snapshot_id、document_count、建立時間）。
+      3. manipulation_detection (#264)：操縱偵測模組能力描述與可用偵測器清單。
+
+    不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。任一子區塊
+    import/讀取失敗時回傳 partial result（帶 error 欄位說明），不讓整個端點
+    因單一依賴故障而 502。
+    """
+    data: dict = {}
+
+    # --- #257: cache_freshness ---
+    try:
+        from .freshness import dashboard as freshness_dashboard
+        from .ingestion.cache import get_cache_backend, DEFAULT_REFRESH_INTERVAL_SECONDS
+        from .schema import COIN_POOL as _coins
+
+        backend = _shared_web_cache_backend()
+        sources = list(DEFAULT_REFRESH_INTERVAL_SECONDS.keys())
+        try:
+            from .scheduler_log import get_recent_scheduler_runs
+            runs = get_recent_scheduler_runs()
+        except Exception:
+            runs = []
+        snapshot = freshness_dashboard(backend, _coins, sources, runs=runs)
+        data["cache_freshness"] = snapshot
+    except Exception as exc:
+        data["cache_freshness"] = {"error": f"讀取失敗: {type(exc).__name__}"}
+
+    # --- #256: snapshots ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            if flow._readonly_store_missing():
+                data["snapshots"] = {"coins": [], "note": "SQLite store 不存在（尚無排程執行過）"}
+            else:
+                rows = flow._conn().execute(
+                    "SELECT snapshot_id, coin, created_at, document_count "
+                    "FROM analysis_snapshots ORDER BY created_at DESC LIMIT 10"
+                ).fetchall()
+                coins_snap: dict = {}
+                for row in rows:
+                    coin = row["coin"]
+                    if coin not in coins_snap:
+                        coins_snap[coin] = {
+                            "snapshot_id": row["snapshot_id"],
+                            "coin": coin,
+                            "document_count": row["document_count"],
+                            "created_at": row["created_at"],
+                        }
+                data["snapshots"] = {"coins": list(coins_snap.values())}
+    except Exception as exc:
+        data["snapshots"] = {"error": f"讀取失敗: {type(exc).__name__}"}
+
+    # --- #264: manipulation_detection ---
+    try:
+        from .trust.insights import (
+            detect_smart_money_divergence,
+            detect_manipulation_burst,
+            detect_source_self_contradiction,
+        )
+        data["manipulation_detection"] = {
+            "available_detectors": [
+                {"name": "smart_money_divergence", "description": "聰明錢背離（鏈上吸籌 vs 價格下跌）"},
+                {"name": "manipulation_burst", "description": "操縱風險：單源爆量（同步滑動視窗）"},
+                {"name": "source_self_contradiction", "description": "來源自我矛盾（不確定性信號）"},
+            ],
+            "note": "偵測結果在每次 /api/analyze 執行時即時產生，本端點僅暴露模組能力描述。",
+        }
+    except Exception as exc:
+        data["manipulation_detection"] = {"error": f"模組載入失敗: {type(exc).__name__}"}
+
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_budget_governance() -> tuple[int, str]:
     """Read-only budget governance state (#279). No admin token required.
 
@@ -7061,6 +7141,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/data-plane-status":
+            code, body = _handle_api_data_plane_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/budget-governance":
             code, body = _handle_api_budget_governance()
