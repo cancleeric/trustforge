@@ -13,6 +13,8 @@ interface HermesTopBarProps {
   onHelp?: () => void
   beginnerMode?: boolean
   onBeginnerModeChange?: (enabled: boolean) => void
+  reducedMotion?: boolean
+  onReducedMotionToggle?: () => void
 }
 
 export default function HermesTopBar({
@@ -27,6 +29,8 @@ export default function HermesTopBar({
   onHelp,
   beginnerMode = false,
   onBeginnerModeChange,
+  reducedMotion = false,
+  onReducedMotionToggle,
 }: HermesTopBarProps) {
   const { locale, setLocale, t } = useHermesI18n()
   const navItems = [
@@ -87,6 +91,9 @@ export default function HermesTopBar({
       <div style={{ flex: 1 }} />
       <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
         {beginnerMode ? '新手模式' : '完整模式'}
+      </button>
+      <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} aria-label={reducedMotion ? '低動態模式已啟用' : '啟用低動態模式'} title={reducedMotion ? '低動態模式（點擊關閉）' : '啟用低動態模式'}>
+        {reducedMotion ? '⏸ 低動態' : '▶ 動態'}
       </button>
       <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label="開啟新手說明">？ 說明</button>
       {!beginnerMode && <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>⬡ 艦體升級</button>}

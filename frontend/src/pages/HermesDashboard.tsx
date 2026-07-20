@@ -16,6 +16,7 @@ import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
 import HermesOnboarding from '../hermes/HermesOnboarding'
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 import HermesFirstRun from '../hermes/HermesFirstRun'
+import { useReducedMotion } from '../lib/useReducedMotion'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
@@ -57,6 +58,7 @@ export default function HermesDashboard() {
   const [runtimeVersion, setRuntimeVersion] = useState('snapshot')
   const [costLedger, setCostLedger] = useState<number | null>(null)
   const [startupComplete, setStartupComplete] = useState(qaMode)
+  const { reducedMotion, toggle: toggleReducedMotion } = useReducedMotion()
   const [serviceMonitor, setServiceMonitor] = useState<Record<string, ServiceMonitorState>>({
     overview: 'checking', health: 'checking', sources: 'checking', history: 'checking', costs: 'checking',
   })
@@ -508,7 +510,7 @@ export default function HermesDashboard() {
         <div style={{ position: 'absolute', right: 6, bottom: 6, width: 34, height: 34, pointerEvents: 'none', zIndex: 11, borderBottom: '2px solid rgba(77,216,224,.55)', borderRight: '2px solid rgba(77,216,224,.55)', boxShadow: '2px 2px 10px rgba(77,216,224,.2)' }} />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} />
+          <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} reducedMotion={reducedMotion} onReducedMotionToggle={toggleReducedMotion} />
         </div>
 
         <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>

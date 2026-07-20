@@ -1163,11 +1163,40 @@
 
 /* 尊重 reduce-motion：關掉所有裝飾動畫，資訊層不受影響 */
 @media (prefers-reduced-motion: reduce) {
-  .hermes-root * {
+  .hermes-root *,
+  .hermes-root *::before,
+  .hermes-root *::after {
     animation: none !important;
     transition: none !important;
   }
 }
+
+/* 使用者手動切換的低動態模式（data-reduced-motion on <html>） */
+:root[data-reduced-motion] .hermes-root *,
+:root[data-reduced-motion] .hermes-root *::before,
+:root[data-reduced-motion] .hermes-root *::after,
+:root[data-reduced-motion] .bridge-workspace *,
+:root[data-reduced-motion] .bridge-workspace *::before,
+:root[data-reduced-motion] .bridge-workspace *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* 低動態時跳過啟動序列延遲：startup 直接顯示完成狀態 */
+@media (prefers-reduced-motion: reduce) {
+  .hermes-startup-progress i { transition: none !important; }
+  .hermes-data-swap { animation: none !important; transition: none !important; }
+}
+:root[data-reduced-motion] .hermes-startup-progress i { transition: none !important; }
+:root[data-reduced-motion] .hermes-data-swap { animation: none !important; transition: none !important; }
+
+/* 保留功能性 opacity（不影響 hover/focus 等狀態指示，只停止滑動動畫） */
+@media (prefers-reduced-motion: reduce) {
+  .hermes-energy-station::after { transition: opacity 0s !important; }
+  .hermes-row-hover { transition: none !important; }
+}
+:root[data-reduced-motion] .hermes-energy-station::after { transition: opacity 0s !important; }
+:root[data-reduced-motion] .hermes-row-hover { transition: none !important; }
 
 /* 艦橋永遠維持單一 1440×900 座標系；外層依 viewport 等比縮放。 */
 

@@ -231,6 +231,12 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_qa_matrix(args: argparse.Namespace) -> int:
+    """QA mini matrix：5 幣 × 3 題型退化檢查（issue #203）。"""
+    from .qa_matrix import main as qa_main
+    return qa_main(offline=args.offline, data_dir=args.data_dir, out_dir=args.out)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="trustforge",
@@ -276,6 +282,12 @@ def main(argv=None) -> int:
     bf.add_argument("--json", action="store_true", help="輸出 JSON")
     bf.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
     bf.set_defaults(func=cmd_backfill)
+
+    qa = sub.add_parser("qa-matrix", help="QA mini matrix：5 幣 × 3 題型退化檢查")
+    qa.add_argument("--offline", action="store_true", help="使用離線樣本資料（免 AWS）")
+    qa.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
+    qa.add_argument("--out", default="out", help="輸出目錄（預設 out/）")
+    qa.set_defaults(func=cmd_qa_matrix)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):
