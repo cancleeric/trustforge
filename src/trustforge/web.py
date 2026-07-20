@@ -5328,6 +5328,115 @@ def _handle_api_improvement_diagnostics() -> tuple[int, str]:
         return 502, _json_envelope_err("improvement_unavailable", "改善診斷暫時無法讀取")
 
 
+def _handle_api_evidence_quality() -> tuple[int, str]:
+    """GET /api/evidence-quality — Evidence 組裝品質追蹤 (#253)。
+
+    從最近 20 個 completed jobs 讀取 evidence 統計，計算：
+      - completeness: 必填欄位（source/fetched_at/content_reference/related_claim）非空比例
+      - source_diversity: unique source 數 / total evidence 數
+      - avg_evidence_count: 平均每個 job 的 evidence 筆數
+      - freshness: 平均資料齡（秒，從 fetched_at 到現在）
+    """
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            if flow._readonly_store_missing():
+                return 200, _json_envelope_ok({
+                    "status": "no_data",
+                    "message": "尚無已完成的分析 jobs。",
+                    "jobs_sampled": 0,
+                    "completeness": None,
+                    "source_diversity": None,
+                    "avg_evidence_count": None,
+                    "freshness_avg_seconds": None,
+                })
+            conn = flow._conn()
+            rows = conn.execute(
+                "SELECT payload_json FROM analysis_results ORDER BY published_at DESC LIMIT 20",
+            ).fetchall()
+
+        if not rows:
+            return 200, _json_envelope_ok({
+                "status": "no_data",
+                "message": "尚無已完成的分析 jobs。",
+                "jobs_sampled": 0,
+                "completeness": None,
+                "source_diversity": None,
+                "avg_evidence_count": None,
+                "freshness_avg_seconds": None,
+            })
+
+        now = time.time()
+        _REQUIRED_FIELDS = ("source", "fetched_at", "content_reference", "related_claim")
+        total_evidence = 0
+        total_complete_fields = 0
+        total_required_checks = 0
+        all_sources: set[str] = set()
+        evidence_counts: list[int] = []
+        freshness_deltas: list[float] = []
+
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            evidence_list = payload.get("evidence", [])
+            evidence_counts.append(len(evidence_list))
+            for ev in evidence_list:
+                total_evidence += 1
+                src = ev.get("source", "")
+                if src:
+                    all_sources.add(src)
+                for fld in _REQUIRED_FIELDS:
+                    total_required_checks += 1
+                    val = ev.get(fld, "")
+                    if val:
+                        total_complete_fields += 1
+                # freshness: parse fetched_at ISO8601
+                fetched_at = ev.get("fetched_at", "")
+                if fetched_at:
+                    try:
+                        from datetime import datetime, timezone
+                        dt = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+                        delta = now - dt.timestamp()
+                        if delta >= 0:
+                            freshness_deltas.append(delta)
+                    except (ValueError, OverflowError):
+                        pass
+
+        completeness = (
+            round(total_complete_fields / total_required_checks, 4)
+            if total_required_checks > 0 else None
+        )
+        source_diversity = (
+            round(len(all_sources) / total_evidence, 4)
+            if total_evidence > 0 else None
+        )
+        avg_evidence_count = (
+            round(sum(evidence_counts) / len(evidence_counts), 2)
+            if evidence_counts else None
+        )
+        freshness_avg_seconds = (
+            round(sum(freshness_deltas) / len(freshness_deltas), 1)
+            if freshness_deltas else None
+        )
+
+        return 200, _json_envelope_ok({
+            "status": "ok",
+            "jobs_sampled": len(rows),
+            "total_evidence": total_evidence,
+            "unique_sources": len(all_sources),
+            "completeness": completeness,
+            "source_diversity": source_diversity,
+            "avg_evidence_count": avg_evidence_count,
+            "freshness_avg_seconds": freshness_avg_seconds,
+        })
+    except Exception:
+        logging.exception("TrustForge /api/evidence-quality error")
+        return 502, _json_envelope_err("evidence_quality_unavailable", "Evidence 品質指標暫時無法讀取")
+
+
 def _handle_api_alerts_operations() -> tuple[int, str]:
     """Read-only alert state + operational runbook references (#274)."""
     try:
@@ -7221,6 +7330,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/improvement-diagnostics":
             code, body = _handle_api_improvement_diagnostics()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/evidence-quality":
+            code, body = _handle_api_evidence_quality()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/alerts-operations":
             code, body = _handle_api_alerts_operations()
