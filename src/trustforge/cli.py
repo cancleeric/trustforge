@@ -99,6 +99,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_smoke(args: argparse.Namespace) -> int:
+    """Bedrock smoke test：驗證 AWS Bedrock 連線可用（issue #202）。"""
+    # 直接使用 smoke 模組的邏輯（避免依賴 scripts/ 路徑）
+    from .smoke import run_smoke
+    return run_smoke(out_dir=args.out)
+
+
 def cmd_control(args: argparse.Namespace) -> int:
     if args.action in {"start", "stop"}:
         control = set_runtime_enabled(
@@ -224,6 +231,18 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_security_gate(args: argparse.Namespace) -> int:
+    """投稿前安全掃描（issue #205）。"""
+    from .security_gate import run_security_gate
+    return run_security_gate(out_dir=args.out)
+
+
+def cmd_qa_matrix(args: argparse.Namespace) -> int:
+    """QA mini matrix：5 幣 × 3 題型退化檢查（issue #203）。"""
+    from .qa_matrix import main as qa_main
+    return qa_main(offline=args.offline, data_dir=args.data_dir, out_dir=args.out)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="trustforge",
@@ -254,6 +273,10 @@ def main(argv=None) -> int:
     c.add_argument("--json", action="store_true", help="輸出 JSON 狀態")
     c.set_defaults(func=cmd_control)
 
+    s = sub.add_parser("smoke", help="Bedrock smoke test：驗證 AWS Bedrock 連線可用")
+    s.add_argument("--out", default="out", help="Artifact 輸出目錄（預設 out/）")
+    s.set_defaults(func=cmd_smoke)
+
     bf = sub.add_parser("backfill", help="歷史回填系統：用 5 年 OHLCV 逐日產 snapshot 累積校準資料")
     bf.add_argument("action", choices=["start", "stop", "status", "plan", "reset-failed"])
     bf.add_argument("--coin", default=None, help="幣種（逗號分隔，如 BTC,ETH；預設全部）")
@@ -265,6 +288,16 @@ def main(argv=None) -> int:
     bf.add_argument("--json", action="store_true", help="輸出 JSON")
     bf.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
     bf.set_defaults(func=cmd_backfill)
+
+    sg = sub.add_parser("security-gate", help="投稿前安全掃描：secret / 內網 reference 檢查")
+    sg.add_argument("--out", default="out", help="報告輸出目錄（預設 out/）")
+    sg.set_defaults(func=cmd_security_gate)
+
+    qa = sub.add_parser("qa-matrix", help="QA mini matrix：5 幣 × 3 題型退化檢查")
+    qa.add_argument("--offline", action="store_true", help="使用離線樣本資料（免 AWS）")
+    qa.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
+    qa.add_argument("--out", default="out", help="輸出目錄（預設 out/）")
+    qa.set_defaults(func=cmd_qa_matrix)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):

@@ -57,6 +57,7 @@ from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
     DEFAULT_BEDROCK_DAILY_USD_CAP,
+    daily_cap_exceeded,
     daily_cap_usd_resolved,
     online_stance_requested,
     warn_if_bedrock_model_unpriced,
@@ -5094,6 +5095,74 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
     }
 
 
+def _handle_api_operations_status() -> tuple[int, str]:
+    """GET /api/operations-status — Operations plane: schema migration 追蹤 (#277)、
+    權限審計 (#276)、品質 gate 狀態 (#270)。
+
+    ⚠️ 安全注意（#276）：auth_audit 只暴露 boolean（token 是否已設），
+    **絕不暴露 token 值本身**。
+    """
+    data: dict = {}
+
+    # --- #277: schema migration 與相容性追蹤 ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            conn = flow._conn()
+            tables = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                ).fetchall()
+            ]
+            # 讀 user_version pragma 當作 schema 版本追蹤
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            data["schema"] = {
+                "sqlite_path": str(flow.path),
+                "tables": tables,
+                "table_count": len(tables),
+                "user_version": user_version,
+                "status": "ok",
+            }
+    except Exception as exc:
+        data["schema"] = {"status": "error", "error": str(type(exc).__name__)}
+
+    # --- #276: 權限審計（只暴露 boolean，絕不暴露值） ---
+    data["auth_audit"] = {
+        "admin_token_set": bool(os.getenv("TRUSTFORGE_ADMIN_TOKEN", "").strip()),
+        "live_token_set": bool(os.getenv("TRUSTFORGE_LIVE_TOKEN", "").strip()),
+        "trust_proxy": TRUST_PROXY,
+        "bind_host": os.getenv("TRUSTFORGE_BIND_HOST", "0.0.0.0"),
+    }
+
+    # --- #270: 評測題庫品質 gate ---
+    try:
+        qb_path = Path(__file__).resolve().parents[2] / "out" / "question-bank-latest.json"
+        if qb_path.is_file():
+            import json as _json
+
+            qb_data = _json.loads(qb_path.read_text(encoding="utf-8"))
+            # 摘要：pass/fail 計數
+            results = qb_data if isinstance(qb_data, list) else qb_data.get("results", [])
+            total = len(results)
+            passed = sum(1 for r in results if r.get("pass") or r.get("passed"))
+            data["quality_gate"] = {
+                "status": "ok",
+                "source": str(qb_path),
+                "total": total,
+                "passed": passed,
+                "failed": total - passed,
+                "pass_rate": round(passed / total, 4) if total > 0 else None,
+            }
+        else:
+            data["quality_gate"] = {"status": "no_data", "source": str(qb_path)}
+    except Exception as exc:
+        data["quality_gate"] = {"status": "error", "error": str(type(exc).__name__)}
+
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
     """Read-only Hermes worker/queue telemetry. UI polling never starts analysis."""
     try:
@@ -5103,6 +5172,86 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
     except Exception:
         logging.exception("TrustForge /api/analysis-flow error")
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
+
+
+def _handle_api_data_plane_status() -> tuple[int, str]:
+    """GET /api/data-plane-status — 合併觀測端點（issues #256, #257, #264）。
+
+    暴露三個面向：
+      1. cache_freshness (#257)：快取鮮度摘要（各來源 × 各幣種鮮度狀態統計）。
+      2. snapshots (#256)：AnalysisFlow 中最新 snapshot 狀態（各幣種最新
+         snapshot_id、document_count、建立時間）。
+      3. manipulation_detection (#264)：操縱偵測模組能力描述與可用偵測器清單。
+
+    不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。任一子區塊
+    import/讀取失敗時回傳 partial result（帶 error 欄位說明），不讓整個端點
+    因單一依賴故障而 502。
+    """
+    data: dict = {}
+
+    # --- #257: cache_freshness ---
+    try:
+        from .freshness import dashboard as freshness_dashboard
+        from .ingestion.cache import get_cache_backend, DEFAULT_REFRESH_INTERVAL_SECONDS
+        from .schema import COIN_POOL as _coins
+
+        backend = _shared_web_cache_backend()
+        sources = list(DEFAULT_REFRESH_INTERVAL_SECONDS.keys())
+        try:
+            from .scheduler_log import get_recent_scheduler_runs
+            runs = get_recent_scheduler_runs()
+        except Exception:
+            runs = []
+        snapshot = freshness_dashboard(backend, _coins, sources, runs=runs)
+        data["cache_freshness"] = snapshot
+    except Exception as exc:
+        data["cache_freshness"] = {"error": f"讀取失敗: {type(exc).__name__}"}
+
+    # --- #256: snapshots ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            if flow._readonly_store_missing():
+                data["snapshots"] = {"coins": [], "note": "SQLite store 不存在（尚無排程執行過）"}
+            else:
+                rows = flow._conn().execute(
+                    "SELECT snapshot_id, coin, created_at, document_count "
+                    "FROM analysis_snapshots ORDER BY created_at DESC LIMIT 10"
+                ).fetchall()
+                coins_snap: dict = {}
+                for row in rows:
+                    coin = row["coin"]
+                    if coin not in coins_snap:
+                        coins_snap[coin] = {
+                            "snapshot_id": row["snapshot_id"],
+                            "coin": coin,
+                            "document_count": row["document_count"],
+                            "created_at": row["created_at"],
+                        }
+                data["snapshots"] = {"coins": list(coins_snap.values())}
+    except Exception as exc:
+        data["snapshots"] = {"error": f"讀取失敗: {type(exc).__name__}"}
+
+    # --- #264: manipulation_detection ---
+    try:
+        from .trust.insights import (
+            detect_smart_money_divergence,
+            detect_manipulation_burst,
+            detect_source_self_contradiction,
+        )
+        data["manipulation_detection"] = {
+            "available_detectors": [
+                {"name": "smart_money_divergence", "description": "聰明錢背離（鏈上吸籌 vs 價格下跌）"},
+                {"name": "manipulation_burst", "description": "操縱風險：單源爆量（同步滑動視窗）"},
+                {"name": "source_self_contradiction", "description": "來源自我矛盾（不確定性信號）"},
+            ],
+            "note": "偵測結果在每次 /api/analyze 執行時即時產生，本端點僅暴露模組能力描述。",
+        }
+    except Exception as exc:
+        data["manipulation_detection"] = {"error": f"模組載入失敗: {type(exc).__name__}"}
+
+    return 200, _json_envelope_ok(data)
 
 
 def _handle_api_budget_governance() -> tuple[int, str]:
@@ -5156,6 +5305,384 @@ def _budget_spent_today() -> float:
     """Helper: read today's Bedrock spend from ledger."""
     from .budget_guard import daily_cost_usd
     return daily_cost_usd()
+
+
+
+def _handle_api_improvement_diagnostics() -> tuple[int, str]:
+    """Read-only improvement diagnostics (#278). Returns latest diagnose output."""
+    try:
+        report_path = Path(os.getenv(
+            "TRUSTFORGE_HOME",
+            str(Path(__file__).resolve().parents[2]),
+        )) / "out" / "hermes-improvement-latest.json"
+        if not report_path.is_file():
+            return 200, _json_envelope_ok({
+                "status": "no_diagnostic_available",
+                "proposals": [],
+                "message": "尚無診斷報告。執行 scripts/diagnose_hermes.py 或等待 daemon 自動產出。",
+            })
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        return 200, _json_envelope_ok(payload)
+    except Exception:
+        logging.exception("TrustForge /api/improvement-diagnostics error")
+        return 502, _json_envelope_err("improvement_unavailable", "改善診斷暫時無法讀取")
+
+
+def _handle_api_evidence_quality() -> tuple[int, str]:
+    """GET /api/evidence-quality — Evidence 組裝品質追蹤 (#253)。
+
+    從最近 20 個 completed jobs 讀取 evidence 統計，計算：
+      - completeness: 必填欄位（source/fetched_at/content_reference/related_claim）非空比例
+      - source_diversity: unique source 數 / total evidence 數
+      - avg_evidence_count: 平均每個 job 的 evidence 筆數
+      - freshness: 平均資料齡（秒，從 fetched_at 到現在）
+    """
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            if flow._readonly_store_missing():
+                return 200, _json_envelope_ok({
+                    "status": "no_data",
+                    "message": "尚無已完成的分析 jobs。",
+                    "jobs_sampled": 0,
+                    "completeness": None,
+                    "source_diversity": None,
+                    "avg_evidence_count": None,
+                    "freshness_avg_seconds": None,
+                })
+            conn = flow._conn()
+            rows = conn.execute(
+                "SELECT payload_json FROM analysis_results ORDER BY published_at DESC LIMIT 20",
+            ).fetchall()
+
+        if not rows:
+            return 200, _json_envelope_ok({
+                "status": "no_data",
+                "message": "尚無已完成的分析 jobs。",
+                "jobs_sampled": 0,
+                "completeness": None,
+                "source_diversity": None,
+                "avg_evidence_count": None,
+                "freshness_avg_seconds": None,
+            })
+
+        now = time.time()
+        _REQUIRED_FIELDS = ("source", "fetched_at", "content_reference", "related_claim")
+        total_evidence = 0
+        total_complete_fields = 0
+        total_required_checks = 0
+        all_sources: set[str] = set()
+        evidence_counts: list[int] = []
+        freshness_deltas: list[float] = []
+
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            evidence_list = payload.get("evidence", [])
+            evidence_counts.append(len(evidence_list))
+            for ev in evidence_list:
+                total_evidence += 1
+                src = ev.get("source", "")
+                if src:
+                    all_sources.add(src)
+                for fld in _REQUIRED_FIELDS:
+                    total_required_checks += 1
+                    val = ev.get(fld, "")
+                    if val:
+                        total_complete_fields += 1
+                # freshness: parse fetched_at ISO8601
+                fetched_at = ev.get("fetched_at", "")
+                if fetched_at:
+                    try:
+                        from datetime import datetime, timezone
+                        dt = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+                        delta = now - dt.timestamp()
+                        if delta >= 0:
+                            freshness_deltas.append(delta)
+                    except (ValueError, OverflowError):
+                        pass
+
+        completeness = (
+            round(total_complete_fields / total_required_checks, 4)
+            if total_required_checks > 0 else None
+        )
+        source_diversity = (
+            round(len(all_sources) / total_evidence, 4)
+            if total_evidence > 0 else None
+        )
+        avg_evidence_count = (
+            round(sum(evidence_counts) / len(evidence_counts), 2)
+            if evidence_counts else None
+        )
+        freshness_avg_seconds = (
+            round(sum(freshness_deltas) / len(freshness_deltas), 1)
+            if freshness_deltas else None
+        )
+
+        return 200, _json_envelope_ok({
+            "status": "ok",
+            "jobs_sampled": len(rows),
+            "total_evidence": total_evidence,
+            "unique_sources": len(all_sources),
+            "completeness": completeness,
+            "source_diversity": source_diversity,
+            "avg_evidence_count": avg_evidence_count,
+            "freshness_avg_seconds": freshness_avg_seconds,
+        })
+    except Exception:
+        logging.exception("TrustForge /api/evidence-quality error")
+        return 502, _json_envelope_err("evidence_quality_unavailable", "Evidence 品質指標暫時無法讀取")
+
+
+def _handle_api_delivery_status() -> tuple[int, str]:
+    """GET /api/delivery-status — Delivery plane: 報告敘事品質與引用格式追蹤
+    (#268, #269)。
+
+    report_narrative: 從 AnalysisFlow(readonly=True) 讀取最近 10 個 completed
+    jobs，提取報告摘要資訊（coin, mode, word_count, has_contrarian_evidence,
+    has_provenance）。
+    citation_format: 從 run_skill_manifest() 讀取 report/evaluation 相關
+    outer skill 的 revision。
+    """
+    data: dict = {}
+
+    # --- #268: report_narrative ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        latest_reports: list[dict] = []
+        with AnalysisFlow(readonly=True) as flow:
+            if not flow._readonly_store_missing():
+                conn = flow._conn()
+                rows = conn.execute(
+                    "SELECT payload_json, coin, mode FROM analysis_results "
+                    "ORDER BY published_at DESC LIMIT 10",
+                ).fetchall()
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    report = payload.get("report", {})
+                    evidence_list = payload.get("evidence", [])
+                    # word_count: market_judgment + facts + inferences 合計字數
+                    text_parts = [report.get("market_judgment", "")]
+                    text_parts.extend(report.get("facts", []))
+                    text_parts.extend(report.get("inferences", []))
+                    word_count = sum(len(p) for p in text_parts if p)
+                    # has_contrarian_evidence: contrarian 非空
+                    has_contrarian = bool(report.get("contrarian"))
+                    # has_provenance: 至少一筆 evidence 有 source_url
+                    has_provenance = any(
+                        ev.get("source_url") for ev in evidence_list
+                    )
+                    latest_reports.append({
+                        "coin": row["coin"],
+                        "mode": row["mode"],
+                        "word_count": word_count,
+                        "has_contrarian_evidence": has_contrarian,
+                        "has_provenance": has_provenance,
+                    })
+        data["report_narrative"] = {
+            "latest_reports": latest_reports,
+            "delivery_version": VERSION,
+        }
+    except Exception as exc:
+        data["report_narrative"] = {
+            "latest_reports": [],
+            "delivery_version": VERSION,
+            "error": f"讀取失敗: {type(exc).__name__}",
+        }
+
+    # --- #269: citation_format ---
+    try:
+        from .skills import run_skill_manifest
+
+        manifest = run_skill_manifest()
+        outer_skills = manifest.get("outer_skills", [])
+        # 提取 report/evaluation 相關 skill entries
+        citation_skills = [
+            {"family": s["family"], "revision": s["revision"], "origin": s["origin"]}
+            for s in outer_skills
+            if s.get("family") in ("report", "evaluation")
+        ]
+        data["citation_format"] = {
+            "skills": citation_skills,
+            "status": "active",
+        }
+    except Exception as exc:
+        data["citation_format"] = {
+            "skills": [],
+            "status": "error",
+            "error": f"讀取失敗: {type(exc).__name__}",
+        }
+
+    return 200, _json_envelope_ok(data)
+
+
+def _handle_api_memory_strategy() -> tuple[int, str]:
+    """GET /api/memory-strategy — h-obsidian 記憶策略模組接入觀測層 (#275)。
+
+    暴露 Hermes agent 的記憶策略狀態：
+    - strategy: 從 hermes.manifest()['autonomy'] 讀取跨跑間記憶規則
+    - snapshot_stats: 從 AnalysisFlow(readonly=True) 的 analysis_snapshots 表讀取統計
+    - backfill_stats: 從 backfill.py 的 BackfillWorker DB 讀取（DB 不存在回 null）
+
+    不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。
+    """
+    data: dict = {}
+
+    # --- strategy: 從 hermes.manifest()['autonomy'] 讀取 ---
+    try:
+        from .hermes import manifest as hermes_manifest
+
+        autonomy = hermes_manifest().get("autonomy", {})
+        data["strategy"] = {
+            "cross_run_memory": autonomy.get(
+                "cross_run_memory",
+                "research snapshots only; formal conclusions are run-isolated",
+            ),
+            "formal_run_rule": autonomy.get(
+                "formal_run_rule",
+                "select only snapshots and source records at or before run_started_at",
+            ),
+            "no_unbounded_network_access": autonomy.get("no_unbounded_network_access", True),
+        }
+    except Exception:
+        data["strategy"] = {
+            "cross_run_memory": "research snapshots only; formal conclusions are run-isolated",
+            "formal_run_rule": "select only snapshots and source records at or before run_started_at",
+            "no_unbounded_network_access": True,
+        }
+
+    # --- snapshot_stats: 從 AnalysisFlow analysis_snapshots 表讀取 ---
+    try:
+        from .analysis_flow import AnalysisFlow
+
+        with AnalysisFlow(readonly=True) as flow:
+            if flow._readonly_store_missing():
+                data["snapshot_stats"] = None
+            else:
+                conn = flow._conn()
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM analysis_snapshots"
+                ).fetchone()[0]
+                coins_rows = conn.execute(
+                    "SELECT DISTINCT coin FROM analysis_snapshots ORDER BY coin"
+                ).fetchall()
+                coins_covered = [row[0] for row in coins_rows]
+                oldest_row = conn.execute(
+                    "SELECT MIN(created_at) FROM analysis_snapshots"
+                ).fetchone()
+                newest_row = conn.execute(
+                    "SELECT MAX(created_at) FROM analysis_snapshots"
+                ).fetchone()
+                oldest_at = oldest_row[0] if oldest_row and oldest_row[0] else None
+                newest_at = newest_row[0] if newest_row and newest_row[0] else None
+                # Convert epoch to ISO string if available
+                from datetime import datetime, timezone
+
+                oldest_iso = (
+                    datetime.fromtimestamp(oldest_at, tz=timezone.utc).isoformat()
+                    if oldest_at else None
+                )
+                newest_iso = (
+                    datetime.fromtimestamp(newest_at, tz=timezone.utc).isoformat()
+                    if newest_at else None
+                )
+                data["snapshot_stats"] = {
+                    "total_snapshots": total,
+                    "coins_covered": coins_covered,
+                    "oldest_snapshot_at": oldest_iso,
+                    "newest_snapshot_at": newest_iso,
+                }
+    except Exception:
+        data["snapshot_stats"] = None
+
+    # --- backfill_stats: 從 backfill.py DB 讀取 ---
+    try:
+        from .backfill import _db_path as backfill_db_path
+
+        bf_path = backfill_db_path()
+        if not bf_path.exists():
+            data["backfill_stats"] = None
+        else:
+            import sqlite3
+
+            conn = sqlite3.connect(
+                f"file:{bf_path}?mode=ro", uri=True, timeout=2,
+                isolation_level=None, check_same_thread=False,
+            )
+            try:
+                completed = conn.execute(
+                    "SELECT COUNT(*) FROM backfill_tasks WHERE state='completed'"
+                ).fetchone()[0]
+                pending = conn.execute(
+                    "SELECT COUNT(*) FROM backfill_tasks WHERE state='pending'"
+                ).fetchone()[0]
+                data["backfill_stats"] = {
+                    "total_completed": completed,
+                    "total_pending": pending,
+                }
+            finally:
+                conn.close()
+    except Exception:
+        data["backfill_stats"] = None
+
+    return 200, _json_envelope_ok(data)
+
+
+def _handle_api_alerts_operations() -> tuple[int, str]:
+    """Read-only alert state + operational runbook references (#274)."""
+    try:
+        dedup_incident = False
+        dedup_recent_failures = 0
+        try:
+            dedup_incident = _dedup_prep_failure_incident_active
+            with _dedup_prep_failure_lock:
+                now = time.monotonic()
+                dedup_recent_failures = sum(
+                    1 for ts in _dedup_prep_failure_timestamps
+                    if now - ts <= _DEDUP_PREP_FAILURE_WINDOW_SEC
+                )
+        except Exception:
+            pass
+        budget_exceeded = False
+        try:
+            budget_exceeded = daily_cap_exceeded()
+        except Exception:
+            pass
+        cw_enabled = os.getenv("TRUSTFORGE_CW_METRICS", "").strip().lower() in {
+            "1", "true", "yes", "on", "dynamodb",
+        }
+        data = {
+            "alerts": {
+                "dedup_fail_open": {
+                    "incident_active": dedup_incident,
+                    "recent_failures": dedup_recent_failures,
+                    "threshold": _DEDUP_PREP_FAILURE_ALERT_THRESHOLD,
+                    "window_sec": _DEDUP_PREP_FAILURE_WINDOW_SEC,
+                    "cooldown_sec": _DEDUP_PREP_FAILURE_ALERT_COOLDOWN_SEC,
+                },
+                "budget_cap_exceeded": {"active": budget_exceeded},
+            },
+            "observability": {
+                "cloudwatch_metrics_enabled": cw_enabled,
+                "log_alert_prefix": "ALERT: TrustForge",
+            },
+            "runbooks": {
+                "dedup_fail_open": "deploy/put_dedup_alarm.sh — CloudWatch Alarm 設定",
+                "budget_exceeded": "設 TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 緊急全關",
+                "bedrock_offline": "確認 BEDROCK_MODEL_ID + AWS 憑證",
+            },
+        }
+        return 200, _json_envelope_ok(data)
+    except Exception:
+        logging.exception("TrustForge /api/alerts-operations error")
+        return 502, _json_envelope_err("alerts_unavailable", "告警狀態暫時無法讀取")
 
 
 def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
@@ -5431,6 +5958,93 @@ def _handle_api_analysis_requeue(headers, rfile, client_ip: str = "") -> tuple[i
     except Exception:
         logging.exception("TrustForge analysis requeue error")
         return 502, _json_envelope_err("analysis_queue_unavailable", "重新排程失敗")
+
+
+def _handle_api_intelligence_status() -> tuple[int, str]:
+    """Intelligence plane observability (#259, #262, #265).
+
+    Read-only, no admin token required. Exposes:
+      - skills: outer skill manifest (from trustforge.skills)
+      - tools: Hermes tool registry (from trustforge.hermes)
+      - claim_extraction: latest claim_extraction stage state from AnalysisFlow
+    """
+    data: dict = {}
+    # --- skills (#265) ---
+    try:
+        from .skills import run_skill_manifest
+        data["skills"] = run_skill_manifest()
+    except Exception:
+        data["skills"] = None
+
+    # --- tools (#259) ---
+    try:
+        from .hermes import HERMES_TOOLS
+        from dataclasses import asdict
+        data["tools"] = [asdict(t) for t in HERMES_TOOLS]
+    except Exception:
+        data["tools"] = None
+
+    # --- claim_extraction (#262) ---
+    try:
+        from .analysis_flow import AnalysisFlow
+        with AnalysisFlow(readonly=True) as flow:
+            status = flow.status()
+            stages = status.get("stages") or []
+            ce_stage = next(
+                (s for s in stages if s.get("id") == "claim_extraction"), None
+            )
+            data["claim_extraction"] = ce_stage
+    except Exception:
+        data["claim_extraction"] = None
+
+    return 200, _json_envelope_ok(data)
+
+
+def _handle_api_prompt_versions() -> tuple[int, str]:
+    """GET /api/prompt-versions：暴露當前所有 prompt template 的版本資訊。
+
+    回傳每個可識別的 prompt template 的名稱、用途描述與 SHA-256 hash，
+    供外部比對「這次產出是用哪個版本的 prompt」。不需 admin token、不觸發
+    任何連接器/Bedrock 呼叫（純記憶體計算）。
+    """
+    from .agent import orchestrator as _orch
+
+    templates: list[dict] = []
+
+    # 1. SYSTEM — 主行文 system prompt
+    templates.append({
+        "name": "SYSTEM",
+        "purpose": "Step 3 帶溯源行文的 system prompt（指示 LLM 只依據已信任加權證據作答）",
+        "sha256_hash": hashlib.sha256(_orch.SYSTEM.encode("utf-8")).hexdigest(),
+    })
+
+    # 2. _STEP4_SYSTEM — 限制複審 system prompt
+    templates.append({
+        "name": "_STEP4_SYSTEM",
+        "purpose": "Step 4 限制複審的 system prompt（審查報告限制是否完整）",
+        "sha256_hash": hashlib.sha256(_orch._STEP4_SYSTEM.encode("utf-8")).hexdigest(),
+    })
+
+    # 3. _PROMPT_INJECTION_RE — prompt injection 偵測正則
+    templates.append({
+        "name": "_PROMPT_INJECTION_RE",
+        "purpose": "Prompt injection 偵測正則表達式（用於 untrusted 資料過濾）",
+        "sha256_hash": hashlib.sha256(
+            _orch._PROMPT_INJECTION_RE.pattern.encode("utf-8")
+        ).hexdigest(),
+    })
+
+    # 4. orchestrator.py 整體檔案 hash（捕捉 inline f-string prompt 變更）
+    orch_path = Path(_orch.__file__)
+    if orch_path.exists():
+        orch_bytes = orch_path.read_bytes()
+        templates.append({
+            "name": "orchestrator_module",
+            "purpose": "agent/orchestrator.py 整體檔案 hash（含所有 inline prompt template）",
+            "sha256_hash": hashlib.sha256(orch_bytes).hexdigest(),
+        })
+
+    return 200, _json_envelope_ok({"templates": templates})
 
 
 def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
@@ -5950,6 +6564,63 @@ def _handle_api_history(qs: dict, client_ip: str = "") -> tuple[int, str]:
     except Exception:
         logging.exception("TrustForge /api/history error")
         return 502, _json_envelope_err("upstream_error", "歷史資料暫時無法讀取，請稍後再試")
+
+
+def _handle_api_rate_limit_status() -> tuple[int, str]:
+    """`/api/rate-limit-status`：暴露目前各限流 bucket 的設定與即時統計。
+
+    唯讀觀測端點，不需 admin token。回傳每個 bucket 的設定值（window/max）
+    以及目前追蹤的 IP 數量與各 IP 的計數（不暴露完整 IP，只暴露計數）。
+    """
+    now = time.time()
+
+    def _bucket_stats(
+        buckets: dict[str, list[float]], window: float, lock: threading.Lock
+    ) -> dict[str, Any]:
+        with lock:
+            active_ips = 0
+            total_requests = 0
+            for ts_list in buckets.values():
+                active = [t for t in ts_list if now - t < window]
+                if active:
+                    active_ips += 1
+                    total_requests += len(active)
+            return {
+                "active_ips": active_ips,
+                "total_requests_in_window": total_requests,
+                "tracked_ips": len(buckets),
+            }
+
+    data = {
+        "buckets": {
+            "live": {
+                "window_seconds": _RATE_WINDOW,
+                "max_requests_per_ip": _RATE_MAX,
+                "stats": _bucket_stats(_rate_buckets, _RATE_WINDOW, _rate_lock),
+            },
+            "real": {
+                "window_seconds": _REAL_RATE_WINDOW,
+                "max_requests_per_ip": _REAL_RATE_MAX,
+                "stats": _bucket_stats(_real_rate_buckets, _REAL_RATE_WINDOW, _real_rate_lock),
+            },
+            "status": {
+                "window_seconds": _STATUS_RATE_WINDOW,
+                "max_requests_per_ip": _STATUS_RATE_MAX,
+                "stats": _bucket_stats(_status_rate_buckets, _STATUS_RATE_WINDOW, _status_rate_lock),
+            },
+            "online_stance": {
+                "window_seconds": _ONLINE_STANCE_RATE_WINDOW,
+                "max_requests_per_ip": _ONLINE_STANCE_RATE_MAX,
+                "stats": _bucket_stats(
+                    _online_stance_rate_buckets,
+                    _ONLINE_STANCE_RATE_WINDOW,
+                    _online_stance_rate_lock,
+                ),
+            },
+        },
+        "max_tracked_ips": _RATE_LIMIT_MAX_TRACKED_IPS,
+    }
+    return 200, _json_envelope_ok(data)
 
 
 def _handle_api_health() -> tuple[int, str]:
@@ -6640,6 +7311,10 @@ class Handler(BaseHTTPRequestHandler):
         _send_path = urlparse(getattr(self, "path", "") or "").path
         if (_send_path + "/").startswith("/api/admin/"):
             self.send_header("Cache-Control", "no-store")
+        # issue #273：所有 /api/* 回應帶版本 header，前端可在每次 API call
+        # 檢查後端版本是否與預期一致，防止前後端版本 drift。
+        if _send_path.startswith("/api/"):
+            self.send_header("X-TrustForge-Version", VERSION)
         cors_headers = _cors_headers(_send_path, getattr(self, "headers", {}))
         for name, val in cors_headers.items():
             self.send_header(name, val)
@@ -6824,6 +7499,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/health":
             code, body = _handle_api_health()
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/rate-limit-status":
+            code, body = _handle_api_rate_limit_status()
+            return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/status":
             code, body = _handle_api_status(client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
@@ -6836,11 +7514,32 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/history":
             code, body = _handle_api_history(qs, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/operations-status":
+            code, body = _handle_api_operations_status()
+            return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/data-plane-status":
+            code, body = _handle_api_data_plane_status()
+            return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/budget-governance":
             code, body = _handle_api_budget_governance()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/improvement-diagnostics":
+            code, body = _handle_api_improvement_diagnostics()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/evidence-quality":
+            code, body = _handle_api_evidence_quality()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/delivery-status":
+            code, body = _handle_api_delivery_status()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/memory-strategy":
+            code, body = _handle_api_memory_strategy()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/alerts-operations":
+            code, body = _handle_api_alerts_operations()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/hermes-upgrades":
             code, body = _handle_api_hermes_upgrades(qs)
@@ -6859,6 +7558,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analysis-journey":
             code, body = _handle_api_analysis_journey(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/intelligence-status":
+            code, body = _handle_api_intelligence_status()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/prompt-versions":
+            code, body = _handle_api_prompt_versions()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analyze":
             code, body = _handle_api_analyze(qs, client_ip)

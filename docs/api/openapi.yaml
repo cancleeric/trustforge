@@ -163,6 +163,82 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/rate-limit-status:
+    get:
+      tags: [observability]
+      operationId: getRateLimitStatus
+      summary: 速率限制狀態與統計（唯讀觀測，不需 admin token）
+      description: |
+        暴露目前各限流 bucket（live / real / status / online_stance）的設定值
+        （window / max）與即時統計（追蹤 IP 數、視窗內請求數）。不暴露完整 IP
+        位址，僅回傳聚合計數。供前端或監控層掌握限流健康狀況。
+      responses:
+        "200":
+          description: 各 bucket 的設定與即時統計
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          buckets:
+                            type: object
+                            additionalProperties:
+                              type: object
+                              properties:
+                                window_seconds:
+                                  type: integer
+                                max_requests_per_ip:
+                                  type: integer
+                                stats:
+                                  type: object
+                                  properties:
+                                    active_ips:
+                                      type: integer
+                                    total_requests_in_window:
+                                      type: integer
+                                    tracked_ips:
+                                      type: integer
+                          max_tracked_ips:
+                            type: integer
+              example:
+                ok: true
+                data:
+                  buckets:
+                    live:
+                      window_seconds: 60
+                      max_requests_per_ip: 5
+                      stats:
+                        active_ips: 2
+                        total_requests_in_window: 7
+                        tracked_ips: 3
+                    real:
+                      window_seconds: 60
+                      max_requests_per_ip: 60
+                      stats:
+                        active_ips: 1
+                        total_requests_in_window: 3
+                        tracked_ips: 1
+                    status:
+                      window_seconds: 30
+                      max_requests_per_ip: 10
+                      stats:
+                        active_ips: 0
+                        total_requests_in_window: 0
+                        tracked_ips: 0
+                    online_stance:
+                      window_seconds: 3600
+                      max_requests_per_ip: 20
+                      stats:
+                        active_ips: 0
+                        total_requests_in_window: 0
+                        tracked_ips: 0
+                  max_tracked_ips: 5000
+
   /api/status:
     get:
       tags: [observability]
@@ -377,6 +453,92 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/data-plane-status:
+    get:
+      tags: [observability]
+      operationId: getDataPlaneStatus
+      summary: 資料層合併觀測（快取鮮度 + 快照狀態 + 操縱偵測模組）
+      description: |
+        合併三個觀測面向（issues #256, #257, #264）：
+        - `cache_freshness`：各來源 × 各幣種的快取鮮度狀態統計。
+        - `snapshots`：AnalysisFlow 中各幣種最新 snapshot 狀態。
+        - `manipulation_detection`：操縱偵測模組能力描述與可用偵測器清單。
+
+        不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。任一子區塊
+        讀取失敗時回傳 partial result（帶 error 欄位說明），不讓整個端點 502。
+      responses:
+        "200":
+          description: 資料層合併觀測狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          cache_freshness:
+                            type: object
+                            description: 快取鮮度摘要（freshness.dashboard 輸出）
+                          snapshots:
+                            type: object
+                            description: 各幣種最新 analysis snapshot 狀態
+                            properties:
+                              coins:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    snapshot_id:
+                                      type: string
+                                    coin:
+                                      type: string
+                                    document_count:
+                                      type: integer
+                                    created_at:
+                                      type: number
+                          manipulation_detection:
+                            type: object
+                            description: 操縱偵測模組能力描述
+                            properties:
+                              available_detectors:
+                                type: array
+                                items:
+                                  type: object
+                                  properties:
+                                    name:
+                                      type: string
+                                    description:
+                                      type: string
+                              note:
+                                type: string
+              example:
+                ok: true
+                data:
+                  cache_freshness:
+                    observed_at_epoch: 1721000000
+                    summary: {fresh: 10, stale: 5, missing: 100}
+                    rows: []
+                    recent_scheduler_runs: 0
+                    failure_labels: {}
+                  snapshots:
+                    coins:
+                      - snapshot_id: "snap-btc-abc123"
+                        coin: BTC
+                        document_count: 42
+                        created_at: 1721000000
+                  manipulation_detection:
+                    available_detectors:
+                      - name: smart_money_divergence
+                        description: "聰明錢背離（鏈上吸籌 vs 價格下跌）"
+                      - name: manipulation_burst
+                        description: "操縱風險：單源爆量（同步滑動視窗）"
+                      - name: source_self_contradiction
+                        description: "來源自我矛盾（不確定性信號）"
+                    note: "偵測結果在每次 /api/analyze 執行時即時產生，本端點僅暴露模組能力描述。"
+
   /api/analysis-flow:
     get:
       tags: [observability]
@@ -405,6 +567,269 @@ paths:
       responses:
         "200":
           description: 預算治理狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/improvement-diagnostics:
+    get:
+      tags: [observability]
+      operationId: getImprovementDiagnostics
+      summary: Hermes 自我改善診斷報告
+      description: 唯讀。回傳最新 diagnose_hermes.py 產出的改善提案。
+      responses:
+        "200":
+          description: 改善診斷報告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/evidence-quality:
+    get:
+      tags: [observability]
+      operationId: getEvidenceQuality
+      summary: Evidence 組裝品質追蹤
+      description: |
+        唯讀。從最近 20 個已完成 analysis jobs 讀取 evidence 統計，計算品質指標：
+        completeness（必填欄位齊全率）、source_diversity（來源多樣性）、
+        avg_evidence_count（平均 evidence 筆數）、freshness_avg_seconds（平均資料齡）。
+      responses:
+        "200":
+          description: Evidence 品質指標
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok, no_data]
+                          jobs_sampled:
+                            type: integer
+                          total_evidence:
+                            type: integer
+                          unique_sources:
+                            type: integer
+                          completeness:
+                            type: number
+                            nullable: true
+                            description: 必填欄位（source/fetched_at/content_reference/related_claim）非空比例 0-1
+                          source_diversity:
+                            type: number
+                            nullable: true
+                            description: unique source 數 / total evidence 數 0-1
+                          avg_evidence_count:
+                            type: number
+                            nullable: true
+                            description: 平均每個 job 的 evidence 筆數
+                          freshness_avg_seconds:
+                            type: number
+                            nullable: true
+                            description: 平均資料齡（秒，fetched_at 到目前）
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/delivery-status:
+    get:
+      tags: [observability]
+      operationId: getDeliveryStatus
+      summary: 報告敘事品質與引用格式追蹤（#268, #269）
+      description: |
+        唯讀。合併兩個 delivery plane 觀測面向：
+        - `report_narrative` (#268)：最近 10 個已完成 analysis jobs 的報告摘要
+          （coin, mode, word_count, has_contrarian_evidence, has_provenance）
+          與交付版本號。
+        - `citation_format` (#269)：outer skill manifest 中 report/evaluation
+          相關 skill 的 revision 與狀態。
+
+        不需 admin token、不觸發連接器/Bedrock 呼叫、純唯讀。
+      responses:
+        "200":
+          description: Delivery plane 狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          report_narrative:
+                            type: object
+                            required: [latest_reports, delivery_version]
+                            properties:
+                              latest_reports:
+                                type: array
+                                items:
+                                  type: object
+                                  required: [coin, mode, word_count, has_contrarian_evidence, has_provenance]
+                                  properties:
+                                    coin:
+                                      type: string
+                                    mode:
+                                      type: string
+                                    word_count:
+                                      type: integer
+                                      description: market_judgment + facts + inferences 合計字元數
+                                    has_contrarian_evidence:
+                                      type: boolean
+                                      description: 報告是否包含反方證據
+                                    has_provenance:
+                                      type: boolean
+                                      description: 至少一筆 evidence 帶 source_url 溯源
+                              delivery_version:
+                                type: string
+                                description: 當前部署版本號
+                              error:
+                                type: string
+                                description: 讀取失敗時的錯誤摘要（正常時不存在）
+                          citation_format:
+                            type: object
+                            required: [skills, status]
+                            properties:
+                              skills:
+                                type: array
+                                items:
+                                  type: object
+                                  required: [family, revision, origin]
+                                  properties:
+                                    family:
+                                      type: string
+                                      enum: [report, evaluation]
+                                    revision:
+                                      type: string
+                                      description: SHA-256 artifact hash
+                                    origin:
+                                      type: string
+                                      enum: [baseline, approved]
+                              status:
+                                type: string
+                                enum: [active, error]
+                              error:
+                                type: string
+                                description: 讀取失敗時的錯誤摘要（正常時不存在）
+              example:
+                ok: true
+                data:
+                  report_narrative:
+                    latest_reports:
+                      - coin: BTC
+                        mode: risk
+                        word_count: 1234
+                        has_contrarian_evidence: true
+                        has_provenance: true
+                    delivery_version: dev
+                  citation_format:
+                    skills:
+                      - family: report
+                        revision: "abc123..."
+                        origin: baseline
+                      - family: evaluation
+                        revision: "def456..."
+                        origin: baseline
+                    status: active
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/memory-strategy:
+    get:
+      tags: [observability]
+      operationId: getMemoryStrategy
+      summary: Hermes 記憶策略狀態與快照統計（#275）
+      description: |
+        唯讀。暴露 Hermes agent 的記憶策略（跨跑間共享研究快照、formal
+        conclusions 跑間隔離）、analysis_snapshots 表統計、backfill 進度。
+        不需 admin token、不觸發連接器/Bedrock 呼叫。
+      responses:
+        "200":
+          description: 記憶策略狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [strategy]
+                        properties:
+                          strategy:
+                            type: object
+                            required: [cross_run_memory, formal_run_rule, no_unbounded_network_access]
+                            properties:
+                              cross_run_memory:
+                                type: string
+                              formal_run_rule:
+                                type: string
+                              no_unbounded_network_access:
+                                type: boolean
+                          snapshot_stats:
+                            type: object
+                            nullable: true
+                            description: analysis_snapshots 表統計；DB 不存在時為 null
+                            properties:
+                              total_snapshots:
+                                type: integer
+                              coins_covered:
+                                type: array
+                                items:
+                                  type: string
+                              oldest_snapshot_at:
+                                type: string
+                                nullable: true
+                              newest_snapshot_at:
+                                type: string
+                                nullable: true
+                          backfill_stats:
+                            type: object
+                            nullable: true
+                            description: backfill_tasks 統計；DB 不存在時為 null
+                            properties:
+                              total_completed:
+                                type: integer
+                              total_pending:
+                                type: integer
+              example:
+                ok: true
+                data:
+                  strategy:
+                    cross_run_memory: "research snapshots only; formal conclusions are run-isolated"
+                    formal_run_rule: "select only snapshots and source records at or before run_started_at"
+                    no_unbounded_network_access: true
+                  snapshot_stats:
+                    total_snapshots: 42
+                    coins_covered: ["BTC", "ETH"]
+                    oldest_snapshot_at: "2026-07-01T00:00:00+00:00"
+                    newest_snapshot_at: "2026-07-20T06:00:00+00:00"
+                  backfill_stats:
+                    total_completed: 100
+                    total_pending: 50
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/alerts-operations:
+    get:
+      tags: [observability]
+      operationId: getAlertsOperations
+      summary: 告警狀態與操作流程 runbook
+      description: 唯讀。暴露 dedup fail-open incident、budget exceeded、runbook 參考。
+      responses:
+        "200":
+          description: 告警狀態與 runbook
           content:
             application/json:
               schema:
@@ -584,6 +1009,104 @@ paths:
         "404": {description: 找不到死信工作}
         "502": {$ref: "#/components/responses/UpstreamError"}
 
+  /api/intelligence-status:
+    get:
+      tags: [observability]
+      operationId: getIntelligenceStatus
+      summary: Intelligence plane 觀測（技能/工具/主張抽取狀態）
+      description: |
+        合併三個觀測面向：outer skill manifest、Hermes 工具註冊表、最近一次
+        claim_extraction stage 狀態。唯讀，不需 admin token。
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          skills:
+                            description: "outer skill manifest（`trustforge.skills.run_skill_manifest()` 結果），讀取失敗時為 null"
+                            nullable: true
+                          tools:
+                            description: "Hermes 工具清單（`trustforge.hermes.HERMES_TOOLS`），讀取失敗時為 null"
+                            type: array
+                            nullable: true
+                            items:
+                              type: object
+                              properties:
+                                name: {type: string}
+                                description: {type: string}
+                                scope: {type: string}
+                                max_concurrency: {type: integer}
+                          claim_extraction:
+                            description: "最近一次 claim_extraction stage 狀態（從 AnalysisFlow SQLite），讀取失敗時為 null"
+                            nullable: true
+                            type: object
+                            properties:
+                              id: {type: string}
+                              queued: {type: integer}
+                              current:
+                                nullable: true
+                              next_retry_at:
+                                nullable: true
+
+  /api/prompt-versions:
+    get:
+      tags: [meta]
+      operationId: getPromptVersions
+      summary: 當前所有 prompt template 的版本 hash（SHA-256）
+      description: |
+        暴露 orchestrator 中每個可識別的 prompt template 的名稱、用途與
+        SHA-256 hash，可用於比對「這次產出是用哪個版本的 prompt」。
+        不需 admin token、不觸發任何連接器/Bedrock 呼叫（純記憶體計算）。
+      responses:
+        "200":
+          description: prompt template 版本清單
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [templates]
+                        properties:
+                          templates:
+                            type: array
+                            items:
+                              type: object
+                              required: [name, purpose, sha256_hash]
+                              properties:
+                                name:
+                                  type: string
+                                  description: prompt template 的識別名稱
+                                purpose:
+                                  type: string
+                                  description: 用途說明
+                                sha256_hash:
+                                  type: string
+                                  description: 模板內容的 SHA-256 hex digest
+              example:
+                ok: true
+                data:
+                  templates:
+                    - name: SYSTEM
+                      purpose: "Step 3 帶溯源行文的 system prompt"
+                      sha256_hash: "abc123..."
+                    - name: _STEP4_SYSTEM
+                      purpose: "Step 4 限制複審的 system prompt"
+                      sha256_hash: "def456..."
+                    - name: orchestrator_module
+                      purpose: "agent/orchestrator.py 整體檔案 hash"
+                      sha256_hash: "789ghi..."
+
   /api/analyze:
     get:
       tags: [analysis]
@@ -722,6 +1245,42 @@ paths:
                 error:
                   code: upstream_error
                   message: "分析服務暫時無法使用，請稍後再試"
+
+  /api/operations-status:
+    get:
+      tags: [operations]
+      operationId: getOperationsStatus
+      summary: Operations plane 合併觀測端點（schema/auth_audit/quality_gate）
+      description: |
+        暴露三個面向：
+        1. schema (#277)：SQLite schema 版本、table 列表、相容性狀態。
+        2. auth_audit (#276)：admin token 是否已設、live token 是否已設、
+           trust proxy 狀態、bind host——**只暴露 boolean，絕不暴露 token 值**。
+        3. quality_gate (#270)：最新 question-bank-latest.json 評測結果摘要。
+      responses:
+        "200":
+          description: Operations 狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  schema:
+                    sqlite_path: "out/trustforge.sqlite3"
+                    tables: ["analysis_snapshots", "analysis_jobs", "analysis_results"]
+                    table_count: 3
+                    user_version: 0
+                    status: "ok"
+                  auth_audit:
+                    admin_token_set: true
+                    live_token_set: false
+                    trust_proxy: false
+                    bind_host: "0.0.0.0"
+                  quality_gate:
+                    status: "no_data"
+                    source: "out/question-bank-latest.json"
 
   /api/openapi.yaml:
     get:

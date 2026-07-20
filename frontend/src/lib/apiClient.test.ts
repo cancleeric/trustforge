@@ -593,3 +593,12 @@ describe('apiFetch — 正常信封', () => {
     if (!result.ok) expect(result.error.code).toBe('http_error')
   })
 })
+
+describe('REGISTER_TIMEOUT_MS (#245)', () => {
+  it('REGISTER_TIMEOUT_MS > DEFAULT_TIMEOUT_MS (write endpoints need more headroom)', async () => {
+    const { DEFAULT_TIMEOUT_MS, REGISTER_TIMEOUT_MS, ANALYZE_TIMEOUT_MS } = await import('./apiClient')
+    expect(REGISTER_TIMEOUT_MS).toBeGreaterThan(DEFAULT_TIMEOUT_MS)
+    expect(REGISTER_TIMEOUT_MS).toBeLessThanOrEqual(ANALYZE_TIMEOUT_MS)
+    expect(REGISTER_TIMEOUT_MS).toBe(30_000)
+  })
+})

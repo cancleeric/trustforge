@@ -254,3 +254,100 @@ class TestStatusAPI:
         assert "BTC" in status["per_coin"]
         assert "ETH" in status["per_coin"]
         worker.close()
+
+
+# ─── 持久化到 trust_snapshot_history ──────────────────────────────────────────
+
+
+class TestBackfillPersistToTrustHistory:
+    """驗證 backfill 的 replay 結果正確寫入 trust_snapshot_history_key，
+    讓 get_trust_history() 能讀到。"""
+
+    def test_completed_days_readable_by_get_trust_history(self, tmp_env):
+        """回填完成的天數可透過 get_trust_history 讀到。"""
+        from trustforge.ingestion.cache import get_cache_backend, get_trust_history
+
+        set_backfill_enabled(True, reason="test")
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-06-01",
+            end_date="2024-06-03",
+            batch_size=10,
+        )
+        worker.seed_tasks()
+        results = worker.run_batch()
+
+        # 確認有完成的天
+        completed = [r for r in results if r.state == "completed"]
+        assert len(completed) >= 1
+
+        # 透過 get_trust_history 讀取
+        backend = get_cache_backend()
+        history = get_trust_history("BTC", 30, backend, end_date="2024-06-30")
+
+        # 應該讀到至少跟 completed 同樣數量的 entries
+        assert len(history) >= len(completed)
+
+        # 驗證每筆都有必要欄位
+        for entry in history:
+            assert "trust_score" in entry
+            assert "direction" in entry
+            assert "coin" in entry
+            assert entry["coin"] == "BTC"
+            assert "date" in entry  # get_trust_history 自動補的
+
+    def test_backfill_entries_have_archive_type(self, tmp_env):
+        """回填寫入的 snapshot 帶有 archive_type=backfilled_archive。"""
+        from trustforge.ingestion.cache import get_cache_backend, get_trust_history
+
+        set_backfill_enabled(True, reason="test")
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["ETH"],
+            start_date="2024-05-01",
+            end_date="2024-05-02",
+            batch_size=10,
+        )
+        worker.seed_tasks()
+        results = worker.run_batch()
+        completed = [r for r in results if r.state == "completed"]
+        assert len(completed) >= 1
+
+        backend = get_cache_backend()
+        history = get_trust_history("ETH", 60, backend, end_date="2024-05-31")
+        assert len(history) >= 1
+
+        for entry in history:
+            assert entry.get("archive_type") == "backfilled_archive"
+
+    def test_backfill_format_matches_fetch_scheduler(self, tmp_env):
+        """回填寫入的格式與 fetch_scheduler _snapshot_dict 一致。"""
+        from trustforge.ingestion.cache import get_cache_backend, get_trust_history
+
+        set_backfill_enabled(True, reason="test")
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-07-01",
+            end_date="2024-07-01",
+            batch_size=1,
+        )
+        worker.seed_tasks()
+        results = worker.run_batch()
+        assert results[0].state == "completed"
+
+        backend = get_cache_backend()
+        history = get_trust_history("BTC", 10, backend, end_date="2024-07-05")
+        assert len(history) == 1
+
+        snap = history[0]
+        # 必備欄位（對齊 _snapshot_dict）
+        assert isinstance(snap["trust_score"], (int, float))
+        assert isinstance(snap["direction"], str)
+        assert isinstance(snap["calibrated_confidence"], (int, float))
+        assert "decision_state" in snap
+        assert "generated_at" in snap
+        # backfill 特有欄位
+        assert snap["archive_type"] == "backfilled_archive"
+        assert "snapshot_epoch" in snap
