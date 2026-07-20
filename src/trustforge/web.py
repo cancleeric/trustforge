@@ -5105,7 +5105,39 @@ def _handle_api_analysis_flow(qs: dict) -> tuple[int, str]:
         return 502, _json_envelope_err("analysis_flow_unavailable", "分析流水線狀態暫時無法讀取")
 
 
-def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
+def _handle_api_backfill_status() -> tuple[int, str]:
+    """Read-only backfill progress. No admin token required."""
+    try:
+        from .backfill import BackfillWorker
+        worker = BackfillWorker()
+        status = worker.status()
+        worker.close()
+        return 200, _json_envelope_ok(status)
+    except Exception:
+        logging.exception("TrustForge /api/backfill-status error")
+        return 502, _json_envelope_err("backfill_unavailable", "回填狀態暫時無法讀取")
+
+
+def _handle_api_admin_backfill_control(headers: Any, rfile: Any) -> tuple[int, str]:
+    """Admin-only backfill start/stop control."""
+    try:
+        length = int(headers.get("Content-Length", 0))
+        raw = rfile.read(length) if length else b""
+        body = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, ValueError):
+        return 400, _json_envelope_err("invalid_json", "無法解析 JSON body")
+    action = body.get("action", "").strip().lower()
+    if action not in {"start", "stop"}:
+        return 400, _json_envelope_err("invalid_action", "action 須為 start 或 stop")
+    from .backfill import set_backfill_enabled, backfill_enabled
+    set_backfill_enabled(
+        action == "start", reason="web_admin", actor="admin",
+    )
+    ctrl = backfill_enabled()
+    return 200, _json_envelope_ok({"enabled": ctrl.enabled, "source": ctrl.source, "reason": ctrl.reason})
+
+
+
     """Read-only, version-backed Hermes ship/module upgrade projection."""
     try:
         from .upgrade_control import upgrade_status
@@ -6786,6 +6818,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/analysis-flow":
             code, body = _handle_api_analysis_flow(qs)
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/backfill-status":
+            code, body = _handle_api_backfill_status()
+            return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/hermes-upgrades":
             code, body = _handle_api_hermes_upgrades(qs)
             return self._send(code, body, "application/json; charset=utf-8")
@@ -7122,6 +7157,11 @@ class Handler(BaseHTTPRequestHandler):
             if u.path in actions:
                 code, body = _handle_api_admin_upgrade_action(
                     getattr(self, "headers", {}), self.rfile, actions[u.path]
+                )
+                return self._send(code, body, "application/json; charset=utf-8")
+            if u.path == "/api/admin/backfill-control":
+                code, body = _handle_api_admin_backfill_control(
+                    getattr(self, "headers", {}), self.rfile,
                 )
                 return self._send(code, body, "application/json; charset=utf-8")
             return self._send(404, _json_envelope_err("not_found", "無此管理端點"),

@@ -393,6 +393,53 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/backfill-status:
+    get:
+      tags: [observability]
+      operationId: getBackfillStatus
+      summary: 歷史回填進度與啟停狀態
+      description: 唯讀。回傳每幣種回填進度、總完成數、剩餘天數。
+      responses:
+        "200":
+          description: 回填進度摘要
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/admin/backfill-control:
+    post:
+      tags: [admin]
+      operationId: postAdminBackfillControl
+      summary: 啟動或停止歷史回填
+      description: 需 admin token。Body `{"action": "start"|"stop"}`。
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [start, stop]
+              required: [action]
+      responses:
+        "200":
+          description: 回填控制狀態已更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /api/hermes-upgrades:
     get:
       tags: [observability]
