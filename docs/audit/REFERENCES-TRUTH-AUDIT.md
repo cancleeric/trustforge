@@ -1,9 +1,11 @@
 # References 狀態 Truth Audit
 
 > Issue: #384
-> 審計日期: 2026-07-21
-> 審計人: implement-384 (Kiro session)
+> 審計日期: 2026-07-21（v1）→ 2026-07-22（v2 更新）
+> 審計人: implement-384 (v1) → implement-384-v2 (v2)
 > 比對來源: `/tmp/trustforge-devlog/references.html` vs `main` branch (commit HEAD)
+>
+> **v2 變更摘要**：補入 AgentCore backend registry 段落（🟡）；校準模型路徑 PR #394 修正後升為 ✅ verified；明確標注 GitHub Actions `.disabled` 語意；逐項對照 issue comment 2026-07-22 的六項待修正點。
 
 ## 狀態圖例
 
@@ -46,7 +48,7 @@
 
 | 方法 | 參考狀態 | 實際狀態 | 位置 | 說明 |
 |------|----------|----------|------|------|
-| Guo et al. (2017) Calibration | 🔬 研究中 | 🔬 research | `src/trustforge/trust/scoring.py::_CALIBRATION_TABLE` + `src/trustforge/calibration_model.py` | 資訊完整度分層對齊此精神；isotonic regression 校準已實作（PAV），需 backfill 資料達標才上線（`calibrator_gate.py` MIN=100） |
+| Guo et al. (2017) Calibration | 🔬 研究中 | ✅ verified | `src/trustforge/calibration_model.py` + `data/model-artifacts/calibration-model.json` | **PR #394（commit `327fe48`）修正路徑分裂**：`_calibration_model_path()` 優先遍歷 `data/model-artifacts/` → `out/model-artifacts/` → fallback `_CALIBRATION_TABLE`；1980 筆 ground truth 已訓練並版控；測試 `tests/test_calibration_model.py` |
 | Conformal Prediction (Split) | 🔬 研究中 | 🔬 research | `src/trustforge/trust/conformal.py` | 回測顯示 abstain rate ~94%（無判別力），CEO 決策本輪不 wire 進 production；commit `4e638e2`；測試 `tests/test_w4_conformal.py` |
 | Niculescu-Mizil & Caruana (2005) Platt | 📚 方法論參考 | 📚 reference | — | 未直接實作 |
 | Kuleshov et al. (2018) | 📚 方法論參考 | 📚 reference | — | 未直接實作 |
@@ -163,10 +165,11 @@
 | pytest | ✅ 已實作 | ✅ verified | `tests/` | 120+ 測試檔案 |
 | AWS App Runner | ✅ 已實作 | 🟡 implemented-not-verified | `apprunner.yaml` | 設定檔存在；尚未確認 production deploy 是否活躍 |
 | AWS SSM + EventBridge | ✅ 已實作 | 🟡 implemented-not-verified | `src/trustforge/ssm_params.py` + `scripts/fetch_scheduler.py` | SSM token 讀取已實作（opt-in）；EventBridge 排程未見 IaC 定義，僅有設計文件 |
+| AgentCore Backend Registry | — | 🟡 implemented-not-verified | `src/trustforge/backend_registry.py` + `src/trustforge/ports.py` | Provider registry 可熱切換 `builtin`/`agentcore`（7 keys）；預設 `builtin`；無 agentcore adapter 端到端實作；測試 `tests/test_backend_registry.py` |
 | SQLite 快取 | ✅ 已實作 | ✅ verified | `src/trustforge/ingestion/cache.py` (line 612+) | `CACHE_BACKEND=sqlite` 路徑完整 |
 | nginx | ✅ 已實作 | 🟡 implemented-not-verified | `deploy/nginx.conf`, `deploy/nginx-react-http.conf` 等 | 設定檔存在，production 未驗證 |
 | Docker | ✅ 已實作 | ✅ verified | `Dockerfile` | python:3.12-slim 基底 |
-| GitHub Actions CI | ✅ 已實作 | 🟡 implemented-not-verified | `.github/workflows/ci.yml.disabled` | **CI 檔名帶 `.disabled` 後綴**，workflow_dispatch only；Production Deploy workflow 亦停用 (`deploy-production.yml.disabled`) |
+| GitHub Actions CI | ✅ 已實作 | 🟡 implemented-not-verified | `.github/workflows/ci.yml.disabled` | **所有 workflow 均帶 `.disabled` 後綴**，`workflow_dispatch` only，不自動觸發；Production Deploy workflow（`deploy-production.yml.disabled`）明確停用。能手動觸發但未進入 CI 自動門控。 |
 
 ---
 
@@ -250,9 +253,15 @@
 4. **AWS SSM + EventBridge**：references 標 ✅ 已實作，SSM 讀取碼存在但 EventBridge IaC 定義未見於 repo。**實際狀態：🟡 implemented-not-verified**。
 5. **協同行為檢測**：references 標 🔬 研究中，實際已有 `_coordination_template_flags` / `_coordination_burst_flags` + insights `detect_manipulation_burst`，但 CEO 定案降為 informational-only（不扣分）。**實際狀態：🟡 implemented-not-verified**（有碼、有測試、但不影響信任分）。
 
+### v2 新增發現（2026-07-22）
+
+6. **AgentCore runtime routing**：`backend_registry.py` + `ports.py` 已實作 provider registry，可熱切換 `builtin`/`agentcore`；但實際 agentcore adapter 路由未驗證（`get_provider()` 預設返回 `builtin`，無 agentcore 端對端 adapter 實作）。references.html 未列此項；**實際狀態：🟡 implemented-not-verified**（registry 有，routing 未接通）。
+7. **Calibration 路徑（已修正）**：v1 審計時 `calibration_model.py` 硬編碼 `out/` 路徑；PR #394（commit `327fe48`）修正為 `_calibration_model_path()` 優先遍歷 `data/model-artifacts/`，且 1980 筆 ground truth 已版控。**實際狀態升為 ✅ verified**。
+
 ### 正確標記（無需修改）
 
 - Dawid–Skene EM：✅ 正確
+- Calibration (Guo 2017)：**v2 升為 ✅ verified**（PR #394 路徑修正 + 1980 筆訓練資料版控）
 - Conformal Prediction：🔬 正確（研究工件，不在 production）
 - 多源可信度/交叉驗證：✅ 正確
 - CoinGecko / SEC EDGAR / Blockchain.com / Cointelegraph：✅ 正確
@@ -264,11 +273,21 @@
 
 ## 驗收條件對照
 
+### v1（2026-07-21，PR #387）
+
 - [x] 逐項核對學術方法、模型、資料源、基礎設施
 - [x] 每個 ✅ 附 repo path、commit 或測試
 - [x] HOYA BIT 誠實分級（歷史 OHLCV ✅ / live ticker ⚠ blocked）
-- [x] calibration 誠實分級（🔬 research + calibrator gate blocked）
+- [x] calibration 誠實分級（🔬 research + calibrator gate blocked）→ **v2 已升為 ✅ verified（PR #394）**
 - [x] manipulation detection 誠實分級（🟡 informational-only）
 - [x] GitHub Actions 明確標註 `.disabled` 狀態，Production Deploy 停用
 - [x] 台灣監管來源未取得真資料前不標 ✅（全部 📚 planned）
 - [x] 頁面與 repo 文件一致性檢查完成
+
+### v2（2026-07-22，本 PR）
+
+- [x] AgentCore backend registry 新增段落：🟡 implemented-not-verified（registry 有，routing 未驗證）
+- [x] 校準模型狀態升為 ✅ verified（PR #394 路徑修正 + `data/model-artifacts/` 1980 筆訓練資料版控）
+- [x] GitHub Actions `.disabled` 說明強化（明確 Production Deploy workflow 亦停用）
+- [x] issue comment 六項待修正點全部對照更新（HOYA BIT / GitHub Actions / App Runner / nginx / EventBridge / Calibration / AgentCore / Manipulation）
+- [x] 狀態圖例覆蓋所有六個符號（✅ / 🟡 / 🔬 / 📚 / ⛔ / ⚠）
