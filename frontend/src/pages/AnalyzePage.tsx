@@ -319,8 +319,13 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
               </div>
             )}
             {!loading && !error && !data && (
-              <div className="hermes-clip border border-tf-border bg-tf-card p-5 text-sm text-tf-text2">
-                分析完成後會在此顯示本次 run 的報告、證據與執行紀錄。
+              <div className="hermes-clip border border-tf-border bg-tf-card p-5 text-center" role="status">
+                <p className="text-base font-semibold text-tf-text">尚無分析資料</p>
+                <p className="mt-2 text-sm text-tf-text2">
+                  {hasExplicitRequest
+                    ? '目前尚未產生此題的分析快照，請稍候或重新送出分析。'
+                    : '請在左側面板選擇幣種與題型後送出分析，完成後報告、證據與執行紀錄將顯示於此。'}
+                </p>
               </div>
             )}
           </section>
