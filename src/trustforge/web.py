@@ -5096,6 +5096,113 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
     }
 
 
+def _handle_api_training_status() -> tuple[int, str]:
+    """GET /api/training-status — 訓練資料累積狀態儀表板（Issue #333）。
+
+    讀取 `out/training-data/*.jsonl` 統計訓練紀錄數與方向標註率，
+    讀取 backfill DB（`out/trustforge-backfill.sqlite3`）的進度，
+    回傳結構化 JSON 供前端 TrainingStatusCard 使用。
+
+    ⚠️ credit-safe：純讀本機檔案/SQLite（readonly），不觸發任何連接器/Bedrock。
+    """
+    import sqlite3
+
+    training_data_dir = Path(__file__).resolve().parents[2] / "out" / "training-data"
+    backfill_db_path = Path(__file__).resolve().parents[2] / "out" / "trustforge-backfill.sqlite3"
+
+    # --- 訓練資料統計 ---
+    total_records = 0
+    has_direction_count = 0
+    per_coin: dict[str, dict[str, int]] = {}
+
+    if training_data_dir.is_dir():
+        for jsonl_file in sorted(training_data_dir.glob("*.jsonl")):
+            coin_name = jsonl_file.stem.upper()
+            coin_total = 0
+            coin_direction = 0
+            try:
+                with open(jsonl_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        coin_total += 1
+                        direction = record.get("direction")
+                        if (
+                            direction is not None
+                            and direction != ""
+                            and direction != "不明"
+                        ):
+                            coin_direction += 1
+            except OSError:
+                continue
+            total_records += coin_total
+            has_direction_count += coin_direction
+            per_coin[coin_name] = {
+                "total": coin_total,
+                "has_direction": coin_direction,
+            }
+
+    direction_ratio = round(has_direction_count / total_records, 4) if total_records > 0 else 0.0
+
+    # --- Backfill 進度 ---
+    backfill: dict | None = None
+    if backfill_db_path.is_file():
+        try:
+            conn = sqlite3.connect(
+                f"file:{backfill_db_path}?mode=ro", uri=True, timeout=2.0
+            )
+            try:
+                cur = conn.execute(
+                    "SELECT state, COUNT(*) FROM backfill_tasks GROUP BY state"
+                )
+                state_counts: dict[str, int] = {}
+                for row in cur.fetchall():
+                    state_counts[row[0]] = row[1]
+                total_tasks = sum(state_counts.values())
+                completed_tasks = state_counts.get("completed", 0)
+                running = state_counts.get("running", 0) > 0
+                progress_pct = round(completed_tasks / total_tasks * 100, 1) if total_tasks > 0 else 0.0
+                backfill = {
+                    "mode": "live" if running else "idle",
+                    "is_running": running,
+                    "completed": completed_tasks,
+                    "total": total_tasks,
+                    "progress_pct": progress_pct,
+                }
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError):
+            backfill = None
+
+    # --- Upgrade threshold ---
+    upgrade_target = 100
+    upgrade_current = has_direction_count
+    upgrade_met = upgrade_current >= upgrade_target
+    upgrade_pct = round(upgrade_current / upgrade_target * 100, 1) if upgrade_target > 0 else 0.0
+
+    data = {
+        "training_data": {
+            "total_records": total_records,
+            "has_direction": has_direction_count,
+            "direction_ratio": direction_ratio,
+            "per_coin": per_coin,
+        },
+        "backfill": backfill,
+        "upgrade_threshold": {
+            "target": upgrade_target,
+            "current": upgrade_current,
+            "met": upgrade_met,
+            "pct": upgrade_pct,
+        },
+    }
+    return 200, _json_envelope_ok(data)
+
+
 def _handle_api_operations_status() -> tuple[int, str]:
     """GET /api/operations-status — Operations plane: schema migration 追蹤 (#277)、
     權限審計 (#276)、品質 gate 狀態 (#270)。
@@ -7555,6 +7662,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/data-plane-status":
             code, body = _handle_api_data_plane_status()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/training-status":
+            code, body = _handle_api_training_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/budget-governance":
             code, body = _handle_api_budget_governance()
