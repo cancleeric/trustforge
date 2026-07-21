@@ -1,0 +1,34 @@
+{
+  "total_calls": 45,
+  "total_tokens": 62046,
+  "total_cost_usd": 0.487242,
+  "by_coin": {
+    "BTC": {
+      "calls": 11,
+      "tokens": 15327,
+      "cost_usd": 0.121557
+    },
+    "ETH": {
+      "calls": 10,
+      "tokens": 13757,
+      "cost_usd": 0.107775
+    },
+    "SOL": {
+      "calls": 9,
+      "tokens": 12347,
+      "cost_usd": 0.096393
+    },
+    "BNB": {
+      "calls": 8,
+      "tokens": 10888,
+      "cost_usd": 0.08448
+    },
+    "XRP": {
+      "calls": 7,
+      "tokens": 9727,
+      "cost_usd": 0.077037
+    }
+  },
+  "started_at": "2026-07-19T21:39:54.704819",
+  "last_updated": "2026-07-19T23:02:51.841301"
+}

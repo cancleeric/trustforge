@@ -1336,6 +1336,36 @@ paths:
                 type: string
               example: "llms.txt 未部署\n"
 
+  /api/admin/backend-providers:
+    get:
+      tags: [admin]
+      operationId: getAdminBackendProviders
+      summary: 讀取管理面可用後端 provider 狀態
+      security:
+        - AdminToken: []
+      description: |
+        回傳 admin backend provider registry 的目前狀態，供管理面切換或檢查
+        AgentCore / Bedrock / mock backend 可用性。此路徑屬於 `/api/admin/*`
+        管理面，未設定或未通過 `ADMIN_TOKEN` 時維持 fail-closed。
+      responses:
+        "200":
+          description: 後端 provider 狀態清單
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          description: admin token 缺失或錯誤
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "404":
+          description: admin 未啟用時與不存在路徑一致的 fail-closed 回應
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
   /api/admin/config:
     get:
       tags: [admin]

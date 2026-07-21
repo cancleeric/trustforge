@@ -24,6 +24,15 @@ export function recommendAnalysisMode(question: string): AnalysisModeId {
   return 'risk'
 }
 
+export function beginnerTypeForMode(mode: AnalysisModeId): 'multi_source' | 'hypothesis' {
+  return mode === 'fundamentals' || mode === 'catalyst' ? 'hypothesis' : 'multi_source'
+}
+
+export function beginnerQuestion(coin: string, intent: BeginnerIntent): string {
+  const selected = BEGINNER_INTENTS.find((item) => item.id === intent) ?? BEGINNER_INTENTS[0]
+  return `${coin}：${selected.question}`
+}
+
 const ONBOARDING_COOKIE = 'trustforge_hermes_onboarding_v1'
 
 export function shouldShowHermesOnboarding(): boolean {

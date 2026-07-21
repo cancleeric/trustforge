@@ -467,6 +467,26 @@ export interface AdminConfigChanges {
   live_token?: string | null
 }
 
+export type BackendProviderKey =
+  | 'memory'
+  | 'policy'
+  | 'eval'
+  | 'llm'
+  | 'gateway'
+  | 'observability'
+  | 'upgrade'
+
+export type BackendProvider = 'builtin' | 'agentcore'
+
+export interface AdminBackendProvidersData {
+  kind: 'backend_provider_registry'
+  providers: Record<BackendProviderKey, BackendProvider>
+  valid_providers: BackendProvider[]
+  provider_keys: BackendProviderKey[]
+  hot_config: boolean
+  restart_required: boolean
+}
+
 export interface AdminAuditChange {
   field: string
   /** token 類欄位 old/new 是後端遮罩值（`"<set>"`/`"<cleared>"`/

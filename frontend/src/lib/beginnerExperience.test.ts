@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { recommendAnalysisMode } from './beginnerExperience'
+import { beginnerQuestion, beginnerTypeForMode, recommendAnalysisMode } from './beginnerExperience'
 
 describe('recommendAnalysisMode', () => {
   it.each([
@@ -10,5 +10,19 @@ describe('recommendAnalysisMode', () => {
     ['有沒有操縱風險', 'risk'],
   ])('recommends a mode for %s', (question, expected) => {
     expect(recommendAnalysisMode(question)).toBe(expected)
+  })
+})
+
+describe('beginner task flow helpers', () => {
+  it('maps beginner modes to hidden analysis types', () => {
+    expect(beginnerTypeForMode('risk')).toBe('multi_source')
+    expect(beginnerTypeForMode('news')).toBe('multi_source')
+    expect(beginnerTypeForMode('fundamentals')).toBe('hypothesis')
+    expect(beginnerTypeForMode('catalyst')).toBe('hypothesis')
+  })
+
+  it('builds an asset-scoped beginner question', () => {
+    expect(beginnerQuestion('BTC', 'trust')).toContain('BTC')
+    expect(beginnerQuestion('BTC', 'trust')).toContain('三個最重要')
   })
 })
