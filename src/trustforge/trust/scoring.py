@@ -1672,13 +1672,23 @@ _CALIBRATION_TABLE: list[tuple[float, float]] = [
 
 
 def _calibrate_confidence(raw: float) -> float:
-    """用 `_CALIBRATION_TABLE`（硬編分位數映射表）校準一個 [0, 1] 指標。
+    """校準一個 [0, 1] 指標。
 
-    確定性、免 LLM：純查表 + 分段線性插值，同輸入必同輸出，不呼叫任何
-    模型。**簡化版分位數校準，非嚴謹 conformal coverage 保證**（見
-    `_CALIBRATION_TABLE` 上方誠實聲明）。輸入超出 [0, 1] 時 clamp 到邊界。
+    優先使用 isotonic regression 訓練模型（out/model-artifacts/calibration-model.json），
+    無模型時 fallback 到硬編碼 `_CALIBRATION_TABLE`。
+
+    確定性、免 LLM：純查表/插值，同輸入必同輸出，不呼叫任何模型。
+    輸入超出 [0, 1] 時 clamp 到邊界。
     """
     x = max(0.0, min(1.0, raw))
+
+    # 嘗試使用訓練過的 isotonic model
+    model = _load_cached_calibration_model()
+    if model is not None:
+        from ..calibration_model import apply_calibration
+        return apply_calibration(x, model)
+
+    # Fallback：硬編碼查表
     table = _CALIBRATION_TABLE
     if x <= table[0][0]:
         return table[0][1]
@@ -1691,6 +1701,23 @@ def _calibrate_confidence(raw: float) -> float:
             ratio = (x - x0) / (x1 - x0)
             return round(y0 + ratio * (y1 - y0), 4)
     return round(x, 4)  # 理論上不會到這（表已覆蓋 [0, 1]，防禦性寫法）
+
+
+# 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
+_CALIBRATION_MODEL_CACHE: dict[str, list[dict] | None] = {}
+_CALIBRATION_MODEL_PATH = "out/model-artifacts/calibration-model.json"
+
+
+def _load_cached_calibration_model() -> list[dict] | None:
+    """載入並快取校準模型。模組內只讀一次。"""
+    if "model" not in _CALIBRATION_MODEL_CACHE:
+        from pathlib import Path
+
+        from ..calibration_model import load_calibration_model
+        _CALIBRATION_MODEL_CACHE["model"] = load_calibration_model(
+            Path(_CALIBRATION_MODEL_PATH)
+        )
+    return _CALIBRATION_MODEL_CACHE["model"]
 
 
 def _evidence_strength(
