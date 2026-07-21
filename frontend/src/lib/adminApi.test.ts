@@ -7,7 +7,14 @@
 //      合法、畸形型別整包 parse_error，不讓假 version 進下一次 CAS）。
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getAdminAudit, getAdminConfig, putAdminConfig } from './endpoints'
+import {
+  getAdminAudit,
+  getAdminBackendProviders,
+  getAdminConfig,
+  putAdminConfig,
+  setAdminBackendProvider,
+  setAllAdminBackendProviders,
+} from './endpoints'
 import type { AdminConfigData } from './types'
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -45,6 +52,25 @@ function validAdminConfigData(): AdminConfigData {
     updated_by: 'admin@203.0.113.5',
     exists: true,
     version_corrupt: false,
+  }
+}
+
+function validBackendProvidersData() {
+  return {
+    kind: 'backend_provider_registry',
+    providers: {
+      memory: 'builtin',
+      policy: 'builtin',
+      eval: 'builtin',
+      llm: 'builtin',
+      gateway: 'builtin',
+      observability: 'builtin',
+      upgrade: 'builtin',
+    },
+    valid_providers: ['builtin', 'agentcore'],
+    provider_keys: ['memory', 'policy', 'eval', 'llm', 'gateway', 'observability', 'upgrade'],
+    hot_config: true,
+    restart_required: false,
   }
 }
 
@@ -109,6 +135,48 @@ describe('admin endpoints — 請求形狀（token 走 header、PUT 帶 CAS body
     expect(url).toBe('/api/admin/audit')
     expect((init.headers as Record<string, string>)['X-Admin-Token']).toBe('tok')
   })
+
+  it('getAdminBackendProviders：GET、X-Admin-Token header、token 不進 URL', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { ok: true, data: validBackendProvidersData() }))
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await getAdminBackendProviders('secret-admin-token')
+    expect(result.ok).toBe(true)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/admin/backend-providers')
+    expect(url).not.toContain('secret-admin-token')
+    expect(init.method).toBe('GET')
+    expect((init.headers as Record<string, string>)['X-Admin-Token']).toBe('secret-admin-token')
+  })
+
+  it('setAdminBackendProvider：POST 單一 key/provider', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { ok: true, data: validBackendProvidersData() }))
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await setAdminBackendProvider('tok', 'memory', 'agentcore')
+    expect(result.ok).toBe(true)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/admin/backend-provider')
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['X-Admin-Token']).toBe('tok')
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
+    expect(JSON.parse(init.body as string)).toEqual({ key: 'memory', provider: 'agentcore' })
+  })
+
+  it('setAllAdminBackendProviders：POST 全部 provider', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { ok: true, data: validBackendProvidersData() }))
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await setAllAdminBackendProviders('tok', 'builtin')
+    expect(result.ok).toBe(true)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/admin/backend-providers-all')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ provider: 'builtin' })
+  })
 })
 
 describe('admin endpoints — 回應驗證（契約漂移擋下、不進表單）', () => {
@@ -169,6 +237,15 @@ describe('admin endpoints — 回應驗證（契約漂移擋下、不進表單�
     const data = { ...validAdminConfigData(), warnings: [123] }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
     const result = await putAdminConfig('t', { bedrock_enabled: true }, 7)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('parse_error')
+  })
+
+  it('backend providers 缺少 provider key → parse_error', async () => {
+    const data = validBackendProvidersData()
+    delete (data.providers as Record<string, string>).memory
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data })))
+    const result = await getAdminBackendProviders('t')
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error.code).toBe('parse_error')
   })
