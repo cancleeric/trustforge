@@ -5099,7 +5099,7 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
 def _handle_api_training_status() -> tuple[int, str]:
     """GET /api/training-status — 訓練資料累積狀態儀表板（Issue #333）。
 
-    讀取 `out/training-data/*.jsonl` 統計訓練紀錄數與方向標註率，
+    讀取 `data/training/*.jsonl` 統計訓練紀錄數與方向標註率，
     讀取 backfill DB（`out/trustforge-backfill.sqlite3`）的進度，
     回傳結構化 JSON 供前端 TrainingStatusCard 使用。
 
@@ -5107,7 +5107,7 @@ def _handle_api_training_status() -> tuple[int, str]:
     """
     import sqlite3
 
-    training_data_dir = Path(__file__).resolve().parents[2] / "out" / "training-data"
+    training_data_dir = Path(__file__).resolve().parents[2] / "data" / "training"
     backfill_db_path = Path(__file__).resolve().parents[2] / "out" / "trustforge-backfill.sqlite3"
 
     # --- 訓練資料統計 ---
