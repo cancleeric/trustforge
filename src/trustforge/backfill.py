@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -180,7 +181,14 @@ class BackfillWorker:
         end_date: str | None = None,
         batch_size: int = 30,
         interval_sec: float = 5.0,
+        mode: str = "offline",
+        sample: int | None = None,
     ):
+        if mode not in ("offline", "live"):
+            raise ValueError(f"mode must be 'offline' or 'live', got {mode!r}")
+        self.mode = mode
+        self.sample = sample
+
         self.db_path = _db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.data_dir = Path(data_dir) if data_dir else _root() / "data" / "data"
@@ -245,7 +253,10 @@ class BackfillWorker:
         return result
 
     def seed_tasks(self) -> int:
-        """將所有待回填日期寫入 SQLite（跳過已存在的記錄）。"""
+        """將所有待回填日期寫入 SQLite（跳過已存在的記錄）。
+
+        如果 self.sample 已設，均勻抽取 N 天（等距抽樣跨全時間範圍）。
+        """
         conn = self._get_conn()
         start = date.fromisoformat(self.start_date)
         end = date.fromisoformat(self.end_date)
@@ -253,20 +264,27 @@ class BackfillWorker:
         seeded = 0
         for coin in self.coins:
             bars = load_ohlcv(coin, self.data_dir)
-            bar_dates = {b.date for b in bars}
-            day = start
-            while day <= end:
-                ds = day.isoformat()
-                if ds in bar_dates:
-                    cursor = conn.execute(
-                        "INSERT OR IGNORE INTO backfill_tasks"
-                        "(coin,date_str,state,created_at,updated_at)"
-                        " VALUES(?,?,?,?,?)",
-                        (coin, ds, "pending", now, now),
-                    )
-                    if cursor.rowcount:
-                        seeded += 1
-                day += timedelta(days=1)
+            bar_dates = sorted(b.date for b in bars)
+            # 只保留在 start~end 範圍內的日期
+            eligible_dates = [d for d in bar_dates if start <= date.fromisoformat(d) <= end]
+
+            # 抽樣：均勻取 N 天
+            if self.sample is not None and self.sample < len(eligible_dates):
+                step = len(eligible_dates) / self.sample
+                eligible_dates = [
+                    eligible_dates[int(i * step)]
+                    for i in range(self.sample)
+                ]
+
+            for ds in eligible_dates:
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO backfill_tasks"
+                    "(coin,date_str,state,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (coin, ds, "pending", now, now),
+                )
+                if cursor.rowcount:
+                    seeded += 1
         return seeded
 
     # ─── 核心執行 ─────────────────────────────────────────────────────────
@@ -297,7 +315,11 @@ class BackfillWorker:
         return results
 
     def _process_day(self, coin: str, date_str: str) -> BackfillDayResult:
-        """處理單日回填：產 snapshot → replay。"""
+        """處理單日回填：產 snapshot → replay。
+
+        mode=offline: 用 BedrockClient(offline=True) 走 replay_snapshot（現有行為）
+        mode=live: 用 BedrockClient(offline=False) 走 run_agent_pipeline（真 Bedrock）
+        """
         conn = self._get_conn()
         start_time = time.time()
         conn.execute(
@@ -319,16 +341,22 @@ class BackfillWorker:
                 )
                 return result
 
-            # 跑 replay（offline，不用 Bedrock）
-            replay_result = replay_snapshot(
-                snapshot,
-                query=f"回填分析 {coin} {date_str} 市場信任狀態",
-            )
+            if self.mode == "live":
+                replay_result = self._run_live_pipeline(coin, date_str, snapshot)
+            else:
+                # mode=offline: 現有行為
+                replay_result = replay_snapshot(
+                    snapshot,
+                    query=f"回填分析 {coin} {date_str} 市場信任狀態",
+                )
 
             # 將 replay 結果寫入 trust_snapshot_history_key，讓
             # get_trust_history() 能讀到（格式對齊 fetch_scheduler.py
             # _snapshot_dict()：cache_get() → entry['docs'][0]）。
             self._persist_to_trust_history(coin, date_str, replay_result, snapshot)
+
+            # 寫入訓練資料 JSONL
+            self._persist_to_training_data(coin, date_str, replay_result, snapshot)
 
             duration = time.time() - start_time
             doc_count = sum(
@@ -369,6 +397,59 @@ class BackfillWorker:
                 "Backfill failed for %s %s: %s", coin, date_str, error_msg,
             )
             return result
+
+    def _run_live_pipeline(
+        self, coin: str, date_str: str, snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """mode=live: 用真 Bedrock 跑完整 agent pipeline。"""
+        from .agent.orchestrator import run_agent_pipeline
+        from .bedrock import BedrockClient
+        from .execlog import ExecutionLog
+        from .ingestion.base import Document
+        from .schema import QuestionType
+
+        boundary = float(snapshot.get("snapshot_epoch", 0))
+
+        # 從 snapshot 建出 Document 列表
+        docs: list[Document] = []
+        for source_entry in snapshot.get("sources") or []:
+            source_name = str(source_entry.get("source", ""))
+            for raw in source_entry.get("documents") or []:
+                if not isinstance(raw, dict):
+                    continue
+                published = raw.get("ts", boundary)
+                docs.append(Document(
+                    id=str(raw.get("id", f"{source_name}:{len(docs)}")),
+                    kind=str(raw.get("kind", "price")),
+                    source=str(raw.get("source", source_name)),
+                    text=str(raw.get("text", "")),
+                    url=str(raw.get("url", "")),
+                    ts=float(published),
+                    meta=dict(raw.get("meta") or {}),
+                ))
+
+        if not docs:
+            raise ValueError(f"No documents for live pipeline: {coin} {date_str}")
+
+        client = BedrockClient(offline=False)
+        log = ExecutionLog(now_fn=lambda: boundary)
+        query = f"回填分析 {coin} {date_str} 市場信任狀態"
+
+        from dataclasses import asdict
+        report, evidence = run_agent_pipeline(
+            query, coin, QuestionType.MULTI_SOURCE, docs,
+            client=client, log=log, now_fn=lambda: boundary,
+        )
+
+        return {
+            "coin": coin,
+            "snapshot_at": snapshot.get("snapshot_at"),
+            "snapshot_epoch": boundary,
+            "archive_type": snapshot.get("archive_type", "backfilled_archive"),
+            "report": asdict(report),
+            "evidence": [item.to_dict() for item in evidence],
+            "execution_log_jsonl": log.to_jsonl(),
+        }
 
     def _build_day_snapshot(
         self, coin: str, date_str: str,
@@ -488,6 +569,62 @@ class BackfillWorker:
             logger.debug(
                 "Backfill trust history skipped (newer exists) for %s %s",
                 coin, date_str,
+            )
+
+    def _persist_to_training_data(
+        self,
+        coin: str,
+        date_str: str,
+        replay_result: dict[str, Any],
+        snapshot: dict[str, Any],
+    ) -> None:
+        """Append 訓練資料到 out/training-data/{coin}.jsonl。
+
+        每筆格式：
+        {"date": ..., "coin": ..., "direction": ..., "trust_score": ...,
+         "confidence": ..., "evidence_count": ..., "sources": [...],
+         "model_id": ..., "generated_at": ...}
+        """
+        report = replay_result.get("report", {})
+        evidence_list = replay_result.get("evidence", [])
+
+        # 收集不重複的 source 名稱
+        sources: list[str] = []
+        seen_sources: set[str] = set()
+        for ev in evidence_list:
+            src = ev.get("source", "") if isinstance(ev, dict) else ""
+            if src and src not in seen_sources:
+                sources.append(src)
+                seen_sources.add(src)
+
+        # 判斷 model_id：live 模式有真實 model_id，offline 為 None
+        model_id = os.getenv("BEDROCK_MODEL_ID") if self.mode == "live" else None
+
+        record = {
+            "date": date_str,
+            "coin": coin,
+            "direction": report.get("direction", "neutral"),
+            "trust_score": round(float(report.get("confidence", 0)), 4),
+            "confidence": round(
+                float(report.get("calibrated_confidence", 0)), 4,
+            ),
+            "evidence_count": len(evidence_list),
+            "sources": sources,
+            "model_id": model_id,
+            "generated_at": iso_utc(time.time()),
+        }
+
+        training_dir = _root() / "out" / "training-data"
+        training_dir.mkdir(parents=True, exist_ok=True)
+        output_path = training_dir / f"{coin.upper()}.jsonl"
+
+        try:
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            logger.warning(
+                "Failed to persist training data for %s %s: %s",
+                coin, date_str, exc,
             )
 
     # ─── Daemon 模式 ──────────────────────────────────────────────────────
