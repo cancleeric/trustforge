@@ -287,12 +287,62 @@ def _from_ret_pcts(ret_pcts: list[float]) -> str | None:
         return "中性"
 
 
-def _direction(supporting: list[ScoredClaim]) -> str:
-    """從高信任價格事實判方向（我方判斷，非外部結論）。
+def _stance_consensus_direction(supporting: list[ScoredClaim]) -> str | None:
+    """Layer 2 多源 Stance 加權方向判定（Issue #342）。
 
-    使用 OHLCV 報酬率計算：(最近 close - 14天前 close) / 14天前 close
-    > +3% → "偏多"，< -3% → "偏空"，否則 "中性"。
-    無 price claims 時回傳 "不明"。
+    從 supporting 中收集有 `sc.claim.direction` 為 "bullish" 或 "bearish" 的
+    claims，用每筆的 trust score 做加權投票。需要 ≥2 個獨立來源（canonical_source
+    去重）有方向才有效，避免單源灌量或偶發方向標記主導結論。
+
+    判定規則：
+    - bullish_weight > bearish_weight × 1.3 → "偏多"
+    - bearish_weight > bullish_weight × 1.3 → "偏空"
+    - 否則（含勢均力敵）→ return None（fallback 到 Layer 1 價格趨勢）
+
+    設計意圖：
+    - 獨立來源門檻（≥2）確保不是單一來源的方向判斷就主導結論。
+    - 1.3 倍閾值確保多空差異有足夠顯著性，避免微弱優勢下硬給方向。
+    - 使用 `_canonical_source` 去重（repo-wide 唯一來源正規化），與
+      trust.scoring 的獨立性 invariant 一致。
+    """
+    from ..trust.scoring import _canonical_source
+
+    bullish_weight = 0.0
+    bearish_weight = 0.0
+    directional_sources: set[str] = set()
+
+    for sc in supporting:
+        direction = sc.claim.direction
+        if direction not in ("bullish", "bearish"):
+            continue
+        source_key = _canonical_source(sc.claim.doc.source)
+        directional_sources.add(source_key)
+        if direction == "bullish":
+            bullish_weight += sc.trust
+        else:
+            bearish_weight += sc.trust
+
+    # 需要 ≥2 個獨立來源有方向才有效
+    if len(directional_sources) < 2:
+        return None
+
+    # 判定方向（需 1.3 倍顯著性）
+    if bullish_weight > bearish_weight * 1.3:
+        return "偏多"
+    if bearish_weight > bullish_weight * 1.3:
+        return "偏空"
+    return None
+
+
+def _direction(supporting: list[ScoredClaim]) -> str:
+    """從高信任證據判方向（我方判斷，非外部結論）。
+
+    Layer 2（多源 Stance 加權）→ Layer 1（價格趨勢）→ "不明" 的 fallback 鏈：
+    1. 先嘗試 Layer 2 `_stance_consensus_direction`：多源 stance 加權投票
+       （需 ≥2 獨立來源有方向且一方顯著勝出 1.3 倍）。
+    2. Layer 2 回 None 時 fallback 到 Layer 1 `_price_trend_direction`：
+       使用 OHLCV 報酬率計算（>+3% 偏多，<-3% 偏空，否則中性）。
+    3. 兩層都無法判定時回傳 "不明"。
 
     參數吃呼叫端傳入的 supporting 子集——W4 codex 對抗審第 8 輪根治後，
     `trust.scoring.aggregate(coin=)` 本身就已用 `_matches_coin` 篩過
@@ -300,10 +350,10 @@ def _direction(supporting: list[ScoredClaim]) -> str:
     `build_report` 直接傳 `brief.supporting` 進來即天生 coin-scoped，不必
     再由呼叫端另外篩一次。
     """
-    price_dir = _price_trend_direction(supporting)
-    if price_dir:
-        return price_dir
-    return "不明"
+    stance_dir = _stance_consensus_direction(supporting)
+    if stance_dir:
+        return stance_dir
+    return _price_trend_direction(supporting) or "不明"
 
 
 def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:

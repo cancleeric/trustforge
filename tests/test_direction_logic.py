@@ -1,6 +1,8 @@
-"""Issue #338 Layer 1：_price_trend_direction / _direction 單元測試。
+"""Issue #338 Layer 1 + Issue #342 Layer 2：_direction 邏輯單元測試。
 
-使用 mock ScoredClaim，不依賴真實 DB。覆蓋：
+使用 mock ScoredClaim，不依賴真實 DB。
+
+Layer 1（_price_trend_direction）覆蓋：
 - 漲 >3% → 偏多
 - 跌 >3% → 偏空
 - 盤整 ±3% 內 → 中性
@@ -11,6 +13,13 @@
 - close 非正數排除
 - date 缺失排除
 - 單筆 price claim → None
+
+Layer 2（_stance_consensus_direction）覆蓋：
+- 多源 bullish (≥2 source) → 偏多
+- 多源 bearish (≥2 source) → 偏空
+- 只有 1 個 source → fallback to Layer 1 (return None)
+- bullish/bearish 勢均力敵 → fallback (return None)
+- 無 stance claims → fallback (return None)
 """
 from __future__ import annotations
 
@@ -18,7 +27,11 @@ import pytest
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from trustforge.agent.orchestrator import _price_trend_direction, _direction
+from trustforge.agent.orchestrator import (
+    _price_trend_direction,
+    _direction,
+    _stance_consensus_direction,
+)
 
 
 # --- Mock 物件 ---
@@ -276,3 +289,168 @@ class TestDirection:
     def test_empty_returns_unknown(self):
         """空清單 → '不明'"""
         assert _direction([]) == "不明"
+
+
+# ======================================================================
+# Layer 2: _stance_consensus_direction tests (Issue #342)
+# ======================================================================
+
+def _make_stance_claims(
+    items: list[tuple[str, str, float]],
+) -> list[MockScoredClaim]:
+    """建立一組帶方向的 mock ScoredClaim。
+
+    items = [(source, direction, trust), ...]
+    direction: "bullish" | "bearish" | "neutral"
+    """
+    claims = []
+    for i, (source, direction, trust) in enumerate(items):
+        doc = MockDocument(
+            kind="news",
+            source=source,
+            text=f"claim from {source} #{i}",
+            meta={"coin": "BTC"},
+        )
+        claim = MockClaim(
+            doc=doc,
+            id=f"stance-{source}-{i}",
+            text=doc.text,
+            direction=direction,
+        )
+        claims.append(MockScoredClaim(claim=claim, trust=trust))
+    return claims
+
+
+class TestStanceConsensusDirection:
+    """_stance_consensus_direction 單元測試（Layer 2，Issue #342）。"""
+
+    def test_multi_source_bullish(self):
+        """多源 bullish (≥2 independent sources) → 偏多"""
+        claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.7),
+            ("cointelegraph", "bullish", 0.6),
+            ("reuters", "bearish", 0.3),
+        ])
+        # bullish_weight = 0.7 + 0.6 = 1.3
+        # bearish_weight = 0.3
+        # 1.3 > 0.3 * 1.3 = 0.39 → 偏多
+        assert _stance_consensus_direction(claims) == "偏多"
+
+    def test_multi_source_bearish(self):
+        """多源 bearish (≥2 independent sources) → 偏空"""
+        claims = _make_stance_claims([
+            ("coindesk", "bearish", 0.8),
+            ("cointelegraph", "bearish", 0.7),
+            ("reuters", "bullish", 0.3),
+        ])
+        # bullish_weight = 0.3
+        # bearish_weight = 0.8 + 0.7 = 1.5
+        # 1.5 > 0.3 * 1.3 = 0.39 → 偏空
+        assert _stance_consensus_direction(claims) == "偏空"
+
+    def test_single_source_returns_none(self):
+        """只有 1 個獨立來源有方向 → return None (fallback to Layer 1)"""
+        claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.9),
+            ("coindesk", "bullish", 0.8),  # 同源重複，只算 1 個
+            ("reuters", "neutral", 0.7),   # neutral 不計入方向
+        ])
+        # directional_sources = {"coindesk"} → len < 2 → None
+        assert _stance_consensus_direction(claims) is None
+
+    def test_evenly_matched_returns_none(self):
+        """bullish/bearish 勢均力敵 → return None (fallback)"""
+        claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.7),
+            ("cointelegraph", "bearish", 0.7),
+            ("reuters", "bullish", 0.1),
+        ])
+        # bullish_weight = 0.7 + 0.1 = 0.8
+        # bearish_weight = 0.7
+        # 0.8 > 0.7 * 1.3 = 0.91? NO (0.8 < 0.91)
+        # 0.7 > 0.8 * 1.3 = 1.04? NO
+        # → None
+        assert _stance_consensus_direction(claims) is None
+
+    def test_no_stance_claims_returns_none(self):
+        """無 stance claims (全部 neutral) → return None (fallback)"""
+        claims = _make_stance_claims([
+            ("coindesk", "neutral", 0.9),
+            ("cointelegraph", "neutral", 0.8),
+            ("reuters", "neutral", 0.7),
+        ])
+        # directional_sources empty → len < 2 → None
+        assert _stance_consensus_direction(claims) is None
+
+    def test_empty_list_returns_none(self):
+        """空清單 → return None"""
+        assert _stance_consensus_direction([]) is None
+
+    def test_canonical_source_dedup(self):
+        """同源大小寫/空白變體只算一個獨立來源（canonical_source 去重）"""
+        claims = _make_stance_claims([
+            ("CoinDesk", "bullish", 0.7),
+            (" coindesk ", "bullish", 0.6),  # 同源變體
+            ("Reuters", "bearish", 0.2),
+        ])
+        # canonical: coindesk (×2 merged), reuters
+        # directional_sources = {"coindesk", "reuters"} → len >= 2 ✓
+        # bullish_weight = 0.7 + 0.6 = 1.3
+        # bearish_weight = 0.2
+        # 1.3 > 0.2 * 1.3 = 0.26 → 偏多
+        assert _stance_consensus_direction(claims) == "偏多"
+
+    def test_canonical_dedup_reduces_to_single_source(self):
+        """canonical_source 去重後只剩 1 個獨立來源 → return None"""
+        claims = _make_stance_claims([
+            ("CoinDesk", "bullish", 0.7),
+            ("coindesk", "bullish", 0.6),
+            ("COINDESK", "bullish", 0.5),
+        ])
+        # canonical: all are "coindesk" → only 1 unique source
+        # directional_sources = {"coindesk"} → len < 2 → None
+        assert _stance_consensus_direction(claims) is None
+
+
+class TestDirectionWithStanceFallback:
+    """_direction 整合測試：Layer 2 → Layer 1 fallback chain (Issue #342)。"""
+
+    def test_stance_takes_priority_over_price(self):
+        """Layer 2 stance 有結果時，優先於 Layer 1 price trend"""
+        # 價格跌 >3%（Layer 1 會說偏空）
+        dates = _date_range("2024-01-01", 15)
+        price_claims = _make_price_claims(
+            [(dates[0], 100.0)] + [(dates[-1], 96.0)]
+            + [(dates[i], 99.0) for i in range(1, 14)]
+        )
+        # 但 stance 多源 bullish（Layer 2 會說偏多）
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.8),
+            ("cointelegraph", "bullish", 0.7),
+        ])
+        combined = price_claims + stance_claims
+        # Layer 2 偏多 wins over Layer 1 偏空
+        assert _direction(combined) == "偏多"
+
+    def test_stance_none_falls_back_to_price(self):
+        """Layer 2 回 None 時 fallback 到 Layer 1 price trend"""
+        dates = _date_range("2024-01-01", 15)
+        price_claims = _make_price_claims(
+            [(dates[0], 100.0)] + [(dates[-1], 110.0)]
+            + [(dates[i], 102.0) for i in range(1, 14)]
+        )
+        # stance: 只有 1 個 source → Layer 2 回 None
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.9),
+        ])
+        combined = price_claims + stance_claims
+        # Layer 1 偏多 (price trend +10%)
+        assert _direction(combined) == "偏多"
+
+    def test_both_layers_fail_returns_unknown(self):
+        """兩層都無法判定 → '不明'"""
+        # 無 price claims 且 stance 來源不足
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.9),
+        ])
+        assert _direction(stance_claims) == "不明"
