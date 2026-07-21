@@ -95,6 +95,19 @@ class ExecutionLog:
             "summary": summary,
         })
 
+    def log_policy_snapshot(self, snapshot: dict) -> None:
+        """Record effective policy snapshot at run start.
+
+        Args:
+            snapshot: Dict from PolicyExecutor.snapshot_for_log(), containing
+                      per-family revision hash + policy_summary.
+        """
+        self.record(
+            "policy.snapshot",
+            params=snapshot,
+            summary="Effective outer-skill policies frozen for this run",
+        )
+
     def record_llm_cost(
         self, model: str | None, tokens_in: int, tokens_out: int, cost_usd: float
     ) -> None:

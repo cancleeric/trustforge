@@ -15,7 +15,8 @@ from typing import Any
 from .skill_changes import active_revision, default_log_path
 
 SKILL_FAMILIES = frozenset({"source", "analysis", "report", "evaluation", "improvement"})
-FORBIDDEN_KEYS = frozenset({"trust_weights", "core", "time_boundary", "evidence_binding"})
+FORBIDDEN_FAMILIES = frozenset({"deploy", "core", "security", "cost"})
+FORBIDDEN_KEYS = frozenset({"trust_weights", "core", "time_boundary", "evidence_binding", "security", "cost", "deploy"})
 
 
 def _home() -> Path:
@@ -46,6 +47,11 @@ def artifact_hash(value: dict[str, Any]) -> str:
 
 def validate_artifact(value: dict[str, Any]) -> None:
     family = value.get("family")
+    if family in FORBIDDEN_FAMILIES:
+        raise ValueError(
+            f"family '{family}' is archived/forbidden and cannot be executed; "
+            f"forbidden families: {sorted(FORBIDDEN_FAMILIES)}"
+        )
     if family not in SKILL_FAMILIES:
         raise ValueError(f"unsupported skill family: {family!r}")
     if not isinstance(value.get("rules"), list) or not value["rules"]:

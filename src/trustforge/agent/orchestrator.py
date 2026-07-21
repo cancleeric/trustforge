@@ -186,8 +186,9 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
     )
 
 
-def _price_trend_direction(supporting: list[ScoredClaim]) -> str | None:
-    """從 supporting claims 中找 kind="price" 的 documents，提取 close 值算報酬率。
+def _price_trend_direction(supporting: list[ScoredClaim],
+                           all_scored: list[ScoredClaim] | None = None) -> str | None:
+    """從 price claims 提取 close 值算報酬率。
 
     計算邏輯（兩種模式）：
 
@@ -202,13 +203,37 @@ def _price_trend_direction(supporting: list[ScoredClaim]) -> str | None:
 
     判定門檻：> +3% → "偏多"，< -3% → "偏空"，否則 "中性"。
     無 price claims 或無法取得有效資料 → return None。
+
+    #347 修正：price facts 是由官方 OHLCV 自行計算的客觀事實（kind="price",
+    source="ohlcv-csv"），信譽 0.95 但因零佐證+時效衰減會落在 trust<0.50，
+    被 aggregate() 的 support_threshold 擋在 supporting 之外。方向判定不應
+    受信任門檻限制——OHLCV 報酬率是確定性計算結果、不需要佐證。因此本函式
+    在 supporting 中找不到 price claims 時，改從 all_scored（完整評分清單）
+    中查找，確保客觀價格事實不被信任門檻截斷。
     """
     # 收集 (date_str, close) pairs（模式 A）
     price_points: list[tuple[str, float]] = []
     # 收集 ret_pct（模式 B）
     ret_pcts: list[float] = []
 
-    for sc in supporting:
+    # #347：先從 supporting 找 price claims；找不到可用方向資料時 fallback 到 all_scored
+    # 「可用」= 有 ret_pct（模式 B）或同時有 close + date（模式 A）
+    def _has_direction_data(sc) -> bool:
+        if sc.claim.doc.kind != "price":
+            return False
+        meta = sc.claim.doc.meta
+        if "ret_pct" in meta:
+            return True
+        if meta.get("close") is not None and meta.get("date") is not None:
+            return True
+        return False
+
+    price_source = supporting
+    if not any(_has_direction_data(sc) for sc in supporting):
+        if all_scored:
+            price_source = all_scored
+
+    for sc in price_source:
         if sc.claim.doc.kind != "price":
             continue
         meta = sc.claim.doc.meta
@@ -334,26 +359,55 @@ def _stance_consensus_direction(supporting: list[ScoredClaim]) -> str | None:
     return None
 
 
-def _direction(supporting: list[ScoredClaim]) -> str:
-    """從高信任證據判方向（我方判斷，非外部結論）。
+def _direction(supporting: list[ScoredClaim],
+               all_scored: list[ScoredClaim] | None = None) -> str:
+    """統一方向判定：LLM 語意分析 → offline fallback (OHLCV 統計)。
 
-    Layer 2（多源 Stance 加權）→ Layer 1（價格趨勢）→ "不明" 的 fallback 鏈：
-    1. 先嘗試 Layer 2 `_stance_consensus_direction`：多源 stance 加權投票
-       （需 ≥2 獨立來源有方向且一方顯著勝出 1.3 倍）。
-    2. Layer 2 回 None 時 fallback 到 Layer 1 `_price_trend_direction`：
-       使用 OHLCV 報酬率計算（>+3% 偏多，<-3% 偏空，否則中性）。
-    3. 兩層都無法判定時回傳 "不明"。
+    唯一管線（Issue #372 統一）：
+    1. Bedrock/AgentCore 可用 → LLM 語意分析（analyze_direction + aggregate_votes）
+    2. offline → OHLCV 報酬率統計 fallback
+
+    不再有 Layer 1/2/3 多層 fallback。
 
     參數吃呼叫端傳入的 supporting 子集——W4 codex 對抗審第 8 輪根治後，
     `trust.scoring.aggregate(coin=)` 本身就已用 `_matches_coin` 篩過
     `TrustedBrief.supporting`（保留本幣相關＋全市場通用，排除明確他幣），
     `build_report` 直接傳 `brief.supporting` 進來即天生 coin-scoped，不必
     再由呼叫端另外篩一次。
+
+    `all_scored`：選填（#347 修正追加）。完整評分清單——price facts 因零佐證+
+    時效衰減可能 trust<0.50 被排除在 supporting 之外，但它們是自行從官方
+    OHLCV 計算的客觀事實，方向判定不應受信任門檻限制。提供此參數時，
+    `_price_trend_direction` 在 supporting 無 price claims 時會從中查找。
     """
-    stance_dir = _stance_consensus_direction(supporting)
-    if stance_dir:
-        return stance_dir
-    return _price_trend_direction(supporting) or "不明"
+    # === 主路徑：LLM 語意分析 ===
+    try:
+        from ..semantic_direction import analyze_direction, aggregate_votes
+        client = BedrockClient()
+        if not client.offline:
+            evidence_by_type: dict[str, list[str]] = {}
+            source_claims = all_scored if all_scored else supporting
+            for sc in source_claims:
+                kind = sc.claim.doc.kind or "unknown"
+                type_map = {
+                    "price": "price", "news": "news", "regulatory": "news",
+                    "onchain": "onchain", "market": "onchain",
+                    "sentiment": "sentiment", "social": "sentiment",
+                }
+                st = type_map.get(kind)
+                if st:
+                    evidence_by_type.setdefault(st, []).append(sc.claim.text)
+            if evidence_by_type:
+                votes = analyze_direction(evidence_by_type, client)
+                if votes:
+                    direction, conf = aggregate_votes(votes)
+                    return {"bullish": "偏多", "bearish": "偏空", "neutral": "中性"}.get(direction, "中性")
+    except Exception:
+        pass
+
+    # === Offline fallback：OHLCV 統計 ===
+    price_dir = _price_trend_direction(supporting, all_scored=all_scored)
+    return price_dir or "不明"
 
 
 def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
@@ -978,6 +1032,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     """
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
+    _tele_t0 = time.perf_counter()
 
     # 1. 證據清單（支撐 + 反方）
     log.record(
@@ -1050,18 +1105,34 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     facts = [sc.claim.text for sc in brief.supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
 
     if is_abstain:
-        # 證據不足：不代客決策，不給任何方向性字眼（不判斷偏多/偏空/中性），
-        # 只中性陳述「資料不足以判斷」+ 具體原因，供人工自行決定是否需要
-        # 補資料再問。direction 設為「不明」，與 schema.Report._direction_label()
-        # 掃描不到 偏多/偏空/中性 關鍵詞時的預設值一致。
-        direction = "不明"
-        head = (
-            f"{coin}：現有資料不足以判斷市場方向"
-            f"（支撐證據 {n_supporting} 筆、校準後資訊完整度 {calibrated:.2f}），"
-            "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
-        )
+        # 證據不足：不代客決策，但仍嘗試從價格趨勢給出參考方向（Issue #367）。
+        # 若 _direction 能從客觀 OHLCV 算出偏多/偏空/中性，附上「僅供參考」提示；
+        # 若連方向都判不出（"不明"），退回原本的純中性文案。
+        direction = _direction(brief.supporting, all_scored=scored)
+        if direction == "不明":
+            head = (
+                f"{coin}：現有資料不足以判斷市場方向"
+                f"（支撐證據 {n_supporting} 筆、校準後資訊完整度 {calibrated:.2f}），"
+                "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
+            )
+        else:
+            if qtype == QuestionType.HYPOTHESIS:
+                head = (
+                    f"針對假設「{query}」：資料不足以做確信判斷，"
+                    f"但價格趨勢指向{direction}（僅供參考，非投資建議）。"
+                )
+            elif qtype == QuestionType.COMPARISON:
+                head = (
+                    f"{coin}：資料不足以做確信判斷，但價格趨勢指向{direction}"
+                    "（僅供參考，非投資建議）。（比較分析需對每個幣種各跑一次 pipeline 後並列）"
+                )
+            else:
+                head = (
+                    f"{coin}：資料不足以做確信判斷，但價格趨勢指向{direction}"
+                    "（僅供參考，非投資建議）。"
+                )
     else:
-        direction = _direction(brief.supporting)
+        direction = _direction(brief.supporting, all_scored=scored)
         if qtype == QuestionType.HYPOTHESIS:
             head = f"針對假設「{query}」：依現有證據，{coin} 短期傾向{direction}。"
         elif qtype == QuestionType.COMPARISON:
@@ -1310,6 +1381,14 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         decision_state=decision_state,
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
+    # --- telemetry: record build_report invocation ---
+    try:
+        from ..module_telemetry import record_invocation as _rec_inv
+        _tele_elapsed = (time.perf_counter() - _tele_t0) * 1000.0
+        _rec_inv("agent.build_report", _tele_elapsed, "success",
+                 metadata={"coin": coin, "evidence_count": len(evidence)})
+    except Exception:
+        pass
     return report, evidence
 
 

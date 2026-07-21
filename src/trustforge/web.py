@@ -5099,7 +5099,7 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
 def _handle_api_training_status() -> tuple[int, str]:
     """GET /api/training-status — 訓練資料累積狀態儀表板（Issue #333）。
 
-    讀取 `out/training-data/*.jsonl` 統計訓練紀錄數與方向標註率，
+    讀取 `data/training/*.jsonl` 統計訓練紀錄數與方向標註率，
     讀取 backfill DB（`out/trustforge-backfill.sqlite3`）的進度，
     回傳結構化 JSON 供前端 TrainingStatusCard 使用。
 
@@ -5107,7 +5107,7 @@ def _handle_api_training_status() -> tuple[int, str]:
     """
     import sqlite3
 
-    training_data_dir = Path(__file__).resolve().parents[2] / "out" / "training-data"
+    training_data_dir = Path(__file__).resolve().parents[2] / "data" / "training"
     backfill_db_path = Path(__file__).resolve().parents[2] / "out" / "trustforge-backfill.sqlite3"
 
     # --- 訓練資料統計 ---
@@ -5185,6 +5185,10 @@ def _handle_api_training_status() -> tuple[int, str]:
     upgrade_met = upgrade_current >= upgrade_target
     upgrade_pct = round(upgrade_current / upgrade_target * 100, 1) if upgrade_target > 0 else 0.0
 
+    # --- Anomalies（Issue #355）---
+    from .backfill import read_recent_anomalies
+    anomalies = read_recent_anomalies(limit=5)
+
     data = {
         "training_data": {
             "total_records": total_records,
@@ -5199,6 +5203,7 @@ def _handle_api_training_status() -> tuple[int, str]:
             "met": upgrade_met,
             "pct": upgrade_pct,
         },
+        "anomalies": anomalies,
     }
     return 200, _json_envelope_ok(data)
 
@@ -6754,6 +6759,34 @@ def _handle_api_health() -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
+# Module Runtime Telemetry API（issue #382）
+# ---------------------------------------------------------------------------
+
+def _handle_api_module_telemetry(qs: dict | None = None) -> tuple[int, str]:
+    """`/api/module-telemetry`：回傳所有模組的 runtime 遙測資料。
+
+    可選 query param `module_id` 查詢單一模組。
+    """
+    try:
+        from .module_telemetry import get_all_telemetry, get_telemetry
+        from dataclasses import asdict
+
+        if qs and "module_id" in qs:
+            mid = qs["module_id"][0] if isinstance(qs["module_id"], list) else qs["module_id"]
+            rec = get_telemetry(mid)
+            if rec is None:
+                return 404, _json_envelope_err("not_found", f"No telemetry for module: {mid}")
+            return 200, _json_envelope_ok(asdict(rec))
+
+        records = get_all_telemetry()
+        data = [asdict(r) for r in records]
+        return 200, _json_envelope_ok({"modules": data, "total": len(data)})
+    except Exception:
+        logging.exception("TrustForge /api/module-telemetry error")
+        return 502, _json_envelope_err("upstream_error", "模組遙測暫時無法讀取")
+
+
+# ---------------------------------------------------------------------------
 # 第三輪 AI 友善：OpenAPI spec／llms.txt 純靜態回應（純 stdlib 讀檔，見
 # CTO PR「feat/ai-friendly-openapi」）——不重用 `_json_envelope_*`
 # 信封（這兩個端點回的是文件本身，不是 `{ok,data,error}` API payload），
@@ -7710,6 +7743,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/analyze":
             code, body = _handle_api_analyze(qs, client_ip)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/module-telemetry":
+            code, body = _handle_api_module_telemetry(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
         # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封

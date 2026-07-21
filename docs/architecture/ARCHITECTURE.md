@@ -44,6 +44,19 @@ TrustScore = w_src · SourceReputation
 權重可調，預設見 `trust/scoring.py::DEFAULT_WEIGHTS`。
 最終對 query 相關主張做信任加權聚合，產出 `TrustedBrief`（含支撐證據與反方證據）。
 
+#### Trust Kernel（純計算核心 — #381）
+
+Layer 2 的計算邏輯封裝為 **Trust Kernel**（`trust/kernel.py`），作為信任評分的
+穩定介面層。Kernel 遵守**零外部依賴邊界**——禁止 IO/LLM/cache/boto3/env 存取，
+確保所有計算可重現、可在純記憶體 fixture 中測試。
+
+- 公開 API：`extract_claims()`, `score()`, `aggregate()`, `em_source_reliability()`
+- 核心常數：`DEFAULT_WEIGHTS`, `KIND_REPUTATION`, `KIND_HALFLIFE_HOURS`
+- 邊界文件：[`TRUST-KERNEL-BOUNDARY.md`](TRUST-KERNEL-BOUNDARY.md)
+
+外層（`agent/orchestrator.py`、`pipeline.py`）透過 Kernel facade 存取信任評分功能，
+`stance_fn`（需 IO/Bedrock）由外層注入。
+
 ### Layer 3 — Agent（編排 + 溯源生成）
 
 - 輸入：`TrustedBrief`（已加權、已附溯源）。
@@ -128,7 +141,7 @@ Layer 2（多源 stance 共識，待實作）：
   bearish 加權和 > bullish × 1.3 → 偏空
   否則 → 中性
 
-最終方向 = Layer 2（有效時）> Layer 1 > 「不明」
+最終方向 = Layer 1（明確漲跌時）> Layer 2（價格中性/無法判定時補充）> 「不明」
 ```
 
 審查標準：`.kiro/specs/direction-logic-338.md`

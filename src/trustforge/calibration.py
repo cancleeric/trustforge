@@ -16,7 +16,7 @@ from typing import Any, Iterable
 from .ingestion.prices import Bar
 
 
-_DIRECTION_SIGN = {"偏多": 1, "偏空": -1}
+_DIRECTION_SIGN = {"偏多": 1, "偏空": -1, "bullish": 1, "bearish": -1}
 
 
 @dataclass(frozen=True)

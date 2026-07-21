@@ -4,7 +4,6 @@ import type { ServiceMonitorState } from '../pages/HermesDashboard'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
 import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
 import GlossaryTerm from '../components/GlossaryTerm'
-import { latestUniqueConversationMessages } from '../lib/conversationMessages'
 
 interface HermesLeftRailProps {
   model: GalaxyModel
@@ -36,7 +35,6 @@ export default function HermesLeftRail({
 }: HermesLeftRailProps) {
   const { t } = useHermesI18n()
   const { tierCounts, coins } = model
-  const visibleConversation = latestUniqueConversationMessages(questionContext?.conversation ?? [])
   return (
     <div
       className="hermes-glass"
@@ -97,15 +95,18 @@ export default function HermesLeftRail({
             <div style={{ fontSize: 9, color: 'var(--color-hermes-amber)', letterSpacing: 1, marginBottom: 4 }}>{t('agentOutput')}</div>
             <div aria-label={t('agentOutput')} style={{ maxHeight: 62, overflowY: 'auto', fontSize: 11.5, lineHeight: 1.5, color: 'var(--color-hermes-tx)', overflowWrap: 'anywhere' }}>{hermesMessage}</div>
           </div>
-          {(visibleConversation.length || hasOrder) ? (
+          {(questionContext?.conversation.length || hasOrder) ? (
             <div style={{ background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 6, padding: '8px 11px', alignSelf: 'flex-end', maxWidth: '92%' }}>
               <div style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1, marginBottom: 3 }}>對話記憶 · SQLITE</div>
-              {visibleConversation.map((message) => (
+              {(questionContext?.conversation ?? [])
+                .filter((msg, i, arr) => i === 0 || msg.role !== arr[i - 1].role || msg.content !== arr[i - 1].content)
+                .slice(-3)
+                .map((message) => (
                 <div key={message.message_id} style={{ fontSize: 10.5, lineHeight: 1.4, color: message.role === 'hermes' ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-tx2)', marginTop: 4 }}>
                   {message.role === 'hermes' ? 'HERMES' : 'YOU'} › {message.content}
                 </div>
               ))}
-              {!visibleConversation.length && <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx2)' }}>&gt; {qtype}: {query}</div>}
+              {!questionContext?.conversation.length && <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx2)' }}>&gt; {qtype}: {query}</div>}
             </div>
           ) : null}
           {!!questionContext?.matches.length && (

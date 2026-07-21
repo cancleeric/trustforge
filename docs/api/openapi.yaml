@@ -1288,7 +1288,7 @@ paths:
       operationId: getTrainingStatus
       summary: 訓練資料累積狀態（Issue #333）
       description: |
-        讀取 `out/training-data/*.jsonl` 統計訓練紀錄數與方向標註率，
+        讀取 `data/training/*.jsonl` 統計訓練紀錄數與方向標註率，
         讀取 backfill DB 的進度，回傳結構化狀態供前端 TrainingStatusCard 使用。
         純讀本機檔案/SQLite（readonly），credit-safe。
       responses:

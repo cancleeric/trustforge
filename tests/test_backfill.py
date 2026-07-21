@@ -476,7 +476,7 @@ class TestBackfillTrainingData:
         training_path = Path(os.environ.get(
             "TRUSTFORGE_HOME",
             str(Path(__file__).resolve().parents[1]),
-        )) / "out" / "training-data" / "BTC.jsonl"
+        )) / "data" / "training" / "BTC.jsonl"
         assert training_path.exists()
 
         # 讀取確認格式正確
@@ -516,10 +516,150 @@ class TestBackfillTrainingData:
         training_path = Path(os.environ.get(
             "TRUSTFORGE_HOME",
             str(Path(__file__).resolve().parents[1]),
-        )) / "out" / "training-data" / "ETH.jsonl"
+        )) / "data" / "training" / "ETH.jsonl"
         assert training_path.exists()
 
         line = training_path.read_text(encoding="utf-8").strip().split("\n")[0]
         record = json.loads(line)
         assert record["model_id"] is None
         worker.close()
+
+
+# ─── Issue #355: 自動健康檢查 ─────────────────────────────────────────────────
+
+
+@pytest.fixture
+def isolated_env(tmp_path):
+    """Provide fully isolated TRUSTFORGE_HOME for health check tests."""
+    state_file = tmp_path / "backfill-control.json"
+    db_file = tmp_path / "backfill.sqlite3"
+    env = {
+        "TRUSTFORGE_BACKFILL_STATE_PATH": str(state_file),
+        "TRUSTFORGE_BACKFILL_ENABLED": "",
+        "TRUSTFORGE_HOME": str(tmp_path),
+    }
+    with patch.dict(os.environ, env, clear=False):
+        yield {"state": state_file, "db": db_file, "tmp": tmp_path}
+
+
+class TestBatchHealthCheck:
+    """驗證 Issue #355 自動健康檢查機制。"""
+
+    def test_high_failure_rate_writes_anomaly(self, isolated_env):
+        """失敗率 >10% 時寫入 anomaly-report.json。"""
+        from trustforge.backfill import (
+            BackfillDayResult,
+            _check_batch_health,
+            _anomaly_report_path,
+        )
+
+        # 模擬 10 個結果，2 個 failed (20%)
+        results = [
+            BackfillDayResult("BTC", f"2024-01-{i:02d}", "completed")
+            for i in range(1, 9)
+        ] + [
+            BackfillDayResult("BTC", "2024-01-09", "failed", error="timeout"),
+            BackfillDayResult("BTC", "2024-01-10", "failed", error="timeout"),
+        ]
+
+        anomalies = _check_batch_health(results)
+        assert len(anomalies) == 1
+        assert anomalies[0]["type"] == "high_failure_rate"
+        assert anomalies[0]["failed_count"] == 2
+        assert anomalies[0]["failure_rate"] > 0.10
+
+        # 確認寫入檔案
+        path = _anomaly_report_path()
+        assert path.is_file()
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) >= 1
+        record = json.loads(lines[-1])
+        assert record["type"] == "high_failure_rate"
+
+    def test_no_anomaly_for_normal_batch(self, isolated_env):
+        """正常 batch（低失敗率）不寫入 anomaly。"""
+        from trustforge.backfill import (
+            BackfillDayResult,
+            _check_batch_health,
+            _anomaly_report_path,
+        )
+
+        # 10 個 completed，0 個 failed
+        results = [
+            BackfillDayResult("BTC", f"2024-01-{i:02d}", "completed")
+            for i in range(1, 11)
+        ]
+
+        anomalies = _check_batch_health(results)
+        assert len(anomalies) == 0
+
+    def test_direction_bias_detected(self, isolated_env):
+        """方向偏差 >95% 時寫入 anomaly。"""
+        from trustforge.backfill import (
+            BackfillDayResult,
+            _check_batch_health,
+            _anomaly_report_path,
+        )
+
+        # 需要在 training data 中建立對應的方向資料
+        tmp = isolated_env["tmp"]
+        training_dir = tmp / "data" / "training"
+        training_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = training_dir / "BTC.jsonl"
+
+        # 寫入 20 筆全部都是 bearish 的 training data
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for i in range(1, 21):
+                record = {
+                    "date": f"2024-03-{i:02d}",
+                    "coin": "BTC",
+                    "direction": "bearish",
+                    "trust_score": 0.5,
+                }
+                f.write(json.dumps(record) + "\n")
+
+        # 模擬 20 個 completed 結果
+        results = [
+            BackfillDayResult("BTC", f"2024-03-{i:02d}", "completed")
+            for i in range(1, 21)
+        ]
+
+        anomalies = _check_batch_health(results)
+        # 應該偵測到方向偏差
+        direction_anomalies = [a for a in anomalies if a["type"] == "direction_bias"]
+        assert len(direction_anomalies) == 1
+        assert direction_anomalies[0]["dominant_direction"] == "bearish"
+        assert direction_anomalies[0]["dominant_ratio"] > 0.95
+
+    def test_empty_results_no_anomaly(self, isolated_env):
+        """空結果不觸發 anomaly。"""
+        from trustforge.backfill import _check_batch_health
+
+        anomalies = _check_batch_health([])
+        assert anomalies == []
+
+    def test_read_recent_anomalies(self, isolated_env):
+        """read_recent_anomalies 正確讀取最近 N 筆。"""
+        from trustforge.backfill import (
+            _anomaly_report_path,
+            _write_anomaly,
+            read_recent_anomalies,
+        )
+
+        # 寫入 7 筆
+        for i in range(7):
+            _write_anomaly({"type": "test", "index": i})
+
+        # 讀取最近 5 筆
+        recent = read_recent_anomalies(limit=5)
+        assert len(recent) == 5
+        # 應該是最後 5 筆
+        assert recent[0]["index"] == 2
+        assert recent[4]["index"] == 6
+
+    def test_read_recent_anomalies_empty_file(self, isolated_env):
+        """anomaly 檔案不存在時回傳空列表。"""
+        from trustforge.backfill import read_recent_anomalies
+
+        recent = read_recent_anomalies()
+        assert recent == []

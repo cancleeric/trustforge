@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Direction Distribution Check",
+      "trigger": "PostTaskExec",
+      "description": "任務完成後檢查方向判定的輸出分佈是否合理（不允許 >90% 同一方向）",
+      "matcher": "(orchestrator|scoring|direction)",
+      "action": {
+        "type": "command",
+        "command": "cd /Users/yinghaowang/HurricaneSoft/trustforge && .venv/bin/pytest tests/test_direction_distribution.py -x -q --no-cov --tb=short 2>&1 | tail -5",
+        "timeout": 60
+      }
+    }
+  ]
+}

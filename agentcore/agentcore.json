@@ -1,0 +1,78 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "TrustForge",
+  "version": 1,
+  "managedBy": "CDK",
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "TrustForge"
+  },
+  "runtimes": [
+    {
+      "name": "TrustForge",
+      "build": "CodeZip",
+      "entrypoint": "main.py",
+      "codeLocation": "app/TrustForge/",
+      "runtimeVersion": "PYTHON_3_14",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "requestHeaderAllowlist": [
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"
+      ]
+    },
+    {
+      "name": "CustomerSupport",
+      "build": "CodeZip",
+      "entrypoint": "main.py",
+      "codeLocation": "app/CustomerSupport/",
+      "runtimeVersion": "PYTHON_3_14",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "requestHeaderAllowlist": [
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-User-Id"
+      ]
+    }
+  ],
+  "memories": [
+    {
+      "name": "UserPreferences",
+      "eventExpiryDuration": 30,
+      "strategies": [
+        {
+          "type": "SEMANTIC",
+          "namespaceTemplates": [
+            "/users/{actorId}/facts"
+          ]
+        },
+        {
+          "type": "SUMMARIZATION",
+          "namespaceTemplates": [
+            "/summaries/{actorId}/{sessionId}"
+          ]
+        }
+      ]
+    }
+  ],
+  "knowledgeBases": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [
+    {
+      "name": "QualityMonitor",
+      "agent": "TrustForge",
+      "evaluators": [
+        "Builtin.GoalSuccessRate",
+        "Builtin.Correctness"
+      ],
+      "samplingRate": 100,
+      "enableOnCreate": true
+    }
+  ],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "abTests": [],
+  "harnesses": [],
+  "datasets": [],
+  "payments": []
+}

@@ -1,8 +1,9 @@
-"""Issue #338 Layer 1 + Issue #342 Layer 2：_direction 邏輯單元測試。
+"""Issue #338 _price_trend_direction + Issue #342 _stance_consensus_direction +
+Issue #372 _direction 統一管線 單元測試。
 
 使用 mock ScoredClaim，不依賴真實 DB。
 
-Layer 1（_price_trend_direction）覆蓋：
+_price_trend_direction 覆蓋：
 - 漲 >3% → 偏多
 - 跌 >3% → 偏空
 - 盤整 ±3% 內 → 中性
@@ -14,12 +15,16 @@ Layer 1（_price_trend_direction）覆蓋：
 - date 缺失排除
 - 單筆 price claim → None
 
-Layer 2（_stance_consensus_direction）覆蓋：
+_stance_consensus_direction 覆蓋（函式獨立測試，不在 _direction 中呼叫）：
 - 多源 bullish (≥2 source) → 偏多
 - 多源 bearish (≥2 source) → 偏空
-- 只有 1 個 source → fallback to Layer 1 (return None)
-- bullish/bearish 勢均力敵 → fallback (return None)
-- 無 stance claims → fallback (return None)
+- 只有 1 個 source → return None
+- bullish/bearish 勢均力敵 → return None
+- 無 stance claims → return None
+
+_direction 統一管線（Issue #372）：
+- LLM 語意分析 → offline fallback (OHLCV 統計)
+- 測試環境為 offline，故 _direction 直接走 _price_trend_direction fallback
 """
 from __future__ import annotations
 
@@ -412,44 +417,79 @@ class TestStanceConsensusDirection:
         assert _stance_consensus_direction(claims) is None
 
 
-class TestDirectionWithStanceFallback:
-    """_direction 整合測試：Layer 2 → Layer 1 fallback chain (Issue #342)。"""
+class TestDirectionWithUnifiedPipeline:
+    """_direction 統一管線測試（Issue #372）。
 
-    def test_stance_takes_priority_over_price(self):
-        """Layer 2 stance 有結果時，優先於 Layer 1 price trend"""
-        # 價格跌 >3%（Layer 1 會說偏空）
+    核心行為：LLM 語意分析 → offline fallback (OHLCV 統計)。
+    測試環境為 offline（無 Bedrock），故 _direction 直接走 _price_trend_direction。
+    不再有 stance layer 參與 _direction 判定。
+    """
+
+    def test_price_bearish_returns_bearish(self):
+        """價格偏空 → 偏空（offline 直接走 OHLCV）"""
         dates = _date_range("2024-01-01", 15)
         price_claims = _make_price_claims(
             [(dates[0], 100.0)] + [(dates[-1], 96.0)]
             + [(dates[i], 99.0) for i in range(1, 14)]
         )
-        # 但 stance 多源 bullish（Layer 2 會說偏多）
         stance_claims = _make_stance_claims([
             ("coindesk", "bullish", 0.8),
             ("cointelegraph", "bullish", 0.7),
         ])
         combined = price_claims + stance_claims
-        # Layer 2 偏多 wins over Layer 1 偏空
-        assert _direction(combined) == "偏多"
+        # Offline: OHLCV fallback → 偏空
+        assert _direction(combined) == "偏空"
 
-    def test_stance_none_falls_back_to_price(self):
-        """Layer 2 回 None 時 fallback 到 Layer 1 price trend"""
+    def test_price_bullish_returns_bullish(self):
+        """價格偏多 → 偏多（offline 直接走 OHLCV）"""
         dates = _date_range("2024-01-01", 15)
         price_claims = _make_price_claims(
             [(dates[0], 100.0)] + [(dates[-1], 110.0)]
             + [(dates[i], 102.0) for i in range(1, 14)]
         )
-        # stance: 只有 1 個 source → Layer 2 回 None
         stance_claims = _make_stance_claims([
-            ("coindesk", "bullish", 0.9),
+            ("coindesk", "bearish", 0.8),
+            ("cointelegraph", "bearish", 0.7),
         ])
         combined = price_claims + stance_claims
-        # Layer 1 偏多 (price trend +10%)
+        # Offline: OHLCV fallback → 偏多
         assert _direction(combined) == "偏多"
 
+    def test_price_neutral_returns_neutral_offline(self):
+        """價格中性 → 中性（offline 無 LLM，stance 不再參與 _direction）"""
+        dates = _date_range("2024-01-01", 15)
+        price_claims = _make_price_claims(
+            [(dates[0], 100.0)] + [(dates[-1], 101.0)]
+            + [(dates[i], 100.5) for i in range(1, 14)]
+        )
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.8),
+            ("cointelegraph", "bullish", 0.7),
+        ])
+        combined = price_claims + stance_claims
+        # Offline: OHLCV = 中性，不再 fallback 到 stance
+        assert _direction(combined) == "中性"
+
+    def test_no_price_returns_unknown_offline(self):
+        """無價格資料 → 不明（offline 無 LLM，stance 不再參與 _direction）"""
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.8),
+            ("cointelegraph", "bullish", 0.7),
+        ])
+        # Offline: OHLCV = None → "不明"
+        assert _direction(stance_claims) == "不明"
+
+    def test_price_data_only_bullish(self):
+        """只有價格資料且漲 → 偏多"""
+        dates = _date_range("2024-01-01", 15)
+        price_claims = _make_price_claims(
+            [(dates[0], 100.0)] + [(dates[-1], 110.0)]
+            + [(dates[i], 102.0) for i in range(1, 14)]
+        )
+        assert _direction(price_claims) == "偏多"
+
     def test_both_layers_fail_returns_unknown(self):
-        """兩層都無法判定 → '不明'"""
-        # 無 price claims 且 stance 來源不足
+        """無 price + 只有 stance → '不明'（offline 模式 stance 不生效）"""
         stance_claims = _make_stance_claims([
             ("coindesk", "bullish", 0.9),
         ])
