@@ -718,13 +718,11 @@ def test_complete_online_extracts_usage_from_fake_invoke_model(monkeypatch):
     captured = {}
 
     class _FakeRuntime:
-        def invoke_model(self, **kwargs):
+        def converse(self, **kwargs):
             captured.update(kwargs)
             return {
-                "body": _FakeInvokeBody({
-                    "content": [{"type": "text", "text": "假回應文字"}],
-                    "usage": {"input_tokens": 321, "output_tokens": 88},
-                })
+                "output": {"message": {"content": [{"text": "假回應文字"}]}},
+                "usage": {"inputTokens": 321, "outputTokens": 88},
             }
 
     monkeypatch.setattr(client, "_runtime", lambda: _FakeRuntime())
@@ -743,8 +741,8 @@ def test_complete_online_missing_usage_defaults_to_zero(monkeypatch):
     client = BedrockClient(config=config, offline=False)
 
     class _FakeRuntime:
-        def invoke_model(self, **kwargs):
-            return {"body": _FakeInvokeBody({"content": [{"type": "text", "text": "x"}]})}
+        def converse(self, **kwargs):
+            return {"output": {"message": {"content": [{"text": "x"}]}}, "usage": {}}
 
     monkeypatch.setattr(client, "_runtime", lambda: _FakeRuntime())
     result = client.complete(system="sys", prompt="prompt")
