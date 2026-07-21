@@ -222,8 +222,119 @@ class FakeBudgetProvider:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Builtin Adapters（production 用）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class BedrockLLMAdapter:
+    """Builtin LLM adapter via bedrock.BedrockClient."""
+
+    def __init__(self, client=None):
+        if client is None:
+            from .bedrock import BedrockClient
+            self._client = BedrockClient()
+        else:
+            self._client = client
+
+    def complete(self, system: str, prompt: str) -> str:
+        return self._client.complete(system=system, prompt=prompt).text
+
+    def classify_stance(self, claim_a: str, claim_b: str) -> str:
+        return self._client.classify_stance(claim_a, claim_b)
+
+
+class SQLiteCacheAdapter:
+    """Builtin Cache adapter backed by SQLite."""
+
+    def get(self, key: str) -> dict | None:
+        from .ingestion.cache import get_cache_backend, cache_get
+        result = cache_get(get_cache_backend(), key)
+        if result is None:
+            return None
+        if hasattr(result, '__iter__'):
+            return {"documents": [getattr(d, '__dict__', d) for d in result]}
+        return None
+
+    def set(self, key: str, value: dict, ttl: int = 3600) -> None:
+        import time as _time
+        from .ingestion.cache import get_cache_backend, cache_set
+        cache_set(get_cache_backend(), key, value, fetched_at=_time.time(), ttl_seconds=ttl)
+
+
+class AgentCoreLLMAdapter:
+    """AgentCore LLM adapter（TRUSTFORGE_AGENTCORE=1 時啟用）。"""
+
+    def __init__(self):
+        import os
+        if not os.environ.get("TRUSTFORGE_AGENTCORE"):
+            raise RuntimeError(
+                "AgentCoreLLMAdapter requires TRUSTFORGE_AGENTCORE=1 in environment"
+            )
+
+    def complete(self, system: str, prompt: str) -> str:
+        raise NotImplementedError(
+            "AgentCore bridge not yet implemented — set BEDROCK_MODEL_ID to use Bedrock adapter"
+        )
+
+    def classify_stance(self, claim_a: str, claim_b: str) -> str:
+        raise NotImplementedError(
+            "AgentCore bridge not yet implemented — set BEDROCK_MODEL_ID to use Bedrock adapter"
+        )
+
+
+class NullLLMAdapter:
+    """Offline LLM adapter — 回傳固定佔位字串。"""
+
+    def complete(self, system: str, prompt: str) -> str:
+        return "[offline]"
+
+    def classify_stance(self, claim_a: str, claim_b: str) -> str:
+        return "neutral"
+
+
+class NullCacheAdapter:
+    """Offline Cache adapter — 永遠 miss。"""
+
+    def get(self, key: str) -> dict | None:
+        return None
+
+    def set(self, key: str, value: dict, ttl: int = 3600) -> None:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Runtime Resolver
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _resolve_llm_from_env() -> tuple[LLMProvider, str]:
+    """根據環境變數選擇 LLM adapter。"""
+    import os
+
+    if os.environ.get("TRUSTFORGE_AGENTCORE") == "1":
+        try:
+            adapter = AgentCoreLLMAdapter()
+            return adapter, "agentcore"
+        except Exception as exc:
+            raise RuntimeError(
+                f"TRUSTFORGE_AGENTCORE=1 but AgentCore init failed: {exc}"
+            ) from exc
+
+    if os.environ.get("BEDROCK_MODEL_ID"):
+        return BedrockLLMAdapter(), "bedrock"
+
+    return NullLLMAdapter(), "null"
+
+
+def _resolve_cache_from_env() -> tuple[CacheProvider, str]:
+    """根據環境變數選擇 Cache adapter。"""
+    import os
+
+    if os.environ.get("CACHE_BACKEND", "").lower() == "sqlite":
+        return SQLiteCacheAdapter(), "sqlite"
+
+    return NullCacheAdapter(), "null"
+
 
 def resolve_providers(
     *,
@@ -232,40 +343,63 @@ def resolve_providers(
     source: SourceProvider | None = None,
     observability: ObservabilityProvider | None = None,
     budget: BudgetProvider | None = None,
+    offline: bool = False,
 ) -> ProviderSet:
     """Resolve providers for a pipeline run.
 
     Accepts optional explicit provider instances. For any not provided,
-    falls back to builtin defaults (Fake providers for safety — real
-    adapters should be explicitly constructed by the caller).
-
-    Returns a ProviderSet with resolution metadata for execution logging.
+    resolves from environment or falls back to Null/Fake adapters.
     """
     resolutions: list[ProviderResolution] = []
 
-    def _resolve(key: str, explicit: object | None, fallback_factory: type) -> tuple[object, ProviderResolution]:
-        if explicit is not None:
-            res = ProviderResolution(
-                key=key, configured="explicit", resolved="explicit", invoked=False,
-            )
-            return explicit, res
-        # Fallback to safe default
-        instance = fallback_factory()
-        res = ProviderResolution(
-            key=key, configured="builtin", resolved="builtin",
-            invoked=False, fallback_reason="no explicit provider given",
-        )
-        return instance, res
+    # --- LLM ---
+    if llm is not None:
+        resolved_llm = llm
+        resolutions.append(ProviderResolution(
+            key="llm", configured="explicit", resolved="explicit", invoked=False,
+        ))
+    elif offline:
+        resolved_llm = NullLLMAdapter()
+        resolutions.append(ProviderResolution(
+            key="llm", configured="offline", resolved="null",
+            invoked=False, fallback_reason="offline=True",
+        ))
+    else:
+        resolved_llm, adapter_name = _resolve_llm_from_env()
+        resolutions.append(ProviderResolution(
+            key="llm", configured=adapter_name, resolved=adapter_name, invoked=False,
+        ))
 
-    resolved_llm, r = _resolve("llm", llm, FakeLLMProvider)
+    # --- Cache ---
+    if cache is not None:
+        resolved_cache = cache
+        resolutions.append(ProviderResolution(
+            key="cache", configured="explicit", resolved="explicit", invoked=False,
+        ))
+    elif offline:
+        resolved_cache = NullCacheAdapter()
+        resolutions.append(ProviderResolution(
+            key="cache", configured="offline", resolved="null",
+            invoked=False, fallback_reason="offline=True",
+        ))
+    else:
+        resolved_cache, cache_name = _resolve_cache_from_env()
+        resolutions.append(ProviderResolution(
+            key="cache", configured=cache_name, resolved=cache_name, invoked=False,
+        ))
+
+    # --- Source / Observability / Budget ---
+    def _resolve_generic(key: str, explicit: object | None, fallback_factory: type) -> tuple[object, ProviderResolution]:
+        if explicit is not None:
+            return explicit, ProviderResolution(key=key, configured="explicit", resolved="explicit", invoked=False)
+        instance = fallback_factory()
+        return instance, ProviderResolution(key=key, configured="builtin", resolved="builtin", invoked=False, fallback_reason="no explicit provider given")
+
+    resolved_source, r = _resolve_generic("source", source, FakeSourceProvider)
     resolutions.append(r)
-    resolved_cache, r = _resolve("cache", cache, FakeCacheProvider)
+    resolved_obs, r = _resolve_generic("observability", observability, FakeObservabilityProvider)
     resolutions.append(r)
-    resolved_source, r = _resolve("source", source, FakeSourceProvider)
-    resolutions.append(r)
-    resolved_obs, r = _resolve("observability", observability, FakeObservabilityProvider)
-    resolutions.append(r)
-    resolved_budget, r = _resolve("budget", budget, FakeBudgetProvider)
+    resolved_budget, r = _resolve_generic("budget", budget, FakeBudgetProvider)
     resolutions.append(r)
 
     return ProviderSet(
