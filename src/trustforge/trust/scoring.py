@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time as _time_mod
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -1504,6 +1505,7 @@ def score(
     docstring）。不提供時（預設）行為與之前逐字相同——用 `stance_client`
     等參數自建一份專屬本次 `score()` 呼叫的 stance_fn。
     """
+    _tele_t0 = _time_mod.perf_counter()
     w = weights or DEFAULT_WEIGHTS
     if stance_fn is None:
         stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
@@ -1604,6 +1606,14 @@ def score(
                 info_flags=c_info_flags,
             )
         )
+    # --- telemetry: record score() invocation ---
+    try:
+        from ..module_telemetry import record_invocation as _rec_inv
+        _tele_elapsed = (_time_mod.perf_counter() - _tele_t0) * 1000.0
+        _rec_inv("trust.scoring", _tele_elapsed, "success",
+                 metadata={"claims_count": len(claims)})
+    except Exception:
+        pass
     return out
 
 
