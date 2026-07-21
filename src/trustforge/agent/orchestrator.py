@@ -186,8 +186,113 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
     )
 
 
+def _price_trend_direction(supporting: list[ScoredClaim]) -> str | None:
+    """從 supporting claims 中找 kind="price" 的 documents，提取 close 值算報酬率。
+
+    計算邏輯（兩種模式）：
+
+    模式 A（逐日 OHLCV，backfill 產生）：
+      - 從 price claims 的 doc.meta 取 close 值，按 date 排序
+      - 報酬率 = (最近 close - 基準 close) / 基準 close
+      - 基準 = 14 天前的 close（不足 14 天則用最早的 close）
+
+    模式 B（聚合事實，price_facts 產生）：
+      - 從 price claims 的 doc.meta 取 ret_pct（已算好的報酬百分比）
+      - 多筆取平均
+
+    判定門檻：> +3% → "偏多"，< -3% → "偏空"，否則 "中性"。
+    無 price claims 或無法取得有效資料 → return None。
+    """
+    # 收集 (date_str, close) pairs（模式 A）
+    price_points: list[tuple[str, float]] = []
+    # 收集 ret_pct（模式 B）
+    ret_pcts: list[float] = []
+
+    for sc in supporting:
+        if sc.claim.doc.kind != "price":
+            continue
+        meta = sc.claim.doc.meta
+        # 模式 B：meta 有 ret_pct
+        if "ret_pct" in meta:
+            try:
+                ret_pcts.append(float(meta["ret_pct"]))
+            except (ValueError, TypeError):
+                pass
+            continue
+        # 模式 A：meta 有 close + date
+        close_val = meta.get("close")
+        date_str = meta.get("date")
+        # 嘗試從 text 解析 "C=xxx" pattern（舊版 claim 相容）
+        if close_val is None:
+            m = re.search(r"C=([\d.]+)", sc.claim.text)
+            if m:
+                try:
+                    close_val = float(m.group(1))
+                except (ValueError, TypeError):
+                    continue
+        if close_val is None or date_str is None:
+            continue
+        try:
+            close_val = float(close_val)
+        except (ValueError, TypeError):
+            continue
+        if close_val <= 0:
+            continue
+        price_points.append((date_str, close_val))
+
+    # 優先模式 A（更精確：從逐日 OHLCV 算）
+    if len(price_points) >= 2:
+        price_points.sort(key=lambda x: x[0])
+        latest_date, latest_close = price_points[-1]
+        from datetime import date as _date_type
+        try:
+            latest_d = _date_type.fromisoformat(latest_date)
+        except (ValueError, TypeError):
+            return _from_ret_pcts(ret_pcts)
+
+        # 找離 latest_d >= 14 天的最近一筆（倒著找）
+        base_close = price_points[0][1]  # fallback: 最早
+        for date_str, close_val in reversed(price_points[:-1]):
+            try:
+                d = _date_type.fromisoformat(date_str)
+            except (ValueError, TypeError):
+                continue
+            if (latest_d - d).days >= 14:
+                base_close = close_val
+                break
+
+        ret = (latest_close - base_close) / base_close
+        if ret > 0.03:
+            return "偏多"
+        elif ret < -0.03:
+            return "偏空"
+        else:
+            return "中性"
+
+    # 模式 B fallback（price_facts 產生的聚合事實）
+    return _from_ret_pcts(ret_pcts)
+
+
+def _from_ret_pcts(ret_pcts: list[float]) -> str | None:
+    """從 ret_pct 列表判定方向。"""
+    if not ret_pcts:
+        return None
+    avg_ret = sum(ret_pcts) / len(ret_pcts)
+    # ret_pct 是百分比值（如 +5.2 代表 5.2%），門檻 3%
+    if avg_ret > 3.0:
+        return "偏多"
+    elif avg_ret < -3.0:
+        return "偏空"
+    else:
+        return "中性"
+
+
 def _direction(supporting: list[ScoredClaim]) -> str:
     """從高信任價格事實判方向（我方判斷，非外部結論）。
+
+    使用 OHLCV 報酬率計算：(最近 close - 14天前 close) / 14天前 close
+    > +3% → "偏多"，< -3% → "偏空"，否則 "中性"。
+    無 price claims 時回傳 "不明"。
 
     參數吃呼叫端傳入的 supporting 子集——W4 codex 對抗審第 8 輪根治後，
     `trust.scoring.aggregate(coin=)` 本身就已用 `_matches_coin` 篩過
@@ -195,16 +300,10 @@ def _direction(supporting: list[ScoredClaim]) -> str:
     `build_report` 直接傳 `brief.supporting` 進來即天生 coin-scoped，不必
     再由呼叫端另外篩一次。
     """
-    for sc in supporting:
-        if sc.claim.doc.kind == "price":
-            t = sc.claim.text
-            if "上漲" in t:
-                return "偏多"
-            if "下跌" in t:
-                return "偏空"
-            if "盤整" in t:
-                return "中性"
-    return "中性"
+    price_dir = _price_trend_direction(supporting)
+    if price_dir:
+        return price_dir
+    return "不明"
 
 
 def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
