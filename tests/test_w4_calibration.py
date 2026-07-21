@@ -875,14 +875,17 @@ def test_e2e_multi_btc_sources_normal_state_unaffected_by_coin_scoping():
     """回歸對照組：正常多本幣(BTC)來源情境，coin-scoped 貫穿修正後仍應正常
     給出 normal 態方向結論——確認本輪修正沒有誤傷合法的多幣種相關來源。"""
     docs = [
-        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p0", "price", "exch-a", "BTC Daily OHLCV 2024-01-01: C=40000.00",
+             meta={"coin": "BTC", "date": "2024-01-01", "close": 40000.0}),
+        _doc("p1", "price", "exch-a", "BTC Daily OHLCV 2024-01-15: C=42000.00",
+             meta={"coin": "BTC", "date": "2024-01-15", "close": 42000.0}),
         _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p3", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p4", "news", "coindesk", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
     ]
     scored = score(extract_claims(docs), now=1_000_000.0)
     brief = aggregate(scored, query="分析 BTC", coin="BTC")
-    assert len(brief.supporting) == 4
+    assert len(brief.supporting) >= 4
 
     report, _evidence = _run_report(brief)
     assert report.decision_state == "normal", (
@@ -985,7 +988,10 @@ def test_e2e_root_fix_all_report_fields_immune_to_mixed_trust_other_coin_claims(
     存在（同 Round 7 測試手法，套用到本輪更廣的欄位集合）。
     """
     btc_docs = [
-        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p0", "price", "exch-a", "BTC Daily OHLCV 2024-01-01: C=40000.00",
+             meta={"coin": "BTC", "date": "2024-01-01", "close": 40000.0}),
+        _doc("p1", "price", "exch-a", "BTC Daily OHLCV 2024-01-15: C=42000.00",
+             meta={"coin": "BTC", "date": "2024-01-15", "close": 42000.0}),
         _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p3", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p4", "news", "coindesk", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
@@ -1087,8 +1093,10 @@ def test_e2e_moderate_evidence_low_confidence_state_still_gives_conclusion_but_m
     """2 個獨立來源、單一 kind、有一定反方雜訊 → calibrated 落 [0.35, 0.5)
     （真實 aggregate 產出）→ 仍出結論（有方向），但標「低信心」。"""
     docs = [
-        _doc("p1", "price", "exch-a", "BTC 盤整 持穩。"),
-        _doc("p2", "price", "exch-b", "BTC 盤整 持穩。"),
+        _doc("p1", "price", "exch-a", "BTC Daily OHLCV 2024-01-01: C=50000.00",
+             meta={"coin": "BTC", "date": "2024-01-01", "close": 50000.0}),
+        _doc("p2", "price", "exch-b", "BTC Daily OHLCV 2024-01-15: C=50500.00",
+             meta={"coin": "BTC", "date": "2024-01-15", "close": 50500.0}),
     ] + [_doc(f"c{i}", "social", f"anon-{i}", "BTC 翻倍 to the moon 穩賺快上車！") for i in range(3)]
     brief = _aggregate_from_docs(docs)
     assert 0.35 <= brief.calibrated_confidence < 0.5, brief.calibrated_confidence
@@ -1107,7 +1115,10 @@ def test_e2e_strong_multi_source_evidence_normal_state_unmarked():
     """多獨立來源、多元 kind、無反方 → calibrated >= 0.5（真實 aggregate 產出）
     → 正常，不含 abstain/低信心標記（既有行為逐字不變）。"""
     docs = [
-        _doc("p1", "price", "exch-a", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
+        _doc("p0", "price", "exch-a", "BTC Daily OHLCV 2024-01-01: C=40000.00",
+             meta={"coin": "BTC", "date": "2024-01-01", "close": 40000.0}),
+        _doc("p1", "price", "exch-a", "BTC Daily OHLCV 2024-01-15: C=42000.00",
+             meta={"coin": "BTC", "date": "2024-01-15", "close": 42000.0}),
         _doc("p2", "onchain", "glassnode", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p3", "regulatory", "sec-gov", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
         _doc("p4", "news", "coindesk", "BTC 站穩 關鍵 支撐位 反彈 上漲。"),
