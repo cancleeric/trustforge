@@ -590,6 +590,34 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
   # 主要 config SSM 成功不代表 fetch-scheduler 真的能跑（IAM 權限不足只有實
   # 際執行才會露餡）：再同步跑一次，非成功就讓整支腳本 exit 非零。
   verify_fetch_scheduler "$IID"
+
+  # ---- nginx conf 健全性保護（防止 TLS conf 在無 domain/cert 現況下讓全站
+  #      301 空轉）：佈署腳本本身不涉及 nginx conf 切換（那是 cutover_switch.sh
+  #      的職責），但要確保佈署結束時使用者*實際能*透過 public IP:80 拿到
+  #      服務——若現行 nginx conf 把 port 80 全部 301 導去 HTTPS domain，而該
+  #      domain 的 TLS cert 不可用或使用者實際是打 bare IP，等同使用者看到錯誤。
+  #      這裡做「佈署後 public nginx smoke test」：透過 SSM 打
+  #      http://127.0.0.1/healthz（經 nginx port 80），若收到 301/不通 → 自動
+  #      降級切回 react-http.conf（HTTP-only），確保 bare-IP 可達；印 WARNING
+  #      提醒後續人工切回 TLS 版。不 exit 1（佈署本身已成功），只是 conf 降級。
+  echo "[ec2] 檢查 nginx port 80 公開可達性…"
+  nginx_check_cmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
+    --document-name AWS-RunShellScript --parameters commands='["HTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1/healthz)","echo \"nginx_http_code=$HTTP_CODE\"","if [ \"$HTTP_CODE\" = \"200\" ]; then echo ok; exit 0; fi","echo \"[ec2] ⚠️ nginx port 80 /healthz 回傳 $HTTP_CODE（非 200），疑似 TLS conf 301 空轉，自動降級到 react-http.conf\" >&2","if [ -f /etc/nginx/trustforge-sites/react-http.conf ]; then ln -sfn /etc/nginx/trustforge-sites/react-http.conf /etc/nginx/conf.d/trustforge.conf && nginx -t && systemctl reload nginx && echo downgraded; else echo \"[ec2] ❌ react-http.conf 不存在，無法自動降級\" >&2; exit 1; fi"]' \
+    --query 'Command.CommandId' --output text 2>/dev/null || echo "")
+  if [ -n "$nginx_check_cmdid" ] && [ "$nginx_check_cmdid" != "None" ]; then
+    nginx_status=$(poll_ssm_terminal_status "$nginx_check_cmdid" "$IID" 30 3) || true
+    nginx_out=$(aws ssm get-command-invocation --region "$REGION" --command-id "$nginx_check_cmdid" --instance-id "$IID" \
+      --query 'StandardOutputContent' --output text 2>/dev/null || echo "")
+    if echo "$nginx_out" | grep -q "downgraded"; then
+      echo "[ec2] ⚠️  nginx conf 已自動降級到 react-http.conf（HTTP-only），bare-IP 可達。"
+      echo "[ec2]    後續若要啟用 TLS：確認 domain DNS + cert 就緒後，執行 cutover_switch.sh react"
+    elif echo "$nginx_out" | grep -q "^ok"; then
+      echo "[ec2] nginx port 80 /healthz 正常（200）"
+    else
+      echo "[ec2] ⚠️  nginx 檢查結果不明（Status=$nginx_status），請人工確認 http://<IP>/healthz 是否可達"
+    fi
+  fi
+
   IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
   echo "[ec2] ✅ 既有實例已更新：$IID  公開 IP：${IP}（EIP 未動，模型=${MODEL:-<離線>}）"
