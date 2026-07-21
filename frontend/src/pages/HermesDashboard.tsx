@@ -20,35 +20,6 @@ import { useReducedMotion } from '../lib/useReducedMotion'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
-function AgentCoreStatusBar() {
-  const [status, setStatus] = useState<'connected' | 'disconnected' | 'checking'>('checking')
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const resp = await fetch('/agentcore/invocations', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: 'ping' }),
-          signal: AbortSignal.timeout(5000),
-        })
-        setStatus(resp.status > 0 ? 'connected' : 'disconnected')
-      } catch {
-        setStatus('disconnected')
-      }
-    }
-    check()
-    const id = setInterval(check, 30000)
-    return () => clearInterval(id)
-  }, [])
-  const color = status === 'connected' ? '#4ade80' : status === 'disconnected' ? '#f87171' : '#fbbf24'
-  const label = status === 'connected' ? '● AgentCore Connected' : status === 'disconnected' ? '○ AgentCore Offline' : '◐ Checking...'
-  return (
-    <div style={{ position: 'fixed', bottom: 8, left: 16, zIndex: 9999, background: 'rgba(13,17,23,0.9)', border: `1px solid ${color}`, borderRadius: 6, padding: '4px 12px', fontFamily: 'monospace', fontSize: 11, color }}>
-      {label}
-    </div>
-  )
-}
-
 export default function HermesDashboard() {
   const { locale, t } = useHermesI18n()
   const qtypes = useMemo(
@@ -542,8 +513,6 @@ export default function HermesDashboard() {
           <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} reducedMotion={reducedMotion} onReducedMotionToggle={toggleReducedMotion} />
         </div>
 
-        {/* AgentCore connection status */}
-        <AgentCoreStatusBar />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <HermesLeftRail

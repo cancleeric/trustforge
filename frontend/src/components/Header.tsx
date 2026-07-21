@@ -11,7 +11,6 @@ const BUILD_VERSION = import.meta.env.VITE_RELEASE_VERSION || 'build'
 
 export default function Header() {
   const [releaseVersion, setReleaseVersion] = useState(BUILD_VERSION)
-  const [agentcoreStatus, setAgentcoreStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking')
   const { locale, setLocale, t } = useHermesI18n()
   const navItems = [
     { to: '/', label: 'HERMES' }, { to: '/analyze', label: t('analyze') },
@@ -27,24 +26,6 @@ export default function Header() {
       // Keep the build-time value visible if the health endpoint is briefly unavailable.
     })
     return () => controller.abort()
-  }, [])
-
-  useEffect(() => {
-    const checkAgentCore = async () => {
-      try {
-        const resp = await fetch('/agentcore/health', { signal: AbortSignal.timeout(3000) })
-        setAgentcoreStatus(resp.ok ? 'connected' : 'disconnected')
-      } catch {
-        setAgentcoreStatus('disconnected')
-      }
-    }
-
-    void checkAgentCore()
-    const interval = window.setInterval(() => {
-      void checkAgentCore()
-    }, 15000)
-
-    return () => window.clearInterval(interval)
   }, [])
 
   return (
@@ -95,18 +76,6 @@ export default function Header() {
         title="部署版本（release / git sha）"
         className="self-center rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted"
       >{`${releaseVersion} · ${GIT_SHA}`}</span>
-      <span
-        title={`AgentCore: ${agentcoreStatus}`}
-        className={`self-center rounded border px-2 py-0.5 font-mono text-xs ${
-          agentcoreStatus === 'connected'
-            ? 'border-green-500/40 text-green-400'
-            : agentcoreStatus === 'disconnected'
-              ? 'border-red-500/40 text-red-400'
-              : 'border-yellow-500/40 text-yellow-400'
-        }`}
-      >
-        {agentcoreStatus === 'connected' ? '● AgentCore' : agentcoreStatus === 'disconnected' ? '○ AgentCore OFF' : '◐ Checking'}
-      </span>
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} className="self-center rounded border border-tf-border bg-transparent px-2 py-1 font-mono text-xs text-tf-muted hover:text-tf-text">
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>
