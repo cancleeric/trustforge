@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from .agent.orchestrator import run_agent_pipeline
-from .bedrock import BedrockClient
+from .bedrock import BedrockClient, LLMResult
 from .brand_logos import source_display_name
 from .budget_guard import (
     daily_cap_exceeded,
@@ -19,12 +19,55 @@ from .budget_guard import (
 from .execlog import ExecutionLog
 from .ingestion.base import collect, execution_log_context
 from .policy import PolicyExecutor
+from .ports import BedrockLLMAdapter, LLMProvider, NullLLMAdapter, resolve_providers
 from .schema import COIN_POOL, Evidence, QuestionType, Report
 from .skills import run_skill_manifest
 
 
 _DATA_MODES = ("live", "sample")
 _LLM_MODES = ("off", "bedrock")
+
+
+class _ProviderClient:
+    """Adapt an LLMProvider to the BedrockClient duck type used by orchestrator."""
+
+    def __init__(self, provider: LLMProvider, *, offline: bool, stance_offline: bool):
+        self._provider = provider
+        self.offline = offline
+        self.stance_offline = stance_offline
+        self.cost_events: list[dict] = []
+        self.config = type("_ProviderClientConfig", (), {"model_id": None})()
+
+    def complete(self, system: str, prompt: str) -> LLMResult:
+        if self.offline:
+            return LLMResult(text="[offline]", input_tokens=0, output_tokens=0, model_id=None)
+        return LLMResult(
+            text=self._provider.complete(system, prompt),
+            input_tokens=0,
+            output_tokens=0,
+            model_id=None,
+        )
+
+    def extract_claims_with_llm(self, docs, log=None):
+        from .trust.scoring import extract_claims
+
+        return extract_claims(docs)
+
+    def classify_stance(self, claim_a: str, claim_b: str) -> str:
+        if self.stance_offline:
+            return "neutral"
+        return self._provider.classify_stance(claim_a, claim_b)
+
+
+def _client_from_llm_provider(provider: LLMProvider | None, *, offline: bool, stance_offline: bool):
+    if isinstance(provider, BedrockLLMAdapter):
+        client = provider.client
+        client.offline = offline
+        client.stance_offline = stance_offline
+        return client
+    if provider is None:
+        provider = NullLLMAdapter()
+    return _ProviderClient(provider, offline=offline or isinstance(provider, NullLLMAdapter), stance_offline=stance_offline)
 
 
 def _resolve_modes(
@@ -207,10 +250,40 @@ def run(coin: str, query: str, qtype: QuestionType,
     elif _online_stance_wanted and force_stance_offline:
         _degrade_reason = "rate_limit"
 
+    providers = resolve_providers(
+        llm=BedrockLLMAdapter(
+            client=BedrockClient(
+                offline=llm_offline,
+                stance_offline=stance_offline,
+            )
+        ),
+        offline=llm_offline,
+    )
+    for resolution in providers.resolutions:
+        if resolution.key == "llm":
+            resolution.invoked = True
+        log.record(
+            "provider.resolve",
+            params={
+                "key": resolution.key,
+                "configured": resolution.configured,
+                "resolved": resolution.resolved,
+                "invoked": resolution.invoked,
+                "revision": resolution.revision,
+                "fallback_reason": resolution.fallback_reason,
+            },
+            summary=f"provider {resolution.key}: {resolution.resolved}",
+        )
+    llm_client = _client_from_llm_provider(
+        providers.llm,
+        offline=llm_offline,
+        stance_offline=stance_offline,
+    )
+
     try:
         report, evidence = run_agent_pipeline(
             query, coin, qtype, docs,
-            client=BedrockClient(offline=llm_offline, stance_offline=stance_offline), log=log,
+            client=llm_client, log=log,
         )
     finally:
         release_request_budget(_reservation)
