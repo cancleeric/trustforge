@@ -129,10 +129,10 @@ export default function HermesRightRail({
           <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}><GlossaryTerm term="divergence" label={t('divergence')} compact /></span>
         </div>
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
-          {crossSignal ? `${crossSignal.summary} — ${t('tapReview')}`
-            : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
-              : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
-                : `${t('conflict')} · Δ ${divDock.divergence}% — ${t('tapReview')}`}
+          {crossSignal ? crossSignal.summary
+            : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
+              : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
+                : `${t('conflict')} · Δ ${divDock.divergence}%`}
         </div>
       </div>
     </div>
