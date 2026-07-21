@@ -451,10 +451,174 @@ class BackfillWorker:
             "execution_log_jsonl": log.to_jsonl(),
         }
 
+    # ─── 歷史來源快取 ─────────────────────────────────────────────────────
+
+    def _load_historical_sources(self) -> None:
+        """一次性從 API 拉全量 FNG + blockchain charts 歷史，快取到 instance。
+
+        後續呼叫直接從 cache 讀。網路失敗時 graceful degrade（空快取），
+        不阻塞 backfill 主流程。
+        """
+        if getattr(self, "_historical_loaded", False):
+            return
+
+        self._fng_history: list[dict[str, Any]] = []
+        self._blockchain_cache: dict[str, list[dict[str, Any]]] = {}
+        self._historical_loaded = True
+
+        # ── Fear & Greed Index（market-wide，所有幣種共用）
+        try:
+            from .ingestion.safe_fetch import fetch_url
+            raw = fetch_url(
+                "https://api.alternative.me/fng/?limit=0&format=json",
+                user_agent="TrustForge-Backfill/1.0",
+                timeout=30,
+                max_bytes=4 * 1024 * 1024,  # FNG 全歷史約 1-2 MB
+            )
+            payload = json.loads(raw)
+            # 用最大可能的時間範圍預先 parse，個別日期在 snapshot 時再篩
+            self._fng_history = payload.get("data", [])
+            logger.info(
+                "FNG history loaded: %d entries", len(self._fng_history),
+            )
+        except Exception as exc:
+            logger.warning("Failed to load FNG history (degraded): %s", exc)
+
+        # ── Blockchain.com charts（BTC only）
+        from .historical_sources import BLOCKCHAIN_CHARTS
+        for chart_name in BLOCKCHAIN_CHARTS:
+            try:
+                from .ingestion.safe_fetch import fetch_url
+                raw = fetch_url(
+                    f"https://api.blockchain.info/charts/{chart_name}"
+                    "?timespan=5years&format=json",
+                    user_agent="TrustForge-Backfill/1.0",
+                    timeout=30,
+                    max_bytes=8 * 1024 * 1024,
+                )
+                payload = json.loads(raw)
+                self._blockchain_cache[chart_name] = payload
+                values_count = len(payload.get("values", []))
+                logger.info(
+                    "Blockchain.com %s loaded: %d points",
+                    chart_name, values_count,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load blockchain-com %s (degraded): %s",
+                    chart_name, exc,
+                )
+
+    def _get_historical_documents(
+        self, coin: str, snapshot_epoch: float,
+    ) -> list[dict[str, dict[str, Any]]]:
+        """從快取中取出該日之前的歷史來源 documents，按 source 分組。
+
+        回傳格式：[{"source": ..., "fetched_at": ..., "documents": [...]}]
+        遵守 point-in-time 原則：只包含 snapshot_epoch 之前的資料。
+        """
+        from .historical_sources import (
+            parse_alternative_me_history,
+            parse_blockchain_chart_history,
+        )
+
+        self._load_historical_sources()
+        extra_sources: list[dict[str, Any]] = []
+
+        # ── FNG：找 snapshot_epoch 當天（±12h 範圍）的 entry
+        if self._fng_history:
+            # FNG 的 timestamp 是每日 00:00 UTC，取 snapshot 當天往前 24h
+            day_start = snapshot_epoch - 86400
+            day_end = snapshot_epoch
+            try:
+                retrieved_at = snapshot_epoch
+                fng_payload = {"data": self._fng_history}
+                fng_docs = parse_alternative_me_history(
+                    fng_payload,
+                    retrieved_at=retrieved_at,
+                    start_epoch=day_start,
+                    end_epoch=day_end,
+                )
+                # 只取當前 coin 的 docs（FNG 是 market-wide，parser 會為每個幣種產一條）
+                coin_fng_docs = [d for d in fng_docs if d.get("coin") == coin]
+                if coin_fng_docs:
+                    fng_documents = []
+                    for doc in coin_fng_docs:
+                        fng_documents.append({
+                            "id": f"fng-{coin}-{doc.get('published_at', '')}",
+                            "kind": doc.get("kind", "sentiment"),
+                            "source": "alternative-me-fng",
+                            "text": doc.get("text", ""),
+                            "url": doc.get("url", ""),
+                            "ts": day_end,
+                            "published_at": doc.get("published_at", ""),
+                            "meta": {
+                                "value": doc.get("value"),
+                                "classification": doc.get("classification"),
+                                "scope": doc.get("scope", "market-wide"),
+                            },
+                        })
+                    extra_sources.append({
+                        "source": "alternative-me-fng",
+                        "fetched_at": snapshot_epoch,
+                        "documents": fng_documents,
+                    })
+            except Exception as exc:
+                logger.debug("FNG parse failed for %s: %s", coin, exc)
+
+        # ── Blockchain.com charts（BTC only）
+        if coin == "BTC" and self._blockchain_cache:
+            day_start = snapshot_epoch - 86400
+            day_end = snapshot_epoch
+            bc_documents: list[dict[str, Any]] = []
+            for chart_name, payload in self._blockchain_cache.items():
+                try:
+                    retrieved_at = snapshot_epoch
+                    chart_docs = parse_blockchain_chart_history(
+                        payload,
+                        chart_name=chart_name,
+                        retrieved_at=retrieved_at,
+                        start_epoch=day_start,
+                        end_epoch=day_end,
+                    )
+                    for doc in chart_docs:
+                        bc_documents.append({
+                            "id": f"bc-{chart_name}-{doc.get('published_at', '')}",
+                            "kind": doc.get("kind", "onchain"),
+                            "source": "blockchain-com-charts",
+                            "text": doc.get("text", ""),
+                            "url": doc.get("url", ""),
+                            "ts": day_end,
+                            "published_at": doc.get("published_at", ""),
+                            "meta": {
+                                "metric": doc.get("metric"),
+                                "unit": doc.get("unit"),
+                                "value": doc.get("value"),
+                                "scope": doc.get("scope", "asset"),
+                            },
+                        })
+                except Exception as exc:
+                    logger.debug(
+                        "Blockchain.com %s parse failed: %s", chart_name, exc,
+                    )
+            if bc_documents:
+                extra_sources.append({
+                    "source": "blockchain-com-charts",
+                    "fetched_at": snapshot_epoch,
+                    "documents": bc_documents,
+                })
+
+        return extra_sources
+
+    # ─── Snapshot 建構 ────────────────────────────────────────────────────
+
     def _build_day_snapshot(
         self, coin: str, date_str: str,
     ) -> dict[str, Any] | None:
-        """用 OHLCV 截取到該日為止的資料，組成 point-in-time snapshot。"""
+        """用 OHLCV 截取到該日為止的資料，組成 point-in-time snapshot。
+
+        額外接入歷史來源（FNG / blockchain-com）以達成交叉佐證。
+        """
         bars = load_ohlcv(coin, self.data_dir)
         if not bars:
             return None
@@ -510,6 +674,18 @@ class BackfillWorker:
             "fetched_at": snapshot_epoch,
             "documents": ohlcv_documents,
         }]
+
+        # 接入歷史來源（FNG + blockchain-com），graceful degrade
+        try:
+            historical_sources = self._get_historical_documents(
+                coin, snapshot_epoch,
+            )
+            sources.extend(historical_sources)
+        except Exception as exc:
+            logger.warning(
+                "Historical sources failed for %s %s (degraded): %s",
+                coin, date_str, exc,
+            )
 
         return {
             "coin": coin,
