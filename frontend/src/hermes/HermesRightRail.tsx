@@ -14,11 +14,10 @@ interface HermesRightRailProps {
   journey?: AnalysisJourneyData | null
   crossSignal?: CrossSourceSignal | null
   onOpenComposite: () => void
-  onOpenDivergence: () => void
 }
 
 export default function HermesRightRail({
-  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, onOpenComposite, onOpenDivergence,
+  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, onOpenComposite,
 }: HermesRightRailProps) {
   const { t } = useHermesI18n()
   const { score, tier, full } = selCoin
@@ -115,24 +114,21 @@ export default function HermesRightRail({
 
       {/* divergence alert dock */}
       <div
-        onClick={onOpenDivergence}
         className="hermes-clip"
         style={{
-          cursor: 'pointer', background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
+          background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
           animation: tier === 'danger' ? 'hermes-alert-flash 2.4s ease-in-out infinite' : undefined,
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.transform = 'translateY(-1px)')}
-        onMouseLeave={(e) => (e.currentTarget.style.transform = 'none')}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
           <span style={{ color: dockColor, fontSize: 13 }}>⚠</span>
           <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}><GlossaryTerm term="divergence" label={t('divergence')} compact /></span>
         </div>
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
-          {crossSignal ? `${crossSignal.summary} — ${t('tapReview')}`
-            : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
-              : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}% — ${t('tapReview')}`
-                : `${t('conflict')} · Δ ${divDock.divergence}% — ${t('tapReview')}`}
+          {crossSignal ? crossSignal.summary
+            : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}% · ${t('monitoring')}`
+              : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}% · ${t('monitoring')}`
+                : `${t('conflict')} · Δ ${divDock.divergence}% · ${t('monitoring')}`}
         </div>
       </div>
     </div>

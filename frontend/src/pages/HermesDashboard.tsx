@@ -561,7 +561,6 @@ export default function HermesDashboard() {
             crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
             derivation={hudDerivation}
             onOpenComposite={() => setSelectedStage('composite')}
-            onOpenDivergence={() => setSelectedStage('divergence')}
           />
         </div>
 
