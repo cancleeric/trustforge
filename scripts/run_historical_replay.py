@@ -10,7 +10,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from trustforge.calibration import replay_report  # noqa: E402
+from trustforge.calibration import load_training_snapshots, replay_report  # noqa: E402
 from trustforge.ingestion.cache import get_cache_backend, get_trust_history  # noqa: E402
 from trustforge.ingestion.prices import load_ohlcv  # noqa: E402
 from trustforge.replay_regression import evaluate_replay_regression_gate  # noqa: E402
@@ -23,12 +23,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=365, help="number of UTC snapshot days to inspect")
     parser.add_argument("--end-date", help="UTC YYYY-MM-DD end date; defaults to today")
     parser.add_argument("--data-dir", default=str(REPO / "data" / "data"))
+    parser.add_argument("--training-data", type=Path, help="JSONL training archive directory; defaults to cache history")
     parser.add_argument("--out", help="optional JSON report path")
     args = parser.parse_args(argv)
     if args.days < 1:
         parser.error("--days must be >= 1")
 
-    snapshots = get_trust_history(args.coin, args.days, get_cache_backend(), end_date=args.end_date)
+    if args.training_data:
+        snapshots = load_training_snapshots(args.training_data, coin=args.coin)
+    else:
+        snapshots = get_trust_history(args.coin, args.days, get_cache_backend(), end_date=args.end_date)
     report = replay_report(args.coin, snapshots, load_ohlcv(args.coin, args.data_dir))
     report["regression_gate"] = evaluate_replay_regression_gate(report)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+import json
+from pathlib import Path
 from typing import Any, Iterable
 
 from .ingestion.prices import Bar
@@ -22,17 +24,49 @@ class Outcome:
     date: str
     horizon_days: int
     direction: str
-    completeness: float
+    confidence: float
     return_pct: float
     directional_return_pct: float
     hit: bool
 
 
-def _clamp(value: Any) -> float:
+def _clamp_probability(value: Any) -> float:
     try:
         return max(0.0, min(1.0, float(value)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _confidence(snapshot: dict[str, Any]) -> float:
+    if snapshot.get("confidence") is not None:
+        return _clamp_probability(snapshot.get("confidence"))
+    return _clamp_probability(snapshot.get("calibrated_confidence"))
+
+
+def load_training_snapshots(training_dir: str | Path, *, coin: str | None = None) -> list[dict[str, Any]]:
+    """Read JSONL training archives that contain directional predictions."""
+    root = Path(training_dir)
+    wanted_coin = coin.upper() if coin else None
+    snapshots: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.jsonl")):
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_no} is not valid JSONL") from exc
+            if not isinstance(row, dict):
+                continue
+            row_coin = str(row.get("coin", "")).upper()
+            if wanted_coin and row_coin != wanted_coin:
+                continue
+            if _DIRECTION_SIGN.get(str(row.get("direction", ""))) is None:
+                continue
+            if not row.get("date"):
+                continue
+            snapshots.append(row)
+    return snapshots
 
 
 def outcomes_for_horizon(
@@ -66,7 +100,7 @@ def outcomes_for_horizon(
             date=ordered[start].date,
             horizon_days=horizon_days,
             direction=direction,
-            completeness=_clamp(snapshot.get("calibrated_confidence")),
+            confidence=_confidence(snapshot),
             return_pct=return_pct,
             directional_return_pct=directional_return,
             hit=directional_return > 0,
@@ -92,24 +126,30 @@ def calibration_summary(outcomes: Iterable[Outcome], *, bins: int = 5) -> dict[s
     rows = list(outcomes)
     count = len(rows)
     correct = sum(row.hit for row in rows)
-    brier = sum((row.completeness - float(row.hit)) ** 2 for row in rows) / count if count else None
+    brier = sum((row.confidence - float(row.hit)) ** 2 for row in rows) / count if count else None
     groups: dict[int, list[Outcome]] = defaultdict(list)
     for row in rows:
-        groups[min(bins - 1, int(row.completeness * bins))].append(row)
+        groups[min(bins - 1, int(row.confidence * bins))].append(row)
     reliability = []
+    calibration_error = 0.0
     for index in range(bins):
         group = groups[index]
         if not group:
             continue
+        mean_confidence = sum(row.confidence for row in group) / len(group)
+        empirical_hit_rate = sum(row.hit for row in group) / len(group)
+        calibration_error = max(calibration_error, abs(mean_confidence - empirical_hit_rate))
         reliability.append({
             "range": [round(index / bins, 2), round((index + 1) / bins, 2)],
             "count": len(group),
-            "mean_information_completeness": round(sum(row.completeness for row in group) / len(group), 4),
-            "empirical_hit_rate": round(sum(row.hit for row in group) / len(group), 4),
+            "mean_confidence": round(mean_confidence, 4),
+            "mean_information_completeness": round(mean_confidence, 4),
+            "empirical_hit_rate": round(empirical_hit_rate, 4),
         })
     return {
         "eligible_predictions": count,
         "hit_rate": round(correct / count, 4) if count else None,
+        "calibration_error": round(calibration_error, 4) if count else None,
         "mean_directional_return_pct": round(sum(row.directional_return_pct for row in rows) / count, 4) if count else None,
         "max_drawdown_pct": round(_max_drawdown(row.directional_return_pct for row in rows), 4) if count else None,
         "brier_score_proxy": round(brier, 4) if brier is not None else None,
