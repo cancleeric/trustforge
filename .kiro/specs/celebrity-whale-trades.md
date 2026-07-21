@@ -191,8 +191,8 @@ Document(
 
 ## 五、成功指標
 
-- [ ] 離線模式可正確產出 whale_onchain 和 celebrity_trade Document
-- [ ] 新 kind 在 scoring 中獲得正確的基礎信譽分
-- [ ] 已驗證的鯨魚信號能作為獨立佐證來源提升 corroboration 分項
-- [ ] 未驗證的名人宣告被正確降級至 social 等級
-- [ ] 所有安全措施（SSRF、key 隱藏、URL 白名單）就位
+- [x] 離線模式可正確產出 whale_onchain 和 celebrity_trade Document
+- [x] 新 kind 在 scoring 中獲得正確的基礎信譽分
+- [x] 已驗證的鯨魚信號能作為獨立佐證來源提升 corroboration 分項
+- [x] 未驗證的名人宣告被正確降級至 social 等級
+- [x] 所有安全措施（SSRF、key 隱藏、URL 白名單）就位

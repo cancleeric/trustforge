@@ -231,10 +231,10 @@ class BackfillProgress:
 
 ## 五、成功指標
 
-- [ ] `python -m trustforge.cli backfill plan` 顯示正確天數
-- [ ] `python -m trustforge.cli backfill start --coin BTC` 可啟動並產出 snapshot
-- [ ] daemon 模式下 backfill 與 analysis flow 並行不衝突
-- [ ] kill → restart 後從斷點繼續
-- [ ] `GET /api/backfill-status` 回傳正確進度
-- [ ] 5 幣完跑後 `available_snapshot_count` ≥ 100
-- [ ] 測試全過
+- [x] `python -m trustforge.cli backfill plan` 顯示正確天數
+- [x] `python -m trustforge.cli backfill start --coin BTC` 可啟動並產出 snapshot
+- [x] daemon 模式下 backfill 與 analysis flow 並行不衝突
+- [x] kill → restart 後從斷點繼續
+- [x] `GET /api/backfill-status` 回傳正確進度
+- [x] 5 幣完跑後 `available_snapshot_count` ≥ 100
+- [x] 測試全過

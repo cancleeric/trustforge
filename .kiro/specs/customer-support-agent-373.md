@@ -81,8 +81,8 @@ agent = Agent(
 ---
 
 ## Tasks
-- [ ] 建立 app/CustomerSupport/ 目錄結構
-- [ ] 寫 main.py + tools.py
-- [ ] 更新 agentcore.json
-- [ ] agentcore dev 測試
-- [ ] 對外 API 測試（curl）
+- [x] 建立 app/CustomerSupport/ 目錄結構
+- [x] 寫 main.py + tools.py
+- [x] 更新 agentcore.json
+- [x] agentcore dev 測試
+- [x] 對外 API 測試（curl）

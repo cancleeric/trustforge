@@ -38,5 +38,5 @@
 ---
 
 ## 三、驗收
-- [ ] 掃描完成無 P0 leak
-- [ ] 報告寫入 `out/security-gate-report.json`
+- [x] 掃描完成無 P0 leak
+- [x] 報告寫入 `out/security-gate-report.json`

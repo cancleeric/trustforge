@@ -56,7 +56,7 @@ def label_outcomes(training_dir, ohlcv_dir, horizon=7, threshold=0.03):
 ---
 
 ## Tasks
-- [ ] outcome_labeler.py
-- [ ] CLI 子命令
-- [ ] 執行標記
-- [ ] 驗證分佈
+- [x] outcome_labeler.py
+- [x] CLI 子命令
+- [x] 執行標記
+- [x] 驗證分佈
