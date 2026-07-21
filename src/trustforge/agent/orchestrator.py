@@ -1094,16 +1094,32 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     facts = [sc.claim.text for sc in brief.supporting if sc.claim.doc.kind in OBJECTIVE_KINDS]
 
     if is_abstain:
-        # 證據不足：不代客決策，不給任何方向性字眼（不判斷偏多/偏空/中性），
-        # 只中性陳述「資料不足以判斷」+ 具體原因，供人工自行決定是否需要
-        # 補資料再問。direction 設為「不明」，與 schema.Report._direction_label()
-        # 掃描不到 偏多/偏空/中性 關鍵詞時的預設值一致。
-        direction = "不明"
-        head = (
-            f"{coin}：現有資料不足以判斷市場方向"
-            f"（支撐證據 {n_supporting} 筆、校準後資訊完整度 {calibrated:.2f}），"
-            "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
-        )
+        # 證據不足：不代客決策，但仍嘗試從價格趨勢給出參考方向（Issue #367）。
+        # 若 _direction 能從客觀 OHLCV 算出偏多/偏空/中性，附上「僅供參考」提示；
+        # 若連方向都判不出（"不明"），退回原本的純中性文案。
+        direction = _direction(brief.supporting, all_scored=scored)
+        if direction == "不明":
+            head = (
+                f"{coin}：現有資料不足以判斷市場方向"
+                f"（支撐證據 {n_supporting} 筆、校準後資訊完整度 {calibrated:.2f}），"
+                "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
+            )
+        else:
+            if qtype == QuestionType.HYPOTHESIS:
+                head = (
+                    f"針對假設「{query}」：資料不足以做確信判斷，"
+                    f"但價格趨勢指向{direction}（僅供參考，非投資建議）。"
+                )
+            elif qtype == QuestionType.COMPARISON:
+                head = (
+                    f"{coin}：資料不足以做確信判斷，但價格趨勢指向{direction}"
+                    "（僅供參考，非投資建議）。（比較分析需對每個幣種各跑一次 pipeline 後並列）"
+                )
+            else:
+                head = (
+                    f"{coin}：資料不足以做確信判斷，但價格趨勢指向{direction}"
+                    "（僅供參考，非投資建議）。"
+                )
     else:
         direction = _direction(brief.supporting, all_scored=scored)
         if qtype == QuestionType.HYPOTHESIS:
