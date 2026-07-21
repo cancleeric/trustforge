@@ -109,3 +109,27 @@ TrustForge 沒有獨立的 `/api/compare` 端點，比較分析走的是
 才消失。在 W3 偵測演算法或任何 UI 呈現正式上線前，必須重新評估是否需要
 主動刪除同步（如定期比對來源是否還存在）或縮短 TTL，本 PR 範圍內不處理
 （純資料累積前置，不含偵測/UI）。
+
+---
+
+## 方向判定邏輯（v0.16.21+ 修正）
+
+**修正前**（bug）：用中文關鍵字匹配 → 全輸出「中性」
+**修正後**：用 OHLCV 14 天報酬率計算
+
+```
+Layer 1（價格趨勢）：
+  14天報酬率 > +3%  → 偏多
+  14天報酬率 < -3%  → 偏空
+  中間               → 中性
+
+Layer 2（多源 stance 共識，待實作）：
+  bullish 加權和 > bearish × 1.3 → 偏多
+  bearish 加權和 > bullish × 1.3 → 偏空
+  否則 → 中性
+
+最終方向 = Layer 2（有效時）> Layer 1 > 「不明」
+```
+
+審查標準：`.kiro/specs/direction-logic-338.md`
+計劃：`docs/plans/PLAN-direction-logic-fix-338.md`
