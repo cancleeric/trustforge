@@ -237,6 +237,65 @@ def cmd_security_gate(args: argparse.Namespace) -> int:
     return run_security_gate(out_dir=args.out)
 
 
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """校準升級：計算 hit_rate + calibration error（issue #335）。"""
+    from .calibration_runner import run_calibration, DEFAULT_DATA_DIR, DEFAULT_TRAINING_DIR
+
+    data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
+    training_dir = Path(args.training_dir) if args.training_dir else DEFAULT_TRAINING_DIR
+
+    coins = list(COIN_POOL) if args.all else []
+    if args.coin and not args.all:
+        coin = args.coin.upper()
+        if coin not in COIN_POOL:
+            print(f"幣種須為 {COIN_POOL} 之一")
+            return 2
+        coins = [coin]
+
+    if not coins:
+        print("請指定 --coin <幣種> 或 --all")
+        return 2
+
+    results: list[dict] = []
+    for coin in coins:
+        print(f"校準 {coin}...")
+        result = run_calibration(coin, data_dir=data_dir, training_dir=training_dir)
+        results.append(result)
+
+        # 顯示摘要
+        count = result["available_snapshot_count"]
+        if not result["horizons"]:
+            print(f"  {coin}: {count} 筆快照，無有效方向預測可校準")
+            continue
+
+        for h_key, h_val in result["horizons"].items():
+            eligible = h_val["eligible_predictions"]
+            hit_rate = h_val["hit_rate"]
+            hr_str = f"{hit_rate:.2%}" if hit_rate is not None else "N/A"
+            print(f"  {h_key}: {eligible} eligible, hit_rate={hr_str}")
+
+        cal = result.get("calibration", {})
+        cal_err = cal.get("calibration_error")
+        reliable = cal.get("reliable_bins", 0)
+        if cal_err is not None:
+            print(f"  calibration_error={cal_err:.4f} ({reliable} reliable bins)")
+        else:
+            print(f"  calibration_error=N/A (insufficient data, {reliable} reliable bins)")
+
+    # 輸出 JSON
+    if args.json:
+        out = json.dumps(results, ensure_ascii=False, indent=2)
+        if args.out:
+            out_path = Path(args.out)
+            out_path.mkdir(parents=True, exist_ok=True)
+            (out_path / "calibration_results.json").write_text(out, encoding="utf-8")
+            print(f"\n結果寫入 {out_path / 'calibration_results.json'}")
+        else:
+            print(out)
+
+    return 0
+
+
 def cmd_qa_matrix(args: argparse.Namespace) -> int:
     """QA mini matrix：5 幣 × 3 題型退化檢查（issue #203）。"""
     from .qa_matrix import main as qa_main
@@ -319,11 +378,13 @@ def main(argv=None) -> int:
     qa.add_argument("--out", default="out", help="輸出目錄（預設 out/）")
     qa.set_defaults(func=cmd_qa_matrix)
 
-    cal = sub.add_parser("calibrate", help="Historical replay calibration diagnostic")
-    cal.add_argument("--coin", choices=COIN_POOL, required=True)
-    cal.add_argument("--training-data", type=Path, default=Path("out/training-data"))
-    cal.add_argument("--data-dir", default="data/data", help="OHLCV CSV 資料目錄")
-    cal.add_argument("--out", default="out/historical-replay-calibration.json")
+    cal = sub.add_parser("calibrate", help="校準升級：計算 hit_rate + calibration error")
+    cal.add_argument("--coin", default=None, help=f"幣種（{COIN_POOL}）")
+    cal.add_argument("--all", action="store_true", help="校準所有幣種")
+    cal.add_argument("--data-dir", default=None, dest="data_dir", help="OHLCV 資料目錄")
+    cal.add_argument("--training-dir", default=None, dest="training_dir", help="訓練資料目錄")
+    cal.add_argument("--json", action="store_true", help="輸出 JSON 結果")
+    cal.add_argument("--out", default=None, help="JSON 輸出目錄")
     cal.set_defaults(func=cmd_calibrate)
 
     args = p.parse_args(argv)
