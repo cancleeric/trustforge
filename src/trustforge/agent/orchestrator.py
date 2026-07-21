@@ -186,8 +186,9 @@ def _scored_to_evidence(sc: ScoredClaim, related: str) -> Evidence:
     )
 
 
-def _price_trend_direction(supporting: list[ScoredClaim]) -> str | None:
-    """從 supporting claims 中找 kind="price" 的 documents，提取 close 值算報酬率。
+def _price_trend_direction(supporting: list[ScoredClaim],
+                           all_scored: list[ScoredClaim] | None = None) -> str | None:
+    """從 price claims 提取 close 值算報酬率。
 
     計算邏輯（兩種模式）：
 
@@ -202,13 +203,37 @@ def _price_trend_direction(supporting: list[ScoredClaim]) -> str | None:
 
     判定門檻：> +3% → "偏多"，< -3% → "偏空"，否則 "中性"。
     無 price claims 或無法取得有效資料 → return None。
+
+    #347 修正：price facts 是由官方 OHLCV 自行計算的客觀事實（kind="price",
+    source="ohlcv-csv"），信譽 0.95 但因零佐證+時效衰減會落在 trust<0.50，
+    被 aggregate() 的 support_threshold 擋在 supporting 之外。方向判定不應
+    受信任門檻限制——OHLCV 報酬率是確定性計算結果、不需要佐證。因此本函式
+    在 supporting 中找不到 price claims 時，改從 all_scored（完整評分清單）
+    中查找，確保客觀價格事實不被信任門檻截斷。
     """
     # 收集 (date_str, close) pairs（模式 A）
     price_points: list[tuple[str, float]] = []
     # 收集 ret_pct（模式 B）
     ret_pcts: list[float] = []
 
-    for sc in supporting:
+    # #347：先從 supporting 找 price claims；找不到可用方向資料時 fallback 到 all_scored
+    # 「可用」= 有 ret_pct（模式 B）或同時有 close + date（模式 A）
+    def _has_direction_data(sc) -> bool:
+        if sc.claim.doc.kind != "price":
+            return False
+        meta = sc.claim.doc.meta
+        if "ret_pct" in meta:
+            return True
+        if meta.get("close") is not None and meta.get("date") is not None:
+            return True
+        return False
+
+    price_source = supporting
+    if not any(_has_direction_data(sc) for sc in supporting):
+        if all_scored:
+            price_source = all_scored
+
+    for sc in price_source:
         if sc.claim.doc.kind != "price":
             continue
         meta = sc.claim.doc.meta
@@ -334,7 +359,8 @@ def _stance_consensus_direction(supporting: list[ScoredClaim]) -> str | None:
     return None
 
 
-def _direction(supporting: list[ScoredClaim]) -> str:
+def _direction(supporting: list[ScoredClaim],
+               all_scored: list[ScoredClaim] | None = None) -> str:
     """從高信任證據判方向（我方判斷，非外部結論）。
 
     Layer 2（多源 Stance 加權）→ Layer 1（價格趨勢）→ "不明" 的 fallback 鏈：
@@ -349,11 +375,16 @@ def _direction(supporting: list[ScoredClaim]) -> str:
     `TrustedBrief.supporting`（保留本幣相關＋全市場通用，排除明確他幣），
     `build_report` 直接傳 `brief.supporting` 進來即天生 coin-scoped，不必
     再由呼叫端另外篩一次。
+
+    `all_scored`：選填（#347 修正追加）。完整評分清單——price facts 因零佐證+
+    時效衰減可能 trust<0.50 被排除在 supporting 之外，但它們是自行從官方
+    OHLCV 計算的客觀事實，方向判定不應受信任門檻限制。提供此參數時，
+    `_price_trend_direction` 在 supporting 無 price claims 時會從中查找。
     """
     stance_dir = _stance_consensus_direction(supporting)
     if stance_dir:
         return stance_dir
-    return _price_trend_direction(supporting) or "不明"
+    return _price_trend_direction(supporting, all_scored=all_scored) or "不明"
 
 
 def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:
@@ -1061,7 +1092,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
             "暫不給出方向性結論，建議待更多獨立來源佐證後再評估。"
         )
     else:
-        direction = _direction(brief.supporting)
+        direction = _direction(brief.supporting, all_scored=scored)
         if qtype == QuestionType.HYPOTHESIS:
             head = f"針對假設「{query}」：依現有證據，{coin} 短期傾向{direction}。"
         elif qtype == QuestionType.COMPARISON:
