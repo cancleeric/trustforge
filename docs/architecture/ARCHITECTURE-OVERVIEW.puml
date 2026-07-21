@@ -1,18 +1,16 @@
 @startuml
-title TrustForge Architecture Overview — v0.17.2 (27fe4c5)
+title TrustForge System Overview — v0.17.2
 
 left to right direction
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
-skinparam roundcorner 10
+skinparam roundcorner 12
 skinparam linetype ortho
 skinparam defaultFontName "Noto Sans CJK TC"
-skinparam defaultFontSize 13
+skinparam defaultFontSize 15
 skinparam ArrowColor #475569
 skinparam packageBorderColor #94A3B8
 skinparam packageBackgroundColor #F8FAFC
-skinparam rectangleBorderColor #64748B
-skinparam rectangleFontColor #0F172A
 
 !define LIVE #DCFCE7
 !define CORE #DBEAFE
@@ -20,125 +18,69 @@ skinparam rectangleFontColor #0F172A
 !define PARTIAL #FEF3C7
 !define BLOCKED #FEE2E2
 
-rectangle "Users / Scheduler / CLI" as users LIVE
-rectangle "Web API / Lambda" as web LIVE
+rectangle "Users\nScheduler · CLI" as users LIVE
 
-package "Runtime execution path" {
-  rectangle "Pipeline\nmode · budget · degradation\nexecution log" as pipeline LIVE
-  rectangle "Agent Orchestrator\nclaim → score → narrative → review" as orchestrator LIVE
-  rectangle "BedrockClient\nsemantic direction · narrative" as bedrock LIVE
+package "Experience" {
+  rectangle "React UI" as ui LIVE
+  rectangle "Web API / Lambda" as api LIVE
 }
 
-package "Data plane" {
-  rectangle "collect()" as collect LIVE
-  rectangle "CoinGecko" as coingecko LIVE
-  rectangle "News RSS" as news LIVE
-  rectangle "SEC EDGAR" as sec LIVE
-  rectangle "Blockchain / mempool / Blockchair" as chain LIVE
-  rectangle "HOYA BIT\nhistorical OHLCV: verified\nlive ticker: blocked" as hoya BLOCKED
-  rectangle "Cache / Source Archive" as cache LIVE
+package "Data acquisition" {
+  rectangle "Live sources\nCoinGecko · RSS · SEC\nBlockchain providers" as sources LIVE
+  rectangle "HOYA BIT\nHistory verified\nLive blocked" as hoya BLOCKED
+  rectangle "Ingestion + Cache\ncollect() · archive" as ingestion LIVE
 }
 
-package "Trust computation" {
-  rectangle "KernelInput / KernelOutput\nrun_kernel() contract" as kernelApi CORE
-  rectangle "scoring.py\nscore · corroboration · calibration\nstance/cache assembly remains" as scoring PARTIAL
-  rectangle "Dawid–Skene EM" as ds CORE
-  rectangle "Isotonic calibration\n1,980 ground-truth samples" as calibration CORE
-  rectangle "Conformal prediction\nresearch only" as conformal PARTIAL
+package "Analysis runtime" {
+  rectangle "Pipeline\nmode · budget · degradation" as pipeline LIVE
+  rectangle "Agent Orchestrator\nclaim · score · narrative · review" as agent LIVE
+  rectangle "Bedrock\nsemantic + narrative" as bedrock LIVE
 }
 
-package "Provider upgrade window" {
-  rectangle "resolve_providers()" as resolver PARTIAL
-  rectangle "LLM port\nBedrock / Null" as llmPort PARTIAL
-  rectangle "Cache port\nSQLite / Null" as cachePort PARTIAL
-  rectangle "Source / Observability / Budget\ndefaults still Fake" as fakePorts BLOCKED
-  rectangle "AgentCore LLM adapter\nNotImplementedError" as agentcore BLOCKED
+package "Trust domain" {
+  rectangle "Trust Scoring\ncorroboration · reputation" as scoring CORE
+  rectangle "Calibration\nDawid–Skene" as models CORE
+  rectangle "Kernel v2 Contract\nnot production entry yet" as kernel PARTIAL
 }
 
-package "Outer-skill policy" {
-  rectangle "Immutable revisions\nstage · approve · rollback" as skills CONTROL
-  rectangle "Policy executor\nschema · compiler · guards" as policy CONTROL
-  rectangle "Effective policy snapshot\nlogged per run" as snapshot LIVE
-  rectangle "Five-family runtime consumers\nnot connected" as consumers BLOCKED
+package "Delivery" {
+  rectangle "Report + Evidence\nprovenance · limits" as report LIVE
+  rectangle "Snapshots / History" as history LIVE
 }
 
-package "Operations / governance" {
-  rectangle "Budget guard / ledger" as budget LIVE
-  rectangle "Security · PIT · evidence gates" as security LIVE
-  rectangle "Module telemetry\nlifecycle + SQLite\npartial instrumentation" as telemetry PARTIAL
-  rectangle "31-module upgrade control\nqueue · review · API" as upgrade CONTROL
-  rectangle "Manual production deployment\nGitHub workflows disabled" as deploy LIVE
+package "Governance sidecar" {
+  rectangle "Budget + Security\nPIT · evidence gates" as gates LIVE
+  rectangle "Policy + Upgrade\ncontrol plane" as control CONTROL
+  rectangle "Telemetry\npartial coverage" as telemetry PARTIAL
 }
 
-package "Planned / blocked" {
-  rectangle "Taiwan regulatory adapters\nMOPS · FSC · TWSE · TPEx" as taiwan BLOCKED
-  rectangle "Production RAG / reranker" as rag BLOCKED
-  rectangle "Pump-and-dump / Sybil graph model" as graphModel BLOCKED
-  rectangle "31-module runtime evidence" as fullTelemetry BLOCKED
-  rectangle "Public references status sync" as publicRefs BLOCKED
-}
+users --> ui
+ui --> api
+api --> pipeline
+sources --> ingestion
+hoya --> ingestion
+ingestion --> pipeline
+pipeline --> agent
+agent --> bedrock
+agent --> scoring
+scoring --> models
+scoring --> report
+report --> history
 
-users --> web
-users --> pipeline
-web --> pipeline
-pipeline --> orchestrator
+kernel ..> scoring
+agent ..> kernel
 
-pipeline --> collect
-collect --> coingecko
-collect --> news
-collect --> sec
-collect --> chain
-collect --> hoya
-collect --> cache
-collect --> orchestrator
-
-pipeline --> bedrock
-orchestrator --> bedrock
-orchestrator --> scoring
-scoring --> ds
-scoring --> calibration
-conformal ..> scoring
-orchestrator ..> kernelApi
-kernelApi --> scoring
-
-pipeline ..> resolver
-resolver --> llmPort
-resolver --> cachePort
-resolver --> fakePorts
-llmPort ..> agentcore
-resolver ..> bedrock
-resolver ..> collect
-
-pipeline --> policy
-skills --> policy
-policy --> snapshot
-policy ..> consumers
-
-pipeline --> budget
-pipeline --> security
-scoring --> telemetry
-orchestrator --> telemetry
-upgrade --> telemetry
-upgrade ..> resolver
-upgrade ..> policy
-upgrade ..> kernelApi
-
-taiwan ..> collect
-rag ..> orchestrator
-graphModel ..> scoring
-fullTelemetry ..> telemetry
-publicRefs ..> upgrade
+gates -[hidden]-> control
+control -[hidden]-> telemetry
+gates ..> pipeline
+control ..> pipeline
+telemetry ..> agent
 
 legend bottom
-  |= Color |= Meaning |
-  |<#DCFCE7> Green | Connected production path |
-  |<#DBEAFE> Blue | Core computation capability |
-  |<#EDE9FE> Purple | Control / governance plane |
-  |<#FEF3C7> Amber | Implemented but partial or research-only |
-  |<#FEE2E2> Red | Blocked, fake, not implemented, or not connected |
-  | Solid arrow | Current runtime call path |
-  | Dashed arrow | Intended, optional, or not-yet-connected path |
+  |<#DCFCE7> Connected runtime |<#DBEAFE> Trust-domain core |
+  |<#EDE9FE> Governance/control |<#FEF3C7> Partial / target |
+  |<#FEE2E2> Blocked |
 endlegend
 
-footer Source of truth: repository main at v0.17.2 / commit 27fe4c5 — generated 2026-07-22
+footer Solid = current call path · Dashed = target or sidecar relationship
 @enduml
