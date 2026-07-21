@@ -391,7 +391,29 @@ def _direction(supporting: list[ScoredClaim],
     if price_dir and price_dir != "中性":
         return price_dir  # 價格明確漲跌時不被 stance 覆蓋
 
-    # Layer 2: 多源 stance 共識（只在價格中性/無法判定時才用）
+    # Layer 2: LLM 語意分析（價格中性時用 LLM 判斷）
+    try:
+        from .semantic_direction import analyze_direction, aggregate_votes
+        from .bedrock import BedrockClient
+        client = BedrockClient()
+        if not client.offline:
+            evidence_by_type = {}
+            source_claims = all_scored if all_scored else supporting
+            for sc in source_claims:
+                kind = sc.claim.doc.kind or "unknown"
+                st = {"price": "price", "news": "news", "regulatory": "news", "onchain": "onchain", "market": "onchain", "sentiment": "sentiment", "social": "sentiment"}.get(kind)
+                if st:
+                    evidence_by_type.setdefault(st, []).append(sc.claim.text)
+            if evidence_by_type:
+                votes = analyze_direction(evidence_by_type, client)
+                if votes:
+                    direction, conf = aggregate_votes(votes)
+                    dir_map = {"bullish": "偏多", "bearish": "偏空", "neutral": "中性"}
+                    return dir_map.get(direction, "中性")
+    except Exception:
+        pass
+
+    # Layer 3: 多源 stance 共識 (fallback)
     stance_dir = _stance_consensus_direction(supporting)
     if stance_dir:
         return stance_dir
