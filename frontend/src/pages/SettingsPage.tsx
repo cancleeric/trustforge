@@ -281,9 +281,9 @@ export default function SettingsPage() {
       </div>
 
       <div className="mt-4 flex items-center justify-between rounded-lg border border-tf-border bg-tf-panel px-6 py-3.5">
-        <span className="inline-flex items-center gap-2 text-xs" style={{ color: 'var(--color-tf-green)' }}>
-          <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--color-tf-green)' }} />
-          變更僅保留於本分頁（尚無後端偏好儲存）
+        <span className="inline-flex items-center gap-2 text-xs text-tf-muted">
+          <span className="h-1.5 w-1.5 rounded-full bg-tf-muted" />
+          偏好僅套用至本工作階段
         </span>
       </div>
     </main>
