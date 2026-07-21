@@ -6,6 +6,7 @@ from typing import Any
 DOCUMENT_SCHEMA_VERSION = "1.0.0"
 EVIDENCE_SCHEMA_VERSION = "1.0.0"
 REPORT_SCHEMA_VERSION = "1.0.0"
+KERNEL_SCHEMA_VERSION = "1.0.0"
 
 
 def contract_schemas() -> dict[str, dict[str, Any]]:
