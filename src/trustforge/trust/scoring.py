@@ -1715,6 +1715,7 @@ def _calibrate_confidence(raw: float) -> float:
 
 # 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
 _CALIBRATION_MODEL_CACHE: dict[str, list[dict] | None] = {}
+_CALIBRATION_MODEL_PATH: str | None = None
 
 
 def _calibration_model_path() -> "Path | None":
@@ -1726,6 +1727,10 @@ def _calibration_model_path() -> "Path | None":
     3. None → fallback 到 _CALIBRATION_TABLE
     """
     from pathlib import Path
+
+    if _CALIBRATION_MODEL_PATH:
+        override = Path(_CALIBRATION_MODEL_PATH)
+        return override if override.is_file() else None
 
     root = Path(__file__).resolve().parents[3]
     for candidate in [
