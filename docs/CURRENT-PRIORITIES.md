@@ -19,15 +19,15 @@
 
 5 幣 × 多題型，使用最新抓到的多源資料持續分析。每輪分析完自動寫入 trust snapshot。
 
-**現況**：⚠️ daemon 在跑但 snapshot 寫入沒整合進迴圈
-**待做**：Issue #328 Task 3 — daemon 自動寫 snapshot
+**現況**：✅ live backfill / calibration runner 已合進 `develop`，#328 已關閉
+**注意**：需持續確認 daemon 現場資料與 snapshot 寫入 evidence
 
 ### 🔴 目標 3：五年歷史回填（累積訓練資料）
 
 用真 Bedrock 跑 5 年歷史，累積有方向預測的 snapshots → 觸發校準升級 → 外框模組自我迭代。
 
-**現況**：❌ 之前回填全是 offline，0 筆可用訓練資料
-**待做**：Issue #328 — live mode 回填 + 訓練資料持久化 + model artifacts 匯出
+**現況**：✅ #328 主要功能已完成；live backfill 已累積訓練資料
+**注意**：model artifacts 可攜與乾淨 `npm ci` lockfile 風險若仍需要，另開 hygiene/ops issue 追蹤
 
 ---
 
@@ -48,13 +48,13 @@
 有效 AWS credential
     → Bedrock 可用
         → 手動分析 ✅
-        → 自動分析 ✅（差 snapshot 寫入整合）
-        → 歷史回填 live mode（Issue #328）
-            → 累積 ≥100 有方向預測
-                → diagnose 產出校準提案
+        → 自動分析 / live backfill ✅
+        → 歷史回填 live mode（Issue #328）✅
+            → 累積 ≥100 有方向預測 ✅
+                → calibration runner / diagnose 產出校準指標 ✅
                     → review 通過
                         → 外框模組升級
-                            → model artifacts 匯出
+                            → model artifacts 可攜化（另行追蹤）
 ```
 
 ---
@@ -63,7 +63,7 @@
 
 | # | 標題 | 優先 | 狀態 |
 |---|------|------|------|
-| **#328** | 五年歷史真實分析回填系統 | P0 | 剛開，待實作 |
+| **#328** | 五年歷史真實分析回填系統 | P0 | 已關閉，主要功能已合併 |
 | **#324** | Bedrock Knowledge Base | 低 | 決賽後 |
 | **#312** | Bedrock Live Run artifact | M | 被 #328 涵蓋 |
 | **#313** | 決賽投稿封裝 | M | 7/28-31 |
