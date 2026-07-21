@@ -450,8 +450,8 @@ def main(argv=None) -> int:
     bf.set_defaults(func=cmd_backfill)
 
     tc = sub.add_parser("train-calibration", help="從 training data 訓練 isotonic calibration model")
-    tc.add_argument("--training-dir", default="out/training-data",
-                    help="Training data JSONL 目錄（預設 out/training-data）")
+    tc.add_argument("--training-dir", default="data/training",
+                    help="Training data JSONL 目錄（預設 data/training）")
     tc.add_argument("--data-dir", default="data/data",
                     help="OHLCV CSV 目錄（預設 data/data）")
     tc.add_argument("--out", default="out/model-artifacts/calibration-model.json",
@@ -470,7 +470,7 @@ def main(argv=None) -> int:
 
     cal = sub.add_parser("calibrate", help="Historical replay calibration diagnostic")
     cal.add_argument("--coin", choices=COIN_POOL, required=True)
-    cal.add_argument("--training-data", type=Path, default=Path("out/training-data"))
+    cal.add_argument("--training-data", type=Path, default=Path("data/training"))
     cal.add_argument("--data-dir", default="data/data", help="OHLCV CSV 資料目錄")
     cal.add_argument("--out", default="out/historical-replay-calibration.json")
     cal.set_defaults(func=cmd_calibrate)

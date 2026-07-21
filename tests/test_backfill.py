@@ -476,7 +476,7 @@ class TestBackfillTrainingData:
         training_path = Path(os.environ.get(
             "TRUSTFORGE_HOME",
             str(Path(__file__).resolve().parents[1]),
-        )) / "out" / "training-data" / "BTC.jsonl"
+        )) / "data" / "training" / "BTC.jsonl"
         assert training_path.exists()
 
         # 讀取確認格式正確
@@ -516,7 +516,7 @@ class TestBackfillTrainingData:
         training_path = Path(os.environ.get(
             "TRUSTFORGE_HOME",
             str(Path(__file__).resolve().parents[1]),
-        )) / "out" / "training-data" / "ETH.jsonl"
+        )) / "data" / "training" / "ETH.jsonl"
         assert training_path.exists()
 
         line = training_path.read_text(encoding="utf-8").strip().split("\n")[0]

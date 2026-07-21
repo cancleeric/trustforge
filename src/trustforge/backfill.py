@@ -754,7 +754,7 @@ class BackfillWorker:
         replay_result: dict[str, Any],
         snapshot: dict[str, Any],
     ) -> None:
-        """Append 訓練資料到 out/training-data/{coin}.jsonl。
+        """Append 訓練資料到 data/training/{coin}.jsonl。
 
         每筆格式：
         {"date": ..., "coin": ..., "direction": ..., "trust_score": ...,
@@ -790,7 +790,7 @@ class BackfillWorker:
             "generated_at": iso_utc(time.time()),
         }
 
-        training_dir = _root() / "out" / "training-data"
+        training_dir = _root() / "data" / "training"
         training_dir.mkdir(parents=True, exist_ok=True)
         output_path = training_dir / f"{coin.upper()}.jsonl"
 
