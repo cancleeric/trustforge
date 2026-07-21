@@ -1684,7 +1684,7 @@ _CALIBRATION_TABLE: list[tuple[float, float]] = [
 def _calibrate_confidence(raw: float) -> float:
     """校準一個 [0, 1] 指標。
 
-    優先使用 isotonic regression 訓練模型（out/model-artifacts/calibration-model.json），
+    優先使用 isotonic regression 訓練模型（data/model-artifacts/ 版控版 → out/model-artifacts/ runtime 版），
     無模型時 fallback 到硬編碼 `_CALIBRATION_TABLE`。
 
     確定性、免 LLM：純查表/插值，同輸入必同輸出，不呼叫任何模型。
@@ -1715,18 +1715,35 @@ def _calibrate_confidence(raw: float) -> float:
 
 # 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
 _CALIBRATION_MODEL_CACHE: dict[str, list[dict] | None] = {}
-_CALIBRATION_MODEL_PATH = "out/model-artifacts/calibration-model.json"
+
+
+def _calibration_model_path() -> "Path | None":
+    """Find calibration model: data/ (versioned) → out/ (runtime) → None.
+
+    遍歷順序（高優先到低優先）：
+    1. data/model-artifacts/calibration-model.json  ← 版控內，正式訓練產物
+    2. out/model-artifacts/calibration-model.json   ← 本機 runtime 產出
+    3. None → fallback 到 _CALIBRATION_TABLE
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    for candidate in [
+        root / "data" / "model-artifacts" / "calibration-model.json",
+        root / "out" / "model-artifacts" / "calibration-model.json",
+    ]:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _load_cached_calibration_model() -> list[dict] | None:
     """載入並快取校準模型。模組內只讀一次。"""
     if "model" not in _CALIBRATION_MODEL_CACHE:
-        from pathlib import Path
-
         from ..calibration_model import load_calibration_model
-        _CALIBRATION_MODEL_CACHE["model"] = load_calibration_model(
-            Path(_CALIBRATION_MODEL_PATH)
-        )
+
+        path = _calibration_model_path()
+        _CALIBRATION_MODEL_CACHE["model"] = load_calibration_model(path) if path is not None else None
     return _CALIBRATION_MODEL_CACHE["model"]
 
 
