@@ -5185,6 +5185,10 @@ def _handle_api_training_status() -> tuple[int, str]:
     upgrade_met = upgrade_current >= upgrade_target
     upgrade_pct = round(upgrade_current / upgrade_target * 100, 1) if upgrade_target > 0 else 0.0
 
+    # --- Anomalies（Issue #355）---
+    from .backfill import read_recent_anomalies
+    anomalies = read_recent_anomalies(limit=5)
+
     data = {
         "training_data": {
             "total_records": total_records,
@@ -5199,6 +5203,7 @@ def _handle_api_training_status() -> tuple[int, str]:
             "met": upgrade_met,
             "pct": upgrade_pct,
         },
+        "anomalies": anomalies,
     }
     return 200, _json_envelope_ok(data)
 

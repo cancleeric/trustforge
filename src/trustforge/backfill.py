@@ -41,6 +41,151 @@ from .schema import COIN_POOL, iso_utc
 
 logger = logging.getLogger(__name__)
 
+# ─── Anomaly Report（Issue #355）───────────────────────────────────────────────
+
+ANOMALY_DIRECTION_THRESHOLD = 0.95  # >95% 同一方向 = 異常
+ANOMALY_FAILURE_THRESHOLD = 0.10    # >10% 失敗 = 異常
+
+
+def _anomaly_report_path() -> Path:
+    """anomaly-report.json 的路徑（out/ 下，不進版控）。"""
+    return _root() / "out" / "anomaly-report.json"
+
+
+def _write_anomaly(anomaly: dict[str, Any]) -> None:
+    """Append 一筆 anomaly 到 anomaly-report.json（JSONL 格式）。"""
+    path = _anomaly_report_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(anomaly, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to write anomaly report: %s", exc)
+
+
+def _check_batch_health(results: list["BackfillDayResult"]) -> list[dict[str, Any]]:
+    """檢查一個 batch 的健康狀態，回傳所有偵測到的異常。
+
+    檢查項目：
+    a. 方向分佈：>95% 同一 direction → 異常
+    b. 失敗率：>10% failed → 異常
+    """
+    if not results:
+        return []
+
+    anomalies: list[dict[str, Any]] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    batch_size = len(results)
+
+    # --- (a) 方向分佈檢查 ---
+    # 只看 completed 的結果（有 direction 資訊要從 training data 讀）
+    completed = [r for r in results if r.state == "completed"]
+    if len(completed) >= 5:  # 至少 5 筆才有統計意義
+        # 收集 direction：從最近寫入的 training data 推斷
+        # 直接從 DB 的 completed results 中讀取 snapshot_id 來查找
+        directions: list[str] = []
+        for r in completed:
+            # 讀 training data 中對應的紀錄
+            training_dir = _root() / "data" / "training"
+            jsonl_path = training_dir / f"{r.coin.upper()}.jsonl"
+            if jsonl_path.is_file():
+                try:
+                    # 讀最後幾行找到匹配的 date
+                    with open(jsonl_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                record = json.loads(line)
+                                if record.get("date") == r.date_str and record.get("coin") == r.coin:
+                                    d = record.get("direction", "")
+                                    if d:
+                                        directions.append(d)
+                                    break
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                except OSError:
+                    pass
+
+        if len(directions) >= 5:
+            from collections import Counter
+            counter = Counter(directions)
+            most_common_dir, most_common_count = counter.most_common(1)[0]
+            ratio = most_common_count / len(directions)
+            if ratio > ANOMALY_DIRECTION_THRESHOLD:
+                anomaly = {
+                    "type": "direction_bias",
+                    "detected_at": now_iso,
+                    "batch_size": batch_size,
+                    "direction_counts": dict(counter),
+                    "dominant_direction": most_common_dir,
+                    "dominant_ratio": round(ratio, 4),
+                    "threshold": ANOMALY_DIRECTION_THRESHOLD,
+                    "message": (
+                        f"Batch direction bias: {most_common_count}/{len(directions)} "
+                        f"({ratio:.1%}) are '{most_common_dir}'"
+                    ),
+                }
+                logger.error(
+                    "ANOMALY: direction bias detected — %s/%s (%.1f%%) are '%s'",
+                    most_common_count, len(directions), ratio * 100, most_common_dir,
+                )
+                anomalies.append(anomaly)
+
+    # --- (b) 失敗率檢查 ---
+    failed_count = sum(1 for r in results if r.state == "failed")
+    if batch_size > 0:
+        failure_rate = failed_count / batch_size
+        if failure_rate > ANOMALY_FAILURE_THRESHOLD:
+            anomaly = {
+                "type": "high_failure_rate",
+                "detected_at": now_iso,
+                "batch_size": batch_size,
+                "failed_count": failed_count,
+                "failure_rate": round(failure_rate, 4),
+                "threshold": ANOMALY_FAILURE_THRESHOLD,
+                "message": (
+                    f"Batch failure rate: {failed_count}/{batch_size} "
+                    f"({failure_rate:.1%}) failed"
+                ),
+            }
+            logger.error(
+                "ANOMALY: high failure rate — %s/%s (%.1f%%) failed",
+                failed_count, batch_size, failure_rate * 100,
+            )
+            anomalies.append(anomaly)
+
+    # 寫入 anomaly-report.json
+    for a in anomalies:
+        _write_anomaly(a)
+
+    return anomalies
+
+
+def read_recent_anomalies(limit: int = 5) -> list[dict[str, Any]]:
+    """讀取最近 N 筆 anomaly（供 web API 使用）。"""
+    path = _anomaly_report_path()
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        # 取最後 limit 筆
+        recent_lines = lines[-limit:] if len(lines) > limit else lines
+        result = []
+        for line in recent_lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                result.append(json.loads(line))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return result
+    except OSError:
+        return []
+
+
 # ─── 啟停控制 ────────────────────────────────────────────────────────────────
 
 _TRUTHY = frozenset({"1", "true", "yes", "on", "enabled"})
@@ -290,7 +435,10 @@ class BackfillWorker:
     # ─── 核心執行 ─────────────────────────────────────────────────────────
 
     def run_batch(self) -> list[BackfillDayResult]:
-        """跑一個 batch（最多 batch_size 天），回傳結果。"""
+        """跑一個 batch（最多 batch_size 天），回傳結果。
+
+        每 batch 結束後自動執行健康檢查（Issue #355）。
+        """
         conn = self._get_conn()
         rows = conn.execute(
             "SELECT coin, date_str FROM backfill_tasks"
@@ -312,6 +460,11 @@ class BackfillWorker:
                 break
             result = self._process_day(row["coin"], row["date_str"])
             results.append(result)
+
+        # Issue #355: batch 結束後自動健康檢查
+        if results:
+            _check_batch_health(results)
+
         return results
 
     def _process_day(self, coin: str, date_str: str) -> BackfillDayResult:
