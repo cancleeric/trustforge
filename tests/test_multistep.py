@@ -14,6 +14,7 @@ import math
 
 import pytest
 
+from trustforge.agent import orchestrator as orch
 from trustforge.agent.orchestrator import run_agent_pipeline
 from trustforge.bedrock import BedrockClient, BedrockConfig, LLMResult
 from trustforge.execlog import ExecutionLog
@@ -578,3 +579,38 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
     assert real_recency > 0.8, (
         f"正常文件的 recency 不應被非有限時間戳的文件拖累變老舊，實得 {real_recency}"
     )
+
+
+def test_run_agent_pipeline_step2_invokes_trust_kernel(monkeypatch):
+    """Production Step2 should pass normalized claims through the Kernel facade."""
+    from trustforge.trust.kernel import KernelOutput
+
+    seen = {}
+    real_run_kernel = orch.run_kernel
+
+    def spy_run_kernel(inp):
+        seen["coin"] = inp.coin
+        seen["query"] = inp.query
+        seen["claims"] = len(inp.claims)
+        out = real_run_kernel(inp)
+        assert isinstance(out, KernelOutput)
+        return out
+
+    monkeypatch.setattr(orch, "run_kernel", spy_run_kernel)
+
+    fake = FakeBedrockClient()
+    log = ExecutionLog()
+    run_agent_pipeline(
+        "BTC 多源分析",
+        "BTC",
+        QuestionType.MULTI_SOURCE,
+        _make_docs(),
+        client=fake,
+        log=log,
+    )
+
+    assert seen == {"coin": "BTC", "query": "BTC 多源分析", "claims": 5}
+    derive_events = [event for event in log.events if event.get("tool") == "judgment.derive"]
+    assert derive_events
+    assert any("kernel_confidence" in event["params"] for event in derive_events)
+    assert any("kernel_abstain" in event["params"] for event in derive_events)

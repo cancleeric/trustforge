@@ -148,6 +148,21 @@ class TestImportBoundary:
             + "\n".join(f"  • {v}" for v in violations)
         )
 
+    def test_no_module_level_scoring_import(self):
+        """kernel.py 不得在 module load 時拉入 scoring.py。"""
+        source = _collect_kernel_source()
+        tree = ast.parse(source)
+
+        violations: list[str] = []
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "scoring":
+                violations.append(f"from .scoring import ... at line {node.lineno}")
+
+        assert not violations, (
+            "kernel.py module-level scoring imports found:\n"
+            + "\n".join(f" • {v}" for v in violations)
+        )
+
     def test_no_os_environ_access(self):
         """kernel.py 不得存取 os.environ 或 os.getenv。"""
         source = _collect_kernel_source()
