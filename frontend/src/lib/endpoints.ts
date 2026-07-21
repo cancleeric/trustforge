@@ -1,6 +1,7 @@
 import { ANALYZE_TIMEOUT_MS, apiFetch, DEFAULT_TIMEOUT_MS, REGISTER_TIMEOUT_MS } from './apiClient'
 import {
   isAdminAuditData,
+  isAdminBackendProvidersData,
   isAdminConfigData,
   isAnalyzeData,
   isComparisonAnalyzeData,
@@ -12,10 +13,13 @@ import {
 } from './validators'
 import type {
   AdminAuditData,
+  AdminBackendProvidersData,
   AdminConfigChanges,
   AdminConfigData,
   AnalyzeData,
   ApiEnvelope,
+  BackendProvider,
+  BackendProviderKey,
   ComparisonAnalyzeData,
   CostsData,
   HealthData,
@@ -313,4 +317,62 @@ export function getAdminAudit(
     headers: { 'X-Admin-Token': adminToken },
     cache: 'no-store',
   })
+}
+
+export function getAdminBackendProviders(
+  adminToken: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AdminBackendProvidersData>> {
+  return apiFetch<AdminBackendProvidersData>(
+    '/api/admin/backend-providers',
+    undefined,
+    isAdminBackendProvidersData,
+    {
+      signal,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      headers: { 'X-Admin-Token': adminToken },
+      cache: 'no-store',
+    },
+  )
+}
+
+export function setAdminBackendProvider(
+  adminToken: string,
+  key: BackendProviderKey,
+  provider: BackendProvider,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AdminBackendProvidersData>> {
+  return apiFetch<AdminBackendProvidersData>(
+    '/api/admin/backend-provider',
+    undefined,
+    isAdminBackendProvidersData,
+    {
+      signal,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      method: 'POST',
+      headers: { 'X-Admin-Token': adminToken },
+      jsonBody: { key, provider },
+      cache: 'no-store',
+    },
+  )
+}
+
+export function setAllAdminBackendProviders(
+  adminToken: string,
+  provider: BackendProvider,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AdminBackendProvidersData>> {
+  return apiFetch<AdminBackendProvidersData>(
+    '/api/admin/backend-providers-all',
+    undefined,
+    isAdminBackendProvidersData,
+    {
+      signal,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      method: 'POST',
+      headers: { 'X-Admin-Token': adminToken },
+      jsonBody: { provider },
+      cache: 'no-store',
+    },
+  )
 }

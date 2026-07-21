@@ -19,8 +19,22 @@ import {
   ADMIN_CAP_MAX_USD,
   ADMIN_CAP_MIN_USD,
 } from '../lib/adminConsole'
-import { getAdminAudit, getAdminConfig, putAdminConfig } from '../lib/endpoints'
-import type { AdminAuditRecord, AdminConfigChanges, AdminConfigData } from '../lib/types'
+import {
+  getAdminAudit,
+  getAdminBackendProviders,
+  getAdminConfig,
+  putAdminConfig,
+  setAdminBackendProvider,
+  setAllAdminBackendProviders,
+} from '../lib/endpoints'
+import type {
+  AdminAuditRecord,
+  AdminBackendProvidersData,
+  AdminConfigChanges,
+  AdminConfigData,
+  BackendProvider,
+  BackendProviderKey,
+} from '../lib/types'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 
 // ── 小元件 ──────────────────────────────────────────────────────────────
@@ -101,6 +115,16 @@ const BTN_PRIMARY =
 const BTN_PLAIN =
   'rounded-md border border-tf-border px-3 py-1.5 text-sm text-tf-text2 transition hover:text-tf-link disabled:cursor-not-allowed disabled:opacity-50'
 
+const BACKEND_PROVIDER_LABELS: Record<BackendProviderKey, string> = {
+  memory: '記憶',
+  policy: '治理',
+  eval: '評估',
+  llm: '模型路由',
+  gateway: '工具路由',
+  observability: '可觀測',
+  upgrade: '升級引擎',
+}
+
 export default function AdminPage() {
   // token 主存 React state；初始值嘗試從 sessionStorage 撈（同分頁 reload）
   const [token, setToken] = useState<string | null>(() => loadSessionToken())
@@ -111,11 +135,14 @@ export default function AdminPage() {
   const [config, setConfig] = useState<AdminConfigData | null>(null)
   const [audit, setAudit] = useState<AdminAuditRecord[] | null>(null)
   const [auditError, setAuditError] = useState<{ code: string; message: string } | null>(null)
+  const [backendProviders, setBackendProviders] = useState<AdminBackendProvidersData | null>(null)
+  const [backendError, setBackendError] = useState<{ code: string; message: string } | null>(null)
 
   const [capInput, setCapInput] = useState('')
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string[]>([])
   const [saveError, setSaveError] = useState<{ code: string; message: string } | null>(null)
+  const [backendSaving, setBackendSaving] = useState(false)
   const [confirmBedrockOn, setConfirmBedrockOn] = useState(false)
   // live token 明文一次性顯示（僅本次 render 週期的 state，不落任何儲存）
   const [freshLiveToken, setFreshLiveToken] = useState<string | null>(null)
@@ -143,15 +170,30 @@ export default function AdminPage() {
     [],
   )
 
+  const refreshBackendProviders = useCallback((activeToken: string, signal?: AbortSignal) => {
+    getAdminBackendProviders(activeToken, signal).then((res) => {
+      if (signal?.aborted) return
+      if (res.ok) {
+        setBackendProviders(res.data)
+        setBackendError(null)
+      } else {
+        setBackendProviders(null)
+        setBackendError(res.error)
+      }
+    })
+  }, [])
+
   const lock = useCallback(() => {
     clearSessionToken()
     setToken(null)
     setConfig(null)
     setAudit(null)
+    setBackendProviders(null)
     setFreshLiveToken(null)
     setNotice([])
     setSaveError(null)
     setAuditError(null)
+    setBackendError(null)
     // qa L1 安全防呆：Bedrock 二次確認 dialog 開著時被踢回閘門，若不重置，
     // 重新解鎖後 dialog 會直接呈現在「確認開啟」狀態——等於一鍵開真
     // Bedrock，繞過原本要求的二次確認。
@@ -172,13 +214,14 @@ export default function AdminPage() {
       if (res.ok) {
         applyConfig(res.data)
         refreshAudit(token)
+        refreshBackendProviders(token)
       } else {
         lock()
         setGateError(res.error)
       }
     })
     return () => controller.abort()
-  }, [token, applyConfig, refreshAudit, lock])
+  }, [token, applyConfig, refreshAudit, refreshBackendProviders, lock])
 
   async function unlock(e: React.FormEvent) {
     e.preventDefault()
@@ -198,6 +241,7 @@ export default function AdminPage() {
       setTokenInput('')
       applyConfig(res.data)
       refreshAudit(candidate)
+      refreshBackendProviders(candidate)
     } else {
       setGateError(res.error)
     }
@@ -222,9 +266,10 @@ export default function AdminPage() {
     const res = await putAdminConfig(token, changes, config.version ?? 0)
     if (res.ok) {
       setSaving(false)
-      applyConfig(res.data)
-      setNotice(res.data.warnings ?? [])
-      refreshAudit(token)
+        applyConfig(res.data)
+        setNotice(res.data.warnings ?? [])
+        refreshAudit(token)
+        refreshBackendProviders(token)
       return res.data
     }
     if (res.error.code === 'version_conflict') {
@@ -293,6 +338,38 @@ export default function AdminPage() {
       setCopied(true)
     } catch {
       setCopied(false) // clipboard 權限被拒就維持手動選取複製
+    }
+  }
+
+  async function changeBackendProvider(key: BackendProviderKey, provider: BackendProvider) {
+    if (!token) return
+    setBackendSaving(true)
+    setBackendError(null)
+    const res = await setAdminBackendProvider(token, key, provider)
+    setBackendSaving(false)
+    if (res.ok) {
+      setBackendProviders(res.data)
+    } else if (res.error.code === 'unauthorized') {
+      lock()
+      setGateError(res.error)
+    } else {
+      setBackendError(res.error)
+    }
+  }
+
+  async function changeAllBackendProviders(provider: BackendProvider) {
+    if (!token) return
+    setBackendSaving(true)
+    setBackendError(null)
+    const res = await setAllAdminBackendProviders(token, provider)
+    setBackendSaving(false)
+    if (res.ok) {
+      setBackendProviders(res.data)
+    } else if (res.error.code === 'unauthorized') {
+      lock()
+      setGateError(res.error)
+    } else {
+      setBackendError(res.error)
     }
   }
 
@@ -527,6 +604,69 @@ export default function AdminPage() {
             </button>
           )}
         </div>
+      </SectionCard>
+
+      <SectionCard title="AgentCore / 自主後端切換">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm text-tf-text2">
+          <p>
+            7 個模組可即時切換；預設 <strong className="text-tf-text">自主 builtin</strong>，
+            AgentCore 是可拔插擴充層。
+          </p>
+          {backendProviders && (
+            <span className="text-xs text-tf-muted">
+              {backendProviders.hot_config ? 'hot config' : '需重啟'} ·
+              {backendProviders.restart_required ? ' restart required' : ' no restart'}
+            </span>
+          )}
+        </div>
+        {backendError && <ErrorState code={backendError.code} message={backendError.message} />}
+        {backendProviders === null && backendError === null ? (
+          <LoadingState label="後端 provider 狀態載入中…" />
+        ) : backendProviders ? (
+          <div className="grid gap-3">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={backendSaving}
+                onClick={() => changeAllBackendProviders('agentcore')}
+                className={BTN_PRIMARY}
+              >
+                全部切 AgentCore
+              </button>
+              <button
+                type="button"
+                disabled={backendSaving}
+                onClick={() => changeAllBackendProviders('builtin')}
+                className={BTN_PLAIN}
+              >
+                全部切自主
+              </button>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {backendProviders.provider_keys.map((key) => (
+                <label
+                  key={key}
+                  className="flex items-center justify-between gap-3 rounded-md border border-tf-border bg-tf-bg p-3 text-sm"
+                >
+                  <span>
+                    <span className="font-semibold text-tf-text">{BACKEND_PROVIDER_LABELS[key]}</span>
+                    <code className="ml-2 text-xs text-tf-muted">backend.{key}</code>
+                  </span>
+                  <select
+                    value={backendProviders.providers[key]}
+                    disabled={backendSaving}
+                    onChange={(e) => changeBackendProvider(key, e.target.value as BackendProvider)}
+                    className="rounded border border-tf-border bg-tf-card px-2 py-1 text-sm text-tf-text"
+                    aria-label={`${BACKEND_PROVIDER_LABELS[key]}後端`}
+                  >
+                    <option value="builtin">自主</option>
+                    <option value="agentcore">AgentCore</option>
+                  </select>
+                </label>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </SectionCard>
 
       {/* §4-2 live token 管理 */}

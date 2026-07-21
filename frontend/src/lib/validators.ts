@@ -10,6 +10,7 @@ import type {
   AdminAuditData,
   AdminAuditRecord,
   AdminBedrockView,
+  AdminBackendProvidersData,
   AdminCapView,
   AdminConfigData,
   AdminLiveTokenView,
@@ -520,6 +521,38 @@ function isAdminHermesAutonomyView(value: unknown): value is AdminConfigData['he
     typeof value.effective === 'boolean' &&
     typeof value.source === 'string'
   )
+}
+
+function isBackendProvider(value: unknown): value is AdminBackendProvidersData['valid_providers'][number] {
+  return value === 'builtin' || value === 'agentcore'
+}
+
+function isBackendProviderKey(value: unknown): value is AdminBackendProvidersData['provider_keys'][number] {
+  return (
+    value === 'memory' ||
+    value === 'policy' ||
+    value === 'eval' ||
+    value === 'llm' ||
+    value === 'gateway' ||
+    value === 'observability' ||
+    value === 'upgrade'
+  )
+}
+
+export function isAdminBackendProvidersData(value: unknown): value is AdminBackendProvidersData {
+  if (!isPlainObject(value)) return false
+  if (value.kind !== 'backend_provider_registry') return false
+  if (!isPlainObject(value.providers)) return false
+  if (!Array.isArray(value.valid_providers) || !value.valid_providers.every(isBackendProvider)) {
+    return false
+  }
+  if (!Array.isArray(value.provider_keys) || !value.provider_keys.every(isBackendProviderKey)) {
+    return false
+  }
+  for (const key of value.provider_keys) {
+    if (!isBackendProvider(value.providers[key])) return false
+  }
+  return typeof value.hot_config === 'boolean' && typeof value.restart_required === 'boolean'
 }
 
 export function isAdminConfigData(value: unknown): value is AdminConfigData {
