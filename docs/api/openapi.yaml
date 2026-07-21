@@ -1282,6 +1282,48 @@ paths:
                     status: "no_data"
                     source: "out/question-bank-latest.json"
 
+  /api/training-status:
+    get:
+      tags: [operations]
+      operationId: getTrainingStatus
+      summary: 訓練資料累積狀態（Issue #333）
+      description: |
+        讀取 `out/training-data/*.jsonl` 統計訓練紀錄數與方向標註率，
+        讀取 backfill DB 的進度，回傳結構化狀態供前端 TrainingStatusCard 使用。
+        純讀本機檔案/SQLite（readonly），credit-safe。
+      responses:
+        "200":
+          description: 訓練資料累積狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  training_data:
+                    total_records: 344
+                    has_direction: 36
+                    direction_ratio: 0.1047
+                    per_coin:
+                      BTC:
+                        total: 138
+                        has_direction: 20
+                      ETH:
+                        total: 80
+                        has_direction: 10
+                  backfill:
+                    mode: "live"
+                    is_running: true
+                    completed: 29
+                    total: 1000
+                    progress_pct: 2.9
+                  upgrade_threshold:
+                    target: 100
+                    current: 36
+                    met: false
+                    pct: 36.0
+
   /api/openapi.yaml:
     get:
       tags: [meta]
