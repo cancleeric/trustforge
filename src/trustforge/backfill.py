@@ -180,10 +180,16 @@ class BackfillWorker:
         end_date: str | None = None,
         batch_size: int = 30,
         interval_sec: float = 5.0,
+        training_data_dir: str | Path | None = None,
     ):
         self.db_path = _db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.data_dir = Path(data_dir) if data_dir else _root() / "data" / "data"
+        self.training_data_dir = (
+            Path(training_data_dir)
+            if training_data_dir
+            else _root() / "out" / "training-data"
+        )
         self.coins = [c.upper() for c in (coins or list(COIN_POOL))]
         self.start_date = start_date or "2021-07-01"
         self.end_date = end_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -337,6 +343,14 @@ class BackfillWorker:
             )
 
             snapshot_id = f"backfill-{coin.lower()}-{date_str}"
+            self._upsert_training_record(
+                coin,
+                date_str,
+                replay_result,
+                snapshot,
+                snapshot_id=snapshot_id,
+                document_count=doc_count,
+            )
             result = BackfillDayResult(
                 coin,
                 date_str,
@@ -489,6 +503,67 @@ class BackfillWorker:
                 "Backfill trust history skipped (newer exists) for %s %s",
                 coin, date_str,
             )
+
+    def _upsert_training_record(
+        self,
+        coin: str,
+        date_str: str,
+        replay_result: dict[str, Any],
+        snapshot: dict[str, Any],
+        *,
+        snapshot_id: str,
+        document_count: int,
+    ) -> None:
+        """Write one portable JSONL training row per coin/date."""
+        report = replay_result.get("report", {})
+        record = {
+            "coin": coin,
+            "date": date_str,
+            "snapshot_id": snapshot_id,
+            "archive_type": "backfilled_archive",
+            "snapshot_at": snapshot.get("snapshot_at", ""),
+            "snapshot_epoch": snapshot.get("snapshot_epoch", 0),
+            "direction": report.get("direction", "neutral"),
+            "confidence": report.get("confidence", 0),
+            "calibrated_confidence": report.get("calibrated_confidence", 0),
+            "decision_state": report.get("decision_state", ""),
+            "generated_at": report.get("generated_at", iso_utc(time.time())),
+            "document_count": document_count,
+            "sources": [
+                {
+                    "source": source.get("source", ""),
+                    "document_count": len(source.get("documents", [])),
+                }
+                for source in snapshot.get("sources", [])
+            ],
+        }
+
+        self.training_data_dir.mkdir(parents=True, exist_ok=True)
+        path = self.training_data_dir / f"{coin.lower()}-backfill.jsonl"
+        rows: list[dict[str, Any]] = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    existing = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping malformed training JSONL row in %s", path)
+                    continue
+                if existing.get("coin") == coin and existing.get("date") == date_str:
+                    continue
+                rows.append(existing)
+        rows.append(record)
+
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(
+            "".join(
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
 
     # ─── Daemon 模式 ──────────────────────────────────────────────────────
 

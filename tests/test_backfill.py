@@ -123,6 +123,37 @@ class TestBackfillProgress:
         assert progress["BTC"].state == "completed"
         worker.close()
 
+    def test_completed_days_write_portable_training_jsonl(self, tmp_env):
+        """成功回填會同步匯出可搬遷的 JSON Lines 訓練資料。"""
+        set_backfill_enabled(True, reason="test")
+        training_dir = tmp_env["tmp"] / "training-data"
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-06-01",
+            end_date="2024-06-01",
+            batch_size=1,
+            training_data_dir=training_dir,
+        )
+        worker.seed_tasks()
+
+        results = worker.run_batch()
+
+        assert len(results) == 1
+        assert results[0].state == "completed"
+        rows = [
+            json.loads(line)
+            for line in (training_dir / "btc-backfill.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["coin"] == "BTC"
+        assert rows[0]["date"] == "2024-06-01"
+        assert rows[0]["archive_type"] == "backfilled_archive"
+        assert rows[0]["snapshot_id"] == "backfill-btc-2024-06-01"
+        assert rows[0]["document_count"] > 0
+        assert rows[0]["sources"]
+        worker.close()
+
     def test_reset_failed(self, tmp_env):
         """reset_failed 把 failed 重設為 pending。"""
         set_backfill_enabled(True, reason="test")
