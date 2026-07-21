@@ -367,6 +367,20 @@ def _judge_hit(direction: str, change_pct: float) -> bool:
         return abs(change_pct) < 0.02
 
 
+def cmd_label_outcomes(args: argparse.Namespace) -> int:
+    """用 OHLCV T+N outcome 標記 ground truth 方向（issue #378）。"""
+    from .outcome_labeler import label_outcomes
+    stats = label_outcomes(
+        Path(args.training_dir),
+        Path(args.data_dir),
+        horizon=args.horizon,
+        threshold=args.threshold / 100,
+    )
+    for coin, s in stats.items():
+        print(f"{coin}: {s['labeled']}/{s['total']} labeled")
+    return 0
+
+
 def cmd_security_gate(args: argparse.Namespace) -> int:
     """投稿前安全掃描（issue #205）。"""
     from .security_gate import run_security_gate
@@ -457,6 +471,17 @@ def main(argv=None) -> int:
     tc.add_argument("--out", default="out/model-artifacts/calibration-model.json",
                     help="模型輸出路徑")
     tc.set_defaults(func=cmd_train_calibration)
+
+    lo = sub.add_parser("label-outcomes", help="用 OHLCV T+N outcome 標記 ground truth 方向")
+    lo.add_argument("--training-dir", default="data/training",
+                    help="Training data JSONL 目錄（預設 data/training）")
+    lo.add_argument("--data-dir", default="data/data",
+                    help="OHLCV CSV 目錄（預設 data/data）")
+    lo.add_argument("--horizon", type=int, default=7,
+                    help="T+N 天數（預設 7）")
+    lo.add_argument("--threshold", type=float, default=3,
+                    help="方向判定門檻百分比（預設 3）")
+    lo.set_defaults(func=cmd_label_outcomes)
 
     sg = sub.add_parser("security-gate", help="投稿前安全掃描：secret / 內網 reference 檢查")
     sg.add_argument("--out", default="out", help="報告輸出目錄（預設 out/）")
