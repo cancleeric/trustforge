@@ -22,7 +22,7 @@ const DIMENSION_META: {
 export default function TrustBreakdown({ data }: { data: TrustComponentsAggregate }) {
   return (
     <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-      <h3 className="mb-3 text-sm font-semibold text-tf-text">信任拆解（逐項 WHY）</h3>
+      <h3 className="mb-3 text-sm font-semibold text-tf-text" title="此為原始分數，非加權後最終信任分">信任拆解（逐項 WHY）</h3>
       <ul className="flex flex-col gap-3">
         {DIMENSION_META.map(({ key, label, why, glossary }) => {
           const raw = data[key]
@@ -46,7 +46,7 @@ export default function TrustBreakdown({ data }: { data: TrustComponentsAggregat
                 {isUnscored ? (
                   <span className="text-tf-muted">暫無評分</span>
                 ) : (
-                  <span className="tf-num text-tf-muted">{(clamped * 100).toFixed(0)}%</span>
+                  <span className="tf-num text-tf-muted" title="此為原始分數，非加權後最終信任分">{(clamped * 100).toFixed(0)}%</span>
                 )}
               </div>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-tf-border">
