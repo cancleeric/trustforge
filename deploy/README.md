@@ -734,17 +734,24 @@ header，不管跑的是哪份 nginx conf（react TLS／react-http／legacy-tls�
 
 ## #104 dedup fail-open 告警（部署清單強制項）
 
-`deploy/put_dedup_alarm.sh` 建的 CloudWatch Alarm 監控
-`DedupFailOpenRecentFailures`（見 `src/trustforge/cloudwatch_metrics.py`、`web.py::
-_record_dedup_prep_failure`），指標超過門檻（預設 5）即觸發，讓重複計費/去重失效
-（#51+#87 fail-open）可被即時看見。
+`deploy/put_dedup_alarm.sh` 會建立 #104 要求的兩層 CloudWatch 告警：
 
-**demo 部署清單強制兩件事，否則告警形同虛設：**
+1. `DedupFailOpenRecentFailures`：監控 app 端送出的滑動視窗數值（見
+`src/trustforge/cloudwatch_metrics.py`、`web.py::_record_dedup_prep_failure`），指標
+超過門檻（預設 5）即觸發。
+2. `DedupFailOpenAlertLogCount`：先在 CloudWatch Logs 建 metric filter，匹配固定前綴
+`"ALERT: TrustForge dedup"`，再對該 log metric 建 alarm。這條作首次通知，
+auto-resolve 仍以 `/api/status.dedup.degraded` 的即時狀態為準。
+
+**demo 部署清單強制三件事，否則告警形同虛設：**
 
 1. **`TRUSTFORGE_CW_METRICS=1` 必須開啟**（app 端 opt-in，否則不送指標、Alarm
    永遠收不到數據）。`deploy_ec2.sh` 對公開 demo 預設已開（=1），實例角色也補了
    `cloudwatch:PutMetricData`。
-2. **必設 `TRUSTFORGE_DEDUP_ALARM_SNS=<arn:aws:sns:...>`**。有 SNS 時 Alarm 觸發才
+2. **確認 `TRUSTFORGE_DEDUP_LOG_GROUP`**。預設為
+   `/aws/apprunner/trustforge/application`；若 demo 環境的 web log group 不同，部署前
+   必須覆寫，否則 log-based alarm 收不到 ALERT 前綴。
+3. **必設 `TRUSTFORGE_DEDUP_ALARM_SNS=<arn:aws:sns:...>`**。有 SNS 時 Alarm 觸發才
    真的發通知；未設則 Alarm 仍會建立（純狀態可視、可在 CloudWatch 控制台看到），
    但**不發任何通知**——腳本絕不會再把非法的 Logs ARN 塞進 `--alarm-actions`
    （那會讓 `set -e` 下的建表失敗、Alarm 整個建不出來，舊版 codex 打回的主因）。
@@ -753,6 +760,7 @@ _record_dedup_prep_failure`），指標超過門檻（預設 5）即觸發，讓
 ```bash
 # 建 Alarm（先設 SNS topic）
 REGION=ap-southeast-2 TRUSTFORGE_CW_NAMESPACE=TrustForge \
+  TRUSTFORGE_DEDUP_LOG_GROUP=/aws/apprunner/trustforge/application \
   TRUSTFORGE_DEDUP_ALARM_SNS=arn:aws:sns:ap-southeast-2:<ACCT>:trustforge-alerts \
   ./deploy/put_dedup_alarm.sh
 ```
