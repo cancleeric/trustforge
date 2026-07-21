@@ -142,7 +142,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     if args.action == "plan":
         worker = BackfillWorker(
             coins=coins, start_date=args.start, end_date=args.end,
-            data_dir=args.data_dir,
+            data_dir=args.data_dir, mode=args.mode, sample=args.sample,
         )
         plan = worker.plan()
         total = sum(plan.values())
@@ -155,7 +155,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     if args.action == "status":
         worker = BackfillWorker(
             coins=coins, start_date=args.start, end_date=args.end,
-            data_dir=args.data_dir,
+            data_dir=args.data_dir, mode=args.mode, sample=args.sample,
         )
         status = worker.status()
         if args.json:
@@ -182,7 +182,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     if args.action == "reset-failed":
         worker = BackfillWorker(
             coins=coins, start_date=args.start, end_date=args.end,
-            data_dir=args.data_dir,
+            data_dir=args.data_dir, mode=args.mode, sample=args.sample,
         )
         count = worker.reset_failed()
         print(f"已重設 {count} 個失敗任務為 pending")
@@ -194,7 +194,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     worker = BackfillWorker(
         coins=coins, start_date=args.start, end_date=args.end,
         batch_size=args.batch_size, interval_sec=args.interval,
-        data_dir=args.data_dir,
+        data_dir=args.data_dir, mode=args.mode, sample=args.sample,
     )
     seeded = worker.seed_tasks()
     plan = worker.plan()
@@ -287,6 +287,10 @@ def main(argv=None) -> int:
     bf.add_argument("--daemon", action="store_true", help="前台持續執行（Ctrl+C 停止）")
     bf.add_argument("--json", action="store_true", help="輸出 JSON")
     bf.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
+    bf.add_argument("--mode", default="offline", choices=["offline", "live"],
+                    help="offline=離線（預設）；live=真 Bedrock")
+    bf.add_argument("--sample", type=int, default=None,
+                    help="抽樣天數（均勻分布跨時間範圍；預設全量）")
     bf.set_defaults(func=cmd_backfill)
 
     sg = sub.add_parser("security-gate", help="投稿前安全掃描：secret / 內網 reference 檢查")
