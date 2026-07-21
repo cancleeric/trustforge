@@ -77,3 +77,22 @@
 2. 不寫一次性腳本，功能進 CLI/daemon
 3. 產出的資料和模型可匯出/匯入
 4. PR 必須指定 reviewer + eye scan
+
+---
+
+## 更新：v0.17.1（2026-07-21 深夜）
+
+### 已完成
+- PIT 標籤重建（ground truth 三態均衡）
+- 統一語意分析管線
+- Trust Kernel facade Phase 1
+- Provider ports/adapters
+- 架構盤點總報告
+- Runtime telemetry
+- Policy executor
+
+### 現在的優先順序
+1. 用 ground truth 重訓校準模型
+2. 方向模型 shadow test
+3. #385 台灣監管資料源（blocked）
+4. Trust Kernel Phase 2/3（漸進搬移）
