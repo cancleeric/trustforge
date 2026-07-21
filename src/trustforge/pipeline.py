@@ -18,6 +18,7 @@ from .budget_guard import (
 )
 from .execlog import ExecutionLog
 from .ingestion.base import collect, execution_log_context
+from .policy import PolicyExecutor
 from .schema import COIN_POOL, Evidence, QuestionType, Report
 from .skills import run_skill_manifest
 
@@ -123,6 +124,15 @@ def run(coin: str, query: str, qtype: QuestionType,
     # Freeze the selected outer-skill revisions at run start.  This is audit
     # data, not a runtime override of the deterministic Trust Layer.
     log.record("hermes.skills", params=run_skill_manifest(), summary="Hermes outer skill revisions frozen for this run")
+    # Resolve typed outer-skill policies and log snapshot for auditability (R4/R5).
+    try:
+        _policy_executor = PolicyExecutor()
+        _policy_executor.resolve_effective()
+        log.log_policy_snapshot(_policy_executor.snapshot_for_log())
+    except Exception:
+        # Policy resolution is non-blocking for the pipeline — if skill artifacts
+        # are missing or malformed, we log the failure but continue with defaults.
+        log.record("policy.snapshot", params={"error": "policy_resolution_failed"}, summary="Policy resolution failed; continuing with defaults")
     log.record(
         "ingestion.collect",
         params={"coin": coin, "offline": collect_offline,
