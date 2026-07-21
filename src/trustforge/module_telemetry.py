@@ -5,12 +5,14 @@
 - invocation_count：累計呼叫次數
 - last_result：最後一次呼叫結果（success / failure / degraded）
 - avg_latency_ms：平均延遲（毫秒）
+- state：模組生命週期狀態（registered → configured → resolved → invoked → verified）
 
 持久化用 SQLite（`out/module-telemetry.sqlite3`），寫入為背景
 threading，失敗不影響核心 pipeline。
 """
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -21,6 +23,24 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+class ModuleState(str, enum.Enum):
+    """模組生命週期狀態。
+
+    正常流程：registered → configured → resolved → invoked → verified
+    異常狀態：disabled / blocked / degraded / failed / stale
+    """
+    registered = "registered"
+    configured = "configured"
+    resolved = "resolved"
+    invoked = "invoked"
+    verified = "verified"
+    disabled = "disabled"
+    blocked = "blocked"
+    degraded = "degraded"
+    failed = "failed"
+    stale = "stale"
 
 logger = logging.getLogger(__name__)
 
@@ -43,20 +63,26 @@ class TelemetryRecord:
     last_result: str  # success / failure / degraded
     avg_latency_ms: float
     last_latency_ms: float = 0.0
+    state: str = ModuleState.registered.value  # 模組生命週期狀態
+    evidence_ref: str = ""  # verified 狀態的佐證參考
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class _WriteEvent:
     """Background writer 消費的事件。"""
-    __slots__ = ("module_id", "latency_ms", "result", "ts", "metadata")
+    __slots__ = ("module_id", "latency_ms", "result", "ts", "metadata", "state", "evidence_ref")
 
     def __init__(self, module_id: str, latency_ms: float, result: str,
-                 ts: float, metadata: dict[str, Any] | None = None):
+                 ts: float, metadata: dict[str, Any] | None = None,
+                 state: str = ModuleState.invoked.value,
+                 evidence_ref: str = ""):
         self.module_id = module_id
         self.latency_ms = latency_ms
         self.result = result
         self.ts = ts
         self.metadata = metadata or {}
+        self.state = state
+        self.evidence_ref = evidence_ref
 
 
 class ModuleTelemetry:
@@ -108,6 +134,8 @@ class ModuleTelemetry:
                     total_latency_ms REAL NOT NULL DEFAULT 0.0,
                     avg_latency_ms REAL NOT NULL DEFAULT 0.0,
                     last_latency_ms REAL NOT NULL DEFAULT 0.0,
+                    state TEXT NOT NULL DEFAULT 'registered',
+                    evidence_ref TEXT NOT NULL DEFAULT '',
                     metadata TEXT NOT NULL DEFAULT '{}'
                 )
             """)
@@ -170,8 +198,9 @@ class ModuleTelemetry:
                 conn.execute("""
                     INSERT INTO module_telemetry
                         (module_id, last_invoked_at, invocation_count, last_result,
-                         total_latency_ms, avg_latency_ms, last_latency_ms, metadata)
-                    VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+                         total_latency_ms, avg_latency_ms, last_latency_ms,
+                         state, evidence_ref, metadata)
+                    VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(module_id) DO UPDATE SET
                         last_invoked_at = excluded.last_invoked_at,
                         invocation_count = invocation_count + 1,
@@ -180,9 +209,14 @@ class ModuleTelemetry:
                         avg_latency_ms = (total_latency_ms + excluded.total_latency_ms)
                                          / (invocation_count + 1),
                         last_latency_ms = excluded.last_latency_ms,
+                        state = excluded.state,
+                        evidence_ref = CASE WHEN excluded.evidence_ref != ''
+                                       THEN excluded.evidence_ref
+                                       ELSE module_telemetry.evidence_ref END,
                         metadata = excluded.metadata
                 """, (ev.module_id, ts_iso, ev.result,
-                      ev.latency_ms, ev.latency_ms, ev.latency_ms, meta_json))
+                      ev.latency_ms, ev.latency_ms, ev.latency_ms,
+                      ev.state, ev.evidence_ref, meta_json))
             conn.commit()
             conn.close()
         except Exception:
@@ -211,10 +245,41 @@ class ModuleTelemetry:
                 result=result,
                 ts=time.time(),
                 metadata=metadata,
+                state=ModuleState.invoked.value,
             )
             self._queue.put_nowait(ev)
         except queue.Full:
             logger.debug("module_telemetry: queue full, dropping event for %s", module_id)
+        except Exception:
+            pass  # fail-silent
+
+    def record_verified(
+        self,
+        module_id: str,
+        evidence_ref: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """記錄模組已通過驗證（state → verified）。
+
+        Parameters
+        ----------
+        module_id : 模組識別
+        evidence_ref : 驗證佐證（如測試名稱、CI run URL、程式碼位置）
+        metadata : 選填額外資訊
+        """
+        try:
+            ev = _WriteEvent(
+                module_id=module_id,
+                latency_ms=0.0,
+                result="verified",
+                ts=time.time(),
+                metadata=metadata,
+                state=ModuleState.verified.value,
+                evidence_ref=evidence_ref,
+            )
+            self._queue.put_nowait(ev)
+        except queue.Full:
+            logger.debug("module_telemetry: queue full, dropping verified event for %s", module_id)
         except Exception:
             pass  # fail-silent
 
@@ -236,6 +301,8 @@ class ModuleTelemetry:
                 last_result=row["last_result"],
                 avg_latency_ms=row["avg_latency_ms"],
                 last_latency_ms=row["last_latency_ms"],
+                state=row["state"],
+                evidence_ref=row["evidence_ref"],
                 metadata=json.loads(row["metadata"]) if row["metadata"] else {},
             )
         except Exception:
@@ -259,6 +326,8 @@ class ModuleTelemetry:
                     last_result=r["last_result"],
                     avg_latency_ms=r["avg_latency_ms"],
                     last_latency_ms=r["last_latency_ms"],
+                    state=r["state"],
+                    evidence_ref=r["evidence_ref"],
                     metadata=json.loads(r["metadata"]) if r["metadata"] else {},
                 )
                 for r in rows
@@ -311,3 +380,18 @@ def get_all_telemetry() -> list[TelemetryRecord]:
         return ModuleTelemetry.get_instance().get_all_telemetry()
     except Exception:
         return []
+
+
+def record_verified(
+    module_id: str,
+    evidence_ref: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """記錄模組已通過驗證（module-level 便捷函式）。"""
+    try:
+        ModuleTelemetry.get_instance().record_verified(
+            module_id=module_id, evidence_ref=evidence_ref,
+            metadata=metadata,
+        )
+    except Exception:
+        pass  # telemetry 失敗不崩
