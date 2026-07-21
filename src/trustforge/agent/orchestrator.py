@@ -1032,6 +1032,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
     """
     client = client or BedrockClient(offline=True)
     log = log or ExecutionLog(now_fn=now_fn)
+    _tele_t0 = time.perf_counter()
 
     # 1. 證據清單（支撐 + 反方）
     log.record(
@@ -1380,6 +1381,14 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         decision_state=decision_state,
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
+    # --- telemetry: record build_report invocation ---
+    try:
+        from ..module_telemetry import record_invocation as _rec_inv
+        _tele_elapsed = (time.perf_counter() - _tele_t0) * 1000.0
+        _rec_inv("agent.build_report", _tele_elapsed, "success",
+                 metadata={"coin": coin, "evidence_count": len(evidence)})
+    except Exception:
+        pass
     return report, evidence
 
 
