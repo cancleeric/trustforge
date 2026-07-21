@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -139,8 +140,8 @@ class ScoredClaim:
     claim: Claim
     trust: float                       # 0–1
     components: dict = field(default_factory=dict)   # 各分項，供溯源/解釋
-    # W2：動態來源信譽可解釋 trace。預設 None（`dynamic_reputation=False` 逐字相容，
-    # 不影響既有 dataclass 相等性比較）。開啟時填入該 claim 來源的
+    # W2：動態來源信譽可解釋 trace。預設啟用（`dynamic_reputation=True`）；
+    # 設 False 時為 None。開啟時填入該 claim 來源的
     # {source, prior, final, agree_n, contradict_n, iterations_run}。
     # 刻意獨立於 components（後者維持 str -> number 契約，不塞巢狀 dict）。
     reputation_trace: dict | None = None
@@ -1438,7 +1439,7 @@ def score(
     stance_client=None,
     stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
     stance_remaining_time_fn: Callable[[], float] | None = None,
-    dynamic_reputation: bool = False,
+    dynamic_reputation: bool = True,
     reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
     stance_fn: Callable[[str, str], str] | None = None,
     offline: bool = False,
@@ -1462,14 +1463,14 @@ def score(
     （第 3 輪對抗審修正：預算消耗點在 `cached_stance_fn` 內部，只在確認 cache
     miss 後才扣，見該函式 docstring）。
 
-    W2（truth-discovery 動態來源信譽）：`dynamic_reputation=False`（**預設**）完全
-    跳過 `_iterate_source_reputation`，`reputation` 分項與既有行為逐字相同（回歸
-    鎖）。設 `True` 才啟用：來源信譽不再是固定 `KIND_REPUTATION`，而是由
-    `_iterate_source_reputation` 依交叉佐證/矛盾動態調整（bounded 迭代，見該函式
-    docstring）；`reputation_iterations` 控制迭代輪數上限（硬上限 5）。啟用時每筆
-    `ScoredClaim.reputation_trace` 會附上該來源的
+    W2（truth-discovery 動態來源信譽）：`dynamic_reputation=True`（**預設**）啟用
+    `_iterate_source_reputation`，來源信譽不再是固定 `KIND_REPUTATION`，而是由
+    交叉佐證/矛盾動態調整（bounded 迭代，見該函式 docstring）。設 `False` 可關閉：
+    `reputation` 分項回退到靜態行為。`reputation_iterations` 控制迭代輪數上限
+    （硬上限 5）。啟用時每筆 `ScoredClaim.reputation_trace` 會附上該來源的
     `{source, prior, final, agree_n, contradict_n, iterations_run}`（可解釋，不塞進
-    `components`，維持 `components` 的 str→number 契約）。
+    `components`，維持 `components` 的 str→number 契約）。如果動態信譽計算過程發生
+    異常（EM 不收斂/溢位/斷言違反），自動 fail-safe fallback 到靜態信譽。
 
     codex 對抗審 [HIGH，#24]：`agree_n`/`prior→final` 的上調**只認真語意
     `entailment`**（見 `_reputation_evidence`/`_corroboration_detail`
@@ -1517,57 +1518,66 @@ def score(
     dynamic_map: dict[str, float] | None = None
     trace_by_source: dict[str, dict] | None = None
     if dynamic_reputation and claims:
-        # evidence 只算一次，`_iterate_source_reputation` 的 K 輪迭代與下面建 trace
-        # 共用同一份結果，不因迭代輪數或 trace 需求重呼叫 stance_fn。
-        evidence = _reputation_evidence(claims, stance_fn=stance_fn)
-        trace_meta: dict = {}
-        sr0_for_trace: dict[str, float] = {}
-        raw_source_of: dict[str, str] = {}
-        for c in claims:
-            s = _canonical_source(c.doc.source)
-            if s not in sr0_for_trace:
-                sr0_for_trace[s] = _source_reputation(c)
-                raw_source_of[s] = c.doc.source
-        dynamic_map = _iterate_source_reputation(
-            claims,
-            now,
-            weights=w,
-            stance_fn=stance_fn,
-            iterations=reputation_iterations,
-            evidence=evidence,
-            trace_out=trace_meta,
-            offline=offline,
-        )
-        iterations_run = trace_meta.get("iterations_run", 0)
-        ds_mode = trace_meta.get("mode") == "ds_em"
-        by_source: dict[str, list[Claim]] = {}
-        for c in claims:
-            by_source.setdefault(_canonical_source(c.doc.source), []).append(c)
-        trace_by_source = {}
-        for s, s_claims in by_source.items():
-            if ds_mode:
-                # DS EM 模式：agree_n=參與的達標 item 數、contradict_n=與所屬
-                # item 多數票方向不一致次數（不偽造 agree/contra 聯集）。
-                agree_n = trace_meta.get("ds_agree_n", {}).get(s, 0)
-                contradict_n = trace_meta.get("ds_contradict_n", {}).get(s, 0)
-            else:
-                agree_sources: set[str] = set()
-                contra_sources: set[str] = set()
-                for c in s_claims:
-                    agree, contra = evidence.get(c.id, (set(), set()))
-                    agree_sources |= agree
-                    contra_sources |= contra
-                agree_n = len(agree_sources)
-                contradict_n = len(contra_sources)
-            trace_by_source[s] = {
-                "source": raw_source_of.get(s, s),
-                "prior": round(sr0_for_trace.get(s, 0.0), 4),
-                "final": round(dynamic_map.get(s, sr0_for_trace.get(s, 0.0)), 4),
-                "agree_n": agree_n,
-                "contradict_n": contradict_n,
-                "iterations_run": iterations_run,
-                "mode": trace_meta.get("mode", "entailment"),
-            }
+        try:
+            # evidence 只算一次，`_iterate_source_reputation` 的 K 輪迭代與下面建 trace
+            # 共用同一份結果，不因迭代輪數或 trace 需求重呼叫 stance_fn。
+            evidence = _reputation_evidence(claims, stance_fn=stance_fn)
+            trace_meta: dict = {}
+            sr0_for_trace: dict[str, float] = {}
+            raw_source_of: dict[str, str] = {}
+            for c in claims:
+                s = _canonical_source(c.doc.source)
+                if s not in sr0_for_trace:
+                    sr0_for_trace[s] = _source_reputation(c)
+                    raw_source_of[s] = c.doc.source
+            dynamic_map = _iterate_source_reputation(
+                claims,
+                now,
+                weights=w,
+                stance_fn=stance_fn,
+                iterations=reputation_iterations,
+                evidence=evidence,
+                trace_out=trace_meta,
+                offline=offline,
+            )
+            iterations_run = trace_meta.get("iterations_run", 0)
+            ds_mode = trace_meta.get("mode") == "ds_em"
+            by_source: dict[str, list[Claim]] = {}
+            for c in claims:
+                by_source.setdefault(_canonical_source(c.doc.source), []).append(c)
+            trace_by_source = {}
+            for s, s_claims in by_source.items():
+                if ds_mode:
+                    # DS EM 模式：agree_n=參與的達標 item 數、contradict_n=與所屬
+                    # item 多數票方向不一致次數（不偽造 agree/contra 聯集）。
+                    agree_n = trace_meta.get("ds_agree_n", {}).get(s, 0)
+                    contradict_n = trace_meta.get("ds_contradict_n", {}).get(s, 0)
+                else:
+                    agree_sources: set[str] = set()
+                    contra_sources: set[str] = set()
+                    for c in s_claims:
+                        agree, contra = evidence.get(c.id, (set(), set()))
+                        agree_sources |= agree
+                        contra_sources |= contra
+                    agree_n = len(agree_sources)
+                    contradict_n = len(contra_sources)
+                trace_by_source[s] = {
+                    "source": raw_source_of.get(s, s),
+                    "prior": round(sr0_for_trace.get(s, 0.0), 4),
+                    "final": round(dynamic_map.get(s, sr0_for_trace.get(s, 0.0)), 4),
+                    "agree_n": agree_n,
+                    "contradict_n": contradict_n,
+                    "iterations_run": iterations_run,
+                    "mode": trace_meta.get("mode", "entailment"),
+                }
+        except Exception:
+            # fail-safe：EM 失敗（不收斂/溢位/斷言違反）→ 靜默 fallback 到靜態信譽
+            logging.getLogger(__name__).warning(
+                "dynamic_reputation failed, falling back to static reputation",
+                exc_info=True,
+            )
+            dynamic_map = None
+            trace_by_source = None
 
     out: list[ScoredClaim] = []
     for c in claims:
@@ -1662,13 +1672,23 @@ _CALIBRATION_TABLE: list[tuple[float, float]] = [
 
 
 def _calibrate_confidence(raw: float) -> float:
-    """用 `_CALIBRATION_TABLE`（硬編分位數映射表）校準一個 [0, 1] 指標。
+    """校準一個 [0, 1] 指標。
 
-    確定性、免 LLM：純查表 + 分段線性插值，同輸入必同輸出，不呼叫任何
-    模型。**簡化版分位數校準，非嚴謹 conformal coverage 保證**（見
-    `_CALIBRATION_TABLE` 上方誠實聲明）。輸入超出 [0, 1] 時 clamp 到邊界。
+    優先使用 isotonic regression 訓練模型（out/model-artifacts/calibration-model.json），
+    無模型時 fallback 到硬編碼 `_CALIBRATION_TABLE`。
+
+    確定性、免 LLM：純查表/插值，同輸入必同輸出，不呼叫任何模型。
+    輸入超出 [0, 1] 時 clamp 到邊界。
     """
     x = max(0.0, min(1.0, raw))
+
+    # 嘗試使用訓練過的 isotonic model
+    model = _load_cached_calibration_model()
+    if model is not None:
+        from ..calibration_model import apply_calibration
+        return apply_calibration(x, model)
+
+    # Fallback：硬編碼查表
     table = _CALIBRATION_TABLE
     if x <= table[0][0]:
         return table[0][1]
@@ -1681,6 +1701,23 @@ def _calibrate_confidence(raw: float) -> float:
             ratio = (x - x0) / (x1 - x0)
             return round(y0 + ratio * (y1 - y0), 4)
     return round(x, 4)  # 理論上不會到這（表已覆蓋 [0, 1]，防禦性寫法）
+
+
+# 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
+_CALIBRATION_MODEL_CACHE: dict[str, list[dict] | None] = {}
+_CALIBRATION_MODEL_PATH = "out/model-artifacts/calibration-model.json"
+
+
+def _load_cached_calibration_model() -> list[dict] | None:
+    """載入並快取校準模型。模組內只讀一次。"""
+    if "model" not in _CALIBRATION_MODEL_CACHE:
+        from pathlib import Path
+
+        from ..calibration_model import load_calibration_model
+        _CALIBRATION_MODEL_CACHE["model"] = load_calibration_model(
+            Path(_CALIBRATION_MODEL_PATH)
+        )
+    return _CALIBRATION_MODEL_CACHE["model"]
 
 
 def _evidence_strength(

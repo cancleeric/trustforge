@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -180,16 +181,17 @@ class BackfillWorker:
         end_date: str | None = None,
         batch_size: int = 30,
         interval_sec: float = 5.0,
-        training_data_dir: str | Path | None = None,
+        mode: str = "offline",
+        sample: int | None = None,
     ):
+        if mode not in ("offline", "live"):
+            raise ValueError(f"mode must be 'offline' or 'live', got {mode!r}")
+        self.mode = mode
+        self.sample = sample
+
         self.db_path = _db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.data_dir = Path(data_dir) if data_dir else _root() / "data" / "data"
-        self.training_data_dir = (
-            Path(training_data_dir)
-            if training_data_dir
-            else _root() / "out" / "training-data"
-        )
         self.coins = [c.upper() for c in (coins or list(COIN_POOL))]
         self.start_date = start_date or "2021-07-01"
         self.end_date = end_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -251,7 +253,10 @@ class BackfillWorker:
         return result
 
     def seed_tasks(self) -> int:
-        """將所有待回填日期寫入 SQLite（跳過已存在的記錄）。"""
+        """將所有待回填日期寫入 SQLite（跳過已存在的記錄）。
+
+        如果 self.sample 已設，均勻抽取 N 天（等距抽樣跨全時間範圍）。
+        """
         conn = self._get_conn()
         start = date.fromisoformat(self.start_date)
         end = date.fromisoformat(self.end_date)
@@ -259,20 +264,27 @@ class BackfillWorker:
         seeded = 0
         for coin in self.coins:
             bars = load_ohlcv(coin, self.data_dir)
-            bar_dates = {b.date for b in bars}
-            day = start
-            while day <= end:
-                ds = day.isoformat()
-                if ds in bar_dates:
-                    cursor = conn.execute(
-                        "INSERT OR IGNORE INTO backfill_tasks"
-                        "(coin,date_str,state,created_at,updated_at)"
-                        " VALUES(?,?,?,?,?)",
-                        (coin, ds, "pending", now, now),
-                    )
-                    if cursor.rowcount:
-                        seeded += 1
-                day += timedelta(days=1)
+            bar_dates = sorted(b.date for b in bars)
+            # 只保留在 start~end 範圍內的日期
+            eligible_dates = [d for d in bar_dates if start <= date.fromisoformat(d) <= end]
+
+            # 抽樣：均勻取 N 天
+            if self.sample is not None and self.sample < len(eligible_dates):
+                step = len(eligible_dates) / self.sample
+                eligible_dates = [
+                    eligible_dates[int(i * step)]
+                    for i in range(self.sample)
+                ]
+
+            for ds in eligible_dates:
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO backfill_tasks"
+                    "(coin,date_str,state,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (coin, ds, "pending", now, now),
+                )
+                if cursor.rowcount:
+                    seeded += 1
         return seeded
 
     # ─── 核心執行 ─────────────────────────────────────────────────────────
@@ -303,7 +315,11 @@ class BackfillWorker:
         return results
 
     def _process_day(self, coin: str, date_str: str) -> BackfillDayResult:
-        """處理單日回填：產 snapshot → replay。"""
+        """處理單日回填：產 snapshot → replay。
+
+        mode=offline: 用 BedrockClient(offline=True) 走 replay_snapshot（現有行為）
+        mode=live: 用 BedrockClient(offline=False) 走 run_agent_pipeline（真 Bedrock）
+        """
         conn = self._get_conn()
         start_time = time.time()
         conn.execute(
@@ -325,16 +341,22 @@ class BackfillWorker:
                 )
                 return result
 
-            # 跑 replay（offline，不用 Bedrock）
-            replay_result = replay_snapshot(
-                snapshot,
-                query=f"回填分析 {coin} {date_str} 市場信任狀態",
-            )
+            if self.mode == "live":
+                replay_result = self._run_live_pipeline(coin, date_str, snapshot)
+            else:
+                # mode=offline: 現有行為
+                replay_result = replay_snapshot(
+                    snapshot,
+                    query=f"回填分析 {coin} {date_str} 市場信任狀態",
+                )
 
             # 將 replay 結果寫入 trust_snapshot_history_key，讓
             # get_trust_history() 能讀到（格式對齊 fetch_scheduler.py
             # _snapshot_dict()：cache_get() → entry['docs'][0]）。
             self._persist_to_trust_history(coin, date_str, replay_result, snapshot)
+
+            # 寫入訓練資料 JSONL
+            self._persist_to_training_data(coin, date_str, replay_result, snapshot)
 
             duration = time.time() - start_time
             doc_count = sum(
@@ -343,14 +365,6 @@ class BackfillWorker:
             )
 
             snapshot_id = f"backfill-{coin.lower()}-{date_str}"
-            self._upsert_training_record(
-                coin,
-                date_str,
-                replay_result,
-                snapshot,
-                snapshot_id=snapshot_id,
-                document_count=doc_count,
-            )
             result = BackfillDayResult(
                 coin,
                 date_str,
@@ -384,10 +398,227 @@ class BackfillWorker:
             )
             return result
 
+    def _run_live_pipeline(
+        self, coin: str, date_str: str, snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """mode=live: 用真 Bedrock 跑完整 agent pipeline。"""
+        from .agent.orchestrator import run_agent_pipeline
+        from .bedrock import BedrockClient
+        from .execlog import ExecutionLog
+        from .ingestion.base import Document
+        from .schema import QuestionType
+
+        boundary = float(snapshot.get("snapshot_epoch", 0))
+
+        # 從 snapshot 建出 Document 列表
+        docs: list[Document] = []
+        for source_entry in snapshot.get("sources") or []:
+            source_name = str(source_entry.get("source", ""))
+            for raw in source_entry.get("documents") or []:
+                if not isinstance(raw, dict):
+                    continue
+                published = raw.get("ts", boundary)
+                docs.append(Document(
+                    id=str(raw.get("id", f"{source_name}:{len(docs)}")),
+                    kind=str(raw.get("kind", "price")),
+                    source=str(raw.get("source", source_name)),
+                    text=str(raw.get("text", "")),
+                    url=str(raw.get("url", "")),
+                    ts=float(published),
+                    meta=dict(raw.get("meta") or {}),
+                ))
+
+        if not docs:
+            raise ValueError(f"No documents for live pipeline: {coin} {date_str}")
+
+        client = BedrockClient(offline=False)
+        log = ExecutionLog(now_fn=lambda: boundary)
+        query = f"回填分析 {coin} {date_str} 市場信任狀態"
+
+        from dataclasses import asdict
+        report, evidence = run_agent_pipeline(
+            query, coin, QuestionType.MULTI_SOURCE, docs,
+            client=client, log=log, now_fn=lambda: boundary,
+        )
+
+        return {
+            "coin": coin,
+            "snapshot_at": snapshot.get("snapshot_at"),
+            "snapshot_epoch": boundary,
+            "archive_type": snapshot.get("archive_type", "backfilled_archive"),
+            "report": asdict(report),
+            "evidence": [item.to_dict() for item in evidence],
+            "execution_log_jsonl": log.to_jsonl(),
+        }
+
+    # ─── 歷史來源快取 ─────────────────────────────────────────────────────
+
+    def _load_historical_sources(self) -> None:
+        """一次性從 API 拉全量 FNG + blockchain charts 歷史，快取到 instance。
+
+        後續呼叫直接從 cache 讀。網路失敗時 graceful degrade（空快取），
+        不阻塞 backfill 主流程。
+        """
+        if getattr(self, "_historical_loaded", False):
+            return
+
+        self._fng_history: list[dict[str, Any]] = []
+        self._blockchain_cache: dict[str, list[dict[str, Any]]] = {}
+        self._historical_loaded = True
+
+        # ── Fear & Greed Index（market-wide，所有幣種共用）
+        try:
+            from .ingestion.safe_fetch import fetch_url
+            raw = fetch_url(
+                "https://api.alternative.me/fng/?limit=0&format=json",
+                user_agent="TrustForge-Backfill/1.0",
+                timeout=30,
+                max_bytes=4 * 1024 * 1024,  # FNG 全歷史約 1-2 MB
+            )
+            payload = json.loads(raw)
+            # 用最大可能的時間範圍預先 parse，個別日期在 snapshot 時再篩
+            self._fng_history = payload.get("data", [])
+            logger.info(
+                "FNG history loaded: %d entries", len(self._fng_history),
+            )
+        except Exception as exc:
+            logger.warning("Failed to load FNG history (degraded): %s", exc)
+
+        # ── Blockchain.com charts（BTC only）
+        from .historical_sources import BLOCKCHAIN_CHARTS
+        for chart_name in BLOCKCHAIN_CHARTS:
+            try:
+                from .ingestion.safe_fetch import fetch_url
+                raw = fetch_url(
+                    f"https://api.blockchain.info/charts/{chart_name}"
+                    "?timespan=5years&format=json",
+                    user_agent="TrustForge-Backfill/1.0",
+                    timeout=30,
+                    max_bytes=8 * 1024 * 1024,
+                )
+                payload = json.loads(raw)
+                self._blockchain_cache[chart_name] = payload
+                values_count = len(payload.get("values", []))
+                logger.info(
+                    "Blockchain.com %s loaded: %d points",
+                    chart_name, values_count,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load blockchain-com %s (degraded): %s",
+                    chart_name, exc,
+                )
+
+    def _get_historical_documents(
+        self, coin: str, snapshot_epoch: float,
+    ) -> list[dict[str, dict[str, Any]]]:
+        """從快取中取出該日之前的歷史來源 documents，按 source 分組。
+
+        回傳格式：[{"source": ..., "fetched_at": ..., "documents": [...]}]
+        遵守 point-in-time 原則：只包含 snapshot_epoch 之前的資料。
+        """
+        from .historical_sources import (
+            parse_alternative_me_history,
+            parse_blockchain_chart_history,
+        )
+
+        self._load_historical_sources()
+        extra_sources: list[dict[str, Any]] = []
+
+        # ── FNG：找 snapshot_epoch 當天（±12h 範圍）的 entry
+        if self._fng_history:
+            # FNG 的 timestamp 是每日 00:00 UTC，取 snapshot 當天往前 24h
+            day_start = snapshot_epoch - 86400
+            day_end = snapshot_epoch
+            try:
+                retrieved_at = snapshot_epoch
+                fng_payload = {"data": self._fng_history}
+                fng_docs = parse_alternative_me_history(
+                    fng_payload,
+                    retrieved_at=retrieved_at,
+                    start_epoch=day_start,
+                    end_epoch=day_end,
+                )
+                # 只取當前 coin 的 docs（FNG 是 market-wide，parser 會為每個幣種產一條）
+                coin_fng_docs = [d for d in fng_docs if d.get("coin") == coin]
+                if coin_fng_docs:
+                    fng_documents = []
+                    for doc in coin_fng_docs:
+                        fng_documents.append({
+                            "id": f"fng-{coin}-{doc.get('published_at', '')}",
+                            "kind": doc.get("kind", "sentiment"),
+                            "source": "alternative-me-fng",
+                            "text": doc.get("text", ""),
+                            "url": doc.get("url", ""),
+                            "ts": day_end,
+                            "published_at": doc.get("published_at", ""),
+                            "meta": {
+                                "value": doc.get("value"),
+                                "classification": doc.get("classification"),
+                                "scope": doc.get("scope", "market-wide"),
+                            },
+                        })
+                    extra_sources.append({
+                        "source": "alternative-me-fng",
+                        "fetched_at": snapshot_epoch,
+                        "documents": fng_documents,
+                    })
+            except Exception as exc:
+                logger.debug("FNG parse failed for %s: %s", coin, exc)
+
+        # ── Blockchain.com charts（BTC only）
+        if coin == "BTC" and self._blockchain_cache:
+            day_start = snapshot_epoch - 86400
+            day_end = snapshot_epoch
+            bc_documents: list[dict[str, Any]] = []
+            for chart_name, payload in self._blockchain_cache.items():
+                try:
+                    retrieved_at = snapshot_epoch
+                    chart_docs = parse_blockchain_chart_history(
+                        payload,
+                        chart_name=chart_name,
+                        retrieved_at=retrieved_at,
+                        start_epoch=day_start,
+                        end_epoch=day_end,
+                    )
+                    for doc in chart_docs:
+                        bc_documents.append({
+                            "id": f"bc-{chart_name}-{doc.get('published_at', '')}",
+                            "kind": doc.get("kind", "onchain"),
+                            "source": "blockchain-com-charts",
+                            "text": doc.get("text", ""),
+                            "url": doc.get("url", ""),
+                            "ts": day_end,
+                            "published_at": doc.get("published_at", ""),
+                            "meta": {
+                                "metric": doc.get("metric"),
+                                "unit": doc.get("unit"),
+                                "value": doc.get("value"),
+                                "scope": doc.get("scope", "asset"),
+                            },
+                        })
+                except Exception as exc:
+                    logger.debug(
+                        "Blockchain.com %s parse failed: %s", chart_name, exc,
+                    )
+            if bc_documents:
+                extra_sources.append({
+                    "source": "blockchain-com-charts",
+                    "fetched_at": snapshot_epoch,
+                    "documents": bc_documents,
+                })
+
+        return extra_sources
+
+    # ─── Snapshot 建構 ────────────────────────────────────────────────────
+
     def _build_day_snapshot(
         self, coin: str, date_str: str,
     ) -> dict[str, Any] | None:
-        """用 OHLCV 截取到該日為止的資料，組成 point-in-time snapshot。"""
+        """用 OHLCV 截取到該日為止的資料，組成 point-in-time snapshot。
+
+        額外接入歷史來源（FNG / blockchain-com）以達成交叉佐證。
+        """
         bars = load_ohlcv(coin, self.data_dir)
         if not bars:
             return None
@@ -443,6 +674,18 @@ class BackfillWorker:
             "fetched_at": snapshot_epoch,
             "documents": ohlcv_documents,
         }]
+
+        # 接入歷史來源（FNG + blockchain-com），graceful degrade
+        try:
+            historical_sources = self._get_historical_documents(
+                coin, snapshot_epoch,
+            )
+            sources.extend(historical_sources)
+        except Exception as exc:
+            logger.warning(
+                "Historical sources failed for %s %s (degraded): %s",
+                coin, date_str, exc,
+            )
 
         return {
             "coin": coin,
@@ -504,66 +747,61 @@ class BackfillWorker:
                 coin, date_str,
             )
 
-    def _upsert_training_record(
+    def _persist_to_training_data(
         self,
         coin: str,
         date_str: str,
         replay_result: dict[str, Any],
         snapshot: dict[str, Any],
-        *,
-        snapshot_id: str,
-        document_count: int,
     ) -> None:
-        """Write one portable JSONL training row per coin/date."""
+        """Append 訓練資料到 out/training-data/{coin}.jsonl。
+
+        每筆格式：
+        {"date": ..., "coin": ..., "direction": ..., "trust_score": ...,
+         "confidence": ..., "evidence_count": ..., "sources": [...],
+         "model_id": ..., "generated_at": ...}
+        """
         report = replay_result.get("report", {})
+        evidence_list = replay_result.get("evidence", [])
+
+        # 收集不重複的 source 名稱
+        sources: list[str] = []
+        seen_sources: set[str] = set()
+        for ev in evidence_list:
+            src = ev.get("source", "") if isinstance(ev, dict) else ""
+            if src and src not in seen_sources:
+                sources.append(src)
+                seen_sources.add(src)
+
+        # 判斷 model_id：live 模式有真實 model_id，offline 為 None
+        model_id = os.getenv("BEDROCK_MODEL_ID") if self.mode == "live" else None
+
         record = {
-            "coin": coin,
             "date": date_str,
-            "snapshot_id": snapshot_id,
-            "archive_type": "backfilled_archive",
-            "snapshot_at": snapshot.get("snapshot_at", ""),
-            "snapshot_epoch": snapshot.get("snapshot_epoch", 0),
+            "coin": coin,
             "direction": report.get("direction", "neutral"),
-            "confidence": report.get("confidence", 0),
-            "calibrated_confidence": report.get("calibrated_confidence", 0),
-            "decision_state": report.get("decision_state", ""),
-            "generated_at": report.get("generated_at", iso_utc(time.time())),
-            "document_count": document_count,
-            "sources": [
-                {
-                    "source": source.get("source", ""),
-                    "document_count": len(source.get("documents", [])),
-                }
-                for source in snapshot.get("sources", [])
-            ],
+            "trust_score": round(float(report.get("confidence", 0)), 4),
+            "confidence": round(
+                float(report.get("calibrated_confidence", 0)), 4,
+            ),
+            "evidence_count": len(evidence_list),
+            "sources": sources,
+            "model_id": model_id,
+            "generated_at": iso_utc(time.time()),
         }
 
-        self.training_data_dir.mkdir(parents=True, exist_ok=True)
-        path = self.training_data_dir / f"{coin.lower()}-backfill.jsonl"
-        rows: list[dict[str, Any]] = []
-        if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    existing = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping malformed training JSONL row in %s", path)
-                    continue
-                if existing.get("coin") == coin and existing.get("date") == date_str:
-                    continue
-                rows.append(existing)
-        rows.append(record)
+        training_dir = _root() / "out" / "training-data"
+        training_dir.mkdir(parents=True, exist_ok=True)
+        output_path = training_dir / f"{coin.upper()}.jsonl"
 
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(
-            "".join(
-                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
-                for row in rows
-            ),
-            encoding="utf-8",
-        )
-        tmp_path.replace(path)
+        try:
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            logger.warning(
+                "Failed to persist training data for %s %s: %s",
+                coin, date_str, exc,
+            )
 
     # ─── Daemon 模式 ──────────────────────────────────────────────────────
 

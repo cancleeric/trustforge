@@ -151,3 +151,15 @@ def _isolate_admin_config_cache():
     yield
     _reset_admin_config_cache_for_tests()
     _reset_admin_cfg_fail_window_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_calibration_model_cache():
+    """issue #343：`scoring._CALIBRATION_MODEL_CACHE` 是模組級全域狀態，
+    跨測試共用同一份記憶體。比照其他 isolate fixture，每個測試前後都清空，
+    避免某個測試載入的校準模型（如 TestNoModelFallback.test_with_model_uses_isotonic）
+    污染到下一個測試。"""
+    from trustforge.trust import scoring
+    scoring._CALIBRATION_MODEL_CACHE.clear()
+    yield
+    scoring._CALIBRATION_MODEL_CACHE.clear()

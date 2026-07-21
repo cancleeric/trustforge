@@ -382,3 +382,144 @@ class TestBackfillPersistToTrustHistory:
         # backfill 特有欄位
         assert snap["archive_type"] == "backfilled_archive"
         assert "snapshot_epoch" in snap
+
+
+# ─── Issue #328: mode=live, sample, training data ─────────────────────────────
+
+
+class TestBackfillModeSample:
+    """驗證 Issue #328 新增的 mode 與 sample 參數。"""
+
+    def test_default_mode_is_offline(self, tmp_env):
+        """預設 mode 為 offline。"""
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-01-01",
+            end_date="2024-01-05",
+        )
+        assert worker.mode == "offline"
+        assert worker.sample is None
+        worker.close()
+
+    def test_invalid_mode_raises(self, tmp_env):
+        """非法 mode 值應 raise ValueError。"""
+        with pytest.raises(ValueError, match="mode must be"):
+            BackfillWorker(
+                db_path=tmp_env["db"],
+                coins=["BTC"],
+                start_date="2024-01-01",
+                end_date="2024-01-05",
+                mode="invalid",
+            )
+
+    def test_sample_reduces_seeded_tasks(self, tmp_env):
+        """sample 參數限制 seed_tasks 產出的任務數。"""
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            sample=10,
+        )
+        seeded = worker.seed_tasks()
+        # 2024 全年有 366 天，sample=10 只寫 10 筆
+        assert seeded == 10
+        worker.close()
+
+    def test_sample_none_seeds_all(self, tmp_env):
+        """sample=None 寫入全部天數。"""
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-06-01",
+            end_date="2024-06-10",
+            sample=None,
+        )
+        seeded = worker.seed_tasks()
+        assert seeded == 10
+        worker.close()
+
+    def test_sample_larger_than_available_seeds_all(self, tmp_env):
+        """sample > 可用天數時，寫入全部。"""
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-06-01",
+            end_date="2024-06-05",
+            sample=999,
+        )
+        seeded = worker.seed_tasks()
+        assert seeded == 5
+        worker.close()
+
+
+class TestBackfillTrainingData:
+    """驗證 Issue #328 training data JSONL 持久化。"""
+
+    def test_training_data_created_on_backfill(self, tmp_env):
+        """回填完成後應建立 training-data JSONL 檔案。"""
+        set_backfill_enabled(True, reason="test")
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["BTC"],
+            start_date="2024-07-01",
+            end_date="2024-07-02",
+            batch_size=5,
+        )
+        worker.seed_tasks()
+        results = worker.run_batch()
+        completed = [r for r in results if r.state == "completed"]
+        assert len(completed) >= 1
+
+        # 確認 training data 檔案存在
+        training_path = Path(os.environ.get(
+            "TRUSTFORGE_HOME",
+            str(Path(__file__).resolve().parents[1]),
+        )) / "out" / "training-data" / "BTC.jsonl"
+        assert training_path.exists()
+
+        # 讀取確認格式正確
+        lines = training_path.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) >= len(completed)
+
+        for line in lines:
+            record = json.loads(line)
+            assert "date" in record
+            assert "coin" in record
+            assert record["coin"] == "BTC"
+            assert "direction" in record
+            assert "trust_score" in record
+            assert "confidence" in record
+            assert "evidence_count" in record
+            assert "sources" in record
+            assert isinstance(record["sources"], list)
+            assert "model_id" in record
+            assert "generated_at" in record
+
+        worker.close()
+
+    def test_training_data_offline_model_id_is_none(self, tmp_env):
+        """offline mode 的 model_id 應為 None。"""
+        set_backfill_enabled(True, reason="test")
+        worker = BackfillWorker(
+            db_path=tmp_env["db"],
+            coins=["ETH"],
+            start_date="2024-08-01",
+            end_date="2024-08-01",
+            batch_size=1,
+            mode="offline",
+        )
+        worker.seed_tasks()
+        worker.run_batch()
+
+        training_path = Path(os.environ.get(
+            "TRUSTFORGE_HOME",
+            str(Path(__file__).resolve().parents[1]),
+        )) / "out" / "training-data" / "ETH.jsonl"
+        assert training_path.exists()
+
+        line = training_path.read_text(encoding="utf-8").strip().split("\n")[0]
+        record = json.loads(line)
+        assert record["model_id"] is None
+        worker.close()

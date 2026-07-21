@@ -6,6 +6,7 @@ import time
 import logging
 from trustforge.analysis_flow import AnalysisFlow
 from trustforge.hermes import autonomy_enabled
+from trustforge.snapshot_writer import write_trust_snapshots
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Hermes continuous pre-analysis flow")
@@ -60,6 +61,14 @@ def main() -> int:
                 now = time.monotonic()
                 if enabled and now >= next_scheduled_refresh:
                     flow.refresh_once()
+                    # Issue #328: 自動寫入 trust snapshot（history + latest）
+                    try:
+                        snapshot_results = write_trust_snapshots()
+                        ok_count = sum(1 for v in snapshot_results.values() if v.startswith("ok"))
+                        if ok_count:
+                            logging.debug("Daemon snapshot write: %d/%d coins ok", ok_count, len(snapshot_results))
+                    except Exception:
+                        logging.exception("Daemon snapshot write failed; analysis flow unaffected")
                     next_scheduled_refresh = now + max(60.0, args.schedule_seconds)
                 else:
                     if not enabled:

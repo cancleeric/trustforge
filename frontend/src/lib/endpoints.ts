@@ -199,6 +199,29 @@ export function getHealth(signal?: AbortSignal): Promise<ApiEnvelope<HealthData>
   })
 }
 
+export interface TrainingStatusPerCoin { total: number; has_direction: number }
+export interface TrainingStatusData {
+  training_data: {
+    total_records: number; has_direction: number; direction_ratio: number
+    per_coin: Record<string, TrainingStatusPerCoin>
+  }
+  backfill: { mode: string; is_running: boolean; completed: number; total: number; progress_pct: number } | null
+  upgrade_threshold: { target: number; current: number; met: boolean; pct: number }
+}
+export function getTrainingStatus(signal?: AbortSignal): Promise<ApiEnvelope<TrainingStatusData>> {
+  const valid = (value: unknown): value is TrainingStatusData => {
+    if (!value || typeof value !== 'object') return false
+    const data = value as TrainingStatusData
+    return typeof data.training_data === 'object' && data.training_data !== null &&
+      typeof data.training_data.total_records === 'number' &&
+      typeof data.upgrade_threshold === 'object' && data.upgrade_threshold !== null &&
+      typeof data.upgrade_threshold.target === 'number'
+  }
+  return apiFetch<TrainingStatusData>('/api/training-status', undefined, valid, {
+    signal, timeoutMs: DEFAULT_TIMEOUT_MS,
+  })
+}
+
 export interface ComparisonParams {
   coin: string
   coin2: string

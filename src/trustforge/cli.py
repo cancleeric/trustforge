@@ -142,7 +142,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     if args.action == "plan":
         worker = BackfillWorker(
             coins=coins, start_date=args.start, end_date=args.end,
-            data_dir=args.data_dir,
+            data_dir=args.data_dir, mode=args.mode, sample=args.sample,
         )
         plan = worker.plan()
         total = sum(plan.values())
@@ -155,7 +155,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     if args.action == "status":
         worker = BackfillWorker(
             coins=coins, start_date=args.start, end_date=args.end,
-            data_dir=args.data_dir,
+            data_dir=args.data_dir, mode=args.mode, sample=args.sample,
         )
         status = worker.status()
         if args.json:
@@ -182,7 +182,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     if args.action == "reset-failed":
         worker = BackfillWorker(
             coins=coins, start_date=args.start, end_date=args.end,
-            data_dir=args.data_dir,
+            data_dir=args.data_dir, mode=args.mode, sample=args.sample,
         )
         count = worker.reset_failed()
         print(f"已重設 {count} 個失敗任務為 pending")
@@ -194,7 +194,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     worker = BackfillWorker(
         coins=coins, start_date=args.start, end_date=args.end,
         batch_size=args.batch_size, interval_sec=args.interval,
-        data_dir=args.data_dir,
+        data_dir=args.data_dir, mode=args.mode, sample=args.sample,
     )
     seeded = worker.seed_tasks()
     plan = worker.plan()
@@ -229,6 +229,142 @@ def cmd_backfill(args: argparse.Namespace) -> int:
               f"（{status['progress_pct']}%）")
         worker.close()
     return 0
+
+
+def cmd_train_calibration(args: argparse.Namespace) -> int:
+    """從 training data 訓練 isotonic calibration model（issue #343）。
+
+    邏輯：
+    1. 讀取 training-data 中有方向預測的記錄
+    2. 與 OHLCV T+7 實際價格比對，算出 hit/miss
+    3. 訓練 isotonic model
+    4. 存入 model-artifacts
+    """
+    import csv
+    from datetime import timedelta
+
+    from .calibration_model import save_calibration_model, train_isotonic
+
+    training_dir = Path(args.training_dir)
+    data_dir = Path(args.data_dir)
+    out_path = Path(args.out)
+
+    if not training_dir.exists():
+        print(f"Training data 目錄不存在：{training_dir}")
+        return 1
+
+    # 讀取所有幣種的 OHLCV（date → close price）
+    ohlcv_map: dict[str, dict[str, float]] = {}  # coin → {date_str → close}
+    for csv_file in data_dir.glob("*_daily_ohlcv.csv"):
+        coin = csv_file.stem.replace("_daily_ohlcv", "").upper()
+        prices: dict[str, float] = {}
+        with open(csv_file, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                prices[row["date"]] = float(row["close"])
+        ohlcv_map[coin] = prices
+
+    if not ohlcv_map:
+        print(f"OHLCV 目錄無資料：{data_dir}")
+        return 1
+
+    # 讀取 training data，收集 (confidence, hit_flag) 對
+    confidences: list[float] = []
+    hit_flags: list[bool] = []
+    skipped = 0
+    total = 0
+
+    for jsonl_file in training_dir.glob("*.jsonl"):
+        coin = jsonl_file.stem.upper()
+        if coin not in ohlcv_map:
+            continue
+        prices = ohlcv_map[coin]
+
+        with open(jsonl_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+
+                total += 1
+                direction = rec.get("direction", "")
+                confidence = rec.get("confidence")
+                date_str = rec.get("date")
+
+                if confidence is None or date_str is None:
+                    skipped += 1
+                    continue
+
+                # 計算 T+7 日期
+                from datetime import date as _date
+                try:
+                    pred_date = _date.fromisoformat(date_str)
+                except ValueError:
+                    skipped += 1
+                    continue
+
+                t7_date = pred_date + timedelta(days=7)
+                t7_str = t7_date.isoformat()
+                t0_str = date_str
+
+                if t0_str not in prices or t7_str not in prices:
+                    skipped += 1
+                    continue
+
+                # 計算 T+7 相對 T0 的變化
+                p0 = prices[t0_str]
+                p7 = prices[t7_str]
+                if p0 == 0:
+                    skipped += 1
+                    continue
+                change_pct = (p7 - p0) / p0
+
+                # Hit 判定（calibration_runner 邏輯）：
+                # - 中性/不明 + |change| < 2% → hit
+                # - 偏多 + change > 0 → hit
+                # - 偏空 + change < 0 → hit
+                # - 其他 → miss
+                hit = _judge_hit(direction, change_pct)
+
+                confidences.append(float(confidence))
+                hit_flags.append(hit)
+
+    eligible = len(confidences)
+    print(f"共讀取 {total} 筆記錄，{skipped} 筆跳過，{eligible} 筆可用")
+
+    if eligible < 5:
+        print("可用樣本不足（< 5），無法訓練模型")
+        return 1
+
+    # 訓練
+    points = train_isotonic(confidences, hit_flags)
+    save_calibration_model(points, out_path, sample_count=eligible)
+    print(f"模型已存入：{out_path}（{len(points)} 個校準點，{eligible} 筆樣本）")
+    return 0
+
+
+def _judge_hit(direction: str, change_pct: float) -> bool:
+    """Hit 判定邏輯（對齊 calibration_runner spec）。
+
+    - 中性 / 不明：|change| < 2% → hit
+    - 偏多：change > 0 → hit
+    - 偏空：change < 0 → hit
+    - 其他方向未知：視為中性
+    """
+    if direction in ("中性", "不明", ""):
+        return abs(change_pct) < 0.02
+    elif direction == "偏多":
+        return change_pct > 0
+    elif direction == "偏空":
+        return change_pct < 0
+    else:
+        # 未知方向，視為中性
+        return abs(change_pct) < 0.02
 
 
 def cmd_security_gate(args: argparse.Namespace) -> int:
@@ -307,7 +443,20 @@ def main(argv=None) -> int:
     bf.add_argument("--daemon", action="store_true", help="前台持續執行（Ctrl+C 停止）")
     bf.add_argument("--json", action="store_true", help="輸出 JSON")
     bf.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
+    bf.add_argument("--mode", default="offline", choices=["offline", "live"],
+                    help="offline=離線（預設）；live=真 Bedrock")
+    bf.add_argument("--sample", type=int, default=None,
+                    help="抽樣天數（均勻分布跨時間範圍；預設全量）")
     bf.set_defaults(func=cmd_backfill)
+
+    tc = sub.add_parser("train-calibration", help="從 training data 訓練 isotonic calibration model")
+    tc.add_argument("--training-dir", default="out/training-data",
+                    help="Training data JSONL 目錄（預設 out/training-data）")
+    tc.add_argument("--data-dir", default="data/data",
+                    help="OHLCV CSV 目錄（預設 data/data）")
+    tc.add_argument("--out", default="out/model-artifacts/calibration-model.json",
+                    help="模型輸出路徑")
+    tc.set_defaults(func=cmd_train_calibration)
 
     sg = sub.add_parser("security-gate", help="投稿前安全掃描：secret / 內網 reference 檢查")
     sg.add_argument("--out", default="out", help="報告輸出目錄（預設 out/）")

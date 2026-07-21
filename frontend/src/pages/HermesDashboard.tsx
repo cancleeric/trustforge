@@ -14,6 +14,7 @@ import HermesModuleDeck, { type HermesWorkspaceModule } from '../hermes/HermesMo
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
 import HermesOnboarding from '../hermes/HermesOnboarding'
+import TrainingStatusCard from '../components/TrainingStatusCard'
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 import HermesFirstRun from '../hermes/HermesFirstRun'
 import { useReducedMotion } from '../lib/useReducedMotion'
@@ -563,6 +564,10 @@ export default function HermesDashboard() {
             onOpenComposite={() => setSelectedStage('composite')}
             onOpenDivergence={() => setSelectedStage('divergence')}
           />
+          {/* Training status dashboard card — Issue #333 */}
+          <div style={{ position: 'absolute', right: 0, bottom: 'calc(var(--hermes-bottom) + 8px)', width: 'var(--hermes-rail)', zIndex: 6, padding: '0 16px' }}>
+            <TrainingStatusCard />
+          </div>
         </div>
 
         <div className="hermes-boot-layer" style={{ opacity: boot.bottom ? 1 : 0, transition: 'opacity .5s ease-out' }}>
