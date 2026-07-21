@@ -1,5 +1,7 @@
 # TrustForge Architecture Overview
 
+> Human-readable rendered page: [`architecture-overview.html`](architecture-overview.html)
+
 ![TrustForge architecture overview](ARCHITECTURE-OVERVIEW.svg)
 
 This diagram records the verified architecture at `v0.17.2` (`27fe4c5`). It

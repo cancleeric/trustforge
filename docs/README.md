@@ -25,7 +25,8 @@
 
 | 文件 | 說明 |
 |------|------|
-| [architecture/ARCHITECTURE-OVERVIEW.md](architecture/ARCHITECTURE-OVERVIEW.md) | `v0.17.2` 架構圖集：系統總覽、Kernel 邊界、升級控制、跨專案 Agent Platform 抽取邊界；含 PlantUML 與 SVG/PNG |
+| [architecture/architecture-overview.html](architecture/architecture-overview.html) | 人類閱讀版架構頁：系統總覽、Kernel 邊界、升級控制、跨專案 Agent Platform 抽取邊界，內嵌四張 SVG 圖 |
+| [architecture/ARCHITECTURE-OVERVIEW.md](architecture/ARCHITECTURE-OVERVIEW.md) | 架構圖技術註記與 PlantUML/SVG/PNG 來源索引 |
 | [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md) | 三層管線與信任演算法設計 |
 | [architecture/AWS-ARCHITECTURE.md](architecture/AWS-ARCHITECTURE.md) | AWS 服務架構（決賽簡報用），含前後端分離對外拓樸 |
 | [architecture/BACKFILL-SYSTEM.md](architecture/BACKFILL-SYSTEM.md) | 歷史回填系統：5年 OHLCV 逐日 replay，三層啟停控制 |
