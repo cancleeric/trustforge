@@ -1,0 +1,23 @@
+{
+  "family": "deploy",
+  "name": "deploy-nginx-healthcheck",
+  "description": "EC2 佈署後自動檢查 nginx port 80 可達性，防止 TLS conf 301 空轉",
+  "trigger": "deploy_ec2.sh update-in-place 完成後",
+  "steps": [
+    "透過 SSM 對實例打 curl http://127.0.0.1/healthz",
+    "判斷 HTTP status code",
+    "如果非 200，自動降級到 react-http.conf",
+    "印出 WARNING 供人工後續切回 TLS"
+  ],
+  "context": [
+    "nginx conf symlink 在 /etc/nginx/conf.d/trustforge.conf",
+    "指向 /etc/nginx/trustforge-sites/ 下的 4 份 conf",
+    "cutover_switch.sh 是正式切換工具（有鎖、有 rollback）",
+    "此 smoke test 是防禦性補強"
+  ],
+  "lessons": [
+    "deploy 腳本不碰 nginx conf 是設計決策（職責分離）",
+    "但必須驗證最終可達性",
+    "多人協作時 nginx 狀態可能被另一人改過"
+  ]
+}
