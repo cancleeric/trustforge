@@ -30,6 +30,23 @@ def test_diagnostic_blocks_calibrator_proposal_until_leakage_safe_sample_gate_is
     assert [item["id"] for item in report["proposals"]] == ["calibration-data-accumulation"]
 
 
+def test_diagnostic_proposes_calibrator_upgrade_when_error_crosses_threshold():
+    report = diagnose(replay={
+        "available_snapshot_count": 120,
+        "horizons": {"T+1": {
+            "eligible_predictions": 120,
+            "hit_rate": 0.52,
+            "calibration_error": 0.17,
+            "reliability": [],
+        }},
+    }, generated_at="2026-07-21T00:00:00Z")
+
+    proposal = next(item for item in report["proposals"] if item["id"] == "confidence-calibrator-t+1")
+    assert proposal["area"] == "historical-calibration"
+    assert proposal["automatic_apply"] is False
+    assert proposal["evidence"]["calibration_error"] == 0.17
+
+
 def test_analysis_history_can_propose_outer_framework_experiments_but_never_apply_them():
     report = diagnose(analysis_history={
         "job_count": 40, "failed_jobs": 3, "retried_jobs": 6,

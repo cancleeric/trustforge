@@ -106,14 +106,16 @@ def diagnose(
         for horizon, metrics in sorted((replay.get("horizons") or {}).items()):
             eligible = int(_number(metrics.get("eligible_predictions")))
             hit_rate = metrics.get("hit_rate")
-            reliability = metrics.get("reliability") or []
-            if eligible >= 100 and hit_rate is not None and any(
-                abs(_number(bin_.get("mean_information_completeness")) - _number(bin_.get("empirical_hit_rate"))) >= 0.15
-                for bin_ in reliability
-            ):
+            calibration_error = _number(metrics.get("calibration_error"))
+            if eligible >= 100 and hit_rate is not None and calibration_error >= 0.15:
                 proposals.append(ImprovementProposal(
                     id=f"confidence-calibrator-{horizon.lower()}", area="historical-calibration", severity="medium",
-                    evidence={"horizon": horizon, "eligible_predictions": eligible, "hit_rate": hit_rate},
+                    evidence={
+                        "horizon": horizon,
+                        "eligible_predictions": eligible,
+                        "hit_rate": hit_rate,
+                        "calibration_error": calibration_error,
+                    },
                     proposed_experiment="Compare an explainable logistic-regression and isotonic calibrator on time-separated train/holdout periods.",
                     success_metric="Holdout calibration error improves while no future source or OHLCV data crosses the run boundary.",
                 ))

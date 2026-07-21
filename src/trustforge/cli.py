@@ -243,6 +243,26 @@ def cmd_qa_matrix(args: argparse.Namespace) -> int:
     return qa_main(offline=args.offline, data_dir=args.data_dir, out_dir=args.out)
 
 
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """Historical replay calibration diagnostic from JSONL training archives."""
+    from .calibration import load_training_snapshots, replay_report
+    from .ingestion.prices import load_ohlcv
+    from .improvement import diagnose
+
+    snapshots = load_training_snapshots(args.training_data, coin=args.coin)
+    report = replay_report(args.coin, snapshots, load_ohlcv(args.coin, args.data_dir))
+    diagnostic = diagnose(replay=report)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({**report, "diagnostic": diagnostic}, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(
+        f"calibrate 完成：{args.coin.upper()} eligible="
+        f"{report['horizons']['T+1']['eligible_predictions']} "
+        f"calibration_error={report['horizons']['T+1']['calibration_error']} -> {out}"
+    )
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="trustforge",
@@ -298,6 +318,13 @@ def main(argv=None) -> int:
     qa.add_argument("--data-dir", default=None, help="OHLCV 資料目錄")
     qa.add_argument("--out", default="out", help="輸出目錄（預設 out/）")
     qa.set_defaults(func=cmd_qa_matrix)
+
+    cal = sub.add_parser("calibrate", help="Historical replay calibration diagnostic")
+    cal.add_argument("--coin", choices=COIN_POOL, required=True)
+    cal.add_argument("--training-data", type=Path, default=Path("out/training-data"))
+    cal.add_argument("--data-dir", default="data/data", help="OHLCV CSV 資料目錄")
+    cal.add_argument("--out", default="out/historical-replay-calibration.json")
+    cal.set_defaults(func=cmd_calibrate)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):
