@@ -245,18 +245,19 @@ class BedrockClient:
             "system": system,
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
         }
-        resp = self._runtime().invoke_model(
+        resp = self._runtime().converse(
             modelId=self.config.model_id,
-            body=json.dumps(body),
+            system=[{"text": system}],
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": self.config.max_tokens},
         )
-        payload = json.loads(resp["body"].read())
-        # Bedrock messages 回應：content 為 block 陣列
-        text = "".join(b.get("text", "") for b in payload.get("content", []))
-        usage = payload.get("usage", {}) or {}
+        output = resp.get("output", {}).get("message", {}).get("content", [])
+        text = "".join(b.get("text", "") for b in output)
+        usage = resp.get("usage", {}) or {}
         return LLMResult(
             text=text,
-            input_tokens=int(usage.get("input_tokens", 0) or 0),
-            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            input_tokens=int(usage.get("inputTokens", 0) or 0),
+            output_tokens=int(usage.get("outputTokens", 0) or 0),
             model_id=self.config.model_id,
         )
 

@@ -47,6 +47,9 @@ PRICING: dict[str, tuple[float, float]] = {
     # `apac.anthropic.claude-haiku-4-5` 精確 key 對不上，導致 estimate_cost()
     # 精確查找失敗 → 真實呼叫成本被悄悄記成 $0，掩蓋支出。價格同 Haiku 4.5。
     "au.anthropic.claude-haiku-4-5-20251001-v1:0": (1.0, 5.0),
+    # us-west-2 cross-region inference prefix（競賽帳號 320566125702）
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": (1.0, 5.0),
+    "us.anthropic.claude-sonnet-4-6": (3.0, 15.0),
 }
 
 
