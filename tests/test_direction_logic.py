@@ -413,24 +413,77 @@ class TestStanceConsensusDirection:
 
 
 class TestDirectionWithStanceFallback:
-    """_direction 整合測試：Layer 2 → Layer 1 fallback chain (Issue #342)。"""
+    """_direction 整合測試：Layer 1 → Layer 2 fallback chain (Issue #365 修正)。
 
-    def test_stance_takes_priority_over_price(self):
-        """Layer 2 stance 有結果時，優先於 Layer 1 price trend"""
-        # 價格跌 >3%（Layer 1 會說偏空）
+    核心原則：客觀價格事實優先於主觀 stance。
+    - Layer 1 (price) 明確漲跌時直接回傳，不被 stance 覆蓋
+    - Layer 1 = 中性/None 時，Layer 2 (stance) 才補充生效
+    """
+
+    def test_price_bearish_overrides_stance_bullish(self):
+        """Issue #365: 價格偏空 + stance bullish → 仍然偏空（價格優先）"""
+        # 價格跌 >3%（Layer 1 = 偏空）
         dates = _date_range("2024-01-01", 15)
         price_claims = _make_price_claims(
             [(dates[0], 100.0)] + [(dates[-1], 96.0)]
             + [(dates[i], 99.0) for i in range(1, 14)]
         )
-        # 但 stance 多源 bullish（Layer 2 會說偏多）
+        # stance 多源 bullish（Layer 2 會說偏多）
         stance_claims = _make_stance_claims([
             ("coindesk", "bullish", 0.8),
             ("cointelegraph", "bullish", 0.7),
         ])
         combined = price_claims + stance_claims
-        # Layer 2 偏多 wins over Layer 1 偏空
+        # Layer 1 偏空 wins — 客觀價格事實不被主觀 stance 覆蓋
+        assert _direction(combined) == "偏空"
+
+    def test_price_bullish_overrides_stance_bearish(self):
+        """Issue #365: 價格偏多 + stance bearish → 仍然偏多（價格優先）"""
+        # 價格漲 >3%（Layer 1 = 偏多）
+        dates = _date_range("2024-01-01", 15)
+        price_claims = _make_price_claims(
+            [(dates[0], 100.0)] + [(dates[-1], 110.0)]
+            + [(dates[i], 102.0) for i in range(1, 14)]
+        )
+        # stance 多源 bearish（Layer 2 會說偏空）
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bearish", 0.8),
+            ("cointelegraph", "bearish", 0.7),
+        ])
+        combined = price_claims + stance_claims
+        # Layer 1 偏多 wins
         assert _direction(combined) == "偏多"
+
+    def test_price_neutral_stance_bullish_uses_stance(self):
+        """Issue #365: 價格中性 + stance bullish → 偏多（stance 補充）"""
+        # 價格盤整 ±3% 內（Layer 1 = 中性）
+        dates = _date_range("2024-01-01", 15)
+        price_claims = _make_price_claims(
+            [(dates[0], 100.0)] + [(dates[-1], 101.0)]
+            + [(dates[i], 100.5) for i in range(1, 14)]
+        )
+        # stance 多源 bullish
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.8),
+            ("cointelegraph", "bullish", 0.7),
+        ])
+        combined = price_claims + stance_claims
+        # Layer 1 = 中性 → Layer 2 偏多 kicks in
+        assert _direction(combined) == "偏多"
+
+    def test_price_neutral_stance_bearish_uses_stance(self):
+        """Issue #365: 價格中性 + stance bearish → 偏空（stance 補充）"""
+        dates = _date_range("2024-01-01", 15)
+        price_claims = _make_price_claims(
+            [(dates[0], 100.0)] + [(dates[-1], 101.0)]
+            + [(dates[i], 100.5) for i in range(1, 14)]
+        )
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bearish", 0.8),
+            ("cointelegraph", "bearish", 0.7),
+        ])
+        combined = price_claims + stance_claims
+        assert _direction(combined) == "偏空"
 
     def test_stance_none_falls_back_to_price(self):
         """Layer 2 回 None 時 fallback 到 Layer 1 price trend"""
@@ -446,6 +499,14 @@ class TestDirectionWithStanceFallback:
         combined = price_claims + stance_claims
         # Layer 1 偏多 (price trend +10%)
         assert _direction(combined) == "偏多"
+
+    def test_no_price_stance_bullish_uses_stance(self):
+        """無價格資料 + stance bullish → 偏多（Layer 1=None, Layer 2 補充）"""
+        stance_claims = _make_stance_claims([
+            ("coindesk", "bullish", 0.8),
+            ("cointelegraph", "bullish", 0.7),
+        ])
+        assert _direction(stance_claims) == "偏多"
 
     def test_both_layers_fail_returns_unknown(self):
         """兩層都無法判定 → '不明'"""

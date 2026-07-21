@@ -363,12 +363,17 @@ def _direction(supporting: list[ScoredClaim],
                all_scored: list[ScoredClaim] | None = None) -> str:
     """從高信任證據判方向（我方判斷，非外部結論）。
 
-    Layer 2（多源 Stance 加權）→ Layer 1（價格趨勢）→ "不明" 的 fallback 鏈：
-    1. 先嘗試 Layer 2 `_stance_consensus_direction`：多源 stance 加權投票
-       （需 ≥2 獨立來源有方向且一方顯著勝出 1.3 倍）。
-    2. Layer 2 回 None 時 fallback 到 Layer 1 `_price_trend_direction`：
+    Layer 1（價格趨勢，客觀事實）→ Layer 2（多源 Stance 補充）→ "不明" fallback：
+
+    1. 先嘗試 Layer 1 `_price_trend_direction`：
        使用 OHLCV 報酬率計算（>+3% 偏多，<-3% 偏空，否則中性）。
+       **當價格明確漲跌時直接回傳，不被主觀 stance 覆蓋**（Issue #365 修正）。
+    2. Layer 1 為 "中性" 或 None 時，嘗試 Layer 2 `_stance_consensus_direction`：
+       多源 stance 加權投票（需 ≥2 獨立來源有方向且一方顯著勝出 1.3 倍）。
     3. 兩層都無法判定時回傳 "不明"。
+
+    核心原則：**客觀價格事實優先於主觀 stance**。Layer 2 stance consensus
+    只在價格中性或無法判定時才生效，確保不會用主觀判斷覆蓋客觀事實。
 
     參數吃呼叫端傳入的 supporting 子集——W4 codex 對抗審第 8 輪根治後，
     `trust.scoring.aggregate(coin=)` 本身就已用 `_matches_coin` 篩過
@@ -381,10 +386,18 @@ def _direction(supporting: list[ScoredClaim],
     OHLCV 計算的客觀事實，方向判定不應受信任門檻限制。提供此參數時，
     `_price_trend_direction` 在 supporting 無 price claims 時會從中查找。
     """
+    # Layer 1: 價格趨勢（客觀事實，最高優先）
+    price_dir = _price_trend_direction(supporting, all_scored=all_scored)
+    if price_dir and price_dir != "中性":
+        return price_dir  # 價格明確漲跌時不被 stance 覆蓋
+
+    # Layer 2: 多源 stance 共識（只在價格中性/無法判定時才用）
     stance_dir = _stance_consensus_direction(supporting)
     if stance_dir:
         return stance_dir
-    return _price_trend_direction(supporting, all_scored=all_scored) or "不明"
+
+    # Fallback
+    return price_dir or "不明"
 
 
 def _derive_limits(brief: TrustedBrief) -> tuple[list[str], list[str]]:

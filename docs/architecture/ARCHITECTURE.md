@@ -128,7 +128,7 @@ Layer 2（多源 stance 共識，待實作）：
   bearish 加權和 > bullish × 1.3 → 偏空
   否則 → 中性
 
-最終方向 = Layer 2（有效時）> Layer 1 > 「不明」
+最終方向 = Layer 1（明確漲跌時）> Layer 2（價格中性/無法判定時補充）> 「不明」
 ```
 
 審查標準：`.kiro/specs/direction-logic-338.md`
