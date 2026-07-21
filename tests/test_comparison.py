@@ -30,14 +30,20 @@ from trustforge.schema import (
 # helpers
 # ---------------------------------------------------------------------------
 
-def _doc(id, kind, source, text, ts=1_000.0):
-    return Document(id=id, kind=kind, source=source, text=text, ts=ts)
+def _doc(id, kind, source, text, ts=1_000.0, meta=None):
+    return Document(id=id, kind=kind, source=source, text=text, ts=ts, meta=meta or {})
 
 
 def _make_docs(coin: str):
     """合成一組帶幣種前綴的文件，用於 monkeypatch。"""
     return [
-        _doc(f"{coin}_p1", "price",   "hoya-ohlcv", f"{coin} 今日收盤 30000 美元，漲幅 1.2%。"),
+        # 兩筆 price docs 跨 14 天，漲幅 ~4%（> 3% → 偏多）
+        _doc(f"{coin}_p0", "price", "hoya-ohlcv",
+             f"{coin} Daily OHLCV 2024-01-01: O=29000 H=29500 L=28500 C=29000.00 V=5000",
+             meta={"coin": coin, "date": "2024-01-01", "close": 29000.0}),
+        _doc(f"{coin}_p1", "price", "hoya-ohlcv",
+             f"{coin} Daily OHLCV 2024-01-15: O=30000 H=30500 L=29500 C=30160.00 V=5000",
+             meta={"coin": coin, "date": "2024-01-15", "close": 30160.0}),
         _doc(f"{coin}_o1", "onchain", "glassnode",   f"大額 {coin} 流出交易所，減少賣壓。"),
         _doc(f"{coin}_n1", "news",    "coindesk",    f"分析師認為 {coin} 本週走勢偏多。"),
     ]

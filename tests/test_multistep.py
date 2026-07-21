@@ -26,13 +26,19 @@ from trustforge.trust.scoring import Claim, extract_claims
 # helpers
 # ---------------------------------------------------------------------------
 
-def _doc(id, kind, source, text, ts=1000.0):
-    return Document(id=id, kind=kind, source=source, text=text, ts=ts)
+def _doc(id, kind, source, text, ts=1000.0, meta=None):
+    return Document(id=id, kind=kind, source=source, text=text, ts=ts, meta=meta or {})
 
 
 def _make_docs():
     return [
-        _doc("p1", "price",   "hoya-ohlcv",  "BTC 今日收盤價 46637.08 美元，漲幅 3.2%。"),
+        # 兩筆 price docs 跨 14 天，漲幅 ~3.6%（> 3% → 偏多）
+        _doc("p0", "price", "hoya-ohlcv",
+             "BTC Daily OHLCV 2024-01-01: O=45000 H=45500 L=44500 C=45000.00 V=10000",
+             ts=1000.0, meta={"coin": "BTC", "date": "2024-01-01", "close": 45000.0}),
+        _doc("p1", "price", "hoya-ohlcv",
+             "BTC Daily OHLCV 2024-01-15: O=46500 H=47000 L=46000 C=46637.08 V=10000",
+             ts=1000.0, meta={"coin": "BTC", "date": "2024-01-15", "close": 46637.08}),
         _doc("o1", "onchain", "glassnode",    "大額 BTC 流出交易所 12,400 枚，減少賣壓。"),
         _doc("n1", "news",    "coindesk",     "分析師認為 BTC 本週走勢偏多，支撐位 45000。"),
         _doc("s1", "social",  "x-anon",       "BTC 馬上暴漲翻倍穩賺！"),
@@ -40,6 +46,7 @@ def _make_docs():
 
 
 _FAKE_CLAIMS_JSON = json.dumps([
+    {"claim": "BTC 收盤 45000 美元", "claim_type": "fact", "direction": "bullish", "source_doc_id": "p0"},
     {"claim": "BTC 今日收盤 46637.08 美元", "claim_type": "fact",      "direction": "bullish", "source_doc_id": "p1"},
     {"claim": "大額 BTC 流出交易所",          "claim_type": "fact",      "direction": "bullish", "source_doc_id": "o1"},
     {"claim": "分析師看多本週走勢",            "claim_type": "inference", "direction": "bullish", "source_doc_id": "n1"},
