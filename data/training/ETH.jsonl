@@ -484,3 +484,6 @@
 {"date": "2024-05-01", "coin": "ETH", "direction": "中性", "trust_score": 0.5687, "confidence": 0.2862, "evidence_count": 7, "sources": ["ohlcv-official"], "model_id": null, "generated_at": "2026-07-21T13:43:47Z"}
 {"date": "2024-05-02", "coin": "ETH", "direction": "中性", "trust_score": 0.5687, "confidence": 0.2862, "evidence_count": 7, "sources": ["ohlcv-official"], "model_id": null, "generated_at": "2026-07-21T13:43:47Z"}
 {"date": "2024-08-01", "coin": "ETH", "direction": "中性", "trust_score": 0.5687, "confidence": 0.2862, "evidence_count": 7, "sources": ["ohlcv-official"], "model_id": null, "generated_at": "2026-07-21T13:44:06Z"}
+{"date": "2024-05-01", "coin": "ETH", "direction": "中性", "trust_score": 0.5687, "confidence": 0.2862, "evidence_count": 7, "sources": ["ohlcv-official"], "model_id": null, "generated_at": "2026-07-21T15:37:52Z"}
+{"date": "2024-05-02", "coin": "ETH", "direction": "中性", "trust_score": 0.5687, "confidence": 0.2862, "evidence_count": 7, "sources": ["ohlcv-official"], "model_id": null, "generated_at": "2026-07-21T15:37:52Z"}
+{"date": "2024-08-01", "coin": "ETH", "direction": "中性", "trust_score": 0.5687, "confidence": 0.2862, "evidence_count": 7, "sources": ["ohlcv-official"], "model_id": null, "generated_at": "2026-07-21T15:38:08Z"}
