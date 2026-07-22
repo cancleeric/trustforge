@@ -16,6 +16,13 @@ from .contracts import (
     UnsupportedKernelContractVersion,
     require_supported_contract_version,
 )
+from .aggregation import (
+    FIXED_HEURISTIC_TABLE,
+    FIXED_HEURISTIC_VERSION,
+    ISOTONIC_VERSION,
+    SUPPORTED_CALIBRATION_MODEL_VERSIONS,
+    aggregate_scored_claims,
+)
 from .corroboration import (
     CorroborationClaim,
     CorroborationResult,
@@ -44,6 +51,11 @@ from .scoring import (
 )
 
 __all__ = [
+    "FIXED_HEURISTIC_TABLE",
+    "FIXED_HEURISTIC_VERSION",
+    "ISOTONIC_VERSION",
+    "SUPPORTED_CALIBRATION_MODEL_VERSIONS",
+    "aggregate_scored_claims",
     "KERNEL_CONTRACT_VERSION",
     "JsonValue",
     "KernelClaim",
