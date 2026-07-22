@@ -10,8 +10,32 @@ from pathlib import Path
 from typing import Any
 
 
+_AUTOMATED_APPROVAL_ACTOR_TOKENS = (
+    "agent",
+    "auto",
+    "automation",
+    "bedrock",
+    "bot",
+    "claude",
+    "codex",
+    "gemini",
+    "gpt",
+    "llm",
+    "model",
+    "openai",
+    "service",
+)
+
+
 def default_path() -> Path:
     return Path(os.getenv("TRUSTFORGE_SQLITE_PATH", str(Path(__file__).resolve().parents[2] / "out" / "trustforge.sqlite3")))
+
+
+def _is_human_approval_actor(actor: str) -> bool:
+    normalized = actor.strip().lower()
+    if not normalized:
+        return False
+    return not any(token in normalized for token in _AUTOMATED_APPROVAL_ACTOR_TOKENS)
 
 
 class UpgradeQueue:
@@ -127,6 +151,8 @@ class UpgradeQueue:
         proposal_id, decision, actor, reason = (value.strip() for value in (proposal_id, decision, actor, reason))
         if decision not in {"approve", "reject"} or not actor or not reason:
             raise ValueError("decision, actor and reason are required")
+        if decision == "approve" and not _is_human_approval_actor(actor):
+            raise ValueError("approval requires human actor")
         now = time.time()
         with closing(self._db()) as db, db:
             row = db.execute("SELECT state FROM upgrade_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
