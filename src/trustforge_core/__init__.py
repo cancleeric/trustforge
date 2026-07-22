@@ -12,6 +12,16 @@ from .contracts import (
     KernelInput,
     KernelOutput,
 )
+from .corroboration import (
+    CorroborationClaim,
+    CorroborationResult,
+    DOMAIN_STOP,
+    StanceLabel,
+    StancePair,
+    canonical_source,
+    corroborate,
+    directional_word_polarities,
+)
 from .dawid_skene import LABELS, N_LABELS, em_source_reliability
 from .scoring import (
     interpolate_calibration,
@@ -28,6 +38,14 @@ __all__ = [
     "KernelDocument",
     "KernelInput",
     "KernelOutput",
+    "CorroborationClaim",
+    "CorroborationResult",
+    "DOMAIN_STOP",
+    "StanceLabel",
+    "StancePair",
+    "canonical_source",
+    "corroborate",
+    "directional_word_polarities",
     "LABELS",
     "N_LABELS",
     "em_source_reliability",
