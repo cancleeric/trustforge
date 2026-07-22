@@ -15,11 +15,83 @@ Ref: Issue #386, Spec .kiro/specs/provider-ports-386.md
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Port: LLM Provider
+# Port: generic Model Provider
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ModelErrorCategory = Literal[
+    "provider_unavailable",
+    "rate_limited",
+    "timeout",
+    "bad_request",
+    "auth_error",
+    "safety_blocked",
+    "unknown",
+]
+
+
+@dataclass(frozen=True)
+class ModelRequest:
+    """Provider-neutral model request.
+
+    The contract deliberately has no TrustForge domain vocabulary such as
+    coin, Evidence, stance, or Hermes. Domain-specific adapters may translate
+    into this shape at the application boundary.
+    """
+
+    system: str
+    prompt: str
+    response_format: Literal["text", "json"] = "text"
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    """Token/cost usage sufficient for budget ledger accounting."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class ModelResponse:
+    """Provider-neutral completion response."""
+
+    text: str
+    model: str
+    provider: str
+    usage: ModelUsage = field(default_factory=ModelUsage)
+    structured: dict[str, Any] | list[Any] | None = None
+
+
+class ModelProviderError(RuntimeError):
+    """Classified model-provider failure."""
+
+    def __init__(self, message: str, *, category: ModelErrorCategory = "unknown"):
+        super().__init__(message)
+        self.category = category
+
+
+@runtime_checkable
+class ModelProvider(Protocol):
+    """Minimal provider-neutral model completion contract."""
+
+    provider_id: str
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        """Run one text or structured-output completion."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Port: legacy LLM Provider
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @runtime_checkable
@@ -162,6 +234,52 @@ class FakeLLMProvider:
     def classify_stance(self, claim_a: str, claim_b: str) -> str:
         self.calls.append({"method": "classify_stance", "claim_a": claim_a, "claim_b": claim_b})
         return self.default_stance
+
+
+class FakeModelProvider:
+    """Test model provider implementing the generic ModelProvider contract."""
+
+    provider_id = "fake"
+
+    def __init__(
+        self,
+        default_text: str = "fake model response",
+        *,
+        default_model: str = "fake-model",
+        default_structured: dict[str, Any] | list[Any] | None = None,
+        usage: ModelUsage | None = None,
+    ) -> None:
+        self.default_text = default_text
+        self.default_model = default_model
+        self.default_structured = default_structured
+        self.usage = usage or ModelUsage()
+        self.calls: list[ModelRequest] = []
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        self.calls.append(request)
+        return ModelResponse(
+            text=self.default_text,
+            model=request.model or self.default_model,
+            provider=self.provider_id,
+            usage=self.usage,
+            structured=self.default_structured if request.response_format == "json" else None,
+        )
+
+
+class NullModelProvider:
+    """Offline model provider that never calls an external service."""
+
+    provider_id = "null"
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        structured: dict[str, Any] | None = {} if request.response_format == "json" else None
+        return ModelResponse(
+            text="",
+            model=request.model or "offline/null",
+            provider=self.provider_id,
+            usage=ModelUsage(),
+            structured=structured,
+        )
 
 
 class FakeCacheProvider:
