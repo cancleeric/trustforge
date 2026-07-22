@@ -1,4 +1,5 @@
 """Deterministic scoring primitives with no TrustForge application dependencies."""
+
 from __future__ import annotations
 
 import math
@@ -6,7 +7,11 @@ import re
 from collections.abc import Mapping, Sequence
 
 from .contracts import (
+    FIXED_HEURISTIC_VERSION,
+    ISOTONIC_VERSION as _ISOTONIC_VERSION,
     KERNEL_CONTRACT_VERSION,
+    STRICT_JSON_MAX_INTEGER,
+    SUPPORTED_CALIBRATION_MODEL_VERSIONS,
     KernelClaim,
     KernelDocument,
     KernelInput,
@@ -16,6 +21,10 @@ from .contracts import (
     require_supported_contract_version,
 )
 from .corroboration import canonical_source
+
+
+# Backwards-compatible scoring-module re-export; canonical value lives in contracts.
+ISOTONIC_VERSION = _ISOTONIC_VERSION
 
 
 DEFAULT_SCORE_WEIGHTS: tuple[tuple[str, float], ...] = (
@@ -65,13 +74,7 @@ INDEPENDENT_SOURCE_SATURATION = 4
 KIND_DIVERSITY_SATURATION = 3
 SUPPORTING_LIMIT = 10
 CONTRARIAN_LIMIT = 5
-FIXED_HEURISTIC_VERSION = "fixed-heuristic-v1"
-ISOTONIC_VERSION = "isotonic-v1"
-SUPPORTED_CALIBRATION_MODEL_VERSIONS = frozenset(
-    {FIXED_HEURISTIC_VERSION, ISOTONIC_VERSION}
-)
 _UNSET = object()
-STRICT_JSON_MAX_INTEGER = (1 << 53) - 1
 
 _COIN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("BTC", ("btc", "bitcoin", "比特幣", "比特")),
@@ -182,7 +185,9 @@ def _calibration_table(
         raise ValueError("calibration_table must be an exact tuple")
     if version == FIXED_HEURISTIC_VERSION:
         if table:
-            raise ValueError("fixed calibration model does not accept calibration_table")
+            raise ValueError(
+                "fixed calibration model does not accept calibration_table"
+            )
         return DEFAULT_CALIBRATION_TABLE
     if len(table) < 2:
         raise ValueError("isotonic calibration_table must contain at least two points")
@@ -347,17 +352,21 @@ def _validate_scored_claim_graph(item: KernelScoredClaim, *, index: int) -> None
             ("contradict_n", trace.contradict_n),
             ("iterations_run", trace.iterations_run),
         ):
-            _nonnegative_json_int(
-                value, field=f"{prefix}.reputation_trace.{field}"
-            )
-    for field, values in (("manip_flags", item.manip_flags), ("info_flags", item.info_flags)):
+            _nonnegative_json_int(value, field=f"{prefix}.reputation_trace.{field}")
+    for field, values in (
+        ("manip_flags", item.manip_flags),
+        ("info_flags", item.info_flags),
+    ):
         if type(values) is not tuple or not all(type(value) is str for value in values):
             raise ValueError(f"{prefix}.{field} must be an exact tuple of strings")
 
 
 def _alias_in(alias: str, text: str) -> bool:
     if alias.isascii():
-        return re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE | re.ASCII) is not None
+        return (
+            re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE | re.ASCII)
+            is not None
+        )
     return alias in text
 
 
@@ -373,9 +382,7 @@ def _normalize(text: str) -> frozenset[str]:
     if type(text) is not str:
         raise ValueError("text must be an exact string")
     return frozenset(
-        token
-        for token in re.findall(r"[\w一-鿿]+", text.lower())
-        if len(token) > 1
+        token for token in re.findall(r"[\w一-鿿]+", text.lower()) if len(token) > 1
     )
 
 
@@ -392,7 +399,9 @@ def _matches_coin(scored: KernelScoredClaim, coin: str) -> bool:
     explicit = _metadata_coin(scored.claim)
     if explicit:
         return explicit.upper() in targets
-    mentioned = _coins_mentioned(scored.claim.document.id + " " + scored.claim.document.text)
+    mentioned = _coins_mentioned(
+        scored.claim.document.id + " " + scored.claim.document.text
+    )
     if not mentioned:
         return True
     return bool(mentioned & targets) and not (mentioned - targets)
@@ -405,7 +414,9 @@ def _mentions_coin(scored: KernelScoredClaim, coin: str) -> bool:
     explicit = _metadata_coin(scored.claim)
     if explicit:
         return explicit.upper() in targets
-    mentioned = _coins_mentioned(scored.claim.document.id + " " + scored.claim.document.text)
+    mentioned = _coins_mentioned(
+        scored.claim.document.id + " " + scored.claim.document.text
+    )
     return bool(mentioned & targets) and not (mentioned - targets)
 
 
@@ -526,7 +537,9 @@ def aggregate_scored_claims(
     if type(scored_claims) is not tuple or not all(
         type(item) is KernelScoredClaim for item in scored_claims
     ):
-        raise ValueError("scored_claims must be a tuple of exact KernelScoredClaim values")
+        raise ValueError(
+            "scored_claims must be a tuple of exact KernelScoredClaim values"
+        )
     for index, item in enumerate(scored_claims):
         _validate_scored_claim_graph(item, index=index)
     if type(query) is not str:
@@ -589,11 +602,14 @@ def aggregate_scored_claims(
             if _matches_coin(scored, coin)
         )
     else:
-        relevant = tuple(
-            scored
-            for scored in scored_claims
-            if not query_tokens or (_normalize(scored.claim.text) & query_tokens)
-        ) or scored_claims
+        relevant = (
+            tuple(
+                scored
+                for scored in scored_claims
+                if not query_tokens or (_normalize(scored.claim.text) & query_tokens)
+            )
+            or scored_claims
+        )
         relevant = tuple(sorted(relevant, key=lambda sc: sc.trust, reverse=True))
 
     supporting_all = tuple(sc for sc in relevant if sc.trust >= threshold)
@@ -618,11 +634,7 @@ def aggregate_scored_claims(
     insufficient_sources = independent_sources < 2
     abstain = low_calibrated or insufficient_sources
     decision_state = (
-        "abstain"
-        if abstain
-        else "low_confidence"
-        if calibrated < 0.5
-        else "normal"
+        "abstain" if abstain else "low_confidence" if calibrated < 0.5 else "normal"
     )
     return KernelOutput(
         raw_confidence,
@@ -652,10 +664,7 @@ def run_kernel(inp: KernelInput) -> KernelOutput:
     if type(inp) is not KernelInput:
         raise ValueError("inp must be an exact KernelInput")
     require_supported_contract_version(inp.contract_version)
-    scored_claims = tuple(
-        score_claim(claim, now=inp.pit_epoch)
-        for claim in inp.claims
-    )
+    scored_claims = tuple(score_claim(claim, now=inp.pit_epoch) for claim in inp.claims)
     return aggregate_scored_claims(
         scored_claims,
         query=inp.query,
@@ -691,10 +700,17 @@ def score_claim(
     half_life_map = _validated_table(half_lives, field="half_lives", positive=True)
     if "default" not in half_life_map:
         raise ValueError("half_lives must contain a default entry")
-    if type(info_flags) is not tuple or not all(type(flag) is str for flag in info_flags):
+    if type(info_flags) is not tuple or not all(
+        type(flag) is str for flag in info_flags
+    ):
         raise ValueError("info_flags must be an exact tuple of exact strings")
-    if reputation_trace is not None and type(reputation_trace) is not KernelReputationTrace:
-        raise ValueError("reputation_trace must be an exact KernelReputationTrace or None")
+    if (
+        reputation_trace is not None
+        and type(reputation_trace) is not KernelReputationTrace
+    ):
+        raise ValueError(
+            "reputation_trace must be an exact KernelReputationTrace or None"
+        )
 
     metadata: dict[str, object] = {}
     for key, value in claim.document.metadata:
@@ -711,9 +727,7 @@ def score_claim(
             raise ValueError("metadata reputation must be between zero and one")
     resolved_dynamic: object = _NO_DYNAMIC_REPUTATION
     if dynamic_reputation is not None:
-        resolved_dynamic = _exact_number(
-            dynamic_reputation, field="dynamic_reputation"
-        )
+        resolved_dynamic = _exact_number(dynamic_reputation, field="dynamic_reputation")
         if not 0.0 <= resolved_dynamic <= 1.0:  # type: ignore[operator]
             raise ValueError("dynamic_reputation must be between zero and one")
     reputation = _resolve_source_reputation(

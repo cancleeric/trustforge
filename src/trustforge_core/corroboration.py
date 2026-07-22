@@ -9,6 +9,7 @@ boundary.  The production cached-stance adapter already emits only these three
 labels, so hardening rejects malformed custom/provider results without changing
 the formal cached path.
 """
+
 from __future__ import annotations
 
 import re
@@ -16,33 +17,87 @@ from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from .source_identity import canonical_source
+
 StanceLabel = Literal["entailment", "contradiction", "neutral"]
 _STANCE_LABELS = frozenset({"entailment", "contradiction", "neutral"})
 
 DOMAIN_STOP = frozenset(
     {
-        "btc", "eth", "sol", "bnb", "xrp", "bitcoin", "ethereum", "solana",
-        "比特幣", "比特", "以太坊", "以太", "幣", "市場", "價格", "成交量",
-        "交易所", "交易", "行情", "數據", "分析", "資料", "報告", "漲跌",
-        "上漲", "下跌", "看漲", "看跌", "走低", "走高", "目前", "近期",
-        "顯示", "表示", "預計", "預測", "可能", "目標",
+        "btc",
+        "eth",
+        "sol",
+        "bnb",
+        "xrp",
+        "bitcoin",
+        "ethereum",
+        "solana",
+        "比特幣",
+        "比特",
+        "以太坊",
+        "以太",
+        "幣",
+        "市場",
+        "價格",
+        "成交量",
+        "交易所",
+        "交易",
+        "行情",
+        "數據",
+        "分析",
+        "資料",
+        "報告",
+        "漲跌",
+        "上漲",
+        "下跌",
+        "看漲",
+        "看跌",
+        "走低",
+        "走高",
+        "目前",
+        "近期",
+        "顯示",
+        "表示",
+        "預計",
+        "預測",
+        "可能",
+        "目標",
     }
 )
 
-_SOURCE_ALIASES = {
-    "coindesk.com": "coindesk", "cointelegraph.com": "cointelegraph",
-    "theblock.co": "theblock", "theblock": "theblock", "reuters.com": "reuters",
-    "bloomberg.com": "bloomberg", "bitcoinmagazine.com": "bitcoinmagazine",
-    "newsbtc.com": "newsbtc", "cryptoslate.com": "cryptoslate",
-    "decrypt.co": "decrypt", "utoday.com": "utoday", "twitter": "x",
-    "x.com": "x", "sec edgar": "sec-gov", "sec": "sec-gov", "sec.gov": "sec-gov",
-}
 _NEG_RX = re.compile(r"不會|不太|不致|不至|不再|沒有|沒|尚未|未|無法|別|勿|非")
 _DIRECTION_WORDS = (
-    "上漲", "漲", "看漲", "看多", "買入", "買盤", "累積", "增持", "突破",
-    "流入", "利多", "走高", "反彈", "上揚", "攀升", "下跌", "跌", "看跌",
-    "看空", "賣壓", "拋壓", "拋售", "流出", "利空", "走低", "暴跌", "崩",
-    "恐慌", "清算", "賣盤", "下挫",
+    "上漲",
+    "漲",
+    "看漲",
+    "看多",
+    "買入",
+    "買盤",
+    "累積",
+    "增持",
+    "突破",
+    "流入",
+    "利多",
+    "走高",
+    "反彈",
+    "上揚",
+    "攀升",
+    "下跌",
+    "跌",
+    "看跌",
+    "看空",
+    "賣壓",
+    "拋壓",
+    "拋售",
+    "流出",
+    "利空",
+    "走低",
+    "暴跌",
+    "崩",
+    "恐慌",
+    "清算",
+    "賣盤",
+    "下挫",
 )
 
 
@@ -65,15 +120,10 @@ class CorroborationResult:
     contradicting_sources: frozenset[str]
 
 
-def canonical_source(source: str | None) -> str:
-    if not source:
-        return ""
-    key = source.strip().casefold()
-    return _SOURCE_ALIASES.get(key, key) if key else ""
-
-
 def _normalize(text: str) -> set[str]:
-    return {token for token in re.findall(r"[\w一-鿿]+", text.lower()) if len(token) > 1}
+    return {
+        token for token in re.findall(r"[\w一-鿿]+", text.lower()) if len(token) > 1
+    }
 
 
 def _direction_compatible(left: str, right: str) -> bool:
@@ -90,10 +140,14 @@ def directional_word_polarities(text: str) -> tuple[set[str], set[str]]:
     asserted: set[str] = set()
     negated: set[str] = set()
     for start, end, word in candidates:
-        if any(start < used_end and end > used_start for used_start, used_end in consumed):
+        if any(
+            start < used_end and end > used_start for used_start, used_end in consumed
+        ):
             continue
         consumed.append((start, end))
-        target = negated if _NEG_RX.search(text[max(0, start - 4):start]) else asserted
+        target = (
+            negated if _NEG_RX.search(text[max(0, start - 4) : start]) else asserted
+        )
         target.add(word)
     return asserted, negated
 
@@ -123,8 +177,12 @@ def corroborate(
         if not _direction_compatible(target.direction, candidate.direction):
             continue
         target_asserted, target_negated = directional_word_polarities(target.text)
-        candidate_asserted, candidate_negated = directional_word_polarities(candidate.text)
-        if (target_asserted & candidate_negated) or (candidate_asserted & target_negated):
+        candidate_asserted, candidate_negated = directional_word_polarities(
+            candidate.text
+        )
+        if (target_asserted & candidate_negated) or (
+            candidate_asserted & target_negated
+        ):
             continue
         if not require_stance:
             if not require_entailment:
@@ -143,6 +201,12 @@ def corroborate(
 
 
 __all__ = [
-    "CorroborationClaim", "CorroborationResult", "DOMAIN_STOP", "StanceLabel", "StancePair",
-    "canonical_source", "corroborate", "directional_word_polarities",
+    "CorroborationClaim",
+    "CorroborationResult",
+    "DOMAIN_STOP",
+    "StanceLabel",
+    "StancePair",
+    "canonical_source",
+    "corroborate",
+    "directional_word_polarities",
 ]

@@ -1,4 +1,5 @@
 """Golden parity and import-boundary tests for core corroboration."""
+
 from __future__ import annotations
 
 import ast
@@ -16,6 +17,7 @@ from trustforge_core.corroboration import (
 CORE_FILE = (
     Path(__file__).resolve().parents[1] / "src" / "trustforge_core" / "corroboration.py"
 )
+SOURCE_IDENTITY_FILE = CORE_FILE.with_name("source_identity.py")
 
 
 def test_core_yields_only_one_pending_pair_until_app_injects_result():
@@ -42,7 +44,9 @@ def test_core_yields_only_one_pending_pair_until_app_injects_result():
     assert result.contradicting_sources == frozenset({"source-b"})
 
 
-@pytest.mark.parametrize("require_entailment", [False, True], ids=["ordinary", "strict"])
+@pytest.mark.parametrize(
+    "require_entailment", [False, True], ids=["ordinary", "strict"]
+)
 @pytest.mark.parametrize("invalid_label", [None, "", "entails", "typo", [], {}])
 def test_core_rejects_invalid_runtime_stance_labels(
     require_entailment: bool, invalid_label: object
@@ -73,4 +77,24 @@ def test_core_corroboration_imports_standard_library_only():
             imports.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.append(node.module)
-    assert imports == ["__future__", "re", "collections.abc", "dataclasses", "typing"]
+    assert imports == [
+        "__future__",
+        "re",
+        "collections.abc",
+        "dataclasses",
+        "typing",
+        "source_identity",
+    ]
+
+
+def test_source_identity_module_has_no_runtime_or_application_dependencies():
+    tree = ast.parse(
+        SOURCE_IDENTITY_FILE.read_text(encoding="utf-8"),
+        filename=str(SOURCE_IDENTITY_FILE),
+    )
+    imports = [
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    ]
+    assert imports == ["__future__"]

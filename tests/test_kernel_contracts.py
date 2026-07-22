@@ -49,7 +49,7 @@ def test_contracts_are_frozen_slotted_values():
     request = KernelInput((claim,), 100.0, "BTC", "outlook")
     result = KernelOutput(0.7, 0.6, False, "偏多", ("supported",), 1, 1)
 
-    assert KERNEL_CONTRACT_VERSION == "2.1.0"
+    assert KERNEL_CONTRACT_VERSION == "2.2.0"
     assert request.contract_version == KERNEL_CONTRACT_VERSION
     assert result.contract_version == KERNEL_CONTRACT_VERSION
     with pytest.raises(dataclasses.FrozenInstanceError):
