@@ -412,9 +412,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
 
 def _write_modelhub_error_current(
-    out_dir: Path, coin: str, log, result: dict, *, reason: str
+    out_dir: Path, coin: str, log, result: dict, *, reason: str, out_dir_fd: int | None = None
 ) -> bool:
-    from .modelhub_submit import write_current_manifest
+    from .modelhub_submit import _write_current_manifest_at, write_current_manifest
 
     current = {
         "schema_version": 1, "coin": coin, "status": "error", "run_id": log.run_id,
@@ -425,11 +425,16 @@ def _write_modelhub_error_current(
         for key in ("dataset_sha256", "artifact_sha256"):
             if key in proposal:
                 current[key] = proposal[key]
-    for key in ("dataset_sha256", "artifact_sha256"):
+    for key in (
+        "dataset_sha256", "artifact_sha256", "execution_log_file", "execution_log_sha256"
+    ):
         if isinstance(result, dict) and key in result:
             current[key] = result[key]
     try:
-        write_current_manifest(out_dir, coin, current)
+        if out_dir_fd is None:
+            write_current_manifest(out_dir, coin, current)
+        else:
+            _write_current_manifest_at(out_dir_fd, coin, current)
         return True
     except (OSError, TypeError, ValueError):
         return False
@@ -487,7 +492,8 @@ def _valid_modelhub_execution_reference(out_dir: Path, result: dict) -> bool:
 
 def cmd_modelhub_train(args: argparse.Namespace) -> int:
     """Run isolated ModelHub calibrator proposal flows and print JSON summaries."""
-    from .modelhub_submit import persist_execution_log, submit_calibrator_training
+    from .modelhub_submit import _persist_execution_log_at, submit_calibrator_training
+    from .safe_fs import pinned_directory
     from .execlog import ExecutionLog
 
     coins = list(COIN_POOL) if args.all else [args.coin]
@@ -524,9 +530,9 @@ def cmd_modelhub_train(args: argparse.Namespace) -> int:
         except Exception as exc:
             invalid_result = True
             log.record(
-                "modelhub.training.terminal",
+                "modelhub.training.error",
                 {
-                    "coin": coin, "stage": "terminal", "status": "error",
+                    "coin": coin, "stage": "exception", "status": "error",
                     "exception_type": type(exc).__name__,
                 },
                 "Unexpected ModelHub orchestration error",
@@ -541,6 +547,10 @@ def cmd_modelhub_train(args: argparse.Namespace) -> int:
             or not _valid_modelhub_execution_reference(Path(args.out_dir), result)
         ):
             invalid_result = True
+            for event in log.events:
+                params = event.get("params", {})
+                if event.get("tool") == "modelhub.training.terminal" and params.get("stage") == "terminal":
+                    event["tool"] = "modelhub.training.rejected_terminal"
             log.record(
                 "modelhub.training.terminal",
                 {
@@ -553,7 +563,17 @@ def cmd_modelhub_train(args: argparse.Namespace) -> int:
         result["run_id"] = log.run_id
         if invalid_result:
             try:
-                log_file, log_sha = persist_execution_log(Path(args.out_dir), log)
+                with pinned_directory(Path(args.out_dir), create=True) as recovery_fd:
+                    log_file, log_sha = _persist_execution_log_at(recovery_fd, log, failure=True)
+                    if not args.dry_run:
+                        recovery_result = {
+                            **result, "execution_log_file": log_file,
+                            "execution_log_sha256": log_sha,
+                        }
+                        recovery_manifest_updated = _write_modelhub_error_current(
+                            Path(args.out_dir), coin, log, recovery_result,
+                            reason="unexpected_or_invalid_result", out_dir_fd=recovery_fd,
+                        )
                 log_persisted = True
             except (OSError, TypeError, ValueError):
                 log_persisted = False
@@ -565,12 +585,13 @@ def cmd_modelhub_train(args: argparse.Namespace) -> int:
                 "reason": "log_persistence_failed", "manifest_updated": False,
             }
         elif invalid_result and not args.dry_run:
-            manifest_updated = _write_modelhub_error_current(
-                Path(args.out_dir), coin, log, result, reason="unexpected_or_invalid_result"
-            )
+            recovery_result = {
+                **result, "execution_log_file": log_file, "execution_log_sha256": log_sha,
+            }
             result = {
                 "status": "error", "coin": coin, "run_id": log.run_id,
-                "reason": "unexpected_or_invalid_result", "manifest_updated": manifest_updated,
+                "reason": "unexpected_or_invalid_result",
+                "manifest_updated": recovery_manifest_updated,
                 "execution_log_file": log_file, "execution_log_sha256": log_sha,
             }
         elif invalid_result:

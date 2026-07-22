@@ -146,6 +146,17 @@ def test_opaque_token_limit_applies_to_final_prefixed_identifier(tmp_path, raw_l
     assert result["status"] == expected
 
 
+@pytest.mark.parametrize("control", ["\u0085", "\u009f"])
+def test_opaque_tokens_reject_all_unicode_cc_controls(tmp_path, control):
+    rows = write_rows(tmp_path)
+    built = []
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: built.append(1),
+        opaque_id_factory=lambda: f"opaque{control}token", out_dir=tmp_path / "out",
+    )
+    assert result["status"] == "error" and built == []
+
+
 def test_injected_opaque_tokens_do_not_depend_on_holdout_labels_or_features(tmp_path):
     rows = write_rows(tmp_path)
     first_client = FakeClient(rows)
@@ -356,7 +367,7 @@ def test_candidate_current_failure_returns_error_and_preserves_history(tmp_path,
     def fail_current(out_dir, coin, value):
         raise OSError("disk full")
 
-    monkeypatch.setattr("trustforge.modelhub_submit.write_current_manifest", fail_current)
+    monkeypatch.setattr("trustforge.modelhub_submit._write_current_manifest_at", fail_current)
     result = submit_calibrator_training(
         "BTC", training_dir=tmp_path, req_no="REQ-2", client_factory=lambda: FakeClient(rows),
         out_dir=out,
@@ -400,6 +411,61 @@ def test_symlinked_output_directory_rejects_proposal_log_and_current(tmp_path):
     assert list(target.iterdir()) == []
 
 
+def test_candidate_transaction_stays_on_one_pinned_output_inode(tmp_path, monkeypatch):
+    rows = write_rows(tmp_path / "training")
+    output = tmp_path / "output"
+    moved = tmp_path / "pinned-output"
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    real_write = __import__("trustforge.modelhub_submit", fromlist=["write_atomic_at"]).write_atomic_at
+    swapped = False
+
+    def swap_after_pin(parent_fd, name, encoded, *, immutable):
+        nonlocal swapped
+        if not swapped:
+            __import__("os").rename(output, moved)
+            __import__("os").symlink(attacker, output, target_is_directory=True)
+            swapped = True
+        return real_write(parent_fd, name, encoded, immutable=immutable)
+
+    monkeypatch.setattr("trustforge.modelhub_submit.write_atomic_at", swap_after_pin)
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path / "training", req_no="REQ",
+        client_factory=lambda: FakeClient(rows), out_dir=output,
+    )
+    assert result["status"] == "candidate" and swapped
+    current = json.loads((moved / "BTC.json").read_text())
+    assert (moved / current["proposal_file"]).is_file()
+    log = moved / current["execution_log_file"]
+    assert hashlib.sha256(log.read_bytes()).hexdigest() == current["execution_log_sha256"]
+    assert list(attacker.iterdir()) == []
+
+
+def test_blocked_transaction_log_and_current_share_pinned_output_inode(tmp_path, monkeypatch):
+    write_rows(tmp_path / "training", count=99)
+    output = tmp_path / "output"
+    moved = tmp_path / "pinned-output"
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    real_write = __import__("trustforge.modelhub_submit", fromlist=["write_atomic_at"]).write_atomic_at
+    swapped = False
+
+    def swap_after_pin(parent_fd, name, encoded, *, immutable):
+        nonlocal swapped
+        if not swapped:
+            __import__("os").rename(output, moved)
+            __import__("os").symlink(attacker, output, target_is_directory=True)
+            swapped = True
+        return real_write(parent_fd, name, encoded, immutable=immutable)
+
+    monkeypatch.setattr("trustforge.modelhub_submit.write_atomic_at", swap_after_pin)
+    result = submit_calibrator_training("BTC", training_dir=tmp_path / "training", out_dir=output)
+    assert result["status"] == "blocked"
+    current = json.loads((moved / "BTC.json").read_text())
+    assert (moved / current["execution_log_file"]).is_file()
+    assert list(attacker.iterdir()) == []
+
+
 def test_dry_run_log_rejects_symlinked_output_directory(tmp_path):
     write_rows(tmp_path / "training")
     target = tmp_path / "external"
@@ -429,7 +495,7 @@ def test_failure_current_replace_error_is_reported_not_silenced(tmp_path, monkey
     rows = write_rows(tmp_path)
     client = FakeClient(rows, confidence=0.5)
     monkeypatch.setattr(
-        "trustforge.modelhub_submit.write_current_manifest",
+        "trustforge.modelhub_submit._write_current_manifest_at",
         lambda out_dir, coin, value: (_ for _ in ()).throw(OSError("replace failed")),
     )
     result = submit_calibrator_training(

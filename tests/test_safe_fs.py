@@ -90,3 +90,41 @@ def test_current_directory_fsync_failure_restores_previous_target(tmp_path, monk
     with pytest.raises(OSError, match="directory fsync"):
         write_atomic(target, b"new", immutable=False)
     assert target.read_bytes() == b"old"
+
+
+def test_rollback_is_directory_fsynced_after_first_fsync_failure(tmp_path, monkeypatch):
+    target = tmp_path / "current.json"
+    target.write_bytes(b"old")
+    real_fsync = os.fsync
+    directory_calls = 0
+
+    def fail_first_directory(descriptor):
+        nonlocal directory_calls
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_calls += 1
+            if directory_calls == 1:
+                raise OSError("publication fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_first_directory)
+    with pytest.raises(OSError, match="publication fsync"):
+        write_atomic(target, b"new", immutable=False)
+    assert directory_calls == 2
+    assert target.read_bytes() == b"old"
+
+
+def test_persistent_directory_fsync_failure_is_explicit(tmp_path, monkeypatch):
+    target = tmp_path / "current.json"
+    target.write_bytes(b"old")
+
+    real_fsync = os.fsync
+
+    def fail_directory(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("persistent fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_directory)
+    with pytest.raises(OSError, match="publication and rollback directory fsync failed"):
+        write_atomic(target, b"new", immutable=False)
+    assert target.read_bytes() == b"old"

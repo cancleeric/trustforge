@@ -62,6 +62,35 @@ def test_execution_reference_rejects_duplicate_contradictory_terminal(tmp_path):
     assert cli._valid_modelhub_execution_reference(tmp_path, result) is False
 
 
+def test_cli_recovery_reclassifies_prior_terminal_and_writes_one_final_terminal(
+    monkeypatch, capsys, tmp_path
+):
+    def malformed_after_terminal(coin, **kwargs):
+        log = kwargs["execution_log"]
+        log.record(
+            "modelhub.training.terminal",
+            {"coin": coin, "stage": "terminal", "status": "candidate"},
+            "untrusted terminal",
+        )
+        return {"coin": coin, "status": "candidate", "run_id": log.run_id}
+
+    monkeypatch.setattr(
+        "trustforge.modelhub_submit.submit_calibrator_training", malformed_after_terminal
+    )
+    assert cli.main([
+        "modelhub-train", "--coin", "BTC", "--req-no", "REQ", "--out-dir", str(tmp_path)
+    ]) == 1
+    result = json.loads(capsys.readouterr().out)
+    events = [
+        json.loads(line)
+        for line in (tmp_path / result["execution_log_file"]).read_text().splitlines()
+    ]
+    terminals = [event for event in events if event["tool"] == "modelhub.training.terminal"]
+    assert len(terminals) == 1 and terminals[0] is events[-1]
+    assert terminals[0]["params"]["status"] == "error"
+    assert any(event["tool"] == "modelhub.training.rejected_terminal" for event in events)
+
+
 def test_cli_requires_exactly_one_coin_target():
     with pytest.raises(SystemExit):
         cli.main(["modelhub-train", "--dry-run"])
@@ -166,8 +195,8 @@ def test_log_persistence_failure_is_coin_error_and_all_continues(monkeypatch, ca
 
     monkeypatch.setattr("trustforge.modelhub_submit.submit_calibrator_training", submit)
     monkeypatch.setattr(
-        "trustforge.modelhub_submit.persist_execution_log",
-        lambda out_dir, log: (_ for _ in ()).throw(OSError("log failed")),
+        "trustforge.modelhub_submit._persist_execution_log_at",
+        lambda out_dir_fd, log, **kwargs: (_ for _ in ()).throw(OSError("log failed")),
     )
     assert cli.main([
         "modelhub-train", "--all", "--dry-run", "--out-dir", str(tmp_path)
@@ -186,8 +215,8 @@ def test_dry_run_log_failure_never_changes_existing_live_current(monkeypatch, ca
         lambda coin, **kwargs: {"coin": coin, "status": "dry_run"},
     )
     monkeypatch.setattr(
-        "trustforge.modelhub_submit.persist_execution_log",
-        lambda out_dir, log: (_ for _ in ()).throw(OSError("log failed")),
+        "trustforge.modelhub_submit._persist_execution_log_at",
+        lambda out_dir_fd, log, **kwargs: (_ for _ in ()).throw(OSError("log failed")),
     )
     assert cli.main([
         "modelhub-train", "--coin", "BTC", "--dry-run", "--out-dir", str(tmp_path)
@@ -218,3 +247,12 @@ def test_live_unexpected_or_malformed_result_replaces_stale_current(monkeypatch,
     assert manifest["reason"] == "unexpected_or_invalid_result"
     assert "proposal_file" not in manifest
     assert manifest["automatic_apply"] is False
+    assert manifest["execution_log_file"] == result["execution_log_file"]
+    assert manifest["execution_log_sha256"] == result["execution_log_sha256"]
+    log_path = tmp_path / manifest["execution_log_file"]
+    assert hashlib.sha256(log_path.read_bytes()).hexdigest() == manifest["execution_log_sha256"]
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    terminals = [event for event in events if event["tool"] == "modelhub.training.terminal"]
+    assert len(terminals) == 1
+    assert terminals[0] is events[-1]
+    assert terminals[0]["params"]["status"] == "error"

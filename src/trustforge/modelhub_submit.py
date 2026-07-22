@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import secrets
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -23,7 +24,7 @@ from .modelhub_training import (
     build_flat_training_package,
     load_flat_training_rows,
 )
-from .safe_fs import SafePathError, pinned_directory, write_atomic
+from .safe_fs import SafePathError, pinned_directory, write_atomic, write_atomic_at
 
 MIN_ECE_IMPROVEMENT = 0.02
 MAX_OUTBOUND_PAYLOAD_BYTES = 8 * 1024 * 1024
@@ -45,11 +46,6 @@ def ensure_safe_directory(path: Path) -> Path:
 
 def _safe_run_id(run_id: str) -> str:
     return run_id if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id) else hashlib.sha256(run_id.encode()).hexdigest()
-
-
-def _fsync_directory(path: Path) -> None:
-    with pinned_directory(path) as descriptor:
-        os.fsync(descriptor)
 
 
 def _candidate_predictions(result: dict[str, Any], holdout: list[dict[str, Any]]) -> list[float]:
@@ -83,11 +79,11 @@ def write_current_manifest(out_dir: Path, coin: str, value: dict[str, Any]) -> N
     _atomic_json(Path(out_dir) / f"{coin}.json", value)
 
 
-def _immutable_json(path: Path, value: dict[str, Any]) -> None:
+def _write_current_manifest_at(out_dir_fd: int, coin: str, value: dict[str, Any]) -> None:
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
-    _immutable_bytes(path, encoded)
+    write_atomic_at(out_dir_fd, f"{coin}.json", encoded, immutable=False)
 
 
 def _immutable_bytes(path: Path, encoded: bytes) -> None:
@@ -102,10 +98,11 @@ def persist_execution_log(out_dir: Path, log: ExecutionLog) -> tuple[str, str]:
     return filename, hashlib.sha256(encoded).hexdigest()
 
 
-def _persist_failure_execution_log(out_dir: Path, log: ExecutionLog) -> tuple[str, str]:
+def _persist_execution_log_at(out_dir_fd: int, log: ExecutionLog, *, failure: bool = False) -> tuple[str, str]:
     encoded = log.to_jsonl().encode("utf-8")
-    filename = f"execution-{_safe_run_id(log.run_id)}-error.jsonl"
-    _immutable_bytes(Path(out_dir) / filename, encoded)
+    suffix = "-error" if failure else ""
+    filename = f"execution-{_safe_run_id(log.run_id)}{suffix}.jsonl"
+    write_atomic_at(out_dir_fd, filename, encoded, immutable=True)
     return filename, hashlib.sha256(encoded).hexdigest()
 
 
@@ -130,7 +127,38 @@ def submit_calibrator_training(
     execution_log: ExecutionLog | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     opaque_id_factory: Callable[[], str] = secrets.token_urlsafe,
-    execution_log_writer: Callable[[Path, ExecutionLog], tuple[str, str]] = persist_execution_log,
+    execution_log_writer: Callable[[int, ExecutionLog], tuple[str, str]] = _persist_execution_log_at,
+) -> dict[str, Any]:
+    try:
+        with pinned_directory(Path(out_dir), create=True) as out_dir_fd:
+            return _submit_calibrator_training(
+                coin, training_dir=training_dir, out_dir=out_dir, req_no=req_no, dry_run=dry_run,
+                client_factory=client_factory, execution_log=execution_log, now=now,
+                opaque_id_factory=opaque_id_factory, execution_log_writer=execution_log_writer,
+                out_dir_fd=out_dir_fd,
+            )
+    except SafePathError:
+        normalized_coin = coin.upper() if isinstance(coin, str) and re.fullmatch(r"[A-Za-z0-9]{2,10}", coin) else ""
+        log = execution_log or ExecutionLog()
+        return _summary(
+            "error", normalized_coin, run_id=log.run_id, manifest_updated=False,
+            reason="log_persistence_failed",
+        )
+
+
+def _submit_calibrator_training(
+    coin: str,
+    *,
+    training_dir: Path,
+    out_dir: Path,
+    req_no: str | None,
+    dry_run: bool,
+    client_factory: Callable[[], ModelHubClient],
+    execution_log: ExecutionLog | None,
+    now: Callable[[], datetime],
+    opaque_id_factory: Callable[[], str],
+    execution_log_writer: Callable[[int, ExecutionLog], tuple[str, str]],
+    out_dir_fd: int,
 ) -> dict[str, Any]:
     """Load, gate, submit, independently score, and atomically propose one coin."""
     log = execution_log or ExecutionLog()
@@ -151,7 +179,7 @@ def submit_calibrator_training(
     def finish(status: str, *, persist_current: bool = True, **values: Any) -> dict[str, Any]:
         record("terminal", status=status)
         try:
-            log_file, log_sha = execution_log_writer(Path(out_dir), log)
+            log_file, log_sha = execution_log_writer(out_dir_fd, log)
         except (OSError, TypeError, ValueError):
             return _summary(
                 "error", normalized_coin, run_id=log.run_id, manifest_updated=False,
@@ -177,7 +205,7 @@ def submit_calibrator_training(
                 if key in result:
                     current[key] = result[key]
             try:
-                write_current_manifest(Path(out_dir), normalized_coin, current)
+                _write_current_manifest_at(out_dir_fd, normalized_coin, current)
                 result["manifest_updated"] = True
             except (OSError, TypeError, ValueError):
                 _replace_terminal(log, "error", record)
@@ -186,7 +214,7 @@ def submit_calibrator_training(
                     reason="manifest_update_failed",
                 )
                 try:
-                    failure_file, failure_sha = _persist_failure_execution_log(Path(out_dir), log)
+                    failure_file, failure_sha = _persist_execution_log_at(out_dir_fd, log, failure=True)
                     failure.update(execution_log_file=failure_file, execution_log_sha256=failure_sha)
                 except (OSError, TypeError, ValueError):
                     failure["reason"] = "log_persistence_failed"
@@ -227,7 +255,7 @@ def submit_calibrator_training(
                 isinstance(candidate, str)
                 and candidate
                 and len(prefixed_candidate) <= 256
-                and not any(ord(character) < 32 or ord(character) == 127 for character in prefixed_candidate)
+                and not any(unicodedata.category(character) == "Cc" for character in prefixed_candidate)
                 and candidate not in reserved_ids
                 and prefixed_candidate not in reserved_ids
                 and prefixed_candidate not in opaque_ids
@@ -346,9 +374,12 @@ def submit_calibrator_training(
     if log.remaining() <= 0:
         return finish("timeout", req_no=selected_req_no)
     try:
-        _immutable_json(Path(out_dir) / proposal_name, proposal)
+        proposal_encoded = json.dumps(
+            proposal, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        write_atomic_at(out_dir_fd, proposal_name, proposal_encoded, immutable=True)
         record("terminal", status="candidate")
-        log_file, log_sha = execution_log_writer(Path(out_dir), log)
+        log_file, log_sha = execution_log_writer(out_dir_fd, log)
         current = {
             "schema_version": 1, "coin": normalized_coin, "status": "candidate", "run_id": log.run_id,
             "req_no": selected_req_no,
@@ -358,7 +389,7 @@ def submit_calibrator_training(
             "automatic_apply": False, "requires_human_approval": True,
             "execution_log_file": log_file, "execution_log_sha256": log_sha,
         }
-        write_current_manifest(Path(out_dir), normalized_coin, current)
+        _write_current_manifest_at(out_dir_fd, normalized_coin, current)
     except (OSError, TypeError, ValueError):
         if not (log_file and log_sha):
             return finish("error", persist_current=False, reason="candidate_publication_failed", manifest_updated=False)
@@ -370,7 +401,7 @@ def submit_calibrator_training(
         )
         if log_file and log_sha:
             try:
-                failure_file, failure_sha = _persist_failure_execution_log(Path(out_dir), log)
+                failure_file, failure_sha = _persist_execution_log_at(out_dir_fd, log, failure=True)
                 failure.update(execution_log_file=failure_file, execution_log_sha256=failure_sha)
             except (OSError, TypeError, ValueError):
                 failure["reason"] = "log_persistence_failed"
