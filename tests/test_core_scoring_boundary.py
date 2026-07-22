@@ -76,10 +76,13 @@ def test_fixed_calibration_interpolation_matches_legacy(monkeypatch):
 
 def test_core_scoring_imports_standard_library_only():
     tree = ast.parse(CORE_FILE.read_text(encoding="utf-8"), filename=str(CORE_FILE))
-    imports = []
+    absolute_imports = []
+    relative_imports = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imports.extend(alias.name for alias in node.names)
+            absolute_imports.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.append(node.module)
-    assert imports == ["__future__", "math", "collections.abc"]
+            target = relative_imports if node.level else absolute_imports
+            target.append(node.module)
+    assert absolute_imports == ["__future__", "math", "re", "collections.abc"]
+    assert relative_imports == ["contracts"]

@@ -24,6 +24,11 @@ import time as _time_mod
 from dataclasses import dataclass, field
 from typing import Callable
 
+from trustforge_core.contracts import (
+    KernelClaim as _CoreKernelClaim,
+    KernelDocument as _CoreKernelDocument,
+    KernelReputationTrace as _CoreKernelReputationTrace,
+)
 from trustforge_core.corroboration import (
     CorroborationClaim as _CoreCorroborationClaim,
     DOMAIN_STOP,
@@ -32,9 +37,17 @@ from trustforge_core.corroboration import (
     directional_word_polarities as _core_directional_word_polarities,
 )
 from trustforge_core.scoring import (
+    DEFAULT_HALF_LIVES as _CORE_DEFAULT_HALF_LIVES,
+    DEFAULT_SCORE_WEIGHTS as _CORE_DEFAULT_SCORE_WEIGHTS,
+    DEFAULT_SOURCE_REPUTATIONS as _CORE_DEFAULT_SOURCE_REPUTATIONS,
+    corroboration_score as _core_corroboration_score,
     interpolate_calibration as _interpolate_calibration,
+    manipulation_flags as _core_manipulation_flags,
+    manipulation_hits as _core_manipulation_hits,
+    manipulation_penalty as _core_manipulation_penalty,
     recency_decay as _core_recency_decay,
     reputation_floor as _core_reputation_floor,
+    score_claim as _core_score_claim,
     source_reputation as _core_source_reputation,
     stable_sigmoid as _core_stable_sigmoid,
 )
@@ -69,34 +82,10 @@ STANCE_TIME_RESERVE_SEC = (
 
 
 # --- 權重（可調）---------------------------------------------------------
-DEFAULT_WEIGHTS = {
-    "src": 0.50,    # 來源信譽（客觀來源即使無佐證也應有基本信任）
-    "corr": 0.25,   # 交叉佐證（獨立來源越多越加分）
-    "rec": 0.15,    # 時效
-    "manip": 0.40,  # 操縱懲罰（扣分項，足以把喊單壓到 0）
-}
+DEFAULT_WEIGHTS = dict(_CORE_DEFAULT_SCORE_WEIGHTS)
 
 # 來源類型基礎信譽（0–1）。客觀數據（價格/鏈上）最高，匿名社群最低。
-KIND_REPUTATION = {
-    "price": 0.95,     # 官方提供 OHLCV，客觀事實
-    "onchain": 0.95,
-    "regulatory": 0.90,
-    "hoyabit": 0.85,   # 交易所一手行情數據
-    "news": 0.65,
-    "social": 0.35,
-    # CoinGecko（W-coingecko，CEO 審核 gray 計劃）：現價客觀事實，但為
-    # 第三方彙整（非交易所一手數據），信譽略低於 hoyabit/onchain；情緒投票
-    # 與 GitHub 開發活動皆為輔助訊號，信譽落在 news 與 social 之間。
-    "price_live": 0.90,
-    "sentiment": 0.50,
-    "dev_activity": 0.50,
-    # 鯨魚/名人交易信號（celebrity-whale-trades spec）：
-    # - whale_onchain：鏈上可驗證的大額轉帳，客觀事實但非一手交易所數據
-    # - celebrity_trade：已標記錢包/名人公開交易，意見型需佐證（未驗證者
-    #   在 _source_reputation 中動態降級至 social 等級 0.35）
-    "whale_onchain": 0.88,
-    "celebrity_trade": 0.50,
-}
+KIND_REPUTATION = dict(_CORE_DEFAULT_SOURCE_REPUTATIONS)
 
 
 def _reputation_floor(kind: str) -> float:
@@ -111,19 +100,15 @@ def _reputation_floor(kind: str) -> float:
 
 # 各 kind 的 recency 半衰期（小時）。鯨魚/名人交易信號時效性極強（市場秒級反應），
 # 使用 2 小時半衰期；一般來源沿用預設 12 小時（不列入此 map，走 _recency_decay 預設）。
+_DEFAULT_HALF_LIFE_HOURS = dict(_CORE_DEFAULT_HALF_LIVES)["default"]
 KIND_HALFLIFE_HOURS: dict[str, float] = {
-    "whale_onchain": 2.0,       # 鯨魚鏈上轉帳：市場反應極快
-    "celebrity_trade": 2.0,     # 名人交易宣告：時效同鯨魚
+    kind: hours for kind, hours in _CORE_DEFAULT_HALF_LIVES if kind != "default"
 }
 
 # 操縱訊號關鍵詞（啟發式；正式版可換 Bedrock 分類器）。
 # ⚠️ 誠實聲明（issue #177-A）：這是**關鍵詞層級表面比對**，非行為/統計/協同
 # 操縱偵測；只要換詞（如把「暴漲」改成「大漲」）即可繞過。僅作「可疑用語標記」
 # 併入有限信任扣分（components["manipulation"]），**不代表「已判定操縱」**。
-_MANIP_PATTERNS = [
-    r"to the moon", r"暴漲", r"翻倍", r"\bshill\b", r"喊單", r"穩賺",
-    r"financial advice", r"\bpump\b", r"快上車", r"百倍",
-]
 
 
 @dataclass
@@ -157,6 +142,75 @@ class ScoredClaim:
     # **不併入 `components["manipulation"]`**，純粹供人工判讀。CEO 定案：文字
     # 相似度單獨無法證明協同操縱，自動扣分必然誤傷合法聯播/引用。預設空 list。
     info_flags: list[str] = field(default_factory=list)
+
+
+def _to_core_scoring_claim(claim: Claim) -> _CoreKernelClaim:
+    """Detach one mutable app claim; nonfinite time becomes unknown only in core."""
+    document = claim.doc
+    raw_timestamp = document.ts
+    if type(raw_timestamp) not in {int, float}:
+        raise ValueError("document timestamp must be an exact number")
+    try:
+        timestamp = float(raw_timestamp)
+    except OverflowError as exc:
+        raise ValueError("document timestamp is outside the finite float range") from exc
+    if not math.isfinite(timestamp):
+        timestamp = 0.0
+    # Only fields consumed by per-claim scoring cross this private boundary.
+    # Unrelated app metadata may contain arbitrary objects; never stringify,
+    # compare, sort, or otherwise execute hooks on those values/keys.
+    metadata: tuple[tuple[str, object], ...] = ()
+    if type(document.meta) is dict:
+        selected: list[tuple[str, object]] = []
+        for key, value in document.meta.items():
+            if type(key) is str and key in {"reputation", "verified_onchain"}:
+                selected.append((key, value))
+        metadata = tuple(selected)
+    return _CoreKernelClaim(
+        id=claim.id,
+        text=claim.text,
+        claim_type=claim.claim_type,
+        direction=claim.direction,
+        document=_CoreKernelDocument(
+            id=document.id,
+            kind=document.kind,
+            source=document.source,
+            text=document.text,
+            timestamp=timestamp,
+            url=document.url,
+            metadata=metadata,
+        ),
+    )
+
+
+def _to_core_reputation_trace(
+    trace: dict | None,
+) -> _CoreKernelReputationTrace | None:
+    if trace is None:
+        return None
+    return _CoreKernelReputationTrace(
+        source=trace["source"],
+        prior=trace["prior"],
+        final=trace["final"],
+        agree_n=trace["agree_n"],
+        contradict_n=trace["contradict_n"],
+        iterations_run=trace["iterations_run"],
+        mode=trace.get("mode", "entailment"),
+    )
+
+
+def _legacy_trace(trace: _CoreKernelReputationTrace | None) -> dict | None:
+    if trace is None:
+        return None
+    return {
+        "source": trace.source,
+        "prior": trace.prior,
+        "final": trace.final,
+        "agree_n": trace.agree_n,
+        "contradict_n": trace.contradict_n,
+        "iterations_run": trace.iterations_run,
+        "mode": trace.mode,
+    }
 
 
 @dataclass
@@ -281,7 +335,7 @@ def _recency_decay(c: Claim, now: float, half_life_h: float | None = None) -> fl
     保持一致）。
     """
     if half_life_h is None:
-        half_life_h = KIND_HALFLIFE_HOURS.get(c.doc.kind, 12.0)
+        half_life_h = KIND_HALFLIFE_HOURS.get(c.doc.kind, _DEFAULT_HALF_LIFE_HOURS)
     return _core_recency_decay(
         timestamp=c.doc.ts,
         now=now,
@@ -355,33 +409,13 @@ def _manip_hits(text: str) -> list[str]:
     命中原文字串，依出現順序、未去重。`_manipulation_penalty`／`_manipulation_flags`
     共用此清單，確保兩者對「命中什麼」的認定逐字一致，只是用途不同（前者算分數，
     後者回原文供 UI 回溯）。"""
-    hits: list[str] = []
-    for p in _MANIP_PATTERNS:
-        for m in re.finditer(p, text, re.IGNORECASE):
-            if _NEG_RX.search(text[max(0, m.start() - 4):m.start()]):
-                continue
-            hits.append(m.group(0))
-    return hits
+    return list(_core_manipulation_hits(text))
 
 
 def _manipulation_penalty(c: Claim, extra_hits: int = 0) -> float:
     # ⚠️ 誠實聲明（issue #177-A）：關鍵詞層級啟發式；非行為/統計操縱偵測。
     # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
-    hits = _manip_hits(c.text)
-    # 社群來源的操縱訊號加重
-    weight = 1.5 if c.doc.kind == "social" else 1.0
-    # `extra_hits`：預留給「確定判定為操縱、需要真正扣分」的額外命中數量，
-    # 併入同一套關鍵詞計分公式（沿用既有 0.4/hit、social 加重 1.5 倍），不新增
-    # 權重項、不動 `raw = ... - w["manip"] * manip` 既有公式結構。預設 0。
-    #
-    # CEO 定案（codex 對抗審確認根本限制）：W3 模板相似指標
-    # （`_coordination_template_flags`）**不再**餵入這裡——文字相似度單獨無法
-    # 區分「協同操縱」vs「合法聯播/引用」，自動扣分必然誤傷合法聯播；改為
-    # informational-only（見 `_coordination_signals` docstring），只產生
-    # `ScoredClaim.info_flags`，不影響這個函式的分數。目前 `score()` 呼叫本
-    # 函式一律不傳 `extra_hits`（沿用預設 0），此參數保留供未來若有「確定性
-    # 且經證實有效」的扣分型協同指標時使用。
-    return min(1.0, (len(hits) + extra_hits) * 0.4 * weight)
+    return _core_manipulation_penalty(c.text, c.doc.kind, extra_hits=extra_hits)
 
 
 def _manipulation_flags(c: Claim) -> list[str]:
@@ -392,11 +426,7 @@ def _manipulation_flags(c: Claim) -> list[str]:
     計算，不動 `_manipulation_penalty` 既有 float 簽名與既有測試鎖定的分數
     行為（兩者底層共用 `_manip_hits`，命中判定邏輯不會分岔）。
     """
-    seen: list[str] = []
-    for h in _manip_hits(c.text):
-        if h not in seen:
-            seen.append(h)
-    return seen
+    return list(_core_manipulation_flags(c.text))
 
 
 def _normalize(s: str) -> set[str]:
@@ -964,8 +994,7 @@ def _corroboration(
         target, all_claims, stance_fn=stance_fn
     )
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
-    n = len(independent_sources)
-    return 1.0 - math.pow(0.5, n) if n else 0.0
+    return _core_corroboration_score(tuple(sorted(independent_sources)))
 
 
 # --- W2：truth-discovery 動態來源信譽 -------------------------------------
@@ -1501,27 +1530,45 @@ def score(
 
     out: list[ScoredClaim] = []
     for c in claims:
-        rep = _source_reputation(c, dynamic_map=dynamic_map)
-        corr = _corroboration(c, claims, stance_fn=stance_fn)
-        rec = _recency_decay(c, now)
+        independent_sources, _contradicting_sources = _corroboration_detail(
+            c, claims, stance_fn=stance_fn
+        )
         c_info_flags = info_flags_by_id.get(c.id, [])
-        manip = _manipulation_penalty(c)
-        raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
-        trust = max(0.0, min(1.0, raw))
+        trace = (
+            trace_by_source.get(_canonical_source(c.doc.source))
+            if trace_by_source is not None
+            else None
+        )
+        resolved_dynamic = (
+            dynamic_map.get(_canonical_source(c.doc.source))
+            if dynamic_map is not None
+            else None
+        )
+        core_scored = _core_score_claim(
+            _to_core_scoring_claim(c),
+            now=now,
+            weights=tuple((key, w[key]) for key in ("src", "corr", "rec", "manip")),
+            reputations=tuple(KIND_REPUTATION.items()),
+            half_lives=(
+                ("default", _DEFAULT_HALF_LIFE_HOURS),
+                *tuple(KIND_HALFLIFE_HOURS.items()),
+            ),
+            independent_sources=tuple(sorted(independent_sources)),
+            dynamic_reputation=resolved_dynamic,
+            reputation_trace=_to_core_reputation_trace(trace),
+            info_flags=tuple(c_info_flags),
+        )
         out.append(
             ScoredClaim(
                 claim=c,
-                trust=trust,
-                components={"reputation": rep, "corroboration": corr,
-                            "recency": rec, "manipulation": manip},
-                reputation_trace=(
-                    trace_by_source.get(_canonical_source(c.doc.source)) if trace_by_source is not None else None
-                ),
-                manip_flags=_manipulation_flags(c),
+                trust=core_scored.trust,
+                components=dict(core_scored.components),
+                reputation_trace=_legacy_trace(core_scored.reputation_trace),
+                manip_flags=list(core_scored.manip_flags),
                 # W3：文字相似度透明化 flag，informational-only，回填
                 # `Evidence.info_flags`（見 `_coordination_signals` docstring）。
                 # 不併入 `manip_flags`／`components["manipulation"]`。
-                info_flags=c_info_flags,
+                info_flags=list(core_scored.info_flags),
             )
         )
     # --- telemetry: record score() invocation ---
