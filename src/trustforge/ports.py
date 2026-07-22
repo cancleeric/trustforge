@@ -236,6 +236,11 @@ class BedrockLLMAdapter:
         else:
             self._client = client
 
+    @property
+    def client(self):
+        """Return the underlying Bedrock client for legacy orchestration bridges."""
+        return self._client
+
     def complete(self, system: str, prompt: str) -> str:
         return self._client.complete(system=system, prompt=prompt).text
 
@@ -307,7 +312,7 @@ class NullCacheAdapter:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _resolve_llm_from_env() -> tuple[LLMProvider, str]:
+def _resolve_llm_from_env(*, bedrock_client_factory=None) -> tuple[LLMProvider, str]:
     """根據環境變數選擇 LLM adapter。"""
     import os
 
@@ -321,6 +326,8 @@ def _resolve_llm_from_env() -> tuple[LLMProvider, str]:
             ) from exc
 
     if os.environ.get("BEDROCK_MODEL_ID"):
+        if bedrock_client_factory is not None:
+            return BedrockLLMAdapter(client=bedrock_client_factory()), "bedrock"
         return BedrockLLMAdapter(), "bedrock"
 
     return NullLLMAdapter(), "null"
@@ -344,6 +351,7 @@ def resolve_providers(
     observability: ObservabilityProvider | None = None,
     budget: BudgetProvider | None = None,
     offline: bool = False,
+    bedrock_client_factory=None,
 ) -> ProviderSet:
     """Resolve providers for a pipeline run.
 
@@ -365,7 +373,9 @@ def resolve_providers(
             invoked=False, fallback_reason="offline=True",
         ))
     else:
-        resolved_llm, adapter_name = _resolve_llm_from_env()
+        resolved_llm, adapter_name = _resolve_llm_from_env(
+            bedrock_client_factory=bedrock_client_factory
+        )
         resolutions.append(ProviderResolution(
             key="llm", configured=adapter_name, resolved=adapter_name, invoked=False,
         ))
