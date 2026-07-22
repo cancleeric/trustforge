@@ -25,6 +25,8 @@ from trustforge_core import (
     KERNEL_RESOLUTION_VERSION,
     KernelClaim,
     KernelClaimResolution,
+    KernelInput,
+    run_kernel,
 )
 
 
@@ -51,6 +53,11 @@ def _app_claim(
 ) -> Claim:
     values = {"coin": coin}
     values.update(meta or {})
+    if "ret_pct" in values and "date_range" not in values:
+        values["date_range"] = "2026-07-01~2026-07-22"
+        values["data_lineage"] = {
+            "analysis_window": "2026-07-01~2026-07-22"
+        }
     return Claim(
         claim_id,
         text,
@@ -60,6 +67,22 @@ def _app_claim(
 
 def _claim(*args, **kwargs) -> KernelClaim:
     return to_kernel_claim(_app_claim(*args, **kwargs))
+
+
+def _raw_price_fact(claim_id: str, *, meta: dict) -> KernelClaim:
+    app_claim = Claim(
+        claim_id,
+        "BTC production-shaped price fact",
+        Document(
+            claim_id,
+            "price",
+            "ohlcv-csv",
+            "BTC production-shaped price fact",
+            ts=PIT - 1,
+            meta={"coin": "BTC", **meta},
+        ),
+    )
+    return to_kernel_claim(app_claim)
 
 
 @pytest.mark.parametrize(
@@ -94,6 +117,103 @@ def test_future_timestamp_and_future_date_fail_closed():
     assert resolve_ohlcv_direction(claims, coin="BTC", pit_epoch=PIT).value == "unknown"
 
 
+def test_price_fact_window_schema_accepts_past_and_rejects_unsafe_variants():
+    past = _raw_price_fact(
+        "past",
+        meta={
+            "ret_pct": 5,
+            "date_range": "2026-07-01~2026-07-22",
+            "data_lineage": {"analysis_window": "2026-07-01~2026-07-22"},
+        },
+    )
+    future = _raw_price_fact(
+        "future",
+        meta={
+            "ret_pct": 5,
+            "date_range": "2026-07-01~2026-07-23",
+            "data_lineage": {"analysis_window": "2026-07-01~2026-07-23"},
+        },
+    )
+    malformed = _raw_price_fact(
+        "malformed",
+        meta={
+            "ret_pct": 5,
+            "date_range": "not-a-window",
+            "data_lineage": {"analysis_window": "not-a-window"},
+        },
+    )
+    missing = _raw_price_fact("missing", meta={"ret_pct": 5})
+    conflict = _raw_price_fact(
+        "conflict",
+        meta={
+            "ret_pct": 5,
+            "date_range": "2026-07-01~2026-07-22",
+            "data_lineage": {"analysis_window": "2026-07-01~2026-07-23"},
+        },
+    )
+    assert resolve_ohlcv_direction([past], coin="BTC", pit_epoch=PIT).value == "bullish"
+    for claim in (future, malformed, missing, conflict):
+        assert resolve_ohlcv_direction([claim], coin="BTC", pit_epoch=PIT).value == "unknown"
+
+
+@pytest.mark.parametrize("pit_epoch", [-1, math.nan, math.inf, 10**30])
+def test_invalid_pit_never_invokes_semantic_provider(pit_epoch):
+    calls = 0
+
+    def provider(_evidence):
+        nonlocal calls
+        calls += 1
+        return [DirectionVote("news", "bullish", 0.9, "must not run")]
+
+    with pytest.raises(ValueError, match="pit_epoch"):
+        resolve_direction(
+            [_claim("n", kind="news")],
+            coin="BTC",
+            pit_epoch=pit_epoch,
+            semantic_provider=provider,
+        )
+    assert calls == 0
+
+
+@pytest.mark.parametrize("timestamp", [PIT + 1, -1, math.nan, math.inf, "123", object()])
+def test_invalid_claim_timestamp_never_reaches_semantic_provider(timestamp):
+    claim = _claim("n", kind="news")
+    object.__setattr__(claim.document, "timestamp", timestamp)
+    calls = 0
+
+    def provider(_evidence):
+        nonlocal calls
+        calls += 1
+        return [DirectionVote("news", "bullish", 0.9, "must not run")]
+
+    result = resolve_direction(
+        [claim], coin="BTC", pit_epoch=PIT, semantic_provider=provider
+    )
+    assert calls == 0
+    assert result.value == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("text", object()), ("kind", 7), ("metadata", (("coin", object()),))],
+)
+def test_tampered_document_graph_never_reaches_semantic_provider(field, value):
+    claim = _claim("n", kind="news")
+    object.__setattr__(claim.document, field, value)
+    calls = 0
+
+    def provider(_evidence):
+        nonlocal calls
+        calls += 1
+        return [DirectionVote("news", "bullish", 0.9, "must not run")]
+
+    result = resolve_direction(
+        [claim], coin="BTC", pit_epoch=PIT, semantic_provider=provider
+    )
+    assert calls == 0
+    assert result.value == "unknown"
+
+
 def test_daily_closes_take_priority_over_return_facts():
     claims = [
         _claim("old", meta={"date": "2026-07-01", "close": 100}),
@@ -103,6 +223,38 @@ def test_daily_closes_take_priority_over_return_facts():
     result = resolve_ohlcv_direction(claims, coin="BTC", pit_epoch=PIT)
     assert (result.value, result.method) == ("bullish", "ohlcv-close")
     assert result.input_ids == ("new", "old")
+
+
+def test_same_date_duplicate_closes_do_not_form_a_return():
+    claims = [
+        _claim("a", meta={"date": "2026-07-01", "close": 100}),
+        _claim("b", meta={"date": "2026-07-01", "close": 110}),
+    ]
+    result = resolve_ohlcv_direction(claims, coin="BTC", pit_epoch=PIT)
+    assert result.value == "unknown"
+
+
+def test_conflicting_same_date_close_is_excluded_fail_closed():
+    claims = [
+        _claim("old-a", meta={"date": "2026-07-01", "close": 100}),
+        _claim("old-b", meta={"date": "2026-07-01", "close": 101}),
+        _claim("new", meta={"date": "2026-07-22", "close": 110}),
+    ]
+    result = resolve_ohlcv_direction(claims, coin="BTC", pit_epoch=PIT)
+    assert result.value == "unknown"
+
+
+def test_overflowing_close_change_and_return_mean_fail_closed():
+    closes = [
+        _claim("old", meta={"date": "2026-07-01", "close": 1e-308}),
+        _claim("new", meta={"date": "2026-07-22", "close": 1e308}),
+    ]
+    returns = [
+        _claim("a", meta={"ret_pct": 1e308}),
+        _claim("b", meta={"ret_pct": 1e308}),
+    ]
+    assert resolve_ohlcv_direction(closes, coin="BTC", pit_epoch=PIT).value == "unknown"
+    assert resolve_ohlcv_direction(returns, coin="BTC", pit_epoch=PIT).value == "unknown"
 
 
 def test_coin_scope_excludes_other_coin():
@@ -119,10 +271,17 @@ def test_coin_scope_keeps_truly_market_wide_fact_without_explicit_coin():
     app_claim = Claim(
         "market",
         "market-wide price fact",
-        Document(
-            "market", "price", "fixture", "market-wide price fact",
-            ts=PIT - 1, meta={"ret_pct": 4},
-        ),
+            Document(
+                "market", "price", "fixture", "market-wide price fact",
+                ts=PIT - 1,
+                meta={
+                    "ret_pct": 4,
+                    "date_range": "2026-07-01~2026-07-22",
+                    "data_lineage": {
+                        "analysis_window": "2026-07-01~2026-07-22"
+                    },
+                },
+            ),
     )
     result = resolve_ohlcv_direction(
         [to_kernel_claim(app_claim)], coin="BTC", pit_epoch=PIT
@@ -322,6 +481,38 @@ def test_semantic_generator_failure_during_iteration_falls_back():
     assert (result.value, result.method) == ("bearish", "ohlcv-return")
 
 
+def test_provider_vote_iterable_is_bounded_and_overflow_fails_closed():
+    produced = 0
+
+    def provider(_evidence):
+        nonlocal produced
+        for _ in range(5):
+            produced += 1
+            yield DirectionVote("news", "bullish", 0.9, "unbounded")
+
+    result = resolve_direction(
+        [_claim("n", kind="news")],
+        coin="BTC",
+        pit_epoch=PIT,
+        semantic_provider=provider,
+    )
+    assert produced == 5
+    assert result.value == "unknown"
+
+
+def test_duplicate_semantic_source_type_fails_closed():
+    result = resolve_direction(
+        [_claim("n", kind="news")],
+        coin="BTC",
+        pit_epoch=PIT,
+        semantic_provider=lambda _evidence: [
+            DirectionVote("news", "bullish", 0.8, "one"),
+            DirectionVote("news", "bullish", 0.7, "duplicate"),
+        ],
+    )
+    assert result.value == "unknown"
+
+
 def test_nonfinite_aggregate_confidence_fails_closed(monkeypatch):
     monkeypatch.setattr(
         "trustforge.direction_resolution.aggregate_votes",
@@ -377,14 +568,20 @@ def test_resolver_never_calls_scoring_kernel_io_or_connector(monkeypatch):
     assert result.value == "bullish"
 
 
-def test_direction_cannot_upgrade_an_unrelated_decision_state():
-    decision_state = "abstain"
-    result = resolve_direction(
+def test_bullish_resolution_does_not_upgrade_kernel_abstain_state():
+    direction = resolve_direction(
         [_claim("p", meta={"ret_pct": 10})], coin="BTC", pit_epoch=PIT
     )
-    assert result.value == "bullish"
-    assert decision_state == "abstain"
-    assert not hasattr(result, "decision_state")
+    claim = _claim("only", kind="news", text="BTC single-source evidence")
+    resolution = to_kernel_run_resolution(
+        [KernelClaimResolution(claim.id)], direction
+    )
+    output = run_kernel(
+        KernelInput((claim,), PIT, "BTC", "BTC outlook", resolution=resolution)
+    )
+    assert direction.value == output.direction == "bullish"
+    assert output.abstain is True
+    assert output.decision_state == "abstain"
 
 
 def test_mapper_is_lossless_and_rejects_version_or_enum_mismatch():
@@ -410,6 +607,15 @@ def test_mapper_is_lossless_and_rejects_version_or_enum_mismatch():
         to_kernel_run_resolution([KernelClaimResolution("claim")], object())
     with pytest.raises(ValueError, match="KernelClaimResolution"):
         to_kernel_run_resolution([object()], direction)
+
+
+def test_mapper_revalidates_object_setattr_tampered_direction():
+    direction = ResolvedDirection(
+        "bullish", DIRECTION_POLICY_VERSION, "no-signal", (), "valid"
+    )
+    object.__setattr__(direction, "value", "sideways")
+    with pytest.raises(ValueError, match="unsupported resolved direction"):
+        to_kernel_run_resolution([KernelClaimResolution("claim")], direction)
 
 
 def test_policy_version_and_pit_validation_fail_closed():

@@ -11,6 +11,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from itertools import islice
 
 from trustforge_core import KernelClaim, KernelDocument
 
@@ -96,8 +97,32 @@ def _validated_claims(
         raise ValueError("claim IDs must be nonempty strings")
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate claim IDs are not allowed")
+    revalidated: list[KernelClaim] = []
+    for claim in normalized:
+        document = claim.document
+        try:
+            clean_document = KernelDocument(
+                id=document.id,
+                kind=document.kind,
+                source=document.source,
+                text=document.text,
+                timestamp=document.timestamp,
+                url=document.url,
+                metadata=document.metadata,
+            )
+            revalidated.append(
+                KernelClaim(
+                    id=claim.id,
+                    text=claim.text,
+                    document=clean_document,
+                    claim_type=claim.claim_type,
+                    direction=claim.direction,
+                )
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
     return tuple(
-        claim for claim in normalized if _matches_coin(claim.document, coin)
+        claim for claim in revalidated if _matches_coin(claim.document, coin)
     )
 
 
@@ -105,6 +130,19 @@ def _metadata_value(document: KernelDocument, key: str) -> object:
     for item_key, value in document.metadata:
         if item_key == key:
             return value
+    return None
+
+
+def _metadata_contains(document: KernelDocument, key: str) -> bool:
+    return any(item_key == key for item_key, _ in document.metadata)
+
+
+def _nested_value(value: object, key: str) -> object:
+    if type(value) is not tuple:
+        return None
+    for item in value:
+        if type(item) is tuple and len(item) == 2 and item[0] == key:
+            return item[1]
     return None
 
 
@@ -148,11 +186,65 @@ def _pit_date(pit_epoch: float) -> date:
     if type(pit_epoch) not in {int, float} or type(pit_epoch) is bool:
         raise ValueError("pit_epoch must be a finite number")
     try:
-        if not math.isfinite(pit_epoch):
+        if not math.isfinite(pit_epoch) or pit_epoch < 0:
             raise ValueError("pit_epoch must be a finite number")
         return datetime.fromtimestamp(float(pit_epoch), timezone.utc).date()
     except (OverflowError, OSError) as exc:
         raise ValueError("pit_epoch must be a valid Unix timestamp") from exc
+
+
+def _parse_window(value: object, *, pit_day: date) -> tuple[date, date] | None:
+    if type(value) is not str or value.count("~") != 1:
+        return None
+    raw_start, raw_end = value.split("~")
+    try:
+        start = date.fromisoformat(raw_start)
+        end = date.fromisoformat(raw_end)
+    except ValueError:
+        return None
+    if start > end or end > pit_day:
+        return None
+    return start, end
+
+
+def _price_fact_window_is_valid(document: KernelDocument, *, pit_day: date) -> bool:
+    date_range = _metadata_value(document, "date_range")
+    lineage = _metadata_value(document, "data_lineage")
+    analysis_window = _nested_value(lineage, "analysis_window")
+    parsed_range = _parse_window(date_range, pit_day=pit_day)
+    parsed_lineage = _parse_window(analysis_window, pit_day=pit_day)
+    return (
+        parsed_range is not None
+        and parsed_lineage is not None
+        and parsed_range == parsed_lineage
+    )
+
+
+def _claim_is_pit_valid(
+    claim: KernelClaim, *, pit_epoch: float, pit_day: date
+) -> bool:
+    raw_timestamp = claim.document.timestamp
+    if type(raw_timestamp) not in {int, float} or type(raw_timestamp) is bool:
+        return False
+    try:
+        timestamp = float(raw_timestamp)
+    except OverflowError:
+        return False
+    if not math.isfinite(timestamp) or timestamp < 0 or timestamp > pit_epoch:
+        return False
+    document = claim.document
+    raw_date = _metadata_value(document, "date")
+    if raw_date is not None:
+        if type(raw_date) is not str:
+            return False
+        try:
+            if date.fromisoformat(raw_date) > pit_day:
+                return False
+        except ValueError:
+            return False
+    if document.kind == "price" and _metadata_contains(document, "ret_pct"):
+        return _price_fact_window_is_valid(document, pit_day=pit_day)
+    return True
 
 
 def _eligible_price_claims(
@@ -165,18 +257,10 @@ def _eligible_price_claims(
         doc = claim.document
         if doc.kind != "price":
             continue
-        timestamp = _finite_number(doc.timestamp)
-        if timestamp is None or timestamp < 0 or timestamp > float(pit_epoch):
+        if not _claim_is_pit_valid(
+            claim, pit_epoch=float(pit_epoch), pit_day=pit_day
+        ):
             continue
-        raw_date = _metadata_value(doc, "date")
-        if raw_date is not None:
-            if type(raw_date) is not str:
-                continue
-            try:
-                if date.fromisoformat(raw_date) > pit_day:
-                    continue
-            except ValueError:
-                continue
         eligible.append(claim)
     return tuple(eligible)
 
@@ -205,26 +289,50 @@ def resolve_ohlcv_direction(
             continue
 
     # Objective daily closes are more precise than pre-aggregated return facts.
-    if len(points) >= 2:
-        points.sort(key=lambda item: (item[0], item[2]))
-        latest_date, latest_close, _ = points[-1]
-        base_close = points[0][1]
-        for point_date, close, _ in reversed(points[:-1]):
+    points_by_date: dict[date, list[tuple[float, str]]] = {}
+    for point_date, close, claim_id in points:
+        points_by_date.setdefault(point_date, []).append((close, claim_id))
+    daily_points: list[tuple[date, float, tuple[str, ...]]] = []
+    for point_date, observations in points_by_date.items():
+        closes = {item[0] for item in observations}
+        if len(closes) == 1:
+            daily_points.append(
+                (point_date, next(iter(closes)), tuple(sorted(item[1] for item in observations)))
+            )
+
+    if len(daily_points) >= 2:
+        daily_points.sort(key=lambda item: item[0])
+        latest_date, latest_close, _ = daily_points[-1]
+        base_close = daily_points[0][1]
+        for point_date, close, _ in reversed(daily_points[:-1]):
             if (latest_date - point_date).days >= 14:
                 base_close = close
                 break
         change = (latest_close - base_close) / base_close
+        if not math.isfinite(change):
+            return _unknown_direction()
         value = "bullish" if change > 0.03 else "bearish" if change < -0.03 else "neutral"
         return ResolvedDirection(
             value=value,
             policy_version=DIRECTION_POLICY_VERSION,
             method="ohlcv-close",
-            input_ids=tuple(sorted(item[2] for item in points)),
+            input_ids=tuple(
+                sorted(
+                    claim_id
+                    for _, _, claim_ids in daily_points
+                    for claim_id in claim_ids
+                )
+            ),
             reason=f"finite PIT-valid close return {change:.6f}",
         )
 
     if returns:
-        average = sum(item[0] for item in returns) / len(returns)
+        try:
+            average = math.fsum(item[0] for item in returns) / len(returns)
+        except OverflowError:
+            return _unknown_direction()
+        if not math.isfinite(average):
+            return _unknown_direction()
         value = "bullish" if average > 3.0 else "bearish" if average < -3.0 else "neutral"
         return ResolvedDirection(
             value=value,
@@ -234,6 +342,10 @@ def resolve_ohlcv_direction(
             reason=f"finite PIT-valid mean ret_pct {average:.6f}",
         )
 
+    return _unknown_direction()
+
+
+def _unknown_direction() -> ResolvedDirection:
     return ResolvedDirection(
         value="unknown",
         policy_version=DIRECTION_POLICY_VERSION,
@@ -256,11 +368,22 @@ def resolve_direction(
     legacy ``analyze_direction`` behavior (up to three model completions); this
     resolver neither records nor duplicates provider token/cost events.
     """
-    scoped = _validated_claims(claims, coin=coin)
+    pit_day = _pit_date(pit_epoch)
+    scoped = tuple(
+        claim
+        for claim in _validated_claims(claims, coin=coin)
+        if _claim_is_pit_valid(
+            claim, pit_epoch=float(pit_epoch), pit_day=pit_day
+        )
+    )
     evidence = semantic_evidence(scoped, coin=coin)
     if semantic_provider is not None and evidence:
         try:
-            votes = list(semantic_provider(evidence))
+            votes = list(islice(iter(semantic_provider(evidence)), 5))
+            if len(votes) > 4 or len(
+                {vote.source_type for vote in votes if type(vote) is DirectionVote}
+            ) != len(votes):
+                votes = []
             if not all(
                 type(vote) is DirectionVote
                 and vote.source_type in {"price", "news", "onchain", "sentiment"}
