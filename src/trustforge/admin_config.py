@@ -284,6 +284,43 @@ def _default_store() -> AdminConfigStore:
         return _default_store_instance
 
 
+def _is_local_admin_config_unavailable(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        error = response.get("Error")
+        if isinstance(error, dict):
+            code = str(error.get("Code", ""))
+            if code in {
+                "AccessDenied",
+                "AccessDeniedException",
+                "ExpiredTokenException",
+                "InvalidClientTokenId",
+                "NoCredentialsError",
+                "PartialCredentialsError",
+                "ResourceNotFoundException",
+                "UnrecognizedClientException",
+            }:
+                return True
+
+    name = type(exc).__name__
+    if name in {"NoCredentialsError", "PartialCredentialsError"}:
+        return True
+
+    text = str(exc)
+    return any(
+        marker in text
+        for marker in (
+            "AccessDenied",
+            "ExpiredToken",
+            "InvalidClientTokenId",
+            "NoCredentialsError",
+            "PartialCredentialsError",
+            "ResourceNotFoundException",
+            "UnrecognizedClientException",
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # live token helpers（明文絕不落庫）
 # ---------------------------------------------------------------------------
@@ -433,6 +470,9 @@ def get_config(
             ConsistentRead=consistent,
         )
     except Exception as exc:
+        if _is_local_admin_config_unavailable(exc):
+            _log.warning("[admin_config] local admin config unavailable, using empty config: %s", exc)
+            return AdminConfig()
         raise AdminConfigReadError(f"admin config 讀取失敗: {exc}") from exc
     item = resp.get("Item")
     if not isinstance(item, dict):
