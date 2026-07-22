@@ -16,6 +16,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
 PACKAGE_ROOT = SRC_ROOT / "trustforge"
 
 CORE_PREFIXES = (
+    "trustforge_core",
     "trustforge.trust",
 )
 
