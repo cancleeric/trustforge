@@ -16,15 +16,22 @@ from trustforge.ports import (
     BedrockLLMAdapter,
     BudgetProvider,
     CacheProvider,
-    FakeBudgetProvider,
-    FakeCacheProvider,
-    FakeLLMProvider,
-    FakeObservabilityProvider,
-    FakeSourceProvider,
-    LLMProvider,
-    NullCacheAdapter,
-    NullLLMAdapter,
-    ObservabilityProvider,
+FakeBudgetProvider,
+FakeCacheProvider,
+FakeLLMProvider,
+FakeModelProvider,
+FakeObservabilityProvider,
+FakeSourceProvider,
+LLMProvider,
+ModelProvider,
+ModelProviderError,
+ModelRequest,
+ModelResponse,
+ModelUsage,
+NullCacheAdapter,
+NullLLMAdapter,
+NullModelProvider,
+ObservabilityProvider,
     ProviderResolution,
     ProviderSet,
     SourceProvider,
@@ -44,6 +51,10 @@ class TestProtocolRuntimeCheckable:
     def test_llm_provider_isinstance(self):
         fake = FakeLLMProvider()
         assert isinstance(fake, LLMProvider)
+
+    def test_model_provider_isinstance(self):
+        fake = FakeModelProvider()
+        assert isinstance(fake, ModelProvider)
 
     def test_cache_provider_isinstance(self):
         fake = FakeCacheProvider()
@@ -87,6 +98,59 @@ class TestFakeLLMProvider:
         fake.classify_stance("a", "b")
         fake.complete("s2", "p2")
         assert len(fake.calls) == 3
+
+
+class TestModelProviderContract:
+    """Provider-neutral model contract (#405)."""
+
+    def test_text_completion_returns_identity_and_usage(self):
+        usage = ModelUsage(input_tokens=12, output_tokens=5, total_tokens=17, cost_usd=0.002)
+        provider = FakeModelProvider(default_text="hello", usage=usage)
+
+        response = provider.complete(ModelRequest(system="s", prompt="p", model="m1"))
+
+        assert isinstance(response, ModelResponse)
+        assert response.text == "hello"
+        assert response.model == "m1"
+        assert response.provider == "fake"
+        assert response.usage == usage
+        assert provider.calls == [ModelRequest(system="s", prompt="p", model="m1")]
+
+    def test_structured_output_is_provider_neutral(self):
+        provider = FakeModelProvider(default_structured={"answer": 42})
+
+        response = provider.complete(
+            ModelRequest(system="s", prompt="json please", response_format="json")
+        )
+
+        assert response.structured == {"answer": 42}
+        assert response.text == "fake model response"
+
+    def test_null_model_provider_is_offline_and_zero_cost(self):
+        response = NullModelProvider().complete(
+            ModelRequest(system="s", prompt="p", response_format="json")
+        )
+
+        assert response.provider == "null"
+        assert response.model == "offline/null"
+        assert response.usage == ModelUsage()
+        assert response.structured == {}
+
+    def test_error_has_classification(self):
+        exc = ModelProviderError("rate limit", category="rate_limited")
+
+        assert str(exc) == "rate limit"
+        assert exc.category == "rate_limited"
+
+    def test_contract_fields_do_not_embed_trustforge_domain_terms(self):
+        forbidden = {"stance", "coin", "evidence", "hermes", "claim"}
+        field_names = {
+            *ModelRequest.__dataclass_fields__,
+            *ModelResponse.__dataclass_fields__,
+            *ModelUsage.__dataclass_fields__,
+        }
+
+        assert field_names.isdisjoint(forbidden)
 
 
 class TestFakeCacheProvider:
