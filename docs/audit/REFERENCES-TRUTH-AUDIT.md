@@ -291,3 +291,23 @@
 - [x] GitHub Actions `.disabled` 說明強化（明確 Production Deploy workflow 亦停用）
 - [x] issue comment 六項待修正點全部對照更新（HOYA BIT / GitHub Actions / App Runner / nginx / EventBridge / Calibration / AgentCore / Manipulation）
 - [x] 狀態圖例覆蓋所有六個符號（✅ / 🟡 / 🔬 / 📚 / ⛔ / ⚠）
+
+---
+
+## 可重跑驗證
+
+此 audit 由 `scripts/check_references_truth_audit.py` 提供 focused guard，可在 PR review 時重跑：
+
+```bash
+python3 scripts/check_references_truth_audit.py
+pytest --no-cov tests/test_references_truth_audit.py
+```
+
+檢查重點：
+
+- HOYA BIT live ticker 仍標為 `⚠ blocked-external`，不得在正式 HTTPS contract 前升為 ✅。
+- AgentCore runtime routing 仍標為 `🟡 implemented-not-verified`，不得把 registry 存在誤寫成 production routing 已驗證。
+- RAG 仍是 `📚 reference/planned`，不得把文獻引用誤寫成 runtime 功能。
+- Manipulation detection 仍是資訊性 `🟡 implemented-not-verified`，不得誤寫成交易/production 防護。
+- MOPS/FSC/TWSE/TPEx 在取得真資料與測試前不得標 ✅。
+- GitHub Actions 只描述停用中的 `.disabled` workflows；Production Deploy workflow 必須明確停用。
