@@ -625,6 +625,55 @@ class BedrockLLMAdapter:
         return self._client.classify_stance(claim_a, claim_b)
 
 
+class BedrockModelProvider:
+    """Builtin provider-neutral model adapter via bedrock.BedrockClient."""
+
+    provider_id = "bedrock"
+
+    def __init__(self, client=None):
+        if client is None:
+            from .bedrock import BedrockClient
+            self._client = BedrockClient()
+        else:
+            self._client = client
+
+    @property
+    def client(self):
+        """Return the underlying Bedrock client for compatibility bridges."""
+        return self._client
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        try:
+            result = self._client.complete(system=request.system, prompt=request.prompt)
+        except TimeoutError as exc:
+            raise ModelProviderError(str(exc), category="timeout") from exc
+        except PermissionError as exc:
+            raise ModelProviderError(str(exc), category="auth_error") from exc
+        except ValueError as exc:
+            raise ModelProviderError(str(exc), category="bad_request") from exc
+        except Exception as exc:
+            raise ModelProviderError(str(exc), category="unknown") from exc
+
+        model = request.model or result.model_id or "bedrock/unknown"
+        total_tokens = result.input_tokens + result.output_tokens
+        cost_usd = 0.0
+        if result.model_id:
+            from .ledger import estimate_cost
+            cost_usd = estimate_cost(result.model_id, result.input_tokens, result.output_tokens)
+        return ModelResponse(
+            text=result.text,
+            model=model,
+            provider=self.provider_id,
+            usage=ModelUsage(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                total_tokens=total_tokens,
+                cost_usd=cost_usd,
+            ),
+            structured=None,
+        )
+
+
 class SQLiteCacheAdapter:
     """Builtin Cache adapter backed by SQLite."""
 
