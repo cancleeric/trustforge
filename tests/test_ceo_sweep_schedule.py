@@ -274,9 +274,9 @@ def test_ceo_sweep_builds_continuous_development_inventory(monkeypatch):
     report = module.build_report()
 
     assert report["cadence"] == "30 minutes"
-    assert report["mode"] == "ceo_continuous_development_inventory"
-    assert report["execution_status"] == "inventory_complete_runner_dispatch_pending"
-    assert "gray_plan_and_ceo_auto_review" in report["decision"]
+    assert report["mode"] == "ceo_half_hour_issue_pr_development"
+    assert report["execution_status"] == "issue_pr_lane_dispatch_required"
+    assert "one_scoped_issue_pr_lane" in report["decision"]
     assert report["cpo_plan"]["proposed_author"] == "gray"
     assert report["ceo_review"]["required_decision"] == "per_lane_auto_review_after_gray_plan"
     assert report["development_plan"]["operating_mode"] == "unattended_scoped_issue_lanes"
