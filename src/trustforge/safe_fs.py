@@ -28,16 +28,13 @@ def pinned_directory(path: Path, *, create: bool = False) -> Iterator[int]:
             if component in {"", ".", ".."}:
                 raise SafePathError("unsafe path component")
             if create:
-                created = False
                 try:
                     os.mkdir(component, dir_fd=descriptor)
-                    created = True
                 except FileExistsError:
                     pass
-                if created:
-                    # The child cannot be treated as durable until its entry is
-                    # committed in the directory that contains it.
-                    os.fsync(descriptor)
+                # This must also run after FileExistsError: an earlier failed
+                # attempt may have created the entry without durably syncing it.
+                os.fsync(descriptor)
             try:
                 child = os.open(component, _directory_flags(), dir_fd=descriptor)
             except OSError as exc:

@@ -508,6 +508,65 @@ def test_nested_output_creation_fsync_failure_stops_before_modelhub_network(
     assert not (out / "BTC.json").exists()
 
 
+def test_transient_output_entry_fsync_failure_retry_syncs_before_network(tmp_path, monkeypatch):
+    rows = write_rows(tmp_path / "training")
+    out = tmp_path / "retry-output" / "nested"
+    containing = tmp_path.stat()
+    real_fsync = __import__("os").fsync
+    failed = False
+    built = []
+
+    def fail_once(descriptor):
+        nonlocal failed
+        info = __import__("os").fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (containing.st_dev, containing.st_ino) and not failed:
+            failed = True
+            raise OSError("transient output entry fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_once)
+    first = submit_calibrator_training(
+        "BTC", training_dir=tmp_path / "training", out_dir=out, req_no="REQ-1",
+        client_factory=lambda: built.append("first") or FakeClient(rows),
+    )
+    assert first["status"] == "error" and built == []
+    assert (tmp_path / "retry-output").is_dir()
+    second = submit_calibrator_training(
+        "BTC", training_dir=tmp_path / "training", out_dir=out, req_no="REQ-2",
+        client_factory=lambda: built.append("second") or FakeClient(rows),
+    )
+    assert second["status"] == "candidate" and built == ["second"]
+    assert json.loads((out / "BTC.json").read_text())["status"] == "candidate"
+
+
+def test_persistent_output_entry_fsync_failure_retries_never_reach_network_multi_coin(
+    tmp_path, monkeypatch
+):
+    write_rows(tmp_path / "training", coin="BTC")
+    write_rows(tmp_path / "training", coin="ETH")
+    out = tmp_path / "shared-output" / "nested"
+    containing = tmp_path.stat()
+    real_fsync = __import__("os").fsync
+    built = []
+
+    def fail_persistently(descriptor):
+        info = __import__("os").fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (containing.st_dev, containing.st_ino):
+            raise OSError("persistent output entry fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_persistently)
+    for coin in ("BTC", "ETH", "BTC"):
+        result = submit_calibrator_training(
+            coin, training_dir=tmp_path / "training", out_dir=out, req_no=f"REQ-{coin}",
+            client_factory=lambda: built.append(coin),
+        )
+        assert result["status"] == "error" and result["manifest_updated"] is False
+    assert built == []
+    assert not (out / "BTC.json").exists()
+    assert not (out / "ETH.json").exists()
+
+
 def test_execution_log_is_immutable_and_cannot_overwrite_same_run(tmp_path):
     from trustforge.execlog import ExecutionLog
 
