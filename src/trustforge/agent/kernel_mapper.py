@@ -7,7 +7,7 @@ TrustForge ``Claim``/``Document`` shapes, while ``trustforge_core`` may not.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from trustforge_core import (
@@ -17,11 +17,13 @@ from trustforge_core import (
     KernelClaimResolution,
     KernelDocument,
     KernelInput,
+    KernelOutput,
     KernelRunResolution,
+    validate_kernel_output_graph,
 )
 
 from ..direction_resolution import ResolvedDirection
-from ..trust.scoring import Claim
+from ..trust.scoring import Claim, ScoredClaim, TrustedBrief
 
 
 def _freeze_json(value: Any) -> JsonValue:
@@ -98,3 +100,118 @@ def to_kernel_run_resolution(
         resolved_direction=validated_direction.value,
         resolution_version=resolution_version,
     )
+
+
+def to_resolved_kernel_input(
+    claims: Sequence[Claim],
+    *,
+    pit_epoch: float,
+    coin: str,
+    query: str,
+    direction: ResolvedDirection,
+    stance_fn: Callable[[str, str], str] | None = None,
+    stance_client: Any = None,
+    stance_pair_budget: int = 40,
+    stance_remaining_time_fn: Callable[[], float] | None = None,
+    dynamic_reputation: bool = True,
+    reputation_iterations: int = 3,
+    offline: bool = False,
+) -> KernelInput:
+    """Resolve app-owned facts and compose one provider-free kernel request."""
+    if type(direction) is not ResolvedDirection:
+        raise ValueError("direction must be an exact ResolvedDirection")
+    validated_direction = ResolvedDirection(
+        value=direction.value,
+        policy_version=direction.policy_version,
+        method=direction.method,
+        input_ids=direction.input_ids,
+        reason=direction.reason,
+    )
+    from ..trust.scoring import (
+        resolve_kernel_run_resolution,
+    )
+
+    normalized_claims = list(claims)
+    claim_ids = tuple(claim.id for claim in normalized_claims)
+    if len(set(claim_ids)) != len(claim_ids):
+        raise ValueError("duplicate claim IDs are not allowed")
+    base_input = to_kernel_input(
+        normalized_claims,
+        pit_epoch=pit_epoch,
+        coin=coin,
+        query=query,
+    )
+    run_resolution = resolve_kernel_run_resolution(
+        normalized_claims,
+        pit_epoch,
+        resolved_direction=validated_direction.value,
+        stance_client=stance_client,
+        stance_pair_budget=stance_pair_budget,
+        stance_remaining_time_fn=stance_remaining_time_fn,
+        stance_fn=stance_fn,
+        dynamic_reputation=dynamic_reputation,
+        reputation_iterations=reputation_iterations,
+        offline=offline,
+    )
+    return KernelInput(
+        claims=base_input.claims,
+        pit_epoch=base_input.pit_epoch,
+        coin=base_input.coin,
+        query=base_input.query,
+        resolution=run_resolution,
+    )
+
+
+def to_legacy_scoring(
+    output: KernelOutput, claims: Sequence[Claim]
+) -> tuple[list[ScoredClaim], TrustedBrief]:
+    """Adapt a kernel result to existing report/evidence consumer DTOs.
+
+    Core provenance retains full precision.  The legacy trace presentation is
+    intentionally rounded to its historical four-decimal representation.
+    """
+    validate_kernel_output_graph(output)
+    normalized_claims = list(claims)
+    claim_ids = tuple(claim.id for claim in normalized_claims)
+    output_ids = tuple(item.claim.id for item in output.scored_claims)
+    if len(set(claim_ids)) != len(claim_ids) or output_ids != claim_ids:
+        raise ValueError("kernel output must match app claim IDs exactly and in order")
+
+    legacy_by_id: dict[str, ScoredClaim] = {}
+    scored: list[ScoredClaim] = []
+    for claim, item in zip(normalized_claims, output.scored_claims, strict=True):
+        trace = item.reputation_trace
+        legacy_trace = None
+        if trace is not None:
+            legacy_trace = {
+                "source": trace.source,
+                "prior": round(trace.prior, 4),
+                "final": round(trace.final, 4),
+                "agree_n": trace.agree_n,
+                "contradict_n": trace.contradict_n,
+                "iterations_run": trace.iterations_run,
+                "mode": trace.mode,
+            }
+        legacy_item = ScoredClaim(
+            claim=claim,
+            trust=item.trust,
+            components=dict(item.components),
+            reputation_trace=legacy_trace,
+            manip_flags=list(item.manip_flags),
+            info_flags=list(item.info_flags),
+        )
+        scored.append(legacy_item)
+        legacy_by_id[claim.id] = legacy_item
+
+    supporting_ids = tuple(item.claim.id for item in output.supporting)
+    contrarian_ids = tuple(item.claim.id for item in output.contrarian)
+    if any(item not in legacy_by_id for item in supporting_ids + contrarian_ids):
+        raise ValueError("kernel output references an unknown scored claim")
+    brief = TrustedBrief(
+        query=output.query,
+        supporting=[legacy_by_id[item] for item in supporting_ids],
+        contrarian=[legacy_by_id[item] for item in contrarian_ids],
+        confidence=output.trust_score,
+        calibrated_confidence=output.confidence,
+    )
+    return scored, brief
