@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import time
 import uuid
 
@@ -106,6 +107,11 @@ class ExecutionLog:
             ),
         )
         self.events.append(event.to_legacy_dict())
+
+    def replace_event_tool(self, index: int, tool: str) -> None:
+        """Reclassify one event while keeping both JSONL serializers aligned."""
+        self.events[index]["tool"] = tool
+        self._generic.events[index] = replace(self._generic.events[index], tool=tool)
 
     def log_policy_snapshot(self, snapshot: dict) -> None:
         """Record effective policy snapshot at run start.

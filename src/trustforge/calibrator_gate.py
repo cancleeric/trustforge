@@ -20,6 +20,16 @@ def evaluate_calibrator_gate(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         (row for row in rows if row.get("date") and row.get("hit") is not None),
         key=lambda row: str(row["date"]),
     )
+    identities = [(str(row.get("coin", "")), str(row["date"])) for row in rows]
+    if len(set(identities)) != len(identities):
+        unique_count = len(set(identities))
+        return {
+            "eligible": False,
+            "reason": "duplicate_outcome_identity",
+            "eligible_outcomes": unique_count,
+            "minimum": MIN_ELIGIBLE_OUTCOMES,
+            "remaining": max(0, MIN_ELIGIBLE_OUTCOMES - unique_count),
+        }
     if len(rows) < MIN_ELIGIBLE_OUTCOMES:
         return {
             "eligible": False,
@@ -29,7 +39,35 @@ def evaluate_calibrator_gate(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "remaining": MIN_ELIGIBLE_OUTCOMES - len(rows),
         }
 
-    split = max(1, int(len(rows) * (1 - HOLDOUT_RATIO)))
+    explicit_split = all(row.get("split") in {"train", "val"} for row in rows)
+    explicit_train_count: int | None = None
+    if any("split" in row for row in rows) and not explicit_split:
+        return {
+            "eligible": False, "reason": "invalid_explicit_split", "eligible_outcomes": len(rows),
+            "minimum": MIN_ELIGIBLE_OUTCOMES, "remaining": 0,
+        }
+    if explicit_split:
+        split_values = [row["split"] for row in rows]
+        train_count = split_values.count("train")
+        explicit_train_count = train_count
+        val_count = split_values.count("val")
+        train_dates = {str(row["date"]) for row in rows if row["split"] == "train"}
+        val_dates = {str(row["date"]) for row in rows if row["split"] == "val"}
+        if (
+            not train_count
+            or not val_count
+            or split_values != ["train"] * train_count + ["val"] * val_count
+            or train_dates & val_dates
+            or max(train_dates) >= min(val_dates)
+        ):
+            return {
+                "eligible": False, "reason": "explicit_split_not_chronological",
+                "eligible_outcomes": len(rows), "minimum": MIN_ELIGIBLE_OUTCOMES, "remaining": 0,
+            }
+
+    split = explicit_train_count if explicit_train_count is not None else max(
+        1, int(len(rows) * (1 - HOLDOUT_RATIO))
+    )
     train, holdout = rows[:split], rows[split:]
     if not holdout or str(train[-1]["date"]) >= str(holdout[0]["date"]):
         return {

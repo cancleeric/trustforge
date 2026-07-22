@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
+import math
+import os
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 from .calibrator_gate import calibrator_model_gate_status, evaluate_calibrator_gate
+from .calibration_metrics import judge_direction_hit
+from .safe_fs import SafePathError, read_regular_file
 
 _CANDIDATES = ("sklearn-logreg", "isotonic")
 _FEATURE_CONTRACT = (
@@ -16,10 +23,155 @@ _FEATURE_CONTRACT = (
 _ACTIVE_MODEL_ROUTE = "bedrock-direct"
 _CANDIDATE_MODEL_ROUTE = "agentcore-gateway"
 _ROUTE_DEPENDENCIES = ("historical-calibration", "rag-index", "rag-reranker")
+TRAINING_SCHEMA_VERSION = 1
+MAX_TRAINING_FILE_BYTES = 16 * 1024 * 1024
+MAX_TRAINING_LINE_BYTES = 256 * 1024
+MAX_TRAINING_SOURCE_LINES = 10_000
+MAX_ELIGIBLE_ROWS = 10_000
 
 
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+class TrainingDataError(ValueError):
+    pass
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        converted = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return converted if math.isfinite(converted) else None
+
+
+def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
+    """Load the strict, version-controlled flat JSONL contract for one coin."""
+    expected = coin.upper()
+    candidates: dict[str, list[tuple[tuple[Any, ...], dict[str, Any], tuple[Any, ...]]]] = {}
+    base_required = {"date", "coin", "direction"}
+    label_fields = {"outcome_pct", "ground_truth_direction", "split"}
+    try:
+        encoded, _ = read_regular_file(path, maximum_bytes=MAX_TRAINING_FILE_BYTES)
+    except (OSError, SafePathError) as exc:
+        message = str(exc).lower()
+        if "symlink" in message or getattr(exc, "errno", None) == errno.ELOOP:
+            raise TrainingDataError("training path contains a symlink") from None
+        if "regular" in message:
+            raise TrainingDataError("training data must be a regular file") from None
+        raise TrainingDataError("training data is unavailable") from None
+    eligible_candidates = 0
+    streamed_bytes = 0
+    for line_number, encoded_line in enumerate(encoded.splitlines(keepends=True), 1):
+            streamed_bytes += len(encoded_line)
+            if streamed_bytes > MAX_TRAINING_FILE_BYTES:
+                raise TrainingDataError("training data exceeds file size limit")
+            if line_number > MAX_TRAINING_SOURCE_LINES:
+                raise TrainingDataError("training data exceeds source line limit")
+            if len(encoded_line) > MAX_TRAINING_LINE_BYTES:
+                raise TrainingDataError(f"training line exceeds size limit at line {line_number}")
+            if not encoded_line.strip():
+                continue
+            try:
+                raw = json.loads(encoded_line)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+                raise TrainingDataError(f"invalid JSONL at line {line_number}") from None
+            if not isinstance(raw, dict) or not base_required.issubset(raw):
+                raise TrainingDataError(f"invalid training schema at line {line_number}")
+            if raw["coin"] != expected or not isinstance(raw["direction"], str):
+                raise TrainingDataError(f"invalid coin or direction at line {line_number}")
+            try:
+                date.fromisoformat(raw["date"])
+            except (TypeError, ValueError):
+                raise TrainingDataError(f"invalid date at line {line_number}") from None
+            present_labels = label_fields.intersection(raw)
+            if (
+                not present_labels
+                or "confidence" not in raw
+                or (raw.get("outcome_pct") is None and raw.get("ground_truth_direction") is None)
+            ):
+                continue
+            if present_labels != label_fields:
+                raise TrainingDataError(f"partially labelled training row at line {line_number}")
+            confidence = _finite_number(raw["confidence"])
+            outcome = _finite_number(raw["outcome_pct"])
+            generated_at = raw.get("generated_at")
+            try:
+                parsed_generated_at = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+                if parsed_generated_at.tzinfo is None:
+                    raise ValueError("timestamp must be timezone aware")
+                parsed_generated_at = parsed_generated_at.astimezone(timezone.utc)
+            except (AttributeError, TypeError, ValueError):
+                raise TrainingDataError(f"invalid generated_at at line {line_number}") from None
+            if (
+                confidence is None or not 0 <= confidence <= 1 or outcome is None
+                or raw["split"] not in {"train", "val"}
+                or raw["ground_truth_direction"] not in {"bullish", "bearish", "neutral"}
+            ):
+                raise TrainingDataError(f"invalid training values at line {line_number}")
+            eligible_candidates += 1
+            if eligible_candidates > MAX_ELIGIBLE_ROWS:
+                raise TrainingDataError("training data exceeds eligible row limit")
+            sample_id = hashlib.sha256(
+                f"{TRAINING_SCHEMA_VERSION}|{expected}|{raw['date']}".encode("utf-8")
+            ).hexdigest()
+            row = {
+                "sample_id": sample_id,
+                "date": raw["date"], "coin": expected, "direction": raw["direction"],
+                "calibrated_confidence": confidence, "confidence": confidence,
+                "outcome_pct": outcome, "hit": judge_direction_hit(raw["direction"], outcome / 100),
+                "ground_truth_direction": raw["ground_truth_direction"], "split": raw["split"],
+            }
+            label_identity = (raw["split"], raw["ground_truth_direction"], outcome)
+            source_identity = json.dumps(
+                {
+                    "generated_at": raw.get("generated_at"),
+                    "sources": raw.get("sources"),
+                    "model_id": raw.get("model_id"),
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+            inference_identity = (raw["direction"], confidence, source_identity)
+            candidates.setdefault(raw["date"], []).append(
+                ((parsed_generated_at, inference_identity), row, label_identity)
+            )
+    rows: list[dict[str, Any]] = []
+    for row_date, duplicate_rows in candidates.items():
+        if len({candidate[2] for candidate in duplicate_rows}) != 1:
+            raise TrainingDataError(f"conflicting duplicate outcome for {row_date}")
+        earliest = min(candidate[0][0] for candidate in duplicate_rows)
+        earliest_rows = [candidate for candidate in duplicate_rows if candidate[0][0] == earliest]
+        if len({candidate[0][1] for candidate in earliest_rows}) != 1:
+            raise TrainingDataError(f"conflicting earliest inference for {row_date}")
+        rows.append(earliest_rows[0][1])
+    rows.sort(key=lambda row: (row["date"], row["coin"]))
+    return rows
+
+
+def build_flat_training_package(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = sorted(rows, key=lambda row: (str(row.get("date", "")), str(row.get("coin", ""))))
+    gate = evaluate_calibrator_gate(rows)
+    digest = hashlib.sha256(_canonical_json(rows)).hexdigest()
+    result: dict[str, Any] = {
+        "status": "ready_for_modelhub_dry_run" if gate["eligible"] else "blocked",
+        "dataset": {"row_count": len(rows), "sha256": digest},
+        "gate": gate,
+        "rows": rows,
+        "automatic_apply": False,
+        "requires_human_approval": True,
+    }
+    if gate["eligible"]:
+        result["split"] = {
+            "strategy": "chronological_explicit_split", "train_count": gate["train_count"],
+            "holdout_count": gate["holdout_count"], "train_end": gate["train_end"],
+            "holdout_start": gate["holdout_start"],
+        }
+    else:
+        result["blocked_reason"] = gate["reason"]
+    return result
 
 
 def eligible_calibrator_rows(label_documents: Iterable[dict[str, Any]], *, horizon: int = 1) -> list[dict[str, Any]]:
@@ -40,14 +192,20 @@ def eligible_calibrator_rows(label_documents: Iterable[dict[str, Any]], *, horiz
                     "calibrated_confidence": label.get("calibrated_confidence"),
                     "hit": bool(outcome["hit"]),
                     "directional_return_pct": outcome.get("directional_return_pct"),
-                    "outcome": {"horizon": key, "start_close": outcome.get("start_close"), "end_close": outcome.get("end_close")},
+                    "outcome": {
+                        "horizon": key,
+                        "start_close": outcome.get("start_close"),
+                        "end_close": outcome.get("end_close"),
+                    },
                     "ohlcv_lineage": lineage,
                 }
             )
     return sorted(rows, key=lambda row: (row["date"], row["coin"]))
 
 
-def build_calibrator_training_package(label_documents: Iterable[dict[str, Any]], *, horizon: int = 1) -> dict[str, Any]:
+def build_calibrator_training_package(
+    label_documents: Iterable[dict[str, Any]], *, horizon: int = 1
+) -> dict[str, Any]:
     """Return a ModelHub-ready draft without credentials, networking, or model fitting."""
     rows = eligible_calibrator_rows(label_documents, horizon=horizon)
     gate = evaluate_calibrator_gate(rows)
@@ -66,7 +224,10 @@ def build_calibrator_training_package(label_documents: Iterable[dict[str, Any]],
         "feature_contract": list(_FEATURE_CONTRACT),
         "gate": gate,
         "model_gate_status": calibrator_model_gate_status(rows),
-        "rollback": {"strategy": "keep_current_calibrator_active", "activation": "human_approval_after_holdout_improvement"},
+        "rollback": {
+            "strategy": "keep_current_calibrator_active",
+            "activation": "human_approval_after_holdout_improvement",
+        },
         "modelhub_submission_draft": {
             "product": "trustforge",
             "company": "hurricanesoft",
@@ -74,7 +235,10 @@ def build_calibrator_training_package(label_documents: Iterable[dict[str, Any]],
             "priority": "P2",
             "model_type": "confidence_calibrator",
             "candidate_architectures": list(_CANDIDATES),
-            "purpose": "Time-separated calibration of Hermes information completeness; not market direction prediction.",
+            "purpose": (
+                "Time-separated calibration of Hermes information completeness; "
+                "not market direction prediction."
+            ),
             "contract_status": "requires_modelhub_api_contract_confirmation",
         },
     }

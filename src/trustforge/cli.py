@@ -13,7 +13,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import re
+import stat
 from pathlib import Path
 
 from .pipeline import run, run_comparison
@@ -356,15 +360,9 @@ def _judge_hit(direction: str, change_pct: float) -> bool:
     - 偏空：change < 0 → hit
     - 其他方向未知：視為中性
     """
-    if direction in ("中性", "不明", ""):
-        return abs(change_pct) < 0.02
-    elif direction == "偏多":
-        return change_pct > 0
-    elif direction == "偏空":
-        return change_pct < 0
-    else:
-        # 未知方向，視為中性
-        return abs(change_pct) < 0.02
+    from .calibration_metrics import judge_direction_hit
+
+    return judge_direction_hit(direction, change_pct)
 
 
 def cmd_label_outcomes(args: argparse.Namespace) -> int:
@@ -410,6 +408,205 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         f"{report['horizons']['T+1']['eligible_predictions']} "
         f"calibration_error={report['horizons']['T+1']['calibration_error']} -> {out}"
     )
+    return 0
+
+
+def _write_modelhub_error_current(
+    out_dir: Path, coin: str, log, result: dict, *, reason: str, out_dir_fd: int | None = None
+) -> bool:
+    from .modelhub_submit import _write_current_manifest_at, write_current_manifest
+
+    current = {
+        "schema_version": 1, "coin": coin, "status": "error", "run_id": log.run_id,
+        "reason": reason, "automatic_apply": False, "requires_human_approval": True,
+    }
+    proposal = result.get("proposal") if isinstance(result, dict) else None
+    if isinstance(proposal, dict):
+        for key in ("dataset_sha256", "artifact_sha256"):
+            if key in proposal:
+                current[key] = proposal[key]
+    for key in (
+        "dataset_sha256", "artifact_sha256", "execution_log_file", "execution_log_sha256"
+    ):
+        if isinstance(result, dict) and key in result:
+            current[key] = result[key]
+    try:
+        if out_dir_fd is None:
+            write_current_manifest(out_dir, coin, current)
+        else:
+            _write_current_manifest_at(out_dir_fd, coin, current)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _valid_modelhub_execution_reference(out_dir: Path, result: dict) -> bool:
+    from .safe_fs import read_regular_file
+
+    filename = result.get("execution_log_file")
+    expected_sha = result.get("execution_log_sha256")
+    if not isinstance(filename, str) or Path(filename).name != filename:
+        return False
+    if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+        return False
+    try:
+        encoded, _ = read_regular_file(Path(out_dir) / filename, maximum_bytes=8 * 1024 * 1024)
+        events = [json.loads(line) for line in encoded.splitlines() if line.strip()]
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, RecursionError):
+        return False
+    run_id = result.get("run_id")
+    coin = result.get("coin")
+    status = result.get("status")
+    if (
+        not events or not isinstance(run_id, str) or not isinstance(coin, str)
+        or hashlib.sha256(encoded).hexdigest() != expected_sha
+    ):
+        return False
+    safe_run_id = (
+        run_id if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id)
+        else hashlib.sha256(run_id.encode()).hexdigest()
+    )
+    allowed_names = {f"execution-{safe_run_id}.jsonl"}
+    if status == "error":
+        allowed_names.add(f"execution-{safe_run_id}-error.jsonl")
+    if filename not in allowed_names:
+        return False
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("params"), dict):
+            return False
+        hermes = event["params"].get("hermes")
+        if not isinstance(hermes, dict) or hermes.get("run_id") != run_id:
+            return False
+    terminals = [
+        event for event in events
+        if event.get("tool") == "modelhub.training.terminal"
+        and event["params"].get("stage") == "terminal"
+    ]
+    return bool(
+        len(terminals) == 1
+        and terminals[-1] is events[-1]
+        and terminals[-1]["params"].get("coin") == coin
+        and terminals[-1]["params"].get("status") == status
+    )
+
+
+def cmd_modelhub_train(args: argparse.Namespace) -> int:
+    """Run isolated ModelHub calibrator proposal flows and print JSON summaries."""
+    from .modelhub_submit import _persist_execution_log_at, submit_calibrator_training
+    from .safe_fs import pinned_directory
+    from .execlog import ExecutionLog
+
+    coins = list(COIN_POOL) if args.all else [args.coin]
+    request_map: dict[str, str] = {}
+    for item in args.req_no_map:
+        if "=" not in item:
+            print(json.dumps({"status": "error", "coin": ""}))
+            return 1
+        coin_key, request_number = item.split("=", 1)
+        if coin_key in request_map or coin_key not in COIN_POOL or not request_number:
+            print(json.dumps({"status": "error", "coin": coin_key}))
+            return 1
+        request_map[coin_key] = request_number
+    if not args.all and request_map:
+        print(json.dumps({"status": "error", "coin": args.coin}))
+        return 1
+    if args.all and not args.dry_run:
+        if set(request_map) != set(COIN_POOL) or len(set(request_map.values())) != len(COIN_POOL):
+            print(json.dumps({"status": "error", "coin": ""}))
+            return 1
+    results = []
+    for coin in coins:
+        log = ExecutionLog()
+        invalid_result = False
+        try:
+            result = submit_calibrator_training(
+                coin,
+                training_dir=Path(args.training_dir),
+                out_dir=Path(args.out_dir),
+                req_no=request_map[coin] if args.all and not args.dry_run else args.req_no,
+                dry_run=args.dry_run,
+                execution_log=log,
+            )
+        except Exception as exc:
+            invalid_result = True
+            log.record(
+                "modelhub.training.error",
+                {
+                    "coin": coin, "stage": "exception", "status": "error",
+                    "exception_type": type(exc).__name__,
+                },
+                "Unexpected ModelHub orchestration error",
+            )
+            result = {"status": "error", "coin": coin, "run_id": log.run_id}
+        if (
+            not isinstance(result, dict)
+            or result.get("status") not in {
+                "blocked", "unavailable", "timeout", "no_improvement", "error", "candidate", "dry_run",
+            }
+            or result.get("coin") != coin
+            or not _valid_modelhub_execution_reference(Path(args.out_dir), result)
+        ):
+            invalid_result = True
+            for event_index, event in enumerate(log.events):
+                params = event.get("params", {})
+                if event.get("tool") == "modelhub.training.terminal" and params.get("stage") == "terminal":
+                    log.replace_event_tool(event_index, "modelhub.training.rejected_terminal")
+            log.record(
+                "modelhub.training.terminal",
+                {
+                    "coin": coin, "stage": "terminal", "status": "error",
+                    "exception_type": "InvalidResult",
+                },
+                "Malformed ModelHub orchestration result",
+            )
+            result = {"status": "error", "coin": coin, "run_id": log.run_id}
+        result["run_id"] = log.run_id
+        if invalid_result:
+            try:
+                with pinned_directory(Path(args.out_dir), create=True) as recovery_fd:
+                    log_file, log_sha = _persist_execution_log_at(recovery_fd, log, failure=True)
+                    if not args.dry_run:
+                        recovery_result = {
+                            **result, "execution_log_file": log_file,
+                            "execution_log_sha256": log_sha,
+                        }
+                        recovery_manifest_updated = _write_modelhub_error_current(
+                            Path(args.out_dir), coin, log, recovery_result,
+                            reason="unexpected_or_invalid_result", out_dir_fd=recovery_fd,
+                        )
+                log_persisted = True
+            except (OSError, TypeError, ValueError):
+                log_persisted = False
+        else:
+            log_persisted = True
+        if invalid_result and not log_persisted:
+            result = {
+                "status": "error", "coin": coin, "run_id": log.run_id,
+                "reason": "log_persistence_failed", "manifest_updated": False,
+            }
+        elif invalid_result and not args.dry_run:
+            recovery_result = {
+                **result, "execution_log_file": log_file, "execution_log_sha256": log_sha,
+            }
+            result = {
+                "status": "error", "coin": coin, "run_id": log.run_id,
+                "reason": "unexpected_or_invalid_result",
+                "manifest_updated": recovery_manifest_updated,
+                "execution_log_file": log_file, "execution_log_sha256": log_sha,
+            }
+        elif invalid_result:
+            result = {
+                "status": "error", "coin": coin, "run_id": log.run_id,
+                "reason": "unexpected_or_invalid_result", "manifest_updated": False,
+                "execution_log_file": log_file, "execution_log_sha256": log_sha,
+            }
+        results.append(result)
+    print(json.dumps(results if args.all else results[0], ensure_ascii=False, sort_keys=True))
+    statuses = {result["status"] for result in results}
+    if statuses & {"unavailable", "timeout", "error"}:
+        return 1
+    if statuses & {"blocked", "no_improvement"}:
+        return 2
     return 0
 
 
@@ -499,6 +696,17 @@ def main(argv=None) -> int:
     cal.add_argument("--data-dir", default="data/data", help="OHLCV CSV 資料目錄")
     cal.add_argument("--out", default="out/historical-replay-calibration.json")
     cal.set_defaults(func=cmd_calibrate)
+
+    mh = sub.add_parser("modelhub-train", help="建立 ModelHub calibrator 訓練候選 proposal")
+    target = mh.add_mutually_exclusive_group(required=True)
+    target.add_argument("--coin", choices=COIN_POOL)
+    target.add_argument("--all", action="store_true")
+    mh.add_argument("--dry-run", action="store_true")
+    mh.add_argument("--training-dir", default="data/training")
+    mh.add_argument("--out-dir", default="out/modelhub-proposals")
+    mh.add_argument("--req-no", default=None)
+    mh.add_argument("--req-no-map", action="append", default=[], metavar="COIN=REQ")
+    mh.set_defaults(func=cmd_modelhub_train)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):
