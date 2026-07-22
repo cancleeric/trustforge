@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -185,18 +186,28 @@ def test_progress_accepts_only_new_verified_commit():
     }
 
 
-def test_runtime_guard_validates_git_common_dir_and_rejects_symlink_lane(tmp_path):
+def test_runtime_guard_validates_git_common_dir_and_rejects_symlink_lane(tmp_path, monkeypatch):
     module = _load_script("ceo_runtime_guard_git", "ceo_runtime_guard.py")
+    for key in tuple(os.environ):
+        if key.startswith("GIT_"):
+            monkeypatch.delenv(key)
     repo = tmp_path / "repo"
     lane = tmp_path / "lane"
-    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True)
+    # pytest normally supplies an empty tmp_path, but an interrupted/concurrent
+    # full-suite run can leave the numbered directory behind.  This fixture is
+    # destructive only inside its pytest-owned directory and must not inherit a
+    # stale repository, remote, commit, or worktree registration.
+    shutil.rmtree(repo, ignore_errors=True)
+    shutil.rmtree(lane, ignore_errors=True)
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True, env=git_env)
     (repo / "README").write_text("test\n")
-    subprocess.run(["git", "-C", str(repo), "add", "README"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(lane)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "add", "README"], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], check=True, capture_output=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(lane)], check=True, capture_output=True, env=git_env)
 
     assert module.validate_lane(repo, lane)["valid"] is True
     lane_link = tmp_path / "lane-link"
