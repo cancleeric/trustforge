@@ -83,6 +83,29 @@ query
 故 TrustForge 在競賽期間直連 `bedrock-runtime`，所有呼叫集中於 `bedrock.py`。
 競賽結束後若要產品化，再評估是否抽換成閘道。
 
+## ModelHub 校準器候選編排（#351）
+
+```text
+data/training/{coin}.jsonl
+  → flat loader + ≥100 unique labelled outcomes gate
+  → chronological train/holdout split
+  → label-free holdout payload + dataset SHA256
+  → loopback-only ModelHub trigger/poll/artifact lookup
+  → weighted ECE（baseline − candidate ≥ 0.02）
+  → immutable proposal + execution log
+  → per-coin current manifest
+  → 人工審查／人工啟用（程式永不 automatic apply）
+```
+
+`modelhub_client.py` 僅接受 HTTP loopback host，停用 proxy/redirect；GET 有 bounded retry，
+POST 不重試，並限制 timeout、poll deadline 與 response body。`modelhub_submit.py` 以 dir-fd
+固定路徑元件、拒絕 symlink/non-regular input，且 file 與 directory fsync 成功後才發布
+proposal/log/current。ModelHub 只收到 train rows 與不含 label/hit 的 opaque holdout features。
+
+每次編排使用既有 `ExecutionLog` 的 15 分鐘預算；程式沒有修改 `budget_guard.py`。
+ModelHub poll 本身最多 5 分鐘，且每一階段都再檢查剩餘 execution budget。五幣 live 模式
+要求五個互異 `req_no`，避免不同幣種誤用同一 submission。
+
 ## W3 前置：account 維度資料蒐集聲明（PR #107，harper CISO 審查附條件通過）
 
 **蒐集目的**：目前累積帳號維度資料，供未來 W3「協同操縱偵測」演算法使
