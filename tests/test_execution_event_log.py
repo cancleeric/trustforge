@@ -73,6 +73,20 @@ def test_secret_redaction_is_recursive_and_key_based():
     }
 
 
+def test_secret_redaction_preserves_token_count_fields():
+    value = {
+        "tokens_in": 100,
+        "tokens_out": 50,
+        "nested": {"token": "secret"},
+    }
+
+    assert redact_secrets(value) == {
+        "tokens_in": 100,
+        "tokens_out": 50,
+        "nested": {"token": REDACTED},
+    }
+
+
 def test_execution_log_redacts_secrets_before_jsonl_output():
     log = ExecutionLog(now_fn=lambda: 1000.0, run_id="hermes-redact")
     log.record(

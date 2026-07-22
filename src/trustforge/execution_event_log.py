@@ -7,6 +7,7 @@ JSONL compatibility, and defensive secret redaction.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -146,4 +147,7 @@ def redact_secrets(value: Any) -> Any:
 
 def _is_secret_key(key: str) -> bool:
     lowered = key.lower().replace("-", "_")
-    return any(marker in lowered for marker in _SECRET_KEY_MARKERS)
+    if lowered in _SECRET_KEY_MARKERS:
+        return True
+    parts = set(filter(None, re.split(r"[_\W]+", lowered)))
+    return any(marker in parts for marker in _SECRET_KEY_MARKERS)
