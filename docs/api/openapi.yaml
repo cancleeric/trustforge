@@ -574,6 +574,43 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/module-telemetry:
+    get:
+      tags: [observability]
+      operationId: getModuleTelemetry
+      summary: 模組 runtime 遙測狀態
+      description: |
+        唯讀。未帶 `module_id` 時回傳所有模組遙測紀錄與總數；
+        帶 `module_id` 時回傳單一模組紀錄，找不到則回 404。
+      parameters:
+        - in: query
+          name: module_id
+          required: false
+          schema:
+            type: string
+          description: 可選的模組識別碼。
+      responses:
+        "200":
+          description: 模組遙測狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        additionalProperties: true
+        "404":
+          description: 指定模組不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/improvement-diagnostics:
     get:
       tags: [observability]

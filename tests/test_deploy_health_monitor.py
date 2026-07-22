@@ -91,7 +91,7 @@ def test_monitor_fails_when_service_drops_during_deploy(tmp_path):
 
 
 def test_production_workflow_wraps_backend_deploy():
-    workflow = (ROOT / ".github" / "workflows" / "deploy-production.yml").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "deploy-production.yml.disabled").read_text()
     assert "scripts/monitor_deploy_health.sh" in workflow
     assert "out/release/deploy-health-canary.jsonl" in workflow
     assert workflow.index("Deploy frontend to EC2 nginx") < workflow.index(

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import time as _time_mod
 from dataclasses import dataclass, field
@@ -1684,8 +1685,9 @@ _CALIBRATION_TABLE: list[tuple[float, float]] = [
 def _calibrate_confidence(raw: float) -> float:
     """校準一個 [0, 1] 指標。
 
-    優先使用 isotonic regression 訓練模型（data/model-artifacts/ 版控版 → out/model-artifacts/ runtime 版），
-    無模型時 fallback 到硬編碼 `_CALIBRATION_TABLE`。
+    預設使用硬編碼 `_CALIBRATION_TABLE`。isotonic regression 訓練模型屬於
+    holdout 待驗證候選，只有明確設定 `TRUSTFORGE_ENABLE_CALIBRATION_MODEL=1`
+    時才會啟用。
 
     確定性、免 LLM：純查表/插值，同輸入必同輸出，不呼叫任何模型。
     輸入超出 [0, 1] 時 clamp 到邊界。
@@ -1744,6 +1746,8 @@ def _calibration_model_path() -> "Path | None":
 
 def _load_cached_calibration_model() -> list[dict] | None:
     """載入並快取校準模型。模組內只讀一次。"""
+    if os.environ.get("TRUSTFORGE_ENABLE_CALIBRATION_MODEL") != "1":
+        return None
     if "model" not in _CALIBRATION_MODEL_CACHE:
         from ..calibration_model import load_calibration_model
 

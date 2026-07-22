@@ -586,7 +586,7 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
 
 
 def test_ci_is_manual_and_pre_push_is_full_local_gate():
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml.disabled").read_text()
     hook = (ROOT / ".githooks/pre-push").read_text()
 
     assert "workflow_dispatch:" in workflow
