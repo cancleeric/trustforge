@@ -46,9 +46,13 @@ def _reject_verified(lines: list[str], patterns: dict[str, str]) -> None:
             raise AssertionError(f"{subject} must not be marked verified in references export")
 
 
-def verify_references_export(path: Path = DEFAULT_REFERENCES_EXPORT) -> list[str]:
+def verify_references_export(
+    path: Path = DEFAULT_REFERENCES_EXPORT, *, require_present: bool = False
+) -> list[str]:
     """Verify exported public references.html uses conservative v2 statuses when available."""
     if not path.exists():
+        if require_present:
+            raise AssertionError(f"references export is required but missing: {path}")
         return [f"references export not present; skipped {path}"]
 
     lines = _export_lines(path.read_text(encoding="utf-8"))
@@ -142,9 +146,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=Path, default=DEFAULT_AUDIT)
     parser.add_argument("--references-html", type=Path, default=DEFAULT_REFERENCES_EXPORT)
+    parser.add_argument(
+        "--require-references-export",
+        action="store_true",
+        help="fail when --references-html is missing instead of treating it as an optional local export",
+    )
     args = parser.parse_args()
     checks = verify_audit(args.path)
-    checks.extend(verify_references_export(args.references_html))
+    checks.extend(
+        verify_references_export(
+            args.references_html, require_present=args.require_references_export
+        )
+    )
     for check in checks:
         print(f"ok - {check}")
     return 0

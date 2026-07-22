@@ -302,8 +302,11 @@
 
 ```bash
 python3 scripts/check_references_truth_audit.py
+python3 scripts/check_references_truth_audit.py --require-references-export
 pytest --no-cov tests/test_references_truth_audit.py
 ```
+
+第一個命令允許本地開發環境沒有 `/tmp/trustforge-devlog/references.html` 時跳過 public export；第二個命令用於 PR/release review，必須取得 public references export，否則直接失敗，避免只更新 repo audit 卻漏掉對外頁面同步。
 
 檢查重點：
 
