@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from pathlib import Path
 import re
 import time as _time_mod
 from dataclasses import dataclass, field
@@ -1271,7 +1272,10 @@ def _iterate_source_reputation(
             for lab in sv.values():
                 if lab in counts:
                     counts[lab] += 1
-            item_majority[key] = max(_DS_LABELS, key=lambda l: (counts[l], -_DS_LABELS.index(l)))
+            item_majority[key] = max(
+                _DS_LABELS,
+                key=lambda label: (counts[label], -_DS_LABELS.index(label)),
+            )
         # 每 source 的 DS trace 指標：
         #   agree_n       = 該 source 參與的「達標 item」（rater≥min）數
         #   contradict_n  = 該 source 與所屬 item 多數票方向不一致的次數
@@ -1290,8 +1294,6 @@ def _iterate_source_reputation(
         # r(source) 直喂 Step B 的 agreement_score；退化來源（r=0.5）由下方強制
         # α=1 處理（r=0.5 等價先驗，不動信譽）。
         agreement_override = {s: reliability.get(s, 0.5) for s in claims_by_source}
-        ds_fallback = set(ds_meta.get("fallback_sources", []))
-
     # codex 對抗審修正（第 2 輪 HIGH，PR #29）：`avg_temp_by_source`（該來源投給
     # 其他來源的「票權」）必須以「內容不同的主張種類」為單位平均，不能被同一來源
     # 重複貼同一條 claim（尤其是刻意重貼「自己最高 trust」那條）拉抬——否則即使
@@ -1703,7 +1705,7 @@ _CALIBRATION_MODEL_CACHE: dict[str, list[dict] | None] = {}
 _CALIBRATION_MODEL_PATH: str | None = None
 
 
-def _calibration_model_path() -> "Path | None":
+def _calibration_model_path() -> Path | None:
     """Find calibration model: data/ (versioned) → out/ (runtime) → None.
 
     遍歷順序（高優先到低優先）：
@@ -1711,8 +1713,6 @@ def _calibration_model_path() -> "Path | None":
     2. out/model-artifacts/calibration-model.json   ← 本機 runtime 產出
     3. None → fallback 到 _CALIBRATION_TABLE
     """
-    from pathlib import Path
-
     if _CALIBRATION_MODEL_PATH:
         override = Path(_CALIBRATION_MODEL_PATH)
         return override if override.is_file() else None
