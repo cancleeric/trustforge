@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import json
+import math
+import numbers
 import os
 import socket
 import time
+import unicodedata
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 DEFAULT_BASE_URL = "http://localhost:8950"
 DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
+MIN_POLL_INTERVAL = 0.05
 
 
 class ModelHubError(Exception):
@@ -40,7 +44,42 @@ class ModelHubPollTimeout(ModelHubError):
     pass
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+_DEFAULT_OPENER = build_opener(_NoRedirectHandler())
+
+
+def _open_no_redirect(request: Request, *, timeout: float) -> Any:
+    return _DEFAULT_OPENER.open(request, timeout=timeout)
+
+
+def _has_control(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
+def _validated_identifier(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip() or _has_control(value):
+        raise ModelHubConfigurationError(
+            f"ModelHub {label} must be a non-empty, unpadded string without control characters"
+        )
+    return value
+
+
+def _finite_real(value: Any, label: str, *, minimum: float, maximum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, numbers.Real) or not math.isfinite(value):
+        raise ModelHubConfigurationError(f"ModelHub {label} must be a finite real number")
+    converted = float(value)
+    if converted < minimum or (maximum is not None and converted > maximum):
+        raise ModelHubConfigurationError(f"ModelHub {label} is outside the allowed range")
+    return converted
+
+
 def _validated_base_url(value: str) -> str:
+    if not isinstance(value, str):
+        raise ModelHubConfigurationError("ModelHub base URL must be a string")
     parsed = urlsplit(value)
     if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise ModelHubConfigurationError("ModelHub base URL must use HTTP on a loopback host")
@@ -48,6 +87,8 @@ def _validated_base_url(value: str) -> str:
         raise ModelHubConfigurationError("ModelHub base URL must not contain user information")
     if parsed.query or parsed.fragment:
         raise ModelHubConfigurationError("ModelHub base URL must not contain a query or fragment")
+    if parsed.netloc.endswith(":"):
+        raise ModelHubConfigurationError("ModelHub base URL has an empty port")
     try:
         port = parsed.port
     except ValueError as exc:
@@ -73,15 +114,22 @@ class ModelHubClient:
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] = _open_no_redirect,
     ) -> None:
-        if timeout <= 0 or retries < 0 or retries > 2 or max_response_bytes <= 0:
+        validated_timeout = _finite_real(timeout, "timeout", minimum=math.nextafter(0.0, 1.0))
+        if type(retries) is not int or retries < 0 or retries > 2:
             raise ModelHubConfigurationError("Invalid timeout, retry count, or response limit")
-        self.base_url = _validated_base_url(base_url or os.getenv("MODELHUB_BASE_URL", DEFAULT_BASE_URL))
-        self.timeout = float(timeout)
+        if type(max_response_bytes) is not int or max_response_bytes <= 0:
+            raise ModelHubConfigurationError("Invalid timeout, retry count, or response limit")
+        selected_base_url = base_url if base_url is not None else os.getenv("MODELHUB_BASE_URL", DEFAULT_BASE_URL)
+        self.base_url = _validated_base_url(selected_base_url)
+        self.timeout = validated_timeout
         self.retries = retries
         self.max_response_bytes = max_response_bytes
-        self._api_key = api_key if api_key is not None else os.getenv("MODELHUB_API_KEY")
+        selected_api_key = api_key if api_key is not None else os.getenv("MODELHUB_API_KEY")
+        if selected_api_key is not None and (not isinstance(selected_api_key, str) or _has_control(selected_api_key)):
+            raise ModelHubConfigurationError("ModelHub API key contains invalid characters")
+        self._api_key = selected_api_key
         self._sleep = sleep
         self._monotonic = monotonic
         self._opener = opener
@@ -121,9 +169,13 @@ class ModelHubClient:
                 raise ModelHubResponseError("ModelHub request payload is not JSON serializable") from exc
             headers["Content-Type"] = "application/json"
 
-        request = Request(self._url(*segments), data=data, headers=headers, method=method)
+        try:
+            request = Request(self._url(*segments), data=data, headers=headers, method=method)
+        except ValueError:
+            raise ModelHubConfigurationError("ModelHub request headers are invalid") from None
         last_transport: BaseException | None = None
-        for attempt in range(self.retries + 1):
+        retry_count = self.retries if method == "GET" else 0
+        for attempt in range(retry_count + 1):
             request_timeout = self.timeout
             if deadline is not None:
                 remaining = deadline - self._monotonic()
@@ -132,17 +184,24 @@ class ModelHubClient:
                 request_timeout = min(request_timeout, remaining)
             try:
                 with self._opener(request, timeout=request_timeout) as response:
-                    return self._decode_response(response)
+                    decoded = self._decode_response(response)
+                if deadline is not None and deadline - self._monotonic() <= 0:
+                    raise ModelHubPollTimeout("ModelHub training result polling timed out")
+                return decoded
             except HTTPError as exc:
                 if exc.code != 429 and exc.code < 500:
                     raise ModelHubHTTPError(exc.code) from None
-                if attempt == self.retries:
+                if attempt == retry_count:
                     raise ModelHubHTTPError(exc.code, "ModelHub retry limit exhausted") from None
+            except ValueError:
+                raise ModelHubConfigurationError(
+                    "ModelHub request could not be sent because its headers are invalid"
+                ) from None
             except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
                 last_transport = exc
-                if attempt == self.retries:
+                if attempt == retry_count:
                     raise ModelHubTransportError("ModelHub is unavailable after retry limit") from None
-            if attempt < self.retries:
+            if attempt < retry_count:
                 delay = min(0.1 * (2**attempt), 1.0)
                 if deadline is not None:
                     remaining = deadline - self._monotonic()
@@ -173,6 +232,7 @@ class ModelHubClient:
         return models
 
     def trigger_retrain(self, req_no: str, payload: dict[str, Any]) -> dict[str, Any]:
+        req_no = _validated_identifier(req_no, "request number")
         if not isinstance(payload, dict):
             raise ModelHubResponseError("ModelHub retrain payload must be an object")
         return self._require_dict(
@@ -181,8 +241,9 @@ class ModelHubClient:
         )
 
     def poll_training_result(self, req_no: str, *, max_wait: float = 300.0, interval: float = 1.0) -> dict[str, Any]:
-        if max_wait < 0 or interval < 0:
-            raise ModelHubConfigurationError("Polling limits must not be negative")
+        req_no = _validated_identifier(req_no, "request number")
+        max_wait = _finite_real(max_wait, "maximum poll wait", minimum=math.nextafter(0.0, 1.0), maximum=300.0)
+        interval = _finite_real(interval, "poll interval", minimum=MIN_POLL_INTERVAL)
         deadline = self._monotonic() + max_wait
         terminal = {"completed", "complete", "succeeded", "success", "failed", "error", "cancelled", "canceled"}
         while True:
@@ -201,6 +262,9 @@ class ModelHubClient:
             self._sleep(min(interval, remaining))
 
     def get_model_path(self, product: str, name: str) -> str:
+        """Return an untrusted artifact path string; callers must not open it without validation."""
+        product = _validated_identifier(product, "product")
+        name = _validated_identifier(name, "model name")
         result = self._require_dict(
             self._request("GET", ("api", "external-models", product, name, "path")),
             "model path",
