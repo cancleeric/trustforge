@@ -1,5 +1,7 @@
 # Trust Kernel Boundary（信任核心邊界）
 
+![Trust Kernel runtime boundary](RUNTIME-BOUNDARY.svg)
+
 > Issue: #381 | Spec: `.kiro/specs/trust-kernel-381.md`
 
 ## 概述

@@ -1,0 +1,86 @@
+@startuml
+title TrustForge System Overview — v0.17.2
+
+left to right direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 12
+skinparam linetype ortho
+skinparam defaultFontName "Noto Sans CJK TC"
+skinparam defaultFontSize 15
+skinparam ArrowColor #475569
+skinparam packageBorderColor #94A3B8
+skinparam packageBackgroundColor #F8FAFC
+
+!define LIVE #DCFCE7
+!define CORE #DBEAFE
+!define CONTROL #EDE9FE
+!define PARTIAL #FEF3C7
+!define BLOCKED #FEE2E2
+
+rectangle "Users\nScheduler · CLI" as users LIVE
+
+package "Experience" {
+  rectangle "React UI" as ui LIVE
+  rectangle "Web API / Lambda" as api LIVE
+}
+
+package "Data acquisition" {
+  rectangle "Live sources\nCoinGecko · RSS · SEC\nBlockchain providers" as sources LIVE
+  rectangle "HOYA BIT\nHistory verified\nLive blocked" as hoya BLOCKED
+  rectangle "Ingestion + Cache\ncollect() · archive" as ingestion LIVE
+}
+
+package "Analysis runtime" {
+  rectangle "Pipeline\nmode · budget · degradation" as pipeline LIVE
+  rectangle "Agent Orchestrator\nclaim · score · narrative · review" as agent LIVE
+  rectangle "Bedrock\nsemantic + narrative" as bedrock LIVE
+}
+
+package "Trust domain" {
+  rectangle "Trust Scoring\ncorroboration · reputation" as scoring CORE
+  rectangle "Calibration\nDawid–Skene" as models CORE
+  rectangle "Kernel v2 Contract\nnot production entry yet" as kernel PARTIAL
+}
+
+package "Delivery" {
+  rectangle "Report + Evidence\nprovenance · limits" as report LIVE
+  rectangle "Snapshots / History" as history LIVE
+}
+
+package "Governance sidecar" {
+  rectangle "Budget + Security\nPIT · evidence gates" as gates LIVE
+  rectangle "Policy + Upgrade\ncontrol plane" as control CONTROL
+  rectangle "Telemetry\npartial coverage" as telemetry PARTIAL
+}
+
+users --> ui
+ui --> api
+api --> pipeline
+sources --> ingestion
+hoya --> ingestion
+ingestion --> pipeline
+pipeline --> agent
+agent --> bedrock
+agent --> scoring
+scoring --> models
+scoring --> report
+report --> history
+
+kernel ..> scoring
+agent ..> kernel
+
+gates -[hidden]-> control
+control -[hidden]-> telemetry
+gates ..> pipeline
+control ..> pipeline
+telemetry ..> agent
+
+legend bottom
+  |<#DCFCE7> Connected runtime |<#DBEAFE> Trust-domain core |
+  |<#EDE9FE> Governance/control |<#FEF3C7> Partial / target |
+  |<#FEE2E2> Blocked |
+endlegend
+
+footer Solid = current call path · Dashed = target or sidecar relationship
+@enduml

@@ -1,0 +1,55 @@
+@startuml
+title TrustForge Upgrade Control — Human-gated, no automatic deployment
+
+left to right direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 12
+skinparam linetype ortho
+skinparam defaultFontName "Noto Sans CJK TC"
+skinparam defaultFontSize 15
+skinparam ArrowColor #475569
+
+!define LIVE #DCFCE7
+!define CONTROL #EDE9FE
+!define PARTIAL #FEF3C7
+!define BLOCKED #FEE2E2
+
+rectangle "Observe\nruntime evidence" as observe PARTIAL
+rectangle "Diagnose\nproposal" as diagnose CONTROL
+rectangle "Sandbox\nreplay + tests" as sandbox CONTROL
+rectangle "Review\nLLM + adversarial" as review CONTROL
+rectangle "Human approval\ncommit-bound attestation" as approve LIVE
+rectangle "Activate\nversion pointer" as activate LIVE
+rectangle "Verify\nhealth + workflow" as verify LIVE
+rectangle "Rollback\nprevious approved revision" as rollback LIVE
+
+observe --> diagnose
+diagnose --> sandbox
+sandbox --> review
+review --> approve
+approve --> activate
+activate --> verify
+verify --> rollback : regression
+rollback --> verify
+
+package "Upgrade windows" {
+  rectangle "Outer policy\nsource · analysis · report\nevaluation · improvement" as policy CONTROL
+  rectangle "Provider adapters\nLLM · cache · source\nobservability · budget" as providers PARTIAL
+  rectangle "Model gate\ncalibrator · RAG · reranker" as model PARTIAL
+  rectangle "Trust Kernel release\nreviewed code only" as core LIVE
+}
+
+policy ..> sandbox
+providers ..> sandbox
+model ..> sandbox
+core ..> review
+
+rectangle "Forbidden\nrecursive upgrade\nautomatic merge\nautomatic production deploy" as forbidden BLOCKED
+forbidden -[hidden]-> approve
+
+note bottom of forbidden
+GitHub production workflows remain disabled.
+Deployment is a separate, explicit human operation.
+end note
+@enduml

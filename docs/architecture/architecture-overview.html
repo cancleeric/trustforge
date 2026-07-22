@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="TrustForge v0.17.2 系統架構、核心邊界、升級控制與可抽取 Agent Platform 能力。">
+  <title>TrustForge Architecture Overview</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: #cbd5e1;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --green: #166534;
+      --green-soft: #dcfce7;
+      --purple: #6d28d9;
+      --purple-soft: #ede9fe;
+      --amber: #92400e;
+      --amber-soft: #fef3c7;
+      --red: #991b1b;
+      --red-soft: #fee2e2;
+      --shadow: 0 12px 32px rgb(15 23 42 / 8%);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1120;
+        --surface: #111827;
+        --text: #e5e7eb;
+        --muted: #a7b0c0;
+        --border: #334155;
+        --accent: #93c5fd;
+        --accent-soft: #172554;
+        --green: #86efac;
+        --green-soft: #052e16;
+        --purple: #c4b5fd;
+        --purple-soft: #2e1065;
+        --amber: #fde68a;
+        --amber-soft: #451a03;
+        --red: #fca5a5;
+        --red-soft: #450a0a;
+        --shadow: 0 12px 32px rgb(0 0 0 / 30%);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", "Noto Sans TC", sans-serif;
+      line-height: 1.65;
+    }
+    a { color: var(--accent); }
+    code {
+      padding: .12rem .35rem;
+      border-radius: .35rem;
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+    .shell { width: min(1480px, calc(100% - 32px)); margin: 0 auto; }
+    header {
+      padding: 56px 0 28px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(135deg, var(--surface), var(--accent-soft));
+    }
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: .82rem;
+      font-weight: 700;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(2rem, 5vw, 4.4rem); line-height: 1.05; }
+    .lede { max-width: 850px; margin: 18px 0 0; color: var(--muted); font-size: 1.08rem; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    .tag {
+      padding: 5px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: .85rem;
+    }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 90%, transparent);
+      backdrop-filter: blur(14px);
+    }
+    nav .shell { display: flex; gap: 22px; overflow-x: auto; padding-block: 12px; }
+    nav a { color: var(--muted); text-decoration: none; white-space: nowrap; font-weight: 650; }
+    nav a:hover { color: var(--text); }
+    main { padding: 30px 0 64px; }
+    section { scroll-margin-top: 70px; margin-top: 38px; }
+    section:first-child { margin-top: 0; }
+    h2 { margin: 0 0 8px; font-size: clamp(1.45rem, 3vw, 2.2rem); }
+    h3 { margin-top: 0; }
+    .section-intro { margin: 0 0 18px; color: var(--muted); max-width: 920px; }
+    .diagram {
+      margin: 0;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: #fff;
+      box-shadow: var(--shadow);
+      overflow: auto;
+    }
+    .diagram img { display: block; width: 100%; height: auto; min-width: 760px; }
+    .diagram figcaption {
+      margin-top: 12px;
+      color: #475569;
+      font-size: .9rem;
+    }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .card {
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+    .card ul { margin-bottom: 0; padding-left: 1.2rem; }
+    .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+    .status { padding: 14px; border-radius: 12px; border: 1px solid var(--border); }
+    .status strong { display: block; margin-bottom: 3px; }
+    .live { background: var(--green-soft); color: var(--green); }
+    .control { background: var(--purple-soft); color: var(--purple); }
+    .partial { background: var(--amber-soft); color: var(--amber); }
+    .blocked { background: var(--red-soft); color: var(--red); }
+    .packages {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .package { padding: 16px; border-left: 5px solid var(--accent); background: var(--surface); }
+    .package strong { display: block; margin-bottom: 5px; }
+    .package span { color: var(--muted); }
+    .source-links { margin-top: 14px; color: var(--muted); font-size: .92rem; }
+    .prose { max-width: 980px; }
+    .prose p { color: var(--muted); }
+    .prose li + li { margin-top: 7px; }
+    .callout {
+      padding: 18px 20px;
+      border-left: 5px solid var(--accent);
+      background: var(--surface);
+    }
+    .next-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 0;
+      list-style: none;
+    }
+    .next-list li {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    footer { padding: 28px 0 44px; border-top: 1px solid var(--border); color: var(--muted); }
+
+    @media (max-width: 850px) {
+      header { padding-top: 38px; }
+      .grid, .packages, .status-grid, .next-list { grid-template-columns: 1fr; }
+      .diagram { margin-inline: -16px; border-radius: 0; }
+    }
+    @media print {
+      nav { display: none; }
+      body, header { background: #fff; color: #000; }
+      section { break-inside: avoid; }
+      .diagram { box-shadow: none; overflow: visible; }
+      .diagram img { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell">
+      <p class="eyebrow">Architecture / Verified implementation map</p>
+      <h1>TrustForge Architecture</h1>
+      <p class="lede">
+        系統執行路徑、Trust Kernel 邊界、升級控制，以及可抽成跨專案共用
+        Agent Platform 的能力。圖中刻意區分「已接線」與「只有介面」。
+      </p>
+      <div class="meta">
+        <span class="tag">v0.17.2</span>
+        <span class="tag">commit 27fe4c5</span>
+        <span class="tag">reviewed 2026-07-22</span>
+        <span class="tag">production workflows disabled</span>
+      </div>
+    </div>
+  </header>
+
+  <nav aria-label="Architecture sections">
+    <div class="shell">
+      <a href="#introduction">Introduction</a>
+      <a href="#why">Why this</a>
+      <a href="#what">What you'll see</a>
+      <a href="#overview">系統總覽</a>
+      <a href="#kernel">Kernel 邊界</a>
+      <a href="#upgrade">升級控制</a>
+      <a href="#platform">Agent Platform</a>
+      <a href="#status">實作狀態</a>
+      <a href="#summary">Summary</a>
+      <a href="#takeaways">Key takeaways</a>
+      <a href="#cleanup">Clean up</a>
+      <a href="#next">What's next</a>
+    </div>
+  </nav>
+
+  <main class="shell">
+    <section id="introduction" class="prose">
+      <h2>Introduction</h2>
+      <p>
+        TrustForge 是一套以多源 Evidence 為輸入、以確定性 Trust Domain 為核心的
+        agent 系統。Agent 負責協調資料取得、語意分析與報告生成；最終信任評分、
+        來源佐證、校準與棄權規則仍由產品自有邏輯控制。
+      </p>
+      <p>
+        本頁描述的是 <code>v0.17.2</code> 的實際程式接線，而不是只畫理想目標。
+        實線代表目前 runtime path，虛線代表規劃中的 adapter、sidecar 或尚未接線能力。
+      </p>
+    </section>
+
+    <section id="why" class="prose">
+      <h2>Why this architecture?</h2>
+      <p>
+        這個架構要同時解決兩件事：讓 agent 能快速替換模型、資料源與治理策略；又不能讓
+        LLM、外框 Skill 或部署工具任意改寫 Trust Kernel。若兩者混在一起，模型升級會
+        改變核心判斷，控制面顯示「active」也可能與真正 production call path 不一致。
+      </p>
+      <div class="callout">
+        <strong>設計原則：</strong> AgentCore 是可替換的 runtime/provider；TrustForge
+        Domain 才是產品護城河。升級外框必須可換，核心判斷必須可重現、可稽核、可回滾。
+      </div>
+    </section>
+
+    <section id="what" class="prose">
+      <h2>What you'll see</h2>
+      <ul>
+        <li>目前 production 的資料、分析、信任計算與交付路徑。</li>
+        <li>Trust Kernel v2 contract 與仍留在 <code>scoring.py</code> 的混合依賴。</li>
+        <li>Provider、Policy、Model 與 Kernel 各自的升級窗口及人類核准閘門。</li>
+        <li>可抽成跨專案 Agent Platform Kit 的通用能力，以及必須留在 TrustForge 的領域能力。</li>
+      </ul>
+    </section>
+
+    <section id="overview">
+      <h2>系統總覽</h2>
+      <p class="section-intro">正式資料流由左至右；治理能力以 sidecar 方式接入，不與 Trust Domain 混為一體。</p>
+      <figure class="diagram">
+        <a href="ARCHITECTURE-OVERVIEW.svg" aria-label="開啟完整尺寸系統總覽">
+          <img src="ARCHITECTURE-OVERVIEW.svg" alt="TrustForge 系統總覽，從使用者、資料源、Pipeline、Agent Orchestrator 到 Trust Domain 與報告交付。">
+        </a>
+        <figcaption>點圖可開啟完整 SVG。實線是目前呼叫路徑；虛線是目標或旁路關係。</figcaption>
+      </figure>
+    </section>
+
+    <section id="kernel">
+      <h2>Trust Kernel 邊界</h2>
+      <p class="section-intro">Kernel v2 已有輸入輸出契約，但 production orchestrator 尚未以 <code>run_kernel()</code> 為入口，核心仍委派給混合 outer assembly 的 <code>scoring.py</code>。</p>
+      <figure class="diagram">
+        <a href="RUNTIME-BOUNDARY.svg" aria-label="開啟完整尺寸 Kernel 邊界圖">
+          <img src="RUNTIME-BOUNDARY.svg" alt="Trust Kernel 現況與目標邊界，顯示 scoring.py 的混合依賴與待抽出的純核心。">
+        </a>
+        <figcaption>紅色邊界規則是硬限制：純核心不得依賴 IO、LLM、環境變數、檔案系統或部署控制。</figcaption>
+      </figure>
+    </section>
+
+    <section id="upgrade">
+      <h2>升級控制</h2>
+      <p class="section-intro">Provider、Policy、Model 與 Kernel 有不同升級窗口，但都必須經 sandbox、review 與人類核准。</p>
+      <figure class="diagram">
+        <a href="UPGRADE-CONTROL-OVERVIEW.svg" aria-label="開啟完整尺寸升級控制圖">
+          <img src="UPGRADE-CONTROL-OVERVIEW.svg" alt="TrustForge 從觀測、診斷、sandbox、審查、人類核准到啟用、驗證與回滾的升級流程。">
+        </a>
+        <figcaption>Recursive upgrade、自動 merge 與自動 production deployment 均被禁止。</figcaption>
+      </figure>
+    </section>
+
+    <section id="platform">
+      <h2>AgentCore 與可重用 Agent Platform</h2>
+      <p class="section-intro">AgentCore 是可替換 runtime/provider，不是 TrustForge Domain。跨專案能力應抽到獨立 platform kit，金融信任演算法則留在產品核心。</p>
+      <figure class="diagram">
+        <a href="AGENT-PLATFORM-BOUNDARY.svg" aria-label="開啟完整尺寸 Agent Platform 邊界圖">
+          <img src="AGENT-PLATFORM-BOUNDARY.svg" alt="AgentCore、通用 Agent Platform Kit、TrustForge Application 與 TrustForge Domain Core 的邊界。">
+        </a>
+        <figcaption>此圖是抽取目標，不代表目前已拆成獨立套件。</figcaption>
+      </figure>
+
+      <div class="grid" style="margin-top:18px">
+        <article class="card">
+          <h3>適合跨專案共用</h3>
+          <ul>
+            <li>Provider ports 與 adapters</li>
+            <li>Policy stage／approve／rollback</li>
+            <li>Module telemetry 與 execution log</li>
+            <li>Upgrade queue／review</li>
+            <li>Budget、安全與 idempotency gates</li>
+            <li>Skill registry</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>應留在 TrustForge</h3>
+          <ul>
+            <li>Trust Score 與 corroboration</li>
+            <li>Source reputation／Dawid–Skene</li>
+            <li>金融方向與操縱語意</li>
+            <li>Calibration／market outcomes</li>
+            <li>Crypto source connectors</li>
+            <li>Evidence／Report 產品契約</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="packages" aria-label="Recommended package boundaries">
+        <div class="package"><strong>agent-platform-kit</strong><span>通用 Agent 維運、治理與 provider 整合</span></div>
+        <div class="package"><strong>trustforge-core</strong><span>確定性信任演算法與金融領域模型</span></div>
+        <div class="package"><strong>trustforge-app</strong><span>Pipeline、API、UI 與部署組裝</span></div>
+      </div>
+    </section>
+
+    <section id="status">
+      <h2>如何判讀實作狀態</h2>
+      <div class="status-grid">
+        <div class="status live"><strong>已接線</strong>正式 runtime 正在呼叫</div>
+        <div class="status control"><strong>控制面</strong>治理、審查或升級登記</div>
+        <div class="status partial"><strong>部分完成</strong>有 contract 或實作，但尚未全面接入</div>
+        <div class="status blocked"><strong>阻擋／待做</strong>Fake、NotImplemented 或外部條件未滿足</div>
+      </div>
+      <p class="source-links">
+        可編輯來源：
+        <a href="ARCHITECTURE-OVERVIEW.puml">System PUML</a> ·
+        <a href="RUNTIME-BOUNDARY.puml">Kernel PUML</a> ·
+        <a href="UPGRADE-CONTROL-OVERVIEW.puml">Upgrade PUML</a> ·
+        <a href="AGENT-PLATFORM-BOUNDARY.puml">Platform PUML</a> ·
+        <a href="ARCHITECTURE-OVERVIEW.md">Markdown notes</a>
+      </p>
+    </section>
+
+    <section id="summary" class="prose">
+      <h2>Summary</h2>
+      <p>
+        TrustForge 已具備完整產品管線、確定性信任計算、外框升級治理與初步 provider
+        abstraction；但 Kernel、provider resolver、policy consumers 與 telemetry coverage
+        尚未全部進入正式 execution path。這些差距在圖中保留為 amber 或 red，而不是提前標綠。
+      </p>
+    </section>
+
+    <section id="takeaways">
+      <h2>Key takeaways</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>核心與 Agent runtime 分離</h3>
+          <p>AgentCore、Bedrock 或未來 runtime 都應透過 adapter 接入，不能成為 Trust Domain 的必要依賴。</p>
+        </article>
+        <article class="card">
+          <h3>登記不等於已接線</h3>
+          <p>模組必須具備 configured、resolved、invoked、verified evidence，才可宣稱 production active。</p>
+        </article>
+        <article class="card">
+          <h3>Kernel 必須維持純計算</h3>
+          <p>IO、LLM、環境變數、檔案、Skill 與 deployment control 都應留在 outer layer。</p>
+        </article>
+        <article class="card">
+          <h3>所有升級都有人類閘門</h3>
+          <p>允許 sandbox、review、activate pointer 與 rollback，但禁止 recursive upgrade 和自動 production deploy。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="cleanup" class="prose">
+      <h2>Clean up</h2>
+      <p>閱讀本頁不會建立任何 AWS 或 production 資源。若為本機預覽啟動靜態伺服器，完成後按 <code>Ctrl+C</code> 停止即可。</p>
+      <p>重新產圖前不需要手動刪除 SVG/PNG；PlantUML 會覆寫同名輸出。若只想移除本機預覽產物，請勿刪除已版控的圖檔與 <code>.puml</code> 原始碼。</p>
+    </section>
+
+    <section id="next" class="prose">
+      <h2>What's next?</h2>
+      <ol class="next-list">
+        <li><strong>完成 Kernel 實體切割</strong><br>讓 orchestrator 正式呼叫純 <code>run_kernel()</code>，並將 outer assembly 移出 scoring。</li>
+        <li><strong>接通 provider composition root</strong><br>讓 pipeline 透過 resolver 選擇 production adapters，不再直接建構 BedrockClient。</li>
+        <li><strong>完成 Policy consumers</strong><br>讓五個 outer family 的核准 policy 真正作用於各自 runtime 模組。</li>
+        <li><strong>補齊 runtime evidence</strong><br>31 個模組都必須有 invocation、revision、fallback 與 verification evidence。</li>
+        <li><strong>抽取 Agent Platform Kit</strong><br>先抽 contracts 與 adapters，再抽治理能力，避免把 TrustForge domain 一起泛化。</li>
+        <li><strong>持續誠實同步文件</strong><br>每次 release 重新產圖並核對公開 references，未接線能力不得提前標示完成。</li>
+      </ol>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">TrustForge architecture source of truth · Generated diagrams are committed alongside PlantUML sources.</div>
+  </footer>
+</body>
+</html>

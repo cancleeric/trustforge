@@ -1,0 +1,79 @@
+@startuml
+title Reusable Agent Platform Boundary — Current code vs extraction target
+
+left to right direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 12
+skinparam linetype ortho
+skinparam defaultFontName "Noto Sans CJK TC"
+skinparam defaultFontSize 14
+skinparam ArrowColor #475569
+
+!define GENERIC #EDE9FE
+!define DOMAIN #DBEAFE
+!define APP #DCFCE7
+!define PARTIAL #FEF3C7
+
+package "External runtimes" {
+  rectangle "AWS AgentCore" as agentcore PARTIAL
+  rectangle "Bedrock" as bedrock APP
+  rectangle "Future agent runtime" as future PARTIAL
+}
+
+package "Reusable Agent Platform Kit\n(candidate extraction — not a package yet)" {
+  rectangle "Provider ports + adapters" as ports GENERIC
+  rectangle "Policy lifecycle\nstage · approve · rollback" as policy GENERIC
+  rectangle "Module telemetry" as telemetry GENERIC
+  rectangle "Upgrade queue + review" as upgrade GENERIC
+  rectangle "Execution log + lineage" as log GENERIC
+  rectangle "Budget · security · idempotency" as guards GENERIC
+  rectangle "Skill registry" as skills GENERIC
+}
+
+package "TrustForge Domain Core" {
+  rectangle "Trust Kernel\nscore · corroboration · abstain" as kernel DOMAIN
+  rectangle "Source reputation\nDawid–Skene" as reputation DOMAIN
+  rectangle "Financial semantics\ndirection · manipulation" as semantics DOMAIN
+  rectangle "Calibration + outcomes" as calibration DOMAIN
+  rectangle "Crypto source connectors" as connectors DOMAIN
+  rectangle "Evidence / Report contracts" as contracts DOMAIN
+}
+
+package "TrustForge Application" {
+  rectangle "Pipeline composition root" as pipeline APP
+  rectangle "Agent orchestrator" as orchestrator APP
+  rectangle "Web / CLI / Scheduler" as entry APP
+}
+
+agentcore ..> ports : adapter
+bedrock ..> ports : adapter
+future ..> ports : adapter
+
+ports --> pipeline
+policy --> pipeline
+telemetry --> pipeline
+upgrade --> policy
+log --> pipeline
+guards --> pipeline
+skills --> policy
+
+connectors --> pipeline
+pipeline --> orchestrator
+orchestrator --> kernel
+kernel --> reputation
+kernel --> semantics
+kernel --> calibration
+kernel --> contracts
+entry --> pipeline
+
+note bottom of ports
+AgentCore is one provider/runtime integration.
+It is not the TrustForge domain and should be replaceable.
+end note
+
+note bottom of kernel
+Domain algorithms remain product-owned.
+They must not move into the generic agent kit.
+end note
+@enduml
