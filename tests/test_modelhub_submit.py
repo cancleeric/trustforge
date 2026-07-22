@@ -479,6 +479,35 @@ def test_dry_run_log_rejects_symlinked_output_directory(tmp_path):
     assert list(target.iterdir()) == []
 
 
+def test_nested_output_creation_fsync_failure_stops_before_modelhub_network(
+    tmp_path, monkeypatch
+):
+    rows = write_rows(tmp_path / "training")
+    built = []
+    real_fsync = __import__("os").fsync
+    directory_fsyncs = 0
+
+    def fail_nested_entry(descriptor):
+        nonlocal directory_fsyncs
+        import stat
+        if stat.S_ISDIR(__import__("os").fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 2:
+                raise OSError("nested entry fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_nested_entry)
+    out = tmp_path / "missing" / "nested" / "proposals"
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path / "training", out_dir=out, req_no="REQ",
+        client_factory=lambda: built.append(1) or FakeClient(rows),
+    )
+    assert result["status"] == "error"
+    assert result["manifest_updated"] is False
+    assert built == []
+    assert not (out / "BTC.json").exists()
+
+
 def test_execution_log_is_immutable_and_cannot_overwrite_same_run(tmp_path):
     from trustforge.execlog import ExecutionLog
 

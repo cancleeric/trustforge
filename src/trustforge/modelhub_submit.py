@@ -137,7 +137,7 @@ def submit_calibrator_training(
                 opaque_id_factory=opaque_id_factory, execution_log_writer=execution_log_writer,
                 out_dir_fd=out_dir_fd,
             )
-    except SafePathError:
+    except (SafePathError, OSError):
         normalized_coin = coin.upper() if isinstance(coin, str) and re.fullmatch(r"[A-Za-z0-9]{2,10}", coin) else ""
         log = execution_log or ExecutionLog()
         return _summary(

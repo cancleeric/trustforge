@@ -4,6 +4,7 @@ import stat
 import pytest
 
 from trustforge.safe_fs import read_regular_file, write_atomic
+from trustforge.safe_fs import pinned_directory
 
 
 def _require_dirfd_support():
@@ -128,3 +129,44 @@ def test_persistent_directory_fsync_failure_is_explicit(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="publication and rollback directory fsync failed"):
         write_atomic(target, b"new", immutable=False)
     assert target.read_bytes() == b"old"
+
+
+def test_nested_directory_creation_fsyncs_each_new_parent_entry(tmp_path, monkeypatch):
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def count_directory_fsync(descriptor):
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", count_directory_fsync)
+    nested = tmp_path / "one" / "two" / "three"
+    with pinned_directory(nested, create=True) as descriptor:
+        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+    assert nested.is_dir()
+    assert directory_fsyncs == 3
+
+
+def test_nested_directory_creation_fsync_failure_propagates(tmp_path, monkeypatch):
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def fail_second_new_entry(descriptor):
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 2:
+                raise OSError("new directory entry fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_second_new_entry)
+    nested = tmp_path / "one" / "two" / "three"
+    with pytest.raises(OSError, match="new directory entry fsync failed"):
+        with pinned_directory(nested, create=True):
+            pass
+    assert directory_fsyncs == 2
+    # A just-created entry may remain after an fsync error; it was never
+    # reported as a successfully pinned durable path.
+    assert not nested.exists()
