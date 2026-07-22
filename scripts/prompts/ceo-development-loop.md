@@ -20,7 +20,9 @@ Mandatory sequence:
    Otherwise create a branch from the detached `origin/develop` head named
    `codex/issue-<number>-<short-slug>`. Implement the smallest complete change with tests.
 5. Run focused tests, lint/build where applicable, and `git diff --check`. Perform an eye
-   scan for UI changes. Run a commit-bound adversarial review and fix every finding.
+   scan or breaking-change analysis. Run a commit-bound `/codex-review` adversarial review
+   and fix every finding. When the parent opens a PR it must request at least one reviewer.
+   Security-related changes require harper (CISO) and gray (CPO) review before merge.
 6. Commit the verified change locally. Do not access GitHub, open/update a PR, push, merge,
    or deploy. The parent runner will record the local commit for later reviewed handling.
 
