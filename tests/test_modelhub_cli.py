@@ -1,8 +1,65 @@
 import json
+import hashlib
 
 import pytest
 
 from trustforge import cli
+from trustforge.execlog import ExecutionLog
+
+
+def _write_reference(directory, *, run_id="run-a", coin="BTC", status="dry_run", filename=None):
+    log = ExecutionLog(run_id=run_id)
+    log.record(
+        "modelhub.training.terminal",
+        {"coin": coin, "stage": "terminal", "status": status},
+        "terminal",
+    )
+    encoded = log.to_jsonl().encode()
+    name = filename or f"execution-{run_id}.jsonl"
+    (directory / name).write_bytes(encoded)
+    return {
+        "run_id": run_id, "coin": coin, "status": status,
+        "execution_log_file": name, "execution_log_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize("mutation", ["run", "coin", "status", "missing_terminal", "invalid_json"])
+def test_execution_reference_binds_jsonl_to_result(tmp_path, mutation):
+    result = _write_reference(tmp_path)
+    if mutation == "run":
+        result["run_id"] = "run-b"
+    elif mutation == "coin":
+        result["coin"] = "ETH"
+    elif mutation == "status":
+        result["status"] = "candidate"
+    elif mutation == "missing_terminal":
+        path = tmp_path / result["execution_log_file"]
+        encoded = path.read_bytes().splitlines()[0] + b"\n"
+        path.write_bytes(encoded)
+        result["execution_log_sha256"] = hashlib.sha256(encoded).hexdigest()
+    else:
+        path = tmp_path / result["execution_log_file"]
+        path.write_bytes(b"not json\n")
+        result["execution_log_sha256"] = hashlib.sha256(b"not json\n").hexdigest()
+    assert cli._valid_modelhub_execution_reference(tmp_path, result) is False
+
+
+def test_execution_reference_rejects_valid_log_renamed_across_run(tmp_path):
+    result = _write_reference(tmp_path, run_id="run-a", filename="execution-run-b.jsonl")
+    assert cli._valid_modelhub_execution_reference(tmp_path, result) is False
+
+
+def test_execution_reference_rejects_duplicate_contradictory_terminal(tmp_path):
+    result = _write_reference(tmp_path)
+    path = tmp_path / result["execution_log_file"]
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    contradictory = json.loads(json.dumps(events[-1]))
+    contradictory["params"]["status"] = "error"
+    events.insert(-1, contradictory)
+    encoded = "\n".join(json.dumps(event, ensure_ascii=False) for event in events).encode()
+    path.write_bytes(encoded)
+    result["execution_log_sha256"] = hashlib.sha256(encoded).hexdigest()
+    assert cli._valid_modelhub_execution_reference(tmp_path, result) is False
 
 
 def test_cli_requires_exactly_one_coin_target():

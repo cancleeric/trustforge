@@ -6,7 +6,7 @@ import hashlib
 
 from trustforge.calibration_metrics import judge_direction_hit, weighted_ece
 from trustforge.modelhub_client import ModelHubHTTPError, ModelHubPollTimeout, ModelHubTransportError
-from trustforge.modelhub_submit import persist_execution_log, submit_calibrator_training
+from trustforge.modelhub_submit import persist_execution_log, submit_calibrator_training, write_current_manifest
 
 
 def write_rows(directory, coin="BTC", count=100):
@@ -131,6 +131,19 @@ def test_opaque_tokens_are_per_run_random_and_collision_fails(tmp_path):
         opaque_id_factory=lambda: reserved, out_dir=tmp_path / "reserved",
     )
     assert reserved_result["status"] == "error" and reserved_built == []
+
+
+@pytest.mark.parametrize("raw_length,expected", [(248, "candidate"), (249, "error"), (256, "error")])
+def test_opaque_token_limit_applies_to_final_prefixed_identifier(tmp_path, raw_length, expected):
+    rows = write_rows(tmp_path)
+    counter = iter(range(1000))
+    # Keep every token unique without changing its requested boundary length.
+    factory = lambda: f"{next(counter):04d}" + "x" * (raw_length - 4)
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: FakeClient(rows),
+        opaque_id_factory=factory, out_dir=tmp_path / f"out-{raw_length}",
+    )
+    assert result["status"] == expected
 
 
 def test_injected_opaque_tokens_do_not_depend_on_holdout_labels_or_features(tmp_path):
@@ -426,6 +439,45 @@ def test_failure_current_replace_error_is_reported_not_silenced(tmp_path, monkey
     assert result["status"] == "error" and result["coin"] == "BTC"
     assert result["manifest_updated"] is False and result["reason"] == "manifest_update_failed"
     assert result["execution_log_file"] and len(result["execution_log_sha256"]) == 64
+    events = [json.loads(line) for line in (tmp_path / "out" / result["execution_log_file"]).read_text().splitlines()]
+    assert events[-1]["tool"] == "modelhub.training.terminal"
+    assert events[-1]["params"]["status"] == result["status"] == "error"
+
+
+def test_directory_fsync_failure_does_not_report_manifest_published(tmp_path, monkeypatch):
+    rows = write_rows(tmp_path / "training")
+    real_fsync = __import__("os").fsync
+
+    def fail_directory(descriptor):
+        import stat
+        if stat.S_ISDIR(__import__("os").fstat(descriptor).st_mode):
+            raise OSError("directory fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_directory)
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path / "training", req_no="REQ",
+        client_factory=lambda: FakeClient(rows), out_dir=tmp_path / "out",
+    )
+    assert result["status"] == "error"
+    assert result["manifest_updated"] is False
+
+
+def test_current_directory_fsync_failure_rolls_back_destination(tmp_path, monkeypatch):
+    current = tmp_path / "BTC.json"
+    current.write_bytes(b'{"old":true}')
+    real_fsync = __import__("os").fsync
+
+    def fail_directory(descriptor):
+        import stat
+        if stat.S_ISDIR(__import__("os").fstat(descriptor).st_mode):
+            raise OSError("directory fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_directory)
+    with pytest.raises(OSError, match="directory fsync"):
+        write_current_manifest(tmp_path, "BTC", {"status": "candidate"})
+    assert current.read_bytes() == b'{"old":true}'
 
 
 def test_metrics_and_shared_direction_semantics():

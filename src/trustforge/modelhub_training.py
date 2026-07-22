@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import math
 import os
-import stat
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from .calibrator_gate import calibrator_model_gate_status, evaluate_calibrator_gate
 from .calibration_metrics import judge_direction_hit
+from .safe_fs import SafePathError, read_regular_file
 
 _CANDIDATES = ("sklearn-logreg", "isotonic")
 _FEATURE_CONTRACT = (
@@ -47,57 +48,24 @@ def _finite_number(value: Any) -> float | None:
     return converted if math.isfinite(converted) else None
 
 
-def _safe_input_path(path: Path) -> Path:
-    absolute = Path(os.path.abspath(path))
-    current = Path(absolute.anchor)
-    for component in absolute.parts[1:]:
-        current /= component
-        info = os.lstat(current)
-        if stat.S_ISLNK(info.st_mode):
-            raise TrainingDataError("training path contains a symlink")
-    return absolute
-
-
 def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
     """Load the strict, version-controlled flat JSONL contract for one coin."""
     expected = coin.upper()
     candidates: dict[str, list[tuple[tuple[Any, ...], dict[str, Any], tuple[Any, ...]]]] = {}
     base_required = {"date", "coin", "direction"}
     label_fields = {"outcome_pct", "ground_truth_direction", "split"}
-    descriptor: int | None = None
     try:
-        path = _safe_input_path(path)
-        path_stat = os.lstat(path)
-        if stat.S_ISLNK(path_stat.st_mode):
-            raise TrainingDataError("training data symlinks are not allowed")
-        flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
-        file_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(file_stat.st_mode):
-            os.close(descriptor)
-            descriptor = None
-            raise TrainingDataError("training data must be a regular file")
-        if (path_stat.st_dev, path_stat.st_ino) != (file_stat.st_dev, file_stat.st_ino):
-            os.close(descriptor)
-            descriptor = None
-            raise TrainingDataError("training data identity changed during open")
-        if file_stat.st_size > MAX_TRAINING_FILE_BYTES:
-            os.close(descriptor)
-            descriptor = None
-            raise TrainingDataError("training data exceeds file size limit")
-        handle = os.fdopen(descriptor, "rb")
-        descriptor = None
-    except OSError:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        encoded, _ = read_regular_file(path, maximum_bytes=MAX_TRAINING_FILE_BYTES)
+    except (OSError, SafePathError) as exc:
+        message = str(exc).lower()
+        if "symlink" in message or getattr(exc, "errno", None) == errno.ELOOP:
+            raise TrainingDataError("training path contains a symlink") from None
+        if "regular" in message:
+            raise TrainingDataError("training data must be a regular file") from None
         raise TrainingDataError("training data is unavailable") from None
     eligible_candidates = 0
     streamed_bytes = 0
-    with handle:
-        for line_number, encoded_line in enumerate(handle, 1):
+    for line_number, encoded_line in enumerate(encoded.splitlines(keepends=True), 1):
             streamed_bytes += len(encoded_line)
             if streamed_bytes > MAX_TRAINING_FILE_BYTES:
                 raise TrainingDataError("training data exceeds file size limit")

@@ -6,8 +6,6 @@ import hashlib
 import os
 import re
 import secrets
-import stat
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +23,7 @@ from .modelhub_training import (
     build_flat_training_package,
     load_flat_training_rows,
 )
+from .safe_fs import SafePathError, pinned_directory, write_atomic
 
 MIN_ECE_IMPROVEMENT = 0.02
 MAX_OUTBOUND_PAYLOAD_BYTES = 8 * 1024 * 1024
@@ -36,26 +35,11 @@ def _summary(status: str, coin: str, **values: Any) -> dict[str, Any]:
     return {"status": status, "coin": coin, **values}
 
 
-class SafePathError(OSError):
-    pass
-
-
 def ensure_safe_directory(path: Path) -> Path:
-    """Create a directory one component at a time while rejecting all symlinks."""
+    """Compatibility validator; security-sensitive operations use the returned dirfd."""
     absolute = Path(os.path.abspath(path))
-    current = Path(absolute.anchor)
-    for component in absolute.parts[1:]:
-        current /= component
-        try:
-            info = os.lstat(current)
-        except FileNotFoundError:
-            try:
-                os.mkdir(current)
-            except FileExistsError:
-                pass
-            info = os.lstat(current)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise SafePathError("output path contains a symlink or non-directory component")
+    with pinned_directory(absolute, create=True):
+        pass
     return absolute
 
 
@@ -64,14 +48,8 @@ def _safe_run_id(run_id: str) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    except OSError:
-        pass
+    with pinned_directory(path) as descriptor:
+        os.fsync(descriptor)
 
 
 def _candidate_predictions(result: dict[str, Any], holdout: list[dict[str, Any]]) -> list[float]:
@@ -96,22 +74,8 @@ def _candidate_predictions(result: dict[str, Any], holdout: list[dict[str, Any]]
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    safe_parent = ensure_safe_directory(path.parent)
-    path = safe_parent / path.name
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(safe_parent)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    write_atomic(path, encoded, immutable=False)
 
 
 def write_current_manifest(out_dir: Path, coin: str, value: dict[str, Any]) -> None:
@@ -127,23 +91,7 @@ def _immutable_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _immutable_bytes(path: Path, encoded: bytes) -> None:
-    safe_parent = ensure_safe_directory(path.parent)
-    path = safe_parent / path.name
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=safe_parent)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.link(temporary, path)
-        os.unlink(temporary)
-        _fsync_directory(safe_parent)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
+    write_atomic(path, encoded, immutable=True)
 
 
 def persist_execution_log(out_dir: Path, log: ExecutionLog) -> tuple[str, str]:
@@ -152,6 +100,23 @@ def persist_execution_log(out_dir: Path, log: ExecutionLog) -> tuple[str, str]:
     filename = f"execution-{_safe_run_id(log.run_id)}.jsonl"
     _immutable_bytes(Path(out_dir) / filename, encoded)
     return filename, hashlib.sha256(encoded).hexdigest()
+
+
+def _persist_failure_execution_log(out_dir: Path, log: ExecutionLog) -> tuple[str, str]:
+    encoded = log.to_jsonl().encode("utf-8")
+    filename = f"execution-{_safe_run_id(log.run_id)}-error.jsonl"
+    _immutable_bytes(Path(out_dir) / filename, encoded)
+    return filename, hashlib.sha256(encoded).hexdigest()
+
+
+def _replace_terminal(log: ExecutionLog, status: str, record: Callable[..., None]) -> None:
+    """Replace the uncommitted in-memory terminal after publication fails."""
+    if log.events:
+        params = log.events[-1].get("params", {})
+        if log.events[-1].get("tool") == "modelhub.training.terminal" and params.get("stage") == "terminal":
+            log.events.pop()
+    record("manifest_update_failed", status="error")
+    record("terminal", status=status)
 
 
 def submit_calibrator_training(
@@ -215,13 +180,17 @@ def submit_calibrator_training(
                 write_current_manifest(Path(out_dir), normalized_coin, current)
                 result["manifest_updated"] = True
             except (OSError, TypeError, ValueError):
-                record("manifest_update_failed", status="error")
-                record("terminal", status="error")
-                return _summary(
+                _replace_terminal(log, "error", record)
+                failure = _summary(
                     "error", normalized_coin, run_id=log.run_id, manifest_updated=False,
-                    reason="manifest_update_failed", execution_log_file=log_file,
-                    execution_log_sha256=log_sha,
+                    reason="manifest_update_failed",
                 )
+                try:
+                    failure_file, failure_sha = _persist_failure_execution_log(Path(out_dir), log)
+                    failure.update(execution_log_file=failure_file, execution_log_sha256=failure_sha)
+                except (OSError, TypeError, ValueError):
+                    failure["reason"] = "log_persistence_failed"
+                return failure
         return result
 
     if not re.fullmatch(r"[A-Z0-9]{2,10}", normalized_coin):
@@ -257,8 +226,8 @@ def submit_calibrator_training(
             if (
                 isinstance(candidate, str)
                 and candidate
-                and len(candidate) <= 256
-                and not any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+                and len(prefixed_candidate) <= 256
+                and not any(ord(character) < 32 or ord(character) == 127 for character in prefixed_candidate)
                 and candidate not in reserved_ids
                 and prefixed_candidate not in reserved_ids
                 and prefixed_candidate not in opaque_ids
@@ -391,12 +360,20 @@ def submit_calibrator_training(
         }
         write_current_manifest(Path(out_dir), normalized_coin, current)
     except (OSError, TypeError, ValueError):
+        if not (log_file and log_sha):
+            return finish("error", persist_current=False, reason="candidate_publication_failed", manifest_updated=False)
+        if log_file and log_sha:
+            _replace_terminal(log, "error", record)
         failure = _summary(
             "error", normalized_coin, run_id=log.run_id, manifest_updated=False,
             reason="candidate_publication_failed",
         )
         if log_file and log_sha:
-            failure.update(execution_log_file=log_file, execution_log_sha256=log_sha)
+            try:
+                failure_file, failure_sha = _persist_failure_execution_log(Path(out_dir), log)
+                failure.update(execution_log_file=failure_file, execution_log_sha256=failure_sha)
+            except (OSError, TypeError, ValueError):
+                failure["reason"] = "log_persistence_failed"
         return failure
     return _summary(
         "candidate", normalized_coin, run_id=log.run_id, proposal=proposal,

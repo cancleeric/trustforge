@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -435,7 +436,7 @@ def _write_modelhub_error_current(
 
 
 def _valid_modelhub_execution_reference(out_dir: Path, result: dict) -> bool:
-    from .modelhub_submit import ensure_safe_directory
+    from .safe_fs import read_regular_file
 
     filename = result.get("execution_log_file")
     expected_sha = result.get("execution_log_sha256")
@@ -444,18 +445,44 @@ def _valid_modelhub_execution_reference(out_dir: Path, result: dict) -> bool:
     if not isinstance(expected_sha, str) or len(expected_sha) != 64:
         return False
     try:
-        safe_out_dir = ensure_safe_directory(out_dir)
-    except OSError:
+        encoded, _ = read_regular_file(Path(out_dir) / filename, maximum_bytes=8 * 1024 * 1024)
+        events = [json.loads(line) for line in encoded.splitlines() if line.strip()]
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, RecursionError):
         return False
-    path = safe_out_dir / filename
-    try:
-        info = os.lstat(path)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    run_id = result.get("run_id")
+    coin = result.get("coin")
+    status = result.get("status")
+    if (
+        not events or not isinstance(run_id, str) or not isinstance(coin, str)
+        or hashlib.sha256(encoded).hexdigest() != expected_sha
+    ):
+        return False
+    safe_run_id = (
+        run_id if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id)
+        else hashlib.sha256(run_id.encode()).hexdigest()
+    )
+    allowed_names = {f"execution-{safe_run_id}.jsonl"}
+    if status == "error":
+        allowed_names.add(f"execution-{safe_run_id}-error.jsonl")
+    if filename not in allowed_names:
+        return False
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("params"), dict):
             return False
-        encoded = path.read_bytes()
-    except OSError:
-        return False
-    return hashlib.sha256(encoded).hexdigest() == expected_sha
+        hermes = event["params"].get("hermes")
+        if not isinstance(hermes, dict) or hermes.get("run_id") != run_id:
+            return False
+    terminals = [
+        event for event in events
+        if event.get("tool") == "modelhub.training.terminal"
+        and event["params"].get("stage") == "terminal"
+    ]
+    return bool(
+        len(terminals) == 1
+        and terminals[-1] is events[-1]
+        and terminals[-1]["params"].get("coin") == coin
+        and terminals[-1]["params"].get("status") == status
+    )
 
 
 def cmd_modelhub_train(args: argparse.Namespace) -> int:
@@ -497,7 +524,7 @@ def cmd_modelhub_train(args: argparse.Namespace) -> int:
         except Exception as exc:
             invalid_result = True
             log.record(
-                "modelhub.training.error",
+                "modelhub.training.terminal",
                 {
                     "coin": coin, "stage": "terminal", "status": "error",
                     "exception_type": type(exc).__name__,
@@ -515,7 +542,7 @@ def cmd_modelhub_train(args: argparse.Namespace) -> int:
         ):
             invalid_result = True
             log.record(
-                "modelhub.training.error",
+                "modelhub.training.terminal",
                 {
                     "coin": coin, "stage": "terminal", "status": "error",
                     "exception_type": "InvalidResult",
