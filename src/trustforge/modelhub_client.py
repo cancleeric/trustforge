@@ -50,6 +50,13 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("non-finite JSON number")
 
 
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
         return None
@@ -182,7 +189,11 @@ class ModelHubClient:
         if len(raw) > self.max_response_bytes:
             raise ModelHubResponseError("ModelHub response exceeded the configured size limit")
         try:
-            return json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+            return json.loads(
+                raw.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+                parse_float=_parse_finite_float,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             raise ModelHubResponseError("ModelHub returned malformed JSON") from None
 

@@ -308,6 +308,25 @@ def test_inbound_non_finite_json_is_rejected_without_cause(constant):
     assert secret not in "".join(traceback.format_exception(caught.value))
 
 
+@pytest.mark.parametrize(
+    "body",
+    [b"1e9999", b"-1e9999", b'{"models":[{"score":1e9999}]}', b'{"models":[{"values":[-1e9999]}]}'],
+)
+def test_inbound_exponent_overflow_is_rejected_without_cause(body):
+    secret = "exponent-secret"
+    with pytest.raises(ModelHubResponseError) as caught:
+        ModelHubClient(api_key=secret, opener=Opener(body)).list_models()
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert secret not in "".join(traceback.format_exception(caught.value))
+
+
+def test_inbound_normal_decimal_keeps_float_semantics():
+    models = ModelHubClient(opener=Opener({"models": [{"score": 0.125, "loss": -1.5e-3}]})).list_models()
+    assert models == [{"score": 0.125, "loss": -0.0015}]
+    assert isinstance(models[0]["score"], float)
+
+
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
 def test_outbound_non_finite_json_is_rejected_without_request(value):
     secret = "payload-secret"
