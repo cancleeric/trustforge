@@ -28,9 +28,17 @@ from .corroboration import (
 )
 from .dawid_skene import LABELS, N_LABELS, em_source_reliability
 from .scoring import (
+    DEFAULT_HALF_LIVES,
+    DEFAULT_SCORE_WEIGHTS,
+    DEFAULT_SOURCE_REPUTATIONS,
+    corroboration_score,
     interpolate_calibration,
+    manipulation_flags,
+    manipulation_hits,
+    manipulation_penalty,
     recency_decay,
     reputation_floor,
+    score_claim,
     source_reputation,
     stable_sigmoid,
 )
@@ -57,9 +65,17 @@ __all__ = [
     "LABELS",
     "N_LABELS",
     "em_source_reliability",
+    "DEFAULT_HALF_LIVES",
+    "DEFAULT_SCORE_WEIGHTS",
+    "DEFAULT_SOURCE_REPUTATIONS",
+    "corroboration_score",
     "interpolate_calibration",
+    "manipulation_flags",
+    "manipulation_hits",
+    "manipulation_penalty",
     "recency_decay",
     "reputation_floor",
+    "score_claim",
     "source_reputation",
     "stable_sigmoid",
 ]
