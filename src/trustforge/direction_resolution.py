@@ -100,6 +100,8 @@ def _validated_claims(
     revalidated: list[KernelClaim] = []
     for claim in normalized:
         document = claim.document
+        if type(document) is not KernelDocument:
+            continue
         try:
             clean_document = KernelDocument(
                 id=document.id,

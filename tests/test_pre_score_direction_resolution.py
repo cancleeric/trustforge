@@ -214,6 +214,31 @@ def test_tampered_document_graph_never_reaches_semantic_provider(field, value):
     assert result.value == "unknown"
 
 
+def test_hostile_nested_document_is_rejected_before_any_attribute_hook():
+    hooks = 0
+
+    class HostileDocument:
+        def __getattribute__(self, _name):
+            nonlocal hooks
+            hooks += 1
+            raise AssertionError("hostile document attribute was read")
+
+    claim = _claim("n", kind="news")
+    object.__setattr__(claim, "document", HostileDocument())
+    callbacks = 0
+
+    def provider(_evidence):
+        nonlocal callbacks
+        callbacks += 1
+        return [DirectionVote("news", "bullish", 0.9, "must not run")]
+
+    result = resolve_direction(
+        [claim], coin="BTC", pit_epoch=PIT, semantic_provider=provider
+    )
+    assert hooks == callbacks == 0
+    assert result.value == "unknown"
+
+
 def test_daily_closes_take_priority_over_return_facts():
     claims = [
         _claim("old", meta={"date": "2026-07-01", "close": 100}),
