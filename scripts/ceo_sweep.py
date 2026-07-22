@@ -244,7 +244,7 @@ def build_report(max_lanes: int = 1) -> dict:
         },
         {
             "q": "是否有 PR 卡住 merge gate？",
-            "a": "每個 PR 必須有 reviewer、CI 綠、eye scan 與 /codex-review 紀錄；缺任一項不得 merge。",
+            "a": "每個 PR 開立時必須指定 reviewer；merge 前必須有 CI 綠、eye scan、/codex-review 紀錄。安全相關修改另需 harper(CISO)+gray(CPO) 雙審；缺任一項不得 merge。",
         },
     ]
     development_plan = {
@@ -268,11 +268,15 @@ def build_report(max_lanes: int = 1) -> dict:
             {"owner": "deputy-implementation", "role": "background subagent", "action": "handle approved scoped code work without blocking CEO interaction"},
             {"owner": "harper", "role": "CISO", "action": "review security-sensitive changes before merge"},
         ],
+        "pr_open_guardrails": [
+            "reviewer request required when every PR is opened",
+            "leave PR open for human review unless explicit merge approval exists",
+        ],
         "merge_guardrails": [
-            "reviewer required on every PR",
-            "eye scan required before merge",
-            "/codex-review required before merge",
-            "security changes require harper plus /codex-review",
+            "reviewer approval required before merge",
+            "eye scan or breaking-change analysis required before merge",
+            "/codex-review adversarial review required before merge",
+            "security changes require harper (CISO) plus gray (CPO) review before merge",
         ],
         "automation_boundary": "runner may dispatch issue lanes; production, main merges, releases, secrets and cost changes remain forbidden",
     }

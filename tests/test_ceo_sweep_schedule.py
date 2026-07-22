@@ -590,10 +590,32 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
     assert "secrets" in prompt
     assert "cost caps" in prompt
     assert "never bypass that hook" in prompt
+    assert "/codex-review" in prompt
+    assert "request at least one reviewer" in prompt
+    assert "harper (ciso) and gray (cpo)" in prompt
     installer = (ROOT / "scripts/install_ceo_half_hour_schedule.sh").read_text()
     template = (ROOT / "scripts/templates/com.hurricanesoft.trustforge-ceo-sweep.plist.in").read_text()
     assert "command -v gh" in installer
     assert "install_launch_agent.py" in installer
+
+
+def test_ceo_sweep_report_exposes_pr_open_and_merge_review_gates(monkeypatch):
+    module = _load_script("ceo_sweep_review_gates", "ceo_sweep.py")
+    monkeypatch.setattr(module, "_json_cmd", lambda _args: [])
+
+    report = module.build_report(max_lanes=1)
+    development_plan = report["development_plan"]
+
+    assert development_plan["pr_open_guardrails"] == [
+        "reviewer request required when every PR is opened",
+        "leave PR open for human review unless explicit merge approval exists",
+    ]
+    assert "eye scan or breaking-change analysis required before merge" in development_plan["merge_guardrails"]
+    assert "/codex-review adversarial review required before merge" in development_plan["merge_guardrails"]
+    assert (
+        "security changes require harper (CISO) plus gray (CPO) review before merge"
+        in development_plan["merge_guardrails"]
+    )
 
 
 def test_ci_is_manual_and_pre_push_is_full_local_gate():
