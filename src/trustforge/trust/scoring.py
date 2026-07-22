@@ -23,6 +23,14 @@ import time as _time_mod
 from dataclasses import dataclass, field
 from typing import Callable
 
+from trustforge_core.scoring import (
+    interpolate_calibration as _interpolate_calibration,
+    recency_decay as _core_recency_decay,
+    reputation_floor as _core_reputation_floor,
+    source_reputation as _core_source_reputation,
+    stable_sigmoid as _core_stable_sigmoid,
+)
+
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
 from ..ingestion.base import Document, _coins_mentioned, _matches_coin, _mentions_coin
 from .dawid_skene import LABELS as _DS_LABELS, em_source_reliability
@@ -90,7 +98,7 @@ def _reputation_floor(kind: str) -> float:
     不低於 ~0.1」；price/onchain 最高 ≈0.29，依序遞減，未知 kind 保守回退 0.35 基礎
     → floor≈0.105，等同 social 下限，不給未知來源類型更高保障）。
     """
-    return round(0.3 * KIND_REPUTATION.get(kind, 0.35), 4)
+    return _core_reputation_floor(kind, KIND_REPUTATION)
 
 
 # 各 kind 的 recency 半衰期（小時）。鯨魚/名人交易信號時效性極強（市場秒級反應），
@@ -236,23 +244,13 @@ def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) ->
     meta["verified_onchain"]=False 的未驗證宣告自動降級至 social 等級 0.35，
     防止未經鏈上驗證的名人喊單獲得過高信任。
     """
-    base = KIND_REPUTATION.get(c.doc.kind, 0.5)
-    # 名人交易動態降級：未經鏈上驗證者降至 social 等級
-    if c.doc.kind == "celebrity_trade" and not c.doc.meta.get("verified_onchain", False):
-        base = KIND_REPUTATION.get("social", 0.35)
-    # 來源層級覆寫（白名單/黑名單）
-    override = c.doc.meta.get("reputation")
-    prior = float(override) if override is not None else base
-    if dynamic_map is None:
-        return prior
-    # issue #72/#132：dynamic_map 的 key 是 canonical source（見
-    # `_iterate_source_reputation` 分組口徑），查表也走 canonical，避免同源
-    # 大小寫/空白變體查不到先驗值、被誤當成未知來源。
-    dynamic_sr = dynamic_map.get(_canonical_source(c.doc.source), prior)
-    # 名人交易動態降級：即使 dynamic_map 給了較高信譽，未驗證者仍不得超過 social 等級
-    if c.doc.kind == "celebrity_trade" and not c.doc.meta.get("verified_onchain", False):
-        return min(dynamic_sr, KIND_REPUTATION.get("social", 0.35))
-    return dynamic_sr
+    return _core_source_reputation(
+        kind=c.doc.kind,
+        source_key=_canonical_source(c.doc.source),
+        metadata=c.doc.meta,
+        reputations=KIND_REPUTATION,
+        dynamic=dynamic_map,
+    )
 
 
 def _recency_decay(c: Claim, now: float, half_life_h: float | None = None) -> float:
@@ -294,14 +292,11 @@ def _recency_decay(c: Claim, now: float, half_life_h: float | None = None) -> fl
     """
     if half_life_h is None:
         half_life_h = KIND_HALFLIFE_HOURS.get(c.doc.kind, 12.0)
-    if not c.doc.ts:
-        return 0.5
-    if not math.isfinite(c.doc.ts) or not math.isfinite(now):
-        return 0.5
-    age_h = (now - c.doc.ts) / 3600.0
-    if not math.isfinite(age_h) or age_h < 0:
-        return 0.5
-    return math.pow(0.5, age_h / half_life_h)
+    return _core_recency_decay(
+        timestamp=c.doc.ts,
+        now=now,
+        half_life_hours=half_life_h,
+    )
 
 
 # 明確否定結構(不吃「不僅/不斷/不只」這類肯定副詞)。命中前 4 字內出現才視為否定。
@@ -1073,8 +1068,7 @@ def _stable_sigmoid(x: float, clamp: float = 30.0) -> float:
     `_iterate_source_reputation` 內的 `agree_union_of`/`contra_union_of`）雙重
     保險：正常情境下去重後的 net 本身就有界，這裡的 clamp 是最後一道防線。
     """
-    xc = max(-clamp, min(clamp, x))
-    return 1.0 / (1.0 + math.exp(-xc))
+    return _core_stable_sigmoid(x, clamp=clamp)
 
 
 def _reputation_evidence(
@@ -1701,18 +1695,7 @@ def _calibrate_confidence(raw: float) -> float:
         return apply_calibration(x, model)
 
     # Fallback：硬編碼查表
-    table = _CALIBRATION_TABLE
-    if x <= table[0][0]:
-        return table[0][1]
-    if x >= table[-1][0]:
-        return table[-1][1]
-    for (x0, y0), (x1, y1) in zip(table, table[1:]):
-        if x0 <= x <= x1:
-            if x1 == x0:  # 防禦性：表若有重複 x 值不除以 0
-                return y0
-            ratio = (x - x0) / (x1 - x0)
-            return round(y0 + ratio * (y1 - y0), 4)
-    return round(x, 4)  # 理論上不會到這（表已覆蓋 [0, 1]，防禦性寫法）
+    return _interpolate_calibration(x, _CALIBRATION_TABLE)
 
 
 # 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
