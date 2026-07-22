@@ -47,6 +47,17 @@ def _finite_number(value: Any) -> float | None:
     return converted if math.isfinite(converted) else None
 
 
+def _safe_input_path(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            raise TrainingDataError("training path contains a symlink")
+    return absolute
+
+
 def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
     """Load the strict, version-controlled flat JSONL contract for one coin."""
     expected = coin.upper()
@@ -55,6 +66,7 @@ def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
     label_fields = {"outcome_pct", "ground_truth_direction", "split"}
     descriptor: int | None = None
     try:
+        path = _safe_input_path(path)
         path_stat = os.lstat(path)
         if stat.S_ISLNK(path_stat.st_mode):
             raise TrainingDataError("training data symlinks are not allowed")

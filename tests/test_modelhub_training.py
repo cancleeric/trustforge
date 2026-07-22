@@ -204,3 +204,13 @@ def test_loader_rejects_symlink_without_reading_target(tmp_path):
     link.symlink_to(target)
     with pytest.raises(TrainingDataError, match="symlink"):
         load_flat_training_rows(link, coin="BTC")
+
+
+def test_loader_rejects_symlinked_parent_directory(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "BTC.jsonl").write_text("external", encoding="utf-8")
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(real, target_is_directory=True)
+    with pytest.raises(TrainingDataError, match="symlink"):
+        load_flat_training_rows(linked_parent / "BTC.jsonl", coin="BTC")

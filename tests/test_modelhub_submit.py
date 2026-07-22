@@ -2,10 +2,11 @@ import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+import hashlib
 
 from trustforge.calibration_metrics import judge_direction_hit, weighted_ece
 from trustforge.modelhub_client import ModelHubHTTPError, ModelHubPollTimeout, ModelHubTransportError
-from trustforge.modelhub_submit import submit_calibrator_training
+from trustforge.modelhub_submit import persist_execution_log, submit_calibrator_training
 
 
 def write_rows(directory, coin="BTC", count=100):
@@ -62,6 +63,9 @@ class BudgetLog:
     def record(self, tool, params=None, summary=""):
         self.events.append({"tool": tool, "params": params or {}, "summary": summary})
 
+    def to_jsonl(self):
+        return "\n".join(json.dumps(event, sort_keys=True) for event in self.events) + "\n"
+
 
 def test_dry_run_never_builds_client_or_reads_request_number(tmp_path, monkeypatch):
     write_rows(tmp_path)
@@ -112,13 +116,21 @@ def test_opaque_tokens_are_per_run_random_and_collision_fails(tmp_path):
         opaque_id_factory=lambda: next(tokens), out_dir=tmp_path / "out",
     )
     assert result["status"] == "candidate"
-    assert all(row["opaque_id"].startswith("opaque-") for row in client.payload["holdout_features"])
+    assert all(row["opaque_id"].startswith("holdout_opaque-") for row in client.payload["holdout_features"])
     built = []
     collision = submit_calibrator_training(
         "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: built.append(1),
         opaque_id_factory=lambda: "same-token", out_dir=tmp_path / "collision",
     )
     assert collision["status"] == "error" and built == []
+
+    reserved = client.payload["train_rows"][0]["sample_id"]
+    reserved_built = []
+    reserved_result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: reserved_built.append(1),
+        opaque_id_factory=lambda: reserved, out_dir=tmp_path / "reserved",
+    )
+    assert reserved_result["status"] == "error" and reserved_built == []
 
 
 def test_injected_opaque_tokens_do_not_depend_on_holdout_labels_or_features(tmp_path):
@@ -216,6 +228,10 @@ def test_candidate_proposal_is_atomic_safe_and_has_no_path_or_key(tmp_path, monk
     serialized = json.dumps(proposal)
     assert "never-write-this-key" not in serialized and "/untrusted/absolute" not in serialized
     assert not list(out.glob("*.tmp"))
+    current = json.loads((out / "BTC.json").read_text())
+    log_path = out / current["execution_log_file"]
+    assert log_path.exists()
+    assert hashlib.sha256(log_path.read_bytes()).hexdigest() == current["execution_log_sha256"]
 
 
 def test_rejected_or_stale_trigger_response_stops_before_poll(tmp_path):
@@ -259,7 +275,7 @@ def test_invalid_coin_records_error_without_creating_manifest(tmp_path):
     assert result["status"] == "error" and result["coin"] == ""
     assert log.events[-1]["params"]["status"] == "error"
     assert not (tmp_path / ".json").exists()
-    assert list(tmp_path.iterdir()) == []
+    assert len(list(tmp_path.glob("execution-*.jsonl"))) == 1
 
 
 def test_budget_expiring_after_artifact_lookup_writes_no_candidate(tmp_path):
@@ -337,6 +353,65 @@ def test_candidate_current_failure_returns_error_and_preserves_history(tmp_path,
     assert (out / "BTC.json").read_bytes() == old_current
 
 
+def test_candidate_log_failure_never_publishes_current(tmp_path):
+    rows = write_rows(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    current = out / "BTC.json"
+    current.write_bytes(b'{"status":"candidate","old":true}')
+    before = current.read_bytes()
+
+    def fail_log(out_dir, log):
+        raise OSError("log disk full")
+
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: FakeClient(rows),
+        out_dir=out, execution_log_writer=fail_log,
+    )
+    assert result["status"] == "error" and result["manifest_updated"] is False
+    assert current.read_bytes() == before
+    assert len(list(out.glob("BTC-*.json"))) == 1  # Immutable orphan proposal only.
+
+
+def test_symlinked_output_directory_rejects_proposal_log_and_current(tmp_path):
+    rows = write_rows(tmp_path / "training")
+    target = tmp_path / "external"
+    target.mkdir()
+    linked = tmp_path / "linked-out"
+    linked.symlink_to(target, target_is_directory=True)
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path / "training", req_no="REQ",
+        client_factory=lambda: FakeClient(rows), out_dir=linked,
+    )
+    assert result["status"] == "error" and result["manifest_updated"] is False
+    assert list(target.iterdir()) == []
+
+
+def test_dry_run_log_rejects_symlinked_output_directory(tmp_path):
+    write_rows(tmp_path / "training")
+    target = tmp_path / "external"
+    target.mkdir()
+    linked = tmp_path / "linked-out"
+    linked.symlink_to(target, target_is_directory=True)
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path / "training", dry_run=True, out_dir=linked
+    )
+    assert result["status"] == "error" and result["manifest_updated"] is False
+    assert list(target.iterdir()) == []
+
+
+def test_execution_log_is_immutable_and_cannot_overwrite_same_run(tmp_path):
+    from trustforge.execlog import ExecutionLog
+
+    log = ExecutionLog(run_id="fixed-run")
+    filename, digest = persist_execution_log(tmp_path, log)
+    before = (tmp_path / filename).read_bytes()
+    assert hashlib.sha256(before).hexdigest() == digest
+    with pytest.raises(FileExistsError):
+        persist_execution_log(tmp_path, log)
+    assert (tmp_path / filename).read_bytes() == before
+
+
 def test_failure_current_replace_error_is_reported_not_silenced(tmp_path, monkeypatch):
     rows = write_rows(tmp_path)
     client = FakeClient(rows, confidence=0.5)
@@ -348,10 +423,9 @@ def test_failure_current_replace_error_is_reported_not_silenced(tmp_path, monkey
         "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: client,
         out_dir=tmp_path / "out",
     )
-    assert result == {
-        "status": "error", "coin": "BTC", "run_id": result["run_id"],
-        "manifest_updated": False, "reason": "manifest_update_failed",
-    }
+    assert result["status"] == "error" and result["coin"] == "BTC"
+    assert result["manifest_updated"] is False and result["reason"] == "manifest_update_failed"
+    assert result["execution_log_file"] and len(result["execution_log_sha256"]) == 64
 
 
 def test_metrics_and_shared_direction_semantics():

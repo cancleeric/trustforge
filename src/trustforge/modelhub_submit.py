@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import secrets
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,44 @@ def _summary(status: str, coin: str, **values: Any) -> dict[str, Any]:
     return {"status": status, "coin": coin, **values}
 
 
+class SafePathError(OSError):
+    pass
+
+
+def ensure_safe_directory(path: Path) -> Path:
+    """Create a directory one component at a time while rejecting all symlinks."""
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            try:
+                os.mkdir(current)
+            except FileExistsError:
+                pass
+            info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise SafePathError("output path contains a symlink or non-directory component")
+    return absolute
+
+
+def _safe_run_id(run_id: str) -> str:
+    return run_id if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id) else hashlib.sha256(run_id.encode()).hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
 def _candidate_predictions(result: dict[str, Any], holdout: list[dict[str, Any]]) -> list[float]:
     predictions = result.get("holdout_predictions")
     if not isinstance(predictions, list) or len(predictions) != len(holdout):
@@ -57,7 +96,8 @@ def _candidate_predictions(result: dict[str, Any], holdout: list[dict[str, Any]]
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_parent = ensure_safe_directory(path.parent)
+    path = safe_parent / path.name
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -65,6 +105,7 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(safe_parent)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -79,21 +120,38 @@ def write_current_manifest(out_dir: Path, coin: str, value: dict[str, Any]) -> N
 
 
 def _immutable_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    _immutable_bytes(path, encoded)
+
+
+def _immutable_bytes(path: Path, encoded: bytes) -> None:
+    safe_parent = ensure_safe_directory(path.parent)
+    path = safe_parent / path.name
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=safe_parent)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
         os.link(temporary, path)
         os.unlink(temporary)
+        _fsync_directory(safe_parent)
     except BaseException:
         try:
             os.unlink(temporary)
         except OSError:
             pass
         raise
+
+
+def persist_execution_log(out_dir: Path, log: ExecutionLog) -> tuple[str, str]:
+    """Persist one immutable terminal log and return its relative name and digest."""
+    encoded = log.to_jsonl().encode("utf-8")
+    filename = f"execution-{_safe_run_id(log.run_id)}.jsonl"
+    _immutable_bytes(Path(out_dir) / filename, encoded)
+    return filename, hashlib.sha256(encoded).hexdigest()
 
 
 def submit_calibrator_training(
@@ -107,6 +165,7 @@ def submit_calibrator_training(
     execution_log: ExecutionLog | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     opaque_id_factory: Callable[[], str] = secrets.token_urlsafe,
+    execution_log_writer: Callable[[Path, ExecutionLog], tuple[str, str]] = persist_execution_log,
 ) -> dict[str, Any]:
     """Load, gate, submit, independently score, and atomically propose one coin."""
     log = execution_log or ExecutionLog()
@@ -124,13 +183,26 @@ def submit_calibrator_training(
             params["dataset_sha256"] = dataset_sha256
         log.record(f"modelhub.training.{stage}", params, f"ModelHub stage: {stage}")
 
-    def finish(status: str, **values: Any) -> dict[str, Any]:
+    def finish(status: str, *, persist_current: bool = True, **values: Any) -> dict[str, Any]:
         record("terminal", status=status)
-        result = _summary(status, normalized_coin, run_id=log.run_id, **values)
-        if not dry_run and status in {"blocked", "no_improvement", "unavailable", "timeout", "error"}:
+        try:
+            log_file, log_sha = execution_log_writer(Path(out_dir), log)
+        except (OSError, TypeError, ValueError):
+            return _summary(
+                "error", normalized_coin, run_id=log.run_id, manifest_updated=False,
+                reason="log_persistence_failed",
+            )
+        result = _summary(
+            status, normalized_coin, run_id=log.run_id, execution_log_file=log_file,
+            execution_log_sha256=log_sha, **values,
+        )
+        if persist_current and not dry_run and status in {
+            "blocked", "no_improvement", "unavailable", "timeout", "error",
+        }:
             current = {
                 "schema_version": 1, "coin": normalized_coin, "status": status, "run_id": log.run_id,
                 "automatic_apply": False, "requires_human_approval": True,
+                "execution_log_file": log_file, "execution_log_sha256": log_sha,
             }
             if selected_req_no:
                 current["req_no"] = selected_req_no
@@ -147,14 +219,17 @@ def submit_calibrator_training(
                 record("terminal", status="error")
                 return _summary(
                     "error", normalized_coin, run_id=log.run_id, manifest_updated=False,
-                    reason="manifest_update_failed",
+                    reason="manifest_update_failed", execution_log_file=log_file,
+                    execution_log_sha256=log_sha,
                 )
         return result
 
     if not re.fullmatch(r"[A-Z0-9]{2,10}", normalized_coin):
-        record("terminal", status="error")
-        return _summary("error", "", run_id=log.run_id)
+        normalized_coin = ""
+        return finish("error", persist_current=False)
 
+    log_file: str | None = None
+    log_sha: str | None = None
     try:
         rows = load_flat_training_rows(Path(training_dir) / f"{normalized_coin}.jsonl", coin=normalized_coin)
         package = build_flat_training_package(rows)
@@ -171,20 +246,24 @@ def submit_calibrator_training(
 
     train_rows = [row for row in package["rows"] if row["split"] == "train"]
     holdout_rows = [row for row in package["rows"] if row["split"] == "val"]
+    reserved_ids = {row["sample_id"] for row in train_rows}
     opaque_ids: set[str] = set()
     evaluation_holdout: list[dict[str, Any]] = []
     for row in holdout_rows:
         token: str | None = None
         for _ in range(MAX_OPAQUE_ID_ATTEMPTS):
             candidate = opaque_id_factory()
+            prefixed_candidate = f"holdout_{candidate}" if isinstance(candidate, str) else ""
             if (
                 isinstance(candidate, str)
                 and candidate
                 and len(candidate) <= 256
                 and not any(ord(character) < 32 or ord(character) == 127 for character in candidate)
-                and candidate not in opaque_ids
+                and candidate not in reserved_ids
+                and prefixed_candidate not in reserved_ids
+                and prefixed_candidate not in opaque_ids
             ):
-                token = candidate
+                token = prefixed_candidate
                 break
         if token is None:
             return finish("error")
@@ -299,6 +378,8 @@ def submit_calibrator_training(
         return finish("timeout", req_no=selected_req_no)
     try:
         _immutable_json(Path(out_dir) / proposal_name, proposal)
+        record("terminal", status="candidate")
+        log_file, log_sha = execution_log_writer(Path(out_dir), log)
         current = {
             "schema_version": 1, "coin": normalized_coin, "status": "candidate", "run_id": log.run_id,
             "req_no": selected_req_no,
@@ -306,13 +387,19 @@ def submit_calibrator_training(
             "baseline_ece": baseline_ece, "candidate_ece": candidate_ece, "improvement": improvement,
             "artifact_sha256": artifact_sha.lower(),
             "automatic_apply": False, "requires_human_approval": True,
+            "execution_log_file": log_file, "execution_log_sha256": log_sha,
         }
         write_current_manifest(Path(out_dir), normalized_coin, current)
     except (OSError, TypeError, ValueError):
-        record("manifest_update_failed", status="error")
-        record("terminal", status="error")
-        return _summary(
+        failure = _summary(
             "error", normalized_coin, run_id=log.run_id, manifest_updated=False,
-            reason="manifest_update_failed",
+            reason="candidate_publication_failed",
         )
-    return finish("candidate", proposal=proposal, proposal_file=proposal_name, manifest_updated=True)
+        if log_file and log_sha:
+            failure.update(execution_log_file=log_file, execution_log_sha256=log_sha)
+        return failure
+    return _summary(
+        "candidate", normalized_coin, run_id=log.run_id, proposal=proposal,
+        proposal_file=proposal_name, manifest_updated=True, execution_log_file=log_file,
+        execution_log_sha256=log_sha,
+    )

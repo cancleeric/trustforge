@@ -21,6 +21,7 @@ def test_cli_status_exit_mapping(monkeypatch, capsys, tmp_path, status, code):
         "trustforge.modelhub_submit.submit_calibrator_training",
         lambda coin, **kwargs: {"coin": coin, "status": status},
     )
+    monkeypatch.setattr("trustforge.cli._valid_modelhub_execution_reference", lambda out_dir, result: True)
     assert cli.main(["modelhub-train", "--coin", "BTC", "--dry-run", "--out-dir", str(tmp_path)]) == code
     assert json.loads(capsys.readouterr().out)["status"] == status
 
@@ -75,6 +76,7 @@ def test_live_all_passes_distinct_request_numbers(monkeypatch, capsys, tmp_path)
         return {"coin": coin, "status": "candidate"}
 
     monkeypatch.setattr("trustforge.modelhub_submit.submit_calibrator_training", submit)
+    monkeypatch.setattr("trustforge.cli._valid_modelhub_execution_reference", lambda out_dir, result: True)
     arguments = ["modelhub-train", "--all", "--out-dir", str(tmp_path)]
     for index, coin in enumerate(cli.COIN_POOL):
         arguments += ["--req-no-map", f"{coin}=REQ-{index}"]
@@ -82,7 +84,7 @@ def test_live_all_passes_distinct_request_numbers(monkeypatch, capsys, tmp_path)
     assert len({request for _, request in calls}) == len(cli.COIN_POOL)
     output = json.loads(capsys.readouterr().out)
     assert all("run_id" in result for result in output)
-    assert len(list(tmp_path.glob("execution-*.jsonl"))) == len(cli.COIN_POOL)
+    assert not list(tmp_path.glob("execution-*.jsonl"))  # CLI never duplicates submit-owned logs.
 
 
 def test_malformed_submit_result_becomes_logged_error(monkeypatch, capsys, tmp_path):
@@ -106,28 +108,16 @@ def test_log_persistence_failure_is_coin_error_and_all_continues(monkeypatch, ca
         return {"coin": coin, "status": "dry_run"}
 
     monkeypatch.setattr("trustforge.modelhub_submit.submit_calibrator_training", submit)
-    monkeypatch.setattr("trustforge.cli._persist_modelhub_execution_log", lambda out_dir, log: False)
+    monkeypatch.setattr(
+        "trustforge.modelhub_submit.persist_execution_log",
+        lambda out_dir, log: (_ for _ in ()).throw(OSError("log failed")),
+    )
     assert cli.main([
         "modelhub-train", "--all", "--dry-run", "--out-dir", str(tmp_path)
     ]) == 1
     output = json.loads(capsys.readouterr().out)
     assert calls == list(cli.COIN_POOL)
     assert all(result["status"] == "error" for result in output)
-
-
-def test_execution_log_helper_handles_file_mkstemp_and_replace_failures(tmp_path, monkeypatch):
-    from trustforge.execlog import ExecutionLog
-
-    out_file = tmp_path / "not-a-directory"
-    out_file.write_text("x")
-    assert cli._persist_modelhub_execution_log(out_file, ExecutionLog()) is False
-    monkeypatch.setattr("trustforge.cli.tempfile.mkstemp", lambda **kwargs: (_ for _ in ()).throw(OSError()))
-    assert cli._persist_modelhub_execution_log(tmp_path / "mkstemp", ExecutionLog()) is False
-    monkeypatch.undo()
-    monkeypatch.setattr("trustforge.cli.os.replace", lambda source, target: (_ for _ in ()).throw(OSError()))
-    replace_dir = tmp_path / "replace"
-    assert cli._persist_modelhub_execution_log(replace_dir, ExecutionLog()) is False
-    assert not list(replace_dir.glob("*.tmp"))
 
 
 def test_dry_run_log_failure_never_changes_existing_live_current(monkeypatch, capsys, tmp_path):
@@ -138,7 +128,10 @@ def test_dry_run_log_failure_never_changes_existing_live_current(monkeypatch, ca
         "trustforge.modelhub_submit.submit_calibrator_training",
         lambda coin, **kwargs: {"coin": coin, "status": "dry_run"},
     )
-    monkeypatch.setattr("trustforge.cli._persist_modelhub_execution_log", lambda out_dir, log: False)
+    monkeypatch.setattr(
+        "trustforge.modelhub_submit.persist_execution_log",
+        lambda out_dir, log: (_ for _ in ()).throw(OSError("log failed")),
+    )
     assert cli.main([
         "modelhub-train", "--coin", "BTC", "--dry-run", "--out-dir", str(tmp_path)
     ]) == 1
