@@ -257,7 +257,7 @@ def test_v2_result_dto_preserves_legacy_report_facing_golden_values():
 def test_result_contracts_are_frozen_slotted_and_json_safe():
     result = _core_result()
 
-    assert KERNEL_CONTRACT_VERSION == "2.1.0"
+    assert KERNEL_CONTRACT_VERSION == "2.2.0"
     assert json.dumps(dataclasses.asdict(result), allow_nan=False)
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.query = "changed"  # type: ignore[misc]
@@ -324,7 +324,7 @@ def test_kernel_output_keeps_seven_positional_arguments():
 
     assert result.trust_score == 0.8
     assert result.confidence == 0.7
-    assert result.contract_version == "2.1.0"
+    assert result.contract_version == "2.2.0"
     assert result.query == ""
 
 
