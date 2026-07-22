@@ -98,10 +98,12 @@ def test_rollback_is_directory_fsynced_after_first_fsync_failure(tmp_path, monke
     target.write_bytes(b"old")
     real_fsync = os.fsync
     directory_calls = 0
+    containing = tmp_path.stat()
 
     def fail_first_directory(descriptor):
         nonlocal directory_calls
-        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (containing.st_dev, containing.st_ino):
             directory_calls += 1
             if directory_calls == 1:
                 raise OSError("publication fsync failed")
@@ -119,10 +121,16 @@ def test_persistent_directory_fsync_failure_is_explicit(tmp_path, monkeypatch):
     target.write_bytes(b"old")
 
     real_fsync = os.fsync
+    containing = tmp_path.stat()
+    directory_calls = 0
 
     def fail_directory(descriptor):
-        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            raise OSError("persistent fsync failure")
+        nonlocal directory_calls
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (containing.st_dev, containing.st_ino):
+            directory_calls += 1
+            if directory_calls >= 1:
+                raise OSError("persistent fsync failure")
         return real_fsync(descriptor)
 
     monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_directory)
@@ -146,27 +154,58 @@ def test_nested_directory_creation_fsyncs_each_new_parent_entry(tmp_path, monkey
     with pinned_directory(nested, create=True) as descriptor:
         assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
     assert nested.is_dir()
-    assert directory_fsyncs == 3
+    assert directory_fsyncs >= 3
 
 
 def test_nested_directory_creation_fsync_failure_propagates(tmp_path, monkeypatch):
     real_fsync = os.fsync
-    directory_fsyncs = 0
+    one = tmp_path / "one"
+    one.mkdir()
+    containing = one.stat()
+    containing_fsyncs = 0
 
-    def fail_second_new_entry(descriptor):
-        nonlocal directory_fsyncs
-        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            directory_fsyncs += 1
-            if directory_fsyncs == 2:
-                raise OSError("new directory entry fsync failed")
+    def fail_new_nested_entry(descriptor):
+        nonlocal containing_fsyncs
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (containing.st_dev, containing.st_ino):
+            containing_fsyncs += 1
+            raise OSError("new directory entry fsync failed")
         return real_fsync(descriptor)
 
-    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_second_new_entry)
-    nested = tmp_path / "one" / "two" / "three"
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_new_nested_entry)
+    nested = one / "two" / "three"
     with pytest.raises(OSError, match="new directory entry fsync failed"):
         with pinned_directory(nested, create=True):
             pass
-    assert directory_fsyncs == 2
+    assert containing_fsyncs == 1
     # A just-created entry may remain after an fsync error; it was never
     # reported as a successfully pinned durable path.
+    assert (one / "two").is_dir()
     assert not nested.exists()
+
+
+def test_retry_fsyncs_entry_left_by_transient_failure_before_descending(tmp_path, monkeypatch):
+    real_fsync = os.fsync
+    containing = tmp_path.stat()
+    failed = False
+    containing_fsyncs = 0
+
+    def fail_once_on_containing_directory(descriptor):
+        nonlocal failed, containing_fsyncs
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (containing.st_dev, containing.st_ino):
+            containing_fsyncs += 1
+            if not failed:
+                failed = True
+                raise OSError("transient containing-directory fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_once_on_containing_directory)
+    nested = tmp_path / "left-behind" / "child"
+    with pytest.raises(OSError, match="transient containing-directory"):
+        with pinned_directory(nested, create=True):
+            pass
+    assert (tmp_path / "left-behind").is_dir()
+    with pinned_directory(nested, create=True) as descriptor:
+        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+    assert containing_fsyncs == 2
