@@ -1,169 +1,98 @@
-# Spec：ModelHub 整合 (#351)
+# Spec：ModelHub 整合（#351）
 
-> Issue: #351
-> Priority: P1
-> 前置：#343（isotonic 校準模型）、#335（校準升級執行）
-> ModelHub API: localhost:8950
+> Priority: P1｜前置：#343、#335｜狀態：自動化已實作，live retrain／activation 未執行
 
----
+## Requirements
 
-## Requirements（需求）
+### R1：Flat JSONL 是唯一輸入真相 ✅
 
-### R1: 訓練資料搬移進版控 ✅ DONE
-- 將 `out/training-data/*.jsonl` 複製到 `data/training/`（版控可追蹤）
-- 5 幣種各一檔：BTC.jsonl / ETH.jsonl / SOL.jsonl / BNB.jsonl / XRP.jsonl
-- 格式：每行 JSON，含 date/coin/direction/trust_score/confidence/evidence_count/sources/model_id/generated_at
-- `data/training/` 不在 .gitignore（確認完成）
-- 後續 backfill 產出也寫入此目錄（單一真相來源）
+- `data/training/{BTC,ETH,SOL,BNB,XRP}.jsonl` 進版控。
+- loader 驗證 regular file、大小/列數/行長/JSON 型別與 coin 一致性。
+- gate 以至少 100 個 unique labelled outcomes 判定；chronological split 明確保留 holdout。
 
-### R2: ModelHub 提交介面（calibrator retrain）
-- 新模組 `src/trustforge/modelhub_client.py`：封裝 ModelHub REST API
-- 支援端點：
-  - `GET /v1/models` → 列出可用模型（健康檢查 + 模型清單）
-  - `POST /api/submissions/{req_no}/retrain-lightning` → 觸發快速再訓練
-  - `GET /api/submissions/{req_no}/training-result` → 輪詢訓練結果
-  - `GET /api/external-models/{product}/{name}/path` → 取得模型 artifact 路徑
-- 所有呼叫有 timeout（預設 30s）、retry（最多 2 次）、結構化錯誤回傳
-- 不引入 requests 第三方依賴 → 用 `urllib.request`（與專案慣例一致）
-- `MODELHUB_BASE_URL` 環境變數控制（預設 `http://localhost:8950`）
-- ModelHub 不可達時 → graceful fallback，不影響既有 pipeline
+### R2：Defensive ModelHub REST client ✅
 
-### R3: 端到端訓練流程
-- 新模組 `src/trustforge/modelhub_submit.py`：編排完整流程
-- 流程：
-  1. 讀取 `data/training/{coin}.jsonl` → 組合為 `eligible_calibrator_rows()`
-  2. 經過 `evaluate_calibrator_gate()` 門檻檢查（≥100 筆有標記 outcomes）
-  3. Gate 通過 → 呼叫 `build_calibrator_training_package()` 產出 training package
-  4. 呼叫 ModelHub `retrain-lightning`，附帶 dataset SHA256 + split 資訊
-  5. 輪詢 `training-result` 直到完成或 timeout（最長 5 分鐘）
-  6. 完成後呼叫 `external-models/.../path` 取得 artifact
-  7. 比對 holdout 效能 → 若改善 > threshold（ECE 降低 ≥ 0.02）→ 標記候選
-  8. **不自動啟用** — 寫入 proposal 到 `out/modelhub-proposals/` 等待人工審查
-- CLI 入口：`python -m trustforge.cli modelhub-train --coin BTC`（或 `--all`）
-- 執行紀錄寫入 execution_log（遵循 15 分鐘預算）
+- `src/trustforge/modelhub_client.py` 使用 stdlib `urllib.request`。
+- 支援 models、retrain-lightning、training-result、external-model path。
+- base URL 僅允許 HTTP loopback；`localhost` 正規化為 `127.0.0.1`。
+- 停用 proxy/redirect；GET 最多 2 次 bounded retry，POST 不 retry。
+- timeout、5 分鐘 poll 上限、response size、finite JSON/schema 驗證與 API key redaction。
+- ModelHub 不可達時回結構化狀態，不影響既有分析 pipeline。
 
----
+### R3：Human-review-only 候選編排 ✅
 
-## Design（設計）
+1. flat loader → gate → chronological split。
+2. 送出 train rows、dataset SHA256 與 label-free opaque holdout features。
+3. trigger → poll → artifact digest 驗證。
+4. 本機以 weighted ECE 比對；`baseline_ece - candidate_ece >= 0.02` 才成為 candidate。
+5. durable immutable proposal/execution log 先落地，再發布 per-coin current manifest。
+6. `automatic_apply: false` 與 `requires_human_approval: true` 為固定契約。
 
-### 架構圖
+五幣 live CLI 必須提供五個互異映射：
 
-```
-data/training/{coin}.jsonl          ← R1: 版控中的訓練資料
-        │
-        ▼
-modelhub_training.py                ← 既有：build_calibrator_training_package()
-  │ eligible rows + gate check
-  ▼
-calibrator_gate.py                  ← 既有：evaluate_calibrator_gate()
-  │ gate.eligible == True?
-  ▼
-modelhub_client.py [NEW]            ← R2: REST client
-  │ POST retrain-lightning
-  │ GET  training-result (poll)
-  │ GET  external-models/.../path
-  ▼
-modelhub_submit.py [NEW]            ← R3: 編排邏輯
-  │ holdout 比對 → proposal
-  ▼
-out/modelhub-proposals/{coin}.json  ← 候選模型 proposal（人工審查）
+```text
+BTC=<BTC_REQ>, ETH=<ETH_REQ>, SOL=<SOL_REQ>, BNB=<BNB_REQ>, XRP=<XRP_REQ>
 ```
 
-### modelhub_client.py 介面設計
+真實 request number 應由執行者從 ModelHub 核對後填入；不得把單一 registration request
+硬套到五幣。macOS 的 `/tmp` 是 symlink，安全路徑檢查會拒絕；測試輸出使用 `/private/tmp/...`。
 
-```python
-class ModelHubClient:
-    """ModelHub REST API client (stdlib only)."""
+### R4：Execution budget ✅
 
-    def __init__(self, base_url: str | None = None, timeout: float = 30.0):
-        ...
+編排建立既有 `ExecutionLog`，以其 15 分鐘 deadline 在 trigger/poll/artifact/metric/publication
+階段檢查剩餘時間；poll 另 capped at 300 秒。`budget_guard.py` 沒有修改，也不宣稱已修改。
 
-    def health_check(self) -> bool:
-        """GET /v1/models — 回傳 ModelHub 是否可達。"""
+## Failure semantics
 
-    def list_models(self) -> list[dict]:
-        """GET /v1/models — 回傳可用模型列表。"""
+| status | 契約 |
+|--------|------|
+| `blocked` | outcome gate 未過，回 minimum/remaining |
+| `unavailable` | ModelHub transport retry 耗盡 |
+| `timeout` | poll 或 ExecutionLog budget 不足 |
+| `no_improvement` | weighted ECE 改善 < 0.02，不產 proposal |
+| `error` | fail-closed；資料、API schema、path 或 durable write 驗證失敗 |
+| `candidate` | proposal/log/current 完整，但仍只候選、不得自動啟用 |
+| `dry_run` | 不呼叫 ModelHub、不產 current；保留 terminal execution log |
 
-    def trigger_retrain(self, req_no: str, payload: dict) -> dict:
-        """POST /api/submissions/{req_no}/retrain-lightning"""
+## Tasks
 
-    def poll_training_result(self, req_no: str, *, max_wait: float = 300) -> dict:
-        """GET /api/submissions/{req_no}/training-result — 輪詢至完成或 timeout。"""
+### T1：訓練資料
 
-    def get_model_path(self, product: str, name: str) -> str:
-        """GET /api/external-models/{product}/{name}/path"""
-```
+- [x] 五幣 flat JSONL 進版控且為單一輸入真相
+- [x] loader/resource caps/gate/split 測試
 
-### modelhub_submit.py 流程
+### T2：REST client（PR #440）
 
-```python
-def submit_calibrator_training(
-    coin: str | None = None,
-    *,
-    training_dir: Path = Path("data/training"),
-    dry_run: bool = False,
-) -> dict:
-    """端到端：讀資料 → gate → 提交 ModelHub → 輪詢 → 比對 → proposal。
+- [x] client 與五個 API operation
+- [x] timeout/retry/graceful fallback
+- [x] loopback/redirect/proxy/response/API-key 防線
+- [x] mock unit tests 與 opt-in integration test
 
-    dry_run=True 只做 gate 檢查 + package 建構，不實際呼叫 ModelHub。
-    """
-```
+### T3：編排（PR #447）
 
-### 錯誤處理策略
+- [x] loader/gate/package/client 整合
+- [x] label-free opaque holdout 與 weighted ECE
+- [x] `--coin`、`--all`、`--req-no-map`、`--dry-run`
+- [x] immutable proposal/log、atomic current、failure semantics
+- [x] dirfd/TOCTOU 與 fsync/rollback 防線
+- [x] 15 分鐘 ExecutionLog budget
 
-| 場景 | 行為 |
-|------|------|
-| ModelHub 不可達 | 回傳 status=unavailable，不崩 pipeline |
-| Gate 未通過（<100 outcomes） | 回傳 status=blocked + 差多少筆 |
-| 訓練 timeout（>5 min） | 回傳 status=timeout + req_no（可手動查） |
-| Holdout 未改善 | 回傳 status=no_improvement，不產 proposal |
-| 網路中斷重試耗盡 | 回傳 status=error + last_exception |
+### T4：文件與驗收
 
-### 安全約束
+- [x] README、architecture、spec、QA、handoff 更新
+- [x] targeted coverage ≥80%
+- [x] Dev Manager、harper、`/codex-review`、eye gates 0 finding
+- [x] 五幣 dry-run 與 log SHA256 親驗
+- [ ] 取得並核對五幣真實、互異 req_no
+- [ ] 經明確授權執行 live retrain
+- [ ] 人工審查候選後另行決定 activation
 
-- ModelHub 呼叫 **僅限本機 localhost**（競賽環境）
-- 不傳送任何 AWS credential 給 ModelHub
-- training package 含 dataset SHA256 可事後審計
-- 模型啟用永遠需要人工審查（`automatic_apply: False`）
+## 驗收證據與邊界
 
----
+PR #440 merge 後 115 passed、1 skipped。合併後可重現的 relevant suite 為 221 passed；精確
+命令與 coverage 限制見 QA 文件。五幣 `/private/tmp` dry-run 成功且 execution-log hashes 重算吻合。
+全倉既有 failures 追蹤於 #454；ruff 不可用，因此兩者均不宣稱通過。未執行 live retrain、
+activation、DB/secret/Docker/deploy 或 Issue #393。
 
-## Tasks（實作任務）
-
-### T1: 訓練資料搬移 ✅
-- [x] `mkdir -p data/training`
-- [x] `cp out/training-data/*.jsonl data/training/`
-- [x] 確認不在 .gitignore
-- [x] `git add data/training/`
-
-### T2: ModelHub REST Client
-- [ ] 新增 `src/trustforge/modelhub_client.py`
-- [ ] 實作 `ModelHubClient` class（urllib.request，無第三方依賴）
-- [ ] health_check / list_models / trigger_retrain / poll_training_result / get_model_path
-- [ ] timeout + retry 邏輯
-- [ ] 單元測試 `tests/test_modelhub_client.py`（mock HTTP 不依賴實際 ModelHub）
-- [ ] 整合測試用 `@pytest.mark.integration` 標記（需 ModelHub 跑起來才過）
-
-### T3: 端到端提交流程
-- [ ] 新增 `src/trustforge/modelhub_submit.py`
-- [ ] 整合 modelhub_training.py + calibrator_gate.py + modelhub_client.py
-- [ ] dry_run 模式（不呼叫 ModelHub）
-- [ ] proposal 輸出格式設計（含 holdout 比較、SHA256、timestamp）
-- [ ] CLI 子命令 `modelhub-train`
-- [ ] 測試：gate 未通過 / dry_run / 正常流程（mock）
-
-### T4: 文件與整合
-- [ ] 更新 README.md 加入 ModelHub 整合說明
-- [ ] 更新 ARCHITECTURE.md 加入 ModelHub 互動圖
-- [ ] 確認 `budget_guard.py` 計入 ModelHub 呼叫時間
-
----
-
-## 驗收標準
-
-1. `data/training/` 進版控且含 5 幣種 JSONL（R1 ✅）
-2. `python -m trustforge.cli modelhub-train --coin BTC --dry-run` 能跑完不報錯
-3. ModelHub 可達時，`--coin BTC` 能完成 retrain 流程並產出 proposal
-4. ModelHub 不可達時，graceful 回傳 status=unavailable 不崩
-5. 所有新模組有 ≥80% 測試覆蓋率
-6. 不引入新第三方依賴（urllib.request only）
+Live retrain 或 activation 都須先取得 Eric 或具名 ModelHub owner 的明確授權；持有 req_no、
+API key 或完成 reviewer/CISO gate 不等於取得該操作授權。
