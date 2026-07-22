@@ -9,33 +9,17 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-
-_AUTOMATED_APPROVAL_ACTOR_TOKENS = (
-    "agent",
-    "auto",
-    "automation",
-    "bedrock",
-    "bot",
-    "claude",
-    "codex",
-    "gemini",
-    "gpt",
-    "llm",
-    "model",
-    "openai",
-    "service",
+from .upgrade_state_machine import (
+    activation_transition,
+    decision_transition,
+    review_transition,
+    rollback_transition,
+    sandbox_transition,
 )
 
 
 def default_path() -> Path:
     return Path(os.getenv("TRUSTFORGE_SQLITE_PATH", str(Path(__file__).resolve().parents[2] / "out" / "trustforge.sqlite3")))
-
-
-def _is_human_approval_actor(actor: str) -> bool:
-    normalized = actor.strip().lower()
-    if not normalized:
-        return False
-    return not any(token in normalized for token in _AUTOMATED_APPROVAL_ACTOR_TOKENS)
 
 
 class UpgradeQueue:
@@ -101,7 +85,7 @@ class UpgradeQueue:
                 db.execute("INSERT INTO upgrade_reviews (proposal_id,reviewer,verdict,payload_json,created_at) VALUES (?,?,?,?,?)",
                            (proposal_id, "bedrock-adversarial-reviewer", verdict,
                             json.dumps(item, ensure_ascii=False, sort_keys=True), now))
-                next_state = "llm_reviewed" if verdict == "sandbox_ready" else verdict
+                next_state = review_transition(verdict).state
                 db.execute("UPDATE upgrade_proposals SET state=?,updated_at=? WHERE proposal_id=?", (next_state, now, proposal_id))
                 count += 1
         return count
@@ -133,43 +117,34 @@ class UpgradeQueue:
             row = db.execute("SELECT state FROM upgrade_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
             if row is None:
                 raise KeyError(proposal_id)
-            if row["state"] in {"approved", "rejected", "activated", "rolled_back"}:
-                raise ValueError("terminal proposal cannot be sandboxed")
+            transition = sandbox_transition(str(row["state"]), passed)
             payload = details if isinstance(details, dict) else {}
             cursor = db.execute("""INSERT INTO upgrade_sandbox_runs
                 (proposal_id,passed,artifact_hash,payload_json,created_at) VALUES (?,?,?,?,?)""",
                 (proposal_id, int(passed), artifact_hash,
                  json.dumps(payload, ensure_ascii=False, sort_keys=True), now))
-            state = "sandbox_passed" if passed else "sandbox_failed"
             db.execute("UPDATE upgrade_proposals SET state=?,updated_at=? WHERE proposal_id=?",
-                       (state, now, proposal_id))
-        return {"run_id": cursor.lastrowid, "proposal_id": proposal_id, "state": state,
-                "passed": passed, "artifact_hash": artifact_hash}
+                       (transition.state, now, proposal_id))
+            return {"run_id": cursor.lastrowid, "proposal_id": proposal_id, "state": transition.state,
+                    "passed": passed, "artifact_hash": artifact_hash}
 
     def decide(self, proposal_id: str, decision: str, actor: str, reason: str) -> dict[str, Any]:
         """Record the human gate. Approval requires the latest sandbox to pass."""
         proposal_id, decision, actor, reason = (value.strip() for value in (proposal_id, decision, actor, reason))
         if decision not in {"approve", "reject"} or not actor or not reason:
             raise ValueError("decision, actor and reason are required")
-        if decision == "approve" and not _is_human_approval_actor(actor):
-            raise ValueError("approval requires human actor")
         now = time.time()
         with closing(self._db()) as db, db:
             row = db.execute("SELECT state FROM upgrade_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
             if row is None:
                 raise KeyError(proposal_id)
-            if row["state"] in {"approved", "rejected", "activated", "rolled_back"}:
-                raise ValueError("proposal already has a terminal decision")
-            if decision == "approve" and row["state"] != "sandbox_passed":
-                raise ValueError("approval requires a passed sandbox")
-            state = "approved" if decision == "approve" else "rejected"
-            payload = {"previous_state": row["state"]}
+            transition = decision_transition(str(row["state"]), decision, actor)
             cursor = db.execute("""INSERT INTO upgrade_decisions
                 (proposal_id,actor,decision,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)""",
-                (proposal_id, actor, decision, reason, json.dumps(payload, sort_keys=True), now))
+                (proposal_id, actor, decision, reason, json.dumps(transition.payload, sort_keys=True), now))
             db.execute("UPDATE upgrade_proposals SET state=?,updated_at=? WHERE proposal_id=?",
-                       (state, now, proposal_id))
-        return {"decision_id": cursor.lastrowid, "proposal_id": proposal_id, "state": state,
+                       (transition.state, now, proposal_id))
+            return {"decision_id": cursor.lastrowid, "proposal_id": proposal_id, "state": transition.state,
                 "decision": decision, "actor": actor, "reason": reason, "activated": False}
 
     def activate(self, proposal_id: str, actor: str, reason: str, *, log_path: Path | None = None) -> dict[str, Any]:
@@ -185,10 +160,7 @@ class UpgradeQueue:
             sandbox = db.execute("SELECT passed,artifact_hash,payload_json FROM upgrade_sandbox_runs WHERE proposal_id=? ORDER BY run_id DESC LIMIT 1", (proposal_id,)).fetchone()
         if proposal is None:
             raise KeyError(proposal_id)
-        if proposal["state"] != "approved":
-            raise ValueError("activation requires an approved proposal")
-        if sandbox is None or not sandbox["passed"]:
-            raise ValueError("activation requires a passed sandbox")
+        transition = activation_transition(str(proposal["state"]), bool(sandbox and sandbox["passed"]))
         payload = json.loads(sandbox["payload_json"])
         candidate = payload.get("candidate", {})
         family, revision = str(candidate.get("family", "")), str(candidate.get("revision", ""))
@@ -206,8 +178,9 @@ class UpgradeQueue:
         with closing(self._db()) as db, db:
             cursor = db.execute("INSERT INTO upgrade_activations (proposal_id,actor,action,family,revision,previous_revision,reason,created_at) VALUES (?,?,?,?,?,?,?,?)",
                                 (proposal_id, actor, "activate", family, revision, previous, reason, now))
-            db.execute("UPDATE upgrade_proposals SET state='activated',updated_at=? WHERE proposal_id=?", (now, proposal_id))
-        return {"activation_id": cursor.lastrowid, "proposal_id": proposal_id, "state": "activated",
+            db.execute("UPDATE upgrade_proposals SET state=?,updated_at=? WHERE proposal_id=?",
+                       (transition.state, now, proposal_id))
+        return {"activation_id": cursor.lastrowid, "proposal_id": proposal_id, "state": transition.state,
                 "family": family, "revision": revision, "previous_revision": previous}
 
     def rollback(self, proposal_id: str, target_revision: str, actor: str, reason: str,
@@ -224,8 +197,7 @@ class UpgradeQueue:
             activation = db.execute("SELECT family FROM upgrade_activations WHERE proposal_id=? AND action='activate' ORDER BY activation_id DESC LIMIT 1", (proposal_id,)).fetchone()
         if row is None or activation is None:
             raise KeyError(proposal_id)
-        if row["state"] != "activated":
-            raise ValueError("rollback requires an activated proposal")
+        transition = rollback_transition(str(row["state"]))
         family = str(activation["family"])
         skill_id = skill_id_for(family)
         previous = active_revision(skill_id, log_path=log_path)
@@ -234,6 +206,7 @@ class UpgradeQueue:
         with closing(self._db()) as db, db:
             cursor = db.execute("INSERT INTO upgrade_activations (proposal_id,actor,action,family,revision,previous_revision,reason,created_at) VALUES (?,?,?,?,?,?,?,?)",
                                 (proposal_id, actor, "rollback", family, target_revision, previous, reason, now))
-            db.execute("UPDATE upgrade_proposals SET state='rolled_back',updated_at=? WHERE proposal_id=?", (now, proposal_id))
-        return {"activation_id": cursor.lastrowid, "proposal_id": proposal_id, "state": "rolled_back",
+            db.execute("UPDATE upgrade_proposals SET state=?,updated_at=? WHERE proposal_id=?",
+                       (transition.state, now, proposal_id))
+        return {"activation_id": cursor.lastrowid, "proposal_id": proposal_id, "state": transition.state,
                 "family": family, "revision": target_revision, "previous_revision": previous}
