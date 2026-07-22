@@ -39,6 +39,21 @@ def test_references_truth_audit_rejects_taiwan_sources_marked_verified(tmp_path)
         verify_audit(audit)
 
 
+def test_references_export_missing_is_optional_by_default(tmp_path):
+    missing = tmp_path / "references.html"
+
+    checks = verify_references_export(missing)
+
+    assert checks == [f"references export not present; skipped {missing}"]
+
+
+def test_references_export_can_be_required_for_public_sync(tmp_path):
+    missing = tmp_path / "references.html"
+
+    with pytest.raises(AssertionError, match="references export is required but missing"):
+        verify_references_export(missing, require_present=True)
+
+
 def test_references_export_rejects_stale_verified_public_statuses(tmp_path):
     references = tmp_path / "references.html"
     references.write_text(
