@@ -1,5 +1,7 @@
 import json
+import stat
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 from scripts import prepare_calibrator_training
 import pytest
@@ -59,6 +61,7 @@ def _flat(count=100, *, coin="BTC"):
         "date": (start + timedelta(days=index)).isoformat(), "coin": coin, "direction": "不明",
         "confidence": 0.5, "outcome_pct": 0.0, "ground_truth_direction": "neutral",
         "split": "train" if index < int(count * 0.8) else "val",
+        "generated_at": f"2026-01-{1 + index % 28:02d}T00:00:00Z",
     } for index in range(count)]
 
 
@@ -108,6 +111,9 @@ def test_loader_skips_unlabelled_and_missing_confidence_rows(tmp_path):
 def test_duplicate_dates_have_stable_distinct_sample_ids(tmp_path):
     rows = _flat()
     duplicate = dict(rows[0])
+    duplicate["generated_at"] = "2027-01-01T00:00:00Z"
+    duplicate["direction"] = "偏多"
+    duplicate["confidence"] = 0.7
     rows.insert(1, duplicate)
     path = tmp_path / "BTC.jsonl"
     path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
@@ -120,6 +126,26 @@ def test_duplicate_dates_have_stable_distinct_sample_ids(tmp_path):
     reordered = load_flat_training_rows(path, coin="BTC")
     assert reordered[0]["sample_id"] == original_id
     assert reordered == loaded
+
+
+def test_same_earliest_timestamp_with_inference_conflict_fails(tmp_path):
+    rows = _flat()
+    duplicate = dict(rows[0])
+    duplicate["direction"] = "偏多"
+    rows.append(duplicate)
+    path = tmp_path / "BTC.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    with pytest.raises(TrainingDataError, match="conflicting earliest inference"):
+        load_flat_training_rows(path, coin="BTC")
+
+
+def test_eligible_row_requires_timezone_aware_generated_at(tmp_path):
+    rows = _flat()
+    rows[0].pop("generated_at")
+    path = tmp_path / "BTC.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    with pytest.raises(TrainingDataError, match="generated_at"):
+        load_flat_training_rows(path, coin="BTC")
 
 
 def test_label_change_does_not_change_sample_id_but_conflicting_duplicate_fails(tmp_path):
@@ -158,3 +184,23 @@ def test_loader_eligible_candidate_cap_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr("trustforge.modelhub_training.MAX_ELIGIBLE_ROWS", 1)
     with pytest.raises(TrainingDataError):
         load_flat_training_rows(path, coin="BTC")
+
+
+def test_loader_rejects_nonregular_file_before_read(tmp_path, monkeypatch):
+    path = tmp_path / "BTC.jsonl"
+    path.write_text("must not be read", encoding="utf-8")
+    monkeypatch.setattr(
+        "trustforge.modelhub_training.os.fstat",
+        lambda descriptor: SimpleNamespace(st_mode=stat.S_IFIFO, st_size=0),
+    )
+    with pytest.raises(TrainingDataError, match="regular file"):
+        load_flat_training_rows(path, coin="BTC")
+
+
+def test_loader_rejects_symlink_without_reading_target(tmp_path):
+    target = tmp_path / "outside.jsonl"
+    target.write_text("sensitive external contents", encoding="utf-8")
+    link = tmp_path / "BTC.jsonl"
+    link.symlink_to(target)
+    with pytest.raises(TrainingDataError, match="symlink"):
+        load_flat_training_rows(link, coin="BTC")

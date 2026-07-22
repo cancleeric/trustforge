@@ -4,7 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import date
+import os
+import stat
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -51,11 +53,34 @@ def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
     candidates: dict[str, list[tuple[tuple[Any, ...], dict[str, Any], tuple[Any, ...]]]] = {}
     base_required = {"date", "coin", "direction"}
     label_fields = {"outcome_pct", "ground_truth_direction", "split"}
+    descriptor: int | None = None
     try:
-        if path.stat().st_size > MAX_TRAINING_FILE_BYTES:
+        path_stat = os.lstat(path)
+        if stat.S_ISLNK(path_stat.st_mode):
+            raise TrainingDataError("training data symlinks are not allowed")
+        flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            os.close(descriptor)
+            descriptor = None
+            raise TrainingDataError("training data must be a regular file")
+        if (path_stat.st_dev, path_stat.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+            os.close(descriptor)
+            descriptor = None
+            raise TrainingDataError("training data identity changed during open")
+        if file_stat.st_size > MAX_TRAINING_FILE_BYTES:
+            os.close(descriptor)
+            descriptor = None
             raise TrainingDataError("training data exceeds file size limit")
-        handle = path.open("rb")
+        handle = os.fdopen(descriptor, "rb")
+        descriptor = None
     except OSError:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         raise TrainingDataError("training data is unavailable") from None
     eligible_candidates = 0
     streamed_bytes = 0
@@ -93,6 +118,14 @@ def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
                 raise TrainingDataError(f"partially labelled training row at line {line_number}")
             confidence = _finite_number(raw["confidence"])
             outcome = _finite_number(raw["outcome_pct"])
+            generated_at = raw.get("generated_at")
+            try:
+                parsed_generated_at = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+                if parsed_generated_at.tzinfo is None:
+                    raise ValueError("timestamp must be timezone aware")
+                parsed_generated_at = parsed_generated_at.astimezone(timezone.utc)
+            except (AttributeError, TypeError, ValueError):
+                raise TrainingDataError(f"invalid generated_at at line {line_number}") from None
             if (
                 confidence is None or not 0 <= confidence <= 1 or outcome is None
                 or raw["split"] not in {"train", "val"}
@@ -121,13 +154,19 @@ def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
                 },
                 ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             )
-            inference_identity = (raw["direction"], confidence, str(raw.get("generated_at", "")), source_identity)
-            candidates.setdefault(raw["date"], []).append((inference_identity, row, label_identity))
+            inference_identity = (raw["direction"], confidence, source_identity)
+            candidates.setdefault(raw["date"], []).append(
+                ((parsed_generated_at, inference_identity), row, label_identity)
+            )
     rows: list[dict[str, Any]] = []
     for row_date, duplicate_rows in candidates.items():
         if len({candidate[2] for candidate in duplicate_rows}) != 1:
             raise TrainingDataError(f"conflicting duplicate outcome for {row_date}")
-        rows.append(min(duplicate_rows, key=lambda candidate: candidate[0])[1])
+        earliest = min(candidate[0][0] for candidate in duplicate_rows)
+        earliest_rows = [candidate for candidate in duplicate_rows if candidate[0][0] == earliest]
+        if len({candidate[0][1] for candidate in earliest_rows}) != 1:
+            raise TrainingDataError(f"conflicting earliest inference for {row_date}")
+        rows.append(earliest_rows[0][1])
     rows.sort(key=lambda row: (row["date"], row["coin"]))
     return rows
 

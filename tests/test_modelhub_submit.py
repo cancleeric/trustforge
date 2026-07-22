@@ -15,6 +15,7 @@ def write_rows(directory, coin="BTC", count=100):
         "date": (start + timedelta(days=index)).isoformat(), "coin": coin, "direction": "不明",
         "confidence": 0.5, "outcome_pct": 0.0, "ground_truth_direction": "neutral",
         "split": "train" if index < int(count * 0.8) else "val",
+        "generated_at": f"2026-01-{1 + index % 28:02d}T00:00:00Z",
     } for index in range(count)]
     (directory / f"{coin}.jsonl").write_text(
         "\n".join(json.dumps(row) for row in rows), encoding="utf-8"
@@ -32,16 +33,16 @@ class FakeClient:
         self.payload = payload
         if self.failure and self.failure[0] == "trigger":
             raise self.failure[1]
-        return {"status": "accepted"}
+        return {"status": "accepted", "req_no": req_no, "dataset_sha256": payload["dataset_sha256"]}
 
     def poll_training_result(self, req_no, *, max_wait):
         self.calls.append(("poll", req_no, max_wait))
         if self.failure and self.failure[0] == "poll":
             raise self.failure[1]
         holdout = self.payload["holdout_features"]
-        predictions = [{"sample_id": row["sample_id"], "confidence": self.confidence} for row in holdout]
+        predictions = [{"opaque_id": row["opaque_id"], "confidence": self.confidence} for row in holdout]
         if not self.aligned:
-            predictions[0]["sample_id"] = "wrong-id"
+            predictions[0]["opaque_id"] = "wrong-id"
         return {"status": "completed", "artifact_sha256": "a" * 64, "holdout_predictions": predictions}
 
     def get_model_path(self, product, name):
@@ -95,11 +96,54 @@ def test_payload_never_leaks_holdout_answers_and_sample_ids_are_disjoint(tmp_pat
         out_dir=tmp_path / "out",
     )
     assert result["status"] == "candidate"
-    forbidden = {"hit", "outcome_pct", "ground_truth_direction", "split", "date", "coin"}
+    forbidden = {"hit", "outcome_pct", "ground_truth_direction", "split", "date", "coin", "sample_id"}
     assert all(forbidden.isdisjoint(row) for row in client.payload["holdout_features"])
     train_ids = {row["sample_id"] for row in client.payload["train_rows"]}
-    holdout_ids = {row["sample_id"] for row in client.payload["holdout_features"]}
+    holdout_ids = {row["opaque_id"] for row in client.payload["holdout_features"]}
     assert train_ids.isdisjoint(holdout_ids)
+
+
+def test_opaque_tokens_are_per_run_random_and_collision_fails(tmp_path):
+    rows = write_rows(tmp_path)
+    client = FakeClient(rows)
+    tokens = iter(f"opaque-{index}" for index in range(100))
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: client,
+        opaque_id_factory=lambda: next(tokens), out_dir=tmp_path / "out",
+    )
+    assert result["status"] == "candidate"
+    assert all(row["opaque_id"].startswith("opaque-") for row in client.payload["holdout_features"])
+    built = []
+    collision = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: built.append(1),
+        opaque_id_factory=lambda: "same-token", out_dir=tmp_path / "collision",
+    )
+    assert collision["status"] == "error" and built == []
+
+
+def test_injected_opaque_tokens_do_not_depend_on_holdout_labels_or_features(tmp_path):
+    rows = write_rows(tmp_path)
+    first_client = FakeClient(rows)
+    first_tokens = iter(f"fixed-{index}" for index in range(100))
+    submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ-1", client_factory=lambda: first_client,
+        opaque_id_factory=lambda: next(first_tokens), out_dir=tmp_path / "first",
+    )
+    source = [json.loads(line) for line in (tmp_path / "BTC.jsonl").read_text().splitlines()]
+    for row in source:
+        if row["split"] == "val":
+            row["direction"] = "偏多"
+            row["confidence"] = 0.8
+    (tmp_path / "BTC.jsonl").write_text("\n".join(json.dumps(row) for row in source))
+    second_client = FakeClient(rows)
+    second_tokens = iter(f"fixed-{index}" for index in range(100))
+    submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ-2", client_factory=lambda: second_client,
+        opaque_id_factory=lambda: next(second_tokens), out_dir=tmp_path / "second",
+    )
+    assert [row["opaque_id"] for row in first_client.payload["holdout_features"]] == [
+        row["opaque_id"] for row in second_client.payload["holdout_features"]
+    ]
 
 
 @pytest.mark.parametrize(
@@ -257,6 +301,57 @@ def test_current_manifest_does_not_reference_stale_candidate(tmp_path):
     assert third["status"] == "error" and history.exists()
     current = json.loads((out / "BTC.json").read_text())
     assert current["status"] == "error" and "proposal_file" not in current
+
+
+def test_same_dataset_two_runs_keep_two_immutable_histories(tmp_path):
+    rows = write_rows(tmp_path)
+    out = tmp_path / "out"
+    for request_number in ("REQ-1", "REQ-2"):
+        assert submit_calibrator_training(
+            "BTC", training_dir=tmp_path, req_no=request_number,
+            client_factory=lambda: FakeClient(rows, 0.9), out_dir=out,
+        )["status"] == "candidate"
+    assert len(list(out.glob("BTC-*-hermes-*.json"))) == 2
+
+
+def test_candidate_current_failure_returns_error_and_preserves_history(tmp_path, monkeypatch):
+    rows = write_rows(tmp_path)
+    out = tmp_path / "out"
+    first = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ-1", client_factory=lambda: FakeClient(rows),
+        out_dir=out,
+    )
+    assert first["status"] == "candidate"
+    old_current = (out / "BTC.json").read_bytes()
+
+    def fail_current(out_dir, coin, value):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("trustforge.modelhub_submit.write_current_manifest", fail_current)
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ-2", client_factory=lambda: FakeClient(rows),
+        out_dir=out,
+    )
+    assert result["status"] == "error" and result["manifest_updated"] is False
+    assert len(list(out.glob("BTC-*-hermes-*.json"))) == 2
+    assert (out / "BTC.json").read_bytes() == old_current
+
+
+def test_failure_current_replace_error_is_reported_not_silenced(tmp_path, monkeypatch):
+    rows = write_rows(tmp_path)
+    client = FakeClient(rows, confidence=0.5)
+    monkeypatch.setattr(
+        "trustforge.modelhub_submit.write_current_manifest",
+        lambda out_dir, coin, value: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+    result = submit_calibrator_training(
+        "BTC", training_dir=tmp_path, req_no="REQ", client_factory=lambda: client,
+        out_dir=tmp_path / "out",
+    )
+    assert result == {
+        "status": "error", "coin": "BTC", "run_id": result["run_id"],
+        "manifest_updated": False, "reason": "manifest_update_failed",
+    }
 
 
 def test_metrics_and_shared_direction_semantics():

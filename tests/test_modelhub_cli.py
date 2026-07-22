@@ -96,3 +96,75 @@ def test_malformed_submit_result_becomes_logged_error(monkeypatch, capsys, tmp_p
     assert result["status"] == "error" and result["run_id"]
     content = next(tmp_path.glob("execution-*.jsonl")).read_text()
     assert "InvalidResult" in content
+
+
+def test_log_persistence_failure_is_coin_error_and_all_continues(monkeypatch, capsys, tmp_path):
+    calls = []
+
+    def submit(coin, **kwargs):
+        calls.append(coin)
+        return {"coin": coin, "status": "dry_run"}
+
+    monkeypatch.setattr("trustforge.modelhub_submit.submit_calibrator_training", submit)
+    monkeypatch.setattr("trustforge.cli._persist_modelhub_execution_log", lambda out_dir, log: False)
+    assert cli.main([
+        "modelhub-train", "--all", "--dry-run", "--out-dir", str(tmp_path)
+    ]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert calls == list(cli.COIN_POOL)
+    assert all(result["status"] == "error" for result in output)
+
+
+def test_execution_log_helper_handles_file_mkstemp_and_replace_failures(tmp_path, monkeypatch):
+    from trustforge.execlog import ExecutionLog
+
+    out_file = tmp_path / "not-a-directory"
+    out_file.write_text("x")
+    assert cli._persist_modelhub_execution_log(out_file, ExecutionLog()) is False
+    monkeypatch.setattr("trustforge.cli.tempfile.mkstemp", lambda **kwargs: (_ for _ in ()).throw(OSError()))
+    assert cli._persist_modelhub_execution_log(tmp_path / "mkstemp", ExecutionLog()) is False
+    monkeypatch.undo()
+    monkeypatch.setattr("trustforge.cli.os.replace", lambda source, target: (_ for _ in ()).throw(OSError()))
+    replace_dir = tmp_path / "replace"
+    assert cli._persist_modelhub_execution_log(replace_dir, ExecutionLog()) is False
+    assert not list(replace_dir.glob("*.tmp"))
+
+
+def test_dry_run_log_failure_never_changes_existing_live_current(monkeypatch, capsys, tmp_path):
+    current = tmp_path / "BTC.json"
+    current.write_bytes(b'{"status":"candidate","protected":true}')
+    before = current.read_bytes()
+    monkeypatch.setattr(
+        "trustforge.modelhub_submit.submit_calibrator_training",
+        lambda coin, **kwargs: {"coin": coin, "status": "dry_run"},
+    )
+    monkeypatch.setattr("trustforge.cli._persist_modelhub_execution_log", lambda out_dir, log: False)
+    assert cli.main([
+        "modelhub-train", "--coin", "BTC", "--dry-run", "--out-dir", str(tmp_path)
+    ]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["manifest_updated"] is False
+    assert current.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", ["unexpected", "malformed"])
+def test_live_unexpected_or_malformed_result_replaces_stale_current(monkeypatch, capsys, tmp_path, mode):
+    current = tmp_path / "BTC.json"
+    current.write_text('{"status":"candidate","proposal_file":"stale.json"}')
+
+    def submit(coin, **kwargs):
+        if mode == "unexpected":
+            raise RuntimeError("must not leak")
+        return {"wrong": True}
+
+    monkeypatch.setattr("trustforge.modelhub_submit.submit_calibrator_training", submit)
+    assert cli.main([
+        "modelhub-train", "--coin", "BTC", "--req-no", "REQ", "--out-dir", str(tmp_path)
+    ]) == 1
+    result = json.loads(capsys.readouterr().out)
+    manifest = json.loads(current.read_text())
+    assert result["manifest_updated"] is True
+    assert manifest["status"] == "error"
+    assert manifest["reason"] == "unexpected_or_invalid_result"
+    assert "proposal_file" not in manifest
+    assert manifest["automatic_apply"] is False
