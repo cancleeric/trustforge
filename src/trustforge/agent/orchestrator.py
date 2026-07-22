@@ -24,6 +24,7 @@ from ..execlog import ExecutionLog
 from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
+from ..trust.kernel import KernelInput, run_kernel
 from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 
 # Step 4 最低剩餘預算門檻（秒）：低於此值直接跳過，確保在 15 分鐘內完成
@@ -1523,10 +1524,20 @@ def run_agent_pipeline(
     # coin=coin：「coin-filter 主導」（demo 可靠性 #32 追加）——見 aggregate() docstring，
     # 讓明確提及該幣的證據不因 query 措辭（如中文複合詞、無空格）忽窄忽寬地被截斷擠出。
     brief = aggregate(scored, query=query, coin=coin)
+    kernel_output = run_kernel(KernelInput(
+        claims=claims,
+        pit_epoch=now_ts,
+        coin=coin,
+        query=query,
+        stance_fn=shared_stance_fn,
+    ))
     log.record(
         "judgment.derive",
         params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),
-                "confidence": round(brief.confidence, 3)},
+                "confidence": round(brief.confidence, 3),
+                "kernel_confidence": round(kernel_output.confidence, 3),
+                "kernel_abstain": kernel_output.abstain,
+                "kernel_reason_codes": kernel_output.reason_codes},
         summary="Step2 純 pipeline 完成；判斷由演算法產生，非 LLM",
     )
 
