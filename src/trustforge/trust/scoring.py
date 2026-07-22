@@ -24,6 +24,13 @@ import time as _time_mod
 from dataclasses import dataclass, field
 from typing import Callable
 
+from trustforge_core.corroboration import (
+    CorroborationClaim as _CoreCorroborationClaim,
+    DOMAIN_STOP,
+    canonical_source as _core_canonical_source,
+    corroborate as _core_corroborate,
+    directional_word_polarities as _core_directional_word_polarities,
+)
 from trustforge_core.scoring import (
     interpolate_calibration as _interpolate_calibration,
     recency_decay as _core_recency_decay,
@@ -107,24 +114,6 @@ def _reputation_floor(kind: str) -> float:
 KIND_HALFLIFE_HOURS: dict[str, float] = {
     "whale_onchain": 2.0,       # 鯨魚鏈上轉帳：市場反應極快
     "celebrity_trade": 2.0,     # 名人交易宣告：時效同鯨魚
-}
-
-# 域內停用詞（Domain Stopwords）：加密市場每篇分析都有、對「是否在說同一件事」無鑑別力的詞。
-# 這些詞從 overlap 計算中完全排除，讓佐證判斷只依賴具體/稀有的內容詞。
-DOMAIN_STOP: set[str] = {
-    # 幣名（太普遍，任何 BTC 分析都有）
-    "btc", "eth", "sol", "bnb", "xrp",
-    "bitcoin", "ethereum", "solana",
-    "比特幣", "比特", "以太坊", "以太", "幣",
-    # 超高頻市場通用詞
-    "市場", "價格", "成交量", "交易所", "交易",
-    "行情", "數據", "分析", "資料", "報告",
-    # 方向性通用詞（過於籠統；「漲」/「跌」單字被 _normalize 過濾不到，改用整詞）
-    "漲跌", "上漲", "下跌", "看漲", "看跌", "走低", "走高",
-    # 高頻語法詞（_normalize 已過濾單字，這裡補雙字）
-    # 注意：支撐/阻力是具體 TA 訊號詞，已從 DOMAIN_STOP 移除（見 codex #fix-[Low]）
-    "目前", "近期", "顯示", "表示", "預計", "預測", "可能",
-    "目標",
 }
 
 # 操縱訊號關鍵詞（啟發式；正式版可換 Bedrock 分類器）。
@@ -415,9 +404,9 @@ def _normalize(s: str) -> set[str]:
 
 
 # --- 來源身分正規化（issue #72：repo-wide canonical source identity）------
-# 全倉「同一來源只算一個獨立聲音」不變量的唯一真相來源。`_corroboration_detail`/
-# `_evidence_strength`/`_iterate_source_reputation` 與 `agent.orchestrator` 三處
-# 去重口徑都必須走這裡，不允許各自再發明一套（見 issue #106 收口與本 PR #72）。
+# 唯一實作已移至 pure core；此相容 facade 讓既有 app 呼叫點維持同一去重口徑。
+# `_corroboration_detail`/`_evidence_strength`/`_iterate_source_reputation` 與
+# `agent.orchestrator` 都必須走這裡或 core API，不允許各自再發明一套。
 #
 # 正規化分兩層：
 #   1. 零成本層：`strip().casefold()`——治大小寫/前後空白變體
@@ -428,29 +417,6 @@ def _normalize(s: str) -> set[str]:
 # ⚠️ 保守白名單原則：只有「確定是同一發布實體」的變體才收斂，絕不反向——不
 # 能把真正不同的來源併成一個，否則反而會「虛減」獨立來源數、讓回音室被誤判
 # 成跨源互證。新增別名請附註為何是同一實體。
-_SOURCE_ALIASES: dict[str, str] = {
-    # 域名形式 → 裸發布者名（同一家媒體的 RSS/網站/APP 可能帶不同後綴）
-    "coindesk.com": "coindesk",
-    "cointelegraph.com": "cointelegraph",
-    "theblock.co": "theblock",
-    "theblock": "theblock",
-    "reuters.com": "reuters",
-    "bloomberg.com": "bloomberg",
-    "bitcoinmagazine.com": "bitcoinmagazine",
-    "newsbtc.com": "newsbtc",
-    "cryptoslate.com": "cryptoslate",
-    "decrypt.co": "decrypt",
-    "utoday.com": "utoday",
-    # 平台更名 / 帳號別名：Twitter → X 是同一平臺的更名，視為同一來源。
-    "twitter": "x",
-    "x.com": "x",
-    # 監管機關官方單一源（regulatory.py 固定 `sec-gov`；其他呈現視為同一機關）。
-    "sec edgar": "sec-gov",
-    "sec": "sec-gov",
-    "sec.gov": "sec-gov",
-}
-
-
 def _canonical_source(source: str | None) -> str:
     """repo-wide 唯一來源身分正規化（issue #72 收口）。
 
@@ -463,19 +429,7 @@ def _canonical_source(source: str | None) -> str:
     只用於「比對/去重/計數」，顯示一律保留原始 `source` 字串（見
     `_normalize_source_key` 既有約定）。
     """
-    if not source:
-        return ""
-    key = source.strip().casefold()
-    if not key:
-        return ""
-    return _SOURCE_ALIASES.get(key, key)
-
-
-def _direction_compatible(d1: str, d2: str) -> bool:
-    """方向相容檢查。任一方為 neutral 時不擋（離線/預設安全）；兩者皆有方向時必須一致。"""
-    if "neutral" in (d1, d2):
-        return True
-    return d1 == d2
+    return _core_canonical_source(source)
 
 
 def _claim_coin(c: Claim) -> str:
@@ -885,33 +839,8 @@ def _directional_word_polarities(text: str) -> tuple[set[str], set[str]]:
     （即它是某個更長方向詞的子字串，如「漲」⊂「上漲」）則不計——避免子串交叉
     誤殺真正同向佐證（under-corroboration）。否定閘仍逐詞判定。
     """
-    candidates: list[tuple[int, int, str]] = []
-    for w in _BULLISH_WORDS + _BEARISH_WORDS:
-        for m in re.finditer(re.escape(w), text):
-            candidates.append((m.start(), m.end(), w))
-
-    # 最長優先（與 `_infer_direction` 同款排序），短詞子串不重複計
-    candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
-
-    consumed: list[tuple[int, int]] = []
-    def _overlaps(s: int, e: int) -> bool:
-        return any(s < ce and e > cs for cs, ce in consumed)
-
-    kept: list[tuple[int, int, str]] = []
-    for start, end, w in candidates:
-        if _overlaps(start, end):
-            continue
-        consumed.append((start, end))
-        kept.append((start, end, w))
-
-    asserted: set[str] = set()
-    negated: set[str] = set()
-    for start, end, w in kept:
-        if _NEG_RX.search(text[max(0, start - 4): start]):
-            negated.add(w)
-        else:
-            asserted.add(w)
-    return asserted, negated
+    asserted, negated = _core_directional_word_polarities(text)
+    return set(asserted), set(negated)
 
 
 def _corroboration_detail(
@@ -955,53 +884,45 @@ def _corroboration_detail(
     `"contradiction"` 只可能來自真正跑成功（或先前持久化快取過）的分類結果，
     是已驗證的真訊號，兩種模式下都照樣計入 `contradicting_sources`。
     """
-    tt = _normalize(target.text) - DOMAIN_STOP
-    independent_sources: set[str] = set()
-    contradicting_sources: set[str] = set()
-    if not tt:
-        return independent_sources, contradicting_sources
-    # issue #72 / #132：同源排除與「已計入來源」去重都用 canonical key，
-    # 否則同一來源的大小寫/空白變體（如 `"CoinDesk"` vs `" coindesk "`）會被
-    # 誤判成不同來源，讓同源轉發/重複發文灌水成多個「獨立佐證」。
-    target_key = _canonical_source(target.doc.source)
-    for c in all_claims:
-        c_key = _canonical_source(c.doc.source)
-        if c_key == target_key:
-            continue
-        if c_key in independent_sources:
-            continue
-        ct = _normalize(c.text) - DOMAIN_STOP
-        inter = len(tt & ct)
-        if not inter:
-            continue
-        if inter / len(tt) < 0.4:
-            continue
-        if not _direction_compatible(target.direction, c.direction):
-            continue
-        # issue #4 否定詞語意偵測：同一方向詞一方 asserted、另一方 negated →
-        # 語意對立（如「BTC 上漲」vs「BTC 不會上漲」），即使被否定方因
-        # `_infer_direction` 判成 neutral、通過上方方向閘，也不計為獨立佐證。
-        tgt_asserted, tgt_negated = _directional_word_polarities(target.text)
-        cand_asserted, cand_negated = _directional_word_polarities(c.text)
-        if (tgt_asserted & cand_negated) or (cand_asserted & tgt_negated):
-            continue
-        if stance_fn is None:
-            if require_entailment:
-                # W2：沒有可用的分類器，無法驗證語意——保守排除，不當佐證。
-                continue
-            independent_sources.add(c_key)
-            continue
-        label = stance_fn(target.text, c.text)
-        if label == "contradiction":
-            contradicting_sources.add(c_key)
-            continue
-        if require_entailment:
-            if label == "entailment":
-                independent_sources.add(c_key)
-            # "neutral"（genuine 或 fail-safe，無法區分）：W2 不採信，兩個集合都不進。
-            continue
-        independent_sources.add(c_key)
-    return independent_sources, contradicting_sources
+    def _to_core(claim: Claim) -> _CoreCorroborationClaim:
+        return _CoreCorroborationClaim(
+            text=claim.text,
+            source=claim.doc.source,
+            direction=claim.direction,
+        )
+
+    engine = _core_corroborate(
+        _to_core(target),
+        tuple(_to_core(claim) for claim in all_claims),
+        require_stance=stance_fn is not None,
+        require_entailment=require_entailment,
+    )
+    try:
+        pending = next(engine)
+    except StopIteration as completed:
+        result = completed.value
+    else:
+        while True:
+            # Keep the callback outside the generator-completion handler.  A
+            # provider callback that raises StopIteration is an app error, not
+            # a successful completion signal from the core generator.
+            label = stance_fn(pending.target_text, pending.candidate_text)  # type: ignore[misc]
+            # Legacy callbacks historically treated every non-contradiction
+            # value like neutral.  Preserve that facade compatibility while
+            # keeping the public core API strict for direct callers.  Check
+            # the type first so unhashable provider values cannot raise here.
+            if not isinstance(label, str) or label not in (
+                "entailment",
+                "contradiction",
+                "neutral",
+            ):
+                label = "neutral"
+            try:
+                pending = engine.send(label)  # type: ignore[arg-type]
+            except StopIteration as completed:
+                result = completed.value
+                break
+    return set(result.independent_sources), set(result.contradicting_sources)
 
 
 def _corroboration(
