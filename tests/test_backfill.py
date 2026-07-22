@@ -25,6 +25,7 @@ def tmp_env(tmp_path):
     env = {
         "TRUSTFORGE_BACKFILL_STATE_PATH": str(state_file),
         "TRUSTFORGE_BACKFILL_ENABLED": "",  # clear env override
+        "TRUSTFORGE_HOME": str(tmp_path),
     }
     with patch.dict(os.environ, env, clear=False):
         yield {"state": state_file, "db": db_file, "tmp": tmp_path}

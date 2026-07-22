@@ -328,6 +328,7 @@ class BackfillWorker:
         interval_sec: float = 5.0,
         mode: str = "offline",
         sample: int | None = None,
+        training_data_dir: str | Path | None = None,
     ):
         if mode not in ("offline", "live"):
             raise ValueError(f"mode must be 'offline' or 'live', got {mode!r}")
@@ -336,7 +337,12 @@ class BackfillWorker:
 
         self.db_path = _db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.data_dir = Path(data_dir) if data_dir else _root() / "data" / "data"
+        default_data_dir = _root() / "data" / "data"
+        repo_data_dir = Path(__file__).resolve().parents[2] / "data" / "data"
+        self.data_dir = Path(data_dir) if data_dir else (
+            default_data_dir if default_data_dir.exists() else repo_data_dir
+        )
+        self.training_data_dir = Path(training_data_dir) if training_data_dir else None
         self.coins = [c.upper() for c in (coins or list(COIN_POOL))]
         self.start_date = start_date or "2021-07-01"
         self.end_date = end_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -941,11 +947,18 @@ class BackfillWorker:
             "sources": sources,
             "model_id": model_id,
             "generated_at": iso_utc(time.time()),
+            "archive_type": "backfilled_archive",
+            "snapshot_id": f"backfill-{coin.lower()}-{date_str}",
+            "document_count": len(snapshot.get("sources", [])),
         }
 
-        training_dir = _root() / "data" / "training"
+        training_dir = self.training_data_dir or (_root() / "data" / "training")
         training_dir.mkdir(parents=True, exist_ok=True)
-        output_path = training_dir / f"{coin.upper()}.jsonl"
+        output_path = (
+            training_dir / f"{coin.lower()}-backfill.jsonl"
+            if self.training_data_dir
+            else training_dir / f"{coin.upper()}.jsonl"
+        )
 
         try:
             with open(output_path, "a", encoding="utf-8") as f:

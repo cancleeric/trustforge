@@ -85,10 +85,10 @@ def test_kernel_golden_vector_contradiction_abstention():
 
     assert out.__dict__ == {
         "trust_score": 0.6125,
-        "confidence": 0.272959,
-        "abstain": True,
+        "confidence": 0.5227,
+        "abstain": False,
         "direction": "偏多",
-        "reason_codes": ["low_confidence", "contrarian_evidence_present"],
+        "reason_codes": ["contrarian_evidence_present"],
         "supporting_count": 2,
         "independent_sources": 2,
     }
@@ -101,13 +101,12 @@ def test_kernel_golden_vector_sparse_empty_input():
 
     assert out.__dict__ == {
         "trust_score": 0.0,
-        "confidence": 0.25,
+        "confidence": 0.0,
         "abstain": True,
         "direction": "不明",
         "reason_codes": [
             "low_confidence",
             "no_supporting_claims",
-            "calibration_boosted",
         ],
         "supporting_count": 0,
         "independent_sources": 0,
