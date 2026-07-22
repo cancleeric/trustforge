@@ -239,6 +239,31 @@ class ModuleTelemetry:
         except Exception:
             pass  # fail-silent
 
+    def record_state(
+        self,
+        module_id: str,
+        state: ModuleState | str,
+        evidence_ref: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a module lifecycle state without counting it as an invocation."""
+        try:
+            normalized_state = ModuleState(state).value
+            ev = _WriteEvent(
+                module_id=module_id,
+                latency_ms=0.0,
+                result=normalized_state,
+                ts=time.time(),
+                metadata=metadata,
+                state=normalized_state,
+                evidence_ref=evidence_ref,
+            )
+            self._queue.put_nowait(ev)
+        except queue.Full:
+            logger.debug("module_telemetry: queue full, dropping state event %s", module_id)
+        except Exception:
+            pass  # fail-silent
+
     def get_telemetry(self, module_id: str) -> TelemetryRecord | None:
         """查詢單一模組的遙測快照。"""
         try:
@@ -326,6 +351,24 @@ def get_all_telemetry() -> list[TelemetryRecord]:
         return ModuleTelemetry.get_instance().get_all_telemetry()
     except Exception:
         return []
+
+
+def record_state(
+    module_id: str,
+    state: ModuleState | str,
+    evidence_ref: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """記錄模組生命週期狀態（module-level 便捷函式）。"""
+    try:
+        ModuleTelemetry.get_instance().record_state(
+            module_id=module_id,
+            state=state,
+            evidence_ref=evidence_ref,
+            metadata=metadata,
+        )
+    except Exception:
+        pass  # telemetry 失敗不崩
 
 
 def record_verified(

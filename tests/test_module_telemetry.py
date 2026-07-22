@@ -239,3 +239,53 @@ class TestModuleStateV2:
         assert rec is not None
         assert rec.state == "verified"
         assert rec.evidence_ref == "tests/test_orchestrator.py::test_build_report"
+
+    def test_configured_resolved_invoked_verified_lifecycle(self, tmp_db):
+        """Issue #382: configured/resolved states are first-class evidence."""
+        from trustforge.module_telemetry import ModuleState, ModuleTelemetry
+
+        tele = ModuleTelemetry(db_path=tmp_db)
+        tele.record_state(
+            "provider.llm",
+            ModuleState.configured,
+            evidence_ref="env:BEDROCK_MODEL_ID",
+            metadata={"phase": "configured"},
+        )
+        time.sleep(0.2)
+        rec = tele.get_telemetry("provider.llm")
+        assert rec is not None
+        assert rec.state == "configured"
+        assert rec.last_result == "configured"
+        assert rec.evidence_ref == "env:BEDROCK_MODEL_ID"
+        assert rec.metadata == {"phase": "configured"}
+
+        tele.record_state(
+            "provider.llm",
+            "resolved",
+            evidence_ref="provider.resolve:llm",
+            metadata={"resolved": "bedrock"},
+        )
+        time.sleep(0.2)
+        rec = tele.get_telemetry("provider.llm")
+        assert rec is not None
+        assert rec.state == "resolved"
+        assert rec.last_result == "resolved"
+        assert rec.evidence_ref == "provider.resolve:llm"
+        assert rec.metadata == {"resolved": "bedrock"}
+
+        tele.record_invocation("provider.llm", 12.5, "success", metadata={"tool": "complete"})
+        time.sleep(0.2)
+        rec = tele.get_telemetry("provider.llm")
+        assert rec is not None
+        assert rec.state == "invoked"
+        assert rec.invocation_count == 3
+        assert rec.evidence_ref == "provider.resolve:llm"
+
+        tele.record_verified("provider.llm", "ci:test_provider_ports")
+        time.sleep(0.5)
+        rec = tele.get_telemetry("provider.llm")
+        assert rec is not None
+        assert rec.state == "verified"
+        assert rec.last_result == "verified"
+        assert rec.evidence_ref == "ci:test_provider_ports"
+        tele.shutdown()
