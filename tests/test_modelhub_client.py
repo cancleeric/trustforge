@@ -3,6 +3,8 @@ import json
 import math
 import socket
 import threading
+import traceback
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 
@@ -294,6 +296,107 @@ def test_response_read_value_error_is_not_misclassified_as_header_error():
         ModelHubClient(opener=return_response).list_models()
     assert not isinstance(caught.value, ModelHubConfigurationError)
     assert "body-secret" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_inbound_non_finite_json_is_rejected_without_cause(constant):
+    secret = "json-secret"
+    with pytest.raises(ModelHubResponseError) as caught:
+        ModelHubClient(api_key=secret, opener=Opener(f'{{"value":{constant}}}'.encode())).list_models()
+    assert caught.value.__cause__ is None
+    assert secret not in "".join(traceback.format_exception(caught.value))
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_outbound_non_finite_json_is_rejected_without_request(value):
+    secret = "payload-secret"
+    opener = Opener({"status": "unused"})
+    with pytest.raises(ModelHubResponseError) as caught:
+        ModelHubClient(api_key=secret, opener=opener).trigger_retrain("REQ-1", {"value": value})
+    assert opener.calls == []
+    assert caught.value.__cause__ is None
+    assert secret not in "".join(traceback.format_exception(caught.value))
+
+
+def test_payload_serialization_error_has_no_untrusted_cause():
+    payload = {}
+    payload["cycle"] = payload
+    with pytest.raises(ModelHubResponseError) as caught:
+        ModelHubClient().trigger_retrain("REQ-1", payload)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+class TransportPhaseResponse:
+    def __init__(self, phase, secret):
+        self.phase = phase
+        self.secret = secret
+        self.read_calls = 0
+
+    def __enter__(self):
+        if self.phase == "enter":
+            raise socket.timeout(self.secret)
+        return self
+
+    def __exit__(self, *_args):
+        if self.phase == "exit":
+            raise ConnectionError(self.secret)
+        return None
+
+    def read1(self, _amount):
+        if self.phase == "read1":
+            raise IncompleteRead(b"", 1)
+        if self.phase == "read":
+            raise AssertionError("read fallback expected")
+        self.read_calls += 1
+        return b'{"models":[]}' if self.read_calls == 1 else b""
+
+
+class FallbackTransportResponse(TransportPhaseResponse):
+    read1 = None
+
+    def read(self, _amount):
+        raise TimeoutError(self.secret)
+
+
+@pytest.mark.parametrize("phase", ["enter", "read", "read1", "exit"])
+def test_response_context_transport_errors_retry_get_and_redact_traceback(phase):
+    secret = f"{phase}-transport-secret"
+    response_type = FallbackTransportResponse if phase == "read" else TransportPhaseResponse
+    responses = [response_type(phase, secret) for _ in range(3)]
+    calls = []
+
+    def opener(_request, timeout):
+        calls.append(timeout)
+        return responses.pop(0)
+
+    with pytest.raises(ModelHubTransportError) as caught:
+        ModelHubClient(api_key=secret, opener=opener, sleep=lambda _: None).list_models()
+    assert len(calls) == 3
+    assert caught.value.__cause__ is None
+    assert secret not in "".join(traceback.format_exception(caught.value))
+
+
+def test_response_context_transport_error_makes_health_false():
+    responses = [TransportPhaseResponse("enter", "health-secret") for _ in range(3)]
+    client = ModelHubClient(opener=lambda _request, timeout: responses.pop(0), sleep=lambda _: None)
+    assert client.health_check() is False
+
+
+def test_post_body_transport_failure_is_ambiguous_and_never_retried():
+    calls = []
+    secret = "post-secret"
+
+    def opener(_request, timeout):
+        calls.append(timeout)
+        return FallbackTransportResponse("read", secret)
+
+    with pytest.raises(ModelHubTransportError) as caught:
+        ModelHubClient(api_key=secret, opener=opener).trigger_retrain("REQ-1", {})
+    assert len(calls) == 1
+    assert caught.value.__cause__ is None
+    assert secret not in "".join(traceback.format_exception(caught.value))
 
 
 def test_oversized_response_is_rejected():

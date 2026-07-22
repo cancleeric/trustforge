@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from http.client import HTTPException
 import math
 import numbers
 import os
@@ -16,6 +17,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 DEFAULT_BASE_URL = "http://localhost:8950"
 DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
 MIN_POLL_INTERVAL = 0.05
+_TRANSPORT_ERRORS = (URLError, TimeoutError, socket.timeout, ConnectionError, OSError, HTTPException)
 
 
 class ModelHubError(Exception):
@@ -42,6 +44,10 @@ class ModelHubResponseError(ModelHubError):
 
 class ModelHubPollTimeout(ModelHubError):
     pass
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -171,14 +177,14 @@ class ModelHubClient:
                 self._check_deadline(deadline)
         except ModelHubPollTimeout:
             raise
-        except (ValueError, RecursionError) as exc:
-            raise ModelHubResponseError("ModelHub response body could not be read") from exc
+        except (ValueError, RecursionError):
+            raise ModelHubResponseError("ModelHub response body could not be read") from None
         if len(raw) > self.max_response_bytes:
             raise ModelHubResponseError("ModelHub response exceeded the configured size limit")
         try:
-            return json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
-            raise ModelHubResponseError("ModelHub returned malformed JSON") from exc
+            return json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+            raise ModelHubResponseError("ModelHub returned malformed JSON") from None
 
     def _request(
         self,
@@ -194,9 +200,14 @@ class ModelHubClient:
         data = None
         if payload is not None:
             try:
-                data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            except (TypeError, ValueError) as exc:
-                raise ModelHubResponseError("ModelHub request payload is not JSON serializable") from exc
+                data = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            except (TypeError, ValueError, RecursionError):
+                raise ModelHubResponseError("ModelHub request payload is not JSON serializable") from None
             headers["Content-Type"] = "application/json"
 
         try:
@@ -223,16 +234,23 @@ class ModelHubClient:
                     raise ModelHubHTTPError(exc.code) from None
                 if attempt == retry_count:
                     raise ModelHubHTTPError(exc.code, "ModelHub retry limit exhausted") from None
-            except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
+            except _TRANSPORT_ERRORS as exc:
                 last_transport = exc
                 if attempt == retry_count:
                     raise ModelHubTransportError("ModelHub is unavailable after retry limit") from None
             else:
-                with response:
-                    decoded = self._decode_response(response, deadline)
-                if deadline is not None and deadline - self._monotonic() <= 0:
-                    raise ModelHubPollTimeout("ModelHub training result polling timed out")
-                return decoded
+                try:
+                    with response as opened_response:
+                        decoded = self._decode_response(opened_response, deadline)
+                    if deadline is not None and deadline - self._monotonic() <= 0:
+                        raise ModelHubPollTimeout("ModelHub training result polling timed out")
+                    return decoded
+                except ModelHubError:
+                    raise
+                except _TRANSPORT_ERRORS as exc:
+                    last_transport = exc
+                    if attempt == retry_count:
+                        raise ModelHubTransportError("ModelHub is unavailable after retry limit") from None
             if attempt < retry_count:
                 delay = min(0.1 * (2**attempt), 1.0)
                 if deadline is not None:
