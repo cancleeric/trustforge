@@ -33,4 +33,4 @@ testpaths = ["tests"]
 # 注意：這是 always-on 設定，跑「單一測試檔子集」時覆蓋率會偏低而觸發 fail-under；
 # 本機只想跑子集時請加 `--no-cov`（例：`pytest tests/test_foo.py --no-cov`）。
 # CI 一律跑全倉，不受此影響。
-addopts = "--cov=trustforge --cov-report=term-missing --cov-fail-under=75"
+addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing --cov-fail-under=75"
