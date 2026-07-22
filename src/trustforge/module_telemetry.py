@@ -71,12 +71,16 @@ class TelemetryRecord:
 
 class _WriteEvent:
     """Background writer 消費的事件。"""
-    __slots__ = ("module_id", "latency_ms", "result", "ts", "metadata", "state", "evidence_ref")
+    __slots__ = (
+        "module_id", "latency_ms", "result", "ts", "metadata", "state",
+        "evidence_ref", "count_invocation",
+    )
 
     def __init__(self, module_id: str, latency_ms: float, result: str,
                  ts: float, metadata: dict[str, Any] | None = None,
                  state: str = ModuleState.invoked.value,
-                 evidence_ref: str = ""):
+                 evidence_ref: str = "",
+                 count_invocation: bool = True):
         self.module_id = module_id
         self.latency_ms = latency_ms
         self.result = result
@@ -84,6 +88,7 @@ class _WriteEvent:
         self.metadata = metadata or {}
         self.state = state
         self.evidence_ref = evidence_ref
+        self.count_invocation = count_invocation
 
 
 class ModuleTelemetry:
@@ -232,10 +237,37 @@ class ModuleTelemetry:
                 metadata=metadata,
                 state=ModuleState.verified.value,
                 evidence_ref=evidence_ref,
+                count_invocation=False,
             )
             self._queue.put_nowait(ev)
         except queue.Full:
             logger.debug("module_telemetry: queue full, dropping verified event for %s", module_id)
+        except Exception:
+            pass  # fail-silent
+
+    def record_state(
+        self,
+        module_id: str,
+        state: ModuleState | str,
+        evidence_ref: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a module lifecycle state without counting it as an invocation."""
+        try:
+            normalized_state = ModuleState(state).value
+            ev = _WriteEvent(
+                module_id=module_id,
+                latency_ms=0.0,
+                result=normalized_state,
+                ts=time.time(),
+                metadata=metadata,
+                state=normalized_state,
+                evidence_ref=evidence_ref,
+                count_invocation=False,
+            )
+            self._queue.put_nowait(ev)
+        except queue.Full:
+            logger.debug("module_telemetry: queue full, dropping state event %s", module_id)
         except Exception:
             pass  # fail-silent
 
@@ -277,6 +309,7 @@ def _to_store_event(ev: _WriteEvent) -> TelemetryStoreEvent:
         metadata=ev.metadata,
         state=ev.state,
         evidence_ref=ev.evidence_ref,
+        count_invocation=ev.count_invocation,
     )
 
 
@@ -326,6 +359,24 @@ def get_all_telemetry() -> list[TelemetryRecord]:
         return ModuleTelemetry.get_instance().get_all_telemetry()
     except Exception:
         return []
+
+
+def record_state(
+    module_id: str,
+    state: ModuleState | str,
+    evidence_ref: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """記錄模組生命週期狀態（module-level 便捷函式）。"""
+    try:
+        ModuleTelemetry.get_instance().record_state(
+            module_id=module_id,
+            state=state,
+            evidence_ref=evidence_ref,
+            metadata=metadata,
+        )
+    except Exception:
+        pass  # telemetry 失敗不崩
 
 
 def record_verified(
