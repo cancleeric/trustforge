@@ -13,6 +13,7 @@ from trustforge_core import (
     ISOTONIC_VERSION,
     KernelClaim,
     KernelDocument,
+    KernelReputationTrace,
     KernelScoredClaim,
     SUPPORTED_CALIBRATION_MODEL_VERSIONS,
     aggregate_scored_claims,
@@ -161,3 +162,82 @@ def test_recursive_metadata_is_strict_json_and_success_output_never_has_nan() ->
     object.__setattr__(bad.claim.document, "metadata", (("nested", (float("nan"),)),))
     with pytest.raises(ValueError, match="finite JSON"):
         aggregate_scored_claims((bad,), query="")
+
+
+def _traced_item() -> KernelScoredClaim:
+    item = _item("traced", 0.8, "one")
+    trace = KernelReputationTrace("one", 0.6, 0.7, 1, 0, 2, "entailment")
+    object.__setattr__(item, "reputation_trace", trace)
+    return item
+
+
+@pytest.mark.parametrize("mode", ("evil", "", 7), ids=("evil", "empty", "non-string"))
+def test_tampered_reputation_trace_mode_fails_closed(mode: object) -> None:
+    item = _traced_item()
+    object.__setattr__(item.reputation_trace, "mode", mode)
+    with pytest.raises(ValueError, match="reputation_trace.mode"):
+        aggregate_scored_claims((item,), query="")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("agree_n", -1),
+        ("contradict_n", True),
+        ("iterations_run", 1 << 54),
+    ),
+    ids=("negative", "bool", "huge"),
+)
+def test_tampered_reputation_trace_counts_fail_closed(
+    field: str, value: object
+) -> None:
+    item = _traced_item()
+    object.__setattr__(item.reputation_trace, field, value)
+    with pytest.raises(ValueError, match=field):
+        aggregate_scored_claims((item,), query="")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("prior", float("nan")), ("final", float("inf")), ("prior", True)),
+    ids=("prior-nan", "final-inf", "prior-bool"),
+)
+def test_tampered_reputation_trace_scores_require_exact_finite_numbers(
+    field: str, value: object
+) -> None:
+    item = _traced_item()
+    object.__setattr__(item.reputation_trace, field, value)
+    with pytest.raises(ValueError, match=field):
+        aggregate_scored_claims((item,), query="")
+
+
+def test_tampered_trace_subclass_and_hostile_hooks_are_never_called() -> None:
+    calls = {name: 0 for name in ("int", "repr", "eq", "hash")}
+
+    class BadInt(int):
+        def __int__(self) -> int:
+            calls["int"] += 1
+            raise AssertionError
+
+        def __repr__(self) -> str:
+            calls["repr"] += 1
+            raise AssertionError
+
+        def __eq__(self, other: object) -> bool:
+            calls["eq"] += 1
+            raise AssertionError
+
+        def __hash__(self) -> int:
+            calls["hash"] += 1
+            raise AssertionError
+
+    item = _traced_item()
+    object.__setattr__(item.reputation_trace, "agree_n", BadInt(1))
+    with pytest.raises(ValueError, match="agree_n"):
+        aggregate_scored_claims((item,), query="")
+    assert calls == {name: 0 for name in calls}
+
+
+def test_valid_reputation_trace_output_is_strict_json() -> None:
+    output = aggregate_scored_claims((_traced_item(),), query="")
+    json.dumps(asdict(output), allow_nan=False)

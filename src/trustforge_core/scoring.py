@@ -71,6 +71,7 @@ SUPPORTED_CALIBRATION_MODEL_VERSIONS = frozenset(
     {FIXED_HEURISTIC_VERSION, ISOTONIC_VERSION}
 )
 _UNSET = object()
+STRICT_JSON_MAX_INTEGER = (1 << 53) - 1
 
 _COIN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("BTC", ("btc", "bitcoin", "比特幣", "比特")),
@@ -112,6 +113,12 @@ def _probability(value: object, *, field: str) -> float:
     if not 0.0 <= number <= 1.0:
         raise ValueError(f"{field} must be between zero and one")
     return number
+
+
+def _nonnegative_json_int(value: object, *, field: str) -> int:
+    if type(value) is not int or value < 0 or value > STRICT_JSON_MAX_INTEGER:
+        raise ValueError(f"{field} must be a nonnegative JSON-safe integer")
+    return value
 
 
 def _validated_table(
@@ -248,7 +255,7 @@ def _exact_json_value(value: object, *, field: str) -> None:
     if value is None or type(value) in {bool, str}:
         return
     if type(value) is int:
-        if value.bit_length() > 53:
+        if not -STRICT_JSON_MAX_INTEGER <= value <= STRICT_JSON_MAX_INTEGER:
             raise ValueError(f"{field} integer is outside the strict JSON range")
         return
     if type(value) is float:
@@ -327,8 +334,12 @@ def _validate_scored_claim_graph(item: KernelScoredClaim, *, index: int) -> None
     if trace is not None:
         if type(trace) is not KernelReputationTrace:
             raise ValueError(f"{prefix}.reputation_trace must be exact")
-        if type(trace.source) is not str or type(trace.mode) is not str:
-            raise ValueError(f"{prefix}.reputation_trace strings must be exact")
+        if type(trace.source) is not str:
+            raise ValueError(f"{prefix}.reputation_trace.source must be exact")
+        if type(trace.mode) is not str or trace.mode not in {"entailment", "ds_em"}:
+            raise ValueError(
+                f"{prefix}.reputation_trace.mode must be entailment or ds_em"
+            )
         _exact_number(trace.prior, field=f"{prefix}.reputation_trace.prior")
         _exact_number(trace.final, field=f"{prefix}.reputation_trace.final")
         for field, value in (
@@ -336,8 +347,9 @@ def _validate_scored_claim_graph(item: KernelScoredClaim, *, index: int) -> None
             ("contradict_n", trace.contradict_n),
             ("iterations_run", trace.iterations_run),
         ):
-            if type(value) is not int or value < 0:
-                raise ValueError(f"{prefix}.reputation_trace.{field} must be nonnegative")
+            _nonnegative_json_int(
+                value, field=f"{prefix}.reputation_trace.{field}"
+            )
     for field, values in (("manip_flags", item.manip_flags), ("info_flags", item.info_flags)):
         if type(values) is not tuple or not all(type(value) is str for value in values):
             raise ValueError(f"{prefix}.{field} must be an exact tuple of strings")
