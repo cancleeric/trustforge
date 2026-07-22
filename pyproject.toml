@@ -34,3 +34,9 @@ testpaths = ["tests"]
 # 本機只想跑子集時請加 `--no-cov`（例：`pytest tests/test_foo.py --no-cov`）。
 # CI 一律跑全倉，不受此影響。
 addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing --cov-fail-under=75"
+markers = [
+    "slow: tests that are expected to exceed the normal fast-suite budget",
+    "network: tests that perform real or simulated network-bound behavior",
+    "serial: tests that must not run concurrently with related tests",
+    "subprocess: tests that spawn external commands or child processes",
+]
