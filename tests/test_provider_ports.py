@@ -21,19 +21,22 @@ from trustforge.ports import (
     FakeBudgetProvider,
     FakeCacheProvider,
     FakeLLMProvider,
-FakeModelProvider,
-FakeObservabilityProvider,
-FakeSourceProvider,
-LLMProvider,
-ModelProvider,
-ModelProviderError,
-ModelRequest,
-ModelResponse,
-ModelUsage,
-NullCacheAdapter,
-NullLLMAdapter,
-NullModelProvider,
-ObservabilityProvider,
+    FakeModelProvider,
+    FakeObservabilityProvider,
+    FakeSecurityDecisionProvider,
+    FakeSourceProvider,
+    LLMProvider,
+    ModelProvider,
+    ModelProviderError,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    NullCacheAdapter,
+    NullLLMAdapter,
+    NullModelProvider,
+    ObservabilityProvider,
+    PolicyDecision,
+    PolicyRequest,
     ProviderResolution,
     ProviderSet,
     RuntimeCapability,
@@ -41,7 +44,10 @@ ObservabilityProvider,
     RuntimeSession,
     RuntimeToolCall,
     RuntimeTraceEvent,
+    SecurityDecisionProvider,
     SourceProvider,
+    evaluate_security_decision,
+    redact_policy_context,
     resolve_providers,
 )
 from trustforge.schema import QuestionType
@@ -82,6 +88,10 @@ class TestProtocolRuntimeCheckable:
     def test_budget_provider_isinstance(self):
         fake = FakeBudgetProvider()
         assert isinstance(fake, BudgetProvider)
+
+    def test_security_decision_provider_isinstance(self):
+        fake = FakeSecurityDecisionProvider()
+        assert isinstance(fake, SecurityDecisionProvider)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -220,6 +230,113 @@ class TestAgentRuntimeProviderContract:
         }
 
         assert field_names.isdisjoint(forbidden)
+
+
+class TestSecurityDecisionProviderContract:
+    """Provider-neutral security decision contract (#416)."""
+
+    def test_allow_and_deny_decisions_are_generic(self):
+        allow_provider = FakeSecurityDecisionProvider()
+        deny_provider = FakeSecurityDecisionProvider(
+            PolicyDecision(
+                action="deny",
+                reason="policy_miss",
+                evidence={"rule": "default-deny"},
+            )
+        )
+        request = PolicyRequest(
+            subject="user:123",
+            action="artifact.read",
+            resource="artifact:abc",
+            context={"tenant": "unit"},
+        )
+
+        allow = evaluate_security_decision(allow_provider, request)
+        deny = evaluate_security_decision(deny_provider, request)
+
+        assert allow.allowed is True
+        assert allow.action == "allow"
+        assert deny.allowed is False
+        assert deny.action == "deny"
+        assert deny.reason == "policy_miss"
+        assert deny.evidence == {"rule": "default-deny"}
+        assert allow_provider.requests == [request]
+
+    def test_policy_failure_fails_closed_and_redacts_context(self):
+        provider = FakeSecurityDecisionProvider(
+            failure=RuntimeError("boom token=super-secret")
+        )
+        request = PolicyRequest(
+            subject="user:123",
+            action="artifact.read",
+            resource="artifact:abc",
+            context={
+                "tenant": "unit",
+                "token": "super-secret",
+                "nested": {"Authorization": "Bearer super-secret"},
+            },
+        )
+
+        decision = evaluate_security_decision(provider, request)
+
+        assert decision.action == "deny"
+        assert decision.allowed is False
+        assert decision.reason == "policy evaluation failed: RuntimeError"
+        assert decision.evidence == {
+            "provider": "fake-security",
+            "context": {
+                "tenant": "unit",
+                "token": "<redacted>",
+                "nested": {"Authorization": "<redacted>"},
+            },
+        }
+        assert "super-secret" not in str(decision)
+
+    def test_policy_decision_evidence_is_redacted_before_logging(self):
+        provider = FakeSecurityDecisionProvider(
+            PolicyDecision(
+                action="allow",
+                reason="matched",
+                evidence={
+                    "rule": "tenant-owner",
+                    "credentials": {"api_key": "secret-value"},
+                },
+            )
+        )
+
+        decision = evaluate_security_decision(
+            provider,
+            PolicyRequest(subject="u", action="a", resource="r"),
+        )
+
+        assert decision.evidence == {
+            "rule": "tenant-owner",
+            "credentials": "<redacted>",
+        }
+        assert "secret-value" not in str(decision)
+
+    def test_contract_does_not_embed_web_or_api_rule_terms(self):
+        forbidden = {"route", "header", "cookie", "http", "web", "api", "admin"}
+        field_names = {
+            *PolicyRequest.__dataclass_fields__,
+            *PolicyDecision.__dataclass_fields__,
+        }
+
+        assert field_names.isdisjoint(forbidden)
+
+    def test_redaction_is_recursive_without_mutating_input(self):
+        original = {
+            "token": "secret-token",
+            "nested": [{"password": "secret-password"}, {"safe": "ok"}],
+        }
+
+        redacted = redact_policy_context(original)
+
+        assert redacted == {
+            "token": "<redacted>",
+            "nested": [{"password": "<redacted>"}, {"safe": "ok"}],
+        }
+        assert original["token"] == "secret-token"
 
 
 class TestFakeCacheProvider:
