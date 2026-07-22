@@ -25,9 +25,18 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from trustforge_core.contracts import (
+    KERNEL_CONTRACT_VERSION as _CORE_CONTRACT_VERSION,
     KernelClaim as _CoreKernelClaim,
     KernelDocument as _CoreKernelDocument,
     KernelReputationTrace as _CoreKernelReputationTrace,
+    KernelScoredClaim as _CoreKernelScoredClaim,
+)
+from trustforge_core.aggregation import (
+    FIXED_HEURISTIC_TABLE as _CORE_FIXED_HEURISTIC_TABLE,
+    FIXED_HEURISTIC_VERSION as _CORE_FIXED_HEURISTIC_VERSION,
+    ISOTONIC_VERSION as _CORE_ISOTONIC_VERSION,
+    aggregate_scored_claims as _core_aggregate_scored_claims,
+    evidence_strength as _core_evidence_strength,
 )
 from trustforge_core.corroboration import (
     CorroborationClaim as _CoreCorroborationClaim,
@@ -53,7 +62,7 @@ from trustforge_core.scoring import (
 )
 
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document, _coins_mentioned, _matches_coin, _mentions_coin
+from ..ingestion.base import Document, _coins_mentioned
 from .dawid_skene import LABELS as _DS_LABELS, em_source_reliability
 from .stance_cache import cached_stance_fn
 
@@ -211,6 +220,46 @@ def _legacy_trace(trace: _CoreKernelReputationTrace | None) -> dict | None:
         "iterations_run": trace.iterations_run,
         "mode": trace.mode,
     }
+
+
+def _to_core_aggregate_scored(scored: ScoredClaim) -> _CoreKernelScoredClaim:
+    """Detach only immutable fields consumed by pure aggregation."""
+    document = scored.claim.doc
+    raw_timestamp = document.ts
+    timestamp = 0.0
+    if type(raw_timestamp) in {int, float}:
+        try:
+            candidate_timestamp = float(raw_timestamp)
+        except OverflowError:
+            pass
+        else:
+            if math.isfinite(candidate_timestamp):
+                timestamp = candidate_timestamp
+    metadata: tuple[tuple[str, str], ...] = ()
+    if type(document.meta) is dict:
+        for key, value in document.meta.items():
+            if type(key) is str and key == "coin" and type(value) is str:
+                metadata = (("coin", value),)
+                break
+    claim = scored.claim
+    return _CoreKernelScoredClaim(
+        claim=_CoreKernelClaim(
+            id=claim.id,
+            text=claim.text,
+            claim_type=claim.claim_type,
+            direction=claim.direction,
+            document=_CoreKernelDocument(
+                id=document.id,
+                kind=document.kind,
+                source=document.source,
+                text=document.text,
+                timestamp=timestamp,
+                url=document.url,
+                metadata=metadata,
+            ),
+        ),
+        trust=scored.trust,
+    )
 
 
 @dataclass
@@ -1620,30 +1669,37 @@ def score(
 # 是工程判斷的固定常數而非統計估計出來的參數。目的只是讓「校準後信心」
 # 是一個真正反映證據強度、可跨三態的確定性指標，供下游 abstain 判斷用；
 # 不對外呈現為論文級統計保證。
-_STRENGTH_WEIGHTS = {
-    "trust": 0.35,       # supporting 裸加權均值（證據本身品質）
-    "indep": 0.30,       # 獨立來源數（交叉佐證廣度）
-    "diversity": 0.15,   # 來源類型（kind）多元度
-    "dominance": 0.20,   # 佐證 vs 反方證據的優勢比例
-}
-_INDEP_SOURCE_SATURATION = 4  # 達到此獨立來源數即給滿分，之後不再加分
-_KIND_DIVERSITY_SATURATION = 3  # 達到此來源類型數即給滿分，之後不再加分
-
 # 分位數映射表錨點依輸入（x＝evidence_strength）遞增排序，(x, 校準後信心)。
 # 中低段（<0.40）刻意壓得比原值低——這段最容易是「勉強及格但證據結構
 # 薄弱」的情境；高段（>=0.55）貼近原值，因為 evidence_strength 本身在
 # 高段已經隱含多源、多元 kind、佐證壓倒反方，不需要再額外壓縮。
-_CALIBRATION_TABLE: list[tuple[float, float]] = [
-    (0.00, 0.00),
-    (0.10, 0.03),
-    (0.20, 0.08),
-    (0.30, 0.20),
-    (0.40, 0.40),
-    (0.55, 0.55),
-    (0.70, 0.70),
-    (0.85, 0.85),
-    (1.00, 1.00),
-]
+_CALIBRATION_TABLE: list[tuple[float, float]] = list(_CORE_FIXED_HEURISTIC_TABLE)
+
+
+def _aggregate_calibration_spec() -> tuple[str, tuple[tuple[float, float], ...]]:
+    """Resolve app-owned calibration state into an immutable core value."""
+    model = _load_cached_calibration_model()
+    if model is None:
+        return _CORE_FIXED_HEURISTIC_VERSION, ()
+    points: list[tuple[float, float]] = []
+    if type(model) is not list:
+        raise ValueError("calibration model must be an exact list")
+    for point in model:
+        if type(point) is not dict:
+            raise ValueError("calibration model points must be exact dictionaries")
+        confidence: object | None = None
+        calibrated: object | None = None
+        for key, value in point.items():
+            if type(key) is not str:
+                continue
+            if key == "confidence":
+                confidence = value
+            elif key == "calibrated":
+                calibrated = value
+        if confidence is None or calibrated is None:
+            raise ValueError("calibration model point is incomplete")
+        points.append((confidence, calibrated))  # type: ignore[arg-type]
+    return _CORE_ISOTONIC_VERSION, tuple(points)
 
 
 def _calibrate_confidence(raw: float) -> float:
@@ -1656,16 +1712,9 @@ def _calibrate_confidence(raw: float) -> float:
     確定性、免 LLM：純查表/插值，同輸入必同輸出，不呼叫任何模型。
     輸入超出 [0, 1] 時 clamp 到邊界。
     """
-    x = max(0.0, min(1.0, raw))
-
-    # 嘗試使用訓練過的 isotonic model
-    model = _load_cached_calibration_model()
-    if model is not None:
-        from ..calibration_model import apply_calibration
-        return apply_calibration(x, model)
-
-    # Fallback：硬編碼查表
-    return _interpolate_calibration(x, _CALIBRATION_TABLE)
+    version, table = _aggregate_calibration_spec()
+    resolved = _CORE_FIXED_HEURISTIC_TABLE if version == _CORE_FIXED_HEURISTIC_VERSION else table
+    return _interpolate_calibration(raw, resolved)
 
 
 # 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
@@ -1726,31 +1775,15 @@ def _evidence_strength(
     修法：dominance 的分子分母都改用「該側涉及的獨立來源數」（同一來源
     無論產生幾句 claim，只算一份），跟 `indep_factor` 既有的去重口徑一致
     （`n_indep` 本就已是去重來源數，直接複用）。"""
-    n_indep = len({_canonical_source(sc.claim.doc.source) for sc in supporting})
-    n_kinds = len({sc.claim.doc.kind for sc in supporting})
-
-    indep_factor = max(0.0, min(
-        (n_indep - 1) / (_INDEP_SOURCE_SATURATION - 1), 1.0
-    ))
-    diversity_factor = max(0.0, min(
-        (n_kinds - 1) / (_KIND_DIVERSITY_SATURATION - 1), 1.0
-    ))
-    n_contrarian_sources = len({_canonical_source(sc.claim.doc.source) for sc in contrarian})
-    total_sources = n_indep + n_contrarian_sources
-    dominance = (n_indep / total_sources) if total_sources > 0 else 0.0
-
-    w = _STRENGTH_WEIGHTS
-    strength = (
-        w["trust"] * confidence
-        + w["indep"] * indep_factor
-        + w["diversity"] * diversity_factor
-        + w["dominance"] * dominance
+    return _core_evidence_strength(
+        supporting=tuple(_to_core_aggregate_scored(item) for item in supporting),
+        contrarian=tuple(_to_core_aggregate_scored(item) for item in contrarian),
+        trust_score=confidence,
     )
-    return max(0.0, min(1.0, strength))
 
 
 # --- 5. 聚合 -------------------------------------------------------------
-def aggregate(scored: list[ScoredClaim], query: str,
+def aggregate(scored: list[ScoredClaim], query: str | None,
               support_threshold: float = 0.50,
               coin: str | None = None) -> TrustedBrief:
     """信任加權聚合。高於門檻→支撐證據；明顯低分→反方證據。
@@ -1804,42 +1837,25 @@ def aggregate(scored: list[ScoredClaim], query: str,
     (query)` 相關性排序、全納入（不新增篩選），維持 #32 修正前就存在的
     既有語意。
     """
-    qt = _normalize(query)
-    if coin:
-        # 先依 (是否幣種特定, 信任分) 排序——把「明確提及該幣」的主張排在
-        # 「全市場通用」主張之前，使下面的 [:10]/[:5] 截斷優先保留前者
-        # （demo 可靠性 #32 追加的既有精神，見上方 docstring）。
-        relevant = sorted(
-            scored,
-            key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
-        )
-        # W4 codex 對抗審第 8 輪根治：排序後直接用 `_matches_coin` 過濾
-        # （保留本幣相關 + 全市場通用，只排除明確他幣）——`supporting`/
-        # `contrarian`/`confidence` 全部從這份已過濾的 `relevant` 算，
-        # 不再是「全納入、只排序」。`_matches_coin` 是幣別別名比對，不是
-        # #32 當年那種脆弱的 `_normalize(query)` 文字比對，不會重蹈覆轍。
-        relevant = [sc for sc in relevant if _matches_coin(sc.claim.doc, coin)]
-    else:
-        # 與 query 相關者優先（無相關詞則全納入）——未指定 coin 時無獨立的
-        # 幣種相關性判準可用，行為逐字向後相容，不引入新篩選。
-        relevant = [
-            sc for sc in scored
-            if not qt or (_normalize(sc.claim.text) & qt)
-        ] or scored
-        relevant.sort(key=lambda sc: sc.trust, reverse=True)
-    supporting = [sc for sc in relevant if sc.trust >= support_threshold]
-    contrarian = [sc for sc in relevant if sc.trust < support_threshold]
-
-    confidence = (sum(sc.trust for sc in supporting) / len(supporting)) if supporting else 0.0
-    # W4：用「校準前」的完整 supporting/contrarian（截斷前，與 confidence 同一份
-    # 基礎資料，見上方 `_evidence_strength` 對「不重新計算 trust、不新增資料源」
-    # 的承諾）算證據強度綜合指標，再校準——不用截斷後的 [:10]/[:5]，避免評分
-    # 結果隨截斷上限漂移（跟 `confidence` 本身的計算基礎保持一致）。
-    evidence_strength = _evidence_strength(supporting, contrarian, confidence)
+    normalized_query = "" if query is None else query
+    normalized_coin = "" if coin is None else coin
+    core_items = tuple(_to_core_aggregate_scored(item) for item in scored)
+    originals = {id(core_item): original for core_item, original in zip(core_items, scored)}
+    calibration_version, calibration_table = _aggregate_calibration_spec()
+    output = _core_aggregate_scored_claims(
+        scored_claims=core_items,
+        query=normalized_query,
+        coin=normalized_coin,
+        support_threshold=support_threshold,
+        contract_version=_CORE_CONTRACT_VERSION,
+        calibration_model_version=calibration_version,
+        calibration_table=calibration_table,
+        resolved_direction="neutral",
+    )
     return TrustedBrief(
-        query=query,
-        supporting=supporting[:10],
-        contrarian=contrarian[:5],
-        confidence=confidence,
-        calibrated_confidence=_calibrate_confidence(evidence_strength),
+        query=normalized_query,
+        supporting=[originals[id(item)] for item in output.supporting],
+        contrarian=[originals[id(item)] for item in output.contrarian],
+        confidence=output.trust_score,
+        calibrated_confidence=output.confidence,
     )
