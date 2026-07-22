@@ -15,6 +15,7 @@ from trustforge.ports import (
     AgentCoreLLMAdapter,
     AgentRuntimeProvider,
     BedrockLLMAdapter,
+    BedrockModelProvider,
     BudgetProvider,
     CacheProvider,
     FakeAgentRuntimeProvider,
@@ -162,6 +163,57 @@ class TestModelProviderContract:
 
         assert str(exc) == "rate limit"
         assert exc.category == "rate_limited"
+
+    def test_bedrock_model_provider_adapts_completion_result(self):
+        """Issue #407: Bedrock has a provider-neutral ModelProvider adapter."""
+        from trustforge.bedrock import LLMResult
+
+        class FakeBedrockClient:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, system: str, prompt: str):
+                self.calls.append({"system": system, "prompt": prompt})
+                return LLMResult(
+                    text="bedrock answer",
+                    input_tokens=1_000,
+                    output_tokens=500,
+                    model_id="au.anthropic.claude-haiku-4-5-20251001-v1:0",
+                )
+
+        client = FakeBedrockClient()
+        provider = BedrockModelProvider(client=client)
+
+        response = provider.complete(ModelRequest(system="sys", prompt="user"))
+
+        assert isinstance(provider, ModelProvider)
+        assert client.calls == [{"system": "sys", "prompt": "user"}]
+        assert response == ModelResponse(
+            text="bedrock answer",
+            model="au.anthropic.claude-haiku-4-5-20251001-v1:0",
+            provider="bedrock",
+            usage=ModelUsage(
+                input_tokens=1_000,
+                output_tokens=500,
+                total_tokens=1_500,
+                cost_usd=0.0035,
+            ),
+        )
+
+    def test_bedrock_model_provider_classifies_client_errors(self):
+        """Issue #407: provider failures should cross the port with categories."""
+
+        class TimeoutClient:
+            def complete(self, system: str, prompt: str):
+                raise TimeoutError("bedrock timed out")
+
+        provider = BedrockModelProvider(client=TimeoutClient())
+
+        with pytest.raises(ModelProviderError) as excinfo:
+            provider.complete(ModelRequest(system="sys", prompt="user"))
+
+        assert excinfo.value.category == "timeout"
+        assert str(excinfo.value) == "bedrock timed out"
 
     def test_contract_fields_do_not_embed_trustforge_domain_terms(self):
         forbidden = {"stance", "coin", "evidence", "hermes", "claim"}
