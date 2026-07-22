@@ -13,6 +13,13 @@ from .contracts import (
     KernelOutput,
 )
 from .dawid_skene import LABELS, N_LABELS, em_source_reliability
+from .scoring import (
+    interpolate_calibration,
+    recency_decay,
+    reputation_floor,
+    source_reputation,
+    stable_sigmoid,
+)
 
 __all__ = [
     "KERNEL_CONTRACT_VERSION",
@@ -24,4 +31,9 @@ __all__ = [
     "LABELS",
     "N_LABELS",
     "em_source_reliability",
+    "interpolate_calibration",
+    "recency_decay",
+    "reputation_floor",
+    "source_reputation",
+    "stable_sigmoid",
 ]
