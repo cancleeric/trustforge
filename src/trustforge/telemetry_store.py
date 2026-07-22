@@ -24,6 +24,7 @@ class TelemetryStoreEvent:
     result: str
     ts: float
     state: str
+    count_invocation: bool = True
     evidence_ref: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -102,20 +103,28 @@ class SQLiteTelemetryStore:
             for ev in batch:
                 ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ev.ts))
                 meta_json = json.dumps(ev.metadata, ensure_ascii=False) if ev.metadata else "{}"
+                invocation_delta = 1 if ev.count_invocation else 0
+                total_latency_delta = ev.latency_ms if ev.count_invocation else 0.0
                 conn.execute("""
                     INSERT INTO module_telemetry
                         (module_id, last_invoked_at, invocation_count, last_result,
                          total_latency_ms, avg_latency_ms, last_latency_ms,
                          state, evidence_ref, metadata)
-                    VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(module_id) DO UPDATE SET
                         last_invoked_at = excluded.last_invoked_at,
-                        invocation_count = invocation_count + 1,
+                        invocation_count = invocation_count + ?,
                         last_result = excluded.last_result,
-                        total_latency_ms = total_latency_ms + excluded.total_latency_ms,
-                        avg_latency_ms = (total_latency_ms + excluded.total_latency_ms)
-                                         / (invocation_count + 1),
-                        last_latency_ms = excluded.last_latency_ms,
+                        total_latency_ms = total_latency_ms + ?,
+                        avg_latency_ms = CASE
+                            WHEN invocation_count + ? > 0
+                            THEN (total_latency_ms + ?) / (invocation_count + ?)
+                            ELSE 0.0
+                        END,
+                        last_latency_ms = CASE WHEN ? = 1
+                            THEN excluded.last_latency_ms
+                            ELSE module_telemetry.last_latency_ms
+                        END,
                         state = excluded.state,
                         evidence_ref = CASE WHEN excluded.evidence_ref != ''
                                        THEN excluded.evidence_ref
@@ -124,13 +133,20 @@ class SQLiteTelemetryStore:
                 """, (
                     ev.subject_id,
                     ts_iso,
+                    invocation_delta,
                     ev.result,
-                    ev.latency_ms,
-                    ev.latency_ms,
+                    total_latency_delta,
+                    ev.latency_ms if ev.count_invocation else 0.0,
                     ev.latency_ms,
                     ev.state,
                     ev.evidence_ref,
                     meta_json,
+                    invocation_delta,
+                    total_latency_delta,
+                    invocation_delta,
+                    total_latency_delta,
+                    invocation_delta,
+                    invocation_delta,
                 ))
             conn.commit()
         finally:

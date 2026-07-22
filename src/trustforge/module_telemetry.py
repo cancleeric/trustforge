@@ -71,12 +71,16 @@ class TelemetryRecord:
 
 class _WriteEvent:
     """Background writer 消費的事件。"""
-    __slots__ = ("module_id", "latency_ms", "result", "ts", "metadata", "state", "evidence_ref")
+    __slots__ = (
+        "module_id", "latency_ms", "result", "ts", "metadata", "state",
+        "evidence_ref", "count_invocation",
+    )
 
     def __init__(self, module_id: str, latency_ms: float, result: str,
                  ts: float, metadata: dict[str, Any] | None = None,
                  state: str = ModuleState.invoked.value,
-                 evidence_ref: str = ""):
+                 evidence_ref: str = "",
+                 count_invocation: bool = True):
         self.module_id = module_id
         self.latency_ms = latency_ms
         self.result = result
@@ -84,6 +88,7 @@ class _WriteEvent:
         self.metadata = metadata or {}
         self.state = state
         self.evidence_ref = evidence_ref
+        self.count_invocation = count_invocation
 
 
 class ModuleTelemetry:
@@ -232,6 +237,7 @@ class ModuleTelemetry:
                 metadata=metadata,
                 state=ModuleState.verified.value,
                 evidence_ref=evidence_ref,
+                count_invocation=False,
             )
             self._queue.put_nowait(ev)
         except queue.Full:
@@ -257,6 +263,7 @@ class ModuleTelemetry:
                 metadata=metadata,
                 state=normalized_state,
                 evidence_ref=evidence_ref,
+                count_invocation=False,
             )
             self._queue.put_nowait(ev)
         except queue.Full:
@@ -302,6 +309,7 @@ def _to_store_event(ev: _WriteEvent) -> TelemetryStoreEvent:
         metadata=ev.metadata,
         state=ev.state,
         evidence_ref=ev.evidence_ref,
+        count_invocation=ev.count_invocation,
     )
 
 

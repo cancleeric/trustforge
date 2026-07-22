@@ -256,6 +256,9 @@ class TestModuleStateV2:
         assert rec is not None
         assert rec.state == "configured"
         assert rec.last_result == "configured"
+        assert rec.invocation_count == 0
+        assert rec.avg_latency_ms == 0.0
+        assert rec.last_latency_ms == 0.0
         assert rec.evidence_ref == "env:BEDROCK_MODEL_ID"
         assert rec.metadata == {"phase": "configured"}
 
@@ -270,6 +273,9 @@ class TestModuleStateV2:
         assert rec is not None
         assert rec.state == "resolved"
         assert rec.last_result == "resolved"
+        assert rec.invocation_count == 0
+        assert rec.avg_latency_ms == 0.0
+        assert rec.last_latency_ms == 0.0
         assert rec.evidence_ref == "provider.resolve:llm"
         assert rec.metadata == {"resolved": "bedrock"}
 
@@ -278,7 +284,9 @@ class TestModuleStateV2:
         rec = tele.get_telemetry("provider.llm")
         assert rec is not None
         assert rec.state == "invoked"
-        assert rec.invocation_count == 3
+        assert rec.invocation_count == 1
+        assert rec.avg_latency_ms == pytest.approx(12.5, rel=0.01)
+        assert rec.last_latency_ms == pytest.approx(12.5, rel=0.01)
         assert rec.evidence_ref == "provider.resolve:llm"
 
         tele.record_verified("provider.llm", "ci:test_provider_ports")
@@ -287,5 +295,8 @@ class TestModuleStateV2:
         assert rec is not None
         assert rec.state == "verified"
         assert rec.last_result == "verified"
+        assert rec.invocation_count == 1
+        assert rec.avg_latency_ms == pytest.approx(12.5, rel=0.01)
+        assert rec.last_latency_ms == pytest.approx(12.5, rel=0.01)
         assert rec.evidence_ref == "ci:test_provider_ports"
         tele.shutdown()
