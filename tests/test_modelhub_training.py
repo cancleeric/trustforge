@@ -112,5 +112,49 @@ def test_duplicate_dates_have_stable_distinct_sample_ids(tmp_path):
     path = tmp_path / "BTC.jsonl"
     path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
     loaded = load_flat_training_rows(path, coin="BTC")
-    assert loaded[0]["date"] == loaded[1]["date"]
-    assert loaded[0]["sample_id"] != loaded[1]["sample_id"]
+    assert len(loaded) == 100
+    original_id = loaded[0]["sample_id"]
+    rows[0]["outcome_pct"] = 0.0
+    rows.reverse()
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    reordered = load_flat_training_rows(path, coin="BTC")
+    assert reordered[0]["sample_id"] == original_id
+    assert reordered == loaded
+
+
+def test_label_change_does_not_change_sample_id_but_conflicting_duplicate_fails(tmp_path):
+    rows = _flat()
+    path = tmp_path / "BTC.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    original_id = load_flat_training_rows(path, coin="BTC")[0]["sample_id"]
+    rows[0]["outcome_pct"] = 1.0
+    rows[0]["ground_truth_direction"] = "bullish"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    assert load_flat_training_rows(path, coin="BTC")[0]["sample_id"] == original_id
+    conflicting = dict(rows[0])
+    conflicting["outcome_pct"] = -1.0
+    conflicting["ground_truth_direction"] = "bearish"
+    rows.append(conflicting)
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    with pytest.raises(TrainingDataError, match="conflicting duplicate"):
+        load_flat_training_rows(path, coin="BTC")
+
+
+@pytest.mark.parametrize(
+    "constant,limit",
+    [("MAX_TRAINING_FILE_BYTES", 1), ("MAX_TRAINING_LINE_BYTES", 1), ("MAX_TRAINING_SOURCE_LINES", 1)],
+)
+def test_loader_resource_caps_fail_closed(tmp_path, monkeypatch, constant, limit):
+    path = tmp_path / "BTC.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in _flat()), encoding="utf-8")
+    monkeypatch.setattr(f"trustforge.modelhub_training.{constant}", limit)
+    with pytest.raises(TrainingDataError):
+        load_flat_training_rows(path, coin="BTC")
+
+
+def test_loader_eligible_candidate_cap_fails_closed(tmp_path, monkeypatch):
+    path = tmp_path / "BTC.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in _flat()), encoding="utf-8")
+    monkeypatch.setattr("trustforge.modelhub_training.MAX_ELIGIBLE_ROWS", 1)
+    with pytest.raises(TrainingDataError):
+        load_flat_training_rows(path, coin="BTC")

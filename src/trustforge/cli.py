@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from .pipeline import run, run_comparison
@@ -410,20 +412,72 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 def cmd_modelhub_train(args: argparse.Namespace) -> int:
     """Run isolated ModelHub calibrator proposal flows and print JSON summaries."""
     from .modelhub_submit import submit_calibrator_training
+    from .execlog import ExecutionLog
 
     coins = list(COIN_POOL) if args.all else [args.coin]
+    request_map: dict[str, str] = {}
+    for item in args.req_no_map:
+        if "=" not in item:
+            print(json.dumps({"status": "error", "coin": ""}))
+            return 1
+        coin_key, request_number = item.split("=", 1)
+        if coin_key in request_map or coin_key not in COIN_POOL or not request_number:
+            print(json.dumps({"status": "error", "coin": coin_key}))
+            return 1
+        request_map[coin_key] = request_number
+    if not args.all and request_map:
+        print(json.dumps({"status": "error", "coin": args.coin}))
+        return 1
+    if args.all and not args.dry_run:
+        if set(request_map) != set(COIN_POOL) or len(set(request_map.values())) != len(COIN_POOL):
+            print(json.dumps({"status": "error", "coin": ""}))
+            return 1
     results = []
     for coin in coins:
+        log = ExecutionLog()
         try:
             result = submit_calibrator_training(
                 coin,
                 training_dir=Path(args.training_dir),
                 out_dir=Path(args.out_dir),
-                req_no=args.req_no,
+                req_no=request_map[coin] if args.all and not args.dry_run else args.req_no,
                 dry_run=args.dry_run,
+                execution_log=log,
             )
-        except Exception:
-            result = {"status": "error", "coin": coin}
+        except Exception as exc:
+            log.record(
+                "modelhub.training.error", {"coin": coin, "exception_type": type(exc).__name__},
+                "Unexpected ModelHub orchestration error",
+            )
+            result = {"status": "error", "coin": coin, "run_id": log.run_id}
+        if (
+            not isinstance(result, dict)
+            or result.get("status") not in {
+                "blocked", "unavailable", "timeout", "no_improvement", "error", "candidate", "dry_run",
+            }
+            or result.get("coin") != coin
+        ):
+            log.record(
+                "modelhub.training.error", {"coin": coin, "exception_type": "InvalidResult"},
+                "Malformed ModelHub orchestration result",
+            )
+            result = {"status": "error", "coin": coin, "run_id": log.run_id}
+        result["run_id"] = log.run_id
+        log_dir = Path(args.out_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=".execution-", suffix=".tmp", dir=log_dir)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(log.to_jsonl())
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, log_dir / f"execution-{log.run_id}.jsonl")
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            result = {"status": "error", "coin": coin, "run_id": log.run_id}
         results.append(result)
     print(json.dumps(results if args.all else results[0], ensure_ascii=False, sort_keys=True))
     statuses = {result["status"] for result in results}
@@ -529,6 +583,7 @@ def main(argv=None) -> int:
     mh.add_argument("--training-dir", default="data/training")
     mh.add_argument("--out-dir", default="out/modelhub-proposals")
     mh.add_argument("--req-no", default=None)
+    mh.add_argument("--req-no-map", action="append", default=[], metavar="COIN=REQ")
     mh.set_defaults(func=cmd_modelhub_train)
 
     args = p.parse_args(argv)

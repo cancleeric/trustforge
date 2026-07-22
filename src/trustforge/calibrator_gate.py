@@ -20,6 +20,16 @@ def evaluate_calibrator_gate(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         (row for row in rows if row.get("date") and row.get("hit") is not None),
         key=lambda row: str(row["date"]),
     )
+    identities = [(str(row.get("coin", "")), str(row["date"])) for row in rows]
+    if len(set(identities)) != len(identities):
+        unique_count = len(set(identities))
+        return {
+            "eligible": False,
+            "reason": "duplicate_outcome_identity",
+            "eligible_outcomes": unique_count,
+            "minimum": MIN_ELIGIBLE_OUTCOMES,
+            "remaining": max(0, MIN_ELIGIBLE_OUTCOMES - unique_count),
+        }
     if len(rows) < MIN_ELIGIBLE_OUTCOMES:
         return {
             "eligible": False,

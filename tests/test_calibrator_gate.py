@@ -51,19 +51,26 @@ def test_explicit_split_fails_closed_for_leak_or_noncontiguous_split():
     rows[20]["split"] = "train"
     rows[80]["split"] = "val"
     rows[99]["date"] = rows[0]["date"]
-    assert evaluate_calibrator_gate(rows)["reason"] == "explicit_split_not_chronological"
+    assert evaluate_calibrator_gate(rows)["reason"] == "duplicate_outcome_identity"
 
 
-def test_duplicate_dates_are_allowed_within_one_split_but_not_across_boundary():
+def test_duplicate_outcome_identity_is_rejected_even_within_one_split():
     rows = [
         {"date": f"2021-{1 + index // 28:02d}-{1 + index % 28:02d}", "hit": True,
          "split": "train" if index < 80 else "val"}
         for index in range(100)
     ]
     rows[1]["date"] = rows[0]["date"]
-    assert evaluate_calibrator_gate(rows)["eligible"] is True
-    rows[80]["date"] = rows[79]["date"]
-    assert evaluate_calibrator_gate(rows)["reason"] == "explicit_split_not_chronological"
+    assert evaluate_calibrator_gate(rows)["reason"] == "duplicate_outcome_identity"
+
+
+def test_duplicate_identity_cannot_flood_minimum_gate():
+    rows = [{"date": "2021-01-01", "coin": "BTC", "hit": True} for _ in range(100)]
+    result = evaluate_calibrator_gate(rows)
+    assert result["eligible"] is False
+    assert result["reason"] == "duplicate_outcome_identity"
+    assert result["eligible_outcomes"] == 1
+    assert result["remaining"] == 99
 
 
 def test_explicit_non_80_20_split_uses_actual_boundary_and_counts():

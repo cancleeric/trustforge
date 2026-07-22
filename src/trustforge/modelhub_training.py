@@ -20,6 +20,11 @@ _FEATURE_CONTRACT = (
 _ACTIVE_MODEL_ROUTE = "bedrock-direct"
 _CANDIDATE_MODEL_ROUTE = "agentcore-gateway"
 _ROUTE_DEPENDENCIES = ("historical-calibration", "rag-index", "rag-reranker")
+TRAINING_SCHEMA_VERSION = 1
+MAX_TRAINING_FILE_BYTES = 16 * 1024 * 1024
+MAX_TRAINING_LINE_BYTES = 256 * 1024
+MAX_TRAINING_SOURCE_LINES = 10_000
+MAX_ELIGIBLE_ROWS = 10_000
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -43,54 +48,86 @@ def _finite_number(value: Any) -> float | None:
 def load_flat_training_rows(path: Path, *, coin: str) -> list[dict[str, Any]]:
     """Load the strict, version-controlled flat JSONL contract for one coin."""
     expected = coin.upper()
-    rows: list[dict[str, Any]] = []
+    candidates: dict[str, list[tuple[tuple[Any, ...], dict[str, Any], tuple[Any, ...]]]] = {}
     base_required = {"date", "coin", "direction"}
     label_fields = {"outcome_pct", "ground_truth_direction", "split"}
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        if path.stat().st_size > MAX_TRAINING_FILE_BYTES:
+            raise TrainingDataError("training data exceeds file size limit")
+        handle = path.open("rb")
     except OSError:
         raise TrainingDataError("training data is unavailable") from None
-    for line_number, line in enumerate(lines, 1):
-        if not line.strip():
-            continue
-        try:
-            raw = json.loads(line)
-        except (json.JSONDecodeError, ValueError, RecursionError):
-            raise TrainingDataError(f"invalid JSONL at line {line_number}") from None
-        if not isinstance(raw, dict) or not base_required.issubset(raw):
-            raise TrainingDataError(f"invalid training schema at line {line_number}")
-        if raw["coin"] != expected or not isinstance(raw["direction"], str):
-            raise TrainingDataError(f"invalid coin or direction at line {line_number}")
-        try:
-            date.fromisoformat(raw["date"])
-        except (TypeError, ValueError):
-            raise TrainingDataError(f"invalid date at line {line_number}") from None
-        present_labels = label_fields.intersection(raw)
-        if (
-            not present_labels
-            or "confidence" not in raw
-            or (raw.get("outcome_pct") is None and raw.get("ground_truth_direction") is None)
-        ):
-            continue
-        if present_labels != label_fields:
-            raise TrainingDataError(f"partially labelled training row at line {line_number}")
-        confidence = _finite_number(raw["confidence"])
-        outcome = _finite_number(raw["outcome_pct"])
-        if (
-            confidence is None or not 0 <= confidence <= 1 or outcome is None
-            or raw["split"] not in {"train", "val"}
-            or raw["ground_truth_direction"] not in {"bullish", "bearish", "neutral"}
-        ):
-            raise TrainingDataError(f"invalid training values at line {line_number}")
-        canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        sample_id = hashlib.sha256(f"{line_number}:{canonical}".encode("utf-8")).hexdigest()
-        rows.append({
-            "sample_id": sample_id,
-            "date": raw["date"], "coin": expected, "direction": raw["direction"],
-            "calibrated_confidence": confidence, "confidence": confidence,
-            "outcome_pct": outcome, "hit": judge_direction_hit(raw["direction"], outcome / 100),
-            "ground_truth_direction": raw["ground_truth_direction"], "split": raw["split"],
-        })
+    eligible_candidates = 0
+    streamed_bytes = 0
+    with handle:
+        for line_number, encoded_line in enumerate(handle, 1):
+            streamed_bytes += len(encoded_line)
+            if streamed_bytes > MAX_TRAINING_FILE_BYTES:
+                raise TrainingDataError("training data exceeds file size limit")
+            if line_number > MAX_TRAINING_SOURCE_LINES:
+                raise TrainingDataError("training data exceeds source line limit")
+            if len(encoded_line) > MAX_TRAINING_LINE_BYTES:
+                raise TrainingDataError(f"training line exceeds size limit at line {line_number}")
+            if not encoded_line.strip():
+                continue
+            try:
+                raw = json.loads(encoded_line)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+                raise TrainingDataError(f"invalid JSONL at line {line_number}") from None
+            if not isinstance(raw, dict) or not base_required.issubset(raw):
+                raise TrainingDataError(f"invalid training schema at line {line_number}")
+            if raw["coin"] != expected or not isinstance(raw["direction"], str):
+                raise TrainingDataError(f"invalid coin or direction at line {line_number}")
+            try:
+                date.fromisoformat(raw["date"])
+            except (TypeError, ValueError):
+                raise TrainingDataError(f"invalid date at line {line_number}") from None
+            present_labels = label_fields.intersection(raw)
+            if (
+                not present_labels
+                or "confidence" not in raw
+                or (raw.get("outcome_pct") is None and raw.get("ground_truth_direction") is None)
+            ):
+                continue
+            if present_labels != label_fields:
+                raise TrainingDataError(f"partially labelled training row at line {line_number}")
+            confidence = _finite_number(raw["confidence"])
+            outcome = _finite_number(raw["outcome_pct"])
+            if (
+                confidence is None or not 0 <= confidence <= 1 or outcome is None
+                or raw["split"] not in {"train", "val"}
+                or raw["ground_truth_direction"] not in {"bullish", "bearish", "neutral"}
+            ):
+                raise TrainingDataError(f"invalid training values at line {line_number}")
+            eligible_candidates += 1
+            if eligible_candidates > MAX_ELIGIBLE_ROWS:
+                raise TrainingDataError("training data exceeds eligible row limit")
+            sample_id = hashlib.sha256(
+                f"{TRAINING_SCHEMA_VERSION}|{expected}|{raw['date']}".encode("utf-8")
+            ).hexdigest()
+            row = {
+                "sample_id": sample_id,
+                "date": raw["date"], "coin": expected, "direction": raw["direction"],
+                "calibrated_confidence": confidence, "confidence": confidence,
+                "outcome_pct": outcome, "hit": judge_direction_hit(raw["direction"], outcome / 100),
+                "ground_truth_direction": raw["ground_truth_direction"], "split": raw["split"],
+            }
+            label_identity = (raw["split"], raw["ground_truth_direction"], outcome)
+            source_identity = json.dumps(
+                {
+                    "generated_at": raw.get("generated_at"),
+                    "sources": raw.get("sources"),
+                    "model_id": raw.get("model_id"),
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+            inference_identity = (raw["direction"], confidence, str(raw.get("generated_at", "")), source_identity)
+            candidates.setdefault(raw["date"], []).append((inference_identity, row, label_identity))
+    rows: list[dict[str, Any]] = []
+    for row_date, duplicate_rows in candidates.items():
+        if len({candidate[2] for candidate in duplicate_rows}) != 1:
+            raise TrainingDataError(f"conflicting duplicate outcome for {row_date}")
+        rows.append(min(duplicate_rows, key=lambda candidate: candidate[0])[1])
     rows.sort(key=lambda row: (row["date"], row["coin"]))
     return rows
 
