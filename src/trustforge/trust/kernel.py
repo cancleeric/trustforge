@@ -97,6 +97,7 @@ class KernelInput:
     pit_epoch: float  # Point-in-time Unix timestamp
     coin: str
     query: str
+    stance_fn: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,7 @@ def run_kernel(inp: KernelInput) -> KernelOutput:
         inp.claims,
         now=inp.pit_epoch,
         dynamic_reputation=False,   # 純記憶體，不呼叫 Bedrock
+        stance_fn=inp.stance_fn,
         offline=True,
     )
     brief = _aggregate(scored, inp.query, coin=inp.coin)

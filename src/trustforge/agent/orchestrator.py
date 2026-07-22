@@ -1529,6 +1529,7 @@ def run_agent_pipeline(
         pit_epoch=now_ts,
         coin=coin,
         query=query,
+        stance_fn=shared_stance_fn,
     ))
     log.record(
         "judgment.derive",
