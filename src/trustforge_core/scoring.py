@@ -19,6 +19,7 @@ from .contracts import (
     KernelReputationTrace,
     KernelScoredClaim,
     require_supported_contract_version,
+    validate_kernel_input_graph,
 )
 from .corroboration import canonical_source
 
@@ -660,15 +661,53 @@ def aggregate_scored_claims(
 
 
 def run_kernel(inp: KernelInput) -> KernelOutput:
-    """Run the public deterministic kernel entrypoint for one versioned input."""
+    """Run one fully validated, provider-free deterministic kernel input.
+
+    ``resolution=None`` is a compatibility-only path for pre-resolution callers
+    and is not the production formal-run composition. Resolved mode consumes
+    only caller-supplied immutable values; it performs no inference or I/O.
+    """
     if type(inp) is not KernelInput:
         raise ValueError("inp must be an exact KernelInput")
-    require_supported_contract_version(inp.contract_version)
-    scored_claims = tuple(score_claim(claim, now=inp.pit_epoch) for claim in inp.claims)
+    validate_kernel_input_graph(inp)
+    resolution = inp.resolution
+    if resolution is None:
+        scored_claims = tuple(
+            score_claim(claim, now=inp.pit_epoch) for claim in inp.claims
+        )
+        return aggregate_scored_claims(
+            scored_claims,
+            query=inp.query,
+            coin=inp.coin,
+            contract_version=inp.contract_version,
+        )
+
+    weights = resolution.score_weights or DEFAULT_SCORE_WEIGHTS
+    reputations = resolution.reputations or DEFAULT_SOURCE_REPUTATIONS
+    half_lives = resolution.half_lives or DEFAULT_HALF_LIVES
+    scored_claims = tuple(
+        score_claim(
+            claim,
+            now=inp.pit_epoch,
+            weights=weights,
+            reputations=reputations,
+            half_lives=half_lives,
+            independent_sources=claim_resolution.independent_sources,
+            dynamic_reputation=claim_resolution.dynamic_reputation,
+            reputation_trace=claim_resolution.reputation_trace,
+            info_flags=claim_resolution.info_flags,
+        )
+        for claim, claim_resolution in zip(
+            inp.claims, resolution.claim_resolutions, strict=True
+        )
+    )
     return aggregate_scored_claims(
         scored_claims,
         query=inp.query,
         coin=inp.coin,
+        calibration_model_version=resolution.calibration_model_version,
+        calibration_table=resolution.calibration_table,
+        resolved_direction=resolution.resolved_direction,
         contract_version=inp.contract_version,
     )
 
