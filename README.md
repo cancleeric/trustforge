@@ -162,6 +162,30 @@ CACHE_BACKEND=sqlite PORT=8799 python -m trustforge.web   # → http://127.0.0.1
 > **反作弊鐵則**：市場判斷、證據整合、信任評分由本 pipeline 產生；Bedrock 只負責
 > 把推理「行文」，不得把第三方現成結論當主要結果。詳見 `docs/competition/COMPETITION.md`。
 
+## ModelHub 校準器候選流程（#351）
+
+TrustForge 已提供 loopback-only 的 ModelHub REST client 與五幣校準器候選編排。輸入真相是
+`data/training/{BTC,ETH,SOL,BNB,XRP}.jsonl`；流程會先做資料 gate 與 chronological split，
+再以 weighted ECE 比較 baseline/candidate。改善至少 `0.02` 才建立 immutable proposal。
+候選永遠是 `automatic_apply: false`、`requires_human_approval: true`，不會自動啟用模型。
+
+```bash
+# 安全 dry-run：不呼叫 ModelHub；macOS 請使用 /private/tmp，避免 /tmp symlink 被拒絕
+python -m trustforge.cli modelhub-train --all --dry-run \
+  --out-dir /private/tmp/trustforge-modelhub-proposals
+
+# live 編排須為五幣各提供一個不同、真實存在的 ModelHub req_no
+python -m trustforge.cli modelhub-train --all \
+  --req-no-map "BTC=$MODELHUB_BTC_REQ" --req-no-map "ETH=$MODELHUB_ETH_REQ" \
+  --req-no-map "SOL=$MODELHUB_SOL_REQ" --req-no-map "BNB=$MODELHUB_BNB_REQ" \
+  --req-no-map "XRP=$MODELHUB_XRP_REQ"
+```
+
+輸出目錄包含 immutable `execution-<run_id>.jsonl`、候選 proposal，以及每幣可覆寫的
+`<COIN>.json` current manifest。blocked、unavailable、timeout、no_improvement、error 也會留下
+可稽核的 terminal log/current；dry-run 只留 execution log，不建立 current。詳見
+[`docs/qa/modelhub-integration-351.md`](docs/qa/modelhub-integration-351.md)。
+
 ---
 
 ## 倉庫結構
