@@ -61,6 +61,11 @@ def _current(
         query=query,
         coin=coin,
         support_threshold=support_threshold,
+        calibration_model_version=(
+            "fixed-heuristic-v1"
+            if calibration_table is DEFAULT_CALIBRATION_TABLE
+            else "isotonic-v1"
+        ),
         calibration_table=calibration_table,
         contract_version=KERNEL_CONTRACT_VERSION,
     )

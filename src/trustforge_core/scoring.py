@@ -8,13 +8,14 @@ from collections.abc import Mapping, Sequence
 from .contracts import (
     KERNEL_CONTRACT_VERSION,
     KernelClaim,
+    KernelDocument,
     KernelInput,
     KernelOutput,
     KernelReputationTrace,
     KernelScoredClaim,
     require_supported_contract_version,
 )
-from .corroboration import DOMAIN_STOP, canonical_source
+from .corroboration import canonical_source
 
 
 DEFAULT_SCORE_WEIGHTS: tuple[tuple[str, float], ...] = (
@@ -69,6 +70,7 @@ ISOTONIC_VERSION = "isotonic-v1"
 SUPPORTED_CALIBRATION_MODEL_VERSIONS = frozenset(
     {FIXED_HEURISTIC_VERSION, ISOTONIC_VERSION}
 )
+_UNSET = object()
 
 _COIN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("BTC", ("btc", "bitcoin", "比特幣", "比特")),
@@ -243,7 +245,11 @@ def corroboration_score(independent_sources: tuple[str, ...]) -> float:
 
 
 def _exact_json_value(value: object, *, field: str) -> None:
-    if value is None or type(value) in {bool, int, str}:
+    if value is None or type(value) in {bool, str}:
+        return
+    if type(value) is int:
+        if value.bit_length() > 53:
+            raise ValueError(f"{field} integer is outside the strict JSON range")
         return
     if type(value) is float:
         if not math.isfinite(value):
@@ -275,6 +281,66 @@ def _metadata_coin(claim: KernelClaim) -> str | None:
                 raise ValueError("claim metadata coin must be an exact string")
             coin = value
     return coin
+
+
+def _validate_scored_claim_graph(item: KernelScoredClaim, *, index: int) -> None:
+    prefix = f"scored_claims[{index}]"
+    _probability(item.trust, field=f"{prefix}.trust")
+    claim = item.claim
+    if type(claim) is not KernelClaim:
+        raise ValueError(f"{prefix}.claim must be an exact KernelClaim")
+    for field, value in (
+        ("id", claim.id),
+        ("text", claim.text),
+        ("claim_type", claim.claim_type),
+        ("direction", claim.direction),
+    ):
+        if type(value) is not str:
+            raise ValueError(f"{prefix}.claim.{field} must be an exact string")
+    document = claim.document
+    if type(document) is not KernelDocument:
+        raise ValueError(f"{prefix}.claim.document must be an exact KernelDocument")
+    for field, value in (
+        ("id", document.id),
+        ("kind", document.kind),
+        ("source", document.source),
+        ("text", document.text),
+        ("url", document.url),
+    ):
+        if type(value) is not str:
+            raise ValueError(f"{prefix}.claim.document.{field} must be an exact string")
+    _exact_number(document.timestamp, field=f"{prefix}.claim.document.timestamp")
+    _metadata_coin(claim)
+    if type(item.components) is not tuple:
+        raise ValueError(f"{prefix}.components must be an exact tuple")
+    for component_index, component in enumerate(item.components):
+        if (
+            type(component) is not tuple
+            or len(component) != 2
+            or type(component[0]) is not str
+        ):
+            raise ValueError(f"{prefix}.components entries must be exact tuples")
+        _exact_number(
+            component[1], field=f"{prefix}.components[{component_index}].value"
+        )
+    trace = item.reputation_trace
+    if trace is not None:
+        if type(trace) is not KernelReputationTrace:
+            raise ValueError(f"{prefix}.reputation_trace must be exact")
+        if type(trace.source) is not str or type(trace.mode) is not str:
+            raise ValueError(f"{prefix}.reputation_trace strings must be exact")
+        _exact_number(trace.prior, field=f"{prefix}.reputation_trace.prior")
+        _exact_number(trace.final, field=f"{prefix}.reputation_trace.final")
+        for field, value in (
+            ("agree_n", trace.agree_n),
+            ("contradict_n", trace.contradict_n),
+            ("iterations_run", trace.iterations_run),
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{prefix}.reputation_trace.{field} must be nonnegative")
+    for field, values in (("manip_flags", item.manip_flags), ("info_flags", item.info_flags)):
+        if type(values) is not tuple or not all(type(value) is str for value in values):
+            raise ValueError(f"{prefix}.{field} must be an exact tuple of strings")
 
 
 def _alias_in(alias: str, text: str) -> bool:
@@ -424,9 +490,9 @@ def aggregate_scored_claims(
     query: str,
     support_threshold: float = 0.50,
     coin: str = "",
-    calibration_model_version: str | None = None,
-    calibration_table: tuple[tuple[float, float], ...] = DEFAULT_CALIBRATION_TABLE,
-    resolved_direction: str = "neutral",
+    calibration_model_version: str | object = _UNSET,
+    calibration_table: tuple[tuple[float, float], ...] | object = _UNSET,
+    resolved_direction: str | object = _UNSET,
     contract_version: str = KERNEL_CONTRACT_VERSION,
 ) -> KernelOutput:
     """Aggregate scored claims into the versioned, report-facing kernel result."""
@@ -436,27 +502,54 @@ def aggregate_scored_claims(
     ):
         raise ValueError("scored_claims must be a tuple of exact KernelScoredClaim values")
     for index, item in enumerate(scored_claims):
-        _probability(item.trust, field=f"scored_claims[{index}].trust")
+        _validate_scored_claim_graph(item, index=index)
     if type(query) is not str:
         raise ValueError("query must be an exact string")
     threshold = _probability(support_threshold, field="support_threshold")
     if type(coin) is not str:
         raise ValueError("coin must be an exact string")
-    if type(resolved_direction) is not str:
+    if resolved_direction is _UNSET:
+        output_direction = _infer_decision_direction
+    elif type(resolved_direction) is str:
+        output_direction = None
+    else:
         raise ValueError("resolved_direction must be an exact string")
-    resolved_calibration_version = calibration_model_version
-    if resolved_calibration_version is None:
-        resolved_calibration_version = (
-            FIXED_HEURISTIC_VERSION
-            if calibration_table is DEFAULT_CALIBRATION_TABLE
-            else ISOTONIC_VERSION
-        )
+    if calibration_model_version is _UNSET:
+        resolved_calibration_version = FIXED_HEURISTIC_VERSION
+        if calibration_table is _UNSET:
+            resolved_calibration_input: tuple[tuple[float, float], ...] = ()
+        elif type(calibration_table) is tuple:
+            _validated_numeric_table(
+                calibration_table, field="calibration_table", probability=True
+            )
+            if calibration_table != DEFAULT_CALIBRATION_TABLE:
+                raise ValueError(
+                    "calibration model version is required for a custom table"
+                )
+            resolved_calibration_input = ()
+        else:
+            raise ValueError("calibration_table must be an exact tuple")
+    else:
+        resolved_calibration_version = calibration_model_version
+        if calibration_table is _UNSET:
+            resolved_calibration_input = ()
+        elif type(calibration_table) is tuple:
+            if calibration_model_version == FIXED_HEURISTIC_VERSION:
+                _validated_numeric_table(
+                    calibration_table, field="calibration_table", probability=True
+                )
+                if calibration_table and calibration_table != DEFAULT_CALIBRATION_TABLE:
+                    raise ValueError(
+                        "fixed calibration model does not accept a custom table"
+                    )
+                resolved_calibration_input = ()
+            else:
+                resolved_calibration_input = calibration_table
+        else:
+            raise ValueError("calibration_table must be an exact tuple")
     resolved_calibration_table = _calibration_table(
         resolved_calibration_version,
-        ()
-        if calibration_model_version is None
-        and calibration_table is DEFAULT_CALIBRATION_TABLE
-        else calibration_table,
+        resolved_calibration_input,
     )
 
     query_tokens = _normalize(query)
@@ -473,7 +566,7 @@ def aggregate_scored_claims(
         relevant = tuple(
             scored
             for scored in scored_claims
-            if not query_tokens or ((_normalize(scored.claim.text) - DOMAIN_STOP) & query_tokens)
+            if not query_tokens or (_normalize(scored.claim.text) & query_tokens)
         ) or scored_claims
         relevant = tuple(sorted(relevant, key=lambda sc: sc.trust, reverse=True))
 
@@ -509,7 +602,9 @@ def aggregate_scored_claims(
         raw_confidence,
         calibrated,
         abstain,
-        resolved_direction,
+        _infer_decision_direction(supporting)
+        if output_direction is _infer_decision_direction
+        else resolved_direction,
         _decision_codes(
             low_calibrated=low_calibrated,
             insufficient_sources=insufficient_sources,

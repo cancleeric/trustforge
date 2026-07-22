@@ -136,7 +136,10 @@ def test_core_aggregate_preserves_sparse_empty_neutral_and_abstain_decision():
     assert result.abstain is True
     assert result.direction == "不明"
     assert result.decision_state == "abstain"
-    assert result.reason_codes == ("low_confidence", "no_supporting_claims")
+    assert result.reason_codes == (
+        "low_calibrated_confidence",
+        "insufficient_independent_sources",
+    )
 
 
 def test_core_aggregate_coin_scope_keeps_market_wide_and_excludes_other_coin():
