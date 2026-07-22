@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from .contracts import (
     KERNEL_CONTRACT_VERSION,
     KernelClaim,
+    KernelInput,
     KernelOutput,
     KernelReputationTrace,
     KernelScoredClaim,
@@ -428,6 +429,23 @@ def aggregate_scored_claims(
         supporting=supporting,
         contrarian=contrarian,
         decision_state="abstain" if abstain else "normal",
+    )
+
+
+def run_kernel(inp: KernelInput) -> KernelOutput:
+    """Run the public deterministic kernel entrypoint for one versioned input."""
+    if type(inp) is not KernelInput:
+        raise ValueError("inp must be an exact KernelInput")
+    require_supported_contract_version(inp.contract_version)
+    scored_claims = tuple(
+        score_claim(claim, now=inp.pit_epoch)
+        for claim in inp.claims
+    )
+    return aggregate_scored_claims(
+        scored_claims,
+        query=inp.query,
+        coin=inp.coin,
+        contract_version=inp.contract_version,
     )
 
 

@@ -17,6 +17,8 @@ from trustforge_core import (
     KernelDocument,
     KernelInput,
     KernelOutput,
+    UnsupportedKernelContractVersion,
+    run_kernel,
 )
 
 
@@ -96,3 +98,36 @@ def test_mapper_preserves_claim_order_and_normalized_fields():
     assert request.pit_epoch == 10.0
     assert request.coin == "BTC"
     assert request.query == "q"
+
+
+def test_public_core_run_kernel_is_deterministic_and_report_facing():
+    document = KernelDocument(
+        "btc-news-1",
+        "news",
+        "coindesk",
+        "BTC ETF inflows expanded after spot market demand improved",
+        1_700_000_000.0,
+        metadata=(("coin", "BTC"),),
+    )
+    claim = KernelClaim("c1", document.text, document, direction="bullish")
+    request = KernelInput((claim,), 1_700_000_100.0, "BTC", "BTC outlook")
+
+    first = run_kernel(request)
+    second = run_kernel(request)
+
+    assert first == second
+    assert isinstance(first, KernelOutput)
+    assert first.contract_version == KERNEL_CONTRACT_VERSION
+    assert first.query == "BTC outlook"
+    assert first.supporting_count == len(first.supporting)
+    assert first.scored_claims[0].claim is claim
+
+
+def test_public_core_run_kernel_rejects_non_finite_and_unknown_versions():
+    document = KernelDocument("d1", "news", "source", "BTC news", 100.0)
+    claim = KernelClaim("c1", "BTC news", document)
+
+    with pytest.raises(ValueError, match="pit_epoch must be a finite number"):
+        KernelInput((claim,), float("nan"), "BTC", "q")
+    with pytest.raises(UnsupportedKernelContractVersion):
+        KernelInput((claim,), 100.0, "BTC", "q", contract_version="999.0.0")
