@@ -25,7 +25,7 @@ PR #440 已交付 defensive ModelHub client，PR #447 已交付五幣 calibrator
 先做無網路副作用的 dry-run：
 
 ```bash
-PYTHONPATH=src python -m trustforge.cli modelhub-train --all --dry-run \
+PYTHONPATH=src python3 -m trustforge.cli modelhub-train --all --dry-run \
   --training-dir data/training \
   --out-dir /private/tmp/trustforge-modelhub-proposals
 ```
@@ -34,7 +34,7 @@ macOS `/tmp` 是 symlink，安全路徑檢查會刻意拒絕；請用 canonical 
 live 模式必須提供五個不同 request number：
 
 ```bash
-PYTHONPATH=src python -m trustforge.cli modelhub-train --all \
+PYTHONPATH=src python3 -m trustforge.cli modelhub-train --all \
   --req-no-map "BTC=$MODELHUB_BTC_REQ" --req-no-map "ETH=$MODELHUB_ETH_REQ" \
   --req-no-map "SOL=$MODELHUB_SOL_REQ" --req-no-map "BNB=$MODELHUB_BNB_REQ" \
   --req-no-map "XRP=$MODELHUB_XRP_REQ" \
@@ -42,7 +42,9 @@ PYTHONPATH=src python -m trustforge.cli modelhub-train --all \
 ```
 
 執行前逐一向 ModelHub 查證 mapping，且 API key 只放環境變數／vault，禁止寫入文件、shell
-歷史或 commit。本交接沒有虛構五個 request number，也沒有授權 state-changing retrain。
+歷史或 commit。state-changing retrain 必須先取得 Eric 或具名 ModelHub owner 的明確授權；
+取得 req_no、API key 或通過 reviewer/CISO 審查都不構成操作授權。本交接沒有虛構五個
+request number，也沒有授權 state-changing retrain。
 
 ## 4. 輸出與 failure semantics
 
@@ -72,7 +74,9 @@ PYTHONPATH=src python -m trustforge.cli modelhub-train --all \
 ## 6. 已完成 QA／審查證據
 
 - PR #440 merge 後 client：115 passed、1 skipped。
-- PR #447 final targeted ModelHub suite：213 passed；focused coverage 87–89%。
+- PR #447 merge 後可重現 relevant suite：221 passed（精確命令見 QA 文件）。
+- focused coverage：`modelhub_submit` 89%、`modelhub_training` 87%、`safe_fs` 86%；coverage
+  invocation 因 repo 全域 source/fail-under 設定以非零結束，未宣稱全域 coverage gate 通過。
 - 五幣 `/private/tmp` dry-run 成功；五份 execution-log SHA256 親自重算吻合，0 current manifest。
 - final head `2924e4e...`：Dev Manager、harper CISO、`/codex-review` 均 0 finding；eye
   breaking-changes scan 0 critical／0 warning。
@@ -90,5 +94,6 @@ ruff 通過。也不宣稱 live retrain、activation 或部署完成。完整紀
 - [ ] 先重跑五幣 `/private/tmp` dry-run，重算每份 execution log SHA256。
 - [ ] 取得明確授權後才執行 state-changing live retrain。
 - [ ] 逐幣檢查 status、dataset SHA、proposal/log/current 引用與 weighted ECE。
-- [ ] 對任何 candidate 做人工 reviewer + harper + `/codex-review`；另行核准後才可 activation。
+- [ ] 對任何 candidate 做人工 reviewer + harper + `/codex-review`；只有 Eric 或具名 ModelHub
+  owner 可另行核准 activation，審查通過本身不構成 activation 授權。
 - [ ] 保留 `MH-2026-074`；若要刪除，交由 hCore admin 依外部服務流程處理。

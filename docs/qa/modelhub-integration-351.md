@@ -6,8 +6,29 @@
 ## 已驗證
 
 - PR #440 merge 後 client suite：115 passed、1 skipped。
-- PR #447 final head targeted ModelHub suite：213 passed。
-- PR #447 focused coverage：`modelhub_submit` 89%、`modelhub_training` 87%、`safe_fs` 87%。
+- PR #447 merge 後 relevant suite：221 passed。可重現命令：
+
+  ```bash
+  PYTHONPATH=src CACHE_BACKEND=sqlite TRUSTFORGE_DISABLE_ADMIN_CONFIG=1 \
+    python3 -m pytest \
+    tests/test_modelhub_client.py tests/test_calibrator_gate.py \
+    tests/test_modelhub_cli.py tests/test_modelhub_submit.py \
+    tests/test_modelhub_training.py tests/test_safe_fs.py -q --no-cov
+  ```
+
+- Focused module coverage：`modelhub_submit` 89%、`modelhub_training` 87%、`safe_fs` 86%。
+  可重現 invocation：
+
+  ```bash
+  PYTHONPATH=src CACHE_BACKEND=sqlite TRUSTFORGE_DISABLE_ADMIN_CONFIG=1 \
+    python3 -m pytest \
+    tests/test_modelhub_submit.py tests/test_modelhub_training.py tests/test_safe_fs.py -q \
+    --cov=trustforge.modelhub_submit --cov=trustforge.modelhub_training \
+    --cov=trustforge.safe_fs --cov-report=term
+  ```
+
+  此 coverage invocation 仍會載入 repo 全域 `source=src`／`fail-under=75`，所以即使上述三個
+  changed modules 都超過 80%，整體 focused invocation 仍以非零結束；不宣稱全域 coverage gate 通過。
 - 五幣 `/private/tmp` dry-run 成功；五份 execution log 的 SHA256 均獨立重算吻合，且沒有 current manifest。
 - compileall 與 `git diff --check` 通過。
 
@@ -40,5 +61,7 @@ PR #447 final reviewed head `2924e4ef65f9949973d2e2f86f5064c3f25b2561`：
 
 - 未以真實五幣 `req_no` 執行 live retrain。
 - 未下載或啟用任何候選模型，未變更 registry current 狀態。
+- Live retrain／activation 只有 Eric 或具名 ModelHub owner 可明確核准；req_no、API key 或
+  reviewer/CISO 通過均不等於操作授權。
 - 未修改 `budget_guard.py`；15 分鐘限制由既有 `ExecutionLog` 實際執行。
 - 未做 DB/migration、secret rotation、Docker、AWS、部署或 Issue #393 回填。

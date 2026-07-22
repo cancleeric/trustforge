@@ -89,7 +89,10 @@ BTC=<BTC_REQ>, ETH=<ETH_REQ>, SOL=<SOL_REQ>, BNB=<BNB_REQ>, XRP=<XRP_REQ>
 
 ## 驗收證據與邊界
 
-PR #440 merge 後 115 passed、1 skipped。PR #447 final targeted suite 213 passed，focused
-coverage 87–89%；五幣 `/private/tmp` dry-run 成功且 execution-log hashes 重算吻合。
+PR #440 merge 後 115 passed、1 skipped。合併後可重現的 relevant suite 為 221 passed；精確
+命令與 coverage 限制見 QA 文件。五幣 `/private/tmp` dry-run 成功且 execution-log hashes 重算吻合。
 全倉既有 failures 追蹤於 #454；ruff 不可用，因此兩者均不宣稱通過。未執行 live retrain、
 activation、DB/secret/Docker/deploy 或 Issue #393。
+
+Live retrain 或 activation 都須先取得 Eric 或具名 ModelHub owner 的明確授權；持有 req_no、
+API key 或完成 reviewer/CISO gate 不等於取得該操作授權。
