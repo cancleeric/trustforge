@@ -356,15 +356,9 @@ def _judge_hit(direction: str, change_pct: float) -> bool:
     - 偏空：change < 0 → hit
     - 其他方向未知：視為中性
     """
-    if direction in ("中性", "不明", ""):
-        return abs(change_pct) < 0.02
-    elif direction == "偏多":
-        return change_pct > 0
-    elif direction == "偏空":
-        return change_pct < 0
-    else:
-        # 未知方向，視為中性
-        return abs(change_pct) < 0.02
+    from .calibration_metrics import judge_direction_hit
+
+    return judge_direction_hit(direction, change_pct)
 
 
 def cmd_label_outcomes(args: argparse.Namespace) -> int:
@@ -410,6 +404,33 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         f"{report['horizons']['T+1']['eligible_predictions']} "
         f"calibration_error={report['horizons']['T+1']['calibration_error']} -> {out}"
     )
+    return 0
+
+
+def cmd_modelhub_train(args: argparse.Namespace) -> int:
+    """Run isolated ModelHub calibrator proposal flows and print JSON summaries."""
+    from .modelhub_submit import submit_calibrator_training
+
+    coins = list(COIN_POOL) if args.all else [args.coin]
+    results = []
+    for coin in coins:
+        try:
+            result = submit_calibrator_training(
+                coin,
+                training_dir=Path(args.training_dir),
+                out_dir=Path(args.out_dir),
+                req_no=args.req_no,
+                dry_run=args.dry_run,
+            )
+        except Exception:
+            result = {"status": "error", "coin": coin}
+        results.append(result)
+    print(json.dumps(results if args.all else results[0], ensure_ascii=False, sort_keys=True))
+    statuses = {result["status"] for result in results}
+    if statuses & {"unavailable", "timeout", "error"}:
+        return 1
+    if statuses & {"blocked", "no_improvement"}:
+        return 2
     return 0
 
 
@@ -499,6 +520,16 @@ def main(argv=None) -> int:
     cal.add_argument("--data-dir", default="data/data", help="OHLCV CSV 資料目錄")
     cal.add_argument("--out", default="out/historical-replay-calibration.json")
     cal.set_defaults(func=cmd_calibrate)
+
+    mh = sub.add_parser("modelhub-train", help="建立 ModelHub calibrator 訓練候選 proposal")
+    target = mh.add_mutually_exclusive_group(required=True)
+    target.add_argument("--coin", choices=COIN_POOL)
+    target.add_argument("--all", action="store_true")
+    mh.add_argument("--dry-run", action="store_true")
+    mh.add_argument("--training-dir", default="data/training")
+    mh.add_argument("--out-dir", default="out/modelhub-proposals")
+    mh.add_argument("--req-no", default=None)
+    mh.set_defaults(func=cmd_modelhub_train)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):
