@@ -13,16 +13,20 @@ threading，失敗不影響核心 pipeline。
 from __future__ import annotations
 
 import enum
-import json
 import logging
-import os
 import queue
-import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
+
+from .telemetry_store import (
+    SQLiteTelemetryStore,
+    TelemetryStore,
+    TelemetryStoreEvent,
+    TelemetryStoreRecord,
+    default_telemetry_db_path,
+)
 
 
 class ModuleState(str, enum.Enum):
@@ -45,10 +49,7 @@ class ModuleState(str, enum.Enum):
 logger = logging.getLogger(__name__)
 
 # 預設 SQLite 位置
-_DEFAULT_DB_PATH = os.getenv(
-    "TRUSTFORGE_TELEMETRY_DB",
-    str(Path(__file__).resolve().parents[2] / "out" / "module-telemetry.sqlite3"),
-)
+_DEFAULT_DB_PATH = default_telemetry_db_path()
 
 # Background write queue size limit
 _QUEUE_MAX = 2048
@@ -94,8 +95,9 @@ class ModuleTelemetry:
     _instance: "ModuleTelemetry | None" = None
     _lock = threading.Lock()
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, store: TelemetryStore | None = None):
         self._db_path = db_path or _DEFAULT_DB_PATH
+        self._store = store or SQLiteTelemetryStore(self._db_path)
         self._queue: queue.Queue[_WriteEvent | None] = queue.Queue(maxsize=_QUEUE_MAX)
         self._writer_thread: threading.Thread | None = None
         self._started = False
@@ -122,25 +124,7 @@ class ModuleTelemetry:
     def _init_db(self) -> None:
         """建立 SQLite schema（如果不存在）。"""
         try:
-            os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-            conn = sqlite3.connect(self._db_path, timeout=5)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS module_telemetry (
-                    module_id TEXT PRIMARY KEY,
-                    last_invoked_at TEXT NOT NULL,
-                    invocation_count INTEGER NOT NULL DEFAULT 0,
-                    last_result TEXT NOT NULL DEFAULT 'unknown',
-                    total_latency_ms REAL NOT NULL DEFAULT 0.0,
-                    avg_latency_ms REAL NOT NULL DEFAULT 0.0,
-                    last_latency_ms REAL NOT NULL DEFAULT 0.0,
-                    state TEXT NOT NULL DEFAULT 'registered',
-                    evidence_ref TEXT NOT NULL DEFAULT '',
-                    metadata TEXT NOT NULL DEFAULT '{}'
-                )
-            """)
-            conn.commit()
-            conn.close()
+            self._store.initialize()
         except Exception:
             logger.warning("module_telemetry: failed to init DB at %s", self._db_path, exc_info=True)
 
@@ -190,35 +174,7 @@ class ModuleTelemetry:
         if not batch:
             return
         try:
-            conn = sqlite3.connect(self._db_path, timeout=5)
-            conn.execute("PRAGMA journal_mode=WAL")
-            for ev in batch:
-                ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ev.ts))
-                meta_json = json.dumps(ev.metadata, ensure_ascii=False) if ev.metadata else "{}"
-                conn.execute("""
-                    INSERT INTO module_telemetry
-                        (module_id, last_invoked_at, invocation_count, last_result,
-                         total_latency_ms, avg_latency_ms, last_latency_ms,
-                         state, evidence_ref, metadata)
-                    VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(module_id) DO UPDATE SET
-                        last_invoked_at = excluded.last_invoked_at,
-                        invocation_count = invocation_count + 1,
-                        last_result = excluded.last_result,
-                        total_latency_ms = total_latency_ms + excluded.total_latency_ms,
-                        avg_latency_ms = (total_latency_ms + excluded.total_latency_ms)
-                                         / (invocation_count + 1),
-                        last_latency_ms = excluded.last_latency_ms,
-                        state = excluded.state,
-                        evidence_ref = CASE WHEN excluded.evidence_ref != ''
-                                       THEN excluded.evidence_ref
-                                       ELSE module_telemetry.evidence_ref END,
-                        metadata = excluded.metadata
-                """, (ev.module_id, ts_iso, ev.result,
-                      ev.latency_ms, ev.latency_ms, ev.latency_ms,
-                      ev.state, ev.evidence_ref, meta_json))
-            conn.commit()
-            conn.close()
+            self._store.write_batch([_to_store_event(ev) for ev in batch])
         except Exception:
             logger.warning("module_telemetry: flush_batch failed", exc_info=True)
 
@@ -286,25 +242,8 @@ class ModuleTelemetry:
     def get_telemetry(self, module_id: str) -> TelemetryRecord | None:
         """查詢單一模組的遙測快照。"""
         try:
-            conn = sqlite3.connect(self._db_path, timeout=3)
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM module_telemetry WHERE module_id = ?", (module_id,)
-            ).fetchone()
-            conn.close()
-            if row is None:
-                return None
-            return TelemetryRecord(
-                module_id=row["module_id"],
-                last_invoked_at=row["last_invoked_at"],
-                invocation_count=row["invocation_count"],
-                last_result=row["last_result"],
-                avg_latency_ms=row["avg_latency_ms"],
-                last_latency_ms=row["last_latency_ms"],
-                state=row["state"],
-                evidence_ref=row["evidence_ref"],
-                metadata=json.loads(row["metadata"]) if row["metadata"] else {},
-            )
+            rec = self._store.get(module_id)
+            return _from_store_record(rec) if rec is not None else None
         except Exception:
             logger.warning("module_telemetry: get_telemetry failed for %s", module_id, exc_info=True)
             return None
@@ -312,26 +251,7 @@ class ModuleTelemetry:
     def get_all_telemetry(self) -> list[TelemetryRecord]:
         """查詢所有模組的遙測快照。"""
         try:
-            conn = sqlite3.connect(self._db_path, timeout=3)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM module_telemetry ORDER BY last_invoked_at DESC"
-            ).fetchall()
-            conn.close()
-            return [
-                TelemetryRecord(
-                    module_id=r["module_id"],
-                    last_invoked_at=r["last_invoked_at"],
-                    invocation_count=r["invocation_count"],
-                    last_result=r["last_result"],
-                    avg_latency_ms=r["avg_latency_ms"],
-                    last_latency_ms=r["last_latency_ms"],
-                    state=r["state"],
-                    evidence_ref=r["evidence_ref"],
-                    metadata=json.loads(r["metadata"]) if r["metadata"] else {},
-                )
-                for r in rows
-            ]
+            return [_from_store_record(rec) for rec in self._store.list_all()]
         except Exception:
             logger.warning("module_telemetry: get_all_telemetry failed", exc_info=True)
             return []
@@ -346,6 +266,32 @@ class ModuleTelemetry:
             if self._writer_thread and self._writer_thread.is_alive():
                 self._writer_thread.join(timeout=3)
             self._started = False
+
+
+def _to_store_event(ev: _WriteEvent) -> TelemetryStoreEvent:
+    return TelemetryStoreEvent(
+        subject_id=ev.module_id,
+        latency_ms=ev.latency_ms,
+        result=ev.result,
+        ts=ev.ts,
+        metadata=ev.metadata,
+        state=ev.state,
+        evidence_ref=ev.evidence_ref,
+    )
+
+
+def _from_store_record(rec: TelemetryStoreRecord) -> TelemetryRecord:
+    return TelemetryRecord(
+        module_id=rec.subject_id,
+        last_invoked_at=rec.last_invoked_at,
+        invocation_count=rec.invocation_count,
+        last_result=rec.last_result,
+        avg_latency_ms=rec.avg_latency_ms,
+        last_latency_ms=rec.last_latency_ms,
+        state=rec.state,
+        evidence_ref=rec.evidence_ref,
+        metadata=rec.metadata,
+    )
 
 
 # --- 便捷函式（module-level，用 singleton）---------------------------------
