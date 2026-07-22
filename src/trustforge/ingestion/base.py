@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from ..coin_scope import coins_mentioned, matches_coin_fields
 from ..data_contracts import DOCUMENT_SCHEMA_VERSION
 
 # 資料根目錄：預設為 repo 根（src 上一層）；Lambda 等打包環境用 TRUSTFORGE_HOME 覆寫
@@ -27,17 +28,6 @@ OFFICIAL_OHLCV_DIR = _HOME / "data" / "data"     # HOYA BIT 官方基準 OHLCV
 
 # 文件型來源類型（有對應的 sample_data/*.json）。price 走 OHLCV CSV，另行處理。
 SOURCE_KINDS = ("onchain", "regulatory", "hoyabit", "news", "social")
-
-# 幣別別名（小寫），用於離線樣本幣別識別。
-# 優先使用 meta["coin"] 顯式欄位；次由 id / text 內別名判定。
-_COIN_ALIASES: dict[str, frozenset] = {
-    "BTC": frozenset({"btc", "bitcoin", "比特幣", "比特"}),
-    "ETH": frozenset({"eth", "ethereum", "以太坊", "以太"}),
-    "SOL": frozenset({"sol", "solana"}),
-    "BNB": frozenset({"bnb", "binance"}),
-    "XRP": frozenset({"xrp", "ripple", "瑞波"}),
-}
-
 
 @dataclass
 class Document:
@@ -187,21 +177,9 @@ def sync_source_enabled_from_admin(store=None) -> None:
             _SOURCE_ENABLED_OVERRIDES[name] = False
 
 
-def _alias_in(alias: str, text: str) -> bool:
-    """ASCII 別名用詞界 \\b（配 re.ASCII 處理 CJK 夾雜，避免 'sol' 誤命中 'solana'/'console'）；
-    CJK 別名（如 比特幣）詞界概念不同，用子字串。"""
-    if alias.isascii():
-        return re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE | re.ASCII) is not None
-    return alias in text
-
-
 def _coins_mentioned(text: str) -> set[str]:
     """回傳 text 中提及的所有幣別代碼集合。"""
-    found: set[str] = set()
-    for code, aliases in _COIN_ALIASES.items():
-        if any(_alias_in(a, text) for a in aliases):
-            found.add(code)
-    return found
+    return coins_mentioned(text)
 
 
 def _matches_coin(doc: "Document", coin: str) -> bool:
@@ -214,23 +192,12 @@ def _matches_coin(doc: "Document", coin: str) -> bool:
        避免他幣訊號被誤當目標幣訊號污染。
     3. 無任何幣別提及 → 全市場通用，納入。
     """
-    targets = {t.strip().upper() for t in re.split(r"[,\s]+", coin) if t.strip()}
-    if not targets:
-        return True  # 未指定幣 → 不過濾
-
-    # 1. 顯式 meta 欄位（最優先）
-    explicit = doc.meta.get("coin")
-    if explicit:
-        return str(explicit).upper() in targets
-
-    mentioned = _coins_mentioned(doc.id + " " + doc.text)
-
-    # 3. 無幣別提及 → 全市場通用，納入
-    if not mentioned:
-        return True
-
-    # 2. 目標幣被提及 且 無其他非目標幣 → 納入；否則（含跨幣內容）排除
-    return bool(mentioned & targets) and not (mentioned - targets)
+    return matches_coin_fields(
+        document_id=doc.id,
+        text=doc.text,
+        explicit_coin=doc.meta.get("coin"),
+        target_coin=coin,
+    )
 
 
 def _mentions_coin(doc: "Document", coin: str) -> bool:
