@@ -51,6 +51,27 @@ def test_upgrade_queue_rejects_approval_without_passed_sandbox(tmp_path):
     assert rejected["state"] == "rejected"
 
 
+def test_upgrade_queue_rejects_automated_approval_actor_after_passed_sandbox(tmp_path):
+    import pytest
+
+    automated_actors = [
+        "bedrock-adversarial-reviewer",
+        "codex-agent",
+        "deployment-service",
+        "llm-reviewer",
+    ]
+    for actor in automated_actors:
+        queue = UpgradeQueue(tmp_path / f"{actor}.sqlite3")
+        queue.sync_diagnostic({"proposals": [{"id": "p", "area": "x", "severity": "high"}]})
+        queue.record_sandbox("p", True, "sha256:abc", {"tests": 24})
+
+        with pytest.raises(ValueError, match="human actor"):
+            queue.decide("p", "approve", actor, "sandbox green")
+
+        rejected = queue.decide("p", "reject", actor, "automated reviewer blocked approval")
+        assert rejected["state"] == "rejected"
+
+
 def test_real_sandbox_runner_persists_result_to_upgrade_queue(tmp_path, monkeypatch):
     import importlib.util
     import json
