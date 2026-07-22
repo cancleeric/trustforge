@@ -54,7 +54,7 @@ def test_list_models_builds_url_timeout_and_redacted_header():
     client = ModelHubClient(api_key="top-secret", opener=opener, sleep=lambda _: None)
     assert client.list_models() == [{"slug": "safe"}]
     request, timeout = opener.calls[0]
-    assert request.full_url == "http://localhost:8950/v1/models"
+    assert request.full_url == "http://127.0.0.1:8950/v1/models"
     assert request.get_header("X-api-key") == "top-secret"
     assert request.get_method() == "GET"
     assert timeout == 30
@@ -105,6 +105,54 @@ def test_default_opener_never_follows_redirect_or_forwards_key(status):
         server.server_close()
 
 
+def test_default_opener_ignores_environment_proxy_and_key_never_reaches_it(monkeypatch):
+    target_seen = []
+    proxy_seen = []
+
+    class Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            target_seen.append((self.path, self.headers.get("X-API-Key")))
+            body = b'{"models":[]}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_GET(self):
+            proxy_seen.append((self.path, self.headers.get("X-API-Key")))
+            self.send_response(502)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (target, proxy)]
+    for thread in threads:
+        thread.start()
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.server_port}")
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    try:
+        client = ModelHubClient(base_url=f"http://localhost:{target.server_port}", api_key="proxy-secret")
+        assert client.list_models() == []
+        assert target_seen == [("/v1/models", "proxy-secret")]
+        assert proxy_seen == []
+        assert client.base_url == f"http://127.0.0.1:{target.server_port}"
+    finally:
+        for server in (target, proxy):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join()
+
+
 @pytest.mark.parametrize("url", [
     "https://localhost:8950", "http://example.com:8950", "http://user@localhost:8950",
     "http://127.0.0.2:8950", "http://localhost:8950?x=1", "http://localhost:",
@@ -117,6 +165,10 @@ def test_rejects_non_loopback_or_unsafe_base_urls(url):
 def test_accepts_ipv4_and_ipv6_loopback():
     assert ModelHubClient(base_url="http://127.0.0.1:8950").base_url == "http://127.0.0.1:8950"
     assert ModelHubClient(base_url="http://[::1]:8950").base_url == "http://[::1]:8950"
+
+
+def test_localhost_is_normalized_without_dns_lookup():
+    assert ModelHubClient(base_url="http://localhost:8950").base_url == "http://127.0.0.1:8950"
 
 
 @pytest.mark.parametrize("failure", [URLError("down secret-value"), TimeoutError("secret-value"), socket.timeout()])
@@ -219,6 +271,31 @@ def test_malformed_or_wrong_schema_response(body):
         ModelHubClient(opener=Opener(body)).list_models()
 
 
+@pytest.mark.parametrize("body", [b"1" + b"0" * 5000, b"[" * 2000 + b"]" * 2000])
+def test_pathological_json_is_a_redacted_response_error(body):
+    with pytest.raises(ModelHubResponseError) as caught:
+        ModelHubClient(api_key="json-secret", opener=Opener(body)).list_models()
+    assert "json-secret" not in str(caught.value)
+
+
+def test_response_read_value_error_is_not_misclassified_as_header_error():
+    class BrokenResponse(Response):
+        def read(self, amount):
+            raise ValueError("read failed with body-secret")
+
+    opener = Opener({"models": []})
+    opener.results = [BrokenResponse({"models": []})]
+
+    def return_response(request, timeout):
+        opener.calls.append((request, timeout))
+        return opener.results.pop(0)
+
+    with pytest.raises(ModelHubResponseError) as caught:
+        ModelHubClient(opener=return_response).list_models()
+    assert not isinstance(caught.value, ModelHubConfigurationError)
+    assert "body-secret" not in str(caught.value)
+
+
 def test_oversized_response_is_rejected():
     with pytest.raises(ModelHubResponseError, match="size limit"):
         ModelHubClient(opener=Opener(b"12345"), max_response_bytes=4).list_models()
@@ -234,7 +311,7 @@ def test_poll_returns_success_and_failure_terminal_statuses():
 
 
 def test_poll_uses_monotonic_deadline_and_bounded_sleep():
-    now = iter([10.0, 12.0, 12.0, 12.0, 15.0])
+    now = iter([10.0, 12.0, 12.0, 12.0, 12.0, 12.0, 15.0])
     sleeps = []
     client = ModelHubClient(
         opener=Opener({"status": "queued"}, {"status": "running"}),
@@ -247,10 +324,31 @@ def test_poll_uses_monotonic_deadline_and_bounded_sleep():
 
 
 def test_poll_rejects_terminal_response_that_arrives_after_deadline():
-    now = iter([0.0, 0.0, 6.0])
+    now = iter([0.0, 0.0, 0.0, 0.0, 6.0])
     client = ModelHubClient(opener=Opener({"status": "completed"}), monotonic=lambda: next(now))
     with pytest.raises(ModelHubPollTimeout):
         client.poll_training_result("R", max_wait=5)
+
+
+def test_chunked_body_read_stops_as_soon_as_deadline_expires():
+    class SlowChunkResponse(Response):
+        def __init__(self):
+            self.calls = 0
+
+        def read1(self, amount):
+            self.calls += 1
+            return b'{"status":"completed"}' if self.calls == 1 else b""
+
+    response = SlowChunkResponse()
+
+    def opener(_request, timeout):
+        return response
+
+    now = iter([0.0, 0.0, 0.0, 0.0, 6.0])
+    client = ModelHubClient(opener=opener, monotonic=lambda: next(now))
+    with pytest.raises(ModelHubPollTimeout):
+        client.poll_training_result("R", max_wait=5)
+    assert response.calls == 1
 
 
 @pytest.mark.parametrize("max_wait", [True, "1", None, math.nan, math.inf, 0, -1, 300.01])

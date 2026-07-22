@@ -11,7 +11,7 @@ import unicodedata
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 DEFAULT_BASE_URL = "http://localhost:8950"
 DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
@@ -49,7 +49,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
         return None
 
 
-_DEFAULT_OPENER = build_opener(_NoRedirectHandler())
+_DEFAULT_OPENER = build_opener(ProxyHandler({}), _NoRedirectHandler())
 
 
 def _open_no_redirect(request: Request, *, timeout: float) -> Any:
@@ -93,7 +93,7 @@ def _validated_base_url(value: str) -> str:
         port = parsed.port
     except ValueError as exc:
         raise ModelHubConfigurationError("ModelHub base URL has an invalid port") from exc
-    netloc = parsed.hostname or ""
+    netloc = "127.0.0.1" if parsed.hostname == "localhost" else (parsed.hostname or "")
     if ":" in netloc:
         netloc = f"[{netloc}]"
     if port is not None:
@@ -102,7 +102,12 @@ def _validated_base_url(value: str) -> str:
 
 
 class ModelHubClient:
-    """ModelHub REST client using only the Python standard library."""
+    """ModelHub REST client using only the Python standard library.
+
+    Poll deadlines bound socket timeouts and response-body reads. The stdlib
+    opener/header phase itself cannot be asynchronously interrupted; this
+    client deliberately does not create background threads to simulate that.
+    """
 
     def __init__(
         self,
@@ -141,13 +146,38 @@ class ModelHubClient:
         path = "/".join(quote(str(segment), safe="") for segment in segments)
         return f"{self.base_url}/{path}"
 
-    def _decode_response(self, response: Any) -> Any:
-        raw = response.read(self.max_response_bytes + 1)
+    def _check_deadline(self, deadline: float | None) -> None:
+        if deadline is not None and deadline - self._monotonic() <= 0:
+            raise ModelHubPollTimeout("ModelHub training result polling timed out")
+
+    def _decode_response(self, response: Any, deadline: float | None = None) -> Any:
+        self._check_deadline(deadline)
+        try:
+            read1 = getattr(response, "read1", None)
+            if callable(read1):
+                chunks: list[bytes] = []
+                total = 0
+                while total <= self.max_response_bytes:
+                    self._check_deadline(deadline)
+                    chunk = read1(min(64 * 1024, self.max_response_bytes + 1 - total))
+                    self._check_deadline(deadline)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                raw = b"".join(chunks)
+            else:
+                raw = response.read(self.max_response_bytes + 1)
+                self._check_deadline(deadline)
+        except ModelHubPollTimeout:
+            raise
+        except (ValueError, RecursionError) as exc:
+            raise ModelHubResponseError("ModelHub response body could not be read") from exc
         if len(raw) > self.max_response_bytes:
             raise ModelHubResponseError("ModelHub response exceeded the configured size limit")
         try:
             return json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise ModelHubResponseError("ModelHub returned malformed JSON") from exc
 
     def _request(
@@ -183,24 +213,26 @@ class ModelHubClient:
                     raise ModelHubPollTimeout("ModelHub training result polling timed out")
                 request_timeout = min(request_timeout, remaining)
             try:
-                with self._opener(request, timeout=request_timeout) as response:
-                    decoded = self._decode_response(response)
-                if deadline is not None and deadline - self._monotonic() <= 0:
-                    raise ModelHubPollTimeout("ModelHub training result polling timed out")
-                return decoded
+                response = self._opener(request, timeout=request_timeout)
+            except ValueError:
+                raise ModelHubConfigurationError(
+                    "ModelHub request could not be sent because its headers are invalid"
+                ) from None
             except HTTPError as exc:
                 if exc.code != 429 and exc.code < 500:
                     raise ModelHubHTTPError(exc.code) from None
                 if attempt == retry_count:
                     raise ModelHubHTTPError(exc.code, "ModelHub retry limit exhausted") from None
-            except ValueError:
-                raise ModelHubConfigurationError(
-                    "ModelHub request could not be sent because its headers are invalid"
-                ) from None
             except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
                 last_transport = exc
                 if attempt == retry_count:
                     raise ModelHubTransportError("ModelHub is unavailable after retry limit") from None
+            else:
+                with response:
+                    decoded = self._decode_response(response, deadline)
+                if deadline is not None and deadline - self._monotonic() <= 0:
+                    raise ModelHubPollTimeout("ModelHub training result polling timed out")
+                return decoded
             if attempt < retry_count:
                 delay = min(0.1 * (2**attempt), 1.0)
                 if deadline is not None:
