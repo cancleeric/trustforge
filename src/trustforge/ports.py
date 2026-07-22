@@ -188,6 +188,110 @@ class BudgetProvider(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Port: Security Decision Provider
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DecisionAction = Literal["allow", "deny"]
+
+
+@dataclass(frozen=True)
+class PolicyRequest:
+    """Provider-neutral authorization request.
+
+    This port carries only generic subject/action/resource/context facts. Web,
+    API, role, route, and header rules belong in application adapters.
+    """
+
+    subject: str
+    action: str
+    resource: str
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PolicyDecision:
+    """Provider-neutral authorization decision."""
+
+    action: DecisionAction
+    reason: str
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def allowed(self) -> bool:
+        """True when the decision explicitly allows the request."""
+        return self.action == "allow"
+
+
+@runtime_checkable
+class SecurityDecisionProvider(Protocol):
+    """Minimal provider-neutral authorization/security decision contract."""
+
+    provider_id: str
+
+    def evaluate(self, request: PolicyRequest) -> PolicyDecision:
+        """Evaluate one authorization request."""
+        ...
+
+
+_SENSITIVE_POLICY_KEYS = frozenset({
+    "api_key",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "session",
+    "token",
+})
+
+
+def _redact_policy_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return redact_policy_context(value)
+    if isinstance(value, list):
+        return [_redact_policy_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_policy_value(item) for item in value)
+    return value
+
+
+def redact_policy_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy safe for security-decision logs."""
+    redacted: dict[str, Any] = {}
+    for key, value in context.items():
+        if key.lower() in _SENSITIVE_POLICY_KEYS:
+            redacted[key] = "<redacted>"
+        else:
+            redacted[key] = _redact_policy_value(value)
+    return redacted
+
+
+def evaluate_security_decision(
+    provider: SecurityDecisionProvider,
+    request: PolicyRequest,
+) -> PolicyDecision:
+    """Evaluate a policy adapter with fail-closed error handling."""
+    try:
+        decision = provider.evaluate(request)
+    except Exception as exc:
+        return PolicyDecision(
+            action="deny",
+            reason=f"policy evaluation failed: {type(exc).__name__}",
+            evidence={
+                "provider": provider.provider_id,
+                "context": redact_policy_context(request.context),
+            },
+        )
+
+    return PolicyDecision(
+        action=decision.action,
+        reason=decision.reason,
+        evidence=redact_policy_context(decision.evidence),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Port: Agent Runtime
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -475,6 +579,23 @@ class FakeBudgetProvider:
             "model_id": model_id, "input_tokens": input_tokens,
             "output_tokens": output_tokens, "cost_usd": cost_usd,
         })
+
+
+class FakeSecurityDecisionProvider:
+    """Test fake for the generic SecurityDecisionProvider contract."""
+
+    provider_id = "fake-security"
+
+    def __init__(self, decision: PolicyDecision | None = None, *, failure: Exception | None = None) -> None:
+        self.decision = decision or PolicyDecision(action="allow", reason="matched")
+        self.failure = failure
+        self.requests: list[PolicyRequest] = []
+
+    def evaluate(self, request: PolicyRequest) -> PolicyDecision:
+        self.requests.append(request)
+        if self.failure is not None:
+            raise self.failure
+        return self.decision
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
