@@ -616,7 +616,7 @@ def aggregate_scored_claims(
     supporting_all = tuple(sc for sc in relevant if sc.trust >= threshold)
     contrarian_all = tuple(sc for sc in relevant if sc.trust < threshold)
     raw_confidence = (
-        sum(sc.trust for sc in supporting_all) / len(supporting_all)
+        math.fsum(sc.trust for sc in supporting_all) / len(supporting_all)
         if supporting_all
         else 0.0
     )
