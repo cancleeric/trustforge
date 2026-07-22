@@ -304,7 +304,7 @@ def build_report(max_lanes: int = 1) -> dict:
     }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "ceo_continuous_development_inventory",
+        "mode": "ceo_half_hour_issue_pr_development",
         "cadence": "30 minutes",
         WORLD_FIRST_BAR: {
             "question": "這一輪是否讓 TrustForge 更接近世界第一？",
@@ -320,8 +320,8 @@ def build_report(max_lanes: int = 1) -> dict:
         "merged_pr_ownership": ownership,
         "inventory_errors": inventory_errors,
         "execution_queue": [] if inventory_errors else build_execution_queue(issues, prs, max_lanes, ownership),
-        "decision": "dispatch_scoped_lanes_after_gray_plan_and_ceo_auto_review",
-        "execution_status": "inventory_failed" if inventory_errors else "inventory_complete_runner_dispatch_pending",
+        "decision": "dispatch_one_scoped_issue_pr_lane_after_gray_plan_and_ceo_auto_review",
+        "execution_status": "inventory_failed" if inventory_errors else "issue_pr_lane_dispatch_required",
     }
 
 
