@@ -13,12 +13,14 @@ from trustforge import pipeline as pl
 from trustforge.ingestion.base import Document
 from trustforge.ports import (
     AgentCoreLLMAdapter,
+    AgentRuntimeProvider,
     BedrockLLMAdapter,
     BudgetProvider,
     CacheProvider,
-FakeBudgetProvider,
-FakeCacheProvider,
-FakeLLMProvider,
+    FakeAgentRuntimeProvider,
+    FakeBudgetProvider,
+    FakeCacheProvider,
+    FakeLLMProvider,
 FakeModelProvider,
 FakeObservabilityProvider,
 FakeSourceProvider,
@@ -34,6 +36,11 @@ NullModelProvider,
 ObservabilityProvider,
     ProviderResolution,
     ProviderSet,
+    RuntimeCapability,
+    RuntimeRun,
+    RuntimeSession,
+    RuntimeToolCall,
+    RuntimeTraceEvent,
     SourceProvider,
     resolve_providers,
 )
@@ -55,6 +62,10 @@ class TestProtocolRuntimeCheckable:
     def test_model_provider_isinstance(self):
         fake = FakeModelProvider()
         assert isinstance(fake, ModelProvider)
+
+    def test_agent_runtime_provider_isinstance(self):
+        fake = FakeAgentRuntimeProvider()
+        assert isinstance(fake, AgentRuntimeProvider)
 
     def test_cache_provider_isinstance(self):
         fake = FakeCacheProvider()
@@ -148,6 +159,64 @@ class TestModelProviderContract:
             *ModelRequest.__dataclass_fields__,
             *ModelResponse.__dataclass_fields__,
             *ModelUsage.__dataclass_fields__,
+        }
+
+        assert field_names.isdisjoint(forbidden)
+
+
+class TestAgentRuntimeProviderContract:
+    """Provider-neutral agent runtime contract (#406)."""
+
+    def test_capabilities_are_generic(self):
+        runtime = FakeAgentRuntimeProvider(
+            [RuntimeCapability(name="tools", version="1", limits={"max": 2})]
+        )
+
+        assert runtime.capabilities() == [
+            RuntimeCapability(name="tools", version="1", limits={"max": 2})
+        ]
+
+    def test_session_run_tool_trace_and_cancel_lifecycle(self):
+        runtime = FakeAgentRuntimeProvider()
+        session = runtime.start_session({"tenant": "unit"})
+        tool = RuntimeToolCall(name="lookup", arguments={"q": "x"}, timeout_sec=3)
+
+        run = runtime.start_run(session, input={"prompt": "hello"}, tools=[tool])
+        trace = RuntimeTraceEvent(event="tool.started", payload={"tool": "lookup"})
+        runtime.trace(run.run_id, trace)
+
+        assert isinstance(session, RuntimeSession)
+        assert isinstance(run, RuntimeRun)
+        assert session.metadata == {"tenant": "unit"}
+        assert run.status == "running"
+        assert run.output == {
+            "session_id": session.session_id,
+            "input": {"prompt": "hello"},
+            "tools": ["lookup"],
+        }
+        assert runtime.traces == [(run.run_id, trace)]
+        assert runtime.cancel_run(run.run_id) is True
+        assert runtime.runs[run.run_id].status == "cancelled"
+        assert runtime.cancel_run("missing") is False
+
+    def test_contract_fields_do_not_embed_trustforge_or_model_provider_terms(self):
+        forbidden = {
+            "aws",
+            "bedrock",
+            "trustforge",
+            "coin",
+            "evidence",
+            "hermes",
+            "model",
+            "tokens",
+            "cost",
+        }
+        field_names = {
+            *RuntimeCapability.__dataclass_fields__,
+            *RuntimeSession.__dataclass_fields__,
+            *RuntimeToolCall.__dataclass_fields__,
+            *RuntimeTraceEvent.__dataclass_fields__,
+            *RuntimeRun.__dataclass_fields__,
         }
 
         assert field_names.isdisjoint(forbidden)

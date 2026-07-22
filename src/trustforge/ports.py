@@ -188,6 +188,91 @@ class BudgetProvider(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Port: Agent Runtime
+# ═══════════════════════════════════════════════════════════════════════════════
+
+RunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+TraceLevel = Literal["debug", "info", "warning", "error"]
+
+
+@dataclass(frozen=True)
+class RuntimeCapability:
+    """Provider-neutral runtime capability declaration."""
+
+    name: str
+    version: str = ""
+    limits: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeSession:
+    """Opaque agent runtime session handle."""
+
+    session_id: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeToolCall:
+    """Tool invocation request for an agent runtime."""
+
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    timeout_sec: float | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeTraceEvent:
+    """Structured runtime trace event."""
+
+    event: str
+    level: TraceLevel = "info"
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeRun:
+    """Opaque run handle and status."""
+
+    run_id: str
+    status: RunStatus
+    output: dict[str, Any] | None = None
+
+
+@runtime_checkable
+class AgentRuntimeProvider(Protocol):
+    """Minimal provider-neutral agent runtime contract."""
+
+    runtime_id: str
+
+    def capabilities(self) -> list[RuntimeCapability]:
+        """Return runtime capabilities without starting a run."""
+        ...
+
+    def start_session(self, metadata: dict[str, Any] | None = None) -> RuntimeSession:
+        """Create or attach to an agent session."""
+        ...
+
+    def start_run(
+        self,
+        session: RuntimeSession,
+        *,
+        input: dict[str, Any],
+        tools: list[RuntimeToolCall] | None = None,
+    ) -> RuntimeRun:
+        """Start an agent run."""
+        ...
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Cancel a running agent run."""
+        ...
+
+    def trace(self, run_id: str, event: RuntimeTraceEvent) -> None:
+        """Record a runtime trace event."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Provider Resolution（Runtime resolver 的回傳型別）
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -280,6 +365,59 @@ class NullModelProvider:
             usage=ModelUsage(),
             structured=structured,
         )
+
+
+class FakeAgentRuntimeProvider:
+    """Test fake for the generic AgentRuntimeProvider contract."""
+
+    runtime_id = "fake-agent-runtime"
+
+    def __init__(self, capabilities: list[RuntimeCapability] | None = None) -> None:
+        self._capabilities = capabilities or [RuntimeCapability(name="session")]
+        self.sessions: list[RuntimeSession] = []
+        self.runs: dict[str, RuntimeRun] = {}
+        self.traces: list[tuple[str, RuntimeTraceEvent]] = []
+        self.cancelled: list[str] = []
+
+    def capabilities(self) -> list[RuntimeCapability]:
+        return list(self._capabilities)
+
+    def start_session(self, metadata: dict[str, Any] | None = None) -> RuntimeSession:
+        session = RuntimeSession(
+            session_id=f"session-{len(self.sessions) + 1}",
+            metadata=dict(metadata or {}),
+        )
+        self.sessions.append(session)
+        return session
+
+    def start_run(
+        self,
+        session: RuntimeSession,
+        *,
+        input: dict[str, Any],
+        tools: list[RuntimeToolCall] | None = None,
+    ) -> RuntimeRun:
+        run = RuntimeRun(
+            run_id=f"run-{len(self.runs) + 1}",
+            status="running",
+            output={
+                "session_id": session.session_id,
+                "input": dict(input),
+                "tools": [tool.name for tool in tools or []],
+            },
+        )
+        self.runs[run.run_id] = run
+        return run
+
+    def cancel_run(self, run_id: str) -> bool:
+        if run_id not in self.runs:
+            return False
+        self.runs[run_id] = RuntimeRun(run_id=run_id, status="cancelled")
+        self.cancelled.append(run_id)
+        return True
+
+    def trace(self, run_id: str, event: RuntimeTraceEvent) -> None:
+        self.traces.append((run_id, event))
 
 
 class FakeCacheProvider:
