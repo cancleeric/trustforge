@@ -53,7 +53,7 @@ print(json.dumps({
     }
 
     result = subprocess.run(
-        [sys.executable, "-I", "-c", code],
+        [sys.executable, "-P", "-c", code],
         check=True,
         capture_output=True,
         text=True,
