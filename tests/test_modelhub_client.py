@@ -255,6 +255,21 @@ def test_timeout_must_be_positive_finite_real(timeout):
         ModelHubClient(timeout=timeout)
 
 
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+@pytest.mark.parametrize("field", ["timeout", "max_wait", "interval"])
+def test_huge_real_parameters_are_sanitized_configuration_errors(field, sign):
+    value = sign * (10**10000)
+    with pytest.raises(ModelHubConfigurationError) as caught:
+        if field == "timeout":
+            ModelHubClient(timeout=value)
+        elif field == "max_wait":
+            ModelHubClient(opener=Opener({"status": "completed"})).poll_training_result("R", max_wait=value)
+        else:
+            ModelHubClient(opener=Opener({"status": "completed"})).poll_training_result("R", interval=value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
 @pytest.mark.parametrize("retries", [True, 1.0, "1", -1, 3])
 def test_retries_must_be_bounded_real_int(retries):
     with pytest.raises(ModelHubConfigurationError):

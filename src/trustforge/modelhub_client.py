@@ -82,9 +82,14 @@ def _validated_identifier(value: Any, label: str) -> str:
 
 
 def _finite_real(value: Any, label: str, *, minimum: float, maximum: float | None = None) -> float:
-    if isinstance(value, bool) or not isinstance(value, numbers.Real) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise ModelHubConfigurationError(f"ModelHub {label} must be a finite real number")
-    converted = float(value)
+    try:
+        converted = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ModelHubConfigurationError(f"ModelHub {label} must be a finite real number") from None
+    if not math.isfinite(converted):
+        raise ModelHubConfigurationError(f"ModelHub {label} must be a finite real number")
     if converted < minimum or (maximum is not None and converted > maximum):
         raise ModelHubConfigurationError(f"ModelHub {label} is outside the allowed range")
     return converted
