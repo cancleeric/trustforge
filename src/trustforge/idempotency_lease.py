@@ -51,8 +51,10 @@ import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from threading import Lock
+from typing import Any, Literal, Protocol, runtime_checkable
 
 # 15 分鐘租約 TTL —— D2.5「15 分鐘 deadline-aware」的具體上界：
 # 重複計費風險窗口 / 單一 key 最多被計算一次的間隔上界（正常結束會立即
@@ -82,6 +84,203 @@ def new_owner_id() -> str:
 
 
 _log = logging.getLogger(__name__)
+
+
+LeaseRole = Literal["leader", "follower"]
+LeaseTerminalStatus = Literal["completed", "failed", "expired"]
+
+
+@dataclass(frozen=True)
+class IdempotencyLeaseHandle:
+    """Provider-neutral idempotency lease handle."""
+
+    key: str
+    owner_id: str
+    acquired_at: float
+    expires_at: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class IdempotencyLeaseDecision:
+    """Acquire result: leader may compute, follower must not duplicate work."""
+
+    role: LeaseRole
+    handle: IdempotencyLeaseHandle | None = None
+    retry_after_seconds: float | None = None
+    reason: str = ""
+
+
+@runtime_checkable
+class IdempotencyLeaseProvider(Protocol):
+    """Generic acquire/follow/complete/fail/expire contract.
+
+    A provider must be fail-closed for uncertain backends: if it cannot prove the
+    caller is leader, it returns follower instead of allowing duplicate work.
+    """
+
+    provider_id: str
+
+    def acquire(
+        self,
+        key: str,
+        owner_id: str,
+        ttl_seconds: int,
+        *,
+        now: float | None = None,
+    ) -> IdempotencyLeaseDecision:
+        """Try to become leader for key."""
+        ...
+
+    def follow(self, key: str, *, now: float | None = None) -> IdempotencyLeaseDecision:
+        """Return follower state for a currently held key."""
+        ...
+
+    def complete(self, handle: IdempotencyLeaseHandle) -> None:
+        """Mark leader work complete and release or finalize the lease."""
+        ...
+
+    def fail(self, handle: IdempotencyLeaseHandle, reason: str) -> None:
+        """Mark leader work failed and release or finalize the lease."""
+        ...
+
+    def expire(self, key: str, *, now: float | None = None) -> bool:
+        """Expire orphaned/stale work when the backend can prove it is stale."""
+        ...
+
+
+class InMemoryIdempotencyLeaseProvider:
+    """Thread-safe local adapter for the generic idempotency lease contract."""
+
+    provider_id = "memory"
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._leases: dict[str, IdempotencyLeaseHandle] = {}
+        self.terminal_events: list[dict[str, Any]] = []
+
+    def acquire(
+        self,
+        key: str,
+        owner_id: str,
+        ttl_seconds: int,
+        *,
+        now: float | None = None,
+    ) -> IdempotencyLeaseDecision:
+        current_time = time.time() if now is None else now
+        with self._lock:
+            existing = self._leases.get(key)
+            if existing is not None and current_time < existing.expires_at:
+                return IdempotencyLeaseDecision(
+                    role="follower",
+                    handle=existing,
+                    retry_after_seconds=max(0.0, existing.expires_at - current_time),
+                    reason="lease_held",
+                )
+            handle = IdempotencyLeaseHandle(
+                key=key,
+                owner_id=owner_id,
+                acquired_at=current_time,
+                expires_at=current_time + ttl_seconds,
+            )
+            self._leases[key] = handle
+            return IdempotencyLeaseDecision(role="leader", handle=handle)
+
+    def follow(self, key: str, *, now: float | None = None) -> IdempotencyLeaseDecision:
+        current_time = time.time() if now is None else now
+        with self._lock:
+            existing = self._leases.get(key)
+            if existing is None or current_time >= existing.expires_at:
+                return IdempotencyLeaseDecision(role="follower", reason="not_held")
+            return IdempotencyLeaseDecision(
+                role="follower",
+                handle=existing,
+                retry_after_seconds=max(0.0, existing.expires_at - current_time),
+                reason="lease_held",
+            )
+
+    def complete(self, handle: IdempotencyLeaseHandle) -> None:
+        self._finish(handle, status="completed")
+
+    def fail(self, handle: IdempotencyLeaseHandle, reason: str) -> None:
+        self._finish(handle, status="failed", reason=reason)
+
+    def expire(self, key: str, *, now: float | None = None) -> bool:
+        current_time = time.time() if now is None else now
+        with self._lock:
+            existing = self._leases.get(key)
+            if existing is None or current_time < existing.expires_at:
+                return False
+            self._leases.pop(key, None)
+            self.terminal_events.append({"key": key, "status": "expired"})
+            return True
+
+    def _finish(
+        self,
+        handle: IdempotencyLeaseHandle,
+        *,
+        status: LeaseTerminalStatus,
+        reason: str = "",
+    ) -> None:
+        with self._lock:
+            existing = self._leases.get(handle.key)
+            if existing != handle:
+                return
+            self._leases.pop(handle.key, None)
+            event = {"key": handle.key, "owner_id": handle.owner_id, "status": status}
+            if reason:
+                event["reason"] = reason
+            self.terminal_events.append(event)
+
+
+class LeaseBackendIdempotencyAdapter:
+    """Generic contract adapter around the existing local/durable LeaseBackend API."""
+
+    provider_id = "lease-backend"
+
+    def __init__(self, backend: "LeaseBackend") -> None:
+        self.backend = backend
+
+    def acquire(
+        self,
+        key: str,
+        owner_id: str,
+        ttl_seconds: int,
+        *,
+        now: float | None = None,
+    ) -> IdempotencyLeaseDecision:
+        current_time = time.time() if now is None else now
+        try:
+            acquired = self.backend.try_acquire(key, owner_id, ttl_seconds)
+        except Exception:  # noqa: BLE001
+            _log.warning("[idempotency_lease] backend acquire uncertain; following", exc_info=True)
+            acquired = False
+        if not acquired:
+            return IdempotencyLeaseDecision(role="follower", reason="lease_held_or_backend_uncertain")
+        return IdempotencyLeaseDecision(
+            role="leader",
+            handle=IdempotencyLeaseHandle(
+                key=key,
+                owner_id=owner_id,
+                acquired_at=current_time,
+                expires_at=current_time + ttl_seconds,
+            ),
+        )
+
+    def follow(self, key: str, *, now: float | None = None) -> IdempotencyLeaseDecision:
+        return IdempotencyLeaseDecision(
+            role="follower",
+            reason="lease_held" if self.backend.is_held(key) else "not_held",
+        )
+
+    def complete(self, handle: IdempotencyLeaseHandle) -> None:
+        self.backend.release(handle.key, handle.owner_id)
+
+    def fail(self, handle: IdempotencyLeaseHandle, reason: str) -> None:
+        self.backend.release(handle.key, handle.owner_id)
+
+    def expire(self, key: str, *, now: float | None = None) -> bool:
+        return not self.backend.is_held(key)
 
 
 def _owner_pid(owner_id: str) -> str:
