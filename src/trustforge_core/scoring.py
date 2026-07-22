@@ -507,7 +507,21 @@ def aggregate_scored_claims(
     resolved_direction: str | object = _UNSET,
     contract_version: str = KERNEL_CONTRACT_VERSION,
 ) -> KernelOutput:
-    """Aggregate scored claims into the versioned, report-facing kernel result."""
+    """Aggregate scored claims into the versioned kernel result.
+
+    Calibration provenance is fail-closed.  Omitting
+    ``calibration_model_version`` is a compatibility path for the built-in
+    fixed heuristic only: ``calibration_table`` must also be omitted or equal
+    the canonical ``DEFAULT_CALIBRATION_TABLE``.  A custom table requires the
+    explicit ``ISOTONIC_VERSION``.  Explicit ``None`` is invalid.  Explicit
+    ``FIXED_HEURISTIC_VERSION`` accepts an omitted/canonical default table and
+    rejects every custom table.
+
+    Omitting ``resolved_direction`` temporarily preserves legacy deterministic
+    inference for existing ``run_kernel`` callers.  An explicitly supplied
+    exact string is passed through unchanged.  Issue #453 will own production
+    direction routing; this function performs no external callback or I/O work.
+    """
     require_supported_contract_version(contract_version)
     if type(scored_claims) is not tuple or not all(
         type(item) is KernelScoredClaim for item in scored_claims
