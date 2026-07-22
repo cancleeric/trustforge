@@ -41,6 +41,8 @@ from trustforge_core.scoring import (
     DEFAULT_HALF_LIVES as _CORE_DEFAULT_HALF_LIVES,
     DEFAULT_SCORE_WEIGHTS as _CORE_DEFAULT_SCORE_WEIGHTS,
     DEFAULT_SOURCE_REPUTATIONS as _CORE_DEFAULT_SOURCE_REPUTATIONS,
+    FIXED_HEURISTIC_VERSION as _CORE_FIXED_HEURISTIC_VERSION,
+    ISOTONIC_VERSION as _CORE_ISOTONIC_VERSION,
     aggregate_scored_claims as _core_aggregate_scored_claims,
     corroboration_score as _core_corroboration_score,
     interpolate_calibration as _interpolate_calibration,
@@ -188,21 +190,21 @@ def _to_core_scoring_claim(claim: Claim) -> _CoreKernelClaim:
 def _to_core_aggregate_claim(claim: Claim) -> _CoreKernelClaim:
     document = claim.doc
     raw_timestamp = document.ts
-    if type(raw_timestamp) not in {int, float}:
-        raise ValueError("document timestamp must be an exact number")
-    try:
-        timestamp = float(raw_timestamp)
-    except OverflowError as exc:
-        raise ValueError("document timestamp is outside the finite float range") from exc
-    if not math.isfinite(timestamp):
-        timestamp = 0.0
-    metadata: tuple[tuple[str, object], ...] = ()
+    timestamp = 0.0
+    if type(raw_timestamp) in {int, float}:
+        try:
+            candidate_timestamp = float(raw_timestamp)
+        except OverflowError:
+            pass
+        else:
+            if math.isfinite(candidate_timestamp):
+                timestamp = candidate_timestamp
+    metadata: tuple[tuple[str, str], ...] = ()
     if type(document.meta) is dict:
-        selected: list[tuple[str, object]] = []
         for key, value in document.meta.items():
-            if type(key) is str and key == "coin" and type(value) in {str, int, float, bool}:
-                selected.append((key, value))
-        metadata = tuple(selected)
+            if type(key) is str and key == "coin" and type(value) is str:
+                metadata = ((key, value),)
+                break
     return _CoreKernelClaim(
         id=claim.id,
         text=claim.text,
@@ -221,14 +223,9 @@ def _to_core_aggregate_claim(claim: Claim) -> _CoreKernelClaim:
 
 
 def _to_core_aggregate_scored(scored: ScoredClaim) -> _CoreKernelScoredClaim:
-    trace = _to_core_reputation_trace(scored.reputation_trace)
     return _CoreKernelScoredClaim(
         claim=_to_core_aggregate_claim(scored.claim),
         trust=scored.trust,
-        components=tuple(scored.components.items()),
-        reputation_trace=trace,
-        manip_flags=tuple(scored.manip_flags),
-        info_flags=tuple(scored.info_flags),
     )
 
 
@@ -1756,6 +1753,32 @@ def _load_cached_calibration_model() -> list[dict] | None:
     return _CALIBRATION_MODEL_CACHE["model"]
 
 
+def _aggregate_calibration_spec() -> tuple[str, tuple[tuple[float, float], ...]]:
+    """Load app-owned calibration once and detach exact immutable points."""
+    model = _load_cached_calibration_model()
+    if model is None:
+        return _CORE_FIXED_HEURISTIC_VERSION, ()
+    if type(model) is not list:
+        raise ValueError("calibration model must be an exact list")
+    points: list[tuple[float, float]] = []
+    for point in model:
+        if type(point) is not dict:
+            raise ValueError("calibration model points must be exact dictionaries")
+        confidence: object | None = None
+        calibrated: object | None = None
+        for key, value in point.items():
+            if type(key) is not str:
+                continue
+            if key == "confidence":
+                confidence = value
+            elif key == "calibrated":
+                calibrated = value
+        if confidence is None or calibrated is None:
+            raise ValueError("calibration model point is incomplete")
+        points.append((confidence, calibrated))  # type: ignore[arg-type]
+    return _CORE_ISOTONIC_VERSION, tuple(points)
+
+
 def _evidence_strength(
     supporting: list[ScoredClaim], contrarian: list[ScoredClaim], confidence: float
 ) -> float:
@@ -1859,11 +1882,15 @@ def aggregate(scored: list[ScoredClaim], query: str,
         core_item = _to_core_aggregate_scored(item)
         core_by_id[id(core_item)] = item
         core_scored.append(core_item)
+    calibration_version, calibration_table = _aggregate_calibration_spec()
     core_result = _core_aggregate_scored_claims(
         tuple(core_scored),
         query=query,
         support_threshold=support_threshold,
         coin=coin or "",
+        calibration_model_version=calibration_version,
+        calibration_table=calibration_table,
+        resolved_direction="neutral",
     )
     return TrustedBrief(
         query=query,
