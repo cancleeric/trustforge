@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from typing import Any
+
 from .agent.orchestrator import run_agent_pipeline
 from .bedrock import BedrockClient, LLMResult
 from .brand_logos import source_display_name
@@ -68,6 +70,68 @@ def _client_from_llm_provider(provider: LLMProvider | None, *, offline: bool, st
     if provider is None:
         provider = NullLLMAdapter()
     return _ProviderClient(provider, offline=offline or isinstance(provider, NullLLMAdapter), stance_offline=stance_offline)
+
+
+def _log_policy_consumers(
+    log: ExecutionLog,
+    policies: dict[str, Any],
+) -> None:
+    """Record the runtime consumers that received the frozen policy values."""
+    consumer_by_family = {
+        "source": "ingestion.collect",
+        "analysis": "agent.orchestrator",
+        "report": "report.postprocess",
+        "evaluation": "quality.evaluation",
+        "improvement": "improvement.diagnostics",
+    }
+    for family, consumer in sorted(consumer_by_family.items()):
+        policy = policies.get(family)
+        if policy is None:
+            continue
+        log.record(
+            "policy.consumer",
+            params={
+                "family": family,
+                "consumer": consumer,
+                "policy": dict(getattr(policy, "__dict__", {})),
+            },
+            summary=f"{family} policy consumed by {consumer}",
+        )
+
+
+def _apply_report_policy(
+    report: Report,
+    policy: Any,
+    log: ExecutionLog,
+    *,
+    origin: str | None = None,
+) -> None:
+    """Apply report-family policy to the presentation layer only."""
+    max_sections = int(getattr(policy, "max_sections", 0) or 0)
+    include_contrarian = bool(getattr(policy, "include_contrarian", True))
+    effective_max_sections = 0 if origin == "baseline" else max_sections
+
+    if effective_max_sections > 0:
+        report.facts = report.facts[:effective_max_sections]
+        report.inferences = report.inferences[:effective_max_sections]
+        report.key_basis = report.key_basis[:effective_max_sections]
+        report.limits = report.limits[:effective_max_sections]
+        report.could_flip = report.could_flip[:effective_max_sections]
+        report.contrarian = report.contrarian[:effective_max_sections]
+
+    if not include_contrarian:
+        report.contrarian = []
+
+    log.record(
+        "policy.consumer.report.applied",
+        params={
+            "max_sections": max_sections,
+            "effective_max_sections": effective_max_sections,
+            "include_contrarian": include_contrarian,
+            "origin": origin,
+        },
+        summary="Report policy applied to presentation output",
+    )
 
 
 def _resolve_modes(
@@ -164,6 +228,8 @@ def run(coin: str, query: str, qtype: QuestionType,
     )
 
     log = _log if _log is not None else ExecutionLog()
+    _runtime_policies: dict[str, Any] = {}
+    _runtime_policy_origins: dict[str, str | None] = {}
     # Freeze the selected outer-skill revisions at run start.  This is audit
     # data, not a runtime override of the deterministic Trust Layer.
     log.record("hermes.skills", params=run_skill_manifest(), summary="Hermes outer skill revisions frozen for this run")
@@ -171,7 +237,14 @@ def run(coin: str, query: str, qtype: QuestionType,
     try:
         _policy_executor = PolicyExecutor()
         _policy_executor.resolve_effective()
-        log.log_policy_snapshot(_policy_executor.snapshot_for_log())
+        _policy_snapshot = _policy_executor.snapshot_for_log()
+        log.log_policy_snapshot(_policy_snapshot)
+        for _family, _details in _policy_snapshot.get("policies", {}).items():
+            if isinstance(_details, dict):
+                _runtime_policy_origins[_family] = _details.get("origin")
+        for _family in ("source", "analysis", "report", "evaluation", "improvement"):
+            _runtime_policies[_family] = _policy_executor.get_policy(_family)
+        _log_policy_consumers(log, _runtime_policies)
     except Exception:
         # Policy resolution is non-blocking for the pipeline — if skill artifacts
         # are missing or malformed, we log the failure but continue with defaults.
@@ -285,6 +358,13 @@ def run(coin: str, query: str, qtype: QuestionType,
             query, coin, qtype, docs,
             client=llm_client, log=log,
         )
+        if "report" in _runtime_policies:
+            _apply_report_policy(
+                report,
+                _runtime_policies["report"],
+                log,
+                origin=_runtime_policy_origins.get("report"),
+            )
     finally:
         release_request_budget(_reservation)
     if _degrade_reason == "unpriced_model":
