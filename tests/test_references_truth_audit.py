@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.check_references_truth_audit import verify_audit
+from scripts.check_references_truth_audit import verify_audit, verify_references_export
 
 
 def test_references_truth_audit_is_conservative_and_reproducible():
@@ -37,3 +37,44 @@ def test_references_truth_audit_rejects_taiwan_sources_marked_verified(tmp_path)
 
     with pytest.raises(AssertionError, match="Taiwan regulatory sources"):
         verify_audit(audit)
+
+
+def test_references_export_rejects_stale_verified_public_statuses(tmp_path):
+    references = tmp_path / "references.html"
+    references.write_text(
+        "\n".join(
+            [
+                "<div>HOYA BIT OHLCV ✅ verified</div>",
+                "<div>HOYA BIT live ticker ✅ verified</div>",
+                "<div>GitHub Actions CI ✅ verified</div>",
+                "<div>Production Deploy deploy-production.yml.disabled</div>",
+                "<div>AgentCore runtime routing 🟡 implemented-not-verified</div>",
+                "<div>manipulation detection informational-only 不扣分</div>",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="HOYA BIT live ticker"):
+        verify_references_export(references)
+
+
+def test_references_export_accepts_conservative_public_statuses(tmp_path):
+    references = tmp_path / "references.html"
+    references.write_text(
+        "\n".join(
+            [
+                "<div>HOYA BIT OHLCV ✅ verified</div>",
+                "<div>HOYA BIT live ticker ⚠ blocked</div>",
+                "<div>GitHub Actions CI .disabled 停用</div>",
+                "<div>Production Deploy deploy-production.yml.disabled 停用</div>",
+                "<div>AgentCore runtime routing 🟡 implemented-not-verified 未驗證</div>",
+                "<div>manipulation detection informational-only 不扣分</div>",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    checks = verify_references_export(references)
+
+    assert "public references export rejects stale verified statuses" in checks
