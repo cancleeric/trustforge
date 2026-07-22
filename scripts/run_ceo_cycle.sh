@@ -152,6 +152,7 @@ if [[ "$INVENTORY_STATUS" == "inventory_failed" ]]; then
   fail_cycle inventory_error "$INVENTORY_ERROR"
   exit $?
 fi
+QUEUE_COUNT="$($PYTHON_BIN -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["execution_queue"]))' "$LATEST")"
 
 if ! "$PYTHON_BIN" "$ROOT/scripts/ceo_runtime_guard.py" prepare --dir "$WORKTREE_ROOT" >/dev/null; then
   fail_cycle unsafe_worktree_root
@@ -273,6 +274,10 @@ failures=$((failures + setup_failures))
 
 if (( ${#pids[@]} == 0 )); then
   echo "[ceo_cycle] no runnable issues or no verified clean lanes"
+  if (( QUEUE_COUNT > 0 )); then
+    printf 'failed\t0\t{"reason":"dispatch_required_but_no_lane_started","queue_candidates":%s}\n' "$QUEUE_COUNT" >>"$EVENT_FILE"
+    failures=$((failures + 1))
+  fi
 fi
 if (( failures == 0 )); then
   record_status true || exit 2
