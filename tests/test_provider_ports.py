@@ -581,6 +581,82 @@ class TestPipelineProviderRuntimePath:
         assert provider_events
         assert any(event["params"]["key"] == "llm" and event["params"]["invoked"] for event in provider_events)
 
+    def test_pipeline_composition_root_passes_resolved_provider_client(self, monkeypatch):
+        """Issue #408: formal pipeline should inject the resolved provider client."""
+        from trustforge.schema import Report
+
+        fake_llm = FakeLLMProvider(default_response="provider narrative")
+        injected_client = object()
+        seen: dict[str, object] = {}
+
+        def fake_resolve_providers(**kwargs):
+            return ProviderSet(
+                llm=fake_llm,
+                resolutions=[
+                    ProviderResolution(key="llm", configured="test", resolved="fake"),
+                ],
+            )
+
+        def fake_client_from_provider(provider, *, offline, stance_offline):
+            seen["provider"] = provider
+            seen["offline"] = offline
+            seen["stance_offline"] = stance_offline
+            return injected_client
+
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return [
+                Document(
+                    id="btc-price",
+                    kind="price",
+                    source="test-price",
+                    text="BTC close rose 3%",
+                    ts=1_000.0,
+                )
+            ]
+
+        def fake_run_agent_pipeline(query, coin, qtype, docs, *, client, log):
+            seen["client"] = client
+            return (
+                Report(
+                    coin=coin,
+                    question_type=str(qtype),
+                    question=query,
+                    market_judgment="neutral",
+                    facts=[],
+                    inferences=[],
+                    key_basis=[],
+                    confidence=0.5,
+                    limits=[],
+                    could_flip=[],
+                    contrarian=[],
+                    generated_at="2026-07-22T00:00:00Z",
+                ),
+                [],
+            )
+
+        monkeypatch.setattr(pl, "resolve_providers", fake_resolve_providers)
+        monkeypatch.setattr(pl, "_client_from_llm_provider", fake_client_from_provider)
+        monkeypatch.setattr(pl, "run_agent_pipeline", fake_run_agent_pipeline)
+        monkeypatch.setattr(pl, "collect", fake_collect)
+        monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
+        monkeypatch.setattr(pl, "try_reserve_request_budget", lambda: 0.01)
+        monkeypatch.setattr(pl, "release_request_budget", lambda _reservation: None)
+        monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
+        monkeypatch.setattr(pl, "stance_model_priced", lambda: True)
+
+        pl.run(
+            "BTC",
+            "分析 BTC",
+            QuestionType.MULTI_SOURCE,
+            data_mode="sample",
+            llm_mode="bedrock",
+        )
+
+        assert seen["provider"] is fake_llm
+        assert seen["offline"] is False
+        assert seen["stance_offline"] is False
+        assert seen["client"] is injected_client
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # R5-3: Protocol 不接受不符合介面的物件
