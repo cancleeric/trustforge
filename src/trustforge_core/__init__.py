@@ -11,6 +11,10 @@ from .contracts import (
     KernelDocument,
     KernelInput,
     KernelOutput,
+    KernelReputationTrace,
+    KernelScoredClaim,
+    UnsupportedKernelContractVersion,
+    require_supported_contract_version,
 )
 from .corroboration import (
     CorroborationClaim,
@@ -38,6 +42,10 @@ __all__ = [
     "KernelDocument",
     "KernelInput",
     "KernelOutput",
+    "KernelReputationTrace",
+    "KernelScoredClaim",
+    "UnsupportedKernelContractVersion",
+    "require_supported_contract_version",
     "CorroborationClaim",
     "CorroborationResult",
     "DOMAIN_STOP",
