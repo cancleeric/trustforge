@@ -10,8 +10,17 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from trustforge_core import JsonValue, KernelClaim, KernelDocument, KernelInput
+from trustforge_core import (
+    KERNEL_RESOLUTION_VERSION,
+    JsonValue,
+    KernelClaim,
+    KernelClaimResolution,
+    KernelDocument,
+    KernelInput,
+    KernelRunResolution,
+)
 
+from ..direction_resolution import ResolvedDirection
 from ..trust.scoring import Claim
 
 
@@ -63,4 +72,29 @@ def to_kernel_input(
         pit_epoch=float(pit_epoch),
         coin=coin,
         query=query,
+    )
+
+
+def to_kernel_run_resolution(
+    claim_resolutions: Sequence[KernelClaimResolution],
+    direction: ResolvedDirection,
+    *,
+    resolution_version: str = KERNEL_RESOLUTION_VERSION,
+) -> KernelRunResolution:
+    """Map an app direction into the v2 run contract without reinterpretation."""
+    if type(direction) is not ResolvedDirection:
+        raise ValueError("direction must be an exact ResolvedDirection")
+    validated_direction = ResolvedDirection(
+        value=direction.value,
+        policy_version=direction.policy_version,
+        method=direction.method,
+        input_ids=direction.input_ids,
+        reason=direction.reason,
+    )
+    if resolution_version != KERNEL_RESOLUTION_VERSION:
+        raise ValueError("unsupported kernel resolution version")
+    return KernelRunResolution(
+        claim_resolutions=tuple(claim_resolutions),
+        resolved_direction=validated_direction.value,
+        resolution_version=resolution_version,
     )
