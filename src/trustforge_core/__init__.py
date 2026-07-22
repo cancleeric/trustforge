@@ -12,6 +12,7 @@ from .contracts import (
     KernelInput,
     KernelOutput,
 )
+from .dawid_skene import LABELS, N_LABELS, em_source_reliability
 
 __all__ = [
     "KERNEL_CONTRACT_VERSION",
@@ -20,4 +21,7 @@ __all__ = [
     "KernelDocument",
     "KernelInput",
     "KernelOutput",
+    "LABELS",
+    "N_LABELS",
+    "em_source_reliability",
 ]
