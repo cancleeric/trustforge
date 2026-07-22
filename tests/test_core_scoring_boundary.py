@@ -85,4 +85,4 @@ def test_core_scoring_imports_standard_library_only():
             target = relative_imports if node.level else absolute_imports
             target.append(node.module)
     assert absolute_imports == ["__future__", "math", "re", "collections.abc"]
-    assert relative_imports == ["contracts"]
+    assert relative_imports == ["contracts", "corroboration"]

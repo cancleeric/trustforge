@@ -5,7 +5,15 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 
-from .contracts import KernelClaim, KernelReputationTrace, KernelScoredClaim
+from .contracts import (
+    KERNEL_CONTRACT_VERSION,
+    KernelClaim,
+    KernelOutput,
+    KernelReputationTrace,
+    KernelScoredClaim,
+    require_supported_contract_version,
+)
+from .corroboration import DOMAIN_STOP, canonical_source
 
 
 DEFAULT_SCORE_WEIGHTS: tuple[tuple[str, float], ...] = (
@@ -33,6 +41,35 @@ DEFAULT_HALF_LIVES: tuple[tuple[str, float], ...] = (
     ("default", 12.0),
     ("whale_onchain", 2.0),
     ("celebrity_trade", 2.0),
+)
+DEFAULT_STRENGTH_WEIGHTS: tuple[tuple[str, float], ...] = (
+    ("trust", 0.35),
+    ("indep", 0.30),
+    ("diversity", 0.15),
+    ("dominance", 0.20),
+)
+DEFAULT_CALIBRATION_TABLE: tuple[tuple[float, float], ...] = (
+    (0.00, 0.00),
+    (0.10, 0.03),
+    (0.20, 0.08),
+    (0.30, 0.20),
+    (0.40, 0.40),
+    (0.55, 0.55),
+    (0.70, 0.70),
+    (0.85, 0.85),
+    (1.00, 1.00),
+)
+INDEPENDENT_SOURCE_SATURATION = 4
+KIND_DIVERSITY_SATURATION = 3
+SUPPORTING_LIMIT = 10
+CONTRARIAN_LIMIT = 5
+
+_COIN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("BTC", ("btc", "bitcoin", "比特幣", "比特")),
+    ("ETH", ("eth", "ethereum", "以太坊", "以太")),
+    ("SOL", ("sol", "solana")),
+    ("BNB", ("bnb", "binance")),
+    ("XRP", ("xrp", "ripple", "瑞波")),
 )
 
 _MANIP_PATTERNS: tuple[str, ...] = (
@@ -92,6 +129,27 @@ def _validated_table(
     return result
 
 
+def _validated_numeric_table(
+    table: tuple[tuple[float, float], ...],
+    *,
+    field: str,
+    probability: bool = False,
+) -> None:
+    if type(table) is not tuple:
+        raise ValueError(f"{field} must be an immutable tuple table")
+    previous_key: float | None = None
+    for index, item in enumerate(table):
+        if type(item) is not tuple or len(item) != 2:
+            raise ValueError(f"{field} entries must be exact (number, number) tuples")
+        key = _exact_number(item[0], field=f"{field}[{index}].key")
+        value = _exact_number(item[1], field=f"{field}[{index}].value")
+        if previous_key is not None and key < previous_key:
+            raise ValueError(f"{field} keys must be sorted")
+        if probability and (key < 0 or key > 1 or value < 0 or value > 1):
+            raise ValueError(f"{field} values must be between zero and one")
+        previous_key = key
+
+
 def manipulation_hits(text: str) -> tuple[str, ...]:
     """Return manipulation-keyword matches in stable legacy pattern order."""
     if type(text) is not str:
@@ -138,6 +196,239 @@ def corroboration_score(independent_sources: tuple[str, ...]) -> float:
         raise ValueError("independent_sources must be an exact tuple of exact strings")
     count = len(set(independent_sources))
     return 1.0 - math.pow(0.5, count) if count else 0.0
+
+
+def _metadata_dict(claim: KernelClaim) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    for key, value in claim.document.metadata:
+        if key in metadata:
+            raise ValueError("claim metadata keys must be unique")
+        metadata[key] = value
+    return metadata
+
+
+def _alias_in(alias: str, text: str) -> bool:
+    if alias.isascii():
+        return re.search(r"\b" + re.escape(alias) + r"\b", text, re.IGNORECASE | re.ASCII) is not None
+    return alias in text
+
+
+def _coins_mentioned(text: str) -> frozenset[str]:
+    found: set[str] = set()
+    for code, aliases in _COIN_ALIASES:
+        if any(_alias_in(alias, text) for alias in aliases):
+            found.add(code)
+    return frozenset(found)
+
+
+def _normalize(text: str) -> frozenset[str]:
+    if type(text) is not str:
+        raise ValueError("text must be an exact string")
+    return frozenset(
+        token
+        for token in re.findall(r"[\w一-鿿]+", text.lower())
+        if len(token) > 1
+    )
+
+
+def _coin_targets(coin: str) -> frozenset[str]:
+    return frozenset(
+        part.strip().upper() for part in re.split(r"[,\s]+", coin) if part.strip()
+    )
+
+
+def _matches_coin(scored: KernelScoredClaim, coin: str) -> bool:
+    targets = _coin_targets(coin)
+    if not targets:
+        return True
+    explicit = _metadata_dict(scored.claim).get("coin")
+    if explicit:
+        return str(explicit).upper() in targets
+    mentioned = _coins_mentioned(scored.claim.document.id + " " + scored.claim.document.text)
+    if not mentioned:
+        return True
+    return bool(mentioned & targets) and not (mentioned - targets)
+
+
+def _mentions_coin(scored: KernelScoredClaim, coin: str) -> bool:
+    targets = _coin_targets(coin)
+    if not targets:
+        return False
+    explicit = _metadata_dict(scored.claim).get("coin")
+    if explicit:
+        return str(explicit).upper() in targets
+    mentioned = _coins_mentioned(scored.claim.document.id + " " + scored.claim.document.text)
+    return bool(mentioned & targets) and not (mentioned - targets)
+
+
+def evidence_strength(
+    supporting: tuple[KernelScoredClaim, ...],
+    contrarian: tuple[KernelScoredClaim, ...],
+    confidence: float,
+    *,
+    weights: tuple[tuple[str, float], ...] = DEFAULT_STRENGTH_WEIGHTS,
+) -> float:
+    """Return the deterministic aggregate confidence-strength signal."""
+    if type(supporting) is not tuple or not all(
+        type(item) is KernelScoredClaim for item in supporting
+    ):
+        raise ValueError("supporting must be a tuple of exact KernelScoredClaim values")
+    if type(contrarian) is not tuple or not all(
+        type(item) is KernelScoredClaim for item in contrarian
+    ):
+        raise ValueError("contrarian must be a tuple of exact KernelScoredClaim values")
+    confidence_value = _exact_number(confidence, field="confidence")
+    weight_map = _validated_table(
+        weights,
+        field="strength_weights",
+        required=frozenset({"trust", "indep", "diversity", "dominance"}),
+    )
+    n_indep = len({canonical_source(sc.claim.document.source) for sc in supporting})
+    n_kinds = len({sc.claim.document.kind for sc in supporting})
+    indep_factor = max(
+        0.0,
+        min((n_indep - 1) / (INDEPENDENT_SOURCE_SATURATION - 1), 1.0),
+    )
+    diversity_factor = max(
+        0.0,
+        min((n_kinds - 1) / (KIND_DIVERSITY_SATURATION - 1), 1.0),
+    )
+    n_contrarian_sources = len(
+        {canonical_source(sc.claim.document.source) for sc in contrarian}
+    )
+    total_sources = n_indep + n_contrarian_sources
+    dominance = (n_indep / total_sources) if total_sources > 0 else 0.0
+    strength = (
+        weight_map["trust"] * confidence_value
+        + weight_map["indep"] * indep_factor
+        + weight_map["diversity"] * diversity_factor
+        + weight_map["dominance"] * dominance
+    )
+    return max(0.0, min(1.0, strength))
+
+
+def _infer_decision_direction(supporting: tuple[KernelScoredClaim, ...]) -> str:
+    bullish = 0
+    bearish = 0
+    for scored in supporting:
+        direction = scored.claim.direction
+        if direction == "bullish":
+            bullish += 1
+        elif direction == "bearish":
+            bearish += 1
+    if bullish == 0 and bearish == 0:
+        return "不明"
+    if bullish > bearish + 1:
+        return "偏多"
+    if bearish > bullish + 1:
+        return "偏空"
+    return "中性"
+
+
+def _decision_codes(
+    *,
+    supporting: tuple[KernelScoredClaim, ...],
+    contrarian: tuple[KernelScoredClaim, ...],
+    raw_confidence: float,
+    calibrated_confidence: float,
+    abstain: bool,
+) -> tuple[str, ...]:
+    codes: list[str] = []
+    if abstain:
+        codes.append("low_confidence")
+    if not supporting:
+        codes.append("no_supporting_claims")
+    if calibrated_confidence > raw_confidence + 0.1:
+        codes.append("calibration_boosted")
+    if contrarian:
+        codes.append("contrarian_evidence_present")
+    return tuple(codes)
+
+
+def aggregate_scored_claims(
+    scored_claims: tuple[KernelScoredClaim, ...],
+    *,
+    query: str,
+    support_threshold: float = 0.50,
+    coin: str = "",
+    calibration_table: tuple[tuple[float, float], ...] = DEFAULT_CALIBRATION_TABLE,
+    contract_version: str = KERNEL_CONTRACT_VERSION,
+) -> KernelOutput:
+    """Aggregate scored claims into the versioned, report-facing kernel result."""
+    require_supported_contract_version(contract_version)
+    if type(scored_claims) is not tuple or not all(
+        type(item) is KernelScoredClaim for item in scored_claims
+    ):
+        raise ValueError("scored_claims must be a tuple of exact KernelScoredClaim values")
+    if type(query) is not str:
+        raise ValueError("query must be an exact string")
+    threshold = _exact_number(support_threshold, field="support_threshold")
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("support_threshold must be between zero and one")
+    if type(coin) is not str:
+        raise ValueError("coin must be an exact string")
+    _validated_numeric_table(
+        calibration_table, field="calibration_table", probability=True
+    )
+
+    query_tokens = _normalize(query)
+    if coin:
+        relevant = tuple(
+            scored
+            for scored in sorted(
+                scored_claims,
+                key=lambda sc: (0 if _mentions_coin(sc, coin) else 1, -sc.trust),
+            )
+            if _matches_coin(scored, coin)
+        )
+    else:
+        relevant = tuple(
+            scored
+            for scored in scored_claims
+            if not query_tokens or ((_normalize(scored.claim.text) - DOMAIN_STOP) & query_tokens)
+        ) or scored_claims
+        relevant = tuple(sorted(relevant, key=lambda sc: sc.trust, reverse=True))
+
+    supporting_all = tuple(sc for sc in relevant if sc.trust >= threshold)
+    contrarian_all = tuple(sc for sc in relevant if sc.trust < threshold)
+    raw_confidence = (
+        math.fsum(sc.trust for sc in supporting_all) / len(supporting_all)
+        if supporting_all
+        else 0.0
+    )
+    strength = evidence_strength(
+        supporting_all,
+        contrarian_all,
+        raw_confidence,
+    )
+    calibrated = interpolate_calibration(strength, calibration_table)
+    supporting = supporting_all[:SUPPORTING_LIMIT]
+    contrarian = contrarian_all[:CONTRARIAN_LIMIT]
+    abstain = calibrated < 0.4
+    independent_sources = len(
+        {canonical_source(sc.claim.document.source) for sc in supporting}
+    )
+    return KernelOutput(
+        raw_confidence,
+        calibrated,
+        abstain,
+        _infer_decision_direction(supporting),
+        _decision_codes(
+            supporting=supporting,
+            contrarian=contrarian,
+            raw_confidence=raw_confidence,
+            calibrated_confidence=calibrated,
+            abstain=abstain,
+        ),
+        len(supporting),
+        independent_sources,
+        contract_version=contract_version,
+        query=query,
+        scored_claims=scored_claims,
+        supporting=supporting,
+        contrarian=contrarian,
+        decision_state="abstain" if abstain else "normal",
+    )
 
 
 def score_claim(
@@ -322,10 +613,18 @@ def interpolate_calibration(raw: float, table: Sequence[tuple[float, float]]) ->
 
 
 __all__ = [
+    "CONTRARIAN_LIMIT",
+    "DEFAULT_CALIBRATION_TABLE",
     "DEFAULT_HALF_LIVES",
     "DEFAULT_SCORE_WEIGHTS",
     "DEFAULT_SOURCE_REPUTATIONS",
+    "DEFAULT_STRENGTH_WEIGHTS",
+    "INDEPENDENT_SOURCE_SATURATION",
+    "KIND_DIVERSITY_SATURATION",
+    "SUPPORTING_LIMIT",
+    "aggregate_scored_claims",
     "corroboration_score",
+    "evidence_strength",
     "interpolate_calibration",
     "manipulation_flags",
     "manipulation_hits",
