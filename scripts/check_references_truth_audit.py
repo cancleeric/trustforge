@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_AUDIT = ROOT / "docs" / "audit" / "REFERENCES-TRUTH-AUDIT.md"
+DEFAULT_REFERENCES_EXPORT = Path("/tmp/trustforge-devlog/references.html")
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 
@@ -24,6 +25,61 @@ def _line_matching(lines: list[str], pattern: str) -> str:
 def _require_status(line: str, expected: str, subject: str) -> None:
     if expected not in line:
         raise AssertionError(f"{subject} must include {expected!r}: {line}")
+
+
+def _export_lines(text: str) -> list[str]:
+    text = re.sub(r"<[^>]+>", "\n", text)
+    text = re.sub(r"&nbsp;?", " ", text)
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _export_line_matching(lines: list[str], pattern: str, subject: str) -> str:
+    for line in lines:
+        if re.search(pattern, line, re.IGNORECASE):
+            return line
+    raise AssertionError(f"references export missing conservative status: {subject}")
+
+
+def _reject_verified(lines: list[str], patterns: dict[str, str]) -> None:
+    for subject, pattern in patterns.items():
+        if any(re.search(pattern, line, re.IGNORECASE) for line in lines):
+            raise AssertionError(f"{subject} must not be marked verified in references export")
+
+
+def verify_references_export(path: Path = DEFAULT_REFERENCES_EXPORT) -> list[str]:
+    """Verify exported public references.html uses conservative v2 statuses when available."""
+    if not path.exists():
+        return [f"references export not present; skipped {path}"]
+
+    lines = _export_lines(path.read_text(encoding="utf-8"))
+    checks: list[str] = []
+
+    required_fragments = {
+        "HOYA BIT historical OHLCV remains verified": r"HOYA BIT.{0,120}OHLCV.{0,120}(?:✅|verified)",
+        "HOYA BIT live ticker remains blocked": r"HOYA BIT.{0,120}(?:live|ticker).{0,120}(?:⚠|blocked)",
+        "GitHub Actions workflow disabled state is public": r"GitHub Actions.{0,160}(?:\.disabled|disabled|停用)",
+        "Production deploy disabled state is public": r"(?:Production Deploy|deploy-production).{0,160}(?:\.disabled|disabled|停用)",
+        "AgentCore routing remains unverified": r"AgentCore.{0,160}(?:🟡|implemented-not-verified|not verified|未驗證)",
+        "manipulation detection remains informational-only": r"(?:manipulation|協同行為).{0,180}(?:informational-only|不扣分|🟡)",
+    }
+    for subject, pattern in required_fragments.items():
+        _export_line_matching(lines, pattern, subject)
+        checks.append(subject)
+
+    _reject_verified(
+        lines,
+        {
+            "HOYA BIT live ticker": r"HOYA BIT.{0,120}(?:live|ticker).{0,120}(?:✅|(?<!not-)(?<!not )verified)",
+            "GitHub Actions CI": r"GitHub Actions.{0,160}(?:✅|(?<!not-)(?<!not )verified)",
+            "AWS App Runner production evidence": r"App Runner.{0,160}(?:✅|(?<!not-)(?<!not )verified)",
+            "EventBridge production evidence": r"EventBridge.{0,160}(?:✅|(?<!not-)(?<!not )verified)",
+            "nginx production evidence": r"nginx.{0,160}(?:✅|(?<!not-)(?<!not )verified)",
+            "AgentCore runtime routing": r"AgentCore.{0,120}(?:routing|runtime).{0,120}(?:✅|(?<!not-)(?<!not )verified)",
+        },
+    )
+    checks.append("public references export rejects stale verified statuses")
+
+    return checks
 
 
 def verify_audit(path: Path = DEFAULT_AUDIT) -> list[str]:
@@ -52,7 +108,7 @@ def verify_audit(path: Path = DEFAULT_AUDIT) -> list[str]:
     _require_status(agentcore_line, "🟡", "AgentCore runtime routing")
     checks.append("AgentCore runtime routing is not represented as production verified")
 
-    calibration_line = _line_matching(lines, r"Guo.*Calibration|calibration.*verified")
+    calibration_line = _line_matching(lines, r"Guo.*Calibration")
     _require_status(calibration_line, "✅ verified", "calibration model artifact")
     checks.append("calibration status is tied to the committed model artifact evidence")
 
@@ -85,8 +141,10 @@ def verify_audit(path: Path = DEFAULT_AUDIT) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=Path, default=DEFAULT_AUDIT)
+    parser.add_argument("--references-html", type=Path, default=DEFAULT_REFERENCES_EXPORT)
     args = parser.parse_args()
     checks = verify_audit(args.path)
+    checks.extend(verify_references_export(args.references_html))
     for check in checks:
         print(f"ok - {check}")
     return 0

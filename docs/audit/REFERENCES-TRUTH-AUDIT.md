@@ -6,6 +6,8 @@
 > 比對來源: `/tmp/trustforge-devlog/references.html` vs `main` branch (commit HEAD)
 >
 > **v2 變更摘要**：補入 AgentCore backend registry 段落（🟡）；校準模型路徑 PR #394 修正後升為 ✅ verified；明確標注 GitHub Actions `.disabled` 語意；逐項對照 issue comment 2026-07-22 的六項待修正點。
+>
+> **v2.1 補充**：Calibration 的 ✅ 僅代表 model artifact 與 runtime lookup path 已驗證；public references page 不得把 calibration activation 標成無條件 production verified，正式啟用仍需 evidence gates。
 
 ## 狀態圖例
 
