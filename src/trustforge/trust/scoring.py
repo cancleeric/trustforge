@@ -28,6 +28,7 @@ from trustforge_core.contracts import (
     KernelClaim as _CoreKernelClaim,
     KernelDocument as _CoreKernelDocument,
     KernelReputationTrace as _CoreKernelReputationTrace,
+    KernelScoredClaim as _CoreKernelScoredClaim,
 )
 from trustforge_core.corroboration import (
     CorroborationClaim as _CoreCorroborationClaim,
@@ -40,6 +41,7 @@ from trustforge_core.scoring import (
     DEFAULT_HALF_LIVES as _CORE_DEFAULT_HALF_LIVES,
     DEFAULT_SCORE_WEIGHTS as _CORE_DEFAULT_SCORE_WEIGHTS,
     DEFAULT_SOURCE_REPUTATIONS as _CORE_DEFAULT_SOURCE_REPUTATIONS,
+    aggregate_scored_claims as _core_aggregate_scored_claims,
     corroboration_score as _core_corroboration_score,
     interpolate_calibration as _interpolate_calibration,
     manipulation_flags as _core_manipulation_flags,
@@ -53,7 +55,7 @@ from trustforge_core.scoring import (
 )
 
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document, _coins_mentioned, _matches_coin, _mentions_coin
+from ..ingestion.base import Document, _coins_mentioned
 from .dawid_skene import LABELS as _DS_LABELS, em_source_reliability
 from .stance_cache import cached_stance_fn
 
@@ -180,6 +182,53 @@ def _to_core_scoring_claim(claim: Claim) -> _CoreKernelClaim:
             url=document.url,
             metadata=metadata,
         ),
+    )
+
+
+def _to_core_aggregate_claim(claim: Claim) -> _CoreKernelClaim:
+    document = claim.doc
+    raw_timestamp = document.ts
+    if type(raw_timestamp) not in {int, float}:
+        raise ValueError("document timestamp must be an exact number")
+    try:
+        timestamp = float(raw_timestamp)
+    except OverflowError as exc:
+        raise ValueError("document timestamp is outside the finite float range") from exc
+    if not math.isfinite(timestamp):
+        timestamp = 0.0
+    metadata: tuple[tuple[str, object], ...] = ()
+    if type(document.meta) is dict:
+        selected: list[tuple[str, object]] = []
+        for key, value in document.meta.items():
+            if type(key) is str and key == "coin" and type(value) in {str, int, float, bool}:
+                selected.append((key, value))
+        metadata = tuple(selected)
+    return _CoreKernelClaim(
+        id=claim.id,
+        text=claim.text,
+        claim_type=claim.claim_type,
+        direction=claim.direction,
+        document=_CoreKernelDocument(
+            id=document.id,
+            kind=document.kind,
+            source=document.source,
+            text=document.text,
+            timestamp=timestamp,
+            url=document.url,
+            metadata=metadata,
+        ),
+    )
+
+
+def _to_core_aggregate_scored(scored: ScoredClaim) -> _CoreKernelScoredClaim:
+    trace = _to_core_reputation_trace(scored.reputation_trace)
+    return _CoreKernelScoredClaim(
+        claim=_to_core_aggregate_claim(scored.claim),
+        trust=scored.trust,
+        components=tuple(scored.components.items()),
+        reputation_trace=trace,
+        manip_flags=tuple(scored.manip_flags),
+        info_flags=tuple(scored.info_flags),
     )
 
 
@@ -1804,42 +1853,22 @@ def aggregate(scored: list[ScoredClaim], query: str,
     (query)` 相關性排序、全納入（不新增篩選），維持 #32 修正前就存在的
     既有語意。
     """
-    qt = _normalize(query)
-    if coin:
-        # 先依 (是否幣種特定, 信任分) 排序——把「明確提及該幣」的主張排在
-        # 「全市場通用」主張之前，使下面的 [:10]/[:5] 截斷優先保留前者
-        # （demo 可靠性 #32 追加的既有精神，見上方 docstring）。
-        relevant = sorted(
-            scored,
-            key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
-        )
-        # W4 codex 對抗審第 8 輪根治：排序後直接用 `_matches_coin` 過濾
-        # （保留本幣相關 + 全市場通用，只排除明確他幣）——`supporting`/
-        # `contrarian`/`confidence` 全部從這份已過濾的 `relevant` 算，
-        # 不再是「全納入、只排序」。`_matches_coin` 是幣別別名比對，不是
-        # #32 當年那種脆弱的 `_normalize(query)` 文字比對，不會重蹈覆轍。
-        relevant = [sc for sc in relevant if _matches_coin(sc.claim.doc, coin)]
-    else:
-        # 與 query 相關者優先（無相關詞則全納入）——未指定 coin 時無獨立的
-        # 幣種相關性判準可用，行為逐字向後相容，不引入新篩選。
-        relevant = [
-            sc for sc in scored
-            if not qt or (_normalize(sc.claim.text) & qt)
-        ] or scored
-        relevant.sort(key=lambda sc: sc.trust, reverse=True)
-    supporting = [sc for sc in relevant if sc.trust >= support_threshold]
-    contrarian = [sc for sc in relevant if sc.trust < support_threshold]
-
-    confidence = (sum(sc.trust for sc in supporting) / len(supporting)) if supporting else 0.0
-    # W4：用「校準前」的完整 supporting/contrarian（截斷前，與 confidence 同一份
-    # 基礎資料，見上方 `_evidence_strength` 對「不重新計算 trust、不新增資料源」
-    # 的承諾）算證據強度綜合指標，再校準——不用截斷後的 [:10]/[:5]，避免評分
-    # 結果隨截斷上限漂移（跟 `confidence` 本身的計算基礎保持一致）。
-    evidence_strength = _evidence_strength(supporting, contrarian, confidence)
+    core_by_id: dict[int, ScoredClaim] = {}
+    core_scored: list[_CoreKernelScoredClaim] = []
+    for item in scored:
+        core_item = _to_core_aggregate_scored(item)
+        core_by_id[id(core_item)] = item
+        core_scored.append(core_item)
+    core_result = _core_aggregate_scored_claims(
+        tuple(core_scored),
+        query=query,
+        support_threshold=support_threshold,
+        coin=coin or "",
+    )
     return TrustedBrief(
         query=query,
-        supporting=supporting[:10],
-        contrarian=contrarian[:5],
-        confidence=confidence,
-        calibrated_confidence=_calibrate_confidence(evidence_strength),
+        supporting=[core_by_id[id(item)] for item in core_result.supporting],
+        contrarian=[core_by_id[id(item)] for item in core_result.contrarian],
+        confidence=core_result.trust_score,
+        calibrated_confidence=core_result.confidence,
     )
