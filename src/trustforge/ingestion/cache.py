@@ -61,7 +61,6 @@ Cache key 設計：`(source.name, coin)`，**不含 query**——原因：
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import sqlite3
@@ -70,6 +69,7 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -77,6 +77,11 @@ from typing import Any, Iterable, NamedTuple
 
 from ..data_contracts import DOCUMENT_SCHEMA_VERSION
 from .base import Document, Source
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - exercised via Windows import tests.
+    fcntl = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # 路徑（JSON fallback backend 用）：可用 env 覆寫，預設放 out/（.gitignore 已
@@ -473,6 +478,7 @@ class JsonCacheBackend(CacheBackend):
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path is not None else _default_json_path()
         self._read_cache_lock = threading.RLock()
+        self._write_lock = threading.RLock()
         self._read_cache_signature: tuple[int, int, int] | None = None
         self._read_cache_data: dict[str, Any] | None = None
 
@@ -540,6 +546,22 @@ class JsonCacheBackend(CacheBackend):
         檔」其中一種，不會讀到寫一半的殘檔，讀不需要鎖也不會有這個坑。"""
         return self.path.with_name(self.path.name + ".lock")
 
+    @contextmanager
+    def _locked_for_write(self):
+        """Serialize JSON read-modify-write on platforms with and without fcntl."""
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._write_lock:
+            if fcntl is None:
+                yield
+                return
+
+            with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def _set_unlocked(
         self, key: str, docs: list[dict[str, Any]], fetched_at: float,
         ttl_seconds: float | None = None,  # noqa: ARG002 — 本地 backend 不需要，見介面 docstring
@@ -576,29 +598,19 @@ class JsonCacheBackend(CacheBackend):
         （見 `_lock_path` docstring 的 lost-update 說明）——跟
         `set_if_newer()` 共用同一把鎖，兩者交錯呼叫時彼此序列化，任一方都
         不會拿著對方寫入前的舊資料整檔覆寫回去。"""
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                self._set_unlocked(key, docs, fetched_at, ttl_seconds=ttl_seconds)
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with self._locked_for_write():
+            self._set_unlocked(key, docs, fetched_at, ttl_seconds=ttl_seconds)
 
     def set_if_newer(
         self, key: str, docs: list[dict[str, Any]], fetched_at: float,
         ttl_seconds: float | None = None,
     ) -> bool:
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._lock_path, "a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                existing = self.get(key)
-                if existing is not None and existing["fetched_at"] >= fetched_at:
-                    return False
-                self._set_unlocked(key, docs, fetched_at, ttl_seconds=ttl_seconds)
-                return True
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with self._locked_for_write():
+            existing = self.get(key)
+            if existing is not None and existing["fetched_at"] >= fetched_at:
+                return False
+            self._set_unlocked(key, docs, fetched_at, ttl_seconds=ttl_seconds)
+            return True
 
 
 class SQLiteCacheBackend(CacheBackend):
