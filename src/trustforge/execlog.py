@@ -5,10 +5,10 @@
 """
 from __future__ import annotations
 
-import json
 import time
 import uuid
 
+from .execution_event_log import ExecutionEventLog, ExecutionStepRecord, record_to_dict
 from .schema import iso_utc
 
 # 官方執行上限 15 分鐘
@@ -59,6 +59,11 @@ class ExecutionLog:
         self._now = now_fn
         self.start = self._now()
         self.run_id = run_id or f"hermes-{uuid.uuid4().hex[:12]}"
+        self._generic = ExecutionEventLog(
+            run_id=self.run_id,
+            started_at=iso_utc(self.start),
+            budget_sec=RUNTIME_BUDGET_SEC,
+        )
         self.events: list[dict] = []
         self.record("session.start", summary="Hermes Agent 分析開始")
 
@@ -87,13 +92,20 @@ class ExecutionLog:
                 "status": _status_for_event(tool, params),
             },
         }
-        self.events.append({
-            "ts": iso_utc(self._now()),
-            "elapsed_sec": round(self.elapsed(), 2),
-            "tool": tool,
-            "params": params,
-            "summary": summary,
-        })
+        event = self._generic.append(
+            ts=iso_utc(self._now()),
+            elapsed_sec=self.elapsed(),
+            tool=tool,
+            params=params,
+            summary=summary,
+            step=ExecutionStepRecord(
+                step_id=node_id,
+                label=node_label,
+                order=node_order,
+                status=_status_for_event(tool, params),
+            ),
+        )
+        self.events.append(event.to_legacy_dict())
 
     def log_policy_snapshot(self, snapshot: dict) -> None:
         """Record effective policy snapshot at run start.
@@ -132,7 +144,7 @@ class ExecutionLog:
         )
 
     def to_jsonl(self) -> str:
-        return "\n".join(json.dumps(e, ensure_ascii=False) for e in self.events)
+        return self._generic.to_jsonl()
 
     def manifest(self) -> dict:
         """Public execution envelope used by API consumers and exported logs."""
@@ -140,12 +152,13 @@ class ExecutionLog:
         # deduplicated API result may be serialized by several concurrent
         # followers; they must all receive byte-identical audit metadata.
         elapsed = self.events[-1]["elapsed_sec"] if self.events else 0.0
+        generic = record_to_dict(self._generic.manifest(elapsed_sec=elapsed))
         return {
             "agent": "hermes",
-            "run_id": self.run_id,
-            "started_at": iso_utc(self.start),
-            "elapsed_sec": elapsed,
-            "budget_sec": RUNTIME_BUDGET_SEC,
+            "run_id": generic["run_id"],
+            "started_at": generic["started_at"],
+            "elapsed_sec": generic["elapsed_sec"],
+            "budget_sec": generic["budget_sec"],
             "nodes": [
                 {"id": node_id, "label": label, "order": order}
                 for node_id, label, order in HERMES_NODES
