@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+from trustforge import pipeline as pl
+from trustforge.ingestion.base import Document
 from trustforge.ports import (
     AgentCoreLLMAdapter,
     BedrockLLMAdapter,
@@ -28,6 +30,7 @@ from trustforge.ports import (
     SourceProvider,
     resolve_providers,
 )
+from trustforge.schema import QuestionType
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -276,6 +279,57 @@ class TestResolveProviders:
             assert isinstance(ps.llm, AgentCoreLLMAdapter)
             with pytest.raises(NotImplementedError):
                 ps.llm.complete("sys", "prompt")  # type: ignore[union-attr]
+
+
+class TestPipelineProviderRuntimePath:
+    """Formal pipeline path should enter through provider resolver."""
+
+    def test_pipeline_run_invokes_resolved_llm_provider(self, monkeypatch):
+        fake_llm = FakeLLMProvider(default_response="provider narrative")
+        seen: dict[str, object] = {}
+
+        def fake_resolve_providers(**kwargs):
+            seen["offline"] = kwargs.get("offline")
+            return ProviderSet(
+                llm=fake_llm,
+                resolutions=[
+                    ProviderResolution(key="llm", configured="test", resolved="fake"),
+                    ProviderResolution(key="cache", configured="test", resolved="fake"),
+                ],
+            )
+
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return [
+                Document(
+                    id="btc-price",
+                    kind="price",
+                    source="test-price",
+                    text="BTC close rose 3%",
+                    ts=1_000.0,
+                )
+            ]
+
+        monkeypatch.setattr(pl, "resolve_providers", fake_resolve_providers)
+        monkeypatch.setattr(pl, "collect", fake_collect)
+        monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
+        monkeypatch.setattr(pl, "try_reserve_request_budget", lambda: 0.01)
+        monkeypatch.setattr(pl, "release_request_budget", lambda _reservation: None)
+        monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
+        monkeypatch.setattr(pl, "stance_model_priced", lambda: True)
+
+        _report, _evidence, log = pl.run(
+            "BTC",
+            "分析 BTC",
+            QuestionType.MULTI_SOURCE,
+            data_mode="sample",
+            llm_mode="bedrock",
+        )
+
+        assert seen["offline"] is False
+        assert any(call["method"] == "complete" for call in fake_llm.calls)
+        provider_events = [event for event in log.events if event.get("tool") == "provider.resolve"]
+        assert provider_events
+        assert any(event["params"]["key"] == "llm" and event["params"]["invoked"] for event in provider_events)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
