@@ -271,8 +271,9 @@ for dispatch in "${pids[@]}"; do
   printf 'failed\t%s\t{"lane":%s,"reason":"%s","exit_code":%s,"dispatched_at":"%s"}\n' "$issue" "$lane" "$result_reason" "$agent_exit" "$dispatched_at" >>"$EVENT_FILE"
 done
 failures=$((failures + setup_failures))
+DISPATCHED_COUNT="${#pids[@]}"
 
-if (( ${#pids[@]} == 0 )); then
+if (( DISPATCHED_COUNT == 0 )); then
   echo "[ceo_cycle] no runnable issues or no verified clean lanes"
   if (( QUEUE_COUNT > 0 )); then
     printf 'failed\t0\t{"reason":"dispatch_required_but_no_lane_started","queue_candidates":%s}\n' "$QUEUE_COUNT" >>"$EVENT_FILE"

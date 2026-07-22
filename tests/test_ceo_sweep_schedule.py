@@ -280,10 +280,49 @@ def test_ceo_sweep_builds_continuous_development_inventory(monkeypatch):
     assert report["cpo_plan"]["proposed_author"] == "gray"
     assert report["ceo_review"]["required_decision"] == "per_lane_auto_review_after_gray_plan"
     assert report["development_plan"]["operating_mode"] == "unattended_scoped_issue_lanes"
+    assert report["development_plan"]["skip_prevention"]["failure_reason"] == (
+        "runnable_issue_queue_not_exhausted_but_no_issue_pr_opened"
+    )
+    assert "fall_through_to_next_runnable_issue" in report["skip_prevention_gate"]
     serialized = json.dumps(report).lower()
     assert "approved_for" not in serialized
     assert '"author"' not in serialized
 
+
+def test_ceo_lane_prompt_requires_fallback_after_blocked_candidate():
+    prompt = (ROOT / "scripts/prompts/ceo-development-loop.md").read_text()
+
+    assert "Parent runner contract" in prompt
+    assert "fall through next runnable queue candidate" in prompt
+    assert "cannot end only blocked/dependency" in prompt
+    assert "issue PR open review" in prompt
+
+
+def test_ceo_cycle_runner_does_not_fail_normal_backlog_over_lane_capacity():
+    runner = (ROOT / "scripts/run_ceo_cycle.sh").read_text()
+    normal_capacity_limited_backlog = {
+        "queue_count": 2,
+        "dispatched_count": 1,
+        "failures": 0,
+        "setup_failures": 0,
+    }
+    failures = (
+        normal_capacity_limited_backlog["failures"]
+        + normal_capacity_limited_backlog["setup_failures"]
+    )
+    if (
+        normal_capacity_limited_backlog["dispatched_count"] == 0
+        and normal_capacity_limited_backlog["queue_count"] > 0
+    ):
+        failures += 1
+
+    assert failures == 0
+    assert 'DISPATCHED_COUNT="${#pids[@]}"' in runner
+    assert "if (( DISPATCHED_COUNT == 0 )); then" in runner
+    assert "QUEUE_COUNT > DISPATCHED_COUNT" not in runner
+    assert "runnable_issue_queue_not_exhausted_but_no_issue_pr_opened" not in runner
+    assert '"dispatched_lanes":%s' not in runner
+    assert "dispatch_required_but_no_lane_started" in runner
 
 @pytest.mark.parametrize(
     "source",
@@ -617,6 +656,18 @@ def test_ceo_sweep_report_exposes_pr_open_and_merge_review_gates(monkeypatch):
         in development_plan["merge_guardrails"]
     )
 
+    serialized = json.dumps(development_plan).lower()
+    assert "green ci" not in serialized
+    assert "local targeted verification" in serialized
+
+
+def test_ceo_lane_prompt_does_not_require_github_ci_or_full_pre_push_gate():
+    prompt = (ROOT / "scripts/prompts/ceo-development-loop.md").read_text()
+
+    assert "GitHub Actions CI is not an automated merge gate" in prompt
+    assert "Do not require full" in prompt
+    assert "pre-push-style local suite before opening review PR" in prompt
+    assert "focused local verification" in prompt
 
 def test_ci_is_manual_and_pre_push_is_full_local_gate():
     workflow = (ROOT / ".github/workflows/ci.yml.disabled").read_text()

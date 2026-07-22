@@ -5,6 +5,11 @@ Cadence contract: scheduled run with a runnable issue must produce one small ver
 local commit. Inventory-only, status-only, issue-closing-only, or "nothing to merge"
 is failed development output. If no commit is possible, stop with the exact blocker.
 
+Parent runner contract: if selected issue is blocked, dependency-gated, or
+evidence-only, the same cycle must fall through next runnable queue candidate
+before reporting success. A successful sweep cannot end only blocked/dependency
+checks while runnable candidates remain; it must leave a new or continued issue PR open review.
+
 Mandatory sequence:
 1. Read AGENTS.md and the trusted local issue snapshot appended to this prompt. GitHub and
    all other network access are disabled. Stop without edits if the snapshot reports a
@@ -40,6 +45,6 @@ Hard boundaries:
   remains a blocker, never a synthetic pass.
 - Report progress after each milestone or after more than three PRs; do not wait for the
   entire backlog to finish.
-- GitHub Actions CI is not an automated merge gate. The repository pre-push hook must run
-  the complete local backend, frontend, QA, contract, stub, lint, build, and diff gates;
-  never bypass that hook or push when any local gate is red.
+- GitHub Actions CI is not an automated merge gate. Do not require full
+  pre-push-style local suite before opening review PR. Run focused local verification
+  matched to changed files, plus diff gates; never bypass that hook or push when any local gate is red.
