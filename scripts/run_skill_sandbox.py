@@ -31,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--proposal-id", help="Persist the real sandbox result to this durable upgrade proposal")
     parser.add_argument("--queue-db", type=Path, help="SQLite queue path; defaults to TRUSTFORGE_SQLITE_PATH")
     args = parser.parse_args(argv)
+    queue = UpgradeQueue(args.queue_db) if args.proposal_id else None
+    proposal_binding = (
+        queue.resolve_latest_sandbox_instance(args.proposal_id)
+        if queue is not None and args.proposal_id
+        else None
+    )
     candidate = json.loads(args.artifact.read_text(encoding="utf-8"))
     if not isinstance(candidate, dict):
         parser.error("artifact must be a JSON object")
@@ -49,10 +55,10 @@ def main(argv: list[str] | None = None) -> int:
         "passed": qa["returncode"] == 0 and (replay is None or replay["returncode"] == 0),
         "activation": "not activated; use manage_skill_change.py approve with this evidence after human review",
     }
-    if args.proposal_id:
-        queue = UpgradeQueue(args.queue_db)
+    if proposal_binding is not None and queue is not None:
+        result["proposal_binding"] = proposal_binding
         result["queue_run"] = queue.record_sandbox(
-            args.proposal_id,
+            proposal_binding["proposal_id"],
             bool(result["passed"]),
             f"sha256:{artifact_hash(candidate)}",
             {"runner": "run_skill_sandbox.py", **result},

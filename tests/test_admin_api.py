@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from io import BytesIO
 
@@ -46,9 +48,13 @@ def _reset_admin_auth_buckets():
     `test_json_api.py` 清 `_status_rate_buckets` 的慣例）。"""
     web._admin_auth_fail_buckets.clear()
     web._admin_auth_global_fails.clear()
+    web._UPGRADE_PRINCIPAL_FACTORY = None
+    web._UPGRADE_SANDBOX_ATTESTATION_FACTORY = None
     yield
     web._admin_auth_fail_buckets.clear()
     web._admin_auth_global_fails.clear()
+    web._UPGRADE_PRINCIPAL_FACTORY = None
+    web._UPGRADE_SANDBOX_ATTESTATION_FACTORY = None
 
 
 @pytest.fixture
@@ -906,16 +912,42 @@ def test_audit_read_error_502(admin_enabled, monkeypatch):
 
 def test_upgrade_gate_requires_auth_and_passed_sandbox(admin_enabled, monkeypatch, tmp_path):
     monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(tmp_path / "upgrades.sqlite3"))
+    from trustforge.upgrade_ports import AuthenticatedPrincipal, SandboxAttestation
     from trustforge.upgrade_queue import UpgradeQueue
-    UpgradeQueue().sync_diagnostic({"proposals": [{"id": "p", "area": "x", "severity": "high"}]})
-    body = json.dumps({"proposal_id": "p", "decision": "approve", "actor": "qa", "reason": "green"})
+    queue = UpgradeQueue()
+    queue.sync_diagnostic({"proposals": [{"id": "p", "area": "x", "severity": "high", "tenant_id": "t1"}]})
+    binding = queue.resolve_review_instance("p")
+    queue.record_reviews({"reviews": [{
+        "proposal_id": binding["proposal_id"],
+        "payload_sha256": binding["payload_sha256"],
+        "verdict": "sandbox_ready",
+    }]})
+    proposal_id = binding["proposal_id"]
+    body = json.dumps({"proposal_id": proposal_id, "decision": "approve", "actor": "qa", "reason": "green"})
     assert _request("POST", "/api/admin/hermes-upgrade-decision", body=body)[0] == 401
     code, response, _ = _request("POST", "/api/admin/hermes-upgrade-decision", token=TEST_ADMIN_TOKEN, body=body)
-    assert code == 409
-    assert json.loads(response)["error"]["code"] == "invalid_upgrade_transition"
-    sandbox = json.dumps({"proposal_id": "p", "passed": True, "artifact_hash": "sha256:abc", "details": {"tests": 24}})
+    assert code == 400
+    assert json.loads(response)["error"]["code"] == "bad_request"
+    trusted_body = json.dumps({"proposal_id": proposal_id, "decision": "approve", "reason": "green"})
+    assert _request("POST", "/api/admin/hermes-upgrade-decision", token=TEST_ADMIN_TOKEN, body=trusted_body)[0] == 403
+    principal = AuthenticatedPrincipal(
+        "operator", "t1", frozenset({"upgrade:approve"}),
+        datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    monkeypatch.setattr(web, "_UPGRADE_PRINCIPAL_FACTORY", lambda _headers: principal)
+    details = {"candidate": {"family": "analysis", "revision": "abc"}, "tests": 24}
+    checksum = hashlib.sha256(json.dumps(details, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    monkeypatch.setattr(
+        web,
+        "_UPGRADE_SANDBOX_ATTESTATION_FACTORY",
+        lambda _payload, _headers: SandboxAttestation(
+            proposal_id, "analysis", "abc", "run-1", "runner/v1", "sha256:abc",
+            checksum, True, datetime.now(timezone.utc), details,
+        ),
+    )
+    sandbox = json.dumps({"proposal_id": proposal_id, "candidate_revision": "abc"})
     assert _request("POST", "/api/admin/hermes-upgrade-sandbox", token=TEST_ADMIN_TOKEN, body=sandbox)[0] == 200
-    code, response, _ = _request("POST", "/api/admin/hermes-upgrade-decision", token=TEST_ADMIN_TOKEN, body=body)
+    code, response, _ = _request("POST", "/api/admin/hermes-upgrade-decision", token=TEST_ADMIN_TOKEN, body=trusted_body)
     assert code == 200
     assert json.loads(response)["data"]["activated"] is False
 
@@ -928,15 +960,36 @@ def test_admin_upgrade_queue_get_is_authenticated(admin_enabled, monkeypatch, tm
     assert json.loads(response)["data"]["durable"] is True
 
 
+def test_upgrade_sandbox_rejects_caller_reported_pass_and_hash(admin_enabled):
+    body = json.dumps({
+        "proposal_id": "p",
+        "passed": True,
+        "artifact_hash": "sha256:attacker",
+        "details": {"tests": 999},
+    })
+    code, response, _ = _request(
+        "POST", "/api/admin/hermes-upgrade-sandbox",
+        token=TEST_ADMIN_TOKEN, body=body,
+    )
+    assert code == 403
+    assert json.loads(response)["error"]["code"] == "trusted_attestation_required"
+
+
 def test_upgrade_activation_endpoint_is_authenticated_and_explicit(admin_enabled, monkeypatch):
+    from trustforge.upgrade_ports import AuthenticatedPrincipal
     from trustforge.upgrade_queue import UpgradeQueue
 
     called = {}
-    def activate(self, proposal_id, actor, reason):
-        called.update(proposal_id=proposal_id, actor=actor, reason=reason)
+    principal = AuthenticatedPrincipal(
+        "release-operator", "t1", frozenset({"upgrade:activate"}),
+        datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    monkeypatch.setattr(web, "_UPGRADE_PRINCIPAL_FACTORY", lambda _headers: principal)
+    def activate(self, proposal_id, reason, *, principal):
+        called.update(proposal_id=proposal_id, actor=principal.subject, reason=reason)
         return {"proposal_id": proposal_id, "state": "activated", "revision": "abc"}
     monkeypatch.setattr(UpgradeQueue, "activate", activate)
-    body = json.dumps({"proposal_id": "p", "actor": "release-operator", "reason": "reviewed"})
+    body = json.dumps({"proposal_id": "p", "reason": "reviewed"})
     assert _request("POST", "/api/admin/hermes-upgrade-activate", body=body)[0] == 401
     code, response, _ = _request("POST", "/api/admin/hermes-upgrade-activate", token=TEST_ADMIN_TOKEN, body=body)
     assert code == 200

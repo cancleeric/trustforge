@@ -5874,8 +5874,9 @@ def _handle_api_alerts_operations() -> tuple[int, str]:
 def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
     """Read-only, version-backed Hermes ship/module upgrade projection."""
     try:
+        from .upgrade_adapters import HermesControlPlaneCatalog
         from .upgrade_control import upgrade_status
-        return 200, _json_envelope_ok(upgrade_status())
+        return 200, _json_envelope_ok(upgrade_status(HermesControlPlaneCatalog()))
     except Exception:
         logging.exception("TrustForge /api/hermes-upgrades error")
         return 502, _json_envelope_err("upgrade_control_unavailable", "Hermes 升級控制面暫時無法讀取")
@@ -5891,51 +5892,94 @@ def _handle_api_admin_upgrade_queue() -> tuple[int, str]:
         return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法讀取")
 
 
+# Deployment composition roots must inject these after authentication.  A
+# shared admin token alone is deliberately not treated as named-human proof.
+_UPGRADE_PRINCIPAL_FACTORY = None
+_UPGRADE_SANDBOX_ATTESTATION_FACTORY = None
+
+
+def _upgrade_queue_for_mutation():
+    from .upgrade_adapters import (
+        HermesActivationHandler,
+        HermesModuleCatalog,
+        HermesRollbackHandler,
+        PrincipalAuthority,
+    )
+    from .upgrade_queue import UpgradeQueue
+
+    return UpgradeQueue(
+        authority=PrincipalAuthority(),
+        catalog=HermesModuleCatalog(),
+        activation_handler=HermesActivationHandler(),
+        rollback_handler=HermesRollbackHandler(),
+    )
+
+
 def _handle_api_admin_upgrade_action(headers, rfile, action: str) -> tuple[int, str]:
     payload, error = _read_admin_put_body(headers, rfile)
     if error is not None:
         return error
     assert payload is not None
     try:
-        from .upgrade_queue import UpgradeQueue
-        queue = UpgradeQueue()
+        queue = _upgrade_queue_for_mutation()
         if action == "sandbox":
-            allowed = {"proposal_id", "passed", "artifact_hash", "details"}
-            if set(payload) - allowed or not isinstance(payload.get("passed"), bool):
-                return 400, _json_envelope_err("bad_request", "sandbox 欄位或 passed 型別不合法")
-            result = queue.record_sandbox(
-                str(payload.get("proposal_id", "")), payload["passed"],
-                str(payload.get("artifact_hash", "")), payload.get("details"),
-            )
+            allowed = {"proposal_id", "candidate_revision"}
+            if set(payload) - allowed or _UPGRADE_SANDBOX_ATTESTATION_FACTORY is None:
+                return 403, _json_envelope_err(
+                    "trusted_attestation_required", "缺少可信 sandbox runner attestation"
+                )
+            attestation = _UPGRADE_SANDBOX_ATTESTATION_FACTORY(payload, headers)
+            result = queue.record_sandbox(attestation)
         elif action == "decision":
-            allowed = {"proposal_id", "decision", "actor", "reason"}
-            if set(payload) - allowed:
-                return 400, _json_envelope_err("bad_request", "decision 含不支援欄位")
+            allowed = {"proposal_id", "decision", "reason"}
+            if set(payload) - allowed or _UPGRADE_PRINCIPAL_FACTORY is None:
+                if "actor" in payload:
+                    return 400, _json_envelope_err("bad_request", "actor 不得由 caller 指定")
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
+            principal = _UPGRADE_PRINCIPAL_FACTORY(headers)
+            if principal is None:
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
             result = queue.decide(
                 str(payload.get("proposal_id", "")), str(payload.get("decision", "")),
-                str(payload.get("actor", "")), str(payload.get("reason", "")),
+                str(payload.get("reason", "")), principal=principal,
             )
         elif action == "activate":
-            allowed = {"proposal_id", "actor", "reason"}
+            allowed = {"proposal_id", "reason"}
             if set(payload) - allowed:
-                return 400, _json_envelope_err("bad_request", "activation 含不支援欄位")
+                return 400, _json_envelope_err("bad_request", "decision 含不支援欄位")
+            if _UPGRADE_PRINCIPAL_FACTORY is None:
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
+            principal = _UPGRADE_PRINCIPAL_FACTORY(headers)
             result = queue.activate(
-                str(payload.get("proposal_id", "")), str(payload.get("actor", "")),
-                str(payload.get("reason", "")),
+                str(payload.get("proposal_id", "")), str(payload.get("reason", "")),
+                principal=principal,
             )
         else:
-            allowed = {"proposal_id", "target_revision", "actor", "reason"}
+            allowed = {"proposal_id", "target_revision", "reason"}
             if set(payload) - allowed:
                 return 400, _json_envelope_err("bad_request", "rollback 含不支援欄位")
+            if _UPGRADE_PRINCIPAL_FACTORY is None:
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
+            principal = _UPGRADE_PRINCIPAL_FACTORY(headers)
             result = queue.rollback(
                 str(payload.get("proposal_id", "")), str(payload.get("target_revision", "")),
-                str(payload.get("actor", "")), str(payload.get("reason", "")),
+                str(payload.get("reason", "")), principal=principal,
             )
         return 200, _json_envelope_ok(result)
     except KeyError:
         return 404, _json_envelope_err("proposal_not_found", "找不到升級候選")
     except ValueError as exc:
         return 409, _json_envelope_err("invalid_upgrade_transition", str(exc))
+    except PermissionError as exc:
+        return 403, _json_envelope_err("upgrade_forbidden", str(exc))
     except Exception:
         logging.exception("TrustForge admin upgrade action error")
         return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法寫入")
