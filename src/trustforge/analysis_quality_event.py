@@ -2,17 +2,32 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import math
 from typing import Any, Mapping
 
 from .learning_event_contract import (
     LearningEvent,
     LearningEventError,
+    SCHEMA_VERSION,
+    canonical_identity,
     canonical_integrity_checksum,
     make_learning_event,
 )
 
 EVENT_TYPE = "analysis-quality.v1"
+# Keep the builder's hard ceiling aligned with LearningEventFileStore.  These
+# bounds are checked before copying, sorting, hashing, or deep-freezing caller
+# controlled collections.
+MAX_CANONICAL_EVENT_BYTES = 1024 * 1024
+MAX_EVIDENCE_ITEMS = 1024
+MAX_SOURCE_AVAILABLE_TIMES = 4096
+MAX_STAGE_METRICS = 256
+MAX_SOURCE_DISTRIBUTION_BUCKETS = 256
+MAX_IDENTIFIER_CHARS = 512
+MAX_TEXT_CHARS = 64 * 1024
+MAX_PREFLIGHT_NODES = 100_000
+MAX_PREFLIGHT_DEPTH = 64
 _CONFIDENCE_FIELDS = {"raw", "calibrated"}
 _DECISION_FIELDS = {"direction", "state"}
 _EVIDENCE_FIELDS = {
@@ -87,9 +102,10 @@ def build_analysis_quality_event(
     delivery attempts must not alter canonical event bytes.
     """
 
-    tenant_id = _required_string_value(trusted_tenant_id, "trusted_tenant_id")
+    tenant_id = _required_identifier_value(trusted_tenant_id, "trusted_tenant_id")
     if not isinstance(snapshot, Mapping):
         raise LearningEventError("analysis snapshot must be an object")
+    _preflight_bounds(snapshot, trusted_pit, trusted_provenance)
     unknown = set(snapshot) - _SNAPSHOT_FIELDS
     if unknown:
         raise LearningEventError(
@@ -106,7 +122,7 @@ def build_analysis_quality_event(
     question_id = _required_string(snapshot, "question_id")
     answer_id = _required_string(snapshot, "answer_id")
     evidence_snapshot_id = _required_string(snapshot, "evidence_snapshot_id")
-    question = _required_string(snapshot, "question")
+    question = _required_string_value(snapshot.get("question"), "question")
     coin = _required_string(snapshot, "coin")
     mode = _required_string(snapshot, "mode")
     question_type = _required_string(snapshot, "question_type")
@@ -165,11 +181,6 @@ def build_analysis_quality_event(
             "independent_source_count cannot exceed evidence_count"
         )
     evidence_snapshot = _evidence_snapshot(snapshot, available_time)
-    expected_snapshot_id = canonical_integrity_checksum(evidence_snapshot)
-    if evidence_snapshot_id != expected_snapshot_id:
-        raise LearningEventError(
-            "evidence_snapshot_id must match canonical evidence_snapshot content"
-        )
     if len(evidence_snapshot) != evidence_stats["evidence_count"]:
         raise LearningEventError("evidence_snapshot length must match evidence_count")
     quality = _strict_object(snapshot, "quality", _QUALITY_FIELDS)
@@ -260,6 +271,22 @@ def build_analysis_quality_event(
         "stage_metrics": stage_metrics,
         "failure": failure,
     }
+    _assert_canonical_event_size(
+        tenant_id=tenant_id,
+        analysis_id=analysis_id,
+        event_time=_canonical_time(event_time),
+        available_time=_canonical_time(available_time),
+        as_of_time=_canonical_time(as_of_time),
+        provenance=provenance,
+        payload=payload,
+    )
+    # Hashing a full Evidence snapshot is intentionally after all cheap count,
+    # string, and total-byte rejection paths.
+    expected_snapshot_id = canonical_integrity_checksum(evidence_snapshot)
+    if evidence_snapshot_id != expected_snapshot_id:
+        raise LearningEventError(
+            "evidence_snapshot_id must match canonical evidence_snapshot content"
+        )
     return make_learning_event(
         kind="historical_non_evidentiary",
         tenant_id=tenant_id,
@@ -273,14 +300,169 @@ def build_analysis_quality_event(
     )
 
 
+def _preflight_bounds(
+    snapshot: Mapping[str, Any],
+    trusted_pit: Any,
+    trusted_provenance: Any,
+) -> None:
+    """Reject resource-exhaustion inputs without materializing collections."""
+
+    if len(snapshot) > len(_SNAPSHOT_FIELDS):
+        raise LearningEventError(
+            f"analysis snapshot has too many fields (maximum {len(_SNAPSHOT_FIELDS)})"
+        )
+    _bounded_sequence(snapshot.get("evidence_snapshot"), "evidence_snapshot", MAX_EVIDENCE_ITEMS)
+    _bounded_sequence(
+        snapshot.get("source_available_times"),
+        "source_available_times",
+        MAX_SOURCE_AVAILABLE_TIMES,
+    )
+    _bounded_sequence(snapshot.get("stage_metrics"), "stage_metrics", MAX_STAGE_METRICS)
+    stats = snapshot.get("evidence_stats")
+    if isinstance(stats, Mapping):
+        distribution = stats.get("source_distribution")
+        if isinstance(distribution, Mapping) and len(distribution) > MAX_SOURCE_DISTRIBUTION_BUCKETS:
+            raise LearningEventError(
+                "evidence_stats.source_distribution exceeds "
+                f"{MAX_SOURCE_DISTRIBUTION_BUCKETS} buckets"
+            )
+    if isinstance(trusted_pit, Mapping):
+        _bounded_sequence(
+            trusted_pit.get("source_available_times"),
+            "trusted_pit.source_available_times",
+            MAX_SOURCE_AVAILABLE_TIMES,
+        )
+
+    # Iterative traversal avoids recursion exhaustion and rejects oversized text
+    # before any downstream dict/list copies or key sorting.
+    stack = [
+        ("snapshot", snapshot, 0),
+        ("trusted_pit", trusted_pit, 0),
+        ("trusted_provenance", trusted_provenance, 0),
+    ]
+    nodes = 0
+    while stack:
+        path, value, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_PREFLIGHT_NODES:
+            raise LearningEventError(
+                f"analysis input exceeds {MAX_PREFLIGHT_NODES} preflight nodes"
+            )
+        if isinstance(value, str):
+            if len(value) > MAX_TEXT_CHARS:
+                raise LearningEventError(
+                    f"{path} exceeds {MAX_TEXT_CHARS} characters"
+                )
+        elif isinstance(value, Mapping):
+            if value and depth >= MAX_PREFLIGHT_DEPTH:
+                raise LearningEventError(
+                    f"{path} exceeds maximum preflight depth "
+                    f"{MAX_PREFLIGHT_DEPTH}"
+                )
+            required_nodes = len(value) * 2
+            remaining_nodes = MAX_PREFLIGHT_NODES - nodes - len(stack)
+            if required_nodes > remaining_nodes:
+                raise LearningEventError(
+                    f"{path} exceeds remaining preflight node budget "
+                    f"({remaining_nodes} available, {required_nodes} required)"
+                )
+            for key, item in value.items():
+                if isinstance(key, str) and len(key) > MAX_IDENTIFIER_CHARS:
+                    raise LearningEventError(
+                        f"{path} field name exceeds {MAX_IDENTIFIER_CHARS} characters"
+                    )
+                item_path = f"{path}.{key}" if isinstance(key, str) else path
+                stack.append((f"{path} field name", key, depth + 1))
+                stack.append((item_path, item, depth + 1))
+        elif isinstance(value, (list, tuple)):
+            if value and depth >= MAX_PREFLIGHT_DEPTH:
+                raise LearningEventError(
+                    f"{path} exceeds maximum preflight depth "
+                    f"{MAX_PREFLIGHT_DEPTH}"
+                )
+            required_nodes = len(value)
+            remaining_nodes = MAX_PREFLIGHT_NODES - nodes - len(stack)
+            if required_nodes > remaining_nodes:
+                raise LearningEventError(
+                    f"{path} exceeds remaining preflight node budget "
+                    f"({remaining_nodes} available, {required_nodes} required)"
+                )
+            stack.extend(
+                (f"{path}[{index}]", item, depth + 1)
+                for index, item in enumerate(value)
+            )
+
+
+def _bounded_sequence(value: Any, field: str, maximum: int) -> None:
+    if isinstance(value, (list, tuple)) and len(value) > maximum:
+        raise LearningEventError(f"{field} exceeds {maximum} items")
+
+
+def _assert_canonical_event_size(
+    *,
+    tenant_id: str,
+    analysis_id: str,
+    event_time: str,
+    available_time: str,
+    as_of_time: str,
+    provenance: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> None:
+    entity_id = f"analysis-quality:{analysis_id}"
+    envelope = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "historical_non_evidentiary",
+        "tenant_id": tenant_id,
+        "entity_id": entity_id,
+        "revision": 1,
+        "identity": canonical_identity(
+            tenant_id=tenant_id,
+            kind="historical_non_evidentiary",
+            entity_id=entity_id,
+            revision=1,
+        ),
+        "event_time": event_time,
+        "available_time": available_time,
+        "as_of_time": as_of_time,
+        "provenance": provenance,
+        "payload": payload,
+    }
+    try:
+        size = len(
+            json.dumps(
+                envelope,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise LearningEventError("analysis-quality event JSON is invalid") from None
+    if size > MAX_CANONICAL_EVENT_BYTES:
+        raise LearningEventError(
+            "analysis-quality canonical event exceeds "
+            f"{MAX_CANONICAL_EVENT_BYTES} bytes (got {size})"
+        )
+
+
 def _required_string(snapshot: Mapping[str, Any], key: str) -> str:
-    return _required_string_value(snapshot.get(key), key)
+    return _required_identifier_value(snapshot.get(key), key)
 
 
 def _required_string_value(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise LearningEventError(f"{field} is required for analysis-quality event")
     return value
+
+
+def _required_identifier_value(value: Any, field: str) -> str:
+    result = _required_string_value(value, field)
+    if len(result) > MAX_IDENTIFIER_CHARS:
+        raise LearningEventError(
+            f"{field} exceeds {MAX_IDENTIFIER_CHARS} characters"
+        )
+    return result
 
 
 def _strict_object(

@@ -42,6 +42,21 @@ and `trust`. Unknown fields—including outcome, label, diagnostic, approval, or
 activation surfaces—fail closed even when the caller recomputes the snapshot
 hash.
 
+## Resource bounds
+
+The builder fails closed before copying, sorting, hashing, or deep-freezing
+caller-controlled collections. The canonical event is capped at 1 MiB, matching
+the immutable file store's per-event limit. Additional hard limits are 1,024
+Evidence items, 4,096 source-availability timestamps, 256 stage metrics, 256
+source-distribution buckets, 512 characters for identities/field names, and
+64 Ki characters for any individual text value. Preflight traversal is capped
+at 100,000 structural nodes to reject deliberately nested wrong-type input.
+Nesting is independently capped at 64 levels; the depth check runs before
+constructing child paths, so cyclic or single-child adversarial containers
+cannot cause quadratic path growth. Exactly-at-limit inputs are accepted when
+otherwise valid; limit-plus-one inputs are rejected with the specific field and
+limit in the error.
+
 ## Delivery semantics
 
 The emission boundary accepts only an append-only sink:

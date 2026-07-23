@@ -1,5 +1,6 @@
 import pytest
 
+import trustforge.analysis_quality_event as analysis_quality
 from trustforge.analysis_quality_emission import (
     AnalysisQualityConflictError,
     AnalysisQualityEmissionError,
@@ -69,3 +70,19 @@ def test_append_exception_propagates_without_false_success():
     with pytest.raises(RuntimeError) as raised:
         emit(snapshot(), Sink())
     assert raised.value is failure
+
+
+def test_oversized_input_is_rejected_before_sink_append(monkeypatch):
+    calls = 0
+
+    class Sink:
+        def append(self, event):
+            nonlocal calls
+            calls += 1
+            return "created"
+
+    value = snapshot()
+    monkeypatch.setattr(analysis_quality, "MAX_EVIDENCE_ITEMS", 1)
+    with pytest.raises(LearningEventError, match="evidence_snapshot exceeds 1 items"):
+        emit(value, Sink())
+    assert calls == 0

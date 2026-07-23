@@ -1,8 +1,18 @@
 import copy
+from collections.abc import Mapping
 
 import pytest
 
+import trustforge.analysis_quality_event as analysis_quality
 from trustforge.analysis_quality_event import (
+    MAX_CANONICAL_EVENT_BYTES,
+    MAX_EVIDENCE_ITEMS,
+    MAX_IDENTIFIER_CHARS,
+    MAX_PREFLIGHT_DEPTH,
+    MAX_SOURCE_AVAILABLE_TIMES,
+    MAX_SOURCE_DISTRIBUTION_BUCKETS,
+    MAX_STAGE_METRICS,
+    MAX_TEXT_CHARS,
     build_analysis_quality_event as _build_analysis_quality_event,
 )
 from trustforge.learning_event_contract import (
@@ -416,3 +426,166 @@ def test_evidence_snapshot_rejects_every_unknown_field_even_with_recomputed_hash
 
     with pytest.raises(LearningEventError, match=rf"unknown fields: {forbidden}"):
         build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+
+
+@pytest.mark.parametrize(
+    ("field", "maximum"),
+    [
+        ("evidence_snapshot", MAX_EVIDENCE_ITEMS),
+        ("source_available_times", MAX_SOURCE_AVAILABLE_TIMES),
+        ("stage_metrics", MAX_STAGE_METRICS),
+    ],
+)
+def test_collection_preflight_accepts_exact_limit_and_rejects_limit_plus_one(
+    monkeypatch, field, maximum
+):
+    value = snapshot()
+    # Isolate the cheap boundary itself; semantic validation of repeated
+    # entries is deliberately later.
+    monkeypatch.setattr(
+        analysis_quality,
+        {
+            "evidence_snapshot": "MAX_EVIDENCE_ITEMS",
+            "source_available_times": "MAX_SOURCE_AVAILABLE_TIMES",
+            "stage_metrics": "MAX_STAGE_METRICS",
+        }[field],
+        maximum,
+    )
+    value[field] = [value[field][0]] * maximum
+    analysis_quality._preflight_bounds(
+        value, trusted_pit(value), trusted_provenance(value)
+    )
+    value[field].append(value[field][0])
+    with pytest.raises(LearningEventError, match=rf"{field} exceeds {maximum} items"):
+        analysis_quality._preflight_bounds(
+            value, trusted_pit(value), trusted_provenance(value)
+        )
+
+
+def test_source_distribution_preflight_boundary():
+    value = snapshot()
+    distribution = {
+        f"source-{index}": 0
+        for index in range(MAX_SOURCE_DISTRIBUTION_BUCKETS)
+    }
+    value["evidence_stats"]["source_distribution"] = distribution
+    analysis_quality._preflight_bounds(
+        value, trusted_pit(value), trusted_provenance(value)
+    )
+    distribution["one-too-many"] = 0
+    with pytest.raises(LearningEventError, match="source_distribution exceeds"):
+        analysis_quality._preflight_bounds(
+            value, trusted_pit(value), trusted_provenance(value)
+        )
+
+
+def test_identifier_string_boundary_is_diagnostic():
+    value = snapshot()
+    value["analysis_id"] = "a" * MAX_IDENTIFIER_CHARS
+    event = build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+    assert event.payload["analysis_id"] == value["analysis_id"]
+
+    value["analysis_id"] += "a"
+    with pytest.raises(LearningEventError, match=rf"analysis_id exceeds {MAX_IDENTIFIER_CHARS}"):
+        build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+
+
+def test_question_text_boundary_is_diagnostic():
+    value = snapshot()
+    value["question"] = "q" * MAX_TEXT_CHARS
+    build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+
+    value["question"] += "q"
+    with pytest.raises(
+        LearningEventError,
+        match=rf"snapshot.question exceeds {MAX_TEXT_CHARS} characters",
+    ):
+        build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+
+
+def test_canonical_event_byte_boundary(monkeypatch):
+    value = snapshot()
+    event = build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+    exact_size = len(serialize_learning_event(event).encode("utf-8"))
+    assert exact_size < MAX_CANONICAL_EVENT_BYTES
+
+    monkeypatch.setattr(
+        analysis_quality, "MAX_CANONICAL_EVENT_BYTES", exact_size
+    )
+    build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+    monkeypatch.setattr(
+        analysis_quality, "MAX_CANONICAL_EVENT_BYTES", exact_size - 1
+    )
+    with pytest.raises(LearningEventError, match=rf"exceeds {exact_size - 1} bytes"):
+        build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+
+
+def test_wrong_type_nested_sequence_is_rejected_before_iteration(monkeypatch):
+    class BombList(list):
+        def __iter__(self):
+            raise AssertionError("oversized list must not be iterated")
+
+    value = snapshot()
+    value["evidence_snapshot"][0]["attacker_extension"] = BombList([0] * 1000)
+    monkeypatch.setattr(analysis_quality, "MAX_PREFLIGHT_NODES", 500)
+
+    with pytest.raises(LearningEventError, match="remaining preflight node budget"):
+        analysis_quality._preflight_bounds(
+            value, trusted_pit(value), trusted_provenance(value)
+        )
+
+
+def test_wrong_type_nested_mapping_is_rejected_before_iteration(monkeypatch):
+    class BombMapping(Mapping):
+        def __len__(self):
+            return 1000
+
+        def __iter__(self):
+            raise AssertionError("oversized mapping must not be iterated")
+
+        def __getitem__(self, key):
+            raise AssertionError("oversized mapping must not be read")
+
+        def items(self):
+            raise AssertionError("oversized mapping must not be iterated")
+
+    value = snapshot()
+    value["evidence_snapshot"][0]["attacker_extension"] = BombMapping()
+    monkeypatch.setattr(analysis_quality, "MAX_PREFLIGHT_NODES", 500)
+
+    with pytest.raises(LearningEventError, match="remaining preflight node budget"):
+        analysis_quality._preflight_bounds(
+            value, trusted_pit(value), trusted_provenance(value)
+        )
+
+
+def test_preflight_depth_accepts_exact_limit_and_rejects_limit_plus_one():
+    def nested_list(levels):
+        value = "leaf"
+        for _ in range(levels):
+            value = [value]
+        return value
+
+    # Root snapshot field consumes depth 1; 63 containers place the scalar leaf
+    # exactly at depth 64.
+    exactly = {"attacker_extension": nested_list(MAX_PREFLIGHT_DEPTH - 1)}
+    analysis_quality._preflight_bounds(exactly, {}, {})
+
+    too_deep = {"attacker_extension": nested_list(MAX_PREFLIGHT_DEPTH)}
+    with pytest.raises(
+        LearningEventError,
+        match=rf"maximum preflight depth {MAX_PREFLIGHT_DEPTH}",
+    ):
+        analysis_quality._preflight_bounds(too_deep, {}, {})
+
+
+def test_self_referential_sequence_fails_at_depth_limit():
+    cycle = []
+    cycle.append(cycle)
+    value = {"attacker_extension": cycle}
+
+    with pytest.raises(
+        LearningEventError,
+        match=rf"maximum preflight depth {MAX_PREFLIGHT_DEPTH}",
+    ):
+        analysis_quality._preflight_bounds(value, {}, {})
