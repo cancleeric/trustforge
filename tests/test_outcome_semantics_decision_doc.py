@@ -1,9 +1,10 @@
 """Structural guards for the pending issue #501 decision record."""
 
-from pathlib import Path
-import re
 from datetime import datetime
 from decimal import Decimal
+import json
+from pathlib import Path
+import re
 
 
 DOC = (
@@ -88,7 +89,14 @@ def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
     assert len(set(prediction_ids)) == len(rows) - 1
     assert prediction_ids.count("p20") == 2
     assert all(all(row[column] for column in headers) for row in rows)
-    assert all(len(row["expected"].split(";", 1)[0].split("/")) == 10 for row in rows)
+    for row in rows:
+        assert isinstance(json.loads(row["calendar_sessions"]), list)
+        assert isinstance(json.loads(row["bars"]), list)
+        expected = json.loads(row["expected"])
+        assert {
+            "maturity", "reason", "start", "target", "return", "directional",
+            "abs_risk", "downside", "hit", "version",
+        } <= expected.keys()
 
 
 def test_fixture_table_covers_required_adversarial_cases() -> None:
@@ -131,6 +139,32 @@ def test_fixture_primary_timestamps_are_rfc3339_and_pit_ordered() -> None:
             assert event_at > available_at
         else:
             assert event_at <= available_at
+        for session in json.loads(row["calendar_sessions"]):
+            assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", session["label"])
+            assert session["status"] in {"open", "closed", "unknown"}
+            if session["scheduled_close_at"] is not None:
+                _parse_rfc3339(session["scheduled_close_at"])
+        for bar in json.loads(row["bars"]):
+            assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", bar["session"])
+            _parse_rfc3339(bar["event_at"])
+            _parse_rfc3339(bar["available_at"])
+            Decimal(bar["close"])
+
+
+def test_session_close_mapping_is_deterministic() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    for row in rows:
+        sessions = {item["label"]: item for item in json.loads(row["calendar_sessions"])}
+        for bar in json.loads(row["bars"]):
+            session = sessions[bar["session"]]
+            assert session["status"] == "open"
+            assert bar["event_at"] == session["scheduled_close_at"]
+        if row["calendar_id"] == "crypto:UTC:v1":
+            for session in sessions.values():
+                label_start = datetime.fromisoformat(session["label"] + "T00:00:00+00:00")
+                close = _parse_rfc3339(session["scheduled_close_at"])
+                assert (close - label_start).total_seconds() == 86400
 
 
 def test_numeric_formula_and_revision_pair_contract() -> None:
@@ -138,7 +172,7 @@ def test_numeric_formula_and_revision_pair_contract() -> None:
     _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
     by_id = {row["fixture_id"]: row for row in rows}
 
-    after = by_id["after_cutoff"]["expected"].split("/", 5)[4]
+    after = json.loads(by_id["after_cutoff"]["expected"])["return"]
     assert abs(Decimal(after) - (Decimal(106) / Decimal(102) - 1) * 100) <= Decimal("0.00000001")
     assert by_id["cutoff_equal"]["prediction_available_at"] == "2026-01-01T23:55:00Z"
 
@@ -146,8 +180,35 @@ def test_numeric_formula_and_revision_pair_contract() -> None:
     second = by_id["revision_v2"]
     assert first["prediction_id"] == second["prediction_id"] == "p20"
     assert first["horizon"] == second["horizon"] == "T+1"
-    assert "outcome_id=o1" in first["expected"] and "canonical=o1" in first["expected"]
-    assert "outcome_id=o2" in second["expected"] and "supersedes=o1" in second["expected"]
+    first_expected = json.loads(first["expected"])
+    second_expected = json.loads(second["expected"])
+    assert first_expected["outcome_id"] == first_expected["canonical"] == "o1"
+    assert second_expected["outcome_id"] == second_expected["canonical"] == "o2"
+    assert second_expected["supersedes"] == "o1"
+
+
+def test_labeled_directional_fixture_formulas() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    tolerance = Decimal("0.00000001")
+    signs = {"bullish": Decimal(1), "bearish": Decimal(-1)}
+    for row in rows:
+        expected = json.loads(row["expected"])
+        bars = json.loads(row["bars"])
+        if expected["maturity"] != "labeled" or row["direction"] not in signs:
+            continue
+        by_session = {bar["session"]: Decimal(bar["close"]) for bar in bars}
+        if expected["start"] not in by_session or expected["target"] not in by_session:
+            continue
+        start = by_session[expected["start"]]
+        target = by_session[expected["target"]]
+        calculated_return = (target / start - 1) * 100
+        calculated_directional = calculated_return * signs[row["direction"]]
+        assert abs(Decimal(expected["return"]) - calculated_return) <= tolerance
+        assert abs(Decimal(expected["directional"]) - calculated_directional) <= tolerance
+        assert abs(Decimal(expected["abs_risk"]) - abs(calculated_return)) <= tolerance
+        assert abs(Decimal(expected["downside"]) - min(calculated_return, Decimal(0))) <= tolerance
+        assert expected["hit"] is (calculated_directional > 0)
 
 
 def test_revision_identity_and_reconciliation_are_explicit() -> None:
