@@ -145,6 +145,20 @@ def test_peer_metrics_reject_invalid_values_and_windows() -> None:
             observed_at=datetime(2026, 1, 2),
         )
 
+    with pytest.raises(ValueError, match="observed_at must be at or after window_end"):
+        PeerMetricsSnapshot(
+            asset_id="asset:arb",
+            observed_tps=metric(1),
+            tvl=metric(1, "usd"),
+            gas_fee=metric(1, "usd/transfer"),
+            activity_breakdown={"swap": metric(1)},
+            window_start=utc(2026, 1, 1),
+            window_end=utc(2026, 1, 2),
+            observed_at=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+        )
+
+    assert snapshot().observed_at == snapshot().window_end
+
     with pytest.raises(ValueError, match="activity_breakdown must map"):
         PeerMetricsSnapshot(
             asset_id="asset:arb",

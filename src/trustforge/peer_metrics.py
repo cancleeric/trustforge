@@ -73,6 +73,8 @@ class PeerMetricsSnapshot:
                 raise ValueError(f"PeerMetricsSnapshot.{field_name} must be timezone-aware")
         if self.window_end <= self.window_start:
             raise ValueError("PeerMetricsSnapshot.window_end must be after window_start")
+        if self.observed_at < self.window_end:
+            raise ValueError("PeerMetricsSnapshot.observed_at must be at or after window_end")
 
     def to_dict(self) -> dict[str, Any]:
         return {
