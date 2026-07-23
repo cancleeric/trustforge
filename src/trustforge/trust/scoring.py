@@ -152,7 +152,11 @@ class ScoredClaim:
 
 def _to_core_scoring_claim(claim: Claim) -> _CoreKernelClaim:
     """Detach one mutable app claim; nonfinite time becomes unknown only in core."""
+    if type(claim) is not Claim:
+        raise ValueError("claim must be an exact Claim")
     document = claim.doc
+    if type(document) is not Document:
+        raise ValueError("claim document must be an exact Document")
     raw_timestamp = document.ts
     if type(raw_timestamp) not in {int, float}:
         raise ValueError("document timestamp must be an exact number")
@@ -1428,6 +1432,70 @@ def build_stance_fn(
 
 
 # --- 主評分 --------------------------------------------------------------
+def _preflight_kernel_resolution(
+    claims: list[Claim],
+    now: float,
+    weights: dict | None,
+    dynamic_reputation: bool,
+    reputation_iterations: int,
+    offline: bool,
+    stance_fn: Callable[[str, str], str] | None,
+) -> dict:
+    """Validate all resolver inputs before provider/cache/stance work."""
+    if type(now) not in {int, float}:
+        raise ValueError("now must be an exact finite nonnegative number")
+    try:
+        valid_now = math.isfinite(float(now)) and now >= 0
+    except OverflowError:
+        valid_now = False
+    if not valid_now:
+        raise ValueError("now must be an exact finite nonnegative number")
+    if type(claims) is not list or not all(type(claim) is Claim for claim in claims):
+        raise ValueError("claims must be an exact list of exact Claim values")
+    if not all(type(claim.doc) is Document for claim in claims):
+        raise ValueError("claim documents must be exact Document values")
+    # Convert before reading IDs into a set: conversion validates exact primitive
+    # fields, so hostile __hash__/__eq__ hooks can never execute below.
+    detached = tuple(_to_core_scoring_claim(claim) for claim in claims)
+    claim_ids = tuple(claim.id for claim in detached)
+    if any(not claim_id for claim_id in claim_ids):
+        raise ValueError("claim IDs must be nonempty exact strings")
+    if len(set(claim_ids)) != len(claim_ids):
+        raise ValueError("duplicate claim IDs are not allowed")
+    if (
+        type(reputation_iterations) is not int
+        or not 1 <= reputation_iterations <= MAX_REPUTATION_ITERATIONS
+    ):
+        raise ValueError(
+            f"reputation_iterations must be an exact integer in [1, {MAX_REPUTATION_ITERATIONS}]"
+        )
+    if type(dynamic_reputation) is not bool:
+        raise ValueError("dynamic_reputation must be an exact boolean")
+    if type(offline) is not bool:
+        raise ValueError("offline must be an exact boolean")
+    if stance_fn is not None and not callable(stance_fn):
+        raise ValueError("stance_fn must be callable or None")
+    resolved_weights = DEFAULT_WEIGHTS if weights is None else weights
+    if type(resolved_weights) is not dict:
+        raise ValueError("weights must contain exactly src, corr, rec, and manip")
+    weight_keys = tuple(resolved_weights.keys())
+    if not all(type(key) is str for key in weight_keys) or set(weight_keys) != {
+        "src", "corr", "rec", "manip"
+    }:
+        raise ValueError("weights must contain exactly src, corr, rec, and manip")
+    for key in ("src", "corr", "rec", "manip"):
+        value = resolved_weights[key]
+        if type(value) not in {int, float}:
+            raise ValueError(f"weight {key} must be a finite number in [0, 1]")
+        try:
+            valid_weight = math.isfinite(value) and 0 <= value <= 1
+        except OverflowError:
+            valid_weight = False
+        if not valid_weight:
+            raise ValueError(f"weight {key} must be a finite number in [0, 1]")
+    return resolved_weights
+
+
 def resolve_kernel_claim_resolutions(
     claims: list[Claim],
     now: float,
@@ -1443,7 +1511,10 @@ def resolve_kernel_claim_resolutions(
     here, while the returned immutable values can be consumed by
     :func:`trustforge_core.run_kernel` without I/O or repeated provider calls.
     """
-    w = weights or DEFAULT_WEIGHTS
+    w = _preflight_kernel_resolution(
+        claims, now, weights, dynamic_reputation, reputation_iterations, offline,
+        stance_fn,
+    )
     info_flags_by_id = _coordination_signals(claims) if claims else {}
     dynamic_map: dict[str, float] | None = None
     trace_by_source: dict[str, dict] | None = None
@@ -1547,49 +1618,16 @@ def resolve_kernel_run_resolution(
     TODO(#420 PR-B): make this seam the only production scoring composition;
     PR-A deliberately leaves orchestrator and AnalysisFlow routing unchanged.
     """
-    if type(now) not in {int, float}:
-        raise ValueError("now must be an exact finite nonnegative number")
-    try:
-        valid_now = math.isfinite(float(now)) and now >= 0
-    except OverflowError:
-        valid_now = False
-    if not valid_now:
-        raise ValueError("now must be an exact finite nonnegative number")
-    if type(claims) is not list or not all(type(claim) is Claim for claim in claims):
-        raise ValueError("claims must be an exact list of exact Claim values")
-    claim_ids = tuple(claim.id for claim in claims)
-    if any(type(claim_id) is not str or not claim_id for claim_id in claim_ids):
-        raise ValueError("claim IDs must be nonempty exact strings")
-    if len(set(claim_ids)) != len(claim_ids):
-        raise ValueError("duplicate claim IDs are not allowed")
-    # Rebuild the complete scoring-facing graph before a callback can run.
-    for claim in claims:
-        _to_core_scoring_claim(claim)
-    if (
-        type(reputation_iterations) is not int
-        or not 1 <= reputation_iterations <= MAX_REPUTATION_ITERATIONS
-    ):
-        raise ValueError(
-            f"reputation_iterations must be an exact integer in [1, {MAX_REPUTATION_ITERATIONS}]"
-        )
-    if type(dynamic_reputation) is not bool:
-        raise ValueError("dynamic_reputation must be an exact boolean")
-    if type(offline) is not bool:
-        raise ValueError("offline must be an exact boolean")
+    resolved_weights = _preflight_kernel_resolution(
+        claims, now, weights, dynamic_reputation, reputation_iterations, offline,
+        stance_fn,
+    )
     if type(stance_pair_budget) is not int or stance_pair_budget < 0:
         raise ValueError("stance_pair_budget must be an exact nonnegative integer")
     if stance_fn is not None and not callable(stance_fn):
         raise ValueError("stance_fn must be callable or None")
     if stance_remaining_time_fn is not None and not callable(stance_remaining_time_fn):
         raise ValueError("stance_remaining_time_fn must be callable or None")
-    resolved_weights = DEFAULT_WEIGHTS if weights is None else weights
-    if type(resolved_weights) is not dict or set(resolved_weights) != {
-        "src",
-        "corr",
-        "rec",
-        "manip",
-    }:
-        raise ValueError("weights must contain exactly src, corr, rec, and manip")
     weight_table = tuple(
         (key, resolved_weights[key]) for key in ("src", "corr", "rec", "manip")
     )
@@ -1708,7 +1746,14 @@ def score(
         weights=w,
         stance_fn=stance_fn,
         dynamic_reputation=dynamic_reputation,
-        reputation_iterations=reputation_iterations,
+        # Preserve the legacy public score() contract, which clamps explicit
+        # integer iteration counts.  The lower formal-run resolver itself is
+        # strict and rejects out-of-range values before any callback.
+        reputation_iterations=(
+            max(1, min(reputation_iterations, MAX_REPUTATION_ITERATIONS))
+            if type(reputation_iterations) is int
+            else reputation_iterations
+        ),
         offline=offline,
     )
     out: list[ScoredClaim] = []

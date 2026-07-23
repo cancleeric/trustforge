@@ -8,7 +8,10 @@ from trustforge.agent.kernel_mapper import to_legacy_scoring, to_resolved_kernel
 from trustforge.direction_resolution import DIRECTION_POLICY_VERSION, ResolvedDirection
 from trustforge.ingestion.base import Document
 from trustforge.trust.scoring import Claim, aggregate, score
-from trustforge.trust.scoring import resolve_kernel_run_resolution
+from trustforge.trust.scoring import (
+    resolve_kernel_claim_resolutions,
+    resolve_kernel_run_resolution,
+)
 from trustforge_core import run_kernel
 
 
@@ -423,3 +426,94 @@ def test_direct_resolution_rejects_duplicate_and_non_claims_before_callback() ->
             stance_fn=stance,
         )
     assert calls == 0
+
+
+@pytest.mark.parametrize(
+    ("now", "kwargs"),
+    [
+        (float("nan"), {}),
+        (110.0, {"weights": {"src": 2.0, "corr": 0.2, "rec": 0.2, "manip": 0.2}}),
+        (110.0, {"weights": {"src": 10**1000, "corr": 0.2, "rec": 0.2, "manip": 0.2}}),
+        (110.0, {"reputation_iterations": 0}),
+        (110.0, {"dynamic_reputation": 1}),
+        (110.0, {"offline": 0}),
+    ],
+)
+def test_lower_resolution_preflight_runs_before_callback(now: float, kwargs: dict) -> None:
+    calls = 0
+
+    def stance(_left: str, _right: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "neutral"
+
+    with pytest.raises(ValueError):
+        resolve_kernel_claim_resolutions(_claims(), now, stance_fn=stance, **kwargs)
+    assert calls == 0
+
+
+def test_output_adapter_rejects_invalid_values_and_summary_graph() -> None:
+    claims = _claims()
+    direction = ResolvedDirection("neutral", DIRECTION_POLICY_VERSION, "no-signal", (), "none")
+    output = run_kernel(to_resolved_kernel_input(
+        claims, pit_epoch=110.0, coin="BTC", query="BTC", direction=direction,
+        dynamic_reputation=False,
+    ))
+    for field, value, match in (
+        ("trust_score", 999.0, "trust_score must be in"),
+        ("confidence", -5.0, "confidence must be in"),
+        ("independent_sources", 999, "independent_sources must match"),
+        ("abstain", False, "abstain must match"),
+    ):
+        object.__setattr__(output, field, value)
+        with pytest.raises(ValueError, match=match):
+            to_legacy_scoring(output, claims)
+        object.__setattr__(output, field, run_kernel(to_resolved_kernel_input(
+            claims, pit_epoch=110.0, coin="BTC", query="BTC", direction=direction,
+            dynamic_reputation=False,
+        )).__getattribute__(field))
+
+
+def test_output_adapter_requires_complete_app_claim_graph_equivalence() -> None:
+    claims = _claims()
+    direction = ResolvedDirection("neutral", DIRECTION_POLICY_VERSION, "no-signal", (), "none")
+    output = run_kernel(to_resolved_kernel_input(
+        claims, pit_epoch=110.0, coin="BTC", query="BTC", direction=direction,
+        dynamic_reputation=False,
+    ))
+    forged = _claims()
+    forged[0].text = "attacker replacement"
+    with pytest.raises(ValueError, match="complete app claim graph"):
+        to_legacy_scoring(output, forged)
+
+
+def test_hostile_app_claim_values_are_rejected_without_hooks() -> None:
+    hooks = 0
+
+    class Hostile:
+        def __hash__(self) -> int:
+            nonlocal hooks
+            hooks += 1
+            raise AssertionError("hook executed")
+
+        def __eq__(self, _other: object) -> bool:
+            nonlocal hooks
+            hooks += 1
+            raise AssertionError("hook executed")
+
+        def __str__(self) -> str:
+            nonlocal hooks
+            hooks += 1
+            raise AssertionError("hook executed")
+
+    claim = _claims()[0]
+    claim.id = Hostile()  # type: ignore[assignment]
+    with pytest.raises(ValueError):
+        resolve_kernel_claim_resolutions([claim], 110.0, stance_fn=lambda *_: "neutral")
+    assert hooks == 0
+
+    claim = _claims()[0]
+    claim.doc = Hostile()  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="exact Document"):
+        resolve_kernel_claim_resolutions([claim], 110.0, stance_fn=lambda *_: "neutral")
+    assert hooks == 0

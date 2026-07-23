@@ -7,7 +7,7 @@ TrustForge ``Claim``/``Document`` shapes, while ``trustforge_core`` may not.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from trustforge_core import (
@@ -23,28 +23,34 @@ from trustforge_core import (
 )
 
 from ..direction_resolution import ResolvedDirection
+from ..ingestion.base import Document
 from ..trust.scoring import Claim, ScoredClaim, TrustedBrief
 
 
 def _freeze_json(value: Any) -> JsonValue:
     """Convert JSON-compatible application metadata to immutable values."""
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or type(value) in {bool, int, str}:
         return value
-    if isinstance(value, float):
+    if type(value) is float:
         return value if math.isfinite(value) else str(value)
-    if isinstance(value, Mapping):
+    if type(value) is dict:
+        if not all(type(key) is str for key in value):
+            raise ValueError("metadata keys must be exact strings")
         return tuple(
-            (str(key), _freeze_json(item))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            (key, _freeze_json(value[key])) for key in sorted(value)
         )
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if type(value) in {list, tuple}:
         return tuple(_freeze_json(item) for item in value)
-    return str(value)
+    raise ValueError("metadata must contain only exact JSON values")
 
 
 def to_kernel_claim(claim: Claim) -> KernelClaim:
     """Normalize one application claim into the independent core contract."""
+    if type(claim) is not Claim:
+        raise ValueError("claim must be an exact Claim")
     document = claim.doc
+    if type(document) is not Document:
+        raise ValueError("document must be an exact Document")
     metadata = _freeze_json(document.meta)
     if not isinstance(metadata, tuple):
         metadata = (("value", metadata),)
@@ -172,10 +178,16 @@ def to_legacy_scoring(
     """
     validate_kernel_output_graph(output)
     normalized_claims = list(claims)
-    claim_ids = tuple(claim.id for claim in normalized_claims)
+    normalized_kernel_claims = tuple(to_kernel_claim(claim) for claim in normalized_claims)
+    claim_ids = tuple(claim.id for claim in normalized_kernel_claims)
     output_ids = tuple(item.claim.id for item in output.scored_claims)
     if len(set(claim_ids)) != len(claim_ids) or output_ids != claim_ids:
         raise ValueError("kernel output must match app claim IDs exactly and in order")
+    if any(
+        app_claim != item.claim
+        for app_claim, item in zip(normalized_kernel_claims, output.scored_claims, strict=True)
+    ):
+        raise ValueError("kernel output must match the complete app claim graph")
 
     legacy_by_id: dict[str, ScoredClaim] = {}
     scored: list[ScoredClaim] = []

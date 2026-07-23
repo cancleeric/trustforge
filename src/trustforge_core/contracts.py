@@ -556,6 +556,12 @@ def validate_kernel_output_graph(value: KernelOutput) -> None:
         value.contrarian,
         value.decision_state,
     )
+    if not 0.0 <= value.trust_score <= 1.0:
+        raise ValueError("trust_score must be in [0, 1]")
+    if not 0.0 <= value.confidence <= 1.0:
+        raise ValueError("confidence must be in [0, 1]")
+    if value.abstain != (value.decision_state == "abstain"):
+        raise ValueError("abstain must match decision_state")
     for item in value.scored_claims:
         validate_scored_claim_graph(item)
     claim_ids = tuple(item.claim.id for item in value.scored_claims)
@@ -574,3 +580,8 @@ def validate_kernel_output_graph(value: KernelOutput) -> None:
         raise ValueError("supporting and contrarian must not overlap")
     if value.supporting_count != len(value.supporting):
         raise ValueError("supporting_count must match supporting")
+    canonical_supporting_sources = {
+        canonical_source(item.claim.document.source) for item in value.supporting
+    }
+    if value.independent_sources != len(canonical_supporting_sources):
+        raise ValueError("independent_sources must match canonical supporting sources")
