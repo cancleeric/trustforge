@@ -2,7 +2,7 @@
 
 > Issue: #501
 >
-> Status: **PENDING CEO DISPOSITION — NOT APPROVED FOR IMPLEMENTATION**
+> Status: **CEO DISPOSITION RECORDED — NOT APPROVED FOR IMPLEMENTATION / PRODUCTION SCOPE EMPTY**
 >
 > Owner: CEO / product owner
 >
@@ -12,18 +12,18 @@
 
 ## 1. 決策摘要
 
-本文件定義 outcome labeler 所需的候選契約。下列推薦均為工程分析，**不是產品決策**；CEO 必須在第 10 節逐項留下書面 disposition，所有項目通過前不得把推薦值當成 production default。
+本文件定義 outcome labeler 所需的語意契約。CEO disposition 已在第 10 節逐項記錄並綁定核准的 spec A；這只核准產品語意，**不核准實作、production provider 或 production asset scope**。
 
 | ID | 待決問題 | 選項 | 工程推薦 | 主要風險 | 狀態 |
 |---|---|---|---|---|---|
-| D1 | 市場日曆 | A. 資產／venue 的正式交易日曆；B. UTC 日曆日；C. OHLCV 第 N 根 bar | A；24/7 資產使用 UTC 日曆 | C 會把缺 bar、停牌誤當不存在的時間；B 不適合有休市的市場 | pending CEO disposition |
-| D2 | T+N 終點 | A. 第 N 個合格交易 session 的 official close；B. elapsed N×24h；C. 第 N 根現有 bar | A | A 需要可靠 calendar/venue；B/C 跨假日語意不穩 | pending CEO disposition |
-| D3 | 安全起點價格 | A. event 所屬 session close；B. availability-cutoff 後第一個安全 close；C. event 時即時價 | B；只能由 `prediction_available_at` 與 cutoff 判定 | A 對晚到 prediction 造成 leakage；C 難重現 | pending CEO disposition |
-| D4 | 中性 outcome | A. 不評分；B. 固定 ±2%；C. horizon/volatility-aware band | A（首版）；另報 realized move | B/C 會新增未驗證產品閾值；A 無法校準中性預測 | pending CEO disposition |
-| D5 | hit tie | A. directional return `> 0` 才 hit；B. `>= 0`；C. flat 為 neutral | A | B 把零報酬算成功；C 需要先決定 neutral 契約 | pending CEO disposition |
-| D6 | 公司行動／股息 | A. split-adjusted price return；B. dividend-adjusted total return；C. raw price return + action ledger；D. unavailable | 首版 A：同 provider、同 methodology version、以 outcome `as_of` 可得的 split-adjusted close；股息不計 | A 不代表投資人總報酬；B 需要可靠 dividend/reinvestment 契約；回溯調整會改寫 latest | pending CEO disposition |
-| D7 | 行情修訂 | A. immutable first-known；B. latest truth；C. 雙版本 | C | 單用 A 犧牲正確性；單用 B 破壞重現性 | pending CEO disposition |
-| D8 | 晚到資料 | A. cutoff 後永久 unavailable；B. cutoff 後產生新 revision；C. 無限期等待 | B，current 統計按 `as_of` 選 canonical revision | A 浪費可恢復資料；B 需版本化；C 造成無限漂移 | pending CEO disposition |
+| D1 | 市場日曆 | A. 資產／venue 的正式交易日曆；B. UTC 日曆日；C. OHLCV 第 N 根 bar | A；24/7 資產使用 UTC 日曆 | C 會把缺 bar、停牌誤當不存在的時間；B 不適合有休市的市場 | disposition recorded |
+| D2 | T+N 終點 | A. 第 N 個合格交易 session 的 official close；B. elapsed N×24h；C. 第 N 根現有 bar | A | A 需要可靠 calendar/venue；B/C 跨假日語意不穩 | disposition recorded |
+| D3 | 安全起點價格 | A. event 所屬 session close；B. availability-cutoff 後第一個安全 close；C. event 時即時價 | B；只能由 `prediction_available_at` 與 cutoff 判定 | A 對晚到 prediction 造成 leakage；C 難重現 | disposition recorded |
+| D4 | 中性 outcome | A. 不評分；B. 固定 ±2%；C. horizon/volatility-aware band | A（首版）；另報 realized move | B/C 會新增未驗證產品閾值；A 無法校準中性預測 | disposition recorded |
+| D5 | hit tie | A. directional return `> 0` 才 hit；B. `>= 0`；C. flat 為 neutral | A | B 把零報酬算成功；C 需要先決定 neutral 契約 | disposition recorded |
+| D6 | 公司行動／股息 | A. split-adjusted price return；B. dividend-adjusted total return；C. raw price return + action ledger；D. unavailable | 首版 A：同 provider、同 methodology version、以 outcome `as_of` 可得的 split-adjusted close；股息不計 | A 不代表投資人總報酬；B 需要可靠 dividend/reinvestment 契約；回溯調整會改寫 latest | semantic disposition recorded; implementation deferred |
+| D7 | 行情修訂 | A. immutable first-known；B. latest truth；C. 雙版本 | C | 單用 A 犧牲正確性；單用 B 破壞重現性 | disposition recorded |
+| D8 | 晚到資料 | A. cutoff 後永久 unavailable；B. cutoff 後產生新 revision；C. 無限期等待 | B，current 統計按 `as_of` 選 canonical revision | A 浪費可恢復資料；B 需版本化；C 造成無限漂移 | disposition recorded |
 
 ## 2. 與現有程式契約的差異
 
@@ -64,7 +64,7 @@ PIT invariant：`prediction_event_at <= prediction_available_at`。等號合法�
 |---|---|---|---|---|
 | `prediction_cutoff_buffer` | prediction 必須早於 start close 的安全距離 | 24/7: 0m/5m/15m；session venue: 0m/15m/30m | 24/7=5m；session venue=15m | `available_at == close-buffer` 可用該 session；大於則 start 移至下一 scheduled session |
 | `publication_lag_sla` | close event 後等待 official bar 的正常發布期 | 15m/1h/4h | 24/7=1h；session venue=4h | `available_at <= close+SLA` 是 on-time；超過仍可在 late cutoff 前標記 late/pending |
-| `late_data_cutoff` | 超過 maturity 後等待缺資料的 UTC elapsed duration | 24h/72h/168h elapsed UTC | **工程推薦：UTC elapsed 72h；PENDING CEO commit-bound disposition** | 候選規則為 `as_of == matures_at + 72h` 仍在 cutoff 內；大於才 unavailable；DST、本地午夜與假日不改 duration；D8=B 到貨後新增 revision |
+| `late_data_cutoff` | 超過 maturity 後等待缺資料的 UTC elapsed duration | 24h/72h/168h elapsed UTC | **Disposition recorded: UTC elapsed 72h（spec A）** | `as_of == matures_at + 72h` 仍在 cutoff 內；大於才 unavailable；DST、本地午夜與假日不改 duration；D8=B 到貨後新增 revision |
 
 三個參數按 `calendar_id` 版本化且不可互相代替。未配置任何一個即 `unavailable(RULE_NOT_APPROVED)`；不能默認為零。
 
@@ -208,7 +208,7 @@ NYSE 官方 2026 calendar 指定 2026-11-27（Thanksgiving 次日）於 13:00 Am
 
 不允許把 fixture 的 `split-v1` 當真實 provider methodology。首版 scope 必須逐 instrument 指定 provider、dataset/version、price type、corporate-action methodology、license/lineage 與 calendar version；任何一格 unavailable 時 CEO 不可批准該 scope。
 
-1. CEO 完成 D1–D8 書面 disposition，包含 cutoff SLA 與首版適用 asset/venue。
+1. CEO 已完成 D1–D8 與 cutoff SLA 書面 semantic disposition；production asset/provider scope 明確 REJECT/DEFER、EMPTY。
 2. 將核准結果轉 immutable contract version 與 machine-readable fixtures。
 3. 另開 implementation issue；不得在 #501 偷帶 labeler、DB 或回填。
 4. 對現有兩套 calibration 路徑提出 migration/compatibility 計畫，禁止靜默改歷史數字。
@@ -216,18 +216,18 @@ NYSE 官方 2026 calendar 指定 2026-11-27（Thanksgiving 次日）於 13:00 Am
 
 ## 10. CEO / product owner disposition（必填）
 
-> **目前 disposition：PENDING。下表未簽署，因此本文件不得作為 production default。**
+> **CEO disposition 已記錄並綁定 spec A `3bea99b78c6b53e95864d46d680c647e2aad3b52`。這不是 implementation approval；production scope 仍為 EMPTY。**
 
 | Decision | CEO disposition（approve option / reject / revise） | 理由 | 日期 | commit SHA |
 |---|---|---|---|---|
-| D1 calendar | PENDING |  |  |  |
-| D2 T+N endpoint | PENDING |  |  |  |
-| D3 start price | PENDING |  |  |  |
-| D4 neutral | PENDING |  |  |  |
-| D5 tie | PENDING |  |  |  |
-| D6 corporate actions | PENDING |  |  |  |
-| D7 revisions | PENDING |  |  |  |
-| D8 late data | PENDING |  |  |  |
-| cutoff SLA / asset scope | PENDING |  |  |  |
+| D1 calendar | APPROVE A | 正式 venue calendar 決定 scheduled sessions；24/7 使用版本化 UTC daily calendar，bar 缺失或停牌不得改變 T+N。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| D2 T+N endpoint | APPROVE A | T+N 是 start 後第 N 個 calendar-eligible scheduled session close，週末、假日與休市不計，不能以現存第 N 根 bar 代替。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| D3 start price | APPROVE B | 使用 availability-cutoff 後第一個安全 official close，避免 prediction 尚不可用時取用已知 close 造成 future leakage。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| D4 neutral | APPROVE A | neutral／abstain 不形成 directional prediction，因此不計 directional hit；仍可記錄 realized return 與 risk diagnostics。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| D5 tie | APPROVE A | 只在未 quantize directional return 嚴格大於零時命中；exact zero 為 miss，tolerance 不得成為商業 dead-band。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| D6 corporate actions | APPROVE A — SEMANTIC ONLY | 採同 provider／methodology／as-of basis 的 split-adjusted price return、排除 cash dividend；provider 與 production scope 未核准，實作 deferred。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| D7 revisions | APPROVE C | 同時保留 immutable as-first-known 與 latest-official versions，兼顧 PIT 重現與官方修訂，current/canonical 依 as-of 明選 variant。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| D8 late data | APPROVE B | cutoff 後晚到資料建立新的 immutable outcome revision 並 supersede，不覆寫舊版本；歷史 as-of 仍可重現。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
+| cutoff SLA / asset scope | APPROVE SLA; REJECT/DEFER ASSET/PROVIDER SCOPE; PRODUCTION SCOPE=EMPTY | prediction cutoff：24/7=5m、session venue=15m；publication SLA：24/7=1h、session venue=4h；late cutoff=`matures_at + UTC elapsed 72h`。未有具名 production provider/dataset/methodology/license lineage，asset/provider scope REJECT/DEFER。 | 2026-07-23 | 3bea99b78c6b53e95864d46d680c647e2aad3b52 |
 
-書面核准必須綁定包含本表的 exact commit SHA。PR review、author 自述或口頭同意都不能取代 CEO / product owner disposition。
+本 disposition commit B 引用已獨立審查的 spec A，避免自指 SHA。它只記錄 semantic disposition；PR review、implementation authorization、production provider/scope approval、merge 與 deploy 仍須各自完成既定 gate。

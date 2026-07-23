@@ -36,9 +36,12 @@ def _table_after(text: str, heading: str) -> tuple[list[str], list[dict[str, str
     return headers, rows
 
 
-def test_disposition_table_has_exact_pending_decisions() -> None:
+def test_disposition_table_has_exact_commit_bound_decisions() -> None:
     text = DOC.read_text(encoding="utf-8")
-    assert "PENDING CEO DISPOSITION — NOT APPROVED FOR IMPLEMENTATION" in text
+    assert (
+        "CEO DISPOSITION RECORDED — NOT APPROVED FOR IMPLEMENTATION / "
+        "PRODUCTION SCOPE EMPTY"
+    ) in text
 
     headers, rows = _table_after(text, "## 10. CEO / product owner disposition（必填）")
     assert headers == [
@@ -48,24 +51,27 @@ def test_disposition_table_has_exact_pending_decisions() -> None:
         "日期",
         "commit SHA",
     ]
-    assert [row["Decision"] for row in rows] == [
-        "D1 calendar",
-        "D2 T+N endpoint",
-        "D3 start price",
-        "D4 neutral",
-        "D5 tie",
-        "D6 corporate actions",
-        "D7 revisions",
-        "D8 late data",
-        "cutoff SLA / asset scope",
+    expected = [
+        ("D1 calendar", "APPROVE A", "正式 venue calendar 決定 scheduled sessions；24/7 使用版本化 UTC daily calendar，bar 缺失或停牌不得改變 T+N。"),
+        ("D2 T+N endpoint", "APPROVE A", "T+N 是 start 後第 N 個 calendar-eligible scheduled session close，週末、假日與休市不計，不能以現存第 N 根 bar 代替。"),
+        ("D3 start price", "APPROVE B", "使用 availability-cutoff 後第一個安全 official close，避免 prediction 尚不可用時取用已知 close 造成 future leakage。"),
+        ("D4 neutral", "APPROVE A", "neutral／abstain 不形成 directional prediction，因此不計 directional hit；仍可記錄 realized return 與 risk diagnostics。"),
+        ("D5 tie", "APPROVE A", "只在未 quantize directional return 嚴格大於零時命中；exact zero 為 miss，tolerance 不得成為商業 dead-band。"),
+        ("D6 corporate actions", "APPROVE A — SEMANTIC ONLY", "採同 provider／methodology／as-of basis 的 split-adjusted price return、排除 cash dividend；provider 與 production scope 未核准，實作 deferred。"),
+        ("D7 revisions", "APPROVE C", "同時保留 immutable as-first-known 與 latest-official versions，兼顧 PIT 重現與官方修訂，current/canonical 依 as-of 明選 variant。"),
+        ("D8 late data", "APPROVE B", "cutoff 後晚到資料建立新的 immutable outcome revision 並 supersede，不覆寫舊版本；歷史 as-of 仍可重現。"),
+        ("cutoff SLA / asset scope", "APPROVE SLA; REJECT/DEFER ASSET/PROVIDER SCOPE; PRODUCTION SCOPE=EMPTY", "prediction cutoff：24/7=5m、session venue=15m；publication SLA：24/7=1h、session venue=4h；late cutoff=`matures_at + UTC elapsed 72h`。未有具名 production provider/dataset/methodology/license lineage，asset/provider scope REJECT/DEFER。"),
     ]
-    assert all(
-        row["CEO disposition（approve option / reject / revise）"] == "PENDING"
-        and row["理由"] == ""
-        and row["日期"] == ""
-        and row["commit SHA"] == ""
+    assert [
+        (row["Decision"], row["CEO disposition（approve option / reject / revise）"], row["理由"])
         for row in rows
-    )
+    ] == expected
+    assert {row["日期"] for row in rows} == {"2026-07-23"}
+    assert {row["commit SHA"] for row in rows} == {
+        "3bea99b78c6b53e95864d46d680c647e2aad3b52"
+    }
+    assert "NOT APPROVED FOR IMPLEMENTATION" in text
+    assert "Production scope: EMPTY" in text
 
 
 def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
