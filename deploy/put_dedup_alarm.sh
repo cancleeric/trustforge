@@ -82,7 +82,7 @@ aws cloudwatch put-metric-alarm \
   --threshold "$RECENT_FAILURES_THRESHOLD" \
   --comparison-operator "GreaterThanOrEqualToThreshold" \
   --treat-missing-data "notBreaching" \
-  "${ALARM_ACTIONS[@]}"
+  ${ALARM_ACTIONS[@]+"${ALARM_ACTIONS[@]}"}
 
 aws cloudwatch put-metric-alarm \
   --region "$REGION" \
@@ -96,6 +96,6 @@ aws cloudwatch put-metric-alarm \
   --threshold "$LOG_ALARM_THRESHOLD" \
   --comparison-operator "GreaterThanOrEqualToThreshold" \
   --treat-missing-data "notBreaching" \
-  "${ALARM_ACTIONS[@]}"
+  ${ALARM_ACTIONS[@]+"${ALARM_ACTIONS[@]}"}
 
 echo "done: alarms updated: ${RECENT_FAILURES_ALARM_NAME}, ${LOG_ALARM_NAME}; log filter updated: ${LOG_FILTER_NAME}."
