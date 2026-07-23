@@ -52,6 +52,7 @@ describe('SnapshotModal data lineage', () => {
     expect(screen.getByText('BTC_daily_ohlcv.csv')).toBeInTheDocument()
     expect(screen.getByText('2021-06-01 ~ 2026-05-31')).toBeInTheDocument()
     expect(screen.getByText('BTCUSDT')).toBeInTheDocument()
+    expect(screen.getByText('date, open, high, low, close, volume')).toBeInTheDocument()
     expect(screen.getByText(evidence.data_lineage?.sha256 ?? '')).toBeInTheDocument()
 
     const payload = downloadedPayload()

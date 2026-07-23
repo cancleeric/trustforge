@@ -192,6 +192,7 @@ export default function SnapshotModal({ ev, onClose }: { ev: Evidence; onClose: 
                 <div><dt className="inline text-tf-muted">列數：</dt><dd className="inline text-tf-text">{ev.data_lineage.rows}</dd></div>
                 <div><dt className="inline text-tf-muted">時間基準：</dt><dd className="inline text-tf-text">{ev.data_lineage.time_basis}</dd></div>
                 <div><dt className="inline text-tf-muted">間隔：</dt><dd className="inline text-tf-text">{ev.data_lineage.interval}</dd></div>
+                <div className="sm:col-span-2"><dt className="inline text-tf-muted">欄位：</dt><dd className="inline break-words font-mono text-tf-text">{ev.data_lineage.columns.join(', ')}</dd></div>
                 <div className="sm:col-span-2"><dt className="inline text-tf-muted">SHA-256：</dt><dd className="inline break-all font-mono text-tf-text">{ev.data_lineage.sha256}</dd></div>
               </dl>
             </div>
