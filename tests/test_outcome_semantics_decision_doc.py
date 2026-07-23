@@ -88,9 +88,10 @@ def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
     assert len(rows) >= 20
     assert len({row["fixture_id"] for row in rows}) == len(rows)
     prediction_ids = [row["prediction_id"] for row in rows]
-    assert len(set(prediction_ids)) == len(rows) - 2
+    assert len(set(prediction_ids)) == len(rows) - 3
     assert prediction_ids.count("p20") == 2
     assert prediction_ids.count("p14") == 2
+    assert prediction_ids.count("p23") == 2
     assert all(all(row[column] for column in headers) for row in rows)
     for row in rows:
         assert isinstance(json.loads(row["calendar_sessions"]), list)
@@ -126,6 +127,7 @@ def test_fixture_table_covers_required_adversarial_cases() -> None:
         "revision_v2",
         "missing_lineage",
     } <= fixture_ids
+    assert {row["horizon"] for row in rows} == {"T+1", "T+7", "T+14"}
 
 
 def _parse_rfc3339(value: str) -> datetime:
@@ -249,13 +251,27 @@ def _canonical_hash(value: dict[str, object]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _market_revision(bars: list[dict[str, str]], start: str, target: str) -> str:
+    payload = []
+    stable_keys = (
+        "provider", "dataset_version", "methodology_version", "event_at",
+        "available_at", "content_hash",
+    )
+    for role, session in (("start", start), ("target", target)):
+        matches = sorted(
+            (bar for bar in bars if bar["session"] == session and "content_hash" in bar),
+            key=lambda bar: tuple(bar[key] for key in stable_keys),
+        )
+        payload.extend({"role": role, "content_hash": bar["content_hash"]} for bar in matches)
+    return _canonical_hash(payload)  # type: ignore[arg-type]
+
+
 def test_fixture_lineage_and_outcome_identity_are_rebuildable() -> None:
     text = DOC.read_text(encoding="utf-8")
     _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
     for row in rows:
         bars = json.loads(row["bars"])
         expected = json.loads(row["expected"])
-        hashes = []
         for bar in bars:
             required = {
                 "provider", "dataset_version", "methodology_version", "session",
@@ -272,10 +288,10 @@ def test_fixture_lineage_and_outcome_identity_are_rebuildable() -> None:
                 "event_at", "available_at", "close",
             ))
             assert bar["content_hash"] == "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
-            hashes.append(bar["content_hash"])
         if row["fixture_id"] != "missing_lineage":
-            revision = "sha256:" + hashlib.sha256("|".join(hashes).encode()).hexdigest()
+            revision = _market_revision(bars, expected["start"], expected["target"])
             assert expected["market_data_revision"] == revision
+            assert _market_revision(list(reversed(bars)), expected["start"], expected["target"]) == revision
         assert expected["outcome_id"] == _canonical_hash(expected["identity_inputs"])
 
 
@@ -313,10 +329,14 @@ def test_calendar_policy_derives_start_target_and_missing_data_state() -> None:
         )
         target_close = _parse_rfc3339(target["scheduled_close_at"])
         publication_sla = timedelta(hours=1 if row["calendar_id"] == "crypto:UTC:v1" else 4)
-        late_boundary = target_close + publication_sla + timedelta(days=3)
+        matures_at = target_close + publication_sla
+        late_boundary = matures_at + timedelta(hours=72)
         as_of = _parse_rfc3339(row["as_of"])
         if target_bar is None:
-            if as_of <= late_boundary:
+            if as_of < target_close:
+                assert expected["maturity"] == "pending"
+                assert expected["reason"] == "NOT_MATURE"
+            elif as_of <= late_boundary:
                 assert expected["maturity"] == "pending"
                 assert expected["reason"] == "WAITING_LATE_DATA_CUTOFF"
             else:
@@ -330,6 +350,18 @@ def test_calendar_policy_derives_start_target_and_missing_data_state() -> None:
             assert expected["maturity"] == "pending"
         else:
             assert expected["maturity"] == "labeled", row["fixture_id"]
+
+
+def test_late_cutoff_is_72_elapsed_utc_hours_across_dst() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    row = next(item for item in rows if item["fixture_id"] == "dst_72h_equal")
+    sessions = json.loads(row["calendar_sessions"])
+    target_close = _parse_rfc3339(sessions[1]["scheduled_close_at"])
+    matures_at = target_close + timedelta(hours=4)
+    cutoff = _parse_rfc3339(row["as_of"])
+    assert cutoff - matures_at == timedelta(hours=72)
+    assert json.loads(row["expected"])["maturity"] == "pending"
 
 
 def test_revision_identity_and_reconciliation_are_explicit() -> None:
