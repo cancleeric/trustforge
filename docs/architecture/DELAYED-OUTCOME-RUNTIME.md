@@ -65,6 +65,11 @@ all other statuses leave ledger state untouched. Dry-run plans under the same lo
 nothing. This ledger is deliberately non-durable and fixture-only; it is not a
 production allocator or durable audit store.
 
+`validate_canonical_delayed_outcome` is the shared fail-closed boundary used
+both before append and by calibration consumers. It revalidates the exact
+payload schema, non-Evidence classification, seven-key identity, provenance,
+source-analysis binding, metrics, and predecessor chain.
+
 Outcome events are always `delayed_outcome`, explicitly non-evidentiary, and
 never eligible as Evidence. Dry-run returns before invoking the append port, so
 it performs zero writes.
@@ -79,5 +84,7 @@ fixture dataclasses. Calibration consumers must explicitly select
 read `outcome_version`, `return_pct`, and `market_data_revision` directly.
 Joins require the exact source analysis identity—not only a reusable
 `analysis_id`—and manifests expose tenant and variant explicitly.
+Neutral and abstain outcomes retain realized diagnostics but are excluded from
+directional confidence calibration.
 This migration is required for Issue #507 and does not claim the Issue #508
 dataset-manifest milestone is complete.

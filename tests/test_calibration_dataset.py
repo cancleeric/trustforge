@@ -294,14 +294,85 @@ def test_calibration_join_binds_exact_analysis_identity_not_reused_analysis_id()
 def test_calibration_rejects_outcome_before_analysis_availability():
     analysis = _analysis(1)
     outcome = _outcome(analysis)
+    forged_time = "2026-07-01T00:00:00.500000Z"
+    payload = {
+        **outcome.payload,
+        "labeled_at": forged_time,
+        "canonical_as_of": forged_time,
+    }
+    source_record = {
+        **outcome.provenance["source_record"],
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
     forged = replace(
         outcome,
-        available_time="2026-07-01T00:00:00.500000Z",
-        as_of_time="2026-07-01T00:00:00.500000Z",
+        available_time=forged_time,
+        as_of_time=forged_time,
+        payload=payload,
         provenance={
             **outcome.provenance,
-            "observed_at": "2026-07-01T00:00:00.500000Z",
+            "observed_at": forged_time,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
         },
     )
     with pytest.raises(CalibrationDatasetError, match="analysis availability"):
         _dataset([analysis], [forged])
+
+
+@pytest.mark.parametrize("direction", ["neutral", "abstain"])
+def test_calibration_excludes_non_directional_labeled_outcomes(direction):
+    analysis = _analysis(1)
+    analysis = replace(
+        analysis,
+        payload={
+            **analysis.payload,
+            "decision": {
+                **analysis.payload["decision"],
+                "direction": direction,
+            },
+        },
+    )
+    outcome = _outcome(analysis)
+    manifest = _dataset([analysis], [outcome])
+    assert outcome.payload["maturity"] == "labeled"
+    assert outcome.payload["reason_code"] == "PREDICTION_NOT_DIRECTIONAL"
+    assert manifest["row_count"] == 0
+
+
+def test_other_tenant_non_outcome_event_is_filtered_before_validation():
+    analysis = _analysis(1)
+    outcome = _outcome(analysis)
+    foreign_analysis = _analysis(2, tenant="tenant-b")
+    manifest = _dataset([analysis], [foreign_analysis, outcome])
+    assert manifest["row_count"] == 1
+
+
+def test_higher_revision_wrong_source_cannot_shadow_legitimate_outcome():
+    analysis = _analysis(1)
+    ledger = FixtureOutcomeLedger(append=LearningEventAppendLog())
+    legitimate = _outcome(analysis, ledger=ledger)
+    successor = _outcome(
+        analysis,
+        ledger=ledger,
+        labeled_at_override="2026-07-04T00:00:00Z",
+    )
+    payload = {
+        **successor.payload,
+        "source_event_identity": "forged-analysis-identity",
+    }
+    source_record = {
+        **successor.provenance["source_record"],
+        "analysis_identity": "forged-analysis-identity",
+    }
+    forged = replace(
+        successor,
+        payload=payload,
+        provenance={
+            **successor.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(CalibrationDatasetError, match="canonical validation"):
+        _dataset([analysis], [legitimate, forged])

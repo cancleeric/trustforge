@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
-from .learning_event_contract import LearningEvent
+from .delayed_outcome_labeler import validate_canonical_delayed_outcome
+from .learning_event_contract import LearningEvent, LearningEventError
 
 
 class CalibrationDatasetError(ValueError):
@@ -34,10 +35,16 @@ def build_confidence_calibration_dataset(
         for event in analysis_events
         if event.tenant_id == trusted_tenant_id
     ]
+    analysis_identities: dict[str, set[str]] = {}
+    for row in analyses:
+        analysis_identities.setdefault(row["analysis_id"], set()).add(
+            row["analysis_identity"]
+        )
     outcomes = _latest_labeled_outcomes(
         outcome_events,
         trusted_tenant_id=trusted_tenant_id,
         market_data_variant=market_data_variant,
+        analysis_identities=analysis_identities,
     )
     rows = []
     for analysis in analyses:
@@ -105,18 +112,37 @@ def _latest_labeled_outcomes(
     *,
     trusted_tenant_id: str,
     market_data_variant: str,
+    analysis_identities: dict[str, set[str]],
 ) -> dict[tuple[str, str, str, str], dict[str, Any]]:
     outcomes: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     revisions: dict[tuple[str, str, str, str], int] = {}
-    for event in outcome_events:
+    tenant_events = [
+        event for event in outcome_events if event.tenant_id == trusted_tenant_id
+    ]
+    by_outcome_id = {
+        event.payload.get("outcome_id"): event
+        for event in tenant_events
+        if event.kind == "delayed_outcome"
+        and isinstance(event.payload.get("outcome_id"), str)
+    }
+    for event in sorted(tenant_events, key=lambda item: item.revision):
         if event.kind != "delayed_outcome":
-            raise CalibrationDatasetError("dataset outcome source must be delayed_outcome event")
+            raise CalibrationDatasetError(
+                "dataset outcome source must be delayed_outcome event"
+            )
         payload = event.payload
-        if event.tenant_id != trusted_tenant_id:
-            continue
         if payload.get("market_data_variant") != market_data_variant:
             continue
+        predecessor = by_outcome_id.get(payload.get("supersedes_outcome_id"))
+        try:
+            validate_canonical_delayed_outcome(event, predecessor=predecessor)
+        except LearningEventError as exc:
+            raise CalibrationDatasetError(
+                "dataset outcome failed canonical validation"
+            ) from exc
         if payload.get("status") != "labeled":
+            continue
+        if payload.get("direction_sign") not in {-1, 1}:
             continue
         analysis_id = payload.get("analysis_id")
         horizon = payload.get("horizon")
@@ -124,6 +150,13 @@ def _latest_labeled_outcomes(
             raise CalibrationDatasetError("outcome analysis_id and horizon are required")
         if not isinstance(payload.get("source_event_identity"), str):
             raise CalibrationDatasetError("outcome source_event_identity is required")
+        if payload["source_event_identity"] not in analysis_identities.get(
+            analysis_id,
+            set(),
+        ):
+            raise CalibrationDatasetError(
+                "outcome source_event_identity does not match analysis"
+            )
         key = (event.tenant_id, analysis_id, horizon, market_data_variant)
         revision = payload.get("outcome_version")
         if type(revision) is not int or revision < 1:

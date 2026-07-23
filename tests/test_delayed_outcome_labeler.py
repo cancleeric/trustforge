@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import date, timedelta
 
 import pytest
 
@@ -11,6 +12,7 @@ from trustforge.delayed_outcome_labeler import (
     VenueSession,
     canonical_fixture_price_content_hash,
     canonical_market_data_revision,
+    validate_canonical_delayed_outcome,
 )
 from trustforge.learning_event_contract import LearningEventError, canonical_integrity_checksum
 from trustforge.learning_event_store import LearningEventAppendLog
@@ -403,6 +405,124 @@ def test_ledger_append_failure_does_not_commit_version_and_retry_is_idempotent()
     assert len(port.log.replay()) == 1
 
 
+def test_exact_retry_precedes_revision_budget_check():
+    ledger = FixtureOutcomeLedger(
+        append=LearningEventAppendLog(),
+        maximum_revisions=1,
+    )
+    first = _build(ledger=ledger)
+    retry = _build(ledger=ledger)
+    assert retry.identity == first.identity
+    with pytest.raises(LearningEventError, match="revision budget"):
+        _build(
+            ledger=ledger,
+            as_of="2026-07-04T00:00:00Z",
+            labeled_at="2026-07-04T00:00:00Z",
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"classification": "evidentiary"},
+        {"eligible_as_evidence": True},
+        {"hit": True},
+        {"outcome_id": "sha256:" + "f" * 64},
+    ],
+)
+def test_public_validator_rejects_forged_delayed_outcome_payload(mutation):
+    event = _build(analysis=_analysis(direction="neutral"))
+    forged = replace(event, payload={**event.payload, **mutation})
+    with pytest.raises(LearningEventError):
+        validate_canonical_delayed_outcome(forged)
+
+
+def test_public_validator_rejects_bullish_return_metric_mutation():
+    event = _build(
+        analysis=_analysis(direction="bullish"),
+        data=[
+            _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+            _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+        ],
+    )
+    payload = {
+        **event.payload,
+        "return_pct": "999.00000000",
+    }
+    source_record = {
+        **event.provenance["source_record"],
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    forged = replace(
+        event,
+        payload=payload,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(LearningEventError, match="metrics are inconsistent"):
+        validate_canonical_delayed_outcome(forged)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"source": "forged-labeler"},
+        {"unexpected": "forged"},
+        {"source_record": {"payload_checksum": "sha256:" + "f" * 64}},
+    ],
+)
+def test_public_validator_rejects_provenance_mutation(mutation):
+    event = _build()
+    if "source_record" in mutation:
+        source_record = {
+            **event.provenance["source_record"],
+            **mutation["source_record"],
+        }
+        mutation = {"source_record": source_record}
+    with pytest.raises(LearningEventError):
+        forged = replace(event, provenance={**event.provenance, **mutation})
+        validate_canonical_delayed_outcome(forged)
+
+
+def test_public_validator_rejects_forged_provenance_source_identity():
+    event = _build()
+    source_record = {
+        **event.provenance["source_record"],
+        "analysis_identity": "forged-analysis",
+    }
+    forged = replace(
+        event,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(LearningEventError, match="emission contract"):
+        validate_canonical_delayed_outcome(forged)
+
+
+def test_public_validator_rejects_semantic_provenance_mutation_after_rechecksum():
+    event = _build()
+    source_record = {
+        **event.provenance["source_record"],
+        "analysis_identity": "forged-analysis",
+    }
+    forged = replace(
+        event,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(LearningEventError, match="emission contract"):
+        validate_canonical_delayed_outcome(forged)
+
+
 @pytest.mark.parametrize("bad_status", ["conflict", "error", "unknown", None])
 def test_ledger_rejects_unconfirmed_append_status_without_state_mutation(bad_status):
     class StatusPort:
@@ -556,6 +676,28 @@ def test_calendar_rejects_venue_session_subclass():
     )
     with pytest.raises(LearningEventError, match="exact VenueSession"):
         replace(_calendar(), sessions=(derived,))
+
+
+def test_calendar_streaming_canonical_budget_near_and_over_boundary():
+    base = date(2020, 1, 1)
+
+    def sessions(count):
+        return tuple(
+            VenueSession(
+                (base + timedelta(days=index)).isoformat(),
+                "open",
+                (base + timedelta(days=index)).isoformat()
+                + "T20:00:00."
+                + "0" * 4000
+                + "Z",
+            )
+            for index in range(count)
+        )
+
+    near = replace(_calendar(), sessions=sessions(250))
+    assert len(near.sessions) == 250
+    with pytest.raises(LearningEventError, match="aggregate byte limit"):
+        replace(_calendar(), sessions=sessions(260))
 
 
 def test_price_content_hash_requires_full_sha256_digest():
