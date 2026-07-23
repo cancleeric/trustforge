@@ -65,6 +65,12 @@
 |------|------|
 | [handoff/2026-07-22-modelhub-integration-handoff.md](handoff/2026-07-22-modelhub-integration-handoff.md) | ModelHub #351 七段式現況、操作契約與剩餘工作 |
 
+## skills/ — 執行與審查教學
+
+| 文件 | 說明 |
+|------|------|
+| [skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md](skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md) | Luna GitHub PR 對抗審 SOP：固定 SHA、負向測試、PIT leakage、安全 activation、stacked PR 與 PASS／FAIL 模板 |
+
 ## design/
 
 既有設計資產子目錄，原地不動（見 [design/](design/)）。
