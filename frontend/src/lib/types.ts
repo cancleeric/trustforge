@@ -181,6 +181,28 @@ export interface Report {
   hypothesis_ledger?: HypothesisLedger | null
   calibrated_confidence: number
   decision_state: DecisionState
+  asset_context?: AssetContext | null
+  risk_notices?: RiskNotice[]
+}
+
+export interface AssetContext {
+  schema_version: string
+  asset_id: string
+  symbol: string
+  name: string
+  sector: string
+  layer: string
+  token_role: string
+  market_cap_tier: string
+  ecosystem: string | null
+  parent_asset_id: string | null
+  tags: string[]
+}
+
+export interface RiskNotice {
+  code: string
+  severity: 'info' | 'warning'
+  message: string
 }
 
 /** 洞察的一個貢獻來源（InsightExplainabilityPanel 最小單元）。 */
