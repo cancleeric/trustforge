@@ -1,7 +1,9 @@
 from dataclasses import replace
+import json
 
 import pytest
 
+import trustforge.calibration_dataset as calibration_dataset_module
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.calibration_dataset import (
     CalibrationDatasetError,
@@ -731,3 +733,45 @@ def test_preflight_rejects_deep_and_broad_containers_before_hash(monkeypatch):
 def test_row_counts_always_contains_all_splits():
     manifest = _dataset([_analysis(1)], [])
     assert manifest["row_counts"] == {"train": 0, "validation": 0, "test": 0}
+
+
+def test_streaming_anchor_count_equals_canonical_json_for_normal_and_nested():
+    normal = _analysis(1)
+    nested = replace(
+        normal,
+        payload={
+            **normal.payload,
+            "nested-fixture": {
+                "unicode": "可信度",
+                "list": [1, True, None, {"escaped": 'a"b\\c'}],
+            },
+        },
+    )
+
+    for event in (normal, nested):
+        expected = len(
+            json.dumps(
+                calibration_dataset_module._event_anchor(event),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        assert calibration_dataset_module._canonical_event_anchor_size(event) == expected
+
+
+def test_exact_canonical_byte_limit_passes_and_one_byte_over_rejects(monkeypatch):
+    analysis = _analysis(1)
+    size = calibration_dataset_module._canonical_event_anchor_size(analysis)
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_BYTES", size)
+
+    manifest = _dataset([analysis], [])
+    assert manifest["row_count"] == 0
+
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_BYTES", size - 1)
+    monkeypatch.setattr(
+        "trustforge.calibration_dataset._sha256",
+        lambda _value: pytest.fail("hash must not run before exact byte gate"),
+    )
+    with pytest.raises(CalibrationDatasetError, match="UTF-8 byte limit"):
+        _dataset([analysis], [])

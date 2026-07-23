@@ -63,7 +63,11 @@ foreign-tenant events are discarded before all quotas, exclusion counts,
 roots, or checksums. Scoped event count, recursive string-field UTF-8,
 container-node, and nesting-depth bounds are checked directly on the event
 tree. Scalar canonical bytes are counted incrementally with
-`JSONEncoder.iterencode`, aborting as soon as the aggregate limit is crossed.
+the same canonical token walker used to define the materialized anchor. It
+includes all ten outer keys, sorted nested mapping keys with JSON
+quotes/escaping, colons, commas, braces, list separators, and scalar JSON, and
+aborts as soon as the exact aggregate UTF-8 limit is crossed. Normal and nested
+fixtures assert that its count equals compact canonical JSON byte length.
 Only a successfully preflighted event is converted to a canonical anchor;
 sorting and hashing occur after the bounded scan.
 Events whose `available_time` is after `dataset_as_of` are invisible: adding or

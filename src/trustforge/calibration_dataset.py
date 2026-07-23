@@ -474,60 +474,134 @@ def _preflight_event(
     byte_budget: int,
     node_budget: int,
 ) -> tuple[int, int]:
-    stack: list[tuple[Any, int]] = [
-        (value, 1)
-        for value in (
-        event.schema_version,
-        event.kind,
-        event.tenant_id,
-        event.entity_id,
-        event.identity,
-        event.event_time,
-        event.available_time,
-        event.as_of_time,
-        event.provenance,
-        event.payload,
-        )
-    ]
-    encoder = json.JSONEncoder(
-        ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    state = {"nodes": 0, "node_budget": node_budget, "source": source}
     total_bytes = 0
-    nodes = 0
-    while stack:
-        value, depth = stack.pop()
-        nodes += 1
-        if nodes > node_budget:
-            raise CalibrationDatasetError(f"{source} input exceeds node limit")
-        if depth > _MAX_NESTING_DEPTH:
-            raise CalibrationDatasetError(
-                f"{source} input exceeds nesting depth limit"
-            )
-        if isinstance(value, str):
-            if _utf8_exceeds(value, _MAX_FIELD_BYTES):
-                raise CalibrationDatasetError(
-                    f"{source} input field exceeds UTF-8 byte limit"
-                )
-        if isinstance(value, Mapping):
-            total_bytes += 2 + max(0, len(value) - 1)
-            for key, item in value.items():
-                stack.append((key, depth + 1))
-                stack.append((item, depth + 1))
-        elif isinstance(value, (tuple, list)):
-            total_bytes += 2 + max(0, len(value) - 1)
-            stack.extend((item, depth + 1) for item in value)
-        else:
-            for chunk in encoder.iterencode(value):
-                total_bytes += len(chunk.encode("utf-8"))
-                if total_bytes > byte_budget:
-                    raise CalibrationDatasetError(
-                        f"{source} input exceeds UTF-8 byte limit"
-                    )
+    for token in _canonical_event_anchor_tokens(event, state=state):
+        total_bytes += len(token.encode("utf-8"))
         if total_bytes > byte_budget:
             raise CalibrationDatasetError(
                 f"{source} input exceeds UTF-8 byte limit"
             )
-    return total_bytes, nodes
+    return total_bytes, int(state["nodes"])
+
+
+def _canonical_event_anchor_tokens(
+    event: LearningEvent, *, state: dict[str, Any]
+) -> Iterable[str]:
+    yield from _canonical_mapping_tokens(
+        _event_anchor_items(event), state=state, depth=1
+    )
+
+
+def _event_anchor_items(event: LearningEvent) -> tuple[tuple[str, Any], ...]:
+    return (
+        ("identity", event.identity),
+        ("schema_version", event.schema_version),
+        ("tenant_id", event.tenant_id),
+        ("kind", event.kind),
+        ("entity_id", event.entity_id),
+        ("event_time", event.event_time),
+        ("available_time", event.available_time),
+        ("as_of_time", event.as_of_time),
+        ("provenance", event.provenance),
+        ("payload", event.payload),
+    )
+
+
+def _canonical_mapping_tokens(
+    items: Iterable[tuple[str, Any]],
+    *,
+    state: dict[str, Any],
+    depth: int,
+    visited: bool = False,
+) -> Iterable[str]:
+    if not visited:
+        _visit_node(state, depth)
+    ordered = sorted(items, key=lambda item: item[0])
+    yield "{"
+    for index, (key, value) in enumerate(ordered):
+        if index:
+            yield ","
+        yield from _canonical_scalar_tokens(key, state=state, depth=depth + 1)
+        yield ":"
+        yield from _canonical_value_tokens(value, state=state, depth=depth + 1)
+    yield "}"
+
+
+def _canonical_value_tokens(
+    value: Any, *, state: dict[str, Any], depth: int
+) -> Iterable[str]:
+    if isinstance(value, Mapping):
+        _visit_node(state, depth)
+        if state["nodes"] + (2 * len(value)) > state["node_budget"]:
+            raise CalibrationDatasetError(
+                f"{state['source']} input exceeds node limit"
+            )
+        keys: list[str] = []
+        for key in value:
+            if not isinstance(key, str):
+                raise CalibrationDatasetError(
+                    f"{state['source']} input mapping key must be a string"
+                )
+            if _utf8_exceeds(key, _MAX_FIELD_BYTES):
+                raise CalibrationDatasetError(
+                    f"{state['source']} input field exceeds UTF-8 byte limit"
+                )
+            keys.append(key)
+        keys.sort()
+        yield from _canonical_mapping_tokens(
+            ((key, value[key]) for key in keys),
+            state=state,
+            depth=depth,
+            visited=True,
+        )
+        return
+    if isinstance(value, (tuple, list)):
+        _visit_node(state, depth)
+        yield "["
+        for index, item in enumerate(value):
+            if index:
+                yield ","
+            yield from _canonical_value_tokens(item, state=state, depth=depth + 1)
+        yield "]"
+        return
+    yield from _canonical_scalar_tokens(value, state=state, depth=depth)
+
+
+def _canonical_scalar_tokens(
+    value: Any, *, state: dict[str, Any], depth: int
+) -> Iterable[str]:
+    _visit_node(state, depth)
+    if isinstance(value, str) and _utf8_exceeds(value, _MAX_FIELD_BYTES):
+        raise CalibrationDatasetError(
+            f"{state['source']} input field exceeds UTF-8 byte limit"
+        )
+    encoder = json.JSONEncoder(
+        ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    yield from encoder.iterencode(value)
+
+
+def _visit_node(state: dict[str, Any], depth: int) -> None:
+    state["nodes"] += 1
+    if state["nodes"] > state["node_budget"]:
+        raise CalibrationDatasetError(f"{state['source']} input exceeds node limit")
+    if depth > _MAX_NESTING_DEPTH:
+        raise CalibrationDatasetError(
+            f"{state['source']} input exceeds nesting depth limit"
+        )
+
+
+def _canonical_event_anchor_size(event: LearningEvent) -> int:
+    state: dict[str, Any] = {
+        "nodes": 0,
+        "node_budget": _MAX_INPUT_NODES,
+        "source": "analysis",
+    }
+    return sum(
+        len(token.encode("utf-8"))
+        for token in _canonical_event_anchor_tokens(event, state=state)
+    )
 
 
 def _utf8_exceeds(value: str, limit: int) -> bool:
@@ -541,14 +615,8 @@ def _utf8_exceeds(value: str, limit: int) -> bool:
 
 def _event_anchor(event: LearningEvent) -> dict[str, Any]:
     return {
-        "identity": event.identity,
-        "schema_version": event.schema_version,
-        "tenant_id": event.tenant_id,
-        "event_time": event.event_time,
-        "available_time": event.available_time,
-        "as_of_time": event.as_of_time,
-        "provenance": _jsonable(event.provenance),
-        "payload": _jsonable(event.payload),
+        key: _jsonable(value)
+        for key, value in _event_anchor_items(event)
     }
 
 
