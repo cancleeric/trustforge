@@ -25,7 +25,9 @@ from .contracts import (
     validate_claim_resolution_order,
     validate_claim_resolution_graph,
     validate_kernel_input_graph,
+    validate_kernel_output_graph,
     validate_reputation_trace_graph,
+    validate_scored_claim_graph,
     validate_run_resolution_graph,
 )
 from .corroboration import (
@@ -85,7 +87,9 @@ __all__ = [
     "validate_claim_resolution_order",
     "validate_claim_resolution_graph",
     "validate_kernel_input_graph",
+    "validate_kernel_output_graph",
     "validate_reputation_trace_graph",
+    "validate_scored_claim_graph",
     "validate_run_resolution_graph",
     "CorroborationClaim",
     "CorroborationResult",

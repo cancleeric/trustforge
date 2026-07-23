@@ -433,6 +433,8 @@ class KernelScoredClaim:
                 "reputation_trace must be an exact KernelReputationTrace or None"
             )
         _require_finite_number(self.trust, field="trust")
+        if not 0.0 <= self.trust <= 1.0:
+            raise ValueError("trust must be in [0, 1]")
         if type(self.components) is not tuple:
             raise ValueError("components must be a tuple")
         for index, component in enumerate(self.components):
@@ -512,3 +514,78 @@ class KernelOutput:
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         raise TypeError("KernelOutput is sealed and cannot be subclassed")
+
+
+def validate_scored_claim_graph(value: KernelScoredClaim) -> None:
+    """Revalidate a complete scored-claim graph after possible tampering."""
+    if type(value) is not KernelScoredClaim:
+        raise ValueError("scored claim must be an exact KernelScoredClaim")
+    validate_claim_graph(value.claim)
+    if value.reputation_trace is not None:
+        validate_reputation_trace_graph(value.reputation_trace)
+    _require_finite_number(value.trust, field="trust")
+    if not 0.0 <= value.trust <= 1.0:
+        raise ValueError("trust must be in [0, 1]")
+    if type(value.components) is not tuple:
+        raise ValueError("components must be a tuple")
+    for index, component in enumerate(value.components):
+        if (
+            type(component) is not tuple
+            or len(component) != 2
+            or type(component[0]) is not str
+        ):
+            raise ValueError("components must contain (str, float) tuples")
+        _require_finite_number(component[1], field=f"components[{index}].value")
+    _require_exact_string_tuple(value.manip_flags, field="manip_flags")
+    _require_exact_string_tuple(value.info_flags, field="info_flags")
+
+
+def validate_kernel_output_graph(value: KernelOutput) -> None:
+    """Revalidate a result graph and its internal reference topology."""
+    if type(value) is not KernelOutput:
+        raise ValueError("output must be an exact KernelOutput")
+    # Re-run all scalar and tuple checks without trusting construction-time state.
+    KernelOutput(
+        value.trust_score,
+        value.confidence,
+        value.abstain,
+        value.direction,
+        value.reason_codes,
+        value.supporting_count,
+        value.independent_sources,
+        value.contract_version,
+        value.query,
+        value.scored_claims,
+        value.supporting,
+        value.contrarian,
+        value.decision_state,
+    )
+    if not 0.0 <= value.trust_score <= 1.0:
+        raise ValueError("trust_score must be in [0, 1]")
+    if not 0.0 <= value.confidence <= 1.0:
+        raise ValueError("confidence must be in [0, 1]")
+    if value.abstain != (value.decision_state == "abstain"):
+        raise ValueError("abstain must match decision_state")
+    for item in value.scored_claims:
+        validate_scored_claim_graph(item)
+    claim_ids = tuple(item.claim.id for item in value.scored_claims)
+    if len(set(claim_ids)) != len(claim_ids):
+        raise ValueError("scored_claims must contain unique claim IDs")
+    scored_objects = {id(item) for item in value.scored_claims}
+    supporting_objects = {id(item) for item in value.supporting}
+    contrarian_objects = {id(item) for item in value.contrarian}
+    if len(supporting_objects) != len(value.supporting):
+        raise ValueError("supporting must not contain duplicate references")
+    if len(contrarian_objects) != len(value.contrarian):
+        raise ValueError("contrarian must not contain duplicate references")
+    if not supporting_objects <= scored_objects or not contrarian_objects <= scored_objects:
+        raise ValueError("supporting and contrarian must reference scored_claims")
+    if supporting_objects & contrarian_objects:
+        raise ValueError("supporting and contrarian must not overlap")
+    if value.supporting_count != len(value.supporting):
+        raise ValueError("supporting_count must match supporting")
+    canonical_supporting_sources = {
+        canonical_source(item.claim.document.source) for item in value.supporting
+    }
+    if value.independent_sources != len(canonical_supporting_sources):
+        raise ValueError("independent_sources must match canonical supporting sources")
