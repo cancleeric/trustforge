@@ -20,6 +20,8 @@ from .learning_event_contract import LearningEvent, LearningEventError
 _MAX_INPUT_EVENTS = 100_000
 _MAX_INPUT_BYTES = 16 * 1024 * 1024
 _MAX_FIELD_BYTES = 64 * 1024
+_MAX_INPUT_NODES = 1_000_000
+_MAX_NESTING_DEPTH = 64
 _SUPPORTED_SCHEMA = "learning-event.v1"
 _SUPPORTED_DIRECTIONS = {"bullish", "bearish"}
 
@@ -80,10 +82,16 @@ def build_confidence_calibration_dataset(
     policy_dict = policy.canonical()
     dataset_as_of = _parse(policy.dataset_as_of)
     analyses_input = _bounded_visible_events(
-        analysis_events, dataset_as_of=dataset_as_of, source="analysis"
+        analysis_events,
+        dataset_as_of=dataset_as_of,
+        source="analysis",
+        trusted_tenant_id=policy.tenant_id,
     )
     outcomes_input = _bounded_visible_events(
-        outcome_events, dataset_as_of=dataset_as_of, source="outcome"
+        outcome_events,
+        dataset_as_of=dataset_as_of,
+        source="outcome",
+        trusted_tenant_id=policy.tenant_id,
     )
 
     excluded: Counter[str] = Counter(
@@ -101,6 +109,8 @@ def build_confidence_calibration_dataset(
     )
     analyses: dict[str, tuple[LearningEvent, dict[str, Any]]] = {}
     trusted_source_analyses: dict[str, LearningEvent] = {}
+    group_splits: dict[str, str] = {}
+    group_cutoffs: dict[str, datetime] = {}
     group_keys: set[tuple[str, str]] = set()
     for event in analyses_input:
         if event.tenant_id != policy.tenant_id:
@@ -118,19 +128,23 @@ def build_confidence_calibration_dataset(
             raise CalibrationDatasetError("duplicate analysis group key")
         group_keys.add(group_key)
         analyses[event.identity] = (event, row)
+        split = _split_for(_parse(event.available_time), policy)
+        group_splits[event.identity] = split
+        group_cutoffs[event.identity] = _label_cutoff(split, policy)
 
     outcomes = _latest_labeled_outcomes(
         outcomes_input,
         policy=policy,
         source_analyses=trusted_source_analyses,
+        group_splits=group_splits,
+        group_cutoffs=group_cutoffs,
         trusted_authority_registry=trusted_authority_registry,
         excluded=excluded,
     )
 
     rows: list[dict[str, Any]] = []
-    for source_identity, (analysis_event, analysis) in analyses.items():
-        split = _split_for(_parse(analysis_event.available_time), policy)
-        cutoff = _label_cutoff(split, policy)
+    for source_identity, (_analysis_event, analysis) in analyses.items():
+        split = group_splits[source_identity]
         matched = outcomes.get(source_identity, {})
         for horizon, outcome in matched.items():
             if _parse(outcome["outcome_available_time"]) <= _parse(
@@ -139,9 +153,6 @@ def build_confidence_calibration_dataset(
                 raise CalibrationDatasetError(
                     "outcome cannot be available before analysis availability"
                 )
-            if _parse(outcome["outcome_available_time"]) > cutoff:
-                excluded[f"outcome_after_{split}_label_cutoff"] += 1
-                continue
             rows.append({**analysis, **outcome, "split": split})
 
     rows.sort(
@@ -201,7 +212,10 @@ def build_confidence_calibration_dataset(
         },
         "excluded_counts": dict(sorted(excluded.items())),
         "split_ranges": split_ranges,
-        "row_counts": dict(sorted(Counter(row["split"] for row in rows).items())),
+        "row_counts": {
+            split: sum(1 for row in rows if row["split"] == split)
+            for split in ("train", "validation", "test")
+        },
         "group_counts": {
             split: sum(1 for group in unique_groups if group[2] == split)
             for split in ("train", "validation", "test")
@@ -216,30 +230,40 @@ def build_confidence_calibration_dataset(
 
 
 def _bounded_visible_events(
-    events: Iterable[LearningEvent], *, dataset_as_of: datetime, source: str
+    events: Iterable[LearningEvent],
+    *,
+    dataset_as_of: datetime,
+    source: str,
+    trusted_tenant_id: str,
 ) -> list[LearningEvent]:
     """Bound input before materialization/sort/hash; post-cutoff events are invisible."""
 
     visible: list[LearningEvent] = []
     total_bytes = 0
+    total_nodes = 0
     scanned = 0
     for event in events:
         if not isinstance(event, LearningEvent):
             raise CalibrationDatasetError(f"{source} input must contain LearningEvent")
+        if not isinstance(event.tenant_id, str):
+            raise CalibrationDatasetError(f"{source} tenant metadata is invalid")
+        if event.tenant_id != trusted_tenant_id:
+            continue
         scanned += 1
         if scanned > _MAX_INPUT_EVENTS:
             raise CalibrationDatasetError(f"{source} input exceeds event count limit")
-        _validate_event_string_fields(event, source=source)
-        anchor = _event_anchor(event)
-        encoder = json.JSONEncoder(
-            ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        event_bytes, event_nodes = _preflight_event(
+            event,
+            source=source,
+            byte_budget=_MAX_INPUT_BYTES - total_bytes,
+            node_budget=_MAX_INPUT_NODES - total_nodes,
         )
-        for chunk in encoder.iterencode(anchor):
-            total_bytes += len(chunk.encode("utf-8"))
-            if total_bytes > _MAX_INPUT_BYTES:
-                raise CalibrationDatasetError(
-                    f"{source} input exceeds UTF-8 byte limit"
-                )
+        total_bytes += event_bytes
+        total_nodes += event_nodes
+        if total_bytes > _MAX_INPUT_BYTES:
+            raise CalibrationDatasetError(f"{source} input exceeds UTF-8 byte limit")
+        if total_nodes > _MAX_INPUT_NODES:
+            raise CalibrationDatasetError(f"{source} input exceeds node limit")
         if _parse(event.available_time) > dataset_as_of:
             continue
         visible.append(event)
@@ -299,6 +323,8 @@ def _latest_labeled_outcomes(
     *,
     policy: CalibrationDatasetPolicy,
     source_analyses: dict[str, LearningEvent],
+    group_splits: dict[str, str],
+    group_cutoffs: dict[str, datetime],
     trusted_authority_registry: FixtureAuthorityRegistry,
     excluded: Counter[str],
 ) -> dict[str, dict[str, dict[str, Any]]]:
@@ -346,6 +372,14 @@ def _latest_labeled_outcomes(
             raise CalibrationDatasetError(
                 "dataset outcome failed canonical validation"
             ) from exc
+        cutoff = group_cutoffs.get(source_identity)
+        if cutoff is None:
+            continue
+        if _parse(event.available_time) > cutoff:
+            excluded[
+                f"outcome_after_{group_splits[source_identity]}_label_cutoff"
+            ] += 1
+            continue
         if payload.get("status") != "labeled":
             excluded["outcome_not_labeled"] += 1
             continue
@@ -433,8 +467,16 @@ def _bounded_text(value: Any, field: str, *, required: bool) -> None:
         raise CalibrationDatasetError(f"{field} exceeds UTF-8 byte limit")
 
 
-def _validate_event_string_fields(event: LearningEvent, *, source: str) -> None:
-    stack: list[Any] = [
+def _preflight_event(
+    event: LearningEvent,
+    *,
+    source: str,
+    byte_budget: int,
+    node_budget: int,
+) -> tuple[int, int]:
+    stack: list[tuple[Any, int]] = [
+        (value, 1)
+        for value in (
         event.schema_version,
         event.kind,
         event.tenant_id,
@@ -445,20 +487,56 @@ def _validate_event_string_fields(event: LearningEvent, *, source: str) -> None:
         event.as_of_time,
         event.provenance,
         event.payload,
+        )
     ]
+    encoder = json.JSONEncoder(
+        ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    total_bytes = 0
+    nodes = 0
     while stack:
-        value = stack.pop()
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > node_budget:
+            raise CalibrationDatasetError(f"{source} input exceeds node limit")
+        if depth > _MAX_NESTING_DEPTH:
+            raise CalibrationDatasetError(
+                f"{source} input exceeds nesting depth limit"
+            )
         if isinstance(value, str):
-            if len(value.encode("utf-8")) > _MAX_FIELD_BYTES:
+            if _utf8_exceeds(value, _MAX_FIELD_BYTES):
                 raise CalibrationDatasetError(
                     f"{source} input field exceeds UTF-8 byte limit"
                 )
-        elif isinstance(value, Mapping):
+        if isinstance(value, Mapping):
+            total_bytes += 2 + max(0, len(value) - 1)
             for key, item in value.items():
-                stack.append(key)
-                stack.append(item)
+                stack.append((key, depth + 1))
+                stack.append((item, depth + 1))
         elif isinstance(value, (tuple, list)):
-            stack.extend(value)
+            total_bytes += 2 + max(0, len(value) - 1)
+            stack.extend((item, depth + 1) for item in value)
+        else:
+            for chunk in encoder.iterencode(value):
+                total_bytes += len(chunk.encode("utf-8"))
+                if total_bytes > byte_budget:
+                    raise CalibrationDatasetError(
+                        f"{source} input exceeds UTF-8 byte limit"
+                    )
+        if total_bytes > byte_budget:
+            raise CalibrationDatasetError(
+                f"{source} input exceeds UTF-8 byte limit"
+            )
+    return total_bytes, nodes
+
+
+def _utf8_exceeds(value: str, limit: int) -> bool:
+    total = 0
+    for character in value:
+        total += len(character.encode("utf-8"))
+        if total > limit:
+            return True
+    return False
 
 
 def _event_anchor(event: LearningEvent) -> dict[str, Any]:

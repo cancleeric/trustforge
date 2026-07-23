@@ -652,3 +652,82 @@ def test_streaming_aggregate_byte_bound_early_stops_before_hash(monkeypatch):
 
     with pytest.raises(CalibrationDatasetError, match="input exceeds"):
         _dataset([analysis], [], registry=_registry_for([analysis], []))
+
+
+def test_late_revision_cannot_shadow_cutoff_eligible_revision():
+    analysis = _analysis(1)
+    ledger = FixtureOutcomeLedger(append=LearningEventAppendLog())
+    v1 = _outcome(analysis, ledger=ledger)
+    v2 = _outcome(
+        analysis,
+        ledger=ledger,
+        labeled_at_override="2026-07-04T00:00:00Z",
+    )
+    policy = _policy(
+        train_end="2026-07-03T12:00:00Z",
+        validation_end="2026-07-10T00:00:00Z",
+    )
+
+    first = _dataset([analysis], [v1, v2], policy=policy)
+    reversed_input = _dataset([analysis], [v2, v1], policy=policy)
+
+    assert first == reversed_input
+    assert first["rows"][0]["outcome_identity"].endswith("/v1")
+    assert first["excluded_counts"]["outcome_after_train_label_cutoff"] == 1
+
+
+def test_foreign_tenant_is_invisible_to_quota_counts_roots_and_checksum(monkeypatch):
+    analysis = _analysis(1)
+    outcome = _outcome(analysis)
+    baseline = _dataset([analysis], [outcome])
+    foreign_analyses = [
+        _analysis(day, tenant="tenant-b", analysis_id=f"foreign-{day}")
+        for day in range(1, 10)
+    ]
+    foreign_outcomes = [
+        _outcome(item, end_day=day + 1)
+        for day, item in enumerate(foreign_analyses, start=1)
+    ]
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_EVENTS", 1)
+
+    with_foreign = _dataset(
+        [*foreign_analyses, analysis],
+        [*foreign_outcomes, outcome],
+        registry=_registry_for([analysis], [outcome]),
+    )
+
+    assert with_foreign == baseline
+    assert with_foreign["excluded_counts"]["analysis_wrong_tenant"] == 0
+    assert with_foreign["excluded_counts"]["outcome_wrong_tenant"] == 0
+
+
+def test_preflight_rejects_deep_and_broad_containers_before_hash(monkeypatch):
+    analysis = _analysis(1)
+    nested = "leaf"
+    for _ in range(8):
+        nested = {"nested": nested}
+    deep = replace(analysis, payload={**analysis.payload, "extra": nested})
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_NESTING_DEPTH", 4)
+    monkeypatch.setattr(
+        "trustforge.calibration_dataset._sha256",
+        lambda _value: pytest.fail("hash must not run before depth bound"),
+    )
+    with pytest.raises(CalibrationDatasetError, match="nesting depth"):
+        _dataset([deep], [], registry=_registry_for([analysis], []))
+
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_NESTING_DEPTH", 64)
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_NODES", 10)
+    broad = replace(
+        analysis,
+        payload={
+            **analysis.payload,
+            "extra": {f"field-{index}": index for index in range(20)},
+        },
+    )
+    with pytest.raises(CalibrationDatasetError, match="node limit"):
+        _dataset([broad], [], registry=_registry_for([analysis], []))
+
+
+def test_row_counts_always_contains_all_splits():
+    manifest = _dataset([_analysis(1)], [])
+    assert manifest["row_counts"] == {"train": 0, "validation": 0, "test": 0}

@@ -51,13 +51,21 @@ source-analysis identity binding, supersession lineage, and selected
 market-data variant. Only mature directional labels enter rows. The join uses
 an identity index keyed by exact source analysis and horizon, not
 `analysis_id`, and is O(A + O); duplicate identities or revisions fail closed.
+For each `(source analysis identity, horizon)`, the builder first derives the
+analysis group's split and label cutoff, discards and counts canonical
+revisions beyond that cutoff, and only then chooses the highest eligible
+revision. A late v2 can therefore never shadow an eligible v1.
 
 ## Resource and point-in-time bounds
 
-Inputs are consumed once. Event count and recursive string-field UTF-8 bounds
-are checked first. Canonical bytes are then counted incrementally with
-`JSONEncoder.iterencode`, aborting as soon as the aggregate limit is crossed,
-before materialization, sorting, or hashing.
+Inputs are consumed once. After safe event-type and tenant metadata checks,
+foreign-tenant events are discarded before all quotas, exclusion counts,
+roots, or checksums. Scoped event count, recursive string-field UTF-8,
+container-node, and nesting-depth bounds are checked directly on the event
+tree. Scalar canonical bytes are counted incrementally with
+`JSONEncoder.iterencode`, aborting as soon as the aggregate limit is crossed.
+Only a successfully preflighted event is converted to a canonical anchor;
+sorting and hashing occur after the bounded scan.
 Events whose `available_time` is after `dataset_as_of` are invisible: adding or
 reordering such late inputs does not change rows, roots, counts, or checksum.
 The implementation then canonical-sorts visible scoped anchors and output rows.
