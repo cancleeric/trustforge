@@ -400,6 +400,26 @@ def _nested_nonlocal_mutations(nodes: Iterable[ast.stmt]) -> set[str]:
     return _nested_declaration_mutations(nodes, ast.Nonlocal)
 
 
+class _AttributeMutationVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.roots: set[str] = set()
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            root: ast.expr = node
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name):
+                self.roots.add(root.id)
+        self.generic_visit(node)
+
+
+def _attribute_mutated_roots(tree: ast.Module) -> set[str]:
+    visitor = _AttributeMutationVisitor()
+    visitor.visit(tree)
+    return visitor.roots
+
+
 def _trusted_import_bindings(
     tree: ast.Module,
     *,
@@ -423,6 +443,7 @@ def _trusted_import_bindings(
             )
     counts = _scope_binding_counts(tree.body)
     globally_mutated = _nested_global_mutations(tree)
+    attribute_mutated = _attribute_mutated_roots(tree)
     return (
         {
             name for name in names
@@ -430,7 +451,11 @@ def _trusted_import_bindings(
         },
         {
             name for name in module_aliases
-            if counts[name] == 1 and name not in globally_mutated
+            if (
+                counts[name] == 1
+                and name not in globally_mutated
+                and name not in attribute_mutated
+            )
         },
     )
 

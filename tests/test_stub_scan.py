@@ -806,3 +806,61 @@ def test_scan_keeps_trust_for_class_body_declaration_reads(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_revokes_trusted_module_alias_on_attribute_store_or_delete(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/module_attribute_mutation.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "def mutate_typing():\n"
+        "    typing.Protocol = object\n"
+        "class MutateAbc:\n"
+        "    del abc.abstractmethod\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n"
+        "class MetaAbstract(metaclass=abc.ABCMeta):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.module_attribute_mutation.Abstract.method",
+        "trustforge.module_attribute_mutation.Direct.method",
+        "trustforge.module_attribute_mutation.MetaAbstract.method",
+    ]
+
+
+def test_scan_keeps_trusted_module_alias_on_attribute_reads(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/module_attribute_read.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "def inspect():\n"
+        "    return typing.Protocol, abc.ABC, abc.ABCMeta, abc.abstractmethod\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n"
+        "class MetaAbstract(metaclass=abc.ABCMeta):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
