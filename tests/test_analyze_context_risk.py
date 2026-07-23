@@ -11,7 +11,7 @@ class _Log:
         return {"agent": "test"}
 
 
-def _report(coin: str) -> Report:
+def _report(coin: str, *, generated_at: str = "2026-07-23T00:00:00Z") -> Report:
     return Report(
         coin=coin,
         question_type="multi_source",
@@ -24,7 +24,7 @@ def _report(coin: str) -> Report:
         limits=[],
         could_flip=[],
         contrarian=[],
-        generated_at="2026-07-23T00:00:00Z",
+        generated_at=generated_at,
         calibrated_confidence=0.5,
         decision_state="normal",
     )
@@ -62,3 +62,13 @@ def test_old_report_snapshots_missing_context_fields_stay_readable() -> None:
 
     assert public["asset_context"] is None
     assert public["risk_notices"] == []
+
+
+def test_malformed_generated_at_disables_context_without_crashing() -> None:
+    payload = web._build_analyze_json_payload(
+        _report("ARB", generated_at="not-a-timestamp"), [], _Log()
+    )
+    report = payload["report"]
+
+    assert report["asset_context"] is None
+    assert report["risk_notices"] == []

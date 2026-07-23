@@ -5072,7 +5072,9 @@ def _parse_report_generated_at(report) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, datetime):
         return None
     if parsed.tzinfo is None:
         return None
@@ -5110,7 +5112,11 @@ def _public_report_dict(report) -> dict:
         return data
     repository = _asset_context_repository()
     as_of = _parse_report_generated_at(report)
-    record = repository.by_symbol(getattr(report, "coin", ""), as_of=as_of) if repository else None
+    record = (
+        repository.by_symbol(getattr(report, "coin", ""), as_of=as_of)
+        if repository and as_of is not None
+        else None
+    )
     context = record.context.to_dict() if record else None
     data["asset_context"] = context
     data["risk_notices"] = _risk_notices_for_context(context)
