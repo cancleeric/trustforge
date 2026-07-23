@@ -1,9 +1,15 @@
 from dataclasses import replace
+import json
 
 import pytest
 
+import trustforge.calibration_dataset as calibration_dataset_module
 from trustforge.analysis_quality_event import build_analysis_quality_event
-from trustforge.calibration_dataset import CalibrationDatasetError, build_confidence_calibration_dataset
+from trustforge.calibration_dataset import (
+    CalibrationDatasetError,
+    CalibrationDatasetPolicy,
+    build_confidence_calibration_dataset,
+)
 from trustforge.delayed_outcome_labeler import (
     FixtureAuthorityRegistry,
     FixtureMarketData,
@@ -14,13 +20,15 @@ from trustforge.delayed_outcome_labeler import (
     canonical_fixture_price_content_hash,
 )
 from trustforge.learning_event_contract import (
+    LearningEventError,
     canonical_integrity_checksum,
     make_learning_event,
 )
 from trustforge.learning_event_store import LearningEventAppendLog
 
 
-def _analysis(day: int, analysis_id=None, tenant="tenant-a"):
+def _analysis(day: int, analysis_id=None, tenant="tenant-a", available_time=None):
+    available_time = available_time or f"2026-07-{day:02d}T00:00:01Z"
     evidence_snapshot = [
         {
             "source": f"source-{index}",
@@ -34,14 +42,14 @@ def _analysis(day: int, analysis_id=None, tenant="tenant-a"):
     ]
     pit = {
         "event_time": f"2026-07-{day:02d}T00:00:00Z",
-        "available_time": f"2026-07-{day:02d}T00:00:01Z",
-        "as_of_time": f"2026-07-{day:02d}T00:00:01Z",
+        "available_time": available_time,
+        "as_of_time": available_time,
         "source_available_times": [f"2026-07-{day:02d}T00:00:00Z"],
     }
     provenance = {
         "source": "analysis-flow",
         "collector": "unit-test",
-        "observed_at": f"2026-07-{day:02d}T00:00:01Z",
+        "observed_at": available_time,
     }
     return build_analysis_quality_event(
         {
@@ -57,13 +65,13 @@ def _analysis(day: int, analysis_id=None, tenant="tenant-a"):
             "mode": "formal",
             "question_type": "direction",
             "event_time": f"2026-07-{day:02d}T00:00:00Z",
-            "available_time": f"2026-07-{day:02d}T00:00:01Z",
-            "as_of_time": f"2026-07-{day:02d}T00:00:01Z",
+            "available_time": available_time,
+            "as_of_time": available_time,
             "source_available_times": [f"2026-07-{day:02d}T00:00:00Z"],
             "provenance": {
                 "source": "analysis-flow",
                 "collector": "unit-test",
-                "observed_at": f"2026-07-{day:02d}T00:00:01Z",
+                "observed_at": available_time,
             },
             "confidence": {"raw": 0.7, "calibrated": 0.62},
             "decision": {"direction": "bullish", "state": "buy"},
@@ -143,6 +151,7 @@ def _outcome(
     ledger=None,
     variant="latest_official",
     labeled_at_override=None,
+    horizon="T+1",
 ):
     start_day = int(analysis.event_time[8:10])
     fixture = FixtureMarketData(
@@ -156,7 +165,7 @@ def _outcome(
     return ledger.observe(
         analysis,
         trusted_tenant_id=analysis.tenant_id,
-        horizon="T+1",
+        horizon=horizon,
         trusted_as_of_time=labeled_at,
         trusted_labeled_at=labeled_at,
         calendar=_calendar(),
@@ -187,16 +196,42 @@ def _registry_for(analyses, outcomes):
     )
 
 
-def _dataset(analyses, outcomes, *, variant="latest_official", registry=None):
+def _policy(
+    *,
+    variant="latest_official",
+    dataset_as_of="2026-07-20T00:00:00Z",
+    train_end="2026-07-10T00:00:00Z",
+    validation_end="2026-07-15T00:00:00Z",
+    embargo_seconds=0,
+):
+    return CalibrationDatasetPolicy(
+        dataset_as_of=dataset_as_of,
+        train_end=train_end,
+        validation_end=validation_end,
+        embargo_seconds=embargo_seconds,
+        eligibility_version="eligibility-v1",
+        split_version="fixed-utc-v1",
+        producer_version="unit",
+        tenant_id="tenant-a",
+        market_data_variant=variant,
+    )
+
+
+def _dataset(
+    analyses,
+    outcomes,
+    *,
+    variant="latest_official",
+    registry=None,
+    policy=None,
+):
     analyses = list(analyses)
     outcomes = list(outcomes)
     registry = registry or _registry_for(analyses, outcomes)
     return build_confidence_calibration_dataset(
         analyses,
         outcomes,
-        producer_version="unit",
-        trusted_tenant_id="tenant-a",
-        market_data_variant=variant,
+        policy=policy or _policy(variant=variant),
         trusted_authority_registry=registry,
     )
 
@@ -247,12 +282,18 @@ def test_calibration_dataset_temporal_split_is_chronological_and_reproducible():
     analyses = [_analysis(day) for day in range(1, 6)]
     outcomes = [_outcome(analysis, end_day=day + 1) for day, analysis in enumerate(analyses, start=1)]
 
-    first = _dataset(analyses, outcomes)
-    second = _dataset(reversed(analyses), reversed(outcomes))
+    policy = _policy(
+        train_end="2026-07-04T00:00:00Z",
+        validation_end="2026-07-05T00:00:00Z",
+    )
+    first = _dataset(analyses, outcomes, policy=policy)
+    second = _dataset(reversed(analyses), reversed(outcomes), policy=policy)
 
     assert first["manifest_sha256"] == second["manifest_sha256"]
-    assert [row["split"] for row in first["rows"]] == ["train", "train", "train", "validation", "test"]
-    assert [row["analysis_id"] for row in first["rows"]] == [f"an-{day}" for day in range(1, 6)]
+    assert [row["split"] for row in first["rows"]] == ["train", "train", "test"]
+    assert [row["analysis_id"] for row in first["rows"]] == ["an-1", "an-2", "an-5"]
+    assert first["excluded_counts"]["outcome_after_train_label_cutoff"] == 1
+    assert first["excluded_counts"]["outcome_after_validation_label_cutoff"] == 1
 
 
 def test_calibration_dataset_skips_pending_or_unavailable_outcomes():
@@ -299,9 +340,7 @@ def test_calibration_dataset_requires_variant_and_isolates_tenant_and_variant():
         build_confidence_calibration_dataset(
             [analysis],
             [latest],
-            producer_version="unit",
-            trusted_tenant_id="tenant-a",
-            market_data_variant="",
+            policy=_policy(variant=""),
             trusted_authority_registry=_registry_for([analysis], [latest]),
         )
 
@@ -325,8 +364,8 @@ def test_calibration_join_binds_exact_analysis_identity_not_reused_analysis_id()
     assert manifest["row_count"] == 1
     assert manifest["rows"][0]["analysis_identity"] == first.identity
     assert manifest["rows"][0]["source_event_identity"] == first.identity
-    assert manifest["tenant_id"] == "tenant-a"
-    assert manifest["market_data_variant"] == "latest_official"
+    assert manifest["policy"]["tenant_id"] == "tenant-a"
+    assert manifest["policy"]["market_data_variant"] == "latest_official"
 
 
 def test_calibration_rejects_outcome_before_analysis_availability():
@@ -414,3 +453,325 @@ def test_higher_revision_wrong_source_cannot_shadow_legitimate_outcome():
     )
     with pytest.raises(CalibrationDatasetError, match="does not match analysis"):
         _dataset([analysis], [legitimate, forged])
+
+
+def test_fixed_utc_boundaries_and_embargo_reject_future_labels():
+    before = _analysis(1, analysis_id="before")
+    at_train = _analysis(4, analysis_id="at-train")
+    at_validation = _analysis(5, analysis_id="at-validation")
+    policy = _policy(
+        train_end="2026-07-04T00:00:00Z",
+        validation_end="2026-07-05T00:00:00Z",
+        embargo_seconds=3600,
+    )
+    outcomes = [
+        _outcome(before, end_day=2),
+        _outcome(at_train, end_day=5),
+        _outcome(at_validation, end_day=6),
+    ]
+
+    manifest = _dataset(
+        [at_validation, before, at_train],
+        outcomes,
+        policy=policy,
+    )
+
+    assert [(row["analysis_id"], row["split"]) for row in manifest["rows"]] == [
+        ("before", "train"),
+        ("at-validation", "test"),
+    ]
+    assert manifest["excluded_counts"]["outcome_after_validation_label_cutoff"] == 1
+
+
+def test_all_horizons_for_analysis_use_one_group_and_split():
+    analysis = _analysis(1)
+    t1 = _outcome(analysis, end_day=2, horizon="T+1")
+    t7 = _outcome(
+        analysis,
+        end_day=8,
+        horizon="T+7",
+        labeled_at_override="2026-07-09T00:00:00Z",
+    )
+
+    manifest = _dataset([analysis], [t7, t1])
+
+    assert [row["horizon"] for row in manifest["rows"]] == ["T+1", "T+7"]
+    assert {row["split"] for row in manifest["rows"]} == {"train"}
+    assert manifest["row_count"] == 2
+    assert manifest["group_count"] == 1
+    assert manifest["group_counts"]["train"] == 1
+
+
+def test_post_dataset_as_of_inputs_are_invisible_to_manifest_and_checksum():
+    analysis = _analysis(1)
+    outcome = _outcome(analysis)
+    baseline = _dataset([analysis], [outcome])
+    late_analysis = replace(
+        _analysis(2),
+        available_time="2026-07-21T00:00:00Z",
+        as_of_time="2026-07-21T00:00:00Z",
+    )
+    late_outcome = replace(
+        _outcome(_analysis(3), end_day=4),
+        available_time="2026-07-21T00:00:00Z",
+        as_of_time="2026-07-21T00:00:00Z",
+    )
+
+    with_late = _dataset(
+        [late_analysis, analysis],
+        [late_outcome, outcome],
+        registry=_registry_for([analysis], [outcome]),
+    )
+
+    assert with_late == baseline
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 1.1])
+def test_nonfinite_or_out_of_range_confidence_is_rejected(value):
+    analysis = _analysis(1)
+    with pytest.raises((LearningEventError, CalibrationDatasetError), match="finite"):
+        analysis = replace(
+            analysis,
+            payload={
+                **analysis.payload,
+                "confidence": {
+                    **analysis.payload["confidence"],
+                    "calibrated": value,
+                },
+            },
+        )
+        _dataset([analysis], [])
+
+
+def test_partial_analysis_is_rejected_and_policy_is_exact():
+    analysis = _analysis(1)
+    analysis = replace(
+        analysis,
+        payload={
+            **analysis.payload,
+            "failure": {
+                "status": "partial",
+                "failed_stage": "kernel",
+                "code": "FAILED",
+                "message": "fixture",
+                "retryable": True,
+            },
+        },
+    )
+    with pytest.raises(CalibrationDatasetError, match="partial"):
+        _dataset([analysis], [])
+
+    invalid = _policy(
+        train_end="2026-07-15T00:00:00Z",
+        validation_end="2026-07-10T00:00:00Z",
+    )
+    with pytest.raises(CalibrationDatasetError, match="boundaries"):
+        _dataset([], [], policy=invalid, registry=_registry_for([_analysis(1)], []))
+
+
+def test_streaming_count_bound_runs_before_sort_or_hash(monkeypatch):
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_EVENTS", 1)
+    with pytest.raises(CalibrationDatasetError, match="count limit"):
+        _dataset([_analysis(1), _analysis(2)], [])
+
+
+def test_split_uses_prediction_availability_not_earlier_event_time():
+    analysis = _analysis(
+        3,
+        available_time="2026-07-03T13:00:00Z",
+    )
+    outcome = _outcome(
+        analysis,
+        end_day=4,
+        labeled_at_override="2026-07-05T00:00:00Z",
+    )
+    policy = _policy(
+        train_end="2026-07-03T12:00:00Z",
+        validation_end="2026-07-10T00:00:00Z",
+    )
+
+    manifest = _dataset([analysis], [outcome], policy=policy)
+
+    assert analysis.event_time < policy.train_end
+    assert analysis.available_time >= policy.train_end
+    assert manifest["rows"][0]["split"] == "validation"
+
+
+def test_policy_timestamps_are_canonical_utc_and_timezone_equivalent():
+    analysis = _analysis(1)
+    outcome = _outcome(analysis)
+    utc = _dataset([analysis], [outcome])
+    offset_policy = CalibrationDatasetPolicy(
+        dataset_as_of="2026-07-20T08:00:00+08:00",
+        train_end="2026-07-10T08:00:00+08:00",
+        validation_end="2026-07-15T08:00:00+08:00",
+        embargo_seconds=0,
+        eligibility_version="eligibility-v1",
+        split_version="fixed-utc-v1",
+        producer_version="unit",
+        tenant_id="tenant-a",
+        market_data_variant="latest_official",
+    )
+    offset = _dataset([analysis], [outcome], policy=offset_policy)
+
+    assert offset == utc
+    assert offset["policy"]["dataset_as_of"] == "2026-07-20T00:00:00.000000Z"
+    assert offset["split_ranges"]["train"]["end_exclusive"].endswith("Z")
+
+    naive = replace(offset_policy, dataset_as_of="2026-07-20T00:00:00")
+    with pytest.raises(CalibrationDatasetError, match="timezone aware"):
+        _dataset(
+            [analysis],
+            [outcome],
+            policy=naive,
+            registry=_registry_for([analysis], [outcome]),
+        )
+
+
+def test_recursive_field_bound_precedes_materialize_sort_and_hash(monkeypatch):
+    analysis = _analysis(1)
+    analysis = replace(
+        analysis,
+        payload={**analysis.payload, "question": "界" * 100},
+    )
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_FIELD_BYTES", 128)
+    monkeypatch.setattr(
+        "trustforge.calibration_dataset._sha256",
+        lambda _value: pytest.fail("hash must not run before field bound"),
+    )
+
+    with pytest.raises(CalibrationDatasetError, match="field exceeds"):
+        _dataset([analysis], [], registry=_registry_for([analysis], []))
+
+
+def test_streaming_aggregate_byte_bound_early_stops_before_hash(monkeypatch):
+    analysis = _analysis(1)
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_BYTES", 100)
+    monkeypatch.setattr(
+        "trustforge.calibration_dataset._sha256",
+        lambda _value: pytest.fail("hash must not run before aggregate bound"),
+    )
+
+    with pytest.raises(CalibrationDatasetError, match="input exceeds"):
+        _dataset([analysis], [], registry=_registry_for([analysis], []))
+
+
+def test_late_revision_cannot_shadow_cutoff_eligible_revision():
+    analysis = _analysis(1)
+    ledger = FixtureOutcomeLedger(append=LearningEventAppendLog())
+    v1 = _outcome(analysis, ledger=ledger)
+    v2 = _outcome(
+        analysis,
+        ledger=ledger,
+        labeled_at_override="2026-07-04T00:00:00Z",
+    )
+    policy = _policy(
+        train_end="2026-07-03T12:00:00Z",
+        validation_end="2026-07-10T00:00:00Z",
+    )
+
+    first = _dataset([analysis], [v1, v2], policy=policy)
+    reversed_input = _dataset([analysis], [v2, v1], policy=policy)
+
+    assert first == reversed_input
+    assert first["rows"][0]["outcome_identity"].endswith("/v1")
+    assert first["excluded_counts"]["outcome_after_train_label_cutoff"] == 1
+
+
+def test_foreign_tenant_is_invisible_to_quota_counts_roots_and_checksum(monkeypatch):
+    analysis = _analysis(1)
+    outcome = _outcome(analysis)
+    baseline = _dataset([analysis], [outcome])
+    foreign_analyses = [
+        _analysis(day, tenant="tenant-b", analysis_id=f"foreign-{day}")
+        for day in range(1, 10)
+    ]
+    foreign_outcomes = [
+        _outcome(item, end_day=day + 1)
+        for day, item in enumerate(foreign_analyses, start=1)
+    ]
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_EVENTS", 1)
+
+    with_foreign = _dataset(
+        [*foreign_analyses, analysis],
+        [*foreign_outcomes, outcome],
+        registry=_registry_for([analysis], [outcome]),
+    )
+
+    assert with_foreign == baseline
+    assert with_foreign["excluded_counts"]["analysis_wrong_tenant"] == 0
+    assert with_foreign["excluded_counts"]["outcome_wrong_tenant"] == 0
+
+
+def test_preflight_rejects_deep_and_broad_containers_before_hash(monkeypatch):
+    analysis = _analysis(1)
+    nested = "leaf"
+    for _ in range(8):
+        nested = {"nested": nested}
+    deep = replace(analysis, payload={**analysis.payload, "extra": nested})
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_NESTING_DEPTH", 4)
+    monkeypatch.setattr(
+        "trustforge.calibration_dataset._sha256",
+        lambda _value: pytest.fail("hash must not run before depth bound"),
+    )
+    with pytest.raises(CalibrationDatasetError, match="nesting depth"):
+        _dataset([deep], [], registry=_registry_for([analysis], []))
+
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_NESTING_DEPTH", 64)
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_NODES", 10)
+    broad = replace(
+        analysis,
+        payload={
+            **analysis.payload,
+            "extra": {f"field-{index}": index for index in range(20)},
+        },
+    )
+    with pytest.raises(CalibrationDatasetError, match="node limit"):
+        _dataset([broad], [], registry=_registry_for([analysis], []))
+
+
+def test_row_counts_always_contains_all_splits():
+    manifest = _dataset([_analysis(1)], [])
+    assert manifest["row_counts"] == {"train": 0, "validation": 0, "test": 0}
+
+
+def test_streaming_anchor_count_equals_canonical_json_for_normal_and_nested():
+    normal = _analysis(1)
+    nested = replace(
+        normal,
+        payload={
+            **normal.payload,
+            "nested-fixture": {
+                "unicode": "可信度",
+                "list": [1, True, None, {"escaped": 'a"b\\c'}],
+            },
+        },
+    )
+
+    for event in (normal, nested):
+        expected = len(
+            json.dumps(
+                calibration_dataset_module._event_anchor(event),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        assert calibration_dataset_module._canonical_event_anchor_size(event) == expected
+
+
+def test_exact_canonical_byte_limit_passes_and_one_byte_over_rejects(monkeypatch):
+    analysis = _analysis(1)
+    size = calibration_dataset_module._canonical_event_anchor_size(analysis)
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_BYTES", size)
+
+    manifest = _dataset([analysis], [])
+    assert manifest["row_count"] == 0
+
+    monkeypatch.setattr("trustforge.calibration_dataset._MAX_INPUT_BYTES", size - 1)
+    monkeypatch.setattr(
+        "trustforge.calibration_dataset._sha256",
+        lambda _value: pytest.fail("hash must not run before exact byte gate"),
+    )
+    with pytest.raises(CalibrationDatasetError, match="UTF-8 byte limit"):
+        _dataset([analysis], [])
