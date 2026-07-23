@@ -9,7 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",
-    "pretest:mobile-geometry": "playwright install --with-deps chromium",
+    "pretest:mobile-geometry": "playwright install chromium",
     "test:mobile-geometry": "node scripts/verify-mobile-geometry.mjs"
   },
   "dependencies": {
