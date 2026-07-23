@@ -3,6 +3,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from trustforge.asset_context import (
+    ASSET_CONTEXT_SCHEMA_VERSION,
+    ASSET_LAYERS,
+    ASSET_SECTORS,
+    MARKET_CAP_TIERS,
+    TOKEN_ROLES,
+)
+
 DOCUMENT_SCHEMA_VERSION = "1.0.0"
 EVIDENCE_SCHEMA_VERSION = "1.0.0"
 REPORT_SCHEMA_VERSION = "1.0.0"
@@ -72,6 +80,39 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                 "hypothesis_ledger": {"type": ["object", "null"]},
                 "calibrated_confidence": {"type": "number"},
                 "decision_state": {"enum": ["abstain", "low_confidence", "normal"]},
+            },
+            "additionalProperties": False,
+        },
+        "AssetContext": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://trustforge.local/contracts/asset-context/1.0.0",
+            "title": "TrustForge AssetContext",
+            "type": "object",
+            "required": [
+                "schema_version",
+                "asset_id",
+                "symbol",
+                "name",
+                "sector",
+                "layer",
+                "token_role",
+                "market_cap_tier",
+                "ecosystem",
+                "parent_asset_id",
+                "tags",
+            ],
+            "properties": {
+                "schema_version": {"const": ASSET_CONTEXT_SCHEMA_VERSION},
+                "asset_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "symbol": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "name": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "sector": {"enum": list(ASSET_SECTORS)},
+                "layer": {"enum": list(ASSET_LAYERS)},
+                "token_role": {"enum": list(TOKEN_ROLES)},
+                "market_cap_tier": {"enum": list(MARKET_CAP_TIERS)},
+                "ecosystem": {"type": ["string", "null"]},
+                "parent_asset_id": {"type": ["string", "null"]},
+                "tags": {"type": "array", "items": {"type": "string"}},
             },
             "additionalProperties": False,
         },
