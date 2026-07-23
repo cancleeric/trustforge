@@ -44,6 +44,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ from . import backend_registry
 from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
+from .asset_context_repository import AssetContextRepository, load_asset_context_records
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
@@ -5035,6 +5037,8 @@ _EVIDENCE_PUBLIC_FIELDS = frozenset({
     "reputation_mode",
 })
 _EVIDENCE_FILTERED_FIELDS = frozenset({"author"})
+_ASSET_CONTEXT_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "asset_context_records.json"
+_ASSET_CONTEXT_REPOSITORY: AssetContextRepository | None = None
 
 
 def _public_evidence_dict(ev) -> dict:
@@ -5048,6 +5052,69 @@ def _public_evidence_dict(ev) -> dict:
     for field_name in _EVIDENCE_FILTERED_FIELDS:
         d.pop(field_name, None)
     return d
+
+
+def _asset_context_repository() -> AssetContextRepository | None:
+    global _ASSET_CONTEXT_REPOSITORY
+    if _ASSET_CONTEXT_REPOSITORY is not None:
+        return _ASSET_CONTEXT_REPOSITORY
+    if not _ASSET_CONTEXT_FIXTURE.exists():
+        return None
+    _ASSET_CONTEXT_REPOSITORY = AssetContextRepository(
+        load_asset_context_records(_ASSET_CONTEXT_FIXTURE)
+    )
+    return _ASSET_CONTEXT_REPOSITORY
+
+
+def _parse_report_generated_at(report) -> datetime | None:
+    raw = getattr(report, "generated_at", "")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _risk_notices_for_context(context: dict | None) -> list[dict]:
+    if not context:
+        return []
+    notices: list[dict] = []
+    if context.get("layer") == "layer_2":
+        notices.append({
+            "code": "layer_2_dependency",
+            "severity": "info",
+            "message": "Layer 2 asset: compare against L2 peers and include parent-chain dependency risk.",
+        })
+    if context.get("token_role") == "governance":
+        notices.append({
+            "code": "governance_token",
+            "severity": "info",
+            "message": "Governance token: monitor unlocks, voting concentration, and protocol upgrade exposure.",
+        })
+    if context.get("market_cap_tier") in {"small", "mid"}:
+        notices.append({
+            "code": "market_cap_liquidity",
+            "severity": "warning",
+            "message": "Lower market-cap tier: liquidity and slippage can dominate short-window signals.",
+        })
+    return notices
+
+
+def _public_report_dict(report) -> dict:
+    data = dataclasses.asdict(report)
+    if data.get("asset_context") is not None or data.get("risk_notices"):
+        return data
+    repository = _asset_context_repository()
+    as_of = _parse_report_generated_at(report)
+    record = repository.by_symbol(getattr(report, "coin", ""), as_of=as_of) if repository else None
+    context = record.context.to_dict() if record else None
+    data["asset_context"] = context
+    data["risk_notices"] = _risk_notices_for_context(context)
+    return data
 
 
 def _public_snapshot_dict(snap: dict) -> dict:
@@ -5076,7 +5143,7 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
     `lambda_handler.py` Function URL 入口共用同一份，見上方說明。"""
     return {
         "version": VERSION,
-        "report": dataclasses.asdict(report),
+        "report": _public_report_dict(report),
         "evidence": [_public_evidence_dict(ev) for ev in evidence],
         "execution": log.manifest(),
         "execution_log": log.events,
@@ -5087,9 +5154,9 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
     """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。"""
     return {
         "version": VERSION,
-        "report_a": dataclasses.asdict(report_a),
+        "report_a": _public_report_dict(report_a),
         "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
-        "report_b": dataclasses.asdict(report_b),
+        "report_b": _public_report_dict(report_b),
         "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
         "execution": log.manifest(),
         "execution_log": log.events,
@@ -6317,12 +6384,12 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             )
             payload = {
                 "version": VERSION,
-                "report_a": dataclasses.asdict(report_a),
+                "report_a": _public_report_dict(report_a),
                 "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
                 "trust_radar_a": aggregate_trust_by_kind(evidence_a),
                 "trust_components_aggregate_a": _aggregate_trust_components(evidence_a),
                 "price_provenance_a": _price_provenance_data(evidence_a),
-                "report_b": dataclasses.asdict(report_b),
+                "report_b": _public_report_dict(report_b),
                 "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
@@ -6342,7 +6409,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             )
             payload = {
                 "version": VERSION,
-                "report": dataclasses.asdict(report),
+                "report": _public_report_dict(report),
                 "evidence": [_public_evidence_dict(ev) for ev in evidence],
                 "trust_radar": aggregate_trust_by_kind(evidence),
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
