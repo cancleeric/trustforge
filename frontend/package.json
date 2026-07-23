@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "NODE_ENV=development vitest run"
   },
   "dependencies": {
     "react": "^19.2.7",
