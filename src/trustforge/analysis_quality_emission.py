@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Mapping, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from .analysis_quality_event import build_analysis_quality_event
 from .learning_event_contract import LearningEvent, LearningEventError
@@ -32,11 +32,11 @@ class AnalysisQualityConflictError(AnalysisQualityEmissionError):
 
 
 def emit_analysis_quality_event(
-    snapshot: Mapping[str, object],
+    snapshot: dict[str, object],
     *,
     trusted_tenant_id: str,
-    trusted_pit: Mapping[str, object],
-    trusted_provenance: Mapping[str, object],
+    trusted_pit: dict[str, object],
+    trusted_provenance: dict[str, object],
     sink: AnalysisQualityAppendSink,
 ) -> EmissionResult:
     """Build then append once; never convert storage failure into success."""

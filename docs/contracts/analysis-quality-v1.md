@@ -47,9 +47,11 @@ hash.
 Authority roots must be exact built-in `dict` objects. Recursive input accepts
 only exact built-in JSON containers (`dict` and `list`) and scalars (`str`,
 `int`, `float`, `bool`, and `None`); duck-typed mappings, tuples, subclasses,
-and custom scalars fail closed before their methods are invoked. After bounded
+and custom scalars fail closed before their methods are invoked. Object keys
+must be exact built-in strings. After bounded
 type/shape traversal, the builder streams canonical JSON chunks for the three
-authority inputs and rejects their cumulative UTF-8 bytes above 1 MiB before
+authority inputs without sorting keys and rejects their cumulative UTF-8 bytes
+above 1 MiB before
 copying, sorting source times, hashing Evidence, or deep-freezing. The final
 canonical event has a separate exact 1 MiB cap matching the immutable file
 store's per-event limit. Additional hard limits are 1,024

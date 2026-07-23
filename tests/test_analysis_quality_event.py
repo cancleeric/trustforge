@@ -1,6 +1,7 @@
 import copy
 from collections.abc import Mapping
 import json
+from typing import get_origin, get_type_hints
 
 import pytest
 
@@ -17,6 +18,7 @@ from trustforge.analysis_quality_event import (
     MAX_TEXT_CHARS,
     build_analysis_quality_event as _build_analysis_quality_event,
 )
+from trustforge.analysis_quality_emission import emit_analysis_quality_event
 from trustforge.learning_event_contract import (
     LearningEventError,
     canonical_integrity_checksum,
@@ -634,6 +636,38 @@ def test_streaming_raw_utf8_budget_exact_and_plus_one(monkeypatch, text):
     )
     with pytest.raises(LearningEventError, match=rf"raw JSON budget {exact - 1} bytes"):
         analysis_quality._preflight_bounds(*values)
+
+
+def test_raw_budget_streaming_does_not_sort_keys(monkeypatch):
+    real_encoder = json.JSONEncoder
+    observed = []
+
+    def encoder_spy(**kwargs):
+        observed.append(kwargs["sort_keys"])
+        return real_encoder(**kwargs)
+
+    monkeypatch.setattr(analysis_quality.json, "JSONEncoder", encoder_spy)
+    analysis_quality._assert_raw_authority_input_size(
+        {"z": 1, "a": 2}, {"y": 3}, {"x": 4}
+    )
+    assert observed == [False]
+
+
+def test_json_object_keys_must_be_exact_strings():
+    value = {"attacker_extension": {1: "not-a-json-object-key"}}
+
+    with pytest.raises(LearningEventError, match="keys must be exact strings"):
+        analysis_quality._preflight_bounds(value, {}, {})
+
+
+def test_public_builder_and_emission_annotations_require_dict_roots():
+    builder_hints = get_type_hints(_build_analysis_quality_event)
+    emission_hints = get_type_hints(emit_analysis_quality_event)
+
+    for hints in (builder_hints, emission_hints):
+        assert get_origin(hints["snapshot"]) is dict
+        assert get_origin(hints["trusted_pit"]) is dict
+        assert get_origin(hints["trusted_provenance"]) is dict
 
 
 def test_preflight_depth_accepts_exact_limit_and_rejects_limit_plus_one():

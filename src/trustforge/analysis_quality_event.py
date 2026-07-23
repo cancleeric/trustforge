@@ -89,11 +89,11 @@ _SNAPSHOT_FIELDS = {
 
 
 def build_analysis_quality_event(
-    snapshot: Mapping[str, Any],
+    snapshot: dict[str, Any],
     *,
     trusted_tenant_id: str,
-    trusted_pit: Mapping[str, Any],
-    trusted_provenance: Mapping[str, Any],
+    trusted_pit: dict[str, Any],
+    trusted_provenance: dict[str, Any],
 ) -> LearningEvent:
     """Build one immutable event from a completed or partially failed analysis.
 
@@ -302,7 +302,7 @@ def build_analysis_quality_event(
 
 
 def _preflight_bounds(
-    snapshot: Mapping[str, Any],
+    snapshot: dict[str, Any],
     trusted_pit: Any,
     trusted_provenance: Any,
 ) -> None:
@@ -374,11 +374,15 @@ def _preflight_bounds(
                     f"({remaining_nodes} available, {required_nodes} required)"
                 )
             for key, item in value.items():
-                if type(key) is str and len(key) > MAX_IDENTIFIER_CHARS:
+                if type(key) is not str:
+                    raise LearningEventError(
+                        f"{path} keys must be exact strings"
+                    )
+                if len(key) > MAX_IDENTIFIER_CHARS:
                     raise LearningEventError(
                         f"{path} field name exceeds {MAX_IDENTIFIER_CHARS} characters"
                     )
-                item_path = f"{path}.{key}" if type(key) is str else path
+                item_path = f"{path}.{key}"
                 stack.append((f"{path} field name", key, depth + 1))
                 stack.append((item_path, item, depth + 1))
         elif type(value) is list:
@@ -417,7 +421,7 @@ def _assert_raw_authority_input_size(*values: dict[str, Any]) -> None:
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
-        sort_keys=True,
+        sort_keys=False,
     )
     total = 0
     try:
