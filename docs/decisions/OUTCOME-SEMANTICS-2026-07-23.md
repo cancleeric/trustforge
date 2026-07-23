@@ -1,9 +1,9 @@
 # T+1 / T+7 / T+14 outcome 語意與資料規則
 
-> Issue: #501  
-> Status: **PENDING CEO DISPOSITION — NOT APPROVED FOR IMPLEMENTATION**  
-> Owner: CEO / product owner  
-> Draft date: 2026-07-23  
+> Issue: #501
+> Status: **PENDING CEO DISPOSITION — NOT APPROVED FOR IMPLEMENTATION**
+> Owner: CEO / product owner
+> Draft date: 2026-07-23
 > Scope: 決策文件與可轉 fixture 的期望值；不實作 labeler、不動 DB、不回填資料。
 
 ## 1. 決策摘要
