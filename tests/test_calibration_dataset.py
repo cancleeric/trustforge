@@ -26,7 +26,8 @@ def _analysis(day: int, analysis_id=None):
             "quality": {"freshness": "ok", "conflict": "low", "completeness": "complete"},
             "versions": {"kernel": "learning-event.v1"},
             "stage_metrics": [],
-        }
+        },
+        trusted_tenant_id="tenant-a",
     )
 
 

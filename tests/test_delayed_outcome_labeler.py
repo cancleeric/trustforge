@@ -27,7 +27,8 @@ def _analysis():
             "quality": {"freshness": "ok", "conflict": "low", "completeness": "complete"},
             "versions": {"kernel": "learning-event.v1"},
             "stage_metrics": [],
-        }
+        },
+        trusted_tenant_id="tenant-a",
     )
 
 

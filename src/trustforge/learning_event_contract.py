@@ -96,8 +96,14 @@ def canonical_identity(*, tenant_id: str, kind: LearningEventKind, entity_id: st
     return f"le1/{quote(tenant_id, safe='')}/{kind}/{quote(entity_id, safe='')}/v{revision}"
 
 
-def provenance_checksum(source_record: Any) -> str:
-    """Checksum the canonical JSON bytes of a provenance source record."""
+def canonical_integrity_checksum(source_record: Any) -> str:
+    """Return an integrity-only checksum of canonical source-record bytes.
+
+    This proves only deterministic byte self-consistency.  It does not prove
+    authenticity, authorization, tenant ownership, evidentiary classification,
+    or that the source record is truthful.  Callers must establish those
+    properties through separate trusted controls.
+    """
 
     canonical = _canonical_json_bytes(source_record, "provenance.source_record")
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
@@ -274,7 +280,7 @@ def _validate_provenance(value: Any, tenant_id: str, as_of_ts: datetime) -> None
         raise LearningEventError("provenance.observed_at must use canonical UTC form")
     if observed > as_of_ts:
         raise LearningEventError("provenance.observed_at cannot follow as_of_time")
-    expected = provenance_checksum(value["source_record"])
+    expected = canonical_integrity_checksum(value["source_record"])
     if value["checksum"] != expected:
         raise LearningEventError("provenance.checksum does not match canonical source_record bytes")
 

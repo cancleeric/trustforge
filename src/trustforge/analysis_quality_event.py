@@ -7,16 +7,25 @@ from typing import Any
 from .learning_event_contract import (
     LearningEvent,
     LearningEventError,
+    canonical_integrity_checksum,
     make_learning_event,
-    provenance_checksum,
 )
 
 
-def build_analysis_quality_event(snapshot: dict[str, Any]) -> LearningEvent:
+def build_analysis_quality_event(
+    snapshot: dict[str, Any],
+    *,
+    trusted_tenant_id: str,
+) -> LearningEvent:
     """Create an `analysis-quality.v1` event from one completed analysis snapshot."""
 
+    if not isinstance(trusted_tenant_id, str) or not trusted_tenant_id.strip():
+        raise LearningEventError("trusted_tenant_id is required")
     analysis_id = _required(snapshot, "analysis_id")
-    tenant_id = _required(snapshot, "tenant_id")
+    snapshot_tenant_id = _required(snapshot, "tenant_id")
+    if snapshot_tenant_id != trusted_tenant_id:
+        raise LearningEventError("snapshot tenant_id must match trusted_tenant_id")
+    tenant_id = trusted_tenant_id
     coin = _required(snapshot, "coin")
     mode = _required(snapshot, "mode")
     question_type = _required(snapshot, "question_type")
@@ -58,7 +67,7 @@ def build_analysis_quality_event(snapshot: dict[str, Any]) -> LearningEvent:
         "tenant_id": tenant_id,
         "source_record": source_record,
         "version": str(_object(snapshot, "versions").get("contract", "analysis-quality.v1")),
-        "checksum": provenance_checksum(source_record),
+        "checksum": canonical_integrity_checksum(source_record),
     }
     return make_learning_event(
         kind="historical_non_evidentiary",

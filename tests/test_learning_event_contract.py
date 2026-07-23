@@ -6,10 +6,10 @@ from trustforge.learning_event_contract import (
     LearningEvent,
     LearningEventError,
     assert_append_only,
+    canonical_integrity_checksum,
     canonical_identity,
     deserialize_learning_event,
     make_learning_event,
-    provenance_checksum,
     serialize_learning_event,
 )
 
@@ -30,7 +30,7 @@ def _provenance(tenant_id="tenant-a", observed_at="2026-07-01T01:00:00.000000Z")
         "tenant_id": tenant_id,
         "source_record": source_record,
         "version": "fixture.v1",
-        "checksum": provenance_checksum(source_record),
+        "checksum": canonical_integrity_checksum(source_record),
     }
 
 
@@ -154,6 +154,43 @@ def test_checksum_is_over_canonical_source_record_bytes():
             revision=1,
             provenance=provenance,
             payload={"evidence_id": "ev-1", "claim": "c", "source_url": "https://e.test"},
+            **TIMES,
+        )
+
+
+def test_recomputed_integrity_checksum_does_not_grant_authenticity_or_evidentiary_trust():
+    forged_record = {"record_id": "attacker-controlled", "claim": "trust me"}
+    provenance = _provenance()
+    provenance["source_record"] = forged_record
+    provenance["checksum"] = canonical_integrity_checksum(forged_record)
+    diagnostic = make_learning_event(
+        kind="candidate_diagnostic",
+        tenant_id="tenant-a",
+        entity_id="diag-1",
+        revision=1,
+        provenance=provenance,
+        payload={"diagnostic_id": "diag-1", "analysis_id": "an-1", "reason": "untrusted input"},
+        **TIMES,
+    )
+
+    assert diagnostic.kind == "candidate_diagnostic"
+    checksum_contract = canonical_integrity_checksum.__doc__ or ""
+    assert "integrity-only" in checksum_contract
+    assert "authenticity" in checksum_contract
+    assert "evidentiary classification" in checksum_contract
+    with pytest.raises(LearningEventError, match="evidence_id is not allowed"):
+        make_learning_event(
+            kind="candidate_diagnostic",
+            tenant_id="tenant-a",
+            entity_id="diag-1",
+            revision=1,
+            provenance=provenance,
+            payload={
+                "diagnostic_id": "diag-1",
+                "analysis_id": "an-1",
+                "reason": "classification spoof",
+                "evidence_id": "forged-evidence",
+            },
             **TIMES,
         )
 

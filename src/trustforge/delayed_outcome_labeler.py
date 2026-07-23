@@ -7,8 +7,8 @@ from typing import Any
 from .learning_event_contract import (
     LearningEvent,
     LearningEventError,
+    canonical_integrity_checksum,
     make_learning_event,
-    provenance_checksum,
 )
 
 _HORIZON_DAYS = {"T+1": 1, "T+7": 7, "T+14": 14}
@@ -84,7 +84,7 @@ def build_delayed_outcome_observation(
             "tenant_id": analysis_event.tenant_id,
             "source_record": source_record,
             "version": source_version,
-            "checksum": provenance_checksum(source_record),
+            "checksum": canonical_integrity_checksum(source_record),
         },
         payload=payload,
     )

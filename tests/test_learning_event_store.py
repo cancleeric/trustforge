@@ -2,8 +2,8 @@ import pytest
 
 from trustforge.learning_event_contract import (
     LearningEventError,
+    canonical_integrity_checksum,
     make_learning_event,
-    provenance_checksum,
     serialize_learning_event,
 )
 from trustforge.learning_event_store import LearningEventAppendLog, plan_learning_event_migration
@@ -22,7 +22,7 @@ PROVENANCE = {
     "tenant_id": "tenant-a",
     "source_record": SOURCE_RECORD,
     "version": "fixture.v1",
-    "checksum": provenance_checksum(SOURCE_RECORD),
+    "checksum": canonical_integrity_checksum(SOURCE_RECORD),
 }
 
 
