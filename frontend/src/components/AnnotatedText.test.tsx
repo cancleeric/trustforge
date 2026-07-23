@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import AnnotatedText from './AnnotatedText'
 import { findGlossaryAnnotations } from '../lib/annotatedText'
 
@@ -24,5 +24,28 @@ describe('AnnotatedText', () => {
 
     expect(annotations).toHaveLength(1)
     expect(annotations[0]).toMatchObject({ term: 'market_cap' })
+  })
+
+  it('clamps popovers inside narrow viewports', () => {
+    vi.stubGlobal('innerWidth', 240)
+    render(<AnnotatedText text="TVL" />)
+    const tvl = screen.getByRole('button', { name: /TVL/ })
+    vi.spyOn(tvl.parentElement!, 'getBoundingClientRect').mockReturnValue({
+      x: 220,
+      y: 20,
+      width: 32,
+      height: 20,
+      top: 20,
+      right: 252,
+      bottom: 40,
+      left: 220,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    fireEvent.click(tvl)
+
+    const note = screen.getByRole('note')
+    expect(note).toHaveStyle({ left: '12px', width: '216px' })
+    vi.unstubAllGlobals()
   })
 })
