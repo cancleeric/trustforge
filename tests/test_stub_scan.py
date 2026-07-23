@@ -186,6 +186,50 @@ def test_scan_rejects_shadowed_protocol_bindings(tmp_path, monkeypatch):
     ]
 
 
+def test_scan_rejects_protocol_direct_name_only_after_later_rebinding(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/protocol_rebound_later.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "class Before(Protocol):\n"
+        "    def method(self): ...\n"
+        "Protocol = object\n"
+        "class After(Protocol):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.protocol_rebound_later.After.method",
+    ]
+
+
+def test_scan_rejects_protocol_module_alias_only_after_later_rebinding(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/protocol_module_rebound_later.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "class Before(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "typing = object\n"
+        "class After(typing.Protocol):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.protocol_module_rebound_later.After.method",
+    ]
+
+
 def test_scan_rejects_abc_rebinding_in_control_flow(tmp_path, monkeypatch):
     root = tmp_path
     source = root / "src/trustforge/control_flow_shadow.py"

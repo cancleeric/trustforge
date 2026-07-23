@@ -738,20 +738,25 @@ def scan(paths: Iterable[Path]) -> list[dict[str, object]]:
         relative = path.relative_to(ROOT)
         module = ".".join(relative.with_suffix("").parts[1:])
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
-        protocol_names, protocol_modules = _protocol_bindings(tree)
-        abstractmethod_names, abc_modules = _abc_bindings(tree)
-        abc_names, _ = _trusted_import_bindings(
-            tree, modules={"abc"}, symbol="ABC"
-        )
-        abc_meta_names, _ = _trusted_import_bindings(
-            tree, modules={"abc"}, symbol="ABCMeta"
-        )
-        visitor = _FunctionVisitor(
-            module, relative, protocol_names, protocol_modules,
-            abstractmethod_names, abc_modules, abc_names, abc_meta_names,
-        )
-        visitor.visit(tree)
-        findings.extend(visitor.findings)
+        for index, statement in enumerate(tree.body, start=1):
+            prefix_tree = ast.Module(
+                body=tree.body[:index],
+                type_ignores=list(tree.type_ignores),
+            )
+            protocol_names, protocol_modules = _protocol_bindings(prefix_tree)
+            abstractmethod_names, abc_modules = _abc_bindings(prefix_tree)
+            abc_names, _ = _trusted_import_bindings(
+                prefix_tree, modules={"abc"}, symbol="ABC"
+            )
+            abc_meta_names, _ = _trusted_import_bindings(
+                prefix_tree, modules={"abc"}, symbol="ABCMeta"
+            )
+            visitor = _FunctionVisitor(
+                module, relative, protocol_names, protocol_modules,
+                abstractmethod_names, abc_modules, abc_names, abc_meta_names,
+            )
+            visitor.visit(statement)
+            findings.extend(visitor.findings)
     return sorted(findings, key=lambda item: (str(item["symbol"]), str(item["kind"])))
 
 
