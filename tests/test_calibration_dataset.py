@@ -5,12 +5,41 @@ import pytest
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.calibration_dataset import CalibrationDatasetError, build_confidence_calibration_dataset
 from trustforge.delayed_outcome_labeler import build_delayed_outcome_observation
+from trustforge.learning_event_contract import canonical_integrity_checksum
 
 
 def _analysis(day: int, analysis_id=None):
+    evidence_snapshot = [
+        {
+            "source": f"source-{index}",
+            "fetched_at": f"2026-07-{day:02d}T00:00:00.000000Z",
+            "content_reference": f"sha256:content-{day}-{index}",
+            "related_claim": f"claim-{index}",
+            "schema_version": "evidence.v1",
+            "trust": 0.8,
+        }
+        for index in range(4)
+    ]
+    pit = {
+        "event_time": f"2026-07-{day:02d}T00:00:00Z",
+        "available_time": f"2026-07-{day:02d}T00:00:01Z",
+        "as_of_time": f"2026-07-{day:02d}T00:00:01Z",
+        "source_available_times": [f"2026-07-{day:02d}T00:00:00Z"],
+    }
+    provenance = {
+        "source": "analysis-flow",
+        "collector": "unit-test",
+        "observed_at": f"2026-07-{day:02d}T00:00:01Z",
+    }
     return build_analysis_quality_event(
         {
             "analysis_id": analysis_id or f"an-{day}",
+            "run_id": f"run-{day}",
+            "question_id": f"question-{day}",
+            "answer_id": f"answer-{day}",
+            "evidence_snapshot_id": canonical_integrity_checksum(evidence_snapshot),
+            "evidence_snapshot": evidence_snapshot,
+            "question": "Will BTC rise?",
             "tenant_id": "tenant-a",
             "coin": "BTC",
             "mode": "formal",
@@ -21,13 +50,33 @@ def _analysis(day: int, analysis_id=None):
             "source_available_times": [f"2026-07-{day:02d}T00:00:00Z"],
             "provenance": {"source": "analysis-flow", "collector": "unit-test", "observed_at": f"2026-07-{day:02d}T00:00:01Z"},
             "confidence": {"raw": 0.7, "calibrated": 0.62},
-            "decision": {"direction": "bullish", "abstain": False},
-            "evidence_stats": {"supporting": 3, "contrarian": 1, "missingness": 0.0},
-            "quality": {"freshness": "ok", "conflict": "low", "completeness": "complete"},
-            "versions": {"kernel": "learning-event.v1"},
-            "stage_metrics": [],
+            "decision": {"direction": "bullish", "state": "buy"},
+            "evidence_stats": {
+                "supporting_count": 3,
+                "contrarian_count": 1,
+                "evidence_count": 4,
+                "average_trust": 0.8,
+                "independent_source_count": 3,
+                "source_distribution": {"exchange": 2, "news": 2},
+            },
+            "quality": {"freshness": "ok", "conflict": "low", "missingness": 0.0, "completeness": "complete"},
+            "versions": {
+                "contract": "analysis-quality.v1",
+                "schema": "analysis-quality.v1",
+                "kernel": "learning-event.v1",
+                "scoring": "score-v1",
+                "evidence": "evidence-v1",
+                "model": "model-v1",
+                "prompt": "prompt-v1",
+                "policy": "policy-v1",
+                "rule": "rule-v1",
+            },
+            "stage_metrics": [{"stage": "kernel", "latency_ms": 1, "status": "complete", "attempts": 1, "failure": None}],
+            "failure": {"status": "complete", "failed_stage": None, "code": None, "message": None, "retryable": False},
         },
         trusted_tenant_id="tenant-a",
+        trusted_pit=pit,
+        trusted_provenance=provenance,
     )
 
 
