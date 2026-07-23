@@ -41,6 +41,8 @@
 
 所有 timestamp 使用 RFC 3339、帶 offset 儲存；比較前正規化為 UTC。session label 仍使用 calendar 的本地日期，禁止用 UTC date 代替有休市市場的 session date。
 
+24/7 UTC daily calendar 的 session label `D` 精確定義為半開區間 `[D 00:00:00Z, D+1 00:00:00Z)`，scheduled close 是 `D+1 00:00:00Z`。因此 label `2026-01-01` 的 close bar event time 是 `2026-01-02T00:00:00Z`；所有 start/target session 欄位存 label，不存 close 的 UTC date。非 24/7 venue 由具版本的官方 calendar 提供 open/close instants。
+
 PIT invariant：`prediction_event_at <= prediction_available_at`。等號合法，表示事件在產生時即完整可用；反序是 `unavailable(INVALID_PREDICTION_TIMELINE)`，不得自動交換、截斷或推測。所有 cutoff 比較先轉 UTC；DST 只影響 calendar 提供的本地 close 對應 UTC instant。
 
 | 欄位 | 公式／定義 | 來源 | event time | available time | null / pending / unavailable |
@@ -99,7 +101,15 @@ repeat N times:
 
 報酬是百分點（例如 100→110 為 `10.0`），不是小數 `0.10`。計算使用未四捨五入的 decimal/float；顯示層才 round。風險欄位是 realized diagnostics，不得描述為預測風險機率。
 
-### 4.1 Revision、current、canonical 與 as-of
+### 4.1 Numeric contract（待 CEO 與 D5 disposition）
+
+- 所有 price 與計算使用 base-10 `Decimal`，禁止 binary float；輸入最多 18 位有效數、8 位小數，超出即 unavailable。
+- 中間運算使用 precision 34、`ROUND_HALF_EVEN`；除法不先 quantize。
+- persisted percentage quantize 到小數點後 8 位；顯示可另行 round，但不得回寫 outcome。
+- fixture 比較 tolerance 固定 `0.00000001` percentage point。`after_cutoff` 的 exact value 是 `200/51 = 3.921568627450980392...`，persisted expected `3.92156863`。
+- D5=A 的 hit 使用**未 quantize** directional return `> 0`；exact zero 才是 miss。任何非零 Decimal（即使 persisted 顯示接近 0）仍依符號判定。若產品要 dead-band，必須選 D5=C 並另簽明確 threshold，不得偷用 tolerance 當商業規則。
+
+### 4.2 Revision、current、canonical 與 as-of
 
 - logical outcome key 是 (`prediction_id`, `horizon`, `contract_version`, `market_data_variant`)；實體 identity 再加 `market_data_revision` 與 `outcome_version`。
 - `as_first_known` 固定使用 late cutoff 內首次完整可得的 provider revisions；一旦 labeled 不因後續 provider revision 改值。
@@ -143,10 +153,10 @@ repeat N times:
 | daily_bear_down | crypto:UTC:v1 | 01-01O@00Z,01-02O@00Z | p02 | 2026-01-01T22:00:00Z | 2026-01-01T22:01:00Z | bearish | T+1 | 01-01:00Z:00:10Z:100:split-v1,01-02:00Z:00:10Z:90:split-v1 | 2026-01-03T00:00:00Z | as_first_known | labeled/null/01-01/01-02/-10/10/10/-10/true/1 |
 | bearish_miss | crypto:UTC:v1 | 01-01O@00Z,01-02O@00Z | p03 | 2026-01-01T22:00:00Z | 2026-01-01T22:01:00Z | bearish | T+1 | 01-01:00Z:00:10Z:100:split-v1,01-02:00Z:00:10Z:110:split-v1 | 2026-01-03T00:00:00Z | as_first_known | labeled/null/01-01/01-02/10/-10/10/0/false/1 |
 | cutoff_equal | crypto:UTC:v1 | 2026-01-01O@00Z,2026-01-02O@00Z | p04 | 2026-01-01T23:54:00Z | 2026-01-01T23:55:00Z | bullish | T+1 | 2026-01-01:2026-01-02T00:00:00Z:2026-01-02T00:10:00Z:100:split-v1,2026-01-02:2026-01-03T00:00:00Z:2026-01-03T00:10:00Z:105:split-v1 | 2026-01-03T01:00:00Z | as_first_known | labeled/null/2026-01-01/2026-01-02/5/5/5/0/true/1 |
-| after_cutoff | crypto:UTC:v1 | 01-01O@00Z,01-02O@00Z,01-03O@00Z | p05 | 2026-01-01T23:55:00Z | 2026-01-01T23:55:00.001Z | bullish | T+1 | 01-02:00Z:00:10Z:102:split-v1,01-03:00Z:00:10Z:106:split-v1 | 2026-01-04T00:00:00Z | as_first_known | labeled/null/01-02/01-03/3.9215686/3.9215686/3.9215686/0/true/1 |
+| after_cutoff | crypto:UTC:v1 | 2026-01-01O@2026-01-02T00:00:00Z,2026-01-02O@2026-01-03T00:00:00Z,2026-01-03O@2026-01-04T00:00:00Z | p05 | 2026-01-01T23:55:00Z | 2026-01-01T23:55:00.001Z | bullish | T+1 | 2026-01-02:2026-01-03T00:00:00Z:2026-01-03T00:10:00Z:102:split-v1,2026-01-03:2026-01-04T00:00:00Z:2026-01-04T00:10:00Z:106:split-v1 | 2026-01-04T01:00:00Z | as_first_known | labeled/null/2026-01-02/2026-01-03/3.92156863/3.92156863/3.92156863/0/true/1 |
 | invalid_timeline | crypto:UTC:v1 | 2026-01-01O@00Z,2026-01-02O@00Z | p06 | 2026-01-01T12:00:01Z | 2026-01-01T12:00:00Z | bullish | T+1 | 2026-01-01:2026-01-02T00:00:00Z:2026-01-02T00:10:00Z:100:split-v1,2026-01-02:2026-01-03T00:00:00Z:2026-01-03T00:10:00Z:110:split-v1 | 2026-01-03T01:00:00Z | as_first_known | unavailable/INVALID_PREDICTION_TIMELINE/null/null/null/null/null/null/null/1 |
 | weekend_skip | XNYS:v2026a | 01-02O@21Z,01-03C,01-04C,01-05O@21Z | p07 | 2026-01-02T20:00:00Z | 2026-01-02T20:01:00Z | bullish | T+1 | 01-02:21Z:21:10Z:100:split-v1,01-05:21Z:21:10Z:105:split-v1 | 2026-01-06T02:00:00Z | as_first_known | labeled/null/01-02/01-05/5/5/5/0/true/1 |
-| early_close | XNYS:v2026a | 2026-07-02O@20Z,2026-07-03O@17Z,2026-07-06O@20Z | p08 | 2026-07-03T16:44:00Z | 2026-07-03T16:45:00Z | bullish | T+1 | 2026-07-03:2026-07-03T17:00:00Z:2026-07-03T17:10:00Z:100:split-v1,2026-07-06:2026-07-06T20:00:00Z:2026-07-06T20:10:00Z:101:split-v1 | 2026-07-07T01:00:00Z | as_first_known | labeled/null/2026-07-03/2026-07-06/1/1/1/0/true/1 |
+| early_close | XNYS:official-2026 | 2026-11-27O@18Z,2026-11-30O@21Z | p08 | 2026-11-27T17:44:00Z | 2026-11-27T17:45:00Z | bullish | T+1 | 2026-11-27:2026-11-27T18:00:00Z:2026-11-27T18:10:00Z:100:UNAVAILABLE,2026-11-30:2026-11-30T21:00:00Z:2026-11-30T21:10:00Z:101:UNAVAILABLE | 2026-12-01T02:00:00Z | as_first_known | labeled/null/2026-11-27/2026-11-30/1/1/1/0/true/1 |
 | dst_calendar | XNYS:v2026a | 2026-03-06O@21Z,2026-03-09O@20Z | p09 | 2026-03-06T20:00:00Z | 2026-03-06T20:01:00Z | bullish | T+1 | 2026-03-06:2026-03-06T21:00:00Z:2026-03-06T21:10:00Z:100:split-v1,2026-03-09:2026-03-09T20:00:00Z:2026-03-09T20:10:00Z:102:split-v1 | 2026-03-10T01:00:00Z | as_first_known | labeled/null/2026-03-06/2026-03-09/2/2/2/0/true/1 |
 | emergency_closed | XNYS:v2026a | 01-07O@21Z,01-08C,01-09O@21Z | p10 | 2026-01-07T20:00:00Z | 2026-01-07T20:01:00Z | bullish | T+1 | 01-07:21Z:21:10Z:100:split-v1,01-09:21Z:21:10Z:103:split-v1 | 2026-01-10T02:00:00Z | as_first_known | labeled/null/01-07/01-09/3/3/3/0/true/1 |
 | calendar_gap | XNYS:v2026a | 2026-01-07O@21Z,2026-01-08? | p11 | 2026-01-07T20:00:00Z | 2026-01-07T20:01:00Z | bullish | T+1 | 2026-01-07:2026-01-07T21:00:00Z:2026-01-07T21:10:00Z:100:split-v1 | 2026-01-12T00:00:00Z | as_first_known | unavailable/CALENDAR_GAP/2026-01-07/null/null/null/null/null/null/1 |
@@ -158,7 +168,12 @@ repeat N times:
 | adjustment_future_hidden | XNYS:v2026a | 02-02O@21Z,02-03O@21Z | p17 | 2026-02-02T20:00:00Z | 2026-02-02T20:01:00Z | bullish | T+1 | 02-02:21Z:02-05T00Z:50:split-v2,02-03:21Z:21:10Z:55:split-v2 | 2026-02-04T02:00:00Z | latest_official | pending/WAITING_OFFICIAL_CLOSE/02-02/02-03/null/null/null/null/null/1 |
 | zero_start | crypto:UTC:v1 | 2026-01-01O@00Z,2026-01-02O@00Z | p18 | 2026-01-01T22:00:00Z | 2026-01-01T22:01:00Z | bullish | T+1 | 2026-01-01:2026-01-02T00:00:00Z:2026-01-02T00:10:00Z:0:split-v1,2026-01-02:2026-01-03T00:00:00Z:2026-01-03T00:10:00Z:10:split-v1 | 2026-01-03T01:00:00Z | as_first_known | unavailable/ZERO_START_CLOSE/2026-01-01/2026-01-02/null/null/null/null/null/1 |
 | neutral_unscored | crypto:UTC:v1 | 01-01O@00Z,01-02O@00Z | p19 | 2026-01-01T22:00:00Z | 2026-01-01T22:01:00Z | neutral | T+1 | 01-01:00Z:00:10Z:100:split-v1,01-02:00Z:00:10Z:101:split-v1 | 2026-01-03T00:00:00Z | as_first_known | labeled/PREDICTION_NOT_DIRECTIONAL/01-01/01-02/1/null/1/0/null/1 |
-| revision_dual | crypto:UTC:v1 | 01-01O@00Z,01-02O@00Z | p20 | 2026-01-01T22:00:00Z | 2026-01-01T22:01:00Z | bullish | T+1 | 01-01:00Z:00:10Z:100:split-v1,01-02:00Z:00:10Z:108:split-v2 | 2026-01-04T00:00:00Z | latest_official | labeled/MARKET_DATA_REVISED/01-01/01-02/8/8/8/0/true/2 |
+| revision_v1 | crypto:UTC:v1 | 2026-01-01O@2026-01-02T00:00:00Z,2026-01-02O@2026-01-03T00:00:00Z | p20 | 2026-01-01T22:00:00Z | 2026-01-01T22:01:00Z | bullish | T+1 | 2026-01-01:2026-01-02T00:00:00Z:2026-01-02T00:10:00Z:100:split-v1,2026-01-02:2026-01-03T00:00:00Z:2026-01-03T00:10:00Z:110:split-v1 | 2026-01-03T12:00:00Z | latest_official | labeled/null/2026-01-01/2026-01-02/10/10/10/0/true/1; revision=r1; outcome_id=o1; supersedes=null; canonical=o1 |
+| revision_v2 | crypto:UTC:v1 | 2026-01-01O@2026-01-02T00:00:00Z,2026-01-02O@2026-01-03T00:00:00Z | p20 | 2026-01-01T22:00:00Z | 2026-01-01T22:01:00Z | bullish | T+1 | 2026-01-01:2026-01-02T00:00:00Z:2026-01-02T00:10:00Z:100:split-v1,2026-01-02:2026-01-03T00:00:00Z:2026-01-04T00:00:00Z:108:split-v2 | 2026-01-04T00:00:00Z | latest_official | labeled/MARKET_DATA_REVISED/2026-01-01/2026-01-02/8/8/8/0/true/2; revision=r2; outcome_id=o2; supersedes=o1; canonical=o2 |
+
+`revision_v1` 與 `revision_v2` 共用 logical key `(p20,T+1,contract,latest_official)`：`as_of=2026-01-03T12:00:00Z` 時 r2 尚不可見，canonical=o1；`as_of=2026-01-04T00:00:00Z` 時 canonical=o2 且 o1 superseded。兩個 outcome identity 必須不同。
+
+NYSE 官方 2026 calendar 指定 2026-11-27（Thanksgiving 次日）於 13:00 America/New_York，即 18:00Z early close；2026-07-03 是全日休市，禁止作 early-close fixture。來源：https://www.nyse.com/markets/hours-calendars 。
 
 ## 8. 可觀測性與報表要求
 
@@ -170,6 +185,15 @@ repeat N times:
 `superseded_versions` 是另列 audit count，不進上述任何 current count。報表必須帶 `contract_version`、`calendar_version`、`market_data_variant`、`as_of` 與產生時間。只報 eligible 而隱藏缺失會造成 survivorship bias。
 
 ## 9. 實作前置門檻
+
+### 9.1 首版 asset scope 候選（全部 PENDING）
+
+| scope_id | instruments | asset class | venue / calendar_id | timezone | provider / dataset / methodology | 可否簽 |
+|---|---|---|---|---|---|---|
+| S1 | BTC, ETH, SOL, BNB, XRP | crypto spot reference | 24/7 UTC / `crypto:UTC:v1` | UTC | **UNAVAILABLE/PENDING**：repo 有 OHLCV loader 與 coin symbols，但未提供可證實的 production provider、dataset ID 與 adjustment methodology contract | **不可簽**，直到具名 provider/dataset/methodology 與授權 lineage 補齊 |
+| S2 | 無 | listed equity | XNYS / `XNYS:official-2026` | America/New_York | **UNAVAILABLE/PENDING**：本 issue 未證實 instrument master、production price provider/dataset 或 corporate-action methodology | **不可簽**；XNYS 僅供 calendar fixture，不代表首版支援股票 |
+
+不允許把 fixture 的 `split-v1` 當真實 provider methodology。首版 scope 必須逐 instrument 指定 provider、dataset/version、price type、corporate-action methodology、license/lineage 與 calendar version；任何一格 unavailable 時 CEO 不可批准該 scope。
 
 1. CEO 完成 D1–D8 書面 disposition，包含 cutoff SLA 與首版適用 asset/venue。
 2. 將核准結果轉 immutable contract version 與 machine-readable fixtures。

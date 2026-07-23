@@ -1,6 +1,9 @@
 """Structural guards for the pending issue #501 decision record."""
 
 from pathlib import Path
+import re
+from datetime import datetime
+from decimal import Decimal
 
 
 DOC = (
@@ -81,9 +84,11 @@ def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
     ]
     assert len(rows) >= 20
     assert len({row["fixture_id"] for row in rows}) == len(rows)
-    assert len({row["prediction_id"] for row in rows}) == len(rows)
+    prediction_ids = [row["prediction_id"] for row in rows]
+    assert len(set(prediction_ids)) == len(rows) - 1
+    assert prediction_ids.count("p20") == 2
     assert all(all(row[column] for column in headers) for row in rows)
-    assert all(len(row["expected"].split("/")) == 10 for row in rows)
+    assert all(len(row["expected"].split(";", 1)[0].split("/")) == 10 for row in rows)
 
 
 def test_fixture_table_covers_required_adversarial_cases() -> None:
@@ -105,8 +110,44 @@ def test_fixture_table_covers_required_adversarial_cases() -> None:
         "dividend_price_only",
         "adjustment_future_hidden",
         "zero_start",
-        "revision_dual",
+        "revision_v1",
+        "revision_v2",
     } <= fixture_ids
+
+
+def _parse_rfc3339(value: str) -> datetime:
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value)
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def test_fixture_primary_timestamps_are_rfc3339_and_pit_ordered() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    for row in rows:
+        event_at = _parse_rfc3339(row["prediction_event_at"])
+        available_at = _parse_rfc3339(row["prediction_available_at"])
+        _parse_rfc3339(row["as_of"])
+        if row["fixture_id"] == "invalid_timeline":
+            assert event_at > available_at
+        else:
+            assert event_at <= available_at
+
+
+def test_numeric_formula_and_revision_pair_contract() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    by_id = {row["fixture_id"]: row for row in rows}
+
+    after = by_id["after_cutoff"]["expected"].split("/", 5)[4]
+    assert abs(Decimal(after) - (Decimal(106) / Decimal(102) - 1) * 100) <= Decimal("0.00000001")
+    assert by_id["cutoff_equal"]["prediction_available_at"] == "2026-01-01T23:55:00Z"
+
+    first = by_id["revision_v1"]
+    second = by_id["revision_v2"]
+    assert first["prediction_id"] == second["prediction_id"] == "p20"
+    assert first["horizon"] == second["horizon"] == "T+1"
+    assert "outcome_id=o1" in first["expected"] and "canonical=o1" in first["expected"]
+    assert "outcome_id=o2" in second["expected"] and "supersedes=o1" in second["expected"]
 
 
 def test_revision_identity_and_reconciliation_are_explicit() -> None:
