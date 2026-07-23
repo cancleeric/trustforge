@@ -574,13 +574,11 @@ class TestResolveProviders:
             assert res.resolved == "bedrock"
 
     def test_agentcore_env_not_implemented(self):
-        """TRUSTFORGE_AGENTCORE=1 → AgentCoreLLMAdapter (complete raises NotImplementedError)。"""
+        """TRUSTFORGE_AGENTCORE=1 fails closed before returning an adapter."""
         env = {"TRUSTFORGE_AGENTCORE": "1"}
         with patch.dict(os.environ, env, clear=False):
-            ps = resolve_providers()
-            assert isinstance(ps.llm, AgentCoreLLMAdapter)
-            with pytest.raises(NotImplementedError):
-                ps.llm.complete("sys", "prompt")  # type: ignore[union-attr]
+            with pytest.raises(RuntimeError, match="unsupported"):
+                resolve_providers()
 
 
 class TestPipelineProviderRuntimePath:
@@ -892,6 +890,5 @@ class TestFailureNotSilent:
 
     def test_agentcore_complete_not_implemented(self):
         with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": "1"}):
-            adapter = AgentCoreLLMAdapter()
-            with pytest.raises(NotImplementedError):
-                adapter.complete("sys", "prompt")
+            with pytest.raises(RuntimeError, match="not implemented"):
+                AgentCoreLLMAdapter()
