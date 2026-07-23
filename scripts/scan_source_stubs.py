@@ -197,11 +197,23 @@ class _ScopeBindingVisitor(ast.NodeVisitor):
         self.counts[node.name] += 1
         for decorator in node.decorator_list:
             self.visit(decorator)
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ):
+            if argument.annotation:
+                self.visit(argument.annotation)
+        if node.args.vararg and node.args.vararg.annotation:
+            self.visit(node.args.vararg.annotation)
+        if node.args.kwarg and node.args.kwarg.annotation:
+            self.visit(node.args.kwarg.annotation)
         for default in (*node.args.defaults, *node.args.kw_defaults):
             if default:
                 self.visit(default)
         if node.returns:
             self.visit(node.returns)
+        self._visit_type_parameters(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -213,6 +225,16 @@ class _ScopeBindingVisitor(ast.NodeVisitor):
             self.visit(base)
         for keyword in node.keywords:
             self.visit(keyword.value)
+        self._visit_type_parameters(node)
+
+    def _visit_type_parameters(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> None:
+        for type_parameter in getattr(node, "type_params", ()):
+            for attribute in ("bound", "default_value"):
+                value = getattr(type_parameter, attribute, None)
+                if value:
+                    self.visit(value)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         # Defaults are evaluated in the enclosing scope; the body and

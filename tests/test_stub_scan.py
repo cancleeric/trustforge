@@ -1,5 +1,7 @@
 import ast
 
+import pytest
+
 from scripts.scan_source_stubs import _stub_kind, scan
 
 
@@ -343,6 +345,115 @@ def test_scan_does_not_treat_lambda_body_walrus_as_outer_shadowing(
         "    def method(self): ...\n"
         "class MetaBased(metaclass=Meta):\n"
         "    @required\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
+
+
+def test_scan_rejects_function_parameter_annotation_walrus_shadowing(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/annotation_shadow.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import abc as abc_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "def positional(value: (Protocol := object)): pass\n"
+        "def positional_only(value: (abc_alias := object), /): pass\n"
+        "def keyword_only(*, value: (required := object)): pass\n"
+        "def varargs(*values: (Base := object)): pass\n"
+        "async def kwargs(**values: (Meta := type)): pass\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Qualified(abc_alias.ABC):\n"
+        "    @abc_alias.abstractmethod\n"
+        "    def method(self): ...\n"
+        "class Required:\n"
+        "    @required\n"
+        "    def method(self): pass\n"
+        "class Based(Base):\n"
+        "    def method(self): ...\n"
+        "class MetaBased(metaclass=Meta):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.annotation_shadow.Based.method",
+        "trustforge.annotation_shadow.Direct.method",
+        "trustforge.annotation_shadow.MetaBased.method",
+        "trustforge.annotation_shadow.Qualified.method",
+        "trustforge.annotation_shadow.Required.method",
+        "trustforge.annotation_shadow.keyword_only",
+        "trustforge.annotation_shadow.kwargs",
+        "trustforge.annotation_shadow.positional",
+        "trustforge.annotation_shadow.positional_only",
+        "trustforge.annotation_shadow.varargs",
+    ]
+
+
+@pytest.mark.skipif(
+    "type_params" not in ast.FunctionDef._fields,
+    reason="runtime parser does not support PEP 695 type parameters",
+)
+def test_scan_rejects_type_parameter_bound_and_default_walrus_shadowing(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/type_parameter_shadow.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import abc as abc_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "def generic[T: (Protocol := object)](): pass\n"
+        "async def async_generic[T = (abc_alias := object)](): pass\n"
+        "class Required[T: (required := object)]:\n"
+        "    def method(self): ...\n"
+        "class Based[T = (Base := object)]:\n"
+        "    def method(self): ...\n"
+        "class MetaBased[T: (Meta := type)]:\n"
+        "    def method(self): ...\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Qualified(abc_alias.ABC):\n"
+        "    @abc_alias.abstractmethod\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    symbols = [row["symbol"] for row in scan([source])]
+    assert "trustforge.type_parameter_shadow.Direct.method" in symbols
+    assert "trustforge.type_parameter_shadow.Qualified.method" in symbols
+    assert "trustforge.type_parameter_shadow.Required.method" in symbols
+    assert "trustforge.type_parameter_shadow.Based.method" in symbols
+    assert "trustforge.type_parameter_shadow.MetaBased.method" in symbols
+
+
+def test_scan_does_not_treat_function_body_walrus_as_outer_shadowing(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/function_body_scope.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "from abc import ABC, abstractmethod\n"
+        "def mutate_locally():\n"
+        "    (Protocol := object)\n"
+        "    (ABC := object)\n"
+        "    (abstractmethod := object)\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(ABC):\n"
+        "    @abstractmethod\n"
         "    def method(self): pass\n",
         encoding="utf-8",
     )
