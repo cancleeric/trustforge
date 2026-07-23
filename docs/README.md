@@ -43,6 +43,7 @@
 | [plans/OPTIMIZATION-PLAN-weakness.md](plans/OPTIMIZATION-PLAN-weakness.md) | CEO 兩路批判彙整（核心弱點分析 + UI code-grounded 審查）：Phase1 商業級 UI 快修清單（**注意：清單所列 4 項已在前後端分離 React 重寫中獨立解決，這部分內容已過時，見 `PLAN-next-worldfirst-depth.md` §6 housekeeping 記錄**）+ Phase2 核心戰略抉擇（效度定位/資料密度/niche）——**Phase2 仍待老闆拍板，本文件未關閉** |
 | [plans/PLAN-next-worldfirst-depth.md](plans/PLAN-next-worldfirst-depth.md) | 下一步世界第一深度優化計劃（非-gated 專案）：#13 分歧來源去重、#20 主題切換已執行；**仍有未執行項**：#3 跨幣操縱排行、#15 burst 偵測重新設計（僅排資料探索驗證，未排實作）；§6 記錄 `fix/ui-commercial` 分支已過時、UXUI-ROUND-01.md 稽核項目多數已被 React 重寫吸收等 housekeeping 發現 |
 | [plans/DAWID-SKENE-CONFIDENCE-PLAN-2026-07-13.md](plans/DAWID-SKENE-CONFIDENCE-PLAN-2026-07-13.md) | Dawid-Skene EM 信心收斂開發擴充計劃：資料結構/介面整合（`stance_fn is None` 分支）/測試策略/分階段工時（約 5 天）；明確排除 conformal/預測力範圍 |
+| [plans/PLAN-2026-07-21-ui-optimization.md](plans/PLAN-2026-07-21-ui-optimization.md) | UI/UX 優化現況版：#356–#360 完成／更正、#539–#542 與 #361/#362 剩餘工作、≤12h 相依性與驗收標準 |
 
 ## qa/ — 測試與研究發現
 
