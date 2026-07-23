@@ -2,7 +2,7 @@
 
 > 日期：2026-07-23
 > 狀態：開發中但 CEO 審查未通過；里程碑 A／B／C 均未完成，禁止往主線或生產整合
-> 進度稽核：2026-07-23；詳見第 11 節
+> 進度稽核：2026-07-23（第二次複驗）；詳見第 11 節
 > 依據：`docs/architecture/TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-ANALYSIS-2026-07-23.md`
 
 ## 1. 目標與不可變邊界
@@ -195,7 +195,7 @@
 
 可平行起跑的前置工作只有 #501、#502、#503；其餘必須等列出的上游完成並合併，不得依賴未合併分支。#505 不授權 DB 異動：若需要 migration，仍須 Eric 當次 purpose token。
 
-## 11. CEO 開發進度稽核（2026-07-23）
+## 11. CEO 開發進度稽核（2026-07-23，第二次複驗）
 
 ### 11.1 稽核結論
 
@@ -204,9 +204,14 @@
 - `main` 尚未包含三軌功能。
 - #501–#512 全部維持 OPEN。
 - 部分 GitHub PR 顯示 MERGED，但只合併到上一層 feature branch，不代表已進入 `develop`。
-- #528、#532、#533、#535 曾在沒有新 commit／CI／修正回覆時被重新標記 Ready；CEO
-  拒絕重審並再次轉為 Draft，等待工程師在原分支修正。
-- 聚焦驗證為 136 passed、5 failed；沒有可支持完成宣稱的 required CI 證據。
+- #529 已合併到 `develop`，完成移除未授權 #517；#523 已無 merge conflict，但仍是
+  Draft，尚未完成乾淨替代與 #502 驗收。
+- #528 已有新 commit `d4e58557b85705139dcd872ef13b2c8806845d18`；#543 所指的
+  delayed-price PIT leakage 經隔離重現與 8 項測試複驗已修復，但 PR 仍為 Draft、無 CI，
+  且 stacked 依賴尚未合法整合。
+- #532、#533、#535 沒有新 commit，既有 anomaly leakage、安全與 E2E blockers 持續有效。
+- 第一輪聚焦驗證為 136 passed、5 failed；第二輪只對 #528 修正範圍跑 8 passed。
+  兩輪皆沒有可支持整體完成宣稱的 required CI 證據。
 - 里程碑 A 未通過，因此里程碑 B、C 不得往主線整合或用於 ModelHub／production activation。
 
 ### 11.2 Issue／PR 真實狀態
@@ -214,12 +219,12 @@
 | Issue | PR | 2026-07-23 審查狀態 | 下一步 |
 |---|---|---|---|
 | #501 | #519／#526 | #519 已進 `develop`，但 corrective #526 無新證據即被標 Ready，已退回 Draft；語意尚未拍板 | 完成交易日曆、T+N、缺值、修訂與 `available_time` 規則 |
-| #502 | #517／#529／#523 | #517 為未授權合併事故；#529、#523 無雙審即被標 Ready，已退回 Draft；#523 另有 merge conflict（DIRTY） | 先完成 #529，再將 #523 更新到乾淨 `develop`、解決衝突後重新雙審 |
+| #502 | #517／#529／#523 | #529 已合併並移除 #517；#523 現為 CLEAN／Draft，但 head 未更新、無 CI 或 reviewer PASS | 將 #523 更新到 revert 後的乾淨 `develop`，完成真正負向 contract tests 後重新雙審 |
 | #503 | #521 | 已進 `develop`，Issue 仍 OPEN | 核對唯讀 capability、tenant、artifact provenance 證據後才能關閉 |
 | #504 | #522 | 已進 `develop`，但依賴的 #502 正在事故復原 | #502 乾淨替代通過前不得宣稱完成 |
 | #505 | #525 | 只合併到 `feat/504-three-track-contract` | 等合法 #504 基線後重審；不授權 migration |
 | #506 | #527 | 只合併到 `design/505-learning-event-storage-gate` | 等 #504、#505 合法整合後重審 |
-| #507 | #528 | Draft；被 #543 future leakage 阻擋 | 排除 `available_time > as_of_time` 輸入並補負向／邊界測試 |
+| #507 | #528 | Draft；新 head `d4e5855` 已修復 #543 future-price leakage，隔離測試 8 passed；仍無 CI、上游治理未完成 | 保持 Draft，完成合法 base／依賴、required CI 與整張 PR 重審 |
 | #508 | #530 | 只合併到尚未通過的 #507 feature branch | #507 與里程碑 A 親驗通過後才能重審 |
 | #509 | #532 | Draft；被 #544 future leakage 阻擋 | baseline 排除未來才 available 的事件並補 leakage 測試 |
 | #510 | #533 | Draft；harper CISO 審查 FAIL：activation 可跳過 sandbox／approval，actor／probe evidence 可偽造，rollback 綁定不足 | 完成 #503 證據、authorization/state binding、新 SHA 的 harper CISO 與 `/codex-review` 雙審 |
@@ -228,11 +233,13 @@
 
 ### 11.3 Blocking findings
 
-1. **#524／PR #517 未授權合併事故**
-   固定處置順序為：先審查並合併 #529，移除 #517；再把 #523 更新到乾淨
-   `develop`，作為 #502 的替代。兩者完成前，#504 及其下游不得宣稱完成。
-2. **#543／PR #528 delayed outcome future leakage**
-   labeler 可使用決策 `as_of_time` 後才 available 的價格；修正前不得產生校準資料集。
+1. **#524／PR #517 未授權合併事故：部分解除**
+   #529 已合併並移除 #517；#524 仍 OPEN，因 #523 尚未成為通過審查的 #502 乾淨替代。
+   #523 合併前，#504 及其下游仍不得以 #502 完成為前提宣稱完成。
+2. **#543／PR #528 delayed outcome future leakage：finding 已修，PR 未完成**
+   新 commit `d4e58557b85705139dcd872ef13b2c8806845d18` 已讓 start／target price
+   同時拒絕 `available_time > as_of_time`，並補 future-start、future-target 與 exact-cutoff
+   測試；隔離測試 8 passed。#543 仍 OPEN，應在 #528 合法整合與證據完成後關閉。
 3. **#544／PR #532 anomaly future leakage**
    anomaly baseline 會納入未來才 available 的事件；修正前不得作為 diagnostic 基線。
 4. **測試與輸出隔離缺陷**
@@ -249,26 +256,31 @@
    activation event、artifact 與 rollback target 亦未可靠綁定。harper CISO 已對 commit
    `141fdcbda810c9b9ef1c557b89c28a9d6f446cf7` 給出 FAIL，修正後必須以新 SHA 重新雙審。
 7. **#535 E2E 未覆蓋真實阻擋路徑**
-   未驗 #543 delayed price 與 #544 anomaly event 的 PIT 排除；RAG 未驗 cross-tenant
+   雖 #528 已補自身 delayed-price 測試，#535 head 未更新，仍未驗該修正與 #544 anomaly
+   event 的整合 PIT 排除；RAG 未驗 cross-tenant
    negative retrieval；activation 未驗 human-like spoof、未授權 role 或跳過 sandbox；
    rollback 未驗 config restore 與錯誤 target。
+8. **相關 PIT 基線 #520 尚未整合**
+   #520 仍為 Draft／OPEN 且 merge state DIRTY；即使已有舊 commit-bound APPROVED，也沒有
+   CI，不能視為 timezone／naive timestamp 邊界已進入三軌合法基線。
 
 ### 11.4 三軌能力判定
 
 | 軌道 | 現況 | CEO 判定 |
 |---|---|---|
 | Question RAG | 已有 SQLite 字元 bigram 歷史問題檢索與 lineage；embedding index、reranker、完整 gold-set 流程未整合 | 部分完成 |
-| 分析異常偵測＋信心校準 | 異常偵測仍以規則／統計門檻為主；isotonic 校準與 artifact 已有基礎，但測試漂移且 PIT leakage 未關閉 | 未完成 |
+| 分析異常偵測＋信心校準 | #528 delayed-price PIT finding 已修；但 #532 anomaly PIT leakage、校準測試漂移、合法資料集整合與 CI 尚未完成 | 未完成 |
 | Wrapper 受控升級 | 已有 ModelHub package、sandbox 與人工 activation gate；明確禁止自動套用 | 部分完成，安全整合未通過 |
 
 「外框自我升級」在本計劃永遠指受控候選升級，不是模型自行批准、遞迴修改或自行上線。
 
 ### 11.5 恢復開發與重新送審順序
 
-1. 完成 #529 revert，接著完成 #523 乾淨替代，恢復可信 #502 基線。
+1. #529 revert 已完成；下一步更新並審查 #523，恢復可信 #502 基線。
 2. 完成 #526，正式拍板 #501 outcome 語意。
 3. 依合法依賴重整 #504 → #505 → #506；不得沿用未審 stacked merge 當完成證據。
-4. 修正 #543／#528；CEO 親驗里程碑 A 的事件、重放與 PIT 邊界。
+4. #528 的 #543 finding 已修；待 #501、#502、#504–#507 合法整合後，CEO 親驗里程碑 A
+   的事件、重放、timestamp 與 PIT 邊界。
 5. 里程碑 A 通過後才重審 #508，再修正及重審 #544／#532。
 6. #533 完成 harper CISO＋`/codex-review` 雙審；#534 重新核對 RAG 隔離。
 7. 最後將 #535 更新到全部已審、已合併的上游 commit，執行三軌 E2E 與安全負向驗收。
