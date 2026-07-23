@@ -25,6 +25,61 @@
       "symbol": "trustforge.web.Handler.log_message",
       "kind": "pass",
       "reason": "Intentional BaseHTTPRequestHandler access-log suppression; application errors use structured logging."
+    },
+    {
+      "symbol": "trustforge.ports.LLMProvider.complete",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.LLMProvider.classify_stance",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.CacheProvider.get",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.CacheProvider.set",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.SourceProvider.fetch",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.ObservabilityProvider.emit",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.BudgetProvider.check",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.BudgetProvider.record",
+      "kind": "ellipsis",
+      "reason": "Protocol (port) interface declaration (#386); concrete adapters implement it."
+    },
+    {
+      "symbol": "trustforge.ports.AgentCoreLLMAdapter.complete",
+      "kind": "not_implemented",
+      "reason": "AgentCore adapter placeholder; competition runs Bedrock-direct, this adapter is intentionally unwired."
+    },
+    {
+      "symbol": "trustforge.ports.AgentCoreLLMAdapter.classify_stance",
+      "kind": "not_implemented",
+      "reason": "AgentCore adapter placeholder; competition runs Bedrock-direct, this adapter is intentionally unwired."
+    },
+    {
+      "symbol": "trustforge.ports.NullCacheAdapter.set",
+      "kind": "pass",
+      "reason": "Null-object cache adapter; set is intentionally a no-op."
     }
   ]
 }
