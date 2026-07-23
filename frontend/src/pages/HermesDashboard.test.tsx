@@ -73,6 +73,20 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.queryByLabelText('問題')).not.toBeInTheDocument()
   })
 
+  it('opens the divergence drilldown from the right rail', () => {
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+      </MemoryRouter>,
+    )
+
+    const divergenceDock = screen.getByText('跨來源分歧').closest('.hermes-clip')
+    expect(divergenceDock).not.toBeNull()
+    fireEvent.click(divergenceDock!)
+
+    expect(screen.getByRole('dialog')).toHaveTextContent('跨來源分歧')
+  })
+
   it.each(['基本面', '價格催化因子'])('maps %s to hypothesis', async (mode) => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
