@@ -483,6 +483,30 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
             return
         self._record_copy(target, iterable)
 
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load):
+            # Fail closed: a bare module object is trusted only at its import
+            # binding. Every evaluated load is an escape unless a containing
+            # direct safe-member read suppresses traversal to this root.
+            self.unresolved_unpack_sources.add(node.id)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if (
+            isinstance(node.value, ast.Name)
+            and node.attr in self._TRUSTED_ATTRIBUTES
+        ):
+            return
+        if (
+            isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.attr in self._TRUSTED_ATTRIBUTES
+        ):
+            # A safe member used as a compound receiver exposes the module
+            # provenance again; visit its root instead of suppressing it.
+            self.visit(node.value.value)
+            return
+        self.visit(node.value)
+
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
             self._record_copy(target, node.value)

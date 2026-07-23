@@ -1500,3 +1500,71 @@ def test_scan_keeps_module_trust_for_safe_member_type_parameters(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "captured",
+        '{"module": captured}',
+        '[_, {"module": captured}]',
+    ],
+)
+def test_scan_revokes_module_trust_for_match_subject_captures(
+    tmp_path, monkeypatch, pattern
+):
+    root = tmp_path
+    source = root / "src/trustforge/match_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "match typing:\n"
+        f"    case {pattern}:\n"
+        "        pass\n"
+        "match abc:\n"
+        f"    case {pattern}:\n"
+        "        pass\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.match_escape.Abstract.method",
+        "trustforge.match_escape.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_safe_member_match_subjects(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/safe_match_subjects.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "match typing.Protocol:\n"
+        "    case protocol:\n"
+        "        pass\n"
+        "match abc.ABC:\n"
+        '    case {"module": captured}:\n'
+        "        pass\n"
+        "match (typing.Protocol, abc.ABCMeta):\n"
+        '    case [_, {"module": captured}]:\n'
+        "        pass\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
