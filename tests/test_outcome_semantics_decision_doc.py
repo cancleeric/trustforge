@@ -288,10 +288,13 @@ def test_fixture_lineage_and_outcome_identity_are_rebuildable() -> None:
                 "event_at", "available_at", "close",
             ))
             assert bar["content_hash"] == "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
-        if row["fixture_id"] != "missing_lineage":
-            revision = _market_revision(bars, expected["start"], expected["target"])
-            assert expected["market_data_revision"] == revision
-            assert _market_revision(list(reversed(bars)), expected["start"], expected["target"]) == revision
+        revision = _market_revision(bars, expected["start"], expected["target"])
+        assert expected["market_data_revision"] == revision
+        assert _market_revision(list(reversed(bars)), expected["start"], expected["target"]) == revision
+        if row["fixture_id"] == "missing_lineage":
+            assert expected["partial_role_set"] == ["start"]
+            assert expected["missing_roles"] == ["target"]
+            assert expected["market_data_revision"] != "UNAVAILABLE"
         assert expected["outcome_id"] == _canonical_hash(expected["identity_inputs"])
 
 
