@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from trustforge.analysis_quality_event import build_analysis_quality_event
@@ -15,7 +17,7 @@ def _analysis(day: int, analysis_id=None):
             "question_type": "direction",
             "event_time": f"2026-07-{day:02d}T00:00:00Z",
             "available_time": f"2026-07-{day:02d}T00:00:01Z",
-            "as_of_time": f"2026-07-{day:02d}T00:00:00Z",
+            "as_of_time": f"2026-07-{day:02d}T00:00:01Z",
             "source_available_times": [f"2026-07-{day:02d}T00:00:00Z"],
             "provenance": {"source": "analysis-flow", "collector": "unit-test", "observed_at": f"2026-07-{day:02d}T00:00:01Z"},
             "confidence": {"raw": 0.7, "calibrated": 0.62},
@@ -51,7 +53,7 @@ def test_calibration_dataset_joins_analysis_and_mature_outcome_with_traceability
     row = manifest["rows"][0]
     assert row["analysis_id"] == "an-1"
     assert row["analysis_identity"] == analysis.identity
-    assert row["outcome_identity"].endswith(":T+1:v1")
+    assert row["outcome_identity"].endswith("/v1")
     assert row["schema_version"] == "learning-event.v1"
     assert len(manifest["rows_sha256"]) == 64
     assert len(manifest["manifest_sha256"]) == 64
@@ -59,9 +61,9 @@ def test_calibration_dataset_joins_analysis_and_mature_outcome_with_traceability
 
 def test_calibration_dataset_requires_analysis_id_and_rejects_ohlcv_expansion():
     no_id = _analysis(1)
-    no_id.payload["analysis_id"] = ""
+    no_id = replace(no_id, payload={**no_id.payload, "analysis_id": ""})
     ohlcv = _analysis(2)
-    ohlcv.payload["source_kind"] = "five_year_ohlcv"
+    ohlcv = replace(ohlcv, payload={**ohlcv.payload, "source_kind": "five_year_ohlcv"})
 
     with pytest.raises(CalibrationDatasetError, match="analysis_id"):
         build_confidence_calibration_dataset([no_id], [], producer_version="unit")
@@ -77,7 +79,7 @@ def test_calibration_dataset_uses_latest_outcome_revision_without_rewrite():
     manifest = build_confidence_calibration_dataset([analysis], [old, revised], producer_version="unit")
 
     assert manifest["rows"][0]["outcome_source_version"] == "fixture-v2"
-    assert manifest["rows"][0]["outcome_identity"].endswith(":v2")
+    assert manifest["rows"][0]["outcome_identity"].endswith("/v2")
 
 
 def test_calibration_dataset_temporal_split_is_chronological_and_reproducible():

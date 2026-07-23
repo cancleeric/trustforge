@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -58,7 +59,7 @@ def _analysis_row(event: LearningEvent) -> dict[str, Any]:
         raise CalibrationDatasetError("analysis_id is required")
     confidence = event.payload.get("confidence")
     decision = event.payload.get("decision")
-    if not isinstance(confidence, dict) or not isinstance(decision, dict):
+    if not isinstance(confidence, Mapping) or not isinstance(decision, Mapping):
         raise CalibrationDatasetError("analysis confidence and decision are required")
     return {
         "analysis_id": analysis_id,

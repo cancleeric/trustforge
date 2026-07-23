@@ -14,7 +14,7 @@ def _snapshot():
         "question_type": "direction",
         "event_time": "2026-07-01T00:00:00Z",
         "available_time": "2026-07-01T00:00:01Z",
-        "as_of_time": "2026-07-01T00:00:00Z",
+        "as_of_time": "2026-07-01T00:00:01Z",
         "source_available_times": ["2026-06-30T23:59:59Z"],
         "provenance": {"source": "analysis-flow", "collector": "unit-test", "observed_at": "2026-07-01T00:00:01Z"},
         "confidence": {"raw": 0.7, "calibrated": 0.62},
@@ -30,7 +30,7 @@ def test_analysis_quality_event_has_unique_id_and_no_outcome_mutation_surface():
     event = build_analysis_quality_event(_snapshot())
 
     assert event.kind == "historical_non_evidentiary"
-    assert event.identity == "analysis-quality:tenant-a:an-1"
+    assert event.identity == "le1/tenant-a/historical_non_evidentiary/analysis-quality%3Aan-1/v1"
     assert event.payload["event_type"] == "analysis-quality.v1"
     assert "outcome_id" not in serialize_learning_event(event)
 
@@ -56,6 +56,14 @@ def test_analysis_quality_rejects_missing_version_or_provenance():
         build_analysis_quality_event(missing_provenance)
 
 
+def test_analysis_quality_rejects_unknown_provenance_fields_fail_closed():
+    snapshot = _snapshot()
+    snapshot["provenance"]["unreviewed_extension"] = "not-allowed"
+
+    with pytest.raises(LearningEventError, match="unknown provenance fields"):
+        build_analysis_quality_event(snapshot)
+
+
 def test_analysis_quality_rejects_future_data_and_cross_tenant_rewrite():
     future = _snapshot()
     future["source_available_times"] = ["2026-07-02T00:00:00Z"]
@@ -64,7 +72,9 @@ def test_analysis_quality_rejects_future_data_and_cross_tenant_rewrite():
 
     with pytest.raises(LearningEventError, match="future source data"):
         build_analysis_quality_event(future)
-    assert build_analysis_quality_event(tenant_b).identity == "analysis-quality:tenant-b:an-1"
+    assert build_analysis_quality_event(tenant_b).identity.startswith(
+        "le1/tenant-b/historical_non_evidentiary/"
+    )
 
 
 def test_partial_failure_and_retry_metadata_are_explicit():

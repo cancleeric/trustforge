@@ -18,7 +18,7 @@ def _analysis():
             "question_type": "direction",
             "event_time": "2026-07-01T00:00:00Z",
             "available_time": "2026-07-01T00:00:01Z",
-            "as_of_time": "2026-07-01T00:00:00Z",
+            "as_of_time": "2026-07-01T00:00:01Z",
             "source_available_times": ["2026-06-30T23:59:59Z"],
             "provenance": {"source": "analysis-flow", "collector": "unit-test", "observed_at": "2026-07-01T00:00:01Z"},
             "confidence": {"raw": 0.7, "calibrated": 0.62},
@@ -157,15 +157,22 @@ def test_source_revision_creates_new_observation_identity_without_rewrite():
         revision=2,
     )
 
-    assert original.identity.endswith(":v1")
-    assert revised.identity.endswith(":v2")
+    assert original.identity.endswith("/v1")
+    assert revised.identity.endswith("/v2")
     assert original.identity != revised.identity
 
 
 def test_delayed_outcome_rejects_non_analysis_source_and_unknown_horizon():
     with pytest.raises(LearningEventError, match="analysis-quality"):
         build_delayed_outcome_observation(
-            replace(_analysis(), payload={"event_type": "candidate_diagnostic"}),
+            replace(
+                _analysis(),
+                payload={
+                    "historical_answer_id": "not-analysis",
+                    "question": "fixture",
+                    "event_type": "not-analysis-quality",
+                },
+            ),
             horizon="T+1",
             as_of_time="2026-07-02T01:00:00Z",
             prices={},

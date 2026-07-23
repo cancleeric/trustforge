@@ -4,7 +4,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .learning_event_contract import LearningEvent, LearningEventError, make_learning_event
+from .learning_event_contract import (
+    LearningEvent,
+    LearningEventError,
+    make_learning_event,
+    provenance_checksum,
+)
 
 
 def build_analysis_quality_event(snapshot: dict[str, Any]) -> LearningEvent:
@@ -40,13 +45,30 @@ def build_analysis_quality_event(snapshot: dict[str, Any]) -> LearningEvent:
     }
     if "outcome_id" in snapshot or "label_id" in snapshot:
         raise LearningEventError("analysis-quality event cannot contain outcome or gold label identity")
+    provenance = _object(snapshot, "provenance")
+    if not isinstance(provenance.get("source"), str) or not provenance["source"].strip():
+        raise LearningEventError("provenance.source is required")
+    source_record = {
+        "analysis_id": analysis_id,
+        "event_time": event_time,
+        "source": provenance["source"],
+    }
+    canonical_provenance = {
+        **provenance,
+        "tenant_id": tenant_id,
+        "source_record": source_record,
+        "version": str(_object(snapshot, "versions").get("contract", "analysis-quality.v1")),
+        "checksum": provenance_checksum(source_record),
+    }
     return make_learning_event(
         kind="historical_non_evidentiary",
-        identity=f"analysis-quality:{tenant_id}:{analysis_id}",
+        tenant_id=tenant_id,
+        entity_id=f"analysis-quality:{analysis_id}",
+        revision=1,
         event_time=event_time,
         available_time=available_time,
         as_of_time=as_of_time,
-        provenance=_object(snapshot, "provenance"),
+        provenance=canonical_provenance,
         payload=payload,
     )
 
