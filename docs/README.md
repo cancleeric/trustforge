@@ -55,11 +55,23 @@
 | [qa/CONFORMAL-FINDING.md](qa/CONFORMAL-FINDING.md) | W4 Split Conformal Prediction 研究發現：數學實作完成、JOINT coverage 達標，但代理訊號 pseudo-AUC≈0.49（等同隨機）——誠實負結果，不接進 production |
 | [qa/modelhub-integration-351.md](qa/modelhub-integration-351.md) | ModelHub client／候選編排 #351 的驗證、審查證據與未執行邊界 |
 
+## reports/ — 事故與調查報告
+
+| 文件 | 說明 |
+|------|------|
+| [reports/REPORT-2026-07-23-hardcoded-paths-portability.md](reports/REPORT-2026-07-23-hardcoded-paths-portability.md) | 本機排程硬編碼路徑事故：#518／PR #536 根治、審查證據、未執行真機驗收與剩餘 freshness 告警風險 |
+
 ## handoff/ — 交接文件
 
 | 文件 | 說明 |
 |------|------|
 | [handoff/2026-07-22-modelhub-integration-handoff.md](handoff/2026-07-22-modelhub-integration-handoff.md) | ModelHub #351 七段式現況、操作契約與剩餘工作 |
+
+## skills/ — 執行與審查教學
+
+| 文件 | 說明 |
+|------|------|
+| [skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md](skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md) | Luna GitHub PR 對抗式審查指南：固定 SHA、負向測試、PIT leakage、安全 activation、stacked PR 與 PASS／FAIL 模板 |
 
 ## design/
 

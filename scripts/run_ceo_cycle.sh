@@ -3,7 +3,9 @@ set -u
 setopt NO_BG_NICE
 umask 077
 
-ROOT="${TRUSTFORGE_HOME:-/Users/apple/HurricaneSoft/trustforge}"
+SCRIPT_DIR="${0:A:h}"
+DEFAULT_ROOT="${SCRIPT_DIR:h}"
+ROOT="${TRUSTFORGE_HOME:-$DEFAULT_ROOT}"
 PYTHON_BIN="${TRUSTFORGE_PYTHON:-$ROOT/.venv/bin/python}"
 CODEX_BIN="${TRUSTFORGE_CODEX:-codex}"
 WORKTREE_ROOT="${TRUSTFORGE_CEO_WORKTREE_ROOT:-/private/tmp/trustforge-ceo-lanes}"
@@ -20,7 +22,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 2
 fi
 ROOT="$($PYTHON_BIN -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$ROOT")" || exit 2
-if [[ "$ROOT" != "${TRUSTFORGE_HOME:-/Users/apple/HurricaneSoft/trustforge}" ]]; then
+if [[ "$ROOT" != "${TRUSTFORGE_HOME:-$DEFAULT_ROOT}" ]]; then
   echo "[ceo_cycle] repository root must be a canonical realpath" >&2
   exit 2
 fi
