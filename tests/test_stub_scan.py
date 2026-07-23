@@ -88,9 +88,10 @@ def test_scan_ignores_only_abstractmethod_imported_from_abc(tmp_path, monkeypatc
     source.write_text(
         "from abc import abstractmethod\n"
         "from abc import abstractmethod as required\n"
+        "from abc import ABC, ABCMeta\n"
         "import abc\n"
         "import abc as standard_abc\n"
-        "class Interface:\n"
+        "class Interface(ABC):\n"
         "    @abstractmethod\n"
         "    def direct(self): pass\n"
         "    @required\n"
@@ -98,7 +99,13 @@ def test_scan_ignores_only_abstractmethod_imported_from_abc(tmp_path, monkeypatc
         "    @abc.abstractmethod\n"
         "    def qualified(self): raise NotImplementedError\n"
         "    @standard_abc.abstractmethod\n"
-        "    def module_alias(self): pass\n",
+        "    def module_alias(self): pass\n"
+        "class MetaInterface(metaclass=ABCMeta):\n"
+        "    @abstractmethod\n"
+        "    def required(self): pass\n"
+        "class QualifiedInterface(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def required(self): ...\n",
         encoding="utf-8",
     )
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
@@ -114,11 +121,11 @@ def test_scan_rejects_untrusted_and_shadowed_abstractmethod_names(
     source.parent.mkdir(parents=True)
     source.write_text(
         "from abc import abstractmethod as shadowed\n"
+        "from abc import abstractmethod\n"
         "import abc\n"
         "shadowed = lambda fn: fn\n"
         "class evil:\n"
         "    abstractmethod = staticmethod(lambda fn: fn)\n"
-        "def abstractmethod(fn): return fn\n"
         "class Ordinary:\n"
         "    @abstractmethod\n"
         "    def local(self): pass\n"
@@ -126,6 +133,8 @@ def test_scan_rejects_untrusted_and_shadowed_abstractmethod_names(
         "    def qualified(self): ...\n"
         "    @shadowed\n"
         "    def rebound(self): raise NotImplementedError\n"
+        "    @abstractmethod\n"
+        "    def genuine_but_concrete(self): pass\n"
         "class LocallyShadowed:\n"
         "    abc = evil\n"
         "    @abc.abstractmethod\n"
@@ -136,7 +145,71 @@ def test_scan_rejects_untrusted_and_shadowed_abstractmethod_names(
 
     assert [row["symbol"] for row in scan([source])] == [
         "trustforge.fake_abstracts.LocallyShadowed.method",
+        "trustforge.fake_abstracts.Ordinary.genuine_but_concrete",
         "trustforge.fake_abstracts.Ordinary.local",
         "trustforge.fake_abstracts.Ordinary.qualified",
         "trustforge.fake_abstracts.Ordinary.rebound",
+    ]
+
+
+def test_scan_rejects_shadowed_protocol_bindings(tmp_path, monkeypatch):
+    root = tmp_path
+    source = root / "src/trustforge/fake_protocols.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "from typing import Protocol as InterfaceBase\n"
+        "import typing\n"
+        "Protocol = object\n"
+        "if False:\n"
+        "    InterfaceBase = object\n"
+        "try:\n"
+        "    typing = object\n"
+        "except Exception:\n"
+        "    pass\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Aliased(InterfaceBase):\n"
+        "    def method(self): ...\n"
+        "class Qualified(typing.Protocol):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.fake_protocols.Aliased.method",
+        "trustforge.fake_protocols.Direct.method",
+        "trustforge.fake_protocols.Qualified.method",
+    ]
+
+
+def test_scan_rejects_abc_rebinding_in_control_flow(tmp_path, monkeypatch):
+    root = tmp_path
+    source = root / "src/trustforge/control_flow_shadow.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from abc import ABC, abstractmethod\n"
+        "import abc\n"
+        "if False:\n"
+        "    abstractmethod = lambda fn: fn\n"
+        "for abc in ():\n"
+        "    pass\n"
+        "try:\n"
+        "    ABC = object\n"
+        "except Exception:\n"
+        "    pass\n"
+        "class Interface(ABC):\n"
+        "    @abstractmethod\n"
+        "    def direct(self): pass\n"
+        "class Qualified:\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.control_flow_shadow.Interface.direct",
+        "trustforge.control_flow_shadow.Qualified.method",
     ]
