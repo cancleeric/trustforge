@@ -487,10 +487,125 @@
     "type": "object"
   },
   "Report": {
+    "$defs": {
+      "AssetContext": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_id": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "ecosystem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "layer": {
+            "enum": [
+              "layer_1",
+              "layer_2",
+              "app",
+              "protocol",
+              "token",
+              "offchain",
+              "unknown"
+            ]
+          },
+          "market_cap_tier": {
+            "enum": [
+              "large",
+              "mid",
+              "small",
+              "micro",
+              "unknown"
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "parent_asset_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "const": "1.0.0"
+          },
+          "sector": {
+            "enum": [
+              "defi",
+              "l1",
+              "l2",
+              "stablecoin",
+              "exchange",
+              "infrastructure",
+              "meme",
+              "rwa",
+              "gaming",
+              "ai",
+              "unknown"
+            ]
+          },
+          "symbol": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "token_role": {
+            "enum": [
+              "gas",
+              "governance",
+              "utility",
+              "staking",
+              "stable",
+              "lp",
+              "wrapped",
+              "meme",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "asset_id",
+          "symbol",
+          "name",
+          "sector",
+          "layer",
+          "token_role",
+          "market_cap_tier",
+          "ecosystem",
+          "parent_asset_id",
+          "tags"
+        ],
+        "type": "object"
+      }
+    },
     "$id": "https://trustforge.local/contracts/report/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
+      "asset_context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AssetContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "calibrated_confidence": {
         "type": "number"
       },
@@ -566,6 +681,34 @@
       },
       "question_type": {
         "type": "string"
+      },
+      "risk_notices": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "message": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "info",
+                "warning"
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message"
+          ],
+          "type": "object"
+        },
+        "type": "array"
       },
       "schema_version": {
         "const": "1.0.0"

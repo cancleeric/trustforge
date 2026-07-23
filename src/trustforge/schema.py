@@ -151,6 +151,12 @@ class Report:
     # 既有斷言（見 `tests/test_cross_source_signal.py` 手造 Report 的用法）。
     calibrated_confidence: float = 0.0
     decision_state: str = "normal"
+    # #579 Analyze API context/risk notices: optional public-only metadata for
+    # consumers that need to interpret a report against the right asset peer set.
+    # Defaults keep old snapshots/readers valid; serialization callers may fill
+    # these at the public boundary without changing core scoring behavior.
+    asset_context: dict | None = None
+    risk_notices: list[dict] = field(default_factory=list)
 
     def confidence_label(self) -> str:
         """三態優先於純數字分桶：abstain/低信心用結構化狀態直接標示，避免
