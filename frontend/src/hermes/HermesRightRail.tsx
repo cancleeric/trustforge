@@ -115,25 +115,25 @@ export default function HermesRightRail({
 
       {/* divergence alert dock */}
       <div
-        onClick={onOpenDivergence}
-        className="hermes-clip"
+        className="hermes-clip hermes-divergence-dock"
         style={{
-          cursor: 'pointer', background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
+          background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
           animation: tier === 'danger' ? 'hermes-alert-flash 2.4s ease-in-out infinite' : undefined,
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.transform = 'translateY(-1px)')}
-        onMouseLeave={(e) => (e.currentTarget.style.transform = 'none')}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
           <span style={{ color: dockColor, fontSize: 13 }}>⚠</span>
           <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}><GlossaryTerm term="divergence" label={t('divergence')} compact /></span>
         </div>
-        <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
-          {crossSignal ? crossSignal.summary
-            : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
-              : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
-                : `${t('conflict')} · Δ ${divDock.divergence}%`}
-        </div>
+        <button type="button" onClick={onOpenDivergence} style={{ display: 'block', width: '100%', padding: 0, border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', font: 'inherit' }}>
+          <span style={{ display: 'block', fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
+            {crossSignal ? crossSignal.summary
+              : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
+                : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
+                  : `${t('conflict')} · Δ ${divDock.divergence}%`}
+          </span>
+          <span style={{ display: 'block', marginTop: 4, fontSize: 9.5, color: dockColor }}>{t('tapReview')} →</span>
+        </button>
       </div>
     </div>
   )

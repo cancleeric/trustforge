@@ -73,18 +73,42 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.queryByLabelText('問題')).not.toBeInTheDocument()
   })
 
-  it('opens the divergence drilldown from the right rail', () => {
+  it('opens and closes the divergence drilldown from the desktop right rail', () => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
       </MemoryRouter>,
     )
 
-    const divergenceDock = screen.getByText('跨來源分歧').closest('.hermes-clip')
+    const divergenceDock = document.querySelector('.hermes-divergence-dock')
     expect(divergenceDock).not.toBeNull()
-    fireEvent.click(divergenceDock!)
+    fireEvent.click(divergenceDock!.querySelector(':scope > button')!)
 
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('跨來源分歧')
+    fireEvent.click(dialog.querySelector('button')!)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('opens the mobile divergence drilldown while glossary help remains independent', () => {
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+      </MemoryRouter>,
+    )
+
+    const mobileEntry = document.querySelector('.hermes-mobile-divergence')
+    expect(mobileEntry).not.toBeNull()
+    fireEvent.click(mobileEntry!.querySelector('.tf-glossary button')!)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    const reviewButton = mobileEntry!.querySelector(':scope > button') as HTMLButtonElement
+    reviewButton.focus()
+    fireEvent.click(reviewButton)
     expect(screen.getByRole('dialog')).toHaveTextContent('跨來源分歧')
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it.each(['基本面', '價格催化因子'])('maps %s to hypothesis', async (mode) => {
