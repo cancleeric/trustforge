@@ -74,6 +74,28 @@ def test_disposition_table_has_exact_commit_bound_decisions() -> None:
     assert "Production scope: EMPTY" in text
 
 
+def test_synced_runtime_contract_gaps_are_named_and_not_approved() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    required_clauses = (
+        "src/trustforge/delayed_outcome_labeler.py::build_delayed_outcome_observation",
+        "event_date + timedelta(days=N)",
+        "elapsed calendar date",
+        "binary float",
+        "未把 authenticated tenant 納入七鍵 canonical JSON/SHA-256 identity",
+        "`market_data_variant`",
+        "canonical-as-of",
+        "`supersedes_outcome_id`",
+        "late-data cutoff",
+        "src/trustforge/calibration_dataset.py::_latest_labeled_outcomes",
+        "`(analysis_id, horizon)`",
+        "key 未 tenant-bound",
+        "legacy diagnostic behavior — not contract compliant and not implementation-ready",
+        "本文件不授權修改 runtime",
+    )
+    for clause in required_clauses:
+        assert clause in text
+
+
 def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
     text = DOC.read_text(encoding="utf-8")
     headers, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")

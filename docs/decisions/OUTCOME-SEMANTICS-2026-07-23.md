@@ -31,9 +31,11 @@
 
 - `src/trustforge/calibration.py::outcomes_for_horizon`：T+N 是排序後 OHLCV 的 index distance；只接受 `偏多`、`偏空`、`bullish`、`bearish`；缺起點／終點 bar 或起點 close=0 時直接略過；`directional_return > 0` 才命中。
 - `src/trustforge/calibration_runner.py::compare_predictions`：同樣以 bar index 計算；接受 `中性`、`偏多`、`偏空`；中性使用固定 `abs(return) < 2%`，方向 hit 使用嚴格正／負。
-- 兩者目前都沒有正式 calendar、event/available time、maturity state、停牌、公司行動、晚到或 revision lineage 欄位。
+- `src/trustforge/delayed_outcome_labeler.py::build_delayed_outcome_observation`：以 analysis `event_time` 的 UTC calendar date 當 start，並用 `event_date + timedelta(days=N)` 的 elapsed calendar date 當 maturity/target；這不是版本化 venue calendar 的 eligible-session T+N，也未套 prediction cutoff、publication SLA 或 late-data cutoff。price/outcome 使用 binary float；`outcome_id` 是 `analysis_event.identity:horizon:v{revision}` 字串，未把 authenticated tenant 納入七鍵 canonical JSON/SHA-256 identity。payload 亦缺 `market_data_variant`、canonical-as-of、market-data revision lineage 與 `supersedes_outcome_id`。
+- `src/trustforge/calibration_dataset.py::_latest_labeled_outcomes`：以 `(analysis_id, horizon)` 選 latest revision，key 未 tenant-bound；同 analysis ID/horizon 的不同 tenant 可能 collision 或錯選。dataset row 也未保存可驗證的 tenant namespace，不能證明 outcome 與 analysis 屬同 tenant。
+- 前兩個 calibration legacy functions 目前都沒有正式 calendar、event/available time、maturity state、停牌、公司行動、晚到或 revision lineage 欄位。
 
-第 10 節已完成 D1–D8 semantic disposition；既有行為仍只能視為 diagnostic legacy behavior，因 semantic approval 不會追認既有 runtime，也不得被描述成已實作核准契約。
+第 10 節已完成 D1–D8 semantic disposition；上述既有與新同步模組仍只能視為 **legacy diagnostic behavior — not contract compliant and not implementation-ready**。semantic approval 不會追認既有 runtime，也不得被描述成已實作核准契約。任何後續 implementation issue 必須另行修正、審查與驗證；本文件不授權修改 runtime。
 
 ## 3. 已拍板的時間語意模型
 
