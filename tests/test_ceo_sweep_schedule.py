@@ -26,14 +26,16 @@ def _load_script(name: str, filename: str):
 
 
 def test_ceo_sweep_template_and_installer_are_half_hourly_without_editing_host_plist():
-    tracked = plistlib.loads(
-        (ROOT / "deploy/launchd/com.hurricanesoft.trustforge-ceo-sweep.plist").read_bytes()
+    module = _load_script("install_launch_agent_cadence", "install_launch_agent.py")
+    generated = module.payload(
+        "sweep", ROOT.resolve(), Path(sys.executable).resolve(),
+        Path("/usr/bin/true"), Path("/usr/bin/false"),
     )
     template = (ROOT / "scripts/templates/com.hurricanesoft.trustforge-ceo-sweep.plist.in").read_text()
     installer = (ROOT / "scripts/install_ceo_half_hour_schedule.sh").read_text()
     compatibility_wrapper = (ROOT / "scripts/install_ceo_hourly_schedule.sh").read_text()
 
-    assert tracked["StartInterval"] == 3600
+    assert generated["StartInterval"] == 1800
     assert "<integer>1800</integer>" in template
     assert "<integer>3600</integer>" not in template
     assert "every 1800s" in installer

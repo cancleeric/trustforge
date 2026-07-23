@@ -3,6 +3,17 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('Hermes responsive bridge layout contract', () => {
+  it('keeps training status and divergence in the right rail flow without overlapping layers', () => {
+    const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
+    const rightRail = readFileSync(path.join(__dirname, 'HermesRightRail.tsx'), 'utf8')
+
+    expect(dashboard).toContain('trainingStatus={<TrainingStatusCard />}')
+    expect(dashboard).not.toContain('hermes-training-status-layer')
+    expect(rightRail).toContain('zIndex: 5')
+    expect(rightRail).toContain('className="hermes-training-status-slot"')
+    expect(rightRail).toContain('className="hermes-clip hermes-divergence-dock"')
+  })
+
   it('uses the viewport without a fixed canvas or page scrolling', () => {
     const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
     const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')

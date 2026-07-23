@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 import pytest
 from trustforge.historical_replay import replay_date_range, replay_snapshot
@@ -15,6 +18,45 @@ def test_daily_replay_outputs_report_evidence_and_execution_log():
 def test_daily_replay_rejects_future_document():
     with pytest.raises(ValueError, match="future document"):
         replay_snapshot(_snapshot({"id": "future", "text": "bad", "published_at": "2021-07-02T00:00:00Z"}), query="test")
+
+
+def test_daily_replay_rejects_timezone_unknown_document():
+    with pytest.raises(ValueError, match="timezone-aware published_at"):
+        replay_snapshot(_snapshot({"id": "naive", "text": "bad", "published_at": "2021-06-30T12:00:00"}), query="test")
+
+
+def test_daily_replay_accepts_explicit_offsets_at_boundary():
+    for published_at in (
+        "2021-06-30T14:00:00+02:00",
+        "2021-07-01T13:59:59+14:00",
+        "2021-06-30T09:59:59-14:00",
+    ):
+        result = replay_snapshot(
+            _snapshot({"id": published_at, "text": "BTC update", "published_at": published_at}),
+            query="test",
+        )
+        assert result["evidence"][0]["content_reference"] == "BTC update"
+
+
+def test_daily_replay_normalizes_dst_offset_deterministically():
+    result = replay_snapshot(
+        _snapshot({"id": "dst", "text": "BTC update", "published_at": "2021-03-14T01:30:00-05:00"}),
+        query="test",
+    )
+
+    assert result["evidence"][0]["content_reference"] == "BTC update"
+
+
+def test_replay_timestamp_boundary_is_host_timezone_independent():
+    code = (
+        "from trustforge.historical_replay import replay_snapshot;"
+        "from tests.test_historical_replay import _snapshot;"
+        "replay_snapshot(_snapshot({'id':'offset','text':'BTC update','published_at':'2021-06-30T14:00:00+02:00'}), query='test')"
+    )
+    env = dict(os.environ)
+    env["TZ"] = "Pacific/Kiritimati"
+    env["PYTHONPATH"] = os.pathsep.join(("src", ".", env.get("PYTHONPATH", "")))
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=os.getcwd(), env=env)
 
 def test_replay_range_records_missing_days_without_fabricating_data():
     available = {"2021-07-01": _snapshot({"id": "a", "text": "BTC update", "published_at": "2021-06-30T12:00:00Z"})}
