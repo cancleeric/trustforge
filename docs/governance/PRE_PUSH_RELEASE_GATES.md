@@ -1,4 +1,4 @@
-# Pre-Push and Release Gates
+# Pre-Push Release Gates
 
 TrustForge does not use GitHub Actions as a merge, release, or deployment gate.
 All workflows under `.github/workflows/` intentionally remain disabled. Do not
@@ -27,9 +27,9 @@ npm --prefix frontend run build
 git diff --check
 ```
 
-`npm --prefix frontend ci` is skipped by the hook only when
+The hook skips `npm --prefix frontend ci` only when
 `frontend/node_modules/.bin/vitest` already exists. `TRUSTFORGE_NO_CD=1` may be
-used for pushes that must skip deployment side effects, but it does not skip the
+used when a push must skip deployment side effects, but it does not skip the
 quality gates above.
 
 ## PR Evidence
@@ -38,21 +38,21 @@ Each PR must record commit-bound pre-push evidence in the PR body or a PR
 comment:
 
 - head commit SHA
-- UTC timestamp of the gate run
+- UTC timestamp for the gate run
 - exact command or hook path used
 - local gate result
 - targeted tests, lint, build, `git diff --check`, and Eye scan evidence when
   the change requires them
 - explicit reason for any gate that was not run
 
-UI changes still require an Eye scan against the actual branch and desktop/mobile
-layout verification. Every PR requires a named reviewer and a `/codex-review`
-comment. Security-sensitive changes require harper (CISO) and gray (CPO) review
-before merge. Cost-sensitive changes require harper review before merge.
+UI changes still require actual-branch Eye desktop/mobile layout verification.
+Every PR requires a named reviewer and a `/codex-review` comment.
+Security-sensitive changes require harper (CISO) and gray (CPO) review before
+merge. Cost-sensitive changes require harper review before merge.
 
 ## Release Boundary
 
-Production deployment remains controlled by the explicit release workflow outside
-GitHub Actions. Release work must verify the deployed health and changed user
-workflow before closing the release milestone. Issue-development sweeps open PRs
+Production deployment remains controlled by an explicit release workflow outside
+GitHub Actions. Release work must verify deployed health and changed user
+workflows before closing a release milestone. Issue-development sweeps open PRs
 for review only; they do not merge, release, or deploy.
