@@ -12,7 +12,7 @@ from trustforge.asset_context_repository import (
 )
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "asset_context_records.json"
+FIXTURE = Path(__file__).parents[1] / "data" / "asset_context_records.json"
 
 
 def utc(year: int, month: int, day: int) -> datetime:
