@@ -30,7 +30,7 @@ def edge() -> DependencyEdge:
         valid_from=utc(2026, 1, 1),
         valid_until=None,
         confidence=0.82,
-        official_source_url="fixture://ecolink/dependencies",
+        official_source_url="https://arbitrum.foundation/ecolink/dependencies",
         observed_at=utc(2026, 1, 2),
     )
 
@@ -45,7 +45,7 @@ def event() -> UpgradeEvent:
         status=UpgradeEventStatus.SCHEDULED,
         impact_direction=ImpactDirection.MIXED,
         impacted_asset_ids=("asset:arb", "asset:eth"),
-        official_source_url="fixture://ecolink/upgrades",
+        official_source_url="https://arbitrum.foundation/ecolink/upgrades",
         observed_at=utc(2026, 1, 2),
     )
 
@@ -61,7 +61,7 @@ def test_dependency_edge_serializes_validity_lineage_and_controlled_kind() -> No
         "valid_from": "2026-01-01T00:00:00+00:00",
         "valid_until": None,
         "confidence": 0.82,
-        "official_source_url": "fixture://ecolink/dependencies",
+        "official_source_url": "https://arbitrum.foundation/ecolink/dependencies",
         "observed_at": "2026-01-02T00:00:00+00:00",
     }
     assert dependency_edge_from_dict(payload).to_dict() == payload
@@ -103,7 +103,7 @@ def test_ecolink_contract_rejects_invalid_edges_and_bool_confidence() -> None:
             valid_from=utc(2026, 1, 1),
             valid_until=None,
             confidence=0.5,
-            official_source_url="fixture://ecolink/dependencies",
+            official_source_url="https://arbitrum.foundation/ecolink/dependencies",
             observed_at=utc(2026, 1, 1),
         )
 
@@ -115,7 +115,7 @@ def test_ecolink_contract_rejects_invalid_edges_and_bool_confidence() -> None:
             valid_from=utc(2026, 1, 1),
             valid_until=None,
             confidence=True,  # type: ignore[arg-type]
-            official_source_url="fixture://ecolink/dependencies",
+            official_source_url="https://arbitrum.foundation/ecolink/dependencies",
             observed_at=utc(2026, 1, 1),
         )
 
@@ -127,7 +127,7 @@ def test_ecolink_contract_rejects_invalid_edges_and_bool_confidence() -> None:
             valid_from=utc(2026, 1, 2),
             valid_until=utc(2026, 1, 1),
             confidence=0.5,
-            official_source_url="fixture://ecolink/dependencies",
+            official_source_url="https://arbitrum.foundation/ecolink/dependencies",
             observed_at=utc(2026, 1, 1),
         )
 
@@ -155,7 +155,7 @@ def test_ecolink_contract_requires_official_source_and_timezone() -> None:
             status=UpgradeEventStatus.ACTIVATED,
             impact_direction=ImpactDirection.UNKNOWN,
             impacted_asset_ids=("asset:arb",),
-            official_source_url="fixture://ecolink/upgrades",
+            official_source_url="https://arbitrum.foundation/ecolink/upgrades",
             observed_at=utc(2026, 1, 2),
         )
 

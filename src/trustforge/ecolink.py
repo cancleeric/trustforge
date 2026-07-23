@@ -9,6 +9,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 ECOLINK_SCHEMA_VERSION = "1.0.0"
+OFFICIAL_ECOLINK_HOSTS = frozenset(
+    {
+        "arbitrum.foundation",
+        "blog.arbitrum.io",
+        "forum.arbitrum.foundation",
+        "gov.optimism.io",
+        "ethereum.org",
+    }
+)
 
 
 class DependencyKind(StrEnum):
@@ -207,8 +216,10 @@ def _canonical_asset_id(asset_id: str) -> str:
 
 def _ensure_official_url(url: str, field_name: str) -> None:
     parsed = urlparse(url)
-    if parsed.scheme not in {"https", "fixture"} or not parsed.netloc:
+    if parsed.scheme != "https" or parsed.username or parsed.password:
         raise ValueError(f"{field_name} must be official source URL")
+    if parsed.hostname not in OFFICIAL_ECOLINK_HOSTS:
+        raise ValueError(f"{field_name} host is not allowlisted official source")
 
 
 def _required_timestamp(raw: object, field_name: str) -> datetime:
