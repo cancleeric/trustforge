@@ -3,8 +3,12 @@ import stat
 
 import pytest
 
-from trustforge.safe_fs import read_regular_file, write_atomic
-from trustforge.safe_fs import pinned_directory
+from trustforge.safe_fs import (
+    pinned_directory,
+    read_regular_file,
+    write_atomic,
+    write_immutable_cross_directory_at,
+)
 
 
 def _require_dirfd_support():
@@ -209,3 +213,119 @@ def test_retry_fsyncs_entry_left_by_transient_failure_before_descending(tmp_path
     with pinned_directory(nested, create=True) as descriptor:
         assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
     assert containing_fsyncs == 2
+
+
+def test_cross_directory_immutable_publish_commits_staging_before_destination(tmp_path, monkeypatch):
+    staging = tmp_path / "staging"
+    destination = tmp_path / "events"
+    staging.mkdir()
+    destination.mkdir()
+    staging_info = staging.stat()
+    destination_info = destination.stat()
+    real_fsync = os.fsync
+    directory_order = []
+
+    def record_fsync(descriptor):
+        info = os.fstat(descriptor)
+        identity = (info.st_dev, info.st_ino)
+        if identity == (staging_info.st_dev, staging_info.st_ino):
+            directory_order.append("staging")
+        elif identity == (destination_info.st_dev, destination_info.st_ino):
+            directory_order.append("destination")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", record_fsync)
+    with pinned_directory(staging) as staging_fd, pinned_directory(destination) as destination_fd:
+        write_immutable_cross_directory_at(staging_fd, destination_fd, "event.json", b"event")
+
+    assert directory_order[-2:] == ["staging", "destination"]
+    assert (destination / "event.json").read_bytes() == b"event"
+    assert list(staging.iterdir()) == []
+
+
+def test_cross_directory_destination_fsync_failure_rolls_back_both_directories(
+    tmp_path, monkeypatch
+):
+    staging = tmp_path / "staging"
+    destination = tmp_path / "events"
+    staging.mkdir()
+    destination.mkdir()
+    destination_info = destination.stat()
+    real_fsync = os.fsync
+    destination_calls = 0
+
+    def fail_first_destination_fsync(descriptor):
+        nonlocal destination_calls
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (destination_info.st_dev, destination_info.st_ino):
+            destination_calls += 1
+            if destination_calls == 1:
+                raise OSError("destination commit fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_first_destination_fsync)
+    with pinned_directory(staging) as staging_fd, pinned_directory(destination) as destination_fd:
+        with pytest.raises(OSError, match="destination commit fsync failed"):
+            write_immutable_cross_directory_at(
+                staging_fd, destination_fd, "event.json", b"event"
+            )
+
+    assert destination_calls == 2
+    assert not (destination / "event.json").exists()
+    assert list(staging.iterdir()) == []
+
+
+def test_cross_directory_persistent_staging_fsync_reports_rollback_failure(
+    tmp_path, monkeypatch
+):
+    staging = tmp_path / "staging"
+    destination = tmp_path / "events"
+    staging.mkdir()
+    destination.mkdir()
+    staging_info = staging.stat()
+    real_fsync = os.fsync
+
+    def fail_staging_fsync(descriptor):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (staging_info.st_dev, staging_info.st_ino):
+            raise OSError("persistent staging fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_staging_fsync)
+    with pinned_directory(staging) as staging_fd, pinned_directory(destination) as destination_fd:
+        with pytest.raises(
+            OSError, match="publication failed and rollback was not durable"
+        ):
+            write_immutable_cross_directory_at(
+                staging_fd, destination_fd, "event.json", b"event"
+            )
+
+    assert not (destination / "event.json").exists()
+
+
+def test_cross_directory_persistent_destination_fsync_reports_rollback_failure(
+    tmp_path, monkeypatch
+):
+    staging = tmp_path / "staging"
+    destination = tmp_path / "events"
+    staging.mkdir()
+    destination.mkdir()
+    destination_info = destination.stat()
+    real_fsync = os.fsync
+
+    def fail_destination_fsync(descriptor):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (destination_info.st_dev, destination_info.st_ino):
+            raise OSError("persistent destination fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.fsync", fail_destination_fsync)
+    with pinned_directory(staging) as staging_fd, pinned_directory(destination) as destination_fd:
+        with pytest.raises(
+            OSError, match="publication failed and rollback was not durable"
+        ):
+            write_immutable_cross_directory_at(
+                staging_fd, destination_fd, "event.json", b"event"
+            )
+
+    assert not (destination / "event.json").exists()
