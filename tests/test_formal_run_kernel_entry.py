@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from trustforge.agent import orchestrator as orch
+import trustforge_core
 from trustforge.ingestion.base import Document
 from trustforge.pipeline import run
 from trustforge.schema import QuestionType
-from trustforge.trust.kernel import KernelOutput
+from trustforge_core import KernelOutput
 
 
 def test_formal_pipeline_run_enters_trust_kernel(monkeypatch):
@@ -33,7 +33,7 @@ def test_formal_pipeline_run_enters_trust_kernel(monkeypatch):
         ]
 
     seen: dict[str, object] = {}
-    real_run_kernel = orch.run_kernel
+    real_run_kernel = trustforge_core.run_kernel
 
     def spy_run_kernel(inp):
         seen["coin"] = inp.coin
@@ -44,7 +44,7 @@ def test_formal_pipeline_run_enters_trust_kernel(monkeypatch):
         return out
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
-    monkeypatch.setattr(orch, "run_kernel", spy_run_kernel)
+    monkeypatch.setattr("trustforge.agent.orchestrator.run_kernel", spy_run_kernel)
 
     report, evidence, log = run(
         "BTC",
