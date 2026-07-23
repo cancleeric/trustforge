@@ -56,10 +56,28 @@ lowercase SHA-256 digests. Calendar and price fixtures are each bounded to
 Late-after-cutoff recovery requires a new immutable version and a same-tenant,
 same-logical-key predecessor.
 
-`trusted_outcome_version` and `trusted_supersedes` are server-authority inputs.
-This fixture-only component validates their continuity and integrity, but does
-not implement the future atomic version allocator or durable audit store.
+`FixtureOutcomeLedger` is the only public construction path. Under one
+in-process lock it allocates a bounded monotonic version per
+tenant/prediction/horizon/variant key, validates predecessor continuity,
+deduplicates request fingerprints, appends first, and commits in-memory state
+only after the append port confirms `created` or `idempotent`; exceptions and
+all other statuses leave ledger state untouched. Dry-run plans under the same lock but mutates
+nothing. This ledger is deliberately non-durable and fixture-only; it is not a
+production allocator or durable audit store.
 
 Outcome events are always `delayed_outcome`, explicitly non-evidentiary, and
 never eligible as Evidence. Dry-run returns before invoking the append port, so
 it performs zero writes.
+
+## Breaking migration
+
+The old public builder that accepted caller-selected revisions, predecessors,
+price dictionaries, and source versions was removed. Consumers must use
+`FixtureOutcomeLedger.observe` with trusted tenant/time context and approved
+fixture dataclasses. Calibration consumers must explicitly select
+`market_data_variant`; canonical rows are isolated by tenant and variant and
+read `outcome_version`, `return_pct`, and `market_data_revision` directly.
+Joins require the exact source analysis identity—not only a reusable
+`analysis_id`—and manifests expose tenant and variant explicitly.
+This migration is required for Issue #507 and does not claim the Issue #508
+dataset-manifest milestone is complete.

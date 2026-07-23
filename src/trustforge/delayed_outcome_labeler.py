@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
@@ -29,7 +30,22 @@ _PRICE_QUANTUM = Decimal("0.00000001")
 _LATE_CUTOFF = timedelta(hours=72)
 _OUTCOME_CONTRACT = "delayed-outcome.v1"
 _MAX_FIXTURE_RECORDS = 10_000
+_MAX_FIXTURE_BYTES = 1024 * 1024
+_MAX_REVISIONS_PER_LOGICAL_KEY = 100
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FIXTURE_AUTHORITY = {
+    ("fixture-provider", "fixture-dataset-v1", "split-v1"),
+}
+_OUTCOME_PAYLOAD_FIELDS = {
+    "event_type", "classification", "eligible_as_evidence", "outcome_id",
+    "analysis_id", "identity_inputs", "prediction_id",
+    "source_event_identity", "horizon", "contract_version",
+    "market_data_variant", "market_data_revision", "outcome_version",
+    "maturity", "status", "reason_code", "start_session", "target_session",
+    "matures_at", "labeled_at", "canonical_as_of",
+    "supersedes_outcome_id", "lineage", "return_pct", "direction_sign",
+    "directional_return_pct", "risk_abs_move_pct", "risk_downside_pct", "hit",
+}
 
 
 class OutcomeAppendPort(Protocol):
@@ -43,6 +59,18 @@ class VenueSession:
     label: str
     status: str
     scheduled_close_at: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.label) is not str or not self.label or len(self.label.encode("utf-8")) > 32:
+            raise LearningEventError("venue session label is invalid")
+        if type(self.status) is not str or not self.status or len(self.status.encode("utf-8")) > 16:
+            raise LearningEventError("venue session status is invalid")
+        if self.scheduled_close_at is not None and (
+            type(self.scheduled_close_at) is not str
+            or not self.scheduled_close_at
+            or len(self.scheduled_close_at.encode("utf-8")) > 4096
+        ):
+            raise LearningEventError("venue session scheduled_close_at is invalid")
 
 
 @dataclass(frozen=True)
@@ -58,6 +86,16 @@ class FixtureVenueCalendar:
     publication_lag_hours: int
 
     def __post_init__(self) -> None:
+        if type(self.sessions) is not tuple or any(
+            type(session) is not VenueSession for session in self.sessions
+        ):
+            raise LearningEventError("calendar fixture must contain exact VenueSession records")
+        for field in ("calendar_id", "timezone", "version_available_at"):
+            value = getattr(self, field)
+            if type(value) is not str or not value or len(value.encode("utf-8")) > 4096:
+                raise LearningEventError(f"calendar {field} is invalid")
+        if type(self.continuous_24_7) is not bool:
+            raise LearningEventError("calendar continuous_24_7 must be boolean")
         if not self.calendar_id or not self.timezone:
             raise LearningEventError("calendar identity and timezone are required")
         try:
@@ -121,6 +159,7 @@ class FixtureVenueCalendar:
                     "%Y-%m-%d",
                 ).replace(tzinfo=timezone.utc) + timedelta(days=1):
                     raise LearningEventError("24/7 session labels must be daily")
+        _assert_streaming_calendar_limit(self)
 
     def resolve(
         self,
@@ -165,6 +204,21 @@ class FixturePrice:
     methodology_version: str
     content_hash: str
 
+    def __post_init__(self) -> None:
+        for field in (
+            "session_label",
+            "adjusted_close",
+            "event_at",
+            "available_at",
+            "provider",
+            "dataset_version",
+            "methodology_version",
+            "content_hash",
+        ):
+            value = getattr(self, field)
+            if type(value) is not str or not value or len(value.encode("utf-8")) > 4096:
+                raise LearningEventError(f"fixture price {field} is invalid")
+
 
 @dataclass(frozen=True)
 class FixtureMarketData:
@@ -173,8 +227,13 @@ class FixtureMarketData:
     prices: tuple[FixturePrice, ...]
 
     def __post_init__(self) -> None:
+        if type(self.prices) is not tuple or any(
+            type(item) is not FixturePrice for item in self.prices
+        ):
+            raise LearningEventError("market-data fixture must contain exact FixturePrice records")
         if len(self.prices) > _MAX_FIXTURE_RECORDS:
             raise LearningEventError("market-data fixture exceeds price limit")
+        _assert_streaming_price_limit(self.prices)
 
     def price_for(
         self,
@@ -208,7 +267,7 @@ class FixtureMarketData:
 
 def canonical_market_data_revision(
     *,
-    calendar_id: str,
+    calendar: FixtureVenueCalendar,
     variant: str,
     fixture: FixtureMarketData,
     start: FixturePrice | None,
@@ -228,17 +287,25 @@ def canonical_market_data_revision(
                 "selected market data must belong to the visible fixture snapshot"
             )
     manifest = {
-        "calendar_id": calendar_id,
+        "calendar": _calendar_manifest(calendar),
         "variant": variant,
         "selected": {
             "start": _price_manifest(start),
             "target": _price_manifest(target),
         },
     }
+    encoded = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if len(encoded) > _MAX_FIXTURE_BYTES:
+        raise LearningEventError("fixture manifest exceeds aggregate byte limit")
     return canonical_integrity_checksum(manifest)
 
 
-def build_delayed_outcome_observation(
+def _build_delayed_outcome_observation(
     analysis_event: LearningEvent,
     *,
     trusted_tenant_id: str,
@@ -296,7 +363,21 @@ def build_delayed_outcome_observation(
             None, None, trusted_supersedes,
         )
 
-    resolved = calendar.resolve(prediction_available, _HORIZONS[horizon])
+    try:
+        resolved = calendar.resolve(prediction_available, _HORIZONS[horizon])
+    except LearningEventError as exc:
+        if str(exc) != "CALENDAR_GAP":
+            raise
+        _assert_market_data_revision(
+            market_data_revision, calendar, market_data, market_data_variant,
+            None, None, trusted_labeled_at,
+        )
+        return _state_event(
+            analysis_event, trusted_tenant_id, horizon, market_data_variant,
+            market_data_revision, trusted_outcome_version, trusted_as_of_time,
+            trusted_labeled_at, calendar, "unavailable", "CALENDAR_GAP",
+            None, None, trusted_supersedes,
+        )
     if resolved is None:
         _assert_market_data_revision(
             market_data_revision, calendar, market_data, market_data_variant, None, None,
@@ -373,19 +454,171 @@ def build_delayed_outcome_observation(
     )
 
 
-def emit_delayed_outcome_observation(
-    event: LearningEvent,
-    *,
-    append: OutcomeAppendPort,
-    dry_run: bool,
-) -> str:
-    """Append unless dry-run; dry-run is guaranteed to perform zero writes."""
+class FixtureOutcomeLedger:
+    """Bounded in-process fixture allocator; not durable or production-safe."""
 
-    if event.kind != "delayed_outcome":
-        raise LearningEventError("only delayed outcomes may be emitted")
-    if dry_run:
-        return "dry-run"
-    return append.append(event)
+    def __init__(
+        self,
+        *,
+        append: OutcomeAppendPort,
+        maximum_revisions: int = _MAX_REVISIONS_PER_LOGICAL_KEY,
+    ) -> None:
+        if (
+            type(maximum_revisions) is not int
+            or maximum_revisions < 1
+            or maximum_revisions > _MAX_REVISIONS_PER_LOGICAL_KEY
+        ):
+            raise ValueError("maximum_revisions is invalid")
+        self._append = append
+        self._maximum_revisions = maximum_revisions
+        self._lock = threading.RLock()
+        self._current: dict[tuple[str, str, str, str], LearningEvent] = {}
+        self._retries: dict[str, LearningEvent] = {}
+
+    def observe(
+        self,
+        analysis_event: LearningEvent,
+        *,
+        trusted_tenant_id: str,
+        trusted_as_of_time: str,
+        trusted_labeled_at: str,
+        calendar: FixtureVenueCalendar,
+        market_data: FixtureMarketData,
+        horizon: str,
+        market_data_variant: str,
+        dry_run: bool = False,
+    ) -> LearningEvent:
+        if type(dry_run) is not bool:
+            raise LearningEventError("dry_run must be boolean")
+        prediction_id = str(analysis_event.payload.get("analysis_id", ""))
+        logical_key = (
+            trusted_tenant_id,
+            prediction_id,
+            horizon,
+            market_data_variant,
+        )
+        with self._lock:
+            previous = self._current.get(logical_key)
+            version = 1 if previous is None else previous.revision + 1
+            if version > self._maximum_revisions:
+                raise LearningEventError("fixture outcome revision budget exceeded")
+            market_revision = _market_revision_for_request(
+                analysis_event,
+                trusted_labeled_at,
+                calendar,
+                market_data,
+                horizon,
+                market_data_variant,
+            )
+            fingerprint = canonical_integrity_checksum(
+                {
+                    "logical_key": logical_key,
+                    "analysis_identity": analysis_event.identity,
+                    "trusted_as_of_time": trusted_as_of_time,
+                    "trusted_labeled_at": trusted_labeled_at,
+                    "calendar": _calendar_manifest(calendar),
+                    "market_data_revision": market_revision,
+                }
+            )
+            retry = self._retries.get(fingerprint)
+            if retry is not None:
+                return retry
+            event = _build_delayed_outcome_observation(
+                analysis_event,
+                trusted_tenant_id=trusted_tenant_id,
+                trusted_as_of_time=trusted_as_of_time,
+                trusted_labeled_at=trusted_labeled_at,
+                calendar=calendar,
+                market_data=market_data,
+                horizon=horizon,
+                market_data_variant=market_data_variant,
+                market_data_revision=market_revision,
+                trusted_outcome_version=version,
+                trusted_supersedes=previous,
+            )
+            _validate_emittable_outcome(event)
+            if dry_run:
+                return event
+            append_status = self._append.append(event)
+            if append_status not in {"created", "idempotent"}:
+                raise LearningEventError(
+                    "fixture outcome append did not confirm durable creation"
+                )
+            self._current[logical_key] = event
+            self._retries[fingerprint] = event
+            return event
+
+
+def _market_revision_for_request(
+    analysis_event: LearningEvent,
+    labeled_at: str,
+    calendar: FixtureVenueCalendar,
+    market_data: FixtureMarketData,
+    horizon: str,
+    variant: str,
+) -> str:
+    prediction_available = _parse_datetime(
+        analysis_event.available_time,
+        "prediction_available_at",
+    )
+    try:
+        resolved = calendar.resolve(prediction_available, _HORIZONS.get(horizon, 0))
+    except LearningEventError as exc:
+        if str(exc) != "CALENDAR_GAP":
+            raise
+        resolved = None
+    start = target = None
+    if resolved is not None:
+        cutoff = _parse_datetime(labeled_at, "trusted_labeled_at")
+        start = market_data.price_for(resolved[0].label, cutoff, variant=variant)
+        target = market_data.price_for(resolved[1].label, cutoff, variant=variant)
+    return canonical_market_data_revision(
+        calendar=calendar,
+        variant=variant,
+        fixture=market_data,
+        start=start,
+        target=target,
+        visible_at=labeled_at,
+    )
+
+
+def _validate_emittable_outcome(event: LearningEvent) -> None:
+    payload = event.payload
+    if (
+        event.kind != "delayed_outcome"
+        or set(payload) != _OUTCOME_PAYLOAD_FIELDS
+        or payload.get("event_type") != _OUTCOME_CONTRACT
+        or payload.get("classification") != "non_evidentiary_outcome"
+        or payload.get("eligible_as_evidence") is not False
+        or event.provenance.get("tenant_id") != event.tenant_id
+        or not isinstance(payload.get("source_event_identity"), str)
+        or event.provenance.get("source_record", {}).get("analysis_identity")
+        != payload.get("source_event_identity")
+    ):
+        raise LearningEventError("delayed outcome emission contract is invalid")
+    inputs = payload.get("identity_inputs")
+    if not hasattr(inputs, "items") or set(inputs) != {
+        "tenant_id", "prediction_id", "horizon", "contract_version",
+        "market_data_variant", "market_data_revision", "outcome_version",
+    }:
+        raise LearningEventError("delayed outcome identity inputs are invalid")
+    reconstructed = "sha256:" + hashlib.sha256(
+        json.dumps(
+            dict(inputs),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    if (
+        reconstructed != payload.get("outcome_id")
+        or event.entity_id != reconstructed
+        or event.revision != inputs["outcome_version"]
+        or inputs["tenant_id"] != event.tenant_id
+        or event.provenance.get("source_record", {}).get("identity_inputs")
+        != inputs
+    ):
+        raise LearningEventError("delayed outcome canonical identity is invalid")
 
 
 def _state_event(
@@ -422,7 +655,8 @@ def _state_event(
         json.dumps(identity_inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
     supersedes_id = _validate_supersession(
-        supersedes, tenant_id, prediction_id, horizon, variant, outcome_version
+        supersedes, tenant_id, prediction_id, horizon, variant, outcome_version,
+        analysis.identity, labeled_at, as_of_time,
     )
     metrics: dict[str, Any] = {
         "return_pct": None,
@@ -450,6 +684,8 @@ def _state_event(
                 raw_return = (target / start - Decimal(1)) * Decimal(100)
                 sign = _DIRECTIONS[direction]
                 directional = raw_return * sign if sign in {-1, 1} else None
+                if directional is None:
+                    reason = "PREDICTION_NOT_DIRECTIONAL"
                 metrics = {
                     "return_pct": _persist_decimal(raw_return),
                     "direction_sign": sign,
@@ -492,6 +728,7 @@ def _state_event(
     }
     source_record = {
         "fixture_only": True,
+        "analysis_identity": analysis.identity,
         "calendar_id": calendar.calendar_id,
         "calendar_version_available_at": calendar.version_available_at,
         "market_data_revision": revision_hash,
@@ -532,6 +769,9 @@ def _validate_supersession(
     horizon: str,
     variant: str,
     outcome_version: int,
+    analysis_identity: str,
+    successor_labeled_at: str,
+    successor_as_of: str,
 ) -> str | None:
     if previous is None:
         if outcome_version != 1:
@@ -561,6 +801,7 @@ def _validate_supersession(
         or previous.tenant_id != tenant_id
         or identity_inputs.get("tenant_id") != previous.tenant_id
         or payload.get("prediction_id") != prediction_id
+        or payload.get("source_event_identity") != analysis_identity
         or identity_inputs.get("prediction_id") != prediction_id
         or payload.get("horizon") != horizon
         or identity_inputs.get("horizon") != horizon
@@ -576,6 +817,10 @@ def _validate_supersession(
         or payload.get("outcome_id") != reconstructed
         or previous.entity_id != reconstructed
         or payload.get("supersedes_outcome_id") == reconstructed
+        or _parse_datetime(previous.available_time, "predecessor available_time")
+        > _parse_datetime(successor_labeled_at, "successor labeled_at")
+        or _parse_datetime(previous.as_of_time, "predecessor as_of_time")
+        > _parse_datetime(successor_as_of, "successor as_of")
     ):
         raise LearningEventError("supersession must reference same-tenant logical predecessor")
     if reconstructed == canonical_integrity_checksum(
@@ -603,7 +848,7 @@ def _assert_market_data_revision(
     visible_at: str,
 ) -> None:
     expected = canonical_market_data_revision(
-        calendar_id=calendar.calendar_id,
+        calendar=calendar,
         variant=variant,
         fixture=fixture,
         start=start,
@@ -641,6 +886,14 @@ def _validate_selected_price(
         raise LearningEventError("PRICE_LINEAGE_MISSING")
     if not _SHA256.fullmatch(item.content_hash):
         raise LearningEventError("PRICE_LINEAGE_MISSING")
+    if (
+        item.provider,
+        item.dataset_version,
+        item.methodology_version,
+    ) not in _FIXTURE_AUTHORITY:
+        raise LearningEventError("fixture market-data authority is not allowlisted")
+    if item.content_hash != canonical_fixture_price_content_hash(item):
+        raise LearningEventError("fixture price content hash does not match record")
     event_at = _parse_datetime(item.event_at, f"{endpoint} price event_at")
     available_at = _parse_datetime(
         item.available_at,
@@ -658,6 +911,19 @@ def _validate_selected_price(
     ):
         raise LearningEventError("price lineage does not match calendar sessions")
     _price_decimal(item.adjusted_close)
+
+
+def canonical_fixture_price_content_hash(item: FixturePrice) -> str:
+    record = {
+        "session_label": item.session_label,
+        "adjusted_close": item.adjusted_close,
+        "event_at": item.event_at,
+        "available_at": item.available_at,
+        "provider": item.provider,
+        "dataset_version": item.dataset_version,
+        "methodology_version": item.methodology_version,
+    }
+    return canonical_integrity_checksum(record)
 
 
 def _price_lineage(item: FixturePrice) -> dict[str, str]:
@@ -679,6 +945,78 @@ def _price_manifest(item: FixturePrice | None) -> dict[str, str] | None:
         **_price_lineage(item),
         "adjusted_close": item.adjusted_close,
     }
+
+
+def _calendar_manifest(calendar: FixtureVenueCalendar) -> dict[str, Any]:
+    return {
+        "calendar_id": calendar.calendar_id,
+        "timezone": calendar.timezone,
+        "version_available_at": calendar.version_available_at,
+        "continuous_24_7": calendar.continuous_24_7,
+        "prediction_cutoff_minutes": calendar.prediction_cutoff_minutes,
+        "publication_lag_hours": calendar.publication_lag_hours,
+        "sessions": [
+            {
+                "label": session.label,
+                "status": session.status,
+                "scheduled_close_at": session.scheduled_close_at,
+            }
+            for session in calendar.sessions
+        ],
+    }
+
+
+def _assert_streaming_calendar_limit(calendar: FixtureVenueCalendar) -> None:
+    header = {
+        "calendar_id": calendar.calendar_id,
+        "timezone": calendar.timezone,
+        "version_available_at": calendar.version_available_at,
+        "continuous_24_7": calendar.continuous_24_7,
+        "prediction_cutoff_minutes": calendar.prediction_cutoff_minutes,
+        "publication_lag_hours": calendar.publication_lag_hours,
+    }
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        sort_keys=False,
+        separators=(",", ":"),
+    )
+    total = 2
+    for chunk in encoder.iterencode(header):
+        total += len(chunk.encode("utf-8"))
+        if total > _MAX_FIXTURE_BYTES:
+            raise LearningEventError(
+                "calendar fixture exceeds aggregate byte limit"
+            )
+    for session in calendar.sessions:
+        record = {
+            "label": session.label,
+            "status": session.status,
+            "scheduled_close_at": session.scheduled_close_at,
+        }
+        for chunk in encoder.iterencode(record):
+            total += len(chunk.encode("utf-8"))
+            if total > _MAX_FIXTURE_BYTES:
+                raise LearningEventError(
+                    "calendar fixture exceeds aggregate byte limit"
+                )
+
+
+def _assert_streaming_price_limit(prices: tuple[FixturePrice, ...]) -> None:
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        sort_keys=False,
+        separators=(",", ":"),
+    )
+    total = 2
+    for item in prices:
+        if total > 2:
+            total += 1
+        for chunk in encoder.iterencode(_price_manifest(item)):
+            total += len(chunk.encode("utf-8"))
+            if total > _MAX_FIXTURE_BYTES:
+                raise LearningEventError(
+                    "market-data fixture exceeds aggregate byte limit"
+                )
 
 
 def _price_decimal(value: str) -> Decimal:

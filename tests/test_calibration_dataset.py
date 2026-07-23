@@ -1,5 +1,4 @@
 from dataclasses import replace
-import hashlib
 
 import pytest
 
@@ -7,16 +6,20 @@ from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.calibration_dataset import CalibrationDatasetError, build_confidence_calibration_dataset
 from trustforge.delayed_outcome_labeler import (
     FixtureMarketData,
+    FixtureOutcomeLedger,
     FixturePrice,
     FixtureVenueCalendar,
     VenueSession,
-    build_delayed_outcome_observation,
-    canonical_market_data_revision,
+    canonical_fixture_price_content_hash,
 )
-from trustforge.learning_event_contract import canonical_integrity_checksum
+from trustforge.learning_event_contract import (
+    canonical_integrity_checksum,
+    make_learning_event,
+)
+from trustforge.learning_event_store import LearningEventAppendLog
 
 
-def _analysis(day: int, analysis_id=None):
+def _analysis(day: int, analysis_id=None, tenant="tenant-a"):
     evidence_snapshot = [
         {
             "source": f"source-{index}",
@@ -48,7 +51,7 @@ def _analysis(day: int, analysis_id=None):
             "evidence_snapshot_id": canonical_integrity_checksum(evidence_snapshot),
             "evidence_snapshot": evidence_snapshot,
             "question": "Will BTC rise?",
-            "tenant_id": "tenant-a",
+            "tenant_id": tenant,
             "coin": "BTC",
             "mode": "formal",
             "question_type": "direction",
@@ -94,7 +97,7 @@ def _analysis(day: int, analysis_id=None):
             ],
             "failure": {"status": "complete", "failed_stage": None, "code": None, "message": None, "retryable": False},
         },
-        trusted_tenant_id="tenant-a",
+        trusted_tenant_id=tenant,
         trusted_pit=pit,
         trusted_provenance=provenance,
     )
@@ -120,8 +123,7 @@ def _calendar():
 
 
 def _price(day, close):
-    record = f"{day}:{close}".encode()
-    return FixturePrice(
+    item = FixturePrice(
         session_label=f"2026-07-{day:02d}",
         adjusted_close=close,
         event_at=f"2026-07-{day:02d}T20:00:00Z",
@@ -129,55 +131,47 @@ def _price(day, close):
         provider="fixture-provider",
         dataset_version="fixture-dataset-v1",
         methodology_version="split-v1",
-        content_hash="sha256:" + hashlib.sha256(record).hexdigest(),
+        content_hash="sha256:" + "0" * 64,
     )
+    return replace(item, content_hash=canonical_fixture_price_content_hash(item))
 
 
-def _outcome(analysis, end_day=2, revision=1, supersedes=None):
+def _outcome(
+    analysis,
+    end_day=2,
+    ledger=None,
+    variant="latest_official",
+    labeled_at_override=None,
+):
     start_day = int(analysis.event_time[8:10])
     fixture = FixtureMarketData((_price(start_day, "100.00000000"), _price(end_day, "110.00000000")))
-    labeled_at = f"2026-07-{end_day + 1:02d}T00:00:00Z"
-    start = fixture.prices[0]
-    target = fixture.prices[1]
-    market_revision = canonical_market_data_revision(
-        calendar_id=_calendar().calendar_id,
-        variant="latest_official",
-        fixture=fixture,
-        start=start,
-        target=target,
-        visible_at=labeled_at,
-    )
-    event = build_delayed_outcome_observation(
+    labeled_at = labeled_at_override or f"2026-07-{end_day + 1:02d}T00:00:00Z"
+    ledger = ledger or FixtureOutcomeLedger(append=LearningEventAppendLog())
+    return ledger.observe(
         analysis,
-        trusted_tenant_id="tenant-a",
+        trusted_tenant_id=analysis.tenant_id,
         horizon="T+1",
         trusted_as_of_time=labeled_at,
         trusted_labeled_at=labeled_at,
         calendar=_calendar(),
         market_data=fixture,
-        market_data_variant="latest_official",
-        market_data_revision=market_revision,
-        trusted_outcome_version=revision,
-        trusted_supersedes=supersedes,
+        market_data_variant=variant,
     )
-    # #508's legacy dataset projection still consumes these compatibility
-    # columns. The outcome itself was built and validated through the #507
-    # canonical contract; this test-only projection keeps #508 behavior scoped.
-    return replace(
-        event,
-        payload={
-            **event.payload,
-            "revision": str(revision),
-            "source_version": f"fixture-v{revision}",
-            "outcome_pct": event.payload["return_pct"],
-            "ground_truth_direction": "bullish",
-        },
+
+
+def _dataset(analyses, outcomes, *, variant="latest_official"):
+    return build_confidence_calibration_dataset(
+        analyses,
+        outcomes,
+        producer_version="unit",
+        trusted_tenant_id="tenant-a",
+        market_data_variant=variant,
     )
 
 
 def test_calibration_dataset_joins_analysis_and_mature_outcome_with_traceability():
     analysis = _analysis(1)
-    manifest = build_confidence_calibration_dataset([analysis], [_outcome(analysis)], producer_version="unit")
+    manifest = _dataset([analysis], [_outcome(analysis)])
 
     assert manifest["row_count"] == 1
     row = manifest["rows"][0]
@@ -196,19 +190,24 @@ def test_calibration_dataset_requires_analysis_id_and_rejects_ohlcv_expansion():
     ohlcv = replace(ohlcv, payload={**ohlcv.payload, "source_kind": "five_year_ohlcv"})
 
     with pytest.raises(CalibrationDatasetError, match="analysis_id"):
-        build_confidence_calibration_dataset([no_id], [], producer_version="unit")
+        _dataset([no_id], [])
     with pytest.raises(CalibrationDatasetError, match="OHLCV"):
-        build_confidence_calibration_dataset([ohlcv], [], producer_version="unit")
+        _dataset([ohlcv], [])
 
 
 def test_calibration_dataset_uses_latest_outcome_revision_without_rewrite():
     analysis = _analysis(1)
-    old = _outcome(analysis, revision=1)
-    revised = _outcome(analysis, revision=2, supersedes=old)
+    ledger = FixtureOutcomeLedger(append=LearningEventAppendLog())
+    old = _outcome(analysis, ledger=ledger)
+    revised = _outcome(
+        analysis,
+        ledger=ledger,
+        labeled_at_override="2026-07-04T00:00:00Z",
+    )
 
-    manifest = build_confidence_calibration_dataset([analysis], [old, revised], producer_version="unit")
+    manifest = _dataset([analysis], [old, revised])
 
-    assert manifest["rows"][0]["outcome_source_version"] == "fixture-v2"
+    assert manifest["rows"][0]["outcome_source_version"] == revised.payload["market_data_revision"]
     assert manifest["rows"][0]["outcome_identity"].endswith("/v2")
 
 
@@ -216,8 +215,8 @@ def test_calibration_dataset_temporal_split_is_chronological_and_reproducible():
     analyses = [_analysis(day) for day in range(1, 6)]
     outcomes = [_outcome(analysis, end_day=day + 1) for day, analysis in enumerate(analyses, start=1)]
 
-    first = build_confidence_calibration_dataset(analyses, outcomes, producer_version="unit")
-    second = build_confidence_calibration_dataset(reversed(analyses), reversed(outcomes), producer_version="unit")
+    first = _dataset(analyses, outcomes)
+    second = _dataset(reversed(analyses), reversed(outcomes))
 
     assert first["manifest_sha256"] == second["manifest_sha256"]
     assert [row["split"] for row in first["rows"]] == ["train", "train", "train", "validation", "test"]
@@ -228,15 +227,7 @@ def test_calibration_dataset_skips_pending_or_unavailable_outcomes():
     analysis = _analysis(1)
     fixture = FixtureMarketData(())
     labeled_at = "2026-07-03T01:00:00Z"
-    market_revision = canonical_market_data_revision(
-        calendar_id=_calendar().calendar_id,
-        variant="as_first_known",
-        fixture=fixture,
-        start=None,
-        target=None,
-        visible_at=labeled_at,
-    )
-    pending = build_delayed_outcome_observation(
+    pending = FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
         analysis,
         trusted_tenant_id="tenant-a",
         horizon="T+7",
@@ -245,10 +236,72 @@ def test_calibration_dataset_skips_pending_or_unavailable_outcomes():
         calendar=_calendar(),
         market_data=fixture,
         market_data_variant="as_first_known",
-        market_data_revision=market_revision,
-        trusted_outcome_version=1,
     )
 
-    manifest = build_confidence_calibration_dataset([analysis], [pending], producer_version="unit")
+    manifest = _dataset([analysis], [pending], variant="as_first_known")
 
     assert manifest["row_count"] == 0
+
+
+def test_calibration_dataset_requires_variant_and_isolates_tenant_and_variant():
+    analysis = _analysis(1)
+    first_known = _outcome(analysis, variant="as_first_known")
+    latest = _outcome(analysis, variant="latest_official")
+    other_analysis = _analysis(1, tenant="tenant-b")
+    other = _outcome(other_analysis, variant="latest_official")
+
+    manifest = _dataset(
+        [analysis, other_analysis],
+        [first_known, latest, other],
+        variant="latest_official",
+    )
+    assert manifest["row_count"] == 1
+    assert manifest["rows"][0]["outcome_identity"] == latest.identity
+
+    with pytest.raises(CalibrationDatasetError, match="selected explicitly"):
+        build_confidence_calibration_dataset(
+            [analysis],
+            [latest],
+            producer_version="unit",
+            trusted_tenant_id="tenant-a",
+            market_data_variant="",
+        )
+
+
+def test_calibration_join_binds_exact_analysis_identity_not_reused_analysis_id():
+    first = _analysis(1, analysis_id="duplicate")
+    raw_second = _analysis(2, analysis_id="duplicate")
+    second = make_learning_event(
+        kind=raw_second.kind,
+        tenant_id=raw_second.tenant_id,
+        entity_id=raw_second.entity_id,
+        revision=2,
+        event_time=raw_second.event_time,
+        available_time=raw_second.available_time,
+        as_of_time=raw_second.as_of_time,
+        provenance=raw_second.provenance,
+        payload=raw_second.payload,
+    )
+    outcome = _outcome(first)
+    manifest = _dataset([first, second], [outcome])
+    assert manifest["row_count"] == 1
+    assert manifest["rows"][0]["analysis_identity"] == first.identity
+    assert manifest["rows"][0]["source_event_identity"] == first.identity
+    assert manifest["tenant_id"] == "tenant-a"
+    assert manifest["market_data_variant"] == "latest_official"
+
+
+def test_calibration_rejects_outcome_before_analysis_availability():
+    analysis = _analysis(1)
+    outcome = _outcome(analysis)
+    forged = replace(
+        outcome,
+        available_time="2026-07-01T00:00:00.500000Z",
+        as_of_time="2026-07-01T00:00:00.500000Z",
+        provenance={
+            **outcome.provenance,
+            "observed_at": "2026-07-01T00:00:00.500000Z",
+        },
+    )
+    with pytest.raises(CalibrationDatasetError, match="analysis availability"):
+        _dataset([analysis], [forged])

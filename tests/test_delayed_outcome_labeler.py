@@ -1,18 +1,16 @@
 from dataclasses import replace
-from datetime import datetime
-import hashlib
 
 import pytest
 
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.delayed_outcome_labeler import (
     FixtureMarketData,
+    FixtureOutcomeLedger,
     FixturePrice,
     FixtureVenueCalendar,
     VenueSession,
-    build_delayed_outcome_observation,
+    canonical_fixture_price_content_hash,
     canonical_market_data_revision,
-    emit_delayed_outcome_observation,
 )
 from trustforge.learning_event_contract import LearningEventError, canonical_integrity_checksum
 from trustforge.learning_event_store import LearningEventAppendLog
@@ -90,17 +88,17 @@ def _price(label, close, available, *, revision="r1", method="split-v1"):
     close_at = next(
         s.scheduled_close_at for s in _calendar().sessions if s.label == label
     )
-    return FixturePrice(
-        label, close, close_at, available, "fixture-provider", revision, method,
-        "sha256:" + hashlib.sha256(
-            f"{label}:{close}:{available}:{revision}:{method}".encode()
-        ).hexdigest(),
+    item = FixturePrice(
+        label, close, close_at, available, "fixture-provider",
+        "fixture-dataset-v1", method,
+        "sha256:" + "0" * 64,
     )
+    return replace(item, content_hash=canonical_fixture_price_content_hash(item))
 
 
 def _empty_revision(variant="as_first_known"):
     return canonical_market_data_revision(
-        calendar_id=_calendar().calendar_id,
+        calendar=_calendar(),
         variant=variant,
         fixture=FixtureMarketData(()),
         start=None,
@@ -110,30 +108,16 @@ def _empty_revision(variant="as_first_known"):
 
 
 def _build(*, horizon="T+1", as_of="2026-07-03T00:00:00Z", data=None,
-           analysis=None, variant="as_first_known", revision=1, supersedes=None,
-           supplied_market_revision=None, labeled_at=None):
+           analysis=None, variant="as_first_known", labeled_at=None,
+           ledger=None, dry_run=False):
     analysis = analysis or _analysis()
     fixture = FixtureMarketData(tuple(data or ()))
-    available = datetime.fromisoformat(analysis.available_time.replace("Z", "+00:00"))
-    start = target = None
-    resolved = _calendar().resolve(available, int(horizon.removeprefix("T+")))
-    if resolved is not None:
-        start_session, target_session = resolved
-        visible_dt = datetime.fromisoformat((labeled_at or as_of).replace("Z", "+00:00"))
-        start = fixture.price_for(start_session.label, visible_dt, variant=variant)
-        target = fixture.price_for(target_session.label, visible_dt, variant=variant)
-    market_revision = canonical_market_data_revision(
-        calendar_id=_calendar().calendar_id, variant=variant, fixture=fixture,
-        start=start, target=target,
-        visible_at=labeled_at or as_of,
-    )
-    return build_delayed_outcome_observation(
+    ledger = ledger or FixtureOutcomeLedger(append=LearningEventAppendLog())
+    return ledger.observe(
         analysis, trusted_tenant_id="tenant-a",
         trusted_as_of_time=as_of, trusted_labeled_at=labeled_at or as_of, calendar=_calendar(),
         market_data=fixture, horizon=horizon,
-        market_data_variant=variant,
-        market_data_revision=supplied_market_revision or market_revision,
-        trusted_outcome_version=revision, trusted_supersedes=supersedes,
+        market_data_variant=variant, dry_run=dry_run,
     )
 
 
@@ -239,6 +223,11 @@ def test_decimal_metrics_direction_neutral_abstain_and_hit(direction, expected_s
     assert event.payload["return_pct"] == "3.92156863"
     assert event.payload["direction_sign"] == expected_sign
     assert event.payload["hit"] is expected_hit
+    assert event.payload["reason_code"] == (
+        "PREDICTION_NOT_DIRECTIONAL"
+        if direction in {"neutral", "abstain"}
+        else None
+    )
     assert event.payload["risk_abs_move_pct"] == "3.92156863"
     assert event.payload["risk_downside_pct"] == "0.00000000"
 
@@ -250,7 +239,7 @@ def test_d6_requires_same_split_adjustment_lineage_and_excludes_dividend():
     ])
     assert good.payload["lineage"]["adjustment_basis"] == "split_adjusted_price_return"
     assert good.payload["lineage"]["cash_dividend_included"] is False
-    with pytest.raises(LearningEventError, match="one provider and methodology"):
+    with pytest.raises(LearningEventError, match="not allowlisted"):
         _build(data=[
             _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
             _price("2026-07-02", "90.00000000", "2026-07-02T21:00:00Z", method="raw-v1"),
@@ -260,11 +249,12 @@ def test_d6_requires_same_split_adjustment_lineage_and_excludes_dividend():
 def test_seven_key_sha_is_tenant_bound_and_outcome_is_never_evidence():
     first = _build()
     other_analysis = _analysis(tenant="tenant-b")
-    other = build_delayed_outcome_observation(
-        other_analysis, trusted_tenant_id="tenant-b", trusted_as_of_time="2026-07-02T23:59:00Z",
-        trusted_labeled_at="2026-07-02T23:59:00Z", calendar=_calendar(),
-        market_data=FixtureMarketData(()), horizon="T+1", market_data_variant="as_first_known",
-        market_data_revision=_empty_revision(), trusted_outcome_version=1,
+    other = FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
+        other_analysis, trusted_tenant_id="tenant-b",
+        trusted_as_of_time="2026-07-03T00:00:00Z",
+        trusted_labeled_at="2026-07-03T00:00:00Z", calendar=_calendar(),
+        market_data=FixtureMarketData(()), horizon="T+1",
+        market_data_variant="as_first_known",
     )
     assert first.payload["outcome_id"] != other.payload["outcome_id"]
     assert len(first.payload["identity_inputs"]) == 7
@@ -274,35 +264,25 @@ def test_seven_key_sha_is_tenant_bound_and_outcome_is_never_evidence():
 
 
 def test_latest_official_revision_is_append_only_same_tenant_supersession():
-    first = _build(variant="latest_official")
-    second = _build(variant="latest_official", revision=2, supersedes=first)
     log = LearningEventAppendLog()
-    assert log.append(first) == "created"
-    assert log.append(second) == "created"
+    ledger = FixtureOutcomeLedger(append=log)
+    first = _build(variant="latest_official", ledger=ledger)
+    second = _build(
+        variant="latest_official", ledger=ledger,
+        as_of="2026-07-04T00:00:00Z", labeled_at="2026-07-04T00:00:00Z",
+    )
     assert second.payload["supersedes_outcome_id"] == first.payload["outcome_id"]
     assert first.payload["supersedes_outcome_id"] is None
-    other_analysis = _analysis(tenant="tenant-b")
-    other = build_delayed_outcome_observation(
-        other_analysis, trusted_tenant_id="tenant-b",
-        trusted_as_of_time="2026-07-02T23:59:00Z",
-        trusted_labeled_at="2026-07-02T23:59:00Z", calendar=_calendar(),
-        market_data=FixtureMarketData(()), horizon="T+1",
-        market_data_variant="latest_official", market_data_revision=_empty_revision("latest_official"),
-        trusted_outcome_version=1,
-    )
-    with pytest.raises(LearningEventError, match="same-tenant"):
-        _build(variant="latest_official", revision=2, supersedes=other)
+    assert len(log.replay()) == 2
 
 
 def test_as_first_known_is_idempotent_and_later_fixture_data_needs_new_identity():
-    first = _build()
-    same = _build()
     log = LearningEventAppendLog()
-    assert log.append(first) == "created"
-    assert log.append(same) == "idempotent"
-    revised = _build(variant="latest_official", revision=2,
-                     supersedes=_build(variant="latest_official"))
-    assert revised.identity != first.identity
+    ledger = FixtureOutcomeLedger(append=log)
+    first = _build(ledger=ledger)
+    same = _build(ledger=ledger)
+    assert same.identity == first.identity
+    assert len(log.replay()) == 1
 
 
 def test_d7_variants_choose_first_known_or_latest_available_revision():
@@ -325,14 +305,12 @@ def test_market_data_revision_binds_selected_pair_and_rejects_tamper():
         _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
         _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
     ]
-    with pytest.raises(LearningEventError, match="selected fixture manifest"):
-        _build(data=data, supplied_market_revision="sha256:" + "0" * 64)
     original = _build(data=data)
     tampered = list(data)
     tampered[1] = replace(tampered[1], content_hash="sha256:" + "a" * 64)
-    assert _build(data=tampered).payload["market_data_revision"] != original.payload[
-        "market_data_revision"
-    ]
+    with pytest.raises(LearningEventError, match="content hash"):
+        _build(data=tampered)
+    assert original.payload["market_data_revision"].startswith("sha256:")
 
 
 def test_future_fixture_append_does_not_change_first_known_identity_or_manifest():
@@ -378,50 +356,83 @@ def test_d8_data_arriving_after_cutoff_requires_successor_revision():
     ]
     with pytest.raises(LearningEventError, match="successor revision"):
         _build(as_of="2026-07-06T01:00:00Z", data=late_data)
-    unavailable = _build(as_of="2026-07-06T00:00:00.000001Z", variant="latest_official")
+    ledger = FixtureOutcomeLedger(append=LearningEventAppendLog())
+    unavailable = _build(
+        as_of="2026-07-06T00:00:00.000001Z",
+        variant="latest_official", ledger=ledger,
+    )
     recovered = _build(
         as_of="2026-07-06T01:00:00Z", data=late_data,
-        variant="latest_official", revision=2, supersedes=unavailable,
+        variant="latest_official", ledger=ledger,
     )
     assert recovered.payload["maturity"] == "labeled"
     assert recovered.payload["supersedes_outcome_id"] == unavailable.payload["outcome_id"]
 
 
-def test_supersession_rejects_tampered_predecessor_identity_manifest():
-    first = _build(variant="latest_official")
-    payload = dict(first.payload)
-    identity_inputs = dict(payload["identity_inputs"])
-    identity_inputs["market_data_revision"] = "sha256:" + "f" * 64
-    payload["identity_inputs"] = identity_inputs
-    tampered = replace(first, payload=payload)
-    with pytest.raises(LearningEventError, match="same-tenant logical predecessor"):
-        _build(
-            variant="latest_official",
-            revision=2,
-            supersedes=tampered,
-        )
-
-
 def test_dry_run_performs_zero_append():
-    event = _build()
-
     class ExplodingStore:
         def append(self, event):
             raise AssertionError("dry-run wrote")
 
-    assert emit_delayed_outcome_observation(event, append=ExplodingStore(), dry_run=True) == "dry-run"
+    ledger = FixtureOutcomeLedger(append=ExplodingStore())
+    planned = _build(ledger=ledger, dry_run=True)
+    actual = _build(ledger=ledger, dry_run=True)
+    assert planned.revision == actual.revision == 1
+
+
+def test_ledger_append_failure_does_not_commit_version_and_retry_is_idempotent():
+    class FailOnce:
+        def __init__(self):
+            self.calls = 0
+            self.log = LearningEventAppendLog()
+
+        def append(self, event):
+            self.calls += 1
+            if self.calls == 1:
+                raise LearningEventError("fixture append failed")
+            return self.log.append(event)
+
+    port = FailOnce()
+    ledger = FixtureOutcomeLedger(append=port)
+    with pytest.raises(LearningEventError, match="append failed"):
+        _build(ledger=ledger)
+    created = _build(ledger=ledger)
+    retry = _build(ledger=ledger)
+    assert created.revision == retry.revision == 1
+    assert created.identity == retry.identity
+    assert len(port.log.replay()) == 1
+
+
+@pytest.mark.parametrize("bad_status", ["conflict", "error", "unknown", None])
+def test_ledger_rejects_unconfirmed_append_status_without_state_mutation(bad_status):
+    class StatusPort:
+        def __init__(self):
+            self.first = True
+            self.log = LearningEventAppendLog()
+
+        def append(self, event):
+            if self.first:
+                self.first = False
+                return bad_status
+            return self.log.append(event)
+
+    port = StatusPort()
+    ledger = FixtureOutcomeLedger(append=port)
+    with pytest.raises(LearningEventError, match="did not confirm"):
+        _build(ledger=ledger)
+    created = _build(ledger=ledger)
+    assert created.revision == 1
+    assert len(port.log.replay()) == 1
 
 
 def test_fixture_only_authority_and_calendar_gaps_fail_closed():
     with pytest.raises(LearningEventError, match="trusted tenant"):
-        build_delayed_outcome_observation(
+        FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
             _analysis(), trusted_tenant_id="tenant-b",
             trusted_as_of_time="2026-07-02T23:59:00Z",
             trusted_labeled_at="2026-07-02T23:59:00Z", calendar=_calendar(),
             market_data=FixtureMarketData(()), horizon="T+1",
             market_data_variant="as_first_known",
-            market_data_revision=_empty_revision(),
-            trusted_outcome_version=1,
         )
 
 
@@ -434,29 +445,27 @@ def test_calendar_timezone_requires_iana_registry_identity():
         _calendar(),
         sessions=_calendar().sessions + (VenueSession("2026-07-21", "unknown", None),),
     )
-    event = build_delayed_outcome_observation(
+    event = FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
         _analysis(), trusted_tenant_id="tenant-a",
         trusted_as_of_time="2026-07-03T00:00:00Z",
         trusted_labeled_at="2026-07-03T00:00:00Z", calendar=after_target,
         market_data=FixtureMarketData(()), horizon="T+1",
         market_data_variant="as_first_known",
-        market_data_revision=_empty_revision(), trusted_outcome_version=1,
     )
     assert event.payload["target_session"] == "2026-07-02"
 
     sessions = list(_calendar().sessions)
     sessions[1] = VenueSession("2026-07-02", "unknown", None)
     gap = replace(_calendar(), sessions=tuple(sessions))
-    with pytest.raises(LearningEventError, match="CALENDAR_GAP"):
-        build_delayed_outcome_observation(
+    gap_event = FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
             _analysis(), trusted_tenant_id="tenant-a",
             trusted_as_of_time="2026-07-02T23:59:00Z",
             trusted_labeled_at="2026-07-02T23:59:00Z", calendar=gap,
             market_data=FixtureMarketData(()), horizon="T+1",
             market_data_variant="as_first_known",
-            market_data_revision=_empty_revision(),
-            trusted_outcome_version=1,
         )
+    assert gap_event.payload["maturity"] == "unavailable"
+    assert gap_event.payload["reason_code"] == "CALENDAR_GAP"
 
 
 def test_24_7_calendar_requires_contiguous_utc_daily_sessions():
@@ -505,6 +514,48 @@ def test_fixture_record_limits_fail_before_unbounded_processing():
     price = _price("2026-07-01", "1.00000000", "2026-07-01T21:00:00Z")
     with pytest.raises(LearningEventError, match="price limit"):
         FixtureMarketData((price,) * 10_001)
+    oversized = replace(
+        price,
+        provider="x" * 4000,
+        content_hash="sha256:" + "0" * 64,
+    )
+    with pytest.raises(LearningEventError, match="aggregate byte limit"):
+        FixtureMarketData((oversized,) * 300)
+    with pytest.raises(LearningEventError, match="calendar calendar_id is invalid"):
+        replace(_calendar(), calendar_id="x" * 4097)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"label": "x" * 33}, "label is invalid"),
+        ({"status": "x" * 17}, "status is invalid"),
+        ({"scheduled_close_at": "x" * 4097}, "scheduled_close_at is invalid"),
+        ({"scheduled_close_at": 123}, "scheduled_close_at is invalid"),
+    ],
+)
+def test_venue_session_fields_fail_before_calendar_parse(kwargs, message):
+    values = {
+        "label": "2026-07-01",
+        "status": "open",
+        "scheduled_close_at": "2026-07-01T20:00:00Z",
+        **kwargs,
+    }
+    with pytest.raises(LearningEventError, match=message):
+        VenueSession(**values)
+
+
+def test_calendar_rejects_venue_session_subclass():
+    class DerivedSession(VenueSession):
+        pass
+
+    derived = DerivedSession(
+        "2026-07-01",
+        "open",
+        "2026-07-01T20:00:00Z",
+    )
+    with pytest.raises(LearningEventError, match="exact VenueSession"):
+        replace(_calendar(), sessions=(derived,))
 
 
 def test_price_content_hash_requires_full_sha256_digest():
@@ -532,7 +583,6 @@ def test_price_content_hash_requires_full_sha256_digest():
         ),
         ({"event_at": "2026-07-01T19:00:00Z"}, "calendar sessions"),
         ({"adjusted_close": "not-a-price"}, "price is invalid"),
-        ({"provider": ""}, "PRICE_LINEAGE_MISSING"),
     ],
 )
 def test_pending_rejects_invalid_known_start_price_before_manifest(mutation, message):
@@ -542,6 +592,11 @@ def test_pending_rejects_invalid_known_start_price_before_manifest(mutation, mes
         "2026-07-01T21:00:00Z",
     )
     start = replace(start, **mutation)
+    if "content_hash" not in mutation:
+        start = replace(
+            start,
+            content_hash=canonical_fixture_price_content_hash(start),
+        )
     with pytest.raises(LearningEventError, match=message):
         _build(
             as_of="2026-07-02T22:00:00Z",
