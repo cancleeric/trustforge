@@ -27,10 +27,17 @@ interface TrainingStatusData {
   }
 }
 
-type StatusLight = 'green' | 'yellow' | 'red'
+type StatusLight = 'green' | 'yellow' | 'neutral' | 'red'
+
+type AvailabilityState =
+  | { kind: 'loading' }
+  | { kind: 'ready' }
+  | { kind: 'not_enabled'; diagnostic: string }
+  | { kind: 'unavailable'; diagnostic: string }
+  | { kind: 'error'; message: string; diagnostic: string }
 
 function getStatusLight(data: TrainingStatusData | null): StatusLight {
-  if (!data) return 'red'
+  if (!data) return 'neutral'
   if (data.upgrade_threshold.met) return 'green'
   if (data.backfill?.is_running || data.upgrade_threshold.current > 0) return 'yellow'
   return 'red'
@@ -39,12 +46,13 @@ function getStatusLight(data: TrainingStatusData | null): StatusLight {
 const STATUS_COLORS: Record<StatusLight, string> = {
   green: '#4ade80',
   yellow: '#fbbf24',
+  neutral: '#8b949e',
   red: '#f87171',
 }
 
 export default function TrainingStatusCard() {
   const [data, setData] = useState<TrainingStatusData | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [availability, setAvailability] = useState<AvailabilityState>({ kind: 'loading' })
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -52,18 +60,36 @@ export default function TrainingStatusCard() {
         signal: AbortSignal.timeout(10_000),
       })
       if (!resp.ok) {
-        setError(`HTTP ${resp.status}`)
+        if (resp.status === 404) {
+          setData(null)
+          setAvailability({ kind: 'not_enabled', diagnostic: 'HTTP 404' })
+          return
+        }
+        setAvailability({
+          kind: 'error',
+          message: `HTTP ${resp.status}`,
+          diagnostic: `HTTP ${resp.status}`,
+        })
         return
       }
       const envelope = await resp.json()
       if (envelope.ok && envelope.data) {
         setData(envelope.data as TrainingStatusData)
-        setError(null)
+        setAvailability({ kind: 'ready' })
       } else {
-        setError(envelope.error?.message ?? 'Unknown error')
+        const message = envelope.error?.message ?? 'Unknown error'
+        setAvailability({
+          kind: 'error',
+          message,
+          diagnostic: envelope.error?.code ? `${envelope.error.code}: ${message}` : message,
+        })
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Fetch failed')
+      const diagnostic =
+        err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
+          ? err.message
+          : 'Fetch failed'
+      setAvailability({ kind: 'unavailable', diagnostic })
     }
   }, [])
 
@@ -73,8 +99,18 @@ export default function TrainingStatusCard() {
     return () => clearInterval(interval)
   }, [fetchStatus])
 
-  const statusLight = getStatusLight(data)
+  const statusLight = availability.kind === 'error' ? 'red' : getStatusLight(data)
   const lightColor = STATUS_COLORS[statusLight]
+  const neutralMessage =
+    availability.kind === 'not_enabled'
+      ? '訓練資料未啟用'
+      : availability.kind === 'unavailable'
+        ? '訓練狀態暫不可用'
+        : null
+  const diagnostic =
+    availability.kind === 'not_enabled' || availability.kind === 'unavailable' || availability.kind === 'error'
+      ? availability.diagnostic
+      : undefined
 
   return (
     <div
@@ -92,7 +128,7 @@ export default function TrainingStatusCard() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span
-          aria-label={`Status: ${statusLight === 'green' ? '已達標' : statusLight === 'yellow' ? '進行中' : '停止'}`}
+          aria-label={`Status: ${statusLight === 'green' ? '已達標' : statusLight === 'yellow' ? '進行中' : statusLight === 'neutral' ? '中性' : '停止'}`}
           style={{
             width: 8,
             height: 8,
@@ -115,9 +151,23 @@ export default function TrainingStatusCard() {
         </span>
       </div>
 
-      {error && (
-        <div style={{ fontSize: 10.5, color: '#f87171' }}>
-          ⚠ {error}
+      {neutralMessage && (
+        <div
+          data-training-status-diagnostic={diagnostic}
+          style={{ fontSize: 10.5, color: 'var(--color-hermes-tx3, #8b949e)' }}
+          title={diagnostic}
+        >
+          {neutralMessage}
+        </div>
+      )}
+
+      {availability.kind === 'error' && (
+        <div
+          data-training-status-diagnostic={diagnostic}
+          style={{ fontSize: 10.5, color: '#f87171' }}
+          title={diagnostic}
+        >
+          ⚠ {availability.message}
         </div>
       )}
 
@@ -198,7 +248,7 @@ export default function TrainingStatusCard() {
         </>
       )}
 
-      {!data && !error && (
+      {!data && availability.kind === 'loading' && (
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx3, #8b949e)' }}>
           載入中…
         </div>

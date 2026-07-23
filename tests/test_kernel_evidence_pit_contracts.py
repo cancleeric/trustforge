@@ -13,8 +13,9 @@ import json
 import pytest
 
 from trustforge.analysis_flow import AnalysisFlow
+from trustforge.bedrock import BedrockClient
 from trustforge.historical_replay import replay_snapshot
-from trustforge.schema import Evidence
+from trustforge.ingestion.base import Document
 from trustforge_core import KernelClaim, KernelDocument, KernelInput, run_kernel
 
 
@@ -40,46 +41,96 @@ def _document(*, published_at: object = "2021-06-30T12:00:00Z") -> dict:
     }
 
 
-def test_historical_answer_is_not_structurally_bindable_as_evidence(tmp_path):
-    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
-    flow.register_question("BTC", "risk", "BTC market risk", enqueue=False)
-
-    [historical] = flow.question_context("BTC", "risk", "BTC market risk")["matches"]
-
-    assert historical["source_tier"] == "historical_non_evidentiary"
-    with pytest.raises(TypeError):
-        Evidence(**historical)
-
-
-def test_historical_non_evidentiary_replay_document_is_rejected_before_evidence():
-    with pytest.raises(ValueError, match="historical_non_evidentiary"):
-        replay_snapshot(
-            _snapshot(
-                {
-                    "id": "prior-answer",
-                    "kind": "historical_non_evidentiary",
-                    "text": "Prior generated answer must not become evidence",
-                    "published_at": "2021-06-30T12:00:00Z",
-                }
-            ),
-            query="BTC outlook",
-        )
-
-
 @pytest.mark.parametrize(
     "hostile_tier",
-    ["evidence", "Evidence", "primary", "verified", "historical_evidentiary"],
+    [
+        "historical_non_evidentiary",
+        "evidence",
+        "Evidence",
+        "primary",
+        "verified",
+        "historical_evidentiary",
+    ],
 )
-def test_relabeling_historical_answer_cannot_escalate_its_classification(
-    tmp_path, hostile_tier
+def test_worker_route_keeps_hostile_retrieval_context_out_of_evidence(
+    tmp_path, monkeypatch, hostile_tier
 ):
+    snapshot_document = Document(
+        id="snapshot-doc",
+        kind="regulatory",
+        source="snapshot-source",
+        text="BTC regulation remains unchanged.",
+        url="https://snapshot.test",
+        ts=PIT_EPOCH,
+        meta={},
+    )
+    monkeypatch.setattr(
+        "trustforge.analysis_flow.collect",
+        lambda *args, **kwargs: [snapshot_document],
+    )
     flow = AnalysisFlow(tmp_path / f"{hostile_tier}.sqlite3")
-    flow.register_question("BTC", "risk", "BTC market risk", enqueue=False)
-    [historical] = flow.question_context("BTC", "risk", "BTC market risk")["matches"]
-    hostile = {**historical, "source_tier": hostile_tier}
+    snapshot_id = flow.create_snapshot("BTC")
+    job_id = flow.enqueue_job(snapshot_id, "risk", "BTC market risk")
+    assert job_id
 
-    with pytest.raises(TypeError):
-        Evidence(**hostile)
+    hostile = {
+        "question_id": "historical-question",
+        "coin": "BTC",
+        "mode": "risk",
+        "question": "prior answer",
+        "answer": "HOSTILE MEMORY MUST NOT BECOME EVIDENCE",
+        "snapshot_id": "historical-snapshot",
+        "job_id": "historical-job",
+        "published_at": PIT_EPOCH - 60,
+        "source_tier": hostile_tier,
+        # Deliberately satisfy both Document-like and Evidence-like shapes.  A
+        # future regression that merges retrieval context into source docs can
+        # no longer rely on missing fields to keep this payload out.
+        "id": "hostile-memory-doc",
+        "kind": "regulatory",
+        "source": "hostile-memory",
+        "text": "HOSTILE MEMORY MUST NOT BECOME EVIDENCE",
+        "url": "https://hostile.invalid",
+        "ts": PIT_EPOCH - 60,
+        "meta": {},
+        "fetched_at": "2021-06-30T23:59:00Z",
+        "content_reference": "HOSTILE MEMORY MUST NOT BECOME EVIDENCE",
+        "related_claim": "BTC market risk",
+    }
+    monkeypatch.setattr(
+        flow,
+        "question_context",
+        lambda *args, **kwargs: {
+            "query": "BTC market risk",
+            "matches": [hostile],
+            "conversation": [],
+            "retrieval": "hostile-test",
+        },
+    )
+
+    documents_seen_by_claim_extraction: list[Document] = []
+    original_extract = BedrockClient.extract_claims_with_llm
+
+    def record_claim_inputs(client, documents, *, log=None):
+        documents_seen_by_claim_extraction.extend(documents)
+        return original_extract(client, documents, log=log)
+
+    monkeypatch.setattr(BedrockClient, "extract_claims_with_llm", record_claim_inputs)
+
+    flow.start()
+    flow.join()
+    flow.stop()
+
+    payload = flow.job_status(job_id)["result"]
+    assert [document.id for document in documents_seen_by_claim_extraction] == [
+        "snapshot-doc"
+    ]
+    assert payload["retrieval_context"] == [hostile]
+    assert {item["source"] for item in payload["evidence"]} == {"snapshot-source"}
+    assert all(
+        "HOSTILE MEMORY" not in item["content_reference"]
+        for item in payload["evidence"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -88,13 +139,7 @@ def test_relabeling_historical_answer_cannot_escalate_its_classification(
         None,
         "",
         "not-a-time",
-        pytest.param(
-            "2021-06-30T12:00:00",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="#515: timezone-naive available-time must fail closed",
-            ),
-        ),
+        "2021-06-30T12:00:00",
     ],
 )
 def test_replay_fails_closed_for_missing_or_unknown_document_time(published_at):
@@ -158,6 +203,33 @@ def test_kernel_has_exact_deterministic_baseline():
     second = run_kernel(kernel_input)
 
     assert first == second
+    expected_scored_claim = {
+        "claim": {
+            "id": "claim-1",
+            "text": "BTC close rose 3%",
+            "document": {
+                "id": "price-1",
+                "kind": "price",
+                "source": "fixture-price",
+                "text": "BTC close rose 3%",
+                "timestamp": PIT_EPOCH,
+                "url": "",
+                "metadata": (),
+            },
+            "claim_type": "fact",
+            "direction": "bullish",
+        },
+        "trust": 0.625,
+        "components": (
+            ("reputation", 0.95),
+            ("corroboration", 0.0),
+            ("recency", 1.0),
+            ("manipulation", 0.0),
+        ),
+        "reputation_trace": None,
+        "manip_flags": (),
+        "info_flags": (),
+    }
     assert asdict(first) == {
         "trust_score": 0.625,
         "confidence": 0.4188,
@@ -168,8 +240,8 @@ def test_kernel_has_exact_deterministic_baseline():
         "independent_sources": 1,
         "contract_version": "2.2.0",
         "query": "BTC outlook",
-        "scored_claims": (asdict(first.scored_claims[0]),),
-        "supporting": (asdict(first.supporting[0]),),
+        "scored_claims": (expected_scored_claim,),
+        "supporting": (expected_scored_claim,),
         "contrarian": (),
         "decision_state": "abstain",
     }
