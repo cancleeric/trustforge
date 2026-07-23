@@ -517,15 +517,31 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
         if node.returns:
             self._record_unresolved(node.returns)
 
+    def _record_type_parameters(self, node: ast.AST) -> None:
+        for parameter in getattr(node, "type_params", ()):
+            for attribute in ("bound", "default_value"):
+                value = getattr(parameter, attribute, None)
+                if value:
+                    self._record_unresolved(value)
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._record_function_defaults(node)
         self._record_function_annotations(node)
+        self._record_type_parameters(node)
         self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self._record_function_defaults(node)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._record_type_parameters(node)
+        self.generic_visit(node)
+
+    def visit_TypeAlias(self, node: ast.TypeAlias) -> None:
+        self._record_type_parameters(node)
         self.generic_visit(node)
 
     def visit_Return(self, node: ast.Return) -> None:

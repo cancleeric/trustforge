@@ -1442,3 +1442,61 @@ def test_scan_keeps_module_trust_for_safe_member_returns_yields_and_annotations(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "def generic[T: typing = abc](): return 1",
+        "class Generic[T: typing = abc]: pass",
+        "type Generic[T: typing = abc] = T",
+    ],
+)
+def test_scan_revokes_module_trust_for_type_parameter_bounds_and_defaults(
+    tmp_path, monkeypatch, declaration
+):
+    root = tmp_path
+    source = root / "src/trustforge/type_parameter_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        f"{declaration}\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.type_parameter_escape.Abstract.method",
+        "trustforge.type_parameter_escape.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_safe_member_type_parameters(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/safe_type_parameters.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "def function[T: typing.Protocol = abc.ABC](): return 1\n"
+        "async def async_function[T: abc.ABC = typing.Protocol](): return 1\n"
+        "class Generic[T: abc.ABCMeta = typing.Protocol]: pass\n"
+        "type Alias[T: typing.Protocol = abc.ABC] = T\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
