@@ -114,20 +114,10 @@ export default function HermesRightRail({
       </div>
 
       {/* divergence alert dock */}
-      <button
-        type="button"
-        aria-label={t('divergence')}
-        onClick={onOpenDivergence}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault()
-            onOpenDivergence()
-          }
-        }}
+      <div
         className="hermes-clip"
         style={{
-          width: '100%', textAlign: 'left', color: 'inherit', font: 'inherit',
-          cursor: 'pointer', background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
+          background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
           animation: tier === 'danger' ? 'hermes-alert-flash 2.4s ease-in-out infinite' : undefined,
         }}
         onMouseEnter={(e) => (e.currentTarget.style.transform = 'translateY(-1px)')}
@@ -135,17 +125,26 @@ export default function HermesRightRail({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
           <span style={{ color: dockColor, fontSize: 13 }}>⚠</span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}>
-            {t('divergence')}<i aria-hidden="true" style={{ fontSize: 9, fontStyle: 'normal', opacity: .7 }}>?</i>
+          <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}>
+            <GlossaryTerm term="divergence" label={t('divergence')} compact />
           </span>
         </div>
-        <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
+        <button
+          type="button"
+          aria-label={`${t('divergence')} drilldown`}
+          onClick={onOpenDivergence}
+          style={{
+            width: '100%', padding: 0, border: 0, background: 'transparent',
+            color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10.5,
+            textAlign: 'left', cursor: 'pointer',
+          }}
+        >
           {crossSignal ? crossSignal.summary
             : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
               : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
                 : `${t('conflict')} · Δ ${divDock.divergence}%`}
-        </div>
-      </button>
+        </button>
+      </div>
     </div>
   )
 }

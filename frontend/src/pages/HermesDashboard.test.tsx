@@ -73,34 +73,51 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.queryByLabelText('問題')).not.toBeInTheDocument()
   })
 
-  it('exposes the divergence dock as a named, focusable button and opens it on click', () => {
+  it('opens the divergence drilldown through the native button click', () => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
       </MemoryRouter>,
     )
 
-    const divergenceDock = screen.getByRole('button', { name: '跨來源分歧' })
-    expect(divergenceDock).toHaveProperty('tabIndex', 0)
-    divergenceDock.focus()
-    expect(divergenceDock).toHaveFocus()
-    fireEvent.click(divergenceDock)
+    const drilldown = screen.getByRole('button', { name: '跨來源分歧 drilldown' })
+    expect(drilldown).toHaveProperty('tabIndex', 0)
+    drilldown.focus()
+    expect(drilldown).toHaveFocus()
+    fireEvent.click(drilldown)
 
     expect(screen.getByRole('dialog')).toHaveTextContent('跨來源分歧')
   })
 
-  it.each(['Enter', ' '])('opens the divergence drilldown once with the %s key', (key) => {
+  it.each(['Enter', ' '])('does not manually open the drilldown on raw %s keydown', (key) => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
       </MemoryRouter>,
     )
 
-    const divergenceDock = screen.getByRole('button', { name: '跨來源分歧' })
-    fireEvent.keyDown(divergenceDock, { key })
+    fireEvent.keyDown(screen.getByRole('button', { name: '跨來源分歧 drilldown' }), { key })
 
-    expect(screen.getAllByRole('dialog')).toHaveLength(1)
-    expect(screen.getByRole('dialog')).toHaveTextContent('跨來源分歧')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('opens and escapes the divergence glossary without opening the drilldown', () => {
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+      </MemoryRouter>,
+    )
+
+    const glossary = screen.getAllByRole('button', { name: /跨來源分歧/ })
+      .find((button) => button.hasAttribute('aria-expanded'))
+    expect(glossary).toBeDefined()
+    fireEvent.click(glossary!)
+
+    expect(screen.getByRole('note')).toHaveTextContent('不同來源對同一問題得出互相衝突的訊號')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('note')).not.toBeInTheDocument()
   })
 
   it.each(['基本面', '價格催化因子'])('maps %s to hypothesis', async (mode) => {
