@@ -69,12 +69,12 @@
     {
       "symbol": "trustforge.ports.AgentCoreLLMAdapter.complete",
       "kind": "not_implemented",
-      "reason": "AgentCore adapter placeholder; competition runs Bedrock-direct, this adapter is intentionally unwired."
+      "reason": "AgentCore adapter is env-gated (TRUSTFORGE_AGENTCORE); the resolver can select it but complete/classify_stance intentionally raise NotImplementedError. Competition runs Bedrock-direct so it is never enabled. Known gap tracked in #637 (implement, remove, or fail-fast at resolve time)."
     },
     {
       "symbol": "trustforge.ports.AgentCoreLLMAdapter.classify_stance",
       "kind": "not_implemented",
-      "reason": "AgentCore adapter placeholder; competition runs Bedrock-direct, this adapter is intentionally unwired."
+      "reason": "AgentCore adapter is env-gated (TRUSTFORGE_AGENTCORE); the resolver can select it but complete/classify_stance intentionally raise NotImplementedError. Competition runs Bedrock-direct so it is never enabled. Known gap tracked in #637 (implement, remove, or fail-fast at resolve time)."
     },
     {
       "symbol": "trustforge.ports.NullCacheAdapter.set",

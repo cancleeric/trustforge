@@ -1254,6 +1254,8 @@ paths:
       description: |
         回傳所有已註冊模組的 runtime 遙測資料（最近呼叫時間、呼叫次數、
         平均延遲、目前狀態等）。可用 query param `module_id` 查詢單一模組。
+        注意：`evidence_ref` 與 `metadata` 為內部遙測欄位，未來版本將收斂為
+        對外安全的 public schema（見 security issue #636），不應被視為穩定契約。
       parameters:
         - name: module_id
           in: query
