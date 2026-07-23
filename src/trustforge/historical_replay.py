@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .agent.orchestrator import run_agent_pipeline
@@ -28,10 +28,6 @@ def replay_snapshot(snapshot: dict[str, Any], *, query: str, qtype: QuestionType
         for raw in source_entry.get("documents") or []:
             if not isinstance(raw, dict) or not raw.get("published_at"):
                 raise ValueError("historical replay requires published_at on every document")
-            if str(raw.get("kind", "")) == "historical_non_evidentiary":
-                raise ValueError(
-                    "historical replay rejected historical_non_evidentiary document"
-                )
             published = _epoch(str(raw["published_at"]))
             if published > boundary:
                 raise ValueError("historical replay rejected future document")
