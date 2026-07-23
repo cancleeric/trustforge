@@ -3,6 +3,32 @@
 > 不走 App Runner 自動化。流程：`git push` → pre-push hook 跑測試 → 綠 → AWS CLI 部署到 Lambda。
 > Lambda 在免費方案內可用、每月 100 萬請求免費；App Runner 不在免費內故不採用。
 
+## 本機排程（macOS launchd / Linux systemd --user）
+
+本機排程不使用含特定使用者絕對路徑的靜態 plist。安裝器從自身位置找出 repo；
+如需覆寫可設 canonical、已存在的 `TRUSTFORGE_HOME`，symlink 或非 canonical
+路徑會 fail-closed。這套本機安裝器不修改 production installer。
+
+```bash
+# 只產生檔案供檢查，不呼叫 launchctl/systemctl
+./deploy/install_local_scheduler.sh --render-only --output-dir /tmp/trustforge-scheduler
+
+# 寫入使用者層排程並啟用；UI 預設不裝，需明確 opt-in
+./deploy/install_local_scheduler.sh
+./deploy/install_local_scheduler.sh --with-ui
+
+# 寫入但不啟用
+./deploy/install_local_scheduler.sh --no-enable
+```
+
+macOS plist 一律由 `scripts/install_launch_agent.py` 透過 `plistlib` 產生，不用
+`sed` 改 XML。Linux 僅建立 user units。測試可用
+`TRUSTFORGE_SCHEDULER_OS`、`TRUSTFORGE_LAUNCHCTL`、
+`TRUSTFORGE_SYSTEMCTL` 注入假平台／命令。
+
+`./deploy/uninstall_local_scheduler.sh` 只移除固定 TrustForge labels/units，
+保留 `out/` logs 與 SQLite 資料。
+
 ## 一次性前置（🧑 你做，AI 不碰憑證/IAM）
 
 1. **安裝 AWS CLI**
