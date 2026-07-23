@@ -19,10 +19,21 @@ def _effective_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.st
     return body
 
 
-def _stub_kind(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+def _stub_kind(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    abstractmethod_names: set[str] | None = None,
+    abc_modules: set[str] | None = None,
+) -> str | None:
+    abstractmethod_names = abstractmethod_names or set()
+    abc_modules = abc_modules or set()
     if any(
-        (isinstance(decorator, ast.Name) and decorator.id == "abstractmethod")
-        or (isinstance(decorator, ast.Attribute) and decorator.attr == "abstractmethod")
+        (isinstance(decorator, ast.Name) and decorator.id in abstractmethod_names)
+        or (
+            isinstance(decorator, ast.Attribute)
+            and decorator.attr == "abstractmethod"
+            and isinstance(decorator.value, ast.Name)
+            and decorator.value.id in abc_modules
+        )
         for decorator in node.decorator_list
     ):
         return None
@@ -52,17 +63,26 @@ class _FunctionVisitor(ast.NodeVisitor):
         path: Path,
         protocol_names: set[str],
         protocol_modules: set[str],
+        abstractmethod_names: set[str],
+        abc_modules: set[str],
     ):
         self.module = module
         self.path = path
         self.protocol_names = protocol_names
         self.protocol_modules = protocol_modules
+        self.abstractmethod_names = abstractmethod_names
+        self.abc_modules = abc_modules
         self.scope: list[str] = []
         self.scope_kinds: list[str] = []
         self.protocol_classes: list[bool] = []
         self.findings: list[dict[str, object]] = []
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        shadowed = _bound_names(node.body)
+        previous_names = self.abstractmethod_names
+        previous_modules = self.abc_modules
+        self.abstractmethod_names = previous_names - shadowed
+        self.abc_modules = previous_modules - shadowed
         self.scope.append(node.name)
         self.scope_kinds.append("class")
         self.protocol_classes.append(any(
@@ -73,6 +93,8 @@ class _FunctionVisitor(ast.NodeVisitor):
         self.protocol_classes.pop()
         self.scope_kinds.pop()
         self.scope.pop()
+        self.abstractmethod_names = previous_names
+        self.abc_modules = previous_modules
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         is_direct_protocol_method = (
@@ -80,7 +102,9 @@ class _FunctionVisitor(ast.NodeVisitor):
             and self.scope_kinds[-1] == "class"
             and self.protocol_classes[-1]
         )
-        kind = None if is_direct_protocol_method else _stub_kind(node)
+        kind = None if is_direct_protocol_method else _stub_kind(
+            node, self.abstractmethod_names, self.abc_modules
+        )
         if kind:
             self.findings.append({
                 "symbol": ".".join((self.module, *self.scope, node.name)),
@@ -90,7 +114,25 @@ class _FunctionVisitor(ast.NodeVisitor):
             })
         self.scope.append(node.name)
         self.scope_kinds.append("function")
+        previous_names = self.abstractmethod_names
+        previous_modules = self.abc_modules
+        shadowed = _bound_names(node.body) | {
+            argument.arg
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        }
+        if node.args.vararg:
+            shadowed.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            shadowed.add(node.args.kwarg.arg)
+        self.abstractmethod_names = previous_names - shadowed
+        self.abc_modules = previous_modules - shadowed
         self.generic_visit(node)
+        self.abstractmethod_names = previous_names
+        self.abc_modules = previous_modules
         self.scope_kinds.pop()
         self.scope.pop()
 
@@ -117,6 +159,68 @@ def _protocol_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
     return names, modules
 
 
+def _bound_names(nodes: Iterable[ast.stmt]) -> set[str]:
+    """Return names rebound directly in one lexical scope."""
+    names: set[str] = set()
+
+    def add_target(target: ast.expr) -> None:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                add_target(element)
+
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                add_target(target)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+    return names
+
+
+def _abc_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    modules: set[str] = set()
+    trusted_import_names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "abc":
+            for alias in node.names:
+                if alias.name == "abstractmethod":
+                    bound = alias.asname or alias.name
+                    names.add(bound)
+                    trusted_import_names.add(bound)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "abc":
+                    bound = alias.asname or alias.name
+                    modules.add(bound)
+                    trusted_import_names.add(bound)
+
+    # A same-scope second binding makes the provenance ambiguous. Fail closed.
+    all_bound = _bound_names(tree.body)
+    binding_counts: dict[str, int] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                binding_counts[bound] = binding_counts.get(bound, 0) + 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            binding_counts[node.name] = binding_counts.get(node.name, 0) + 1
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for bound in _bound_names([node]):
+                binding_counts[bound] = binding_counts.get(bound, 0) + 1
+    shadowed = {
+        name for name in all_bound & trusted_import_names
+        if binding_counts.get(name, 0) > 1
+    }
+    return names - shadowed, modules - shadowed
+
+
 def _is_protocol_base(
     node: ast.expr,
     protocol_names: set[str],
@@ -139,8 +243,10 @@ def scan(paths: Iterable[Path]) -> list[dict[str, object]]:
         module = ".".join(relative.with_suffix("").parts[1:])
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
         protocol_names, protocol_modules = _protocol_bindings(tree)
+        abstractmethod_names, abc_modules = _abc_bindings(tree)
         visitor = _FunctionVisitor(
-            module, relative, protocol_names, protocol_modules
+            module, relative, protocol_names, protocol_modules,
+            abstractmethod_names, abc_modules,
         )
         visitor.visit(tree)
         findings.extend(visitor.findings)
