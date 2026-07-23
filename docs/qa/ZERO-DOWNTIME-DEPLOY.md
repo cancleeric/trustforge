@@ -1,5 +1,10 @@
 # Production Zero-Downtime Deployment Evidence
 
+> Historical evidence only. Current releases follow
+> [Release and Deployment Governance](../RELEASE-DEPLOY-GOVERNANCE.md).
+> GitHub Actions are intentionally disabled and are not a current deployment
+> mechanism.
+
 ## Scope
 
 TrustForge keeps the primary backend on port 8080 and starts a health-checked
@@ -20,16 +25,17 @@ All three artifacts contain `deploy-health-canary.jsonl`. Across 96 public
 probes, every sample returned HTTP 200 with curl exit code 0. Each run contains
 at least one `before` and `after` sample, plus continuous `during` samples.
 
-## Verification
+## Historical Verification
 
 - `deploy/prepare_backend_deploy_backup.sh` creates and health-checks the
   temporary candidate before the primary restart.
 - All production nginx configurations route through the 8080 primary and 8081
   backup upstream.
-- `scripts/monitor_deploy_health.sh` is fail-closed and wraps the backend SSM
-  deployment in `.github/workflows/deploy-production.yml`.
-- Release QA artifacts are retained by GitHub Actions and include both the
-  health canary and question-bank result.
+- `scripts/monitor_deploy_health.sh` was used as a fail-closed wrapper around
+  the backend deployment.
+- The historical GitHub-run artifacts included the health canary and
+  question-bank result. They do not authorize or describe the current release
+  path.
 
 This evidence validates uninterrupted public health availability for these
 three production releases. It does not claim that every external upstream data

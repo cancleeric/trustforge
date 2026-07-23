@@ -19,13 +19,13 @@ and p50/p95 per-source latency, so slow or incomplete connectors are visible.
 
 ## Quality gate
 
-GitHub Actions runs the deterministic 24-case offline subset on every supported
-branch/PR and uploads `question-bank-results.json` as a CI artifact. The gate
-requires every case to have the required report fields, Evidence contract, a
-source-level execution event, and the source event contract (`source`, `kind`,
-`duration_ms`, `document_count`, `outcome`). It deliberately does not run live
-crawlers or Bedrock in CI: online runs are a separately scheduled, credentialed
-measurement and must not be conflated with fixture latency.
+The mandatory pre-push hook runs the deterministic 24-case offline subset and
+writes `out/pre-push/question-bank-results.json`. The gate requires every case
+to have the required report fields, Evidence contract, a source-level execution
+event, and the source event contract (`source`, `kind`, `duration_ms`,
+`document_count`, `outcome`). It deliberately does not run live crawlers or
+Bedrock: online runs are a separately scheduled, credentialed measurement and
+must not be conflated with fixture latency.
 
 The prompts are authored by TrustForge, not copied from external question sets.
 Public financial QA datasets and exchange documentation are suitable only as

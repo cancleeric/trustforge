@@ -98,7 +98,7 @@ Issue（明確驗收條件）
         → Hooks 自動檢查（lint + test）
           → PR（reviewer: cancleeric）
             → /codex-review 對抗性審查
-              → Merge → 驗證 post-merge CI
+              → Merge → 驗證合併後 commit 與 release smoke
 ```
 
 ---
@@ -111,7 +111,7 @@ Issue（明確驗收條件）
 | 今日關閉 Issues（7/20） | 28 | 高強度開發衝刺 |
 | 已合併 PRs | 30 | `gh pr list --state merged` |
 | 測試通過數 | 2,237 | `pytest` (venv 環境) |
-| 測試覆蓋率 | 85.73% | 超過 75% CI 閘門要求 |
+| 測試覆蓋率 | 85.73% | 超過 75% 本機品質門檻 |
 | Steering 規範檔 | 3 | project / competition / trust-layer |
 | Hooks 自動化 | 2 | lint-on-save / test-before-commit |
 | Specs 需求文件 | 5 | 中大型功能皆有 Spec |

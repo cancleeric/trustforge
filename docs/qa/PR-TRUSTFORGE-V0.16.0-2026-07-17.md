@@ -38,12 +38,13 @@ Target: `develop -> main`
 ## Release And Production Checklist
 
 - [ ] Push reviewed `develop` to GitHub and Gitea independently.
-- [ ] Open the `develop -> main` PR and wait for required checks/review.
+- [ ] Run the mandatory pre-push gate and record commit-bound evidence.
+- [ ] Open the `develop -> main` PR with a named reviewer.
 - [ ] Merge through branch protection; do not push directly to `main`.
 - [ ] Re-run release verification on the resulting main commit.
 - [ ] Create `release/v0.16.0` from that exact verified commit.
 - [ ] Create and push immutable annotated tag `v0.16.0`.
-- [ ] Approve the protected production environment deployment.
+- [ ] Execute the controlled local production release/deploy runbook.
 - [ ] Verify service health, version projection, analysis flow and rollback
   marker after deployment.
 
