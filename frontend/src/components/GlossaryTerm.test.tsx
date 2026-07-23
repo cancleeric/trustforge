@@ -26,4 +26,12 @@ describe('GlossaryTerm', () => {
     expect(screen.getByRole('note')).toHaveTextContent(GLOSSARY_BY_ID.fdv.description)
     expect(HELP_CENTER_GLOSSARY.some((term) => term.term_id === 'fdv')).toBe(true)
   })
+
+  it('preserves approved score-axis popover semantics', () => {
+    expect(GLOSSARY_BY_ID.recency.description).toContain('獨立 0-100 子分數')
+    expect(GLOSSARY_BY_ID.manipulation.label).toBe('抗操縱能力')
+    expect(GLOSSARY_BY_ID.manipulation.description).toContain('喊單、誇大承諾與協同行為')
+    expect(GLOSSARY_BY_ID.divergence.label).toBe('跨來源分歧')
+    expect(GLOSSARY_BY_ID.divergence.description).toContain('結論越需要保守解讀')
+  })
 })
