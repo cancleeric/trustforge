@@ -63,6 +63,20 @@ def test_anomaly_baseline_finds_known_quality_anomalies_without_approval_surface
     assert "approval_action" not in diagnostic.payload
 
 
+def test_anomaly_baseline_excludes_future_available_events_at_cutoff():
+    events = [_event(1), _event(2), _event(3)]
+    future_event = _event(4)
+
+    diagnostic = build_quality_anomaly_diagnostic(
+        [*events, future_event],
+        baseline_version="rules-v1",
+        as_of_time="2026-07-03T00:00:01Z",
+    )
+
+    assert diagnostic.payload["input_count"] == 3
+    assert all(finding.get("analysis_id") != "an-4" for finding in diagnostic.payload["findings"])
+
+
 def test_anomaly_baseline_has_stable_versioned_checksum_and_rerun_identity():
     events = [_event(1), _event(2), _event(3)]
     first = build_quality_anomaly_diagnostic(deepcopy(events), baseline_version="rules-v1", as_of_time="2026-07-10T00:00:00Z")

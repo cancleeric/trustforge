@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from statistics import mean, pstdev
 from typing import Any, Iterable
 
@@ -17,7 +18,8 @@ def build_quality_anomaly_diagnostic(
     baseline_version: str,
     as_of_time: str,
 ) -> LearningEvent:
-    rows = [_row(event) for event in events]
+    as_of = _parse_datetime(as_of_time, "as_of_time")
+    rows = [_row(event) for event in events if _parse_datetime(event.available_time, "event available_time") <= as_of]
     baseline = _baseline(rows, baseline_version)
     findings = _findings(rows, baseline)
     digest = _sha256({"baseline": baseline, "findings": findings})
@@ -113,3 +115,13 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _parse_datetime(value: str, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise LearningEventError(f"{field} must be ISO-8601") from None
+    if parsed.tzinfo is None:
+        raise LearningEventError(f"{field} must include timezone")
+    return parsed.astimezone(timezone.utc)
