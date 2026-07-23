@@ -1,7 +1,8 @@
 # TrustForge 三軌統一學習架構開發計劃 
 
 > 日期：2026-07-23  
-> 狀態：CEO 審查通過的開發基準；尚未授權實作、DB 異動、ModelHub 寫入或生產發布  
+> 狀態：開發中但 CEO 審查未通過；里程碑 A／B／C 均未完成，禁止往主線或生產整合
+> 進度稽核：2026-07-23；詳見第 11 節
 > 依據：`docs/architecture/TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-ANALYSIS-2026-07-23.md`
 
 ## 1. 目標與不可變邊界
@@ -193,3 +194,85 @@
 | #512 三軌 E2E／安全負向驗收 | 10h | #507、#509、#510、#511 |
 
 可平行起跑的前置工作只有 #501、#502、#503；其餘必須等列出的上游完成並合併，不得依賴未合併分支。#505 不授權 DB 異動：若需要 migration，仍須 Eric 當次 purpose token。
+
+## 11. CEO 開發進度稽核（2026-07-23）
+
+### 11.1 稽核結論
+
+目前只能判定「已產生實作分支與 stacked PR」，不能判定任何里程碑完成：
+
+- `main` 尚未包含三軌功能。
+- #501–#512 全部維持 OPEN。
+- 部分 GitHub PR 顯示 MERGED，但只合併到上一層 feature branch，不代表已進入 `develop`。
+- #528、#532、#533、#535 曾在沒有新 commit／CI／修正回覆時被重新標記 Ready；CEO
+  拒絕重審並再次轉為 Draft，等待工程師在原分支修正。
+- 聚焦驗證為 136 passed、5 failed；沒有可支持完成宣稱的 required CI 證據。
+- 里程碑 A 未通過，因此里程碑 B、C 不得往主線整合或用於 ModelHub／production activation。
+
+### 11.2 Issue／PR 真實狀態
+
+| Issue | PR | 2026-07-23 審查狀態 | 下一步 |
+|---|---|---|---|
+| #501 | #519／#526 | #519 已進 `develop`，但 corrective #526 無新證據即被標 Ready，已退回 Draft；語意尚未拍板 | 完成交易日曆、T+N、缺值、修訂與 `available_time` 規則 |
+| #502 | #517／#529／#523 | #517 為未授權合併事故；#529、#523 無雙審即被標 Ready，已退回 Draft；#523 另有 merge conflict（DIRTY） | 先完成 #529，再將 #523 更新到乾淨 `develop`、解決衝突後重新雙審 |
+| #503 | #521 | 已進 `develop`，Issue 仍 OPEN | 核對唯讀 capability、tenant、artifact provenance 證據後才能關閉 |
+| #504 | #522 | 已進 `develop`，但依賴的 #502 正在事故復原 | #502 乾淨替代通過前不得宣稱完成 |
+| #505 | #525 | 只合併到 `feat/504-three-track-contract` | 等合法 #504 基線後重審；不授權 migration |
+| #506 | #527 | 只合併到 `design/505-learning-event-storage-gate` | 等 #504、#505 合法整合後重審 |
+| #507 | #528 | Draft；被 #543 future leakage 阻擋 | 排除 `available_time > as_of_time` 輸入並補負向／邊界測試 |
+| #508 | #530 | 只合併到尚未通過的 #507 feature branch | #507 與里程碑 A 親驗通過後才能重審 |
+| #509 | #532 | Draft；被 #544 future leakage 阻擋 | baseline 排除未來才 available 的事件並補 leakage 測試 |
+| #510 | #533 | Draft；harper CISO 審查 FAIL：activation 可跳過 sandbox／approval，actor／probe evidence 可偽造，rollback 綁定不足 | 完成 #503 證據、authorization/state binding、新 SHA 的 harper CISO 與 `/codex-review` 雙審 |
+| #511 | #534 | 只合併到 `feat/504-three-track-contract` | 等合法 #504，驗 reviewer provenance 與歷史答案隔離 |
+| #512 | #535 | Draft；上游未完成，E2E 未覆蓋真實 leakage、跨 tenant RAG 與 activation 跳關 | 等 #507、#509、#510、#511 以已審 commit 合併後重建 E2E 基線 |
+
+### 11.3 Blocking findings
+
+1. **#524／PR #517 未授權合併事故**
+   固定處置順序為：先審查並合併 #529，移除 #517；再把 #523 更新到乾淨
+   `develop`，作為 #502 的替代。兩者完成前，#504 及其下游不得宣稱完成。
+2. **#543／PR #528 delayed outcome future leakage**
+   labeler 可使用決策 `as_of_time` 後才 available 的價格；修正前不得產生校準資料集。
+3. **#544／PR #532 anomaly future leakage**
+   anomaly baseline 會納入未來才 available 的事件；修正前不得作為 diagnostic 基線。
+4. **測試與輸出隔離缺陷**
+   聚焦測試有 5 項失敗：2 項 calibration path 介面漂移、3 項 backfill contract／fixture
+   失敗。Backfill 測試曾直接追加 tracked `data/training`，工程師必須改用隔離的暫存輸出，
+   不得污染 repo 訓練資料。
+5. **缺 required CI 證據**
+   本輪相關 PR 無 status checks 證據；任何 Draft 不得僅憑本機通過或 GitHub `MERGED`
+   標籤改為完成。
+6. **#533 activation authorization／狀態機可繞過**
+   `activate_wrapper_artifact()` 未證明 sandbox 與 proposal approval 已通過；human actor
+   採字串黑名單而非 authenticated principal／role／approval record，存在核准偽造。
+   caller 只需提供最小 `{"status":"verified"}` 即可開啟 ModelHub gate；`config_snapshot`、
+   activation event、artifact 與 rollback target 亦未可靠綁定。harper CISO 已對 commit
+   `141fdcbda810c9b9ef1c557b89c28a9d6f446cf7` 給出 FAIL，修正後必須以新 SHA 重新雙審。
+7. **#535 E2E 未覆蓋真實阻擋路徑**
+   未驗 #543 delayed price 與 #544 anomaly event 的 PIT 排除；RAG 未驗 cross-tenant
+   negative retrieval；activation 未驗 human-like spoof、未授權 role 或跳過 sandbox；
+   rollback 未驗 config restore 與錯誤 target。
+
+### 11.4 三軌能力判定
+
+| 軌道 | 現況 | CEO 判定 |
+|---|---|---|
+| Question RAG | 已有 SQLite 字元 bigram 歷史問題檢索與 lineage；embedding index、reranker、完整 gold-set 流程未整合 | 部分完成 |
+| 分析異常偵測＋信心校準 | 異常偵測仍以規則／統計門檻為主；isotonic 校準與 artifact 已有基礎，但測試漂移且 PIT leakage 未關閉 | 未完成 |
+| Wrapper 受控升級 | 已有 ModelHub package、sandbox 與人工 activation gate；明確禁止自動套用 | 部分完成，安全整合未通過 |
+
+「外框自我升級」在本計劃永遠指受控候選升級，不是模型自行批准、遞迴修改或自行上線。
+
+### 11.5 恢復開發與重新送審順序
+
+1. 完成 #529 revert，接著完成 #523 乾淨替代，恢復可信 #502 基線。
+2. 完成 #526，正式拍板 #501 outcome 語意。
+3. 依合法依賴重整 #504 → #505 → #506；不得沿用未審 stacked merge 當完成證據。
+4. 修正 #543／#528；CEO 親驗里程碑 A 的事件、重放與 PIT 邊界。
+5. 里程碑 A 通過後才重審 #508，再修正及重審 #544／#532。
+6. #533 完成 harper CISO＋`/codex-review` 雙審；#534 重新核對 RAG 隔離。
+7. 最後將 #535 更新到全部已審、已合併的上游 commit，執行三軌 E2E 與安全負向驗收。
+
+每個工程師修正後，必須在原 PR 回覆修正 commit、測試命令與結果，並重新標記
+Ready for review。沒有新 commit／證據而只切換 Ready 狀態，視為無效重送並退回 Draft。
+CEO 重新審查通過前，Issue 保持 OPEN、PR 必須維持 Draft。
