@@ -42,7 +42,9 @@ class AssetContextRepository:
         candidates = (
             record
             for record in self._records
-            if record.context.asset_id == asset_id and record.valid_from <= as_of
+            if record.context.asset_id == asset_id
+            and record.valid_from <= as_of
+            and record.fetched_at <= as_of
         )
         return max(candidates, key=lambda record: record.valid_from, default=None)
 
@@ -52,7 +54,9 @@ class AssetContextRepository:
         candidates = (
             record
             for record in self._records
-            if record.context.symbol.casefold() == normalized and record.valid_from <= as_of
+            if record.context.symbol.casefold() == normalized
+            and record.valid_from <= as_of
+            and record.fetched_at <= as_of
         )
         return max(candidates, key=lambda record: record.valid_from, default=None)
 

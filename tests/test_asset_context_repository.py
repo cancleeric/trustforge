@@ -42,6 +42,16 @@ def test_repository_returns_latest_context_at_as_of_time() -> None:
     assert repository.by_symbol("arb", utc(2026, 6, 1)) == new_record
 
 
+def test_repository_does_not_return_context_before_it_was_fetched() -> None:
+    repository = AssetContextRepository(load_asset_context_records(FIXTURE))
+
+    record = repository.lookup("asset:arb", utc(2026, 1, 1))
+
+    assert record is not None
+    assert record.context.market_cap_tier.value == "mid"
+    assert repository.by_symbol("ARB", utc(2026, 1, 1)) == record
+
+
 def test_repository_fail_soft_for_unknown_or_not_yet_valid_asset() -> None:
     repository = AssetContextRepository(load_asset_context_records(FIXTURE))
 
