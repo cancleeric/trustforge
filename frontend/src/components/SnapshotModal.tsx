@@ -13,6 +13,19 @@ const JSON_STRING = 'var(--color-tf-warn)'
 const JSON_NUM = 'var(--color-tf-text)'
 const JSON_PUNCT = 'var(--color-tf-muted)'
 
+function buildPayload(ev: Evidence) {
+  return {
+    source: ev.source,
+    kind: ev.kind,
+    fetched_at: ev.fetched_at,
+    trust: ev.trust,
+    content_reference: ev.content_reference,
+    related_claim: ev.related_claim,
+    flags: ev.flags,
+    data_lineage: ev.data_lineage ?? null,
+  }
+}
+
 function jsonLine(parts: Array<[string, string]>): { html: ReactNode } {
   return {
     html: (
@@ -27,6 +40,7 @@ function jsonLine(parts: Array<[string, string]>): { html: ReactNode } {
 
 function buildPayloadLines(ev: Evidence) {
   const flagsStr = ev.flags.length > 0 ? JSON.stringify(ev.flags) : '[]'
+  const lineageStr = JSON.stringify(ev.data_lineage ?? null)
   const lines = [
     jsonLine([['{', JSON_PUNCT]]),
     jsonLine([[' "source"', JSON_KEY], [': ', JSON_PUNCT], [JSON.stringify(ev.source), JSON_STRING], [',', JSON_PUNCT]]),
@@ -35,7 +49,9 @@ function buildPayloadLines(ev: Evidence) {
     jsonLine([[' "trust"', JSON_KEY], [': ', JSON_PUNCT], [ev.trust.toFixed(3), JSON_NUM], [',', JSON_PUNCT]]),
     jsonLine([[' "content_reference"', JSON_KEY], [': ', JSON_PUNCT], [JSON.stringify(ev.content_reference), JSON_STRING], [',', JSON_PUNCT]]),
     jsonLine([[' "related_claim"', JSON_KEY], [': ', JSON_PUNCT], [JSON.stringify(ev.related_claim), JSON_STRING], [',', JSON_PUNCT]]),
-    jsonLine([[' "flags"', JSON_KEY], [': ', JSON_PUNCT], [flagsStr, JSON_NUM]]),
+    jsonLine([[' "flags"', JSON_KEY], [': ', JSON_PUNCT], [flagsStr, JSON_NUM], [',', JSON_PUNCT]]),
+    jsonLine([[' "data_lineage"', JSON_KEY], [': ', JSON_PUNCT], [lineageStr, ev.data_lineage ? JSON_STRING : JSON_NUM]]),
+    jsonLine([['}', JSON_PUNCT]]),
   ]
   return lines.map((l, i) => ({ n: i + 1, html: l.html }))
 }
@@ -48,11 +64,7 @@ export default function SnapshotModal({ ev, onClose }: { ev: Evidence; onClose: 
   }, [onClose])
 
   const payloadLines = buildPayloadLines(ev)
-  const payloadJson = JSON.stringify(
-    { source: ev.source, kind: ev.kind, fetched_at: ev.fetched_at, trust: ev.trust, content_reference: ev.content_reference, related_claim: ev.related_claim, flags: ev.flags },
-    null,
-    2,
-  )
+  const payloadJson = JSON.stringify(buildPayload(ev), null, 2)
   const weightPct = Math.round(Math.max(0, Math.min(1, ev.trust)) * 100)
   const snapshotId = `${ev.source}_${ev.fetched_at}`.replace(/[^a-zA-Z0-9]/g, '').slice(0, 24)
 
@@ -154,21 +166,35 @@ export default function SnapshotModal({ ev, onClose }: { ev: Evidence; onClose: 
             <GlossaryTerm term="lineage" label="血統" compact /> · LINEAGE
           </p>
           {ev.data_lineage ? (
-            <div className="flex flex-wrap items-center gap-5 rounded-[10px] border border-tf-border bg-tf-card px-6 py-4">
-              {['擷取', '存檔（不可變）', `納入 ${ev.data_lineage.dataset_name}`].map((label, i, arr) => (
-                <div key={label} className="flex items-center gap-5">
-                  <div className="flex flex-col items-center gap-2">
-                    <span
-                      className="flex h-8 w-8 rotate-45 items-center justify-center text-[9px]"
-                      style={{ background: i < 2 ? 'color-mix(in srgb, var(--color-tf-accent) 15%, transparent)' : 'color-mix(in srgb, var(--color-tf-warn) 20%, transparent)', border: `1.5px solid ${i < 2 ? 'var(--color-tf-accent)' : 'var(--color-tf-warn)'}` }}
-                    >
-                      <span className="-rotate-45" style={{ color: i < 2 ? 'var(--color-tf-accent)' : 'var(--color-tf-warn)' }}>{i + 1}</span>
-                    </span>
-                    <span className="whitespace-nowrap text-center text-xs text-tf-text">{label}</span>
+            <div className="space-y-4 rounded-[10px] border border-tf-border bg-tf-card px-6 py-4">
+              <div className="flex flex-wrap items-center gap-5">
+                {['擷取', '存檔（不可變）', `納入 ${ev.data_lineage.dataset_name}`].map((label, i, arr) => (
+                  <div key={label} className="flex items-center gap-5">
+                    <div className="flex flex-col items-center gap-2">
+                      <span
+                        className="flex h-8 w-8 rotate-45 items-center justify-center text-[9px]"
+                        style={{ background: i < 2 ? 'color-mix(in srgb, var(--color-tf-accent) 15%, transparent)' : 'color-mix(in srgb, var(--color-tf-warn) 20%, transparent)', border: `1.5px solid ${i < 2 ? 'var(--color-tf-accent)' : 'var(--color-tf-warn)'}` }}
+                      >
+                        <span className="-rotate-45" style={{ color: i < 2 ? 'var(--color-tf-accent)' : 'var(--color-tf-warn)' }}>{i + 1}</span>
+                      </span>
+                      <span className="whitespace-nowrap text-center text-xs text-tf-text">{label}</span>
+                    </div>
+                    {i < arr.length - 1 && <div className="mb-5 h-0.5 w-12 bg-tf-accent" />}
                   </div>
-                  {i < arr.length - 1 && <div className="mb-5 h-0.5 w-12 bg-tf-accent" />}
-                </div>
-              ))}
+                ))}
+              </div>
+              <dl className="grid gap-x-5 gap-y-2 text-xs sm:grid-cols-2">
+                <div><dt className="inline text-tf-muted">檔案：</dt><dd className="inline text-tf-text">{ev.data_lineage.file}</dd></div>
+                <div><dt className="inline text-tf-muted">角色：</dt><dd className="inline text-tf-text">{ev.data_lineage.dataset_role}</dd></div>
+                <div><dt className="inline text-tf-muted">涵蓋：</dt><dd className="inline text-tf-text">{ev.data_lineage.coverage.start_date} ~ {ev.data_lineage.coverage.end_date}</dd></div>
+                <div><dt className="inline text-tf-muted">分析窗：</dt><dd className="inline text-tf-text">{ev.data_lineage.analysis_window}</dd></div>
+                <div><dt className="inline text-tf-muted">交易對：</dt><dd className="inline text-tf-text">{ev.data_lineage.trading_pair}</dd></div>
+                <div><dt className="inline text-tf-muted">列數：</dt><dd className="inline text-tf-text">{ev.data_lineage.rows}</dd></div>
+                <div><dt className="inline text-tf-muted">時間基準：</dt><dd className="inline text-tf-text">{ev.data_lineage.time_basis}</dd></div>
+                <div><dt className="inline text-tf-muted">間隔：</dt><dd className="inline text-tf-text">{ev.data_lineage.interval}</dd></div>
+                <div className="sm:col-span-2"><dt className="inline text-tf-muted">欄位：</dt><dd className="inline break-words font-mono text-tf-text">{ev.data_lineage.columns.join(', ')}</dd></div>
+                <div className="sm:col-span-2"><dt className="inline text-tf-muted">SHA-256：</dt><dd className="inline break-all font-mono text-tf-text">{ev.data_lineage.sha256}</dd></div>
+              </dl>
             </div>
           ) : (
             <p className="rounded-[10px] border border-tf-border bg-tf-card px-4 py-3 text-xs text-tf-muted">
