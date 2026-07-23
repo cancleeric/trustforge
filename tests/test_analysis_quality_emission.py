@@ -7,18 +7,24 @@ from trustforge.analysis_quality_emission import (
 )
 from trustforge.learning_event_contract import LearningEventError
 from trustforge.learning_event_store import LearningEventAppendLog
-from tests.test_analysis_quality_event import snapshot
+from tests.test_analysis_quality_event import snapshot, trusted_pit, trusted_provenance
+
+
+def emit(value, sink):
+    return emit_analysis_quality_event(
+        value,
+        trusted_tenant_id="tenant-a",
+        trusted_pit=trusted_pit(value),
+        trusted_provenance=trusted_provenance(value),
+        sink=sink,
+    )
 
 
 def test_first_emit_and_identical_redelivery_are_exactly_once():
     sink = LearningEventAppendLog()
 
-    first = emit_analysis_quality_event(
-        snapshot(), trusted_tenant_id="tenant-a", sink=sink
-    )
-    retry = emit_analysis_quality_event(
-        snapshot(), trusted_tenant_id="tenant-a", sink=sink
-    )
+    first = emit(snapshot(), sink)
+    retry = emit(snapshot(), sink)
 
     assert first.status == "created"
     assert retry.status == "idempotent"
@@ -28,12 +34,12 @@ def test_first_emit_and_identical_redelivery_are_exactly_once():
 
 def test_same_identity_content_drift_fails_closed():
     sink = LearningEventAppendLog()
-    emit_analysis_quality_event(snapshot(), trusted_tenant_id="tenant-a", sink=sink)
+    emit(snapshot(), sink)
     drift = snapshot()
     drift["confidence"]["raw"] = 0.8
 
     with pytest.raises(LearningEventError, match="immutable"):
-        emit_analysis_quality_event(drift, trusted_tenant_id="tenant-a", sink=sink)
+        emit(drift, sink)
 
 
 @pytest.mark.parametrize(
@@ -50,9 +56,7 @@ def test_non_success_sink_status_never_reports_success(status, error):
             return status
 
     with pytest.raises(error):
-        emit_analysis_quality_event(
-            snapshot(), trusted_tenant_id="tenant-a", sink=Sink()
-        )
+        emit(snapshot(), Sink())
 
 
 def test_append_exception_propagates_without_false_success():
@@ -63,7 +67,5 @@ def test_append_exception_propagates_without_false_success():
             raise failure
 
     with pytest.raises(RuntimeError) as raised:
-        emit_analysis_quality_event(
-            snapshot(), trusted_tenant_id="tenant-a", sink=Sink()
-        )
+        emit(snapshot(), Sink())
     assert raised.value is failure

@@ -5,16 +5,40 @@ import pytest
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.calibration_dataset import CalibrationDatasetError, build_confidence_calibration_dataset
 from trustforge.delayed_outcome_labeler import build_delayed_outcome_observation
+from trustforge.learning_event_contract import canonical_integrity_checksum
 
 
 def _analysis(day: int, analysis_id=None):
+    evidence_snapshot = [
+        {
+            "source": f"source-{index}",
+            "fetched_at": f"2026-07-{day:02d}T00:00:00.000000Z",
+            "content_reference": f"sha256:content-{day}-{index}",
+            "related_claim": f"claim-{index}",
+            "schema_version": "evidence.v1",
+            "trust": 0.8,
+        }
+        for index in range(4)
+    ]
+    pit = {
+        "event_time": f"2026-07-{day:02d}T00:00:00Z",
+        "available_time": f"2026-07-{day:02d}T00:00:01Z",
+        "as_of_time": f"2026-07-{day:02d}T00:00:01Z",
+        "source_available_times": [f"2026-07-{day:02d}T00:00:00Z"],
+    }
+    provenance = {
+        "source": "analysis-flow",
+        "collector": "unit-test",
+        "observed_at": f"2026-07-{day:02d}T00:00:01Z",
+    }
     return build_analysis_quality_event(
         {
             "analysis_id": analysis_id or f"an-{day}",
             "run_id": f"run-{day}",
             "question_id": f"question-{day}",
             "answer_id": f"answer-{day}",
-            "evidence_snapshot_id": f"evidence-snapshot-{day}",
+            "evidence_snapshot_id": canonical_integrity_checksum(evidence_snapshot),
+            "evidence_snapshot": evidence_snapshot,
             "question": "Will BTC rise?",
             "tenant_id": "tenant-a",
             "coin": "BTC",
@@ -51,6 +75,8 @@ def _analysis(day: int, analysis_id=None):
             "failure": {"status": "complete", "failed_stage": None, "code": None, "message": None, "retryable": False},
         },
         trusted_tenant_id="tenant-a",
+        trusted_pit=pit,
+        trusted_provenance=provenance,
     )
 
 

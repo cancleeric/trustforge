@@ -4,18 +4,44 @@ import pytest
 
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.delayed_outcome_labeler import build_delayed_outcome_observation
-from trustforge.learning_event_contract import LearningEventError
+from trustforge.learning_event_contract import (
+    LearningEventError,
+    canonical_integrity_checksum,
+)
 from trustforge.learning_event_store import LearningEventAppendLog
 
 
 def _analysis():
+    evidence_snapshot = [
+        {
+            "source": f"source-{index}",
+            "fetched_at": "2026-06-30T23:59:59.000000Z",
+            "content_reference": f"sha256:content-{index}",
+            "related_claim": f"claim-{index}",
+            "schema_version": "evidence.v1",
+            "trust": 0.8,
+        }
+        for index in range(4)
+    ]
+    pit = {
+        "event_time": "2026-07-01T00:00:00Z",
+        "available_time": "2026-07-01T00:00:01Z",
+        "as_of_time": "2026-07-01T00:00:01Z",
+        "source_available_times": ["2026-06-30T23:59:59Z"],
+    }
+    provenance = {
+        "source": "analysis-flow",
+        "collector": "unit-test",
+        "observed_at": "2026-07-01T00:00:01Z",
+    }
     return build_analysis_quality_event(
         {
             "analysis_id": "an-1",
             "run_id": "run-1",
             "question_id": "question-1",
             "answer_id": "answer-1",
-            "evidence_snapshot_id": "evidence-snapshot-1",
+            "evidence_snapshot_id": canonical_integrity_checksum(evidence_snapshot),
+            "evidence_snapshot": evidence_snapshot,
             "question": "Will BTC rise?",
             "tenant_id": "tenant-a",
             "coin": "BTC",
@@ -52,6 +78,8 @@ def _analysis():
             "failure": {"status": "complete", "failed_stage": None, "code": None, "message": None, "retryable": False},
         },
         trusted_tenant_id="tenant-a",
+        trusted_pit=pit,
+        trusted_provenance=provenance,
     )
 
 

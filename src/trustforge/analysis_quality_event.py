@@ -38,12 +38,14 @@ _VERSION_FIELDS = {
 _STAGE_FIELDS = {"stage", "latency_ms", "status", "attempts", "failure"}
 _FAILURE_FIELDS = {"status", "failed_stage", "code", "message", "retryable"}
 _PROVENANCE_INPUT_FIELDS = {"source", "collector", "observed_at"}
+_PIT_FIELDS = {"event_time", "available_time", "as_of_time", "source_available_times"}
 _SNAPSHOT_FIELDS = {
     "analysis_id",
     "run_id",
     "question_id",
     "answer_id",
     "evidence_snapshot_id",
+    "evidence_snapshot",
     "question",
     "tenant_id",
     "coin",
@@ -74,6 +76,8 @@ def build_analysis_quality_event(
     snapshot: Mapping[str, Any],
     *,
     trusted_tenant_id: str,
+    trusted_pit: Mapping[str, Any],
+    trusted_provenance: Mapping[str, Any],
 ) -> LearningEvent:
     """Build one immutable event from a completed or partially failed analysis.
 
@@ -106,13 +110,20 @@ def build_analysis_quality_event(
     coin = _required_string(snapshot, "coin")
     mode = _required_string(snapshot, "mode")
     question_type = _required_string(snapshot, "question_type")
-    event_time = _required_time(snapshot, "event_time")
-    available_time = _required_time(snapshot, "available_time")
-    as_of_time = _required_time(snapshot, "as_of_time")
+    pit = _trusted_object(trusted_pit, "trusted_pit", _PIT_FIELDS)
+    event_time = _required_time(pit, "event_time")
+    available_time = _required_time(pit, "available_time")
+    as_of_time = _required_time(pit, "as_of_time")
     if available_time < event_time or available_time > as_of_time:
         raise LearningEventError("analysis PIT times are inconsistent")
-
-    source_times = _source_times(snapshot, as_of_time)
+    source_times = _source_times(pit, available_time)
+    _assert_snapshot_pit(
+        snapshot,
+        event_time=event_time,
+        available_time=available_time,
+        as_of_time=as_of_time,
+        source_times=source_times,
+    )
     confidence = _strict_object(snapshot, "confidence", _CONFIDENCE_FIELDS)
     _require_keys(confidence, "confidence", _CONFIDENCE_FIELDS)
     for key in _CONFIDENCE_FIELDS:
@@ -153,6 +164,14 @@ def build_analysis_quality_event(
         raise LearningEventError(
             "independent_source_count cannot exceed evidence_count"
         )
+    evidence_snapshot = _evidence_snapshot(snapshot, available_time)
+    expected_snapshot_id = canonical_integrity_checksum(evidence_snapshot)
+    if evidence_snapshot_id != expected_snapshot_id:
+        raise LearningEventError(
+            "evidence_snapshot_id must match canonical evidence_snapshot content"
+        )
+    if len(evidence_snapshot) != evidence_stats["evidence_count"]:
+        raise LearningEventError("evidence_snapshot length must match evidence_count")
     quality = _strict_object(snapshot, "quality", _QUALITY_FIELDS)
     _require_keys(quality, "quality", _QUALITY_FIELDS)
     for key in ("freshness", "conflict", "completeness"):
@@ -183,13 +202,21 @@ def build_analysis_quality_event(
     if "outcome_id" in snapshot or "label_id" in snapshot:
         raise LearningEventError("analysis-quality event cannot contain outcome or gold label identity")
 
-    provenance_input = _strict_object(snapshot, "provenance", _PROVENANCE_INPUT_FIELDS)
-    _require_keys(provenance_input, "provenance", _PROVENANCE_INPUT_FIELDS)
-    observed_at = _parse_time(provenance_input["observed_at"], "provenance.observed_at")
-    if observed_at > as_of_time:
-        raise LearningEventError("provenance.observed_at cannot follow as_of_time")
+    provenance_input = _trusted_object(
+        trusted_provenance,
+        "trusted_provenance",
+        _PROVENANCE_INPUT_FIELDS,
+    )
+    observed_at = _parse_time(
+        provenance_input["observed_at"],
+        "trusted_provenance.observed_at",
+    )
+    if observed_at > available_time:
+        raise LearningEventError("provenance.observed_at cannot follow available_time")
     for field in ("source", "collector"):
         _required_string_value(provenance_input[field], f"provenance.{field}")
+    _assert_snapshot_provenance(snapshot, provenance_input, observed_at)
+    provenance_input["observed_at"] = _canonical_time(observed_at)
 
     source_record = {
         "analysis_id": analysis_id,
@@ -221,6 +248,7 @@ def build_analysis_quality_event(
         "question_id": question_id,
         "answer_id": answer_id,
         "evidence_snapshot_id": evidence_snapshot_id,
+        "evidence_snapshot": evidence_snapshot,
         "coin": coin,
         "mode": mode,
         "question_type": question_type,
@@ -269,6 +297,18 @@ def _strict_object(
     return dict(value)
 
 
+def _trusted_object(
+    value: Any,
+    field: str,
+    exact_fields: set[str],
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise LearningEventError(f"{field} is required for analysis-quality event")
+    if set(value) != exact_fields:
+        raise LearningEventError(f"{field} schema is invalid")
+    return dict(value)
+
+
 def _require_keys(value: Mapping[str, Any], field: str, required: set[str]) -> None:
     missing = required - set(value)
     if missing:
@@ -313,14 +353,108 @@ def _canonical_time(value: datetime) -> str:
     return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _source_times(snapshot: Mapping[str, Any], as_of_time: datetime) -> list[datetime]:
+def _source_times(snapshot: Mapping[str, Any], available_time: datetime) -> list[datetime]:
     raw = snapshot.get("source_available_times")
     if not isinstance(raw, list) or not raw:
         raise LearningEventError("source_available_times is required for analysis-quality event")
     parsed = [_parse_time(item, "source_available_time") for item in raw]
-    if any(value > as_of_time for value in parsed):
+    if any(value > available_time for value in parsed):
         raise LearningEventError("analysis-quality event cannot include future source data")
     return sorted(set(parsed))
+
+
+def _assert_snapshot_pit(
+    snapshot: Mapping[str, Any],
+    *,
+    event_time: datetime,
+    available_time: datetime,
+    as_of_time: datetime,
+    source_times: list[datetime],
+) -> None:
+    assertions = {
+        "event_time": event_time,
+        "available_time": available_time,
+        "as_of_time": as_of_time,
+    }
+    for field, trusted in assertions.items():
+        asserted = _required_time(snapshot, field)
+        if _canonical_time(asserted) != _canonical_time(trusted):
+            raise LearningEventError(f"snapshot {field} must match trusted_pit")
+    asserted_sources = _source_times(snapshot, available_time)
+    if [_canonical_time(value) for value in asserted_sources] != [
+        _canonical_time(value) for value in source_times
+    ]:
+        raise LearningEventError(
+            "snapshot source_available_times must match trusted_pit"
+        )
+
+
+def _assert_snapshot_provenance(
+    snapshot: Mapping[str, Any],
+    trusted: Mapping[str, Any],
+    trusted_observed_at: datetime,
+) -> None:
+    asserted = _strict_object(snapshot, "provenance", _PROVENANCE_INPUT_FIELDS)
+    _require_keys(asserted, "provenance", _PROVENANCE_INPUT_FIELDS)
+    if asserted["source"] != trusted["source"] or asserted["collector"] != trusted["collector"]:
+        raise LearningEventError("snapshot provenance must match trusted_provenance")
+    asserted_observed_at = _parse_time(
+        asserted["observed_at"],
+        "provenance.observed_at",
+    )
+    if _canonical_time(asserted_observed_at) != _canonical_time(trusted_observed_at):
+        raise LearningEventError("snapshot provenance must match trusted_provenance")
+
+
+def _evidence_snapshot(
+    snapshot: Mapping[str, Any],
+    available_time: datetime,
+) -> list[dict[str, Any]]:
+    raw = snapshot.get("evidence_snapshot")
+    if not isinstance(raw, list):
+        raise LearningEventError("evidence_snapshot must be a list")
+    canonical: list[dict[str, Any]] = []
+    required = {
+        "source",
+        "fetched_at",
+        "content_reference",
+        "related_claim",
+        "schema_version",
+        "trust",
+    }
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            raise LearningEventError(f"evidence_snapshot[{index}] must be an object")
+        evidence = dict(item)
+        missing = required - set(evidence)
+        if missing:
+            raise LearningEventError(
+                f"evidence_snapshot[{index}] missing fields: {', '.join(sorted(missing))}"
+            )
+        for field in (
+            "source",
+            "content_reference",
+            "related_claim",
+            "schema_version",
+        ):
+            _required_string_value(
+                evidence[field],
+                f"evidence_snapshot[{index}].{field}",
+            )
+        _unit_interval(evidence["trust"], f"evidence_snapshot[{index}].trust")
+        fetched_at = _parse_time(
+            evidence["fetched_at"],
+            f"evidence_snapshot[{index}].fetched_at",
+        )
+        if fetched_at > available_time:
+            raise LearningEventError(
+                f"evidence_snapshot[{index}].fetched_at cannot follow available_time"
+            )
+        evidence["fetched_at"] = _canonical_time(fetched_at)
+        # The learning-event contract performs the final recursive JSON check
+        # and deep-freeze, including any optional evidence fields.
+        canonical.append(evidence)
+    return canonical
 
 
 def _stage_metrics(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -359,6 +493,11 @@ def _stage_metrics(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
         if metric["status"] == "failed":
             if not isinstance(failure, Mapping) or set(failure) != {"code", "message"}:
                 raise LearningEventError(f"stage_metrics[{index}].failure is invalid")
+            for field in ("code", "message"):
+                _required_string_value(
+                    failure[field],
+                    f"stage_metrics[{index}].failure.{field}",
+                )
         elif failure is not None:
             raise LearningEventError(f"stage_metrics[{index}].failure must be null")
         metrics.append(metric)

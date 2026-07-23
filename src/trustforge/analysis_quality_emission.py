@@ -35,11 +35,18 @@ def emit_analysis_quality_event(
     snapshot: Mapping[str, object],
     *,
     trusted_tenant_id: str,
+    trusted_pit: Mapping[str, object],
+    trusted_provenance: Mapping[str, object],
     sink: AnalysisQualityAppendSink,
 ) -> EmissionResult:
     """Build then append once; never convert storage failure into success."""
 
-    event = build_analysis_quality_event(snapshot, trusted_tenant_id=trusted_tenant_id)
+    event = build_analysis_quality_event(
+        snapshot,
+        trusted_tenant_id=trusted_tenant_id,
+        trusted_pit=trusted_pit,
+        trusted_provenance=trusted_provenance,
+    )
     status = sink.append(event)
     if status in {"created", "idempotent"}:
         return EmissionResult(status=status, identity=event.identity)

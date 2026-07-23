@@ -19,6 +19,8 @@ The event records:
 - raw and calibrated confidence plus direction and decision;
 - analysis, run, question, answer, and evidence-snapshot references;
 - the actual question text (distinct from question type);
+- the full canonical Evidence snapshot; each item carries source, canonical
+  fetched time, content reference, related claim, schema version, and trust;
 - evidence support, contradiction, count, average trust, independent-source
   count, and mutually exclusive source-category distribution;
 - freshness, conflict, missingness, and completeness quality;
@@ -30,6 +32,10 @@ The event records:
 
 Missing, unknown, cross-tenant, internally inconsistent, or future-available
 data fails closed. Outcome and gold-label identities are forbidden.
+`evidence_snapshot_id` is the `sha256:` canonical content identity of the full
+Evidence snapshot and is verified during construction. Evidence timestamps,
+source availability, and provenance observation must not follow the trusted
+analysis `available_time`.
 
 ## Delivery semantics
 
@@ -46,9 +52,14 @@ analysis failure is canonical analysis data and must be represented by the
 stage and top-level failure structures. Per-stage `attempts` describes analysis
 execution and is canonical; it is not a transport delivery attempt.
 
-Answer content and the full Evidence snapshot remain in their authoritative
-records and are referenced by `answer_id` and `evidence_snapshot_id`; this event
-does not duplicate those mutable storage representations.
+Answer content remains in its authoritative record and is referenced by
+`answer_id`. The Evidence snapshot is intentionally embedded and deeply frozen;
+`evidence_snapshot_id` provides its stable content address.
+
+PIT and provenance values are supplied separately through trusted caller
+authority. Same-named snapshot values are assertions only and must match their
+trusted canonical values; advancing `as_of_time` or changing collector/source
+inside the snapshot cannot change the authority.
 
 Runtime `AnalysisFlow`/HTTP wiring and feature flags are deferred to Issue
 #570. Persistence backends, migrations, delayed labeling, datasets, training,
