@@ -95,6 +95,11 @@ session resolution, target-close maturity, publication lag, the inclusive
 72-hour late-data cutoff, canonical visible prices, maturity/status, reason
 code, and `matures_at`. Pending, unavailable, and labeled payloads must match
 that complete state exactly, including metric and lineage nullability.
+The same transition helper also enforces that data first visible after the
+72-hour cutoff can only produce a labeled successor revision with a valid
+predecessor; a rechecksummed revision-one label is rejected. Event time remains
+identical to the exact source analysis, and the calendar version must already
+be available at both outcome availability and canonical as-of time.
 
 Outcome events are always `delayed_outcome`, explicitly non-evidentiary, and
 never eligible as Evidence. Dry-run returns before invoking the append port, so

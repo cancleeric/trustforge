@@ -384,6 +384,30 @@ class _ExpectedOutcomeState:
     late_cutoff: datetime | None
 
 
+def _validate_late_after_cutoff_transition(
+    state: _ExpectedOutcomeState,
+    *,
+    outcome_version: int,
+    predecessor: LearningEvent | None,
+) -> None:
+    late_selected_data = (
+        state.maturity == "labeled"
+        and state.late_cutoff is not None
+        and any(
+            _parse_datetime(price.available_at, "price available_at")
+            > state.late_cutoff
+            for price in (state.start_price, state.target_price)
+            if price is not None
+        )
+    )
+    if late_selected_data and (
+        outcome_version == 1 or predecessor is None
+    ):
+        raise LearningEventError(
+            "late-after-cutoff data requires immutable successor revision"
+        )
+
+
 def _compute_expected_outcome_state(
     *,
     analysis: LearningEvent,
@@ -392,7 +416,16 @@ def _compute_expected_outcome_state(
     horizon: str,
     variant: str,
     labeled_at: datetime,
+    as_of: datetime,
 ) -> _ExpectedOutcomeState:
+    calendar_available = _parse_datetime(
+        calendar.version_available_at,
+        "calendar version_available_at",
+    )
+    if calendar_available > labeled_at or calendar_available > as_of:
+        raise LearningEventError(
+            "calendar version is not available at outcome PIT"
+        )
     prediction_event = _parse_datetime(analysis.event_time, "prediction_event_at")
     prediction_available = _parse_datetime(
         analysis.available_time,
@@ -503,15 +536,11 @@ def _build_delayed_outcome_observation(
     labeled_at = _parse_datetime(trusted_labeled_at, "trusted_labeled_at")
     if labeled_at > as_of:
         raise LearningEventError("labeled_at cannot be after as_of")
-    if _parse_datetime(calendar.version_available_at, "calendar version_available_at") > as_of:
-        raise LearningEventError("calendar version is not available at as_of")
     prediction_available = _parse_datetime(analysis_event.available_time, "prediction_available_at")
     if as_of < prediction_available:
         raise LearningEventError("as_of cannot precede prediction availability")
     if labeled_at < prediction_available:
         raise LearningEventError("labeled_at cannot precede prediction availability")
-    if _parse_datetime(calendar.version_available_at, "calendar version_available_at") > labeled_at:
-        raise LearningEventError("calendar version is not available at labeled_at")
     state = _compute_expected_outcome_state(
         analysis=analysis_event,
         calendar=calendar,
@@ -519,6 +548,12 @@ def _build_delayed_outcome_observation(
         horizon=horizon,
         variant=market_data_variant,
         labeled_at=labeled_at,
+        as_of=as_of,
+    )
+    _validate_late_after_cutoff_transition(
+        state,
+        outcome_version=trusted_outcome_version,
+        predecessor=trusted_supersedes,
     )
     _assert_market_data_revision(
         market_data_revision,
@@ -529,19 +564,6 @@ def _build_delayed_outcome_observation(
         state.target_price,
         trusted_labeled_at,
     )
-    if state.maturity == "labeled":
-        arrived_after_cutoff = any(
-            _parse_datetime(price.available_at, "price available_at")
-            > state.late_cutoff
-            for price in (state.start_price, state.target_price)
-            if price is not None
-        )
-        if arrived_after_cutoff and (
-            trusted_outcome_version == 1 or trusted_supersedes is None
-        ):
-            raise LearningEventError(
-                "late-after-cutoff data requires immutable successor revision"
-            )
     return _state_event(
         analysis_event, trusted_tenant_id, horizon, market_data_variant,
         market_data_revision, trusted_outcome_version, trusted_as_of_time,
@@ -736,7 +758,12 @@ def validate_canonical_delayed_outcome(
         != canonical_integrity_checksum(source_record)
     ):
         raise LearningEventError("delayed outcome emission contract is invalid")
-    start_price, target_price, prediction_direction = _validate_canonical_source_binding(
+    (
+        start_price,
+        target_price,
+        prediction_direction,
+        expected_state,
+    ) = _validate_canonical_source_binding(
         event,
         source_record,
         source_analysis=source_analysis,
@@ -774,6 +801,11 @@ def validate_canonical_delayed_outcome(
         != payload.get("market_data_revision")
     ):
         raise LearningEventError("delayed outcome canonical identity is invalid")
+    _validate_late_after_cutoff_transition(
+        expected_state,
+        outcome_version=event.revision,
+        predecessor=predecessor,
+    )
     maturity = payload.get("maturity")
     metric_fields = (
         "return_pct", "direction_sign", "directional_return_pct",
@@ -1198,7 +1230,12 @@ def _validate_canonical_source_binding(
     *,
     source_analysis: LearningEvent,
     trusted_authority_registry: FixtureAuthorityRegistry,
-) -> tuple[FixturePrice | None, FixturePrice | None, str]:
+) -> tuple[
+    FixturePrice | None,
+    FixturePrice | None,
+    str,
+    _ExpectedOutcomeState,
+]:
     if type(trusted_authority_registry) is not FixtureAuthorityRegistry:
         raise LearningEventError("trusted fixture authority registry is required")
     _validate_analysis(source_analysis, event.tenant_id)
@@ -1210,6 +1247,7 @@ def _validate_canonical_source_binding(
         or source_analysis.identity != source_record.get("analysis_identity")
         or analysis_id != payload.get("analysis_id")
         or analysis_id != payload.get("prediction_id")
+        or event.event_time != source_analysis.event_time
         or not hasattr(decision, "items")
     ):
         raise LearningEventError("source analysis semantic binding is invalid")
@@ -1350,6 +1388,7 @@ def _validate_canonical_source_binding(
             event.available_time,
             "outcome available_time",
         ),
+        as_of=_parse_datetime(event.as_of_time, "outcome as_of_time"),
     )
     expected_start = (
         expected_state.start_session.label
@@ -1422,7 +1461,7 @@ def _validate_canonical_source_binding(
         "market_data_revision"
     ):
         raise LearningEventError("market_data_revision source binding is invalid")
-    return start_price, target_price, prediction_direction
+    return start_price, target_price, prediction_direction, expected_state
 
 
 def _validate_exact_labeled_metrics(

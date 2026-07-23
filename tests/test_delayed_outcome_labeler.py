@@ -393,6 +393,46 @@ def test_single_instrument_registry_rejects_cross_instrument_analysis():
         )
 
 
+def test_validator_rejects_event_time_detached_from_source_analysis():
+    analysis = _analysis()
+    event = _build(analysis=analysis)
+    forged = replace(event, event_time="2026-07-01T19:00:01Z")
+    with pytest.raises(
+        LearningEventError,
+        match="source analysis semantic binding",
+    ):
+        validate_canonical_delayed_outcome(
+            forged,
+            source_analysis=analysis,
+        )
+
+
+def test_future_calendar_cannot_label_historical_outcome():
+    analysis = _analysis()
+    calendar = replace(
+        _calendar(),
+        version_available_at="2026-07-04T00:00:00Z",
+    )
+    fixture = FixtureMarketData(())
+    with pytest.raises(
+        LearningEventError,
+        match="calendar version is not available at outcome PIT",
+    ):
+        FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
+            analysis,
+            trusted_tenant_id=analysis.tenant_id,
+            trusted_as_of_time="2026-07-03T00:00:00Z",
+            trusted_labeled_at="2026-07-03T00:00:00Z",
+            calendar=calendar,
+            market_data=fixture,
+            trusted_authority_registry=_registry(
+                analysis, calendar, fixture
+            ),
+            horizon="T+1",
+            market_data_variant="as_first_known",
+        )
+
+
 def test_labeled_availability_cannot_precede_maturity_or_selected_sources():
     data = [
         _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
@@ -555,6 +595,7 @@ def test_same_available_time_ties_and_fixture_order_are_deterministic():
 
 
 def test_d8_data_arriving_after_cutoff_requires_successor_revision():
+    analysis = _analysis()
     late_data = [
         _price("2026-07-01", "100.00000000", "2026-07-06T00:00:01Z"),
         _price("2026-07-02", "110.00000000", "2026-07-06T00:00:01Z"),
@@ -572,6 +613,63 @@ def test_d8_data_arriving_after_cutoff_requires_successor_revision():
     )
     assert recovered.payload["maturity"] == "labeled"
     assert recovered.payload["supersedes_outcome_id"] == unavailable.payload["outcome_id"]
+    registry = _registry(
+        analysis,
+        _calendar(),
+        FixtureMarketData(tuple(late_data)),
+    )
+    validate_canonical_delayed_outcome(
+        recovered,
+        source_analysis=analysis,
+        trusted_registry=registry,
+        predecessor=unavailable,
+    )
+
+    identity_inputs = {
+        **recovered.payload["identity_inputs"],
+        "outcome_version": 1,
+    }
+    outcome_id = "sha256:" + hashlib.sha256(
+        json.dumps(
+            identity_inputs,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    payload = {
+        **recovered.payload,
+        "outcome_id": outcome_id,
+        "outcome_version": 1,
+        "identity_inputs": identity_inputs,
+        "supersedes_outcome_id": None,
+    }
+    source_record = {
+        **recovered.provenance["source_record"],
+        "identity_inputs": identity_inputs,
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    forged_v1 = make_learning_event(
+        kind=recovered.kind,
+        tenant_id=recovered.tenant_id,
+        entity_id=outcome_id,
+        revision=1,
+        event_time=recovered.event_time,
+        available_time=recovered.available_time,
+        as_of_time=recovered.as_of_time,
+        payload=payload,
+        provenance={
+            **recovered.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(LearningEventError, match="successor revision"):
+        validate_canonical_delayed_outcome(
+            forged_v1,
+            source_analysis=analysis,
+            trusted_registry=registry,
+        )
 
 
 def test_dry_run_performs_zero_append():
