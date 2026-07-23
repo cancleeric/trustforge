@@ -61,23 +61,19 @@ class OutcomeAppendPort(Protocol):
 class FixtureAuthorityRegistry:
     """Server-trusted fixture snapshot roots; never derived from an outcome event."""
 
-    calendar_manifest_digests: tuple[tuple[str, str], ...]
+    instrument: str
+    calendar_manifest_digest: str
     price_records: tuple[FixturePrice, ...]
 
     def __post_init__(self) -> None:
-        if type(self.calendar_manifest_digests) is not tuple or any(
-            type(item) is not tuple
-            or len(item) != 2
-            or type(item[0]) is not str
-            or not item[0]
-            or not _SHA256.fullmatch(item[1])
-            for item in self.calendar_manifest_digests
+        if (
+            type(self.instrument) is not str
+            or not self.instrument
+            or len(self.instrument.encode("utf-8")) > 256
+            or type(self.calendar_manifest_digest) is not str
+            or not _SHA256.fullmatch(self.calendar_manifest_digest)
         ):
             raise LearningEventError("fixture calendar registry is invalid")
-        if len({item[0] for item in self.calendar_manifest_digests}) != len(
-            self.calendar_manifest_digests
-        ):
-            raise LearningEventError("fixture calendar registry contains duplicates")
         if type(self.price_records) is not tuple or any(
             type(item) is not FixturePrice for item in self.price_records
         ):
@@ -101,17 +97,19 @@ class FixtureAuthorityRegistry:
         if type(instrument) is not str or not instrument:
             raise LearningEventError("fixture registry instrument is required")
         return cls(
-            calendar_manifest_digests=(
-                (
-                    instrument,
-                    canonical_integrity_checksum(_calendar_manifest(calendar)),
-                ),
+            instrument=instrument,
+            calendar_manifest_digest=canonical_integrity_checksum(
+                _calendar_manifest(calendar)
             ),
             price_records=market_data.prices,
         )
 
     def calendar_digest_for(self, instrument: str) -> str | None:
-        return dict(self.calendar_manifest_digests).get(instrument)
+        return (
+            self.calendar_manifest_digest
+            if instrument == self.instrument
+            else None
+        )
 
     @property
     def price_record_digests(self) -> frozenset[str]:
@@ -374,6 +372,101 @@ def canonical_market_data_revision(
     return canonical_integrity_checksum(manifest)
 
 
+@dataclass(frozen=True)
+class _ExpectedOutcomeState:
+    maturity: str
+    reason: str | None
+    start_session: VenueSession | None
+    target_session: VenueSession | None
+    start_price: FixturePrice | None
+    target_price: FixturePrice | None
+    matures_at: datetime | None
+    late_cutoff: datetime | None
+
+
+def _compute_expected_outcome_state(
+    *,
+    analysis: LearningEvent,
+    calendar: FixtureVenueCalendar,
+    market_data: FixtureMarketData,
+    horizon: str,
+    variant: str,
+    labeled_at: datetime,
+) -> _ExpectedOutcomeState:
+    prediction_event = _parse_datetime(analysis.event_time, "prediction_event_at")
+    prediction_available = _parse_datetime(
+        analysis.available_time,
+        "prediction_available_at",
+    )
+    if prediction_event > prediction_available:
+        return _ExpectedOutcomeState(
+            "unavailable", "INVALID_PREDICTION_TIMELINE",
+            None, None, None, None, None, None,
+        )
+    try:
+        resolved = calendar.resolve(prediction_available, _HORIZONS[horizon])
+    except LearningEventError as exc:
+        if str(exc) != "CALENDAR_GAP":
+            raise
+        return _ExpectedOutcomeState(
+            "unavailable", "CALENDAR_GAP",
+            None, None, None, None, None, None,
+        )
+    if resolved is None:
+        return _ExpectedOutcomeState(
+            "pending", "NOT_MATURE",
+            None, None, None, None, None, None,
+        )
+    start_session, target_session = resolved
+    target_close_at = _parse_datetime(
+        target_session.scheduled_close_at or "",
+        "target close",
+    )
+    matures_at = target_close_at + timedelta(
+        hours=calendar.publication_lag_hours
+    )
+    late_cutoff = matures_at + _LATE_CUTOFF
+    start_price = market_data.price_for(
+        start_session.label, labeled_at, variant=variant
+    )
+    target_price = market_data.price_for(
+        target_session.label, labeled_at, variant=variant
+    )
+    if start_price is not None:
+        _validate_selected_price(start_price, start_session, "start")
+    if target_price is not None:
+        _validate_selected_price(target_price, target_session, "target")
+    if start_price is not None and target_price is not None:
+        _validate_price_lineage(start_price, target_price)
+    if labeled_at < matures_at:
+        maturity, reason = "pending", "WAITING_OFFICIAL_CLOSE"
+    elif start_price is None or target_price is None:
+        missing = (
+            "START_CLOSE_MISSING"
+            if start_price is None
+            else "TARGET_CLOSE_MISSING"
+        )
+        if labeled_at <= late_cutoff:
+            maturity, reason = "pending", "WAITING_LATE_DATA_CUTOFF"
+        else:
+            maturity, reason = "unavailable", missing
+    else:
+        maturity, reason = "labeled", None
+        direction = analysis.payload.get("decision", {}).get("direction")
+        if _DIRECTIONS.get(direction) not in {-1, 1}:
+            reason = "PREDICTION_NOT_DIRECTIONAL"
+    return _ExpectedOutcomeState(
+        maturity,
+        reason,
+        start_session,
+        target_session,
+        start_price,
+        target_price,
+        matures_at,
+        late_cutoff,
+    )
+
+
 def _build_delayed_outcome_observation(
     analysis_event: LearningEvent,
     *,
@@ -412,7 +505,6 @@ def _build_delayed_outcome_observation(
         raise LearningEventError("labeled_at cannot be after as_of")
     if _parse_datetime(calendar.version_available_at, "calendar version_available_at") > as_of:
         raise LearningEventError("calendar version is not available at as_of")
-    prediction_event = _parse_datetime(analysis_event.event_time, "prediction_event_at")
     prediction_available = _parse_datetime(analysis_event.available_time, "prediction_available_at")
     if as_of < prediction_available:
         raise LearningEventError("as_of cannot precede prediction availability")
@@ -420,91 +512,28 @@ def _build_delayed_outcome_observation(
         raise LearningEventError("labeled_at cannot precede prediction availability")
     if _parse_datetime(calendar.version_available_at, "calendar version_available_at") > labeled_at:
         raise LearningEventError("calendar version is not available at labeled_at")
-    if prediction_event > prediction_available:
-        _assert_market_data_revision(
-            market_data_revision, calendar, market_data, market_data_variant, None, None,
-            trusted_labeled_at,
-        )
-        return _state_event(
-            analysis_event, trusted_tenant_id, horizon, market_data_variant,
-            market_data_revision, trusted_outcome_version, trusted_as_of_time,
-            trusted_labeled_at, calendar, "unavailable", "INVALID_PREDICTION_TIMELINE",
-            None, None, trusted_supersedes,
-        )
-
-    try:
-        resolved = calendar.resolve(prediction_available, _HORIZONS[horizon])
-    except LearningEventError as exc:
-        if str(exc) != "CALENDAR_GAP":
-            raise
-        _assert_market_data_revision(
-            market_data_revision, calendar, market_data, market_data_variant,
-            None, None, trusted_labeled_at,
-        )
-        return _state_event(
-            analysis_event, trusted_tenant_id, horizon, market_data_variant,
-            market_data_revision, trusted_outcome_version, trusted_as_of_time,
-            trusted_labeled_at, calendar, "unavailable", "CALENDAR_GAP",
-            None, None, trusted_supersedes,
-        )
-    if resolved is None:
-        _assert_market_data_revision(
-            market_data_revision, calendar, market_data, market_data_variant, None, None,
-            trusted_labeled_at,
-        )
-        return _state_event(
-            analysis_event, trusted_tenant_id, horizon, market_data_variant,
-            market_data_revision, trusted_outcome_version, trusted_as_of_time,
-            trusted_labeled_at, calendar, "pending", "NOT_MATURE", None, None,
-            trusted_supersedes,
-        )
-    start_session, target_session = resolved
-    target_close_at = _parse_datetime(target_session.scheduled_close_at or "", "target close")
-    matures_at = target_close_at + timedelta(hours=calendar.publication_lag_hours)
-    late_cutoff = matures_at + _LATE_CUTOFF
-    start_price = market_data.price_for(
-        start_session.label, labeled_at, variant=market_data_variant
+    state = _compute_expected_outcome_state(
+        analysis=analysis_event,
+        calendar=calendar,
+        market_data=market_data,
+        horizon=horizon,
+        variant=market_data_variant,
+        labeled_at=labeled_at,
     )
-    target_price = market_data.price_for(
-        target_session.label, labeled_at, variant=market_data_variant
-    )
-    if start_price is not None:
-        _validate_selected_price(start_price, start_session, "start")
-    if target_price is not None:
-        _validate_selected_price(target_price, target_session, "target")
-    if start_price is not None and target_price is not None:
-        _validate_price_lineage(start_price, target_price)
     _assert_market_data_revision(
         market_data_revision,
         calendar,
         market_data,
         market_data_variant,
-        start_price,
-        target_price,
+        state.start_price,
+        state.target_price,
         trusted_labeled_at,
     )
-
-    if labeled_at < matures_at:
-        maturity, reason = "pending", "WAITING_OFFICIAL_CLOSE"
-    elif start_price is None or target_price is None:
-        missing = "START_CLOSE_MISSING" if start_price is None else "TARGET_CLOSE_MISSING"
-        if labeled_at <= late_cutoff:
-            maturity, reason = "pending", "WAITING_LATE_DATA_CUTOFF"
-        else:
-            maturity, reason = "unavailable", missing
-    else:
-        maturity, reason = "labeled", None
-        source_available = max(
-            _parse_datetime(start_price.available_at, "start price available_at"),
-            _parse_datetime(target_price.available_at, "target price available_at"),
-        )
-        if labeled_at < max(matures_at, source_available):
-            raise LearningEventError(
-                "labeled_at cannot precede maturity or selected source availability"
-            )
+    if state.maturity == "labeled":
         arrived_after_cutoff = any(
-            _parse_datetime(price.available_at, "price available_at") > late_cutoff
-            for price in (start_price, target_price)
+            _parse_datetime(price.available_at, "price available_at")
+            > state.late_cutoff
+            for price in (state.start_price, state.target_price)
             if price is not None
         )
         if arrived_after_cutoff and (
@@ -516,10 +545,10 @@ def _build_delayed_outcome_observation(
     return _state_event(
         analysis_event, trusted_tenant_id, horizon, market_data_variant,
         market_data_revision, trusted_outcome_version, trusted_as_of_time,
-        trusted_labeled_at, calendar, maturity, reason, start_session,
-        target_session, trusted_supersedes,
-        start_price=start_price, target_price=target_price,
-        matures_at=matures_at,
+        trusted_labeled_at, calendar, state.maturity, state.reason,
+        state.start_session, state.target_session, trusted_supersedes,
+        start_price=state.start_price, target_price=state.target_price,
+        matures_at=state.matures_at,
     )
 
 
@@ -1305,51 +1334,54 @@ def _validate_canonical_source_binding(
     horizon = payload.get("horizon")
     if horizon not in _HORIZONS:
         raise LearningEventError("source analysis horizon is invalid")
-    prediction_available = _parse_datetime(
-        source_analysis.available_time,
-        "source analysis available_time",
-    )
-    if _parse_datetime(
-        source_analysis.event_time,
-        "source analysis event_time",
-    ) > prediction_available:
-        resolved = None
-    else:
-        try:
-            resolved = calendar.resolve(prediction_available, _HORIZONS[horizon])
-        except LearningEventError as exc:
-            if str(exc) != "CALENDAR_GAP":
-                raise
-            resolved = None
-    expected_start = resolved[0].label if resolved is not None else None
-    expected_target = resolved[1].label if resolved is not None else None
-    if (
-        payload.get("start_session") != expected_start
-        or payload.get("target_session") != expected_target
-    ):
-        raise LearningEventError(
-            "outcome sessions do not match source analysis horizon"
-        )
-    registry_market_data = FixtureMarketData(
-        trusted_authority_registry.price_records
-    )
-    cutoff = _parse_datetime(event.available_time, "outcome available_time")
     variant = payload.get("market_data_variant")
     if variant not in _VARIANTS:
         raise LearningEventError("canonical market-data variant is invalid")
-    expected_start_price = (
-        registry_market_data.price_for(expected_start, cutoff, variant=variant)
-        if expected_start is not None
+    registry_market_data = FixtureMarketData(
+        trusted_authority_registry.price_records
+    )
+    expected_state = _compute_expected_outcome_state(
+        analysis=source_analysis,
+        calendar=calendar,
+        market_data=registry_market_data,
+        horizon=horizon,
+        variant=variant,
+        labeled_at=_parse_datetime(
+            event.available_time,
+            "outcome available_time",
+        ),
+    )
+    expected_start = (
+        expected_state.start_session.label
+        if expected_state.start_session is not None
         else None
     )
-    expected_target_price = (
-        registry_market_data.price_for(expected_target, cutoff, variant=variant)
-        if expected_target is not None
+    expected_target = (
+        expected_state.target_session.label
+        if expected_state.target_session is not None
+        else None
+    )
+    expected_matures_at = (
+        _timestamp(expected_state.matures_at)
+        if expected_state.matures_at is not None
         else None
     )
     if (
-        _price_manifest(start_price) != _price_manifest(expected_start_price)
-        or _price_manifest(target_price) != _price_manifest(expected_target_price)
+        payload.get("start_session") != expected_start
+        or payload.get("target_session") != expected_target
+        or payload.get("maturity") != expected_state.maturity
+        or payload.get("status") != expected_state.maturity
+        or payload.get("reason_code") != expected_state.reason
+        or payload.get("matures_at") != expected_matures_at
+    ):
+        raise LearningEventError(
+            "outcome state does not match trusted fixture timeline"
+        )
+    if (
+        _price_manifest(start_price)
+        != _price_manifest(expected_state.start_price)
+        or _price_manifest(target_price)
+        != _price_manifest(expected_state.target_price)
     ):
         raise LearningEventError(
             "selected prices do not match trusted fixture snapshot selection"

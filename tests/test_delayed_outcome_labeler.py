@@ -313,6 +313,86 @@ def test_publication_sla_boundary_never_labels_early_even_when_bars_exist():
     assert at.payload["maturity"] == "labeled"
 
 
+def test_validator_rejects_fully_rechecksummed_pending_to_early_labeled():
+    analysis = _analysis(direction="bullish")
+    prices = (
+        _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+        _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+    )
+    event = _build(
+        analysis=analysis,
+        data=list(prices),
+        as_of="2026-07-02T23:59:59.999999Z",
+    )
+    selected = event.provenance["source_record"]["selected_prices"]
+    payload = {
+        **event.payload,
+        "maturity": "labeled",
+        "status": "labeled",
+        "reason_code": None,
+        "return_pct": "10.00000000",
+        "direction_sign": 1,
+        "directional_return_pct": "10.00000000",
+        "risk_abs_move_pct": "10.00000000",
+        "risk_downside_pct": "0.00000000",
+        "hit": True,
+        "lineage": {
+            "adjustment_basis": "split_adjusted_price_return",
+            "cash_dividend_included": False,
+            "start": _lineage_record(dict(selected["start"])),
+            "target": _lineage_record(dict(selected["target"])),
+        },
+    }
+    source_record = {
+        **event.provenance["source_record"],
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    forged = replace(
+        event,
+        payload=payload,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="outcome state does not match trusted fixture timeline",
+    ):
+        validate_canonical_delayed_outcome(
+            forged,
+            source_analysis=analysis,
+            trusted_registry=_registry(
+                analysis, _calendar(), FixtureMarketData(prices)
+            ),
+        )
+
+
+def test_single_instrument_registry_rejects_cross_instrument_analysis():
+    analysis = _analysis(direction="bullish")
+    prices = (
+        _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+        _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+    )
+    event = _build(analysis=analysis, data=list(prices))
+    other_instrument_analysis = replace(
+        analysis,
+        payload={**analysis.payload, "coin": "OTHER"},
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="calendar manifest is not trusted for source analysis instrument",
+    ):
+        validate_canonical_delayed_outcome(
+            event,
+            source_analysis=other_instrument_analysis,
+            trusted_registry=_registry(
+                analysis, _calendar(), FixtureMarketData(prices)
+            ),
+        )
+
+
 def test_labeled_availability_cannot_precede_maturity_or_selected_sources():
     data = [
         _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
@@ -738,7 +818,7 @@ def test_source_analysis_rejects_registered_but_wrong_t_plus_n_pair():
     )
     with pytest.raises(
         LearningEventError,
-        match="outcome sessions do not match source analysis horizon",
+        match="outcome state does not match trusted fixture timeline",
     ):
         validate_canonical_delayed_outcome(
             forged,
