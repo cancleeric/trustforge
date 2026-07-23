@@ -1,4 +1,179 @@
 {
+  "AssetContext": {
+    "$id": "https://trustforge.local/contracts/asset-context/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "ecosystem": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "layer": {
+        "enum": [
+          "layer_1",
+          "layer_2",
+          "app",
+          "protocol",
+          "token",
+          "offchain",
+          "unknown"
+        ]
+      },
+      "market_cap_tier": {
+        "enum": [
+          "large",
+          "mid",
+          "small",
+          "micro",
+          "unknown"
+        ]
+      },
+      "name": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "parent_asset_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "sector": {
+        "enum": [
+          "defi",
+          "l1",
+          "l2",
+          "stablecoin",
+          "exchange",
+          "infrastructure",
+          "meme",
+          "rwa",
+          "gaming",
+          "ai",
+          "unknown"
+        ]
+      },
+      "symbol": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "tags": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "token_role": {
+        "enum": [
+          "gas",
+          "governance",
+          "utility",
+          "staking",
+          "stable",
+          "lp",
+          "wrapped",
+          "meme",
+          "unknown"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "asset_id",
+      "symbol",
+      "name",
+      "sector",
+      "layer",
+      "token_role",
+      "market_cap_tier",
+      "ecosystem",
+      "parent_asset_id",
+      "tags"
+    ],
+    "title": "TrustForge AssetContext",
+    "type": "object"
+  },
+  "DependencyEdge": {
+    "$id": "https://trustforge.local/contracts/dependency-edge/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "confidence": {
+        "maximum": 1,
+        "minimum": 0,
+        "type": "number"
+      },
+      "kind": {
+        "enum": [
+          "bridge",
+          "oracle",
+          "liquidity",
+          "settlement",
+          "governance",
+          "infrastructure",
+          "unknown"
+        ]
+      },
+      "observed_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "official_source_url": {
+        "minLength": 1,
+        "pattern": "^https://(arbitrum\\.foundation|blog\\.arbitrum\\.io|ethereum\\.org|forum\\.arbitrum\\.foundation|gov\\.optimism\\.io)(/|$)",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "source_asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "target_asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "valid_from": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "valid_until": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "source_asset_id",
+      "target_asset_id",
+      "kind",
+      "valid_from",
+      "valid_until",
+      "confidence",
+      "official_source_url",
+      "observed_at"
+    ],
+    "title": "TrustForge DependencyEdge",
+    "type": "object"
+  },
   "Document": {
     "$id": "https://trustforge.local/contracts/document/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -222,6 +397,93 @@
       "decision_state"
     ],
     "title": "TrustForge Report",
+    "type": "object"
+  },
+  "UpgradeEvent": {
+    "$id": "https://trustforge.local/contracts/upgrade-event/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "actual_at": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "event_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "impact_direction": {
+        "enum": [
+          "positive",
+          "negative",
+          "mixed",
+          "unknown"
+        ]
+      },
+      "impacted_asset_ids": {
+        "items": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "official_source_url": {
+        "minLength": 1,
+        "pattern": "^https://(arbitrum\\.foundation|blog\\.arbitrum\\.io|ethereum\\.org|forum\\.arbitrum\\.foundation|gov\\.optimism\\.io)(/|$)",
+        "type": "string"
+      },
+      "scheduled_at": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "status": {
+        "enum": [
+          "announced",
+          "scheduled",
+          "activated",
+          "cancelled"
+        ]
+      },
+      "title": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "event_id",
+      "asset_id",
+      "title",
+      "scheduled_at",
+      "actual_at",
+      "status",
+      "impact_direction",
+      "impacted_asset_ids",
+      "official_source_url",
+      "observed_at"
+    ],
+    "title": "TrustForge UpgradeEvent",
     "type": "object"
   }
 }

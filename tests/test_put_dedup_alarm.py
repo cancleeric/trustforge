@@ -68,6 +68,16 @@ def test_no_sns_builds_filter_and_alarms_without_actions(tmp_path: Path) -> None
 
 
 @pytest.mark.skipif(not _SCRIPT.exists(), reason="deploy script is missing")
+def test_blank_sns_builds_alarms_without_actions(tmp_path: Path) -> None:
+    rc, out, calls = _run(tmp_path, {"TRUSTFORGE_DEDUP_ALARM_SNS": ""})
+
+    assert rc == 0, out
+    assert not any("--alarm-actions" in call for call in calls), calls
+    assert not any("--ok-actions" in call for call in calls), calls
+    assert sum("cloudwatch put-metric-alarm" in call for call in calls) == 2
+
+
+@pytest.mark.skipif(not _SCRIPT.exists(), reason="deploy script is missing")
 def test_valid_sns_adds_actions_to_both_alarms(tmp_path: Path) -> None:
     sns = "arn:aws:sns:ap-southeast-2:123456789012:trustforge-alerts"
     rc, out, calls = _run(tmp_path, {"TRUSTFORGE_DEDUP_ALARM_SNS": sns})
