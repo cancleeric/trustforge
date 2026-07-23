@@ -7,6 +7,7 @@ import pytest
 
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.delayed_outcome_labeler import (
+    FixtureAuthorityRegistry,
     FixtureMarketData,
     FixtureOutcomeLedger,
     FixturePrice,
@@ -14,7 +15,7 @@ from trustforge.delayed_outcome_labeler import (
     VenueSession,
     canonical_fixture_price_content_hash,
     canonical_market_data_revision,
-    validate_canonical_delayed_outcome,
+    validate_canonical_delayed_outcome as _validate_canonical_delayed_outcome,
 )
 from trustforge.learning_event_contract import (
     LearningEventError,
@@ -120,12 +121,122 @@ def _build(*, horizon="T+1", as_of="2026-07-03T00:00:00Z", data=None,
            ledger=None, dry_run=False):
     analysis = analysis or _analysis()
     fixture = FixtureMarketData(tuple(data or ()))
+    registry = FixtureAuthorityRegistry.from_fixture(
+        instrument=analysis.payload["coin"],
+        calendar=_calendar(),
+        market_data=fixture,
+    )
     ledger = ledger or FixtureOutcomeLedger(append=LearningEventAppendLog())
     return ledger.observe(
         analysis, trusted_tenant_id="tenant-a",
         trusted_as_of_time=as_of, trusted_labeled_at=labeled_at or as_of, calendar=_calendar(),
-        market_data=fixture, horizon=horizon,
+        market_data=fixture, trusted_authority_registry=registry, horizon=horizon,
         market_data_variant=variant, dry_run=dry_run,
+    )
+
+
+def _registry(analysis, calendar, fixture):
+    return FixtureAuthorityRegistry.from_fixture(
+        instrument=analysis.payload["coin"],
+        calendar=calendar,
+        market_data=fixture,
+    )
+
+
+def _price_record(item):
+    return {
+        "session_label": item.session_label,
+        "adjusted_close": item.adjusted_close,
+        "event_at": item.event_at,
+        "available_at": item.available_at,
+        "provider": item.provider,
+        "dataset_version": item.dataset_version,
+        "methodology_version": item.methodology_version,
+        "content_hash": item.content_hash,
+    }
+
+
+def _lineage_record(record):
+    return {key: value for key, value in record.items() if key != "adjusted_close"}
+
+
+def _fully_readdress(event, *, selected_prices, payload_changes):
+    revision_manifest = {
+        "calendar": event.provenance["source_record"]["calendar_manifest"],
+        "variant": event.payload["market_data_variant"],
+        "selected": selected_prices,
+    }
+    market_revision = canonical_integrity_checksum(revision_manifest)
+    identity_inputs = {
+        **event.payload["identity_inputs"],
+        "market_data_revision": market_revision,
+    }
+    outcome_id = "sha256:" + hashlib.sha256(
+        json.dumps(
+            identity_inputs,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    payload = {
+        **event.payload,
+        **payload_changes,
+        "outcome_id": outcome_id,
+        "identity_inputs": identity_inputs,
+        "market_data_revision": market_revision,
+    }
+    source_record = {
+        **event.provenance["source_record"],
+        "selected_prices": selected_prices,
+        "market_data_revision": market_revision,
+        "identity_inputs": identity_inputs,
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    return make_learning_event(
+        kind=event.kind,
+        tenant_id=event.tenant_id,
+        entity_id=outcome_id,
+        revision=event.revision,
+        event_time=event.event_time,
+        available_time=event.available_time,
+        as_of_time=event.as_of_time,
+        payload=payload,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+
+
+def validate_canonical_delayed_outcome(
+    event,
+    *,
+    source_analysis=None,
+    trusted_registry=None,
+    predecessor=None,
+):
+    source_analysis = source_analysis or _analysis(
+        direction=event.provenance["source_record"]["prediction_direction"]
+    )
+    if trusted_registry is None:
+        selected = event.provenance["source_record"]["selected_prices"]
+        prices = tuple(
+            FixturePrice(**dict(selected[endpoint]))
+            for endpoint in ("start", "target")
+            if selected[endpoint] is not None
+        )
+        trusted_registry = FixtureAuthorityRegistry.from_fixture(
+            instrument=source_analysis.payload["coin"],
+            calendar=_calendar(),
+            market_data=FixtureMarketData(prices),
+        )
+    return _validate_canonical_delayed_outcome(
+        event,
+        source_analysis=source_analysis,
+        trusted_authority_registry=trusted_registry,
+        predecessor=predecessor,
     )
 
 
@@ -257,11 +368,17 @@ def test_d6_requires_same_split_adjustment_lineage_and_excludes_dividend():
 def test_seven_key_sha_is_tenant_bound_and_outcome_is_never_evidence():
     first = _build()
     other_analysis = _analysis(tenant="tenant-b")
+    other_fixture = FixtureMarketData(())
+    calendar = _calendar()
     other = FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
         other_analysis, trusted_tenant_id="tenant-b",
         trusted_as_of_time="2026-07-03T00:00:00Z",
-        trusted_labeled_at="2026-07-03T00:00:00Z", calendar=_calendar(),
-        market_data=FixtureMarketData(()), horizon="T+1",
+        trusted_labeled_at="2026-07-03T00:00:00Z", calendar=calendar,
+        market_data=other_fixture,
+        trusted_authority_registry=_registry(
+            other_analysis, calendar, other_fixture
+        ),
+        horizon="T+1",
         market_data_variant="as_first_known",
     )
     assert first.payload["outcome_id"] != other.payload["outcome_id"]
@@ -539,6 +656,248 @@ def test_public_validator_rejects_rechecksummed_direction_sign_flip():
         validate_canonical_delayed_outcome(forged)
 
 
+def test_source_analysis_rejects_fully_rechecksummed_direction_flip():
+    analysis = _analysis(direction="bullish")
+    event = _build(
+        analysis=analysis,
+        data=[
+            _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+            _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+        ],
+    )
+    payload = {
+        **event.payload,
+        "direction_sign": -1,
+        "directional_return_pct": (
+            "-" + event.payload["directional_return_pct"].lstrip("-")
+        ),
+        "hit": False,
+    }
+    source_record = {
+        **event.provenance["source_record"],
+        "prediction_direction": "bearish",
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    forged = replace(
+        event,
+        payload=payload,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="prediction direction does not match source analysis",
+    ):
+        validate_canonical_delayed_outcome(
+            forged,
+            source_analysis=analysis,
+        )
+
+
+def test_source_analysis_rejects_registered_but_wrong_t_plus_n_pair():
+    analysis = _analysis(direction="bullish")
+    prices = (
+        _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+        _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+        _price("2026-07-03", "120.00000000", "2026-07-03T18:00:00Z"),
+    )
+    event = _build(
+        analysis=analysis,
+        data=list(prices),
+        as_of="2026-07-04T00:00:00Z",
+    )
+    selected = {
+        "start": event.provenance["source_record"]["selected_prices"]["start"],
+        "target": _price_record(prices[2]),
+    }
+    forged = _fully_readdress(
+        event,
+        selected_prices=selected,
+        payload_changes={
+            "target_session": "2026-07-03",
+            "return_pct": "20.00000000",
+            "directional_return_pct": "20.00000000",
+            "risk_abs_move_pct": "20.00000000",
+            "risk_downside_pct": "0.00000000",
+            "hit": True,
+            "lineage": {
+                "adjustment_basis": "split_adjusted_price_return",
+                "cash_dividend_included": False,
+                "start": _lineage_record(dict(selected["start"])),
+                "target": _lineage_record(selected["target"]),
+            },
+        },
+    )
+    registry = _registry(
+        analysis,
+        _calendar(),
+        FixtureMarketData(prices),
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="outcome sessions do not match source analysis horizon",
+    ):
+        validate_canonical_delayed_outcome(
+            forged,
+            source_analysis=analysis,
+            trusted_registry=registry,
+        )
+
+
+def test_registry_rejects_fully_readdressed_untrusted_target_price():
+    analysis = _analysis(direction="bullish")
+    approved = (
+        _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+        _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+    )
+    event = _build(analysis=analysis, data=list(approved))
+    forged_target = _price(
+        "2026-07-02",
+        "999.00000000",
+        "2026-07-02T21:00:00Z",
+    )
+    selected = {
+        "start": event.provenance["source_record"]["selected_prices"]["start"],
+        "target": _price_record(forged_target),
+    }
+    forged = _fully_readdress(
+        event,
+        selected_prices=selected,
+        payload_changes={
+            "return_pct": "899.00000000",
+            "directional_return_pct": "899.00000000",
+            "risk_abs_move_pct": "899.00000000",
+            "risk_downside_pct": "0.00000000",
+            "hit": True,
+            "lineage": {
+                "adjustment_basis": "split_adjusted_price_return",
+                "cash_dividend_included": False,
+                "start": _lineage_record(dict(selected["start"])),
+                "target": _lineage_record(selected["target"]),
+            },
+        },
+    )
+    registry = _registry(
+        analysis,
+        _calendar(),
+        FixtureMarketData(approved),
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="selected price record is not in trusted fixture registry",
+    ):
+        validate_canonical_delayed_outcome(
+            forged,
+            source_analysis=analysis,
+            trusted_registry=registry,
+        )
+
+
+def test_registry_rejects_fully_readdressed_old_same_session_revision():
+    analysis = _analysis(direction="bullish")
+    start = _price(
+        "2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"
+    )
+    old_target = _price(
+        "2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"
+    )
+    latest_target = _price(
+        "2026-07-02", "111.00000000", "2026-07-02T22:00:00Z"
+    )
+    snapshot = (start, old_target, latest_target)
+    event = _build(
+        analysis=analysis,
+        data=list(snapshot),
+        variant="latest_official",
+    )
+    selected = {
+        "start": _price_record(start),
+        "target": _price_record(old_target),
+    }
+    forged = _fully_readdress(
+        event,
+        selected_prices=selected,
+        payload_changes={
+            "return_pct": "10.00000000",
+            "directional_return_pct": "10.00000000",
+            "risk_abs_move_pct": "10.00000000",
+            "risk_downside_pct": "0.00000000",
+            "hit": True,
+            "lineage": {
+                "adjustment_basis": "split_adjusted_price_return",
+                "cash_dividend_included": False,
+                "start": _lineage_record(selected["start"]),
+                "target": _lineage_record(selected["target"]),
+            },
+        },
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="trusted fixture snapshot selection",
+    ):
+        validate_canonical_delayed_outcome(
+            forged,
+            source_analysis=analysis,
+            trusted_registry=_registry(
+                analysis, _calendar(), FixtureMarketData(snapshot)
+            ),
+        )
+
+
+def test_registry_rejects_fully_readdressed_future_same_session_revision():
+    analysis = _analysis(direction="bullish")
+    start = _price(
+        "2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"
+    )
+    visible_target = _price(
+        "2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"
+    )
+    future_target = _price(
+        "2026-07-02", "999.00000000", "2026-07-04T00:00:00Z"
+    )
+    snapshot = (start, visible_target, future_target)
+    event = _build(
+        analysis=analysis,
+        data=list(snapshot),
+        variant="latest_official",
+    )
+    selected = {
+        "start": _price_record(start),
+        "target": _price_record(future_target),
+    }
+    forged = _fully_readdress(
+        event,
+        selected_prices=selected,
+        payload_changes={
+            "return_pct": "899.00000000",
+            "directional_return_pct": "899.00000000",
+            "risk_abs_move_pct": "899.00000000",
+            "risk_downside_pct": "0.00000000",
+            "hit": True,
+            "lineage": {
+                "adjustment_basis": "split_adjusted_price_return",
+                "cash_dividend_included": False,
+                "start": _lineage_record(selected["start"]),
+                "target": _lineage_record(selected["target"]),
+            },
+        },
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="not visible at outcome availability",
+    ):
+        validate_canonical_delayed_outcome(
+            forged,
+            source_analysis=analysis,
+            trusted_registry=_registry(
+                analysis, _calendar(), FixtureMarketData(snapshot)
+            ),
+        )
+
+
 def test_public_validator_rejects_fully_readdressed_calendar_authority_forgery():
     event = _build(
         analysis=_analysis(direction="bullish"),
@@ -689,12 +1048,17 @@ def test_ledger_rejects_unconfirmed_append_status_without_state_mutation(bad_sta
 
 
 def test_fixture_only_authority_and_calendar_gaps_fail_closed():
+    analysis = _analysis()
+    fixture = FixtureMarketData(())
+    calendar = _calendar()
     with pytest.raises(LearningEventError, match="trusted tenant"):
         FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
-            _analysis(), trusted_tenant_id="tenant-b",
+            analysis, trusted_tenant_id="tenant-b",
             trusted_as_of_time="2026-07-02T23:59:00Z",
-            trusted_labeled_at="2026-07-02T23:59:00Z", calendar=_calendar(),
-            market_data=FixtureMarketData(()), horizon="T+1",
+            trusted_labeled_at="2026-07-02T23:59:00Z", calendar=calendar,
+            market_data=fixture,
+            trusted_authority_registry=_registry(analysis, calendar, fixture),
+            horizon="T+1",
             market_data_variant="as_first_known",
         )
 
@@ -708,11 +1072,17 @@ def test_calendar_timezone_requires_iana_registry_identity():
         _calendar(),
         sessions=_calendar().sessions + (VenueSession("2026-07-21", "unknown", None),),
     )
+    analysis = _analysis()
+    fixture = FixtureMarketData(())
     event = FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
-        _analysis(), trusted_tenant_id="tenant-a",
+        analysis, trusted_tenant_id="tenant-a",
         trusted_as_of_time="2026-07-03T00:00:00Z",
         trusted_labeled_at="2026-07-03T00:00:00Z", calendar=after_target,
-        market_data=FixtureMarketData(()), horizon="T+1",
+        market_data=fixture,
+        trusted_authority_registry=_registry(
+            analysis, after_target, fixture
+        ),
+        horizon="T+1",
         market_data_variant="as_first_known",
     )
     assert event.payload["target_session"] == "2026-07-02"
@@ -720,11 +1090,17 @@ def test_calendar_timezone_requires_iana_registry_identity():
     sessions = list(_calendar().sessions)
     sessions[1] = VenueSession("2026-07-02", "unknown", None)
     gap = replace(_calendar(), sessions=tuple(sessions))
+    gap_analysis = _analysis()
+    gap_fixture = FixtureMarketData(())
     gap_event = FixtureOutcomeLedger(append=LearningEventAppendLog()).observe(
-            _analysis(), trusted_tenant_id="tenant-a",
+            gap_analysis, trusted_tenant_id="tenant-a",
             trusted_as_of_time="2026-07-02T23:59:00Z",
             trusted_labeled_at="2026-07-02T23:59:00Z", calendar=gap,
-            market_data=FixtureMarketData(()), horizon="T+1",
+            market_data=gap_fixture,
+            trusted_authority_registry=_registry(
+                gap_analysis, gap, gap_fixture
+            ),
+            horizon="T+1",
             market_data_variant="as_first_known",
         )
     assert gap_event.payload["maturity"] == "unavailable"

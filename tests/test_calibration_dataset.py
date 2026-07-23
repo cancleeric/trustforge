@@ -5,6 +5,7 @@ import pytest
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.calibration_dataset import CalibrationDatasetError, build_confidence_calibration_dataset
 from trustforge.delayed_outcome_labeler import (
+    FixtureAuthorityRegistry,
     FixtureMarketData,
     FixtureOutcomeLedger,
     FixturePrice,
@@ -144,7 +145,12 @@ def _outcome(
     labeled_at_override=None,
 ):
     start_day = int(analysis.event_time[8:10])
-    fixture = FixtureMarketData((_price(start_day, "100.00000000"), _price(end_day, "110.00000000")))
+    fixture = FixtureMarketData(
+        (
+            _price(start_day, f"{100 + start_day}.00000000"),
+            _price(end_day, f"{100 + end_day}.00000000"),
+        )
+    )
     labeled_at = labeled_at_override or f"2026-07-{end_day + 1:02d}T00:00:00Z"
     ledger = ledger or FixtureOutcomeLedger(append=LearningEventAppendLog())
     return ledger.observe(
@@ -155,17 +161,43 @@ def _outcome(
         trusted_labeled_at=labeled_at,
         calendar=_calendar(),
         market_data=fixture,
+        trusted_authority_registry=FixtureAuthorityRegistry.from_fixture(
+            instrument=analysis.payload["coin"],
+            calendar=_calendar(),
+            market_data=fixture,
+        ),
         market_data_variant=variant,
     )
 
 
-def _dataset(analyses, outcomes, *, variant="latest_official"):
+def _registry_for(analyses, outcomes):
+    analyses = list(analyses)
+    prices = {}
+    for outcome in outcomes:
+        if outcome.kind != "delayed_outcome":
+            continue
+        for raw in outcome.provenance["source_record"]["selected_prices"].values():
+            if raw is not None:
+                price = FixturePrice(**dict(raw))
+                prices[canonical_integrity_checksum(dict(raw))] = price
+    return FixtureAuthorityRegistry.from_fixture(
+        instrument=analyses[0].payload["coin"],
+        calendar=_calendar(),
+        market_data=FixtureMarketData(tuple(prices.values())),
+    )
+
+
+def _dataset(analyses, outcomes, *, variant="latest_official", registry=None):
+    analyses = list(analyses)
+    outcomes = list(outcomes)
+    registry = registry or _registry_for(analyses, outcomes)
     return build_confidence_calibration_dataset(
         analyses,
         outcomes,
         producer_version="unit",
         trusted_tenant_id="tenant-a",
         market_data_variant=variant,
+        trusted_authority_registry=registry,
     )
 
 
@@ -235,6 +267,11 @@ def test_calibration_dataset_skips_pending_or_unavailable_outcomes():
         trusted_labeled_at=labeled_at,
         calendar=_calendar(),
         market_data=fixture,
+        trusted_authority_registry=FixtureAuthorityRegistry.from_fixture(
+            instrument=analysis.payload["coin"],
+            calendar=_calendar(),
+            market_data=fixture,
+        ),
         market_data_variant="as_first_known",
     )
 
@@ -265,6 +302,7 @@ def test_calibration_dataset_requires_variant_and_isolates_tenant_and_variant():
             producer_version="unit",
             trusted_tenant_id="tenant-a",
             market_data_variant="",
+            trusted_authority_registry=_registry_for([analysis], [latest]),
         )
 
 
@@ -316,7 +354,7 @@ def test_calibration_rejects_outcome_before_analysis_availability():
             "checksum": canonical_integrity_checksum(source_record),
         },
     )
-    with pytest.raises(CalibrationDatasetError, match="analysis availability"):
+    with pytest.raises(CalibrationDatasetError, match="canonical validation"):
         _dataset([analysis], [forged])
 
 
@@ -374,5 +412,5 @@ def test_higher_revision_wrong_source_cannot_shadow_legitimate_outcome():
             "checksum": canonical_integrity_checksum(source_record),
         },
     )
-    with pytest.raises(CalibrationDatasetError, match="canonical validation"):
+    with pytest.raises(CalibrationDatasetError, match="does not match analysis"):
         _dataset([analysis], [legitimate, forged])

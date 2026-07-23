@@ -58,6 +58,70 @@ class OutcomeAppendPort(Protocol):
 
 
 @dataclass(frozen=True)
+class FixtureAuthorityRegistry:
+    """Server-trusted fixture snapshot roots; never derived from an outcome event."""
+
+    calendar_manifest_digests: tuple[tuple[str, str], ...]
+    price_records: tuple[FixturePrice, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.calendar_manifest_digests) is not tuple or any(
+            type(item) is not tuple
+            or len(item) != 2
+            or type(item[0]) is not str
+            or not item[0]
+            or not _SHA256.fullmatch(item[1])
+            for item in self.calendar_manifest_digests
+        ):
+            raise LearningEventError("fixture calendar registry is invalid")
+        if len({item[0] for item in self.calendar_manifest_digests}) != len(
+            self.calendar_manifest_digests
+        ):
+            raise LearningEventError("fixture calendar registry contains duplicates")
+        if type(self.price_records) is not tuple or any(
+            type(item) is not FixturePrice for item in self.price_records
+        ):
+            raise LearningEventError("fixture price registry is invalid")
+        digests = [
+            canonical_integrity_checksum(_price_manifest(item))
+            for item in self.price_records
+        ]
+        if len(set(digests)) != len(digests):
+            raise LearningEventError("fixture price registry contains duplicates")
+        FixtureMarketData(self.price_records)
+
+    @classmethod
+    def from_fixture(
+        cls,
+        *,
+        instrument: str,
+        calendar: FixtureVenueCalendar,
+        market_data: FixtureMarketData,
+    ) -> FixtureAuthorityRegistry:
+        if type(instrument) is not str or not instrument:
+            raise LearningEventError("fixture registry instrument is required")
+        return cls(
+            calendar_manifest_digests=(
+                (
+                    instrument,
+                    canonical_integrity_checksum(_calendar_manifest(calendar)),
+                ),
+            ),
+            price_records=market_data.prices,
+        )
+
+    def calendar_digest_for(self, instrument: str) -> str | None:
+        return dict(self.calendar_manifest_digests).get(instrument)
+
+    @property
+    def price_record_digests(self) -> frozenset[str]:
+        return frozenset(
+            canonical_integrity_checksum(_price_manifest(item))
+            for item in self.price_records
+        )
+
+
+@dataclass(frozen=True)
 class VenueSession:
     """Venue status: ``closed`` means venue closure, never instrument suspension."""
 
@@ -489,6 +553,7 @@ class FixtureOutcomeLedger:
         trusted_labeled_at: str,
         calendar: FixtureVenueCalendar,
         market_data: FixtureMarketData,
+        trusted_authority_registry: FixtureAuthorityRegistry,
         horizon: str,
         market_data_variant: str,
         dry_run: bool = False,
@@ -541,7 +606,12 @@ class FixtureOutcomeLedger:
                 trusted_outcome_version=version,
                 trusted_supersedes=previous,
             )
-            validate_canonical_delayed_outcome(event, predecessor=previous)
+            validate_canonical_delayed_outcome(
+                event,
+                source_analysis=analysis_event,
+                trusted_authority_registry=trusted_authority_registry,
+                predecessor=previous,
+            )
             if dry_run:
                 return event
             append_status = self._append.append(event)
@@ -590,6 +660,8 @@ def _market_revision_for_request(
 def validate_canonical_delayed_outcome(
     event: LearningEvent,
     *,
+    source_analysis: LearningEvent,
+    trusted_authority_registry: FixtureAuthorityRegistry,
     predecessor: LearningEvent | None = None,
 ) -> None:
     """Fail closed unless an event is the exact canonical delayed-outcome schema."""
@@ -636,7 +708,10 @@ def validate_canonical_delayed_outcome(
     ):
         raise LearningEventError("delayed outcome emission contract is invalid")
     start_price, target_price, prediction_direction = _validate_canonical_source_binding(
-        event, source_record
+        event,
+        source_record,
+        source_analysis=source_analysis,
+        trusted_authority_registry=trusted_authority_registry,
     )
     inputs = payload.get("identity_inputs")
     if not hasattr(inputs, "items") or set(inputs) != {
@@ -1091,10 +1166,32 @@ def _price_manifest(item: FixturePrice | None) -> dict[str, str] | None:
 def _validate_canonical_source_binding(
     event: LearningEvent,
     source_record: Any,
+    *,
+    source_analysis: LearningEvent,
+    trusted_authority_registry: FixtureAuthorityRegistry,
 ) -> tuple[FixturePrice | None, FixturePrice | None, str]:
+    if type(trusted_authority_registry) is not FixtureAuthorityRegistry:
+        raise LearningEventError("trusted fixture authority registry is required")
+    _validate_analysis(source_analysis, event.tenant_id)
+    payload = event.payload
+    analysis_id = source_analysis.payload.get("analysis_id")
+    decision = source_analysis.payload.get("decision")
+    if (
+        source_analysis.identity != payload.get("source_event_identity")
+        or source_analysis.identity != source_record.get("analysis_identity")
+        or analysis_id != payload.get("analysis_id")
+        or analysis_id != payload.get("prediction_id")
+        or not hasattr(decision, "items")
+    ):
+        raise LearningEventError("source analysis semantic binding is invalid")
     prediction_direction = source_record.get("prediction_direction")
-    if prediction_direction not in _DIRECTIONS:
-        raise LearningEventError("canonical prediction direction is invalid")
+    if (
+        prediction_direction not in _DIRECTIONS
+        or decision.get("direction") != prediction_direction
+    ):
+        raise LearningEventError(
+            "prediction direction does not match source analysis"
+        )
     calendar_manifest = source_record.get("calendar_manifest")
     if not hasattr(calendar_manifest, "items"):
         raise LearningEventError("canonical calendar manifest is required")
@@ -1113,6 +1210,7 @@ def _validate_canonical_source_binding(
         calendar_data
     ):
         raise LearningEventError("canonical calendar manifest checksum is invalid")
+    calendar_digest = canonical_integrity_checksum(calendar_data)
     authority = (
         calendar_data.get("calendar_id"),
         calendar_data.get("timezone"),
@@ -1123,6 +1221,15 @@ def _validate_canonical_source_binding(
     )
     if authority not in _FIXTURE_CALENDAR_AUTHORITY:
         raise LearningEventError("fixture calendar authority not allowlisted")
+    instrument = source_analysis.payload.get("coin")
+    if (
+        type(instrument) is not str
+        or trusted_authority_registry.calendar_digest_for(instrument)
+        != calendar_digest
+    ):
+        raise LearningEventError(
+            "calendar manifest is not trusted for source analysis instrument"
+        )
     raw_sessions = calendar_data.get("sessions")
     if not isinstance(raw_sessions, (tuple, list)):
         raise LearningEventError("canonical calendar sessions are invalid")
@@ -1173,16 +1280,80 @@ def _validate_canonical_source_binding(
         }:
             raise LearningEventError("canonical selected price is invalid")
         price = FixturePrice(**dict(raw_price))
+        if canonical_integrity_checksum(dict(raw_price)) not in (
+            trusted_authority_registry.price_record_digests
+        ):
+            raise LearningEventError(
+                "selected price record is not in trusted fixture registry"
+            )
         session = sessions_by_label.get(price.session_label)
         if session is None:
             raise LearningEventError("selected price session is absent from calendar")
         _validate_selected_price(price, session, endpoint)
+        if _parse_datetime(
+            price.available_at,
+            f"{endpoint} selected price available_at",
+        ) > _parse_datetime(event.available_time, "outcome available_time"):
+            raise LearningEventError(
+                "selected price is not visible at outcome availability"
+            )
         parsed[endpoint] = price
     start_price = parsed["start"]
     target_price = parsed["target"]
     if start_price is not None and target_price is not None:
         _validate_price_lineage(start_price, target_price)
-    payload = event.payload
+    horizon = payload.get("horizon")
+    if horizon not in _HORIZONS:
+        raise LearningEventError("source analysis horizon is invalid")
+    prediction_available = _parse_datetime(
+        source_analysis.available_time,
+        "source analysis available_time",
+    )
+    if _parse_datetime(
+        source_analysis.event_time,
+        "source analysis event_time",
+    ) > prediction_available:
+        resolved = None
+    else:
+        try:
+            resolved = calendar.resolve(prediction_available, _HORIZONS[horizon])
+        except LearningEventError as exc:
+            if str(exc) != "CALENDAR_GAP":
+                raise
+            resolved = None
+    expected_start = resolved[0].label if resolved is not None else None
+    expected_target = resolved[1].label if resolved is not None else None
+    if (
+        payload.get("start_session") != expected_start
+        or payload.get("target_session") != expected_target
+    ):
+        raise LearningEventError(
+            "outcome sessions do not match source analysis horizon"
+        )
+    registry_market_data = FixtureMarketData(
+        trusted_authority_registry.price_records
+    )
+    cutoff = _parse_datetime(event.available_time, "outcome available_time")
+    variant = payload.get("market_data_variant")
+    if variant not in _VARIANTS:
+        raise LearningEventError("canonical market-data variant is invalid")
+    expected_start_price = (
+        registry_market_data.price_for(expected_start, cutoff, variant=variant)
+        if expected_start is not None
+        else None
+    )
+    expected_target_price = (
+        registry_market_data.price_for(expected_target, cutoff, variant=variant)
+        if expected_target is not None
+        else None
+    )
+    if (
+        _price_manifest(start_price) != _price_manifest(expected_start_price)
+        or _price_manifest(target_price) != _price_manifest(expected_target_price)
+    ):
+        raise LearningEventError(
+            "selected prices do not match trusted fixture snapshot selection"
+        )
     if (
         start_price is not None
         and start_price.session_label != payload.get("start_session")
@@ -1191,6 +1362,22 @@ def _validate_canonical_source_binding(
         and target_price.session_label != payload.get("target_session")
     ):
         raise LearningEventError("selected prices do not match outcome sessions")
+    expected_lineage = (
+        {
+            "adjustment_basis": "split_adjusted_price_return",
+            "cash_dividend_included": False,
+            "start": _price_lineage(start_price),
+            "target": _price_lineage(target_price),
+        }
+        if payload.get("maturity") == "labeled"
+        and start_price is not None
+        and target_price is not None
+        else None
+    )
+    if payload.get("lineage") != expected_lineage:
+        raise LearningEventError(
+            "outcome lineage does not match selected price records"
+        )
     revision_manifest = {
         "calendar": _calendar_manifest(calendar),
         "variant": payload.get("market_data_variant"),

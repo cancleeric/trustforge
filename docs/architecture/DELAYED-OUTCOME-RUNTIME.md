@@ -78,6 +78,17 @@ metric from adjusted closes with Decimal34 round-half-even arithmetic.
 Rechecksumming a forged payload or provenance record cannot detach a label from
 its selected fixture observations or prediction direction.
 
+Validation also requires the exact source analysis event and a server-trusted
+`FixtureAuthorityRegistry`. The registry binds the analysis instrument to one
+calendar-manifest digest and retains the complete immutable price snapshot.
+Validation rebuilds `FixtureMarketData` from that trusted snapshot and repeats
+the canonical as-first-known/latest-official selection at outcome availability;
+membership alone is insufficient, and old or future same-session revisions are
+rejected. The source analysis independently supplies tenant, identity, analysis
+ID, direction, and availability; the validator resolves the canonical calendar
+again to enforce the exact cutoff and T+N session pair. Neither the ledger nor
+the calibration consumer may validate an outcome without both trust anchors.
+
 Outcome events are always `delayed_outcome`, explicitly non-evidentiary, and
 never eligible as Evidence. Dry-run returns before invoking the append port, so
 it performs zero writes.

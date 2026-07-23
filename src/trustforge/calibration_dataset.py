@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
-from .delayed_outcome_labeler import validate_canonical_delayed_outcome
+from .delayed_outcome_labeler import (
+    FixtureAuthorityRegistry,
+    validate_canonical_delayed_outcome,
+)
 from .learning_event_contract import LearningEvent, LearningEventError
 
 
@@ -23,6 +26,7 @@ def build_confidence_calibration_dataset(
     producer_version: str,
     trusted_tenant_id: str,
     market_data_variant: str,
+    trusted_authority_registry: FixtureAuthorityRegistry,
 ) -> dict[str, Any]:
     if not isinstance(producer_version, str) or not producer_version.strip():
         raise CalibrationDatasetError("producer_version is required")
@@ -30,21 +34,23 @@ def build_confidence_calibration_dataset(
         raise CalibrationDatasetError("trusted_tenant_id is required")
     if market_data_variant not in {"as_first_known", "latest_official"}:
         raise CalibrationDatasetError("market_data_variant must be selected explicitly")
-    analyses = [
-        _analysis_row(event)
+    tenant_analysis_events = [
+        event
         for event in analysis_events
         if event.tenant_id == trusted_tenant_id
     ]
-    analysis_identities: dict[str, set[str]] = {}
-    for row in analyses:
-        analysis_identities.setdefault(row["analysis_id"], set()).add(
-            row["analysis_identity"]
-        )
+    analyses = [_analysis_row(event) for event in tenant_analysis_events]
+    source_analyses: dict[str, LearningEvent] = {}
+    for event in tenant_analysis_events:
+        if event.identity in source_analyses:
+            raise CalibrationDatasetError("duplicate source analysis identity")
+        source_analyses[event.identity] = event
     outcomes = _latest_labeled_outcomes(
         outcome_events,
         trusted_tenant_id=trusted_tenant_id,
         market_data_variant=market_data_variant,
-        analysis_identities=analysis_identities,
+        source_analyses=source_analyses,
+        trusted_authority_registry=trusted_authority_registry,
     )
     rows = []
     for analysis in analyses:
@@ -112,7 +118,8 @@ def _latest_labeled_outcomes(
     *,
     trusted_tenant_id: str,
     market_data_variant: str,
-    analysis_identities: dict[str, set[str]],
+    source_analyses: dict[str, LearningEvent],
+    trusted_authority_registry: FixtureAuthorityRegistry,
 ) -> dict[tuple[str, str, str, str], dict[str, Any]]:
     outcomes: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     revisions: dict[tuple[str, str, str, str], int] = {}
@@ -134,8 +141,19 @@ def _latest_labeled_outcomes(
         if payload.get("market_data_variant") != market_data_variant:
             continue
         predecessor = by_outcome_id.get(payload.get("supersedes_outcome_id"))
+        source_identity = payload.get("source_event_identity")
+        source_analysis = source_analyses.get(source_identity)
+        if source_analysis is None:
+            raise CalibrationDatasetError(
+                "outcome source_event_identity does not match analysis"
+            )
         try:
-            validate_canonical_delayed_outcome(event, predecessor=predecessor)
+            validate_canonical_delayed_outcome(
+                event,
+                source_analysis=source_analysis,
+                trusted_authority_registry=trusted_authority_registry,
+                predecessor=predecessor,
+            )
         except LearningEventError as exc:
             raise CalibrationDatasetError(
                 "dataset outcome failed canonical validation"
@@ -150,13 +168,6 @@ def _latest_labeled_outcomes(
             raise CalibrationDatasetError("outcome analysis_id and horizon are required")
         if not isinstance(payload.get("source_event_identity"), str):
             raise CalibrationDatasetError("outcome source_event_identity is required")
-        if payload["source_event_identity"] not in analysis_identities.get(
-            analysis_id,
-            set(),
-        ):
-            raise CalibrationDatasetError(
-                "outcome source_event_identity does not match analysis"
-            )
         key = (event.tenant_id, analysis_id, horizon, market_data_variant)
         revision = payload.get("outcome_version")
         if type(revision) is not int or revision < 1:
