@@ -10,7 +10,7 @@ from trustforge.learning_event_contract import (
     LearningEventError, canonical_integrity_checksum, make_learning_event,
 )
 from trustforge.rag_gold_set import (
-    RagGoldSetError, RagGoldSetPolicy, RetrievalEvaluationPolicy,
+    ApprovalStoreSnapshot, RagGoldSetError, RagGoldSetPolicy, RetrievalEvaluationPolicy,
     ReviewerAuthorityRegistry, build_rag_gold_set, evaluate_rag_retrieval,
 )
 
@@ -125,21 +125,73 @@ def label(evidence_event=None, label_id="l1", query="q1", revision=1, predecesso
     return event("human_gold_label", label_id, revision, payload)
 
 
+def approval_store(labels, *, extra_records=(), **changes):
+    from trustforge.calibration_dataset import _event_anchor
+    from trustforge.rag_gold_set import _sha256
+    records = []
+    for item in labels:
+        payload = item.payload
+        records.append({
+            "approval_id": f"approval-{payload['label_id']}",
+            "label_identity": item.identity,
+            "label_event_sha256": _sha256(_event_anchor(item)),
+            "label_id": payload["label_id"], "query_id": payload["query_id"],
+            "decision": payload["label"], "reason": payload["reason"],
+            "reviewer_id": payload["reviewer"],
+            "reviewed_at": payload["reviewed_at"], "tenant_id": item.tenant_id,
+        })
+    records.extend(extra_records)
+    store = approval_store_from_records(records)
+    if not changes:
+        return store
+    values = {
+        "tenant_id": store.tenant_id, "version": store.version,
+        "valid_from": store.valid_from, "valid_until": store.valid_until,
+        "records": store.records, "root_sha256": store.root_sha256,
+        "checksum": store.checksum,
+    }
+    values.update(changes)
+    return ApprovalStoreSnapshot(**values)
+
+
+def approval_store_from_records(records):
+    from trustforge.rag_gold_set import _sha256
+    scoped = sorted(
+        (record for record in records if record["tenant_id"] == T and record["reviewed_at"] <= AS_OF),
+        key=lambda record: (record["label_identity"], record["approval_id"]),
+    )
+    root = _sha256(scoped)
+    unsigned = {
+        "tenant_id": T, "version": "approval-v1",
+        "valid_from": "2026-01-01T00:00:00.000000Z",
+        "valid_until": "2027-01-01T00:00:00.000000Z",
+        "records": scoped, "root_sha256": root, "count": len(scoped),
+    }
+    return ApprovalStoreSnapshot(
+        tenant_id=T, version="approval-v1",
+        valid_from=unsigned["valid_from"], valid_until=unsigned["valid_until"],
+        records=tuple(records), root_sha256=root, checksum=_sha256(unsigned),
+    )
+
+
 def inputs():
     ev = evidence()
     ret = retrieval(ev)
     return ev, ret, feedback(ret), label(ev)
 
 
-def build(*, labels=None, retrievals=None, feedbacks=None, evidences=None, reg=None, policy=None, previous=None):
+def build(*, labels=None, retrievals=None, feedbacks=None, evidences=None, reg=None, approvals=None, policy=None, previous=None):
     ev, ret, feed, lab = inputs()
+    label_input = labels if labels is not None else [lab]
     return build_rag_gold_set(
-        labels if labels is not None else [lab],
+        label_input,
         retrieval_events=retrievals if retrievals is not None else [ret],
         feedback_events=feedbacks if feedbacks is not None else [feed],
         evidence_events=evidences if evidences is not None else [ev],
         policy=policy or RagGoldSetPolicy(T, AS_OF, "gold-v1", "producer-v1"),
-        trusted_reviewer_registry=reg or registry(), previous_manifest=previous,
+        trusted_reviewer_registry=reg or registry(),
+        trusted_approval_store=approvals or approval_store(label_input),
+        previous_manifest=previous,
     )
 
 
@@ -152,6 +204,7 @@ def evaluate(retrievals, manifest=None, evidences=None):
         trusted_feedback_events=[feed],
         trusted_evidence_events=evidences or [ev],
         trusted_reviewer_registry=registry(),
+        trusted_approval_store=approval_store([lab]),
     )
 
 
@@ -212,6 +265,7 @@ def test_evidence_revision_current_revoked_and_stale_citation():
             trusted_label_events=[label(v2)], trusted_retrieval_events=[],
             trusted_feedback_events=[],
             trusted_evidence_events=[v1, v2], trusted_reviewer_registry=registry(),
+            trusted_approval_store=approval_store([label(v2)]),
         )
     revoked = evidence(revision=2, predecessor=v1.identity, status="revoked")
     with pytest.raises(RagGoldSetError):
@@ -388,6 +442,7 @@ def test_query_time_snapshot_is_reported_with_lineage_and_changes_hash():
         trusted_feedback_events=[changed_feed],
         trusted_evidence_events=[changed_ev],
         trusted_reviewer_registry=registry(),
+        trusted_approval_store=approval_store([changed_label]),
     )
     assert changed_report["report_sha256"] != base["report_sha256"]
 
@@ -411,6 +466,7 @@ def test_same_query_cutoff_builds_evidence_snapshot_once(monkeypatch):
         evidence_events=[ev],
         policy=RagGoldSetPolicy(T, AS_OF, "gold-v1", "producer-v1"),
         trusted_reviewer_registry=registry(),
+        trusted_approval_store=approval_store([label(ev)]),
     )
     # One dataset snapshot plus one cached unique retrieval cutoff snapshot.
     assert calls == 2
@@ -429,6 +485,7 @@ def test_missing_retrieval_still_binds_query_time_evidence_and_changes_hash():
             trusted_label_events=[lab], trusted_retrieval_events=[trusted_ret],
             trusted_feedback_events=[feed], trusted_evidence_events=evidence_input,
             trusted_reviewer_registry=registry(),
+            trusted_approval_store=approval_store([lab]),
         )
 
     base = run((item for item in [ev]))
@@ -463,8 +520,9 @@ def test_unique_cutoff_limit_fails_before_any_snapshot_build(monkeypatch):
         build_rag_gold_set(
             [label(ev)], retrieval_events=retrievals, feedback_events=[],
             evidence_events=[ev],
-            policy=RagGoldSetPolicy(T, AS_OF, "gold-v1", "producer-v1"),
-            trusted_reviewer_registry=registry(),
+                policy=RagGoldSetPolicy(T, AS_OF, "gold-v1", "producer-v1"),
+                trusted_reviewer_registry=registry(),
+                trusted_approval_store=approval_store([label(ev)]),
         )
     assert calls == 0
 
@@ -477,6 +535,7 @@ def test_one_shot_evidence_generator_matches_list_and_offset_is_canonicalized():
         evidence_events=(item for item in [ev]),
         policy=RagGoldSetPolicy(T, AS_OF, "gold-v1", "producer-v1"),
         trusted_reviewer_registry=registry(),
+        trusted_approval_store=approval_store([lab]),
     )
     assert from_generator == from_list
     payload = dict(ret.payload)
@@ -531,8 +590,9 @@ def test_gold_decision_matrix_and_report_replay(
             trusted_label_events=[gold],
             trusted_retrieval_events=[trusted_ret],
             trusted_feedback_events=[feed],
-            trusted_evidence_events=[ev],
-            trusted_reviewer_registry=registry(),
+                trusted_evidence_events=[ev],
+                trusted_reviewer_registry=registry(),
+                trusted_approval_store=approval_store([gold]),
         )
 
     first = run()
@@ -587,9 +647,208 @@ def test_empty_current_evidence_allows_trusted_explicit_abstention():
         trusted_label_events=[gold], trusted_retrieval_events=[abstention],
         trusted_feedback_events=[feed], trusted_evidence_events=[],
         trusted_reviewer_registry=registry(),
+        trusted_approval_store=approval_store([gold]),
     )
     row = report["rows"][0]
     assert row["outcome"] == "explicit_abstention"
     assert row["decision_correct"] is True
     assert row["snapshot_id"] == trusted["snapshot_id"]
     assert row["job_id"] == trusted["job_id"]
+
+
+def test_label_self_assertion_without_matching_independent_approval_is_rejected():
+    gold = label()
+    empty = approval_store_from_records([])
+    with pytest.raises(RagGoldSetError):
+        build(labels=[gold], approvals=empty)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("label_identity", "forged-identity"),
+        ("label_event_sha256", "0" * 64),
+        ("label_id", "other-label"),
+        ("query_id", "other-query"),
+        ("decision", "must_abstain"),
+        ("reason", "different reason"),
+        ("reviewer_id", "mallory"),
+        ("reviewed_at", "2026-05-31T00:00:00.000000Z"),
+        ("tenant_id", "other-tenant"),
+    ],
+)
+def test_approval_record_must_exactly_bind_label_content(field, value):
+    gold = label()
+    record = dict(approval_store([gold]).records[0])
+    record[field] = value
+    forged = approval_store_from_records([record])
+    with pytest.raises(RagGoldSetError):
+        build(labels=[gold], approvals=forged)
+
+
+def test_approval_replay_duplicate_cross_label_and_store_tamper_rejected():
+    gold = label()
+    record = dict(approval_store([gold]).records[0])
+    with pytest.raises(RagGoldSetError):
+        build(labels=[gold], approvals=approval_store_from_records([record, dict(record)]))
+    other = label(label_id="other", query="q2")
+    with pytest.raises(RagGoldSetError):
+        build(labels=[gold], approvals=approval_store([other]))
+    tampered = approval_store([gold], checksum="0" * 64)
+    with pytest.raises(RagGoldSetError):
+        build(labels=[gold], approvals=tampered)
+
+
+def test_foreign_and_future_approval_records_are_scoped_invisible():
+    gold = label()
+    base = build(labels=[gold])
+    record = dict(approval_store([gold]).records[0])
+    foreign = {
+        **record, "approval_id": "foreign-approval",
+        "label_identity": "foreign-label", "tenant_id": "other-tenant",
+    }
+    future = {
+        **record, "approval_id": "future-approval",
+        "label_identity": "future-label",
+        "reviewed_at": "2027-06-01T00:00:00.000000Z",
+    }
+    augmented = approval_store([gold], extra_records=(foreign, future))
+    assert build(labels=[gold], approvals=augmented) == base
+
+
+def test_approval_store_replay_is_byte_identical_and_frozen_in_manifest():
+    gold = label()
+    store = approval_store([gold])
+    first = build(labels=[gold], approvals=store)
+    second = build(labels=[gold], approvals=store)
+    assert first == second
+    assert first["policy"]["approval_store_version"] == store.version
+    assert first["policy"]["approval_store_root_sha256"] == store.root_sha256
+    assert first["approval_store"]["checksum"] == store.checksum
+    assert first["rows"][0]["approval_id"] == "approval-l1"
+
+
+def test_resigned_row_approval_provenance_forgery_is_rejected():
+    forged = copy.deepcopy(build())
+    forged["rows"][0]["approval_store_root_sha256"] = "0" * 64
+    forged["rows_sha256"] = sha(forged["rows"])
+    forged["manifest_sha256"] = sha({
+        key: value for key, value in forged.items() if key != "manifest_sha256"
+    })
+    with pytest.raises(RagGoldSetError, match="row approval provenance"):
+        evaluate([], forged)
+
+
+def test_forged_previous_manifest_row_lineage_is_rejected():
+    previous = copy.deepcopy(build())
+    previous["rows"][0]["approval_store_checksum"] = "0" * 64
+    previous["rows_sha256"] = sha(previous["rows"])
+    previous["manifest_sha256"] = sha({
+        key: value for key, value in previous.items() if key != "manifest_sha256"
+    })
+    policy = RagGoldSetPolicy(
+        T, AS_OF, "gold-v1", "producer-v1", gold_set_revision=2,
+        previous_manifest_sha256=previous["manifest_sha256"],
+    )
+    with pytest.raises(RagGoldSetError):
+        build(policy=policy, previous=previous)
+
+
+def test_previous_chain_rejects_valid_but_changed_approval_store():
+    from trustforge.rag_gold_set import _sha256
+    previous = build()
+    base = approval_store([label()])
+    unsigned = {
+        "tenant_id": T, "version": "approval-v2",
+        "valid_from": base.valid_from, "valid_until": base.valid_until,
+        "records": list(base.records), "root_sha256": base.root_sha256,
+        "count": len(base.records),
+    }
+    changed = ApprovalStoreSnapshot(
+        T, "approval-v2", base.valid_from, base.valid_until, base.records,
+        base.root_sha256, _sha256(unsigned),
+    )
+    policy = RagGoldSetPolicy(
+        T, AS_OF, "gold-v1", "producer-v1", gold_set_revision=2,
+        previous_manifest_sha256=previous["manifest_sha256"],
+    )
+    with pytest.raises(RagGoldSetError, match="approval store change"):
+        build(policy=policy, previous=previous, approvals=changed)
+
+
+def test_approval_store_shared_node_budget_rejects_many_small_records(monkeypatch):
+    import trustforge.rag_gold_set as module
+    gold = label()
+    base = dict(approval_store([gold]).records[0])
+    records = tuple({
+        **base, "approval_id": f"approval-{index}",
+        "label_identity": f"label-{index}", "label_id": f"label-{index}",
+    } for index in range(20))
+    store = ApprovalStoreSnapshot(
+        T, "approval-v1", "2026-01-01T00:00:00.000000Z",
+        "2027-01-01T00:00:00.000000Z", records, "0" * 64, "0" * 64,
+    )
+    monkeypatch.setattr(module, "_MAX_NODES", 100)
+    with pytest.raises(RagGoldSetError, match="node limit"):
+        store.canonical(tenant_id=T, cutoff=module._parse(AS_OF, "cutoff"))
+
+
+def test_approval_store_stops_before_materializing_late_record(monkeypatch):
+    import trustforge.rag_gold_set as module
+
+    class Spy(dict):
+        touched = False
+
+        def get(self, key, default=None):
+            self.touched = True
+            return super().get(key, default)
+
+        def __iter__(self):
+            self.touched = True
+            return super().__iter__()
+
+    gold = label()
+    base = dict(approval_store([gold]).records[0])
+    records = tuple({
+        **base, "approval_id": f"approval-{index}",
+        "label_identity": f"label-{index}", "label_id": f"label-{index}",
+    } for index in range(10))
+    late = Spy(base)
+    store = ApprovalStoreSnapshot(
+        T, "approval-v1", "2026-01-01T00:00:00.000000Z",
+        "2027-01-01T00:00:00.000000Z", records + (late,),
+        "0" * 64, "0" * 64,
+    )
+    monkeypatch.setattr(module, "_MAX_NODES", 40)
+    with pytest.raises(RagGoldSetError, match="node limit"):
+        store.canonical(tenant_id=T, cutoff=module._parse(AS_OF, "cutoff"))
+    assert late.touched is False
+
+
+def test_foreign_approval_record_does_not_consume_shared_quota(monkeypatch):
+    import trustforge.rag_gold_set as module
+
+    class ForeignSpy(dict):
+        iterated = False
+
+        def __iter__(self):
+            self.iterated = True
+            raise AssertionError("foreign record must not be streamed")
+
+    gold = label()
+    trusted = approval_store([gold])
+    foreign = ForeignSpy({
+        **dict(trusted.records[0]), "tenant_id": "other-tenant",
+        "approval_id": "foreign", "label_identity": "foreign",
+    })
+    augmented = ApprovalStoreSnapshot(
+        trusted.tenant_id, trusted.version, trusted.valid_from,
+        trusted.valid_until, trusted.records + (foreign,),
+        trusted.root_sha256, trusted.checksum,
+    )
+    monkeypatch.setattr(module, "_MAX_NODES", 100)
+    result = augmented.canonical(
+        tenant_id=T, cutoff=module._parse(AS_OF, "cutoff")
+    )
+    assert result["count"] == 1
+    assert foreign.iterated is False

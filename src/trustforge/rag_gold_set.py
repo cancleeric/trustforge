@@ -37,6 +37,11 @@ _AUTHORITY_FIELDS = {
     "reviewer_id", "role", "tenant_id", "valid_from", "valid_until",
     "credential_sha256",
 }
+_APPROVAL_FIELDS = {
+    "approval_id", "label_identity", "label_event_sha256", "label_id",
+    "query_id", "decision", "reason", "reviewer_id", "reviewed_at",
+    "tenant_id",
+}
 _CITATION_FIELDS = {"evidence_identity", "claim"}
 _LABEL_ENUM = {"approved_answer", "must_abstain"}
 _EVIDENCE_FIELDS = {
@@ -115,6 +120,91 @@ class ReviewerAuthorityRegistry:
 
 
 @dataclass(frozen=True)
+class ApprovalStoreSnapshot:
+    """Independent caller-trusted proof that exact label events were approved."""
+
+    tenant_id: str
+    version: str
+    valid_from: str
+    valid_until: str
+    records: tuple[Mapping[str, Any], ...]
+    root_sha256: str
+    checksum: str
+
+    def canonical(self, *, tenant_id: str, cutoff: datetime) -> dict[str, Any]:
+        if self.tenant_id != tenant_id:
+            raise RagGoldSetError("approval store tenant mismatch")
+        _text(self.version, "approval store version")
+        valid_from = _parse(self.valid_from, "approval_store.valid_from")
+        valid_until = _parse(self.valid_until, "approval_store.valid_until")
+        if not valid_from < valid_until or not valid_from <= cutoff < valid_until:
+            raise RagGoldSetError("approval store is outside its effective window")
+        if type(self.records) is not tuple:
+            raise RagGoldSetError("approval store records must be an exact tuple")
+        scoped = []
+        approval_ids, label_identities = set(), set()
+        total_bytes = 0
+        stream_state = {
+            "nodes": 0, "node_budget": _MAX_NODES, "source": "approval store",
+        }
+        for raw in self.records:
+            if not isinstance(raw, Mapping):
+                raise RagGoldSetError("approval record must be an object")
+            # Trusted routing metadata is checked before scoped quota/hash.
+            if raw.get("tenant_id") != tenant_id:
+                continue
+            reviewed_at = _parse(raw.get("reviewed_at"), "approval.reviewed_at")
+            if reviewed_at > cutoff:
+                continue
+            chunks = []
+            try:
+                for token in _canonical_value_tokens(
+                    raw, state=stream_state, depth=1
+                ):
+                    total_bytes += len(token.encode("utf-8"))
+                    if total_bytes > _MAX_BYTES:
+                        raise RagGoldSetError(
+                            "approval store exceeds scoped UTF-8 byte limit"
+                        )
+                    chunks.append(token)
+                record = json.loads("".join(chunks))
+            except (ValueError, TypeError, RecursionError) as exc:
+                raise RagGoldSetError(str(exc)) from exc
+            if len(scoped) >= _MAX_EVENTS:
+                raise RagGoldSetError("approval store exceeds scoped record limit")
+            if set(record) != _APPROVAL_FIELDS:
+                raise RagGoldSetError("approval record schema is not exact")
+            for field in (
+                "approval_id", "label_identity", "label_id", "query_id",
+                "decision", "reason", "reviewer_id",
+            ):
+                _text(record[field], f"approval.{field}")
+            _hex(record["label_event_sha256"], "approval.label_event_sha256")
+            if record["decision"] not in _LABEL_ENUM:
+                raise RagGoldSetError("approval decision is invalid")
+            if record["reviewer_id"] != _REVIEWER:
+                raise RagGoldSetError("approval reviewer is invalid")
+            if record["approval_id"] in approval_ids:
+                raise RagGoldSetError("duplicate one-time approval_id")
+            if record["label_identity"] in label_identities:
+                raise RagGoldSetError("duplicate approval for label event")
+            approval_ids.add(record["approval_id"])
+            label_identities.add(record["label_identity"])
+            record["reviewed_at"] = _utc(reviewed_at)
+            scoped.append(record)
+        scoped.sort(key=lambda item: (item["label_identity"], item["approval_id"]))
+        root = _sha256(scoped)
+        unsigned = {
+            "tenant_id": tenant_id, "version": self.version,
+            "valid_from": _utc(valid_from), "valid_until": _utc(valid_until),
+            "records": scoped, "root_sha256": root, "count": len(scoped),
+        }
+        if self.root_sha256 != root or self.checksum != _sha256(unsigned):
+            raise RagGoldSetError("approval store root/checksum mismatch")
+        return {**unsigned, "checksum": self.checksum}
+
+
+@dataclass(frozen=True)
 class RagGoldSetPolicy:
     tenant_id: str
     dataset_as_of: str
@@ -123,6 +213,10 @@ class RagGoldSetPolicy:
     gold_set_revision: int = 1
     previous_manifest_sha256: str | None = None
     max_unique_query_cutoffs: int = _MAX_UNIQUE_CUTOFFS
+    approval_store_version: str | None = None
+    approval_store_root_sha256: str | None = None
+    approval_store_checksum: str | None = None
+    approval_store_count: int | None = None
     minimum_labels: int = 1
 
     def canonical(self) -> dict[str, Any]:
@@ -140,6 +234,18 @@ class RagGoldSetPolicy:
             _hex(self.previous_manifest_sha256, "previous_manifest_sha256")
         if self.max_unique_query_cutoffs != _MAX_UNIQUE_CUTOFFS:
             raise RagGoldSetError("max_unique_query_cutoffs must use frozen policy limit")
+        for field in (
+            "approval_store_root_sha256", "approval_store_checksum",
+        ):
+            if value[field] is not None:
+                _hex(value[field], field)
+        if value["approval_store_version"] is not None:
+            _text(value["approval_store_version"], "approval_store_version")
+        if value["approval_store_count"] is not None and (
+            type(value["approval_store_count"]) is not int
+            or value["approval_store_count"] < 0
+        ):
+            raise RagGoldSetError("approval_store_count is invalid")
         return value
 
 
@@ -171,12 +277,29 @@ def build_rag_gold_set(
     evidence_events: Iterable[LearningEvent],
     policy: RagGoldSetPolicy,
     trusted_reviewer_registry: ReviewerAuthorityRegistry,
+    trusted_approval_store: ApprovalStoreSnapshot,
     previous_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an immutable PIT manifest from explicitly reviewed human labels."""
 
     frozen = policy.canonical()
     cutoff = _parse(frozen["dataset_as_of"], "dataset_as_of")
+    approval_store = trusted_approval_store.canonical(
+        tenant_id=policy.tenant_id, cutoff=cutoff
+    )
+    approval_binding = {
+        "approval_store_version": approval_store["version"],
+        "approval_store_root_sha256": approval_store["root_sha256"],
+        "approval_store_checksum": approval_store["checksum"],
+        "approval_store_count": approval_store["count"],
+    }
+    for field, actual in approval_binding.items():
+        if frozen[field] is not None and frozen[field] != actual:
+            raise RagGoldSetError(f"policy {field} does not match trusted approval store")
+        frozen[field] = actual
+    approvals_by_label = {
+        record["label_identity"]: record for record in approval_store["records"]
+    }
     retrieval_input = _collect_rag_events(
         retrieval_events, tenant_id=policy.tenant_id, cutoff=cutoff, event_type="rag-retrieval.v1"
     )
@@ -245,6 +368,22 @@ def build_rag_gold_set(
             raise RagGoldSetError("label reviewer role mismatch")
         if payload["reviewer_authority_sha256"] != _sha256(authority):
             raise RagGoldSetError("label reviewer authority hash mismatch")
+        approval = approvals_by_label.get(event.identity)
+        expected_approval = {
+            "label_identity": event.identity,
+            "label_event_sha256": _sha256(_event_anchor(event)),
+            "label_id": payload["label_id"],
+            "query_id": payload["query_id"],
+            "decision": payload["label"],
+            "reason": payload["reason"],
+            "reviewer_id": payload["reviewer"],
+            "reviewed_at": _utc(reviewed_at),
+            "tenant_id": event.tenant_id,
+        }
+        if approval is None or any(
+            approval[field] != value for field, value in expected_approval.items()
+        ):
+            raise RagGoldSetError("label lacks exact independent approval record")
         citations = _citations(payload["citations"])
         if payload["label"] == "approved_answer" and not citations:
             raise RagGoldSetError("gold answer requires at least one evidence citation")
@@ -268,6 +407,10 @@ def build_rag_gold_set(
             "reviewer_authority_sha256": payload["reviewer_authority_sha256"],
             "reviewer_registry_version": trusted_reviewer_registry.version,
             "reviewer_registry_sha256": trusted_reviewer_registry.registry_sha256,
+            "approval_id": approval["approval_id"],
+            "approval_store_version": approval_store["version"],
+            "approval_store_root_sha256": approval_store["root_sha256"],
+            "approval_store_checksum": approval_store["checksum"],
             "reason": payload["reason"],
             "reviewed_at": _utc(reviewed_at),
             "available_time": event.available_time,
@@ -281,6 +424,9 @@ def build_rag_gold_set(
         if row["label_id"] in by_id:
             raise RagGoldSetError("duplicate label_id")
         by_id[row["label_id"]] = (event, row)
+
+    if set(approvals_by_label) != {event.identity for event, _ in by_id.values()}:
+        raise RagGoldSetError("approval store contains extra scoped label approvals")
 
     _validate_supersession(by_id)
     selected: dict[str, dict[str, Any]] = {}
@@ -307,6 +453,12 @@ def build_rag_gold_set(
             "source": "caller_trusted_registry",
             "registry_version": trusted_reviewer_registry.version,
             "registry_sha256": trusted_reviewer_registry.registry_sha256,
+        },
+        "approval_store": {
+            "version": approval_store["version"],
+            "root_sha256": approval_store["root_sha256"],
+            "checksum": approval_store["checksum"],
+            "count": approval_store["count"],
         },
         "evidence_snapshot": {
             "snapshot_id": evidence["snapshot_id"],
@@ -343,6 +495,7 @@ def evaluate_rag_retrieval(
     trusted_feedback_events: Iterable[LearningEvent],
     trusted_evidence_events: Iterable[LearningEvent],
     trusted_reviewer_registry: ReviewerAuthorityRegistry,
+    trusted_approval_store: ApprovalStoreSnapshot,
     previous_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate citations/abstention against a verified frozen gold manifest."""
@@ -369,6 +522,7 @@ def evaluate_rag_retrieval(
         evidence_events=evidence_input,
         policy=RagGoldSetPolicy(**manifest["policy"]),
         trusted_reviewer_registry=trusted_reviewer_registry,
+        trusted_approval_store=trusted_approval_store,
         previous_manifest=previous_manifest,
     )
     if rebuilt != manifest:
@@ -585,7 +739,8 @@ def _verify_manifest(value: Mapping[str, Any], *, tenant_id: str) -> dict[str, A
     manifest = _clone_exact_json(value, "gold manifest")
     fields = {
         "kind", "status", "policy", "classification", "eligible_as_evidence",
-        "authority", "evidence_snapshot", "input_roots", "input_counts", "row_count",
+        "authority", "approval_store", "evidence_snapshot", "input_roots",
+        "input_counts", "row_count",
         "rows_sha256", "rows",
         "manifest_sha256",
     }
@@ -609,14 +764,33 @@ def _verify_manifest(value: Mapping[str, Any], *, tenant_id: str) -> dict[str, A
     }:
         raise RagGoldSetError("gold evidence snapshot binding is invalid")
     _hex(manifest["evidence_snapshot"]["snapshot_sha256"], "gold.evidence_snapshot")
+    if type(manifest["approval_store"]) is not dict or set(
+        manifest["approval_store"]
+    ) != {"version", "root_sha256", "checksum", "count"}:
+        raise RagGoldSetError("gold approval store binding is invalid")
+    _hex(manifest["approval_store"]["root_sha256"], "gold approval root")
+    _hex(manifest["approval_store"]["checksum"], "gold approval checksum")
+    if type(manifest["approval_store"]["count"]) is not int or (
+        manifest["approval_store"]["count"] < 0
+    ):
+        raise RagGoldSetError("gold approval count is invalid")
     if type(manifest["policy"]) is not dict or set(manifest["policy"]) != {
         "tenant_id", "dataset_as_of", "gold_version", "producer_version",
         "minimum_labels", "gold_set_revision", "previous_manifest_sha256",
         "max_unique_query_cutoffs",
+        "approval_store_version", "approval_store_root_sha256",
+        "approval_store_checksum", "approval_store_count",
     }:
         raise RagGoldSetError("gold policy schema is invalid")
     if manifest["policy"]["tenant_id"] != tenant_id:
         raise RagGoldSetError("gold manifest tenant mismatch")
+    if {
+        "version": manifest["policy"]["approval_store_version"],
+        "root_sha256": manifest["policy"]["approval_store_root_sha256"],
+        "checksum": manifest["policy"]["approval_store_checksum"],
+        "count": manifest["policy"]["approval_store_count"],
+    } != manifest["approval_store"]:
+        raise RagGoldSetError("gold policy/approval store binding mismatch")
     if manifest["status"] not in {"complete", "insufficient_data"}:
         raise RagGoldSetError("gold manifest status is invalid")
     if type(manifest["rows"]) is not list or type(manifest["row_count"]) is not int:
@@ -645,11 +819,14 @@ def _verify_manifest(value: Mapping[str, Any], *, tenant_id: str) -> dict[str, A
     )
     if manifest["status"] != expected_status:
         raise RagGoldSetError("gold manifest status/count mismatch")
+    approval_ids = set()
     for row in manifest["rows"]:
         if type(row) is not dict or set(row) != {
             "label_id", "label_identity", "revision", "query_id", "label", "answer",
             "citations", "reviewer_id", "reviewer_authority_sha256",
             "reviewer_registry_version", "reviewer_registry_sha256",
+            "approval_id", "approval_store_version",
+            "approval_store_root_sha256", "approval_store_checksum",
             "reason", "reviewed_at",
             "available_time", "supersedes_label_id", "source_provenance",
         }:
@@ -658,6 +835,22 @@ def _verify_manifest(value: Mapping[str, Any], *, tenant_id: str) -> dict[str, A
             raise RagGoldSetError("gold row reviewer is invalid")
         _hex(row["reviewer_authority_sha256"], "gold reviewer authority")
         _hex(row["reviewer_registry_sha256"], "gold reviewer registry")
+        _text(row["approval_id"], "gold approval_id")
+        if row["approval_id"] in approval_ids:
+            raise RagGoldSetError("gold rows contain duplicate approval_id")
+        approval_ids.add(row["approval_id"])
+        _hex(row["approval_store_root_sha256"], "gold approval root")
+        _hex(row["approval_store_checksum"], "gold approval checksum")
+        if {
+            "version": row["approval_store_version"],
+            "root_sha256": row["approval_store_root_sha256"],
+            "checksum": row["approval_store_checksum"],
+        } != {
+            "version": manifest["approval_store"]["version"],
+            "root_sha256": manifest["approval_store"]["root_sha256"],
+            "checksum": manifest["approval_store"]["checksum"],
+        }:
+            raise RagGoldSetError("gold row approval provenance mismatch")
         if type(row["source_provenance"]) is not dict or set(
             row["source_provenance"]
         ) != {"source", "version", "checksum"}:
@@ -911,6 +1104,15 @@ def _verify_previous_manifest(
         or verified["authority"]["registry_sha256"] != registry.registry_sha256
     ):
         raise RagGoldSetError("reviewer registry change requires a new authorized chain")
+    if verified["approval_store"] != {
+        "version": policy["approval_store_version"],
+        "root_sha256": policy["approval_store_root_sha256"],
+        "checksum": policy["approval_store_checksum"],
+        "count": policy["approval_store_count"],
+    }:
+        raise RagGoldSetError(
+            "approval store change requires a new explicitly authorized chain"
+        )
 
 
 def _citations(value: Any) -> list[dict[str, str]]:

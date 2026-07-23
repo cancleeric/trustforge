@@ -9,6 +9,19 @@ AnalysisFlow，也沒有 approval、activation 或 Evidence promotion API。
   tenant/version/effective-window/registry checksum 的 trusted registry
   fixture 授權。有效期採 `[valid_from, valid_until)`；事件自行宣稱的角色、
   到期日或 hash 不構成權限。
+- Reviewer registry 只證明角色資格；每個 visible human label 還必須在獨立
+  caller-trusted approval-store snapshot 中有 exactly-one approval record。
+  Store 具 tenant/version/effective window/records/root/checksum；record 綁
+  approval ID、canonical label event identity/content hash、label/query、
+  decision/reason/reviewer/review time/tenant。label payload 自述不能取代此
+  approval。duplicate approval、跨 label、錯誤內容或 store tamper 均 fail
+  closed；foreign tenant 與 cutoff 後 records 在 scoped quota/hash 前不可見。
+  Store version/root/checksum/count 同時凍結於 policy、manifest 與 label row
+  provenance；row 必須 exact 等於 top-level store binding，approval ID 在
+  manifest rows 中唯一。既有 manifest revision chain 不允許無授權更換
+  approval store。不涉及 secret、資料庫或外部 I/O。
+  Scoped visible approval records 共用同一組 streaming remaining byte/node
+  budget；不會逐 record 重設 quota，也不會先 materialize 完整 store。
 - label、retrieval 與 manifest 都採 exact schema、canonical checksum、
   tenant 與 point-in-time cutoff。外租戶及 cutoff 後輸入在計數、quota 與
   hash 前即不可見。
