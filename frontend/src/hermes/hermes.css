@@ -2170,6 +2170,10 @@
   display: none;
 }
 
+.hermes-training-status-slot {
+  flex: 0 0 auto;
+}
+
 @media (max-width:1024px) {
   .hermes-frame {
     --hermes-rail: clamp(180px, 18vw, 210px);

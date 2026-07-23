@@ -81,7 +81,10 @@ describe('HermesDashboard workspace navigation', () => {
     )
 
     const divergenceDock = document.querySelector('.hermes-divergence-dock')
+    const trainingStatus = document.querySelector('.hermes-training-status-slot')
     expect(divergenceDock).not.toBeNull()
+    expect(trainingStatus).not.toBeNull()
+    expect(trainingStatus).toContainElement(screen.getByText('訓練資料'))
     const desktopButton = divergenceDock!.querySelector(':scope > button') as HTMLButtonElement
     desktopButton.focus()
     desktopButton.click()

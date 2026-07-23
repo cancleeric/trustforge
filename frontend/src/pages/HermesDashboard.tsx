@@ -562,13 +562,10 @@ export default function HermesDashboard() {
             journey={analysisJourney}
             crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
             derivation={hudDerivation}
+            trainingStatus={<TrainingStatusCard />}
             onOpenComposite={() => setSelectedStage('composite')}
             onOpenDivergence={() => setSelectedStage('divergence')}
           />
-          {/* Training status dashboard card — Issue #333 */}
-          <div className="hermes-training-status-layer" style={{ position: 'absolute', right: 0, bottom: 'calc(var(--hermes-bottom) + 8px)', width: 'var(--hermes-rail)', zIndex: 6, padding: '0 16px' }}>
-            <TrainingStatusCard />
-          </div>
         </div>
 
         <HermesMobileDivergenceEntry

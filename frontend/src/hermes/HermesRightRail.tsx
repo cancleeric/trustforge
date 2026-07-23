@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { TIER_COLOR, type GalaxyCoin, type SelectedDerivation, type TrustComponent } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import type { AnalysisFlowData, AnalysisJourneyData } from '../lib/endpoints'
@@ -13,12 +14,13 @@ interface HermesRightRailProps {
   flow?: AnalysisFlowData | null
   journey?: AnalysisJourneyData | null
   crossSignal?: CrossSourceSignal | null
+  trainingStatus?: ReactNode
   onOpenComposite: () => void
   onOpenDivergence: () => void
 }
 
 export default function HermesRightRail({
-  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, onOpenComposite, onOpenDivergence,
+  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, trainingStatus, onOpenComposite, onOpenDivergence,
 }: HermesRightRailProps) {
   const { t } = useHermesI18n()
   const { score, tier, full } = selCoin
@@ -44,7 +46,7 @@ export default function HermesRightRail({
     <div
       className="hermes-glass hermes-right-rail"
       style={{
-        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 7,
+        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
         borderLeft: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
         display: 'flex', flexDirection: 'column', gap: 12,
         overflowY: 'auto',
@@ -112,6 +114,8 @@ export default function HermesRightRail({
           {t('fullBreakdown')} →
         </button>
       </div>
+
+      {trainingStatus && <div className="hermes-training-status-slot">{trainingStatus}</div>}
 
       {/* divergence alert dock */}
       <div
