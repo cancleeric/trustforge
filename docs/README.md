@@ -1,5 +1,9 @@
 # TrustForge docs/
 
+Governance index:
+
+- [governance/PRE_PUSH_RELEASE_GATES.md](governance/PRE_PUSH_RELEASE_GATES.md) - Canonical pre-push-only policy: disabled GitHub Actions, mandatory `.githooks/pre-push`, PR evidence, reviewer `/codex-review`, security/cost review, and release boundary.
+
 > 本目錄為 TrustForge 的規劃與技術文件索引。文件依生命週期/用途分區：
 > `competition/`（命題與交付規範）、`architecture/`（架構決策）、
 > `plans/`（進行中的活計劃）、`qa/`（測試與研究發現）、`design/`（既有設計資產）、
@@ -25,15 +29,17 @@
 
 | 文件 | 說明 |
 |------|------|
+| [architecture/architecture-overview.html](architecture/architecture-overview.html) | 人類閱讀版架構頁：系統總覽、Kernel 邊界、升級控制、跨專案 Agent Platform 抽取邊界，內嵌四張 SVG 圖 |
+| [architecture/ARCHITECTURE-OVERVIEW.md](architecture/ARCHITECTURE-OVERVIEW.md) | 架構圖技術註記與 PlantUML/SVG/PNG 來源索引 |
+| [architecture/AGENT-PLATFORM-EXTRACTION-FEASIBILITY-2026-07-22.md](architecture/AGENT-PLATFORM-EXTRACTION-FEASIBILITY-2026-07-22.md) | AgentCore／Bedrock 定位、三套件拆分可行性、現況耦合與風險評估 |
 | [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md) | 三層管線與信任演算法設計 |
 | [architecture/AWS-ARCHITECTURE.md](architecture/AWS-ARCHITECTURE.md) | AWS 服務架構（決賽簡報用），含前後端分離對外拓樸 |
 | [architecture/BACKFILL-SYSTEM.md](architecture/BACKFILL-SYSTEM.md) | 歷史回填系統：5年 OHLCV 逐日 replay，三層啟停控制 |
-| [architecture/TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-ANALYSIS-2026-07-23.md](architecture/TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-ANALYSIS-2026-07-23.md) | 三軌統一學習架構：Question RAG、分析品質、外框受控升級的資料、標籤、ModelHub 與啟用邊界 |
-| [decisions/OUTCOME-SEMANTICS-2026-07-23.md](decisions/OUTCOME-SEMANTICS-2026-07-23.md) | #501 T+1/T+7/T+14 outcome 語意 disposition、D7/D8 revision/late-data 安全與權限前置契約；semantic approval 不代表 implementation authorization，production scope 為 EMPTY |
 | [architecture/OBSERVABILITY-API.md](architecture/OBSERVABILITY-API.md) | 觀測層 API 端點文件：budget-governance / improvement / alerts / backfill |
 | [architecture/PLAN-frontend-backend-split.md](architecture/PLAN-frontend-backend-split.md) | 前後端分離架構＋遷移計劃：SSR零-JS → React+Vite+TS+Tailwind。**方案 B 已定案（Issue #81，2026-07-06）並上線 v0.6.1**：web.py 降為純 `/api/*` API，React SPA 獨立部署，SSR 凍結新功能僅保留 `cutover_switch.sh legacy` 緊急回滾路徑 |
 | [architecture/TRUTH-DISCOVERY-EVALUATION-2026-07-13.md](architecture/TRUTH-DISCOVERY-EVALUATION-2026-07-13.md) | Truth-discovery 統計收斂法補強評估（#179）：CRH/Dawid-Skene/CATD/LTM 四方法對照表，結論 Dawid-Skene EM 最適合當 Bedrock 離線 fallback |
 | [architecture/CONFIDENCE-CONVERGENCE-REPORT-2026-07-13.md](architecture/CONFIDENCE-CONVERGENCE-REPORT-2026-07-13.md) | 信心值收斂技術報告：現況 `_dynamic_reputation` 架構＋離線 no-op 問題（#178）＋ Dawid-Skene EM 平行 fallback 解法＋邊界聲明（不涉及 conformal/預測力，#167 範圍） |
+| [decisions/OUTCOME-SEMANTICS-2026-07-23.md](decisions/OUTCOME-SEMANTICS-2026-07-23.md) | #501 T+1/T+7/T+14 outcome 語意 disposition、D7/D8 revision/late-data 安全與權限前置契約；semantic approval 不代表 implementation authorization，production scope 為 EMPTY |
 
 ## plans/ — 進行中的活計劃
 
@@ -45,7 +51,9 @@
 | [plans/OPTIMIZATION-PLAN-weakness.md](plans/OPTIMIZATION-PLAN-weakness.md) | CEO 兩路批判彙整（核心弱點分析 + UI code-grounded 審查）：Phase1 商業級 UI 快修清單（**注意：清單所列 4 項已在前後端分離 React 重寫中獨立解決，這部分內容已過時，見 `PLAN-next-worldfirst-depth.md` §6 housekeeping 記錄**）+ Phase2 核心戰略抉擇（效度定位/資料密度/niche）——**Phase2 仍待老闆拍板，本文件未關閉** |
 | [plans/PLAN-next-worldfirst-depth.md](plans/PLAN-next-worldfirst-depth.md) | 下一步世界第一深度優化計劃（非-gated 專案）：#13 分歧來源去重、#20 主題切換已執行；**仍有未執行項**：#3 跨幣操縱排行、#15 burst 偵測重新設計（僅排資料探索驗證，未排實作）；§6 記錄 `fix/ui-commercial` 分支已過時、UXUI-ROUND-01.md 稽核項目多數已被 React 重寫吸收等 housekeeping 發現 |
 | [plans/DAWID-SKENE-CONFIDENCE-PLAN-2026-07-13.md](plans/DAWID-SKENE-CONFIDENCE-PLAN-2026-07-13.md) | Dawid-Skene EM 信心收斂開發擴充計劃：資料結構/介面整合（`stance_fn is None` 分支）/測試策略/分階段工時（約 5 天）；明確排除 conformal/預測力範圍 |
-| [plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md](plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md) | 三軌統一學習架構開發計劃：7 個 PR、三個里程碑、資料契約、驗收與治理門檻 |
+| [plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md](plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md) | Agent Platform／Trust Kernel／TrustForge App 漸進拆分計畫：工作流依賴、驗收條件、測試與 12–22 PR 里程碑 |
+| [plans/PLAN-2026-07-21-ui-optimization.md](plans/PLAN-2026-07-21-ui-optimization.md) | UI/UX 優化現況版：#356–#360 完成／更正、#539–#542 與 #361/#362 剩餘工作、≤12h 相依性與驗收標準 |
+| [plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md](plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md) | 三軌統一學習架構開發計劃：#501 replacement semantic disposition 已完成；implementation authorization 與 production scope 仍維持未授權／EMPTY |
 
 ## qa/ — 測試與研究發現
 
