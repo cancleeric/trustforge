@@ -117,7 +117,11 @@ async function collectBoxes(page, selectors) {
 
 function assertGeometry({ viewport, routeName, boxes }) {
   const label = `${viewport.width}x${viewport.height} ${routeName}`
-  const required = ['root', 'topbar', 'leftRail', 'rightRail', 'stageBar']
+  const leftRailVisible = viewport.width > 560
+  const rightRailVisible = viewport.width > 900
+  const required = ['root', 'topbar', 'stageBar']
+  if (leftRailVisible) required.push('leftRail')
+  if (rightRailVisible) required.push('rightRail')
   if (routeName === 'home') required.push('galaxy')
   if (routeName === 'analyze-module') required.push('moduleDeck')
 
@@ -136,11 +140,22 @@ function assertGeometry({ viewport, routeName, boxes }) {
   }
 
   const content = boxes.moduleDeck ?? boxes.galaxy
+  if (!leftRailVisible) assertHiddenOrEmpty(label, 'leftRail', boxes.leftRail)
+  if (!rightRailVisible) assertHiddenOrEmpty(label, 'rightRail', boxes.rightRail)
+
   if (content) {
     assertNotOverlap(label, 'topbar', boxes.topbar, 'content', content)
     assertNotOverlap(label, 'stageBar', boxes.stageBar, 'content', content)
-    assertSeparated(label, 'leftRail', boxes.leftRail, 'content', content)
-    assertSeparated(label, 'content', content, 'rightRail', boxes.rightRail)
+    if (leftRailVisible) assertSeparated(label, 'leftRail', boxes.leftRail, 'content', content)
+    if (rightRailVisible) assertSeparated(label, 'content', content, 'rightRail', boxes.rightRail)
+  }
+}
+
+function assertHiddenOrEmpty(label, name, box) {
+  if (!box) return
+  const visible = box.display !== 'none' && box.visibility !== 'hidden' && box.opacity > 0
+  if (visible && box.width > 1 && box.height > 1) {
+    failures.push(`${label}: ${name} should be hidden or empty on mobile ${formatBox(box)}`)
   }
 }
 
