@@ -45,6 +45,18 @@ def test_single_asset_analyze_payload_adds_public_context_and_risk_notices() -> 
     assert "valid_from" not in report["asset_context"]
 
 
+def test_asset_context_seed_data_uses_runtime_copied_data_path() -> None:
+    assert web._ASSET_CONTEXT_RECORDS_PATH.parts[-2:] == ("data", "asset_context_records.json")
+    assert web._ASSET_CONTEXT_RECORDS_PATH.exists()
+
+    original_repository = web._ASSET_CONTEXT_REPOSITORY
+    try:
+        web._ASSET_CONTEXT_REPOSITORY = None
+        assert web._asset_context_repository() is not None
+    finally:
+        web._ASSET_CONTEXT_REPOSITORY = original_repository
+
+
 def test_comparison_payload_adds_context_per_report_without_internal_fields() -> None:
     payload = web._build_comparison_json_payload(_report("ARB"), [], _report("BTC"), [], _Log())
 

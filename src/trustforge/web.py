@@ -5037,7 +5037,7 @@ _EVIDENCE_PUBLIC_FIELDS = frozenset({
     "reputation_mode",
 })
 _EVIDENCE_FILTERED_FIELDS = frozenset({"author"})
-_ASSET_CONTEXT_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "asset_context_records.json"
+_ASSET_CONTEXT_RECORDS_PATH = Path(__file__).resolve().parents[2] / "data" / "asset_context_records.json"
 _ASSET_CONTEXT_REPOSITORY: AssetContextRepository | None = None
 
 
@@ -5058,10 +5058,10 @@ def _asset_context_repository() -> AssetContextRepository | None:
     global _ASSET_CONTEXT_REPOSITORY
     if _ASSET_CONTEXT_REPOSITORY is not None:
         return _ASSET_CONTEXT_REPOSITORY
-    if not _ASSET_CONTEXT_FIXTURE.exists():
+    if not _ASSET_CONTEXT_RECORDS_PATH.exists():
         return None
     _ASSET_CONTEXT_REPOSITORY = AssetContextRepository(
-        load_asset_context_records(_ASSET_CONTEXT_FIXTURE)
+        load_asset_context_records(_ASSET_CONTEXT_RECORDS_PATH)
     )
     return _ASSET_CONTEXT_REPOSITORY
 
