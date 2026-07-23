@@ -15,6 +15,10 @@ class GlossaryAudience(StrEnum):
     HELP_CENTER = "help_center"
 
 
+def _canonical_key(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
+
+
 @dataclass(frozen=True)
 class GlossaryTerm:
     term_id: str
@@ -96,15 +100,16 @@ def validate_glossary_catalog(terms: Iterable[GlossaryTerm]) -> tuple[GlossaryTe
     seen_ids: set[str] = set()
     seen_aliases: dict[str, str] = {}
     for term in catalog:
-        if term.term_id in seen_ids:
+        canonical_term_id = _canonical_key(term.term_id)
+        if canonical_term_id in seen_ids:
             raise ValueError(f"duplicate glossary term_id: {term.term_id}")
-        seen_ids.add(term.term_id)
+        seen_ids.add(canonical_term_id)
         for phrase in (term.label, *term.aliases):
-            key = phrase.casefold()
+            key = _canonical_key(phrase)
             owner = seen_aliases.get(key)
-            if owner is not None and owner != term.term_id:
-                raise ValueError(f"duplicate glossary alias: {phrase}")
-            seen_aliases[key] = term.term_id
+            if owner is not None and owner != canonical_term_id:
+                raise ValueError(f"duplicate glossary alias: {key}")
+            seen_aliases[key] = canonical_term_id
     return catalog
 
 
@@ -119,14 +124,15 @@ def glossary_catalog_payload() -> dict[str, object]:
 
 
 def glossary_by_term_id(term_id: str) -> GlossaryTerm | None:
-    return next((term for term in GLOSSARY_CATALOG if term.term_id == term_id), None)
+    needle = _canonical_key(term_id)
+    return next((term for term in GLOSSARY_CATALOG if _canonical_key(term.term_id) == needle), None)
 
 
 def glossary_by_phrase(phrase: str) -> GlossaryTerm | None:
-    needle = phrase.casefold()
+    needle = _canonical_key(phrase)
     for term in GLOSSARY_CATALOG:
-        if term.label.casefold() == needle:
+        if _canonical_key(term.label) == needle:
             return term
-        if any(alias.casefold() == needle for alias in term.aliases):
+        if any(_canonical_key(alias) == needle for alias in term.aliases):
             return term
     return None

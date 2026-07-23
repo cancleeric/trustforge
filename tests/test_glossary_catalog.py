@@ -35,7 +35,9 @@ def test_core_glossary_catalog_contains_required_terms() -> None:
 
 def test_glossary_lookup_is_shared_by_id_label_and_alias() -> None:
     assert glossary_by_term_id("tokenomics") is not None
+    assert glossary_by_term_id(" tokenomics ") == glossary_by_term_id("tokenomics")
     assert glossary_by_phrase("MC") == glossary_by_term_id("market_cap")
+    assert glossary_by_phrase(" MC ") == glossary_by_term_id("market_cap")
     assert glossary_by_phrase("market cap") == glossary_by_term_id("market_cap")
     assert glossary_by_phrase("代幣經濟") == glossary_by_term_id("tokenomics")
     assert glossary_by_phrase("missing") is None
@@ -51,10 +53,17 @@ def test_glossary_catalog_rejects_duplicate_term_ids_and_aliases() -> None:
 
     duplicate_alias = (
         GlossaryTerm(term_id="one", label="One", definition="one", aliases=("Same",)),
-        GlossaryTerm(term_id="two", label="Two", definition="two", aliases=("same",)),
+        GlossaryTerm(term_id="two", label="Two", definition="two", aliases=(" same ",)),
     )
     with pytest.raises(ValueError, match="duplicate glossary alias: same"):
         validate_glossary_catalog(duplicate_alias)
+
+    duplicate_normalized_id = (
+        GlossaryTerm(term_id="market_cap", label="Market Cap", definition="one"),
+        GlossaryTerm(term_id=" market_cap ", label="Market Cap 2", definition="two"),
+    )
+    with pytest.raises(ValueError, match="duplicate glossary term_id"):
+        validate_glossary_catalog(duplicate_normalized_id)
 
 
 def test_glossary_term_validates_required_fields_and_audiences() -> None:

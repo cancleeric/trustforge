@@ -1,31 +1,12 @@
+import { HELP_CENTER_GLOSSARY } from '../lib/glossaryCatalog'
 // 說明中心（/help，R2 深色艦橋設計稿新頁）：彙整名詞解釋、5 階段管線原理、
 // 信任分數色帶與常見問題。內容取自設計稿逐字稿（見 docs/design/hermes-r2-darkbridge/
 // HERMES Help Center.dc.html），純靜態頁、無需後端資料，故不比照其他頁面
 // 走 API loading/error 狀態機。
 
-type GlossaryRow = { term: string; en: string; desc: string; where: string }
 type Stage = { num: string; label: string; desc: string; highlight?: boolean }
 type Band = { range: string; label: string; color: string; bg: string; border: string; desc: string }
 type Faq = { q: string; a: string }
-
-const GLOSSARY: GlossaryRow[] = [
-  { term: '信任分數', en: 'Trust Score', desc: '0–100 的綜合評分，衡量「這個幣的市場資料有多可信」，不是價格預測或投資建議。分數越高，資料越一致、越難被操縱。', where: '分析結果 · 執行台 · 歷史趨勢' },
-  { term: 'multi_source 模式', en: 'Multi-source', desc: '同時比對多個交易所與資料源（報價、成交量、情緒），交叉驗證後才給分，比單一來源更難被造假。', where: '分析結果 · 執行台 · 成本' },
-  { term: '交叉佐證', en: 'Cross-corroboration', desc: '用多個獨立來源互相印證同一項數據。越多來源一致，該數據越可信。', where: '分析結果 · 拆解抽屜' },
-  { term: '跨來源分歧', en: 'Cross-source divergence', desc: '同一項數據在不同來源之間的差異。分歧越大，代表資料越不可靠或可能有人為操縱。', where: '分析結果 · 比較 · 拆解抽屜' },
-  { term: '抗操縱能力', en: 'Manipulation resistance', desc: '評估資料被人為操縱（假量、掛單誘導）影響的難易度。分數越高越不容易被操縱。', where: '分析結果 · 比較 · 拆解抽屜' },
-  { term: 'wash-trading 疑慮', en: 'Wash trading', desc: '自買自賣（對敲）製造假成交量的嫌疑，會讓成交量看起來比實際熱絡。', where: '分析結果 · 執行台 · 通知' },
-  { term: 'spoofing 訊號', en: 'Spoofing', desc: '掛出大量假委託、再快速撤單，誘導市場方向的操縱手法訊號。', where: '分析結果 · 設定' },
-  { term: '資料充足度', en: 'Sufficiency', desc: '衡量當下可用的可信來源夠不夠多、夠不夠新，足以支撐一個可靠的信任分數。', where: '歷史趨勢' },
-  { term: '完整度區間', en: 'Completeness band', desc: '資訊完整度的合理波動範圍。區間越窄代表估計越穩定；越寬代表資料較不足、需保守看待。', where: '歷史趨勢' },
-  { term: '新鮮度', en: 'Freshness', desc: '資料的即時程度。FRESH＝最新、STALE＝逾期待更新、MISSING＝來源缺席未回應。', where: '來源狀態' },
-  { term: '連接器', en: 'Connectors', desc: '串接各交易所與資料源的介接元件，負責持續抓取報價、成交量與情緒資料。', where: '來源狀態 · 管理' },
-  { term: 'LLM Runtime · Bedrock', en: 'LLM runtime', desc: '驅動 HERMES 推理與生成報告的大型語言模型執行環境（AWS Bedrock）。', where: '來源狀態' },
-  { term: 'TOKEN 用量', en: 'Token usage', desc: 'LLM 處理文字的計費單位。一次 run 消耗的 token 越多，成本越高。', where: '成本帳本' },
-  { term: '不可竄改', en: 'Immutable', desc: '快照一旦寫入即無法修改，用於事後稽核與追溯 HERMES 當時看到的原始資料。', where: '快照 Modal' },
-  { term: '血統', en: 'Lineage', desc: '資料的來源與處理歷程鏈，可追溯每個數字來自哪個來源、經過哪些步驟得出。', where: '快照 Modal' },
-  { term: '權重', en: 'Weight', desc: '該來源在計分時的重要程度。信譽高、越新鮮的來源權重越高，對最終信任分影響越大。', where: '拆解抽屜 · 快照 Modal' },
-]
 
 const STAGES: Stage[] = [
   { num: '01', label: '來源掃描', desc: '從 150+ 個交易所、資料源與情緒來源持續擷取原始快照。' },
@@ -98,13 +79,13 @@ export default function HelpCenterPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-tf-border">
-              {GLOSSARY.map((g) => (
-                <tr key={g.term}>
+              {HELP_CENTER_GLOSSARY.map((g) => (
+                <tr key={g.term_id}>
                   <td className="px-2 py-3 align-top">
-                    <p className="text-sm font-semibold text-tf-text">{g.term}</p>
-                    <p className="text-xs text-tf-muted">{g.en}</p>
+                    <p className="text-sm font-semibold text-tf-text">{g.label}</p>
+                    <p className="text-xs text-tf-muted">{g.aliases[0] ?? ''}</p>
                   </td>
-                  <td className="px-2 py-3 align-top text-xs leading-relaxed text-tf-text2">{g.desc}</td>
+                  <td className="px-2 py-3 align-top text-xs leading-relaxed text-tf-text2">{g.description}</td>
                   <td className="px-2 py-3 align-top text-xs leading-relaxed text-tf-muted">{g.where}</td>
                 </tr>
               ))}
