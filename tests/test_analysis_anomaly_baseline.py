@@ -138,6 +138,7 @@ def _manifest(events):
             ),
         }
         for index, event in enumerate(events)
+        if event.payload["failure"]["status"] == "complete"
     ]
     import hashlib
     def sha(value):
@@ -216,10 +217,14 @@ def test_known_anomalies_emit_candidate_only_with_versions_and_query():
     reference = [_event(i, f"2026-07-0{i+1}T01:00:00Z", confidence=.5) for i in range(3)]
     current = [
         _event(i+3, f"2026-07-{i+9:02d}T01:00:00Z", confidence=.95,
-               evidence=0, distribution={"none": 0}, partial=True)
+               evidence=0, distribution={"none": 0})
         for i in range(3)
     ]
-    events = reference + current
+    partial = _event(
+        99, "2026-07-12T02:00:00Z", confidence=.95,
+        evidence=0, distribution={"none": 0}, partial=True,
+    )
+    events = reference + current + [partial]
     result = detect_analysis_anomalies(events, calibration_manifest=_manifest(events), policy=_policy())
     codes = {finding["reason_code"] for finding in result["findings"]}
     assert {
@@ -402,12 +407,11 @@ def test_pipeline_anomaly_classes_are_independently_detected(mutation, expected)
         for i in range(3)
     ]
     current = [
-        _event(i + 3, f"2026-07-{i+9:02d}T01:00:00Z", confidence=.55, **(
-            mutation if i == 0 else {}
-        ))
+        _event(i + 3, f"2026-07-{i+9:02d}T01:00:00Z", confidence=.55)
         for i in range(3)
     ]
-    events = reference + current
+    anomalous = _event(99, "2026-07-12T02:00:00Z", confidence=.55, **mutation)
+    events = reference + current + [anomalous]
     result = detect_analysis_anomalies(
         events, calibration_manifest=_manifest(events), policy=_policy()
     )
@@ -434,6 +438,57 @@ def test_normal_pipeline_emits_no_pipeline_specific_code():
         "PIPELINE_LATENCY_OUTLIER",
         "PIPELINE_STAGE_MISSING",
     }
+
+
+def test_root_bound_partial_events_do_not_pollute_distribution_cohort():
+    reference = [
+        _event(i, f"2026-07-0{i+1}T01:00:00Z", confidence=.5)
+        for i in range(3)
+    ]
+    current = [
+        _event(i + 3, f"2026-07-{i+9:02d}T01:00:00Z", confidence=.5)
+        for i in range(3)
+    ]
+    partial = [
+        _event(i + 6, f"2026-07-{i+9:02d}T02:00:00Z", confidence=1.0, partial=True)
+        for i in range(3)
+    ]
+    events = reference + current + partial
+    result = detect_analysis_anomalies(
+        events, calibration_manifest=_manifest(events), policy=_policy()
+    )
+    codes = {finding["reason_code"] for finding in result["findings"]}
+    assert "PIPELINE_FAILURE_OR_PARTIAL" in codes
+    assert "CONFIDENCE_DRIFT" not in codes
+    assert "MEDIAN_MAD_OUTLIER" not in codes
+    assert result["sample_counts"] == {
+        "cohort": "manifest_rows_distribution", "reference": 3, "current": 3,
+    }
+    assert result["pipeline_sample_counts"] == {
+        "cohort": "root_bound_all_analysis_events", "reference": 3, "current": 6,
+    }
+    assert result["baseline"]["reference_stats"]["count"] == 3
+    assert result["baseline"]["reference_stats"]["confidence_mean"] == .5
+    assert "pipeline_anomaly_rate" not in result["baseline"]["reference_stats"]
+    assert result["baseline"]["pipeline_reference_stats"]["count"] == 3
+
+
+def test_pipeline_only_events_cannot_satisfy_distribution_minimums():
+    reference = [_event(1, "2026-07-02T01:00:00Z", confidence=.5)]
+    partial_current = [
+        _event(i + 10, f"2026-07-{i+9:02d}T01:00:00Z", partial=True)
+        for i in range(5)
+    ]
+    events = reference + partial_current
+    result = detect_analysis_anomalies(
+        events, calibration_manifest=_manifest(events), policy=_policy()
+    )
+    assert result["status"] == "insufficient_data"
+    assert result["sample_counts"]["reference"] == 1
+    assert result["sample_counts"]["current"] == 0
+    assert [finding["reason_code"] for finding in result["findings"]] == [
+        "INSUFFICIENT_DATA"
+    ]
 
 
 def test_valid_foreign_tenant_event_is_byte_and_hash_invisible():

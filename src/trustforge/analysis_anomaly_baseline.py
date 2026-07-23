@@ -172,7 +172,8 @@ def detect_analysis_anomalies(
     if actual_root != manifest["input_roots"]["analysis_sha256"]:
         raise AnalysisAnomalyError("analysis input root mismatch")
     cohort = _manifest_cohort(manifest)
-    selected: dict[str, dict[str, Any]] = {}
+    distribution_selected: dict[str, dict[str, Any]] = {}
+    pipeline_selected: dict[str, dict[str, Any]] = {}
     rejected = Counter({
         "not_manifest_row_cohort": 0, "outside_windows": 0,
         "after_query_as_of": 0,
@@ -186,12 +187,7 @@ def detect_analysis_anomalies(
         # Root authority is primary. Rows define labeled cohort membership for
         # distribution rules; pipeline/degraded diagnostics still inspect every
         # root-bound canonical input so partial analyses cannot be hidden.
-        if event.identity not in cohort and event.payload.get("failure", {}).get(
-            "status"
-        ) == "complete":
-            rejected["not_manifest_row_cohort"] += 1
-            continue
-        if event.identity in selected:
+        if event.identity in pipeline_selected:
             raise AnalysisAnomalyError("duplicate analysis event identity")
         row = _analysis_metrics(event)
         available = _parse(event.available_time, "analysis.available_time")
@@ -200,12 +196,28 @@ def detect_analysis_anomalies(
             rejected["outside_windows"] += 1
             continue
         row["window"] = window
-        selected[event.identity] = row
+        pipeline_selected[event.identity] = row
+        if event.identity in cohort:
+            distribution_selected[event.identity] = row
+        else:
+            rejected["not_manifest_row_cohort"] += 1
 
-    reference = [row for row in selected.values() if row["window"] == "reference"]
-    current = [row for row in selected.values() if row["window"] == "current"]
+    reference = [
+        row for row in distribution_selected.values() if row["window"] == "reference"
+    ]
+    current = [
+        row for row in distribution_selected.values() if row["window"] == "current"
+    ]
+    pipeline_reference = [
+        row for row in pipeline_selected.values() if row["window"] == "reference"
+    ]
+    pipeline_current = [
+        row for row in pipeline_selected.values() if row["window"] == "current"
+    ]
     reference.sort(key=lambda row: row["identity"])
     current.sort(key=lambda row: row["identity"])
+    pipeline_reference.sort(key=lambda row: row["identity"])
+    pipeline_current.sort(key=lambda row: row["identity"])
     query = {
         "query_version": policy.query_version,
         "tenant_id": policy.tenant_id,
@@ -245,7 +257,7 @@ def detect_analysis_anomalies(
     else:
         findings.extend(_distribution_findings(reference, current, policy))
         findings.extend(_outlier_findings(reference, current, policy))
-        findings.extend(_pipeline_findings(reference, current, policy))
+        findings.extend(_pipeline_findings(pipeline_reference, pipeline_current, policy))
         if any(
             finding["reason_code"].startswith("DEGRADED_") for finding in findings
         ):
@@ -267,6 +279,7 @@ def detect_analysis_anomalies(
 
     findings.sort(key=lambda item: (item["reason_code"], _sha256(item)))
     reference_stats = _reference_stats(reference)
+    pipeline_reference_stats = _pipeline_reference_stats(pipeline_reference)
     spec = {
         key: frozen[key]
         for key in frozen
@@ -292,6 +305,7 @@ def detect_analysis_anomalies(
             query_hash=query_hash,
             baseline_spec_sha256=baseline_spec_sha256,
             reference_stats=reference_stats,
+            pipeline_reference_stats=pipeline_reference_stats,
             input_summary=input_summary,
         )
         for ordinal, finding in enumerate(findings)
@@ -305,13 +319,23 @@ def detect_analysis_anomalies(
             "spec_sha256": baseline_spec_sha256,
             "thresholds": _frozen_thresholds(frozen),
             "reference_stats": reference_stats,
+            "pipeline_reference_stats": pipeline_reference_stats,
             "manifest_sha256": manifest["manifest_sha256"],
             "manifest_rows_sha256": manifest["rows_sha256"],
             "analysis_input_root": manifest["input_roots"]["analysis_sha256"],
         },
         "query": query,
         "query_sha256": query_hash,
-        "sample_counts": {"reference": len(reference), "current": len(current)},
+        "sample_counts": {
+            "cohort": "manifest_rows_distribution",
+            "reference": len(reference),
+            "current": len(current),
+        },
+        "pipeline_sample_counts": {
+            "cohort": "root_bound_all_analysis_events",
+            "reference": len(pipeline_reference),
+            "current": len(pipeline_current),
+        },
         "rejected_counts": dict(sorted(rejected.items())),
         "input_summary": input_summary,
         "findings": findings,
@@ -816,6 +840,7 @@ def _candidate(
     query_hash: str,
     baseline_spec_sha256: str,
     reference_stats: Mapping[str, Any],
+    pipeline_reference_stats: Mapping[str, Any],
     input_summary: Mapping[str, Any],
 ) -> LearningEvent:
     seed = {
@@ -856,6 +881,7 @@ def _candidate(
             "spec_sha256": baseline_spec_sha256,
             "thresholds": _frozen_thresholds(policy),
             "reference_stats": dict(reference_stats),
+            "pipeline_reference_stats": dict(pipeline_reference_stats),
         },
         "input_manifest": {
             "manifest_sha256": manifest["manifest_sha256"],
@@ -904,20 +930,13 @@ def _reference_stats(reference: list[dict[str, Any]]) -> dict[str, Any]:
             "confidence_mad": None, "evidence_missing_rate": None,
             "source_concentration_rate": None,
             "source_concentration_mean_share": None,
-            "pipeline_anomaly_rate": None,
-            "pipeline_failure_or_partial_rate": None,
-            "pipeline_retry_spike_rate": None,
-            "latency_mean_ms": None,
-            "latency_median_ms": None, "latency_mad_ms": None,
         }
     confidence = [row["confidence"] for row in reference]
-    latency = [row["total_latency_ms"] for row in reference]
     concentrations = [
         row["source_concentration"] for row in reference
         if row["source_concentration"] is not None
     ]
     confidence_median = statistics.median(confidence)
-    latency_median = statistics.median(latency)
     return {
         "count": len(reference),
         "confidence_mean": statistics.fmean(confidence),
@@ -932,6 +951,24 @@ def _reference_stats(reference: list[dict[str, Any]]) -> dict[str, Any]:
         "source_concentration_mean_share": (
             statistics.fmean(concentrations) if concentrations else None
         ),
+    }
+
+
+def _pipeline_reference_stats(reference: list[dict[str, Any]]) -> dict[str, Any]:
+    if not reference:
+        return {
+            "count": 0,
+            "pipeline_anomaly_rate": None,
+            "pipeline_failure_or_partial_rate": None,
+            "pipeline_retry_spike_rate": None,
+            "latency_mean_ms": None,
+            "latency_median_ms": None,
+            "latency_mad_ms": None,
+        }
+    latency = [row["total_latency_ms"] for row in reference]
+    latency_median = statistics.median(latency)
+    return {
+        "count": len(reference),
         "pipeline_anomaly_rate": sum(
             row["pipeline_anomaly"] for row in reference
         ) / len(reference),

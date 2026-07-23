@@ -21,8 +21,13 @@ A raw row list is never authorized.
 The analysis input root is recomputed from the exact #508 canonical event
 anchors and must equal `input_roots.analysis_sha256`; a subset, extra event, or
 plausible-looking fake digest fails closed. Manifest rows select the labeled
-distribution cohort, while root-bound partial events remain visible to pipeline
-diagnostics. Inputs must be canonical `analysis-quality.v1` events for the
+distribution cohort used exclusively for sample minimums, confidence,
+Evidence/source distribution, outliers, and distribution reference statistics.
+A separate pipeline cohort contains every root-bound event, including non-row
+partial/failed events, and is used exclusively for pipeline findings and
+pipeline reference statistics. Pipeline-only inputs can never satisfy a
+distribution sample minimum or alter confidence/reference statistics. Inputs
+must be canonical `analysis-quality.v1` events for the
 trusted tenant and visible by `dataset_as_of`; the query cutoff is applied
 separately. Foreign tenants and post-dataset events cannot affect quotas,
 findings, roots, or hashes. Scoped inputs have finite
@@ -54,6 +59,10 @@ If either window misses its frozen sample minimum, the only result is
 `DEGRADED_INPUT` finding, never silent substitution or approval.
 A zero reference MAD is explicitly degraded rather than silently treated as a
 healthy scale.
+
+The report labels `sample_counts` as `manifest_rows_distribution` and separately
+reports `pipeline_sample_counts` as `root_bound_all_analysis_events`; the two
+counts must not be interpreted interchangeably.
 
 ## Candidate-only output
 
