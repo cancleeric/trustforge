@@ -1206,3 +1206,60 @@ def test_scan_keeps_module_trust_for_wrapped_attribute_read_iterables(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_revokes_module_trust_for_compound_attribute_receivers(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/compound_receivers.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "for item in (typing,).__getitem__(0):\n"
+        "    pass\n"
+        "[item for item in [abc].pop()]\n"
+        "for item in {'module': typing}.values():\n"
+        "    pass\n"
+        "[item for item in (abc,).__iter__()]\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.compound_receivers.Abstract.method",
+        "trustforge.compound_receivers.Direct.method",
+    ]
+
+
+def test_scan_revokes_module_trust_for_nonmember_module_attributes(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/nonmember_attributes.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "for item in typing.__dict__.values():\n"
+        "    pass\n"
+        "[item for item in abc.__dict__.values()]\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.nonmember_attributes.Abstract.method",
+        "trustforge.nonmember_attributes.Direct.method",
+    ]

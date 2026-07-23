@@ -438,8 +438,14 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
                     self.names.add(node.id)
 
             def visit_Attribute(self, node: ast.Attribute) -> None:
-                # Reading a member does not expose the module object itself.
-                return
+                if (
+                    isinstance(node.value, ast.Name)
+                    and node.attr in _ModuleAliasFlowVisitor._TRUSTED_ATTRIBUTES
+                ):
+                    # A direct read of a known interface member does not expose
+                    # the module object. Compound receivers remain traversable.
+                    return
+                self.visit(node.value)
 
         visitor = _BareLoadVisitor()
         visitor.visit(value)
