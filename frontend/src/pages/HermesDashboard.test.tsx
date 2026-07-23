@@ -73,17 +73,33 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.queryByLabelText('問題')).not.toBeInTheDocument()
   })
 
-  it('opens the divergence drilldown from the right rail', () => {
+  it('exposes the divergence dock as a named, focusable button and opens it on click', () => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
       </MemoryRouter>,
     )
 
-    const divergenceDock = screen.getByText('跨來源分歧').closest('.hermes-clip')
-    expect(divergenceDock).not.toBeNull()
-    fireEvent.click(divergenceDock!)
+    const divergenceDock = screen.getByRole('button', { name: '跨來源分歧' })
+    expect(divergenceDock).toHaveProperty('tabIndex', 0)
+    divergenceDock.focus()
+    expect(divergenceDock).toHaveFocus()
+    fireEvent.click(divergenceDock)
 
+    expect(screen.getByRole('dialog')).toHaveTextContent('跨來源分歧')
+  })
+
+  it.each(['Enter', ' '])('opens the divergence drilldown once with the %s key', (key) => {
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+      </MemoryRouter>,
+    )
+
+    const divergenceDock = screen.getByRole('button', { name: '跨來源分歧' })
+    fireEvent.keyDown(divergenceDock, { key })
+
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
     expect(screen.getByRole('dialog')).toHaveTextContent('跨來源分歧')
   })
 
