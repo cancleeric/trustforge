@@ -58,9 +58,13 @@ class PeerMetricsSnapshot:
         for field_name in ("observed_tps", "tvl", "gas_fee"):
             if not isinstance(getattr(self, field_name), MetricValue):
                 raise ValueError(f"PeerMetricsSnapshot.{field_name} must be MetricValue")
-        if not isinstance(self.activity_breakdown, dict) or any(
+        if (
+            not isinstance(self.activity_breakdown, dict)
+            or not self.activity_breakdown
+            or any(
             not key.strip() or not isinstance(value, MetricValue)
             for key, value in self.activity_breakdown.items()
+            )
         ):
             raise ValueError("PeerMetricsSnapshot.activity_breakdown must map strings to MetricValue")
         for field_name in ("window_start", "window_end", "observed_at"):
@@ -92,12 +96,33 @@ def snapshots_comparable(left: PeerMetricsSnapshot, right: PeerMetricsSnapshot) 
     for metric_name in ("observed_tps", "tvl", "gas_fee"):
         left_metric = getattr(left, metric_name)
         right_metric = getattr(right, metric_name)
-        if left_metric.value is None or right_metric.value is None:
-            return False, f"{metric_name} missing"
-        if left_metric.unit != right_metric.unit:
-            return False, f"{metric_name} unit differs"
-        if left_metric.method != right_metric.method:
-            return False, f"{metric_name} method differs"
+        comparable, reason = _metric_comparable(metric_name, left_metric, right_metric)
+        if not comparable:
+            return False, reason
+    if set(left.activity_breakdown) != set(right.activity_breakdown):
+        return False, "activity_breakdown keys differ"
+    for activity_name in sorted(left.activity_breakdown):
+        comparable, reason = _metric_comparable(
+            f"activity_breakdown.{activity_name}",
+            left.activity_breakdown[activity_name],
+            right.activity_breakdown[activity_name],
+        )
+        if not comparable:
+            return False, reason
+    return True, None
+
+
+def _metric_comparable(
+    metric_name: str, left_metric: MetricValue, right_metric: MetricValue
+) -> tuple[bool, str | None]:
+    if left_metric.value is None or right_metric.value is None:
+        return False, f"{metric_name} missing"
+    if left_metric.unit != right_metric.unit:
+        return False, f"{metric_name} unit differs"
+    if left_metric.method != right_metric.method:
+        return False, f"{metric_name} method differs"
+    if left_metric.source != right_metric.source:
+        return False, f"{metric_name} source differs"
     return True, None
 
 
