@@ -44,7 +44,18 @@ def _freeze_json(value: Any) -> JsonValue:
     raise ValueError("metadata must contain only exact JSON values")
 
 
-def to_kernel_claim(claim: Claim) -> KernelClaim:
+def _finite_timestamp(value: Any, *, fallback: float) -> float:
+    """Keep malformed upstream timestamps from violating the core contract."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        timestamp = fallback
+    if not math.isfinite(timestamp):
+        timestamp = fallback
+    return timestamp if math.isfinite(timestamp) else 0.0
+
+
+def to_kernel_claim(claim: Claim, *, pit_epoch: float | None = None) -> KernelClaim:
     """Normalize one application claim into the independent core contract."""
     if type(claim) is not Claim:
         raise ValueError("claim must be an exact Claim")
@@ -64,7 +75,10 @@ def to_kernel_claim(claim: Claim) -> KernelClaim:
             kind=document.kind,
             source=document.source,
             text=document.text,
-            timestamp=float(document.ts),
+            timestamp=_finite_timestamp(
+                document.ts,
+                fallback=0.0 if pit_epoch is None else pit_epoch,
+            ),
             url=document.url,
             metadata=metadata,
         ),
@@ -76,7 +90,7 @@ def to_kernel_input(
 ) -> KernelInput:
     """Build an immutable kernel request at the application boundary."""
     return KernelInput(
-        claims=tuple(to_kernel_claim(claim) for claim in claims),
+        claims=tuple(to_kernel_claim(claim, pit_epoch=pit_epoch) for claim in claims),
         pit_epoch=float(pit_epoch),
         coin=coin,
         query=query,

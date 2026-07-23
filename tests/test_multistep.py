@@ -583,7 +583,7 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
 
 def test_run_agent_pipeline_step2_invokes_trust_kernel(monkeypatch):
     """Production Step2 should pass normalized claims through the Kernel facade."""
-    from trustforge.trust.kernel import KernelOutput
+    from trustforge_core import KernelOutput
 
     seen = {}
     real_run_kernel = orch.run_kernel
