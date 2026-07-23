@@ -51,6 +51,21 @@ def test_historical_answer_is_not_structurally_bindable_as_evidence(tmp_path):
         Evidence(**historical)
 
 
+def test_historical_non_evidentiary_replay_document_is_rejected_before_evidence():
+    with pytest.raises(ValueError, match="historical_non_evidentiary"):
+        replay_snapshot(
+            _snapshot(
+                {
+                    "id": "prior-answer",
+                    "kind": "historical_non_evidentiary",
+                    "text": "Prior generated answer must not become evidence",
+                    "published_at": "2021-06-30T12:00:00Z",
+                }
+            ),
+            query="BTC outlook",
+        )
+
+
 @pytest.mark.parametrize(
     "hostile_tier",
     ["evidence", "Evidence", "primary", "verified", "historical_evidentiary"],
