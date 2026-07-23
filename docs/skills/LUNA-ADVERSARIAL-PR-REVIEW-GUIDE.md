@@ -1,24 +1,36 @@
-# Luna GitHub PR 對抗審教學
+# Luna GitHub PR 對抗式審查指南
 
 > 對象：Luna（PR reviewer）
 > 目的：判斷一個固定 commit 是否真的安全、正確、可合併
-> 原則：測試通過只是證據之一，不等於審查通過
+> 核心原則：測試通過只是證據之一，不等於審查通過
 
-## 1. Reviewer 的責任
+## 0. 快速規則
+
+- 審查綁定目前 head commit SHA；舊 SHA 的結論不適用新 SHA。
+- 先讀 issue acceptance criteria，再讀 diff；不要先相信 PR 描述。
+- 至少設計一個作者沒有提供的負向或邊界案例。
+- `statusCheckRollup=[]` 代表沒有 required CI 證據，不是綠燈。
+- pytest 最終 exit code 非 0、coverage gate 失敗或 collection error，都不能寫成 PASS。
+- 有安全、權限、資料污染、成本或 activation 風險時，需要額外 CISO 或等效安全審查。
+- 審查只做唯讀檢查、測試與 GitHub review；不要替作者修改 production code。
+
+## 1. Reviewer 責任
 
 Luna 的工作不是證明作者寫得對，而是主動找出作者、測試與 CI 沒有想到的失敗路徑。
 
-審查只做唯讀檢查、測試與 GitHub review，不替作者修改程式。發現問題時：
+發現問題時，review 必須包含：
 
-1. 綁定實際 head commit SHA。
-2. 說明可重現的失敗或缺失。
-3. 指出精確檔案與行號。
-4. 提供工程師可執行的驗收條件。
-5. 判定 `PASS` 或 `CHANGES REQUIRED`，不能只寫「看起來沒問題」。
+1. 實際 head commit SHA。
+2. 可重現的失敗或缺失。
+3. 精確檔案與行號。
+4. 工程師可執行、可驗收的修正條件。
+5. 明確 disposition：`PASS` 或 `CHANGES REQUIRED`。
 
-## 2. 開始審查前的固定輸入
+不要只寫「看起來沒問題」。無法證明門檻已滿足時，就是不能 approve。
 
-缺少下列任一項，不得 APPROVE：
+## 2. 審查前固定輸入
+
+缺少下列任一項，不得 approve：
 
 - Issue 與 acceptance criteria。
 - PR number、base branch、head branch。
@@ -26,14 +38,16 @@ Luna 的工作不是證明作者寫得對，而是主動找出作者、測試與
 - 上游依賴及其合併狀態。
 - PR 變更檔案與 blast radius。
 - required CI 狀態。
-- 安全／資料／權限／成本敏感性分類。
+- 安全、資料、權限、成本敏感性分類。
 
-先確認：
+建議先抓固定資訊：
 
 ```bash
-review_pr_number=533
+review_pr_number=<PR_NUMBER>
+
 rtk gh pr view "$review_pr_number" \
-  --json number,state,isDraft,baseRefName,headRefName,headRefOid,mergeStateStatus,statusCheckRollup
+  --json number,state,isDraft,baseRefName,headRefName,headRefOid,mergeStateStatus,statusCheckRollup,files,reviews
+
 rtk gh pr diff "$review_pr_number"
 ```
 
@@ -44,17 +58,17 @@ rtk gh pr diff "$review_pr_number"
 
 ### 第一步：範圍與依賴
 
-- 變更是否符合 Issue 範圍？
+- 變更是否符合 issue 範圍？
 - 是否夾帶未授權 production behavior、DB、secret、外部服務或部署？
 - base 是否為已審、已合併的合法上游？
-- 上游 Issue 若仍 OPEN，本 PR 是否錯誤宣稱完成？
+- 上游 issue 若仍 OPEN，本 PR 是否錯誤宣稱完成？
 - 是否存在 merge conflict、stale head 或未同步 base？
 
 ### 第二步：讀實作，不先信 PR 描述
 
 - 找出真正的 public entry point。
 - 從輸入追到 validation、state transition、persistence 與輸出。
-- 檢查 fail-open／fail-closed。
+- 檢查 fail-open 與 fail-closed。
 - 檢查 caller 是否能自行提供本應由系統產生的「已核准」「已驗證」證據。
 - 檢查重要資料是否只驗型別或非空，卻沒有驗來源、身分、時間與關聯。
 
@@ -76,12 +90,14 @@ rtk gh pr diff "$review_pr_number"
 - 把不合法輸入只改一個欄位，看系統是否仍接受。
 - 嘗試跳過狀態機中間步驟。
 - 嘗試使用未授權但「長得像真人」的 actor。
-- 嘗試把 caller 自製的 verified／approved dict 傳入。
+- 嘗試把 caller 自製的 verified 或 approved dict 傳入。
 - 嘗試指向錯誤 artifact、tenant、version 或 rollback target。
 - 把資料的 `available_time` 放在決策 `as_of_time` 之後。
 
 測試只能在 `/tmp`、pytest `tmp_path` 或隔離 worktree 執行。禁止讓測試寫入 tracked
-`data/`、正式 fixture、DB 或外部服務。測試後必須確認：
+`data/`、正式 fixture、DB 或外部服務。
+
+測試後必須確認：
 
 ```bash
 rtk git status --short
@@ -90,14 +106,14 @@ rtk git diff --check
 
 ### 第五步：按風險領域檢查
 
-#### Point-in-time／資料學習
+#### Point-in-time 與資料學習
 
 - 每個輸入都必須滿足 `available_time <= as_of_time`。
 - `event_time` 不能代替 `available_time`。
-- 未成熟 outcome 必須 pending／unavailable，不能偷看未來後標為 labeled。
-- train／validation／test 必須使用時間切分。
+- 未成熟 outcome 必須 pending 或 unavailable，不能偷看未來後標為 labeled。
+- train、validation、test 必須使用時間切分。
 - outcome、Evidence、historical answer、human gold label 不得混類。
-- 重跑必須 idempotent，修訂只能追加版本，不得覆寫原事件。
+- 重跑必須 idempotent；修訂只能追加版本，不得覆寫原事件。
 
 #### 身分、核准與 activation
 
@@ -122,7 +138,7 @@ rtk git diff --check
 - 相似答案、多數票或高點擊不能升格為 Evidence。
 - 必須驗 cross-tenant negative retrieval。
 - citation 必須綁定 tenant、snapshot 與 provenance。
-- Evidence 不足時應 abstain／降級。
+- Evidence 不足時應 abstain 或降級。
 - 惡意 feedback 與 prompt injection 不得污染 gold set。
 
 ### 第六步：驗證交付門檻
@@ -131,13 +147,10 @@ rtk git diff --check
 
 - 適用的 unit、contract、integration、security、replay tests。
 - lint、build、`git diff --check`。
-- required CI 全綠；`statusCheckRollup=[]` 不是綠燈。
+- required CI 全綠。
 - `/codex-review` commit-bound 結果。
-- 安全／權限／資料污染變更另有 harper CISO 審查。
-- UI 變更有 eye；無 UI 則記錄 `eye: N/A`，並查資料真實性與錯誤狀態。
-
-聚焦測試顯示 `N passed`，但 pytest 最終 exit code 非 0、coverage gate 失敗或有 collection
-error，都不能寫成 PASS。
+- 安全、權限、資料污染變更另有 CISO 或等效安全審查。
+- UI 變更有 eye；無 UI 則記錄 `Eye: N/A`，並查資料真實性與錯誤狀態。
 
 ### 第七步：固定結論
 
@@ -160,9 +173,9 @@ error，都不能寫成 PASS。
 6. 再標記 Ready for review。
 
 若 head SHA 沒變、沒有工程師回覆或只有切換 Ready 狀態，視為無效重送，退回 Draft。
-舊 SHA 的 APPROVED 不適用新 SHA。
+舊 SHA 的 approved 不適用新 SHA。
 
-## 5. 共用 GitHub 帳號的署名規則
+## 5. 共用 GitHub 帳號署名
 
 目前不同 reviewer 可能共用 `cancleeric` GitHub 身分，因此 GitHub author 不能證明是誰審查。
 每則 review body 第一行必須明示：
@@ -186,7 +199,7 @@ Disposition: PASS | SECURITY BLOCK
 共用 owner 帳號產生的 APPROVED 只能當 commit-bound attestation，不能冒充 GitHub 獨立核准，
 也不能取代 branch protection、required CI 或 CISO。
 
-## 6. GitHub review 模板
+## 6. Review 模板
 
 ### CHANGES REQUIRED
 
@@ -252,9 +265,9 @@ leakage。必須直接驗證該價格的 `available_time <= as_of_time`。
 「actor 字串不像 bot」「probe dict 寫 verified」「config snapshot 非空」都不是安全證據。
 必須驗證可信身分、狀態機、核准紀錄、artifact/provenance 綁定與 activation-bound rollback。
 
-## 8. Luna 的最後自問
+## 8. Approve 前最後自問
 
-送出 APPROVE 前逐項回答：
+送出 approve 前逐項回答：
 
 - 我審的是目前 head SHA，還是舊 commit？
 - 我是否只相信作者描述與現有測試？
@@ -264,4 +277,4 @@ leakage。必須直接驗證該價格的 `available_time <= as_of_time`。
 - pytest 最終 exit code、CI、build 是否真的成功？
 - 我能否用精確檔案、行號和輸入輸出證明結論？
 
-任何一題無法肯定回答，就不能 APPROVE。
+任何一題無法肯定回答，就不能 approve。

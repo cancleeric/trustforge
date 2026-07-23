@@ -69,7 +69,7 @@
 
 | 文件 | 說明 |
 |------|------|
-| [skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md](skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md) | Luna GitHub PR 對抗審 SOP：固定 SHA、負向測試、PIT leakage、安全 activation、stacked PR 與 PASS／FAIL 模板 |
+| [skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md](skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md) | Luna GitHub PR 對抗式審查指南：固定 SHA、負向測試、PIT leakage、安全 activation、stacked PR 與 PASS／FAIL 模板 |
 
 ## design/
 
