@@ -38,8 +38,7 @@ class AssetContextRepository:
         self._records = tuple(sorted(records, key=lambda record: record.valid_from))
 
     def lookup(self, asset_id: str, as_of: datetime) -> AssetContextRecord | None:
-        if as_of.tzinfo is None:
-            raise ValueError("as_of must be timezone-aware")
+        _ensure_aware_as_of(as_of)
         candidates = (
             record
             for record in self._records
@@ -48,6 +47,7 @@ class AssetContextRepository:
         return max(candidates, key=lambda record: record.valid_from, default=None)
 
     def by_symbol(self, symbol: str, as_of: datetime) -> AssetContextRecord | None:
+        _ensure_aware_as_of(as_of)
         normalized = symbol.casefold()
         candidates = (
             record
@@ -93,3 +93,8 @@ def _parse_timestamp(raw: Any, field_name: str) -> datetime:
     if timestamp.tzinfo is None:
         raise ValueError(f"AssetContextRecord.{field_name} must be timezone-aware")
     return timestamp.astimezone(timezone.utc)
+
+
+def _ensure_aware_as_of(as_of: datetime) -> None:
+    if as_of.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")

@@ -66,3 +66,7 @@ def test_repository_rejects_invalid_records_and_naive_as_of() -> None:
     repository = AssetContextRepository(load_asset_context_records(FIXTURE))
     with pytest.raises(ValueError, match="as_of must be timezone-aware"):
         repository.lookup("asset:arb", datetime(2026, 1, 1))
+    with pytest.raises(ValueError, match="as_of must be timezone-aware"):
+        repository.by_symbol("ARB", datetime(2026, 1, 1))
+    with pytest.raises(ValueError, match="as_of must be timezone-aware"):
+        repository.by_symbol("UNKNOWN", datetime(2026, 1, 1))
