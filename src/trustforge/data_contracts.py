@@ -10,6 +10,7 @@ from trustforge.asset_context import (
     MARKET_CAP_TIERS,
     TOKEN_ROLES,
 )
+from trustforge.ecolink import ECOLINK_SCHEMA_VERSION, OFFICIAL_ECOLINK_HOSTS
 from trustforge.peer_metrics import PEER_METRICS_SCHEMA_VERSION
 
 DOCUMENT_SCHEMA_VERSION = "1.0.0"
@@ -150,6 +151,81 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
             },
             "additionalProperties": False,
         },
+        "DependencyEdge": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://trustforge.local/contracts/dependency-edge/1.0.0",
+            "title": "TrustForge DependencyEdge",
+            "type": "object",
+            "required": [
+                "schema_version",
+                "source_asset_id",
+                "target_asset_id",
+                "kind",
+                "valid_from",
+                "valid_until",
+                "confidence",
+                "official_source_url",
+                "observed_at",
+            ],
+            "properties": {
+                "schema_version": {"const": ECOLINK_SCHEMA_VERSION},
+                "source_asset_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "target_asset_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "kind": {
+                    "enum": [
+                        "bridge",
+                        "oracle",
+                        "liquidity",
+                        "settlement",
+                        "governance",
+                        "infrastructure",
+                        "unknown",
+                    ]
+                },
+                "valid_from": {"type": "string", "format": "date-time"},
+                "valid_until": {"type": ["string", "null"], "format": "date-time"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "official_source_url": _official_source_schema(),
+                "observed_at": {"type": "string", "format": "date-time"},
+            },
+            "additionalProperties": False,
+        },
+        "UpgradeEvent": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://trustforge.local/contracts/upgrade-event/1.0.0",
+            "title": "TrustForge UpgradeEvent",
+            "type": "object",
+            "required": [
+                "schema_version",
+                "event_id",
+                "asset_id",
+                "title",
+                "scheduled_at",
+                "actual_at",
+                "status",
+                "impact_direction",
+                "impacted_asset_ids",
+                "official_source_url",
+                "observed_at",
+            ],
+            "properties": {
+                "schema_version": {"const": ECOLINK_SCHEMA_VERSION},
+                "event_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "asset_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "title": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "scheduled_at": {"type": ["string", "null"], "format": "date-time"},
+                "actual_at": {"type": ["string", "null"], "format": "date-time"},
+                "status": {"enum": ["announced", "scheduled", "activated", "cancelled"]},
+                "impact_direction": {"enum": ["positive", "negative", "mixed", "unknown"]},
+                "impacted_asset_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                },
+                "official_source_url": _official_source_schema(),
+                "observed_at": {"type": "string", "format": "date-time"},
+            },
+            "additionalProperties": False,
+        },
     }
 
 
@@ -164,6 +240,15 @@ def _metric_value_schema() -> dict[str, Any]:
             "source": {"type": "string", "minLength": 1, "pattern": r"\S"},
         },
         "additionalProperties": False,
+    }
+
+
+def _official_source_schema() -> dict[str, Any]:
+    hosts = "|".join(sorted(host.replace(".", r"\.") for host in OFFICIAL_ECOLINK_HOSTS))
+    return {
+        "type": "string",
+        "minLength": 1,
+        "pattern": rf"^https://({hosts})(/|$)",
     }
 
 
