@@ -426,10 +426,34 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.edges: set[tuple[str, str]] = set()
         self.dynamic_mutation_roots: set[str] = set()
+        self.unresolved_unpack_sources: set[str] = set()
 
     def _record_copy(self, target: ast.expr, value: ast.expr | None) -> None:
         if isinstance(target, ast.Name) and isinstance(value, ast.Name):
             self.edges.add((target.id, value.id))
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if (
+                isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)
+                and not any(isinstance(element, ast.Starred) for element in target.elts)
+            ):
+                for target_element, value_element in zip(target.elts, value.elts):
+                    self._record_copy(target_element, value_element)
+                return
+            if value is not None:
+                self.unresolved_unpack_sources.update(
+                    child.id
+                    for child in ast.walk(value)
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+                )
+            return
+        if isinstance(value, (ast.Tuple, ast.List)):
+            self.unresolved_unpack_sources.update(
+                child.id
+                for child in ast.walk(value)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+            )
 
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
@@ -477,6 +501,7 @@ def _unsafe_module_aliases(
             len(reachable) > 1
             or reachable & attribute_mutated
             or reachable & flow.dynamic_mutation_roots
+            or reachable & flow.unresolved_unpack_sources
         ):
             unsafe.add(original)
     return unsafe

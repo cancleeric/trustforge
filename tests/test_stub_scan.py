@@ -949,3 +949,77 @@ def test_scan_keeps_module_trust_for_read_only_attribute_extraction(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_revokes_module_trust_for_nested_destructuring_aliases(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/destructuring_alias.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "(typing_copy, [marker, (abc_copy, tail)]) = "
+        "(typing, [0, (abc, 1)])\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.destructuring_alias.Abstract.method",
+        "trustforge.destructuring_alias.Direct.method",
+    ]
+
+
+def test_scan_revokes_module_trust_for_unresolved_destructuring(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/unresolved_destructuring.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "(head, *rest) = (typing, abc)\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.unresolved_destructuring.Abstract.method",
+        "trustforge.unresolved_destructuring.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_nested_read_only_destructuring(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/read_only_destructuring.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "(protocol_type, [abstract_type, decorator]) = "
+        "(typing.Protocol, [abc.ABC, abc.abstractmethod])\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
