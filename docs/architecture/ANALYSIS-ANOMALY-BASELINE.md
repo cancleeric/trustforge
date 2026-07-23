@@ -54,6 +54,13 @@ The versioned rules compare fixed reference and current windows:
   greater than one and never inferred from failure;
 - missing-stage and robust latency anomalies, each with its own reason code.
 
+All rate thresholds use strict exceedance (`observed_rate > threshold`):
+Evidence missing, source concentration, pipeline failure/partial, and retry
+spike do not fire when healthy rate and threshold are both zero or when the
+observed rate exactly equals the frozen threshold. Confidence drift and robust
+outlier rules are distance boundaries and intentionally fire at equality
+(`distance >= threshold`).
+
 If either window misses its frozen sample minimum, the only result is
 `INSUFFICIENT_DATA`. Missing eligible quality metrics yield a deterministic
 `DEGRADED_INPUT` finding, never silent substitution or approval.

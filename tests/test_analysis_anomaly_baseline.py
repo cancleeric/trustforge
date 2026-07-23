@@ -491,6 +491,77 @@ def test_pipeline_only_events_cannot_satisfy_distribution_minimums():
     ]
 
 
+def _codes(events, **policy_updates):
+    return {
+        finding["reason_code"]
+        for finding in detect_analysis_anomalies(
+            events,
+            calibration_manifest=_manifest(events),
+            policy=_policy(**policy_updates),
+        )["findings"]
+    }
+
+
+def test_rate_threshold_zero_exact_and_strictly_exceeded_for_evidence():
+    healthy = _normal_events()
+    assert "EVIDENCE_MISSING" not in _codes(
+        healthy, evidence_missing_rate_threshold=0.0
+    )
+    reference = healthy[:3]
+    current = [
+        _event(30, "2026-07-09T01:00:00Z", evidence=0, distribution={"none": 0}),
+        _event(31, "2026-07-10T01:00:00Z"),
+        _event(32, "2026-07-11T01:00:00Z"),
+    ]
+    events = reference + current
+    assert "EVIDENCE_MISSING" not in _codes(
+        events, evidence_missing_rate_threshold=1 / 3
+    )
+    assert "EVIDENCE_MISSING" in _codes(
+        events, evidence_missing_rate_threshold=(1 / 3) - 1e-9
+    )
+
+
+def test_rate_threshold_exact_and_strictly_exceeded_for_source_concentration():
+    events = _normal_events()
+    exact = 2 / 3
+    assert "SOURCE_CONCENTRATION" not in _codes(
+        events, source_concentration_threshold=exact
+    )
+    assert "SOURCE_CONCENTRATION" in _codes(
+        events, source_concentration_threshold=exact - 1e-9
+    )
+    no_sources = [
+        *events[:3],
+        *[
+            _event(i + 40, f"2026-07-{i+9:02d}T01:00:00Z",
+                   evidence=0, distribution={"none": 0})
+            for i in range(3)
+        ],
+    ]
+    assert "SOURCE_CONCENTRATION" not in _codes(
+        no_sources, source_concentration_threshold=0.0,
+        evidence_missing_rate_threshold=1.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation,reason",
+    [
+        ({"partial": True}, "PIPELINE_FAILURE_OR_PARTIAL"),
+        ({"retry": True}, "PIPELINE_RETRY_SPIKE"),
+    ],
+)
+def test_pipeline_rate_threshold_zero_exact_and_strictly_exceeded(mutation, reason):
+    normal = _normal_events()
+    assert reason not in _codes(normal, pipeline_anomaly_rate_threshold=0.0)
+    anomalous = _event(50, "2026-07-12T02:00:00Z", **mutation)
+    events = normal + [anomalous]
+    # Four current pipeline events, exactly one anomalous.
+    assert reason not in _codes(events, pipeline_anomaly_rate_threshold=0.25)
+    assert reason in _codes(events, pipeline_anomaly_rate_threshold=0.25 - 1e-9)
+
+
 def test_valid_foreign_tenant_event_is_byte_and_hash_invisible():
     events = _normal_events()
     foreign = _event(999, "2026-07-10T01:00:00Z", tenant_id="tenant-b")

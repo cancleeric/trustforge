@@ -696,7 +696,7 @@ def _distribution_findings(
             "threshold": policy.confidence_drift_threshold,
         }))
     missing = sum(row["evidence_missing"] for row in current) / len(current)
-    if missing >= policy.evidence_missing_rate_threshold:
+    if missing > policy.evidence_missing_rate_threshold:
         findings.append(_finding("EVIDENCE_MISSING", "current evidence missing rate exceeded threshold", {
             "current_rate": missing, "threshold": policy.evidence_missing_rate_threshold,
         }))
@@ -706,7 +706,7 @@ def _distribution_findings(
     ]
     if concentrations:
         concentration = statistics.fmean(concentrations)
-        if concentration >= policy.source_concentration_threshold:
+        if concentration > policy.source_concentration_threshold:
             findings.append(_finding("SOURCE_CONCENTRATION", "current sources are overly concentrated", {
                 "current_mean_max_share": concentration,
                 "threshold": policy.source_concentration_threshold,
@@ -762,7 +762,7 @@ def _pipeline_findings(
     reference_retry_rate = sum(row["pipeline_retry_spike"] for row in reference) / len(reference)
     current_retry_rate = sum(row["pipeline_retry_spike"] for row in current) / len(current)
     findings: list[dict[str, Any]] = []
-    if current_failure_rate >= policy.pipeline_anomaly_rate_threshold:
+    if current_failure_rate > policy.pipeline_anomaly_rate_threshold:
         findings.append(_finding(
             "PIPELINE_FAILURE_OR_PARTIAL",
             "current pipeline failure or partial rate exceeded threshold",
@@ -773,7 +773,7 @@ def _pipeline_findings(
                 "threshold": policy.pipeline_anomaly_rate_threshold,
             },
         ))
-    if current_retry_rate >= policy.pipeline_anomaly_rate_threshold:
+    if current_retry_rate > policy.pipeline_anomaly_rate_threshold:
         findings.append(_finding(
             "PIPELINE_RETRY_SPIKE",
             "current pipeline retry rate exceeded threshold",
