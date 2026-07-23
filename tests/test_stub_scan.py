@@ -460,3 +460,104 @@ def test_scan_does_not_treat_function_body_walrus_as_outer_shadowing(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_rejects_all_trusted_bindings_shadowed_in_nested_scopes(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/nested_shadow.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import typing as typing_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "import abc as abc_alias\n"
+        "class Outer:\n"
+        "    Protocol = object\n"
+        "    typing_alias = object\n"
+        "    required = lambda fn: fn\n"
+        "    Base = object\n"
+        "    Meta = type\n"
+        "    abc_alias = object\n"
+        "    class Direct(Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Qualified(typing_alias.Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Abstract(Base):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class MetaAbstract(metaclass=Meta):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class QualifiedAbstract(abc_alias.ABC):\n"
+        "        @abc_alias.abstractmethod\n"
+        "        def method(self): ...\n"
+        "def outer(Protocol, typing_alias, required, Base, Meta, abc_alias):\n"
+        "    class Direct(Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Qualified(typing_alias.Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Abstract(Base):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class MetaAbstract(metaclass=Meta):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class QualifiedAbstract(abc_alias.ABC):\n"
+        "        @abc_alias.abstractmethod\n"
+        "        def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    symbols = [row["symbol"] for row in scan([source])]
+    assert len(symbols) == 10
+    assert "trustforge.nested_shadow.Outer.Direct.method" in symbols
+    assert "trustforge.nested_shadow.Outer.Qualified.method" in symbols
+    assert "trustforge.nested_shadow.Outer.Abstract.method" in symbols
+    assert "trustforge.nested_shadow.Outer.MetaAbstract.method" in symbols
+    assert "trustforge.nested_shadow.Outer.QualifiedAbstract.method" in symbols
+    assert "trustforge.nested_shadow.outer.Direct.method" in symbols
+    assert "trustforge.nested_shadow.outer.Qualified.method" in symbols
+    assert "trustforge.nested_shadow.outer.Abstract.method" in symbols
+    assert "trustforge.nested_shadow.outer.MetaAbstract.method" in symbols
+    assert "trustforge.nested_shadow.outer.QualifiedAbstract.method" in symbols
+
+
+def test_scan_preserves_trusted_bindings_across_clean_nested_scopes(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/nested_clean.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import typing as typing_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "import abc as abc_alias\n"
+        "class Outer:\n"
+        "    class Direct(Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Qualified(typing_alias.Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Abstract(Base):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class MetaAbstract(metaclass=Meta):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class QualifiedAbstract(abc_alias.ABC):\n"
+        "        @abc_alias.abstractmethod\n"
+        "        def method(self): ...\n"
+        "def outer():\n"
+        "    class Direct(Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Abstract(Base):\n"
+        "        @required\n"
+        "        def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []

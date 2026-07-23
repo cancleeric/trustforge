@@ -60,6 +60,15 @@ def _stub_kind(
 
 
 class _FunctionVisitor(ast.NodeVisitor):
+    _TRUSTED_BINDING_ATTRIBUTES = (
+        "protocol_names",
+        "protocol_modules",
+        "abstractmethod_names",
+        "abc_modules",
+        "abc_names",
+        "abc_meta_names",
+    )
+
     def __init__(
         self,
         module: str,
@@ -85,6 +94,18 @@ class _FunctionVisitor(ast.NodeVisitor):
         self.abstract_classes: list[bool] = []
         self.findings: list[dict[str, object]] = []
 
+    def _enter_lexical_scope(self, shadowed: set[str]) -> dict[str, set[str]]:
+        snapshot: dict[str, set[str]] = {}
+        for attribute in self._TRUSTED_BINDING_ATTRIBUTES:
+            current = getattr(self, attribute)
+            snapshot[attribute] = current
+            setattr(self, attribute, current - shadowed)
+        return snapshot
+
+    def _leave_lexical_scope(self, snapshot: dict[str, set[str]]) -> None:
+        for attribute, value in snapshot.items():
+            setattr(self, attribute, value)
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         is_protocol = any(
             _is_protocol_base(base, self.protocol_names, self.protocol_modules)
@@ -101,10 +122,7 @@ class _FunctionVisitor(ast.NodeVisitor):
             for keyword in node.keywords
         )
         shadowed = _bound_names(node.body)
-        previous_names = self.abstractmethod_names
-        previous_modules = self.abc_modules
-        self.abstractmethod_names = previous_names - shadowed
-        self.abc_modules = previous_modules - shadowed
+        trusted_snapshot = self._enter_lexical_scope(shadowed)
         self.scope.append(node.name)
         self.scope_kinds.append("class")
         self.protocol_classes.append(is_protocol)
@@ -114,8 +132,7 @@ class _FunctionVisitor(ast.NodeVisitor):
         self.abstract_classes.pop()
         self.scope_kinds.pop()
         self.scope.pop()
-        self.abstractmethod_names = previous_names
-        self.abc_modules = previous_modules
+        self._leave_lexical_scope(trusted_snapshot)
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         is_direct_protocol_method = (
@@ -145,8 +162,6 @@ class _FunctionVisitor(ast.NodeVisitor):
             })
         self.scope.append(node.name)
         self.scope_kinds.append("function")
-        previous_names = self.abstractmethod_names
-        previous_modules = self.abc_modules
         shadowed = _bound_names(node.body) | {
             argument.arg
             for argument in (
@@ -159,11 +174,9 @@ class _FunctionVisitor(ast.NodeVisitor):
             shadowed.add(node.args.vararg.arg)
         if node.args.kwarg:
             shadowed.add(node.args.kwarg.arg)
-        self.abstractmethod_names = previous_names - shadowed
-        self.abc_modules = previous_modules - shadowed
+        trusted_snapshot = self._enter_lexical_scope(shadowed)
         self.generic_visit(node)
-        self.abstractmethod_names = previous_names
-        self.abc_modules = previous_modules
+        self._leave_lexical_scope(trusted_snapshot)
         self.scope_kinds.pop()
         self.scope.pop()
 
