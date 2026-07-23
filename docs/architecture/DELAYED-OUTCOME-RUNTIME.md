@@ -100,6 +100,10 @@ The same transition helper also enforces that data first visible after the
 predecessor; a rechecksummed revision-one label is rejected. Event time remains
 identical to the exact source analysis, and the calendar version must already
 be available at both outcome availability and canonical as-of time.
+For D8 `latest_official`, the cutoff-expired unavailable revision and its later
+labeled recovery both retain `LATE_AFTER_CUTOFF`; `as_first_known` terminal
+missing-price outcomes retain `START_CLOSE_MISSING` or
+`TARGET_CLOSE_MISSING`.
 
 Outcome events are always `delayed_outcome`, explicitly non-evidentiary, and
 never eligible as Evidence. Dry-run returns before invoking the append port, so

@@ -277,6 +277,7 @@ def test_missing_bar_becomes_unavailable_only_after_elapsed_72_hour_cutoff():
     after = _build(as_of="2026-07-06T00:00:00.000001Z")
     assert at_cutoff.payload["maturity"] == "pending"
     assert after.payload["maturity"] == "unavailable"
+    assert after.payload["reason_code"] == "START_CLOSE_MISSING"
     assert after.payload["return_pct"] is None
 
 
@@ -607,11 +608,14 @@ def test_d8_data_arriving_after_cutoff_requires_successor_revision():
         as_of="2026-07-06T00:00:00.000001Z",
         variant="latest_official", ledger=ledger,
     )
+    assert unavailable.payload["maturity"] == "unavailable"
+    assert unavailable.payload["reason_code"] == "LATE_AFTER_CUTOFF"
     recovered = _build(
         as_of="2026-07-06T01:00:00Z", data=late_data,
         variant="latest_official", ledger=ledger,
     )
     assert recovered.payload["maturity"] == "labeled"
+    assert recovered.payload["reason_code"] == "LATE_AFTER_CUTOFF"
     assert recovered.payload["supersedes_outcome_id"] == unavailable.payload["outcome_id"]
     registry = _registry(
         analysis,

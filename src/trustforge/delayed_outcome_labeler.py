@@ -406,6 +406,13 @@ def _validate_late_after_cutoff_transition(
         raise LearningEventError(
             "late-after-cutoff data requires immutable successor revision"
         )
+    if late_selected_data and predecessor is not None and (
+        predecessor.payload.get("maturity") != "unavailable"
+        or predecessor.payload.get("reason_code") != "LATE_AFTER_CUTOFF"
+    ):
+        raise LearningEventError(
+            "late-after-cutoff recovery requires unavailable predecessor"
+        )
 
 
 def _compute_expected_outcome_state(
@@ -482,9 +489,25 @@ def _compute_expected_outcome_state(
         if labeled_at <= late_cutoff:
             maturity, reason = "pending", "WAITING_LATE_DATA_CUTOFF"
         else:
-            maturity, reason = "unavailable", missing
+            maturity = "unavailable"
+            reason = (
+                "LATE_AFTER_CUTOFF"
+                if variant == "latest_official"
+                else missing
+            )
     else:
-        maturity, reason = "labeled", None
+        late_selected_data = any(
+            _parse_datetime(price.available_at, "price available_at")
+            > late_cutoff
+            for price in (start_price, target_price)
+            if price is not None
+        )
+        maturity = "labeled"
+        reason = (
+            "LATE_AFTER_CUTOFF"
+            if variant == "latest_official" and late_selected_data
+            else None
+        )
         direction = analysis.payload.get("decision", {}).get("direction")
         if _DIRECTIONS.get(direction) not in {-1, 1}:
             reason = "PREDICTION_NOT_DIRECTIONAL"
@@ -846,7 +869,8 @@ def validate_canonical_delayed_outcome(
             if (
                 directional != expected_directional
                 or payload.get("hit") is not (directional > 0)
-                or payload.get("reason_code") is not None
+                or payload.get("reason_code")
+                not in {None, "LATE_AFTER_CUTOFF"}
             ):
                 raise LearningEventError(
                     "directional delayed outcome metrics are inconsistent"
