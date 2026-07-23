@@ -47,14 +47,22 @@ if ! command -v aws >/dev/null 2>&1; then
   exit 1
 fi
 
-ALARM_ACTIONS=()
 if [[ -n "$SNS_TOPIC" ]]; then
   if [[ "$SNS_TOPIC" != arn:aws:sns:* ]]; then
     echo "error: TRUSTFORGE_DEDUP_ALARM_SNS is not a valid SNS topic ARN: $SNS_TOPIC" >&2
     exit 1
   fi
-  ALARM_ACTIONS=(--alarm-actions "$SNS_TOPIC" --ok-actions "$SNS_TOPIC")
 fi
+
+put_metric_alarm() {
+  if [[ -n "$SNS_TOPIC" ]]; then
+    aws cloudwatch put-metric-alarm "$@" \
+      --alarm-actions "$SNS_TOPIC" \
+      --ok-actions "$SNS_TOPIC"
+  else
+    aws cloudwatch put-metric-alarm "$@"
+  fi
+}
 
 echo "[dedup-alarm] region=$REGION namespace=$NAMESPACE"
 if [[ -z "$SNS_TOPIC" ]]; then
@@ -69,7 +77,7 @@ aws logs put-metric-filter \
   --metric-transformations \
     "metricName=$LOG_METRIC,metricNamespace=$NAMESPACE,metricValue=1,defaultValue=0"
 
-aws cloudwatch put-metric-alarm \
+put_metric_alarm \
   --region "$REGION" \
   --alarm-name "$RECENT_FAILURES_ALARM_NAME" \
   --alarm-description "TrustForge dedup fail-open recent_failures exceeded threshold (#104)." \
@@ -81,10 +89,9 @@ aws cloudwatch put-metric-alarm \
   --evaluation-periods "$EVAL_PERIODS" \
   --threshold "$RECENT_FAILURES_THRESHOLD" \
   --comparison-operator "GreaterThanOrEqualToThreshold" \
-  --treat-missing-data "notBreaching" \
-  "${ALARM_ACTIONS[@]}"
+  --treat-missing-data "notBreaching"
 
-aws cloudwatch put-metric-alarm \
+put_metric_alarm \
   --region "$REGION" \
   --alarm-name "$LOG_ALARM_NAME" \
   --alarm-description "TrustForge dedup ALERT log prefix observed (#104)." \
@@ -95,7 +102,6 @@ aws cloudwatch put-metric-alarm \
   --evaluation-periods "$EVAL_PERIODS" \
   --threshold "$LOG_ALARM_THRESHOLD" \
   --comparison-operator "GreaterThanOrEqualToThreshold" \
-  --treat-missing-data "notBreaching" \
-  "${ALARM_ACTIONS[@]}"
+  --treat-missing-data "notBreaching"
 
 echo "done: alarms updated: ${RECENT_FAILURES_ALARM_NAME}, ${LOG_ALARM_NAME}; log filter updated: ${LOG_FILTER_NAME}."
