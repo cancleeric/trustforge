@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from urllib.error import HTTPError
 
 import pytest
 
 from trustforge.peer_metrics import PeerMetricMethod
+from trustforge.ingestion import safe_fetch
 from trustforge.tvl_connector import fetch_tvl_metric, parse_tvl_metric
 
 
@@ -26,20 +29,52 @@ def payload(**overrides):
 def test_tvl_connector_fetch_validates_url_before_network_call() -> None:
     called = {"value": False}
 
-    def fetch_json(_url: str):
+    def fetch_bytes(_url: str):
         called["value"] = True
-        return payload()
+        return json.dumps(payload()).encode("utf-8")
 
     result = fetch_tvl_metric(
         "http://169.254.169.254/latest",
         fetched_at=utc(2026, 1, 1, 13),
-        fetch_json=fetch_json,
+        fetch_bytes=fetch_bytes,
     )
 
     assert result.metric is None
     assert result.error is not None
     assert result.error["code"] == "tvl_connector_error"
     assert called["value"] is False
+
+
+def test_tvl_connector_uses_shared_safe_fetch_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_fetch_url(url: str, *, user_agent: str, timeout: float, max_bytes: int):
+        calls.append((url, user_agent, timeout, max_bytes))
+        return json.dumps(payload(source=url)).encode("utf-8")
+
+    monkeypatch.setattr(safe_fetch, "fetch_url", fake_fetch_url)
+
+    result = fetch_tvl_metric(
+        "https://api.llama.fi/protocol/arbitrum",
+        fetched_at=utc(2026, 1, 1, 13),
+    )
+
+    assert result.ok is True
+    assert result.metric is not None
+    assert result.metric.source == "https://api.llama.fi/protocol/arbitrum"
+    assert calls == [("https://api.llama.fi/protocol/arbitrum", "TrustForge/1.0 (tvl-connector)", 5, 65536)]
+
+
+def test_tvl_connector_rejects_legacy_unsafe_json_fetcher() -> None:
+    result = fetch_tvl_metric(
+        "https://api.llama.fi/protocol/arbitrum",
+        fetched_at=utc(2026, 1, 1, 13),
+        fetch_json=lambda _url: payload(),
+    )
+
+    assert result.metric is None
+    assert result.error is not None
+    assert "fetch_json injection is unsupported" in result.error["message"]
 
 
 def test_tvl_connector_returns_observed_metric_for_allowlisted_source() -> None:
@@ -55,12 +90,26 @@ def test_tvl_connector_error_envelope_does_not_publish_fake_metric() -> None:
     result = fetch_tvl_metric(
         "https://api.llama.fi/protocol/arbitrum",
         fetched_at=utc(2026, 1, 1, 13),
-        fetch_json=lambda _url: payload(tvl_usd=True),
+        fetch_bytes=lambda _url: json.dumps(payload(tvl_usd=True)).encode("utf-8"),
     )
 
     assert result.metric is None
     assert result.error is not None
     assert "finite non-negative" in result.error["message"]
+
+
+def test_tvl_connector_rate_limit_error_envelope_has_no_metric() -> None:
+    def rate_limited(_url: str) -> bytes:
+        raise HTTPError(_url, 429, "Too Many Requests", {"Retry-After": "60"}, None)
+
+    result = fetch_tvl_metric(
+        "https://api.llama.fi/protocol/arbitrum",
+        fetched_at=utc(2026, 1, 1, 13),
+        fetch_bytes=rate_limited,
+    )
+
+    assert result.metric is None
+    assert result.error == {"code": "rate_limited", "message": "TVL source rate limited"}
 
 
 def test_tvl_connector_rejects_unapproved_hosts_and_schema_drift() -> None:
