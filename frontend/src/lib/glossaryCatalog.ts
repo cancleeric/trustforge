@@ -38,7 +38,29 @@ export type GlossaryCatalogTerm = {
   where?: string
 }
 
-export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = [
+const canonicalKey = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
+
+export function validateGlossaryCatalog(terms: GlossaryCatalogTerm[]) {
+  const seenIds = new Set<string>()
+  const seenPhrases = new Map<string, GlossaryTermId>()
+  for (const term of terms) {
+    const termId = canonicalKey(term.term_id)
+    if (seenIds.has(termId)) throw new Error(`duplicate glossary term_id: ${term.term_id}`)
+    seenIds.add(termId)
+
+    for (const phrase of [term.label, ...term.aliases]) {
+      const key = canonicalKey(phrase)
+      const owner = seenPhrases.get(key)
+      if (owner && canonicalKey(owner) !== termId) {
+        throw new Error(`duplicate glossary alias: ${key}`)
+      }
+      seenPhrases.set(key, term.term_id)
+    }
+  }
+  return terms
+}
+
+export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
   {
     term_id: 'fdv',
     label: 'FDV',
@@ -240,7 +262,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = [
     aliases: [],
     audiences: ['popover'],
   },
-]
+])
 
 export const GLOSSARY_BY_ID = Object.fromEntries(
   GLOSSARY_CATALOG.map((term) => [term.term_id, term]),
