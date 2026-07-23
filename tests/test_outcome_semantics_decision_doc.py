@@ -1,8 +1,4 @@
-"""Guard the decision record required by issue #501.
-
-These tests intentionally validate documentation completeness only.  They do
-not turn recommendations into an approved product contract.
-"""
+"""Structural guards for the pending issue #501 decision record."""
 
 from pathlib import Path
 
@@ -15,60 +11,117 @@ DOC = (
 )
 
 
-def test_outcome_semantics_remains_explicitly_pending_ceo_disposition() -> None:
-    text = DOC.read_text(encoding="utf-8")
+def _table_after(text: str, heading: str) -> tuple[list[str], list[dict[str, str]]]:
+    """Parse the first Markdown table after an exact heading."""
+    section = text.split(heading, maxsplit=1)[1]
+    lines = section.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("|"))
+    table_lines: list[str] = []
+    for line in lines[start:]:
+        if not line.startswith("|"):
+            break
+        table_lines.append(line)
+    headers = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
+    rows = []
+    for line in table_lines[2:]:
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        assert len(cells) == len(headers), (headers, cells)
+        rows.append(dict(zip(headers, cells, strict=True)))
+    return headers, rows
 
+
+def test_disposition_table_has_exact_pending_decisions() -> None:
+    text = DOC.read_text(encoding="utf-8")
     assert "PENDING CEO DISPOSITION — NOT APPROVED FOR IMPLEMENTATION" in text
-    for decision in range(1, 9):
-        assert f"D{decision}" in text
-    assert text.count("| PENDING |") >= 9
-    assert "exact commit SHA" in text
+
+    headers, rows = _table_after(text, "## 10. CEO / product owner disposition（必填）")
+    assert headers == [
+        "Decision",
+        "CEO disposition（approve option / reject / revise）",
+        "理由",
+        "日期",
+        "commit SHA",
+    ]
+    assert [row["Decision"] for row in rows] == [
+        "D1 calendar",
+        "D2 T+N endpoint",
+        "D3 start price",
+        "D4 neutral",
+        "D5 tie",
+        "D6 corporate actions",
+        "D7 revisions",
+        "D8 late data",
+        "cutoff SLA / asset scope",
+    ]
+    assert all(
+        row["CEO disposition（approve option / reject / revise）"] == "PENDING"
+        and row["理由"] == ""
+        and row["日期"] == ""
+        and row["commit SHA"] == ""
+        for row in rows
+    )
 
 
-def test_outcome_semantics_covers_required_contract_and_edges() -> None:
+def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
     text = DOC.read_text(encoding="utf-8")
-
-    required_terms = (
+    headers, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    assert headers == [
+        "fixture_id",
+        "calendar_id",
+        "calendar_sessions",
+        "prediction_id",
         "prediction_event_at",
         "prediction_available_at",
-        "calendar_id",
-        "timezone",
-        "start_session",
-        "target_session",
-        "return_pct",
-        "directional_return_pct",
-        "risk_abs_move_pct",
-        "risk_downside_pct",
-        "maturity",
-        "pending",
-        "unavailable",
-        "週末／假日",
-        "停牌",
-        "公司行動",
-        "晚到",
-        "行情修訂",
-    )
-    for term in required_terms:
-        assert term in text
+        "direction",
+        "horizon",
+        "bars",
+        "as_of",
+        "market_data_variant",
+        "expected",
+    ]
+    assert len(rows) >= 20
+    assert len({row["fixture_id"] for row in rows}) == len(rows)
+    assert len({row["prediction_id"] for row in rows}) == len(rows)
+    assert all(all(row[column] for column in headers) for row in rows)
+    assert all(len(row["expected"].split("/")) == 10 for row in rows)
 
 
-def test_fixture_table_has_each_required_boundary_case() -> None:
+def test_fixture_table_covers_required_adversarial_cases() -> None:
     text = DOC.read_text(encoding="utf-8")
-
-    fixture_ids = (
-        "daily_bull_up",
-        "daily_bear_down",
-        "flat_is_miss",
-        "weekend_skip",
-        "holiday_skip_t7",
-        "after_cutoff",
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    fixture_ids = {row["fixture_id"] for row in rows}
+    assert {
+        "bearish_miss",
+        "cutoff_equal",
+        "invalid_timeline",
+        "dst_calendar",
+        "early_close",
+        "emergency_closed",
+        "calendar_gap",
         "suspension_no_slide",
-        "split_adjusted",
-        "missing_start",
-        "not_mature_t14",
-        "neutral_unscored",
-        "late_before_cutoff",
+        "target_missing",
+        "late_after_cutoff",
+        "split_adjusted_asof",
+        "dividend_price_only",
+        "adjustment_future_hidden",
+        "zero_start",
         "revision_dual",
+    } <= fixture_ids
+
+
+def test_revision_identity_and_reconciliation_are_explicit() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    required_clauses = (
+        "`market_data_variant`, `market_data_revision`, `outcome_version`",
+        "`current(as_of)`",
+        "`canonical(as_of, variant)`",
+        "scheduled open/close",
+        "instrument 停牌或缺 bar 不得改變 start/target session",
+        "prediction_cutoff_buffer",
+        "publication_lag_sla",
+        "late_data_cutoff",
+        "maturity 軸",
+        "eligibility 軸",
     )
-    for fixture_id in fixture_ids:
-        assert f"`{fixture_id}`" in text
+    for clause in required_clauses:
+        assert clause in text
