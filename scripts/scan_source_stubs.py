@@ -771,12 +771,16 @@ def _advance_trusted_bindings(
         statement_tree, abc_modules | imported_abc_modules
     )
     return (
-        (protocol_names | imported_protocol_names) - rebound,
-        (protocol_modules | imported_protocol_modules) - rebound - unsafe_protocol_modules,
-        (abstractmethod_names | imported_abstractmethod_names) - rebound,
-        (abc_modules | imported_abc_modules) - rebound - unsafe_abc_modules,
-        (abc_names | imported_abc_names) - rebound,
-        (abc_meta_names | imported_abc_meta_names) - rebound,
+        (protocol_names - (introduced - imported_protocol_names) | imported_protocol_names) - rebound,
+        (
+            protocol_modules - (introduced - imported_protocol_modules) | imported_protocol_modules
+        ) - rebound - unsafe_protocol_modules,
+        (
+            abstractmethod_names - (introduced - imported_abstractmethod_names) | imported_abstractmethod_names
+        ) - rebound,
+        (abc_modules - (introduced - imported_abc_modules) | imported_abc_modules) - rebound - unsafe_abc_modules,
+        (abc_names - (introduced - imported_abc_names) | imported_abc_names) - rebound,
+        (abc_meta_names - (introduced - imported_abc_meta_names) | imported_abc_meta_names) - rebound,
     )
 
 
