@@ -490,6 +490,7 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self._record_copy(node.target, node.value)
+        self._record_unresolved(node.annotation)
         self.generic_visit(node)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
@@ -503,8 +504,22 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
             if default:
                 self._record_unresolved(default)
 
+    def _record_function_annotations(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        arguments = (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+        for argument in arguments:
+            if argument.annotation:
+                self._record_unresolved(argument.annotation)
+        for argument in (node.args.vararg, node.args.kwarg):
+            if argument and argument.annotation:
+                self._record_unresolved(argument.annotation)
+        if node.returns:
+            self._record_unresolved(node.returns)
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._record_function_defaults(node)
+        self._record_function_annotations(node)
         self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -512,6 +527,18 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self._record_function_defaults(node)
         self.generic_visit(node)
+
+    def visit_Return(self, node: ast.Return) -> None:
+        if node.value:
+            self._record_unresolved(node.value)
+        self.generic_visit(node)
+
+    def visit_Yield(self, node: ast.Yield) -> None:
+        if node.value:
+            self._record_unresolved(node.value)
+        self.generic_visit(node)
+
+    visit_YieldFrom = visit_Yield
 
     def visit_For(self, node: ast.For) -> None:
         self._record_iteration(node.target, node.iter)

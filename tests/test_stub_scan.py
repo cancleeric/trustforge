@@ -1340,3 +1340,105 @@ def test_scan_keeps_module_trust_for_member_defaults_and_call_arguments(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_revokes_module_trust_for_return_yield_and_yield_from(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/return_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "def returned(): return typing\n"
+        "def yielded(): yield abc\n"
+        "def delegated(): yield from typing\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.return_escape.Abstract.method",
+        "trustforge.return_escape.Direct.method",
+    ]
+
+
+def test_scan_revokes_module_trust_for_evaluated_function_annotations(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/function_annotation_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "def sync(posonly: typing, /, positional: abc, *values: typing,\n"
+        "         keyword: abc, **options: typing) -> abc: return 1\n"
+        "async def async_annotated(value: typing) -> abc: return 1\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.function_annotation_escape.Abstract.method",
+        "trustforge.function_annotation_escape.Direct.method",
+    ]
+
+
+def test_scan_revokes_module_trust_for_annotated_assignment_annotation(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/assignment_annotation_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "value: typing\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.assignment_annotation_escape.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_safe_member_returns_yields_and_annotations(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/safe_evaluated_values.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "value: typing.Protocol\n"
+        "def returned(value: typing.Protocol, *args: abc.ABC,\n"
+        "             keyword: abc.ABCMeta, **kwargs: typing.Protocol)"
+        " -> abc.ABC: return typing.Protocol\n"
+        "async def yielded(value: abc.ABC) -> typing.Protocol:\n"
+        "    yield abc.ABC\n"
+        "def delegated(): yield from (typing.Protocol,)\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
