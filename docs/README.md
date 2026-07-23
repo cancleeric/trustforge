@@ -1,5 +1,9 @@
 # TrustForge docs/
 
+Governance index:
+
+- [governance/PRE_PUSH_RELEASE_GATES.md](governance/PRE_PUSH_RELEASE_GATES.md) - Canonical pre-push-only policy: disabled GitHub Actions, mandatory `.githooks/pre-push`, PR evidence, reviewer `/codex-review`, security/cost review, and release boundary.
+
 > 本目錄為 TrustForge 的規劃與技術文件索引。文件依生命週期/用途分區：
 > `competition/`（命題與交付規範）、`architecture/`（架構決策）、
 > `plans/`（進行中的活計劃）、`qa/`（測試與研究發現）、`design/`（既有設計資產）、

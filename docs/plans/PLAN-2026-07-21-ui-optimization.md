@@ -103,8 +103,8 @@ CEO 文案決策 ─► #361
    狀態轉換與錯誤狀態。
 4. Merge 前完成 `/codex-review` 對抗審，修完所有 finding 並留下 commit-bound reviewer
    attestation；不得自我核准或繞過 branch protection。
-5. Merge 前等待並確認所有 required CI checks 全綠。
-6. Merge 後確認 CI；若進入正式發布，另依 release workflow 親驗使用者流程。
+5. Merge 前確認 `.githooks/pre-push` 與相應 local gate evidence 已綠，且 PR 記錄 commit-bound evidence。
+6. Merge 後確認 release workflow 所需的本機／部署驗證；若進入正式發布，另依 release workflow 親驗使用者流程。
 
 ## 6. 歷史研究的保留方式
 
