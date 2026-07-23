@@ -1,4 +1,110 @@
 {
+  "AssetContext": {
+    "$id": "https://trustforge.local/contracts/asset-context/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "ecosystem": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "layer": {
+        "enum": [
+          "layer_1",
+          "layer_2",
+          "app",
+          "protocol",
+          "token",
+          "offchain",
+          "unknown"
+        ]
+      },
+      "market_cap_tier": {
+        "enum": [
+          "large",
+          "mid",
+          "small",
+          "micro",
+          "unknown"
+        ]
+      },
+      "name": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "parent_asset_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "sector": {
+        "enum": [
+          "defi",
+          "l1",
+          "l2",
+          "stablecoin",
+          "exchange",
+          "infrastructure",
+          "meme",
+          "rwa",
+          "gaming",
+          "ai",
+          "unknown"
+        ]
+      },
+      "symbol": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "tags": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "token_role": {
+        "enum": [
+          "gas",
+          "governance",
+          "utility",
+          "staking",
+          "stable",
+          "lp",
+          "wrapped",
+          "meme",
+          "unknown"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "asset_id",
+      "symbol",
+      "name",
+      "sector",
+      "layer",
+      "token_role",
+      "market_cap_tier",
+      "ecosystem",
+      "parent_asset_id",
+      "tags"
+    ],
+    "title": "TrustForge AssetContext",
+    "type": "object"
+  },
   "Document": {
     "$id": "https://trustforge.local/contracts/document/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
