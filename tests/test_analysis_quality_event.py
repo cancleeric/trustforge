@@ -14,7 +14,7 @@ def _snapshot():
         "question_type": "direction",
         "event_time": "2026-07-01T00:00:00Z",
         "available_time": "2026-07-01T00:00:01Z",
-        "as_of_time": "2026-07-01T00:00:00Z",
+        "as_of_time": "2026-07-01T00:00:01Z",
         "source_available_times": ["2026-06-30T23:59:59Z"],
         "provenance": {"source": "analysis-flow", "collector": "unit-test", "observed_at": "2026-07-01T00:00:01Z"},
         "confidence": {"raw": 0.7, "calibrated": 0.62},
@@ -27,17 +27,17 @@ def _snapshot():
 
 
 def test_analysis_quality_event_has_unique_id_and_no_outcome_mutation_surface():
-    event = build_analysis_quality_event(_snapshot())
+    event = build_analysis_quality_event(_snapshot(), trusted_tenant_id="tenant-a")
 
     assert event.kind == "historical_non_evidentiary"
-    assert event.identity == "analysis-quality:tenant-a:an-1"
+    assert event.identity == "le1/tenant-a/historical_non_evidentiary/analysis-quality%3Aan-1/v1"
     assert event.payload["event_type"] == "analysis-quality.v1"
     assert "outcome_id" not in serialize_learning_event(event)
 
 
 def test_analysis_quality_retry_is_idempotent_in_append_log():
-    event = build_analysis_quality_event(_snapshot())
-    retry = build_analysis_quality_event(_snapshot())
+    event = build_analysis_quality_event(_snapshot(), trusted_tenant_id="tenant-a")
+    retry = build_analysis_quality_event(_snapshot(), trusted_tenant_id="tenant-a")
     log = LearningEventAppendLog()
 
     assert log.append(event) == "created"
@@ -51,9 +51,17 @@ def test_analysis_quality_rejects_missing_version_or_provenance():
     missing_provenance["provenance"] = {"collector": "unit-test", "observed_at": "2026-07-01T00:00:01Z"}
 
     with pytest.raises(LearningEventError, match="versions"):
-        build_analysis_quality_event(missing_version)
+        build_analysis_quality_event(missing_version, trusted_tenant_id="tenant-a")
     with pytest.raises(LearningEventError, match="provenance.source"):
-        build_analysis_quality_event(missing_provenance)
+        build_analysis_quality_event(missing_provenance, trusted_tenant_id="tenant-a")
+
+
+def test_analysis_quality_rejects_unknown_provenance_fields_fail_closed():
+    snapshot = _snapshot()
+    snapshot["provenance"]["unreviewed_extension"] = "not-allowed"
+
+    with pytest.raises(LearningEventError, match="unknown provenance fields"):
+        build_analysis_quality_event(snapshot, trusted_tenant_id="tenant-a")
 
 
 def test_analysis_quality_rejects_future_data_and_cross_tenant_rewrite():
@@ -63,8 +71,10 @@ def test_analysis_quality_rejects_future_data_and_cross_tenant_rewrite():
     tenant_b["tenant_id"] = "tenant-b"
 
     with pytest.raises(LearningEventError, match="future source data"):
-        build_analysis_quality_event(future)
-    assert build_analysis_quality_event(tenant_b).identity == "analysis-quality:tenant-b:an-1"
+        build_analysis_quality_event(future, trusted_tenant_id="tenant-a")
+    assert build_analysis_quality_event(tenant_b, trusted_tenant_id="tenant-b").identity.startswith(
+        "le1/tenant-b/historical_non_evidentiary/"
+    )
 
 
 def test_partial_failure_and_retry_metadata_are_explicit():
@@ -72,7 +82,7 @@ def test_partial_failure_and_retry_metadata_are_explicit():
     snapshot["failure"] = {"stage": "retrieval", "reason": "timeout"}
     snapshot["retry"] = {"attempt": 2, "dedupe_key": "an-1"}
 
-    event = build_analysis_quality_event(snapshot)
+    event = build_analysis_quality_event(snapshot, trusted_tenant_id="tenant-a")
 
     assert event.payload["failure"] == {"stage": "retrieval", "reason": "timeout"}
     assert event.payload["retry"] == {"attempt": 2, "dedupe_key": "an-1"}
@@ -83,4 +93,22 @@ def test_analysis_quality_cannot_carry_outcome_or_gold_label_identity():
     outcome["outcome_id"] = "out-1"
 
     with pytest.raises(LearningEventError, match="outcome or gold label"):
-        build_analysis_quality_event(outcome)
+        build_analysis_quality_event(outcome, trusted_tenant_id="tenant-a")
+
+
+@pytest.mark.parametrize("trusted_tenant_id", ["", " ", "tenant-b"])
+def test_analysis_quality_rejects_untrusted_or_cross_tenant_snapshot(trusted_tenant_id):
+    with pytest.raises(LearningEventError, match="trusted_tenant_id|must match"):
+        build_analysis_quality_event(_snapshot(), trusted_tenant_id=trusted_tenant_id)
+
+
+def test_analysis_quality_rejects_missing_or_blank_snapshot_tenant():
+    missing = _snapshot()
+    missing.pop("tenant_id")
+    blank = _snapshot()
+    blank["tenant_id"] = " "
+
+    with pytest.raises(LearningEventError, match="tenant_id"):
+        build_analysis_quality_event(missing, trusted_tenant_id="tenant-a")
+    with pytest.raises(LearningEventError, match="tenant_id"):
+        build_analysis_quality_event(blank, trusted_tenant_id="tenant-a")

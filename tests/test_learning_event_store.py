@@ -1,6 +1,11 @@
 import pytest
 
-from trustforge.learning_event_contract import LearningEventError, make_learning_event, serialize_learning_event
+from trustforge.learning_event_contract import (
+    LearningEventError,
+    canonical_integrity_checksum,
+    make_learning_event,
+    serialize_learning_event,
+)
 from trustforge.learning_event_store import LearningEventAppendLog, plan_learning_event_migration
 
 
@@ -9,13 +14,24 @@ TIMES = {
     "available_time": "2026-07-01T01:00:00Z",
     "as_of_time": "2026-07-01T01:00:00Z",
 }
-PROVENANCE = {"source": "fixture", "collector": "storage-test", "observed_at": "2026-07-01T01:00:00Z"}
+SOURCE_RECORD = {"record_id": "storage-fixture"}
+PROVENANCE = {
+    "source": "fixture",
+    "collector": "storage-test",
+    "observed_at": "2026-07-01T01:00:00.000000Z",
+    "tenant_id": "tenant-a",
+    "source_record": SOURCE_RECORD,
+    "version": "fixture.v1",
+    "checksum": canonical_integrity_checksum(SOURCE_RECORD),
+}
 
 
-def _outcome(identity="outcome:an-1:T+1:v1", status="pending"):
+def _outcome(revision=1, status="pending"):
     return make_learning_event(
         kind="delayed_outcome",
-        identity=identity,
+        tenant_id="tenant-a",
+        entity_id="outcome:an-1:T+1",
+        revision=revision,
         provenance=PROVENANCE,
         payload={"outcome_id": "out-1", "analysis_id": "an-1", "horizon": "T+1", "status": status},
         **TIMES,
@@ -25,7 +41,9 @@ def _outcome(identity="outcome:an-1:T+1:v1", status="pending"):
 def _evidence(identity="evidence:1"):
     return make_learning_event(
         kind="evidentiary",
-        identity=identity,
+        tenant_id="tenant-a",
+        entity_id=identity,
+        revision=1,
         provenance=PROVENANCE,
         payload={"evidence_id": "ev-1", "claim": "btc up", "source_url": "https://example.test"},
         **TIMES,
@@ -46,7 +64,7 @@ def test_append_log_rejects_in_place_rewrite_but_allows_revision_identity():
     log = LearningEventAppendLog()
     original = _outcome(status="pending")
     rewritten = _outcome(status="labeled")
-    revision = _outcome(identity="outcome:an-1:T+1:v2", status="labeled")
+    revision = _outcome(revision=2, status="labeled")
 
     assert log.append(original) == "created"
     with pytest.raises(LearningEventError, match="immutable"):
