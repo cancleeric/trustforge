@@ -1263,3 +1263,80 @@ def test_scan_revokes_module_trust_for_nonmember_module_attributes(
         "trustforge.nonmember_attributes.Abstract.method",
         "trustforge.nonmember_attributes.Direct.method",
     ]
+
+
+def test_scan_revokes_module_trust_for_function_and_lambda_defaults(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/default_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "def sync_default(module=typing): pass\n"
+        "async def async_default(*, module=abc): pass\n"
+        "(lambda module=typing: module)\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    symbols = [row["symbol"] for row in scan([source])]
+    assert "trustforge.default_escape.Direct.method" in symbols
+    assert "trustforge.default_escape.Abstract.method" in symbols
+
+
+def test_scan_revokes_module_trust_for_call_arguments(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/call_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "consume(typing)\n"
+        "consume(module=abc)\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.call_escape.Abstract.method",
+        "trustforge.call_escape.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_member_defaults_and_call_arguments(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/member_value_calls.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "def sync_default(member=typing.Protocol): return member\n"
+        "async def async_default(*, member=abc.ABC): return member\n"
+        "(lambda member=abc.abstractmethod: member)\n"
+        "consume(typing.Protocol, abstract=abc.ABCMeta)\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []

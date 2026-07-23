@@ -496,6 +496,23 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
         self._record_copy(node.target, node.value)
         self.generic_visit(node)
 
+    def _record_function_defaults(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ) -> None:
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default:
+                self._record_unresolved(default)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._record_function_defaults(node)
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._record_function_defaults(node)
+        self.generic_visit(node)
+
     def visit_For(self, node: ast.For) -> None:
         self._record_iteration(node.target, node.iter)
         self.generic_visit(node)
@@ -529,6 +546,10 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
             and node.args[1].value in self._TRUSTED_ATTRIBUTES
         ):
             self.dynamic_mutation_roots.add(node.args[0].id)
+        for argument in node.args:
+            self._record_unresolved(argument)
+        for keyword in node.keywords:
+            self._record_unresolved(keyword.value)
         self.generic_visit(node)
 
 
