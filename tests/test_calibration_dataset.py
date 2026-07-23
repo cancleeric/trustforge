@@ -1,10 +1,18 @@
 from dataclasses import replace
+import hashlib
 
 import pytest
 
 from trustforge.analysis_quality_event import build_analysis_quality_event
 from trustforge.calibration_dataset import CalibrationDatasetError, build_confidence_calibration_dataset
-from trustforge.delayed_outcome_labeler import build_delayed_outcome_observation
+from trustforge.delayed_outcome_labeler import (
+    FixtureMarketData,
+    FixturePrice,
+    FixtureVenueCalendar,
+    VenueSession,
+    build_delayed_outcome_observation,
+    canonical_market_data_revision,
+)
 from trustforge.learning_event_contract import canonical_integrity_checksum
 
 
@@ -48,7 +56,11 @@ def _analysis(day: int, analysis_id=None):
             "available_time": f"2026-07-{day:02d}T00:00:01Z",
             "as_of_time": f"2026-07-{day:02d}T00:00:01Z",
             "source_available_times": [f"2026-07-{day:02d}T00:00:00Z"],
-            "provenance": {"source": "analysis-flow", "collector": "unit-test", "observed_at": f"2026-07-{day:02d}T00:00:01Z"},
+            "provenance": {
+                "source": "analysis-flow",
+                "collector": "unit-test",
+                "observed_at": f"2026-07-{day:02d}T00:00:01Z",
+            },
             "confidence": {"raw": 0.7, "calibrated": 0.62},
             "decision": {"direction": "bullish", "state": "buy"},
             "evidence_stats": {
@@ -71,7 +83,15 @@ def _analysis(day: int, analysis_id=None):
                 "policy": "policy-v1",
                 "rule": "rule-v1",
             },
-            "stage_metrics": [{"stage": "kernel", "latency_ms": 1, "status": "complete", "attempts": 1, "failure": None}],
+            "stage_metrics": [
+                {
+                    "stage": "kernel",
+                    "latency_ms": 1,
+                    "status": "complete",
+                    "attempts": 1,
+                    "failure": None,
+                }
+            ],
             "failure": {"status": "complete", "failed_stage": None, "code": None, "message": None, "retryable": False},
         },
         trusted_tenant_id="tenant-a",
@@ -80,18 +100,78 @@ def _analysis(day: int, analysis_id=None):
     )
 
 
-def _outcome(analysis, end_day=2, revision=1):
-    prices = {
-        analysis.event_time[:10]: {"close": 100, "available_time": analysis.available_time, "source_id": "start"},
-        f"2026-07-{end_day:02d}": {"close": 110, "available_time": f"2026-07-{end_day:02d}T01:00:00Z", "source_id": "end"},
-    }
-    return build_delayed_outcome_observation(
+def _calendar():
+    return FixtureVenueCalendar(
+        calendar_id="fixture:XNYS:calibration-v1",
+        timezone="America/New_York",
+        version_available_at="2026-06-01T00:00:00Z",
+        continuous_24_7=False,
+        prediction_cutoff_minutes=15,
+        publication_lag_hours=4,
+        sessions=tuple(
+            VenueSession(
+                f"2026-07-{day:02d}",
+                "open",
+                f"2026-07-{day:02d}T20:00:00Z",
+            )
+            for day in range(1, 21)
+        ),
+    )
+
+
+def _price(day, close):
+    record = f"{day}:{close}".encode()
+    return FixturePrice(
+        session_label=f"2026-07-{day:02d}",
+        adjusted_close=close,
+        event_at=f"2026-07-{day:02d}T20:00:00Z",
+        available_at=f"2026-07-{day:02d}T21:00:00Z",
+        provider="fixture-provider",
+        dataset_version="fixture-dataset-v1",
+        methodology_version="split-v1",
+        content_hash="sha256:" + hashlib.sha256(record).hexdigest(),
+    )
+
+
+def _outcome(analysis, end_day=2, revision=1, supersedes=None):
+    start_day = int(analysis.event_time[8:10])
+    fixture = FixtureMarketData((_price(start_day, "100.00000000"), _price(end_day, "110.00000000")))
+    labeled_at = f"2026-07-{end_day + 1:02d}T00:00:00Z"
+    start = fixture.prices[0]
+    target = fixture.prices[1]
+    market_revision = canonical_market_data_revision(
+        calendar_id=_calendar().calendar_id,
+        variant="latest_official",
+        fixture=fixture,
+        start=start,
+        target=target,
+        visible_at=labeled_at,
+    )
+    event = build_delayed_outcome_observation(
         analysis,
+        trusted_tenant_id="tenant-a",
         horizon="T+1",
-        as_of_time=f"2026-07-{end_day:02d}T01:00:00Z",
-        prices=prices,
-        source_version=f"fixture-v{revision}",
-        revision=revision,
+        trusted_as_of_time=labeled_at,
+        trusted_labeled_at=labeled_at,
+        calendar=_calendar(),
+        market_data=fixture,
+        market_data_variant="latest_official",
+        market_data_revision=market_revision,
+        trusted_outcome_version=revision,
+        trusted_supersedes=supersedes,
+    )
+    # #508's legacy dataset projection still consumes these compatibility
+    # columns. The outcome itself was built and validated through the #507
+    # canonical contract; this test-only projection keeps #508 behavior scoped.
+    return replace(
+        event,
+        payload={
+            **event.payload,
+            "revision": str(revision),
+            "source_version": f"fixture-v{revision}",
+            "outcome_pct": event.payload["return_pct"],
+            "ground_truth_direction": "bullish",
+        },
     )
 
 
@@ -124,7 +204,7 @@ def test_calibration_dataset_requires_analysis_id_and_rejects_ohlcv_expansion():
 def test_calibration_dataset_uses_latest_outcome_revision_without_rewrite():
     analysis = _analysis(1)
     old = _outcome(analysis, revision=1)
-    revised = _outcome(analysis, revision=2)
+    revised = _outcome(analysis, revision=2, supersedes=old)
 
     manifest = build_confidence_calibration_dataset([analysis], [old, revised], producer_version="unit")
 
@@ -146,12 +226,27 @@ def test_calibration_dataset_temporal_split_is_chronological_and_reproducible():
 
 def test_calibration_dataset_skips_pending_or_unavailable_outcomes():
     analysis = _analysis(1)
+    fixture = FixtureMarketData(())
+    labeled_at = "2026-07-03T01:00:00Z"
+    market_revision = canonical_market_data_revision(
+        calendar_id=_calendar().calendar_id,
+        variant="as_first_known",
+        fixture=fixture,
+        start=None,
+        target=None,
+        visible_at=labeled_at,
+    )
     pending = build_delayed_outcome_observation(
         analysis,
+        trusted_tenant_id="tenant-a",
         horizon="T+7",
-        as_of_time="2026-07-03T01:00:00Z",
-        prices={},
-        source_version="fixture-v1",
+        trusted_as_of_time=labeled_at,
+        trusted_labeled_at=labeled_at,
+        calendar=_calendar(),
+        market_data=fixture,
+        market_data_variant="as_first_known",
+        market_data_revision=market_revision,
+        trusted_outcome_version=1,
     )
 
     manifest = build_confidence_calibration_dataset([analysis], [pending], producer_version="unit")

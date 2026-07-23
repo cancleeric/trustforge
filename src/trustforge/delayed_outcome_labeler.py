@@ -1,8 +1,18 @@
-"""Delayed T+N outcome observations for analysis-quality events."""
+"""Fixture-only delayed outcome observations.
+
+This module implements the approved #501 outcome semantics without connecting a
+production market-data provider, database, backfill job, or HTTP surface.
+"""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from typing import Any
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from typing import Any, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .learning_event_contract import (
     LearningEvent,
@@ -11,120 +21,689 @@ from .learning_event_contract import (
     make_learning_event,
 )
 
-_HORIZON_DAYS = {"T+1": 1, "T+7": 7, "T+14": 14}
+_HORIZONS = {"T+1": 1, "T+7": 7, "T+14": 14}
+_VARIANTS = {"as_first_known", "latest_official"}
+_DIRECTIONS = {"bullish": 1, "bearish": -1, "neutral": 0, "abstain": None}
+_PERCENT_QUANTUM = Decimal("0.00000001")
+_PRICE_QUANTUM = Decimal("0.00000001")
+_LATE_CUTOFF = timedelta(hours=72)
+_OUTCOME_CONTRACT = "delayed-outcome.v1"
+_MAX_FIXTURE_RECORDS = 10_000
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+class OutcomeAppendPort(Protocol):
+    def append(self, event: LearningEvent) -> str: ...
+
+
+@dataclass(frozen=True)
+class VenueSession:
+    """Venue status: ``closed`` means venue closure, never instrument suspension."""
+
+    label: str
+    status: str
+    scheduled_close_at: str | None
+
+
+@dataclass(frozen=True)
+class FixtureVenueCalendar:
+    """A complete, versioned fixture calendar; unknown dates fail closed."""
+
+    calendar_id: str
+    timezone: str
+    version_available_at: str
+    continuous_24_7: bool
+    sessions: tuple[VenueSession, ...]
+    prediction_cutoff_minutes: int
+    publication_lag_hours: int
+
+    def __post_init__(self) -> None:
+        if not self.calendar_id or not self.timezone:
+            raise LearningEventError("calendar identity and timezone are required")
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise LearningEventError("calendar timezone must be a valid IANA zone") from None
+        _parse_datetime(self.version_available_at, "calendar version_available_at")
+        expected_buffer = 5 if self.continuous_24_7 else 15
+        expected_sla = 1 if self.continuous_24_7 else 4
+        if self.prediction_cutoff_minutes != expected_buffer or self.publication_lag_hours != expected_sla:
+            raise LearningEventError("calendar rule is not approved")
+        if not self.sessions:
+            raise LearningEventError("calendar sessions are required")
+        if len(self.sessions) > _MAX_FIXTURE_RECORDS:
+            raise LearningEventError("calendar fixture exceeds session limit")
+        labels: set[str] = set()
+        previous_label: str | None = None
+        previous_close: datetime | None = None
+        for session in self.sessions:
+            if session.label in labels or session.status not in {"open", "closed", "unknown"}:
+                raise LearningEventError("calendar session is invalid")
+            try:
+                parsed_label = datetime.strptime(session.label, "%Y-%m-%d")
+            except ValueError:
+                raise LearningEventError("calendar session label must be ISO date") from None
+            if parsed_label.strftime("%Y-%m-%d") != session.label:
+                raise LearningEventError("calendar session label must be ISO date")
+            if previous_label is not None and session.label <= previous_label:
+                raise LearningEventError("calendar session labels are not ordered")
+            previous_label = session.label
+            labels.add(session.label)
+            if session.status == "open":
+                if session.scheduled_close_at is None:
+                    raise LearningEventError("open session close is required")
+                close = _parse_datetime(session.scheduled_close_at, "session scheduled_close_at")
+                if previous_close is not None and close <= previous_close:
+                    raise LearningEventError("calendar sessions are not ordered")
+                previous_close = close
+            elif session.scheduled_close_at is not None:
+                raise LearningEventError("closed or unknown session must not have a close")
+        if self.continuous_24_7:
+            if self.timezone != "UTC":
+                raise LearningEventError("24/7 calendar timezone must be UTC")
+            for index, session in enumerate(self.sessions):
+                if session.status != "open":
+                    raise LearningEventError("24/7 calendar sessions must all be open")
+                label = datetime.strptime(session.label, "%Y-%m-%d").replace(
+                    tzinfo=timezone.utc
+                )
+                expected_close = label + timedelta(days=1)
+                actual_close = _parse_datetime(
+                    session.scheduled_close_at or "",
+                    "24/7 session scheduled_close_at",
+                )
+                if actual_close != expected_close:
+                    raise LearningEventError(
+                        "24/7 session close must be next UTC midnight"
+                    )
+                if index and label != datetime.strptime(
+                    self.sessions[index - 1].label,
+                    "%Y-%m-%d",
+                ).replace(tzinfo=timezone.utc) + timedelta(days=1):
+                    raise LearningEventError("24/7 session labels must be daily")
+
+    def resolve(
+        self,
+        prediction_available: datetime,
+        horizon_sessions: int,
+    ) -> tuple[VenueSession, VenueSession] | None:
+        """Resolve only the path needed for start and target."""
+
+        buffer = timedelta(minutes=self.prediction_cutoff_minutes)
+        start_index: int | None = None
+        for index, session in enumerate(self.sessions):
+            if session.status == "unknown":
+                raise LearningEventError("CALENDAR_GAP")
+            if session.status == "closed":
+                continue
+            close = _parse_datetime(session.scheduled_close_at or "", "session close")
+            if prediction_available <= close - buffer:
+                start_index = index
+                break
+        if start_index is None:
+            return None
+        remaining = horizon_sessions
+        for session in self.sessions[start_index + 1 :]:
+            if session.status == "unknown":
+                raise LearningEventError("CALENDAR_GAP")
+            if session.status == "closed":
+                continue
+            remaining -= 1
+            if remaining == 0:
+                return self.sessions[start_index], session
+        return None
+
+
+@dataclass(frozen=True)
+class FixturePrice:
+    session_label: str
+    adjusted_close: str
+    event_at: str
+    available_at: str
+    provider: str
+    dataset_version: str
+    methodology_version: str
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class FixtureMarketData:
+    """Explicit fixture data.  The name prevents accidental production use."""
+
+    prices: tuple[FixturePrice, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.prices) > _MAX_FIXTURE_RECORDS:
+            raise LearningEventError("market-data fixture exceeds price limit")
+
+    def price_for(
+        self,
+        label: str,
+        as_of: datetime,
+        *,
+        variant: str,
+    ) -> FixturePrice | None:
+        matches = [
+            item
+            for item in self.prices
+            if item.session_label == label
+            and _parse_datetime(item.available_at, "price available_at") <= as_of
+        ]
+        if not matches:
+            return None
+        ordered = sorted(
+            matches,
+            key=lambda item: (
+                _parse_datetime(item.available_at, "price available_at"),
+                json.dumps(
+                    _price_manifest(item),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        return ordered[0] if variant == "as_first_known" else ordered[-1]
+
+
+def canonical_market_data_revision(
+    *,
+    calendar_id: str,
+    variant: str,
+    fixture: FixtureMarketData,
+    start: FixturePrice | None,
+    target: FixturePrice | None,
+    visible_at: str,
+) -> str:
+    """Hash only the exact selected records visible at the event cutoff."""
+
+    cutoff = _parse_datetime(visible_at, "market revision visible_at")
+    for selected in (start, target):
+        if selected is not None and (
+            selected not in fixture.prices
+            or _parse_datetime(selected.available_at, "selected price available_at")
+            > cutoff
+        ):
+            raise LearningEventError(
+                "selected market data must belong to the visible fixture snapshot"
+            )
+    manifest = {
+        "calendar_id": calendar_id,
+        "variant": variant,
+        "selected": {
+            "start": _price_manifest(start),
+            "target": _price_manifest(target),
+        },
+    }
+    return canonical_integrity_checksum(manifest)
 
 
 def build_delayed_outcome_observation(
     analysis_event: LearningEvent,
     *,
+    trusted_tenant_id: str,
+    trusted_as_of_time: str,
+    trusted_labeled_at: str,
+    calendar: FixtureVenueCalendar,
+    market_data: FixtureMarketData,
     horizon: str,
-    as_of_time: str,
-    prices: dict[str, dict[str, Any]],
-    source_version: str,
-    revision: int = 1,
-    dry_run: bool = False,
+    market_data_variant: str,
+    market_data_revision: str,
+    trusted_outcome_version: int,
+    trusted_supersedes: LearningEvent | None = None,
 ) -> LearningEvent:
-    """Create an append-only delayed outcome observation for one analysis."""
+    """Build one immutable delayed outcome revision from trusted fixture inputs."""
 
-    if analysis_event.kind != "historical_non_evidentiary":
-        raise LearningEventError("delayed outcome requires analysis-quality source event")
-    if analysis_event.payload.get("event_type") != "analysis-quality.v1":
-        raise LearningEventError("delayed outcome source must be analysis-quality.v1")
-    if horizon not in _HORIZON_DAYS:
+    _validate_analysis(analysis_event, trusted_tenant_id)
+    if horizon not in _HORIZONS:
         raise LearningEventError("unsupported outcome horizon")
-    if revision < 1:
-        raise LearningEventError("revision must be positive")
+    if market_data_variant not in _VARIANTS:
+        raise LearningEventError("unsupported market data variant")
+    if not isinstance(market_data_revision, str) or not _SHA256.fullmatch(
+        market_data_revision
+    ):
+        raise LearningEventError("market_data_revision must be content-addressed")
+    if (
+        isinstance(trusted_outcome_version, bool)
+        or not isinstance(trusted_outcome_version, int)
+        or trusted_outcome_version < 1
+    ):
+        raise LearningEventError("trusted_outcome_version must be positive")
 
-    event_date = _parse_datetime(analysis_event.event_time, "event_time").date()
-    maturity_date = event_date + timedelta(days=_HORIZON_DAYS[horizon])
-    as_of = _parse_datetime(as_of_time, "as_of_time")
-    base = _price_for(prices, event_date, as_of)
-    matured = as_of.date() >= maturity_date
-    target = _price_for(prices, maturity_date, as_of)
+    as_of = _parse_datetime(trusted_as_of_time, "trusted_as_of_time")
+    labeled_at = _parse_datetime(trusted_labeled_at, "trusted_labeled_at")
+    if labeled_at > as_of:
+        raise LearningEventError("labeled_at cannot be after as_of")
+    if _parse_datetime(calendar.version_available_at, "calendar version_available_at") > as_of:
+        raise LearningEventError("calendar version is not available at as_of")
+    prediction_event = _parse_datetime(analysis_event.event_time, "prediction_event_at")
+    prediction_available = _parse_datetime(analysis_event.available_time, "prediction_available_at")
+    if as_of < prediction_available:
+        raise LearningEventError("as_of cannot precede prediction availability")
+    if labeled_at < prediction_available:
+        raise LearningEventError("labeled_at cannot precede prediction availability")
+    if _parse_datetime(calendar.version_available_at, "calendar version_available_at") > labeled_at:
+        raise LearningEventError("calendar version is not available at labeled_at")
+    if prediction_event > prediction_available:
+        _assert_market_data_revision(
+            market_data_revision, calendar, market_data, market_data_variant, None, None,
+            trusted_labeled_at,
+        )
+        return _state_event(
+            analysis_event, trusted_tenant_id, horizon, market_data_variant,
+            market_data_revision, trusted_outcome_version, trusted_as_of_time,
+            trusted_labeled_at, calendar, "unavailable", "INVALID_PREDICTION_TIMELINE",
+            None, None, trusted_supersedes,
+        )
 
-    status = "pending"
-    outcome: dict[str, Any] = {}
-    if matured and (base is None or target is None):
-        status = "unavailable"
-    elif matured:
-        status = "labeled"
-        outcome = _outcome_values(base, target)
+    resolved = calendar.resolve(prediction_available, _HORIZONS[horizon])
+    if resolved is None:
+        _assert_market_data_revision(
+            market_data_revision, calendar, market_data, market_data_variant, None, None,
+            trusted_labeled_at,
+        )
+        return _state_event(
+            analysis_event, trusted_tenant_id, horizon, market_data_variant,
+            market_data_revision, trusted_outcome_version, trusted_as_of_time,
+            trusted_labeled_at, calendar, "pending", "NOT_MATURE", None, None,
+            trusted_supersedes,
+        )
+    start_session, target_session = resolved
+    target_close_at = _parse_datetime(target_session.scheduled_close_at or "", "target close")
+    matures_at = target_close_at + timedelta(hours=calendar.publication_lag_hours)
+    late_cutoff = matures_at + _LATE_CUTOFF
+    start_price = market_data.price_for(
+        start_session.label, labeled_at, variant=market_data_variant
+    )
+    target_price = market_data.price_for(
+        target_session.label, labeled_at, variant=market_data_variant
+    )
+    if start_price is not None:
+        _validate_selected_price(start_price, start_session, "start")
+    if target_price is not None:
+        _validate_selected_price(target_price, target_session, "target")
+    if start_price is not None and target_price is not None:
+        _validate_price_lineage(start_price, target_price)
+    _assert_market_data_revision(
+        market_data_revision,
+        calendar,
+        market_data,
+        market_data_variant,
+        start_price,
+        target_price,
+        trusted_labeled_at,
+    )
 
-    entity_id = f"{analysis_event.entity_id}:{horizon}"
-    payload = {
-        "outcome_id": entity_id,
-        "analysis_id": analysis_event.payload["analysis_id"],
+    if labeled_at < matures_at:
+        maturity, reason = "pending", "WAITING_OFFICIAL_CLOSE"
+    elif start_price is None or target_price is None:
+        missing = "START_CLOSE_MISSING" if start_price is None else "TARGET_CLOSE_MISSING"
+        if labeled_at <= late_cutoff:
+            maturity, reason = "pending", "WAITING_LATE_DATA_CUTOFF"
+        else:
+            maturity, reason = "unavailable", missing
+    else:
+        maturity, reason = "labeled", None
+        source_available = max(
+            _parse_datetime(start_price.available_at, "start price available_at"),
+            _parse_datetime(target_price.available_at, "target price available_at"),
+        )
+        if labeled_at < max(matures_at, source_available):
+            raise LearningEventError(
+                "labeled_at cannot precede maturity or selected source availability"
+            )
+        arrived_after_cutoff = any(
+            _parse_datetime(price.available_at, "price available_at") > late_cutoff
+            for price in (start_price, target_price)
+            if price is not None
+        )
+        if arrived_after_cutoff and (
+            trusted_outcome_version == 1 or trusted_supersedes is None
+        ):
+            raise LearningEventError(
+                "late-after-cutoff data requires immutable successor revision"
+            )
+    return _state_event(
+        analysis_event, trusted_tenant_id, horizon, market_data_variant,
+        market_data_revision, trusted_outcome_version, trusted_as_of_time,
+        trusted_labeled_at, calendar, maturity, reason, start_session,
+        target_session, trusted_supersedes,
+        start_price=start_price, target_price=target_price,
+        matures_at=matures_at,
+    )
+
+
+def emit_delayed_outcome_observation(
+    event: LearningEvent,
+    *,
+    append: OutcomeAppendPort,
+    dry_run: bool,
+) -> str:
+    """Append unless dry-run; dry-run is guaranteed to perform zero writes."""
+
+    if event.kind != "delayed_outcome":
+        raise LearningEventError("only delayed outcomes may be emitted")
+    if dry_run:
+        return "dry-run"
+    return append.append(event)
+
+
+def _state_event(
+    analysis: LearningEvent,
+    tenant_id: str,
+    horizon: str,
+    variant: str,
+    revision_hash: str,
+    outcome_version: int,
+    as_of_time: str,
+    labeled_at: str,
+    calendar: FixtureVenueCalendar,
+    maturity: str,
+    reason: str | None,
+    start_session: VenueSession | None,
+    target_session: VenueSession | None,
+    supersedes: LearningEvent | None,
+    *,
+    start_price: FixturePrice | None = None,
+    target_price: FixturePrice | None = None,
+    matures_at: datetime | None = None,
+) -> LearningEvent:
+    prediction_id = str(analysis.payload["analysis_id"])
+    identity_inputs = {
+        "tenant_id": tenant_id,
+        "prediction_id": prediction_id,
         "horizon": horizon,
-        "status": status,
-        "source_event_identity": analysis_event.identity,
-        "maturity_date": maturity_date.isoformat(),
-        "dry_run": dry_run,
-        "revision": str(revision),
-        "source_version": source_version,
-        "available_time": as_of_time,
-        **outcome,
+        "contract_version": _OUTCOME_CONTRACT,
+        "market_data_variant": variant,
+        "market_data_revision": revision_hash,
+        "outcome_version": outcome_version,
+    }
+    outcome_id = "sha256:" + hashlib.sha256(
+        json.dumps(identity_inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    supersedes_id = _validate_supersession(
+        supersedes, tenant_id, prediction_id, horizon, variant, outcome_version
+    )
+    metrics: dict[str, Any] = {
+        "return_pct": None,
+        "direction_sign": None,
+        "directional_return_pct": None,
+        "risk_abs_move_pct": None,
+        "risk_downside_pct": None,
+        "hit": None,
+    }
+    lineage: dict[str, Any] | None = None
+    if maturity == "labeled":
+        if start_price is None or target_price is None:
+            raise LearningEventError("labeled outcome requires both prices")
+        start = _price_decimal(start_price.adjusted_close)
+        target = _price_decimal(target_price.adjusted_close)
+        if start == 0:
+            maturity, reason = "unavailable", "ZERO_START_CLOSE"
+        else:
+            direction = str(analysis.payload["decision"]["direction"])
+            if direction not in _DIRECTIONS:
+                raise LearningEventError("prediction direction is unsupported")
+            with localcontext() as context:
+                context.prec = 34
+                context.rounding = ROUND_HALF_EVEN
+                raw_return = (target / start - Decimal(1)) * Decimal(100)
+                sign = _DIRECTIONS[direction]
+                directional = raw_return * sign if sign in {-1, 1} else None
+                metrics = {
+                    "return_pct": _persist_decimal(raw_return),
+                    "direction_sign": sign,
+                    "directional_return_pct": _persist_decimal(directional) if directional is not None else None,
+                    "risk_abs_move_pct": _persist_decimal(abs(raw_return)),
+                    "risk_downside_pct": _persist_decimal(min(raw_return, Decimal(0))),
+                    "hit": directional > 0 if directional is not None else None,
+                }
+            lineage = {
+                "adjustment_basis": "split_adjusted_price_return",
+                "cash_dividend_included": False,
+                "start": _price_lineage(start_price),
+                "target": _price_lineage(target_price),
+            }
+    payload = {
+        "event_type": "delayed-outcome.v1",
+        "classification": "non_evidentiary_outcome",
+        "eligible_as_evidence": False,
+        "outcome_id": outcome_id,
+        "analysis_id": prediction_id,
+        "identity_inputs": identity_inputs,
+        "prediction_id": prediction_id,
+        "source_event_identity": analysis.identity,
+        "horizon": horizon,
+        "contract_version": _OUTCOME_CONTRACT,
+        "market_data_variant": variant,
+        "market_data_revision": revision_hash,
+        "outcome_version": outcome_version,
+        "maturity": maturity,
+        "status": maturity,
+        "reason_code": reason,
+        "start_session": start_session.label if start_session else None,
+        "target_session": target_session.label if target_session else None,
+        "matures_at": _timestamp(matures_at) if matures_at else None,
+        "labeled_at": labeled_at,
+        "canonical_as_of": as_of_time,
+        "supersedes_outcome_id": supersedes_id,
+        "lineage": lineage,
+        **metrics,
     }
     source_record = {
-        "analysis_identity": analysis_event.identity,
-        "horizon": horizon,
-        "source_version": source_version,
+        "fixture_only": True,
+        "calendar_id": calendar.calendar_id,
+        "calendar_version_available_at": calendar.version_available_at,
+        "market_data_revision": revision_hash,
+        "identity_inputs": identity_inputs,
     }
     return make_learning_event(
         kind="delayed_outcome",
-        tenant_id=analysis_event.tenant_id,
-        entity_id=entity_id,
-        revision=revision,
-        event_time=analysis_event.event_time,
-        available_time=as_of_time,
+        tenant_id=tenant_id,
+        entity_id=outcome_id,
+        revision=outcome_version,
+        event_time=analysis.event_time,
+        available_time=labeled_at,
         as_of_time=as_of_time,
         provenance={
-            "source": "delayed-outcome-labeler",
+            "source": "fixture-delayed-outcome-labeler",
             "collector": "trustforge",
-            "observed_at": as_of_time,
-            "tenant_id": analysis_event.tenant_id,
+            "observed_at": labeled_at,
+            "tenant_id": tenant_id,
             "source_record": source_record,
-            "version": source_version,
+            "version": _OUTCOME_CONTRACT,
             "checksum": canonical_integrity_checksum(source_record),
         },
         payload=payload,
     )
 
 
-def _outcome_values(base: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-    start_close = _number(base.get("close"), "start_close")
-    end_close = _number(target.get("close"), "end_close")
-    if start_close == 0:
-        raise LearningEventError("start_close cannot be zero")
-    pct = ((end_close - start_close) / start_close) * 100
+def _validate_analysis(event: LearningEvent, trusted_tenant_id: str) -> None:
+    if not trusted_tenant_id or event.tenant_id != trusted_tenant_id:
+        raise LearningEventError("trusted tenant does not match analysis")
+    if event.kind != "historical_non_evidentiary" or event.payload.get("event_type") != "analysis-quality.v1":
+        raise LearningEventError("delayed outcome source must be analysis-quality.v1")
+
+
+def _validate_supersession(
+    previous: LearningEvent | None,
+    tenant_id: str,
+    prediction_id: str,
+    horizon: str,
+    variant: str,
+    outcome_version: int,
+) -> str | None:
+    if previous is None:
+        if outcome_version != 1:
+            raise LearningEventError("outcome revision requires predecessor")
+        return None
+    payload = previous.payload
+    identity_inputs = payload.get("identity_inputs")
+    if not isinstance(identity_inputs, dict) and not hasattr(identity_inputs, "items"):
+        raise LearningEventError("predecessor identity inputs are invalid")
+    identity_inputs = dict(identity_inputs)
+    expected_keys = {
+        "tenant_id", "prediction_id", "horizon", "contract_version",
+        "market_data_variant", "market_data_revision", "outcome_version",
+    }
+    if set(identity_inputs) != expected_keys:
+        raise LearningEventError("predecessor identity inputs are invalid")
+    reconstructed = "sha256:" + hashlib.sha256(
+        json.dumps(
+            identity_inputs,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    if (
+        previous.kind != "delayed_outcome"
+        or previous.tenant_id != tenant_id
+        or identity_inputs.get("tenant_id") != previous.tenant_id
+        or payload.get("prediction_id") != prediction_id
+        or identity_inputs.get("prediction_id") != prediction_id
+        or payload.get("horizon") != horizon
+        or identity_inputs.get("horizon") != horizon
+        or payload.get("market_data_variant") != variant
+        or identity_inputs.get("market_data_variant") != variant
+        or identity_inputs.get("contract_version") != _OUTCOME_CONTRACT
+        or payload.get("contract_version") != identity_inputs.get("contract_version")
+        or payload.get("market_data_revision")
+        != identity_inputs.get("market_data_revision")
+        or payload.get("outcome_version") != outcome_version - 1
+        or identity_inputs.get("outcome_version") != outcome_version - 1
+        or previous.revision != outcome_version - 1
+        or payload.get("outcome_id") != reconstructed
+        or previous.entity_id != reconstructed
+        or payload.get("supersedes_outcome_id") == reconstructed
+    ):
+        raise LearningEventError("supersession must reference same-tenant logical predecessor")
+    if reconstructed == canonical_integrity_checksum(
+        {
+            "tenant_id": tenant_id,
+            "prediction_id": prediction_id,
+            "horizon": horizon,
+            "contract_version": _OUTCOME_CONTRACT,
+            "market_data_variant": variant,
+            "market_data_revision": identity_inputs["market_data_revision"],
+            "outcome_version": outcome_version,
+        }
+    ):
+        raise LearningEventError("supersession cannot self-reference")
+    return str(payload["outcome_id"])
+
+
+def _assert_market_data_revision(
+    supplied: str,
+    calendar: FixtureVenueCalendar,
+    fixture: FixtureMarketData,
+    variant: str,
+    start: FixturePrice | None,
+    target: FixturePrice | None,
+    visible_at: str,
+) -> None:
+    expected = canonical_market_data_revision(
+        calendar_id=calendar.calendar_id,
+        variant=variant,
+        fixture=fixture,
+        start=start,
+        target=target,
+        visible_at=visible_at,
+    )
+    if supplied != expected:
+        raise LearningEventError(
+            "market_data_revision does not match selected fixture manifest"
+        )
+
+
+def _validate_price_lineage(start: FixturePrice, target: FixturePrice) -> None:
+    if (
+        start.provider != target.provider
+        or start.dataset_version != target.dataset_version
+        or start.methodology_version != target.methodology_version
+    ):
+        raise LearningEventError("adjustment lineage must use one provider and methodology")
+
+
+def _validate_selected_price(
+    item: FixturePrice,
+    session: VenueSession,
+    endpoint: str,
+) -> None:
+    if not all(
+        (
+            item.provider,
+            item.dataset_version,
+            item.methodology_version,
+            item.content_hash,
+        )
+    ):
+        raise LearningEventError("PRICE_LINEAGE_MISSING")
+    if not _SHA256.fullmatch(item.content_hash):
+        raise LearningEventError("PRICE_LINEAGE_MISSING")
+    event_at = _parse_datetime(item.event_at, f"{endpoint} price event_at")
+    available_at = _parse_datetime(
+        item.available_at,
+        f"{endpoint} price available_at",
+    )
+    if event_at > available_at:
+        raise LearningEventError("price timeline is invalid")
+    if (
+        item.session_label != session.label
+        or event_at
+        != _parse_datetime(
+            session.scheduled_close_at or "",
+            f"{endpoint} session close",
+        )
+    ):
+        raise LearningEventError("price lineage does not match calendar sessions")
+    _price_decimal(item.adjusted_close)
+
+
+def _price_lineage(item: FixturePrice) -> dict[str, str]:
     return {
-        "start_close": start_close,
-        "end_close": end_close,
-        "outcome_pct": pct,
-        "ground_truth_direction": "bullish" if pct > 0 else "bearish" if pct < 0 else "neutral",
-        "source_lineage": {
-            "start_source_id": str(base.get("source_id", "")),
-            "end_source_id": str(target.get("source_id", "")),
-            "start_available_time": str(base.get("available_time", "")),
-            "end_available_time": str(target.get("available_time", "")),
-        },
+        "session_label": item.session_label,
+        "provider": item.provider,
+        "dataset_version": item.dataset_version,
+        "methodology_version": item.methodology_version,
+        "event_at": item.event_at,
+        "available_at": item.available_at,
+        "content_hash": item.content_hash,
     }
 
 
-def _price_for(prices: dict[str, dict[str, Any]], target_date: date, as_of: datetime) -> dict[str, Any] | None:
-    value = prices.get(target_date.isoformat())
-    if value is None:
+def _price_manifest(item: FixturePrice | None) -> dict[str, str] | None:
+    if item is None:
         return None
-    if not isinstance(value, dict):
-        raise LearningEventError("price observation must be an object")
-    available = value.get("available_time")
-    if not isinstance(available, str):
-        raise LearningEventError("price observation available_time is required")
-    if _parse_datetime(available, "price observation available_time") > as_of:
-        return None
-    return value
+    return {
+        **_price_lineage(item),
+        "adjusted_close": item.adjusted_close,
+    }
+
+
+def _price_decimal(value: str) -> Decimal:
+    if not isinstance(value, str):
+        raise LearningEventError("price must be a decimal string")
+    try:
+        decimal = Decimal(value)
+    except InvalidOperation:
+        raise LearningEventError("price is invalid") from None
+    if not decimal.is_finite() or decimal <= 0:
+        raise LearningEventError("price must be finite and positive")
+    significant = len(decimal.as_tuple().digits)
+    fractional = max(0, -decimal.as_tuple().exponent)
+    if significant > 18 or fractional > 8 or decimal != decimal.quantize(_PRICE_QUANTUM):
+        raise LearningEventError("price exceeds numeric contract")
+    return decimal
+
+
+def _persist_decimal(value: Decimal) -> str:
+    return format(value.quantize(_PERCENT_QUANTUM, rounding=ROUND_HALF_EVEN), "f")
 
 
 def _parse_datetime(value: str, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise LearningEventError(f"{field} must be ISO-8601")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -134,7 +713,5 @@ def _parse_datetime(value: str, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _number(value: Any, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise LearningEventError(f"{field} must be numeric")
-    return float(value)
+def _timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
