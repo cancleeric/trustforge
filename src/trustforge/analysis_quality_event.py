@@ -427,9 +427,14 @@ def _evidence_snapshot(
             raise LearningEventError(f"evidence_snapshot[{index}] must be an object")
         evidence = dict(item)
         missing = required - set(evidence)
+        unknown = set(evidence) - required
         if missing:
             raise LearningEventError(
                 f"evidence_snapshot[{index}] missing fields: {', '.join(sorted(missing))}"
+            )
+        if unknown:
+            raise LearningEventError(
+                f"evidence_snapshot[{index}] unknown fields: {', '.join(sorted(unknown))}"
             )
         for field in (
             "source",
@@ -452,7 +457,8 @@ def _evidence_snapshot(
             )
         evidence["fetched_at"] = _canonical_time(fetched_at)
         # The learning-event contract performs the final recursive JSON check
-        # and deep-freeze, including any optional evidence fields.
+        # and deep-freeze. Evidence items intentionally have no passthrough
+        # extension surface in analysis-quality.v1.
         canonical.append(evidence)
     return canonical
 

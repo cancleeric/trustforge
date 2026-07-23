@@ -36,6 +36,11 @@ data fails closed. Outcome and gold-label identities are forbidden.
 Evidence snapshot and is verified during construction. Evidence timestamps,
 source availability, and provenance observation must not follow the trusted
 analysis `available_time`.
+Evidence items use an exact, closed schema with no extension passthrough:
+`source`, `fetched_at`, `content_reference`, `related_claim`, `schema_version`,
+and `trust`. Unknown fields—including outcome, label, diagnostic, approval, or
+activation surfaces—fail closed even when the caller recomputes the snapshot
+hash.
 
 ## Delivery semantics
 

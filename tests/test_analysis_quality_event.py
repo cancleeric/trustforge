@@ -392,3 +392,27 @@ def test_failed_stage_requires_nonempty_failure_code_and_message():
 
     with pytest.raises(LearningEventError, match="failure.code"):
         build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    [
+        "outcome_id",
+        "label_id",
+        "diagnostic_id",
+        "approval_action",
+        "activation",
+        "unreviewed_extension",
+    ],
+)
+def test_evidence_snapshot_rejects_every_unknown_field_even_with_recomputed_hash(
+    forbidden,
+):
+    value = snapshot()
+    value["evidence_snapshot"][0][forbidden] = "attacker-controlled"
+    value["evidence_snapshot_id"] = canonical_integrity_checksum(
+        value["evidence_snapshot"]
+    )
+
+    with pytest.raises(LearningEventError, match=rf"unknown fields: {forbidden}"):
+        build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
