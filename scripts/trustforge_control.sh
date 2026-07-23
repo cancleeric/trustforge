@@ -1,11 +1,26 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -u
 
-ROOT="${TRUSTFORGE_HOME:-/Users/apple/HurricaneSoft/trustforge}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+DEFAULT_ROOT="$(dirname "$SCRIPT_DIR")"
+ROOT="${TRUSTFORGE_HOME:-$DEFAULT_ROOT}"
 PID_FILE="${TRUSTFORGE_PID_FILE:-$ROOT/out/trustforge-web.pid}"
 LOG_FILE="${TRUSTFORGE_LOG_FILE:-$ROOT/out/trustforge-web.log}"
 PORT="${PORT:-8080}"
 PYTHON_BIN="${TRUSTFORGE_PYTHON:-$ROOT/.venv/bin/python}"
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3)"
+fi
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "[trustforge_control] python unavailable" >&2
+  exit 2
+fi
+ROOT="$("$PYTHON_BIN" -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$ROOT")" || exit 2
+if [[ "$ROOT" != "${TRUSTFORGE_HOME:-$DEFAULT_ROOT}" ]]; then
+  echo "[trustforge_control] repository root must be a canonical realpath" >&2
+  exit 2
+fi
 
 cd "$ROOT" || exit 1
 mkdir -p "$ROOT/out"
