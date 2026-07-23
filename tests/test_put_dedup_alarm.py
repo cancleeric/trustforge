@@ -57,6 +57,7 @@ def test_no_sns_builds_filter_and_alarms_without_actions(tmp_path: Path) -> None
     rc, out, calls = _run(tmp_path, {})
 
     assert rc == 0, out
+    assert "unbound variable" not in out
     assert not any("--alarm-actions" in call for call in calls), calls
     assert not any("--ok-actions" in call for call in calls), calls
     assert any("logs put-metric-filter" in call for call in calls), calls
