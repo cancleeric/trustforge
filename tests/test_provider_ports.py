@@ -573,14 +573,24 @@ class TestResolveProviders:
             res = next(r for r in ps.resolutions if r.key == "llm")
             assert res.resolved == "bedrock"
 
-    def test_agentcore_env_not_implemented(self):
-        """TRUSTFORGE_AGENTCORE=1 → AgentCoreLLMAdapter (complete raises NotImplementedError)。"""
-        env = {"TRUSTFORGE_AGENTCORE": "1"}
-        with patch.dict(os.environ, env, clear=False):
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "ON"])
+    def test_agentcore_enabled_values_fail_closed(self, value):
+        """Every documented enabled spelling fails closed while unavailable."""
+        with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": value}, clear=True):
+            with pytest.raises(RuntimeError, match="unsupported"):
+                resolve_providers()
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "FALSE", "No", "off"])
+    def test_agentcore_disabled_values_do_not_enable_adapter(self, value):
+        with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": value}, clear=True):
             ps = resolve_providers()
-            assert isinstance(ps.llm, AgentCoreLLMAdapter)
-            with pytest.raises(NotImplementedError):
-                ps.llm.complete("sys", "prompt")  # type: ignore[union-attr]
+            assert isinstance(ps.llm, NullLLMAdapter)
+
+    @pytest.mark.parametrize("value", ["01", "enabled", "2", "maybe"])
+    def test_agentcore_malformed_values_fail_closed(self, value):
+        with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": value}, clear=True):
+            with pytest.raises(ValueError, match="must be one of"):
+                resolve_providers()
 
 
 class TestPipelineProviderRuntimePath:
@@ -892,6 +902,5 @@ class TestFailureNotSilent:
 
     def test_agentcore_complete_not_implemented(self):
         with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": "1"}):
-            adapter = AgentCoreLLMAdapter()
-            with pytest.raises(NotImplementedError):
-                adapter.complete("sys", "prompt")
+            with pytest.raises(RuntimeError, match="not implemented"):
+                AgentCoreLLMAdapter()

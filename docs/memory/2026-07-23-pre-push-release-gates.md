@@ -7,7 +7,7 @@ Operational memory:
 
 - `.githooks/pre-push` is the mandatory local push gate.
 - PRs must include commit-bound pre-push evidence.
-- UI PRs still need actual-branch Eye and desktop/mobile verification.
+- UI PRs still need actual-branch Eye desktop/mobile verification.
 - Every PR needs a named reviewer and `/codex-review`.
 - Security changes require harper (CISO) and gray (CPO) review; cost changes
   require harper review.

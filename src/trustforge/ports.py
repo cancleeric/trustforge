@@ -693,24 +693,19 @@ class SQLiteCacheAdapter:
 
 
 class AgentCoreLLMAdapter:
-    """AgentCore LLM adapter（TRUSTFORGE_AGENTCORE=1 時啟用）。"""
+    """Unavailable placeholder retained for an explicit fail-closed error."""
 
     def __init__(self):
-        import os
-        if not os.environ.get("TRUSTFORGE_AGENTCORE"):
-            raise RuntimeError(
-                "AgentCoreLLMAdapter requires TRUSTFORGE_AGENTCORE=1 in environment"
-            )
+        raise RuntimeError(
+            "TRUSTFORGE_AGENTCORE is unsupported because AgentCore integration "
+            "is not implemented; use BEDROCK_MODEL_ID"
+        )
 
     def complete(self, system: str, prompt: str) -> str:
-        raise NotImplementedError(
-            "AgentCore bridge not yet implemented — set BEDROCK_MODEL_ID to use Bedrock adapter"
-        )
+        raise RuntimeError("AgentCore integration is unavailable")
 
     def classify_stance(self, claim_a: str, claim_b: str) -> str:
-        raise NotImplementedError(
-            "AgentCore bridge not yet implemented — set BEDROCK_MODEL_ID to use Bedrock adapter"
-        )
+        raise RuntimeError("AgentCore integration is unavailable")
 
 
 class NullLLMAdapter:
@@ -742,14 +737,17 @@ def _resolve_llm_from_env(*, bedrock_client_factory=None) -> tuple[LLMProvider, 
     """根據環境變數選擇 LLM adapter。"""
     import os
 
-    if os.environ.get("TRUSTFORGE_AGENTCORE") == "1":
-        try:
-            adapter = AgentCoreLLMAdapter()
-            return adapter, "agentcore"
-        except Exception as exc:
-            raise RuntimeError(
-                f"TRUSTFORGE_AGENTCORE=1 but AgentCore init failed: {exc}"
-            ) from exc
+    agentcore_flag = os.environ.get("TRUSTFORGE_AGENTCORE", "").strip().lower()
+    if agentcore_flag in {"1", "true", "yes", "on"}:
+        raise RuntimeError(
+            "TRUSTFORGE_AGENTCORE is enabled but unsupported because AgentCore integration "
+            "is not implemented; use BEDROCK_MODEL_ID"
+        )
+    if agentcore_flag not in {"", "0", "false", "no", "off"}:
+        raise ValueError(
+            "TRUSTFORGE_AGENTCORE must be one of "
+            "1/true/yes/on or 0/false/no/off"
+        )
 
     if os.environ.get("BEDROCK_MODEL_ID"):
         if bedrock_client_factory is not None:
