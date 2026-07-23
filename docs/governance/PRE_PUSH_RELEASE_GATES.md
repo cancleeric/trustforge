@@ -1,19 +1,19 @@
 # Pre-Push Release Gates
 
-TrustForge does not use GitHub Actions as a merge, release, or deployment gate.
-All workflows under `.github/workflows/` intentionally remain disabled. Do not
-restore, enable, rerun, or depend on them for PR acceptance.
+TrustForge uses the repository pre-push hook as the mandatory local quality gate.
+GitHub Actions workflows under `.github/workflows/` intentionally remain
+disabled and are not merge, release, or deployment gates. Do not restore, enable,
+rerun, or depend on GitHub Actions as PR acceptance evidence.
 
 ## Mandatory Local Gate
 
-Every push must pass the repository pre-push hook at `.githooks/pre-push`.
-Install it once per clone:
+Every push must pass `.githooks/pre-push`. Install the hook path once per clone:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-The hook currently runs these exact gates, in order:
+The hook currently runs these gates in order:
 
 ```bash
 env PYTHONPATH=src "$PYTHON" -m pytest -q
@@ -27,14 +27,14 @@ npm --prefix frontend run build
 git diff --check
 ```
 
-The hook skips `npm --prefix frontend ci` only when
+The hook may skip `npm --prefix frontend ci` only when
 `frontend/node_modules/.bin/vitest` already exists. `TRUSTFORGE_NO_CD=1` may be
-used when a push must skip deployment side effects, but it does not skip the
-quality gates above.
+used when a push must avoid deployment side effects, but it does not skip any of
+the quality gates above.
 
 ## PR Evidence
 
-Each PR must record commit-bound pre-push evidence in the PR body or a PR
+Every PR must record commit-bound local gate evidence in the PR body or in a PR
 comment:
 
 - head commit SHA
@@ -45,8 +45,10 @@ comment:
   the change requires them
 - explicit reason for any gate that was not run
 
-UI changes still require actual-branch Eye desktop/mobile layout verification.
-Every PR requires a named reviewer and a `/codex-review` comment.
+UI changes still require actual-branch Eye desktop and mobile layout
+verification. Every PR must request a named reviewer and include a `/codex-review`
+comment.
+
 Security-sensitive changes require harper (CISO) and gray (CPO) review before
 merge. Cost-sensitive changes require harper review before merge.
 
@@ -54,5 +56,5 @@ merge. Cost-sensitive changes require harper review before merge.
 
 Production deployment remains controlled by an explicit release workflow outside
 GitHub Actions. Release work must verify deployed health and changed user
-workflows before closing a release milestone. Issue-development sweeps open PRs
+workflows before closing the release milestone. Issue-development sweeps open PRs
 for review only; they do not merge, release, or deploy.
