@@ -1128,3 +1128,81 @@ def test_scan_revokes_module_trust_for_rhs_starred_unpacking(
         "trustforge.starred_unpacking.Abstract.method",
         "trustforge.starred_unpacking.Direct.method",
     ]
+
+
+def test_scan_revokes_module_trust_for_call_wrapped_and_set_iterables(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/wrapped_iterables.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "for typing_copy in iter((typing,)):\n"
+        "    typing_copy.Protocol = object\n"
+        "[abc_copy for abc_copy in set([abc])]\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.wrapped_iterables.Abstract.method",
+        "trustforge.wrapped_iterables.Direct.method",
+    ]
+
+
+def test_scan_revokes_module_trust_for_other_unresolved_iterable_shapes(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/non_tuple_iterables.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "for typing_copy in {typing}:\n"
+        "    pass\n"
+        "(abc_copy for abc_copy in (abc + ()))\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.non_tuple_iterables.Abstract.method",
+        "trustforge.non_tuple_iterables.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_wrapped_attribute_read_iterables(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/read_only_wrapped_iterables.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "for protocol_type in iter((typing.Protocol,)):\n"
+        "    pass\n"
+        "[abstract_type for abstract_type in set([abc.ABC])]\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []

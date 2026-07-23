@@ -428,13 +428,26 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
         self.dynamic_mutation_roots: set[str] = set()
         self.unresolved_unpack_sources: set[str] = set()
 
+    def _record_unresolved(self, value: ast.expr) -> None:
+        class _BareLoadVisitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.names: set[str] = set()
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, ast.Load):
+                    self.names.add(node.id)
+
+            def visit_Attribute(self, node: ast.Attribute) -> None:
+                # Reading a member does not expose the module object itself.
+                return
+
+        visitor = _BareLoadVisitor()
+        visitor.visit(value)
+        self.unresolved_unpack_sources.update(visitor.names)
+
     def _record_copy(self, target: ast.expr, value: ast.expr | None) -> None:
         if isinstance(value, ast.Starred):
-            self.unresolved_unpack_sources.update(
-                child.id
-                for child in ast.walk(value.value)
-                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-            )
+            self._record_unresolved(value.value)
             return
         if isinstance(target, ast.Name) and isinstance(value, ast.Name):
             self.edges.add((target.id, value.id))
@@ -449,18 +462,13 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
                     self._record_copy(target_element, value_element)
                 return
             if value is not None:
-                self.unresolved_unpack_sources.update(
-                    child.id
-                    for child in ast.walk(value)
-                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-                )
+                self._record_unresolved(value)
             return
         if isinstance(value, (ast.Tuple, ast.List)):
-            self.unresolved_unpack_sources.update(
-                child.id
-                for child in ast.walk(value)
-                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
-            )
+            self._record_unresolved(value)
+            return
+        if value is not None:
+            self._record_unresolved(value)
 
     def _record_iteration(self, target: ast.expr, iterable: ast.expr) -> None:
         if isinstance(iterable, (ast.Tuple, ast.List)):
