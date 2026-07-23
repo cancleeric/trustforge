@@ -701,6 +701,85 @@ def _abc_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
     return _trusted_import_bindings(tree, modules={"abc"}, symbol="abstractmethod")
 
 
+def _statement_import_bindings(
+    statement: ast.stmt,
+    *,
+    modules: set[str],
+    symbol: str,
+) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    module_aliases: set[str] = set()
+    if isinstance(statement, ast.ImportFrom) and statement.module in modules:
+        names.update(
+            alias.asname or alias.name
+            for alias in statement.names
+            if alias.name == symbol
+        )
+    elif isinstance(statement, ast.Import):
+        module_aliases.update(
+            alias.asname or alias.name
+            for alias in statement.names
+            if alias.name in modules
+        )
+    return names, module_aliases
+
+
+def _rebinds_in_statement(statement: ast.stmt, introduced: set[str]) -> set[str]:
+    bound = _scope_binding_counts([statement])
+    rebound = {name for name, count in bound.items() if name not in introduced or count > 1}
+    module = ast.Module(body=[statement], type_ignores=[])
+    rebound.update(_nested_global_mutations(module))
+    return rebound
+
+
+def _advance_trusted_bindings(
+    statement: ast.stmt,
+    *,
+    protocol_names: set[str],
+    protocol_modules: set[str],
+    abstractmethod_names: set[str],
+    abc_modules: set[str],
+    abc_names: set[str],
+    abc_meta_names: set[str],
+) -> tuple[set[str], set[str], set[str], set[str], set[str], set[str]]:
+    imported_protocol_names, imported_protocol_modules = _statement_import_bindings(
+        statement, modules={"typing", "typing_extensions"}, symbol="Protocol"
+    )
+    imported_abstractmethod_names, imported_abc_modules = _statement_import_bindings(
+        statement, modules={"abc"}, symbol="abstractmethod"
+    )
+    imported_abc_names, _ = _statement_import_bindings(
+        statement, modules={"abc"}, symbol="ABC"
+    )
+    imported_abc_meta_names, _ = _statement_import_bindings(
+        statement, modules={"abc"}, symbol="ABCMeta"
+    )
+    introduced = (
+        imported_protocol_names
+        | imported_protocol_modules
+        | imported_abstractmethod_names
+        | imported_abc_modules
+        | imported_abc_names
+        | imported_abc_meta_names
+    )
+    rebound = _rebinds_in_statement(statement, introduced)
+    statement_tree = ast.Module(body=[statement], type_ignores=[])
+    unsafe_protocol_modules = _unsafe_module_aliases(
+        statement_tree, protocol_modules | imported_protocol_modules
+    )
+    unsafe_abc_modules = _unsafe_module_aliases(
+        statement_tree, abc_modules | imported_abc_modules
+    )
+    return (
+        (protocol_names | imported_protocol_names) - rebound,
+        (protocol_modules | imported_protocol_modules) - rebound - unsafe_protocol_modules,
+        (abstractmethod_names | imported_abstractmethod_names) - rebound,
+        (abc_modules | imported_abc_modules) - rebound - unsafe_abc_modules,
+        (abc_names | imported_abc_names) - rebound,
+        (abc_meta_names | imported_abc_meta_names) - rebound,
+    )
+
+
 def _is_protocol_base(
     node: ast.expr,
     protocol_names: set[str],
@@ -738,25 +817,35 @@ def scan(paths: Iterable[Path]) -> list[dict[str, object]]:
         relative = path.relative_to(ROOT)
         module = ".".join(relative.with_suffix("").parts[1:])
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
-        for index, statement in enumerate(tree.body, start=1):
-            prefix_tree = ast.Module(
-                body=tree.body[:index],
-                type_ignores=list(tree.type_ignores),
-            )
-            protocol_names, protocol_modules = _protocol_bindings(prefix_tree)
-            abstractmethod_names, abc_modules = _abc_bindings(prefix_tree)
-            abc_names, _ = _trusted_import_bindings(
-                prefix_tree, modules={"abc"}, symbol="ABC"
-            )
-            abc_meta_names, _ = _trusted_import_bindings(
-                prefix_tree, modules={"abc"}, symbol="ABCMeta"
-            )
+        protocol_names: set[str] = set()
+        protocol_modules: set[str] = set()
+        abstractmethod_names: set[str] = set()
+        abc_modules: set[str] = set()
+        abc_names: set[str] = set()
+        abc_meta_names: set[str] = set()
+        for statement in tree.body:
             visitor = _FunctionVisitor(
                 module, relative, protocol_names, protocol_modules,
                 abstractmethod_names, abc_modules, abc_names, abc_meta_names,
             )
             visitor.visit(statement)
             findings.extend(visitor.findings)
+            (
+                protocol_names,
+                protocol_modules,
+                abstractmethod_names,
+                abc_modules,
+                abc_names,
+                abc_meta_names,
+            ) = _advance_trusted_bindings(
+                statement,
+                protocol_names=protocol_names,
+                protocol_modules=protocol_modules,
+                abstractmethod_names=abstractmethod_names,
+                abc_modules=abc_modules,
+                abc_names=abc_names,
+                abc_meta_names=abc_meta_names,
+            )
     return sorted(findings, key=lambda item: (str(item["symbol"]), str(item["kind"])))
 
 
