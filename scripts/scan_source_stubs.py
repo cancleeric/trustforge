@@ -162,7 +162,7 @@ class _FunctionVisitor(ast.NodeVisitor):
             })
         self.scope.append(node.name)
         self.scope_kinds.append("function")
-        shadowed = _bound_names(node.body) | {
+        shadowed = _bound_names(node.body) | _nested_nonlocal_mutations(node.body) | {
             argument.arg
             for argument in (
                 *node.args.posonlyargs,
@@ -312,6 +312,91 @@ def _scope_binding_counts(nodes: Iterable[ast.stmt]) -> Counter[str]:
     return visitor.counts
 
 
+class _ScopeMutationVisitor(_ScopeBindingVisitor):
+    """Collect actual writes in one scope, excluding declarations alone."""
+
+    def visit_Global(self, node: ast.Global) -> None:
+        return
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        return
+
+
+def _scope_mutated_names(nodes: Iterable[ast.stmt]) -> set[str]:
+    visitor = _ScopeMutationVisitor()
+    for node in nodes:
+        visitor.visit(node)
+    return set(visitor.counts)
+
+
+class _ScopeDeclarationVisitor(ast.NodeVisitor):
+    def __init__(self, declaration_type: type[ast.Global] | type[ast.Nonlocal]):
+        self.declaration_type = declaration_type
+        self.names: set[str] = set()
+
+    def visit_Global(self, node: ast.Global) -> None:
+        if self.declaration_type is ast.Global:
+            self.names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        if self.declaration_type is ast.Nonlocal:
+            self.names.update(node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+def _scope_declared_names(
+    nodes: Iterable[ast.stmt],
+    declaration_type: type[ast.Global] | type[ast.Nonlocal],
+) -> set[str]:
+    visitor = _ScopeDeclarationVisitor(declaration_type)
+    for node in nodes:
+        visitor.visit(node)
+    return visitor.names
+
+
+class _NestedDeclarationMutationVisitor(ast.NodeVisitor):
+    def __init__(self, declaration_type: type[ast.Global] | type[ast.Nonlocal]):
+        self.declaration_type = declaration_type
+        self.names: set[str] = set()
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        declared = _scope_declared_names(node.body, self.declaration_type)
+        self.names.update(declared & _scope_mutated_names(node.body))
+        for statement in node.body:
+            self.visit(statement)
+
+    visit_FunctionDef = _visit_function
+    visit_AsyncFunctionDef = _visit_function
+
+
+def _nested_declaration_mutations(
+    nodes: Iterable[ast.stmt],
+    declaration_type: type[ast.Global] | type[ast.Nonlocal],
+) -> set[str]:
+    visitor = _NestedDeclarationMutationVisitor(declaration_type)
+    for node in nodes:
+        visitor.visit(node)
+    return visitor.names
+
+
+def _nested_global_mutations(tree: ast.Module) -> set[str]:
+    return _nested_declaration_mutations(tree.body, ast.Global)
+
+
+def _nested_nonlocal_mutations(nodes: Iterable[ast.stmt]) -> set[str]:
+    return _nested_declaration_mutations(nodes, ast.Nonlocal)
+
+
 def _trusted_import_bindings(
     tree: ast.Module,
     *,
@@ -334,9 +419,16 @@ def _trusted_import_bindings(
                 if alias.name in modules
             )
     counts = _scope_binding_counts(tree.body)
+    globally_mutated = _nested_global_mutations(tree)
     return (
-        {name for name in names if counts[name] == 1},
-        {name for name in module_aliases if counts[name] == 1},
+        {
+            name for name in names
+            if counts[name] == 1 and name not in globally_mutated
+        },
+        {
+            name for name in module_aliases
+            if counts[name] == 1 and name not in globally_mutated
+        },
     )
 
 
