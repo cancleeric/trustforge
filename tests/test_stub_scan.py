@@ -79,3 +79,73 @@ def test_scan_keeps_ordinary_nested_and_indirect_class_stubs(tmp_path, monkeypat
         "trustforge.ordinary.NotTyping.method",
         "trustforge.ordinary.Ordinary.method",
     ]
+
+
+def test_scan_invalidates_direct_protocol_binding_in_statement_order(tmp_path, monkeypatch):
+    root = tmp_path
+    source = root / "src/trustforge/direct_rebinding.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "class BeforeImport(Protocol):\n"
+        "    def method(self): ...\n"
+        "from typing import Protocol\n"
+        "class RealProtocol(Protocol):\n"
+        "    def method(self): ...\n"
+        "Protocol = object\n"
+        "class AfterAssign(Protocol):\n"
+        "    def method(self): ...\n"
+        "from typing_extensions import Protocol\n"
+        "class AfterReimport(Protocol):\n"
+        "    def method(self): ...\n"
+        "from elsewhere import Protocol\n"
+        "class AfterOtherImport(Protocol):\n"
+        "    def method(self): ...\n"
+        "from typing import Protocol\n"
+        "del Protocol\n"
+        "class AfterDelete(Protocol):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.direct_rebinding.AfterAssign.method",
+        "trustforge.direct_rebinding.AfterDelete.method",
+        "trustforge.direct_rebinding.AfterOtherImport.method",
+        "trustforge.direct_rebinding.BeforeImport.method",
+    ]
+
+
+def test_scan_invalidates_qualified_protocol_binding_in_statement_order(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/qualified_rebinding.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing as t\n"
+        "class RealProtocol(t.Protocol):\n"
+        "    def method(self): ...\n"
+        "t = object\n"
+        "class AfterAssign(t.Protocol):\n"
+        "    def method(self): ...\n"
+        "import typing_extensions as t\n"
+        "class AfterReimport(t.Protocol):\n"
+        "    def method(self): ...\n"
+        "from elsewhere import value as t\n"
+        "class AfterOtherImport(t.Protocol):\n"
+        "    def method(self): ...\n"
+        "import typing as t\n"
+        "class t:\n"
+        "    Protocol = object\n"
+        "class AfterDefinition(t.Protocol):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.qualified_rebinding.AfterAssign.method",
+        "trustforge.qualified_rebinding.AfterDefinition.method",
+        "trustforge.qualified_rebinding.AfterOtherImport.method",
+    ]

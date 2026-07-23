@@ -50,13 +50,11 @@ class _FunctionVisitor(ast.NodeVisitor):
         self,
         module: str,
         path: Path,
-        protocol_names: set[str],
-        protocol_modules: set[str],
+        protocol_classes: set[int],
     ):
         self.module = module
         self.path = path
-        self.protocol_names = protocol_names
-        self.protocol_modules = protocol_modules
+        self.known_protocol_classes = protocol_classes
         self.scope: list[str] = []
         self.scope_kinds: list[str] = []
         self.protocol_classes: list[bool] = []
@@ -65,10 +63,7 @@ class _FunctionVisitor(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.scope.append(node.name)
         self.scope_kinds.append("class")
-        self.protocol_classes.append(any(
-            _is_protocol_base(base, self.protocol_names, self.protocol_modules)
-            for base in node.bases
-        ))
+        self.protocol_classes.append(id(node) in self.known_protocol_classes)
         self.generic_visit(node)
         self.protocol_classes.pop()
         self.scope_kinds.pop()
@@ -98,23 +93,59 @@ class _FunctionVisitor(ast.NodeVisitor):
     visit_AsyncFunctionDef = _visit_function
 
 
-def _protocol_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+def _bound_names(target: ast.expr) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return {
+            name
+            for element in target.elts
+            for name in _bound_names(element)
+        }
+    return set()
+
+
+def _protocol_classes(tree: ast.Module) -> set[int]:
     names: set[str] = set()
     modules: set[str] = set()
+    protocol_classes: set[int] = set()
     for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module in {"typing", "typing_extensions"}:
-            names.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name == "Protocol"
-            )
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                names.discard(bound)
+                modules.discard(bound)
+                if (
+                    node.module in {"typing", "typing_extensions"}
+                    and alias.name == "Protocol"
+                ):
+                    names.add(bound)
         elif isinstance(node, ast.Import):
-            modules.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name in {"typing", "typing_extensions"}
-            )
-    return names, modules
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                names.discard(bound)
+                modules.discard(bound)
+                if alias.name in {"typing", "typing_extensions"}:
+                    modules.add(bound)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(node, ast.ClassDef) and any(
+                _is_protocol_base(base, names, modules) for base in node.bases
+            ):
+                protocol_classes.add(id(node))
+            names.discard(node.name)
+            modules.discard(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for bound in _bound_names(target):
+                    names.discard(bound)
+                    modules.discard(bound)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                for bound in _bound_names(target):
+                    names.discard(bound)
+                    modules.discard(bound)
+    return protocol_classes
 
 
 def _is_protocol_base(
@@ -138,10 +169,7 @@ def scan(paths: Iterable[Path]) -> list[dict[str, object]]:
         relative = path.relative_to(ROOT)
         module = ".".join(relative.with_suffix("").parts[1:])
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
-        protocol_names, protocol_modules = _protocol_bindings(tree)
-        visitor = _FunctionVisitor(
-            module, relative, protocol_names, protocol_modules
-        )
+        visitor = _FunctionVisitor(module, relative, _protocol_classes(tree))
         visitor.visit(tree)
         findings.extend(visitor.findings)
     return sorted(findings, key=lambda item: (str(item["symbol"]), str(item["kind"])))
