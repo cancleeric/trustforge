@@ -1,5 +1,7 @@
 import multiprocessing
 import os
+import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -227,6 +229,78 @@ def _append_in_process(directory: str, result_directory: str, start, index: int)
     (Path(result_directory) / str(index)).write_text(result, encoding="utf-8")
 
 
+def _winner_fails_destination_fsync(
+    directory: str,
+    result_path: str,
+    linked,
+    release,
+) -> None:
+    import trustforge.safe_fs as safe_fs
+
+    destination = Path(directory)
+    destination.mkdir(parents=True, exist_ok=True)
+    destination_info = destination.stat()
+    real_fsync = safe_fs.os.fsync
+    failed = False
+
+    def block_then_fail(descriptor):
+        nonlocal failed
+        info = os.fstat(descriptor)
+        if (
+            not failed
+            and stat.S_ISDIR(info.st_mode)
+            and (info.st_dev, info.st_ino)
+            == (destination_info.st_dev, destination_info.st_ino)
+        ):
+            failed = True
+            linked.set()
+            if not release.wait(10):
+                raise RuntimeError("test release timed out")
+            raise OSError("injected destination fsync failure")
+        return real_fsync(descriptor)
+
+    safe_fs.os.fsync = block_then_fail
+    try:
+        result = FileLearningEventStore(destination).append(_evidence())
+    except BaseException as exc:
+        result = f"error:{type(exc).__name__}:{exc}"
+    Path(result_path).write_text(result, encoding="utf-8")
+
+
+def _replay_in_process(directory: str, result_path: str) -> None:
+    try:
+        events = FileLearningEventStore(Path(directory)).replay(
+            trusted_tenant_id="tenant-a"
+        )
+        result = f"replay:{len(events)}"
+    except BaseException as exc:
+        result = f"error:{type(exc).__name__}:{exc}"
+    Path(result_path).write_text(result, encoding="utf-8")
+
+
+def _append_once_in_process(directory: str, result_path: str) -> None:
+    try:
+        result = FileLearningEventStore(Path(directory)).append(_evidence())
+    except BaseException as exc:
+        result = f"error:{type(exc).__name__}:{exc}"
+    Path(result_path).write_text(result, encoding="utf-8")
+
+
+def _hold_exclusive_lock(directory: str, ready, release) -> None:
+    store = FileLearningEventStore(Path(directory))
+    with store._store_lock(exclusive=True):
+        ready.set()
+        if not release.wait(10):
+            raise RuntimeError("test release timed out")
+
+
+def _acquire_lock_then_crash(directory: str, ready) -> None:
+    store = FileLearningEventStore(Path(directory))
+    with store._store_lock(exclusive=True):
+        ready.set()
+        os._exit(0)
+
+
 def test_file_store_multi_process_race_publishes_exactly_once(tmp_path):
     context = multiprocessing.get_context("spawn")
     event_directory = tmp_path / "events"
@@ -252,6 +326,95 @@ def test_file_store_multi_process_race_publishes_exactly_once(tmp_path):
     assert FileLearningEventStore(event_directory).replay(
         trusted_tenant_id="tenant-a"
     ) == [_evidence()]
+
+
+def test_cross_process_lock_prevents_visible_uncommitted_ghost_success(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    event_directory = tmp_path / "events"
+    results = tmp_path / "results"
+    results.mkdir()
+    linked = context.Event()
+    release = context.Event()
+    winner = context.Process(
+        target=_winner_fails_destination_fsync,
+        args=(str(event_directory), str(results / "winner"), linked, release),
+    )
+    winner.start()
+    assert linked.wait(10), "winner never reached visible pre-commit link"
+
+    loser = context.Process(
+        target=_append_once_in_process,
+        args=(str(event_directory), str(results / "loser")),
+    )
+    reader = context.Process(
+        target=_replay_in_process,
+        args=(str(event_directory), str(results / "reader")),
+    )
+    loser.start()
+    reader.start()
+    time.sleep(0.2)
+    assert not (results / "loser").exists()
+    assert not (results / "reader").exists()
+
+    release.set()
+    for process in (winner, loser, reader):
+        process.join(timeout=10)
+        assert process.exitcode == 0
+
+    assert (results / "winner").read_text(encoding="utf-8").startswith("error:OSError:")
+    assert (results / "loser").read_text(encoding="utf-8") == "created"
+    assert (results / "reader").read_text(encoding="utf-8") in {"replay:0", "replay:1"}
+    assert FileLearningEventStore(event_directory).replay(
+        trusted_tenant_id="tenant-a"
+    ) == [_evidence()]
+
+
+def test_cross_process_lock_timeout_fails_closed(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_exclusive_lock,
+        args=(str(tmp_path), ready, release),
+    )
+    holder.start()
+    assert ready.wait(10)
+
+    try:
+        with pytest.raises(LearningEventError, match="lock timed out"):
+            FileLearningEventStore(tmp_path, lock_timeout_seconds=0.05).replay(
+                trusted_tenant_id="tenant-a"
+            )
+    finally:
+        release.set()
+        holder.join(timeout=10)
+    assert holder.exitcode == 0
+
+
+def test_process_crash_releases_store_lock_without_stale_owner(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    process = context.Process(
+        target=_acquire_lock_then_crash,
+        args=(str(tmp_path), ready),
+    )
+    process.start()
+    assert ready.wait(10)
+    process.join(timeout=10)
+    assert process.exitcode == 0
+
+    assert FileLearningEventStore(tmp_path, lock_timeout_seconds=0.2).replay(
+        trusted_tenant_id="tenant-a"
+    ) == []
+
+
+def test_shared_store_locks_can_coexist(tmp_path):
+    first = FileLearningEventStore(tmp_path)
+    second = FileLearningEventStore(tmp_path)
+
+    with first._store_lock(exclusive=False):
+        with second._store_lock(exclusive=False):
+            pass
 
 
 def test_file_store_fsync_failure_leaves_no_ghost_event(tmp_path, monkeypatch):
@@ -400,3 +563,75 @@ def test_staging_entries_are_isolated_but_event_namespace_tmp_fails_closed(tmp_p
     (tmp_path / ".attacker.tmp").write_bytes(b"attacker")
     with pytest.raises(LearningEventError, match="unexpected entry"):
         store.replay(trusted_tenant_id="tenant-a")
+
+
+def test_exclusive_append_cleans_bounded_valid_crash_staging_entry(tmp_path):
+    store = FileLearningEventStore(tmp_path)
+    store.staging_directory.mkdir()
+    event = _evidence()
+    name = store._path_for_identity(event.identity).name
+    leftover = store.staging_directory / f".{name}.{'a' * 24}.tmp"
+    leftover.write_bytes(b"crash")
+
+    assert store.append(event) == "created"
+    assert list(store.staging_directory.iterdir()) == []
+
+
+def test_exclusive_append_reconciles_two_link_crash_leftover(tmp_path):
+    store = FileLearningEventStore(tmp_path / "events")
+    store.directory.mkdir()
+    store.staging_directory.mkdir()
+    event = _evidence()
+    name = store._path_for_identity(event.identity).name
+    leftover = store.staging_directory / f".{name}.{'a' * 24}.tmp"
+    leftover.write_bytes(serialize_learning_event(event).encode("utf-8"))
+    os.link(leftover, store.directory / name)
+
+    assert store.append(event) == "created"
+    assert list(store.staging_directory.iterdir()) == []
+    assert store.replay(trusted_tenant_id="tenant-a") == [event]
+
+
+def test_staging_cleanup_limit_fails_closed(tmp_path):
+    store = FileLearningEventStore(tmp_path, maximum_staging_entries=1)
+    store.staging_directory.mkdir()
+    name = store._path_for_identity(_evidence().identity).name
+    for token in ("a" * 24, "b" * 24):
+        (store.staging_directory / f".{name}.{token}.tmp").write_bytes(b"crash")
+
+    with pytest.raises(LearningEventError, match="cleanup limit"):
+        store.append(_evidence())
+
+
+@pytest.mark.parametrize("lock_kind", ["symlink", "hardlink"])
+def test_store_rejects_unsafe_lock_file(tmp_path, lock_kind):
+    store = FileLearningEventStore(tmp_path)
+    store.control_directory.mkdir()
+    target = store.control_directory / "target"
+    target.write_bytes(b"lock")
+    lock_path = store.control_directory / "store.lock"
+    if lock_kind == "symlink":
+        lock_path.symlink_to(target)
+    else:
+        os.link(target, lock_path)
+
+    with pytest.raises(LearningEventError, match="lock file is unsafe"):
+        store.replay(trusted_tenant_id="tenant-a")
+
+
+def test_idempotent_append_requires_destination_directory_fsync(tmp_path, monkeypatch):
+    store = FileLearningEventStore(tmp_path)
+    event = _evidence()
+    assert store.append(event) == "created"
+    destination_info = store.directory.stat()
+    real_fsync = os.fsync
+
+    def fail_destination_fsync(descriptor):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (destination_info.st_dev, destination_info.st_ino):
+            raise OSError("destination fsync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("trustforge.learning_event_store.os.fsync", fail_destination_fsync)
+    with pytest.raises(LearningEventError, match="could not be made durable"):
+        store.append(event)

@@ -46,6 +46,28 @@ with different bytes is rejected. Staging files never share the replay
 namespace. An unexpected `.tmp` or any other non-event entry in the event
 directory is still corruption and fails closed.
 
+All publication and FileExists reconciliation runs under a cross-process
+exclusive OS lock. Replay and snapshot hold a shared lock for their complete
+scan, validation, and read. The lock is a securely opened, no-follow regular
+file in the sibling `.learning_events.control` namespace; it is never reopened
+by pathname by the locking library. macOS/Linux and Windows locking are supplied
+by `portalocker`. Unsupported shared locking, unsafe lock metadata, or lock
+timeout fails closed. OS process exit releases the lock, so there is no PID file
+or stale-owner deletion.
+
+The lock prevents readers or losing writers from observing a destination
+hard-link while the winning writer is still between link and commit/rollback.
+An identical FileExists reconciliation fsyncs the event directory before
+returning `idempotent`, which safely completes durability if a previous process
+crashed after unlinking staging but before the final directory fsync.
+
+An exclusive writer also performs bounded crash cleanup in staging. It accepts
+only the exact store-generated temporary-name grammar and regular files. A
+single-link temp is removed; a two-link temp is rolled back only when its event
+link resolves to the exact same inode. Unexpected entries, excessive entries,
+extra hard links, symlinks, or mismatched inodes fail closed rather than being
+followed or deleted.
+
 Replay iterates the pinned directory descriptor with bounded `scandir`; it stops
 as soon as the configured event-count limit is exceeded and sorts only the
 bounded result. Before reading, no-follow metadata checks reject non-regular
