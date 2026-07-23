@@ -39,6 +39,7 @@ Governance index:
 | [architecture/PLAN-frontend-backend-split.md](architecture/PLAN-frontend-backend-split.md) | 前後端分離架構＋遷移計劃：SSR零-JS → React+Vite+TS+Tailwind。**方案 B 已定案（Issue #81，2026-07-06）並上線 v0.6.1**：web.py 降為純 `/api/*` API，React SPA 獨立部署，SSR 凍結新功能僅保留 `cutover_switch.sh legacy` 緊急回滾路徑 |
 | [architecture/TRUTH-DISCOVERY-EVALUATION-2026-07-13.md](architecture/TRUTH-DISCOVERY-EVALUATION-2026-07-13.md) | Truth-discovery 統計收斂法補強評估（#179）：CRH/Dawid-Skene/CATD/LTM 四方法對照表，結論 Dawid-Skene EM 最適合當 Bedrock 離線 fallback |
 | [architecture/CONFIDENCE-CONVERGENCE-REPORT-2026-07-13.md](architecture/CONFIDENCE-CONVERGENCE-REPORT-2026-07-13.md) | 信心值收斂技術報告：現況 `_dynamic_reputation` 架構＋離線 no-op 問題（#178）＋ Dawid-Skene EM 平行 fallback 解法＋邊界聲明（不涉及 conformal/預測力，#167 範圍） |
+| [decisions/OUTCOME-SEMANTICS-2026-07-23.md](decisions/OUTCOME-SEMANTICS-2026-07-23.md) | #501 T+1/T+7/T+14 outcome 語意 disposition、D7/D8 revision/late-data 安全與權限前置契約；semantic approval 不代表 implementation authorization，production scope 為 EMPTY |
 
 ## plans/ — 進行中的活計劃
 
@@ -52,6 +53,7 @@ Governance index:
 | [plans/DAWID-SKENE-CONFIDENCE-PLAN-2026-07-13.md](plans/DAWID-SKENE-CONFIDENCE-PLAN-2026-07-13.md) | Dawid-Skene EM 信心收斂開發擴充計劃：資料結構/介面整合（`stance_fn is None` 分支）/測試策略/分階段工時（約 5 天）；明確排除 conformal/預測力範圍 |
 | [plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md](plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md) | Agent Platform／Trust Kernel／TrustForge App 漸進拆分計畫：工作流依賴、驗收條件、測試與 12–22 PR 里程碑 |
 | [plans/PLAN-2026-07-21-ui-optimization.md](plans/PLAN-2026-07-21-ui-optimization.md) | UI/UX 優化現況版：#356–#360 完成／更正、#539–#542 與 #361/#362 剩餘工作、≤12h 相依性與驗收標準 |
+| [plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md](plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md) | 三軌統一學習架構開發計劃：#501 replacement semantic disposition 已完成；implementation authorization 與 production scope 仍維持未授權／EMPTY |
 
 ## qa/ — 測試與研究發現
 
