@@ -29,7 +29,14 @@ interface TrainingStatusData {
 
 type StatusLight = 'green' | 'yellow' | 'red'
 
-function getStatusLight(data: TrainingStatusData | null): StatusLight {
+type StatusProblem =
+  | { kind: 'optional-unavailable'; message: string; diagnostic: string }
+  | { kind: 'temporary-unavailable'; message: string; diagnostic: string }
+  | { kind: 'error'; message: string }
+
+function getStatusLight(data: TrainingStatusData | null, problem: StatusProblem | null): StatusLight {
+  if (problem?.kind === 'optional-unavailable' || problem?.kind === 'temporary-unavailable') return 'yellow'
+  if (problem?.kind === 'error') return 'red'
   if (!data) return 'red'
   if (data.upgrade_threshold.met) return 'green'
   if (data.backfill?.is_running || data.upgrade_threshold.current > 0) return 'yellow'
@@ -44,7 +51,7 @@ const STATUS_COLORS: Record<StatusLight, string> = {
 
 export default function TrainingStatusCard() {
   const [data, setData] = useState<TrainingStatusData | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [problem, setProblem] = useState<StatusProblem | null>(null)
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -52,18 +59,31 @@ export default function TrainingStatusCard() {
         signal: AbortSignal.timeout(10_000),
       })
       if (!resp.ok) {
-        setError(`HTTP ${resp.status}`)
+        if (resp.status === 404) {
+          setData(null)
+          setProblem({
+            kind: 'optional-unavailable',
+            message: '訓練資料未啟用',
+            diagnostic: `training-status endpoint returned ${resp.status}`,
+          })
+          return
+        }
+        setProblem({ kind: 'error', message: `HTTP ${resp.status}` })
         return
       }
       const envelope = await resp.json()
       if (envelope.ok && envelope.data) {
         setData(envelope.data as TrainingStatusData)
-        setError(null)
+        setProblem(null)
       } else {
-        setError(envelope.error?.message ?? 'Unknown error')
+        setProblem({ kind: 'error', message: envelope.error?.message ?? 'Unknown error' })
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Fetch failed')
+      setProblem({
+        kind: 'temporary-unavailable',
+        message: '訓練狀態暫不可用',
+        diagnostic: err instanceof Error ? err.message : 'Fetch failed',
+      })
     }
   }, [])
 
@@ -73,8 +93,9 @@ export default function TrainingStatusCard() {
     return () => clearInterval(interval)
   }, [fetchStatus])
 
-  const statusLight = getStatusLight(data)
+  const statusLight = getStatusLight(data, problem)
   const lightColor = STATUS_COLORS[statusLight]
+  const isNeutralProblem = problem?.kind === 'optional-unavailable' || problem?.kind === 'temporary-unavailable'
 
   return (
     <div
@@ -115,9 +136,15 @@ export default function TrainingStatusCard() {
         </span>
       </div>
 
-      {error && (
-        <div style={{ fontSize: 10.5, color: '#f87171' }}>
-          ⚠ {error}
+      {problem && (
+        <div
+          data-diagnostic={problem.kind === 'error' ? undefined : problem.diagnostic}
+          style={{
+            fontSize: 10.5,
+            color: isNeutralProblem ? 'var(--color-hermes-tx2, #c9d1d9)' : '#f87171',
+          }}
+        >
+          {isNeutralProblem ? problem.message : `⚠ ${problem.message}`}
         </div>
       )}
 
@@ -198,7 +225,7 @@ export default function TrainingStatusCard() {
         </>
       )}
 
-      {!data && !error && (
+      {!data && !problem && (
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx3, #8b949e)' }}>
           載入中…
         </div>
