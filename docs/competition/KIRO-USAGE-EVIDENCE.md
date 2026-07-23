@@ -95,10 +95,10 @@ Issue（明確驗收條件）
   → Spec（.kiro/specs/*.md）
     → Branch（feat/issue-XXX-...）
       → 實作（Kiro CLI 輔助）
-        → Hooks 自動檢查（lint + test）
+        → Hooks 自動檢查（lint + test + build + diff）
           → PR（reviewer: cancleeric）
             → /codex-review 對抗性審查
-              → Merge → 驗證 post-merge CI
+              → Merge → 驗證 post-merge local/release evidence
 ```
 
 ---

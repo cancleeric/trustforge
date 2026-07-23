@@ -31,10 +31,6 @@ def replay_snapshot(snapshot: dict[str, Any], *, query: str, qtype: QuestionType
         for raw in source_entry.get("documents") or []:
             if not isinstance(raw, dict) or not raw.get("published_at"):
                 raise ValueError("historical replay requires published_at on every document")
-            if str(raw.get("kind", "")) == "historical_non_evidentiary":
-                raise ValueError(
-                    "historical replay rejected historical_non_evidentiary document"
-                )
             published = _epoch(str(raw["published_at"]))
             if published > boundary:
                 raise ValueError("historical replay rejected future document")

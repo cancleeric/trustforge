@@ -1,0 +1,38 @@
+[
+  {
+    "context": {
+      "schema_version": "1.0.0",
+      "asset_id": "asset:arb",
+      "symbol": "ARB",
+      "name": "Arbitrum",
+      "sector": "l2",
+      "layer": "layer_2",
+      "token_role": "governance",
+      "market_cap_tier": "large",
+      "ecosystem": "ethereum",
+      "parent_asset_id": "asset:eth",
+      "tags": ["rollup", "optimistic"]
+    },
+    "valid_from": "2026-01-01T00:00:00Z",
+    "fetched_at": "2026-01-02T00:00:00Z",
+    "source": "fixture://asset-context/arb/2026-01-01"
+  },
+  {
+    "context": {
+      "schema_version": "1.0.0",
+      "asset_id": "asset:arb",
+      "symbol": "ARB",
+      "name": "Arbitrum",
+      "sector": "l2",
+      "layer": "layer_2",
+      "token_role": "governance",
+      "market_cap_tier": "mid",
+      "ecosystem": "ethereum",
+      "parent_asset_id": "asset:eth",
+      "tags": ["rollup", "optimistic", "governance"]
+    },
+    "valid_from": "2025-01-01T00:00:00Z",
+    "fetched_at": "2025-01-02T00:00:00Z",
+    "source": "fixture://asset-context/arb/2025-01-01"
+  }
+]
