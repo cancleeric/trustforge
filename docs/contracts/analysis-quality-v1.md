@@ -44,16 +44,21 @@ hash.
 
 ## Resource bounds
 
-The builder fails closed before copying, sorting, hashing, or deep-freezing
-caller-controlled collections. The canonical event is capped at 1 MiB, matching
-the immutable file store's per-event limit. Additional hard limits are 1,024
+Authority roots must be exact built-in `dict` objects. Recursive input accepts
+only exact built-in JSON containers (`dict` and `list`) and scalars (`str`,
+`int`, `float`, `bool`, and `None`); duck-typed mappings, tuples, subclasses,
+and custom scalars fail closed before their methods are invoked. After bounded
+type/shape traversal, the builder streams canonical JSON chunks for the three
+authority inputs and rejects their cumulative UTF-8 bytes above 1 MiB before
+copying, sorting source times, hashing Evidence, or deep-freezing. The final
+canonical event has a separate exact 1 MiB cap matching the immutable file
+store's per-event limit. Additional hard limits are 1,024
 Evidence items, 4,096 source-availability timestamps, 256 stage metrics, 256
 source-distribution buckets, 512 characters for identities/field names, and
 64 Ki characters for any individual text value. Preflight traversal is capped
 at 100,000 structural nodes to reject deliberately nested wrong-type input.
 Nesting is independently capped at 64 levels; the depth check runs before
-constructing child paths, so cyclic or single-child adversarial containers
-cannot cause quadratic path growth. Exactly-at-limit inputs are accepted when
+constructing the next child path, so any path-growth cost is bounded. Exactly-at-limit inputs are accepted when
 otherwise valid; limit-plus-one inputs are rejected with the specific field and
 limit in the error.
 

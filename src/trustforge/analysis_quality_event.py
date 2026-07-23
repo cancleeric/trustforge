@@ -20,6 +20,7 @@ EVENT_TYPE = "analysis-quality.v1"
 # bounds are checked before copying, sorting, hashing, or deep-freezing caller
 # controlled collections.
 MAX_CANONICAL_EVENT_BYTES = 1024 * 1024
+MAX_RAW_AUTHORITY_INPUT_BYTES = 1024 * 1024
 MAX_EVIDENCE_ITEMS = 1024
 MAX_SOURCE_AVAILABLE_TIMES = 4096
 MAX_STAGE_METRICS = 256
@@ -103,7 +104,7 @@ def build_analysis_quality_event(
     """
 
     tenant_id = _required_identifier_value(trusted_tenant_id, "trusted_tenant_id")
-    if not isinstance(snapshot, Mapping):
+    if type(snapshot) is not dict:
         raise LearningEventError("analysis snapshot must be an object")
     _preflight_bounds(snapshot, trusted_pit, trusted_provenance)
     unknown = set(snapshot) - _SNAPSHOT_FIELDS
@@ -159,7 +160,7 @@ def build_analysis_quality_event(
         _nonnegative_integer(evidence_stats[key], f"evidence_stats.{key}")
     _unit_interval(evidence_stats["average_trust"], "evidence_stats.average_trust")
     distribution = evidence_stats["source_distribution"]
-    if not isinstance(distribution, Mapping) or not distribution:
+    if type(distribution) is not dict or not distribution:
         raise LearningEventError("evidence_stats.source_distribution must be a non-empty object")
     for key, value in distribution.items():
         _required_string_value(key, "evidence_stats.source_distribution key")
@@ -307,6 +308,13 @@ def _preflight_bounds(
 ) -> None:
     """Reject resource-exhaustion inputs without materializing collections."""
 
+    for field, value in (
+        ("snapshot", snapshot),
+        ("trusted_pit", trusted_pit),
+        ("trusted_provenance", trusted_provenance),
+    ):
+        if type(value) is not dict:
+            raise LearningEventError(f"{field} must be an exact JSON object")
     if len(snapshot) > len(_SNAPSHOT_FIELDS):
         raise LearningEventError(
             f"analysis snapshot has too many fields (maximum {len(_SNAPSHOT_FIELDS)})"
@@ -319,19 +327,18 @@ def _preflight_bounds(
     )
     _bounded_sequence(snapshot.get("stage_metrics"), "stage_metrics", MAX_STAGE_METRICS)
     stats = snapshot.get("evidence_stats")
-    if isinstance(stats, Mapping):
+    if type(stats) is dict:
         distribution = stats.get("source_distribution")
-        if isinstance(distribution, Mapping) and len(distribution) > MAX_SOURCE_DISTRIBUTION_BUCKETS:
+        if type(distribution) is dict and len(distribution) > MAX_SOURCE_DISTRIBUTION_BUCKETS:
             raise LearningEventError(
                 "evidence_stats.source_distribution exceeds "
                 f"{MAX_SOURCE_DISTRIBUTION_BUCKETS} buckets"
             )
-    if isinstance(trusted_pit, Mapping):
-        _bounded_sequence(
-            trusted_pit.get("source_available_times"),
-            "trusted_pit.source_available_times",
-            MAX_SOURCE_AVAILABLE_TIMES,
-        )
+    _bounded_sequence(
+        trusted_pit.get("source_available_times"),
+        "trusted_pit.source_available_times",
+        MAX_SOURCE_AVAILABLE_TIMES,
+    )
 
     # Iterative traversal avoids recursion exhaustion and rejects oversized text
     # before any downstream dict/list copies or key sorting.
@@ -348,12 +355,12 @@ def _preflight_bounds(
             raise LearningEventError(
                 f"analysis input exceeds {MAX_PREFLIGHT_NODES} preflight nodes"
             )
-        if isinstance(value, str):
+        if type(value) is str:
             if len(value) > MAX_TEXT_CHARS:
                 raise LearningEventError(
                     f"{path} exceeds {MAX_TEXT_CHARS} characters"
                 )
-        elif isinstance(value, Mapping):
+        elif type(value) is dict:
             if value and depth >= MAX_PREFLIGHT_DEPTH:
                 raise LearningEventError(
                     f"{path} exceeds maximum preflight depth "
@@ -367,14 +374,14 @@ def _preflight_bounds(
                     f"({remaining_nodes} available, {required_nodes} required)"
                 )
             for key, item in value.items():
-                if isinstance(key, str) and len(key) > MAX_IDENTIFIER_CHARS:
+                if type(key) is str and len(key) > MAX_IDENTIFIER_CHARS:
                     raise LearningEventError(
                         f"{path} field name exceeds {MAX_IDENTIFIER_CHARS} characters"
                     )
-                item_path = f"{path}.{key}" if isinstance(key, str) else path
+                item_path = f"{path}.{key}" if type(key) is str else path
                 stack.append((f"{path} field name", key, depth + 1))
                 stack.append((item_path, item, depth + 1))
-        elif isinstance(value, (list, tuple)):
+        elif type(value) is list:
             if value and depth >= MAX_PREFLIGHT_DEPTH:
                 raise LearningEventError(
                     f"{path} exceeds maximum preflight depth "
@@ -391,11 +398,41 @@ def _preflight_bounds(
                 (f"{path}[{index}]", item, depth + 1)
                 for index, item in enumerate(value)
             )
+        elif type(value) is float and not math.isfinite(value):
+            raise LearningEventError(f"{path} must be finite JSON number")
+        elif type(value) not in (int, float, bool, type(None)):
+            raise LearningEventError(f"{path} must use exact built-in JSON types")
+    _assert_raw_authority_input_size(
+        snapshot, trusted_pit, trusted_provenance
+    )
 
 
 def _bounded_sequence(value: Any, field: str, maximum: int) -> None:
-    if isinstance(value, (list, tuple)) and len(value) > maximum:
+    if type(value) is list and len(value) > maximum:
         raise LearningEventError(f"{field} exceeds {maximum} items")
+
+
+def _assert_raw_authority_input_size(*values: dict[str, Any]) -> None:
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    total = 0
+    try:
+        for value in values:
+            for chunk in encoder.iterencode(value):
+                total += len(chunk.encode("utf-8"))
+                if total > MAX_RAW_AUTHORITY_INPUT_BYTES:
+                    raise LearningEventError(
+                        "authority inputs exceed streaming raw JSON budget "
+                        f"{MAX_RAW_AUTHORITY_INPUT_BYTES} bytes"
+                    )
+    except LearningEventError:
+        raise
+    except (TypeError, ValueError, RecursionError):
+        raise LearningEventError("authority input JSON is invalid") from None
 
 
 def _assert_canonical_event_size(
@@ -451,7 +488,7 @@ def _required_string(snapshot: Mapping[str, Any], key: str) -> str:
 
 
 def _required_string_value(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise LearningEventError(f"{field} is required for analysis-quality event")
     return value
 
@@ -471,7 +508,7 @@ def _strict_object(
     allowed: set[str],
 ) -> dict[str, Any]:
     value = snapshot.get(key)
-    if not isinstance(value, Mapping):
+    if type(value) is not dict:
         raise LearningEventError(f"{key} is required for analysis-quality event")
     unknown = set(value) - allowed
     if unknown:
@@ -484,7 +521,7 @@ def _trusted_object(
     field: str,
     exact_fields: set[str],
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
+    if type(value) is not dict:
         raise LearningEventError(f"{field} is required for analysis-quality event")
     if set(value) != exact_fields:
         raise LearningEventError(f"{field} schema is invalid")
@@ -499,8 +536,7 @@ def _require_keys(value: Mapping[str, Any], field: str, required: set[str]) -> N
 
 def _unit_interval(value: Any, field: str) -> None:
     if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
+        type(value) not in (int, float)
         or not math.isfinite(value)
         or value < 0
         or value > 1
@@ -509,7 +545,7 @@ def _unit_interval(value: Any, field: str) -> None:
 
 
 def _nonnegative_integer(value: Any, field: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise LearningEventError(f"{field} must be a nonnegative integer")
 
 
@@ -520,7 +556,7 @@ def _required_time(snapshot: Mapping[str, Any], key: str) -> datetime:
 
 
 def _parse_time(value: Any, field: str) -> datetime:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise LearningEventError(f"{field} must be ISO-8601")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -537,7 +573,7 @@ def _canonical_time(value: datetime) -> str:
 
 def _source_times(snapshot: Mapping[str, Any], available_time: datetime) -> list[datetime]:
     raw = snapshot.get("source_available_times")
-    if not isinstance(raw, list) or not raw:
+    if type(raw) is not list or not raw:
         raise LearningEventError("source_available_times is required for analysis-quality event")
     parsed = [_parse_time(item, "source_available_time") for item in raw]
     if any(value > available_time for value in parsed):
@@ -593,7 +629,7 @@ def _evidence_snapshot(
     available_time: datetime,
 ) -> list[dict[str, Any]]:
     raw = snapshot.get("evidence_snapshot")
-    if not isinstance(raw, list):
+    if type(raw) is not list:
         raise LearningEventError("evidence_snapshot must be a list")
     canonical: list[dict[str, Any]] = []
     required = {
@@ -605,7 +641,7 @@ def _evidence_snapshot(
         "trust",
     }
     for index, item in enumerate(raw):
-        if not isinstance(item, Mapping):
+        if type(item) is not dict:
             raise LearningEventError(f"evidence_snapshot[{index}] must be an object")
         evidence = dict(item)
         missing = required - set(evidence)
@@ -647,12 +683,12 @@ def _evidence_snapshot(
 
 def _stage_metrics(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = snapshot.get("stage_metrics")
-    if not isinstance(raw, list) or not raw:
+    if type(raw) is not list or not raw:
         raise LearningEventError("stage_metrics is required for analysis-quality event")
     metrics: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, item in enumerate(raw):
-        if not isinstance(item, Mapping):
+        if type(item) is not dict:
             raise LearningEventError(f"stage_metrics[{index}] must be an object")
         metric = dict(item)
         unknown = set(metric) - _STAGE_FIELDS
@@ -666,20 +702,18 @@ def _stage_metrics(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
         if metric["status"] not in {"complete", "failed", "skipped"}:
             raise LearningEventError(f"stage_metrics[{index}].status is invalid")
         if (
-            isinstance(metric["latency_ms"], bool)
-            or not isinstance(metric["latency_ms"], int)
+            type(metric["latency_ms"]) is not int
             or metric["latency_ms"] < 0
         ):
             raise LearningEventError(f"stage_metrics[{index}].latency_ms is invalid")
         if (
-            isinstance(metric["attempts"], bool)
-            or not isinstance(metric["attempts"], int)
+            type(metric["attempts"]) is not int
             or metric["attempts"] < 1
         ):
             raise LearningEventError(f"stage_metrics[{index}].attempts is invalid")
         failure = metric["failure"]
         if metric["status"] == "failed":
-            if not isinstance(failure, Mapping) or set(failure) != {"code", "message"}:
+            if type(failure) is not dict or set(failure) != {"code", "message"}:
                 raise LearningEventError(f"stage_metrics[{index}].failure is invalid")
             for field in ("code", "message"):
                 _required_string_value(
@@ -697,7 +731,7 @@ def _failure(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     _require_keys(failure, "failure", _FAILURE_FIELDS)
     if failure["status"] not in {"complete", "partial"}:
         raise LearningEventError("failure.status is invalid")
-    if not isinstance(failure["retryable"], bool):
+    if type(failure["retryable"]) is not bool:
         raise LearningEventError("failure.retryable must be boolean")
     nullable = ("failed_stage", "code", "message")
     if failure["status"] == "complete":

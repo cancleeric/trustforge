@@ -86,3 +86,20 @@ def test_oversized_input_is_rejected_before_sink_append(monkeypatch):
     with pytest.raises(LearningEventError, match="evidence_snapshot exceeds 1 items"):
         emit(value, Sink())
     assert calls == 0
+
+
+def test_raw_authority_budget_rejection_never_calls_sink(monkeypatch):
+    calls = 0
+
+    class Sink:
+        def append(self, event):
+            nonlocal calls
+            calls += 1
+            return "created"
+
+    monkeypatch.setattr(
+        analysis_quality, "MAX_RAW_AUTHORITY_INPUT_BYTES", 32
+    )
+    with pytest.raises(LearningEventError, match="streaming raw JSON budget"):
+        emit(snapshot(), Sink())
+    assert calls == 0

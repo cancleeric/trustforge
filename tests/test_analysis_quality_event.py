@@ -1,5 +1,6 @@
 import copy
 from collections.abc import Mapping
+import json
 
 import pytest
 
@@ -9,6 +10,7 @@ from trustforge.analysis_quality_event import (
     MAX_EVIDENCE_ITEMS,
     MAX_IDENTIFIER_CHARS,
     MAX_PREFLIGHT_DEPTH,
+    MAX_RAW_AUTHORITY_INPUT_BYTES,
     MAX_SOURCE_AVAILABLE_TIMES,
     MAX_SOURCE_DISTRIBUTION_BUCKETS,
     MAX_STAGE_METRICS,
@@ -520,22 +522,20 @@ def test_canonical_event_byte_boundary(monkeypatch):
         build_analysis_quality_event(value, trusted_tenant_id="tenant-a")
 
 
-def test_wrong_type_nested_sequence_is_rejected_before_iteration(monkeypatch):
+def test_wrong_type_nested_sequence_is_rejected_before_iteration():
     class BombList(list):
         def __iter__(self):
             raise AssertionError("oversized list must not be iterated")
 
     value = snapshot()
     value["evidence_snapshot"][0]["attacker_extension"] = BombList([0] * 1000)
-    monkeypatch.setattr(analysis_quality, "MAX_PREFLIGHT_NODES", 500)
-
-    with pytest.raises(LearningEventError, match="remaining preflight node budget"):
+    with pytest.raises(LearningEventError, match="exact built-in JSON types"):
         analysis_quality._preflight_bounds(
             value, trusted_pit(value), trusted_provenance(value)
         )
 
 
-def test_wrong_type_nested_mapping_is_rejected_before_iteration(monkeypatch):
+def test_wrong_type_nested_mapping_is_rejected_before_iteration():
     class BombMapping(Mapping):
         def __len__(self):
             return 1000
@@ -551,12 +551,89 @@ def test_wrong_type_nested_mapping_is_rejected_before_iteration(monkeypatch):
 
     value = snapshot()
     value["evidence_snapshot"][0]["attacker_extension"] = BombMapping()
-    monkeypatch.setattr(analysis_quality, "MAX_PREFLIGHT_NODES", 500)
-
-    with pytest.raises(LearningEventError, match="remaining preflight node budget"):
+    with pytest.raises(LearningEventError, match="exact built-in JSON types"):
         analysis_quality._preflight_bounds(
             value, trusted_pit(value), trusted_provenance(value)
         )
+
+
+def test_hostile_mapping_root_is_rejected_before_any_method_call():
+    class HostileRoot(Mapping):
+        def __len__(self):
+            raise AssertionError("root len must not be called")
+
+        def __iter__(self):
+            raise AssertionError("root iteration must not occur")
+
+        def __getitem__(self, key):
+            raise AssertionError("root lookup must not occur")
+
+        def get(self, key, default=None):
+            raise AssertionError("root get must not occur")
+
+    with pytest.raises(LearningEventError, match="analysis snapshot must be an object"):
+        _build_analysis_quality_event(
+            HostileRoot(),
+            trusted_tenant_id="tenant-a",
+            trusted_pit={},
+            trusted_provenance={},
+        )
+
+
+@pytest.mark.parametrize("container_type", [dict, list])
+def test_hostile_builtin_container_subclass_is_rejected_before_methods(container_type):
+    if container_type is dict:
+        class Hostile(dict):
+            def __len__(self):
+                raise AssertionError("subclass len must not be called")
+
+            def items(self):
+                raise AssertionError("subclass items must not be called")
+
+        hostile = Hostile()
+    else:
+        class Hostile(list):
+            def __len__(self):
+                raise AssertionError("subclass len must not be called")
+
+            def __iter__(self):
+                raise AssertionError("subclass iteration must not occur")
+
+        hostile = Hostile()
+    value = snapshot()
+    value["confidence"]["raw"] = hostile
+
+    with pytest.raises(LearningEventError, match="exact built-in JSON types"):
+        analysis_quality._preflight_bounds(
+            value, trusted_pit(value), trusted_provenance(value)
+        )
+
+
+@pytest.mark.parametrize("text", ["ascii", "台灣🙂"])
+def test_streaming_raw_utf8_budget_exact_and_plus_one(monkeypatch, text):
+    values = ({"value": text}, {"authority": text}, {"provenance": text})
+    exact = sum(
+        len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        for value in values
+    )
+    assert exact < MAX_RAW_AUTHORITY_INPUT_BYTES
+    monkeypatch.setattr(
+        analysis_quality, "MAX_RAW_AUTHORITY_INPUT_BYTES", exact
+    )
+    analysis_quality._preflight_bounds(*values)
+    monkeypatch.setattr(
+        analysis_quality, "MAX_RAW_AUTHORITY_INPUT_BYTES", exact - 1
+    )
+    with pytest.raises(LearningEventError, match=rf"raw JSON budget {exact - 1} bytes"):
+        analysis_quality._preflight_bounds(*values)
 
 
 def test_preflight_depth_accepts_exact_limit_and_rejects_limit_plus_one():
