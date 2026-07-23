@@ -60,7 +60,7 @@ if [[ -n "$SNS_TOPIC" ]]; then
 fi
 
 put_metric_alarm() {
-  aws cloudwatch put-metric-alarm "$@" "${ALARM_ACTION_ARGS[@]}"
+  aws cloudwatch put-metric-alarm "$@" ${ALARM_ACTION_ARGS[@]+"${ALARM_ACTION_ARGS[@]}"}
 }
 
 echo "[dedup-alarm] region=$REGION namespace=$NAMESPACE"

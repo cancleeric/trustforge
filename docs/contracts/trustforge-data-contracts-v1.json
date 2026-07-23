@@ -294,6 +294,198 @@
     "title": "TrustForge Evidence",
     "type": "object"
   },
+  "PeerMetricsSnapshot": {
+    "$id": "https://trustforge.local/contracts/peer-metrics-snapshot/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "activity_breakdown": {
+        "additionalProperties": {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "enum": [
+                "observed",
+                "estimated",
+                "reported",
+                "unknown"
+              ]
+            },
+            "source": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "unit": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "value": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "unit",
+            "method",
+            "source"
+          ],
+          "type": "object"
+        },
+        "minProperties": 1,
+        "type": "object"
+      },
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "gas_fee": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "enum": [
+              "observed",
+              "estimated",
+              "reported",
+              "unknown"
+            ]
+          },
+          "source": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "unit": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0,
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "unit",
+          "method",
+          "source"
+        ],
+        "type": "object"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "observed_tps": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "enum": [
+              "observed",
+              "estimated",
+              "reported",
+              "unknown"
+            ]
+          },
+          "source": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "unit": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0,
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "unit",
+          "method",
+          "source"
+        ],
+        "type": "object"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "tvl": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "enum": [
+              "observed",
+              "estimated",
+              "reported",
+              "unknown"
+            ]
+          },
+          "source": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "unit": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0,
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "unit",
+          "method",
+          "source"
+        ],
+        "type": "object"
+      },
+      "window_end": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "window_start": {
+        "format": "date-time",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "asset_id",
+      "observed_tps",
+      "tvl",
+      "gas_fee",
+      "activity_breakdown",
+      "window_start",
+      "window_end",
+      "observed_at"
+    ],
+    "title": "TrustForge PeerMetricsSnapshot",
+    "type": "object"
+  },
   "Report": {
     "$id": "https://trustforge.local/contracts/report/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",

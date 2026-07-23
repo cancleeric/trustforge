@@ -14,6 +14,7 @@ import HermesModuleDeck, { type HermesWorkspaceModule } from '../hermes/HermesMo
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
 import HermesOnboarding from '../hermes/HermesOnboarding'
+import HermesMobileDivergenceEntry from '../hermes/HermesMobileDivergenceEntry'
 import TrainingStatusCard from '../components/TrainingStatusCard'
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 import HermesFirstRun from '../hermes/HermesFirstRun'
@@ -561,14 +562,17 @@ export default function HermesDashboard() {
             journey={analysisJourney}
             crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
             derivation={hudDerivation}
+            trainingStatus={<TrainingStatusCard />}
             onOpenComposite={() => setSelectedStage('composite')}
             onOpenDivergence={() => setSelectedStage('divergence')}
           />
-          {/* Training status dashboard card — Issue #333 */}
-          <div style={{ position: 'absolute', right: 0, bottom: 'calc(var(--hermes-bottom) + 8px)', width: 'var(--hermes-rail)', zIndex: 6, padding: '0 16px' }}>
-            <TrainingStatusCard />
-          </div>
         </div>
+
+        <HermesMobileDivergenceEntry
+          derivation={hudDerivation}
+          crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
+          onOpen={() => setSelectedStage('divergence')}
+        />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.bottom ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <StageBar flow={analysisFlow} mode={activeModule} telemetry={moduleTelemetry} activity={{ status: phase, coin: selectedId.toUpperCase(), mode: qtype, question: query.trim() }} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onSelectStage={(id) => setSelectedStage((s) => (s === id ? null : id))} />
