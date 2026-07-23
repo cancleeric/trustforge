@@ -4,7 +4,10 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerAnalysisQuestion } from '../lib/endpoints'
-import { HermesI18nProvider } from '../hermes/hermesI18n'
+import { buildGalaxyModel, deriveSelected, type HermesTier } from '../lib/hermesData'
+import type { CrossSourceSignal } from '../lib/types'
+import HermesRightRail from '../hermes/HermesRightRail'
+import { HermesI18nProvider, useHermesI18n } from '../hermes/hermesI18n'
 import HermesDashboard from './HermesDashboard'
 
 vi.mock('../lib/endpoints', () => ({
@@ -27,6 +30,33 @@ function DashboardHistoryControls() {
 
 function LocationProbe() {
   return <output aria-label="location">{useLocation().search}</output>
+}
+
+function RightRailTruthHarness({ tier = 'moderate', crossSignal }: { tier?: HermesTier; crossSignal?: CrossSourceSignal }) {
+  const fallback = buildGalaxyModel(null).coins[0]
+  const score = tier === 'healthy' ? 90 : tier === 'moderate' ? 70 : 40
+  const coin = { ...fallback, score, tier, comps: [score, score, score, score] }
+  const derivation = deriveSelected(coin)
+  return (
+    <HermesRightRail
+      selCoin={coin}
+      components={derivation.components}
+      derivation={derivation}
+      crossSignal={crossSignal}
+      onOpenComposite={vi.fn()}
+      onOpenDivergence={vi.fn()}
+    />
+  )
+}
+
+function LocaleSwitcher() {
+  const { setLocale } = useHermesI18n()
+  return (
+    <>
+      <button type="button" onClick={() => setLocale('en')}>use English</button>
+      <button type="button" onClick={() => setLocale('zh-TW')}>使用中文</button>
+    </>
+  )
 }
 
 describe('HermesDashboard workspace navigation', () => {
@@ -80,7 +110,7 @@ describe('HermesDashboard workspace navigation', () => {
       </MemoryRouter>,
     )
 
-    const drilldown = screen.getByRole('button', { name: '跨來源分歧 drilldown' })
+    const drilldown = screen.getByRole('button', { name: /跨來源分歧：.*；點擊查看/ })
     expect(drilldown).toHaveProperty('tabIndex', 0)
     drilldown.focus()
     expect(drilldown).toHaveFocus()
@@ -96,7 +126,7 @@ describe('HermesDashboard workspace navigation', () => {
       </MemoryRouter>,
     )
 
-    fireEvent.keyDown(screen.getByRole('button', { name: '跨來源分歧 drilldown' }), { key })
+    fireEvent.keyDown(screen.getByRole('button', { name: /跨來源分歧：.*；點擊查看/ }), { key })
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -118,6 +148,51 @@ describe('HermesDashboard workspace navigation', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('note')).not.toBeInTheDocument()
+  })
+
+  it('uses the live divergence summary for both visible and accessible truth', () => {
+    const summary = '鏈上活動與新聞情緒方向相反'
+    render(
+      <HermesI18nProvider>
+        <RightRailTruthHarness crossSignal={{ type: 'divergence', summary }} />
+      </HermesI18nProvider>,
+    )
+
+    const drilldown = screen.getByRole('button', { name: `跨來源分歧：${summary}；點擊查看` })
+    expect(drilldown).toHaveTextContent(summary)
+  })
+
+  it.each([
+    ['healthy', '來源一致性正常 · Δ 8%'],
+    ['moderate', '持續監控分歧 · Δ 24%'],
+    ['danger', '偵測到來源衝突 · Δ 54%'],
+  ] as const)('uses the %s tier fallback as visible and accessible truth', (tier, summary) => {
+    render(
+      <HermesI18nProvider>
+        <RightRailTruthHarness tier={tier} />
+      </HermesI18nProvider>,
+    )
+
+    const drilldown = screen.getByRole('button', { name: `跨來源分歧：${summary}；點擊查看` })
+    expect(drilldown).toHaveTextContent(summary)
+  })
+
+  it('keeps the tier fallback and accessible name localized from the same summary', () => {
+    render(
+      <HermesI18nProvider>
+        <LocaleSwitcher />
+        <RightRailTruthHarness tier="healthy" />
+      </HermesI18nProvider>,
+    )
+
+    const zhDrilldown = screen.getByRole('button', { name: '跨來源分歧：來源一致性正常 · Δ 8%；點擊查看' })
+    expect(zhDrilldown).toHaveTextContent('來源一致性正常 · Δ 8%')
+
+    fireEvent.click(screen.getByRole('button', { name: 'use English' }))
+
+    const enDrilldown = screen.getByRole('button', { name: 'CROSS-SOURCE DIVERGENCE：Alignment nominal · Δ 8%；tap to review' })
+    expect(enDrilldown).toHaveTextContent('Alignment nominal · Δ 8%')
+    fireEvent.click(screen.getByRole('button', { name: '使用中文' }))
   })
 
   it.each(['基本面', '價格催化因子'])('maps %s to hypothesis', async (mode) => {

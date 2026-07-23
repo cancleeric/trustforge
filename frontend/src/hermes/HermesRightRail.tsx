@@ -37,6 +37,10 @@ export default function HermesRightRail({
 
   const divDock = derivation
   const dockColor = divDock.divColor
+  const divergenceSummary = crossSignal ? crossSignal.summary
+    : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
+      : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
+        : `${t('conflict')} · Δ ${divDock.divergence}%`
   const componentLabel = (label: string) => label === 'Reputation' ? t('reputation') : label === 'Corroboration' ? t('corroboration') : label === 'Recency' ? t('recency') : t('resistance')
   const componentGlossary = (label: string): GlossaryKey => label === 'Reputation' ? 'reputation' : label === 'Corroboration' ? 'corroboration' : label === 'Recency' ? 'recency' : 'manipulation'
 
@@ -131,7 +135,7 @@ export default function HermesRightRail({
         </div>
         <button
           type="button"
-          aria-label={`${t('divergence')} drilldown`}
+          aria-label={`${t('divergence')}：${divergenceSummary}；${t('tapReview')}`}
           onClick={onOpenDivergence}
           style={{
             width: '100%', padding: 0, border: 0, background: 'transparent',
@@ -139,10 +143,7 @@ export default function HermesRightRail({
             textAlign: 'left', cursor: 'pointer',
           }}
         >
-          {crossSignal ? crossSignal.summary
-            : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
-              : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
-                : `${t('conflict')} · Δ ${divDock.divergence}%`}
+          {divergenceSummary}
         </button>
       </div>
     </div>
