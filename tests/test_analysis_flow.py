@@ -4,12 +4,16 @@ import time
 import sqlite3
 import fcntl
 import threading
+import importlib.util
+import sys
+from pathlib import Path
 
-import plistlib
 import pytest
 
 from trustforge.analysis_flow import AnalysisFlow, MODES, STAGES
 from trustforge.ingestion.base import Document
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _docs() -> list[Document]:
@@ -372,8 +376,15 @@ def test_runtime_reconciles_orphaned_intermediate_stage_from_snapshot(tmp_path, 
 
 
 def test_local_daemon_runs_overlapping_workers_per_stage():
-    with open("deploy/launchd/com.hurricanesoft.trustforge-analysis-flow.plist", "rb") as handle:
-        arguments = plistlib.load(handle)["ProgramArguments"]
+    spec = importlib.util.spec_from_file_location(
+        "analysis_launch_agent", ROOT / "scripts/install_launch_agent.py"
+    )
+    assert spec and spec.loader
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    arguments = generator.payload(
+        "analysis", ROOT.resolve(), Path(sys.executable).resolve(), None
+    )["ProgramArguments"]
 
     index = arguments.index("--workers-per-stage")
     assert int(arguments[index + 1]) >= 2

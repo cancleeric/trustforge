@@ -22,6 +22,11 @@
       "reason": "Issue #199; official HOYA BIT trades contract is not available."
     },
     {
+      "symbol": "trustforge.ports.NullCacheAdapter.set",
+      "kind": "pass",
+      "reason": "Intentional null-object cache sink: offline writes are discarded by contract."
+    },
+    {
       "symbol": "trustforge.web.Handler.log_message",
       "kind": "pass",
       "reason": "Intentional BaseHTTPRequestHandler access-log suppression; application errors use structured logging."
