@@ -213,3 +213,65 @@ def test_scan_rejects_abc_rebinding_in_control_flow(tmp_path, monkeypatch):
         "trustforge.control_flow_shadow.Interface.direct",
         "trustforge.control_flow_shadow.Qualified.method",
     ]
+
+
+def test_scan_rejects_walrus_shadowing_from_all_comprehension_shapes(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/comprehension_shadow.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import typing as typing_alias\n"
+        "from abc import ABC, abstractmethod as required\n"
+        "import abc\n"
+        "[(Protocol := object) for _ in ()]\n"
+        "{(typing_alias := object) for _ in ()}\n"
+        "{_: (required := (lambda fn: fn)) for _ in ()}\n"
+        "((abc := object) for _ in ())\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Qualified(typing_alias.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(ABC):\n"
+        "    @required\n"
+        "    def method(self): pass\n"
+        "class QualifiedAbstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.comprehension_shadow.Abstract.method",
+        "trustforge.comprehension_shadow.Direct.method",
+        "trustforge.comprehension_shadow.Qualified.method",
+        "trustforge.comprehension_shadow.QualifiedAbstract.method",
+    ]
+
+
+def test_scan_does_not_treat_comprehension_targets_as_outer_shadowing(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/comprehension_targets.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "from abc import ABC, abstractmethod\n"
+        "[Protocol for Protocol in ()]\n"
+        "{ABC for ABC in ()}\n"
+        "{abstractmethod: abstractmethod for abstractmethod in ()}\n"
+        "(Protocol for Protocol in ())\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(ABC):\n"
+        "    @abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []

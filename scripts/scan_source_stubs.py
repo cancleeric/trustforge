@@ -218,11 +218,31 @@ class _ScopeBindingVisitor(ast.NodeVisitor):
         return
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
-        return
+        self.visit(node.elt)
+        self._visit_comprehension_generators(node.generators)
 
-    visit_SetComp = visit_ListComp
-    visit_DictComp = visit_ListComp
-    visit_GeneratorExp = visit_ListComp
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self.visit(node.elt)
+        self._visit_comprehension_generators(node.generators)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self.visit(node.key)
+        self.visit(node.value)
+        self._visit_comprehension_generators(node.generators)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self.visit(node.elt)
+        self._visit_comprehension_generators(node.generators)
+
+    def _visit_comprehension_generators(
+        self, generators: list[ast.comprehension]
+    ) -> None:
+        for generator in generators:
+            # Comprehension iteration targets live in the implicit inner scope.
+            # Iterable/condition walrus expressions still bind the outer scope.
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name:
