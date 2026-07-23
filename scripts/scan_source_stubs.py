@@ -369,14 +369,17 @@ class _NestedDeclarationMutationVisitor(ast.NodeVisitor):
         self.declaration_type = declaration_type
         self.names: set[str] = set()
 
-    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    def _visit_scope(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> None:
         declared = _scope_declared_names(node.body, self.declaration_type)
         self.names.update(declared & _scope_mutated_names(node.body))
         for statement in node.body:
             self.visit(statement)
 
-    visit_FunctionDef = _visit_function
-    visit_AsyncFunctionDef = _visit_function
+    visit_FunctionDef = _visit_scope
+    visit_AsyncFunctionDef = _visit_scope
+    visit_ClassDef = _visit_scope
 
 
 def _nested_declaration_mutations(

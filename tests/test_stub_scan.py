@@ -684,3 +684,125 @@ def test_scan_keeps_enclosing_trust_for_nested_nonlocal_read_only(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_revokes_module_trust_for_class_body_global_mutations(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/class_global_mutation.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import typing as typing_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "import abc as abc_alias\n"
+        "class Mutator:\n"
+        "    global Protocol, typing_alias, required, Base, Meta, abc_alias\n"
+        "    Protocol = object\n"
+        "    typing_alias = object\n"
+        "    required = lambda fn: fn\n"
+        "    Base = object\n"
+        "    Meta = type\n"
+        "    del abc_alias\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Qualified(typing_alias.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(Base):\n"
+        "    @required\n"
+        "    def method(self): pass\n"
+        "class MetaAbstract(metaclass=Meta):\n"
+        "    @required\n"
+        "    def method(self): pass\n"
+        "class QualifiedAbstract(abc_alias.ABC):\n"
+        "    @abc_alias.abstractmethod\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    symbols = [row["symbol"] for row in scan([source])]
+    assert "trustforge.class_global_mutation.Direct.method" in symbols
+    assert "trustforge.class_global_mutation.Qualified.method" in symbols
+    assert "trustforge.class_global_mutation.Abstract.method" in symbols
+    assert "trustforge.class_global_mutation.MetaAbstract.method" in symbols
+    assert "trustforge.class_global_mutation.QualifiedAbstract.method" in symbols
+
+
+def test_scan_revokes_function_trust_for_class_body_nonlocal_mutations(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/class_nonlocal_mutation.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import typing as typing_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "import abc as abc_alias\n"
+        "def outer():\n"
+        "    class Mutator:\n"
+        "        nonlocal Protocol, typing_alias, required, Base, Meta, abc_alias\n"
+        "        Protocol = object\n"
+        "        typing_alias = object\n"
+        "        required = lambda fn: fn\n"
+        "        Base = object\n"
+        "        Meta = type\n"
+        "        del abc_alias\n"
+        "    class Direct(Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Qualified(typing_alias.Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Abstract(Base):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class MetaAbstract(metaclass=Meta):\n"
+        "        @required\n"
+        "        def method(self): pass\n"
+        "    class QualifiedAbstract(abc_alias.ABC):\n"
+        "        @abc_alias.abstractmethod\n"
+        "        def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    symbols = [row["symbol"] for row in scan([source])]
+    assert "trustforge.class_nonlocal_mutation.outer.Direct.method" in symbols
+    assert "trustforge.class_nonlocal_mutation.outer.Qualified.method" in symbols
+    assert "trustforge.class_nonlocal_mutation.outer.Abstract.method" in symbols
+    assert "trustforge.class_nonlocal_mutation.outer.MetaAbstract.method" in symbols
+    assert "trustforge.class_nonlocal_mutation.outer.QualifiedAbstract.method" in symbols
+
+
+def test_scan_keeps_trust_for_class_body_declaration_reads(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/class_declaration_read.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "from abc import ABC, abstractmethod\n"
+        "class GlobalReader:\n"
+        "    global Protocol, ABC, abstractmethod\n"
+        "    values = Protocol, ABC, abstractmethod\n"
+        "def outer():\n"
+        "    class NonlocalReader:\n"
+        "        nonlocal Protocol, ABC, abstractmethod\n"
+        "        values = Protocol, ABC, abstractmethod\n"
+        "    class Direct(Protocol):\n"
+        "        def method(self): ...\n"
+        "    class Abstract(ABC):\n"
+        "        @abstractmethod\n"
+        "        def method(self): pass\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(ABC):\n"
+        "    @abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
