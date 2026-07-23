@@ -1023,3 +1023,108 @@ def test_scan_keeps_module_trust_for_nested_read_only_destructuring(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_revokes_module_trust_for_for_and_async_for_aliases(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/loop_aliases.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "for typing_copy in (typing,):\n"
+        "    typing_copy.Protocol = object\n"
+        "async def mutate():\n"
+        "    async for abc_copy in (abc,):\n"
+        "        del abc_copy.abstractmethod\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.loop_aliases.Abstract.method",
+        "trustforge.loop_aliases.Direct.method",
+    ]
+
+
+def test_scan_revokes_module_trust_for_nested_comprehension_aliases(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/comprehension_aliases.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "[(typing_copy, abc_copy) for "
+        "(typing_copy, (abc_copy, marker)) in [(typing, (abc, 0))]]\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.comprehension_aliases.Abstract.method",
+        "trustforge.comprehension_aliases.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_read_only_loop_values(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/read_only_loops.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "for protocol_type in (typing.Protocol,):\n"
+        "    pass\n"
+        "[abstract_type for abstract_type in (abc.ABC,)]\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
+
+
+def test_scan_revokes_module_trust_for_rhs_starred_unpacking(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/starred_unpacking.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "(typing_copy,) = (*[typing],)\n"
+        "[head, (abc_copy, tail)] = [0, (*[abc],)]\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.starred_unpacking.Abstract.method",
+        "trustforge.starred_unpacking.Direct.method",
+    ]

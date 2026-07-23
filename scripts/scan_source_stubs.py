@@ -429,6 +429,13 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
         self.unresolved_unpack_sources: set[str] = set()
 
     def _record_copy(self, target: ast.expr, value: ast.expr | None) -> None:
+        if isinstance(value, ast.Starred):
+            self.unresolved_unpack_sources.update(
+                child.id
+                for child in ast.walk(value.value)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+            )
+            return
         if isinstance(target, ast.Name) and isinstance(value, ast.Name):
             self.edges.add((target.id, value.id))
             return
@@ -455,6 +462,13 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
                 if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
             )
 
+    def _record_iteration(self, target: ast.expr, iterable: ast.expr) -> None:
+        if isinstance(iterable, (ast.Tuple, ast.List)):
+            for element in iterable.elts:
+                self._record_copy(target, element)
+            return
+        self._record_copy(target, iterable)
+
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
             self._record_copy(target, node.value)
@@ -466,6 +480,29 @@ class _ModuleAliasFlowVisitor(ast.NodeVisitor):
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         self._record_copy(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._record_iteration(node.target, node.iter)
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For
+
+    def _visit_comprehension_aliases(
+        self, generators: list[ast.comprehension]
+    ) -> None:
+        for generator in generators:
+            self._record_iteration(generator.target, generator.iter)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension_aliases(node.generators)
+        self.generic_visit(node)
+
+    visit_SetComp = visit_ListComp
+    visit_GeneratorExp = visit_ListComp
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension_aliases(node.generators)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
