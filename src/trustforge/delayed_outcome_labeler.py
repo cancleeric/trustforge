@@ -509,7 +509,10 @@ def _compute_expected_outcome_state(
             else None
         )
         direction = analysis.payload.get("decision", {}).get("direction")
-        if _DIRECTIONS.get(direction) not in {-1, 1}:
+        if (
+            reason is None
+            and _DIRECTIONS.get(direction) not in {-1, 1}
+        ):
             reason = "PREDICTION_NOT_DIRECTIONAL"
     return _ExpectedOutcomeState(
         maturity,
@@ -857,7 +860,11 @@ def validate_canonical_delayed_outcome(
         if sign in {0, None} and (
             payload.get("directional_return_pct") is not None
             or payload.get("hit") is not None
-            or payload.get("reason_code") != "PREDICTION_NOT_DIRECTIONAL"
+            or payload.get("reason_code")
+            not in {
+                "PREDICTION_NOT_DIRECTIONAL",
+                "LATE_AFTER_CUTOFF",
+            }
         ):
             raise LearningEventError("non-directional delayed outcome is invalid")
         if sign in {-1, 1}:
@@ -975,7 +982,7 @@ def _state_event(
                 raw_return = (target / start - Decimal(1)) * Decimal(100)
                 sign = _DIRECTIONS[direction]
                 directional = raw_return * sign if sign in {-1, 1} else None
-                if directional is None:
+                if directional is None and reason is None:
                     reason = "PREDICTION_NOT_DIRECTIONAL"
                 metrics = {
                     "return_pct": _persist_decimal(raw_return),

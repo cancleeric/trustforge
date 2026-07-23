@@ -676,6 +676,35 @@ def test_d8_data_arriving_after_cutoff_requires_successor_revision():
         )
 
 
+@pytest.mark.parametrize("direction", ["neutral", "abstain"])
+def test_d8_late_reason_precedes_non_directional_reason(direction):
+    analysis = _analysis(direction=direction)
+    ledger = FixtureOutcomeLedger(append=LearningEventAppendLog())
+    unavailable = _build(
+        analysis=analysis,
+        as_of="2026-07-06T00:00:00.000001Z",
+        variant="latest_official",
+        ledger=ledger,
+    )
+    late_data = [
+        _price("2026-07-01", "100.00000000", "2026-07-06T00:00:01Z"),
+        _price("2026-07-02", "110.00000000", "2026-07-06T00:00:01Z"),
+    ]
+    recovered = _build(
+        analysis=analysis,
+        as_of="2026-07-06T01:00:00Z",
+        data=late_data,
+        variant="latest_official",
+        ledger=ledger,
+    )
+    assert unavailable.payload["maturity"] == "unavailable"
+    assert unavailable.payload["reason_code"] == "LATE_AFTER_CUTOFF"
+    assert recovered.payload["maturity"] == "labeled"
+    assert recovered.payload["reason_code"] == "LATE_AFTER_CUTOFF"
+    assert recovered.payload["directional_return_pct"] is None
+    assert recovered.payload["hit"] is None
+
+
 def test_dry_run_performs_zero_append():
     class ExplodingStore:
         def append(self, event):

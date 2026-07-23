@@ -104,6 +104,9 @@ For D8 `latest_official`, the cutoff-expired unavailable revision and its later
 labeled recovery both retain `LATE_AFTER_CUTOFF`; `as_first_known` terminal
 missing-price outcomes retain `START_CLOSE_MISSING` or
 `TARGET_CLOSE_MISSING`.
+`LATE_AFTER_CUTOFF` is a transition reason and takes precedence over
+`PREDICTION_NOT_DIRECTIONAL`; neutral and abstain eligibility remains encoded
+by `direction_sign` and null directional metrics, then excluded by calibration.
 
 Outcome events are always `delayed_outcome`, explicitly non-evidentiary, and
 never eligible as Evidence. Dry-run returns before invoking the append port, so
