@@ -420,6 +420,68 @@ def _attribute_mutated_roots(tree: ast.Module) -> set[str]:
     return visitor.roots
 
 
+class _ModuleAliasFlowVisitor(ast.NodeVisitor):
+    _TRUSTED_ATTRIBUTES = {"Protocol", "ABC", "ABCMeta", "abstractmethod"}
+
+    def __init__(self) -> None:
+        self.edges: set[tuple[str, str]] = set()
+        self.dynamic_mutation_roots: set[str] = set()
+
+    def _record_copy(self, target: ast.expr, value: ast.expr | None) -> None:
+        if isinstance(target, ast.Name) and isinstance(value, ast.Name):
+            self.edges.add((target.id, value.id))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._record_copy(target, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._record_copy(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._record_copy(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in {"setattr", "delattr"}
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in self._TRUSTED_ATTRIBUTES
+        ):
+            self.dynamic_mutation_roots.add(node.args[0].id)
+        self.generic_visit(node)
+
+
+def _unsafe_module_aliases(
+    tree: ast.Module, module_aliases: set[str]
+) -> set[str]:
+    flow = _ModuleAliasFlowVisitor()
+    flow.visit(tree)
+    attribute_mutated = _attribute_mutated_roots(tree)
+    unsafe: set[str] = set()
+    for original in module_aliases:
+        reachable = {original}
+        changed = True
+        while changed:
+            changed = False
+            for target, source in flow.edges:
+                if source in reachable and target not in reachable:
+                    reachable.add(target)
+                    changed = True
+        if (
+            len(reachable) > 1
+            or reachable & attribute_mutated
+            or reachable & flow.dynamic_mutation_roots
+        ):
+            unsafe.add(original)
+    return unsafe
+
+
 def _trusted_import_bindings(
     tree: ast.Module,
     *,
@@ -443,7 +505,7 @@ def _trusted_import_bindings(
             )
     counts = _scope_binding_counts(tree.body)
     globally_mutated = _nested_global_mutations(tree)
-    attribute_mutated = _attribute_mutated_roots(tree)
+    unsafe_module_aliases = _unsafe_module_aliases(tree, module_aliases)
     return (
         {
             name for name in names
@@ -454,7 +516,7 @@ def _trusted_import_bindings(
             if (
                 counts[name] == 1
                 and name not in globally_mutated
-                and name not in attribute_mutated
+                and name not in unsafe_module_aliases
             )
         },
     )

@@ -864,3 +864,88 @@ def test_scan_keeps_trusted_module_alias_on_attribute_reads(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_revokes_module_trust_after_object_alias_escape_and_mutation(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/module_alias_escape.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import typing_extensions as typing_ext\n"
+        "import abc\n"
+        "typing_copy = typing\n"
+        "abc_copy: object = abc\n"
+        "(typing_ext_copy := typing_ext)\n"
+        "typing_copy.Protocol = object\n"
+        "del abc_copy.ABC\n"
+        "abc.ABCMeta += ()\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Extension(typing_ext.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.module_alias_escape.Abstract.method",
+        "trustforge.module_alias_escape.Direct.method",
+        "trustforge.module_alias_escape.Extension.method",
+    ]
+
+
+def test_scan_revokes_module_trust_for_explicit_setattr_and_delattr(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/module_dynamic_attribute.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "setattr(typing, 'Protocol', object)\n"
+        "abc_copy = abc\n"
+        "delattr(abc_copy, 'abstractmethod')\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.module_dynamic_attribute.Abstract.method",
+        "trustforge.module_dynamic_attribute.Direct.method",
+    ]
+
+
+def test_scan_keeps_module_trust_for_read_only_attribute_extraction(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/module_attribute_extract.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "import abc\n"
+        "protocol_type = typing.Protocol\n"
+        "abstract_type = abc.ABC\n"
+        "decorator = abc.abstractmethod\n"
+        "class Direct(typing.Protocol):\n"
+        "    def method(self): ...\n"
+        "class Abstract(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
