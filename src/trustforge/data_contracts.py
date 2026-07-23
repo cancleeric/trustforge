@@ -141,6 +141,7 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                 "gas_fee": _metric_value_schema(),
                 "activity_breakdown": {
                     "type": "object",
+                    "minProperties": 1,
                     "additionalProperties": _metric_value_schema(),
                 },
                 "window_start": {"type": "string", "format": "date-time"},

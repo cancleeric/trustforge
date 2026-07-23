@@ -18,12 +18,12 @@ def utc(year: int, month: int, day: int) -> datetime:
     return datetime(year, month, day, tzinfo=timezone.utc)
 
 
-def metric(value: float | None, unit: str = "count/s") -> MetricValue:
+def metric(value: float | None, unit: str = "count/s", source: str = "fixture://peer-metrics") -> MetricValue:
     return MetricValue(
         value=value,
         unit=unit,
         method=PeerMetricMethod.OBSERVED,
-        source="fixture://peer-metrics",
+        source=source,
     )
 
 
@@ -60,6 +60,7 @@ def test_peer_metrics_schema_allows_null_missing_values() -> None:
 
     assert schema["properties"]["schema_version"]["const"] == PEER_METRICS_SCHEMA_VERSION
     assert schema["properties"]["observed_tps"]["properties"]["value"]["type"] == ["number", "null"]
+    assert schema["properties"]["activity_breakdown"]["minProperties"] == 1
     assert schema["properties"]["activity_breakdown"]["additionalProperties"]["properties"]["method"][
         "enum"
     ] == ["observed", "estimated", "reported", "unknown"]
@@ -83,13 +84,37 @@ def test_peer_metrics_comparability_requires_same_window_method_unit_and_values(
         observed_tps=metric(18.5, "tx/s"),
         tvl=metric(2_500_000_000.0, "usd"),
         gas_fee=metric(0.03, "usd/transfer"),
-        activity_breakdown={},
+        activity_breakdown={"swap": metric(11.2)},
         window_start=utc(2026, 1, 1),
         window_end=utc(2026, 1, 2),
         observed_at=utc(2026, 1, 2),
     )
     assert snapshots_comparable(left, changed_unit) == (False, "observed_tps unit differs")
     assert snapshots_comparable(left, snapshot("asset:op", tvl=None)) == (False, "tvl missing")
+
+    changed_source = PeerMetricsSnapshot(
+        asset_id="asset:op",
+        observed_tps=metric(18.5, source="fixture://other"),
+        tvl=metric(2_500_000_000.0, "usd"),
+        gas_fee=metric(0.03, "usd/transfer"),
+        activity_breakdown={"swap": metric(11.2), "bridge": metric(3.4)},
+        window_start=utc(2026, 1, 1),
+        window_end=utc(2026, 1, 2),
+        observed_at=utc(2026, 1, 2),
+    )
+    assert snapshots_comparable(left, changed_source) == (False, "observed_tps source differs")
+
+    changed_activity = PeerMetricsSnapshot(
+        asset_id="asset:op",
+        observed_tps=metric(18.5),
+        tvl=metric(2_500_000_000.0, "usd"),
+        gas_fee=metric(0.03, "usd/transfer"),
+        activity_breakdown={"swap": metric(11.2)},
+        window_start=utc(2026, 1, 1),
+        window_end=utc(2026, 1, 2),
+        observed_at=utc(2026, 1, 2),
+    )
+    assert snapshots_comparable(left, changed_activity) == (False, "activity_breakdown keys differ")
 
 
 def test_peer_metrics_reject_invalid_values_and_windows() -> None:
@@ -102,7 +127,7 @@ def test_peer_metrics_reject_invalid_values_and_windows() -> None:
             observed_tps=metric(1),
             tvl=metric(1, "usd"),
             gas_fee=metric(1, "usd/transfer"),
-            activity_breakdown={},
+            activity_breakdown={"swap": metric(1)},
             window_start=utc(2026, 1, 2),
             window_end=utc(2026, 1, 1),
             observed_at=utc(2026, 1, 2),
@@ -114,8 +139,20 @@ def test_peer_metrics_reject_invalid_values_and_windows() -> None:
             observed_tps=metric(1),
             tvl=metric(1, "usd"),
             gas_fee=metric(1, "usd/transfer"),
-            activity_breakdown={},
+            activity_breakdown={"swap": metric(1)},
             window_start=utc(2026, 1, 1),
             window_end=utc(2026, 1, 2),
             observed_at=datetime(2026, 1, 2),
+        )
+
+    with pytest.raises(ValueError, match="activity_breakdown must map"):
+        PeerMetricsSnapshot(
+            asset_id="asset:arb",
+            observed_tps=metric(1),
+            tvl=metric(1, "usd"),
+            gas_fee=metric(1, "usd/transfer"),
+            activity_breakdown={},
+            window_start=utc(2026, 1, 1),
+            window_end=utc(2026, 1, 2),
+            observed_at=utc(2026, 1, 2),
         )
