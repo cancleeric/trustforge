@@ -105,47 +105,186 @@ def _bound_names(target: ast.expr) -> set[str]:
     return set()
 
 
-def _protocol_classes(tree: ast.Module) -> set[int]:
+class _NamedExprVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.names.update(_bound_names(node.target))
+        self.visit(node.value)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        pass
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        pass
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_ClassDef = visit_FunctionDef
+
+
+def _named_expr_names(node: ast.AST) -> set[str]:
+    visitor = _NamedExprVisitor()
+    visitor.visit(node)
+    return visitor.names
+
+
+def _pattern_names(pattern: ast.pattern) -> set[str]:
     names: set[str] = set()
-    modules: set[str] = set()
-    protocol_classes: set[int] = set()
-    for node in tree.body:
+    for node in ast.walk(pattern):
+        if isinstance(node, ast.MatchAs) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchStar) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+    return names
+
+
+class _ProtocolBindingAnalyzer:
+    def __init__(self) -> None:
+        self.protocol_classes: set[int] = set()
+
+    @staticmethod
+    def _intersection(
+        states: list[tuple[set[str], set[str]]],
+    ) -> tuple[set[str], set[str]]:
+        return (
+            set.intersection(*(names for names, _ in states)),
+            set.intersection(*(modules for _, modules in states)),
+        )
+
+    @staticmethod
+    def _invalidate_names(
+        state: tuple[set[str], set[str]], bound: set[str]
+    ) -> tuple[set[str], set[str]]:
+        names, modules = state
+        return names - bound, modules - bound
+
+    @staticmethod
+    def _invalidate_targets(
+        state: tuple[set[str], set[str]], targets: list[ast.expr]
+    ) -> tuple[set[str], set[str]]:
+        names, modules = state
+        bound = {name for target in targets for name in _bound_names(target)}
+        names, modules = names - bound, modules - bound
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and target.attr == "Protocol"
+                and isinstance(target.value, ast.Name)
+            ):
+                modules.discard(target.value.id)
+        return names, modules
+
+    def _block(
+        self,
+        body: list[ast.stmt],
+        state: tuple[set[str], set[str]],
+    ) -> tuple[set[str], set[str]]:
+        for node in body:
+            state = self._statement(node, state)
+        return state
+
+    def _statement(
+        self,
+        node: ast.stmt,
+        state: tuple[set[str], set[str]],
+    ) -> tuple[set[str], set[str]]:
+        names, modules = map(set, state)
+        state = (names, modules)
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 bound = alias.asname or alias.name
-                names.discard(bound)
-                modules.discard(bound)
+                state = self._invalidate_names(state, {bound})
                 if (
                     node.module in {"typing", "typing_extensions"}
                     and alias.name == "Protocol"
                 ):
-                    names.add(bound)
-        elif isinstance(node, ast.Import):
+                    state[0].add(bound)
+            return state
+        if isinstance(node, ast.Import):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".")[0]
-                names.discard(bound)
-                modules.discard(bound)
+                state = self._invalidate_names(state, {bound})
                 if alias.name in {"typing", "typing_extensions"}:
-                    modules.add(bound)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    state[1].add(bound)
+            return state
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            state = self._invalidate_names(state, _named_expr_names(node))
             if isinstance(node, ast.ClassDef) and any(
-                _is_protocol_base(base, names, modules) for base in node.bases
+                _is_protocol_base(base, *state) for base in node.bases
             ):
-                protocol_classes.add(id(node))
-            names.discard(node.name)
-            modules.discard(node.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                self.protocol_classes.add(id(node))
+            return self._invalidate_names(state, {node.name})
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            state = self._invalidate_names(state, _named_expr_names(node))
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                for bound in _bound_names(target):
-                    names.discard(bound)
-                    modules.discard(bound)
-        elif isinstance(node, ast.Delete):
-            for target in node.targets:
-                for bound in _bound_names(target):
-                    names.discard(bound)
-                    modules.discard(bound)
-    return protocol_classes
+            return self._invalidate_targets(state, targets)
+        if isinstance(node, ast.Delete):
+            return self._invalidate_targets(state, node.targets)
+        if isinstance(node, ast.If):
+            state = self._invalidate_names(state, _named_expr_names(node.test))
+            return self._intersection([
+                self._block(node.body, state),
+                self._block(node.orelse, state),
+            ])
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            state = self._invalidate_names(state, _named_expr_names(node.iter))
+            loop_state = self._invalidate_targets(state, [node.target])
+            body_state = self._block(node.body, loop_state)
+            loop_exit = self._intersection([state, body_state])
+            else_state = self._block(node.orelse, loop_exit)
+            return self._intersection([loop_exit, else_state])
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                state = self._invalidate_names(
+                    state, _named_expr_names(item.context_expr)
+                )
+                if item.optional_vars:
+                    state = self._invalidate_targets(state, [item.optional_vars])
+            return self._block(node.body, state)
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            body_state = state
+            exception_states = [state]
+            for statement in node.body:
+                body_state = self._statement(statement, body_state)
+                exception_states.append(body_state)
+            normal = self._block(node.orelse, body_state)
+            paths = [normal]
+            handler_entry = self._intersection(exception_states)
+            for handler in node.handlers:
+                handler_state = handler_entry
+                if handler.name:
+                    handler_state = self._invalidate_names(
+                        handler_state, {handler.name}
+                    )
+                paths.append(self._block(handler.body, handler_state))
+            if node.finalbody:
+                paths = [self._block(node.finalbody, path) for path in paths]
+            return self._intersection(paths)
+        if isinstance(node, ast.Match):
+            state = self._invalidate_names(state, _named_expr_names(node.subject))
+            paths = [state]
+            for case in node.cases:
+                case_state = self._invalidate_names(
+                    state, _pattern_names(case.pattern)
+                )
+                if case.guard:
+                    case_state = self._invalidate_names(
+                        case_state, _named_expr_names(case.guard)
+                    )
+                paths.append(self._block(case.body, case_state))
+            return self._intersection(paths)
+        return self._invalidate_names(state, _named_expr_names(node))
+
+    def analyze(self, tree: ast.Module) -> set[int]:
+        self._block(tree.body, (set(), set()))
+        return self.protocol_classes
+
+
+def _protocol_classes(tree: ast.Module) -> set[int]:
+    return _ProtocolBindingAnalyzer().analyze(tree)
 
 
 def _is_protocol_base(
