@@ -433,6 +433,8 @@ class KernelScoredClaim:
                 "reputation_trace must be an exact KernelReputationTrace or None"
             )
         _require_finite_number(self.trust, field="trust")
+        if not 0.0 <= self.trust <= 1.0:
+            raise ValueError("trust must be in [0, 1]")
         if type(self.components) is not tuple:
             raise ValueError("components must be a tuple")
         for index, component in enumerate(self.components):
@@ -522,6 +524,8 @@ def validate_scored_claim_graph(value: KernelScoredClaim) -> None:
     if value.reputation_trace is not None:
         validate_reputation_trace_graph(value.reputation_trace)
     _require_finite_number(value.trust, field="trust")
+    if not 0.0 <= value.trust <= 1.0:
+        raise ValueError("trust must be in [0, 1]")
     if type(value.components) is not tuple:
         raise ValueError("components must be a tuple")
     for index, component in enumerate(value.components):

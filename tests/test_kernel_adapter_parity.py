@@ -487,6 +487,33 @@ def test_output_adapter_requires_complete_app_claim_graph_equivalence() -> None:
         to_legacy_scoring(output, forged)
 
 
+@pytest.mark.parametrize("invalid_trust", [-0.1, 1.1, 999.0])
+def test_scored_claim_trust_is_bounded_at_construction_and_revalidation(
+    invalid_trust: float,
+) -> None:
+    claims = _claims()
+    direction = ResolvedDirection(
+        "neutral", DIRECTION_POLICY_VERSION, "no-signal", (), "none"
+    )
+    output = run_kernel(
+        to_resolved_kernel_input(
+            claims,
+            pit_epoch=110.0,
+            coin="BTC",
+            query="BTC",
+            direction=direction,
+            dynamic_reputation=False,
+        )
+    )
+    item = output.scored_claims[0]
+    with pytest.raises(ValueError, match="trust must be in"):
+        type(item)(claim=item.claim, trust=invalid_trust)
+
+    object.__setattr__(item, "trust", invalid_trust)
+    with pytest.raises(ValueError, match="trust must be in"):
+        to_legacy_scoring(output, claims)
+
+
 def test_hostile_app_claim_values_are_rejected_without_hooks() -> None:
     hooks = 0
 
