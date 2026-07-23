@@ -36,6 +36,11 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FIXTURE_AUTHORITY = {
     ("fixture-provider", "fixture-dataset-v1", "split-v1"),
 }
+_FIXTURE_CALENDAR_AUTHORITY = {
+    ("equity:XNYS:fixture-v1", "America/New_York", "2026-06-01T00:00:00Z", False, 15, 4),
+    ("fixture:XNYS:calibration-v1", "America/New_York", "2026-06-01T00:00:00Z", False, 15, 4),
+    ("crypto:UTC:fixture-v1", "UTC", "2026-06-01T00:00:00Z", True, 5, 1),
+}
 _OUTCOME_PAYLOAD_FIELDS = {
     "event_type", "classification", "eligible_as_evidence", "outcome_id",
     "analysis_id", "identity_inputs", "prediction_id",
@@ -595,9 +600,13 @@ def validate_canonical_delayed_outcome(
     source_record_fields = {
         "fixture_only",
         "analysis_identity",
+        "prediction_direction",
         "calendar_id",
         "calendar_version_available_at",
+        "calendar_manifest",
+        "calendar_manifest_checksum",
         "market_data_revision",
+        "selected_prices",
         "identity_inputs",
         "payload_checksum",
     }
@@ -626,6 +635,9 @@ def validate_canonical_delayed_outcome(
         != canonical_integrity_checksum(source_record)
     ):
         raise LearningEventError("delayed outcome emission contract is invalid")
+    start_price, target_price, prediction_direction = _validate_canonical_source_binding(
+        event, source_record
+    )
     inputs = payload.get("identity_inputs")
     if not hasattr(inputs, "items") or set(inputs) != {
         "tenant_id", "prediction_id", "horizon", "contract_version",
@@ -703,6 +715,12 @@ def validate_canonical_delayed_outcome(
                 raise LearningEventError(
                     "directional delayed outcome metrics are inconsistent"
                 )
+        _validate_exact_labeled_metrics(
+            payload,
+            start_price=start_price,
+            target_price=target_price,
+            prediction_direction=prediction_direction,
+        )
     elif maturity in {"pending", "unavailable"}:
         if any(payload.get(field) is not None for field in metric_fields):
             raise LearningEventError("unlabeled delayed outcome metrics must be null")
@@ -842,9 +860,18 @@ def _state_event(
     source_record = {
         "fixture_only": True,
         "analysis_identity": analysis.identity,
+        "prediction_direction": analysis.payload["decision"]["direction"],
         "calendar_id": calendar.calendar_id,
         "calendar_version_available_at": calendar.version_available_at,
+        "calendar_manifest": _calendar_manifest(calendar),
+        "calendar_manifest_checksum": canonical_integrity_checksum(
+            _calendar_manifest(calendar)
+        ),
         "market_data_revision": revision_hash,
+        "selected_prices": {
+            "start": _price_manifest(start_price),
+            "target": _price_manifest(target_price),
+        },
         "identity_inputs": identity_inputs,
         "payload_checksum": canonical_integrity_checksum(payload),
     }
@@ -1059,6 +1086,162 @@ def _price_manifest(item: FixturePrice | None) -> dict[str, str] | None:
         **_price_lineage(item),
         "adjusted_close": item.adjusted_close,
     }
+
+
+def _validate_canonical_source_binding(
+    event: LearningEvent,
+    source_record: Any,
+) -> tuple[FixturePrice | None, FixturePrice | None, str]:
+    prediction_direction = source_record.get("prediction_direction")
+    if prediction_direction not in _DIRECTIONS:
+        raise LearningEventError("canonical prediction direction is invalid")
+    calendar_manifest = source_record.get("calendar_manifest")
+    if not hasattr(calendar_manifest, "items"):
+        raise LearningEventError("canonical calendar manifest is required")
+    calendar_data = dict(calendar_manifest)
+    if set(calendar_data) != {
+        "calendar_id",
+        "timezone",
+        "version_available_at",
+        "continuous_24_7",
+        "prediction_cutoff_minutes",
+        "publication_lag_hours",
+        "sessions",
+    }:
+        raise LearningEventError("canonical calendar manifest is invalid")
+    if source_record.get("calendar_manifest_checksum") != canonical_integrity_checksum(
+        calendar_data
+    ):
+        raise LearningEventError("canonical calendar manifest checksum is invalid")
+    authority = (
+        calendar_data.get("calendar_id"),
+        calendar_data.get("timezone"),
+        calendar_data.get("version_available_at"),
+        calendar_data.get("continuous_24_7"),
+        calendar_data.get("prediction_cutoff_minutes"),
+        calendar_data.get("publication_lag_hours"),
+    )
+    if authority not in _FIXTURE_CALENDAR_AUTHORITY:
+        raise LearningEventError("fixture calendar authority not allowlisted")
+    raw_sessions = calendar_data.get("sessions")
+    if not isinstance(raw_sessions, (tuple, list)):
+        raise LearningEventError("canonical calendar sessions are invalid")
+    sessions: list[VenueSession] = []
+    for raw_session in raw_sessions:
+        if not hasattr(raw_session, "items") or set(raw_session) != {
+            "label",
+            "status",
+            "scheduled_close_at",
+        }:
+            raise LearningEventError("canonical calendar session is invalid")
+        sessions.append(VenueSession(**dict(raw_session)))
+    calendar = FixtureVenueCalendar(
+        calendar_id=calendar_data["calendar_id"],
+        timezone=calendar_data["timezone"],
+        version_available_at=calendar_data["version_available_at"],
+        continuous_24_7=calendar_data["continuous_24_7"],
+        prediction_cutoff_minutes=calendar_data["prediction_cutoff_minutes"],
+        publication_lag_hours=calendar_data["publication_lag_hours"],
+        sessions=tuple(sessions),
+    )
+    if (
+        source_record.get("calendar_id") != calendar.calendar_id
+        or source_record.get("calendar_version_available_at")
+        != calendar.version_available_at
+    ):
+        raise LearningEventError("canonical calendar identity is inconsistent")
+
+    selected = source_record.get("selected_prices")
+    if not hasattr(selected, "items") or set(selected) != {"start", "target"}:
+        raise LearningEventError("canonical selected prices are invalid")
+    parsed: dict[str, FixturePrice | None] = {}
+    sessions_by_label = {session.label: session for session in calendar.sessions}
+    for endpoint in ("start", "target"):
+        raw_price = selected.get(endpoint)
+        if raw_price is None:
+            parsed[endpoint] = None
+            continue
+        if not hasattr(raw_price, "items") or set(raw_price) != {
+            "session_label",
+            "adjusted_close",
+            "event_at",
+            "available_at",
+            "provider",
+            "dataset_version",
+            "methodology_version",
+            "content_hash",
+        }:
+            raise LearningEventError("canonical selected price is invalid")
+        price = FixturePrice(**dict(raw_price))
+        session = sessions_by_label.get(price.session_label)
+        if session is None:
+            raise LearningEventError("selected price session is absent from calendar")
+        _validate_selected_price(price, session, endpoint)
+        parsed[endpoint] = price
+    start_price = parsed["start"]
+    target_price = parsed["target"]
+    if start_price is not None and target_price is not None:
+        _validate_price_lineage(start_price, target_price)
+    payload = event.payload
+    if (
+        start_price is not None
+        and start_price.session_label != payload.get("start_session")
+    ) or (
+        target_price is not None
+        and target_price.session_label != payload.get("target_session")
+    ):
+        raise LearningEventError("selected prices do not match outcome sessions")
+    revision_manifest = {
+        "calendar": _calendar_manifest(calendar),
+        "variant": payload.get("market_data_variant"),
+        "selected": {
+            "start": _price_manifest(start_price),
+            "target": _price_manifest(target_price),
+        },
+    }
+    if canonical_integrity_checksum(revision_manifest) != payload.get(
+        "market_data_revision"
+    ):
+        raise LearningEventError("market_data_revision source binding is invalid")
+    return start_price, target_price, prediction_direction
+
+
+def _validate_exact_labeled_metrics(
+    payload: Any,
+    *,
+    start_price: FixturePrice | None,
+    target_price: FixturePrice | None,
+    prediction_direction: str,
+) -> None:
+    if start_price is None or target_price is None:
+        raise LearningEventError("labeled outcome requires canonical selected prices")
+    start = _price_decimal(start_price.adjusted_close)
+    target = _price_decimal(target_price.adjusted_close)
+    if start == 0:
+        raise LearningEventError("labeled outcome cannot use zero start close")
+    sign = _DIRECTIONS[prediction_direction]
+    if payload.get("direction_sign") != sign:
+        raise LearningEventError(
+            "direction_sign does not match canonical prediction direction"
+        )
+    with localcontext() as context:
+        context.prec = 34
+        context.rounding = ROUND_HALF_EVEN
+        realized = (target / start - Decimal(1)) * Decimal(100)
+        directional = realized * sign if sign in {-1, 1} else None
+    expected = {
+        "return_pct": _persist_decimal(realized),
+        "directional_return_pct": (
+            _persist_decimal(directional) if directional is not None else None
+        ),
+        "risk_abs_move_pct": _persist_decimal(abs(realized)),
+        "risk_downside_pct": _persist_decimal(min(realized, Decimal(0))),
+        "hit": directional > 0 if directional is not None else None,
+    }
+    if any(payload.get(field) != value for field, value in expected.items()):
+        raise LearningEventError(
+            "labeled delayed outcome metrics do not match selected prices"
+        )
 
 
 def _calendar_manifest(calendar: FixtureVenueCalendar) -> dict[str, Any]:

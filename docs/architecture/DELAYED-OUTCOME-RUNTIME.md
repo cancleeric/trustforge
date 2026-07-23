@@ -69,6 +69,14 @@ production allocator or durable audit store.
 both before append and by calibration consumers. It revalidates the exact
 payload schema, non-Evidence classification, seven-key identity, provenance,
 source-analysis binding, metrics, and predecessor chain.
+Canonical fixture provenance contains the complete calendar manifest and
+checksum, the prediction direction, and exact selected start/target immutable
+price records. Validation reconstructs the market-data revision, verifies the
+calendar and price authorities, price content hashes, session binding, and
+paired adjustment lineage, then recomputes every realized and directional
+metric from adjusted closes with Decimal34 round-half-even arithmetic.
+Rechecksumming a forged payload or provenance record cannot detach a label from
+its selected fixture observations or prediction direction.
 
 Outcome events are always `delayed_outcome`, explicitly non-evidentiary, and
 never eligible as Evidence. Dry-run returns before invoking the append port, so

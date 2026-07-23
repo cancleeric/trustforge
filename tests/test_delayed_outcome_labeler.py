@@ -1,4 +1,6 @@
 from dataclasses import replace
+import hashlib
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -14,7 +16,11 @@ from trustforge.delayed_outcome_labeler import (
     canonical_market_data_revision,
     validate_canonical_delayed_outcome,
 )
-from trustforge.learning_event_contract import LearningEventError, canonical_integrity_checksum
+from trustforge.learning_event_contract import (
+    LearningEventError,
+    canonical_integrity_checksum,
+    make_learning_event,
+)
 from trustforge.learning_event_store import LearningEventAppendLog
 
 
@@ -463,6 +469,143 @@ def test_public_validator_rejects_bullish_return_metric_mutation():
         },
     )
     with pytest.raises(LearningEventError, match="metrics are inconsistent"):
+        validate_canonical_delayed_outcome(forged)
+
+
+def test_public_validator_rejects_rechecksummed_all_metric_forgery():
+    event = _build(
+        analysis=_analysis(direction="bullish"),
+        data=[
+            _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+            _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+        ],
+    )
+    payload = {
+        **event.payload,
+        "return_pct": "999.00000000",
+        "directional_return_pct": "999.00000000",
+        "risk_abs_move_pct": "999.00000000",
+        "risk_downside_pct": "0.00000000",
+        "hit": True,
+    }
+    source_record = {
+        **event.provenance["source_record"],
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    forged = replace(
+        event,
+        payload=payload,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(LearningEventError, match="do not match selected prices"):
+        validate_canonical_delayed_outcome(forged)
+
+
+def test_public_validator_rejects_rechecksummed_direction_sign_flip():
+    event = _build(
+        analysis=_analysis(direction="bullish"),
+        data=[
+            _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+            _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+        ],
+    )
+    payload = {
+        **event.payload,
+        "direction_sign": -1,
+        "directional_return_pct": "-10.00000000",
+        "hit": False,
+    }
+    source_record = {
+        **event.provenance["source_record"],
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    forged = replace(
+        event,
+        payload=payload,
+        provenance={
+            **event.provenance,
+            "source_record": source_record,
+            "checksum": canonical_integrity_checksum(source_record),
+        },
+    )
+    with pytest.raises(
+        LearningEventError,
+        match="direction_sign does not match canonical prediction direction",
+    ):
+        validate_canonical_delayed_outcome(forged)
+
+
+def test_public_validator_rejects_fully_readdressed_calendar_authority_forgery():
+    event = _build(
+        analysis=_analysis(direction="bullish"),
+        data=[
+            _price("2026-07-01", "100.00000000", "2026-07-01T21:00:00Z"),
+            _price("2026-07-02", "110.00000000", "2026-07-02T21:00:00Z"),
+        ],
+    )
+    original_source = event.provenance["source_record"]
+    calendar_manifest = {
+        **original_source["calendar_manifest"],
+        "calendar_id": "forged:XNYS:fixture-v1",
+    }
+    revision_manifest = {
+        "calendar": calendar_manifest,
+        "variant": event.payload["market_data_variant"],
+        "selected": original_source["selected_prices"],
+    }
+    market_revision = canonical_integrity_checksum(revision_manifest)
+    identity_inputs = {
+        **event.payload["identity_inputs"],
+        "market_data_revision": market_revision,
+    }
+    outcome_id = "sha256:" + hashlib.sha256(
+        json.dumps(
+            identity_inputs,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    payload = {
+        **event.payload,
+        "outcome_id": outcome_id,
+        "identity_inputs": identity_inputs,
+        "market_data_revision": market_revision,
+    }
+    source_record = {
+        **original_source,
+        "calendar_id": calendar_manifest["calendar_id"],
+        "calendar_manifest": calendar_manifest,
+        "calendar_manifest_checksum": canonical_integrity_checksum(
+            calendar_manifest
+        ),
+        "market_data_revision": market_revision,
+        "identity_inputs": identity_inputs,
+        "payload_checksum": canonical_integrity_checksum(payload),
+    }
+    with pytest.raises(
+        LearningEventError,
+        match="fixture calendar authority not allowlisted",
+    ):
+        forged = make_learning_event(
+            kind=event.kind,
+            tenant_id=event.tenant_id,
+            entity_id=outcome_id,
+            revision=event.revision,
+            event_time=event.event_time,
+            available_time=event.available_time,
+            as_of_time=event.as_of_time,
+            payload=payload,
+            provenance={
+                **event.provenance,
+                "source_record": source_record,
+                "checksum": canonical_integrity_checksum(source_record),
+            },
+        )
         validate_canonical_delayed_outcome(forged)
 
 
