@@ -5,8 +5,12 @@ from datetime import datetime, timezone
 import pytest
 from trustforge.historical_replay import replay_date_range, replay_snapshot
 
-def _snapshot(document):
-    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+def _snapshot(document, *, snapshot_epoch=None):
+    boundary = (
+        datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+        if snapshot_epoch is None
+        else snapshot_epoch
+    )
     return {"coin": "BTC", "snapshot_at": "2021-07-01T00:00:00Z", "snapshot_epoch": boundary, "archive_type": "backfilled_archive", "sources": [{"source": "government", "documents": [document]}]}
 
 def test_daily_replay_outputs_report_evidence_and_execution_log():
@@ -18,6 +22,25 @@ def test_daily_replay_outputs_report_evidence_and_execution_log():
 def test_daily_replay_rejects_future_document():
     with pytest.raises(ValueError, match="future document"):
         replay_snapshot(_snapshot({"id": "future", "text": "bad", "published_at": "2021-07-02T00:00:00Z"}), query="test")
+
+
+@pytest.mark.parametrize("snapshot_epoch", ["nan", "inf", "-inf", 0, -1, "not-a-number"])
+def test_daily_replay_rejects_invalid_snapshot_epoch_before_evidence_binding(snapshot_epoch):
+    snapshot = _snapshot(
+        {"id": "future", "text": "bad", "published_at": "9999-12-31T23:59:59Z"},
+        snapshot_epoch=snapshot_epoch,
+    )
+
+    with pytest.raises(ValueError, match="finite positive snapshot_epoch"):
+        replay_snapshot(snapshot, query="test")
+
+
+def test_daily_replay_rejects_missing_snapshot_epoch_before_evidence_binding():
+    snapshot = _snapshot({"id": "future", "text": "bad", "published_at": "9999-12-31T23:59:59Z"})
+    del snapshot["snapshot_epoch"]
+
+    with pytest.raises(ValueError, match="finite positive snapshot_epoch"):
+        replay_snapshot(snapshot, query="test")
 
 
 def test_daily_replay_rejects_timezone_unknown_document():
