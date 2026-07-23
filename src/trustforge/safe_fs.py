@@ -162,3 +162,83 @@ def write_atomic_at(parent_fd: int, name: str, encoded: bytes, *, immutable: boo
             except OSError:
                 pass
         raise
+
+
+def write_immutable_cross_directory_at(
+    staging_fd: int,
+    destination_fd: int,
+    name: str,
+    encoded: bytes,
+) -> None:
+    """Publish one immutable file from isolated staging into a destination fd.
+
+    The destination becomes committed only after the staging entry has been
+    removed and both directory entries have been durably synced.
+    """
+
+    if not name or name in {".", ".."} or Path(name).name != name:
+        raise SafePathError("unsafe filename")
+    temporary = _temporary_name(name)
+    temporary_exists = False
+    destination_exists = False
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=staging_fd,
+        )
+        temporary_exists = True
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(errno.EIO, "short write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+
+        os.link(
+            temporary,
+            name,
+            src_dir_fd=staging_fd,
+            dst_dir_fd=destination_fd,
+        )
+        destination_exists = True
+        os.unlink(temporary, dir_fd=staging_fd)
+        temporary_exists = False
+        os.fsync(staging_fd)
+        os.fsync(destination_fd)
+    except BaseException as publication_error:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        rollback_errors: list[BaseException] = []
+        if destination_exists:
+            try:
+                os.unlink(name, dir_fd=destination_fd)
+            except OSError as exc:
+                rollback_errors.append(exc)
+        if temporary_exists:
+            try:
+                os.unlink(temporary, dir_fd=staging_fd)
+            except OSError as exc:
+                rollback_errors.append(exc)
+        try:
+            os.fsync(staging_fd)
+        except OSError as exc:
+            rollback_errors.append(exc)
+        if destination_exists:
+            try:
+                os.fsync(destination_fd)
+            except OSError as exc:
+                rollback_errors.append(exc)
+        if rollback_errors:
+            raise OSError(
+                "cross-directory publication failed and rollback was not durable"
+            ) from rollback_errors[-1]
+        raise publication_error

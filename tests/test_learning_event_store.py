@@ -1,3 +1,7 @@
+import multiprocessing
+import os
+from pathlib import Path
+
 import pytest
 
 from trustforge.learning_event_contract import (
@@ -6,7 +10,12 @@ from trustforge.learning_event_contract import (
     make_learning_event,
     serialize_learning_event,
 )
-from trustforge.learning_event_store import LearningEventAppendLog, plan_learning_event_migration
+from trustforge.learning_event_store import (
+    FileLearningEventStore,
+    LearningEventAppendLog,
+    default_learning_event_directory,
+    plan_learning_event_migration,
+)
 
 
 TIMES = {
@@ -38,13 +47,15 @@ def _outcome(revision=1, status="pending"):
     )
 
 
-def _evidence(identity="evidence:1"):
+def _evidence(identity="evidence:1", tenant_id="tenant-a"):
+    provenance = dict(PROVENANCE)
+    provenance["tenant_id"] = tenant_id
     return make_learning_event(
         kind="evidentiary",
-        tenant_id="tenant-a",
+        tenant_id=tenant_id,
         entity_id=identity,
         revision=1,
-        provenance=PROVENANCE,
+        provenance=provenance,
         payload={"evidence_id": "ev-1", "claim": "btc up", "source_url": "https://example.test"},
         **TIMES,
     )
@@ -99,3 +110,293 @@ def test_outcome_cannot_be_migrated_as_evidence():
 
     assert report["status"] == "blocked"
     assert report["will_write"] is False
+
+
+def test_file_store_defaults_to_portable_trustforge_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_HOME", str(tmp_path))
+
+    assert default_learning_event_directory() == tmp_path / "out" / "learning_events"
+
+
+def test_file_store_missing_nested_directory_replays_empty_without_creating_it(tmp_path):
+    directory = tmp_path / "not-created" / "events"
+
+    assert FileLearningEventStore(directory).replay(trusted_tenant_id="tenant-a") == []
+    assert not directory.exists()
+
+
+def test_file_store_persists_idempotently_and_replays_after_restart(tmp_path):
+    event = _evidence()
+    store = FileLearningEventStore(tmp_path)
+
+    assert store.append(event) == "created"
+    assert store.append(event) == "idempotent"
+    assert FileLearningEventStore(tmp_path).replay(trusted_tenant_id="tenant-a") == [event]
+    names = [path.name for path in tmp_path.iterdir()]
+    assert len(names) == 1
+    assert names[0].endswith(".json")
+    assert "tenant-a" not in names[0]
+    assert "evidence" not in names[0]
+
+
+def test_file_store_replay_is_deterministic_by_identity_digest(tmp_path):
+    events = [_evidence("evidence:3"), _evidence("evidence:1"), _evidence("evidence:2")]
+    store = FileLearningEventStore(tmp_path)
+    for event in events:
+        store.append(event)
+
+    replayed = store.replay(trusted_tenant_id="tenant-a")
+    expected = sorted(events, key=lambda event: store._path_for_identity(event.identity).name)
+    assert replayed == expected
+    assert FileLearningEventStore(tmp_path).snapshot(trusted_tenant_id="tenant-a") == tuple(
+        serialize_learning_event(event) for event in expected
+    )
+
+
+def test_file_store_rejects_same_identity_with_different_bytes(tmp_path):
+    store = FileLearningEventStore(tmp_path)
+    original = _outcome(status="pending")
+    rewritten = _outcome(status="labeled")
+
+    assert store.append(original) == "created"
+    with pytest.raises(LearningEventError, match="immutable"):
+        store.append(rewritten)
+    assert store.replay(trusted_tenant_id="tenant-a") == [original]
+
+
+@pytest.mark.parametrize("replacement", [b"{", b"not-json"])
+def test_file_store_replay_fails_closed_for_corrupt_or_truncated_event(tmp_path, replacement):
+    event = _evidence()
+    store = FileLearningEventStore(tmp_path)
+    store.append(event)
+    next(tmp_path.iterdir()).write_bytes(replacement)
+
+    with pytest.raises(LearningEventError, match="corrupt"):
+        store.replay(trusted_tenant_id="tenant-a")
+
+
+def test_file_store_replay_fails_closed_for_oversize_event(tmp_path):
+    event = _evidence()
+    writer = FileLearningEventStore(tmp_path)
+    writer.append(event)
+
+    with pytest.raises(LearningEventError, match="unsafe or unreadable"):
+        FileLearningEventStore(tmp_path, maximum_event_bytes=8).replay(
+            trusted_tenant_id="tenant-a"
+        )
+
+
+def test_file_store_replay_fails_closed_for_digest_mismatch(tmp_path):
+    event = _evidence()
+    store = FileLearningEventStore(tmp_path)
+    store.append(event)
+    path = next(tmp_path.iterdir())
+    path.rename(tmp_path / ("0" * 64 + ".json"))
+
+    with pytest.raises(LearningEventError, match="digest"):
+        store.replay(trusted_tenant_id="tenant-a")
+
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "directory", "fifo"])
+def test_file_store_replay_fails_closed_for_non_regular_entry(tmp_path, entry_kind):
+    name = "0" * 64 + ".json"
+    path = tmp_path / name
+    if entry_kind == "symlink":
+        store = FileLearningEventStore(tmp_path)
+        store.staging_directory.mkdir()
+        target = store.staging_directory / "target"
+        target.write_text("{}", encoding="utf-8")
+        path.symlink_to(target)
+    elif entry_kind == "directory":
+        path.mkdir()
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO is unavailable")
+        os.mkfifo(path)
+
+    with pytest.raises(LearningEventError, match="unsafe or unreadable"):
+        FileLearningEventStore(tmp_path).replay(trusted_tenant_id="tenant-a")
+
+
+def _append_in_process(directory: str, result_directory: str, start, index: int) -> None:
+    start.wait()
+    try:
+        result = FileLearningEventStore(Path(directory)).append(_evidence())
+    except BaseException as exc:  # pragma: no cover - surfaced in parent assertion
+        result = f"error:{type(exc).__name__}:{exc}"
+    (Path(result_directory) / str(index)).write_text(result, encoding="utf-8")
+
+
+def test_file_store_multi_process_race_publishes_exactly_once(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    event_directory = tmp_path / "events"
+    result_directory = tmp_path / "results"
+    result_directory.mkdir()
+    start = context.Event()
+    processes = [
+        context.Process(
+            target=_append_in_process,
+            args=(str(event_directory), str(result_directory), start, index),
+        )
+        for index in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    results = [(result_directory / str(index)).read_text(encoding="utf-8") for index in range(2)]
+    assert sorted(results) == ["created", "idempotent"]
+    assert FileLearningEventStore(event_directory).replay(
+        trusted_tenant_id="tenant-a"
+    ) == [_evidence()]
+
+
+def test_file_store_fsync_failure_leaves_no_ghost_event(tmp_path, monkeypatch):
+    def fail_write(*args, **kwargs):
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(
+        "trustforge.learning_event_store.write_immutable_cross_directory_at",
+        fail_write,
+    )
+    store = FileLearningEventStore(tmp_path)
+
+    with pytest.raises(OSError, match="fsync failed"):
+        store.append(_evidence())
+    assert store.replay(trusted_tenant_id="tenant-a") == []
+
+
+def test_file_store_rejects_empty_symlink_directory(tmp_path):
+    real_directory = tmp_path / "real"
+    real_directory.mkdir()
+    linked_directory = tmp_path / "linked"
+    linked_directory.symlink_to(real_directory, target_is_directory=True)
+
+    with pytest.raises(LearningEventError, match="opened safely"):
+        FileLearningEventStore(linked_directory).replay(trusted_tenant_id="tenant-a")
+
+
+def test_file_store_append_stays_on_pinned_parent_when_path_is_swapped(tmp_path, monkeypatch):
+    output = tmp_path / "events"
+    moved = tmp_path / "pinned-events"
+    attacker = tmp_path / "attacker"
+    output.mkdir()
+    attacker.mkdir()
+    real_open = os.open
+    swapped = False
+
+    def swap_before_temp_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and dir_fd is not None and isinstance(path, str) and path.endswith(".tmp"):
+            os.rename(output, moved)
+            os.symlink(attacker, output, target_is_directory=True)
+            swapped = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("trustforge.safe_fs.os.open", swap_before_temp_open)
+    assert FileLearningEventStore(output).append(_evidence()) == "created"
+    assert swapped
+    assert len(list(moved.iterdir())) == 1
+    assert list(attacker.iterdir()) == []
+
+
+def test_file_store_requires_explicit_nonempty_trusted_tenant(tmp_path):
+    store = FileLearningEventStore(tmp_path)
+
+    with pytest.raises(TypeError):
+        store.replay()
+    with pytest.raises(TypeError):
+        store.snapshot()
+    with pytest.raises(LearningEventError, match="trusted_tenant_id"):
+        store.replay(trusted_tenant_id=" ")
+
+
+def test_file_store_replay_and_snapshot_are_tenant_scoped(tmp_path):
+    store = FileLearningEventStore(tmp_path)
+    tenant_a = _evidence("evidence:a", "tenant-a")
+    tenant_b = _evidence("evidence:b", "tenant-b")
+    store.append(tenant_b)
+    store.append(tenant_a)
+
+    assert store.replay(trusted_tenant_id="tenant-a") == [tenant_a]
+    assert store.replay(trusted_tenant_id="tenant-b") == [tenant_b]
+    assert store.snapshot(trusted_tenant_id="tenant-a") == (
+        serialize_learning_event(tenant_a),
+    )
+
+
+def test_other_tenant_corruption_still_fails_closed(tmp_path):
+    store = FileLearningEventStore(tmp_path)
+    tenant_b = _evidence("evidence:b", "tenant-b")
+    store.append(tenant_b)
+    store._path_for_identity(tenant_b.identity).write_bytes(b"{")
+
+    with pytest.raises(LearningEventError, match="corrupt"):
+        store.replay(trusted_tenant_id="tenant-a")
+
+
+def test_file_store_event_count_limit_stops_before_unbounded_collection(tmp_path, monkeypatch):
+    writer = FileLearningEventStore(tmp_path)
+    writer.append(_evidence("evidence:1"))
+    writer.append(_evidence("evidence:2"))
+    reads = 0
+
+    def reject_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        raise AssertionError("count limit must fail before reading event bytes")
+
+    monkeypatch.setattr("trustforge.learning_event_store.read_regular_file_at", reject_read)
+    with pytest.raises(LearningEventError, match="event count"):
+        FileLearningEventStore(tmp_path, maximum_event_count=1).replay(
+            trusted_tenant_id="tenant-a"
+        )
+    assert reads == 0
+
+
+def test_file_store_total_size_limit_fails_before_event_reads(tmp_path, monkeypatch):
+    writer = FileLearningEventStore(tmp_path)
+    writer.append(_evidence())
+    reads = 0
+
+    def reject_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        raise AssertionError("total limit must fail before reading event bytes")
+
+    monkeypatch.setattr("trustforge.learning_event_store.read_regular_file_at", reject_read)
+    with pytest.raises(LearningEventError, match="total size"):
+        FileLearningEventStore(tmp_path, maximum_total_bytes=1).replay(
+            trusted_tenant_id="tenant-a"
+        )
+    assert reads == 0
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("maximum_event_bytes", 0),
+        ("maximum_event_count", 0),
+        ("maximum_total_bytes", 0),
+        ("maximum_event_count", True),
+    ],
+)
+def test_file_store_rejects_invalid_resource_limits(tmp_path, option, value):
+    with pytest.raises(ValueError, match=option):
+        FileLearningEventStore(tmp_path, **{option: value})
+
+
+def test_staging_entries_are_isolated_but_event_namespace_tmp_fails_closed(tmp_path):
+    store = FileLearningEventStore(tmp_path)
+    event = _evidence()
+    store.append(event)
+    (store.staging_directory / ".attacker.tmp").write_bytes(b"attacker")
+
+    assert store.replay(trusted_tenant_id="tenant-a") == [event]
+
+    (tmp_path / ".attacker.tmp").write_bytes(b"attacker")
+    with pytest.raises(LearningEventError, match="unexpected entry"):
+        store.replay(trusted_tenant_id="tenant-a")
