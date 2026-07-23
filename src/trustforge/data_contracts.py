@@ -10,6 +10,7 @@ from trustforge.asset_context import (
     MARKET_CAP_TIERS,
     TOKEN_ROLES,
 )
+from trustforge.peer_metrics import PEER_METRICS_SCHEMA_VERSION
 
 DOCUMENT_SCHEMA_VERSION = "1.0.0"
 EVIDENCE_SCHEMA_VERSION = "1.0.0"
@@ -116,6 +117,53 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
             },
             "additionalProperties": False,
         },
+        "PeerMetricsSnapshot": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://trustforge.local/contracts/peer-metrics-snapshot/1.0.0",
+            "title": "TrustForge PeerMetricsSnapshot",
+            "type": "object",
+            "required": [
+                "schema_version",
+                "asset_id",
+                "observed_tps",
+                "tvl",
+                "gas_fee",
+                "activity_breakdown",
+                "window_start",
+                "window_end",
+                "observed_at",
+            ],
+            "properties": {
+                "schema_version": {"const": PEER_METRICS_SCHEMA_VERSION},
+                "asset_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                "observed_tps": _metric_value_schema(),
+                "tvl": _metric_value_schema(),
+                "gas_fee": _metric_value_schema(),
+                "activity_breakdown": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": _metric_value_schema(),
+                },
+                "window_start": {"type": "string", "format": "date-time"},
+                "window_end": {"type": "string", "format": "date-time"},
+                "observed_at": {"type": "string", "format": "date-time"},
+            },
+            "additionalProperties": False,
+        },
+    }
+
+
+def _metric_value_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": ["value", "unit", "method", "source"],
+        "properties": {
+            "value": {"type": ["number", "null"], "minimum": 0},
+            "unit": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "method": {"enum": ["observed", "estimated", "reported", "unknown"]},
+            "source": {"type": "string", "minLength": 1, "pattern": r"\S"},
+        },
+        "additionalProperties": False,
     }
 
 
