@@ -1,7 +1,9 @@
 """Structural guards for the pending issue #501 decision record."""
 
 from datetime import datetime
-from decimal import Decimal
+from datetime import timedelta
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -86,8 +88,9 @@ def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
     assert len(rows) >= 20
     assert len({row["fixture_id"] for row in rows}) == len(rows)
     prediction_ids = [row["prediction_id"] for row in rows]
-    assert len(set(prediction_ids)) == len(rows) - 1
+    assert len(set(prediction_ids)) == len(rows) - 2
     assert prediction_ids.count("p20") == 2
+    assert prediction_ids.count("p14") == 2
     assert all(all(row[column] for column in headers) for row in rows)
     for row in rows:
         assert isinstance(json.loads(row["calendar_sessions"]), list)
@@ -113,13 +116,15 @@ def test_fixture_table_covers_required_adversarial_cases() -> None:
         "calendar_gap",
         "suspension_no_slide",
         "target_missing",
-        "late_after_cutoff",
+        "late_after_cutoff_v1",
+        "late_after_cutoff_v2",
         "split_adjusted_asof",
         "dividend_price_only",
         "adjustment_future_hidden",
         "zero_start",
         "revision_v1",
         "revision_v2",
+        "missing_lineage",
     } <= fixture_ids
 
 
@@ -182,15 +187,36 @@ def test_numeric_formula_and_revision_pair_contract() -> None:
     assert first["horizon"] == second["horizon"] == "T+1"
     first_expected = json.loads(first["expected"])
     second_expected = json.loads(second["expected"])
-    assert first_expected["outcome_id"] == first_expected["canonical"] == "o1"
-    assert second_expected["outcome_id"] == second_expected["canonical"] == "o2"
-    assert second_expected["supersedes"] == "o1"
+    assert first_expected["outcome_id"] == first_expected["canonical"]
+    assert second_expected["outcome_id"] == second_expected["canonical"]
+    assert second_expected["supersedes"] == first_expected["outcome_id"]
+    assert second_expected["version"] > first_expected["version"]
+    for fixture_id in ("revision_v1", "revision_v2"):
+        row = by_id[fixture_id]
+        as_of = _parse_rfc3339(row["as_of"])
+        assert all(_parse_rfc3339(bar["available_at"]) <= as_of for bar in json.loads(row["bars"]))
+    first_as_of = _parse_rfc3339(first["as_of"])
+    assert any(
+        _parse_rfc3339(bar["available_at"]) > first_as_of
+        for bar in json.loads(second["bars"])
+    )
+
+    late_first = json.loads(by_id["late_after_cutoff_v1"]["expected"])
+    late_second = json.loads(by_id["late_after_cutoff_v2"]["expected"])
+    assert late_first["maturity"] == "unavailable"
+    assert late_second["supersedes"] == late_first["outcome_id"]
+    assert late_second["version"] > late_first["version"]
+    late_first_as_of = _parse_rfc3339(by_id["late_after_cutoff_v1"]["as_of"])
+    assert any(
+        _parse_rfc3339(bar["available_at"]) > late_first_as_of
+        for bar in json.loads(by_id["late_after_cutoff_v2"]["bars"])
+    )
 
 
 def test_labeled_directional_fixture_formulas() -> None:
     text = DOC.read_text(encoding="utf-8")
     _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
-    tolerance = Decimal("0.00000001")
+    quantum = Decimal("0.00000001")
     signs = {"bullish": Decimal(1), "bearish": Decimal(-1)}
     for row in rows:
         expected = json.loads(row["expected"])
@@ -202,13 +228,108 @@ def test_labeled_directional_fixture_formulas() -> None:
             continue
         start = by_session[expected["start"]]
         target = by_session[expected["target"]]
-        calculated_return = (target / start - 1) * 100
-        calculated_directional = calculated_return * signs[row["direction"]]
-        assert abs(Decimal(expected["return"]) - calculated_return) <= tolerance
-        assert abs(Decimal(expected["directional"]) - calculated_directional) <= tolerance
-        assert abs(Decimal(expected["abs_risk"]) - abs(calculated_return)) <= tolerance
-        assert abs(Decimal(expected["downside"]) - min(calculated_return, Decimal(0))) <= tolerance
-        assert expected["hit"] is (calculated_directional > 0)
+        with localcontext() as context:
+            context.prec = 34
+            context.rounding = ROUND_HALF_EVEN
+            calculated_return = (target / start - 1) * 100
+            calculated_directional = calculated_return * signs[row["direction"]]
+            assert Decimal(expected["return"]).as_tuple().exponent == -8
+            assert Decimal(expected["directional"]).as_tuple().exponent == -8
+            assert Decimal(expected["abs_risk"]).as_tuple().exponent == -8
+            assert Decimal(expected["downside"]).as_tuple().exponent == -8
+            assert Decimal(expected["return"]) == calculated_return.quantize(quantum)
+            assert Decimal(expected["directional"]) == calculated_directional.quantize(quantum)
+            assert Decimal(expected["abs_risk"]) == abs(calculated_return).quantize(quantum)
+            assert Decimal(expected["downside"]) == min(calculated_return, Decimal(0)).quantize(quantum)
+            assert expected["hit"] is (calculated_directional > 0)
+
+
+def _canonical_hash(value: dict[str, object]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def test_fixture_lineage_and_outcome_identity_are_rebuildable() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    for row in rows:
+        bars = json.loads(row["bars"])
+        expected = json.loads(row["expected"])
+        hashes = []
+        for bar in bars:
+            required = {
+                "provider", "dataset_version", "methodology_version", "session",
+                "event_at", "available_at", "close", "content_hash",
+            }
+            if row["fixture_id"] == "missing_lineage" and "content_hash" not in bar:
+                assert expected["maturity"] == "unavailable"
+                assert expected["reason"] == "PRICE_LINEAGE_MISSING"
+                continue
+            assert required <= bar.keys()
+            assert bar["provider"] == "synthetic-fixture-only"
+            canonical = "|".join(str(bar[key]) for key in (
+                "provider", "dataset_version", "methodology_version", "session",
+                "event_at", "available_at", "close",
+            ))
+            assert bar["content_hash"] == "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+            hashes.append(bar["content_hash"])
+        if row["fixture_id"] != "missing_lineage":
+            revision = "sha256:" + hashlib.sha256("|".join(hashes).encode()).hexdigest()
+            assert expected["market_data_revision"] == revision
+        assert expected["outcome_id"] == _canonical_hash(expected["identity_inputs"])
+
+
+def test_calendar_policy_derives_start_target_and_missing_data_state() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    _, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
+    for row in rows:
+        expected = json.loads(row["expected"])
+        if row["fixture_id"] in {"invalid_timeline", "calendar_gap", "missing_lineage", "zero_start"}:
+            assert expected["reason"] in {
+                "INVALID_PREDICTION_TIMELINE", "CALENDAR_GAP", "PRICE_LINEAGE_MISSING",
+                "ZERO_START_CLOSE",
+            }
+            continue
+        sessions = json.loads(row["calendar_sessions"])
+        open_sessions = [item for item in sessions if item["status"] == "open"]
+        buffer = timedelta(minutes=5 if row["calendar_id"] == "crypto:UTC:v1" else 15)
+        available = _parse_rfc3339(row["prediction_available_at"])
+        eligible_starts = [
+            item for item in open_sessions
+            if available <= _parse_rfc3339(item["scheduled_close_at"]) - buffer
+        ]
+        assert eligible_starts
+        start = eligible_starts[0]
+        start_index = open_sessions.index(start)
+        horizon = int(row["horizon"].removeprefix("T+"))
+        assert start_index + horizon < len(open_sessions)
+        target = open_sessions[start_index + horizon]
+        assert expected["start"] == start["label"]
+        assert expected["target"] == target["label"]
+
+        target_bar = next(
+            (bar for bar in json.loads(row["bars"]) if bar["session"] == target["label"]),
+            None,
+        )
+        target_close = _parse_rfc3339(target["scheduled_close_at"])
+        publication_sla = timedelta(hours=1 if row["calendar_id"] == "crypto:UTC:v1" else 4)
+        late_boundary = target_close + publication_sla + timedelta(days=3)
+        as_of = _parse_rfc3339(row["as_of"])
+        if target_bar is None:
+            if as_of <= late_boundary:
+                assert expected["maturity"] == "pending"
+                assert expected["reason"] == "WAITING_LATE_DATA_CUTOFF"
+            else:
+                assert expected["maturity"] == "unavailable"
+                assert expected["reason"] in {"TARGET_CLOSE_MISSING", "LATE_AFTER_CUTOFF"}
+        elif any(
+            _parse_rfc3339(bar["available_at"]) > as_of
+            for bar in json.loads(row["bars"])
+            if bar["session"] in {start["label"], target["label"]}
+        ):
+            assert expected["maturity"] == "pending"
+        else:
+            assert expected["maturity"] == "labeled", row["fixture_id"]
 
 
 def test_revision_identity_and_reconciliation_are_explicit() -> None:
