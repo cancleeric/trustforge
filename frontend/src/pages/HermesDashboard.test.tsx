@@ -73,7 +73,7 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.queryByLabelText('問題')).not.toBeInTheDocument()
   })
 
-  it('opens and closes the divergence drilldown from the desktop right rail', () => {
+  it('opens and closes the divergence drilldown from the desktop right rail', async () => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
@@ -82,9 +82,11 @@ describe('HermesDashboard workspace navigation', () => {
 
     const divergenceDock = document.querySelector('.hermes-divergence-dock')
     expect(divergenceDock).not.toBeNull()
-    fireEvent.click(divergenceDock!.querySelector(':scope > button')!)
+    const desktopButton = divergenceDock!.querySelector(':scope > button') as HTMLButtonElement
+    desktopButton.focus()
+    desktopButton.click()
 
-    const dialog = screen.getByRole('dialog')
+    const dialog = await screen.findByRole('dialog')
     expect(dialog).toHaveTextContent('跨來源分歧')
     fireEvent.click(dialog.querySelector('button')!)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

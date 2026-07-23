@@ -3,6 +3,15 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('Hermes responsive bridge layout contract', () => {
+  it('keeps the desktop right rail above the overlapping training status layer', () => {
+    const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
+    const rightRail = readFileSync(path.join(__dirname, 'HermesRightRail.tsx'), 'utf8')
+
+    expect(dashboard).toContain('className="hermes-training-status-layer"')
+    expect(dashboard).toContain('zIndex: 6')
+    expect(rightRail).toContain('zIndex: 7')
+  })
+
   it('uses the viewport without a fixed canvas or page scrolling', () => {
     const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
     const dashboard = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
