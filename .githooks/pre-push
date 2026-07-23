@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# TrustForge pre-push local quality gate. CI is intentionally local-first;
-# production CD remains a separate protected release workflow.
+# TrustForge mandatory local pre-push quality gate. GitHub Actions are disabled.
+# Production deployment is a separate controlled local release process.
 # 啟用：git config core.hooksPath .githooks
 # 略過部署：TRUSTFORGE_NO_CD=1 git push
 set -uo pipefail
@@ -33,5 +33,5 @@ run_gate "diff check" git diff --check
 
 echo "[pre-push] all local quality gates passed"
 
-echo "[pre-push] release CD 由 GitHub production workflow 處理"
+echo "[pre-push] production deployment uses the controlled local release process"
 exit 0

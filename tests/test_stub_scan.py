@@ -26,3 +26,56 @@ def test_scan_uses_stable_qualified_symbols(tmp_path, monkeypatch):
         "symbol": "trustforge.example.Connector.fetch", "kind": "pass",
         "path": "src/trustforge/example.py", "line": 2,
     }]
+
+
+def test_scan_ignores_only_direct_protocol_interface_methods(tmp_path, monkeypatch):
+    root = tmp_path
+    source = root / "src/trustforge/protocols.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import typing\n"
+        "import typing_extensions as te\n"
+        "from typing_extensions import Protocol as ExtensionProtocol\n"
+        "class Direct(Protocol):\n"
+        "    def sync(self): ...\n"
+        "    async def async_method(self): ...\n"
+        "class Qualified(typing.Protocol):\n"
+        "    def sync(self): ...\n"
+        "class Extension(te.Protocol):\n"
+        "    def sync(self): ...\n"
+        "class Aliased(ExtensionProtocol):\n"
+        "    def sync(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
+
+
+def test_scan_keeps_ordinary_nested_and_indirect_class_stubs(tmp_path, monkeypatch):
+    root = tmp_path
+    source = root / "src/trustforge/ordinary.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "class LocalProtocol: pass\n"
+        "class Interface(Protocol):\n"
+        "    def method(self):\n"
+        "        def nested(): ...\n"
+        "class Indirect(Interface):\n"
+        "    def method(self): ...\n"
+        "class Ordinary:\n"
+        "    async def method(self): ...\n"
+        "class NotTyping(LocalProtocol):\n"
+        "    def method(self): ...\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.ordinary.Indirect.method",
+        "trustforge.ordinary.Interface.method.nested",
+        "trustforge.ordinary.NotTyping.method",
+        "trustforge.ordinary.Ordinary.method",
+    ]

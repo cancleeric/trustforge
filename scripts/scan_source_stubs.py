@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail CI when a new empty/not-implemented production function appears."""
+"""Fail the local pre-push gate on production stubs."""
 from __future__ import annotations
 
 import argparse
@@ -46,19 +46,41 @@ def _stub_kind(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
 
 
 class _FunctionVisitor(ast.NodeVisitor):
-    def __init__(self, module: str, path: Path):
+    def __init__(
+        self,
+        module: str,
+        path: Path,
+        protocol_names: set[str],
+        protocol_modules: set[str],
+    ):
         self.module = module
         self.path = path
+        self.protocol_names = protocol_names
+        self.protocol_modules = protocol_modules
         self.scope: list[str] = []
+        self.scope_kinds: list[str] = []
+        self.protocol_classes: list[bool] = []
         self.findings: list[dict[str, object]] = []
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.scope.append(node.name)
+        self.scope_kinds.append("class")
+        self.protocol_classes.append(any(
+            _is_protocol_base(base, self.protocol_names, self.protocol_modules)
+            for base in node.bases
+        ))
         self.generic_visit(node)
+        self.protocol_classes.pop()
+        self.scope_kinds.pop()
         self.scope.pop()
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        kind = _stub_kind(node)
+        is_direct_protocol_method = (
+            bool(self.scope_kinds)
+            and self.scope_kinds[-1] == "class"
+            and self.protocol_classes[-1]
+        )
+        kind = None if is_direct_protocol_method else _stub_kind(node)
         if kind:
             self.findings.append({
                 "symbol": ".".join((self.module, *self.scope, node.name)),
@@ -67,11 +89,47 @@ class _FunctionVisitor(ast.NodeVisitor):
                 "line": node.lineno,
             })
         self.scope.append(node.name)
+        self.scope_kinds.append("function")
         self.generic_visit(node)
+        self.scope_kinds.pop()
         self.scope.pop()
 
     visit_FunctionDef = _visit_function
     visit_AsyncFunctionDef = _visit_function
+
+
+def _protocol_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    modules: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module in {"typing", "typing_extensions"}:
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "Protocol"
+            )
+        elif isinstance(node, ast.Import):
+            modules.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in {"typing", "typing_extensions"}
+            )
+    return names, modules
+
+
+def _is_protocol_base(
+    node: ast.expr,
+    protocol_names: set[str],
+    protocol_modules: set[str],
+) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in protocol_names
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "Protocol"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in protocol_modules
+    )
 
 
 def scan(paths: Iterable[Path]) -> list[dict[str, object]]:
@@ -79,8 +137,12 @@ def scan(paths: Iterable[Path]) -> list[dict[str, object]]:
     for path in sorted(paths):
         relative = path.relative_to(ROOT)
         module = ".".join(relative.with_suffix("").parts[1:])
-        visitor = _FunctionVisitor(module, relative)
-        visitor.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(relative)))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(relative))
+        protocol_names, protocol_modules = _protocol_bindings(tree)
+        visitor = _FunctionVisitor(
+            module, relative, protocol_names, protocol_modules
+        )
+        visitor.visit(tree)
         findings.extend(visitor.findings)
     return sorted(findings, key=lambda item: (str(item["symbol"]), str(item["kind"])))
 
@@ -88,7 +150,7 @@ def scan(paths: Iterable[Path]) -> list[dict[str, object]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--allowlist", type=Path, default=ROOT / "docs/audit/stub-allowlist.json")
-    parser.add_argument("--out", type=Path, default=ROOT / "out/ci/stub-scan.json")
+    parser.add_argument("--out", type=Path, default=ROOT / "out/pre-push/stub-scan.json")
     args = parser.parse_args()
     allowed_doc = json.loads(args.allowlist.read_text(encoding="utf-8"))
     allowed = {(row["symbol"], row["kind"]): row for row in allowed_doc.get("allowed", [])}
