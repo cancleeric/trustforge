@@ -4,7 +4,12 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from .learning_event_contract import LearningEvent, LearningEventError, make_learning_event
+from .learning_event_contract import (
+    LearningEvent,
+    LearningEventError,
+    canonical_integrity_checksum,
+    make_learning_event,
+)
 
 _HORIZON_DAYS = {"T+1": 1, "T+7": 7, "T+14": 14}
 
@@ -45,8 +50,9 @@ def build_delayed_outcome_observation(
         status = "labeled"
         outcome = _outcome_values(base, target)
 
+    entity_id = f"{analysis_event.entity_id}:{horizon}"
     payload = {
-        "outcome_id": f"{analysis_event.identity}:{horizon}:v{revision}",
+        "outcome_id": entity_id,
         "analysis_id": analysis_event.payload["analysis_id"],
         "horizon": horizon,
         "status": status,
@@ -58,9 +64,16 @@ def build_delayed_outcome_observation(
         "available_time": as_of_time,
         **outcome,
     }
+    source_record = {
+        "analysis_identity": analysis_event.identity,
+        "horizon": horizon,
+        "source_version": source_version,
+    }
     return make_learning_event(
         kind="delayed_outcome",
-        identity=payload["outcome_id"],
+        tenant_id=analysis_event.tenant_id,
+        entity_id=entity_id,
+        revision=revision,
         event_time=analysis_event.event_time,
         available_time=as_of_time,
         as_of_time=as_of_time,
@@ -68,7 +81,10 @@ def build_delayed_outcome_observation(
             "source": "delayed-outcome-labeler",
             "collector": "trustforge",
             "observed_at": as_of_time,
-            "source_version": source_version,
+            "tenant_id": analysis_event.tenant_id,
+            "source_record": source_record,
+            "version": source_version,
+            "checksum": canonical_integrity_checksum(source_record),
         },
         payload=payload,
     )
