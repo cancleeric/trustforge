@@ -33,9 +33,9 @@ def build_delayed_outcome_observation(
     event_date = _parse_datetime(analysis_event.event_time, "event_time").date()
     maturity_date = event_date + timedelta(days=_HORIZON_DAYS[horizon])
     as_of = _parse_datetime(as_of_time, "as_of_time")
-    base = _price_for(prices, event_date)
+    base = _price_for(prices, event_date, as_of)
     matured = as_of.date() >= maturity_date
-    target = _price_for(prices, maturity_date)
+    target = _price_for(prices, maturity_date, as_of)
 
     status = "pending"
     outcome: dict[str, Any] = {}
@@ -94,7 +94,7 @@ def _outcome_values(base: dict[str, Any], target: dict[str, Any]) -> dict[str, A
     }
 
 
-def _price_for(prices: dict[str, dict[str, Any]], target_date: date) -> dict[str, Any] | None:
+def _price_for(prices: dict[str, dict[str, Any]], target_date: date, as_of: datetime) -> dict[str, Any] | None:
     value = prices.get(target_date.isoformat())
     if value is None:
         return None
@@ -103,6 +103,8 @@ def _price_for(prices: dict[str, dict[str, Any]], target_date: date) -> dict[str
     available = value.get("available_time")
     if not isinstance(available, str):
         raise LearningEventError("price observation available_time is required")
+    if _parse_datetime(available, "price observation available_time") > as_of:
+        return None
     return value
 
 

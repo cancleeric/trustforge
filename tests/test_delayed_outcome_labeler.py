@@ -81,6 +81,60 @@ def test_missing_mature_price_is_unavailable_not_evidence():
     assert event.kind == "delayed_outcome"
 
 
+def test_future_available_target_price_is_unavailable_at_cutoff():
+    prices = {
+        "2026-07-01": {"close": 100, "available_time": "2026-07-01T01:00:00Z", "source_id": "start"},
+        "2026-07-08": {"close": 110, "available_time": "2026-07-09T00:00:00Z", "source_id": "future-end"},
+    }
+
+    event = build_delayed_outcome_observation(
+        _analysis(),
+        horizon="T+7",
+        as_of_time="2026-07-08T01:00:00Z",
+        prices=prices,
+        source_version="fixture-v1",
+    )
+
+    assert event.payload["status"] == "unavailable"
+    assert "source_lineage" not in event.payload
+
+
+def test_future_available_start_price_is_unavailable_at_cutoff():
+    prices = {
+        "2026-07-01": {"close": 100, "available_time": "2026-07-08T02:00:00Z", "source_id": "future-start"},
+        "2026-07-08": {"close": 110, "available_time": "2026-07-08T01:00:00Z", "source_id": "end"},
+    }
+
+    event = build_delayed_outcome_observation(
+        _analysis(),
+        horizon="T+7",
+        as_of_time="2026-07-08T01:00:00Z",
+        prices=prices,
+        source_version="fixture-v1",
+    )
+
+    assert event.payload["status"] == "unavailable"
+    assert "source_lineage" not in event.payload
+
+
+def test_price_available_exactly_at_cutoff_can_label():
+    prices = {
+        "2026-07-01": {"close": 100, "available_time": "2026-07-01T01:00:00Z", "source_id": "start"},
+        "2026-07-08": {"close": 110, "available_time": "2026-07-08T01:00:00Z", "source_id": "end"},
+    }
+
+    event = build_delayed_outcome_observation(
+        _analysis(),
+        horizon="T+7",
+        as_of_time="2026-07-08T01:00:00Z",
+        prices=prices,
+        source_version="fixture-v1",
+    )
+
+    assert event.payload["status"] == "labeled"
+    assert event.payload["source_lineage"]["end_available_time"] == "2026-07-08T01:00:00Z"
+
+
 def test_source_revision_creates_new_observation_identity_without_rewrite():
     prices = {
         "2026-07-01": {"close": 100, "available_time": "2026-07-01T01:00:00Z", "source_id": "start"},
