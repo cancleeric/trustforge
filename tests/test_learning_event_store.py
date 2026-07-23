@@ -552,6 +552,15 @@ def test_file_store_rejects_invalid_resource_limits(tmp_path, option, value):
         FileLearningEventStore(tmp_path, **{option: value})
 
 
+@pytest.mark.parametrize(
+    "timeout",
+    [float("nan"), float("inf"), float("-inf"), 0, -0.1],
+)
+def test_file_store_rejects_nonfinite_or_nonpositive_lock_timeout(tmp_path, timeout):
+    with pytest.raises(ValueError, match="finite and positive"):
+        FileLearningEventStore(tmp_path, lock_timeout_seconds=timeout)
+
+
 def test_staging_entries_are_isolated_but_event_namespace_tmp_fails_closed(tmp_path):
     store = FileLearningEventStore(tmp_path)
     event = _evidence()
@@ -617,6 +626,52 @@ def test_store_rejects_unsafe_lock_file(tmp_path, lock_kind):
 
     with pytest.raises(LearningEventError, match="lock file is unsafe"):
         store.replay(trusted_tenant_id="tenant-a")
+
+
+def test_store_rejects_world_writable_control_directory(tmp_path):
+    store = FileLearningEventStore(tmp_path)
+    store.control_directory.mkdir(mode=0o700)
+    store.control_directory.chmod(0o777)
+
+    with pytest.raises(LearningEventError, match="control directory is unsafe"):
+        store.replay(trusted_tenant_id="tenant-a")
+
+
+def test_lock_path_replacement_before_critical_section_fails_closed(tmp_path, monkeypatch):
+    store = FileLearningEventStore(tmp_path)
+    assert store.replay(trusted_tenant_id="tenant-a") == []
+    lock_path = store.control_directory / "store.lock"
+    real_lock = __import__("portalocker").lock
+
+    def lock_then_replace(file_object, flags):
+        real_lock(file_object, flags)
+        lock_path.unlink()
+        lock_path.write_bytes(b"replacement")
+
+    monkeypatch.setattr("trustforge.learning_event_store.portalocker.lock", lock_then_replace)
+    with pytest.raises(LearningEventError, match="lock identity changed"):
+        store.replay(trusted_tenant_id="tenant-a")
+
+
+@pytest.mark.parametrize("failure", [NotImplementedError("unsupported"), OSError("unsupported")])
+def test_unsupported_shared_lock_backend_fails_closed(tmp_path, monkeypatch, failure):
+    def reject_shared_lock(file_object, flags):
+        raise failure
+
+    monkeypatch.setattr(
+        "trustforge.learning_event_store.portalocker.lock",
+        reject_shared_lock,
+    )
+    with pytest.raises(LearningEventError, match="lock mode is unavailable"):
+        FileLearningEventStore(tmp_path).replay(trusted_tenant_id="tenant-a")
+
+
+def test_windows_without_trusted_control_acl_validation_fails_closed(tmp_path, monkeypatch):
+    store = FileLearningEventStore(tmp_path)
+    monkeypatch.setattr("trustforge.learning_event_store.os.name", "nt")
+
+    with pytest.raises(LearningEventError, match="ACL validation is unavailable"):
+        store._validate_control_directory(-1)
 
 
 def test_idempotent_append_requires_destination_directory_fsync(tmp_path, monkeypatch):

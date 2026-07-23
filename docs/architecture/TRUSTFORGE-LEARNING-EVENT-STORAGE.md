@@ -50,10 +50,22 @@ All publication and FileExists reconciliation runs under a cross-process
 exclusive OS lock. Replay and snapshot hold a shared lock for their complete
 scan, validation, and read. The lock is a securely opened, no-follow regular
 file in the sibling `.learning_events.control` namespace; it is never reopened
-by pathname by the locking library. macOS/Linux and Windows locking are supplied
-by `portalocker`. Unsupported shared locking, unsafe lock metadata, or lock
-timeout fails closed. OS process exit releases the lock, so there is no PID file
-or stale-owner deletion.
+by pathname by the locking library. Before every lock, POSIX validates that the
+pinned control fd is a directory owned by the current uid and is not writable by
+group or world. After acquisition, the opened lock fd must still match the
+single-link regular file in that pinned namespace, preventing a pathname swap
+from entering the critical section on a different inode.
+
+`portalocker` supplies shared/exclusive advisory locking. Unsupported shared
+locking, non-finite or expired timeout, unsafe control or lock metadata, and
+lock identity replacement all fail closed. OS process exit releases the lock,
+so there is no PID file or stale-owner deletion.
+
+This implementation is enabled on macOS and Linux. It intentionally fails
+closed on Windows because this scope does not include a trustworthy Windows ACL
+validator for the control directory. Portalocker's Windows lock backend alone
+does not establish safe lock-namespace ownership. Windows enablement therefore
+requires a separately reviewed ACL validation implementation.
 
 The lock prevents readers or losing writers from observing a destination
 hard-link while the winning writer is still between link and commit/rollback.

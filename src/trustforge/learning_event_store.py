@@ -7,6 +7,7 @@ and replayable before any storage backend is introduced.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import stat
@@ -71,9 +72,10 @@ class FileLearningEventStore:
         if (
             isinstance(lock_timeout_seconds, bool)
             or not isinstance(lock_timeout_seconds, (int, float))
+            or not math.isfinite(lock_timeout_seconds)
             or lock_timeout_seconds <= 0
         ):
-            raise ValueError("lock_timeout_seconds must be positive")
+            raise ValueError("lock_timeout_seconds must be finite and positive")
         if (
             isinstance(maximum_staging_entries, bool)
             or not isinstance(maximum_staging_entries, int)
@@ -252,6 +254,7 @@ class FileLearningEventStore:
         except (OSError, SafePathError) as exc:
             raise LearningEventError("learning event store lock path is unsafe") from exc
         try:
+            self._validate_control_directory(control_fd)
             descriptor = self._open_lock_file(control_fd)
             try:
                 os.fsync(control_fd)
@@ -273,6 +276,7 @@ class FileLearningEventStore:
                     try:
                         portalocker.lock(file_object, flags)
                         acquired = True
+                        self._validate_lock_identity(control_fd, file_object.fileno())
                         break
                     except portalocker.exceptions.LockException as exc:
                         if time.monotonic() >= deadline:
@@ -295,6 +299,37 @@ class FileLearningEventStore:
                     file_object.close()
         finally:
             context.__exit__(None, None, None)
+
+    @staticmethod
+    def _validate_control_directory(control_fd: int) -> None:
+        if os.name == "nt":
+            raise LearningEventError(
+                "learning event store lock control ACL validation is unavailable on Windows"
+            )
+        try:
+            info = os.fstat(control_fd)
+        except OSError as exc:
+            raise LearningEventError("learning event store lock path is unsafe") from exc
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise LearningEventError("learning event store lock control directory is unsafe")
+
+    @staticmethod
+    def _validate_lock_identity(control_fd: int, descriptor: int) -> None:
+        try:
+            opened = os.fstat(descriptor)
+            current = os.stat("store.lock", dir_fd=control_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise LearningEventError("learning event store lock identity changed") from exc
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise LearningEventError("learning event store lock identity changed")
 
     @staticmethod
     def _open_lock_file(control_fd: int) -> int:
