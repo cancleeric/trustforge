@@ -275,3 +275,77 @@ def test_scan_does_not_treat_comprehension_targets_as_outer_shadowing(
     monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
 
     assert scan([source]) == []
+
+
+def test_scan_rejects_lambda_default_walrus_shadowing(tmp_path, monkeypatch):
+    root = tmp_path
+    source = root / "src/trustforge/lambda_default_shadow.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import abc\n"
+        "import abc as abc_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "(lambda value=(Protocol := object): None)\n"
+        "(lambda value=(abc_alias := object): None)\n"
+        "(lambda value=(required := (lambda fn: fn)): None)\n"
+        "(lambda value=(Base := object): None)\n"
+        "(lambda *, value=(Meta := type): None)\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Qualified(abc_alias.ABC):\n"
+        "    @abc_alias.abstractmethod\n"
+        "    def method(self): ...\n"
+        "class Required(abc.ABC):\n"
+        "    @required\n"
+        "    def method(self): pass\n"
+        "class Based(Base):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n"
+        "class MetaBased(metaclass=Meta):\n"
+        "    @abc.abstractmethod\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.lambda_default_shadow.Based.method",
+        "trustforge.lambda_default_shadow.Direct.method",
+        "trustforge.lambda_default_shadow.MetaBased.method",
+        "trustforge.lambda_default_shadow.Qualified.method",
+        "trustforge.lambda_default_shadow.Required.method",
+    ]
+
+
+def test_scan_does_not_treat_lambda_body_walrus_as_outer_shadowing(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/lambda_body_scope.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "import abc as abc_alias\n"
+        "from abc import abstractmethod as required, ABC as Base, ABCMeta as Meta\n"
+        "(lambda: (Protocol := object))\n"
+        "(lambda: (abc_alias := object))\n"
+        "(lambda: (required := object))\n"
+        "(lambda: (Base := object))\n"
+        "(lambda: (Meta := object))\n"
+        "class Direct(Protocol):\n"
+        "    def method(self): ...\n"
+        "class Based(Base):\n"
+        "    @required\n"
+        "    def method(self): pass\n"
+        "class Qualified(abc_alias.ABC):\n"
+        "    @abc_alias.abstractmethod\n"
+        "    def method(self): ...\n"
+        "class MetaBased(metaclass=Meta):\n"
+        "    @required\n"
+        "    def method(self): pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []

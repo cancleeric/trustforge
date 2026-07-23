@@ -215,7 +215,11 @@ class _ScopeBindingVisitor(ast.NodeVisitor):
             self.visit(keyword.value)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        return
+        # Defaults are evaluated in the enclosing scope; the body and
+        # parameters belong to the lambda's own lexical scope.
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default:
+                self.visit(default)
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
         self.visit(node.elt)
