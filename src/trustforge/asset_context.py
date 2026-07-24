@@ -75,6 +75,9 @@ class AssetContext:
     ecosystem: str | None = None
     parent_asset_id: str | None = None
     tags: tuple[str, ...] = field(default_factory=tuple)
+    settlement_chain: str = "unknown"
+    gas_token: str = "unknown"
+    dependencies: tuple[str, ...] = field(default_factory=tuple)
     schema_version: str = ASSET_CONTEXT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -98,6 +101,14 @@ class AssetContext:
                 raise ValueError(f"AssetContext.{field_name} must be a string or null")
         if not isinstance(self.tags, tuple) or any(not isinstance(tag, str) for tag in self.tags):
             raise ValueError("AssetContext.tags must be a tuple of strings")
+        for field_name in ("settlement_chain", "gas_token"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"AssetContext.{field_name} must be a non-empty string")
+        if not isinstance(self.dependencies, tuple) or any(
+            not isinstance(dependency, str) for dependency in self.dependencies
+        ):
+            raise ValueError("AssetContext.dependencies must be a tuple of strings")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -106,6 +117,7 @@ class AssetContext:
         payload["token_role"] = self.token_role.value
         payload["market_cap_tier"] = self.market_cap_tier.value
         payload["tags"] = list(self.tags)
+        payload["dependencies"] = list(self.dependencies)
         return payload
 
 
@@ -144,10 +156,17 @@ def asset_context_from_dict(payload: dict[str, Any]) -> AssetContext:
         "parent_asset_id",
         "tags",
     )
+    # Optional fields: safe to omit for backward compatibility with payloads
+    # produced before these fields existed; falls back to the dataclass default.
+    optional_fields = (
+        "settlement_chain",
+        "gas_token",
+        "dependencies",
+    )
     missing = [name for name in required_fields if name not in payload]
     if missing:
         raise ValueError(f"missing AssetContext fields: {', '.join(missing)}")
-    extra = sorted(set(payload) - set(required_fields))
+    extra = sorted(set(payload) - set(required_fields) - set(optional_fields))
     if extra:
         raise ValueError(f"unexpected AssetContext fields: {', '.join(extra)}")
 
@@ -159,6 +178,25 @@ def asset_context_from_dict(payload: dict[str, Any]) -> AssetContext:
     tags = payload["tags"]
     if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
         raise ValueError("AssetContext.tags must be a list of strings")
+
+    kwargs: dict[str, Any] = {}
+    if "settlement_chain" in payload:
+        settlement_chain = payload["settlement_chain"]
+        if not isinstance(settlement_chain, str) or not settlement_chain.strip():
+            raise ValueError("AssetContext.settlement_chain must be a non-empty string")
+        kwargs["settlement_chain"] = settlement_chain
+    if "gas_token" in payload:
+        gas_token = payload["gas_token"]
+        if not isinstance(gas_token, str) or not gas_token.strip():
+            raise ValueError("AssetContext.gas_token must be a non-empty string")
+        kwargs["gas_token"] = gas_token
+    if "dependencies" in payload:
+        dependencies = payload["dependencies"]
+        if not isinstance(dependencies, list) or any(
+            not isinstance(dependency, str) for dependency in dependencies
+        ):
+            raise ValueError("AssetContext.dependencies must be a list of strings")
+        kwargs["dependencies"] = tuple(dependencies)
 
     return AssetContext(
         schema_version=str(payload["schema_version"]),
@@ -172,4 +210,5 @@ def asset_context_from_dict(payload: dict[str, Any]) -> AssetContext:
         ecosystem=_optional_string(payload, "ecosystem"),
         parent_asset_id=_optional_string(payload, "parent_asset_id"),
         tags=tuple(tags),
+        **kwargs,
     )

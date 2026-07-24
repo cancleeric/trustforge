@@ -9,11 +9,21 @@
         "pattern": "\\S",
         "type": "string"
       },
+      "dependencies": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
       "ecosystem": {
         "type": [
           "string",
           "null"
         ]
+      },
+      "gas_token": {
+        "minLength": 1,
+        "type": "string"
       },
       "layer": {
         "enum": [
@@ -63,6 +73,10 @@
           "ai",
           "unknown"
         ]
+      },
+      "settlement_chain": {
+        "minLength": 1,
+        "type": "string"
       },
       "symbol": {
         "minLength": 1,
@@ -496,11 +510,21 @@
             "pattern": "\\S",
             "type": "string"
           },
+          "dependencies": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "ecosystem": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "gas_token": {
+            "minLength": 1,
+            "type": "string"
           },
           "layer": {
             "enum": [
@@ -550,6 +574,10 @@
               "ai",
               "unknown"
             ]
+          },
+          "settlement_chain": {
+            "minLength": 1,
+            "type": "string"
           },
           "symbol": {
             "minLength": 1,

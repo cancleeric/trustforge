@@ -25,6 +25,9 @@ def test_asset_context_round_trips_with_controlled_taxonomy() -> None:
         market_cap_tier=MarketCapTier.LARGE,
         ecosystem="ethereum",
         tags=("rollup", "optimistic"),
+        settlement_chain="ethereum",
+        gas_token="ETH",
+        dependencies=("ethereum",),
     )
 
     payload = context.to_dict()
@@ -40,8 +43,61 @@ def test_asset_context_round_trips_with_controlled_taxonomy() -> None:
         "ecosystem": "ethereum",
         "parent_asset_id": None,
         "tags": ["rollup", "optimistic"],
+        "settlement_chain": "ethereum",
+        "gas_token": "ETH",
+        "dependencies": ["ethereum"],
     }
     assert asset_context_from_dict(payload).to_dict() == payload
+
+
+def test_asset_context_from_dict_is_backward_compatible_without_new_fields() -> None:
+    legacy_payload = {
+        "schema_version": ASSET_CONTEXT_SCHEMA_VERSION,
+        "asset_id": "asset:arb",
+        "symbol": "ARB",
+        "name": "Arbitrum",
+        "sector": "l2",
+        "layer": "layer_2",
+        "token_role": "governance",
+        "market_cap_tier": "large",
+        "ecosystem": "ethereum",
+        "parent_asset_id": None,
+        "tags": ["rollup", "optimistic"],
+    }
+
+    context = asset_context_from_dict(legacy_payload)
+
+    assert context.settlement_chain == "unknown"
+    assert context.gas_token == "unknown"
+    assert context.dependencies == ()
+
+
+def test_asset_context_new_fields_round_trip_and_validate() -> None:
+    payload = {
+        "schema_version": ASSET_CONTEXT_SCHEMA_VERSION,
+        "asset_id": "asset:btc",
+        "symbol": "BTC",
+        "name": "Bitcoin",
+        "sector": "l1",
+        "layer": "layer_1",
+        "token_role": "gas",
+        "market_cap_tier": "large",
+        "ecosystem": None,
+        "parent_asset_id": None,
+        "tags": [],
+        "settlement_chain": "bitcoin",
+        "gas_token": "BTC",
+        "dependencies": [],
+    }
+
+    context = asset_context_from_dict(payload)
+    assert context.to_dict() == payload
+
+    with pytest.raises(ValueError, match="AssetContext.settlement_chain must be a non-empty string"):
+        asset_context_from_dict({**payload, "settlement_chain": ""})
+
+    with pytest.raises(ValueError, match="AssetContext.dependencies must be a list of strings"):
+        asset_context_from_dict({**payload, "dependencies": [1]})
 
 
 def test_asset_context_schema_exposes_required_version_and_enums() -> None:
