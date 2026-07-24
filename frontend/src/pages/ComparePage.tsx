@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { getComparisonSnapshot, registerAnalysisComparison } from '../lib/endpoints'
 import type { ComparisonParams } from '../lib/endpoints'
 import type { ComparisonAnalyzeData } from '../lib/types'
@@ -205,6 +205,17 @@ export default function ComparePage() {
       </div>
 
       <CompareForm initial={{ coin: params.coin, coin2: params.coin2, q: params.q }} onSubmit={handleSubmit} />
+
+      {/* 同層 peer 比較（模組③ Wave 3）：`COIN_POOL` 五幣是 L1，無法涵蓋
+          asset:arb/op/matic 這類 L2 peer group，改成獨立頁面用資產識別
+          碼直接查（比照 /asset-context、/eco-link），不掛在這裡的雙幣
+          分析表單上，見 `PeerMetricsPage`。 */}
+      <Link
+        to="/peer-metrics"
+        className="hermes-clip block rounded-lg border border-tf-border bg-tf-card p-3 text-xs text-tf-link no-underline hover:border-tf-link"
+      >
+        查看同層 Peer 比較（含 L2 資產，例：asset:arb）→
+      </Link>
 
       {loading && !data && <LoadingState label={`讀取 ${params.coin} / ${params.coin2} 比較快照中…`} />}
       {loading && data && <div className="hermes-analysis-pending" role="status"><i />Hermes 正在更新比較快照；目前保留上一個完整結果。</div>}

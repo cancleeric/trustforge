@@ -5,6 +5,8 @@ import {
   isAdminConfigData,
   isAnalyzeData,
   isAssetContextResponseData,
+  isPeerMetricsResponseData,
+  isEcoLinkResponseData,
   isComparisonAnalyzeData,
   isCostsData,
   isHealthData,
@@ -20,6 +22,8 @@ import type {
   AnalyzeData,
   ApiEnvelope,
   AssetContextResponseData,
+  PeerMetricsResponseData,
+  EcoLinkResponseData,
   BackendProvider,
   BackendProviderKey,
   ComparisonAnalyzeData,
@@ -413,6 +417,44 @@ export function getAssetContext(
     '/api/asset-context',
     { symbol },
     isAssetContextResponseData,
+    {
+      signal,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+    },
+  )
+}
+
+/** `GET /api/peer-metrics`：獨立於 `/api/analyze` 的輕量唯讀查詢（模組③
+ * Wave 3）——查無此資產時 `data.snapshot` 為 `null`、`data.peers` 為空
+ * 陣列（語意是「查無資料」而非請求錯誤，同 `/api/asset-context` 慣例）。
+ * `asset` 是資產識別碼，例如 `asset:arb`。 */
+export function getPeerMetrics(
+  asset: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<PeerMetricsResponseData>> {
+  return apiFetch<PeerMetricsResponseData>(
+    '/api/peer-metrics',
+    { asset },
+    isPeerMetricsResponseData,
+    {
+      signal,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+    },
+  )
+}
+
+/** `GET /api/eco-link`：獨立於 `/api/analyze` 的輕量唯讀查詢（模組③
+ * Wave 3）——回傳*相關性*影響路徑（非因果）；`verdict` 為
+ * `insufficient_data` 時 `impact_paths` 為空陣列。`asset` 是資產識別碼，
+ * 例如 `asset:arb`。 */
+export function getEcoLink(
+  asset: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<EcoLinkResponseData>> {
+  return apiFetch<EcoLinkResponseData>(
+    '/api/eco-link',
+    { asset },
+    isEcoLinkResponseData,
     {
       signal,
       timeoutMs: DEFAULT_TIMEOUT_MS,
