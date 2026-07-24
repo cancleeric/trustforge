@@ -11,6 +11,7 @@ import AdminPage from './pages/AdminPage'
 import SettingsPage from './pages/SettingsPage'
 import HelpCenterPage from './pages/HelpCenterPage'
 import AssetContextLookupPage from './pages/AssetContextLookupPage'
+import EcoLinkPage from './pages/EcoLinkPage'
 import NotificationsPage from './pages/NotificationsPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { HermesI18nProvider } from './hermes/hermesI18n'
@@ -47,6 +48,9 @@ function RoutedContent() {
         {/* 資產脈絡查詢（新手脈絡模組①，獨立於 /analyze）：刻意不進 Header
             主導覽 navItems（跟 /help 同權重的次要功能），見 Header.tsx。 */}
         <Route path="/asset-context" element={<AssetContextLookupPage />} />
+        {/* EcoLink 影響路徑查詢（模組③ Wave 3，獨立於 /compare）：比照
+            /asset-context 慣例，刻意不進 Header 主導覽 navItems。 */}
+        <Route path="/eco-link" element={<EcoLinkPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
