@@ -611,6 +611,50 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/asset-context:
+    get:
+      tags: [analysis]
+      operationId: getAssetContext
+      summary: 資產脈絡查詢
+      description: |
+        唯讀。獨立於 `/api/analyze` 的輕量查詢端點——只回傳資產的分類脈絡
+        （sector/layer/settlement_chain/gas_token/dependencies 等），不觸發
+        完整信任分析流程、不受 `COIN_POOL` 五幣白名單限制、不需認證、不設
+        限流。查無此資產的脈絡資料時仍回 200，`data.asset_context` 為
+        `null`（語意是「查無資料」而非請求錯誤）。
+      parameters:
+        - in: query
+          name: symbol
+          required: true
+          schema:
+            type: string
+          description: 資產代號（大小寫不敏感），例如 ARB。
+      responses:
+        "200":
+          description: 資產脈絡資料（查無時 asset_context 為 null）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          asset_context:
+                            type: object
+                            nullable: true
+                            additionalProperties: true
+        "400":
+          description: 缺少必要參數 symbol
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/improvement-diagnostics:
     get:
       tags: [observability]

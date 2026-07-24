@@ -5066,6 +5066,40 @@ def _asset_context_repository() -> AssetContextRepository | None:
     return _ASSET_CONTEXT_REPOSITORY
 
 
+def _handle_api_asset_context(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/asset-context?symbol=ARB`：獨立於 `/api/analyze` 的輕量唯讀
+
+    資產脈絡查詢端點——讓「新手脈絡查詢」小工具可以只查 sector/layer/
+    settlement_chain 這類分類資料，不必觸發完整分析流程（不進
+    `COIN_POOL` 白名單限制、不算費用、不寫 ledger）。
+
+    比照 `/api/health`、`/api/rate-limit-status` 這類唯讀觀測端點：不設
+    限流、不需認證。查無此資產時回 200 + `{"asset_context": null}`，
+    語意是「查無脈絡資料」而非「請求本身有誤」，故意不用 404/500，
+    讓前端可以用同一條 happy-path 處理「資料存在」與「資料缺席」兩種
+    情況（見 `AssetContextLookupPage` 空狀態文案）。
+    """
+    try:
+        symbol = None
+        if qs and "symbol" in qs:
+            raw = qs["symbol"]
+            symbol = raw[0] if isinstance(raw, list) else raw
+        if not symbol or not str(symbol).strip():
+            return 400, _json_envelope_err(
+                "invalid_request", "缺少必要參數 symbol"
+            )
+        repository = _asset_context_repository()
+        if repository is None:
+            return 200, _json_envelope_ok({"asset_context": None})
+        record = repository.by_symbol(str(symbol).strip(), datetime.now(timezone.utc))
+        if record is None:
+            return 200, _json_envelope_ok({"asset_context": None})
+        return 200, _json_envelope_ok({"asset_context": record.context.to_dict()})
+    except Exception:
+        logging.exception("TrustForge /api/asset-context error")
+        return 502, _json_envelope_err("upstream_error", "資產脈絡資料暫時無法讀取，請稍後再試")
+
+
 def _parse_report_generated_at(report) -> datetime | None:
     raw = getattr(report, "generated_at", "")
     if not isinstance(raw, str) or not raw.strip():
@@ -7859,6 +7893,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/module-telemetry":
             code, body = _handle_api_module_telemetry(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/asset-context":
+            code, body = _handle_api_asset_context(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
         # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封
