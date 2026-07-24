@@ -7090,17 +7090,17 @@ def _handle_api_module_telemetry(qs: dict | None = None) -> tuple[int, str]:
     """
     try:
         from .module_telemetry import get_all_telemetry, get_telemetry
-        from dataclasses import asdict
 
         if qs and "module_id" in qs:
             mid = qs["module_id"][0] if isinstance(qs["module_id"], list) else qs["module_id"]
             rec = get_telemetry(mid)
             if rec is None:
                 return 404, _json_envelope_err("not_found", f"No telemetry for module: {mid}")
-            return 200, _json_envelope_ok(asdict(rec))
+            return 200, _json_envelope_ok(rec.to_public_dict())
 
         records = get_all_telemetry()
-        data = [asdict(r) for r in records]
+        # #636：白名單序列化，禁止對外回傳 evidence_ref / metadata
+        data = [r.to_public_dict() for r in records]
         return 200, _json_envelope_ok({"modules": data, "total": len(data)})
     except Exception:
         logging.exception("TrustForge /api/module-telemetry error")
