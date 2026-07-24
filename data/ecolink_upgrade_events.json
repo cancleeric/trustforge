@@ -1,0 +1,35 @@
+[
+  {
+    "event_id": "upgrade:arb:stylus",
+    "asset_id": "asset:arb",
+    "title": "Stylus upgrade",
+    "scheduled_at": "2026-02-01T00:00:00Z",
+    "actual_at": null,
+    "impact_direction": "mixed",
+    "status": "scheduled",
+    "impacted_asset_ids": ["asset:eth"],
+    "official_source_url": "https://arbitrum.foundation/upgrade/stylus"
+  },
+  {
+    "event_id": "upgrade:op:bedrock",
+    "asset_id": "asset:op",
+    "title": "Bedrock upgrade",
+    "scheduled_at": null,
+    "actual_at": "2026-01-10T00:00:00Z",
+    "impact_direction": "positive",
+    "status": "activated",
+    "impacted_asset_ids": ["asset:eth"],
+    "official_source_url": "https://gov.optimism.io/upgrade/bedrock"
+  },
+  {
+    "event_id": "upgrade:arb:no-known-path",
+    "asset_id": "asset:arb",
+    "title": "Governance parameter change",
+    "scheduled_at": null,
+    "actual_at": "2026-01-05T00:00:00Z",
+    "impact_direction": "unknown",
+    "status": "activated",
+    "impacted_asset_ids": ["asset:matic"],
+    "official_source_url": "https://arbitrum.foundation/upgrade/governance-params"
+  }
+]
