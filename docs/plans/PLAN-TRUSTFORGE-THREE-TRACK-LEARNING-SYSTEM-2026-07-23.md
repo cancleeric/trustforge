@@ -140,11 +140,12 @@
 ## 6. 每個 PR 的共同門檻
 
 - 指定具名 reviewer；作者不得偽造自我批准，採 commit-bound reviewer attestation。
-- 本機 tests、lint、build、`git diff --check` 與 required CI 全綠。
+- Repo-local `.githooks/pre-push` gate 全綠；TrustForge 不使用 GitHub Actions，
+  `statusCheckRollup=[]` 是預期狀態。
 - 實際 branch 執行 eye scan；無 UI 也要記錄「無視覺變更」並檢查 API／報表／錯誤狀態的資料真實性。
 - 執行 `/codex-review` 對抗審，修完所有 finding 後重跑；安全、權限、資料污染、artifact provenance 及成本敏感變更另加 harper（CISO）審查。
 - PR 留下 findings、修正、測試、eye 與最終 disposition；不得 admin override。
-- 合併前無 unresolved finding；合併後驗證 post-merge CI。
+- 合併前無 unresolved finding；合併後在整合分支重跑 repo-local pre-push gate。
 - 每個里程碑或累積超過三個 PR，先向 CEO 回報，不等全部完成。
 
 ## 7. 回滾
@@ -202,29 +203,29 @@
 目前只能判定「已產生實作分支與 stacked PR」，不能判定任何里程碑完成：
 
 - `main` 尚未包含三軌功能。
-- #501 已完成 replacement semantic disposition 文件與 spec-only guards；implementation authorization、runtime enforcement、provider/asset scope 仍未授權，Production scope: EMPTY。#502–#512 維持 OPEN。
+- #501–#512 全部維持 OPEN。
 - 部分 GitHub PR 顯示 MERGED，但只合併到上一層 feature branch，不代表已進入 `develop`。
 - #529 已合併到 `develop`，完成移除未授權 #517；#523 已無 merge conflict，但仍是
   Draft，尚未完成乾淨替代與 #502 驗收。
 - #528 已有新 commit `d4e58557b85705139dcd872ef13b2c8806845d18`；#543 所指的
-  delayed-price PIT leakage 經隔離重現與 8 項測試複驗已修復，但 PR 仍為 Draft、無 CI，
-  且 stacked 依賴尚未合法整合。
+  delayed-price PIT leakage 經隔離重現與 8 項測試複驗已修復，但 PR 仍為 Draft、缺完整
+  local pre-push gate 證據，且 stacked 依賴尚未合法整合。
 - #532、#533、#535 沒有新 commit，既有 anomaly leakage、安全與 E2E blockers 持續有效。
 - 第一輪聚焦驗證為 136 passed、5 failed；第二輪只對 #528 修正範圍跑 8 passed。
-  兩輪皆沒有可支持整體完成宣稱的 required CI 證據。
+  兩輪皆未提供完整 repo-local pre-push gate 全綠證據。
 - 里程碑 A 未通過，因此里程碑 B、C 不得往主線整合或用於 ModelHub／production activation。
 
 ### 11.2 Issue／PR 真實狀態
 
 | Issue | PR | 2026-07-23 審查狀態 | 下一步 |
 |---|---|---|---|
-| #501 | replacement disposition（取代陳舊 #526 整批合併） | 交易日曆、T+N、缺值、D7/D8 修訂與 trusted availability 語意已拍板；已補 tenant-bound identity、allowlist、atomic monotonic version、append-only audit、retention/legal hold、quota/revision budget 與 policy-only rollback 的 implementation 前置契約 | semantic spec complete；implementation authorization 未授權；Production scope: EMPTY |
-| #502 | #517／#529／#523 | #529 已合併並移除 #517；#523 現為 CLEAN／Draft，但 head 未更新、無 CI 或 reviewer PASS | 將 #523 更新到 revert 後的乾淨 `develop`，完成真正負向 contract tests 後重新雙審 |
+| #501 | #519／#526 | #519 已進 `develop`，但 corrective #526 無新證據即被標 Ready，已退回 Draft；語意尚未拍板 | 完成交易日曆、T+N、缺值、修訂與 `available_time` 規則 |
+| #502 | #517／#529／#523 | #529 已合併並移除 #517；#523 現為 CLEAN／Draft，但 head 未更新、缺完整 local pre-push gate 與 reviewer PASS | 將 #523 更新到 revert 後的乾淨 `develop`，完成真正負向 contract tests 後重新雙審 |
 | #503 | #521 | 已進 `develop`，Issue 仍 OPEN | 核對唯讀 capability、tenant、artifact provenance 證據後才能關閉 |
 | #504 | #522 | 已進 `develop`，但依賴的 #502 正在事故復原 | #502 乾淨替代通過前不得宣稱完成 |
 | #505 | #525 | 只合併到 `feat/504-three-track-contract` | 等合法 #504 基線後重審；不授權 migration |
 | #506 | #527 | 只合併到 `design/505-learning-event-storage-gate` | 等 #504、#505 合法整合後重審 |
-| #507 | #528 | Draft；新 head `d4e5855` 已修復 #543 future-price leakage，隔離測試 8 passed；仍無 CI、上游治理未完成 | 保持 Draft，完成合法 base／依賴、required CI 與整張 PR 重審 |
+| #507 | #528 | Draft；新 head `d4e5855` 已修復 #543 future-price leakage，隔離測試 8 passed；仍缺完整 local pre-push gate、上游治理未完成 | 保持 Draft，完成合法 base／依賴、local pre-push gate 與整張 PR 重審 |
 | #508 | #530 | 只合併到尚未通過的 #507 feature branch | #507 與里程碑 A 親驗通過後才能重審 |
 | #509 | #532 | Draft；被 #544 future leakage 阻擋 | baseline 排除未來才 available 的事件並補 leakage 測試 |
 | #510 | #533 | Draft；harper CISO 審查 FAIL：activation 可跳過 sandbox／approval，actor／probe evidence 可偽造，rollback 綁定不足 | 完成 #503 證據、authorization/state binding、新 SHA 的 harper CISO 與 `/codex-review` 雙審 |
@@ -246,9 +247,10 @@
    聚焦測試有 5 項失敗：2 項 calibration path 介面漂移、3 項 backfill contract／fixture
    失敗。Backfill 測試曾直接追加 tracked `data/training`，工程師必須改用隔離的暫存輸出，
    不得污染 repo 訓練資料。
-5. **缺 required CI 證據**
-   本輪相關 PR 無 status checks 證據；任何 Draft 不得僅憑本機通過或 GitHub `MERGED`
-   標籤改為完成。
+5. **缺完整 local pre-push gate 證據**
+   TrustForge 刻意停用 GitHub Actions，空的 status checks 不是 blocker。真正 blocker 是相關
+   PR 只有局部測試，尚未留下 `.githooks/pre-push` 全套 tests／lint／build／data checks／
+   `git diff --check` 全綠證據；不得只憑局部測試或 GitHub `MERGED` 標籤改為完成。
 6. **#533 activation authorization／狀態機可繞過**
    `activate_wrapper_artifact()` 未證明 sandbox 與 proposal approval 已通過；human actor
    採字串黑名單而非 authenticated principal／role／approval record，存在核准偽造。
@@ -261,15 +263,15 @@
    negative retrieval；activation 未驗 human-like spoof、未授權 role 或跳過 sandbox；
    rollback 未驗 config restore 與錯誤 target。
 8. **相關 PIT 基線 #520 尚未整合**
-   #520 仍為 Draft／OPEN 且 merge state DIRTY；即使已有舊 commit-bound APPROVED，也沒有
-   CI，不能視為 timezone／naive timestamp 邊界已進入三軌合法基線。
+   #520 仍為 Draft／OPEN 且 merge state DIRTY；即使已有舊 commit-bound APPROVED，也缺少
+   完整 local pre-push gate 證據，不能視為 timezone／naive timestamp 邊界已進入合法基線。
 
 ### 11.4 三軌能力判定
 
 | 軌道 | 現況 | CEO 判定 |
 |---|---|---|
 | Question RAG | 已有 SQLite 字元 bigram 歷史問題檢索與 lineage；embedding index、reranker、完整 gold-set 流程未整合 | 部分完成 |
-| 分析異常偵測＋信心校準 | #528 delayed-price PIT finding 已修；但 #532 anomaly PIT leakage、校準測試漂移、合法資料集整合與 CI 尚未完成 | 未完成 |
+| 分析異常偵測＋信心校準 | #528 delayed-price PIT finding 已修；但 #532 anomaly PIT leakage、校準測試漂移、合法資料集整合與完整 local pre-push gate 尚未完成 | 未完成 |
 | Wrapper 受控升級 | 已有 ModelHub package、sandbox 與人工 activation gate；明確禁止自動套用 | 部分完成，安全整合未通過 |
 
 「外框自我升級」在本計劃永遠指受控候選升級，不是模型自行批准、遞迴修改或自行上線。
@@ -277,7 +279,7 @@
 ### 11.5 恢復開發與重新送審順序
 
 1. #529 revert 已完成；下一步更新並審查 #523，恢復可信 #502 基線。
-2. #501 replacement 已正式拍板 outcome 語意；不得合併 #526 的陳舊七個 commits。後續另開 implementation issue，並維持 production scope EMPTY，直到 provider/asset scope 與安全 gate 明確核准。
+2. 完成 #526，正式拍板 #501 outcome 語意。
 3. 依合法依賴重整 #504 → #505 → #506；不得沿用未審 stacked merge 當完成證據。
 4. #528 的 #543 finding 已修；待 #501、#502、#504–#507 合法整合後，CEO 親驗里程碑 A
    的事件、重放、timestamp 與 PIT 邊界。
