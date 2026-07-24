@@ -11,7 +11,10 @@
       "market_cap_tier": "large",
       "ecosystem": "ethereum",
       "parent_asset_id": "asset:eth",
-      "tags": ["rollup", "optimistic"]
+      "tags": ["rollup", "optimistic"],
+      "settlement_chain": "ethereum",
+      "gas_token": "ETH",
+      "dependencies": ["ethereum_settlement", "sequencer", "canonical_bridge"]
     },
     "valid_from": "2026-01-01T00:00:00Z",
     "fetched_at": "2026-01-02T00:00:00Z",
@@ -29,7 +32,10 @@
       "market_cap_tier": "mid",
       "ecosystem": "ethereum",
       "parent_asset_id": "asset:eth",
-      "tags": ["rollup", "optimistic", "governance"]
+      "tags": ["rollup", "optimistic", "governance"],
+      "settlement_chain": "ethereum",
+      "gas_token": "ETH",
+      "dependencies": ["ethereum_settlement", "sequencer", "canonical_bridge"]
     },
     "valid_from": "2025-01-01T00:00:00Z",
     "fetched_at": "2025-01-02T00:00:00Z",

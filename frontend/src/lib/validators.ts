@@ -15,6 +15,8 @@ import type {
   AdminConfigData,
   AdminLiveTokenView,
   AnalyzeData,
+  AssetContext,
+  AssetContextResponseData,
   BasisItem,
   CacheBackendStatus,
   ComparisonAnalyzeData,
@@ -596,5 +598,39 @@ export function isAdminAuditData(value: unknown): value is AdminAuditData {
     typeof value.limit === 'number' &&
     Array.isArray(value.records) &&
     value.records.every(isAdminAuditRecord)
+  )
+}
+
+// ── /api/asset-context ───────────────────────────────────────────────────
+
+/** 只驗形狀（必要字串欄位是否為 string），不驗 enum 白名單——後端
+ * `AssetSector`/`AssetLayer` 等列舉未來新增值時前端不該連帶炸掉，未知值
+ * 由渲染層（`SectorLayerCard`）自行 fallback 顯示原始字串。可選欄位
+ * （`settlement_chain`/`gas_token`/`dependencies`）比照後端 legacy 快照
+ * 相容策略，缺席視為合法。 */
+function isAssetContext(value: unknown): value is AssetContext {
+  return (
+    isPlainObject(value) &&
+    typeof value.schema_version === 'string' &&
+    typeof value.asset_id === 'string' &&
+    typeof value.symbol === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.sector === 'string' &&
+    typeof value.layer === 'string' &&
+    typeof value.token_role === 'string' &&
+    typeof value.market_cap_tier === 'string' &&
+    (value.ecosystem === null || typeof value.ecosystem === 'string') &&
+    (value.parent_asset_id === null || typeof value.parent_asset_id === 'string') &&
+    isStringArray(value.tags) &&
+    (value.settlement_chain === undefined || typeof value.settlement_chain === 'string') &&
+    (value.gas_token === undefined || typeof value.gas_token === 'string') &&
+    (value.dependencies === undefined || isStringArray(value.dependencies))
+  )
+}
+
+export function isAssetContextResponseData(value: unknown): value is AssetContextResponseData {
+  return (
+    isPlainObject(value) &&
+    (value.asset_context === null || isAssetContext(value.asset_context))
   )
 }

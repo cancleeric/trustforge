@@ -4,6 +4,7 @@ import {
   isAdminBackendProvidersData,
   isAdminConfigData,
   isAnalyzeData,
+  isAssetContextResponseData,
   isComparisonAnalyzeData,
   isCostsData,
   isHealthData,
@@ -18,6 +19,7 @@ import type {
   AdminConfigData,
   AnalyzeData,
   ApiEnvelope,
+  AssetContextResponseData,
   BackendProvider,
   BackendProviderKey,
   ComparisonAnalyzeData,
@@ -396,6 +398,24 @@ export function setAllAdminBackendProviders(
       headers: { 'X-Admin-Token': adminToken },
       jsonBody: { provider },
       cache: 'no-store',
+    },
+  )
+}
+
+/** `GET /api/asset-context`：獨立於 `/api/analyze` 的輕量唯讀查詢，見
+ * `web.py::_handle_api_asset_context` docstring——查無資料時
+ * `data.asset_context` 為 `null`，不是錯誤，呼叫端不需特判 error。 */
+export function getAssetContext(
+  symbol: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<AssetContextResponseData>> {
+  return apiFetch<AssetContextResponseData>(
+    '/api/asset-context',
+    { symbol },
+    isAssetContextResponseData,
+    {
+      signal,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
     },
   )
 }

@@ -10,6 +10,7 @@ import HistoryPage from './pages/HistoryPage'
 import AdminPage from './pages/AdminPage'
 import SettingsPage from './pages/SettingsPage'
 import HelpCenterPage from './pages/HelpCenterPage'
+import AssetContextLookupPage from './pages/AssetContextLookupPage'
 import NotificationsPage from './pages/NotificationsPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { HermesI18nProvider } from './hermes/hermesI18n'
@@ -43,6 +44,9 @@ function RoutedContent() {
             麵包屑辨識當前位置，見 BridgeWorkspaceShell 的 bridge-module-heading）。 */}
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/help" element={<HelpCenterPage />} />
+        {/* 資產脈絡查詢（新手脈絡模組①，獨立於 /analyze）：刻意不進 Header
+            主導覽 navItems（跟 /help 同權重的次要功能），見 Header.tsx。 */}
+        <Route path="/asset-context" element={<AssetContextLookupPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
