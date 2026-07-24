@@ -252,6 +252,7 @@ from trustforge.bedrock import BedrockClient
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.schema import QuestionType
+from trustforge.trust import scoring as scoring_module
 from trustforge.trust.scoring import (
     Claim,
     ScoredClaim,
@@ -349,6 +350,15 @@ def test_calibrate_confidence_fixed_table_exact_values():
     assert _calibrate_confidence(0.3) == 0.20
     assert _calibrate_confidence(0.4) == 0.40
     assert _calibrate_confidence(0.55) == 0.55
+    assert _calibrate_confidence(1.0) == 1.0
+
+
+def test_calibrate_confidence_uses_fixed_table_until_model_gate_enabled(monkeypatch):
+    """版控訓練 artifact 是候選模型；未通過 gate 前不得覆蓋固定 baseline。"""
+    monkeypatch.delenv("TRUSTFORGE_ENABLE_CALIBRATION_MODEL", raising=False)
+    scoring_module._CALIBRATION_MODEL_CACHE.clear()
+
+    assert scoring_module._calibration_model_path() is not None
     assert _calibrate_confidence(1.0) == 1.0
 
 

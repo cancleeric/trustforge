@@ -15,11 +15,83 @@ Ref: Issue #386, Spec .kiro/specs/provider-ports-386.md
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Port: LLM Provider
+# Port: generic Model Provider
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ModelErrorCategory = Literal[
+    "provider_unavailable",
+    "rate_limited",
+    "timeout",
+    "bad_request",
+    "auth_error",
+    "safety_blocked",
+    "unknown",
+]
+
+
+@dataclass(frozen=True)
+class ModelRequest:
+    """Provider-neutral model request.
+
+    The contract deliberately has no TrustForge domain vocabulary such as
+    coin, Evidence, stance, or Hermes. Domain-specific adapters may translate
+    into this shape at the application boundary.
+    """
+
+    system: str
+    prompt: str
+    response_format: Literal["text", "json"] = "text"
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    """Token/cost usage sufficient for budget ledger accounting."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class ModelResponse:
+    """Provider-neutral completion response."""
+
+    text: str
+    model: str
+    provider: str
+    usage: ModelUsage = field(default_factory=ModelUsage)
+    structured: dict[str, Any] | list[Any] | None = None
+
+
+class ModelProviderError(RuntimeError):
+    """Classified model-provider failure."""
+
+    def __init__(self, message: str, *, category: ModelErrorCategory = "unknown"):
+        super().__init__(message)
+        self.category = category
+
+
+@runtime_checkable
+class ModelProvider(Protocol):
+    """Minimal provider-neutral model completion contract."""
+
+    provider_id: str
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        """Run one text or structured-output completion."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Port: legacy LLM Provider
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @runtime_checkable
@@ -116,6 +188,195 @@ class BudgetProvider(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Port: Security Decision Provider
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DecisionAction = Literal["allow", "deny"]
+
+
+@dataclass(frozen=True)
+class PolicyRequest:
+    """Provider-neutral authorization request.
+
+    This port carries only generic subject/action/resource/context facts. Web,
+    API, role, route, and header rules belong in application adapters.
+    """
+
+    subject: str
+    action: str
+    resource: str
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PolicyDecision:
+    """Provider-neutral authorization decision."""
+
+    action: DecisionAction
+    reason: str
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def allowed(self) -> bool:
+        """True when the decision explicitly allows the request."""
+        return self.action == "allow"
+
+
+@runtime_checkable
+class SecurityDecisionProvider(Protocol):
+    """Minimal provider-neutral authorization/security decision contract."""
+
+    provider_id: str
+
+    def evaluate(self, request: PolicyRequest) -> PolicyDecision:
+        """Evaluate one authorization request."""
+        ...
+
+
+_SENSITIVE_POLICY_KEYS = frozenset({
+    "api_key",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "session",
+    "token",
+})
+
+
+def _redact_policy_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return redact_policy_context(value)
+    if isinstance(value, list):
+        return [_redact_policy_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_policy_value(item) for item in value)
+    return value
+
+
+def redact_policy_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy safe for security-decision logs."""
+    redacted: dict[str, Any] = {}
+    for key, value in context.items():
+        if key.lower() in _SENSITIVE_POLICY_KEYS:
+            redacted[key] = "<redacted>"
+        else:
+            redacted[key] = _redact_policy_value(value)
+    return redacted
+
+
+def evaluate_security_decision(
+    provider: SecurityDecisionProvider,
+    request: PolicyRequest,
+) -> PolicyDecision:
+    """Evaluate a policy adapter with fail-closed error handling."""
+    try:
+        decision = provider.evaluate(request)
+    except Exception as exc:
+        return PolicyDecision(
+            action="deny",
+            reason=f"policy evaluation failed: {type(exc).__name__}",
+            evidence={
+                "provider": provider.provider_id,
+                "context": redact_policy_context(request.context),
+            },
+        )
+
+    return PolicyDecision(
+        action=decision.action,
+        reason=decision.reason,
+        evidence=redact_policy_context(decision.evidence),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Port: Agent Runtime
+# ═══════════════════════════════════════════════════════════════════════════════
+
+RunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+TraceLevel = Literal["debug", "info", "warning", "error"]
+
+
+@dataclass(frozen=True)
+class RuntimeCapability:
+    """Provider-neutral runtime capability declaration."""
+
+    name: str
+    version: str = ""
+    limits: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeSession:
+    """Opaque agent runtime session handle."""
+
+    session_id: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeToolCall:
+    """Tool invocation request for an agent runtime."""
+
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    timeout_sec: float | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeTraceEvent:
+    """Structured runtime trace event."""
+
+    event: str
+    level: TraceLevel = "info"
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeRun:
+    """Opaque run handle and status."""
+
+    run_id: str
+    status: RunStatus
+    output: dict[str, Any] | None = None
+
+
+@runtime_checkable
+class AgentRuntimeProvider(Protocol):
+    """Minimal provider-neutral agent runtime contract."""
+
+    runtime_id: str
+
+    def capabilities(self) -> list[RuntimeCapability]:
+        """Return runtime capabilities without starting a run."""
+        ...
+
+    def start_session(self, metadata: dict[str, Any] | None = None) -> RuntimeSession:
+        """Create or attach to an agent session."""
+        ...
+
+    def start_run(
+        self,
+        session: RuntimeSession,
+        *,
+        input: dict[str, Any],
+        tools: list[RuntimeToolCall] | None = None,
+    ) -> RuntimeRun:
+        """Start an agent run."""
+        ...
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Cancel a running agent run."""
+        ...
+
+    def trace(self, run_id: str, event: RuntimeTraceEvent) -> None:
+        """Record a runtime trace event."""
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Provider Resolution（Runtime resolver 的回傳型別）
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -162,6 +423,105 @@ class FakeLLMProvider:
     def classify_stance(self, claim_a: str, claim_b: str) -> str:
         self.calls.append({"method": "classify_stance", "claim_a": claim_a, "claim_b": claim_b})
         return self.default_stance
+
+
+class FakeModelProvider:
+    """Test model provider implementing the generic ModelProvider contract."""
+
+    provider_id = "fake"
+
+    def __init__(
+        self,
+        default_text: str = "fake model response",
+        *,
+        default_model: str = "fake-model",
+        default_structured: dict[str, Any] | list[Any] | None = None,
+        usage: ModelUsage | None = None,
+    ) -> None:
+        self.default_text = default_text
+        self.default_model = default_model
+        self.default_structured = default_structured
+        self.usage = usage or ModelUsage()
+        self.calls: list[ModelRequest] = []
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        self.calls.append(request)
+        return ModelResponse(
+            text=self.default_text,
+            model=request.model or self.default_model,
+            provider=self.provider_id,
+            usage=self.usage,
+            structured=self.default_structured if request.response_format == "json" else None,
+        )
+
+
+class NullModelProvider:
+    """Offline model provider that never calls an external service."""
+
+    provider_id = "null"
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        structured: dict[str, Any] | None = {} if request.response_format == "json" else None
+        return ModelResponse(
+            text="",
+            model=request.model or "offline/null",
+            provider=self.provider_id,
+            usage=ModelUsage(),
+            structured=structured,
+        )
+
+
+class FakeAgentRuntimeProvider:
+    """Test fake for the generic AgentRuntimeProvider contract."""
+
+    runtime_id = "fake-agent-runtime"
+
+    def __init__(self, capabilities: list[RuntimeCapability] | None = None) -> None:
+        self._capabilities = capabilities or [RuntimeCapability(name="session")]
+        self.sessions: list[RuntimeSession] = []
+        self.runs: dict[str, RuntimeRun] = {}
+        self.traces: list[tuple[str, RuntimeTraceEvent]] = []
+        self.cancelled: list[str] = []
+
+    def capabilities(self) -> list[RuntimeCapability]:
+        return list(self._capabilities)
+
+    def start_session(self, metadata: dict[str, Any] | None = None) -> RuntimeSession:
+        session = RuntimeSession(
+            session_id=f"session-{len(self.sessions) + 1}",
+            metadata=dict(metadata or {}),
+        )
+        self.sessions.append(session)
+        return session
+
+    def start_run(
+        self,
+        session: RuntimeSession,
+        *,
+        input: dict[str, Any],
+        tools: list[RuntimeToolCall] | None = None,
+    ) -> RuntimeRun:
+        run = RuntimeRun(
+            run_id=f"run-{len(self.runs) + 1}",
+            status="running",
+            output={
+                "session_id": session.session_id,
+                "input": dict(input),
+                "tools": [tool.name for tool in tools or []],
+            },
+        )
+        self.runs[run.run_id] = run
+        return run
+
+    def cancel_run(self, run_id: str) -> bool:
+        if run_id not in self.runs:
+            return False
+        self.runs[run_id] = RuntimeRun(run_id=run_id, status="cancelled")
+        self.cancelled.append(run_id)
+        return True
+
+    def trace(self, run_id: str, event: RuntimeTraceEvent) -> None:
+        self.traces.append((run_id, event))
 
 
 class FakeCacheProvider:
@@ -221,6 +581,23 @@ class FakeBudgetProvider:
         })
 
 
+class FakeSecurityDecisionProvider:
+    """Test fake for the generic SecurityDecisionProvider contract."""
+
+    provider_id = "fake-security"
+
+    def __init__(self, decision: PolicyDecision | None = None, *, failure: Exception | None = None) -> None:
+        self.decision = decision or PolicyDecision(action="allow", reason="matched")
+        self.failure = failure
+        self.requests: list[PolicyRequest] = []
+
+    def evaluate(self, request: PolicyRequest) -> PolicyDecision:
+        self.requests.append(request)
+        if self.failure is not None:
+            raise self.failure
+        return self.decision
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Builtin Adapters（production 用）
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -236,11 +613,65 @@ class BedrockLLMAdapter:
         else:
             self._client = client
 
+    @property
+    def client(self):
+        """Return the underlying Bedrock client for legacy orchestration bridges."""
+        return self._client
+
     def complete(self, system: str, prompt: str) -> str:
         return self._client.complete(system=system, prompt=prompt).text
 
     def classify_stance(self, claim_a: str, claim_b: str) -> str:
         return self._client.classify_stance(claim_a, claim_b)
+
+
+class BedrockModelProvider:
+    """Builtin provider-neutral model adapter via bedrock.BedrockClient."""
+
+    provider_id = "bedrock"
+
+    def __init__(self, client=None):
+        if client is None:
+            from .bedrock import BedrockClient
+            self._client = BedrockClient()
+        else:
+            self._client = client
+
+    @property
+    def client(self):
+        """Return the underlying Bedrock client for compatibility bridges."""
+        return self._client
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        try:
+            result = self._client.complete(system=request.system, prompt=request.prompt)
+        except TimeoutError as exc:
+            raise ModelProviderError(str(exc), category="timeout") from exc
+        except PermissionError as exc:
+            raise ModelProviderError(str(exc), category="auth_error") from exc
+        except ValueError as exc:
+            raise ModelProviderError(str(exc), category="bad_request") from exc
+        except Exception as exc:
+            raise ModelProviderError(str(exc), category="unknown") from exc
+
+        model = request.model or result.model_id or "bedrock/unknown"
+        total_tokens = result.input_tokens + result.output_tokens
+        cost_usd = 0.0
+        if result.model_id:
+            from .ledger import estimate_cost
+            cost_usd = estimate_cost(result.model_id, result.input_tokens, result.output_tokens)
+        return ModelResponse(
+            text=result.text,
+            model=model,
+            provider=self.provider_id,
+            usage=ModelUsage(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                total_tokens=total_tokens,
+                cost_usd=cost_usd,
+            ),
+            structured=None,
+        )
 
 
 class SQLiteCacheAdapter:
@@ -262,24 +693,19 @@ class SQLiteCacheAdapter:
 
 
 class AgentCoreLLMAdapter:
-    """AgentCore LLM adapter（TRUSTFORGE_AGENTCORE=1 時啟用）。"""
+    """Unavailable placeholder retained for an explicit fail-closed error."""
 
     def __init__(self):
-        import os
-        if not os.environ.get("TRUSTFORGE_AGENTCORE"):
-            raise RuntimeError(
-                "AgentCoreLLMAdapter requires TRUSTFORGE_AGENTCORE=1 in environment"
-            )
+        raise RuntimeError(
+            "TRUSTFORGE_AGENTCORE is unsupported because AgentCore integration "
+            "is not implemented; use BEDROCK_MODEL_ID"
+        )
 
     def complete(self, system: str, prompt: str) -> str:
-        raise NotImplementedError(
-            "AgentCore bridge not yet implemented — set BEDROCK_MODEL_ID to use Bedrock adapter"
-        )
+        raise RuntimeError("AgentCore integration is unavailable")
 
     def classify_stance(self, claim_a: str, claim_b: str) -> str:
-        raise NotImplementedError(
-            "AgentCore bridge not yet implemented — set BEDROCK_MODEL_ID to use Bedrock adapter"
-        )
+        raise RuntimeError("AgentCore integration is unavailable")
 
 
 class NullLLMAdapter:
@@ -307,20 +733,25 @@ class NullCacheAdapter:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _resolve_llm_from_env() -> tuple[LLMProvider, str]:
+def _resolve_llm_from_env(*, bedrock_client_factory=None) -> tuple[LLMProvider, str]:
     """根據環境變數選擇 LLM adapter。"""
     import os
 
-    if os.environ.get("TRUSTFORGE_AGENTCORE") == "1":
-        try:
-            adapter = AgentCoreLLMAdapter()
-            return adapter, "agentcore"
-        except Exception as exc:
-            raise RuntimeError(
-                f"TRUSTFORGE_AGENTCORE=1 but AgentCore init failed: {exc}"
-            ) from exc
+    agentcore_flag = os.environ.get("TRUSTFORGE_AGENTCORE", "").strip().lower()
+    if agentcore_flag in {"1", "true", "yes", "on"}:
+        raise RuntimeError(
+            "TRUSTFORGE_AGENTCORE is enabled but unsupported because AgentCore integration "
+            "is not implemented; use BEDROCK_MODEL_ID"
+        )
+    if agentcore_flag not in {"", "0", "false", "no", "off"}:
+        raise ValueError(
+            "TRUSTFORGE_AGENTCORE must be one of "
+            "1/true/yes/on or 0/false/no/off"
+        )
 
     if os.environ.get("BEDROCK_MODEL_ID"):
+        if bedrock_client_factory is not None:
+            return BedrockLLMAdapter(client=bedrock_client_factory()), "bedrock"
         return BedrockLLMAdapter(), "bedrock"
 
     return NullLLMAdapter(), "null"
@@ -344,6 +775,7 @@ def resolve_providers(
     observability: ObservabilityProvider | None = None,
     budget: BudgetProvider | None = None,
     offline: bool = False,
+    bedrock_client_factory=None,
 ) -> ProviderSet:
     """Resolve providers for a pipeline run.
 
@@ -365,7 +797,9 @@ def resolve_providers(
             invoked=False, fallback_reason="offline=True",
         ))
     else:
-        resolved_llm, adapter_name = _resolve_llm_from_env()
+        resolved_llm, adapter_name = _resolve_llm_from_env(
+            bedrock_client_factory=bedrock_client_factory
+        )
         resolutions.append(ProviderResolution(
             key="llm", configured=adapter_name, resolved=adapter_name, invoked=False,
         ))

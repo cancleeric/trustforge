@@ -9,25 +9,49 @@ from unittest.mock import patch
 
 import pytest
 
+from trustforge import pipeline as pl
+from trustforge.ingestion.base import Document
 from trustforge.ports import (
     AgentCoreLLMAdapter,
+    AgentRuntimeProvider,
     BedrockLLMAdapter,
+    BedrockModelProvider,
     BudgetProvider,
     CacheProvider,
+    FakeAgentRuntimeProvider,
     FakeBudgetProvider,
     FakeCacheProvider,
     FakeLLMProvider,
+    FakeModelProvider,
     FakeObservabilityProvider,
+    FakeSecurityDecisionProvider,
     FakeSourceProvider,
     LLMProvider,
+    ModelProvider,
+    ModelProviderError,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
     NullCacheAdapter,
     NullLLMAdapter,
+    NullModelProvider,
     ObservabilityProvider,
+    PolicyDecision,
+    PolicyRequest,
     ProviderResolution,
     ProviderSet,
+    RuntimeCapability,
+    RuntimeRun,
+    RuntimeSession,
+    RuntimeToolCall,
+    RuntimeTraceEvent,
+    SecurityDecisionProvider,
     SourceProvider,
+    evaluate_security_decision,
+    redact_policy_context,
     resolve_providers,
 )
+from trustforge.schema import QuestionType
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -41,6 +65,14 @@ class TestProtocolRuntimeCheckable:
     def test_llm_provider_isinstance(self):
         fake = FakeLLMProvider()
         assert isinstance(fake, LLMProvider)
+
+    def test_model_provider_isinstance(self):
+        fake = FakeModelProvider()
+        assert isinstance(fake, ModelProvider)
+
+    def test_agent_runtime_provider_isinstance(self):
+        fake = FakeAgentRuntimeProvider()
+        assert isinstance(fake, AgentRuntimeProvider)
 
     def test_cache_provider_isinstance(self):
         fake = FakeCacheProvider()
@@ -57,6 +89,10 @@ class TestProtocolRuntimeCheckable:
     def test_budget_provider_isinstance(self):
         fake = FakeBudgetProvider()
         assert isinstance(fake, BudgetProvider)
+
+    def test_security_decision_provider_isinstance(self):
+        fake = FakeSecurityDecisionProvider()
+        assert isinstance(fake, SecurityDecisionProvider)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -84,6 +120,275 @@ class TestFakeLLMProvider:
         fake.classify_stance("a", "b")
         fake.complete("s2", "p2")
         assert len(fake.calls) == 3
+
+
+class TestModelProviderContract:
+    """Provider-neutral model contract (#405)."""
+
+    def test_text_completion_returns_identity_and_usage(self):
+        usage = ModelUsage(input_tokens=12, output_tokens=5, total_tokens=17, cost_usd=0.002)
+        provider = FakeModelProvider(default_text="hello", usage=usage)
+
+        response = provider.complete(ModelRequest(system="s", prompt="p", model="m1"))
+
+        assert isinstance(response, ModelResponse)
+        assert response.text == "hello"
+        assert response.model == "m1"
+        assert response.provider == "fake"
+        assert response.usage == usage
+        assert provider.calls == [ModelRequest(system="s", prompt="p", model="m1")]
+
+    def test_structured_output_is_provider_neutral(self):
+        provider = FakeModelProvider(default_structured={"answer": 42})
+
+        response = provider.complete(
+            ModelRequest(system="s", prompt="json please", response_format="json")
+        )
+
+        assert response.structured == {"answer": 42}
+        assert response.text == "fake model response"
+
+    def test_null_model_provider_is_offline_and_zero_cost(self):
+        response = NullModelProvider().complete(
+            ModelRequest(system="s", prompt="p", response_format="json")
+        )
+
+        assert response.provider == "null"
+        assert response.model == "offline/null"
+        assert response.usage == ModelUsage()
+        assert response.structured == {}
+
+    def test_error_has_classification(self):
+        exc = ModelProviderError("rate limit", category="rate_limited")
+
+        assert str(exc) == "rate limit"
+        assert exc.category == "rate_limited"
+
+    def test_bedrock_model_provider_adapts_completion_result(self):
+        """Issue #407: Bedrock has a provider-neutral ModelProvider adapter."""
+        from trustforge.bedrock import LLMResult
+
+        class FakeBedrockClient:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, system: str, prompt: str):
+                self.calls.append({"system": system, "prompt": prompt})
+                return LLMResult(
+                    text="bedrock answer",
+                    input_tokens=1_000,
+                    output_tokens=500,
+                    model_id="au.anthropic.claude-haiku-4-5-20251001-v1:0",
+                )
+
+        client = FakeBedrockClient()
+        provider = BedrockModelProvider(client=client)
+
+        response = provider.complete(ModelRequest(system="sys", prompt="user"))
+
+        assert isinstance(provider, ModelProvider)
+        assert client.calls == [{"system": "sys", "prompt": "user"}]
+        assert response == ModelResponse(
+            text="bedrock answer",
+            model="au.anthropic.claude-haiku-4-5-20251001-v1:0",
+            provider="bedrock",
+            usage=ModelUsage(
+                input_tokens=1_000,
+                output_tokens=500,
+                total_tokens=1_500,
+                cost_usd=0.0035,
+            ),
+        )
+
+    def test_bedrock_model_provider_classifies_client_errors(self):
+        """Issue #407: provider failures should cross the port with categories."""
+
+        class TimeoutClient:
+            def complete(self, system: str, prompt: str):
+                raise TimeoutError("bedrock timed out")
+
+        provider = BedrockModelProvider(client=TimeoutClient())
+
+        with pytest.raises(ModelProviderError) as excinfo:
+            provider.complete(ModelRequest(system="sys", prompt="user"))
+
+        assert excinfo.value.category == "timeout"
+        assert str(excinfo.value) == "bedrock timed out"
+
+    def test_contract_fields_do_not_embed_trustforge_domain_terms(self):
+        forbidden = {"stance", "coin", "evidence", "hermes", "claim"}
+        field_names = {
+            *ModelRequest.__dataclass_fields__,
+            *ModelResponse.__dataclass_fields__,
+            *ModelUsage.__dataclass_fields__,
+        }
+
+        assert field_names.isdisjoint(forbidden)
+
+
+class TestAgentRuntimeProviderContract:
+    """Provider-neutral agent runtime contract (#406)."""
+
+    def test_capabilities_are_generic(self):
+        runtime = FakeAgentRuntimeProvider(
+            [RuntimeCapability(name="tools", version="1", limits={"max": 2})]
+        )
+
+        assert runtime.capabilities() == [
+            RuntimeCapability(name="tools", version="1", limits={"max": 2})
+        ]
+
+    def test_session_run_tool_trace_and_cancel_lifecycle(self):
+        runtime = FakeAgentRuntimeProvider()
+        session = runtime.start_session({"tenant": "unit"})
+        tool = RuntimeToolCall(name="lookup", arguments={"q": "x"}, timeout_sec=3)
+
+        run = runtime.start_run(session, input={"prompt": "hello"}, tools=[tool])
+        trace = RuntimeTraceEvent(event="tool.started", payload={"tool": "lookup"})
+        runtime.trace(run.run_id, trace)
+
+        assert isinstance(session, RuntimeSession)
+        assert isinstance(run, RuntimeRun)
+        assert session.metadata == {"tenant": "unit"}
+        assert run.status == "running"
+        assert run.output == {
+            "session_id": session.session_id,
+            "input": {"prompt": "hello"},
+            "tools": ["lookup"],
+        }
+        assert runtime.traces == [(run.run_id, trace)]
+        assert runtime.cancel_run(run.run_id) is True
+        assert runtime.runs[run.run_id].status == "cancelled"
+        assert runtime.cancel_run("missing") is False
+
+    def test_contract_fields_do_not_embed_trustforge_or_model_provider_terms(self):
+        forbidden = {
+            "aws",
+            "bedrock",
+            "trustforge",
+            "coin",
+            "evidence",
+            "hermes",
+            "model",
+            "tokens",
+            "cost",
+        }
+        field_names = {
+            *RuntimeCapability.__dataclass_fields__,
+            *RuntimeSession.__dataclass_fields__,
+            *RuntimeToolCall.__dataclass_fields__,
+            *RuntimeTraceEvent.__dataclass_fields__,
+            *RuntimeRun.__dataclass_fields__,
+        }
+
+        assert field_names.isdisjoint(forbidden)
+
+
+class TestSecurityDecisionProviderContract:
+    """Provider-neutral security decision contract (#416)."""
+
+    def test_allow_and_deny_decisions_are_generic(self):
+        allow_provider = FakeSecurityDecisionProvider()
+        deny_provider = FakeSecurityDecisionProvider(
+            PolicyDecision(
+                action="deny",
+                reason="policy_miss",
+                evidence={"rule": "default-deny"},
+            )
+        )
+        request = PolicyRequest(
+            subject="user:123",
+            action="artifact.read",
+            resource="artifact:abc",
+            context={"tenant": "unit"},
+        )
+
+        allow = evaluate_security_decision(allow_provider, request)
+        deny = evaluate_security_decision(deny_provider, request)
+
+        assert allow.allowed is True
+        assert allow.action == "allow"
+        assert deny.allowed is False
+        assert deny.action == "deny"
+        assert deny.reason == "policy_miss"
+        assert deny.evidence == {"rule": "default-deny"}
+        assert allow_provider.requests == [request]
+
+    def test_policy_failure_fails_closed_and_redacts_context(self):
+        provider = FakeSecurityDecisionProvider(
+            failure=RuntimeError("boom token=super-secret")
+        )
+        request = PolicyRequest(
+            subject="user:123",
+            action="artifact.read",
+            resource="artifact:abc",
+            context={
+                "tenant": "unit",
+                "token": "super-secret",
+                "nested": {"Authorization": "Bearer super-secret"},
+            },
+        )
+
+        decision = evaluate_security_decision(provider, request)
+
+        assert decision.action == "deny"
+        assert decision.allowed is False
+        assert decision.reason == "policy evaluation failed: RuntimeError"
+        assert decision.evidence == {
+            "provider": "fake-security",
+            "context": {
+                "tenant": "unit",
+                "token": "<redacted>",
+                "nested": {"Authorization": "<redacted>"},
+            },
+        }
+        assert "super-secret" not in str(decision)
+
+    def test_policy_decision_evidence_is_redacted_before_logging(self):
+        provider = FakeSecurityDecisionProvider(
+            PolicyDecision(
+                action="allow",
+                reason="matched",
+                evidence={
+                    "rule": "tenant-owner",
+                    "credentials": {"api_key": "secret-value"},
+                },
+            )
+        )
+
+        decision = evaluate_security_decision(
+            provider,
+            PolicyRequest(subject="u", action="a", resource="r"),
+        )
+
+        assert decision.evidence == {
+            "rule": "tenant-owner",
+            "credentials": "<redacted>",
+        }
+        assert "secret-value" not in str(decision)
+
+    def test_contract_does_not_embed_web_or_api_rule_terms(self):
+        forbidden = {"route", "header", "cookie", "http", "web", "api", "admin"}
+        field_names = {
+            *PolicyRequest.__dataclass_fields__,
+            *PolicyDecision.__dataclass_fields__,
+        }
+
+        assert field_names.isdisjoint(forbidden)
+
+    def test_redaction_is_recursive_without_mutating_input(self):
+        original = {
+            "token": "secret-token",
+            "nested": [{"password": "secret-password"}, {"safe": "ok"}],
+        }
+
+        redacted = redact_policy_context(original)
+
+        assert redacted == {
+            "token": "<redacted>",
+            "nested": [{"password": "<redacted>"}, {"safe": "ok"}],
+        }
+        assert original["token"] == "secret-token"
 
 
 class TestFakeCacheProvider:
@@ -268,14 +573,151 @@ class TestResolveProviders:
             res = next(r for r in ps.resolutions if r.key == "llm")
             assert res.resolved == "bedrock"
 
-    def test_agentcore_env_not_implemented(self):
-        """TRUSTFORGE_AGENTCORE=1 → AgentCoreLLMAdapter (complete raises NotImplementedError)。"""
-        env = {"TRUSTFORGE_AGENTCORE": "1"}
-        with patch.dict(os.environ, env, clear=False):
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "ON"])
+    def test_agentcore_enabled_values_fail_closed(self, value):
+        """Every documented enabled spelling fails closed while unavailable."""
+        with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": value}, clear=True):
+            with pytest.raises(RuntimeError, match="unsupported"):
+                resolve_providers()
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "FALSE", "No", "off"])
+    def test_agentcore_disabled_values_do_not_enable_adapter(self, value):
+        with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": value}, clear=True):
             ps = resolve_providers()
-            assert isinstance(ps.llm, AgentCoreLLMAdapter)
-            with pytest.raises(NotImplementedError):
-                ps.llm.complete("sys", "prompt")  # type: ignore[union-attr]
+            assert isinstance(ps.llm, NullLLMAdapter)
+
+    @pytest.mark.parametrize("value", ["01", "enabled", "2", "maybe"])
+    def test_agentcore_malformed_values_fail_closed(self, value):
+        with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": value}, clear=True):
+            with pytest.raises(ValueError, match="must be one of"):
+                resolve_providers()
+
+
+class TestPipelineProviderRuntimePath:
+    """Formal pipeline path should enter through provider resolver."""
+
+    def test_pipeline_run_invokes_resolved_llm_provider(self, monkeypatch):
+        fake_llm = FakeLLMProvider(default_response="provider narrative")
+        seen: dict[str, object] = {}
+
+        def fake_resolve_providers(**kwargs):
+            seen["offline"] = kwargs.get("offline")
+            return ProviderSet(
+                llm=fake_llm,
+                resolutions=[
+                    ProviderResolution(key="llm", configured="test", resolved="fake"),
+                    ProviderResolution(key="cache", configured="test", resolved="fake"),
+                ],
+            )
+
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return [
+                Document(
+                    id="btc-price",
+                    kind="price",
+                    source="test-price",
+                    text="BTC close rose 3%",
+                    ts=1_000.0,
+                )
+            ]
+
+        monkeypatch.setattr(pl, "resolve_providers", fake_resolve_providers)
+        monkeypatch.setattr(pl, "collect", fake_collect)
+        monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
+        monkeypatch.setattr(pl, "try_reserve_request_budget", lambda: 0.01)
+        monkeypatch.setattr(pl, "release_request_budget", lambda _reservation: None)
+        monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
+        monkeypatch.setattr(pl, "stance_model_priced", lambda: True)
+
+        _report, _evidence, log = pl.run(
+            "BTC",
+            "分析 BTC",
+            QuestionType.MULTI_SOURCE,
+            data_mode="sample",
+            llm_mode="bedrock",
+        )
+
+        assert seen["offline"] is False
+        assert any(call["method"] == "complete" for call in fake_llm.calls)
+        provider_events = [event for event in log.events if event.get("tool") == "provider.resolve"]
+        assert provider_events
+        assert any(event["params"]["key"] == "llm" and event["params"]["invoked"] for event in provider_events)
+
+    def test_pipeline_composition_root_passes_resolved_provider_client(self, monkeypatch):
+        """Issue #408: formal pipeline should inject the resolved provider client."""
+        from trustforge.schema import Report
+
+        fake_llm = FakeLLMProvider(default_response="provider narrative")
+        injected_client = object()
+        seen: dict[str, object] = {}
+
+        def fake_resolve_providers(**kwargs):
+            return ProviderSet(
+                llm=fake_llm,
+                resolutions=[
+                    ProviderResolution(key="llm", configured="test", resolved="fake"),
+                ],
+            )
+
+        def fake_client_from_provider(provider, *, offline, stance_offline):
+            seen["provider"] = provider
+            seen["offline"] = offline
+            seen["stance_offline"] = stance_offline
+            return injected_client
+
+        def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
+            return [
+                Document(
+                    id="btc-price",
+                    kind="price",
+                    source="test-price",
+                    text="BTC close rose 3%",
+                    ts=1_000.0,
+                )
+            ]
+
+        def fake_run_agent_pipeline(query, coin, qtype, docs, *, client, log):
+            seen["client"] = client
+            return (
+                Report(
+                    coin=coin,
+                    question_type=str(qtype),
+                    question=query,
+                    market_judgment="neutral",
+                    facts=[],
+                    inferences=[],
+                    key_basis=[],
+                    confidence=0.5,
+                    limits=[],
+                    could_flip=[],
+                    contrarian=[],
+                    generated_at="2026-07-22T00:00:00Z",
+                ),
+                [],
+            )
+
+        monkeypatch.setattr(pl, "resolve_providers", fake_resolve_providers)
+        monkeypatch.setattr(pl, "_client_from_llm_provider", fake_client_from_provider)
+        monkeypatch.setattr(pl, "run_agent_pipeline", fake_run_agent_pipeline)
+        monkeypatch.setattr(pl, "collect", fake_collect)
+        monkeypatch.setattr(pl, "daily_cap_exceeded", lambda: False)
+        monkeypatch.setattr(pl, "try_reserve_request_budget", lambda: 0.01)
+        monkeypatch.setattr(pl, "release_request_budget", lambda _reservation: None)
+        monkeypatch.setattr(pl, "narrative_model_priced", lambda: True)
+        monkeypatch.setattr(pl, "stance_model_priced", lambda: True)
+
+        pl.run(
+            "BTC",
+            "分析 BTC",
+            QuestionType.MULTI_SOURCE,
+            data_mode="sample",
+            llm_mode="bedrock",
+        )
+
+        assert seen["provider"] is fake_llm
+        assert seen["offline"] is False
+        assert seen["stance_offline"] is False
+        assert seen["client"] is injected_client
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -460,6 +902,5 @@ class TestFailureNotSilent:
 
     def test_agentcore_complete_not_implemented(self):
         with patch.dict(os.environ, {"TRUSTFORGE_AGENTCORE": "1"}):
-            adapter = AgentCoreLLMAdapter()
-            with pytest.raises(NotImplementedError):
-                adapter.complete("sys", "prompt")
+            with pytest.raises(RuntimeError, match="not implemented"):
+                AgentCoreLLMAdapter()

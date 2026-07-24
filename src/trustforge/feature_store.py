@@ -98,3 +98,9 @@ class TrustFeatureStore:
         if self._owns_connection and self._conn is not None:
             conn, self._conn = self._conn, None
             conn.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

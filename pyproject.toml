@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trustforge"
-version = "0.16.36"
+version = "0.18.0"
 description = "加密市場分析 AI Agent：多源資訊的信任提煉（AWS Bedrock）"
 requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.34",   # 唯一模型入口：AWS Bedrock runtime
     "certifi>=2024.2.2",  # 外部 HTTPS connector 的可攜式 CA trust store
+    "portalocker>=3,<4",  # macOS/Linux/Windows cross-process store locks
 ]
 
 [project.optional-dependencies]
@@ -28,10 +29,27 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
-markers = ["integration: tests requiring an explicitly enabled live local service"]
 # #91 CI 品質閘：覆蓋率下限。目前全倉覆蓋率約 93%，設 75% 保留充足緩衝、
 # 不會讓現有 CI（跑全倉）變紅，同時擋住「新程式碼大幅拉低覆蓋率」的回歸。
 # 注意：這是 always-on 設定，跑「單一測試檔子集」時覆蓋率會偏低而觸發 fail-under；
 # 本機只想跑子集時請加 `--no-cov`（例：`pytest tests/test_foo.py --no-cov`）。
 # CI 一律跑全倉，不受此影響。
-addopts = "--cov=trustforge --cov-report=term-missing --cov-fail-under=75"
+addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing --cov-fail-under=75"
+# Suppress benign GC-timing ResourceWarnings from sqlite3 connections.  All
+# sqlite-backed stores (SourceEventArchive, TrustFeatureStore,
+# SQLiteCacheBackend, AnalysisFlow) define close()+__del__, but Python's
+# non-deterministic GC can collect Connection objects before the wrapper's
+# __del__ runs during interpreter teardown, emitting "unclosed database"
+# ResourceWarnings that are noise rather than real leaks.  This filter is
+# narrowly scoped to the sqlite "unclosed database" message so genuine
+# ResourceWarnings (sockets, files) remain visible.
+filterwarnings = [
+    "ignore:unclosed database:ResourceWarning",
+]
+markers = [
+    "integration: tests requiring an explicitly enabled live local service",
+    "slow: tests that are expected to exceed the normal fast-suite budget",
+    "network: tests that perform real or simulated network-bound behavior",
+    "serial: tests that must not run concurrently with related tests",
+    "subprocess: tests that spawn external commands or child processes",
+]

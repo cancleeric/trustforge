@@ -547,10 +547,10 @@ def cmd_modelhub_train(args: argparse.Namespace) -> int:
             or not _valid_modelhub_execution_reference(Path(args.out_dir), result)
         ):
             invalid_result = True
-            for event in log.events:
+            for event_index, event in enumerate(log.events):
                 params = event.get("params", {})
                 if event.get("tool") == "modelhub.training.terminal" and params.get("stage") == "terminal":
-                    event["tool"] = "modelhub.training.rejected_terminal"
+                    log.replace_event_tool(event_index, "modelhub.training.rejected_terminal")
             log.record(
                 "modelhub.training.terminal",
                 {

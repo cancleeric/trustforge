@@ -44,6 +44,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ from . import backend_registry
 from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
+from .asset_context_repository import AssetContextRepository, load_asset_context_records
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
@@ -5035,6 +5037,8 @@ _EVIDENCE_PUBLIC_FIELDS = frozenset({
     "reputation_mode",
 })
 _EVIDENCE_FILTERED_FIELDS = frozenset({"author"})
+_ASSET_CONTEXT_RECORDS_PATH = Path(__file__).resolve().parents[2] / "data" / "asset_context_records.json"
+_ASSET_CONTEXT_REPOSITORY: AssetContextRepository | None = None
 
 
 def _public_evidence_dict(ev) -> dict:
@@ -5048,6 +5052,109 @@ def _public_evidence_dict(ev) -> dict:
     for field_name in _EVIDENCE_FILTERED_FIELDS:
         d.pop(field_name, None)
     return d
+
+
+def _asset_context_repository() -> AssetContextRepository | None:
+    global _ASSET_CONTEXT_REPOSITORY
+    if _ASSET_CONTEXT_REPOSITORY is not None:
+        return _ASSET_CONTEXT_REPOSITORY
+    if not _ASSET_CONTEXT_RECORDS_PATH.exists():
+        return None
+    _ASSET_CONTEXT_REPOSITORY = AssetContextRepository(
+        load_asset_context_records(_ASSET_CONTEXT_RECORDS_PATH)
+    )
+    return _ASSET_CONTEXT_REPOSITORY
+
+
+def _handle_api_asset_context(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/asset-context?symbol=ARB`：獨立於 `/api/analyze` 的輕量唯讀
+
+    資產脈絡查詢端點——讓「新手脈絡查詢」小工具可以只查 sector/layer/
+    settlement_chain 這類分類資料，不必觸發完整分析流程（不進
+    `COIN_POOL` 白名單限制、不算費用、不寫 ledger）。
+
+    比照 `/api/health`、`/api/rate-limit-status` 這類唯讀觀測端點：不設
+    限流、不需認證。查無此資產時回 200 + `{"asset_context": null}`，
+    語意是「查無脈絡資料」而非「請求本身有誤」，故意不用 404/500，
+    讓前端可以用同一條 happy-path 處理「資料存在」與「資料缺席」兩種
+    情況（見 `AssetContextLookupPage` 空狀態文案）。
+    """
+    try:
+        symbol = None
+        if qs and "symbol" in qs:
+            raw = qs["symbol"]
+            symbol = raw[0] if isinstance(raw, list) else raw
+        if not symbol or not str(symbol).strip():
+            return 400, _json_envelope_err(
+                "invalid_request", "缺少必要參數 symbol"
+            )
+        repository = _asset_context_repository()
+        if repository is None:
+            return 200, _json_envelope_ok({"asset_context": None})
+        record = repository.by_symbol(str(symbol).strip(), datetime.now(timezone.utc))
+        if record is None:
+            return 200, _json_envelope_ok({"asset_context": None})
+        return 200, _json_envelope_ok({"asset_context": record.context.to_dict()})
+    except Exception:
+        logging.exception("TrustForge /api/asset-context error")
+        return 502, _json_envelope_err("upstream_error", "資產脈絡資料暫時無法讀取，請稍後再試")
+
+
+def _parse_report_generated_at(report) -> datetime | None:
+    raw = getattr(report, "generated_at", "")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, datetime):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _risk_notices_for_context(context: dict | None) -> list[dict]:
+    if not context:
+        return []
+    notices: list[dict] = []
+    if context.get("layer") == "layer_2":
+        notices.append({
+            "code": "layer_2_dependency",
+            "severity": "info",
+            "message": "Layer 2 asset: compare against L2 peers and include parent-chain dependency risk.",
+        })
+    if context.get("token_role") == "governance":
+        notices.append({
+            "code": "governance_token",
+            "severity": "info",
+            "message": "Governance token: monitor unlocks, voting concentration, and protocol upgrade exposure.",
+        })
+    if context.get("market_cap_tier") in {"small", "mid"}:
+        notices.append({
+            "code": "market_cap_liquidity",
+            "severity": "warning",
+            "message": "Lower market-cap tier: liquidity and slippage can dominate short-window signals.",
+        })
+    return notices
+
+
+def _public_report_dict(report) -> dict:
+    data = dataclasses.asdict(report)
+    if data.get("asset_context") is not None or data.get("risk_notices"):
+        return data
+    repository = _asset_context_repository()
+    as_of = _parse_report_generated_at(report)
+    record = (
+        repository.by_symbol(getattr(report, "coin", ""), as_of=as_of)
+        if repository and as_of is not None
+        else None
+    )
+    context = record.context.to_dict() if record else None
+    data["asset_context"] = context
+    data["risk_notices"] = _risk_notices_for_context(context)
+    return data
 
 
 def _public_snapshot_dict(snap: dict) -> dict:
@@ -5076,7 +5183,7 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
     `lambda_handler.py` Function URL 入口共用同一份，見上方說明。"""
     return {
         "version": VERSION,
-        "report": dataclasses.asdict(report),
+        "report": _public_report_dict(report),
         "evidence": [_public_evidence_dict(ev) for ev in evidence],
         "execution": log.manifest(),
         "execution_log": log.events,
@@ -5087,9 +5194,9 @@ def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, l
     """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。"""
     return {
         "version": VERSION,
-        "report_a": dataclasses.asdict(report_a),
+        "report_a": _public_report_dict(report_a),
         "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
-        "report_b": dataclasses.asdict(report_b),
+        "report_b": _public_report_dict(report_b),
         "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
         "execution": log.manifest(),
         "execution_log": log.events,
@@ -5801,8 +5908,9 @@ def _handle_api_alerts_operations() -> tuple[int, str]:
 def _handle_api_hermes_upgrades(qs: dict) -> tuple[int, str]:
     """Read-only, version-backed Hermes ship/module upgrade projection."""
     try:
+        from .upgrade_adapters import HermesControlPlaneCatalog
         from .upgrade_control import upgrade_status
-        return 200, _json_envelope_ok(upgrade_status())
+        return 200, _json_envelope_ok(upgrade_status(HermesControlPlaneCatalog()))
     except Exception:
         logging.exception("TrustForge /api/hermes-upgrades error")
         return 502, _json_envelope_err("upgrade_control_unavailable", "Hermes 升級控制面暫時無法讀取")
@@ -5818,51 +5926,90 @@ def _handle_api_admin_upgrade_queue() -> tuple[int, str]:
         return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法讀取")
 
 
+# Deployment composition roots must inject these after authentication.  A
+# shared admin token alone is deliberately not treated as named-human proof.
+_UPGRADE_PRINCIPAL_FACTORY = None
+
+
+def _upgrade_queue_for_mutation():
+    from .upgrade_adapters import (
+        HermesActivationHandler,
+        HermesModuleCatalog,
+        HermesRollbackHandler,
+        PrincipalAuthority,
+    )
+    from .upgrade_queue import UpgradeQueue
+
+    return UpgradeQueue(
+        authority=PrincipalAuthority(),
+        catalog=HermesModuleCatalog(),
+        activation_handler=HermesActivationHandler(),
+        rollback_handler=HermesRollbackHandler(),
+    )
+
+
 def _handle_api_admin_upgrade_action(headers, rfile, action: str) -> tuple[int, str]:
+    if action == "sandbox":
+        return 410, _json_envelope_err(
+            "sandbox_endpoint_retired",
+            "Sandbox 結果僅接受可信本機 runner 直接提交",
+        )
     payload, error = _read_admin_put_body(headers, rfile)
     if error is not None:
         return error
     assert payload is not None
     try:
-        from .upgrade_queue import UpgradeQueue
-        queue = UpgradeQueue()
-        if action == "sandbox":
-            allowed = {"proposal_id", "passed", "artifact_hash", "details"}
-            if set(payload) - allowed or not isinstance(payload.get("passed"), bool):
-                return 400, _json_envelope_err("bad_request", "sandbox 欄位或 passed 型別不合法")
-            result = queue.record_sandbox(
-                str(payload.get("proposal_id", "")), payload["passed"],
-                str(payload.get("artifact_hash", "")), payload.get("details"),
-            )
-        elif action == "decision":
-            allowed = {"proposal_id", "decision", "actor", "reason"}
-            if set(payload) - allowed:
-                return 400, _json_envelope_err("bad_request", "decision 含不支援欄位")
+        queue = _upgrade_queue_for_mutation()
+        if action == "decision":
+            allowed = {"proposal_id", "decision", "reason"}
+            if set(payload) - allowed or _UPGRADE_PRINCIPAL_FACTORY is None:
+                if "actor" in payload:
+                    return 400, _json_envelope_err("bad_request", "actor 不得由 caller 指定")
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
+            principal = _UPGRADE_PRINCIPAL_FACTORY(headers)
+            if principal is None:
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
             result = queue.decide(
                 str(payload.get("proposal_id", "")), str(payload.get("decision", "")),
-                str(payload.get("actor", "")), str(payload.get("reason", "")),
+                str(payload.get("reason", "")), principal=principal,
             )
         elif action == "activate":
-            allowed = {"proposal_id", "actor", "reason"}
+            allowed = {"proposal_id", "reason"}
             if set(payload) - allowed:
-                return 400, _json_envelope_err("bad_request", "activation 含不支援欄位")
+                return 400, _json_envelope_err("bad_request", "decision 含不支援欄位")
+            if _UPGRADE_PRINCIPAL_FACTORY is None:
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
+            principal = _UPGRADE_PRINCIPAL_FACTORY(headers)
             result = queue.activate(
-                str(payload.get("proposal_id", "")), str(payload.get("actor", "")),
-                str(payload.get("reason", "")),
+                str(payload.get("proposal_id", "")), str(payload.get("reason", "")),
+                principal=principal,
             )
         else:
-            allowed = {"proposal_id", "target_revision", "actor", "reason"}
+            allowed = {"proposal_id", "target_revision", "reason"}
             if set(payload) - allowed:
                 return 400, _json_envelope_err("bad_request", "rollback 含不支援欄位")
+            if _UPGRADE_PRINCIPAL_FACTORY is None:
+                return 403, _json_envelope_err(
+                    "trusted_principal_required", "缺少可信 authenticated principal"
+                )
+            principal = _UPGRADE_PRINCIPAL_FACTORY(headers)
             result = queue.rollback(
                 str(payload.get("proposal_id", "")), str(payload.get("target_revision", "")),
-                str(payload.get("actor", "")), str(payload.get("reason", "")),
+                str(payload.get("reason", "")), principal=principal,
             )
         return 200, _json_envelope_ok(result)
     except KeyError:
         return 404, _json_envelope_err("proposal_not_found", "找不到升級候選")
     except ValueError as exc:
         return 409, _json_envelope_err("invalid_upgrade_transition", str(exc))
+    except PermissionError as exc:
+        return 403, _json_envelope_err("upgrade_forbidden", str(exc))
     except Exception:
         logging.exception("TrustForge admin upgrade action error")
         return 502, _json_envelope_err("upgrade_queue_unavailable", "升級佇列暫時無法寫入")
@@ -6317,12 +6464,12 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             )
             payload = {
                 "version": VERSION,
-                "report_a": dataclasses.asdict(report_a),
+                "report_a": _public_report_dict(report_a),
                 "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
                 "trust_radar_a": aggregate_trust_by_kind(evidence_a),
                 "trust_components_aggregate_a": _aggregate_trust_components(evidence_a),
                 "price_provenance_a": _price_provenance_data(evidence_a),
-                "report_b": dataclasses.asdict(report_b),
+                "report_b": _public_report_dict(report_b),
                 "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
@@ -6342,7 +6489,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
             )
             payload = {
                 "version": VERSION,
-                "report": dataclasses.asdict(report),
+                "report": _public_report_dict(report),
                 "evidence": [_public_evidence_dict(ev) for ev in evidence],
                 "trust_radar": aggregate_trust_by_kind(evidence),
                 "trust_components_aggregate": _aggregate_trust_components(evidence),
@@ -7746,6 +7893,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/module-telemetry":
             code, body = _handle_api_module_telemetry(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/asset-context":
+            code, body = _handle_api_asset_context(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
         # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封

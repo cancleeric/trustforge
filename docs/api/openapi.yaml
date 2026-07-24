@@ -574,6 +574,87 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/module-telemetry:
+    get:
+      tags: [observability]
+      operationId: getModuleTelemetry
+      summary: 模組 runtime 遙測狀態
+      description: |
+        唯讀。未帶 `module_id` 時回傳所有模組遙測紀錄與總數；
+        帶 `module_id` 時回傳單一模組紀錄，找不到則回 404。
+      parameters:
+        - in: query
+          name: module_id
+          required: false
+          schema:
+            type: string
+          description: 可選的模組識別碼。
+      responses:
+        "200":
+          description: 模組遙測狀態
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        additionalProperties: true
+        "404":
+          description: 指定模組不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/asset-context:
+    get:
+      tags: [analysis]
+      operationId: getAssetContext
+      summary: 資產脈絡查詢
+      description: |
+        唯讀。獨立於 `/api/analyze` 的輕量查詢端點——只回傳資產的分類脈絡
+        （sector/layer/settlement_chain/gas_token/dependencies 等），不觸發
+        完整信任分析流程、不受 `COIN_POOL` 五幣白名單限制、不需認證、不設
+        限流。查無此資產的脈絡資料時仍回 200，`data.asset_context` 為
+        `null`（語意是「查無資料」而非請求錯誤）。
+      parameters:
+        - in: query
+          name: symbol
+          required: true
+          schema:
+            type: string
+          description: 資產代號（大小寫不敏感），例如 ARB。
+      responses:
+        "200":
+          description: 資產脈絡資料（查無時 asset_context 為 null）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          asset_context:
+                            type: object
+                            nullable: true
+                            additionalProperties: true
+        "400":
+          description: 缺少必要參數 symbol
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/improvement-diagnostics:
     get:
       tags: [observability]
@@ -1767,24 +1848,16 @@ paths:
     post:
       tags: [admin]
       operationId: recordAdminHermesUpgradeSandbox
-      summary: 寫入候選 artifact 的 sandbox 驗證結果（不會啟用）
+      summary: 已退役；sandbox 僅由可信本機 runner 直接提交
+      deprecated: true
       security: [{AdminToken: []}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [proposal_id, passed, artifact_hash]
-              properties:
-                proposal_id: {type: string}
-                passed: {type: boolean}
-                artifact_hash: {type: string}
-                details: {type: object}
       responses:
-        "200": {description: Sandbox 結果已持久化}
+        "410":
+          description: 固定回傳 sandbox_endpoint_retired；不解析或寫入 payload
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorEnvelope"}
         "401": {$ref: "#/components/responses/AdminUnauthorized"}
-        "409": {description: 候選狀態不允許此轉換}
         "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
 
   /api/admin/hermes-upgrade-decision:

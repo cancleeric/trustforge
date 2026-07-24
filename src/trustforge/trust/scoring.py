@@ -17,13 +17,49 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+from pathlib import Path
 import re
 import time as _time_mod
 from dataclasses import dataclass, field
 from typing import Callable
 
+from trustforge_core.contracts import (
+    KernelClaim as _CoreKernelClaim,
+    KernelClaimResolution as _CoreKernelClaimResolution,
+    KernelDocument as _CoreKernelDocument,
+    KernelReputationTrace as _CoreKernelReputationTrace,
+    KernelRunResolution as _CoreKernelRunResolution,
+    KernelScoredClaim as _CoreKernelScoredClaim,
+)
+from trustforge_core.corroboration import (
+    CorroborationClaim as _CoreCorroborationClaim,
+    DOMAIN_STOP,
+    canonical_source as _core_canonical_source,
+    corroborate as _core_corroborate,
+    directional_word_polarities as _core_directional_word_polarities,
+)
+from trustforge_core.scoring import (
+    DEFAULT_HALF_LIVES as _CORE_DEFAULT_HALF_LIVES,
+    DEFAULT_SCORE_WEIGHTS as _CORE_DEFAULT_SCORE_WEIGHTS,
+    DEFAULT_SOURCE_REPUTATIONS as _CORE_DEFAULT_SOURCE_REPUTATIONS,
+    FIXED_HEURISTIC_VERSION as _CORE_FIXED_HEURISTIC_VERSION,
+    ISOTONIC_VERSION as _CORE_ISOTONIC_VERSION,
+    aggregate_scored_claims as _core_aggregate_scored_claims,
+    corroboration_score as _core_corroboration_score,
+    interpolate_calibration as _interpolate_calibration,
+    manipulation_flags as _core_manipulation_flags,
+    manipulation_hits as _core_manipulation_hits,
+    manipulation_penalty as _core_manipulation_penalty,
+    recency_decay as _core_recency_decay,
+    reputation_floor as _core_reputation_floor,
+    score_claim as _core_score_claim,
+    source_reputation as _core_source_reputation,
+    stable_sigmoid as _core_stable_sigmoid,
+)
+
 from ..bedrock import _STANCE_CONNECT_TIMEOUT_SEC, _STANCE_READ_TIMEOUT_SEC
-from ..ingestion.base import Document, _coins_mentioned, _matches_coin, _mentions_coin
+from ..ingestion.base import Document, _coins_mentioned
 from .dawid_skene import LABELS as _DS_LABELS, em_source_reliability
 from .stance_cache import cached_stance_fn
 
@@ -52,34 +88,10 @@ STANCE_TIME_RESERVE_SEC = (
 
 
 # --- 權重（可調）---------------------------------------------------------
-DEFAULT_WEIGHTS = {
-    "src": 0.50,    # 來源信譽（客觀來源即使無佐證也應有基本信任）
-    "corr": 0.25,   # 交叉佐證（獨立來源越多越加分）
-    "rec": 0.15,    # 時效
-    "manip": 0.40,  # 操縱懲罰（扣分項，足以把喊單壓到 0）
-}
+DEFAULT_WEIGHTS = dict(_CORE_DEFAULT_SCORE_WEIGHTS)
 
 # 來源類型基礎信譽（0–1）。客觀數據（價格/鏈上）最高，匿名社群最低。
-KIND_REPUTATION = {
-    "price": 0.95,     # 官方提供 OHLCV，客觀事實
-    "onchain": 0.95,
-    "regulatory": 0.90,
-    "hoyabit": 0.85,   # 交易所一手行情數據
-    "news": 0.65,
-    "social": 0.35,
-    # CoinGecko（W-coingecko，CEO 審核 gray 計劃）：現價客觀事實，但為
-    # 第三方彙整（非交易所一手數據），信譽略低於 hoyabit/onchain；情緒投票
-    # 與 GitHub 開發活動皆為輔助訊號，信譽落在 news 與 social 之間。
-    "price_live": 0.90,
-    "sentiment": 0.50,
-    "dev_activity": 0.50,
-    # 鯨魚/名人交易信號（celebrity-whale-trades spec）：
-    # - whale_onchain：鏈上可驗證的大額轉帳，客觀事實但非一手交易所數據
-    # - celebrity_trade：已標記錢包/名人公開交易，意見型需佐證（未驗證者
-    #   在 _source_reputation 中動態降級至 social 等級 0.35）
-    "whale_onchain": 0.88,
-    "celebrity_trade": 0.50,
-}
+KIND_REPUTATION = dict(_CORE_DEFAULT_SOURCE_REPUTATIONS)
 
 
 def _reputation_floor(kind: str) -> float:
@@ -89,42 +101,20 @@ def _reputation_floor(kind: str) -> float:
     不低於 ~0.1」；price/onchain 最高 ≈0.29，依序遞減，未知 kind 保守回退 0.35 基礎
     → floor≈0.105，等同 social 下限，不給未知來源類型更高保障）。
     """
-    return round(0.3 * KIND_REPUTATION.get(kind, 0.35), 4)
+    return _core_reputation_floor(kind, KIND_REPUTATION)
 
 
 # 各 kind 的 recency 半衰期（小時）。鯨魚/名人交易信號時效性極強（市場秒級反應），
 # 使用 2 小時半衰期；一般來源沿用預設 12 小時（不列入此 map，走 _recency_decay 預設）。
+_DEFAULT_HALF_LIFE_HOURS = dict(_CORE_DEFAULT_HALF_LIVES)["default"]
 KIND_HALFLIFE_HOURS: dict[str, float] = {
-    "whale_onchain": 2.0,       # 鯨魚鏈上轉帳：市場反應極快
-    "celebrity_trade": 2.0,     # 名人交易宣告：時效同鯨魚
-}
-
-# 域內停用詞（Domain Stopwords）：加密市場每篇分析都有、對「是否在說同一件事」無鑑別力的詞。
-# 這些詞從 overlap 計算中完全排除，讓佐證判斷只依賴具體/稀有的內容詞。
-DOMAIN_STOP: set[str] = {
-    # 幣名（太普遍，任何 BTC 分析都有）
-    "btc", "eth", "sol", "bnb", "xrp",
-    "bitcoin", "ethereum", "solana",
-    "比特幣", "比特", "以太坊", "以太", "幣",
-    # 超高頻市場通用詞
-    "市場", "價格", "成交量", "交易所", "交易",
-    "行情", "數據", "分析", "資料", "報告",
-    # 方向性通用詞（過於籠統；「漲」/「跌」單字被 _normalize 過濾不到，改用整詞）
-    "漲跌", "上漲", "下跌", "看漲", "看跌", "走低", "走高",
-    # 高頻語法詞（_normalize 已過濾單字，這裡補雙字）
-    # 注意：支撐/阻力是具體 TA 訊號詞，已從 DOMAIN_STOP 移除（見 codex #fix-[Low]）
-    "目前", "近期", "顯示", "表示", "預計", "預測", "可能",
-    "目標",
+    kind: hours for kind, hours in _CORE_DEFAULT_HALF_LIVES if kind != "default"
 }
 
 # 操縱訊號關鍵詞（啟發式；正式版可換 Bedrock 分類器）。
 # ⚠️ 誠實聲明（issue #177-A）：這是**關鍵詞層級表面比對**，非行為/統計/協同
 # 操縱偵測；只要換詞（如把「暴漲」改成「大漲」）即可繞過。僅作「可疑用語標記」
 # 併入有限信任扣分（components["manipulation"]），**不代表「已判定操縱」**。
-_MANIP_PATTERNS = [
-    r"to the moon", r"暴漲", r"翻倍", r"\bshill\b", r"喊單", r"穩賺",
-    r"financial advice", r"\bpump\b", r"快上車", r"百倍",
-]
 
 
 @dataclass
@@ -158,6 +148,121 @@ class ScoredClaim:
     # **不併入 `components["manipulation"]`**，純粹供人工判讀。CEO 定案：文字
     # 相似度單獨無法證明協同操縱，自動扣分必然誤傷合法聯播/引用。預設空 list。
     info_flags: list[str] = field(default_factory=list)
+
+
+def _to_core_scoring_claim(claim: Claim) -> _CoreKernelClaim:
+    """Detach one mutable app claim; nonfinite time becomes unknown only in core."""
+    if type(claim) is not Claim:
+        raise ValueError("claim must be an exact Claim")
+    document = claim.doc
+    if type(document) is not Document:
+        raise ValueError("claim document must be an exact Document")
+    raw_timestamp = document.ts
+    if type(raw_timestamp) not in {int, float}:
+        raise ValueError("document timestamp must be an exact number")
+    try:
+        timestamp = float(raw_timestamp)
+    except OverflowError as exc:
+        raise ValueError("document timestamp is outside the finite float range") from exc
+    if not math.isfinite(timestamp):
+        timestamp = 0.0
+    # Only fields consumed by per-claim scoring cross this private boundary.
+    # Unrelated app metadata may contain arbitrary objects; never stringify,
+    # compare, sort, or otherwise execute hooks on those values/keys.
+    metadata: tuple[tuple[str, object], ...] = ()
+    if type(document.meta) is dict:
+        selected: list[tuple[str, object]] = []
+        for key, value in document.meta.items():
+            if type(key) is str and key in {"reputation", "verified_onchain"}:
+                selected.append((key, value))
+        metadata = tuple(selected)
+    return _CoreKernelClaim(
+        id=claim.id,
+        text=claim.text,
+        claim_type=claim.claim_type,
+        direction=claim.direction,
+        document=_CoreKernelDocument(
+            id=document.id,
+            kind=document.kind,
+            source=document.source,
+            text=document.text,
+            timestamp=timestamp,
+            url=document.url,
+            metadata=metadata,
+        ),
+    )
+
+
+def _to_core_aggregate_claim(claim: Claim) -> _CoreKernelClaim:
+    document = claim.doc
+    raw_timestamp = document.ts
+    timestamp = 0.0
+    if type(raw_timestamp) in {int, float}:
+        try:
+            candidate_timestamp = float(raw_timestamp)
+        except OverflowError:
+            pass
+        else:
+            if math.isfinite(candidate_timestamp):
+                timestamp = candidate_timestamp
+    metadata: tuple[tuple[str, str], ...] = ()
+    if type(document.meta) is dict:
+        for key, value in document.meta.items():
+            if type(key) is str and key == "coin" and type(value) is str:
+                metadata = ((key, value),)
+                break
+    return _CoreKernelClaim(
+        id=claim.id,
+        text=claim.text,
+        claim_type=claim.claim_type,
+        direction=claim.direction,
+        document=_CoreKernelDocument(
+            id=document.id,
+            kind=document.kind,
+            source=document.source,
+            text=document.text,
+            timestamp=timestamp,
+            url=document.url,
+            metadata=metadata,
+        ),
+    )
+
+
+def _to_core_aggregate_scored(scored: ScoredClaim) -> _CoreKernelScoredClaim:
+    return _CoreKernelScoredClaim(
+        claim=_to_core_aggregate_claim(scored.claim),
+        trust=scored.trust,
+    )
+
+
+def _to_core_reputation_trace(
+    trace: dict | None,
+) -> _CoreKernelReputationTrace | None:
+    if trace is None:
+        return None
+    return _CoreKernelReputationTrace(
+        source=trace["source"],
+        prior=trace["prior"],
+        final=trace["final"],
+        agree_n=trace["agree_n"],
+        contradict_n=trace["contradict_n"],
+        iterations_run=trace["iterations_run"],
+        mode=trace.get("mode", "entailment"),
+    )
+
+
+def _legacy_trace(trace: _CoreKernelReputationTrace | None) -> dict | None:
+    if trace is None:
+        return None
+    return {
+        "source": trace.source,
+        "prior": round(trace.prior, 4),
+        "final": round(trace.final, 4),
+        "agree_n": trace.agree_n,
+        "contradict_n": trace.contradict_n,
+        "iterations_run": trace.iterations_run,
+        "mode": trace.mode,
+    }
 
 
 @dataclass
@@ -235,23 +340,13 @@ def _source_reputation(c: Claim, dynamic_map: dict[str, float] | None = None) ->
     meta["verified_onchain"]=False 的未驗證宣告自動降級至 social 等級 0.35，
     防止未經鏈上驗證的名人喊單獲得過高信任。
     """
-    base = KIND_REPUTATION.get(c.doc.kind, 0.5)
-    # 名人交易動態降級：未經鏈上驗證者降至 social 等級
-    if c.doc.kind == "celebrity_trade" and not c.doc.meta.get("verified_onchain", False):
-        base = KIND_REPUTATION.get("social", 0.35)
-    # 來源層級覆寫（白名單/黑名單）
-    override = c.doc.meta.get("reputation")
-    prior = float(override) if override is not None else base
-    if dynamic_map is None:
-        return prior
-    # issue #72/#132：dynamic_map 的 key 是 canonical source（見
-    # `_iterate_source_reputation` 分組口徑），查表也走 canonical，避免同源
-    # 大小寫/空白變體查不到先驗值、被誤當成未知來源。
-    dynamic_sr = dynamic_map.get(_canonical_source(c.doc.source), prior)
-    # 名人交易動態降級：即使 dynamic_map 給了較高信譽，未驗證者仍不得超過 social 等級
-    if c.doc.kind == "celebrity_trade" and not c.doc.meta.get("verified_onchain", False):
-        return min(dynamic_sr, KIND_REPUTATION.get("social", 0.35))
-    return dynamic_sr
+    return _core_source_reputation(
+        kind=c.doc.kind,
+        source_key=_canonical_source(c.doc.source),
+        metadata=c.doc.meta,
+        reputations=KIND_REPUTATION,
+        dynamic=dynamic_map,
+    )
 
 
 def _recency_decay(c: Claim, now: float, half_life_h: float | None = None) -> float:
@@ -292,15 +387,12 @@ def _recency_decay(c: Claim, now: float, half_life_h: float | None = None) -> fl
     保持一致）。
     """
     if half_life_h is None:
-        half_life_h = KIND_HALFLIFE_HOURS.get(c.doc.kind, 12.0)
-    if not c.doc.ts:
-        return 0.5
-    if not math.isfinite(c.doc.ts) or not math.isfinite(now):
-        return 0.5
-    age_h = (now - c.doc.ts) / 3600.0
-    if not math.isfinite(age_h) or age_h < 0:
-        return 0.5
-    return math.pow(0.5, age_h / half_life_h)
+        half_life_h = KIND_HALFLIFE_HOURS.get(c.doc.kind, _DEFAULT_HALF_LIFE_HOURS)
+    return _core_recency_decay(
+        timestamp=c.doc.ts,
+        now=now,
+        half_life_hours=half_life_h,
+    )
 
 
 # 明確否定結構(不吃「不僅/不斷/不只」這類肯定副詞)。命中前 4 字內出現才視為否定。
@@ -369,33 +461,13 @@ def _manip_hits(text: str) -> list[str]:
     命中原文字串，依出現順序、未去重。`_manipulation_penalty`／`_manipulation_flags`
     共用此清單，確保兩者對「命中什麼」的認定逐字一致，只是用途不同（前者算分數，
     後者回原文供 UI 回溯）。"""
-    hits: list[str] = []
-    for p in _MANIP_PATTERNS:
-        for m in re.finditer(p, text, re.IGNORECASE):
-            if _NEG_RX.search(text[max(0, m.start() - 4):m.start()]):
-                continue
-            hits.append(m.group(0))
-    return hits
+    return list(_core_manipulation_hits(text))
 
 
 def _manipulation_penalty(c: Claim, extra_hits: int = 0) -> float:
     # ⚠️ 誠實聲明（issue #177-A）：關鍵詞層級啟發式；非行為/統計操縱偵測。
     # 否定守門:命中前 4 字內有明確否定(如「不會暴漲」)不計,避免正當新聞被誤扣
-    hits = _manip_hits(c.text)
-    # 社群來源的操縱訊號加重
-    weight = 1.5 if c.doc.kind == "social" else 1.0
-    # `extra_hits`：預留給「確定判定為操縱、需要真正扣分」的額外命中數量，
-    # 併入同一套關鍵詞計分公式（沿用既有 0.4/hit、social 加重 1.5 倍），不新增
-    # 權重項、不動 `raw = ... - w["manip"] * manip` 既有公式結構。預設 0。
-    #
-    # CEO 定案（codex 對抗審確認根本限制）：W3 模板相似指標
-    # （`_coordination_template_flags`）**不再**餵入這裡——文字相似度單獨無法
-    # 區分「協同操縱」vs「合法聯播/引用」，自動扣分必然誤傷合法聯播；改為
-    # informational-only（見 `_coordination_signals` docstring），只產生
-    # `ScoredClaim.info_flags`，不影響這個函式的分數。目前 `score()` 呼叫本
-    # 函式一律不傳 `extra_hits`（沿用預設 0），此參數保留供未來若有「確定性
-    # 且經證實有效」的扣分型協同指標時使用。
-    return min(1.0, (len(hits) + extra_hits) * 0.4 * weight)
+    return _core_manipulation_penalty(c.text, c.doc.kind, extra_hits=extra_hits)
 
 
 def _manipulation_flags(c: Claim) -> list[str]:
@@ -406,11 +478,7 @@ def _manipulation_flags(c: Claim) -> list[str]:
     計算，不動 `_manipulation_penalty` 既有 float 簽名與既有測試鎖定的分數
     行為（兩者底層共用 `_manip_hits`，命中判定邏輯不會分岔）。
     """
-    seen: list[str] = []
-    for h in _manip_hits(c.text):
-        if h not in seen:
-            seen.append(h)
-    return seen
+    return list(_core_manipulation_flags(c.text))
 
 
 def _normalize(s: str) -> set[str]:
@@ -418,9 +486,9 @@ def _normalize(s: str) -> set[str]:
 
 
 # --- 來源身分正規化（issue #72：repo-wide canonical source identity）------
-# 全倉「同一來源只算一個獨立聲音」不變量的唯一真相來源。`_corroboration_detail`/
-# `_evidence_strength`/`_iterate_source_reputation` 與 `agent.orchestrator` 三處
-# 去重口徑都必須走這裡，不允許各自再發明一套（見 issue #106 收口與本 PR #72）。
+# 唯一實作已移至 pure core；此相容 facade 讓既有 app 呼叫點維持同一去重口徑。
+# `_corroboration_detail`/`_evidence_strength`/`_iterate_source_reputation` 與
+# `agent.orchestrator` 都必須走這裡或 core API，不允許各自再發明一套。
 #
 # 正規化分兩層：
 #   1. 零成本層：`strip().casefold()`——治大小寫/前後空白變體
@@ -431,29 +499,6 @@ def _normalize(s: str) -> set[str]:
 # ⚠️ 保守白名單原則：只有「確定是同一發布實體」的變體才收斂，絕不反向——不
 # 能把真正不同的來源併成一個，否則反而會「虛減」獨立來源數、讓回音室被誤判
 # 成跨源互證。新增別名請附註為何是同一實體。
-_SOURCE_ALIASES: dict[str, str] = {
-    # 域名形式 → 裸發布者名（同一家媒體的 RSS/網站/APP 可能帶不同後綴）
-    "coindesk.com": "coindesk",
-    "cointelegraph.com": "cointelegraph",
-    "theblock.co": "theblock",
-    "theblock": "theblock",
-    "reuters.com": "reuters",
-    "bloomberg.com": "bloomberg",
-    "bitcoinmagazine.com": "bitcoinmagazine",
-    "newsbtc.com": "newsbtc",
-    "cryptoslate.com": "cryptoslate",
-    "decrypt.co": "decrypt",
-    "utoday.com": "utoday",
-    # 平台更名 / 帳號別名：Twitter → X 是同一平臺的更名，視為同一來源。
-    "twitter": "x",
-    "x.com": "x",
-    # 監管機關官方單一源（regulatory.py 固定 `sec-gov`；其他呈現視為同一機關）。
-    "sec edgar": "sec-gov",
-    "sec": "sec-gov",
-    "sec.gov": "sec-gov",
-}
-
-
 def _canonical_source(source: str | None) -> str:
     """repo-wide 唯一來源身分正規化（issue #72 收口）。
 
@@ -466,19 +511,7 @@ def _canonical_source(source: str | None) -> str:
     只用於「比對/去重/計數」，顯示一律保留原始 `source` 字串（見
     `_normalize_source_key` 既有約定）。
     """
-    if not source:
-        return ""
-    key = source.strip().casefold()
-    if not key:
-        return ""
-    return _SOURCE_ALIASES.get(key, key)
-
-
-def _direction_compatible(d1: str, d2: str) -> bool:
-    """方向相容檢查。任一方為 neutral 時不擋（離線/預設安全）；兩者皆有方向時必須一致。"""
-    if "neutral" in (d1, d2):
-        return True
-    return d1 == d2
+    return _core_canonical_source(source)
 
 
 def _claim_coin(c: Claim) -> str:
@@ -888,33 +921,8 @@ def _directional_word_polarities(text: str) -> tuple[set[str], set[str]]:
     （即它是某個更長方向詞的子字串，如「漲」⊂「上漲」）則不計——避免子串交叉
     誤殺真正同向佐證（under-corroboration）。否定閘仍逐詞判定。
     """
-    candidates: list[tuple[int, int, str]] = []
-    for w in _BULLISH_WORDS + _BEARISH_WORDS:
-        for m in re.finditer(re.escape(w), text):
-            candidates.append((m.start(), m.end(), w))
-
-    # 最長優先（與 `_infer_direction` 同款排序），短詞子串不重複計
-    candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
-
-    consumed: list[tuple[int, int]] = []
-    def _overlaps(s: int, e: int) -> bool:
-        return any(s < ce and e > cs for cs, ce in consumed)
-
-    kept: list[tuple[int, int, str]] = []
-    for start, end, w in candidates:
-        if _overlaps(start, end):
-            continue
-        consumed.append((start, end))
-        kept.append((start, end, w))
-
-    asserted: set[str] = set()
-    negated: set[str] = set()
-    for start, end, w in kept:
-        if _NEG_RX.search(text[max(0, start - 4): start]):
-            negated.add(w)
-        else:
-            asserted.add(w)
-    return asserted, negated
+    asserted, negated = _core_directional_word_polarities(text)
+    return set(asserted), set(negated)
 
 
 def _corroboration_detail(
@@ -958,53 +966,45 @@ def _corroboration_detail(
     `"contradiction"` 只可能來自真正跑成功（或先前持久化快取過）的分類結果，
     是已驗證的真訊號，兩種模式下都照樣計入 `contradicting_sources`。
     """
-    tt = _normalize(target.text) - DOMAIN_STOP
-    independent_sources: set[str] = set()
-    contradicting_sources: set[str] = set()
-    if not tt:
-        return independent_sources, contradicting_sources
-    # issue #72 / #132：同源排除與「已計入來源」去重都用 canonical key，
-    # 否則同一來源的大小寫/空白變體（如 `"CoinDesk"` vs `" coindesk "`）會被
-    # 誤判成不同來源，讓同源轉發/重複發文灌水成多個「獨立佐證」。
-    target_key = _canonical_source(target.doc.source)
-    for c in all_claims:
-        c_key = _canonical_source(c.doc.source)
-        if c_key == target_key:
-            continue
-        if c_key in independent_sources:
-            continue
-        ct = _normalize(c.text) - DOMAIN_STOP
-        inter = len(tt & ct)
-        if not inter:
-            continue
-        if inter / len(tt) < 0.4:
-            continue
-        if not _direction_compatible(target.direction, c.direction):
-            continue
-        # issue #4 否定詞語意偵測：同一方向詞一方 asserted、另一方 negated →
-        # 語意對立（如「BTC 上漲」vs「BTC 不會上漲」），即使被否定方因
-        # `_infer_direction` 判成 neutral、通過上方方向閘，也不計為獨立佐證。
-        tgt_asserted, tgt_negated = _directional_word_polarities(target.text)
-        cand_asserted, cand_negated = _directional_word_polarities(c.text)
-        if (tgt_asserted & cand_negated) or (cand_asserted & tgt_negated):
-            continue
-        if stance_fn is None:
-            if require_entailment:
-                # W2：沒有可用的分類器，無法驗證語意——保守排除，不當佐證。
-                continue
-            independent_sources.add(c_key)
-            continue
-        label = stance_fn(target.text, c.text)
-        if label == "contradiction":
-            contradicting_sources.add(c_key)
-            continue
-        if require_entailment:
-            if label == "entailment":
-                independent_sources.add(c_key)
-            # "neutral"（genuine 或 fail-safe，無法區分）：W2 不採信，兩個集合都不進。
-            continue
-        independent_sources.add(c_key)
-    return independent_sources, contradicting_sources
+    def _to_core(claim: Claim) -> _CoreCorroborationClaim:
+        return _CoreCorroborationClaim(
+            text=claim.text,
+            source=claim.doc.source,
+            direction=claim.direction,
+        )
+
+    engine = _core_corroborate(
+        _to_core(target),
+        tuple(_to_core(claim) for claim in all_claims),
+        require_stance=stance_fn is not None,
+        require_entailment=require_entailment,
+    )
+    try:
+        pending = next(engine)
+    except StopIteration as completed:
+        result = completed.value
+    else:
+        while True:
+            # Keep the callback outside the generator-completion handler.  A
+            # provider callback that raises StopIteration is an app error, not
+            # a successful completion signal from the core generator.
+            label = stance_fn(pending.target_text, pending.candidate_text)  # type: ignore[misc]
+            # Legacy callbacks historically treated every non-contradiction
+            # value like neutral.  Preserve that facade compatibility while
+            # keeping the public core API strict for direct callers.  Check
+            # the type first so unhashable provider values cannot raise here.
+            if not isinstance(label, str) or label not in (
+                "entailment",
+                "contradiction",
+                "neutral",
+            ):
+                label = "neutral"
+            try:
+                pending = engine.send(label)  # type: ignore[arg-type]
+            except StopIteration as completed:
+                result = completed.value
+                break
+    return set(result.independent_sources), set(result.contradicting_sources)
 
 
 def _corroboration(
@@ -1046,8 +1046,7 @@ def _corroboration(
         target, all_claims, stance_fn=stance_fn
     )
     # 1 個獨立佐證→0.5，2 個→0.79，飽和到 1.0
-    n = len(independent_sources)
-    return 1.0 - math.pow(0.5, n) if n else 0.0
+    return _core_corroboration_score(tuple(sorted(independent_sources)))
 
 
 # --- W2：truth-discovery 動態來源信譽 -------------------------------------
@@ -1072,8 +1071,7 @@ def _stable_sigmoid(x: float, clamp: float = 30.0) -> float:
     `_iterate_source_reputation` 內的 `agree_union_of`/`contra_union_of`）雙重
     保險：正常情境下去重後的 net 本身就有界，這裡的 clamp 是最後一道防線。
     """
-    xc = max(-clamp, min(clamp, x))
-    return 1.0 / (1.0 + math.exp(-xc))
+    return _core_stable_sigmoid(x, clamp=clamp)
 
 
 def _reputation_evidence(
@@ -1276,7 +1274,10 @@ def _iterate_source_reputation(
             for lab in sv.values():
                 if lab in counts:
                     counts[lab] += 1
-            item_majority[key] = max(_DS_LABELS, key=lambda l: (counts[l], -_DS_LABELS.index(l)))
+            item_majority[key] = max(
+                _DS_LABELS,
+                key=lambda label: (counts[label], -_DS_LABELS.index(label)),
+            )
         # 每 source 的 DS trace 指標：
         #   agree_n       = 該 source 參與的「達標 item」（rater≥min）數
         #   contradict_n  = 該 source 與所屬 item 多數票方向不一致的次數
@@ -1295,8 +1296,6 @@ def _iterate_source_reputation(
         # r(source) 直喂 Step B 的 agreement_score；退化來源（r=0.5）由下方強制
         # α=1 處理（r=0.5 等價先驗，不動信譽）。
         agreement_override = {s: reliability.get(s, 0.5) for s in claims_by_source}
-        ds_fallback = set(ds_meta.get("fallback_sources", []))
-
     # codex 對抗審修正（第 2 輪 HIGH，PR #29）：`avg_temp_by_source`（該來源投給
     # 其他來源的「票權」）必須以「內容不同的主張種類」為單位平均，不能被同一來源
     # 重複貼同一條 claim（尤其是刻意重貼「自己最高 trust」那條）拉抬——否則即使
@@ -1433,6 +1432,237 @@ def build_stance_fn(
 
 
 # --- 主評分 --------------------------------------------------------------
+def _preflight_kernel_resolution(
+    claims: list[Claim],
+    now: float,
+    weights: dict | None,
+    dynamic_reputation: bool,
+    reputation_iterations: int,
+    offline: bool,
+    stance_fn: Callable[[str, str], str] | None,
+) -> dict:
+    """Validate all resolver inputs before provider/cache/stance work."""
+    if type(now) not in {int, float}:
+        raise ValueError("now must be an exact finite nonnegative number")
+    try:
+        valid_now = math.isfinite(float(now)) and now >= 0
+    except OverflowError:
+        valid_now = False
+    if not valid_now:
+        raise ValueError("now must be an exact finite nonnegative number")
+    if type(claims) is not list or not all(type(claim) is Claim for claim in claims):
+        raise ValueError("claims must be an exact list of exact Claim values")
+    if not all(type(claim.doc) is Document for claim in claims):
+        raise ValueError("claim documents must be exact Document values")
+    # Convert before reading IDs into a set: conversion validates exact primitive
+    # fields, so hostile __hash__/__eq__ hooks can never execute below.
+    detached = tuple(_to_core_scoring_claim(claim) for claim in claims)
+    claim_ids = tuple(claim.id for claim in detached)
+    if any(not claim_id for claim_id in claim_ids):
+        raise ValueError("claim IDs must be nonempty exact strings")
+    if len(set(claim_ids)) != len(claim_ids):
+        raise ValueError("duplicate claim IDs are not allowed")
+    if (
+        type(reputation_iterations) is not int
+        or not 1 <= reputation_iterations <= MAX_REPUTATION_ITERATIONS
+    ):
+        raise ValueError(
+            f"reputation_iterations must be an exact integer in [1, {MAX_REPUTATION_ITERATIONS}]"
+        )
+    if type(dynamic_reputation) is not bool:
+        raise ValueError("dynamic_reputation must be an exact boolean")
+    if type(offline) is not bool:
+        raise ValueError("offline must be an exact boolean")
+    if stance_fn is not None and not callable(stance_fn):
+        raise ValueError("stance_fn must be callable or None")
+    resolved_weights = DEFAULT_WEIGHTS if weights is None else weights
+    if type(resolved_weights) is not dict:
+        raise ValueError("weights must contain exactly src, corr, rec, and manip")
+    weight_keys = tuple(resolved_weights.keys())
+    if not all(type(key) is str for key in weight_keys) or set(weight_keys) != {
+        "src", "corr", "rec", "manip"
+    }:
+        raise ValueError("weights must contain exactly src, corr, rec, and manip")
+    for key in ("src", "corr", "rec", "manip"):
+        value = resolved_weights[key]
+        if type(value) not in {int, float}:
+            raise ValueError(f"weight {key} must be a finite number in [0, 1]")
+        try:
+            valid_weight = math.isfinite(value) and 0 <= value <= 1
+        except OverflowError:
+            valid_weight = False
+        if not valid_weight:
+            raise ValueError(f"weight {key} must be a finite number in [0, 1]")
+    return resolved_weights
+
+
+def resolve_kernel_claim_resolutions(
+    claims: list[Claim],
+    now: float,
+    weights: dict | None = None,
+    stance_fn: Callable[[str, str], str] | None = None,
+    dynamic_reputation: bool = True,
+    reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
+    offline: bool = False,
+) -> tuple[_CoreKernelClaimResolution, ...]:
+    """Resolve provider/app-owned scoring facts without scoring a claim.
+
+    This is the formal-run adapter seam: all semantic/provider work happens
+    here, while the returned immutable values can be consumed by
+    :func:`trustforge_core.run_kernel` without I/O or repeated provider calls.
+    """
+    w = _preflight_kernel_resolution(
+        claims, now, weights, dynamic_reputation, reputation_iterations, offline,
+        stance_fn,
+    )
+    info_flags_by_id = _coordination_signals(claims) if claims else {}
+    dynamic_map: dict[str, float] | None = None
+    trace_by_source: dict[str, dict] | None = None
+    if dynamic_reputation and claims:
+        try:
+            evidence = _reputation_evidence(claims, stance_fn=stance_fn)
+            trace_meta: dict = {}
+            sr0_for_trace: dict[str, float] = {}
+            raw_source_of: dict[str, str] = {}
+            for claim in claims:
+                source = _canonical_source(claim.doc.source)
+                if source not in sr0_for_trace:
+                    sr0_for_trace[source] = _source_reputation(claim)
+                    raw_source_of[source] = claim.doc.source
+            dynamic_map = _iterate_source_reputation(
+                claims,
+                now,
+                weights=w,
+                stance_fn=stance_fn,
+                iterations=reputation_iterations,
+                evidence=evidence,
+                trace_out=trace_meta,
+                offline=offline,
+            )
+            iterations_run = trace_meta.get("iterations_run", 0)
+            ds_mode = trace_meta.get("mode") == "ds_em"
+            by_source: dict[str, list[Claim]] = {}
+            for claim in claims:
+                by_source.setdefault(
+                    _canonical_source(claim.doc.source), []
+                ).append(claim)
+            trace_by_source = {}
+            for source, source_claims in by_source.items():
+                if ds_mode:
+                    agree_n = trace_meta.get("ds_agree_n", {}).get(source, 0)
+                    contradict_n = trace_meta.get("ds_contradict_n", {}).get(source, 0)
+                else:
+                    agree_sources: set[str] = set()
+                    contra_sources: set[str] = set()
+                    for claim in source_claims:
+                        agree, contra = evidence.get(claim.id, (set(), set()))
+                        agree_sources |= agree
+                        contra_sources |= contra
+                    agree_n = len(agree_sources)
+                    contradict_n = len(contra_sources)
+                trace_by_source[source] = {
+                    "source": raw_source_of.get(source, source),
+                    "prior": sr0_for_trace.get(source, 0.0),
+                    "final": dynamic_map.get(source, sr0_for_trace.get(source, 0.0)),
+                    "agree_n": agree_n,
+                    "contradict_n": contradict_n,
+                    "iterations_run": iterations_run,
+                    "mode": trace_meta.get("mode", "entailment"),
+                }
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "dynamic_reputation failed, falling back to static reputation",
+                exc_info=True,
+            )
+            dynamic_map = None
+            trace_by_source = None
+
+    resolutions: list[_CoreKernelClaimResolution] = []
+    for claim in claims:
+        independent_sources, _ = _corroboration_detail(
+            claim, claims, stance_fn=stance_fn
+        )
+        source = _canonical_source(claim.doc.source)
+        trace = trace_by_source.get(source) if trace_by_source is not None else None
+        resolved_dynamic = (
+            dynamic_map.get(source) if dynamic_map is not None else None
+        )
+        resolutions.append(
+            _CoreKernelClaimResolution(
+                claim_id=claim.id,
+                independent_sources=tuple(sorted(independent_sources)),
+                dynamic_reputation=resolved_dynamic,
+                reputation_trace=_to_core_reputation_trace(trace),
+                info_flags=tuple(info_flags_by_id.get(claim.id, [])),
+            )
+        )
+    return tuple(resolutions)
+
+
+def resolve_kernel_run_resolution(
+    claims: list[Claim],
+    now: float,
+    *,
+    resolved_direction: str,
+    weights: dict | None = None,
+    stance_client=None,
+    stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
+    stance_remaining_time_fn: Callable[[], float] | None = None,
+    stance_fn: Callable[[str, str], str] | None = None,
+    dynamic_reputation: bool = True,
+    reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
+    offline: bool = False,
+) -> _CoreKernelRunResolution:
+    """Compose the complete immutable scoring policy for one formal run.
+
+    TODO(#420 PR-B): make this seam the only production scoring composition;
+    PR-A deliberately leaves orchestrator and AnalysisFlow routing unchanged.
+    """
+    resolved_weights = _preflight_kernel_resolution(
+        claims, now, weights, dynamic_reputation, reputation_iterations, offline,
+        stance_fn,
+    )
+    if type(stance_pair_budget) is not int or stance_pair_budget < 0:
+        raise ValueError("stance_pair_budget must be an exact nonnegative integer")
+    if stance_fn is not None and not callable(stance_fn):
+        raise ValueError("stance_fn must be callable or None")
+    if stance_remaining_time_fn is not None and not callable(stance_remaining_time_fn):
+        raise ValueError("stance_remaining_time_fn must be callable or None")
+    weight_table = tuple(
+        (key, resolved_weights[key]) for key in ("src", "corr", "rec", "manip")
+    )
+    calibration_version, calibration_table = _aggregate_calibration_spec()
+    policy = {
+        "score_weights": weight_table,
+        "reputations": tuple(KIND_REPUTATION.items()),
+        "half_lives": (
+            ("default", _DEFAULT_HALF_LIFE_HOURS),
+            *tuple(KIND_HALFLIFE_HOURS.items()),
+        ),
+        "calibration_model_version": calibration_version,
+        "calibration_table": calibration_table,
+        "resolved_direction": resolved_direction,
+    }
+    # Validate every policy and direction value before any semantic callback.
+    _CoreKernelRunResolution(claim_resolutions=(), **policy)
+    if stance_fn is None:
+        stance_fn = build_stance_fn(
+            stance_client, stance_pair_budget, stance_remaining_time_fn
+        )
+    return _CoreKernelRunResolution(
+        claim_resolutions=resolve_kernel_claim_resolutions(
+            claims,
+            now,
+            weights=resolved_weights,
+            stance_fn=stance_fn,
+            dynamic_reputation=dynamic_reputation,
+            reputation_iterations=reputation_iterations,
+            offline=offline,
+        ),
+        **policy,
+    )
+
+
 def score(
     claims: list[Claim],
     now: float,
@@ -1510,100 +1740,49 @@ def score(
     if stance_fn is None:
         stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
 
-    # W3：確定性、informational-only 文字相似度透明化訊號（模板相似），對本次
-    # `score()` 的整個 claims 池只算一次（O(n²)，量級同 `_corroboration`，見
-    # `_coordination_signals` docstring）。**不參與 manip 計算**——CEO 定案：
-    # 文字相似度單獨無法證明協同操縱，只回填 `ScoredClaim.info_flags` 供人工
-    # 判讀，`_iterate_source_reputation` 的 static_manip 也不吃這份結果。
-    info_flags_by_id = _coordination_signals(claims) if claims else {}
-
-    dynamic_map: dict[str, float] | None = None
-    trace_by_source: dict[str, dict] | None = None
-    if dynamic_reputation and claims:
-        try:
-            # evidence 只算一次，`_iterate_source_reputation` 的 K 輪迭代與下面建 trace
-            # 共用同一份結果，不因迭代輪數或 trace 需求重呼叫 stance_fn。
-            evidence = _reputation_evidence(claims, stance_fn=stance_fn)
-            trace_meta: dict = {}
-            sr0_for_trace: dict[str, float] = {}
-            raw_source_of: dict[str, str] = {}
-            for c in claims:
-                s = _canonical_source(c.doc.source)
-                if s not in sr0_for_trace:
-                    sr0_for_trace[s] = _source_reputation(c)
-                    raw_source_of[s] = c.doc.source
-            dynamic_map = _iterate_source_reputation(
-                claims,
-                now,
-                weights=w,
-                stance_fn=stance_fn,
-                iterations=reputation_iterations,
-                evidence=evidence,
-                trace_out=trace_meta,
-                offline=offline,
-            )
-            iterations_run = trace_meta.get("iterations_run", 0)
-            ds_mode = trace_meta.get("mode") == "ds_em"
-            by_source: dict[str, list[Claim]] = {}
-            for c in claims:
-                by_source.setdefault(_canonical_source(c.doc.source), []).append(c)
-            trace_by_source = {}
-            for s, s_claims in by_source.items():
-                if ds_mode:
-                    # DS EM 模式：agree_n=參與的達標 item 數、contradict_n=與所屬
-                    # item 多數票方向不一致次數（不偽造 agree/contra 聯集）。
-                    agree_n = trace_meta.get("ds_agree_n", {}).get(s, 0)
-                    contradict_n = trace_meta.get("ds_contradict_n", {}).get(s, 0)
-                else:
-                    agree_sources: set[str] = set()
-                    contra_sources: set[str] = set()
-                    for c in s_claims:
-                        agree, contra = evidence.get(c.id, (set(), set()))
-                        agree_sources |= agree
-                        contra_sources |= contra
-                    agree_n = len(agree_sources)
-                    contradict_n = len(contra_sources)
-                trace_by_source[s] = {
-                    "source": raw_source_of.get(s, s),
-                    "prior": round(sr0_for_trace.get(s, 0.0), 4),
-                    "final": round(dynamic_map.get(s, sr0_for_trace.get(s, 0.0)), 4),
-                    "agree_n": agree_n,
-                    "contradict_n": contradict_n,
-                    "iterations_run": iterations_run,
-                    "mode": trace_meta.get("mode", "entailment"),
-                }
-        except Exception:
-            # fail-safe：EM 失敗（不收斂/溢位/斷言違反）→ 靜默 fallback 到靜態信譽
-            logging.getLogger(__name__).warning(
-                "dynamic_reputation failed, falling back to static reputation",
-                exc_info=True,
-            )
-            dynamic_map = None
-            trace_by_source = None
-
+    resolutions = resolve_kernel_claim_resolutions(
+        claims,
+        now,
+        weights=w,
+        stance_fn=stance_fn,
+        dynamic_reputation=dynamic_reputation,
+        # Preserve the legacy public score() contract, which clamps explicit
+        # integer iteration counts.  The lower formal-run resolver itself is
+        # strict and rejects out-of-range values before any callback.
+        reputation_iterations=(
+            max(1, min(reputation_iterations, MAX_REPUTATION_ITERATIONS))
+            if type(reputation_iterations) is int
+            else reputation_iterations
+        ),
+        offline=offline,
+    )
     out: list[ScoredClaim] = []
-    for c in claims:
-        rep = _source_reputation(c, dynamic_map=dynamic_map)
-        corr = _corroboration(c, claims, stance_fn=stance_fn)
-        rec = _recency_decay(c, now)
-        c_info_flags = info_flags_by_id.get(c.id, [])
-        manip = _manipulation_penalty(c)
-        raw = w["src"] * rep + w["corr"] * corr + w["rec"] * rec - w["manip"] * manip
-        trust = max(0.0, min(1.0, raw))
+    for c, resolution in zip(claims, resolutions, strict=True):
+        core_scored = _core_score_claim(
+            _to_core_scoring_claim(c),
+            now=now,
+            weights=tuple((key, w[key]) for key in ("src", "corr", "rec", "manip")),
+            reputations=tuple(KIND_REPUTATION.items()),
+            half_lives=(
+                ("default", _DEFAULT_HALF_LIFE_HOURS),
+                *tuple(KIND_HALFLIFE_HOURS.items()),
+            ),
+            independent_sources=resolution.independent_sources,
+            dynamic_reputation=resolution.dynamic_reputation,
+            reputation_trace=resolution.reputation_trace,
+            info_flags=resolution.info_flags,
+        )
         out.append(
             ScoredClaim(
                 claim=c,
-                trust=trust,
-                components={"reputation": rep, "corroboration": corr,
-                            "recency": rec, "manipulation": manip},
-                reputation_trace=(
-                    trace_by_source.get(_canonical_source(c.doc.source)) if trace_by_source is not None else None
-                ),
-                manip_flags=_manipulation_flags(c),
+                trust=core_scored.trust,
+                components=dict(core_scored.components),
+                reputation_trace=_legacy_trace(core_scored.reputation_trace),
+                manip_flags=list(core_scored.manip_flags),
                 # W3：文字相似度透明化 flag，informational-only，回填
                 # `Evidence.info_flags`（見 `_coordination_signals` docstring）。
                 # 不併入 `manip_flags`／`components["manipulation"]`。
-                info_flags=c_info_flags,
+                info_flags=list(core_scored.info_flags),
             )
         )
     # --- telemetry: record score() invocation ---
@@ -1684,8 +1863,9 @@ _CALIBRATION_TABLE: list[tuple[float, float]] = [
 def _calibrate_confidence(raw: float) -> float:
     """校準一個 [0, 1] 指標。
 
-    優先使用 isotonic regression 訓練模型（data/model-artifacts/ 版控版 → out/model-artifacts/ runtime 版），
-    無模型時 fallback 到硬編碼 `_CALIBRATION_TABLE`。
+    預設使用硬編碼 `_CALIBRATION_TABLE`。isotonic regression 訓練模型屬於
+    holdout 待驗證候選，只有明確設定 `TRUSTFORGE_ENABLE_CALIBRATION_MODEL=1`
+    時才會啟用。
 
     確定性、免 LLM：純查表/插值，同輸入必同輸出，不呼叫任何模型。
     輸入超出 [0, 1] 時 clamp 到邊界。
@@ -1699,25 +1879,15 @@ def _calibrate_confidence(raw: float) -> float:
         return apply_calibration(x, model)
 
     # Fallback：硬編碼查表
-    table = _CALIBRATION_TABLE
-    if x <= table[0][0]:
-        return table[0][1]
-    if x >= table[-1][0]:
-        return table[-1][1]
-    for (x0, y0), (x1, y1) in zip(table, table[1:]):
-        if x0 <= x <= x1:
-            if x1 == x0:  # 防禦性：表若有重複 x 值不除以 0
-                return y0
-            ratio = (x - x0) / (x1 - x0)
-            return round(y0 + ratio * (y1 - y0), 4)
-    return round(x, 4)  # 理論上不會到這（表已覆蓋 [0, 1]，防禦性寫法）
+    return _interpolate_calibration(x, _CALIBRATION_TABLE)
 
 
 # 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
 _CALIBRATION_MODEL_CACHE: dict[str, list[dict] | None] = {}
+_CALIBRATION_MODEL_PATH: str | None = None
 
 
-def _calibration_model_path() -> "Path | None":
+def _calibration_model_path() -> Path | None:
     """Find calibration model: data/ (versioned) → out/ (runtime) → None.
 
     遍歷順序（高優先到低優先）：
@@ -1725,7 +1895,9 @@ def _calibration_model_path() -> "Path | None":
     2. out/model-artifacts/calibration-model.json   ← 本機 runtime 產出
     3. None → fallback 到 _CALIBRATION_TABLE
     """
-    from pathlib import Path
+    if _CALIBRATION_MODEL_PATH:
+        override = Path(_CALIBRATION_MODEL_PATH)
+        return override if override.is_file() else None
 
     root = Path(__file__).resolve().parents[3]
     for candidate in [
@@ -1739,12 +1911,40 @@ def _calibration_model_path() -> "Path | None":
 
 def _load_cached_calibration_model() -> list[dict] | None:
     """載入並快取校準模型。模組內只讀一次。"""
+    if os.environ.get("TRUSTFORGE_ENABLE_CALIBRATION_MODEL") != "1":
+        return None
     if "model" not in _CALIBRATION_MODEL_CACHE:
         from ..calibration_model import load_calibration_model
 
         path = _calibration_model_path()
         _CALIBRATION_MODEL_CACHE["model"] = load_calibration_model(path) if path is not None else None
     return _CALIBRATION_MODEL_CACHE["model"]
+
+
+def _aggregate_calibration_spec() -> tuple[str, tuple[tuple[float, float], ...]]:
+    """Load app-owned calibration once and detach exact immutable points."""
+    model = _load_cached_calibration_model()
+    if model is None:
+        return _CORE_FIXED_HEURISTIC_VERSION, ()
+    if type(model) is not list:
+        raise ValueError("calibration model must be an exact list")
+    points: list[tuple[float, float]] = []
+    for point in model:
+        if type(point) is not dict:
+            raise ValueError("calibration model points must be exact dictionaries")
+        confidence: object | None = None
+        calibrated: object | None = None
+        for key, value in point.items():
+            if type(key) is not str:
+                continue
+            if key == "confidence":
+                confidence = value
+            elif key == "calibrated":
+                calibrated = value
+        if confidence is None or calibrated is None:
+            raise ValueError("calibration model point is incomplete")
+        points.append((confidence, calibrated))  # type: ignore[arg-type]
+    return _CORE_ISOTONIC_VERSION, tuple(points)
 
 
 def _evidence_strength(
@@ -1844,42 +2044,26 @@ def aggregate(scored: list[ScoredClaim], query: str,
     (query)` 相關性排序、全納入（不新增篩選），維持 #32 修正前就存在的
     既有語意。
     """
-    qt = _normalize(query)
-    if coin:
-        # 先依 (是否幣種特定, 信任分) 排序——把「明確提及該幣」的主張排在
-        # 「全市場通用」主張之前，使下面的 [:10]/[:5] 截斷優先保留前者
-        # （demo 可靠性 #32 追加的既有精神，見上方 docstring）。
-        relevant = sorted(
-            scored,
-            key=lambda sc: (0 if _mentions_coin(sc.claim.doc, coin) else 1, -sc.trust),
-        )
-        # W4 codex 對抗審第 8 輪根治：排序後直接用 `_matches_coin` 過濾
-        # （保留本幣相關 + 全市場通用，只排除明確他幣）——`supporting`/
-        # `contrarian`/`confidence` 全部從這份已過濾的 `relevant` 算，
-        # 不再是「全納入、只排序」。`_matches_coin` 是幣別別名比對，不是
-        # #32 當年那種脆弱的 `_normalize(query)` 文字比對，不會重蹈覆轍。
-        relevant = [sc for sc in relevant if _matches_coin(sc.claim.doc, coin)]
-    else:
-        # 與 query 相關者優先（無相關詞則全納入）——未指定 coin 時無獨立的
-        # 幣種相關性判準可用，行為逐字向後相容，不引入新篩選。
-        relevant = [
-            sc for sc in scored
-            if not qt or (_normalize(sc.claim.text) & qt)
-        ] or scored
-        relevant.sort(key=lambda sc: sc.trust, reverse=True)
-    supporting = [sc for sc in relevant if sc.trust >= support_threshold]
-    contrarian = [sc for sc in relevant if sc.trust < support_threshold]
-
-    confidence = (sum(sc.trust for sc in supporting) / len(supporting)) if supporting else 0.0
-    # W4：用「校準前」的完整 supporting/contrarian（截斷前，與 confidence 同一份
-    # 基礎資料，見上方 `_evidence_strength` 對「不重新計算 trust、不新增資料源」
-    # 的承諾）算證據強度綜合指標，再校準——不用截斷後的 [:10]/[:5]，避免評分
-    # 結果隨截斷上限漂移（跟 `confidence` 本身的計算基礎保持一致）。
-    evidence_strength = _evidence_strength(supporting, contrarian, confidence)
+    core_by_id: dict[int, ScoredClaim] = {}
+    core_scored: list[_CoreKernelScoredClaim] = []
+    for item in scored:
+        core_item = _to_core_aggregate_scored(item)
+        core_by_id[id(core_item)] = item
+        core_scored.append(core_item)
+    calibration_version, calibration_table = _aggregate_calibration_spec()
+    core_result = _core_aggregate_scored_claims(
+        tuple(core_scored),
+        query=query,
+        support_threshold=support_threshold,
+        coin=coin or "",
+        calibration_model_version=calibration_version,
+        calibration_table=calibration_table,
+        resolved_direction="neutral",
+    )
     return TrustedBrief(
         query=query,
-        supporting=supporting[:10],
-        contrarian=contrarian[:5],
-        confidence=confidence,
-        calibrated_confidence=_calibrate_confidence(evidence_strength),
+        supporting=[core_by_id[id(item)] for item in core_result.supporting],
+        contrarian=[core_by_id[id(item)] for item in core_result.contrarian],
+        confidence=core_result.trust_score,
+        calibrated_confidence=core_result.confidence,
     )

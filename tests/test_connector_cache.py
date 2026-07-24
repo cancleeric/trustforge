@@ -34,6 +34,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+import trustforge.ingestion.cache as cache_mod
 from trustforge.ingestion.base import Document, Source
 from trustforge.ingestion.cache import (
     COIN_AGNOSTIC_SOURCES,
@@ -163,6 +164,18 @@ def test_json_backend_survives_corrupt_file(tmp_path):
     # set() 之後應能正常寫入、不被壞檔卡住（覆蓋壞檔）。
     backend.set("k", [{"id": "1"}], fetched_at=1.0)
     assert backend.get("k")["docs"] == [{"id": "1"}]
+
+
+def test_json_backend_works_without_fcntl(monkeypatch, tmp_path):
+    monkeypatch.setattr(cache_mod, "fcntl", None)
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+
+    backend.set("k", [{"id": "1"}], fetched_at=1.0)
+
+    assert backend.get("k") == {"docs": [{"id": "1"}], "fetched_at": 1.0}
+    assert backend.set_if_newer("k", [{"id": "old"}], fetched_at=0.5) is False
+    assert backend.set_if_newer("k", [{"id": "2"}], fetched_at=2.0) is True
+    assert backend.get("k") == {"docs": [{"id": "2"}], "fetched_at": 2.0}
 
 
 def test_get_cache_backend_reads_env(monkeypatch, tmp_path):

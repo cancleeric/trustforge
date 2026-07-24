@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+import math
 from typing import Any, Callable
 
 from .agent.orchestrator import run_agent_pipeline
@@ -13,14 +14,27 @@ from .schema import QuestionType
 
 
 def _epoch(value: str) -> float:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("historical replay requires timezone-aware published_at")
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _snapshot_boundary(snapshot: dict[str, Any]) -> float:
+    try:
+        boundary = float(snapshot.get("snapshot_epoch"))
+    except (TypeError, ValueError):
+        raise ValueError("snapshot requires finite positive snapshot_epoch") from None
+    if not math.isfinite(boundary) or boundary <= 0:
+        raise ValueError("snapshot requires finite positive snapshot_epoch")
+    return boundary
 
 
 def replay_snapshot(snapshot: dict[str, Any], *, query: str, qtype: QuestionType = QuestionType.MULTI_SOURCE) -> dict[str, Any]:
     """Replay only documents legal at ``snapshot_epoch``; never fetch/cache-read."""
-    boundary = float(snapshot.get("snapshot_epoch", 0) or 0)
+    boundary = _snapshot_boundary(snapshot)
     coin = str(snapshot.get("coin", "")).upper()
-    if not boundary or not coin:
+    if not coin:
         raise ValueError("snapshot requires coin and snapshot_epoch")
     docs: list[Document] = []
     for source_entry in snapshot.get("sources") or []:

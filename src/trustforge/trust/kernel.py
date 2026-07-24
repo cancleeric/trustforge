@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 # Contract version — bump when KernelInput/KernelOutput schema changes
 KERNEL_CONTRACT_VERSION = "1.0.0"
@@ -29,33 +30,48 @@ KERNEL_CONTRACT_VERSION = "1.0.0"
 KERNEL_SCHEMA_VERSION = KERNEL_CONTRACT_VERSION
 
 # ---------------------------------------------------------------------------
-# Phase-1 facade re-exports（向後相容，不可移除）
-# 呼叫端可透過 kernel 模組取得這些符號，不需直接依賴 scoring.py 的內部結構。
+# Phase-1 facade lazy re-exports（向後相容，不可移除）
+# 呼叫端仍可透過 kernel 模組取得這些符號；但 kernel.py 本身不再於
+# module import time 載入 scoring.py，避免把 scoring/Bedrock 相關依賴拉進
+# Trust Kernel import graph。
 # ---------------------------------------------------------------------------
 
-# 核心計算函式
-from .scoring import (  # noqa: E402
-    extract_claims,
-    score,
-    aggregate,
-)
+_SCORING_EXPORTS = {
+    "extract_claims",
+    "score",
+    "aggregate",
+    "DEFAULT_WEIGHTS",
+    "KIND_REPUTATION",
+    "KIND_HALFLIFE_HOURS",
+    "Claim",
+    "ScoredClaim",
+    "TrustedBrief",
+}
 
-# Dawid-Skene EM 動態信譽
-from .dawid_skene import em_source_reliability  # noqa: E402
+_DAWID_SKENE_EXPORTS = {
+    "em_source_reliability",
+}
 
-# 核心常數
-from .scoring import (  # noqa: E402
-    DEFAULT_WEIGHTS,
-    KIND_REPUTATION,
-    KIND_HALFLIFE_HOURS,
-)
 
-# 資料型別
-from .scoring import (  # noqa: E402
-    Claim,
-    ScoredClaim,
-    TrustedBrief,
-)
+def __getattr__(name: str) -> Any:
+    """Resolve legacy facade exports lazily.
+
+    This preserves `from trustforge.trust.kernel import score` compatibility
+    while keeping the Kernel module import boundary physically clean.
+    """
+    if name in _SCORING_EXPORTS:
+        from . import scoring
+
+        value = getattr(scoring, name)
+        globals()[name] = value
+        return value
+    if name in _DAWID_SKENE_EXPORTS:
+        from . import dawid_skene
+
+        value = getattr(dawid_skene, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ---------------------------------------------------------------------------
 # v2 新增：版本化 Kernel Input / Output contract
@@ -81,6 +97,7 @@ class KernelInput:
     pit_epoch: float  # Point-in-time Unix timestamp
     coin: str
     query: str
+    stance_fn: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -183,24 +200,23 @@ def run_kernel(inp: KernelInput) -> KernelOutput:
     scoring.py 自身可有 bedrock 依賴（用於 stance timeout 常數），
     但那些依賴不會出現在本模組的 import 圖中。
 
-    注意：模組層級已有 from .scoring import score, aggregate 的 facade re-export，
-    因此這裡直接使用模組頂層的符號，不需要再延遲 import（兩者指向同一物件）。
-
     Args:
         inp: KernelInput — 標準化 Claim list + PIT timestamp + coin + query。
 
     Returns:
         KernelOutput — 信任分、校準信心、棄權旗標、方向、推理代碼、計數。
     """
-    # 直接使用模組頂層已 re-export 的符號（score / aggregate），
-    # 避免在函式體內重複 import 造成混淆。
-    scored = score(
+    from .scoring import aggregate as _aggregate
+    from .scoring import score as _score
+
+    scored = _score(
         inp.claims,
         now=inp.pit_epoch,
         dynamic_reputation=False,   # 純記憶體，不呼叫 Bedrock
+        stance_fn=inp.stance_fn,
         offline=True,
     )
-    brief = aggregate(scored, inp.query, coin=inp.coin)
+    brief = _aggregate(scored, inp.query, coin=inp.coin)
 
     calibrated = (
         brief.calibrated_confidence

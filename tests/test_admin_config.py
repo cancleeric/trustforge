@@ -183,8 +183,21 @@ def test_get_config_bad_version_falls_back_to_none():
     assert config.version_corrupt is True
 
 
+def test_get_config_local_unavailable_returns_empty_config():
+    for code in ("AccessDeniedException", "ResourceNotFoundException"):
+        store, mock_table = _store_with_mock_table()
+        mock_table.get_item.side_effect = ClientError(
+            {"Error": {"Code": code, "Message": "local dev unavailable"}},
+            "GetItem",
+        )
+
+        cfg = get_config(store)
+
+        assert cfg == AdminConfig()
+
+
 def test_get_config_read_failure_raises_dedicated_error():
-    """讀取失敗（網路/憑證/throttle）≠「沒資料」：必須 raise 讓呼叫端
+    """讀取失敗（網路/throttle）≠「沒資料」：必須 raise 讓呼叫端
     fail-safe，不得靜默回空 config（否則 PR-3 會把 outage 當『未設定』）。"""
     store, mock_table = _store_with_mock_table()
     mock_table.get_item.side_effect = ClientError(

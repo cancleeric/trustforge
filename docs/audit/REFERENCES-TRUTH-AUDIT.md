@@ -6,6 +6,8 @@
 > 比對來源: `/tmp/trustforge-devlog/references.html` vs `main` branch (commit HEAD)
 >
 > **v2 變更摘要**：補入 AgentCore backend registry 段落（🟡）；校準模型路徑 PR #394 修正後升為 ✅ verified；明確標注 GitHub Actions `.disabled` 語意；逐項對照 issue comment 2026-07-22 的六項待修正點。
+>
+> **v2.1 補充**：Calibration 的 ✅ 僅代表 model artifact 與 runtime lookup path 已驗證；public references page 不得把 calibration activation 標成無條件 production verified，正式啟用仍需 evidence gates。
 
 ## 狀態圖例
 
@@ -291,3 +293,26 @@
 - [x] GitHub Actions `.disabled` 說明強化（明確 Production Deploy workflow 亦停用）
 - [x] issue comment 六項待修正點全部對照更新（HOYA BIT / GitHub Actions / App Runner / nginx / EventBridge / Calibration / AgentCore / Manipulation）
 - [x] 狀態圖例覆蓋所有六個符號（✅ / 🟡 / 🔬 / 📚 / ⛔ / ⚠）
+
+---
+
+## 可重跑驗證
+
+此 audit 由 `scripts/check_references_truth_audit.py` 提供 focused guard，可在 PR review 時重跑：
+
+```bash
+python3 scripts/check_references_truth_audit.py
+python3 scripts/check_references_truth_audit.py --require-references-export
+pytest --no-cov tests/test_references_truth_audit.py
+```
+
+第一個命令允許本地開發環境沒有 `/tmp/trustforge-devlog/references.html` 時跳過 public export；第二個命令用於 PR/release review，必須取得 public references export，否則直接失敗，避免只更新 repo audit 卻漏掉對外頁面同步。
+
+檢查重點：
+
+- HOYA BIT live ticker 仍標為 `⚠ blocked-external`，不得在正式 HTTPS contract 前升為 ✅。
+- AgentCore runtime routing 仍標為 `🟡 implemented-not-verified`，不得把 registry 存在誤寫成 production routing 已驗證。
+- RAG 仍是 `📚 reference/planned`，不得把文獻引用誤寫成 runtime 功能。
+- Manipulation detection 仍是資訊性 `🟡 implemented-not-verified`，不得誤寫成交易/production 防護。
+- MOPS/FSC/TWSE/TPEx 在取得真資料與測試前不得標 ✅。
+- GitHub Actions 只描述停用中的 `.disabled` workflows；Production Deploy workflow 必須明確停用。

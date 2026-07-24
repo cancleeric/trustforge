@@ -1,5 +1,7 @@
 # Trust Kernel Boundary（信任核心邊界）
 
+![Trust Kernel runtime boundary](RUNTIME-BOUNDARY.svg)
+
 > Issue: #381 | Spec: `.kiro/specs/trust-kernel-381.md`
 
 ## 概述
@@ -61,6 +63,50 @@ Trust Kernel 模組（`kernel.py` 及未來 `kernel/` 下所有檔案）禁止 i
 - `open()` / `pathlib.Path().read_*` — 檔案 IO
 
 CI 由 `tests/test_trust_kernel.py::test_kernel_boundary_no_prohibited_imports` 強制。
+
+## Aggregate calibration migration（#452）
+
+`trustforge_core.aggregate_scored_claims()` 現在要求 calibration provenance
+明確且 fail-closed。舊呼叫若完全省略 calibration 參數，或沿用 canonical
+`DEFAULT_CALIBRATION_TABLE`，會走內建 `fixed-heuristic-v1` 相容路徑：
+
+```python
+aggregate_scored_claims(scored, query="BTC")
+aggregate_scored_claims(
+    scored,
+    query="BTC",
+    calibration_table=DEFAULT_CALIBRATION_TABLE,
+)
+```
+
+新呼叫應明示版本。固定 heuristic 可省略 table，或傳 canonical default；
+自訂 table 必須明示 `ISOTONIC_VERSION`：
+
+```python
+aggregate_scored_claims(
+    scored,
+    query="BTC",
+    calibration_model_version=FIXED_HEURISTIC_VERSION,
+)
+
+aggregate_scored_claims(
+    scored,
+    query="BTC",
+    calibration_model_version=ISOTONIC_VERSION,
+    calibration_table=((0.0, 0.1), (1.0, 0.9)),
+)
+```
+
+安全邊界如下：
+
+- 未提供版本卻傳入自訂 table：拒絕。
+- 顯式傳入 `None` 或未知版本：拒絕。
+- `FIXED_HEURISTIC_VERSION` 搭配自訂 table：拒絕。
+- isotonic table 必須是 immutable exact tuple，且 x 嚴格遞增、y 單調不減。
+
+`resolved_direction` 顯式 exact string 會原值透傳。省略時暫時保留舊
+`run_kernel` 的 deterministic inference，直到 #453 接手 production direction
+routing。#452 不修改 orchestrator、report、pipeline 或 production routing。
 
 ## 呼叫端 Adapter 模式
 

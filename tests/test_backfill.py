@@ -17,6 +17,27 @@ from trustforge.backfill import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch):
+    """Block real HTTP calls in backfill tests.
+
+    ``BackfillWorker._load_historical_sources`` fetches full Fear & Greed +
+    blockchain.com chart histories from live APIs with 30 s timeouts.  Each
+    ``run_batch`` day triggers these calls, making the suite the slowest
+    segment (~75 s of the full run).  The worker degrades gracefully when
+    they fail (snapshot still has local OHLCV data), so stubbing ``fetch_url``
+    to raise immediately makes tests deterministic and fast without changing
+    the assertions under test.
+    """
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("network disabled in backfill tests")
+
+    monkeypatch.setattr(
+        "trustforge.ingestion.safe_fetch.fetch_url", _fail,
+    )
+
+
 @pytest.fixture
 def tmp_env(tmp_path):
     """Provide isolated paths for backfill state and DB."""
@@ -25,6 +46,7 @@ def tmp_env(tmp_path):
     env = {
         "TRUSTFORGE_BACKFILL_STATE_PATH": str(state_file),
         "TRUSTFORGE_BACKFILL_ENABLED": "",  # clear env override
+        "TRUSTFORGE_HOME": str(tmp_path),
     }
     with patch.dict(os.environ, env, clear=False):
         yield {"state": state_file, "db": db_file, "tmp": tmp_path}

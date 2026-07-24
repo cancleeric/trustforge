@@ -181,6 +181,43 @@ export interface Report {
   hypothesis_ledger?: HypothesisLedger | null
   calibrated_confidence: number
   decision_state: DecisionState
+  asset_context?: AssetContext | null
+  risk_notices?: RiskNotice[]
+}
+
+export interface AssetContext {
+  schema_version: string
+  asset_id: string
+  symbol: string
+  name: string
+  sector: string
+  layer: string
+  token_role: string
+  market_cap_tier: string
+  ecosystem: string | null
+  parent_asset_id: string | null
+  tags: string[]
+  /** L2 結算鏈（例：ARB → "ethereum"）。舊快照可能未帶，缺省為 "unknown"。 */
+  settlement_chain?: string
+  /** 交易手續費計價代幣（例：ARB 轉帳仍需 ETH 付 gas）。缺省為 "unknown"。 */
+  gas_token?: string
+  /** 上下游依賴（白話關聯說明的資料來源，例：sequencer、canonical_bridge）。 */
+  dependencies?: string[]
+}
+
+export interface RiskNotice {
+  code: string
+  severity: 'info' | 'warning'
+  message: string
+}
+
+// ── /api/asset-context ───────────────────────────────────────────────────
+
+/** `GET /api/asset-context?symbol=` 回應資料——查無資料時 `asset_context`
+ * 為 `null`（HTTP 200，非 404/500，見 `web.py::_handle_api_asset_context`
+ * docstring）。 */
+export interface AssetContextResponseData {
+  asset_context: AssetContext | null
 }
 
 /** 洞察的一個貢獻來源（InsightExplainabilityPanel 最小單元）。 */

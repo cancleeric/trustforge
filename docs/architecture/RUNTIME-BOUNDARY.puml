@@ -1,0 +1,61 @@
+@startuml
+title Trust Kernel Runtime Boundary — Actual v0.17.2 and target
+
+top to bottom direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 12
+skinparam linetype ortho
+skinparam defaultFontName "Noto Sans CJK TC"
+skinparam defaultFontSize 15
+skinparam ArrowColor #475569
+
+!define LIVE #DCFCE7
+!define CORE #DBEAFE
+!define PARTIAL #FEF3C7
+!define BLOCKED #FEE2E2
+
+package "Outer layer — IO allowed" {
+  rectangle "Sources / Cache" as sources LIVE
+  rectangle "Pipeline" as pipeline LIVE
+  rectangle "Orchestrator" as orchestrator LIVE
+  rectangle "Bedrock / stance" as bedrock LIVE
+  rectangle "Calibration artifact IO" as modelio PARTIAL
+}
+
+package "Current scoring implementation" {
+  rectangle "scoring.py\ncalculation + outer assembly mixed" as scoring PARTIAL
+}
+
+package "Kernel v2 contract" {
+  rectangle "KernelInput\nclaims · PIT · coin · query" as input CORE
+  rectangle "run_kernel()" as run CORE
+  rectangle "KernelOutput\nscore · confidence · abstain\ndirection · reason codes" as output CORE
+}
+
+package "Target pure kernel" {
+  rectangle "Pure scoring" as pureScore CORE
+  rectangle "Corroboration" as corroboration CORE
+  rectangle "Reputation" as reputation CORE
+  rectangle "Abstain + reason codes" as abstain CORE
+}
+
+sources --> pipeline
+pipeline --> orchestrator
+orchestrator --> scoring : actual
+orchestrator --> bedrock
+modelio --> scoring
+
+input --> run
+run --> scoring : currently delegates
+run --> output
+orchestrator ..> input : target, not connected
+
+scoring ..> pureScore : extract
+scoring ..> corroboration : extract
+scoring ..> reputation : extract
+scoring ..> abstain : extract
+
+rectangle "Boundary rule\nPure kernel must not import IO, LLM, env,\nfilesystem, web, skills, upgrade or deploy" as rule BLOCKED
+rule -[hidden]-> pureScore
+@enduml

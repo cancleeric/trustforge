@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -187,18 +188,28 @@ def test_progress_accepts_only_new_verified_commit():
     }
 
 
-def test_runtime_guard_validates_git_common_dir_and_rejects_symlink_lane(tmp_path):
+def test_runtime_guard_validates_git_common_dir_and_rejects_symlink_lane(tmp_path, monkeypatch):
     module = _load_script("ceo_runtime_guard_git", "ceo_runtime_guard.py")
+    for key in tuple(os.environ):
+        if key.startswith("GIT_"):
+            monkeypatch.delenv(key)
     repo = tmp_path / "repo"
     lane = tmp_path / "lane"
-    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True)
+    # pytest normally supplies an empty tmp_path, but an interrupted/concurrent
+    # full-suite run can leave the numbered directory behind.  This fixture is
+    # destructive only inside its pytest-owned directory and must not inherit a
+    # stale repository, remote, commit, or worktree registration.
+    shutil.rmtree(repo, ignore_errors=True)
+    shutil.rmtree(lane, ignore_errors=True)
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True, env=git_env)
     (repo / "README").write_text("test\n")
-    subprocess.run(["git", "-C", str(repo), "add", "README"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(lane)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "add", "README"], check=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial"], check=True, capture_output=True, env=git_env)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(lane)], check=True, capture_output=True, env=git_env)
 
     assert module.validate_lane(repo, lane)["valid"] is True
     lane_link = tmp_path / "lane-link"
@@ -265,16 +276,55 @@ def test_ceo_sweep_builds_continuous_development_inventory(monkeypatch):
     report = module.build_report()
 
     assert report["cadence"] == "30 minutes"
-    assert report["mode"] == "ceo_continuous_development_inventory"
-    assert report["execution_status"] == "inventory_complete_runner_dispatch_pending"
-    assert "gray_plan_and_ceo_auto_review" in report["decision"]
+    assert report["mode"] == "ceo_half_hour_issue_pr_development"
+    assert report["execution_status"] == "issue_pr_lane_dispatch_required"
+    assert "one_scoped_issue_pr_lane" in report["decision"]
     assert report["cpo_plan"]["proposed_author"] == "gray"
     assert report["ceo_review"]["required_decision"] == "per_lane_auto_review_after_gray_plan"
     assert report["development_plan"]["operating_mode"] == "unattended_scoped_issue_lanes"
+    assert report["development_plan"]["skip_prevention"]["failure_reason"] == (
+        "runnable_issue_queue_not_exhausted_but_no_issue_pr_opened"
+    )
+    assert "fall_through_to_next_runnable_issue" in report["skip_prevention_gate"]
     serialized = json.dumps(report).lower()
     assert "approved_for" not in serialized
     assert '"author"' not in serialized
 
+
+def test_ceo_lane_prompt_requires_fallback_after_blocked_candidate():
+    prompt = (ROOT / "scripts/prompts/ceo-development-loop.md").read_text()
+
+    assert "Parent runner contract" in prompt
+    assert "fall through next runnable queue candidate" in prompt
+    assert "cannot end only blocked/dependency" in prompt
+    assert "issue PR open review" in prompt
+
+
+def test_ceo_cycle_runner_does_not_fail_normal_backlog_over_lane_capacity():
+    runner = (ROOT / "scripts/run_ceo_cycle.sh").read_text()
+    normal_capacity_limited_backlog = {
+        "queue_count": 2,
+        "dispatched_count": 1,
+        "failures": 0,
+        "setup_failures": 0,
+    }
+    failures = (
+        normal_capacity_limited_backlog["failures"]
+        + normal_capacity_limited_backlog["setup_failures"]
+    )
+    if (
+        normal_capacity_limited_backlog["dispatched_count"] == 0
+        and normal_capacity_limited_backlog["queue_count"] > 0
+    ):
+        failures += 1
+
+    assert failures == 0
+    assert 'DISPATCHED_COUNT="${#pids[@]}"' in runner
+    assert "if (( DISPATCHED_COUNT == 0 )); then" in runner
+    assert "QUEUE_COUNT > DISPATCHED_COUNT" not in runner
+    assert "runnable_issue_queue_not_exhausted_but_no_issue_pr_opened" not in runner
+    assert '"dispatched_lanes":%s' not in runner
+    assert "dispatch_required_but_no_lane_started" in runner
 
 @pytest.mark.parametrize(
     "source",
@@ -581,11 +631,45 @@ def test_runner_and_prompt_enforce_unattended_safety_contract():
     assert "secrets" in prompt
     assert "cost caps" in prompt
     assert "never bypass that hook" in prompt
+    assert "/codex-review" in prompt
+    assert "request at least one reviewer" in prompt
+    assert "harper (ciso) and gray (cpo)" in prompt
     installer = (ROOT / "scripts/install_ceo_half_hour_schedule.sh").read_text()
     template = (ROOT / "scripts/templates/com.hurricanesoft.trustforge-ceo-sweep.plist.in").read_text()
     assert "command -v gh" in installer
     assert "install_launch_agent.py" in installer
 
+
+def test_ceo_sweep_report_exposes_pr_open_and_merge_review_gates(monkeypatch):
+    module = _load_script("ceo_sweep_review_gates", "ceo_sweep.py")
+    monkeypatch.setattr(module, "_json_cmd", lambda _args: [])
+
+    report = module.build_report(max_lanes=1)
+    development_plan = report["development_plan"]
+
+    assert development_plan["pr_open_guardrails"] == [
+        "reviewer request required when every PR is opened",
+        "leave PR open for human review unless explicit merge approval exists",
+    ]
+    assert "eye scan or breaking-change analysis required before merge" in development_plan["merge_guardrails"]
+    assert "/codex-review adversarial review required before merge" in development_plan["merge_guardrails"]
+    assert (
+        "security changes require harper (CISO) plus gray (CPO) review before merge"
+        in development_plan["merge_guardrails"]
+    )
+
+    serialized = json.dumps(development_plan).lower()
+    assert "green ci" not in serialized
+    assert "local targeted verification" in serialized
+
+
+def test_ceo_lane_prompt_does_not_require_github_ci_or_full_pre_push_gate():
+    prompt = (ROOT / "scripts/prompts/ceo-development-loop.md").read_text()
+
+    assert "GitHub Actions CI is not an automated merge gate" in prompt
+    assert "Do not require full" in prompt
+    assert "pre-push-style local suite before opening review PR" in prompt
+    assert "focused local verification" in prompt
 
 def test_ci_is_manual_and_pre_push_is_full_local_gate():
     workflow = (ROOT / ".github/workflows/ci.yml.disabled").read_text()

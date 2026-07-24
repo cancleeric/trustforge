@@ -292,6 +292,7 @@ class TestNoModelFallback:
 
         # 清除 cache 並指向模型
         scoring._CALIBRATION_MODEL_CACHE.clear()
+        monkeypatch.setenv("TRUSTFORGE_ENABLE_CALIBRATION_MODEL", "1")
         monkeypatch.setattr(scoring, "_CALIBRATION_MODEL_PATH", str(model_path))
 
         # 驗證用模型映射：0.0 → 0.1（模型值，非硬編碼的 0.0）

@@ -240,11 +240,11 @@ def build_report(max_lanes: int = 1) -> dict:
         },
         {
             "q": "是否有 issue 需要本輪處理？",
-            "a": "查看 open issues 的 UX、CI、production、cost 類標籤；高風險 issue 必須進 CEO 計劃審查。",
+            "a": "查看 open issues 的 UX、production、cost、test/perf 類標籤；高風險 issue 必須進 CEO 計劃審查。",
         },
         {
             "q": "是否有 PR 卡住 merge gate？",
-            "a": "每個 PR 必須有 reviewer、CI 綠、eye scan 與 /codex-review 紀錄；缺任一項不得 merge。",
+            "a": "每個 PR 開立時必須指定 reviewer；merge 前必須有 local targeted verification、eye scan、/codex-review 紀錄。安全相關修改另需 harper(CISO)+gray(CPO) 雙審；缺任一項不得 merge。",
         },
     ]
     development_plan = {
@@ -253,9 +253,15 @@ def build_report(max_lanes: int = 1) -> dict:
         "ceo_review_required_before_implementation": True,
         "proposed_ceo_role": "final_plan_gate_and_execution_dispatch",
         "operating_mode": "unattended_scoped_issue_lanes",
+        "skip_prevention": {
+            "rule": "never stop inventory-only or blocked-candidate-only sweep while runnable queue candidates remain",
+            "required_recovery": "if selected issue blocked, dependency-gated, or evidence-only, dispatch next runnable queue candidate in same cycle",
+            "success_condition": "at least one new or continued issue PR left open review whenever execution_queue non-empty",
+            "failure_reason": "runnable_issue_queue_not_exhausted_but_no_issue_pr_opened",
+        },
         "priority_order": [
-            "open PRs with failing CI or missing reviewer",
-            "open PRs with green CI but missing approval",
+            "open PRs failing local targeted verification or missing reviewer",
+            "open PRs local targeted verification but missing approval",
             "open issues labeled production, bug, e2e, cost or release",
             "completed issues missing GitHub evidence or closure",
             "unfinished development plan milestones",
@@ -264,15 +270,19 @@ def build_report(max_lanes: int = 1) -> dict:
         "proposed_development_dispatch": [
             {"owner": "gray", "role": "CPO", "action": "write scoped development or optimization plan before implementation"},
             {"owner": "ceo", "role": "CEO", "action": "approve or reject the plan before code work starts"},
-            {"owner": "deputy-analysis", "role": "background subagent", "action": "analyze issue, PR, branch, CI and e2e evidence"},
+            {"owner": "deputy-analysis", "role": "background subagent", "action": "analyze issue, PR, branch, local verification, review and e2e evidence"},
             {"owner": "deputy-implementation", "role": "background subagent", "action": "handle approved scoped code work without blocking CEO interaction"},
             {"owner": "harper", "role": "CISO", "action": "review security-sensitive changes before merge"},
         ],
+        "pr_open_guardrails": [
+            "reviewer request required when every PR is opened",
+            "leave PR open for human review unless explicit merge approval exists",
+        ],
         "merge_guardrails": [
-            "reviewer required on every PR",
-            "eye scan required before merge",
-            "/codex-review required before merge",
-            "security changes require harper plus /codex-review",
+            "reviewer approval required before merge",
+            "eye scan or breaking-change analysis required before merge",
+            "/codex-review adversarial review required before merge",
+            "security changes require harper (CISO) plus gray (CPO) review before merge",
         ],
         "automation_boundary": "runner may dispatch issue lanes; production, main merges, releases, secrets and cost changes remain forbidden",
     }
@@ -291,6 +301,7 @@ def build_report(max_lanes: int = 1) -> dict:
         "forbidden_automation": [
             "no automatic merge",
             "no automatic deploy",
+            "no successful sweep report after checking only blocked/dependency issues while runnable queue candidates remain",
             "no security-sensitive merge without harper plus /codex-review",
             "no completion report without local verification",
         ],
@@ -304,7 +315,7 @@ def build_report(max_lanes: int = 1) -> dict:
     }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "ceo_continuous_development_inventory",
+        "mode": "ceo_half_hour_issue_pr_development",
         "cadence": "30 minutes",
         WORLD_FIRST_BAR: {
             "question": "這一輪是否讓 TrustForge 更接近世界第一？",
@@ -320,8 +331,9 @@ def build_report(max_lanes: int = 1) -> dict:
         "merged_pr_ownership": ownership,
         "inventory_errors": inventory_errors,
         "execution_queue": [] if inventory_errors else build_execution_queue(issues, prs, max_lanes, ownership),
-        "decision": "dispatch_scoped_lanes_after_gray_plan_and_ceo_auto_review",
-        "execution_status": "inventory_failed" if inventory_errors else "inventory_complete_runner_dispatch_pending",
+        "decision": "dispatch_one_scoped_issue_pr_lane_after_gray_plan_and_ceo_auto_review",
+        "skip_prevention_gate": "blocked_or_dependency_candidate_must_fall_through_to_next_runnable_issue_before_reporting_success",
+        "execution_status": "inventory_failed" if inventory_errors else "issue_pr_lane_dispatch_required",
     }
 
 

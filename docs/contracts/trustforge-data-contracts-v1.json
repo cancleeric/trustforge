@@ -1,4 +1,193 @@
 {
+  "AssetContext": {
+    "$id": "https://trustforge.local/contracts/asset-context/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "dependencies": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "ecosystem": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "gas_token": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "layer": {
+        "enum": [
+          "layer_1",
+          "layer_2",
+          "app",
+          "protocol",
+          "token",
+          "offchain",
+          "unknown"
+        ]
+      },
+      "market_cap_tier": {
+        "enum": [
+          "large",
+          "mid",
+          "small",
+          "micro",
+          "unknown"
+        ]
+      },
+      "name": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "parent_asset_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "sector": {
+        "enum": [
+          "defi",
+          "l1",
+          "l2",
+          "stablecoin",
+          "exchange",
+          "infrastructure",
+          "meme",
+          "rwa",
+          "gaming",
+          "ai",
+          "unknown"
+        ]
+      },
+      "settlement_chain": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "symbol": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "tags": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "token_role": {
+        "enum": [
+          "gas",
+          "governance",
+          "utility",
+          "staking",
+          "stable",
+          "lp",
+          "wrapped",
+          "meme",
+          "unknown"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "asset_id",
+      "symbol",
+      "name",
+      "sector",
+      "layer",
+      "token_role",
+      "market_cap_tier",
+      "ecosystem",
+      "parent_asset_id",
+      "tags"
+    ],
+    "title": "TrustForge AssetContext",
+    "type": "object"
+  },
+  "DependencyEdge": {
+    "$id": "https://trustforge.local/contracts/dependency-edge/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "confidence": {
+        "maximum": 1,
+        "minimum": 0,
+        "type": "number"
+      },
+      "kind": {
+        "enum": [
+          "bridge",
+          "oracle",
+          "liquidity",
+          "settlement",
+          "governance",
+          "infrastructure",
+          "unknown"
+        ]
+      },
+      "observed_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "official_source_url": {
+        "minLength": 1,
+        "pattern": "^https://(arbitrum\\.foundation|blog\\.arbitrum\\.io|ethereum\\.org|forum\\.arbitrum\\.foundation|gov\\.optimism\\.io)(/|$)",
+        "type": "string"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "source_asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "target_asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "valid_from": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "valid_until": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "schema_version",
+      "source_asset_id",
+      "target_asset_id",
+      "kind",
+      "valid_from",
+      "valid_until",
+      "confidence",
+      "official_source_url",
+      "observed_at"
+    ],
+    "title": "TrustForge DependencyEdge",
+    "type": "object"
+  },
   "Document": {
     "$id": "https://trustforge.local/contracts/document/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -119,11 +308,332 @@
     "title": "TrustForge Evidence",
     "type": "object"
   },
+  "PeerMetricsSnapshot": {
+    "$id": "https://trustforge.local/contracts/peer-metrics-snapshot/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "activity_breakdown": {
+        "additionalProperties": {
+          "additionalProperties": false,
+          "properties": {
+            "method": {
+              "enum": [
+                "observed",
+                "estimated",
+                "reported",
+                "unknown"
+              ]
+            },
+            "source": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "unit": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "value": {
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "unit",
+            "method",
+            "source"
+          ],
+          "type": "object"
+        },
+        "minProperties": 1,
+        "type": "object"
+      },
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "gas_fee": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "enum": [
+              "observed",
+              "estimated",
+              "reported",
+              "unknown"
+            ]
+          },
+          "source": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "unit": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0,
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "unit",
+          "method",
+          "source"
+        ],
+        "type": "object"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "observed_tps": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "enum": [
+              "observed",
+              "estimated",
+              "reported",
+              "unknown"
+            ]
+          },
+          "source": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "unit": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0,
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "unit",
+          "method",
+          "source"
+        ],
+        "type": "object"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "tvl": {
+        "additionalProperties": false,
+        "properties": {
+          "method": {
+            "enum": [
+              "observed",
+              "estimated",
+              "reported",
+              "unknown"
+            ]
+          },
+          "source": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "unit": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0,
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "unit",
+          "method",
+          "source"
+        ],
+        "type": "object"
+      },
+      "window_end": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "window_start": {
+        "format": "date-time",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "asset_id",
+      "observed_tps",
+      "tvl",
+      "gas_fee",
+      "activity_breakdown",
+      "window_start",
+      "window_end",
+      "observed_at"
+    ],
+    "title": "TrustForge PeerMetricsSnapshot",
+    "type": "object"
+  },
   "Report": {
+    "$defs": {
+      "AssetContext": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_id": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ecosystem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gas_token": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "layer": {
+            "enum": [
+              "layer_1",
+              "layer_2",
+              "app",
+              "protocol",
+              "token",
+              "offchain",
+              "unknown"
+            ]
+          },
+          "market_cap_tier": {
+            "enum": [
+              "large",
+              "mid",
+              "small",
+              "micro",
+              "unknown"
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "parent_asset_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "const": "1.0.0"
+          },
+          "sector": {
+            "enum": [
+              "defi",
+              "l1",
+              "l2",
+              "stablecoin",
+              "exchange",
+              "infrastructure",
+              "meme",
+              "rwa",
+              "gaming",
+              "ai",
+              "unknown"
+            ]
+          },
+          "settlement_chain": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "symbol": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "token_role": {
+            "enum": [
+              "gas",
+              "governance",
+              "utility",
+              "staking",
+              "stable",
+              "lp",
+              "wrapped",
+              "meme",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "asset_id",
+          "symbol",
+          "name",
+          "sector",
+          "layer",
+          "token_role",
+          "market_cap_tier",
+          "ecosystem",
+          "parent_asset_id",
+          "tags"
+        ],
+        "type": "object"
+      }
+    },
     "$id": "https://trustforge.local/contracts/report/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
+      "asset_context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AssetContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "calibrated_confidence": {
         "type": "number"
       },
@@ -200,6 +710,34 @@
       "question_type": {
         "type": "string"
       },
+      "risk_notices": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "message": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "info",
+                "warning"
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "message"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
       "schema_version": {
         "const": "1.0.0"
       }
@@ -222,6 +760,93 @@
       "decision_state"
     ],
     "title": "TrustForge Report",
+    "type": "object"
+  },
+  "UpgradeEvent": {
+    "$id": "https://trustforge.local/contracts/upgrade-event/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "actual_at": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "event_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "impact_direction": {
+        "enum": [
+          "positive",
+          "negative",
+          "mixed",
+          "unknown"
+        ]
+      },
+      "impacted_asset_ids": {
+        "items": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "observed_at": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "official_source_url": {
+        "minLength": 1,
+        "pattern": "^https://(arbitrum\\.foundation|blog\\.arbitrum\\.io|ethereum\\.org|forum\\.arbitrum\\.foundation|gov\\.optimism\\.io)(/|$)",
+        "type": "string"
+      },
+      "scheduled_at": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "status": {
+        "enum": [
+          "announced",
+          "scheduled",
+          "activated",
+          "cancelled"
+        ]
+      },
+      "title": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "event_id",
+      "asset_id",
+      "title",
+      "scheduled_at",
+      "actual_at",
+      "status",
+      "impact_direction",
+      "impacted_asset_ids",
+      "official_source_url",
+      "observed_at"
+    ],
+    "title": "TrustForge UpgradeEvent",
     "type": "object"
   }
 }
