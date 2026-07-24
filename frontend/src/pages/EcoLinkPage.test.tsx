@@ -23,6 +23,7 @@ describe('EcoLinkPage', () => {
     const response: ApiEnvelope<EcoLinkResponseData> = {
       ok: true,
       data: {
+        illustrative: true,
         verdict: 'possible_relation',
         message: 'asset:arb 與 asset:eth 可能相關',
         impact_paths: [
@@ -45,7 +46,7 @@ describe('EcoLinkPage', () => {
   it('verdict: insufficient_data 時顯示「資料不足，無法判定」', async () => {
     vi.mocked(getEcoLink).mockResolvedValueOnce({
       ok: true,
-      data: { verdict: 'insufficient_data', message: '資料不足，無法判定', impact_paths: [] },
+      data: { illustrative: true, verdict: 'insufficient_data', message: '資料不足，無法判定', impact_paths: [] },
     })
     renderPage('/eco-link?asset=asset:op')
     expect(await screen.findByText('資料不足，無法判定。')).toBeInTheDocument()
@@ -63,7 +64,7 @@ describe('EcoLinkPage', () => {
   it('點快速建議可切換查詢資產並帶入 URL', async () => {
     vi.mocked(getEcoLink).mockResolvedValue({
       ok: true,
-      data: { verdict: 'insufficient_data', message: '資料不足，無法判定', impact_paths: [] },
+      data: { illustrative: true, verdict: 'insufficient_data', message: '資料不足，無法判定', impact_paths: [] },
     })
     renderPage()
     await screen.findByText('資料不足，無法判定。')

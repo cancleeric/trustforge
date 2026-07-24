@@ -1,5 +1,6 @@
 import type { PeerComparisonEntry, PeerMetricsSnapshot } from '../lib/types'
 import { formatMetricValue } from '../lib/peerMetricsFormat'
+import IllustrativeBadge from './IllustrativeBadge'
 
 /** 同層 peer 比較表（模組③ Wave 3）：TPS/TVL/Gas/活躍度並列。
  * `comparable: false` 的 peer 顯示「無法比較：{reason}」，不留白補 0；
@@ -21,11 +22,11 @@ function AssetRow({
   reason,
 }: {
   label: string
-  snapshot: PeerMetricsSnapshot
+  snapshot: PeerMetricsSnapshot | null
   comparable: boolean
   reason: string | null
 }) {
-  if (!comparable) {
+  if (!comparable || !snapshot) {
     return (
       <>
         <tr className="border-b border-tf-border last:border-0" data-testid="peer-row">
@@ -59,14 +60,14 @@ function AssetCard({
   reason,
 }: {
   label: string
-  snapshot: PeerMetricsSnapshot
+  snapshot: PeerMetricsSnapshot | null
   comparable: boolean
   reason: string | null
 }) {
   return (
     <div className="rounded-lg border border-tf-border bg-tf-bg p-3" data-testid="peer-card">
       <p className="font-mono text-xs font-semibold text-tf-text">{label}</p>
-      {!comparable ? (
+      {!comparable || !snapshot ? (
         <p className="mt-1 text-xs text-tf-warn" role="note">
           無法比較：{reason ?? '原因未知'}
         </p>
@@ -103,7 +104,10 @@ export default function PeerComparisonTable({
 }) {
   return (
     <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-      <p className="mb-3 font-mono text-xs font-semibold uppercase text-tf-link">同層比較</p>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <p className="font-mono text-xs font-semibold uppercase text-tf-link">同層比較</p>
+        <IllustrativeBadge />
+      </div>
 
       {/* desktop：橫向表格；sm 以下隱藏，避免固定欄寬造成橫向溢位。 */}
       <div className="hidden overflow-x-auto sm:block">
@@ -121,8 +125,8 @@ export default function PeerComparisonTable({
             <AssetRow label={`${snapshot.asset_id}（本體）`} snapshot={snapshot} comparable reason={null} />
             {peers.map((peer) => (
               <AssetRow
-                key={peer.snapshot.asset_id}
-                label={peer.snapshot.asset_id}
+                key={peer.asset_id}
+                label={peer.asset_id}
                 snapshot={peer.snapshot}
                 comparable={peer.comparable}
                 reason={peer.reason}
@@ -137,8 +141,8 @@ export default function PeerComparisonTable({
         <AssetCard label={`${snapshot.asset_id}（本體）`} snapshot={snapshot} comparable reason={null} />
         {peers.map((peer) => (
           <AssetCard
-            key={peer.snapshot.asset_id}
-            label={peer.snapshot.asset_id}
+            key={peer.asset_id}
+            label={peer.asset_id}
             snapshot={peer.snapshot}
             comparable={peer.comparable}
             reason={peer.reason}

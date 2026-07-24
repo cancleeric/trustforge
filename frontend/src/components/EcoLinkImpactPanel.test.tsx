@@ -39,6 +39,16 @@ describe('EcoLinkImpactPanel', () => {
     expect(screen.queryByTestId('impact-path')).not.toBeInTheDocument()
   })
 
+  it('渲染「示範資料」illustrative 揭露徽章（possible_relation 與 insufficient_data 都要顯示）', () => {
+    const { unmount } = render(
+      <EcoLinkImpactPanel verdict="possible_relation" message="可能相關" impactPaths={[makePath()]} />,
+    )
+    expect(screen.getByText(/示範資料/)).toBeInTheDocument()
+    unmount()
+    render(<EcoLinkImpactPanel verdict="insufficient_data" message="資料不足，無法判定" impactPaths={[]} />)
+    expect(screen.getByText(/示範資料/)).toBeInTheDocument()
+  })
+
   it('文案不得出現「導致」「因此」等因果字眼', () => {
     const { container } = render(
       <EcoLinkImpactPanel

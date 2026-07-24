@@ -671,18 +671,25 @@ function isPeerMetricsSnapshot(value: unknown): value is PeerMetricsSnapshot {
   return true
 }
 
-function isPeerComparisonEntry(value: unknown): value is { snapshot: PeerMetricsSnapshot; comparable: boolean; reason: string | null } {
+/** `asset_id` 恆存在（宣告在 peer_group 裡的 peer 一律列出，即使查無
+ * snapshot 也不靜默丟棄），`snapshot` 在該 peer 查無資料時為 `null`
+ * （見 `web.py::_handle_api_peer_metrics` docstring / PR #653）。 */
+function isPeerComparisonEntry(value: unknown): value is { asset_id: string; snapshot: PeerMetricsSnapshot | null; comparable: boolean; reason: string | null } {
   return (
     isPlainObject(value) &&
-    isPeerMetricsSnapshot(value.snapshot) &&
+    typeof value.asset_id === 'string' &&
+    (value.snapshot === null || isPeerMetricsSnapshot(value.snapshot)) &&
     typeof value.comparable === 'boolean' &&
     (value.reason === null || typeof value.reason === 'string')
   )
 }
 
+/** `illustrative` 只驗形狀是否為 `true`——本端點恆回 `true`（fixture-only
+ * 資料），畸形時整包轉 parse_error，不讓「示範資料」揭露悄悄消失。 */
 export function isPeerMetricsResponseData(value: unknown): value is PeerMetricsResponseData {
   return (
     isPlainObject(value) &&
+    value.illustrative === true &&
     (value.snapshot === null || isPeerMetricsSnapshot(value.snapshot)) &&
     Array.isArray(value.peers) &&
     value.peers.every(isPeerComparisonEntry)
@@ -708,6 +715,7 @@ function isEcoLinkImpactPath(value: unknown): value is EcoLinkImpactPath {
 export function isEcoLinkResponseData(value: unknown): value is EcoLinkResponseData {
   return (
     isPlainObject(value) &&
+    value.illustrative === true &&
     typeof value.verdict === 'string' &&
     typeof value.message === 'string' &&
     Array.isArray(value.impact_paths) &&

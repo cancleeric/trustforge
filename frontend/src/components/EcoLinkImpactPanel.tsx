@@ -1,4 +1,5 @@
 import type { EcoLinkImpactPath } from '../lib/types'
+import IllustrativeBadge from './IllustrativeBadge'
 
 /** EcoLink 影響路徑面板（模組③ Wave 3）：`verdict === 'insufficient_data'`
  * 時顯示「資料不足，無法判定」，不假裝「沒有影響」；措辭一律「可能
@@ -49,13 +50,19 @@ export default function EcoLinkImpactPanel({
   if (verdict === 'insufficient_data') {
     return (
       <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4 text-sm text-tf-muted" role="status">
+        <div className="mb-2">
+          <IllustrativeBadge />
+        </div>
         資料不足，無法判定。
       </div>
     )
   }
   return (
     <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-      <p className="mb-2 font-mono text-xs font-semibold uppercase text-tf-link">EcoLink 影響路徑</p>
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <p className="font-mono text-xs font-semibold uppercase text-tf-link">EcoLink 影響路徑</p>
+        <IllustrativeBadge />
+      </div>
       <p className="mb-3 text-sm text-tf-text2">{message}</p>
       <ul className="flex flex-col gap-2">
         {impactPaths.map((path) => (

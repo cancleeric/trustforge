@@ -25,7 +25,12 @@ function makeSnapshot(overrides: Partial<PeerMetricsSnapshot> = {}): PeerMetrics
 describe('PeerComparisonTable', () => {
   it('渲染本體 snapshot 與可比較 peer 的 TPS/TVL/Gas/活躍度並列', () => {
     const peers: PeerComparisonEntry[] = [
-      { snapshot: makeSnapshot({ asset_id: 'asset:op', observed_tps: metric(15.9) }), comparable: true, reason: null },
+      {
+        asset_id: 'asset:op',
+        snapshot: makeSnapshot({ asset_id: 'asset:op', observed_tps: metric(15.9) }),
+        comparable: true,
+        reason: null,
+      },
     ]
     render(<PeerComparisonTable snapshot={makeSnapshot()} peers={peers} />)
     expect(screen.getAllByText(/asset:arb/).length).toBeGreaterThan(0)
@@ -36,6 +41,7 @@ describe('PeerComparisonTable', () => {
   it('comparable:false 的 peer 顯示「無法比較：{reason}」，不留白補 0', () => {
     const peers: PeerComparisonEntry[] = [
       {
+        asset_id: 'asset:matic',
         snapshot: makeSnapshot({ asset_id: 'asset:matic', observed_tps: metric(null) }),
         comparable: false,
         reason: 'observed_tps missing',
@@ -43,6 +49,15 @@ describe('PeerComparisonTable', () => {
     ]
     render(<PeerComparisonTable snapshot={makeSnapshot()} peers={peers} />)
     expect(screen.getAllByText(/無法比較：observed_tps missing/).length).toBeGreaterThan(0)
+  })
+
+  it('peer 的 snapshot 為 null（宣告在 peer_group 但查無資料）時仍列出該 peer，顯示「無法比較：snapshot missing」，不靜默丟棄', () => {
+    const peers: PeerComparisonEntry[] = [
+      { asset_id: 'asset:ghost', snapshot: null, comparable: false, reason: 'snapshot missing' },
+    ]
+    render(<PeerComparisonTable snapshot={makeSnapshot()} peers={peers} />)
+    expect(screen.getAllByText(/asset:ghost/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/無法比較：snapshot missing/).length).toBeGreaterThan(0)
   })
 
   it('缺值欄位（value: null）誠實顯示「—」，不補 0', () => {
@@ -54,5 +69,10 @@ describe('PeerComparisonTable', () => {
   it('peers 為空陣列時顯示空狀態文案', () => {
     render(<PeerComparisonTable snapshot={makeSnapshot()} peers={[]} />)
     expect(screen.getByText('目前無同層 peer 可比較。')).toBeInTheDocument()
+  })
+
+  it('顯示「示範資料」illustrative 揭露徽章，不讓評審誤把 fixture 當真實觀測', () => {
+    render(<PeerComparisonTable snapshot={makeSnapshot()} peers={[]} />)
+    expect(screen.getByText(/示範資料/)).toBeInTheDocument()
   })
 })

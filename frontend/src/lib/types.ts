@@ -246,18 +246,26 @@ export interface PeerMetricsSnapshot {
   observed_at?: string
 }
 
-/** 同層 peer 的比較結果。`comparable: false` 時 `reason` 必附具體原因
- * （例如 `"observed_tps missing"`）——UI 顯示「無法比較：{reason}」，
- * 不留白補 0（見 openapi.yaml peer-metrics 說明）。 */
+/** 同層 peer 的比較結果。`asset_id` 恆存在（宣告在 peer_group 裡的
+ * peer 一律列出，即使查無 snapshot 也不靜默丟棄，見 `web.py`
+ * `_handle_api_peer_metrics` docstring / PR #653 codex-review）。
+ * `snapshot` 在該 peer 查無資料時為 `null`（此時 `comparable` 恆
+ * `false`）。`comparable: false` 時 `reason` 必附具體原因（例如
+ * `"observed_tps missing"`、`"snapshot missing"`）——UI 顯示「無法
+ * 比較：{reason}」，不留白補 0。 */
 export interface PeerComparisonEntry {
-  snapshot: PeerMetricsSnapshot
+  asset_id: string
+  snapshot: PeerMetricsSnapshot | null
   comparable: boolean
   reason: string | null
 }
 
 /** `GET /api/peer-metrics?asset=` 回應資料——查無此資產時 `snapshot` 為
- * `null`、`peers` 為空陣列（語意是「查無資料」而非請求錯誤）。 */
+ * `null`、`peers` 為空陣列（語意是「查無資料」而非請求錯誤）。
+ * `illustrative` 恆為 `true`：本端點資料只來自 fixture，非即時真實
+ * 觀測值，UI 必須顯眼揭露（誠實鐵則，見 openapi.yaml 說明）。 */
 export interface PeerMetricsResponseData {
+  illustrative: true
   snapshot: PeerMetricsSnapshot | null
   peers: PeerComparisonEntry[]
 }
@@ -276,8 +284,10 @@ export interface EcoLinkImpactPath {
 /** `GET /api/eco-link?asset=` 回應資料。`verdict === 'insufficient_data'`
  * 時 `impact_paths` 為空陣列，UI 顯示「資料不足，無法判定」，不假裝
  * 「沒有影響」（見 openapi.yaml eco-link 說明）。措辭一律「可能相關」，
- * 前端不得出現「導致」「因此」等因果字眼。 */
+ * 前端不得出現「導致」「因此」等因果字眼。`illustrative` 恆為 `true`：
+ * 本端點資料只來自 fixture，非即時真實抓取，UI 必須顯眼揭露。 */
 export interface EcoLinkResponseData {
+  illustrative: true
   verdict: 'possible_relation' | 'insufficient_data'
   message: string
   impact_paths: EcoLinkImpactPath[]
