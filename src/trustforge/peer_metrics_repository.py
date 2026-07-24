@@ -48,6 +48,9 @@ class PeerMetricsRepository:
         record = self._by_asset_id.get(asset_id)
         return record.snapshot if record is not None else None
 
+    def record_for(self, asset_id: str) -> PeerMetricsRecord | None:
+        return self._by_asset_id.get(asset_id)
+
     def peer_group(self, asset_id: str) -> tuple[str, ...]:
         record = self._by_asset_id.get(asset_id)
         if record is None:
