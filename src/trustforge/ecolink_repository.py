@@ -78,9 +78,19 @@ class EcoLinkRepository:
         self,
         dependencies: Iterable[DependencyEdge] = (),
         upgrade_events: Iterable[UpgradeEvent] = (),
+        *,
+        illustrative: bool = True,
     ) -> None:
         self._dependencies = tuple(dependencies)
         self._upgrade_events = tuple(upgrade_events)
+        # Every `DependencyEdge`/`UpgradeEvent` accepted by the loaders in
+        # this module must have carried `illustrative: true` at parse time
+        # (see `_require_illustrative_and_strip`); the flag itself is
+        # stripped before the contract dataclasses parse the remaining
+        # payload (they reject unknown keys), so we re-attach it here at the
+        # repository level rather than lose it, letting API responses
+        # disclose that the data is illustrative/fixture-sourced.
+        self.illustrative = illustrative
 
     def dependencies_for(self, asset_id: str) -> tuple[DependencyEdge, ...]:
         return tuple(
