@@ -716,6 +716,73 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/eco-link:
+    get:
+      tags: [analysis]
+      operationId: getEcoLink
+      summary: EcoLink 影響路徑
+      description: |
+        唯讀。獨立於 `/api/analyze` 的輕量查詢端點——回傳指定資產的
+        impact paths：官方升級事件與依賴邊之間的*相關性*，非已證實的
+        因果關係。措辭一律用「可能相關」，不使用「導致」/「因此」等
+        因果字眼。
+
+        當找不到任何符合最低信心門檻的路徑時（低信心邊已被濾除，或
+        本來就沒有邊/事件），不假裝「沒有影響」，而是明確回傳
+        `verdict: "insufficient_data"` + 訊息「資料不足，無法判定」。
+        有找到路徑時 `verdict` 為 `"possible_relation"`。不受
+        `COIN_POOL` 限制、不需認證、不設限流。
+      parameters:
+        - in: query
+          name: asset
+          required: true
+          schema:
+            type: string
+          description: 資產識別碼，例如 `asset:arb`。
+      responses:
+        "200":
+          description: EcoLink 影響路徑（資料不足時 verdict 為 insufficient_data）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          verdict:
+                            type: string
+                            enum: [possible_relation, insufficient_data]
+                          message:
+                            type: string
+                          impact_paths:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                event_id:
+                                  type: string
+                                path:
+                                  type: array
+                                  items:
+                                    type: string
+                                direction:
+                                  type: string
+                                confidence:
+                                  type: number
+                                official_source_url:
+                                  type: string
+        "400":
+          description: 缺少必要參數 asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/improvement-diagnostics:
     get:
       tags: [observability]

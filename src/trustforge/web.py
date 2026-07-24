@@ -56,6 +56,7 @@ from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
 from .asset_context_repository import AssetContextRepository, load_asset_context_records
+from .ecolink_repository import EcoLinkRepository, load_ecolink_fixtures
 from .peer_metrics import snapshots_comparable
 from .peer_metrics_repository import PeerMetricsRepository, load_peer_metrics_fixture
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
@@ -5163,6 +5164,87 @@ def _handle_api_peer_metrics(qs: dict | None = None) -> tuple[int, str]:
         return 502, _json_envelope_err("upstream_error", "Peer 比較資料暫時無法讀取，請稍後再試")
 
 
+_ECOLINK_DEPENDENCY_EDGES_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "ecolink_dependency_edges.json"
+)
+_ECOLINK_UPGRADE_EVENTS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "ecolink_upgrade_events.json"
+)
+_ECOLINK_REPOSITORY: EcoLinkRepository | None = None
+# `ecolink_connector.parse_upgrade_event` rejects any `scheduled_at` that is
+# already in the past relative to `fetched_at` (staleness guard against
+# showing a lapsed "upcoming" event as still pending). The fixture data is
+# static/illustrative (Wave 1, `data/ecolink_upgrade_events.json`), authored
+# with a fixed reference date -- using the real wall-clock `now()` here would
+# make this endpoint start failing the moment real time passes the fixture's
+# `scheduled_at`, which has nothing to do with the fixture actually being
+# stale. Pin `fetched_at` to the fixture's own reference date instead (same
+# value `tests/test_ecolink_repository.py` uses to validate the fixture).
+_ECOLINK_FIXTURE_FETCHED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def _ecolink_repository() -> EcoLinkRepository | None:
+    global _ECOLINK_REPOSITORY
+    if _ECOLINK_REPOSITORY is not None:
+        return _ECOLINK_REPOSITORY
+    if not _ECOLINK_DEPENDENCY_EDGES_PATH.exists() or not _ECOLINK_UPGRADE_EVENTS_PATH.exists():
+        return None
+    _ECOLINK_REPOSITORY = load_ecolink_fixtures(
+        _ECOLINK_DEPENDENCY_EDGES_PATH,
+        _ECOLINK_UPGRADE_EVENTS_PATH,
+        fetched_at=_ECOLINK_FIXTURE_FETCHED_AT,
+    )
+    return _ECOLINK_REPOSITORY
+
+
+def _handle_api_eco_link(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/eco-link?asset=asset:arb`：唯讀的 EcoLink 影響路徑端點——
+    回傳該資產的 impact paths（見 `ecolink_repository.ImpactPath`）。
+
+    ⚠️ 誠實守則（見 `ecolink_repository` 模組 docstring）：`ImpactPath` 是
+    「官方升級事件」與「依賴邊」之間的*相關性*，不是已證實的因果關係。
+    本端點措辭一律用「可能相關」，禁止「導致」/「因此」等因果字眼。
+
+    當 repository 找不到任何符合最低信心門檻的路徑時（低信心邊已被
+    `impact_paths_for()` 濾除，或本來就沒有邊），不假裝「沒有影響」，
+    而是明確回傳 `verdict: "insufficient_data"` + 訊息「資料不足，無法
+    判定」——避免把「查無強相關證據」誤呈現為「已確認無影響」。
+
+    比照 `/api/asset-context`：獨立於 `/api/analyze`，不受 `COIN_POOL`
+    限制、不需認證、不設限流。`asset` 不可缺，缺則 400。
+    """
+    try:
+        asset = None
+        if qs and "asset" in qs:
+            raw = qs["asset"]
+            asset = raw[0] if isinstance(raw, list) else raw
+        if not asset or not str(asset).strip():
+            return 400, _json_envelope_err("invalid_request", "缺少必要參數 asset")
+        asset = str(asset).strip()
+        repository = _ecolink_repository()
+        if repository is None:
+            return 200, _json_envelope_ok({
+                "verdict": "insufficient_data",
+                "message": "資料不足，無法判定",
+                "impact_paths": [],
+            })
+        paths = repository.impact_paths_for(asset)
+        if not paths:
+            return 200, _json_envelope_ok({
+                "verdict": "insufficient_data",
+                "message": "資料不足，無法判定",
+                "impact_paths": [],
+            })
+        return 200, _json_envelope_ok({
+            "verdict": "possible_relation",
+            "message": "以下路徑為可能相關，非已證實的因果關係",
+            "impact_paths": [path.to_dict() for path in paths],
+        })
+    except Exception:
+        logging.exception("TrustForge /api/eco-link error")
+        return 502, _json_envelope_err("upstream_error", "EcoLink 影響路徑資料暫時無法讀取，請稍後再試")
+
+
 def _parse_report_generated_at(report) -> datetime | None:
     raw = getattr(report, "generated_at", "")
     if not isinstance(raw, str) or not raw.strip():
@@ -7962,6 +8044,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/peer-metrics":
             code, body = _handle_api_peer_metrics(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/eco-link":
+            code, body = _handle_api_eco_link(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
         # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封
