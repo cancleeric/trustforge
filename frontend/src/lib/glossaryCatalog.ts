@@ -98,7 +98,7 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     audiences: ['report', 'popover', 'help_center'],
     where: '分析結果 · 風險提示',
     riskNote:
-      'Allocation and emission schedules vary widely between assets; check vesting cliffs and team/investor allocation share before comparing tokenomics across projects.',
+      'Vesting cliffs and team/investor allocation shares vary widely between assets, which can make tokenomics comparisons across projects misleading.',
   },
   {
     term_id: 'gas_fee',
