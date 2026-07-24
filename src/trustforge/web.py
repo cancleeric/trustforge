@@ -56,6 +56,8 @@ from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
 from .asset_context_repository import AssetContextRepository, load_asset_context_records
+from .peer_metrics import snapshots_comparable
+from .peer_metrics_repository import PeerMetricsRepository, load_peer_metrics_fixture
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
@@ -5100,6 +5102,67 @@ def _handle_api_asset_context(qs: dict | None = None) -> tuple[int, str]:
         return 502, _json_envelope_err("upstream_error", "資產脈絡資料暫時無法讀取，請稍後再試")
 
 
+_PEER_METRICS_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "peer_metrics_snapshots.json"
+)
+_PEER_METRICS_REPOSITORY: PeerMetricsRepository | None = None
+
+
+def _peer_metrics_repository() -> PeerMetricsRepository | None:
+    global _PEER_METRICS_REPOSITORY
+    if _PEER_METRICS_REPOSITORY is not None:
+        return _PEER_METRICS_REPOSITORY
+    if not _PEER_METRICS_FIXTURE_PATH.exists():
+        return None
+    _PEER_METRICS_REPOSITORY = PeerMetricsRepository(
+        load_peer_metrics_fixture(_PEER_METRICS_FIXTURE_PATH)
+    )
+    return _PEER_METRICS_REPOSITORY
+
+
+def _handle_api_peer_metrics(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/peer-metrics?asset=asset:arb`：唯讀的 peer 比較端點——回傳
+    該資產最新 snapshot，以及同組 peers 的 snapshot，並對每個 peer 用
+    `snapshots_comparable()` 標出是否可比較。
+
+    比照 `/api/asset-context`：獨立於 `/api/analyze`，不受 `COIN_POOL`
+    限制、不需認證、不設限流。查無此資產時回 200 + 空結構（語意是
+    「查無資料」而非請求本身有誤）；`asset` 不可缺，缺則 400。
+
+    不可比較的 peer 一律帶明確 `reason`（來自 `snapshots_comparable`
+    的第二個回傳值），前端可顯示「無法比較：{reason}」——不留白補 0。
+    """
+    try:
+        asset = None
+        if qs and "asset" in qs:
+            raw = qs["asset"]
+            asset = raw[0] if isinstance(raw, list) else raw
+        if not asset or not str(asset).strip():
+            return 400, _json_envelope_err("invalid_request", "缺少必要參數 asset")
+        asset = str(asset).strip()
+        repository = _peer_metrics_repository()
+        if repository is None:
+            return 200, _json_envelope_ok({"snapshot": None, "peers": []})
+        snapshot = repository.by_asset_id(asset)
+        if snapshot is None:
+            return 200, _json_envelope_ok({"snapshot": None, "peers": []})
+        peers = []
+        for peer_asset_id in repository.peer_group(asset):
+            peer_snapshot = repository.by_asset_id(peer_asset_id)
+            if peer_snapshot is None:
+                continue
+            comparable, reason = snapshots_comparable(snapshot, peer_snapshot)
+            peers.append({
+                "snapshot": peer_snapshot.to_dict(),
+                "comparable": comparable,
+                "reason": reason,
+            })
+        return 200, _json_envelope_ok({"snapshot": snapshot.to_dict(), "peers": peers})
+    except Exception:
+        logging.exception("TrustForge /api/peer-metrics error")
+        return 502, _json_envelope_err("upstream_error", "Peer 比較資料暫時無法讀取，請稍後再試")
+
+
 def _parse_report_generated_at(report) -> datetime | None:
     raw = getattr(report, "generated_at", "")
     if not isinstance(raw, str) or not raw.strip():
@@ -7896,6 +7959,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/asset-context":
             code, body = _handle_api_asset_context(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/peer-metrics":
+            code, body = _handle_api_peer_metrics(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
         # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封

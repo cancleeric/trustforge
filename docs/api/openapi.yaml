@@ -655,6 +655,67 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/peer-metrics:
+    get:
+      tags: [analysis]
+      operationId: getPeerMetrics
+      summary: Peer 比較 snapshot
+      description: |
+        唯讀。獨立於 `/api/analyze` 的輕量查詢端點——回傳指定資產最新的
+        peer metrics snapshot，以及同組 peers 各自的 snapshot，並對每個
+        peer 明確標出可否比較（`comparable`）。不可比較時附具體 `reason`
+        （例如 `"observed_tps missing"`、`"metric windows differ"`），
+        故意不留白補 0，讓前端可顯示「無法比較：{reason}」。查無此資產
+        時仍回 200，`data.snapshot` 為 `null`、`data.peers` 為空陣列
+        （語意是「查無資料」而非請求錯誤）。不受 `COIN_POOL` 限制、不需
+        認證、不設限流。
+      parameters:
+        - in: query
+          name: asset
+          required: true
+          schema:
+            type: string
+          description: 資產識別碼，例如 `asset:arb`。
+      responses:
+        "200":
+          description: Peer 比較 snapshot（查無時 snapshot 為 null、peers 為空陣列）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          snapshot:
+                            type: object
+                            nullable: true
+                            additionalProperties: true
+                          peers:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                snapshot:
+                                  type: object
+                                  additionalProperties: true
+                                comparable:
+                                  type: boolean
+                                reason:
+                                  type: string
+                                  nullable: true
+                                  description: 不可比較時的具體原因；可比較時為 null。
+        "400":
+          description: 缺少必要參數 asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/improvement-diagnostics:
     get:
       tags: [observability]
