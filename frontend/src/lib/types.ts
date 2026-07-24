@@ -211,6 +211,15 @@ export interface RiskNotice {
   message: string
 }
 
+// ── /api/asset-context ───────────────────────────────────────────────────
+
+/** `GET /api/asset-context?symbol=` 回應資料——查無資料時 `asset_context`
+ * 為 `null`（HTTP 200，非 404/500，見 `web.py::_handle_api_asset_context`
+ * docstring）。 */
+export interface AssetContextResponseData {
+  asset_context: AssetContext | null
+}
+
 /** 洞察的一個貢獻來源（InsightExplainabilityPanel 最小單元）。 */
 export interface InsightContribution {
   source: string
