@@ -1492,8 +1492,9 @@ paths:
       description: |
         回傳所有已註冊模組的 runtime 遙測資料（最近呼叫時間、呼叫次數、
         平均延遲、目前狀態等）。可用 query param `module_id` 查詢單一模組。
-        注意：`evidence_ref` 與 `metadata` 為內部遙測欄位，未來版本將收斂為
-        對外安全的 public schema（見 security issue #636），不應被視為穩定契約。
+        本端點無認證，回應為白名單序列化（見 security issue #636）：內部
+        欄位 `evidence_ref`（可能含測試名/CI URL/程式碼位置）與任意
+        `metadata` dict **不會**對外回傳。
       parameters:
         - name: module_id
           in: query
@@ -1519,8 +1520,6 @@ paths:
                       avg_latency_ms: 120.5
                       last_latency_ms: 98.0
                       state: "verified"
-                      evidence_ref: ""
-                      metadata: {}
                   total: 1
         "404":
           description: 指定 module_id 查無遙測資料
