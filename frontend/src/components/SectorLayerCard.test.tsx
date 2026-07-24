@@ -47,6 +47,11 @@ describe('SectorLayerCard', () => {
     expect(screen.queryByText(/轉帳手續費需/)).not.toBeInTheDocument()
   })
 
+  it('symbol 與 gas_token 僅大小寫不同時不顯示警示（大小寫不敏感比對）', () => {
+    render(<SectorLayerCard context={makeContext({ symbol: 'eth', gas_token: 'ETH' })} />)
+    expect(screen.queryByText(/轉帳手續費需/)).not.toBeInTheDocument()
+  })
+
   it('未知欄位誠實顯示 unknown，不猜值', () => {
     render(
       <SectorLayerCard

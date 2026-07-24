@@ -45,7 +45,8 @@ export default function SectorLayerCard({ context }: { context: AssetContext }) 
   const settlementChain = context.settlement_chain ?? UNKNOWN
   const gasToken = context.gas_token ?? UNKNOWN
   const dependencies = context.dependencies ?? []
-  const gasMismatch = gasToken !== UNKNOWN && gasToken !== context.symbol
+  const gasMismatch =
+    gasToken !== UNKNOWN && gasToken.toUpperCase() !== context.symbol.toUpperCase()
   const summary = relationSummary(context)
 
   return (

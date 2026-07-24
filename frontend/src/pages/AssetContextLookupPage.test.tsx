@@ -3,7 +3,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
-import type { AssetContext } from '../lib/types'
+import type { ApiEnvelope, AssetContext, AssetContextResponseData } from '../lib/types'
 import { getAssetContext } from '../lib/endpoints'
 import AssetContextLookupPage from './AssetContextLookupPage'
 
@@ -82,6 +82,32 @@ describe('AssetContextLookupPage', () => {
     await waitFor(() => {
       expect(getAssetContext).toHaveBeenLastCalledWith('BTC', expect.anything())
     })
+    expect(await screen.findByText('目前無此資產的脈絡資料。')).toBeInTheDocument()
+  })
+
+  it('切換查詢時不殘留上一個資產的卡片（新查詢未回來前先清空）', async () => {
+    let resolveSecond: ((value: ApiEnvelope<AssetContextResponseData>) => void) | undefined
+    vi.mocked(getAssetContext)
+      .mockResolvedValueOnce({ ok: true, data: { asset_context: arbContext() } })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve
+          }),
+      )
+
+    renderPage()
+
+    expect(await screen.findByText('[Layer 2]')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('資產代號'), { target: { value: 'BTC' } })
+    fireEvent.click(screen.getByRole('button', { name: '查詢' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('[Layer 2]')).not.toBeInTheDocument()
+    })
+
+    resolveSecond?.({ ok: true, data: { asset_context: null } })
     expect(await screen.findByText('目前無此資產的脈絡資料。')).toBeInTheDocument()
   })
 })

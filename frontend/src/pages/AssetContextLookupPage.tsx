@@ -53,6 +53,11 @@ export default function AssetContextLookupPage() {
     const normalized = next.trim().toUpperCase()
     if (!normalized) return
     setInput(normalized)
+    if (normalized !== symbol) {
+      setContext(null)
+      setError(null)
+      setLoading(true)
+    }
     setSymbol(normalized)
     setSearchParams({ symbol: normalized })
   }
