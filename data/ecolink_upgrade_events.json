@@ -4,7 +4,7 @@
     "event_id": "upgrade:arb:stylus",
     "asset_id": "asset:arb",
     "title": "Stylus upgrade",
-    "scheduled_at": "2026-02-01T00:00:00Z",
+    "scheduled_at": "2027-06-01T00:00:00Z",
     "actual_at": null,
     "impact_direction": "mixed",
     "status": "scheduled",

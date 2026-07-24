@@ -49,6 +49,7 @@ def test_handler_returns_impact_paths_for_arb():
     parsed = _envelope(body)
     assert parsed["ok"] is True
     data = parsed["data"]
+    assert data["illustrative"] is True
     assert data["verdict"] == "possible_relation"
     assert "可能相關" in data["message"] or "possible_relation" == data["verdict"]
     assert "導致" not in data["message"]
@@ -67,6 +68,7 @@ def test_handler_returns_insufficient_data_when_no_path_meets_confidence():
     parsed = _envelope(body)
     assert parsed["ok"] is True
     data = parsed["data"]
+    assert data["illustrative"] is True
     assert data["verdict"] == "insufficient_data"
     assert data["message"] == "資料不足，無法判定"
     assert data["impact_paths"] == []

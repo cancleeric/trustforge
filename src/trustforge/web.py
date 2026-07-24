@@ -5131,7 +5131,15 @@ def _handle_api_peer_metrics(qs: dict | None = None) -> tuple[int, str]:
     「查無資料」而非請求本身有誤）；`asset` 不可缺，缺則 400。
 
     不可比較的 peer 一律帶明確 `reason`（來自 `snapshots_comparable`
-    的第二個回傳值），前端可顯示「無法比較：{reason}」——不留白補 0。
+    的第二個回傳值，或「該 peer 缺 snapshot」時的 `"snapshot missing"`），
+    前端可顯示「無法比較：{reason}」——不留白補 0、也不把該 peer 靜默
+    丟掉（codex-review PR #653：宣告在 `peer_group` 裡但查無 snapshot 的
+    peer 仍必須出現在回應中，只是 `comparable` 為 false）。
+
+    `illustrative` 一律為 true——本端點資料只來自 fixture（見
+    `peer_metrics_repository` 模組 docstring：每筆 record 在解析時都被
+    嚴格驗證 `illustrative: true`），揭露此欄位讓消費者知道不是即時
+    真實觀測值。
     """
     try:
         asset = None
@@ -5143,22 +5151,33 @@ def _handle_api_peer_metrics(qs: dict | None = None) -> tuple[int, str]:
         asset = str(asset).strip()
         repository = _peer_metrics_repository()
         if repository is None:
-            return 200, _json_envelope_ok({"snapshot": None, "peers": []})
+            return 200, _json_envelope_ok({"illustrative": True, "snapshot": None, "peers": []})
         snapshot = repository.by_asset_id(asset)
         if snapshot is None:
-            return 200, _json_envelope_ok({"snapshot": None, "peers": []})
+            return 200, _json_envelope_ok({"illustrative": True, "snapshot": None, "peers": []})
         peers = []
         for peer_asset_id in repository.peer_group(asset):
-            peer_snapshot = repository.by_asset_id(peer_asset_id)
-            if peer_snapshot is None:
+            peer_record = repository.record_for(peer_asset_id)
+            if peer_record is None:
+                peers.append({
+                    "asset_id": peer_asset_id,
+                    "snapshot": None,
+                    "comparable": False,
+                    "reason": "snapshot missing",
+                })
                 continue
-            comparable, reason = snapshots_comparable(snapshot, peer_snapshot)
+            comparable, reason = snapshots_comparable(snapshot, peer_record.snapshot)
             peers.append({
-                "snapshot": peer_snapshot.to_dict(),
+                "asset_id": peer_asset_id,
+                "snapshot": peer_record.snapshot.to_dict(),
                 "comparable": comparable,
                 "reason": reason,
             })
-        return 200, _json_envelope_ok({"snapshot": snapshot.to_dict(), "peers": peers})
+        return 200, _json_envelope_ok({
+            "illustrative": True,
+            "snapshot": snapshot.to_dict(),
+            "peers": peers,
+        })
     except Exception:
         logging.exception("TrustForge /api/peer-metrics error")
         return 502, _json_envelope_err("upstream_error", "Peer 比較資料暫時無法讀取，請稍後再試")
@@ -5171,19 +5190,21 @@ _ECOLINK_UPGRADE_EVENTS_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "ecolink_upgrade_events.json"
 )
 _ECOLINK_REPOSITORY: EcoLinkRepository | None = None
-# `ecolink_connector.parse_upgrade_event` rejects any `scheduled_at` that is
-# already in the past relative to `fetched_at` (staleness guard against
-# showing a lapsed "upcoming" event as still pending). The fixture data is
-# static/illustrative (Wave 1, `data/ecolink_upgrade_events.json`), authored
-# with a fixed reference date -- using the real wall-clock `now()` here would
-# make this endpoint start failing the moment real time passes the fixture's
-# `scheduled_at`, which has nothing to do with the fixture actually being
-# stale. Pin `fetched_at` to the fixture's own reference date instead (same
-# value `tests/test_ecolink_repository.py` uses to validate the fixture).
-_ECOLINK_FIXTURE_FETCHED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def _ecolink_repository() -> EcoLinkRepository | None:
+    """`ecolink_connector.parse_upgrade_event` rejects any `scheduled_at`
+    already in the past relative to `fetched_at` (a real staleness guard: a
+    "scheduled" upgrade whose date has passed is stale/no-longer-current
+    information and must not be presented as a live upcoming event). We use
+    the real wall-clock time as `fetched_at` here — codex-review (PR #653)
+    correctly flagged an earlier version that pinned `fetched_at` to a fixed
+    past constant, which silently defeated this guard and would let an
+    actually-expired scheduled event keep reporting as `possible_relation`
+    forever. `data/ecolink_upgrade_events.json`'s `scheduled_at` is kept as a
+    stable future illustrative date so this stays honest without needing any
+    workaround.
+    """
     global _ECOLINK_REPOSITORY
     if _ECOLINK_REPOSITORY is not None:
         return _ECOLINK_REPOSITORY
@@ -5192,7 +5213,7 @@ def _ecolink_repository() -> EcoLinkRepository | None:
     _ECOLINK_REPOSITORY = load_ecolink_fixtures(
         _ECOLINK_DEPENDENCY_EDGES_PATH,
         _ECOLINK_UPGRADE_EVENTS_PATH,
-        fetched_at=_ECOLINK_FIXTURE_FETCHED_AT,
+        fetched_at=datetime.now(timezone.utc),
     )
     return _ECOLINK_REPOSITORY
 
@@ -5212,6 +5233,11 @@ def _handle_api_eco_link(qs: dict | None = None) -> tuple[int, str]:
 
     比照 `/api/asset-context`：獨立於 `/api/analyze`，不受 `COIN_POOL`
     限制、不需認證、不設限流。`asset` 不可缺，缺則 400。
+
+    `illustrative` 一律為 true——`EcoLinkRepository` 只裝載通過
+    `_require_illustrative_and_strip()` 嚴格驗證的 fixture 資料（見
+    `ecolink_repository` 模組 docstring），揭露此欄位讓消費者知道不是
+    即時真實抓取。
     """
     try:
         asset = None
@@ -5224,6 +5250,7 @@ def _handle_api_eco_link(qs: dict | None = None) -> tuple[int, str]:
         repository = _ecolink_repository()
         if repository is None:
             return 200, _json_envelope_ok({
+                "illustrative": True,
                 "verdict": "insufficient_data",
                 "message": "資料不足，無法判定",
                 "impact_paths": [],
@@ -5231,11 +5258,13 @@ def _handle_api_eco_link(qs: dict | None = None) -> tuple[int, str]:
         paths = repository.impact_paths_for(asset)
         if not paths:
             return 200, _json_envelope_ok({
+                "illustrative": repository.illustrative,
                 "verdict": "insufficient_data",
                 "message": "資料不足，無法判定",
                 "impact_paths": [],
             })
         return 200, _json_envelope_ok({
+            "illustrative": repository.illustrative,
             "verdict": "possible_relation",
             "message": "以下路徑為可能相關，非已證實的因果關係",
             "impact_paths": [path.to_dict() for path in paths],
