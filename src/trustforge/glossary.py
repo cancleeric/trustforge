@@ -92,8 +92,8 @@ CORE_GLOSSARY_TERMS: tuple[GlossaryTerm, ...] = (
         definition="Token supply, allocation, emissions, utility, and incentive design.",
         aliases=("token economics", "代幣經濟"),
         risk_note=(
-            "Allocation and emission schedules vary widely between assets; check vesting cliffs and "
-            "team/investor allocation share before comparing tokenomics across projects."
+            "Vesting cliffs and team/investor allocation shares vary widely between assets, which "
+            "can make tokenomics comparisons across projects misleading."
         ),
     ),
     GlossaryTerm(

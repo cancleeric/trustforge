@@ -36,6 +36,7 @@ export type GlossaryCatalogTerm = {
   aliases: string[]
   audiences: GlossaryAudience[]
   where?: string
+  riskNote?: string
 }
 
 const canonicalKey = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
@@ -68,6 +69,8 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     aliases: ['fully diluted valuation'],
     audiences: ['report', 'popover', 'help_center'],
     where: '分析結果 · 名詞標註',
+    riskNote:
+      'FDV can be far higher than circulating market cap when most supply is still locked; comparing FDV across assets with very different unlock schedules can be misleading.',
   },
   {
     term_id: 'market_cap',
@@ -84,6 +87,8 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     aliases: ['total value locked'],
     audiences: ['report', 'popover', 'help_center'],
     where: '分析結果 · 同層比較',
+    riskNote:
+      'TVL reflects deposited assets, not usage or revenue, and can be inflated by incentive programs or double-counted across composable protocols.',
   },
   {
     term_id: 'tokenomics',
@@ -92,6 +97,8 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     aliases: ['token economics', '代幣經濟'],
     audiences: ['report', 'popover', 'help_center'],
     where: '分析結果 · 風險提示',
+    riskNote:
+      'Vesting cliffs and team/investor allocation shares vary widely between assets, which can make tokenomics comparisons across projects misleading.',
   },
   {
     term_id: 'gas_fee',
@@ -100,6 +107,8 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     aliases: ['gas', 'transaction fee', '手續費'],
     audiences: ['report', 'popover', 'help_center'],
     where: '分析結果 · 成本',
+    riskNote:
+      'A token usually cannot be used to pay its own transfer fees; fees are paid in the gas token accepted by the network where the transaction executes. For example, transactions on Arbitrum (an Ethereum L2) are typically paid in ETH, not in ARB.',
   },
   {
     term_id: 'unlock_sell_pressure',
@@ -108,6 +117,8 @@ export const GLOSSARY_CATALOG: GlossaryCatalogTerm[] = validateGlossaryCatalog([
     aliases: ['unlock pressure', 'token unlock', 'unlock sell pressure'],
     audiences: ['report', 'popover', 'help_center'],
     where: '分析結果 · 風險提示',
+    riskNote:
+      '解鎖後流通供給增加，可能形成賣壓；實際影響需視解鎖排程、解鎖量佔流通量比例與市場深度而定，非必然下跌。',
   },
   {
     term_id: 'trustScore',

@@ -74,6 +74,12 @@ export default function GlossaryTerm({ term, label, compact }: Props) {
         <span id={id} className="tf-glossary-popover" role="note" style={popoverStyle}>
           <b>{entry.label}</b>
           <span>{entry.description}</span>
+          {entry.riskNote && (
+            <span className="tf-glossary-risk">
+              <i aria-hidden="true">⚠️</i>
+              {entry.riskNote}
+            </span>
+          )}
         </span>
       )}
     </span>
