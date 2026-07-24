@@ -39,6 +39,8 @@ def fetch_tvl_metric(
         _validate_source_url(url)
         raw = _fetch_url(url)
         payload = _decode_json(raw)
+        if "source" in payload and payload["source"] != url:
+            raise ValueError("TVL payload source does not match fetched URL")
         payload.setdefault("source", url)
         return TvlConnectorResult(metric=parse_tvl_metric(payload, fetched_at=fetched_at), error=None)
     except HTTPError as exc:

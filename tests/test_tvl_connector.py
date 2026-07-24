@@ -169,6 +169,34 @@ def test_tvl_connector_oversize_response_never_publishes_metric(
     assert "exceeds maximum size" in result.error["message"]
 
 
+@pytest.mark.parametrize(
+    "claimed_source",
+    [
+        "https://defillama.com/protocol/arbitrum",
+        "https://api.llama.fi/protocol/ethereum",
+    ],
+)
+def test_tvl_connector_rejects_allowlisted_but_mismatched_source(
+    monkeypatch: pytest.MonkeyPatch,
+    claimed_source: str,
+) -> None:
+    monkeypatch.setattr(
+        tvl_connector,
+        "_fetch_url",
+        lambda _url: json.dumps(payload(source=claimed_source)).encode("utf-8"),
+    )
+
+    result = fetch_tvl_metric(
+        "https://api.llama.fi/protocol/arbitrum",
+        fetched_at=utc(2026, 1, 1, 13),
+    )
+
+    assert result.metric is None
+    assert result.error is not None
+    assert result.error["code"] == "tvl_connector_error"
+    assert "source does not match fetched URL" in result.error["message"]
+
+
 def test_tvl_connector_rejects_unapproved_hosts_and_schema_drift() -> None:
     with pytest.raises(ValueError, match="source host is not allowed"):
         parse_tvl_metric(payload(source="https://metadata.google.internal/latest"), fetched_at=utc(2026, 1, 1, 13))
