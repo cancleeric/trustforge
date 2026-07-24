@@ -1,5 +1,6 @@
 [
   {
+    "illustrative": true,
     "event_id": "upgrade:arb:stylus",
     "asset_id": "asset:arb",
     "title": "Stylus upgrade",
@@ -11,6 +12,7 @@
     "official_source_url": "https://arbitrum.foundation/upgrade/stylus"
   },
   {
+    "illustrative": true,
     "event_id": "upgrade:op:bedrock",
     "asset_id": "asset:op",
     "title": "Bedrock upgrade",
@@ -22,6 +24,7 @@
     "official_source_url": "https://gov.optimism.io/upgrade/bedrock"
   },
   {
+    "illustrative": true,
     "event_id": "upgrade:arb:no-known-path",
     "asset_id": "asset:arb",
     "title": "Governance parameter change",

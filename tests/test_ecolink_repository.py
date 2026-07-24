@@ -69,6 +69,7 @@ def test_load_dependency_edges_fixture_rejects_non_allowlisted_host(tmp_path: Pa
     bad_path.write_text(
         """
         [{
+          "illustrative": true,
           "schema_version": "1.0.0",
           "source_asset_id": "asset:arb",
           "target_asset_id": "asset:eth",
@@ -102,3 +103,76 @@ def test_load_upgrade_events_fixture_deduplicates_and_parses(repository: EcoLink
         "upgrade:op:bedrock",
         "upgrade:arb:no-known-path",
     }
+
+
+def _valid_edge_payload(**overrides) -> dict:
+    payload = {
+        "illustrative": True,
+        "schema_version": "1.0.0",
+        "source_asset_id": "asset:arb",
+        "target_asset_id": "asset:eth",
+        "kind": "settlement",
+        "valid_from": "2026-01-01T00:00:00+00:00",
+        "valid_until": None,
+        "confidence": 0.9,
+        "official_source_url": "https://arbitrum.foundation/ecolink/dependencies",
+        "observed_at": "2026-01-01T00:00:00+00:00",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _valid_event_payload(**overrides) -> dict:
+    payload = {
+        "illustrative": True,
+        "event_id": "upgrade:arb:stylus",
+        "asset_id": "asset:arb",
+        "title": "Stylus upgrade",
+        "scheduled_at": "2026-02-01T00:00:00Z",
+        "actual_at": None,
+        "impact_direction": "mixed",
+        "status": "scheduled",
+        "impacted_asset_ids": ["asset:eth"],
+        "official_source_url": "https://arbitrum.foundation/upgrade/stylus",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_parse_dependency_edges_fixture_rejects_string_false_illustrative() -> None:
+    with pytest.raises(ValueError, match="illustrative must be the boolean true"):
+        parse_dependency_edges_fixture([_valid_edge_payload(illustrative="false")])
+
+
+def test_parse_dependency_edges_fixture_rejects_missing_illustrative() -> None:
+    payload = _valid_edge_payload()
+    del payload["illustrative"]
+    with pytest.raises(ValueError, match="missing DependencyEdge.illustrative field"):
+        parse_dependency_edges_fixture([payload])
+
+
+def test_load_upgrade_events_fixture_rejects_string_false_illustrative(tmp_path: Path) -> None:
+    import json
+
+    bad_path = tmp_path / "bad_events.json"
+    bad_path.write_text(json.dumps([_valid_event_payload(illustrative="false")]), encoding="utf-8")
+    with pytest.raises(ValueError, match="illustrative must be the boolean true"):
+        load_upgrade_events_fixture(bad_path, fetched_at=utc(2026, 1, 1))
+
+
+def test_load_upgrade_events_fixture_rejects_missing_illustrative(tmp_path: Path) -> None:
+    import json
+
+    payload = _valid_event_payload()
+    del payload["illustrative"]
+    bad_path = tmp_path / "bad_events_missing.json"
+    bad_path.write_text(json.dumps([payload]), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing UpgradeEvent.illustrative field"):
+        load_upgrade_events_fixture(bad_path, fetched_at=utc(2026, 1, 1))
+
+
+def test_parse_dependency_edges_fixture_rejects_non_allowlisted_host() -> None:
+    with pytest.raises(ValueError, match="not allowlisted official source"):
+        parse_dependency_edges_fixture(
+            [_valid_edge_payload(official_source_url="https://evil.example/dependency")]
+        )

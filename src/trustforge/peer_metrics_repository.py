@@ -63,11 +63,16 @@ def parse_metric_value(payload: dict[str, Any]) -> MetricValue:
     extra = sorted(set(payload) - required)
     if extra:
         raise ValueError(f"unexpected MetricValue fields: {', '.join(extra)}")
+    source = payload["source"]
+    if not isinstance(source, str) or not source.startswith("fixture://"):
+        raise ValueError(
+            f"MetricValue.source must start with 'fixture://' for illustrative fixture data, got {source!r}"
+        )
     return MetricValue(
         value=payload["value"],
         unit=payload["unit"],
         method=PeerMetricMethod(payload["method"]),
-        source=payload["source"],
+        source=source,
     )
 
 
@@ -119,10 +124,15 @@ def parse_peer_metrics_record(payload: dict[str, Any]) -> PeerMetricsRecord:
     snapshot_payload = payload["snapshot"]
     if not isinstance(snapshot_payload, dict):
         raise ValueError("PeerMetricsRecord.snapshot must be object")
+    illustrative = payload["illustrative"]
+    if illustrative is not True:
+        raise ValueError(
+            f"PeerMetricsRecord.illustrative must be the boolean true, got {illustrative!r}"
+        )
     return PeerMetricsRecord(
         snapshot=parse_peer_metrics_snapshot(snapshot_payload),
         peer_group=tuple(peer_group),
-        illustrative=bool(payload["illustrative"]),
+        illustrative=illustrative,
     )
 
 

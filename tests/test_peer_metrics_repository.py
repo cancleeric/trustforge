@@ -118,3 +118,72 @@ def test_record_rejects_peer_group_without_self() -> None:
     }
     with pytest.raises(ValueError, match="peer_group must include"):
         parse_peer_metrics_record(payload)
+
+
+def _valid_snapshot_payload(asset_id: str = "asset:arb") -> dict:
+    return {
+        "asset_id": asset_id,
+        "observed_tps": {"value": 1.0, "unit": "count/s", "method": "observed", "source": "fixture://x"},
+        "tvl": {"value": 1.0, "unit": "usd", "method": "observed", "source": "fixture://x"},
+        "gas_fee": {"value": 1.0, "unit": "usd/transfer", "method": "observed", "source": "fixture://x"},
+        "activity_breakdown": {
+            "swap": {"value": 1.0, "unit": "count/s", "method": "observed", "source": "fixture://x"}
+        },
+        "window_start": "2026-01-01T00:00:00Z",
+        "window_end": "2026-01-08T00:00:00Z",
+        "observed_at": "2026-01-08T00:00:00Z",
+    }
+
+
+def test_record_rejects_illustrative_as_string_false() -> None:
+    payload = {
+        "illustrative": "false",
+        "peer_group": ["asset:arb"],
+        "snapshot": _valid_snapshot_payload(),
+    }
+    with pytest.raises(ValueError, match="illustrative must be the boolean true"):
+        parse_peer_metrics_record(payload)
+
+
+def test_record_rejects_illustrative_as_string_true() -> None:
+    # A truthy-looking string must still be rejected -- only Python's
+    # literal True is accepted, never a string that merely looks truthy.
+    payload = {
+        "illustrative": "true",
+        "peer_group": ["asset:arb"],
+        "snapshot": _valid_snapshot_payload(),
+    }
+    with pytest.raises(ValueError, match="illustrative must be the boolean true"):
+        parse_peer_metrics_record(payload)
+
+
+def test_record_rejects_missing_illustrative_field() -> None:
+    payload = {
+        "peer_group": ["asset:arb"],
+        "snapshot": _valid_snapshot_payload(),
+    }
+    with pytest.raises(ValueError, match="missing PeerMetricsRecord fields: illustrative"):
+        parse_peer_metrics_record(payload)
+
+
+def test_metric_value_rejects_non_fixture_source() -> None:
+    from trustforge.peer_metrics_repository import parse_metric_value
+
+    with pytest.raises(ValueError, match="must start with 'fixture://'"):
+        parse_metric_value(
+            {
+                "value": 1.0,
+                "unit": "count/s",
+                "method": "observed",
+                "source": "https://api.llama.fi/tvl/arbitrum",
+            }
+        )
+
+
+def test_metric_value_accepts_fixture_source() -> None:
+    from trustforge.peer_metrics_repository import parse_metric_value
+
+    metric = parse_metric_value(
+        {"value": 1.0, "unit": "count/s", "method": "observed", "source": "fixture://peer-metrics/l2"}
+    )
+    assert metric.source == "fixture://peer-metrics/l2"

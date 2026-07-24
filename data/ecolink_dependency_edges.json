@@ -1,5 +1,6 @@
 [
   {
+    "illustrative": true,
     "schema_version": "1.0.0",
     "source_asset_id": "asset:arb",
     "target_asset_id": "asset:eth",
@@ -11,6 +12,7 @@
     "observed_at": "2026-01-01T00:00:00+00:00"
   },
   {
+    "illustrative": true,
     "schema_version": "1.0.0",
     "source_asset_id": "asset:arb",
     "target_asset_id": "asset:eth",
@@ -22,6 +24,7 @@
     "observed_at": "2026-01-01T00:00:00+00:00"
   },
   {
+    "illustrative": true,
     "schema_version": "1.0.0",
     "source_asset_id": "asset:op",
     "target_asset_id": "asset:eth",
