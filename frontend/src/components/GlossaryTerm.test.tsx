@@ -34,4 +34,21 @@ describe('GlossaryTerm', () => {
     expect(GLOSSARY_BY_ID.divergence.label).toBe('跨來源分歧')
     expect(GLOSSARY_BY_ID.divergence.description).toContain('結論越需要保守解讀')
   })
+
+  it('shows a ⚠️ risk note for terms that have one', () => {
+    render(<GlossaryTerm term="tvl" />)
+    fireEvent.click(screen.getByRole('button', { name: /TVL/ }))
+
+    const note = screen.getByRole('note')
+    expect(note).toHaveTextContent('⚠️')
+    expect(note).toHaveTextContent(GLOSSARY_BY_ID.tvl.riskNote as string)
+  })
+
+  it('does not render a risk note block for terms without one', () => {
+    render(<GlossaryTerm term="market_cap" />)
+    fireEvent.click(screen.getByRole('button', { name: /MC/ }))
+
+    expect(GLOSSARY_BY_ID.market_cap.riskNote).toBeUndefined()
+    expect(screen.getByRole('note')).not.toHaveTextContent('⚠️')
+  })
 })
