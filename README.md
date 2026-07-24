@@ -142,12 +142,18 @@ export TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0
 
 ```bash
 # 本機起 Live Demo（SQLite 共用快取，免 AWS 即可看完整管線）
-CACHE_BACKEND=sqlite PORT=8799 python -m trustforge.web   # → http://127.0.0.1:8799
-# 首次由舊版 JSON 升級時先執行：
-# python scripts/migrate_json_cache_to_sqlite.py
+CACHE_BACKEND=sqlite ./scripts/trustforge_control.sh start   # → http://127.0.0.1:8799（PORT 預設 8799）
+# ⚠️ 請用控制腳本啟動，勿裸跑 `python -m trustforge.web`：缺 TRUSTFORGE_DISABLE_ADMIN_CONFIG 時
+#    每個請求會嘗試讀遠端 admin config，憑證未就緒會使整個 server 卡住（全站逾時）。
+# 首次由舊版 JSON 升級時先執行：python scripts/migrate_json_cache_to_sqlite.py
 #   /            首頁表單（選幣種/題型/問題）
 #   /analyze     HTML 報告　/analyze.json  JSON（report+evidence+log）　/healthz  健康檢查
 ```
+
+> **本機真 Bedrock + Hermes daemon（自動分析 → 信任分數）**：完整環境變數、每日花費上限、
+> `X-Live-Token`、以及用 `POST /api/analysis-question` 強制產生新分析等步驟見 runbook —
+> Wiki `hurricanesoft/trustforge/local-live-analysis-runbook`、
+> SkillHub `ops/trustforge-local-live-bedrock-and-daemon-real-analysis`。
 
 **佈署到 AWS**：推薦 **App Runner 原始碼模式**——連 GitHub repo 即讀 `apprunner.yaml` 自動建置（**雲端建置，本機免 Docker**），給公開 HTTPS Live Demo URL、push 即重佈。設 `BEDROCK_MODEL_ID`+`AWS_REGION` 並給 instance role `bedrock:InvokeModel` 後，帶 `?live=1` 走真實 Bedrock。完整步驟見 [`docs/competition/SUBMISSION-CHECKLIST.md`](docs/competition/SUBMISSION-CHECKLIST.md)。容器路線另附 `Dockerfile`。
 
@@ -213,7 +219,7 @@ trustforge/
 │   ├── agent/              # Bedrock 編排 → Report + Evidence + Log
 │   └── cli.py              # demo / 競賽執行入口
 ├── demo/sample_data/       # 離線樣本：ohlcv/*.csv + 各來源 *.json
-└── tests/                  # 13 測試（信任評分 / 價格 / 報告管線）
+└── tests/                  # 4100+ 測試（信任評分 / 價格 / 報告管線 / 安全 / 觀測 / 校準；覆蓋率 ~86%）
 ```
 
 ---
