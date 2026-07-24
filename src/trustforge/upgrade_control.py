@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .skill_changes import change_history
-from .skills import run_skill_manifest
 from .historical_sources import historical_source_capabilities
 from .module_status import observability_snapshot
+from .upgrade_ports import ControlPlaneCatalog
 
 
 MODULES = (
@@ -121,11 +120,11 @@ def _historical_coverage() -> dict[str, Any]:
     return {"status": "measured", **value}
 
 
-def upgrade_status() -> dict[str, Any]:
+def upgrade_status(catalog: ControlPlaneCatalog) -> dict[str, Any]:
     """Project versioned core/outer modules and approval-gated candidates."""
-    manifest = run_skill_manifest()
+    manifest = catalog.manifest()
     outer = {row["family"]: row for row in manifest["outer_skills"]}
-    history = change_history()
+    history = catalog.history()
     diagnostic = _diagnostic()
     llm_review = _llm_review()
     historical_coverage = _historical_coverage()
