@@ -712,11 +712,15 @@ function isEcoLinkImpactPath(value: unknown): value is EcoLinkImpactPath {
 /** 不驗 `verdict` 是否僅限已知兩值以外的字面——只要是 string 即放行，
  * 未知值由渲染層 fallback（比照 `isAssetContext` 對 enum 的寬鬆策略），
  * 避免後端新增 verdict 值時前端連帶炸掉。 */
+/** `verdict` 嚴格白名單（codex-review PR #655）：只認 openapi.yaml 定義的
+ * 兩個字面值，未知值一律 parse_error——不能只驗 `typeof === 'string'`，
+ * 否則畸形/未來新增 verdict 會 fall through 到 `EcoLinkImpactPanel` 的
+ * `possible_relation` 分支，把「不確定/未知」誤渲染成正面結論。 */
 export function isEcoLinkResponseData(value: unknown): value is EcoLinkResponseData {
   return (
     isPlainObject(value) &&
     value.illustrative === true &&
-    typeof value.verdict === 'string' &&
+    (value.verdict === 'possible_relation' || value.verdict === 'insufficient_data') &&
     typeof value.message === 'string' &&
     Array.isArray(value.impact_paths) &&
     value.impact_paths.every(isEcoLinkImpactPath)

@@ -49,6 +49,18 @@ describe('EcoLinkImpactPanel', () => {
     expect(screen.getByText(/示範資料/)).toBeInTheDocument()
   })
 
+  it('official_source_url 為 javascript: scheme 時不渲染成可點連結（safeHref 擋 XSS）', () => {
+    render(
+      <EcoLinkImpactPanel
+        verdict="possible_relation"
+        message="可能相關"
+        impactPaths={[makePath({ official_source_url: 'javascript:alert(1)' })]}
+      />,
+    )
+    expect(screen.queryByRole('link', { name: '官方來源' })).not.toBeInTheDocument()
+    expect(screen.getByText(/官方來源（連結格式無效）/)).toBeInTheDocument()
+  })
+
   it('文案不得出現「導致」「因此」等因果字眼', () => {
     const { container } = render(
       <EcoLinkImpactPanel

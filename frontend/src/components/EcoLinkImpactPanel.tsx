@@ -1,4 +1,5 @@
 import type { EcoLinkImpactPath } from '../lib/types'
+import { safeHref } from '../lib/safeHref'
 import IllustrativeBadge from './IllustrativeBadge'
 
 /** EcoLink 影響路徑面板（模組③ Wave 3）：`verdict === 'insufficient_data'`
@@ -19,6 +20,11 @@ function ConfidenceBadge({ confidence }: { confidence: number }) {
 }
 
 function ImpactPathCard({ path }: { path: EcoLinkImpactPath }) {
+  // 安全鐵則：`official_source_url` 來自 fixture/後端，塞進 `<a href>`
+  // 前一律先過 `safeHref`（只放行 http/https，擋 javascript:/data: 等
+  // 可執行 scheme）。`safeHref` 回 `null` 時不渲染成可點連結，改顯示
+  // 純文字，不得靜默 fallback 成其他目的地（見 `lib/safeHref.ts`）。
+  const href = safeHref(path.official_source_url)
   return (
     <li className="rounded-lg border border-tf-border bg-tf-bg p-3" data-testid="impact-path">
       <div className="flex flex-wrap items-center gap-2">
@@ -26,14 +32,18 @@ function ImpactPathCard({ path }: { path: EcoLinkImpactPath }) {
         <ConfidenceBadge confidence={path.confidence} />
       </div>
       <p className="mt-1 text-xs text-tf-muted">方向：{path.direction}</p>
-      <a
-        href={path.official_source_url}
-        target="_blank"
-        rel="noreferrer noopener"
-        className="mt-1 inline-block break-all text-xs text-tf-link underline hover:no-underline"
-      >
-        官方來源
-      </a>
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="mt-1 inline-block break-all text-xs text-tf-link underline hover:no-underline"
+        >
+          官方來源
+        </a>
+      ) : (
+        <span className="mt-1 inline-block break-all text-xs text-tf-muted">官方來源（連結格式無效）</span>
+      )}
     </li>
   )
 }

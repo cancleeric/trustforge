@@ -104,6 +104,8 @@ python -m trustforge.cli analyze \
 pytest -q
 ```
 
+> 本機 pre-push gate（`.githooks/pre-push`）前端步驟需 Node >=20.12（Vite 8），請依 `.nvmrc` 執行 `nvm use`。
+
 ## 資料來源
 
 | 資料 | 位置 | 說明 |

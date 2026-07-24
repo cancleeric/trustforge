@@ -56,6 +56,8 @@ Governance index:
 | [plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md](plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md) | Agent Platform／Trust Kernel／TrustForge App 漸進拆分計畫：工作流依賴、驗收條件、測試與 12–22 PR 里程碑 |
 | [plans/PLAN-2026-07-21-ui-optimization.md](plans/PLAN-2026-07-21-ui-optimization.md) | UI/UX 優化現況版：#356–#360 完成／更正、#539–#542 與 #361/#362 剩餘工作、≤12h 相依性與驗收標準 |
 | [plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md](plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md) | 三軌統一學習架構開發計劃：#501 replacement semantic disposition 已完成；implementation authorization 與 production scope 仍維持未授權／EMPTY |
+| [plans/PLAN-next-competition-readiness-2026-07-24.md](plans/PLAN-next-competition-readiness-2026-07-24.md) | 競賽就緒衝刺排序（剩約 8 天）：首選 #636 telemetry 安全修（harper 必審）；次選 Demo 敘事整合入口（三模組被評審看見）；模組③真實資料源本輪不建議動工；#633/#634/#637 技術債延後 |
+| [plans/PLAN-demo-narrative-entry-2026-07-24.md](plans/PLAN-demo-narrative-entry-2026-07-24.md) | Demo 敘事整合入口執行計劃：首選方案 B（HermesDashboard 首屏新增「新手 3 步」敘事卡片，導向資產脈絡查詢/名詞解釋/同層生態），不做主導覽升級或獨立整合頁；PR1-3 拆解（≤12h）、reviewer、CEO 裁示點 |
 
 ## qa/ — 測試與研究發現
 

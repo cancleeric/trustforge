@@ -66,7 +66,28 @@ class TelemetryRecord:
     last_latency_ms: float = 0.0
     state: str = ModuleState.registered.value  # 模組生命週期狀態
     evidence_ref: str = ""  # verified 狀態的佐證參考
+    # ⚠️ 安全警語（#636）：本欄位「不會」被 /api/module-telemetry 對外回傳
+    # （見 web.py `_handle_api_module_telemetry` 白名單序列化），但呼叫端
+    # 仍應假設未來可能被讀取／記錄外流，**禁止填入 CI URL、內部檔案路徑、
+    # 憑證／token 等敏感內容**，僅記錄可公開的簡短驗證描述。
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """對外安全序列化（#636）：白名單欄位，不含 `evidence_ref` / `metadata`。
+
+        `/api/module-telemetry` 無認證即可存取，`evidence_ref`（可能含測試名、
+        CI URL、程式碼位置）與任意 `metadata` dict 不得原樣外流，僅回傳狀態
+        類欄位供監控儀表板使用。
+        """
+        return {
+            "module_id": self.module_id,
+            "state": self.state,
+            "last_invoked_at": self.last_invoked_at,
+            "invocation_count": self.invocation_count,
+            "avg_latency_ms": self.avg_latency_ms,
+            "last_latency_ms": self.last_latency_ms,
+            "last_result": self.last_result,
+        }
 
 
 class _WriteEvent:
