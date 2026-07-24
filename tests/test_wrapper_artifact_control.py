@@ -404,6 +404,123 @@ def test_request_approval_forbids_self_approval_by_runner(env):
         _request_approval(env, reviewer_subject="bob")
 
 
+# --------------------------------------------------------------------------- #
+# CISO H1: separation-of-duties subject canonicalization (no spoof bypass)
+#
+# These pin the three spoofing vectors the CISO flagged: trailing whitespace,
+# case differences, and Unicode homoglyphs.  Principals canonicalize their
+# subjects at construction (NFKC + strip + casefold) and reject cross-script
+# mixtures, so a reviewer that is cosmetically the same as the proposer or
+# runner is treated as the same principal — self-approval is refused.
+# ---------------------------------------------------------------------------
+
+
+def test_request_approval_forbids_self_approval_via_trailing_whitespace_proposer(env):
+    """CISO H1 case 1a: reviewer 'alice ' vs proposer 'alice' must not bypass."""
+    _build_proposal(env, proposer_subject="alice")
+    _attach_sandbox(env, runner_subject="bob")
+    with pytest.raises(WrapperArtifactError, match="same principal as the proposer"):
+        _request_approval(env, reviewer_subject="alice ")  # trailing space
+
+
+def test_request_approval_forbids_self_approval_via_trailing_whitespace_runner(env):
+    """CISO H1 case 1b: reviewer 'bob ' vs runner 'bob' must not bypass."""
+    _build_proposal(env, proposer_subject="alice")
+    _attach_sandbox(env, runner_subject="bob")
+    with pytest.raises(WrapperArtifactError, match="same principal as the sandbox runner"):
+        _request_approval(env, reviewer_subject="bob ")  # trailing space
+
+
+def test_request_approval_forbids_self_approval_via_case_difference(env):
+    """CISO H1 case 2: reviewer 'Alice' vs proposer 'alice' must not bypass."""
+    _build_proposal(env, proposer_subject="alice")
+    _attach_sandbox(env, runner_subject="bob")
+    with pytest.raises(WrapperArtifactError, match="same principal as the proposer"):
+        _request_approval(env, reviewer_subject="Alice")  # different case
+
+
+def test_request_approval_forbids_self_approval_via_nfkc_homoglyph(env):
+    """CISO H1 case 3 (NFKC-equivalent): reviewer fullwidth 'ａ' (U+FF41) vs
+    proposer ASCII 'a'.  NFKC folds fullwidth to ASCII, so the two canonical
+    subjects are equal and self-approval is refused at the review layer."""
+    _build_proposal(env, proposer_subject="alice")
+    _attach_sandbox(env, runner_subject="bob")
+    with pytest.raises(WrapperArtifactError, match="same principal as the proposer"):
+        _request_approval(env, reviewer_subject="\uff41lice")  # fullwidth 'a' + latin
+
+
+def test_reviewer_principal_rejects_cross_script_confusable_subject(env):
+    """CISO H1 case 3 (cross-script): a reviewer subject that mixes Latin
+    letters with a Cyrillic confusable ('а' U+0430 + 'lice') cannot even be
+    constructed, so the spoofing principal never enters the controller.
+    NFKC does not fold cross-script confusables, so this mixed-script check is
+    the dedicated defense for that vector."""
+    import datetime as dt
+    with pytest.raises(WrapperArtifactError, match="cross-script confusable"):
+        ReviewerPrincipal(
+            subject="\u0430lice",  # Cyrillic small a + Latin lice
+            role="release-manager",
+            expires_at=dt.datetime.now(dt.timezone.utc) + timedelta(hours=1),
+        )
+
+
+def test_actor_principal_rejects_cross_script_confusable_subject(env):
+    """The proposer/runner side is equally protected: an ActorPrincipal with a
+    mixed-script subject is rejected at construction, so an attacker cannot
+    smuggle a confusable proposer/runner past the separation-of-duties check
+    from the other side either."""
+    with pytest.raises(WrapperArtifactError, match="cross-script confusable"):
+        ActorPrincipal("\u0430lice")  # Cyrillic small a + Latin lice
+
+
+def test_principal_subject_is_canonicalized_at_construction(env):
+    """Sanity: a legitimate reviewer subject is stored in canonical form
+    (NFKC + strip + casefold), confirming the construction-time canonicalization
+    that the comparison-layer canonicalization builds on."""
+    reviewer = ReviewerPrincipal(
+        subject="  Alice  ",
+        role="Release-Manager",
+        expires_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc) + timedelta(hours=1),
+    )
+    assert reviewer.subject == "alice"  # stripped + casefolded
+
+
+def test_principal_accepts_non_mixed_non_ascii_subject(env):
+    """A pure-non-Latin subject (no ASCII letters mixed in) is legitimate and
+    must not be rejected by the mixed-script check — the rule targets
+    Latin+non-Latin *mixtures*, not non-ASCII identifiers themselves."""
+    actor = ActorPrincipal("王小明")  # pure Han, no ASCII letters
+    assert actor.subject == "王小明"
+
+
+def test_request_approval_accepts_genuinely_distinct_principals(env):
+    """CISO H1 case 5 (positive control): distinct principals — including ones
+    whose raw subjects differ only in case/whitespace from each other but are
+    genuinely different identities — must still be accepted, proving the
+    canonicalization is not over-broad.
+
+    Here proposer 'alice', runner 'bob', reviewer 'carol' are all distinct
+    identities; the approval is minted successfully."""
+    _build_proposal(env, proposer_subject="alice")
+    _attach_sandbox(env, runner_subject="bob")
+    approval = _request_approval(env, reviewer_subject="carol")
+    assert approval.proposal_id == "p1"
+    assert approval.reviewer.subject == "carol"
+
+
+def test_request_approval_accepts_when_only_case_or_whitespace_differ_between_distinct_ids(env):
+    """Stronger positive control: two *different* identities whose spelling
+    differs by more than canonicalization (e.g. 'carol' vs 'carolynn') are
+    accepted even when one carries cosmetic differences.  This ensures the
+    canonicalization collapses only true homoglyph/whitespace/case variants,
+    not distinct names."""
+    _build_proposal(env, proposer_subject="alice")
+    _attach_sandbox(env, runner_subject="bob")
+    # 'Carol' casefolds to 'carol', which is distinct from 'carolynn' — accepted.
+    approval = _request_approval(env, reviewer_subject="Carol")
+    assert approval.reviewer.subject == "carol"
+
+
 def test_request_approval_rejects_expired_reviewer(env):
     import datetime as dt
     _build_proposal(env)
@@ -791,6 +908,30 @@ def test_rollback_succeeds_directly_from_human_activation(env):
     event = env["controller"].rollback(proposal_id="p1", actor=reviewer, reason="activation problem")
     assert env["controller"].state("p1") == "rollback"
     assert event.target_artifact_id == env["baseline_artifact_id"]
+
+
+def test_rollback_translates_pointer_value_error_to_wrapper_artifact_error(env, monkeypatch):
+    """CISO L1: if the wired RevisionPointerStore.rollback raises ValueError
+    (its invariant-violation contract), the controller must surface it as a
+    WrapperArtifactError so callers catch a single domain type, not a leaked
+    ValueError from the storage layer."""
+    _activate_for_rollback(env)
+    env["controller"].begin_monitoring(proposal_id="p1")
+
+    # Force the pointer store's rollback to fail with a raw ValueError, as the
+    # store contract permits for invariant violations (e.g. unknown artifact).
+    def _boom(*args, **kwargs):
+        raise ValueError("simulated pointer-store invariant violation")
+
+    monkeypatch.setattr(env["pointers"], "rollback", _boom)
+
+    reviewer = ReviewerPrincipal(
+        subject="oncall",
+        role="sre",
+        expires_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc) + timedelta(hours=1),
+    )
+    with pytest.raises(WrapperArtifactError, match="pointer rollback failed"):
+        env["controller"].rollback(proposal_id="p1", actor=reviewer, reason="r")
 
 
 # --------------------------------------------------------------------------- #

@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -87,6 +88,54 @@ def _require_nonempty_str(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise WrapperArtifactError(f"{label} must be a non-empty string")
     return value.strip()
+
+
+def _canonical_subject(s: str) -> str:
+    """Canonicalize a principal subject for structural comparison.
+
+    Applies NFKC normalization (which folds compatibility-equivalent
+    homoglyphs such as fullwidth ASCII, ligatures, and superscripts),
+    strips surrounding whitespace, and casefolds.  Used both at principal
+    construction time (so every stored subject is already in canonical form)
+    and at every separation-of-duties comparison, so that the
+    proposer-vs-reviewer and runner-vs-reviewer self-approval checks cannot
+    be bypassed by whitespace, case, or NFKC-equivalent homoglyph
+    differences (CISO H1 cases 1 and 2).
+
+    Note that NFKC does **not** fold cross-script confusables (e.g. Cyrillic
+    U+0430 ``а`` vs Latin ``a``); those are rejected at construction time by
+    :func:`_assert_no_mixed_script`, so a mixed-script spoofing subject can
+    never enter the controller (CISO H1 case 3).
+    """
+    return unicodedata.normalize("NFKC", s).strip().casefold()
+
+
+def _assert_no_mixed_script(canonical: str) -> None:
+    """Reject Latin + non-Latin letter mixtures in a principal subject.
+
+    NFKC folds compatibility-equivalent homoglyphs but does not fold
+    cross-script confusables such as Cyrillic ``а`` (U+0430) standing in for
+    Latin ``a`` — the exact vector of CISO H1 case 3.  A principal ``subject``
+    is a machine identifier (a user/service id), not a free-form display
+    name; a string that mixes ASCII letters with non-ASCII letters has no
+    legitimate identifier use and is the necessary precondition for a
+    cross-script homoglyph spoof.  Pure-ASCII identifiers (the existing
+    convention) and pure-non-Latin identifiers (e.g. a CJK id) remain valid.
+    """
+    has_ascii_letter = False
+    has_non_ascii_letter = False
+    for ch in canonical:
+        if unicodedata.category(ch)[0] != "L":  # only letters carry spoof risk
+            continue
+        if ch.isascii():
+            has_ascii_letter = True
+        else:
+            has_non_ascii_letter = True
+        if has_ascii_letter and has_non_ascii_letter:
+            raise WrapperArtifactError(
+                "principal subject mixes ASCII and non-ASCII letters; "
+                "cross-script confusable subjects are forbidden"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -212,11 +261,29 @@ class ReviewerPrincipal:
     free-form strings: a controller compares principals by structural equality,
     not by string matching against a blacklist.  ``expires_at`` is consulted on
     every authorization and may not be naive.
+
+    ``subject`` is canonicalized at construction time via
+    :func:`_canonical_subject` (NFKC + strip + casefold) and rejected if it
+    mixes ASCII with non-ASCII letters (:func:`_assert_no_mixed_script`), so
+    two principals that differ only by whitespace, case, NFKC-equivalent
+    homoglyphs, or cross-script confusables cannot both exist — the
+    separation-of-duties check in :meth:`request_approval` therefore cannot
+    be spoofed by subject cosmetic differences.
     """
 
     subject: str
     role: str
     expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subject, str) or not self.subject.strip():
+            raise WrapperArtifactError("reviewer subject must be a non-empty string")
+        canonical = _canonical_subject(self.subject)
+        _assert_no_mixed_script(canonical)
+        object.__setattr__(self, "subject", canonical)
+        if not isinstance(self.role, str) or not self.role.strip():
+            raise WrapperArtifactError("reviewer role must be a non-empty string")
+        object.__setattr__(self, "role", self.role.strip())
 
     def is_expired(self, *, now: datetime | None = None) -> bool:
         current = now or _utcnow()
@@ -232,6 +299,13 @@ class ActorPrincipal:
 
     Deliberately a different type from :class:`ReviewerPrincipal` so the
     controller can statically enforce "the proposer cannot be the approver".
+
+    ``subject`` is canonicalized at construction via
+    :func:`_canonical_subject` and rejected if it mixes ASCII with non-ASCII
+    letters, mirroring :class:`ReviewerPrincipal`, so the separation-of-duties
+    comparison in :meth:`request_approval` compares two principals that are
+    each already in canonical form (and defense-in-depth canonicalizes again
+    at the comparison site).
     """
 
     subject: str
@@ -239,7 +313,9 @@ class ActorPrincipal:
     def __post_init__(self) -> None:
         if not isinstance(self.subject, str) or not self.subject.strip():
             raise WrapperArtifactError("actor subject must be a non-empty string")
-        object.__setattr__(self, "subject", self.subject.strip())
+        canonical = _canonical_subject(self.subject)
+        _assert_no_mixed_script(canonical)
+        object.__setattr__(self, "subject", canonical)
 
 
 @dataclass(frozen=True)
@@ -583,11 +659,17 @@ class WrapperArtifactController:
         )
 
         # No self-approval: the reviewer must differ from proposer and runner.
-        if proposal.proposer is not None and reviewer.subject == proposal.proposer.subject:
+        # Both sides are canonicalized at construction, but we re-canonicalize
+        # here as defense-in-depth so the separation-of-duties invariant does
+        # not depend on every future Principal subtype remembering to
+        # canonicalize.  This closes the CISO H1 spoofing vectors (whitespace,
+        # case, NFKC-equivalent homoglyphs, and cross-script confusables — the
+        # latter already rejected at construction by _assert_no_mixed_script).
+        if proposal.proposer is not None and _canonical_subject(reviewer.subject) == _canonical_subject(proposal.proposer.subject):
             raise WrapperArtifactError(
                 "reviewer is the same principal as the proposer; self-approval forbidden"
             )
-        if proposal.sandbox_runner is not None and reviewer.subject == proposal.sandbox_runner.subject:
+        if proposal.sandbox_runner is not None and _canonical_subject(reviewer.subject) == _canonical_subject(proposal.sandbox_runner.subject):
             raise WrapperArtifactError(
                 "reviewer is the same principal as the sandbox runner; self-approval forbidden"
             )
@@ -816,13 +898,20 @@ class WrapperArtifactController:
         if target_artifact_id not in self._approved_artifacts:
             raise WrapperArtifactError("rollback target is no longer in approved set")
         # Restore the active pointer to the rollback target.  Offline by
-        # construction: no ModelHub call here.
-        self.pointers.rollback(
-            self.pointer_name,
-            target_artifact_id,
-            actor=actor.subject,
-            now=self._now().timestamp(),
-        )
+        # construction: no ModelHub call here.  The pointer store raises
+        # ValueError on invariant violations (e.g. unknown artifact); promote
+        # to WrapperArtifactError so callers catch a single domain type.
+        try:
+            self.pointers.rollback(
+                self.pointer_name,
+                target_artifact_id,
+                actor=actor.subject,
+                now=self._now().timestamp(),
+            )
+        except WrapperArtifactError:
+            raise
+        except ValueError as exc:
+            raise WrapperArtifactError(f"pointer rollback failed: {exc}") from exc
         event = RollbackEvent(
             rollback_id="war_" + secrets.token_urlsafe(24),
             proposal_id=proposal.proposal_id,
