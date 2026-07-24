@@ -1,4 +1,5 @@
 import type { BasisItem } from '../lib/types'
+import AnnotatedText from './AnnotatedText'
 
 export default function KeyBasisList({ items }: { items: BasisItem[] }) {
   if (!items.length) return null
@@ -8,8 +9,8 @@ export default function KeyBasisList({ items }: { items: BasisItem[] }) {
       <ul className="flex flex-col gap-3">
         {items.map((item, i) => (
           <li key={i} className="border-l-2 border-tf-accent pl-3">
-            <p className="text-sm text-tf-text">{item.claim}</p>
-            <p className="mt-0.5 text-xs text-tf-muted">{item.explanation}</p>
+            <p className="text-sm text-tf-text"><AnnotatedText text={item.claim} /></p>
+            <p className="mt-0.5 text-xs text-tf-muted"><AnnotatedText text={item.explanation} compact /></p>
             {item.evidence_idx.length > 0 && (
               <p className="mt-1 flex flex-wrap gap-1">
                 {item.evidence_idx.map((idx) => (
