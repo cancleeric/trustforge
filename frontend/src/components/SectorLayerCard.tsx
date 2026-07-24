@@ -1,4 +1,5 @@
 import type { AssetContext } from '../lib/types'
+import AnnotatedText from './AnnotatedText'
 
 const UNKNOWN = 'unknown'
 
@@ -79,7 +80,7 @@ export default function SectorLayerCard({ context }: { context: AssetContext }) 
                 className="inline-flex items-center gap-1 rounded-full border-tf-warn bg-[color-mix(in_srgb,var(--color-tf-warn)_14%,transparent)] px-1.5 py-0.5 text-[0.68rem] font-semibold text-tf-warn"
                 title={`轉帳手續費需 ${gasToken}`}
               >
-                &#9888; 轉帳手續費需 {gasToken}
+                &#9888; <AnnotatedText text={`轉帳手續費需 ${gasToken}`} compact />
               </span>
             )}
           </dd>
@@ -112,7 +113,11 @@ export default function SectorLayerCard({ context }: { context: AssetContext }) 
         )}
       </div>
 
-      {summary && <p className="mt-3 text-xs leading-relaxed text-tf-text2">{summary}</p>}
+      {summary && (
+        <p className="mt-3 text-xs leading-relaxed text-tf-text2">
+          <AnnotatedText text={summary} compact />
+        </p>
+      )}
     </div>
   )
 }
