@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import SectorLayerCard from './SectorLayerCard'
 import type { AssetContext } from '../lib/types'
 
@@ -26,7 +26,7 @@ function makeContext(overrides: Partial<AssetContext> = {}): AssetContext {
 
 describe('SectorLayerCard', () => {
   it('渲染 [Layer 2] badge、settlement_chain、gas_token、token_role、依賴清單與白話說明', () => {
-    render(<SectorLayerCard context={makeContext()} />)
+    const { container } = render(<SectorLayerCard context={makeContext()} />)
     expect(screen.getByText('[Layer 2]')).toBeInTheDocument()
     expect(screen.getAllByText('ethereum').length).toBeGreaterThan(0)
     expect(screen.getByText('ETH')).toBeInTheDocument()
@@ -34,12 +34,20 @@ describe('SectorLayerCard', () => {
     expect(screen.getByText('ethereum_settlement')).toBeInTheDocument()
     expect(screen.getByText('sequencer')).toBeInTheDocument()
     expect(screen.getByText('canonical_bridge')).toBeInTheDocument()
-    expect(screen.getByText(/依附於 Ethereum/)).toBeInTheDocument()
+    expect(container.textContent).toMatch(/依附於 Ethereum/)
   })
 
-  it('gas_token 與資產本身不同時標示手續費警示', () => {
+  it('gas_token 與資產本身不同時標示手續費警示（並以 AnnotatedText 呈現 glossary 詞，可點出 ⚠️ risk_note）', () => {
+    const { container } = render(<SectorLayerCard context={makeContext()} />)
+    expect(container.textContent).toMatch(/轉帳手續費\??需 ETH/)
+    // 「手續費」為 gas_fee glossary 詞，需被 AnnotatedText 標註成可點的 GlossaryTerm
+    expect(screen.getAllByText('手續費').length).toBeGreaterThan(0)
+  })
+
+  it('點擊「手續費」glossary 詞可展開 popover 並看到 ⚠️ risk_note（模組②可見）', () => {
     render(<SectorLayerCard context={makeContext()} />)
-    expect(screen.getByText(/轉帳手續費需 ETH/)).toBeInTheDocument()
+    fireEvent.click(screen.getAllByText('手續費')[0])
+    expect(screen.getByText(/A token usually cannot be used to pay its own transfer fees/)).toBeInTheDocument()
   })
 
   it('gas_token 等於資產本身時不顯示警示（不誤標）', () => {
