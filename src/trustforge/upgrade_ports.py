@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, ContextManager, Protocol
 
 
 class OperationDisplacedError(RuntimeError):
@@ -47,6 +47,7 @@ class PointerChange:
 
 @dataclass(frozen=True)
 class SandboxAttestation:
+    db_identity: str
     proposal_id: str
     candidate_family: str
     candidate_revision: str
@@ -57,6 +58,34 @@ class SandboxAttestation:
     passed: bool
     completed_at: datetime
     details: dict[str, Any]
+    key_id: str
+    proof: str
+
+
+class SandboxAttestationVerifier(Protocol):
+    def compact(
+        self,
+        *,
+        db_identity: str,
+        exact_capabilities: dict[str, dict[str, Any]],
+    ) -> int: ...
+
+    def reject(
+        self,
+        attestation: SandboxAttestation,
+        *,
+        operation_binding: str,
+        db_identity: str,
+    ) -> None: ...
+
+    def consume(
+        self,
+        attestation: SandboxAttestation,
+        *,
+        already_persisted: bool,
+        operation_binding: str,
+        db_identity: str,
+    ) -> ContextManager[None]: ...
 
 
 class AuthorityAdapter(Protocol):

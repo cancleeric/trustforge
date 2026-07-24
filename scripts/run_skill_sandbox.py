@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
-"""Validate an outer-skill candidate without changing the active pointer."""
+"""Validate and submit through the sole trusted local sandbox runner path.
+
+The retired Web endpoint never accepts sandbox results.  This process issues
+and consumes its internal capability locally and never emits that capability.
+"""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from datetime import datetime, timezone
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from trustforge.skills import artifact_hash, validate_artifact, write_artifact  # noqa: E402
+from trustforge.upgrade_adapters import (  # noqa: E402
+    JournalCapacityError,
+    SandboxAttestationAuthority,
+)
 from trustforge.upgrade_queue import UpgradeQueue  # noqa: E402
 
 
@@ -28,10 +38,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=REPO / "out" / "skill-sandbox.json")
     parser.add_argument("--with-replay", action="store_true")
     parser.add_argument("--replay-coin", default="BTC")
-    parser.add_argument("--proposal-id", help="Persist the real sandbox result to this durable upgrade proposal")
+    parser.add_argument(
+        "--proposal-id",
+        help="trusted local-only submission to this durable upgrade proposal",
+    )
     parser.add_argument("--queue-db", type=Path, help="SQLite queue path; defaults to TRUSTFORGE_SQLITE_PATH")
     args = parser.parse_args(argv)
-    queue = UpgradeQueue(args.queue_db) if args.proposal_id else None
+    sandbox_authority = SandboxAttestationAuthority() if args.proposal_id else None
+    queue = (
+        UpgradeQueue(args.queue_db, sandbox_verifier=sandbox_authority)
+        if args.proposal_id
+        else None
+    )
     proposal_binding = (
         queue.resolve_latest_sandbox_instance(args.proposal_id)
         if queue is not None and args.proposal_id
@@ -57,12 +75,34 @@ def main(argv: list[str] | None = None) -> int:
     }
     if proposal_binding is not None and queue is not None:
         result["proposal_binding"] = proposal_binding
-        result["queue_run"] = queue.record_sandbox(
-            proposal_binding["proposal_id"],
-            bool(result["passed"]),
-            f"sha256:{artifact_hash(candidate)}",
-            {"runner": "run_skill_sandbox.py", **result},
+        details = {"runner": "run_skill_sandbox.py", **result}
+        details_json = json.dumps(
+            details, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
+        assert sandbox_authority is not None
+        issue_args = {
+            "db_identity": str(queue.path.resolve(strict=False)),
+            "proposal_id": proposal_binding["proposal_id"],
+            "candidate_family": str(candidate["family"]),
+            "candidate_revision": revision,
+            "artifact_hash": f"sha256:{artifact_hash(candidate)}",
+            "run_id": artifact_hash({
+                "family": candidate["family"], "rules": candidate["rules"],
+            }),
+            "runner_version": "run_skill_sandbox.py/v2",
+            "details_checksum": hashlib.sha256(
+                details_json.encode("utf-8")
+            ).hexdigest(),
+            "passed": bool(result["passed"]),
+            "completed_at": datetime.now(timezone.utc),
+            "details": details,
+        }
+        try:
+            issued = sandbox_authority.issue(**issue_args)
+        except JournalCapacityError:
+            queue.compact_sandbox_journal()
+            issued = sandbox_authority.issue(**issue_args)
+        result["queue_run"] = queue.record_sandbox(issued)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))

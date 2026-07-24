@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +12,13 @@ from pathlib import Path
 import pytest
 
 from trustforge.upgrade_adapters import PrincipalAuthority
-from trustforge.upgrade_adapters import HermesActivationHandler, HermesRollbackHandler
+from trustforge.upgrade_adapters import (
+    HermesActivationHandler,
+    HermesRollbackHandler,
+    JournalCapacityError,
+    LegacyJournalError,
+    SandboxAttestationAuthority,
+)
 from trustforge.upgrade_ports import (
     AuthenticatedPrincipal,
     OperationDisplacedError,
@@ -20,6 +28,11 @@ from trustforge.upgrade_ports import (
 )
 from trustforge.upgrade_queue import UpgradeQueue
 from trustforge.safe_fs import SafePathError
+
+SANDBOX_AUTHORITY = SandboxAttestationAuthority(
+    Path("/private/tmp")
+    / f"trustforge-upgrade-queue-test-capabilities-{os.getpid()}.jsonl"
+)
 
 
 def principal(*actions: str, tenant: str = "t1", expired: bool = False):
@@ -32,10 +45,19 @@ def principal(*actions: str, tenant: str = "t1", expired: bool = False):
     )
 
 
-def attestation(proposal_id="p", revision="abc", *, passed=True):
+def attestation(
+    proposal_id="p", revision="abc", *, passed=True,
+    authority=SANDBOX_AUTHORITY,
+    db_identity=None,
+):
+    db_identity = str(
+        Path(db_identity or "/private/tmp/trustforge-test-default.sqlite3")
+        .resolve(strict=False)
+    )
     details = {"candidate": {"family": "analysis", "revision": revision}, "tests": 24}
     encoded = json.dumps(details, sort_keys=True, separators=(",", ":")).encode()
-    return SandboxAttestation(
+    return authority.issue(
+        db_identity=db_identity,
         proposal_id=proposal_id,
         candidate_family="analysis",
         candidate_revision=revision,
@@ -111,6 +133,7 @@ def queue(tmp_path, *, activator=None, rollback=None):
         catalog=Catalog(),
         activation_handler=activator or Activator(),
         rollback_handler=rollback or Rollback(),
+        sandbox_verifier=SANDBOX_AUTHORITY,
     )
 
 
@@ -120,6 +143,20 @@ def latest_instance(q, logical_id="p"):
         for row in q.status()["proposals"]
         if row["logical_id"] == logical_id
     )
+
+
+def raw_five_table_snapshot(q):
+    with sqlite3.connect(q.path) as db:
+        return tuple(
+            tuple(db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall())
+            for table in (
+                "upgrade_proposals",
+                "upgrade_reviews",
+                "upgrade_sandbox_runs",
+                "upgrade_decisions",
+                "upgrade_activations",
+            )
+        )
 
 
 def record_review(q, logical_id, verdict):
@@ -135,7 +172,7 @@ def record_review(q, logical_id, verdict):
 def prepare_approved(q):
     q.sync_diagnostic({"proposals": [{"id": "p", "area": "x", "tenant_id": "t1"}]})
     proposal_id = record_review(q, "p", "sandbox_ready")
-    q.record_sandbox(attestation(proposal_id=proposal_id))
+    q.record_sandbox(attestation(proposal_id=proposal_id, db_identity=q.path))
     q.decide(proposal_id, "approve", "green", principal=principal("upgrade:approve"))
     return proposal_id
 
@@ -162,7 +199,7 @@ def test_legacy_reviewer_reject_is_normalized_to_terminal_rejected(tmp_path):
     with pytest.raises(ValueError, match="terminal"):
         q.record_reviews({"reviews": [{"proposal_id": proposal_id, "verdict": "sandbox_ready"}]})
     with pytest.raises(ValueError, match="sandbox requires"):
-        q.record_sandbox(attestation(proposal_id=proposal_id))
+        q.record_sandbox(attestation(proposal_id=proposal_id, db_identity=q.path))
 
 
 def test_terminal_review_overwrite_fails_before_review_row(tmp_path):
@@ -182,9 +219,9 @@ def test_trusted_sandbox_attestation_is_required_and_checksum_bound(tmp_path):
     record_review(q, "p", "sandbox_ready")
     with pytest.raises(PermissionError, match="trusted"):
         q.record_sandbox("p")  # type: ignore[arg-type]
-    forged = attestation()
+    forged = attestation(db_identity=q.path)
     object.__setattr__(forged, "details_checksum", "0" * 64)
-    with pytest.raises(ValueError, match="checksum"):
+    with pytest.raises(ValueError, match="checksum mismatch"):
         q.record_sandbox(forged)
     assert q.status()["sandbox_runs"] == []
 
@@ -216,7 +253,7 @@ def test_valid_sandbox_attestation_cannot_bypass_review_state(
 
     before = snapshot()
     with pytest.raises(ValueError, match="sandbox requires"):
-        q.record_sandbox(attestation(proposal_id=proposal_id))
+        q.record_sandbox(attestation(proposal_id=proposal_id, db_identity=q.path))
     assert snapshot() == before
     with pytest.raises(ValueError, match="passed sandbox"):
         q.decide(
@@ -232,10 +269,12 @@ def test_sandbox_failed_can_retry_to_passed(tmp_path):
     q.sync_diagnostic({"proposals": [{"id": "p", "area": "x"}]})
     proposal_id = record_review(q, "p", "sandbox_ready")
     failed = q.record_sandbox(
-        attestation(proposal_id=proposal_id, passed=False)
+        attestation(proposal_id=proposal_id, passed=False, db_identity=q.path)
     )
     assert failed["state"] == "sandbox_failed"
-    passed = q.record_sandbox(attestation(proposal_id=proposal_id))
+    passed = q.record_sandbox(
+        attestation(proposal_id=proposal_id, db_identity=q.path)
+    )
     assert passed["state"] == "sandbox_passed"
     assert len(q.status()["sandbox_runs"]) == 2
 
@@ -260,7 +299,7 @@ def test_authority_rejects_cross_tenant_expired_and_missing_action(tmp_path):
     q.sync_diagnostic({"proposals": [{"id": "p", "area": "x", "tenant_id": "t1"}]})
     record_review(q, "p", "sandbox_ready")
     proposal_id = latest_instance(q)
-    q.record_sandbox(attestation(proposal_id=proposal_id))
+    q.record_sandbox(attestation(proposal_id=proposal_id, db_identity=q.path))
     for denied in (
         principal("upgrade:approve", tenant="t2"),
         principal("upgrade:approve", expired=True),
@@ -270,6 +309,678 @@ def test_authority_rejects_cross_tenant_expired_and_missing_action(tmp_path):
             q.decide(proposal_id, "approve", "green", principal=denied)
     assert q.status()["decisions"] == []
 
+
+def test_tenantless_proposal_requires_platform_principal_for_all_mutations(tmp_path):
+    q = queue(tmp_path)
+    q.sync_diagnostic({"proposals": [{"id": "global", "area": "x"}]})
+    proposal_id = record_review(q, "global", "sandbox_ready")
+    q.record_sandbox(attestation(proposal_id=proposal_id, db_identity=q.path))
+    tenant_operator = principal(
+        "upgrade:approve", "upgrade:activate", "upgrade:rollback",
+        tenant="t1",
+    )
+    platform_operator = principal(
+        "upgrade:approve", "upgrade:activate", "upgrade:rollback",
+        tenant="",
+    )
+    before = raw_five_table_snapshot(q)
+    with pytest.raises(PermissionError, match="cross-tenant"):
+        q.decide(
+            proposal_id, "approve", "green", principal=tenant_operator
+        )
+    assert raw_five_table_snapshot(q) == before
+    q.decide(
+        proposal_id, "approve", "green", principal=platform_operator
+    )
+    before = raw_five_table_snapshot(q)
+    with pytest.raises(PermissionError, match="cross-tenant"):
+        q.activate(proposal_id, "release", principal=tenant_operator)
+    assert raw_five_table_snapshot(q) == before
+    q.activate(proposal_id, "release", principal=platform_operator)
+    before = raw_five_table_snapshot(q)
+    with pytest.raises(PermissionError, match="cross-tenant"):
+        q.rollback(
+            proposal_id, "old", "incident", principal=tenant_operator
+        )
+    assert raw_five_table_snapshot(q) == before
+    q.rollback(
+        proposal_id, "old", "incident", principal=platform_operator
+    )
+    assert q.status()["proposals"][0]["state"] == "rolled_back"
+
+
+def test_sandbox_capability_wrong_key_tamper_replay_and_missing_verifier(tmp_path):
+    q = queue(tmp_path)
+    q.sync_diagnostic({"proposals": [{"id": "p", "area": "x"}]})
+    proposal_id = record_review(q, "p", "sandbox_ready")
+    before = q.status()
+
+    wrong = SandboxAttestationAuthority(
+        tmp_path / "wrong-capabilities.jsonl"
+    )
+    with pytest.raises(PermissionError, match="authority mismatch"):
+        q.record_sandbox(
+            attestation(
+                proposal_id=proposal_id, authority=wrong, db_identity=q.path
+            )
+        )
+    assert q.status() == before
+    legitimate = attestation(proposal_id=proposal_id, db_identity=q.path)
+    with pytest.raises(PermissionError, match="payload is invalid"):
+        q.record_sandbox(replace(legitimate, passed=False))
+    assert q.status() == before
+
+    q.record_sandbox(legitimate)
+    after = q.status()
+    assert q.record_sandbox(legitimate)["idempotent"] is True
+    assert q.status() == after
+
+    no_verifier = UpgradeQueue(tmp_path / "no-verifier.sqlite3")
+    no_verifier.sync_diagnostic({"proposals": [{"id": "x", "area": "x"}]})
+    x_id = no_verifier.resolve_latest_reviewable_instance("x")["proposal_id"]
+    binding = no_verifier.resolve_exact_review_instance({"id": "x", "area": "x"})
+    no_verifier.record_reviews({"reviews": [{
+        "proposal_id": x_id,
+        "payload_sha256": binding["payload_sha256"],
+        "verdict": "sandbox_ready",
+    }]})
+    no_verifier_before = no_verifier.status()
+    with pytest.raises(PermissionError, match="verifier"):
+        no_verifier.record_sandbox(
+            attestation(proposal_id=x_id, db_identity=no_verifier.path)
+        )
+    assert no_verifier.status() == no_verifier_before
+
+
+def test_rejected_early_capability_cannot_be_reused_after_state_becomes_eligible(
+    tmp_path,
+):
+    authority = SandboxAttestationAuthority(tmp_path / "capabilities.jsonl")
+    q = UpgradeQueue(
+        tmp_path / "queue.sqlite3",
+        authority=PrincipalAuthority(),
+        catalog=Catalog(),
+        activation_handler=Activator(),
+        rollback_handler=Rollback(),
+        sandbox_verifier=authority,
+    )
+    q.sync_diagnostic({"proposals": [{"id": "p", "area": "x"}]})
+    proposal_id = latest_instance(q)
+    capability = attestation(
+        proposal_id=proposal_id, authority=authority, db_identity=q.path
+    )
+    before = q.status()
+    with pytest.raises(ValueError, match="sandbox requires"):
+        q.record_sandbox(capability)
+    assert q.status() == before
+    record_review(q, "p", "sandbox_ready")
+    with pytest.raises(PermissionError, match="rejected"):
+        q.record_sandbox(capability)
+
+
+def test_consumed_capability_is_idempotent_only_for_exact_database(tmp_path):
+    authority = SandboxAttestationAuthority(tmp_path / "capabilities.jsonl")
+
+    def configured(path):
+        q = UpgradeQueue(
+            path,
+            authority=PrincipalAuthority(),
+            catalog=Catalog(),
+            activation_handler=Activator(),
+            rollback_handler=Rollback(),
+            sandbox_verifier=authority,
+        )
+        q.sync_diagnostic({"proposals": [{"id": "p", "area": "x"}]})
+        return q, record_review(q, "p", "sandbox_ready")
+
+    first, first_id = configured(tmp_path / "first.sqlite3")
+    second, second_id = configured(tmp_path / "second.sqlite3")
+    assert first_id == second_id
+    capability = attestation(
+        proposal_id=first_id, authority=authority, db_identity=first.path
+    )
+    original = first.record_sandbox(capability)
+    platform = principal(
+        "upgrade:approve", "upgrade:activate", tenant=""
+    )
+    first.decide(first_id, "approve", "green", principal=platform)
+    first.activate(first_id, "release", principal=platform)
+    retry = UpgradeQueue(
+        first.path,
+        authority=PrincipalAuthority(),
+        catalog=Catalog(),
+        activation_handler=Activator(),
+        rollback_handler=Rollback(),
+        sandbox_verifier=SandboxAttestationAuthority(authority.path),
+    ).record_sandbox(capability)
+    assert retry["idempotent"] is True
+    assert retry["run_id"] == original["run_id"]
+    assert retry["state"] == original["state"] == "sandbox_passed"
+    before = raw_five_table_snapshot(second)
+    with pytest.raises(PermissionError, match="database mismatch"):
+        second.record_sandbox(capability)
+    assert raw_five_table_snapshot(second) == before
+
+
+def test_incomplete_journal_tail_is_repaired_but_bad_complete_frame_fails(tmp_path):
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path)
+    first = attestation(authority=authority)
+    with path.open("ab") as stream:
+        stream.write(b'{"record":')
+    restarted = SandboxAttestationAuthority(path)
+    assert restarted.resolve(first.proof) == first
+    second = attestation(authority=restarted)
+    assert restarted.resolve(second.proof) == second
+    with path.open("ab") as stream:
+        stream.write(b'{"record":{}}\n')
+    with pytest.raises(SafePathError):
+        SandboxAttestationAuthority(path).resolve(first.proof)
+
+
+@pytest.mark.parametrize("target", ["journal", "lock"])
+def test_capability_journal_and_lock_symlinks_fail_closed(tmp_path, target):
+    path = tmp_path / "capabilities.jsonl"
+    victim = tmp_path / "victim"
+    victim.write_text("", encoding="utf-8")
+    link = path if target == "journal" else path.with_name(path.name + ".lock")
+    link.symlink_to(victim)
+    with pytest.raises((SafePathError, OSError)):
+        attestation(authority=SandboxAttestationAuthority(path))
+
+
+def test_capability_journal_and_lock_unsafe_modes_fail_closed(tmp_path):
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path)
+    issued = attestation(authority=authority)
+    path.chmod(0o644)
+    with pytest.raises(SafePathError, match="permissions"):
+        authority.resolve(issued.proof)
+    path.chmod(0o600)
+    lock = path.with_name(path.name + ".lock")
+    lock.chmod(0o644)
+    with pytest.raises(SafePathError, match="permissions"):
+        authority.resolve(issued.proof)
+
+
+def test_two_queue_workers_persist_one_capability_row(tmp_path):
+    authority = SandboxAttestationAuthority(tmp_path / "capabilities.jsonl")
+    path = tmp_path / "queue.sqlite3"
+    first = UpgradeQueue(path, sandbox_verifier=authority)
+    first.sync_diagnostic({"proposals": [{"id": "p", "area": "x"}]})
+    proposal_id = record_review(first, "p", "sandbox_ready")
+    capability = attestation(
+        proposal_id=proposal_id, authority=authority, db_identity=path
+    )
+
+    def consume_once():
+        return UpgradeQueue(
+            path, sandbox_verifier=SandboxAttestationAuthority(authority.path)
+        ).record_sandbox(capability)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: consume_once(), range(2)))
+    assert sorted(bool(result.get("idempotent")) for result in results) == [
+        False, True,
+    ]
+    assert len(first.status()["sandbox_runs"]) == 1
+
+
+def test_oversized_capability_frame_rejected_without_touching_journal(tmp_path):
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path)
+    baseline = attestation(authority=authority)
+    before = path.read_bytes()
+    details = {
+        "candidate": {"family": "analysis", "revision": "abc"},
+        "oversized": "x" * authority._MAX_FRAME_BYTES,
+    }
+    encoded = json.dumps(details, sort_keys=True, separators=(",", ":")).encode()
+    with pytest.raises(SafePathError, match="frame exceeds"):
+        authority.issue(
+            db_identity=str(
+                (tmp_path / "queue.sqlite3").resolve(strict=False)
+            ),
+            proposal_id="p",
+            candidate_family="analysis",
+            candidate_revision="abc",
+            run_id="oversized",
+            runner_version="runner/v1",
+            artifact_hash="sha256:abc",
+            details_checksum=hashlib.sha256(encoded).hexdigest(),
+            passed=True,
+            completed_at=datetime.now(timezone.utc),
+            details=details,
+        )
+    assert path.read_bytes() == before
+    assert authority.resolve(baseline.proof) == baseline
+
+
+def test_journal_exact_limit_succeeds_then_overflow_is_byte_identical(tmp_path):
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path)
+    record = {"probe": "near-limit"}
+    envelope = {
+        "record": record,
+        "checksum": hashlib.sha256(
+            json.dumps(
+                record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+    }
+    frame = (
+        json.dumps(
+            envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+        + b"\n"
+    )
+    authority._MAX_BYTES = len(frame)
+    with authority._locked() as parent_fd:
+        authority._append(parent_fd, record)
+    at_limit = path.read_bytes()
+    assert len(at_limit) == authority._MAX_BYTES
+    with authority._locked() as parent_fd:
+        with pytest.raises(SafePathError, match="journal exceeds"):
+            authority._append(parent_fd, record)
+    assert path.read_bytes() == at_limit
+
+
+def test_compaction_retention_boundary_restart_and_wrong_db(tmp_path):
+    now = [datetime.now(timezone.utc)]
+    clock = lambda: now[0]
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path, clock=clock)
+    q = UpgradeQueue(tmp_path / "queue.sqlite3", sandbox_verifier=authority)
+    q.sync_diagnostic({"proposals": [{"id": "exact", "area": "x"}]})
+    exact_id = record_review(q, "exact", "sandbox_ready")
+    exact = attestation(
+        proposal_id=exact_id, authority=authority, db_identity=q.path
+    )
+    q.record_sandbox(exact)
+
+    undisposed = attestation(proposal_id="undisposed", authority=authority)
+    rejected = attestation(
+        proposal_id="rejected", authority=authority, db_identity=q.path
+    )
+    orphan = attestation(
+        proposal_id="orphan", authority=authority, db_identity=q.path
+    )
+    wrong_path = tmp_path / "other.sqlite3"
+    wrong_db = attestation(
+        proposal_id="wrong-db", authority=authority, db_identity=wrong_path
+    )
+    binding = "a" * 64
+    db_identity = str(q.path.resolve(strict=False))
+    authority.reject(
+        rejected, operation_binding=binding, db_identity=db_identity
+    )
+    with authority.consume(
+        orphan, already_persisted=False, operation_binding=binding,
+        db_identity=db_identity,
+    ):
+        pass
+    with authority.consume(
+        wrong_db, already_persisted=False, operation_binding=binding,
+        db_identity=str(wrong_path.resolve(strict=False)),
+    ):
+        pass
+
+    now[0] += timedelta(hours=24, seconds=299)
+    assert q.compact_sandbox_journal() == 0
+    for capability in (exact, undisposed, rejected, orphan, wrong_db):
+        assert SandboxAttestationAuthority(path, clock=clock).resolve(
+            capability.proof
+        ) == capability
+
+    now[0] += timedelta(seconds=2)
+    q.compact_sandbox_journal()
+    restarted = SandboxAttestationAuthority(path, clock=clock)
+    for expired in (exact, undisposed, rejected):
+        with pytest.raises(PermissionError, match="not issued"):
+            restarted.resolve(expired.proof)
+    assert restarted.resolve(orphan.proof) == orphan
+    assert restarted.resolve(wrong_db.proof) == wrong_db
+
+
+def test_compaction_clock_rollback_is_byte_identical(tmp_path):
+    now = [datetime.now(timezone.utc)]
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path, clock=lambda: now[0])
+    attestation(authority=authority)
+    before = path.read_bytes()
+    now[0] -= timedelta(seconds=1)
+    with pytest.raises(SafePathError, match="clock moved backwards"):
+        authority.compact(
+            db_identity=str((tmp_path / "queue.sqlite3").resolve(strict=False)),
+            exact_capabilities={},
+        )
+    assert path.read_bytes() == before
+
+
+def test_issue_reserves_full_lifecycle_then_compacts_at_high_water(tmp_path):
+    now = [datetime.now(timezone.utc)]
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path, clock=lambda: now[0])
+    attestation(authority=authority)
+    before = path.read_bytes()
+    authority._MAX_BYTES = len(before) + authority._MAX_DISPOSITION_BYTES + 100
+    with pytest.raises(JournalCapacityError):
+        attestation(authority=authority)
+    assert path.read_bytes() == before
+    now[0] += authority._RETENTION + timedelta(seconds=1)
+    authority.compact(
+        db_identity=str((tmp_path / "queue.sqlite3").resolve(strict=False)),
+        exact_capabilities={},
+    )
+    issued = attestation(authority=authority)
+    assert authority.resolve(issued.proof) == issued
+
+
+def test_compaction_replace_failure_preserves_old_journal(
+    tmp_path, monkeypatch
+):
+    now = [datetime.now(timezone.utc)]
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path, clock=lambda: now[0])
+    issued = attestation(authority=authority)
+    before = path.read_bytes()
+    now[0] += authority._RETENTION + timedelta(seconds=1)
+    monkeypatch.setattr(
+        "trustforge.upgrade_adapters.os.replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("crash")),
+    )
+    with pytest.raises(OSError, match="crash"):
+        authority.compact(
+            db_identity=str((tmp_path / "queue.sqlite3").resolve(strict=False)),
+            exact_capabilities={},
+        )
+    assert path.read_bytes() == before
+    assert authority.resolve(issued.proof) == issued
+
+
+def test_issue_rejects_long_or_wrong_database_identity_before_write(tmp_path):
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path)
+    with pytest.raises(SafePathError, match="database identity"):
+        attestation(
+            authority=authority,
+            db_identity="/" + ("x" * 4097),
+        )
+    assert not path.exists()
+    relative = "relative.sqlite3"
+    with pytest.raises(SafePathError, match="database identity"):
+        authority.issue(
+            db_identity=relative,
+            proposal_id="p",
+            candidate_family="analysis",
+            candidate_revision="abc",
+            run_id="run",
+            runner_version="runner/v1",
+            artifact_hash="sha256:abc",
+            details_checksum=hashlib.sha256(b"{}").hexdigest(),
+            passed=True,
+            completed_at=datetime.now(timezone.utc),
+            details={},
+        )
+    assert not path.exists()
+
+
+def test_near_capacity_parallel_dispositions_preserve_each_others_headroom(
+    tmp_path,
+):
+    path = tmp_path / "capabilities.jsonl"
+    authority = SandboxAttestationAuthority(path)
+    db_identity = str((tmp_path / "queue.sqlite3").resolve(strict=False))
+    first = attestation(
+        proposal_id="a", authority=authority, db_identity=db_identity
+    )
+    second = attestation(
+        proposal_id="b", authority=authority, db_identity=db_identity
+    )
+    with authority._locked() as parent_fd:
+        entries = authority._read(parent_fd)
+    authority._MAX_BYTES = len(path.read_bytes()) + sum(
+        authority._disposition_reservation(entry["issued"])
+        for entry in entries.values()
+    )
+
+    def consume_first():
+        with authority.consume(
+            first, already_persisted=False, operation_binding="a" * 64,
+            db_identity=db_identity,
+        ):
+            pass
+
+    def reject_second():
+        authority.reject(
+            second, operation_binding="b" * 64, db_identity=db_identity
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda fn: fn(), (consume_first, reject_second)))
+    restarted = SandboxAttestationAuthority(path)
+    assert restarted.resolve(first.proof) == first
+    assert restarted.resolve(second.proof) == second
+
+
+@pytest.mark.parametrize("field", [
+    "proposal_id", "passed", "artifact_hash", "run_id",
+    "details_checksum", "operation_binding", "journal_id", "db_identity",
+    "candidate_family", "candidate_revision", "runner_version",
+    "completed_at", "details_content",
+])
+def test_compaction_aborts_on_each_db_journal_identity_conflict(
+    tmp_path, field
+):
+    now = [datetime.now(timezone.utc)]
+    authority = SandboxAttestationAuthority(
+        tmp_path / "capabilities.jsonl", clock=lambda: now[0]
+    )
+    q = UpgradeQueue(tmp_path / "queue.sqlite3", sandbox_verifier=authority)
+    q.sync_diagnostic({"proposals": [{"id": "p", "area": "x"}]})
+    proposal_id = record_review(q, "p", "sandbox_ready")
+    issued = attestation(
+        proposal_id=proposal_id, authority=authority, db_identity=q.path
+    )
+    q.record_sandbox(issued)
+    before = authority.path.read_bytes()
+    with sqlite3.connect(q.path) as db:
+        if field in {"proposal_id", "passed", "artifact_hash"}:
+            value = {
+                "proposal_id": "tampered",
+                "passed": 0,
+                "artifact_hash": "sha256:tampered",
+            }[field]
+            db.execute(
+                f"UPDATE upgrade_sandbox_runs SET {field}=?",
+                (value,),
+            )
+        else:
+            row = db.execute(
+                "SELECT payload_json FROM upgrade_sandbox_runs"
+            ).fetchone()
+            payload = json.loads(row[0])
+            if field == "candidate_family":
+                payload["candidate"]["family"] = "tampered"
+            elif field == "candidate_revision":
+                payload["candidate"]["revision"] = "tampered"
+            elif field == "details_content":
+                payload["tests"] = 999
+            else:
+                payload["attestation"][field] = "tampered"
+            db.execute(
+                "UPDATE upgrade_sandbox_runs SET payload_json=?",
+                (json.dumps(payload, sort_keys=True),),
+            )
+    now[0] += authority._RETENTION + timedelta(seconds=1)
+    with pytest.raises((ValueError, SafePathError)):
+        q.compact_sandbox_journal()
+    assert authority.path.read_bytes() == before
+
+
+def test_legacy_v2_journal_is_preserved_with_explicit_compatibility_error(
+    tmp_path,
+):
+    path = tmp_path / "capabilities.jsonl"
+    record = {
+        "schema": "trustforge.sandbox-capability/v2",
+        "state": "issued",
+        "capability_id": "a" * 64,
+        "journal_id": hashlib.sha256(
+            str(path.resolve(strict=False)).encode()
+        ).hexdigest(),
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "attestation": {},
+    }
+    envelope = {
+        "record": record,
+        "checksum": hashlib.sha256(
+            json.dumps(
+                record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+    }
+    path.write_text(
+        json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    before = path.read_bytes()
+    with pytest.raises(LegacyJournalError, match="v2"):
+        SandboxAttestationAuthority(path).resolve("a" * 64)
+    assert path.read_bytes() == before
+
+
+def test_compaction_skips_known_legacy_db_row_and_reclaims_exact_v3(tmp_path):
+    now = [datetime.now(timezone.utc)]
+    authority = SandboxAttestationAuthority(
+        tmp_path / "capabilities.jsonl", clock=lambda: now[0]
+    )
+    q = UpgradeQueue(tmp_path / "queue.sqlite3", sandbox_verifier=authority)
+    q.sync_diagnostic({"proposals": [{"id": "p", "area": "x"}]})
+    proposal_id = record_review(q, "p", "sandbox_ready")
+    issued = attestation(
+        proposal_id=proposal_id, authority=authority, db_identity=q.path
+    )
+    q.record_sandbox(issued)
+    legacy = {
+        "candidate": {"family": "analysis", "revision": "legacy"},
+        "attestation": {
+            "run_id": "legacy-run",
+            "runner_version": "legacy/v1",
+            "details_checksum": "0" * 64,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    with sqlite3.connect(q.path) as db:
+        db.execute(
+            "INSERT INTO upgrade_sandbox_runs "
+            "(proposal_id,passed,artifact_hash,payload_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("legacy", 1, "sha256:legacy", json.dumps(legacy), 0.0),
+        )
+    now[0] += authority._RETENTION + timedelta(seconds=1)
+    q.compact_sandbox_journal()
+    with pytest.raises(PermissionError, match="not issued"):
+        authority.resolve(issued.proof)
+
+
+@pytest.mark.parametrize("legacy_attestation", [
+    pytest.param("missing", id="missing"),
+    pytest.param(None, id="null"),
+    pytest.param([], id="list"),
+])
+def test_compaction_rejects_unverifiable_legacy_shapes_byte_identically(
+    tmp_path, legacy_attestation
+):
+    authority = SandboxAttestationAuthority(tmp_path / "capabilities.jsonl")
+    q = UpgradeQueue(tmp_path / "queue.sqlite3", sandbox_verifier=authority)
+    issued = attestation(authority=authority, db_identity=q.path)
+    payload = {"candidate": {"family": "analysis", "revision": "legacy"}}
+    if legacy_attestation != "missing":
+        payload["attestation"] = legacy_attestation
+    with sqlite3.connect(q.path) as db:
+        db.execute(
+            "INSERT INTO upgrade_sandbox_runs "
+            "(proposal_id,passed,artifact_hash,payload_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("legacy", 1, "sha256:legacy", json.dumps(payload), 0.0),
+        )
+    before = authority.path.read_bytes()
+    with pytest.raises(ValueError, match="malformed"):
+        q.compact_sandbox_journal()
+    assert authority.path.read_bytes() == before
+
+
+def test_compaction_rejects_partial_v3_downgrade_with_journal_unchanged(
+    tmp_path,
+):
+    authority = SandboxAttestationAuthority(tmp_path / "capabilities.jsonl")
+    q = UpgradeQueue(tmp_path / "queue.sqlite3", sandbox_verifier=authority)
+    issued = attestation(authority=authority, db_identity=q.path)
+    before = authority.path.read_bytes()
+    partial = {
+        "candidate": {"family": "analysis", "revision": "abc"},
+        "attestation": {"capability_id": issued.proof},
+    }
+    with sqlite3.connect(q.path) as db:
+        db.execute(
+            "INSERT INTO upgrade_sandbox_runs "
+            "(proposal_id,passed,artifact_hash,payload_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("partial", 1, "sha256:abc", json.dumps(partial), 0.0),
+        )
+    with pytest.raises(ValueError, match="malformed"):
+        q.compact_sandbox_journal()
+    assert authority.path.read_bytes() == before
+
+
+def test_high_water_compact_with_legacy_row_then_issue_and_consume_e2e(
+    tmp_path,
+):
+    now = [datetime.now(timezone.utc)]
+    authority = SandboxAttestationAuthority(
+        tmp_path / "capabilities.jsonl", clock=lambda: now[0]
+    )
+    q = UpgradeQueue(tmp_path / "queue.sqlite3", sandbox_verifier=authority)
+    expired = attestation(
+        proposal_id="x" * 71, authority=authority, db_identity=q.path
+    )
+    with authority._locked() as parent_fd:
+        issued_record = authority._read(parent_fd)[expired.proof]["issued"]
+    authority._MAX_BYTES = (
+        len(authority.path.read_bytes())
+        + authority._disposition_reservation(issued_record)
+    )
+    with sqlite3.connect(q.path) as db:
+        db.execute(
+            "INSERT INTO upgrade_sandbox_runs "
+            "(proposal_id,passed,artifact_hash,payload_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (
+                "legacy", 1, "sha256:legacy",
+                json.dumps({
+                    "candidate": {"family": "analysis", "revision": "legacy"},
+                    "attestation": {
+                        "run_id": "legacy", "runner_version": "legacy/v1",
+                        "details_checksum": "0" * 64,
+                        "completed_at": now[0].isoformat(),
+                    },
+                }),
+                0.0,
+            ),
+        )
+    with pytest.raises(JournalCapacityError):
+        attestation(authority=authority, db_identity=q.path)
+    now[0] += authority._RETENTION + timedelta(seconds=1)
+    q.compact_sandbox_journal()
+    q.sync_diagnostic({"proposals": [{"id": "fresh", "area": "x"}]})
+    proposal_id = record_review(q, "fresh", "sandbox_ready")
+    fresh = attestation(
+        proposal_id=proposal_id, authority=authority, db_identity=q.path
+    )
+    assert q.record_sandbox(fresh)["state"] == "sandbox_passed"
+    assert len(q.status()["sandbox_runs"]) == 2
 
 def test_caller_actor_qa_is_not_an_authority_input(tmp_path):
     q = queue(tmp_path)
@@ -476,11 +1187,14 @@ def test_queue_first_activation_uses_existing_hermes_pointer_snapshot(tmp_path):
         rollback_handler=HermesRollbackHandler(
             log_path, receipt_path=receipt_path
         ),
+        sandbox_verifier=SANDBOX_AUTHORITY,
     )
     q.sync_diagnostic({"proposals": [{"id": "p", "area": "x", "tenant_id": "t1"}]})
     record_review(q, "p", "sandbox_ready")
     proposal_id = latest_instance(q)
-    q.record_sandbox(attestation(proposal_id=proposal_id, revision=revision))
+    q.record_sandbox(attestation(
+        proposal_id=proposal_id, revision=revision, db_identity=q.path
+    ))
     q.decide(proposal_id, "approve", "green", principal=principal("upgrade:approve"))
     with pytest.raises(RuntimeError, match="lost handler response"):
         q.activate(proposal_id, "release", principal=principal("upgrade:activate"))
@@ -604,6 +1318,7 @@ def test_queue_retry_of_completed_but_unpersisted_activation_cannot_displace_new
             log_path, receipt_path=receipt_path, after_receipt=lose_sqlite_window
         ),
         rollback_handler=HermesRollbackHandler(log_path, receipt_path=receipt_path),
+        sandbox_verifier=SANDBOX_AUTHORITY,
     )
 
     def approve_proposal(proposal_id, revision):
@@ -611,7 +1326,9 @@ def test_queue_retry_of_completed_but_unpersisted_activation_cannot_displace_new
             "id": proposal_id, "area": "x", "tenant_id": "t1",
         }]})
         durable_id = record_review(q, proposal_id, "sandbox_ready")
-        q.record_sandbox(attestation(proposal_id=durable_id, revision=revision))
+        q.record_sandbox(attestation(
+            proposal_id=durable_id, revision=revision, db_identity=q.path
+        ))
         q.decide(
             durable_id, "approve", "green",
             principal=principal("upgrade:approve"),
@@ -673,6 +1390,7 @@ def test_queue_retry_of_unpersisted_rollback_cannot_displace_newer_activation(tm
             rollback_handler=HermesRollbackHandler(
                 log_path, receipt_path=receipt_path
             ),
+            sandbox_verifier=SANDBOX_AUTHORITY,
         )
 
     def approve_and_activate(q, proposal_id, revision):
@@ -680,7 +1398,9 @@ def test_queue_retry_of_unpersisted_rollback_cannot_displace_newer_activation(tm
             "id": proposal_id, "area": "x", "tenant_id": "t1",
         }]})
         durable_id = record_review(q, proposal_id, "sandbox_ready")
-        q.record_sandbox(attestation(proposal_id=durable_id, revision=revision))
+        q.record_sandbox(attestation(
+            proposal_id=durable_id, revision=revision, db_identity=q.path
+        ))
         q.decide(
             durable_id, "approve", "green",
             principal=principal("upgrade:approve"),
@@ -815,6 +1535,7 @@ def test_improvement_dynamic_rounds_create_content_addressed_instances(tmp_path)
         catalog=Catalog(),
         activation_handler=Activator(),
         rollback_handler=Rollback(),
+        sandbox_verifier=SANDBOX_AUTHORITY,
     )
     round_one = diagnose(
         scheduler_runs=[{"failure_count": 1, "failures": ["timeout"]}],
@@ -831,8 +1552,13 @@ def test_improvement_dynamic_rounds_create_content_addressed_instances(tmp_path)
     first_id = record_review(
         q, "source-reliability-investigation", "sandbox_ready"
     )
-    q.record_sandbox(attestation(proposal_id=first_id))
-    q.decide(first_id, "approve", "green", principal=principal("upgrade:approve"))
+    q.record_sandbox(attestation(proposal_id=first_id, db_identity=q.path))
+    q.decide(
+        first_id,
+        "approve",
+        "green",
+        principal=principal("upgrade:approve", tenant=""),
+    )
 
     q.sync_diagnostic(round_two)
     status = q.status()
@@ -1009,8 +1735,10 @@ def test_sandbox_cli_resolves_logical_once_before_new_round(
     ]) == 0
     result = json.loads(output.read_text(encoding="utf-8"))
     assert result["proposal_binding"]["proposal_id"] == first_id
+    assert "capability" not in json.dumps(result).lower()
     status = q.status()
     assert len(status["proposals"]) == 2
+    assert len(status["sandbox_runs"]) == 1
     assert status["sandbox_runs"][0]["proposal_id"] == first_id
 
 

@@ -5,8 +5,10 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 import stat
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -19,6 +21,7 @@ from .upgrade_ports import (
     PointerChange,
     RollbackHandler,
     UpgradeCandidate,
+    SandboxAttestation,
 )
 
 
@@ -38,11 +41,618 @@ class PrincipalAuthority:
             raise PermissionError("authenticated principal has expired")
         if action not in principal.actions:
             raise PermissionError(f"principal lacks {action} action")
-        if tenant_id and principal.tenant_id != tenant_id:
+        if principal.tenant_id != tenant_id:
             raise PermissionError("cross-tenant upgrade mutation is forbidden")
         if not principal.subject.strip():
             raise PermissionError("authenticated principal subject is required")
         return principal.subject.strip()
+
+
+class JournalCapacityError(SafePathError):
+    pass
+
+
+class LegacyJournalError(SafePathError):
+    pass
+
+
+class SandboxAttestationAuthority:
+    """OS-protected append-only sandbox capability journal.
+
+    Security boundary: the sandbox runner, Web process, and queue workers are
+    trusted processes running as the same OS UID.  Mode 0600, no-follow opens,
+    directory pinning, and advisory locks exclude other UIDs and path swaps;
+    this is not a privilege boundary between mutually hostile same-UID code.
+    """
+
+    _MAX_BYTES = 8 * 1024 * 1024
+    _MAX_FRAME_BYTES = 1024 * 1024
+    _MAX_DISPOSITION_BYTES = 1024
+    _RETENTION = timedelta(hours=24, seconds=300)
+
+    def __init__(self, path: Path | None = None, *, clock=None):
+        self.path = path or self.default_path()
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.key_id = hashlib.sha256(
+            str(self.path.resolve(strict=False)).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def default_path() -> Path:
+        configured = os.getenv("TRUSTFORGE_SANDBOX_CAPABILITY_JOURNAL")
+        if configured:
+            return Path(configured)
+        return (
+            Path(__file__).resolve().parents[2]
+            / "out"
+            / "sandbox-capabilities-v4.jsonl"
+        )
+
+    @staticmethod
+    def _attestation_payload(attestation: SandboxAttestation) -> dict[str, Any]:
+        return {
+            "db_identity": attestation.db_identity,
+            "proposal_id": attestation.proposal_id,
+            "candidate_family": attestation.candidate_family,
+            "candidate_revision": attestation.candidate_revision,
+            "artifact_hash": attestation.artifact_hash,
+            "run_id": attestation.run_id,
+            "runner_version": attestation.runner_version,
+            "details_checksum": attestation.details_checksum,
+            "passed": attestation.passed,
+            "completed_at": attestation.completed_at.isoformat(),
+            "details": attestation.details,
+        }
+
+    @contextmanager
+    def _locked(self) -> Iterator[int]:
+        with pinned_directory(self.path.parent, create=True) as parent_fd:
+            name = self.path.name + ".lock"
+            fd = os.open(
+                name,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=parent_fd,
+            )
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+                    raise SafePathError("sandbox journal lock permissions are unsafe")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield parent_fd
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def _read(self, parent_fd: int) -> dict[str, dict[str, Any]]:
+        try:
+            raw, info = read_regular_file_at(
+                parent_fd, self.path.name, maximum_bytes=self._MAX_BYTES
+            )
+        except FileNotFoundError:
+            return {}
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise SafePathError("sandbox capability journal permissions are unsafe")
+        capabilities: dict[str, dict[str, Any]] = {}
+        # O_APPEND writes can be cut short by process death.  A non-newline
+        # terminated final frame was never durable and is ignored; every
+        # complete frame, including its checksum, remains fail-closed.
+        complete = raw
+        if raw and not raw.endswith(b"\n"):
+            complete = raw[: raw.rfind(b"\n") + 1] if b"\n" in raw else b""
+        for number, line in enumerate(complete.splitlines(), 1):
+            try:
+                envelope = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SafePathError(
+                    f"corrupt sandbox capability journal at line {number}"
+                ) from exc
+            if not isinstance(envelope, dict) or set(envelope) != {"record", "checksum"}:
+                raise SafePathError("invalid sandbox capability envelope")
+            record = envelope["record"]
+            if (
+                not isinstance(record, dict)
+                or envelope["checksum"]
+                != hashlib.sha256(_canonical(record)).hexdigest()
+            ):
+                raise SafePathError("sandbox capability checksum mismatch")
+            if record.get("schema") == "trustforge.sandbox-capability/v2":
+                raise LegacyJournalError(
+                    "legacy sandbox journal v2 is preserved; use the v3 journal"
+                )
+            capability_id = record.get("capability_id")
+            state = record.get("state")
+            if not isinstance(capability_id, str) or state not in {
+                "issued", "consumed", "rejected"
+            }:
+                raise SafePathError("invalid sandbox capability record")
+            entry = capabilities.setdefault(capability_id, {})
+            if state == "issued":
+                if entry or set(record) != {
+                    "schema", "state", "capability_id", "journal_id",
+                    "issued_at", "attestation",
+                }:
+                    raise SafePathError("duplicate sandbox capability issue")
+                if record["schema"] != "trustforge.sandbox-capability/v3":
+                    raise SafePathError("unknown sandbox capability schema")
+                try:
+                    issued_at = datetime.fromisoformat(record["issued_at"])
+                except (TypeError, ValueError) as exc:
+                    raise SafePathError("invalid sandbox capability issued_at") from exc
+                if issued_at.tzinfo is None:
+                    raise SafePathError("sandbox capability issued_at must be aware")
+                if record["journal_id"] != self.key_id:
+                    raise SafePathError("sandbox capability journal identity mismatch")
+                attestation = record["attestation"]
+                if not isinstance(attestation, dict) or set(attestation) != {
+                    "proposal_id", "candidate_family", "candidate_revision",
+                    "artifact_hash", "run_id", "runner_version",
+                    "details_checksum", "passed", "completed_at", "details",
+                    "db_identity",
+                }:
+                    raise SafePathError("invalid sandbox capability attestation")
+                if (
+                    not all(isinstance(attestation[key], str) for key in (
+                        "proposal_id", "candidate_family", "candidate_revision",
+                        "artifact_hash", "run_id", "runner_version",
+                        "details_checksum", "completed_at",
+                        "db_identity",
+                    ))
+                    or type(attestation["passed"]) is not bool
+                    or not isinstance(attestation["details"], dict)
+                ):
+                    raise SafePathError("invalid sandbox capability attestation fields")
+                entry["issued"] = record
+            else:
+                if (
+                    "issued" not in entry
+                    or "consumed" in entry
+                    or "rejected" in entry
+                ):
+                    raise SafePathError("out-of-order sandbox capability disposition")
+                if set(record) != {
+                    "schema", "state", "capability_id", "journal_id",
+                    "issued_checksum", "operation_binding",
+                    "db_identity", "db_digest",
+                }:
+                    raise SafePathError("invalid sandbox capability disposition")
+                if (
+                    record["schema"] != "trustforge.sandbox-capability/v3"
+                    or record["journal_id"] != self.key_id
+                    or not isinstance(record["operation_binding"], str)
+                    or len(record["operation_binding"]) != 64
+                ):
+                    raise SafePathError("invalid sandbox capability disposition identity")
+                if (
+                    not isinstance(record["db_identity"], str)
+                    or record["db_digest"]
+                    != hashlib.sha256(record["db_identity"].encode()).hexdigest()
+                ):
+                    raise SafePathError("invalid sandbox disposition DB identity")
+                issued_checksum = hashlib.sha256(
+                    _canonical(entry["issued"])
+                ).hexdigest()
+                if record["issued_checksum"] != issued_checksum:
+                    raise SafePathError("disposition does not bind issued capability")
+                entry[state] = record
+        return capabilities
+
+    def _append(
+        self,
+        parent_fd: int,
+        record: dict[str, Any],
+        *,
+        reservation: int = 0,
+    ) -> None:
+        envelope = {
+            "record": record,
+            "checksum": hashlib.sha256(_canonical(record)).hexdigest(),
+        }
+        encoded = _canonical(envelope) + b"\n"
+        if len(encoded) > self._MAX_FRAME_BYTES:
+            raise SafePathError("sandbox capability frame exceeds size limit")
+        fd = os.open(
+            self.path.name,
+            os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+                raise SafePathError("sandbox capability journal permissions are unsafe")
+            if info.st_size:
+                if info.st_size > self._MAX_BYTES:
+                    raise SafePathError("sandbox capability journal exceeds size limit")
+                journal = os.pread(fd, info.st_size, 0)
+                durable_size = info.st_size
+                if not journal.endswith(b"\n"):
+                    newline = journal.rfind(b"\n")
+                    durable_size = newline + 1 if newline >= 0 else 0
+                if durable_size + len(encoded) + reservation > self._MAX_BYTES:
+                    raise JournalCapacityError(
+                        "sandbox capability journal exceeds size limit"
+                    )
+                if durable_size != info.st_size:
+                    os.ftruncate(fd, durable_size)
+                    os.fsync(fd)
+            elif len(encoded) + reservation > self._MAX_BYTES:
+                raise JournalCapacityError(
+                    "sandbox capability journal exceeds size limit"
+                )
+            view = memoryview(encoded)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short sandbox capability journal write")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+            os.fsync(parent_fd)
+
+    def _disposition_reservation(self, issued: dict[str, Any]) -> int:
+        db_identity = str(issued["attestation"]["db_identity"])
+        common = {
+            "schema": "trustforge.sandbox-capability/v3",
+            "capability_id": str(issued["capability_id"]),
+            "journal_id": self.key_id,
+            "issued_checksum": hashlib.sha256(_canonical(issued)).hexdigest(),
+            "operation_binding": "0" * 64,
+            "db_identity": db_identity,
+            "db_digest": hashlib.sha256(db_identity.encode()).hexdigest(),
+        }
+        sizes = []
+        for state in ("consumed", "rejected"):
+            record = {**common, "state": state}
+            envelope = {
+                "record": record,
+                "checksum": hashlib.sha256(_canonical(record)).hexdigest(),
+            }
+            sizes.append(len(_canonical(envelope)) + 1)
+        return max(sizes)
+
+    def issue(
+        self,
+        *,
+        db_identity: str,
+        proposal_id: str,
+        candidate_family: str,
+        candidate_revision: str,
+        artifact_hash: str,
+        run_id: str,
+        runner_version: str,
+        details_checksum: str,
+        passed: bool,
+        completed_at,
+        details: dict[str, Any],
+    ) -> SandboxAttestation:
+        canonical_db = str(Path(db_identity).resolve(strict=False))
+        if (
+            not db_identity
+            or db_identity != canonical_db
+            or len(db_identity.encode("utf-8")) > 4096
+        ):
+            raise SafePathError("sandbox database identity is unsafe")
+        completed_iso = completed_at.isoformat()
+        seed = _canonical({
+            "proposal_id": proposal_id,
+            "run_id": run_id,
+            "completed_at": completed_iso,
+            "nonce": secrets.token_hex(16),
+        })
+        capability_id = hashlib.sha256(seed).hexdigest()
+        attestation = SandboxAttestation(
+            db_identity=db_identity,
+            proposal_id=proposal_id,
+            candidate_family=candidate_family,
+            candidate_revision=candidate_revision,
+            run_id=run_id,
+            runner_version=runner_version,
+            artifact_hash=artifact_hash,
+            details_checksum=details_checksum,
+            passed=passed,
+            completed_at=completed_at,
+            details=details,
+            key_id=self.key_id,
+            proof=capability_id,
+        )
+        record = {
+            "schema": "trustforge.sandbox-capability/v3",
+            "state": "issued",
+            "capability_id": capability_id,
+            "journal_id": self.key_id,
+            "issued_at": self.clock().astimezone(timezone.utc).isoformat(),
+            "attestation": self._attestation_payload(attestation),
+        }
+        with self._locked() as parent_fd:
+            capabilities = self._read(parent_fd)
+            if capability_id in capabilities:
+                raise RuntimeError("sandbox capability id collision")
+            reservation = sum(
+                self._disposition_reservation(entry["issued"])
+                for entry in capabilities.values()
+                if "consumed" not in entry and "rejected" not in entry
+            ) + self._disposition_reservation(record)
+            self._append(
+                parent_fd,
+                record,
+                reservation=reservation,
+            )
+        return attestation
+
+    def resolve(self, capability_id: str) -> SandboxAttestation:
+        with self._locked() as parent_fd:
+            entry = self._read(parent_fd).get(capability_id)
+            if entry is None:
+                raise PermissionError("sandbox capability was not issued")
+            payload = entry["issued"]["attestation"]
+        return SandboxAttestation(
+            **{
+                **payload,
+                "completed_at": datetime.fromisoformat(payload["completed_at"]),
+                "key_id": self.key_id,
+                "proof": capability_id,
+            }
+        )
+
+    def compact(
+        self,
+        *,
+        db_identity: str,
+        exact_capabilities: dict[str, dict[str, Any]],
+    ) -> int:
+        """Crash-safely retain only records required by the lifecycle policy."""
+        now = self.clock().astimezone(timezone.utc)
+        with self._locked() as parent_fd:
+            capabilities = self._read(parent_fd)
+            retained: list[dict[str, Any]] = []
+            for capability_id, entry in capabilities.items():
+                issued = entry["issued"]
+                issued_at = datetime.fromisoformat(issued["issued_at"]).astimezone(
+                    timezone.utc
+                )
+                if now < issued_at:
+                    raise SafePathError("sandbox journal clock moved backwards")
+                age = now - issued_at
+                disposition = entry.get("consumed") or entry.get("rejected")
+                keep = False
+                if disposition is None:
+                    keep = age <= self._RETENTION
+                elif disposition["db_identity"] != db_identity:
+                    keep = True
+                elif entry.get("rejected") is not None:
+                    keep = age <= self._RETENTION
+                elif capability_id not in exact_capabilities:
+                    keep = True
+                else:
+                    exact = exact_capabilities[capability_id]
+                    expected = {
+                        "proposal_id": issued["attestation"]["proposal_id"],
+                        "passed": issued["attestation"]["passed"],
+                        "artifact_hash": issued["attestation"]["artifact_hash"],
+                        "candidate_family": issued["attestation"][
+                            "candidate_family"
+                        ],
+                        "candidate_revision": issued["attestation"][
+                            "candidate_revision"
+                        ],
+                        "run_id": issued["attestation"]["run_id"],
+                        "runner_version": issued["attestation"]["runner_version"],
+                        "completed_at": issued["attestation"]["completed_at"],
+                        "details_checksum": issued["attestation"]["details_checksum"],
+                        "operation_binding": disposition["operation_binding"],
+                        "journal_id": issued["journal_id"],
+                        "db_identity": disposition["db_identity"],
+                    }
+                    if exact != expected:
+                        raise SafePathError(
+                            "sandbox DB row conflicts with journal identity"
+                        )
+                    keep = age <= self._RETENTION
+                if keep:
+                    retained.append(issued)
+                    if disposition is not None:
+                        retained.append(disposition)
+            encoded = b"".join(
+                _canonical({
+                    "record": record,
+                    "checksum": hashlib.sha256(_canonical(record)).hexdigest(),
+                }) + b"\n"
+                for record in retained
+            )
+            if len(encoded) > self._MAX_BYTES:
+                raise JournalCapacityError(
+                    "compacted sandbox journal exceeds size limit"
+                )
+            temporary = f".{self.path.name}.{secrets.token_hex(12)}.compact"
+            fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=parent_fd,
+            )
+            try:
+                view = memoryview(encoded)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError("short sandbox journal compaction write")
+                    view = view[written:]
+                os.fsync(fd)
+            except BaseException:
+                os.close(fd)
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except OSError:
+                    pass
+                raise
+            else:
+                os.close(fd)
+            try:
+                os.replace(
+                    temporary,
+                    self.path.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                os.fsync(parent_fd)
+            except BaseException:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except OSError:
+                    pass
+                raise
+            return len(capabilities) - sum(
+                1 for entry in capabilities.values()
+                if entry["issued"] in retained
+            )
+
+    def _verified_entry(
+        self,
+        parent_fd: int,
+        attestation: SandboxAttestation,
+    ) -> tuple[
+        dict[str, dict[str, Any]], dict[str, Any], dict[str, Any]
+    ]:
+        if attestation.key_id != self.key_id:
+            raise PermissionError("sandbox attestation authority mismatch")
+        capabilities = self._read(parent_fd)
+        entry = capabilities.get(attestation.proof)
+        if entry is None:
+            raise PermissionError("sandbox capability was not issued")
+        issued = entry["issued"]
+        if issued["journal_id"] != self.key_id or issued["attestation"] != (
+            self._attestation_payload(attestation)
+        ):
+            raise PermissionError("sandbox capability payload is invalid")
+        return capabilities, entry, issued
+
+    def _other_undisposed_reservation(
+        self,
+        capabilities: dict[str, dict[str, Any]],
+        capability_id: str,
+    ) -> int:
+        return sum(
+            self._disposition_reservation(entry["issued"])
+            for current_id, entry in capabilities.items()
+            if current_id != capability_id
+            and "consumed" not in entry
+            and "rejected" not in entry
+        )
+
+    def reject(
+        self,
+        attestation: SandboxAttestation,
+        *,
+        operation_binding: str,
+        db_identity: str,
+    ) -> None:
+        """Permanently burn an authentic capability that failed eligibility."""
+        if attestation.db_identity != db_identity:
+            raise PermissionError("sandbox capability database mismatch")
+        if (
+            len(operation_binding) != 64
+            or any(character not in "0123456789abcdef" for character in operation_binding)
+        ):
+            raise SafePathError("sandbox operation binding is invalid")
+        with self._locked() as parent_fd:
+            capabilities, entry, issued = self._verified_entry(
+                parent_fd, attestation
+            )
+            if entry.get("consumed") is not None or entry.get("rejected") is not None:
+                raise PermissionError("sandbox capability replay is forbidden")
+            record = {
+                "schema": "trustforge.sandbox-capability/v3",
+                "state": "rejected",
+                "capability_id": attestation.proof,
+                "journal_id": self.key_id,
+                "issued_checksum": hashlib.sha256(_canonical(issued)).hexdigest(),
+                "operation_binding": operation_binding,
+                "db_identity": db_identity,
+                "db_digest": hashlib.sha256(db_identity.encode()).hexdigest(),
+            }
+            if self._disposition_reservation(issued) < len(
+                _canonical({
+                    "record": record,
+                    "checksum": hashlib.sha256(_canonical(record)).hexdigest(),
+                })
+            ) + 1:
+                raise SafePathError("sandbox disposition exceeds issued reservation")
+            self._append(
+                parent_fd,
+                record,
+                reservation=self._other_undisposed_reservation(
+                    capabilities, attestation.proof
+                ),
+            )
+
+    @contextmanager
+    def consume(
+        self,
+        attestation: SandboxAttestation,
+        *,
+        already_persisted: bool,
+        operation_binding: str,
+        db_identity: str,
+    ) -> Iterator[None]:
+        if attestation.db_identity != db_identity:
+            raise PermissionError("sandbox capability database mismatch")
+        if (
+            len(operation_binding) != 64
+            or any(character not in "0123456789abcdef" for character in operation_binding)
+        ):
+            raise SafePathError("sandbox operation binding is invalid")
+        with self._locked() as parent_fd:
+            capabilities, entry, issued = self._verified_entry(
+                parent_fd, attestation
+            )
+            if entry.get("rejected") is not None:
+                raise PermissionError("sandbox capability was rejected")
+            if entry.get("consumed") is not None:
+                if entry["consumed"]["db_identity"] != db_identity:
+                    raise PermissionError("sandbox capability database mismatch")
+                if already_persisted:
+                    if entry["consumed"]["operation_binding"] != operation_binding:
+                        raise PermissionError(
+                            "sandbox capability recovery binding mismatch"
+                        )
+                    yield
+                    return
+                if entry["consumed"]["operation_binding"] != operation_binding:
+                    raise PermissionError("sandbox capability recovery binding mismatch")
+                yield
+                return
+            if already_persisted:
+                raise SafePathError("sandbox DB row exists for unconsumed capability")
+            record = {
+                "schema": "trustforge.sandbox-capability/v3",
+                "state": "consumed",
+                "capability_id": attestation.proof,
+                "journal_id": self.key_id,
+                "issued_checksum": hashlib.sha256(
+                    _canonical(issued)
+                ).hexdigest(),
+                "operation_binding": operation_binding,
+                "db_identity": db_identity,
+                "db_digest": hashlib.sha256(db_identity.encode()).hexdigest(),
+            }
+            if self._disposition_reservation(issued) < len(
+                _canonical({
+                    "record": record,
+                    "checksum": hashlib.sha256(_canonical(record)).hexdigest(),
+                })
+            ) + 1:
+                raise SafePathError("sandbox disposition exceeds issued reservation")
+            self._append(
+                parent_fd,
+                record,
+                reservation=self._other_undisposed_reservation(
+                    capabilities, attestation.proof
+                ),
+            )
+            yield
 
 
 class HermesModuleCatalog(ModuleCatalog):

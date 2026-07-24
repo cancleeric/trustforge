@@ -18,6 +18,7 @@ from .upgrade_ports import (
     ModuleCatalog,
     RollbackHandler,
     SandboxAttestation,
+    SandboxAttestationVerifier,
 )
 from .upgrade_state_machine import (
     activation_transition,
@@ -41,12 +42,14 @@ class UpgradeQueue:
         catalog: ModuleCatalog | None = None,
         activation_handler: ActivationHandler | None = None,
         rollback_handler: RollbackHandler | None = None,
+        sandbox_verifier: SandboxAttestationVerifier | None = None,
     ):
         self.path = path or default_path()
         self.authority = authority
         self.catalog = catalog
         self.activation_handler = activation_handler
         self.rollback_handler = rollback_handler
+        self.sandbox_verifier = sandbox_verifier
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._db()) as db, db:
             db.executescript("""
@@ -401,45 +404,99 @@ class UpgradeQueue:
                 "reviews": reviews, "sandbox_runs": sandbox_runs, "decisions": decisions,
                 "activations": activations}
 
+    def compact_sandbox_journal(self) -> int:
+        if self.sandbox_verifier is None or not hasattr(
+            self.sandbox_verifier, "compact"
+        ):
+            raise PermissionError("sandbox journal compactor is required")
+        db_identity = str(self.path.resolve(strict=False))
+        with closing(self._db()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            exact: dict[str, dict[str, Any]] = {}
+            for row in db.execute(
+                "SELECT proposal_id,passed,artifact_hash,payload_json "
+                "FROM upgrade_sandbox_runs"
+            ):
+                payload = json.loads(str(row["payload_json"]))
+                identity = payload.get("attestation") if isinstance(payload, dict) else None
+                v3_markers = {
+                    "capability_id", "journal_id",
+                    "operation_binding", "db_identity",
+                }
+                legacy_fields = {
+                    "run_id", "runner_version",
+                    "details_checksum", "completed_at",
+                }
+                if (
+                    isinstance(identity, dict)
+                    and not (set(identity) & v3_markers)
+                    and set(identity) == legacy_fields
+                    and all(isinstance(identity[key], str) for key in legacy_fields)
+                ):
+                    continue
+                required = {
+                    "capability_id", "journal_id", "run_id",
+                    "details_checksum", "operation_binding", "db_identity",
+                    "runner_version", "completed_at",
+                }
+                if not isinstance(identity, dict) or not required <= set(identity):
+                    raise ValueError("malformed sandbox DB identity")
+                details = {
+                    key: value for key, value in payload.items()
+                    if key != "attestation"
+                }
+                details_checksum = hashlib.sha256(
+                    json.dumps(
+                        details, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                candidate = details.get("candidate")
+                if (
+                    not isinstance(candidate, dict)
+                    or not isinstance(candidate.get("family"), str)
+                    or not isinstance(candidate.get("revision"), str)
+                    or identity["details_checksum"] != details_checksum
+                ):
+                    raise ValueError("sandbox DB details identity conflict")
+                capability_id = identity["capability_id"]
+                if (
+                    not isinstance(capability_id, str)
+                    or identity["db_identity"] != db_identity
+                    or capability_id in exact
+                ):
+                    raise ValueError("conflicting sandbox DB identity")
+                exact[capability_id] = {
+                    "proposal_id": str(row["proposal_id"]),
+                    "passed": bool(row["passed"]),
+                    "artifact_hash": str(row["artifact_hash"]),
+                    "candidate_family": candidate["family"],
+                    "candidate_revision": candidate["revision"],
+                    "run_id": identity["run_id"],
+                    "runner_version": identity["runner_version"],
+                    "completed_at": identity["completed_at"],
+                    "details_checksum": details_checksum,
+                    "operation_binding": identity["operation_binding"],
+                    "journal_id": identity["journal_id"],
+                    "db_identity": identity["db_identity"],
+                }
+            return self.sandbox_verifier.compact(
+                db_identity=db_identity,
+                exact_capabilities=exact,
+            )
+
     def record_sandbox(
         self,
-        attestation: SandboxAttestation | str,
-        passed: bool | None = None,
-        artifact_hash: str | None = None,
-        details: dict[str, Any] | None = None,
+        attestation: SandboxAttestation,
     ) -> dict[str, Any]:
         """Persist a bounded sandbox result; this never activates a candidate."""
-        # Compatibility boundary for the repository-owned local sandbox
-        # runner.  HTTP never reaches this branch: web.py accepts only an
-        # injected attestation factory and rejects caller-supplied results.
-        if isinstance(attestation, str):
-            if (
-                not isinstance(passed, bool)
-                or not isinstance(artifact_hash, str)
-                or not isinstance(details, dict)
-                or details.get("runner") != "run_skill_sandbox.py"
-                or not isinstance(details.get("candidate"), dict)
-            ):
-                raise PermissionError("trusted sandbox attestation is required")
-            candidate = details["candidate"]
-            revision = str(candidate.get("revision", ""))
-            canonical = json.dumps(
-                details, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
-            attestation = SandboxAttestation(
-                proposal_id=attestation,
-                candidate_family=str(candidate.get("family", "")),
-                candidate_revision=revision,
-                run_id=hashlib.sha256(canonical.encode()).hexdigest(),
-                runner_version="run_skill_sandbox.py/compat-v1",
-                artifact_hash=artifact_hash,
-                details_checksum=hashlib.sha256(canonical.encode()).hexdigest(),
-                passed=passed,
-                completed_at=datetime.now(timezone.utc),
-                details=details,
-            )
         if not isinstance(attestation, SandboxAttestation):
             raise PermissionError("trusted sandbox attestation is required")
+        if self.sandbox_verifier is None:
+            raise PermissionError("sandbox attestation verifier is required")
+        db_identity = str(self.path.resolve(strict=False))
+        if attestation.db_identity != db_identity:
+            raise PermissionError("sandbox capability database mismatch")
         proposal_id = attestation.proposal_id.strip()
         artifact_hash = attestation.artifact_hash.strip()
         if not proposal_id or not artifact_hash:
@@ -468,32 +525,122 @@ class UpgradeQueue:
         now = time.time()
         with closing(self._db()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            already_persisted = False
+            persisted_run = None
+            for sandbox_row in db.execute(
+                "SELECT run_id,proposal_id,passed,artifact_hash,payload_json "
+                "FROM upgrade_sandbox_runs"
+            ):
+                try:
+                    persisted = json.loads(str(sandbox_row["payload_json"]))
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("corrupt sandbox run payload") from exc
+                identity = (
+                    persisted.get("attestation")
+                    if isinstance(persisted, dict)
+                    else None
+                )
+                if not isinstance(identity, dict):
+                    raise ValueError("sandbox run has no capability identity")
+                if identity.get("capability_id") == attestation.proof:
+                    if (
+                        identity.get("journal_id") != attestation.key_id
+                        or str(sandbox_row["proposal_id"]) != proposal_id
+                        or str(sandbox_row["artifact_hash"]) != artifact_hash
+                        or bool(sandbox_row["passed"]) != attestation.passed
+                        or identity.get("run_id") != attestation.run_id
+                        or identity.get("details_checksum")
+                        != attestation.details_checksum
+                        or identity.get("db_identity")
+                        != db_identity
+                    ):
+                        raise ValueError("sandbox capability identity conflict")
+                    already_persisted = True
+                    persisted_run = (sandbox_row, identity)
             row = db.execute("SELECT state FROM upgrade_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
             if row is None:
                 raise KeyError(proposal_id)
-            transition = sandbox_transition(str(row["state"]), attestation.passed)
-            payload = {
-                **attestation.details,
-                "attestation": {
-                    "run_id": attestation.run_id,
-                    "runner_version": attestation.runner_version,
-                    "details_checksum": attestation.details_checksum,
-                    "completed_at": attestation.completed_at.isoformat(),
-                },
-            }
-            cursor = db.execute("""INSERT INTO upgrade_sandbox_runs
-                (proposal_id,passed,artifact_hash,payload_json,created_at) VALUES (?,?,?,?,?)""",
-                (proposal_id, int(attestation.passed), artifact_hash,
-                 json.dumps(payload, ensure_ascii=False, sort_keys=True), now))
-            changed = db.execute(
-                "UPDATE upgrade_proposals SET state=?,updated_at=? "
-                "WHERE proposal_id=? AND state=?",
-                (transition.state, now, proposal_id, str(row["state"])),
-            )
-            if changed.rowcount != 1:
-                raise ValueError("proposal state changed concurrently")
-            return {"run_id": cursor.lastrowid, "proposal_id": proposal_id, "state": transition.state,
-                    "passed": attestation.passed, "artifact_hash": artifact_hash}
+            if already_persisted:
+                assert persisted_run is not None
+                sandbox_row, identity = persisted_run
+                operation_binding = str(identity.get("operation_binding", ""))
+                if len(operation_binding) != 64:
+                    raise ValueError("sandbox run has no recovery binding")
+                with self.sandbox_verifier.consume(
+                    attestation,
+                    already_persisted=True,
+                    operation_binding=operation_binding,
+                    db_identity=db_identity,
+                ):
+                    return {
+                        "run_id": int(sandbox_row["run_id"]),
+                        "proposal_id": proposal_id,
+                        "state": (
+                            "sandbox_passed"
+                            if attestation.passed
+                            else "sandbox_failed"
+                        ),
+                        "passed": attestation.passed,
+                        "artifact_hash": artifact_hash,
+                        "idempotent": True,
+                    }
+            operation_binding = hashlib.sha256(
+                json.dumps(
+                    {
+                        "schema": "trustforge.sandbox-operation/v1",
+                        "proposal_id": proposal_id,
+                        "proposal_state": str(row["state"]),
+                        "capability_id": attestation.proof,
+                        "journal_id": attestation.key_id,
+                        "artifact_hash": artifact_hash,
+                        "passed": attestation.passed,
+                        "db_identity": db_identity,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            try:
+                transition = sandbox_transition(str(row["state"]), attestation.passed)
+            except Exception:
+                self.sandbox_verifier.reject(
+                    attestation,
+                    operation_binding=operation_binding,
+                    db_identity=db_identity,
+                )
+                raise
+            with self.sandbox_verifier.consume(
+                attestation,
+                already_persisted=False,
+                operation_binding=operation_binding,
+                db_identity=db_identity,
+            ):
+                payload = {
+                    **attestation.details,
+                    "attestation": {
+                        "capability_id": attestation.proof,
+                        "journal_id": attestation.key_id,
+                        "run_id": attestation.run_id,
+                        "runner_version": attestation.runner_version,
+                        "details_checksum": attestation.details_checksum,
+                        "completed_at": attestation.completed_at.isoformat(),
+                        "operation_binding": operation_binding,
+                        "db_identity": db_identity,
+                    },
+                }
+                cursor = db.execute("""INSERT INTO upgrade_sandbox_runs
+                    (proposal_id,passed,artifact_hash,payload_json,created_at) VALUES (?,?,?,?,?)""",
+                    (proposal_id, int(attestation.passed), artifact_hash,
+                     json.dumps(payload, ensure_ascii=False, sort_keys=True), now))
+                changed = db.execute(
+                    "UPDATE upgrade_proposals SET state=?,updated_at=? "
+                    "WHERE proposal_id=? AND state=?",
+                    (transition.state, now, proposal_id, str(row["state"])),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("proposal state changed concurrently")
+                return {"run_id": cursor.lastrowid, "proposal_id": proposal_id, "state": transition.state,
+                        "passed": attestation.passed, "artifact_hash": artifact_hash}
 
     @staticmethod
     def _tenant_id(payload_json: str) -> str:

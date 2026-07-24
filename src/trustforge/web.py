@@ -5895,7 +5895,6 @@ def _handle_api_admin_upgrade_queue() -> tuple[int, str]:
 # Deployment composition roots must inject these after authentication.  A
 # shared admin token alone is deliberately not treated as named-human proof.
 _UPGRADE_PRINCIPAL_FACTORY = None
-_UPGRADE_SANDBOX_ATTESTATION_FACTORY = None
 
 
 def _upgrade_queue_for_mutation():
@@ -5916,21 +5915,18 @@ def _upgrade_queue_for_mutation():
 
 
 def _handle_api_admin_upgrade_action(headers, rfile, action: str) -> tuple[int, str]:
+    if action == "sandbox":
+        return 410, _json_envelope_err(
+            "sandbox_endpoint_retired",
+            "Sandbox 結果僅接受可信本機 runner 直接提交",
+        )
     payload, error = _read_admin_put_body(headers, rfile)
     if error is not None:
         return error
     assert payload is not None
     try:
         queue = _upgrade_queue_for_mutation()
-        if action == "sandbox":
-            allowed = {"proposal_id", "candidate_revision"}
-            if set(payload) - allowed or _UPGRADE_SANDBOX_ATTESTATION_FACTORY is None:
-                return 403, _json_envelope_err(
-                    "trusted_attestation_required", "缺少可信 sandbox runner attestation"
-                )
-            attestation = _UPGRADE_SANDBOX_ATTESTATION_FACTORY(payload, headers)
-            result = queue.record_sandbox(attestation)
-        elif action == "decision":
+        if action == "decision":
             allowed = {"proposal_id", "decision", "reason"}
             if set(payload) - allowed or _UPGRADE_PRINCIPAL_FACTORY is None:
                 if "actor" in payload:

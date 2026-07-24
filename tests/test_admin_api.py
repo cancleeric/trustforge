@@ -19,9 +19,11 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -49,12 +51,10 @@ def _reset_admin_auth_buckets():
     web._admin_auth_fail_buckets.clear()
     web._admin_auth_global_fails.clear()
     web._UPGRADE_PRINCIPAL_FACTORY = None
-    web._UPGRADE_SANDBOX_ATTESTATION_FACTORY = None
     yield
     web._admin_auth_fail_buckets.clear()
     web._admin_auth_global_fails.clear()
     web._UPGRADE_PRINCIPAL_FACTORY = None
-    web._UPGRADE_SANDBOX_ATTESTATION_FACTORY = None
 
 
 @pytest.fixture
@@ -912,9 +912,13 @@ def test_audit_read_error_502(admin_enabled, monkeypatch):
 
 def test_upgrade_gate_requires_auth_and_passed_sandbox(admin_enabled, monkeypatch, tmp_path):
     monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(tmp_path / "upgrades.sqlite3"))
-    from trustforge.upgrade_ports import AuthenticatedPrincipal, SandboxAttestation
+    from trustforge.upgrade_ports import AuthenticatedPrincipal
+    from trustforge.upgrade_adapters import SandboxAttestationAuthority
     from trustforge.upgrade_queue import UpgradeQueue
-    queue = UpgradeQueue()
+    sandbox_authority = SandboxAttestationAuthority(
+        tmp_path / "admin-api-sandbox-capabilities.jsonl"
+    )
+    queue = UpgradeQueue(sandbox_verifier=sandbox_authority)
     queue.sync_diagnostic({"proposals": [{"id": "p", "area": "x", "severity": "high", "tenant_id": "t1"}]})
     binding = queue.resolve_review_instance("p")
     queue.record_reviews({"reviews": [{
@@ -937,16 +941,20 @@ def test_upgrade_gate_requires_auth_and_passed_sandbox(admin_enabled, monkeypatc
     monkeypatch.setattr(web, "_UPGRADE_PRINCIPAL_FACTORY", lambda _headers: principal)
     details = {"candidate": {"family": "analysis", "revision": "abc"}, "tests": 24}
     checksum = hashlib.sha256(json.dumps(details, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    monkeypatch.setattr(
-        web,
-        "_UPGRADE_SANDBOX_ATTESTATION_FACTORY",
-        lambda _payload, _headers: SandboxAttestation(
-            proposal_id, "analysis", "abc", "run-1", "runner/v1", "sha256:abc",
-            checksum, True, datetime.now(timezone.utc), details,
-        ),
+    capability = sandbox_authority.issue(
+        db_identity=str(queue.path.resolve(strict=False)),
+        proposal_id=proposal_id,
+        candidate_family="analysis",
+        candidate_revision="abc",
+        run_id="run-1",
+        runner_version="runner/v1",
+        artifact_hash="sha256:abc",
+        details_checksum=checksum,
+        passed=True,
+        completed_at=datetime.now(timezone.utc),
+        details=details,
     )
-    sandbox = json.dumps({"proposal_id": proposal_id, "candidate_revision": "abc"})
-    assert _request("POST", "/api/admin/hermes-upgrade-sandbox", token=TEST_ADMIN_TOKEN, body=sandbox)[0] == 200
+    queue.record_sandbox(capability)
     code, response, _ = _request("POST", "/api/admin/hermes-upgrade-decision", token=TEST_ADMIN_TOKEN, body=trusted_body)
     assert code == 200
     assert json.loads(response)["data"]["activated"] is False
@@ -960,19 +968,65 @@ def test_admin_upgrade_queue_get_is_authenticated(admin_enabled, monkeypatch, tm
     assert json.loads(response)["data"]["durable"] is True
 
 
-def test_upgrade_sandbox_rejects_caller_reported_pass_and_hash(admin_enabled):
-    body = json.dumps({
-        "proposal_id": "p",
-        "passed": True,
+@pytest.mark.parametrize("body", [
+    json.dumps({"capability_id": "a" * 64}),
+    json.dumps({
+        "proposal_id": "p", "passed": True,
         "artifact_hash": "sha256:attacker",
-        "details": {"tests": 999},
-    })
+    }),
+    json.dumps({"any": "otherwise-valid-payload"}),
+])
+def test_upgrade_sandbox_endpoint_is_stably_retired(
+    admin_enabled, monkeypatch, tmp_path, body
+):
+    from trustforge.upgrade_adapters import SandboxAttestationAuthority
+    from trustforge.upgrade_queue import UpgradeQueue
+
+    queue_path = tmp_path / "queue.sqlite3"
+    journal_path = tmp_path / "capabilities.jsonl"
+    monkeypatch.setenv("TRUSTFORGE_SQLITE_PATH", str(queue_path))
+    monkeypatch.setenv(
+        "TRUSTFORGE_SANDBOX_CAPABILITY_JOURNAL", str(journal_path)
+    )
+    UpgradeQueue()
+    journal_path.write_bytes(b"journal-sentinel\n")
+
+    def five_tables():
+        with sqlite3.connect(queue_path) as db:
+            return tuple(
+                tuple(db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall())
+                for table in (
+                    "upgrade_proposals", "upgrade_reviews",
+                    "upgrade_sandbox_runs", "upgrade_decisions",
+                    "upgrade_activations",
+                )
+            )
+
+    before_tables = five_tables()
+    before_journal = journal_path.read_bytes()
     code, response, _ = _request(
         "POST", "/api/admin/hermes-upgrade-sandbox",
         token=TEST_ADMIN_TOKEN, body=body,
     )
-    assert code == 403
-    assert json.loads(response)["error"]["code"] == "trusted_attestation_required"
+    assert code == 410
+    assert json.loads(response)["error"]["code"] == "sandbox_endpoint_retired"
+    assert "capability" not in response.lower()
+    assert five_tables() == before_tables
+    assert journal_path.read_bytes() == before_journal
+
+
+def test_openapi_marks_sandbox_endpoint_deprecated_and_410_only():
+    spec = (
+        Path(__file__).resolve().parents[1] / "docs" / "api" / "openapi.yaml"
+    ).read_text(encoding="utf-8")
+    section = spec.split(
+        "  /api/admin/hermes-upgrade-sandbox:", 1
+    )[1].split("  /api/admin/hermes-upgrade-decision:", 1)[0]
+    assert "deprecated: true" in section
+    assert '"410":' in section
+    assert "sandbox_endpoint_retired" in section
+    assert "requestBody:" not in section
+    assert '"200":' not in section
 
 
 def test_upgrade_activation_endpoint_is_authenticated_and_explicit(admin_enabled, monkeypatch):
