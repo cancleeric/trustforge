@@ -1484,6 +1484,67 @@ paths:
                   code: upstream_error
                   message: "分析服務暫時無法使用，請稍後再試"
 
+  /api/module-telemetry:
+    get:
+      tags: [operations]
+      operationId: getModuleTelemetry
+      summary: 模組 runtime 遙測快照
+      description: |
+        回傳所有已註冊模組的 runtime 遙測資料（最近呼叫時間、呼叫次數、
+        平均延遲、目前狀態等）。可用 query param `module_id` 查詢單一模組。
+        注意：`evidence_ref` 與 `metadata` 為內部遙測欄位，未來版本將收斂為
+        對外安全的 public schema（見 security issue #636），不應被視為穩定契約。
+      parameters:
+        - name: module_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 選填，指定單一模組 ID
+      responses:
+        "200":
+          description: 模組遙測資料
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  modules:
+                    - module_id: "hermes"
+                      last_invoked_at: "2026-07-20T12:00:00Z"
+                      invocation_count: 42
+                      last_result: "success"
+                      avg_latency_ms: 120.5
+                      last_latency_ms: 98.0
+                      state: "verified"
+                      evidence_ref: ""
+                      metadata: {}
+                  total: 1
+        "404":
+          description: 指定 module_id 查無遙測資料
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: not_found
+                  message: "No telemetry for module: unknown"
+        "502":
+          description: 遙測讀取失敗
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: upstream_error
+                  message: "模組遙測暫時無法讀取"
+
   /api/operations-status:
     get:
       tags: [operations]

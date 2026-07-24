@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>專案開發團隊 — TrustForge Hermes｜中再參與</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --accent2: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1rem; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", "Segoe UI", sans-serif;
+    line-height: 1.6; max-width: 1000px; margin-inline: auto;
+  }
+  h1 { font-size: 1.7rem; margin: 0 0 .3rem; }
+  h2 { font-size: 1.25rem; margin: 2.2rem 0 .8rem; padding-bottom: .3rem; border-bottom: 2px solid var(--border); }
+  h3 { font-size: 1rem; color: var(--accent); margin: 1.4rem 0 .5rem; }
+  .sub { color: var(--muted); font-size: .9rem; margin: .2rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: .8rem 0; font-size: .92rem; }
+  th, td { border: 1px solid var(--border); padding: .55rem .7rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: var(--accent); font-weight: 600; }
+  tr:nth-child(even) td { background: #12161d; }
+  code { background: #1f2530; padding: .1rem .35rem; border-radius: 4px; font-size: .85em; color: #ffa657; }
+  .note { background: var(--panel); border-left: 3px solid var(--accent); padding: .7rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; color: var(--muted); font-size: .9rem; }
+  ul { margin: .4rem 0; padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+  .lead { color: var(--accent2); font-weight: 600; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+  input[type=checkbox] { accent-color: var(--accent2); margin-right: .4rem; }
+  .foot { color: var(--muted); font-size: .85rem; margin-top: 2.5rem; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>專案開發團隊</h1>
+<p class="sub">2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽 ｜ 黑客組</p>
+<p class="sub">命題：【智慧金融：HOYA BIT】加密市場分析 AI Agent — 多源資訊的信任提煉</p>
+
+<h2>隊名：中再參與</h2>
+<table>
+  <tr><th>成員</th><th>角色</th><th>主責分工</th></tr>
+  <tr><td>王英豪</td><td>隊長</td><td>核心（信任提煉引擎）</td></tr>
+  <tr><td>王榆翔（Nicholas）</td><td>副隊</td><td>外框模組（資料連接器 + AWS + HOYA BIT）</td></tr>
+  <tr><td>嵋婕（麋鹿/迷路）</td><td>主揪</td><td>創意（敘事 + 簡報 + 交付統籌）</td></tr>
+  <tr><td>林子彤</td><td>團隊成員</td><td>前端 WebUI</td></tr>
+</table>
+<p class="sub">出品：HurricaneSoft（颶風軟體）</p>
+
+<h2>四隊分工總表</h2>
+<table>
+  <tr><th>隊</th><th>主責</th><th>副手</th><th>對應 codebase</th><th>內容</th></tr>
+  <tr><td><strong>核心</strong></td><td>王英豪（隊長）</td><td>—</td><td><code>src/trustforge/trust/</code><br><code>src/trustforge/agent/</code></td><td>信任提煉引擎（護城河，評審技術深度重點）</td></tr>
+  <tr><td><strong>外框模組</strong></td><td>Nicholas（副隊）</td><td>—</td><td><code>src/trustforge/ingestion/</code></td><td>6 類資料連接器 + Bedrock 直連 + AWS 佈署 + HOYA BIT 對接</td></tr>
+  <tr><td><strong>前端 WebUI</strong></td><td>林子彤</td><td>嵋婕（設計方向）</td><td><code>frontend/src/</code></td><td>dashboard、信任橫條、證據卡、溯源面板——實作主力</td></tr>
+  <tr><td><strong>創意（主揪）</strong></td><td>嵋婕</td><td>林子彤（UI 落地）</td><td><code>docs/competition/</code><br><code>docs/pitch/</code></td><td>敘事、Demo 劇本、評審簡報、4 交付件統籌</td></tr>
+</table>
+<div class="note"><strong>分工原則</strong>：核心給最強的隊長獨扛（信任層是差異化護城河，不分散）；外框吃最多雜活給副隊；前端與創意天然一組——UI 呈現什麼＝簡報講什麼，嵋婕定設計方向、林子彤做實作，兩人黏一組同步。</div>
+
+<h2>各隊 owns 的檔案清單</h2>
+
+<h3>核心 — 王英豪（隊長）</h3>
+<ul>
+  <li><code>trust/scoring.py</code> — TrustScore 三維（來源信譽 + 交叉佐證 + 時效衰減）</li>
+  <li><code>trust/conformal.py</code> — 分數校準</li>
+  <li><code>trust/dawid_skene.py</code> — 多源共識估計</li>
+  <li><code>trust/insights.py</code> — 洞察可解釋</li>
+  <li><code>trust/stance_cache.py</code> — 語意 stance 佐證快取</li>
+  <li><code>agent/orchestrator.py</code> — 信任加權融合 + 帶溯源生成分析</li>
+</ul>
+
+<h3>外框模組 — Nicholas（副隊）</h3>
+<ul>
+  <li><code>ingestion/news.py · onchain.py · prices.py · regulatory.py · social.py · coingecko.py</code></li>
+  <li><code>ingestion/hoyabit.py</code> — <strong>HOYA BIT 企業數據對接（命題硬約束，追蹤 #167）</strong></li>
+  <li><code>ingestion/cache.py · safe_fetch.py · base.py</code></li>
+  <li>Bedrock 直連入口、<code>deploy/</code>、<code>apprunner.yaml</code>、<code>Dockerfile</code>、AWS 佈署與合規</li>
+</ul>
+
+<h3>前端 WebUI — 林子彤（主）/ 嵋婕（設計方向）</h3>
+<ul>
+  <li><code>frontend/src/App.tsx · main.tsx · pages/ · components/ · hermes/ · lib/</code></li>
+  <li>dark dashboard、信任橫條、可展開證據卡（真 URL）、操縱旗標、信心儀表、跨源訊號面板</li>
+</ul>
+
+<h3>創意（主揪）— 嵋婕（主）/ 林子彤（UI 落地）</h3>
+<ul>
+  <li><code>docs/competition/</code> 敘事與簡報、<code>docs/pitch/</code></li>
+  <li>Live Demo 劇本、評審簡報（技術深度 + 創意可用性）</li>
+  <li><strong>4 交付件統籌</strong>：Report / Evidence / Execution Log / Live Demo</li>
+</ul>
+
+<h2>跨隊責任（沒對到單一目錄，指定掛靠）</h2>
+<table>
+  <tr><th>事項</th><th>主管</th><th>把關</th><th>備註</th></tr>
+  <tr><td>HOYA BIT 企業數據</td><td>Nicholas</td><td>隊長盯 spec</td><td>命題硬約束，<code>hoyabit.py</code> 待接真實資料源（#167）</td></tr>
+  <tr><td>AWS / Bedrock 合規</td><td>Nicholas</td><td>隊長最終把關</td><td>全程只用 Bedrock 直連，禁其他供應商/內部閘道，踩線=失格</td></tr>
+  <tr><td>4 交付件 + Demo 劇本</td><td>嵋婕（交付 owner）</td><td>全隊</td><td>決賽 30 小時命脈</td></tr>
+  <tr><td>QA / Demo 驗收</td><td>各隊自測</td><td>隊長親驗</td><td>決賽前 UI 修復（#172）、敘事 UI（#171）</td></tr>
+</table>
+
+<h2>決賽 checklist（8/1–2，30 小時）</h2>
+<ul style="list-style:none; padding-left:.2rem;">
+  <li><input type="checkbox"> 以 8/1 現場公告的 Bedrock 模型 id 調整交付範圍與資料</li>
+  <li><input type="checkbox"> 核心：信任加權分析端到端跑通，每個結論可展開溯源</li>
+  <li><input type="checkbox"> 外框：HOYA BIT 真實資料接線完成，<code>?real=1</code> credit-safe 驗證</li>
+  <li><input type="checkbox"> 前端：決賽前 UI 4 項修復（dead cards / 破損比較表單 / 裸錯誤頁 / 無首頁連結）</li>
+  <li><input type="checkbox"> 創意：評審簡報定稿 + Live Demo 劇本彩排</li>
+  <li><input type="checkbox"> 繳交：命題連結 / 企業數據應用 / 技術架構 / 生成式 AI 應用 / Live Demo</li>
+  <li><input type="checkbox"> 合規複查：全程 Bedrock、無投資建議定位、HOYA BIT 資料不進公開版控</li>
+</ul>
+
+<p class="foot">TrustForge Hermes（信源熔爐）· HurricaneSoft 颶風軟體 · 隊名「中再參與」</p>
+
+</body>
+</html>
