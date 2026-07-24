@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isfinite
-from typing import Any, Callable
+from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 
@@ -34,14 +34,10 @@ def fetch_tvl_metric(
     url: str,
     *,
     fetched_at: datetime,
-    fetch_json: Callable[[str], dict[str, Any]] | None = None,
-    fetch_bytes: Callable[[str], bytes] | None = None,
 ) -> TvlConnectorResult:
     try:
-        if fetch_json is not None:
-            raise ValueError("fetch_json injection is unsupported; use shared safe_fetch boundary")
         _validate_source_url(url)
-        raw = _fetch_url(url) if fetch_bytes is None else fetch_bytes(url)
+        raw = _fetch_url(url)
         payload = _decode_json(raw)
         payload.setdefault("source", url)
         return TvlConnectorResult(metric=parse_tvl_metric(payload, fetched_at=fetched_at), error=None)
@@ -100,7 +96,10 @@ def _validate_source_url(source: str) -> None:
 
 
 def _fetch_url(url: str) -> bytes:
-    return safe_fetch.fetch_url(url, user_agent=_UA, timeout=_TIMEOUT, max_bytes=_MAX_BYTES)
+    raw = safe_fetch.fetch_url(url, user_agent=_UA, timeout=_TIMEOUT, max_bytes=_MAX_BYTES + 1)
+    if len(raw) > _MAX_BYTES:
+        raise ValueError("TVL response exceeds maximum size")
+    return raw
 
 
 def _decode_json(raw: bytes) -> dict[str, Any]:
