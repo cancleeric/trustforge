@@ -8,8 +8,8 @@ must still complete every review and release gate; do not silently skip a gate.
 1. Start from an issue with explicit acceptance criteria and dependencies.
 2. Create a scoped branch. Do not develop directly on `main`.
 3. Implement focused changes with regression tests.
-4. Run the mandatory local pre-push hook and any targeted test, lint, build, and
-   `git diff --check` gates needed for the change.
+4. Run the repository-local `.githooks/pre-push` gate; it must complete tests, lint, build,
+   data checks, and `git diff --check` successfully before push.
 5. Open a PR linked to the issue with commit-bound pre-push evidence. GitHub
    Actions workflows are intentionally disabled and are not required checks.
 6. Perform an adversarial `/codex-review`. Fix every finding and rerun the
@@ -20,7 +20,8 @@ must still complete every review and release gate; do not silently skip a gate.
    the PR. GitHub forbids authors from approving their own PR; in this one-person
    repository use a commit-bound reviewer attestation instead of fabricating an
    approval. Never use admin or override merge to bypass protection.
-9. Merge only with no unresolved findings and passing local gate evidence.
+9. Merge only with no unresolved findings and a green local pre-push gate. After merge,
+   rerun the local gate against the merged branch.
 10. Deploy production only through the explicit release workflow outside GitHub
     Actions, then verify health and the changed user workflow before closing the
     milestone.
