@@ -197,6 +197,12 @@ export interface AssetContext {
   ecosystem: string | null
   parent_asset_id: string | null
   tags: string[]
+  /** L2 結算鏈（例：ARB → "ethereum"）。舊快照可能未帶，缺省為 "unknown"。 */
+  settlement_chain?: string
+  /** 交易手續費計價代幣（例：ARB 轉帳仍需 ETH 付 gas）。缺省為 "unknown"。 */
+  gas_token?: string
+  /** 上下游依賴（白話關聯說明的資料來源，例：sequencer、canonical_bridge）。 */
+  dependencies?: string[]
 }
 
 export interface RiskNotice {
