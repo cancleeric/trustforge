@@ -186,6 +186,92 @@ def test_scan_rejects_shadowed_protocol_bindings(tmp_path, monkeypatch):
     ]
 
 
+def test_scan_flags_deferred_direct_protocol_after_exact_symbol_rebinding(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/deferred_direct_protocol.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "def deferred():\n"
+        "    class Interface(Protocol):\n"
+        "        def method(self): ...\n"
+        "    return Interface\n"
+        "Protocol = object\n"
+        "deferred()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.deferred_direct_protocol.deferred.Interface.method",
+    ]
+
+
+def test_scan_flags_deferred_qualified_protocol_after_exact_symbol_rebinding(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/deferred_qualified_protocol.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "def deferred():\n"
+        "    class Interface(typing.Protocol):\n"
+        "        def method(self): ...\n"
+        "    return Interface\n"
+        "typing = object\n"
+        "deferred()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert [row["symbol"] for row in scan([source])] == [
+        "trustforge.deferred_qualified_protocol.deferred.Interface.method",
+    ]
+
+
+def test_scan_allows_deferred_direct_protocol_when_never_rebound(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/deferred_direct_protocol_control.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from typing import Protocol\n"
+        "def deferred():\n"
+        "    class Interface(Protocol):\n"
+        "        def method(self): ...\n"
+        "    return Interface\n"
+        "deferred()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
+
+
+def test_scan_allows_deferred_qualified_protocol_when_never_rebound(
+    tmp_path, monkeypatch
+):
+    root = tmp_path
+    source = root / "src/trustforge/deferred_qualified_protocol_control.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import typing\n"
+        "def deferred():\n"
+        "    class Interface(typing.Protocol):\n"
+        "        def method(self): ...\n"
+        "    return Interface\n"
+        "deferred()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.scan_source_stubs.ROOT", root)
+
+    assert scan([source]) == []
+
+
 def test_scan_rejects_abc_rebinding_in_control_flow(tmp_path, monkeypatch):
     root = tmp_path
     source = root / "src/trustforge/control_flow_shadow.py"

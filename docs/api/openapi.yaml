@@ -1743,24 +1743,16 @@ paths:
     post:
       tags: [admin]
       operationId: recordAdminHermesUpgradeSandbox
-      summary: 寫入候選 artifact 的 sandbox 驗證結果（不會啟用）
+      summary: 已退役；sandbox 僅由可信本機 runner 直接提交
+      deprecated: true
       security: [{AdminToken: []}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [proposal_id, passed, artifact_hash]
-              properties:
-                proposal_id: {type: string}
-                passed: {type: boolean}
-                artifact_hash: {type: string}
-                details: {type: object}
       responses:
-        "200": {description: Sandbox 結果已持久化}
+        "410":
+          description: 固定回傳 sandbox_endpoint_retired；不解析或寫入 payload
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorEnvelope"}
         "401": {$ref: "#/components/responses/AdminUnauthorized"}
-        "409": {description: 候選狀態不允許此轉換}
         "429": {$ref: "#/components/responses/AdminAuthRateLimited"}
 
   /api/admin/hermes-upgrade-decision:
