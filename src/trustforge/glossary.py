@@ -102,8 +102,9 @@ CORE_GLOSSARY_TERMS: tuple[GlossaryTerm, ...] = (
         definition="Network fee paid to execute or settle transactions.",
         aliases=("gas", "transaction fee", "手續費"),
         risk_note=(
-            "Tokens that live on top of another chain (e.g. an L2 governance token) still need the "
-            "underlying chain's native gas token (e.g. ETH) to pay transaction fees, not the token itself."
+            "A token usually cannot be used to pay its own transfer fees; fees are paid in the gas "
+            "token accepted by the network where the transaction executes. For example, transactions "
+            "on Arbitrum (an Ethereum L2) are typically paid in ETH, not in ARB."
         ),
     ),
     GlossaryTerm(
