@@ -22,3 +22,5 @@ out/
 .eye-cache/
 .claude/
 .cli/
+.playwright-mcp/
+.kiro/settings/
