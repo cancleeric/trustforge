@@ -1,63 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { getComparisonSnapshot, getPeerMetrics, registerAnalysisComparison } from '../lib/endpoints'
+import { Link, useSearchParams } from 'react-router-dom'
+import { getComparisonSnapshot, registerAnalysisComparison } from '../lib/endpoints'
 import type { ComparisonParams } from '../lib/endpoints'
-import type { ComparisonAnalyzeData, PeerComparisonEntry, PeerMetricsSnapshot } from '../lib/types'
+import type { ComparisonAnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import AnalysisReportView from '../components/AnalysisReportView'
-import PeerComparisonTable from '../components/PeerComparisonTable'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
 import CoinSelect from '../components/CoinSelect'
-
-/** 模組③ Wave 3：同層 peer 比較——獨立於雙幣分析比較流程，僅依「幣種
- * A」查詢，唯讀查詢、不觸發任何分析工作。目前 peer-metrics fixture 用
- * `asset:` 前綴的資產識別碼（例：`asset:eth`），這裡直接由 `COIN_POOL`
- * 代號小寫轉換猜測；查無資料時（如 fixture 尚未收錄的資產）API 本身
- * 回 `snapshot: null`，UI 顯示空狀態，不視為錯誤。 */
-function PeerComparisonSection({ coin }: { coin: string }) {
-  const assetId = `asset:${coin.toLowerCase()}`
-  const [snapshot, setSnapshot] = useState<PeerMetricsSnapshot | null>(null)
-  const [peers, setPeers] = useState<PeerComparisonEntry[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<{ code: string; message: string } | null>(null)
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    getPeerMetrics(assetId, controller.signal)
-      .then((response) => {
-        if (controller.signal.aborted) return
-        if (response.ok) {
-          setSnapshot(response.data.snapshot)
-          setPeers(response.data.peers)
-        } else if (response.error.code !== 'cancelled') {
-          setError(response.error)
-        }
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setError({ code: 'network_error', message: '連線異常，請稍後再試' })
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
-      })
-    return () => controller.abort()
-  }, [assetId])
-
-  if (loading) return <LoadingState label={`讀取 ${assetId} 同層比較資料中…`} />
-  if (error) return <ErrorState code={error.code} message={error.message} />
-  if (!snapshot) {
-    return (
-      <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4 text-sm text-tf-muted">
-        目前無 {assetId} 的同層比較資料。
-      </div>
-    )
-  }
-  return <PeerComparisonTable snapshot={snapshot} peers={peers} />
-}
 
 function defaultQuery(coin: string, coin2: string): string {
   return `比較${coin}與${coin2}近期市場狀況，整合多源資料`
@@ -256,7 +206,16 @@ export default function ComparePage() {
 
       <CompareForm initial={{ coin: params.coin, coin2: params.coin2, q: params.q }} onSubmit={handleSubmit} />
 
-      <PeerComparisonSection coin={params.coin} />
+      {/* 同層 peer 比較（模組③ Wave 3）：`COIN_POOL` 五幣是 L1，無法涵蓋
+          asset:arb/op/matic 這類 L2 peer group，改成獨立頁面用資產識別
+          碼直接查（比照 /asset-context、/eco-link），不掛在這裡的雙幣
+          分析表單上，見 `PeerMetricsPage`。 */}
+      <Link
+        to="/peer-metrics"
+        className="hermes-clip block rounded-lg border border-tf-border bg-tf-card p-3 text-xs text-tf-link no-underline hover:border-tf-link"
+      >
+        查看同層 Peer 比較（含 L2 資產，例：asset:arb）→
+      </Link>
 
       {loading && !data && <LoadingState label={`讀取 ${params.coin} / ${params.coin2} 比較快照中…`} />}
       {loading && data && <div className="hermes-analysis-pending" role="status"><i />Hermes 正在更新比較快照；目前保留上一個完整結果。</div>}

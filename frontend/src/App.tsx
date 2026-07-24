@@ -12,6 +12,7 @@ import SettingsPage from './pages/SettingsPage'
 import HelpCenterPage from './pages/HelpCenterPage'
 import AssetContextLookupPage from './pages/AssetContextLookupPage'
 import EcoLinkPage from './pages/EcoLinkPage'
+import PeerMetricsPage from './pages/PeerMetricsPage'
 import NotificationsPage from './pages/NotificationsPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { HermesI18nProvider } from './hermes/hermesI18n'
@@ -51,6 +52,10 @@ function RoutedContent() {
         {/* EcoLink 影響路徑查詢（模組③ Wave 3，獨立於 /compare）：比照
             /asset-context 慣例，刻意不進 Header 主導覽 navItems。 */}
         <Route path="/eco-link" element={<EcoLinkPage />} />
+        {/* Peer 同層比較查詢（模組③ Wave 3，獨立於 /compare 的雙幣分析
+            表單——`COIN_POOL` 涵蓋不到 L2 資產如 asset:arb）：比照
+            /asset-context 慣例，刻意不進 Header 主導覽 navItems。 */}
+        <Route path="/peer-metrics" element={<PeerMetricsPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
