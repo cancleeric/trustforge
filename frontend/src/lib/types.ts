@@ -287,6 +287,18 @@ export function isKnownMarketCapTier(value: string): value is MarketCapTier {
   return (MARKET_CAP_TIERS as readonly string[]).includes(value)
 }
 
+export function isKnownDependencyKind(value: string): value is DependencyKind {
+  return (DEPENDENCY_KINDS as readonly string[]).includes(value)
+}
+
+export function isKnownImpactDirection(value: string): value is ImpactDirection {
+  return (IMPACT_DIRECTIONS as readonly string[]).includes(value)
+}
+
+export function isKnownUpgradeEventStatus(value: string): value is UpgradeEventStatus {
+  return (UPGRADE_EVENT_STATUSES as readonly string[]).includes(value)
+}
+
 export interface RiskNotice {
   code: string
   severity: 'info' | 'warning'
@@ -353,6 +365,68 @@ export interface PeerMetricsResponseData {
 }
 
 // ── /api/eco-link ────────────────────────────────────────────────────────
+// 對應後端 trustforge/ecolink.py enum 與 contract（#580）
+
+export type DependencyKind =
+  | 'bridge'
+  | 'oracle'
+  | 'liquidity'
+  | 'settlement'
+  | 'governance'
+  | 'infrastructure'
+  | 'unknown'
+
+export type ImpactDirection =
+  | 'positive'
+  | 'negative'
+  | 'mixed'
+  | 'unknown'
+
+export type UpgradeEventStatus =
+  | 'announced'
+  | 'scheduled'
+  | 'activated'
+  | 'cancelled'
+
+export const DEPENDENCY_KINDS: readonly DependencyKind[] = [
+  'bridge', 'oracle', 'liquidity', 'settlement', 'governance', 'infrastructure', 'unknown',
+] as const
+
+export const IMPACT_DIRECTIONS: readonly ImpactDirection[] = [
+  'positive', 'negative', 'mixed', 'unknown',
+] as const
+
+export const UPGRADE_EVENT_STATUSES: readonly UpgradeEventStatus[] = [
+  'announced', 'scheduled', 'activated', 'cancelled',
+] as const
+
+/** 一條依賴邊：source → target 的官方關係宣告（含有效期間）。 */
+export interface DependencyEdge {
+  schema_version: string
+  source_asset_id: string
+  target_asset_id: string
+  kind: DependencyKind
+  valid_from: string
+  valid_until: string | null
+  confidence: number
+  official_source_url: string
+  observed_at: string
+}
+
+/** 一則升級事件：區塊鏈官方升級／治理提案的結構化紀錄。 */
+export interface UpgradeEvent {
+  schema_version: string
+  event_id: string
+  asset_id: string
+  title: string
+  scheduled_at: string | null
+  actual_at: string | null
+  status: UpgradeEventStatus
+  impact_direction: ImpactDirection
+  impacted_asset_ids: string[]
+  official_source_url: string
+  observed_at: string
+}
 
 /** 一條影響路徑：官方升級事件與依賴邊之間的*相關性*（非因果）。 */
 export interface EcoLinkImpactPath {
