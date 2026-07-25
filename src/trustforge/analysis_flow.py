@@ -220,6 +220,35 @@ def _bedrock_live_attempt(log: ExecutionLog):
                     )
 
 
+# Issue #570: three-track learning emission hooks. These wrappers live at
+# module scope so the ``AnalysisFlow._worker`` call sites stay narrow and the
+# import of :mod:`trustforge.three_track_wiring` only happens when emission
+# is actually enabled (lazy). Each wrapper is structurally fail-soft: even if
+# the underlying helper raises unexpectedly, the analysis path is unaffected.
+def _emit_three_track_learning_on_success(flow: "AnalysisFlow", job_id: str) -> None:
+    try:
+        from .three_track_wiring import emit_for_completed_job
+        emit_for_completed_job(flow, job_id)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "three-track learning SUCCESS emission failed (fail-soft) "
+            "for job_id=%s", job_id,
+        )
+
+
+def _emit_three_track_learning_on_failure(
+    flow: "AnalysisFlow", job_id: str, error: BaseException,
+) -> None:
+    try:
+        from .three_track_wiring import emit_for_failed_job
+        emit_for_failed_job(flow, job_id, error=error)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "three-track learning FAILURE emission failed (fail-soft) "
+            "for job_id=%s", job_id,
+        )
+
+
 class AnalysisFlow:
     def __init__(self, path: str | Path | None = None, *, workers_per_stage: int = 1,
                  readonly: bool = False):
@@ -787,6 +816,10 @@ class AnalysisFlow:
                         (time.time(), job_id),
                     )
                     self._adopted.discard(job_id)
+                    # Issue #570: three-track learning SUCCESS hook.
+                    # Structurally fail-soft — runs strictly after durable
+                    # state has landed; the helper never raises into us.
+                    _emit_three_track_learning_on_success(self, job_id)
             except Exception as exc:
                 retry = int(package.get("retries", {}).get(stage, 0)) + 1
                 package.setdefault("retries", {})[stage] = retry
@@ -835,6 +868,11 @@ class AnalysisFlow:
                          retry, str(exc)[:1000], time.time()),
                     )
                     self._adopted.discard(job_id)
+                    # Issue #570: three-track learning FAILURE hook.
+                    # Structurally Fail-soft — runs strictly after the
+                    # dead-letter row has landed; the helper never raises
+                    # into us.
+                    _emit_three_track_learning_on_failure(self, job_id, exc)
             finally: self._queues[stage].task_done()
 
     def _job(self, job_id: str) -> sqlite3.Row:
