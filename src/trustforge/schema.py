@@ -2,14 +2,22 @@
 
 Evidence 欄位嚴格對應命題文件（source / fetched_at / content_reference / related_claim），
 因主辦會抽查證據回溯性。Report 結構強制「事實 → 推論 → 結論」分層與三大必備章節。
+
+Asset taxonomy 參見 `asset_context.py`（enum + `AssetContext` dataclass），
+Report.asset_context 欄位儲存其序列化 dict（`AssetContext.to_dict()`），
+契約定義見 `data_contracts.py` `_asset_context_schema_properties()`。
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from .data_contracts import EVIDENCE_SCHEMA_VERSION, REPORT_SCHEMA_VERSION
+
+if TYPE_CHECKING:
+    from .asset_context import AssetContext  # noqa: F401  -- typed contract reference
 
 # 官方幣種池
 COIN_POOL = ("BTC", "ETH", "SOL", "BNB", "XRP")
@@ -151,10 +159,9 @@ class Report:
     # 既有斷言（見 `tests/test_cross_source_signal.py` 手造 Report 的用法）。
     calibrated_confidence: float = 0.0
     decision_state: str = "normal"
-    # #579 Analyze API context/risk notices: optional public-only metadata for
-    # consumers that need to interpret a report against the right asset peer set.
-    # Defaults keep old snapshots/readers valid; serialization callers may fill
-    # these at the public boundary without changing core scoring behavior.
+    # #574 AssetContext schema: stores the serialized dict from
+    # `asset_context.AssetContext.to_dict()` for JSON transport. The structured
+    # contract (enum taxonomy + validation) lives in `asset_context.py`.
     asset_context: dict | None = None
     risk_notices: list[dict] = field(default_factory=list)
 
