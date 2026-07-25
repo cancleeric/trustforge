@@ -25,12 +25,18 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from trustforge_core.contracts import (
+    KERNEL_CONTRACT_VERSION as _CORE_CONTRACT_VERSION,
     KernelClaim as _CoreKernelClaim,
-    KernelClaimResolution as _CoreKernelClaimResolution,
     KernelDocument as _CoreKernelDocument,
     KernelReputationTrace as _CoreKernelReputationTrace,
-    KernelRunResolution as _CoreKernelRunResolution,
     KernelScoredClaim as _CoreKernelScoredClaim,
+)
+from trustforge_core.aggregation import (
+    FIXED_HEURISTIC_TABLE as _CORE_FIXED_HEURISTIC_TABLE,
+    FIXED_HEURISTIC_VERSION as _CORE_FIXED_HEURISTIC_VERSION,
+    ISOTONIC_VERSION as _CORE_ISOTONIC_VERSION,
+    aggregate_scored_claims as _core_aggregate_scored_claims,
+    evidence_strength as _core_evidence_strength,
 )
 from trustforge_core.corroboration import (
     CorroborationClaim as _CoreCorroborationClaim,
@@ -43,9 +49,6 @@ from trustforge_core.scoring import (
     DEFAULT_HALF_LIVES as _CORE_DEFAULT_HALF_LIVES,
     DEFAULT_SCORE_WEIGHTS as _CORE_DEFAULT_SCORE_WEIGHTS,
     DEFAULT_SOURCE_REPUTATIONS as _CORE_DEFAULT_SOURCE_REPUTATIONS,
-    FIXED_HEURISTIC_VERSION as _CORE_FIXED_HEURISTIC_VERSION,
-    ISOTONIC_VERSION as _CORE_ISOTONIC_VERSION,
-    aggregate_scored_claims as _core_aggregate_scored_claims,
     corroboration_score as _core_corroboration_score,
     interpolate_calibration as _interpolate_calibration,
     manipulation_flags as _core_manipulation_flags,
@@ -152,11 +155,7 @@ class ScoredClaim:
 
 def _to_core_scoring_claim(claim: Claim) -> _CoreKernelClaim:
     """Detach one mutable app claim; nonfinite time becomes unknown only in core."""
-    if type(claim) is not Claim:
-        raise ValueError("claim must be an exact Claim")
     document = claim.doc
-    if type(document) is not Document:
-        raise ValueError("claim document must be an exact Document")
     raw_timestamp = document.ts
     if type(raw_timestamp) not in {int, float}:
         raise ValueError("document timestamp must be an exact number")
@@ -193,48 +192,6 @@ def _to_core_scoring_claim(claim: Claim) -> _CoreKernelClaim:
     )
 
 
-def _to_core_aggregate_claim(claim: Claim) -> _CoreKernelClaim:
-    document = claim.doc
-    raw_timestamp = document.ts
-    timestamp = 0.0
-    if type(raw_timestamp) in {int, float}:
-        try:
-            candidate_timestamp = float(raw_timestamp)
-        except OverflowError:
-            pass
-        else:
-            if math.isfinite(candidate_timestamp):
-                timestamp = candidate_timestamp
-    metadata: tuple[tuple[str, str], ...] = ()
-    if type(document.meta) is dict:
-        for key, value in document.meta.items():
-            if type(key) is str and key == "coin" and type(value) is str:
-                metadata = ((key, value),)
-                break
-    return _CoreKernelClaim(
-        id=claim.id,
-        text=claim.text,
-        claim_type=claim.claim_type,
-        direction=claim.direction,
-        document=_CoreKernelDocument(
-            id=document.id,
-            kind=document.kind,
-            source=document.source,
-            text=document.text,
-            timestamp=timestamp,
-            url=document.url,
-            metadata=metadata,
-        ),
-    )
-
-
-def _to_core_aggregate_scored(scored: ScoredClaim) -> _CoreKernelScoredClaim:
-    return _CoreKernelScoredClaim(
-        claim=_to_core_aggregate_claim(scored.claim),
-        trust=scored.trust,
-    )
-
-
 def _to_core_reputation_trace(
     trace: dict | None,
 ) -> _CoreKernelReputationTrace | None:
@@ -256,13 +213,53 @@ def _legacy_trace(trace: _CoreKernelReputationTrace | None) -> dict | None:
         return None
     return {
         "source": trace.source,
-        "prior": round(trace.prior, 4),
-        "final": round(trace.final, 4),
+        "prior": trace.prior,
+        "final": trace.final,
         "agree_n": trace.agree_n,
         "contradict_n": trace.contradict_n,
         "iterations_run": trace.iterations_run,
         "mode": trace.mode,
     }
+
+
+def _to_core_aggregate_scored(scored: ScoredClaim) -> _CoreKernelScoredClaim:
+    """Detach only immutable fields consumed by pure aggregation."""
+    document = scored.claim.doc
+    raw_timestamp = document.ts
+    timestamp = 0.0
+    if type(raw_timestamp) in {int, float}:
+        try:
+            candidate_timestamp = float(raw_timestamp)
+        except OverflowError:
+            pass
+        else:
+            if math.isfinite(candidate_timestamp):
+                timestamp = candidate_timestamp
+    metadata: tuple[tuple[str, str], ...] = ()
+    if type(document.meta) is dict:
+        for key, value in document.meta.items():
+            if type(key) is str and key == "coin" and type(value) is str:
+                metadata = (("coin", value),)
+                break
+    claim = scored.claim
+    return _CoreKernelScoredClaim(
+        claim=_CoreKernelClaim(
+            id=claim.id,
+            text=claim.text,
+            claim_type=claim.claim_type,
+            direction=claim.direction,
+            document=_CoreKernelDocument(
+                id=document.id,
+                kind=document.kind,
+                source=document.source,
+                text=document.text,
+                timestamp=timestamp,
+                url=document.url,
+                metadata=metadata,
+            ),
+        ),
+        trust=scored.trust,
+    )
 
 
 @dataclass
@@ -1432,237 +1429,6 @@ def build_stance_fn(
 
 
 # --- 主評分 --------------------------------------------------------------
-def _preflight_kernel_resolution(
-    claims: list[Claim],
-    now: float,
-    weights: dict | None,
-    dynamic_reputation: bool,
-    reputation_iterations: int,
-    offline: bool,
-    stance_fn: Callable[[str, str], str] | None,
-) -> dict:
-    """Validate all resolver inputs before provider/cache/stance work."""
-    if type(now) not in {int, float}:
-        raise ValueError("now must be an exact finite nonnegative number")
-    try:
-        valid_now = math.isfinite(float(now)) and now >= 0
-    except OverflowError:
-        valid_now = False
-    if not valid_now:
-        raise ValueError("now must be an exact finite nonnegative number")
-    if type(claims) is not list or not all(type(claim) is Claim for claim in claims):
-        raise ValueError("claims must be an exact list of exact Claim values")
-    if not all(type(claim.doc) is Document for claim in claims):
-        raise ValueError("claim documents must be exact Document values")
-    # Convert before reading IDs into a set: conversion validates exact primitive
-    # fields, so hostile __hash__/__eq__ hooks can never execute below.
-    detached = tuple(_to_core_scoring_claim(claim) for claim in claims)
-    claim_ids = tuple(claim.id for claim in detached)
-    if any(not claim_id for claim_id in claim_ids):
-        raise ValueError("claim IDs must be nonempty exact strings")
-    if len(set(claim_ids)) != len(claim_ids):
-        raise ValueError("duplicate claim IDs are not allowed")
-    if (
-        type(reputation_iterations) is not int
-        or not 1 <= reputation_iterations <= MAX_REPUTATION_ITERATIONS
-    ):
-        raise ValueError(
-            f"reputation_iterations must be an exact integer in [1, {MAX_REPUTATION_ITERATIONS}]"
-        )
-    if type(dynamic_reputation) is not bool:
-        raise ValueError("dynamic_reputation must be an exact boolean")
-    if type(offline) is not bool:
-        raise ValueError("offline must be an exact boolean")
-    if stance_fn is not None and not callable(stance_fn):
-        raise ValueError("stance_fn must be callable or None")
-    resolved_weights = DEFAULT_WEIGHTS if weights is None else weights
-    if type(resolved_weights) is not dict:
-        raise ValueError("weights must contain exactly src, corr, rec, and manip")
-    weight_keys = tuple(resolved_weights.keys())
-    if not all(type(key) is str for key in weight_keys) or set(weight_keys) != {
-        "src", "corr", "rec", "manip"
-    }:
-        raise ValueError("weights must contain exactly src, corr, rec, and manip")
-    for key in ("src", "corr", "rec", "manip"):
-        value = resolved_weights[key]
-        if type(value) not in {int, float}:
-            raise ValueError(f"weight {key} must be a finite number in [0, 1]")
-        try:
-            valid_weight = math.isfinite(value) and 0 <= value <= 1
-        except OverflowError:
-            valid_weight = False
-        if not valid_weight:
-            raise ValueError(f"weight {key} must be a finite number in [0, 1]")
-    return resolved_weights
-
-
-def resolve_kernel_claim_resolutions(
-    claims: list[Claim],
-    now: float,
-    weights: dict | None = None,
-    stance_fn: Callable[[str, str], str] | None = None,
-    dynamic_reputation: bool = True,
-    reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
-    offline: bool = False,
-) -> tuple[_CoreKernelClaimResolution, ...]:
-    """Resolve provider/app-owned scoring facts without scoring a claim.
-
-    This is the formal-run adapter seam: all semantic/provider work happens
-    here, while the returned immutable values can be consumed by
-    :func:`trustforge_core.run_kernel` without I/O or repeated provider calls.
-    """
-    w = _preflight_kernel_resolution(
-        claims, now, weights, dynamic_reputation, reputation_iterations, offline,
-        stance_fn,
-    )
-    info_flags_by_id = _coordination_signals(claims) if claims else {}
-    dynamic_map: dict[str, float] | None = None
-    trace_by_source: dict[str, dict] | None = None
-    if dynamic_reputation and claims:
-        try:
-            evidence = _reputation_evidence(claims, stance_fn=stance_fn)
-            trace_meta: dict = {}
-            sr0_for_trace: dict[str, float] = {}
-            raw_source_of: dict[str, str] = {}
-            for claim in claims:
-                source = _canonical_source(claim.doc.source)
-                if source not in sr0_for_trace:
-                    sr0_for_trace[source] = _source_reputation(claim)
-                    raw_source_of[source] = claim.doc.source
-            dynamic_map = _iterate_source_reputation(
-                claims,
-                now,
-                weights=w,
-                stance_fn=stance_fn,
-                iterations=reputation_iterations,
-                evidence=evidence,
-                trace_out=trace_meta,
-                offline=offline,
-            )
-            iterations_run = trace_meta.get("iterations_run", 0)
-            ds_mode = trace_meta.get("mode") == "ds_em"
-            by_source: dict[str, list[Claim]] = {}
-            for claim in claims:
-                by_source.setdefault(
-                    _canonical_source(claim.doc.source), []
-                ).append(claim)
-            trace_by_source = {}
-            for source, source_claims in by_source.items():
-                if ds_mode:
-                    agree_n = trace_meta.get("ds_agree_n", {}).get(source, 0)
-                    contradict_n = trace_meta.get("ds_contradict_n", {}).get(source, 0)
-                else:
-                    agree_sources: set[str] = set()
-                    contra_sources: set[str] = set()
-                    for claim in source_claims:
-                        agree, contra = evidence.get(claim.id, (set(), set()))
-                        agree_sources |= agree
-                        contra_sources |= contra
-                    agree_n = len(agree_sources)
-                    contradict_n = len(contra_sources)
-                trace_by_source[source] = {
-                    "source": raw_source_of.get(source, source),
-                    "prior": sr0_for_trace.get(source, 0.0),
-                    "final": dynamic_map.get(source, sr0_for_trace.get(source, 0.0)),
-                    "agree_n": agree_n,
-                    "contradict_n": contradict_n,
-                    "iterations_run": iterations_run,
-                    "mode": trace_meta.get("mode", "entailment"),
-                }
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "dynamic_reputation failed, falling back to static reputation",
-                exc_info=True,
-            )
-            dynamic_map = None
-            trace_by_source = None
-
-    resolutions: list[_CoreKernelClaimResolution] = []
-    for claim in claims:
-        independent_sources, _ = _corroboration_detail(
-            claim, claims, stance_fn=stance_fn
-        )
-        source = _canonical_source(claim.doc.source)
-        trace = trace_by_source.get(source) if trace_by_source is not None else None
-        resolved_dynamic = (
-            dynamic_map.get(source) if dynamic_map is not None else None
-        )
-        resolutions.append(
-            _CoreKernelClaimResolution(
-                claim_id=claim.id,
-                independent_sources=tuple(sorted(independent_sources)),
-                dynamic_reputation=resolved_dynamic,
-                reputation_trace=_to_core_reputation_trace(trace),
-                info_flags=tuple(info_flags_by_id.get(claim.id, [])),
-            )
-        )
-    return tuple(resolutions)
-
-
-def resolve_kernel_run_resolution(
-    claims: list[Claim],
-    now: float,
-    *,
-    resolved_direction: str,
-    weights: dict | None = None,
-    stance_client=None,
-    stance_pair_budget: int = DEFAULT_STANCE_PAIR_BUDGET,
-    stance_remaining_time_fn: Callable[[], float] | None = None,
-    stance_fn: Callable[[str, str], str] | None = None,
-    dynamic_reputation: bool = True,
-    reputation_iterations: int = DEFAULT_REPUTATION_ITERATIONS,
-    offline: bool = False,
-) -> _CoreKernelRunResolution:
-    """Compose the complete immutable scoring policy for one formal run.
-
-    TODO(#420 PR-B): make this seam the only production scoring composition;
-    PR-A deliberately leaves orchestrator and AnalysisFlow routing unchanged.
-    """
-    resolved_weights = _preflight_kernel_resolution(
-        claims, now, weights, dynamic_reputation, reputation_iterations, offline,
-        stance_fn,
-    )
-    if type(stance_pair_budget) is not int or stance_pair_budget < 0:
-        raise ValueError("stance_pair_budget must be an exact nonnegative integer")
-    if stance_fn is not None and not callable(stance_fn):
-        raise ValueError("stance_fn must be callable or None")
-    if stance_remaining_time_fn is not None and not callable(stance_remaining_time_fn):
-        raise ValueError("stance_remaining_time_fn must be callable or None")
-    weight_table = tuple(
-        (key, resolved_weights[key]) for key in ("src", "corr", "rec", "manip")
-    )
-    calibration_version, calibration_table = _aggregate_calibration_spec()
-    policy = {
-        "score_weights": weight_table,
-        "reputations": tuple(KIND_REPUTATION.items()),
-        "half_lives": (
-            ("default", _DEFAULT_HALF_LIFE_HOURS),
-            *tuple(KIND_HALFLIFE_HOURS.items()),
-        ),
-        "calibration_model_version": calibration_version,
-        "calibration_table": calibration_table,
-        "resolved_direction": resolved_direction,
-    }
-    # Validate every policy and direction value before any semantic callback.
-    _CoreKernelRunResolution(claim_resolutions=(), **policy)
-    if stance_fn is None:
-        stance_fn = build_stance_fn(
-            stance_client, stance_pair_budget, stance_remaining_time_fn
-        )
-    return _CoreKernelRunResolution(
-        claim_resolutions=resolve_kernel_claim_resolutions(
-            claims,
-            now,
-            weights=resolved_weights,
-            stance_fn=stance_fn,
-            dynamic_reputation=dynamic_reputation,
-            reputation_iterations=reputation_iterations,
-            offline=offline,
-        ),
-        **policy,
-    )
-
-
 def score(
     claims: list[Claim],
     now: float,
@@ -1740,24 +1506,93 @@ def score(
     if stance_fn is None:
         stance_fn = build_stance_fn(stance_client, stance_pair_budget, stance_remaining_time_fn)
 
-    resolutions = resolve_kernel_claim_resolutions(
-        claims,
-        now,
-        weights=w,
-        stance_fn=stance_fn,
-        dynamic_reputation=dynamic_reputation,
-        # Preserve the legacy public score() contract, which clamps explicit
-        # integer iteration counts.  The lower formal-run resolver itself is
-        # strict and rejects out-of-range values before any callback.
-        reputation_iterations=(
-            max(1, min(reputation_iterations, MAX_REPUTATION_ITERATIONS))
-            if type(reputation_iterations) is int
-            else reputation_iterations
-        ),
-        offline=offline,
-    )
+    # W3：確定性、informational-only 文字相似度透明化訊號（模板相似），對本次
+    # `score()` 的整個 claims 池只算一次（O(n²)，量級同 `_corroboration`，見
+    # `_coordination_signals` docstring）。**不參與 manip 計算**——CEO 定案：
+    # 文字相似度單獨無法證明協同操縱，只回填 `ScoredClaim.info_flags` 供人工
+    # 判讀，`_iterate_source_reputation` 的 static_manip 也不吃這份結果。
+    info_flags_by_id = _coordination_signals(claims) if claims else {}
+
+    dynamic_map: dict[str, float] | None = None
+    trace_by_source: dict[str, dict] | None = None
+    if dynamic_reputation and claims:
+        try:
+            # evidence 只算一次，`_iterate_source_reputation` 的 K 輪迭代與下面建 trace
+            # 共用同一份結果，不因迭代輪數或 trace 需求重呼叫 stance_fn。
+            evidence = _reputation_evidence(claims, stance_fn=stance_fn)
+            trace_meta: dict = {}
+            sr0_for_trace: dict[str, float] = {}
+            raw_source_of: dict[str, str] = {}
+            for c in claims:
+                s = _canonical_source(c.doc.source)
+                if s not in sr0_for_trace:
+                    sr0_for_trace[s] = _source_reputation(c)
+                    raw_source_of[s] = c.doc.source
+            dynamic_map = _iterate_source_reputation(
+                claims,
+                now,
+                weights=w,
+                stance_fn=stance_fn,
+                iterations=reputation_iterations,
+                evidence=evidence,
+                trace_out=trace_meta,
+                offline=offline,
+            )
+            iterations_run = trace_meta.get("iterations_run", 0)
+            ds_mode = trace_meta.get("mode") == "ds_em"
+            by_source: dict[str, list[Claim]] = {}
+            for c in claims:
+                by_source.setdefault(_canonical_source(c.doc.source), []).append(c)
+            trace_by_source = {}
+            for s, s_claims in by_source.items():
+                if ds_mode:
+                    # DS EM 模式：agree_n=參與的達標 item 數、contradict_n=與所屬
+                    # item 多數票方向不一致次數（不偽造 agree/contra 聯集）。
+                    agree_n = trace_meta.get("ds_agree_n", {}).get(s, 0)
+                    contradict_n = trace_meta.get("ds_contradict_n", {}).get(s, 0)
+                else:
+                    agree_sources: set[str] = set()
+                    contra_sources: set[str] = set()
+                    for c in s_claims:
+                        agree, contra = evidence.get(c.id, (set(), set()))
+                        agree_sources |= agree
+                        contra_sources |= contra
+                    agree_n = len(agree_sources)
+                    contradict_n = len(contra_sources)
+                trace_by_source[s] = {
+                    "source": raw_source_of.get(s, s),
+                    "prior": round(sr0_for_trace.get(s, 0.0), 4),
+                    "final": round(dynamic_map.get(s, sr0_for_trace.get(s, 0.0)), 4),
+                    "agree_n": agree_n,
+                    "contradict_n": contradict_n,
+                    "iterations_run": iterations_run,
+                    "mode": trace_meta.get("mode", "entailment"),
+                }
+        except Exception:
+            # fail-safe：EM 失敗（不收斂/溢位/斷言違反）→ 靜默 fallback 到靜態信譽
+            logging.getLogger(__name__).warning(
+                "dynamic_reputation failed, falling back to static reputation",
+                exc_info=True,
+            )
+            dynamic_map = None
+            trace_by_source = None
+
     out: list[ScoredClaim] = []
-    for c, resolution in zip(claims, resolutions, strict=True):
+    for c in claims:
+        independent_sources, _contradicting_sources = _corroboration_detail(
+            c, claims, stance_fn=stance_fn
+        )
+        c_info_flags = info_flags_by_id.get(c.id, [])
+        trace = (
+            trace_by_source.get(_canonical_source(c.doc.source))
+            if trace_by_source is not None
+            else None
+        )
+        resolved_dynamic = (
+            dynamic_map.get(_canonical_source(c.doc.source))
+            if dynamic_map is not None
+            else None
+        )
         core_scored = _core_score_claim(
             _to_core_scoring_claim(c),
             now=now,
@@ -1767,10 +1602,10 @@ def score(
                 ("default", _DEFAULT_HALF_LIFE_HOURS),
                 *tuple(KIND_HALFLIFE_HOURS.items()),
             ),
-            independent_sources=resolution.independent_sources,
-            dynamic_reputation=resolution.dynamic_reputation,
-            reputation_trace=resolution.reputation_trace,
-            info_flags=resolution.info_flags,
+            independent_sources=tuple(sorted(independent_sources)),
+            dynamic_reputation=resolved_dynamic,
+            reputation_trace=_to_core_reputation_trace(trace),
+            info_flags=tuple(c_info_flags),
         )
         out.append(
             ScoredClaim(
@@ -1834,30 +1669,37 @@ def score(
 # 是工程判斷的固定常數而非統計估計出來的參數。目的只是讓「校準後信心」
 # 是一個真正反映證據強度、可跨三態的確定性指標，供下游 abstain 判斷用；
 # 不對外呈現為論文級統計保證。
-_STRENGTH_WEIGHTS = {
-    "trust": 0.35,       # supporting 裸加權均值（證據本身品質）
-    "indep": 0.30,       # 獨立來源數（交叉佐證廣度）
-    "diversity": 0.15,   # 來源類型（kind）多元度
-    "dominance": 0.20,   # 佐證 vs 反方證據的優勢比例
-}
-_INDEP_SOURCE_SATURATION = 4  # 達到此獨立來源數即給滿分，之後不再加分
-_KIND_DIVERSITY_SATURATION = 3  # 達到此來源類型數即給滿分，之後不再加分
-
 # 分位數映射表錨點依輸入（x＝evidence_strength）遞增排序，(x, 校準後信心)。
 # 中低段（<0.40）刻意壓得比原值低——這段最容易是「勉強及格但證據結構
 # 薄弱」的情境；高段（>=0.55）貼近原值，因為 evidence_strength 本身在
 # 高段已經隱含多源、多元 kind、佐證壓倒反方，不需要再額外壓縮。
-_CALIBRATION_TABLE: list[tuple[float, float]] = [
-    (0.00, 0.00),
-    (0.10, 0.03),
-    (0.20, 0.08),
-    (0.30, 0.20),
-    (0.40, 0.40),
-    (0.55, 0.55),
-    (0.70, 0.70),
-    (0.85, 0.85),
-    (1.00, 1.00),
-]
+_CALIBRATION_TABLE: list[tuple[float, float]] = list(_CORE_FIXED_HEURISTIC_TABLE)
+
+
+def _aggregate_calibration_spec() -> tuple[str, tuple[tuple[float, float], ...]]:
+    """Resolve app-owned calibration state into an immutable core value."""
+    model = _load_cached_calibration_model()
+    if model is None:
+        return _CORE_FIXED_HEURISTIC_VERSION, ()
+    points: list[tuple[float, float]] = []
+    if type(model) is not list:
+        raise ValueError("calibration model must be an exact list")
+    for point in model:
+        if type(point) is not dict:
+            raise ValueError("calibration model points must be exact dictionaries")
+        confidence: object | None = None
+        calibrated: object | None = None
+        for key, value in point.items():
+            if type(key) is not str:
+                continue
+            if key == "confidence":
+                confidence = value
+            elif key == "calibrated":
+                calibrated = value
+        if confidence is None or calibrated is None:
+            raise ValueError("calibration model point is incomplete")
+        points.append((confidence, calibrated))  # type: ignore[arg-type]
+    return _CORE_ISOTONIC_VERSION, tuple(points)
 
 
 def _calibrate_confidence(raw: float) -> float:
@@ -1870,16 +1712,9 @@ def _calibrate_confidence(raw: float) -> float:
     確定性、免 LLM：純查表/插值，同輸入必同輸出，不呼叫任何模型。
     輸入超出 [0, 1] 時 clamp 到邊界。
     """
-    x = max(0.0, min(1.0, raw))
-
-    # 嘗試使用訓練過的 isotonic model
-    model = _load_cached_calibration_model()
-    if model is not None:
-        from ..calibration_model import apply_calibration
-        return apply_calibration(x, model)
-
-    # Fallback：硬編碼查表
-    return _interpolate_calibration(x, _CALIBRATION_TABLE)
+    version, table = _aggregate_calibration_spec()
+    resolved = _CORE_FIXED_HEURISTIC_TABLE if version == _CORE_FIXED_HEURISTIC_VERSION else table
+    return _interpolate_calibration(raw, resolved)
 
 
 # 快取已載入的模型（模組層級，避免每次呼叫重複讀檔）
@@ -1921,32 +1756,6 @@ def _load_cached_calibration_model() -> list[dict] | None:
     return _CALIBRATION_MODEL_CACHE["model"]
 
 
-def _aggregate_calibration_spec() -> tuple[str, tuple[tuple[float, float], ...]]:
-    """Load app-owned calibration once and detach exact immutable points."""
-    model = _load_cached_calibration_model()
-    if model is None:
-        return _CORE_FIXED_HEURISTIC_VERSION, ()
-    if type(model) is not list:
-        raise ValueError("calibration model must be an exact list")
-    points: list[tuple[float, float]] = []
-    for point in model:
-        if type(point) is not dict:
-            raise ValueError("calibration model points must be exact dictionaries")
-        confidence: object | None = None
-        calibrated: object | None = None
-        for key, value in point.items():
-            if type(key) is not str:
-                continue
-            if key == "confidence":
-                confidence = value
-            elif key == "calibrated":
-                calibrated = value
-        if confidence is None or calibrated is None:
-            raise ValueError("calibration model point is incomplete")
-        points.append((confidence, calibrated))  # type: ignore[arg-type]
-    return _CORE_ISOTONIC_VERSION, tuple(points)
-
-
 def _evidence_strength(
     supporting: list[ScoredClaim], contrarian: list[ScoredClaim], confidence: float
 ) -> float:
@@ -1966,31 +1775,15 @@ def _evidence_strength(
     修法：dominance 的分子分母都改用「該側涉及的獨立來源數」（同一來源
     無論產生幾句 claim，只算一份），跟 `indep_factor` 既有的去重口徑一致
     （`n_indep` 本就已是去重來源數，直接複用）。"""
-    n_indep = len({_canonical_source(sc.claim.doc.source) for sc in supporting})
-    n_kinds = len({sc.claim.doc.kind for sc in supporting})
-
-    indep_factor = max(0.0, min(
-        (n_indep - 1) / (_INDEP_SOURCE_SATURATION - 1), 1.0
-    ))
-    diversity_factor = max(0.0, min(
-        (n_kinds - 1) / (_KIND_DIVERSITY_SATURATION - 1), 1.0
-    ))
-    n_contrarian_sources = len({_canonical_source(sc.claim.doc.source) for sc in contrarian})
-    total_sources = n_indep + n_contrarian_sources
-    dominance = (n_indep / total_sources) if total_sources > 0 else 0.0
-
-    w = _STRENGTH_WEIGHTS
-    strength = (
-        w["trust"] * confidence
-        + w["indep"] * indep_factor
-        + w["diversity"] * diversity_factor
-        + w["dominance"] * dominance
+    return _core_evidence_strength(
+        supporting=tuple(_to_core_aggregate_scored(item) for item in supporting),
+        contrarian=tuple(_to_core_aggregate_scored(item) for item in contrarian),
+        trust_score=confidence,
     )
-    return max(0.0, min(1.0, strength))
 
 
 # --- 5. 聚合 -------------------------------------------------------------
-def aggregate(scored: list[ScoredClaim], query: str,
+def aggregate(scored: list[ScoredClaim], query: str | None,
               support_threshold: float = 0.50,
               coin: str | None = None) -> TrustedBrief:
     """信任加權聚合。高於門檻→支撐證據；明顯低分→反方證據。
@@ -2044,26 +1837,25 @@ def aggregate(scored: list[ScoredClaim], query: str,
     (query)` 相關性排序、全納入（不新增篩選），維持 #32 修正前就存在的
     既有語意。
     """
-    core_by_id: dict[int, ScoredClaim] = {}
-    core_scored: list[_CoreKernelScoredClaim] = []
-    for item in scored:
-        core_item = _to_core_aggregate_scored(item)
-        core_by_id[id(core_item)] = item
-        core_scored.append(core_item)
+    normalized_query = "" if query is None else query
+    normalized_coin = "" if coin is None else coin
+    core_items = tuple(_to_core_aggregate_scored(item) for item in scored)
+    originals = {id(core_item): original for core_item, original in zip(core_items, scored)}
     calibration_version, calibration_table = _aggregate_calibration_spec()
-    core_result = _core_aggregate_scored_claims(
-        tuple(core_scored),
-        query=query,
+    output = _core_aggregate_scored_claims(
+        scored_claims=core_items,
+        query=normalized_query,
+        coin=normalized_coin,
         support_threshold=support_threshold,
-        coin=coin or "",
+        contract_version=_CORE_CONTRACT_VERSION,
         calibration_model_version=calibration_version,
         calibration_table=calibration_table,
         resolved_direction="neutral",
     )
     return TrustedBrief(
-        query=query,
-        supporting=[core_by_id[id(item)] for item in core_result.supporting],
-        contrarian=[core_by_id[id(item)] for item in core_result.contrarian],
-        confidence=core_result.trust_score,
-        calibrated_confidence=core_result.confidence,
+        query=normalized_query,
+        supporting=[originals[id(item)] for item in output.supporting],
+        contrarian=[originals[id(item)] for item in output.contrarian],
+        confidence=output.trust_score,
+        calibrated_confidence=output.confidence,
     )

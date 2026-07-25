@@ -30,6 +30,13 @@ from .contracts import (
     validate_scored_claim_graph,
     validate_run_resolution_graph,
 )
+from .aggregation import (
+    FIXED_HEURISTIC_TABLE,
+    FIXED_HEURISTIC_VERSION,
+    ISOTONIC_VERSION,
+    SUPPORTED_CALIBRATION_MODEL_VERSIONS,
+    aggregate_scored_claims,
+)
 from .corroboration import (
     CorroborationClaim,
     CorroborationResult,
@@ -67,6 +74,11 @@ from .scoring import (
 )
 
 __all__ = [
+    "FIXED_HEURISTIC_TABLE",
+    "FIXED_HEURISTIC_VERSION",
+    "ISOTONIC_VERSION",
+    "SUPPORTED_CALIBRATION_MODEL_VERSIONS",
+    "aggregate_scored_claims",
     "KERNEL_CONTRACT_VERSION",
     "KERNEL_RESOLUTION_VERSION",
     "FIXED_HEURISTIC_VERSION",
