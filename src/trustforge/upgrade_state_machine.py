@@ -6,22 +6,7 @@ from dataclasses import dataclass
 
 
 TERMINAL_PROPOSAL_STATES = frozenset({"approved", "rejected", "activated", "rolled_back"})
-
-_AUTOMATED_APPROVAL_ACTOR_TOKENS = (
-    "agent",
-    "auto",
-    "automation",
-    "bedrock",
-    "bot",
-    "claude",
-    "codex",
-    "gemini",
-    "gpt",
-    "llm",
-    "model",
-    "openai",
-    "service",
-)
+AUTOMATED_REVIEW_VERDICTS = frozenset({"insufficient", "sandbox_ready", "rejected"})
 
 
 @dataclass(frozen=True)
@@ -30,35 +15,41 @@ class UpgradeTransition:
     payload: dict[str, str]
 
 
-def is_human_approval_actor(actor: str) -> bool:
-    normalized = actor.strip().lower()
-    if not normalized:
-        return False
-    return not any(token in normalized for token in _AUTOMATED_APPROVAL_ACTOR_TOKENS)
-
-
 def review_transition(verdict: str) -> UpgradeTransition:
+    if verdict not in AUTOMATED_REVIEW_VERDICTS:
+        raise ValueError("unknown automated review verdict")
     state = "llm_reviewed" if verdict == "sandbox_ready" else verdict
     return UpgradeTransition(state=state, payload={"verdict": verdict})
 
 
 def sandbox_transition(current_state: str, passed: bool) -> UpgradeTransition:
-    if current_state in TERMINAL_PROPOSAL_STATES:
-        raise ValueError("terminal proposal cannot be sandboxed")
+    if current_state not in {"llm_reviewed", "sandbox_failed"}:
+        raise ValueError(
+            "sandbox requires llm_reviewed or sandbox_failed proposal"
+        )
     return UpgradeTransition(
         state="sandbox_passed" if passed else "sandbox_failed",
         payload={"previous_state": current_state},
     )
 
 
-def decision_transition(current_state: str, decision: str, actor: str) -> UpgradeTransition:
+def decision_transition(
+    current_state: str,
+    decision: str,
+    _legacy_untrusted_actor_display: str | None = None,
+) -> UpgradeTransition:
+    """Apply pure state rules.
+
+    The optional third argument exists only for legacy callers.  It is
+    intentionally ignored and must never be treated as authorization; Queue
+    mutations authorize an ``AuthenticatedPrincipal`` through AuthorityAdapter
+    before invoking this transition.
+    """
     if decision not in {"approve", "reject"}:
         raise ValueError("decision must be approve or reject")
     if current_state in TERMINAL_PROPOSAL_STATES:
         raise ValueError("proposal already has terminal decision")
     if decision == "approve":
-        if not is_human_approval_actor(actor):
-            raise ValueError("approval requires human actor")
         if current_state != "sandbox_passed":
             raise ValueError("approval requires passed sandbox")
     return UpgradeTransition(

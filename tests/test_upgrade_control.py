@@ -18,13 +18,19 @@ def test_upgrade_control_exposes_full_versioned_topology_without_recursive_apply
     }))
     monkeypatch.setenv("TRUSTFORGE_IMPROVEMENT_REPORT", str(report))
     monkeypatch.setenv("TRUSTFORGE_HISTORICAL_COVERAGE_REPORT", str(coverage))
-    monkeypatch.setattr(upgrade_control, "change_history", lambda: [])
-    monkeypatch.setattr(upgrade_control, "run_skill_manifest", lambda: {
-        "outer_skills": [{"family": family, "revision": family * 12, "origin": "baseline"}
-                         for family in ("source", "analysis", "report", "evaluation", "improvement")]
-    })
+    class Catalog:
+        def history(self):
+            return []
 
-    data = upgrade_control.upgrade_status()
+        def manifest(self):
+            return {
+                "outer_skills": [
+                    {"family": family, "revision": family * 12, "origin": "baseline"}
+                    for family in ("source", "analysis", "report", "evaluation", "improvement")
+                ]
+            }
+
+    data = upgrade_control.upgrade_status(Catalog())
 
     assert len(data["modules"]) == 31
     assert data["coverage"] == {"registered": 31, "complete": True}
