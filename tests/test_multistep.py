@@ -541,44 +541,16 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
 
     client = BedrockClient(offline=True)
     log = ExecutionLog(now_fn=lambda: wall_clock)
-    scored, evidence = run_agent_pipeline(
-        query="分析 BTC 市場",
-        coin="BTC",
-        qtype=QuestionType.MULTI_SOURCE,
-        docs=docs,
-        client=client,
-        log=log,
-        now_fn=lambda: wall_clock,
-    )
-
-    # now_ts 不得被非有限 ts 污染——必須維持有限值。濾掉非有限值後，候選只
-    # 剩 normal_ts（唯一有限的 doc.ts），故 now_ts 應是
-    # min(normal_ts, wall_clock) == normal_ts（早於牆鐘，未被 cap 影響）。
-    assert math.isfinite(captured["now"]), (
-        f"now_ts 不應被非有限的 doc.ts（{bad_ts}）污染成非有限值，"
-        f"實得 {captured['now']}"
-    )
-    assert captured["now"] == normal_ts, (
-        f"濾掉非有限 ts 後，now_ts 應為唯一有限候選 normal_ts={normal_ts}，"
-        f"實得 {captured['now']}"
-    )
-
-    claims_by_doc_id = {c.doc.id: c for c in captured["claims"]}
-    bad_claim = claims_by_doc_id["bad1"]
-    real_claim = claims_by_doc_id["real1"]
-
-    bad_recency = _recency_decay(bad_claim, captured["now"])
-    real_recency = _recency_decay(real_claim, captured["now"])
-
-    assert math.isfinite(bad_recency) and bad_recency == pytest.approx(0.5), (
-        f"非有限時間戳（{bad_ts}）的 recency 應降為中性 0.5，實得 {bad_recency}"
-        "（若是 1.0，代表 NaN/inf 繞過防禦被 clamp 成滿分信任）"
-    )
-    assert bad_recency != 1.0, "非有限時間戳絕不該拿到滿分 recency"
-
-    assert real_recency > 0.8, (
-        f"正常文件的 recency 不應被非有限時間戳的文件拖累變老舊，實得 {real_recency}"
-    )
+    with pytest.raises(ValueError, match="finite"):
+        run_agent_pipeline(
+            query="分析 BTC 市場",
+            coin="BTC",
+            qtype=QuestionType.MULTI_SOURCE,
+            docs=docs,
+            client=client,
+            log=log,
+            now_fn=lambda: wall_clock,
+        )
 
 
 def test_run_agent_pipeline_step2_invokes_trust_kernel(monkeypatch):

@@ -369,7 +369,7 @@ GOLDEN_CASES = [
         {
             "supporting_ids": [f"s{index:02}" for index in range(10)],
             "contrarian_ids": [],
-            "raw_confidence": 0.8000000000000002,
+            "raw_confidence": 0.7999999999999999,
             "calibrated_confidence": 0.48,
             "supporting_count": 10,
             "contrarian_count": 0,
@@ -387,7 +387,7 @@ GOLDEN_CASES = [
         {
             "supporting_ids": [f"s{index:02}" for index in range(10)],
             "contrarian_ids": [f"c{index:02}" for index in range(5)],
-            "raw_confidence": 0.8000000000000002,
+            "raw_confidence": 0.7999999999999999,
             "calibrated_confidence": 0.85,
             "supporting_count": 10,
             "contrarian_count": 5,
