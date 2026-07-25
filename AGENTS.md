@@ -8,29 +8,28 @@ must still complete every review and release gate; do not silently skip a gate.
 1. Start from an issue with explicit acceptance criteria and dependencies.
 2. Create a scoped branch. Do not develop directly on `main`.
 3. Implement focused changes with regression tests.
-4. Enable the repository hook with `git config core.hooksPath .githooks`.
-   Every push must pass the full applicable `.githooks/pre-push` test, lint,
-   build, audit, and `git diff --check` gates. A failing gate blocks the push.
-5. Open a PR linked to the issue, name a reviewer, and record commit-bound
-   pre-push evidence in the PR.
-6. Perform an adversarial `/codex-review`. Fix every finding and rerun checks.
+4. Run the repository-local `.githooks/pre-push` gate; it must complete tests, lint, build,
+   data checks, and `git diff --check` successfully before push.
+5. Open a PR linked to the issue with commit-bound pre-push evidence. GitHub
+   Actions workflows are intentionally disabled and are not required checks.
+6. Perform an adversarial `/codex-review`. Fix every finding and rerun the
+   affected local gates.
 7. For UI changes, perform an eye scan against the actual branch. Check desktop
    and mobile layout, data truthfulness, overflow, state transitions, and errors.
 8. Record reviewer findings, fixes, eye-scan evidence, and final disposition in
    the PR. GitHub forbids authors from approving their own PR; in this one-person
    repository use a commit-bound reviewer attestation instead of fabricating an
    approval. Never use admin or override merge to bypass protection.
-9. Merge only with no unresolved findings and locally verified pre-push
-   evidence bound to the reviewed commit.
-10. Deploy production only through the controlled local release/deploy runbook,
-    then verify health and the changed user workflow before closing the
+9. Merge only with no unresolved findings and a green local pre-push gate. After merge,
+   rerun the local gate against the merged branch.
+10. Deploy production only through the explicit release workflow outside GitHub
+    Actions, then verify health and the changed user workflow before closing the
     milestone.
 
-GitHub Actions are intentionally not used. All files under
-`.github/workflows/` remain disabled and are not test, merge, release, or
-deployment gates. Security and cost-sensitive changes require harper (CISO)
-review plus an explicit security/adversarial review section in addition to the
-normal review record.
+Security-sensitive changes require harper (CISO) and gray (CPO) review before
+merge. Cost-sensitive changes require harper review before merge. Both require
+an explicit security/adversarial review section in addition to the normal review
+record.
 
 ## CEO Development Cycle
 

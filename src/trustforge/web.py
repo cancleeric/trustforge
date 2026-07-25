@@ -56,6 +56,9 @@ from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
 from .asset_context_repository import AssetContextRepository, load_asset_context_records
+from .ecolink_repository import EcoLinkRepository, load_ecolink_fixtures
+from .peer_metrics import snapshots_comparable
+from .peer_metrics_repository import PeerMetricsRepository, load_peer_metrics_fixture
 from .schema import COIN_POOL, QuestionType, comparison_to_markdown
 from .brand_logos import coin_logo_html, source_display_name, source_logo_html
 from .budget_guard import (
@@ -5066,6 +5069,211 @@ def _asset_context_repository() -> AssetContextRepository | None:
     return _ASSET_CONTEXT_REPOSITORY
 
 
+def _handle_api_asset_context(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/asset-context?symbol=ARB`：獨立於 `/api/analyze` 的輕量唯讀
+
+    資產脈絡查詢端點——讓「新手脈絡查詢」小工具可以只查 sector/layer/
+    settlement_chain 這類分類資料，不必觸發完整分析流程（不進
+    `COIN_POOL` 白名單限制、不算費用、不寫 ledger）。
+
+    比照 `/api/health`、`/api/rate-limit-status` 這類唯讀觀測端點：不設
+    限流、不需認證。查無此資產時回 200 + `{"asset_context": null}`，
+    語意是「查無脈絡資料」而非「請求本身有誤」，故意不用 404/500，
+    讓前端可以用同一條 happy-path 處理「資料存在」與「資料缺席」兩種
+    情況（見 `AssetContextLookupPage` 空狀態文案）。
+    """
+    try:
+        symbol = None
+        if qs and "symbol" in qs:
+            raw = qs["symbol"]
+            symbol = raw[0] if isinstance(raw, list) else raw
+        if not symbol or not str(symbol).strip():
+            return 400, _json_envelope_err(
+                "invalid_request", "缺少必要參數 symbol"
+            )
+        repository = _asset_context_repository()
+        if repository is None:
+            return 200, _json_envelope_ok({"asset_context": None})
+        record = repository.by_symbol(str(symbol).strip(), datetime.now(timezone.utc))
+        if record is None:
+            return 200, _json_envelope_ok({"asset_context": None})
+        return 200, _json_envelope_ok({"asset_context": record.context.to_dict()})
+    except Exception:
+        logging.exception("TrustForge /api/asset-context error")
+        return 502, _json_envelope_err("upstream_error", "資產脈絡資料暫時無法讀取，請稍後再試")
+
+
+_PEER_METRICS_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "peer_metrics_snapshots.json"
+)
+_PEER_METRICS_REPOSITORY: PeerMetricsRepository | None = None
+
+
+def _peer_metrics_repository() -> PeerMetricsRepository | None:
+    global _PEER_METRICS_REPOSITORY
+    if _PEER_METRICS_REPOSITORY is not None:
+        return _PEER_METRICS_REPOSITORY
+    if not _PEER_METRICS_FIXTURE_PATH.exists():
+        return None
+    _PEER_METRICS_REPOSITORY = PeerMetricsRepository(
+        load_peer_metrics_fixture(_PEER_METRICS_FIXTURE_PATH)
+    )
+    return _PEER_METRICS_REPOSITORY
+
+
+def _handle_api_peer_metrics(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/peer-metrics?asset=asset:arb`：唯讀的 peer 比較端點——回傳
+    該資產最新 snapshot，以及同組 peers 的 snapshot，並對每個 peer 用
+    `snapshots_comparable()` 標出是否可比較。
+
+    比照 `/api/asset-context`：獨立於 `/api/analyze`，不受 `COIN_POOL`
+    限制、不需認證、不設限流。查無此資產時回 200 + 空結構（語意是
+    「查無資料」而非請求本身有誤）；`asset` 不可缺，缺則 400。
+
+    不可比較的 peer 一律帶明確 `reason`（來自 `snapshots_comparable`
+    的第二個回傳值，或「該 peer 缺 snapshot」時的 `"snapshot missing"`），
+    前端可顯示「無法比較：{reason}」——不留白補 0、也不把該 peer 靜默
+    丟掉（codex-review PR #653：宣告在 `peer_group` 裡但查無 snapshot 的
+    peer 仍必須出現在回應中，只是 `comparable` 為 false）。
+
+    `illustrative` 一律為 true——本端點資料只來自 fixture（見
+    `peer_metrics_repository` 模組 docstring：每筆 record 在解析時都被
+    嚴格驗證 `illustrative: true`），揭露此欄位讓消費者知道不是即時
+    真實觀測值。
+    """
+    try:
+        asset = None
+        if qs and "asset" in qs:
+            raw = qs["asset"]
+            asset = raw[0] if isinstance(raw, list) else raw
+        if not asset or not str(asset).strip():
+            return 400, _json_envelope_err("invalid_request", "缺少必要參數 asset")
+        asset = str(asset).strip()
+        repository = _peer_metrics_repository()
+        if repository is None:
+            return 200, _json_envelope_ok({"illustrative": True, "snapshot": None, "peers": []})
+        snapshot = repository.by_asset_id(asset)
+        if snapshot is None:
+            return 200, _json_envelope_ok({"illustrative": True, "snapshot": None, "peers": []})
+        peers = []
+        for peer_asset_id in repository.peer_group(asset):
+            peer_record = repository.record_for(peer_asset_id)
+            if peer_record is None:
+                peers.append({
+                    "asset_id": peer_asset_id,
+                    "snapshot": None,
+                    "comparable": False,
+                    "reason": "snapshot missing",
+                })
+                continue
+            comparable, reason = snapshots_comparable(snapshot, peer_record.snapshot)
+            peers.append({
+                "asset_id": peer_asset_id,
+                "snapshot": peer_record.snapshot.to_dict(),
+                "comparable": comparable,
+                "reason": reason,
+            })
+        return 200, _json_envelope_ok({
+            "illustrative": True,
+            "snapshot": snapshot.to_dict(),
+            "peers": peers,
+        })
+    except Exception:
+        logging.exception("TrustForge /api/peer-metrics error")
+        return 502, _json_envelope_err("upstream_error", "Peer 比較資料暫時無法讀取，請稍後再試")
+
+
+_ECOLINK_DEPENDENCY_EDGES_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "ecolink_dependency_edges.json"
+)
+_ECOLINK_UPGRADE_EVENTS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "ecolink_upgrade_events.json"
+)
+_ECOLINK_REPOSITORY: EcoLinkRepository | None = None
+
+
+def _ecolink_repository() -> EcoLinkRepository | None:
+    """`ecolink_connector.parse_upgrade_event` rejects any `scheduled_at`
+    already in the past relative to `fetched_at` (a real staleness guard: a
+    "scheduled" upgrade whose date has passed is stale/no-longer-current
+    information and must not be presented as a live upcoming event). We use
+    the real wall-clock time as `fetched_at` here — codex-review (PR #653)
+    correctly flagged an earlier version that pinned `fetched_at` to a fixed
+    past constant, which silently defeated this guard and would let an
+    actually-expired scheduled event keep reporting as `possible_relation`
+    forever. `data/ecolink_upgrade_events.json`'s `scheduled_at` is kept as a
+    stable future illustrative date so this stays honest without needing any
+    workaround.
+    """
+    global _ECOLINK_REPOSITORY
+    if _ECOLINK_REPOSITORY is not None:
+        return _ECOLINK_REPOSITORY
+    if not _ECOLINK_DEPENDENCY_EDGES_PATH.exists() or not _ECOLINK_UPGRADE_EVENTS_PATH.exists():
+        return None
+    _ECOLINK_REPOSITORY = load_ecolink_fixtures(
+        _ECOLINK_DEPENDENCY_EDGES_PATH,
+        _ECOLINK_UPGRADE_EVENTS_PATH,
+        fetched_at=datetime.now(timezone.utc),
+    )
+    return _ECOLINK_REPOSITORY
+
+
+def _handle_api_eco_link(qs: dict | None = None) -> tuple[int, str]:
+    """`GET /api/eco-link?asset=asset:arb`：唯讀的 EcoLink 影響路徑端點——
+    回傳該資產的 impact paths（見 `ecolink_repository.ImpactPath`）。
+
+    ⚠️ 誠實守則（見 `ecolink_repository` 模組 docstring）：`ImpactPath` 是
+    「官方升級事件」與「依賴邊」之間的*相關性*，不是已證實的因果關係。
+    本端點措辭一律用「可能相關」，禁止「導致」/「因此」等因果字眼。
+
+    當 repository 找不到任何符合最低信心門檻的路徑時（低信心邊已被
+    `impact_paths_for()` 濾除，或本來就沒有邊），不假裝「沒有影響」，
+    而是明確回傳 `verdict: "insufficient_data"` + 訊息「資料不足，無法
+    判定」——避免把「查無強相關證據」誤呈現為「已確認無影響」。
+
+    比照 `/api/asset-context`：獨立於 `/api/analyze`，不受 `COIN_POOL`
+    限制、不需認證、不設限流。`asset` 不可缺，缺則 400。
+
+    `illustrative` 一律為 true——`EcoLinkRepository` 只裝載通過
+    `_require_illustrative_and_strip()` 嚴格驗證的 fixture 資料（見
+    `ecolink_repository` 模組 docstring），揭露此欄位讓消費者知道不是
+    即時真實抓取。
+    """
+    try:
+        asset = None
+        if qs and "asset" in qs:
+            raw = qs["asset"]
+            asset = raw[0] if isinstance(raw, list) else raw
+        if not asset or not str(asset).strip():
+            return 400, _json_envelope_err("invalid_request", "缺少必要參數 asset")
+        asset = str(asset).strip()
+        repository = _ecolink_repository()
+        if repository is None:
+            return 200, _json_envelope_ok({
+                "illustrative": True,
+                "verdict": "insufficient_data",
+                "message": "資料不足，無法判定",
+                "impact_paths": [],
+            })
+        paths = repository.impact_paths_for(asset)
+        if not paths:
+            return 200, _json_envelope_ok({
+                "illustrative": repository.illustrative,
+                "verdict": "insufficient_data",
+                "message": "資料不足，無法判定",
+                "impact_paths": [],
+            })
+        return 200, _json_envelope_ok({
+            "illustrative": repository.illustrative,
+            "verdict": "possible_relation",
+            "message": "以下路徑為可能相關，非已證實的因果關係",
+            "impact_paths": [path.to_dict() for path in paths],
+        })
+    except Exception:
+        logging.exception("TrustForge /api/eco-link error")
+        return 502, _json_envelope_err("upstream_error", "EcoLink 影響路徑資料暫時無法讀取，請稍後再試")
+
+
 def _parse_report_generated_at(report) -> datetime | None:
     raw = getattr(report, "generated_at", "")
     if not isinstance(raw, str) or not raw.strip():
@@ -6882,17 +7090,17 @@ def _handle_api_module_telemetry(qs: dict | None = None) -> tuple[int, str]:
     """
     try:
         from .module_telemetry import get_all_telemetry, get_telemetry
-        from dataclasses import asdict
 
         if qs and "module_id" in qs:
             mid = qs["module_id"][0] if isinstance(qs["module_id"], list) else qs["module_id"]
             rec = get_telemetry(mid)
             if rec is None:
                 return 404, _json_envelope_err("not_found", f"No telemetry for module: {mid}")
-            return 200, _json_envelope_ok(asdict(rec))
+            return 200, _json_envelope_ok(rec.to_public_dict())
 
         records = get_all_telemetry()
-        data = [asdict(r) for r in records]
+        # #636：白名單序列化，禁止對外回傳 evidence_ref / metadata
+        data = [r.to_public_dict() for r in records]
         return 200, _json_envelope_ok({"modules": data, "total": len(data)})
     except Exception:
         logging.exception("TrustForge /api/module-telemetry error")
@@ -7859,6 +8067,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/module-telemetry":
             code, body = _handle_api_module_telemetry(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/asset-context":
+            code, body = _handle_api_asset_context(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/peer-metrics":
+            code, body = _handle_api_peer_metrics(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/eco-link":
+            code, body = _handle_api_eco_link(qs)
             return self._send(code, body, "application/json; charset=utf-8")
         # 第三輪 AI 友善：本 API 的 OpenAPI 3.1 spec，純讀檔回傳，見
         # `_handle_openapi_spec` docstring——不套用 `{ok,data,error}` 信封

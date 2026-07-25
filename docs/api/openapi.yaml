@@ -611,6 +611,207 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/asset-context:
+    get:
+      tags: [analysis]
+      operationId: getAssetContext
+      summary: 資產脈絡查詢
+      description: |
+        唯讀。獨立於 `/api/analyze` 的輕量查詢端點——只回傳資產的分類脈絡
+        （sector/layer/settlement_chain/gas_token/dependencies 等），不觸發
+        完整信任分析流程、不受 `COIN_POOL` 五幣白名單限制、不需認證、不設
+        限流。查無此資產的脈絡資料時仍回 200，`data.asset_context` 為
+        `null`（語意是「查無資料」而非請求錯誤）。
+      parameters:
+        - in: query
+          name: symbol
+          required: true
+          schema:
+            type: string
+          description: 資產代號（大小寫不敏感），例如 ARB。
+      responses:
+        "200":
+          description: 資產脈絡資料（查無時 asset_context 為 null）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          asset_context:
+                            type: object
+                            nullable: true
+                            additionalProperties: true
+        "400":
+          description: 缺少必要參數 symbol
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/peer-metrics:
+    get:
+      tags: [analysis]
+      operationId: getPeerMetrics
+      summary: Peer 比較 snapshot
+      description: |
+        唯讀。獨立於 `/api/analyze` 的輕量查詢端點——回傳指定資產最新的
+        peer metrics snapshot，以及同組 peers 各自的 snapshot，並對每個
+        peer 明確標出可否比較（`comparable`）。不可比較時附具體 `reason`
+        （例如 `"observed_tps missing"`、`"metric windows differ"`，或該
+        peer 查無 snapshot 時的 `"snapshot missing"`——宣告的 peer 一律
+        列出、不靜默丟棄），故意不留白補 0，讓前端可顯示「無法比較：
+        {reason}」。查無此資產時仍回 200，`data.snapshot` 為 `null`、
+        `data.peers` 為空陣列（語意是「查無資料」而非請求錯誤）。不受
+        `COIN_POOL` 限制、不需認證、不設限流。
+
+        `data.illustrative` 一律為 `true`：本端點資料只來自 fixture（見
+        `peer_metrics_repository` 模組），非即時真實觀測值。
+      parameters:
+        - in: query
+          name: asset
+          required: true
+          schema:
+            type: string
+          description: 資產識別碼，例如 `asset:arb`。
+      responses:
+        "200":
+          description: Peer 比較 snapshot（查無時 snapshot 為 null、peers 為空陣列）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: object
+                        required: [illustrative, snapshot, peers]
+                        properties:
+                          illustrative:
+                            type: boolean
+                            description: 恆為 true——本端點資料只來自 fixture，非即時真實觀測值。
+                          snapshot:
+                            allOf:
+                              - $ref: "#/components/schemas/PeerMetricsSnapshot"
+                            nullable: true
+                          peers:
+                            type: array
+                            items:
+                              type: object
+                              required: [asset_id, snapshot, comparable, reason]
+                              properties:
+                                asset_id:
+                                  type: string
+                                  description: peer 資產識別碼。
+                                snapshot:
+                                  allOf:
+                                    - $ref: "#/components/schemas/PeerMetricsSnapshot"
+                                  nullable: true
+                                  description: 該 peer 查無 snapshot 時為 null（此時 comparable 恆為 false）。
+                                comparable:
+                                  type: boolean
+                                reason:
+                                  type: string
+                                  nullable: true
+                                  description: 不可比較時的具體原因；可比較時為 null。
+        "400":
+          description: 缺少必要參數 asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/eco-link:
+    get:
+      tags: [analysis]
+      operationId: getEcoLink
+      summary: EcoLink 影響路徑
+      description: |
+        唯讀。獨立於 `/api/analyze` 的輕量查詢端點——回傳指定資產的
+        impact paths：官方升級事件與依賴邊之間的*相關性*，非已證實的
+        因果關係。措辭一律用「可能相關」，不使用「導致」/「因此」等
+        因果字眼。
+
+        當找不到任何符合最低信心門檻的路徑時（低信心邊已被濾除，或
+        本來就沒有邊/事件），不假裝「沒有影響」，而是明確回傳
+        `verdict: "insufficient_data"` + 訊息「資料不足，無法判定」。
+        有找到路徑時 `verdict` 為 `"possible_relation"`。不受
+        `COIN_POOL` 限制、不需認證、不設限流。
+
+        `data.illustrative` 一律為 `true`：本端點資料只來自 fixture（見
+        `ecolink_repository` 模組），非即時真實抓取。
+      parameters:
+        - in: query
+          name: asset
+          required: true
+          schema:
+            type: string
+          description: 資產識別碼，例如 `asset:arb`。
+      responses:
+        "200":
+          description: EcoLink 影響路徑（資料不足時 verdict 為 insufficient_data）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        type: object
+                        required: [illustrative, verdict, message, impact_paths]
+                        properties:
+                          illustrative:
+                            type: boolean
+                            description: 恆為 true——本端點資料只來自 fixture，非即時真實抓取。
+                          verdict:
+                            type: string
+                            enum: [possible_relation, insufficient_data]
+                          message:
+                            type: string
+                          impact_paths:
+                            type: array
+                            items:
+                              type: object
+                              required:
+                                - event_id
+                                - path
+                                - direction
+                                - confidence
+                                - official_source_url
+                              properties:
+                                event_id:
+                                  type: string
+                                path:
+                                  type: array
+                                  items:
+                                    type: string
+                                direction:
+                                  type: string
+                                confidence:
+                                  type: number
+                                official_source_url:
+                                  type: string
+        "400":
+          description: 缺少必要參數 asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/improvement-diagnostics:
     get:
       tags: [observability]
@@ -1283,6 +1484,66 @@ paths:
                   code: upstream_error
                   message: "分析服務暫時無法使用，請稍後再試"
 
+  /api/module-telemetry:
+    get:
+      tags: [operations]
+      operationId: getModuleTelemetry
+      summary: 模組 runtime 遙測快照
+      description: |
+        回傳所有已註冊模組的 runtime 遙測資料（最近呼叫時間、呼叫次數、
+        平均延遲、目前狀態等）。可用 query param `module_id` 查詢單一模組。
+        本端點無認證，回應為白名單序列化（見 security issue #636）：內部
+        欄位 `evidence_ref`（可能含測試名/CI URL/程式碼位置）與任意
+        `metadata` dict **不會**對外回傳。
+      parameters:
+        - name: module_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 選填，指定單一模組 ID
+      responses:
+        "200":
+          description: 模組遙測資料
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEnvelope"
+              example:
+                ok: true
+                data:
+                  modules:
+                    - module_id: "hermes"
+                      last_invoked_at: "2026-07-20T12:00:00Z"
+                      invocation_count: 42
+                      last_result: "success"
+                      avg_latency_ms: 120.5
+                      last_latency_ms: 98.0
+                      state: "verified"
+                  total: 1
+        "404":
+          description: 指定 module_id 查無遙測資料
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: not_found
+                  message: "No telemetry for module: unknown"
+        "502":
+          description: 遙測讀取失敗
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrEnvelope"
+              example:
+                ok: false
+                error:
+                  code: upstream_error
+                  message: "模組遙測暫時無法讀取"
+
   /api/operations-status:
     get:
       tags: [operations]
@@ -1829,6 +2090,60 @@ components:
             message:
               type: string
               description: 通用中文訊息，刻意不透傳例外 stacktrace/內部依賴細節
+
+    MetricValue:
+      type: object
+      description: 單一指標觀測值，含觀測方法與來源（`fixture://` 開頭表示 illustrative fixture 資料）。
+      required: [value, unit, method, source]
+      properties:
+        value:
+          type: number
+          nullable: true
+        unit:
+          type: string
+        method:
+          type: string
+          enum: [observed, estimated, reported, unknown]
+        source:
+          type: string
+
+    PeerMetricsSnapshot:
+      type: object
+      description: 見 `GET /api/peer-metrics`——單一資產在某個觀測窗口的 peer 比較指標。
+      required:
+        - schema_version
+        - asset_id
+        - observed_tps
+        - tvl
+        - gas_fee
+        - activity_breakdown
+        - window_start
+        - window_end
+        - observed_at
+      properties:
+        schema_version:
+          type: string
+        asset_id:
+          type: string
+        observed_tps:
+          $ref: "#/components/schemas/MetricValue"
+        tvl:
+          $ref: "#/components/schemas/MetricValue"
+        gas_fee:
+          $ref: "#/components/schemas/MetricValue"
+        activity_breakdown:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/MetricValue"
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        observed_at:
+          type: string
+          format: date-time
 
     AdminConfigData:
       type: object

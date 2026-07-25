@@ -1,0 +1,278 @@
+[
+  {
+    "illustrative": true,
+    "peer_group": [
+      "asset:arb",
+      "asset:op",
+      "asset:matic"
+    ],
+    "snapshot": {
+      "asset_id": "asset:arb",
+      "observed_tps": {
+        "value": 18.5,
+        "unit": "count/s",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "tvl": {
+        "value": 2500000000.0,
+        "unit": "usd",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "gas_fee": {
+        "value": 0.03,
+        "unit": "usd/transfer",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "activity_breakdown": {
+        "swap": {
+          "value": 11.2,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l2"
+        },
+        "bridge": {
+          "value": 3.4,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l2"
+        }
+      },
+      "window_start": "2026-01-01T00:00:00+00:00",
+      "window_end": "2026-01-08T00:00:00+00:00",
+      "observed_at": "2026-01-08T00:00:00+00:00"
+    }
+  },
+  {
+    "illustrative": true,
+    "peer_group": [
+      "asset:arb",
+      "asset:op",
+      "asset:matic"
+    ],
+    "snapshot": {
+      "asset_id": "asset:op",
+      "observed_tps": {
+        "value": 15.9,
+        "unit": "count/s",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "tvl": {
+        "value": 1900000000.0,
+        "unit": "usd",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "gas_fee": {
+        "value": 0.02,
+        "unit": "usd/transfer",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "activity_breakdown": {
+        "swap": {
+          "value": 9.8,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l2"
+        },
+        "bridge": {
+          "value": 2.7,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l2"
+        }
+      },
+      "window_start": "2026-01-01T00:00:00+00:00",
+      "window_end": "2026-01-08T00:00:00+00:00",
+      "observed_at": "2026-01-08T00:00:00+00:00"
+    }
+  },
+  {
+    "illustrative": true,
+    "peer_group": [
+      "asset:arb",
+      "asset:op",
+      "asset:matic"
+    ],
+    "snapshot": {
+      "asset_id": "asset:matic",
+      "observed_tps": {
+        "value": null,
+        "unit": "count/s",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "tvl": {
+        "value": 850000000.0,
+        "unit": "usd",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "gas_fee": {
+        "value": 0.01,
+        "unit": "usd/transfer",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l2"
+      },
+      "activity_breakdown": {
+        "swap": {
+          "value": 6.1,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l2"
+        },
+        "bridge": {
+          "value": 1.5,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l2"
+        }
+      },
+      "window_start": "2026-01-01T00:00:00+00:00",
+      "window_end": "2026-01-08T00:00:00+00:00",
+      "observed_at": "2026-01-08T00:00:00+00:00"
+    }
+  },
+  {
+    "illustrative": true,
+    "peer_group": [
+      "asset:eth",
+      "asset:sol",
+      "asset:bnb"
+    ],
+    "snapshot": {
+      "asset_id": "asset:eth",
+      "observed_tps": {
+        "value": 14.2,
+        "unit": "count/s",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "tvl": {
+        "value": 58000000000.0,
+        "unit": "usd",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "gas_fee": {
+        "value": 1.85,
+        "unit": "usd/transfer",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "activity_breakdown": {
+        "swap": {
+          "value": 8.9,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l1"
+        },
+        "bridge": {
+          "value": 1.1,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l1"
+        }
+      },
+      "window_start": "2026-01-01T00:00:00+00:00",
+      "window_end": "2026-01-08T00:00:00+00:00",
+      "observed_at": "2026-01-08T00:00:00+00:00"
+    }
+  },
+  {
+    "illustrative": true,
+    "peer_group": [
+      "asset:eth",
+      "asset:sol",
+      "asset:bnb"
+    ],
+    "snapshot": {
+      "asset_id": "asset:sol",
+      "observed_tps": {
+        "value": 2800.0,
+        "unit": "count/s",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "tvl": {
+        "value": 6200000000.0,
+        "unit": "usd",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "gas_fee": {
+        "value": 0.0006,
+        "unit": "usd/transfer",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "activity_breakdown": {
+        "swap": {
+          "value": 1900.0,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l1"
+        },
+        "bridge": {
+          "value": 40.0,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l1"
+        }
+      },
+      "window_start": "2026-01-01T00:00:00+00:00",
+      "window_end": "2026-01-08T00:00:00+00:00",
+      "observed_at": "2026-01-08T00:00:00+00:00"
+    }
+  },
+  {
+    "illustrative": true,
+    "peer_group": [
+      "asset:eth",
+      "asset:sol",
+      "asset:bnb"
+    ],
+    "snapshot": {
+      "asset_id": "asset:bnb",
+      "observed_tps": {
+        "value": 71.0,
+        "unit": "count/s",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "tvl": {
+        "value": 4300000000.0,
+        "unit": "usd",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "gas_fee": {
+        "value": 0.15,
+        "unit": "usd/transfer",
+        "method": "observed",
+        "source": "fixture://peer-metrics/l1"
+      },
+      "activity_breakdown": {
+        "swap": {
+          "value": 45.0,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l1"
+        },
+        "bridge": {
+          "value": 5.2,
+          "unit": "count/s",
+          "method": "observed",
+          "source": "fixture://peer-metrics/l1"
+        }
+      },
+      "window_start": "2026-01-01T00:00:00+00:00",
+      "window_end": "2026-01-08T00:00:00+00:00",
+      "observed_at": "2026-01-08T00:00:00+00:00"
+    }
+  }
+]

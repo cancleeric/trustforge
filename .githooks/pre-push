@@ -19,6 +19,31 @@ run_gate() {
   fi
 }
 
+# Node version gate (issue #660): Vite 8 bundled rolldown needs util.styleText (Node >=20.12).
+NODE_MIN_MAJOR=20
+NODE_MIN_MINOR=12
+if [ -n "${NVM_DIR:-}" ] && [ -s "${NVM_DIR}/nvm.sh" ] && [ -f .nvmrc ]; then
+  . "${NVM_DIR}/nvm.sh" >/dev/null 2>&1
+  nvm use >/dev/null 2>&1 || true
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "[pre-push] FAILED: node not found on PATH. The frontend gate needs Node >=${NODE_MIN_MAJOR}.${NODE_MIN_MINOR}; activate it (e.g. \`nvm install && nvm use\` per .nvmrc) and retry." >&2
+  exit 1
+fi
+NODE_VERSION="$(node --version)"
+NODE_VERSION="${NODE_VERSION#v}"
+if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  echo "[pre-push] FAILED: cannot parse \`node --version\` ('$NODE_VERSION'); need Node >=${NODE_MIN_MAJOR}.${NODE_MIN_MINOR}." >&2
+  exit 1
+fi
+NODE_MAJOR="${NODE_VERSION%%.*}"
+NODE_MINOR_REST="${NODE_VERSION#*.}"
+NODE_MINOR="${NODE_MINOR_REST%%.*}"
+if [ "$NODE_MAJOR" -lt "$NODE_MIN_MAJOR" ] || { [ "$NODE_MAJOR" -eq "$NODE_MIN_MAJOR" ] && [ "$NODE_MINOR" -lt "$NODE_MIN_MINOR" ]; }; then
+  echo "[pre-push] FAILED: Node >=${NODE_MIN_MAJOR}.${NODE_MIN_MINOR} required for the frontend gate (got $(node --version)). Activate it (e.g. \`nvm install && nvm use\` per .nvmrc, or otherwise put Node >=${NODE_MIN_MAJOR}.${NODE_MIN_MINOR} on PATH) and retry." >&2
+  exit 1
+fi
+
 run_gate "backend tests" env PYTHONPATH=src "$PYTHON" -m pytest -q
 run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
 run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json

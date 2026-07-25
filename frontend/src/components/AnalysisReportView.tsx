@@ -17,6 +17,7 @@ import HermesExecutionPanel from './HermesExecutionPanel'
 import { formatTimestamp } from '../lib/format'
 import PlainLanguageResultSummary from './PlainLanguageResultSummary'
 import GlossaryTerm from './GlossaryTerm'
+import AnnotatedText from './AnnotatedText'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
@@ -66,7 +67,9 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
         />
         <section className="hermes-clip border-l-2 border-tf-accent bg-tf-card p-4" aria-label="市場結論">
           <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">市場結論</p>
-          <p className="mt-2 text-base font-semibold leading-7 text-tf-text">{data.report.market_judgment}</p>
+          <p className="mt-2 text-base font-semibold leading-7 text-tf-text">
+            <AnnotatedText text={data.report.market_judgment} />
+          </p>
           <div className="mt-4 grid grid-cols-3 gap-2 border-t border-tf-border pt-3 text-xs">
             <div><p className="text-tf-muted">事實</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.facts.length}</p></div>
             <div><p className="text-tf-muted">推論</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.inferences.length}</p></div>
@@ -108,7 +111,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
           <h3 className="mb-2 text-sm font-semibold text-tf-text">已知限制 / 資料不足</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.limits.map((l, i) => (
-              <li key={i}>{l}</li>
+              <li key={i}><AnnotatedText text={l} /></li>
             ))}
           </ul>
         </div>
@@ -119,7 +122,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
           <h3 className="mb-2 text-sm font-semibold text-tf-text">可能推翻結論的條件</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.could_flip.map((l, i) => (
-              <li key={i}>{l}</li>
+              <li key={i}><AnnotatedText text={l} /></li>
             ))}
           </ul>
         </div>
@@ -130,7 +133,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
           <h3 className="mb-2 text-sm font-semibold text-tf-text">反方 / 低信任證據（已標記，未納入主結論）</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.contrarian.map((l, i) => (
-              <li key={i}>{l}</li>
+              <li key={i}><AnnotatedText text={l} /></li>
             ))}
           </ul>
         </div>

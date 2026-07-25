@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trustforge"
-version = "0.16.36"
+version = "0.18.1"
 description = "加密市場分析 AI Agent：多源資訊的信任提煉（AWS Bedrock）"
 requires-python = ">=3.11"
 dependencies = [
@@ -35,7 +35,19 @@ testpaths = ["tests"]
 # 本機只想跑子集時請加 `--no-cov`（例：`pytest tests/test_foo.py --no-cov`）。
 # CI 一律跑全倉，不受此影響。
 addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing --cov-fail-under=75"
+# Suppress benign GC-timing ResourceWarnings from sqlite3 connections.  All
+# sqlite-backed stores (SourceEventArchive, TrustFeatureStore,
+# SQLiteCacheBackend, AnalysisFlow) define close()+__del__, but Python's
+# non-deterministic GC can collect Connection objects before the wrapper's
+# __del__ runs during interpreter teardown, emitting "unclosed database"
+# ResourceWarnings that are noise rather than real leaks.  This filter is
+# narrowly scoped to the sqlite "unclosed database" message so genuine
+# ResourceWarnings (sockets, files) remain visible.
+filterwarnings = [
+    "ignore:unclosed database:ResourceWarning",
+]
 markers = [
+    "integration: tests requiring an explicitly enabled live local service",
     "slow: tests that are expected to exceed the normal fast-suite budget",
     "network: tests that perform real or simulated network-bound behavior",
     "serial: tests that must not run concurrently with related tests",

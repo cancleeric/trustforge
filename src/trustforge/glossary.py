@@ -30,6 +30,7 @@ class GlossaryTerm:
         GlossaryAudience.POPOVER,
         GlossaryAudience.HELP_CENTER,
     )
+    risk_note: str = ""
 
     def __post_init__(self) -> None:
         for field_name in ("term_id", "label", "definition"):
@@ -44,6 +45,8 @@ class GlossaryTerm:
             not isinstance(audience, GlossaryAudience) for audience in self.audiences
         ):
             raise ValueError("GlossaryTerm.audiences must be tuple of GlossaryAudience")
+        if not isinstance(self.risk_note, str):
+            raise ValueError("GlossaryTerm.risk_note must be a string")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -52,6 +55,7 @@ class GlossaryTerm:
             "definition": self.definition,
             "aliases": list(self.aliases),
             "audiences": [audience.value for audience in self.audiences],
+            "risk_note": self.risk_note,
         }
 
 
@@ -61,6 +65,10 @@ CORE_GLOSSARY_TERMS: tuple[GlossaryTerm, ...] = (
         label="FDV",
         definition="Fully diluted valuation; market cap estimated as if all token supply were circulating.",
         aliases=("fully diluted valuation",),
+        risk_note=(
+            "FDV can be far higher than circulating market cap when most supply is still locked; "
+            "comparing FDV across assets with very different unlock schedules can be misleading."
+        ),
     ),
     GlossaryTerm(
         term_id="market_cap",
@@ -73,24 +81,40 @@ CORE_GLOSSARY_TERMS: tuple[GlossaryTerm, ...] = (
         label="TVL",
         definition="Total value locked; assets deposited in a protocol or chain, measured at observation time.",
         aliases=("total value locked",),
+        risk_note=(
+            "TVL reflects deposited assets, not usage or revenue, and can be inflated by incentive "
+            "programs or double-counted across composable protocols."
+        ),
     ),
     GlossaryTerm(
         term_id="tokenomics",
         label="Tokenomics",
         definition="Token supply, allocation, emissions, utility, and incentive design.",
         aliases=("token economics", "代幣經濟"),
+        risk_note=(
+            "Vesting cliffs and team/investor allocation shares vary widely between assets, which "
+            "can make tokenomics comparisons across projects misleading."
+        ),
     ),
     GlossaryTerm(
         term_id="gas_fee",
         label="Gas Fee",
         definition="Network fee paid to execute or settle transactions.",
         aliases=("gas", "transaction fee", "手續費"),
+        risk_note=(
+            "A token usually cannot be used to pay its own transfer fees; fees are paid in the gas "
+            "token accepted by the network where the transaction executes. For example, transactions "
+            "on Arbitrum (an Ethereum L2) are typically paid in ETH, not in ARB."
+        ),
     ),
     GlossaryTerm(
         term_id="unlock_sell_pressure",
         label="解鎖賣壓",
         definition="Potential selling pressure created when previously locked tokens become transferable.",
         aliases=("unlock pressure", "token unlock", "unlock sell pressure"),
+        risk_note=(
+            "解鎖後流通供給增加，可能形成賣壓；實際影響需視解鎖排程、解鎖量佔流通量比例與市場深度而定，非必然下跌。"
+        ),
     ),
 )
 

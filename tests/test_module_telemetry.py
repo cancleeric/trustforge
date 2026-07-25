@@ -1,6 +1,7 @@
 """Tests for module_telemetry.py (issue #382)."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -299,4 +300,115 @@ class TestModuleStateV2:
         assert rec.avg_latency_ms == pytest.approx(12.5, rel=0.01)
         assert rec.last_latency_ms == pytest.approx(12.5, rel=0.01)
         assert rec.evidence_ref == "ci:test_provider_ports"
+        tele.shutdown()
+
+
+class TestPublicApiWhitelist:
+    """#636: /api/module-telemetry 是無認證端點，不得原樣外流
+    `evidence_ref`（可能含測試名/CI URL/程式碼位置）與任意 `metadata`。
+    """
+
+    _ALLOWED_KEYS = {
+        "module_id",
+        "state",
+        "last_invoked_at",
+        "invocation_count",
+        "avg_latency_ms",
+        "last_latency_ms",
+        "last_result",
+    }
+
+    def test_to_public_dict_excludes_evidence_ref_and_metadata(self, tmp_db):
+        from trustforge.module_telemetry import ModuleTelemetry
+
+        tele = ModuleTelemetry(db_path=tmp_db)
+        tele.record_invocation(
+            "agent.build_report", 42.0, "success",
+            metadata={"internal_path": "/etc/secrets/keys.json"},
+        )
+        time.sleep(0.3)
+
+        rec = tele.get_telemetry("agent.build_report")
+        assert rec is not None
+        assert rec.metadata  # sanity: internal field is populated pre-serialization
+
+        tele.record_verified(
+            "agent.build_report",
+            "https://ci.internal.example.com/jobs/12345",
+        )
+        time.sleep(0.5)
+
+        rec = tele.get_telemetry("agent.build_report")
+        assert rec is not None
+        assert rec.evidence_ref  # sanity: internal field still populated
+
+        public = rec.to_public_dict()
+        assert set(public.keys()) == self._ALLOWED_KEYS
+        assert "evidence_ref" not in public
+        assert "metadata" not in public
+        # 佐證 evidence_ref/metadata 的實際內容確實沒有經任何管道混進白名單值
+        for value in public.values():
+            assert "ci.internal.example.com" not in str(value)
+            assert "/etc/secrets" not in str(value)
+
+        tele.shutdown()
+
+    def test_api_module_telemetry_endpoint_single_module_hides_sensitive_fields(
+        self, tmp_db, monkeypatch
+    ):
+        from trustforge import web
+        from trustforge.module_telemetry import ModuleTelemetry
+        import trustforge.module_telemetry as mt
+
+        tele = ModuleTelemetry(db_path=tmp_db)
+        tele.record_invocation("agent.build_report", 10.0, "success")
+        time.sleep(0.3)
+        tele.record_verified(
+            "agent.build_report",
+            "tests/test_orchestrator.py::test_build_report",
+        )
+        time.sleep(0.5)
+
+        monkeypatch.setattr(mt, "get_telemetry", tele.get_telemetry)
+        monkeypatch.setattr(mt, "get_all_telemetry", tele.get_all_telemetry)
+
+        code, body = web._handle_api_module_telemetry({"module_id": ["agent.build_report"]})
+        assert code == 200
+        data = json.loads(body)["data"]
+        assert set(data.keys()) == self._ALLOWED_KEYS
+        assert "evidence_ref" not in data
+        assert "metadata" not in data
+        assert data["module_id"] == "agent.build_report"
+        assert data["state"] == "verified"
+
+        tele.shutdown()
+
+    def test_api_module_telemetry_endpoint_list_hides_sensitive_fields(
+        self, tmp_db, monkeypatch
+    ):
+        from trustforge import web
+        from trustforge.module_telemetry import ModuleTelemetry
+        import trustforge.module_telemetry as mt
+
+        tele = ModuleTelemetry(db_path=tmp_db)
+        tele.record_invocation(
+            "agent.build_report", 10.0, "success",
+            metadata={"secret": "should-not-leak"},
+        )
+        time.sleep(0.3)
+        tele.record_verified("agent.build_report", "ci://internal-run-999")
+        time.sleep(0.5)
+
+        monkeypatch.setattr(mt, "get_telemetry", tele.get_telemetry)
+        monkeypatch.setattr(mt, "get_all_telemetry", tele.get_all_telemetry)
+
+        code, body = web._handle_api_module_telemetry(None)
+        assert code == 200
+        data = json.loads(body)["data"]
+        assert data["total"] >= 1
+        for module in data["modules"]:
+            assert set(module.keys()) == self._ALLOWED_KEYS
+            assert "evidence_ref" not in module
+            assert "metadata" not in module
+
         tele.shutdown()

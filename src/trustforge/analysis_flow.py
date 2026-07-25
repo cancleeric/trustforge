@@ -26,11 +26,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from . import budget_guard
 from .agent.orchestrator import build_report
 from .bedrock import BedrockClient
 from .execlog import ExecutionLog
 from .ingestion.base import collect
 from .ingestion.cache import doc_from_dict, doc_to_dict
+from .ledger import append_run
 from .schema import COIN_POOL, QuestionType, iso_utc
 from .trust.scoring import aggregate, build_stance_fn, score
 from .feature_store import TrustFeatureStore
@@ -106,6 +108,145 @@ def _question_similarity(left: str, right: str) -> float:
 
 def _db_path(path: str | Path | None = None) -> Path:
     return Path(path) if path is not None else Path(__file__).resolve().parents[2] / "out" / "trustforge.sqlite3"
+
+
+@contextmanager
+def _bedrock_live_attempt(log: ExecutionLog):
+    """Yield 是否本次真的允許呼叫 Bedrock（fail-closed；任何判定例外一律離線）。
+
+    複用既有閘邏輯，不另造繞過 `budget_guard`／每日 cap 的新路徑（`STAGES`
+    daemon 管線跟公開 `/api/analyze` 共用同一套安全護欄）：
+    - `web._bedrock_allowed()`：live 總閘（env `BEDROCK_MODEL_ID` AND admin
+      config `bedrock_enabled`，皆 fail-closed，見 `web.py` 該函式 docstring）。
+      Lazy import（同檔案 `_stage_report_delivery` 既有慣例）避免頂層循環匯入。
+    - `budget_guard.daily_cap_exceeded()` / `narrative_model_priced()` /
+      `try_reserve_request_budget()`：每日 $ cap、unpriced model 保護、
+      並行 TOCTOU 原子預留，跟 `pipeline.run()` 放行真 Bedrock 前的檢查
+      （`pipeline.py` 220-299 行）邏輯一致。
+
+    離開時（無論本次呼叫成功/失敗/未真的呼叫），順序固定「先記帳、後放預留」
+    （codex + harper CISO 雙審 HIGH，比照 `orchestrator.py:1633` 先記帳、
+    `pipeline.py:369` 外層 finally 後才釋放的既有安全序；先前版本順序反了，
+    `release_request_budget()` 先跑會讓並發 daemon job 在這筆花費「還沒進
+    帳本」的空窗期呼叫 `try_reserve_request_budget()`，讀到偏低的
+    `daily_cost_usd()` 誤判還有額度，繞過 $/天 cap）：
+    - `AnalysisFlow` 走 `agent.orchestrator.build_report()` 直接組報告，不經過
+      `run_agent_pipeline()` 收尾既有的 `ledger.append_run()` 記帳——若不在
+      這裡補記，daemon 這條管線的真花費永遠進不了帳本，`daily_cost_usd()`
+      看不到它，每日 cap 對這條管線形同虛設。這裡把本次呼叫期間新增的
+      `llm.cost` log 事件彙總，比照 `run_agent_pipeline()` 收尾同一套格式
+      寫回帳本；持久化失敗（含 `append_run` 本身丟例外）同樣落
+      `budget_guard.record_unledgered_spend()`（fail-closed，避免帳本故障
+      期間被重複呼叫無限繞過 cap）。`total_cost_usd` 在 `append_run` 的
+      try 之外先算好，確保即使 `append_run` 呼叫本身丟例外，仍握有這個值
+      可以落 unledgered fallback，不會發生「兩頭都沒記」。
+    - 記帳完成（成功或已落 fallback）後，才釋放本次預留（若有）——包在
+      巢狀 `finally` 保證即使記帳邏輯本身出非預期例外，release 仍必定
+      執行，不讓預留卡死漏放。
+    """
+    reservation: float | None = None
+    live = False
+    try:
+        from .web import _bedrock_allowed  # noqa: PLC0415 — 避免頂層循環匯入
+
+        if (
+            _bedrock_allowed()
+            and not budget_guard.daily_cap_exceeded()
+            and budget_guard.narrative_model_priced()
+        ):
+            reservation = budget_guard.try_reserve_request_budget()
+            live = reservation is not None
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "analysis_flow: bedrock live 閘判定失敗，fail-closed 強制本次離線",
+            exc_info=True,
+        )
+        live, reservation = False, None
+
+    start_idx = len(log.events)
+    try:
+        yield live
+    finally:
+        try:
+            # `total_cost_usd` 故意算在 `append_run` 的 try 之外/更前
+            # （CISO 對抗審 LOW）：即使下面 `append_run` 呼叫本身丟例外，
+            # 這裡仍握有算好的金額可以落 `record_unledgered_spend` 的保守
+            # 估計，不會發生「記帳跟 unledgered fallback 兩頭都沒記」。
+            new_calls = [
+                {
+                    "model": event["params"].get("model"),
+                    "tokens_in": event["params"].get("tokens_in", 0),
+                    "tokens_out": event["params"].get("tokens_out", 0),
+                    "cost_usd": event["params"].get("cost_usd", 0.0),
+                }
+                for event in log.events[start_idx:]
+                if event.get("tool") == "llm.cost"
+            ]
+            total_cost_usd = round(sum(float(c["cost_usd"] or 0.0) for c in new_calls), 6)
+            if total_cost_usd > 0:
+                try:
+                    persisted = append_run({
+                        "ts": iso_utc(time.time()),
+                        "question_type": "analysis_flow",
+                        "coin": None,
+                        "offline": not live,
+                        "calls": new_calls,
+                        "total_cost_usd": total_cost_usd,
+                    })
+                except Exception:
+                    persisted = False
+                    logging.getLogger(__name__).warning(
+                        "analysis_flow: append_run 記帳例外，落 record_unledgered_spend 保守估計",
+                        exc_info=True,
+                    )
+                if not persisted:
+                    budget_guard.record_unledgered_spend(total_cost_usd)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "analysis_flow: bedrock 花費記帳失敗（cap 帳本可能少計這筆）", exc_info=True,
+            )
+        finally:
+            # codex + harper CISO 雙審 HIGH：記帳必須先於釋放預留完成——見
+            # docstring。巢狀 finally 保證無論上面記帳成功/丟例外，release
+            # 一定執行（不因記帳例外漏放預留），但文字順序＋巢狀結構確保
+            # release 永遠在記帳嘗試「之後」才生效，關掉並發 job 讀到偏低
+            # `daily_cost_usd()`、誤判有額度繞過 cap 的 TOCTOU 空窗。
+            if reservation is not None:
+                try:
+                    budget_guard.release_request_budget(reservation)
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "analysis_flow: release_request_budget 失敗", exc_info=True,
+                    )
+
+
+# Issue #570: three-track learning emission hooks. These wrappers live at
+# module scope so the ``AnalysisFlow._worker`` call sites stay narrow and the
+# import of :mod:`trustforge.three_track_wiring` only happens when emission
+# is actually enabled (lazy). Each wrapper is structurally fail-soft: even if
+# the underlying helper raises unexpectedly, the analysis path is unaffected.
+def _emit_three_track_learning_on_success(flow: "AnalysisFlow", job_id: str) -> None:
+    try:
+        from .three_track_wiring import emit_for_completed_job
+        emit_for_completed_job(flow, job_id)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "three-track learning SUCCESS emission failed (fail-soft) "
+            "for job_id=%s", job_id,
+        )
+
+
+def _emit_three_track_learning_on_failure(
+    flow: "AnalysisFlow", job_id: str, error: BaseException,
+) -> None:
+    try:
+        from .three_track_wiring import emit_for_failed_job
+        emit_for_failed_job(flow, job_id, error=error)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "three-track learning FAILURE emission failed (fail-soft) "
+            "for job_id=%s", job_id,
+        )
 
 
 class AnalysisFlow:
@@ -675,6 +816,10 @@ class AnalysisFlow:
                         (time.time(), job_id),
                     )
                     self._adopted.discard(job_id)
+                    # Issue #570: three-track learning SUCCESS hook.
+                    # Structurally fail-soft — runs strictly after durable
+                    # state has landed; the helper never raises into us.
+                    _emit_three_track_learning_on_success(self, job_id)
             except Exception as exc:
                 retry = int(package.get("retries", {}).get(stage, 0)) + 1
                 package.setdefault("retries", {})[stage] = retry
@@ -723,6 +868,11 @@ class AnalysisFlow:
                          retry, str(exc)[:1000], time.time()),
                     )
                     self._adopted.discard(job_id)
+                    # Issue #570: three-track learning FAILURE hook.
+                    # Structurally Fail-soft — runs strictly after the
+                    # dead-letter row has landed; the helper never raises
+                    # into us.
+                    _emit_three_track_learning_on_failure(self, job_id, exc)
             finally: self._queues[stage].task_done()
 
     def _job(self, job_id: str) -> sqlite3.Row:
@@ -742,17 +892,23 @@ class AnalysisFlow:
         return package
 
     def _stage_claim_extraction(self, package: dict) -> dict:
-        client = BedrockClient(offline=True)
-        package["client"] = client
-        package["claims"] = client.extract_claims_with_llm(package["docs"], log=package["log"])
-        package["log"].record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": False}, summary=f"{len(package['claims'])} claims")
+        log = package["log"]
+        with _bedrock_live_attempt(log) as live:
+            client = BedrockClient(offline=not live)
+            package["client"] = client
+            package["claims"] = client.extract_claims_with_llm(package["docs"], log=log)
+            llm_active = not client.offline and bool(client.config.model_id)
+        log.record("bedrock.complete", params={"step": 1, "task": "claim_extraction", "llm_active": llm_active}, summary=f"{len(package['claims'])} claims")
         return package
 
     def _stage_trust_reasoning(self, package: dict) -> dict:
         finite = [d.ts for d in package["docs"] if math.isfinite(d.ts)]
         now = min(max(finite, default=time.time()), time.time())
         stance = build_stance_fn(stance_client=None, stance_remaining_time_fn=package["log"].remaining)
-        package["scored"] = score(package["claims"], now, stance_fn=stance, offline=True, dynamic_reputation=True)
+        # `offline` 反映 Step1（`_stage_claim_extraction`）決定的真實 live 狀態，
+        # 不再寫死 True——`stance_client=None` 本來就不會真的打 Bedrock 分類，
+        # 這裡只影響 DS EM 離線 fallback 是否觸發（見 `score()` docstring）。
+        package["scored"] = score(package["claims"], now, stance_fn=stance, offline=package["client"].offline, dynamic_reputation=True)
         package["brief"] = aggregate(package["scored"], package["job"]["question"], coin=package["job"]["coin"])
         package["stance"] = stance
         package["log"].record("pipeline.step2.start", summary=f"scored {len(package['scored'])} claims")
@@ -760,10 +916,27 @@ class AnalysisFlow:
 
     def _stage_evidence_assembly(self, package: dict) -> dict:
         job = package["job"]
-        package["report"], package["evidence"] = build_report(
-            job["question"], job["coin"], QuestionType(job["question_type"]), package["brief"],
-            client=package["client"], log=package["log"], stance_fn=package["stance"], scored=package["scored"],
-        )
+        client = package["client"]
+        log = package["log"]
+
+        def _build_report():
+            return build_report(
+                job["question"], job["coin"], QuestionType(job["question_type"]), package["brief"],
+                client=client, log=log, stance_fn=package["stance"], scored=package["scored"],
+            )
+
+        if client.offline:
+            # Step1 已判離線（未 live 資格 / 預留失敗）：Step3 narrative 不會
+            # 憑空變成 live，維持離線、不需要再走一次閘。
+            package["report"], package["evidence"] = _build_report()
+        else:
+            # Step3（`build_report` 內的 narrative 呼叫，Bedrock #2）跟 Step1
+            # 是兩次獨立真呼叫，中間隔著佇列等待——重新走一次獨立的 live 閘 +
+            # 預留，反映呼叫當下最新的 cap 狀態，不沿用 Step1 當時已過期的判定
+            # （避免這段等待期間才發生的「已達每日上限」被繞過）。
+            with _bedrock_live_attempt(log) as live:
+                client.offline = not live
+                package["report"], package["evidence"] = _build_report()
         return package
 
     def _stage_report_delivery(self, package: dict) -> dict:

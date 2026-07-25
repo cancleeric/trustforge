@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import AnnotatedText from './AnnotatedText'
 
 interface Props {
   facts: string[]
@@ -26,7 +27,7 @@ export default function FactsInferenceLadder({ facts, inferences, marketJudgment
       <Step badge="步驟 1/3" title="事實（客觀資料）">
         <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
           {facts.map((f, i) => (
-            <li key={i}>{f}</li>
+            <li key={i}><AnnotatedText text={f} /></li>
           ))}
         </ul>
       </Step>
@@ -34,13 +35,13 @@ export default function FactsInferenceLadder({ facts, inferences, marketJudgment
         <ul className="space-y-2 text-sm text-tf-text2">
           {inferences.map((inf, i) => (
             <li key={i} className="whitespace-pre-wrap break-words">
-              {inf}
+              <AnnotatedText text={inf} />
             </li>
           ))}
         </ul>
       </Step>
       <Step badge="步驟 3/3" title="結論 / 市場判斷">
-        <p className="text-sm font-medium text-tf-text">{marketJudgment}</p>
+        <p className="text-sm font-medium text-tf-text"><AnnotatedText text={marketJudgment} /></p>
       </Step>
     </div>
   )

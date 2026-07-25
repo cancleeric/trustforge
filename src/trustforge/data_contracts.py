@@ -47,6 +47,9 @@ def _asset_context_schema_properties() -> dict[str, Any]:
             "ecosystem": {"type": ["string", "null"]},
             "parent_asset_id": {"type": ["string", "null"]},
             "tags": {"type": "array", "items": {"type": "string"}},
+            "settlement_chain": {"type": "string", "minLength": 1},
+            "gas_token": {"type": "string", "minLength": 1},
+            "dependencies": {"type": "array", "items": {"type": "string"}},
         },
         "additionalProperties": False,
     }

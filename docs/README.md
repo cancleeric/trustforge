@@ -39,6 +39,7 @@ Governance index:
 | [architecture/AWS-ARCHITECTURE.md](architecture/AWS-ARCHITECTURE.md) | AWS 服務架構（決賽簡報用），含前後端分離對外拓樸 |
 | [architecture/BACKFILL-SYSTEM.md](architecture/BACKFILL-SYSTEM.md) | 歷史回填系統：5年 OHLCV 逐日 replay，三層啟停控制 |
 | [architecture/RAG-GOLD-SET-PROVENANCE.md](architecture/RAG-GOLD-SET-PROVENANCE.md) | #511 RAG gold set：gray-cpo provenance、tenant/PIT/history isolation、citation/abstention 與 non-Evidence 邊界 |
+| [architecture/TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-ANALYSIS-2026-07-23.md](architecture/TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-ANALYSIS-2026-07-23.md) | 三軌統一學習架構：Question RAG、分析品質、外框受控升級的資料、標籤、ModelHub 與啟用邊界 |
 | [architecture/OBSERVABILITY-API.md](architecture/OBSERVABILITY-API.md) | 觀測層 API 端點文件：budget-governance / improvement / alerts / backfill |
 | [architecture/PLAN-frontend-backend-split.md](architecture/PLAN-frontend-backend-split.md) | 前後端分離架構＋遷移計劃：SSR零-JS → React+Vite+TS+Tailwind。**方案 B 已定案（Issue #81，2026-07-06）並上線 v0.6.1**：web.py 降為純 `/api/*` API，React SPA 獨立部署，SSR 凍結新功能僅保留 `cutover_switch.sh legacy` 緊急回滾路徑 |
 | [architecture/TRUTH-DISCOVERY-EVALUATION-2026-07-13.md](architecture/TRUTH-DISCOVERY-EVALUATION-2026-07-13.md) | Truth-discovery 統計收斂法補強評估（#179）：CRH/Dawid-Skene/CATD/LTM 四方法對照表，結論 Dawid-Skene EM 最適合當 Bedrock 離線 fallback |
@@ -58,6 +59,8 @@ Governance index:
 | [plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md](plans/AGENT-PLATFORM-EXTRACTION-PLAN-2026-07-22.md) | Agent Platform／Trust Kernel／TrustForge App 漸進拆分計畫：工作流依賴、驗收條件、測試與 12–22 PR 里程碑 |
 | [plans/PLAN-2026-07-21-ui-optimization.md](plans/PLAN-2026-07-21-ui-optimization.md) | UI/UX 優化現況版：#356–#360 完成／更正、#539–#542 與 #361/#362 剩餘工作、≤12h 相依性與驗收標準 |
 | [plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md](plans/PLAN-TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-2026-07-23.md) | 三軌統一學習架構開發計劃：#501 replacement semantic disposition 已完成；implementation authorization 與 production scope 仍維持未授權／EMPTY |
+| [plans/PLAN-next-competition-readiness-2026-07-24.md](plans/PLAN-next-competition-readiness-2026-07-24.md) | 競賽就緒衝刺排序（剩約 8 天）：首選 #636 telemetry 安全修（harper 必審）；次選 Demo 敘事整合入口（三模組被評審看見）；模組③真實資料源本輪不建議動工；#633/#634/#637 技術債延後 |
+| [plans/PLAN-demo-narrative-entry-2026-07-24.md](plans/PLAN-demo-narrative-entry-2026-07-24.md) | Demo 敘事整合入口執行計劃：首選方案 B（HermesDashboard 首屏新增「新手 3 步」敘事卡片，導向資產脈絡查詢/名詞解釋/同層生態），不做主導覽升級或獨立整合頁；PR1-3 拆解（≤12h）、reviewer、CEO 裁示點 |
 
 ## qa/ — 測試與研究發現
 
@@ -68,11 +71,24 @@ Governance index:
 | [qa/CONFORMAL-FINDING.md](qa/CONFORMAL-FINDING.md) | W4 Split Conformal Prediction 研究發現：數學實作完成、JOINT coverage 達標，但代理訊號 pseudo-AUC≈0.49（等同隨機）——誠實負結果，不接進 production |
 | [qa/modelhub-integration-351.md](qa/modelhub-integration-351.md) | ModelHub client／候選編排 #351 的驗證、審查證據與未執行邊界 |
 
+
+## reports/ — 事故與調查報告
+
+| 文件 | 說明 |
+|------|------|
+| [reports/REPORT-2026-07-23-hardcoded-paths-portability.md](reports/REPORT-2026-07-23-hardcoded-paths-portability.md) | 本機排程硬編碼路徑事故：#518／PR #536 根治、審查證據、未執行真機驗收與剩餘 freshness 告警風險 |
+
 ## handoff/ — 交接文件
 
 | 文件 | 說明 |
 |------|------|
 | [handoff/2026-07-22-modelhub-integration-handoff.md](handoff/2026-07-22-modelhub-integration-handoff.md) | ModelHub #351 七段式現況、操作契約與剩餘工作 |
+
+## skills/ — 執行與審查教學
+
+| 文件 | 說明 |
+|------|------|
+| [skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md](skills/LUNA-ADVERSARIAL-PR-REVIEW-GUIDE.md) | Luna GitHub PR 對抗式審查指南：固定 SHA、負向測試、PIT leakage、安全 activation、stacked PR 與 PASS／FAIL 模板 |
 
 ## design/
 

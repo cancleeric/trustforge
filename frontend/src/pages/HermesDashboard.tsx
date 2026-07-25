@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import HermesTopBar from '../hermes/HermesTopBar'
+import HermesHeroTagline from '../hermes/HermesHeroTagline'
 import HermesLeftRail from '../hermes/HermesLeftRail'
 import HermesRightRail from '../hermes/HermesRightRail'
 import CurrencyGalaxy from '../hermes/CurrencyGalaxy'
@@ -14,6 +15,7 @@ import HermesModuleDeck, { type HermesWorkspaceModule } from '../hermes/HermesMo
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import HermesUpgradeShip from '../hermes/HermesUpgradeShip'
 import HermesOnboarding from '../hermes/HermesOnboarding'
+import HermesBeginnerNarrative from '../components/HermesBeginnerNarrative'
 import HermesMobileDivergenceEntry from '../hermes/HermesMobileDivergenceEntry'
 import TrainingStatusCard from '../components/TrainingStatusCard'
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
@@ -514,6 +516,10 @@ export default function HermesDashboard() {
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} reducedMotion={reducedMotion} onReducedMotionToggle={toggleReducedMotion} />
         </div>
+
+        <HermesHeroTagline />
+
+        {beginnerMode && !activeModule && <HermesBeginnerNarrative />}
 
 
         <div className="hermes-boot-layer" style={{ opacity: boot.left ? 1 : 0, transition: 'opacity .5s ease-out' }}>

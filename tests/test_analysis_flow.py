@@ -10,10 +10,15 @@ from pathlib import Path
 
 import pytest
 
+from trustforge import budget_guard
+from trustforge import analysis_flow as analysis_flow_module
 from trustforge.analysis_flow import AnalysisFlow, MODES, STAGES
+from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 
 ROOT = Path(__file__).resolve().parents[1]
+
+_PRICED_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 def _docs() -> list[Document]:
@@ -416,3 +421,215 @@ def test_readonly_projection_skips_schema_writes_and_reads_existing_state(tmp_pa
     assert context["conversation"] == []
     assert latest is None
     assert not missing.exists()
+
+
+# ---------------------------------------------------------------------------
+# Live Bedrock gating for the daemon STAGES pipeline (`_stage_claim_extraction`
+# / `_stage_trust_reasoning` / `_stage_evidence_assembly`), reusing
+# `web._bedrock_allowed()` + `budget_guard`'s cap/reservation/pricing checks
+# instead of the previous hardcoded `offline=True`.
+# ---------------------------------------------------------------------------
+
+
+class _FakeLiveBedrockClient:
+    """Stand-in for `BedrockClient` in live-gate tests: never touches boto3/AWS,
+    but mirrors the `.offline` / `.config.model_id` / `extract_claims_with_llm`
+    surface `_stage_claim_extraction` relies on, and records a real `llm.cost`
+    log event when "live" so the ledger-accounting path can be exercised."""
+
+    def __init__(self, offline: bool = False):
+        self.offline = offline
+        self.config = type("Cfg", (), {"model_id": _PRICED_MODEL_ID if not offline else None})()
+
+    def extract_claims_with_llm(self, docs, log=None):
+        if not self.offline and log is not None:
+            log.record_llm_cost(self.config.model_id, tokens_in=100, tokens_out=50, cost_usd=0.01)
+        return []
+
+
+def _claim_extraction_package() -> dict:
+    return {
+        "docs": _docs(),
+        "log": ExecutionLog(run_id="test-run"),
+        "job": {"question": "BTC 近期風險？", "coin": "BTC", "question_type": "multi_source"},
+    }
+
+
+def test_claim_extraction_stays_offline_when_bedrock_gate_closed(tmp_path):
+    """預設測試環境沒有 BEDROCK_MODEL_ID／live 閘關閉 → 維持離線，不記帳。"""
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    package = flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert package["client"].offline is True
+    llm_event = next(e for e in package["log"].events if e["tool"] == "bedrock.complete")
+    assert llm_event["params"]["llm_active"] is False
+    assert budget_guard.daily_cost_usd() == 0
+
+
+def test_claim_extraction_goes_live_when_gate_open_and_budget_available(tmp_path, monkeypatch):
+    """gate 開＋budget 有額度 → offline=False、llm_active=True，且真花費透過
+    `_bedrock_live_attempt()` 補記進 `ledger.append_run()`，讓 `daily_cost_usd()`
+    看得到——證明這條管線的 Bedrock 呼叫確實仍過 budget_guard 的每日 cap 帳本。
+    """
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+
+    assert budget_guard.daily_cost_usd() == 0
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    package = flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert package["client"].offline is False
+    llm_event = next(e for e in package["log"].events if e["tool"] == "bedrock.complete")
+    assert llm_event["params"]["llm_active"] is True
+    assert budget_guard.daily_cost_usd() == pytest.approx(0.01)
+
+
+def test_claim_extraction_forced_offline_when_daily_cap_exceeded(tmp_path, monkeypatch):
+    """gate 開，但每日 cap 已達標 → 強制離線，不得繞過 budget_guard 的 cap。"""
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+    monkeypatch.setattr(budget_guard, "daily_cap_exceeded", lambda *a, **k: True)
+
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    package = flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert package["client"].offline is True
+    assert budget_guard.daily_cost_usd() == 0
+
+
+def test_claim_extraction_fail_closed_when_gate_raises(tmp_path, monkeypatch):
+    """live 閘判定本身炸例外 → fail-closed 維持離線，例外不得外傳。"""
+    def _boom(*a, **k):
+        raise RuntimeError("gate blew up")
+
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", _boom)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    package = flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert package["client"].offline is True
+    assert budget_guard.daily_cost_usd() == 0
+
+
+def test_trust_reasoning_passes_client_offline_state_to_score(tmp_path, monkeypatch):
+    """Step2 `score()` 的 `offline` 必須反映 Step1 真實決定的 live 狀態，不再
+    寫死 True。"""
+    captured = {}
+
+    def _fake_score(claims, now, *, stance_fn=None, offline=None, dynamic_reputation=None):
+        captured["offline"] = offline
+        return []
+
+    monkeypatch.setattr("trustforge.analysis_flow.score", _fake_score)
+
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    package = _claim_extraction_package()
+    package["client"] = _FakeLiveBedrockClient(offline=False)
+    package["claims"] = []
+    flow._stage_trust_reasoning(package)
+
+    assert captured["offline"] is False
+
+
+def test_evidence_assembly_rechecks_gate_and_can_flip_to_offline_when_cap_hits_between_steps(
+    tmp_path, monkeypatch,
+):
+    """Step1 判定 live 後、排隊等到 Step3 之間 cap 才被打滿：Step3 必須重新
+    走一次獨立閘判定，不得沿用 Step1 過期的 live 決定去打真 Bedrock。"""
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("trustforge.analysis_flow.budget_guard.daily_cap_exceeded", lambda *a, **k: True)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+
+    captured = {}
+
+    def _fake_build_report(question, coin, qtype, brief, *, client, log, stance_fn, scored):
+        captured["offline_at_call"] = client.offline
+        return {"report": "stub"}, {"evidence": "stub"}
+
+    monkeypatch.setattr("trustforge.analysis_flow.build_report", _fake_build_report)
+
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    package = _claim_extraction_package()
+    package["client"] = _FakeLiveBedrockClient(offline=False)  # Step1 曾判 live
+    package["claims"] = []
+    package["scored"] = []
+    package["brief"] = None
+    package["stance"] = None
+    flow._stage_evidence_assembly(package)
+
+    assert captured["offline_at_call"] is True
+    assert budget_guard.daily_cost_usd() == 0
+
+
+def test_bedrock_live_attempt_records_ledger_before_releasing_reservation(tmp_path, monkeypatch):
+    """codex + harper CISO 雙審 HIGH（TOCTOU）：`_bedrock_live_attempt()` 的
+    finally 必須先把花費寫進帳本（或落 unledgered fallback），才可以釋放
+    預留。反過來（先 release 後記帳）會在記帳完成前留出空窗：並發的另一個
+    daemon job 這時呼叫 `try_reserve_request_budget()` 會讀到偏低的
+    `daily_cost_usd()`，誤判還有額度，繞過 $/天 cap。
+
+    這裡把 `append_run` 模擬成延遲（掛起一小段時間才回傳），驗證
+    `release_request_budget` 只會在 `append_run` 真的跑完之後才被呼叫。
+    全程 mock，不打真 Bedrock。"""
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+
+    order = []
+    real_append_run = analysis_flow_module.append_run
+    real_release = budget_guard.release_request_budget
+
+    def _slow_append_run(record):
+        time.sleep(0.05)  # 模擬帳本寫入被延遲/掛起
+        result = real_append_run(record)
+        order.append("append_run")
+        return result
+
+    def _tracking_release(amount):
+        order.append("release")
+        return real_release(amount)
+
+    monkeypatch.setattr("trustforge.analysis_flow.append_run", _slow_append_run)
+    monkeypatch.setattr("trustforge.analysis_flow.budget_guard.release_request_budget", _tracking_release)
+
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert order == ["append_run", "release"]
+    # 記帳真的先落地成功，非只是呼叫順序對但實際沒寫入。
+    assert budget_guard.daily_cost_usd() == pytest.approx(0.01)
+
+
+def test_bedrock_live_attempt_releases_reservation_even_when_ledger_accounting_raises(
+    tmp_path, monkeypatch,
+):
+    """記帳區塊本身丟非預期例外時，release 仍必須執行（不可讓預留卡死
+    漏放）——巢狀 finally 的另一半保證。"""
+    monkeypatch.setattr("trustforge.web._bedrock_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("trustforge.analysis_flow.BedrockClient", _FakeLiveBedrockClient)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", _PRICED_MODEL_ID)
+
+    def _boom(record):
+        raise RuntimeError("ledger backend on fire")
+
+    released = {}
+    real_release = budget_guard.release_request_budget
+
+    def _tracking_release(amount):
+        released["amount"] = amount
+        return real_release(amount)
+
+    monkeypatch.setattr("trustforge.analysis_flow.append_run", _boom)
+    monkeypatch.setattr("trustforge.analysis_flow.budget_guard.release_request_budget", _tracking_release)
+
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    # 不得讓例外外傳到呼叫端（daemon 一個 job 記帳故障不該讓整個 stage 掛掉）。
+    flow._stage_claim_extraction(_claim_extraction_package())
+
+    assert released.get("amount") is not None
+    # append_run 丟例外 → 記帳走 unledgered fallback，仍算進今日已花費。
+    assert budget_guard.daily_cost_usd() == pytest.approx(0.01)

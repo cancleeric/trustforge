@@ -15,6 +15,13 @@ import type {
   AdminConfigData,
   AdminLiveTokenView,
   AnalyzeData,
+  AssetContext,
+  AssetContextResponseData,
+  PeerMetricValue,
+  PeerMetricsSnapshot,
+  PeerMetricsResponseData,
+  EcoLinkImpactPath,
+  EcoLinkResponseData,
   BasisItem,
   CacheBackendStatus,
   ComparisonAnalyzeData,
@@ -596,5 +603,126 @@ export function isAdminAuditData(value: unknown): value is AdminAuditData {
     typeof value.limit === 'number' &&
     Array.isArray(value.records) &&
     value.records.every(isAdminAuditRecord)
+  )
+}
+
+// ── /api/asset-context ───────────────────────────────────────────────────
+
+/** 只驗形狀（必要字串欄位是否為 string），不驗 enum 白名單——後端
+ * `AssetSector`/`AssetLayer` 等列舉未來新增值時前端不該連帶炸掉，未知值
+ * 由渲染層（`SectorLayerCard`）自行 fallback 顯示原始字串。可選欄位
+ * （`settlement_chain`/`gas_token`/`dependencies`）比照後端 legacy 快照
+ * 相容策略，缺席視為合法。 */
+function isAssetContext(value: unknown): value is AssetContext {
+  return (
+    isPlainObject(value) &&
+    typeof value.schema_version === 'string' &&
+    typeof value.asset_id === 'string' &&
+    typeof value.symbol === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.sector === 'string' &&
+    typeof value.layer === 'string' &&
+    typeof value.token_role === 'string' &&
+    typeof value.market_cap_tier === 'string' &&
+    (value.ecosystem === null || typeof value.ecosystem === 'string') &&
+    (value.parent_asset_id === null || typeof value.parent_asset_id === 'string') &&
+    isStringArray(value.tags) &&
+    (value.settlement_chain === undefined || typeof value.settlement_chain === 'string') &&
+    (value.gas_token === undefined || typeof value.gas_token === 'string') &&
+    (value.dependencies === undefined || isStringArray(value.dependencies))
+  )
+}
+
+export function isAssetContextResponseData(value: unknown): value is AssetContextResponseData {
+  return (
+    isPlainObject(value) &&
+    (value.asset_context === null || isAssetContext(value.asset_context))
+  )
+}
+
+// ── /api/peer-metrics ────────────────────────────────────────────────────
+
+/** `value` 允許 `null`（該指標缺席）——不強求一定有數字，讓渲染層誠實
+ * 顯示「—」而不是把缺值偽裝成 0。 */
+function isPeerMetricValue(value: unknown): value is PeerMetricValue {
+  return (
+    isPlainObject(value) &&
+    (value.value === null || typeof value.value === 'number') &&
+    typeof value.unit === 'string' &&
+    typeof value.method === 'string' &&
+    typeof value.source === 'string'
+  )
+}
+
+/** 只驗形狀，不驗 enum 白名單（比照 `isAssetContext`）。所有指標欄位
+ * 皆為選填——`additionalProperties: true`，後端未來可能加減欄位。 */
+function isPeerMetricsSnapshot(value: unknown): value is PeerMetricsSnapshot {
+  if (!isPlainObject(value) || typeof value.asset_id !== 'string') return false
+  if (value.observed_tps !== undefined && value.observed_tps !== null && !isPeerMetricValue(value.observed_tps)) return false
+  if (value.tvl !== undefined && value.tvl !== null && !isPeerMetricValue(value.tvl)) return false
+  if (value.gas_fee !== undefined && value.gas_fee !== null && !isPeerMetricValue(value.gas_fee)) return false
+  if (value.activity_breakdown !== undefined && value.activity_breakdown !== null) {
+    if (!isPlainObject(value.activity_breakdown)) return false
+    if (!Object.values(value.activity_breakdown).every(isPeerMetricValue)) return false
+  }
+  if (value.window_start !== undefined && typeof value.window_start !== 'string') return false
+  if (value.window_end !== undefined && typeof value.window_end !== 'string') return false
+  if (value.observed_at !== undefined && typeof value.observed_at !== 'string') return false
+  return true
+}
+
+/** `asset_id` 恆存在（宣告在 peer_group 裡的 peer 一律列出，即使查無
+ * snapshot 也不靜默丟棄），`snapshot` 在該 peer 查無資料時為 `null`
+ * （見 `web.py::_handle_api_peer_metrics` docstring / PR #653）。 */
+function isPeerComparisonEntry(value: unknown): value is { asset_id: string; snapshot: PeerMetricsSnapshot | null; comparable: boolean; reason: string | null } {
+  return (
+    isPlainObject(value) &&
+    typeof value.asset_id === 'string' &&
+    (value.snapshot === null || isPeerMetricsSnapshot(value.snapshot)) &&
+    typeof value.comparable === 'boolean' &&
+    (value.reason === null || typeof value.reason === 'string')
+  )
+}
+
+/** `illustrative` 只驗形狀是否為 `true`——本端點恆回 `true`（fixture-only
+ * 資料），畸形時整包轉 parse_error，不讓「示範資料」揭露悄悄消失。 */
+export function isPeerMetricsResponseData(value: unknown): value is PeerMetricsResponseData {
+  return (
+    isPlainObject(value) &&
+    value.illustrative === true &&
+    (value.snapshot === null || isPeerMetricsSnapshot(value.snapshot)) &&
+    Array.isArray(value.peers) &&
+    value.peers.every(isPeerComparisonEntry)
+  )
+}
+
+// ── /api/eco-link ────────────────────────────────────────────────────────
+
+function isEcoLinkImpactPath(value: unknown): value is EcoLinkImpactPath {
+  return (
+    isPlainObject(value) &&
+    typeof value.event_id === 'string' &&
+    isStringArray(value.path) &&
+    typeof value.direction === 'string' &&
+    typeof value.confidence === 'number' &&
+    typeof value.official_source_url === 'string'
+  )
+}
+
+/** 不驗 `verdict` 是否僅限已知兩值以外的字面——只要是 string 即放行，
+ * 未知值由渲染層 fallback（比照 `isAssetContext` 對 enum 的寬鬆策略），
+ * 避免後端新增 verdict 值時前端連帶炸掉。 */
+/** `verdict` 嚴格白名單（codex-review PR #655）：只認 openapi.yaml 定義的
+ * 兩個字面值，未知值一律 parse_error——不能只驗 `typeof === 'string'`，
+ * 否則畸形/未來新增 verdict 會 fall through 到 `EcoLinkImpactPanel` 的
+ * `possible_relation` 分支，把「不確定/未知」誤渲染成正面結論。 */
+export function isEcoLinkResponseData(value: unknown): value is EcoLinkResponseData {
+  return (
+    isPlainObject(value) &&
+    value.illustrative === true &&
+    (value.verdict === 'possible_relation' || value.verdict === 'insufficient_data') &&
+    typeof value.message === 'string' &&
+    Array.isArray(value.impact_paths) &&
+    value.impact_paths.every(isEcoLinkImpactPath)
   )
 }

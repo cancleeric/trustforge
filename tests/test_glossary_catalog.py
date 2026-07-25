@@ -31,6 +31,24 @@ def test_core_glossary_catalog_contains_required_terms() -> None:
     assert "market capitalization" in terms["market_cap"]["aliases"]
     assert "popover" in terms["tvl"]["audiences"]
     assert "help_center" in terms["gas_fee"]["audiences"]
+    assert "ETH" in terms["gas_fee"]["risk_note"]
+    assert terms["unlock_sell_pressure"]["risk_note"]
+    assert terms["market_cap"]["risk_note"] == ""
+
+
+def test_glossary_term_risk_note_defaults_to_empty_and_serializes() -> None:
+    term = GlossaryTerm(term_id="x", label="X", definition="Definition")
+
+    assert term.risk_note == ""
+    assert term.to_dict()["risk_note"] == ""
+
+    annotated = GlossaryTerm(term_id="y", label="Y", definition="Definition", risk_note="be careful")
+    assert annotated.to_dict()["risk_note"] == "be careful"
+
+
+def test_glossary_term_rejects_non_string_risk_note() -> None:
+    with pytest.raises(ValueError, match="GlossaryTerm.risk_note must be a string"):
+        GlossaryTerm(term_id="x", label="X", definition="Definition", risk_note=None)  # type: ignore[arg-type]
 
 
 def test_glossary_lookup_is_shared_by_id_label_and_alias() -> None:
