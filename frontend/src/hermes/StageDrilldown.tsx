@@ -3,6 +3,8 @@ import { COMPONENT_WEIGHTS, HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, t
 import { useHermesI18n } from './hermesI18n'
 import { requeueAnalysis, type AnalysisFlowData, type AnalysisJourneyData } from '../lib/endpoints'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
+import EvidenceTable from '../components/EvidenceTable'
+import { groupByStance } from '../lib/stancePairs'
 
 interface StageDrilldownProps {
   selCoin: GalaxyCoin
@@ -63,7 +65,13 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
     })),
     passedItems: passedEvidence.map((item) => item.source),
     droppedItems: flaggedEvidence.map((item) => ({ name: item.source, reason: item.flags.join(', ') })),
-    crossItems: (report?.key_basis ?? []).slice(0, 4).map((item) => ({ stance: 'EVIDENCE', claim: item.claim, source: item.explanation, color: HERMES_CYAN })),
+    crossItems: (() => {
+      const { bullish, bearish } = groupByStance(report?.cross_source_signal)
+      return [
+        ...bullish.map(item => ({ stance: item.stance, claim: item.text ?? '', source: item.source, color: HERMES_CYAN })),
+        ...bearish.map(item => ({ stance: item.stance, claim: item.text ?? '', source: item.source, color: HERMES_AMBER })),
+      ]
+    })(),
     manipulationItems: flaggedEvidence.flatMap((item) => item.flags.map((flag) => `${item.source}: ${flag}`)),
     components: actualComponents.map((item) => ({ ...item, barColor: item.score >= 75 ? HERMES_CYAN : item.score >= 50 ? HERMES_AMBER : HERMES_RED })),
     steps: [
@@ -215,6 +223,16 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
                 </div>
               </div>
             ))}
+            {evidence.length > 0 ? (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginBottom: 6 }}>{t('scanned')} ({evidence.length})</div>
+                <EvidenceTable evidence={evidence} />
+              </div>
+            ) : (
+              <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx3)', fontStyle: 'italic', marginTop: 8 }}>
+                {analysis ? `${t('scanned')} ${evidence.length}` : t('proxyTrace')}
+              </div>
+            )}
             <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginTop: 6 }}>{t('reasoningTrace')}</div>
             {derivation.steps.map((stp, i) => (
               <div key={i} style={{ marginLeft: stp.indent, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: `3px solid ${stp.color}`, borderRadius: '0 6px 6px 0', padding: '9px 12px' }}>
@@ -222,6 +240,36 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
                 <p style={{ margin: 0, fontSize: 11.5, lineHeight: 1.5, color: 'var(--color-hermes-tx)' }}>{stp.text}</p>
               </div>
             ))}
+            {analysis && (
+              <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => {
+                    const payload = JSON.stringify({
+                      evidence: analysis.evidence ?? [],
+                      trust_radar: analysis.trust_radar ?? {},
+                      execution_log: analysis.execution_log ?? [],
+                    }, null, 2)
+                    const href = URL.createObjectURL(new Blob([payload], { type: 'application/json' }))
+                    const a = document.createElement('a')
+                    a.href = href
+                    a.download = `${telemetry?.runId ?? 'breakdown'}-breakdown.json`
+                    a.click()
+                    URL.revokeObjectURL(href)
+                  }}
+                  style={{
+                    background: 'var(--color-hermes-inset)',
+                    border: '1px solid var(--color-hermes-bd)',
+                    borderRadius: 5,
+                    padding: '5px 12px',
+                    fontSize: 10.5,
+                    color: 'var(--color-hermes-tx2)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {'⬇'} JSON
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
