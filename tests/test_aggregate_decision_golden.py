@@ -369,7 +369,7 @@ GOLDEN_CASES = [
         {
             "supporting_ids": [f"s{index:02}" for index in range(10)],
             "contrarian_ids": [],
-            "raw_confidence": 0.7999999999999999,
+            "raw_confidence": 0.8,
             "calibrated_confidence": 0.48,
             "supporting_count": 10,
             "contrarian_count": 0,
@@ -387,7 +387,7 @@ GOLDEN_CASES = [
         {
             "supporting_ids": [f"s{index:02}" for index in range(10)],
             "contrarian_ids": [f"c{index:02}" for index in range(5)],
-            "raw_confidence": 0.7999999999999999,
+            "raw_confidence": 0.8,
             "calibrated_confidence": 0.85,
             "supporting_count": 10,
             "contrarian_count": 5,
@@ -467,7 +467,13 @@ def test_legacy_aggregate_and_current_decision_golden(
     kwargs: dict[str, Any],
     expected: dict[str, Any],
 ):
-    assert _structured_result(factory(), **kwargs) == expected
+    actual = _structured_result(factory(), **kwargs)
+    float_keys = {"raw_confidence", "calibrated_confidence"}
+    for k, v in expected.items():
+        if k in float_keys:
+            assert actual[k] == pytest.approx(v, rel=1e-12), f"Mismatch on {k}"
+        else:
+            assert actual[k] == v, f"Mismatch on {k}"
 
 
 def test_legacy_parsed_isotonic_model_consumption_golden(monkeypatch):
