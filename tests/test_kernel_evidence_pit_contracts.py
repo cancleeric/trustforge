@@ -139,13 +139,7 @@ def test_worker_route_keeps_hostile_retrieval_context_out_of_evidence(
         None,
         "",
         "not-a-time",
-        pytest.param(
-            "2021-06-30T12:00:00",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="#515: timezone-naive available-time must fail closed",
-            ),
-        ),
+        "2021-06-30T12:00:00",
     ],
 )
 def test_replay_fails_closed_for_missing_or_unknown_document_time(published_at):
