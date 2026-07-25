@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react'
 import { TIER_COLOR, type GalaxyCoin, type SelectedDerivation, type TrustComponent } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import type { AnalysisFlowData, AnalysisJourneyData } from '../lib/endpoints'
@@ -14,13 +13,12 @@ interface HermesRightRailProps {
   flow?: AnalysisFlowData | null
   journey?: AnalysisJourneyData | null
   crossSignal?: CrossSourceSignal | null
-  trainingStatus?: ReactNode
   onOpenComposite: () => void
   onOpenDivergence: () => void
 }
 
 export default function HermesRightRail({
-  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, trainingStatus, onOpenComposite, onOpenDivergence,
+  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, onOpenComposite, onOpenDivergence,
 }: HermesRightRailProps) {
   const { t } = useHermesI18n()
   const { score, tier, full } = selCoin
@@ -39,6 +37,10 @@ export default function HermesRightRail({
 
   const divDock = derivation
   const dockColor = divDock.divColor
+  const divergenceSummary = crossSignal ? crossSignal.summary
+    : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
+      : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
+        : `${t('conflict')} · Δ ${divDock.divergence}%`
   const componentLabel = (label: string) => label === 'Reputation' ? t('reputation') : label === 'Corroboration' ? t('corroboration') : label === 'Recency' ? t('recency') : t('resistance')
   const componentGlossary = (label: string): GlossaryKey => label === 'Reputation' ? 'reputation' : label === 'Corroboration' ? 'corroboration' : label === 'Recency' ? 'recency' : 'manipulation'
 
@@ -115,28 +117,33 @@ export default function HermesRightRail({
         </button>
       </div>
 
-      {trainingStatus && <div className="hermes-training-status-slot">{trainingStatus}</div>}
-
       {/* divergence alert dock */}
       <div
-        className="hermes-clip hermes-divergence-dock"
+        className="hermes-clip"
         style={{
           background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
           animation: tier === 'danger' ? 'hermes-alert-flash 2.4s ease-in-out infinite' : undefined,
         }}
+        onMouseEnter={(e) => (e.currentTarget.style.transform = 'translateY(-1px)')}
+        onMouseLeave={(e) => (e.currentTarget.style.transform = 'none')}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
           <span style={{ color: dockColor, fontSize: 13 }}>⚠</span>
-          <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}><GlossaryTerm term="divergence" label={t('divergence')} compact /></span>
-        </div>
-        <button type="button" onClick={onOpenDivergence} style={{ display: 'block', width: '100%', padding: 0, border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', font: 'inherit' }}>
-          <span style={{ display: 'block', fontSize: 10.5, color: 'var(--color-hermes-tx2)' }}>
-            {crossSignal ? crossSignal.summary
-              : tier === 'healthy' ? `${t('alignment')} · Δ ${divDock.divergence}%`
-                : tier === 'moderate' ? `${t('monitor')} · Δ ${divDock.divergence}%`
-                  : `${t('conflict')} · Δ ${divDock.divergence}%`}
+          <span style={{ fontSize: 11, fontWeight: 700, color: dockColor, letterSpacing: '.5px' }}>
+            <GlossaryTerm term="divergence" label={t('divergence')} compact />
           </span>
-          <span style={{ display: 'block', marginTop: 4, fontSize: 9.5, color: dockColor }}>{t('tapReview')} →</span>
+        </div>
+        <button
+          type="button"
+          aria-label={`${t('divergence')}：${divergenceSummary}；${t('tapReview')}`}
+          onClick={onOpenDivergence}
+          style={{
+            width: '100%', padding: 0, border: 0, background: 'transparent',
+            color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10.5,
+            textAlign: 'left', cursor: 'pointer',
+          }}
+        >
+          {divergenceSummary}
         </button>
       </div>
     </div>

@@ -737,16 +737,10 @@ def _resolve_llm_from_env(*, bedrock_client_factory=None) -> tuple[LLMProvider, 
     """根據環境變數選擇 LLM adapter。"""
     import os
 
-    agentcore_flag = os.environ.get("TRUSTFORGE_AGENTCORE", "").strip().lower()
-    if agentcore_flag in {"1", "true", "yes", "on"}:
+    if os.environ.get("TRUSTFORGE_AGENTCORE") == "1":
         raise RuntimeError(
-            "TRUSTFORGE_AGENTCORE is enabled but unsupported because AgentCore integration "
+            "TRUSTFORGE_AGENTCORE=1 is unsupported because AgentCore integration "
             "is not implemented; use BEDROCK_MODEL_ID"
-        )
-    if agentcore_flag not in {"", "0", "false", "no", "off"}:
-        raise ValueError(
-            "TRUSTFORGE_AGENTCORE must be one of "
-            "1/true/yes/on or 0/false/no/off"
         )
 
     if os.environ.get("BEDROCK_MODEL_ID"):
