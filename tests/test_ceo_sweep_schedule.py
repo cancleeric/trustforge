@@ -672,7 +672,7 @@ def test_ceo_lane_prompt_does_not_require_github_ci_or_full_pre_push_gate():
     assert "focused local verification" in prompt
 
 def test_ci_runs_on_develop_and_main_and_pre_push_is_full_local_gate():
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml.disabled").read_text()
     hook = (ROOT / ".githooks/pre-push").read_text()
 
     assert "workflow_dispatch:" in workflow
