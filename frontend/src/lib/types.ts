@@ -185,15 +185,79 @@ export interface Report {
   risk_notices?: RiskNotice[]
 }
 
+// ── Asset taxonomy（對應後端 trustforge/asset_context.py enum）────────────
+// 所有 enum 型別皆保留 "unknown" 值——後端認定不明的欄位絕不用空字串冒充。
+
+export type AssetSector =
+  | 'defi'
+  | 'l1'
+  | 'l2'
+  | 'stablecoin'
+  | 'exchange'
+  | 'infrastructure'
+  | 'meme'
+  | 'rwa'
+  | 'gaming'
+  | 'ai'
+  | 'unknown'
+
+export type AssetLayer =
+  | 'layer_1'
+  | 'layer_2'
+  | 'app'
+  | 'protocol'
+  | 'token'
+  | 'offchain'
+  | 'unknown'
+
+export type TokenRole =
+  | 'gas'
+  | 'governance'
+  | 'utility'
+  | 'staking'
+  | 'stable'
+  | 'lp'
+  | 'wrapped'
+  | 'meme'
+  | 'unknown'
+
+export type MarketCapTier =
+  | 'large'
+  | 'mid'
+  | 'small'
+  | 'micro'
+  | 'unknown'
+
+/** Asset taxonomy enum value sets（對應後端 ASSET_SECTORS / ASSET_LAYERS /
+ * TOKEN_ROLES / MARKET_CAP_TIERS），供前端驗證與 lookup table 覆蓋稽核用。 */
+export const ASSET_SECTORS: readonly AssetSector[] = [
+  'defi', 'l1', 'l2', 'stablecoin', 'exchange',
+  'infrastructure', 'meme', 'rwa', 'gaming', 'ai', 'unknown',
+] as const
+
+export const ASSET_LAYERS: readonly AssetLayer[] = [
+  'layer_1', 'layer_2', 'app', 'protocol', 'token', 'offchain', 'unknown',
+] as const
+
+export const TOKEN_ROLES: readonly TokenRole[] = [
+  'gas', 'governance', 'utility', 'staking', 'stable', 'lp', 'wrapped', 'meme', 'unknown',
+] as const
+
+export const MARKET_CAP_TIERS: readonly MarketCapTier[] = [
+  'large', 'mid', 'small', 'micro', 'unknown',
+] as const
+
+// ── AssetContext ──────────────────────────────────────────────────────────
+
 export interface AssetContext {
   schema_version: string
   asset_id: string
   symbol: string
   name: string
-  sector: string
-  layer: string
-  token_role: string
-  market_cap_tier: string
+  sector: AssetSector
+  layer: AssetLayer
+  token_role: TokenRole
+  market_cap_tier: MarketCapTier
   ecosystem: string | null
   parent_asset_id: string | null
   tags: string[]
@@ -203,6 +267,24 @@ export interface AssetContext {
   gas_token?: string
   /** 上下游依賴（白話關聯說明的資料來源，例：sequencer、canonical_bridge）。 */
   dependencies?: string[]
+}
+
+/** 型別層面不看 enum 白名單（比照 runtime `isAssetContext` 策略）——
+ * 後端新增 enum 值時前端型別不該連帶編譯失敗，由渲染層 fallback。 */
+export function isKnownAssetSector(value: string): value is AssetSector {
+  return (ASSET_SECTORS as readonly string[]).includes(value)
+}
+
+export function isKnownAssetLayer(value: string): value is AssetLayer {
+  return (ASSET_LAYERS as readonly string[]).includes(value)
+}
+
+export function isKnownTokenRole(value: string): value is TokenRole {
+  return (TOKEN_ROLES as readonly string[]).includes(value)
+}
+
+export function isKnownMarketCapTier(value: string): value is MarketCapTier {
+  return (MARKET_CAP_TIERS as readonly string[]).includes(value)
 }
 
 export interface RiskNotice {

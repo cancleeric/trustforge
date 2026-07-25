@@ -1,9 +1,9 @@
-import type { AssetContext } from '../lib/types'
+import type { AssetContext, AssetLayer, TokenRole } from '../lib/types'
 import AnnotatedText from './AnnotatedText'
 
 const UNKNOWN = 'unknown'
 
-const LAYER_LABEL: Record<string, string> = {
+const LAYER_LABEL: Record<AssetLayer, string> = {
   layer_1: 'Layer 1',
   layer_2: 'Layer 2',
   app: 'App',
@@ -13,7 +13,7 @@ const LAYER_LABEL: Record<string, string> = {
   unknown: 'Layer 未知',
 }
 
-const TOKEN_ROLE_LABEL: Record<string, string> = {
+const TOKEN_ROLE_LABEL: Record<TokenRole, string> = {
   gas: 'Gas',
   governance: '治理',
   utility: '功能性',
@@ -25,12 +25,12 @@ const TOKEN_ROLE_LABEL: Record<string, string> = {
   unknown: '未知',
 }
 
-function layerLabel(layer: string): string {
-  return LAYER_LABEL[layer] ?? layer
+function layerLabel(layer: AssetLayer): string {
+  return LAYER_LABEL[layer]
 }
 
-function tokenRoleLabel(role: string): string {
-  return TOKEN_ROLE_LABEL[role] ?? role
+function tokenRoleLabel(role: TokenRole): string {
+  return TOKEN_ROLE_LABEL[role]
 }
 
 /** 白話關聯說明——只在有足夠已知欄位（sector/settlement_chain）時才組句，
