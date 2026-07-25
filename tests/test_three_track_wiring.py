@@ -130,7 +130,9 @@ class TestFlagOffRegression:
         out: dict[str, dict[str, Any]] = {}
         for row in rows:
             payload = json.loads(row["payload_json"])
-            out[row["mode"]] = payload["report"]
+            report = dict(payload["report"])
+            report.pop("generated_at", None)
+            out[row["mode"]] = report
         return out
 
 
