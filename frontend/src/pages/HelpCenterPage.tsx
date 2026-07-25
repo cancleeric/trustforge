@@ -9,7 +9,7 @@ type Band = { range: string; label: string; color: string; bg: string; border: s
 type Faq = { q: string; a: string }
 
 const STAGES: Stage[] = [
-  { num: '01', label: '來源掃描', desc: '從 150+ 個交易所、資料源與情緒來源持續擷取原始快照。' },
+  { num: '01', label: '來源掃描', desc: '從多個交易所、鏈上、資料源與情緒來源持續擷取原始快照。' },
   { num: '02', label: '可信過濾', desc: '剔除過期、低可信或明顯異常的資料，只留下可用來源。' },
   { num: '03', label: '交叉驗證', desc: '讓多個獨立來源互相印證同一項數據，量化彼此的分歧程度。' },
   { num: '04', label: '操縱偵測', desc: '掃描 wash-trading、spoofing 等人為操縱訊號並標記。' },
