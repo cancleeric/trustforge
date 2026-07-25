@@ -150,7 +150,13 @@ def store_backfilled_source_snapshot(
             if not isinstance(document, dict) or not all(document.get(field) for field in required):
                 raise ValueError("backfilled documents require published_at, retrieved_at, provider, license, content_sha256")
             # Callers supply ISO publication time; only past information is legal.
-            published = datetime.fromisoformat(str(document["published_at"]).replace("Z", "+00:00")).timestamp()
+            # Require timezone-aware ISO 8601 — reject naive timestamps that
+            # would silently reinterpret in host-local timezone (#515).
+            raw_published = str(document["published_at"])
+            parsed = datetime.fromisoformat(raw_published.replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("backfilled document published_at must be timezone-aware")
+            published = parsed.astimezone(timezone.utc).timestamp()
             if published > snapshot_epoch:
                 raise ValueError("backfilled document crosses historical run boundary")
             hash_payload = {key: value for key, value in document.items() if key != "content_sha256"}
