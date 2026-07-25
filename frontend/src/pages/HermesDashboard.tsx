@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import HermesTopBar from '../hermes/HermesTopBar'
+import HermesHeroTagline from '../hermes/HermesHeroTagline'
 import HermesLeftRail from '../hermes/HermesLeftRail'
 import HermesRightRail from '../hermes/HermesRightRail'
 import CurrencyGalaxy from '../hermes/CurrencyGalaxy'
@@ -515,6 +516,8 @@ export default function HermesDashboard() {
         <div className="hermes-boot-layer" style={{ opacity: boot.topbar ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <HermesTopBar costLedger={costLedger} version={`${runtimeVersion} · ${t('galaxy')}`} activeModule={activeModule} onModuleSelect={openModule} onHome={closeModule} degradedMessage={globalError} onToggleShip={toggleShip} onHelp={() => setOnboardingOpen(true)} beginnerMode={beginnerMode} onBeginnerModeChange={setExperienceMode} reducedMotion={reducedMotion} onReducedMotionToggle={toggleReducedMotion} />
         </div>
+
+        <HermesHeroTagline />
 
         {beginnerMode && !activeModule && <HermesBeginnerNarrative />}
 

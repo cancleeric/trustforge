@@ -69,4 +69,16 @@ describe('SnapshotModal data lineage', () => {
     expect(payload).toHaveProperty('data_lineage', null)
     expect(screen.getByText(/無檔案型可重現血緣鏈/)).toBeInTheDocument()
   })
+
+  it('surfaces dataset_generated_at and price_unit in lineage UI and export JSON', () => {
+    render(<SnapshotModal ev={evidence} onClose={vi.fn()} />)
+
+    expect(screen.getByText(evidence.data_lineage?.dataset_generated_at ?? '')).toBeInTheDocument()
+    expect(screen.getByText(evidence.data_lineage?.price_unit ?? '')).toBeInTheDocument()
+
+    const payload = downloadedPayload()
+
+    expect(payload.data_lineage.dataset_generated_at).toBe(evidence.data_lineage?.dataset_generated_at)
+    expect(payload.data_lineage.price_unit).toBe(evidence.data_lineage?.price_unit)
+  })
 })
