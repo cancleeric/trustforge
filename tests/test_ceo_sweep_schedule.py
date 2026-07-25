@@ -671,12 +671,19 @@ def test_ceo_lane_prompt_does_not_require_github_ci_or_full_pre_push_gate():
     assert "pre-push-style local suite before opening review PR" in prompt
     assert "focused local verification" in prompt
 
-def test_ci_is_manual_and_pre_push_is_full_local_gate():
-    workflow = (ROOT / ".github/workflows/ci.yml.disabled").read_text()
+def test_ci_runs_on_develop_and_main_and_pre_push_is_full_local_gate():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     hook = (ROOT / ".githooks/pre-push").read_text()
 
     assert "workflow_dispatch:" in workflow
-    assert "pull_request:" not in workflow
+    assert "pull_request:" in workflow
+    assert "push:" in workflow
+    assert workflow.count("- develop") == 2
+    assert workflow.count("- main") == 2
+    assert "contents: read" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "pull_request_target:" not in workflow
+    assert "secrets." not in workflow
     assert "backend tests" in hook
     assert "data contracts" in hook
     assert "source stub scan" in hook
