@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { TIER_COLOR, type GalaxyCoin, type SelectedDerivation, type TrustComponent } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
 import type { AnalysisFlowData, AnalysisJourneyData } from '../lib/endpoints'
@@ -13,12 +14,13 @@ interface HermesRightRailProps {
   flow?: AnalysisFlowData | null
   journey?: AnalysisJourneyData | null
   crossSignal?: CrossSourceSignal | null
+  trainingStatus?: ReactNode
   onOpenComposite: () => void
   onOpenDivergence: () => void
 }
 
 export default function HermesRightRail({
-  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, onOpenComposite, onOpenDivergence,
+  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, trainingStatus, onOpenComposite, onOpenDivergence,
 }: HermesRightRailProps) {
   const { t } = useHermesI18n()
   const { score, tier, full } = selCoin
@@ -117,9 +119,11 @@ export default function HermesRightRail({
         </button>
       </div>
 
+      {trainingStatus && <div className="hermes-training-status-slot">{trainingStatus}</div>}
+
       {/* divergence alert dock */}
       <div
-        className="hermes-clip"
+        className="hermes-clip hermes-divergence-dock"
         style={{
           background: divDock.divDim, border: `1px solid ${divDock.divBd}`, borderRadius: 8, padding: '11px 14px',
           animation: tier === 'danger' ? 'hermes-alert-flash 2.4s ease-in-out infinite' : undefined,

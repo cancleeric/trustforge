@@ -508,6 +508,13 @@
   transition-duration: .001ms !important;
 }
 
+/* qa-mode 全域 pause 會把 module-deck 進場動畫凍結在 from{opacity:0}，
+   造成整塊工作台在測試/QA 模式下永遠不可見。進場動畫本身不影響版面判讀，
+   直接關閉讓它落回靜態 opacity:1。 */
+.hermes-dashboard.is-qa-mode .hermes-module-deck {
+  animation-name: none;
+}
+
 .hermes-module-deck::before {
   content: '';
   position: absolute;
@@ -2268,6 +2275,13 @@
 
   .hermes-engine-rings b {
     top: 24px;
+  }
+
+  /* 手機版桌面外溢：galaxy boot-layer 桌面故意 inset:0 全螢幕出血，但小螢幕下
+     這塊 hit-region 幾何上會蓋住 topbar/energy-deck，讓自動化版面斷言判定重疊。
+     只在 ≤900px 收窄到 topbar~energy-deck 之間，桌面全螢幕出血效果不變。 */
+  [data-region='galaxy'] {
+    inset: var(--hermes-top) 0 var(--hermes-bottom) 0;
   }
 }
 
