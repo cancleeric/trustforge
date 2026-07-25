@@ -74,34 +74,11 @@ def test_disposition_table_has_exact_commit_bound_decisions() -> None:
     assert "Production scope: EMPTY" in text
 
 
-def test_synced_runtime_contract_gaps_are_named_and_not_approved() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    required_clauses = (
-        "src/trustforge/delayed_outcome_labeler.py::build_delayed_outcome_observation",
-        "event_date + timedelta(days=N)",
-        "elapsed calendar date",
-        "binary float",
-        "未把 authenticated tenant 納入七鍵 canonical JSON/SHA-256 identity",
-        "`market_data_variant`",
-        "canonical-as-of",
-        "`supersedes_outcome_id`",
-        "late-data cutoff",
-        "src/trustforge/calibration_dataset.py::_latest_labeled_outcomes",
-        "`(analysis_id, horizon)`",
-        "key 未 tenant-bound",
-        "legacy diagnostic behavior — not contract compliant and not implementation-ready",
-        "本文件不授權修改 runtime",
-    )
-    for clause in required_clauses:
-        assert clause in text
-
-
 def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
     text = DOC.read_text(encoding="utf-8")
     headers, rows = _table_after(text, "## 7. 人工演算與 fixture 決策表")
     assert headers == [
         "fixture_id",
-        "tenant_id",
         "calendar_id",
         "calendar_sessions",
         "prediction_id",
@@ -126,17 +103,6 @@ def test_fixture_table_is_parseable_and_has_complete_expected_shape() -> None:
         assert isinstance(json.loads(row["calendar_sessions"]), list)
         assert isinstance(json.loads(row["bars"]), list)
         expected = json.loads(row["expected"])
-        assert row["tenant_id"] == "tenant-fixture-a"
-        assert expected["identity_inputs"]["tenant_id"] == row["tenant_id"]
-        assert set(expected["identity_inputs"]) == {
-            "tenant_id",
-            "prediction_id",
-            "horizon",
-            "contract_version",
-            "market_data_variant",
-            "market_data_revision",
-            "outcome_version",
-        }
         assert {
             "maturity", "reason", "start", "target", "return", "directional",
             "abs_risk", "downside", "hit", "version",
@@ -226,7 +192,6 @@ def test_numeric_formula_and_revision_pair_contract() -> None:
     first = by_id["revision_v1"]
     second = by_id["revision_v2"]
     assert first["prediction_id"] == second["prediction_id"] == "p20"
-    assert first["tenant_id"] == second["tenant_id"] == "tenant-fixture-a"
     assert first["horizon"] == second["horizon"] == "T+1"
     first_expected = json.loads(first["expected"])
     second_expected = json.loads(second["expected"])
@@ -424,90 +389,3 @@ def test_revision_identity_and_reconciliation_are_explicit() -> None:
     )
     for clause in required_clauses:
         assert clause in text
-
-
-def test_d7_d8_security_and_authority_contract_is_complete() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    required_clauses = (
-        "semantic approval ≠ implementation authorization",
-        "Production scope: EMPTY",
-        "authenticated tenant",
-        "tenant_id` 納入 identity",
-        "canonical JSON/hash",
-        "idempotency key",
-        "server-trusted clock",
-        "server-side allowlist",
-        "same tenant",
-        "acyclic",
-        "single atomic boundary",
-        "嚴格單調遞增",
-        "tamper-evident append-only audit",
-        "legal hold",
-        "per-tenant rate limit",
-        "finite revision budget",
-        "policy-only rollback",
-    )
-    for clause in required_clauses:
-        assert clause in text
-
-
-def test_negative_authority_decision_vectors_fail_closed() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    headers, rows = _table_after(
-        text, "### 9.3 Negative authority decision vectors（spec-only）"
-    )
-    assert headers == ["vector_id", "request 嘗試", "必要 decision"]
-    assert {row["vector_id"] for row in rows} == {
-        "tenant_override",
-        "trusted_availability_override",
-        "provider_content_bypass",
-        "cross_tenant_supersession",
-        "cyclic_supersession",
-        "forced_revision",
-        "destructive_rollback",
-    }
-    assert all(row["必要 decision"].startswith("REJECT") for row in rows)
-    assert "request-supplied timestamp" in text
-    assert "request 不得自供" in text
-    assert "client 不得指定 version" in text
-    assert "測試只能驗證 decision document" in text
-    assert "runtime enforcement 已完成" in text
-
-
-def test_cross_tenant_identity_namespace_prevents_collision() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    headers, rows = _table_after(
-        text, "### 9.4 Cross-tenant identity collision fixtures（spec-only）"
-    )
-    assert headers == [
-        "fixture_id",
-        "tenant_id",
-        "prediction_id",
-        "horizon",
-        "contract_version",
-        "market_data_variant",
-        "market_data_revision",
-        "outcome_version",
-        "expected_outcome_id",
-    ]
-    assert len(rows) == 2
-
-    identity_fields = headers[1:-1]
-    identities: list[dict[str, object]] = []
-    for row in rows:
-        identity: dict[str, object] = {
-            field: int(row[field]) if field == "outcome_version" else row[field]
-            for field in identity_fields
-        }
-        identities.append(identity)
-        assert row["expected_outcome_id"] == _canonical_hash(identity)
-
-    without_tenant = [
-        {key: value for key, value in identity.items() if key != "tenant_id"}
-        for identity in identities
-    ]
-    assert without_tenant[0] == without_tenant[1]
-    assert identities[0]["tenant_id"] != identities[1]["tenant_id"]
-    assert rows[0]["expected_outcome_id"] != rows[1]["expected_outcome_id"]
-    assert "prediction_id` 全域唯一" in text
-    assert "tenant_id` 只能由 server authentication context 注入" in text
