@@ -41,7 +41,6 @@ LOG_ALARM_THRESHOLD="${TRUSTFORGE_DEDUP_LOG_ALARM_THRESHOLD:-1}"
 PERIOD="${TRUSTFORGE_DEDUP_ALARM_PERIOD:-300}"
 EVAL_PERIODS="${TRUSTFORGE_DEDUP_ALARM_EVAL_PERIODS:-1}"
 SNS_TOPIC="${TRUSTFORGE_DEDUP_ALARM_SNS:-}"
-declare -a ALARM_ACTION_ARGS=()
 
 if ! command -v aws >/dev/null 2>&1; then
   echo "error: aws cli not found; install/configure aws before running this script." >&2
@@ -53,14 +52,16 @@ if [[ -n "$SNS_TOPIC" ]]; then
     echo "error: TRUSTFORGE_DEDUP_ALARM_SNS is not a valid SNS topic ARN: $SNS_TOPIC" >&2
     exit 1
   fi
-  ALARM_ACTION_ARGS=(
-    --alarm-actions "$SNS_TOPIC"
-    --ok-actions "$SNS_TOPIC"
-  )
 fi
 
 put_metric_alarm() {
-  aws cloudwatch put-metric-alarm "$@" ${ALARM_ACTION_ARGS[@]+"${ALARM_ACTION_ARGS[@]}"}
+  if [[ -n "$SNS_TOPIC" ]]; then
+    aws cloudwatch put-metric-alarm "$@" \
+      --alarm-actions "$SNS_TOPIC" \
+      --ok-actions "$SNS_TOPIC"
+  else
+    aws cloudwatch put-metric-alarm "$@"
+  fi
 }
 
 echo "[dedup-alarm] region=$REGION namespace=$NAMESPACE"
