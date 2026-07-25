@@ -1,10 +1,13 @@
 # Production Interaction Canary
 
 > Last verified: 2026-07-14, release `v0.14.6`
+>
+> Historical evidence only. GitHub Actions are now intentionally disabled;
+> current deployments follow the controlled local release/deploy runbook.
 
 ## Release And Health
 
-- GitHub production workflow `29315134262` completed successfully.
+- Historical GitHub production run `29315134262` completed successfully.
 - EC2 health returned `status=ok`, `version=v0.14.6`.
 - `trustforge.service` was active after deployment.
 - The active frontend bundle contains `execution-log.json` and no longer exposes

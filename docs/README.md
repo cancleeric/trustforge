@@ -12,6 +12,9 @@ Governance index:
 > **規矩**：`PLAN-*` 工作單執行完畢或被取代，當輪移入 `archive/plans/`，並在
 > 該目錄的 `README.md` 索引補一行（檔名 + 當初任務 + 結局：已上線版本/被誰取代）。
 
+開發、合併、release 與 production deployment 的權威門控規則見
+[RELEASE-DEPLOY-GOVERNANCE.md](RELEASE-DEPLOY-GOVERNANCE.md)。
+
 ---
 
 ## competition/ — 命題與交付規範

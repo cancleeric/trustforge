@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# TrustForge pre-push local quality gate. GitHub Actions workflows are
-# intentionally disabled; production deployment is a separate release operation.
+# TrustForge mandatory pre-push quality gate. GitHub Actions are not used;
+# production deployment is a separate controlled local release operation.
 # 啟用：git config core.hooksPath .githooks
-# 略過部署：TRUSTFORGE_NO_CD=1 git push
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -33,5 +32,5 @@ run_gate "diff check" git diff --check
 
 echo "[pre-push] all local quality gates passed"
 
-echo "[pre-push] production deployment remains release-workflow controlled outside GitHub Actions"
+echo "[pre-push] production deploy requires the controlled local release/deploy runbook"
 exit 0
