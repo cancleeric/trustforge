@@ -138,3 +138,114 @@ def test_backfill_is_isolated_from_same_day_live_snapshot(tmp_path):
     assert live["sources"][0]["source"] == "hoyabit-ticker"
     assert backfill is not None and backfill["archive_type"] == "backfilled_archive"
     assert backfill["sources"][0]["source"] == "alternative-me-fng"
+
+
+# ── #515: timezone-aware PIT boundary enforcement ────────────────────────────
+
+
+def _backfill_document(published_at, provider="example", extra=None):
+    doc = {
+        "id": "archive-1", "text": "historical announcement",
+        "provider": provider, "license": "public-record",
+        "published_at": published_at, "retrieved_at": "2026-07-14T00:00:00Z",
+    }
+    if extra:
+        doc.update(extra)
+    doc["content_sha256"] = hashlib.sha256(
+        json.dumps(doc, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return doc
+
+
+def test_backfill_accepts_utc_z_suffix(tmp_path):
+    """published_at 有 Z 後綴 → 正常寫入。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    doc = _backfill_document("2021-06-30T12:00:00Z")
+
+    result = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "government", "documents": [doc]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+    )
+    assert result.ok
+
+
+def test_backfill_accepts_explicit_positive_offset(tmp_path):
+    """published_at 有明確 +02:00 offset → 正常化為 UTC 後寫入。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    doc = _backfill_document("2021-06-30T14:00:00+02:00")
+
+    result = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "government", "documents": [doc]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+    )
+    assert result.ok
+
+
+def test_backfill_accepts_explicit_negative_offset(tmp_path):
+    """published_at 有明確 -05:00 offset → 正常化為 UTC 後寫入。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    doc = _backfill_document("2021-06-30T07:00:00-05:00")
+
+    result = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "government", "documents": [doc]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+    )
+    assert result.ok
+
+
+def test_backfill_rejects_naive_timestamp(tmp_path):
+    """published_at 無時區 → ValueError（fail-closed，拒絕無時區時間戳）。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    doc = _backfill_document("2021-06-30T12:00:00")  # naive, no tz
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        store_backfilled_source_snapshot(
+            backend, "BTC", "2021-07-01", [{"source": "government", "documents": [doc]}],
+            snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+        )
+
+
+def test_backfill_rejects_empty_offset_string(tmp_path):
+    """published_at 只有日期無時間無時區 → ValueError。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    doc = _backfill_document("2021-06-30")  # date-only, no time/tz
+
+    with pytest.raises(ValueError):
+        store_backfilled_source_snapshot(
+            backend, "BTC", "2021-07-01", [{"source": "government", "documents": [doc]}],
+            snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+        )
+
+
+def test_backfill_dst_boundary_still_normalizes(tmp_path):
+    """published_at 在 DST 邊界但帶合法 offset → 仍正常化寫入。
+    
+    美國東岸 2021-03-14 02:30 EST(-05:00) 或 EDT(-04:00)，帶明確 offset
+    就不 ambiguous。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    doc = _backfill_document("2021-03-14T02:30:00-04:00")  # EDT, explicit offset
+
+    result = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "government", "documents": [doc]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+    )
+    assert result.ok
+
+
+def test_backfill_extreme_positive_offset_normalizes(tmp_path):
+    """published_at +14:00（Kiritimati）→ 仍正常化寫入。"""
+    backend = JsonCacheBackend(tmp_path / "cache.json")
+    boundary = datetime(2021, 7, 1, tzinfo=timezone.utc).timestamp()
+    doc = _backfill_document("2021-06-30T23:00:00+14:00")
+
+    result = store_backfilled_source_snapshot(
+        backend, "BTC", "2021-07-01", [{"source": "government", "documents": [doc]}],
+        snapshot_epoch=boundary, provider_manifest={"providers": [{"provider": "example"}]},
+    )
+    assert result.ok
