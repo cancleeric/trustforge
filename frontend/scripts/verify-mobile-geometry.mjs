@@ -94,6 +94,9 @@ try {
       for (const locale of ['en', 'zh-TW']) {
         await runHitTestMatrix(browser, viewport, locale)
         await runFullExperienceChecks(browser, viewport, locale)
+        if (viewport.width <= 900) {
+          await runBeginnerNarrativeSheetChecks(browser, viewport, locale)
+        }
       }
     }
   } finally {
@@ -396,6 +399,88 @@ async function runHitTestMatrix(browser, viewport, locale = 'en') {
   }, MIN_TARGET)
 
   for (const f of [...result.failures, ...result2.failures]) failures.push(`${label}: ${f}`)
+  await context.close()
+}
+
+// N33 (CEO real-browser geometry audit): N31/N32 stopped the beginner
+// narrative panel from overlapping the mobile divergence dock / galaxy
+// chips at <=900px, but did so by pinning the panel's `top` to an
+// empirically-measured `55.2vh` guess — which, on short/wide viewports
+// (680x500, 900x620, 960x482), crushed the panel itself down to 32-42px
+// tall while its content still needed ~350-480px of scrollHeight to read.
+// A panel that never overlaps anything is not "fixed" if the content is
+// physically unreadable, and beginnerMode defaults ON, so this was every
+// new user's first impression.
+//
+// The panel is now a collapsible sheet: collapsed by default (small,
+// content-driven height that can never collide with anything, replacing
+// the vh guess entirely) and expandable on demand via a mobile-only toggle,
+// at which point `top` pins to the real `--hermes-top` topbar-height
+// variable instead of a measured constant. This checks the *expanded*
+// state actually delivers on that: real geometry (clientHeight vs
+// scrollHeight), a visible scroll affordance for any leftover overflow,
+// the panel's own close button staying reachable via a real
+// `locator.click()` while expanded (covering the screen), and no new
+// horizontal overflow. Runs in a dedicated context so it can't leave the
+// narrative dismissed for the shared runHitTestMatrix/runFullExperience
+// checks that run alongside it.
+async function runBeginnerNarrativeSheetChecks(browser, viewport, locale) {
+  const label = `${viewport.width}x${viewport.height} ${locale} (beginner sheet)`
+  const context = await browser.newContext()
+  await context.addCookies([{ name: 'trustforge_hermes_locale', value: locale, url: BASE_URL }])
+  const page = await context.newPage()
+  await page.setViewportSize(viewport)
+  await page.route('**/api/**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }))
+  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('.hermes-dashboard', { state: 'visible' })
+  await page.waitForSelector('.hermes-beginner-narrative', { state: 'visible' })
+
+  // Expand it. On a pre-fix build there is no toggle at all (the panel was
+  // always shown fully expanded), so this deliberately no-ops in that case
+  // rather than failing for the wrong reason — the geometry assertion below
+  // is what's meant to catch the actual regression either way.
+  const toggle = page.locator('.hermes-beginner-narrative-toggle')
+  if (await toggle.count()) {
+    await toggle.first().click()
+  }
+
+  const geometry = await page.evaluate(() => {
+    const el = document.querySelector('.hermes-beginner-narrative')
+    if (!el) return null
+    const style = getComputedStyle(el)
+    return { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, overflowY: style.overflowY }
+  })
+
+  if (!geometry) {
+    failures.push(`${label}: beginner narrative panel missing from DOM while checking expanded readability`)
+  } else {
+    const minReadable = Math.min(geometry.scrollHeight, 200)
+    if (geometry.clientHeight < minReadable) {
+      failures.push(
+        `${label}: beginner narrative panel clientHeight=${geometry.clientHeight} scrollHeight=${geometry.scrollHeight}, ` +
+        `unreadable (needs clientHeight >= min(scrollHeight,200)=${minReadable})`,
+      )
+    }
+    if (geometry.clientHeight < geometry.scrollHeight - 1 && geometry.overflowY !== 'auto' && geometry.overflowY !== 'scroll') {
+      failures.push(
+        `${label}: beginner narrative panel content overflows (client=${geometry.clientHeight} scroll=${geometry.scrollHeight}) ` +
+        `with no visible scroll affordance (overflow-y=${geometry.overflowY})`,
+      )
+    }
+  }
+
+  const closeLabel = locale === 'zh-TW' ? '關閉新手脈絡引導' : 'Close beginner guide'
+  try {
+    await page.locator(`.hermes-beginner-narrative [aria-label="${closeLabel}"]`).click({ timeout: 3000 })
+  } catch {
+    failures.push(`${label}: beginner narrative close button unreachable while panel expanded`)
+  }
+
+  const noHorizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)
+  if (!noHorizontalOverflow) {
+    failures.push(`${label}: horizontal overflow introduced while beginner narrative expanded`)
+  }
+
   await context.close()
 }
 

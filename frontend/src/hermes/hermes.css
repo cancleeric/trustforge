@@ -2317,46 +2317,56 @@
     align-items: center;
   }
 
-  /* N31/N32 (CEO real-browser hit-test audit, 2 rounds):
+  /* N31/N32/N33 (CEO real-browser hit-test audit, 3 rounds):
      `.hermes-beginner-narrative` (beginnerMode default ON) shares the same
      `left:rail+12 / right:12` column as `.hermes-mobile-divergence` (the
      dock, always mounted at this breakpoint) — z-index alone let the
      narrative's box physically overlap the dock's two buttons on first
      visit. Round 1 fixed that by pushing `bottom` up by a flat
-     `94px + 12px` (the dock's own height + gap) and shrinking `max-height`
-     to match — but that push was width-only (`max-width:900px`), so on
-     *short* viewports (e.g. 375x667) the raised box collided with the
-     galaxy's `[aria-label^="Focus "]` planet chips instead: same disease,
-     new victim.
+     `94px + 12px` (the dock's own height + gap) — width-only, so on *short*
+     viewports (375x667) the raised box collided with the galaxy's
+     `[aria-label^="Focus "]` chips instead. Round 2 pinned both `top` (an
+     empirically-measured `55.2vh` guess at the galaxy's own footprint) and
+     `bottom`, which stopped every collision but, on short/wide viewports
+     (680x500: 32px tall; 900x620: 42px tall), crushed the panel itself down
+     to unreadable — a box that never overlaps anything is not "fixed" if
+     nobody can read it, and `55.2vh` broke the instant the galaxy's own
+     layout changed since it wasn't derived from anything real.
 
-     This is a height-aware fix: pin BOTH edges instead of bottom+max-height.
-     - `bottom` still clears the dock (unchanged math from round 1).
-     - `top` is derived from the galaxy's own vertical footprint. The
-       galaxy's orbiting chips are drawn from a center at `top:54%` of its
-       ~460px 3D assembly box; empirically (measured via the mobile-geometry
-       harness's real hit-test probe across the required viewport matrix)
-       the lowest chip edge tracks viewport height at roughly `0.552 * vh`.
-       `55.2vh + 20px` clears that with margin.
-     - Height is then *not* set explicitly at all: with both `top` and
-       `bottom` pinned and no `height`, CSS computes the box's height as
-       exactly the span between them (spec default for absolutely
-       positioned boxes), so it can never re-collide with either neighbor —
-       any leftover content scrolls via the panel's existing
-       `overflow-y:auto`. `max-height:none` clears round 1's now-redundant
-       (and, worse, conflicting) max-height override.
-     - `min()` guards the pathological case where a viewport is so short
-       there's no legal gap left at all (e.g. 680x500, where the dock and
-       the galaxy's own footprint already overlap even before the narrative
-       is drawn — a pre-existing condition, not something this panel can
-       fix): it clamps `top` to at most `bottom-edge - 20px`, so the box
-       degrades to a small 20px sliver instead of inverting/collapsing. */
-  .hermes-beginner-narrative {
-    top: min(
-      calc(55.2vh + 20px),
-      calc(100% - (var(--hermes-bottom) + 12px + 94px + 12px) - 20px)
-    ) !important;
+     Round 3 replaces the pinned-box approach entirely with a collapsible
+     sheet, so no viewport-dependent constant is needed at all:
+     - Default (`.hermes-beginner-narrative` without `.is-expanded`): only
+       the one-line header (title + toggle + close) renders —
+       `.hermes-beginner-narrative-body` is `display:none`. `top` is left
+       unset, so with only `bottom` pinned the box's height is intrinsic to
+       its (tiny, one-line) visible content — it can never grow tall enough
+       to reach the galaxy's chips regardless of viewport height, without
+       needing to know anything about the galaxy's own layout.
+     - `.is-expanded` (user opts in via the toggle button, which this
+       breakpoint reveals): the body renders and `top` pins to
+       `var(--hermes-top)`, the topbar's own real height variable (already
+       used to lay out the galaxy region itself two rules below) plus a
+       12px gap — a structural anchor, not a measured guess. The box may
+       then legitimately span most of the screen and sit over the galaxy,
+       the same way any other opt-in full-screen sheet would; any overflow
+       still scrolls via the panel's own `overflow-y:auto`. */
+  .hermes-beginner-narrative:not(.is-expanded) {
     bottom: calc(var(--hermes-bottom) + 12px + 94px + 12px) !important;
     max-height: none !important;
+  }
+
+  .hermes-beginner-narrative.is-expanded {
+    top: calc(var(--hermes-top) + 12px) !important;
+    bottom: calc(var(--hermes-bottom) + 12px + 94px + 12px) !important;
+    max-height: none !important;
+  }
+
+  .hermes-beginner-narrative:not(.is-expanded) .hermes-beginner-narrative-body {
+    display: none !important;
+  }
+
+  .hermes-beginner-narrative-toggle {
+    display: inline-flex !important;
   }
 
   .hermes-topbar-nav {
