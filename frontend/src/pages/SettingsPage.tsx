@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { applyTheme, browserThemeEnv, persistTheme, resolveInitialTheme, type Theme } from '../lib/theme'
+import { useHermesI18n, type MessageKey } from '../hermes/hermesI18n'
 
 // 設定頁（/settings，R2 深色艦橋設計稿新頁）：目前後端沒有「使用者偏好」
 // API，此頁刻意只做兩件誠實的事——(1) 主題切換是真的，串接既有
@@ -8,14 +9,14 @@ import { applyTheme, browserThemeEnv, persistTheme, resolveInitialTheme, type Th
 // （reload 即重置），不寫入任何後端，避免假裝有一個不存在的偏好儲存服務。
 // 之後真要接後端，就是幫這些欄位補一個 PATCH /settings（ponytail: 之後接）。
 
-type Category = '一般' | '通知' | '來源' | '連續引擎' | '外觀' | 'API 連線'
-const CATEGORIES: Array<{ id: Category; icon: string }> = [
-  { id: '一般', icon: '⚙' },
-  { id: '通知', icon: '◔' },
-  { id: '來源', icon: '⊞' },
-  { id: '連續引擎', icon: '↻' },
-  { id: '外觀', icon: '◐' },
-  { id: 'API 連線', icon: '⚿' },
+type Category = 'general' | 'notifications' | 'sources' | 'continuous' | 'appearance' | 'api'
+const CATEGORIES: Array<{ id: Category; icon: string; labelKey: MessageKey }> = [
+  { id: 'general', icon: '⚙', labelKey: 'setCatGeneral' },
+  { id: 'notifications', icon: '◔', labelKey: 'setCatNotifications' },
+  { id: 'sources', icon: '⊞', labelKey: 'setCatSources' },
+  { id: 'continuous', icon: '↻', labelKey: 'setCatContinuous' },
+  { id: 'appearance', icon: '◐', labelKey: 'setCatAppearance' },
+  { id: 'api', icon: '⚿', labelKey: 'setCatApi' },
 ]
 
 function Toggle({ on, onClick, accent = 'var(--color-tf-accent)' }: { on: boolean; onClick: () => void; accent?: string }) {
@@ -59,7 +60,8 @@ function Row({ label, help, children }: { label: string; help: string; children:
 }
 
 export default function SettingsPage() {
-  const [active, setActive] = useState<Category>('通知')
+  const { t } = useHermesI18n()
+  const [active, setActive] = useState<Category>('notifications')
   const [theme, setTheme] = useState<Theme>(() => resolveInitialTheme(browserThemeEnv()))
 
   const [dropAlert, setDropAlert] = useState(true)
@@ -94,9 +96,9 @@ export default function SettingsPage() {
       style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}
     >
       <div className="mb-5 border-b border-tf-border pb-4">
-        <p className="font-mono text-xs font-semibold uppercase tracking-[0.16em] text-tf-link">Control panel</p>
-        <h1 className="mt-1 text-2xl font-bold text-tf-text">設定</h1>
-        <p className="mt-1 text-sm text-tf-text2">操作者層級偏好；敏感金鑰不以明文顯示，僅存於本分頁。</p>
+        <p className="font-mono text-xs font-semibold uppercase tracking-[0.16em] text-tf-link">{t('setKicker')}</p>
+        <h1 className="mt-1 text-2xl font-bold text-tf-text">{t('setTitle')}</h1>
+        <p className="mt-1 text-sm text-tf-text2">{t('setDesc')}</p>
       </div>
 
       <div className="grid grid-cols-1 gap-5 md:grid-cols-[200px_1fr]">
@@ -117,31 +119,31 @@ export default function SettingsPage() {
               >
                 {c.icon}
               </span>
-              {c.id}
+              {t(c.labelKey)}
             </button>
           ))}
           <div className="mt-2 hidden rounded-lg border border-tf-border bg-tf-card p-3 md:block">
-            <p className="mb-2 text-[9.5px] uppercase tracking-[0.14em] text-tf-muted">狀態</p>
+            <p className="mb-2 text-[9.5px] uppercase tracking-[0.14em] text-tf-muted">{t('setStatusLabel')}</p>
             <p className="flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--color-tf-green)' }}>
               <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--color-tf-green)' }} />
-              本分頁 session 內有效
+              {t('setStatusValue')}
             </p>
           </div>
         </aside>
 
         <section className="flex flex-col gap-4">
-          {active === '一般' && (
-            <Card title="一般 · GENERAL" sub="TrustForge HERMES 操作台">
-              <p className="text-xs text-tf-muted">目前無額外一般設定，其他分類請見左側清單。</p>
+          {active === 'general' && (
+            <Card title={t('setGeneralTitle')} sub={t('setGeneralSub')}>
+              <p className="text-xs text-tf-muted">{t('setGeneralBody')}</p>
             </Card>
           )}
 
-          {active === '通知' && (
-            <Card title="通知 · NOTIFICATIONS" sub="CONTINUOUS ENGINE 事件推播">
-              <Row label="信任分下降告警" help="分數跌破門檻時推播">
+          {active === 'notifications' && (
+            <Card title={t('setNotifTitle')} sub={t('setNotifSub')}>
+              <Row label={t('setDropAlertLabel')} help={t('setDropAlertHelp')}>
                 <Toggle on={dropAlert} onClick={() => setDropAlert((v) => !v)} />
               </Row>
-              <Row label="告警門檻" help={`信任分 < ${threshold}`}>
+              <Row label={t('setThresholdLabel')} help={t('setThresholdHelpTemplate', { threshold })}>
                 <input
                   type="range"
                   min={0}
@@ -149,26 +151,26 @@ export default function SettingsPage() {
                   value={threshold}
                   onChange={(e) => setThreshold(Number(e.target.value))}
                   className="w-40 accent-tf-warn"
-                  aria-label="告警門檻"
+                  aria-label={t('setThresholdLabel')}
                 />
               </Row>
-              <Row label="來源缺席提醒" help="連接器超過 5 分鐘無回應">
+              <Row label={t('setAbsenceAlertLabel')} help={t('setAbsenceAlertHelp')}>
                 <Toggle on={absenceAlert} onClick={() => setAbsenceAlert((v) => !v)} />
               </Row>
-              <Row label="操縱偵測推播" help="wash-trading / spoofing 訊號">
+              <Row label={t('setManipAlertLabel')} help={t('setManipAlertHelp')}>
                 <Toggle on={manipAlert} onClick={() => setManipAlert((v) => !v)} />
               </Row>
             </Card>
           )}
 
-          {active === '來源' && (
-            <Card title="來源 · SOURCES" sub="啟用來源與加權">
+          {active === 'sources' && (
+            <Card title={t('setSourcesTitle')} sub={t('setSourcesSub')}>
               <div className="mb-4 flex flex-col gap-2.5">
                 {sources.map((s, i) => (
                   <div key={s.name} className="grid grid-cols-[1fr_auto_auto] items-center gap-4 rounded-lg border border-tf-border bg-tf-well px-3.5 py-2.5">
                     <span className="text-xs" style={{ color: s.on ? 'var(--color-tf-text)' : 'var(--color-tf-muted)' }}>{s.name}</span>
                     <div className="flex w-[150px] items-center gap-2.5">
-                      <span className="text-[9.5px] text-tf-muted">權重</span>
+                      <span className="text-[9.5px] text-tf-muted">{t('setWeightLabel')}</span>
                       <div className="h-1 flex-1 overflow-hidden rounded-full bg-tf-border">
                         <div className="h-full" style={{ width: `${s.weight}%`, background: weightColor(s.weight) }} />
                       </div>
@@ -178,7 +180,7 @@ export default function SettingsPage() {
                   </div>
                 ))}
               </div>
-              <Row label="分歧門檻" help="超過此值即觸發分歧告警">
+              <Row label={t('setDivergenceLabel')} help={t('setDivergenceHelp')}>
                 <div className="flex w-[220px] items-center gap-3">
                   <input
                     type="range"
@@ -187,7 +189,7 @@ export default function SettingsPage() {
                     value={divergenceThreshold}
                     onChange={(e) => setDivergenceThreshold(Number(e.target.value))}
                     className="flex-1 accent-tf-warn"
-                    aria-label="分歧門檻"
+                    aria-label={t('setDivergenceLabel')}
                   />
                   <span className="tf-num w-10 text-xs font-semibold" style={{ color: 'var(--color-tf-warn)' }}>{divergenceThreshold}%</span>
                 </div>
@@ -195,15 +197,15 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {active === '連續引擎' && (
-            <Card title="連續引擎 · CONTINUOUS ENGINE" sub="背景重新評分排程">
-              <Row label="連續掃描" help="背景持續重新評分">
+          {active === 'continuous' && (
+            <Card title={t('setContinuousTitle')} sub={t('setContinuousSub')}>
+              <Row label={t('setScanLabel')} help={t('setScanHelp')}>
                 <div className="flex items-center gap-2.5">
-                  {continuousScan && <span className="text-[11px]" style={{ color: 'var(--color-tf-green)' }}>running</span>}
+                  {continuousScan && <span className="text-[11px]" style={{ color: 'var(--color-tf-green)' }}>{t('setRunning')}</span>}
                   <Toggle on={continuousScan} onClick={() => setContinuousScan((v) => !v)} accent="var(--color-tf-green)" />
                 </div>
               </Row>
-              <Row label="掃描間隔" help="兩輪掃描之間隔">
+              <Row label={t('setIntervalLabel')} help={t('setIntervalHelp')}>
                 <div className="flex overflow-hidden rounded-md border border-tf-border">
                   {(['1m', '5m', '15m'] as const).map((opt) => (
                     <button
@@ -218,7 +220,7 @@ export default function SettingsPage() {
                   ))}
                 </div>
               </Row>
-              <Row label="並行度" help="同時掃描的來源數">
+              <Row label={t('setConcurrencyLabel')} help={t('setConcurrencyHelp')}>
                 <div className="flex items-center gap-2.5">
                   <button type="button" onClick={() => setConcurrency((v) => Math.max(1, v - 1))} className="flex h-[26px] w-[26px] items-center justify-center rounded-md border border-tf-border text-tf-link">−</button>
                   <span className="tf-num w-5 text-center text-sm font-semibold text-tf-text">{concurrency}</span>
@@ -228,50 +230,50 @@ export default function SettingsPage() {
             </Card>
           )}
 
-          {active === '外觀' && (
-            <Card title="外觀 · APPEARANCE" sub="介面主題與密度">
-              <Row label="主題" help="介面配色（與右上角主題切換同步）">
+          {active === 'appearance' && (
+            <Card title={t('setAppearanceTitle')} sub={t('setAppearanceSub')}>
+              <Row label={t('setThemeLabel')} help={t('setThemeHelp')}>
                 <div className="flex overflow-hidden rounded-md border border-tf-border">
-                  {([['深色', 'dark'], ['淺色', 'light']] as const).map(([label, t]) => (
+                  {([[t('setThemeDark'), 'dark'], [t('setThemeLight'), 'light']] as const).map(([label, th]) => (
                     <button
-                      key={t}
+                      key={th}
                       type="button"
-                      onClick={() => chooseTheme(t)}
+                      onClick={() => chooseTheme(th)}
                       className="border-r border-tf-border px-3 py-1.5 text-[11.5px] last:border-r-0"
-                      style={theme === t ? { background: 'var(--color-tf-accent)', color: 'var(--color-tf-bg)', fontWeight: 600 } : { background: 'var(--color-tf-well)', color: 'var(--color-tf-muted)' }}
+                      style={theme === th ? { background: 'var(--color-tf-accent)', color: 'var(--color-tf-bg)', fontWeight: 600 } : { background: 'var(--color-tf-well)', color: 'var(--color-tf-muted)' }}
                     >
                       {label}
                     </button>
                   ))}
                 </div>
               </Row>
-              <Row label="語言" help="介面語言（切換見右上角 EN/繁中）">
-                <span className="rounded-md border border-tf-border bg-tf-well px-3 py-1.5 text-xs text-tf-text2">繁體中文</span>
+              <Row label={t('setLanguageLabel')} help={t('setLanguageHelp')}>
+                <span className="rounded-md border border-tf-border bg-tf-well px-3 py-1.5 text-xs text-tf-text2">{t('setLanguageValue')}</span>
               </Row>
             </Card>
           )}
 
-          {active === 'API 連線' && (
-            <Card title="API 連線 · CONNECTIONS" sub="金鑰不以明文顯示">
-              <Row label="TRUSTFORGE_ADMIN_TOKEN" help="只存本分頁 · 關閉即清除">
+          {active === 'api' && (
+            <Card title={t('setApiTitle')} sub={t('setApiSub')}>
+              <Row label={t('setTokenLabel')} help={t('setTokenHelp')}>
                 <div className="flex items-center gap-2.5">
                   <span className="rounded-md border border-tf-border bg-tf-well px-3 py-2 text-[13px] tracking-[0.24em] text-tf-muted">⚿ ••••••••</span>
-                  <button type="button" className="rounded-md border border-tf-border px-3.5 py-2 text-xs text-tf-link" style={{ background: 'color-mix(in srgb, var(--color-tf-accent) 8%, transparent)' }}>更新</button>
+                  <button type="button" className="rounded-md border border-tf-border px-3.5 py-2 text-xs text-tf-link" style={{ background: 'color-mix(in srgb, var(--color-tf-accent) 8%, transparent)' }}>{t('setTokenUpdate')}</button>
                 </div>
               </Row>
-              <Row label="Cache 後端" help="readonly">
+              <Row label={t('setCacheLabel')} help={t('setCacheHelp')}>
                 <span className="inline-flex items-center gap-2 text-xs text-tf-text">
                   DynamoDBCache
                   <span className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10.5px]" style={{ color: 'var(--color-tf-green)', borderColor: 'color-mix(in srgb, var(--color-tf-green) 40%, transparent)', background: 'color-mix(in srgb, var(--color-tf-green) 12%, transparent)' }}>
-                    <span className="h-1 w-1 rounded-full" style={{ background: 'var(--color-tf-green)' }} />正常
+                    <span className="h-1 w-1 rounded-full" style={{ background: 'var(--color-tf-green)' }} />{t('setCacheNormal')}
                   </span>
                 </span>
               </Row>
-              <Row label="LLM runtime" help="readonly">
+              <Row label={t('setLlmLabel')} help={t('setLlmHelp')}>
                 <span className="inline-flex items-center gap-2 text-xs text-tf-muted">
                   Bedrock
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-tf-border bg-tf-well px-2.5 py-0.5 text-[10.5px] text-tf-muted">
-                    <span className="h-1 w-1 rounded-full bg-tf-muted" />未啟用
+                    <span className="h-1 w-1 rounded-full bg-tf-muted" />{t('setLlmDisabled')}
                   </span>
                 </span>
               </Row>
@@ -283,7 +285,7 @@ export default function SettingsPage() {
       <div className="mt-4 flex items-center justify-between rounded-lg border border-tf-border bg-tf-panel px-6 py-3.5">
         <span className="inline-flex items-center gap-2 text-xs" style={{ color: 'var(--color-tf-green)' }}>
           <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--color-tf-green)' }} />
-          變更僅保留於本分頁（設定僅存於本機瀏覽器）
+          {t('setFooter')}
         </span>
       </div>
     </main>

@@ -73,20 +73,20 @@ export default function Header() {
       </nav>
 
       <span
-        title="部署版本（release / git sha）"
+        title={t('hdrDeployVersionTitle')}
         className="self-center rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted"
       >{`${releaseVersion} · ${GIT_SHA}`}</span>
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} className="self-center rounded border border-tf-border bg-transparent px-2 py-1 font-mono text-xs text-tf-muted hover:text-tf-text">
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>
       <Link to="/asset-context" className="self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
-        資產脈絡查詢
+        {t('hdrAssetContext')}
       </Link>
       <Link to="/eco-link" className="self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
-        EcoLink
+        {t('hdrEcoLink')}
       </Link>
       <Link to="/peer-metrics" className="self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
-        Peer 比較
+        {t('hdrPeerCompare')}
       </Link>
       <Link to="/help" className="self-center font-mono text-xs text-tf-muted no-underline hover:text-tf-text">
         ? {t('help')}

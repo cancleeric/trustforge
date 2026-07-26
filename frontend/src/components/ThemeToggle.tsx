@@ -8,6 +8,7 @@ import {
   resolveInitialTheme,
   type Theme,
 } from '../lib/theme'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 // #20 主題切換：純 client CSS（`<html data-theme>` + CSS 變數），不
 // 觸發任何 API、不重新 fetch，已存在的分析結果 React state 不受影響。
@@ -23,6 +24,7 @@ import {
 //   - 使用者按下 toggle 才是明確選擇：這裡才 `persistTheme()`，並停止跟隨
 //     系統（解除訂閱），從此以使用者選擇為準。
 export default function ThemeToggle() {
+  const { t } = useHermesI18n()
   const [theme, setTheme] = useState<Theme>(() => resolveInitialTheme(browserThemeEnv()))
   const [userChosen, setUserChosen] = useState<boolean>(() => hasStoredTheme(browserThemeEnv()))
 
@@ -41,7 +43,7 @@ export default function ThemeToggle() {
   }, [userChosen])
 
   const isDark = theme === 'dark'
-  const label = isDark ? '切換至淺色主題' : '切換至深色主題'
+  const label = isDark ? t('themeToggleToLight') : t('themeToggleToDark')
 
   function handleToggle() {
     const next: Theme = isDark ? 'light' : 'dark'
