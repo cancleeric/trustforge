@@ -515,6 +515,13 @@
   animation-name: none;
 }
 
+/* 同一類問題：即時遙測面板的進場動畫（hermes-telemetry-lock）也是
+   from{opacity:0}，qa-mode 全域 pause 會把它凍結在起始幀，導致面板在
+   QA 模式下永遠不可見。同上做法，直接關閉讓它落回靜態 opacity:1。 */
+.hermes-dashboard.is-qa-mode .hermes-live-telemetry {
+  animation-name: none;
+}
+
 .hermes-module-deck::before {
   content: '';
   position: absolute;
@@ -915,10 +922,15 @@
   height: 82px;
   min-width: 0;
   display: grid;
-  grid-template-columns: 31px 1fr;
+  /* N12 fix: was `31px 1fr` with 9px inline padding — real measured labels
+     ("Cross-Verify" 77px, "Manipulation" 77px, "Composite Score" 96px) were
+     wider than the ~75px the copy column resolved to, so `text-overflow:
+     ellipsis` below clipped them ("Cross-Veri…"). Narrowing the icon column
+     and the inline padding gives the label column back ~18px. */
+  grid-template-columns: 22px 1fr;
   grid-template-rows: 1fr 1fr;
   align-items: center;
-  padding: 6px 9px;
+  padding: 6px 4px;
   border: 0;
   color: var(--color-hermes-tx2);
   background: transparent;
@@ -988,13 +1000,23 @@
 }
 
 .hermes-energy-copy strong {
-  display: block;
+  /* N12 fix: the narrower column above still isn't guaranteed to fit every
+     stage label at every zoom/locale, so on top of the extra width we also
+     let the label wrap onto a second line (up to 2 lines) instead of
+     truncating with an ellipsis. `-webkit-line-clamp` is safe to rely on
+     here — it's supported by every engine this app targets (Chromium,
+     Safari, Firefox 68+). */
+  display: -webkit-box;
   overflow: hidden;
   color: var(--color-hermes-tx);
   font-size: 10px;
   letter-spacing: .4px;
+  line-height: 1.2;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .hermes-energy-copy small {
@@ -1386,13 +1408,15 @@
 }
 
 .tf-error-retry {
-  width: 30px;
-  height: 30px;
   flex: 0 0 auto;
+  white-space: nowrap;
+  min-width: max-content;
+  padding: 6px 10px;
   border: 1px solid color-mix(in srgb, var(--tf-state-color, var(--color-tf-bad)) 55%, transparent);
+  border-radius: 4px;
   color: var(--tf-state-color, var(--color-tf-bad));
   background: transparent;
-  font-size: 18px;
+  font-size: 13px;
   line-height: 1;
   cursor: pointer;
 }
@@ -2183,9 +2207,54 @@
 
 @media (max-width:1024px) {
   .hermes-frame {
-    --hermes-rail: clamp(180px, 18vw, 210px);
+    /* N10 fix: was `clamp(180px, 18vw, 210px)` — at 960px that resolves to
+       its 180px floor (18vw = 172.8px < 180px), leaving the left rail cards
+       (query composer, agent-output panel, etc.) cramped enough that card
+       subtitle text runs right up against the card edge. Titles didn't
+       break below 3 characters so it wasn't broken, just tight. Widened the
+       floor/preferred/ceiling so the same breakpoint gets noticeably more
+       breathing room without eating into the main viewport meaningfully at
+       the top of this range (1024px). */
+    --hermes-rail: clamp(215px, 22vw, 245px);
     --hermes-right-rail: clamp(170px, 17vw, 200px);
   }
+
+  /* N6 (round 1, CEO 退件重修): 中間斷點（~768–1024px）左欄變窄，intent-picker
+     若仍維持 2 欄，中文標題（如「這個幣現在可信嗎？」）會被擠成 2–3 字一行
+     斷行。退成單欄，讓每張卡片有全欄寬度可完整顯示標題。
+     ⚠️ round 1 的教訓：base rule `.hermes-intent-picker>div{grid-template-
+     columns:1fr 1fr}`（見下方非 media 區塊）跟這條規則 specificity 完全相同
+     （都是 1 class + 1 element），CSS cascade 是比「原始碼順序」不是比「有沒有
+     被 media query 包住」——base rule 定義在檔案更後面，兩者 match 時後面的
+     贏，導致這條規則雖然 media query 有 match，套用到 DOM 上卻被蓋掉、完全
+     沒生效（用 devtools computed style 才看得出來，字串斷言測不到）。用
+     !important 保證中間斷點下這條規則確實贏過 base rule。 */
+  .hermes-intent-picker>div {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* N6: hero tagline 是全寬（left:0,right:0）、z-index 高於左欄的裝飾 strip，
+     版面只在 --hermes-top（固定 44px）預留單行高度。窄螢幕下長文案會
+     flex-wrap 成 2 行，超出預留高度，視覺上蓋住下方左欄卡片。中間斷點
+     純視覺、非核心功能，直接隱藏避免重疊；topbar/badge 之外的行銷文案
+     本就不影響操作（pointerEvents:none）。 */
+  .hermes-hero-tagline {
+    display: none !important;
+  }
+}
+
+/* N6 (round 2, CEO 親測): 真正的觸發條件不是 viewport 寬度，是「分析工作區
+   （HermesModuleDeck）展開」這件事本身。module deck 的 inset 是寫死的
+   `44px 300px 120px`（不是跟 --hermes-rail 連動的變數），跟左欄自己的寬度
+   無關，但左欄背後的 HermesLeftRail 仍原封不動渲染在 module deck 左側那條
+   窄縫。CEO 實測：1440px 寬視窗、workspace 展開時，.hermes-intent-picker
+   computed 寬度只剩 109px，遠小於任何 viewport media query 斷點會處理到的
+   寬度，中文標題一樣斷成 2–3 字。inline QueryConsole（AnalyzePage embedded）
+   在 module deck 內已經是完整寬度的問題輸入介面，左欄這份縮小版
+   intent-picker 這時純屬多餘、無法在該寬度下可讀顯示；驗收標準允許「乾脆不
+   顯示」，直接在 module 開啟時隱藏它，避免在任何 viewport 寬度下都出現斷字。 */
+.hermes-dashboard.is-module-open .hermes-intent-picker {
+  display: none !important;
 }
 
 @media (max-width:900px) {

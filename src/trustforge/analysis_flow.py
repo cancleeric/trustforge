@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from . import budget_guard
+from .agent.narrative_locale import DEFAULT_LOCALE as DEFAULT_NARRATIVE_LOCALE
+from .agent.narrative_locale import normalize_locale
 from .agent.orchestrator import build_report
 from .bedrock import BedrockClient
 from .execlog import ExecutionLog
@@ -38,6 +40,18 @@ from .trust.scoring import aggregate, build_stance_fn, score
 from .feature_store import TrustFeatureStore
 
 STAGES = ("source_ingestion", "claim_extraction", "trust_reasoning", "evidence_assembly", "report_delivery")
+
+# Issue N16: a `state='running'` job whose checkpoint stops advancing for this
+# long is presumed orphaned (owning process crashed, or its worker thread is
+# hung on a blocking call — `Thread.is_alive()` in `reconcile_runtime()` can't
+# see a hang, only a dead thread). 600s (10 minutes) is chosen because it is
+# comfortably longer than any observed single-stage duration (Bedrock calls in
+# `_stage_claim_extraction`/`_stage_trust_reasoning` are the slowest steps and
+# normally complete in well under a minute) while still being short enough
+# that an operator sees recovery within one incident window rather than a job
+# sitting stuck indefinitely. It is also well above the 30s max retry backoff
+# used elsewhere in this module, so it never races an in-flight retry.
+STALE_RUNNING_JOB_THRESHOLD_SECONDS = 600
 MODES: dict[str, tuple[QuestionType, str]] = {
     "risk": (QuestionType.MULTI_SOURCE, "評估{coin}整體信任狀態，並標記任何正在形成的操縱風險。"),
     "sentiment": (QuestionType.MULTI_SOURCE, "分析{coin}市場情緒、分歧與反方訊號。"),
@@ -473,18 +487,23 @@ class AnalysisFlow:
         job_id = self.enqueue_job(snap[0], mode, question, origin=origin) if snap and enqueue else None
         return question_id, job_id
 
-    def submit_manual(self, coin: str, mode: str, question: str) -> tuple[str, str | None]:
+    def submit_manual(self, coin: str, mode: str, question: str,
+                      *, locale: str = DEFAULT_NARRATIVE_LOCALE) -> tuple[str, str | None]:
         """Create a high-priority, snapshot-isolated job for an explicit user run.
 
         This deliberately does not consult the Hermes autonomy toggle: that
         toggle controls scheduled refresh creation only.  The normal snapshot
         ingestion and downstream pipeline remain subject to their existing
         source, Bedrock and cost controls.
+
+        `locale` (N11) selects the narrative output language and rides on the
+        in-memory stage package only — see `enqueue_job`.
         """
         # Validate and persist the intent before collecting live sources.  Bad
         # input must never trigger a chargeable/network ingestion attempt.
         coin, mode, question = coin.strip().upper(), mode.strip(), question.strip()
         question_id, _ = self.register_question(coin, mode, question, enqueue=False)
+        locale = normalize_locale(locale)
         canonical_key = f"{coin}\0{mode}\0{question}"
         with _manual_dedup_lock(self.path, canonical_key):
             existing = self._conn().execute("""
@@ -494,9 +513,37 @@ class AnalysisFlow:
               ORDER BY created_at DESC LIMIT 1
             """, (coin, mode, question, time.time() - MANUAL_DEDUP_WINDOW_SEC)).fetchone()
             if existing:
-                return question_id, existing["job_id"]
+                existing_job_id = existing["job_id"]
+                # N11: `analysis_jobs` has UNIQUE(snapshot_id, coin, mode,
+                # question) with no `locale` column (schema change is CDO
+                # scope, not touched here). Reusing this row is correct for
+                # dedup purposes, but if the caller asked for a *different*
+                # locale than whatever this job last published, blindly
+                # returning it silently serves a stale-language report — the
+                # exact N11 production bug. Re-drive the same job through the
+                # pipeline instead so the reused row picks up the requested
+                # locale. Locale is tracked durably via `analysis_lineage_events`
+                # (see `_locale_for_job`), not in-process state, because the
+                # daemon that actually executes the stages runs in a
+                # *different OS process* (`run_analysis_flow.py --daemon`)
+                # from whichever process called `submit_manual`.
+                if self._locale_for_job(existing_job_id) == locale:
+                    return question_id, existing_job_id
+                self._append_lineage(
+                    "job_relocalized", entity_type="analysis_job", entity_id=existing_job_id,
+                    job_id=existing_job_id, metadata={"locale": locale},
+                )
+                self._conn().execute(
+                    "UPDATE analysis_jobs SET state='queued',current_stage=?,error=NULL,updated_at=? WHERE job_id=?",
+                    (STAGES[0], time.time(), existing_job_id),
+                )
+                self._checkpoint(existing_job_id, STAGES[0], "queued")
+                self._put_package(STAGES[0], {"job_id": existing_job_id, "locale": locale})
+                self._adopted.add(existing_job_id)
+                return question_id, existing_job_id
             snapshot_id = self.create_snapshot(coin, query=question)
-            job_id = self.enqueue_job(snapshot_id, mode, question, origin="manual")
+            job_id = self.enqueue_job(snapshot_id, mode, question, origin="manual",
+                                      locale=locale)
             if job_id is None:
                 existing = self._conn().execute(
                     "SELECT job_id FROM analysis_jobs WHERE snapshot_id=? AND coin=? AND mode=? AND question=?",
@@ -560,7 +607,12 @@ class AnalysisFlow:
         return {"query": question, "matches": candidates[:max(1, min(limit, 10))],
                 "conversation": conversation, "retrieval": "sqlite_char_bigram_v1"}
 
-    def enqueue_job(self, snapshot_id: str, mode: str, question: str, *, origin: str = "scheduled") -> str | None:
+    def enqueue_job(self, snapshot_id: str, mode: str, question: str, *, origin: str = "scheduled",
+                    locale: str = DEFAULT_NARRATIVE_LOCALE) -> str | None:
+        """`locale`（N11）：敘事輸出語系，只掛在**行程內的 stage package** 上，
+        不進 `analysis_jobs` 資料表（schema 異動歸 CDO，本次不碰）。因此
+        daemon 重啟後由 `_restart_from_snapshot()` 重跑的工作會回到預設中文
+        ——這是已知且刻意的降級，不是靜默錯誤。"""
         row = self._conn().execute("SELECT coin FROM analysis_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
         if row is None or mode not in QUESTION_TYPES:
             raise ValueError("unknown snapshot or mode")
@@ -598,9 +650,10 @@ class AnalysisFlow:
             snapshot_id=snapshot_id, job_id=job_id,
             parent_type="snapshot", parent_id=snapshot_id,
             metadata={"coin": row["coin"], "mode": mode, "question_type": qtype.value,
-                      "origin": origin, "priority": priority},
+                      "origin": origin, "priority": priority, "locale": normalize_locale(locale)},
         )
-        self._put_package(STAGES[0], {"job_id": job_id, "priority": priority})
+        self._put_package(STAGES[0], {"job_id": job_id, "priority": priority,
+                                      "locale": normalize_locale(locale)})
         self._adopted.add(job_id)
         return job_id
 
@@ -684,7 +737,7 @@ class AnalysisFlow:
             self._conn().execute("DELETE FROM analysis_retry_queue WHERE job_id=?", (job_id,))
             self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (job_id,))
             self._checkpoint(job_id, STAGES[0], "queued")
-            self._put_package(STAGES[0], {"job_id": job_id})
+            self._put_package(STAGES[0], {"job_id": job_id, "locale": self._locale_for_job(job_id)})
             self._adopted.add(job_id)
             restarted += 1
         return restarted
@@ -745,8 +798,59 @@ class AnalysisFlow:
                 continue
             self._conn().execute("DELETE FROM analysis_stage_runs WHERE job_id=?", (row["job_id"],))
             self._checkpoint(row["job_id"], STAGES[0], "queued")
-            self._put_package(STAGES[0], {"job_id": row["job_id"]})
+            self._put_package(STAGES[0], {"job_id": row["job_id"], "locale": self._locale_for_job(row["job_id"])})
             self._adopted.add(row["job_id"])
+
+    def reap_stale_running(self, threshold_seconds: float | None = None) -> int:
+        """Recover `state='running'` jobs whose checkpoint stopped advancing.
+
+        `reconcile_runtime()` only detects a *dead* worker thread; it cannot
+        see a worker that is still alive but hung (e.g. a blocked network
+        call), nor a job left behind by a daemon process that crashed and was
+        never restarted. This scans for running jobs whose `updated_at` is
+        older than the threshold and routes them through the same
+        retry-queue / dead-letter decision `_worker`'s exception handler
+        already uses (three attempts, then dead-letter) — the actual
+        re-enqueue happens later via the existing `adopt_due_retries()` /
+        `_release_retry()` path, not a new mechanism here.
+        """
+        threshold = STALE_RUNNING_JOB_THRESHOLD_SECONDS if threshold_seconds is None else threshold_seconds
+        cutoff = time.time() - threshold
+        rows = self._conn().execute("""
+          SELECT job_id, current_stage, retry_count FROM analysis_jobs
+          WHERE state='running' AND updated_at < ?
+          AND job_id NOT IN (SELECT job_id FROM analysis_retry_queue)
+          AND job_id NOT IN (SELECT job_id FROM analysis_dead_letters)
+        """, (cutoff,)).fetchall()
+        reaped = 0
+        for row in rows:
+            job_id, stage, retry = row["job_id"], row["current_stage"], row["retry_count"] + 1
+            error = f"stale running job reaped after {threshold:.0f}s without progress"
+            self._conn().execute(
+                "INSERT INTO analysis_stage_attempts VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (f"attempt-{uuid.uuid4().hex[:16]}", job_id, stage, retry, "failed",
+                 time.time(), time.time(), 0.0, 1, error),
+            )
+            if retry < 3:
+                self._conn().execute("UPDATE analysis_jobs SET retry_count=? WHERE job_id=?", (retry, job_id))
+                self._conn().execute(
+                    "INSERT OR REPLACE INTO analysis_retry_queue VALUES(?,?,?,?,?)",
+                    (job_id, stage, time.time(), retry, error),
+                )
+                self._checkpoint(job_id, stage, "queued", error=error, retry=retry)
+            else:
+                job = self._job(job_id)
+                self._conn().execute(
+                    "INSERT OR REPLACE INTO analysis_dead_letters VALUES(?,?,?,?,?,?,?,?,?)",
+                    (job_id, stage, job["coin"], job["mode"], job["question"], job["snapshot_id"],
+                     retry, error, time.time()),
+                )
+                self._checkpoint(job_id, stage, "failed", error=error, retry=retry)
+                self._adopted.discard(job_id)
+            reaped += 1
+        if reaped:
+            logging.warning("Hermes reaped %d stale running job(s) after %.0fs idle", reaped, threshold)
+        return reaped
 
     def adopt_pending(self) -> int:
         """Adopt jobs inserted by the web process without restarting the daemon."""
@@ -762,7 +866,7 @@ class AnalysisFlow:
             job_id = row["job_id"]
             if job_id in self._adopted: continue
             self._adopted.add(job_id)
-            self._put_package(STAGES[0], {"job_id": job_id})
+            self._put_package(STAGES[0], {"job_id": job_id, "locale": self._locale_for_job(job_id)})
             adopted += 1
         return adopted
 
@@ -772,7 +876,7 @@ class AnalysisFlow:
             (job_id, stage, time.time()),
         )
         if not cursor.rowcount: return False
-        self._put_package(STAGES[0], {"job_id": job_id})
+        self._put_package(STAGES[0], {"job_id": job_id, "locale": self._locale_for_job(job_id)})
         self._adopted.add(job_id)
         return True
 
@@ -878,6 +982,35 @@ class AnalysisFlow:
     def _job(self, job_id: str) -> sqlite3.Row:
         return self._conn().execute("SELECT * FROM analysis_jobs WHERE job_id=?", (job_id,)).fetchone()
 
+    def _locale_for_job(self, job_id: str) -> str:
+        """N11: `locale` was originally only ever carried on the in-process
+        stage `package` dict, which is invisible across process boundaries —
+        `run_analysis_flow.py --daemon` is a *separate OS process* from the
+        web process that calls `submit_manual`/`enqueue_job`, so any package
+        reconstructed purely from `job_id` (recover()/adopt_pending()/
+        _release_retry(), all triggered by DB polling, not shared memory)
+        silently fell back to DEFAULT_NARRATIVE_LOCALE. This is the actual
+        production root cause, not just the manual-dedup window.
+
+        Fix without an `analysis_jobs.locale` column (schema change is CDO
+        scope): `analysis_lineage_events.metadata_json` is an existing
+        free-form JSON column already written per job (`job_enqueued`,
+        `job_relocalized`); we record locale there and read it back here.
+        """
+        row = self._conn().execute(
+            """SELECT metadata_json FROM analysis_lineage_events
+               WHERE job_id=? AND event_type IN ('job_enqueued','job_relocalized')
+               ORDER BY created_at DESC LIMIT 1""",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return DEFAULT_NARRATIVE_LOCALE
+        try:
+            locale = json.loads(row["metadata_json"]).get("locale")
+        except (TypeError, json.JSONDecodeError):
+            return DEFAULT_NARRATIVE_LOCALE
+        return normalize_locale(locale) if locale else DEFAULT_NARRATIVE_LOCALE
+
     def _stage_source_ingestion(self, package: dict) -> dict:
         job = self._job(package["job_id"])
         snap = self._conn().execute("SELECT * FROM analysis_snapshots WHERE snapshot_id=?", (job["snapshot_id"],)).fetchone()
@@ -923,6 +1056,7 @@ class AnalysisFlow:
             return build_report(
                 job["question"], job["coin"], QuestionType(job["question_type"]), package["brief"],
                 client=client, log=log, stance_fn=package["stance"], scored=package["scored"],
+                locale=package.get("locale", DEFAULT_NARRATIVE_LOCALE),
             )
 
         if client.offline:

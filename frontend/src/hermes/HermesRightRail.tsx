@@ -83,7 +83,7 @@ export default function HermesRightRail({
             style={{ height: 5, borderRadius: 3, background: stage.current ? 'var(--color-hermes-cyan)' : stage.queued ? 'var(--color-hermes-amber)' : 'var(--color-hermes-bd2)', boxShadow: stage.current ? '0 0 8px var(--color-hermes-cyan)' : undefined }} aria-label={`stage ${index + 1}`} />)}
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: 'var(--color-hermes-tx2)', fontSize: 9.5 }}>
-          <span>排隊 {queued}</span><span>{latestJob ? `${latestJob.mode} · ${latestJob.state}` : '等待此幣快照'}</span>
+          <span>{t('queued')} {queued}</span><span>{latestJob ? `${latestJob.mode} · ${latestJob.state}` : t('waitingSnapshot')}</span>
         </div>
       </div>
 

@@ -70,12 +70,12 @@ export default function HermesLeftRail({
       >
         {beginnerMode && (
           <div className="hermes-intent-picker">
-            <div className="hermes-intent-title">我想做什麼？</div>
-            <p>選一個目的，Hermes 會替你準備問題與分析方式。</p>
+            <div className="hermes-intent-title">{t('whatToDo')}</div>
+            <p>{t('chooseGoal')}</p>
             <div>
               {BEGINNER_INTENTS.map((intent) => (
-                <button key={intent.id} type="button" onClick={() => onChooseIntent?.(intent.mode, intent.question)} title={intent.description}>
-                  <b>{intent.label}</b><span>{intent.description}</span>
+                <button key={intent.id} type="button" onClick={() => onChooseIntent?.(intent.mode, intent.question)} title={t(intent.descriptionKey)}>
+                  <b>{t(intent.labelKey)}</b><span>{t(intent.descriptionKey)}</span>
                 </button>
               ))}
             </div>
@@ -97,7 +97,7 @@ export default function HermesLeftRail({
           </div>
           {(questionContext?.conversation.length || hasOrder) ? (
             <div style={{ background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 6, padding: '8px 11px', alignSelf: 'flex-end', maxWidth: '92%' }}>
-              <div style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1, marginBottom: 3 }}>對話記憶 · SQLITE</div>
+              <div style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1, marginBottom: 3 }}>{t('conversationMemory')}</div>
               {(questionContext?.conversation ?? [])
                 .filter((msg, i, arr) => i === 0 || msg.role !== arr[i - 1].role || msg.content !== arr[i - 1].content)
                 .slice(-3)
@@ -109,18 +109,20 @@ export default function HermesLeftRail({
               {!questionContext?.conversation.length && <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx2)' }}>&gt; {qtype}: {query}</div>}
             </div>
           ) : null}
-          {!!questionContext?.matches.length && (
+          {!!questionContext && (
             <div style={{ borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
-              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 2 }}><GlossaryTerm term="rag" label="相似歷史題目" compact /></div>
+              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 2 }}><GlossaryTerm term="rag" label={t('similarQuestions')} compact /></div>
               <div role="note" style={{ fontSize: 8.5, lineHeight: 1.35, color: 'var(--color-hermes-amber)', marginBottom: 5 }}>
-                歷史參考 · 非本次 Evidence，不參與信任評分
+                {t('historyDisclaimer')}
               </div>
-              {questionContext.matches.slice(0, 3).map((match) => (
+              {questionContext.matches.length ? questionContext.matches.slice(0, 3).map((match) => (
                 <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
                   style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10, lineHeight: 1.35, padding: '5px 2px', cursor: 'pointer' }}>
                   <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{match.mode} · {match.question}
                 </button>
-              ))}
+              )) : (
+                <div style={{ fontSize: 10, lineHeight: 1.4, color: 'var(--color-hermes-tx3)', padding: '5px 2px' }}>{t('noSimilarQuestions')}</div>
+              )}
             </div>
           )}
         </div>
@@ -147,11 +149,11 @@ export default function HermesLeftRail({
 
         {beginnerMode && qtype !== qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)] && (
           <button type="button" className="hermes-mode-suggestion" onClick={() => onApplyRecommendedMode?.(recommendedMode)}>
-            建議改用「{qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)]}」分析
+            {t('suggestSwitchToPrefix')}{qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)]}{t('suggestSwitchToSuffix')}
           </button>
         )}
 
-        {beginnerMode && <div className="hermes-analysis-expectation">將使用目前可用的多來源資料進行「{qtype}」，整理可信程度、主要原因與不確定性。</div>}
+        {beginnerMode && <div className="hermes-analysis-expectation">{t('analysisExpectationPrefix')}{qtype}{t('analysisExpectationSuffix')}</div>}
 
         <button
           onClick={onSubmit}

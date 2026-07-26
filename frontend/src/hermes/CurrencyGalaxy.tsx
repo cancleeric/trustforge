@@ -144,8 +144,11 @@ export default function CurrencyGalaxy({
         <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(230,244,248,.9)' }}>Global Currency Galaxy</span>
       </div>
 
+      {/* top 需清 HermesHeroTagline（topbar 下方 z:9 的第二層 strip，
+          高度隨文字換行變動）——面板 top:18 之前會被 tagline 蓋住頂部
+          幾行字（D3）。46px 是目前單行 tagline 高度（~35.5px）+ 安全邊距。 */}
       {readoutC && (
-        <div className="hermes-live-telemetry hermes-clip-sm" style={{ position: 'absolute', right: 22, top: 18, zIndex: 5, width: 174, padding: '10px 12px', background: 'rgba(5,12,20,.76)', border: `1px solid ${TIER_COLOR[readoutC.tier]}`, backdropFilter: 'blur(8px)', boxShadow: `inset 0 0 18px ${TIER_COLOR[readoutC.tier]}18` }}>
+        <div className="hermes-live-telemetry hermes-clip-sm" style={{ position: 'absolute', right: 22, top: 46, zIndex: 5, width: 174, padding: '10px 12px', background: 'rgba(5,12,20,.76)', border: `1px solid ${TIER_COLOR[readoutC.tier]}`, backdropFilter: 'blur(8px)', boxShadow: `inset 0 0 18px ${TIER_COLOR[readoutC.tier]}18` }}>
           <div style={{ fontSize: 8.5, letterSpacing: '1.2px', color: TIER_COLOR[readoutC.tier], marginBottom: 7 }}>{t('liveTelemetry')} · {readoutC.name}</div>
           <div className="hermes-telemetry-row"><span>{t('trustScore')}</span><b>{readoutC.score}/100</b></div>
           <div className="hermes-telemetry-row"><span>{t('sourceCount')}</span><b>{Math.round(60 + readoutC.econ * .9)}</b></div>

@@ -380,6 +380,82 @@ def test_runtime_reconciles_orphaned_intermediate_stage_from_snapshot(tmp_path, 
     flow.stop()
 
 
+def test_stale_running_job_is_requeued_with_locale_preserved(tmp_path, monkeypatch):
+    # N16: a job whose worker thread is still `is_alive()` but hung (or whose
+    # owning process crashed and never restarted) is left with state='running'
+    # and a frozen updated_at forever, since reconcile_runtime() only detects
+    # dead threads. reap_stale_running() must find it via the updated_at
+    # threshold and route it back through the existing retry path, carrying
+    # the N11 locale (not silently falling back to Chinese).
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    job_id = flow.enqueue_job(snapshot, "risk", "BTC 來源是否分歧", locale="en")
+    assert job_id
+    # Drain the fresh in-process package: it represents runtime state that a
+    # crashed/hung process would not actually have.
+    flow._queues["source_ingestion"].get_nowait()
+    flow._queues["source_ingestion"].task_done()
+    stale_updated_at = time.time() - 9999
+    flow._conn().execute(
+        "UPDATE analysis_jobs SET state='running',current_stage='claim_extraction',updated_at=? WHERE job_id=?",
+        (stale_updated_at, job_id),
+    )
+    flow._conn().execute(
+        "INSERT INTO analysis_stage_runs(job_id,stage,state,queue_entered_at,started_at,finished_at,duration_sec,event_count,retry_count,error)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (job_id, "claim_extraction", "running", stale_updated_at, stale_updated_at, None, None, 0, 0, None),
+    )
+
+    reaped = flow.reap_stale_running(threshold_seconds=1)
+
+    assert reaped == 1
+    job = flow._job(job_id)
+    assert job["state"] == "queued"
+    assert job["retry_count"] == 1
+    retry_row = flow._conn().execute(
+        "SELECT stage FROM analysis_retry_queue WHERE job_id=?", (job_id,),
+    ).fetchone()
+    assert retry_row["stage"] == "claim_extraction"
+
+    adopted = flow.adopt_due_retries()
+    assert adopted == 1
+    _, _, package = flow._queues["source_ingestion"].get_nowait()
+    assert package["job_id"] == job_id
+    assert package["locale"] == "en"
+    flow.stop()
+
+
+def test_stale_running_job_enters_dead_letter_after_retry_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr("trustforge.analysis_flow.collect", lambda *args, **kwargs: _docs())
+    flow = AnalysisFlow(tmp_path / "flow.sqlite3")
+    snapshot = flow.create_snapshot("BTC")
+    job_id = flow.enqueue_job(snapshot, "risk", "BTC 來源是否分歧")
+    assert job_id
+    flow._queues["source_ingestion"].get_nowait()
+    flow._queues["source_ingestion"].task_done()
+    stale_updated_at = time.time() - 9999
+    flow._conn().execute(
+        "UPDATE analysis_jobs SET state='running',current_stage='trust_reasoning',retry_count=2,updated_at=? WHERE job_id=?",
+        (stale_updated_at, job_id),
+    )
+
+    reaped = flow.reap_stale_running(threshold_seconds=1)
+
+    assert reaped == 1
+    job = flow._job(job_id)
+    assert job["state"] == "failed"
+    dead = flow._conn().execute(
+        "SELECT stage,attempts FROM analysis_dead_letters WHERE job_id=?", (job_id,),
+    ).fetchone()
+    assert dead["stage"] == "trust_reasoning"
+    assert dead["attempts"] == 3
+    assert flow._conn().execute(
+        "SELECT 1 FROM analysis_retry_queue WHERE job_id=?", (job_id,),
+    ).fetchone() is None
+    flow.stop()
+
+
 def test_local_daemon_runs_overlapping_workers_per_stage():
     spec = importlib.util.spec_from_file_location(
         "analysis_launch_agent", ROOT / "scripts/install_launch_agent.py"
@@ -546,7 +622,8 @@ def test_evidence_assembly_rechecks_gate_and_can_flip_to_offline_when_cap_hits_b
 
     captured = {}
 
-    def _fake_build_report(question, coin, qtype, brief, *, client, log, stance_fn, scored):
+    def _fake_build_report(question, coin, qtype, brief, *, client, log, stance_fn, scored,
+                           locale="zh-Hant"):
         captured["offline_at_call"] = client.offline
         return {"report": "stub"}, {"evidence": "stub"}
 

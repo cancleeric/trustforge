@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiEnvelope, AssetContext, AssetContextResponseData } from '../lib/types'
 import { getAssetContext } from '../lib/endpoints'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 import AssetContextLookupPage from './AssetContextLookupPage'
 
 vi.mock('../lib/endpoints', () => ({
@@ -32,9 +33,11 @@ function arbContext(): AssetContext {
 
 function renderPage(initialUrl = '/asset-context') {
   return render(
-    <MemoryRouter initialEntries={[initialUrl]}>
-      <AssetContextLookupPage />
-    </MemoryRouter>,
+    <HermesI18nProvider>
+      <MemoryRouter initialEntries={[initialUrl]}>
+        <AssetContextLookupPage />
+      </MemoryRouter>
+    </HermesI18nProvider>,
   )
 }
 
