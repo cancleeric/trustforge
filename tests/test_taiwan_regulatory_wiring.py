@@ -20,6 +20,7 @@ TAIWAN_SOURCE_NAMES = {
     "mops-tpex",
     "twse-punish",
     "tpex-punish",
+    "fsc-vasp-registry",
 }
 
 

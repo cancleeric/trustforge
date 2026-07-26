@@ -1,0 +1,102 @@
+[
+  {
+    "company_name": "禾亞數位科技股份有限公司",
+    "tax_id": "90615871",
+    "business": [
+      "虛擬資產交換商",
+      "虛擬資產交易平台",
+      "虛擬資產移轉商",
+      "虛擬資產保管商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "HOYA BIT",
+    "website": "https://hoyabit.com/"
+  },
+  {
+    "company_name": "拓荒數碼科技股份有限公司",
+    "tax_id": "90266260",
+    "business": [
+      "虛擬資產交換商",
+      "虛擬資產交易平台",
+      "虛擬資產移轉商",
+      "虛擬資產保管商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "ZONE Wallet",
+    "website": "https://www.zonewallet.io/"
+  },
+  {
+    "company_name": "重量科技股份有限公司",
+    "tax_id": "42996154",
+    "business": [
+      "虛擬資產移轉商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "KryptoGO Transfer",
+    "website": "https://www.kryptogo.com/products/transfer"
+  },
+  {
+    "company_name": "現代財富科技股份有限公司",
+    "tax_id": "54687323",
+    "business": [
+      "虛擬資產交換商",
+      "虛擬資產交易平台",
+      "虛擬資產移轉商",
+      "虛擬資產保管商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "MaiCoin/MAX",
+    "website": "https://group.maicoin.com/"
+  },
+  {
+    "company_name": "富昇數位股份有限公司",
+    "tax_id": "90115398",
+    "business": [
+      "虛擬資產交換商",
+      "虛擬資產移轉商",
+      "虛擬資產保管商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "TWEX",
+    "website": "https://www.twex.tw/"
+  },
+  {
+    "company_name": "跨鏈科技股份有限公司",
+    "tax_id": "94197836",
+    "business": [
+      "虛擬資產交換商",
+      "虛擬資產交易平台",
+      "虛擬資產移轉商",
+      "虛擬資產保管商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "Chainss、Atrix",
+    "website": "https://www.chainss.com.tw/"
+  },
+  {
+    "company_name": "幣託科技股份有限公司",
+    "tax_id": "90577481",
+    "business": [
+      "虛擬資產交換商",
+      "虛擬資產交易平台",
+      "虛擬資產移轉商",
+      "虛擬資產保管商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "BitoPro",
+    "website": "https://www.bitopro.com/"
+  },
+  {
+    "company_name": "鏈科股份有限公司",
+    "tax_id": "50897641",
+    "business": [
+      "虛擬資產交換商",
+      "虛擬資產交易平台",
+      "虛擬資產移轉商",
+      "虛擬資產保管商"
+    ],
+    "registered_on": "114年9月22日",
+    "brand": "XREX",
+    "website": "https://xrex.io/tw/zh/"
+  }
+]

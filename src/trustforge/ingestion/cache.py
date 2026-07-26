@@ -218,6 +218,7 @@ COIN_AGNOSTIC_SOURCES = frozenset(
         "mops-tpex",
         "twse-punish",
         "tpex-punish",
+        "fsc-vasp-registry",
     }
 )
 

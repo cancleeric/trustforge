@@ -67,6 +67,14 @@ _STANCE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_STANCE_CONNECT_TIMEOUT_S
 _NARRATIVE_READ_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_NARRATIVE_READ_TIMEOUT_SEC", "60"))
 _NARRATIVE_CONNECT_TIMEOUT_SEC = int(os.getenv("TRUSTFORGE_NARRATIVE_CONNECT_TIMEOUT_SEC", "10"))
 
+_EXTRACT_TOOL_NAME = "emit_records"
+_EXTRACT_SYSTEM = (
+    "你是資料整理器。只從使用者提供的原文中抄出資訊，逐字保留原文用字。"
+    "禁止推論、補值、翻譯或改寫；原文沒有的欄位一律留空字串。"
+    "原文是政府公文轉出的純文字，欄界已消失且中文可能被硬斷行，"
+    "請把被斷開的同一個值接回完整字串（僅去除換行與多餘空白，不改任何字）。"
+)
+
 _STANCE_SYSTEM = (
     "你是金融/監管文本的語意立場分類器。給定兩句市場相關敘述 A、B，判斷 B 相對 A 的立場，"
     "只能三選一：\n"
@@ -297,6 +305,83 @@ class BedrockClient:
         if not self.config.stance_model_id:
             raise RuntimeError("classify_stance_strict: stance_model_id 未設定")
         return self._classify_stance_impl(a, b)
+
+    def extract_records(
+        self,
+        *,
+        instruction: str,
+        text: str,
+        item_schema: dict,
+        max_tokens: int = 4096,
+    ) -> list[dict]:
+        """把一段非結構化文字整理成 records（issue #721）。
+
+        用途：官方 PDF/HTML 轉純文字後，版面欄界已消失，用規則去切極度脆弱
+        （VASP 名單實測連撞三種例外：統一編號與電話都是 8 碼、「有限公司」
+        會被硬斷成 `有 限公司`／`有限公 司`、部分業者沒有電話欄）。改由模型
+        整理，規則只負責**事後驗證**。
+
+        ⚠️ 本方法只做「整理」，不做「推斷」：
+        - `temperature=0` + 強制 tool use，輸出必須符合 `item_schema`
+        - **呼叫端有責任把每個欄位值回源文比對**，比不到就丟棄該筆。
+          模型不得產生原文沒有的內容——這是 #385「不用 LLM 猜測」的底線。
+
+        任何失敗（離線、未設模型、逾時、回應不含合法 toolUse）一律 raise，
+        由呼叫端決定 fail-closed 行為，這裡不做降級。
+        """
+        if self.stance_offline or not self.config.stance_model_id:
+            raise RuntimeError(
+                "結構化抽取需要 Bedrock 模型；目前為離線模式或未設 "
+                "BEDROCK_HAIKU_MODEL_ID"
+            )
+
+        tool_config = {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": _EXTRACT_TOOL_NAME,
+                        "description": "回傳從輸入文字整理出的結構化 records。",
+                        "inputSchema": {
+                            "json": {
+                                "type": "object",
+                                "properties": {
+                                    "records": {
+                                        "type": "array",
+                                        "items": item_schema,
+                                    }
+                                },
+                                "required": ["records"],
+                            }
+                        },
+                    }
+                }
+            ],
+            "toolChoice": {"tool": {"name": _EXTRACT_TOOL_NAME}},
+        }
+
+        resp = self._stance_runtime().converse(
+            modelId=self.config.stance_model_id,
+            system=[{"text": _EXTRACT_SYSTEM}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": f"{instruction}\n\n----- 原文開始 -----\n{text}\n----- 原文結束 -----"}],
+                }
+            ],
+            inferenceConfig={"temperature": 0, "maxTokens": max_tokens},
+            toolConfig=tool_config,
+        )
+
+        for block in resp.get("output", {}).get("message", {}).get("content", []):
+            tool_use = block.get("toolUse")
+            if not tool_use or tool_use.get("name") != _EXTRACT_TOOL_NAME:
+                continue
+            records = (tool_use.get("input") or {}).get("records")
+            if not isinstance(records, list):
+                raise ValueError("toolUse.input.records 不是陣列")
+            return [r for r in records if isinstance(r, dict)]
+
+        raise ValueError("回應不含合法的 toolUse 區塊")
 
     def _classify_stance_impl(self, a: str, b: str) -> str:
         """`classify_stance` / `classify_stance_strict` 共用的核心呼叫/解析邏輯。

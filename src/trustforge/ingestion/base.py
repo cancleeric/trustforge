@@ -85,6 +85,7 @@ _TAIWAN_REGULATORY_SOURCES: frozenset[str] = frozenset(
         "mops-tpex",
         "twse-punish",
         "tpex-punish",
+        "fsc-vasp-registry",  # issue #721：VASP 登記業者名單
     }
 )
 

@@ -88,6 +88,7 @@ _MAX_DOCS = 200
 ALLOWED_TW_HOSTS = frozenset(
     {
         "www.fsc.gov.tw",
+        "www.sfb.gov.tw",  # issue #721：證期局 VASP 專區
         "openapi.twse.com.tw",
         "mops.twse.com.tw",
         "www.twse.com.tw",
@@ -805,6 +806,325 @@ class TPEXSource(_PunishSource):
         self._endpoints = ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap22_O",)
 
 
+# ── FSC VASP 登記業者名單（issue #721）──────────────────────────────────
+
+
+_VASP_AREA_URL = "https://www.sfb.gov.tw/ch/home.jsp?id=1053&parentpath=0,8"
+
+# 專區頁上的名單連結長這樣（檔名嵌民國日期，會隨每次更新改變，故**不寫死**）：
+#   https://www.fsc.gov.tw/userfiles/file/1150722更新完成洗錢防制登記之VASP業者名單.pdf
+_VASP_PDF_HREF = re.compile(
+    r'href="(https://www\.fsc\.gov\.tw/userfiles/file/[^"]+\.pdf)"', re.IGNORECASE
+)
+# 檔名須同時含這些詞才視為名單本體（專區頁另有「疑似洗錢態樣例示」等無關 PDF）
+_VASP_PDF_NAME_TERMS = ("登記", "VASP")
+# 檔名開頭的民國日期（7 碼），如 `1150722` ＝ 2026-07-22
+_VASP_PDF_ROC_DATE = re.compile(r"(\d{7})")
+
+# 名單 record 的結構化 schema（交給模型填，規則負責事後驗證）。
+#
+# ⚠️ 為什麼不用規則直接切：PDF 轉純文字後表格欄界消失，實測連撞三種例外——
+#   1. 統一編號與電話號碼都是 8 碼數字（`電話：02-77566286`），純數字錨點會
+#      多抓 6 筆假業者
+#   2. 「有限公司」會被硬斷行拆開，實測有 `有 限公司` 與 `有限公 司` 兩種
+#   3. 部分業者**沒有電話欄**，靠「前一筆以電話結尾」切界會失效
+# 每修一種就冒出下一種，屬於版面規則本質上的脆弱。故改由模型整理，
+# 規則只做**回源比對**（見 `_verify_against_source`）。
+_VASP_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "company_name": {"type": "string", "description": "業者名稱全銜"},
+        "tax_id": {"type": "string", "description": "統一編號，8 碼數字"},
+        "business": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "核准經營之業務，逐項",
+        },
+        "registered_on": {"type": "string", "description": "完成登記日期，原文民國格式"},
+        "brand": {"type": "string", "description": "對外營業品牌名稱，無則空字串"},
+        "website": {"type": "string", "description": "網站網址，無則空字串"},
+    },
+    "required": ["company_name", "tax_id", "business", "registered_on"],
+}
+
+_VASP_INSTRUCTION = (
+    "以下是金管會「完成洗錢防制登記之 VASP 業者名單」PDF 轉出的純文字，"
+    "原本是一個表格，每一列是一家業者。請逐列整理成 records。\n"
+    "注意：文字中的 8 碼數字可能是統一編號，也可能是電話號碼的一部分"
+    "（如「電話：02-77566286」）——只有位於「統一編號」欄的才是統一編號。"
+    "業者名稱與其他中文欄位可能被硬斷行，請接回完整字串。"
+    "原文沒有的欄位留空字串，不要推測。"
+)
+
+_VASP_ROC_DATE_PARTS = re.compile(r"(\d{2,3})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+
+
+class FSCVASPRegistrySource(TaiwanRegulatorySource):
+    """FSC 完成洗錢防制登記之 VASP 業者名單（issue #721）。
+
+    與本模組其餘來源的關鍵差異：**這是唯一產出結構化實體清單的來源**，
+    其餘七源都只是文字公告。每一家登記業者輸出一個 Document，`meta` 帶
+    統一編號、核准業務、登記日期、品牌名稱、網站，供下游做 entity mapping
+    與「某交易所是否完成登記」這類判斷。
+
+    兩段擷取：
+
+    1. 證期局 VASP 專區頁（HTML）→ 找出**當前**名單 PDF 連結。
+       檔名嵌民國日期會隨更新改變，故必須動態解析，不可寫死 URL。
+    2. 下載該 PDF → 解析業者清單。
+
+    PDF 用 Type0/CIDFontType2 字型且把 ToUnicode CMap 放在壓縮物件流裡，
+    需 `pypdf` 才能正確取出中文（見 `pyproject.toml` 相依說明）。
+
+    fail-closed：專區頁抓不到 / 找不到 PDF 連結 / PDF 截斷 / 解析不出任何
+    業者 → 一律視為來源不可用並拋 `TaiwanRegulatoryUnavailable`。
+    **絕不回退成「名單為空」**——名單缺漏在信任評分上是危險的假陰性。
+    """
+
+    name = "fsc-vasp-registry"
+    _agency = "金融監督管理委員會證券期貨局"
+    _url_kind = "permalink"
+    _history_backfillable = False  # 只有當前版本，舊版名單不對外保留
+    _endpoints = (_VASP_AREA_URL,)
+
+    def _parse(self, raw: bytes, url: str) -> list[dict]:
+        """第一段：從專區頁找出名單 PDF；第二段：抓並解析該 PDF。"""
+        page = raw.decode("utf-8", errors="replace")
+        pdf_url = self._find_list_pdf(page)
+        if not pdf_url:
+            raise ValueError("專區頁找不到 VASP 名單 PDF 連結（版面可能已改）")
+
+        if not self._validate_host(pdf_url):
+            raise ValueError(f"名單 PDF 不在白名單主機：{urlparse(pdf_url).hostname}")
+
+        pdf_bytes = self._fetch_endpoint(pdf_url)
+        if pdf_bytes is None:
+            raise ValueError("名單 PDF 擷取失敗")
+        if not self._pdf_is_complete(pdf_bytes):
+            raise ValueError("名單 PDF 不完整（疑似被 max_bytes 截斷）")
+
+        text = self._extract_pdf_text(pdf_bytes)
+        records = self._parse_entries(text)
+        if not records:
+            # 解析不出任何業者＝版面改了或抽字失敗。名單本來就不可能是空的
+            # （公告明載有數家業者），故一律當失敗，不得回報「名單為空」。
+            raise ValueError("名單 PDF 解析不出任何業者（版面可能已改）")
+
+        updated_at = self._roc_date_from_filename(pdf_url)
+        pdf_hash = _sha256(pdf_bytes)
+        for record in records:
+            record["pdf_url"] = pdf_url
+            record["content_hash"] = pdf_hash
+            record["list_updated_on"] = updated_at
+        return records
+
+    # ── 第一段：專區頁 ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _find_list_pdf(page_html: str) -> str | None:
+        """從專區頁挑出名單 PDF。
+
+        專區頁另掛「疑似洗錢態樣例示」等無關 PDF，故以檔名同時含「登記」
+        與「VASP」為條件；多個候選時取民國日期最新者。
+        """
+        from urllib.parse import unquote
+
+        candidates: list[tuple[str, str]] = []
+        for href in _VASP_PDF_HREF.findall(page_html):
+            url = html.unescape(href)
+            filename = unquote(url.rsplit("/", 1)[-1])
+            if all(term in filename for term in _VASP_PDF_NAME_TERMS):
+                stamp = _VASP_PDF_ROC_DATE.search(filename)
+                candidates.append((stamp.group(1) if stamp else "", url))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    @staticmethod
+    def _roc_date_from_filename(pdf_url: str) -> date | None:
+        """檔名開頭的民國日期即名單更新日（`1150722` ＝ 2026-07-22）。"""
+        from urllib.parse import unquote
+
+        stamp = _VASP_PDF_ROC_DATE.search(unquote(pdf_url.rsplit("/", 1)[-1]))
+        return roc_date_to_date(stamp.group(1)) if stamp else None
+
+    # ── 第二段：PDF ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _pdf_is_complete(payload: bytes) -> bool:
+        """PDF 完整性 sentinel（同 RSS 的 `</rss>` 用意）。
+
+        `safe_fetch` 超過 max_bytes 是靜默截斷，這裡是唯一偵測點。
+        """
+        return payload.startswith(b"%PDF") and b"%%EOF" in payload[-2048:]
+
+    @staticmethod
+    def _extract_pdf_text(payload: bytes) -> str:
+        """用 pypdf 抽出全文。
+
+        延遲匯入：pypdf 缺席時應讓本來源整批失敗（fail-closed），
+        而不是讓整個 ingestion 模組匯入失敗。
+        """
+        import io
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(payload))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    def _parse_entries(self, text: str) -> list[dict]:
+        """把 PDF 全文整理成一家一筆——交給模型做，規則只做回源驗證。
+
+        見 `_VASP_ITEM_SCHEMA` 上方說明：版面規則在這份 PDF 上連撞三種例外，
+        每補一種就冒出下一種。模型負責「整理」，`_verify_against_source()`
+        負責確保它沒有「發明」。
+        """
+        from ..bedrock import BedrockClient
+
+        records = BedrockClient().extract_records(
+            instruction=_VASP_INSTRUCTION,
+            text=text,
+            item_schema=_VASP_ITEM_SCHEMA,
+        )
+
+        verified: list[dict] = []
+        for record in records:
+            clean = self._verify_against_source(record, text)
+            if clean is not None:
+                verified.append(clean)
+        return verified
+
+    @staticmethod
+    def _verify_against_source(record: dict, source_text: str) -> dict | None:
+        """逐欄回源比對——模型只能整理，不能無中生有。
+
+        比對前把原文與欄位值的空白全部去除：PDF 抽出的文字會把同一個值
+        硬斷行（`禾亞數位科技股份\\n有限公司`），模型接回後與原文逐字不同，
+        但去空白後必須完全相符。任一必填欄位比不到就丟棄整筆並記 WARNING。
+
+        這是 #385「不用 LLM 猜測」的守門：模型產出的每個字都必須在官方
+        原文裡找得到。
+        """
+        squeezed = re.sub(r"\s+", "", source_text)
+
+        def present(value: str) -> bool:
+            stripped = re.sub(r"\s+", "", value or "")
+            return bool(stripped) and stripped in squeezed
+
+        name = (record.get("company_name") or "").strip()
+        tax_id = (record.get("tax_id") or "").strip()
+        if not name or not tax_id:
+            return None
+        if not (tax_id.isdigit() and len(tax_id) == 8):
+            _log.warning("VASP 名單：統一編號格式不符，丟棄該筆：%r", tax_id)
+            return None
+        for field, value in (("company_name", name), ("tax_id", tax_id)):
+            if not present(value):
+                _log.warning(
+                    "VASP 名單：%s 在原文中找不到，丟棄該筆（疑為模型杜撰）：%r",
+                    field, value,
+                )
+                return None
+
+        # 選填欄位比不到就清空，不丟棄整筆。
+        brand = (record.get("brand") or "").strip()
+        website = (record.get("website") or "").strip()
+        if brand and not present(brand):
+            _log.warning("VASP 名單：品牌名稱在原文中找不到，清空：%r", brand)
+            brand = ""
+        if website and not present(website):
+            _log.warning("VASP 名單：網站在原文中找不到，清空：%r", website)
+            website = ""
+
+        business = [
+            item.strip()
+            for item in (record.get("business") or [])
+            if isinstance(item, str) and item.strip() and present(item)
+        ]
+
+        return {
+            "company_name": name,
+            "tax_id": tax_id,
+            "business": business,
+            "registered_on": _roc_chinese_date(record.get("registered_on") or ""),
+            "brand": brand,
+            "website": website,
+        }
+
+    # ── Document ────────────────────────────────────────────────────────
+
+    def _to_document(
+        self, record: dict, *, url: str, fetched_at: datetime, content_hash: str
+    ) -> Document | None:
+        tax_id = record.get("tax_id") or ""
+        name = record.get("company_name") or ""
+        if not tax_id or not name:
+            return None
+
+        updated_on = record.get("list_updated_on")
+        registered_on = record.get("registered_on")
+        # 名單更新日為日精度 → fail-closed 取台北該日結束。
+        visible_at = end_of_taipei_day(updated_on) if updated_on else None
+
+        business = record.get("business") or []
+        brand = record.get("brand") or ""
+        title = f"{name}（統一編號 {tax_id}）完成虛擬資產服務洗錢防制登記"
+        if brand:
+            title = f"{title}／品牌 {brand}"
+        body = "\n".join(
+            part
+            for part in (
+                "核准經營之業務：" + "、".join(business) if business else "",
+                f"完成登記日期：{registered_on.isoformat()}" if registered_on else "",
+                f"網站：{record['website']}" if record.get("website") else "",
+            )
+            if part
+        )
+
+        return self._finish_document(
+            # 統一編號是政府核發的實體唯一鍵，比任何內容 hash 都穩定。
+            doc_id=f"tw-reg:fsc-vasp:{tax_id}",
+            title=title,
+            body=body,
+            url=record.get("pdf_url") or url,
+            published=(
+                datetime.combine(updated_on, datetime.min.time())
+                if updated_on
+                else None
+            ),
+            visible_at=visible_at,
+            fetched_at=fetched_at,
+            # 用 PDF 本身的 hash，而非第一段那個專區頁 HTML 的 hash。
+            content_hash=record.get("content_hash") or content_hash,
+            extra_meta={
+                "registry": "fsc-vasp-aml-registration",
+                "company_name": name,
+                "tax_id": tax_id,
+                "brand": brand,
+                "website": record.get("website") or "",
+                "licensed_business": business,
+                "registered_on": registered_on.isoformat() if registered_on else None,
+                "list_updated_on": updated_on.isoformat() if updated_on else None,
+                "list_pdf_url": record.get("pdf_url") or "",
+            },
+        )
+
+
+
+
+
+def _roc_chinese_date(raw: str) -> date | None:
+    """`114 年 9月 22 日` → `date(2025, 9, 22)`。"""
+    parts = _VASP_ROC_DATE_PARTS.search(raw)
+    if not parts:
+        return None
+    try:
+        return date(int(parts.group(1)) + 1911, int(parts.group(2)), int(parts.group(3)))
+    except ValueError:
+        return None
+
+
 def build_taiwan_regulatory_sources() -> list[Source]:
     """回傳所有台灣監管連接器。
 
@@ -820,4 +1140,5 @@ def build_taiwan_regulatory_sources() -> list[Source]:
         MOPSSource("mops-tpex"),
         TWSESource(),
         TPEXSource(),
+        FSCVASPRegistrySource(),
     ]

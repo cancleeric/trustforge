@@ -76,13 +76,14 @@ def test_every_endpoint_is_on_the_host_allowlist(factory) -> None:
         assert source._validate_host(url), f"{source.name} 端點不在白名單：{url}"
 
 
-def test_builder_returns_seven_distinct_sources() -> None:
+def test_builder_returns_eight_distinct_sources() -> None:
     sources = build_taiwan_regulatory_sources()
     names = [s.name for s in sources]
-    assert len(names) == len(set(names)) == 7
+    assert len(names) == len(set(names)) == 8
     assert set(names) == {
         "fsc-news", "fsc-penalty", "fsc-notice",
         "mops-twse", "mops-tpex", "twse-punish", "tpex-punish",
+        "fsc-vasp-registry",
     }
 
 
@@ -388,3 +389,228 @@ def test_tokenisation_term_included() -> None:
     """『RWA代幣化小組』是真實的監管事件，初版詞集漏收。"""
     assert "代幣化" in tw._CRYPTO_TERMS
     assert tw._gate_match("「RWA代幣化小組」完成驗證技術的可行性", "") == "title"
+
+
+# ── FSC VASP 登記業者名單（issue #721）──────────────────────────────────
+#
+# 這個來源不用規則切版面，改由模型整理、規則做回源驗證（見
+# `_VASP_ITEM_SCHEMA` 上方說明）。測試據此分兩類：
+#   1. 結構化結果正確（用真實跑出來的 LLM 輸出當 fixture，不打 Bedrock）
+#   2. **回源驗證擋得住杜撰**——這是 #385「不用 LLM 猜測」的底線
+
+VASP_AREA = FIXTURES / "vasp_area.html"
+VASP_PDF = FIXTURES / "vasp_list.pdf"
+VASP_LLM_RECORDS = json.loads(
+    (FIXTURES / "vasp_llm_records.json").read_text(encoding="utf-8")
+)
+
+
+def _stub_vasp(monkeypatch, records=None) -> None:
+    """兩段擷取用 fixture，LLM 整理用實跑存下的輸出（測試不打 Bedrock）。"""
+
+    def fake_fetch(url: str, **kwargs):
+        if url.endswith(".pdf"):
+            return VASP_PDF.read_bytes()
+        return VASP_AREA.read_bytes()
+
+    monkeypatch.setattr(tw.safe_fetch, "fetch_url", fake_fetch)
+
+    import trustforge.bedrock as bedrock
+
+    payload = VASP_LLM_RECORDS if records is None else records
+    monkeypatch.setattr(
+        bedrock.BedrockClient, "extract_records", lambda self, **kw: payload
+    )
+
+
+def test_vasp_registry_yields_one_document_per_company(monkeypatch) -> None:
+    """這是唯一產出結構化實體清單的來源，其餘七源都只是文字公告。"""
+    _stub_vasp(monkeypatch)
+    docs = tw.FSCVASPRegistrySource().fetch("vasp")
+
+    assert len(docs) == 8, "fixture 名單為 8 家登記業者"
+    assert len({d.id for d in docs}) == 8
+    for doc in docs:
+        assert doc.id.startswith("tw-reg:fsc-vasp:")
+        assert doc.meta["registry"] == "fsc-vasp-aml-registration"
+
+
+def test_vasp_document_carries_structured_entity_fields(monkeypatch) -> None:
+    _stub_vasp(monkeypatch)
+    docs = tw.FSCVASPRegistrySource().fetch("vasp")
+    hoya = next(d for d in docs if d.meta["tax_id"] == "90615871")
+
+    assert hoya.meta["company_name"] == "禾亞數位科技股份有限公司"
+    assert hoya.meta["brand"] == "HOYA BIT"
+    assert hoya.meta["website"] == "https://hoyabit.com/"
+    assert len(hoya.meta["licensed_business"]) == 4
+    assert hoya.meta["registered_on"] == "2025-09-22"
+    assert hoya.id == "tw-reg:fsc-vasp:90615871"
+
+
+def test_vasp_doc_id_uses_the_government_issued_tax_id(monkeypatch) -> None:
+    """統一編號是政府核發的實體唯一鍵，比任何內容 hash 都穩定。"""
+    _stub_vasp(monkeypatch)
+    for doc in tw.FSCVASPRegistrySource().fetch("vasp"):
+        assert doc.id.split(":")[-1] == doc.meta["tax_id"]
+        assert len(doc.meta["tax_id"]) == 8
+
+
+# ── 回源驗證：模型只能整理，不能發明 ─────────────────────────────────────
+
+def test_fabricated_company_is_dropped(monkeypatch, caplog) -> None:
+    """原文沒有的業者一律丟棄——這是「不用 LLM 猜測」的守門。"""
+    import logging
+
+    fake = dict(VASP_LLM_RECORDS[0])
+    fake["company_name"] = "虛構幣安台灣股份有限公司"
+    fake["tax_id"] = "12345678"
+    _stub_vasp(monkeypatch, VASP_LLM_RECORDS + [fake])
+
+    with caplog.at_level(logging.WARNING, logger="trustforge.ingestion.taiwan_regulatory"):
+        docs = tw.FSCVASPRegistrySource().fetch("vasp")
+
+    assert len(docs) == 8, "杜撰的那筆必須被丟棄"
+    assert "12345678" not in {d.meta["tax_id"] for d in docs}
+    assert "找不到" in caplog.text
+
+
+def test_malformed_tax_id_is_dropped(monkeypatch) -> None:
+    bad = dict(VASP_LLM_RECORDS[0])
+    bad["company_name"] = "拓荒數碼科技股份有限公司"
+    bad["tax_id"] = "02-77566286"  # 電話被誤填成統編
+    _stub_vasp(monkeypatch, [bad])
+
+    with pytest.raises(TaiwanRegulatoryUnavailable):
+        tw.FSCVASPRegistrySource().fetch("vasp")
+
+
+def test_fabricated_optional_field_is_cleared_not_fatal(monkeypatch) -> None:
+    """選填欄位比不到就清空，不丟棄整筆——業者本身仍是真的。"""
+    tweaked = [dict(r) for r in VASP_LLM_RECORDS]
+    tweaked[0]["website"] = "https://not-in-the-pdf.example.com/"
+    tweaked[0]["brand"] = "完全沒出現過的品牌"
+    _stub_vasp(monkeypatch, tweaked)
+
+    docs = tw.FSCVASPRegistrySource().fetch("vasp")
+    hoya = next(d for d in docs if d.meta["tax_id"] == "90615871")
+    assert hoya.meta["website"] == ""
+    assert hoya.meta["brand"] == ""
+    assert hoya.meta["company_name"] == "禾亞數位科技股份有限公司"
+
+
+def test_verification_tolerates_pdf_line_breaks(monkeypatch) -> None:
+    """PDF 會把中文值硬斷行（`禾亞數位科技股份\\n有限公司`），模型接回後
+    與原文逐字不同——回源比對必須先去空白，否則真實資料會被誤判為杜撰。"""
+    source_text = "業者名稱 禾亞數位科技股份\n有限公司 90615871"
+    record = {
+        "company_name": "禾亞數位科技股份有限公司",
+        "tax_id": "90615871",
+        "business": [],
+        "registered_on": "114年9月22日",
+    }
+    verified = tw.FSCVASPRegistrySource._verify_against_source(record, source_text)
+    assert verified is not None
+    assert verified["company_name"] == "禾亞數位科技股份有限公司"
+
+
+def test_verification_rejects_text_absent_from_source() -> None:
+    record = {
+        "company_name": "不存在公司",
+        "tax_id": "99999999",
+        "business": [],
+        "registered_on": "114年9月22日",
+    }
+    assert tw.FSCVASPRegistrySource._verify_against_source(record, "無關內容") is None
+
+
+# ── 兩段擷取與 fail-closed ───────────────────────────────────────────────
+
+def test_vasp_picks_the_list_pdf_not_the_other_attachments() -> None:
+    """專區頁另掛「疑似洗錢態樣例示.pdf」等無關附件。"""
+    from urllib.parse import unquote
+
+    picked = tw.FSCVASPRegistrySource._find_list_pdf(
+        VASP_AREA.read_text(encoding="utf-8")
+    )
+    assert picked is not None
+    assert "VASP" in unquote(picked)
+    assert "疑似洗錢態樣" not in unquote(picked)
+
+
+def test_vasp_pdf_url_is_resolved_dynamically_not_hardcoded() -> None:
+    """檔名嵌民國日期會隨每次更新改變，寫死就會在下次更新後失效。"""
+    import inspect
+
+    body = inspect.getsource(tw.FSCVASPRegistrySource._find_list_pdf)
+    assert "1150722" not in body, "不得寫死當期 PDF 檔名"
+    assert tw._VASP_PDF_NAME_TERMS == ("登記", "VASP")
+
+
+def test_vasp_list_update_date_comes_from_the_filename() -> None:
+    """`1150722` ＝ 2026-07-22，既是更新日期也是變更偵測訊號。"""
+    url = "https://www.fsc.gov.tw/userfiles/file/1150722%E6%9B%B4%E6%96%B0.pdf"
+    assert tw.FSCVASPRegistrySource._roc_date_from_filename(url) == date(2026, 7, 22)
+
+
+def test_vasp_missing_pdf_link_is_fail_closed(monkeypatch) -> None:
+    """版面改了找不到連結 → 來源不可用，**不得**回報成「名單為空」。"""
+    monkeypatch.setattr(
+        tw.safe_fetch, "fetch_url", lambda url, **kw: b"<html><body>no links</body></html>"
+    )
+    source = tw.FSCVASPRegistrySource()
+    with pytest.raises(TaiwanRegulatoryUnavailable):
+        source.fetch("vasp")
+    assert source.last_degraded is True
+
+
+def test_vasp_truncated_pdf_is_rejected(monkeypatch) -> None:
+    """`safe_fetch` 超過 max_bytes 是靜默截斷；PDF 用 %%EOF 當 sentinel。"""
+    whole = VASP_PDF.read_bytes()
+
+    def fake(url: str, **kwargs):
+        return whole[: len(whole) // 2] if url.endswith(".pdf") else VASP_AREA.read_bytes()
+
+    monkeypatch.setattr(tw.safe_fetch, "fetch_url", fake)
+    with pytest.raises(TaiwanRegulatoryUnavailable):
+        tw.FSCVASPRegistrySource().fetch("vasp")
+
+
+def test_vasp_llm_unavailable_is_fail_closed(monkeypatch) -> None:
+    """模型不可用（離線／無憑證／逾時）→ 來源不可用，不得靜默回空名單。"""
+    _stub_vasp(monkeypatch)
+    import trustforge.bedrock as bedrock
+
+    def boom(self, **kwargs):
+        raise RuntimeError("no credentials")
+
+    monkeypatch.setattr(bedrock.BedrockClient, "extract_records", boom)
+    with pytest.raises(TaiwanRegulatoryUnavailable):
+        tw.FSCVASPRegistrySource().fetch("vasp")
+
+
+def test_vasp_empty_result_never_reports_an_empty_registry(monkeypatch) -> None:
+    """名單本來就不可能是空的（公告明載有數家業者）。整理不出來一律當失敗
+    ——名單缺漏在信任評分上是危險的假陰性。"""
+    _stub_vasp(monkeypatch, [])
+    with pytest.raises(TaiwanRegulatoryUnavailable):
+        tw.FSCVASPRegistrySource().fetch("vasp")
+
+
+def test_vasp_pdf_host_must_be_allowlisted() -> None:
+    assert "www.sfb.gov.tw" in ALLOWED_TW_HOSTS
+    assert tw.FSCVASPRegistrySource()._validate_host(tw._VASP_AREA_URL) is True
+
+
+def test_vasp_content_hash_is_the_pdf_not_the_landing_page(monkeypatch) -> None:
+    """兩段擷取時 content hash 必須指向真正的資料本體。"""
+    import hashlib
+
+    _stub_vasp(monkeypatch)
+    docs = tw.FSCVASPRegistrySource().fetch("vasp")
+    expected = hashlib.sha256(VASP_PDF.read_bytes()).hexdigest()
+    assert all(d.meta["content_hash"] == expected for d in docs)
+
+
+def test_vasp_is_registered_in_the_builder() -> None:
+    assert "fsc-vasp-registry" in {s.name for s in build_taiwan_regulatory_sources()}
