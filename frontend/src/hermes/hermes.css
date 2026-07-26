@@ -318,7 +318,24 @@
 }
 
 .hermes-frame {
-  --hermes-top: 44px;
+  /* N38: HermesHeroTagline 是一條常駐可見的 strip，但版面完全沒替它留高度——
+     它和軌道/艦橋原本都吃同一個 `top: var(--hermes-top)`，所以直接壓在左右軌
+     與艦橋的第一排標題上。背景 rgba(10,16,24,.42) 只有 42% 不透明，下面的
+     標題不是被遮掉而是透出來糊成一團。實測 1280x800 en：strip 寬 1113px
+     （badge 278 + 文案 825），蓋住 `GALAXY TELEMETRY`(x17,y59) 與
+     `BRIDGE MAIN VIEWPORT`(x294,y59)；zh-TW 1280/1440 蓋住 `主橋接視埠`。
+
+     第一次嘗試是直接把 --hermes-top 從 44px 調到 78px，實測無效並已回退：
+     strip 自己也吃 `top: var(--hermes-top)`，變數一動 strip 跟著往下移，
+     兩者永遠貼在一起（負向對照：strip 與左軌都變成 y=79，對撞數不變）。
+
+     正解是把「topbar 有多高」和「內容從多下面開始」拆成兩個量：
+       --hermes-topbar  topbar 自身高度，strip 貼在它下緣
+       --hermes-tagline strip 佔掉的高度（≤1024px strip 隱藏 → 0）
+       --hermes-top     = 兩者之和，軌道/艦橋/工作台一律吃這個 */
+  --hermes-topbar: 44px;
+  --hermes-tagline: 35px;
+  --hermes-top: calc(var(--hermes-topbar) + var(--hermes-tagline));
   --hermes-bottom: clamp(94px, 13.4vh, 120px);
   --hermes-rail: clamp(230px, 20.84vw, 300px);
   --hermes-right-rail: var(--hermes-rail);
@@ -486,7 +503,10 @@
 .hermes-module-deck {
   position: absolute;
   z-index: 18;
-  inset: 44px 300px 120px;
+  /* N38: 原本硬編 44px，--hermes-top 改成含 tagline strip 的 78px 後，
+     這裡不跟著吃變數就會比左右軌高 34px、上緣被 strip 蓋住。
+     （`300px 120px` 是另一個既知硬編問題，不在本次範圍。） */
+  inset: var(--hermes-top) 300px 120px;
   overflow: hidden;
   color: var(--color-hermes-tx);
   background: linear-gradient(180deg, #050b13, #03080f);
@@ -2240,6 +2260,14 @@
      本就不影響操作（pointerEvents:none）。 */
   .hermes-hero-tagline {
     display: none !important;
+  }
+
+  /* N38: 這個斷點內 strip 是 display:none，就不該再替它保留高度。
+     歸零而不是改 --hermes-top，讓「= topbar + tagline」這條關係在所有
+     斷點都成立。1024x420 這種矮視窗最吃不起白掉的高度（左軌面板本來
+     就是被壓爛的重災區，見 N37）。 */
+  .hermes-frame {
+    --hermes-tagline: 0px;
   }
 }
 
@@ -4225,5 +4253,17 @@
 
   .hermes-onboarding footer {
     align-items: flex-end;
+  }
+}
+
+/* N38: en 的文案較長，實測 1025~1145px 之間 strip 會折成兩行（高 61px），
+   1160px 起才是單行（35px）——邊界是逐 15px 掃出來的，不是估的。
+   折行時只留 35px 會讓 strip 往下多吃 26px、又壓回軌道頂部，所以這個帶狀
+   區間要留 61px。zh-TW 在同一區間全程單行（實測 1025~1280 都是 35px），
+   多留 26px 是白掉的高度，因此用 `html[lang='en']` 只針對英文生效
+   （`documentElement.lang` 由 N15 保證有正確設值）。 */
+@media (min-width:1025px) and (max-width:1159px) {
+  html[lang='en'] .hermes-frame {
+    --hermes-tagline: 61px;
   }
 }

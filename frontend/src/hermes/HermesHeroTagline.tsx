@@ -12,7 +12,11 @@ export default function HermesHeroTagline() {
       role="region"
       aria-label={t('tagline')}
       style={{
-        position: 'absolute', left: 0, right: 0, top: 'var(--hermes-top)', zIndex: 9,
+        // N38: 原本吃 `var(--hermes-top)`，但那個變數的語意是「內容從多下面
+        // 開始」，而內容起點必須把這條 strip 本身算進去——同吃一個變數就等於
+        // strip 永遠疊在內容第一排上。改吃 `--hermes-topbar`（topbar 自身高度），
+        // 讓 strip 貼在 topbar 下緣，內容則由 --hermes-top 讓到 strip 下方。
+        position: 'absolute', left: 0, right: 0, top: 'var(--hermes-topbar)', zIndex: 9,
         display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center',
         gap: 10, padding: '7px 20px',
         background: 'rgba(10,16,24,.42)', backdropFilter: 'blur(6px)',
