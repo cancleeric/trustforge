@@ -87,8 +87,14 @@ try {
       await page.close()
     }
 
+    // N27 is language-dependent (CJK glyphs wrap where Latin labels don't at
+    // the same width), so the topbar-focused assertions below run in both
+    // supported locales rather than just 'en'.
     for (const viewport of HIT_TEST_VIEWPORTS) {
-      await runHitTestMatrix(browser, viewport)
+      for (const locale of ['en', 'zh-TW']) {
+        await runHitTestMatrix(browser, viewport, locale)
+        await runFullExperienceChecks(browser, viewport, locale)
+      }
     }
   } finally {
     await browser.close()
@@ -109,12 +115,14 @@ console.log(
   `Hit-test matrix OK: ${HIT_TEST_VIEWPORTS.map((v) => `${v.width}x${v.height}`).join(', ')}`,
 )
 
-async function runHitTestMatrix(browser, viewport) {
-  const label = `${viewport.width}x${viewport.height}`
+async function runHitTestMatrix(browser, viewport, locale = 'en') {
+  const label = `${viewport.width}x${viewport.height} ${locale}`
   const context = await browser.newContext()
   // English strings are the longest of the two supported locales and are
-  // what the original N22/N23 audits reproduced against.
-  await context.addCookies([{ name: 'trustforge_hermes_locale', value: 'en', url: BASE_URL }])
+  // what the original N22/N23 audits reproduced against. N27's defect was
+  // CJK-specific (labels wrap vertically at widths Latin text doesn't), so
+  // callers also exercise zh-TW.
+  await context.addCookies([{ name: 'trustforge_hermes_locale', value: locale, url: BASE_URL }])
   const page = await context.newPage()
   await page.setViewportSize(viewport)
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }))
@@ -183,24 +191,31 @@ async function runHitTestMatrix(browser, viewport) {
       }
 
       // Any interactive-looking button in the topbar (nav links, the
-      // beginner-mode toggle itself, the language toggle) that is
-      // genuinely on-screen must remain reachable while the narrative is
-      // open in its default state. A full-viewport click-blocking overlay
-      // (like the removed backdrop) would fail every one of these. Buttons
-      // whose center falls outside the viewport are skipped here — that's
-      // a separate, pre-existing narrow-viewport topbar-overflow issue
-      // (confirmed unrelated to the narrative: same position whether it's
-      // open or closed), out of this fix's scope.
+      // beginner-mode toggle itself, the language toggle) must remain
+      // reachable while the narrative is open in its default state. A
+      // full-viewport click-blocking overlay (like the removed backdrop)
+      // would fail every one of these.
+      //
+      // N28: buttons whose center falls outside the viewport used to be
+      // skipped here, because at the time this was written the topbar had
+      // a real, separate narrow-viewport overflow bug (the language toggle
+      // and others fell off the right edge at 375-390px and 561-680px,
+      // confirmed unrelated to the narrative). That overflow is now fixed
+      // (hermes.css ≤560px/≤430px topbar collapse rules + the ≤900px
+      // nav-adjacent-badge collapse), so every topbar button with non-zero
+      // geometry is now required to be on-screen — this is the assertion
+      // that would have caught N28 in the first place.
       const topbarButtons = Array.from(document.querySelectorAll('.hermes-topbar button, .hermes-topbar a'))
       for (const btn of topbarButtons) {
         const br = btn.getBoundingClientRect()
-        const cx = br.x + br.width / 2
-        const cy = br.y + br.height / 2
-        const onScreen = cx >= 0 && cy >= 0 && cx <= window.innerWidth && cy <= window.innerHeight
-        if (!onScreen) continue
+        if (br.width <= 0 || br.height <= 0) continue
+        const label = btn.getAttribute('aria-label') || btn.textContent?.trim().slice(0, 30) || btn.tagName
+        if (br.x < -1 || br.y < -1 || br.right > window.innerWidth + 1 || br.bottom > window.innerHeight + 1) {
+          out.failures.push(`topbar control "${label}" overflows viewport x=${br.x.toFixed(1)} right=${br.right.toFixed(1)} innerWidth=${window.innerWidth}`)
+          continue
+        }
         const r = probe(btn)
         if (r.visible && r.hits === 0) {
-          const label = btn.getAttribute('aria-label') || btn.textContent?.trim().slice(0, 30) || btn.tagName
           out.failures.push(`topbar control "${label}" unreachable while beginner narrative open, covered by ${r.coverer}`)
         }
       }
@@ -310,6 +325,77 @@ async function runHitTestMatrix(browser, viewport) {
   }, MIN_TARGET)
 
   for (const f of [...result.failures, ...result2.failures]) failures.push(`${label}: ${f}`)
+  await context.close()
+}
+
+// N24/N25/N27: the default (beginner) topbar in runHitTestMatrix above only
+// ever renders the single "analyze" nav item, so it can't exercise the rest
+// of the nav row (compare/history/sources/costs) where N27's CJK wrapping
+// and clipping actually showed up, nor the "?" glossary triggers (N25),
+// which only render once the right rail has real content. This runs with
+// the "full experience" cookie so the whole nav row and glossary triggers
+// are present, in both locales (N27 is CJK-specific).
+async function runFullExperienceChecks(browser, viewport, locale) {
+  const label = `${viewport.width}x${viewport.height} ${locale} (full experience)`
+  const context = await browser.newContext()
+  await context.addCookies([
+    { name: 'trustforge_hermes_locale', value: locale, url: BASE_URL },
+    { name: 'trustforge_hermes_experience', value: 'full', url: BASE_URL },
+  ])
+  const page = await context.newPage()
+  await page.setViewportSize(viewport)
+  await page.route('**/api/**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }))
+  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('.hermes-dashboard', { state: 'visible' })
+
+  const result = await page.evaluate((minTarget) => {
+    const out = []
+
+    // N27: nav labels (analyze/compare/history/sources/costs) must render
+    // as a single line inside the topbar's own bounds, not wrap and get
+    // clipped by the topbar's fixed height.
+    const topbar = document.querySelector('.hermes-topbar')
+    const topbarBox = topbar ? topbar.getBoundingClientRect() : null
+    document.querySelectorAll('.hermes-nav-item').forEach((el) => {
+      const r = el.getBoundingClientRect()
+      if (r.width <= 0 || r.height <= 0) return
+      const label = el.textContent?.trim() || '(nav item)'
+      if (topbarBox && (r.top < topbarBox.top - 1 || r.bottom > topbarBox.bottom + 1)) {
+        out.push(`nav item "${label}" clipped by topbar bounds: item top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} topbar top=${topbarBox.top.toFixed(1)} bottom=${topbarBox.bottom.toFixed(1)}`)
+      }
+      // N24: every nav item is an equally-weighted click target, including
+      // "analyze", not just its siblings.
+      if (r.height < minTarget) {
+        out.push(`nav item "${label}" ${r.width.toFixed(1)}x${r.height.toFixed(1)} under ${minTarget}x${minTarget}`)
+      }
+    })
+
+    // N28: with the full toolbar rendered (ship toggle + cost ledger also
+    // visible), every topbar control must still stay on-screen.
+    document.querySelectorAll('.hermes-topbar button, .hermes-topbar a').forEach((btn) => {
+      const r = btn.getBoundingClientRect()
+      if (r.width <= 0 || r.height <= 0) return
+      const label = btn.getAttribute('aria-label') || btn.textContent?.trim().slice(0, 30) || btn.tagName
+      if (r.x < -1 || r.y < -1 || r.right > window.innerWidth + 1 || r.bottom > window.innerHeight + 1) {
+        out.push(`topbar control "${label}" overflows viewport x=${r.x.toFixed(1)} right=${r.right.toFixed(1)} innerWidth=${window.innerWidth}`)
+      }
+    })
+
+    // N25: "?" glossary-term triggers (信任分數?/來源信譽?/...) must meet the
+    // same 24x24 minimum click target as any other control.
+    document.querySelectorAll('.tf-glossary > button').forEach((btn) => {
+      const r = btn.getBoundingClientRect()
+      if (r.width <= 0 || r.height <= 0) return
+      const label = btn.textContent?.trim() || '(glossary term)'
+      if (r.width < minTarget || r.height < minTarget) {
+        out.push(`glossary term "${label}" ${r.width.toFixed(1)}x${r.height.toFixed(1)} under ${minTarget}x${minTarget}`)
+      }
+    })
+
+    return out
+  }, MIN_TARGET)
+
+  for (const f of result) failures.push(`${label}: ${f}`)
   await context.close()
 }
 
