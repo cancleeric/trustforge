@@ -103,7 +103,14 @@ export default function HermesLeftRail({
         <div style={{ flex: 1, minHeight: 110, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
           <div style={{ minHeight: 82, flexShrink: 0, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: '2px solid var(--color-hermes-amber)', borderRadius: '0 6px 6px 0', padding: '9px 11px', overflow: 'hidden' }}>
             <div style={{ fontSize: 9, color: 'var(--color-hermes-amber)', letterSpacing: 1, marginBottom: 4 }}>{t('agentOutput')}</div>
-            <div aria-label={t('agentOutput')} style={{ maxHeight: 62, overflowY: 'auto', fontSize: 11.5, lineHeight: 1.5, color: 'var(--color-hermes-tx)', overflowWrap: 'anywhere' }}>{hermesMessage}</div>
+            {/* N39: 硬鎖 62px＝11.5px 字大約只露 3 行，但 HERMES 的回覆實測遠比
+                這個高：en 561x700 scrollHeight 224、768x1024 121、1280x800 104。
+                也就是使用者要在一個只有內容 28% 高的縫裡捲完整段分析結論——這是
+                主控台最核心的一塊內容，不該是最窄的一塊。
+                改成 min(34vh, 260px)：矮視窗跟著視窗縮（不會把左軌其他區塊擠掉），
+                高視窗最多 260px＝約 13 行，一次讀完常見長度的回覆而不必捲。
+                字級 11.5→12.5：這段是要「讀」的散文，不是 telemetry 數字。 */}
+            <div aria-label={t('agentOutput')} style={{ maxHeight: 'min(34vh, 260px)', overflowY: 'auto', fontSize: 12.5, lineHeight: 1.6, color: 'var(--color-hermes-tx)', overflowWrap: 'anywhere' }}>{hermesMessage}</div>
           </div>
           {(questionContext?.conversation.length || hasOrder) ? (
             <div style={{ background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 6, padding: '8px 11px', alignSelf: 'flex-end', maxWidth: '92%' }}>
@@ -153,8 +160,20 @@ export default function HermesLeftRail({
         <textarea
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          rows={2}
-          style={{ width: '100%', resize: 'none', background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 11.5, lineHeight: 1.5, padding: '8px 10px', marginBottom: 10 }}
+          rows={3}
+          /* N39: 這顆是整個主控台唯一的輸入口，卻是最容易被壓爛的一塊——左軌是
+             flex column，textarea 沒有 `flex-shrink: 0`，空間一緊就被壓到比
+             `rows` 還矮。實測 zh-TW 561x700 clientHeight 只剩 16px（scrollHeight
+             51），一行字被切掉上下半截；1280x800 也只有 40/51。
+             三件事一起改：
+               flexShrink: 0  不再讓 flex 壓縮輸入框（左軌本身 overflow-y:auto，
+                              空間不夠就讓軌道滾，跟 N37 同一個處理原則）
+               minHeight: 74  rows=3 的實高（3×19.2 + padding 16 + border 2），
+                              明確給樓地板，不依賴 `rows` 這個會被 flex 蓋掉的值
+               resize: 'vertical'  原本是 'none'，使用者連手動拉大都不行；
+                              要寫長一點的任務描述時這是唯一的出路
+             字級 11.5→12.5：使用者在這裡打字，不是讀 telemetry。 */
+          style={{ width: '100%', resize: 'vertical', flexShrink: 0, minHeight: 74, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 12.5, lineHeight: 1.6, padding: '8px 10px', marginBottom: 10 }}
         />
 
         {beginnerMode && qtype !== qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)] && (
