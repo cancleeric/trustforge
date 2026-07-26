@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isfinite
+from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 
+from trustforge.ingestion import safe_fetch
 from trustforge.peer_metrics import MetricValue, PeerMetricMethod
 
 ALLOWED_NETWORK_METRIC_HOSTS = frozenset({"arbiscan.io", "api.arbiscan.io", "etherscan.io"})
 MAX_NETWORK_METRIC_AGE = timedelta(hours=6)
 ALLOWED_TX_TYPES = frozenset({"transfer", "swap", "bridge", "contract_call"})
+_MAX_BYTES = 64 * 1024
+_TIMEOUT = 5
+_UA = "TrustForge/1.0 (network-metrics)"
 
 
 @dataclass(frozen=True)
@@ -32,6 +39,74 @@ class ObservedGasMetric:
             "observed_at": self.observed_at.isoformat(),
             "source": self.source,
         }
+
+
+@dataclass(frozen=True)
+class TpsConnectorResult:
+    metric: MetricValue | None
+    error: dict[str, str] | None
+
+    @property
+    def ok(self) -> bool:
+        return self.metric is not None and self.error is None
+
+
+@dataclass(frozen=True)
+class GasConnectorResult:
+    metric: ObservedGasMetric | None
+    error: dict[str, str] | None
+
+    @property
+    def ok(self) -> bool:
+        return self.metric is not None and self.error is None
+
+
+def fetch_tps_metric(
+    url: str,
+    *,
+    fetched_at: datetime,
+) -> TpsConnectorResult:
+    try:
+        _validate_fetch_source_url(url)
+        raw = _fetch_network_metric(url)
+        payload = _decode_network_metric(raw)
+        if "source" in payload and payload["source"] != url:
+            raise ValueError("TPS payload source does not match fetched URL")
+        payload.setdefault("source", url)
+        return TpsConnectorResult(metric=parse_observed_tps_metric(payload, fetched_at=fetched_at), error=None)
+    except HTTPError as exc:
+        if exc.code == 429:
+            return TpsConnectorResult(
+                metric=None,
+                error={"code": "rate_limited", "message": "TPS source rate limited"},
+            )
+        return TpsConnectorResult(metric=None, error={"code": "tps_connector_error", "message": str(exc)})
+    except Exception as exc:
+        return TpsConnectorResult(metric=None, error={"code": "tps_connector_error", "message": str(exc)})
+
+
+def fetch_gas_metric(
+    url: str,
+    *,
+    fetched_at: datetime,
+) -> GasConnectorResult:
+    try:
+        _validate_fetch_source_url(url)
+        raw = _fetch_network_metric(url)
+        payload = _decode_network_metric(raw)
+        if "source" in payload and payload["source"] != url:
+            raise ValueError("Gas payload source does not match fetched URL")
+        payload.setdefault("source", url)
+        return GasConnectorResult(metric=parse_gas_metric(payload, fetched_at=fetched_at), error=None)
+    except HTTPError as exc:
+        if exc.code == 429:
+            return GasConnectorResult(
+                metric=None,
+                error={"code": "rate_limited", "message": "Gas source rate limited"},
+            )
+        return GasConnectorResult(metric=None, error={"code": "gas_connector_error", "message": str(exc)})
+    except Exception as exc:
+        return GasConnectorResult(metric=None, error={"code": "gas_connector_error", "message": str(exc)})
 
 
 def parse_observed_tps_metric(payload: dict, *, fetched_at: datetime) -> MetricValue:
@@ -68,6 +143,28 @@ def parse_gas_metric(payload: dict, *, fetched_at: datetime) -> ObservedGasMetri
         observed_at=observed_at,
         source=source,
     )
+
+
+def _validate_fetch_source_url(source: str) -> None:
+    parsed = urlparse(source)
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        raise ValueError("network metric fetch URL must use https without credentials")
+    if parsed.hostname not in ALLOWED_NETWORK_METRIC_HOSTS:
+        raise ValueError(f"network metric fetch host is not allowed: {parsed.hostname}")
+
+
+def _fetch_network_metric(url: str) -> bytes:
+    raw = safe_fetch.fetch_url(url, user_agent=_UA, timeout=_TIMEOUT, max_bytes=_MAX_BYTES + 1)
+    if len(raw) > _MAX_BYTES:
+        raise ValueError("network metric response exceeds maximum size")
+    return raw
+
+
+def _decode_network_metric(raw: bytes) -> dict[str, Any]:
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("network metric payload must be a JSON object")
+    return payload
 
 
 def _ensure_fetched_at(fetched_at: datetime) -> None:
