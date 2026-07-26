@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -16,6 +17,76 @@ ALLOWED_UPGRADE_EVENT_HOSTS = frozenset(
         "ethereum.org",
     }
 )
+
+
+class UpgradeEventConnectorError(Exception):
+    """Connector-level failure (e.g. naive timestamp, malformed payload)."""
+
+
+@dataclass(frozen=True)
+class ConnectorResult:
+    """Immutable batch-parse result."""
+
+    events: tuple[UpgradeEvent, ...]
+    errors: tuple[str, ...]
+    skipped_count: int
+
+
+class UpgradeEventConnector:
+    """Fail-soft batch connector for official upgrade events.
+
+    * malformed items are skipped and recorded in ``errors``
+    * duplicate ``event_id`` is deduplicated (first wins)
+    * same ``event_id`` with different ``scheduled_at`` → latest scheduled_at wins
+    * stale items (scheduled_at < fetched_at) are skipped
+    * provenance: each event carries ``observed_at`` and ``official_source_url``
+    """
+
+    _allowed_hosts: frozenset[str] | None = None
+
+    def __init__(self, allowed_hosts: frozenset[str] | None = None) -> None:
+        self._allowed_hosts = allowed_hosts
+
+    @property
+    def allowed_hosts(self) -> frozenset[str]:
+        return self._allowed_hosts if self._allowed_hosts is not None else ALLOWED_UPGRADE_EVENT_HOSTS
+
+    def fetch_events(self, payloads: list[dict], *, fetched_at: datetime) -> ConnectorResult:
+        if fetched_at.tzinfo is None:
+            raise UpgradeEventConnectorError("fetched_at must be timezone-aware")
+
+        events: list[UpgradeEvent] = []
+        errors: list[str] = []
+        skipped = 0
+        seen: dict[str, UpgradeEvent] = {}  # event_id → event (latest scheduled_at wins)
+
+        for item in payloads:
+            # Pre-filter stale scheduled_at before strict parsing
+            raw_scheduled = item.get("scheduled_at")
+            if raw_scheduled is not None:
+                scheduled = parse_utc_timestamp(raw_scheduled)
+                if scheduled is not None and scheduled < fetched_at.astimezone(timezone.utc):
+                    skipped += 1
+                    continue
+            try:
+                event = parse_upgrade_event(item, fetched_at=fetched_at)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+
+            existing = seen.get(event.event_id)
+            if existing is None:
+                seen[event.event_id] = event
+            elif event.scheduled_at is not None and (existing.scheduled_at is None or event.scheduled_at > existing.scheduled_at):
+                seen[event.event_id] = event
+            # else: duplicate with same or earlier schedule → drop silently
+
+        events = list(seen.values())
+        return ConnectorResult(
+            events=tuple(events),
+            errors=tuple(errors),
+            skipped_count=skipped,
+        )
 
 
 def parse_upgrade_events_fixture(payload: list[dict], *, fetched_at: datetime) -> tuple[UpgradeEvent, ...]:

@@ -1,8 +1,8 @@
 # TrustForge 三軌統一學習架構開發計劃
 
-> 日期：2026-07-23
-> 狀態：開發中但 CEO 審查未通過；里程碑 A／B／C 均未完成，禁止往主線或生產整合
-> 進度稽核：2026-07-23（第二次複驗）；詳見第 11 節
+> 日期：2026-07-23（計劃）；2026-07-24（第三次複驗）
+> 狀態：里程碑 A CEO 親驗通過（2026-07-24）；#640/#641 CISO 安全審查通過；仍禁止往 main／生產整合直到 #510/#512 收尾
+> 進度稽核：2026-07-23（第二次複驗）→ 2026-07-24（第三次複驗，里程碑 A PASS）；詳見第 11 節
 > 依據：`docs/architecture/TRUSTFORGE-THREE-TRACK-LEARNING-SYSTEM-ANALYSIS-2026-07-23.md`
 
 ## 1. 目標與不可變邊界
@@ -290,3 +290,43 @@
 每個工程師修正後，必須在原 PR 回覆修正 commit、測試命令與結果，並重新標記
 Ready for review。沒有新 commit／證據而只切換 Ready 狀態，視為無效重送並退回 Draft。
 CEO 重新審查通過前，Issue 保持 OPEN、PR 必須維持 Draft。
+
+### 11.6 第三次複驗（2026-07-24，CEO 親驗）
+
+#### 稽核結論
+
+CEO 於 2026-07-24 對 develop 上的三軌新線（codex/\* 分支，PR #623–#641）執行完整複驗：
+
+1. **里程碑 A 五大硬門檻全部通過**（CEO 親跑測試確認，非僅信副手報告）：
+   - Future leakage 拒絕：`available_time > as_of_time` 的事件/outcome 被正確拒絕（#543 修正持續有效）。
+   - 歷史答案隔離：`historical_non_evidentiary` 不能通過 Evidence binding（`test_kernel_evidence_pit_contracts.py` 6 種 hostile tier 全擋）。
+   - 未知 schema fail-closed：未知欄位/重複 JSON key/非有限數值全拒。
+   - 重放一致性：相同事件重放無重複、serialize/deserialize 往返一致。
+   - 核心欄位不可變：deep-freeze + content-addressed，public constructor 無法繞過。
+
+2. **#640/#641 CISO 安全審查通過**（harper 獨立審查，零漏洞）：
+   - #640 anomaly baseline：future event 注入不可見、跨租戶隔離、diagnostic 不能觸發 activation——三層防線 + manifest root hash binding。
+   - #511 RAG gold set：歷史答案不能升格 gold/evidence、reviewer 偽造被拒（two-of-two 信任錨點）、惡意 feedback 不污染、Evidence 不足時 abstain。
+
+3. **測試品質**（PR #645，已 merge 進 develop）：
+   - 3996 passed / 6 skipped / 0 failed / 0 warnings；覆蓋率 86.16%。
+   - 套件 155s → 94s（40% 加速）；backfill 子集 70x+（mock 真實 HTTP）。
+   - 新增 34 條 CISO 負向安全測試（`tests/test_ciso_security_audit_640_641.py`）。
+   - CEO 親驗子集全綠（安全測試 34 + 三軌核心 271 + backfill 29 + warning 歸零）。
+
+4. **Issue 真實狀態更新**：
+   - #501–#509、#511：CLOSED（新線 PR #623–#641 已 merge 進 develop，審查門檻已補完）。
+   - #502：CLOSED（#523 contract tests 存在且綠；CPO 曾誤報缺口，CEO 親查推翻）。
+   - #503（ModelHub 唯讀複驗）、#510（wrapper activation）、#512（E2E）：仍 OPEN。
+
+#### 仍禁止往 main／生產整合的原因
+
+- #510 wrapper activation 尚未實作（安全敏感，需從頭做 + harper CISO 雙審）。
+- #512 三軌 E2E 尚未通過（需真實 analysis_flow／HTTP 執行）。
+- #503 ModelHub 唯讀複驗仍 blocked。
+- develop 領先 main 213+ commits；併版須走正規 release 流程（備份 → 整合驗證 → 部署 → CEO 親驗）。
+
+#### 下一步（Phase 3–4）
+
+1. 收尾 #503（ModelHub 唯讀）、#510（wrapper，CISO 雙審）、#512（E2E）。
+2. 全部通過後 develop → main 正規併版 + 上生產。

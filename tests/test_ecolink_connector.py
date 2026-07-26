@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from trustforge.ecolink_connector import parse_upgrade_events_fixture
+from trustforge.ecolink_connector import (
+    ConnectorResult,
+    UpgradeEventConnector,
+    UpgradeEventConnectorError,
+    parse_upgrade_events_fixture,
+)
 
 
 def utc(year: int, month: int, day: int) -> datetime:
@@ -75,3 +80,144 @@ def test_upgrade_event_connector_rejects_stale_events_and_naive_fetch_time() -> 
 
     with pytest.raises(ValueError, match="fetched_at must be timezone-aware"):
         parse_upgrade_events_fixture([event_payload()], fetched_at=datetime(2026, 1, 1))
+
+
+# ---------------------------------------------------------------------------
+# UpgradeEventConnector tests
+
+
+def connector_payload(**overrides):
+    return {**event_payload(), **overrides}
+
+
+def test_connector_fetches_events_and_preserves_observed_at() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [connector_payload()],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 1
+    assert len(result.errors) == 0
+    assert result.skipped_count == 0
+    assert result.events[0].observed_at == utc(2026, 1, 1)
+
+
+def test_connector_skips_malformed_fields() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [
+            connector_payload(event_id="evt:good"),
+            {"event_id": "evt:missing-everything"},  # malformed
+        ],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 1
+    assert result.events[0].event_id == "evt:good"
+    assert len(result.errors) == 1
+    assert result.skipped_count == 0
+
+
+def test_connector_skips_illegal_host() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [connector_payload(official_source_url="https://malware.test/hack")],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 0
+    assert len(result.errors) == 1
+    assert result.skipped_count == 0
+
+
+def test_connector_skips_stale_events() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [connector_payload(event_id="evt:old", scheduled_at="2025-06-01T00:00:00Z")],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 0
+    assert len(result.errors) == 0
+    assert result.skipped_count == 1
+
+
+def test_connector_deduplicates_by_event_id() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [
+            connector_payload(event_id="evt:dup", title="first"),
+            connector_payload(event_id="evt:dup", title="second"),
+        ],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 1
+    assert result.events[0].title == "first"  # first wins
+
+
+def test_connector_reschedule_picks_latest_scheduled_at() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [
+            connector_payload(event_id="evt:re", scheduled_at="2026-02-01T00:00:00Z", title="early"),
+            connector_payload(event_id="evt:re", scheduled_at="2026-03-01T00:00:00Z", title="later"),
+        ],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 1
+    assert result.events[0].title == "later"
+
+
+def test_connector_reschedule_ignores_earlier_scheduled() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [
+            connector_payload(event_id="evt:re", scheduled_at="2026-03-01T00:00:00Z", title="later"),
+            connector_payload(event_id="evt:re", scheduled_at="2026-02-01T00:00:00Z", title="early"),
+        ],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 1
+    assert result.events[0].title == "later"
+
+
+def test_connector_empty_payloads() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events([], fetched_at=utc(2026, 1, 1))
+    assert len(result.events) == 0
+    assert len(result.errors) == 0
+    assert result.skipped_count == 0
+
+
+def test_connector_all_bad_returns_empty_events() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [{"bad": 1}, {"bad": 2}],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.events) == 0
+    assert len(result.errors) == 2
+    assert result.skipped_count == 0
+
+
+def test_connector_rejects_naive_fetched_at() -> None:
+    connector = UpgradeEventConnector()
+    with pytest.raises(UpgradeEventConnectorError, match="fetched_at must be timezone-aware"):
+        connector.fetch_events([connector_payload()], fetched_at=datetime(2026, 1, 1))
+
+
+def test_connector_custom_allowed_hosts() -> None:
+    connector = UpgradeEventConnector(allowed_hosts=frozenset({"custom.host"}))
+    assert connector.allowed_hosts == frozenset({"custom.host"})
+
+
+def test_connector_default_allowed_hosts() -> None:
+    connector = UpgradeEventConnector()
+    assert "arbitrum.foundation" in connector.allowed_hosts
+
+
+def test_connector_errors_are_strings() -> None:
+    connector = UpgradeEventConnector()
+    result = connector.fetch_events(
+        [connector_payload(official_source_url="https://bad.test/x")],
+        fetched_at=utc(2026, 1, 1),
+    )
+    assert len(result.errors) == 1
+    assert isinstance(result.errors[0], str)
