@@ -225,3 +225,58 @@ def test_tvl_connector_rejects_stale_and_future_observations() -> None:
 
     with pytest.raises(ValueError, match="TVL observation is in the future"):
         parse_tvl_metric(payload(observed_at="2027-01-01T00:00:00Z"), fetched_at=utc(2026, 1, 1, 13))
+
+
+# ---------------------------------------------------------------------------
+# Edge-case guards (gap coverage → 100%)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["asset_id", "tvl_usd", "observed_at", "source"],
+)
+def test_parse_tvl_metric_raises_on_missing_required_field(missing_field: str) -> None:
+    data = payload()
+    del data[missing_field]
+    with pytest.raises(ValueError, match=f"missing TVL fields: {missing_field}"):
+        parse_tvl_metric(data, fetched_at=utc(2026, 1, 1, 13))
+
+
+@pytest.mark.parametrize("bad_source", ["", "   ", None, 42])
+def test_parse_tvl_metric_rejects_empty_or_nonstring_source(bad_source) -> None:
+    data = payload(source=bad_source)
+    with pytest.raises(ValueError, match="TVL source must be non-empty string"):
+        parse_tvl_metric(data, fetched_at=utc(2026, 1, 1, 13))
+
+
+@pytest.mark.parametrize(
+    "bad_payload",
+    [
+        b"just a string, not json",
+        json.dumps([1, 2, 3]),
+        "null",
+        "true",
+    ],
+)
+def test_fetch_tvl_metric_non_dict_json_never_publishes_metric(
+    bad_payload, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        tvl_connector,
+        "_fetch_url",
+        lambda _url: bad_payload if isinstance(bad_payload, bytes) else bad_payload.encode("utf-8"),
+    )
+    result = fetch_tvl_metric(
+        "https://api.llama.fi/protocol/arbitrum",
+        fetched_at=utc(2026, 1, 1, 13),
+    )
+    assert result.metric is None
+    assert result.error is not None
+    assert result.error["code"] == "tvl_connector_error"
+
+
+@pytest.mark.parametrize("bad_ts", [None, 42, True, 3.14, "", "   "])
+def test_parse_tvl_metric_rejects_non_string_timestamp(bad_ts) -> None:
+    data = payload(observed_at=bad_ts)
+    with pytest.raises(ValueError, match="observed_at must be ISO timestamp string"):
+        parse_tvl_metric(data, fetched_at=utc(2026, 1, 1, 13))
