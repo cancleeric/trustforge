@@ -137,9 +137,26 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                         "additionalProperties": False,
                     },
                 },
+                "term_annotations": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/TermAnnotation"},
+                },
             },
             "$defs": {
                 "AssetContext": _asset_context_schema_properties(),
+                "TermAnnotation": {
+                    "type": "object",
+                    "required": ["term_id", "term_name", "matched_text", "start", "end", "glossary_link"],
+                    "properties": {
+                        "term_id": {"type": "string", "minLength": 1},
+                        "term_name": {"type": "string", "minLength": 1},
+                        "matched_text": {"type": "string", "minLength": 1},
+                        "start": {"type": "integer", "minimum": 0},
+                        "end": {"type": "integer", "minimum": 0},
+                        "glossary_link": {"type": "string", "minLength": 1},
+                    },
+                    "additionalProperties": False,
+                },
             },
             "additionalProperties": False,
         },

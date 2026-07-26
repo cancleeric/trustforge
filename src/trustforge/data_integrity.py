@@ -14,7 +14,7 @@ from typing import Any
 from .safe_fs import read_regular_file
 
 
-COINS = ("BTC", "ETH", "SOL", "BNB", "XRP")
+COINS = ("BTC", "ETH", "SOL", "BNB", "XRP", "ARB")
 OHLCV_COLUMNS = ("date", "open", "high", "low", "close", "volume")
 EXPECTED_OHLCV_ROWS = 1826
 CHECKSUM_SCHEMA_VERSION = "1.0.0"
@@ -90,7 +90,7 @@ def _verify_checksums(root: Path) -> dict[str, bytes]:
         raise DataIntegrityError("checksum algorithm must be sha256")
     files = _mapping(manifest.get("files"), location="checksum files")
     if set(files) != set(EXPECTED_FILES):
-        raise DataIntegrityError("checksum manifest must contain exactly the five official OHLCV files")
+        raise DataIntegrityError("checksum manifest must contain exactly the six official OHLCV files")
 
     verified: dict[str, bytes] = {}
     for relative_path in EXPECTED_FILES:
@@ -148,7 +148,7 @@ def _read_metadata(root: Path, *, expected_rows: int) -> tuple[date, date, dict[
 
     symbol_items = _list(metadata.get("symbols"), location="metadata symbols")
     if len(symbol_items) != len(COINS):
-        raise DataIntegrityError("metadata symbols must contain exactly five entries")
+        raise DataIntegrityError("metadata symbols must contain exactly six entries")
     symbols: dict[str, dict[str, Any]] = {}
     for index, item in enumerate(symbol_items):
         symbol = _mapping(item, location=f"metadata symbols[{index}]")
@@ -220,7 +220,7 @@ def _audit_csv(
 
 
 def audit_ohlcv_dataset(repo_root: str | Path, *, expected_rows: int = EXPECTED_OHLCV_ROWS) -> dict[str, Any]:
-    """Verify immutable bytes first, then metadata and all five CSV contracts."""
+    """Verify immutable bytes first, then metadata and all six CSV contracts."""
     try:
         root = Path(repo_root).resolve()
         if isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or expected_rows <= 0:

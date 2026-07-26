@@ -24,6 +24,7 @@ from ..execlog import ExecutionLog
 from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
+from ..term_annotations import annotate_terms
 from trustforge_core import run_kernel
 
 from .kernel_mapper import to_kernel_input
@@ -1366,6 +1367,11 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         else:
             inferences.append(ledger_line)
 
+    # #583 注入 glossary term 標註：對 market_judgment 做 deterministic
+    # 詞彙標註，供前端渲染 glossary popover。
+    _annotations = annotate_terms(market_judgment)
+    term_annotations = [ann.to_dict() for ann in _annotations]
+
     report = Report(
         coin=coin, question_type=qtype.value, question=query,
         market_judgment=market_judgment, facts=facts, inferences=inferences,
@@ -1382,6 +1388,7 @@ def build_report(query: str, coin: str, qtype: QuestionType, brief: TrustedBrief
         # 欄位註解）。
         calibrated_confidence=calibrated,
         decision_state=decision_state,
+        term_annotations=term_annotations,
     )
     log.record("report.done", summary=f"facts={len(facts)} basis={len(key_basis)} evidence={len(evidence)}")
     # --- telemetry: record build_report invocation ---

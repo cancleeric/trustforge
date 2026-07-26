@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-COINS = ("BTC", "ETH", "SOL", "BNB", "XRP")
+COINS = ("BTC", "ETH", "SOL", "BNB", "XRP", "ARB")
 REQUIRED_EVENTS = {"historical_replay.start", "historical_replay.done"}
 
 

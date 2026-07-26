@@ -182,6 +182,7 @@ _COINGECKO_IDS: dict[str, str] = {
     "SOL": "solana",
     "BNB": "binancecoin",
     "XRP": "ripple",
+    "ARB": "arbitrum",
 }
 
 _PRICE_URL = (
