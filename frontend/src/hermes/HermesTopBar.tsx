@@ -90,13 +90,13 @@ export default function HermesTopBar({
       </nav>
       <div style={{ flex: 1 }} />
       <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
-        {beginnerMode ? '新手模式' : '完整模式'}
+        {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
       </button>
       <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} aria-label={reducedMotion ? '低動態模式已啟用' : '啟用低動態模式'} title={reducedMotion ? '低動態模式（點擊關閉）' : '啟用低動態模式'}>
-        {reducedMotion ? '⏸ 低動態' : '▶ 動態'}
+        {reducedMotion ? t('dynamicOff') : t('dynamicOn')}
       </button>
-      <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label="開啟新手說明">？ 說明</button>
-      {!beginnerMode && <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>⬡ 艦體升級</button>}
+      <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label="開啟新手說明">{t('helpToggle')}</button>
+      {!beginnerMode && <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>{t('shipToggle')}</button>}
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} style={{ background: 'transparent', border: '1px solid var(--color-hermes-bd2)', borderRadius: 4, color: 'var(--color-hermes-tx2)', fontFamily: 'inherit', fontSize: 9, padding: '3px 7px', cursor: 'pointer' }}>
         {locale === 'zh-TW' ? 'EN' : '繁中'}
       </button>

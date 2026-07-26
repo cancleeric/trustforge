@@ -208,6 +208,29 @@ describe('HermesDashboard workspace navigation', () => {
     await waitFor(() => expect(screen.getByLabelText('location')).toHaveTextContent('type=hypothesis'))
   })
 
+  it('N2: submit button leaves its loading label once the embedded AnalyzePage settles into an error (not just success)', async () => {
+    // registerAnalysisQuestion resolves `ok:true` but without `job_id`
+    // (see mock above) — AnalyzePage treats that as a failure and settles
+    // into its error state. Before the fix, the left-rail submit button's
+    // `phase` only reset to 'ready' when AnalyzePage produced *successful*
+    // telemetry, so it stayed stuck on the loading label ("Hermes 自動分析中…")
+    // forever on this error path.
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+      </MemoryRouter>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
+    expect(registerAnalysisQuestion).toHaveBeenCalled()
+
+    await waitFor(() => {
+      const submit = screen.getByRole('button', { name: /立即重新分析/ })
+      expect(submit).not.toBeDisabled()
+    })
+    expect(screen.queryByRole('button', { name: 'Hermes 自動分析中…' })).not.toBeInTheDocument()
+  })
+
   it('resets missing mode and question on a history entry', async () => {
     render(
       <MemoryRouter initialEntries={['/?qa=1&coin=ETH&mode=catalyst&q=舊問題']}>
@@ -220,5 +243,32 @@ describe('HermesDashboard workspace navigation', () => {
 
     await waitFor(() => expect(screen.getByRole('combobox')).toHaveValue('風險評估'))
     expect(screen.getByRole('textbox')).toHaveValue('分析SOL近期市場狀況，整合多源資料')
+  })
+
+  it('N7 (CEO round 2 retest): localizes the left-rail beginner intent-picker cards to EN, not the hard-coded zh-TW labels', () => {
+    // CEO's round-2 retest flagged that the five "what do you want to know?"
+    // intent cards in the beginner-mode left rail (default on) stayed
+    // hard-coded zh-TW even when the UI locale was switched to EN — this was
+    // the one concrete miss from N7 round 1's sweep.
+    render(
+      <MemoryRouter initialEntries={['/?qa=1']}>
+        <HermesI18nProvider>
+          <LocaleSwitcher />
+          <HermesDashboard />
+        </HermesI18nProvider>
+      </MemoryRouter>,
+    )
+
+    // baseline: default locale is zh-TW, card shows the Chinese label
+    expect(screen.getByRole('button', { name: /這個幣現在可信嗎？/ })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'use English' }))
+
+    expect(screen.getByRole('button', { name: /Is this coin trustworthy right now\?/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Any manipulation risk\?/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Is this news credible\?/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /What's moving the price\?/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Why did the trust score drop\?/ })).toBeInTheDocument()
+    expect(screen.queryByText('這個幣現在可信嗎？')).not.toBeInTheDocument()
   })
 })

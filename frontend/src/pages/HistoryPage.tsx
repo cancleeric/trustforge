@@ -121,7 +121,7 @@ export default function HistoryPage() {
       {loading && null}
       {!loading && error && !data && <ErrorState code={error.code} message={error.message} />}
       {error && data && (
-        <ErrorState code={error.code} message={`${error.message}；目前保留上一個完整快照。`} />
+        <ErrorState code={error.code} message={error.message} note="目前保留上一個完整快照" />
       )}
       {data && data.history.length === 0 && (
         <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">

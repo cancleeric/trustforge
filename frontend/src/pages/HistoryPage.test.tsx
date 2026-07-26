@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { BridgeHologramProvider } from '../components/BridgeHologramContext'
 import type { HistoryData } from '../lib/types'
 import { getHistory } from '../lib/endpoints'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 import HistoryPage from './HistoryPage'
 
 vi.mock('../components/TrustHistoryChart', () => ({
@@ -36,11 +37,13 @@ function historyData(coin: string): HistoryData {
 
 function renderHistoryPage(initialUrl = '/?coin=BTC&days=30') {
   return render(
-    <MemoryRouter initialEntries={[initialUrl]}>
-      <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
-        <HistoryPage />
-      </BridgeHologramProvider>
-    </MemoryRouter>,
+    <HermesI18nProvider>
+      <MemoryRouter initialEntries={[initialUrl]}>
+        <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+          <HistoryPage />
+        </BridgeHologramProvider>
+      </MemoryRouter>
+    </HermesI18nProvider>,
   )
 }
 

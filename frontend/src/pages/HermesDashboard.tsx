@@ -219,19 +219,6 @@ export default function HermesDashboard() {
   const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const bootTimers = useRef<ReturnType<typeof setTimeout>[]>([])
 
-  const startTyping = useCallback((sel: GalaxyCoin, ph: 'ready' | 'loading') => {
-    if (typeTimer.current) clearInterval(typeTimer.current)
-    setTypedLen(0)
-    const full = buildHermesMessage(sel, ph)
-    typeTimer.current = setInterval(() => {
-      setTypedLen((prev) => {
-        const next = Math.min(full.length, prev + 2)
-        if (next >= full.length && typeTimer.current) clearInterval(typeTimer.current)
-        return next
-      })
-    }, 18)
-  }, [buildHermesMessage])
-
   const animateScoreTo = useCallback((target: number) => {
     if (scoreTimer.current) clearInterval(scoreTimer.current)
     const start = displayScoreRef.current
@@ -380,21 +367,46 @@ export default function HermesDashboard() {
     const stage = (key: keyof typeof boot, delay: number) =>
       timers.push(setTimeout(() => setBoot((b) => ({ ...b, [key]: true })), delay))
     stage('topbar', 0); stage('left', 150); stage('galaxy', 320); stage('right', 620); stage('bottom', 880)
-    timers.push(setTimeout(() => {
-      if (byIdRef.current[selectedId]) startTyping(byIdRef.current[selectedId], phase)
-    }, 1150))
     return () => { timers.forEach(clearTimeout) }
-  }, [startTyping, phase, selectedId])
+  }, [])
 
-  // ── 切幣 / 階段變化 → 重算分數動畫 + typing ──
+  // ── 切幣 / 階段變化 → 重算分數動畫 ──
   useEffect(() => {
     if (!model) return
     const sel = model.byId[selectedId]
     if (!sel) return
     animateScoreTo(sel.score)
     triggerFocusPulse()
-    startTyping(sel, phase)
-  }, [selectedId, model, phase, animateScoreTo, triggerFocusPulse, startTyping])
+  }, [selectedId, model, animateScoreTo, triggerFocusPulse])
+
+  // ── 打字機動畫：以 buildHermesMessage 的結果為唯一真相來源。
+  // buildHermesMessage 依 locale 重新產生，任何導致訊息內容改變的因素
+  // （切幣、phase、語言切換）都會讓這個 effect 重跑，避免 typedLen 與
+  // 實際渲染字串脫鉤而截斷在半個字。
+  useEffect(() => {
+    const sel = model.byId[selectedId]
+    if (!sel) return
+    const full = buildHermesMessage(sel, phase)
+    if (typeTimer.current) { clearInterval(typeTimer.current); typeTimer.current = null }
+    if (reducedMotion) {
+      setTypedLen(full.length)
+      return
+    }
+    setTypedLen(0)
+    typeTimer.current = setInterval(() => {
+      setTypedLen((prev) => {
+        const next = Math.min(full.length, prev + 2)
+        if (next >= full.length && typeTimer.current) {
+          clearInterval(typeTimer.current)
+          typeTimer.current = null
+        }
+        return next
+      })
+    }, 18)
+    return () => {
+      if (typeTimer.current) { clearInterval(typeTimer.current); typeTimer.current = null }
+    }
+  }, [model, selectedId, phase, buildHermesMessage, reducedMotion])
 
   useEffect(() => {
     return () => {
@@ -429,6 +441,15 @@ export default function HermesDashboard() {
   useEffect(() => {
     if (moduleTelemetry) setPhase('ready')
   }, [moduleTelemetry])
+
+  // N2 fix: the effect above only cleared 'loading' on a *successful*
+  // telemetry payload. On an analysis error, AnalyzePage never produces
+  // telemetry, so `phase` (and thus the left-rail submit button's label/
+  // disabled state) stayed stuck on "loading" forever. AnalyzePage now
+  // reports its own internal busy state directly regardless of outcome.
+  const handleModuleBusyChange = useCallback((busy: boolean) => {
+    setPhase(busy ? 'loading' : 'ready')
+  }, [])
 
   const openModule = useCallback((module: HermesWorkspaceModule) => {
     if (activeModule === module) {
@@ -530,7 +551,7 @@ export default function HermesDashboard() {
             qtype={qtype}
             qtypes={qtypes}
             query={query}
-            submitLabel={phase === 'loading' ? 'Hermes 自動分析中…' : '立即重新分析'}
+            submitLabel={phase === 'loading' ? t('analyzingNow') : t('reAnalyze')}
             onType={setQtype}
             onQuery={setQuery}
             onSubmit={onSubmit}
@@ -591,7 +612,7 @@ export default function HermesDashboard() {
           </>
         )}
 
-        {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} />}
+        {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} onBusyChange={handleModuleBusyChange} />}
 
         {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />}
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 interface PerCoinStat {
   total: number
@@ -51,6 +52,7 @@ const STATUS_COLORS: Record<StatusLight, string> = {
 }
 
 export default function TrainingStatusCard() {
+  const { t } = useHermesI18n()
   const [data, setData] = useState<TrainingStatusData | null>(null)
   const [availability, setAvailability] = useState<AvailabilityState>({ kind: 'loading' })
 
@@ -103,9 +105,9 @@ export default function TrainingStatusCard() {
   const lightColor = STATUS_COLORS[statusLight]
   const neutralMessage =
     availability.kind === 'not_enabled'
-      ? '訓練資料未啟用'
+      ? t('trainingDataNotEnabled')
       : availability.kind === 'unavailable'
-        ? '訓練狀態暫不可用'
+        ? t('trainingDataUnavailable')
         : null
   const diagnostic =
     availability.kind === 'not_enabled' || availability.kind === 'unavailable' || availability.kind === 'error'
@@ -147,7 +149,7 @@ export default function TrainingStatusCard() {
             fontWeight: 600,
           }}
         >
-          訓練資料
+          {t('trainingData')}
         </span>
       </div>
 
@@ -176,9 +178,16 @@ export default function TrainingStatusCard() {
           {/* Progress bar: current / target */}
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, color: 'var(--color-hermes-tx2, #c9d1d9)', marginBottom: 4 }}>
-              <span>方向標註進度</span>
+              <span>{t('directionProgress')}</span>
               <span style={{ fontWeight: 600, color: lightColor }}>
-                {data.upgrade_threshold.current} / {data.upgrade_threshold.target}
+                {/* `target` 是「達標所需最低門檻」，不是上限——已達標後 `current`
+                    會持續成長並自然大於 `target`（例：146）。用 " / 100" 的分數
+                    寫法在超過門檻後看起來像是「進度值超過宣告上限」的資料錯誤，
+                    所以達標後改用「現有筆數（已達門檻 N）」的措辭，兩者語意都
+                    是真實計數，只是換一種不會誤讀成分數的呈現方式（D4）。 */}
+                {data.upgrade_threshold.met
+                  ? `${data.upgrade_threshold.current}${t('metThresholdPrefix')}${data.upgrade_threshold.target}${t('metThresholdSuffix')}`
+                  : `${data.upgrade_threshold.current} / ${data.upgrade_threshold.target}`}
               </span>
             </div>
             <div
@@ -201,25 +210,27 @@ export default function TrainingStatusCard() {
               />
             </div>
             <div style={{ fontSize: 9.5, color: 'var(--color-hermes-tx3, #8b949e)', marginTop: 3 }}>
-              {data.upgrade_threshold.met ? '✓ 已達升級門檻' : `差 ${data.upgrade_threshold.target - data.upgrade_threshold.current} 筆達標`}
+              {data.upgrade_threshold.met
+                ? t('thresholdMet')
+                : `${t('thresholdGapPrefix')}${data.upgrade_threshold.target - data.upgrade_threshold.current}${t('thresholdGapSuffix')}`}
             </div>
           </div>
 
           {/* Statistics */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5 }}>
-              <span style={{ color: 'var(--color-hermes-tx3, #8b949e)' }}>總筆數</span>
+              <span style={{ color: 'var(--color-hermes-tx3, #8b949e)' }}>{t('totalRecords')}</span>
               <span style={{ color: 'var(--color-hermes-tx, #e6edf3)', fontWeight: 600 }}>{data.training_data.total_records}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5 }}>
-              <span style={{ color: 'var(--color-hermes-tx3, #8b949e)' }}>有方向比例</span>
+              <span style={{ color: 'var(--color-hermes-tx3, #8b949e)' }}>{t('directionRatio')}</span>
               <span style={{ color: 'var(--color-hermes-tx, #e6edf3)', fontWeight: 600 }}>{(data.training_data.direction_ratio * 100).toFixed(1)}%</span>
             </div>
             {data.backfill && (
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5 }}>
-                <span style={{ color: 'var(--color-hermes-tx3, #8b949e)' }}>回填狀態</span>
+                <span style={{ color: 'var(--color-hermes-tx3, #8b949e)' }}>{t('backfillStatus')}</span>
                 <span style={{ color: data.backfill.is_running ? '#4ade80' : 'var(--color-hermes-tx2, #c9d1d9)', fontWeight: 600 }}>
-                  {data.backfill.is_running ? `進行中 ${data.backfill.progress_pct}%` : `完成 ${data.backfill.completed}/${data.backfill.total}`}
+                  {data.backfill.is_running ? `${t('backfillRunningPrefix')}${data.backfill.progress_pct}%` : `${t('backfillDoneLabel')} ${data.backfill.completed}/${data.backfill.total}`}
                 </span>
               </div>
             )}
@@ -250,7 +261,7 @@ export default function TrainingStatusCard() {
 
       {!data && availability.kind === 'loading' && (
         <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx3, #8b949e)' }}>
-          載入中…
+          {t('trainingLoading')}
         </div>
       )}
     </div>

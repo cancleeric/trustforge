@@ -10,6 +10,7 @@ import QueryConsole, { type QueryValues } from '../components/QueryConsole'
 import AnalysisReportView from '../components/AnalysisReportView'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 function defaultQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
@@ -31,6 +32,30 @@ function jobMatchesRequest(job: AnalysisJobStatus, coin: string, mode: string, q
   return normalizeJobPart(job.coin) === normalizeJobPart(coin)
     && normalizeJobPart(job.mode) === normalizeJobPart(mode)
     && job.question.trim() === question.trim()
+}
+
+// N9/point4 fix: 手動分析的 job_id 存進 sessionStorage（依 coin+mode+question 為
+// key），reload 頁面時可以接回同一個工作，而不是重新排一個新的。故意不寫回
+// URL/searchParams——那會讓 `urlJobId` 這個 effect 依賴值跟著變、把整個輪詢
+// effect 重新觸發一次，導致多跑一輪 submit/poll、UI 短暫閃爍。
+function manualJobStorageKey(coin: string, mode: string, question: string): string {
+  return `hermes:analyze-job:${normalizeJobPart(coin)}|${normalizeJobPart(mode)}|${question.trim()}`
+}
+
+function readStoredJobId(key: string): string | null {
+  try {
+    return window.sessionStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStoredJobId(key: string, jobId: string): void {
+  try {
+    window.sessionStorage.setItem(key, jobId)
+  } catch {
+    // sessionStorage 可能不可用（隱私模式等）——job 追蹤退化成不可持久化，不影響本次流程。
+  }
 }
 
 function useEmbeddedMobileComposer(embedded: boolean): boolean {
@@ -55,7 +80,8 @@ function useEmbeddedMobileComposer(embedded: boolean): boolean {
   return mobile
 }
 
-export default function AnalyzePage({ embedded = false }: { embedded?: boolean } = {}) {
+export default function AnalyzePage({ embedded = false, onBusyChange }: { embedded?: boolean; onBusyChange?: (busy: boolean) => void } = {}) {
+  const { t } = useHermesI18n()
   const { setData: setHologramData } = useBridgeHologram()
   const [searchParams, setSearchParams] = useSearchParams()
   const params = paramsFromSearch(searchParams)
@@ -127,26 +153,59 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
   useEffect(() => {
     if (!hasExplicitRequest) return
     const controller = new AbortController()
+    const timers: number[] = []
+    const setTrackedTimeout = (fn: () => void, delay: number) => {
+      const id = window.setTimeout(fn, delay)
+      timers.push(id)
+      return id
+    }
     setLoading(true)
     setError(null)
     setManualJob(null)
+    // 後端 `_install_request_limit` 併發上限觸發時回 503 `server_busy`
+    // （固定 `Retry-After: 2`）——這是暫時性壅塞，不是真的失敗，所以先做
+    // 有限次數的指數退避重試，而不是立刻把使用者丟進錯誤態。
+    const BUSY_BASE_DELAY_MS = 2000
+    const MAX_BUSY_RETRIES = 5
+    // N8 fix: 終止輪詢的條件是後端回報的 `state`（completed/failed），不是
+    // 一個寫死的秒數——job 在 `trust_reasoning` 等階段跑得比較久是正常的，
+    // 不代表後端死掉。`INACTIVITY_TIMEOUT_MS` 只當「後端完全沒回應」的保
+    // 險絲：只有連續拿不到成功回應（每次成功回應都會把 `lastContactAt`
+    // 往後推）超過這個時間，才判定逾時；job 只要還活著（持續有成功回應）
+    // 就一直等下去，不會被硬砍。
+    const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000
+    let lastContactAt = Date.now()
     if (params.sample) {
-      void getAnalyze({ coin: params.coin, type: params.type, q: params.q, sample: params.sample }, controller.signal).then((res) => {
-        if (controller.signal.aborted) return
-        setLoading(false)
-        if (res.ok) setData(res.data)
-        else setError(res.error)
-      })
-      return () => controller.abort()
+      const runSample = (attempt: number) => {
+        void getAnalyze({ coin: params.coin, type: params.type, q: params.q, sample: params.sample }, controller.signal).then((res) => {
+          if (controller.signal.aborted) return
+          if (!res.ok && res.error.code === 'server_busy' && attempt < MAX_BUSY_RETRIES) {
+            setTrackedTimeout(() => runSample(attempt + 1), BUSY_BASE_DELAY_MS * 2 ** attempt)
+            return
+          }
+          setLoading(false)
+          if (res.ok) setData(res.data)
+          else setError(res.error)
+        })
+      }
+      runSample(0)
+      return () => { controller.abort(); timers.forEach(window.clearTimeout) }
     }
     const poll = (jobId: string, fromUrl = false) => {
       void getAnalysisJob(jobId, controller.signal).then((res) => {
         if (controller.signal.aborted) return
         if (!res.ok) {
+          if (Date.now() - lastContactAt < INACTIVITY_TIMEOUT_MS) {
+            // 後端還在（或至少最近才失聯），無論是 server_busy 還是短暫的
+            // network hiccup，都先重試，而不是把還活著的 job 判死刑。
+            setTrackedTimeout(() => poll(jobId, fromUrl), BUSY_BASE_DELAY_MS)
+            return
+          }
           setLoading(false)
-          setError(res.error)
+          setError({ code: 'analysis_timeout', message: '分析工作長時間沒有回應，後端可能已中斷，請稍後再確認工作狀態' })
           return
         }
+        lastContactAt = Date.now()
         if (fromUrl && !jobMatchesRequest(res.data, params.coin, mode, params.q)) {
           setLoading(false)
           setError({ code: 'analysis_job_mismatch', message: 'URL job does not match this analysis request' })
@@ -160,32 +219,69 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
           setLoading(false)
           setError({ code: 'analysis_failed', message: res.data.error || '分析工作失敗' })
         } else {
-          window.setTimeout(() => poll(jobId, fromUrl), 1200)
+          // queued / running：job 還活著，持續輪詢，不設人為秒數上限（見 N8）。
+          setTrackedTimeout(() => poll(jobId, fromUrl), 1200)
         }
       })
     }
-    if (urlJobId) {
-      poll(urlJobId, true)
-      return () => controller.abort()
+    // N9/point4 fix: 沒有明確的 `?job=` URL 參數時，第一次載入（requestNonce
+    // === 0，代表不是使用者手動重新送出）也試著從 sessionStorage 接回同一
+    // coin/mode/question 的既有 job，而不是無條件重新排一個新的。
+    const storageKey = manualJobStorageKey(params.coin, mode, params.q)
+    const reconnectJobId = urlJobId || (requestNonce === 0 && !params.sample ? readStoredJobId(storageKey) : null)
+    if (reconnectJobId) {
+      poll(reconnectJobId, true)
+      return () => { controller.abort(); timers.forEach(window.clearTimeout) }
     }
     const requestKey = `${params.coin}\n${mode}\n${params.q}\n${params.sample ?? ''}\n${requestNonce}`
     if (requestNonce === 0 && processedRequestKeys.current.has(requestKey)) {
       setLoading(false)
-      return () => controller.abort()
+      return () => { controller.abort(); timers.forEach(window.clearTimeout) }
     }
-    processedRequestKeys.current.add(requestKey)
     // Explicit manual runs are durable high-priority jobs. The scheduler switch
     // controls only scheduled jobs, so it cannot disable this path.
-    void registerAnalysisQuestion(params.coin, mode, params.q, controller.signal).then((res) => {
-      if (controller.signal.aborted) return
-      if (!res.ok || !res.data.job_id) {
-        setLoading(false)
-        setError(res.ok ? { code: 'analysis_queue_unavailable', message: '分析工作尚未建立' } : res.error)
-        return
-      }
-      poll(res.data.job_id)
-    })
-    return () => controller.abort()
+    //
+    // `processedRequestKeys` exists to stop React StrictMode's dev-only
+    // double effect invocation (mount → cleanup → mount) from submitting
+    // the same manual request twice. We claim the key up front so the
+    // second (persisting) invocation doesn't also submit — but the claim
+    // must be released on cleanup if this attempt never got to actually
+    // settle (i.e. it's the throwaway first invocation, whose controller
+    // gets aborted before the request resolves). Claiming permanently
+    // regardless of outcome previously meant: the first invocation fires
+    // the real POST, gets aborted mid-flight and its result silently
+    // discarded (see the `aborted` guard below), while the second,
+    // persisting invocation saw the key as "already handled" and bailed
+    // out via the branch above — never submitting for real, no retry, no
+    // error, stuck in loading forever (see D2).
+    let requestSettled = false
+    const processedKeys = processedRequestKeys.current
+    processedKeys.add(requestKey)
+    const submit = (attempt: number) => {
+      void registerAnalysisQuestion(params.coin, mode, params.q, controller.signal).then((res) => {
+        if (controller.signal.aborted) return
+        requestSettled = true
+        if (!res.ok || !res.data.job_id) {
+          if (!res.ok && res.error.code === 'server_busy' && attempt < MAX_BUSY_RETRIES) {
+            setTrackedTimeout(() => submit(attempt + 1), BUSY_BASE_DELAY_MS * 2 ** attempt)
+            return
+          }
+          setLoading(false)
+          setError(res.ok ? { code: 'analysis_queue_unavailable', message: '分析工作尚未建立' } : res.error)
+          return
+        }
+        // N9/point4 fix: 把拿到的 job_id 存進 sessionStorage，reload 頁面時
+        // 由上面的 `reconnectJobId` 接回同一個工作（見 jobMatchesRequest）。
+        writeStoredJobId(storageKey, res.data.job_id)
+        poll(res.data.job_id)
+      })
+    }
+    submit(0)
+    return () => {
+      controller.abort()
+      timers.forEach(window.clearTimeout)
+      if (!requestSettled) processedKeys.delete(requestKey)
+    }
   }, [hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, urlJobId])
 
   useEffect(() => {
@@ -193,6 +289,18 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
     const timer = window.setTimeout(() => setError(null), 1800)
     return () => window.clearTimeout(timer)
   }, [error])
+
+  // N2 fix: embedded host (HermesDashboard's left-rail submit button) tracks
+  // its own independent `phase` state, previously only reset to 'ready' when
+  // `data` (success) landed via BridgeHologramContext. On an error outcome
+  // `data` never arrives, so the host stayed stuck showing its loading label
+  // forever. `loading` here already flips to false on every settle path
+  // (success, error, or cleared request — see the effect above), so it's a
+  // reliable "still busy" signal to forward regardless of outcome.
+  useEffect(() => {
+    onBusyChange?.(loading)
+    return () => onBusyChange?.(false)
+  }, [loading, onBusyChange])
 
   const handleSubmit = (values: QueryValues) => {
     const next = new URLSearchParams()
@@ -238,19 +346,19 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
         {!focusMode && <div className="mb-5 flex flex-wrap items-end justify-between gap-3 border-b border-tf-border pb-4">
           <div>
             <p className="font-mono text-xs font-semibold uppercase tracking-[1.6px] text-tf-link">Hermes analysis run</p>
-            <h1 className="mt-1 text-2xl font-bold text-tf-text">分析工作區 <span className="text-tf-link">· BRIDGE</span></h1>
-            <p className="mt-1 text-sm text-tf-text2">每次執行固定一個 run，保留來源、節點、證據與輸出供後續稽核。</p>
+            <h1 className="mt-1 text-2xl font-bold text-tf-text">{t('analyzeWorkspaceTitle')} <span className="text-tf-link">· BRIDGE</span></h1>
+            <p className="mt-1 text-sm text-tf-text2">{t('analyzeWorkspaceSubtitle')}</p>
           </div>
           <p className="font-mono text-xs text-tf-muted">asset: {params.coin} · mode: {params.type}</p>
         </div>}
 
         {focusMode && !data && !loading && !error && (
           <section className="mx-auto max-w-3xl rounded-lg border border-tf-border bg-tf-card p-5 sm:p-6">
-            <p className="text-xs font-semibold uppercase text-tf-link">首次試用</p>
-            <h1 className="mt-2 text-2xl font-bold text-tf-text">先完成一次清楚的市場判讀</h1>
+            <p className="text-xs font-semibold uppercase text-tf-link">{t('firstRunEyebrow')}</p>
+            <h1 className="mt-2 text-2xl font-bold text-tf-text">{t('firstRunTitle')}</h1>
             <div className="mt-5 grid gap-4">
               <label className="block">
-                <span className="mb-2 block text-sm font-semibold text-tf-text">1. 選擇想了解的資產</span>
+                <span className="mb-2 block text-sm font-semibold text-tf-text">{t('firstRunStep1')}</span>
                 <select
                   value={focusCoin}
                   onChange={(event) => setFocusCoin(event.target.value)}
@@ -260,7 +368,7 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
                 </select>
               </label>
               <fieldset>
-                <legend className="mb-2 text-sm font-semibold text-tf-text">2. 選擇想解決的問題</legend>
+                <legend className="mb-2 text-sm font-semibold text-tf-text">{t('firstRunStep2')}</legend>
                 <div className="grid gap-2 sm:grid-cols-2">
                   {BEGINNER_INTENTS.map((intent) => (
                     <label key={intent.id} className={`rounded-md border p-3 text-sm ${focusIntent === intent.id ? 'border-tf-link bg-tf-accent/20 text-tf-text' : 'border-tf-border bg-tf-bg text-tf-text2'}`}>
@@ -272,14 +380,14 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
                         onChange={() => setFocusIntent(intent.id)}
                         className="mr-2"
                       />
-                      <span className="font-semibold">{intent.label}</span>
-                      <span className="mt-1 block text-xs text-tf-muted">{intent.description}</span>
+                      <span className="font-semibold">{t(intent.labelKey)}</span>
+                      <span className="mt-1 block text-xs text-tf-muted">{t(intent.descriptionKey)}</span>
                     </label>
                   ))}
                 </div>
               </fieldset>
               <div className="rounded-md border border-tf-border bg-tf-bg p-3 text-sm text-tf-text2">
-                3. 開始後會整理近期資料，給你一句結論、三個原因、目前限制與下一步。
+                {t('firstRunStep3')}
               </div>
               <button
                 type="button"
@@ -287,7 +395,7 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
                 className="rounded-[8px] px-5 py-[13px] text-[13px] font-bold tracking-[0.06em] text-tf-bg hover:opacity-90"
                 style={{ background: 'linear-gradient(135deg,var(--color-tf-accent),#3bc0c8)', boxShadow: '0 0 20px rgba(77,216,224,0.25)' }}
               >
-                開始第一次分析 <span className="tf-num opacity-70">&#8594;</span>
+                {t('firstRunStart')} <span className="tf-num opacity-70">&#8594;</span>
               </button>
             </div>
           </section>
@@ -302,14 +410,14 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
 
           <section className="flex flex-col gap-4">
             {loading && !data && <LoadingState label={manualJob
-              ? `手動優先處理中：${manualJob.current_stage}${manualJob.queue_position ? `（佇列第 ${manualJob.queue_position} 位）` : ''}`
-              : `Hermes 正在建立 ${params.coin} 的手動分析工作…`} />}
+              ? `${t('manualPriorityPrefix')}${manualJob.current_stage}${manualJob.queue_position ? `${t('queuePositionPrefix')}${manualJob.queue_position}${t('queuePositionSuffix')}` : ''}`
+              : t('creatingManualJob', { coin: params.coin })} />}
             {loading && data && (
               <div className="hermes-analysis-pending" role="status" aria-live="polite">
-                <i /> Hermes 正在分析新的資料快照；目前保留顯示上一個完整結果，完成後會一次切換。
+                <i /> {t('analyzingNewSnapshot')}
               </div>
             )}
-            {!loading && error && !data && <ErrorState code={error.code} message={error.message} />}
+            {!loading && error && !data && <ErrorState code={error.code} message={error.message} onRetry={() => setRequestNonce((value) => value + 1)} />}
             {data && focusMode && (
               <BeginnerResult data={data} onShowFullAnalysis={showFullAnalysis} />
             )}
@@ -320,11 +428,11 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
             )}
             {!loading && !error && !data && (
               <div className="hermes-clip border border-tf-border bg-tf-card p-5 text-center" role="status">
-                <p className="text-base font-semibold text-tf-text">尚無分析資料</p>
+                <p className="text-base font-semibold text-tf-text">{t('noAnalysisData')}</p>
                 <p className="mt-2 text-sm text-tf-text2">
                   {hasExplicitRequest
-                    ? '目前尚未產生此題的分析快照，請稍候或重新送出分析。'
-                    : '請在左側面板選擇幣種與題型後送出分析，完成後報告、證據與執行紀錄將顯示於此。'}
+                    ? t('noAnalysisDataPendingHint')
+                    : t('noAnalysisDataEmptyHint')}
                 </p>
               </div>
             )}
@@ -336,34 +444,35 @@ export default function AnalyzePage({ embedded = false }: { embedded?: boolean }
 }
 
 function BeginnerResult({ data, onShowFullAnalysis }: { data: AnalyzeData; onShowFullAnalysis: () => void }) {
+  const { t } = useHermesI18n()
   const reasons = data.report.key_basis.map((item) => item.claim || item.explanation).filter(Boolean).slice(0, 3)
   const fallbackReasons = data.report.facts.concat(data.report.inferences).slice(0, 3)
   const shownReasons = reasons.length ? reasons : fallbackReasons
-  const limit = data.report.limits[0] || '目前資料仍可能不足，請把結論視為需要持續追蹤的判讀。'
-  const nextStep = data.report.could_flip[0] || data.report.contrarian[0] || '保留觀察，等更多來源更新後再重新分析。'
+  const limit = data.report.limits[0] || t('beginnerResultDefaultLimit')
+  const nextStep = data.report.could_flip[0] || data.report.contrarian[0] || t('beginnerResultDefaultNextStep')
   return (
     <article className="mx-auto max-w-3xl rounded-lg border border-tf-border bg-tf-card p-5 sm:p-6">
-      <p className="text-xs font-semibold uppercase text-tf-link">首次分析結果</p>
+      <p className="text-xs font-semibold uppercase text-tf-link">{t('beginnerResultEyebrow')}</p>
       <h2 className="mt-2 text-2xl font-bold text-tf-text">{data.report.coin}：{data.report.market_judgment}</h2>
       <div className="mt-4 rounded-md border border-tf-border bg-tf-bg p-3 text-sm text-tf-text2">
-        目前狀態：{data.report.decision_state === 'abstain' ? '資料不足，暫不判定' : data.report.direction || '需要持續觀察'}
+        {t('beginnerResultCurrentState')}{data.report.decision_state === 'abstain' ? t('beginnerResultInsufficientData') : data.report.direction || t('beginnerResultNeedsWatching')}
       </div>
       <section className="mt-5">
-        <h3 className="text-sm font-semibold text-tf-text">三個原因</h3>
+        <h3 className="text-sm font-semibold text-tf-text">{t('beginnerResultReasonsTitle')}</h3>
         <ol className="mt-2 grid gap-2 text-sm text-tf-text2">
           {shownReasons.map((reason, index) => <li key={index} className="rounded-md border border-tf-border bg-tf-bg p-3">{reason}</li>)}
         </ol>
       </section>
       <section className="mt-5 rounded-md border border-tf-border bg-tf-bg p-3 text-sm text-tf-text2">
-        <p><span className="font-semibold text-tf-text">限制：</span>{limit}</p>
-        <p className="mt-2"><span className="font-semibold text-tf-text">下一步：</span>{nextStep}</p>
+        <p><span className="font-semibold text-tf-text">{t('beginnerResultLimitLabel')}</span>{limit}</p>
+        <p className="mt-2"><span className="font-semibold text-tf-text">{t('beginnerResultNextStepLabel')}</span>{nextStep}</p>
       </section>
       <div className="mt-5 flex flex-wrap gap-3">
         <button type="button" onClick={onShowFullAnalysis} className="rounded-md border border-tf-border px-4 py-2 text-sm font-semibold text-tf-text hover:text-tf-link">
-          查看完整分析
+          {t('beginnerResultShowFull')}
         </button>
         <a href="/analyze" className="rounded-md border border-tf-border px-4 py-2 text-sm font-semibold text-tf-text2 hover:text-tf-link">
-          再做一次簡化分析
+          {t('beginnerResultRedo')}
         </a>
       </div>
     </article>

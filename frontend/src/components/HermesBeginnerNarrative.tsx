@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 /**
  * 新手脈絡 3 步敘事入口（#demo-narrative）。
@@ -19,39 +20,39 @@ interface Step {
   ctas: { label: string; to: string }[]
 }
 
-const STEPS: Step[] = [
-  {
-    no: '01',
-    title: '查代幣定位',
-    desc: '輸入代幣（例：$ARB）→ 自動輸出 [Layer 2] 層級、結算鏈、Gas 代幣與上下游依賴。',
-    ctas: [{ label: '查資產脈絡 →', to: '/asset-context' }],
-  },
-  {
-    no: '02',
-    title: '名詞解釋 + 風險提示',
-    desc: 'FDV / TVL / Gas Fee / 解鎖賣壓等專有名詞自動標註，點擊看白話定義與 ⚠️ 風險提示。',
-    ctas: [{ label: '看名詞標註 →', to: '/asset-context' }],
-  },
-  {
-    no: '03',
-    title: '同層比較 + 生態聯動',
-    desc: '同層資產 TPS/TVL/Gas 橫向比較；官方升級事件對依賴資產的可能影響路徑。',
-    ctas: [
-      { label: '同層比較 →', to: '/peer-metrics' },
-      { label: '生態聯動 →', to: '/eco-link' },
-    ],
-  },
-]
-
 export default function HermesBeginnerNarrative() {
   const navigate = useNavigate()
+  const { t } = useHermesI18n()
   const [open, setOpen] = useState(true)
+  const STEPS: Step[] = useMemo(() => [
+    {
+      no: '01',
+      title: t('beginnerStep1Title'),
+      desc: t('beginnerStep1Desc'),
+      ctas: [{ label: t('beginnerStep1Cta'), to: '/asset-context' }],
+    },
+    {
+      no: '02',
+      title: t('beginnerStep2Title'),
+      desc: t('beginnerStep2Desc'),
+      ctas: [{ label: t('beginnerStep2Cta'), to: '/asset-context' }],
+    },
+    {
+      no: '03',
+      title: t('beginnerStep3Title'),
+      desc: t('beginnerStep3Desc'),
+      ctas: [
+        { label: t('beginnerStep3CtaPeer'), to: '/peer-metrics' },
+        { label: t('beginnerStep3CtaEco'), to: '/eco-link' },
+      ],
+    },
+  ], [t])
   if (!open) return null
 
   return (
     <div
       role="region"
-      aria-label="新手脈絡 3 步"
+      aria-label={t('beginnerNarrativeTitle')}
       className="hermes-beginner-narrative"
       style={{
         position: 'absolute',
@@ -70,15 +71,15 @@ export default function HermesBeginnerNarrative() {
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <span style={{ fontSize: 12, letterSpacing: '.14em', color: 'var(--color-hermes-cy,#4dd8e0)', textTransform: 'uppercase' }}>
-          新手脈絡 · 3 步看懂一個代幣
+          {t('beginnerNarrativeTitle')}
         </span>
         <button
           type="button"
           onClick={() => setOpen(false)}
-          aria-label="關閉新手脈絡引導"
+          aria-label={t('beginnerNarrativeCloseLabel')}
           style={{ background: 'transparent', border: 'none', color: 'rgba(200,220,235,.6)', cursor: 'pointer', fontSize: 13 }}
         >
-          關閉 ✕
+          {t('beginnerNarrativeClose')}
         </button>
       </div>
       <div

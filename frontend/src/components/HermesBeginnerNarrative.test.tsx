@@ -3,11 +3,14 @@ import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import HermesBeginnerNarrative from './HermesBeginnerNarrative'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 
 function renderIt() {
   return render(
     <MemoryRouter>
-      <HermesBeginnerNarrative />
+      <HermesI18nProvider>
+        <HermesBeginnerNarrative />
+      </HermesI18nProvider>
     </MemoryRouter>,
   )
 }

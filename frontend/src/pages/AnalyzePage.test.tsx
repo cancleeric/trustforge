@@ -6,7 +6,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { BridgeHologramProvider } from '../components/BridgeHologramContext'
 import { getAnalysisJob, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeData } from '../lib/types'
+import { HermesI18nProvider, useHermesI18n } from '../hermes/hermesI18n'
 import AnalyzePage from './AnalyzePage'
+
+function LocaleSwitcher({ to }: { to: 'en' | 'zh-TW' }) {
+  const { setLocale } = useHermesI18n()
+  setLocale(to)
+  return null
+}
 
 vi.mock('../components/AnalysisReportView', () => ({
   default: ({ data }: { data: AnalyzeData }) => <div aria-label="analysis report">{data.report.coin}</div>,
@@ -28,11 +35,13 @@ function setMobileComposer(matches: boolean) {
 
 function renderAnalyze(path: string, embedded = false) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
-        <AnalyzePage embedded={embedded} />
-      </BridgeHologramProvider>
-    </MemoryRouter>,
+    <HermesI18nProvider>
+      <MemoryRouter initialEntries={[path]}>
+        <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+          <AnalyzePage embedded={embedded} />
+        </BridgeHologramProvider>
+      </MemoryRouter>
+    </HermesI18nProvider>,
   )
 }
 
@@ -60,6 +69,7 @@ describe('AnalyzePage manual execution', () => {
   beforeEach(() => {
     vi.useRealTimers()
     vi.clearAllMocks()
+    window.sessionStorage.clear()
     mediaMatches = false
     mediaListeners.clear()
     vi.stubGlobal('matchMedia', vi.fn(() => ({
@@ -128,6 +138,91 @@ describe('AnalyzePage manual execution', () => {
     expect(submit).toBeDisabled()
   })
 
+  it('retries a 503 server_busy submission with exponential backoff and eventually succeeds', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(registerAnalysisQuestion)
+        .mockResolvedValueOnce({ ok: false, error: { code: 'server_busy', message: '伺服器忙碌' } })
+        .mockResolvedValueOnce({ ok: true, data: { question_id: 'question-2', job_id: 'flow-2', state: 'queued', origin: 'manual' } })
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: {
+          job_id: 'flow-2', state: 'completed', current_stage: 'report_delivery', coin: 'BTC', mode: 'risk',
+          question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: null,
+          result: analysisResult('BTC', 'flow-2'),
+        },
+      })
+
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+
+      await act(async () => { await vi.runAllTimersAsync() })
+
+      // one initial attempt + exactly one retry after the 503 — no more, no less.
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2)
+      expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC')
+      // the retry path must not leave the UI stuck — loading indicator gone, no error banner.
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null },
+      })
+      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: { question_id: 'question-1', job_id: 'flow-1', state: 'queued', origin: 'manual' } })
+    }
+  })
+
+  it('falls into a visible error state with a working retry button once 503 retries are exhausted', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: false, error: { code: 'server_busy', message: '伺服器忙碌' } })
+
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+
+      await act(async () => { await vi.runAllTimersAsync() })
+
+      // initial attempt (0) + 5 retries (1..5) = 6 calls, then it must give up and
+      // surface a real error state instead of leaving the UI stuck in loading forever.
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(6)
+      const retryButton = screen.getByRole('button', { name: /重新嘗試/ })
+      expect(retryButton).toBeInTheDocument()
+      expect(screen.queryByLabelText('analysis report')).not.toBeInTheDocument()
+
+      // N2: loading and error must be mutually exclusive — once the error
+      // banner is showing, there must be no lingering loading indicator and
+      // the composer's submit button must be back to its normal, enabled
+      // "resubmit" state, not stuck on "still submitting".
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /立即重新分析/ })).not.toBeDisabled()
+
+      // the retry button must actually be able to re-submit and succeed once the
+      // backend recovers — not just be decorative.
+      vi.mocked(registerAnalysisQuestion).mockResolvedValueOnce({
+        ok: true, data: { question_id: 'question-recovered', job_id: 'flow-recovered', state: 'queued', origin: 'manual' },
+      })
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: {
+          job_id: 'flow-recovered', state: 'completed', current_stage: 'report_delivery', coin: 'BTC', mode: 'risk',
+          question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: null,
+          result: analysisResult('BTC', 'flow-recovered'),
+        },
+      })
+      fireEvent.click(retryButton)
+      await act(async () => { await vi.runAllTimersAsync() })
+
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(7)
+      expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC')
+    } finally {
+      vi.useRealTimers()
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: { job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null, origin: 'manual', priority: 0, queue_position: 1, result: null },
+      })
+      vi.mocked(registerAnalysisQuestion).mockResolvedValue({ ok: true, data: { question_id: 'question-1', job_id: 'flow-1', state: 'queued', origin: 'manual' } })
+    }
+  })
+
   it('registers exactly once when explicitly resubmitting the same URL', async () => {
     vi.mocked(getAnalysisJob).mockResolvedValueOnce({ ok: true, data: { job_id: 'flow-1', state: 'failed', current_stage: 'source_ingestion', coin: 'BTC', mode: 'risk', question: 'same', error: 'test', origin: 'manual', priority: 0, queue_position: null, result: null } })
     renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=same')
@@ -141,11 +236,13 @@ describe('AnalyzePage manual execution', () => {
 
   it('does not register processed URLs again on browser back or forward', async () => {
     render(
-      <MemoryRouter initialEntries={['/analyze?coin=BTC&type=multi_source&mode=risk&q=first']}>
-        <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
-          <AnalyzePage /><HistoryControls />
-        </BridgeHologramProvider>
-      </MemoryRouter>,
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={['/analyze?coin=BTC&type=multi_source&mode=risk&q=first']}>
+          <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+            <AnalyzePage /><HistoryControls />
+          </BridgeHologramProvider>
+        </MemoryRouter>
+      </HermesI18nProvider>,
     )
     await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: 'second' }))
@@ -176,11 +273,13 @@ describe('AnalyzePage manual execution', () => {
       },
     }))
     render(
-      <MemoryRouter initialEntries={['/analyze?coin=OLD&type=multi_source&mode=risk&q=old&job=job-old']}>
-        <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
-          <AnalyzePage /><JobControls />
-        </BridgeHologramProvider>
-      </MemoryRouter>,
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={['/analyze?coin=OLD&type=multi_source&mode=risk&q=old&job=job-old']}>
+          <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+            <AnalyzePage /><JobControls />
+          </BridgeHologramProvider>
+        </MemoryRouter>
+      </HermesI18nProvider>,
     )
     await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('OLD'))
     expect(registerAnalysisQuestion).not.toHaveBeenCalled()
@@ -249,5 +348,141 @@ describe('AnalyzePage manual execution', () => {
 
     expect(screen.getByLabelText('問題')).toHaveValue('URL問題')
     expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+  })
+
+  it('N7: localizes the workspace title/subtitle and loading label to EN instead of hard-coded zh-TW', async () => {
+    // N7 regression guard: the analyze workspace shell (title, subtitle,
+    // manual-priority/creating-job loading label) was hard-coded zh-TW and
+    // never respected the EN/zh-TW toggle. Render under the EN locale and
+    // assert the copy is English, not the Chinese literals.
+    render(
+      <HermesI18nProvider>
+        <LocaleSwitcher to="en" />
+        <MemoryRouter initialEntries={['/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況']}>
+          <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+            <AnalyzePage />
+          </BridgeHologramProvider>
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+
+    expect(screen.getByRole('heading', { name: /Analysis workspace/ })).toBeInTheDocument()
+    expect(screen.getByText(/Each run is a single, fixed execution/)).toBeInTheDocument()
+    expect(screen.queryByText('分析工作區')).not.toBeInTheDocument()
+    expect(screen.queryByText(/每次執行固定一個 run/)).not.toBeInTheDocument()
+
+    await waitFor(() => expect(screen.getByText(/Hermes is creating a manual analysis job for BTC/)).toBeInTheDocument())
+    expect(screen.queryByText(/Hermes 正在建立 BTC 的手動分析工作/)).not.toBeInTheDocument()
+  })
+
+  it('N8: keeps polling a job that is still running past the old 120s cliff instead of declaring a false timeout', async () => {
+    // N8 regression guard: the previous implementation gave up and showed
+    // `analysis_timeout` once `Date.now() - pollStartedAt >= 120_000`,
+    // *regardless* of whether the backend was still actively reporting a
+    // live `state`/`current_stage`. Termination must be driven by `state`
+    // (completed/failed), not a hard-coded clock.
+    vi.useFakeTimers()
+    try {
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: {
+          job_id: 'flow-1', state: 'running', current_stage: 'trust_reasoning',
+          coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null,
+          origin: 'manual', priority: 0, queue_position: null, result: null,
+        },
+      })
+
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+
+      // Push well past the old 120_000ms cliff (poll interval is 1200ms).
+      await act(async () => { await vi.advanceTimersByTimeAsync(150_000) })
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(screen.queryByText(/trust_reasoning/)).toBeInTheDocument()
+      expect(screen.queryByLabelText('analysis report')).not.toBeInTheDocument()
+
+      // Now the job actually finishes — the UI must still pick it up.
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: {
+          job_id: 'flow-1', state: 'completed', current_stage: 'report_delivery',
+          coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null,
+          origin: 'manual', priority: 0, queue_position: null,
+          result: analysisResult('BTC', 'flow-1'),
+        },
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+
+      expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC')
+    } finally {
+      vi.useRealTimers()
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: {
+          job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion',
+          coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null,
+          origin: 'manual', priority: 0, queue_position: 1, result: null,
+        },
+      })
+    }
+  }, 20_000)
+
+  it('N8: gives up only after sustained no-response from the backend', async () => {
+    // The 10-minute inactivity fuse must still exist as a safety net for a
+    // genuinely dead backend — this is the one case where surfacing
+    // `analysis_timeout` is correct.
+    vi.useFakeTimers()
+    try {
+      vi.mocked(getAnalysisJob).mockResolvedValue({ ok: false, error: { code: 'network_error', message: 'network down' } })
+
+      renderAnalyze('/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況')
+
+      await act(async () => { await vi.runAllTimersAsync() })
+      await act(async () => {})
+
+      expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('alert')).toHaveTextContent('analysis_timeout')
+    } finally {
+      vi.useRealTimers()
+      vi.mocked(getAnalysisJob).mockResolvedValue({
+        ok: true,
+        data: {
+          job_id: 'flow-1', state: 'queued', current_stage: 'source_ingestion',
+          coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null,
+          origin: 'manual', priority: 0, queue_position: 1, result: null,
+        },
+      })
+    }
+  }, 20_000)
+
+  it('N9: reconnects to the same manual job via sessionStorage after a reload, without resubmitting', async () => {
+    // N9 regression guard: without this, reloading the page mid-analysis (or
+    // after completion) lost track of the job entirely and either
+    // resubmitted a brand-new one or showed "no analysis data" forever for a
+    // job that had actually already completed.
+    const path = '/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況'
+    const first = renderAnalyze(path)
+    await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal)))
+    first.unmount()
+
+    vi.mocked(getAnalysisJob).mockResolvedValue({
+      ok: true,
+      data: {
+        job_id: 'flow-1', state: 'completed', current_stage: 'report_delivery',
+        coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null,
+        origin: 'manual', priority: 0, queue_position: null,
+        result: analysisResult('BTC', 'flow-1'),
+      },
+    })
+
+    // Simulate a page reload: a brand-new mount, same URL, still no
+    // explicit `?job=` param — it must reattach via sessionStorage instead
+    // of firing a second `registerAnalysisQuestion` POST.
+    renderAnalyze(path)
+    await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
+    expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+    expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal))
   })
 })

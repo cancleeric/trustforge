@@ -1,3 +1,8 @@
+// @vitest-environment jsdom
+// N6 round 2 needs `document`/`getComputedStyle` for a genuine computed-style
+// assertion (see below) instead of the string/regex checks the rest of this
+// file otherwise uses; jsdom is a superset so the existing string-based
+// checks below are unaffected by switching this whole file to jsdom.
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -97,5 +102,114 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(css).toContain('.hermes-energy-conduit')
     expect(css).toContain('@keyframes hermes-energy-flow')
     expect(readFileSync(path.join(__dirname, 'HermesModuleDeck.tsx'), 'utf8')).not.toContain('AWAITING DATA')
+  })
+
+  it('N1: keeps the error banner retry button intact instead of a clipped 30px icon box', () => {
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const retryRuleMatch = css.match(/\.tf-error-retry\s*\{[^}]*\}/)
+    expect(retryRuleMatch).not.toBeNull()
+    const retryRule = retryRuleMatch![0]
+
+    // A fixed 30px box was what crushed the "↻ 重新嘗試" label into a
+    // vertical, clipped stack (see StatusStates.tsx's ErrorState button).
+    expect(retryRule).not.toMatch(/width:\s*30px/)
+    expect(retryRule).not.toMatch(/height:\s*30px/)
+    expect(retryRule).toContain('white-space: nowrap')
+    expect(retryRule).toContain('flex: 0 0 auto')
+  })
+
+  it('N6 (round 1 — string check only, see round 2 below for computed-style proof): the mid-breakpoint block still declares single-column + !important, and hides the hero tagline', () => {
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+
+    // At ~768–1024px the left rail narrows (--hermes-rail shrinks) while
+    // .hermes-intent-picker>div was still forced into a 2-column grid,
+    // crushing Chinese question titles into 2–3 character line wraps.
+    //
+    // CEO round-1 rejection: this rule and the always-on base rule
+    // `.hermes-intent-picker>div { grid-template-columns: 1fr 1fr }`
+    // (defined later in the file, outside any @media block) have identical
+    // specificity (1 class + 1 element). CSS cascade breaks specificity ties
+    // by *source order*, not by whether a rule sits inside a matching
+    // @media block — so the later, unconditional base rule was silently
+    // winning even when this media query matched, and DevTools computed
+    // style showed 2 columns the whole time. `!important` now forces this
+    // rule to win regardless of source order.
+    //
+    // NOT OBSERVED here: jsdom does not re-evaluate `@media (max-width:…)`
+    // rules against a simulated `window.innerWidth` for `getComputedStyle`
+    // (verified empirically — changing `window.innerWidth` via
+    // `Object.defineProperty` had no effect on which of two conflicting
+    // matched-vs-unmatched-media rules jsdom applied). So this assertion is
+    // still only a string/regex check on the source, same limitation as
+    // round 1. The computed-style proof below only covers the `.is-module-
+    // open` fix, which is the fix CEO's browser measurements actually
+    // pinned the regression on. A true viewport-driven check for this
+    // narrower slice needs a real browser (see CEO's own DevTools numbers).
+    const midBreakpointMatch = css.match(/@media \(max-width:1024px\) \{([\s\S]*?)\n\}\n\n\/\* N6 \(round 2/)
+    expect(midBreakpointMatch).not.toBeNull()
+    const midBreakpointBlock = midBreakpointMatch![1]
+
+    expect(midBreakpointBlock).toMatch(/\.hermes-intent-picker>div\s*\{\s*grid-template-columns:\s*1fr\s*!important;\s*\}/)
+
+    // The full-width hero tagline strip (left:0,right:0, z-index above the
+    // left rail) only reserves a single-line height via --hermes-top and
+    // wraps to 2 lines at this width, overlapping the left-rail cards below
+    // it. It must be suppressed at this breakpoint to avoid the overlap.
+    // (CEO confirmed this half fixed in round 1 — untouched here.)
+    expect(midBreakpointBlock).toMatch(/\.hermes-hero-tagline\s*\{\s*display:\s*none\s*!important;\s*\}/)
+  })
+
+  it('N6 (round 2 — genuine computed-style proof, not a string assertion): hides the left-rail intent picker once the analysis module deck is open, regardless of viewport width', () => {
+    // CEO round-1 rejection also identified the *real* root cause: the
+    // squish reproduces at 1440px too, whenever the analysis module deck
+    // (HermesModuleDeck, opened via `?workspace=analyze`) is open — its
+    // `inset` is hard-coded (`44px 300px 120px`), independent of
+    // `--hermes-rail`, so the left rail (and its intent-picker cards) keeps
+    // rendering at native size in whatever sliver is left, regardless of
+    // viewport width. CEO measured `.hermes-intent-picker` computed width
+    // at 109px in that state. Per CEO's own accepted criterion ("該區塊乾脆
+    // 不顯示" is an acceptable outcome), the fix hides the intent picker
+    // entirely while the module deck is open.
+    //
+    // This test builds a minimal DOM mirroring the real markup
+    // (`.hermes-dashboard.is-module-open` → `.hermes-frame` →
+    // `[data-region='left-rail']` → `.hermes-clip` → `.hermes-intent-picker`),
+    // injects the real hermes.css into a `<style>` tag, and reads
+    // `getComputedStyle(...).display` — i.e. what actually wins the cascade,
+    // not just "the rule text exists somewhere in the file". This is the
+    // kind of check CEO asked for after round 1's string-only test gave a
+    // false green.
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const style = document.createElement('style')
+    style.textContent = css
+    document.head.appendChild(style)
+    document.body.innerHTML = `
+      <div class="hermes-dashboard">
+        <div class="hermes-frame">
+          <div data-region="left-rail">
+            <div class="hermes-clip">
+              <div class="hermes-intent-picker">
+                <div class="hermes-intent-title"></div>
+                <p></p>
+                <div><button>a</button><button>b</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `
+    const dashboard = document.querySelector('.hermes-dashboard') as HTMLElement
+    const picker = document.querySelector('.hermes-intent-picker') as HTMLElement
+
+    // baseline: visible while the module deck is closed
+    expect(getComputedStyle(picker).display).not.toBe('none')
+
+    dashboard.classList.add('is-module-open')
+    expect(getComputedStyle(picker).display).toBe('none')
+
+    try {
+      document.head.removeChild(style)
+      document.body.innerHTML = ''
+    } catch { /* best-effort cleanup */ }
   })
 })

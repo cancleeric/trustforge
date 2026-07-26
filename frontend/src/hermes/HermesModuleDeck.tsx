@@ -18,11 +18,15 @@ const MODULES = {
 }
 
 export default function HermesModuleDeck({
-  module, onClose, onTelemetry,
+  module, onClose, onTelemetry, onBusyChange,
 }: {
   module: HermesWorkspaceModule
   onClose: () => void
   onTelemetry: (data: BridgeHologramData | null) => void
+  /** Only meaningful for the `analyze` module — forwards its internal
+   * loading state so the host can reflect it even on error outcomes,
+   * where `onTelemetry` never fires (see AnalyzePage's N2 fix). */
+  onBusyChange?: (busy: boolean) => void
 }) {
   const { t } = useHermesI18n()
   const [data, setData] = useState<BridgeHologramData | null>(null)
@@ -50,7 +54,7 @@ export default function HermesModuleDeck({
           <span className="module-holo-caption">{data?.primaryLabel || module.toUpperCase()} · {data?.total ?? 0} SIGNALS</span>
         </div>
         <div className="hermes-module-deck-scroll">
-          {module === 'analyze' ? <AnalyzePage embedded /> : <Module />}
+          {module === 'analyze' ? <AnalyzePage embedded onBusyChange={onBusyChange} /> : <Module />}
         </div>
       </section>
     </BridgeHologramProvider>
