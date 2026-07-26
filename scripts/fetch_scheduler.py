@@ -113,6 +113,7 @@ from trustforge.ingestion.coingecko import build_coingecko_sources  # noqa: E402
 from trustforge.ingestion.news import build_news_sources  # noqa: E402
 from trustforge.ingestion.onchain import build_onchain_sources  # noqa: E402
 from trustforge.ingestion.regulatory import build_regulatory_sources  # noqa: E402
+from trustforge.ingestion.taiwan_regulatory import build_taiwan_regulatory_sources  # noqa: E402
 from trustforge.ingestion.social import build_social_sources  # noqa: E402
 from trustforge.ingestion.hoyabit import build_hoyabit_sources, log_hoyabit_startup_status  # noqa: E402
 from trustforge.brand_logos import coin_logo_html  # noqa: E402
@@ -132,6 +133,11 @@ def build_registry() -> dict[str, Source]:
         + build_onchain_sources()
         + build_social_sources()
         + build_regulatory_sources()
+        # issue #385：台灣監管來源。真呼叫只發生在本排程器；是否實際執行由
+        # `base.get_source_enabled()` 決定（本批預設 disabled，需 override）。
+        # 全部登記在 `cache.COIN_AGNOSTIC_SOURCES`，故每輪只打一次後廣播到
+        # 各幣 cache key，不會每幣各打一次政府站。
+        + build_taiwan_regulatory_sources()
         + build_coingecko_sources()
         + build_hoyabit_sources()
     )

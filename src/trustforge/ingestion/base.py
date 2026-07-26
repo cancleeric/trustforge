@@ -67,7 +67,27 @@ _SOURCE_ENABLED_OVERRIDES: dict[str, bool] = {}
 # 「真實源預設全 ON」互補——未完工的 stub 在 spec 到位前絕不啟用，避免佔位
 # 資料被當真實高權威）。管理端經 `set_source_enabled_override(name, True)`
 # （或 admin_config disabled_sources 反向排除）明確啟用後才納入。
-_DEFAULT_DISABLED_SOURCES: frozenset[str] = frozenset({"hoyabit-ticker"})
+#
+# issue #385 台灣監管來源同樣預設 disabled，但理由不同——它們是真實已接線的
+# 來源，不是 stub。實測 7 源中只有 `fsc-news` 有實質加密內容（23/800），
+# 其餘 coverage 為 0 或近 0；且台灣監管文件多半不提幣別，會走
+# `_matches_coin()` 分支 3「全市場通用」而被納入**每一個幣**的證據池。
+# 先手動 override 開啟觀察雜訊率，驗過再翻預設。
+_TAIWAN_REGULATORY_SOURCES: frozenset[str] = frozenset(
+    {
+        "fsc-news",
+        "fsc-penalty",
+        "fsc-notice",
+        "mops-twse",
+        "mops-tpex",
+        "twse-punish",
+        "tpex-punish",
+    }
+)
+
+_DEFAULT_DISABLED_SOURCES: frozenset[str] = (
+    frozenset({"hoyabit-ticker"}) | _TAIWAN_REGULATORY_SOURCES
+)
 
 # collect() is also used directly by older callers and tests.  A ContextVar lets
 # pipeline.run attach an ExecutionLog without changing that long-standing public
@@ -336,6 +356,7 @@ def collect(query: str, coin: str | None = None,
             from .onchain import build_onchain_sources
             from .social import build_social_sources
             from .regulatory import build_regulatory_sources
+            from .taiwan_regulatory import build_taiwan_regulatory_sources
             from .coingecko import build_coingecko_sources
             from .hoyabit import build_hoyabit_sources
             from .whale_trades import build_whale_sources
@@ -345,6 +366,10 @@ def collect(query: str, coin: str | None = None,
                 + build_onchain_sources()
                 + build_social_sources()
                 + build_regulatory_sources()
+                # issue #385：台灣監管來源預設 disabled（見
+                # `_TAIWAN_REGULATORY_SOURCES`），仍需在此建構，
+                # 才能透過 override 啟用而不必改碼。
+                + build_taiwan_regulatory_sources()
                 + build_coingecko_sources()
                 + build_hoyabit_sources()
                 + build_whale_sources()

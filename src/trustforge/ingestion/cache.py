@@ -203,7 +203,23 @@ def _json_fallback_enabled(explicit: bool | None) -> bool:
 # API，把「同一份」結果廣播寫入每個幣的 cache key，避免浪費呼叫額度。
 # ⚠️ 跟下面 `COIN_KEYED_BATCH_SOURCES` 不同：這裡廣播的內容對每個幣是
 # **完全相同**的（FNG/SEC 本來就不分幣），適合直接整份複製。
-COIN_AGNOSTIC_SOURCES = frozenset({"alternative-me-fng", "sec-gov"})
+#
+# issue #385 台灣監管來源（FSC/MOPS/TWSE/TPEx）同屬此類：政府公告本來就不分
+# 幣別，一份回應對每個幣完全相同。不登記在此的話，排程器會為每個幣各打一次
+# 真 API——5 幣 × 7 源 ＝ 每輪 35 次請求打政府站，既浪費也不禮貌。
+COIN_AGNOSTIC_SOURCES = frozenset(
+    {
+        "alternative-me-fng",
+        "sec-gov",
+        "fsc-news",
+        "fsc-penalty",
+        "fsc-notice",
+        "mops-twse",
+        "mops-tpex",
+        "twse-punish",
+        "tpex-punish",
+    }
+)
 
 # 一次真呼叫的回應本身就「涵蓋多幣、且已用 `Document.meta['coin']` 明確
 # 標示各自歸屬」的來源（生產事故修復：CoinGecko price 429 風暴根因，見
