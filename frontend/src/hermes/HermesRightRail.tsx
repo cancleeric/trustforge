@@ -50,7 +50,7 @@ export default function HermesRightRail({
     <div
       className="hermes-glass hermes-right-rail"
       style={{
-        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
+        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-right-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
         borderLeft: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
         display: 'flex', flexDirection: 'column', gap: 12,
         overflowY: 'auto',

@@ -3446,6 +3446,34 @@
   font: 8px/1.25 var(--font-hermes-sans);
 }
 
+/* N22 fix: at short viewports (e.g. 960x482) the 5-row beginner intent
+   picker (`.hermes-intent-picker`) sits inside the "HERMES CONSOLE" card
+   (`.hermes-clip`), which is itself a flex child sized to whatever's left of
+   `--hermes-rail`'s height after `--hermes-top`/`--hermes-bottom`. In
+   English (longer strings than zh-TW) the 2-line label+description rows
+   wrap taller and the whole picker's natural height (measured: 367.5px)
+   blows well past the card's available box (measured: 314px). The card's
+   own `overflow-y:auto` does clip it correctly — nothing paints past the
+   card's bottom edge — but the last row (and, on this dev's real hit-test
+   harness, `.hermes-energy-station` painting where the clipped button used
+   to visually be) sits below the fold at initial paint with no visible
+   scrollbar affordance (macOS overlay scrollbars), so it's unreachable
+   without the user first discovering they need to scroll this inner card.
+   This isn't a z-index/stacking bug — confirmed via Playwright: after
+   `scrollIntoView`, the button *is* clickable, nothing else covers it.
+   Fix: hide the (redundant — already exposed via each button's `title`
+   attribute) description line under short viewports so all 5 rows fit
+   inside the card without needing to scroll at all. */
+@media (max-height:600px) {
+  .hermes-intent-picker button span {
+    display: none;
+  }
+
+  .hermes-intent-picker button {
+    padding: 6px 7px;
+  }
+}
+
 .hermes-mode-suggestion {
   width: 100%;
   margin: -5px 0 9px;

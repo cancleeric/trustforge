@@ -80,11 +80,15 @@ export default function HermesBeginnerNarrative() {
         <span style={{ fontSize: 12, letterSpacing: '.14em', color: 'var(--color-hermes-cy,#4dd8e0)', textTransform: 'uppercase' }}>
           {t('beginnerNarrativeTitle')}
         </span>
+        {/* min click target ≥24x24 (was 41.6x19.5 — under the 24px min
+            height on every viewport tested; this is *the* dismiss control
+            for the whole overlay, so an unreachable-height target is
+            especially bad). */}
         <button
           type="button"
           onClick={() => setOpen(false)}
           aria-label={t('beginnerNarrativeCloseLabel')}
-          style={{ background: 'transparent', border: 'none', color: 'rgba(200,220,235,.6)', cursor: 'pointer', fontSize: 13 }}
+          style={{ background: 'transparent', border: 'none', color: 'rgba(200,220,235,.6)', cursor: 'pointer', fontSize: 13, minWidth: 24, minHeight: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '4px 6px' }}
         >
           {t('beginnerNarrativeClose')}
         </button>
