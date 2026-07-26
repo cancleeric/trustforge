@@ -57,6 +57,7 @@ import json
 import logging
 import re
 import xml.etree.ElementTree as ET
+from abc import ABC, abstractmethod
 from datetime import date, datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -173,8 +174,8 @@ def _strip_html(raw: str) -> str:
     return text.strip()
 
 
-class TaiwanRegulatorySource(Source):
-    """台灣監管來源共用基底。
+class TaiwanRegulatorySource(Source, ABC):
+    """台灣監管來源共用基底（抽象，不可直接實例化）。
 
     子類別提供 `_endpoints` 與 `_parse()`，本類負責：
     host 白名單、有界擷取、關鍵字閘門、PIT 閘門、dedup、
@@ -279,15 +280,15 @@ class TaiwanRegulatorySource(Source):
 
     # ── 子類別覆寫點 ─────────────────────────────────────────────────────
 
+    @abstractmethod
     def _parse(self, raw: bytes, url: str) -> list[dict]:
         """把原始回應轉成中介 record 清單。"""
-        raise NotImplementedError
 
+    @abstractmethod
     def _to_document(
         self, record: dict, *, url: str, fetched_at: datetime, content_hash: str
     ) -> Document | None:
         """把單一 record 轉成 Document；不合格回 None（跳過該筆）。"""
-        raise NotImplementedError
 
     def _is_complete(self, raw: bytes) -> bool:
         """回應完整性檢查。預設不檢（JSON 走 parse 即可驗）。"""

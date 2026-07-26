@@ -91,8 +91,14 @@ def test_openapi_twse_host_is_allowlisted() -> None:
     assert "openapi.twse.com.tw" in ALLOWED_TW_HOSTS
 
 
+def test_base_class_is_abstract() -> None:
+    """共用基底不得直接實例化——`_parse`／`_to_document` 是抽象方法。"""
+    with pytest.raises(TypeError):
+        TaiwanRegulatorySource()
+
+
 def test_host_validation_rejects_outsiders() -> None:
-    source = TaiwanRegulatorySource()
+    source = FSCSource("fsc-news")  # 走具體子類，基底為抽象
     assert source._validate_host("https://www.fsc.gov.tw/RSS/Messages") is True
     assert source._validate_host("https://openapi.twse.com.tw/v1/x") is True
     assert source._validate_host("https://evil.example.com/") is False
