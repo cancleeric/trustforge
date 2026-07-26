@@ -26,7 +26,10 @@ function Toggle({ on, onClick, accent = 'var(--color-tf-accent)' }: { on: boolea
       role="switch"
       aria-checked={on}
       onClick={onClick}
-      className="relative inline-block h-[22px] w-[42px] rounded-full transition-colors"
+      // 軌道視覺維持 22px（設計稿），但 22 < 24px 最小點擊目標，因此用 ::after 把
+      // 實際可點區域上下各撐 2px 到 26px。這不是遮罩取巧：::after 屬於這顆 button，
+      // 手指落在那 2px 上真的會觸發 onClick，Row 的 py-3.5 也保證不會壓到鄰居。
+      className="relative inline-block h-[22px] w-[42px] rounded-full transition-colors after:absolute after:inset-x-0 after:-inset-y-[2px] after:content-['']"
       style={{ background: on ? accent : 'var(--color-tf-border)' }}
     >
       <span
@@ -150,7 +153,7 @@ export default function SettingsPage() {
                   max={100}
                   value={threshold}
                   onChange={(e) => setThreshold(Number(e.target.value))}
-                  className="w-40 accent-tf-warn"
+                  className="h-6 w-40 accent-tf-warn"
                   aria-label={t('setThresholdLabel')}
                 />
               </Row>
@@ -188,7 +191,7 @@ export default function SettingsPage() {
                     max={100}
                     value={divergenceThreshold}
                     onChange={(e) => setDivergenceThreshold(Number(e.target.value))}
-                    className="flex-1 accent-tf-warn"
+                    className="h-6 flex-1 accent-tf-warn"
                     aria-label={t('setDivergenceLabel')}
                   />
                   <span className="tf-num w-10 text-xs font-semibold" style={{ color: 'var(--color-tf-warn)' }}>{divergenceThreshold}%</span>
