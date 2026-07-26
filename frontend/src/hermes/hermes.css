@@ -806,9 +806,17 @@
 .hermes-energy-deck {
   position: absolute;
   z-index: 8;
-  left: 0;
+  /* N41: 原本 `left: 0` 讓能量管線條橫跨整個畫面，包含左軌正下方那一段——
+     左軌是 AI agent 互動區，底下卻延伸出一條屬於中央艦橋的管線，看起來像
+     互動區自己的一部分。左緣改吃 `--hermes-rail`，管線從軌道右緣才開始。
+     不另外寫斷點：`--hermes-rail` 在 ≤560px 已經是 `0px`（軌道本身也
+     display:none），吃同一個變數就自動貼齊，這條關係在所有斷點都成立。
+     配合 `right: 0` + `width: auto` 取代固定的 1440px 設計稿寬度，
+     1440 視窗實際寬度＝1440 − 軌道，正是「從軌道右緣開始」的意思。 */
+  left: var(--hermes-rail);
+  right: 0;
   bottom: 0;
-  width: 1440px;
+  width: auto;
   height: 120px;
   overflow: hidden;
   display: grid;

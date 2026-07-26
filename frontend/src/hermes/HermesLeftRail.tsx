@@ -96,56 +96,89 @@ export default function HermesLeftRail({
           <span style={{ fontSize: 9, color: 'var(--color-hermes-cyan)', background: 'rgba(77,216,224,.13)', border: '1px solid rgba(77,216,224,.4)', borderRadius: 3, padding: '1px 6px' }}>{t('online')}</span>
         </div>
 
-        {/* N37: 同上——這層的 minHeight:0 實測讓「Hermes 主動報告」對話區在
-            561x700 只剩 46px（scrollHeight 697）、900x620 和 1024x420 直接
-            剩 0px，511~555px 的報告內容一個字都看不到。樓地板取 110px＝
-            下面那顆 agentOutput 卡的 minHeight 82 ＋ gap ＋ 標題行。 */}
-        <div style={{ flex: 1, minHeight: 110, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
-          <div style={{ minHeight: 82, flexShrink: 0, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: '2px solid var(--color-hermes-amber)', borderRadius: '0 6px 6px 0', padding: '9px 11px', overflow: 'hidden' }}>
-            <div style={{ fontSize: 9, color: 'var(--color-hermes-amber)', letterSpacing: 1, marginBottom: 4 }}>{t('agentOutput')}</div>
-            {/* N39: 硬鎖 62px＝11.5px 字大約只露 3 行，但 HERMES 的回覆實測遠比
-                這個高：en 561x700 scrollHeight 224、768x1024 121、1280x800 104。
-                也就是使用者要在一個只有內容 28% 高的縫裡捲完整段分析結論——這是
-                主控台最核心的一塊內容，不該是最窄的一塊。
-                改成 min(34vh, 260px)：矮視窗跟著視窗縮（不會把左軌其他區塊擠掉），
-                高視窗最多 260px＝約 13 行，一次讀完常見長度的回覆而不必捲。
-                字級 11.5→12.5：這段是要「讀」的散文，不是 telemetry 數字。 */}
-            <div aria-label={t('agentOutput')} style={{ maxHeight: 'min(34vh, 260px)', overflowY: 'auto', fontSize: 12.5, lineHeight: 1.6, color: 'var(--color-hermes-tx)', overflowWrap: 'anywhere' }}>{hermesMessage}</div>
-          </div>
-          {(questionContext?.conversation.length || hasOrder) ? (
-            <div style={{ background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 6, padding: '8px 11px', alignSelf: 'flex-end', maxWidth: '92%' }}>
-              <div style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1, marginBottom: 3 }}>{t('conversationMemory')}</div>
-              {(questionContext?.conversation ?? [])
-                .filter((msg, i, arr) => i === 0 || msg.role !== arr[i - 1].role || msg.content !== arr[i - 1].content)
-                .slice(-3)
-                .map((message) => (
-                <div key={message.message_id} style={{ fontSize: 10.5, lineHeight: 1.4, color: message.role === 'hermes' ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-tx2)', marginTop: 4 }}>
-                  {message.role === 'hermes' ? 'HERMES' : 'YOU'} › {message.content}
+        {/* N40: 這塊原本不是「對話」，是三種東西疊在一起——一張 amber 的
+            agentOutput 卡（最新回覆）、一張標題寫「對話記憶」而內容是
+            `HERMES › …` 前綴純文字的 10.5px 小卡（只留最後 3 則），再加一段
+            RAG 相似問題清單。三者用同一個捲動容器，所以歷史訊息、最新回覆、
+            系統建議在視覺上分不出誰是誰，也看不出誰先誰後。老闆的原話是
+            「隨便一個 ai agent 都比這個強」，這是對的：沒有任何對話介面長這樣。
+
+            改成一般 agent 介面的三段式：
+              transcript  單一時間序訊息串，靠左右對齊分角色（使用者靠右、
+                          HERMES 靠左），不再用 `HERMES ›` 前綴。字級
+                          10.5→12.5，並且不再 `.slice(-3)`——訊息串本來就會捲，
+                          砍掉歷史沒有理由。
+              suggestions RAG 相似問題移出訊息串，收進預設闔起的 <details>。
+                          那是系統建議、不是對話內容，混在一起就是雜訊。
+              composer    模式選單＋輸入框＋送出鍵包成一塊，flexShrink:0
+                          釘在底部（見下方 N40 composer）。
+            角色標籤只在 HERMES 一側顯示品牌字 `HERMES`；使用者一側靠右對齊
+            即可辨識，不加字就不必新增 i18n key（少一處可能漏翻的地方）。 */}
+        <div
+          aria-label={t('agentOutput')}
+          style={{ flex: 1, minHeight: 140, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10, paddingRight: 2 }}
+        >
+          {(() => {
+            const history = (questionContext?.conversation ?? [])
+              .filter((msg, i, arr) => i === 0 || msg.role !== arr[i - 1].role || msg.content !== arr[i - 1].content)
+            const bubbles = history.map((msg) => ({ key: msg.message_id, role: msg.role, text: msg.content, latest: false }))
+            // 最新回覆有可能已經是 conversation 的最後一則（後端回寫），重複
+            // 顯示同一句話會讓人以為 HERMES 說了兩次，所以只在不同時才補上。
+            const lastHermes = [...history].reverse().find((m) => m.role === 'hermes')
+            if (hermesMessage && lastHermes?.content !== hermesMessage) {
+              bubbles.push({ key: 'latest', role: 'hermes', text: hermesMessage, latest: true })
+            } else if (bubbles.length) {
+              bubbles[bubbles.length - 1].latest = bubbles[bubbles.length - 1].role === 'hermes'
+            }
+            // 還沒有任何往返時，把待送出的指令當成使用者的第一顆泡泡，讓畫面
+            // 一開始就是對話的樣子，而不是一行 `> risk: …` 的 log。
+            if (!bubbles.length && hasOrder) bubbles.push({ key: 'pending', role: 'user', text: query || qtype, latest: false })
+            return bubbles.map((b) => {
+              const mine = b.role !== 'hermes'
+              return (
+                <div key={b.key} style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '92%', flexShrink: 0 }}>
+                  {!mine && <div style={{ fontSize: 9, letterSpacing: 1, color: b.latest ? 'var(--color-hermes-amber)' : 'var(--color-hermes-tx3)', marginBottom: 3 }}>HERMES</div>}
+                  <div
+                    style={{
+                      background: mine ? 'rgba(40,64,90,.35)' : 'var(--color-hermes-inset)',
+                      border: `1px solid ${b.latest ? 'var(--color-hermes-amber)' : mine ? 'var(--color-hermes-bd2)' : 'var(--color-hermes-bd)'}`,
+                      borderRadius: mine ? '8px 8px 2px 8px' : '2px 8px 8px 8px',
+                      padding: '9px 11px',
+                      fontSize: 12.5,
+                      lineHeight: 1.6,
+                      color: mine ? 'var(--color-hermes-tx2)' : 'var(--color-hermes-tx)',
+                      overflowWrap: 'anywhere',
+                    }}
+                  >
+                    {b.text}
+                  </div>
                 </div>
-              ))}
-              {!questionContext?.conversation.length && <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx2)' }}>&gt; {qtype}: {query}</div>}
-            </div>
-          ) : null}
-          {!!questionContext && (
-            <div style={{ borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
-              <div style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', marginBottom: 2 }}><GlossaryTerm term="rag" label={t('similarQuestions')} compact /></div>
-              <div role="note" style={{ fontSize: 8.5, lineHeight: 1.35, color: 'var(--color-hermes-amber)', marginBottom: 5 }}>
-                {t('historyDisclaimer')}
-              </div>
-              {questionContext.matches.length ? questionContext.matches.slice(0, 3).map((match) => (
-                <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
-                  style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10, lineHeight: 1.35, padding: '5px 2px', cursor: 'pointer' }}>
-                  <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{modeLabel(match.mode, t)} · {match.question}
-                </button>
-              )) : (
-                <div style={{ fontSize: 10, lineHeight: 1.4, color: 'var(--color-hermes-tx3)', padding: '5px 2px' }}>{t('noSimilarQuestions')}</div>
-              )}
-            </div>
-          )}
+              )
+            })
+          })()}
         </div>
 
+        {!!questionContext && (
+          <details style={{ flexShrink: 0, marginBottom: 10, borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
+            <summary style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', cursor: 'pointer', minHeight: 24, display: 'flex', alignItems: 'center' }}>
+              <GlossaryTerm term="rag" label={t('similarQuestions')} compact />
+            </summary>
+            <div role="note" style={{ fontSize: 9.5, lineHeight: 1.35, color: 'var(--color-hermes-amber)', margin: '5px 0' }}>
+              {t('historyDisclaimer')}
+            </div>
+            {questionContext.matches.length ? questionContext.matches.slice(0, 3).map((match) => (
+              <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
+                style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 11, lineHeight: 1.4, padding: '7px 2px', minHeight: 24, cursor: 'pointer' }}>
+                <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{modeLabel(match.mode, t)} · {match.question}
+              </button>
+            )) : (
+              <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx3)', padding: '5px 2px' }}>{t('noSimilarQuestions')}</div>
+            )}
+          </details>
+        )}
+
         <label style={{ display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 }}>{t('analysisMode')}</label>
-        <div style={{ position: 'relative', marginBottom: 10 }}>
+        <div style={{ position: 'relative', marginBottom: 10, flexShrink: 0 }}>
           <select
             value={qtype}
             onChange={(e) => onType(e.target.value)}
@@ -157,6 +190,8 @@ export default function HermesLeftRail({
         </div>
 
         <label style={{ display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 }}>{t('order')}</label>
+        {/* N40 composer：輸入區整塊 flexShrink:0，訊息串（flex:1）吃剩下的高度，
+            這是一般 agent 介面的配置——內容多的時候捲訊息，不是壓輸入框。 */}
         <textarea
           value={query}
           onChange={(e) => onQuery(e.target.value)}
@@ -187,7 +222,7 @@ export default function HermesLeftRail({
         <button
           onClick={onSubmit}
           disabled={disabled}
-          style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: 'var(--color-hermes-amber)', border: 'none', borderRadius: 5, color: '#1a1206', fontWeight: 700, fontSize: 12, padding: 9, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? .55 : 1, transition: 'filter .15s, transform .08s' }}
+          style={{ width: '100%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: 'var(--color-hermes-amber)', border: 'none', borderRadius: 5, color: '#1a1206', fontWeight: 700, fontSize: 12, padding: 9, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? .55 : 1, transition: 'filter .15s, transform .08s' }}
           onMouseEnter={(e) => (e.currentTarget.style.filter = 'brightness(1.12)')}
           onMouseLeave={(e) => (e.currentTarget.style.filter = 'none')}
           onMouseDown={(e) => (e.currentTarget.style.transform = 'scale(.96)')}
