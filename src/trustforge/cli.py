@@ -490,6 +490,35 @@ def _valid_modelhub_execution_reference(out_dir: Path, result: dict) -> bool:
     )
 
 
+def cmd_sagemaker_train(args: argparse.Namespace) -> int:
+    """Run SageMaker calibrator training and print JSON summaries (#704)."""
+    from .sagemaker_submit import submit_sagemaker_training, COIN_POOL as SM_COIN_POOL
+    from .execlog import ExecutionLog
+
+    coins = list(SM_COIN_POOL) if args.all else [args.coin]
+    results = []
+
+    for coin in coins:
+        log = ExecutionLog()
+        try:
+            result = submit_sagemaker_training(
+                coin,
+                training_dir=Path(args.training_dir),
+                out_dir=Path(args.out_dir),
+                dry_run=args.dry_run,
+                execution_log=log,
+            )
+        except Exception as exc:
+            result = {"status": "error", "coin": coin, "run_id": log.run_id,
+                      "reason": f"{type(exc).__name__}: {exc}"}
+        result["run_id"] = log.run_id
+        results.append(result)
+        print(json.dumps(result, ensure_ascii=False))
+
+    failed = [r for r in results if r.get("status") == "error"]
+    return 1 if failed else 0
+
+
 def cmd_modelhub_train(args: argparse.Namespace) -> int:
     """Run isolated ModelHub calibrator proposal flows and print JSON summaries."""
     from .modelhub_submit import _persist_execution_log_at, submit_calibrator_training
@@ -707,6 +736,16 @@ def main(argv=None) -> int:
     mh.add_argument("--req-no", default=None)
     mh.add_argument("--req-no-map", action="append", default=[], metavar="COIN=REQ")
     mh.set_defaults(func=cmd_modelhub_train)
+
+    # --- SageMaker training subcommand (#704) ---
+    sm = sub.add_parser("sagemaker-train", help="建立 SageMaker calibrator 訓練候選 proposal")
+    sm_target = sm.add_mutually_exclusive_group(required=True)
+    sm_target.add_argument("--coin", choices=COIN_POOL)
+    sm_target.add_argument("--all", action="store_true")
+    sm.add_argument("--dry-run", action="store_true")
+    sm.add_argument("--training-dir", default="data/training")
+    sm.add_argument("--out-dir", default="out/sagemaker-proposals")
+    sm.set_defaults(func=cmd_sagemaker_train)
 
     args = p.parse_args(argv)
     if not hasattr(args, "func"):
