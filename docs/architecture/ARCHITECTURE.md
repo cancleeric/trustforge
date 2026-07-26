@@ -106,6 +106,72 @@ proposal/log/current。ModelHub 只收到 train rows 與不含 label/hit 的 opa
 ModelHub poll 本身最多 5 分鐘，且每一階段都再檢查剩餘 execution budget。五幣 live 模式
 要求五個互異 `req_no`，避免不同幣種誤用同一 submission。
 
+## SageMaker 訓練後端（#704）
+
+ModelHub 與 SageMaker 是**同等級**的訓練平台（都有 GPU、都能跑 fit、都產 artifact），
+由環境變數 `TRAINING_BACKEND=sagemaker|modelhub` 選擇後端。兩者不是上下游關係。
+
+```text
+推論端（不動）：Bedrock (LLM) + 本地 apply_calibration() (校準模型)
+訓練端（可選）：ModelHub ←→ SageMaker（同等級、並行）
+```
+
+### 架構
+
+```text
+                    TrainingBackend Protocol
+                    (training_backend.py)
+                         │          │
+              ┌──────────▼──┐  ┌────▼───────────┐
+              │ ModelHub    │  │ SageMaker      │
+              │ Backend     │  │ Backend        │
+              └─────────────┘  └────────────────┘
+```
+
+### SageMaker 編排流程
+
+```text
+data/training/{coin}.jsonl
+  → flat loader + ≥100 unique labelled outcomes gate
+  → chronological train/holdout split
+  → S3 upload (JSONL → s3://{bucket}/trustforge/training/{coin}/{ts}/input/)
+  → SageMaker create_training_job
+  → describe_training_job polling (max 300s)
+  → download model.tar.gz from S3 ModelArtifacts
+  → 解壓 model.json + SHA256 驗證
+  → weighted ECE 比對（改善 ≥ 0.02）
+  → immutable proposal + execution log
+  → per-coin current manifest
+  → 人工審查／人工啟用（程式永不 automatic apply）
+```
+
+### 環境變數
+
+| 變數 | 說明 | 預設 |
+|------|------|------|
+| `TRAINING_BACKEND` | 訓練後端選擇 | `modelhub` |
+| `SAGEMAKER_TRAINING_BUCKET` | S3 bucket | 必填 |
+| `SAGEMAKER_ROLE_ARN` | Execution role | 必填 |
+| `SAGEMAKER_INSTANCE_TYPE` | Instance type | `ml.m5.large` |
+| `SAGEMAKER_USE_SPOT` | Spot instance | `false` |
+
+### CLI
+
+```bash
+# SageMaker dry-run（不呼叫 AWS）
+trustforge sagemaker-train --all --dry-run
+
+# 單幣
+trustforge sagemaker-train --coin BTC --dry-run
+```
+
+### 治理契約
+
+- `automatic_apply: false`（與 ModelHub 一致）
+- `requires_human_approval: true`
+- candidate 不等於 activation
+- artifact 視為 untrusted，下載後驗 SHA256 + `load_calibration_model()` 格式
+
 ## W3 前置：account 維度資料蒐集聲明（PR #107，harper CISO 審查附條件通過）
 
 **蒐集目的**：目前累積帳號維度資料，供未來 W3「協同操縱偵測」演算法使
