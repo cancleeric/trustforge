@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { TIER_COLOR, type GalaxyModel } from '../lib/hermesData'
 import { modeLabel, useHermesI18n } from './hermesI18n'
 import type { ServiceMonitorState } from '../pages/HermesDashboard'
@@ -34,6 +35,17 @@ export default function HermesLeftRail({
   beginnerMode = false, recommendedMode = 'risk', onChooseIntent, onApplyRecommendedMode,
 }: HermesLeftRailProps) {
   const { t } = useHermesI18n()
+  // N42: 訊息串永遠停在 scrollTop 0，最新一則被切在容器下緣——實測 14 組
+  // （2 locale × 7 視窗）全部 `scrollTop: 0`，而 scrollHeight 最高 1403、
+  // clientHeight 只有 140。也就是說使用者從來看不到 HERMES 剛剛回了什麼，
+  // 得自己往下捲。沒有任何 agent 介面是這樣的，這正是「隨便一個 ai agent
+  // 都比這個強」的核心。新訊息進來就釘到底，跟一般聊天介面一致。
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const transcriptDeps = `${questionContext?.conversation?.length ?? 0}|${hermesMessage}`
+  useEffect(() => {
+    const el = transcriptRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [transcriptDeps])
   const { tierCounts, coins } = model
   return (
     <div
@@ -115,6 +127,7 @@ export default function HermesLeftRail({
             角色標籤只在 HERMES 一側顯示品牌字 `HERMES`；使用者一側靠右對齊
             即可辨識，不加字就不必新增 i18n key（少一處可能漏翻的地方）。 */}
         <div
+          ref={transcriptRef}
           aria-label={t('agentOutput')}
           style={{ flex: 1, minHeight: 140, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10, paddingRight: 2 }}
         >
