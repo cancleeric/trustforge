@@ -2462,6 +2462,15 @@
     display: none !important;
   }
 
+  /* .bridge-display-mode（右上「HOLOGRAPHIC DISPLAY / AWAITING DATA」）與
+     .bridge-module-heading（左上頻道＋頁名，真內容）都是 bay 內的絕對定位，
+     一個靠右一個靠左，寬度不足時對撞：實測 390px 重疊 142x12px、320px 重疊
+     205x12px，兩段字直接疊成一團看不懂（561px 起才不重疊）。前者掛
+     aria-hidden="true" 純裝飾，窄螢幕直接收掉，保留真正有資訊的 heading。 */
+  .bridge-display-mode {
+    display: none;
+  }
+
   .hermes-topbar {
     padding-inline: 10px !important;
     gap: 8px !important;
