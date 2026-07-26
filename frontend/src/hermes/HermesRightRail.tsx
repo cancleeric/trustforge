@@ -88,7 +88,16 @@ export default function HermesRightRail({
       </div>
 
       {/* breakdown */}
-      <div className="hermes-clip" style={{ flex: 1, minHeight: 0, background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '12px 14px', display: 'flex', flexDirection: 'column' }}>
+      {/* N36: 原本是 `flex: 1, minHeight: 0`——minHeight:0 明確允許這塊被壓到比內容還矮，
+          而 .hermes-clip 只有 clip-path、overflow 是 visible，壓縮後小孩不會滾、直接溢出盒外。
+          實測本盒高度：1920x1080=254px（正常）→ 1440x900=74px → 1280x800=26px，但 4 條
+          因子列＋「查看完整拆解與推理」CTA 仍畫在 y=454~610 的原尺寸位置，跑到下一個
+          兄弟（.hermes-training-status-slot，y=445~630）的地盤上，被它較晚繪製的文字蓋住：
+          1280x800 有 7 顆控件 elementFromPoint 打不到自己，1440x900 有 5 顆。
+          改 `flex: 1 0 auto`（可長不可縮）＋拿掉 minHeight:0：右軌自己已經是 overflow-y:auto
+          （實測 clientHeight 647 / scrollHeight 686 本來就在滾），空間不夠時讓右軌滾，
+          而不是把面板壓扁讓內容逃出去。 */}
+      <div className="hermes-clip" style={{ flex: '1 0 auto', background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '12px 14px', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 10 }}>
           {t('trustBreakdown')}
           {derived && (
@@ -142,7 +151,10 @@ export default function HermesRightRail({
           aria-label={`${t('divergence')}：${divergenceSummary}；${t('tapReview')}`}
           onClick={onOpenDivergence}
           style={{
-            width: '100%', padding: 0, border: 0, background: 'transparent',
+            // N36: padding:0 + fontSize 10.5 讓這顆實測只有 204x16，低於 24px。
+            // 外層 dock 有 11px 14px padding，撐到 24px 不會壓到鄰居。
+            width: '100%', minHeight: 24, display: 'flex', alignItems: 'center',
+            padding: 0, border: 0, background: 'transparent',
             color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10.5,
             textAlign: 'left', cursor: 'pointer',
           }}

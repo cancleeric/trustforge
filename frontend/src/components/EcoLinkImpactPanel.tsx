@@ -40,7 +40,10 @@ function ImpactPathCard({ path }: { path: EcoLinkImpactPath }) {
           href={href}
           target="_blank"
           rel="noreferrer noopener"
-          className="mt-1 inline-block break-all text-xs text-tf-link underline hover:no-underline"
+          // N36: 實測 zh-TW 48x16、en 108x16，高度只有 16px（text-xs 行高），
+          // 低於 24px 最小點擊目標。改 inline-flex + min-h 只長高不動寬，
+          // break-all 仍作用在唯一的文字子項上。
+          className="mt-1 inline-flex min-h-[24px] items-center break-all text-xs text-tf-link underline hover:no-underline"
         >
           {t('elipOfficialSource')}
         </a>
