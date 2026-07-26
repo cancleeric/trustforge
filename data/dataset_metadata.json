@@ -52,6 +52,14 @@
       "rows": 1826,
       "start_date": "2021-06-01",
       "end_date": "2026-05-31"
+    },
+    {
+      "asset": "ARB",
+      "pair": "ARBUSDT",
+      "file": "data/ARB_daily_ohlcv.csv",
+      "rows": 1826,
+      "start_date": "2021-06-01",
+      "end_date": "2026-05-31"
     }
   ],
   "columns": [

@@ -38,6 +38,7 @@ _COIN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("SOL", ("sol", "solana")),
     ("BNB", ("bnb", "binance")),
     ("XRP", ("xrp", "ripple", "瑞波")),
+    ("ARB", ("arb", "arbitrum")),
 )
 
 

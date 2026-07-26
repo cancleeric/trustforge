@@ -40,7 +40,7 @@ _UA = "TrustForge/1.0 (research)"
 _MIN_VALUE_USD = 1_000_000
 
 # 5 幣白名單（與 base.py 一致）
-_SUPPORTED_COINS = frozenset({"BTC", "ETH", "SOL", "BNB", "XRP"})
+_SUPPORTED_COINS = frozenset({"BTC", "ETH", "SOL", "BNB", "XRP", "ARB"})
 
 # Whale Alert 幣種映射（API symbol → 我們的代碼）
 _WHALE_ALERT_SYMBOLS: dict[str, str] = {
@@ -49,6 +49,7 @@ _WHALE_ALERT_SYMBOLS: dict[str, str] = {
     "sol": "SOL", "solana": "SOL",
     "bnb": "BNB",
     "xrp": "XRP", "ripple": "XRP",
+    "arb": "ARB", "arbitrum": "ARB",
 }
 
 # API key 環境變數名稱

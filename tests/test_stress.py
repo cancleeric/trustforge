@@ -95,7 +95,8 @@ COMPARISON_MATRIX = [
     ("ETH", "SOL"),
     ("SOL", "BNB"),
     ("BNB", "XRP"),
-    ("XRP", "BTC"),
+    ("XRP", "ARB"),
+    ("ARB", "BTC"),
 ]
 
 
