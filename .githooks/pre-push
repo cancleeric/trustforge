@@ -44,7 +44,7 @@ if [ "$NODE_MAJOR" -lt "$NODE_MIN_MAJOR" ] || { [ "$NODE_MAJOR" -eq "$NODE_MIN_M
   exit 1
 fi
 
-run_gate "backend tests" env PYTHONPATH=src "$PYTHON" -m pytest -q
+run_gate "backend tests" env PYTHONPATH=src "$PYTHON" -m pytest --cov-fail-under=75 -q
 run_gate "data contracts" "$PYTHON" scripts/check_data_contracts.py
 run_gate "source stub scan" "$PYTHON" scripts/scan_source_stubs.py --out out/pre-push/stub-scan.json
 run_gate "competition QA" env TRUSTFORGE_BEDROCK_DAILY_USD_CAP=0 "$PYTHON" scripts/run_question_bank.py --limit 24 --out out/pre-push/question-bank-results.json

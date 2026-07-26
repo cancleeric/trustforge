@@ -29,12 +29,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
-# #91 CI 品質閘：覆蓋率下限。目前全倉覆蓋率約 93%，設 75% 保留充足緩衝、
+# #91 CI 品質閘：覆蓋率下限。目前全倉覆蓋率約 85%，設 75% 保留充足緩衝、
 # 不會讓現有 CI（跑全倉）變紅，同時擋住「新程式碼大幅拉低覆蓋率」的回歸。
-# 注意：這是 always-on 設定，跑「單一測試檔子集」時覆蓋率會偏低而觸發 fail-under；
-# 本機只想跑子集時請加 `--no-cov`（例：`pytest tests/test_foo.py --no-cov`）。
-# CI 一律跑全倉，不受此影響。
-addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing --cov-fail-under=75"
+# ⛔ --cov-fail-under 由 .githooks/pre-push 顯式傳入，不放在 addopts 中——
+#   放在 addopts 會讓單一測試檔也吃閥值（跑子集時全倉 9%→白爆）。
+#   本機跑子集時仍可加 --no-cov 加速。
+addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing"
 # Suppress benign GC-timing ResourceWarnings from sqlite3 connections.  All
 # sqlite-backed stores (SourceEventArchive, TrustFeatureStore,
 # SQLiteCacheBackend, AnalysisFlow) define close()+__del__, but Python's
