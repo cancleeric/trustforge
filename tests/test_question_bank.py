@@ -2,8 +2,10 @@ import runpy
 from pathlib import Path
 from types import SimpleNamespace
 
-from trustforge.question_bank import all_cases
-from trustforge.schema import QuestionType
+from itertools import combinations
+
+from trustforge.question_bank import _COMPARISONS, _MULTI_SOURCE, all_cases
+from trustforge.schema import COIN_POOL, QuestionType
 
 
 _RUNNER = runpy.run_path(
@@ -11,14 +13,24 @@ _RUNNER = runpy.run_path(
 )
 
 
-def test_question_bank_is_large_deterministic_and_covers_all_official_types():
+def test_question_bank_is_large_deterministic_and_covers_all_official_coins():
+    """題庫規模跟著 `COIN_POOL` 動態推導：每幣 12 題 multi-source + 12 題
+    hypothesis，每個幣別配對各 12 題 comparison（不寫死幣數，加減幣自動跟著算）。
+    """
     cases = all_cases()
-    assert len(cases) == 240
-    assert len({case.id for case in cases}) == 240
+    per_coin_prompts = len(_MULTI_SOURCE)
+    per_pair_prompts = len(_COMPARISONS)
+    expected_multi = per_coin_prompts * len(COIN_POOL)
+    expected_hypothesis = per_coin_prompts * len(COIN_POOL)
+    expected_comparison = per_pair_prompts * len(list(combinations(COIN_POOL, 2)))
+    expected_total = expected_multi + expected_hypothesis + expected_comparison
+
+    assert len(cases) == expected_total
+    assert len({case.id for case in cases}) == expected_total
     assert {case.question_type for case in cases} == set(QuestionType)
-    assert sum(case.question_type == QuestionType.MULTI_SOURCE for case in cases) == 60
-    assert sum(case.question_type == QuestionType.HYPOTHESIS for case in cases) == 60
-    assert sum(case.question_type == QuestionType.COMPARISON for case in cases) == 120
+    assert sum(case.question_type == QuestionType.MULTI_SOURCE for case in cases) == expected_multi
+    assert sum(case.question_type == QuestionType.HYPOTHESIS for case in cases) == expected_hypothesis
+    assert sum(case.question_type == QuestionType.COMPARISON for case in cases) == expected_comparison
 
 
 def test_question_bank_exercises_government_crawler_and_execution_observability():

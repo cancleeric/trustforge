@@ -35,12 +35,20 @@ from trustforge.schema import COIN_POOL, Evidence
 # 1. 幣別 LOGO
 # ---------------------------------------------------------------------------
 
-def test_coin_pool_all_five_have_real_logo():
-    """COIN_POOL（BTC/ETH/SOL/BNB/XRP）五幣皆有 inline SVG，非 fallback。"""
+def test_coin_pool_coins_have_real_logo_or_documented_no_logo_fallback():
+    """COIN_POOL 每個幣都要有明確、可追溯的 LOGO 呈現結果：simple-icons 有
+    收錄（見 `COIN_LOGO_SVG` 白名單）的幣一律走真官方 `<svg>`；沒收錄的
+    （例：ARB，simple-icons 查無條目，2026-07 fetch 確認），`coin_logo_html`
+    依模組既有契約回空字串（不猜、不偽造、不留破圖，見 `coin_logo_html`
+    docstring）——不得靜靜多印別的東西。不寫死幣數/幣名，跟著 COIN_POOL
+    動態推導，加減幣自動涵蓋。
+    """
     for coin in COIN_POOL:
-        assert coin in COIN_LOGO_SVG, f"{coin} 缺官方 LOGO"
         out = coin_logo_html(coin)
-        assert out.startswith("<svg"), f"{coin} 應為真 <svg>，不是 fallback"
+        if coin in COIN_LOGO_SVG:
+            assert out.startswith("<svg"), f"{coin} 應為真 <svg>，不是 fallback"
+        else:
+            assert out == "", f"{coin} 不在 simple-icons 白名單，應回空字串（不偽造 LOGO）"
         assert "<img" not in out
         # `xmlns="http://www.w3.org/2000/svg"` 是 SVG 命名空間宣告
         # （瀏覽器不會拿去發請求），不算外部資源引用；真正要擋的是
