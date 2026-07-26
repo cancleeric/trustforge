@@ -41,6 +41,28 @@ from .schema import COIN_POOL, iso_utc
 
 logger = logging.getLogger(__name__)
 
+# ─── 方向正規化（Issue #393）──────────────────────────────────────────────────
+
+_DIRECTION_MAP: dict[str, str] = {
+    "偏多": "bullish",
+    "偏空": "bearish",
+    "中性": "neutral",
+    "不明": "neutral",
+    "bullish": "bullish",
+    "bearish": "bearish",
+    "neutral": "neutral",
+}
+
+
+def _normalize_direction(raw: str) -> str:
+    """將中文/英文方向標籤統一正規化為英文（bullish/bearish/neutral）。
+
+    用於 training data 輸出，確保與 ground_truth_direction 同口徑，
+    方便 calibrator 訓練直接比對。未知值一律回 neutral。
+    """
+    return _DIRECTION_MAP.get(raw, "neutral")
+
+
 # ─── Anomaly Report（Issue #355）───────────────────────────────────────────────
 
 ANOMALY_DIRECTION_THRESHOLD = 0.95  # >95% 同一方向 = 異常
@@ -919,6 +941,10 @@ class BackfillWorker:
         {"date": ..., "coin": ..., "direction": ..., "trust_score": ...,
          "confidence": ..., "evidence_count": ..., "sources": [...],
          "model_id": ..., "generated_at": ...}
+
+        direction 正規化為英文標籤（bullish/bearish/neutral）以對齊
+        ground_truth_direction 欄位，方便 calibrator 訓練直接比對。
+        中文方向詞（偏多/偏空/中性）和 "不明" 統一映射。
         """
         report = replay_result.get("report", {})
         evidence_list = replay_result.get("evidence", [])
@@ -935,10 +961,14 @@ class BackfillWorker:
         # 判斷 model_id：live 模式有真實 model_id，offline 為 None
         model_id = os.getenv("BEDROCK_MODEL_ID") if self.mode == "live" else None
 
+        # 正規化 direction 為英文標籤（與 ground_truth_direction 同口徑）
+        raw_direction = report.get("direction", "neutral")
+        direction = _normalize_direction(raw_direction)
+
         record = {
             "date": date_str,
             "coin": coin,
-            "direction": report.get("direction", "neutral"),
+            "direction": direction,
             "trust_score": round(float(report.get("confidence", 0)), 4),
             "confidence": round(
                 float(report.get("calibrated_confidence", 0)), 4,
