@@ -339,6 +339,42 @@
   --hermes-bottom: clamp(94px, 13.4vh, 120px);
   --hermes-rail: clamp(230px, 20.84vw, 300px);
   --hermes-right-rail: var(--hermes-rail);
+  /* N49 四格版面：左側從一欄拆成「選單欄 + 對話欄」。這個變數只是左軌
+     內部的切法，`--hermes-rail` 仍然代表左側佔用的總寬度，中間全息區、
+     底部管線條、右軌等所有 `left/inset: var(--hermes-rail)` 的規則因此
+     完全不受影響。窄螢幕預設 0：選單欄不獨立成欄，兩個 pane 垂直堆疊，
+     退回今天已驗證過的單欄版面。 */
+  --hermes-menu: 0px;
+}
+
+/* N49：左軌兩個 pane 的排列方式。`display/flex-direction/gap` 一定要在
+   這裡而不是元件的 inline style——inline 會贏過 class，斷點就切不動。 */
+.hermes-rail-split { display: flex; flex-direction: column; gap: 12px; }
+.hermes-rail-menu { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.hermes-rail-chat { min-width: 0; }
+
+@media (min-width: 1280px) {
+  /* 選擇器必須是 `.hermes-frame` 不是 `:root`：這兩個變數的基準宣告就在
+     `.hermes-frame`（上面 340 行），而它是左軌的祖先——寫在 `:root` 的覆寫
+     會被就近的 `.hermes-frame` 宣告蓋掉（實測 root 拿到 440px、左軌拿到
+     300px 的基準值，選單欄只剩 13px）。 */
+  .hermes-frame {
+    /* 選單欄 124~160px，對話欄 230~280px；總寬 354~440px（1280 寬時
+       約 27%、1920 寬時約 22%），中間全息區仍是最大的一格。 */
+    --hermes-menu: clamp(124px, 10vw, 160px);
+    --hermes-rail: calc(var(--hermes-menu) + clamp(230px, 19vw, 280px));
+  }
+  .hermes-rail-split { flex-direction: row; }
+  .hermes-rail-menu {
+    flex: 0 0 var(--hermes-menu);
+    width: var(--hermes-menu);
+    overflow-y: auto;
+    padding-right: 12px;
+    border-right: 1px solid var(--color-hermes-bd);
+  }
+  /* 對話欄吃掉剩下的寬度。`min-width: 0` 是必要的：flex item 預設
+     `min-width: auto`，長字串會把它撐爆而不是換行。 */
+  .hermes-rail-chat { flex: 1 1 auto; }
 }
 
 .hermes-frame::before,

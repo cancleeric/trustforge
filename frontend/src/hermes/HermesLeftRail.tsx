@@ -48,7 +48,7 @@ export default function HermesLeftRail({
   const { tierCounts, coins } = model
   return (
     <div
-      className="hermes-glass"
+      className="hermes-glass hermes-rail-split"
       data-region="left-rail"
       style={{
         position: 'absolute', left: 0, top: 'var(--hermes-top)', width: 'var(--hermes-rail)',
@@ -61,10 +61,22 @@ export default function HermesLeftRail({
            附帶好處：軌道多出 94~120px，composer 不再被擠在最下面。 */
         height: 'calc(100% - var(--hermes-top))', zIndex: 5,
         borderRight: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
-        display: 'flex', flexDirection: 'column', gap: 12,
+        /* display/flex-direction/gap 交給 `.hermes-rail-split`（hermes.css）：
+           inline style 會贏過 class，斷點切不動，所以這三個屬性必須留在 CSS。 */
         overflowY: 'auto',
       }}
     >
+      {/* N49（四格版面）：老闆原話「左中右 改為 左改為兩區 … 在最左邊多一堆
+          選單功能 你要放什麼都放到最左邊 選單往右 保留 hermes 的對話 跟 使用者的
+          輸入框 在右邊才是主要的 3D 全息投影區」。左軌本來把遙測、我想做什麼、
+          相似歷史、分析模式、模式建議跟對話串＋輸入框全部疊在同一欄，所以
+          「塞在一起、跟 hermes 對話卡死真的很煩人」。這裡把左軌切成兩個 pane：
+          menu pane 收所有選單/設定/歷史，chat pane 只留 HERMES 對話與輸入框。
+          兩者水平並排還是垂直堆疊由 CSS 一個 flex-direction 決定（見 hermes.css
+          `.hermes-rail-split`）：≥1280px 並排成四格，窄螢幕自動退回今天已驗證
+          的單欄堆疊。左側總寬仍然只由 `--hermes-rail` 表示，所以中間全息區、
+          底部管線條、右軌那些 `left: var(--hermes-rail)` 的規則一行都不用改。 */}
+      <div className="hermes-rail-menu">
       {!beginnerMode && <div>
         <div style={{ fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 9 }}>{t('telemetry')}</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 7, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderRadius: 6, padding: '10px 12px' }}>
@@ -81,18 +93,6 @@ export default function HermesLeftRail({
           </div>
         </div>
       </div>}
-
-      {/* HERMES CONSOLE */}
-      <div
-        className="hermes-clip"
-        /* N37: `minHeight: 0` 明確允許這塊被壓到比內容還矮，而左軌高度是
-           `calc(100% - top - bottom)`，視窗一矮就沒空間分。實測 1024x420 時
-           這個 .hermes-clip clientHeight 只剩 28px（scrollHeight 222），
-           使用者看不到 HERMES 主控台的任何內容。改成 200px 樓地板：左軌自己
-           已經是 overflow-y:auto，空間不夠時讓左軌滾，而不是把面板壓扁。
-           200 = 稽核腳本的可讀性門檻 min(scrollHeight, 200)。 */
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 200, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
-      >
         {/* N46: 這張「我想做什麼？」卡片預設攤開，五張 intent 卡（每張都是
             標題＋說明兩行）在 zh-TW 就吃掉 300px 以上，把 HERMES 對話串和
             輸入框一路推到畫面底部——老闆原話「這設計根本有問題 排盤很有問題」
@@ -113,6 +113,67 @@ export default function HermesLeftRail({
             </div>
           </details>
         )}
+        {!!questionContext && (
+          <details style={{ flexShrink: 0, marginBottom: 10, borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
+            {/* N47: 這行原本掛 `<GlossaryTerm term="rag">`，那顆「?」開出來的是
+                280x81 的 `position: fixed` 彈窗——在只有 230px 寬的左軌裡，它整塊
+                蓋在下面的歷史清單與「分析模式」上，老闆原話「那個問號按了畫面破掉」。
+                名詞解釋在寬面板裡沒問題，在 agent 互動軌道裡是純干擾，這裡改回
+                純文字標題。GlossaryTerm 元件本身與其他頁面的用法都不動。 */}
+            <summary style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', cursor: 'pointer', minHeight: 24, display: 'flex', alignItems: 'center' }}>
+              {t('similarQuestions')}
+            </summary>
+            <div role="note" style={{ fontSize: 9.5, lineHeight: 1.35, color: 'var(--color-hermes-amber)', margin: '5px 0' }}>
+              {t('historyDisclaimer')}
+            </div>
+            {/* N48: 展開這塊時實測輸入框被往下推 111px、底緣 719 掉出 700 高的
+                視窗——三筆歷史每筆都是「百分比 · 幣別/模式 · 整句題目」會折成兩三行，
+                加起來 219px，在左軌這種垂直預算裡是奢侈品。清單自己吃捲軸、
+                高度封頂 108px（約兩筆半，看得出還有下文），展開的代價因此有上限，
+                不會再把 composer 擠出畫面。三筆資料一筆都沒少。 */}
+            <div style={{ maxHeight: 108, overflowY: 'auto' }}>
+            {questionContext.matches.length ? questionContext.matches.slice(0, 3).map((match) => (
+              <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
+                style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 11, lineHeight: 1.4, padding: '7px 2px', minHeight: 24, cursor: 'pointer' }}>
+                <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{modeLabel(match.mode, t)} · {match.question}
+              </button>
+            )) : (
+              <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx3)', padding: '5px 2px' }}>{t('noSimilarQuestions')}</div>
+            )}
+            </div>
+          </details>
+        )}
+        <label style={{ display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 }}>{t('analysisMode')}</label>
+        <div style={{ position: 'relative', marginBottom: 10, flexShrink: 0 }}>
+          <select
+            value={qtype}
+            onChange={(e) => onType(e.target.value)}
+            style={{ width: '100%', appearance: 'none', background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 12, padding: '8px 10px', cursor: 'pointer' }}
+          >
+            {qtypes.map((q) => <option key={q} value={q}>{q}</option>)}
+          </select>
+          <span style={{ position: 'absolute', right: 10, top: 10, color: 'var(--color-hermes-tx3)', pointerEvents: 'none', fontSize: 10 }}>▼</span>
+        </div>
+        {beginnerMode && qtype !== qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)] && (
+          <button type="button" className="hermes-mode-suggestion" onClick={() => onApplyRecommendedMode?.(recommendedMode)}>
+            {t('suggestSwitchToPrefix')}{qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)]}{t('suggestSwitchToSuffix')}
+          </button>
+        )}
+
+        {beginnerMode && <div className="hermes-analysis-expectation">{t('analysisExpectationPrefix')}{qtype}{t('analysisExpectationSuffix')}</div>}
+      </div>
+
+      {/* HERMES CONSOLE：只剩對話串與輸入框，這才是 agent 互動區。 */}
+      <div
+        className="hermes-clip hermes-rail-chat"
+        /* N37: `minHeight: 0` 明確允許這塊被壓到比內容還矮，而左軌高度是
+           `calc(100% - top - bottom)`，視窗一矮就沒空間分。實測 1024x420 時
+           這個 .hermes-clip clientHeight 只剩 28px（scrollHeight 222），
+           使用者看不到 HERMES 主控台的任何內容。改成 200px 樓地板：左軌自己
+           已經是 overflow-y:auto，空間不夠時讓左軌滾，而不是把面板壓扁。
+           200 = 稽核腳本的可讀性門檻 min(scrollHeight, 200)。 */
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 200, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
           <div style={{ position: 'relative', width: 24, height: 24, flexShrink: 0, animation: 'hermes-hermes-breathe 3.2s ease-in-out infinite' }}>
             <div style={{ position: 'absolute', inset: 0, clipPath: 'polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)', border: '1.5px solid var(--color-hermes-amber)', animation: 'hermes-orbit-spin 9s linear infinite' }} />
@@ -121,7 +182,6 @@ export default function HermesLeftRail({
           <span style={{ fontSize: 11, letterSpacing: '1.2px', color: 'var(--color-hermes-tx)' }}>HERMES</span>
           <span style={{ fontSize: 9, color: 'var(--color-hermes-cyan)', background: 'rgba(77,216,224,.13)', border: '1px solid rgba(77,216,224,.4)', borderRadius: 3, padding: '1px 6px' }}>{t('online')}</span>
         </div>
-
         {/* N40: 這塊原本不是「對話」，是三種東西疊在一起——一張 amber 的
             agentOutput 卡（最新回覆）、一張標題寫「對話記憶」而內容是
             `HERMES › …` 前綴純文字的 10.5px 小卡（只留最後 3 則），再加一段
@@ -184,50 +244,6 @@ export default function HermesLeftRail({
             })
           })()}
         </div>
-
-        {!!questionContext && (
-          <details style={{ flexShrink: 0, marginBottom: 10, borderTop: '1px solid var(--color-hermes-bd)', paddingTop: 7 }}>
-            {/* N47: 這行原本掛 `<GlossaryTerm term="rag">`，那顆「?」開出來的是
-                280x81 的 `position: fixed` 彈窗——在只有 230px 寬的左軌裡，它整塊
-                蓋在下面的歷史清單與「分析模式」上，老闆原話「那個問號按了畫面破掉」。
-                名詞解釋在寬面板裡沒問題，在 agent 互動軌道裡是純干擾，這裡改回
-                純文字標題。GlossaryTerm 元件本身與其他頁面的用法都不動。 */}
-            <summary style={{ fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-cyan)', cursor: 'pointer', minHeight: 24, display: 'flex', alignItems: 'center' }}>
-              {t('similarQuestions')}
-            </summary>
-            <div role="note" style={{ fontSize: 9.5, lineHeight: 1.35, color: 'var(--color-hermes-amber)', margin: '5px 0' }}>
-              {t('historyDisclaimer')}
-            </div>
-            {/* N48: 展開這塊時實測輸入框被往下推 111px、底緣 719 掉出 700 高的
-                視窗——三筆歷史每筆都是「百分比 · 幣別/模式 · 整句題目」會折成兩三行，
-                加起來 219px，在左軌這種垂直預算裡是奢侈品。清單自己吃捲軸、
-                高度封頂 108px（約兩筆半，看得出還有下文），展開的代價因此有上限，
-                不會再把 composer 擠出畫面。三筆資料一筆都沒少。 */}
-            <div style={{ maxHeight: 108, overflowY: 'auto' }}>
-            {questionContext.matches.length ? questionContext.matches.slice(0, 3).map((match) => (
-              <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
-                style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 11, lineHeight: 1.4, padding: '7px 2px', minHeight: 24, cursor: 'pointer' }}>
-                <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{modeLabel(match.mode, t)} · {match.question}
-              </button>
-            )) : (
-              <div style={{ fontSize: 11, lineHeight: 1.4, color: 'var(--color-hermes-tx3)', padding: '5px 2px' }}>{t('noSimilarQuestions')}</div>
-            )}
-            </div>
-          </details>
-        )}
-
-        <label style={{ display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 }}>{t('analysisMode')}</label>
-        <div style={{ position: 'relative', marginBottom: 10, flexShrink: 0 }}>
-          <select
-            value={qtype}
-            onChange={(e) => onType(e.target.value)}
-            style={{ width: '100%', appearance: 'none', background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 12, padding: '8px 10px', cursor: 'pointer' }}
-          >
-            {qtypes.map((q) => <option key={q} value={q}>{q}</option>)}
-          </select>
-          <span style={{ position: 'absolute', right: 10, top: 10, color: 'var(--color-hermes-tx3)', pointerEvents: 'none', fontSize: 10 }}>▼</span>
-        </div>
-
         <label style={{ display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 }}>{t('order')}</label>
         {/* N40 composer：輸入區整塊 flexShrink:0，訊息串（flex:1）吃剩下的高度，
             這是一般 agent 介面的配置——內容多的時候捲訊息，不是壓輸入框。 */}
@@ -282,15 +298,6 @@ export default function HermesLeftRail({
           ⤴
         </button>
         </div>
-
-        {beginnerMode && qtype !== qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)] && (
-          <button type="button" className="hermes-mode-suggestion" onClick={() => onApplyRecommendedMode?.(recommendedMode)}>
-            {t('suggestSwitchToPrefix')}{qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)]}{t('suggestSwitchToSuffix')}
-          </button>
-        )}
-
-        {beginnerMode && <div className="hermes-analysis-expectation">{t('analysisExpectationPrefix')}{qtype}{t('analysisExpectationSuffix')}</div>}
-
       </div>
     </div>
   )
