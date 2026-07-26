@@ -74,7 +74,7 @@ function HologramDisplay({ pathname, search, data }: { pathname: string; search:
 
 export default function BridgeWorkspaceShell({ children }: { children: ReactNode }) {
   const { pathname, search } = useLocation()
-  const { locale } = useHermesI18n()
+  const { locale, t } = useHermesI18n()
   const [hologramData, setHologramData] = useState<BridgeHologramData | null>(null)
   const hologramValue = useMemo(() => ({ data: hologramData, setData: setHologramData }), [hologramData])
   const meta = WORKSPACES[pathname] ?? { code: 'SYS-00', zh: '艦橋工作區', en: 'BRIDGE WORKSPACE', channel: 'HERMES' }
@@ -84,7 +84,7 @@ export default function BridgeWorkspaceShell({ children }: { children: ReactNode
     <div className="bridge-workspace">
       <Header />
       <div className="bridge-workspace-grid">
-        <aside className="bridge-side-rail bridge-side-rail-left" aria-label="艦橋系統狀態">
+        <aside className="bridge-side-rail bridge-side-rail-left" aria-label={t('bridgeSideRailStatus')}>
           <span>SYSTEM BUS</span><strong>{meta.code}</strong><i /><span>HERMES CORE</span><b className="bridge-status-dot">ONLINE</b>
         </aside>
         <section className="bridge-hologram-bay" aria-label={locale === 'zh-TW' ? meta.zh : meta.en}>
@@ -93,11 +93,11 @@ export default function BridgeWorkspaceShell({ children }: { children: ReactNode
           <div className="bridge-display-mode" aria-hidden="true"><span>HOLOGRAPHIC DISPLAY</span><b>{hologramData ? 'TELEMETRY LOCKED' : 'AWAITING DATA'}</b></div>
           <div className="bridge-route-viewport">{children}</div>
         </section>
-        <aside className="bridge-side-rail bridge-side-rail-right" aria-label="艦橋遙測">
+        <aside className="bridge-side-rail bridge-side-rail-right" aria-label={t('bridgeSideRailTelemetry')}>
           <span>TELEMETRY</span><strong>LIVE</strong><i /><span>DATA INTEGRITY</span><b>MONITORED</b>
         </aside>
       </div>
-      <footer className="bridge-engine-deck" aria-label="Hermes 工作流能量匯流">
+      <footer className="bridge-engine-deck" aria-label={t('bridgeEngineDeck')}>
         <div className="bridge-energy-line" aria-hidden="true" />
         {ENERGY_STAGES.map((stage, index) => <div className="bridge-energy-node" key={stage}><span>{String(index + 1).padStart(2, '0')}</span><b>{stage}</b></div>)}
         <div className="bridge-engine-core"><span /><b>HERMES ENGINE</b></div>

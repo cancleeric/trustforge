@@ -51,7 +51,10 @@ export default function HermesTopBar({
         boxShadow: '0 1px 12px rgba(77,216,224,.08)',
       }}
     >
-      <button type="button" onClick={onHome} aria-label="HERMES 主頁" style={{ display: 'flex', alignItems: 'center', gap: 9, border: 0, padding: 0, background: 'transparent', fontFamily: 'inherit', cursor: 'pointer' }}>
+      {/* N29: min click target ≥24x24 (was 184.8x19.5 — under the 24px min
+          height on every viewport tested); minHeight + flex-centering keeps
+          the visual logo/label unchanged while guaranteeing the tap target. */}
+      <button type="button" onClick={onHome} aria-label={t('homeAria')} style={{ display: 'flex', alignItems: 'center', gap: 9, border: 0, padding: 0, background: 'transparent', fontFamily: 'inherit', cursor: 'pointer', minHeight: 24 }}>
         <div style={{ width: 16, height: 16, position: 'relative', transform: 'rotate(45deg)', border: '1.5px solid var(--color-hermes-cyan)', borderRadius: 2 }}>
           <div style={{ position: 'absolute', inset: 3, background: 'var(--color-hermes-cyan)', opacity: 0.85 }} />
         </div>
@@ -71,7 +74,7 @@ export default function HermesTopBar({
         <span className="hermes-uplink-status-label" aria-hidden="true">{degradedMessage ? t('degradedState') : t('liveUplink')}</span>
       </span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--color-hermes-amber)', background: 'rgba(232,179,77,.13)', border: '1px solid rgba(232,179,77,.4)', borderRadius: 4, padding: '2px 8px' }}>
-        <span style={{ width: 6, height: 6, transform: 'rotate(45deg)', background: 'var(--color-hermes-amber)', animation: 'hermes-pulse 2.4s infinite' }} />HERMES: {t('active')}
+        <span style={{ width: 6, height: 6, transform: 'rotate(45deg)', background: 'var(--color-hermes-amber)', animation: 'hermes-pulse 2.4s infinite' }} />{t('systemActivePrefix')} {t('active')}
       </span>
       <nav className="hermes-topbar-nav" aria-label={t('navigation')} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
         {navItems.filter((item) => !beginnerMode || item.id === 'analyze').map((item) => (
@@ -105,10 +108,10 @@ export default function HermesTopBar({
       <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
         {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
       </button>
-      <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} aria-label={reducedMotion ? '低動態模式已啟用' : '啟用低動態模式'} title={reducedMotion ? '低動態模式（點擊關閉）' : '啟用低動態模式'}>
+      <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} aria-label={reducedMotion ? t('reducedMotionOnAria') : t('reducedMotionOffAria')} title={reducedMotion ? t('reducedMotionOnTitle') : t('reducedMotionOffTitle')}>
         {reducedMotion ? t('dynamicOff') : t('dynamicOn')}
       </button>
-      <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label="開啟新手說明">{t('helpToggle')}</button>
+      <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label={t('openBeginnerHelp')}>{t('helpToggle')}</button>
       {!beginnerMode && <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>{t('shipToggle')}</button>}
       {/* min click target ≥24x24 (was 26.8x21.5 — under the 24px min height
           on every viewport tested); minHeight + flex-centering keeps the

@@ -24,6 +24,31 @@ import { useReducedMotion } from '../lib/useReducedMotion'
 
 export type ServiceMonitorState = 'checking' | 'ok' | 'empty' | 'stale' | 'error'
 
+// N30: below this width the CSS in hermes.css (`@media (max-width:900px)`)
+// already fully hides `.hermes-right-rail` (display:none) in favour of
+// `HermesMobileDivergenceEntry`, but both stayed mounted in the DOM. That
+// left two interactive controls sharing the same accessible name ("跨來源
+// 分歧") — one real, one display:none. A locator resolving in DOM order
+// (right rail is mounted first) picks the hidden one and hangs waiting for
+// it to become visible, a real reproducible click-timeout on real/CEO
+// hardware, not a probe false positive. Unmounting the right rail below the
+// same breakpoint the CSS already uses removes the duplicate outright.
+const HERMES_RIGHT_RAIL_BREAKPOINT = 900
+
+function useIsNarrowViewport(maxWidth: number): boolean {
+  const [isNarrow, setIsNarrow] = useState(() =>
+    typeof window === 'undefined' ? false : window.matchMedia(`(max-width: ${maxWidth}px)`).matches,
+  )
+  useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${maxWidth}px)`)
+    const handler = (event: MediaQueryListEvent | MediaQueryList) => setIsNarrow(event.matches)
+    handler(mql)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [maxWidth])
+  return isNarrow
+}
+
 export default function HermesDashboard() {
   const { locale, t } = useHermesI18n()
   const qtypes = useMemo(
@@ -69,6 +94,7 @@ export default function HermesDashboard() {
   const [costLedger, setCostLedger] = useState<number | null>(null)
   const [startupComplete, setStartupComplete] = useState(qaMode)
   const { reducedMotion, toggle: toggleReducedMotion } = useReducedMotion()
+  const isRightRailCollapsed = useIsNarrowViewport(HERMES_RIGHT_RAIL_BREAKPOINT)
   const [serviceMonitor, setServiceMonitor] = useState<Record<string, ServiceMonitorState>>({
     overview: 'checking', health: 'checking', sources: 'checking', history: 'checking', costs: 'checking',
   })
@@ -586,21 +612,23 @@ export default function HermesDashboard() {
           </div>
         )}
 
-        <div className="hermes-boot-layer" style={{ opacity: boot.right ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <HermesRightRail
-            selCoin={hudCoin}
-            components={hudComponents}
-            displayScore={telemetryScore ?? displayScore}
-            derived={!rawComponents}
-            flow={analysisFlow}
-            journey={analysisJourney}
-            crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
-            derivation={hudDerivation}
-            trainingStatus={<TrainingStatusCard />}
-            onOpenComposite={() => setSelectedStage('composite')}
-            onOpenDivergence={() => setSelectedStage('divergence')}
-          />
-        </div>
+        {!isRightRailCollapsed && (
+          <div className="hermes-boot-layer" style={{ opacity: boot.right ? 1 : 0, transition: 'opacity .5s ease-out' }}>
+            <HermesRightRail
+              selCoin={hudCoin}
+              components={hudComponents}
+              displayScore={telemetryScore ?? displayScore}
+              derived={!rawComponents}
+              flow={analysisFlow}
+              journey={analysisJourney}
+              crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
+              derivation={hudDerivation}
+              trainingStatus={<TrainingStatusCard />}
+              onOpenComposite={() => setSelectedStage('composite')}
+              onOpenDivergence={() => setSelectedStage('divergence')}
+            />
+          </div>
+        )}
 
         <HermesMobileDivergenceEntry
           derivation={hudDerivation}

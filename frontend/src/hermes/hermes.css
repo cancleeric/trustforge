@@ -2300,6 +2300,9 @@
     white-space: nowrap;
   }
 
+  /* N30: min click target ≥24x24 (was 51.5x19.0/89.5x19.0 — under the 24px
+     min height); min-height + flex-centering keeps the visual label/padding
+     unchanged while guaranteeing the tap target. */
   .hermes-mobile-divergence > button {
     justify-self: start;
     padding: 2px 0;
@@ -2309,6 +2312,9 @@
     font: inherit;
     font-size: 10px;
     cursor: pointer;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
   }
 
   .hermes-topbar-nav {
@@ -2543,6 +2549,9 @@
   }
 }
 
+/* N29: min click target ≥24x24 (was 94.2x20.0/65.4x21.0 — under the 24px
+   min height on every viewport tested); min-height + flex-centering keeps
+   the visual label/padding unchanged while guaranteeing the tap target. */
 .hermes-ship-toggle {
   border: 1px solid rgba(77, 216, 224, .42);
   background: rgba(77, 216, 224, .1);
@@ -2551,7 +2560,10 @@
   padding: 3px 8px;
   font: 600 9px 'IBM Plex Mono', monospace;
   cursor: pointer;
-  white-space: nowrap
+  white-space: nowrap;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .hermes-ship-toggle:hover {
@@ -3430,6 +3442,10 @@
   color: var(--color-hermes-cyan)
 }
 
+/* N29: min click target ≥24x24 (was 49.0x23.0/45.6x23.0/54.0x23.0 — under the
+   24px min height on every viewport tested); min-height + flex-centering
+   keeps the visual label/padding unchanged while guaranteeing the tap
+   target, without changing the topbar's own height (var(--hermes-top)). */
 .hermes-help-toggle {
   border: 1px solid rgba(77, 216, 224, .45);
   border-radius: 4px;
@@ -3438,6 +3454,9 @@
   font: 600 10px var(--font-hermes-sans);
   padding: 4px 9px;
   cursor: pointer;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .hermes-help-toggle:hover {
@@ -3452,6 +3471,9 @@
   font: 600 9px var(--font-hermes-sans);
   padding: 4px 8px;
   cursor: pointer;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .hermes-mode-toggle[aria-pressed='true'] {

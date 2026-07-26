@@ -90,6 +90,16 @@ const messages = {
     firstRunSummaryHint: '系統會比對多個來源，整理一句結論、三個主要原因與資料限制。',
     firstRunCta: '開始第一次分析 →',
     firstRunFooter: '信任分析衡量資料與證據的可信程度，不預測價格，也不是投資建議。',
+    mainNav: '主導覽', bridgeSideRailStatus: '艦橋系統狀態', bridgeSideRailTelemetry: '艦橋遙測', bridgeEngineDeck: 'Hermes 工作流能量匯流',
+    statusAchieved: '已達標', statusInProgress: '進行中', statusNeutral: '中性', statusStopped: '停止',
+    continuousLabel: '持續運作', engineContinuousLabel: '引擎 · 持續運作', continuousEngineLabel: '持續運作引擎', runningLabel: '運作中',
+    analyzingLabel: '分析中', snapshotLockedLabel: '快照已鎖定', bridgeMainViewport: '主橋接視埠', globalCurrencyGalaxy: '全域幣種星系',
+    jobStateQueued: '排隊', jobStateRunning: '執行中', jobStateCompleted: '已完成', jobStateFailed: '失敗',
+    analysisQueueUnavailable: '分析工作尚未建立',
+    homeAria: 'HERMES 主頁', systemActivePrefix: 'HERMES：',
+    reducedMotionOnAria: '低動態模式已啟用', reducedMotionOnTitle: '低動態模式（點擊關閉）',
+    reducedMotionOffAria: '啟用低動態模式', reducedMotionOffTitle: '啟用低動態模式',
+    openBeginnerHelp: '開啟新手說明',
   },
   en: {
     analyze: 'ANALYZE', compare: 'COMPARE', history: 'HISTORY', sources: 'SOURCES', costs: 'COSTS', galaxy: 'GALAXY',
@@ -176,6 +186,16 @@ const messages = {
     firstRunSummaryHint: 'The system cross-checks multiple sources and produces one conclusion, three key reasons, and data limits.',
     firstRunCta: 'Start first analysis →',
     firstRunFooter: 'Trust analysis measures the credibility of data and evidence — it does not predict price and is not investment advice.',
+    mainNav: 'Main navigation', bridgeSideRailStatus: 'Bridge system status', bridgeSideRailTelemetry: 'Bridge telemetry', bridgeEngineDeck: 'Hermes workflow energy conduit',
+    statusAchieved: 'Achieved', statusInProgress: 'In progress', statusNeutral: 'Neutral', statusStopped: 'Stopped',
+    continuousLabel: 'CONTINUOUS', engineContinuousLabel: 'ENGINE · CONTINUOUS', continuousEngineLabel: 'CONTINUOUS ENGINE', runningLabel: 'RUNNING',
+    analyzingLabel: 'ANALYZING', snapshotLockedLabel: 'SNAPSHOT LOCKED', bridgeMainViewport: 'BRIDGE MAIN VIEWPORT', globalCurrencyGalaxy: 'Global Currency Galaxy',
+    jobStateQueued: 'Queued', jobStateRunning: 'Running', jobStateCompleted: 'Completed', jobStateFailed: 'Failed',
+    analysisQueueUnavailable: 'Analysis job could not be created',
+    homeAria: 'HERMES home', systemActivePrefix: 'HERMES:',
+    reducedMotionOnAria: 'Reduced motion enabled', reducedMotionOnTitle: 'Reduced motion (click to turn off)',
+    reducedMotionOffAria: 'Enable reduced motion', reducedMotionOffTitle: 'Enable reduced motion',
+    openBeginnerHelp: 'Open beginner help',
   },
 } as const
 
@@ -183,6 +203,27 @@ type MessageKey = keyof typeof messages.en
 type I18nParams = Record<string, string | number>
 type I18nValue = { locale: HermesLocale; setLocale: (locale: HermesLocale) => void; t: (key: MessageKey, params?: I18nParams) => string }
 const HermesI18nContext = createContext<I18nValue | null>(null)
+
+const ANALYSIS_MODE_KEYS = new Set(['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'])
+
+/** N26: 分析模式 raw 值（'risk'/'sentiment'/…）與 dict key 同名，但直接印出
+ * 只在 en 時能看，zh-TW 下仍是英文字面值——用這支包一層轉譯，非已知模式時
+ * 原樣退回（避免未知值被吃掉）。 */
+export function modeLabel(mode: string | null | undefined, t: I18nValue['t']): string {
+  if (mode && ANALYSIS_MODE_KEYS.has(mode)) return t(mode as MessageKey)
+  return mode ?? ''
+}
+
+const JOB_STATE_KEYS: Record<string, MessageKey> = {
+  queued: 'jobStateQueued', running: 'jobStateRunning', completed: 'jobStateCompleted', failed: 'jobStateFailed',
+}
+
+/** N26: job.state 是後端英文 enum（queued/running/completed/failed），同一顆
+ * bug（'risk · completed'）的另一半——一併走 i18n，未知值原樣退回。 */
+export function jobStateLabel(state: string | null | undefined, t: I18nValue['t']): string {
+  if (state && JOB_STATE_KEYS[state]) return t(JOB_STATE_KEYS[state])
+  return state ?? ''
+}
 
 // N7: some workspace copy embeds runtime values (coin symbol, pipeline stage
 // name, queue position). Rather than string-concatenating localized

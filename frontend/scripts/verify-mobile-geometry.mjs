@@ -379,6 +379,23 @@ async function runFullExperienceChecks(browser, viewport, locale) {
       if (r.x < -1 || r.y < -1 || r.right > window.innerWidth + 1 || r.bottom > window.innerHeight + 1) {
         out.push(`topbar control "${label}" overflows viewport x=${r.x.toFixed(1)} right=${r.right.toFixed(1)} innerWidth=${window.innerWidth}`)
       }
+      // N29: every topbar control (home logo, mode/reduced-motion toggles,
+      // ship-upgrade button, ...) must meet the 24x24 minimum click target,
+      // same as the nav items and language toggle already covered above.
+      if (r.height < minTarget) {
+        out.push(`topbar control "${label}" ${r.width.toFixed(1)}x${r.height.toFixed(1)} under ${minTarget}x${minTarget} height`)
+      }
+    })
+
+    // N30: the mobile divergence dock's "點擊查看 →" tap-review button must
+    // meet the same 24x24 minimum click target as any other control.
+    document.querySelectorAll('.hermes-mobile-divergence > button').forEach((btn) => {
+      const r = btn.getBoundingClientRect()
+      if (r.width <= 0 || r.height <= 0) return
+      const label = btn.textContent?.trim() || '(tap-review button)'
+      if (r.width < minTarget || r.height < minTarget) {
+        out.push(`mobile divergence tap-review button "${label}" ${r.width.toFixed(1)}x${r.height.toFixed(1)} under ${minTarget}x${minTarget}`)
+      }
     })
 
     // N25: "?" glossary-term triggers (信任分數?/來源信譽?/...) must meet the
@@ -396,6 +413,31 @@ async function runFullExperienceChecks(browser, viewport, locale) {
   }, MIN_TARGET)
 
   for (const f of result) failures.push(`${label}: ${f}`)
+
+  // N30 (CEO real-browser hit-test audit, 768x1024): at <=900px the desktop
+  // HermesRightRail (with its own "跨來源分歧" glossary term) is CSS-hidden
+  // (display:none) in favour of HermesMobileDivergenceEntry, but both stayed
+  // mounted in the DOM. A locator resolving `.tf-glossary > button` in DOM
+  // order (HermesRightRail is mounted before the mobile entry) picks the
+  // display:none copy first and hangs waiting for it to become visible —
+  // a real, reproducible click-timeout, not a probe false positive.
+  if (viewport.width <= 900) {
+    const divergenceLabel = locale === 'zh-TW' ? '跨來源分歧' : 'CROSS-SOURCE DIVERGENCE'
+    try {
+      await page.locator('.tf-glossary > button', { hasText: divergenceLabel }).first().click({ timeout: 3000 })
+      // close the popover this click just opened so it can't shadow the
+      // separate tap-review reachability check below.
+      await page.keyboard.press('Escape')
+    } catch {
+      failures.push(`${label}: "${divergenceLabel}" glossary trigger unreachable via in-DOM-order click (resolves to a hidden duplicate before the visible mobile entry)`)
+    }
+    try {
+      await page.locator('.hermes-mobile-divergence > button').first().click({ timeout: 3000 })
+    } catch {
+      failures.push(`${label}: mobile divergence "${await page.locator('.hermes-mobile-divergence > button').first().textContent().catch(() => '')}" tap-review button unreachable`)
+    }
+  }
+
   await context.close()
 }
 

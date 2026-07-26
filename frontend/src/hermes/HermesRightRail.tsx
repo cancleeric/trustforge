@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { TIER_COLOR, type GalaxyCoin, type SelectedDerivation, type TrustComponent } from '../lib/hermesData'
-import { useHermesI18n } from './hermesI18n'
+import { jobStateLabel, modeLabel, useHermesI18n } from './hermesI18n'
 import type { AnalysisFlowData, AnalysisJourneyData } from '../lib/endpoints'
 import type { CrossSourceSignal } from '../lib/types'
 import GlossaryTerm, { type GlossaryKey } from '../components/GlossaryTerm'
@@ -76,14 +76,14 @@ export default function HermesRightRail({
 
       <div className="hermes-clip" style={{ background: 'var(--color-hermes-card)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: '9px 12px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginBottom: 7 }}>
-          <span>CONTINUOUS ENGINE</span><b style={{ color: activeStages.length ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-amber)' }}>{activeStages.length} RUNNING</b>
+          <span>{t('continuousEngineLabel')}</span><b style={{ color: activeStages.length ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-amber)' }}>{activeStages.length} {t('runningLabel')}</b>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 4 }}>
           {(flow?.stages ?? []).map((stage, index) => <div key={stage.id} title={stage.current ? `${stage.current.coin} · ${stage.current.question}` : `${stage.queued} queued`}
             style={{ height: 5, borderRadius: 3, background: stage.current ? 'var(--color-hermes-cyan)' : stage.queued ? 'var(--color-hermes-amber)' : 'var(--color-hermes-bd2)', boxShadow: stage.current ? '0 0 8px var(--color-hermes-cyan)' : undefined }} aria-label={`stage ${index + 1}`} />)}
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: 'var(--color-hermes-tx2)', fontSize: 9.5 }}>
-          <span>{t('queued')} {queued}</span><span>{latestJob ? `${latestJob.mode} · ${latestJob.state}` : t('waitingSnapshot')}</span>
+          <span>{t('queued')} {queued}</span><span>{latestJob ? `${modeLabel(latestJob.mode, t)} · ${jobStateLabel(latestJob.state, t)}` : t('waitingSnapshot')}</span>
         </div>
       </div>
 

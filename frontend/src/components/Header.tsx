@@ -46,7 +46,7 @@ export default function Header() {
         </span>
       </Link>
 
-      <nav aria-label="主導覽" className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto">
+      <nav aria-label={t('mainNav')} className="flex min-w-0 flex-1 items-stretch gap-1 overflow-x-auto">
         {navItems.map((item) => (
           <NavLink
             key={item.to}

@@ -1,5 +1,5 @@
 import { HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
-import { useHermesI18n } from './hermesI18n'
+import { modeLabel, useHermesI18n } from './hermesI18n'
 import type { HermesWorkspaceModule } from './HermesModuleDeck'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import type { AnalysisFlowData } from '../lib/endpoints'
@@ -57,9 +57,9 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
     <section className="hermes-energy-deck" aria-label={locale === 'zh-TW' ? 'Hermes 能量管線' : 'Hermes energy pipeline'}>
       <div className="hermes-engine-activity" role="status" aria-live="polite">
         <i className={currentWork || activity?.status === 'loading' ? 'is-running' : 'is-complete'} />
-        <b>{currentWork ? 'ANALYZING' : telemetry?.runId ? 'SNAPSHOT LOCKED' : 'CONTINUOUS'}</b>
+        <b>{currentWork ? t('analyzingLabel') : telemetry?.runId ? t('snapshotLockedLabel') : t('continuousLabel')}</b>
         <span>{currentWork?.coin ?? activity?.coin ?? selCoin.name}</span>
-        <span>{currentWork?.mode ?? telemetry?.analysisMode ?? activity?.mode ?? mode ?? 'multi_source'}</span>
+        <span>{modeLabel(currentWork?.mode ?? telemetry?.analysisMode ?? activity?.mode ?? mode ?? 'multi_source', t)}</span>
         <strong title={currentWork?.question ?? telemetry?.question ?? activity?.question}>{currentWork?.question ?? telemetry?.question ?? activity?.question ?? '等待有效題目'}</strong>
         {currentWork?.snapshot_id && <small>snapshot {currentWork.snapshot_id}</small>}
         {telemetry?.snapshotAt && <small>snapshot {telemetry.snapshotAt}</small>}
@@ -94,7 +94,7 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
       </div>
       <div className="hermes-engine" aria-label="Hermes Engine">
         <span className="hermes-engine-rings"><i /><b /></span>
-        <span><strong>HERMES</strong><small>ENGINE · CONTINUOUS</small></span>
+        <span><strong>HERMES</strong><small>{t('engineContinuousLabel')}</small></span>
       </div>
     </section>
   )
