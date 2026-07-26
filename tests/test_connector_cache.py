@@ -35,7 +35,7 @@ from urllib.error import HTTPError
 import pytest
 
 import trustforge.ingestion.cache as cache_mod
-from trustforge.ingestion.base import Document, Source
+from trustforge.ingestion.base import Document, Source, get_source_enabled
 from trustforge.ingestion.cache import (
     COIN_AGNOSTIC_SOURCES,
     COIN_KEYED_BATCH_SOURCES,
@@ -944,6 +944,21 @@ def test_collect_explicit_sources_bypasses_cached_source_wrapping(tmp_path):
 # scripts/fetch_scheduler.py：唯一打真 API 的地方
 # ---------------------------------------------------------------------------
 
+def _an_enabled_coin_agnostic_source() -> str:
+    """挑一個**確定啟用**的 coin-agnostic 來源名稱。
+
+    原本寫 `next(iter(COIN_AGNOSTIC_SOURCES))`，但 frozenset 的迭代順序取決於
+    字串 hash，而字串 hash 每個 process 都會被 PYTHONHASHSEED 隨機化——換句話說
+    「取到哪一個」每次跑都不一樣。issue #385 把七個**預設 disabled** 的台灣監管
+    來源加進這個集合後，這個隨機性就會讓排程器走「source disabled，略過」分支，
+    測試時綠時紅。改為以固定順序挑第一個啟用者，順便把這個既有的不穩定性拆掉。
+    """
+    for name in sorted(COIN_AGNOSTIC_SOURCES):
+        if get_source_enabled(name):
+            return name
+    raise AssertionError("COIN_AGNOSTIC_SOURCES 中沒有任何啟用的來源")
+
+
 def _patch_registry(monkeypatch, sources: list[Source]) -> None:
     monkeypatch.setattr(fetch_scheduler, "build_registry", lambda: {s.name: s for s in sources})
 
@@ -1035,7 +1050,7 @@ def test_scheduler_main_loads_admin_disabled_sources_before_fetch(monkeypatch, t
 
 def test_scheduler_coin_agnostic_source_fetches_once_broadcasts_all_coins(monkeypatch, tmp_path):
     backend = JsonCacheBackend(tmp_path / "cache.json")
-    name = next(iter(COIN_AGNOSTIC_SOURCES))
+    name = _an_enabled_coin_agnostic_source()
     src = _FakeSource(name, kind="onchain")
     _patch_registry(monkeypatch, [src])
     coins = ["BTC", "ETH", "SOL"]
@@ -1058,7 +1073,7 @@ def test_scheduler_coin_agnostic_broadcast_backfills_partially_missing_coin(monk
     呼叫，並把 ETH 的 key 一併補齊——不能因為 coins[0]（BTC）新鮮就整源跳過，
     讓 ETH 空等一整個 refresh interval。"""
     backend = JsonCacheBackend(tmp_path / "cache.json")
-    name = next(iter(COIN_AGNOSTIC_SOURCES))
+    name = _an_enabled_coin_agnostic_source()
     # 模擬上一輪：只有 BTC 廣播寫入成功，ETH 完全沒有 cache 資料。
     backend.set(cache_key(name, "BTC"), [], fetched_at=time.time())
     assert backend.get(cache_key(name, "ETH")) is None
@@ -1370,7 +1385,7 @@ def test_scheduler_coin_agnostic_fetch_failure_is_counted_into_failures(monkeypa
     """codex HIGH-1：coin-agnostic 來源真呼叫失敗，同樣要計入 failures（不是
     只印警告就當沒事）。"""
     backend = JsonCacheBackend(tmp_path / "cache.json")
-    name = next(iter(COIN_AGNOSTIC_SOURCES))
+    name = _an_enabled_coin_agnostic_source()
     boom = _FakeSource(name, kind="onchain", raise_exc=RuntimeError("upstream 500"))
     _patch_registry(monkeypatch, [boom])
     results, failures = fetch_scheduler.run_once(
@@ -1480,7 +1495,7 @@ def test_scheduler_coin_agnostic_broadcast_write_failure_is_reported(monkeypatch
         broken, "_get_table",
         MagicMock(side_effect=RuntimeError("no aws credentials / table not found")),
     )
-    name = next(iter(COIN_AGNOSTIC_SOURCES))
+    name = _an_enabled_coin_agnostic_source()
     src = _FakeSource(name, kind="onchain")
     _patch_registry(monkeypatch, [src])
 
