@@ -242,6 +242,37 @@ PR-1〜PR-4 皆不動 Trust Kernel 權重、不動 DB schema、不需 migration 
 4. **發現計劃未預期的地雷 4**：Python ≥3.13 預設 `VERIFY_X509_STRICT`
    會擋掉 `fsc.gov.tw` 與 `tpex.org.tw` 憑證。生產 3.12 不受影響。
 
+### 階段 6：外接通道盤查後的補接（2026-07-26）
+
+階段 5 後逐條盤查「接得上」與「真的通了」的落差，補了兩項：
+
+**A. 跨來源鏡像去重** — 原本各來源只在自己 `fetch()` 內去重，擋不到跨 feed
+鏡像。實測 FSC 三個 feed 共 31 個 doc id 中有 1 筆（`tw-reg:fsc:202602260001`）
+同時出現在 `fsc-news` 與 `fsc-notice`，會算兩票。`collect()` 收完所有來源後
+加一次按 `doc.id` 的去重（`base._dedupe_by_id`）；id 相同但內容不同時記
+WARNING（代表某來源 id 生成有誤，不可靜默吞）。
+
+→ 這修正了先前誤報為完成的驗收條件「同一官方公告的鏡像不能算多票」。
+
+**B. 運維啟用通道** — `disabled_sources` 只能「關」，`_DEFAULT_DISABLED_SOURCES`
+內的源除了改碼重新部署之外無法啟用；`set_source_enabled_override(name, True)`
+在 `src/`、`scripts/` 內零呼叫端，只有測試在用。補上：
+
+- `admin_config` 新增 `enabled_sources` 欄位（欄位／驗證／落庫／讀回／稽核／
+  public dict 共十處，與 `disabled_sources` 對稱）
+- `base.sync_source_enabled_from_admin()` 先套 enabled 再套 disabled，
+  **順序即優先權，關永遠勝過開**（fail-closed）
+- `web.main()` 啟動時 sync（fail-soft）。在此之前只有排程器 sync，
+  結果會是「排程抓了寫 cache、web 端仍過濾掉，cache 寫了沒人讀」
+
+限制：web 端為**啟動時**套用一次，admin 改動需重啟 web 才被產品端讀到
+（排程端最晚 15s 收斂）。要即時生效需把 sync 移進請求路徑，屬另一個題目。
+
+附帶釘正一件事：`hoyabit-ticker` **不是**被「缺啟用通道」擋著，而是被
+`is_valid_hoyabit_endpoint()` 這個刻意的前置條件擋著（檢查在 override 之前）。
+admin 開關不得繞過它——沒有正式契約前舊 placeholder 不該取得第一方信任（#167）。
+已加測試鎖住此行為。
+
 ### 階段 5 判定
 
 coverage 不足，**references 維持 📚 planned、Radar 台灣監管維度留白、

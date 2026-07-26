@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -18,6 +19,8 @@ from typing import Any, Iterable, Iterator
 
 from ..coin_scope import coins_mentioned, matches_coin_fields
 from ..data_contracts import DOCUMENT_SCHEMA_VERSION
+
+_log = logging.getLogger(__name__)
 
 # 資料根目錄：預設為 repo 根（src 上一層）；Lambda 等打包環境用 TRUSTFORGE_HOME 覆寫
 # （Lambda 把 trustforge/ data/ demo/ 都放在 /var/task，設 TRUSTFORGE_HOME=/var/task）。
@@ -176,11 +179,16 @@ def reset_source_enabled_overrides() -> None:
 
 
 def sync_source_enabled_from_admin(store=None) -> None:
-    """從 admin_config 讀 disabled_sources，套用為 override（seam）。
+    """從 admin_config 讀 enabled_sources / disabled_sources，套用為 override。
 
-    預設 admin_config 未設定 disabled_sources（= None）→ 全空 → 所有源維持
-    enabled。admin_config 寫入 disabled_sources（如 ["coindesk"]）後，這裡
-    把對應源標成 disabled，collect() 隨即跳過。
+    預設 admin_config 兩者皆未設定（= None）→ 各源維持自身預設狀態
+    （`_DEFAULT_DISABLED_SOURCES` 內為關，其餘為開）。
+
+    - 寫入 `disabled_sources`（如 ["coindesk"]）→ 對應源標成 disabled，
+      collect() 隨即跳過。
+    - 寫入 `enabled_sources`（如 ["fsc-news"]）→ 對應源標成 enabled，
+      **這是啟用預設 disabled 的源的唯一免改碼途徑**（issue #385）。
+    - 兩者同時列出同一個源 → **disabled 勝**（fail-closed）。
 
     TRUSTFORGE_DISABLE_ADMIN_CONFIG=1 時跳過（本機無 DynamoDB 也能跑排程器）。
     """
@@ -191,6 +199,16 @@ def sync_source_enabled_from_admin(store=None) -> None:
     from .. import admin_config
 
     config = admin_config.get_config(store)
+
+    # issue #385：先套 enabled_sources（把預設 disabled 的源打開），再套
+    # disabled_sources——順序即優先權，**關永遠勝過開**（fail-closed）。
+    # 在此之前 admin 只有「關」的方向，`_DEFAULT_DISABLED_SOURCES` 裡的源
+    # （hoyabit-ticker、台灣監管七源）除了改碼重新部署之外無法啟用。
+    enabled = getattr(config, "enabled_sources", None)
+    if enabled:
+        for name in enabled:
+            _SOURCE_ENABLED_OVERRIDES[name] = True
+
     disabled = getattr(config, "disabled_sources", None)
     if disabled:
         for name in disabled:
@@ -402,7 +420,38 @@ def collect(query: str, coin: str | None = None,
             )
             if _failed is not None:
                 _failed.append(source_name)
-    return docs
+
+    return _dedupe_by_id(docs)
+
+
+def _dedupe_by_id(docs: list["Document"]) -> list["Document"]:
+    """跨來源按 `Document.id` 去重，保留第一次出現者（順序穩定）。
+
+    issue #385：同一份官方公告可能出現在多個 feed。實測 FSC 三個 RSS feed 中，
+    `tw-reg:fsc:202602260001` 同時出現在 `fsc-news` 與 `fsc-notice`——各來源
+    自己的 `fetch()` 內部去重擋不到這種跨來源鏡像，會讓一份公告算兩票。
+
+    doc id 依設計即為「同一份文件的唯一鍵」（FSC 用來源自身的 `dataserno`），
+    所以這裡不需要任何內容比對，相同 id 就是同一份。
+
+    ⚠️ 丟棄時記 WARNING：id 相同但內容不同代表某個來源的 id 生成有誤，
+    那是必須被看見的 bug，不能靜默吞掉。
+    """
+    seen: dict[str, "Document"] = {}
+    unique: list["Document"] = []
+    for doc in docs:
+        kept = seen.get(doc.id)
+        if kept is None:
+            seen[doc.id] = doc
+            unique.append(doc)
+            continue
+        if kept.text != doc.text:
+            _log.warning(
+                "文件 id 重複但內容不同（丟棄後者，疑為 id 生成錯誤）："
+                "id=%s kept_source=%s dropped_source=%s",
+                doc.id, kept.source, doc.source,
+            )
+    return unique
 
 
 def _latest_bar_ts(bars) -> float:

@@ -132,3 +132,202 @@ def test_scheduler_registry_contains_every_taiwan_source() -> None:
 
     for name in TAIWAN_SOURCE_NAMES:
         assert not isinstance(registry[name], CachedSource)
+
+
+# ── 接線點 5：跨來源鏡像去重（issue #385 驗收條件）─────────────────────────
+
+def test_collect_dedupes_the_same_document_across_sources() -> None:
+    """實測 FSC 三個 feed 中 tw-reg:fsc:202602260001 同時出現在 fsc-news 與
+    fsc-notice。各來源自己 fetch() 內的去重擋不到跨來源鏡像，會算兩票。"""
+    from trustforge.ingestion.base import Document, Source, collect
+
+    class _Mirror(Source):
+        kind = "regulatory"
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
+            return [
+                Document(
+                    id="tw-reg:fsc:202602260001",
+                    kind="regulatory",
+                    source=self.name,
+                    text="金管會公告完成洗錢防制登記之提供虛擬資產服務之事業或人員名單",
+                    url="https://www.fsc.gov.tw/x",
+                    ts=1.0,
+                )
+            ]
+
+    # 這兩個名稱預設 disabled（見接線點 2），collect() 會過濾掉，需明確開啟。
+    base.set_source_enabled_override("fsc-news", True)
+    base.set_source_enabled_override("fsc-notice", True)
+
+    docs = collect(
+        "q", coin=None, sources=[_Mirror("fsc-news"), _Mirror("fsc-notice")]
+    )
+    assert [d.id for d in docs] == ["tw-reg:fsc:202602260001"], "一份公告只能一票"
+    assert docs[0].source == "fsc-news", "保留第一次出現者"
+
+
+def test_collect_keeps_genuinely_distinct_documents() -> None:
+    """去重只按 id，不得誤殺不同文件。"""
+    from trustforge.ingestion.base import Document, Source, collect
+
+    class _Two(Source):
+        kind = "regulatory"
+        name = "fsc-news"
+
+        def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
+            return [
+                Document(id="a", kind="regulatory", source=self.name, text="虛擬資產甲"),
+                Document(id="b", kind="regulatory", source=self.name, text="虛擬資產乙"),
+            ]
+
+    base.set_source_enabled_override("fsc-news", True)
+    assert [d.id for d in collect("q", coin=None, sources=[_Two()])] == ["a", "b"]
+
+
+def test_id_collision_with_different_content_is_logged_not_silent(caplog) -> None:
+    """id 相同但內容不同＝某來源的 id 生成有誤，必須被看見。"""
+    import logging
+
+    from trustforge.ingestion.base import Document, _dedupe_by_id
+
+    with caplog.at_level(logging.WARNING, logger="trustforge.ingestion.base"):
+        kept = _dedupe_by_id(
+            [
+                Document(id="same", kind="regulatory", source="s1", text="內容一"),
+                Document(id="same", kind="regulatory", source="s2", text="內容二"),
+            ]
+        )
+    assert len(kept) == 1
+    assert "id 重複但內容不同" in caplog.text
+
+
+def test_identical_mirror_does_not_log_warning(caplog) -> None:
+    """真正的鏡像（內容相同）是預期情形，不該吵。"""
+    import logging
+
+    from trustforge.ingestion.base import Document, _dedupe_by_id
+
+    with caplog.at_level(logging.WARNING, logger="trustforge.ingestion.base"):
+        kept = _dedupe_by_id(
+            [
+                Document(id="same", kind="regulatory", source="fsc-news", text="同一份"),
+                Document(id="same", kind="regulatory", source="fsc-notice", text="同一份"),
+            ]
+        )
+    assert len(kept) == 1
+    assert caplog.text == ""
+
+
+# ── 接線點 6：運維啟用通道（issue #385）──────────────────────────────────
+
+class _FakeAdminConfig:
+    """最小的 admin config double，只帶本測試在意的兩個欄位。"""
+
+    def __init__(self, *, enabled=None, disabled=None) -> None:
+        self.enabled_sources = enabled
+        self.disabled_sources = disabled
+
+
+def _sync_with(monkeypatch, cfg) -> None:
+    import trustforge.admin_config as admin_config
+
+    monkeypatch.delenv("TRUSTFORGE_DISABLE_ADMIN_CONFIG", raising=False)
+    monkeypatch.setattr(admin_config, "get_config", lambda store=None: cfg)
+    base.sync_source_enabled_from_admin()
+
+
+def test_admin_can_enable_a_default_disabled_source(monkeypatch) -> None:
+    """在 #385 之前 admin 只有『關』的方向，`_DEFAULT_DISABLED_SOURCES` 內的
+    源除了改碼重新部署之外無法啟用。"""
+    assert base.get_source_enabled("fsc-news") is False
+    _sync_with(monkeypatch, _FakeAdminConfig(enabled=["fsc-news"]))
+    assert base.get_source_enabled("fsc-news") is True
+
+
+def test_admin_enable_cannot_bypass_the_hoyabit_endpoint_precondition(
+    monkeypatch,
+) -> None:
+    """`hoyabit-ticker` 不是被「缺啟用通道」擋著，而是被一個刻意的前置條件
+    擋著：必須先設定合法 HTTPS 端點（`base.py` 的 `is_valid_hoyabit_endpoint`
+    檢查在 override 之前）。admin 開關**不得**繞過它——沒有正式契約前，
+    舊 placeholder 不該取得第一方信任（#167）。
+    """
+    monkeypatch.delenv("TRUSTFORGE_HOYABIT_TICKER_URL", raising=False)
+    _sync_with(monkeypatch, _FakeAdminConfig(enabled=["hoyabit-ticker"]))
+    assert base.get_source_enabled("hoyabit-ticker") is False, (
+        "端點未設定時，admin 開關不得放行"
+    )
+
+    # 端點合法後才輪到 override 生效。
+    monkeypatch.setenv("TRUSTFORGE_HOYABIT_TICKER_URL", "https://api.example.com/ticker")
+    assert base.get_source_enabled("hoyabit-ticker") is True
+
+
+def test_admin_disable_still_works(monkeypatch) -> None:
+    _sync_with(monkeypatch, _FakeAdminConfig(disabled=["sec-gov"]))
+    assert base.get_source_enabled("sec-gov") is False
+
+
+def test_disable_wins_over_enable_fail_closed(monkeypatch) -> None:
+    """同一個源同時列在兩邊 → 關勝過開（fail-closed）。"""
+    _sync_with(
+        monkeypatch,
+        _FakeAdminConfig(enabled=["fsc-news"], disabled=["fsc-news"]),
+    )
+    assert base.get_source_enabled("fsc-news") is False
+
+
+def test_neither_field_set_keeps_each_source_default(monkeypatch) -> None:
+    _sync_with(monkeypatch, _FakeAdminConfig())
+    assert base.get_source_enabled("fsc-news") is False   # 預設關
+    assert base.get_source_enabled("sec-gov") is True     # 預設開
+
+
+def test_enabled_source_then_flows_into_collect(monkeypatch) -> None:
+    """啟用後必須真的被 collect() 走訪到——這才是通道有效的證據。"""
+    _sync_with(monkeypatch, _FakeAdminConfig(enabled=sorted(TAIWAN_SOURCE_NAMES)))
+    assert TAIWAN_SOURCE_NAMES <= _collected_source_names(monkeypatch)
+
+
+# ── admin_config 儲存層對 enabled_sources 的支援 ─────────────────────────
+
+def test_admin_config_accepts_enabled_sources_field() -> None:
+    import trustforge.admin_config as admin_config
+
+    assert "enabled_sources" in admin_config._ALLOWED_CHANGE_FIELDS
+
+
+def test_admin_config_validates_enabled_sources() -> None:
+    import pytest as _pytest
+
+    import trustforge.admin_config as admin_config
+
+    admin_config._validate_changes({"enabled_sources": ["fsc-news"]})
+    admin_config._validate_changes({"enabled_sources": None})
+    with _pytest.raises(ValueError, match="enabled_sources"):
+        admin_config._validate_changes({"enabled_sources": "fsc-news"})
+    with _pytest.raises(ValueError, match="enabled_sources"):
+        admin_config._validate_changes({"enabled_sources": [""]})
+
+
+def test_admin_config_public_dict_exposes_enabled_sources() -> None:
+    import trustforge.admin_config as admin_config
+
+    cfg = admin_config.AdminConfig(enabled_sources={"fsc-news", "mops-twse"})
+    public = cfg.to_public_dict()
+    assert public["enabled_sources"] == ["fsc-news", "mops-twse"]
+    assert public["disabled_sources"] == []
+    assert "live_token_hash" not in public, "機敏欄位不得外洩"
+
+
+def test_web_startup_syncs_source_enablement() -> None:
+    """產品端也必須 sync，否則 admin 開了之後排程寫 cache、web 卻不讀。"""
+    import inspect
+
+    from trustforge import web
+
+    assert "sync_source_enabled_from_admin" in inspect.getsource(web.main)

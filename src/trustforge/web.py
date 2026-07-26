@@ -8424,6 +8424,30 @@ def main():
     from .ingestion.hoyabit import log_hoyabit_startup_status
 
     log_hoyabit_startup_status()
+
+    # issue #385：把 admin 的 enabled/disabled_sources 套進本 process。
+    #
+    # 為何產品端也需要：`collect()` 用 `get_source_enabled()` 過濾來源，而該
+    # 狀態是 **per-process** 的。在此之前只有 `scripts/fetch_scheduler.py`
+    # 會 sync——結果是 admin 開啟某個預設 disabled 的源後，排程器會去抓並
+    # 寫入 cache，但 web 這一端仍然把它過濾掉，**cache 寫了卻永遠沒人讀**。
+    #
+    # 讀取失敗刻意 fail-soft（不像排程器那樣視為致命）：web 服務不該因為
+    # DynamoDB 暫時讀不到而起不來；退回各源的預設狀態即可（預設 disabled
+    # 的源維持關閉，本身就是保守側）。
+    #
+    # ⚠️ 這是**啟動時**套用一次，因此 admin 改動需重啟 web 才會被產品端
+    # 讀到（排程端最晚 15s 收斂）。要做到即時生效需把 sync 移進請求路徑，
+    # 那會在每次 collect 上加一次帶快取的 config 讀取，屬另一個題目。
+    try:
+        from .ingestion.base import sync_source_enabled_from_admin
+
+        sync_source_enabled_from_admin()
+    except Exception as exc:  # noqa: BLE001 - 啟動不得因設定讀取失敗而中止
+        logging.warning(
+            "啟動時同步 admin source 開關失敗，各源維持預設狀態：error_type=%s",
+            type(exc).__name__,
+        )
     # 前後端分離 Phase 3（task #28，harper 安全審 must-have）：`TRUST_PROXY`
     # 開啟時，代表部署拓樸是「nginx 對外、python 只對內」，此時**強制**把
     # 監聽 host 收斂成 127.0.0.1——即使 `TRUSTFORGE_BIND_HOST` 被設成別的

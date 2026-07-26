@@ -109,8 +109,15 @@ ADMIN_AUDIT_SOURCE = "__admin_audit__"
 # 可透過本層寫入的設定欄位（`live_token` 收明文、落庫轉 hash+last4）
 # issue #155：新增 `disabled_sources`——admin 可明確關掉個別真實連接器
 # （如 ["coindesk"]）；預設空（= 全啟用，fail-closed：忘了設也不會誤關真實源）。
+# issue #385：新增 `enabled_sources`——`disabled_sources` 只能「關」，
+# 無法把預設 disabled 的源（如 hoyabit-ticker、台灣監管七源）打開，運維
+# 因此只能改碼重新部署。本欄位補上「開」的方向。
+# ⚠️ 兩者衝突時 `disabled_sources` 勝（fail-closed：關永遠優先於開）。
 _ALLOWED_CHANGE_FIELDS = frozenset(
-    {"daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled", "live_token", "disabled_sources"}
+    {
+        "daily_cap_usd", "bedrock_enabled", "hermes_autonomy_enabled",
+        "live_token", "disabled_sources", "enabled_sources",
+    }
 )
 
 # process 內 TTL 快取窗（秒）——計劃 §1.4 定 15s
@@ -195,6 +202,10 @@ class AdminConfig:
     # issue #155：被明確關掉的連接器名稱集合（如 {"coindesk", "sec-gov"}）。
     # 預設 None（= 空，全啟用，fail-closed）。落庫成排序後的 list；讀回轉 frozenset。
     disabled_sources: set[str] | None = None
+    # issue #385：被明確「打開」的連接器名稱集合。用於啟用預設 disabled 的
+    # 源（`ingestion.base._DEFAULT_DISABLED_SOURCES`）。與 `disabled_sources`
+    # 同時列出時以 disabled 為準。
+    enabled_sources: set[str] | None = None
     version: int | None = None
     updated_at: str | None = None
     updated_by: str | None = None
@@ -215,6 +226,7 @@ class AdminConfig:
             "live_token_last4": self.live_token_last4,
             "live_token_configured": self.live_token_hash is not None,
             "disabled_sources": sorted(self.disabled_sources) if self.disabled_sources else [],
+            "enabled_sources": sorted(self.enabled_sources) if self.enabled_sources else [],
             "version": self.version,
             "updated_at": self.updated_at,
             "updated_by": self.updated_by,
@@ -443,6 +455,7 @@ def _config_from_item(item: dict[str, Any]) -> AdminConfig:
             item.get("live_token_last4"), "live_token_last4", sensitive=True
         ),
         disabled_sources=_parse_set(item.get("disabled_sources"), "disabled_sources"),
+        enabled_sources=_parse_set(item.get("enabled_sources"), "enabled_sources"),
         version=version,
         updated_at=_parse_str(item.get("updated_at"), "updated_at"),
         updated_by=_parse_str(item.get("updated_by"), "updated_by"),
@@ -666,6 +679,14 @@ def _validate_changes(changes: dict[str, Any]) -> None:
             for v in ds:
                 if not isinstance(v, str) or not v:
                     raise ValueError("disabled_sources 元素必須是非空字串")
+    if "enabled_sources" in changes:
+        es = changes["enabled_sources"]
+        if es is not None:
+            if not isinstance(es, (list, tuple, set, frozenset)):
+                raise ValueError("enabled_sources 必須是 list/set（或 None＝清除）")
+            for v in es:
+                if not isinstance(v, str) or not v:
+                    raise ValueError("enabled_sources 元素必須是非空字串")
 
 
 def put_config(
@@ -759,6 +780,12 @@ def put_config(
         raw_ds = changes["disabled_sources"]
         new_disabled = None if raw_ds is None else frozenset(raw_ds)
 
+    # issue #385：enabled_sources 合併（None＝清除，回復各源的預設狀態）。
+    new_enabled_sources = current.enabled_sources
+    if "enabled_sources" in changes:
+        raw_es = changes["enabled_sources"]
+        new_enabled_sources = None if raw_es is None else frozenset(raw_es)
+
     # 相同設定不應產生新版本或稽核紀錄。這尤其重要於二態開關：管理面
     # 重送「開啟」時，紀錄必須保留真正的狀態轉換，而不是出現「開 → 開」。
     if (
@@ -768,6 +795,7 @@ def put_config(
         and new_hash == current.live_token_hash
         and new_last4 == current.live_token_last4
         and new_disabled == current.disabled_sources
+        and new_enabled_sources == current.enabled_sources
     ):
         return PutConfigResult(config=current, audit_warning=None)
 
@@ -792,6 +820,8 @@ def put_config(
         item["live_token_last4"] = new_last4
     if new_disabled:  # 非空集合才寫入（空/None 一律不寫＝全啟用）
         item["disabled_sources"] = sorted(new_disabled)
+    if new_enabled_sources:  # 同上（空/None 不寫＝各源維持預設狀態）
+        item["enabled_sources"] = sorted(new_enabled_sources)
 
     from boto3.dynamodb.conditions import Attr  # 延遲匯入，同 boto3 lazy 慣例
     from botocore.exceptions import ClientError
@@ -840,6 +870,12 @@ def put_config(
             "old": sorted(current.disabled_sources) if current.disabled_sources else [],
             "new": sorted(new_disabled) if new_disabled else [],
         })
+    if "enabled_sources" in changes:
+        change_entries.append({
+            "field": "enabled_sources",
+            "old": sorted(current.enabled_sources) if current.enabled_sources else [],
+            "new": sorted(new_enabled_sources) if new_enabled_sources else [],
+        })
 
     # journal（logging → systemd journal）先寫：最便宜、幾乎不會失敗，
     # DynamoDB 審計掛了也至少有這一份（計劃 §6-2）
@@ -880,6 +916,7 @@ def put_config(
         live_token_hash=new_hash,
         live_token_last4=new_last4,
         disabled_sources=new_disabled,
+        enabled_sources=new_enabled_sources,
         version=version_to,
         updated_at=now_iso,
         updated_by=actor,
