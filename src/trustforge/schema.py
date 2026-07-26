@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .asset_context import AssetContext  # noqa: F401  -- typed contract reference
 
 # 官方幣種池
-COIN_POOL = ("BTC", "ETH", "SOL", "BNB", "XRP")
+COIN_POOL = ("BTC", "ETH", "SOL", "BNB", "XRP", "ARB")
 
 
 class QuestionType(str, Enum):

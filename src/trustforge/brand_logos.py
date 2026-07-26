@@ -74,7 +74,7 @@ def _svg(path_d: str, hex_color: str, title: str, viewbox: str = "0 0 24 24") ->
 
 
 # ---------------------------------------------------------------------------
-# 幣別 LOGO —— COIN_POOL 五幣（見 schema.py）皆有 simple-icons 收錄。
+# 幣別 LOGO —— COIN_POOL 六幣（見 schema.py），五幣有 simple-icons 收錄，ARB 使用空字串 fallback。
 # ---------------------------------------------------------------------------
 
 COIN_LOGO_SVG: dict[str, str] = {
@@ -372,7 +372,7 @@ def _fallback_badge_html(brand_key: str, color: str) -> str:
 
 
 def coin_logo_html(coin: str) -> str:
-    """幣別官方 LOGO；`coin` 不在白名單（非 `COIN_POOL` 五幣）回空字串——
+    """幣別官方 LOGO；`coin` 不在白名單（非 `COIN_POOL` 六幣）回空字串——
     呼叫端據此不多印任何東西，不會因為缺 LOGO 而顯示破圖或錯誤幣的 LOGO。
     """
     return COIN_LOGO_SVG.get(coin, "")

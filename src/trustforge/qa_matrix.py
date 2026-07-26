@@ -23,6 +23,7 @@ _COMPARISON_PAIRS: dict[str, str] = {
     "SOL": "BTC",
     "BNB": "ETH",
     "XRP": "SOL",
+    "ARB": "ETH",
 }
 
 _OFFLINE_MARKERS = ["[OFFLINE]", "[離線模式]", "[SAMPLE]"]

@@ -6,6 +6,7 @@
     "data/BTC_daily_ohlcv.csv": "ae783a4e3f155e389fcec904abb8c04bf8b657d3abaa81e6770f2d4aba6245e4",
     "data/ETH_daily_ohlcv.csv": "dc81134bdb39590307220ab5671250bf51b78d48f1c1ce949166a4dce534b955",
     "data/SOL_daily_ohlcv.csv": "6c9f436a6e1158b1234d5fd2b1122e8ff9a3bd261f2cb406c6b2a6b3bac91e9e",
-    "data/XRP_daily_ohlcv.csv": "1319a96c591547d984360e7c6e8c291114473de71d56232ff7bca6a01c3bb2f1"
+    "data/XRP_daily_ohlcv.csv": "1319a96c591547d984360e7c6e8c291114473de71d56232ff7bca6a01c3bb2f1",
+    "data/ARB_daily_ohlcv.csv": "7fd41ab65f881eb62012c60ee46423453aad85060532a9cda73c4fb0b592a706"
   }
 }
