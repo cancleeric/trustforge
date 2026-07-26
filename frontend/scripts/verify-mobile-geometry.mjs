@@ -129,6 +129,37 @@ async function runHitTestMatrix(browser, viewport, locale = 'en') {
   await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'networkidle' })
   await page.waitForSelector('.hermes-dashboard', { state: 'visible' })
 
+  // N31 (CEO real-browser hit-test audit): beginnerMode defaults ON, so the
+  // `.hermes-beginner-narrative` panel is open on every first visit. At
+  // <=900px it is absolutely positioned (bottom:18, z-index:12) directly on
+  // top of `.hermes-mobile-divergence` (z-index:7), which is *also* always
+  // mounted at <=900px regardless of beginnerMode. Real Playwright clicks
+  // (not just hit-test probes) on the dock's two controls must succeed while
+  // the narrative is in its default open state — this is what a real mobile
+  // first-time visitor hits.
+  if (viewport.width <= 900) {
+    const divergenceLabel = locale === 'zh-TW' ? '跨來源分歧' : 'CROSS-SOURCE DIVERGENCE'
+    const tapReviewLabel = locale === 'zh-TW' ? '點擊查看' : 'tap to review'
+    try {
+      await page.locator('.hermes-mobile-divergence .tf-glossary > button', { hasText: divergenceLabel }).first()
+        .click({ timeout: 3000 })
+      await page.keyboard.press('Escape')
+    } catch {
+      failures.push(`${label}: "${divergenceLabel}" glossary trigger unreachable while beginner narrative open (default state), blocked by overlapping panel`)
+    }
+    try {
+      await page.locator('.hermes-mobile-divergence > button', { hasText: tapReviewLabel }).first()
+        .click({ timeout: 3000 })
+      // Clicking this button opens the StageDrilldown overlay (scrim +
+      // panel) — close it back out (Escape, wired in HermesDashboard) so it
+      // doesn't contaminate the rest of this viewport's hit-test probes
+      // below.
+      await page.keyboard.press('Escape')
+    } catch {
+      failures.push(`${label}: mobile divergence tap-review button unreachable while beginner narrative open (default state), blocked by overlapping panel`)
+    }
+  }
+
   const result = await page.evaluate((minTarget) => {
     const out = { failures: [] }
 
@@ -146,6 +177,7 @@ async function runHitTestMatrix(browser, viewport, locale = 'en') {
       }
       let hits = 0
       let coverer = null
+      let coveredByNarrative = false
       for (const [x, y] of points) {
         if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) continue
         const hit = document.elementFromPoint(x, y)
@@ -153,9 +185,10 @@ async function runHitTestMatrix(browser, viewport, locale = 'en') {
           hits++
         } else if (hit) {
           coverer = hit.className || hit.tagName
+          if (hit.closest('.hermes-beginner-narrative')) coveredByNarrative = true
         }
       }
-      return { visible: true, rect: { w: r.width, h: r.height }, hits, coverer }
+      return { visible: true, rect: { w: r.width, h: r.height }, hits, coverer, coveredByNarrative }
     }
 
     // --- Phase 1: beginner narrative is open (default first-run state) ---
@@ -233,6 +266,44 @@ async function runHitTestMatrix(browser, viewport, locale = 'en') {
         if (viewportArea > 0 && area / viewportArea > 0.5) {
           out.failures.push(`aria-hidden element covers ${(100 * area / viewportArea).toFixed(1)}% of viewport and accepts pointer events: <${el.tagName.toLowerCase()} class="${el.className}">`)
         }
+      }
+
+      // N32 (CEO 2nd-pass audit): comprehensive scan, not just the specific
+      // controls this file already knew to check. The previous version only
+      // checked the galaxy's "Focus <coin>" chips in phase 2, *after* the
+      // narrative had already been closed (see closeBtn?.click() below) —
+      // that blind spot let a "push the narrative up to clear the mobile
+      // divergence dock" fix silently start covering those chips instead
+      // (same class of bug as the removed full-viewport backdrop: a fix
+      // that only satisfies the specific assertions that already existed).
+      //
+      // Scope, deliberately narrower than "every element on screen":
+      // - <=900px only. Above that the narrative is a centered modal-style
+      //   card that has *always* intentionally sat above the right-rail HUD
+      //   (same as every other viewport CEO already accepted); flagging
+      //   that would just be noise, not a real bug.
+      // - Only counts as a failure when the *narrative itself* is the thing
+      //   actually covering the element (`coveredByNarrative`), not when
+      //   some unrelated element (e.g. two orbiting galaxy planets legitimately
+      //   overlapping each other) happens to win the same hit-test point —
+      //   that's a pre-existing, separate condition unrelated to this bug.
+      // - Excludes `.hermes-energy-deck` (StageBar): by design, on every
+      //   viewport including ones CEO already signed off on, the onboarding
+      //   card sits above the detail HUD until dismissed — that's intentional
+      //   progressive disclosure, not a dead click, and is true even at
+      //   baseline (before this fix existed).
+      // - Excludes the narrative's own controls (checked separately above).
+      if (window.innerWidth <= 900) {
+        document.querySelectorAll('button, a[href], [role="button"]').forEach((el) => {
+          if (el.closest('.hermes-beginner-narrative')) return
+          if (el.closest('.hermes-energy-deck')) return
+          const r = probe(el)
+          if (!r.visible) return
+          if (r.hits === 0 && r.coveredByNarrative) {
+            const desc = el.getAttribute('aria-label') || el.textContent?.trim().slice(0, 30) || el.tagName
+            out.failures.push(`interactive element "${desc}" covered by beginner narrative panel (default open state) at <=900px`)
+          }
+        })
       }
 
       // close it so phase 2 (separate evaluate() call below, after a real
