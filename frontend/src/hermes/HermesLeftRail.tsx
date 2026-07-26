@@ -66,7 +66,13 @@ export default function HermesLeftRail({
       {/* HERMES CONSOLE */}
       <div
         className="hermes-clip"
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
+        /* N37: `minHeight: 0` 明確允許這塊被壓到比內容還矮，而左軌高度是
+           `calc(100% - top - bottom)`，視窗一矮就沒空間分。實測 1024x420 時
+           這個 .hermes-clip clientHeight 只剩 28px（scrollHeight 222），
+           使用者看不到 HERMES 主控台的任何內容。改成 200px 樓地板：左軌自己
+           已經是 overflow-y:auto，空間不夠時讓左軌滾，而不是把面板壓扁。
+           200 = 稽核腳本的可讀性門檻 min(scrollHeight, 200)。 */
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 200, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
       >
         {beginnerMode && (
           <div className="hermes-intent-picker">
@@ -90,7 +96,11 @@ export default function HermesLeftRail({
           <span style={{ fontSize: 9, color: 'var(--color-hermes-cyan)', background: 'rgba(77,216,224,.13)', border: '1px solid rgba(77,216,224,.4)', borderRadius: 3, padding: '1px 6px' }}>{t('online')}</span>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
+        {/* N37: 同上——這層的 minHeight:0 實測讓「Hermes 主動報告」對話區在
+            561x700 只剩 46px（scrollHeight 697）、900x620 和 1024x420 直接
+            剩 0px，511~555px 的報告內容一個字都看不到。樓地板取 110px＝
+            下面那顆 agentOutput 卡的 minHeight 82 ＋ gap ＋ 標題行。 */}
+        <div style={{ flex: 1, minHeight: 110, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
           <div style={{ minHeight: 82, flexShrink: 0, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderLeft: '2px solid var(--color-hermes-amber)', borderRadius: '0 6px 6px 0', padding: '9px 11px', overflow: 'hidden' }}>
             <div style={{ fontSize: 9, color: 'var(--color-hermes-amber)', letterSpacing: 1, marginBottom: 4 }}>{t('agentOutput')}</div>
             <div aria-label={t('agentOutput')} style={{ maxHeight: 62, overflowY: 'auto', fontSize: 11.5, lineHeight: 1.5, color: 'var(--color-hermes-tx)', overflowWrap: 'anywhere' }}>{hermesMessage}</div>
