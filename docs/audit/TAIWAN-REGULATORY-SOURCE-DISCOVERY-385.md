@@ -135,16 +135,34 @@ TWSE t187ap22_L keys:
 
 ## 五、內容相關性驗證
 
-不是湊數來源，實測關鍵字命中：
+> **訂正（2026-07-26 第二輪量測）**：本節初版用的關鍵字集含「加密」「詐騙」
+> 「洗錢」等寬鬆詞，得出 FSC 新聞稿 83 筆、裁罰 60 筆命中。逐筆檢視後發現
+> **絕大多數為誤報**，該組數字不可用。以下為嚴格詞集重新量測的結果。
 
-| Feed | 總筆數 | 命中「虛擬資產／VASP／加密／詐騙／洗錢」 |
+### 關鍵字集的誤報量測
+
+對 FSC 裁罰 feed（498 筆）分別套用兩組詞：
+
+| 詞集 | 命中 | 逐筆檢視 |
 |---|---|---|
-| FSC 新聞稿 | 800 | **83** |
-| FSC 裁罰案件 | 498 | **60** |
+| 寬（含「加密」「洗錢防制」） | 42 | **38 筆**只因「洗錢防制」命中（銀行 AML 裁罰）、**4 筆**只因「加密」命中（資安「資料加密」缺失）→ 全數誤報 |
+| 嚴（「加密貨幣」「加密資產」等複合詞） | 1 | 僅 1 筆，且是臺灣銀行 AML 案順帶提及「虛擬資產」 |
 
-命中樣本包含 2026-06-30「立法院院會三讀通過『虛擬資產服務法』」。
+結論：**「加密」不可單獨成詞**（會收到資安加密），**「洗錢防制」「詐騙」不可入列**（與加密無必然關係）。最終詞集見 `taiwan_regulatory._CRYPTO_TERMS`。
 
-同時也證明：**多數內容與加密無關**（FSC 裁罰 498 筆中 438 筆為銀行／證券商一般裁罰），必須加關鍵字閘門，理由見第六節。
+### 嚴格詞集下的真實 coverage
+
+| 來源 | 總筆數 | 通過閘門 | 內容評估 |
+|---|---|---|---|
+| FSC 新聞稿 | 800 | **23** | **唯一高價值來源**，含 2026-06-30「立法院院會三讀通過『虛擬資產服務法』」、VASP 防詐辦法預告 |
+| FSC 重要公告 | 800 | 8 | 全為「修正各業別金融檢查手冊」例行公告，順帶提及虛擬資產，價值低 |
+| FSC 裁罰案件 | 498 | 1 | 目前近乎無加密內容；保留以承接未來 VASP 開罰 |
+| MOPS 上市重大訊息 | 8（當日） | 0 | — |
+| MOPS 上櫃重大訊息 | 3（當日） | 0 | — |
+| TWSE 裁罰專區 | 21 | 0 | — |
+| TPEx 裁罰專區 | 18 | 0 | — |
+
+**誠實結論**：7 個來源中只有 `fsc-news` 目前有實質加密監管內容。其餘 6 個 coverage 為 0 或近 0。這符合 #385「資料不足時誠實留白」的要求——adapter 仍應建立（契約正確、fail-closed、未來事件發生時能承接），但 **radar 台灣監管維度必須留白，references 頁不得翻 ✅**。
 
 ---
 
@@ -190,6 +208,33 @@ TWSE t187ap22_L keys:
 對策：以 `公司代號` 組 MOPS 查詢頁的穩定 reference URL，meta 標 `url_kind: "query-page"`，**不假裝是永久連結**；另標 `history_backfillable: False`，references 頁須寫明 coverage 起始日，避免 radar 誤判有長期資料。
 
 FSC 則有 `dataserno` 永久連結，`url_kind: "permalink"`。
+
+### 地雷 4：Python ≥ 3.13 的 TLS 嚴格檢查會擋掉台灣政府憑證
+
+實測（Python 3.14.6 / OpenSSL 3.6.2）：
+
+```
+www.fsc.gov.tw   → [SSL: CERTIFICATE_VERIFY_FAILED] Missing Subject Key Identifier
+www.tpex.org.tw  → 同上
+openapi.twse.com.tw → 正常
+```
+
+原因：Python 3.13 起 `ssl.create_default_context()` 預設開啟 `VERIFY_X509_STRICT`，
+強制 RFC 5280 檢查；`fsc.gov.tw` 與 `tpex.org.tw` 的憑證缺 Subject Key Identifier
+擴充欄位而被拒。`curl` 走不同的 TLS 實作故不受影響。
+
+實測各版本：
+
+| Python | `VERIFY_X509_STRICT` 預設 | 這兩個來源 |
+|---|---|---|
+| 3.11.14 | False | ✅ 正常 |
+| 3.12（`Dockerfile` 生產基底 `python:3.12-slim`） | False | ✅ 正常 |
+| 3.13.12 / 3.14.6 | **True** | ❌ 全數失敗 |
+
+**目前生產不受影響**（Dockerfile 為 `python:3.12-slim`）。但**若日後升到 3.13+，
+FSC 與 TPEx 兩來源會整批失效**。adapter 對此已 fail-closed：失敗會拋
+`TaiwanRegulatoryUnavailable` 並記 WARNING，不會偽裝成「沒有相關公告」。
+升版時須先驗這兩個來源。
 
 ---
 
