@@ -208,3 +208,42 @@ PR-1 → PR-2 → PR-3 → PR-4 →（排程觀察期）→ PR-5
 ```
 
 PR-1〜PR-4 皆不動 Trust Kernel 權重、不動 DB schema、不需 migration token。
+
+---
+
+## 七、執行紀錄（2026-07-26 完成）
+
+實際以 develop 直接提交（沿用 #385 前一個 commit `7b069cb` 的作法），
+階段 2 與 3 因共用基底類而合併為一個 commit。
+
+| 階段 | commit | 內容 |
+|---|---|---|
+| 文件 | `8e85136` | discovery + 本計劃 |
+| 1 | `217daf8` | `tw_datetime.py` + 5 份真實 fixture + 26 測試 |
+| 2+3 | `93e81a0` | 七個 adapter 全實作 + 46 測試；文件兩處訂正 |
+| 4 | `3b57e5e` | 四個接線點 + 28 接線測試 |
+| 5 | 本次 | coverage 量測腳本 + 判定文件 + `gate_match` 精準度標記 |
+
+### 與原計劃的差異
+
+1. **來源從 6 個增為 7 個**。計劃時 `TPEXSource` 無明確資料集；盤點 TPEx
+   swagger（225 endpoints）後發現 `mopsfin_t187ap22_O` 上櫃裁罰專區，與
+   TWSE `t187ap22_L` 對稱，故補上 `tpex-punish`。
+
+2. **新增 `gate_match` 精準度標記**（原計劃無）。階段 5 逐筆檢視發現
+   「通過閘門」不等於「是加密監管事件」：`fsc-news` 23 筆中僅 7 筆
+   （標題命中者）為真正的監管事件。故標記命中位置供下游區分，
+   不自行調權重。
+
+3. **關鍵字詞集是量測後定的，不是計劃時列的**。計劃初稿列了「洗錢防制」，
+   實測發現該詞在 FSC 裁罰 feed 造成 38 筆誤報（銀行 AML），
+   「加密」單獨成詞另造成 4 筆誤報（資安「資料加密」），故全數排除。
+
+4. **發現計劃未預期的地雷 4**：Python ≥3.13 預設 `VERIFY_X509_STRICT`
+   會擋掉 `fsc.gov.tw` 與 `tpex.org.tw` 憑證。生產 3.12 不受影響。
+
+### 階段 5 判定
+
+coverage 不足，**references 維持 📚 planned、Radar 台灣監管維度留白、
+七源維持預設 disabled**。完整依據與重新量測門檻見
+`docs/audit/TAIWAN-REGULATORY-COVERAGE-385.md`。

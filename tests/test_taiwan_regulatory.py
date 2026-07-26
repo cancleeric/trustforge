@@ -351,3 +351,34 @@ def test_empty_but_valid_feed_returns_empty_without_raising(monkeypatch) -> None
     assert source.fetch("crypto") == []
     assert source.last_degraded is False
     assert source.last_failures == 0
+
+
+# ── 閘門命中位置（精準度訊號）────────────────────────────────────────────
+
+def test_gate_match_labels_title_hits_separately(monkeypatch) -> None:
+    """實測 fsc-news：標題命中的 7 筆全為真正的 VASP／虛擬資產監管事件，
+    僅內文命中的 16 筆多為新聞彙編等雜訊。兩者都保留，但要能區分。"""
+    _stub_fetch(monkeypatch, (FIXTURES / "fsc_penalty.xml").read_bytes())
+    docs = FSCSource("fsc-penalty").fetch("crypto")
+    for doc in docs:
+        assert doc.meta["gate_match"] in {"title", "body"}
+        title = doc.text.splitlines()[0]
+        if doc.meta["gate_match"] == "title":
+            assert any(t in title for t in tw._CRYPTO_TERMS)
+        else:
+            assert not any(t in title for t in tw._CRYPTO_TERMS)
+
+
+def test_gate_match_returns_none_for_unrelated_content() -> None:
+    assert tw._gate_match("臺灣銀行內部控制缺失", "違反銀行法第45條") is None
+
+
+def test_gate_match_prefers_title() -> None:
+    assert tw._gate_match("虛擬資產服務法三讀", "無關內文") == "title"
+    assert tw._gate_match("金管會每日新聞", "內文提及虛擬資產") == "body"
+
+
+def test_tokenisation_term_included() -> None:
+    """『RWA代幣化小組』是真實的監管事件，初版詞集漏收。"""
+    assert "代幣化" in tw._CRYPTO_TERMS
+    assert tw._gate_match("「RWA代幣化小組」完成驗證技術的可行性", "") == "title"

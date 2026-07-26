@@ -116,6 +116,7 @@ _CRYPTO_TERMS = (
     "以太幣",
     "數位資產",
     "區塊鏈",
+    "代幣化",
 )
 
 
@@ -137,6 +138,25 @@ def _mentions_crypto(*parts: str) -> bool:
     """關鍵字閘門：任一欄位命中即通過。"""
     blob = " ".join(p for p in parts if p)
     return any(term in blob for term in _CRYPTO_TERMS)
+
+
+def _gate_match(title: str, body: str) -> str | None:
+    """判斷閘門命中的位置：`"title"`（高精準）或 `"body"`（低精準）。
+
+    實測 fsc-news：通過閘門的 23 筆中，**標題**命中的 7 筆全數為真正的
+    VASP／虛擬資產監管事件（含 #385 指名要的「金管會公告完成洗錢防制登記
+    之提供虛擬資產服務之事業或人員名單」）；其餘 16 筆只在內文順帶提及，
+    多為每日新聞彙編、普惠金融指標、記者會等，與加密監管無實質關係。
+
+    兩者都保留（避免砍掉內文才有實質討論的公告），但用 `meta["gate_match"]`
+    把精準度訊號交給下游，讓證據權重可以據此區分。本模組**不**自行調整
+    任何權重——那屬於 Trust Kernel，#385 明確不做。
+    """
+    if _mentions_crypto(title):
+        return "title"
+    if _mentions_crypto(body):
+        return "body"
+    return None
 
 
 def _strip_html(raw: str) -> str:
@@ -349,7 +369,8 @@ class TaiwanRegulatorySource(Source):
         extra_meta: dict | None = None,
     ) -> Document | None:
         """組出 Document，套用關鍵字閘門與必填欄位。"""
-        if not _mentions_crypto(title, body):
+        gate_match = _gate_match(title, body)
+        if gate_match is None:
             return None
         if visible_at is None:
             # 無法判定可見時間 ＝ 無法做 PIT ＝ 不可用（fail-closed）。
@@ -368,6 +389,9 @@ class TaiwanRegulatorySource(Source):
             "url_kind": self._url_kind,
             "history_backfillable": self._history_backfillable,
             "regulatory_scope": "industry-level",
+            # "title" ＝ 標題即為加密監管事件（實測精準度 7/7）；
+            # "body" ＝ 僅內文順帶提及（實測多為新聞彙編等雜訊）。
+            "gate_match": gate_match,
         }
         if extra_meta:
             meta.update(extra_meta)
