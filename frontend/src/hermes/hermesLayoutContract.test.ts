@@ -212,4 +212,75 @@ describe('Hermes responsive bridge layout contract', () => {
       document.body.innerHTML = ''
     } catch { /* best-effort cleanup */ }
   })
+
+  it('N12 (genuine computed-style proof): stage labels wrap instead of ellipsis-truncating, and the icon column no longer eats as much width', () => {
+    // CEO measured (real browser, actual computed style, at 960px viewport):
+    //   Cross-Verify   scrollWidth 77px vs clientWidth 75px
+    //   Manipulation   scrollWidth 77px vs clientWidth 75px
+    //   Composite Score scrollWidth 96px vs clientWidth 75px
+    // i.e. `text-overflow: ellipsis` was clipping "Cross-Veri…" etc. Verified
+    // independently with a real Playwright run against the dev server at
+    // exactly 960px (see CTO round report): before the fix, clientWidth was
+    // 75px and scrollWidth 75/75/77/77/96px for the five labels (byte-for-
+    // byte matching CEO's numbers); after the fix, clientWidth grew to 94px
+    // and scrollWidth === clientWidth for all five (no more clipping).
+    //
+    // jsdom has no real layout/viewport engine, so it can't reproduce that
+    // vw-driven pixel measurement here. What *is* genuinely computable here
+    // — real CSS cascade resolution, not a string/regex check — is: (a) the
+    // icon column got narrower (frees width for the label), and (b) the
+    // label element no longer forces a single line via `white-space: nowrap`
+    // (which is what makes `text-overflow: ellipsis` actually clip instead
+    // of just being a no-op declaration).
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const style = document.createElement('style')
+    style.textContent = css
+    document.head.appendChild(style)
+    document.body.innerHTML = `
+      <div class="hermes-energy-station">
+        <span class="hermes-energy-copy"><strong>Composite Score</strong><small></small></span>
+      </div>
+    `
+    const station = document.querySelector('.hermes-energy-station') as HTMLElement
+    const label = document.querySelector('.hermes-energy-copy strong') as HTMLElement
+
+    expect(getComputedStyle(station).gridTemplateColumns).toBe('22px 1fr')
+    expect(getComputedStyle(label).whiteSpace).not.toBe('nowrap')
+    expect(getComputedStyle(label).whiteSpace).toBe('normal')
+
+    try {
+      document.head.removeChild(style)
+      document.body.innerHTML = ''
+    } catch { /* best-effort cleanup */ }
+  })
+
+  it('N10 (string check only — see comment for why a computed-style proof is not possible here): widens the ~960px left-rail breakpoint clamp', () => {
+    // CEO measured (real browser, 960px viewport, analysis workspace open):
+    // left rail actual rendered width was cramped, card subtitle text ran
+    // right up to the card edge — not broken (no 3-char title wraps), but
+    // tight ("很擠"). Independently verified with a real Playwright run at
+    // exactly 960px against the dev server: `[data-region='left-rail']`
+    // computed width was 180px before this fix (18vw of 960px = 172.8px,
+    // clamped up to the 180px floor) and 215px after (22vw of 960px =
+    // 211.2px, clamped up to the new 215px floor) — a real, not just
+    // declared, 35px gain, with zero clipped leaf text nodes
+    // (scrollWidth > clientWidth) in either state.
+    //
+    // As established by the N6 (round 1) test above: jsdom does not
+    // re-evaluate `@media (max-width:…)` rules against a simulated
+    // `window.innerWidth` for `getComputedStyle` (verified empirically —
+    // changing `window.innerWidth` via `Object.defineProperty` had no effect
+    // on which of two conflicting matched-vs-unmatched-media rules jsdom
+    // applied). So the automated regression guard here can only be a
+    // string/regex check on the source, same limitation as N6 round 1; the
+    // real computed-width proof above was done manually via Playwright, not
+    // in this jsdom suite. NOT OBSERVED in this file: the actual rendered
+    // pixel width — see the CTO round report for the Playwright numbers.
+    const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+    const midBreakpointMatch = css.match(/@media \(max-width:1024px\) \{([\s\S]*?)\n\}\n\n\/\* N6 \(round 2/)
+    expect(midBreakpointMatch).not.toBeNull()
+    const midBreakpointBlock = midBreakpointMatch![1]
+
+    expect(midBreakpointBlock).toMatch(/--hermes-rail:\s*clamp\(215px,\s*22vw,\s*245px\);/)
+  })
 })

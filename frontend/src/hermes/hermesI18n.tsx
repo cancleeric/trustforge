@@ -1,5 +1,5 @@
 // oxlint-disable react/only-export-components
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 export type HermesLocale = 'zh-TW' | 'en'
 
@@ -199,8 +199,18 @@ function initialLocale(): HermesLocale {
   return navigator.language.toLowerCase().startsWith('zh') ? 'zh-TW' : 'zh-TW'
 }
 
+/** BCP 47 lang attribute per locale：螢幕閱讀器靠 <html lang> 決定發音語音。 */
+export function htmlLangFor(locale: HermesLocale): string {
+  return locale === 'en' ? 'en' : 'zh-Hant'
+}
+
 export function HermesI18nProvider({ children }: { children: ReactNode }) {
   const [locale, updateLocale] = useState<HermesLocale>(initialLocale)
+  // N15：切語系後介面文字已換，但 <html lang> 仍停在 zh-Hant，
+  // 螢幕閱讀器會用中文語音念英文內容 → 同步 documentElement.lang。
+  useEffect(() => {
+    document.documentElement.lang = htmlLangFor(locale)
+  }, [locale])
   const value = useMemo<I18nValue>(() => ({
     locale,
     setLocale: (next) => {

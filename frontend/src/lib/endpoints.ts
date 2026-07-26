@@ -74,14 +74,31 @@ export function getAnalysisSnapshot(coin: string, mode: string, signal?: AbortSi
 }
 
 export interface AnalysisQuestionReceipt { question_id: string; job_id: string | null; state: string; origin: 'manual' }
-export function registerAnalysisQuestion(coin: string, mode: string, question: string, signal?: AbortSignal): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
+
+/** Narrative locale contract of `POST /api/analysis-question` (N11). */
+export type NarrativeLocale = 'zh-Hant' | 'en'
+
+// The UI locale (`hermesI18n.tsx`) is `zh-TW` | `en`; the API contract is
+// `zh-Hant` | `en`.  `HermesI18nProvider.setLocale` persists the current UI
+// language into this cookie, so reading it here keeps `registerAnalysisQuestion`
+// a plain function (no React hook) while still following the live selection.
+export function currentNarrativeLocale(): NarrativeLocale {
+  const saved = typeof document === 'undefined'
+    ? undefined
+    : document.cookie.split('; ').find((item) => item.startsWith('trustforge_hermes_locale='))?.split('=')[1]
+  return saved === 'en' ? 'en' : 'zh-Hant'
+}
+
+export function registerAnalysisQuestion(coin: string, mode: string, question: string, signal?: AbortSignal, locale?: NarrativeLocale): Promise<ApiEnvelope<AnalysisQuestionReceipt>> {
   const valid = (value: unknown): value is AnalysisQuestionReceipt => !!value && typeof value === 'object' &&
     typeof (value as AnalysisQuestionReceipt).question_id === 'string' &&
     ((value as AnalysisQuestionReceipt).job_id === null || typeof (value as AnalysisQuestionReceipt).job_id === 'string') &&
     typeof (value as AnalysisQuestionReceipt).state === 'string' &&
     (value as AnalysisQuestionReceipt).origin === 'manual'
   return apiFetch('/api/analysis-question', undefined, valid, {
-    signal, method: 'POST', jsonBody: { coin, mode, question }, timeoutMs: REGISTER_TIMEOUT_MS,
+    signal, method: 'POST',
+    jsonBody: { coin, mode, question, locale: locale ?? currentNarrativeLocale() },
+    timeoutMs: REGISTER_TIMEOUT_MS,
   })
 }
 

@@ -41,6 +41,12 @@ export default function HermesDashboard() {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [selectedStage, setSelectedStage] = useState<string | null>(null)
   const [phase, setPhase] = useState<'ready' | 'loading'>('ready')
+  // N13 fix: bumped on every explicit left-rail submit click, independent of
+  // whether the coin/type/q/mode URL params actually changed. Forwarded to
+  // AnalyzePage (via HermesModuleDeck) so it can tell "user explicitly
+  // clicked 立即重新分析 with the same question" apart from a plain reload —
+  // see AnalyzePage's `resubmitSignal` effect for the full rationale.
+  const [resubmitSignal, setResubmitSignal] = useState(0)
   const [lastOrder, setLastOrder] = useState(false)
   const [startupStep, setStartupStep] = useState(0)
   const [moduleTelemetry, setModuleTelemetry] = useState<BridgeHologramData | null>(null)
@@ -436,6 +442,7 @@ export default function HermesDashboard() {
     search.set('mode', ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))])
     search.set('workspace', 'analyze')
     setSearchParams(search)
+    setResubmitSignal((value) => value + 1)
   }, [qtype, qtypes, query, selectedId, setSearchParams, t])
 
   useEffect(() => {
@@ -612,7 +619,7 @@ export default function HermesDashboard() {
           </>
         )}
 
-        {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} onBusyChange={handleModuleBusyChange} />}
+        {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} onBusyChange={handleModuleBusyChange} resubmitSignal={resubmitSignal} />}
 
         {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />}
 

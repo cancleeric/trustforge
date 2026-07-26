@@ -18,7 +18,7 @@ const MODULES = {
 }
 
 export default function HermesModuleDeck({
-  module, onClose, onTelemetry, onBusyChange,
+  module, onClose, onTelemetry, onBusyChange, resubmitSignal,
 }: {
   module: HermesWorkspaceModule
   onClose: () => void
@@ -27,6 +27,11 @@ export default function HermesModuleDeck({
    * loading state so the host can reflect it even on error outcomes,
    * where `onTelemetry` never fires (see AnalyzePage's N2 fix). */
   onBusyChange?: (busy: boolean) => void
+  /** Only meaningful for the `analyze` module — a counter the host bumps on
+   * every explicit "立即重新分析" click so AnalyzePage can force a real
+   * resubmit even when the question text (and therefore the URL) didn't
+   * change (see AnalyzePage's N13 fix). */
+  resubmitSignal?: number
 }) {
   const { t } = useHermesI18n()
   const [data, setData] = useState<BridgeHologramData | null>(null)
@@ -54,7 +59,7 @@ export default function HermesModuleDeck({
           <span className="module-holo-caption">{data?.primaryLabel || module.toUpperCase()} · {data?.total ?? 0} SIGNALS</span>
         </div>
         <div className="hermes-module-deck-scroll">
-          {module === 'analyze' ? <AnalyzePage embedded onBusyChange={onBusyChange} /> : <Module />}
+          {module === 'analyze' ? <AnalyzePage embedded onBusyChange={onBusyChange} resubmitSignal={resubmitSignal} /> : <Module />}
         </div>
       </section>
     </BridgeHologramProvider>

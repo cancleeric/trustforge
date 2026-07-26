@@ -80,7 +80,7 @@ function useEmbeddedMobileComposer(embedded: boolean): boolean {
   return mobile
 }
 
-export default function AnalyzePage({ embedded = false, onBusyChange }: { embedded?: boolean; onBusyChange?: (busy: boolean) => void } = {}) {
+export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSignal }: { embedded?: boolean; onBusyChange?: (busy: boolean) => void; resubmitSignal?: number } = {}) {
   const { t } = useHermesI18n()
   const { setData: setHologramData } = useBridgeHologram()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -91,6 +91,26 @@ export default function AnalyzePage({ embedded = false, onBusyChange }: { embedd
   const [loading, setLoading] = useState(false)
   const [manualJob, setManualJob] = useState<AnalysisJobStatus | null>(null)
   const [requestNonce, setRequestNonce] = useState(0)
+  // N13 fix: the embedded host (HermesDashboard's own left-rail "立即重新
+  // 分析" button) doesn't go through `handleSubmit` below — it drives the
+  // shared URL search params directly (see HermesModuleDeck/HermesDashboard).
+  // When the question text is unchanged, that produces a byte-identical
+  // query string, so React Router never re-renders with new param values
+  // and the polling effect's dependency array never changes — no new POST
+  // ever fires, and the screen just keeps showing the previous run's stale
+  // report with no indication it's stale. `resubmitSignal` is a plain
+  // counter the host bumps on every explicit click (independent of URL
+  // content) so we can force a real resubmit here. It intentionally does
+  // NOT persist across a real page reload (host state resets to its
+  // initial value on remount, same as `requestNonce`), so N9's
+  // reload-reconnects-to-the-same-job behavior is untouched.
+  const prevResubmitSignal = useRef(resubmitSignal)
+  useEffect(() => {
+    if (resubmitSignal !== undefined && resubmitSignal !== prevResubmitSignal.current) {
+      prevResubmitSignal.current = resubmitSignal
+      setRequestNonce((value) => value + 1)
+    }
+  }, [resubmitSignal])
   const processedRequestKeys = useRef(new Set<string>())
   const [focusCoin, setFocusCoin] = useState(params.coin)
   const [focusIntent, setFocusIntent] = useState<BeginnerIntent>('trust')

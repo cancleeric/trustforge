@@ -55,12 +55,19 @@ export default function HermesBeginnerNarrative() {
       aria-label={t('beginnerNarrativeTitle')}
       className="hermes-beginner-narrative"
       style={{
+        // N14：原本 left:50% + translateX(-50%) + width:min(960px,100vw-96px)，
+        // 在窄視窗（例 809×650）會橫向蓋住左欄的送出按鈕，使用者點不到（hit-test
+        // 落在浮層上）。改成夾在左右欄之間的「中央走道」，永遠不與左欄重疊；
+        // 高度也上限化避免往上吃掉整個中央區。
         position: 'absolute',
-        left: '50%',
+        left: 'calc(var(--hermes-rail, 0px) + 12px)',
+        right: 'calc(var(--hermes-right-rail, var(--hermes-rail, 0px)) + 12px)',
         bottom: 18,
-        transform: 'translateX(-50%)',
         zIndex: 12,
-        width: 'min(960px, calc(100vw - 96px))',
+        maxWidth: 960,
+        marginInline: 'auto',
+        maxHeight: 'calc(100% - var(--hermes-top, 44px) - 96px)',
+        overflowY: 'auto',
         background: 'rgba(6,12,22,0.92)',
         border: '1px solid rgba(77,216,224,.28)',
         borderRadius: 12,

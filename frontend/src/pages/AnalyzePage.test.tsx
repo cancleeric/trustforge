@@ -485,4 +485,86 @@ describe('AnalyzePage manual execution', () => {
     expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
     expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal))
   })
+
+  it('N13: bumping resubmitSignal with an unchanged same-question URL fires a new POST', async () => {
+    // N13 regression guard: HermesDashboard's own left-rail "立即重新分析"
+    // button drives the shared URL search params directly instead of going
+    // through AnalyzePage's `handleSubmit`. When the question text is
+    // unchanged, that produces a byte-identical query string, so React
+    // Router never re-renders with new param *values* and the polling
+    // effect's dependency array never changes — no new POST would fire and
+    // the screen would silently keep showing the previous run's stale
+    // report. `resubmitSignal` must force a real resubmit even though the
+    // URL content is identical.
+    const path = '/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況'
+    const view = render(
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={[path]}>
+          <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+            <AnalyzePage embedded resubmitSignal={0} />
+          </BridgeHologramProvider>
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal)))
+
+    // Re-render with the exact same URL/question, only bumping the signal —
+    // this is what the host does on every explicit button click.
+    view.rerender(
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={[path]}>
+          <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+            <AnalyzePage embedded resubmitSignal={1} />
+          </BridgeHologramProvider>
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+
+    await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(2))
+  })
+
+  it('N13: a reload (fresh mount, resubmitSignal reset to its initial value) still reconnects instead of resubmitting', async () => {
+    // Companion negative-path guard for N13: the fix must not turn every
+    // mount into a forced resubmit. A real page reload remounts the whole
+    // React tree, so the host's counter (and the `resubmitSignal` prop it
+    // passes in) restarts fresh — it must NOT be treated as "the value
+    // changed", or N9's reload-reconnects-without-resubmitting guarantee
+    // would break for the embedded host too.
+    const path = '/analyze?coin=BTC&type=multi_source&mode=risk&q=分析BTC近期市場狀況'
+    const first = render(
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={[path]}>
+          <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+            <AnalyzePage embedded resubmitSignal={0} />
+          </BridgeHologramProvider>
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    await waitFor(() => expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(getAnalysisJob).toHaveBeenCalledWith('flow-1', expect.any(AbortSignal)))
+    first.unmount()
+
+    vi.mocked(getAnalysisJob).mockResolvedValue({
+      ok: true,
+      data: {
+        job_id: 'flow-1', state: 'completed', current_stage: 'report_delivery',
+        coin: 'BTC', mode: 'risk', question: '分析BTC近期市場狀況', error: null,
+        origin: 'manual', priority: 0, queue_position: null,
+        result: analysisResult('BTC', 'flow-1'),
+      },
+    })
+
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={[path]}>
+          <BridgeHologramProvider value={{ data: null, setData: vi.fn() }}>
+            <AnalyzePage embedded resubmitSignal={0} />
+          </BridgeHologramProvider>
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    await waitFor(() => expect(screen.getByLabelText('analysis report')).toHaveTextContent('BTC'))
+    expect(registerAnalysisQuestion).toHaveBeenCalledTimes(1)
+  })
 })

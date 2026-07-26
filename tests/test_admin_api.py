@@ -1057,7 +1057,7 @@ def test_manual_analysis_question_is_allowed_when_hermes_autonomy_disabled(monke
     class Flow:
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def submit_manual(self, *_args): return "question-1", "flow-1"
+        def submit_manual(self, *_args, **_kwargs): return "question-1", "flow-1"
     monkeypatch.setattr(analysis_flow, "AnalysisFlow", Flow)
     code, body, _ = _request(
         "POST",

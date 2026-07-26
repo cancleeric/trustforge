@@ -922,10 +922,15 @@
   height: 82px;
   min-width: 0;
   display: grid;
-  grid-template-columns: 31px 1fr;
+  /* N12 fix: was `31px 1fr` with 9px inline padding — real measured labels
+     ("Cross-Verify" 77px, "Manipulation" 77px, "Composite Score" 96px) were
+     wider than the ~75px the copy column resolved to, so `text-overflow:
+     ellipsis` below clipped them ("Cross-Veri…"). Narrowing the icon column
+     and the inline padding gives the label column back ~18px. */
+  grid-template-columns: 22px 1fr;
   grid-template-rows: 1fr 1fr;
   align-items: center;
-  padding: 6px 9px;
+  padding: 6px 4px;
   border: 0;
   color: var(--color-hermes-tx2);
   background: transparent;
@@ -995,13 +1000,23 @@
 }
 
 .hermes-energy-copy strong {
-  display: block;
+  /* N12 fix: the narrower column above still isn't guaranteed to fit every
+     stage label at every zoom/locale, so on top of the extra width we also
+     let the label wrap onto a second line (up to 2 lines) instead of
+     truncating with an ellipsis. `-webkit-line-clamp` is safe to rely on
+     here — it's supported by every engine this app targets (Chromium,
+     Safari, Firefox 68+). */
+  display: -webkit-box;
   overflow: hidden;
   color: var(--color-hermes-tx);
   font-size: 10px;
   letter-spacing: .4px;
+  line-height: 1.2;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .hermes-energy-copy small {
@@ -2192,7 +2207,15 @@
 
 @media (max-width:1024px) {
   .hermes-frame {
-    --hermes-rail: clamp(180px, 18vw, 210px);
+    /* N10 fix: was `clamp(180px, 18vw, 210px)` — at 960px that resolves to
+       its 180px floor (18vw = 172.8px < 180px), leaving the left rail cards
+       (query composer, agent-output panel, etc.) cramped enough that card
+       subtitle text runs right up against the card edge. Titles didn't
+       break below 3 characters so it wasn't broken, just tight. Widened the
+       floor/preferred/ceiling so the same breakpoint gets noticeably more
+       breathing room without eating into the main viewport meaningfully at
+       the top of this range (1024px). */
+    --hermes-rail: clamp(215px, 22vw, 245px);
     --hermes-right-rail: clamp(170px, 17vw, 200px);
   }
 
