@@ -5,6 +5,7 @@ import type { AssetContext } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import SectorLayerCard from '../components/SectorLayerCard'
 import { ErrorState, LoadingState } from '../components/StatusStates'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 /** 「新手脈絡查詢」獨立小工具（模組①）：查詢單一資產的 sector/layer
  * 脈絡卡，解耦於 `/analyze` 的完整信任分析流程——不算費用、不觸發任何
@@ -16,6 +17,7 @@ import { ErrorState, LoadingState } from '../components/StatusStates'
 const SUGGESTIONS = ['ARB', ...COIN_POOL]
 
 export default function AssetContextLookupPage() {
+  const { t } = useHermesI18n()
   const [searchParams, setSearchParams] = useSearchParams()
   const initialSymbol = searchParams.get('symbol') || 'ARB'
   const [input, setInput] = useState(initialSymbol)
@@ -40,14 +42,14 @@ export default function AssetContextLookupPage() {
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setError({ code: 'network_error', message: '連線異常，請稍後再試' })
+          setError({ code: 'network_error', message: t('networkErrorRetry') })
         }
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [symbol])
+  }, [symbol, t])
 
   function submitSymbol(next: string) {
     const normalized = next.trim().toUpperCase()
@@ -65,10 +67,10 @@ export default function AssetContextLookupPage() {
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6 sm:px-6">
       <header className="border-b border-tf-border pb-4">
-        <p className="font-mono text-xs font-semibold text-tf-link">HERMES · 資產脈絡查詢</p>
-        <h1 className="mt-1 text-xl font-bold text-tf-text">30 秒看懂一個代幣的定位</h1>
+        <p className="font-mono text-xs font-semibold text-tf-link">{t('aclEyebrow')}</p>
+        <h1 className="mt-1 text-xl font-bold text-tf-text">{t('aclTitle')}</h1>
         <p className="mt-2 text-sm text-tf-muted">
-          查詢資產的分類脈絡（Layer / 結算鏈 / Gas 代幣 / 上下游依賴），不觸發完整信任分析。
+          {t('aclDesc')}
         </p>
       </header>
 
@@ -80,25 +82,25 @@ export default function AssetContextLookupPage() {
         }}
       >
         <label htmlFor="asset-context-symbol" className="sr-only">
-          資產代號
+          {t('assetSymbolLabel')}
         </label>
         <input
           id="asset-context-symbol"
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="輸入資產代號，例如 ARB"
+          placeholder={t('assetSymbolPlaceholder')}
           className="min-w-0 flex-1 rounded border border-tf-border bg-tf-bg px-3 py-2 font-mono text-sm text-tf-text outline-none focus:border-tf-link"
         />
         <button
           type="submit"
           className="rounded border border-tf-accent bg-tf-accent px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110"
         >
-          查詢
+          {t('searchButton')}
         </button>
       </form>
 
-      <div className="flex flex-wrap gap-1.5" role="group" aria-label="快速查詢建議">
+      <div className="flex flex-wrap gap-1.5" role="group" aria-label={t('quickSuggestionsAria')}>
         {SUGGESTIONS.map((sym) => {
           const isArb = sym === 'ARB'
           return (
@@ -113,18 +115,18 @@ export default function AssetContextLookupPage() {
               }`}
             >
               {sym}
-              {!isArb && <span className="text-[0.65rem] text-tf-muted">L1/資料有限</span>}
+              {!isArb && <span className="text-[0.65rem] text-tf-muted">{t('l1LimitedData')}</span>}
             </button>
           )
         })}
       </div>
 
-      {loading && <LoadingState label="查詢中…" />}
+      {loading && <LoadingState label={t('searching')} />}
       {!loading && error && <ErrorState code={error.code} message={error.message} />}
       {!loading && !error && context && <SectorLayerCard context={context} />}
       {!loading && !error && !context && (
         <div className="rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">
-          目前無此資產的脈絡資料。
+          {t('aclEmptyState')}
         </div>
       )}
     </div>

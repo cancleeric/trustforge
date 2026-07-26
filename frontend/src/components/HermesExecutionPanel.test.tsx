@@ -4,6 +4,7 @@ import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import HermesExecutionPanel from './HermesExecutionPanel'
 import { executionLogDownload } from '../lib/executionLogDownload'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 import type { Evidence, ExecutionEvent, ExecutionManifest, Report } from '../lib/types'
 
 const execution: ExecutionManifest = {
@@ -36,7 +37,11 @@ const report = {
 
 describe('HermesExecutionPanel', () => {
   it('renders the stable agent graph and auditable run id', () => {
-    render(<HermesExecutionPanel execution={execution} events={[event, sourceEvent]} report={report} evidence={[] as Evidence[]} />)
+    render(
+      <HermesI18nProvider>
+        <HermesExecutionPanel execution={execution} events={[event, sourceEvent]} report={report} evidence={[] as Evidence[]} />
+      </HermesI18nProvider>
+    )
     expect(screen.getByText('Hermes Agent')).toBeInTheDocument()
     expect(screen.getByText(/hermes-test-run/)).toBeInTheDocument()
     expect(screen.getAllByText('來源蒐集').length).toBeGreaterThan(0)

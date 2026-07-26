@@ -77,6 +77,29 @@ export default function CurrencyGalaxy({
   const coreIsSel = selectedId === 'btc'
   const coreSize = 122
 
+  // N23: these orbit planets used to be `<button>` elements duplicating the
+  // "Focus <coin>" action already exposed reliably by the quick-selector
+  // chip strip above (line ~161) and are the real, always-24px+, always-
+  // hit-testable entry point. The orbit copies sit inside two nested
+  // `preserve-3d`/`rotateX(...)` containers that keep spinning
+  // (`hermes-orbit-spin(-rev)` 40s loop) and, depending on where in that
+  // loop + which ring (A vs B, rendered in DOM/paint order B-then-A) a
+  // planet currently is, its on-screen box can end up thinner than its
+  // element box (down to ~9–16px) and/or visually behind a sibling
+  // planet's button that paints on top of it — confirmed via real
+  // Playwright hit-testing across 12 viewports (375–1920px): "Focus
+  // Ethereum"/"Focus Solana" unreachable at all 12, "Focus BNB"/"Focus XRP"
+  // under the 24×24 minimum target size at all 12, geometry constant
+  // regardless of viewport (i.e. not a responsive-breakpoint bug — it's
+  // inherent to rendering a reliable click target on top of a live 3D
+  // orbit). Making them real, always-reachable ≥24×24 buttons would mean
+  // freezing the orbit or padding invisible hit-areas that then overlap
+  // neighboring planets even worse. Since the same action is already fully
+  // accessible via the chip strip, these are demoted to decorative,
+  // non-focusable elements (no button semantics, `aria-hidden`) — mouse
+  // hover still drives the readout highlight as a bonus, but nothing here
+  // is a real interactive control a keyboard user could tab to and find
+  // dead.
   const ring = (orbit: Exclude<OrbitId, 'core'>, rot: string, spin: string, ids: [string, string]) => (
     <div
       className="hermes-galaxy"
@@ -90,26 +113,20 @@ export default function CurrencyGalaxy({
       }}
     >
       <div style={{ position: 'absolute', inset: 0, transformStyle: 'preserve-3d', animation: `${spin} 40s linear infinite` }}>
-        <button
-          type="button"
-          aria-label={`${t('focus')} ${c(ids[0]).full}`}
-          aria-pressed={ids[0] === selectedId}
-          onClick={() => onSelect(ids[0])}
+        <div
+          aria-hidden="true"
           onMouseEnter={() => onHover(ids[0])}
           onMouseLeave={() => onHover(null)}
-          style={planetStyle(ids[0])}
+          style={{ ...planetStyle(ids[0]), cursor: 'default' }}
         >
           {planetSurface(ids[0])}
-        </button>
-        <button
-          type="button"
-          aria-label={`${t('focus')} ${c(ids[1]).full}`}
-          aria-pressed={ids[1] === selectedId}
-          onClick={() => onSelect(ids[1])}
+        </div>
+        <div
+          aria-hidden="true"
           onMouseEnter={() => onHover(ids[1])}
           onMouseLeave={() => onHover(null)}
-          style={planetStyle(ids[1])}
-        >{planetSurface(ids[1])}</button>
+          style={{ ...planetStyle(ids[1]), cursor: 'default' }}
+        >{planetSurface(ids[1])}</div>
       </div>
     </div>
   )
@@ -140,15 +157,25 @@ export default function CurrencyGalaxy({
       <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 160, background: 'linear-gradient(rgba(5,10,18,0),rgba(5,10,18,.9))', pointerEvents: 'none' }} />
 
       <div style={{ position: 'absolute', left: 26, top: 14, display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <span style={{ fontSize: 10, letterSpacing: '1.8px', color: 'rgba(220,240,245,.4)' }}>BRIDGE MAIN VIEWPORT</span>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(230,244,248,.9)' }}>Global Currency Galaxy</span>
+        <span style={{ fontSize: 10, letterSpacing: '1.8px', color: 'rgba(220,240,245,.4)' }}>{t('bridgeMainViewport')}</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(230,244,248,.9)' }}>{t('globalCurrencyGalaxy')}</span>
       </div>
 
       {/* top 需清 HermesHeroTagline（topbar 下方 z:9 的第二層 strip，
           高度隨文字換行變動）——面板 top:18 之前會被 tagline 蓋住頂部
-          幾行字（D3）。46px 是目前單行 tagline 高度（~35.5px）+ 安全邊距。 */}
+          幾行字（D3）。46px 是原本單行 tagline 高度（~35.5px）+ 安全邊距。
+          N21 稽核加碼：46px 只清得掉 tagline，清不掉本檔案下面 68px 起的
+          quick currency selector chip strip（左側 26px 起、寬約 220px 的
+          一排 "Focus <coin>" 按鈕）。在窄容器（例如 561px 視窗、右軌隱藏但
+          左軌仍在時，圖庫容器實際可用寬度會縮到 ~370px 左右）兩者的 X 範圍
+          會重疊，導致 chip 被 telemetry 面板蓋住（真實 elementFromPoint 驗證：
+          "Focus XRP" 命中 telemetry 內的 SPAN，不是 chip 本身）。與其用容器
+          寬度算避讓（會隨語系/字重/視埠再變），改成單純把面板往下推過 chip
+          strip 的實際渲染底部（含其父層的額外 offset，經 Playwright 實測
+          chip 底部落在 top:~93 這個座標系裡），兩者 Y 範圍永遠不重疊，不論
+          容器多窄都不會再互蓋。 */}
       {readoutC && (
-        <div className="hermes-live-telemetry hermes-clip-sm" style={{ position: 'absolute', right: 22, top: 46, zIndex: 5, width: 174, padding: '10px 12px', background: 'rgba(5,12,20,.76)', border: `1px solid ${TIER_COLOR[readoutC.tier]}`, backdropFilter: 'blur(8px)', boxShadow: `inset 0 0 18px ${TIER_COLOR[readoutC.tier]}18` }}>
+        <div className="hermes-live-telemetry hermes-clip-sm" style={{ position: 'absolute', right: 22, top: 101, zIndex: 5, width: 174, padding: '10px 12px', background: 'rgba(5,12,20,.76)', border: `1px solid ${TIER_COLOR[readoutC.tier]}`, backdropFilter: 'blur(8px)', boxShadow: `inset 0 0 18px ${TIER_COLOR[readoutC.tier]}18` }}>
           <div style={{ fontSize: 8.5, letterSpacing: '1.2px', color: TIER_COLOR[readoutC.tier], marginBottom: 7 }}>{t('liveTelemetry')} · {readoutC.name}</div>
           <div className="hermes-telemetry-row"><span>{t('trustScore')}</span><b>{readoutC.score}/100</b></div>
           <div className="hermes-telemetry-row"><span>{t('sourceCount')}</span><b>{Math.round(60 + readoutC.econ * .9)}</b></div>

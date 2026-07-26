@@ -2,6 +2,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import SnapshotModal from './SnapshotModal'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 import type { Evidence } from '../lib/types'
 
 const evidence: Evidence = {
@@ -47,7 +48,7 @@ describe('SnapshotModal data lineage', () => {
   }
 
   it('renders lineage details and exports the same lineage in downloaded JSON', () => {
-    render(<SnapshotModal ev={evidence} onClose={vi.fn()} />)
+    render(<HermesI18nProvider><SnapshotModal ev={evidence} onClose={vi.fn()} /></HermesI18nProvider>)
 
     expect(screen.getByText('BTC_daily_ohlcv.csv')).toBeInTheDocument()
     expect(screen.getByText('2021-06-01 ~ 2026-05-31')).toBeInTheDocument()
@@ -62,7 +63,7 @@ describe('SnapshotModal data lineage', () => {
   })
 
   it('exports null lineage for non-file evidence instead of omitting the field', () => {
-    render(<SnapshotModal ev={{ ...evidence, data_lineage: null, kind: 'news' }} onClose={vi.fn()} />)
+    render(<HermesI18nProvider><SnapshotModal ev={{ ...evidence, data_lineage: null, kind: "news" }} onClose={vi.fn()} /></HermesI18nProvider>)
 
     const payload = downloadedPayload()
 
@@ -71,7 +72,7 @@ describe('SnapshotModal data lineage', () => {
   })
 
   it('surfaces dataset_generated_at and price_unit in lineage UI and export JSON', () => {
-    render(<SnapshotModal ev={evidence} onClose={vi.fn()} />)
+    render(<HermesI18nProvider><SnapshotModal ev={evidence} onClose={vi.fn()} /></HermesI18nProvider>)
 
     expect(screen.getByText(evidence.data_lineage?.dataset_generated_at ?? '')).toBeInTheDocument()
     expect(screen.getByText(evidence.data_lineage?.price_unit ?? '')).toBeInTheDocument()

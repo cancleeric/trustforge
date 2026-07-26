@@ -287,7 +287,7 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
             return
           }
           setLoading(false)
-          setError(res.ok ? { code: 'analysis_queue_unavailable', message: '分析工作尚未建立' } : res.error)
+          setError(res.ok ? { code: 'analysis_queue_unavailable', message: t('analysisQueueUnavailable') } : res.error)
           return
         }
         // N9/point4 fix: 把拿到的 job_id 存進 sessionStorage，reload 頁面時
@@ -302,6 +302,10 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
       timers.forEach(window.clearTimeout)
       if (!requestSettled) processedKeys.delete(requestKey)
     }
+    // `t` intentionally excluded: this effect fires the manual-analysis request, and
+    // re-running it on a locale switch would resubmit an in-flight request. `t()`
+    // above is only used to build a one-off error message, never part of the request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasExplicitRequest, mode, params.coin, params.q, params.sample, params.type, requestNonce, urlJobId])
 
   useEffect(() => {

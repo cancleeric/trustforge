@@ -4,6 +4,7 @@ import { getPeerMetrics } from '../lib/endpoints'
 import type { PeerComparisonEntry, PeerMetricsSnapshot } from '../lib/types'
 import PeerComparisonTable from '../components/PeerComparisonTable'
 import { ErrorState, LoadingState } from '../components/StatusStates'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 /** 「Peer 同層比較」獨立查詢頁（模組③ Wave 3）：查詢單一資產的同層
  * peer 比較 snapshot，解耦於 `/compare` 的雙幣分析比較流程——唯讀、
@@ -15,6 +16,7 @@ import { ErrorState, LoadingState } from '../components/StatusStates'
 const SUGGESTIONS = ['asset:arb', 'asset:op', 'asset:matic', 'asset:eth', 'asset:sol', 'asset:bnb']
 
 export default function PeerMetricsPage() {
+  const { t } = useHermesI18n()
   const [searchParams, setSearchParams] = useSearchParams()
   const initialAsset = searchParams.get('asset') || 'asset:arb'
   const [input, setInput] = useState(initialAsset)
@@ -41,14 +43,14 @@ export default function PeerMetricsPage() {
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setError({ code: 'network_error', message: '連線異常，請稍後再試' })
+          setError({ code: 'network_error', message: t('networkErrorRetry') })
         }
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [asset])
+  }, [asset, t])
 
   function submitAsset(next: string) {
     const normalized = next.trim()
@@ -68,9 +70,9 @@ export default function PeerMetricsPage() {
     <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6 sm:px-6">
       <header className="border-b border-tf-border pb-4">
         <p className="font-mono text-xs font-semibold text-tf-link">HERMES</p>
-        <h1 className="mt-1 text-xl font-bold text-tf-text">Peer 同層比較</h1>
+        <h1 className="mt-1 text-xl font-bold text-tf-text">{t('pmTitle')}</h1>
         <p className="mt-2 text-sm text-tf-muted">
-          查詢單一資產與同層 peer 的 TPS/TVL/Gas/活躍度比較——不可比較的 peer 明確標「無法比較：原因」，不留白補 0。
+          {t('pmDesc')}
         </p>
       </header>
 
@@ -82,25 +84,25 @@ export default function PeerMetricsPage() {
         }}
       >
         <label htmlFor="peer-metrics-asset" className="sr-only">
-          資產識別碼
+          {t('assetIdLabel')}
         </label>
         <input
           id="peer-metrics-asset"
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="輸入資產識別碼，例如 asset:arb"
+          placeholder={t('assetIdPlaceholder')}
           className="min-w-0 flex-1 rounded border border-tf-border bg-tf-bg px-3 py-2 font-mono text-sm text-tf-text outline-none focus:border-tf-link"
         />
         <button
           type="submit"
           className="rounded border border-tf-accent bg-tf-accent px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110"
         >
-          查詢
+          {t('searchButton')}
         </button>
       </form>
 
-      <div className="flex flex-wrap gap-1.5" role="group" aria-label="快速查詢建議">
+      <div className="flex flex-wrap gap-1.5" role="group" aria-label={t('quickSuggestionsAria')}>
         {SUGGESTIONS.map((sug) => (
           <button
             key={sug}
@@ -117,12 +119,12 @@ export default function PeerMetricsPage() {
         ))}
       </div>
 
-      {loading && <LoadingState label={`讀取 ${asset} 同層比較資料中…`} />}
+      {loading && <LoadingState label={t('pmLoadingTemplate', { asset })} />}
       {!loading && error && <ErrorState code={error.code} message={error.message} />}
       {!loading && !error && snapshot && <PeerComparisonTable snapshot={snapshot} peers={peers} />}
       {!loading && !error && !snapshot && (
         <div className="rounded-lg border border-tf-border bg-tf-card p-6 text-center text-sm text-tf-muted">
-          目前無 {asset} 的同層比較資料。
+          {t('pmEmptyStateTemplate', { asset })}
         </div>
       )}
     </div>

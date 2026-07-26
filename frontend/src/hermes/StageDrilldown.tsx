@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { COMPONENT_WEIGHTS, HERMES_CYAN, HERMES_AMBER, HERMES_RED, STAGE_DEFS, type GalaxyCoin, type SelectedDerivation } from '../lib/hermesData'
-import { useHermesI18n } from './hermesI18n'
+import { modeLabel, useHermesI18n } from './hermesI18n'
 import { requeueAnalysis, type AnalysisFlowData, type AnalysisJourneyData } from '../lib/endpoints'
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import EvidenceTable from '../components/EvidenceTable'
@@ -116,7 +116,7 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
             <div>狀態：{liveStage?.current ? t('processing') : completedStage?.status === 'completed' ? '本次執行已完成' : completedStage?.status === 'failed' ? '本次執行失敗' : t('standby')}　{t('queued')}：{liveStage?.queued ?? 0}</div>
             {liveStage?.next_retry_at && <div style={{ color: HERMES_AMBER }}>下次重試：{new Date(liveStage.next_retry_at * 1000).toLocaleTimeString()}</div>}
             {liveStage?.current ? <>
-              <div>幣別：{liveStage.current.coin}　模式：{liveStage.current.mode}</div>
+              <div>幣別：{liveStage.current.coin}　模式：{modeLabel(liveStage.current.mode, t)}</div>
               <div>題目：{liveStage.current.question}</div>
               <div>Snapshot：{liveStage.current.snapshot_id}</div>
               <div>開始：{new Date(liveStage.current.started_at * 1000).toLocaleTimeString()}　重試：{liveStage.current.retry_count}</div>

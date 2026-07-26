@@ -24,6 +24,19 @@ export default function HermesBeginnerNarrative() {
   const navigate = useNavigate()
   const { t } = useHermesI18n()
   const [open, setOpen] = useState(true)
+  // N33 (CEO real-browser geometry audit): at <=900px this panel used to be
+  // pinned open at full content height via an empirically-measured `top:
+  // 55.2vh` guess against the galaxy's orbiting chips — it stopped the panel
+  // from overlapping its neighbours, but on short viewports (e.g. 680x500)
+  // it also crushed the panel itself down to ~32px, i.e. unreadable. Below
+  // 900px the panel now defaults to a collapsed one-line summary (intrinsic
+  // height, always small, so it can never collide with the dock or galaxy
+  // regardless of viewport shape — no vh guess needed) and only expands to
+  // full content on demand, at which point hermes.css pins `top` to the real
+  // `--hermes-top` topbar-height variable instead of a measured constant.
+  // Desktop (>900px) ignores this flag entirely (see hermes.css) and always
+  // renders the full content, unchanged from before.
+  const [expanded, setExpanded] = useState(false)
   const STEPS: Step[] = useMemo(() => [
     {
       no: '01',
@@ -53,7 +66,7 @@ export default function HermesBeginnerNarrative() {
     <div
       role="region"
       aria-label={t('beginnerNarrativeTitle')}
-      className="hermes-beginner-narrative"
+      className={`hermes-beginner-narrative${expanded ? ' is-expanded' : ''}`}
       style={{
         // N14：原本 left:50% + translateX(-50%) + width:min(960px,100vw-96px)，
         // 在窄視窗（例 809×650）會橫向蓋住左欄的送出按鈕，使用者點不到（hit-test
@@ -76,20 +89,45 @@ export default function HermesBeginnerNarrative() {
         padding: '14px 16px 16px',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <span style={{ fontSize: 12, letterSpacing: '.14em', color: 'var(--color-hermes-cy,#4dd8e0)', textTransform: 'uppercase' }}>
+      <div className="hermes-beginner-narrative-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, gap: 8 }}>
+        <span
+          className="hermes-beginner-narrative-title"
+          style={{ fontSize: 12, letterSpacing: '.14em', color: 'var(--color-hermes-cy,#4dd8e0)', textTransform: 'uppercase', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        >
           {t('beginnerNarrativeTitle')}
         </span>
-        <button
-          type="button"
-          onClick={() => setOpen(false)}
-          aria-label={t('beginnerNarrativeCloseLabel')}
-          style={{ background: 'transparent', border: 'none', color: 'rgba(200,220,235,.6)', cursor: 'pointer', fontSize: 13 }}
-        >
-          {t('beginnerNarrativeClose')}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          {/* N33: mobile-only collapse/expand toggle (hermes.css hides this
+              button entirely above 900px, where the panel always shows its
+              full content as before — this control only matters on the
+              short viewports that used to be crushed unreadable). Same
+              24x24 minimum target as every other control on this panel. */}
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            aria-expanded={expanded}
+            aria-label={expanded ? t('beginnerNarrativeCollapse') : t('beginnerNarrativeExpand')}
+            className="hermes-beginner-narrative-toggle"
+            style={{ background: 'transparent', border: 'none', color: 'var(--color-hermes-cy,#4dd8e0)', cursor: 'pointer', fontSize: 11, minWidth: 24, minHeight: 24, display: 'none', alignItems: 'center', justifyContent: 'center', padding: '4px 6px', whiteSpace: 'nowrap' }}
+          >
+            {expanded ? t('beginnerNarrativeCollapse') : t('beginnerNarrativeExpand')}
+          </button>
+          {/* min click target ≥24x24 (was 41.6x19.5 — under the 24px min
+              height on every viewport tested; this is *the* dismiss control
+              for the whole overlay, so an unreachable-height target is
+              especially bad). */}
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            aria-label={t('beginnerNarrativeCloseLabel')}
+            style={{ background: 'transparent', border: 'none', color: 'rgba(200,220,235,.6)', cursor: 'pointer', fontSize: 13, minWidth: 24, minHeight: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '4px 6px' }}
+          >
+            {t('beginnerNarrativeClose')}
+          </button>
+        </div>
       </div>
       <div
+        className="hermes-beginner-narrative-body"
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',

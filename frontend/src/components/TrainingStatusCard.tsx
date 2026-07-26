@@ -130,7 +130,7 @@ export default function TrainingStatusCard() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span
-          aria-label={`Status: ${statusLight === 'green' ? '已達標' : statusLight === 'yellow' ? '進行中' : statusLight === 'neutral' ? '中性' : '停止'}`}
+          aria-label={`Status: ${statusLight === 'green' ? t('statusAchieved') : statusLight === 'yellow' ? t('statusInProgress') : statusLight === 'neutral' ? t('statusNeutral') : t('statusStopped')}`}
           style={{
             width: 8,
             height: 8,

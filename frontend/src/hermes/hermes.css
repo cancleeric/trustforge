@@ -2300,6 +2300,9 @@
     white-space: nowrap;
   }
 
+  /* N30: min click target ≥24x24 (was 51.5x19.0/89.5x19.0 — under the 24px
+     min height); min-height + flex-centering keeps the visual label/padding
+     unchanged while guaranteeing the tap target. */
   .hermes-mobile-divergence > button {
     justify-self: start;
     padding: 2px 0;
@@ -2309,9 +2312,95 @@
     font: inherit;
     font-size: 10px;
     cursor: pointer;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* N31/N32/N33 (CEO real-browser hit-test audit, 3 rounds):
+     `.hermes-beginner-narrative` (beginnerMode default ON) shares the same
+     `left:rail+12 / right:12` column as `.hermes-mobile-divergence` (the
+     dock, always mounted at this breakpoint) — z-index alone let the
+     narrative's box physically overlap the dock's two buttons on first
+     visit. Round 1 fixed that by pushing `bottom` up by a flat
+     `94px + 12px` (the dock's own height + gap) — width-only, so on *short*
+     viewports (375x667) the raised box collided with the galaxy's
+     `[aria-label^="Focus "]` chips instead. Round 2 pinned both `top` (an
+     empirically-measured `55.2vh` guess at the galaxy's own footprint) and
+     `bottom`, which stopped every collision but, on short/wide viewports
+     (680x500: 32px tall; 900x620: 42px tall), crushed the panel itself down
+     to unreadable — a box that never overlaps anything is not "fixed" if
+     nobody can read it, and `55.2vh` broke the instant the galaxy's own
+     layout changed since it wasn't derived from anything real.
+
+     Round 3 replaces the pinned-box approach entirely with a collapsible
+     sheet, so no viewport-dependent constant is needed at all:
+     - Default (`.hermes-beginner-narrative` without `.is-expanded`): only
+       the one-line header (title + toggle + close) renders —
+       `.hermes-beginner-narrative-body` is `display:none`. `top` is left
+       unset, so with only `bottom` pinned the box's height is intrinsic to
+       its (tiny, one-line) visible content — it can never grow tall enough
+       to reach the galaxy's chips regardless of viewport height, without
+       needing to know anything about the galaxy's own layout.
+     - `.is-expanded` (user opts in via the toggle button, which this
+       breakpoint reveals): the body renders and `top` pins to
+       `var(--hermes-top)`, the topbar's own real height variable (already
+       used to lay out the galaxy region itself two rules below) plus a
+       12px gap — a structural anchor, not a measured guess. The box may
+       then legitimately span most of the screen and sit over the galaxy,
+       the same way any other opt-in full-screen sheet would; any overflow
+       still scrolls via the panel's own `overflow-y:auto`. */
+  .hermes-beginner-narrative:not(.is-expanded) {
+    bottom: calc(var(--hermes-bottom) + 12px + 94px + 12px) !important;
+    max-height: none !important;
+  }
+
+  .hermes-beginner-narrative.is-expanded {
+    top: calc(var(--hermes-top) + 12px) !important;
+    bottom: calc(var(--hermes-bottom) + 12px + 94px + 12px) !important;
+    max-height: none !important;
+  }
+
+  .hermes-beginner-narrative:not(.is-expanded) .hermes-beginner-narrative-body {
+    display: none !important;
+  }
+
+  .hermes-beginner-narrative-toggle {
+    display: inline-flex !important;
   }
 
   .hermes-topbar-nav {
+    display: none !important;
+  }
+
+  /* N28: below ~900px the nav links above are hidden, but the badges/spacer
+     that only make sense next to a full nav (system id, version pill, the
+     duplicate "HERMES: active" pill, the flex spacer that shoves the
+     right-side controls to the far edge) were still rendered, so their
+     combined width pushed the language toggle and other trailing controls
+     past the right edge of the viewport (confirmed unreachable at 561-680px
+     with no scroll affordance). Collapse them the same way the ≤560px tier
+     already does, since there's no nav left to justify the extra width. */
+  .hermes-topbar>span {
+    display: none !important;
+  }
+
+  .hermes-topbar>.hermes-uplink-status {
+    display: flex !important;
+    margin-left: auto;
+  }
+
+  .hermes-topbar>div[style*='flex: 1'] {
+    display: none;
+  }
+
+  /* N28: "full experience" mode (beginnerMode off) additionally renders a
+     ship-upgrade button here, which isn't caught by the span-hiding rule
+     above (it's a <button>) and was enough on its own to push the language
+     toggle back off-screen even with everything else collapsed. It's a
+     secondary action, not a core control, so it's dropped below ~900px the
+     same as the other non-essential badges. */
+  .hermes-topbar .hermes-ship-toggle {
     display: none !important;
   }
 
@@ -2477,6 +2566,44 @@
   }
 }
 
+/* N28: even after the ≤560px collapse above, phones ≤430px wide still don't
+   have room for the uplink-status label text alongside logo + mode toggles +
+   help + language toggle — the label alone was enough to push the language
+   toggle off-screen (confirmed at 375/390px). Drop just the label text and
+   keep the pulsing status dot; the full text stays available via the
+   span's title/aria-label. */
+@media (max-width:430px) {
+  .hermes-uplink-status-label {
+    display: none;
+  }
+}
+
+/* N28: with the full nav row back (>900px) plus the "full experience"
+   ship-upgrade button and cost-ledger readout (both only render when
+   beginnerMode is off), the topbar needed ~1076px of content width — wider
+   than the ≤900px collapse above accounts for, so the language toggle was
+   still pushed off-screen from 900px up to ~1075px. The ship-upgrade
+   button is a secondary/promotional action, not a core control, so it's
+   the one dropped in this narrower band; it's already fully hidden below
+   900px by the rule above. */
+@media (max-width:1080px) {
+  .hermes-topbar .hermes-ship-toggle {
+    display: none !important;
+  }
+
+  /* hiding ship-toggle alone still left the topbar over budget at the
+     narrow end of this range (~960-1000px): the system-id/version badges
+     and cost-ledger readout (all plain direct-child <span>s other than the
+     uplink-status pill) are decorative/secondary at this width, same
+     treatment as the ≤900px tier already gives them. */
+  .hermes-topbar>span:not(.hermes-uplink-status) {
+    display: none;
+  }
+}
+
+/* N29: min click target ≥24x24 (was 94.2x20.0/65.4x21.0 — under the 24px
+   min height on every viewport tested); min-height + flex-centering keeps
+   the visual label/padding unchanged while guaranteeing the tap target. */
 .hermes-ship-toggle {
   border: 1px solid rgba(77, 216, 224, .42);
   background: rgba(77, 216, 224, .1);
@@ -2485,7 +2612,10 @@
   padding: 3px 8px;
   font: 600 9px 'IBM Plex Mono', monospace;
   cursor: pointer;
-  white-space: nowrap
+  white-space: nowrap;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .hermes-ship-toggle:hover {
@@ -3364,6 +3494,10 @@
   color: var(--color-hermes-cyan)
 }
 
+/* N29: min click target ≥24x24 (was 49.0x23.0/45.6x23.0/54.0x23.0 — under the
+   24px min height on every viewport tested); min-height + flex-centering
+   keeps the visual label/padding unchanged while guaranteeing the tap
+   target, without changing the topbar's own height (var(--hermes-top)). */
 .hermes-help-toggle {
   border: 1px solid rgba(77, 216, 224, .45);
   border-radius: 4px;
@@ -3372,6 +3506,9 @@
   font: 600 10px var(--font-hermes-sans);
   padding: 4px 9px;
   cursor: pointer;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .hermes-help-toggle:hover {
@@ -3386,6 +3523,9 @@
   font: 600 9px var(--font-hermes-sans);
   padding: 4px 8px;
   cursor: pointer;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .hermes-mode-toggle[aria-pressed='true'] {
@@ -3446,6 +3586,34 @@
   font: 8px/1.25 var(--font-hermes-sans);
 }
 
+/* N22 fix: at short viewports (e.g. 960x482) the 5-row beginner intent
+   picker (`.hermes-intent-picker`) sits inside the "HERMES CONSOLE" card
+   (`.hermes-clip`), which is itself a flex child sized to whatever's left of
+   `--hermes-rail`'s height after `--hermes-top`/`--hermes-bottom`. In
+   English (longer strings than zh-TW) the 2-line label+description rows
+   wrap taller and the whole picker's natural height (measured: 367.5px)
+   blows well past the card's available box (measured: 314px). The card's
+   own `overflow-y:auto` does clip it correctly — nothing paints past the
+   card's bottom edge — but the last row (and, on this dev's real hit-test
+   harness, `.hermes-energy-station` painting where the clipped button used
+   to visually be) sits below the fold at initial paint with no visible
+   scrollbar affordance (macOS overlay scrollbars), so it's unreachable
+   without the user first discovering they need to scroll this inner card.
+   This isn't a z-index/stacking bug — confirmed via Playwright: after
+   `scrollIntoView`, the button *is* clickable, nothing else covers it.
+   Fix: hide the (redundant — already exposed via each button's `title`
+   attribute) description line under short viewports so all 5 rows fit
+   inside the card without needing to scroll at all. */
+@media (max-height:600px) {
+  .hermes-intent-picker button span {
+    display: none;
+  }
+
+  .hermes-intent-picker button {
+    padding: 6px 7px;
+  }
+}
+
 .hermes-mode-suggestion {
   width: 100%;
   margin: -5px 0 9px;
@@ -3464,8 +3632,14 @@
   font: 9px/1.45 var(--font-hermes-sans);
 }
 
+.hermes-topbar-nav {
+  flex-shrink: 0;
+}
+
 .hermes-nav-item {
   position: relative;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .hermes-nav-item::after {

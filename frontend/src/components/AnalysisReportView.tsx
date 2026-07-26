@@ -18,6 +18,7 @@ import { formatTimestamp } from '../lib/format'
 import PlainLanguageResultSummary from './PlainLanguageResultSummary'
 import GlossaryTerm from './GlossaryTerm'
 import AnnotatedText from './AnnotatedText'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
@@ -31,6 +32,7 @@ const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
  * （`AnalyzeParams['type']`），非 `AnalyzeData` 回應本身的欄位，單純用來
  * 在標題列顯示本次分析用的模式（呼應設計稿 R2 mode: multi_source 標籤）。 */
 export default function AnalysisReportView({ data, heading, mode }: { data: AnalyzeData; heading?: string; mode?: string }) {
+  const { t } = useHermesI18n()
   return (
     <div className="flex flex-col gap-4">
       <div className="border-b border-tf-border pb-4">
@@ -45,14 +47,14 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
           <span className="font-mono text-xs text-tf-muted">run {data.execution?.run_id ?? 'legacy-run'}</span>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-tf-muted">
-          <span title={data.report.generated_at}>生成於 {formatTimestamp(data.report.generated_at)}</span>
-          <span>{data.evidence.length} 筆可追溯證據</span>
-          <span>版本 {data.version}</span>
+          <span title={data.report.generated_at}>{t('arvGeneratedAtPrefix')}{formatTimestamp(data.report.generated_at)}</span>
+          <span>{data.evidence.length}{t('arvEvidenceCountSuffix')}</span>
+          <span>{t('arvVersionPrefix')}{data.version}</span>
           {mode === 'multi_source' && (
             <span>mode: <GlossaryTerm term="multiSource" label="multi_source" compact /></span>
           )}
           <a href="/help" className="ml-auto text-tf-link no-underline hover:underline">
-            查看完整說明 →
+            {t('arvViewFullHelp')}
           </a>
         </div>
       </div>
@@ -65,26 +67,26 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
           rawConfidence={data.report.confidence}
           decisionState={data.report.decision_state}
         />
-        <section className="hermes-clip border-l-2 border-tf-accent bg-tf-card p-4" aria-label="市場結論">
-          <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">市場結論</p>
+        <section className="hermes-clip border-l-2 border-tf-accent bg-tf-card p-4" aria-label={t('arvMarketConclusion')}>
+          <p className="text-xs font-semibold uppercase tracking-wide text-tf-link">{t('arvMarketConclusion')}</p>
           <p className="mt-2 text-base font-semibold leading-7 text-tf-text">
             <AnnotatedText text={data.report.market_judgment} />
           </p>
           <div className="mt-4 grid grid-cols-3 gap-2 border-t border-tf-border pt-3 text-xs">
-            <div><p className="text-tf-muted">事實</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.facts.length}</p></div>
-            <div><p className="text-tf-muted">推論</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.inferences.length}</p></div>
-            <div><p className="text-tf-muted">反方訊號</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.contrarian.length}</p></div>
+            <div><p className="text-tf-muted">{t('arvFacts')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.facts.length}</p></div>
+            <div><p className="text-tf-muted">{t('arvInferences')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.inferences.length}</p></div>
+            <div><p className="text-tf-muted">{t('arvContrarianSignals')}</p><p className="tf-num mt-1 font-semibold text-tf-text">{data.report.contrarian.length}</p></div>
           </div>
         </section>
       </div>
 
       <details id="technical-analysis" className="hermes-technical-details hermes-clip border border-tf-border bg-tf-card">
-        <summary>查看完整技術分析 <span>執行管線、信任拆解、趨勢與雷達圖</span></summary>
+        <summary>{t('arvTechnicalDetailsSummary')} <span>{t('arvTechnicalDetailsHint')}</span></summary>
         <div className="flex flex-col gap-4 p-4">
           <HermesExecutionPanel execution={data.execution} events={data.execution_log} report={data.report} evidence={data.evidence} />
           <TrustBreakdown data={data.trust_components_aggregate} />
           <TrustTrendSection coin={data.report.coin} />
-          <Suspense fallback={<LoadingState label="雷達圖載入中…" />}>
+          <Suspense fallback={<LoadingState label={t('arvRadarLoading')} />}>
             <TrustRadarChart radar={data.trust_radar} />
           </Suspense>
         </div>
@@ -108,7 +110,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
 
       {data.report.limits.length > 0 && (
         <div id="known-limits" className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-          <h3 className="mb-2 text-sm font-semibold text-tf-text">已知限制 / 資料不足</h3>
+          <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvKnownLimits')}</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.limits.map((l, i) => (
               <li key={i}><AnnotatedText text={l} /></li>
@@ -119,7 +121,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
 
       {data.report.could_flip.length > 0 && (
         <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-          <h3 className="mb-2 text-sm font-semibold text-tf-text">可能推翻結論的條件</h3>
+          <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvCouldFlip')}</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.could_flip.map((l, i) => (
               <li key={i}><AnnotatedText text={l} /></li>
@@ -130,7 +132,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
 
       {data.report.contrarian.length > 0 && (
         <div className="hermes-clip rounded-lg border border-tf-border bg-tf-card p-4">
-          <h3 className="mb-2 text-sm font-semibold text-tf-text">反方 / 低信任證據（已標記，未納入主結論）</h3>
+          <h3 className="mb-2 text-sm font-semibold text-tf-text">{t('arvContrarian')}</h3>
           <ul className="list-disc space-y-1 pl-5 text-sm text-tf-text2">
             {data.report.contrarian.map((l, i) => (
               <li key={i}><AnnotatedText text={l} /></li>
@@ -142,7 +144,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
       <EvidenceTrailPanel evidence={data.evidence} signal={data.report.cross_source_signal} />
 
       <div id="evidence-list">
-        <h3 className="mb-3 text-sm font-semibold text-tf-text">證據清單</h3>
+        <h3 className="mb-3 text-sm font-semibold text-tf-text">{t('arvEvidenceList')}</h3>
         <EvidenceTable evidence={data.evidence} />
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { TIER_COLOR, type GalaxyModel } from '../lib/hermesData'
-import { useHermesI18n } from './hermesI18n'
+import { modeLabel, useHermesI18n } from './hermesI18n'
 import type { ServiceMonitorState } from '../pages/HermesDashboard'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
 import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
@@ -118,7 +118,7 @@ export default function HermesLeftRail({
               {questionContext.matches.length ? questionContext.matches.slice(0, 3).map((match) => (
                 <button key={match.question_id} type="button" onClick={() => onRecallQuestion?.(match.question)} title={match.answer ?? '尚無完成快照'}
                   style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: '1px solid var(--color-hermes-bd)', color: 'var(--color-hermes-tx2)', font: 'inherit', fontSize: 10, lineHeight: 1.35, padding: '5px 2px', cursor: 'pointer' }}>
-                  <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{match.mode} · {match.question}
+                  <b style={{ color: 'var(--color-hermes-amber)' }}>{Math.round(match.similarity * 100)}%</b> · {match.coin}/{modeLabel(match.mode, t)} · {match.question}
                 </button>
               )) : (
                 <div style={{ fontSize: 10, lineHeight: 1.4, color: 'var(--color-hermes-tx3)', padding: '5px 2px' }}>{t('noSimilarQuestions')}</div>
