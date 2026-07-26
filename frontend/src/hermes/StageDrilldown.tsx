@@ -113,7 +113,7 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
         {(liveStage || completedStage) && (
           <div style={{ marginBottom: 14, padding: 12, border: '1px solid var(--color-hermes-bd2)', background: 'rgba(4,10,17,.96)', borderRadius: 6, fontSize: 11, lineHeight: 1.7 }}>
             <div style={{ color: HERMES_CYAN, fontWeight: 700 }}>HERMES WORKER · {liveStage?.id ?? completedStage?.id}</div>
-            <div>狀態：{liveStage?.current ? '處理中' : completedStage?.status === 'completed' ? '本次執行已完成' : completedStage?.status === 'failed' ? '本次執行失敗' : '待命'}　排隊：{liveStage?.queued ?? 0}</div>
+            <div>狀態：{liveStage?.current ? t('processing') : completedStage?.status === 'completed' ? '本次執行已完成' : completedStage?.status === 'failed' ? '本次執行失敗' : t('standby')}　{t('queued')}：{liveStage?.queued ?? 0}</div>
             {liveStage?.next_retry_at && <div style={{ color: HERMES_AMBER }}>下次重試：{new Date(liveStage.next_retry_at * 1000).toLocaleTimeString()}</div>}
             {liveStage?.current ? <>
               <div>幣別：{liveStage.current.coin}　模式：{liveStage.current.mode}</div>

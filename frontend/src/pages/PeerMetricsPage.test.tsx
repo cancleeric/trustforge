@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiEnvelope, PeerMetricsResponseData } from '../lib/types'
 import { getPeerMetrics } from '../lib/endpoints'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 import PeerMetricsPage from './PeerMetricsPage'
 
 vi.mock('../lib/endpoints', () => ({
@@ -12,9 +13,11 @@ vi.mock('../lib/endpoints', () => ({
 
 function renderPage(initialUrl = '/peer-metrics') {
   return render(
-    <MemoryRouter initialEntries={[initialUrl]}>
-      <PeerMetricsPage />
-    </MemoryRouter>,
+    <HermesI18nProvider>
+      <MemoryRouter initialEntries={[initialUrl]}>
+        <PeerMetricsPage />
+      </MemoryRouter>
+    </HermesI18nProvider>,
   )
 }
 

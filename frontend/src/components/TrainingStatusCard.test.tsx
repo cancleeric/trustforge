@@ -2,6 +2,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import TrainingStatusCard from './TrainingStatusCard'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 
 function jsonResponse(status: number, body: unknown) {
   return {
@@ -44,7 +45,7 @@ describe('TrainingStatusCard', () => {
       vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data: trainingStatusData() })),
     )
 
-    render(<TrainingStatusCard />)
+    render(<HermesI18nProvider><TrainingStatusCard /></HermesI18nProvider>)
 
     expect(await screen.findByText('方向標註進度')).toBeInTheDocument()
     expect(screen.getByText('80 / 100')).toBeInTheDocument()
@@ -56,7 +57,7 @@ describe('TrainingStatusCard', () => {
   it('treats 404 as neutral not-enabled state without HTTP error copy', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(404, { ok: false })))
 
-    render(<TrainingStatusCard />)
+    render(<HermesI18nProvider><TrainingStatusCard /></HermesI18nProvider>)
 
     const message = await screen.findByText('訓練資料未啟用')
     expect(message).toHaveAttribute('data-training-status-diagnostic', 'HTTP 404')
@@ -71,7 +72,7 @@ describe('TrainingStatusCard', () => {
       vi.fn().mockRejectedValue(new DOMException('signal timed out', 'TimeoutError')),
     )
 
-    render(<TrainingStatusCard />)
+    render(<HermesI18nProvider><TrainingStatusCard /></HermesI18nProvider>)
 
     const message = await screen.findByText('訓練狀態暫不可用')
     expect(message).toHaveAttribute('data-training-status-diagnostic', 'signal timed out')
@@ -91,7 +92,7 @@ describe('TrainingStatusCard', () => {
       .mockResolvedValue(jsonResponse(404, { ok: false }))
     vi.stubGlobal('fetch', fetchMock)
 
-    render(<TrainingStatusCard />)
+    render(<HermesI18nProvider><TrainingStatusCard /></HermesI18nProvider>)
     expect(await screen.findByText('80 / 100')).toBeInTheDocument()
 
     await act(async () => {

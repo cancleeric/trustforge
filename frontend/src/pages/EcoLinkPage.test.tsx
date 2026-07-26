@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiEnvelope, EcoLinkResponseData } from '../lib/types'
 import { getEcoLink } from '../lib/endpoints'
+import { HermesI18nProvider } from '../hermes/hermesI18n'
 import EcoLinkPage from './EcoLinkPage'
 
 vi.mock('../lib/endpoints', () => ({
@@ -12,9 +13,11 @@ vi.mock('../lib/endpoints', () => ({
 
 function renderPage(initialUrl = '/eco-link') {
   return render(
-    <MemoryRouter initialEntries={[initialUrl]}>
-      <EcoLinkPage />
-    </MemoryRouter>,
+    <HermesI18nProvider>
+      <MemoryRouter initialEntries={[initialUrl]}>
+        <EcoLinkPage />
+      </MemoryRouter>
+    </HermesI18nProvider>,
   )
 }
 

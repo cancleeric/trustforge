@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import CoinSelect from './CoinSelect'
+import { useHermesI18n } from '../hermes/hermesI18n'
 
 export interface QueryValues {
   coin: string
@@ -10,11 +11,11 @@ export interface QueryValues {
 }
 
 const ANALYSIS_MODES = [
-  { value: 'risk', label: '風險評估', type: 'multi_source' },
-  { value: 'sentiment', label: '市場情緒', type: 'multi_source' },
-  { value: 'fundamentals', label: '基本面驗證', type: 'hypothesis' },
-  { value: 'news', label: '事件與新聞', type: 'multi_source' },
-  { value: 'catalyst', label: '催化因素', type: 'hypothesis' },
+  { value: 'risk', labelKey: 'qcModeRisk', type: 'multi_source' },
+  { value: 'sentiment', labelKey: 'qcModeSentiment', type: 'multi_source' },
+  { value: 'fundamentals', labelKey: 'qcModeFundamentals', type: 'hypothesis' },
+  { value: 'news', labelKey: 'qcModeNews', type: 'multi_source' },
+  { value: 'catalyst', labelKey: 'qcModeCatalyst', type: 'hypothesis' },
 ] as const
 
 interface Props {
@@ -32,6 +33,7 @@ function defaultAnalyzeQuery(coin: string): string {
 }
 
 export default function QueryConsole({ initial, onSubmit, disabled = false }: Props) {
+  const { t } = useHermesI18n()
   const [coin, setCoin] = useState(initial.coin)
   const [type, setType] = useState(initial.type)
   const [mode, setMode] = useState(initial.mode)
@@ -65,13 +67,13 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
     >
       <div className="border-b border-tf-border pb-3">
         <p className="font-mono text-xs font-semibold uppercase text-tf-link">Run configuration</p>
-        <h2 className="mt-1 text-sm font-semibold text-tf-text">設定本次分析</h2>
-        <p className="mt-1 text-xs text-tf-muted">送出後會建立獨立 run，來源與執行紀錄不會覆蓋既有結果。</p>
+        <h2 className="mt-1 text-sm font-semibold text-tf-text">{t('qcHeading')}</h2>
+        <p className="mt-1 text-xs text-tf-muted">{t('qcSubtext')}</p>
       </div>
       <CoinSelect id="qc-coin" value={coin} onChange={handleCoinChange} />
       <div>
         <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-type">
-          分析模式
+          {t('qcModeLabel')}
         </label>
         <select
           id="qc-type"
@@ -83,23 +85,23 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
           }}
           className="w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
         >
-          {ANALYSIS_MODES.map((t) => (
-            <option key={t.value} value={t.value}>
-              {t.label}
+          {ANALYSIS_MODES.map((mode) => (
+            <option key={mode.value} value={mode.value}>
+              {t(mode.labelKey)}
             </option>
           ))}
         </select>
         <p className="mt-1 text-[0.68rem] text-tf-muted">
-          雙幣比較請至
+          {t('qcComparePrefix')}
           <Link to="/compare" className="text-tf-link underline">
-            比較頁
+            {t('qcCompareLinkLabel')}
           </Link>
-          。
+          {t('qcComparePeriod')}
         </p>
       </div>
       <div>
         <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-q">
-          問題
+          {t('qcQuestionLabel')}
         </label>
         <textarea
           id="qc-q"
@@ -118,7 +120,7 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
         className="rounded-[8px] px-5 py-[13px] text-[13px] font-bold tracking-[0.06em] text-tf-bg hover:opacity-90"
         style={{ background: 'linear-gradient(135deg,var(--color-tf-accent),#3bc0c8)', boxShadow: '0 0 20px rgba(77,216,224,0.25)' }}
       >
-        立即重新分析 <span className="tf-num opacity-70">&#8594;</span>
+        {t('qcSubmit')} <span className="tf-num opacity-70">&#8594;</span>
       </button>
     </form>
   )

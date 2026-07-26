@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+from trustforge.schema import COIN_POOL
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "fetch_public_history.py"
 SPEC = importlib.util.spec_from_file_location("fetch_public_history", SCRIPT)
@@ -25,8 +27,8 @@ def test_fetch_alternative_me_writes_provenance_complete_jsonl(monkeypatch, tmp_
     ]) == 0
 
     rows = [json.loads(line) for line in output.read_text().splitlines()]
-    assert len(rows) == 5
-    assert {row["coin"] for row in rows} == {"BTC", "ETH", "SOL", "BNB", "XRP"}
+    assert len(rows) == len(COIN_POOL)
+    assert {row["coin"] for row in rows} == set(COIN_POOL)
     assert all(row["published_at"].startswith("2021-06-01") for row in rows)
     assert all(row["retrieved_at"] != row["published_at"] for row in rows)
     assert all(row["provider"] == "Alternative.me" and row["license"] for row in rows)

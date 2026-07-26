@@ -6287,14 +6287,19 @@ def _handle_api_analysis_question(headers, rfile, client_ip: str = "") -> tuple[
     if error is not None:
         return error
     assert payload is not None
-    if set(payload) - {"coin", "mode", "question"}:
-        return 400, _json_envelope_err("bad_request", "只接受 coin、mode、question")
+    if set(payload) - {"coin", "mode", "question", "locale"}:
+        return 400, _json_envelope_err("bad_request", "只接受 coin、mode、question、locale")
     try:
         _check_status_rate_limit(client_ip, "analysis-write")
+        from .agent.narrative_locale import normalize_locale
         from .analysis_flow import AnalysisFlow
+        # N11：語系是展示層選項，不是驗證輸入——非法/未知值一律 fallback 成
+        # 預設中文（`normalize_locale` 不 raise），絕不因語系值回 400/500。
+        locale = normalize_locale(payload.get("locale"))
         with AnalysisFlow() as flow:
             question_id, job_id = flow.submit_manual(
                 str(payload.get("coin", "")), str(payload.get("mode", "")), str(payload.get("question", "")),
+                locale=locale,
             )
         return 202, _json_envelope_ok({"question_id": question_id, "job_id": job_id,
                                        "state": "queued" if job_id else "registered", "origin": "manual"})

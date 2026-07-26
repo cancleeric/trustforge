@@ -618,6 +618,44 @@
           "tags"
         ],
         "type": "object"
+      },
+      "TermAnnotation": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "glossary_link": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "matched_text": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "term_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "term_name": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "term_id",
+          "term_name",
+          "matched_text",
+          "start",
+          "end",
+          "glossary_link"
+        ],
+        "type": "object"
       }
     },
     "$id": "https://trustforge.local/contracts/report/1.0.0",
@@ -740,6 +778,12 @@
       },
       "schema_version": {
         "const": "1.0.0"
+      },
+      "term_annotations": {
+        "items": {
+          "$ref": "#/$defs/TermAnnotation"
+        },
+        "type": "array"
       }
     },
     "required": [

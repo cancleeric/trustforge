@@ -54,6 +54,7 @@ def main() -> int:
             try:
                 flow.reconcile_runtime()
                 flow.adopt_pending()
+                flow.reap_stale_running()
                 flow.adopt_due_retries()
                 # The switch controls only low-priority scheduled snapshots.
                 # Workers stay alive to serve durable manual jobs immediately.

@@ -36,8 +36,8 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
     label: moduleLabels.analyze[flow.stages.indexOf(stage)],
     metric: String(stage.current ? 1 : 0),
     unit: stage.next_retry_at
-      ? `排隊 ${stage.queued} · ${Math.max(0, Math.ceil(stage.next_retry_at - Date.now() / 1000))}s 後重試`
-      : `${stage.current ? '處理中' : '待命'} · 排隊 ${stage.queued} · 重試 ${stage.current?.retry_count ?? 0}`,
+      ? `${t('queued')} ${stage.queued} · ${Math.max(0, Math.ceil(stage.next_retry_at - Date.now() / 1000))}s ${t('retryIn')}`
+      : `${stage.current ? t('processing') : t('standby')} · ${t('queued')} ${stage.queued} · ${t('retryLabel')} ${stage.current?.retry_count ?? 0}`,
     status: stage.current ? 'pending' as const : 'completed' as const,
   })) : mode === 'analyze' ? telemetry?.pipelineStages : undefined
   const currentWork = telemetry?.runId ? undefined : flow?.stages.find((stage) => stage.current)?.current
