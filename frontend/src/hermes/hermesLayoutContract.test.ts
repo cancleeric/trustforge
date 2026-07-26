@@ -59,8 +59,14 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(dashboard).toContain('const activeModule: HermesWorkspaceModule | null =')
     expect(dashboard).toContain("qaMode ? ' is-qa-mode' : ''")
     expect(css).toContain('.hermes-dashboard.is-qa-mode')
-    expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('禁止遞回升級')
-    expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('LLM 對抗審查')
+    const upgradeShip = readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')
+    const i18nDict = readFileSync(path.join(__dirname, 'hermesI18n.tsx'), 'utf8')
+    // N34-1: 這兩段文案已改走 i18n。合約仍然成立——元件必須引用該 key，
+    // 且字典的 zh-TW 值必須是原文案，只是文字不再字面寫在元件裡。
+    expect(upgradeShip).toContain("t('shipNoRecursiveUpgrade')")
+    expect(i18nDict).toContain("shipNoRecursiveUpgrade: '禁止遞回升級'")
+    expect(upgradeShip).toContain("t('shipLlmReview')")
+    expect(i18nDict).toContain("shipLlmReview: 'LLM 對抗審查'")
     expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('(data?.automation.historical_sources ?? []).map')
     expect(css).toContain('left: 18px')
   })

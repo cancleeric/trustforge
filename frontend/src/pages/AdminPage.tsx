@@ -36,6 +36,7 @@ import type {
   BackendProviderKey,
 } from '../lib/types'
 import { ErrorState, LoadingState } from '../components/StatusStates'
+import { useHermesI18n, type MessageKey } from '../hermes/hermesI18n'
 
 // ── 小元件 ──────────────────────────────────────────────────────────────
 
@@ -63,19 +64,20 @@ function SectionCard({ title, children }: { title: string; children: React.React
 }
 
 function AuditTable({ records }: { records: AdminAuditRecord[] }) {
+  const { t } = useHermesI18n()
   if (records.length === 0) {
-    return <p className="text-sm text-tf-muted">目前尚無設定變更紀錄。</p>
+    return <p className="text-sm text-tf-muted">{t('adminNoAuditRecords')}</p>
   }
   return (
     <div className="overflow-x-auto rounded-lg border border-tf-border bg-tf-card">
       <table className="w-full min-w-[560px] border-collapse text-left text-sm">
         <thead>
           <tr className="border-b border-tf-border text-xs text-tf-muted">
-            <th className="px-3 py-2 font-medium">時間（UTC）</th>
-            <th className="px-3 py-2 font-medium">操作者</th>
-            <th className="px-3 py-2 font-medium">欄位</th>
-            <th className="px-3 py-2 font-medium">舊值 → 新值</th>
-            <th className="tf-num px-3 py-2 text-right font-medium">版本</th>
+            <th className="px-3 py-2 font-medium">{t('adminAuditTime')}</th>
+            <th className="px-3 py-2 font-medium">{t('adminAuditActor')}</th>
+            <th className="px-3 py-2 font-medium">{t('adminAuditField')}</th>
+            <th className="px-3 py-2 font-medium">{t('adminAuditChange')}</th>
+            <th className="tf-num px-3 py-2 text-right font-medium">{t('adminAuditVersion')}</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-tf-border">
@@ -115,17 +117,21 @@ const BTN_PRIMARY =
 const BTN_PLAIN =
   'rounded-md border border-tf-border px-3 py-1.5 text-sm text-tf-text2 transition hover:text-tf-link disabled:cursor-not-allowed disabled:opacity-50'
 
-const BACKEND_PROVIDER_LABELS: Record<BackendProviderKey, string> = {
-  memory: '記憶',
-  policy: '治理',
-  eval: '評估',
-  llm: '模型路由',
-  gateway: '工具路由',
-  observability: '可觀測',
-  upgrade: '升級引擎',
+function backendProviderLabels(t: (key: MessageKey) => string): Record<BackendProviderKey, string> {
+  return {
+    memory: t('adminBackendMemory'),
+    policy: t('adminBackendPolicy'),
+    eval: t('adminBackendEval'),
+    llm: t('adminBackendLlm'),
+    gateway: t('adminBackendGateway'),
+    observability: t('adminBackendObservability'),
+    upgrade: t('adminBackendUpgrade'),
+  }
 }
 
 export default function AdminPage() {
+  const { t } = useHermesI18n()
+  const BACKEND_PROVIDER_LABELS = backendProviderLabels(t)
   // token 主存 React state；初始值嘗試從 sessionStorage 撈（同分頁 reload）
   const [token, setToken] = useState<string | null>(() => loadSessionToken())
   const [tokenInput, setTokenInput] = useState('')
@@ -227,7 +233,7 @@ export default function AdminPage() {
     e.preventDefault()
     const candidate = tokenInput.trim()
     if (!candidate) {
-      setGateError({ code: 'bad_request', message: '請輸入管理 token' })
+      setGateError({ code: 'bad_request', message: t('adminEnterTokenPrompt') })
       return
     }
     setChecking(true)
@@ -278,7 +284,7 @@ export default function AdminPage() {
       setSaving(false)
       if (latest.ok) {
         applyConfig(latest.data)
-        setNotice(['設定已被他人變更，已重新載入最新設定——請確認後再送出一次'])
+        setNotice([t('adminConfigReloadedNotice')])
       } else if (latest.error.code === 'unauthorized') {
         // qa L2：409 重讀期間 token 可能已失效（被輪替/管理面關閉），
         // 這時不能只顯示 saveError 停在解鎖畫面——與 PUT 401 分支一致，
@@ -318,7 +324,7 @@ export default function AdminPage() {
     const plaintext = generateLiveToken()
     const updated = await doPut(
       { live_token: plaintext },
-      '請重試輪替，勿假設舊 token 仍有效——伺服器端寫入結果不確定',
+      t('adminRotateFailureHint'),
     )
     if (updated) {
       setFreshLiveToken(plaintext)
@@ -377,14 +383,12 @@ export default function AdminPage() {
   if (!token || !config) {
     return (
       <main className="mx-auto flex max-w-md flex-col gap-4 px-4 py-10 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}>
-        <h1 className="text-lg font-semibold text-tf-text">管理控制台</h1>
+        <h1 className="text-lg font-semibold text-tf-text">{t('adminTitle')}</h1>
         <p className="text-sm text-tf-muted">
-          本頁需要管理 token（<code>TRUSTFORGE_ADMIN_TOKEN</code>，與 live token
-          不同權限層級）。token 只保存在本分頁（記憶體 + sessionStorage），關閉
-          分頁即清除。
+          {t('adminGateDescPre')}<code>TRUSTFORGE_ADMIN_TOKEN</code>{t('adminGateDescPost')}
         </p>
         {checking ? (
-          <LoadingState label="驗證中…" />
+          <LoadingState label={t('adminVerifying')} />
         ) : (
           <form onSubmit={unlock} className="flex flex-col gap-3">
             <input
@@ -397,12 +401,12 @@ export default function AdminPage() {
               autoComplete="new-password"
               value={tokenInput}
               onChange={(e) => setTokenInput(e.target.value)}
-              placeholder="貼上管理 token"
-              aria-label="管理 token"
+              placeholder={t('adminTokenPlaceholder')}
+              aria-label={t('adminTokenAriaLabel')}
               className="rounded-md border border-tf-border bg-tf-bg px-3 py-2 text-sm text-tf-text"
             />
             <button type="submit" className={BTN_PRIMARY} disabled={checking}>
-              進入管理面
+              {t('adminEnterButton')}
             </button>
           </form>
         )}
@@ -421,15 +425,15 @@ export default function AdminPage() {
   return (
     <main className="mx-auto flex max-w-4xl flex-col gap-4 px-4 py-6 sm:px-6" style={{ background: 'radial-gradient(ellipse at 50% 0%,var(--color-tf-bg-hero) 0%,var(--color-tf-bg) 72%)', minHeight: 'calc(100vh - 57px)' }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold text-tf-text">管理控制台</h1>
+        <h1 className="text-lg font-semibold text-tf-text">{t('adminTitle')}</h1>
         <div className="flex items-center gap-3 text-xs text-tf-muted">
           <span className="tf-num">
-            設定版本 v{config.version ?? 0}
+            {t('adminVersionPrefix')}{config.version ?? 0}
             {config.updated_at ? `・${config.updated_at}` : ''}
             {config.updated_by ? `・${config.updated_by}` : ''}
           </span>
           <button type="button" onClick={lock} className={BTN_PLAIN}>
-            鎖定並清除 token
+            {t('adminLockButton')}
           </button>
         </div>
       </div>
@@ -437,7 +441,7 @@ export default function AdminPage() {
       {config.version_corrupt && (
         <ErrorState
           code="version_corrupt"
-          message="設定 version 欄位損毀，需人工修復後才能寫入（見 admin_config.py SOP）——以下表單僅供檢視。"
+          message={t('adminVersionCorruptMsg')}
         />
       )}
 
@@ -453,17 +457,16 @@ export default function AdminPage() {
       {saveError && <ErrorState code={saveError.code} message={saveError.message} />}
 
       {/* §4-2 每日 cap */}
-      <SectionCard title="每日 Bedrock 花費上限（USD）">
+      <SectionCard title={t('adminCapSectionTitle')}>
         <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-tf-text2">
           <span>
-            生效值：<strong className="tf-num text-tf-text">${cap.effective}</strong>/day
+            {t('adminEffectiveLabel')}<strong className="tf-num text-tf-text">${cap.effective}</strong>{t('adminPerDay')}
           </span>
           <SourceBadge source={cap.source} />
         </div>
         <p className="mb-3 text-xs text-tf-muted">
-          三層對照——config：{cap.config !== null ? `$${cap.config}` : '未設定'}／env 原始值：
-          {cap.env !== null ? `「${cap.env}」` : '未設定'}／內建預設：${cap.default}。env 設 0
-          為緊急全關 kill-switch（最高優先）。
+          {t('adminCapDetailPrefix')}{cap.config !== null ? `$${cap.config}` : t('adminNotSet')}{t('adminCapDetailEnvLabel')}
+          {cap.env !== null ? `「${cap.env}」` : t('adminNotSet')}{t('adminCapDetailDefaultLabel')}{cap.default}{t('adminCapDetailKillSwitch')}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <input
@@ -473,7 +476,7 @@ export default function AdminPage() {
             step={0.1}
             value={capInput}
             onChange={(e) => setCapInput(e.target.value)}
-            aria-label="每日花費上限（USD）"
+            aria-label={t('adminCapInputAriaLabel')}
             className="tf-num w-32 rounded-md border border-tf-border bg-tf-bg px-3 py-1.5 text-sm text-tf-text"
           />
           <button
@@ -482,7 +485,7 @@ export default function AdminPage() {
             disabled={saving || !capCheck.ok || config.version_corrupt}
             className={BTN_PRIMARY}
           >
-            儲存上限
+            {t('adminSaveCapButton')}
           </button>
         </div>
         {!capCheck.ok && capInput.trim() !== '' && (
@@ -491,37 +494,35 @@ export default function AdminPage() {
           </p>
         )}
         <p className="mt-2 text-xs text-tf-muted">
-          有效範圍 {ADMIN_CAP_MIN_USD}–{ADMIN_CAP_MAX_USD}；前端檢查僅為即時提示，一律以
-          伺服器回應為準。
+          {t('adminCapRangeHintPre')}{ADMIN_CAP_MIN_USD}–{ADMIN_CAP_MAX_USD}{t('adminCapRangeHintPost')}
         </p>
       </SectionCard>
 
       {/* §4-2 Bedrock 開關（二態明確 + 開啟二次確認） */}
-      <SectionCard title="Bedrock 真呼叫開關">
+      <SectionCard title={t('adminBedrockSectionTitle')}>
         <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-tf-text2">
           <span>
-            目前生效：
+            {t('adminEffectiveLabel')}
             <strong className={bedrock.effective ? 'text-tf-warn' : 'text-tf-text'}>
-              {bedrock.effective ? '真 Bedrock（花錢）' : '離線（安全預設）'}
+              {bedrock.effective ? t('adminBedrockOnLabel') : t('adminBedrockOffLabel')}
             </strong>
           </span>
           <SourceBadge source={bedrock.source} />
           {!bedrock.bedrock_model_id_set && (
             <span className="text-xs text-tf-muted">
-              （BEDROCK_MODEL_ID 未設定——開關開了也不會有真呼叫）
+              {t('adminBedrockModelNotSetHint')}
             </span>
           )}
         </div>
         {confirmBedrockOn ? (
           <div
             role="alertdialog"
-            aria-label="開啟真 Bedrock 確認"
+            aria-label={t('adminBedrockConfirmDialogAriaLabel')}
             className="rounded-lg border border-tf-warn/60 bg-tf-bg p-3"
           >
-            <p className="text-sm font-semibold text-tf-warn">確定要切換到「真 Bedrock」？</p>
+            <p className="text-sm font-semibold text-tf-warn">{t('adminBedrockConfirmTitle')}</p>
             <p className="mt-1 text-sm text-tf-text2">
-              開啟後公開流量最多燒 <strong className="tf-num">${cap.effective}</strong>/day
-              （當前生效 cap）。這會產生真實 AWS 費用。
+              {t('adminBedrockConfirmBodyPre')}<strong className="tf-num">${cap.effective}</strong>{t('adminBedrockConfirmBodyPost')}
             </p>
             <div className="mt-3 flex gap-2">
               <button
@@ -533,14 +534,14 @@ export default function AdminPage() {
                 }}
                 className={BTN_PRIMARY}
               >
-                確認開啟（花錢）
+                {t('adminBedrockConfirmYes')}
               </button>
               <button
                 type="button"
                 onClick={() => setConfirmBedrockOn(false)}
                 className={BTN_PLAIN}
               >
-                取消
+                {t('adminCancel')}
               </button>
             </div>
           </div>
@@ -553,7 +554,7 @@ export default function AdminPage() {
                 onClick={() => doPut({ bedrock_enabled: false })}
                 className={BTN_PRIMARY}
               >
-                切回離線（安全預設）
+                {t('adminBedrockSwitchOff')}
               </button>
             ) : (
               <button
@@ -562,26 +563,25 @@ export default function AdminPage() {
                 onClick={() => setConfirmBedrockOn(true)}
                 className={BTN_PLAIN}
               >
-                切換到真 Bedrock（花錢）…
+                {t('adminBedrockSwitchOnPrompt')}
               </button>
             )}
           </div>
         )}
       </SectionCard>
 
-      <SectionCard title="Hermes 自動工作開關">
+      <SectionCard title={t('adminHermesAutonomySectionTitle')}>
         <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-tf-text2">
           <span>
-            目前生效：
+            {t('adminEffectiveLabel')}
             <strong className={hermesAutonomy.effective ? 'text-tf-warn' : 'text-tf-text'}>
-              {hermesAutonomy.effective ? '自動巡航中（可能產生成本）' : '已停止自動工作'}
+              {hermesAutonomy.effective ? t('adminHermesAutonomyOnLabel') : t('adminHermesAutonomyOffLabel')}
             </strong>
           </span>
           <SourceBadge source={hermesAutonomy.source} />
         </div>
         <p className="mb-3 text-xs text-tf-muted">
-          控制 Hermes cycle、continuous analysis worker 與分析題目佇列。production 未設定時預設關閉；本機未設定時預設開啟。
-          env 原始值：{hermesAutonomy.env !== null ? `「${hermesAutonomy.env}」` : '未設定'}。
+          {t('adminHermesAutonomyDescPre')}{hermesAutonomy.env !== null ? `「${hermesAutonomy.env}」` : t('adminNotSet')}{t('adminHermesAutonomyDescPost')}
         </p>
         <div className="flex gap-2">
           {hermesAutonomy.effective ? (
@@ -591,7 +591,7 @@ export default function AdminPage() {
               onClick={() => doPut({ hermes_autonomy_enabled: false })}
               className={BTN_PRIMARY}
             >
-              關閉自動工作
+              {t('adminHermesAutonomyOff')}
             </button>
           ) : (
             <button
@@ -600,28 +600,27 @@ export default function AdminPage() {
               onClick={() => doPut({ hermes_autonomy_enabled: true })}
               className={BTN_PLAIN}
             >
-              開啟自動工作…
+              {t('adminHermesAutonomyOnPrompt')}
             </button>
           )}
         </div>
       </SectionCard>
 
-      <SectionCard title="AgentCore / 自主後端切換">
+      <SectionCard title={t('adminBackendSectionTitle')}>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm text-tf-text2">
           <p>
-            7 個模組可即時切換；預設 <strong className="text-tf-text">自主 builtin</strong>，
-            AgentCore 是可拔插擴充層。
+            {t('adminBackendDescPre')}<strong className="text-tf-text">{t('adminBackendDescBuiltin')}</strong>{t('adminBackendDescPost')}
           </p>
           {backendProviders && (
             <span className="text-xs text-tf-muted">
-              {backendProviders.hot_config ? 'hot config' : '需重啟'} ·
-              {backendProviders.restart_required ? ' restart required' : ' no restart'}
+              {backendProviders.hot_config ? t('adminHotConfig') : t('adminRestartRequiredNeed')} ·
+              {backendProviders.restart_required ? ` ${t('adminRestartRequired')}` : ` ${t('adminNoRestart')}`}
             </span>
           )}
         </div>
         {backendError && <ErrorState code={backendError.code} message={backendError.message} />}
         {backendProviders === null && backendError === null ? (
-          <LoadingState label="後端 provider 狀態載入中…" />
+          <LoadingState label={t('adminBackendLoadingLabel')} />
         ) : backendProviders ? (
           <div className="grid gap-3">
             <div className="flex flex-wrap gap-2">
@@ -631,7 +630,7 @@ export default function AdminPage() {
                 onClick={() => changeAllBackendProviders('agentcore')}
                 className={BTN_PRIMARY}
               >
-                全部切 AgentCore
+                {t('adminSwitchAllAgentcore')}
               </button>
               <button
                 type="button"
@@ -639,7 +638,7 @@ export default function AdminPage() {
                 onClick={() => changeAllBackendProviders('builtin')}
                 className={BTN_PLAIN}
               >
-                全部切自主
+                {t('adminSwitchAllBuiltin')}
               </button>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
@@ -657,10 +656,10 @@ export default function AdminPage() {
                     disabled={backendSaving}
                     onChange={(e) => changeBackendProvider(key, e.target.value as BackendProvider)}
                     className="rounded border border-tf-border bg-tf-card px-2 py-1 text-sm text-tf-text"
-                    aria-label={`${BACKEND_PROVIDER_LABELS[key]}後端`}
+                    aria-label={`${BACKEND_PROVIDER_LABELS[key]}${t('adminBackendSelectAriaLabelSuffix')}`}
                   >
-                    <option value="builtin">自主</option>
-                    <option value="agentcore">AgentCore</option>
+                    <option value="builtin">{t('adminBuiltinOption')}</option>
+                    <option value="agentcore">{t('adminAgentcoreOption')}</option>
                   </select>
                 </label>
               ))}
@@ -670,20 +669,20 @@ export default function AdminPage() {
       </SectionCard>
 
       {/* §4-2 live token 管理 */}
-      <SectionCard title="Live token（公開分析 live 模式用，權限低於管理 token）">
+      <SectionCard title={t('adminLiveTokenSectionTitle')}>
         <div className="mb-3 flex flex-wrap items-center gap-2 text-sm text-tf-text2">
           <span>
-            狀態：
+            {t('adminLiveTokenStatusLabel')}
             <strong className="text-tf-text">
               {liveToken.effective_configured
-                ? `已設定${liveToken.source === 'config' && liveToken.config_last4 ? `（末 4 碼 ${liveToken.config_last4}）` : ''}`
-                : '未設定'}
+                ? `${t('adminLiveTokenConfiguredPrefix')}${liveToken.source === 'config' && liveToken.config_last4 ? `${t('adminLiveTokenLast4Prefix')}${liveToken.config_last4}${t('adminLiveTokenLast4Suffix')}` : ''}`
+                : t('adminLiveTokenNotConfigured')}
             </strong>
           </span>
           <SourceBadge source={liveToken.source} />
           {liveToken.env_configured && liveToken.source === 'config' && (
             <span className="text-xs text-tf-muted">
-              （env 層另有 token，但 config 層優先生效）
+              {t('adminLiveTokenEnvHint')}
             </span>
           )}
         </div>
@@ -691,7 +690,7 @@ export default function AdminPage() {
         {freshLiveToken && (
           <div className="mb-3 rounded-lg border border-tf-warn/60 bg-tf-bg p-3" role="status">
             <p className="text-sm font-semibold text-tf-warn">
-              新 live token（僅此一次顯示——離開此畫面後無法再看到，後端只存 hash）
+              {t('adminFreshTokenNoticeTitle')}
             </p>
             <code className="tf-num mt-2 block break-all rounded bg-tf-card p-2 text-xs text-tf-text">
               {freshLiveToken}
@@ -699,18 +698,18 @@ export default function AdminPage() {
             {/* harper LOW：剪貼簿是明文常駐面（其他 app/擴充功能可能讀取），
                 提示使用者盡快貼入目的地並清空，降低停留時間。 */}
             <p className="mt-1 text-xs text-tf-muted">
-              複製後請儘速貼入目的地並清空剪貼簿——剪貼簿內容可能被其他應用程式讀取。
+              {t('adminFreshTokenClipboardHint')}
             </p>
             <div className="mt-2 flex items-center gap-2">
               <button type="button" onClick={copyFreshToken} className={BTN_PRIMARY}>
-                {copied ? '已複製' : '複製'}
+                {copied ? t('adminCopied') : t('adminCopy')}
               </button>
               <button
                 type="button"
                 onClick={() => setFreshLiveToken(null)}
                 className={BTN_PLAIN}
               >
-                我已保存，關閉
+                {t('adminSavedClose')}
               </button>
             </div>
           </div>
@@ -723,7 +722,7 @@ export default function AdminPage() {
             onClick={rotateLiveToken}
             className={BTN_PRIMARY}
           >
-            產生新 token 並輪替
+            {t('adminRotateTokenButton')}
           </button>
           <button
             type="button"
@@ -731,18 +730,18 @@ export default function AdminPage() {
             onClick={clearLiveToken}
             className={BTN_PLAIN}
           >
-            清除 runtime token（回落 env 層）
+            {t('adminClearTokenButton')}
           </button>
         </div>
         <p className="mt-2 text-xs text-tf-muted">
-          token 由瀏覽器 CSPRNG 產生（32 bytes hex）；輪替後舊 token（含 env 層）立即失效。
+          {t('adminTokenGenHint')}
         </p>
       </SectionCard>
 
       {/* §4-4 審計檢視（唯讀） */}
       <section>
-        <h2 className="mb-2 text-sm font-semibold text-tf-text">設定變更審計（近 50 筆）</h2>
-        {audit === null && auditError === null && <LoadingState label="審計紀錄載入中…" />}
+        <h2 className="mb-2 text-sm font-semibold text-tf-text">{t('adminAuditSectionTitle')}</h2>
+        {audit === null && auditError === null && <LoadingState label={t('adminAuditLoadingLabel')} />}
         {auditError && <ErrorState code={auditError.code} message={auditError.message} />}
         {audit !== null && <AuditTable records={audit} />}
       </section>

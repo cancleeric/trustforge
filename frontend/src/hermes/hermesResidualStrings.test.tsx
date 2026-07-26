@@ -21,11 +21,38 @@ import Header from '../components/Header'
 import TrainingStatusCard from '../components/TrainingStatusCard'
 import BridgeWorkspaceShell from '../components/BridgeWorkspaceShell'
 import HermesTopBar from './HermesTopBar'
+import AssetContextLookupPage from '../pages/AssetContextLookupPage'
+import PeerMetricsPage from '../pages/PeerMetricsPage'
+import EcoLinkPage from '../pages/EcoLinkPage'
+import HermesOnboarding from './HermesOnboarding'
+import HermesUpgradeShip from './HermesUpgradeShip'
+import PlainLanguageResultSummary from '../components/PlainLanguageResultSummary'
+import { getAssetContext, getPeerMetrics, getEcoLink } from '../lib/endpoints'
+import type { AnalyzeData } from '../lib/types'
 
 vi.mock('../lib/endpoints', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/endpoints')>()
-  return { ...actual, getHealth: vi.fn().mockResolvedValue({ ok: true, data: { version: 'dev' } }) }
+  return {
+    ...actual,
+    getHealth: vi.fn().mockResolvedValue({ ok: true, data: { version: 'dev' } }),
+    getAssetContext: vi.fn(),
+    getPeerMetrics: vi.fn(),
+    getEcoLink: vi.fn(),
+  }
 })
+
+function analyzeDataFixture(): AnalyzeData {
+  return {
+    report: {
+      market_judgment: 'ARB looks stable',
+      decision_state: 'normal',
+      calibrated_confidence: 0.8,
+      key_basis: [{ claim: 'reason one' }, { claim: 'reason two' }],
+      limits: [],
+    },
+    evidence: [{}],
+  } as unknown as AnalyzeData
+}
 
 function LocaleSwitcher({ to }: { to: 'en' | 'zh-TW' }) {
   const { setLocale } = useHermesI18n()
@@ -246,5 +273,114 @@ describe('N17: en mode has no residual Chinese aria-labels (beyond the locked He
     expect(screen.getByRole('complementary', { name: 'Bridge system status' })).toBeInTheDocument()
     expect(screen.getByRole('complementary', { name: 'Bridge telemetry' })).toBeInTheDocument()
     expect(screen.getByRole('contentinfo', { name: 'Hermes workflow energy conduit' })).toBeInTheDocument()
+  })
+})
+
+// N34-1 batch 1: AssetContextLookupPage / PeerMetricsPage / EcoLinkPage /
+// HermesOnboarding / HermesUpgradeShip / PlainLanguageResultSummary had zero
+// i18n coverage before this change (grep useHermesI18n → 0 hits). Each check
+// below renders the real component through HermesI18nProvider in both
+// locales and reads the actual DOM text — not dict-key presence.
+describe('N34-1: batch 1 components render localized copy in both locales', () => {
+  it('AssetContextLookupPage: title + empty state switch between zh-TW and en', async () => {
+    vi.mocked(getAssetContext).mockResolvedValue({ ok: true, data: { asset_context: null } })
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={['/asset-context']}>
+          <LocaleSwitcher to="en" />
+          <AssetContextLookupPage />
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    expect(await screen.findByText('目前無此資產的脈絡資料。')).toBeInTheDocument()
+    expect(screen.getByText('30 秒看懂一個代幣的定位')).toBeInTheDocument()
+    expect(screen.queryByText('Understand a token in 30 seconds')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'go en' }))
+    expect(await screen.findByText('No context data available for this asset yet.')).toBeInTheDocument()
+    expect(screen.getByText('Understand a token in 30 seconds')).toBeInTheDocument()
+    expect(screen.queryByText('30 秒看懂一個代幣的定位')).not.toBeInTheDocument()
+    expect(screen.queryByText('目前無此資產的脈絡資料。')).not.toBeInTheDocument()
+  })
+
+  it('PeerMetricsPage: title switches between zh-TW and en', async () => {
+    vi.mocked(getPeerMetrics).mockResolvedValue({ ok: true, data: { illustrative: true, snapshot: null, peers: [] } })
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={['/peer-metrics']}>
+          <LocaleSwitcher to="en" />
+          <PeerMetricsPage />
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    expect(await screen.findByText('目前無 asset:arb 的同層比較資料。')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Peer 同層比較' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'go en' }))
+    expect(await screen.findByText('No peer comparison data available for asset:arb yet.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Peer Comparison' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Peer 同層比較' })).not.toBeInTheDocument()
+  })
+
+  it('EcoLinkPage: title switches between zh-TW and en', async () => {
+    vi.mocked(getEcoLink).mockResolvedValue({
+      ok: true,
+      data: { illustrative: true, verdict: 'insufficient_data', message: '資料不足，無法判定', impact_paths: [] },
+    })
+    render(
+      <HermesI18nProvider>
+        <MemoryRouter initialEntries={['/eco-link']}>
+          <LocaleSwitcher to="en" />
+          <EcoLinkPage />
+        </MemoryRouter>
+      </HermesI18nProvider>,
+    )
+    expect(await screen.findByRole('heading', { name: 'EcoLink 影響路徑' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'go en' }))
+    expect(await screen.findByRole('heading', { name: 'EcoLink Impact Path' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'EcoLink 影響路徑' })).not.toBeInTheDocument()
+  })
+
+  it('HermesOnboarding: step-1 copy switches between zh-TW and en', () => {
+    render(
+      <HermesI18nProvider>
+        <LocaleSwitcher to="en" />
+        <HermesOnboarding open onClose={vi.fn()} />
+      </HermesI18nProvider>,
+    )
+    expect(screen.getByText('先選一個幣，再問一個問題')).toBeInTheDocument()
+    expect(screen.queryByText('Pick a coin, then ask a question')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'go en' }))
+    expect(screen.getByText('Pick a coin, then ask a question')).toBeInTheDocument()
+    expect(screen.queryByText('先選一個幣，再問一個問題')).not.toBeInTheDocument()
+  })
+
+  it('HermesUpgradeShip: header title + footer flow copy switch between zh-TW and en', () => {
+    render(
+      <HermesI18nProvider>
+        <LocaleSwitcher to="en" />
+        <HermesUpgradeShip data={null} loading={false} onClose={vi.fn()} onRefresh={vi.fn()} />
+      </HermesI18nProvider>,
+    )
+    expect(screen.getByText('HERMES 升級控制台')).toBeInTheDocument()
+    expect(screen.getByText('禁止遞回升級', { exact: false })).toBeInTheDocument()
+    expect(screen.queryByText('HERMES UPGRADE CONTROL')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'go en' }))
+    expect(screen.getByText('HERMES UPGRADE CONTROL')).toBeInTheDocument()
+    expect(screen.getByText('no recursive upgrades', { exact: false })).toBeInTheDocument()
+    expect(screen.queryByText('HERMES 升級控制台')).not.toBeInTheDocument()
+  })
+
+  it('PlainLanguageResultSummary: reasons heading + disclaimer switch between zh-TW and en', () => {
+    render(
+      <HermesI18nProvider>
+        <LocaleSwitcher to="en" />
+        <PlainLanguageResultSummary data={analyzeDataFixture()} />
+      </HermesI18nProvider>,
+    )
+    expect(screen.getByText('三個主要原因')).toBeInTheDocument()
+    expect(screen.queryByText('Three key reasons')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'go en' }))
+    expect(screen.getByText('Three key reasons')).toBeInTheDocument()
+    expect(screen.queryByText('三個主要原因')).not.toBeInTheDocument()
   })
 })
