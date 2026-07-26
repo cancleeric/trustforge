@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .asset_context import AssetContext  # noqa: F401  -- typed contract reference
 
 # 官方幣種池
-COIN_POOL = ("BTC", "ETH", "SOL", "BNB", "XRP")
+COIN_POOL = ("BTC", "ETH", "SOL", "BNB", "XRP", "ARB")
 
 
 class QuestionType(str, Enum):
@@ -164,6 +164,11 @@ class Report:
     # contract (enum taxonomy + validation) lives in `asset_context.py`.
     asset_context: dict | None = None
     risk_notices: list[dict] = field(default_factory=list)
+    # #583 詞彙標註：在分析報告中出現的 glossary term 標註位置與連結，
+    # 供前端渲染 glossary popover / link。由 build_report 在產出 Report 時
+    # 以 term_annotations.annotate_terms() 對 market_judgment 注入。
+    # 預設空 list，向後相容（舊 payload 無標註仍可 parse）。
+    term_annotations: list[dict] = field(default_factory=list)
 
     def confidence_label(self) -> str:
         """三態優先於純數字分桶：abstain/低信心用結構化狀態直接標示，避免

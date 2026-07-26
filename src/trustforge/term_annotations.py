@@ -13,13 +13,17 @@ class TermAnnotation:
     matched_text: str
     start: int
     end: int
+    term_name: str = ""
+    glossary_link: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
             "term_id": self.term_id,
+            "term_name": self.term_name,
             "matched_text": self.matched_text,
             "start": self.start,
             "end": self.end,
+            "glossary_link": self.glossary_link,
         }
 
 
@@ -52,6 +56,8 @@ def annotate_terms(text: str, catalog: tuple[GlossaryTerm, ...] = GLOSSARY_CATAL
                         matched_text=text[index:end],
                         start=index,
                         end=end,
+                        term_name=term.label,
+                        glossary_link=f"/glossary/{term.term_id}",
                     )
                 )
                 occupied.update(span)

@@ -7,9 +7,9 @@ def test_term_annotations_match_aliases_and_labels_without_html() -> None:
     annotations = annotate_terms("FDV and market cap are not the same as TVL.")
 
     assert [item.to_dict() for item in annotations] == [
-        {"term_id": "fdv", "matched_text": "FDV", "start": 0, "end": 3},
-        {"term_id": "market_cap", "matched_text": "market cap", "start": 8, "end": 18},
-        {"term_id": "tvl", "matched_text": "TVL", "start": 39, "end": 42},
+        {"term_id": "fdv", "term_name": "FDV", "matched_text": "FDV", "start": 0, "end": 3, "glossary_link": "/glossary/fdv"},
+        {"term_id": "market_cap", "term_name": "MC", "matched_text": "market cap", "start": 8, "end": 18, "glossary_link": "/glossary/market_cap"},
+        {"term_id": "tvl", "term_name": "TVL", "matched_text": "TVL", "start": 39, "end": 42, "glossary_link": "/glossary/tvl"},
     ]
     assert "<" not in repr(annotations)
 
