@@ -29,9 +29,13 @@ The router hot path is read-only. It never advances a clock file. After each
 successful control-plane terminal transition, the control process atomically
 writes and file/directory-fsyncs a coarse authorization checkpoint. That
 checkpoint contains the original signed `DeploymentAuthorization` (it invents
-no new signer) and is challenged against the latest signed control
-head/sequence. An unresolved authorization is always checked against the real
-current clock, never an attacker-controlled event timestamp. A clock rollback
+no new signer); `checkpoint_at` is exactly that receipt's signed `issued_at`
+and cannot be changed independently. It is challenged against the latest
+signed control head/sequence. Missing, stale or corrupt checkpoint projection
+blocks B/start/promotion but does not block status or emergency control; a
+later terminal transition heals it from signed history. An unresolved
+authorization is always checked against the real current clock, never an
+attacker-controlled event timestamp. A clock rollback
 below the checkpoint blocks B, start and promotion, while status, stop,
 rollback-to-A and failed-transition reconciliation remain available.
 
@@ -143,10 +147,17 @@ result can promote.
 Operator stop first creates an independent, Ed25519-signed, one-way latch for
 the current canary epoch using `O_EXCL`, mode `0600`, and file/directory fsync.
 The router checks that latch immediately before connecting to B. It does not
-hold the global coordination lock across HTTP: a request already connected to
-B at the instant of stop is the only bounded in-flight exception and remains
-limited by the signed policy timeout; requests not yet connected fail closed
-to A immediately.
+hold the global coordination lock across HTTP request/response. Under that lock
+it performs the last latch check and establishes the B TCP socket with a
+maximum 250 ms connect timeout, then releases the lock before sending. A stop
+therefore waits at most for the bounded connect classification, never for a
+hanging B response. The signed manifest and request use that same socket;
+silent reconnect is forbidden.
+
+The systemd sandbox mounts the control ledger (including checkpoint and epoch
+latches) read-only for the router identity. Only `router-outcomes` and the
+dedicated `/run/trustforge` coordination-lock location are writable; the
+security-ledger root is not shared read-write.
 
 The executable data plane is `scripts/release_router_service.py`, packaged by
 `deploy/trustforge-release-router.service`. It accepts idempotent GET only;

@@ -30,6 +30,7 @@ from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedg
 CONFIG_PATH = Path("/etc/trustforge/deployment-control.json")
 KEY_DIRECTORY = Path("/etc/trustforge/deployment-keys")
 LEDGER_PATH = SECURITY_LEDGER_ROOT
+COORDINATION_LOCK_PATH = Path("/run/trustforge/release-coordination.lock")
 
 
 def _protected_json(path: Path, maximum_bytes: int = 1_000_000) -> dict:
@@ -104,6 +105,7 @@ def _build_control(
         ledger_role="release-control",
         bootstrap=bootstrap_ledgers and not (LEDGER_PATH / "control").exists(),
         coordination_root=LEDGER_PATH,
+        coordination_lock_path=COORDINATION_LOCK_PATH,
     )
     if len(outcome_private) > 1:
         raise DeploymentControlError("operator has multiple outcome signing identities")
@@ -122,6 +124,7 @@ def _build_control(
         bootstrap=bootstrap_ledgers
         and not (LEDGER_PATH / "router-outcomes").exists(),
         coordination_root=LEDGER_PATH,
+        coordination_lock_path=COORDINATION_LOCK_PATH,
     )
     if require_preflight:
         identity = ShadowReleaseIdentity(**config["shadow_identity"])

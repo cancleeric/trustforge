@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from scripts.deployment_readiness import LEDGER_PATH, _key_roles_for_command
+from trustforge.release_router_runtime import COORDINATION_LOCK_PATH
 from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT
 
 
@@ -32,11 +33,29 @@ def test_proxy_strips_external_identity_and_injects_authenticated_identity():
 
 def test_systemd_uses_exact_runtime_inputs_and_bounded_resources():
     unit = (ROOT / "deploy/trustforge-release-router.service").read_text()
+    assert "User=trustforge" in unit
+    assert "Group=trustforge" in unit
     assert "ReadOnlyPaths=/etc/trustforge/release-router-runtime.json" in unit
     assert "ReadOnlyPaths=/etc/trustforge/release-router-runtime-keys.json" in unit
     assert "ReadOnlyPaths=/etc/trustforge\n" not in unit
+    assert (
+        "ReadOnlyPaths=/var/lib/trustforge/security-ledger/control" in unit
+    )
+    assert (
+        "ReadWritePaths=/var/lib/trustforge/security-ledger/router-outcomes"
+        in unit
+    )
+    assert "ReadWritePaths=/var/lib/trustforge/security-ledger\n" not in unit
+    assert "ReadWritePaths=/run/trustforge" in unit
+    assert (
+        "ExecStartPre=/usr/bin/touch "
+        "/run/trustforge/release-coordination.lock" in unit
+    )
     assert "TasksMax=64" in unit
     assert "MemoryMax=256M" in unit
+    assert str(COORDINATION_LOCK_PATH) == (
+        "/run/trustforge/release-coordination.lock"
+    )
 
 
 def test_operator_emergency_paths_are_artifact_and_extra_key_independent():

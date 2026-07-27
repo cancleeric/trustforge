@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import secrets
 import urllib.error
@@ -154,10 +155,14 @@ class ReleaseRoutingLedger(Protocol):
     def emergency_stop(self, *, ledger_id: str, reason: str) -> None:
         """Trip the separate durable one-way stop latch."""
 
-    def candidate_execution(
-        self, *, reservation_id: str
-    ) -> AbstractContextManager[None]:
-        """Revalidate and hold the stop/reservation ordering through B start."""
+    def candidate_connection(
+        self,
+        *,
+        endpoint: ReleaseEndpoint,
+        reservation_id: str,
+        connect_timeout: float,
+    ) -> AbstractContextManager[http.client.HTTPConnection]:
+        """Validate stop state and establish the bounded B socket atomically."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,12 +230,15 @@ class ReleaseABRouter:
 
         started = time.monotonic()
         try:
-            with self.ledger.candidate_execution(reservation_id=reservation_id):
-                response = self._request(
+            with self.ledger.candidate_connection(
+                endpoint=snapshot.candidate,
+                reservation_id=reservation_id,
+                connect_timeout=min(snapshot.policy.timeout_ms / 1000, 0.25),
+            ) as connection:
+                response = self._request_connected_candidate(
+                    connection,
                     snapshot.candidate,
                     path,
-                    release="B",
-                    failed_over=False,
                     timeout=snapshot.policy.timeout_ms / 1000,
                     request_headers=request_headers,
                 )
@@ -327,17 +335,8 @@ class ReleaseABRouter:
             request_headers=request_headers,
         )
 
-    def _request(
-        self,
-        endpoint: ReleaseEndpoint,
-        path: str,
-        *,
-        release: str,
-        failed_over: bool,
-        timeout: float = 5.0,
-        request_headers: Mapping[str, str] | None = None,
-    ) -> RoutedResponse:
-        self._verify_endpoint_manifest(endpoint, timeout=timeout)
+    @staticmethod
+    def _validate_path(path: str) -> None:
         parsed_path = urllib.parse.urlsplit(path)
         if (
             len(path) > 2048
@@ -350,6 +349,64 @@ class ReleaseABRouter:
             )
         ):
             raise ReleaseRoutingError("request path is not allowlisted")
+
+    def _request_connected_candidate(
+        self,
+        connection: http.client.HTTPConnection,
+        endpoint: ReleaseEndpoint,
+        path: str,
+        *,
+        timeout: float,
+        request_headers: Mapping[str, str] | None,
+    ) -> RoutedResponse:
+        """Send only through the socket established in the atomic stop handoff."""
+        self._validate_path(path)
+        if connection.sock is None:
+            raise ReleaseRoutingError("candidate connection was not established")
+        connection.sock.settimeout(timeout)
+        connection.request(
+            "GET",
+            "/.well-known/trustforge-release-manifest",
+            headers={"Connection": "keep-alive"},
+        )
+        manifest_response = connection.getresponse()
+        manifest_raw = manifest_response.read(32_769)
+        if manifest_response.status != 200 or len(manifest_raw) > 32_768:
+            raise ReleaseRoutingError("release manifest probe failed")
+        self._verify_manifest_payload(endpoint, manifest_raw)
+        # http.client would silently reconnect here. That would cross the stop
+        # boundary, so a candidate that closed the authenticated socket fails A.
+        if connection.sock is None:
+            raise ReleaseRoutingError(
+                "candidate closed authenticated connection before request"
+            )
+        headers = dict(request_headers or {})
+        headers["Connection"] = "close"
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        body = response.read(_MAX_RESPONSE_BYTES + 1)
+        if len(body) > _MAX_RESPONSE_BYTES:
+            raise ReleaseRoutingError("release response exceeds size limit")
+        return RoutedResponse(
+            body=body,
+            status_code=int(response.status),
+            release="B",
+            failed_over=False,
+            headers=self._safe_headers(response.headers),
+        )
+
+    def _request(
+        self,
+        endpoint: ReleaseEndpoint,
+        path: str,
+        *,
+        release: str,
+        failed_over: bool,
+        timeout: float = 5.0,
+        request_headers: Mapping[str, str] | None = None,
+    ) -> RoutedResponse:
+        self._verify_endpoint_manifest(endpoint, timeout=timeout)
+        self._validate_path(path)
         url = endpoint.base_url.rstrip("/") + path
         request = urllib.request.Request(
             url,
@@ -409,6 +466,9 @@ class ReleaseABRouter:
             raise ReleaseRoutingError("release manifest probe failed") from exc
         if len(raw) > 32_768:
             raise ReleaseRoutingError("release manifest probe is oversized")
+        self._verify_manifest_payload(endpoint, raw)
+
+    def _verify_manifest_payload(self, endpoint: ReleaseEndpoint, raw: bytes) -> None:
         try:
             payload = __import__("json").loads(raw)
         except (UnicodeDecodeError, ValueError) as exc:

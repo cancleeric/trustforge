@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
+import json
 import os
 import threading
 from dataclasses import asdict, replace
@@ -508,6 +510,23 @@ def test_router_snapshot_hot_path_is_read_only(tmp_path):
     assert "monotonic-time-floor" not in after
 
 
+def test_naive_clock_is_rejected_before_timezone_conversion(tmp_path):
+    with pytest.raises(DeploymentControlError, match="timezone aware"):
+        _control(tmp_path, clock=lambda: NOW.replace(tzinfo=None))
+
+
+def test_unsigned_checkpoint_time_mutation_blocks_candidate(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "checkpoint-time-mutation")
+    payload = json.loads(control._checkpoint_path.read_text())
+    payload["checkpoint_at"] = (NOW + timedelta(days=1)).isoformat()
+    control._checkpoint_path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    os.chmod(control._checkpoint_path, 0o600)
+    assert control.routing_snapshot().candidate_blocked is True
+
+
 def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
     control = _control(tmp_path)
     _start_canary(control, "checkpoint-first")
@@ -515,14 +534,12 @@ def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
     control.prepare("stop", _authorization(control, "stop", "checkpoint-stop"), now=NOW)
     control._checkpoint_path.write_bytes(old)
     os.chmod(control._checkpoint_path, 0o600)
-    with pytest.raises(DeploymentControlError, match="terminal head"):
-        control.routing_snapshot()
+    assert control.routing_snapshot().candidate_blocked is True
     damaged = bytearray(old)
     damaged[-3] ^= 1
     control._checkpoint_path.write_bytes(damaged)
     os.chmod(control._checkpoint_path, 0o600)
-    with pytest.raises(DeploymentControlError, match="checkpoint"):
-        control.routing_snapshot()
+    assert control.routing_snapshot().candidate_blocked is True
 
 
 def test_concurrent_checkpoint_readers_never_observe_partial_file(tmp_path):
@@ -542,7 +559,6 @@ def test_concurrent_checkpoint_readers_never_observe_partial_file(tmp_path):
             control._write_checkpoint(
                 authorization=authorization,
                 terminal_record=terminal,
-                checkpoint_at=NOW,
             )
 
     def reader():
@@ -567,7 +583,7 @@ def test_clock_rollback_blocks_b_and_start_but_status_remains_available(tmp_path
     observed = [NOW]
     control = _control(tmp_path, clock=lambda: observed[0])
     _start_canary(control, "clock-checkpoint")
-    observed[0] = NOW - timedelta(minutes=1)
+    observed[0] = NOW - timedelta(minutes=2)
     restarted = _control(tmp_path, clock=lambda: observed[0])
     assert restarted.routing_snapshot().phase == "canary"
     assert restarted.routing_snapshot().candidate_blocked is True
@@ -575,6 +591,20 @@ def test_clock_rollback_blocks_b_and_start_but_status_remains_available(tmp_path
     with pytest.raises(DeploymentControlError, match="clock rolled back"):
         restarted.prepare("start", receipt, now=observed[0])
     stop_receipt = _authorization(restarted, "stop", "clock-rollback-stop")
+    stop_receipt = replace(
+        stop_receipt,
+        issued_at=(NOW - timedelta(minutes=3)).isoformat(),
+        signature="",
+    )
+    stop_receipt = replace(
+        stop_receipt,
+        signature=Ed25519PrivateKey.from_private_bytes(AUTH_KEY)
+        .sign(
+            b"trustforge.deployment-authorization.v3\x00"
+            + canonical_json(stop_receipt.unsigned())
+        )
+        .hex(),
+    )
     restarted.prepare("stop", stop_receipt, now=observed[0])
     assert restarted.routing_snapshot().phase == "stopped"
     assert restarted.routing_snapshot().candidate_blocked is True
@@ -700,7 +730,7 @@ def test_restart_allows_a_second_epoch_scoped_emergency_stop(tmp_path):
     assert emergency[0]["nonce"] != emergency[1]["nonce"]
 
 
-def test_candidate_execution_rechecks_stop_before_network_start(tmp_path):
+def test_candidate_connection_rechecks_stop_before_network_start(tmp_path):
     control = _control(tmp_path)
     _start_canary(control, "concurrent-stop")
     state = control.routing_snapshot()
@@ -716,12 +746,18 @@ def test_candidate_execution_rechecks_stop_before_network_start(tmp_path):
     )
     network_started = False
     with pytest.raises(LedgerError, match="stale"):
-        with control.candidate_execution(reservation_id=reservation_id):
+        with control.candidate_connection(
+            endpoint=control.candidate,
+            reservation_id=reservation_id,
+            connect_timeout=0.1,
+        ):
             network_started = True
     assert network_started is False
 
 
-def test_hanging_candidate_does_not_delay_epoch_stop_latch(tmp_path):
+def test_connect_handoff_orders_stop_and_does_not_lock_hanging_response(
+    tmp_path, monkeypatch
+):
     control = _control(tmp_path)
     _start_canary(control, "hanging-b")
     state = control.routing_snapshot()
@@ -731,24 +767,113 @@ def test_hanging_candidate_does_not_delay_epoch_stop_latch(tmp_path):
     )
     epoch = control._canary_epoch(control._records())
     assert epoch is not None
+    connect_entered = threading.Event()
+    allow_connect = threading.Event()
     connected = threading.Event()
     release_hang = threading.Event()
+    stop_done = threading.Event()
+
+    def bounded_connect(_connection):
+        connect_entered.set()
+        assert allow_connect.wait(1)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", bounded_connect)
 
     def hanging_candidate():
-        with control.candidate_execution(reservation_id=reservation_id):
+        with control.candidate_connection(
+            endpoint=control.candidate,
+            reservation_id=reservation_id,
+            connect_timeout=0.1,
+        ):
             connected.set()
             release_hang.wait(2)
 
+    def stop():
+        control.prepare(
+            "stop",
+            _authorization(control, "stop", "stop-hanging-b"),
+            now=NOW,
+        )
+        stop_done.set()
+
     worker = threading.Thread(target=hanging_candidate)
     worker.start()
+    assert connect_entered.wait(1)
+    stopper = threading.Thread(target=stop)
+    stopper.start()
+    assert not stop_done.wait(0.05)
+    allow_connect.set()
     assert connected.wait(1)
-    started = __import__("time").monotonic()
-    control.prepare("stop", _authorization(control, "stop", "stop-hanging-b"), now=NOW)
-    elapsed = __import__("time").monotonic() - started
-    assert elapsed < 0.5
+    assert stop_done.wait(0.5)
+    assert worker.is_alive()
     assert control.ledger.epoch_stopped(
         ledger_id=control._records()[0]["ledger_id"], canary_epoch=epoch
     )
     release_hang.set()
     worker.join(1)
+    stopper.join(1)
     assert not worker.is_alive()
+    assert not stopper.is_alive()
+
+
+def test_latch_first_stop_crash_is_idempotently_reconciled(tmp_path, monkeypatch):
+    control = _control(tmp_path)
+    _start_canary(control, "latch-crash")
+    receipt = _authorization(control, "stop", "latch-crash-stop")
+    original = control.ledger.append
+    failed = False
+
+    def crash_once(event, **kwargs):
+        nonlocal failed
+        if event.get("kind") == "operator_stop" and not failed:
+            failed = True
+            raise OSError("simulated terminal publication crash")
+        return original(event, **kwargs)
+
+    monkeypatch.setattr(control.ledger, "append", crash_once)
+    with pytest.raises(OSError, match="publication"):
+        control.prepare("stop", receipt, now=NOW)
+    assert control.routing_snapshot().phase == "stopped"
+    result = control.prepare("stop", receipt, now=NOW)
+    assert result["event"]["kind"] == "operator_stop"
+    assert control._checkpoint_path.exists()
+    assert control.routing_snapshot().candidate_blocked is False
+
+
+def test_checkpoint_publication_failure_never_wedges_emergency_control(
+    tmp_path, monkeypatch
+):
+    control = _control(tmp_path)
+    prepared = control.prepare(
+        "start",
+        _authorization(control, "start", "checkpoint-publish-fail"),
+        now=NOW,
+    )
+    monkeypatch.setattr(
+        control,
+        "_write_checkpoint",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+    control.complete(
+        _completion(control, prepared, "start", "checkpoint-fail-complete"),
+        now=NOW,
+    )
+    state = control.routing_snapshot()
+    assert state.phase == "canary"
+    assert state.candidate_blocked is True
+    control.prepare(
+        "stop",
+        _authorization(control, "stop", "checkpoint-fail-stop"),
+        now=NOW,
+    )
+    assert control.routing_snapshot().phase == "stopped"
+    rollback = control.prepare(
+        "rollback-a",
+        _authorization(control, "rollback-a", "checkpoint-fail-rollback"),
+        now=NOW,
+    )
+    control.complete(
+        _completion(control, rollback, "rollback-a", "checkpoint-fail-reconcile"),
+        now=NOW,
+    )
+    assert control.routing_snapshot().phase == "disabled"

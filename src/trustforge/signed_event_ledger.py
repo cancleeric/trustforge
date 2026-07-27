@@ -77,6 +77,7 @@ class SignedEventLedger:
         ledger_role: str,
         bootstrap: bool = False,
         coordination_root: str | os.PathLike[str] | None = None,
+        coordination_lock_path: str | os.PathLike[str] | None = None,
         max_file_bytes: int = 8 * 1024 * 1024,
         max_events: int = 10_000,
         max_event_bytes: int = 32 * 1024,
@@ -129,6 +130,9 @@ class SignedEventLedger:
         self.ledger_role = ledger_role
         self.coordination_root = Path(
             coordination_root or self.directory.parent
+        ).absolute()
+        self.coordination_lock_path = Path(
+            coordination_lock_path or (self.coordination_root / "coordination.lock")
         ).absolute()
         if self.directory.parent != self.coordination_root:
             raise LedgerError("ledger directory must be a direct child of pinned root")
@@ -186,7 +190,7 @@ class SignedEventLedger:
     def coordination_lock(self):
         """Serialize cross-ledger control transitions and route reservations."""
         fd = os.open(
-            self.coordination_root / "coordination.lock",
+            self.coordination_lock_path,
             os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
             0o600,
         )
@@ -194,7 +198,7 @@ class SignedEventLedger:
             info = os.fstat(fd)
             if (
                 not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.geteuid()
+                or (os.geteuid() != 0 and info.st_uid != os.geteuid())
                 or stat.S_IMODE(info.st_mode) != 0o600
             ):
                 raise LedgerError("coordination lock metadata is unsafe")

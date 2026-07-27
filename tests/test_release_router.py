@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import threading
 from contextlib import contextmanager
@@ -31,10 +32,13 @@ _MANIFEST_PUBLIC_KEY = _MANIFEST_PRIVATE_KEY.public_key().public_bytes(
 
 
 class _Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     marker = b"?"
     fail = False
     artifact_digest = ""
     origin = ""
+    close_manifest = False
+    normal_requests = 0
 
     def do_GET(self):
         if self.path == "/.well-known/trustforge-release-manifest":
@@ -49,12 +53,18 @@ class _Handler(BaseHTTPRequestHandler):
             ).hex()
             body = json.dumps({**unsigned, "signature": signature}).encode()
             self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            if self.close_manifest:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
             return
+        type(self).normal_requests += 1
+        body = self.marker
         self.send_response(503 if self.fail else 200)
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(self.marker)
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         return
@@ -150,11 +160,21 @@ class _Ledger:
         self.emergency = True
 
     @contextmanager
-    def candidate_execution(self, *, reservation_id):
+    def candidate_connection(self, *, endpoint, reservation_id, connect_timeout):
         assert reservation_id in self.reservations
         if self.phase != "canary":
             raise RuntimeError("stopped")
-        yield
+        parsed = __import__("urllib.parse", fromlist=["urlsplit"]).urlsplit(
+            endpoint.base_url
+        )
+        connection = http.client.HTTPConnection(
+            parsed.hostname, parsed.port, timeout=connect_timeout
+        )
+        connection.connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
 
 
 def test_real_separate_http_releases_route_limited_b_without_core_import():
@@ -220,6 +240,36 @@ def test_real_b_failure_fails_over_a_and_durable_stop_prevents_next_b():
         next_response = router.route(stable_subject="stable-user")
         assert next_response.release == "A"
         assert ledger.requests == 1
+    finally:
+        a_server.shutdown()
+        b_server.shutdown()
+
+
+def test_candidate_manifest_connection_close_cannot_reconnect_and_falls_back_a():
+    a_server, _ = _server(b"A", "sha256:" + "a" * 64)
+    b_server, b_handler = _server(b"B", "sha256:" + "b" * 64)
+    b_handler.close_manifest = True
+    try:
+        a = ReleaseEndpoint(
+            "sha256:" + "a" * 64,
+            f"http://127.0.0.1:{a_server.server_port}",
+            "manifest-1",
+        )
+        b = ReleaseEndpoint(
+            "sha256:" + "b" * 64,
+            f"http://127.0.0.1:{b_server.server_port}",
+            "manifest-1",
+        )
+        router = ReleaseABRouter(
+            _Ledger(a, b),
+            {"route-2026-07": b"r" * 32},
+            pinned_a_fallback=a,
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
+        )
+        response = router.route(stable_subject="stable-user")
+        assert response.release == "A"
+        assert response.failed_over is True
+        assert b_handler.normal_requests == 0
     finally:
         a_server.shutdown()
         b_server.shutdown()
@@ -360,6 +410,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         )
         control.initialize()
         now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        control.clock = lambda: now
         auth_unsigned = {
             "action": "start",
             "target": target,
@@ -459,7 +510,6 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         control._write_checkpoint(
             authorization=DeploymentAuthorization(**auth_receipt),
             terminal_record=terminal,
-            checkpoint_at=control._current_time(),
         )
         router = ReleaseABRouter(
             control,
@@ -487,6 +537,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             evidence_bundle_digest="sha256:" + "e" * 64,
             stop_after_errors=1,
             require_distributed_lock=False,
+            clock=lambda: now,
         )
         assert 1 <= restarted.routing_snapshot().candidate_requests <= 5
         assert sum(response.release == "B" for response in responses) <= 5
