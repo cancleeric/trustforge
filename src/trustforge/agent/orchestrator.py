@@ -27,7 +27,8 @@ from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..term_annotations import annotate_terms
 from trustforge_core import run_kernel
 
-from .kernel_mapper import to_kernel_input
+from .kernel_mapper import to_kernel_input, to_legacy_scoring
+from .shadow import is_kernel_promoted, record_shadow_run
 from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 from . import narrative_locale as _loc
 
@@ -1514,28 +1515,89 @@ def run_agent_pipeline(
     kernel_output = run_kernel(
         to_kernel_input(claims, pit_epoch=now_ts, coin=coin, query=query)
     )
+
+    # --- #732 P0-6 shadow parity: compare kernel vs legacy, track promotion ---
+    # Shadow code must NEVER block the user-facing pipeline (codex-review C4).
+    # If this raises, log it and continue with legacy — the user still gets a report.
+    try:
+        _shadow_parity = record_shadow_run(
+            kernel=kernel_output,
+            legacy_confidence=(
+                brief.calibrated_confidence
+                if brief.calibrated_confidence is not None
+                else brief.confidence
+            ),
+            legacy_trust_raw=brief.confidence,
+            legacy_scored=scored,
+            coin=coin,
+            qtype_value=qtype.value,
+        )
+        _kernel_promoted = is_kernel_promoted()
+    except Exception:
+        _shadow_parity = {"last_parity_passed": False, "parity_rate": 0.0, "window_runs": 0, "promoted": False, "promotion_eligible": False, "canary_stop_triggered": False, "coins_seen": [], "qtypes_seen": []}
+        _kernel_promoted = False
+        logging.warning(
+            "shadow parity comparison raised exception (coin=%s); "
+            "continuing with legacy brief. See traceback for details.",
+            coin, exc_info=True,
+        )
+        log.record(
+            "shadow.parity_failed",
+            params={"coin": coin, "qtype": qtype.value},
+            summary="shadow parity exception; continuing with legacy",
+        )
     log.record(
         "judgment.derive",
         params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),
                 "confidence": round(brief.confidence, 3),
                 "kernel_confidence": round(kernel_output.confidence, 3),
                 "kernel_abstain": kernel_output.abstain,
-                "kernel_reason_codes": kernel_output.reason_codes},
+                "kernel_reason_codes": kernel_output.reason_codes,
+                "shadow_parity_passed": _shadow_parity["last_parity_passed"],
+                "shadow_promoted": _kernel_promoted,
+                "shadow_parity_rate": _shadow_parity["parity_rate"],
+                "shadow_window_runs": _shadow_parity["window_runs"]},
         summary="Step2 純 pipeline 完成；判斷由演算法產生，非 LLM",
     )
+
+    # #732 kernel promotion: if parity thresholds are met, the kernel-derived
+    # brief replaces the legacy brief for build_report().  The substitution is
+    # behind-to_legacy_scoring() which validates the full output graph before
+    # allowing promotion (see kernel_mapper.py docstring).
+    if _kernel_promoted:
+        try:
+            _promoted_scored, _promoted_brief = to_legacy_scoring(kernel_output, claims)
+            report_scored = _promoted_scored
+            report_brief = _promoted_brief
+            log.record(
+                "promotion.kernel_active",
+                params={"kernel_trust_score": round(kernel_output.trust_score, 3),
+                        "kernel_confidence": round(kernel_output.confidence, 3)},
+                summary="kernel promoted; brief 來源已切換為 kernel 輸出",
+            )
+        except Exception:
+            report_scored = scored
+            report_brief = brief
+            logging.warning(
+                "kernel promotion failed: to_legacy_scoring raised exception; "
+                "falling back to legacy brief (coin=%s)", coin, exc_info=True
+            )
+    else:
+        report_scored = scored
+        report_brief = brief
 
     # ------------------------------------------------------------------
     # Step 3: 帶溯源行文（Bedrock #2，由 build_report 執行並記錄 log）
     # ------------------------------------------------------------------
     log.record("pipeline.step3.start", summary="準備 Bedrock 行文（Step3）")
     report, evidence = build_report(
-        query=query, coin=coin, qtype=qtype, brief=brief,
+        query=query, coin=coin, qtype=qtype, brief=report_brief,
         client=client, log=log, now_fn=now_fn,
         stance_fn=shared_stance_fn,
         # demo 可靠性 #32 追加 HIGH 修正：傳完整（未截斷）scored 全集做跨源訊號
         # 偵測，避免 aggregate() 的 supporting[:10]/contrarian[:5] 截斷把真矛盾
         # 配對擠出偵測範圍（見 build_report docstring）。
-        scored=scored,
+        scored=report_scored,
     )
     # 防禦性再收割一次（demo 可靠性 #32 追加 cost-integrity HIGH 修正）：
     # build_report() 內部已在 Step2.5 偵測後自行收割一次，這裡屬於
