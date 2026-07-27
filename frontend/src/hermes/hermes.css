@@ -976,6 +976,13 @@
   background: #e9ffff;
   box-shadow: 0 0 7px #fff, 0 0 16px #4dd8e0;
   transform: translate(-50%, -50%);
+  /* N63：跟 N62 同一類。這三顆封包的「位置」與「透明度」只寫在 keyframes 裡，
+     基態沒有 left 也沒有 opacity。低動態把動畫停掉，left 退回 auto——三顆全部
+     疊在同一個點（實測都落在 x=496），opacity 退回 1，於是使用者關掉動態反而
+     看到管線上堆著三顆亮點。靜止狀態寫成 keyframes 的 100%（已送達、散盡）：
+     動畫照跑時從 0% 起算，行為不變；停掉時停在正確終點。 */
+  left: 100%;
+  opacity: 0;
   animation: hermes-energy-flow 5s linear infinite;
 }
 

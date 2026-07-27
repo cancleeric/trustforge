@@ -154,8 +154,11 @@ export default function CurrencyGalaxy({
       <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 8% 22%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 18% 68%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 32% 15%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 46% 78%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-1 90s linear infinite alternate', opacity: 0.8 }} />
       <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 62% 30%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 74% 60%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 88% 20%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 94% 72%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-2 130s linear infinite alternate', opacity: 0.6 }} />
       <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 55% 85%,rgba(255,255,255,.5),transparent),radial-gradient(1px 1px at 12% 90%,rgba(255,255,255,.35),transparent),radial-gradient(1px 1px at 40% 45%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-3 160s linear infinite alternate', opacity: 0.45 }} />
-      {/* holo radar sweep */}
-      <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 60, background: 'linear-gradient(rgba(77,216,224,.09),transparent)', animation: 'hermes-holo-sweep 7s linear infinite', pointerEvents: 'none' }} />
+      {/* holo radar sweep — N63：掃描條的位移只寫在 keyframes 裡，基態沒有
+          transform。低動態把動畫停掉就退回 translateY(0)，這條青色漸層帶會
+          永遠卡在星系頂端，看起來像掃到一半凍住。基態補上 keyframes 100% 的
+          translateY(720px)（＝已掃出畫面），動畫照跑時從 0% 起算行為不變。 */}
+      <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 60, background: 'linear-gradient(rgba(77,216,224,.09),transparent)', transform: 'translateY(720px)', animation: 'hermes-holo-sweep 7s linear infinite', pointerEvents: 'none' }} />
       {/* orbit guide circles */}
       <div style={{ position: 'absolute', left: '50%', top: '50%', width: 660, height: 660, transform: 'translate(-50%,-50%)', border: '1px solid rgba(77,216,224,.12)', borderRadius: '50%' }} />
       <div style={{ position: 'absolute', left: '50%', top: '50%', width: 560, height: 560, transform: 'translate(-50%,-50%)', border: '1px solid rgba(77,216,224,.08)', borderRadius: '50%' }} />
