@@ -59,7 +59,7 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
         .public_key()
         .public_bytes(Encoding.Raw, PublicFormat.Raw)
     )
-    subprocess.run(
+    provisioned = subprocess.run(
         [
             sys.executable,
             str(ROOT / "scripts/provision_release_ledgers.py"),
@@ -76,16 +76,58 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
             outcome_runtime_public.hex(),
         ],
         check=True,
+        capture_output=True,
+        text=True,
     )
     assert not outcome_seed.exists()
     assert not control_seed.exists()
-    assert (control / "bootstrap.json").stat().st_mode & 0o777 == 0o640
-    assert (outcomes / "bootstrap.json").stat().st_mode & 0o777 == 0o640
+    provision_receipt = __import__("json").loads(provisioned.stdout)
+    control_public_file = tmp_path / "control-public.json"
+    outcome_public_file = tmp_path / "outcome-public.json"
+    control_public_file.write_text(
+        __import__("json").dumps(
+            {
+                provision_receipt["control_bootstrap_public"][
+                    "key_id"
+                ]: provision_receipt["control_bootstrap_public"]["public_key"],
+                "control-runtime-1": control_runtime_public.hex(),
+            }
+        )
+    )
+    outcome_public_file.write_text(
+        __import__("json").dumps(
+            {
+                provision_receipt["outcome_bootstrap_public"][
+                    "key_id"
+                ]: provision_receipt["outcome_bootstrap_public"]["public_key"],
+                "router-outcome-runtime-1": outcome_runtime_public.hex(),
+            }
+        )
+    )
+    control_public_file.chmod(0o400)
+    outcome_public_file.chmod(0o400)
     for directory, owner in ((control, operator.pw_uid), (outcomes, router.pw_uid)):
         event = directory / "events.jsonl"
         event.touch(mode=0o640)
         os.chown(event, owner, release_gid)
-
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/migrate_release_ledgers.py"),
+            "--source-root",
+            str(root),
+            "--target-root",
+            str(root),
+            "--control-public",
+            str(control_public_file),
+            "--outcome-public",
+            str(outcome_public_file),
+        ],
+        check=True,
+        timeout=10,
+    )
+    assert (control / "bootstrap.json").stat().st_mode & 0o777 == 0o640
+    assert (outcomes / "bootstrap.json").stat().st_mode & 0o777 == 0o640
     subprocess.run(
         [
             "systemd-sysusers",

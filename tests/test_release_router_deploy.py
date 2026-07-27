@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 from pathlib import Path
 
 from scripts.deployment_readiness import (
@@ -33,11 +34,9 @@ def test_install_workflow_dry_run_is_explicit_and_non_mutating():
     assert "resolve the configured worker user" in result.stdout
     assert "usermod -a -G trustforge-release" in result.stdout
     assert (
-            result.stdout.index("systemd-sysusers")
-            < result.stdout.index("systemd-tmpfiles --create")
-            < result.stdout.index(
-                "systemctl start trustforge-release-router.service"
-            )
+        result.stdout.index("systemd-sysusers")
+        < result.stdout.index("systemd-tmpfiles --create")
+        < result.stdout.index("systemctl start trustforge-release-router.service")
     )
 
 
@@ -195,3 +194,89 @@ def test_operator_emergency_paths_are_artifact_and_extra_key_independent():
     assert "outcome-private" not in _key_roles_for_command("initialize")
     assert "outcome-private" not in _key_roles_for_command("start")
     assert "outcome-private" not in _key_roles_for_command("promote")
+
+
+def test_installer_failure_stops_new_service_and_restores_nginx(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    trace = tmp_path / "trace"
+
+    def command(name: str, body: str) -> None:
+        path = fake_bin / name
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+
+    command(
+        "id",
+        'if [ "${1:-}" = "-u" ]; then echo 0; '
+        'elif [ "${1:-}" = "-nG" ]; then echo trustforge-release; fi\nexit 0\n',
+    )
+    command("systemd-sysusers", "exit 0\n")
+    command("systemd-tmpfiles", "exit 0\n")
+    command("usermod", "exit 0\n")
+    command("nginx", 'if [ "${1:-}" = "-T" ]; then echo "user fake;"; fi\nexit 0\n')
+    command(
+        "systemctl",
+        f'echo "$*" >>"{trace}"\n'
+        'if [ "${1:-}" = "is-active" ]; then exit 1; fi\nexit 0\n',
+    )
+    command("setpriv", "exit 0\n")
+    command("python3", "exit 0\n")
+    command(
+        "curl",
+        f'echo "$*" >>"{trace}"\ncase "$*" in *--netrc-file*) exit 22;; esac\nexit 0\n',
+    )
+    command(
+        "stat",
+        'case "$*" in *"%a"*) echo 600;; *) echo 0;; esac\n',
+    )
+    command(
+        "install",
+        'prev=""; last=""; for arg in "$@"; do prev="$last"; last="$arg"; done\n'
+        'cp "$prev" "$last"\n',
+    )
+
+    install_root = tmp_path / "root"
+    nginx_target = install_root / "etc/nginx/snippets/trustforge-release-router.conf"
+    nginx_target.parent.mkdir(parents=True)
+    nginx_target.write_text("old nginx\n")
+    for path in (
+        install_root / "etc/trustforge/release-router-runtime.json",
+        install_root / "etc/trustforge/release-router-runtime-keys.json",
+        install_root / "var/lib/trustforge/security-ledger/control/bootstrap.json",
+        install_root
+        / "var/lib/trustforge/security-ledger/router-outcomes/bootstrap.json",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+    netrc = tmp_path / "smoke.netrc"
+    netrc.write_text("machine router.test login secret-user password secret-pass\n")
+    netrc.chmod(0o600)
+    ca = tmp_path / "ca.pem"
+    ca.write_text("test-ca")
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "TRUSTFORGE_INSTALL_ROOT": str(install_root),
+        "TRUSTFORGE_SMOKE_NETRC": str(netrc),
+        "TRUSTFORGE_SMOKE_CA": str(ca),
+        "TRUSTFORGE_SMOKE_HOST": "router.test",
+    }
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "deploy/install_release_router.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert nginx_target.read_text() == "old nginx\n"
+    assert trace.exists(), result.stderr
+    recorded = trace.read_text()
+    assert "stop trustforge-release-router.service" in recorded
+    assert "enable trustforge-release-router.service" not in recorded
+    assert "--netrc-file /dev/fd/9" in recorded
+    assert "--insecure" not in recorded
+    assert "secret-user" not in recorded
+    assert "secret-pass" not in recorded

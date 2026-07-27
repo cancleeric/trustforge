@@ -31,6 +31,7 @@ OUTCOME_KINDS = frozenset(
 )
 ALLOWED_FIXED_FILES = frozenset({"bootstrap.json", "events.jsonl", "head.json"})
 JOURNAL_SCHEMA = "trustforge.release-ledger-migration/v1"
+JOURNAL_STATES = frozenset({"staged", "old-backed-up", "published", "committed"})
 
 
 def _allowed_entry(name: str) -> bool:
@@ -51,8 +52,8 @@ def _fsync_tree(root: Path) -> None:
 
 
 def _write_journal(path: Path, state: str, stage: Path, backup: Path) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    encoded = (
         json.dumps(
             {
                 "schema": JOURNAL_SCHEMA,
@@ -61,11 +62,22 @@ def _write_journal(path: Path, state: str, stage: Path, backup: Path) -> None:
                 "backup": backup.name,
             },
             sort_keys=True,
-        )
-        + "\n"
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
     )
-    with temporary.open("rb") as stream:
-        os.fsync(stream.fileno())
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.fchown(fd, 0, 0)
+        os.fchmod(fd, 0o600)
+        os.write(fd, encoded)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     os.replace(temporary, path)
     parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     os.fsync(parent_fd)
@@ -75,8 +87,22 @@ def _write_journal(path: Path, state: str, stage: Path, backup: Path) -> None:
 def _recover(journal: Path, target: Path, stage: Path, backup: Path) -> None:
     if not journal.exists():
         return
-    payload = json.loads(journal.read_text())
-    if payload.get("schema") != JOURNAL_SCHEMA:
+    info = os.lstat(journal)
+    raw = journal.read_bytes()
+    payload = json.loads(raw)
+    expected_names = (target.name + ".staging", target.name + ".rollback")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or not isinstance(payload, dict)
+        or set(payload) != {"schema", "state", "stage", "backup"}
+        or json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        != raw
+        or payload.get("schema") != JOURNAL_SCHEMA
+        or payload.get("state") not in JOURNAL_STATES
+        or (payload.get("stage"), payload.get("backup")) != expected_names
+    ):
         raise SystemExit("unknown migration recovery journal")
     state = payload.get("state")
     # Until a committed journal exists, the authenticated old target wins.
@@ -187,24 +213,29 @@ def main() -> int:
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("ledger migration requires root")
-    control_keys = _keys(args.control_public)
-    outcome_keys = _keys(args.outcome_public)
     args.target_root.parent.mkdir(parents=True, exist_ok=True)
-    release_gid = grp.getgrnam("trustforge-release").gr_gid
-    operator_uid = pwd.getpwnam("trustforge-operator").pw_uid
-    router_uid = pwd.getpwnam("trustforge-router").pw_uid
+    parent_info = os.lstat(args.target_root.parent)
+    if parent_info.st_uid != 0 or stat.S_IMODE(parent_info.st_mode) & 0o022:
+        raise SystemExit("migration parent must be root-owned and not writable")
     stage = args.target_root.with_name(args.target_root.name + ".staging")
     backup = args.target_root.with_name(args.target_root.name + ".rollback")
     journal = args.target_root.with_name(args.target_root.name + ".migration.json")
     coordination = os.open(
-        args.source_root / ".migration-coordination.lock",
+        args.target_root.parent / f".{args.target_root.name}.migration.lock",
         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
         0o600,
     )
+    os.fchmod(coordination, 0o600)
+    fcntl.flock(coordination, fcntl.LOCK_EX)
+    # Recovery is always first while holding the stable parent lock.
+    _recover(journal, args.target_root, stage, backup)
+    control_keys = _keys(args.control_public)
+    outcome_keys = _keys(args.outcome_public)
+    release_gid = grp.getgrnam("trustforge-release").gr_gid
+    operator_uid = pwd.getpwnam("trustforge-operator").pw_uid
+    router_uid = pwd.getpwnam("trustforge-router").pw_uid
     event_fds: list[int] = []
     try:
-        fcntl.flock(coordination, fcntl.LOCK_EX)
-        _recover(journal, args.target_root, stage, backup)
         # Fixed-order exclusive locks fence appenders from verification to durable publish.
         for directory in ("control", "router-outcomes"):
             fd = os.open(
@@ -230,6 +261,13 @@ def main() -> int:
             )
             records = projection.read_from_exclusively_locked_fd(event_fds[index])
             source_heads.append(records[-1]["event_hash"] if records else None)
+        same_root = args.target_root.exists() and os.path.samestat(
+            os.stat(args.source_root), os.stat(args.target_root)
+        )
+        if same_root:
+            # In-place migration is already authenticated under both fixed-order
+            # writer locks; never re-open/re-lock the same ledgers.
+            return 0
         if args.target_root.exists():
             # Never replace an unknown target: the rollback candidate must itself
             # be a fully authenticated pair of ledgers.

@@ -10,14 +10,17 @@ elif [[ $# -ne 0 ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST_ROOT="${TRUSTFORGE_INSTALL_ROOT:-}"
 UNIT_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.service"
 NGINX_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.nginx.conf"
 SYSUSERS_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.sysusers.conf"
 TMPFILES_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.tmpfiles.conf"
-UNIT_TARGET="/etc/systemd/system/trustforge-release-router.service"
-NGINX_TARGET="/etc/nginx/snippets/trustforge-release-router.conf"
-SYSUSERS_TARGET="/etc/sysusers.d/trustforge-release-router.conf"
-TMPFILES_TARGET="/etc/tmpfiles.d/trustforge-release-router.conf"
+UNIT_TARGET="$DEST_ROOT/etc/systemd/system/trustforge-release-router.service"
+NGINX_TARGET="$DEST_ROOT/etc/nginx/snippets/trustforge-release-router.conf"
+SYSUSERS_TARGET="$DEST_ROOT/etc/sysusers.d/trustforge-release-router.conf"
+TMPFILES_TARGET="$DEST_ROOT/etc/tmpfiles.d/trustforge-release-router.conf"
+CONFIG_ROOT="$DEST_ROOT/etc/trustforge"
+LEDGER_ROOT="$DEST_ROOT/var/lib/trustforge/security-ledger"
 
 for source in "$UNIT_SOURCE" "$NGINX_SOURCE" "$SYSUSERS_SOURCE" "$TMPFILES_SOURCE"; do
   [[ -f "$source" && ! -L "$source" ]] || {
@@ -37,14 +40,14 @@ if $DRY_RUN; then
     "nginx -T # preflight: resolve the configured worker user" \
     "usermod -a -G trustforge-release <resolved-nginx-worker-user>" \
     "id -nG <resolved-nginx-worker-user> # verify trustforge-release membership" \
-    "python3 scripts/deployment_readiness.py status # authenticate both ledgers" \
+    "setpriv trustforge-operator python3 scripts/deployment_readiness.py status" \
     "test -r runtime config, public keyring, signed endpoint manifests and A/B units" \
     "systemctl daemon-reload" \
     "nginx -t" \
     "systemctl start trustforge-release-router.service # not enabled until smoke passes" \
     "systemctl reload nginx" \
     "curl --unix-socket /run/trustforge/release-router.sock http://localhost/healthz" \
-    "curl https://127.0.0.1/healthz # actual nginx HTTP path" \
+    "curl --netrc-file /dev/fd/9 --cacert <pinned-ca> https://<hostname>/healthz" \
     "systemctl enable trustforge-release-router.service"
   exit 0
 fi
@@ -53,6 +56,34 @@ fi
   echo "installation requires root" >&2
   exit 77
 }
+
+mkdir -p "$(dirname "$UNIT_TARGET")" "$(dirname "$NGINX_TARGET")" \
+  "$(dirname "$SYSUSERS_TARGET")" "$(dirname "$TMPFILES_TARGET")" \
+  "$DEST_ROOT/var/tmp"
+NGINX_BACKUP="$(mktemp "$DEST_ROOT/var/tmp/trustforge-router-nginx.XXXXXX")"
+chmod 0600 "$NGINX_BACKUP"
+NGINX_EXISTED=false
+SERVICE_WAS_ACTIVE=false
+[[ -f "$NGINX_TARGET" && ! -L "$NGINX_TARGET" ]] && {
+  cp -p "$NGINX_TARGET" "$NGINX_BACKUP"
+  NGINX_EXISTED=true
+}
+systemctl is-active --quiet trustforge-release-router.service && SERVICE_WAS_ACTIVE=true
+rollback_install() {
+  status=$?
+  if ! $SERVICE_WAS_ACTIVE; then
+    systemctl stop trustforge-release-router.service >/dev/null 2>&1 || true
+  fi
+  if $NGINX_EXISTED; then
+    install -o root -g root -m 0644 "$NGINX_BACKUP" "$NGINX_TARGET"
+  else
+    rm -f -- "$NGINX_TARGET"
+  fi
+  nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+  rm -f -- "$NGINX_BACKUP"
+  exit "$status"
+}
+trap rollback_install ERR INT TERM
 
 install -o root -g root -m 0644 "$UNIT_SOURCE" "$UNIT_TARGET"
 install -o root -g root -m 0644 "$NGINX_SOURCE" "$NGINX_TARGET"
@@ -72,10 +103,10 @@ id "$NGINX_WORKER_USER" >/dev/null
 usermod -a -G trustforge-release "$NGINX_WORKER_USER"
 id -nG "$NGINX_WORKER_USER" | tr ' ' '\n' | grep -Fx trustforge-release >/dev/null
 for prerequisite in \
-  /etc/trustforge/release-router-runtime.json \
-  /etc/trustforge/release-router-runtime-keys.json \
-  /var/lib/trustforge/security-ledger/control/bootstrap.json \
-  /var/lib/trustforge/security-ledger/router-outcomes/bootstrap.json; do
+  "$CONFIG_ROOT/release-router-runtime.json" \
+  "$CONFIG_ROOT/release-router-runtime-keys.json" \
+  "$LEDGER_ROOT/control/bootstrap.json" \
+  "$LEDGER_ROOT/router-outcomes/bootstrap.json"; do
   [[ -f "$prerequisite" && ! -L "$prerequisite" ]] || {
     echo "release router is not provisioned: missing $prerequisite" >&2
     exit 79
@@ -83,7 +114,11 @@ for prerequisite in \
 done
 systemctl cat trustforge-a.service >/dev/null
 systemctl cat trustforge-b.service >/dev/null
-python3 "$ROOT_DIR/scripts/deployment_readiness.py" status >/dev/null || {
+setpriv \
+  --reuid=trustforge-operator \
+  --regid=trustforge-operator \
+  --init-groups \
+  python3 "$ROOT_DIR/scripts/deployment_readiness.py" status >/dev/null || {
   echo "release ledgers/configuration did not authenticate; provision or migrate first" >&2
   exit 80
 }
@@ -99,7 +134,28 @@ setpriv \
   'import socket; s=socket.socket(socket.AF_UNIX); s.connect("/run/trustforge/release-router.sock"); s.close()'
 curl --fail --silent --show-error --unix-socket /run/trustforge/release-router.sock \
   -H 'X-TrustForge-Trusted-Subject: installer-smoke' http://localhost/healthz >/dev/null
-curl --fail --silent --show-error --insecure \
-  -u "${TRUSTFORGE_SMOKE_USER:?set smoke HTTP user}:${TRUSTFORGE_SMOKE_PASSWORD:?set smoke HTTP password}" \
-  https://127.0.0.1/healthz >/dev/null
+SMOKE_NETRC="${TRUSTFORGE_SMOKE_NETRC:?set path to root-only smoke netrc}"
+SMOKE_CA="${TRUSTFORGE_SMOKE_CA:?set path to pinned CA bundle}"
+SMOKE_HOST="${TRUSTFORGE_SMOKE_HOST:?set authenticated TLS hostname}"
+for secret_file in "$SMOKE_NETRC" "$SMOKE_CA"; do
+  [[ -f "$secret_file" && ! -L "$secret_file" && "$(stat -c %u "$secret_file")" == 0 ]] || {
+    echo "smoke credential/CA file is unsafe" >&2
+    false
+  }
+done
+[[ "$(stat -c %a "$SMOKE_NETRC")" == 600 ]] || {
+  echo "smoke netrc must be root-only 0600" >&2
+  false
+}
+exec 9<"$SMOKE_NETRC"
+[[ "$(stat -Lc %u /proc/$$/fd/9)" == 0 && "$(stat -Lc %a /proc/$$/fd/9)" == 600 ]] || {
+  echo "opened smoke netrc descriptor metadata changed" >&2
+  false
+}
+curl --fail --silent --show-error --netrc-file /dev/fd/9 \
+  --cacert "$SMOKE_CA" --resolve "$SMOKE_HOST:443:127.0.0.1" \
+  "https://$SMOKE_HOST/healthz" >/dev/null
+exec 9<&-
 systemctl enable trustforge-release-router.service
+trap - ERR INT TERM
+rm -f -- "$NGINX_BACKUP"
