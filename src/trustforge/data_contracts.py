@@ -61,10 +61,17 @@ def _asset_context_schema_properties() -> dict[str, Any]:
 
 
 def _asset_intrinsic_schema_properties() -> dict[str, Any]:
-    timestamp = {"type": "string", "format": "date-time"}
+    timestamp = {
+        "type": "string",
+        "format": "date-time",
+        "pattern": r"(?:Z|[+-]\d{2}:\d{2})$",
+    }
     provenance = {
         "type": "object",
-        "required": ["source_urls", "methodology", "content_hash", "coverage"],
+        "required": [
+            "source_urls", "methodology", "content_hash", "coverage",
+            "evidence_path", "source_revision",
+        ],
         "properties": {
             "source_urls": {
                 "type": "array",
@@ -73,6 +80,11 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
             "methodology": {"type": "string", "minLength": 1, "pattern": r"\S"},
             "content_hash": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
             "coverage": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "evidence_path": {
+                "type": "string",
+                "pattern": r"^data/asset_intrinsic_evidence/[^/]+\.txt$",
+            },
+            "source_revision": {"type": "string", "minLength": 1, "pattern": r"\S"},
         },
         "additionalProperties": False,
     }
@@ -88,7 +100,11 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
             "value": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
             "as_of": timestamp,
             "valid_from": timestamp,
-            "valid_until": {"type": ["string", "null"], "format": "date-time"},
+            "valid_until": {
+                "type": ["string", "null"],
+                "format": "date-time",
+                "pattern": r"(?:Z|[+-]\d{2}:\d{2})$",
+            },
             "fetched_at": timestamp,
             "provenance": provenance,
         },

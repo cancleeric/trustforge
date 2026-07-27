@@ -23,7 +23,7 @@ dependencies = [
 # CI（.github/workflows/ci.yml）以 `pip install -e ".[dev]"` 安裝後直接跑 `pytest`，
 # 若這裡沒帶 pytest-cov，addopts 的 --cov 會讓 pytest 報「unrecognized arguments」
 # → CI 直接變紅。故新增 pytest-cov 是覆蓋率閘的必要相依。
-dev = ["pytest>=8", "moto[dynamodb]>=5", "pytest-cov>=5"]
+dev = ["pytest>=8", "moto[dynamodb]>=5", "pytest-cov>=5", "jsonschema>=4,<5"]
 
 [project.scripts]
 trustforge = "trustforge.cli:main"

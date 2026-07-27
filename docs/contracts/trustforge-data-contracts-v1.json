@@ -162,7 +162,16 @@
                         "pattern": "\\S",
                         "type": "string"
                       },
+                      "evidence_path": {
+                        "pattern": "^data/asset_intrinsic_evidence/[^/]+\\.txt$",
+                        "type": "string"
+                      },
                       "methodology": {
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "source_revision": {
                         "minLength": 1,
                         "pattern": "\\S",
                         "type": "string"
@@ -180,7 +189,9 @@
                       "source_urls",
                       "methodology",
                       "content_hash",
-                      "coverage"
+                      "coverage",
+                      "evidence_path",
+                      "source_revision"
                     ],
                     "type": "object"
                   },
@@ -196,10 +207,12 @@
           "properties": {
             "as_of": {
               "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
               "type": "string"
             },
             "fetched_at": {
               "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
               "type": "string"
             },
             "name": {
@@ -223,7 +236,16 @@
                   "pattern": "\\S",
                   "type": "string"
                 },
+                "evidence_path": {
+                  "pattern": "^data/asset_intrinsic_evidence/[^/]+\\.txt$",
+                  "type": "string"
+                },
                 "methodology": {
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "source_revision": {
                   "minLength": 1,
                   "pattern": "\\S",
                   "type": "string"
@@ -240,7 +262,9 @@
                 "source_urls",
                 "methodology",
                 "content_hash",
-                "coverage"
+                "coverage",
+                "evidence_path",
+                "source_revision"
               ],
               "type": "object"
             },
@@ -254,10 +278,12 @@
             },
             "valid_from": {
               "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
               "type": "string"
             },
             "valid_until": {
               "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
               "type": [
                 "string",
                 "null"

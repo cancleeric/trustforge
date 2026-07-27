@@ -8,6 +8,7 @@ use only dimensions exposed by :meth:`AssetIntrinsicRepository.pit_view`.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -43,13 +44,15 @@ class IntrinsicProvenance:
     methodology: str
     content_hash: str
     coverage: str
+    evidence_path: str
+    source_revision: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_urls, tuple) or any(
             not isinstance(url, str) or not url.startswith("https://") for url in self.source_urls
         ):
             raise ValueError("provenance.source_urls must contain HTTPS URLs")
-        for name in ("methodology", "coverage"):
+        for name in ("methodology", "coverage", "evidence_path", "source_revision"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"provenance.{name} must be a non-empty string")
@@ -59,6 +62,16 @@ class IntrinsicProvenance:
             or any(char not in "0123456789abcdef" for char in self.content_hash)
         ):
             raise ValueError("provenance.content_hash must be a lowercase SHA-256 hex digest")
+        evidence_path = Path(self.evidence_path)
+        if (
+            evidence_path.is_absolute()
+            or ".." in evidence_path.parts
+            or evidence_path.parts[:2] != ("data", "asset_intrinsic_evidence")
+        ):
+            raise ValueError(
+                "provenance.evidence_path must be a safe path under "
+                "data/asset_intrinsic_evidence"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -261,13 +274,41 @@ def parse_asset_intrinsic_record(payload: dict[str, Any]) -> AssetIntrinsicRecor
     )
 
 
-def load_asset_intrinsic_records(path: Path) -> tuple[AssetIntrinsicRecord, ...]:
+def load_asset_intrinsic_records(
+    path: Path, *, evidence_root: Path | None = None
+) -> tuple[AssetIntrinsicRecord, ...]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise ValueError("asset intrinsic records must be an array")
     if any(not isinstance(item, dict) for item in raw):
         raise ValueError("asset intrinsic record must be an object")
-    return tuple(parse_asset_intrinsic_record(item) for item in raw)
+    records = tuple(parse_asset_intrinsic_record(item) for item in raw)
+    root = evidence_root if evidence_root is not None else path.resolve().parent.parent
+    verify_asset_intrinsic_evidence(records, root)
+    return records
+
+
+def verify_asset_intrinsic_evidence(
+    records: Iterable[AssetIntrinsicRecord], root: Path
+) -> None:
+    """Verify every provenance hash against exact checked-in evidence bytes."""
+    resolved_root = root.resolve()
+    for record in records:
+        for dimension in record.profile.dimensions:
+            provenance = dimension.provenance
+            evidence_file = (resolved_root / provenance.evidence_path).resolve()
+            try:
+                evidence_file.relative_to(resolved_root)
+            except ValueError as exc:
+                raise ValueError("evidence path escapes repository root") from exc
+            if not evidence_file.is_file():
+                raise ValueError(f"evidence file does not exist: {provenance.evidence_path}")
+            actual = hashlib.sha256(evidence_file.read_bytes()).hexdigest()
+            if actual != provenance.content_hash:
+                raise ValueError(
+                    f"evidence fingerprint mismatch for {provenance.evidence_path}: "
+                    f"expected {provenance.content_hash}, got {actual}"
+                )
 
 
 def _parse_dimension(payload: Any) -> IntrinsicDimension:
@@ -285,7 +326,12 @@ def _parse_dimension(payload: Any) -> IntrinsicDimension:
     if not isinstance(provenance, dict):
         raise ValueError("dimension.provenance must be an object")
     _require_exact_keys(
-        provenance, {"source_urls", "methodology", "content_hash", "coverage"}, "provenance"
+        provenance,
+        {
+            "source_urls", "methodology", "content_hash", "coverage",
+            "evidence_path", "source_revision",
+        },
+        "provenance",
     )
     source_urls = provenance["source_urls"]
     if not isinstance(source_urls, list) or any(not isinstance(item, str) for item in source_urls):
@@ -313,6 +359,12 @@ def _parse_dimension(payload: Any) -> IntrinsicDimension:
             methodology=_required_string(provenance["methodology"], "provenance.methodology"),
             content_hash=_required_string(provenance["content_hash"], "provenance.content_hash"),
             coverage=_required_string(provenance["coverage"], "provenance.coverage"),
+            evidence_path=_required_string(
+                provenance["evidence_path"], "provenance.evidence_path"
+            ),
+            source_revision=_required_string(
+                provenance["source_revision"], "provenance.source_revision"
+            ),
         ),
     )
 

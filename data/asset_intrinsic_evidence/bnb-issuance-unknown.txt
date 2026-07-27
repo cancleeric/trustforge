@@ -1,0 +1,4 @@
+source_revision: assessment-2026-07-27
+source_url: https://docs.bnbchain.org/bnb-smart-chain/introduction/
+observation: The available first-party documentation URL is mutable and no immutable source revision was retained.
+decision: issuance_predictability=unknown

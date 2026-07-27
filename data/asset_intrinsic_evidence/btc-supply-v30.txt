@@ -1,0 +1,4 @@
+source_revision: bitcoin/bitcoin d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3
+source_url: https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp
+observation: A pinned full-node implementation independently validates issuance and the UTXO set.
+limit: Lost keys and beneficial ownership are not inferred.

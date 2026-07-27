@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 from trustforge.asset_intrinsic import (
     AssetIntrinsicRepository,
@@ -217,6 +220,90 @@ def test_contract_schema_is_versioned_strict_and_conditional() -> None:
     assert dimension["additionalProperties"] is False
     assert dimension["properties"]["provenance"]["additionalProperties"] is False
     assert dimension["allOf"][0]["else"]["properties"]["value"] == {"type": "null"}
+
+
+def test_jsonschema_accepts_fixtures_with_draft_202012_format_checker() -> None:
+    validator = Draft202012Validator(
+        contract_schemas()["AssetIntrinsicProfile"], format_checker=FormatChecker()
+    )
+    for record in raw_records():
+        validator.validate(record["profile"])
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_path"),
+    [
+        (lambda profile: profile.pop("asset_id"), []),
+        (lambda profile: profile.__setitem__("extra", True), []),
+        (lambda profile: profile.__setitem__("asset_id", 1), ["asset_id"]),
+        (
+            lambda profile: profile["dimensions"][0].__setitem__(
+                "as_of", "2026-07-27T00:00:00"
+            ),
+            ["dimensions", 0, "as_of"],
+        ),
+        (
+            lambda profile: profile["dimensions"][0].__setitem__("value", "1"),
+            ["dimensions", 0],
+        ),
+    ],
+)
+def test_jsonschema_rejects_missing_extra_type_and_naive_timestamp(
+    mutator, expected_path: list[object]
+) -> None:
+    profile = copy.deepcopy(raw_records()[0]["profile"])
+    mutator(profile)
+    validator = Draft202012Validator(
+        contract_schemas()["AssetIntrinsicProfile"], format_checker=FormatChecker()
+    )
+    errors = list(validator.iter_errors(profile))
+    assert errors
+    assert any(list(error.absolute_path)[: len(expected_path)] == expected_path for error in errors)
+
+
+def test_evidence_fingerprint_tamper_fails_closed(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "repo"
+    evidence_dir = evidence_root / "data" / "asset_intrinsic_evidence"
+    evidence_dir.mkdir(parents=True)
+    payload = copy.deepcopy(raw_records()[0])
+    for dimension in payload["profile"]["dimensions"]:
+        source = Path(__file__).parents[1] / dimension["provenance"]["evidence_path"]
+        target = evidence_root / dimension["provenance"]["evidence_path"]
+        target.write_bytes(source.read_bytes())
+    records_file = evidence_root / "data" / "records.json"
+    records_file.write_text(json.dumps([payload]), encoding="utf-8")
+
+    first_path = evidence_root / payload["profile"]["dimensions"][0]["provenance"]["evidence_path"]
+    first_path.write_bytes(first_path.read_bytes() + b"tamper")
+
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        load_asset_intrinsic_records(records_file, evidence_root=evidence_root)
+
+
+def test_validation_cli_success_is_offline_and_error_exit_is_nonzero(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    command = [
+        sys.executable,
+        str(root / "scripts" / "validate_asset_intrinsic_records.py"),
+        str(FIXTURE),
+        "--as-of",
+        "2026-07-27T00:00:00Z",
+    ]
+    success = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+    assert success.returncode == 0
+    assert json.loads(success.stdout)["network_used"] is False
+
+    bad_file = tmp_path / "bad.json"
+    bad_file.write_text('[{"unexpected": true}]', encoding="utf-8")
+    failure = subprocess.run(
+        [sys.executable, command[1], str(bad_file)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert failure.returncode == 2
+    assert "validation failed" in failure.stderr
 
 
 def test_asset_context_contract_and_fixture_remain_unchanged() -> None:

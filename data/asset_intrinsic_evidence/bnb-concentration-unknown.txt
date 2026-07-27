@@ -1,0 +1,3 @@
+source_revision: assessment-2026-07-27
+observation: Address balances do not establish entity ownership, and no entity-resolved cross-chain history with reproducible clustering was available.
+decision: holder_concentration=unknown

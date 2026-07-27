@@ -1,0 +1,4 @@
+source_revision: assessment-2026-07-27
+source_url: https://docs.bnbchain.org/bnb-smart-chain/validator/overview/
+observation: The mutable documentation describes validator-set bounds but does not establish operator entity independence.
+decision: control_dispersion=unknown
