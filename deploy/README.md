@@ -3,6 +3,71 @@
 > 不走 App Runner 自動化。流程：`git push` → pre-push hook 跑測試 → 綠 → AWS CLI 部署到 Lambda。
 > Lambda 在免費方案內可用、每月 100 萬請求免費；App Runner 不在免費內故不採用。
 
+## Immutable A/B Artifact Identity（#728）
+
+`deploy_ec2.sh` 現在使用 content-addressed 部署流程（SHA-256 digest），而非固定 key 覆寫 S3。
+
+### Artifact layout（S3 `trustforge-deploy-<ACCT>`）
+
+```
+artifacts/
+  <sha256_digest>/         # 每個 build 有獨立前綴
+    artifact.zip           # content-addressed ZIP
+    manifest.json          # ReleaseManifest v1
+  index.jsonl              # append-only 部署紀錄
+pointers/
+  active.json              # 目前 production 指到的 digest
+  candidate.json           # 本次部署的 digest
+  previous.json            # 前一個 production digest（rollback 目標）
+retention/
+  index.jsonl              # 歷史 index（供 retention 政策引用）
+  policy.json              # retention 政策設定
+```
+
+### Deploy flow
+
+1. **Build**：打包 zip → 計算 SHA-256 digest → 生成 `ReleaseManifest` → 上傳到 `artifacts/<digest>/`
+2. **Candidate**：寫 `pointers/candidate.json`
+3. **Deploy**：下載 candidate → 解壓 → `verify_deployed_manifest` fail-closed 驗證 → restart → `web healthz` gate
+4. **Promote**：`candidate.json` → `active.json`，舊 `active.json` → `previous.json`
+
+### ReleaseManifest（`trustforge.release-manifest/v1`）
+
+| Field | Description |
+|-------|-------------|
+| `artifact_digest` | `sha256:<hex>` of the zip file |
+| `git_sha` | Commit hash at build time |
+| `app_version` | TrustForge version from `__version__` |
+| `kernel_contract_version` | Kernel contract schema version |
+| `kernel_resolution_version` | Direction resolution policy version |
+| `core_content_hash` | SHA-256 over `src/trustforge_core/*.py` |
+| `config_snapshot_identity` | `sha256:<digest>` of canonical config JSON |
+| `build_timestamp` | ISO 8601 UTC |
+| `build_host` | Hostname where build ran |
+
+### Verification gates（fail-closed）
+
+| Gate | Location | Checks |
+|------|----------|--------|
+| Pre-deploy | `deploy/verify_release.py` | Manifest完整性、artifact_digest matching、git_sha matching、core_content_hash matching、dirty build reject |
+| Deployed (EC2) | `src/trustforge/verify_deployed_manifest.py` | 遠端 artifact 重新比對 digest/core_hash/config snapshot、zip entry 完整性、config drift detection |
+
+### Config Snapshot（`src/trustforge/config_snapshot.py`）
+
+快照 non-secret environment config（systemd env: BEDROCK_MODEL_ID, CSP_MODE, cache backends, etc.）為 canonical JSON。機敏 token 值（ADMIN_TOKEN, LIVE_TOKEN, SSM_PREFIX）只記錄 boolean presence，不記錄值。
+
+### Retention 政策
+
+- **Observation window**：24h（build 時間在 24h 內的 artifact 受保護）
+- **Canary window**：10min（上傳後 10min 內的 artifact 受保護）
+- **Pointer protection**：active/candidate/previous.json 指到的 artifact 永遠受保護
+- **Dry-run**：`python scripts/apply_retention_policy.py --dry-run` 只產報告
+- **Execute**：`python scripts/apply_retention_policy.py --execute --force` 實際刪除
+
+### Rollback
+
+`deploy_ec2.sh` 在 healthz gate 失敗時自動讀取 `pointers/previous.json`，下載/驗證舊 artifact 並重啟。
+
 ## 本機排程（macOS launchd / Linux systemd --user）
 
 本機排程不使用含特定使用者絕對路徑的靜態 plist。安裝器從自身位置找出 repo；
