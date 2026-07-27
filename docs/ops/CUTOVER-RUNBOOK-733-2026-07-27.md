@@ -238,3 +238,19 @@ For an existing signed-ledger v2 installation, use
 signed heads before creating staging, revalidates the staged copy with its new
 metadata, and performs an atomic rename while retaining the prior target at
 the `.rollback` path. HMAC v1 is not accepted by this migration.
+### Ledger signer lifecycle
+
+Provisioning uses one-time `control-bootstrap-1` and
+`router-outcome-bootstrap-1` private seeds. Both seeds are opened with
+`O_NOFOLLOW`, pinned by parent-directory descriptor and inode, used only to
+authenticate each ledger bootstrap, then unlinked through that pinned
+directory and durably consumed. They must never be installed in the service.
+
+Before provisioning, generate independent persistent signers and pass only
+their public keys as `--control-runtime-public` and
+`--outcome-runtime-public`. Their key IDs are `control-runtime-1` and
+`router-outcome-runtime-1`; the router service receives only the latter
+private key. A failed or interrupted provision/migration must be rerun so the
+transaction journal can restore the prior authenticated state. Do not enable
+the router until `install_release_router.sh` authenticates both ledgers and
+completes the Unix-socket and nginx HTTP smoke tests.

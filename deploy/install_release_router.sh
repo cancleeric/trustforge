@@ -37,11 +37,15 @@ if $DRY_RUN; then
     "nginx -T # preflight: resolve the configured worker user" \
     "usermod -a -G trustforge-release <resolved-nginx-worker-user>" \
     "id -nG <resolved-nginx-worker-user> # verify trustforge-release membership" \
+    "python3 scripts/deployment_readiness.py status # authenticate both ledgers" \
+    "test -r runtime config, public keyring, signed endpoint manifests and A/B units" \
     "systemctl daemon-reload" \
     "nginx -t" \
-    "systemctl enable --now trustforge-release-router.service" \
+    "systemctl start trustforge-release-router.service # not enabled until smoke passes" \
     "systemctl reload nginx" \
-    "setpriv <resolved-nginx-worker-user> python3 -c # connect to router Unix socket"
+    "curl --unix-socket /run/trustforge/release-router.sock http://localhost/healthz" \
+    "curl https://127.0.0.1/healthz # actual nginx HTTP path" \
+    "systemctl enable trustforge-release-router.service"
   exit 0
 fi
 
@@ -67,9 +71,25 @@ NGINX_WORKER_USER="$(
 id "$NGINX_WORKER_USER" >/dev/null
 usermod -a -G trustforge-release "$NGINX_WORKER_USER"
 id -nG "$NGINX_WORKER_USER" | tr ' ' '\n' | grep -Fx trustforge-release >/dev/null
+for prerequisite in \
+  /etc/trustforge/release-router-runtime.json \
+  /etc/trustforge/release-router-runtime-keys.json \
+  /var/lib/trustforge/security-ledger/control/bootstrap.json \
+  /var/lib/trustforge/security-ledger/router-outcomes/bootstrap.json; do
+  [[ -f "$prerequisite" && ! -L "$prerequisite" ]] || {
+    echo "release router is not provisioned: missing $prerequisite" >&2
+    exit 79
+  }
+done
+systemctl cat trustforge-a.service >/dev/null
+systemctl cat trustforge-b.service >/dev/null
+python3 "$ROOT_DIR/scripts/deployment_readiness.py" status >/dev/null || {
+  echo "release ledgers/configuration did not authenticate; provision or migrate first" >&2
+  exit 80
+}
 systemctl daemon-reload
 nginx -t
-systemctl enable --now trustforge-release-router.service
+systemctl start trustforge-release-router.service
 systemctl reload nginx
 setpriv \
   "--reuid=$NGINX_WORKER_USER" \
@@ -77,3 +97,9 @@ setpriv \
   --init-groups \
   python3 -c \
   'import socket; s=socket.socket(socket.AF_UNIX); s.connect("/run/trustforge/release-router.sock"); s.close()'
+curl --fail --silent --show-error --unix-socket /run/trustforge/release-router.sock \
+  -H 'X-TrustForge-Trusted-Subject: installer-smoke' http://localhost/healthz >/dev/null
+curl --fail --silent --show-error --insecure \
+  -u "${TRUSTFORGE_SMOKE_USER:?set smoke HTTP user}:${TRUSTFORGE_SMOKE_PASSWORD:?set smoke HTTP password}" \
+  https://127.0.0.1/healthz >/dev/null
+systemctl enable trustforge-release-router.service

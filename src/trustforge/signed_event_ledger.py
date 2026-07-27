@@ -769,6 +769,12 @@ class SignedEventLedger:
             os.close(fd)
             os.close(directory_fd)
 
+    def read_from_exclusively_locked_fd(self, fd: int) -> list[dict[str, Any]]:
+        """Authenticate a ledger while a migration owns its events-file lock."""
+        records = self._decode(fd)
+        self._verify_head(records)
+        return records
+
     def append(
         self, event: Mapping[str, Any], *, expected_head: str | None = None
     ) -> dict[str, Any]:

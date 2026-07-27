@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import grp
 import json
 import os
@@ -28,6 +29,69 @@ CONTROL_KINDS = frozenset(
 OUTCOME_KINDS = frozenset(
     {"candidate_reservation", "candidate_result", "router_emergency_stop"}
 )
+ALLOWED_FIXED_FILES = frozenset({"bootstrap.json", "events.jsonl", "head.json"})
+JOURNAL_SCHEMA = "trustforge.release-ledger-migration/v1"
+
+
+def _allowed_entry(name: str) -> bool:
+    return name in ALLOWED_FIXED_FILES or (
+        name.startswith("epoch-stop-") and name.endswith(".json")
+    )
+
+
+def _fsync_tree(root: Path) -> None:
+    for directory, _, files in os.walk(root):
+        for name in files:
+            fd = os.open(Path(directory) / name, os.O_RDONLY | os.O_NOFOLLOW)
+            os.fsync(fd)
+            os.close(fd)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        os.fsync(fd)
+        os.close(fd)
+
+
+def _write_journal(path: Path, state: str, stage: Path, backup: Path) -> None:
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "schema": JOURNAL_SCHEMA,
+                "state": state,
+                "stage": stage.name,
+                "backup": backup.name,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    with temporary.open("rb") as stream:
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    os.fsync(parent_fd)
+    os.close(parent_fd)
+
+
+def _recover(journal: Path, target: Path, stage: Path, backup: Path) -> None:
+    if not journal.exists():
+        return
+    payload = json.loads(journal.read_text())
+    if payload.get("schema") != JOURNAL_SCHEMA:
+        raise SystemExit("unknown migration recovery journal")
+    state = payload.get("state")
+    # Until a committed journal exists, the authenticated old target wins.
+    if state != "committed" and backup.exists():
+        if target.exists():
+            __import__("shutil").rmtree(target)
+        os.replace(backup, target)
+    if stage.exists():
+        __import__("shutil").rmtree(stage)
+    if backup.exists() and target.exists():
+        __import__("shutil").rmtree(backup)
+    journal.unlink()
+    parent_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    os.fsync(parent_fd)
+    os.close(parent_fd)
 
 
 def _keys(path: Path) -> dict[str, bytes]:
@@ -47,7 +111,13 @@ def _keys(path: Path) -> dict[str, bytes]:
 
 
 def _verified_projection(
-    root: Path, directory: str, keys: dict[str, bytes], domain: str, kinds
+    root: Path,
+    directory: str,
+    keys: dict[str, bytes],
+    domain: str,
+    kinds,
+    *,
+    verify: bool = True,
 ) -> SignedEventLedger:
     root_info = os.lstat(root)
     directory_info = os.lstat(root / directory)
@@ -71,7 +141,8 @@ def _verified_projection(
         directory_mode=stat.S_IMODE(directory_info.st_mode),
         file_mode=stat.S_IMODE(file_info.st_mode),
     )
-    projection.read()  # Full schema, hash-chain, signature and signed-head validation.
+    if verify:
+        projection.read()  # Full schema, chain, signature and head validation.
     return projection
 
 
@@ -80,6 +151,8 @@ def _copy_ledger(source: Path, target: Path, owner: int, group: int) -> None:
     os.chown(target, owner, group)
     os.chmod(target, 0o750)
     for entry in source.iterdir():
+        if not _allowed_entry(entry.name):
+            raise SystemExit(f"unknown ledger migration entry: {entry}")
         info = os.lstat(entry)
         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise SystemExit(f"unsafe ledger migration entry: {entry}")
@@ -116,63 +189,108 @@ def main() -> int:
         raise SystemExit("ledger migration requires root")
     control_keys = _keys(args.control_public)
     outcome_keys = _keys(args.outcome_public)
-    # Nothing below mutates until both independent ledgers fully authenticate.
-    _verified_projection(
-        args.source_root, "control", control_keys, "release-control", CONTROL_KINDS
-    )
-    _verified_projection(
-        args.source_root,
-        "router-outcomes",
-        outcome_keys,
-        "release-router-outcome",
-        OUTCOME_KINDS,
-    )
+    args.target_root.parent.mkdir(parents=True, exist_ok=True)
     release_gid = grp.getgrnam("trustforge-release").gr_gid
     operator_uid = pwd.getpwnam("trustforge-operator").pw_uid
     router_uid = pwd.getpwnam("trustforge-router").pw_uid
     stage = args.target_root.with_name(args.target_root.name + ".staging")
     backup = args.target_root.with_name(args.target_root.name + ".rollback")
-    if stage.exists() or backup.exists():
-        raise SystemExit("migration staging or rollback path already exists")
-    stage.mkdir(mode=0o750)
-    os.chown(stage, 0, release_gid)
-    os.chmod(stage, 0o750)
-    _copy_ledger(
-        args.source_root / "control",
-        stage / "control",
-        operator_uid,
-        release_gid,
+    journal = args.target_root.with_name(args.target_root.name + ".migration.json")
+    coordination = os.open(
+        args.source_root / ".migration-coordination.lock",
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        0o600,
     )
-    _copy_ledger(
-        args.source_root / "router-outcomes",
-        stage / "router-outcomes",
-        router_uid,
-        release_gid,
-    )
-    _verified_projection(
-        stage, "control", control_keys, "release-control", CONTROL_KINDS
-    )
-    _verified_projection(
-        stage,
-        "router-outcomes",
-        outcome_keys,
-        "release-router-outcome",
-        OUTCOME_KINDS,
-    )
-    parent_fd = os.open(stage.parent, os.O_RDONLY | os.O_DIRECTORY)
+    event_fds: list[int] = []
     try:
+        fcntl.flock(coordination, fcntl.LOCK_EX)
+        _recover(journal, args.target_root, stage, backup)
+        # Fixed-order exclusive locks fence appenders from verification to durable publish.
+        for directory in ("control", "router-outcomes"):
+            fd = os.open(
+                args.source_root / directory / "events.jsonl",
+                os.O_RDWR | os.O_NOFOLLOW,
+            )
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            event_fds.append(fd)
+        source_heads = []
+        for index, (directory, keys, domain, kinds) in enumerate(
+            (
+                ("control", control_keys, "release-control", CONTROL_KINDS),
+                (
+                    "router-outcomes",
+                    outcome_keys,
+                    "release-router-outcome",
+                    OUTCOME_KINDS,
+                ),
+            )
+        ):
+            projection = _verified_projection(
+                args.source_root, directory, keys, domain, kinds, verify=False
+            )
+            records = projection.read_from_exclusively_locked_fd(event_fds[index])
+            source_heads.append(records[-1]["event_hash"] if records else None)
         if args.target_root.exists():
-            os.rename(args.target_root, backup)
+            # Never replace an unknown target: the rollback candidate must itself
+            # be a fully authenticated pair of ledgers.
+            for directory, keys, domain, kinds in (
+                ("control", control_keys, "release-control", CONTROL_KINDS),
+                (
+                    "router-outcomes",
+                    outcome_keys,
+                    "release-router-outcome",
+                    OUTCOME_KINDS,
+                ),
+            ):
+                _verified_projection(
+                    args.target_root, directory, keys, domain, kinds
+                ).read()
+        stage.mkdir(mode=0o750)
+        os.chown(stage, 0, release_gid)
+        os.chmod(stage, 0o750)
+        _copy_ledger(
+            args.source_root / "control", stage / "control", operator_uid, release_gid
+        )
+        _copy_ledger(
+            args.source_root / "router-outcomes",
+            stage / "router-outcomes",
+            router_uid,
+            release_gid,
+        )
+        staged_heads = []
+        for directory, keys, domain, kinds in (
+            ("control", control_keys, "release-control", CONTROL_KINDS),
+            ("router-outcomes", outcome_keys, "release-router-outcome", OUTCOME_KINDS),
+        ):
+            records = _verified_projection(stage, directory, keys, domain, kinds).read()
+            staged_heads.append(records[-1]["event_hash"] if records else None)
+        if staged_heads != source_heads:
+            raise SystemExit("authenticated source heads changed during migration")
+        _fsync_tree(stage)
+        _write_journal(journal, "staged", stage, backup)
+        if args.target_root.exists():
+            os.replace(args.target_root, backup)
+            _write_journal(journal, "old-backed-up", stage, backup)
         try:
-            os.rename(stage, args.target_root)
+            os.replace(stage, args.target_root)
+            _write_journal(journal, "published", stage, backup)
+            _fsync_tree(args.target_root)
+            _write_journal(journal, "committed", stage, backup)
+            if backup.exists():
+                __import__("shutil").rmtree(backup)
+            journal.unlink()
+            parent_fd = os.open(args.target_root.parent, os.O_RDONLY | os.O_DIRECTORY)
             os.fsync(parent_fd)
+            os.close(parent_fd)
         except BaseException:
-            if backup.exists() and not args.target_root.exists():
-                os.rename(backup, args.target_root)
-                os.fsync(parent_fd)
+            _recover(journal, args.target_root, stage, backup)
             raise
     finally:
-        os.close(parent_fd)
+        for fd in reversed(event_fds):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        fcntl.flock(coordination, fcntl.LOCK_UN)
+        os.close(coordination)
     return 0
 
 

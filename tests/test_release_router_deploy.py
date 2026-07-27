@@ -22,18 +22,22 @@ def test_install_workflow_dry_run_is_explicit_and_non_mutating():
         capture_output=True,
         text=True,
     )
-    assert "systemctl enable --now trustforge-release-router.service" in result.stdout
+    assert "systemctl start trustforge-release-router.service" in result.stdout
+    assert "systemctl enable trustforge-release-router.service" in result.stdout
+    assert result.stdout.index("curl --unix-socket") < result.stdout.index(
+        "systemctl enable trustforge-release-router.service"
+    )
     assert "nginx -t" in result.stdout
     assert "systemd-sysusers" in result.stdout
     assert "systemd-tmpfiles --create" in result.stdout
     assert "resolve the configured worker user" in result.stdout
     assert "usermod -a -G trustforge-release" in result.stdout
     assert (
-        result.stdout.index("systemd-sysusers")
-        < result.stdout.index("systemd-tmpfiles --create")
-        < result.stdout.index(
-            "systemctl enable --now trustforge-release-router.service"
-        )
+            result.stdout.index("systemd-sysusers")
+            < result.stdout.index("systemd-tmpfiles --create")
+            < result.stdout.index(
+                "systemctl start trustforge-release-router.service"
+            )
     )
 
 
@@ -126,10 +130,15 @@ def test_root_provisioner_separates_bootstrap_signers_and_consumes_outcome_key()
     assert "ledger provisioning requires root" in source
     assert 'pwd.getpwnam("trustforge-operator")' in source
     assert 'pwd.getpwnam("trustforge-router")' in source
-    assert '"trustforge-operator", "control", "control"' in source
+    assert '"trustforge-operator",' in source
+    assert '"control",' in source
     assert '"trustforge-router"' in source
     assert "pass_fds=(descriptor,)" in source
-    assert "args.outcome_bootstrap_key.unlink()" in source
+    assert "_consume_seed(" in source
+    assert "os.unlink(path.name, dir_fd=parent_fd)" in source
+    assert "os.fsync(parent_fd)" in source
+    assert "router-outcome-bootstrap-1" in source
+    assert "router-outcome-runtime-1" in source
     main = source[source.index("def main()") :]
     assert main.index('pwd.getpwnam("trustforge-operator")') < main.index("_run_as(")
 
@@ -137,14 +146,17 @@ def test_root_provisioner_separates_bootstrap_signers_and_consumes_outcome_key()
 def test_migration_authenticates_both_chains_before_staging_or_swap():
     source = (ROOT / "scripts/migrate_release_ledgers.py").read_text()
     main = source[source.index("def main()") :]
-    first_verify = main.index("_verified_projection(")
-    second_verify = main.index("_verified_projection(", first_verify + 1)
     stage_create = main.index("stage.mkdir(")
-    assert first_verify < second_verify < stage_create
+    source_verify = main.index("read_from_exclusively_locked_fd")
+    assert source_verify < stage_create
     assert "projection.read()" in source
-    assert "os.rename(args.target_root, backup)" in source
-    assert "os.rename(stage, args.target_root)" in source
-    assert "os.rename(backup, args.target_root)" in source
+    assert "fcntl.flock(coordination, fcntl.LOCK_EX)" in source
+    assert "read_from_exclusively_locked_fd" in source
+    assert "ALLOWED_FIXED_FILES" in source
+    assert "_write_journal" in source
+    assert "_recover(" in source
+    assert "os.replace(args.target_root, backup)" in source
+    assert "os.replace(stage, args.target_root)" in source
 
 
 def test_operator_emergency_paths_are_artifact_and_extra_key_independent():

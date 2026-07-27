@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +49,16 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     outcome_seed.write_bytes(b"o" * 32)
     control_seed.chmod(0o400)
     outcome_seed.chmod(0o400)
+    control_runtime_public = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    outcome_runtime_public = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
     subprocess.run(
         [
             sys.executable,
@@ -56,12 +68,17 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
             str(root),
             "--control-key",
             str(control_seed),
+            "--control-runtime-public",
+            control_runtime_public.hex(),
             "--outcome-bootstrap-key",
             str(outcome_seed),
+            "--outcome-runtime-public",
+            outcome_runtime_public.hex(),
         ],
         check=True,
     )
     assert not outcome_seed.exists()
+    assert not control_seed.exists()
     assert (control / "bootstrap.json").stat().st_mode & 0o777 == 0o640
     assert (outcomes / "bootstrap.json").stat().st_mode & 0o777 == 0o640
     for directory, owner in ((control, operator.pw_uid), (outcomes, router.pw_uid)):
