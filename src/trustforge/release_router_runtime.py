@@ -1,8 +1,9 @@
 """Least-privilege construction of the long-lived release router."""
+
 from __future__ import annotations
 
 import json
-import os
+import pwd
 from pathlib import Path
 
 from trustforge.deployment_control import DeploymentControlLedger
@@ -12,9 +13,7 @@ from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedg
 
 RUNTIME_CONFIG_PATH = Path("/etc/trustforge/release-router-runtime.json")
 RUNTIME_KEYS_PATH = Path("/etc/trustforge/release-router-runtime-keys.json")
-COORDINATION_LOCK_PATH = Path(
-    "/run/trustforge-release-control/coordination.lock"
-)
+COORDINATION_LOCK_PATH = Path("/run/trustforge-release-control/coordination.lock")
 
 
 class RouterRuntimeError(RuntimeError):
@@ -23,7 +22,7 @@ class RouterRuntimeError(RuntimeError):
 
 def _protected(path: Path) -> dict:
     raw, info = read_regular_file(path, maximum_bytes=128 * 1024)
-    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+    if info.st_uid != 0 or info.st_mode & 0o077:
         raise RouterRuntimeError("runtime input ownership or mode is unsafe")
     try:
         value = json.loads(raw)
@@ -68,19 +67,38 @@ def build_runtime_router() -> ReleaseABRouter:
     public_keys = _keys(key_file, "endpoint_manifest_public")
     authorization_public = _keys(key_file, "authorization_public")
     completion_public = _keys(key_file, "completion_public")
+    operator_uid = pwd.getpwnam("trustforge-operator").pw_uid
+    router_uid = pwd.getpwnam("trustforge-router").pw_uid
+    ownership = {
+        "root_owner_uid": 0,
+        "root_group": "trustforge-release",
+        "root_mode": 0o750,
+        "directory_group": "trustforge-release",
+        "directory_mode": 0o750,
+        "file_mode": 0o640,
+    }
     if len(outcome_private) != 1:
         raise RouterRuntimeError("runtime requires exactly one outcome signing key")
     outcome_key_id, outcome_secret = next(iter(outcome_private.items()))
     control_permissions = {
-        "release-control": frozenset({
-            "deployment_initialized", "operator_stop", "activation_prepared",
-            "activation_completed", "activation_failed",
-        })
+        "release-control": frozenset(
+            {
+                "deployment_initialized",
+                "operator_stop",
+                "activation_prepared",
+                "activation_completed",
+                "activation_failed",
+            }
+        )
     }
     outcome_permissions = {
-        "release-router-outcome": frozenset({
-            "candidate_reservation", "candidate_result", "router_emergency_stop",
-        })
+        "release-router-outcome": frozenset(
+            {
+                "candidate_reservation",
+                "candidate_result",
+                "router_emergency_stop",
+            }
+        )
     }
     ledger = SignedEventLedger(
         directory=SECURITY_LEDGER_ROOT / "control",
@@ -93,6 +111,8 @@ def build_runtime_router() -> ReleaseABRouter:
         coordination_lock_mode=0o660,
         coordination_lock_owner_uid=0,
         coordination_lock_group="trustforge-release",
+        directory_owner_uid=operator_uid,
+        **ownership,
     )
     outcome_ledger = SignedEventLedger(
         directory=SECURITY_LEDGER_ROOT / "router-outcomes",
@@ -108,6 +128,8 @@ def build_runtime_router() -> ReleaseABRouter:
         coordination_lock_mode=0o660,
         coordination_lock_owner_uid=0,
         coordination_lock_group="trustforge-release",
+        directory_owner_uid=router_uid,
+        **ownership,
     )
     records = ledger.read()
     if not records or records[0]["event"].get("kind") != "deployment_initialized":

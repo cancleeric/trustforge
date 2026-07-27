@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Operator interface for #733 control evidence; never deploys or cuts traffic."""
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import pwd
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,15 +32,15 @@ from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedg
 CONFIG_PATH = Path("/etc/trustforge/deployment-control.json")
 KEY_DIRECTORY = Path("/etc/trustforge/deployment-keys")
 LEDGER_PATH = SECURITY_LEDGER_ROOT
-COORDINATION_LOCK_PATH = Path(
-    "/run/trustforge-release-control/coordination.lock"
-)
+COORDINATION_LOCK_PATH = Path("/run/trustforge-release-control/coordination.lock")
 
 
 def _protected_json(path: Path, maximum_bytes: int = 1_000_000) -> dict:
     raw, info = read_regular_file(path, maximum_bytes=maximum_bytes)
     if info.st_uid != os.geteuid() or info.st_mode & 0o077:
-        raise DeploymentControlError("protected input ownership or permissions are unsafe")
+        raise DeploymentControlError(
+            "protected input ownership or permissions are unsafe"
+        )
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise DeploymentControlError("protected input must be a JSON object")
@@ -67,6 +69,16 @@ def _build_control(
     bootstrap_ledgers: bool,
 ) -> tuple[DeploymentControlLedger, dict[str, bytes], dict[str, bytes]]:
     config = _protected_json(CONFIG_PATH)
+    operator_uid = pwd.getpwnam("trustforge-operator").pw_uid
+    router_uid = pwd.getpwnam("trustforge-router").pw_uid
+    ownership = {
+        "root_owner_uid": 0,
+        "root_group": "trustforge-release",
+        "root_mode": 0o750,
+        "directory_group": "trustforge-release",
+        "directory_mode": 0o750,
+        "file_mode": 0o640,
+    }
     control_public = _keyring(
         "control-event-public", required="control-public" in key_roles
     )
@@ -96,10 +108,17 @@ def _build_control(
     ledger = SignedEventLedger(
         directory=LEDGER_PATH / "control",
         verification_keys=control_public,
-        event_permissions={"release-control": frozenset({
-            "deployment_initialized", "operator_stop", "activation_prepared",
-            "activation_completed", "activation_failed",
-        })},
+        event_permissions={
+            "release-control": frozenset(
+                {
+                    "deployment_initialized",
+                    "operator_stop",
+                    "activation_prepared",
+                    "activation_completed",
+                    "activation_failed",
+                }
+            )
+        },
         domain_keys={"release-control": frozenset(control_public)},
         signing_key_id=control_signer[0],
         signing_private_key=control_signer[1],
@@ -111,6 +130,8 @@ def _build_control(
         coordination_lock_mode=0o660,
         coordination_lock_owner_uid=0,
         coordination_lock_group="trustforge-release",
+        directory_owner_uid=operator_uid,
+        **ownership,
     )
     if len(outcome_private) > 1:
         raise DeploymentControlError("operator has multiple outcome signing identities")
@@ -118,21 +139,28 @@ def _build_control(
     outcome_ledger = SignedEventLedger(
         directory=LEDGER_PATH / "router-outcomes",
         verification_keys=outcome_public,
-        event_permissions={"release-router-outcome": frozenset({
-            "candidate_reservation", "candidate_result", "router_emergency_stop",
-        })},
+        event_permissions={
+            "release-router-outcome": frozenset(
+                {
+                    "candidate_reservation",
+                    "candidate_result",
+                    "router_emergency_stop",
+                }
+            )
+        },
         domain_keys={"release-router-outcome": frozenset(outcome_public)},
         signing_key_id=outcome_signer[0],
         signing_private_key=outcome_signer[1],
         signing_domain="release-router-outcome" if outcome_signer[0] else None,
         ledger_role="release-router-outcomes",
-        bootstrap=bootstrap_ledgers
-        and not (LEDGER_PATH / "router-outcomes").exists(),
+        bootstrap=bootstrap_ledgers and not (LEDGER_PATH / "router-outcomes").exists(),
         coordination_root=LEDGER_PATH,
         coordination_lock_path=COORDINATION_LOCK_PATH,
         coordination_lock_mode=0o660,
         coordination_lock_owner_uid=0,
         coordination_lock_group="trustforge-release",
+        directory_owner_uid=router_uid,
+        **ownership,
     )
     if require_preflight:
         identity = ShadowReleaseIdentity(**config["shadow_identity"])
@@ -188,9 +216,7 @@ def _build_control(
         target_confirmation = initialized["target_confirmation"]
         stop_after_errors = int(initialized["stop_after_errors"])
         if verify_retained_a:
-            snapshot_artifact(
-                config["active_artifact_path"], active.release_digest
-            )
+            snapshot_artifact(config["active_artifact_path"], active.release_digest)
         if verify_retained_b:
             snapshot_artifact(
                 config["candidate_artifact_path"], candidate.release_digest
@@ -238,15 +264,23 @@ def _key_roles_for_command(command: str) -> frozenset[str]:
     if command == "status":
         return frozenset({"control-public", "outcome-public"})
     if command in {"stop", "rollback-a"}:
-        return frozenset({
-            "control-public", "outcome-public", "control-private",
-            "authorization-public",
-        })
+        return frozenset(
+            {
+                "control-public",
+                "outcome-public",
+                "control-private",
+                "authorization-public",
+            }
+        )
     if command == "complete":
-        return frozenset({
-            "control-public", "outcome-public", "control-private",
-            "completion-public",
-        })
+        return frozenset(
+            {
+                "control-public",
+                "outcome-public",
+                "control-private",
+                "completion-public",
+            }
+        )
     if command == "initialize":
         return frozenset(
             {

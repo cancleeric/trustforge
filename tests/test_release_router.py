@@ -500,8 +500,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
                 + hashlib.sha256(canonical_json(completion_receipt)).hexdigest(),
                 "nonce": "complete-test",
                 "actor": "test",
-                "at": "2026-07-28T00:00:01Z",
-                "checkpoint_floor_at": now.isoformat(),
+                "at": now.isoformat(),
                 "completion_receipt": completion_receipt,
             }
         )

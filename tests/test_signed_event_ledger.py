@@ -276,3 +276,24 @@ def test_preprovisioned_coordination_lock_survives_restart_on_same_inode(tmp_pat
 
     assert lock_path.stat().st_ino == expected_inode
     assert restarted.read()[0]["event"]["kind"] == "deployment_initialized"
+
+
+def test_projection_uses_configured_owner_not_reader_euid(tmp_path, monkeypatch):
+    writer = _ledger(tmp_path)
+    writer.append({"kind": "deployment_initialized"})
+    projection = SignedEventLedger(
+        directory=tmp_path / "ledger",
+        verification_keys={"control-1": _public(CONTROL_SEED)},
+        event_permissions={"release-control": CONTROL_KINDS},
+        domain_keys={"release-control": frozenset({"control-1"})},
+        ledger_role="release-control",
+        coordination_root=tmp_path,
+        root_owner_uid=os.geteuid(),
+        directory_owner_uid=os.geteuid(),
+    )
+    monkeypatch.setattr(
+        "trustforge.signed_event_ledger.os.geteuid", lambda: os.getuid() + 10_000
+    )
+    assert projection.read()[0]["event"]["kind"] == "deployment_initialized"
+    with pytest.raises(LedgerError, match="writer ownership"):
+        writer.append({"kind": "operator_stop"})

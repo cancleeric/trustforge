@@ -34,6 +34,8 @@ if $DRY_RUN; then
     "install -o root -g root -m 0644 $TMPFILES_SOURCE $TMPFILES_TARGET" \
     "systemd-sysusers $SYSUSERS_TARGET" \
     "systemd-tmpfiles --create $TMPFILES_TARGET" \
+    "nginx -T # preflight: resolve the configured worker user" \
+    "usermod -a -G trustforge-release <resolved-nginx-worker-user>" \
     "systemctl daemon-reload" \
     "nginx -t" \
     "systemctl enable --now trustforge-release-router.service" \
@@ -52,6 +54,16 @@ install -o root -g root -m 0644 "$SYSUSERS_SOURCE" "$SYSUSERS_TARGET"
 install -o root -g root -m 0644 "$TMPFILES_SOURCE" "$TMPFILES_TARGET"
 systemd-sysusers "$SYSUSERS_TARGET"
 systemd-tmpfiles --create "$TMPFILES_TARGET"
+NGINX_CONFIG="$(nginx -T 2>&1)"
+NGINX_WORKER_USER="$(
+  awk '$1 == "user" {gsub(/;/, "", $2); print $2; exit}' <<<"$NGINX_CONFIG"
+)"
+[[ -n "$NGINX_WORKER_USER" ]] || {
+  echo "nginx worker user is not explicitly configured" >&2
+  exit 78
+}
+id "$NGINX_WORKER_USER" >/dev/null
+usermod -a -G trustforge-release "$NGINX_WORKER_USER"
 systemctl daemon-reload
 nginx -t
 systemctl enable --now trustforge-release-router.service

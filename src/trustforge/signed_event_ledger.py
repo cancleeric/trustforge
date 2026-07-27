@@ -82,6 +82,13 @@ class SignedEventLedger:
         coordination_lock_mode: int = 0o600,
         coordination_lock_owner_uid: int | None = None,
         coordination_lock_group: str | None = None,
+        root_owner_uid: int | None = None,
+        root_group: str | None = None,
+        root_mode: int = 0o700,
+        directory_owner_uid: int | None = None,
+        directory_group: str | None = None,
+        directory_mode: int = 0o700,
+        file_mode: int = 0o600,
         max_file_bytes: int = 8 * 1024 * 1024,
         max_events: int = 10_000,
         max_event_bytes: int = 32 * 1024,
@@ -146,6 +153,15 @@ class SignedEventLedger:
             else coordination_lock_owner_uid
         )
         self.coordination_lock_group = coordination_lock_group
+        self.root_owner_uid = os.geteuid() if root_owner_uid is None else root_owner_uid
+        self.root_group = root_group
+        self.root_mode = root_mode
+        self.directory_owner_uid = (
+            os.geteuid() if directory_owner_uid is None else directory_owner_uid
+        )
+        self.directory_group = directory_group
+        self.directory_mode = directory_mode
+        self.file_mode = file_mode
         if self.directory.parent != self.coordination_root:
             raise LedgerError("ledger directory must be a direct child of pinned root")
         self._verification_keys = dict(verification_keys)
@@ -159,17 +175,25 @@ class SignedEventLedger:
         root_existed = self.coordination_root.exists()
         if not root_existed and not bootstrap:
             raise LedgerError("ledger root requires explicit secure bootstrap")
-        self.coordination_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not root_existed and self._private_key is None:
+            raise LedgerError("projection cannot create ledger root")
+        self.coordination_root.mkdir(mode=self.root_mode, parents=True, exist_ok=True)
         root_info = os.lstat(self.coordination_root)
+        root_gid = (
+            grp.getgrnam(self.root_group).gr_gid
+            if self.root_group
+            else root_info.st_gid
+        )
         if (
             not stat.S_ISDIR(root_info.st_mode)
             or stat.S_ISLNK(root_info.st_mode)
-            or root_info.st_uid != os.geteuid()
-            or (root_existed and stat.S_IMODE(root_info.st_mode) != 0o700)
+            or root_info.st_uid != self.root_owner_uid
+            or root_info.st_gid != root_gid
+            or (root_existed and stat.S_IMODE(root_info.st_mode) != self.root_mode)
         ):
             raise LedgerError("ledger coordination root metadata is unsafe")
         if not root_existed:
-            os.chmod(self.coordination_root, 0o700)
+            os.chmod(self.coordination_root, self.root_mode)
         existed = self.directory.exists()
         legacy_events = self.coordination_root / "events.jsonl"
         legacy_head = self.coordination_root / "head.json"
@@ -179,17 +203,27 @@ class SignedEventLedger:
             raise LedgerError("ledger requires explicit secure bootstrap")
         if bootstrap and self._private_key is None:
             raise LedgerError("bootstrap requires a signing identity")
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not existed and self._private_key is None:
+            raise LedgerError("projection cannot create ledger directory")
+        self.directory.mkdir(mode=self.directory_mode, parents=True, exist_ok=True)
         info = os.lstat(self.directory)
+        directory_gid = (
+            grp.getgrnam(self.directory_group).gr_gid
+            if self.directory_group
+            else info.st_gid
+        )
         if (
             not stat.S_ISDIR(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or (existed and stat.S_IMODE(info.st_mode) != 0o700)
+            or info.st_uid != self.directory_owner_uid
+            or info.st_gid != directory_gid
+            or (existed and stat.S_IMODE(info.st_mode) != self.directory_mode)
         ):
             raise LedgerError("ledger directory metadata is unsafe")
+        if self._private_key is not None and os.geteuid() != self.directory_owner_uid:
+            raise LedgerError("ledger writer does not own its ledger directory")
         if not existed:
-            os.chmod(self.directory, 0o700)
+            os.chmod(self.directory, self.directory_mode)
         if bootstrap and not self._bootstrap_path().exists():
             if (self.directory / "events.jsonl").exists() or (
                 self.directory / "head.json"
@@ -245,6 +279,10 @@ class SignedEventLedger:
     def _bootstrap_path(self) -> Path:
         return self.directory / BOOTSTRAP_FILENAME
 
+    def _set_created_file_group(self, fd: int) -> None:
+        if self.directory_group:
+            os.fchown(fd, -1, grp.getgrnam(self.directory_group).gr_gid)
+
     def _write_bootstrap(self) -> None:
         assert self._private_key is not None
         unsigned = {
@@ -262,9 +300,10 @@ class SignedEventLedger:
         fd = os.open(
             self._bootstrap_path(),
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
+            self.file_mode,
         )
         try:
+            self._set_created_file_group(fd)
             _write_all(fd, _canonical(payload) + b"\n")
             os.fsync(fd)
         finally:
@@ -290,8 +329,14 @@ class SignedEventLedger:
         if (
             not stat.S_ISREG(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != self.directory_owner_uid
+            or info.st_gid
+            != (
+                grp.getgrnam(self.directory_group).gr_gid
+                if self.directory_group
+                else info.st_gid
+            )
+            or stat.S_IMODE(info.st_mode) != self.file_mode
             or info.st_size > self._max_event_bytes
             or not isinstance(payload, dict)
             or _canonical(payload) + b"\n" != raw
@@ -356,6 +401,7 @@ class SignedEventLedger:
                     raise LedgerError("existing epoch stop latch is invalid")
                 return
             try:
+                self._set_created_file_group(fd)
                 _write_all(fd, _canonical(payload) + b"\n")
                 os.fsync(fd)
             finally:
@@ -387,8 +433,14 @@ class SignedEventLedger:
                 info = os.fstat(fd)
                 if (
                     not stat.S_ISREG(info.st_mode)
-                    or info.st_uid not in {0, os.geteuid()}
-                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_uid != self.directory_owner_uid
+                    or info.st_gid
+                    != (
+                        grp.getgrnam(self.directory_group).gr_gid
+                        if self.directory_group
+                        else info.st_gid
+                    )
+                    or stat.S_IMODE(info.st_mode) != self.file_mode
                     or info.st_size > self._max_event_bytes
                 ):
                     raise LedgerError("epoch stop latch metadata is unsafe")
@@ -441,13 +493,24 @@ class SignedEventLedger:
             self.directory, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
         )
         info = os.fstat(fd)
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        expected_gid = (
+            grp.getgrnam(self.directory_group).gr_gid
+            if self.directory_group
+            else info.st_gid
+        )
+        if (
+            info.st_uid != self.directory_owner_uid
+            or info.st_gid != expected_gid
+            or stat.S_IMODE(info.st_mode) != self.directory_mode
+        ):
             os.close(fd)
             raise LedgerError("ledger directory permissions changed")
+        if self._private_key is not None and os.geteuid() != self.directory_owner_uid:
+            os.close(fd)
+            raise LedgerError("ledger writer ownership changed")
         return fd
 
-    @staticmethod
-    def _open_file(directory_fd: int, name: str, *, create: bool) -> int:
+    def _open_file(self, directory_fd: int, name: str, *, create: bool) -> int:
         flags = (
             ((os.O_RDWR | os.O_APPEND) if create else os.O_RDONLY)
             | os.O_CLOEXEC
@@ -460,16 +523,26 @@ class SignedEventLedger:
                 raise
             try:
                 fd = os.open(
-                    name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd
+                    name,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    self.file_mode,
+                    dir_fd=directory_fd,
                 )
+                self._set_created_file_group(fd)
                 os.fsync(directory_fd)
             except FileExistsError:
                 fd = os.open(name, flags, dir_fd=directory_fd)
         info = os.fstat(fd)
         if (
             not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != self.directory_owner_uid
+            or info.st_gid
+            != (
+                grp.getgrnam(self.directory_group).gr_gid
+                if self.directory_group
+                else info.st_gid
+            )
+            or stat.S_IMODE(info.st_mode) != self.file_mode
         ):
             os.close(fd)
             raise LedgerError("ledger file metadata is unsafe")
@@ -584,8 +657,14 @@ class SignedEventLedger:
         if (
             not stat.S_ISREG(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != self.directory_owner_uid
+            or info.st_gid
+            != (
+                grp.getgrnam(self.directory_group).gr_gid
+                if self.directory_group
+                else info.st_gid
+            )
+            or stat.S_IMODE(info.st_mode) != self.file_mode
             or info.st_size > self._max_event_bytes
         ):
             raise LedgerError("ledger head metadata is unsafe")
@@ -653,9 +732,12 @@ class SignedEventLedger:
         }
         temporary = self.directory / f".head-{os.getpid()}-{id(self)}"
         fd = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+            self.file_mode,
         )
         try:
+            self._set_created_file_group(fd)
             _write_all(fd, _canonical(head) + b"\n")
             os.fsync(fd)
         finally:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import http.client
 import errno
+import grp
+import ipaddress
 import json
 import os
 import secrets
@@ -144,7 +146,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         self.stop_after_errors = stop_after_errors
         self.require_distributed_lock = require_distributed_lock
         self.clock = clock or (lambda: datetime.now(timezone.utc))
-        self.control_uid = os.geteuid()
+        self.control_uid = ledger.directory_owner_uid
 
     def _current_time(self) -> datetime:
         observed = self.clock()
@@ -169,8 +171,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             directory_info = os.fstat(directory_fd)
             if (
                 not stat.S_ISDIR(directory_info.st_mode)
-                or directory_info.st_uid not in {0, self.control_uid}
-                or stat.S_IMODE(directory_info.st_mode) != 0o700
+                or directory_info.st_uid != self.control_uid
+                or stat.S_IMODE(directory_info.st_mode) != self.ledger.directory_mode
             ):
                 os.close(directory_fd)
                 raise DeploymentControlError(
@@ -189,8 +191,14 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 info = os.fstat(descriptor)
                 if (
                     not stat.S_ISREG(info.st_mode)
-                    or info.st_uid not in {0, self.control_uid}
-                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_uid != self.control_uid
+                    or info.st_gid
+                    != (
+                        grp.getgrnam(self.ledger.directory_group).gr_gid
+                        if self.ledger.directory_group
+                        else info.st_gid
+                    )
+                    or stat.S_IMODE(info.st_mode) != self.ledger.file_mode
                     or info.st_size > 65_536
                 ):
                     raise DeploymentControlError(
@@ -227,11 +235,13 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         self,
         *,
         terminal_record: Mapping[str, Any],
+        floor: datetime | None = None,
     ) -> None:
         """Project the floor already authenticated by signed terminal history."""
+        projected_floor = floor or self._terminal_floor(terminal_record["event"])
         value = {
             "schema": "trustforge.authorization-checkpoint/v2",
-            "floor_at": terminal_record["event"]["checkpoint_floor_at"],
+            "floor_at": projected_floor.isoformat(),
             "ledger_id": terminal_record["ledger_id"],
             "control_sequence": terminal_record["sequence"],
             "control_head": terminal_record["event_hash"],
@@ -244,8 +254,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         directory_info = os.fstat(directory_fd)
         if (
             not stat.S_ISDIR(directory_info.st_mode)
-            or directory_info.st_uid not in {0, self.control_uid}
-            or stat.S_IMODE(directory_info.st_mode) != 0o700
+            or directory_info.st_uid != self.control_uid
+            or stat.S_IMODE(directory_info.st_mode) != self.ledger.directory_mode
         ):
             os.close(directory_fd)
             raise DeploymentControlError("authorization checkpoint directory is unsafe")
@@ -256,10 +266,16 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             fd = os.open(
                 temporary,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-                0o600,
+                self.ledger.file_mode,
                 dir_fd=directory_fd,
             )
             try:
+                if self.ledger.directory_group:
+                    os.fchown(
+                        fd,
+                        -1,
+                        grp.getgrnam(self.ledger.directory_group).gr_gid,
+                    )
                 view = memoryview(data)
                 while view:
                     written = os.write(fd, view)
@@ -300,12 +316,14 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         if not terminals:
             return False
         terminal = terminals[-1]
+        floor: datetime | None = None
+        for record in terminals:
+            floor = self._terminal_floor(record["event"], floor)
+        assert floor is not None
         try:
-            floor = _utc(terminal["event"]["checkpoint_floor_at"])
             checkpoint = self._read_checkpoint()
         except DeploymentControlError:
             checkpoint = None
-            floor = _utc(terminal["event"]["checkpoint_floor_at"])
         expected = {
             "schema": "trustforge.authorization-checkpoint/v2",
             "floor_at": floor.isoformat(),
@@ -316,7 +334,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         if checkpoint != expected:
             if heal and self.ledger.can_sign:
                 try:
-                    self._write_checkpoint(terminal_record=terminal)
+                    self._write_checkpoint(terminal_record=terminal, floor=floor)
                 except (DeploymentControlError, OSError):
                     return True
             else:
@@ -508,16 +526,29 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         return epoch
 
     @staticmethod
+    def _terminal_floor(
+        event: Mapping[str, Any], prior: datetime | None = None
+    ) -> datetime:
+        """Project a signed terminal floor, including unshipped pre-field v2."""
+        terminal_at = _utc(event["at"])
+        expected = max(prior or terminal_at, terminal_at)
+        encoded = event.get("checkpoint_floor_at")
+        return expected if encoded is None else _utc(encoded)
+
+    @staticmethod
     def _next_checkpoint_floor(
         records: list[dict[str, Any]], terminal_time: datetime
     ) -> datetime:
-        prior = [
-            _utc(record["event"]["checkpoint_floor_at"])
-            for record in records
-            if record["event"].get("kind")
-            in {"operator_stop", "activation_completed", "activation_failed"}
-        ]
-        return max([terminal_time, *prior])
+        floor: datetime | None = None
+        for record in records:
+            event = record["event"]
+            if event.get("kind") in {
+                "operator_stop",
+                "activation_completed",
+                "activation_failed",
+            }:
+                floor = DeploymentControlLedger._terminal_floor(event, floor)
+        return max(terminal_time, floor or terminal_time)
 
     def routing_snapshot(self) -> RoutingSnapshot:
         current_time = self._current_time()
@@ -650,10 +681,11 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     effective_at=_utc(event["at"]),
                 )
                 expected_floor = max(
-                    _utc(completion.verified_at),
-                    projected_floor or _utc(completion.verified_at),
+                    _utc(event["at"]),
+                    projected_floor or _utc(event["at"]),
                 )
-                if _utc(event.get("checkpoint_floor_at")) != expected_floor:
+                encoded_floor = event.get("checkpoint_floor_at")
+                if encoded_floor is not None and _utc(encoded_floor) != expected_floor:
                     raise DeploymentControlError(
                         "activation checkpoint floor is invalid"
                     )
@@ -735,7 +767,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     _utc(event["at"]),
                     projected_floor or _utc(event["at"]),
                 )
-                if _utc(event.get("checkpoint_floor_at")) != expected_floor:
+                encoded_floor = event.get("checkpoint_floor_at")
+                if encoded_floor is not None and _utc(encoded_floor) != expected_floor:
                     raise DeploymentControlError(
                         "operator stop checkpoint floor is invalid"
                     )
@@ -1016,7 +1049,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 "actor": receipt.actor,
                 "at": now.isoformat(),
                 "checkpoint_floor_at": self._next_checkpoint_floor(
-                    records, _utc(receipt.verified_at)
+                    records, now
                 ).isoformat(),
                 "completion_receipt": asdict(receipt),
             },
@@ -1187,12 +1220,17 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             )
             # connect() is the atomic classification point. The coordination
             # lock is released immediately afterward, before request/response.
-            candidate_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            address = ipaddress.ip_address(str(parsed.hostname))
+            family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+            destination = (
+                (str(address), int(parsed.port), 0, 0)
+                if family == socket.AF_INET6
+                else (str(address), int(parsed.port))
+            )
+            candidate_socket = socket.socket(family, socket.SOCK_STREAM)
             try:
                 candidate_socket.setblocking(False)
-                result = candidate_socket.connect_ex(
-                    (str(parsed.hostname), int(parsed.port))
-                )
+                result = candidate_socket.connect_ex(destination)
                 if result not in {
                     0,
                     errno.EINPROGRESS,

@@ -209,3 +209,16 @@ old imports are intentionally breaking: retaining a facade that reports or
 enables `ratio=1` would recreate a second promotion authority. External
 consumers, if discovered, must migrate to the authenticated release router;
 there is no compatibility shim with activation semantics.
+
+## Ledger ownership and pre-field v2 replay
+
+The ledger root is `root:trustforge-release` mode `0750`. Control is owned by
+`trustforge-operator:trustforge-release`; router outcomes are owned by
+`trustforge-router:trustforge-release`. Both ledger directories are `0750`
+with `0640` files. A writer must be the configured owner; the other identity
+is a group-read-only projection and never creates or repairs ledger storage.
+
+Unshipped signed-ledger v2 terminal records created before
+`checkpoint_floor_at` are replayed by deriving the floor from their signed
+terminal `at` value and the prior authenticated floor. Legacy HMAC v1 remains
+rejected and requires an audited offline migration.
