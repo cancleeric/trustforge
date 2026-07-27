@@ -389,6 +389,27 @@ def test_jsonschema_rejects_nested_evidence_path_like_runtime() -> None:
     assert list(validator.iter_errors(profile))
 
 
+@pytest.mark.parametrize("missing_field", ["evidence_kind", "source_coordinates"])
+def test_schema_and_runtime_both_reject_missing_provenance_field(
+    missing_field: str,
+) -> None:
+    profile = copy.deepcopy(raw_records()[0]["profile"])
+    del profile["dimensions"][0]["provenance"][missing_field]
+    validator = Draft202012Validator(
+        contract_schemas()["AssetIntrinsicProfile"], format_checker=FormatChecker()
+    )
+
+    schema_errors = list(validator.iter_errors(profile))
+
+    assert schema_errors
+    assert any(
+        error.validator == "required" and missing_field in error.message
+        for error in schema_errors
+    )
+    with pytest.raises(ValueError, match=rf"missing provenance fields: {missing_field}"):
+        parse_asset_intrinsic_profile(profile)
+
+
 def test_validation_cli_success_is_offline_and_error_exit_is_nonzero(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
     env = {**os.environ, "PYTHONPATH": str(root / "src")}

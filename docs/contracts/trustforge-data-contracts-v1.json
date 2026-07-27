@@ -304,7 +304,9 @@
                       "content_hash",
                       "coverage",
                       "evidence_path",
-                      "source_revision"
+                      "source_revision",
+                      "evidence_kind",
+                      "source_coordinates"
                     ],
                     "type": "object"
                   },
@@ -395,7 +397,9 @@
                 "content_hash",
                 "coverage",
                 "evidence_path",
-                "source_revision"
+                "source_revision",
+                "evidence_kind",
+                "source_coordinates"
               ],
               "type": "object"
             },

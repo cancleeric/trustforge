@@ -75,7 +75,8 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
         "type": "object",
         "required": [
             "source_urls", "methodology", "content_hash", "coverage",
-            "evidence_path", "source_revision",
+            "evidence_path", "source_revision", "evidence_kind",
+            "source_coordinates",
         ],
         "properties": {
             "source_urls": {
