@@ -154,9 +154,87 @@ def test_replay_loader_fails_closed_on_oversize_unicode_and_deep_json(
     (replay / "deep.json").write_text("[" * 2_000 + "]" * 2_000, encoding="utf-8")
     monkeypatch.setattr(samples, "_MAX_INPUT_BYTES", 1)
     counter: Counter[str] = Counter()
-    assert samples._load_replay_snapshots(replay, counter) == []
-    assert counter["input_too_large"] == 2
-    assert counter["malformed_input"] == 1
+    with pytest.raises(samples.ReplayInputError):
+        list(samples._load_replay_snapshots(replay, counter))
+    assert counter["input_too_large"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "spoof"),
+    [("kind", "sentiment"), ("provider", "Evil Inc"), ("scope", "market-wide")],
+)
+def test_known_source_identity_spoof_rejects_entire_snapshot(
+    field: str, spoof: str
+) -> None:
+    item = {
+        "source": "blockchain-com-charts",
+        "kind": "onchain",
+        "provider": "Blockchain.com",
+        "scope": "per-coin",
+        "visible_at": "2026-01-01T08:00:00Z",
+    }
+    item[field] = spoof
+    counter: Counter[str] = Counter()
+    assert samples.extract_replay_evidence({
+        "snapshot_at": "2026-01-01T12:00:00Z",
+        "coin": "BTC",
+        "report": {"direction": "bullish", "calibrated_confidence": 0.9},
+        "evidence": [item],
+    }, counter, "BTC") == []
+    assert counter["source_identity_conflict"] == 1
+    assert counter["rejected_snapshots"] == 1
+
+
+def test_unknown_source_is_not_self_registered() -> None:
+    counter: Counter[str] = Counter()
+    assert samples.extract_replay_evidence({
+        "snapshot_at": "2026-01-01T12:00:00Z",
+        "coin": "BTC",
+        "report": {"direction": "bullish", "calibrated_confidence": 0.9},
+        "evidence": [{
+            "source": "attacker",
+            "kind": "onchain",
+            "provider": "Blockchain.com",
+            "scope": "per-coin",
+            "visible_at": "2026-01-01T08:00:00Z",
+        }],
+    }, counter, "BTC") == []
+    assert counter["unknown_source"] == 1
+
+
+@pytest.mark.parametrize("limit_kind", ["count", "single", "aggregate"])
+def test_replay_batch_limits_abort_without_partial_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit_kind: str
+) -> None:
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    (replay / "a.json").write_text("{}", encoding="utf-8")
+    (replay / "b.json").write_text("{}", encoding="utf-8")
+    if limit_kind == "count":
+        monkeypatch.setattr(samples, "_MAX_REPLAY_FILES", 1)
+    elif limit_kind == "single":
+        monkeypatch.setattr(samples, "_MAX_INPUT_BYTES", 1)
+    else:
+        monkeypatch.setattr(samples, "_MAX_REPLAY_TOTAL_BYTES", 3)
+    with pytest.raises(samples.ReplayInputError):
+        list(samples._load_replay_snapshots(replay, Counter()))
+
+
+def test_replay_lineage_excludes_index_and_is_shared_by_candidates(tmp_path: Path) -> None:
+    fng, ohlcv, replay = _write_inputs(tmp_path)
+    (replay / "index.json").write_text('{"mutable": true}', encoding="utf-8")
+    result, _ = samples.build_samples(
+        fng_path=fng, replay_dir=replay, ohlcv_path=ohlcv / "BTC_daily_ohlcv.csv",
+        coin="BTC", horizon=1, cutoff=date(2026, 1, 1),
+    )
+    assert len({row["lineage_hash"] for row in result}) == 1
+    before = result[0]["lineage_hash"]
+    (replay / "index.json").write_text('{"mutable": false}', encoding="utf-8")
+    result, _ = samples.build_samples(
+        fng_path=fng, replay_dir=replay, ohlcv_path=ohlcv / "BTC_daily_ohlcv.csv",
+        coin="BTC", horizon=1, cutoff=date(2026, 1, 1),
+    )
+    assert result[0]["lineage_hash"] == before
 
 
 def test_fng_loader_fails_closed_when_file_exceeds_bound(
@@ -180,6 +258,31 @@ def test_output_is_deterministic_and_cutoff_is_inclusive(tmp_path: Path) -> None
     second, _ = samples.build_samples(**kwargs)
     assert first == second
     assert [row["sample_id"] for row in first] == [row["sample_id"] for row in second]
+
+
+@pytest.mark.parametrize("failure", ["fsync", "replace"])
+def test_atomic_output_failure_preserves_old_file_and_cleans_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    fng, ohlcv, replay = _write_inputs(tmp_path)
+    output = tmp_path / "samples.jsonl"
+    output.write_bytes(b"trusted-old-output\n")
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected atomic write failure")
+
+    monkeypatch.setattr(samples.os, failure, fail)
+    with pytest.raises(OSError, match="injected atomic write failure"):
+        samples.main([
+            "--fng-jsonl", str(fng),
+            "--replay-dir", str(replay),
+            "--ohlcv-dir", str(ohlcv),
+            "--horizon", "1",
+            "--cutoff", "2026-01-01",
+            "--out", str(output),
+        ])
+    assert output.read_bytes() == b"trusted-old-output\n"
+    assert list(tmp_path.glob(f".{output.name}.*.tmp")) == []
 
 
 def test_market_wide_and_blockchain_sources_are_btc_only(tmp_path: Path) -> None:
@@ -235,3 +338,22 @@ def test_cli_rejects_non_iso_cutoff(tmp_path: Path) -> None:
     ], capture_output=True, text=True)
     assert completed.returncode == 2
     assert "cutoff must be UTC YYYY-MM-DD" in completed.stderr
+
+
+@pytest.mark.subprocess
+def test_cli_replay_limit_is_nonzero_and_does_not_replace_output(tmp_path: Path) -> None:
+    fng, ohlcv, replay = _write_inputs(tmp_path)
+    oversized = replay / "oversized.json"
+    with oversized.open("wb") as stream:
+        stream.seek(samples._MAX_INPUT_BYTES)
+        stream.write(b"\0")
+    output = tmp_path / "samples.jsonl"
+    output.write_bytes(b"trusted-old-output\n")
+    completed = subprocess.run([
+        sys.executable, str(SCRIPT), "--fng-jsonl", str(fng),
+        "--replay-dir", str(replay), "--ohlcv-dir", str(ohlcv),
+        "--horizon", "1", "--cutoff", "2026-01-01", "--out", str(output),
+    ], capture_output=True, text=True)
+    assert completed.returncode != 0
+    assert "replay file exceeds safety limit" in completed.stderr
+    assert output.read_bytes() == b"trusted-old-output\n"

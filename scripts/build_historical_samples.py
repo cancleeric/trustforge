@@ -17,6 +17,7 @@ from collections import Counter
 from csv import DictReader
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any, Optional
 
 _DIRECTION_THRESHOLD = 0.03
@@ -25,13 +26,18 @@ _COINS = {"BTC", "ETH", "SOL", "BNB", "XRP"}
 _MAX_INPUT_BYTES = 32 * 1024 * 1024
 _MAX_JSON_LINE_BYTES = 1024 * 1024
 _MAX_REPLAY_FILES = 10_000
+_MAX_REPLAY_TOTAL_BYTES = 256 * 1024 * 1024
 _CONTRACT_PATH = Path(__file__).resolve().parents[1] / "docs/contracts/historical-sample-contract.md"
-_SOURCE_FAMILY = {
-    "alternative-me-fng": "sentiment",
-    "blockchain-com-charts": "onchain",
-    "ohlcv-csv": "price",
-    "sec-gov": "regulatory",
+_SOURCE_IDENTITY = {
+    "alternative-me-fng": ("sentiment", "Alternative.me", "market-wide"),
+    "blockchain-com-charts": ("onchain", "Blockchain.com", "per-coin"),
+    "ohlcv-csv": ("price", "HOYA BIT", "per-coin"),
+    "sec-gov": ("regulatory", "SEC", "market-wide"),
 }
+
+
+class ReplayInputError(ValueError):
+    """The replay corpus violates a batch-level safety boundary."""
 
 
 def _utc_datetime(value: object) -> datetime | None:
@@ -140,30 +146,34 @@ def load_ohlcv(path: Path) -> dict[str, float]:
 def _bounded_replay_paths(
     replay_dir: Path, counters: Counter[str]
 ) -> list[Path]:
-    paths = sorted(replay_dir.glob("*.json"))
+    paths = [path for path in sorted(replay_dir.glob("*.json")) if path.name != "index.json"]
     if len(paths) > _MAX_REPLAY_FILES:
         counters["too_many_replay_files"] += len(paths) - _MAX_REPLAY_FILES
-        paths = paths[:_MAX_REPLAY_FILES]
+        raise ReplayInputError("replay file count exceeds safety limit")
     accepted: list[Path] = []
+    total_bytes = 0
     for path in paths:
         try:
-            if path.stat().st_size > _MAX_INPUT_BYTES:
+            size = path.stat().st_size
+            if size > _MAX_INPUT_BYTES:
                 counters["input_too_large"] += 1
-                continue
+                raise ReplayInputError(f"replay file exceeds safety limit: {path.name}")
+            total_bytes += size
+            if total_bytes > _MAX_REPLAY_TOTAL_BYTES:
+                counters["replay_total_too_large"] += 1
+                raise ReplayInputError("replay corpus exceeds aggregate safety limit")
         except OSError:
             counters["malformed_input"] += 1
-            continue
+            raise ReplayInputError(f"cannot stat replay file: {path.name}")
         accepted.append(path)
     return accepted
 
 
 def _load_replay_snapshots(
     replay_dir: Path, counters: Counter[str], *, paths: list[Path] | None = None
-) -> list[dict]:
-    snapshots: list[dict[str, Any]] = []
+) -> Iterator[dict[str, Any]]:
+    """Yield validated JSON objects without retaining the corpus in memory."""
     for path in paths if paths is not None else _bounded_replay_paths(replay_dir, counters):
-        if path.name == "index.json":
-            continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
@@ -172,13 +182,12 @@ def _load_replay_snapshots(
         if not isinstance(value, dict):
             counters["malformed_input"] += 1
             continue
-        snapshots.append(value)
-    return snapshots
+        yield value
 
 
 def load_replay_snapshots(replay_dir: Path) -> list[dict]:
     """Backward-compatible replay loader for existing research callers."""
-    return _load_replay_snapshots(replay_dir, Counter())
+    return list(_load_replay_snapshots(replay_dir, Counter()))
 
 
 def compute_outcome(
@@ -284,9 +293,25 @@ def extract_replay_evidence(
             counters["malformed_input"] += 1
             rejected = True
             continue
-        family = item.get("source_family") or item.get("kind") or _SOURCE_FAMILY.get(source)
-        if family not in {"sentiment", "onchain", "price", "regulatory"}:
-            counters["malformed_input"] += 1
+        canonical = _SOURCE_IDENTITY.get(source)
+        if canonical is None:
+            # Replay is a local trusted boundary, not a source-registration
+            # mechanism. Unknown identities must first be added to this
+            # reviewed allowlist.
+            counters["unknown_source"] += 1
+            rejected = True
+            continue
+        family, provider, scope = canonical
+        supplied_family = item.get("source_family", item.get("kind"))
+        supplied_provider = item.get("provider")
+        meta = item.get("meta", {})
+        supplied_scope = item.get("scope", meta.get("scope") if isinstance(meta, dict) else None)
+        if (
+            (supplied_family is not None and supplied_family != family)
+            or (supplied_provider is not None and supplied_provider != provider)
+            or (supplied_scope is not None and supplied_scope != scope)
+        ):
+            counters["source_identity_conflict"] += 1
             rejected = True
             continue
         if source == "blockchain-com-charts" and str(snapshot.get("coin", "BTC")).upper() != "BTC":
@@ -297,11 +322,9 @@ def extract_replay_evidence(
         result[key] = {
             "as_of": as_of,
             "source": source,
-            "provider": str(item.get("provider") or source),
+            "provider": provider,
             "source_family": family,
-            "scope": str(item.get("scope") or item.get("meta", {}).get("scope", "per-coin"))
-            if isinstance(item.get("meta", {}), dict)
-            else "per-coin",
+            "scope": scope,
             "claim_direction": direction,
             "evidence_strength": confidence,
             "abstain": abstain,

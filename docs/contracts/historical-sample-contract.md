@@ -135,14 +135,24 @@ T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = nu
      report direction/confidence）全部拒收，並在 CLI summary 分類計數
    - `snapshot.coin` 必填、須為支援幣別且等於本次 requested coin；否則整個
      snapshot 拒收並計入 `snapshot_coin_mismatch`
-   - 單一輸入檔上限 32 MiB、JSONL 單行上限 1 MiB、replay 最多 10,000 個
-     JSON 檔；超限、Unicode/JSON/recursion parse failure 均 fail-closed 並計數
+   - 單一輸入檔上限 32 MiB、JSONL 單行上限 1 MiB、replay 最多 10,000 個，
+     replay 總量最多 256 MiB。任一 replay 檔、檔案數或總量超限時，整批
+     abort 並以 non-zero 結束，不得截斷後產出 partial output；
+     Unicode/JSON/recursion parse failure 均 fail-closed 並計數
+   - Replay evidence 的 `source` 必須在程式內受審 allowlist；已知 source 的
+     `source_family`、`provider`、`scope` 使用 canonical identity。輸入若宣告
+     衝突 identity，整個 snapshot 拒收；未知 source 不可藉 replay 自行註冊
+   - Replay paths 先完成批次上限檢查，再逐檔串流 decode，不把全部 snapshots
+     常駐記憶體。Lineage 僅納入實際候選 JSON（排除 `index.json`），所有候選
+     replay JSON 使用相同 corpus lineage 語意
    - Scope gate：`scope=market-wide` 的 FNG sample 不因 coin-expanded rows
      重複產生；Blockchain.com 僅接受 BTC
    - cutoff gate：`as_of` 的 UTC 日期必須 `≤ --cutoff YYYY-MM-DD`（inclusive）
 
 5. **Output**：以 `as_of/coin/source_family/source/sample_id` 固定排序，每行一個
-   JSON object。相同輸入、cutoff 與 horizon 必須 byte-for-byte deterministic。
+   JSON object；寫入採同目錄 temporary file、flush+fsync、atomic replace。
+   任一寫入或 replace 失敗時保留舊 output，並清除 temporary file。
+   相同輸入、cutoff 與 horizon 必須 byte-for-byte deterministic。
 
 輸入中的 `report` 與 `evidence` 必須本身就是 JSON object/array。JSON string、
 Python literal 或其他序列化形式一律視為 malformed；pipeline 不使用
