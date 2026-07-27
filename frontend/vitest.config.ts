@@ -18,12 +18,14 @@ export default defineConfig({
     // swap I/O 卡到 1 秒以上，導致 waitFor()／testTimeout 隨機炸裂
     // （見 HermesDashboard.test.tsx N2、hermesLayoutContract.test.ts N6 的隨機
     // 逾時，兩者互不相關卻同天 5000ms 逾時，指向環境資源，不是個別測試邏輯）。
-    // 把平行 worker 數量壓低，用時間換取確定性：換來的是穩定但稍慢的 CI，而不是
-    // 把逾時門檻整體調高去掩蓋 flake。
+    // v0.26 降至 2 workers 仍不足以完全消除；v0.27 進一步降為 single worker＋
+    // 逾時門檻從預設 5000ms 調到 15000ms：在這台共用機上，單一 worker 可避免
+    // jsdom 競爭，15s 足夠覆蓋最極端的 swap I/O spike。
+    testTimeout: 30000,
     poolOptions: {
       threads: {
         minThreads: 1,
-        maxThreads: 2,
+        maxThreads: 1,
       },
     },
   },
