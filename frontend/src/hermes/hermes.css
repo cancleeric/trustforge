@@ -363,6 +363,10 @@
        約 27%、1920 寬時約 22%），中間全息區仍是最大的一格。 */
     --hermes-menu: clamp(124px, 10vw, 160px);
     --hermes-rail: calc(var(--hermes-menu) + clamp(230px, 19vw, 280px));
+    /* N50：右軌必須自己釘死，不能繼續吃 `var(--hermes-rail)`。左軌因為多了
+       選單欄而變寬，右軌沒有理由跟著胖——實測沒釘時 1920 的右軌從 300 變成
+       440。這裡維持 N49 之前的基準值。 */
+    --hermes-right-rail: clamp(230px, 20.84vw, 300px);
   }
   .hermes-rail-split { flex-direction: row; }
   .hermes-rail-menu {
@@ -2115,7 +2119,12 @@
 }
 
 .hermes-energy-deck {
-  right: 0;
+  /* N50：右緣比照 N41 的左緣改吃軌道變數。原本 `right: 0` 讓管線條整條鑽到
+     右軌底下——1920 實測 deck 右緣 1919、右軌左緣 1479，重疊 440px，HERMES
+     那顆環直接壓在「目前焦點」那一格下面。吃 `--hermes-right-rail` 之後管線
+     條在右軌左緣就收掉；≤900px 該變數已經是 0（右軌本來就不掛載），同一條
+     規則在所有斷點都成立，不必另外寫斷點。 */
+  right: var(--hermes-right-rail);
   width: auto;
   height: var(--hermes-bottom);
 }

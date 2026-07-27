@@ -50,7 +50,11 @@ export default function HermesRightRail({
     <div
       className="hermes-glass hermes-right-rail"
       style={{
-        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-right-rail)', height: 'calc(100% - var(--hermes-top) - var(--hermes-bottom))', zIndex: 5,
+        position: 'absolute', right: 0, top: 'var(--hermes-top)', width: 'var(--hermes-right-rail)',         /* N50：高度從 `calc(100% - top - bottom)` 改成 `calc(100% - top)`。
+           管線條右緣改成停在右軌左緣之後，右軌下方那條 `--hermes-bottom`
+           高的帶狀區域不再有東西填，就變成右下角一個空格（老闆原話
+           「右下空了一格」）。跟 N44 左軌的處理一致：軌道自己貼到畫面底緣。 */
+        height: 'calc(100% - var(--hermes-top))', zIndex: 5,
         borderLeft: '1px solid var(--color-hermes-bd)', padding: '14px 16px',
         display: 'flex', flexDirection: 'column', gap: 12,
         overflowY: 'auto',
