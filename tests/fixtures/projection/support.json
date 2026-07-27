@@ -1,0 +1,366 @@
+{
+  "case_id": "support",
+  "commit": "346b89e2f86ec1718cf65460747cabfd3c469f7b",
+  "description": "Multiple high-trust supporting claims from diverse sources",
+  "expected_projection": {
+    "abstain": false,
+    "coin": "BTC",
+    "confidence": 0.7158,
+    "contrarian_texts": [
+      "BTC ETF inflows expanded"
+    ],
+    "decision_state": "normal",
+    "direction": "偏多",
+    "evidence": [
+      {
+        "author": null,
+        "content_reference": "BTC ETF inflows expanded",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:15:00Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "news",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "Reuters",
+        "source_url": "",
+        "trust": 0.475,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.998,
+          "reputation": 0.65
+        }
+      },
+      {
+        "author": null,
+        "content_reference": "BTC exchange reserves fell",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:15:10Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "onchain",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "Glassnode",
+        "source_url": "",
+        "trust": 0.625,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.999,
+          "reputation": 0.95
+        }
+      },
+      {
+        "author": null,
+        "content_reference": "BTC price broke resistance",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:15:20Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "price",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "CoinGecko",
+        "source_url": "",
+        "trust": 0.625,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.999,
+          "reputation": 0.95
+        }
+      },
+      {
+        "author": null,
+        "content_reference": "Institutional accumulation continues",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:15:30Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "regulatory",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "SEC",
+        "source_url": "",
+        "trust": 0.6,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.999,
+          "reputation": 0.9
+        }
+      }
+    ],
+    "independent_sources": 3,
+    "kernel_contract_version": "2.2.0",
+    "key_basis": [
+      {
+        "claim": "BTC exchange reserves fell",
+        "evidence_idx": [
+          0
+        ],
+        "explanation": "Glassnode (onchain) trust=0.625"
+      },
+      {
+        "claim": "BTC price broke resistance",
+        "evidence_idx": [
+          1
+        ],
+        "explanation": "CoinGecko (price) trust=0.625"
+      },
+      {
+        "claim": "Institutional accumulation continues",
+        "evidence_idx": [
+          2
+        ],
+        "explanation": "SEC (regulatory) trust=0.600"
+      }
+    ],
+    "query": "BTC outlook",
+    "raw_confidence": 0.6164742505891984,
+    "reason_codes": [],
+    "supporting_count": 3,
+    "supporting_evidence": [
+      {
+        "author": null,
+        "content_reference": "BTC exchange reserves fell",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:15:10Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "onchain",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "Glassnode",
+        "source_url": "",
+        "trust": 0.625,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.999,
+          "reputation": 0.95
+        }
+      },
+      {
+        "author": null,
+        "content_reference": "BTC price broke resistance",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:15:20Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "price",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "CoinGecko",
+        "source_url": "",
+        "trust": 0.625,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.999,
+          "reputation": 0.95
+        }
+      },
+      {
+        "author": null,
+        "content_reference": "Institutional accumulation continues",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:15:30Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "regulatory",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "SEC",
+        "source_url": "",
+        "trust": 0.6,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.999,
+          "reputation": 0.9
+        }
+      }
+    ]
+  },
+  "input": {
+    "abstain": false,
+    "confidence": 0.7158,
+    "contract_version": "2.2.0",
+    "contrarian": [
+      "c1"
+    ],
+    "decision_state": "normal",
+    "direction": "偏多",
+    "independent_sources": 3,
+    "query": "BTC outlook",
+    "reason_codes": [],
+    "scored_claims": [
+      {
+        "claim": {
+          "claim_type": "fact",
+          "direction": "bullish",
+          "document": {
+            "id": "d1",
+            "kind": "news",
+            "metadata": [],
+            "source": "Reuters",
+            "text": "BTC ETF inflows expanded",
+            "timestamp": 900.0,
+            "url": ""
+          },
+          "id": "c1",
+          "text": "BTC ETF inflows expanded"
+        },
+        "components": [
+          [
+            "reputation",
+            0.65
+          ],
+          [
+            "corroboration",
+            0.0
+          ],
+          [
+            "recency",
+            0.9983967791713544
+          ],
+          [
+            "manipulation",
+            0.0
+          ]
+        ],
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.47475951687570317
+      },
+      {
+        "claim": {
+          "claim_type": "fact",
+          "direction": "bullish",
+          "document": {
+            "id": "d2",
+            "kind": "onchain",
+            "metadata": [],
+            "source": "Glassnode",
+            "text": "BTC exchange reserves fell",
+            "timestamp": 910.0,
+            "url": ""
+          },
+          "id": "c2",
+          "text": "BTC exchange reserves fell"
+        },
+        "components": [
+          [
+            "reputation",
+            0.95
+          ],
+          [
+            "corroboration",
+            0.0
+          ],
+          [
+            "recency",
+            0.9985569855219026
+          ],
+          [
+            "manipulation",
+            0.0
+          ]
+        ],
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.6247835478282854
+      },
+      {
+        "claim": {
+          "claim_type": "fact",
+          "direction": "bullish",
+          "document": {
+            "id": "d3",
+            "kind": "price",
+            "metadata": [],
+            "source": "CoinGecko",
+            "text": "BTC price broke resistance",
+            "timestamp": 920.0,
+            "url": ""
+          },
+          "id": "c3",
+          "text": "BTC price broke resistance"
+        },
+        "components": [
+          [
+            "reputation",
+            0.95
+          ],
+          [
+            "corroboration",
+            0.0
+          ],
+          [
+            "recency",
+            0.99871721757974
+          ],
+          [
+            "manipulation",
+            0.0
+          ]
+        ],
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.624807582636961
+      },
+      {
+        "claim": {
+          "claim_type": "fact",
+          "direction": "bullish",
+          "document": {
+            "id": "d4",
+            "kind": "regulatory",
+            "metadata": [],
+            "source": "SEC",
+            "text": "Institutional accumulation continues",
+            "timestamp": 930.0,
+            "url": ""
+          },
+          "id": "c4",
+          "text": "Institutional accumulation continues"
+        },
+        "components": [
+          [
+            "reputation",
+            0.9
+          ],
+          [
+            "corroboration",
+            0.0
+          ],
+          [
+            "recency",
+            0.9988774753489916
+          ],
+          [
+            "manipulation",
+            0.0
+          ]
+        ],
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.5998316213023487
+      }
+    ],
+    "supporting": [
+      "c3",
+      "c2",
+      "c4"
+    ],
+    "supporting_count": 3,
+    "trust_score": 0.6164742505891984
+  }
+}

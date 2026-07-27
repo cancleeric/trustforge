@@ -1,0 +1,46 @@
+{
+  "case_id": "invalid_contract",
+  "commit": "346b89e2f86ec1718cf65460747cabfd3c469f7b",
+  "description": "Unknown contract version should raise UnsupportedKernelContractVersion",
+  "expected_projection": null,
+  "input": {
+    "abstain": false,
+    "confidence": 0.5,
+    "contract_version": "999.0.0",
+    "contrarian": [],
+    "decision_state": "normal",
+    "direction": "偏多",
+    "independent_sources": 1,
+    "query": "BTC outlook",
+    "reason_codes": [],
+    "scored_claims": [
+      {
+        "claim": {
+          "claim_type": "fact",
+          "direction": "neutral",
+          "document": {
+            "id": "d1",
+            "kind": "news",
+            "metadata": [],
+            "source": "Reuters",
+            "text": "BTC news",
+            "timestamp": 900.0,
+            "url": ""
+          },
+          "id": "c1",
+          "text": "BTC news"
+        },
+        "components": [],
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.5
+      }
+    ],
+    "supporting": [
+      "c1"
+    ],
+    "supporting_count": 1,
+    "trust_score": 0.5
+  }
+}

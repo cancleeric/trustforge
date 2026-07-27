@@ -1,0 +1,43 @@
+{
+  "case_id": "empty_output",
+  "commit": "346b89e2f86ec1718cf65460747cabfd3c469f7b",
+  "description": "Edge case: empty output with zero claims",
+  "expected_projection": {
+    "abstain": true,
+    "coin": "BTC",
+    "confidence": 0.0,
+    "contrarian_texts": [],
+    "decision_state": "abstain",
+    "direction": "不明",
+    "evidence": [],
+    "independent_sources": 0,
+    "kernel_contract_version": "2.2.0",
+    "key_basis": [],
+    "query": "BTC outlook",
+    "raw_confidence": 0.0,
+    "reason_codes": [
+      "low_calibrated_confidence",
+      "insufficient_independent_sources"
+    ],
+    "supporting_count": 0,
+    "supporting_evidence": []
+  },
+  "input": {
+    "abstain": true,
+    "confidence": 0.0,
+    "contract_version": "2.2.0",
+    "contrarian": [],
+    "decision_state": "abstain",
+    "direction": "不明",
+    "independent_sources": 0,
+    "query": "BTC outlook",
+    "reason_codes": [
+      "low_calibrated_confidence",
+      "insufficient_independent_sources"
+    ],
+    "scored_claims": [],
+    "supporting": [],
+    "supporting_count": 0,
+    "trust_score": 0.0
+  }
+}
