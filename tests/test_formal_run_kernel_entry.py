@@ -1,17 +1,16 @@
-"""Formal pipeline entrypoint Trust Kernel regression (#420)."""
+"""Formal pipeline PR1 non-authoritative shadow regression (#732)."""
 
 from __future__ import annotations
 
-import trustforge_core
 from trustforge.ingestion.base import Document
 from trustforge.pipeline import run
 from trustforge.schema import QuestionType
-from trustforge_core import KernelOutput
 
 
-def test_formal_pipeline_run_enters_trust_kernel(monkeypatch):
-    """The public formal run path must pass normalized claims through run_kernel()."""
-    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")  # #733: full kernel for test
+def test_formal_pipeline_pr1_never_enters_candidate_runtime(monkeypatch):
+    """Both legacy switches on still cannot enter candidate wiring in PR1."""
+    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")
+    monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return [
@@ -33,19 +32,15 @@ def test_formal_pipeline_run_enters_trust_kernel(monkeypatch):
             ),
         ]
 
-    seen: dict[str, object] = {}
-    real_run_kernel = trustforge_core.run_kernel
-
-    def spy_run_kernel(inp):
-        seen["coin"] = inp.coin
-        seen["query"] = inp.query
-        seen["claims"] = len(inp.claims)
-        out = real_run_kernel(inp)
-        assert isinstance(out, KernelOutput)
-        return out
+    def bomb(*args, **kwargs):
+        raise AssertionError("PR1 formal pipeline must not call candidate runtime")
 
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
-    monkeypatch.setattr("trustforge.agent.orchestrator.run_kernel", spy_run_kernel)
+    import trustforge.agent.orchestrator as orchestrator
+
+    monkeypatch.setattr(orchestrator, "to_kernel_input", bomb, raising=False)
+    monkeypatch.setattr(orchestrator, "run_kernel", bomb, raising=False)
+    monkeypatch.setattr(orchestrator, "record_shadow_run", bomb, raising=False)
 
     report, evidence, log = run(
         "BTC",
@@ -56,11 +51,12 @@ def test_formal_pipeline_run_enters_trust_kernel(monkeypatch):
 
     assert report.coin == "BTC"
     assert evidence
-    assert seen["coin"] == "BTC"
-    assert seen["query"] == "formal BTC multi-source analysis"
-    assert seen["claims"] > 0
-    assert any(
-        event.get("tool") == "judgment.derive"
-        and "kernel_confidence" in event.get("params", {})
-        for event in log.events
+    event = next(
+        event for event in log.events
+        if event.get("tool") == "judgment.derive"
+        and "shadow_observation_status" in event.get("params", {})
     )
+    assert event["params"]["shadow_observation_status"] == "not_observed"
+    assert event["params"]["shadow_candidate_latency_ms"] == 0.0
+    assert event["params"]["kernel_confidence"] is None
+    assert event["params"]["kernel_abstain"] is None
