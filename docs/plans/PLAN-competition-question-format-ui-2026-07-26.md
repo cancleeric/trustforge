@@ -4,7 +4,9 @@
 > 目標分支：`develop`  
 > 範圍：TrustForge 前端分析入口與少量後端 mode mapping；不變更核心 Trust Layer 演算法。  
 > 依據：`docs/competition/COMPETITION-OFFICIAL.md`。  
-> 狀態：待 Eric / CEO 指派工程實作。
+> 狀態：**CEO 已裁示採方案 B**（主要 UI 改成官方三題型，4–8h，後端已支援三題型，
+> 主要成本在前端與測試）；C／D 視時間再補。2026-07-27 依實作面回填四處修正
+> （§5.1 左軌、§7 雙語系、§8 五道 gate、§10.2 顯示層過濾），待排入實作。
 
 ---
 
@@ -125,6 +127,7 @@ report.md
 |---|---|
 | `frontend/src/components/QueryConsole.tsx` | 把 `ANALYSIS_MODES` 改為官方題型；必要時新增 optional focus selector。 |
 | `frontend/src/pages/HermesDashboard.tsx` | 調整 `qtypes`、`activeQuestionMode`、`onSubmit()` 的 `type` / `mode` 產生邏輯。 |
+| `frontend/src/components/HermesLeftRail.tsx` | **本次補上**：四欄改版後，題型／模式選單實際渲染在左軌，不是只在 `QueryConsole` 內。漏掉這支會出現「主入口改成三題型、左軌仍列五種」的雙軌不一致。 |
 | `frontend/src/lib/beginnerExperience.ts` | 調整 beginner intents，不再把五種模式當官方題型；維持作為分析目的。 |
 | `frontend/src/hermes/hermesI18n.tsx` | 新增／修改文案：官方題型、分析角度、比賽模式提示。 |
 | `frontend/src/pages/HermesDashboard.test.tsx` | 更新目前寫死五種 mode 的測試。 |
@@ -226,7 +229,9 @@ type=multi_source&mode=risk
 - [ ] 使用者／評審可明確看到官方三題型：多源整合、假設驗證、比較分析。
 - [ ] 比較分析不會被錯送成單幣分析。
 - [ ] 比賽模式若存在，只顯示 BTC / ETH / SOL / BNB / XRP。
-- [ ] 手機版下拉與按鈕不 overflow。
+- [ ] 手機版下拉與按鈕不 overflow，且 **zh-TW 與 en 兩個語系都要各驗一次**：
+      英文字串普遍比中文長（例：「多源整合」4 字 vs `Multi-source integration`
+      25 字元），實測上 en 才是換行／溢出的觸發語系，只驗中文會漏掉。
 
 ### API / 行為驗收
 
@@ -247,14 +252,21 @@ type=multi_source&mode=risk
 
 ### 前端
 
+本 repo 的實際 gate 是五道，缺一不可（`npm test -- --run` 與 `npm run lint`
+兩個指令在此 repo 並不存在，照抄會直接失敗）：
+
 ```bash
 cd frontend
-npm test -- --run HermesDashboard AnalyzePage QueryConsole
-npm run lint
-npm run build
+npx vitest run                     # 1. 單元／契約測試
+npx tsc -b                         # 2. 型別
+npx oxlint                         # 3. lint
+npm run build                      # 4. production build
+npm run test:mobile-geometry       # 5. 行動裝置幾何／命中測試矩陣
 ```
 
-若 repo 目前測試命令不同，依 `package.json` 為準。
+第 5 道會用 Playwright 在 13 種視窗尺寸實跑命中測試，題型 selector 若在窄
+視窗被遮住或縮到 24px 以下會在這裡被擋下——這正是本 PLAN §7「手機版下拉與
+按鈕不 overflow」的自動化對應，不要只靠肉眼。
 
 ### 後端
 
@@ -284,7 +296,7 @@ GitHub Actions 不作 release gate。
 | C：官方題型 + 分析角度雙層 selector | 1–1.5 天 | 中 | 比 B 更完整，保留產品化 UX。 |
 | D：新增比賽專用頁 /competition | 2–3 天 | 中 | 最乾淨，適合決賽現場。 |
 
-建議先做 B，再視時間補 C 或 D。
+建議先做 B，再視時間補 C 或 D。**2026-07-27 CEO 裁示：採 B。**
 
 ---
 
@@ -292,6 +304,10 @@ GitHub Actions 不作 release gate。
 
 1. **不要刪掉後端五 mode mapping**：現有排程、舊連結、測試或歷史 job 可能還會用。
 2. **不要移除 ARB 產品支援**：只在比賽模式限制官方幣種池；一般產品可保留 ARB。
+   實作上這條要講死：**限制發生在顯示層的 filter，不是換掉資料來源**。
+   亦即比賽模式從既有幣種清單過濾出 BTC/ETH/SOL/BNB/XRP 來 render，
+   不得另外維護一份「比賽幣種常數」去取代原清單——後者會讓一般產品的
+   ARB 跟著消失，且日後兩份清單必然漂移。
 3. **Comparison 是特殊路徑**：目前已有 `/compare` 頁，改 UI 時要避免把比較分析硬塞進單幣 `/analyze`。
 4. **i18n 與測試會連動**：`hermesI18n.tsx` 的 mode label、`modeLabel()`、測試中的 role/文字查詢都會受影響。
 5. **Release gate 以本機流程為準**：本 repo 指定本機 `.githooks/pre-push`。
@@ -307,7 +323,7 @@ GitHub Actions 不作 release gate。
 | CTO | 實作 QueryConsole / HermesDashboard / tests。 |
 | QA | 桌機與手機 eye scan；驗證三題型送出的 URL / API 行為。 |
 | CISO / harper | 若涉及 live token、成本或管理路徑，審查是否暴露 secrets 或造成 Bedrock 濫用。 |
-| Eric / CEO | 決定採 B、C 或 D；核准是否進入實作。 |
+| Eric / CEO | ~~決定採 B、C 或 D~~ → 2026-07-27 已裁示採 **B**；核准進入實作。 |
 
 ---
 
