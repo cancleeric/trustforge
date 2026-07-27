@@ -5,11 +5,13 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -317,14 +319,69 @@ class _WhaleOfflineSampleSource(Source):
         return docs
 
 
+def _pit_filter(docs: list[Document], as_of: datetime | None) -> list[Document]:
+    """通用 PIT 後置過濾器。
+
+    - 優先用 doc.meta['visible_at_epoch']（精確 PIT，台灣監管用）。
+    - 無則退守 doc.ts（上游發佈時間戳，所有來源通用近似）。
+    - naive as_of 視為 UTC（與 tw_datetime 一致）。
+    """
+    if as_of is None:
+        return docs
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+    as_of_ts = as_of.timestamp()
+    kept: list[Document] = []
+    for doc in docs:
+        visible_at = doc.meta.get("visible_at_epoch")
+        if isinstance(visible_at, (int, float)):
+            if float(visible_at) <= as_of_ts:
+                kept.append(doc)
+            else:
+                _log.debug("PIT 過濾 (visible_at): %s %s", doc.id, doc.source)
+            continue
+        if doc.ts <= as_of_ts:
+            kept.append(doc)
+        else:
+            _log.debug("PIT 過濾 (ts): %s %s ts=%.0f as_of=%.0f",
+                       doc.id, doc.source, doc.ts, as_of_ts)
+    return kept
+
+
+def _fetch_with_as_of(
+    source: Source, query: str, coin: str, as_of: datetime | None
+) -> list[Document]:
+    """向 source.fetch() 傳遞 as_of（若該 source 支援）。
+
+    用 inspect 檢查簽名，不修改任何來源類別。
+    若傳入失敗（TypeError），fallback 到無 as_of 呼叫。
+    """
+    if as_of is None:
+        return source.fetch(query, coin=coin)
+    sig = inspect.signature(source.fetch)
+    if "as_of" in sig.parameters:
+        return source.fetch(query, coin=coin, as_of=as_of)
+    try:
+        return source.fetch(query, coin=coin, as_of=as_of)
+    except TypeError:
+        _log.warning(
+            "Source %s 不支援 as_of，fallback 到無 as_of 呼叫",
+            getattr(source, "name", str(source)),
+        )
+        return source.fetch(query, coin=coin)
+
+
 def collect(query: str, coin: str | None = None,
             sources: Iterable[Source] | None = None,
             offline: bool = False, data_dir=None,
-            _failed: list | None = None) -> list[Document]:
+            _failed: list | None = None,
+            *, as_of: datetime | None = None) -> list[Document]:
     """匯流所有來源（文件型 + OHLCV 價格事實）。offline=True 時用樣本資料。
 
     _failed：可選 list，失敗的來源名稱（source.name）會被 append 進去，
              供呼叫者（如 pipeline.run）填入 report.limits。
+
+    as_of：分析時間點；帶入時只保留在該時刻已對外可見的文件。
     """
     docs: list[Document] = []
 
@@ -349,6 +406,8 @@ def collect(query: str, coin: str | None = None,
                     coin, bars, source_file=lineage.get("file", f"{coin.upper()}_daily_ohlcv.csv"),
                     ts=_latest_bar_ts(bars), data_lineage=lineage,
                 )
+                if as_of is not None:
+                    price_docs = _pit_filter(price_docs, as_of)
                 docs.extend(price_docs)
                 _record_source_event(
                     "official-ohlcv", "price", coin, started, len(price_docs),
@@ -407,7 +466,9 @@ def collect(query: str, coin: str | None = None,
         source_name = getattr(s, "name", str(s))
         source_kind = getattr(s, "kind", "unknown")
         try:
-            source_docs = s.fetch(query, coin=_coin)
+            source_docs = _fetch_with_as_of(s, query, _coin, as_of)
+            if as_of is not None:
+                source_docs = _pit_filter(source_docs, as_of)
             docs.extend(source_docs)
             _record_source_event(
                 source_name, source_kind, _coin, started, len(source_docs),
