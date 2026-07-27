@@ -51,7 +51,8 @@ def test_handler_returns_asset_context_for_known_symbol():
 
 
 def test_handler_returns_null_asset_context_for_unknown_symbol():
-    code, body = web._handle_api_asset_context({"symbol": ["BTC"]})
+    # BTC 從 2026-07-27 起已在 fixture 內，改用真正不在資料裡的代號當負向案例。
+    code, body = web._handle_api_asset_context({"symbol": ["DOGE"]})
     assert code == 200
     parsed = _envelope(body)
     assert parsed["ok"] is True

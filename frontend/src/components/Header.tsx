@@ -12,6 +12,9 @@ const BUILD_VERSION = import.meta.env.VITE_RELEASE_VERSION || 'build'
 export default function Header() {
   const [releaseVersion, setReleaseVersion] = useState(BUILD_VERSION)
   const { locale, setLocale, t } = useHermesI18n()
+  // 'build' = 沒注入 VITE_RELEASE_VERSION；'dev' = 後端沒走發版流程。兩者都是
+  // 哨兵值而非版號，見下方版號徽章的註解。
+  const isUnversioned = releaseVersion === 'build' || /^dev\b/.test(releaseVersion)
   const navItems = [
     { to: '/', label: 'HERMES' }, { to: '/analyze', label: t('analyze') },
     { to: '/compare', label: t('compare') }, { to: '/history', label: t('history') },
@@ -85,9 +88,15 @@ export default function Header() {
         ))}
       </nav>
 
+      {/* 跟 HermesTopBar 同一個問題：`build`（未注入 VITE_RELEASE_VERSION）與
+          `dev`（後端沒走發版流程時 /api/health 的回值）都是哨兵值，不是版號。
+          用一般樣式印成「build · dev」會被讀成版本名叫 build。標成 amber 並
+          換一段說明文案，讓它讀起來是「這份 bundle 沒有版本資訊」的狀態。 */}
       <span
-        title={t('hdrDeployVersionTitle')}
-        className="self-center rounded border border-tf-muted/40 px-2 py-0.5 font-mono text-xs text-tf-muted"
+        title={isUnversioned ? t('hdrUnversionedTitle') : t('hdrDeployVersionTitle')}
+        className={`self-center rounded border px-2 py-0.5 font-mono text-xs ${
+          isUnversioned ? 'border-tf-warn/50 text-tf-warn' : 'border-tf-muted/40 text-tf-muted'
+        }`}
       >{`${releaseVersion} · ${GIT_SHA}`}</span>
       <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} className="self-center rounded border border-tf-border bg-transparent px-2 py-1 font-mono text-xs text-tf-muted hover:text-tf-text">
         {locale === 'zh-TW' ? 'EN' : '繁中'}

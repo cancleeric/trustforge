@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import BackToBridgeLink from '../components/BackToBridgeLink'
 import { getAssetContext } from '../lib/endpoints'
 import type { AssetContext } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
@@ -9,17 +10,23 @@ import { useHermesI18n } from '../hermes/hermesI18n'
 
 /** 「新手脈絡查詢」獨立小工具（模組①）：查詢單一資產的 sector/layer
  * 脈絡卡，解耦於 `/analyze` 的完整信任分析流程——不算費用、不觸發任何
- * 連接器，純讀 `data/asset_context_records.json` fixture。目前只有 ARB
- * 有完整 L2 脈絡資料；`COIN_POOL` 五幣本身是 L1，脈絡資料有限（無
- * settlement_chain/gas_token/dependencies 這類 L2 特有欄位），仍可查但
- * 標註「L1/資料有限」，不誤導成跟 ARB 同等豐富。 */
+ * 連接器，純讀 `data/asset_context_records.json` fixture。
+ *
+ * 2026-07-27 修正（CEO 回報「其他都空的，為什麼會有 ARB」）：原本 fixture
+ * 裡只有 ARB 一筆，`SUGGESTIONS` 又把 ARB 排在最前面當預設，結果是——比賽
+ * 指定的五幣全部查不到資料，畫面上唯一有內容的反而是不在比賽範圍的 ARB，
+ * 主客完全顛倒。已為 COIN_POOL 五幣補上 L1 脈絡資料（settlement_chain /
+ * gas_token / dependencies 都有值），預設改為 COIN_POOL[0]，先前的
+ * 「L1/資料有限」標註也隨之退場（現在不再有限）。ARB 保留但排到最後並
+ * 明示是範圍外的 L2 範例，避免再被誤認成第六種官方幣。 */
 
-const SUGGESTIONS = ['ARB', ...COIN_POOL]
+const SUGGESTIONS = [...COIN_POOL, 'ARB']
 
 export default function AssetContextLookupPage() {
   const { t } = useHermesI18n()
   const [searchParams, setSearchParams] = useSearchParams()
-  const initialSymbol = searchParams.get('symbol') || 'ARB'
+  // 預設幣種必須落在比賽指定的 COIN_POOL 內，不能是範圍外的 ARB。
+  const initialSymbol = searchParams.get('symbol') || COIN_POOL[0]
   const [input, setInput] = useState(initialSymbol)
   const [symbol, setSymbol] = useState(initialSymbol)
   const [context, setContext] = useState<AssetContext | null>(null)
@@ -66,7 +73,8 @@ export default function AssetContextLookupPage() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6 sm:px-6">
-      <header className="border-b border-tf-border pb-4">
+      <header className="flex flex-col gap-2 border-b border-tf-border pb-4">
+        <BackToBridgeLink />
         <p className="font-mono text-xs font-semibold text-tf-link">{t('aclEyebrow')}</p>
         <h1 className="mt-1 text-xl font-bold text-tf-text">{t('aclTitle')}</h1>
         <p className="mt-2 text-sm text-tf-muted">
@@ -102,7 +110,7 @@ export default function AssetContextLookupPage() {
 
       <div className="flex flex-wrap gap-1.5" role="group" aria-label={t('quickSuggestionsAria')}>
         {SUGGESTIONS.map((sym) => {
-          const isArb = sym === 'ARB'
+          const isOutOfScope = sym === 'ARB'
           return (
             <button
               key={sym}
@@ -115,7 +123,7 @@ export default function AssetContextLookupPage() {
               }`}
             >
               {sym}
-              {!isArb && <span className="text-[0.65rem] text-tf-muted">{t('l1LimitedData')}</span>}
+              {isOutOfScope && <span className="text-[0.65rem] text-tf-muted">{t('aclDemoOnly')}</span>}
             </button>
           )
         })}

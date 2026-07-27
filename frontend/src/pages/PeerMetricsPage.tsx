@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import BackToBridgeLink from '../components/BackToBridgeLink'
 import { getPeerMetrics } from '../lib/endpoints'
 import type { PeerComparisonEntry, PeerMetricsSnapshot } from '../lib/types'
 import PeerComparisonTable from '../components/PeerComparisonTable'
@@ -68,7 +69,8 @@ export default function PeerMetricsPage() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6 sm:px-6">
-      <header className="border-b border-tf-border pb-4">
+      <header className="flex flex-col gap-2 border-b border-tf-border pb-4">
+        <BackToBridgeLink />
         <p className="font-mono text-xs font-semibold text-tf-link">HERMES</p>
         <h1 className="mt-1 text-xl font-bold text-tf-text">{t('pmTitle')}</h1>
         <p className="mt-2 text-sm text-tf-muted">

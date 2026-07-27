@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import BackToBridgeLink from '../components/BackToBridgeLink'
 import { getEcoLink } from '../lib/endpoints'
 import type { EcoLinkImpactPath } from '../lib/types'
 import EcoLinkImpactPanel from '../components/EcoLinkImpactPanel'
@@ -70,7 +71,8 @@ export default function EcoLinkPage() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-6 sm:px-6">
-      <header className="border-b border-tf-border pb-4">
+      <header className="flex flex-col gap-2 border-b border-tf-border pb-4">
+        <BackToBridgeLink />
         <p className="font-mono text-xs font-semibold text-tf-link">HERMES</p>
         <h1 className="mt-1 text-xl font-bold text-tf-text">{t('elTitle')}</h1>
         <p className="mt-2 text-sm text-tf-muted">

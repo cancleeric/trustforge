@@ -11,10 +11,17 @@
       "market_cap_tier": "large",
       "ecosystem": "ethereum",
       "parent_asset_id": "asset:eth",
-      "tags": ["rollup", "optimistic"],
+      "tags": [
+        "rollup",
+        "optimistic"
+      ],
       "settlement_chain": "ethereum",
       "gas_token": "ETH",
-      "dependencies": ["ethereum_settlement", "sequencer", "canonical_bridge"]
+      "dependencies": [
+        "ethereum_settlement",
+        "sequencer",
+        "canonical_bridge"
+      ]
     },
     "valid_from": "2026-01-01T00:00:00Z",
     "fetched_at": "2026-01-02T00:00:00Z",
@@ -32,13 +39,161 @@
       "market_cap_tier": "mid",
       "ecosystem": "ethereum",
       "parent_asset_id": "asset:eth",
-      "tags": ["rollup", "optimistic", "governance"],
+      "tags": [
+        "rollup",
+        "optimistic",
+        "governance"
+      ],
       "settlement_chain": "ethereum",
       "gas_token": "ETH",
-      "dependencies": ["ethereum_settlement", "sequencer", "canonical_bridge"]
+      "dependencies": [
+        "ethereum_settlement",
+        "sequencer",
+        "canonical_bridge"
+      ]
     },
     "valid_from": "2025-01-01T00:00:00Z",
     "fetched_at": "2025-01-02T00:00:00Z",
     "source": "fixture://asset-context/arb/2025-01-01"
+  },
+  {
+    "context": {
+      "schema_version": "1.0.0",
+      "market_cap_tier": "large",
+      "sector": "l1",
+      "layer": "layer_1",
+      "token_role": "gas",
+      "asset_id": "asset:btc",
+      "symbol": "BTC",
+      "name": "Bitcoin",
+      "ecosystem": "bitcoin",
+      "parent_asset_id": null,
+      "tags": [
+        "pow",
+        "store_of_value"
+      ],
+      "settlement_chain": "bitcoin",
+      "gas_token": "BTC",
+      "dependencies": [
+        "pow_consensus",
+        "mining_hashrate",
+        "utxo_ledger"
+      ]
+    },
+    "valid_from": "2026-01-01T00:00:00Z",
+    "fetched_at": "2026-01-02T00:00:00Z",
+    "source": "fixture://asset-context/btc/2026-01-01"
+  },
+  {
+    "context": {
+      "schema_version": "1.0.0",
+      "market_cap_tier": "large",
+      "sector": "l1",
+      "layer": "layer_1",
+      "token_role": "gas",
+      "asset_id": "asset:eth",
+      "symbol": "ETH",
+      "name": "Ethereum",
+      "ecosystem": "ethereum",
+      "parent_asset_id": null,
+      "tags": [
+        "pos",
+        "smart_contract"
+      ],
+      "settlement_chain": "ethereum",
+      "gas_token": "ETH",
+      "dependencies": [
+        "pos_consensus",
+        "validator_set",
+        "beacon_chain"
+      ]
+    },
+    "valid_from": "2026-01-01T00:00:00Z",
+    "fetched_at": "2026-01-02T00:00:00Z",
+    "source": "fixture://asset-context/eth/2026-01-01"
+  },
+  {
+    "context": {
+      "schema_version": "1.0.0",
+      "market_cap_tier": "large",
+      "sector": "l1",
+      "layer": "layer_1",
+      "token_role": "gas",
+      "asset_id": "asset:sol",
+      "symbol": "SOL",
+      "name": "Solana",
+      "ecosystem": "solana",
+      "parent_asset_id": null,
+      "tags": [
+        "pos",
+        "high_throughput"
+      ],
+      "settlement_chain": "solana",
+      "gas_token": "SOL",
+      "dependencies": [
+        "pos_consensus",
+        "validator_set",
+        "proof_of_history"
+      ]
+    },
+    "valid_from": "2026-01-01T00:00:00Z",
+    "fetched_at": "2026-01-02T00:00:00Z",
+    "source": "fixture://asset-context/sol/2026-01-01"
+  },
+  {
+    "context": {
+      "schema_version": "1.0.0",
+      "market_cap_tier": "large",
+      "sector": "l1",
+      "layer": "layer_1",
+      "token_role": "gas",
+      "asset_id": "asset:bnb",
+      "symbol": "BNB",
+      "name": "BNB",
+      "ecosystem": "bnbchain",
+      "parent_asset_id": null,
+      "tags": [
+        "pos",
+        "exchange_ecosystem"
+      ],
+      "settlement_chain": "bnb_smart_chain",
+      "gas_token": "BNB",
+      "dependencies": [
+        "pos_consensus",
+        "validator_set",
+        "bnb_beacon_chain"
+      ]
+    },
+    "valid_from": "2026-01-01T00:00:00Z",
+    "fetched_at": "2026-01-02T00:00:00Z",
+    "source": "fixture://asset-context/bnb/2026-01-01"
+  },
+  {
+    "context": {
+      "schema_version": "1.0.0",
+      "market_cap_tier": "large",
+      "sector": "l1",
+      "layer": "layer_1",
+      "token_role": "gas",
+      "asset_id": "asset:xrp",
+      "symbol": "XRP",
+      "name": "XRP",
+      "ecosystem": "xrpl",
+      "parent_asset_id": null,
+      "tags": [
+        "payments",
+        "federated_consensus"
+      ],
+      "settlement_chain": "xrp_ledger",
+      "gas_token": "XRP",
+      "dependencies": [
+        "rpca_consensus",
+        "unique_node_list",
+        "validator_set"
+      ]
+    },
+    "valid_from": "2026-01-01T00:00:00Z",
+    "fetched_at": "2026-01-02T00:00:00Z",
+    "source": "fixture://asset-context/xrp/2026-01-01"
   }
 ]

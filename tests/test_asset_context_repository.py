@@ -23,7 +23,12 @@ def utc(year: int, month: int, day: int) -> datetime:
 def test_repository_loads_fixture_and_preserves_lineage() -> None:
     records = load_asset_context_records(FIXTURE)
 
-    assert len(records) == 2
+    # fixture 涵蓋比賽指定的 COIN_POOL 五幣（各一筆）＋ ARB 兩筆歷史版本。
+    # 2026-07-27 前 fixture 只有 ARB，導致查詢頁對五幣全部空白，見
+    # frontend/src/pages/AssetContextLookupPage.tsx 的說明。
+    assert len(records) == 7
+    symbols = {record.context.symbol for record in records}
+    assert symbols == {"BTC", "ETH", "SOL", "BNB", "XRP", "ARB"}
     assert records[0].context.asset_id == "asset:arb"
     assert records[0].source.startswith("fixture://asset-context/arb/")
     assert records[0].valid_from.tzinfo is timezone.utc

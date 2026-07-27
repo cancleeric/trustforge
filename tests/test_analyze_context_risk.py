@@ -58,7 +58,9 @@ def test_asset_context_seed_data_uses_runtime_copied_data_path() -> None:
 
 
 def test_comparison_payload_adds_context_per_report_without_internal_fields() -> None:
-    payload = web._build_comparison_json_payload(_report("ARB"), [], _report("BTC"), [], _Log())
+    # 負向控制組要用「fixture 裡真的沒有」的代號。BTC 自 2026-07-27 起已補進
+    # data/asset_context_records.json（原本只有 ARB，五幣全空），不再適用。
+    payload = web._build_comparison_json_payload(_report("ARB"), [], _report("DOGE"), [], _Log())
 
     report_a = payload["report_a"]
     report_b = payload["report_b"]
@@ -69,7 +71,7 @@ def test_comparison_payload_adds_context_per_report_without_internal_fields() ->
 
 
 def test_old_report_snapshots_missing_context_fields_stay_readable() -> None:
-    report = _report("BTC")
+    report = _report("DOGE")  # 同上：需要一個 fixture 裡沒有脈絡資料的代號
     public = web._public_report_dict(report)
 
     assert public["asset_context"] is None
