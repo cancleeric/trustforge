@@ -379,6 +379,40 @@ def _time_split(n_dates: int) -> tuple[int, int]:
     return train_end, calib_end
 
 
+def _chronological_partitions(
+    all_samples: dict[str, list[Sample]],
+) -> tuple[list[Sample], list[Sample], str, str]:
+    """Split by global unique dates, never by one coin's bar indexes.
+
+    Every row on a date is assigned to the same partition even when coin
+    calendars differ.  The first 70% remains an unused training interval,
+    the next 15% is calibration, and the final interval is held out.
+    """
+    dates = sorted({sample.date for samples in all_samples.values() for sample in samples})
+    if len(dates) < 7:
+        raise ValueError("at least 7 global unique dates are required")
+    calib_start_idx, held_start_idx = _time_split(len(dates))
+    if not 0 < calib_start_idx < held_start_idx < len(dates):
+        raise ValueError("dataset is too small for chronological train/calibration/held-out split")
+    calib_start = dates[calib_start_idx]
+    held_start = dates[held_start_idx]
+    calibration = [
+        sample
+        for samples in all_samples.values()
+        for sample in samples
+        if calib_start <= sample.date < held_start
+    ]
+    held_out = [
+        sample
+        for samples in all_samples.values()
+        for sample in samples
+        if sample.date >= held_start
+    ]
+    if not calibration or not held_out:
+        raise ValueError("chronological calibration and held-out partitions must be non-empty")
+    return calibration, held_out, calib_start, held_start
+
+
 def compute_tau(wrong_strengths: list[float], alpha: float = ALPHA) -> float:
     """標準 split conformal 有限樣本分位數：第 ceil((n+1)(1-alpha)) 大順序統計量。
 
@@ -398,25 +432,10 @@ def compute_tau(wrong_strengths: list[float], alpha: float = ALPHA) -> float:
 def main() -> None:
     # ——— OHLCV-only baseline（既有行為，逐字不變）———
     all_samples_ohlcv: dict[str, list[Sample]] = {c: _samples_for_coin(c) for c in COINS}
-    n_dates = max((len(load_ohlcv(c, DATA_DIR)) for c in COINS), default=0)
-    calib_start, test_start = _time_split(n_dates)
-
     bars_ref = load_ohlcv(COINS[0], DATA_DIR)
-    calib_date_cut = bars_ref[calib_start].date if calib_start < len(bars_ref) else bars_ref[-1].date
-    test_date_cut = bars_ref[test_start].date if test_start < len(bars_ref) else bars_ref[-1].date
-
-    def _split_samples(all_samples: dict[str, list[Sample]]) -> tuple[list[Sample], list[Sample]]:
-        calib: list[Sample] = []
-        test: list[Sample] = []
-        for samples in all_samples.values():
-            for s in samples:
-                if calib_date_cut <= s.date < test_date_cut:
-                    calib.append(s)
-                elif s.date >= test_date_cut:
-                    test.append(s)
-        return calib, test
-
-    calib_ohlcv, test_ohlcv = _split_samples(all_samples_ohlcv)
+    calib_ohlcv, test_ohlcv, calib_date_cut, test_date_cut = (
+        _chronological_partitions(all_samples_ohlcv)
+    )
     wrong_strengths_ohlcv = [s.evidence_strength for s in calib_ohlcv if s.wrong]
     tau_ohlcv = compute_tau(wrong_strengths_ohlcv)
 
@@ -435,7 +454,11 @@ def main() -> None:
         for c in COINS
     }
 
-    calib_exp, test_exp = _split_samples(all_samples_expanded)
+    calib_exp, test_exp, exp_calib_cut, exp_test_cut = (
+        _chronological_partitions(all_samples_expanded)
+    )
+    if (exp_calib_cut, exp_test_cut) != (calib_date_cut, test_date_cut):
+        raise RuntimeError("baseline and expanded samples produced inconsistent date boundaries")
     wrong_strengths_exp = [s.evidence_strength for s in calib_exp if s.wrong]
     tau_exp = compute_tau(wrong_strengths_exp)
 
@@ -488,10 +511,14 @@ def main() -> None:
         print(f"    conformal._CONFORMAL_TAU = {tau_exp:.4f}  # 無條件進位到 4 位")
     else:
         failed = []
-        if p1_exp == "FAIL": failed.append("P1")
-        if p2_exp == "FAIL": failed.append("P2")
-        if p3_exp == "FAIL": failed.append("P3")
-        if p4_exp == "FAIL": failed.append("P4")
+        if p1_exp == "FAIL":
+            failed.append("P1")
+        if p2_exp == "FAIL":
+            failed.append("P2")
+        if p3_exp == "FAIL":
+            failed.append("P3")
+        if p4_exp == "FAIL":
+            failed.append("P4")
         print(f">>> FAILED: {', '.join(failed)} — Phase E (Honest State) <<<")
         print("    不偽造、不強上。conformal.py 維持現狀，記錄 FAIL 原因。")
 

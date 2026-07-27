@@ -88,20 +88,9 @@ def test_backtest_holdout_joint_coverage_within_alpha_plus_slack():
     """
     coins = backtest_conformal.COINS
     all_samples = {c: backtest_conformal._samples_for_coin(c) for c in coins}
-    bars_ref = backtest_conformal.load_ohlcv(coins[0], backtest_conformal.DATA_DIR)
-    n_dates = len(bars_ref)
-    calib_start, test_start = backtest_conformal._time_split(n_dates)
-    calib_cut = bars_ref[calib_start].date
-    test_cut = bars_ref[test_start].date
-
-    calib_samples = []
-    test_samples = []
-    for samples in all_samples.values():
-        for s in samples:
-            if calib_cut <= s.date < test_cut:
-                calib_samples.append(s)
-            elif s.date >= test_cut:
-                test_samples.append(s)
+    calib_samples, test_samples, _, _ = (
+        backtest_conformal._chronological_partitions(all_samples)
+    )
 
     wrong_strengths = [s.evidence_strength for s in calib_samples if s.wrong]
     tau = backtest_conformal.compute_tau(wrong_strengths, backtest_conformal.ALPHA)
@@ -178,4 +167,3 @@ def test_empty_calibration_set_forces_abstain_even_at_max_legal_strength():
         "空校準集 fallback 下，即使 strength 達到合法值域上界 1.0 也不該"
         "通過門檻——這正是原始 bug（fallback=1.0 + `>=`）會誤放行的情境"
     )
-

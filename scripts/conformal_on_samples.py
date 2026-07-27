@@ -1,83 +1,138 @@
 #!/usr/bin/env python3
-"""Conformal prediction backtest on historical sample JSONL.
+"""Chronological, research-only conformal evaluation for sample-contract JSONL.
 
-Reads the shared historical sample contract JSONL (Milestone 2),
-runs split conformal prediction (single-stage, α=0.1),
-and reports coverage, abstain rate, conditional error rate.
-
-Unlike the original backtest_conformal.py (which derived 6 pseudo-independent
-signals from a single OHLCV series), this script uses the real heterogeneous
-evidence in the sample contract.
-
-Milestone 4 for #197.
-
-Usage:
-    .venv/bin/python scripts/conformal_on_samples.py \
-        --samples out/samples/historical_samples.jsonl \
-        --out out/conformal/conformal_report.json
+This command is deliberately fail-closed.  It never shuffles time-series rows
+and it never promotes or writes production configuration.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
-from dataclasses import dataclass
+import sys
+from collections import Counter
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+ALPHA = 0.10
+MIN_UNIQUE_DATES = 4
+REQUIRED = {
+    "sample_id", "coin", "as_of", "source_family", "claim_direction",
+    "evidence_strength", "outcome_direction", "outcome_observed_at",
+}
+VALID_DIRECTIONS = {"bullish", "bearish", "neutral"}
 
 
-ALPHA = 0.10  # conformal coverage target
+class DatasetError(ValueError):
+    """Input cannot support an honest chronological evaluation."""
 
 
-@dataclass
+@dataclass(frozen=True)
+class Split:
+    calibration: list[dict[str, Any]]
+    held_out: list[dict[str, Any]]
+    calibration_start: str
+    calibration_end: str
+    held_out_start: str
+    held_out_end: str
+
+
+@dataclass(frozen=True)
 class ConformalResult:
-    tau: float                       # conformal threshold
-    calibration_samples: int         # used for calibration
-    held_out_samples: int            # used for evaluation
-    held_out_abstain: int            # evidence_strength ≤ tau
-    held_out_pass: int               # evidence_strength > τ
-    held_out_wrong: int              # wrong among pass
-    joint_error: float               # P(wrong AND pass) / total
-    abstain_rate: float              # abstain / held_out
-    conditional_wrong: float         # wrong / pass (or NaN if pass=0)
-    accuracy: float                  # overall accuracy of non-abstain claims
-    source_families: int             # number of unique source_family values
+    tau: float
+    calibration_samples: int
+    held_out_samples: int
+    held_out_abstain: int
+    held_out_pass: int
+    held_out_wrong: int
+    joint_error: float
+    abstain_rate: float
+    conditional_wrong: float | None
+    accuracy: float | None
+    source_families: int
+
+
+def _iso(value: Any, field: str, line_no: int) -> datetime:
+    if not isinstance(value, str):
+        raise DatasetError(f"line {line_no}: {field} must be an ISO-8601 string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DatasetError(f"line {line_no}: invalid {field}: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise DatasetError(f"line {line_no}: {field} must include timezone")
+    return parsed
 
 
 def load_samples(path: str) -> list[dict]:
-    samples: list[dict] = []
-    for line in Path(path).read_text(encoding="utf-8").strip().split("\n"):
-        if line.strip():
-            samples.append(json.loads(line))
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise DatasetError(f"cannot read samples: {exc}") from exc
+    samples: list[dict[str, Any]] = []
+    for line_no, raw_line in enumerate(raw.splitlines(), 1):
+        if not raw_line.strip():
+            continue
+        try:
+            row = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DatasetError(f"line {line_no}: malformed JSON") from exc
+        missing = REQUIRED.difference(row) if isinstance(row, dict) else REQUIRED
+        if not isinstance(row, dict) or missing:
+            absent = sorted(missing)
+            raise DatasetError(f"line {line_no}: missing fields: {absent}")
+        as_of = _iso(row["as_of"], "as_of", line_no)
+        observed = _iso(row["outcome_observed_at"], "outcome_observed_at", line_no)
+        if observed <= as_of:
+            raise DatasetError(f"line {line_no}: outcome must be strictly after as_of")
+        if row["claim_direction"] not in VALID_DIRECTIONS or row["outcome_direction"] not in VALID_DIRECTIONS:
+            raise DatasetError(f"line {line_no}: invalid direction")
+        strength = row["evidence_strength"]
+        if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength):
+            raise DatasetError(f"line {line_no}: evidence_strength must be finite")
+        if not 0.0 <= float(strength) <= 1.0:
+            raise DatasetError(f"line {line_no}: evidence_strength outside [0,1]")
+        row["_date"] = as_of.date().isoformat()
+        samples.append(row)
+    if not samples:
+        raise DatasetError("dataset is empty")
     return samples
 
 
+def chronological_split(samples: list[dict[str, Any]]) -> Split:
+    dates = sorted({str(row["_date"]) for row in samples})
+    if len(dates) < MIN_UNIQUE_DATES:
+        raise DatasetError(
+            f"need at least {MIN_UNIQUE_DATES} unique dates; got {len(dates)}"
+        )
+    boundary = len(dates) // 2
+    calibration_dates = set(dates[:boundary])
+    held_dates = set(dates[boundary:])
+    calibration = [row for row in samples if row["_date"] in calibration_dates]
+    held = [row for row in samples if row["_date"] in held_dates]
+    if not calibration or not held or dates[boundary - 1] >= dates[boundary]:
+        raise DatasetError("cannot form strictly ordered non-empty partitions")
+    return Split(
+        calibration, held, dates[0], dates[boundary - 1], dates[boundary], dates[-1]
+    )
+
+
 def conformal_threshold(
-    strengths: list[float],  # evidence_strength for each calibration sample
-    correct_flags: list[int],  # 1 if claim==outcome, 0 otherwise
-    alpha: float = ALPHA,
+    strengths: list[float], correct_flags: list[int], alpha: float = ALPHA
 ) -> float:
-    """Compute conformal threshold τ: 1 - quantile of (strength | wrong)."""
-    n = len(strengths)
-    if n == 0:
-        return float("inf")
-
-    # Use non-conformity: 1 - strength when wrong
-    nonconformity = [
-        1.0 - strengths[i]
-        for i in range(n)
-        if correct_flags[i] == 0  # wrong sample
-    ]
-    if not nonconformity:
-        return 0.0  # No wrong samples → perfect calibration
-
-    nonconformity.sort()
-    # Split conformal: τ = 1 - (1 - α) quantile of nonconformity
-    # With n_wrong calibration wrongs, the ⌈(1-α)(n_wrong+1)⌉-th nonconformity
-    n_wrong = len(nonconformity)
-    idx = min(math.ceil((1 - alpha) * (n_wrong + 1)) - 1, n_wrong - 1)
-    target_nc = nonconformity[idx]
-    tau = 1.0 - target_nc
-    return max(0.0, min(1.0, tau))
+    if not 0.0 < alpha < 1.0:
+        raise DatasetError("alpha must be strictly between 0 and 1")
+    wrong = sorted(1.0 - strengths[i] for i, flag in enumerate(correct_flags) if flag == 0)
+    if not wrong:
+        return math.inf
+    index = math.ceil((1 - alpha) * (len(wrong) + 1)) - 1
+    if index >= len(wrong):
+        return math.inf
+    return max(0.0, min(1.0, 1.0 - wrong[index]))
 
 
 def run_conformal(
@@ -85,151 +140,104 @@ def run_conformal(
     random_seed: int = 42,
     alpha: float = ALPHA,
 ) -> ConformalResult:
-    """Run single-stage split conformal on historical samples."""
-    import random
-    random.seed(random_seed)
-    random.shuffle(samples)
+    """Evaluate a chronological split; ``random_seed`` is retained but unused."""
+    del random_seed
+    return _evaluate_split(chronological_split(samples), alpha)
 
-    total = len(samples)
-    split = total // 2
-    calib = samples[:split]
-    held = samples[split:]
 
-    # --- Calibration ---
-    strengths_calib: list[float] = []
-    correct_calib: list[int] = []
-    for s in calib:
-        correct = 1 if s["claim_direction"] == s["outcome_direction"] else 0
-        strengths_calib.append(s["evidence_strength"])
-        correct_calib.append(correct)
-
-    tau = conformal_threshold(strengths_calib, correct_calib, alpha)
-
-    # --- Evaluation ---
-    held_wrong, held_abstain, held_pass = 0, 0, 0
-    correct_pass = 0
-    for s in held:
-        correct = 1 if s["claim_direction"] == s["outcome_direction"] else 0
-        if s["evidence_strength"] <= tau:
-            held_abstain += 1
-        else:
-            held_pass += 1
-            if correct == 0:
-                held_wrong += 1
-            else:
-                correct_pass += 1
-
-    joint_error = held_wrong / len(held) if len(held) > 0 else 0.0
-    abstain_rate = held_abstain / len(held) if len(held) > 0 else 0.0
-    conditional_wrong = held_wrong / held_pass if held_pass > 0 else float("nan")
-    accuracy = correct_pass / held_pass if held_pass > 0 else 0.0
-
-    # Count source families
-    families = set(s.get("source_family", "unknown") for s in samples)
-
+def _evaluate_split(split: Split, alpha: float) -> ConformalResult:
+    flags = [
+        int(row["claim_direction"] == row["outcome_direction"])
+        for row in split.calibration
+    ]
+    tau = conformal_threshold(
+        [float(row["evidence_strength"]) for row in split.calibration], flags, alpha
+    )
+    passed = [row for row in split.held_out if float(row["evidence_strength"]) > tau]
+    wrong = sum(row["claim_direction"] != row["outcome_direction"] for row in passed)
+    held_n = len(split.held_out)
+    pass_n = len(passed)
     return ConformalResult(
         tau=tau,
-        calibration_samples=len(calib),
-        held_out_samples=len(held),
-        held_out_abstain=held_abstain,
-        held_out_pass=held_pass,
-        held_out_wrong=held_wrong,
-        joint_error=joint_error,
-        abstain_rate=abstain_rate,
-        conditional_wrong=conditional_wrong,
-        accuracy=accuracy,
-        source_families=len(families),
+        calibration_samples=len(split.calibration),
+        held_out_samples=held_n,
+        held_out_abstain=held_n - pass_n,
+        held_out_pass=pass_n,
+        held_out_wrong=wrong,
+        joint_error=wrong / held_n,
+        abstain_rate=(held_n - pass_n) / held_n,
+        conditional_wrong=wrong / pass_n if pass_n else None,
+        accuracy=(pass_n - wrong) / pass_n if pass_n else None,
+        source_families=len(_counts(split.calibration + split.held_out, "source_family")),
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--samples", required=True)
-    parser.add_argument("--out", default="out/conformal/conformal_report.json")
-    parser.add_argument("--alpha", type=float, default=ALPHA)
-    args = parser.parse_args()
+def _counts(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+    return dict(sorted(Counter(str(row[field]) for row in rows).items()))
 
-    samples = load_samples(args.samples)
-    result = run_conformal(samples, alpha=args.alpha)
 
-    # Build report
-    report = {
-        "alpha": args.alpha,
+def build_report(
+    samples: list[dict[str, Any]], digest: str, split: Split, alpha: float
+) -> dict[str, Any]:
+    result = _evaluate_split(split, alpha)
+    metrics = asdict(result)
+    metrics["tau"] = result.tau if math.isfinite(result.tau) else "Infinity"
+    checks = {
+        "joint_error": result.joint_error <= alpha,
+        "abstain_rate": result.abstain_rate <= 0.60,
+        "conditional_wrong": (
+            result.conditional_wrong is not None and result.conditional_wrong <= 0.55
+        ),
+        "held_out_support": result.held_out_pass >= 100,
+        "source_families": len(_counts(samples, "source_family")) >= 2,
+    }
+    return {
+        "status": "research-only",
+        "production_wiring_allowed": False,
+        "alpha": alpha,
+        "input_sha256": digest,
         "total_samples": len(samples),
-        "source_families": result.source_families,
-        "calibration_samples": result.calibration_samples,
-        "held_out_samples": result.held_out_samples,
-        "tau": round(result.tau, 4),
-        "joint_error": round(result.joint_error, 4),
-        "abstain_rate": round(result.abstain_rate, 4),
-        "conditional_wrong": round(result.conditional_wrong, 4) if not math.isnan(result.conditional_wrong) else "NaN",
-        "accuracy": round(result.accuracy, 4),
+        "unique_dates": len({row["_date"] for row in samples}),
+        "split": {
+            "strategy": "global-unique-date-chronological-half",
+            "calibration_start": split.calibration_start,
+            "calibration_end": split.calibration_end,
+            "held_out_start": split.held_out_start,
+            "held_out_end": split.held_out_end,
+            "calibration_strictly_before_held_out": split.calibration_end < split.held_out_start,
+        },
+        "counts": {
+            "per_family": _counts(samples, "source_family"),
+            "per_coin": _counts(samples, "coin"),
+            "calibration_per_family": _counts(split.calibration, "source_family"),
+            "held_out_per_family": _counts(split.held_out, "source_family"),
+            "calibration_per_coin": _counts(split.calibration, "coin"),
+            "held_out_per_coin": _counts(split.held_out, "coin"),
+        },
+        "metrics": metrics,
+        "promotion_checks": {**checks, "all_pass": all(checks.values())},
+        "decision": "research-only; production promotion requires a separate approved change",
     }
 
-    # Promotion check
-    report["promotion_checks"] = _promotion_checks(result, args.alpha, samples)
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-
-    print(json.dumps(report, indent=2))
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--samples", required=True, type=Path)
+    parser.add_argument("--out", default=Path("out/conformal/conformal_report.json"), type=Path)
+    parser.add_argument("--alpha", type=float, default=ALPHA)
+    args = parser.parse_args(argv)
+    try:
+        samples = load_samples(str(args.samples))
+        digest = hashlib.sha256(args.samples.read_bytes()).hexdigest()
+        split = chronological_split(samples)
+        report = build_report(samples, digest, split, args.alpha)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    except DatasetError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
-
-
-def _promotion_checks(
-    r: ConformalResult,
-    alpha: float,
-    samples: list[dict],
-) -> dict:
-    """Check promotion thresholds per Milestone 4 requirements."""
-    checks: dict = {}
-    
-    # P1: Joint coverage
-    checks["P1_joint_coverage"] = {
-        "target": alpha,
-        "actual": r.joint_error,
-        "pass": r.joint_error <= alpha,
-    }
-
-    # P2: Abstain rate ≤ 0.60
-    checks["P2_abstain_rate"] = {
-        "target": 0.60,
-        "actual": r.abstain_rate,
-        "pass": r.abstain_rate <= 0.60,
-    }
-
-    # P3: Conditional wrong ≤ 0.55
-    checks["P3_conditional_wrong"] = {
-        "target": 0.55,
-        "actual": r.conditional_wrong if not math.isnan(r.conditional_wrong) else 1.0,
-        "pass": r.conditional_wrong <= 0.55 if not math.isnan(r.conditional_wrong) else False,
-    }
-
-    # P4: Held-out pass ≥ 100
-    checks["P4_held_out_pass"] = {
-        "target": 100,
-        "actual": r.held_out_pass,
-        "pass": r.held_out_pass >= 100,
-    }
-
-    # Extra: Source family check
-    families = set(s.get("source_family", "unknown") for s in samples)
-    checks["source_families"] = {
-        "required": 2,
-        "actual": len(families),
-        "pass": len(families) >= 2,
-        "families": sorted(families),
-    }
-
-    # Overall
-    checks["all_pass"] = all(
-        v.get("pass", False)
-        for k, v in checks.items()
-        if k != "all_pass"
-    )
-
-    return checks
 
 
 if __name__ == "__main__":
