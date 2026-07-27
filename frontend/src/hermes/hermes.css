@@ -1112,9 +1112,15 @@
   color: #e8b34d;
 }
 
+/* N54：這條發光連接線是純裝飾，但 `right:100%` 讓它從引擎左緣往左伸 44px，
+   蓋在最後一顆管線站點上；`.hermes-engine` 的 z-index:3 又高過站點所在的
+   `.hermes-energy-nodes` (z-index:2)，於是「05 綜合信任分數」真實點擊被吃掉
+   （768x1024 實測：引擎左緣 663、站點中心 624，正好落在 619~663 這段線下）。
+   不改幾何、不動 z-index——裝飾元素本來就不該參與命中測試。 */
 .hermes-engine::before {
   content: '';
   position: absolute;
+  pointer-events: none;
   right: 100%;
   top: 50%;
   width: 44px;

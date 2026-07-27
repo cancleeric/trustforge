@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useHermesI18n } from '../hermes/hermesI18n'
 
@@ -37,6 +37,32 @@ export default function HermesBeginnerNarrative() {
   // Desktop (>900px) ignores this flag entirely (see hermes.css) and always
   // renders the full content, unchanged from before.
   const [expanded, setExpanded] = useState(false)
+
+  // N55：這塊面板貼底、高度隨內容自然長，於是是「往上長」的——視窗越窄，
+  // 文字換行越多、面板越高，就越可能吃掉星系中央那顆 129x129 的 BTC 核心星鈕。
+  // 在 N56 拿掉軌道環的命中攔截之後，真實滑鼠點擊判定顯示 1440x900、
+  // 1280x800、1024x768（zh-TW 與 en 各一）核心星全部 BLOCKED，事件落在
+  // narrative-body / narrative-header 上；1920x1080 與 <=900px 則乾淨。
+  // 注意 1920x1080 乾淨而 1440x1080 中招 → 這是**寬度**驅動的碰撞，不是高度，
+  // N32 當年那個 `55.2vh` 常數從一開始就抓錯變數，任何寫死比例都會在某個
+  // 視窗差幾 px。所以不擬合常數，執行期實測核心星底緣當高度上限，
+  // 超出內容交給既有的 overflowY:'auto' 捲動；核心星不存在時退回原 CSS 上限。
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const [maxHeight, setMaxHeight] = useState<string | number>('calc(100% - var(--hermes-top, 44px) - 96px)')
+  useLayoutEffect(() => {
+    const measure = () => {
+      const panel = panelRef.current
+      const core = document.querySelector('.hermes-core-star')
+      if (!panel || !core) return
+      const avail = Math.round(panel.getBoundingClientRect().bottom - core.getBoundingClientRect().bottom - 12)
+      // 空間本來就不夠時不硬壓成不可讀的一條線，維持既有 CSS 上限。
+      setMaxHeight(avail >= 96 ? avail : 'calc(100% - var(--hermes-top, 44px) - 96px)')
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [expanded])
+
   const STEPS: Step[] = useMemo(() => [
     {
       no: '01',
@@ -64,6 +90,7 @@ export default function HermesBeginnerNarrative() {
 
   return (
     <div
+      ref={panelRef}
       role="region"
       aria-label={t('beginnerNarrativeTitle')}
       className={`hermes-beginner-narrative${expanded ? ' is-expanded' : ''}`}
@@ -75,11 +102,18 @@ export default function HermesBeginnerNarrative() {
         position: 'absolute',
         left: 'calc(var(--hermes-rail, 0px) + 12px)',
         right: 'calc(var(--hermes-right-rail, var(--hermes-rail, 0px)) + 12px)',
-        bottom: 18,
+        // N53：N14 當時只把左右夾在兩條軌之間，垂直方向仍是死值 18——
+        // 底部管線甲板 `.hermes-energy-deck` 高 `--hermes-bottom`
+        // (clamp(94px,13.4vh,120px)，1024x768 實測 103px)，所以這塊
+        // z-index:12 的面板永遠坐在 z-index:8 的甲板上面。實測 1024x768
+        // 五顆階段鈕「01 來源掃描」～「05 綜合信任分數」真實點擊全部
+        // BLOCKED，事件落在 narrative-body 上。改成從甲板頂緣起算，
+        // 跟同檔 :534 既有寫法一致，不是為某個視窗硬調的數字。
+        bottom: 'calc(var(--hermes-bottom, 0px) + 18px)',
         zIndex: 12,
         maxWidth: 960,
         marginInline: 'auto',
-        maxHeight: 'calc(100% - var(--hermes-top, 44px) - 96px)',
+        maxHeight, // N55：執行期實測（見上方 useLayoutEffect）
         overflowY: 'auto',
         background: 'rgba(6,12,22,0.92)',
         border: '1px solid rgba(77,216,224,.28)',

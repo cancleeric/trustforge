@@ -109,6 +109,13 @@ export default function CurrencyGalaxy({
         border: `1px solid ${orbit === 'B' ? 'rgba(232,179,77,.22)' : 'rgba(77,216,224,.28)'}`,
         transformStyle: 'preserve-3d',
         transform: rot,
+        // N56：這片軌道環只畫 1px 邊框，但命中測試吃的是整個 270/390px 的
+        // 圓盤方框，而 3D 旋轉後它正好罩在中央那顆 129x129 的 BTC 核心星上。
+        // 實測（1024x768 / 1280x800 / 1440x900 / 320x568，zh-TW 與 en 皆同）：
+        // 核心星真實滑鼠點擊 BLOCKED，事件落在這片看不見的 div 上；
+        // elementFromPoint 也回這片 div 而不是核心星。環本身沒有任何互動，
+        // 只有裡面兩顆行星要 hover，所以環退出命中測試、行星各自補回來。
+        pointerEvents: 'none',
         boxShadow: orbit === 'B' ? '0 0 26px rgba(232,179,77,.05) inset' : '0 0 22px rgba(77,216,224,.06) inset',
       }}
     >
@@ -117,7 +124,7 @@ export default function CurrencyGalaxy({
           aria-hidden="true"
           onMouseEnter={() => onHover(ids[0])}
           onMouseLeave={() => onHover(null)}
-          style={{ ...planetStyle(ids[0]), cursor: 'default' }}
+          style={{ ...planetStyle(ids[0]), cursor: 'default', pointerEvents: 'auto' }}
         >
           {planetSurface(ids[0])}
         </div>
@@ -125,7 +132,7 @@ export default function CurrencyGalaxy({
           aria-hidden="true"
           onMouseEnter={() => onHover(ids[1])}
           onMouseLeave={() => onHover(null)}
-          style={{ ...planetStyle(ids[1]), cursor: 'default' }}
+          style={{ ...planetStyle(ids[1]), cursor: 'default', pointerEvents: 'auto' }}
         >{planetSurface(ids[1])}</div>
       </div>
     </div>
@@ -223,6 +230,10 @@ export default function CurrencyGalaxy({
           {/* BTC core star */}
           <button
             type="button"
+            /* N55：新手導覽面板要在執行期量到這顆核心星的底緣才能算出自己的
+               可用高度，需要一個不隨語系變動的選擇器（aria-label 會在
+               zh-TW/en 之間變）。純標記，不帶樣式。 */
+            className="hermes-core-star"
             aria-label={`${t('focus')} Bitcoin`}
             aria-pressed={coreIsSel}
             onClick={() => onSelect('btc')}
