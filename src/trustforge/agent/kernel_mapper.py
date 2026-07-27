@@ -137,7 +137,16 @@ def _validate_kernel_output(output: KernelOutput, claims: Sequence[Claim]) -> No
     if len(set(item.claim.id for item in output.scored_claims)) != len(
         output.scored_claims
     ):
-        raise ValueError("scored_claims must contain unique claim IDs")
+        raise ValueError("score claims must contain unique claim IDs")
+    # INTEGRITY-001: validate contrarian claims are subset of input and disjoint from supporting
+    supporting_ids = {item.claim.id for item in output.supporting}
+    contrarian_ids = {item.claim.id for item in output.contrarian}
+    if not contrarian_ids <= provided_ids:
+        raise ValueError("contrarian claims must be a subset of input claim IDs")
+    if contrarian_ids & supporting_ids:
+        raise ValueError("contrarian and supporting claim IDs must be disjoint")
+    if len(contrarian_ids) != len(output.contrarian):
+        raise ValueError("contrarian claims must contain unique claim IDs")
 
 
 def to_legacy_scoring(
