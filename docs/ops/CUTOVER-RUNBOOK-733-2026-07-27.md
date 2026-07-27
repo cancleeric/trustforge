@@ -29,13 +29,19 @@ separately pinned A endpoint. It never logs a subject or subject-derived value.
 Production consumes fixed owner-only files:
 
 - `/etc/trustforge/deployment-control.json`
-- `/etc/trustforge/deployment-keyrings.json`
+- `/etc/trustforge/deployment-keys/{ledger,authorization,completion,gates,routing,endpoint-manifests}.json`
+- `/etc/trustforge/release-router-runtime.json`
+- `/etc/trustforge/release-router-runtime-keys.json`
 - `/var/lib/trustforge/security-ledger/`
 
-Keyrings are separated by purpose and carry key IDs: ledger, authorization,
+Operator keyrings are physically separated by purpose and carry key IDs: ledger, authorization,
 activation completion, executable gates and privacy routing. Rotation retains
 old verification keys while selecting a new active ledger/routing key.
 Environment variables and command-line secret values are not accepted.
+`status` opens only the ledger key file; emergency `stop` opens only ledger and
+authorization keys and never touches artifact, gate, completion, routing or
+endpoint-manifest inputs. The long-running router accepts exactly ledger,
+routing and Ed25519 endpoint-manifest public verification roles.
 
 The protected config binds:
 
@@ -129,6 +135,12 @@ POST/PUT/PATCH/DELETE are rejected with 405, so failover never retries a
 side-effecting request. Before serving either path it probes the endpoint's
 signed `/.well-known/trustforge-release-manifest` and requires the served
 artifact digest, origin and manifest key ID to match the ledger identity.
+Install the reviewed unit and reverse-proxy snippet with
+`deploy/install_release_router.sh --dry-run`, inspect the commands, then run
+the same script as root in the authorized release workflow. The service listens
+only on a mode-`0660` Unix socket. The nginx snippet rejects unauthenticated
+requests, strips any client identity headers and injects `$remote_user` from
+the site's authentication layer.
 
 ## Promotion, verification and rollback
 

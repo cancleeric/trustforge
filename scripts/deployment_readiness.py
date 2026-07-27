@@ -28,7 +28,7 @@ from trustforge.release_router import ReleaseEndpoint, RoutingPolicy
 from trustforge.safe_fs import read_regular_file
 
 CONFIG_PATH = Path("/etc/trustforge/deployment-control.json")
-KEYRING_PATH = Path("/etc/trustforge/deployment-keyrings.json")
+KEY_DIRECTORY = Path("/etc/trustforge/deployment-keys")
 LEDGER_PATH = Path("/var/lib/trustforge/deployment-control")
 
 
@@ -42,10 +42,10 @@ def _protected_json(path: Path, maximum_bytes: int = 1_000_000) -> dict:
     return value
 
 
-def _keyring(payload: dict, name: str) -> dict[str, bytes]:
-    values = payload.get(name)
-    if not isinstance(values, dict):
-        raise DeploymentControlError(f"{name} keyring is unavailable")
+def _keyring(name: str, *, required: bool) -> dict[str, bytes]:
+    if not required:
+        return {}
+    values = _protected_json(KEY_DIRECTORY / f"{name}.json", 32 * 1024)
     try:
         decoded = {key: bytes.fromhex(value) for key, value in values.items()}
     except (TypeError, ValueError) as exc:
@@ -60,15 +60,17 @@ def _build_control(
     require_preflight: bool,
     verify_retained_a: bool,
     verify_retained_b: bool,
+    key_roles: frozenset[str],
 ) -> tuple[DeploymentControlLedger, dict[str, bytes], dict[str, bytes]]:
     config = _protected_json(CONFIG_PATH)
-    keys = _protected_json(KEYRING_PATH, 128 * 1024)
-    ledger_keys = _keyring(keys, "ledger")
-    auth_keys = _keyring(keys, "authorization")
-    completion_keys = _keyring(keys, "completion")
-    gate_keys = _keyring(keys, "gates")
-    routing_keys = _keyring(keys, "routing")
-    manifest_keys = _keyring(keys, "endpoint_manifests")
+    ledger_keys = _keyring("ledger", required="ledger" in key_roles)
+    auth_keys = _keyring("authorization", required="authorization" in key_roles)
+    completion_keys = _keyring("completion", required="completion" in key_roles)
+    gate_keys = _keyring("gates", required="gates" in key_roles)
+    routing_keys = _keyring("routing", required="routing" in key_roles)
+    manifest_keys = _keyring(
+        "endpoint-manifests", required="endpoint-manifests" in key_roles
+    )
     ledger = AuthenticatedLedger(
         keyring=ledger_keys,
         active_key_id=config["active_ledger_key_id"],
@@ -134,7 +136,7 @@ def _build_control(
             snapshot_artifact(
                 config["candidate_artifact_path"], candidate.release_digest
             )
-    if policy.routing_key_id not in routing_keys:
+    if "routing" in key_roles and policy.routing_key_id not in routing_keys:
         raise DeploymentControlError("routing key id is unavailable")
     control = DeploymentControlLedger(
         ledger,
@@ -172,6 +174,27 @@ def _redacted_status(control: DeploymentControlLedger) -> dict:
     }
 
 
+def _key_roles_for_command(command: str) -> frozenset[str]:
+    if command == "status":
+        return frozenset({"ledger"})
+    if command in {"stop", "rollback-a"}:
+        return frozenset({"ledger", "authorization"})
+    if command == "complete":
+        return frozenset({"ledger", "completion"})
+    if command in {"initialize", "start", "promote"}:
+        return frozenset(
+            {
+                "ledger",
+                "authorization",
+                "completion",
+                "gates",
+                "routing",
+                "endpoint-manifests",
+            }
+        )
+    raise DeploymentControlError("unknown operator command")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -185,12 +208,22 @@ def main() -> int:
     args = parser.parse_args()
     try:
         require_preflight = args.command in {"initialize", "start", "promote"}
-        verify_retained_a = args.command in {"stop", "rollback-a", "complete"}
-        verify_retained_b = args.command == "complete"
+        verify_retained_a = args.command in {"rollback-a", "complete"}
+        receipt_payload = None
+        if args.command == "complete":
+            receipt_payload = _protected_json(args.receipt, 32_768)
+        verify_retained_b = bool(
+            receipt_payload
+            and receipt_payload.get("status") == "completed"
+            and receipt_payload.get("pointer_active_digest")
+            == receipt_payload.get("candidate_artifact_digest")
+        )
+        key_roles = _key_roles_for_command(args.command)
         control, _routing_keys, _manifest_keys = _build_control(
             require_preflight=require_preflight,
             verify_retained_a=verify_retained_a,
             verify_retained_b=verify_retained_b,
+            key_roles=key_roles,
         )
         now = datetime.now(timezone.utc)
         if args.command == "initialize":
@@ -198,7 +231,7 @@ def main() -> int:
         elif args.command == "status":
             pass
         elif args.command == "complete":
-            receipt = ActivationCompletionReceipt(**_protected_json(args.receipt, 32_768))
+            receipt = ActivationCompletionReceipt(**receipt_payload)
             control.complete(receipt, now=now)
         else:
             authorization = DeploymentAuthorization(
