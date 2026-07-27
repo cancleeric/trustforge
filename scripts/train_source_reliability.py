@@ -1,197 +1,247 @@
 #!/usr/bin/env python3
-"""Offline source-reliability trainer for TrustForge.
-
-Reads historical_sample JSONL, computes per-source reliability with
-small-sample shrinkage, and produces a versioned artifact.
-
-Usage:
-    .venv/bin/python scripts/train_source_reliability.py \
-        --samples out/samples/historical_samples.jsonl \
-        --out data/model-artifacts/source_reputation_v1.json
-
-Milestone 3 for #195: dynamic reputation calibration.
-"""
+"""Train an honest, versioned source-reliability artifact."""
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import math
-import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
-MIN_SAMPLE_PER_SOURCE = 30  # 最低樣本數，不足不收斂
-SHRINKAGE_TARGET = 0.50  # 小樣本朝 0.50 shrink
-ALPHA = 0.05  # 95% confidence interval
+MIN_SAMPLE_PER_SOURCE = 30
+SHRINKAGE_TARGET = 0.50
+SHRINKAGE_K = 100.0
+SCHEMA = "trustforge.source-reputation"
+VERSION = "2.0.0"
 
 
-@dataclass
+@dataclass(frozen=True)
 class SourceStats:
     name: str
-    sample_count: int
+    support: int
     correct: int
     accuracy: float
+    balanced_accuracy: float | None
+    balanced_accuracy_reason: str | None
     brier: float
-    auc_proxy: float  # max(accuracy, 1 - accuracy)，無完整 ROC 時的代理
-    ci_low: float
-    ci_high: float
-    shrinkage_weight: float  # 小樣本 shrinkage 程度
+    wilson_ci_95: tuple[float, float]
+    reliability: float
+    shrinkage_weight: float
 
 
-def wilson_interval(k: int, n: int, alpha: float = ALPHA) -> tuple[float, float]:
-    """Wilson score interval for binomial proportion.
-    More robust than Wald for small n or extreme p."""
+def wilson_interval(k: int, n: int) -> tuple[float, float]:
+    """Return a 95% Wilson score interval for a binomial proportion."""
     if n == 0:
         return 0.0, 0.0
     p = k / n
-    z = 1.96  # normal approx for alpha=0.05
-    denom = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / denom
-    half_width = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    z = 1.959963984540054
+    denominator = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denominator
+    half_width = (
+        z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator
+    )
     return max(0.0, centre - half_width), min(1.0, centre + half_width)
+
+
+def _balanced_accuracy(samples: list[dict[str, Any]]) -> tuple[float | None, str | None]:
+    outcome_classes = sorted({str(sample["outcome_direction"]) for sample in samples})
+    if len(outcome_classes) < 2:
+        return None, "requires at least two observed outcome classes"
+    recalls = []
+    for outcome in outcome_classes:
+        matching = [sample for sample in samples if sample["outcome_direction"] == outcome]
+        recalls.append(
+            sum(sample["claim_direction"] == outcome for sample in matching) / len(matching)
+        )
+    return sum(recalls) / len(recalls), None
 
 
 def compute_source_stats(
     name: str, samples: list[dict]
-) -> Optional[SourceStats]:
-    """Compute reliability stats for a single source."""
-    n = len(samples)
-    if n < MIN_SAMPLE_PER_SOURCE:
-        return None  # Too few samples to be trustworthy
-
-    # Binary correct: claim_direction == outcome_direction
-    correct = sum(
-        1
-        for s in samples
-        if s["claim_direction"] == s["outcome_direction"]
-    )
-    accuracy = correct / n
-
-    # Brier score: (1/N) * Σ( (strength_i - correct_i)^2 )
-    # where correct_i = 1 if claim_direction == outcome_direction else 0
+) -> SourceStats | None:
+    """Compute correctly defined metrics for one source."""
+    support = len(samples)
+    if support < MIN_SAMPLE_PER_SOURCE:
+        return None
+    labels = [
+        1.0 if sample["claim_direction"] == sample["outcome_direction"] else 0.0
+        for sample in samples
+    ]
+    correct = int(sum(labels))
+    accuracy = correct / support
+    balanced_accuracy, balanced_accuracy_reason = _balanced_accuracy(samples)
     brier = sum(
-        (s["evidence_strength"] - (
-            1.0 if s["claim_direction"] == s["outcome_direction"] else 0.0
-        )) ** 2
-        for s in samples
-    ) / n
-
-    # AUC proxy: max(accuracy, 1 - accuracy) — proxy when we only have
-    # binary correctness labels (not ROC scores)
-    auc_proxy = max(accuracy, 1.0 - accuracy)
-
-    # Wilson CI
-    ci_low, ci_high = wilson_interval(correct, n)
-
-    # Small-sample shrinkage: weight toward SHRINKAGE_TARGET
-    # shrinkage_weight = n / (n + k) where k is an effective sample size
-    # We use k=100: at n=30, weight=0.23; at n=1000, weight=0.91
-    shrinkage_k = 100.0
-    shrinkage_weight = n / (n + shrinkage_k)
-    shrinked = accuracy * shrinkage_weight + SHRINKAGE_TARGET * (1 - shrinkage_weight)
-
+        (float(sample["evidence_strength"]) - label) ** 2
+        for sample, label in zip(samples, labels)
+    ) / support
+    shrinkage_weight = support / (support + SHRINKAGE_K)
+    reliability = (
+        accuracy * shrinkage_weight
+        + SHRINKAGE_TARGET * (1.0 - shrinkage_weight)
+    )
     return SourceStats(
         name=name,
-        sample_count=n,
+        support=support,
         correct=correct,
-        accuracy=shrinked,
+        accuracy=accuracy,
+        balanced_accuracy=balanced_accuracy,
+        balanced_accuracy_reason=balanced_accuracy_reason,
         brier=brier,
-        auc_proxy=auc_proxy,
-        ci_low=ci_low,
-        ci_high=ci_high,
+        wilson_ci_95=wilson_interval(correct, support),
+        reliability=reliability,
         shrinkage_weight=shrinkage_weight,
     )
 
 
+def parse_cutoff(value: str) -> date:
+    """Parse the required inclusive UTC cutoff in exact YYYY-MM-DD form."""
+    try:
+        cutoff = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("--cutoff must be a valid YYYY-MM-DD UTC date") from exc
+    if value != cutoff.isoformat():
+        raise ValueError("--cutoff must be exactly YYYY-MM-DD")
+    return cutoff
+
+
+def parse_as_of(value: Any) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError("sample as_of must be a non-empty ISO-8601 string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid sample as_of: {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def load_samples(path: str) -> list[dict]:
     samples: list[dict] = []
-    for line in Path(path).read_text(encoding="utf-8").strip().split("\n"):
-        if line.strip():
-            samples.append(json.loads(line))
+    with Path(path).open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                samples.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON on line {line_number}") from exc
     return samples
+
+
+def build_artifact(samples_path: Path, cutoff_text: str) -> dict[str, Any]:
+    cutoff = parse_cutoff(cutoff_text)
+    all_samples = load_samples(str(samples_path))
+    selected: list[tuple[datetime, dict[str, Any]]] = []
+    excluded_after_cutoff = 0
+    for sample in all_samples:
+        as_of = parse_as_of(sample.get("as_of"))
+        if as_of.date() <= cutoff:
+            selected.append((as_of, sample))
+        else:
+            excluded_after_cutoff += 1
+    selected.sort(
+        key=lambda item: (
+            item[0],
+            str(item[1].get("source", "")),
+            str(item[1].get("sample_id", "")),
+        )
+    )
+
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for _, sample in selected:
+        by_source.setdefault(str(sample["source"]), []).append(sample)
+
+    sources: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    for source, source_samples in sorted(by_source.items()):
+        stats = compute_source_stats(source, source_samples)
+        if stats is None:
+            warnings.append(
+                f"Source {source} has {len(source_samples)} samples; minimum is "
+                f"{MIN_SAMPLE_PER_SOURCE}"
+            )
+            continue
+        payload = asdict(stats)
+        payload.pop("name")
+        payload["wilson_ci_95"] = list(payload["wilson_ci_95"])
+        sources[source] = payload
+
+    if len(sources) < 2:
+        warnings.append("Fewer than two eligible sources; promotion is not supported")
+
+    canonical = b"".join(
+        json.dumps(sample, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        + b"\n"
+        for _, sample in selected
+    )
+    timestamps = [as_of for as_of, _ in selected]
+    return {
+        "schema": SCHEMA,
+        "version": VERSION,
+        "status": "research-only",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "training_cutoff_utc": cutoff.isoformat(),
+        "cutoff_inclusive": True,
+        "sample_time_range_utc": {
+            "min": min(timestamps).isoformat() if timestamps else None,
+            "max": max(timestamps).isoformat() if timestamps else None,
+        },
+        "provenance": {
+            "input_path": str(samples_path),
+            "input_sha256": hashlib.sha256(samples_path.read_bytes()).hexdigest(),
+            "selected_dataset_sha256": hashlib.sha256(canonical).hexdigest(),
+            "input_samples": len(all_samples),
+            "selected_samples": len(selected),
+            "excluded_after_cutoff": excluded_after_cutoff,
+        },
+        "parameters": {
+            "minimum_support": MIN_SAMPLE_PER_SOURCE,
+            "shrinkage_target": SHRINKAGE_TARGET,
+            "shrinkage_k": SHRINKAGE_K,
+        },
+        "sources": sources,
+        "warnings": warnings,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--samples", required=True)
-    parser.add_argument("--out", default="data/model-artifacts/source_reputation_v1.json")
-    parser.add_argument("--cutoff", default=None,
-                        help="Training cutoff date (default: today)")
+    parser.add_argument("--samples", type=Path, required=True)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path("data/model-artifacts/source_reputation_v2.json"),
+    )
+    parser.add_argument(
+        "--cutoff",
+        required=True,
+        help="Inclusive UTC training cutoff (YYYY-MM-DD)",
+    )
     args = parser.parse_args()
-
-    samples = load_samples(args.samples)
-    cutoff = args.cutoff or str(Path(args.samples).stat().st_mtime)[:10]
-
-    # Group by source
-    by_source: dict[str, list[dict]] = {}
-    for s in samples:
-        src = s["source"]
-        by_source.setdefault(src, []).append(s)
-
-    # Compute per-source stats
-    sources: dict[str, dict] = {}
-    baseline_correct = 0
-    baseline_total = 0
-
-    for name, src_samples in by_source.items():
-        stats = compute_source_stats(name, src_samples)
-        if stats is None:
-            continue
-        sources[name] = {
-            "sample_count": stats.sample_count,
-            "reliability": round(stats.accuracy, 4),
-            "brier": round(stats.brier, 4),
-            "auc_proxy": round(stats.auc_proxy, 4),
-            "confidence_interval": [round(stats.ci_low, 4), round(stats.ci_high, 4)],
-            "shrinkage_weight": round(stats.shrinkage_weight, 4),
-        }
-        baseline_correct += stats.correct
-        baseline_total += stats.sample_count
-
-    baseline_accuracy = baseline_correct / baseline_total if baseline_total > 0 else 0.0
-
-    # Dataset hash
-    dataset_hash = hashlib.sha256(Path(args.samples).read_bytes()).hexdigest()
-
-    artifact = {
-        "version": "source-reputation-v1",
-        "training_cutoff": cutoff,
-        "dataset_hash": dataset_hash,
-        "min_sample_per_source": MIN_SAMPLE_PER_SOURCE,
-        "shrinkage_target": SHRINKAGE_TARGET,
-        "baseline_accuracy": round(baseline_accuracy, 4),
-        "sources": sources,
-        "warnings": [],
-    }
-
-    # Add warnings
-    if len(sources) == 0:
-        artifact["warnings"].append("No sources met minimum sample threshold")
-    elif len(sources) == 1:
-        artifact["warnings"].append("Only one source — shadow comparison impossible")
-    
-    for name, info in sources.items():
-        if info["reliability"] < 0.5:
-            artifact["warnings"].append(
-                f"Source {name} reliability ({info['reliability']}) below 0.5"
-            )
-        if info["brier"] > 0.25:
-            artifact["warnings"].append(
-                f"Source {name} Brier score ({info['brier']}) above 0.25 baseline"
-            )
-
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n")
-
-    print(json.dumps({
-        "artifact": str(out_path),
-        "sources": len(sources),
-        "total_samples": len(samples),
-        "warnings": len(artifact["warnings"]),
-    }, indent=2))
+    try:
+        artifact = build_artifact(args.samples, args.cutoff)
+    except (KeyError, TypeError, ValueError) as exc:
+        parser.error(str(exc))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        json.dumps(
+            {
+                "artifact": str(args.out),
+                "sources": len(artifact["sources"]),
+                "selected_samples": artifact["provenance"]["selected_samples"],
+                "warnings": len(artifact["warnings"]),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

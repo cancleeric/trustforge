@@ -21,10 +21,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 ALPHA = 0.10  # conformal coverage target
@@ -43,7 +41,6 @@ class ConformalResult:
     conditional_wrong: float         # wrong / pass (or NaN if pass=0)
     accuracy: float                  # overall accuracy of non-abstain claims
     source_families: int             # number of unique source_family values
-    auc_proxy: float                 # accuracy-based AUC proxy
 
 
 def load_samples(path: str) -> list[dict]:
@@ -130,14 +127,6 @@ def run_conformal(
     # Count source families
     families = set(s.get("source_family", "unknown") for s in samples)
 
-    # AUC proxy
-    total_correct = sum(
-        1
-        for s in samples
-        if s["claim_direction"] == s["outcome_direction"]
-    )
-    auc_proxy = max(total_correct / total, 1 - total_correct / total) if total > 0 else 0.5
-
     return ConformalResult(
         tau=tau,
         calibration_samples=len(calib),
@@ -150,7 +139,6 @@ def run_conformal(
         conditional_wrong=conditional_wrong,
         accuracy=accuracy,
         source_families=len(families),
-        auc_proxy=auc_proxy,
     )
 
 
@@ -176,7 +164,6 @@ def main() -> int:
         "abstain_rate": round(result.abstain_rate, 4),
         "conditional_wrong": round(result.conditional_wrong, 4) if not math.isnan(result.conditional_wrong) else "NaN",
         "accuracy": round(result.accuracy, 4),
-        "auc_proxy": round(result.auc_proxy, 4),
     }
 
     # Promotion check
@@ -233,13 +220,6 @@ def _promotion_checks(
         "actual": len(families),
         "pass": len(families) >= 2,
         "families": sorted(families),
-    }
-
-    # Extra: AUC proxy > 0.5
-    checks["auc_proxy"] = {
-        "target": 0.5,
-        "actual": r.auc_proxy,
-        "pass": r.auc_proxy > 0.5,
     }
 
     # Overall

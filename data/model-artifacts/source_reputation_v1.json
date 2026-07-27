@@ -1,26 +1,7 @@
 {
-  "version": "source-reputation-v1",
-  "training_cutoff": "1785150122",
-  "dataset_hash": "04dca3b6679e40f6c0ab1741cf0cc391f5cbd9b1e01f357ac5bd777ec940953f",
-  "min_sample_per_source": 30,
-  "shrinkage_target": 0.5,
-  "baseline_accuracy": 0.3087,
-  "sources": {
-    "alternative-me-fng": {
-      "sample_count": 1772,
-      "reliability": 0.3189,
-      "brier": 0.3707,
-      "auc_proxy": 0.6913,
-      "confidence_interval": [
-        0.2876,
-        0.3306
-      ],
-      "shrinkage_weight": 0.9466
-    }
-  },
-  "warnings": [
-    "Only one source — shadow comparison impossible",
-    "Source alternative-me-fng reliability (0.3189) below 0.5",
-    "Source alternative-me-fng Brier score (0.3707) above 0.25 baseline"
-  ]
+  "schema": "trustforge.source-reputation",
+  "version": "1.0.0",
+  "status": "superseded",
+  "superseded_by": "source_reputation_v2.json",
+  "reason": "Removed misleading auc_proxy and invalid epoch-derived training cutoff."
 }

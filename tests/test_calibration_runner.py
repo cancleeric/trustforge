@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -11,6 +10,7 @@ from trustforge.calibration_runner import (
     _check_hit,
     calculate_calibration_error,
     compare_predictions,
+    confidence_correctness_auc,
     load_predictions,
     run_calibration,
 )
@@ -18,6 +18,27 @@ from trustforge.ingestion.prices import Bar
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("scores", "labels", "expected"),
+    [
+        ([0.1, 0.2, 0.8, 0.9], [False, False, True, True], 1.0),
+        ([0.8, 0.9, 0.1, 0.2], [False, False, True, True], 0.0),
+        ([0.5, 0.5, 0.5, 0.5], [False, False, True, True], 0.5),
+    ],
+)
+def test_confidence_correctness_auc_is_tie_aware(scores, labels, expected):
+    result = confidence_correctness_auc(scores, labels)
+    assert result["value"] == expected
+    assert result["reason"] is None
+    assert result["target"] == "confidence_discrimination_of_correctness"
+
+
+def test_confidence_correctness_auc_single_class_is_null():
+    result = confidence_correctness_auc([0.2, 0.8], [True, True])
+    assert result["value"] is None
+    assert result["reason"] == "requires both correct and incorrect predictions"
 
 
 def _make_bars(dates_closes: list[tuple[str, float]]) -> list[Bar]:

@@ -32,6 +32,40 @@ _DEFAULT_HORIZONS = (1, 7, 14)
 _MIN_BIN_SAMPLES = 5
 
 
+def confidence_correctness_auc(
+    scores: list[float],
+    labels: list[bool],
+) -> dict[str, Any]:
+    """Tie-aware ROC AUC for confidence discriminating correctness.
+
+    This is the Mann–Whitney probability that a randomly selected correct
+    prediction has greater confidence than a randomly selected incorrect one,
+    with ties receiving half credit. It is not market-direction AUC.
+    """
+    if len(scores) != len(labels):
+        raise ValueError("scores and labels must have equal length")
+    positives = [score for score, label in zip(scores, labels) if label]
+    negatives = [score for score, label in zip(scores, labels) if not label]
+    if not positives or not negatives:
+        return {
+            "value": None,
+            "reason": "requires both correct and incorrect predictions",
+            "target": "confidence_discrimination_of_correctness",
+        }
+    favourable = 0.0
+    for positive in positives:
+        for negative in negatives:
+            if positive > negative:
+                favourable += 1.0
+            elif positive == negative:
+                favourable += 0.5
+    return {
+        "value": round(favourable / (len(positives) * len(negatives)), 6),
+        "reason": None,
+        "target": "confidence_discrimination_of_correctness",
+    }
+
+
 def load_predictions(coin: str, training_dir: Path | str = DEFAULT_TRAINING_DIR) -> list[dict]:
     """從 JSONL 讀取有方向預測（direction != '不明'）的記錄。
 
@@ -209,10 +243,18 @@ def calculate_calibration_error(
             error = abs(mean_conf - empirical_hit_rate)
             max_error = max(max_error, error)
 
+    eligible_predictions = [
+        prediction for prediction in predictions if prediction["date"] in hit_by_date
+    ]
+    discrimination = confidence_correctness_auc(
+        [float(prediction["confidence"]) for prediction in eligible_predictions],
+        [hit_by_date[prediction["date"]] for prediction in eligible_predictions],
+    )
     return {
         "calibration_error": round(max_error, 4) if reliable_bins > 0 else None,
         "bins": bins_data,
         "reliable_bins": reliable_bins,
+        "confidence_correctness_roc_auc": discrimination,
     }
 
 
@@ -245,6 +287,11 @@ def run_calibration(
                 "calibration_error": None,
                 "bins": [],
                 "reliable_bins": 0,
+                "confidence_correctness_roc_auc": {
+                    "value": None,
+                    "reason": "requires both correct and incorrect predictions",
+                    "target": "confidence_discrimination_of_correctness",
+                },
             },
         }
 
