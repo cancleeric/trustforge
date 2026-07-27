@@ -40,6 +40,12 @@
      4.5:1；連結/文字一律改用這個較亮的藍，`--color-tf-accent` 只留給
      按鈕底色/邊框等「非文字」用途（UI 元件對比門檻 3:1 即足夠）。 */
   --color-tf-link: #58a6ff;
+  /* N65：填在 accent 底色「之上」的前景色。原本各處直接寫 text-white，
+     在 GitHub 藍 #1f6feb 上是 4.7:1 沒問題，但 HERMES 把 --color-tf-accent
+     換成亮 cyan #4dd8e0 之後，白字實測只有 1.72:1（CoinSelect 選中的幣種
+     chip，淺色深色兩個主題都中），等於亮底白字看不見。前景不能寫死，要跟著
+     底色走：這裡預設白，`.hermes-surface` 覆寫成近黑。 */
+  --color-tf-on-accent: #ffffff;
   --color-tf-good: #3fb950;
   --color-tf-warn: #d9832a;
   --color-tf-bad: #f85149;

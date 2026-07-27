@@ -30,6 +30,9 @@
   --color-tf-muted2: #526375;
   --color-tf-accent: #4dd8e0;
   --color-tf-link: #4dd8e0;
+  /* N65：accent 在 HERMES 是亮 cyan，填在它上面的字必須是近黑（13.1:1），
+     不能沿用全站預設的白（實測 1.72:1）。 */
+  --color-tf-on-accent: #02040a;
   --color-tf-good: #4dd8e0;
   --color-tf-warn: #e8b34d;
   --color-tf-bad: #ff5f5f;
@@ -44,25 +47,19 @@
   box-shadow: 0 1px 12px rgba(77, 216, 224, .08);
 }
 
-:root[data-theme='light'] .hermes-surface {
-  --color-tf-bg: #eef3f7;
-  --color-tf-bg-hero: #e4ebf1;
-  --color-tf-panel: #e4ebf1;
-  --color-tf-well: #dbe4ec;
-  --color-tf-hover: #d3dee7;
-  --color-tf-card: #ffffff;
-  --color-tf-border: #c5d2dc;
-  --color-tf-text: #14212b;
-  --color-tf-text2: #344957;
-  --color-tf-muted: #5a6f7d;
-  --color-tf-muted2: #6d7f8a;
-  --color-tf-accent: #087f8c;
-  --color-tf-link: #087f8c;
-  --color-tf-good: #16794a;
-  --color-tf-warn: #8a5b00;
-  --color-tf-bad: #c52e3a;
-  --color-tf-green: #16794a;
-}
+/* N64：這裡原本有一整塊 `:root[data-theme='light'] .hermes-surface`，把 tf-*
+   token 全換成淺色主題的值（--color-tf-text: #14212b 等）。但它只換「文字」
+   換不掉「底」——HERMES 的面板底色不是走 tf-* token，而是 .hermes-root 寫死的
+   background: #02040a 加上元件 inline 的 rgba(10,18,29,…)，淺色主題完全碰不到。
+   結果就是深色底配深色字：實測「系統狀態」標題對比 1.25、部署版本的版號值
+   「dev」對比 1.15——字有 render，只是黑底黑字看不見（使用者回報「黑的？」
+   「版號呢？」正是這兩處）。深色主題同一顆是 16.58，方向明確。
+
+   而且這塊本來就違反上面 .hermes-surface 自己寫的約定：「HERMES 是暗色優先
+   設計，故套用後即為暗色（不受 light 主題影響）」。真正的淺色 HERMES 需要
+   整組 hermes-* 色票的淺色版（含輝光、星系），那是設計工程不是改幾個 token，
+   不能靠這塊半套的覆寫假裝有。移除後 HERMES 在兩種主題下都維持一致的暗色，
+   回到檔案自己宣告的契約。 */
 
 :root[data-theme='light'] .app-header {
   background: rgba(255, 255, 255, .9);

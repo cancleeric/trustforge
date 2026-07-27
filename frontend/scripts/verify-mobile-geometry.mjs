@@ -24,6 +24,12 @@ const HIT_TEST_VIEWPORTS = [
 
 const MIN_TARGET = 24
 
+const CONTRAST_ROUTES = [
+  { name: 'status', url: '/?qa=1&reducedMotion=1&workspace=status' },
+  { name: 'history', url: '/?qa=1&reducedMotion=1&workspace=history' },
+  { name: 'costs', url: '/?qa=1&reducedMotion=1&workspace=costs' },
+]
+
 const routes = [
   {
     name: 'home',
@@ -105,6 +111,8 @@ try {
         }
       }
     }
+
+    await runThemeContrastChecks(browser)
   } finally {
     await browser.close()
   }
@@ -715,4 +723,80 @@ async function waitForServer(processHandle, url) {
   }
 
   throw new Error(`Timed out waiting for ${url}`)
+}
+
+// N64 (CEO real-browser audit): HERMES 面板底色寫死在 .hermes-root
+// (#02040a) 與元件 inline style，不走 tf-* token；一旦有人再幫
+// `.hermes-surface` 加一組淺色主題的「文字」token，就會變成深底深字。
+// 實測 RED：預設（無存主題→light）「系統狀態」標題對比 1.25、部署版本的
+// 版號值對比 1.15，深色主題同一顆 16.58——字有 render，只是看不見。
+// 所以這裡不驗 CSS 寫法，直接在真瀏覽器裡量兩種主題下的實際對比，
+// 讓「HERMES 不受 light 主題影響」這條契約有可執行的守門員。
+async function runThemeContrastChecks(browser) {
+  for (const theme of ['light', 'dark']) {
+    for (const route of CONTRAST_ROUTES) {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+      await page.addInitScript((value) => localStorage.setItem('tf-theme', value), theme)
+      await page.goto(`${BASE_URL}${route.url}`, { waitUntil: 'domcontentloaded' })
+      await page.waitForSelector('.hermes-dashboard', { state: 'visible' })
+      await page.waitForLoadState('load')
+      await page.waitForTimeout(1800)
+
+      const offenders = await page.evaluate(() => {
+        const channel = (c) => {
+          const v = c / 255
+          return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+        }
+        const luminance = ([r, g, b]) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        const parse = (value) => (value.match(/[\d.]+/g) || [0, 0, 0]).slice(0, 3).map(Number)
+        // 底色要往上找到第一個「不透明」的祖先，否則量到 rgba(0,0,0,0)
+        // 會把每個元素都判成黑底，變成一支只會亂叫的假警報。
+        const opaqueBackdrop = (node) => {
+          let current = node
+          while (current) {
+            const parts = getComputedStyle(current).backgroundColor.match(/[\d.]+/g)
+            if (parts && (parts.length < 4 || Number(parts[3]) > 0.5)) return parse(getComputedStyle(current).backgroundColor)
+            current = current.parentElement
+          }
+          return [0, 0, 0]
+        }
+
+        const workspace = document.querySelector('.hermes-dashboard')
+        if (!workspace) return [{ text: '(no dashboard)', ratio: 0, required: 4.5 }]
+        const found = []
+        for (const node of workspace.querySelectorAll('*')) {
+          if (node.children.length) continue
+          const text = (node.textContent || '').trim()
+          if (!text || text.length > 40) continue
+          const box = node.getBoundingClientRect()
+          if (box.width < 4 || box.height < 4 || box.bottom < 0 || box.top > window.innerHeight) continue
+          const style = getComputedStyle(node)
+          if (style.visibility === 'hidden' || style.opacity === '0') continue
+          const opacity = Number(style.opacity) || 1
+          const backdrop = opaqueBackdrop(node)
+          const blended = parse(style.color).map((c, i) => c * opacity + backdrop[i] * (1 - opacity))
+          const a = luminance(blended)
+          const b = luminance(backdrop)
+          const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+          const size = parseFloat(style.fontSize)
+          const large = size >= 24 || (size >= 18.66 && Number(style.fontWeight) >= 700)
+          const required = large ? 3 : 4.5
+          // 門檻壓在 2.0：這支要抓的是「深底深字整片看不見」這一類，
+          // 不是把既有一堆 3.x 的 muted 文字一次全部變成 gate 失敗
+          // （那些是另一筆待辦，混進來只會讓這支永遠紅、失去鑑別力）。
+          if (ratio < Math.min(required, 2)) found.push({ text, ratio: Number(ratio.toFixed(2)), required })
+        }
+        return found
+      })
+
+      if (offenders.length) {
+        const sample = offenders.slice(0, 5).map((o) => `"${o.text}" ${o.ratio}:1`).join(', ')
+        failures.push(
+          `theme=${theme} workspace=${route.name}: ${offenders.length} text node(s) below 2:1 contrast (dark-on-dark) — ${sample}`,
+        )
+      }
+
+      await page.close()
+    }
+  }
 }
