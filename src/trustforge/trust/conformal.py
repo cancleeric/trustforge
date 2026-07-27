@@ -90,8 +90,40 @@ evidence_strength」這個量可交換（exchangeable），則有 distribution-f
                    JOINT P(wrong AND strength>tau) = 0.0400 (<= alpha=0.10，達標)
                    CONDITIONAL P(wrong | strength>tau) = 0.6712（參考用，
                    本輪程序不保證此量；數字偏高原因見上方「回測實測發現」）
-                   abstain rate = 0.9405（見 PR 說明 / CEO 判讀是否要調整
-                   α、N 或訊號設計）
+                    abstain rate = 0.9405（見 PR 說明 / CEO 判讀是否要調整
+                    α、N 或訊號設計）
+
+#197 異質多源 Conformal Backtest（Phase E：Honest State——未達 promotion threshold）
+----------------------------------------------------------------------------
+2026-07-27 用 Alternative.me FNG（market-wide sentiment，1826 日）+ Blockchain.com
+Charts（BTC-only onchain：n-transactions, hash-rate, difficulty，1824 日）兩組
+真正異質歷史資料，擴充既有 OHLCV 技術訊號後重跑 `scripts/backtest_conformal.py`。
+
+信號設計：
+  - FNG：0-25=fear(bearish), 75-100=greed(bullish), 45-55=skip。
+    trust = clamp(0.5+abs(value-50)/100, 0.5, 0.85)。
+  - Blockchain：7 日 MA vs 30 日前趨勢，3 metrics。
+    trust = clamp(0.5+abs(pct)/50, 0.5, 0.90)。BTC only（守門）。
+
+回測結果（OHLCV + FNG + Blockchain）：
+  τ (raw)      : 0.905573...
+  held-out test: n=1226, pass=146, confidently-wrong=71
+                  JOINT P(wrong AND strength>τ) = 0.0579 (<= 0.10 ✅)
+                  CONDITIONAL P(wrong | strength>τ) = 0.4863 (<= 0.55 ✅)
+                  abstain rate = 0.8809 (<= 0.60 ❌)
+
+#197 promotion thresholds 對照：
+  P1 joint coverage ≤ 0.10 : 0.0579 ✅
+  P2 abstain rate ≤ 0.60   : 0.8809 ❌ FAIL
+  P3 conditional wrong ≤ 0.55 : 0.4863 ✅
+  P4 held-out pass ≥ 100   : 146 ✅
+
+結論（Phase E：Honest State）：
+  異質訊號明顯改善了 P3（conditional wrong 從 0.67→0.49）和 P4（pass 從 73→146），
+  但 P2 abstain rate 仍太高（0.8809 > 0.60），三項門檻達標、P2 不達標——
+  不偽造、不強上。本模組維持研究工件狀態，不對 production wire。
+  後續若要降低 abstain 率：可考慮降低 α（如 α=0.2）、縮短 forward_days（N=1）、
+  或增加更多異質訊號來源（news/social/regulatory）擴大 evidence pool。
 """
 from __future__ import annotations
 
