@@ -26,8 +26,14 @@
   --color-tf-border: #1c2b3a;
   --color-tf-text: #dce9f2;
   --color-tf-text2: #7f97ab;
-  --color-tf-muted: #526375;
-  --color-tf-muted2: #526375;
+  /* N66：#526375 是 --color-hermes-tx3 的舊值，稍早已因對比不足調成 #71859a，
+     但 .hermes-surface 這兩個對應 token 是它的孿生，當時沒一起換。實測吃
+     tf-muted 的不只裝飾字：/analyze 的表單欄標（幣種／官方題型／問題）、
+     /asset-context 的頁面說明段落與五個幣種 chip、卡片的「上下游關聯」欄標
+     都是它，壓在 #040811 / #0d141e 上只有 2.99–3.24:1（門檻 4.5:1）。
+     改吃同一個 #71859a。 */
+  --color-tf-muted: #71859a;
+  --color-tf-muted2: #71859a;
   --color-tf-accent: #4dd8e0;
   --color-tf-link: #4dd8e0;
   /* N65：accent 在 HERMES 是亮 cyan，填在它上面的字必須是近黑（13.1:1），
@@ -61,10 +67,14 @@
    不能靠這塊半套的覆寫假裝有。移除後 HERMES 在兩種主題下都維持一致的暗色，
    回到檔案自己宣告的契約。 */
 
-:root[data-theme='light'] .app-header {
-  background: rgba(255, 255, 255, .9);
-  box-shadow: 0 1px 12px rgba(26, 78, 92, .1);
-}
+/* N66：這條是 N64 那個模式的殘留，跟艦橋舞台的四條覆寫同性質——.app-header
+   位在 .hermes-surface 之內，文字吃被鎖成暗色系的 tf-* token，底卻被這條強制
+   成近白，於是又是「暗色的字壓在淺色的底」。實測主導覽 6 條連結、版號徽章、
+   EN 鈕、3 個工具頁入口共 12 處都只有 3.8:1（門檻 4.5:1）。
+
+   而且它是多餘的：Header.tsx 自己就掛 `bg-tf-card`，這個 token 本來就會跟著
+   主題走——在 .hermes-surface 內是 #0d141e，在外面是 #ffffff。真正壞事的是
+   這條把白底硬蓋在已經是暗色的 tf-card 上。移除後兩種情境都由 token 決定。 */
 
 .hermes-root ::-webkit-scrollbar {
   width: 8px;
@@ -2083,23 +2093,20 @@
   animation: hermes-core-glow 1.7s ease-in-out infinite;
 }
 
-:root[data-theme='light'] .bridge-workspace {
-  background: #dce7ed;
-}
+/* N66（2026-07-28，CEO 回報 /asset-context「面版也不對」）：這裡原本有四條
+   `:root[data-theme='light'] .bridge-*` 覆寫，把艦橋舞台的底色換成淺色
+   （#dce7ed / #e9f1f5 / rgba(255,255,255,.74)）。問題是舞台上「畫的東西」
+   不跟著淺色走——.hermes-surface 依它自己上方寫明的約定把 tf-* 文字 token
+   鎖成暗色系（--color-tf-text: #dce9f2），HERMES 是暗色優先設計。於是同一個
+   .hermes-surface 底下出現「暗色主題的字」壓在「淺色主題的底」上：
+   /asset-context 的 h1「30 秒看懂一個代幣的定位」實測 #dce9f2 疊
+   rgba(255,255,255,.74)，對比 1.24:1（大字門檻 3:1），標題等同看不見；同頁
+   另有 12 處低於門檻，返回連結、麵包屑、輸入框標籤都在內。
 
-:root[data-theme='light'] .bridge-hologram-bay {
-  background-color: #e9f1f5;
-  box-shadow: inset 0 0 80px rgba(48, 88, 103, .15);
-}
-
-:root[data-theme='light'] .bridge-side-rail,
-:root[data-theme='light'] .bridge-engine-deck {
-  background: rgba(230, 240, 245, .96);
-}
-
-:root[data-theme='light'] .bridge-route-viewport {
-  background: rgba(255, 255, 255, .74);
-}
+   這是 N64 的同一類問題——當時已因同樣理由移除整塊
+   `:root[data-theme='light'] .hermes-surface`。字鎖暗、底跟主題，兩邊只能
+   擇一；既然 HERMES 的約定是暗色優先，outlier 是這四條底色覆寫，故移除，
+   讓舞台在兩種主題下都維持暗色。 */
 
 @media (max-width:900px) {
   .bridge-workspace-grid {

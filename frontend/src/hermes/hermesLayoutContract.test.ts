@@ -79,13 +79,29 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(dashboard).not.toContain('}, [displayScore])')
   })
 
-  it('provides real light tokens for every non-dashboard Hermes route', () => {
+  // N66：這條原本叫「provides real light tokens…」，斷言 hermes.css 含有
+  // `:root[data-theme='light'] .hermes-surface` 與 `… .app-header` 兩個字串。
+  // 它是空轉的——.hermes-surface 那條規則早在 N64 就因為對比問題被刪掉了，
+  // 測試之所以還綠，只是因為 N64 的「註解」把那個 selector 當說明文字引述了
+  // 一次，toContain 讀到的是散文不是規則。這正是字串比對型斷言的陷阱。
+  //
+  // 改成驗真正的不變式，並先把註解剝掉再比對，免得再被說明文字餵成假綠。
+  // 現行契約（N64 + N66）：HERMES 是暗色優先，.hermes-surface 之下的表面
+  // 不接受淺色主題半套覆寫——字被鎖成暗色系 token，底若被改成淺色就會變成
+  // 「暗字壓淺底」，實測低到 1.24:1。要做真正的淺色 HERMES 得整組 hermes-*
+  // 色票（含輝光、星系）都有淺色版，不能靠覆寫幾個底色假裝有。
+  //
+  // 實際的對比把關在 scripts/verify-contrast.mjs（主題×語系×斷點×路由 全掃，
+  // 會真的算合成後的對比值）；這裡只鎖住「不要再長回半套覆寫」。
+  it('keeps Hermes surfaces dark-locked instead of half-overriding them for light theme', () => {
     const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
     const app = readFileSync(path.join(__dirname, '..', 'App.tsx'), 'utf8')
+    const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
 
     expect(app).toContain('<HermesI18nProvider>')
-    expect(css).toContain(":root[data-theme='light'] .hermes-surface")
-    expect(css).toContain(":root[data-theme='light'] .app-header")
+    for (const surface of ['.hermes-surface', '.app-header', '.bridge-workspace', '.bridge-hologram-bay', '.bridge-route-viewport', '.bridge-side-rail', '.bridge-engine-deck']) {
+      expect(rules).not.toContain(`:root[data-theme='light'] ${surface}`)
+    }
   })
 
   it('keeps every inner route inside the hologram bridge workspace', () => {
