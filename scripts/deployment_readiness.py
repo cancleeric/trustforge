@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from trustforge.agent.shadow_contracts import ShadowReleaseIdentity
-from trustforge.authenticated_ledger import AuthenticatedLedger
 from trustforge.deployment_control import (
     ActivationCompletionReceipt,
     DeploymentAuthorization,
@@ -26,10 +25,11 @@ from trustforge.deployment_evidence import (
 )
 from trustforge.release_router import ReleaseEndpoint, RoutingPolicy
 from trustforge.safe_fs import read_regular_file
+from trustforge.signed_event_ledger import SignedEventLedger
 
 CONFIG_PATH = Path("/etc/trustforge/deployment-control.json")
 KEY_DIRECTORY = Path("/etc/trustforge/deployment-keys")
-LEDGER_PATH = Path("/var/lib/trustforge/deployment-control")
+LEDGER_PATH = Path("/var/lib/trustforge/security-ledger")
 
 
 def _protected_json(path: Path, maximum_bytes: int = 1_000_000) -> dict:
@@ -50,8 +50,8 @@ def _keyring(name: str, *, required: bool) -> dict[str, bytes]:
         decoded = {key: bytes.fromhex(value) for key, value in values.items()}
     except (TypeError, ValueError) as exc:
         raise DeploymentControlError(f"{name} keyring is invalid") from exc
-    if any(len(value) < 32 for value in decoded.values()):
-        raise DeploymentControlError(f"{name} keyring contains a short key")
+    if any(len(value) != 32 for value in decoded.values()):
+        raise DeploymentControlError(f"{name} keyring must contain 32-byte keys")
     return decoded
 
 
@@ -63,17 +63,48 @@ def _build_control(
     key_roles: frozenset[str],
 ) -> tuple[DeploymentControlLedger, dict[str, bytes], dict[str, bytes]]:
     config = _protected_json(CONFIG_PATH)
-    ledger_keys = _keyring("ledger", required="ledger" in key_roles)
-    auth_keys = _keyring("authorization", required="authorization" in key_roles)
-    completion_keys = _keyring("completion", required="completion" in key_roles)
+    control_public = _keyring(
+        "control-event-public", required="control-public" in key_roles
+    )
+    outcome_public = _keyring(
+        "router-outcome-public", required="outcome-public" in key_roles
+    )
+    control_private = _keyring(
+        "control-event-private", required="control-private" in key_roles
+    )
+    auth_keys = _keyring(
+        "authorization-public", required="authorization-public" in key_roles
+    )
+    completion_keys = _keyring(
+        "completion-public", required="completion-public" in key_roles
+    )
     gate_keys = _keyring("gates", required="gates" in key_roles)
     routing_keys = _keyring("routing", required="routing" in key_roles)
     manifest_keys = _keyring(
         "endpoint-manifests", required="endpoint-manifests" in key_roles
     )
-    ledger = AuthenticatedLedger(
-        keyring=ledger_keys,
-        active_key_id=config["active_ledger_key_id"],
+    if len(control_private) > 1:
+        raise DeploymentControlError("operator has multiple control signing identities")
+    control_signer = next(iter(control_private.items()), (None, None))
+    ledger = SignedEventLedger(
+        directory=LEDGER_PATH / "control",
+        verification_keys=control_public,
+        event_permissions={"release-control": frozenset({
+            "deployment_initialized", "operator_stop", "activation_prepared",
+            "activation_completed", "activation_failed",
+        })},
+        domain_keys={"release-control": frozenset(control_public)},
+        signing_key_id=control_signer[0],
+        signing_private_key=control_signer[1],
+        signing_domain="release-control" if control_signer[0] else None,
+    )
+    outcome_ledger = SignedEventLedger(
+        directory=LEDGER_PATH / "router-outcomes",
+        verification_keys=outcome_public,
+        event_permissions={"release-router-outcome": frozenset({
+            "candidate_reservation", "candidate_result", "router_emergency_stop",
+        })},
+        domain_keys={"release-router-outcome": frozenset(outcome_public)},
     )
     if require_preflight:
         identity = ShadowReleaseIdentity(**config["shadow_identity"])
@@ -140,6 +171,7 @@ def _build_control(
         raise DeploymentControlError("routing key id is unavailable")
     control = DeploymentControlLedger(
         ledger,
+        outcome_ledger=outcome_ledger,
         authorization_keys=auth_keys,
         completion_keys=completion_keys,
         target=target,
@@ -176,17 +208,25 @@ def _redacted_status(control: DeploymentControlLedger) -> dict:
 
 def _key_roles_for_command(command: str) -> frozenset[str]:
     if command == "status":
-        return frozenset({"ledger"})
+        return frozenset({"control-public", "outcome-public"})
     if command in {"stop", "rollback-a"}:
-        return frozenset({"ledger", "authorization"})
+        return frozenset({
+            "control-public", "outcome-public", "control-private",
+            "authorization-public",
+        })
     if command == "complete":
-        return frozenset({"ledger", "completion"})
+        return frozenset({
+            "control-public", "outcome-public", "control-private",
+            "completion-public",
+        })
     if command in {"initialize", "start", "promote"}:
         return frozenset(
             {
-                "ledger",
-                "authorization",
-                "completion",
+                "control-public",
+                "outcome-public",
+                "control-private",
+                "authorization-public",
+                "completion-public",
                 "gates",
                 "routing",
                 "endpoint-manifests",

@@ -42,10 +42,18 @@ def test_operator_emergency_paths_are_artifact_and_extra_key_independent():
     source = (ROOT / "scripts/deployment_readiness.py").read_text()
     assert 'verify_retained_a = args.command in {"rollback-a", "complete"}' in source
     assert 'KEY_DIRECTORY / f"{name}.json"' in source
-    assert _key_roles_for_command("status") == frozenset({"ledger"})
+    assert _key_roles_for_command("status") == frozenset(
+        {"control-public", "outcome-public"}
+    )
     assert _key_roles_for_command("stop") == frozenset(
-        {"ledger", "authorization"}
+        {
+            "control-public", "outcome-public", "control-private",
+            "authorization-public",
+        }
     )
     assert _key_roles_for_command("complete") == frozenset(
-        {"ledger", "completion"}
+        {
+            "control-public", "outcome-public", "control-private",
+            "completion-public",
+        }
     )

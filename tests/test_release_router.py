@@ -9,7 +9,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.authenticated_ledger import AuthenticatedLedger
 from trustforge.deployment_control import DeploymentControlLedger
 from trustforge.release_router import (
     ReleaseABRouter,
@@ -17,6 +16,7 @@ from trustforge.release_router import (
     RoutingPolicy,
     RoutingSnapshot,
 )
+from trustforge.signed_event_ledger import SignedEventLedger
 
 
 _MANIFEST_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"m" * 32)
@@ -234,15 +234,40 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
                 b"trustforge.routing-policy.v1\x00" + canonical_json(policy_payload)
             ).hexdigest(),
         )
-        ledger = AuthenticatedLedger(
-            keyring={"ledger-1": b"l" * 32},
-            active_key_id="ledger-1",
-            test_directory_override=tmp_path / "ledger",
+        control_seed = b"l" * 32
+        outcome_seed = b"o" * 32
+        ledger = SignedEventLedger(
+            directory=tmp_path / "control-ledger",
+            verification_keys={"control-1": Ed25519PrivateKey.from_private_bytes(
+                control_seed
+            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
+            event_permissions={"release-control": frozenset({
+                "deployment_initialized", "operator_stop", "activation_prepared",
+                "activation_completed", "activation_failed",
+            })},
+            domain_keys={"release-control": frozenset({"control-1"})},
+            signing_key_id="control-1",
+            signing_private_key=control_seed,
+            signing_domain="release-control",
+        )
+        outcome_ledger = SignedEventLedger(
+            directory=tmp_path / "outcome-ledger",
+            verification_keys={"outcome-1": Ed25519PrivateKey.from_private_bytes(
+                outcome_seed
+            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
+            event_permissions={"release-router-outcome": frozenset({
+                "candidate_reservation", "candidate_result", "router_emergency_stop",
+            })},
+            domain_keys={"release-router-outcome": frozenset({"outcome-1"})},
+            signing_key_id="outcome-1",
+            signing_private_key=outcome_seed,
+            signing_domain="release-router-outcome",
         )
         target = "production"
         confirmation = f"PRODUCTION:{target}:{a.release_digest}:{b.release_digest}"
         control = DeploymentControlLedger(
             ledger,
+            outcome_ledger=outcome_ledger,
             authorization_keys={"auth": b"a" * 32},
             completion_keys={"complete": b"c" * 32},
             target=target,
@@ -299,6 +324,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             )
         restarted = DeploymentControlLedger(
             ledger,
+            outcome_ledger=outcome_ledger,
             authorization_keys={"auth": b"a" * 32},
             completion_keys={"complete": b"c" * 32},
             target=target,

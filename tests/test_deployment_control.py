@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -12,7 +11,8 @@ from trustforge.activation_lock import (
     _set_backend_for_tests,
 )
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.authenticated_ledger import AuthenticatedLedger
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from trustforge.deployment_control import (
     ActivationCompletionReceipt,
     DeploymentAuthorization,
@@ -20,10 +20,19 @@ from trustforge.deployment_control import (
     DeploymentControlLedger,
 )
 from trustforge.release_router import ReleaseEndpoint, RoutingPolicy
+from trustforge.signed_event_ledger import SignedEventLedger
 
 NOW = datetime(2026, 7, 28, tzinfo=timezone.utc)
 AUTH_KEY = b"a" * 32
 COMPLETE_KEY = b"c" * 32
+CONTROL_KEY = b"l" * 32
+OUTCOME_KEY = b"o" * 32
+
+
+def _public(seed):
+    return Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw
+    )
 
 
 class _LockBackend:
@@ -71,15 +80,34 @@ def _control(tmp_path):
     candidate = ReleaseEndpoint(_digest("b"), "http://127.0.0.1:18082", "manifest-1")
     target = "trustforge-production"
     confirmation = f"PRODUCTION:{target}:{active.release_digest}:{candidate.release_digest}"
-    ledger = AuthenticatedLedger(
-        keyring={"ledger-1": b"l" * 32},
-        active_key_id="ledger-1",
-        test_directory_override=tmp_path / "ledger",
+    ledger = SignedEventLedger(
+        directory=tmp_path / "control-ledger",
+        verification_keys={"control-1": _public(CONTROL_KEY)},
+        event_permissions={"release-control": frozenset({
+            "deployment_initialized", "operator_stop", "activation_prepared",
+            "activation_completed", "activation_failed",
+        })},
+        domain_keys={"release-control": frozenset({"control-1"})},
+        signing_key_id="control-1",
+        signing_private_key=CONTROL_KEY,
+        signing_domain="release-control",
+    )
+    outcome_ledger = SignedEventLedger(
+        directory=tmp_path / "outcome-ledger",
+        verification_keys={"outcome-1": _public(OUTCOME_KEY)},
+        event_permissions={"release-router-outcome": frozenset({
+            "candidate_reservation", "candidate_result", "router_emergency_stop",
+        })},
+        domain_keys={"release-router-outcome": frozenset({"outcome-1"})},
+        signing_key_id="outcome-1",
+        signing_private_key=OUTCOME_KEY,
+        signing_domain="release-router-outcome",
     )
     control = DeploymentControlLedger(
         ledger,
-        authorization_keys={"auth-1": AUTH_KEY},
-        completion_keys={"complete-1": COMPLETE_KEY},
+        outcome_ledger=outcome_ledger,
+        authorization_keys={"auth-1": _public(AUTH_KEY)},
+        completion_keys={"complete-1": _public(COMPLETE_KEY)},
         target=target,
         target_confirmation=confirmation,
         active=active,
@@ -112,11 +140,9 @@ def _authorization(control, action, nonce):
         "key_id": "auth-1",
         "receipt_version": "trustforge.deployment-authorization/v2",
     }
-    signature = hmac.new(
-        AUTH_KEY,
+    signature = Ed25519PrivateKey.from_private_bytes(AUTH_KEY).sign(
         b"trustforge.deployment-authorization.v2\x00" + canonical_json(unsigned),
-        hashlib.sha256,
-    ).hexdigest()
+    ).hex()
     return DeploymentAuthorization(**unsigned, signature=signature)
 
 
@@ -143,11 +169,9 @@ def _completion(control, prepared, action, nonce, *, pointer=None, status="compl
         "key_id": "complete-1",
         "receipt_version": "trustforge.activation-completion/v1",
     }
-    signature = hmac.new(
-        COMPLETE_KEY,
+    signature = Ed25519PrivateKey.from_private_bytes(COMPLETE_KEY).sign(
         b"trustforge.activation-completion.v1\x00" + canonical_json(unsigned),
-        hashlib.sha256,
-    ).hexdigest()
+    ).hex()
     return ActivationCompletionReceipt(**unsigned, signature=signature)
 
 

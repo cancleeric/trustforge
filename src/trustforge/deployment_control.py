@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,16 +13,14 @@ from trustforge.activation_lock import (
     release_activation_lock,
 )
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.authenticated_ledger import (
-    AuthenticatedLedger,
-    LedgerError,
-)
+from trustforge.authenticated_ledger import GENESIS_HASH, LedgerError
 from trustforge.release_router import (
     ReleaseEndpoint,
     ReleaseRoutingLedger,
     RoutingPolicy,
     RoutingSnapshot,
 )
+from trustforge.signed_event_ledger import SignedEventLedger
 
 Action = Literal["start", "stop", "promote", "rollback-a"]
 
@@ -40,12 +37,6 @@ def _utc(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise DeploymentControlError("timestamp must be timezone aware")
     return parsed.astimezone(timezone.utc)
-
-
-def _sign(secret: bytes, domain: bytes, payload: Mapping[str, Any]) -> str:
-    if len(secret) < 32:
-        raise DeploymentControlError("signing key must be at least 32 bytes")
-    return hmac.new(secret, domain + canonical_json(payload), hashlib.sha256).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,8 +93,9 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
 
     def __init__(
         self,
-        ledger: AuthenticatedLedger,
+        ledger: SignedEventLedger,
         *,
+        outcome_ledger: SignedEventLedger,
         authorization_keys: Mapping[str, bytes],
         completion_keys: Mapping[str, bytes],
         target: str,
@@ -123,6 +115,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         if not 1 <= stop_after_errors <= 100:
             raise DeploymentControlError("automatic stop threshold is invalid")
         self.ledger = ledger
+        self.outcome_ledger = outcome_ledger
         self.authorization_keys = dict(authorization_keys)
         self.completion_keys = dict(completion_keys)
         self.target = target
@@ -171,8 +164,16 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             raise DeploymentControlError("deployment initialization identity mismatch")
         return records
 
+    def _outcome_records(self, deployment_ledger_id: str) -> list[dict[str, Any]]:
+        records = self.outcome_ledger.read()
+        for record in records:
+            if record["event"].get("deployment_ledger_id") != deployment_ledger_id:
+                raise DeploymentControlError("router outcome ledger binding mismatch")
+        return records
+
     def routing_snapshot(self) -> RoutingSnapshot:
         records = self._records()
+        outcome_records = self._outcome_records(records[0]["ledger_id"])
         phase = desired = "disabled"
         activation = "completed"
         requests = errors = 0
@@ -231,7 +232,12 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             elif kind == "operator_stop":
                 phase = desired = "stopped"
                 activation = "completed"
-            elif kind == "candidate_reservation":
+            else:
+                raise DeploymentControlError("unknown deployment ledger event")
+        for record in outcome_records:
+            event = record["event"]
+            kind = event.get("kind")
+            if kind == "candidate_reservation":
                 reservation_id = str(event.get("reservation_id", ""))
                 if reservation_id in reservations:
                     raise DeploymentControlError("duplicate candidate reservation")
@@ -248,11 +254,11 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                         raise DeploymentControlError("premature automatic stop event")
                     phase = desired = "stopped"
                     activation = "completed"
+            elif kind == "router_emergency_stop":
+                phase = desired = "stopped"
+                activation = "completed"
             else:
-                raise DeploymentControlError("unknown deployment ledger event")
-        if self.ledger.emergency_stopped(ledger_id=records[0]["ledger_id"]):
-            phase = desired = "stopped"
-            activation = "completed"
+                raise DeploymentControlError("unknown router outcome event")
         return RoutingSnapshot(
             ledger_id=records[0]["ledger_id"],
             phase=phase,
@@ -264,20 +270,28 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             candidate_requests=requests,
             consecutive_errors=errors,
             stop_after_errors=self.stop_after_errors,
-            ledger_head=records[-1]["event_hash"],
+            ledger_head=(
+                outcome_records[-1]["event_hash"] if outcome_records else GENESIS_HASH
+            ),
         )
 
     def _verify_authorization(
         self, receipt: DeploymentAuthorization, *, action: Action, now: datetime
     ) -> None:
-        secret = self.authorization_keys.get(receipt.key_id)
-        expected = (
-            _sign(secret, b"trustforge.deployment-authorization.v2\x00", receipt.unsigned())
-            if secret is not None else ""
-        )
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        key = self.authorization_keys.get(receipt.key_id)
         snapshot = self.routing_snapshot()
-        if not receipt.signature or not hmac.compare_digest(receipt.signature, expected):
-            raise DeploymentControlError("authorization signature is invalid")
+        try:
+            if key is None:
+                raise InvalidSignature
+            Ed25519PublicKey.from_public_bytes(key).verify(
+                bytes.fromhex(receipt.signature),
+                b"trustforge.deployment-authorization.v2\x00"
+                + canonical_json(receipt.unsigned()),
+            )
+        except (InvalidSignature, ValueError) as exc:
+            raise DeploymentControlError("authorization signature is invalid") from exc
         if (
             receipt.receipt_version != "trustforge.deployment-authorization/v2"
             or receipt.action != action
@@ -302,6 +316,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
     ) -> dict[str, Any]:
         self._verify_authorization(receipt, action=action, now=now)
         state = self.routing_snapshot()
+        control_records = self._records()
+        control_head = control_records[-1]["event_hash"]
         allowed = {
             "start": {"disabled", "stopped"},
             "promote": {"canary"},
@@ -318,7 +334,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     "actor": receipt.actor,
                     "at": now.isoformat(),
                 },
-                expected_head=state.ledger_head,
+                expected_head=control_head,
             )
         desired = {
             "start": "canary",
@@ -362,7 +378,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     "routing_policy_digest": self.policy.policy_digest,
                     "at": now.isoformat(),
                 },
-                expected_head=state.ledger_head,
+                expected_head=control_head,
             )
         except BaseException:
             release_activation_lock(self.target, owner_id)
@@ -389,11 +405,9 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         if prepared_record["event"].get("transaction_id") != receipt.transaction_id:
             raise DeploymentControlError("completion is not for latest unresolved transaction")
         event = prepared_record["event"]
-        secret = self.completion_keys.get(receipt.key_id)
-        expected = (
-            _sign(secret, b"trustforge.activation-completion.v1\x00", receipt.unsigned())
-            if secret is not None else ""
-        )
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        key = self.completion_keys.get(receipt.key_id)
         expected_pointer = (
             self.candidate.release_digest if receipt.action == "promote"
             else self.active.release_digest
@@ -405,9 +419,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             in {self.active.release_digest, self.candidate.release_digest}
         )
         if (
-            not receipt.signature
-            or not hmac.compare_digest(receipt.signature, expected)
-            or receipt.receipt_version != "trustforge.activation-completion/v1"
+            receipt.receipt_version != "trustforge.activation-completion/v1"
             or receipt.action != event["action"]
             or receipt.target != self.target
             or receipt.prepared_event_hash != prepared_record["event_hash"]
@@ -420,6 +432,16 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             or not receipt.nonce
         ):
             raise DeploymentControlError("activation completion binding is invalid")
+        try:
+            if key is None:
+                raise InvalidSignature
+            Ed25519PublicKey.from_public_bytes(key).verify(
+                bytes.fromhex(receipt.signature),
+                b"trustforge.activation-completion.v1\x00"
+                + canonical_json(receipt.unsigned()),
+            )
+        except (InvalidSignature, ValueError) as exc:
+            raise DeploymentControlError("activation completion signature is invalid") from exc
         verified = _utc(receipt.verified_at)
         if verified > now or now - verified > timedelta(minutes=10):
             raise DeploymentControlError("activation completion is stale")
@@ -473,9 +495,12 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             or state.candidate_requests >= state.policy.request_cap
         ):
             raise LedgerError("candidate reservation state changed")
-        self.ledger.append(
+        control_records = self._records()
+        deployment_ledger_id = control_records[0]["ledger_id"]
+        self.outcome_ledger.append(
             {
                 "kind": "candidate_reservation",
+                "deployment_ledger_id": deployment_ledger_id,
                 "reservation_id": reservation_id,
                 "nonce": f"reservation:{reservation_id}",
             },
@@ -494,7 +519,9 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         error_kind: str,
     ) -> RoutingSnapshot:
         for _attempt in range(4):
-            records = self._records()
+            control_records = self._records()
+            deployment_ledger_id = control_records[0]["ledger_id"]
+            records = self._outcome_records(deployment_ledger_id)
             existing = next(
                 (
                     record for record in records
@@ -522,9 +549,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             state = self.routing_snapshot()
             next_errors = 0 if ok else state.consecutive_errors + 1
             try:
-                self.ledger.append(
+                self.outcome_ledger.append(
                     {
                         "kind": "candidate_result",
+                        "deployment_ledger_id": deployment_ledger_id,
                         "reservation_id": reservation_id,
                         "ok": bool(ok),
                         "status_code": int(status_code),
@@ -541,4 +569,17 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         raise LedgerError("candidate outcome could not be durably recorded")
 
     def emergency_stop(self, *, ledger_id: str, reason: str) -> None:
-        self.ledger.trip_emergency_stop(ledger_id=ledger_id, reason=reason)
+        if reason != "candidate_outcome_unrecordable":
+            raise LedgerError("router cannot create operator stop events")
+        state = self.routing_snapshot()
+        if state.ledger_id != ledger_id:
+            raise LedgerError("router emergency stop ledger identity mismatch")
+        self.outcome_ledger.append(
+            {
+                "kind": "router_emergency_stop",
+                "deployment_ledger_id": ledger_id,
+                "reason": reason,
+                "nonce": f"router-emergency:{ledger_id}",
+            },
+            expected_head=state.ledger_head,
+        )
