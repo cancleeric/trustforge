@@ -1,0 +1,84 @@
+{
+  "case_id": "abstain",
+  "commit": "6dbf60487c88d4f108776842539693db3fafab0b",
+  "description": "Low-confidence / insufficient sources → abstain",
+  "expected_kernel_output": {
+    "abstain": true,
+    "confidence": 0.0,
+    "contrarian": [
+      "c1"
+    ],
+    "decision_state": "abstain",
+    "direction": "不明",
+    "independent_sources": 0,
+    "reason_codes": [
+      "low_calibrated_confidence",
+      "insufficient_independent_sources"
+    ],
+    "scored_claims": [
+      {
+        "claim_id": "c1",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.6000000000000001,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [
+          "pump"
+        ],
+        "reputation_trace": null,
+        "trust": 0.009999999999999953
+      }
+    ],
+    "supporting": [],
+    "supporting_count": 0,
+    "trust_score": 0.0
+  },
+  "expected_legacy_brief": {
+    "calibrated_confidence": 0.0,
+    "confidence": 0.0,
+    "contrarian": [
+      {
+        "claim_id": "c1",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.6000000000000001,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [
+          "pump"
+        ],
+        "reputation_trace": null,
+        "trust": 0.009999999999999953
+      }
+    ],
+    "query": "BTC outlook",
+    "supporting": []
+  },
+  "input": {
+    "claims": [
+      {
+        "claim_type": "fact",
+        "direction": "bullish",
+        "document": {
+          "id": "d1",
+          "kind": "social",
+          "meta": {},
+          "source": "twitter_user",
+          "text": "BTC pump shill",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c1",
+        "text": "BTC social post says pump"
+      }
+    ],
+    "coin": "BTC",
+    "pit_epoch": 1000.0,
+    "query": "BTC outlook"
+  }
+}

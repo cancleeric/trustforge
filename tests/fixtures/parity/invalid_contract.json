@@ -1,0 +1,29 @@
+{
+  "case_id": "invalid_contract",
+  "commit": "6dbf60487c88d4f108776842539693db3fafab0b",
+  "description": "Invalid input — NaN pit_epoch should raise",
+  "expected_kernel_output": null,
+  "expected_legacy_brief": null,
+  "input": {
+    "claims": [
+      {
+        "claim_type": "fact",
+        "direction": "bullish",
+        "document": {
+          "id": "d1",
+          "kind": "news",
+          "meta": {},
+          "source": "Reuters",
+          "text": "BTC news",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c1",
+        "text": "BTC news"
+      }
+    ],
+    "coin": "BTC",
+    "pit_epoch": NaN,
+    "query": "BTC outlook"
+  }
+}
