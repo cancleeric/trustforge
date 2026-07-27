@@ -24,6 +24,7 @@ REQUIRED = {
     "evidence_strength", "outcome_direction", "outcome_observed_at",
 }
 VALID_DIRECTIONS = {"bullish", "bearish", "neutral"}
+VALID_SOURCE_FAMILIES = {"sentiment", "onchain", "price", "regulatory"}
 
 
 class DatasetError(ValueError):
@@ -74,6 +75,7 @@ def load_samples(path: str) -> list[dict]:
     except OSError as exc:
         raise DatasetError(f"cannot read samples: {exc}") from exc
     samples: list[dict[str, Any]] = []
+    sample_ids: set[str] = set()
     for line_no, raw_line in enumerate(raw.splitlines(), 1):
         if not raw_line.strip():
             continue
@@ -91,6 +93,16 @@ def load_samples(path: str) -> list[dict]:
             raise DatasetError(f"line {line_no}: outcome must be strictly after as_of")
         if row["claim_direction"] not in VALID_DIRECTIONS or row["outcome_direction"] not in VALID_DIRECTIONS:
             raise DatasetError(f"line {line_no}: invalid direction")
+        if row["source_family"] not in VALID_SOURCE_FAMILIES:
+            raise DatasetError(
+                f"line {line_no}: invalid source_family: {row['source_family']!r}"
+            )
+        sample_id = row["sample_id"]
+        if not isinstance(sample_id, str) or not sample_id.strip():
+            raise DatasetError(f"line {line_no}: sample_id must be a non-empty string")
+        if sample_id in sample_ids:
+            raise DatasetError(f"line {line_no}: duplicate sample_id: {sample_id!r}")
+        sample_ids.add(sample_id)
         strength = row["evidence_strength"]
         if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength):
             raise DatasetError(f"line {line_no}: evidence_strength must be finite")

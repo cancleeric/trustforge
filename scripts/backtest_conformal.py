@@ -557,8 +557,11 @@ def main() -> None:
         and p4_exp == "PASS" and p5_exp == "PASS"
     )
     if all_pass:
-        print(">>> ALL P1-P4 PASS — Promotion eligible (Phase D: Wire Production) <<<")
-        print(f"    conformal._CONFORMAL_TAU = {tau_exp:.4f}  # 無條件進位到 4 位")
+        print(">>> ALL P1-P5 PASS — research evidence only; NOT promotion approval <<<")
+        print(
+            f"    research tau={tau_exp:.4f}; production wiring remains prohibited "
+            "without a separate approved change."
+        )
     else:
         failed = []
         if p1_exp == "FAIL":

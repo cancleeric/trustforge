@@ -157,6 +157,51 @@ def test_partition_family_gate_requires_heterogeneity_in_each_partition(tmp_path
     assert report["promotion_checks"]["all_pass"] is False
 
 
+@pytest.mark.parametrize("family", ["fake-a", "fake-b", "", "SENTIMENT"])
+def test_cli_rejects_non_contract_source_families(tmp_path: Path, family: str):
+    rows = [_row(day, family=family) for day in range(1, 9)]
+    samples = tmp_path / "invalid-family.jsonl"
+    output = tmp_path / "report.json"
+    samples.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    result = subprocess.run(
+        [
+            sys.executable, str(_ROOT / "scripts/conformal_on_samples.py"),
+            "--samples", str(samples), "--out", str(output),
+        ],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "invalid source_family" in result.stderr
+    assert not output.exists()
+
+
+def test_duplicate_sample_id_fails_closed_direct_and_cli(tmp_path: Path):
+    rows = [_row(day) for day in range(1, 9)]
+    rows[1]["sample_id"] = rows[0]["sample_id"]
+    samples = tmp_path / "duplicate.jsonl"
+    output = tmp_path / "report.json"
+    samples.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(conformal.DatasetError, match="duplicate sample_id"):
+        conformal.load_samples(str(samples))
+    result = subprocess.run(
+        [
+            sys.executable, str(_ROOT / "scripts/conformal_on_samples.py"),
+            "--samples", str(samples), "--out", str(output),
+        ],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "duplicate sample_id" in result.stderr
+    assert not output.exists()
+
+
+def test_backtest_success_copy_remains_research_only():
+    source = (_ROOT / "scripts/backtest_conformal.py").read_text()
+    assert "ALL P1-P5 PASS" in source
+    assert "research evidence only; NOT promotion approval" in source
+    assert "conformal._CONFORMAL_TAU =" not in source
+
+
 @pytest.mark.parametrize("payload", ["", "{bad json}\n", json.dumps(_row(1)) + "\n"])
 def test_cli_fails_closed_for_empty_malformed_or_small_dataset(tmp_path: Path, payload: str):
     samples = tmp_path / "samples.jsonl"

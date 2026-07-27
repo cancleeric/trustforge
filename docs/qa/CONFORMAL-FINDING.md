@@ -194,6 +194,14 @@ coverage 保證」——這個誠實標註本身在本輪之前已存在，未�
   舊回測若 FNG／Blockchain input 缺失或 malformed，或任一 partition
   沒有實際異質 family support，P5 必定 FAIL，不能只靠 OHLCV 指標得到
   promotion-eligible 結論。
+- `source_family` 嚴格限制為 contract enum：`sentiment`、`onchain`、
+  `price`、`regulatory`；未知或任意自訂 family 直接 fail-closed，不能用
+  `fake-a`／`fake-b` 湊足異質數。
+- `sample_id` 必須是非空字串，且整個 dataset 全域唯一；重複 ID 直接
+  fail-closed，避免同一 evidence 被複製後膨脹 support、family 或 coin
+  counts。
+- 即使 P1–P5 全過，CLI 也只輸出 `research evidence only`，不得顯示
+  promotion approval 或建議直接寫入 production `_CONFORMAL_TAU`。
 
 `tests/test_conformal_chronological.py` 同時覆蓋直接 unit 與 subprocess CLI，
 包含不同 coin calendars、同日隔離、future outcome 不得影響 signal、
