@@ -10,6 +10,11 @@ from trustforge.asset_context import (
     MARKET_CAP_TIERS,
     TOKEN_ROLES,
 )
+from trustforge.asset_intrinsic import (
+    ASSET_INTRINSIC_SCHEMA_VERSION,
+    INTRINSIC_DIMENSION_NAMES,
+    INTRINSIC_FACT_STATUSES,
+)
 from trustforge.ecolink import ECOLINK_SCHEMA_VERSION, OFFICIAL_ECOLINK_HOSTS
 from trustforge.peer_metrics import PEER_METRICS_SCHEMA_VERSION
 
@@ -50,6 +55,79 @@ def _asset_context_schema_properties() -> dict[str, Any]:
             "settlement_chain": {"type": "string", "minLength": 1},
             "gas_token": {"type": "string", "minLength": 1},
             "dependencies": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+    }
+
+
+def _asset_intrinsic_schema_properties() -> dict[str, Any]:
+    timestamp = {"type": "string", "format": "date-time"}
+    provenance = {
+        "type": "object",
+        "required": ["source_urls", "methodology", "content_hash", "coverage"],
+        "properties": {
+            "source_urls": {
+                "type": "array",
+                "items": {"type": "string", "pattern": r"^https://"},
+            },
+            "methodology": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "content_hash": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
+            "coverage": {"type": "string", "minLength": 1, "pattern": r"\S"},
+        },
+        "additionalProperties": False,
+    }
+    dimension = {
+        "type": "object",
+        "required": [
+            "name", "status", "value", "as_of", "valid_from", "valid_until",
+            "fetched_at", "provenance",
+        ],
+        "properties": {
+            "name": {"enum": list(INTRINSIC_DIMENSION_NAMES)},
+            "status": {"enum": list(INTRINSIC_FACT_STATUSES)},
+            "value": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "as_of": timestamp,
+            "valid_from": timestamp,
+            "valid_until": {"type": ["string", "null"], "format": "date-time"},
+            "fetched_at": timestamp,
+            "provenance": provenance,
+        },
+        "allOf": [
+            {
+                "if": {"properties": {"status": {"const": "known"}}},
+                "then": {
+                    "properties": {
+                        "value": {"type": "number", "minimum": 0, "maximum": 1},
+                        "provenance": {
+                            **provenance,
+                            "properties": {
+                                **provenance["properties"],
+                                "source_urls": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "string", "pattern": r"^https://"},
+                                },
+                            },
+                        },
+                    },
+                },
+                "else": {"properties": {"value": {"type": "null"}}},
+            }
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "required": ["schema_version", "asset_id", "dimensions"],
+        "properties": {
+            "schema_version": {"const": ASSET_INTRINSIC_SCHEMA_VERSION},
+            "asset_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "dimensions": {
+                "type": "array",
+                "minItems": len(INTRINSIC_DIMENSION_NAMES),
+                "maxItems": len(INTRINSIC_DIMENSION_NAMES),
+                "items": dimension,
+            },
         },
         "additionalProperties": False,
     }
@@ -165,6 +243,12 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
             "$id": "https://trustforge.local/contracts/asset-context/1.0.0",
             "title": "TrustForge AssetContext",
             **_asset_context_schema_properties(),
+        },
+        "AssetIntrinsicProfile": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://trustforge.local/contracts/asset-intrinsic-profile/1.0.0",
+            "title": "TrustForge AssetIntrinsicProfile",
+            **_asset_intrinsic_schema_properties(),
         },
         "PeerMetricsSnapshot": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",

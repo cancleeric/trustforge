@@ -1,0 +1,172 @@
+[
+  {
+    "profile": {
+      "schema_version": "1.0.0",
+      "asset_id": "asset:btc",
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "status": "known",
+          "value": 1.0,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": null,
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": ["https://github.com/bitcoin/bitcoin/blob/v30.0/src/validation.cpp"],
+            "methodology": "Pinned Bitcoin Core release source inspection of consensus subsidy calculation; value means the issuance rule is deterministic and locally reproducible, not that governance can never change.",
+            "content_hash": "56de3025d9b8ead49d2e754be3c0452577eecc7209e46d8fd53ee4210b623a0b",
+            "coverage": "Bitcoin Core v30.0 consensus subsidy implementation only"
+          }
+        },
+        {
+          "name": "control_dispersion",
+          "status": "unknown",
+          "value": null,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": null,
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": [],
+            "methodology": "No versioned, independently reproducible dataset covering miner, pool, node operator and client control was available.",
+            "content_hash": "da1b5037ad8376a6232aeb61cefe7d11bb5ffbbbcef8d7a35d6faaf10ec44a53",
+            "coverage": "no qualifying control dataset"
+          }
+        },
+        {
+          "name": "supply_verifiability",
+          "status": "known",
+          "value": 1.0,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": null,
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": ["https://github.com/bitcoin/bitcoin/blob/v30.0/src/validation.cpp"],
+            "methodology": "A pinned full-node implementation can independently validate issuance and the UTXO set; no lost-key estimate is used.",
+            "content_hash": "8ceade021a86c5d07e24336d6112aff737acceda1cc729f5689f8075dbe77373",
+            "coverage": "protocol-valid supply; excludes beneficial ownership and lost keys"
+          }
+        },
+        {
+          "name": "governance_capture_resistance",
+          "status": "unknown",
+          "value": null,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": null,
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": [],
+            "methodology": "A source-code repository alone cannot quantify off-chain governance capture resistance.",
+            "content_hash": "3cfc83589525ce3c1544d54d7fc95c3557fea232d54e50b561102803caa3a8f7",
+            "coverage": "no qualifying governance capture dataset"
+          }
+        },
+        {
+          "name": "holder_concentration",
+          "status": "unknown",
+          "value": null,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": null,
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": [],
+            "methodology": "Address balances are not entity ownership; no entity-resolved historical dataset with reproducible clustering was available.",
+            "content_hash": "f93117ff7ad14250d75905c124d67c632e40cf6a01c13c447290747eb236cc41",
+            "coverage": "unknown; no lost-key or institutional-ownership inference"
+          }
+        }
+      ]
+    },
+    "valid_from": "2026-07-27T00:00:00Z",
+    "fetched_at": "2026-07-27T00:00:00Z"
+  },
+  {
+    "profile": {
+      "schema_version": "1.0.0",
+      "asset_id": "asset:bnb",
+      "dimensions": [
+        {
+          "name": "issuance_predictability",
+          "status": "known",
+          "value": 1.0,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": null,
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": ["https://docs.bnbchain.org/bnb-smart-chain/introduction/"],
+            "methodology": "Pinned documentation snapshot states native BNB has no inflation and validator rewards come from transaction fees; this does not infer issuer trust.",
+            "content_hash": "96871ddedc0c3ff634695174f72372613758ebaeb83a9370be267d8d88c84f3a",
+            "coverage": "BNB Smart Chain native-token issuance rule"
+          }
+        },
+        {
+          "name": "control_dispersion",
+          "status": "unknown",
+          "value": null,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": "2026-10-27T00:00:00Z",
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": ["https://docs.bnbchain.org/bnb-smart-chain/validator/overview/"],
+            "methodology": "Official documentation describes active and consensus validator-set bounds, but no qualified entity-independence dataset or approved normalization rubric is available.",
+            "content_hash": "868c180d84becadd26b898446b9133b017f4b275e98ac138216daf1a9ca3928c",
+            "coverage": "documented validator-set structure; excludes entity affiliation"
+          }
+        },
+        {
+          "name": "supply_verifiability",
+          "status": "known",
+          "value": 1.0,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": "2026-10-27T00:00:00Z",
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": ["https://docs.bnbchain.org/bnb-greenfield/core-concept/bnb-token-model/"],
+            "methodology": "Official lock/unlock circulation rules and no-mint statement are reproducible from documented system contracts; bridge accounting is part of coverage.",
+            "content_hash": "e775f9dedc02193f04fea78c9109f4132164bae7973c3141d19fbacd9b73db49",
+            "coverage": "BSC/Greenfield circulation model, excluding external wrappers"
+          }
+        },
+        {
+          "name": "governance_capture_resistance",
+          "status": "unknown",
+          "value": null,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": "2026-10-27T00:00:00Z",
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": ["https://docs.bnbchain.org/bnb-smart-chain/governance/overview/"],
+            "methodology": "Official documentation describes proposal, voting, quorum and timelock controls, but does not establish voter entity independence or quantify capture resistance.",
+            "content_hash": "70788d25f413d4d94b2fc67fa8beaac1e00ccac9c115da917046f7fe3235726e",
+            "coverage": "native BSC governance mechanics only"
+          }
+        },
+        {
+          "name": "holder_concentration",
+          "status": "unknown",
+          "value": null,
+          "as_of": "2026-07-27T00:00:00Z",
+          "valid_from": "2026-07-27T00:00:00Z",
+          "valid_until": null,
+          "fetched_at": "2026-07-27T00:00:00Z",
+          "provenance": {
+            "source_urls": [],
+            "methodology": "Address balances are not entity ownership; no entity-resolved cross-chain history with reproducible clustering was available.",
+            "content_hash": "30c77776a159373222d96189c54f42bd25559999b4345e84f6924df4425354ca",
+            "coverage": "unknown; no exchange or issuer ownership inference"
+          }
+        }
+      ]
+    },
+    "valid_from": "2026-07-27T00:00:00Z",
+    "fetched_at": "2026-07-27T00:00:00Z"
+  }
+]

@@ -119,6 +119,187 @@
     "title": "TrustForge AssetContext",
     "type": "object"
   },
+  "AssetIntrinsicProfile": {
+    "$id": "https://trustforge.local/contracts/asset-intrinsic-profile/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "asset_id": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "dimensions": {
+        "items": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "value": {
+                    "type": "null"
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "known"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "provenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "content_hash": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "coverage": {
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "methodology": {
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "source_urls": {
+                        "items": {
+                          "pattern": "^https://",
+                          "type": "string"
+                        },
+                        "minItems": 1,
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "source_urls",
+                      "methodology",
+                      "content_hash",
+                      "coverage"
+                    ],
+                    "type": "object"
+                  },
+                  "value": {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "as_of": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "fetched_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "name": {
+              "enum": [
+                "issuance_predictability",
+                "control_dispersion",
+                "supply_verifiability",
+                "governance_capture_resistance",
+                "holder_concentration"
+              ]
+            },
+            "provenance": {
+              "additionalProperties": false,
+              "properties": {
+                "content_hash": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "coverage": {
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "methodology": {
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "source_urls": {
+                  "items": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "source_urls",
+                "methodology",
+                "content_hash",
+                "coverage"
+              ],
+              "type": "object"
+            },
+            "status": {
+              "enum": [
+                "known",
+                "unknown",
+                "stale",
+                "conflicted"
+              ]
+            },
+            "valid_from": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "valid_until": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "value",
+            "as_of",
+            "valid_from",
+            "valid_until",
+            "fetched_at",
+            "provenance"
+          ],
+          "type": "object"
+        },
+        "maxItems": 5,
+        "minItems": 5,
+        "type": "array"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      }
+    },
+    "required": [
+      "schema_version",
+      "asset_id",
+      "dimensions"
+    ],
+    "title": "TrustForge AssetIntrinsicProfile",
+    "type": "object"
+  },
   "DependencyEdge": {
     "$id": "https://trustforge.local/contracts/dependency-edge/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
