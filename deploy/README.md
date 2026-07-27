@@ -45,6 +45,42 @@ retention/
 | `build_timestamp` | ISO 8601 UTC |
 | `build_host` | Hostname where build ran |
 
+### A/B app endpoint identity（#733）
+
+真正的 A/B app 仍由 production entrypoint `python -m trustforge.web` 提供服務；
+每個 immutable release instance 必須設定
+`TRUSTFORGE_RELEASE_IDENTITY_REQUIRED=1`，並提供以下五個值：
+
+| env | runtime read-only input |
+|-----|-------------------------|
+| `TRUSTFORGE_ENDPOINT_MANIFEST_PATH` | build/release plane 簽好的 endpoint manifest |
+| `TRUSTFORGE_RELEASE_MANIFEST_PATH` | 同一份 artifact 的 `ReleaseManifest` |
+| `TRUSTFORGE_RELEASE_ARTIFACT_PATH` | app 實際啟動來源的 immutable artifact ZIP |
+| `TRUSTFORGE_ENDPOINT_MANIFEST_KEYRING_PATH` | 只含 Ed25519 public keys 的 keyring |
+| `TRUSTFORGE_RELEASE_ORIGIN` | router 使用的固定 loopback origin（含 port） |
+
+啟動時會確認簽章、key role、loopback origin 及 artifact digest 綁定；缺檔、
+符號連結、非 regular file、不安全 owner/permissions、錯誤簽章或 digest
+不一致都會在 bind socket 前中止。runtime **不得**持有 endpoint manifest
+private key。驗證通過後，app 於
+`GET /.well-known/trustforge-release-manifest` 回傳凍結的 canonical JSON，
+供 release router 在每次轉送前驗證。
+
+簽署是 build/release-plane 步驟（不是 production installer）：
+
+```bash
+.venv/bin/python scripts/build_endpoint_manifest.py \
+  --release-manifest /absolute/build/manifest.json \
+  --origin http://127.0.0.1:18081 \
+  --key-id endpoint-2026-07 \
+  --private-key /absolute/offline/endpoint-ed25519.key \
+  --output /absolute/build/endpoint-manifest.json
+```
+
+private key 必須是 owner-only 的 32-byte raw Ed25519 seed；output 必須是尚未
+存在的絕對路徑，以 `O_EXCL` 建立為 read-only。A/B systemd unit 與 transactional
+installer 的實際接線屬下一層工作，本層不會自行安裝、enable 或部署服務。
+
 ### Verification gates（fail-closed）
 
 | Gate | Location | Checks |
