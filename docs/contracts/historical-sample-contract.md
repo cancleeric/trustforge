@@ -123,6 +123,8 @@ Trainer 必須再次驗證上游 contract，而不是信任輸入已清理：
   `regulatory`；缺失或任意新值不得靜默進入 artifact。
 - Artifact provenance 必須記錄 duplicate-ID 與 invalid-family violation
   counters；成功 artifact 兩者必須為零。
+- 所有必填 string 欄位都以 `strip()` 後判斷；只含空白或 tab 的值視為
+  缺失並 fail-closed。
 
 T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = null，由下游決定是否排除）。
 

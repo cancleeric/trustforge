@@ -165,7 +165,10 @@ def validate_sample(sample: Any, index: int) -> dict[str, Any]:
         "outcome_direction",
     )
     for field in required_strings:
-        if not isinstance(sample.get(field), str) or not sample[field]:
+        if (
+            not isinstance(sample.get(field), str)
+            or not sample[field].strip()
+        ):
             raise ValueError(
                 f"sample row {index} field {field} must be a non-empty string"
             )

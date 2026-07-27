@@ -236,6 +236,27 @@ def test_missing_or_invalid_source_family_fails_closed(tmp_path: Path, family):
         trainer.build_artifact(path, "2026-07-27")
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "sample_id",
+        "source",
+        "source_family",
+        "as_of",
+        "outcome_observed_at",
+        "claim_direction",
+        "outcome_direction",
+    ],
+)
+def test_whitespace_only_required_string_fails_closed(tmp_path: Path, field: str):
+    path = tmp_path / "samples.jsonl"
+    sample = _sample(1, as_of="2026-07-20T00:00:00Z")
+    sample[field] = " \t "
+    _write_jsonl(path, [sample])
+    with pytest.raises(ValueError, match=f"field {field}"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
 def test_cli_writes_v2_contract_and_filters_after_cutoff(tmp_path: Path):
     samples_path = tmp_path / "samples.jsonl"
     out_path = tmp_path / "artifact.json"
@@ -379,3 +400,26 @@ def test_cli_rejects_duplicate_id_or_invalid_family(
     )
     assert result.returncode != 0
     assert message in result.stderr
+
+
+def test_cli_rejects_whitespace_only_required_string(tmp_path: Path):
+    samples_path = tmp_path / "samples.jsonl"
+    sample = _sample(1, as_of="2026-07-20T00:00:00Z")
+    sample["sample_id"] = "   "
+    _write_jsonl(samples_path, [sample])
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--samples",
+            str(samples_path),
+            "--cutoff",
+            "2026-07-27",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "field sample_id must be a non-empty string" in result.stderr

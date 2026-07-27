@@ -294,6 +294,47 @@ def test_run_calibration_integration(tmp_path: Path):
     assert "bins" in result["calibration"]
 
 
+def test_run_calibration_same_date_reliability_uses_row_identity(tmp_path: Path):
+    training_dir = tmp_path / "training"
+    training_dir.mkdir()
+    _write_training_jsonl(
+        training_dir,
+        "BTC",
+        [
+            {
+                "date": "2024-01-01",
+                "direction": "偏多",
+                "confidence": 0.9,
+                "trust_score": 0.5,
+            },
+            {
+                "date": "2024-01-01",
+                "direction": "偏空",
+                "confidence": 0.1,
+                "trust_score": 0.5,
+            },
+        ],
+    )
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "BTC_daily_ohlcv.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2024-01-01,100,101,99,100,1000\n"
+        "2024-01-02,110,111,109,110,1000\n",
+        encoding="utf-8",
+    )
+
+    result = run_calibration("BTC", data_dir=data_dir, training_dir=training_dir)
+    reliability = result["horizons"]["T+1"]["reliability"]
+
+    assert [item["count"] for item in reliability] == [1, 1]
+    assert [item["mean_information_completeness"] for item in reliability] == [
+        0.1,
+        0.9,
+    ]
+    assert [item["empirical_hit_rate"] for item in reliability] == [0.0, 1.0]
+
+
 def test_run_calibration_no_data(tmp_path: Path):
     """無訓練資料時應回傳空結構不崩。"""
     training_dir = tmp_path / "training"

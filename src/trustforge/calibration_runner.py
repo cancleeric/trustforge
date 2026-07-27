@@ -337,41 +337,58 @@ def run_calibration(
             d for d in comparison["details"] if d.get("horizon") == horizon_days
         ]
 
+        def _confidence_for_detail(detail: dict) -> float | None:
+            prediction_index = detail.get("prediction_index")
+            if (
+                isinstance(prediction_index, int)
+                and 0 <= prediction_index < len(predictions)
+            ):
+                return float(predictions[prediction_index]["confidence"])
+            # Backward compatibility for reports persisted before row identity.
+            matching = [
+                prediction
+                for prediction in predictions
+                if prediction["date"] == detail.get("date")
+            ]
+            if len(matching) == 1:
+                return float(matching[0]["confidence"])
+            return None
+
+        indexed_details = [
+            (detail, confidence)
+            for detail in horizon_details
+            if (confidence := _confidence_for_detail(detail)) is not None
+        ]
+
         # 計算 reliability bins (同 calibration_summary 格式)
         reliability: list[dict] = []
         for low, high in _BIN_EDGES:
             bin_items = [
-                d for d in horizon_details
-                if low <= next(
-                    (p["confidence"] for p in predictions if p["date"] == d["date"]),
-                    0.0,
-                ) < high
+                (detail, confidence)
+                for detail, confidence in indexed_details
+                if low <= confidence < high
             ]
             # 最後一個 bin 包含 1.0
             if high == 1.0:
                 bin_items_extra = [
-                    d for d in horizon_details
-                    if next(
-                        (p["confidence"] for p in predictions if p["date"] == d["date"]),
-                        0.0,
-                    ) == 1.0
-                    and d not in bin_items
+                    (detail, confidence)
+                    for detail, confidence in indexed_details
+                    if confidence == 1.0
+                    and (detail, confidence) not in bin_items
                 ]
                 bin_items.extend(bin_items_extra)
 
             if not bin_items:
                 continue
             bin_count = len(bin_items)
-            confs = [
-                next((p["confidence"] for p in predictions if p["date"] == d["date"]), 0.0)
-                for d in bin_items
-            ]
+            confs = [confidence for _, confidence in bin_items]
             reliability.append({
                 "range": [round(low, 2), round(high, 2)],
                 "count": bin_count,
                 "mean_information_completeness": round(sum(confs) / bin_count, 4),
                 "empirical_hit_rate": round(
-                    sum(1 for d in bin_items if d["hit"]) / bin_count, 4
+                    sum(1 for detail, _ in bin_items if detail["hit"]) / bin_count,
+                    4,
                 ),
             })
 
