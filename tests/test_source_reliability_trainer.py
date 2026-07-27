@@ -31,6 +31,7 @@ def _sample(index: int, *, as_of: str, correct: bool = True) -> dict:
     return {
         "sample_id": f"sample-{index}",
         "source": "provider-a",
+        "source_family": "sentiment",
         "as_of": as_of,
         "outcome_observed_at": "2026-07-27T23:59:59Z",
         "claim_direction": claim,
@@ -210,6 +211,31 @@ def test_non_object_row_fails_closed(tmp_path: Path):
         trainer.build_artifact(path, "2026-07-27")
 
 
+def test_duplicate_sample_id_fails_closed(tmp_path: Path):
+    path = tmp_path / "samples.jsonl"
+    first = _sample(1, as_of="2026-07-20T00:00:00Z")
+    duplicate = {
+        **_sample(2, as_of="2026-07-20T00:00:00Z"),
+        "sample_id": first["sample_id"],
+    }
+    _write_jsonl(path, [first, duplicate])
+    with pytest.raises(ValueError, match="duplicate sample_id"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
+@pytest.mark.parametrize("family", [None, "", "social", "SENTIMENT"])
+def test_missing_or_invalid_source_family_fails_closed(tmp_path: Path, family):
+    path = tmp_path / "samples.jsonl"
+    sample = _sample(1, as_of="2026-07-20T00:00:00Z")
+    if family is None:
+        sample.pop("source_family")
+    else:
+        sample["source_family"] = family
+    _write_jsonl(path, [sample])
+    with pytest.raises(ValueError, match="source_family"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
 def test_cli_writes_v2_contract_and_filters_after_cutoff(tmp_path: Path):
     samples_path = tmp_path / "samples.jsonl"
     out_path = tmp_path / "artifact.json"
@@ -243,6 +269,8 @@ def test_cli_writes_v2_contract_and_filters_after_cutoff(tmp_path: Path):
     assert artifact["version"] == "2.0.0"
     assert artifact["provenance"]["selected_samples"] == 30
     assert artifact["sources"]["provider-a"]["support"] == 30
+    assert artifact["provenance"]["duplicate_sample_id"] == 0
+    assert artifact["provenance"]["invalid_source_family"] == 0
     assert "auc_proxy" not in json.dumps(artifact)
 
 
@@ -315,3 +343,39 @@ def test_cli_rejects_label_not_after_as_of(tmp_path: Path):
     )
     assert result.returncode != 0
     assert "strictly after as_of" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("duplicate", "duplicate sample_id"),
+        ("invalid-family", "source_family"),
+    ],
+)
+def test_cli_rejects_duplicate_id_or_invalid_family(
+    tmp_path: Path, mutation: str, message: str
+):
+    samples_path = tmp_path / "samples.jsonl"
+    first = _sample(1, as_of="2026-07-20T00:00:00Z")
+    second = _sample(2, as_of="2026-07-20T00:00:00Z")
+    if mutation == "duplicate":
+        second["sample_id"] = first["sample_id"]
+    else:
+        second["source_family"] = "social"
+    _write_jsonl(samples_path, [first, second])
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--samples",
+            str(samples_path),
+            "--cutoff",
+            "2026-07-27",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr

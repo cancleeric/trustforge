@@ -115,6 +115,15 @@ timezone，或 label 在 cutoff 後才可觀測，trainer 必須 fail-closed，�
 同樣必須拒絕。Artifact provenance 必須記錄已驗證 label 數量及各類
 violation counter；成功 artifact 的 violation counters 必須為零。
 
+Trainer 必須再次驗證上游 contract，而不是信任輸入已清理：
+
+- `sample_id` 必須是非空字串，且在整個輸入 dataset 全域唯一；重複 ID
+  必須 fail-closed，避免同一 evidence 重複灌高 support。
+- `source_family` 必填，且只能是 `sentiment`、`onchain`、`price`、
+  `regulatory`；缺失或任意新值不得靜默進入 artifact。
+- Artifact provenance 必須記錄 duplicate-ID 與 invalid-family violation
+  counters；成功 artifact 兩者必須為零。
+
 T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = null，由下游決定是否排除）。
 
 ---

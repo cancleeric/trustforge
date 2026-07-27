@@ -16,6 +16,7 @@ SHRINKAGE_TARGET = 0.50
 SHRINKAGE_K = 100.0
 SCHEMA = "trustforge.source-reputation"
 VERSION = "2.0.0"
+SOURCE_FAMILIES = frozenset({"sentiment", "onchain", "price", "regulatory"})
 
 
 @dataclass(frozen=True)
@@ -155,7 +156,9 @@ def validate_sample(sample: Any, index: int) -> dict[str, Any]:
     if not isinstance(sample, dict):
         raise ValueError(f"sample row {index} must be a JSON object")
     required_strings = (
+        "sample_id",
         "source",
+        "source_family",
         "as_of",
         "outcome_observed_at",
         "claim_direction",
@@ -166,6 +169,11 @@ def validate_sample(sample: Any, index: int) -> dict[str, Any]:
             raise ValueError(
                 f"sample row {index} field {field} must be a non-empty string"
             )
+    if sample["source_family"] not in SOURCE_FAMILIES:
+        allowed = ", ".join(sorted(SOURCE_FAMILIES))
+        raise ValueError(
+            f"sample row {index} source_family must be one of: {allowed}"
+        )
     strength = sample.get("evidence_strength")
     if isinstance(strength, bool) or not isinstance(strength, (int, float)):
         raise ValueError(
@@ -184,8 +192,13 @@ def build_artifact(samples_path: Path, cutoff_text: str) -> dict[str, Any]:
     selected: list[tuple[datetime, dict[str, Any]]] = []
     excluded_after_cutoff = 0
     labels_validated = 0
+    sample_ids: set[str] = set()
     for index, raw_sample in enumerate(all_samples, start=1):
         sample = validate_sample(raw_sample, index)
+        sample_id = sample["sample_id"]
+        if sample_id in sample_ids:
+            raise ValueError(f"duplicate sample_id: {sample_id!r}")
+        sample_ids.add(sample_id)
         as_of = parse_as_of(sample.get("as_of"))
         if as_of.date() <= cutoff:
             outcome_observed_at = parse_outcome_observed_at(
@@ -266,6 +279,8 @@ def build_artifact(samples_path: Path, cutoff_text: str) -> dict[str, Any]:
             "label_timestamp_invalid": 0,
             "label_temporal_order_invalid": 0,
             "label_observed_after_cutoff": 0,
+            "duplicate_sample_id": 0,
+            "invalid_source_family": 0,
         },
         "parameters": {
             "minimum_support": MIN_SAMPLE_PER_SOURCE,
