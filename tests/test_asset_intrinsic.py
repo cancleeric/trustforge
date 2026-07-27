@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -261,6 +262,21 @@ def test_jsonschema_rejects_missing_extra_type_and_naive_timestamp(
     assert any(list(error.absolute_path)[: len(expected_path)] == expected_path for error in errors)
 
 
+def test_jsonschema_rejects_duplicate_and_therefore_missing_dimension_name() -> None:
+    profile = copy.deepcopy(raw_records()[0]["profile"])
+    profile["dimensions"][4]["name"] = profile["dimensions"][0]["name"]
+    validator = Draft202012Validator(
+        contract_schemas()["AssetIntrinsicProfile"], format_checker=FormatChecker()
+    )
+
+    errors = list(validator.iter_errors(profile))
+
+    assert errors
+    assert any(error.validator in {"contains", "maxContains"} for error in errors)
+    with pytest.raises(ValueError, match="each intrinsic dimension exactly once"):
+        parse_asset_intrinsic_profile(profile)
+
+
 def test_evidence_fingerprint_tamper_fails_closed(tmp_path: Path) -> None:
     evidence_root = tmp_path / "repo"
     evidence_dir = evidence_root / "data" / "asset_intrinsic_evidence"
@@ -282,6 +298,7 @@ def test_evidence_fingerprint_tamper_fails_closed(tmp_path: Path) -> None:
 
 def test_validation_cli_success_is_offline_and_error_exit_is_nonzero(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
     command = [
         sys.executable,
         str(root / "scripts" / "validate_asset_intrinsic_records.py"),
@@ -289,7 +306,9 @@ def test_validation_cli_success_is_offline_and_error_exit_is_nonzero(tmp_path: P
         "--as-of",
         "2026-07-27T00:00:00Z",
     ]
-    success = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+    success = subprocess.run(
+        command, cwd=root, env=env, capture_output=True, text=True, check=False
+    )
     assert success.returncode == 0
     assert json.loads(success.stdout)["network_used"] is False
 
@@ -298,12 +317,48 @@ def test_validation_cli_success_is_offline_and_error_exit_is_nonzero(tmp_path: P
     failure = subprocess.run(
         [sys.executable, command[1], str(bad_file)],
         cwd=root,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
     )
     assert failure.returncode == 2
     assert "validation failed" in failure.stderr
+
+
+def test_validation_cli_rejects_record_with_empty_pit_dimension_view(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+    isolated_root = tmp_path / "repo"
+    evidence_dir = isolated_root / "data" / "asset_intrinsic_evidence"
+    evidence_dir.mkdir(parents=True)
+    payload = copy.deepcopy(raw_records()[0])
+    for dimension in payload["profile"]["dimensions"]:
+        source = root / dimension["provenance"]["evidence_path"]
+        target = isolated_root / dimension["provenance"]["evidence_path"]
+        target.write_bytes(source.read_bytes())
+        dimension["status"] = "stale"
+        dimension["value"] = None
+    records_file = isolated_root / "data" / "records.json"
+    records_file.write_text(json.dumps([payload]), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "validate_asset_intrinsic_records.py"),
+            str(records_file),
+            "--as-of",
+            "2026-07-27T00:00:00Z",
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "no dimensions are PIT-visible" in result.stderr
 
 
 def test_asset_context_contract_and_fixture_remain_unchanged() -> None:

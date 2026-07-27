@@ -123,6 +123,103 @@
     "$id": "https://trustforge.local/contracts/asset-intrinsic-profile/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
+    "allOf": [
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "issuance_predictability"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "control_dispersion"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "supply_verifiability"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "governance_capture_resistance"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "holder_concentration"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      }
+    ],
     "properties": {
       "asset_id": {
         "minLength": 1,

@@ -45,8 +45,13 @@ def main(argv: list[str] | None = None) -> int:
             asset_id: repository.pit_view(asset_id, as_of)
             for asset_id in asset_ids
         }
-        if not any(view is not None for view in views.values()):
-            raise ValueError("no records are PIT-visible at requested as-of")
+        fact_visible = {
+            asset_id: view
+            for asset_id, view in views.items()
+            if view is not None and len(view.dimensions) > 0
+        }
+        if not fact_visible:
+            raise ValueError("no dimensions are PIT-visible at requested as-of")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"asset intrinsic validation failed: {exc}", file=sys.stderr)
         return 2
@@ -57,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": True,
                 "records": len(records),
                 "assets": len(asset_ids),
-                "pit_visible_assets": sum(view is not None for view in views.values()),
+                "pit_visible_assets": len(fact_visible),
                 "as_of": as_of.isoformat().replace("+00:00", "Z"),
                 "network_used": False,
             },

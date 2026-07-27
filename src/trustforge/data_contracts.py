@@ -145,6 +145,22 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
                 "items": dimension,
             },
         },
+        "allOf": [
+            {
+                "properties": {
+                    "dimensions": {
+                        "contains": {
+                            "type": "object",
+                            "properties": {"name": {"const": dimension_name}},
+                            "required": ["name"],
+                        },
+                        "minContains": 1,
+                        "maxContains": 1,
+                    }
+                }
+            }
+            for dimension_name in INTRINSIC_DIMENSION_NAMES
+        ],
         "additionalProperties": False,
     }
 
