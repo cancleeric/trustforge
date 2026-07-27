@@ -12,10 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.deployment_control import (
-    DeploymentAuthorization,
-    DeploymentControlLedger,
-)
+from trustforge.deployment_control import DeploymentControlLedger
 from trustforge.release_router import (
     ReleaseABRouter,
     ReleaseEndpoint,
@@ -504,13 +501,11 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
                 "nonce": "complete-test",
                 "actor": "test",
                 "at": "2026-07-28T00:00:01Z",
+                "checkpoint_floor_at": now.isoformat(),
                 "completion_receipt": completion_receipt,
             }
         )
-        control._write_checkpoint(
-            authorization=DeploymentAuthorization(**auth_receipt),
-            terminal_record=terminal,
-        )
+        control._write_checkpoint(terminal_record=terminal)
         router = ReleaseABRouter(
             control,
             {"route-2026-07": b"r" * 32},

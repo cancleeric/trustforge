@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import grp
 import json
+import os
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -38,7 +40,12 @@ def _public(seed: bytes) -> bytes:
 
 
 def _ledger(
-    tmp_path, *, seed=CONTROL_SEED, domain="release-control", kinds=CONTROL_KINDS
+    tmp_path,
+    *,
+    seed=CONTROL_SEED,
+    domain="release-control",
+    kinds=CONTROL_KINDS,
+    **overrides,
 ):
     return SignedEventLedger(
         directory=tmp_path / "ledger",
@@ -60,6 +67,7 @@ def _ledger(
         ledger_role=domain,
         bootstrap=True,
         coordination_root=tmp_path,
+        **overrides,
     )
 
 
@@ -238,3 +246,33 @@ def test_write_all_retries_short_writes(tmp_path, monkeypatch):
     finally:
         __import__("os").close(fd)
     assert path.read_bytes() == b"complete-payload"
+
+
+def test_preprovisioned_coordination_lock_survives_restart_on_same_inode(tmp_path):
+    lock_directory = tmp_path / "coordination"
+    lock_directory.mkdir(mode=0o750)
+    lock_directory.chmod(0o750)
+    lock_path = lock_directory / "coordination.lock"
+    lock_path.touch(mode=0o660)
+    lock_path.chmod(0o660)
+    expected_inode = lock_path.stat().st_ino
+    lock_group = grp.getgrgid(os.getegid()).gr_name
+
+    writer = _ledger(
+        tmp_path,
+        coordination_lock_path=lock_path,
+        coordination_lock_mode=0o660,
+        coordination_lock_owner_uid=os.geteuid(),
+        coordination_lock_group=lock_group,
+    )
+    writer.append({"kind": "deployment_initialized"})
+    restarted = _ledger(
+        tmp_path,
+        coordination_lock_path=lock_path,
+        coordination_lock_mode=0o660,
+        coordination_lock_owner_uid=os.geteuid(),
+        coordination_lock_group=lock_group,
+    )
+
+    assert lock_path.stat().st_ino == expected_inode
+    assert restarted.read()[0]["event"]["kind"] == "deployment_initialized"

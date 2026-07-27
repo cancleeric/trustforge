@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import errno
 import json
 import os
 import secrets
+import select
+import socket
 import stat
 import urllib.parse
 from contextlib import contextmanager
@@ -207,11 +210,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             raise DeploymentControlError("authorization checkpoint is corrupt") from exc
         required = {
             "schema",
-            "checkpoint_at",
+            "floor_at",
             "ledger_id",
             "control_sequence",
             "control_head",
-            "authorization_receipt",
         }
         if (
             not isinstance(value, dict)
@@ -224,28 +226,15 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
     def _write_checkpoint(
         self,
         *,
-        authorization: DeploymentAuthorization,
         terminal_record: Mapping[str, Any],
     ) -> None:
-        """Durably checkpoint an existing signed authorization, never re-sign it."""
-        checkpoint_at = _utc(authorization.issued_at)
-        existing = self._read_checkpoint()
-        if existing is not None:
-            # A stop/rollback must remain operable during clock rollback without
-            # lowering the last independently signed time floor.
-            existing_time = _utc(existing["checkpoint_at"])
-            existing_is_verified = not self._checkpoint_clock_rolled_back(
-                self._records(), now=existing_time, require_latest=False
-            )
-            if existing_is_verified and checkpoint_at < existing_time:
-                return
+        """Project the floor already authenticated by signed terminal history."""
         value = {
-            "schema": "trustforge.authorization-checkpoint/v1",
-            "checkpoint_at": checkpoint_at.isoformat(),
+            "schema": "trustforge.authorization-checkpoint/v2",
+            "floor_at": terminal_record["event"]["checkpoint_floor_at"],
             "ledger_id": terminal_record["ledger_id"],
             "control_sequence": terminal_record["sequence"],
             "control_head": terminal_record["event_hash"],
-            "authorization_receipt": asdict(authorization),
         }
         data = canonical_json(value) + b"\n"
         directory_fd = os.open(
@@ -299,83 +288,44 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         records: list[dict[str, Any]],
         *,
         now: datetime,
-        require_latest: bool = True,
+        heal: bool = False,
     ) -> bool:
-        """Challenge a checkpoint against signed history without wedging status."""
+        """Challenge/rebuild the projection from latest signed terminal history."""
         terminals = [
             record
             for record in records
             if record["event"].get("kind")
             in {"operator_stop", "activation_completed", "activation_failed"}
         ]
-        try:
-            checkpoint = self._read_checkpoint()
-        except DeploymentControlError:
-            return True
         if not terminals:
             return False
-        if checkpoint is None:
-            return True
-        terminal = next(
-            (
-                record
-                for record in terminals
-                if record["sequence"] == checkpoint.get("control_sequence")
-                and record["event_hash"] == checkpoint.get("control_head")
-                and record["ledger_id"] == checkpoint.get("ledger_id")
-            ),
-            None,
-        )
-        if (
-            checkpoint.get("schema") != "trustforge.authorization-checkpoint/v1"
-            or terminal is None
-            or (require_latest and terminal != terminals[-1])
-        ):
-            return True
+        terminal = terminals[-1]
         try:
-            authorization = DeploymentAuthorization(
-                **checkpoint["authorization_receipt"]
-            )
-        except (KeyError, TypeError):
-            return True
-        terminal_event = terminal["event"]
-        if terminal_event["kind"] == "operator_stop":
-            expected = terminal_event.get("authorization_receipt")
-        else:
-            prepared_hash = terminal_event.get("prepared_event_hash")
-            prepared = next(
-                (
-                    record["event"]
-                    for record in records
-                    if record["event"].get("kind") == "activation_prepared"
-                    and record["event_hash"] == prepared_hash
-                ),
-                None,
-            )
-            expected = prepared.get("authorization_receipt") if prepared else None
-        if expected != asdict(authorization):
-            return True
-        try:
-            self._verify_ed25519(
-                self.authorization_keys,
-                authorization.key_id,
-                authorization.signature,
-                b"trustforge.deployment-authorization.v3\x00",
-                authorization.unsigned(),
-                "checkpoint authorization",
-            )
-            signed_time = _utc(authorization.issued_at)
-            checkpoint_time = _utc(checkpoint["checkpoint_at"])
+            floor = _utc(terminal["event"]["checkpoint_floor_at"])
+            checkpoint = self._read_checkpoint()
         except DeploymentControlError:
-            return True
-        if checkpoint_time != signed_time:
-            return True
-        return now < signed_time
+            checkpoint = None
+            floor = _utc(terminal["event"]["checkpoint_floor_at"])
+        expected = {
+            "schema": "trustforge.authorization-checkpoint/v2",
+            "floor_at": floor.isoformat(),
+            "ledger_id": terminal["ledger_id"],
+            "control_sequence": terminal["sequence"],
+            "control_head": terminal["event_hash"],
+        }
+        if checkpoint != expected:
+            if heal and self.ledger.can_sign:
+                try:
+                    self._write_checkpoint(terminal_record=terminal)
+                except (DeploymentControlError, OSError):
+                    return True
+            else:
+                return True
+        return now < floor
 
     def _publish_checkpoint_after_terminal(
         self,
         *,
-        authorization: DeploymentAuthorization,
         terminal_record: Mapping[str, Any],
     ) -> None:
         """Best-effort projection: signed history remains authoritative.
@@ -384,9 +334,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         control operations. A later successful terminal transition heals it.
         """
         try:
-            self._write_checkpoint(
-                authorization=authorization, terminal_record=terminal_record
-            )
+            self._write_checkpoint(terminal_record=terminal_record)
         except (DeploymentControlError, OSError):
             return
 
@@ -559,6 +507,18 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 epoch = None
         return epoch
 
+    @staticmethod
+    def _next_checkpoint_floor(
+        records: list[dict[str, Any]], terminal_time: datetime
+    ) -> datetime:
+        prior = [
+            _utc(record["event"]["checkpoint_floor_at"])
+            for record in records
+            if record["event"].get("kind")
+            in {"operator_stop", "activation_completed", "activation_failed"}
+        ]
+        return max([terminal_time, *prior])
+
     def routing_snapshot(self) -> RoutingSnapshot:
         current_time = self._current_time()
         records = self._records()
@@ -568,9 +528,6 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             if record["event"].get("kind")
             in {"activation_completed", "activation_failed"}
         }
-        clock_rolled_back = self._checkpoint_clock_rolled_back(
-            records, now=current_time
-        )
         outcome_records = self._outcome_records(records[0]["ledger_id"])
         phase = desired = "disabled"
         activation = "completed"
@@ -581,6 +538,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         reservations: dict[tuple[str, str], bool] = {}
         known_canary_epochs: set[str] = set()
         current_canary_epoch: str | None = None
+        projected_floor: datetime | None = None
         for record_index, record in enumerate(records[1:], start=1):
             event = record["event"]
             kind = event.get("kind")
@@ -691,6 +649,15 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     prepared_record=prior,
                     effective_at=_utc(event["at"]),
                 )
+                expected_floor = max(
+                    _utc(completion.verified_at),
+                    projected_floor or _utc(completion.verified_at),
+                )
+                if _utc(event.get("checkpoint_floor_at")) != expected_floor:
+                    raise DeploymentControlError(
+                        "activation checkpoint floor is invalid"
+                    )
+                projected_floor = expected_floor
                 expected_receipt_digest = (
                     "sha256:"
                     + hashlib.sha256(canonical_json(asdict(completion))).hexdigest()
@@ -764,6 +731,15 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     raise DeploymentControlError(
                         "operator stop authorization identity mismatch"
                     )
+                expected_floor = max(
+                    _utc(event["at"]),
+                    projected_floor or _utc(event["at"]),
+                )
+                if _utc(event.get("checkpoint_floor_at")) != expected_floor:
+                    raise DeploymentControlError(
+                        "operator stop checkpoint floor is invalid"
+                    )
+                projected_floor = expected_floor
                 if phase != "canary":
                     raise DeploymentControlError("operator stop prior phase is invalid")
                 phase = desired = "stopped"
@@ -830,6 +806,9 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             phase = desired = "stopped"
             activation = "completed"
             current_canary_epoch = None
+        clock_rolled_back = self._checkpoint_clock_rolled_back(
+            records, now=current_time, heal=self.ledger.can_sign
+        )
         return RoutingSnapshot(
             ledger_id=records[0]["ledger_id"],
             phase=phase,
@@ -874,11 +853,6 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         if abs((now.astimezone(timezone.utc) - trusted_now).total_seconds()) > 5:
             raise DeploymentControlError("operator time is not current")
         now = trusted_now
-        records_before = self._records()
-        if action in {"start", "promote"} and self._checkpoint_clock_rolled_back(
-            records_before, now=now
-        ):
-            raise DeploymentControlError("trusted wall clock rolled back")
         self._verify_authorization(receipt, action=action, now=now)
         state = self.routing_snapshot()
         control_records = self._records()
@@ -891,7 +865,11 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             # signed operator_stop terminal event has not yet been appended.
             "stop": {"canary", "stopped"},
         }
-        if state.phase not in allowed[action] or state.activation_status == "prepared":
+        if (
+            state.phase not in allowed[action]
+            or state.activation_status == "prepared"
+            or (action in {"start", "promote"} and state.candidate_blocked)
+        ):
             raise DeploymentControlError("action is not allowed from current state")
         if action == "stop":
             canary_epoch = self._canary_epoch(control_records)
@@ -907,13 +885,14 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     "nonce": receipt.nonce,
                     "actor": receipt.actor,
                     "at": now.isoformat(),
+                    "checkpoint_floor_at": self._next_checkpoint_floor(
+                        control_records, now
+                    ).isoformat(),
                     "authorization_receipt": asdict(receipt),
                 },
                 expected_head=control_head,
             )
-            self._publish_checkpoint_after_terminal(
-                authorization=receipt, terminal_record=result
-            )
+            self._publish_checkpoint_after_terminal(terminal_record=result)
             return result
         desired = {
             "start": "canary",
@@ -978,6 +957,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             raise DeploymentControlError("operator time is not current")
         now = trusted_now
         records = self._records()
+        reconciled_state = self.routing_snapshot()
         terminal_ids = {
             str(record["event"].get("transaction_id"))
             for record in records
@@ -1001,7 +981,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         if (
             receipt.status == "completed"
             and event.get("action") in {"start", "promote"}
-            and self._checkpoint_clock_rolled_back(records, now=now)
+            and reconciled_state.candidate_blocked
         ):
             raise DeploymentControlError("trusted wall clock rolled back")
         self._validate_completion_receipt(
@@ -1035,15 +1015,15 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 "nonce": receipt.nonce,
                 "actor": receipt.actor,
                 "at": now.isoformat(),
+                "checkpoint_floor_at": self._next_checkpoint_floor(
+                    records, _utc(receipt.verified_at)
+                ).isoformat(),
                 "completion_receipt": asdict(receipt),
             },
             expected_head=records[-1]["event_hash"],
         )
         release_activation_lock(self.target, event["owner_id"])
-        authorization = DeploymentAuthorization(**event["authorization_receipt"])
-        self._publish_checkpoint_after_terminal(
-            authorization=authorization, terminal_record=result
-        )
+        self._publish_checkpoint_after_terminal(terminal_record=result)
         return result
 
     def reserve_candidate(
@@ -1207,7 +1187,36 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             )
             # connect() is the atomic classification point. The coordination
             # lock is released immediately afterward, before request/response.
-            connection.connect()
+            candidate_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                candidate_socket.setblocking(False)
+                result = candidate_socket.connect_ex(
+                    (str(parsed.hostname), int(parsed.port))
+                )
+                if result not in {
+                    0,
+                    errno.EINPROGRESS,
+                    errno.EWOULDBLOCK,
+                    errno.EALREADY,
+                }:
+                    raise OSError(result, os.strerror(result))
+                if result != 0:
+                    _, writable, _ = select.select(
+                        [], [candidate_socket], [], connect_timeout
+                    )
+                    if not writable:
+                        raise TimeoutError("candidate connect deadline exceeded")
+                    socket_error = candidate_socket.getsockopt(
+                        socket.SOL_SOCKET, socket.SO_ERROR
+                    )
+                    if socket_error:
+                        raise OSError(socket_error, os.strerror(socket_error))
+                candidate_socket.setblocking(True)
+                candidate_socket.settimeout(connect_timeout)
+                connection.sock = candidate_socket
+            except BaseException:
+                candidate_socket.close()
+                raise
         try:
             yield connection
         finally:

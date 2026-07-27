@@ -5,10 +5,9 @@ Requires=trustforge-a.service
 
 [Service]
 Type=simple
-User=trustforge
-Group=trustforge
+User=trustforge-router
+Group=trustforge-release
 WorkingDirectory=/opt/trustforge
-ExecStartPre=/usr/bin/touch /run/trustforge/release-coordination.lock
 ExecStart=/opt/trustforge/.venv/bin/python scripts/release_router_service.py
 Restart=on-failure
 RestartSec=2
@@ -29,7 +28,9 @@ MemoryMax=256M
 CPUQuota=100%
 ReadOnlyPaths=/var/lib/trustforge/security-ledger/control
 ReadWritePaths=/var/lib/trustforge/security-ledger/router-outcomes
-ReadWritePaths=/run/trustforge
+ReadWritePaths=/run/trustforge-release-control/coordination.lock
+InaccessiblePaths=/etc/trustforge/deployment-keys
+InaccessiblePaths=/etc/trustforge/deployment-control.json
 ReadOnlyPaths=/etc/trustforge/release-router-runtime.json
 ReadOnlyPaths=/etc/trustforge/release-router-runtime-keys.json
 

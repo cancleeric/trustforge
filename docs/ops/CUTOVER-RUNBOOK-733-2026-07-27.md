@@ -28,12 +28,14 @@ separately pinned A endpoint. It never logs a subject or subject-derived value.
 The router hot path is read-only. It never advances a clock file. After each
 successful control-plane terminal transition, the control process atomically
 writes and file/directory-fsyncs a coarse authorization checkpoint. That
-checkpoint contains the original signed `DeploymentAuthorization` (it invents
-no new signer); `checkpoint_at` is exactly that receipt's signed `issued_at`
-and cannot be changed independently. It is challenged against the latest
-signed control head/sequence. Missing, stale or corrupt checkpoint projection
-blocks B/start/promotion but does not block status or emergency control; a
-later terminal transition heals it from signed history. An unresolved
+checkpoint is only a projection of the latest signed terminal head/sequence and
+its ledger-authenticated monotonic `checkpoint_floor_at`. Completion advances
+the floor from the independently signed completion `verified_at`; operator stop
+uses the ledger-signed terminal `at`; every terminal stores the maximum prior
+floor while always advancing the head. Missing, stale or corrupt checkpoint
+projection blocks a read-only router and is atomically rebuilt only by a
+control signer after full semantic replay. It never blocks status or emergency
+control. An unresolved
 authorization is always checked against the real current clock, never an
 attacker-controlled event timestamp. A clock rollback
 below the checkpoint blocks B, start and promotion, while status, stop,
@@ -154,10 +156,15 @@ therefore waits at most for the bounded connect classification, never for a
 hanging B response. The signed manifest and request use that same socket;
 silent reconnect is forbidden.
 
-The systemd sandbox mounts the control ledger (including checkpoint and epoch
-latches) read-only for the router identity. Only `router-outcomes` and the
-dedicated `/run/trustforge` coordination-lock location are writable; the
-security-ledger root is not shared read-write.
+The systemd sandbox runs `trustforge-router`, distinct from
+`trustforge-operator`, and mounts the control ledger (including checkpoint and
+epoch latches) read-only. Deployment keys and the control config are
+inaccessible. Only `router-outcomes` and the pre-provisioned
+`/run/trustforge-release-control/coordination.lock` inode are writable. Its
+parent is root-owned mode `0750`, so the shared group can lock the mode-`0660`
+inode but cannot unlink or replace it. Sysusers/tmpfiles artifacts provision
+the identities and pinned inode before service start; the security-ledger root
+is never shared read-write.
 
 The executable data plane is `scripts/release_router_service.py`, packaged by
 `deploy/trustforge-release-router.service`. It accepts idempotent GET only;

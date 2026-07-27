@@ -12,7 +12,9 @@ from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedg
 
 RUNTIME_CONFIG_PATH = Path("/etc/trustforge/release-router-runtime.json")
 RUNTIME_KEYS_PATH = Path("/etc/trustforge/release-router-runtime-keys.json")
-COORDINATION_LOCK_PATH = Path("/run/trustforge/release-coordination.lock")
+COORDINATION_LOCK_PATH = Path(
+    "/run/trustforge-release-control/coordination.lock"
+)
 
 
 class RouterRuntimeError(RuntimeError):
@@ -88,6 +90,9 @@ def build_runtime_router() -> ReleaseABRouter:
         ledger_role="release-control",
         coordination_root=SECURITY_LEDGER_ROOT,
         coordination_lock_path=COORDINATION_LOCK_PATH,
+        coordination_lock_mode=0o660,
+        coordination_lock_owner_uid=0,
+        coordination_lock_group="trustforge-release",
     )
     outcome_ledger = SignedEventLedger(
         directory=SECURITY_LEDGER_ROOT / "router-outcomes",
@@ -100,6 +105,9 @@ def build_runtime_router() -> ReleaseABRouter:
         ledger_role="release-router-outcomes",
         coordination_root=SECURITY_LEDGER_ROOT,
         coordination_lock_path=COORDINATION_LOCK_PATH,
+        coordination_lock_mode=0o660,
+        coordination_lock_owner_uid=0,
+        coordination_lock_group="trustforge-release",
     )
     records = ledger.read()
     if not records or records[0]["event"].get("kind") != "deployment_initialized":

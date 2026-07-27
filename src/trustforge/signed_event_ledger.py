@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import grp
 import hashlib
 import json
 import os
@@ -78,6 +79,9 @@ class SignedEventLedger:
         bootstrap: bool = False,
         coordination_root: str | os.PathLike[str] | None = None,
         coordination_lock_path: str | os.PathLike[str] | None = None,
+        coordination_lock_mode: int = 0o600,
+        coordination_lock_owner_uid: int | None = None,
+        coordination_lock_group: str | None = None,
         max_file_bytes: int = 8 * 1024 * 1024,
         max_events: int = 10_000,
         max_event_bytes: int = 32 * 1024,
@@ -131,9 +135,17 @@ class SignedEventLedger:
         self.coordination_root = Path(
             coordination_root or self.directory.parent
         ).absolute()
+        self._preprovisioned_coordination_lock = coordination_lock_path is not None
         self.coordination_lock_path = Path(
             coordination_lock_path or (self.coordination_root / "coordination.lock")
         ).absolute()
+        self.coordination_lock_mode = coordination_lock_mode
+        self.coordination_lock_owner_uid = (
+            os.geteuid()
+            if coordination_lock_owner_uid is None
+            else coordination_lock_owner_uid
+        )
+        self.coordination_lock_group = coordination_lock_group
         if self.directory.parent != self.coordination_root:
             raise LedgerError("ledger directory must be a direct child of pinned root")
         self._verification_keys = dict(verification_keys)
@@ -189,17 +201,35 @@ class SignedEventLedger:
     @contextmanager
     def coordination_lock(self):
         """Serialize cross-ledger control transitions and route reservations."""
+        if self._preprovisioned_coordination_lock:
+            parent_info = os.lstat(self.coordination_lock_path.parent)
+            if (
+                not stat.S_ISDIR(parent_info.st_mode)
+                or stat.S_ISLNK(parent_info.st_mode)
+                or parent_info.st_uid != self.coordination_lock_owner_uid
+                or stat.S_IMODE(parent_info.st_mode) != 0o750
+            ):
+                raise LedgerError("coordination lock parent metadata is unsafe")
         fd = os.open(
             self.coordination_lock_path,
-            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
+            os.O_RDWR
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW
+            | (0 if self._preprovisioned_coordination_lock else os.O_CREAT),
+            self.coordination_lock_mode,
         )
         try:
             info = os.fstat(fd)
+            expected_gid = (
+                grp.getgrnam(self.coordination_lock_group).gr_gid
+                if self.coordination_lock_group
+                else info.st_gid
+            )
             if (
                 not stat.S_ISREG(info.st_mode)
-                or (os.geteuid() != 0 and info.st_uid != os.geteuid())
-                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != self.coordination_lock_owner_uid
+                or info.st_gid != expected_gid
+                or stat.S_IMODE(info.st_mode) != self.coordination_lock_mode
             ):
                 raise LedgerError("coordination lock metadata is unsafe")
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -207,6 +237,10 @@ class SignedEventLedger:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    @property
+    def can_sign(self) -> bool:
+        return self._private_key is not None
 
     def _bootstrap_path(self) -> Path:
         return self.directory / BOOTSTRAP_FILENAME

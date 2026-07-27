@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import errno
 import hashlib
-import http.client
 import json
 import os
 import threading
@@ -515,16 +515,30 @@ def test_naive_clock_is_rejected_before_timezone_conversion(tmp_path):
         _control(tmp_path, clock=lambda: NOW.replace(tzinfo=None))
 
 
-def test_unsigned_checkpoint_time_mutation_blocks_candidate(tmp_path):
+def test_unsigned_checkpoint_time_mutation_self_heals_from_terminal_history(tmp_path):
     control = _control(tmp_path)
     _start_canary(control, "checkpoint-time-mutation")
     payload = json.loads(control._checkpoint_path.read_text())
-    payload["checkpoint_at"] = (NOW + timedelta(days=1)).isoformat()
+    payload["floor_at"] = (NOW + timedelta(days=1)).isoformat()
     control._checkpoint_path.write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
     )
     os.chmod(control._checkpoint_path, 0o600)
+    assert control.routing_snapshot().candidate_blocked is False
+    assert json.loads(control._checkpoint_path.read_text())["floor_at"] == (
+        NOW.isoformat()
+    )
+
+
+def test_read_only_router_cannot_heal_corrupt_checkpoint(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "router-no-heal")
+    damaged = b'{"corrupt":true}\n'
+    control._checkpoint_path.write_bytes(damaged)
+    os.chmod(control._checkpoint_path, 0o600)
+    control.ledger._private_key = None
     assert control.routing_snapshot().candidate_blocked is True
+    assert control._checkpoint_path.read_bytes() == damaged
 
 
 def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
@@ -534,12 +548,16 @@ def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
     control.prepare("stop", _authorization(control, "stop", "checkpoint-stop"), now=NOW)
     control._checkpoint_path.write_bytes(old)
     os.chmod(control._checkpoint_path, 0o600)
-    assert control.routing_snapshot().candidate_blocked is True
+    assert control.routing_snapshot().candidate_blocked is False
     damaged = bytearray(old)
     damaged[-3] ^= 1
     control._checkpoint_path.write_bytes(damaged)
     os.chmod(control._checkpoint_path, 0o600)
-    assert control.routing_snapshot().candidate_blocked is True
+    assert control.routing_snapshot().candidate_blocked is False
+    assert (
+        json.loads(control._checkpoint_path.read_text())["control_head"]
+        == (control._records()[-1]["event_hash"])
+    )
 
 
 def test_concurrent_checkpoint_readers_never_observe_partial_file(tmp_path):
@@ -547,19 +565,11 @@ def test_concurrent_checkpoint_readers_never_observe_partial_file(tmp_path):
     _start_canary(control, "checkpoint-concurrency")
     records = control._records()
     terminal = records[-1]
-    prepared_hash = terminal["event"]["prepared_event_hash"]
-    prepared = next(item for item in records if item["event_hash"] == prepared_hash)
-    authorization = DeploymentAuthorization(
-        **prepared["event"]["authorization_receipt"]
-    )
     errors = []
 
     def writer():
         for _ in range(30):
-            control._write_checkpoint(
-                authorization=authorization,
-                terminal_record=terminal,
-            )
+            control._write_checkpoint(terminal_record=terminal)
 
     def reader():
         for _ in range(100):
@@ -588,7 +598,7 @@ def test_clock_rollback_blocks_b_and_start_but_status_remains_available(tmp_path
     assert restarted.routing_snapshot().phase == "canary"
     assert restarted.routing_snapshot().candidate_blocked is True
     receipt = _authorization(restarted, "start", "clock-rollback-start")
-    with pytest.raises(DeploymentControlError, match="clock rolled back"):
+    with pytest.raises(DeploymentControlError, match="stale|clock rolled back"):
         restarted.prepare("start", receipt, now=observed[0])
     stop_receipt = _authorization(restarted, "stop", "clock-rollback-stop")
     stop_receipt = replace(
@@ -608,6 +618,41 @@ def test_clock_rollback_blocks_b_and_start_but_status_remains_available(tmp_path
     restarted.prepare("stop", stop_receipt, now=observed[0])
     assert restarted.routing_snapshot().phase == "stopped"
     assert restarted.routing_snapshot().candidate_blocked is True
+
+
+def test_rollback_completion_older_than_authorization_preserves_signed_floor(
+    tmp_path,
+):
+    control = _control(tmp_path)
+    _start_canary(control, "floor-before-rollback")
+    control.prepare("stop", _authorization(control, "stop", "floor-stop"), now=NOW)
+    prior_floor = control._records()[-1]["event"]["checkpoint_floor_at"]
+    prepared = control.prepare(
+        "rollback-a",
+        _authorization(control, "rollback-a", "floor-rollback"),
+        now=NOW,
+    )
+    completion = _completion(control, prepared, "rollback-a", "floor-rollback-complete")
+    completion = replace(
+        completion,
+        verified_at=(NOW - timedelta(minutes=5)).isoformat(),
+        signature="",
+    )
+    completion = replace(
+        completion,
+        signature=Ed25519PrivateKey.from_private_bytes(COMPLETE_KEY)
+        .sign(
+            b"trustforge.activation-completion.v1\x00"
+            + canonical_json(completion.unsigned())
+        )
+        .hex(),
+    )
+    control.complete(completion, now=NOW)
+    assert control._records()[-1]["event"]["checkpoint_floor_at"] == prior_floor
+    assert (
+        json.loads(control._checkpoint_path.read_text())["control_head"]
+        == (control._records()[-1]["event_hash"])
+    )
 
 
 def test_projection_rejects_failed_receipt_as_completed_event(tmp_path):
@@ -637,6 +682,7 @@ def test_projection_rejects_failed_receipt_as_completed_event(tmp_path):
             "nonce": receipt.nonce,
             "actor": receipt.actor,
             "at": NOW.isoformat(),
+            "checkpoint_floor_at": NOW.isoformat(),
             "completion_receipt": asdict(receipt),
         }
     )
@@ -773,11 +819,25 @@ def test_connect_handoff_orders_stop_and_does_not_lock_hanging_response(
     release_hang = threading.Event()
     stop_done = threading.Event()
 
-    def bounded_connect(_connection):
-        connect_entered.set()
-        assert allow_connect.wait(1)
+    class BoundedSocket:
+        def setblocking(self, _enabled):
+            return None
 
-    monkeypatch.setattr(http.client.HTTPConnection, "connect", bounded_connect)
+        def connect_ex(self, _address):
+            connect_entered.set()
+            assert allow_connect.wait(1)
+            return 0
+
+        def settimeout(self, _timeout):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "trustforge.deployment_control.socket.socket",
+        lambda *_args: BoundedSocket(),
+    )
 
     def hanging_candidate():
         with control.candidate_connection(
@@ -814,6 +874,46 @@ def test_connect_handoff_orders_stop_and_does_not_lock_hanging_response(
     stopper.join(1)
     assert not worker.is_alive()
     assert not stopper.is_alive()
+
+
+def test_candidate_connect_uses_hard_nonblocking_select_deadline(tmp_path, monkeypatch):
+    control = _control(tmp_path)
+    _start_canary(control, "connect-deadline")
+    state = control.routing_snapshot()
+    reservation_id = "f" * 32
+    control.reserve_candidate(
+        expected_head=state.ledger_head, reservation_id=reservation_id
+    )
+
+    class StalledSocket:
+        def setblocking(self, _enabled):
+            return None
+
+        def connect_ex(self, _address):
+            return errno.EINPROGRESS
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "trustforge.deployment_control.socket.socket",
+        lambda *_args: StalledSocket(),
+    )
+    observed_timeout = []
+
+    def deadline_select(_read, _write, _errors, timeout):
+        observed_timeout.append(timeout)
+        return [], [], []
+
+    monkeypatch.setattr("trustforge.deployment_control.select.select", deadline_select)
+    with pytest.raises(TimeoutError, match="deadline"):
+        with control.candidate_connection(
+            endpoint=control.candidate,
+            reservation_id=reservation_id,
+            connect_timeout=0.2,
+        ):
+            pytest.fail("stalled connect cannot yield")
+    assert observed_timeout == [0.2]
 
 
 def test_latch_first_stop_crash_is_idempotently_reconciled(tmp_path, monkeypatch):
