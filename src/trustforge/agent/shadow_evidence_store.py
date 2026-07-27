@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -24,7 +25,7 @@ import threading
 import time
 import weakref
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -51,7 +52,7 @@ from trustforge.agent.shadow_contracts import (
     to_dict,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 APPLICATION_ID = 0x54534653  # "TSFS"
 DEFAULT_MAX_ROWS = 10_000
 DEFAULT_MAX_DB_BYTES = 64 * 1024 * 1024
@@ -442,7 +443,31 @@ class ShadowEvidenceStore:
             has_tables = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
             ).fetchone()
-            if has_tables and (application_id != APPLICATION_ID or version != SCHEMA_VERSION):
+            if has_tables and application_id == APPLICATION_ID and version == 1:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    if _schema_fingerprint(connection) != _expected_v1_schema_fingerprint():
+                        raise ShadowEvidenceStoreError(
+                            "legacy v1 schema fingerprint is invalid"
+                        )
+                    connection.execute(_OBSERVATION_COMPLETION_SCHEMA)
+                    for statement in _OBSERVATION_COMPLETION_TRIGGER_STATEMENTS:
+                        connection.execute(statement)
+                    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                    connection.execute(
+                        "INSERT INTO schema_migrations("
+                        "version, contract_version, applied_at) VALUES (?, ?, "
+                        "strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                        (SCHEMA_VERSION, CONTRACT_VERSION),
+                    )
+                    connection.execute("COMMIT")
+                    version = SCHEMA_VERSION
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+            if has_tables and (
+                application_id != APPLICATION_ID or version != SCHEMA_VERSION
+            ):
                 raise ShadowEvidenceStoreError("unknown or legacy shadow database schema")
             if not has_tables:
                 connection.executescript(_SCHEMA)
@@ -469,7 +494,7 @@ class ShadowEvidenceStore:
             raise ShadowEvidenceStoreError("shadow database integrity check failed")
         expected = {
             "schema_migrations", "policies", "observations", "aggregates",
-            "decisions", "retention_receipts",
+            "decisions", "retention_receipts", "observation_completions",
         }
         actual = {
             row[0] for row in connection.execute(
@@ -477,7 +502,7 @@ class ShadowEvidenceStore:
             )
         }
         if actual != expected:
-            raise ShadowEvidenceStoreError("shadow database schema does not exactly match v1")
+            raise ShadowEvidenceStoreError("shadow database schema does not exactly match v2")
         expected_triggers = {
             f"immutable_{table}_{operation}"
             for table in expected
@@ -491,7 +516,7 @@ class ShadowEvidenceStore:
         if actual_triggers != expected_triggers:
             raise ShadowEvidenceStoreError("shadow database immutability guards are missing")
         if _schema_fingerprint(connection) != _expected_schema_fingerprint():
-            raise ShadowEvidenceStoreError("shadow database canonical schema differs from v1")
+            raise ShadowEvidenceStoreError("shadow database canonical schema differs from v2")
 
     def _storage_bytes(self) -> int:
         total = 0
@@ -507,11 +532,23 @@ class ShadowEvidenceStore:
                 total += value.st_size
         return total
 
-    def _transaction(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+    def _transaction(
+        self,
+        operation: Callable[[sqlite3.Connection], _T],
+        *,
+        commit_guard: Callable[[], bool] | None = None,
+    ) -> _T:
         with self._process_lock():
-            return self._transaction_locked(operation)
+            if commit_guard is None:
+                return self._transaction_locked(operation)
+            return self._transaction_locked(operation, commit_guard=commit_guard)
 
-    def _transaction_locked(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+    def _transaction_locked(
+        self,
+        operation: Callable[[sqlite3.Connection], _T],
+        *,
+        commit_guard: Callable[[], bool] | None = None,
+    ) -> _T:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -527,10 +564,15 @@ class ShadowEvidenceStore:
                 raise ShadowEvidenceStoreError("shadow database WAL/SHM size limit exceeded")
             bindings, _ = self._verify_file_bindings()
             self._close_descriptors(bindings)
+            if commit_guard is not None and not commit_guard():
+                raise ShadowEvidenceStoreError(
+                    "shadow evidence transaction cancelled before commit"
+                )
             connection.execute("COMMIT")
             return result
         except (
-            sqlite3.Error, OSError, ShadowContractError, ValueError, TypeError, KeyError,
+            sqlite3.Error, OSError, ShadowContractError, ShadowEvidenceStoreError,
+            ValueError, TypeError, KeyError,
         ) as exc:
             try:
                 connection.execute("ROLLBACK")
@@ -660,7 +702,131 @@ class ShadowEvidenceStore:
             )
             return event_id
 
-        return self._transaction(write)
+        result = self._transaction(write)
+        self.record_observation_completion(
+            event_id, observation.elapsed_ms, commit_guard=lambda: True,
+        )
+        return result
+
+    def record_policy_and_observation(
+        self,
+        policy: ShadowPolicy,
+        event_id: str,
+        observation: ShadowObservation,
+        *,
+        commit_guard: Callable[[], bool],
+    ) -> str:
+        """Atomically append policy and observation with a final commit guard."""
+        if observation.release_identity.policy_digest != policy_digest(policy):
+            raise ShadowEvidenceStoreError("observation and policy digest differ")
+        if event_id != _event_id("observation", observation_digest(to_dict(observation))):
+            raise ShadowEvidenceStoreError("observation event id does not match payload")
+        policy_payload = to_dict(policy)
+        policy_value_digest = policy_digest(policy)
+        policy_event_id = _event_id("policy", policy_value_digest)
+        observation_payload = to_dict(observation)
+
+        def write(connection: sqlite3.Connection) -> str:
+            existing = connection.execute(
+                "SELECT payload, payload_digest FROM policies WHERE event_id=?",
+                (policy_event_id,),
+            ).fetchone()
+            encoded_policy = canonical_json(policy_payload)
+            if existing:
+                if (
+                    bytes(existing["payload"]) != encoded_policy
+                    or existing["payload_digest"] != policy_value_digest
+                ):
+                    raise ShadowEvidenceStoreError("conflicting policy event")
+            else:
+                if connection.execute(
+                    "SELECT count(*) FROM policies"
+                ).fetchone()[0] >= self.max_rows:
+                    raise ShadowEvidenceStoreError("policy row limit exceeded")
+                connection.execute(
+                    "INSERT INTO policies(event_id, policy_digest, contract_version, "
+                    "payload, payload_digest, recorded_at) VALUES (?, ?, ?, ?, ?, "
+                    "strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    (
+                        policy_event_id, policy_value_digest, CONTRACT_VERSION,
+                        encoded_policy, policy_value_digest,
+                    ),
+                )
+            self._insert_event(
+                connection,
+                "observations",
+                event_id,
+                observation_payload,
+                observation.release_identity,
+                (observation.observed_at, observation.input_digest),
+            )
+            return event_id
+
+        return self._transaction(write, commit_guard=commit_guard)
+
+    def record_observation_completion(
+        self,
+        observation_event_id: str,
+        elapsed_ms: float,
+        *,
+        commit_guard: Callable[[], bool],
+        terminal_status: str = "completed",
+    ) -> str:
+        """Append operational latency measured after observation durability."""
+        if (
+            _DIGEST_RE.fullmatch(observation_event_id) is None
+            or not isinstance(elapsed_ms, (int, float))
+            or isinstance(elapsed_ms, bool)
+            or not math.isfinite(elapsed_ms)
+            or elapsed_ms < 0
+        ):
+            raise ShadowEvidenceStoreError("observation completion is invalid")
+        if terminal_status not in {"completed", "orphaned_after_commit"}:
+            raise ShadowEvidenceStoreError("completion terminal status is invalid")
+        payload = {
+            "observation_event_id": observation_event_id,
+            "elapsed_ms": float(elapsed_ms),
+            "terminal_status": terminal_status,
+        }
+        digest = _sha256(_EVENT_DOMAIN, payload)
+        completion_id = _event_id("observation_completion", digest)
+
+        def write(connection: sqlite3.Connection) -> str:
+            if not connection.execute(
+                "SELECT 1 FROM observations WHERE event_id=?",
+                (observation_event_id,),
+            ).fetchone():
+                raise ShadowEvidenceStoreError("completion observation does not exist")
+            existing = connection.execute(
+                "SELECT payload, payload_digest FROM observation_completions "
+                "WHERE event_id=?",
+                (completion_id,),
+            ).fetchone()
+            encoded = canonical_json(payload)
+            if existing:
+                if (
+                    bytes(existing["payload"]) == encoded
+                    and existing["payload_digest"] == digest
+                ):
+                    return completion_id
+                raise ShadowEvidenceStoreError("conflicting completion event")
+            if connection.execute(
+                "SELECT count(*) FROM observation_completions"
+            ).fetchone()[0] >= self.max_rows:
+                raise ShadowEvidenceStoreError("completion row limit exceeded")
+            connection.execute(
+                "INSERT INTO observation_completions("
+                "event_id, observation_event_id, elapsed_ms, payload, "
+                "payload_digest, recorded_at) VALUES (?, ?, ?, ?, ?, "
+                "strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                (
+                    completion_id, observation_event_id, float(elapsed_ms),
+                    encoded, digest,
+                ),
+            )
+            return completion_id
+
+        return self._transaction(write, commit_guard=commit_guard)
 
     @staticmethod
     def observation_event_id(observation: ShadowObservation) -> str:
@@ -704,9 +870,73 @@ class ShadowEvidenceStore:
                 observed_at = _utc_timestamp(observation.observed_at)
                 if observed_at > boundary:
                     raise ShadowEvidenceStoreError("future observation fails evaluation closed")
-                if window_start <= observed_at <= boundary:
-                    observations.append(observation)
-                    selected_rows.append(row)
+                if observed_at < window_start:
+                    continue
+                completion = connection.execute(
+                    "SELECT * FROM observation_completions "
+                    "WHERE observation_event_id=?",
+                    (row["event_id"],),
+                ).fetchone()
+                if completion is None:
+                    orphan_payload = {
+                        "observation_event_id": row["event_id"],
+                        "elapsed_ms": policy.latency_each_ms_max,
+                        "terminal_status": "orphaned_after_commit",
+                    }
+                    orphan_digest = _sha256(_EVENT_DOMAIN, orphan_payload)
+                    orphan_id = _event_id(
+                        "observation_completion", orphan_digest,
+                    )
+                    connection.execute(
+                        "INSERT INTO observation_completions("
+                        "event_id, observation_event_id, elapsed_ms, payload, "
+                        "payload_digest, recorded_at) VALUES (?, ?, ?, ?, ?, "
+                        "strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                        (
+                            orphan_id, row["event_id"],
+                            policy.latency_each_ms_max,
+                            canonical_json(orphan_payload), orphan_digest,
+                        ),
+                    )
+                    completion = connection.execute(
+                        "SELECT * FROM observation_completions WHERE event_id=?",
+                        (orphan_id,),
+                    ).fetchone()
+                completion_payload = json.loads(bytes(completion["payload"]))
+                if (
+                    canonical_json(completion_payload) != bytes(completion["payload"])
+                    or completion_payload.get("observation_event_id") != row["event_id"]
+                    or completion_payload.get("elapsed_ms") != completion["elapsed_ms"]
+                    or completion_payload.get("terminal_status")
+                    not in {"completed", "orphaned_after_commit"}
+                    or _sha256(_EVENT_DOMAIN, completion_payload)
+                    != completion["payload_digest"]
+                    or completion["event_id"]
+                    != _event_id(
+                        "observation_completion", completion["payload_digest"],
+                    )
+                ):
+                    raise ShadowEvidenceStoreError(
+                        "observation completion evidence is invalid"
+                    )
+                observation = replace(
+                    observation,
+                    elapsed_ms=float(completion["elapsed_ms"]),
+                    status=(
+                        "corrupt"
+                        if completion_payload["terminal_status"]
+                        == "orphaned_after_commit"
+                        else observation.status
+                    ),
+                    parity_passed=(
+                        False
+                        if completion_payload["terminal_status"]
+                        == "orphaned_after_commit"
+                        else observation.parity_passed
+                    ),
+                )
+                observations.append(observation)
+                selected_rows.append(row)
             if len(observations) > limit:
                 raise ShadowEvidenceStoreError("selected observation window exceeds query bound")
             decision = evaluate_shadow(observations, policy, now=now)
@@ -835,7 +1065,17 @@ _IDENTITY_COLUMNS = """
     policy_digest TEXT NOT NULL,
     contract_version TEXT NOT NULL
 """
-_SCHEMA = f"""
+_OBSERVATION_COMPLETION_SCHEMA = """
+CREATE TABLE observation_completions(
+    event_id TEXT PRIMARY KEY,
+    observation_event_id TEXT NOT NULL UNIQUE,
+    elapsed_ms REAL NOT NULL,
+    payload BLOB NOT NULL,
+    payload_digest TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+) STRICT;
+"""
+_SCHEMA_V1 = f"""
 CREATE TABLE schema_migrations(
     version INTEGER PRIMARY KEY, contract_version TEXT NOT NULL, applied_at TEXT NOT NULL
 ) STRICT;
@@ -866,7 +1106,20 @@ CREATE TABLE retention_receipts(
     payload_digest TEXT NOT NULL, recorded_at TEXT NOT NULL
 ) STRICT;
 """
+_SCHEMA = _SCHEMA_V1 + _OBSERVATION_COMPLETION_SCHEMA
 _IMMUTABILITY_TRIGGERS = "\n".join(
+    f"""
+CREATE TRIGGER immutable_{table}_update BEFORE UPDATE ON {table}
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_{table}_delete BEFORE DELETE ON {table}
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+"""
+    for table in (
+        "schema_migrations", "policies", "observations", "aggregates",
+        "decisions", "retention_receipts", "observation_completions",
+    )
+)
+_IMMUTABILITY_TRIGGERS_V1 = "\n".join(
     f"""
 CREATE TRIGGER immutable_{table}_update BEFORE UPDATE ON {table}
 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
@@ -878,6 +1131,19 @@ BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
         "decisions", "retention_receipts",
     )
 )
+_OBSERVATION_COMPLETION_TRIGGER_STATEMENTS = (
+    """
+CREATE TRIGGER immutable_observation_completions_update BEFORE UPDATE ON observation_completions
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END
+""",
+    """
+CREATE TRIGGER immutable_observation_completions_delete BEFORE DELETE ON observation_completions
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END
+""",
+)
+_OBSERVATION_COMPLETION_TRIGGERS = ";\n".join(
+    _OBSERVATION_COMPLETION_TRIGGER_STATEMENTS
+) + ";"
 
 
 def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -890,7 +1156,7 @@ def _schema_fingerprint(connection: sqlite3.Connection) -> str:
     tables: dict[str, Any] = {}
     for table in (
         "schema_migrations", "policies", "observations", "aggregates",
-        "decisions", "retention_receipts",
+        "decisions", "retention_receipts", "observation_completions",
     ):
         tables[table] = {
             "table_xinfo": [tuple(row) for row in connection.execute(f"PRAGMA table_xinfo({table})")],
@@ -924,6 +1190,19 @@ def _expected_schema_fingerprint() -> str:
         connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
         connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         connection.executescript(_IMMUTABILITY_TRIGGERS)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+@lru_cache(maxsize=1)
+def _expected_v1_schema_fingerprint() -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(_SCHEMA_V1)
+        connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
+        connection.execute("PRAGMA user_version=1")
+        connection.executescript(_IMMUTABILITY_TRIGGERS_V1)
         return _schema_fingerprint(connection)
     finally:
         connection.close()

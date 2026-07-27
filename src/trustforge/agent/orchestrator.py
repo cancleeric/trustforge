@@ -1510,11 +1510,32 @@ def run_agent_pipeline(
     # 讓明確提及該幣的證據不因 query 措辭（如中文複合詞、無空格）忽窄忽寬地被截斷擠出。
     brief = aggregate(scored, query=query, coin=coin)
 
-    # PR1 deliberately has no candidate runtime wiring.  Durable observation,
-    # timeout and single-flight semantics are introduced together in PR3.
+    # #732 PR3: candidate observation is explicitly enabled, bounded,
+    # non-authoritative, and durably recorded.  Every failure mode returns a
+    # diagnostic state only; report_scored/report_brief remain the exact active
+    # legacy objects regardless of candidate behavior.
     report_scored, report_brief = scored, brief
-    kernel_output = None
-    _shadow_observation = {"status": "not_observed"}
+    from .shadow_runtime import observe_candidate
+    _shadow_result = observe_candidate(
+        claims=claims,
+        scored=scored,
+        legacy_confidence=brief.calibrated_confidence,
+        legacy_trust_raw=brief.confidence,
+        coin=coin,
+        question_type=qtype.value,
+        query=query,
+        request_id=log.run_id,
+        pit_epoch=now_ts,
+        observed_epoch=_wall_clock,
+    )
+    kernel_output = _shadow_result.kernel_output
+    _shadow_parity = _shadow_result.parity
+    _shadow_observation = {
+        "status": _shadow_result.status,
+        "last_parity_passed": (
+            _shadow_parity.parity_passed if _shadow_parity is not None else None
+        ),
+    }
     log.record(
         "judgment.derive",
         params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),
@@ -1523,10 +1544,12 @@ def run_agent_pipeline(
                 "kernel_abstain": kernel_output.abstain if kernel_output is not None else None,
                 "kernel_reason_codes": kernel_output.reason_codes if kernel_output is not None else (),
                 "shadow_observation_status": _shadow_observation["status"],
-                "shadow_candidate_latency_ms": 0.0,
+                "shadow_candidate_latency_ms": _shadow_result.elapsed_ms,
                 "shadow_parity_passed": _shadow_observation.get("last_parity_passed"),
-                "shadow_parity_rate": _shadow_observation.get("parity_rate"),
-                "shadow_window_runs": _shadow_observation.get("window_runs")},
+                "shadow_observation_event_id": _shadow_result.observation_event_id,
+                "shadow_provider_calls": _shadow_result.provider_calls,
+                "shadow_cost_usd": _shadow_result.cost_usd,
+                "shadow_diagnostic": _shadow_result.diagnostic},
         summary="Step2 純 pipeline 完成；判斷由演算法產生，非 LLM",
     )
 

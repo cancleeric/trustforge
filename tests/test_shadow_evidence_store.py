@@ -18,12 +18,15 @@ import pytest
 import trustforge.agent.shadow_evidence_store as evidence_store_module
 from trustforge.agent.shadow_contracts import (
     CONTRACT_VERSION,
+    ShadowBlocker,
     ShadowInput,
     ShadowObservation,
     ShadowReleaseIdentity,
+    canonical_json,
     input_digest,
     load_policy,
     policy_digest,
+    observation_digest,
     to_dict,
 )
 from trustforge.agent.shadow_evidence_store import (
@@ -119,6 +122,52 @@ def test_restart_deterministic_replay_and_append_only(tmp_path):
     connection.close()
 
 
+def test_atomic_policy_observation_commit_guard_rolls_back_both(tmp_path):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    store = _store(path)
+    policy = load_policy()
+    observation = _observations()[0]
+    event_id = store.observation_event_id(observation)
+
+    with pytest.raises(ShadowEvidenceStoreError, match="cancelled before commit"):
+        store.record_policy_and_observation(
+            policy, event_id, observation, commit_guard=lambda: False,
+        )
+    connection = sqlite3.connect(path)
+    assert connection.execute("SELECT count(*) FROM policies").fetchone()[0] == 0
+    assert connection.execute("SELECT count(*) FROM observations").fetchone()[0] == 0
+    connection.close()
+
+    assert store.record_policy_and_observation(
+        policy, event_id, observation, commit_guard=lambda: True,
+    ) == event_id
+
+
+def test_orphan_completion_recovers_as_deterministic_terminal_blocker(tmp_path):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    store = _store(path)
+    policy = load_policy()
+    observation = _observations()[0]
+    event_id = store.observation_event_id(observation)
+    store.record_policy_and_observation(
+        policy, event_id, observation, commit_guard=lambda: True,
+    )
+
+    now = "2026-07-28T01:00:00+00:00"
+    first = store.evaluate(_identity(), policy, now=now)
+    second = store.evaluate(_identity(), policy, now=now)
+    assert ShadowBlocker.TERMINAL_CORRUPT in first.decision.aggregate.blockers
+    assert first.decision == second.decision
+    connection = sqlite3.connect(path)
+    rows = connection.execute(
+        "SELECT count(*) FROM observation_completions "
+        "WHERE observation_event_id=?",
+        (event_id,),
+    ).fetchone()[0]
+    assert rows == 1
+    connection.close()
+
+
 def test_concurrent_multiprocess_duplicate_is_idempotent(tmp_path):
     path = tmp_path / "private" / "shadow.sqlite3"
     store = _store(path, busy_timeout_ms=5_000)
@@ -205,7 +254,10 @@ def test_corrupt_locked_full_unknown_schema_and_bounds_fail_closed(tmp_path):
     connection.execute("PRAGMA user_version=2")
     connection.close()
     unknown.chmod(0o600)
-    with pytest.raises(ShadowEvidenceStoreError, match="unknown or legacy"):
+    with pytest.raises(
+        ShadowEvidenceStoreError,
+        match="unknown or legacy|legacy v1 schema fingerprint|does not exactly match v2",
+    ):
         ShadowEvidenceStore(unknown)
 
     path = tmp_path / "bounded" / "db"
@@ -278,10 +330,10 @@ def test_schema_migration_ledger_and_no_legacy_import(tmp_path):
     path = tmp_path / "private" / "shadow.sqlite3"
     _store(path)
     connection = sqlite3.connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
     assert connection.execute(
         "SELECT version, contract_version FROM schema_migrations"
-    ).fetchall() == [(1, CONTRACT_VERSION)]
+    ).fetchall() == [(2, CONTRACT_VERSION)]
     assert connection.execute("SELECT count(*) FROM observations").fetchone()[0] == 0
     tables = {
         row[0] for row in connection.execute(
@@ -289,6 +341,100 @@ def test_schema_migration_ledger_and_no_legacy_import(tmp_path):
         )
     }
     assert {"observations", "policies", "aggregates", "decisions"} <= tables
+    connection.close()
+
+
+def test_exact_v1_database_migrates_to_v2_without_fabricating_completion(tmp_path):
+    path = tmp_path / "private" / "shadow.sqlite3"
+    path.parent.mkdir(mode=0o700)
+    connection = sqlite3.connect(path)
+    connection.executescript(evidence_store_module._SCHEMA_V1)
+    connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
+    connection.execute("PRAGMA user_version=1")
+    connection.execute(
+        "INSERT INTO schema_migrations(version, contract_version, applied_at) "
+        "VALUES (1, ?, '2026-07-28T00:00:00Z')",
+        (CONTRACT_VERSION,),
+    )
+    connection.executescript(evidence_store_module._IMMUTABILITY_TRIGGERS_V1)
+    policy = load_policy()
+    policy_payload = to_dict(policy)
+    policy_value_digest = policy_digest(policy)
+    policy_event_id = evidence_store_module._event_id("policy", policy_value_digest)
+    connection.execute(
+        "INSERT INTO policies(event_id, policy_digest, contract_version, payload, "
+        "payload_digest, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            policy_event_id, policy_value_digest, CONTRACT_VERSION,
+            canonical_json(policy_payload), policy_value_digest,
+            "2026-07-28T00:00:00Z",
+        ),
+    )
+    stale = _observations()[0]
+    stale_payload = to_dict(stale)
+    stale_id = evidence_store_module._event_id(
+        "observation", observation_digest(stale_payload),
+    )
+    connection.execute(
+        "INSERT INTO observations("
+        "event_id, active_release, candidate_release, active_artifact_digest, "
+        "candidate_artifact_digest, policy_digest, contract_version, payload, "
+        "payload_digest, recorded_at, observed_at, input_digest) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            stale_id,
+            stale.release_identity.active_release,
+            stale.release_identity.candidate_release,
+            stale.release_identity.active_artifact_digest,
+            stale.release_identity.candidate_artifact_digest,
+            stale.release_identity.policy_digest,
+            stale.release_identity.contract_version,
+            canonical_json(stale_payload),
+            evidence_store_module._sha256(
+                evidence_store_module._EVENT_DOMAIN, stale_payload,
+            ),
+            "2026-07-28T00:00:00Z",
+            stale.observed_at,
+            stale.input_digest,
+        ),
+    )
+    connection.commit()
+    connection.close()
+    path.chmod(0o600)
+
+    store = ShadowEvidenceStore(path)
+    connection = sqlite3.connect(path)
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert connection.execute(
+        "SELECT version FROM schema_migrations ORDER BY version"
+    ).fetchall() == [(1,), (2,)]
+    assert connection.execute(
+        "SELECT count(*) FROM observation_completions"
+    ).fetchone()[0] == 0
+    connection.close()
+
+    fresh_input = replace(
+        stale.canonical_input,
+        request_id="fresh-after-v1-migration",
+        pit_epoch=stale.canonical_input.pit_epoch + 2 * 86_400,
+    )
+    fresh = replace(
+        stale,
+        canonical_input=fresh_input,
+        input_digest=input_digest(to_dict(fresh_input)),
+        observed_at=(
+            datetime.fromisoformat(stale.observed_at) + timedelta(days=2)
+        ).isoformat(),
+    )
+    store.record_observation(store.observation_event_id(fresh), fresh)
+    evaluation = store.evaluate(
+        _identity(), policy, now="2026-07-30T01:00:00+00:00",
+    )
+    assert evaluation.decision.aggregate.observation_count == 1
+    connection = sqlite3.connect(path)
+    assert connection.execute(
+        "SELECT count(*) FROM observation_completions"
+    ).fetchone()[0] == 1
     connection.close()
 
 
