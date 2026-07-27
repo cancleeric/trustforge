@@ -1330,7 +1330,7 @@ class CachedSource(Source):
         )
         self._backend = backend if backend is not None else get_cache_backend()
 
-    def fetch(self, query: str, coin: str = "") -> list[Document]:  # noqa: ARG002
+    def fetch(self, query: str, coin: str = "", *, as_of: datetime | None = None) -> list[Document]:  # noqa: ARG002
         # query 刻意不參與 cache key（見模組頂部說明），只用 coin 查快取。
         key = cache_key(self.name, coin)
         entry = cache_get(self._backend, key)
@@ -1347,7 +1347,11 @@ class CachedSource(Source):
                 f"ttl={self.ttl_seconds}s）"
             )
         docs_raw = entry.get("docs") or []
-        return [doc_from_dict(d) for d in docs_raw if isinstance(d, dict)]
+        docs = [doc_from_dict(d) for d in docs_raw if isinstance(d, dict)]
+        if as_of is not None:
+            from .base import _pit_filter
+            docs = _pit_filter(docs, as_of)
+        return docs
 
 
 def get_freshness_snapshot(
