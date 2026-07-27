@@ -102,6 +102,32 @@ ret < -3%  → bearish
 
 `outcome_observed_at` = as_of + N days（以 UTC 日期表示）。
 
+### Training cutoff 與 label leakage gate
+
+Reliability/calibration training 的 `--cutoff` 是 **UTC `YYYY-MM-DD`
+inclusive**。一筆樣本只有在以下兩項都成立時才可進入訓練：
+
+1. `as_of` 正規化成 UTC 後不晚於 cutoff；
+2. `outcome_observed_at` 必須存在、是帶 timezone 的 ISO 8601 timestamp，
+   正規化成 UTC 後必須嚴格晚於 `as_of`，且不晚於 cutoff。
+
+對 cutoff 內 evidence，若 `outcome_observed_at` 缺失、格式錯誤、沒有
+timezone，或 label 在 cutoff 後才可觀測，trainer 必須 fail-closed，不能把
+該 label 納入統計。`outcome_observed_at <= as_of` 的倒序或同時 label
+同樣必須拒絕。Artifact provenance 必須記錄已驗證 label 數量及各類
+violation counter；成功 artifact 的 violation counters 必須為零。
+
+Trainer 必須再次驗證上游 contract，而不是信任輸入已清理：
+
+- `sample_id` 必須是非空字串，且在整個輸入 dataset 全域唯一；重複 ID
+  必須 fail-closed，避免同一 evidence 重複灌高 support。
+- `source_family` 必填，且只能是 `sentiment`、`onchain`、`price`、
+  `regulatory`；缺失或任意新值不得靜默進入 artifact。
+- Artifact provenance 必須記錄 duplicate-ID 與 invalid-family violation
+  counters；成功 artifact 兩者必須為零。
+- 所有必填 string 欄位都以 `strip()` 後判斷；只含空白或 tab 的值視為
+  缺失並 fail-closed。
+
 T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = null，由下游決定是否排除）。
 
 ---
