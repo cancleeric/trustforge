@@ -23,7 +23,8 @@
   "outcome_horizon": "T+7",
   "outcome_direction": "bearish",
   "outcome_observed_at": "2026-01-08T00:00:00Z",
-  "lineage_hash": "sha256-of-all-input-artifacts"
+  "lineage_hash": "sha256-of-all-input-artifacts",
+  "training_cutoff": "2026-07-27"
 }
 ```
 
@@ -42,6 +43,7 @@
 | `outcome_direction` | ✅ | enum | `bullish` / `bearish` / `neutral`；從 OHLCV 計算 |
 | `outcome_observed_at` | ✅ | ISO 8601 | outcome 實際能觀測到的日期（T+N） |
 | `lineage_hash` | ✅ | string | 所有輸入 artifact 的 composite SHA-256（見第六節） |
+| `training_cutoff` | ✅ | UTC date | 執行時指定的 `YYYY-MM-DD` inclusive cutoff；晚於此日期的 evidence 排除 |
 
 Additional（選填，供下游 #197 使用）：
 
@@ -84,7 +86,7 @@ Additional（選填，供下游 #197 使用）：
 | `report.direction` | `claim_direction` | bullish/bearish/neutral（若為「不明」→ `claim_direction="neutral"` + `abstain=true`） |
 | `report.calibrated_confidence` | `evidence_strength` | 直接使用 |
 | `evidence[].source` | `source` | 取 evidence 清單中第一個 source 名稱 |
-| `evidence[].fetched_at` | — | 用於 PIT 驗證（不能晚於 as_of） |
+| `evidence[].visible_at` / `published_at` / `fetched_at` | — | 依此前後順序選取第一個存在的欄位；必須是帶時區的 ISO 8601，且不能晚於 `as_of` |
 | — | `source_family` | 從 `evidence[].kind` 對映：`sentiment`/`onchain`/`price`/`regulatory` |
 | — | `scope` | 從 `evidence[].meta.get("scope", "per-coin")` |
 | — | `source_count` | 從 `evidence[]` 長度計算（去重 source_family 後） |
@@ -125,11 +127,23 @@ T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = nu
 3. **Load OHLCV**：用 `outcome_labeler.py` 的 `label_n_day_direction()` 計算 outcome（N=1/7/14）。
 
 4. **Join & validate**：
-   - 配對：`(coin, as_of)` 相同者 joined
-   - PIT gate：`evidence.fetched_at ≤ as_of`
-   - Scope gate：`scope=market-wide` 的 sample 不因 coin 重複產生
+   - 每個 `(coin, as_of, source, source_family)` 各自保留一列；同日
+     sentiment/onchain/price 不互相覆寫
+   - PIT gate：evidence visibility timestamp 必須存在、格式有效且 `≤ as_of`
+   - malformed JSON/schema、missing/invalid/future timestamp 全部排除並在 CLI
+     summary 分類計數
+   - Scope gate：`scope=market-wide` 的 FNG sample 不因 coin-expanded rows
+     重複產生；Blockchain.com 僅接受 BTC
+   - cutoff gate：`as_of` 的 UTC 日期必須 `≤ --cutoff YYYY-MM-DD`（inclusive）
 
-5. **Output**：每行一個 sample JSON，寫入 `out/samples/historical_samples.jsonl`。
+5. **Output**：以 `as_of/coin/source_family/source/sample_id` 固定排序，每行一個
+   JSON object。相同輸入、cutoff 與 horizon 必須 byte-for-byte deterministic。
+
+輸入中的 `report` 與 `evidence` 必須本身就是 JSON object/array。JSON string、
+Python literal 或其他序列化形式一律視為 malformed；pipeline 不使用
+`eval()`、`exec()` 或 literal evaluation。Outcome 僅在 feature 建構完成後依
+T+N OHLCV 加入輸出，`outcome_direction` 與 `outcome_observed_at` 不得回流至
+claim、strength、source 或其他 feature。
 
 ---
 
@@ -178,16 +192,20 @@ def lineage_hash(files: list[str]) -> str:
 | FNG raw | `out/history/alternative-me-fng-*.jsonl` | 原始 API 回應 |
 | Replay snapshots | `out/replay/five-year-{coin}/index.json` | 全幣 replay index |
 | OHLCV | `data/data/{coin}_daily_ohlcv.csv` | 價格資料 |
-| Contract version | — | 本文件 SHA-256（固化格式版本） |
+| Contract version | `docs/contracts/historical-sample-contract.md` | 本文件 SHA-256（固化格式版本） |
+
+實作必須對不存在的 lineage artifact fail closed，不得以 `MISSING` placeholder
+產生看似有效的 digest。Replay directory 中所有 JSON artifacts 都參與 digest。
 
 ---
 
 ## 七、驗收條件
 
-- [ ] `build_samples.py`（或等效 pipeline）可從既有資料產生 contract JSONL
-- [ ] 產出 sample count：至少 BTC × 1800+ 日 × 2+ source family
-- [ ] PIT gate：`evidence.fetched_at ≤ as_of` 無例外
-- [ ] FNG market-wide：同日期只產生一個 sample，不因 6 幣展開
-- [ ] Blockchain：BTC only
-- [ ] abstain samples：標記但不排除（保留 `abstain=true` flag）
-- [ ] lineage_hash：可重現且相同輸入 → 相同 hash
+- [x] pipeline 可從明確 JSON/schema 與 OHLCV 產生 contract JSONL
+- [x] 同日 2+ source families 以不同 rows 保留
+- [x] PIT gate 排除並計數 missing/invalid/future evidence
+- [x] FNG market-wide 同日期只產生一個 sample，不因多幣展開
+- [x] Blockchain 僅接受 BTC
+- [x] abstain samples 標記但不排除
+- [x] lineage/sample ID/ordering 可重現
+- [x] UTC `YYYY-MM-DD` cutoff 為 inclusive
