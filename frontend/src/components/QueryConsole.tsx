@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import CoinSelect from './CoinSelect'
 import { useHermesI18n } from '../hermes/hermesI18n'
+import { QUESTION_TYPES, defaultQuestionTypeForFocus, isAnalysisFocusId, isQuestionTypeId, type QuestionTypeId } from '../lib/analysisTaxonomy'
 
 export interface QueryValues {
   coin: string
@@ -10,12 +11,14 @@ export interface QueryValues {
   q: string
 }
 
+// PLAN 方案 B：這五個是產品化的「分析角度」，不是官方題型。官方題型改由
+// 上面獨立一顆下拉負責（QUESTION_TYPES），這裡只留角度與它的預設題型映射。
 const ANALYSIS_MODES = [
-  { value: 'risk', labelKey: 'qcModeRisk', type: 'multi_source' },
-  { value: 'sentiment', labelKey: 'qcModeSentiment', type: 'multi_source' },
-  { value: 'fundamentals', labelKey: 'qcModeFundamentals', type: 'hypothesis' },
-  { value: 'news', labelKey: 'qcModeNews', type: 'multi_source' },
-  { value: 'catalyst', labelKey: 'qcModeCatalyst', type: 'hypothesis' },
+  { value: 'risk', labelKey: 'qcModeRisk' },
+  { value: 'sentiment', labelKey: 'qcModeSentiment' },
+  { value: 'fundamentals', labelKey: 'qcModeFundamentals' },
+  { value: 'news', labelKey: 'qcModeNews' },
+  { value: 'catalyst', labelKey: 'qcModeCatalyst' },
 ] as const
 
 interface Props {
@@ -38,6 +41,7 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
   const [type, setType] = useState(initial.type)
   const [mode, setMode] = useState(initial.mode)
   const [q, setQ] = useState(initial.q)
+  const [typeEdited, setTypeEdited] = useState(false)
   // 使用者是否手動編輯過問題欄——一旦編輯過，換幣就不再覆蓋掉他打的字；
   // 「送出/瀏覽器上下頁」會在下方 effect 裡重置，視為開啟一輪新的表單狀態。
   const [queryEdited, setQueryEdited] = useState(false)
@@ -49,6 +53,7 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
     setMode(initial.mode)
     setQ(initial.q)
     setQueryEdited(false)
+    setTypeEdited(false)
   }, [initial.coin, initial.mode, initial.type, initial.q])
 
   function handleCoinChange(next: string) {
@@ -72,6 +77,22 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
       </div>
       <CoinSelect id="qc-coin" value={coin} onChange={handleCoinChange} />
       <div>
+        <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-qtype">
+          {t('qtypeLabel')}
+        </label>
+        <select
+          id="qc-qtype"
+          value={isQuestionTypeId(type) ? type : 'multi_source'}
+          onChange={(e) => {
+            setType(e.target.value as QuestionTypeId)
+            setTypeEdited(true)
+          }}
+          className="mb-3 w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
+        >
+          {QUESTION_TYPES.map((item) => (
+            <option key={item.id} value={item.id}>{t(item.labelKey)}</option>
+          ))}
+        </select>
         <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-type">
           {t('qcModeLabel')}
         </label>
@@ -79,9 +100,11 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
           id="qc-type"
           value={mode}
           onChange={(e) => {
-            const next = ANALYSIS_MODES.find((item) => item.value === e.target.value) ?? ANALYSIS_MODES[0]
-            setMode(next.value)
-            setType(next.type)
+            const next = e.target.value
+            setMode(next)
+            // 使用者若還沒自己動過題型，角度沿用既有映射帶一個預設題型出來；
+            // 一旦他自己選過題型，就不再被角度覆蓋（題型才是官方要看的那層）。
+            if (!typeEdited && isAnalysisFocusId(next)) setType(defaultQuestionTypeForFocus(next))
           }}
           className="w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
         >
@@ -91,6 +114,9 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
             </option>
           ))}
         </select>
+        {type === 'comparison' && (
+          <p className="mt-1 text-[0.68rem] text-tf-muted">{t('qtypeComparisonHint')}</p>
+        )}
         <p className="mt-1 text-[0.68rem] text-tf-muted">
           {t('qcComparePrefix')}
           {/* N60：全路由掃描量到這條連結只有 33x14（en 是 104x14），低於 24px 最小

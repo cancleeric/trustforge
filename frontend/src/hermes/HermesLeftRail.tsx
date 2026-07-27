@@ -4,21 +4,26 @@ import { modeLabel, useHermesI18n } from './hermesI18n'
 import type { ServiceMonitorState } from '../pages/HermesDashboard'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
 import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
+import { ANALYSIS_FOCUSES, QUESTION_TYPES, type AnalysisFocusId, type QuestionTypeId } from '../lib/analysisTaxonomy'
 
 interface HermesLeftRailProps {
   model: GalaxyModel
   uplinkLatency?: string
   hermesMessage: string
   hasOrder: boolean
-  qtype: string
-  qtypes: string[]
+  /** 官方三題型（多源整合／假設驗證／比較分析）——評審看的就是這個，所以它是
+   *  主選單。存 id 不存翻譯後的 label，理由見 lib/analysisTaxonomy.ts。 */
+  questionType: QuestionTypeId
+  /** 產品化分析角度，降級成選填的第二層（PLAN 方案 B）。 */
+  focus: AnalysisFocusId
   query: string
   submitLabel: string
   disabled?: boolean
   serviceMonitor?: Record<string, ServiceMonitorState>
   questionContext?: AnalysisQuestionContext | null
   onRecallQuestion?: (question: string) => void
-  onType: (v: string) => void
+  onQuestionType: (v: QuestionTypeId) => void
+  onFocus: (v: AnalysisFocusId) => void
   onQuery: (v: string) => void
   onSubmit: () => void
   beginnerMode?: boolean
@@ -27,9 +32,15 @@ interface HermesLeftRailProps {
   onApplyRecommendedMode?: (mode: AnalysisModeId) => void
 }
 
+// 兩顆下拉（官方題型／分析角度）共用同一組樣式，避免各寫一份日後漂移。
+const SELECT_LABEL = { display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 } as const
+const SELECT_WRAP = { position: 'relative', marginBottom: 10, flexShrink: 0 } as const
+const SELECT_STYLE = { width: '100%', appearance: 'none', background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 12, padding: '8px 10px', cursor: 'pointer' } as const
+const SELECT_CARET = { position: 'absolute', right: 10, top: 10, color: 'var(--color-hermes-tx3)', pointerEvents: 'none', fontSize: 10 } as const
+
 export default function HermesLeftRail({
-  model, uplinkLatency = '2.4s', hermesMessage, hasOrder, qtype, qtypes, query, submitLabel,
-  onType, onQuery, onSubmit, disabled = false, serviceMonitor = {},
+  model, uplinkLatency = '2.4s', hermesMessage, hasOrder, questionType, focus, query, submitLabel,
+  onQuestionType, onFocus, onQuery, onSubmit, disabled = false, serviceMonitor = {},
   questionContext = null, onRecallQuestion,
   beginnerMode = false, recommendedMode = 'risk', onChooseIntent, onApplyRecommendedMode,
 }: HermesLeftRailProps) {
@@ -143,24 +154,44 @@ export default function HermesLeftRail({
             </div>
           </details>
         )}
-        <label style={{ display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 }}>{t('analysisMode')}</label>
-        <div style={{ position: 'relative', marginBottom: 10, flexShrink: 0 }}>
+        {/* PLAN 方案 B：官方三題型是主選單（評審看的是這個），產品化的五個
+            分析角度降級成下面那顆選填的第二層。原本這裡只有五個角度，被當成
+            官方題型顯示——那是 PLAN §3 明文要改掉的。 */}
+        <label style={SELECT_LABEL} htmlFor="hermes-qtype">{t('qtypeLabel')}</label>
+        <div style={SELECT_WRAP}>
           <select
-            value={qtype}
-            onChange={(e) => onType(e.target.value)}
-            style={{ width: '100%', appearance: 'none', background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 12, padding: '8px 10px', cursor: 'pointer' }}
+            id="hermes-qtype"
+            value={questionType}
+            onChange={(e) => onQuestionType(e.target.value as QuestionTypeId)}
+            style={SELECT_STYLE}
           >
-            {qtypes.map((q) => <option key={q} value={q}>{q}</option>)}
+            {QUESTION_TYPES.map((item) => <option key={item.id} value={item.id}>{t(item.labelKey)}</option>)}
           </select>
-          <span style={{ position: 'absolute', right: 10, top: 10, color: 'var(--color-hermes-tx3)', pointerEvents: 'none', fontSize: 10 }}>▼</span>
+          <span style={SELECT_CARET}>▼</span>
         </div>
-        {beginnerMode && qtype !== qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)] && (
+        {questionType === 'comparison' && (
+          <div className="hermes-analysis-expectation">{t('qtypeComparisonHint')}</div>
+        )}
+
+        <label style={SELECT_LABEL} htmlFor="hermes-focus">{t('qcModeLabel')}</label>
+        <div style={SELECT_WRAP}>
+          <select
+            id="hermes-focus"
+            value={focus}
+            onChange={(e) => onFocus(e.target.value as AnalysisFocusId)}
+            style={SELECT_STYLE}
+          >
+            {ANALYSIS_FOCUSES.map((item) => <option key={item.id} value={item.id}>{t(item.labelKey)}</option>)}
+          </select>
+          <span style={SELECT_CARET}>▼</span>
+        </div>
+        {beginnerMode && focus !== recommendedMode && (
           <button type="button" className="hermes-mode-suggestion" onClick={() => onApplyRecommendedMode?.(recommendedMode)}>
-            {t('suggestSwitchToPrefix')}{qtypes[['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(recommendedMode)]}{t('suggestSwitchToSuffix')}
+            {t('suggestSwitchToPrefix')}{modeLabel(recommendedMode, t)}{t('suggestSwitchToSuffix')}
           </button>
         )}
 
-        {beginnerMode && <div className="hermes-analysis-expectation">{t('analysisExpectationPrefix')}{qtype}{t('analysisExpectationSuffix')}</div>}
+        {beginnerMode && <div className="hermes-analysis-expectation">{t('analysisExpectationPrefix')}{modeLabel(focus, t)}{t('analysisExpectationSuffix')}</div>}
       </div>
 
       {/* HERMES CONSOLE：只剩對話串與輸入框，這才是 agent 互動區。 */}
@@ -219,7 +250,7 @@ export default function HermesLeftRail({
             }
             // 還沒有任何往返時，把待送出的指令當成使用者的第一顆泡泡，讓畫面
             // 一開始就是對話的樣子，而不是一行 `> risk: …` 的 log。
-            if (!bubbles.length && hasOrder) bubbles.push({ key: 'pending', role: 'user', text: query || qtype, latest: false })
+            if (!bubbles.length && hasOrder) bubbles.push({ key: 'pending', role: 'user', text: query || modeLabel(focus, t), latest: false })
             return bubbles.map((b) => {
               const mine = b.role !== 'hermes'
               return (

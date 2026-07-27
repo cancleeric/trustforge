@@ -132,7 +132,10 @@ const messages = {
     beginnerResultShowFull: '查看完整分析', beginnerResultRedo: '再做一次簡化分析',
     qcModeRisk: '風險評估', qcModeSentiment: '市場情緒', qcModeFundamentals: '基本面驗證', qcModeNews: '事件與新聞', qcModeCatalyst: '催化因素',
     qcHeading: '設定本次分析', qcSubtext: '送出後會建立獨立 run，來源與執行紀錄不會覆蓋既有結果。',
-    qcModeLabel: '分析模式', qcComparePrefix: '雙幣比較請至', qcCompareLinkLabel: '比較頁', qcComparePeriod: '。',
+    qcModeLabel: '分析角度（選填）', qcComparePrefix: '雙幣比較請至', qcCompareLinkLabel: '比較頁', qcComparePeriod: '。',
+    // 官方三題型（HOYA BIT 命題格式，見 docs/competition/COMPETITION-OFFICIAL.md）
+    qtypeLabel: '官方題型', qtypeMultiSource: '多源整合', qtypeHypothesis: '假設驗證', qtypeComparison: '比較分析',
+    qtypeComparisonHint: '比較分析會帶你到雙幣比較頁。',
     qcQuestionLabel: '問題', qcSubmit: '立即重新分析',
     intentTrustLabel: '這個幣現在可信嗎？', intentTrustDesc: '整理整體可信程度與主要風險',
     intentManipulationLabel: '有沒有操縱風險？', intentManipulationDesc: '檢查異常訊號與來源分歧',
@@ -483,7 +486,11 @@ const messages = {
     beginnerResultShowFull: 'View full analysis', beginnerResultRedo: 'Run another simplified analysis',
     qcModeRisk: 'Risk assessment', qcModeSentiment: 'Market sentiment', qcModeFundamentals: 'Fundamentals check', qcModeNews: 'Events & news', qcModeCatalyst: 'Catalysts',
     qcHeading: 'Configure this analysis', qcSubtext: 'Submitting creates an independent run; sources and execution logs never overwrite existing results.',
-    qcModeLabel: 'Analysis mode', qcComparePrefix: 'For two-coin comparison, go to', qcCompareLinkLabel: 'the compare page', qcComparePeriod: '.',
+    qcModeLabel: 'Analysis focus (optional)', qcComparePrefix: 'For two-coin comparison, go to', qcCompareLinkLabel: 'the compare page', qcComparePeriod: '.',
+    // 官方三題型。英文字串比中文長很多（「多源整合」4 字 vs 25 字元），PLAN §7
+    // 指明 en 才是換行／溢出的觸發語系，兩個語系都要各驗一次。
+    qtypeLabel: 'Official question type', qtypeMultiSource: 'Multi-source integration', qtypeHypothesis: 'Hypothesis validation', qtypeComparison: 'Comparative analysis',
+    qtypeComparisonHint: 'Comparative analysis opens the two-coin compare page.',
     qcQuestionLabel: 'Question', qcSubmit: 'Re-run analysis now',
     intentTrustLabel: 'Is this coin trustworthy right now?', intentTrustDesc: 'Summarize overall credibility and key risks',
     intentManipulationLabel: 'Any manipulation risk?', intentManipulationDesc: 'Check anomalous signals and source divergence',

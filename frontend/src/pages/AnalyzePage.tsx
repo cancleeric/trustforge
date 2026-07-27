@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { getAnalysisJob, getAnalyze, registerAnalysisQuestion } from '../lib/endpoints'
 import type { AnalyzeParams } from '../lib/endpoints'
 import type { AnalysisJobStatus } from '../lib/endpoints'
@@ -326,9 +326,23 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     return () => onBusyChange?.(false)
   }, [loading, onBusyChange])
 
+  const navigate = useNavigate()
+
   const handleSubmit = (values: QueryValues) => {
     const next = new URLSearchParams()
     const workspace = searchParams.get('workspace')
+    // PLAN §7：比較分析是雙幣題型，不能當單幣分析送出去。嵌在 HERMES 工作區
+    // 時切 workspace，獨立頁時導到 /compare。
+    if (values.type === 'comparison') {
+      const compare = new URLSearchParams({ coin: values.coin, q: values.q })
+      if (workspace) {
+        compare.set('workspace', 'compare')
+        setSearchParams(compare)
+      } else {
+        navigate({ pathname: '/compare', search: compare.toString() })
+      }
+      return
+    }
     if (workspace) next.set('workspace', workspace)
     next.set('coin', values.coin)
     next.set('type', values.type)

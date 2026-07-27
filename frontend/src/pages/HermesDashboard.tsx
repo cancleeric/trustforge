@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import HermesTopBar from '../hermes/HermesTopBar'
 import HermesHeroTagline from '../hermes/HermesHeroTagline'
@@ -18,6 +18,7 @@ import HermesOnboarding from '../hermes/HermesOnboarding'
 import HermesBeginnerNarrative from '../components/HermesBeginnerNarrative'
 import HermesMobileDivergenceEntry from '../hermes/HermesMobileDivergenceEntry'
 import TrainingStatusCard from '../components/TrainingStatusCard'
+import { defaultQuestionTypeForFocus, isAnalysisFocusId, isQuestionTypeId, type AnalysisFocusId, type QuestionTypeId } from '../lib/analysisTaxonomy'
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 import HermesFirstRun from '../hermes/HermesFirstRun'
 import { useReducedMotion } from '../lib/useReducedMotion'
@@ -51,10 +52,9 @@ function useIsNarrowViewport(maxWidth: number): boolean {
 
 export default function HermesDashboard() {
   const { locale, t } = useHermesI18n()
-  const qtypes = useMemo(
-    () => [t('risk'), t('sentiment'), t('fundamentals'), t('news'), t('catalyst')],
-    [t],
-  )
+  // PLAN 方案 B：狀態改存 id（官方題型 + 分析角度），不再存翻譯後的 label
+  // 再用 indexOf 反查。原本 ['risk','sentiment',…] 這組平行陣列散在 5 個地方，
+  // 語系一切換 label 就變，任何一處漏改就對不上。見 lib/analysisTaxonomy.ts。
   const [searchParams, setSearchParams] = useSearchParams()
   const qaMode = searchParams.get('qa') === '1' || searchParams.get('reducedMotion') === '1'
   const requestedCoin = searchParams.get('coin')?.toLowerCase()
@@ -84,7 +84,21 @@ export default function HermesDashboard() {
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
   const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
-  const [qtype, setQtype] = useState(t('risk'))
+  const [questionType, setQuestionType] = useState<QuestionTypeId>('multi_source')
+  const [focus, setFocus] = useState<AnalysisFocusId>('risk')
+  // 使用者是否自己動過題型下拉。沒動過時，切角度會沿用既有的角度→題型預設
+  // 映射；動過之後就以使用者選的題型為準（題型才是官方評分看的那層）。
+  const typeEdited = useRef(false)
+
+  const handleQuestionType = useCallback((next: QuestionTypeId) => {
+    typeEdited.current = true
+    setQuestionType(next)
+  }, [])
+
+  const handleFocus = useCallback((next: AnalysisFocusId) => {
+    setFocus(next)
+    if (!typeEdited.current) setQuestionType(defaultQuestionTypeForFocus(next))
+  }, [])
   const [query, setQuery] = useState(t('defaultQuery'))
   const [typedLen, setTypedLen] = useState(0)
   const [focusPulse, setFocusPulse] = useState(false)
@@ -107,7 +121,7 @@ export default function HermesDashboard() {
   const activeModule: HermesWorkspaceModule | null =
     requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
       ? requestedModule : null
-  const activeQuestionMode = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))]
+  const activeQuestionMode = focus
   const recommendedMode = recommendAnalysisMode(query)
 
   const setExperienceMode = useCallback((enabled: boolean) => {
@@ -116,9 +130,11 @@ export default function HermesDashboard() {
   }, [])
 
   const applyAnalysisMode = useCallback((mode: AnalysisModeId) => {
-    const index = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(mode)
-    setQtype(qtypes[index])
-  }, [qtypes])
+    setFocus(mode)
+    // 角度是選填的第二層，但使用者從「我想做什麼」挑 intent 時並沒有選題型，
+    // 這時仍沿用既有的角度→題型映射當預設；使用者自己動過題型選單就以他為準。
+    setQuestionType(defaultQuestionTypeForFocus(mode))
+  }, [])
 
   const chooseIntent = useCallback((mode: AnalysisModeId, question: string) => {
     applyAnalysisMode(mode)
@@ -167,11 +183,13 @@ export default function HermesDashboard() {
 
   useEffect(() => {
     const mode = searchParams.get('mode')
-    const modeIndex = ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'].indexOf(mode ?? '')
-    setQtype(modeIndex >= 0 ? qtypes[modeIndex] : qtypes[0])
+    const nextFocus: AnalysisFocusId = isAnalysisFocusId(mode) ? mode : 'risk'
+    setFocus(nextFocus)
+    const requestedType = searchParams.get('type')
+    setQuestionType(isQuestionTypeId(requestedType) ? requestedType : defaultQuestionTypeForFocus(nextFocus))
     const nextQuery = searchParams.get('q')
     setQuery(nextQuery ?? `分析${(requestedCoin ?? 'btc').toUpperCase()}近期市場狀況，整合多源資料`)
-  }, [qtypes, requestedCoin, searchParams])
+  }, [requestedCoin, searchParams])
 
   const selectCoin = useCallback((id: string) => {
     setSelectedId(id)
@@ -464,15 +482,15 @@ export default function HermesDashboard() {
     if (!query.trim()) return
     setPhase('loading')
     setLastOrder(true)
-    const type = qtype === t('fundamentals') || qtype === t('catalyst') ? 'hypothesis' : 'multi_source'
     const search = new URLSearchParams({
-      coin: selectedId.toUpperCase(), type, q: query.trim(),
+      coin: selectedId.toUpperCase(), type: questionType, q: query.trim(),
     })
-    search.set('mode', ['risk', 'sentiment', 'fundamentals', 'news', 'catalyst'][Math.max(0, qtypes.indexOf(qtype))])
-    search.set('workspace', 'analyze')
+    search.set('mode', focus)
+    // PLAN §7：比較分析要導向雙幣比較頁，不能被當成單幣分析送出去。
+    search.set('workspace', questionType === 'comparison' ? 'compare' : 'analyze')
     setSearchParams(search)
     setResubmitSignal((value) => value + 1)
-  }, [qtype, qtypes, query, selectedId, setSearchParams, t])
+  }, [questionType, focus, query, selectedId, setSearchParams])
 
   useEffect(() => {
     if (moduleTelemetry) setPhase('ready')
@@ -584,11 +602,12 @@ export default function HermesDashboard() {
             model={model}
             hermesMessage={hermesMessage}
             hasOrder={lastOrder}
-            qtype={qtype}
-            qtypes={qtypes}
+            questionType={questionType}
+            focus={focus}
             query={query}
             submitLabel={phase === 'loading' ? t('analyzingNow') : t('reAnalyze')}
-            onType={setQtype}
+            onQuestionType={handleQuestionType}
+            onFocus={handleFocus}
             onQuery={setQuery}
             onSubmit={onSubmit}
             disabled={!query.trim() || phase === 'loading'}
@@ -640,7 +659,7 @@ export default function HermesDashboard() {
         />
 
         <div className="hermes-boot-layer" style={{ opacity: boot.bottom ? 1 : 0, transition: 'opacity .5s ease-out' }}>
-          <StageBar flow={analysisFlow} mode={activeModule} telemetry={moduleTelemetry} activity={{ status: phase, coin: selectedId.toUpperCase(), mode: qtype, question: query.trim() }} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onSelectStage={(id) => setSelectedStage((s) => (s === id ? null : id))} />
+          <StageBar flow={analysisFlow} mode={activeModule} telemetry={moduleTelemetry} activity={{ status: phase, coin: selectedId.toUpperCase(), mode: focus, question: query.trim() }} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onSelectStage={(id) => setSelectedStage((s) => (s === id ? null : id))} />
         </div>
 
         {selectedStage && (

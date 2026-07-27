@@ -195,14 +195,16 @@ describe('HermesDashboard workspace navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '使用中文' }))
   })
 
-  it.each(['基本面', '價格催化因子'])('maps %s to hypothesis', async (mode) => {
+  // 方案 B 後：角度選單以 id 為值（不再是翻譯後的 label），且題型獨立一顆下拉。
+  // 使用者沒動過題型時，角度仍會帶出既有的預設題型映射。
+  it.each(['fundamentals', 'catalyst'])('maps %s to hypothesis', async (mode) => {
     render(
       <MemoryRouter initialEntries={['/?qa=1']}>
         <HermesI18nProvider><HermesDashboard /></HermesI18nProvider><LocationProbe />
       </MemoryRouter>,
     )
-    await waitFor(() => expect(screen.getByRole('combobox')).toHaveValue('風險評估'))
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: mode } })
+    await waitFor(() => expect(screen.getByLabelText('分析角度（選填）')).toHaveValue('risk'))
+    fireEvent.change(screen.getByLabelText('分析角度（選填）'), { target: { value: mode } })
     fireEvent.click(screen.getByRole('button', { name: /立即重新分析/ }))
 
     await waitFor(() => expect(screen.getByLabelText('location')).toHaveTextContent('type=hypothesis'))
@@ -238,10 +240,10 @@ describe('HermesDashboard workspace navigation', () => {
         <DashboardHistoryControls />
       </MemoryRouter>,
     )
-    await waitFor(() => expect(screen.getByRole('combobox')).toHaveValue('價格催化因子'))
+    await waitFor(() => expect(screen.getByLabelText('分析角度（選填）')).toHaveValue('catalyst'))
     fireEvent.click(screen.getByRole('button', { name: 'plain entry' }))
 
-    await waitFor(() => expect(screen.getByRole('combobox')).toHaveValue('風險評估'))
+    await waitFor(() => expect(screen.getByLabelText('分析角度（選填）')).toHaveValue('risk'))
     expect(screen.getByRole('textbox')).toHaveValue('分析SOL近期市場狀況，整合多源資料')
   })
 
