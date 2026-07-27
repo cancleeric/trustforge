@@ -17,6 +17,7 @@ from typing import Any
 from trustforge.safe_fs import read_regular_file
 
 from .shadow_contracts import (
+    ShadowDecisionAction,
     ShadowPolicy,
     ShadowReleaseIdentity,
     canonical_json,
@@ -184,6 +185,15 @@ def verify_shadow_health_provenance(
         "ids_are_deterministically_derived": True,
     }
     expected_metrics = _canonical_metrics(result)
+    if (
+        result.decision.action
+        is not ShadowDecisionAction.ELIGIBLE_FOR_OPERATOR_REVIEW
+        or result.decision.aggregate.blockers
+        or not all(expected_checks.values())
+    ):
+        raise ShadowHealthProvenanceError(
+            "durable shadow evidence is not eligible for operator review"
+        )
     expected_header = {
         "report_version": "trustforge.shadow-health/v1",
         "evaluated_at": evaluated_at_text,

@@ -7,45 +7,60 @@ It accepts no request body and never retries a user operation.
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
+import socket
+import socketserver
+import stat
+from http.server import BaseHTTPRequestHandler
 
-from scripts.deployment_readiness import _build_control
 from trustforge.release_router import ReleaseABRouter
+from trustforge.release_router_runtime import build_runtime_router
 
-LISTEN_ADDRESS = ("127.0.0.1", 8090)
+SOCKET_PATH = "/run/trustforge/release-router.sock"
 MAX_SUBJECT_BYTES = 256
+MAX_HEADER_BYTES = 16 * 1024
+FORWARDED_REQUEST_HEADERS = frozenset(
+    {"accept", "accept-encoding", "authorization", "cookie", "if-none-match"}
+)
 
 
 def build_router() -> ReleaseABRouter:
-    control, routing_keys, manifest_keys = _build_control(
-        require_preflight=False,
-        verify_retained_a=False,
-        verify_retained_b=False,
-    )
-    state = control.routing_snapshot()
-    return ReleaseABRouter(
-        control,
-        routing_keys,
-        pinned_a_fallback=state.active,
-        manifest_keyring=manifest_keys,
-    )
+    return build_runtime_router()
 
 
 class ReleaseRouterHandler(BaseHTTPRequestHandler):
     router: ReleaseABRouter
 
     def do_GET(self) -> None:
-        subject = self.headers.get("X-TrustForge-Stable-Subject")
+        if self.headers.get("X-TrustForge-Stable-Subject") is not None:
+            self.send_error(400, "untrusted identity header is forbidden")
+            return
+        if sum(len(k) + len(v) for k, v in self.headers.items()) > MAX_HEADER_BYTES:
+            self.send_error(431, "request headers are too large")
+            return
+        subject = self.headers.get("X-TrustForge-Trusted-Subject")
         if subject is not None and len(subject.encode("utf-8")) > MAX_SUBJECT_BYTES:
             self.send_error(400, "stable subject is too large")
             return
+        forwarded = {
+            name: value
+            for name, value in self.headers.items()
+            if name.lower() in FORWARDED_REQUEST_HEADERS
+        }
         try:
-            response = self.router.route(stable_subject=subject, path=self.path)
+            response = self.router.route(
+                stable_subject=subject,
+                path=self.path,
+                request_headers=forwarded,
+            )
         except Exception:
             self.send_error(503, "release router unavailable")
             return
         self.send_response(response.status_code)
-        self.send_header("Content-Type", "application/octet-stream")
+        for name, value in response.headers:
+            self.send_header(name, value)
+        if not any(name.lower() == "content-type" for name, _ in response.headers):
+            self.send_header("Content-Type", "application/octet-stream")
         self.send_header("X-TrustForge-Release-Path", response.release)
         self.send_header(
             "X-TrustForge-Failed-Over", "true" if response.failed_over else "false"
@@ -68,7 +83,12 @@ class ReleaseRouterHandler(BaseHTTPRequestHandler):
 def main() -> int:
     try:
         ReleaseRouterHandler.router = build_router()
-        server = ThreadingHTTPServer(LISTEN_ADDRESS, ReleaseRouterHandler)
+        if os.path.lexists(SOCKET_PATH):
+            if not stat.S_ISSOCK(os.lstat(SOCKET_PATH).st_mode):
+                raise RuntimeError("refusing to replace non-socket ingress path")
+            os.unlink(SOCKET_PATH)
+        server = _BoundedUnixHTTPServer(SOCKET_PATH, ReleaseRouterHandler)
+        os.chmod(SOCKET_PATH, 0o660)
     except Exception as exc:
         print(
             json.dumps(
@@ -82,6 +102,32 @@ def main() -> int:
         return 2
     server.serve_forever()
     return 0
+
+
+class _BoundedUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+    request_queue_size = 32
+
+    def __init__(self, *args, **kwargs):
+        self._slots = __import__("threading").BoundedSemaphore(32)
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(5)
+        return request, address
+
+    def process_request(self, request: socket.socket, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            request.close()
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 if __name__ == "__main__":

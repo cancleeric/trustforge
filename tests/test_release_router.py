@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from trustforge.agent.shadow_contracts import canonical_json
 from trustforge.authenticated_ledger import AuthenticatedLedger
 from trustforge.deployment_control import DeploymentControlLedger
@@ -15,6 +16,12 @@ from trustforge.release_router import (
     ReleaseEndpoint,
     RoutingPolicy,
     RoutingSnapshot,
+)
+
+
+_MANIFEST_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"m" * 32)
+_MANIFEST_PUBLIC_KEY = _MANIFEST_PRIVATE_KEY.public_key().public_bytes(
+    Encoding.Raw, PublicFormat.Raw
 )
 
 
@@ -32,11 +39,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "origin": self.origin,
                 "key_id": "manifest-1",
             }
-            signature = hmac.new(
-                b"m" * 32,
-                b"trustforge.endpoint-manifest.v1\x00" + canonical_json(unsigned),
-                hashlib.sha256,
-            ).hexdigest()
+            signature = _MANIFEST_PRIVATE_KEY.sign(
+                b"trustforge.endpoint-manifest.v1\x00" + canonical_json(unsigned)
+            ).hex()
             body = json.dumps({**unsigned, "signature": signature}).encode()
             self.send_response(200)
             self.end_headers()
@@ -140,7 +145,7 @@ def test_real_separate_http_releases_route_limited_b_without_core_import():
         ledger = _Ledger(a, b)
         router = ReleaseABRouter(
             ledger, {"route-2026-07": b"r" * 32}, pinned_a_fallback=a,
-            manifest_keyring={"manifest-1": b"m" * 32},
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
         response = router.route(stable_subject="stable-user")
         assert response.release == "B"
@@ -164,7 +169,7 @@ def test_real_b_failure_fails_over_a_and_durable_stop_prevents_next_b():
         ledger = _Ledger(a, b)
         router = ReleaseABRouter(
             ledger, {"route-2026-07": b"r" * 32}, pinned_a_fallback=a,
-            manifest_keyring={"manifest-1": b"m" * 32},
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
         failed = router.route(stable_subject="stable-user")
         assert failed.release == "A"
@@ -190,7 +195,7 @@ def test_missing_or_corrupt_ledger_routes_pinned_a():
 
         router = ReleaseABRouter(
             Broken(), {"route-2026-07": b"r" * 32}, pinned_a_fallback=a,
-            manifest_keyring={"manifest-1": b"m" * 32},
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
         response = router.route(stable_subject="stable-user")
         assert response.release == "A"
@@ -283,7 +288,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             control,
             {"route-2026-07": b"r" * 32},
             pinned_a_fallback=a,
-            manifest_keyring={"manifest-1": b"m" * 32},
+            manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
         with ThreadPoolExecutor(max_workers=12) as pool:
             responses = list(

@@ -11,7 +11,32 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from trustforge.agent.shadow_contracts import canonical_json
+
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_SAFE_RESPONSE_HEADERS = frozenset(
+    {
+        "cache-control",
+        "content-encoding",
+        "content-security-policy",
+        "content-type",
+        "etag",
+        "permissions-policy",
+        "referrer-policy",
+        "strict-transport-security",
+        "x-content-type-options",
+    }
+)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 class ReleaseRoutingError(RuntimeError):
@@ -121,6 +146,7 @@ class RoutedResponse:
     status_code: int
     release: str
     failed_over: bool
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 class ReleaseABRouter:
@@ -139,18 +165,27 @@ class ReleaseABRouter:
         self.pinned_a_fallback = pinned_a_fallback
         self.manifest_keyring = dict(manifest_keyring)
 
-    def route(self, *, stable_subject: str | None, path: str = "/") -> RoutedResponse:
+    def route(
+        self,
+        *,
+        stable_subject: str | None,
+        path: str = "/healthz",
+        request_headers: Mapping[str, str] | None = None,
+    ) -> RoutedResponse:
         snapshot: RoutingSnapshot | None = None
         reservation_id = ""
         for _attempt in range(4):
             try:
                 snapshot = self.ledger.routing_snapshot()
             except Exception:
-                return self._request_a_fallback(path)
+                return self._request_a_fallback(path, request_headers)
             if snapshot.active != self.pinned_a_fallback:
-                return self._request_a_fallback(path)
+                return self._request_a_fallback(path, request_headers)
             if not self._candidate_selected(snapshot, stable_subject):
-                return self._request(snapshot.active, path, release="A", failed_over=False)
+                return self._request(
+                    snapshot.active, path, release="A", failed_over=False,
+                    request_headers=request_headers,
+                )
             reservation_id = secrets.token_hex(16)
             try:
                 snapshot = self.ledger.reserve_candidate(
@@ -162,7 +197,7 @@ class ReleaseABRouter:
                 snapshot = None
                 continue
         if snapshot is None:
-            return self._request_a_fallback(path)
+            return self._request_a_fallback(path, request_headers)
         import time
         started = time.monotonic()
         try:
@@ -172,13 +207,14 @@ class ReleaseABRouter:
                 release="B",
                 failed_over=False,
                 timeout=snapshot.policy.timeout_ms / 1000,
+                request_headers=request_headers,
             )
             if response.status_code >= 500:
                 raise ReleaseRoutingError("candidate_http_5xx")
-                self.ledger.record_candidate_result(
-                    expected_head=snapshot.ledger_head,
-                    reservation_id=reservation_id,
-                    ok=True,
+            self.ledger.record_candidate_result(
+                expected_head=snapshot.ledger_head,
+                reservation_id=reservation_id,
+                ok=True,
                 status_code=response.status_code,
                 latency_ms=(time.monotonic() - started) * 1000,
                 error_kind="",
@@ -206,7 +242,10 @@ class ReleaseABRouter:
                     )
                 except Exception:
                     pass
-            return self._request(snapshot.active, path, release="A", failed_over=True)
+            return self._request(
+                snapshot.active, path, release="A", failed_over=True,
+                request_headers=request_headers,
+            )
 
     def _candidate_selected(
         self, snapshot: RoutingSnapshot, stable_subject: str | None
@@ -243,12 +282,15 @@ class ReleaseABRouter:
         ) % 10_000
         return bucket < snapshot.policy.ratio_basis_points
 
-    def _request_a_fallback(self, path: str) -> RoutedResponse:
+    def _request_a_fallback(
+        self, path: str, request_headers: Mapping[str, str] | None
+    ) -> RoutedResponse:
         return self._request(
             self.pinned_a_fallback,
             path,
             release="A",
             failed_over=True,
+            request_headers=request_headers,
         )
 
     def _request(
@@ -259,30 +301,67 @@ class ReleaseABRouter:
         release: str,
         failed_over: bool,
         timeout: float = 5.0,
+        request_headers: Mapping[str, str] | None = None,
     ) -> RoutedResponse:
         self._verify_endpoint_manifest(endpoint, timeout=timeout)
-        if not path.startswith("/") or path.startswith("//"):
-            raise ReleaseRoutingError("request path must be origin-relative")
+        parsed_path = urllib.parse.urlsplit(path)
+        if (
+            len(path) > 2048
+            or not path.startswith("/")
+            or path.startswith("//")
+            or parsed_path.scheme
+            or parsed_path.netloc
+            or not (
+                parsed_path.path == "/healthz"
+                or parsed_path.path.startswith("/api/")
+            )
+        ):
+            raise ReleaseRoutingError("request path is not allowlisted")
         url = endpoint.base_url.rstrip("/") + path
+        request = urllib.request.Request(
+            url,
+            headers=dict(request_headers or {}),
+            method="GET",
+        )
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
-                body = response.read(4 * 1024 * 1024 + 1)
-                if len(body) > 4 * 1024 * 1024:
+            with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+                body = response.read(_MAX_RESPONSE_BYTES + 1)
+                if len(body) > _MAX_RESPONSE_BYTES:
                     raise ReleaseRoutingError("release response exceeds size limit")
                 return RoutedResponse(
                     body=body,
                     status_code=int(response.status),
                     release=release,
                     failed_over=failed_over,
+                    headers=self._safe_headers(response.headers),
                 )
         except urllib.error.HTTPError as exc:
-            body = exc.read(4 * 1024 * 1024 + 1)
+            if 300 <= exc.code < 400:
+                raise ReleaseRoutingError("release redirect is forbidden") from exc
+            body = exc.read(_MAX_RESPONSE_BYTES + 1)
+            if len(body) > _MAX_RESPONSE_BYTES:
+                raise ReleaseRoutingError("release response exceeds size limit")
             return RoutedResponse(
                 body=body,
                 status_code=int(exc.code),
                 release=release,
                 failed_over=failed_over,
+                headers=self._safe_headers(exc.headers),
             )
+
+    @staticmethod
+    def _safe_headers(headers) -> tuple[tuple[str, str], ...]:
+        result = []
+        for name, value in headers.items():
+            lowered = name.lower()
+            if lowered not in _SAFE_RESPONSE_HEADERS or "\n" in value or "\r" in value:
+                continue
+            if lowered == "content-encoding" and value.lower() not in {
+                "br", "gzip", "identity"
+            }:
+                continue
+            result.append((name, value))
+        return tuple(result)
 
     def _verify_endpoint_manifest(
         self, endpoint: ReleaseEndpoint, *, timeout: float
@@ -292,7 +371,7 @@ class ReleaseABRouter:
             + "/.well-known/trustforge-release-manifest"
         )
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
+            with _NO_REDIRECT_OPENER.open(url, timeout=timeout) as response:
                 raw = response.read(32_769)
         except Exception as exc:
             raise ReleaseRoutingError("release manifest probe failed") from exc
@@ -311,20 +390,22 @@ class ReleaseABRouter:
         }:
             raise ReleaseRoutingError("release manifest probe schema is invalid")
         unsigned = {key: value for key, value in payload.items() if key != "signature"}
-        secret = self.manifest_keyring.get(payload.get("key_id"))
-        expected = (
-            hmac.new(
-                secret,
-                b"trustforge.endpoint-manifest.v1\x00" + canonical_json(unsigned),
-                hashlib.sha256,
-            ).hexdigest()
-            if secret is not None else ""
-        )
+        public_key = self.manifest_keyring.get(payload.get("key_id"))
         if (
             payload.get("schema") != "trustforge.endpoint-manifest/v1"
             or payload.get("artifact_digest") != endpoint.release_digest
             or payload.get("origin") != endpoint.base_url
             or payload.get("key_id") != endpoint.manifest_key_id
-            or not hmac.compare_digest(str(payload.get("signature", "")), expected)
         ):
             raise ReleaseRoutingError("served release identity is not authenticated")
+        try:
+            if public_key is None:
+                raise InvalidSignature
+            Ed25519PublicKey.from_public_bytes(public_key).verify(
+                bytes.fromhex(str(payload.get("signature", ""))),
+                b"trustforge.endpoint-manifest.v1\x00" + canonical_json(unsigned),
+            )
+        except (InvalidSignature, ValueError) as exc:
+            raise ReleaseRoutingError(
+                "served release manifest signature is invalid"
+            ) from exc

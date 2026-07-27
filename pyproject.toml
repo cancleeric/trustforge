@@ -11,6 +11,7 @@ dependencies = [
     "boto3>=1.34",   # 唯一模型入口：AWS Bedrock runtime
     "certifi>=2024.2.2",  # 外部 HTTPS connector 的可攜式 CA trust store
     "portalocker>=3,<4",  # macOS/Linux/Windows cross-process store locks
+    "cryptography>=44,<50",  # Ed25519 endpoint-manifest verification (#733)
     # issue #721：FSC VASP 登記業者名單只以 PDF 發布（無 API、無表格頁）。
     # 該 PDF 用 Type0/CIDFontType2 字型並把 ToUnicode CMap 放在壓縮物件流裡，
     # 手寫解析不可行。pypdf 是純 Python、無 C 相依，可直接在生產基底
