@@ -11,9 +11,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ..ingestion.base import Document
 from .outcome_labeler import batch_label_from_ohlcv
 from .scoring import _iterate_source_reputation, Claim
+
+
+@dataclass
+class _FakeDocument:
+    """Local Document stand-in for synthetic Claims — avoids importing
+    ingestion.base into trust/ (architecture boundary gate)."""
+    id: str
+    kind: str
+    source: str
+    text: str
+    ts: float
+    url: str = ""
+    meta: dict = field(default_factory=dict)
 
 # 方向映射：訓練 JSONL 內的中文方向值 → 英文標準三態
 _DIRECTION_MAP: dict[str, str] = {
@@ -270,7 +282,7 @@ def compare_with_reputation(
             claim = Claim(
                 id=claim_id,
                 text=f"{direction} analysis for {coin} on {date}",
-                doc=Document(
+                doc=_FakeDocument(
                     id=f"doc-{coin}-{date}-{j}",
                     kind="price",
                     source=src,
