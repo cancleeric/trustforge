@@ -28,6 +28,7 @@ from ..term_annotations import annotate_terms
 from trustforge_core import run_kernel
 
 from .kernel_mapper import to_kernel_input, to_legacy_scoring
+from .kernel_canary import get_canary_state, should_use_kernel
 from .shadow import is_kernel_promoted, record_shadow_run
 from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 from . import narrative_locale as _loc
@@ -1512,35 +1513,57 @@ def run_agent_pipeline(
     # coin=coin：「coin-filter 主導」（demo 可靠性 #32 追加）——見 aggregate() docstring，
     # 讓明確提及該幣的證據不因 query 措辭（如中文複合詞、無空格）忽窄忽寬地被截斷擠出。
     brief = aggregate(scored, query=query, coin=coin)
-    kernel_output = run_kernel(
-        to_kernel_input(claims, pit_epoch=now_ts, coin=coin, query=query)
-    )
+
+    # #733 canary gating: only run kernel if this request is in the canary subset.
+    # In full-production mode (ratio=0), kernel is skipped to save cost.
+    # In canary mode (0 < ratio < 1), only a subset of requests runs kernel.
+    # In full-kernel mode (ratio >= 1), all requests run kernel.
+    _should_run_kernel = should_use_kernel(coin=coin, query=query, ts=iso_utc(now_ts))
+    if _should_run_kernel:
+        kernel_output = run_kernel(
+            to_kernel_input(claims, pit_epoch=now_ts, coin=coin, query=query)
+        )
+        get_canary_state().record_success()
+    else:
+        # Kernel is not active for this request; skip shadow parity entirely.
+        kernel_output = None
+        _kernel_promoted = False
 
     # --- #732 P0-6 shadow parity: compare kernel vs legacy, track promotion ---
     # Shadow code must NEVER block the user-facing pipeline (codex-review C4).
     # If this raises, log it and continue with legacy — the user still gets a report.
-    try:
-        _shadow_parity = record_shadow_run(
-            kernel=kernel_output,
-            legacy_confidence=(
-                brief.calibrated_confidence
-                if brief.calibrated_confidence is not None
-                else brief.confidence
-            ),
-            legacy_trust_raw=brief.confidence,
-            legacy_scored=scored,
-            coin=coin,
-            qtype_value=qtype.value,
-        )
-        _kernel_promoted = is_kernel_promoted()
-    except Exception:
-        _shadow_parity = {"last_parity_passed": False, "parity_rate": 0.0, "window_runs": 0, "promoted": False, "promotion_eligible": False, "canary_stop_triggered": False, "coins_seen": [], "qtypes_seen": []}
+    if kernel_output is not None:
+        try:
+            _shadow_parity = record_shadow_run(
+                kernel=kernel_output,
+                legacy_confidence=(
+                    brief.calibrated_confidence
+                    if brief.calibrated_confidence is not None
+                    else brief.confidence
+                ),
+                legacy_trust_raw=brief.confidence,
+                legacy_scored=scored,
+                coin=coin,
+                qtype_value=qtype.value,
+            )
+            _kernel_promoted = is_kernel_promoted()
+        except Exception:
+            _shadow_parity = {"last_parity_passed": False, "parity_rate": 0.0, "window_runs": 0, "promoted": False, "promotion_eligible": False, "canary_stop_triggered": False, "coins_seen": [], "qtypes_seen": []}
+            _kernel_promoted = False
+            get_canary_state().record_error()
+            logging.warning(
+                "shadow parity comparison raised exception (coin=%s); "
+                "continuing with legacy brief. See traceback for details.",
+                coin, exc_info=True,
+            )
+            log.record(
+                "shadow.parity_failed",
+                params={"coin": coin, "qtype": qtype.value},
+                summary="shadow parity exception; continuing with legacy",
+            )
+    else:
+        _shadow_parity = {"last_parity_passed": True, "parity_rate": 0.0, "window_runs": 0, "promoted": False, "promotion_eligible": False, "canary_stop_triggered": False, "coins_seen": [], "qtypes_seen": []}
         _kernel_promoted = False
-        logging.warning(
-            "shadow parity comparison raised exception (coin=%s); "
-            "continuing with legacy brief. See traceback for details.",
-            coin, exc_info=True,
-        )
         log.record(
             "shadow.parity_failed",
             params={"coin": coin, "qtype": qtype.value},
@@ -1550,13 +1573,14 @@ def run_agent_pipeline(
         "judgment.derive",
         params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),
                 "confidence": round(brief.confidence, 3),
-                "kernel_confidence": round(kernel_output.confidence, 3),
-                "kernel_abstain": kernel_output.abstain,
-                "kernel_reason_codes": kernel_output.reason_codes,
+                "kernel_confidence": round(kernel_output.confidence, 3) if kernel_output is not None else None,
+                "kernel_abstain": kernel_output.abstain if kernel_output is not None else None,
+                "kernel_reason_codes": kernel_output.reason_codes if kernel_output is not None else (),
                 "shadow_parity_passed": _shadow_parity["last_parity_passed"],
                 "shadow_promoted": _kernel_promoted,
                 "shadow_parity_rate": _shadow_parity["parity_rate"],
-                "shadow_window_runs": _shadow_parity["window_runs"]},
+                "shadow_window_runs": _shadow_parity["window_runs"],
+                "canary_used": _should_run_kernel},
         summary="Step2 純 pipeline 完成；判斷由演算法產生，非 LLM",
     )
 
@@ -1564,7 +1588,7 @@ def run_agent_pipeline(
     # brief replaces the legacy brief for build_report().  The substitution is
     # behind-to_legacy_scoring() which validates the full output graph before
     # allowing promotion (see kernel_mapper.py docstring).
-    if _kernel_promoted:
+    if _kernel_promoted and kernel_output is not None:
         try:
             _promoted_scored, _promoted_brief = to_legacy_scoring(kernel_output, claims)
             report_scored = _promoted_scored

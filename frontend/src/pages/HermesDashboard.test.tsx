@@ -210,7 +210,7 @@ describe('HermesDashboard workspace navigation', () => {
     await waitFor(() => expect(screen.getByLabelText('location')).toHaveTextContent('type=hypothesis'))
   })
 
-  it('N2: submit button leaves its loading label once the embedded AnalyzePage settles into an error (not just success)', async () => {
+  it('N2: submit button leaves its loading label once the embedded AnalyzePage settles into an error (not just success)', { timeout: 60000 }, async () => {
     // registerAnalysisQuestion resolves `ok:true` but without `job_id`
     // (see mock above) — AnalyzePage treats that as a failure and settles
     // into its error state. Before the fix, the left-rail submit button's

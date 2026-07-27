@@ -518,6 +518,7 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
     甚至比未來戳更嚴重：`max(0.0, min(1.0, nan))` 在 CPython 會回傳 1.0），
     且不應污染 now_ts（now_ts 必須維持有限值），也不應把其他正常文件的
     recency 拖老。"""
+    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")  # #733: full kernel for test
     import trustforge.trust.scoring as scoring_mod
     from trustforge.trust.scoring import _recency_decay
 
@@ -556,6 +557,8 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
 def test_run_agent_pipeline_step2_invokes_trust_kernel(monkeypatch):
     """Production Step2 should pass normalized claims through the Kernel facade."""
     from trustforge_core import KernelOutput
+
+    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")  # full kernel for test
 
     seen = {}
     real_run_kernel = orch.run_kernel
