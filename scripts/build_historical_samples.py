@@ -11,6 +11,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import tempfile
 from collections import Counter
 from csv import DictReader
 from datetime import date, datetime, timedelta, timezone
@@ -19,6 +21,10 @@ from typing import Any, Optional
 
 _DIRECTION_THRESHOLD = 0.03
 _DIRECTIONS = {"bullish", "bearish", "neutral"}
+_COINS = {"BTC", "ETH", "SOL", "BNB", "XRP"}
+_MAX_INPUT_BYTES = 32 * 1024 * 1024
+_MAX_JSON_LINE_BYTES = 1024 * 1024
+_MAX_REPLAY_FILES = 10_000
 _CONTRACT_PATH = Path(__file__).resolve().parents[1] / "docs/contracts/historical-sample-contract.md"
 _SOURCE_FAMILY = {
     "alternative-me-fng": "sentiment",
@@ -60,12 +66,23 @@ def load_fng_records(path: Path, counters: Counter[str]) -> list[dict[str, Any]]
     count. BTC is preferred when present.
     """
     by_day: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        if path.stat().st_size > _MAX_INPUT_BYTES:
+            counters["input_too_large"] += 1
+            return []
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        counters["malformed_input"] += 1
+        return []
+    for line in lines:
         if not line.strip():
+            continue
+        if len(line.encode("utf-8")) > _MAX_JSON_LINE_BYTES:
+            counters["input_too_large"] += 1
             continue
         try:
             rec = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             counters["malformed_input"] += 1
             continue
         if not isinstance(rec, dict):
@@ -120,16 +137,36 @@ def load_ohlcv(path: Path) -> dict[str, float]:
     return index
 
 
-def _load_replay_snapshots(
+def _bounded_replay_paths(
     replay_dir: Path, counters: Counter[str]
+) -> list[Path]:
+    paths = sorted(replay_dir.glob("*.json"))
+    if len(paths) > _MAX_REPLAY_FILES:
+        counters["too_many_replay_files"] += len(paths) - _MAX_REPLAY_FILES
+        paths = paths[:_MAX_REPLAY_FILES]
+    accepted: list[Path] = []
+    for path in paths:
+        try:
+            if path.stat().st_size > _MAX_INPUT_BYTES:
+                counters["input_too_large"] += 1
+                continue
+        except OSError:
+            counters["malformed_input"] += 1
+            continue
+        accepted.append(path)
+    return accepted
+
+
+def _load_replay_snapshots(
+    replay_dir: Path, counters: Counter[str], *, paths: list[Path] | None = None
 ) -> list[dict]:
     snapshots: list[dict[str, Any]] = []
-    for path in sorted(replay_dir.glob("*.json")):
+    for path in paths if paths is not None else _bounded_replay_paths(replay_dir, counters):
         if path.name == "index.json":
             continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
             counters["malformed_input"] += 1
             continue
         if not isinstance(value, dict):
@@ -204,42 +241,57 @@ def _report_fields(report: object) -> tuple[str, float, bool] | None:
 
 
 def extract_replay_evidence(
-    snapshot: dict[str, Any], counters: Counter[str]
+    snapshot: dict[str, Any], counters: Counter[str], requested_coin: str
 ) -> list[dict[str, Any]]:
-    """Return one record per unique source/family in a valid replay snapshot."""
+    """Return records only when the entire replay snapshot passes all gates."""
     as_of = _utc_datetime(snapshot.get("snapshot_at"))
     report = _report_fields(snapshot.get("report"))
     evidence = snapshot.get("evidence")
+    snapshot_coin = snapshot.get("coin")
     if as_of is None:
         counters["missing_or_invalid_timestamp"] += 1
         return []
     if report is None or not isinstance(evidence, list):
         counters["malformed_input"] += 1
         return []
+    if (
+        not isinstance(snapshot_coin, str)
+        or snapshot_coin.upper() not in _COINS
+        or snapshot_coin.upper() != requested_coin
+    ):
+        counters["snapshot_coin_mismatch"] += 1
+        return []
     direction, confidence, abstain = report
     result: dict[tuple[str, str], dict[str, Any]] = {}
+    rejected = False
     for item in evidence:
         if not isinstance(item, dict):
             counters["malformed_input"] += 1
+            rejected = True
             continue
         raw_timestamp = item.get("visible_at", item.get("published_at", item.get("fetched_at")))
         visible_at = _utc_datetime(raw_timestamp)
         if visible_at is None:
             counters["missing_or_invalid_timestamp"] += 1
+            rejected = True
             continue
         if visible_at > as_of:
             counters["future_evidence"] += 1
+            rejected = True
             continue
         source = item.get("source")
         if not isinstance(source, str) or not source.strip():
             counters["malformed_input"] += 1
+            rejected = True
             continue
         family = item.get("source_family") or item.get("kind") or _SOURCE_FAMILY.get(source)
         if family not in {"sentiment", "onchain", "price", "regulatory"}:
             counters["malformed_input"] += 1
+            rejected = True
             continue
         if source == "blockchain-com-charts" and str(snapshot.get("coin", "BTC")).upper() != "BTC":
             counters["blockchain_non_btc"] += 1
+            rejected = True
             continue
         key = (source, family)
         result[key] = {
@@ -254,6 +306,9 @@ def extract_replay_evidence(
             "evidence_strength": confidence,
             "abstain": abstain,
         }
+    if rejected:
+        counters["rejected_snapshots"] += 1
+        return []
     family_count = len({family for _, family in result})
     records = [result[key] for key in sorted(result)]
     for record in records:
@@ -286,12 +341,16 @@ def build_samples(
     counters: Counter[str] = Counter()
     ohlcv = load_ohlcv(ohlcv_path)
     artifacts = [str(_CONTRACT_PATH), str(fng_path), str(ohlcv_path)]
+    replay_paths: list[Path] = []
     if replay_dir is not None:
-        artifacts.extend(str(path) for path in sorted(replay_dir.glob("*.json")))
-    lhash = lineage_hash(*artifacts)
+        replay_paths = _bounded_replay_paths(replay_dir, counters)
+        artifacts.extend(str(path) for path in replay_paths)
     candidates: list[dict[str, Any]] = []
 
     fng_records = load_fng_records(fng_path, counters)
+    if counters["input_too_large"] and not fng_records:
+        return [], counters
+    lhash = lineage_hash(*artifacts)
     if coin == "BTC":
         for fng in fng_records:
             candidates.append({
@@ -308,8 +367,8 @@ def build_samples(
     else:
         counters["fng_non_btc"] += len(fng_records)
     if replay_dir is not None:
-        for snapshot in _load_replay_snapshots(replay_dir, counters):
-            candidates.extend(extract_replay_evidence(snapshot, counters))
+        for snapshot in _load_replay_snapshots(replay_dir, counters, paths=replay_paths):
+            candidates.extend(extract_replay_evidence(snapshot, counters, coin))
 
     samples: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -366,10 +425,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in samples),
-        encoding="utf-8",
+    output_bytes = "".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in samples
     )
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=output.parent, prefix=f".{output.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(output_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, output)
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
     print(json.dumps(dict(sorted(counters.items())), indent=2, sort_keys=True))
     return 0
 

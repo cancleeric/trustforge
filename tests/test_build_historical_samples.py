@@ -78,7 +78,7 @@ def test_pit_rejects_missing_invalid_and_future_evidence(timestamp: str | None) 
         "coin": "BTC",
         "report": {"direction": "bullish", "calibrated_confidence": 0.6},
         "evidence": [evidence],
-    }, counter)
+    }, counter, "BTC")
     assert result == []
     key = "future_evidence" if timestamp and timestamp.startswith("2026-01-02") else "missing_or_invalid_timestamp"
     assert counter[key] == 1
@@ -92,10 +92,82 @@ def test_hostile_python_string_is_never_evaluated(tmp_path: Path) -> None:
         "snapshot_at": "2026-01-01T00:00:00Z",
         "report": payload,
         "evidence": payload,
-    }, counter)
+    }, counter, "BTC")
     assert result == []
     assert not marker.exists()
     assert counter["malformed_input"] == 1
+
+
+@pytest.mark.parametrize("bad_kind", ["future", "missing", "malformed"])
+def test_snapshot_rejects_all_evidence_when_any_item_is_invalid(bad_kind: str) -> None:
+    bad: object
+    if bad_kind == "malformed":
+        bad = "not-an-object"
+    else:
+        bad = {
+            "source": "ohlcv-csv",
+            "kind": "price",
+            **({"visible_at": "2026-01-02T00:00:00Z"} if bad_kind == "future" else {}),
+        }
+    counter: Counter[str] = Counter()
+    result = samples.extract_replay_evidence({
+        "snapshot_at": "2026-01-01T12:00:00Z",
+        "coin": "BTC",
+        "report": {"direction": "bullish", "calibrated_confidence": 0.9},
+        "evidence": [
+            {
+                "source": "blockchain-com-charts",
+                "kind": "onchain",
+                "visible_at": "2026-01-01T08:00:00Z",
+            },
+            bad,
+        ],
+    }, counter, "BTC")
+    assert result == []
+    assert counter["rejected_snapshots"] == 1
+
+
+@pytest.mark.parametrize("snapshot_coin", [None, "DOGE", "ETH"])
+def test_snapshot_coin_must_be_supported_and_match_request(snapshot_coin: str | None) -> None:
+    counter: Counter[str] = Counter()
+    result = samples.extract_replay_evidence({
+        "snapshot_at": "2026-01-01T12:00:00Z",
+        "coin": snapshot_coin,
+        "report": {"direction": "bullish", "calibrated_confidence": 0.9},
+        "evidence": [{
+            "source": "ohlcv-csv",
+            "kind": "price",
+            "visible_at": "2026-01-01T08:00:00Z",
+        }],
+    }, counter, "BTC")
+    assert result == []
+    assert counter["snapshot_coin_mismatch"] == 1
+
+
+def test_replay_loader_fails_closed_on_oversize_unicode_and_deep_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    (replay / "oversize.json").write_text("{}", encoding="utf-8")
+    (replay / "unicode.json").write_bytes(b"\xff")
+    (replay / "deep.json").write_text("[" * 2_000 + "]" * 2_000, encoding="utf-8")
+    monkeypatch.setattr(samples, "_MAX_INPUT_BYTES", 1)
+    counter: Counter[str] = Counter()
+    assert samples._load_replay_snapshots(replay, counter) == []
+    assert counter["input_too_large"] == 2
+    assert counter["malformed_input"] == 1
+
+
+def test_fng_loader_fails_closed_when_file_exceeds_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fng = tmp_path / "fng.jsonl"
+    fng.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(samples, "_MAX_INPUT_BYTES", 1)
+    counter: Counter[str] = Counter()
+    assert samples.load_fng_records(fng, counter) == []
+    assert counter["input_too_large"] == 1
 
 
 def test_output_is_deterministic_and_cutoff_is_inclusive(tmp_path: Path) -> None:
@@ -121,7 +193,7 @@ def test_market_wide_and_blockchain_sources_are_btc_only(tmp_path: Path) -> None
     )
     assert all(row["source"] not in {"alternative-me-fng", "blockchain-com-charts"} for row in result)
     assert counters["fng_non_btc"] == 1
-    assert counters["blockchain_non_btc"] == 1
+    assert counters["snapshot_coin_mismatch"] == 1
 
 
 @pytest.mark.subprocess
@@ -129,6 +201,7 @@ def test_cli_writes_jsonl_and_reports_exclusions(tmp_path: Path) -> None:
     fng, ohlcv, replay = _write_inputs(tmp_path)
     (replay / "btc-2026-01-02.json").write_text(json.dumps({
         "snapshot_at": "2026-01-01T00:00:00Z",
+        "coin": "BTC",
         "report": {"direction": "bullish", "calibrated_confidence": 0.8},
         "evidence": [{"source": "x", "kind": "sentiment",
                       "fetched_at": "2026-01-02T00:00:00Z"}],

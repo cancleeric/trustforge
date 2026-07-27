@@ -130,8 +130,13 @@ T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = nu
    - 每個 `(coin, as_of, source, source_family)` 各自保留一列；同日
      sentiment/onchain/price 不互相覆寫
    - PIT gate：evidence visibility timestamp 必須存在、格式有效且 `≤ as_of`
-   - malformed JSON/schema、missing/invalid/future timestamp 全部排除並在 CLI
-     summary 分類計數
+   - Replay 採 snapshot-level fail-closed：任何一筆 evidence 是 malformed、
+     missing/invalid/future timestamp，整個 snapshot（包括原本有效 evidence 與
+     report direction/confidence）全部拒收，並在 CLI summary 分類計數
+   - `snapshot.coin` 必填、須為支援幣別且等於本次 requested coin；否則整個
+     snapshot 拒收並計入 `snapshot_coin_mismatch`
+   - 單一輸入檔上限 32 MiB、JSONL 單行上限 1 MiB、replay 最多 10,000 個
+     JSON 檔；超限、Unicode/JSON/recursion parse failure 均 fail-closed 並計數
    - Scope gate：`scope=market-wide` 的 FNG sample 不因 coin-expanded rows
      重複產生；Blockchain.com 僅接受 BTC
    - cutoff gate：`as_of` 的 UTC 日期必須 `≤ --cutoff YYYY-MM-DD`（inclusive）
@@ -204,6 +209,8 @@ def lineage_hash(files: list[str]) -> str:
 - [x] pipeline 可從明確 JSON/schema 與 OHLCV 產生 contract JSONL
 - [x] 同日 2+ source families 以不同 rows 保留
 - [x] PIT gate 排除並計數 missing/invalid/future evidence
+- [x] 任一 evidence 違反 PIT/schema 時整個 replay snapshot fail-closed
+- [x] snapshot coin identity 與 requested coin 一致
 - [x] FNG market-wide 同日期只產生一個 sample，不因多幣展開
 - [x] Blockchain 僅接受 BTC
 - [x] abstain samples 標記但不排除
