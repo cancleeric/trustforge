@@ -11,7 +11,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from trustforge.agent.shadow_contracts import canonical_json
-from trustforge.deployment_control import DeploymentControlLedger
+from trustforge.deployment_control import (
+    DeploymentAuthorization,
+    DeploymentControlLedger,
+)
 from trustforge.release_router import (
     ReleaseABRouter,
     ReleaseEndpoint,
@@ -78,9 +81,12 @@ def _policy(ratio=9999):
         "routing_key_id": "route-2026-07",
         "ramp_id": "ramp-1",
     }
-    digest = "sha256:" + hashlib.sha256(
-        b"trustforge.routing-policy.v1\x00" + canonical_json(payload)
-    ).hexdigest()
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"trustforge.routing-policy.v1\x00" + canonical_json(payload)
+        ).hexdigest()
+    )
     return RoutingPolicy(**payload, policy_digest=digest)
 
 
@@ -115,9 +121,12 @@ class _Ledger:
         assert expected_head == self.head
         self.reservations.add(reservation_id)
         self.requests += 1
-        self.head = "sha256:" + hashlib.sha256(
-            json.dumps(["reserve", self.requests]).encode()
-        ).hexdigest()
+        self.head = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(["reserve", self.requests]).encode()
+            ).hexdigest()
+        )
         return self.routing_snapshot()
 
     def record_candidate_result(
@@ -128,9 +137,12 @@ class _Ledger:
         self.errors = 0 if ok else self.errors + 1
         if self.errors >= self.stop_after:
             self.phase = "stopped"
-        self.head = "sha256:" + hashlib.sha256(
-            json.dumps([self.requests, self.errors]).encode()
-        ).hexdigest()
+        self.head = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps([self.requests, self.errors]).encode()
+            ).hexdigest()
+        )
         return self.routing_snapshot()
 
     def emergency_stop(self, *, ledger_id, reason):
@@ -149,20 +161,30 @@ def test_real_separate_http_releases_route_limited_b_without_core_import():
     a_server, _ = _server(b"A", "sha256:" + "a" * 64)
     b_server, _ = _server(b"B", "sha256:" + "b" * 64)
     try:
-        a = ReleaseEndpoint("sha256:" + "a" * 64, f"http://127.0.0.1:{a_server.server_port}", "manifest-1")
-        b = ReleaseEndpoint("sha256:" + "b" * 64, f"http://127.0.0.1:{b_server.server_port}", "manifest-1")
+        a = ReleaseEndpoint(
+            "sha256:" + "a" * 64,
+            f"http://127.0.0.1:{a_server.server_port}",
+            "manifest-1",
+        )
+        b = ReleaseEndpoint(
+            "sha256:" + "b" * 64,
+            f"http://127.0.0.1:{b_server.server_port}",
+            "manifest-1",
+        )
         ledger = _Ledger(a, b)
         router = ReleaseABRouter(
-            ledger, {"route-2026-07": b"r" * 32}, pinned_a_fallback=a,
+            ledger,
+            {"route-2026-07": b"r" * 32},
+            pinned_a_fallback=a,
             manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
         response = router.route(stable_subject="stable-user")
         assert response.release == "B"
         assert response.body == b"B"
         assert ledger.requests == 1
-        assert "trustforge_core" not in __import__(
-            "inspect"
-        ).getsource(__import__("trustforge.release_router", fromlist=["*"]))
+        assert "trustforge_core" not in __import__("inspect").getsource(
+            __import__("trustforge.release_router", fromlist=["*"])
+        )
     finally:
         a_server.shutdown()
         b_server.shutdown()
@@ -173,11 +195,21 @@ def test_real_b_failure_fails_over_a_and_durable_stop_prevents_next_b():
     b_server, b_handler = _server(b"B", "sha256:" + "b" * 64)
     b_handler.fail = True
     try:
-        a = ReleaseEndpoint("sha256:" + "a" * 64, f"http://127.0.0.1:{a_server.server_port}", "manifest-1")
-        b = ReleaseEndpoint("sha256:" + "b" * 64, f"http://127.0.0.1:{b_server.server_port}", "manifest-1")
+        a = ReleaseEndpoint(
+            "sha256:" + "a" * 64,
+            f"http://127.0.0.1:{a_server.server_port}",
+            "manifest-1",
+        )
+        b = ReleaseEndpoint(
+            "sha256:" + "b" * 64,
+            f"http://127.0.0.1:{b_server.server_port}",
+            "manifest-1",
+        )
         ledger = _Ledger(a, b)
         router = ReleaseABRouter(
-            ledger, {"route-2026-07": b"r" * 32}, pinned_a_fallback=a,
+            ledger,
+            {"route-2026-07": b"r" * 32},
+            pinned_a_fallback=a,
             manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
         failed = router.route(stable_subject="stable-user")
@@ -196,14 +228,20 @@ def test_real_b_failure_fails_over_a_and_durable_stop_prevents_next_b():
 def test_missing_or_corrupt_ledger_routes_pinned_a():
     a_server, _ = _server(b"A", "sha256:" + "a" * 64)
     try:
-        a = ReleaseEndpoint("sha256:" + "a" * 64, f"http://127.0.0.1:{a_server.server_port}", "manifest-1")
+        a = ReleaseEndpoint(
+            "sha256:" + "a" * 64,
+            f"http://127.0.0.1:{a_server.server_port}",
+            "manifest-1",
+        )
 
         class Broken:
             def routing_snapshot(self):
                 raise ValueError("tampered")
 
         router = ReleaseABRouter(
-            Broken(), {"route-2026-07": b"r" * 32}, pinned_a_fallback=a,
+            Broken(),
+            {"route-2026-07": b"r" * 32},
+            pinned_a_fallback=a,
             manifest_keyring={"manifest-1": _MANIFEST_PUBLIC_KEY},
         )
         response = router.route(stable_subject="stable-user")
@@ -239,7 +277,8 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         object.__setattr__(
             policy,
             "policy_digest",
-            "sha256:" + hashlib.sha256(
+            "sha256:"
+            + hashlib.sha256(
                 b"trustforge.routing-policy.v1\x00" + canonical_json(policy_payload)
             ).hexdigest(),
         )
@@ -247,13 +286,22 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         outcome_seed = b"o" * 32
         ledger = SignedEventLedger(
             directory=tmp_path / "ledger-root" / "control",
-            verification_keys={"control-1": Ed25519PrivateKey.from_private_bytes(
-                control_seed
-            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
-            event_permissions={"release-control": frozenset({
-                "deployment_initialized", "operator_stop", "activation_prepared",
-                "activation_completed", "activation_failed",
-            })},
+            verification_keys={
+                "control-1": Ed25519PrivateKey.from_private_bytes(control_seed)
+                .public_key()
+                .public_bytes(Encoding.Raw, PublicFormat.Raw)
+            },
+            event_permissions={
+                "release-control": frozenset(
+                    {
+                        "deployment_initialized",
+                        "operator_stop",
+                        "activation_prepared",
+                        "activation_completed",
+                        "activation_failed",
+                    }
+                )
+            },
             domain_keys={"release-control": frozenset({"control-1"})},
             signing_key_id="control-1",
             signing_private_key=control_seed,
@@ -264,12 +312,20 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         )
         outcome_ledger = SignedEventLedger(
             directory=tmp_path / "ledger-root" / "router-outcomes",
-            verification_keys={"outcome-1": Ed25519PrivateKey.from_private_bytes(
-                outcome_seed
-            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
-            event_permissions={"release-router-outcome": frozenset({
-                "candidate_reservation", "candidate_result", "router_emergency_stop",
-            })},
+            verification_keys={
+                "outcome-1": Ed25519PrivateKey.from_private_bytes(outcome_seed)
+                .public_key()
+                .public_bytes(Encoding.Raw, PublicFormat.Raw)
+            },
+            event_permissions={
+                "release-router-outcome": frozenset(
+                    {
+                        "candidate_reservation",
+                        "candidate_result",
+                        "router_emergency_stop",
+                    }
+                )
+            },
             domain_keys={"release-router-outcome": frozenset({"outcome-1"})},
             signing_key_id="outcome-1",
             signing_private_key=outcome_seed,
@@ -283,12 +339,16 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         control = DeploymentControlLedger(
             ledger,
             outcome_ledger=outcome_ledger,
-            authorization_keys={"auth": Ed25519PrivateKey.from_private_bytes(
-                b"a" * 32
-            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
-            completion_keys={"complete": Ed25519PrivateKey.from_private_bytes(
-                b"c" * 32
-            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
+            authorization_keys={
+                "auth": Ed25519PrivateKey.from_private_bytes(b"a" * 32)
+                .public_key()
+                .public_bytes(Encoding.Raw, PublicFormat.Raw)
+            },
+            completion_keys={
+                "complete": Ed25519PrivateKey.from_private_bytes(b"c" * 32)
+                .public_key()
+                .public_bytes(Encoding.Raw, PublicFormat.Raw)
+            },
             target=target,
             target_confirmation=confirmation,
             active=a,
@@ -321,10 +381,12 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         }
         auth_receipt = {
             **auth_unsigned,
-            "signature": Ed25519PrivateKey.from_private_bytes(b"a" * 32).sign(
+            "signature": Ed25519PrivateKey.from_private_bytes(b"a" * 32)
+            .sign(
                 b"trustforge.deployment-authorization.v3\x00"
                 + canonical_json(auth_unsigned)
-            ).hex(),
+            )
+            .hex(),
         }
         transaction_id = hashlib.sha256(
             b"trustforge.activation-transaction.v1\x00"
@@ -371,12 +433,14 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         }
         completion_receipt = {
             **completion_unsigned,
-            "signature": Ed25519PrivateKey.from_private_bytes(b"c" * 32).sign(
+            "signature": Ed25519PrivateKey.from_private_bytes(b"c" * 32)
+            .sign(
                 b"trustforge.activation-completion.v1\x00"
                 + canonical_json(completion_unsigned)
-            ).hex(),
+            )
+            .hex(),
         }
-        ledger.append(
+        terminal = ledger.append(
             {
                 "kind": "activation_completed",
                 "transaction_id": transaction_id,
@@ -384,14 +448,18 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
                 "prepared_event_hash": prepared["event_hash"],
                 "pointer_active_digest": a.release_digest,
                 "observed_manifest_digest": a.release_digest,
-                "activation_receipt_digest": "sha256:" + hashlib.sha256(
-                    canonical_json(completion_receipt)
-                ).hexdigest(),
+                "activation_receipt_digest": "sha256:"
+                + hashlib.sha256(canonical_json(completion_receipt)).hexdigest(),
                 "nonce": "complete-test",
                 "actor": "test",
                 "at": "2026-07-28T00:00:01Z",
                 "completion_receipt": completion_receipt,
             }
+        )
+        control._write_checkpoint(
+            authorization=DeploymentAuthorization(**auth_receipt),
+            terminal_record=terminal,
+            checkpoint_at=control._current_time(),
         )
         router = ReleaseABRouter(
             control,

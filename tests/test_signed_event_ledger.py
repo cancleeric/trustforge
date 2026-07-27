@@ -11,22 +11,35 @@ from trustforge.signed_event_ledger import SignedEventLedger, _write_all
 
 CONTROL_SEED = b"c" * 32
 ROUTER_SEED = b"r" * 32
-CONTROL_KINDS = frozenset({
-    "deployment_initialized", "operator_stop", "activation_prepared",
-    "activation_completed", "activation_failed",
-})
-ROUTER_KINDS = frozenset({
-    "candidate_reservation", "candidate_result", "router_emergency_stop",
-})
+CONTROL_KINDS = frozenset(
+    {
+        "deployment_initialized",
+        "operator_stop",
+        "activation_prepared",
+        "activation_completed",
+        "activation_failed",
+    }
+)
+ROUTER_KINDS = frozenset(
+    {
+        "candidate_reservation",
+        "candidate_result",
+        "router_emergency_stop",
+    }
+)
 
 
 def _public(seed: bytes) -> bytes:
-    return Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
-        Encoding.Raw, PublicFormat.Raw
+    return (
+        Ed25519PrivateKey.from_private_bytes(seed)
+        .public_key()
+        .public_bytes(Encoding.Raw, PublicFormat.Raw)
     )
 
 
-def _ledger(tmp_path, *, seed=CONTROL_SEED, domain="release-control", kinds=CONTROL_KINDS):
+def _ledger(
+    tmp_path, *, seed=CONTROL_SEED, domain="release-control", kinds=CONTROL_KINDS
+):
     return SignedEventLedger(
         directory=tmp_path / "ledger",
         verification_keys={
@@ -66,6 +79,31 @@ def test_projection_uses_public_keys_only_and_cannot_append(tmp_path):
         projection.append({"kind": "operator_stop"})
 
 
+def test_epoch_stop_latch_is_one_way_signed_and_projection_verifiable(tmp_path):
+    writer = _ledger(tmp_path)
+    initialized = writer.append({"kind": "deployment_initialized"})
+    epoch = "a" * 64
+    writer.trip_epoch_stop(ledger_id=initialized["ledger_id"], canary_epoch=epoch)
+    projection = SignedEventLedger(
+        directory=tmp_path / "ledger",
+        verification_keys={"control-1": _public(CONTROL_SEED)},
+        event_permissions={"release-control": CONTROL_KINDS},
+        domain_keys={"release-control": frozenset({"control-1"})},
+        ledger_role="release-control",
+        coordination_root=tmp_path,
+    )
+    assert projection.epoch_stopped(
+        ledger_id=initialized["ledger_id"], canary_epoch=epoch
+    )
+    writer.trip_epoch_stop(ledger_id=initialized["ledger_id"], canary_epoch=epoch)
+    path = tmp_path / "ledger" / f"epoch-stop-{epoch}.json"
+    payload = json.loads(path.read_text())
+    payload["ledger_id"] = "0" * 32
+    path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(LedgerError, match="authentication"):
+        projection.epoch_stopped(ledger_id=initialized["ledger_id"], canary_epoch=epoch)
+
+
 @pytest.mark.parametrize(
     "forbidden", ["operator_stop", "activation_prepared", "activation_completed"]
 )
@@ -87,11 +125,13 @@ def test_forged_router_signature_with_control_kind_fails_projection(tmp_path):
         domain="release-router-outcome",
         kinds=ROUTER_KINDS,
     )
-    router.append({
-        "kind": "candidate_reservation",
-        "deployment_ledger_id": "a" * 32,
-        "reservation_id": "1" * 32,
-    })
+    router.append(
+        {
+            "kind": "candidate_reservation",
+            "deployment_ledger_id": "a" * 32,
+            "reservation_id": "1" * 32,
+        }
+    )
     path = tmp_path / "ledger" / "events.jsonl"
     record = json.loads(path.read_text().strip())
     record["event"]["kind"] = "operator_stop"

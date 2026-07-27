@@ -12,9 +12,10 @@ imports the Kernel.
 
 The authenticated append-only deployment ledger at
 `/var/lib/trustforge/security-ledger` is the control-plane single source of
-truth. Every record is canonical, sequence/hash chained and HMAC authenticated.
-An independently authenticated head detects complete-tail truncation. The
-directory and files are owner-only `0700`/`0600`, opened with `O_NOFOLLOW`,
+truth. Every record is canonical and sequence/hash chained. Every record and
+its independently authenticated head is Ed25519 signed under an event-kind
+capability domain; the head detects complete-tail truncation. The directory
+and files are owner-only `0700`/`0600`, opened with `O_NOFOLLOW`,
 locked across verification and append, bounded, and file/directory fsynced.
 Unknown keys, corruption, truncation, stale heads and unsafe ownership fail
 closed.
@@ -23,6 +24,16 @@ The data-plane router reauthenticates this ledger before every possible B
 route. Missing/corrupt/disabled/stopped/prepared state, missing stable identity,
 missing routing key, exceeded request cap or invalid policy always routes the
 separately pinned A endpoint. It never logs a subject or subject-derived value.
+
+The router hot path is read-only. It never advances a clock file. After each
+successful control-plane terminal transition, the control process atomically
+writes and file/directory-fsyncs a coarse authorization checkpoint. That
+checkpoint contains the original signed `DeploymentAuthorization` (it invents
+no new signer) and is challenged against the latest signed control
+head/sequence. An unresolved authorization is always checked against the real
+current clock, never an attacker-controlled event timestamp. A clock rollback
+below the checkpoint blocks B, start and promotion, while status, stop,
+rollback-to-A and failed-transition reconciliation remain available.
 
 ## Protected inputs
 
@@ -128,6 +139,14 @@ transport error or HTTP 5xx fails over to A. At the configured consecutive
 error threshold the same result event carries the authenticated automatic-stop
 decision; the next request rereads `STOPPED` and cannot enter B. No health
 result can promote.
+
+Operator stop first creates an independent, Ed25519-signed, one-way latch for
+the current canary epoch using `O_EXCL`, mode `0600`, and file/directory fsync.
+The router checks that latch immediately before connecting to B. It does not
+hold the global coordination lock across HTTP: a request already connected to
+B at the instant of stop is the only bounded in-flight exception and remains
+limited by the signed policy timeout; requests not yet connected fail closed
+to A immediately.
 
 The executable data plane is `scripts/release_router_service.py`, packaged by
 `deploy/trustforge-release-router.service`. It accepts idempotent GET only;

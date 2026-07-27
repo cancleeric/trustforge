@@ -1,4 +1,5 @@
 """Release-level A/B HTTP router; never imports or modifies the Trust Kernel."""
+
 from __future__ import annotations
 
 import hashlib
@@ -52,14 +53,23 @@ class ReleaseEndpoint:
 
     def __post_init__(self) -> None:
         parsed = urllib.parse.urlsplit(self.base_url)
-        if parsed.scheme != "http" or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        if (
+            parsed.scheme != "http"
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
             raise ReleaseRoutingError("release endpoint must be an HTTP origin")
         try:
             address = ipaddress.ip_address(parsed.hostname or "")
         except ValueError as exc:
-            raise ReleaseRoutingError("release endpoint must use an explicit IP") from exc
+            raise ReleaseRoutingError(
+                "release endpoint must use an explicit IP"
+            ) from exc
         if not address.is_loopback:
-            raise ReleaseRoutingError("release endpoint must be a local immutable release service")
+            raise ReleaseRoutingError(
+                "release endpoint must be a local immutable release service"
+            )
         if parsed.port is None:
             raise ReleaseRoutingError("release endpoint requires an explicit port")
         if not self.manifest_key_id:
@@ -82,18 +92,21 @@ class RoutingPolicy:
             raise ReleaseRoutingError("request cap is invalid")
         if not 10 <= self.timeout_ms <= 10_000:
             raise ReleaseRoutingError("candidate timeout is invalid")
-        expected = "sha256:" + hashlib.sha256(
-            b"trustforge.routing-policy.v1\x00"
-            + canonical_json(
-                {
-                    "ratio_basis_points": self.ratio_basis_points,
-                    "request_cap": self.request_cap,
-                    "timeout_ms": self.timeout_ms,
-                    "routing_key_id": self.routing_key_id,
-                    "ramp_id": self.ramp_id,
-                }
-            )
-        ).hexdigest()
+        expected = (
+            "sha256:"
+            + hashlib.sha256(
+                b"trustforge.routing-policy.v1\x00"
+                + canonical_json(
+                    {
+                        "ratio_basis_points": self.ratio_basis_points,
+                        "request_cap": self.request_cap,
+                        "timeout_ms": self.timeout_ms,
+                        "routing_key_id": self.routing_key_id,
+                        "ramp_id": self.ramp_id,
+                    }
+                )
+            ).hexdigest()
+        )
         if not hmac.compare_digest(self.policy_digest, expected):
             raise ReleaseRoutingError("routing policy digest mismatch")
 
@@ -111,6 +124,7 @@ class RoutingSnapshot:
     consecutive_errors: int
     stop_after_errors: int
     ledger_head: str
+    candidate_blocked: bool = False
 
 
 class ReleaseRoutingLedger(Protocol):
@@ -189,7 +203,10 @@ class ReleaseABRouter:
                 return self._request_a_fallback(path, request_headers)
             if not self._candidate_selected(snapshot, stable_subject):
                 return self._request(
-                    snapshot.active, path, release="A", failed_over=False,
+                    snapshot.active,
+                    path,
+                    release="A",
+                    failed_over=False,
                     request_headers=request_headers,
                 )
             reservation_id = secrets.token_hex(16)
@@ -205,6 +222,7 @@ class ReleaseABRouter:
         if snapshot is None:
             return self._request_a_fallback(path, request_headers)
         import time
+
         started = time.monotonic()
         try:
             with self.ledger.candidate_execution(reservation_id=reservation_id):
@@ -229,7 +247,8 @@ class ReleaseABRouter:
             return response
         except Exception as exc:
             error_kind = (
-                "timeout" if isinstance(exc, TimeoutError)
+                "timeout"
+                if isinstance(exc, TimeoutError)
                 else "candidate_http_or_transport_error"
             )
             try:
@@ -250,7 +269,10 @@ class ReleaseABRouter:
                 except Exception:
                     pass
             return self._request(
-                snapshot.active, path, release="A", failed_over=True,
+                snapshot.active,
+                path,
+                release="A",
+                failed_over=True,
                 request_headers=request_headers,
             )
 
@@ -261,6 +283,7 @@ class ReleaseABRouter:
             snapshot.phase != "canary"
             or snapshot.desired_phase != "canary"
             or snapshot.activation_status != "completed"
+            or snapshot.candidate_blocked
             or not stable_subject
             or snapshot.candidate_requests >= snapshot.policy.request_cap
         ):
@@ -279,14 +302,18 @@ class ReleaseABRouter:
             "ledger_id": snapshot.ledger_id,
             "ramp_id": snapshot.policy.ramp_id,
         }
-        bucket = int.from_bytes(
-            hmac.new(
-                secret,
-                b"trustforge.routing-bucket.v1\x00" + canonical_json(bucket_payload),
-                hashlib.sha256,
-            ).digest()[:8],
-            "big",
-        ) % 10_000
+        bucket = (
+            int.from_bytes(
+                hmac.new(
+                    secret,
+                    b"trustforge.routing-bucket.v1\x00"
+                    + canonical_json(bucket_payload),
+                    hashlib.sha256,
+                ).digest()[:8],
+                "big",
+            )
+            % 10_000
+        )
         return bucket < snapshot.policy.ratio_basis_points
 
     def _request_a_fallback(
@@ -319,8 +346,7 @@ class ReleaseABRouter:
             or parsed_path.scheme
             or parsed_path.netloc
             or not (
-                parsed_path.path == "/healthz"
-                or parsed_path.path.startswith("/api/")
+                parsed_path.path == "/healthz" or parsed_path.path.startswith("/api/")
             )
         ):
             raise ReleaseRoutingError("request path is not allowlisted")
@@ -364,7 +390,9 @@ class ReleaseABRouter:
             if lowered not in _SAFE_RESPONSE_HEADERS or "\n" in value or "\r" in value:
                 continue
             if lowered == "content-encoding" and value.lower() not in {
-                "br", "gzip", "identity"
+                "br",
+                "gzip",
+                "identity",
             }:
                 continue
             result.append((name, value))
@@ -373,10 +401,7 @@ class ReleaseABRouter:
     def _verify_endpoint_manifest(
         self, endpoint: ReleaseEndpoint, *, timeout: float
     ) -> None:
-        url = (
-            endpoint.base_url.rstrip("/")
-            + "/.well-known/trustforge-release-manifest"
-        )
+        url = endpoint.base_url.rstrip("/") + "/.well-known/trustforge-release-manifest"
         try:
             with _NO_REDIRECT_OPENER.open(url, timeout=timeout) as response:
                 raw = response.read(32_769)

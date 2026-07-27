@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -32,8 +33,10 @@ OUTCOME_KEY = b"o" * 32
 
 
 def _public(seed):
-    return Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
-        Encoding.Raw, PublicFormat.Raw
+    return (
+        Ed25519PrivateKey.from_private_bytes(seed)
+        .public_key()
+        .public_bytes(Encoding.Raw, PublicFormat.Raw)
     )
 
 
@@ -71,9 +74,12 @@ def _policy():
         "routing_key_id": "route-1",
         "ramp_id": "ramp-1",
     }
-    digest = "sha256:" + hashlib.sha256(
-        b"trustforge.routing-policy.v1\x00" + canonical_json(payload)
-    ).hexdigest()
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"trustforge.routing-policy.v1\x00" + canonical_json(payload)
+        ).hexdigest()
+    )
     return RoutingPolicy(**payload, policy_digest=digest)
 
 
@@ -81,14 +87,23 @@ def _control(tmp_path, *, clock=lambda: NOW):
     active = ReleaseEndpoint(_digest("a"), "http://127.0.0.1:18081", "manifest-1")
     candidate = ReleaseEndpoint(_digest("b"), "http://127.0.0.1:18082", "manifest-1")
     target = "trustforge-production"
-    confirmation = f"PRODUCTION:{target}:{active.release_digest}:{candidate.release_digest}"
+    confirmation = (
+        f"PRODUCTION:{target}:{active.release_digest}:{candidate.release_digest}"
+    )
     ledger = SignedEventLedger(
         directory=tmp_path / "ledger-root" / "control",
         verification_keys={"control-1": _public(CONTROL_KEY)},
-        event_permissions={"release-control": frozenset({
-            "deployment_initialized", "operator_stop", "activation_prepared",
-            "activation_completed", "activation_failed",
-        })},
+        event_permissions={
+            "release-control": frozenset(
+                {
+                    "deployment_initialized",
+                    "operator_stop",
+                    "activation_prepared",
+                    "activation_completed",
+                    "activation_failed",
+                }
+            )
+        },
         domain_keys={"release-control": frozenset({"control-1"})},
         signing_key_id="control-1",
         signing_private_key=CONTROL_KEY,
@@ -100,9 +115,15 @@ def _control(tmp_path, *, clock=lambda: NOW):
     outcome_ledger = SignedEventLedger(
         directory=tmp_path / "ledger-root" / "router-outcomes",
         verification_keys={"outcome-1": _public(OUTCOME_KEY)},
-        event_permissions={"release-router-outcome": frozenset({
-            "candidate_reservation", "candidate_result", "router_emergency_stop",
-        })},
+        event_permissions={
+            "release-router-outcome": frozenset(
+                {
+                    "candidate_reservation",
+                    "candidate_result",
+                    "router_emergency_stop",
+                }
+            )
+        },
         domain_keys={"release-router-outcome": frozenset({"outcome-1"})},
         signing_key_id="outcome-1",
         signing_private_key=OUTCOME_KEY,
@@ -151,9 +172,13 @@ def _authorization(control, action, nonce):
         "key_id": "auth-1",
         "receipt_version": "trustforge.deployment-authorization/v3",
     }
-    signature = Ed25519PrivateKey.from_private_bytes(AUTH_KEY).sign(
-        b"trustforge.deployment-authorization.v3\x00" + canonical_json(unsigned),
-    ).hex()
+    signature = (
+        Ed25519PrivateKey.from_private_bytes(AUTH_KEY)
+        .sign(
+            b"trustforge.deployment-authorization.v3\x00" + canonical_json(unsigned),
+        )
+        .hex()
+    )
     return DeploymentAuthorization(**unsigned, signature=signature)
 
 
@@ -165,12 +190,16 @@ def _completion(control, prepared, action, nonce, *, pointer=None, status="compl
         "prepared_event_hash": prepared["event_hash"],
         "active_artifact_digest": control.active.release_digest,
         "candidate_artifact_digest": control.candidate.release_digest,
-        "pointer_active_digest": pointer or (
-            control.candidate.release_digest if action == "promote"
+        "pointer_active_digest": pointer
+        or (
+            control.candidate.release_digest
+            if action == "promote"
             else control.active.release_digest
         ),
-        "observed_manifest_digest": pointer or (
-            control.candidate.release_digest if action == "promote"
+        "observed_manifest_digest": pointer
+        or (
+            control.candidate.release_digest
+            if action == "promote"
             else control.active.release_digest
         ),
         "status": status,
@@ -180,9 +209,13 @@ def _completion(control, prepared, action, nonce, *, pointer=None, status="compl
         "key_id": "complete-1",
         "receipt_version": "trustforge.activation-completion/v1",
     }
-    signature = Ed25519PrivateKey.from_private_bytes(COMPLETE_KEY).sign(
-        b"trustforge.activation-completion.v1\x00" + canonical_json(unsigned),
-    ).hex()
+    signature = (
+        Ed25519PrivateKey.from_private_bytes(COMPLETE_KEY)
+        .sign(
+            b"trustforge.activation-completion.v1\x00" + canonical_json(unsigned),
+        )
+        .hex()
+    )
     return ActivationCompletionReceipt(**unsigned, signature=signature)
 
 
@@ -196,7 +229,9 @@ def activation_backend():
 
 def test_prepared_is_not_active_and_completed_receipt_reconciles_pointer(tmp_path):
     control = _control(tmp_path)
-    prepared = control.prepare("start", _authorization(control, "start", "auth-start"), now=NOW)
+    prepared = control.prepare(
+        "start", _authorization(control, "start", "auth-start"), now=NOW
+    )
     state = control.routing_snapshot()
     assert state.phase == "disabled"
     assert state.desired_phase == "canary"
@@ -211,9 +246,15 @@ def test_prepared_is_not_active_and_completed_receipt_reconciles_pointer(tmp_pat
 
 def test_forged_pointer_completion_is_rejected_and_lock_remains_for_retry(tmp_path):
     control = _control(tmp_path)
-    prepared = control.prepare("start", _authorization(control, "start", "auth-start"), now=NOW)
+    prepared = control.prepare(
+        "start", _authorization(control, "start", "auth-start"), now=NOW
+    )
     forged = _completion(
-        control, prepared, "start", "complete-start", pointer=control.candidate.release_digest
+        control,
+        prepared,
+        "start",
+        "complete-start",
+        pointer=control.candidate.release_digest,
     )
     with pytest.raises(DeploymentControlError, match="binding"):
         control.complete(forged, now=NOW)
@@ -222,7 +263,9 @@ def test_forged_pointer_completion_is_rejected_and_lock_remains_for_retry(tmp_pa
 
 def test_failed_activation_is_distinct_and_observed_known_pointer_is_accepted(tmp_path):
     control = _control(tmp_path)
-    prepared = control.prepare("start", _authorization(control, "start", "auth-start"), now=NOW)
+    prepared = control.prepare(
+        "start", _authorization(control, "start", "auth-start"), now=NOW
+    )
     failed = _completion(
         control,
         prepared,
@@ -262,7 +305,9 @@ def test_production_prepare_rejects_local_json_activation_lock(tmp_path, monkeyp
 
 def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path):
     control = _control(tmp_path)
-    prepared = control.prepare("start", _authorization(control, "start", "auth-start"), now=NOW)
+    prepared = control.prepare(
+        "start", _authorization(control, "start", "auth-start"), now=NOW
+    )
     control.complete(_completion(control, prepared, "start", "complete-start"), now=NOW)
     first = control.routing_snapshot()
     reserved = control.reserve_candidate(
@@ -299,9 +344,7 @@ def _start_canary(control, suffix):
         "start", _authorization(control, "start", f"auth-start-{suffix}"), now=NOW
     )
     control.complete(
-        _completion(
-            control, prepared, "start", f"complete-start-{suffix}"
-        ),
+        _completion(control, prepared, "start", f"complete-start-{suffix}"),
         now=NOW,
     )
 
@@ -351,9 +394,7 @@ def test_restart_canary_epoch_excludes_old_ramp_outcomes(tmp_path):
         latency_ms=1,
         error_kind="candidate_http_or_transport_error",
     )
-    control.prepare(
-        "stop", _authorization(control, "stop", "auth-stop-epoch"), now=NOW
-    )
+    control.prepare("stop", _authorization(control, "stop", "auth-stop-epoch"), now=NOW)
     _start_canary(control, "epoch-2")
     restarted = _control(tmp_path)
     state = restarted.routing_snapshot()
@@ -361,8 +402,7 @@ def test_restart_canary_epoch_excludes_old_ramp_outcomes(tmp_path):
     assert state.candidate_requests == 0
     assert state.consecutive_errors == 0
     epochs = {
-        record["event"]["canary_epoch"]
-        for record in restarted.outcome_ledger.read()
+        record["event"]["canary_epoch"] for record in restarted.outcome_ledger.read()
     }
     assert len(epochs) == 1
     assert next(iter(epochs)) != restarted._canary_epoch(restarted._records())
@@ -386,10 +426,14 @@ def test_expired_authorization_cannot_be_consumed_with_backdated_event_time(tmp_
         expires_at=(NOW - timedelta(minutes=1)).isoformat(),
         signature="",
     )
-    signature = Ed25519PrivateKey.from_private_bytes(AUTH_KEY).sign(
-        b"trustforge.deployment-authorization.v3\x00"
-        + canonical_json(backdated.unsigned())
-    ).hex()
+    signature = (
+        Ed25519PrivateKey.from_private_bytes(AUTH_KEY)
+        .sign(
+            b"trustforge.deployment-authorization.v3\x00"
+            + canonical_json(backdated.unsigned())
+        )
+        .hex()
+    )
     with pytest.raises(DeploymentControlError, match="not current"):
         control.prepare(
             "start",
@@ -398,10 +442,142 @@ def test_expired_authorization_cannot_be_consumed_with_backdated_event_time(tmp_
         )
 
 
-def test_restart_fails_closed_when_wall_clock_rolls_back(tmp_path):
-    _control(tmp_path, clock=lambda: NOW + timedelta(minutes=1))
+def test_direct_backdated_append_cannot_revive_expired_authorization(tmp_path):
+    control = _control(tmp_path)
+    receipt = _authorization(control, "start", "direct-expired")
+    receipt = replace(
+        receipt,
+        issued_at=(NOW - timedelta(minutes=10)).isoformat(),
+        expires_at=(NOW - timedelta(minutes=1)).isoformat(),
+        signature="",
+    )
+    receipt = replace(
+        receipt,
+        signature=Ed25519PrivateKey.from_private_bytes(AUTH_KEY)
+        .sign(
+            b"trustforge.deployment-authorization.v3\x00"
+            + canonical_json(receipt.unsigned())
+        )
+        .hex(),
+    )
+    transaction = hashlib.sha256(
+        b"trustforge.activation-transaction.v1\x00"
+        + canonical_json(
+            {
+                "ledger_id": receipt.ledger_id,
+                "action": receipt.action,
+                "nonce": receipt.nonce,
+            }
+        )
+    ).hexdigest()
+    control.ledger.append(
+        {
+            "kind": "activation_prepared",
+            "transaction_id": transaction,
+            "action": "start",
+            "desired_phase": "canary",
+            "nonce": receipt.nonce,
+            "actor": receipt.actor,
+            "owner_id": f"deployment-control:{transaction}",
+            "evidence_bundle_digest": control.evidence_bundle_digest,
+            "active_artifact_digest": control.active.release_digest,
+            "candidate_artifact_digest": control.candidate.release_digest,
+            "routing_policy_digest": control.policy.policy_digest,
+            "at": (NOW - timedelta(minutes=5)).isoformat(),
+            "authorization_receipt": asdict(receipt),
+        }
+    )
+    with pytest.raises(DeploymentControlError, match="stale"):
+        control.routing_snapshot()
+
+
+def test_router_snapshot_hot_path_is_read_only(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "read-only-hot-path")
+    before = {
+        path.name: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in control.ledger.directory.iterdir()
+    }
+    for _ in range(20):
+        assert control.routing_snapshot().phase == "canary"
+    after = {
+        path.name: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in control.ledger.directory.iterdir()
+    }
+    assert after == before
+    assert "monotonic-time-floor" not in after
+
+
+def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "checkpoint-first")
+    old = control._checkpoint_path.read_bytes()
+    control.prepare("stop", _authorization(control, "stop", "checkpoint-stop"), now=NOW)
+    control._checkpoint_path.write_bytes(old)
+    os.chmod(control._checkpoint_path, 0o600)
+    with pytest.raises(DeploymentControlError, match="terminal head"):
+        control.routing_snapshot()
+    damaged = bytearray(old)
+    damaged[-3] ^= 1
+    control._checkpoint_path.write_bytes(damaged)
+    os.chmod(control._checkpoint_path, 0o600)
+    with pytest.raises(DeploymentControlError, match="checkpoint"):
+        control.routing_snapshot()
+
+
+def test_concurrent_checkpoint_readers_never_observe_partial_file(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "checkpoint-concurrency")
+    records = control._records()
+    terminal = records[-1]
+    prepared_hash = terminal["event"]["prepared_event_hash"]
+    prepared = next(item for item in records if item["event_hash"] == prepared_hash)
+    authorization = DeploymentAuthorization(
+        **prepared["event"]["authorization_receipt"]
+    )
+    errors = []
+
+    def writer():
+        for _ in range(30):
+            control._write_checkpoint(
+                authorization=authorization,
+                terminal_record=terminal,
+                checkpoint_at=NOW,
+            )
+
+    def reader():
+        for _ in range(100):
+            try:
+                control.routing_snapshot()
+            except Exception as exc:  # asserted below
+                errors.append(exc)
+
+    workers = [threading.Thread(target=writer)] + [
+        threading.Thread(target=reader) for _ in range(3)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(5)
+        assert not worker.is_alive()
+    assert errors == []
+
+
+def test_clock_rollback_blocks_b_and_start_but_status_remains_available(tmp_path):
+    observed = [NOW]
+    control = _control(tmp_path, clock=lambda: observed[0])
+    _start_canary(control, "clock-checkpoint")
+    observed[0] = NOW - timedelta(minutes=1)
+    restarted = _control(tmp_path, clock=lambda: observed[0])
+    assert restarted.routing_snapshot().phase == "canary"
+    assert restarted.routing_snapshot().candidate_blocked is True
+    receipt = _authorization(restarted, "start", "clock-rollback-start")
     with pytest.raises(DeploymentControlError, match="clock rolled back"):
-        _control(tmp_path, clock=lambda: NOW)
+        restarted.prepare("start", receipt, now=observed[0])
+    stop_receipt = _authorization(restarted, "stop", "clock-rollback-stop")
+    restarted.prepare("stop", stop_receipt, now=observed[0])
+    assert restarted.routing_snapshot().phase == "stopped"
+    assert restarted.routing_snapshot().candidate_blocked is True
 
 
 def test_projection_rejects_failed_receipt_as_completed_event(tmp_path):
@@ -424,7 +600,8 @@ def test_projection_rejects_failed_receipt_as_completed_event(tmp_path):
             "prepared_event_hash": receipt.prepared_event_hash,
             "pointer_active_digest": receipt.pointer_active_digest,
             "observed_manifest_digest": receipt.observed_manifest_digest,
-            "activation_receipt_digest": "sha256:" + hashlib.sha256(
+            "activation_receipt_digest": "sha256:"
+            + hashlib.sha256(
                 canonical_json(receipt.unsigned() | {"signature": receipt.signature})
             ).hexdigest(),
             "nonce": receipt.nonce,
@@ -542,3 +719,36 @@ def test_candidate_execution_rechecks_stop_before_network_start(tmp_path):
         with control.candidate_execution(reservation_id=reservation_id):
             network_started = True
     assert network_started is False
+
+
+def test_hanging_candidate_does_not_delay_epoch_stop_latch(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "hanging-b")
+    state = control.routing_snapshot()
+    reservation_id = "e" * 32
+    control.reserve_candidate(
+        expected_head=state.ledger_head, reservation_id=reservation_id
+    )
+    epoch = control._canary_epoch(control._records())
+    assert epoch is not None
+    connected = threading.Event()
+    release_hang = threading.Event()
+
+    def hanging_candidate():
+        with control.candidate_execution(reservation_id=reservation_id):
+            connected.set()
+            release_hang.wait(2)
+
+    worker = threading.Thread(target=hanging_candidate)
+    worker.start()
+    assert connected.wait(1)
+    started = __import__("time").monotonic()
+    control.prepare("stop", _authorization(control, "stop", "stop-hanging-b"), now=NOW)
+    elapsed = __import__("time").monotonic() - started
+    assert elapsed < 0.5
+    assert control.ledger.epoch_stopped(
+        ledger_id=control._records()[0]["ledger_id"], canary_epoch=epoch
+    )
+    release_hang.set()
+    worker.join(1)
+    assert not worker.is_alive()

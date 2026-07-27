@@ -1,4 +1,5 @@
 """Ed25519-authenticated, append-only event ledger with signer capabilities."""
+
 from __future__ import annotations
 
 import fcntl
@@ -29,13 +30,17 @@ SCHEMA = "trustforge.signed-event-ledger/v2"
 HEAD_SCHEMA = "trustforge.signed-event-ledger-head/v2"
 BOOTSTRAP_SCHEMA = "trustforge.signed-ledger-bootstrap/v1"
 BOOTSTRAP_FILENAME = "bootstrap.json"
+EPOCH_STOP_PREFIX = "epoch-stop-"
 SECURITY_LEDGER_ROOT = Path("/var/lib/trustforge/security-ledger")
 
 
 def _canonical(value: Any) -> bytes:
     try:
         return json.dumps(
-            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
             allow_nan=False,
         ).encode()
     except (TypeError, ValueError) as exc:
@@ -90,8 +95,7 @@ class SignedEventLedger:
         ):
             raise LedgerError("signer event permissions are required")
         if set(domain_keys) != set(event_permissions) or any(
-            not key_ids
-            or not key_ids.issubset(verification_keys)
+            not key_ids or not key_ids.issubset(verification_keys)
             for key_ids in domain_keys.values()
         ):
             raise LedgerError("each signer domain requires explicit verification keys")
@@ -101,12 +105,16 @@ class SignedEventLedger:
         ):
             raise LedgerError("complete signing identity is required")
         if signing_private_key is not None:
-            if len(signing_private_key) != 32 or signing_key_id not in verification_keys:
+            if (
+                len(signing_private_key) != 32
+                or signing_key_id not in verification_keys
+            ):
                 raise LedgerError("Ed25519 signing key is invalid")
             derived = Ed25519PrivateKey.from_private_bytes(signing_private_key)
-            if derived.public_key().public_bytes(
-                Encoding.Raw, PublicFormat.Raw
-            ) != verification_keys[signing_key_id]:
+            if (
+                derived.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+                != verification_keys[signing_key_id]
+            ):
                 raise LedgerError("signing private key does not match verification key")
             if signing_domain not in event_permissions:
                 raise LedgerError("signing domain has no event permissions")
@@ -167,10 +175,9 @@ class SignedEventLedger:
         if not existed:
             os.chmod(self.directory, 0o700)
         if bootstrap and not self._bootstrap_path().exists():
-            if (
-                (self.directory / "events.jsonl").exists()
-                or (self.directory / "head.json").exists()
-            ):
+            if (self.directory / "events.jsonl").exists() or (
+                self.directory / "head.json"
+            ).exists():
                 raise LedgerError("cannot bootstrap a non-empty ledger")
             self._write_bootstrap()
         self._verify_bootstrap()
@@ -250,14 +257,12 @@ class SignedEventLedger:
             or info.st_size > self._max_event_bytes
             or not isinstance(payload, dict)
             or _canonical(payload) + b"\n" != raw
-            or set(payload) != {
-                "schema", "ledger_role", "key_id", "signer_domain", "signature"
-            }
+            or set(payload)
+            != {"schema", "ledger_role", "key_id", "signer_domain", "signature"}
             or payload["schema"] != BOOTSTRAP_SCHEMA
             or payload["ledger_role"] != self.ledger_role
-            or payload["key_id"] not in self._domain_keys.get(
-                payload["signer_domain"], frozenset()
-            )
+            or payload["key_id"]
+            not in self._domain_keys.get(payload["signer_domain"], frozenset())
         ):
             raise LedgerError("ledger bootstrap record is invalid")
         key = self._verification_keys.get(payload["key_id"])
@@ -272,6 +277,127 @@ class SignedEventLedger:
         except (InvalidSignature, ValueError) as exc:
             raise LedgerError("ledger bootstrap signature is invalid") from exc
 
+    def trip_epoch_stop(self, *, ledger_id: str, canary_epoch: str) -> None:
+        """Create a signed, one-way stop latch for one canary epoch."""
+        if (
+            self._private_key is None
+            or self._signing_key_id is None
+            or self._signing_domain is None
+            or len(ledger_id) != 32
+            or len(canary_epoch) != 64
+            or any(character not in "0123456789abcdef" for character in canary_epoch)
+        ):
+            raise LedgerError("epoch stop latch identity is invalid")
+        unsigned = {
+            "schema": "trustforge.epoch-stop/v1",
+            "ledger_id": ledger_id,
+            "canary_epoch": canary_epoch,
+            "key_id": self._signing_key_id,
+            "signer_domain": self._signing_domain,
+        }
+        payload = {
+            **unsigned,
+            "signature": self._private_key.sign(
+                b"trustforge.epoch-stop.v1\x00" + _canonical(unsigned)
+            ).hex(),
+        }
+        filename = EPOCH_STOP_PREFIX + canary_epoch + ".json"
+        directory_fd = self._open_directory()
+        try:
+            try:
+                fd = os.open(
+                    filename,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+            except FileExistsError:
+                if not self.epoch_stopped(
+                    ledger_id=ledger_id, canary_epoch=canary_epoch
+                ):
+                    raise LedgerError("existing epoch stop latch is invalid")
+                return
+            try:
+                _write_all(fd, _canonical(payload) + b"\n")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def epoch_stopped(self, *, ledger_id: str, canary_epoch: str) -> bool:
+        """Read and authenticate the immutable stop latch when present."""
+        if (
+            len(ledger_id) != 32
+            or len(canary_epoch) != 64
+            or any(character not in "0123456789abcdef" for character in canary_epoch)
+        ):
+            raise LedgerError("epoch stop latch identity is invalid")
+        filename = EPOCH_STOP_PREFIX + canary_epoch + ".json"
+        directory_fd = self._open_directory()
+        try:
+            try:
+                fd = os.open(
+                    filename,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError:
+                return False
+            try:
+                info = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid not in {0, os.geteuid()}
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_size > self._max_event_bytes
+                ):
+                    raise LedgerError("epoch stop latch metadata is unsafe")
+                raw = os.read(fd, self._max_event_bytes + 1)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory_fd)
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LedgerError("epoch stop latch is corrupt") from exc
+        required = {
+            "schema",
+            "ledger_id",
+            "canary_epoch",
+            "key_id",
+            "signer_domain",
+            "signature",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != required
+            or _canonical(payload) + b"\n" != raw
+        ):
+            raise LedgerError("epoch stop latch schema is invalid")
+        unsigned = {key: payload[key] for key in required if key != "signature"}
+        key_id = payload["key_id"]
+        domain = payload["signer_domain"]
+        key = self._verification_keys.get(key_id)
+        try:
+            if (
+                payload["schema"] != "trustforge.epoch-stop/v1"
+                or payload["ledger_id"] != ledger_id
+                or payload["canary_epoch"] != canary_epoch
+                or key_id not in self._domain_keys.get(domain, frozenset())
+                or key is None
+            ):
+                raise InvalidSignature
+            Ed25519PublicKey.from_public_bytes(key).verify(
+                bytes.fromhex(str(payload["signature"])),
+                b"trustforge.epoch-stop.v1\x00" + _canonical(unsigned),
+            )
+        except (InvalidSignature, ValueError) as exc:
+            raise LedgerError("epoch stop latch authentication failed") from exc
+        return True
+
     def _open_directory(self) -> int:
         fd = os.open(
             self.directory, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -285,8 +411,10 @@ class SignedEventLedger:
     @staticmethod
     def _open_file(directory_fd: int, name: str, *, create: bool) -> int:
         flags = (
-            (os.O_RDWR | os.O_APPEND) if create else os.O_RDONLY
-        ) | os.O_CLOEXEC | os.O_NOFOLLOW
+            ((os.O_RDWR | os.O_APPEND) if create else os.O_RDONLY)
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW
+        )
         try:
             fd = os.open(name, flags, dir_fd=directory_fd)
         except FileNotFoundError:
@@ -335,8 +463,15 @@ class SignedEventLedger:
         ledger_id: str | None = None
         nonces: set[str] = set()
         required = {
-            "schema", "sequence", "previous_hash", "event_hash", "key_id",
-            "signer_domain", "ledger_id", "event", "signature",
+            "schema",
+            "sequence",
+            "previous_hash",
+            "event_hash",
+            "key_id",
+            "signer_domain",
+            "ledger_id",
+            "event",
+            "signature",
         }
         for sequence, line in enumerate(raw.splitlines(), 1):
             if sequence > self._max_events or len(line) > self._max_event_bytes:
@@ -359,7 +494,8 @@ class SignedEventLedger:
                 record.get("sequence") != sequence
                 or record.get("previous_hash") != previous
                 or not isinstance(event, dict)
-                or event.get("kind") not in self._permissions.get(str(domain), frozenset())
+                or event.get("kind")
+                not in self._permissions.get(str(domain), frozenset())
                 or record.get("key_id")
                 not in self._domain_keys.get(str(domain), frozenset())
             ):
@@ -374,8 +510,13 @@ class SignedEventLedger:
             core = {
                 name: record[name]
                 for name in (
-                    "schema", "sequence", "previous_hash", "key_id",
-                    "signer_domain", "ledger_id", "event",
+                    "schema",
+                    "sequence",
+                    "previous_hash",
+                    "key_id",
+                    "signer_domain",
+                    "ledger_id",
+                    "event",
                 )
             }
             event_hash = hashlib.sha256(_canonical(core)).hexdigest()
@@ -417,10 +558,19 @@ class SignedEventLedger:
             raise LedgerError("ledger head is corrupt") from exc
         if not isinstance(head, dict) or _canonical(head) + b"\n" != raw:
             raise LedgerError("ledger head is invalid")
-        if set(head) != {
-            "schema", "count", "event_hash", "ledger_id", "key_id",
-            "signer_domain", "signature",
-        } or head.get("schema") != HEAD_SCHEMA:
+        if (
+            set(head)
+            != {
+                "schema",
+                "count",
+                "event_hash",
+                "ledger_id",
+                "key_id",
+                "signer_domain",
+                "signature",
+            }
+            or head.get("schema") != HEAD_SCHEMA
+        ):
             raise LedgerError("legacy or invalid ledger head schema")
         key = self._verification_keys.get(str(head.get("key_id", "")))
         unsigned = {key_: value for key_, value in head.items() if key_ != "signature"}
