@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -246,6 +247,53 @@ def test_fng_loader_fails_closed_when_file_exceeds_bound(
     counter: Counter[str] = Counter()
     assert samples.load_fng_records(fng, counter) == []
     assert counter["input_too_large"] == 1
+
+
+def test_symlink_input_fails_closed(tmp_path: Path) -> None:
+    target = tmp_path / "target.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+    link = tmp_path / "fng.jsonl"
+    link.symlink_to(target)
+    with pytest.raises(samples.ReplayInputError, match="not a regular file"):
+        samples._read_stable_bytes(link)
+
+
+def test_input_replacement_during_read_aborts_and_preserves_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fng, ohlcv, replay = _write_inputs(tmp_path)
+    output = tmp_path / "samples.jsonl"
+    output.write_bytes(b"trusted-old-output\n")
+    watched_inode = fng.stat().st_ino
+    real_read = os.read
+    replaced = False
+
+    def replacing_read(descriptor: int, count: int) -> bytes:
+        nonlocal replaced
+        data = real_read(descriptor, count)
+        if not replaced and os.fstat(descriptor).st_ino == watched_inode:
+            replacement = tmp_path / "replacement.jsonl"
+            replacement.write_text(
+                '{"published_at":"2026-01-01T00:00:00Z","value":99}\n',
+                encoding="utf-8",
+            )
+            os.replace(replacement, fng)
+            replaced = True
+        return data
+
+    monkeypatch.setattr(samples.os, "read", replacing_read)
+    with pytest.raises(samples.ReplayInputError, match="changed while being read"):
+        samples.main([
+            "--fng-jsonl", str(fng),
+            "--replay-dir", str(replay),
+            "--ohlcv-dir", str(ohlcv),
+            "--horizon", "1",
+            "--cutoff", "2026-01-01",
+            "--out", str(output),
+        ])
+    assert replaced
+    assert output.read_bytes() == b"trusted-old-output\n"
+    assert list(tmp_path.glob(f".{output.name}.*.tmp")) == []
 
 
 def test_output_is_deterministic_and_cutoff_is_inclusive(tmp_path: Path) -> None:

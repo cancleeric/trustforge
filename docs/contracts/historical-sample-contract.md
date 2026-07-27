@@ -142,9 +142,14 @@ T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = nu
    - Replay evidence 的 `source` 必須在程式內受審 allowlist；已知 source 的
      `source_family`、`provider`、`scope` 使用 canonical identity。輸入若宣告
      衝突 identity，整個 snapshot 拒收；未知 source 不可藉 replay 自行註冊
-   - Replay paths 先完成批次上限檢查，再逐檔串流 decode，不把全部 snapshots
-     常駐記憶體。Lineage 僅納入實際候選 JSON（排除 `index.json`），所有候選
-     replay JSON 使用相同 corpus lineage 語意
+   - Replay paths 先完成批次上限檢查，再將受總量上限保護的固定 byte
+     snapshots decode。Lineage 僅納入實際候選 JSON（排除 `index.json`），
+     所有候選 replay JSON 使用相同 corpus lineage 語意
+   - FNG、OHLCV、contract 與 replay artifact 必須各自以同一次固定 byte
+     snapshot 完成 size validation、SHA-256 lineage 與 parse；不得分離
+     stat/hash/parse 後重讀路徑。只接受 regular non-symlink file，讀取前後
+     device/inode/size/mtime/ctime 或路徑 identity 有任何變動即整批 abort，
+     不得發布新 output，既有 output 必須保留
    - Scope gate：`scope=market-wide` 的 FNG sample 不因 coin-expanded rows
      重複產生；Blockchain.com 僅接受 BTC
    - cutoff gate：`as_of` 的 UTC 日期必須 `≤ --cutoff YYYY-MM-DD`（inclusive）
@@ -195,8 +200,8 @@ claim、strength、source 或其他 feature。
 ```python
 def lineage_hash(files: list[str]) -> str:
     composite = b""
-    for f in sorted(files):
-        composite += hashlib.sha256(Path(f).read_bytes()).digest()
+    for f, fixed_bytes in sorted(stable_input_snapshots):
+        composite += hashlib.sha256(fixed_bytes).digest()
     return hashlib.sha256(composite).hexdigest()
 ```
 

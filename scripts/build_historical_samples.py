@@ -12,10 +12,12 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 from collections import Counter
 from csv import DictReader
 from datetime import date, datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from collections.abc import Iterator
 from typing import Any, Optional
@@ -38,6 +40,60 @@ _SOURCE_IDENTITY = {
 
 class ReplayInputError(ValueError):
     """The replay corpus violates a batch-level safety boundary."""
+
+
+def _read_stable_bytes(path: Path, *, limit: int | None = None) -> bytes:
+    """Read one regular, non-symlink input once and reject concurrent mutation."""
+    if limit is None:
+        limit = _MAX_INPUT_BYTES
+    try:
+        before_path = path.lstat()
+        if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
+            raise ReplayInputError(f"input is not a regular file: {path}")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            before_fd = os.fstat(descriptor)
+            identity = (before_fd.st_dev, before_fd.st_ino)
+            if identity != (before_path.st_dev, before_path.st_ino):
+                raise ReplayInputError(f"input identity changed before read: {path}")
+            if before_fd.st_size > limit:
+                raise ReplayInputError(f"input exceeds safety limit: {path}")
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            after_fd = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        after_path = path.lstat()
+    except ReplayInputError:
+        raise
+    except OSError as exc:
+        raise ReplayInputError(f"cannot read stable input: {path}") from exc
+    if len(data) > limit:
+        raise ReplayInputError(f"input exceeds safety limit: {path}")
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if (
+        len(data) != before_fd.st_size
+        or any(getattr(before_fd, key) != getattr(after_fd, key) for key in stable_fields)
+        or any(getattr(after_fd, key) != getattr(after_path, key) for key in stable_fields)
+    ):
+        raise ReplayInputError(f"input changed while being read: {path}")
+    return data
+
+
+def _decode_utf8(data: bytes, counters: Counter[str]) -> str | None:
+    try:
+        return data.decode("utf-8")
+    except UnicodeError:
+        counters["malformed_input"] += 1
+        return None
 
 
 def _utc_datetime(value: object) -> datetime | None:
@@ -64,7 +120,7 @@ def _date_cutoff(value: str) -> date:
     return parsed
 
 
-def load_fng_records(path: Path, counters: Counter[str]) -> list[dict[str, Any]]:
+def _parse_fng_records(data: bytes, counters: Counter[str]) -> list[dict[str, Any]]:
     """Load one market-wide FNG record per UTC date.
 
     ``published_at`` is the required evidence visibility timestamp. Duplicate
@@ -72,14 +128,10 @@ def load_fng_records(path: Path, counters: Counter[str]) -> list[dict[str, Any]]
     count. BTC is preferred when present.
     """
     by_day: dict[str, dict[str, Any]] = {}
-    try:
-        if path.stat().st_size > _MAX_INPUT_BYTES:
-            counters["input_too_large"] += 1
-            return []
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        counters["malformed_input"] += 1
+    text = _decode_utf8(data, counters)
+    if text is None:
         return []
+    lines = text.splitlines()
     for line in lines:
         if not line.strip():
             continue
@@ -117,6 +169,19 @@ def load_fng_records(path: Path, counters: Counter[str]) -> list[dict[str, Any]]
     return [by_day[key] for key in sorted(by_day)]
 
 
+def load_fng_records(path: Path, counters: Counter[str]) -> list[dict[str, Any]]:
+    """Backward-compatible loader using one stable byte snapshot."""
+    try:
+        data = _read_stable_bytes(path)
+    except ReplayInputError as exc:
+        if "exceeds safety limit" in str(exc) or "input exceeds" in str(exc):
+            counters["input_too_large"] += 1
+            return []
+        counters["malformed_input"] += 1
+        return []
+    return _parse_fng_records(data, counters)
+
+
 def load_fng_index(path: Path) -> dict[str, dict]:
     """Backward-compatible date index for existing research callers."""
     records = load_fng_records(path, Counter())
@@ -129,18 +194,24 @@ def load_fng_index(path: Path) -> dict[str, dict]:
     }
 
 
-def load_ohlcv(path: Path) -> dict[str, float]:
+def _parse_ohlcv(data: bytes, counters: Counter[str]) -> dict[str, float]:
     index: dict[str, float] = {}
-    with path.open(encoding="utf-8") as stream:
-        for row in DictReader(stream):
-            try:
-                value = float(row["close"])
-                date.fromisoformat(row["date"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if math.isfinite(value) and value > 0:
-                index[row["date"]] = value
+    text = _decode_utf8(data, counters)
+    if text is None:
+        return index
+    for row in DictReader(StringIO(text)):
+        try:
+            value = float(row["close"])
+            date.fromisoformat(row["date"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            index[row["date"]] = value
     return index
+
+
+def load_ohlcv(path: Path) -> dict[str, float]:
+    return _parse_ohlcv(_read_stable_bytes(path), Counter())
 
 
 def _bounded_replay_paths(
@@ -170,13 +241,23 @@ def _bounded_replay_paths(
 
 
 def _load_replay_snapshots(
-    replay_dir: Path, counters: Counter[str], *, paths: list[Path] | None = None
+    replay_dir: Path, counters: Counter[str], *, paths: list[Path] | None = None,
+    blobs: list[tuple[Path, bytes]] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Yield validated JSON objects without retaining the corpus in memory."""
-    for path in paths if paths is not None else _bounded_replay_paths(replay_dir, counters):
+    """Yield validated JSON objects from already-fixed byte snapshots."""
+    selected = blobs
+    if selected is None:
+        selected_paths = (
+            paths if paths is not None else _bounded_replay_paths(replay_dir, counters)
+        )
+        selected = [
+            (path, _read_stable_bytes(path))
+            for path in selected_paths
+        ]
+    for path, data in selected:
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+            value = json.loads(data)
+        except (UnicodeError, json.JSONDecodeError, RecursionError):
             counters["malformed_input"] += 1
             continue
         if not isinstance(value, dict):
@@ -339,14 +420,18 @@ def extract_replay_evidence(
     return records
 
 
-def lineage_hash(*file_paths: str) -> str:
+def _lineage_hash_bytes(blobs: list[tuple[Path, bytes]]) -> str:
     composite = b""
-    for file_path in sorted(file_paths):
-        path = Path(file_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"lineage artifact does not exist: {path}")
-        composite += hashlib.sha256(path.read_bytes()).digest()
+    for _, data in sorted(blobs, key=lambda item: str(item[0])):
+        composite += hashlib.sha256(data).digest()
     return hashlib.sha256(composite).hexdigest()
+
+
+def lineage_hash(*file_paths: str) -> str:
+    return _lineage_hash_bytes([
+        (Path(file_path), _read_stable_bytes(Path(file_path)))
+        for file_path in file_paths
+    ])
 
 
 def _sample_id(sample: dict[str, Any]) -> str:
@@ -362,18 +447,25 @@ def build_samples(
     coin: str, horizon: int, cutoff: date
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
     counters: Counter[str] = Counter()
-    ohlcv = load_ohlcv(ohlcv_path)
-    artifacts = [str(_CONTRACT_PATH), str(fng_path), str(ohlcv_path)]
+    contract_blob = _read_stable_bytes(_CONTRACT_PATH)
+    fng_blob = _read_stable_bytes(fng_path)
+    ohlcv_blob = _read_stable_bytes(ohlcv_path)
+    ohlcv = _parse_ohlcv(ohlcv_blob, counters)
+    artifacts = [(_CONTRACT_PATH, contract_blob), (fng_path, fng_blob), (ohlcv_path, ohlcv_blob)]
     replay_paths: list[Path] = []
+    replay_blobs: list[tuple[Path, bytes]] = []
     if replay_dir is not None:
         replay_paths = _bounded_replay_paths(replay_dir, counters)
-        artifacts.extend(str(path) for path in replay_paths)
+        replay_blobs = [(path, _read_stable_bytes(path)) for path in replay_paths]
+        if sum(len(data) for _, data in replay_blobs) > _MAX_REPLAY_TOTAL_BYTES:
+            raise ReplayInputError("replay corpus exceeds aggregate safety limit")
+        artifacts.extend(replay_blobs)
     candidates: list[dict[str, Any]] = []
 
-    fng_records = load_fng_records(fng_path, counters)
+    fng_records = _parse_fng_records(fng_blob, counters)
     if counters["input_too_large"] and not fng_records:
         return [], counters
-    lhash = lineage_hash(*artifacts)
+    lhash = _lineage_hash_bytes(artifacts)
     if coin == "BTC":
         for fng in fng_records:
             candidates.append({
@@ -390,7 +482,9 @@ def build_samples(
     else:
         counters["fng_non_btc"] += len(fng_records)
     if replay_dir is not None:
-        for snapshot in _load_replay_snapshots(replay_dir, counters, paths=replay_paths):
+        for snapshot in _load_replay_snapshots(
+            replay_dir, counters, paths=replay_paths, blobs=replay_blobs
+        ):
             candidates.extend(extract_replay_evidence(snapshot, counters, coin))
 
     samples: list[dict[str, Any]] = []
