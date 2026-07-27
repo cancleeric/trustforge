@@ -1,0 +1,169 @@
+{
+  "case_id": "reason_codes",
+  "commit": "346b89e2f86ec1718cf65460747cabfd3c469f7b",
+  "description": "Edge case: reason_codes populated",
+  "expected_projection": {
+    "abstain": true,
+    "coin": "BTC",
+    "confidence": 0.0,
+    "contrarian_texts": [
+      "BTC old news",
+      "BTC fresh news"
+    ],
+    "decision_state": "abstain",
+    "direction": "不明",
+    "evidence": [
+      {
+        "author": null,
+        "content_reference": "BTC old news",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:01:40Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "news",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "Reuters",
+        "source_url": "",
+        "trust": 0.473,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.986,
+          "reputation": 0.65
+        }
+      },
+      {
+        "author": null,
+        "content_reference": "BTC fresh news",
+        "data_lineage": null,
+        "fetched_at": "1970-01-01T00:16:39Z",
+        "flags": [],
+        "info_flags": [],
+        "kind": "news",
+        "related_claim": "BTC 市場判斷",
+        "reputation_mode": null,
+        "source": "Reuters",
+        "source_url": "",
+        "trust": 0.475,
+        "trust_components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 1.0,
+          "reputation": 0.65
+        }
+      }
+    ],
+    "independent_sources": 0,
+    "kernel_contract_version": "2.2.0",
+    "key_basis": [],
+    "query": "BTC outlook",
+    "raw_confidence": 0.0,
+    "reason_codes": [
+      "low_calibrated_confidence",
+      "insufficient_independent_sources"
+    ],
+    "supporting_count": 0,
+    "supporting_evidence": []
+  },
+  "input": {
+    "abstain": true,
+    "confidence": 0.0,
+    "contract_version": "2.2.0",
+    "contrarian": [
+      "c2",
+      "c1"
+    ],
+    "decision_state": "abstain",
+    "direction": "不明",
+    "independent_sources": 0,
+    "query": "BTC outlook",
+    "reason_codes": [
+      "low_calibrated_confidence",
+      "insufficient_independent_sources"
+    ],
+    "scored_claims": [
+      {
+        "claim": {
+          "claim_type": "fact",
+          "direction": "bullish",
+          "document": {
+            "id": "d1",
+            "kind": "news",
+            "metadata": [],
+            "source": "Reuters",
+            "text": "BTC old news",
+            "timestamp": 100.0,
+            "url": ""
+          },
+          "id": "c1",
+          "text": "BTC old news"
+        },
+        "components": [
+          [
+            "reputation",
+            0.65
+          ],
+          [
+            "corroboration",
+            0.0
+          ],
+          [
+            "recency",
+            0.9856631986401876
+          ],
+          [
+            "manipulation",
+            0.0
+          ]
+        ],
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.47284947979602815
+      },
+      {
+        "claim": {
+          "claim_type": "fact",
+          "direction": "bullish",
+          "document": {
+            "id": "d2",
+            "kind": "news",
+            "metadata": [],
+            "source": "Reuters",
+            "text": "BTC fresh news",
+            "timestamp": 999.0,
+            "url": ""
+          },
+          "id": "c2",
+          "text": "BTC fresh news"
+        },
+        "components": [
+          [
+            "reputation",
+            0.65
+          ],
+          [
+            "corroboration",
+            0.0
+          ],
+          [
+            "recency",
+            0.9999839550550974
+          ],
+          [
+            "manipulation",
+            0.0
+          ]
+        ],
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.4749975932582646
+      }
+    ],
+    "supporting": [],
+    "supporting_count": 0,
+    "trust_score": 0.0
+  }
+}
