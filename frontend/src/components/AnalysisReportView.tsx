@@ -19,6 +19,7 @@ import PlainLanguageResultSummary from './PlainLanguageResultSummary'
 import GlossaryTerm from './GlossaryTerm'
 import AnnotatedText from './AnnotatedText'
 import { useHermesI18n } from '../hermes/hermesI18n'
+import AssetIntrinsicShadowPanel from './AssetIntrinsicShadowPanel'
 
 // recharts（含 d3 相依）體積大，code-split 成獨立 chunk，不拖慢首屏/其餘頁面
 // 的初始 JS 下載（credit-safe build 不受影響，純前端載入效能考量）。
@@ -60,6 +61,8 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
       </div>
 
       <PlainLanguageResultSummary data={data} />
+
+      <AssetIntrinsicShadowPanel value={data.report.asset_intrinsic_assessment} />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
         <ConfidenceGauge
