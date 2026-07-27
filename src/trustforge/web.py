@@ -56,6 +56,8 @@ from . import rate_limit_store
 from . import ssm_params
 from .agent.orchestrator import aggregate_trust_by_kind
 from .asset_context_repository import AssetContextRepository, load_asset_context_records
+from .asset_intrinsic import AssetIntrinsicRepository, load_asset_intrinsic_records
+from .asset_intrinsic_shadow import assess_intrinsic_shadow
 from .ecolink_repository import EcoLinkRepository, load_ecolink_fixtures
 from .peer_metrics import snapshots_comparable
 from .peer_metrics_repository import PeerMetricsRepository, load_peer_metrics_fixture
@@ -5042,6 +5044,10 @@ _EVIDENCE_PUBLIC_FIELDS = frozenset({
 _EVIDENCE_FILTERED_FIELDS = frozenset({"author"})
 _ASSET_CONTEXT_RECORDS_PATH = Path(__file__).resolve().parents[2] / "data" / "asset_context_records.json"
 _ASSET_CONTEXT_REPOSITORY: AssetContextRepository | None = None
+_ASSET_INTRINSIC_RECORDS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "asset_intrinsic_records.json"
+)
+_ASSET_INTRINSIC_REPOSITORY: AssetIntrinsicRepository | None = None
 
 
 def _public_evidence_dict(ev) -> dict:
@@ -5067,6 +5073,18 @@ def _asset_context_repository() -> AssetContextRepository | None:
         load_asset_context_records(_ASSET_CONTEXT_RECORDS_PATH)
     )
     return _ASSET_CONTEXT_REPOSITORY
+
+
+def _asset_intrinsic_repository() -> AssetIntrinsicRepository | None:
+    global _ASSET_INTRINSIC_REPOSITORY
+    if _ASSET_INTRINSIC_REPOSITORY is not None:
+        return _ASSET_INTRINSIC_REPOSITORY
+    if not _ASSET_INTRINSIC_RECORDS_PATH.exists():
+        return None
+    _ASSET_INTRINSIC_REPOSITORY = AssetIntrinsicRepository(
+        load_asset_intrinsic_records(_ASSET_INTRINSIC_RECORDS_PATH)
+    )
+    return _ASSET_INTRINSIC_REPOSITORY
 
 
 def _handle_api_asset_context(qs: dict | None = None) -> tuple[int, str]:
@@ -5316,19 +5334,53 @@ def _risk_notices_for_context(context: dict | None) -> list[dict]:
 
 def _public_report_dict(report) -> dict:
     data = dataclasses.asdict(report)
-    if data.get("asset_context") is not None or data.get("risk_notices"):
-        return data
-    repository = _asset_context_repository()
     as_of = _parse_report_generated_at(report)
-    record = (
-        repository.by_symbol(getattr(report, "coin", ""), as_of=as_of)
-        if repository and as_of is not None
-        else None
-    )
-    context = record.context.to_dict() if record else None
+    supplied_context = data.get("asset_context")
+    malformed_context = supplied_context is not None and not isinstance(supplied_context, dict)
+    context = supplied_context if isinstance(supplied_context, dict) else None
+    trusted_context: dict | None = None
+    if not malformed_context:
+        context_repository = _asset_context_repository()
+        context_record = (
+            context_repository.by_symbol(getattr(report, "coin", ""), as_of=as_of)
+            if context_repository and as_of is not None
+            else None
+        )
+        trusted_context = context_record.context.to_dict() if context_record else None
+        if context is None:
+            context = trusted_context
     data["asset_context"] = context
-    data["risk_notices"] = _risk_notices_for_context(context)
+    if malformed_context:
+        data["risk_notices"] = []
+    elif not data.get("risk_notices"):
+        data["risk_notices"] = _risk_notices_for_context(context)
+    # Never trust a caller-prefilled shadow object.  Public output is always
+    # recomputed from the server-owned context identity and verified PIT facts.
+    data["asset_intrinsic_assessment"] = _public_intrinsic_assessment(
+        trusted_context if not malformed_context else None,
+        as_of,
+    )
     return data
+
+
+def _public_intrinsic_assessment(
+    context: dict | None, as_of: datetime | None
+) -> dict | None:
+    if not isinstance(context, dict) or as_of is None:
+        return None
+    asset_id = context.get("asset_id")
+    if not isinstance(asset_id, str) or not asset_id.strip():
+        return None
+    try:
+        repository = _asset_intrinsic_repository()
+        view = repository.pit_view(asset_id, as_of) if repository else None
+        return assess_intrinsic_shadow(view) if view is not None else None
+    except (OSError, TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "asset intrinsic shadow assessment unavailable",
+            exc_info=True,
+        )
+        return None
 
 
 def _public_snapshot_dict(snap: dict) -> dict:

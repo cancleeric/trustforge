@@ -119,6 +119,350 @@
     "title": "TrustForge AssetContext",
     "type": "object"
   },
+  "AssetIntrinsicAssessment": {
+    "$id": "https://trustforge.local/contracts/asset-intrinsic-assessment/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "issuance_predictability"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "control_dispersion"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "supply_verifiability"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "governance_capture_resistance"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "holder_concentration"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      }
+    ],
+    "properties": {
+      "affects_official_score": {
+        "const": false
+      },
+      "as_of": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "asset_id": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "dimensions": {
+        "items": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "normalized": {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "provenance": {
+                    "type": "object"
+                  },
+                  "raw": {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "unknown"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "normalized": {
+                    "type": "null"
+                  },
+                  "raw": {
+                    "type": "null"
+                  },
+                  "signed_delta": {
+                    "const": 0.0
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "coverage": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "enum": [
+                "issuance_predictability",
+                "control_dispersion",
+                "supply_verifiability",
+                "governance_capture_resistance",
+                "holder_concentration"
+              ]
+            },
+            "normalized": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "provenance": {
+              "additionalProperties": false,
+              "properties": {
+                "as_of": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "content_hash": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "evidence_kind": {
+                  "enum": [
+                    "upstream_excerpt",
+                    "decision_record"
+                  ]
+                },
+                "fetched_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "source_coordinates": {
+                  "type": "string"
+                },
+                "source_revision": {
+                  "type": "string"
+                },
+                "source_urls": {
+                  "items": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "source_urls",
+                "source_revision",
+                "content_hash",
+                "evidence_kind",
+                "source_coordinates",
+                "as_of",
+                "fetched_at"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "raw": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "reason_code": {
+              "enum": [
+                "eligible",
+                "coverage_gate_not_met",
+                "fact_unknown",
+                "fact_unavailable"
+              ]
+            },
+            "signed_delta": {
+              "maximum": 0.08,
+              "minimum": -0.08,
+              "type": "number"
+            },
+            "status": {
+              "enum": [
+                "known",
+                "unknown"
+              ]
+            },
+            "weight": {
+              "minimum": 0,
+              "type": "number"
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "raw",
+            "normalized",
+            "weight",
+            "signed_delta",
+            "reason_code",
+            "coverage",
+            "provenance"
+          ],
+          "type": "object"
+        },
+        "maxItems": 5,
+        "minItems": 5,
+        "type": "array"
+      },
+      "gate": {
+        "additionalProperties": false,
+        "properties": {
+          "known_count": {
+            "maximum": 5,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "reason_code": {
+            "enum": [
+              "eligible",
+              "insufficient_coverage"
+            ]
+          },
+          "required_known": {
+            "const": 3
+          },
+          "required_source_families": {
+            "const": 2
+          },
+          "source_family_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "passed",
+          "known_count",
+          "required_known",
+          "source_family_count",
+          "required_source_families",
+          "reason_code"
+        ],
+        "type": "object"
+      },
+      "mode": {
+        "const": "shadow"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      },
+      "total_delta": {
+        "maximum": 0.08,
+        "minimum": -0.08,
+        "type": "number"
+      },
+      "total_delta_cap": {
+        "const": 0.08
+      }
+    },
+    "required": [
+      "schema_version",
+      "mode",
+      "affects_official_score",
+      "asset_id",
+      "as_of",
+      "total_delta",
+      "total_delta_cap",
+      "gate",
+      "dimensions"
+    ],
+    "title": "TrustForge AssetIntrinsicAssessment",
+    "type": "object"
+  },
   "AssetIntrinsicProfile": {
     "$id": "https://trustforge.local/contracts/asset-intrinsic-profile/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -961,6 +1305,347 @@
         ],
         "type": "object"
       },
+      "AssetIntrinsicAssessment": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "properties": {
+                    "name": {
+                      "const": "issuance_predictability"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "properties": {
+                    "name": {
+                      "const": "control_dispersion"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "properties": {
+                    "name": {
+                      "const": "supply_verifiability"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "properties": {
+                    "name": {
+                      "const": "governance_capture_resistance"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "properties": {
+                    "name": {
+                      "const": "holder_concentration"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 1
+              }
+            }
+          }
+        ],
+        "properties": {
+          "affects_official_score": {
+            "const": false
+          },
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "asset_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "dimensions": {
+            "items": {
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "else": {
+                    "properties": {
+                      "normalized": {
+                        "maximum": 1,
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "provenance": {
+                        "type": "object"
+                      },
+                      "raw": {
+                        "maximum": 1,
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "unknown"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "normalized": {
+                        "type": "null"
+                      },
+                      "raw": {
+                        "type": "null"
+                      },
+                      "signed_delta": {
+                        "const": 0.0
+                      }
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "coverage": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "name": {
+                  "enum": [
+                    "issuance_predictability",
+                    "control_dispersion",
+                    "supply_verifiability",
+                    "governance_capture_resistance",
+                    "holder_concentration"
+                  ]
+                },
+                "normalized": {
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "provenance": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "as_of": {
+                      "format": "date-time",
+                      "type": "string"
+                    },
+                    "content_hash": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "evidence_kind": {
+                      "enum": [
+                        "upstream_excerpt",
+                        "decision_record"
+                      ]
+                    },
+                    "fetched_at": {
+                      "format": "date-time",
+                      "type": "string"
+                    },
+                    "source_coordinates": {
+                      "type": "string"
+                    },
+                    "source_revision": {
+                      "type": "string"
+                    },
+                    "source_urls": {
+                      "items": {
+                        "pattern": "^https://",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "source_urls",
+                    "source_revision",
+                    "content_hash",
+                    "evidence_kind",
+                    "source_coordinates",
+                    "as_of",
+                    "fetched_at"
+                  ],
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "raw": {
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "reason_code": {
+                  "enum": [
+                    "eligible",
+                    "coverage_gate_not_met",
+                    "fact_unknown",
+                    "fact_unavailable"
+                  ]
+                },
+                "signed_delta": {
+                  "maximum": 0.08,
+                  "minimum": -0.08,
+                  "type": "number"
+                },
+                "status": {
+                  "enum": [
+                    "known",
+                    "unknown"
+                  ]
+                },
+                "weight": {
+                  "minimum": 0,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "name",
+                "status",
+                "raw",
+                "normalized",
+                "weight",
+                "signed_delta",
+                "reason_code",
+                "coverage",
+                "provenance"
+              ],
+              "type": "object"
+            },
+            "maxItems": 5,
+            "minItems": 5,
+            "type": "array"
+          },
+          "gate": {
+            "additionalProperties": false,
+            "properties": {
+              "known_count": {
+                "maximum": 5,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "reason_code": {
+                "enum": [
+                  "eligible",
+                  "insufficient_coverage"
+                ]
+              },
+              "required_known": {
+                "const": 3
+              },
+              "required_source_families": {
+                "const": 2
+              },
+              "source_family_count": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "passed",
+              "known_count",
+              "required_known",
+              "source_family_count",
+              "required_source_families",
+              "reason_code"
+            ],
+            "type": "object"
+          },
+          "mode": {
+            "const": "shadow"
+          },
+          "schema_version": {
+            "const": "1.0.0"
+          },
+          "total_delta": {
+            "maximum": 0.08,
+            "minimum": -0.08,
+            "type": "number"
+          },
+          "total_delta_cap": {
+            "const": 0.08
+          }
+        },
+        "required": [
+          "schema_version",
+          "mode",
+          "affects_official_score",
+          "asset_id",
+          "as_of",
+          "total_delta",
+          "total_delta_cap",
+          "gate",
+          "dimensions"
+        ],
+        "type": "object"
+      },
       "TermAnnotation": {
         "additionalProperties": false,
         "properties": {
@@ -1008,6 +1693,16 @@
         "anyOf": [
           {
             "$ref": "#/$defs/AssetContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "asset_intrinsic_assessment": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AssetIntrinsicAssessment"
           },
           {
             "type": "null"
