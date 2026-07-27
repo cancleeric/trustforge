@@ -1,17 +1,13 @@
-"""Shadow parity comparison & promotion gating (P0-6 / Issue #732).
+"""Shadow parity comparison and observation diagnostics (Issue #732).
 
 Core dual-track pipeline always runs both legacy and kernel scoring in parallel.
 Legacy continues to be the source of truth for `build_report`.  The kernel
-runs in shadow (logged, not consumed) until parity and promotion thresholds
-are met — then the kernel-derived brief is promoted into the active report
-path.
-
-Reverting (canary stop) is automatic: if parity rate falls below the canary
-threshold, promotion is immediately revoked and legacy takes over again.
+runs in shadow and is never consumed by the active report path.  Promotion is
+an explicit operator/release concern; observation code cannot activate or
+revoke a release.
 """
 from __future__ import annotations
 
-import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,7 +18,7 @@ from trustforge_core import KernelOutput
 # Threshold constants — tuned per CPO plan (Issue #732, 5 decisions)
 # ---------------------------------------------------------------------------
 
-# Minimum shadow runs accumulated before promotion eligibility.
+# Minimum shadow runs accumulated before observation readiness.
 SHADOW_WINDOW = 30
 
 # Maximum allowed absolute delta on confidence (kernel vs legacy).
@@ -35,20 +31,16 @@ PARITY_TRUST_DELTA_MAX = 0.05
 PARITY_SUPPORTING_JACCARD_MIN = 0.70
 
 # Minimum fraction of window runs that must pass parity to be eligible for
-# promotion.
-PROMOTION_PARITY_RATE_MIN = 0.90
-
-# If promoted, and the rolling window parity rate drops below this level,
-# canary stop triggers: immediately revert to legacy.
-CANARY_STOP_PARITY_RATE = 0.60
+# operator review.
+OBSERVATION_PARITY_RATE_MIN = 0.90
 
 # Scenario coverage gating: need at least this many distinct coins and
-# question types in the accumulated window before promotion.
+# question types in the accumulated observation window.
 MIN_COIN_COVERAGE = 3
 MIN_QTYPE_COVERAGE = 2
 
 # Consecutive blocking failure gating: if the last N runs all fail parity,
-# block promotion even if the overall rate is acceptable (indicates a
+# block readiness even if the overall rate is acceptable (indicates a
 # regression pattern, not noise).
 BLOCKING_STREAK_MAX = 3
 
@@ -81,7 +73,7 @@ class ShadowParityResult:
 
 
 # ---------------------------------------------------------------------------
-# Accumulator & promotion state machine
+# Process-local observation diagnostics
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -90,15 +82,12 @@ class ShadowAccumulator:
 
     Process-local singleton (same pattern as ``budget_guard``).  Not persisted
     across process restarts — a restart resets accumulated shadow history and
-    defers promotion eligibility until the window refills.  This is intentional:
-    promotion must be based on *current* system behaviour, not historical
-    observation from a previous deployment.
+    defers observation readiness until the window refills.  It is diagnostics
+    only and cannot authorize any release operation.
     """
 
     _window_size: int = field(default=SHADOW_WINDOW, repr=False)
     _runs: list[ShadowParityResult] = field(default_factory=list, repr=False)
-    _promoted: bool = field(default=False, repr=False)
-
     # Prometheus-style counters (monotonically increasing across resets)
     _total_runs: int = field(default=0, repr=False)
     _total_passed: int = field(default=0, repr=False)
@@ -106,11 +95,6 @@ class ShadowAccumulator:
     # ------------------------------------------------------------------
     # public read API
     # ------------------------------------------------------------------
-    @property
-    def promoted(self) -> bool:
-        """Whether the kernel path is currently promoted (active)."""
-        return self._promoted
-
     @property
     def total_runs(self) -> int:
         return self._total_runs
@@ -131,11 +115,11 @@ class ShadowAccumulator:
         return self.window_passed / len(self._runs)
 
     @property
-    def promotion_eligible(self) -> bool:
-        """True iff the window is full and all gating criteria are met."""
+    def observation_eligible(self) -> bool:
+        """Non-authoritative indication that the diagnostic window is complete."""
         if len(self._runs) < self._window_size:
             return False
-        if self.parity_rate < PROMOTION_PARITY_RATE_MIN:
+        if self.parity_rate < OBSERVATION_PARITY_RATE_MIN:
             return False
         coins = {r.coin for r in self._runs}
         if len(coins) < MIN_COIN_COVERAGE:
@@ -154,20 +138,11 @@ class ShadowAccumulator:
             return False
         return True
 
-    @property
-    def canary_stop_triggered(self) -> bool:
-        """True iff promoted and canary threshold breached."""
-        if not self._promoted:
-            return False
-        if not self._runs:
-            return False
-        return self.parity_rate < CANARY_STOP_PARITY_RATE
-
     # ------------------------------------------------------------------
     # mutation API
     # ------------------------------------------------------------------
     def record(self, result: ShadowParityResult) -> None:
-        """Append one result, maintain rolling window, evaluate promotion/canary."""
+        """Append one result and maintain the diagnostic rolling window."""
         self._runs.append(result)
         if len(self._runs) > self._window_size:
             self._runs.pop(0)
@@ -175,31 +150,9 @@ class ShadowAccumulator:
         if result.parity_passed:
             self._total_passed += 1
 
-        if self._promoted:
-            if self.canary_stop_triggered:
-                self._promoted = False
-                logging.warning(
-                    "Canary stop triggered (parity_rate=%.2f < %.2f); "
-                    "kernel promotion revoked, reverting to legacy.",
-                    self.parity_rate,
-                    CANARY_STOP_PARITY_RATE,
-                )
-        else:
-            if self.promotion_eligible:
-                self._promoted = True
-                logging.info(
-                    "Kernel promoted: parity_rate=%.2f (window=%d); "
-                    "kernel-derived brief now active.",
-                    self.parity_rate,
-                    len(self._runs),
-                )
-
     def reset(self) -> None:
-        """Manual reset — clears window and revokes promotion (e.g. after a
-        deliberate hot-patch or rollback).
-        """
+        """Clear process-local diagnostics; this has no release effect."""
         self._runs.clear()
-        self._promoted = False
 
     # ------------------------------------------------------------------
     # diagnostics
@@ -207,13 +160,11 @@ class ShadowAccumulator:
     def diagnostics(self) -> dict[str, Any]:
         """Snapshot for logging / observability."""
         return {
-            "promoted": self._promoted,
             "total_runs": self._total_runs,
             "window_runs": len(self._runs),
             "window_passed": self.window_passed,
             "parity_rate": round(self.parity_rate, 3),
-            "promotion_eligible": self.promotion_eligible,
-            "canary_stop_triggered": self.canary_stop_triggered,
+            "observation_eligible": self.observation_eligible,
             "coins_seen": sorted({r.coin for r in self._runs}),
             "qtypes_seen": sorted({r.qtype_value for r in self._runs}),
         }
@@ -275,7 +226,6 @@ def compare_outputs(
         Immutable comparison record, including ``parity_passed`` flag.
     """
     # Build legacy brief-equivalent from scored claims (best-effort)
-    from ..trust.scoring import ScoredClaim
 
     legacy_supporting_ids = frozenset(
         sc.claim.id for sc in legacy_scored
@@ -300,7 +250,18 @@ def compare_outputs(
     if not math.isfinite(legacy_trust_raw):
         blocking.append(f"legacy_trust_raw is non-finite ({legacy_trust_raw})")
 
-    # If any non-finite values detected, fail parity immediately
+    supporting_jaccard = _jaccard(legacy_supporting_ids, kernel_supporting_ids)
+    direction_match = kernel.direction == legacy_direction or (
+        kernel.direction in ("bullish", "bearish", "neutral")
+        and legacy_direction in ("偏多", "偏空", "中性", None)
+        and _directions_equivalent(kernel.direction, legacy_direction)
+    )
+    decision_state_match = (
+        kernel.abstain == legacy_abstain
+        and kernel.decision_state == ("abstain" if legacy_abstain else "normal")
+    ) or (kernel.abstain and legacy_abstain)
+
+    # If any non-finite values detected, fail parity immediately.
     if blocking:
         return ShadowParityResult(
             coin=coin, qtype_value=qtype_value,
@@ -316,19 +277,6 @@ def compare_outputs(
 
     delta_confidence = abs(kernel.confidence - legacy_confidence)
     delta_trust = abs(kernel.trust_score - legacy_trust_raw)
-
-    supporting_jaccard = _jaccard(legacy_supporting_ids, kernel_supporting_ids)
-
-    direction_match = kernel.direction == legacy_direction or (
-        kernel.direction in ("bullish", "bearish", "neutral")
-        and legacy_direction in ("偏多", "偏空", "中性", None)
-        and _directions_equivalent(kernel.direction, legacy_direction)
-    )
-
-    decision_state_match = (
-        kernel.abstain == legacy_abstain
-        and kernel.decision_state == ("abstain" if legacy_abstain else "normal")
-    ) or (kernel.abstain and legacy_abstain)
 
     # Determine blocking reasons
     blocking = []
@@ -440,16 +388,17 @@ def record_shadow_run(
         coin=coin,
         qtype_value=qtype_value,
     )
+    return record_shadow_result(result)
+
+
+def record_shadow_result(result: ShadowParityResult) -> dict[str, Any]:
+    """Record one already-bounded comparison result."""
     acc = _get_shadow_acc()
     acc.record(result)
     diag = acc.diagnostics()
     diag["last_parity_passed"] = result.parity_passed
     diag["last_blocking_reasons"] = result.blocking_reasons
     return diag
-
-
-def is_kernel_promoted() -> bool:
-    return _get_shadow_acc().promoted
 
 
 def shadow_diagnostics() -> dict[str, Any]:

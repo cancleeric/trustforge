@@ -20,7 +20,7 @@ from trustforge.bedrock import BedrockClient, BedrockConfig, LLMResult
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.schema import QuestionType
-from trustforge.trust.scoring import Claim, extract_claims
+from trustforge.trust.scoring import extract_claims
 
 
 # ---------------------------------------------------------------------------
@@ -518,9 +518,8 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
     甚至比未來戳更嚴重：`max(0.0, min(1.0, nan))` 在 CPython 會回傳 1.0），
     且不應污染 now_ts（now_ts 必須維持有限值），也不應把其他正常文件的
     recency 拖老。"""
-    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")  # #733: full kernel for test
+    monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
     import trustforge.trust.scoring as scoring_mod
-    from trustforge.trust.scoring import _recency_decay
 
     wall_clock = 1_000_000.0
     normal_ts = wall_clock - 3600 * 2  # 正常：2 小時前
@@ -542,40 +541,36 @@ def test_pipeline_non_finite_ts_not_maxed_to_full_trust(monkeypatch, bad_ts):
 
     client = BedrockClient(offline=True)
     log = ExecutionLog(now_fn=lambda: wall_clock)
-    with pytest.raises(ValueError, match="finite"):
-        run_agent_pipeline(
-            query="分析 BTC 市場",
-            coin="BTC",
-            qtype=QuestionType.MULTI_SOURCE,
-            docs=docs,
-            client=client,
-            log=log,
-            now_fn=lambda: wall_clock,
-        )
+    report, _ = run_agent_pipeline(
+        query="分析 BTC 市場",
+        coin="BTC",
+        qtype=QuestionType.MULTI_SOURCE,
+        docs=docs,
+        client=client,
+        log=log,
+        now_fn=lambda: wall_clock,
+    )
+    assert report is not None
+    assert math.isfinite(captured["now"])
+    derive = next(event for event in log.events if event.get("tool") == "judgment.derive")
+    assert derive["params"]["shadow_observation_status"] == "not_observed"
 
 
-def test_run_agent_pipeline_step2_invokes_trust_kernel(monkeypatch):
-    """Production Step2 should pass normalized claims through the Kernel facade."""
-    from trustforge_core import KernelOutput
+def test_run_agent_pipeline_pr1_never_invokes_candidate_runtime(monkeypatch):
+    """PR1 has contracts only: mapper, kernel and recorder are not active wiring."""
+    monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
+    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1")
 
-    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")  # full kernel for test
+    def bomb(*args, **kwargs):
+        raise AssertionError("candidate runtime must not be called in PR1")
 
-    seen = {}
-    real_run_kernel = orch.run_kernel
-
-    def spy_run_kernel(inp):
-        seen["coin"] = inp.coin
-        seen["query"] = inp.query
-        seen["claims"] = len(inp.claims)
-        out = real_run_kernel(inp)
-        assert isinstance(out, KernelOutput)
-        return out
-
-    monkeypatch.setattr(orch, "run_kernel", spy_run_kernel)
+    monkeypatch.setattr(orch, "to_kernel_input", bomb, raising=False)
+    monkeypatch.setattr(orch, "run_kernel", bomb, raising=False)
+    monkeypatch.setattr(orch, "record_shadow_run", bomb, raising=False)
 
     fake = FakeBedrockClient()
     log = ExecutionLog()
-    run_agent_pipeline(
+    report, evidence = run_agent_pipeline(
         "BTC 多源分析",
         "BTC",
         QuestionType.MULTI_SOURCE,
@@ -584,8 +579,53 @@ def test_run_agent_pipeline_step2_invokes_trust_kernel(monkeypatch):
         log=log,
     )
 
-    assert seen == {"coin": "BTC", "query": "BTC 多源分析", "claims": 5}
-    derive_events = [event for event in log.events if event.get("tool") == "judgment.derive"]
+    assert report is not None
+    assert evidence
+    derive_events = [
+        event for event in log.events
+        if event.get("tool") == "judgment.derive"
+        and "shadow_observation_status" in event.get("params", {})
+    ]
     assert derive_events
-    assert any("kernel_confidence" in event["params"] for event in derive_events)
-    assert any("kernel_abstain" in event["params"] for event in derive_events)
+    params = derive_events[-1]["params"]
+    assert params["shadow_observation_status"] == "not_observed"
+    assert params["shadow_candidate_latency_ms"] == 0.0
+    assert params["kernel_confidence"] is None
+    assert params["kernel_abstain"] is None
+
+
+def test_run_agent_pipeline_pr1_golden_legacy_ignores_candidate_switch(monkeypatch):
+    wall_clock = 2_000.0
+
+    def run_once():
+        client = FakeBedrockClient()
+        log = ExecutionLog(now_fn=lambda: wall_clock)
+        report, evidence = run_agent_pipeline(
+            "BTC 多源分析", "BTC", QuestionType.MULTI_SOURCE, _make_docs(),
+            client=client, log=log, now_fn=lambda: wall_clock,
+        )
+        status = next(
+            event["params"]["shadow_observation_status"]
+            for event in log.events
+            if event.get("tool") == "judgment.derive"
+            and "shadow_observation_status" in event.get("params", {})
+        )
+        latency = next(
+            event["params"]["shadow_candidate_latency_ms"]
+            for event in log.events
+            if event.get("tool") == "judgment.derive"
+            and "shadow_candidate_latency_ms" in event.get("params", {})
+        )
+        return report, evidence, status, latency
+
+    monkeypatch.delenv("KERNEL_SHADOW_OBSERVE", raising=False)
+    baseline_report, baseline_evidence, baseline_status, baseline_latency = run_once()
+    assert baseline_status == "not_observed"
+    assert baseline_latency == 0.0
+    monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
+    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1")
+    shadow_report, shadow_evidence, status, latency = run_once()
+    assert shadow_report == baseline_report
+    assert shadow_evidence == baseline_evidence
+    assert status == "not_observed"
+    assert latency == 0.0

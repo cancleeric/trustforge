@@ -1,20 +1,13 @@
-"""P0-6 Shadow parity & promotion threshold tests (Issue #732)."""
+"""P0-6 non-authoritative shadow observation tests (Issue #732)."""
 
 from __future__ import annotations
 
 import pytest
 
-from trustforge.agent import shadow as sh
 from trustforge.agent.kernel_mapper import to_kernel_input
 from trustforge.agent.shadow import (
-    CANARY_STOP_PARITY_RATE,
-    MIN_COIN_COVERAGE,
-    MIN_QTYPE_COVERAGE,
     PARITY_CONFIDENCE_DELTA_MAX,
-    PARITY_SUPPORTING_JACCARD_MIN,
     PARITY_TRUST_DELTA_MAX,
-    PROMOTION_PARITY_RATE_MIN,
-    SHADOW_WINDOW,
     ShadowAccumulator,
     ShadowParityResult,
     compare_outputs,
@@ -86,9 +79,6 @@ def _make_minimal_kernel_output(
     Side-steps the full graph validation by using ``object.__setattr__``
     to populate the sealed slots after constructing a real output.
     """
-    claims = tuple(
-        _make_minimal_kernel_claim(cid, direction) for cid in ("c1", "c2", "c3")
-    )
     kernel_input = to_kernel_input(
         [
             Claim(cid, "t", Document(cid + "_d", "news", "coindesk", "t", 100.0),
@@ -263,7 +253,7 @@ def test_compare_outputs_blocks_on_low_supporting_jaccard() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ShadowAccumulator — window & promotion gating
+# ShadowAccumulator — observation-window diagnostics
 # ---------------------------------------------------------------------------
 
 def test_accumulator_window_limits_size() -> None:
@@ -274,26 +264,24 @@ def test_accumulator_window_limits_size() -> None:
     assert acc.total_runs == 10
 
 
-def test_accumulator_not_promoted_until_window_full_and_gates_met() -> None:
+def test_accumulator_not_ready_until_window_full_and_gates_met() -> None:
     acc = ShadowAccumulator(_window_size=3)
     for _ in range(3):
         acc.record(_passing_result(coin="BTC", qtype_value="analysis"))
-    # Only 1 coin, 1 qtype -> promotion not eligible
-    assert acc.promotion_eligible is False
-    assert acc.promoted is False
+    # Only 1 coin, 1 qtype -> observation is not review-ready.
+    assert acc.observation_eligible is False
 
 
-def test_accumulator_promotes_when_all_gates_met() -> None:
+def test_accumulator_only_reports_observation_readiness() -> None:
     acc = ShadowAccumulator(_window_size=3)
     coins = ["BTC", "ETH", "SOL"]
     qtypes = ["analysis", "hypothesis"]
     for i in range(3):
         acc.record(_passing_result(coin=coins[i], qtype_value=qtypes[i % 2]))
-    assert acc.promotion_eligible is True
-    assert acc.promoted is True
+    assert acc.observation_eligible is True
 
 
-def test_accumulator_blocks_promotion_on_parity_rate() -> None:
+def test_accumulator_blocks_readiness_on_parity_rate() -> None:
     acc = ShadowAccumulator(_window_size=3)
     coins = ["BTC", "ETH", "SOL"]
     for i in range(3):
@@ -302,11 +290,10 @@ def test_accumulator_blocks_promotion_on_parity_rate() -> None:
                             parity_passed=(i < 2))
         )
     # 2/3 passed = 0.667 < 0.90
-    assert acc.promotion_eligible is False
-    assert acc.promoted is False
+    assert acc.observation_eligible is False
 
 
-def test_accumulator_blocks_promotion_on_blocking_streak() -> None:
+def test_accumulator_blocks_readiness_on_blocking_streak() -> None:
     acc = ShadowAccumulator(_window_size=5)
     coins = ["BTC", "ETH", "SOL", "ADA", "XRP"]
     for i in range(5):
@@ -315,44 +302,38 @@ def test_accumulator_blocks_promotion_on_blocking_streak() -> None:
                             parity_passed=(i < 2))
         )
     # last 3 failed (streak=3) — should block
-    assert acc.promotion_eligible is False
-    assert acc.promoted is False
+    assert acc.observation_eligible is False
 
 
 # ---------------------------------------------------------------------------
 # Canary stop
 # ---------------------------------------------------------------------------
 
-def test_canary_stop_revokes_promotion() -> None:
+def test_observation_failures_never_mutate_activation() -> None:
     acc = ShadowAccumulator(_window_size=5)
     coins = ["BTC", "ETH", "SOL", "ADA", "XRP"]
     qtypes = ["analysis", "hypothesis"]
-    # Fill window with all-pass to trigger promotion
+    # Observation success is not activation authority.
     for i in range(5):
         acc.record(_passing_result(coin=coins[i], qtype_value=qtypes[i % 2]))
-    assert acc.promoted is True
     # Inject failures until canary threshold breached
     for i in range(5):
         acc.record(_passing_result(coin=coins[i], qtype_value=qtypes[i % 2],
                                    parity_passed=False))
-    # After all fails, promoted should be False (canary stop revoked it)
-    assert acc.promoted is False
-    assert acc.parity_rate < CANARY_STOP_PARITY_RATE
+    assert acc.parity_rate == 0.0
 
 
 # ---------------------------------------------------------------------------
 # reset
 # ---------------------------------------------------------------------------
 
-def test_reset_clears_window_and_revokes_promotion() -> None:
+def test_reset_clears_window_without_release_side_effect() -> None:
     acc = ShadowAccumulator(_window_size=3)
     coins = ["BTC", "ETH", "SOL"]
     qtypes = ["analysis", "hypothesis"]
     for i in range(3):
         acc.record(_passing_result(coin=coins[i], qtype_value=qtypes[i % 2]))
-    assert acc.promoted is True
     acc.reset()
-    assert acc.promoted is False
     assert acc.window_runs == 0
 
 
@@ -379,7 +360,7 @@ def test_record_shadow_run_returns_diagnostics() -> None:
     )
     assert diag["last_parity_passed"] is True
     assert diag["parity_rate"] == 1.0
-    assert diag["promoted"] is False  # not enough runs yet
+    assert diag["observation_eligible"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +467,7 @@ def test_diagnostics_includes_coverage() -> None:
     assert d["coins_seen"] == ["BTC"]
     assert d["qtypes_seen"] == ["analysis"]
     assert d["parity_rate"] == 1.0
-    assert d["promotion_eligible"] is False
+    assert d["observation_eligible"] is False
 
 
 # ---------------------------------------------------------------------------
