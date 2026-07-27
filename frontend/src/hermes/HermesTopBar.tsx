@@ -108,7 +108,13 @@ export default function HermesTopBar({
       <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
         {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
       </button>
-      <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} aria-label={reducedMotion ? t('reducedMotionOnAria') : t('reducedMotionOffAria')} title={reducedMotion ? t('reducedMotionOnTitle') : t('reducedMotionOffTitle')}>
+      {/* N62：這顆按鈕原本掛 aria-label（「啟用低動態模式」），而 aria-label 是
+          「取代」不是「補充」可見文字——螢幕閱讀器唸到的名稱跟眼睛看到的
+          「動態」對不上，語音操作使用者照著唸也點不到（WCAG 2.5.3 Label in
+          Name）。而且兩個分支語意還互相打架：一邊是動作、一邊是狀態。改成跟
+          旁邊那顆模式切換一樣，讓可見文字直接當可及名稱，狀態交給
+          aria-pressed，動作提示留在 title。 */}
+      <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} title={reducedMotion ? t('reducedMotionOnTitle') : t('reducedMotionOffTitle')}>
         {reducedMotion ? t('dynamicOff') : t('dynamicOn')}
       </button>
       <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label={t('openBeginnerHelp')}>{t('helpToggle')}</button>

@@ -183,19 +183,40 @@ describe('N17: en mode has no residual Chinese aria-labels — HermesTopBar', ()
     expect(screen.getByRole('button', { name: 'HERMES home' })).toBeInTheDocument()
   })
 
-  it('reduced-motion toggle aria-label AND title both switch to English', () => {
+  // N62：原本這條斷言 aria-label 也跟著切語言。aria-label 已經拿掉——它會
+  // 「取代」可見文字，讓螢幕閱讀器唸的名稱跟眼睛看到的對不上（WCAG 2.5.3）。
+  // 這條的用意（兩種語言都要換掉、title 也要換）原封不動保留，只是可及名稱
+  // 現在來自可見文字本身。
+  it('reduced-motion toggle label AND title both switch to English', () => {
     render(
       <HermesI18nProvider>
         <LocaleSwitcher to="en" />
         <HermesTopBar />
       </HermesI18nProvider>,
     )
-    const zhButton = screen.getByRole('button', { name: '啟用低動態模式' })
-    expect(zhButton).toHaveAttribute('title', '啟用低動態模式')
+    const zhButton = screen.getByRole('button', { name: '動態' })
+    expect(zhButton).toHaveAttribute('title', '一般動態（點擊開啟低動態）')
     fireEvent.click(screen.getByRole('button', { name: 'go en' }))
-    expect(screen.queryByRole('button', { name: '啟用低動態模式' })).not.toBeInTheDocument()
-    const enButton = screen.getByRole('button', { name: 'Enable reduced motion' })
-    expect(enButton).toHaveAttribute('title', 'Enable reduced motion')
+    expect(screen.queryByRole('button', { name: '動態' })).not.toBeInTheDocument()
+    const enButton = screen.getByRole('button', { name: 'Motion' })
+    expect(enButton).toHaveAttribute('title', 'Full motion (click to reduce)')
+  })
+
+  // 可及名稱必須「包含」可見文字，否則語音操作使用者照著螢幕唸就點不到。
+  // 順便釘住狀態只由 aria-pressed 承載，標籤裡不得再混入 ▶/⏸ 這種動作符號
+  // ——播放器圖示讀作動作、文字讀作狀態，兩套語意指向相反方向，正是使用者
+  // 看到「兩個狀態反了」的原因。
+  it('reduced-motion toggle: accessible name equals its visible label, state lives in aria-pressed', () => {
+    render(
+      <HermesI18nProvider>
+        <HermesTopBar />
+      </HermesI18nProvider>,
+    )
+    const btn = screen.getByRole('button', { name: '動態' })
+    expect(btn).not.toHaveAttribute('aria-label')
+    expect(btn.textContent?.trim()).toBe('動態')
+    expect(btn).toHaveAttribute('aria-pressed', 'false')
+    expect(btn.textContent).not.toMatch(/[▶⏸]/)
   })
 
   it('help toggle aria-label switches to English', () => {

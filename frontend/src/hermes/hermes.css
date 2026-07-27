@@ -438,6 +438,16 @@
   animation: hermes-core-band-spin-rev 6s linear infinite;
 }
 
+/* N62：這顆能量環的「置中、壓扁、淡出」三件事以前全都只寫在 keyframes 裡，
+   基態一行都沒有。低動態模式把 animation-duration 壓成 .001ms、
+   iteration-count 壓成 1，動畫瞬間跑完；沒有 fill-mode:forwards，計算值就退回
+   基態——於是 translate(-50%,-50%) 不見了（left/top:50% 讓左上角釘在核心星
+   正中心，實測中心偏移剛好 (123,123) 等於自身半徑）、rotateX(68deg) 不見了
+   （246x246 正圓而不是 316x118 橢圓）、opacity 也回到 1（.55 的邊框全亮）。
+   使用者關掉動態，畫面反而多出一個往右下垂的亮圈。
+   修法是把靜止狀態寫進基態，數值等同 keyframes 的 100%（脈衝結束＝散盡消失）：
+   動畫照跑時從 0% 起算，行為一個像素都不變；動畫被停掉時就停在「已散盡」的
+   正確終點，而不是退回一個從來沒打算被看到的原始盒子。 */
 .hermes-core-energy-ring {
   position: absolute;
   left: 50%;
@@ -447,6 +457,8 @@
   border-radius: 50%;
   border: 1px solid rgba(77, 216, 224, .55);
   pointer-events: none;
+  transform: translate(-50%, -50%) rotateX(68deg) scale(1.35);
+  opacity: 0;
   animation: hermes-energy-expand 3.2s ease-out infinite;
 }
 
