@@ -1,91 +1,42 @@
 #!/usr/bin/env python3
-"""W4：Split Conformal Prediction 一次性離線回測（master 計劃 Axis B #1）。
+"""W4：Split Conformal Prediction 離線回測 — TrustForge #197 異質多源 Conformal Backtest。
 
-⚠️ 2026-07 CEO 決策：本腳本產出的 τ **未 wire 進 production**（見
-`trust/conformal.py` 模組上方說明與 `docs/qa/CONFORMAL-FINDING.md`）——
-gray 細案指定的「同一條 OHLCV 衍生多技術訊號」代理對方向判斷幾乎無
-判別力，套用會讓 abstain 率衝到 ~94%。本腳本作為已完成、可重現的研究
-工件保留。
+Phase A/B/C：從 Alternative.me FNG + Blockchain.com Charts 歷史 JSONL 加入
+異質訊號（sentiment + onchain），與既有 OHLCV 技術訊號合併後跑 split conformal，
+評估是否達到 #197 指定 promotion threshold。
 
 用法：
     python3 scripts/backtest_conformal.py
 
 目的：用 `data/data/*.csv`（HOYA BIT 官方 5 幣 OHLCV，2021-06-01~2026-05-31）
-回測出一個有 **distribution-free coverage 保證**的 conformal abstain 門檻 τ，
-取代 `trust.scoring._CALIBRATION_TABLE` 那套「工程判斷、非統計估計」的簡化分位數
-表（見該檔上方誠實聲明）。純確定性、不呼叫任何 LLM/Bedrock，零 credit。
++ `out/history/` 下異質資料回測 compliance 門檻 τ，**不改 conformal.py 數學實作**，
+純確定性、不呼叫任何 LLM/Bedrock，零 credit。
 
-----------------------------------------------------------------------------
+---------------------------------------------------------------------------
 方法（single-stage split conformal，α=0.1）
-----------------------------------------------------------------------------
-1. 對每個 (coin, date)：
-   - **判斷方向**：沿用 `prices.py::price_facts()` 的規則（14 日窗口報酬
-     ret>+1% → 上漲、ret<-1% → 下跌、其餘 盤整）。盤整（無明確方向）樣本
-     不計入回測——系統本來就不會對盤整下方向性結論，沒有「對/錯」可言。
-   - **多個獨立技術訊號**（誠實聲明：這些訊號全部衍生自同一條 OHLCV 價格
-     序列，是「多來源佐證」的**代理**，不是真的多個獨立資料源；見下方
-     `_build_signals()` docstring）：
-       * 動量：3/7/21/30 日報酬方向（4 個訊號，跟主判斷窗口 14 日不同期）
-       * 成交量趨勢：主判斷窗口內近 3 日均量 vs 前 3 日均量（同 `price_facts`
-         的 vol_trend 算法）——量增被視為方向確認、量縮視為動能減弱
-       * 波動率：近 30 日日報酬標準差 vs 前 30 日——波動率下降視為方向確認
-         （趨勢更可信）、波動率上升視为雜訊增加
-     每個訊號依「是否同意主判斷方向」歸類進 supporting／contrarian，餵給
-     既有 `trust.scoring._evidence_strength()`（原封不動複用，不重寫評分
-     邏輯）算出 evidence_strength ∈ [0, 1]。
-   - **label**：往後看 N=3 個交易日的實際漲跌方向（收盤價正負號）跟主判斷
-     方向比對，一致＝對，不一致＝錯。
-2. **時間切分（非隨機，5 幣共用同一組日期索引切點，防跨幣同日相關性洩漏）**：
-   全部日期依索引切成前 70%（train，本方法無可訓練自由參數，此段保留供
-   慣例對齊／未來若改用可調參模型時使用，本輪不使用）／中 15%（校準集）／
-   後 15%（held-out test）。
-3. **nonconformity score = 校準集中 label=錯 的樣本的 evidence_strength**。
-   τ = 這些「錯誤樣本」evidence_strength 由小到大排序後，第
-   ⌈(n+1)(1-α)⌉ 大的順序統計量（α=0.1，標準 split conformal 有限樣本
-   修正公式；名次超出樣本數或校準集無錯誤樣本時，τ=`math.inf`，見
-   `compute_tau()` docstring）。直覺：τ 訂在「就算是錯的判斷，也很少能把
-   evidence_strength 衝到這麼高」的門檻之上——**嚴格**
-   `evidence_strength > τ`（不是 `≥`，見下方誠實聲明的邊界說明）時，
-   錯誤同時發生的機率有 distribution-free 保證上界 α（前提：校準集與
-   held-out test 對此指標可交換／同分布，且歷史≈未來——見下方誠實聲明）。
-4. **held-out test 驗證**：在 test 集上實測
-   P(方向錯 且 evidence_strength > τ) 是否 ≤ α，印出 τ、n_calib_wrong、
-   coverage 實測值供人工核對。
+---------------------------------------------------------------------------
+同原版 W4 流程，差異在 `_samples_for_coin(extra_signals=True)` 會在建完既有
+OHLCV 技術訊號後，追加 Phase B 的異質訊號（FNG + blockchain），其餘 split/
+tau 計算/held-out 驗證流程逐字不變。
 
-----------------------------------------------------------------------------
+---------------------------------------------------------------------------
 ⚠️ 誠實聲明（不可省略，PR 說明務必附上）
-----------------------------------------------------------------------------
-- **單階段 conformal**：本輪只對 `evidence_strength → 是否方向錯誤` 這單一
-  判斷做 split conformal 校準。真正的 pipeline-aware joint coverage（同時
-  涵蓋 claim 抽取、跨源訊號、narrative 忠實度等下游環節的聯合覆蓋保證）
-  **明列 roadmap，本輪不做**。
-- **假設歷史≈未來**：coverage 保證只在校準集與未來資料同分布（exchangeable）
-  的假設下成立。加密市場 regime 會變，這是「歷史回測校準」而非「線上未來
-  保證」。
-- **N=3 交易日視窗是主觀選擇**：換一個 N 會產生不同的 label 分布與不同的
-  τ，本輪未對 N 做敏感度掃描。
-- **技術訊號是價格代理，不是多來源**：4 個動量週期＋成交量趨勢＋波動率，
-  全部衍生自同一條 OHLCV 序列；用它們模擬 `_evidence_strength()` 所需的
-  「多來源」輸入，是本次回測方法論的簡化，不代表真實 pipeline 的多來源
-  異質性（news/social/onchain/regulatory）。
-- 本腳本產出的 τ 之後**手動**抄進 `trust/conformal.py`（連同回測日期範圍/
-  α/coverage 一併寫成註解，可版控可審——比照 `_CALIBRATION_TABLE` 的模式），
-  不是每次啟動自動重跑；資料/規則變動時需重新執行本腳本並更新常數。
-- **邊界語義（codex 對抗審修正）**：初版用 `>=` 判斷是否通過門檻、
-  fallback（校準集無錯誤樣本/樣本不足）回傳 `1.0`——但 `evidence_strength`
-  值域上界含 1.0，`>=` + fallback=1.0 的組合會讓「理論上該一律 abstain」
-  的 fallback 場景被剛好等於 1.0 的樣本鑽漏洞算「通過」，且一般情況下
-  `>=` 本身也沒有標準 split conformal 順序統計量結果（該結果是對嚴格
-  `>` 成立）宣稱的有限樣本上界。已訂正為 fallback=`math.inf` ＋ 全面
-  改用嚴格 `>`（見 `compute_tau()` 與 `main()` 內註解），並補上反例測試
-  （全 1.0 錯誤樣本、ties、空校準集）鎖住這個邊界，見
-  `tests/test_w4_conformal.py`。
+---------------------------------------------------------------------------
+- **單階段 conformal**：本輪只對 `evidence_strength → 是否方向錯誤` 做校準。
+- **假設歷史≈未來**：coverage 保證只在 exchangeable 假設下成立。
+- **N=3、α=0.1 是主觀選擇**。
+- **FNG 為 market-wide**：所有幣別共用同一值，非各幣獨立信號。
+- **blockchain.com 僅 BTC**：hash-rate/difficulty/n-transactions vs SHA256 網路。
+- **不改 conformal.py 數學**：既有 `compute_tau()` 與 `_evidence_strength()` 原封不動複用。
+- 邊界語義（codex 對抗審修正）：fallback=`math.inf` + 嚴格 `>`（非 `>=`）。
 """
 from __future__ import annotations
 
+import json
 import math
 import sys
 from dataclasses import dataclass
+from datetime import datetime as _dt, timedelta as _td
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -96,6 +47,11 @@ from trustforge.trust.scoring import Claim, ScoredClaim, _evidence_strength  # n
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "data"
 COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+
+# Phase A：異質多源歷史資料路徑
+HISTORY_DIR = Path(__file__).resolve().parents[1] / "out" / "history"
+FNG_PATH = HISTORY_DIR / "alternative-me-fng-2021-07-17_2026-07-17.jsonl"
+BLOCKCHAIN_PATH = HISTORY_DIR / "blockchain-com-charts-2021-07-17_2026-07-17.jsonl"
 
 ALPHA = 0.10
 FORWARD_DAYS = 3          # N：往後看幾個交易日判對錯
@@ -131,10 +87,187 @@ def _clamp_trust(magnitude: float, lo: float = 0.5, hi: float = 0.95) -> float:
 def _make_signal_claim(coin: str, source: str, kind: str, ts_tag: str) -> Claim:
     doc = Document(
         id=f"backtest-{coin}-{source}-{ts_tag}", kind=kind, source=source,
-        text=f"{coin} {source} 技術訊號（回測合成，非真實文本）", url="", ts=0.0,
+        text=f"{coin} {source} 訊號（回測合成，非真實文本）", url="", ts=0.0,
         meta={"backtest": True},
     )
     return Claim(id=doc.id, text=doc.text, doc=doc, claim_type="inference")
+
+
+# ——— Phase A：異質多源歷史資料載入 ———————————————————————————————
+
+def _load_fng_index(fng_path: Path | None = None) -> dict[str, dict]:
+    """從 Alternative.me FNG JSONL 建 `{date: {value, classification}}` index。
+
+    FNG 為 market-wide（scope="market-wide"），所有幣別共用同一值。
+    不存在或解析錯誤時 graceful skip（回空 dict，不炸回測）。
+    """
+    fpath = fng_path or FNG_PATH
+    if not fpath.exists():
+        return {}
+    index: dict[str, dict] = {}
+    try:
+        with fpath.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                date_str = rec.get("published_at", "")[:10]
+                if not date_str:
+                    continue
+                # FNG 是 market-wide，每日期多筆記錄（coin 欄位僅供參考），
+                # 取第一筆為準（所有幣同值）。
+                if date_str not in index:
+                    index[date_str] = {
+                        "value": float(rec["value"]),
+                        "classification": rec.get("classification", ""),
+                    }
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        pass  # graceful skip
+    return index
+
+
+def _load_blockchain_index(bc_path: Path | None = None) -> dict[str, dict[str, float]]:
+    """從 Blockchain.com Charts JSONL 建 `{date: {metric: value}}` index。
+
+    僅 BTC（coin="BTC"）；每天 3 metrics：n-transactions, hash-rate, difficulty。
+    不存在或解析錯誤時 graceful skip。
+    """
+    fpath = bc_path or BLOCKCHAIN_PATH
+    if not fpath.exists():
+        return {}
+    index: dict[str, dict[str, float]] = {}
+    try:
+        with fpath.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("coin", "") != "BTC":
+                    continue
+                date_str = rec.get("published_at", "")[:10]
+                if not date_str:
+                    continue
+                metric = rec.get("metric", "")
+                if not metric:
+                    continue
+                index.setdefault(date_str, {})[metric] = float(rec["value"])
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        pass
+    return index
+
+
+# 模組層級 lazy init（首次存取時才載入，只在 _samples_for_coin(extra_signals=True) 時觸發）
+_fng_cache: dict[str, dict] | None = None
+_bc_cache: dict[str, dict[str, float]] | None = None
+
+
+def _get_fng_index() -> dict[str, dict]:
+    global _fng_cache
+    if _fng_cache is None:
+        _fng_cache = _load_fng_index()
+    return _fng_cache
+
+
+def _get_bc_index() -> dict[str, dict[str, float]]:
+    global _bc_cache
+    if _bc_cache is None:
+        _bc_cache = _load_blockchain_index()
+    return _bc_cache
+
+
+# ——— Phase B：異質多源訊號擴充 ———————————————————————————————————————
+
+def _build_fng_signal(
+    coin: str, date_str: str, primary_dir: str, ts_tag: str,
+    fng_index: dict[str, dict] | None = None,
+) -> tuple[list[ScoredClaim], list[ScoredClaim]]:
+    """FNG 訊號：FNG 0-25=fear(bearish), 75-100=greed(bullish), 45-55=skip。
+
+    trust = clamp(0.5+abs(value-50)/100, 0.5, 0.85)。
+    market-wide：所有幣別共用同一值（不要假獨立）。
+    日期不在 index 中時 graceful skip（空 list）。
+    """
+    idx_map = fng_index if fng_index is not None else _get_fng_index()
+    rec = idx_map.get(date_str)
+    if rec is None:
+        return [], []
+    value = rec["value"]
+    if 45 < value < 55:
+        return [], []  # neutral zone, skip
+
+    signal_dir = "up" if value >= 75 else "down"
+    trust = max(0.5, min(0.85, 0.5 + abs(value - 50) / 100.0))
+    claim = _make_signal_claim(coin, "fng", "sentiment", ts_tag)
+    sc = ScoredClaim(claim=claim, trust=trust)
+    if signal_dir == primary_dir:
+        return [sc], []
+    else:
+        return [], [sc]
+
+
+def _build_blockchain_signals(
+    coin: str, date_str: str, primary_dir: str, ts_tag: str,
+    bc_index: dict[str, dict[str, float]] | None = None,
+) -> tuple[list[ScoredClaim], list[ScoredClaim]]:
+    """Blockchain.com onchain 訊號：n-transactions, hash-rate, difficulty。
+
+    ⛔ BTC only（守門：非 BTC 直接跳過）。
+    7 日 MA vs 30 日前趨勢。trust = clamp(0.5+abs(pct)/50, 0.5, 0.90)。
+    資料不足以算 7/30 MA 時 graceful skip。
+    """
+    if coin != "BTC":
+        return [], []
+    idx_map = bc_index if bc_index is not None else _get_bc_index()
+
+    try:
+        d = _dt.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return [], []
+
+    metrics = ["n-transactions", "hash-rate", "difficulty"]
+    supporting: list[ScoredClaim] = []
+    contrarian: list[ScoredClaim] = []
+
+    for metric in metrics:
+        # 7 日 MA（當日往前 7 天）
+        recent_vals: list[float] = []
+        for i in range(7):
+            day = (d - _td(days=i)).strftime("%Y-%m-%d")
+            rec = idx_map.get(day, {})
+            val = rec.get(metric)
+            if val is not None:
+                recent_vals.append(val)
+        if len(recent_vals) < 4:  # 至少要有 4 天資料才合理
+            continue
+        ma7 = sum(recent_vals) / len(recent_vals)
+
+        # 30 日前的 7 日 MA（日期 [d-36, d-30]）
+        prev_vals: list[float] = []
+        for i in range(7):
+            day = (d - _td(days=30 + i)).strftime("%Y-%m-%d")
+            rec = idx_map.get(day, {})
+            val = rec.get(metric)
+            if val is not None:
+                prev_vals.append(val)
+        if len(prev_vals) < 4:
+            continue
+        ma_prev = sum(prev_vals) / len(prev_vals)
+
+        if ma_prev == 0:
+            continue
+        pct = (ma7 - ma_prev) / ma_prev * 100.0
+        if abs(pct) < 1e-9:
+            continue
+
+        trust = max(0.5, min(0.9, 0.5 + abs(pct) / 50.0))
+        claim = _make_signal_claim(coin, f"bc-{metric}", "onchain", ts_tag)
+        sc = ScoredClaim(claim=claim, trust=trust)
+        signal_dir = "up" if pct > 0 else "down"
+        (supporting if signal_dir == primary_dir else contrarian).append(sc)
+
+    return supporting, contrarian
 
 
 def _build_signals(coin: str, bars: list[Bar], idx: int, primary_dir: str, ts_tag: str) \
@@ -190,22 +323,44 @@ def _build_signals(coin: str, bars: list[Bar], idx: int, primary_dir: str, ts_ta
     return supporting, contrarian
 
 
-def _samples_for_coin(coin: str) -> list[Sample]:
+def _samples_for_coin(
+    coin: str,
+    extra_signals: bool = False,
+    fng_index: dict[str, dict] | None = None,
+    bc_index: dict[str, dict[str, float]] | None = None,
+) -> list[Sample]:
     bars = load_ohlcv(coin, DATA_DIR)
     if not bars:
         return []
     samples: list[Sample] = []
     last_idx = len(bars) - 1
-    # 需要：primary window(14) 的歷史、波動率訊號需要 2*30=60 天歷史、
-    # 動量最長週期 30 天歷史、以及往後 FORWARD_DAYS 天的實際結果。
     min_idx = max(PRIMARY_WINDOW - 1, max(MOMENTUM_WINDOWS) - 1, 2 * VOL_STABILITY_WINDOW - 1)
     for idx in range(min_idx, last_idx - FORWARD_DAYS + 1):
         seg = bars[idx - PRIMARY_WINDOW + 1: idx + 1]
         ret14 = _pct(seg[0].close, seg[-1].close)
         primary_dir3 = _direction_from_ret(ret14)
         if primary_dir3 == "flat":
-            continue  # 系統本來就不對盤整下方向性結論，無對/錯可言
+            continue
         supporting, contrarian = _build_signals(coin, bars, idx, primary_dir3, bars[idx].date)
+
+        # Phase B：異質多源訊號擴充（在既有 OHLCV signals 後追加）
+        if extra_signals:
+            date_str = bars[idx].date
+            # FNG：market-wide，所有幣別共用同一值
+            fng_sup, fng_con = _build_fng_signal(
+                coin, date_str, primary_dir3, date_str,
+                fng_index=fng_index,
+            )
+            supporting.extend(fng_sup)
+            contrarian.extend(fng_con)
+            # Blockchain.com：BTC only（_build_blockchain_signals 內部守門）
+            bc_sup, bc_con = _build_blockchain_signals(
+                coin, date_str, primary_dir3, date_str,
+                bc_index=bc_index,
+            )
+            supporting.extend(bc_sup)
+            contrarian.extend(bc_con)
+
         confidence = (sum(sc.trust for sc in supporting) / len(supporting)) if supporting else 0.0
         strength = _evidence_strength(supporting, contrarian, confidence)
 
@@ -227,18 +382,8 @@ def _time_split(n_dates: int) -> tuple[int, int]:
 def compute_tau(wrong_strengths: list[float], alpha: float = ALPHA) -> float:
     """標準 split conformal 有限樣本分位數：第 ceil((n+1)(1-alpha)) 大順序統計量。
 
-    保證是對 **嚴格不等式** `strength > tau` 成立的（標準 split conformal
-    結果：P(s_{n+1} <= qhat) >= 1-alpha，qhat 為此順序統計量；k>n 時依
-    慣例 qhat=+inf）。呼叫端判斷「是否通過門檻」一律要用 `>`，不能用
-    `>=`——`evidence_strength` 的合法上界是 1.0（含），若門檻本身也可能
-    等於 1.0，`>=` 會讓「幾乎總是 abstain」的 fallback 被上界值鑽漏洞
-    通過，破壞保證。
-
-    n=0（校準集裡沒有任何「錯」樣本）或需要的名次超出樣本數時，無法在此
-    校準集規模下給出 distribution-free 保證——回傳 `math.inf`（**不是**
-    合法分數範圍內的值，任何有限 `evidence_strength`（值域 [0, 1]）都
-    不可能 `> math.inf`，因此配合呼叫端的嚴格 `>` 比較，效果是「一律
-    abstain」，這才是真正保守、不會被邊界值鑽漏洞的 fallback）。
+    保證是對 **嚴格不等式** `strength > tau` 成立的。
+    n=0 或名次超出樣本數 → math.inf（一律 abstain）。
     """
     n = len(wrong_strengths)
     if n == 0:
@@ -247,67 +392,111 @@ def compute_tau(wrong_strengths: list[float], alpha: float = ALPHA) -> float:
     k = math.ceil((n + 1) * (1 - alpha))
     if k > n:
         return math.inf
-    return ordered[k - 1]  # 1-indexed k -> 0-indexed
+    return ordered[k - 1]
 
 
 def main() -> None:
-    all_samples: dict[str, list[Sample]] = {c: _samples_for_coin(c) for c in COINS}
+    # ——— OHLCV-only baseline（既有行為，逐字不變）———
+    all_samples_ohlcv: dict[str, list[Sample]] = {c: _samples_for_coin(c) for c in COINS}
     n_dates = max((len(load_ohlcv(c, DATA_DIR)) for c in COINS), default=0)
     calib_start, test_start = _time_split(n_dates)
 
-    # 用「日期索引」切點對應回日期字串，再用日期字串切樣本（樣本已排除掉
-    # 前後緣資料不足的 idx，用日期字串比對比重新算 idx 更穩健）。
     bars_ref = load_ohlcv(COINS[0], DATA_DIR)
     calib_date_cut = bars_ref[calib_start].date if calib_start < len(bars_ref) else bars_ref[-1].date
     test_date_cut = bars_ref[test_start].date if test_start < len(bars_ref) else bars_ref[-1].date
 
-    calib_samples: list[Sample] = []
-    test_samples: list[Sample] = []
-    for samples in all_samples.values():
-        for s in samples:
-            if calib_date_cut <= s.date < test_date_cut:
-                calib_samples.append(s)
-            elif s.date >= test_date_cut:
-                test_samples.append(s)
+    def _split_samples(all_samples: dict[str, list[Sample]]) -> tuple[list[Sample], list[Sample]]:
+        calib: list[Sample] = []
+        test: list[Sample] = []
+        for samples in all_samples.values():
+            for s in samples:
+                if calib_date_cut <= s.date < test_date_cut:
+                    calib.append(s)
+                elif s.date >= test_date_cut:
+                    test.append(s)
+        return calib, test
 
-    wrong_strengths = [s.evidence_strength for s in calib_samples if s.wrong]
-    tau = compute_tau(wrong_strengths)
+    calib_ohlcv, test_ohlcv = _split_samples(all_samples_ohlcv)
+    wrong_strengths_ohlcv = [s.evidence_strength for s in calib_ohlcv if s.wrong]
+    tau_ohlcv = compute_tau(wrong_strengths_ohlcv)
 
-    # ⚠️ 嚴格 `>`（不是 `>=`）：見 `compute_tau()` docstring——標準 split
-    # conformal 的有限樣本保證是對嚴格不等式成立的；`evidence_strength`
-    # 值域上界含 1.0，用 `>=` 會讓邊界值（含 fallback 的 inf 場景之外，
-    # 一般場景 tau 剛好等於某個樣本值時）鑽漏洞算「通過」，破壞保證。
-    n_test = len(test_samples)
-    n_test_pass = sum(1 for s in test_samples if s.evidence_strength > tau)
-    n_test_confidently_wrong = sum(1 for s in test_samples if s.wrong and s.evidence_strength > tau)
-    # 主指標（跟 gray 細案文字一致，僅將「≥」訂正為嚴格「>」以對齊有限
-    # 樣本保證的實際數學形式）：JOINT 機率 P(方向錯 且 strength>tau)，
-    # 這是 split conformal 對「錯誤樣本 score 分位數」做校準時能拿到
-    # distribution-free 保證的量（見腳本上方 docstring 第 3 點的推導）。
-    joint_wrong_rate = (n_test_confidently_wrong / n_test) if n_test else 0.0
-    # 附帶指標（非本輪保證對象，僅供參考）：CONDITIONAL 機率
-    # P(方向錯 | strength>tau, 即「不 abstain 時」)——這個量沒有本輪
-    # split conformal 程序的理論保證，可能明顯偏離 alpha（信號本身預測力
-    # 有限時尤其如此），印出來是為了誠實揭露、不是拿來宣稱達標。
-    conditional_wrong_rate = (n_test_confidently_wrong / n_test_pass) if n_test_pass else 0.0
-    abstain_rate_test = 1.0 - (n_test_pass / n_test) if n_test else 0.0
+    n_test_ohlcv = len(test_ohlcv)
+    n_pass_ohlcv = sum(1 for s in test_ohlcv if s.evidence_strength > tau_ohlcv)
+    n_cw_ohlcv = sum(1 for s in test_ohlcv if s.wrong and s.evidence_strength > tau_ohlcv)
+    jwr_ohlcv = (n_cw_ohlcv / n_test_ohlcv) if n_test_ohlcv else 0.0
+    cwr_ohlcv = (n_cw_ohlcv / n_pass_ohlcv) if n_pass_ohlcv else 0.0
+    abr_ohlcv = 1.0 - (n_pass_ohlcv / n_test_ohlcv) if n_test_ohlcv else 0.0
 
-    print("=== W4 Conformal Backtest ===")
+    # ——— 異質多源擴充（OHLCV + FNG + Blockchain）———
+    fng_idx = _get_fng_index()
+    bc_idx = _get_bc_index()
+    all_samples_expanded: dict[str, list[Sample]] = {
+        c: _samples_for_coin(c, extra_signals=True, fng_index=fng_idx, bc_index=bc_idx)
+        for c in COINS
+    }
+
+    calib_exp, test_exp = _split_samples(all_samples_expanded)
+    wrong_strengths_exp = [s.evidence_strength for s in calib_exp if s.wrong]
+    tau_exp = compute_tau(wrong_strengths_exp)
+
+    n_test_exp = len(test_exp)
+    n_pass_exp = sum(1 for s in test_exp if s.evidence_strength > tau_exp)
+    n_cw_exp = sum(1 for s in test_exp if s.wrong and s.evidence_strength > tau_exp)
+    jwr_exp = (n_cw_exp / n_test_exp) if n_test_exp else 0.0
+    cwr_exp = (n_cw_exp / n_pass_exp) if n_pass_exp else 0.0
+    abr_exp = 1.0 - (n_pass_exp / n_test_exp) if n_test_exp else 0.0
+
+    # ——— 比較報告 ———
+    def _f4(v: float) -> str: return f"{v:.4f}"
+    def _s(n: int) -> str: return str(n)
+
+    print("=== W4 Conformal Backtest — 異質多源 Conformal Backtest #197 ===")
     print(f"date range: {bars_ref[0].date} ~ {bars_ref[-1].date} | coins: {', '.join(COINS)}")
     print(f"split cutoffs: calib>={calib_date_cut}, test>={test_date_cut}")
     print(f"alpha={ALPHA}, forward_days={FORWARD_DAYS}")
-    print(f"calib samples: {len(calib_samples)} (wrong={len(wrong_strengths)})")
-    print(f"tau = {tau:.4f}")
-    print(f"test samples: {n_test} (pass/not-abstain={n_test_pass}, confidently-wrong={n_test_confidently_wrong})")
-    print(f"held-out JOINT coverage: P(wrong AND strength>tau) = {joint_wrong_rate:.4f} (target <= alpha={ALPHA}) "
-          f"{'OK' if joint_wrong_rate <= ALPHA else 'VIOLATED'}")
-    print(f"held-out CONDITIONAL (參考用、非本輪保證對象): P(wrong | strength>tau) = {conditional_wrong_rate:.4f}")
-    print(f"held-out abstain rate at tau: {abstain_rate_test:.4f}")
+    print(f"FNG index: {len(fng_idx)} dates loaded")
+    print(f"Blockchain index: {len(bc_idx)} dates loaded")
+    print()
+    print(f"{'指標':<45} {'OHLCV-only':>14} {'OHLCV+FNG+BC':>14} {'Threshold':>12} {'達標':>5}")
+    print(f"{'─' * 45} {'─' * 14} {'─' * 14} {'─' * 12} {'─' * 5}")
+    print(f"{'τ':<45} {_f4(tau_ohlcv):>14} {_f4(tau_exp):>14} {'':>12} {'':>5}")
+    print(f"{'calib samples':<45} {_s(len(calib_ohlcv)):>14} {_s(len(calib_exp)):>14} {'':>12} {'':>5}")
+    print(f"{'calib wrong':<45} {_s(len(wrong_strengths_ohlcv)):>14} {_s(len(wrong_strengths_exp)):>14} {'':>12} {'':>5}")
+    print(f"{'test samples':<45} {_s(n_test_ohlcv):>14} {_s(n_test_exp):>14} {'':>12} {'':>5}")
+    print()
 
-    # 額外供比對：舊簡化分位數表隱含的 abstain 門檻（calibrated_confidence
-    # 0.35）換算回 evidence_strength 空間大約落在哪裡（線性反插值 _CALIBRATION_TABLE）。
-    old_threshold_raw = 0.30  # _CALIBRATION_TABLE 裡 (0.30, 0.20) 是最接近 0.35 校準值以下的錨點附近
-    print(f"(對照：舊簡化門檻 calibrated<0.35 約對應 evidence_strength≈{old_threshold_raw:.2f} 附近，非精確反函數)")
+    # P1: joint coverage ≤ 0.10
+    p1_exp = "PASS" if jwr_exp <= ALPHA else "FAIL"
+    print(f"{'P1 joint coverage (≤0.10)':<45} {_f4(jwr_ohlcv):>14} {_f4(jwr_exp):>14} {'≤ 0.10':>12} {p1_exp:>5}")
+
+    # P2: abstain rate ≤ 0.60
+    p2_exp = "PASS" if abr_exp <= 0.60 else "FAIL"
+    print(f"{'P2 abstain rate (≤0.60)':<45} {_f4(abr_ohlcv):>14} {_f4(abr_exp):>14} {'≤ 0.60':>12} {p2_exp:>5}")
+
+    # P3: conditional wrong ≤ 0.55
+    p3_exp = "PASS" if cwr_exp <= 0.55 else "FAIL"
+    print(f"{'P3 conditional wrong (≤0.55)':<45} {_f4(cwr_ohlcv):>14} {_f4(cwr_exp):>14} {'≤ 0.55':>12} {p3_exp:>5}")
+
+    # P4: held-out pass ≥ 100
+    p4_exp = "PASS" if n_pass_exp >= 100 else "FAIL"
+    print(f"{'P4 held-out pass (≥100)':<45} {_s(n_pass_ohlcv):>14} {_s(n_pass_exp):>14} {'≥ 100':>12} {p4_exp:>5}")
+
+    print()
+    all_pass = (p1_exp == "PASS" and p2_exp == "PASS" and p3_exp == "PASS" and p4_exp == "PASS")
+    if all_pass:
+        print(">>> ALL P1-P4 PASS — Promotion eligible (Phase D: Wire Production) <<<")
+        print(f"    conformal._CONFORMAL_TAU = {tau_exp:.4f}  # 無條件進位到 4 位")
+    else:
+        failed = []
+        if p1_exp == "FAIL": failed.append("P1")
+        if p2_exp == "FAIL": failed.append("P2")
+        if p3_exp == "FAIL": failed.append("P3")
+        if p4_exp == "FAIL": failed.append("P4")
+        print(f">>> FAILED: {', '.join(failed)} — Phase E (Honest State) <<<")
+        print("    不偽造、不強上。conformal.py 維持現狀，記錄 FAIL 原因。")
+
+    print()
+    print("(對照：舊簡化門檻 calibrated<0.35 約對應 evidence_strength≈0.30 附近，非精確反函數)")
 
 
 if __name__ == "__main__":
