@@ -1,0 +1,52 @@
+{
+  "disclaimer": "TrustScore does not predict market direction. This report evaluates calibration of TrustScore relative to ground-truth direction labels.",
+  "total_records": 1964,
+  "overall": {
+    "accuracy": 0.3406,
+    "auc": 0.8114,
+    "brier_score": 0.2592,
+    "correct": 669,
+    "total": 1964
+  },
+  "bullish_subset": {
+    "target": "GT=bullish; positive=prediction is bullish",
+    "accuracy": 0.008,
+    "auc": 0.9969,
+    "brier_score": 0.2769,
+    "correct": 5,
+    "total": 627
+  },
+  "bearish_subset": {
+    "target": "GT=bearish; positive=prediction is bearish",
+    "accuracy": 0.0089,
+    "auc": 0.0,
+    "brier_score": 0.2829,
+    "correct": 6,
+    "total": 674
+  },
+  "reliability_diagram": {
+    "bins": [
+      {
+        "bin": 5,
+        "range": [
+          0.5,
+          0.6
+        ],
+        "count": 1868,
+        "mean_score": 0.527,
+        "fraction_correct": 0.3362
+      },
+      {
+        "bin": 6,
+        "range": [
+          0.6,
+          0.7
+        ],
+        "count": 96,
+        "mean_score": 0.6025,
+        "fraction_correct": 0.4271
+      }
+    ],
+    "note": "10 equal-width bins of trust_score; fraction_correct is the empirical accuracy within each bin."
+  }
+}
