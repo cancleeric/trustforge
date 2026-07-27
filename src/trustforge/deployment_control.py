@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -22,6 +23,7 @@ from trustforge.release_router import (
     RoutingPolicy,
     RoutingSnapshot,
 )
+from trustforge.safe_fs import write_atomic
 from trustforge.signed_event_ledger import SignedEventLedger
 
 Action = Literal["start", "stop", "promote", "rollback-a"]
@@ -52,13 +54,15 @@ class DeploymentAuthorization:
     evidence_bundle_digest: str
     routing_policy_digest: str
     routing_key_id: str
+    expected_control_head: str
+    expected_sequence: int
     actor: str
     issued_at: str
     expires_at: str
     nonce: str
     key_id: str
     signature: str
-    receipt_version: str = "trustforge.deployment-authorization/v2"
+    receipt_version: str = "trustforge.deployment-authorization/v3"
 
     def unsigned(self) -> dict[str, Any]:
         value = asdict(self)
@@ -108,6 +112,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         evidence_bundle_digest: str,
         stop_after_errors: int = 3,
         require_distributed_lock: bool = True,
+        clock: Callable[[], datetime] | None = None,
     ):
         expected_confirmation = (
             f"PRODUCTION:{target}:{active.release_digest}:{candidate.release_digest}"
@@ -128,6 +133,33 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         self.evidence_bundle_digest = evidence_bundle_digest
         self.stop_after_errors = stop_after_errors
         self.require_distributed_lock = require_distributed_lock
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _trusted_now(self) -> datetime:
+        """Advance a durable wall-clock floor and fail closed on rollback."""
+        current = self.clock().astimezone(timezone.utc)
+        path = self.ledger.directory / "monotonic-time-floor"
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            prior = None
+        else:
+            try:
+                prior = _utc(os.read(descriptor, 128).decode("ascii"))
+            except (OSError, UnicodeDecodeError):
+                raise DeploymentControlError(
+                    "durable time floor is invalid"
+                ) from None
+            finally:
+                os.close(descriptor)
+        if prior is not None and current < prior:
+            raise DeploymentControlError("trusted wall clock rolled back")
+        if prior is None or current > prior:
+            write_atomic(path, current.isoformat().encode("ascii"), immutable=False)
+        return current
 
     @staticmethod
     def _verify_ed25519(
@@ -155,17 +187,19 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         action: Action,
         ledger_id: str,
         effective_at: datetime,
+        expected_control_head: str,
+        expected_sequence: int,
     ) -> None:
         self._verify_ed25519(
             self.authorization_keys,
             receipt.key_id,
             receipt.signature,
-            b"trustforge.deployment-authorization.v2\x00",
+            b"trustforge.deployment-authorization.v3\x00",
             receipt.unsigned(),
             "authorization",
         )
         if (
-            receipt.receipt_version != "trustforge.deployment-authorization/v2"
+            receipt.receipt_version != "trustforge.deployment-authorization/v3"
             or receipt.action != action
             or receipt.target != self.target
             or receipt.target_confirmation != self.target_confirmation
@@ -175,6 +209,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             or receipt.evidence_bundle_digest != self.evidence_bundle_digest
             or receipt.routing_policy_digest != self.policy.policy_digest
             or receipt.routing_key_id != self.policy.routing_key_id
+            or receipt.expected_control_head != expected_control_head
+            or receipt.expected_sequence != expected_sequence
             or not receipt.actor
             or not receipt.nonce
         ):
@@ -295,6 +331,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         return epoch
 
     def routing_snapshot(self) -> RoutingSnapshot:
+        self._trusted_now()
         records = self._records()
         outcome_records = self._outcome_records(records[0]["ledger_id"])
         phase = desired = "disabled"
@@ -306,7 +343,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         reservations: dict[tuple[str, str], bool] = {}
         known_canary_epochs: set[str] = set()
         current_canary_epoch: str | None = None
-        for record in records[1:]:
+        for record_index, record in enumerate(records[1:], start=1):
             event = record["event"]
             kind = event.get("kind")
             if kind == "activation_prepared":
@@ -323,6 +360,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     action=event["action"],
                     ledger_id=records[0]["ledger_id"],
                     effective_at=_utc(event["at"]),
+                    expected_control_head=records[record_index - 1]["event_hash"],
+                    expected_sequence=record["sequence"],
                 )
                 if (
                     event.get("nonce") != authorization.nonce
@@ -330,6 +369,40 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 ):
                     raise DeploymentControlError(
                         "prepared activation authorization identity mismatch"
+                    )
+                allowed_prior = {
+                    "start": {"disabled", "stopped"},
+                    "promote": {"canary"},
+                    "rollback-a": {
+                        "canary", "stopped", "promoted", "recovery_required"
+                    },
+                }
+                expected_desired = {
+                    "start": "canary",
+                    "promote": "promoted",
+                    "rollback-a": "disabled",
+                }
+                expected_transaction = hashlib.sha256(
+                    b"trustforge.activation-transaction.v1\x00"
+                    + canonical_json(
+                        {
+                            "ledger_id": records[0]["ledger_id"],
+                            "action": authorization.action,
+                            "nonce": authorization.nonce,
+                        }
+                    )
+                ).hexdigest()
+                if (
+                    authorization.action not in allowed_prior
+                    or phase not in allowed_prior[authorization.action]
+                    or event.get("desired_phase")
+                    != expected_desired[authorization.action]
+                    or event.get("transaction_id") != expected_transaction
+                    or event.get("owner_id")
+                    != f"deployment-control:{expected_transaction}"
+                ):
+                    raise DeploymentControlError(
+                        "prepared activation semantics mismatch authorization"
                     )
                 transaction = str(event["transaction_id"])
                 if transaction in prepared or unresolved_transaction is not None:
@@ -388,6 +461,25 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     raise DeploymentControlError(
                         "activation completion receipt identity mismatch"
                     )
+                expected_kind = (
+                    "activation_completed"
+                    if completion.status == "completed"
+                    else "activation_failed"
+                )
+                if (
+                    kind != expected_kind
+                    or event.get("transaction_id") != completion.transaction_id
+                    or event.get("action") != completion.action
+                    or event.get("prepared_event_hash")
+                    != completion.prepared_event_hash
+                    or event.get("pointer_active_digest")
+                    != completion.pointer_active_digest
+                    or event.get("observed_manifest_digest")
+                    != completion.observed_manifest_digest
+                ):
+                    raise DeploymentControlError(
+                        "activation completion semantics mismatch receipt"
+                    )
                 terminal_transactions.add(transaction)
                 unresolved_transaction = None
                 if kind == "activation_completed":
@@ -420,6 +512,8 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                     action="stop",
                     ledger_id=records[0]["ledger_id"],
                     effective_at=_utc(event["at"]),
+                    expected_control_head=records[record_index - 1]["event_hash"],
+                    expected_sequence=record["sequence"],
                 )
                 if (
                     event.get("nonce") != authorization.nonce
@@ -427,6 +521,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 ):
                     raise DeploymentControlError(
                         "operator stop authorization identity mismatch"
+                    )
+                if phase != "canary":
+                    raise DeploymentControlError(
+                        "operator stop prior phase is invalid"
                     )
                 phase = desired = "stopped"
                 activation = "completed"
@@ -500,8 +598,14 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
         self, receipt: DeploymentAuthorization, *, action: Action, now: datetime
     ) -> None:
         snapshot = self.routing_snapshot()
+        records = self._records()
         self._validate_authorization_receipt(
-            receipt, action=action, ledger_id=snapshot.ledger_id, effective_at=now
+            receipt,
+            action=action,
+            ledger_id=snapshot.ledger_id,
+            effective_at=now,
+            expected_control_head=records[-1]["event_hash"],
+            expected_sequence=len(records) + 1,
         )
 
     def prepare(
@@ -513,6 +617,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
     def _prepare_locked(
         self, action: Action, receipt: DeploymentAuthorization, *, now: datetime
     ) -> dict[str, Any]:
+        trusted_now = self._trusted_now()
+        if abs((now.astimezone(timezone.utc) - trusted_now).total_seconds()) > 5:
+            raise DeploymentControlError("operator time is not current")
+        now = trusted_now
         self._verify_authorization(receipt, action=action, now=now)
         state = self.routing_snapshot()
         control_records = self._records()
@@ -594,6 +702,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
     def _complete_locked(
         self, receipt: ActivationCompletionReceipt, *, now: datetime
     ) -> dict[str, Any]:
+        trusted_now = self._trusted_now()
+        if abs((now.astimezone(timezone.utc) - trusted_now).total_seconds()) > 5:
+            raise DeploymentControlError("operator time is not current")
+        now = trusted_now
         records = self._records()
         terminal_ids = {
             str(record["event"].get("transaction_id"))
@@ -630,6 +742,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                         else "activation_failed"
                     ),
                     "transaction_id": receipt.transaction_id,
+                    "action": receipt.action,
                     "prepared_event_hash": receipt.prepared_event_hash,
                     "pointer_active_digest": receipt.pointer_active_digest,
                     "observed_manifest_digest": receipt.observed_manifest_digest,
@@ -762,24 +875,63 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 continue
         raise LedgerError("candidate outcome could not be durably recorded")
 
+    @contextmanager
+    def candidate_execution(self, *, reservation_id: str):
+        """Hold the cross-ledger lock from final epoch check through B start."""
+        with self.ledger.coordination_lock():
+            records = self._records()
+            epoch = self._canary_epoch(records)
+            state = self.routing_snapshot()
+            reservation = next(
+                (
+                    item["event"]
+                    for item in self._outcome_records(records[0]["ledger_id"])
+                    if item["event"].get("kind") == "candidate_reservation"
+                    and item["event"].get("reservation_id") == reservation_id
+                ),
+                None,
+            )
+            if (
+                epoch is None
+                or reservation is None
+                or reservation.get("canary_epoch") != epoch
+                or state.phase != "canary"
+                or state.activation_status != "completed"
+            ):
+                raise LedgerError("candidate execution authorization is stale")
+            yield
+
     def emergency_stop(self, *, ledger_id: str, reason: str) -> None:
         if reason != "candidate_outcome_unrecordable":
             raise LedgerError("router cannot create operator stop events")
-        state = self.routing_snapshot()
-        if state.ledger_id != ledger_id:
-            raise LedgerError("router emergency stop ledger identity mismatch")
-        control_records = self._records()
-        canary_epoch = self._canary_epoch(control_records)
-        if canary_epoch is None:
-            raise LedgerError("router emergency stop has no active canary epoch")
-        self.outcome_ledger.append(
-            {
-                "kind": "router_emergency_stop",
-                "deployment_ledger_id": ledger_id,
-                "canary_epoch": canary_epoch,
-                "control_head": canary_epoch,
-                "reason": reason,
-                "nonce": f"router-emergency:{ledger_id}",
-            },
-            expected_head=state.ledger_head,
-        )
+        with self.ledger.coordination_lock():
+            for _attempt in range(8):
+                state = self.routing_snapshot()
+                if state.ledger_id != ledger_id:
+                    raise LedgerError("router emergency stop ledger identity mismatch")
+                control_records = self._records()
+                canary_epoch = self._canary_epoch(control_records)
+                if canary_epoch is None:
+                    raise LedgerError("router emergency stop has no active canary epoch")
+                records = self._outcome_records(ledger_id)
+                nonce = f"router-emergency:{canary_epoch}:{reason}"
+                if any(item["event"].get("nonce") == nonce for item in records):
+                    return
+                try:
+                    self.outcome_ledger.append(
+                        {
+                            "kind": "router_emergency_stop",
+                            "deployment_ledger_id": ledger_id,
+                            "canary_epoch": canary_epoch,
+                            "control_head": canary_epoch,
+                            "reason": reason,
+                            "nonce": nonce,
+                        },
+                        expected_head=(
+                            records[-1]["event_hash"] if records else GENESIS_HASH
+                        ),
+                    )
+                    return
+                except LedgerError:
+                    continue
+        raise LedgerError("router emergency stop contention budget exhausted")

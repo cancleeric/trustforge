@@ -8,6 +8,7 @@ import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
@@ -139,6 +140,11 @@ class ReleaseRoutingLedger(Protocol):
     def emergency_stop(self, *, ledger_id: str, reason: str) -> None:
         """Trip the separate durable one-way stop latch."""
 
+    def candidate_execution(
+        self, *, reservation_id: str
+    ) -> AbstractContextManager[None]:
+        """Revalidate and hold the stop/reservation ordering through B start."""
+
 
 @dataclass(frozen=True, slots=True)
 class RoutedResponse:
@@ -201,14 +207,15 @@ class ReleaseABRouter:
         import time
         started = time.monotonic()
         try:
-            response = self._request(
-                snapshot.candidate,
-                path,
-                release="B",
-                failed_over=False,
-                timeout=snapshot.policy.timeout_ms / 1000,
-                request_headers=request_headers,
-            )
+            with self.ledger.candidate_execution(reservation_id=reservation_id):
+                response = self._request(
+                    snapshot.candidate,
+                    path,
+                    release="B",
+                    failed_over=False,
+                    timeout=snapshot.policy.timeout_ms / 1000,
+                    request_headers=request_headers,
+                )
             if response.status_code >= 500:
                 raise ReleaseRoutingError("candidate_http_5xx")
             self.ledger.record_candidate_result(

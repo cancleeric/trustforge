@@ -117,9 +117,13 @@ class SignedEventLedger:
             self._private_key = None
         if min(max_file_bytes, max_events, max_event_bytes) <= 0:
             raise LedgerError("ledger bounds must be positive")
-        self.directory = Path(directory)
+        self.directory = Path(directory).absolute()
         self.ledger_role = ledger_role
-        self.coordination_root = Path(coordination_root or self.directory.parent)
+        self.coordination_root = Path(
+            coordination_root or self.directory.parent
+        ).absolute()
+        if self.directory.parent != self.coordination_root:
+            raise LedgerError("ledger directory must be a direct child of pinned root")
         self._verification_keys = dict(verification_keys)
         self._permissions = dict(event_permissions)
         self._domain_keys = dict(domain_keys)

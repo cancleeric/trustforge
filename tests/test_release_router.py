@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -136,6 +137,13 @@ class _Ledger:
         assert ledger_id == "ledger-prod-1"
         self.emergency = True
 
+    @contextmanager
+    def candidate_execution(self, *, reservation_id):
+        assert reservation_id in self.reservations
+        if self.phase != "canary":
+            raise RuntimeError("stopped")
+        yield
+
 
 def test_real_separate_http_releases_route_limited_b_without_core_import():
     a_server, _ = _server(b"A", "sha256:" + "a" * 64)
@@ -238,7 +246,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         control_seed = b"l" * 32
         outcome_seed = b"o" * 32
         ledger = SignedEventLedger(
-            directory=tmp_path / "control-ledger",
+            directory=tmp_path / "ledger-root" / "control",
             verification_keys={"control-1": Ed25519PrivateKey.from_private_bytes(
                 control_seed
             ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
@@ -255,7 +263,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             coordination_root=tmp_path / "ledger-root",
         )
         outcome_ledger = SignedEventLedger(
-            directory=tmp_path / "outcome-ledger",
+            directory=tmp_path / "ledger-root" / "router-outcomes",
             verification_keys={"outcome-1": Ed25519PrivateKey.from_private_bytes(
                 outcome_seed
             ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
@@ -302,29 +310,41 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             "evidence_bundle_digest": "sha256:" + "e" * 64,
             "routing_policy_digest": policy.policy_digest,
             "routing_key_id": policy.routing_key_id,
+            "expected_control_head": ledger.read()[-1]["event_hash"],
+            "expected_sequence": len(ledger.read()) + 1,
             "actor": "test",
             "issued_at": (now - timedelta(minutes=1)).isoformat(),
             "expires_at": (now + timedelta(minutes=5)).isoformat(),
             "nonce": "prepare-test",
             "key_id": "auth",
-            "receipt_version": "trustforge.deployment-authorization/v2",
+            "receipt_version": "trustforge.deployment-authorization/v3",
         }
         auth_receipt = {
             **auth_unsigned,
             "signature": Ed25519PrivateKey.from_private_bytes(b"a" * 32).sign(
-                b"trustforge.deployment-authorization.v2\x00"
+                b"trustforge.deployment-authorization.v3\x00"
                 + canonical_json(auth_unsigned)
             ).hex(),
         }
+        transaction_id = hashlib.sha256(
+            b"trustforge.activation-transaction.v1\x00"
+            + canonical_json(
+                {
+                    "ledger_id": auth_unsigned["ledger_id"],
+                    "action": "start",
+                    "nonce": "prepare-test",
+                }
+            )
+        ).hexdigest()
         prepared = ledger.append(
             {
                 "kind": "activation_prepared",
-                "transaction_id": "t1",
+                "transaction_id": transaction_id,
                 "action": "start",
                 "desired_phase": "canary",
                 "nonce": "prepare-test",
                 "actor": "test",
-                "owner_id": "test",
+                "owner_id": f"deployment-control:{transaction_id}",
                 "evidence_bundle_digest": "sha256:" + "e" * 64,
                 "active_artifact_digest": a.release_digest,
                 "candidate_artifact_digest": b.release_digest,
@@ -334,7 +354,7 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             }
         )
         completion_unsigned = {
-            "transaction_id": "t1",
+            "transaction_id": transaction_id,
             "action": "start",
             "target": target,
             "prepared_event_hash": prepared["event_hash"],
@@ -359,7 +379,8 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         ledger.append(
             {
                 "kind": "activation_completed",
-                "transaction_id": "t1",
+                "transaction_id": transaction_id,
+                "action": "start",
                 "prepared_event_hash": prepared["event_hash"],
                 "pointer_active_digest": a.release_digest,
                 "observed_manifest_digest": a.release_digest,

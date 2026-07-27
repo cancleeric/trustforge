@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -77,13 +77,13 @@ def _policy():
     return RoutingPolicy(**payload, policy_digest=digest)
 
 
-def _control(tmp_path):
+def _control(tmp_path, *, clock=lambda: NOW):
     active = ReleaseEndpoint(_digest("a"), "http://127.0.0.1:18081", "manifest-1")
     candidate = ReleaseEndpoint(_digest("b"), "http://127.0.0.1:18082", "manifest-1")
     target = "trustforge-production"
     confirmation = f"PRODUCTION:{target}:{active.release_digest}:{candidate.release_digest}"
     ledger = SignedEventLedger(
-        directory=tmp_path / "control-ledger",
+        directory=tmp_path / "ledger-root" / "control",
         verification_keys={"control-1": _public(CONTROL_KEY)},
         event_permissions={"release-control": frozenset({
             "deployment_initialized", "operator_stop", "activation_prepared",
@@ -98,7 +98,7 @@ def _control(tmp_path):
         coordination_root=tmp_path / "ledger-root",
     )
     outcome_ledger = SignedEventLedger(
-        directory=tmp_path / "outcome-ledger",
+        directory=tmp_path / "ledger-root" / "router-outcomes",
         verification_keys={"outcome-1": _public(OUTCOME_KEY)},
         event_permissions={"release-router-outcome": frozenset({
             "candidate_reservation", "candidate_result", "router_emergency_stop",
@@ -124,6 +124,7 @@ def _control(tmp_path):
         evidence_bundle_digest=_digest("e"),
         stop_after_errors=2,
         require_distributed_lock=False,
+        clock=clock,
     )
     control.initialize()
     return control
@@ -141,15 +142,17 @@ def _authorization(control, action, nonce):
         "evidence_bundle_digest": control.evidence_bundle_digest,
         "routing_policy_digest": control.policy.policy_digest,
         "routing_key_id": control.policy.routing_key_id,
+        "expected_control_head": control._records()[-1]["event_hash"],
+        "expected_sequence": len(control._records()) + 1,
         "actor": "ceo",
         "issued_at": (NOW - timedelta(minutes=1)).isoformat(),
         "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
         "nonce": nonce,
         "key_id": "auth-1",
-        "receipt_version": "trustforge.deployment-authorization/v2",
+        "receipt_version": "trustforge.deployment-authorization/v3",
     }
     signature = Ed25519PrivateKey.from_private_bytes(AUTH_KEY).sign(
-        b"trustforge.deployment-authorization.v2\x00" + canonical_json(unsigned),
+        b"trustforge.deployment-authorization.v3\x00" + canonical_json(unsigned),
     ).hex()
     return DeploymentAuthorization(**unsigned, signature=signature)
 
@@ -372,3 +375,170 @@ def test_projection_reverifies_persisted_independent_receipts(tmp_path, key_role
     setattr(control, key_role, {"wrong": b"x" * 32})
     with pytest.raises(DeploymentControlError, match="signature"):
         control.routing_snapshot()
+
+
+def test_expired_authorization_cannot_be_consumed_with_backdated_event_time(tmp_path):
+    control = _control(tmp_path)
+    receipt = _authorization(control, "start", "expired-backdate")
+    backdated = replace(
+        receipt,
+        issued_at=(NOW - timedelta(minutes=10)).isoformat(),
+        expires_at=(NOW - timedelta(minutes=1)).isoformat(),
+        signature="",
+    )
+    signature = Ed25519PrivateKey.from_private_bytes(AUTH_KEY).sign(
+        b"trustforge.deployment-authorization.v3\x00"
+        + canonical_json(backdated.unsigned())
+    ).hex()
+    with pytest.raises(DeploymentControlError, match="not current"):
+        control.prepare(
+            "start",
+            replace(backdated, signature=signature),
+            now=NOW - timedelta(minutes=5),
+        )
+
+
+def test_restart_fails_closed_when_wall_clock_rolls_back(tmp_path):
+    _control(tmp_path, clock=lambda: NOW + timedelta(minutes=1))
+    with pytest.raises(DeploymentControlError, match="clock rolled back"):
+        _control(tmp_path, clock=lambda: NOW)
+
+
+def test_projection_rejects_failed_receipt_as_completed_event(tmp_path):
+    control = _control(tmp_path)
+    prepared = control.prepare(
+        "start", _authorization(control, "start", "failed-kind"), now=NOW
+    )
+    receipt = _completion(
+        control,
+        prepared,
+        "start",
+        "failed-kind-complete",
+        status="failed",
+    )
+    control.ledger.append(
+        {
+            "kind": "activation_completed",
+            "transaction_id": receipt.transaction_id,
+            "action": receipt.action,
+            "prepared_event_hash": receipt.prepared_event_hash,
+            "pointer_active_digest": receipt.pointer_active_digest,
+            "observed_manifest_digest": receipt.observed_manifest_digest,
+            "activation_receipt_digest": "sha256:" + hashlib.sha256(
+                canonical_json(receipt.unsigned() | {"signature": receipt.signature})
+            ).hexdigest(),
+            "nonce": receipt.nonce,
+            "actor": receipt.actor,
+            "at": NOW.isoformat(),
+            "completion_receipt": asdict(receipt),
+        }
+    )
+    with pytest.raises(DeploymentControlError, match="semantics mismatch"):
+        control.routing_snapshot()
+
+
+def test_projection_rejects_tampered_prepared_semantic_metadata(tmp_path):
+    control = _control(tmp_path)
+    receipt = _authorization(control, "start", "tampered-metadata")
+    transaction = hashlib.sha256(
+        b"trustforge.activation-transaction.v1\x00"
+        + canonical_json(
+            {
+                "ledger_id": receipt.ledger_id,
+                "action": receipt.action,
+                "nonce": receipt.nonce,
+            }
+        )
+    ).hexdigest()
+    control.ledger.append(
+        {
+            "kind": "activation_prepared",
+            "transaction_id": transaction,
+            "action": "start",
+            "desired_phase": "promoted",
+            "nonce": receipt.nonce,
+            "actor": receipt.actor,
+            "owner_id": f"deployment-control:{transaction}",
+            "evidence_bundle_digest": control.evidence_bundle_digest,
+            "active_artifact_digest": control.active.release_digest,
+            "candidate_artifact_digest": control.candidate.release_digest,
+            "routing_policy_digest": control.policy.policy_digest,
+            "at": NOW.isoformat(),
+            "authorization_receipt": asdict(receipt),
+        }
+    )
+    with pytest.raises(DeploymentControlError, match="semantics mismatch"):
+        control.routing_snapshot()
+
+
+def test_emergency_stop_retries_outcome_contention(tmp_path, monkeypatch):
+    control = _control(tmp_path)
+    _start_canary(control, "contention")
+    original = control.outcome_ledger.append
+    attempts = 0
+
+    def contend(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 4:
+            raise LedgerError("simulated contention")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(control.outcome_ledger, "append", contend)
+    control.emergency_stop(
+        ledger_id=control.routing_snapshot().ledger_id,
+        reason="candidate_outcome_unrecordable",
+    )
+    assert attempts == 4
+    assert control.routing_snapshot().phase == "stopped"
+
+
+def test_restart_allows_a_second_epoch_scoped_emergency_stop(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "emergency-1")
+    control.emergency_stop(
+        ledger_id=control.routing_snapshot().ledger_id,
+        reason="candidate_outcome_unrecordable",
+    )
+    prepared = control.prepare(
+        "rollback-a",
+        _authorization(control, "rollback-a", "rollback-after-emergency"),
+        now=NOW,
+    )
+    control.complete(
+        _completion(control, prepared, "rollback-a", "rollback-complete"),
+        now=NOW,
+    )
+    _start_canary(control, "emergency-2")
+    control.emergency_stop(
+        ledger_id=control.routing_snapshot().ledger_id,
+        reason="candidate_outcome_unrecordable",
+    )
+    emergency = [
+        item["event"]
+        for item in control.outcome_ledger.read()
+        if item["event"]["kind"] == "router_emergency_stop"
+    ]
+    assert len(emergency) == 2
+    assert emergency[0]["nonce"] != emergency[1]["nonce"]
+
+
+def test_candidate_execution_rechecks_stop_before_network_start(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "concurrent-stop")
+    state = control.routing_snapshot()
+    reservation_id = "d" * 32
+    control.reserve_candidate(
+        expected_head=state.ledger_head,
+        reservation_id=reservation_id,
+    )
+    control.prepare(
+        "stop",
+        _authorization(control, "stop", "stop-before-network"),
+        now=NOW,
+    )
+    network_started = False
+    with pytest.raises(LedgerError, match="stale"):
+        with control.candidate_execution(reservation_id=reservation_id):
+            network_started = True
+    assert network_started is False

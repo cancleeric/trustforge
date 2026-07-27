@@ -28,7 +28,7 @@ def _public(seed: bytes) -> bytes:
 
 def _ledger(tmp_path, *, seed=CONTROL_SEED, domain="release-control", kinds=CONTROL_KINDS):
     return SignedEventLedger(
-        directory=tmp_path,
+        directory=tmp_path / "ledger",
         verification_keys={
             "control-1": _public(CONTROL_SEED),
             "router-1": _public(ROUTER_SEED),
@@ -46,7 +46,7 @@ def _ledger(tmp_path, *, seed=CONTROL_SEED, domain="release-control", kinds=CONT
         signing_domain=domain,
         ledger_role=domain,
         bootstrap=True,
-        coordination_root=tmp_path.parent / "root",
+        coordination_root=tmp_path,
     )
 
 
@@ -54,12 +54,12 @@ def test_projection_uses_public_keys_only_and_cannot_append(tmp_path):
     writer = _ledger(tmp_path)
     writer.append({"kind": "deployment_initialized"})
     projection = SignedEventLedger(
-        directory=tmp_path,
+        directory=tmp_path / "ledger",
         verification_keys={"control-1": _public(CONTROL_SEED)},
         event_permissions={"release-control": CONTROL_KINDS},
         domain_keys={"release-control": frozenset({"control-1"})},
         ledger_role="release-control",
-        coordination_root=tmp_path.parent / "root",
+        coordination_root=tmp_path,
     )
     assert projection.read()[0]["event"]["kind"] == "deployment_initialized"
     with pytest.raises(LedgerError, match="projection-only"):
@@ -92,7 +92,7 @@ def test_forged_router_signature_with_control_kind_fails_projection(tmp_path):
         "deployment_ledger_id": "a" * 32,
         "reservation_id": "1" * 32,
     })
-    path = tmp_path / "events.jsonl"
+    path = tmp_path / "ledger" / "events.jsonl"
     record = json.loads(path.read_text().strip())
     record["event"]["kind"] = "operator_stop"
     path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
@@ -109,7 +109,7 @@ def test_legacy_hmac_v1_ledger_fails_closed_under_ed25519_projection(tmp_path):
     legacy.append({"kind": "operator_stop"})
     with pytest.raises(LedgerError, match="legacy"):
         SignedEventLedger(
-            directory=tmp_path,
+            directory=tmp_path / "control",
             verification_keys={"control-1": _public(CONTROL_SEED)},
             event_permissions={"release-control": CONTROL_KINDS},
             domain_keys={"release-control": frozenset({"control-1"})},
@@ -126,7 +126,7 @@ def test_fresh_bootstrap_is_explicit_signed_and_restart_verifiable(tmp_path):
         "event_permissions": {"release-control": CONTROL_KINDS},
         "domain_keys": {"release-control": frozenset({"control-1"})},
         "ledger_role": "release-control",
-        "coordination_root": tmp_path / "root",
+        "coordination_root": tmp_path,
     }
     with pytest.raises(LedgerError, match="explicit secure bootstrap"):
         SignedEventLedger(**kwargs)
@@ -142,6 +142,22 @@ def test_fresh_bootstrap_is_explicit_signed_and_restart_verifiable(tmp_path):
     assert SignedEventLedger(**kwargs).read()[0]["event"]["kind"] == (
         "deployment_initialized"
     )
+
+
+def test_bootstrap_directory_cannot_escape_or_alias_coordination_root(tmp_path):
+    with pytest.raises(LedgerError, match="direct child"):
+        SignedEventLedger(
+            directory=tmp_path / "parent" / ".." / "escaped",
+            verification_keys={"control-1": _public(CONTROL_SEED)},
+            event_permissions={"release-control": CONTROL_KINDS},
+            domain_keys={"release-control": frozenset({"control-1"})},
+            signing_key_id="control-1",
+            signing_private_key=CONTROL_SEED,
+            signing_domain="release-control",
+            ledger_role="release-control",
+            coordination_root=tmp_path,
+            bootstrap=True,
+        )
 
 
 def test_write_all_detects_zero_progress_and_partial_event_fails_closed(
