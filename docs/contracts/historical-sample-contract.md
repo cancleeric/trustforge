@@ -107,11 +107,12 @@ inclusive**。一筆樣本只有在以下兩項都成立時才可進入訓練：
 
 1. `as_of` 正規化成 UTC 後不晚於 cutoff；
 2. `outcome_observed_at` 必須存在、是帶 timezone 的 ISO 8601 timestamp，
-   正規化成 UTC 後不晚於 cutoff。
+   正規化成 UTC 後必須嚴格晚於 `as_of`，且不晚於 cutoff。
 
 對 cutoff 內 evidence，若 `outcome_observed_at` 缺失、格式錯誤、沒有
 timezone，或 label 在 cutoff 後才可觀測，trainer 必須 fail-closed，不能把
-該 label 納入統計。Artifact provenance 必須記錄已驗證 label 數量及各類
+該 label 納入統計。`outcome_observed_at <= as_of` 的倒序或同時 label
+同樣必須拒絕。Artifact provenance 必須記錄已驗證 label 數量及各類
 violation counter；成功 artifact 的 violation counters 必須為零。
 
 T+N 超出資料範圍 → 該 sample 不產出 outcome（outcome_direction = null，由下游決定是否排除）。

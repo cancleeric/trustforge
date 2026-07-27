@@ -191,6 +191,12 @@ def build_artifact(samples_path: Path, cutoff_text: str) -> dict[str, Any]:
             outcome_observed_at = parse_outcome_observed_at(
                 sample.get("outcome_observed_at")
             )
+            if outcome_observed_at <= as_of:
+                raise ValueError(
+                    "sample outcome_observed_at must be strictly after as_of: "
+                    f"{sample.get('sample_id', '<unknown>')} "
+                    f"({outcome_observed_at.isoformat()} <= {as_of.isoformat()})"
+                )
             if outcome_observed_at.date() > cutoff:
                 raise ValueError(
                     "sample outcome_observed_at is after inclusive UTC cutoff: "
@@ -258,6 +264,7 @@ def build_artifact(samples_path: Path, cutoff_text: str) -> dict[str, Any]:
             "labels_validated_at_or_before_cutoff": labels_validated,
             "label_timestamp_missing": 0,
             "label_timestamp_invalid": 0,
+            "label_temporal_order_invalid": 0,
             "label_observed_after_cutoff": 0,
         },
         "parameters": {
