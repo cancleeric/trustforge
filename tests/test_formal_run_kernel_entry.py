@@ -11,6 +11,7 @@ from trustforge_core import KernelOutput
 
 def test_formal_pipeline_run_enters_trust_kernel(monkeypatch):
     """The public formal run path must pass normalized claims through run_kernel()."""
+    monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")  # #733: full kernel for test
 
     def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
         return [

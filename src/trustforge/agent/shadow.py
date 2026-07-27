@@ -300,6 +300,20 @@ def compare_outputs(
     if not math.isfinite(legacy_trust_raw):
         blocking.append(f"legacy_trust_raw is non-finite ({legacy_trust_raw})")
 
+    # If any non-finite values detected, fail parity immediately
+    if blocking:
+        return ShadowParityResult(
+            coin=coin, qtype_value=qtype_value,
+            legacy_confidence=legacy_confidence, kernel_confidence=kernel.confidence,
+            legacy_supporting_ids=legacy_supporting_ids, kernel_supporting_ids=kernel_supporting_ids,
+            legacy_direction=legacy_direction, kernel_direction=kernel.direction,
+            legacy_abstain=legacy_abstain, kernel_abstain=kernel.abstain,
+            delta_confidence=float('nan'), delta_trust=float('nan'),
+            supporting_jaccard=supporting_jaccard,
+            direction_match=direction_match, decision_state_match=decision_state_match,
+            parity_passed=False, blocking_reasons=tuple(blocking),
+        )
+
     delta_confidence = abs(kernel.confidence - legacy_confidence)
     delta_trust = abs(kernel.trust_score - legacy_trust_raw)
 
@@ -317,7 +331,7 @@ def compare_outputs(
     ) or (kernel.abstain and legacy_abstain)
 
     # Determine blocking reasons
-    blocking: list[str] = []
+    blocking = []
     if delta_confidence > PARITY_CONFIDENCE_DELTA_MAX:
         blocking.append(
             f"confidence_delta={delta_confidence:.3f}>{PARITY_CONFIDENCE_DELTA_MAX}"
