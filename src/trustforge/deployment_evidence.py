@@ -212,8 +212,10 @@ def verify_gate_receipts(
     for gate in sorted(paths):
         try:
             raw, info = read_regular_file(Path(paths[gate]), maximum_bytes=32_768)
-            if info.st_mode & 0o077:
-                raise EvidenceError("gate receipt permissions are too broad")
+            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise EvidenceError(
+                    "gate receipt ownership or permissions are unsafe"
+                )
             receipt = GateReceipt(**json.loads(raw))
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             raise EvidenceError("gate receipt is invalid") from exc
