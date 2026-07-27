@@ -164,6 +164,49 @@ coverage 保證」——這個誠實標註本身在本輪之前已存在，未�
 
 ---
 
+## 2026-07-27 #752 時序切分 remediation
+
+後續稽核確認早期研究工件仍有兩個會讓結果被高估的方法問題，現已修正：
+
+- `conformal_on_samples.py` 不再 `random.shuffle()`；改用所有幣種的
+  global unique ISO dates 切分。同一天的所有幣種與來源一定落在同一
+  partition，且 calibration 最晚日期嚴格早於 held-out 最早日期。
+- `backtest_conformal.py` 不再拿 BTC bars index 代理其他幣種的 boundary；
+  不同交易日曆一律由實際 sample dates 的聯集決定。
+- `auc_proxy=max(accuracy, 1-accuracy)` 已刪除。該值不是 ROC AUC，歷史文件
+  中的 pseudo-AUC 敘述只保留為舊實驗背景，不再是 promotion check。
+- Conformal threshold 直接取 calibration 錯誤樣本 `evidence_strength` 的
+  finite-sample upper quantile，與 `backtest_conformal.compute_tau()` 一致；
+  不再錯誤地對 `1-strength` 取 quantile 後反轉。有限樣本名次不足時回傳
+  `Infinity`，一律 abstain。
+- 所有 offset timestamps 先 normalize 為 UTC 才決定日期 partition。
+  Calibration 尾端另作 outcome-aware purge：其最晚
+  `outcome_observed_at` 必須嚴格早於 held-out 最早 `as_of`；舊 OHLCV
+  backtest 同樣 purge 最後 `FORWARD_DAYS` 的交界樣本。
+- 新 JSON report 只誠實報 joint error、conditional error、abstain、
+  passed support，並包含輸入 SHA-256、split boundaries、per-family 與
+  per-coin counts。
+- 空、過小、malformed 或時間欄位不合法的資料集 fail-closed；outcome 必須
+  嚴格晚於 `as_of`。研究腳本不寫 production 設定，輸出固定標示
+  `research-only`，即使所有 exploratory checks 通過也需要另一個經核准的
+  production change。
+- Calibration 與 held-out 必須各自實際包含至少兩個 source families。
+  舊回測若 FNG／Blockchain input 缺失或 malformed，或任一 partition
+  沒有實際異質 family support，P5 必定 FAIL，不能只靠 OHLCV 指標得到
+  promotion-eligible 結論。
+- `source_family` 嚴格限制為 contract enum：`sentiment`、`onchain`、
+  `price`、`regulatory`；未知或任意自訂 family 直接 fail-closed，不能用
+  `fake-a`／`fake-b` 湊足異質數。
+- `sample_id` 必須是非空字串，且整個 dataset 全域唯一；重複 ID 直接
+  fail-closed，避免同一 evidence 被複製後膨脹 support、family 或 coin
+  counts。
+- 即使 P1–P5 全過，CLI 也只輸出 `research evidence only`，不得顯示
+  promotion approval 或建議直接寫入 production `_CONFORMAL_TAU`。
+
+`tests/test_conformal_chronological.py` 同時覆蓋直接 unit 與 subprocess CLI，
+包含不同 coin calendars、同日隔離、future outcome 不得影響 signal、
+malformed/small dataset fail-closed，以及 report lineage/counts。
+
 ## 測試現況
 
 `tests/test_w4_conformal.py`（8 個測試，只驗研究工件本身，不牽動

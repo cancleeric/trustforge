@@ -32,6 +32,40 @@ _DEFAULT_HORIZONS = (1, 7, 14)
 _MIN_BIN_SAMPLES = 5
 
 
+def confidence_correctness_auc(
+    scores: list[float],
+    labels: list[bool],
+) -> dict[str, Any]:
+    """Tie-aware ROC AUC for confidence discriminating correctness.
+
+    This is the Mann–Whitney probability that a randomly selected correct
+    prediction has greater confidence than a randomly selected incorrect one,
+    with ties receiving half credit. It is not market-direction AUC.
+    """
+    if len(scores) != len(labels):
+        raise ValueError("scores and labels must have equal length")
+    positives = [score for score, label in zip(scores, labels) if label]
+    negatives = [score for score, label in zip(scores, labels) if not label]
+    if not positives or not negatives:
+        return {
+            "value": None,
+            "reason": "requires both correct and incorrect predictions",
+            "target": "confidence_discrimination_of_correctness",
+        }
+    favourable = 0.0
+    for positive in positives:
+        for negative in negatives:
+            if positive > negative:
+                favourable += 1.0
+            elif positive == negative:
+                favourable += 0.5
+    return {
+        "value": round(favourable / (len(positives) * len(negatives)), 6),
+        "reason": None,
+        "target": "confidence_discrimination_of_correctness",
+    }
+
+
 def load_predictions(coin: str, training_dir: Path | str = DEFAULT_TRAINING_DIR) -> list[dict]:
     """從 JSONL 讀取有方向預測（direction != '不明'）的記錄。
 
@@ -104,7 +138,7 @@ def compare_predictions(
         hits = 0
         horizon_details: list[dict] = []
 
-        for pred in predictions:
+        for prediction_index, pred in enumerate(predictions):
             pred_date = pred["date"]
             start_idx = date_to_idx.get(pred_date)
             if start_idx is None:
@@ -126,6 +160,7 @@ def compare_predictions(
                 hits += 1
 
             horizon_details.append({
+                "prediction_index": prediction_index,
                 "date": pred_date,
                 "direction": pred["direction"],
                 "confidence": pred["confidence"],
@@ -156,13 +191,75 @@ def calculate_calibration_error(
     error = max(|mean_conf - hit_rate|) across bins with ≥5 samples
     回傳 {calibration_error, bins: [...], reliable_bins}
     """
-    # 從 details 建立 per-prediction hit lookup（以 T+1 為基準）
+    # 從 details 建立 per-row hit lookup（以 T+1 為基準）。同日可以有多筆
+    # 預測，不能只用 date 當 key，否則後一筆會覆寫前一筆。
     details = comparison_results.get("details", [])
-    # 使用 T+1 horizon 的 hit 結果
-    hit_by_date: dict[str, bool] = {}
+    indexed_hits: dict[int, list[bool]] = {}
+    legacy_hits_by_date: dict[str, list[bool]] = {}
+    invalid_indexed_details = 0
     for d in details:
         if d.get("horizon") == 1:
-            hit_by_date[d["date"]] = d["hit"]
+            if "prediction_index" in d:
+                prediction_index = d["prediction_index"]
+                if (
+                    isinstance(prediction_index, bool)
+                    or not isinstance(prediction_index, int)
+                    or prediction_index < 0
+                    or prediction_index >= len(predictions)
+                    or d.get("date") != predictions[prediction_index]["date"]
+                ):
+                    invalid_indexed_details += 1
+                    continue
+                indexed_hits.setdefault(prediction_index, []).append(d["hit"])
+            else:
+                # Backward compatibility for stored reports created before row IDs.
+                legacy_hits_by_date.setdefault(d["date"], []).append(d["hit"])
+
+    duplicate_indexed_details = sum(
+        len(hits) for hits in indexed_hits.values() if len(hits) != 1
+    )
+    hit_by_index = {
+        index: hits[0]
+        for index, hits in indexed_hits.items()
+        if len(hits) == 1
+    }
+    prediction_counts_by_date: dict[str, int] = {}
+    for prediction in predictions:
+        prediction_counts_by_date[prediction["date"]] = (
+            prediction_counts_by_date.get(prediction["date"], 0) + 1
+        )
+    legacy_hit_by_date = {
+        date: hits[0]
+        for date, hits in legacy_hits_by_date.items()
+        if len(hits) == 1 and prediction_counts_by_date.get(date) == 1
+    }
+    ambiguous_legacy_dates = {
+        date
+        for date, hits in legacy_hits_by_date.items()
+        if len(hits) != 1 or prediction_counts_by_date.get(date) != 1
+    }
+    excluded_ambiguous_legacy_rows = sum(
+        1
+        for index, prediction in enumerate(predictions)
+        if index not in hit_by_index
+        and prediction["date"] in ambiguous_legacy_dates
+    )
+    alignment_reasons = []
+    if excluded_ambiguous_legacy_rows:
+        alignment_reasons.append(
+            "legacy details without prediction_index require a unique "
+            "prediction and unique detail for the date"
+        )
+    if invalid_indexed_details or duplicate_indexed_details:
+        alignment_reasons.append(
+            "indexed details require one unique non-boolean in-range "
+            "prediction_index with a matching date"
+        )
+
+    def _hit(index: int, prediction: dict) -> bool | None:
+        if index in hit_by_index:
+            return hit_by_index[index]
+        return legacy_hit_by_date.get(prediction["date"])
 
     # 分 bin
     bins_data: list[dict[str, Any]] = []
@@ -171,15 +268,19 @@ def calculate_calibration_error(
 
     for low, high in _BIN_EDGES:
         bin_preds = [
-            p for p in predictions
-            if low <= p["confidence"] < high and p["date"] in hit_by_date
+            (index, prediction)
+            for index, prediction in enumerate(predictions)
+            if low <= prediction["confidence"] < high
+            and _hit(index, prediction) is not None
         ]
         # 最後一個 bin 包含 1.0
         if high == 1.0:
             bin_preds.extend(
-                p for p in predictions
-                if p["confidence"] == 1.0 and p["date"] in hit_by_date
-                and p not in bin_preds
+                (index, prediction)
+                for index, prediction in enumerate(predictions)
+                if prediction["confidence"] == 1.0
+                and _hit(index, prediction) is not None
+                and (index, prediction) not in bin_preds
             )
 
         count = len(bin_preds)
@@ -192,8 +293,12 @@ def calculate_calibration_error(
             })
             continue
 
-        mean_conf = sum(p["confidence"] for p in bin_preds) / count
-        empirical_hits = sum(1 for p in bin_preds if hit_by_date.get(p["date"], False))
+        mean_conf = sum(prediction["confidence"] for _, prediction in bin_preds) / count
+        empirical_hits = sum(
+            1
+            for index, prediction in bin_preds
+            if _hit(index, prediction) is True
+        )
         empirical_hit_rate = empirical_hits / count
 
         bin_entry = {
@@ -209,10 +314,37 @@ def calculate_calibration_error(
             error = abs(mean_conf - empirical_hit_rate)
             max_error = max(max_error, error)
 
+    eligible_predictions = [
+        (index, prediction)
+        for index, prediction in enumerate(predictions)
+        if _hit(index, prediction) is not None
+    ]
+    discrimination = confidence_correctness_auc(
+        [
+            float(prediction["confidence"])
+            for _, prediction in eligible_predictions
+        ],
+        [
+            bool(_hit(index, prediction))
+            for index, prediction in eligible_predictions
+        ],
+    )
     return {
         "calibration_error": round(max_error, 4) if reliable_bins > 0 else None,
         "bins": bins_data,
         "reliable_bins": reliable_bins,
+        "confidence_correctness_roc_auc": discrimination,
+        "row_alignment": {
+            "excluded_ambiguous_legacy_rows": excluded_ambiguous_legacy_rows,
+            "excluded_invalid_indexed_details": invalid_indexed_details,
+            "excluded_duplicate_indexed_details": duplicate_indexed_details,
+            "excluded_total": (
+                excluded_ambiguous_legacy_rows
+                + invalid_indexed_details
+                + duplicate_indexed_details
+            ),
+            "reason": "; ".join(alignment_reasons) if alignment_reasons else None,
+        },
     }
 
 
@@ -245,6 +377,18 @@ def run_calibration(
                 "calibration_error": None,
                 "bins": [],
                 "reliable_bins": 0,
+                "confidence_correctness_roc_auc": {
+                    "value": None,
+                    "reason": "requires both correct and incorrect predictions",
+                    "target": "confidence_discrimination_of_correctness",
+                },
+                "row_alignment": {
+                    "excluded_ambiguous_legacy_rows": 0,
+                    "excluded_invalid_indexed_details": 0,
+                    "excluded_duplicate_indexed_details": 0,
+                    "excluded_total": 0,
+                    "reason": None,
+                },
             },
         }
 
@@ -263,41 +407,58 @@ def run_calibration(
             d for d in comparison["details"] if d.get("horizon") == horizon_days
         ]
 
+        def _confidence_for_detail(detail: dict) -> float | None:
+            prediction_index = detail.get("prediction_index")
+            if (
+                isinstance(prediction_index, int)
+                and 0 <= prediction_index < len(predictions)
+            ):
+                return float(predictions[prediction_index]["confidence"])
+            # Backward compatibility for reports persisted before row identity.
+            matching = [
+                prediction
+                for prediction in predictions
+                if prediction["date"] == detail.get("date")
+            ]
+            if len(matching) == 1:
+                return float(matching[0]["confidence"])
+            return None
+
+        indexed_details = [
+            (detail, confidence)
+            for detail in horizon_details
+            if (confidence := _confidence_for_detail(detail)) is not None
+        ]
+
         # 計算 reliability bins (同 calibration_summary 格式)
         reliability: list[dict] = []
         for low, high in _BIN_EDGES:
             bin_items = [
-                d for d in horizon_details
-                if low <= next(
-                    (p["confidence"] for p in predictions if p["date"] == d["date"]),
-                    0.0,
-                ) < high
+                (detail, confidence)
+                for detail, confidence in indexed_details
+                if low <= confidence < high
             ]
             # 最後一個 bin 包含 1.0
             if high == 1.0:
                 bin_items_extra = [
-                    d for d in horizon_details
-                    if next(
-                        (p["confidence"] for p in predictions if p["date"] == d["date"]),
-                        0.0,
-                    ) == 1.0
-                    and d not in bin_items
+                    (detail, confidence)
+                    for detail, confidence in indexed_details
+                    if confidence == 1.0
+                    and (detail, confidence) not in bin_items
                 ]
                 bin_items.extend(bin_items_extra)
 
             if not bin_items:
                 continue
             bin_count = len(bin_items)
-            confs = [
-                next((p["confidence"] for p in predictions if p["date"] == d["date"]), 0.0)
-                for d in bin_items
-            ]
+            confs = [confidence for _, confidence in bin_items]
             reliability.append({
                 "range": [round(low, 2), round(high, 2)],
                 "count": bin_count,
                 "mean_information_completeness": round(sum(confs) / bin_count, 4),
                 "empirical_hit_rate": round(
-                    sum(1 for d in bin_items if d["hit"]) / bin_count, 4
+                    sum(1 for detail, _ in bin_items if detail["hit"]) / bin_count,
+                    4,
                 ),
             })
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -11,6 +10,7 @@ from trustforge.calibration_runner import (
     _check_hit,
     calculate_calibration_error,
     compare_predictions,
+    confidence_correctness_auc,
     load_predictions,
     run_calibration,
 )
@@ -18,6 +18,27 @@ from trustforge.ingestion.prices import Bar
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("scores", "labels", "expected"),
+    [
+        ([0.1, 0.2, 0.8, 0.9], [False, False, True, True], 1.0),
+        ([0.8, 0.9, 0.1, 0.2], [False, False, True, True], 0.0),
+        ([0.5, 0.5, 0.5, 0.5], [False, False, True, True], 0.5),
+    ],
+)
+def test_confidence_correctness_auc_is_tie_aware(scores, labels, expected):
+    result = confidence_correctness_auc(scores, labels)
+    assert result["value"] == expected
+    assert result["reason"] is None
+    assert result["target"] == "confidence_discrimination_of_correctness"
+
+
+def test_confidence_correctness_auc_single_class_is_null():
+    result = confidence_correctness_auc([0.2, 0.8], [True, True])
+    assert result["value"] is None
+    assert result["reason"] == "requires both correct and incorrect predictions"
 
 
 def _make_bars(dates_closes: list[tuple[str, float]]) -> list[Bar]:
@@ -194,6 +215,140 @@ def test_calibration_error_insufficient_data():
     assert result["reliable_bins"] == 0
 
 
+def test_calibration_same_date_predictions_keep_row_identity():
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        },
+        {
+            "date": "2024-01-01",
+            "direction": "偏空",
+            "confidence": 0.1,
+            "trust_score": 0.5,
+        },
+    ]
+    bars = _make_bars(
+        [
+            ("2024-01-01", 100.0),
+            ("2024-01-02", 110.0),
+        ]
+    )
+    comparison = compare_predictions(predictions, bars, horizons=(1,))
+    assert [detail["prediction_index"] for detail in comparison["details"]] == [0, 1]
+    assert [detail["hit"] for detail in comparison["details"]] == [True, False]
+
+    result = calculate_calibration_error(predictions, comparison)
+    assert result["confidence_correctness_roc_auc"]["value"] == 1.0
+    nonempty_bins = [item for item in result["bins"] if item["count"]]
+    assert sum(item["count"] for item in nonempty_bins) == 2
+    assert sorted(item["empirical_hit_rate"] for item in nonempty_bins) == [0.0, 1.0]
+
+
+def test_legacy_same_date_details_fail_closed_as_ambiguous():
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        },
+        {
+            "date": "2024-01-01",
+            "direction": "偏空",
+            "confidence": 0.1,
+            "trust_score": 0.5,
+        },
+    ]
+    legacy_comparison = {
+        "details": [
+            {
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": True,
+            },
+            {
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": False,
+            },
+        ]
+    }
+
+    result = calculate_calibration_error(predictions, legacy_comparison)
+
+    assert sum(item["count"] for item in result["bins"]) == 0
+    assert result["confidence_correctness_roc_auc"]["value"] is None
+    assert result["row_alignment"]["excluded_ambiguous_legacy_rows"] == 2
+    assert "require a unique prediction" in result["row_alignment"]["reason"]
+
+
+@pytest.mark.parametrize("bad_index", [True, -1, 2, "0"])
+def test_malformed_or_out_of_range_prediction_index_is_excluded(bad_index):
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        }
+    ]
+    comparison = {
+        "details": [
+            {
+                "prediction_index": bad_index,
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": True,
+            }
+        ]
+    }
+
+    result = calculate_calibration_error(predictions, comparison)
+
+    assert sum(item["count"] for item in result["bins"]) == 0
+    assert result["confidence_correctness_roc_auc"]["value"] is None
+    assert result["row_alignment"]["excluded_invalid_indexed_details"] == 1
+    assert result["row_alignment"]["excluded_total"] == 1
+    assert "non-boolean in-range" in result["row_alignment"]["reason"]
+
+
+def test_duplicate_prediction_index_is_excluded_not_last_write_wins():
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        }
+    ]
+    comparison = {
+        "details": [
+            {
+                "prediction_index": 0,
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": True,
+            },
+            {
+                "prediction_index": 0,
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": False,
+            },
+        ]
+    }
+
+    result = calculate_calibration_error(predictions, comparison)
+
+    assert sum(item["count"] for item in result["bins"]) == 0
+    assert result["confidence_correctness_roc_auc"]["value"] is None
+    assert result["row_alignment"]["excluded_duplicate_indexed_details"] == 2
+    assert result["row_alignment"]["excluded_total"] == 2
+
+
 # ─── test_run_calibration_integration ────────────────────────────────────────
 
 
@@ -239,6 +394,47 @@ def test_run_calibration_integration(tmp_path: Path):
     # calibration 結構存在
     assert "calibration" in result
     assert "bins" in result["calibration"]
+
+
+def test_run_calibration_same_date_reliability_uses_row_identity(tmp_path: Path):
+    training_dir = tmp_path / "training"
+    training_dir.mkdir()
+    _write_training_jsonl(
+        training_dir,
+        "BTC",
+        [
+            {
+                "date": "2024-01-01",
+                "direction": "偏多",
+                "confidence": 0.9,
+                "trust_score": 0.5,
+            },
+            {
+                "date": "2024-01-01",
+                "direction": "偏空",
+                "confidence": 0.1,
+                "trust_score": 0.5,
+            },
+        ],
+    )
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "BTC_daily_ohlcv.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2024-01-01,100,101,99,100,1000\n"
+        "2024-01-02,110,111,109,110,1000\n",
+        encoding="utf-8",
+    )
+
+    result = run_calibration("BTC", data_dir=data_dir, training_dir=training_dir)
+    reliability = result["horizons"]["T+1"]["reliability"]
+
+    assert [item["count"] for item in reliability] == [1, 1]
+    assert [item["mean_information_completeness"] for item in reliability] == [
+        0.1,
+        0.9,
+    ]
+    assert [item["empirical_hit_rate"] for item in reliability] == [0.0, 1.0]
 
 
 def test_run_calibration_no_data(tmp_path: Path):
