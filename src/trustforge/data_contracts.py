@@ -14,6 +14,11 @@ from trustforge.asset_intrinsic import (
     ASSET_INTRINSIC_SCHEMA_VERSION,
     INTRINSIC_DIMENSION_NAMES,
     INTRINSIC_FACT_STATUSES,
+    MAX_PATH_LENGTH,
+    MAX_REVISION_LENGTH,
+    MAX_TEXT_LENGTH,
+    MAX_URL_COUNT,
+    MAX_URL_LENGTH,
 )
 from trustforge.ecolink import ECOLINK_SCHEMA_VERSION, OFFICIAL_ECOLINK_HOSTS
 from trustforge.peer_metrics import PEER_METRICS_SCHEMA_VERSION
@@ -75,16 +80,35 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
         "properties": {
             "source_urls": {
                 "type": "array",
-                "items": {"type": "string", "pattern": r"^https://"},
+                "maxItems": MAX_URL_COUNT,
+                "items": {
+                    "type": "string", "maxLength": MAX_URL_LENGTH,
+                    "pattern": r"^https://",
+                },
             },
-            "methodology": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "methodology": {
+                "type": "string", "minLength": 1, "maxLength": MAX_TEXT_LENGTH,
+                "pattern": r"\S",
+            },
             "content_hash": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
-            "coverage": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "coverage": {
+                "type": "string", "minLength": 1, "maxLength": MAX_TEXT_LENGTH,
+                "pattern": r"\S",
+            },
             "evidence_path": {
                 "type": "string",
+                "maxLength": MAX_PATH_LENGTH,
                 "pattern": r"^data/asset_intrinsic_evidence/[^/]+\.txt$",
             },
-            "source_revision": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "source_revision": {
+                "type": "string", "minLength": 1, "maxLength": MAX_REVISION_LENGTH,
+                "pattern": r"\S",
+            },
+            "evidence_kind": {"enum": ["upstream_excerpt", "decision_record"]},
+            "source_coordinates": {
+                "type": "string", "minLength": 1, "maxLength": MAX_TEXT_LENGTH,
+                "pattern": r"\S",
+            },
         },
         "additionalProperties": False,
     }
@@ -121,8 +145,14 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
                                 "source_urls": {
                                     "type": "array",
                                     "minItems": 1,
-                                    "items": {"type": "string", "pattern": r"^https://"},
+                                    "maxItems": MAX_URL_COUNT,
+                                    "items": {
+                                        "type": "string",
+                                        "maxLength": MAX_URL_LENGTH,
+                                        "pattern": r"^https://",
+                                    },
                                 },
+                                "evidence_kind": {"const": "upstream_excerpt"},
                             },
                         },
                     },
@@ -137,7 +167,10 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
         "required": ["schema_version", "asset_id", "dimensions"],
         "properties": {
             "schema_version": {"const": ASSET_INTRINSIC_SCHEMA_VERSION},
-            "asset_id": {"type": "string", "minLength": 1, "pattern": r"\S"},
+            "asset_id": {
+                "type": "string", "minLength": 1, "maxLength": MAX_REVISION_LENGTH,
+                "pattern": r"\S",
+            },
             "dimensions": {
                 "type": "array",
                 "minItems": len(INTRINSIC_DIMENSION_NAMES),

@@ -222,6 +222,7 @@
     ],
     "properties": {
       "asset_id": {
+        "maxLength": 256,
         "minLength": 1,
         "pattern": "\\S",
         "type": "string"
@@ -255,29 +256,44 @@
                         "type": "string"
                       },
                       "coverage": {
+                        "maxLength": 4096,
                         "minLength": 1,
                         "pattern": "\\S",
                         "type": "string"
                       },
+                      "evidence_kind": {
+                        "const": "upstream_excerpt"
+                      },
                       "evidence_path": {
+                        "maxLength": 255,
                         "pattern": "^data/asset_intrinsic_evidence/[^/]+\\.txt$",
                         "type": "string"
                       },
                       "methodology": {
+                        "maxLength": 4096,
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "source_coordinates": {
+                        "maxLength": 4096,
                         "minLength": 1,
                         "pattern": "\\S",
                         "type": "string"
                       },
                       "source_revision": {
+                        "maxLength": 256,
                         "minLength": 1,
                         "pattern": "\\S",
                         "type": "string"
                       },
                       "source_urls": {
                         "items": {
+                          "maxLength": 2048,
                           "pattern": "^https://",
                           "type": "string"
                         },
+                        "maxItems": 16,
                         "minItems": 1,
                         "type": "array"
                       }
@@ -329,29 +345,47 @@
                   "type": "string"
                 },
                 "coverage": {
+                  "maxLength": 4096,
                   "minLength": 1,
                   "pattern": "\\S",
                   "type": "string"
                 },
+                "evidence_kind": {
+                  "enum": [
+                    "upstream_excerpt",
+                    "decision_record"
+                  ]
+                },
                 "evidence_path": {
+                  "maxLength": 255,
                   "pattern": "^data/asset_intrinsic_evidence/[^/]+\\.txt$",
                   "type": "string"
                 },
                 "methodology": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "source_coordinates": {
+                  "maxLength": 4096,
                   "minLength": 1,
                   "pattern": "\\S",
                   "type": "string"
                 },
                 "source_revision": {
+                  "maxLength": 256,
                   "minLength": 1,
                   "pattern": "\\S",
                   "type": "string"
                 },
                 "source_urls": {
                   "items": {
+                    "maxLength": 2048,
                     "pattern": "^https://",
                     "type": "string"
                   },
+                  "maxItems": 16,
                   "type": "array"
                 }
               },

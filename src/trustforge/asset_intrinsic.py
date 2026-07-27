@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Any, Iterable
 
 ASSET_INTRINSIC_SCHEMA_VERSION = "1.0.0"
+MAX_RECORDS_FILE_BYTES = 1_048_576
+MAX_EVIDENCE_FILE_BYTES = 65_536
+MAX_RECORD_COUNT = 1_000
+MAX_URL_COUNT = 16
+MAX_URL_LENGTH = 2_048
+MAX_TEXT_LENGTH = 4_096
+MAX_PATH_LENGTH = 255
+MAX_REVISION_LENGTH = 256
+MAX_TIMESTAMP_LENGTH = 64
 
 
 class IntrinsicDimensionName(StrEnum):
@@ -46,16 +55,35 @@ class IntrinsicProvenance:
     coverage: str
     evidence_path: str
     source_revision: str
+    evidence_kind: str
+    source_coordinates: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_urls, tuple) or any(
             not isinstance(url, str) or not url.startswith("https://") for url in self.source_urls
         ):
             raise ValueError("provenance.source_urls must contain HTTPS URLs")
-        for name in ("methodology", "coverage", "evidence_path", "source_revision"):
+        for name in (
+            "methodology", "coverage", "evidence_path", "source_revision",
+            "evidence_kind", "source_coordinates",
+        ):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"provenance.{name} must be a non-empty string")
+        if len(self.source_urls) > MAX_URL_COUNT:
+            raise ValueError("provenance.source_urls exceeds maximum count")
+        if any(len(url) > MAX_URL_LENGTH for url in self.source_urls):
+            raise ValueError("provenance.source URL exceeds maximum length")
+        if len(self.methodology) > MAX_TEXT_LENGTH or len(self.coverage) > MAX_TEXT_LENGTH:
+            raise ValueError("provenance text exceeds maximum length")
+        if len(self.evidence_path) > MAX_PATH_LENGTH:
+            raise ValueError("provenance.evidence_path exceeds maximum length")
+        if len(self.source_revision) > MAX_REVISION_LENGTH:
+            raise ValueError("provenance.source_revision exceeds maximum length")
+        if len(self.source_coordinates) > MAX_TEXT_LENGTH:
+            raise ValueError("provenance.source_coordinates exceeds maximum length")
+        if self.evidence_kind not in {"upstream_excerpt", "decision_record"}:
+            raise ValueError("provenance.evidence_kind is invalid")
         if (
             not isinstance(self.content_hash, str)
             or len(self.content_hash) != 64
@@ -67,6 +95,8 @@ class IntrinsicProvenance:
             evidence_path.is_absolute()
             or ".." in evidence_path.parts
             or evidence_path.parts[:2] != ("data", "asset_intrinsic_evidence")
+            or len(evidence_path.parts) != 3
+            or evidence_path.suffix != ".txt"
         ):
             raise ValueError(
                 "provenance.evidence_path must be a safe path under "
@@ -107,6 +137,8 @@ class IntrinsicDimension:
                 raise ValueError("known dimension.value must be finite and within [0, 1]")
             if not self.provenance.source_urls:
                 raise ValueError("known dimension requires at least one source URL")
+            if self.provenance.evidence_kind != "upstream_excerpt":
+                raise ValueError("known dimension requires upstream_excerpt evidence")
         elif self.value is not None:
             raise ValueError("non-known dimension.value must be null")
 
@@ -154,6 +186,8 @@ class AssetIntrinsicProfile:
             raise ValueError(f"unsupported AssetIntrinsicProfile schema_version: {self.schema_version}")
         if not isinstance(self.asset_id, str) or not self.asset_id.strip():
             raise ValueError("AssetIntrinsicProfile.asset_id must be a non-empty string")
+        if len(self.asset_id) > MAX_REVISION_LENGTH:
+            raise ValueError("AssetIntrinsicProfile.asset_id exceeds maximum length")
         if not isinstance(self.dimensions, tuple):
             raise ValueError("AssetIntrinsicProfile.dimensions must be a tuple")
         names = tuple(dimension.name for dimension in self.dimensions)
@@ -277,9 +311,13 @@ def parse_asset_intrinsic_record(payload: dict[str, Any]) -> AssetIntrinsicRecor
 def load_asset_intrinsic_records(
     path: Path, *, evidence_root: Path | None = None
 ) -> tuple[AssetIntrinsicRecord, ...]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = json.loads(
+        _read_bounded_bytes(path, MAX_RECORDS_FILE_BYTES, "records file").decode("utf-8")
+    )
     if not isinstance(raw, list):
         raise ValueError("asset intrinsic records must be an array")
+    if len(raw) > MAX_RECORD_COUNT:
+        raise ValueError("asset intrinsic record count exceeds maximum")
     if any(not isinstance(item, dict) for item in raw):
         raise ValueError("asset intrinsic record must be an object")
     records = tuple(parse_asset_intrinsic_record(item) for item in raw)
@@ -303,7 +341,10 @@ def verify_asset_intrinsic_evidence(
                 raise ValueError("evidence path escapes repository root") from exc
             if not evidence_file.is_file():
                 raise ValueError(f"evidence file does not exist: {provenance.evidence_path}")
-            actual = hashlib.sha256(evidence_file.read_bytes()).hexdigest()
+            exact_bytes = _read_bounded_bytes(
+                evidence_file, MAX_EVIDENCE_FILE_BYTES, "evidence file"
+            )
+            actual = hashlib.sha256(exact_bytes).hexdigest()
             if actual != provenance.content_hash:
                 raise ValueError(
                     f"evidence fingerprint mismatch for {provenance.evidence_path}: "
@@ -329,7 +370,8 @@ def _parse_dimension(payload: Any) -> IntrinsicDimension:
         provenance,
         {
             "source_urls", "methodology", "content_hash", "coverage",
-            "evidence_path", "source_revision",
+            "evidence_path", "source_revision", "evidence_kind",
+            "source_coordinates",
         },
         "provenance",
     )
@@ -365,6 +407,12 @@ def _parse_dimension(payload: Any) -> IntrinsicDimension:
             source_revision=_required_string(
                 provenance["source_revision"], "provenance.source_revision"
             ),
+            evidence_kind=_required_string(
+                provenance["evidence_kind"], "provenance.evidence_kind"
+            ),
+            source_coordinates=_required_string(
+                provenance["source_coordinates"], "provenance.source_coordinates"
+            ),
         ),
     )
 
@@ -387,6 +435,8 @@ def _required_string(value: Any, label: str) -> str:
 def _parse_timestamp(value: Any, label: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be an ISO timestamp")
+    if len(value) > MAX_TIMESTAMP_LENGTH:
+        raise ValueError(f"{label} exceeds maximum length")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -402,3 +452,20 @@ def _ensure_aware(value: datetime, label: str) -> None:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _read_bounded_bytes(path: Path, maximum: int, label: str) -> bytes:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be inspected: {path}") from exc
+    if size > maximum:
+        raise ValueError(f"{label} exceeds maximum size of {maximum} bytes")
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(maximum + 1)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be read: {path}") from exc
+    if len(payload) > maximum:
+        raise ValueError(f"{label} exceeds maximum size of {maximum} bytes")
+    return payload

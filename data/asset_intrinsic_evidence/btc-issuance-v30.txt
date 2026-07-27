@@ -1,4 +1,12 @@
-source_revision: bitcoin/bitcoin d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3
-source_url: https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp
-observation: Bitcoin Core v30 consensus subsidy calculation is deterministic and locally reproducible.
-limit: This does not establish that governance can never change.
+CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
+{
+    int halvings = nHeight / consensusParams.nSubsidyHalvingInterval;
+    // Force block reward to zero when right shift is undefined.
+    if (halvings >= 64)
+        return 0;
+
+    CAmount nSubsidy = 50 * COIN;
+    // Subsidy is cut in half every 210,000 blocks which will occur approximately every 4 years.
+    nSubsidy >>= halvings;
+    return nSubsidy;
+}

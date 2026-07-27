@@ -15,6 +15,10 @@ from trustforge.asset_intrinsic import (
     AssetIntrinsicRepository,
     IntrinsicDimensionName,
     IntrinsicFactStatus,
+    MAX_EVIDENCE_FILE_BYTES,
+    MAX_RECORD_COUNT,
+    MAX_RECORDS_FILE_BYTES,
+    MAX_URL_LENGTH,
     load_asset_intrinsic_records,
     parse_asset_intrinsic_profile,
     parse_asset_intrinsic_record,
@@ -294,6 +298,95 @@ def test_evidence_fingerprint_tamper_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="fingerprint mismatch"):
         load_asset_intrinsic_records(records_file, evidence_root=evidence_root)
+
+
+def test_known_btc_evidence_is_exact_pinned_upstream_bytes() -> None:
+    records = load_asset_intrinsic_records(FIXTURE)
+    btc = next(record for record in records if record.profile.asset_id == "asset:btc")
+    known = [dimension for dimension in btc.profile.dimensions if dimension.status.value == "known"]
+
+    assert len(known) == 2
+    for dimension in known:
+        provenance = dimension.provenance
+        assert provenance.evidence_kind == "upstream_excerpt"
+        assert "d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in provenance.source_revision
+        assert all("d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3" in url for url in provenance.source_urls)
+        assert "lines " in provenance.source_coordinates
+    issuance = Path(__file__).parents[1] / known[0].provenance.evidence_path
+    assert issuance.read_text(encoding="utf-8").startswith("CAmount GetBlockSubsidy(")
+    assert "observation:" not in issuance.read_text(encoding="utf-8")
+
+
+def test_loader_rejects_oversized_records_before_json_decode(tmp_path: Path) -> None:
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"[" + b" " * MAX_RECORDS_FILE_BYTES + b"]")
+
+    with pytest.raises(ValueError, match="records file exceeds maximum size"):
+        load_asset_intrinsic_records(oversized, evidence_root=tmp_path)
+
+
+def test_loader_rejects_excessive_record_count_before_item_parse(tmp_path: Path) -> None:
+    excessive = tmp_path / "excessive.json"
+    excessive.write_text(json.dumps([{}] * (MAX_RECORD_COUNT + 1)), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="record count exceeds maximum"):
+        load_asset_intrinsic_records(excessive, evidence_root=tmp_path)
+
+
+def test_loader_rejects_oversized_evidence_before_read(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "repo"
+    evidence_dir = evidence_root / "data" / "asset_intrinsic_evidence"
+    evidence_dir.mkdir(parents=True)
+    payload = copy.deepcopy(raw_records()[0])
+    for dimension in payload["profile"]["dimensions"]:
+        source = Path(__file__).parents[1] / dimension["provenance"]["evidence_path"]
+        target = evidence_root / dimension["provenance"]["evidence_path"]
+        target.write_bytes(source.read_bytes())
+    oversized_path = evidence_root / payload["profile"]["dimensions"][0]["provenance"]["evidence_path"]
+    oversized_path.write_bytes(b"x" * (MAX_EVIDENCE_FILE_BYTES + 1))
+    records_file = evidence_root / "data" / "records.json"
+    records_file.write_text(json.dumps([payload]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="evidence file exceeds maximum size"):
+        load_asset_intrinsic_records(records_file, evidence_root=evidence_root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("asset_id", "a" * 257, "asset_id exceeds maximum length"),
+        ("source_url", "https://" + "a" * MAX_URL_LENGTH, "source URL exceeds maximum length"),
+        (
+            "evidence_path",
+            "data/asset_intrinsic_evidence/nested/evidence.txt",
+            "safe path under",
+        ),
+    ],
+)
+def test_runtime_rejects_critical_oversized_string_and_nested_path(
+    field: str, value: str, expected: str
+) -> None:
+    profile = copy.deepcopy(raw_records()[0]["profile"])
+    if field == "asset_id":
+        profile["asset_id"] = value
+    elif field == "source_url":
+        profile["dimensions"][0]["provenance"]["source_urls"] = [value]
+    else:
+        profile["dimensions"][0]["provenance"]["evidence_path"] = value
+
+    with pytest.raises(ValueError, match=expected):
+        parse_asset_intrinsic_profile(profile)
+
+
+def test_jsonschema_rejects_nested_evidence_path_like_runtime() -> None:
+    profile = copy.deepcopy(raw_records()[0]["profile"])
+    profile["dimensions"][0]["provenance"]["evidence_path"] = (
+        "data/asset_intrinsic_evidence/nested/evidence.txt"
+    )
+    validator = Draft202012Validator(
+        contract_schemas()["AssetIntrinsicProfile"], format_checker=FormatChecker()
+    )
+    assert list(validator.iter_errors(profile))
 
 
 def test_validation_cli_success_is_offline_and_error_exit_is_nonzero(tmp_path: Path) -> None:

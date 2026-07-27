@@ -15,10 +15,12 @@
           "provenance": {
             "source_urls": ["https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp"],
             "methodology": "Pinned Bitcoin Core release source inspection of consensus subsidy calculation; value means the issuance rule is deterministic and locally reproducible, not that governance can never change.",
-            "content_hash": "bacfe6e066351925943e874ad3d22ca9f6b9aca49f202f6e8949b229059ee039",
+            "content_hash": "fbe1792f48eca2a2d2cd7201d5cb512025bb94b28130e2778e1f10d852606ba6",
             "coverage": "Bitcoin Core v30.0 consensus subsidy implementation only",
             "evidence_path": "data/asset_intrinsic_evidence/btc-issuance-v30.txt",
-            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3"
+            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3",
+            "evidence_kind": "upstream_excerpt",
+            "source_coordinates": "src/validation.cpp bytes for git blob d0f6d995, lines 1922-1933 inclusive"
           }
         },
         {
@@ -35,7 +37,9 @@
             "content_hash": "d37496f2a2a055f5223a290710e9f7bd9286490dd5cd0ba44957336d61bfef71",
             "coverage": "no qualifying control dataset",
             "evidence_path": "data/asset_intrinsic_evidence/btc-control-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         },
         {
@@ -49,10 +53,12 @@
           "provenance": {
             "source_urls": ["https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/validation.cpp"],
             "methodology": "A pinned full-node implementation can independently validate issuance and the UTXO set; no lost-key estimate is used.",
-            "content_hash": "6a54c587b155f7889e0c8dcd40c5dad3074f33f9c7546ef6dfe061a2c530b46d",
+            "content_hash": "445219e7cdfba383c2063ddf60bbeff0ce53cac8f7c59113cfa72a019519d114",
             "coverage": "protocol-valid supply; excludes beneficial ownership and lost keys",
             "evidence_path": "data/asset_intrinsic_evidence/btc-supply-v30.txt",
-            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3"
+            "source_revision": "bitcoin/bitcoin:d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3",
+            "evidence_kind": "upstream_excerpt",
+            "source_coordinates": "src/validation.cpp bytes for git blob d0f6d995, lines 2676-2680 inclusive"
           }
         },
         {
@@ -69,7 +75,9 @@
             "content_hash": "594b3597a90172abe9e05513840f984e13531e787616d291cecf49e9b38ab7a1",
             "coverage": "no qualifying governance capture dataset",
             "evidence_path": "data/asset_intrinsic_evidence/btc-governance-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         },
         {
@@ -86,7 +94,9 @@
             "content_hash": "e615ec5396a3b99e0e41d53289f21a347e3d7cf5ea0675d92a47c4bcb950156c",
             "coverage": "unknown; no lost-key or institutional-ownership inference",
             "evidence_path": "data/asset_intrinsic_evidence/btc-concentration-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         }
       ]
@@ -113,7 +123,9 @@
             "content_hash": "69095892b69edb15360cadb85b85daa444230d5ee47cc485a81de7ba859499ea",
             "coverage": "mutable documentation only; no pinned source revision",
             "evidence_path": "data/asset_intrinsic_evidence/bnb-issuance-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         },
         {
@@ -130,7 +142,9 @@
             "content_hash": "bb167adf0fef87dd2aa01fe9483621d9bea8a017fe3c841767c0038def6d7140",
             "coverage": "documented validator-set structure; excludes entity affiliation",
             "evidence_path": "data/asset_intrinsic_evidence/bnb-control-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         },
         {
@@ -147,7 +161,9 @@
             "content_hash": "91ea1e21b1230c4039e52b27e50401f38af5b1eeb977edeceb603654bcc8ee18",
             "coverage": "mutable documentation only; no pinned source revision",
             "evidence_path": "data/asset_intrinsic_evidence/bnb-supply-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         },
         {
@@ -164,7 +180,9 @@
             "content_hash": "d88538b47f95cb85307402fea4b19679e4b0a5051d980f709b4c097cd233db13",
             "coverage": "native BSC governance mechanics only",
             "evidence_path": "data/asset_intrinsic_evidence/bnb-governance-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         },
         {
@@ -181,7 +199,9 @@
             "content_hash": "2408024e76f7b2d450544518d0247c1d2a821d6c24b690277fb956f9b5d9f7ba",
             "coverage": "unknown; no exchange or issuer ownership inference",
             "evidence_path": "data/asset_intrinsic_evidence/bnb-concentration-unknown.txt",
-            "source_revision": "assessment-2026-07-27"
+            "source_revision": "assessment-2026-07-27",
+            "evidence_kind": "decision_record",
+            "source_coordinates": "complete checked-in decision record"
           }
         }
       ]
