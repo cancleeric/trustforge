@@ -1,0 +1,3 @@
+source_revision: assessment-2026-07-27
+observation: No versioned independently reproducible dataset covering miner, pool, node-operator and client control was available.
+decision: control_dispersion=unknown

@@ -1,0 +1,4 @@
+source_revision: assessment-2026-07-27
+source_url: https://docs.bnbchain.org/bnb-greenfield/core-concept/bnb-token-model/
+observation: The available first-party documentation URL is mutable and no immutable system-contract revision was retained.
+decision: supply_verifiability=unknown

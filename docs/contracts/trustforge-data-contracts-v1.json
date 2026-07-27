@@ -119,6 +119,348 @@
     "title": "TrustForge AssetContext",
     "type": "object"
   },
+  "AssetIntrinsicProfile": {
+    "$id": "https://trustforge.local/contracts/asset-intrinsic-profile/1.0.0",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "issuance_predictability"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "control_dispersion"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "supply_verifiability"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "governance_capture_resistance"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      },
+      {
+        "properties": {
+          "dimensions": {
+            "contains": {
+              "properties": {
+                "name": {
+                  "const": "holder_concentration"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxContains": 1,
+            "minContains": 1
+          }
+        }
+      }
+    ],
+    "properties": {
+      "asset_id": {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "dimensions": {
+        "items": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "value": {
+                    "type": "null"
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "known"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "provenance": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "content_hash": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "coverage": {
+                        "maxLength": 4096,
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "evidence_kind": {
+                        "const": "upstream_excerpt"
+                      },
+                      "evidence_path": {
+                        "maxLength": 255,
+                        "pattern": "^data/asset_intrinsic_evidence/[^/]+\\.txt$",
+                        "type": "string"
+                      },
+                      "methodology": {
+                        "maxLength": 4096,
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "source_coordinates": {
+                        "maxLength": 4096,
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "source_revision": {
+                        "maxLength": 256,
+                        "minLength": 1,
+                        "pattern": "\\S",
+                        "type": "string"
+                      },
+                      "source_urls": {
+                        "items": {
+                          "maxLength": 2048,
+                          "pattern": "^https://",
+                          "type": "string"
+                        },
+                        "maxItems": 16,
+                        "minItems": 1,
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "source_urls",
+                      "methodology",
+                      "content_hash",
+                      "coverage",
+                      "evidence_path",
+                      "source_revision",
+                      "evidence_kind",
+                      "source_coordinates"
+                    ],
+                    "type": "object"
+                  },
+                  "value": {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "as_of": {
+              "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+              "type": "string"
+            },
+            "fetched_at": {
+              "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+              "type": "string"
+            },
+            "name": {
+              "enum": [
+                "issuance_predictability",
+                "control_dispersion",
+                "supply_verifiability",
+                "governance_capture_resistance",
+                "holder_concentration"
+              ]
+            },
+            "provenance": {
+              "additionalProperties": false,
+              "properties": {
+                "content_hash": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "coverage": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "evidence_kind": {
+                  "enum": [
+                    "upstream_excerpt",
+                    "decision_record"
+                  ]
+                },
+                "evidence_path": {
+                  "maxLength": 255,
+                  "pattern": "^data/asset_intrinsic_evidence/[^/]+\\.txt$",
+                  "type": "string"
+                },
+                "methodology": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "source_coordinates": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "source_revision": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "source_urls": {
+                  "items": {
+                    "maxLength": 2048,
+                    "pattern": "^https://",
+                    "type": "string"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "source_urls",
+                "methodology",
+                "content_hash",
+                "coverage",
+                "evidence_path",
+                "source_revision",
+                "evidence_kind",
+                "source_coordinates"
+              ],
+              "type": "object"
+            },
+            "status": {
+              "enum": [
+                "known",
+                "unknown",
+                "stale",
+                "conflicted"
+              ]
+            },
+            "valid_from": {
+              "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+              "type": "string"
+            },
+            "valid_until": {
+              "format": "date-time",
+              "pattern": "(?:Z|[+-]\\d{2}:\\d{2})$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "value",
+            "as_of",
+            "valid_from",
+            "valid_until",
+            "fetched_at",
+            "provenance"
+          ],
+          "type": "object"
+        },
+        "maxItems": 5,
+        "minItems": 5,
+        "type": "array"
+      },
+      "schema_version": {
+        "const": "1.0.0"
+      }
+    },
+    "required": [
+      "schema_version",
+      "asset_id",
+      "dimensions"
+    ],
+    "title": "TrustForge AssetIntrinsicProfile",
+    "type": "object"
+  },
   "DependencyEdge": {
     "$id": "https://trustforge.local/contracts/dependency-edge/1.0.0",
     "$schema": "https://json-schema.org/draft/2020-12/schema",
