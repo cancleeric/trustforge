@@ -90,7 +90,10 @@ export default function HermesDashboard() {
   const [focusPulse, setFocusPulse] = useState(false)
   const [displayScore, setDisplayScore] = useState(0)
   const displayScoreRef = useRef(0)
-  const [runtimeVersion, setRuntimeVersion] = useState('snapshot')
+  // 版號要等 getHealth() 回來（實測約 4 秒）才有值。初值原本是 'snapshot'，
+  // 那看起來像一個真的版號，使用者在那 4 秒內截到的畫面會誤以為系統版號叫
+  // snapshot。改成 '…' 讓「還沒載到」跟「真的版號」在視覺上分得開。
+  const [runtimeVersion, setRuntimeVersion] = useState('…')
   const [costLedger, setCostLedger] = useState<number | null>(null)
   const [startupComplete, setStartupComplete] = useState(qaMode)
   const { reducedMotion, toggle: toggleReducedMotion } = useReducedMotion()

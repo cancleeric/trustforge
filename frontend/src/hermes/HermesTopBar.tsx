@@ -19,7 +19,7 @@ interface HermesTopBarProps {
 
 export default function HermesTopBar({
   costLedger = null,
-  version = 'snapshot · GALAXY',
+  version = '… · GALAXY', // 同 HermesDashboard：預設值不要長得像真的版號
   systemId = 'SYS·HRM-01',
   activeModule = null,
   onModuleSelect,

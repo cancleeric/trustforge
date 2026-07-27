@@ -28,11 +28,19 @@ def test_version_fallback_on_import_failure(monkeypatch):
     assert version == "dev"
 
 
-def test_version_has_default_value():
-    """_version.py 未被 deploy 腳本覆寫時，內容應為 'dev'。"""
+def test_version_reports_package_version():
+    """_version.py 未被 deploy 腳本覆寫時，應回報套件實際版號而不是字面 'dev'。
+
+    這條原本斷言 VERSION == 'dev'，等於把「永遠沒有版號」寫成契約：
+    /api/health 因此永遠回 {"version": "dev"}，前端徽章也就顯示不出版號
+    （使用者回報「系統沒顯示版號」）。套件自己知道版號（pyproject 0.18.1），
+    只是這條回報路徑丟掉了，所以改成斷言它與 __init__.__version__ 一致。
+    """
+    import trustforge
     from trustforge._version import VERSION
 
-    assert VERSION == "dev"
+    assert VERSION == trustforge.__version__
+    assert VERSION != "dev"
 
 
 def test_render_page_contains_version_string():
