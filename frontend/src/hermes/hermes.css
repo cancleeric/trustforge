@@ -2557,6 +2557,25 @@
     gap: 8px !important;
   }
 
+  /* N52：頂欄是 nowrap 的 flex，品牌鈕又不可壓縮，英文版字串較長時整排超出——
+     實測 en 320px scrollWidth 361 > clientWidth 318，語言切換鈕「繁中」整顆
+     落在畫面外 (L338 R362)、Help 也被切掉；中文剛好塞得下所以看不出來。
+     不逐項砍字，改成讓「最寬且最不重要」的品牌鈕可壓縮並截字：控制項一定
+     保留可點，品牌退讓成 TRUSTFO…。這樣任何語系任何寬度都成立，不是針對
+     en/320 硬調數字。（inline style 沒設 min-width/overflow，CSS 蓋得到。） */
+  .hermes-topbar>button:first-child {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .hermes-topbar>button:first-child>span {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
   .hermes-topbar>span {
     display: none !important;
   }
