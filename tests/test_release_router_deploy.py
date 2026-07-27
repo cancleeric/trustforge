@@ -116,7 +116,35 @@ def test_installer_fails_closed_when_nginx_worker_user_is_unknown():
     assert '[[ -n "$NGINX_WORKER_USER" ]]' in source
     assert 'id "$NGINX_WORKER_USER"' in source
     assert 'usermod -a -G trustforge-release "$NGINX_WORKER_USER"' in source
+    assert "grep -Fx trustforge-release" in source
+    assert 's.connect("/run/trustforge/release-router.sock")' in source
     assert "exit 78" in source
+
+
+def test_root_provisioner_separates_bootstrap_signers_and_consumes_outcome_key():
+    source = (ROOT / "scripts/provision_release_ledgers.py").read_text()
+    assert "ledger provisioning requires root" in source
+    assert 'pwd.getpwnam("trustforge-operator")' in source
+    assert 'pwd.getpwnam("trustforge-router")' in source
+    assert '"trustforge-operator", "control", "control"' in source
+    assert '"trustforge-router"' in source
+    assert "pass_fds=(descriptor,)" in source
+    assert "args.outcome_bootstrap_key.unlink()" in source
+    main = source[source.index("def main()") :]
+    assert main.index('pwd.getpwnam("trustforge-operator")') < main.index("_run_as(")
+
+
+def test_migration_authenticates_both_chains_before_staging_or_swap():
+    source = (ROOT / "scripts/migrate_release_ledgers.py").read_text()
+    main = source[source.index("def main()") :]
+    first_verify = main.index("_verified_projection(")
+    second_verify = main.index("_verified_projection(", first_verify + 1)
+    stage_create = main.index("stage.mkdir(")
+    assert first_verify < second_verify < stage_create
+    assert "projection.read()" in source
+    assert "os.rename(args.target_root, backup)" in source
+    assert "os.rename(stage, args.target_root)" in source
+    assert "os.rename(backup, args.target_root)" in source
 
 
 def test_operator_emergency_paths_are_artifact_and_extra_key_independent():
@@ -152,6 +180,6 @@ def test_operator_emergency_paths_are_artifact_and_extra_key_independent():
         }
     )
     assert LEDGER_PATH == SECURITY_LEDGER_ROOT
-    assert "outcome-private" in _key_roles_for_command("initialize")
+    assert "outcome-private" not in _key_roles_for_command("initialize")
     assert "outcome-private" not in _key_roles_for_command("start")
     assert "outcome-private" not in _key_roles_for_command("promote")

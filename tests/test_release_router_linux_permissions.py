@@ -5,6 +5,7 @@ import platform
 import pwd
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     router = pwd.getpwnam("trustforge-router")
     operator = pwd.getpwnam("trustforge-operator")
     release_gid = __import__("grp").getgrnam("trustforge-release").gr_gid
+    tmp_path.chmod(0o755)
     root = tmp_path / "security-ledger"
     control = root / "control"
     outcomes = root / "router-outcomes"
@@ -39,6 +41,29 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     os.chown(root, 0, release_gid)
     os.chown(control, operator.pw_uid, release_gid)
     os.chown(outcomes, router.pw_uid, release_gid)
+    control_seed = tmp_path / "control.seed"
+    outcome_seed = tmp_path / "outcome.seed"
+    control_seed.write_bytes(b"c" * 32)
+    outcome_seed.write_bytes(b"o" * 32)
+    control_seed.chmod(0o400)
+    outcome_seed.chmod(0o400)
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/provision_release_ledgers.py"),
+            "provision",
+            "--root",
+            str(root),
+            "--control-key",
+            str(control_seed),
+            "--outcome-bootstrap-key",
+            str(outcome_seed),
+        ],
+        check=True,
+    )
+    assert not outcome_seed.exists()
+    assert (control / "bootstrap.json").stat().st_mode & 0o777 == 0o640
+    assert (outcomes / "bootstrap.json").stat().st_mode & 0o777 == 0o640
     for directory, owner in ((control, operator.pw_uid), (outcomes, router.pw_uid)):
         event = directory / "events.jsonl"
         event.touch(mode=0o640)

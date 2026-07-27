@@ -225,10 +225,10 @@ class SignedEventLedger:
         if not existed:
             os.chmod(self.directory, self.directory_mode)
         if bootstrap and not self._bootstrap_path().exists():
-            if (self.directory / "events.jsonl").exists() or (
-                self.directory / "head.json"
-            ).exists():
-                raise LedgerError("cannot bootstrap a non-empty ledger")
+            if any(self.directory.iterdir()):
+                raise LedgerError(
+                    "cannot bootstrap a non-empty or partially provisioned ledger"
+                )
             self._write_bootstrap()
         self._verify_bootstrap()
 
@@ -253,6 +253,8 @@ class SignedEventLedger:
             self.coordination_lock_mode,
         )
         try:
+            if not self._preprovisioned_coordination_lock:
+                os.fchmod(fd, self.coordination_lock_mode)
             info = os.fstat(fd)
             expected_gid = (
                 grp.getgrnam(self.coordination_lock_group).gr_gid
@@ -303,6 +305,7 @@ class SignedEventLedger:
             self.file_mode,
         )
         try:
+            os.fchmod(fd, self.file_mode)
             self._set_created_file_group(fd)
             _write_all(fd, _canonical(payload) + b"\n")
             os.fsync(fd)
@@ -391,7 +394,7 @@ class SignedEventLedger:
                 fd = os.open(
                     filename,
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-                    0o600,
+                    self.file_mode,
                     dir_fd=directory_fd,
                 )
             except FileExistsError:
@@ -401,6 +404,7 @@ class SignedEventLedger:
                     raise LedgerError("existing epoch stop latch is invalid")
                 return
             try:
+                os.fchmod(fd, self.file_mode)
                 self._set_created_file_group(fd)
                 _write_all(fd, _canonical(payload) + b"\n")
                 os.fsync(fd)
@@ -528,6 +532,7 @@ class SignedEventLedger:
                     self.file_mode,
                     dir_fd=directory_fd,
                 )
+                os.fchmod(fd, self.file_mode)
                 self._set_created_file_group(fd)
                 os.fsync(directory_fd)
             except FileExistsError:
@@ -737,6 +742,7 @@ class SignedEventLedger:
             self.file_mode,
         )
         try:
+            os.fchmod(fd, self.file_mode)
             self._set_created_file_group(fd)
             _write_all(fd, _canonical(head) + b"\n")
             os.fsync(fd)

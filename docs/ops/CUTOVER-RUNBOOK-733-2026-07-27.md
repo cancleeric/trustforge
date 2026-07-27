@@ -222,3 +222,19 @@ Unshipped signed-ledger v2 terminal records created before
 `checkpoint_floor_at` are replayed by deriving the floor from their signed
 terminal `at` value and the prior authenticated floor. Legacy HMAC v1 remains
 rejected and requires an audited offline migration.
+
+On a fresh host, run `systemd-sysusers` before resolving either service
+identity, then apply the tmpfiles policy. As root, run
+`scripts/provision_release_ledgers.py provision` with root-owned mode-`0400`
+control and one-time outcome bootstrap seeds. The helper passes only the
+relevant seed descriptor into each identity-separated bootstrap process and
+deletes the outcome bootstrap seed after both signed bootstrap records verify.
+Archive the helper's public-key JSON output in the runtime verification
+keyrings; it contains no private seed material.
+Only then may the operator run `deployment_readiness.py initialize`.
+
+For an existing signed-ledger v2 installation, use
+`scripts/migrate_release_ledgers.py`. It authenticates both complete chains and
+signed heads before creating staging, revalidates the staged copy with its new
+metadata, and performs an atomic rename while retaining the prior target at
+the `.rollback` path. HMAC v1 is not accepted by this migration.

@@ -297,3 +297,55 @@ def test_projection_uses_configured_owner_not_reader_euid(tmp_path, monkeypatch)
     assert projection.read()[0]["event"]["kind"] == "deployment_initialized"
     with pytest.raises(LedgerError, match="writer ownership"):
         writer.append({"kind": "operator_stop"})
+
+
+def test_created_files_ignore_restrictive_umask_and_use_exact_mode(tmp_path):
+    previous = os.umask(0o077)
+    try:
+        writer = _ledger(tmp_path)
+        initialized = writer.append({"kind": "deployment_initialized"})
+        writer.trip_epoch_stop(
+            ledger_id=initialized["ledger_id"], canary_epoch="f" * 64
+        )
+    finally:
+        os.umask(previous)
+    for path in (tmp_path / "ledger").iterdir():
+        if path.is_file():
+            assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_split_mode_files_are_exact_0640_under_umask_0077(tmp_path):
+    group = grp.getgrgid(os.getegid()).gr_name
+    tmp_path.chmod(0o750)
+    directory = tmp_path / "ledger"
+    directory.mkdir(mode=0o750)
+    directory.chmod(0o750)
+    previous = os.umask(0o077)
+    try:
+        writer = _ledger(
+            tmp_path,
+            root_group=group,
+            root_mode=0o750,
+            directory_group=group,
+            directory_mode=0o750,
+            file_mode=0o640,
+        )
+        initialized = writer.append({"kind": "deployment_initialized"})
+        writer.trip_epoch_stop(
+            ledger_id=initialized["ledger_id"], canary_epoch="e" * 64
+        )
+    finally:
+        os.umask(previous)
+    assert {
+        path.stat().st_mode & 0o777 for path in directory.iterdir() if path.is_file()
+    } == {0o640}
+
+
+def test_bootstrap_rejects_any_partial_preprovisioned_content(tmp_path):
+    directory = tmp_path / "ledger"
+    directory.mkdir()
+    directory.chmod(0o700)
+    (directory / "unexpected.partial").touch()
+    with pytest.raises(LedgerError, match="partially provisioned"):
+        _ledger(tmp_path)
+    assert not (directory / "bootstrap.json").exists()

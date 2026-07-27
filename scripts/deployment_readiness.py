@@ -287,7 +287,6 @@ def _key_roles_for_command(command: str) -> frozenset[str]:
                 "control-public",
                 "outcome-public",
                 "control-private",
-                "outcome-private",
                 "authorization-public",
                 "completion-public",
                 "gates",

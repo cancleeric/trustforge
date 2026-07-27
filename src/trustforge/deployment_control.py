@@ -270,6 +270,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 dir_fd=directory_fd,
             )
             try:
+                os.fchmod(fd, self.ledger.file_mode)
                 if self.ledger.directory_group:
                     os.fchown(
                         fd,

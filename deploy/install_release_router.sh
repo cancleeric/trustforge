@@ -36,10 +36,12 @@ if $DRY_RUN; then
     "systemd-tmpfiles --create $TMPFILES_TARGET" \
     "nginx -T # preflight: resolve the configured worker user" \
     "usermod -a -G trustforge-release <resolved-nginx-worker-user>" \
+    "id -nG <resolved-nginx-worker-user> # verify trustforge-release membership" \
     "systemctl daemon-reload" \
     "nginx -t" \
     "systemctl enable --now trustforge-release-router.service" \
-    "systemctl reload nginx"
+    "systemctl reload nginx" \
+    "setpriv <resolved-nginx-worker-user> python3 -c # connect to router Unix socket"
   exit 0
 fi
 
@@ -64,7 +66,14 @@ NGINX_WORKER_USER="$(
 }
 id "$NGINX_WORKER_USER" >/dev/null
 usermod -a -G trustforge-release "$NGINX_WORKER_USER"
+id -nG "$NGINX_WORKER_USER" | tr ' ' '\n' | grep -Fx trustforge-release >/dev/null
 systemctl daemon-reload
 nginx -t
 systemctl enable --now trustforge-release-router.service
 systemctl reload nginx
+setpriv \
+  "--reuid=$NGINX_WORKER_USER" \
+  "--regid=$NGINX_WORKER_USER" \
+  --init-groups \
+  python3 -c \
+  'import socket; s=socket.socket(socket.AF_UNIX); s.connect("/run/trustforge/release-router.sock"); s.close()'
