@@ -3,7 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from scripts.deployment_readiness import _key_roles_for_command
+from scripts.deployment_readiness import LEDGER_PATH, _key_roles_for_command
+from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,3 +58,7 @@ def test_operator_emergency_paths_are_artifact_and_extra_key_independent():
             "completion-public",
         }
     )
+    assert LEDGER_PATH == SECURITY_LEDGER_ROOT
+    assert "outcome-private" in _key_roles_for_command("initialize")
+    assert "outcome-private" not in _key_roles_for_command("start")
+    assert "outcome-private" not in _key_roles_for_command("promote")

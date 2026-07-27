@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from trustforge.authenticated_ledger import AuthenticatedLedger, LedgerError
-from trustforge.signed_event_ledger import SignedEventLedger
+from trustforge.signed_event_ledger import SignedEventLedger, _write_all
 
 CONTROL_SEED = b"c" * 32
 ROUTER_SEED = b"r" * 32
@@ -44,6 +44,9 @@ def _ledger(tmp_path, *, seed=CONTROL_SEED, domain="release-control", kinds=CONT
         signing_key_id="control-1" if domain == "release-control" else "router-1",
         signing_private_key=seed,
         signing_domain=domain,
+        ledger_role=domain,
+        bootstrap=True,
+        coordination_root=tmp_path.parent / "root",
     )
 
 
@@ -55,6 +58,8 @@ def test_projection_uses_public_keys_only_and_cannot_append(tmp_path):
         verification_keys={"control-1": _public(CONTROL_SEED)},
         event_permissions={"release-control": CONTROL_KINDS},
         domain_keys={"release-control": frozenset({"control-1"})},
+        ledger_role="release-control",
+        coordination_root=tmp_path.parent / "root",
     )
     assert projection.read()[0]["event"]["kind"] == "deployment_initialized"
     with pytest.raises(LedgerError, match="projection-only"):
@@ -102,11 +107,78 @@ def test_legacy_hmac_v1_ledger_fails_closed_under_ed25519_projection(tmp_path):
         test_directory_override=tmp_path,
     )
     legacy.append({"kind": "operator_stop"})
-    projection = SignedEventLedger(
-        directory=tmp_path,
-        verification_keys={"control-1": _public(CONTROL_SEED)},
-        event_permissions={"release-control": CONTROL_KINDS},
-        domain_keys={"release-control": frozenset({"control-1"})},
-    )
     with pytest.raises(LedgerError, match="legacy"):
-        projection.read()
+        SignedEventLedger(
+            directory=tmp_path,
+            verification_keys={"control-1": _public(CONTROL_SEED)},
+            event_permissions={"release-control": CONTROL_KINDS},
+            domain_keys={"release-control": frozenset({"control-1"})},
+            ledger_role="release-control",
+            coordination_root=tmp_path,
+        )
+
+
+def test_fresh_bootstrap_is_explicit_signed_and_restart_verifiable(tmp_path):
+    directory = tmp_path / "control"
+    kwargs = {
+        "directory": directory,
+        "verification_keys": {"control-1": _public(CONTROL_SEED)},
+        "event_permissions": {"release-control": CONTROL_KINDS},
+        "domain_keys": {"release-control": frozenset({"control-1"})},
+        "ledger_role": "release-control",
+        "coordination_root": tmp_path / "root",
+    }
+    with pytest.raises(LedgerError, match="explicit secure bootstrap"):
+        SignedEventLedger(**kwargs)
+    writer = SignedEventLedger(
+        **kwargs,
+        signing_key_id="control-1",
+        signing_private_key=CONTROL_SEED,
+        signing_domain="release-control",
+        bootstrap=True,
+    )
+    writer.append({"kind": "deployment_initialized"})
+    assert (directory / "bootstrap.json").stat().st_mode & 0o777 == 0o600
+    assert SignedEventLedger(**kwargs).read()[0]["event"]["kind"] == (
+        "deployment_initialized"
+    )
+
+
+def test_write_all_detects_zero_progress_and_partial_event_fails_closed(
+    tmp_path, monkeypatch
+):
+    ledger = _ledger(tmp_path)
+    original_write = __import__("os").write
+    calls = 0
+
+    def partial_then_zero(fd, data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_write(fd, bytes(data[:5]))
+        return 0
+
+    monkeypatch.setattr("trustforge.signed_event_ledger.os.write", partial_then_zero)
+    with pytest.raises(LedgerError, match="partial"):
+        ledger.append({"kind": "deployment_initialized"})
+    monkeypatch.undo()
+    with pytest.raises(LedgerError, match="truncated"):
+        ledger.read()
+
+
+def test_write_all_retries_short_writes(tmp_path, monkeypatch):
+    path = tmp_path / "short-write"
+    fd = __import__("os").open(
+        path, __import__("os").O_WRONLY | __import__("os").O_CREAT, 0o600
+    )
+    original_write = __import__("os").write
+
+    def short(fd_, data):
+        return original_write(fd_, bytes(data[: max(1, len(data) // 2)]))
+
+    monkeypatch.setattr("trustforge.signed_event_ledger.os.write", short)
+    try:
+        _write_all(fd, b"complete-payload")
+    finally:
+        __import__("os").close(fd)
+    assert path.read_bytes() == b"complete-payload"

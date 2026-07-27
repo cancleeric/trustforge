@@ -25,11 +25,11 @@ from trustforge.deployment_evidence import (
 )
 from trustforge.release_router import ReleaseEndpoint, RoutingPolicy
 from trustforge.safe_fs import read_regular_file
-from trustforge.signed_event_ledger import SignedEventLedger
+from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedger
 
 CONFIG_PATH = Path("/etc/trustforge/deployment-control.json")
 KEY_DIRECTORY = Path("/etc/trustforge/deployment-keys")
-LEDGER_PATH = Path("/var/lib/trustforge/security-ledger")
+LEDGER_PATH = SECURITY_LEDGER_ROOT
 
 
 def _protected_json(path: Path, maximum_bytes: int = 1_000_000) -> dict:
@@ -61,6 +61,7 @@ def _build_control(
     verify_retained_a: bool,
     verify_retained_b: bool,
     key_roles: frozenset[str],
+    bootstrap_ledgers: bool,
 ) -> tuple[DeploymentControlLedger, dict[str, bytes], dict[str, bytes]]:
     config = _protected_json(CONFIG_PATH)
     control_public = _keyring(
@@ -71,6 +72,9 @@ def _build_control(
     )
     control_private = _keyring(
         "control-event-private", required="control-private" in key_roles
+    )
+    outcome_private = _keyring(
+        "router-outcome-private", required="outcome-private" in key_roles
     )
     auth_keys = _keyring(
         "authorization-public", required="authorization-public" in key_roles
@@ -97,7 +101,13 @@ def _build_control(
         signing_key_id=control_signer[0],
         signing_private_key=control_signer[1],
         signing_domain="release-control" if control_signer[0] else None,
+        ledger_role="release-control",
+        bootstrap=bootstrap_ledgers and not (LEDGER_PATH / "control").exists(),
+        coordination_root=LEDGER_PATH,
     )
+    if len(outcome_private) > 1:
+        raise DeploymentControlError("operator has multiple outcome signing identities")
+    outcome_signer = next(iter(outcome_private.items()), (None, None))
     outcome_ledger = SignedEventLedger(
         directory=LEDGER_PATH / "router-outcomes",
         verification_keys=outcome_public,
@@ -105,6 +115,13 @@ def _build_control(
             "candidate_reservation", "candidate_result", "router_emergency_stop",
         })},
         domain_keys={"release-router-outcome": frozenset(outcome_public)},
+        signing_key_id=outcome_signer[0],
+        signing_private_key=outcome_signer[1],
+        signing_domain="release-router-outcome" if outcome_signer[0] else None,
+        ledger_role="release-router-outcomes",
+        bootstrap=bootstrap_ledgers
+        and not (LEDGER_PATH / "router-outcomes").exists(),
+        coordination_root=LEDGER_PATH,
     )
     if require_preflight:
         identity = ShadowReleaseIdentity(**config["shadow_identity"])
@@ -219,7 +236,21 @@ def _key_roles_for_command(command: str) -> frozenset[str]:
             "control-public", "outcome-public", "control-private",
             "completion-public",
         })
-    if command in {"initialize", "start", "promote"}:
+    if command == "initialize":
+        return frozenset(
+            {
+                "control-public",
+                "outcome-public",
+                "control-private",
+                "outcome-private",
+                "authorization-public",
+                "completion-public",
+                "gates",
+                "routing",
+                "endpoint-manifests",
+            }
+        )
+    if command in {"start", "promote"}:
         return frozenset(
             {
                 "control-public",
@@ -264,6 +295,7 @@ def main() -> int:
             verify_retained_a=verify_retained_a,
             verify_retained_b=verify_retained_b,
             key_roles=key_roles,
+            bootstrap_ledgers=args.command == "initialize",
         )
         now = datetime.now(timezone.utc)
         if args.command == "initialize":

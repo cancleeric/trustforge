@@ -8,7 +8,7 @@ from pathlib import Path
 from trustforge.deployment_control import DeploymentControlLedger
 from trustforge.release_router import ReleaseABRouter, ReleaseEndpoint, RoutingPolicy
 from trustforge.safe_fs import read_regular_file
-from trustforge.signed_event_ledger import SignedEventLedger
+from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT, SignedEventLedger
 
 RUNTIME_CONFIG_PATH = Path("/etc/trustforge/release-router-runtime.json")
 RUNTIME_KEYS_PATH = Path("/etc/trustforge/release-router-runtime-keys.json")
@@ -54,6 +54,8 @@ def build_runtime_router() -> ReleaseABRouter:
         "router_outcome_private",
         "routing",
         "endpoint_manifest_public",
+        "authorization_public",
+        "completion_public",
     }:
         raise RouterRuntimeError("runtime key roles are over-privileged or incomplete")
     control_public = _keys(key_file, "control_event_public")
@@ -61,6 +63,8 @@ def build_runtime_router() -> ReleaseABRouter:
     outcome_private = _keys(key_file, "router_outcome_private")
     routing_keys = _keys(key_file, "routing")
     public_keys = _keys(key_file, "endpoint_manifest_public")
+    authorization_public = _keys(key_file, "authorization_public")
+    completion_public = _keys(key_file, "completion_public")
     if len(outcome_private) != 1:
         raise RouterRuntimeError("runtime requires exactly one outcome signing key")
     outcome_key_id, outcome_secret = next(iter(outcome_private.items()))
@@ -76,19 +80,23 @@ def build_runtime_router() -> ReleaseABRouter:
         })
     }
     ledger = SignedEventLedger(
-        directory="/var/lib/trustforge/security-ledger/control",
+        directory=SECURITY_LEDGER_ROOT / "control",
         verification_keys=control_public,
         event_permissions=control_permissions,
         domain_keys={"release-control": frozenset(control_public)},
+        ledger_role="release-control",
+        coordination_root=SECURITY_LEDGER_ROOT,
     )
     outcome_ledger = SignedEventLedger(
-        directory="/var/lib/trustforge/security-ledger/router-outcomes",
+        directory=SECURITY_LEDGER_ROOT / "router-outcomes",
         verification_keys=outcome_public,
         event_permissions=outcome_permissions,
         domain_keys={"release-router-outcome": frozenset(outcome_public)},
         signing_key_id=outcome_key_id,
         signing_private_key=outcome_secret,
         signing_domain="release-router-outcome",
+        ledger_role="release-router-outcomes",
+        coordination_root=SECURITY_LEDGER_ROOT,
     )
     records = ledger.read()
     if not records or records[0]["event"].get("kind") != "deployment_initialized":
@@ -100,8 +108,8 @@ def build_runtime_router() -> ReleaseABRouter:
     control = DeploymentControlLedger(
         ledger,
         outcome_ledger=outcome_ledger,
-        authorization_keys={},
-        completion_keys={},
+        authorization_keys=authorization_public,
+        completion_keys=completion_public,
         target=initialized["target"],
         target_confirmation=initialized["target_confirmation"],
         active=active,

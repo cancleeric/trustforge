@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from trustforge.activation_lock import (
     ActivationLockRecord,
     _set_backend_for_tests,
 )
 from trustforge.agent.shadow_contracts import canonical_json
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from trustforge.authenticated_ledger import LedgerError
 from trustforge.deployment_control import (
     ActivationCompletionReceipt,
     DeploymentAuthorization,
@@ -91,6 +93,9 @@ def _control(tmp_path):
         signing_key_id="control-1",
         signing_private_key=CONTROL_KEY,
         signing_domain="release-control",
+        ledger_role="release-control",
+        bootstrap=True,
+        coordination_root=tmp_path / "ledger-root",
     )
     outcome_ledger = SignedEventLedger(
         directory=tmp_path / "outcome-ledger",
@@ -102,6 +107,9 @@ def _control(tmp_path):
         signing_key_id="outcome-1",
         signing_private_key=OUTCOME_KEY,
         signing_domain="release-router-outcome",
+        ledger_role="release-router-outcomes",
+        bootstrap=True,
+        coordination_root=tmp_path / "ledger-root",
     )
     control = DeploymentControlLedger(
         ledger,
@@ -281,3 +289,86 @@ def test_candidate_results_atomically_auto_stop_and_do_not_log_subject(tmp_path)
     assert stopped.phase == "stopped"
     serialized = canonical_json([item["event"] for item in control.ledger.read()])
     assert b"subject" not in serialized
+
+
+def _start_canary(control, suffix):
+    prepared = control.prepare(
+        "start", _authorization(control, "start", f"auth-start-{suffix}"), now=NOW
+    )
+    control.complete(
+        _completion(
+            control, prepared, "start", f"complete-start-{suffix}"
+        ),
+        now=NOW,
+    )
+
+
+def test_stop_wins_coordination_lock_before_reservation_deterministically(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "race")
+    before = control.routing_snapshot()
+    attempted = threading.Event()
+    result = {}
+
+    def reserve():
+        attempted.set()
+        try:
+            control.reserve_candidate(
+                expected_head=before.ledger_head, reservation_id="a" * 32
+            )
+        except Exception as exc:  # asserted below
+            result["error"] = exc
+
+    with control.ledger.coordination_lock():
+        worker = threading.Thread(target=reserve)
+        worker.start()
+        assert attempted.wait(1)
+        control._prepare_locked(
+            "stop", _authorization(control, "stop", "auth-stop-race"), now=NOW
+        )
+    worker.join(2)
+    assert not worker.is_alive()
+    assert isinstance(result.get("error"), LedgerError)
+    assert control.routing_snapshot().candidate_requests == 0
+    assert control.routing_snapshot().phase == "stopped"
+
+
+def test_restart_canary_epoch_excludes_old_ramp_outcomes(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "epoch-1")
+    first = control.routing_snapshot()
+    reserved = control.reserve_candidate(
+        expected_head=first.ledger_head, reservation_id="b" * 32
+    )
+    control.record_candidate_result(
+        expected_head=reserved.ledger_head,
+        reservation_id="b" * 32,
+        ok=False,
+        status_code=503,
+        latency_ms=1,
+        error_kind="candidate_http_or_transport_error",
+    )
+    control.prepare(
+        "stop", _authorization(control, "stop", "auth-stop-epoch"), now=NOW
+    )
+    _start_canary(control, "epoch-2")
+    restarted = _control(tmp_path)
+    state = restarted.routing_snapshot()
+    assert state.phase == "canary"
+    assert state.candidate_requests == 0
+    assert state.consecutive_errors == 0
+    epochs = {
+        record["event"]["canary_epoch"]
+        for record in restarted.outcome_ledger.read()
+    }
+    assert len(epochs) == 1
+    assert next(iter(epochs)) != restarted._canary_epoch(restarted._records())
+
+
+@pytest.mark.parametrize("key_role", ["authorization_keys", "completion_keys"])
+def test_projection_reverifies_persisted_independent_receipts(tmp_path, key_role):
+    control = _control(tmp_path)
+    _start_canary(control, key_role)
+    setattr(control, key_role, {"wrong": b"x" * 32})
+    with pytest.raises(DeploymentControlError, match="signature"):
+        control.routing_snapshot()

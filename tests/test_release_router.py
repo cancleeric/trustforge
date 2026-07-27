@@ -4,6 +4,7 @@ import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -249,6 +250,9 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             signing_key_id="control-1",
             signing_private_key=control_seed,
             signing_domain="release-control",
+            ledger_role="release-control",
+            bootstrap=True,
+            coordination_root=tmp_path / "ledger-root",
         )
         outcome_ledger = SignedEventLedger(
             directory=tmp_path / "outcome-ledger",
@@ -262,14 +266,21 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             signing_key_id="outcome-1",
             signing_private_key=outcome_seed,
             signing_domain="release-router-outcome",
+            ledger_role="release-router-outcomes",
+            bootstrap=True,
+            coordination_root=tmp_path / "ledger-root",
         )
         target = "production"
         confirmation = f"PRODUCTION:{target}:{a.release_digest}:{b.release_digest}"
         control = DeploymentControlLedger(
             ledger,
             outcome_ledger=outcome_ledger,
-            authorization_keys={"auth": b"a" * 32},
-            completion_keys={"complete": b"c" * 32},
+            authorization_keys={"auth": Ed25519PrivateKey.from_private_bytes(
+                b"a" * 32
+            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
+            completion_keys={"complete": Ed25519PrivateKey.from_private_bytes(
+                b"c" * 32
+            ).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)},
             target=target,
             target_confirmation=confirmation,
             active=a,
@@ -280,6 +291,31 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
             require_distributed_lock=False,
         )
         control.initialize()
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        auth_unsigned = {
+            "action": "start",
+            "target": target,
+            "target_confirmation": confirmation,
+            "ledger_id": control.routing_snapshot().ledger_id,
+            "active_artifact_digest": a.release_digest,
+            "candidate_artifact_digest": b.release_digest,
+            "evidence_bundle_digest": "sha256:" + "e" * 64,
+            "routing_policy_digest": policy.policy_digest,
+            "routing_key_id": policy.routing_key_id,
+            "actor": "test",
+            "issued_at": (now - timedelta(minutes=1)).isoformat(),
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+            "nonce": "prepare-test",
+            "key_id": "auth",
+            "receipt_version": "trustforge.deployment-authorization/v2",
+        }
+        auth_receipt = {
+            **auth_unsigned,
+            "signature": Ed25519PrivateKey.from_private_bytes(b"a" * 32).sign(
+                b"trustforge.deployment-authorization.v2\x00"
+                + canonical_json(auth_unsigned)
+            ).hex(),
+        }
         prepared = ledger.append(
             {
                 "kind": "activation_prepared",
@@ -294,8 +330,32 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
                 "candidate_artifact_digest": b.release_digest,
                 "routing_policy_digest": policy.policy_digest,
                 "at": "2026-07-28T00:00:00Z",
+                "authorization_receipt": auth_receipt,
             }
         )
+        completion_unsigned = {
+            "transaction_id": "t1",
+            "action": "start",
+            "target": target,
+            "prepared_event_hash": prepared["event_hash"],
+            "active_artifact_digest": a.release_digest,
+            "candidate_artifact_digest": b.release_digest,
+            "pointer_active_digest": a.release_digest,
+            "observed_manifest_digest": a.release_digest,
+            "status": "completed",
+            "verified_at": now.isoformat(),
+            "actor": "test",
+            "nonce": "complete-test",
+            "key_id": "complete",
+            "receipt_version": "trustforge.activation-completion/v1",
+        }
+        completion_receipt = {
+            **completion_unsigned,
+            "signature": Ed25519PrivateKey.from_private_bytes(b"c" * 32).sign(
+                b"trustforge.activation-completion.v1\x00"
+                + canonical_json(completion_unsigned)
+            ).hex(),
+        }
         ledger.append(
             {
                 "kind": "activation_completed",
@@ -303,10 +363,13 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
                 "prepared_event_hash": prepared["event_hash"],
                 "pointer_active_digest": a.release_digest,
                 "observed_manifest_digest": a.release_digest,
-                "activation_receipt_digest": "sha256:" + "d" * 64,
+                "activation_receipt_digest": "sha256:" + hashlib.sha256(
+                    canonical_json(completion_receipt)
+                ).hexdigest(),
                 "nonce": "complete-test",
                 "actor": "test",
                 "at": "2026-07-28T00:00:01Z",
+                "completion_receipt": completion_receipt,
             }
         )
         router = ReleaseABRouter(
@@ -325,8 +388,8 @@ def test_real_authenticated_control_restart_concurrency_cap_and_auto_stop(tmp_pa
         restarted = DeploymentControlLedger(
             ledger,
             outcome_ledger=outcome_ledger,
-            authorization_keys={"auth": b"a" * 32},
-            completion_keys={"complete": b"c" * 32},
+            authorization_keys=control.authorization_keys,
+            completion_keys=control.completion_keys,
             target=target,
             target_confirmation=confirmation,
             active=a,

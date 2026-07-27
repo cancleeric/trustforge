@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,6 +27,9 @@ from trustforge.authenticated_ledger import (
 
 SCHEMA = "trustforge.signed-event-ledger/v2"
 HEAD_SCHEMA = "trustforge.signed-event-ledger-head/v2"
+BOOTSTRAP_SCHEMA = "trustforge.signed-ledger-bootstrap/v1"
+BOOTSTRAP_FILENAME = "bootstrap.json"
+SECURITY_LEDGER_ROOT = Path("/var/lib/trustforge/security-ledger")
 
 
 def _canonical(value: Any) -> bytes:
@@ -36,6 +40,15 @@ def _canonical(value: Any) -> bytes:
         ).encode()
     except (TypeError, ValueError) as exc:
         raise LedgerError("event is not canonical JSON") from exc
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise LedgerError("partial ledger write")
+        view = view[written:]
 
 
 class SignedEventLedger:
@@ -56,6 +69,9 @@ class SignedEventLedger:
         signing_key_id: str | None = None,
         signing_private_key: bytes | None = None,
         signing_domain: str | None = None,
+        ledger_role: str,
+        bootstrap: bool = False,
+        coordination_root: str | os.PathLike[str] | None = None,
         max_file_bytes: int = 8 * 1024 * 1024,
         max_events: int = 10_000,
         max_event_bytes: int = 32 * 1024,
@@ -102,6 +118,8 @@ class SignedEventLedger:
         if min(max_file_bytes, max_events, max_event_bytes) <= 0:
             raise LedgerError("ledger bounds must be positive")
         self.directory = Path(directory)
+        self.ledger_role = ledger_role
+        self.coordination_root = Path(coordination_root or self.directory.parent)
         self._verification_keys = dict(verification_keys)
         self._permissions = dict(event_permissions)
         self._domain_keys = dict(domain_keys)
@@ -110,9 +128,29 @@ class SignedEventLedger:
         self._max_file_bytes = max_file_bytes
         self._max_events = max_events
         self._max_event_bytes = max_event_bytes
+        root_existed = self.coordination_root.exists()
+        if not root_existed and not bootstrap:
+            raise LedgerError("ledger root requires explicit secure bootstrap")
+        self.coordination_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root_info = os.lstat(self.coordination_root)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != os.geteuid()
+            or (root_existed and stat.S_IMODE(root_info.st_mode) != 0o700)
+        ):
+            raise LedgerError("ledger coordination root metadata is unsafe")
+        if not root_existed:
+            os.chmod(self.coordination_root, 0o700)
         existed = self.directory.exists()
-        if not existed and self._private_key is None:
-            raise LedgerError("projection-only ledger directory is absent")
+        legacy_events = self.coordination_root / "events.jsonl"
+        legacy_head = self.coordination_root / "head.json"
+        if os.path.lexists(legacy_events) or os.path.lexists(legacy_head):
+            raise LedgerError("legacy root ledger requires audited offline migration")
+        if not existed and not bootstrap:
+            raise LedgerError("ledger requires explicit secure bootstrap")
+        if bootstrap and self._private_key is None:
+            raise LedgerError("bootstrap requires a signing identity")
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = os.lstat(self.directory)
         if (
@@ -124,6 +162,111 @@ class SignedEventLedger:
             raise LedgerError("ledger directory metadata is unsafe")
         if not existed:
             os.chmod(self.directory, 0o700)
+        if bootstrap and not self._bootstrap_path().exists():
+            if (
+                (self.directory / "events.jsonl").exists()
+                or (self.directory / "head.json").exists()
+            ):
+                raise LedgerError("cannot bootstrap a non-empty ledger")
+            self._write_bootstrap()
+        self._verify_bootstrap()
+
+    @contextmanager
+    def coordination_lock(self):
+        """Serialize cross-ledger control transitions and route reservations."""
+        fd = os.open(
+            self.coordination_root / "coordination.lock",
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise LedgerError("coordination lock metadata is unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _bootstrap_path(self) -> Path:
+        return self.directory / BOOTSTRAP_FILENAME
+
+    def _write_bootstrap(self) -> None:
+        assert self._private_key is not None
+        unsigned = {
+            "schema": BOOTSTRAP_SCHEMA,
+            "ledger_role": self.ledger_role,
+            "key_id": self._signing_key_id,
+            "signer_domain": self._signing_domain,
+        }
+        payload = {
+            **unsigned,
+            "signature": self._private_key.sign(
+                b"trustforge.signed-ledger-bootstrap.v1\x00" + _canonical(unsigned)
+            ).hex(),
+        }
+        fd = os.open(
+            self._bootstrap_path(),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            _write_all(fd, _canonical(payload) + b"\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        directory_fd = self._open_directory()
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _verify_bootstrap(self) -> None:
+        path = self._bootstrap_path()
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(fd)
+                raw = os.read(fd, self._max_event_bytes + 1)
+            finally:
+                os.close(fd)
+            payload = json.loads(raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LedgerError("ledger bootstrap record is missing or corrupt") from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > self._max_event_bytes
+            or not isinstance(payload, dict)
+            or _canonical(payload) + b"\n" != raw
+            or set(payload) != {
+                "schema", "ledger_role", "key_id", "signer_domain", "signature"
+            }
+            or payload["schema"] != BOOTSTRAP_SCHEMA
+            or payload["ledger_role"] != self.ledger_role
+            or payload["key_id"] not in self._domain_keys.get(
+                payload["signer_domain"], frozenset()
+            )
+        ):
+            raise LedgerError("ledger bootstrap record is invalid")
+        key = self._verification_keys.get(payload["key_id"])
+        unsigned = {name: payload[name] for name in payload if name != "signature"}
+        try:
+            if key is None:
+                raise InvalidSignature
+            Ed25519PublicKey.from_public_bytes(key).verify(
+                bytes.fromhex(payload["signature"]),
+                b"trustforge.signed-ledger-bootstrap.v1\x00" + _canonical(unsigned),
+            )
+        except (InvalidSignature, ValueError) as exc:
+            raise LedgerError("ledger bootstrap signature is invalid") from exc
 
     def _open_directory(self) -> int:
         fd = os.open(
@@ -321,7 +464,7 @@ class SignedEventLedger:
             temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
         )
         try:
-            os.write(fd, _canonical(head) + b"\n")
+            _write_all(fd, _canonical(head) + b"\n")
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -390,7 +533,7 @@ class SignedEventLedger:
             encoded = _canonical(record) + b"\n"
             if os.fstat(fd).st_size + len(encoded) > self._max_file_bytes:
                 raise LedgerLimitError("ledger file size bound reached")
-            os.write(fd, encoded)
+            _write_all(fd, encoded)
             os.fsync(fd)
             self._write_head(len(records) + 1, event_hash, ledger_id)
             os.fsync(directory_fd)
