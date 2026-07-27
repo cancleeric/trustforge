@@ -138,7 +138,7 @@ def compare_predictions(
         hits = 0
         horizon_details: list[dict] = []
 
-        for pred in predictions:
+        for prediction_index, pred in enumerate(predictions):
             pred_date = pred["date"]
             start_idx = date_to_idx.get(pred_date)
             if start_idx is None:
@@ -160,6 +160,7 @@ def compare_predictions(
                 hits += 1
 
             horizon_details.append({
+                "prediction_index": prediction_index,
                 "date": pred_date,
                 "direction": pred["direction"],
                 "confidence": pred["confidence"],
@@ -190,13 +191,23 @@ def calculate_calibration_error(
     error = max(|mean_conf - hit_rate|) across bins with ≥5 samples
     回傳 {calibration_error, bins: [...], reliable_bins}
     """
-    # 從 details 建立 per-prediction hit lookup（以 T+1 為基準）
+    # 從 details 建立 per-row hit lookup（以 T+1 為基準）。同日可以有多筆
+    # 預測，不能只用 date 當 key，否則後一筆會覆寫前一筆。
     details = comparison_results.get("details", [])
-    # 使用 T+1 horizon 的 hit 結果
-    hit_by_date: dict[str, bool] = {}
+    hit_by_index: dict[int, bool] = {}
+    legacy_hit_by_date: dict[str, bool] = {}
     for d in details:
         if d.get("horizon") == 1:
-            hit_by_date[d["date"]] = d["hit"]
+            if isinstance(d.get("prediction_index"), int):
+                hit_by_index[d["prediction_index"]] = d["hit"]
+            else:
+                # Backward compatibility for stored reports created before row IDs.
+                legacy_hit_by_date[d["date"]] = d["hit"]
+
+    def _hit(index: int, prediction: dict) -> bool | None:
+        if index in hit_by_index:
+            return hit_by_index[index]
+        return legacy_hit_by_date.get(prediction["date"])
 
     # 分 bin
     bins_data: list[dict[str, Any]] = []
@@ -205,15 +216,19 @@ def calculate_calibration_error(
 
     for low, high in _BIN_EDGES:
         bin_preds = [
-            p for p in predictions
-            if low <= p["confidence"] < high and p["date"] in hit_by_date
+            (index, prediction)
+            for index, prediction in enumerate(predictions)
+            if low <= prediction["confidence"] < high
+            and _hit(index, prediction) is not None
         ]
         # 最後一個 bin 包含 1.0
         if high == 1.0:
             bin_preds.extend(
-                p for p in predictions
-                if p["confidence"] == 1.0 and p["date"] in hit_by_date
-                and p not in bin_preds
+                (index, prediction)
+                for index, prediction in enumerate(predictions)
+                if prediction["confidence"] == 1.0
+                and _hit(index, prediction) is not None
+                and (index, prediction) not in bin_preds
             )
 
         count = len(bin_preds)
@@ -226,8 +241,12 @@ def calculate_calibration_error(
             })
             continue
 
-        mean_conf = sum(p["confidence"] for p in bin_preds) / count
-        empirical_hits = sum(1 for p in bin_preds if hit_by_date.get(p["date"], False))
+        mean_conf = sum(prediction["confidence"] for _, prediction in bin_preds) / count
+        empirical_hits = sum(
+            1
+            for index, prediction in bin_preds
+            if _hit(index, prediction) is True
+        )
         empirical_hit_rate = empirical_hits / count
 
         bin_entry = {
@@ -244,11 +263,19 @@ def calculate_calibration_error(
             max_error = max(max_error, error)
 
     eligible_predictions = [
-        prediction for prediction in predictions if prediction["date"] in hit_by_date
+        (index, prediction)
+        for index, prediction in enumerate(predictions)
+        if _hit(index, prediction) is not None
     ]
     discrimination = confidence_correctness_auc(
-        [float(prediction["confidence"]) for prediction in eligible_predictions],
-        [hit_by_date[prediction["date"]] for prediction in eligible_predictions],
+        [
+            float(prediction["confidence"])
+            for _, prediction in eligible_predictions
+        ],
+        [
+            bool(_hit(index, prediction))
+            for index, prediction in eligible_predictions
+        ],
     )
     return {
         "calibration_error": round(max_error, 4) if reliable_bins > 0 else None,

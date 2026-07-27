@@ -215,6 +215,38 @@ def test_calibration_error_insufficient_data():
     assert result["reliable_bins"] == 0
 
 
+def test_calibration_same_date_predictions_keep_row_identity():
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        },
+        {
+            "date": "2024-01-01",
+            "direction": "偏空",
+            "confidence": 0.1,
+            "trust_score": 0.5,
+        },
+    ]
+    bars = _make_bars(
+        [
+            ("2024-01-01", 100.0),
+            ("2024-01-02", 110.0),
+        ]
+    )
+    comparison = compare_predictions(predictions, bars, horizons=(1,))
+    assert [detail["prediction_index"] for detail in comparison["details"]] == [0, 1]
+    assert [detail["hit"] for detail in comparison["details"]] == [True, False]
+
+    result = calculate_calibration_error(predictions, comparison)
+    assert result["confidence_correctness_roc_auc"]["value"] == 1.0
+    nonempty_bins = [item for item in result["bins"] if item["count"]]
+    assert sum(item["count"] for item in nonempty_bins) == 2
+    assert sorted(item["empirical_hit_rate"] for item in nonempty_bins) == [0.0, 1.0]
+
+
 # ─── test_run_calibration_integration ────────────────────────────────────────
 
 

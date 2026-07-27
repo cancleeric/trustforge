@@ -32,6 +32,7 @@ def _sample(index: int, *, as_of: str, correct: bool = True) -> dict:
         "sample_id": f"sample-{index}",
         "source": "provider-a",
         "as_of": as_of,
+        "outcome_observed_at": "2026-07-27T00:00:00Z",
         "claim_direction": claim,
         "outcome_direction": outcome,
         "evidence_strength": 0.8 if correct else 0.2,
@@ -96,6 +97,10 @@ def test_artifact_cutoff_is_utc_date_inclusive_and_has_provenance(tmp_path: Path
     assert artifact["provenance"]["input_samples"] == 60
     assert artifact["provenance"]["selected_samples"] == 30
     assert artifact["provenance"]["excluded_after_cutoff"] == 30
+    assert artifact["provenance"]["labels_validated_at_or_before_cutoff"] == 30
+    assert artifact["provenance"]["label_timestamp_missing"] == 0
+    assert artifact["provenance"]["label_timestamp_invalid"] == 0
+    assert artifact["provenance"]["label_observed_after_cutoff"] == 0
     assert artifact["sample_time_range_utc"]["max"] == "2026-07-27T23:59:59+00:00"
     assert len(artifact["provenance"]["input_sha256"]) == 64
     assert len(artifact["provenance"]["selected_dataset_sha256"]) == 64
@@ -105,6 +110,86 @@ def test_artifact_cutoff_is_utc_date_inclusive_and_has_provenance(tmp_path: Path
 def test_cutoff_rejects_non_date_values(cutoff: str):
     with pytest.raises(ValueError, match="cutoff"):
         trainer.parse_cutoff(cutoff)
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    ["2026-07-26T23:59:59Z", "2026-07-27T23:59:59Z"],
+)
+def test_label_observation_before_or_equal_cutoff_is_accepted(
+    tmp_path: Path, observed_at: str
+):
+    path = tmp_path / "samples.jsonl"
+    samples = [
+        {
+            **_sample(i, as_of="2026-07-20T00:00:00Z"),
+            "outcome_observed_at": observed_at,
+        }
+        for i in range(30)
+    ]
+    _write_jsonl(path, samples)
+    artifact = trainer.build_artifact(path, "2026-07-27")
+    assert artifact["provenance"]["labels_validated_at_or_before_cutoff"] == 30
+
+
+def test_label_observation_after_cutoff_fails_closed(tmp_path: Path):
+    path = tmp_path / "samples.jsonl"
+    sample = {
+        **_sample(1, as_of="2026-07-20T00:00:00Z"),
+        "outcome_observed_at": "2026-07-28T00:00:00Z",
+    }
+    _write_jsonl(path, [sample])
+    with pytest.raises(ValueError, match="after inclusive UTC cutoff"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
+def test_missing_label_observation_fails_closed(tmp_path: Path):
+    path = tmp_path / "samples.jsonl"
+    sample = _sample(1, as_of="2026-07-20T00:00:00Z")
+    sample.pop("outcome_observed_at")
+    _write_jsonl(path, [sample])
+    with pytest.raises(ValueError, match="outcome_observed_at"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
+@pytest.mark.parametrize("observed_at", ["not-a-date", "2026-07-27T12:00:00"])
+def test_invalid_or_naive_label_observation_fails_closed(
+    tmp_path: Path, observed_at: str
+):
+    path = tmp_path / "samples.jsonl"
+    sample = {
+        **_sample(1, as_of="2026-07-20T00:00:00Z"),
+        "outcome_observed_at": observed_at,
+    }
+    _write_jsonl(path, [sample])
+    with pytest.raises(ValueError, match="outcome_observed_at"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
+def test_naive_as_of_fails_closed(tmp_path: Path):
+    path = tmp_path / "samples.jsonl"
+    _write_jsonl(path, [_sample(1, as_of="2026-07-20T00:00:00")])
+    with pytest.raises(ValueError, match="as_of must include a timezone"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
+@pytest.mark.parametrize("strength", [float("nan"), float("inf"), -0.01, 1.01, "0.5"])
+def test_invalid_evidence_strength_fails_closed(tmp_path: Path, strength):
+    path = tmp_path / "samples.jsonl"
+    sample = {
+        **_sample(1, as_of="2026-07-20T00:00:00Z"),
+        "evidence_strength": strength,
+    }
+    _write_jsonl(path, [sample])
+    with pytest.raises(ValueError, match="evidence_strength"):
+        trainer.build_artifact(path, "2026-07-27")
+
+
+def test_non_object_row_fails_closed(tmp_path: Path):
+    path = tmp_path / "samples.jsonl"
+    path.write_text('["not", "an", "object"]\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        trainer.build_artifact(path, "2026-07-27")
 
 
 def test_cli_writes_v2_contract_and_filters_after_cutoff(tmp_path: Path):
@@ -162,3 +247,28 @@ def test_cli_rejects_epoch_cutoff(tmp_path: Path):
     )
     assert result.returncode != 0
     assert "YYYY-MM-DD" in result.stderr
+
+
+def test_cli_rejects_label_observed_after_cutoff(tmp_path: Path):
+    samples_path = tmp_path / "samples.jsonl"
+    sample = {
+        **_sample(1, as_of="2026-07-20T00:00:00Z"),
+        "outcome_observed_at": "2026-07-28T00:00:00Z",
+    }
+    _write_jsonl(samples_path, [sample])
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--samples",
+            str(samples_path),
+            "--cutoff",
+            "2026-07-27",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "after inclusive UTC cutoff" in result.stderr

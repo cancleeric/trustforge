@@ -1,7 +1,6 @@
 {
   "schema": "trustforge.source-reputation",
   "version": "1.0.0",
-  "status": "superseded",
-  "superseded_by": "source_reputation_v2.json",
-  "reason": "Removed misleading auc_proxy and invalid epoch-derived training cutoff."
+  "status": "withdrawn",
+  "reason": "Invalidated: misleading auc_proxy and invalid epoch-derived training cutoff. No replacement artifact is published until a provenance-complete dataset is available."
 }

@@ -114,8 +114,26 @@ def parse_as_of(value: Any) -> datetime:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"invalid sample as_of: {value!r}") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"sample as_of must include a timezone: {value!r}")
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_outcome_observed_at(value: Any) -> datetime:
+    """Parse a label observation timestamp and require an explicit timezone."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            "sample outcome_observed_at must be a non-empty timezone-aware "
+            "ISO-8601 string"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid sample outcome_observed_at: {value!r}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            f"sample outcome_observed_at must include a timezone: {value!r}"
+        )
     return parsed.astimezone(timezone.utc)
 
 
@@ -132,14 +150,54 @@ def load_samples(path: str) -> list[dict]:
     return samples
 
 
+def validate_sample(sample: Any, index: int) -> dict[str, Any]:
+    """Validate fields consumed by reliability metrics before training."""
+    if not isinstance(sample, dict):
+        raise ValueError(f"sample row {index} must be a JSON object")
+    required_strings = (
+        "source",
+        "as_of",
+        "outcome_observed_at",
+        "claim_direction",
+        "outcome_direction",
+    )
+    for field in required_strings:
+        if not isinstance(sample.get(field), str) or not sample[field]:
+            raise ValueError(
+                f"sample row {index} field {field} must be a non-empty string"
+            )
+    strength = sample.get("evidence_strength")
+    if isinstance(strength, bool) or not isinstance(strength, (int, float)):
+        raise ValueError(
+            f"sample row {index} evidence_strength must be a finite number in [0, 1]"
+        )
+    if not math.isfinite(float(strength)) or not 0.0 <= float(strength) <= 1.0:
+        raise ValueError(
+            f"sample row {index} evidence_strength must be a finite number in [0, 1]"
+        )
+    return sample
+
+
 def build_artifact(samples_path: Path, cutoff_text: str) -> dict[str, Any]:
     cutoff = parse_cutoff(cutoff_text)
     all_samples = load_samples(str(samples_path))
     selected: list[tuple[datetime, dict[str, Any]]] = []
     excluded_after_cutoff = 0
-    for sample in all_samples:
+    labels_validated = 0
+    for index, raw_sample in enumerate(all_samples, start=1):
+        sample = validate_sample(raw_sample, index)
         as_of = parse_as_of(sample.get("as_of"))
         if as_of.date() <= cutoff:
+            outcome_observed_at = parse_outcome_observed_at(
+                sample.get("outcome_observed_at")
+            )
+            if outcome_observed_at.date() > cutoff:
+                raise ValueError(
+                    "sample outcome_observed_at is after inclusive UTC cutoff: "
+                    f"{sample.get('sample_id', '<unknown>')} "
+                    f"({outcome_observed_at.isoformat()} > {cutoff.isoformat()})"
+                )
+            labels_validated += 1
             selected.append((as_of, sample))
         else:
             excluded_after_cutoff += 1
@@ -197,6 +255,10 @@ def build_artifact(samples_path: Path, cutoff_text: str) -> dict[str, Any]:
             "input_samples": len(all_samples),
             "selected_samples": len(selected),
             "excluded_after_cutoff": excluded_after_cutoff,
+            "labels_validated_at_or_before_cutoff": labels_validated,
+            "label_timestamp_missing": 0,
+            "label_timestamp_invalid": 0,
+            "label_observed_after_cutoff": 0,
         },
         "parameters": {
             "minimum_support": MIN_SAMPLE_PER_SOURCE,
