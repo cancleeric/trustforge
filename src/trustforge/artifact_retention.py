@@ -28,8 +28,6 @@ class RetentionPolicy:
 
         protected: set[str] = set()
 
-        [e for e in index_entries if e.get("digit") and e["digit"] in index_entries]
-
         for entry in index_entries:
             digest = entry.get("digest", "")
             ts_str = entry.get("timestamp", "")
