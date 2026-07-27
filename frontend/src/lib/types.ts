@@ -183,6 +183,10 @@ export interface Report {
   decision_state: DecisionState
   asset_context?: AssetContext | null
   risk_notices?: RiskNotice[]
+  /** #758：資產內在事實的觀察性 shadow 結果。舊快照可缺席；刻意保留
+   * unknown，渲染層必須先做 fail-closed shape validation，避免版本切換期
+   * 的畸形 optional payload 拖垮整份正式報告。 */
+  asset_intrinsic_assessment?: unknown
 }
 
 // ── Asset taxonomy（對應後端 trustforge/asset_context.py enum）────────────
