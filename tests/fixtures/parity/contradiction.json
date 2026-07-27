@@ -1,0 +1,207 @@
+{
+  "case_id": "contradiction",
+  "commit": "6dbf60487c88d4f108776842539693db3fafab0b",
+  "description": "Bullish and bearish claims mixed — some contradict via stance",
+  "expected_kernel_output": {
+    "abstain": false,
+    "confidence": 0.4631,
+    "contrarian": [
+      "c1",
+      "c3"
+    ],
+    "decision_state": "low_confidence",
+    "direction": "中性",
+    "independent_sources": 2,
+    "reason_codes": [
+      "below_normal_confidence"
+    ],
+    "scored_claims": [
+      {
+        "claim_id": "c1",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.65
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.4
+      },
+      {
+        "claim_id": "c2",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.95
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.5499999999999999
+      },
+      {
+        "claim_id": "c3",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.25
+      },
+      {
+        "claim_id": "c4",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.9
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.525
+      }
+    ],
+    "supporting": [
+      "c2",
+      "c4"
+    ],
+    "supporting_count": 2,
+    "trust_score": 0.5375
+  },
+  "expected_legacy_brief": {
+    "calibrated_confidence": 0.4631,
+    "confidence": 0.5375,
+    "contrarian": [
+      {
+        "claim_id": "c1",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.65
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.4
+      },
+      {
+        "claim_id": "c3",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.25
+      }
+    ],
+    "query": "BTC outlook",
+    "supporting": [
+      {
+        "claim_id": "c2",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.95
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.5499999999999999
+      },
+      {
+        "claim_id": "c4",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.9
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.525
+      }
+    ]
+  },
+  "input": {
+    "claims": [
+      {
+        "claim_type": "fact",
+        "direction": "bullish",
+        "document": {
+          "id": "d1",
+          "kind": "news",
+          "meta": {},
+          "source": "Reuters",
+          "text": "BTC ETF inflows expanded",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c1",
+        "text": "BTC ETF inflows expanded"
+      },
+      {
+        "claim_type": "fact",
+        "direction": "bullish",
+        "document": {
+          "id": "d2",
+          "kind": "onchain",
+          "meta": {},
+          "source": "Glassnode",
+          "text": "BTC exchange reserves fell",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c2",
+        "text": "BTC exchange reserves fell"
+      },
+      {
+        "claim_type": "fact",
+        "direction": "bearish",
+        "document": {
+          "id": "d3",
+          "kind": "social",
+          "meta": {},
+          "source": "anon",
+          "text": "guaranteed profit",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c3",
+        "text": "BTC social posts promise guaranteed profit"
+      },
+      {
+        "claim_type": "fact",
+        "direction": "bearish",
+        "document": {
+          "id": "d4",
+          "kind": "regulatory",
+          "meta": {},
+          "source": "SEC",
+          "text": "BTC faces regulatory crackdown",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c4",
+        "text": "BTC faces regulatory crackdown"
+      }
+    ],
+    "coin": "BTC",
+    "pit_epoch": 1000.0,
+    "query": "BTC outlook"
+  }
+}
