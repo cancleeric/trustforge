@@ -35,15 +35,20 @@ def _row(day: int, coin: str = "BTC", family: str = "sentiment") -> dict:
         "claim_direction": "bullish" if day % 2 else "bearish",
         "evidence_strength": 0.4 + day / 100,
         "outcome_direction": "bearish" if day % 3 else "bullish",
-        "outcome_observed_at": f"2026-02-{day:02d}T00:00:00Z",
+        "outcome_observed_at": f"2026-01-{day + 1:02d}T00:00:00Z",
     }
 
 
-def test_global_date_split_keeps_same_day_together_across_coin_calendars():
+def _internal(rows: list[dict], tmp_path: Path) -> list[dict]:
+    path = tmp_path / "internal.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return conformal.load_samples(str(path))
+
+
+def test_global_date_split_keeps_same_day_together_across_coin_calendars(tmp_path: Path):
     rows = [_row(day) for day in range(1, 9)]
     rows += [_row(day, "ETH", "onchain") for day in (2, 4, 6, 8)]
-    for row in rows:
-        row["_date"] = row["as_of"][:10]
+    rows = _internal(rows, tmp_path)
 
     split = conformal.chronological_split(rows)
 
@@ -52,10 +57,14 @@ def test_global_date_split_keeps_same_day_together_across_coin_calendars():
     assert calibration_dates.isdisjoint(held_dates)
     assert max(calibration_dates) < min(held_dates)
     assert split.calibration_end < split.held_out_start
+    assert max(row["_outcome_utc"] for row in split.calibration) < min(
+        row["_as_of_utc"] for row in split.held_out
+    )
     assert {row["coin"] for row in split.held_out} == {"BTC", "ETH"}
 
 
-def test_backtest_global_boundaries_do_not_use_btc_calendar():
+def test_backtest_global_boundaries_do_not_use_btc_calendar(monkeypatch):
+    monkeypatch.setattr(backtest, "FORWARD_DAYS", 0)
     samples = {
         "BTC": [
             backtest.Sample("BTC", f"2026-01-{day:02d}", 0.5, False)
@@ -87,6 +96,65 @@ def test_signal_builder_does_not_read_future_bar():
     assert [(x.claim.id, x.trust) for group in first for x in group] == [
         (x.claim.id, x.trust) for group in second for x in group
     ]
+
+
+def test_wrong_strength_upper_quantile_is_not_reversed():
+    strengths = [index / 10 for index in range(1, 11)]
+    flags = [0] * len(strengths)
+    assert conformal.conformal_threshold(strengths, flags, alpha=0.1) == 1.0
+    assert conformal.conformal_threshold(strengths[:-2], flags[:-2], alpha=0.1) == float("inf")
+
+
+def test_backtest_purges_forward_outcomes_at_heldout_boundary():
+    samples = {
+        "BTC": [
+            backtest.Sample("BTC", f"2026-01-{day:02d}", 0.5, False)
+            for day in range(1, 31)
+        ]
+    }
+    calibration, held, _, held_start = backtest._chronological_partitions(samples)
+    assert max(
+        backtest._dt.strptime(row.date, "%Y-%m-%d")
+        + backtest._td(days=backtest.FORWARD_DAYS)
+        for row in calibration
+    ) < backtest._dt.strptime(held_start, "%Y-%m-%d")
+    assert min(row.date for row in held) == held_start
+
+
+def test_missing_or_malformed_heterogeneous_inputs_block_promotion(tmp_path: Path):
+    malformed = tmp_path / "fng.jsonl"
+    malformed.write_text("{broken")
+    assert backtest._load_fng_index(malformed) == {}
+    sample = backtest.Sample(
+        "BTC", "2026-01-01", 0.8, False,
+        frozenset({"price", "sentiment", "onchain"}),
+    )
+    ready, _, _ = backtest._heterogeneous_ready(
+        [sample], [sample], {}, {"2026-01-01": {"hash-rate": 1.0}}
+    )
+    assert ready is False
+
+
+def test_offset_timestamps_are_normalized_to_utc_date(tmp_path: Path):
+    first = _row(1)
+    second = _row(1, "ETH", "onchain")
+    first["as_of"] = "2026-01-02T01:00:00+02:00"
+    second["as_of"] = "2026-01-01T23:00:00Z"
+    first["outcome_observed_at"] = second["outcome_observed_at"] = "2026-01-03T00:00:00Z"
+    path = tmp_path / "offset.jsonl"
+    path.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n")
+    rows = conformal.load_samples(str(path))
+    assert {row["_date"] for row in rows} == {"2026-01-01"}
+
+
+def test_partition_family_gate_requires_heterogeneity_in_each_partition(tmp_path: Path):
+    rows = [_row(day, "BTC", "sentiment") for day in range(1, 9)]
+    rows = _internal(rows, tmp_path)
+    split = conformal.chronological_split(rows)
+    report = conformal.build_report(rows, "0" * 64, split, 0.5)
+    assert report["promotion_checks"]["calibration_source_families"] is False
+    assert report["promotion_checks"]["held_out_source_families"] is False
+    assert report["promotion_checks"]["all_pass"] is False
 
 
 @pytest.mark.parametrize("payload", ["", "{bad json}\n", json.dumps(_row(1)) + "\n"])

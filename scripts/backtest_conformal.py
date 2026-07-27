@@ -69,6 +69,7 @@ class Sample:
     date: str
     evidence_strength: float
     wrong: bool  # True：主判斷方向與 N 日後實際方向不符
+    source_families: frozenset[str] = frozenset({"price"})
 
 
 def _direction_from_ret(ret: float) -> str:
@@ -368,7 +369,18 @@ def _samples_for_coin(
         fut_ret = _pct(bars[idx].close, fut.close)
         actual_dir = "up" if fut_ret > 0 else ("down" if fut_ret < 0 else primary_dir3)
         wrong = actual_dir != primary_dir3
-        samples.append(Sample(coin=coin, date=bars[idx].date, evidence_strength=strength, wrong=wrong))
+        families = {"price"}
+        if extra_signals and (fng_sup or fng_con):
+            families.add("sentiment")
+        if extra_signals and (bc_sup or bc_con):
+            families.add("onchain")
+        samples.append(Sample(
+            coin=coin,
+            date=bars[idx].date,
+            evidence_strength=strength,
+            wrong=wrong,
+            source_families=frozenset(families),
+        ))
     return samples
 
 
@@ -396,11 +408,14 @@ def _chronological_partitions(
         raise ValueError("dataset is too small for chronological train/calibration/held-out split")
     calib_start = dates[calib_start_idx]
     held_start = dates[held_start_idx]
+    held_start_date = _dt.strptime(held_start, "%Y-%m-%d")
     calibration = [
         sample
         for samples in all_samples.values()
         for sample in samples
         if calib_start <= sample.date < held_start
+        and _dt.strptime(sample.date, "%Y-%m-%d") + _td(days=FORWARD_DAYS)
+        < held_start_date
     ]
     held_out = [
         sample
@@ -427,6 +442,28 @@ def compute_tau(wrong_strengths: list[float], alpha: float = ALPHA) -> float:
     if k > n:
         return math.inf
     return ordered[k - 1]
+
+
+def _heterogeneous_ready(
+    calibration: list[Sample],
+    held_out: list[Sample],
+    fng_index: dict[str, dict],
+    blockchain_index: dict[str, dict[str, float]],
+) -> tuple[bool, set[str], set[str]]:
+    """Require loaded inputs and observed family support in both partitions."""
+    calibration_families = set().union(
+        *(sample.source_families for sample in calibration)
+    )
+    held_out_families = set().union(
+        *(sample.source_families for sample in held_out)
+    )
+    ready = (
+        bool(fng_index)
+        and bool(blockchain_index)
+        and len(calibration_families) >= 2
+        and len(held_out_families) >= 2
+    )
+    return ready, calibration_families, held_out_families
 
 
 def main() -> None:
@@ -504,8 +541,21 @@ def main() -> None:
     p4_exp = "PASS" if n_pass_exp >= 100 else "FAIL"
     print(f"{'P4 held-out pass (≥100)':<45} {_s(n_pass_ohlcv):>14} {_s(n_pass_exp):>14} {'≥ 100':>12} {p4_exp:>5}")
 
+    heterogeneous_ready, calib_families, test_families = _heterogeneous_ready(
+        calib_exp, test_exp, fng_idx, bc_idx
+    )
+    p5_exp = "PASS" if heterogeneous_ready else "FAIL"
+    print(
+        f"{'P5 heterogeneous families in both partitions':<45} "
+        f"{','.join(sorted(calib_families)):>14} "
+        f"{','.join(sorted(test_families)):>14} {'≥ 2 each':>12} {p5_exp:>5}"
+    )
+
     print()
-    all_pass = (p1_exp == "PASS" and p2_exp == "PASS" and p3_exp == "PASS" and p4_exp == "PASS")
+    all_pass = (
+        p1_exp == "PASS" and p2_exp == "PASS" and p3_exp == "PASS"
+        and p4_exp == "PASS" and p5_exp == "PASS"
+    )
     if all_pass:
         print(">>> ALL P1-P4 PASS — Promotion eligible (Phase D: Wire Production) <<<")
         print(f"    conformal._CONFORMAL_TAU = {tau_exp:.4f}  # 無條件進位到 4 位")
@@ -519,6 +569,8 @@ def main() -> None:
             failed.append("P3")
         if p4_exp == "FAIL":
             failed.append("P4")
+        if p5_exp == "FAIL":
+            failed.append("P5")
         print(f">>> FAILED: {', '.join(failed)} — Phase E (Honest State) <<<")
         print("    不偽造、不強上。conformal.py 維持現狀，記錄 FAIL 原因。")
 

@@ -13,7 +13,7 @@ import math
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +96,11 @@ def load_samples(path: str) -> list[dict]:
             raise DatasetError(f"line {line_no}: evidence_strength must be finite")
         if not 0.0 <= float(strength) <= 1.0:
             raise DatasetError(f"line {line_no}: evidence_strength outside [0,1]")
-        row["_date"] = as_of.date().isoformat()
+        as_of_utc = as_of.astimezone(timezone.utc)
+        observed_utc = observed.astimezone(timezone.utc)
+        row["_date"] = as_of_utc.date().isoformat()
+        row["_as_of_utc"] = as_of_utc
+        row["_outcome_utc"] = observed_utc
         samples.append(row)
     if not samples:
         raise DatasetError("dataset is empty")
@@ -112,12 +116,23 @@ def chronological_split(samples: list[dict[str, Any]]) -> Split:
     boundary = len(dates) // 2
     calibration_dates = set(dates[:boundary])
     held_dates = set(dates[boundary:])
-    calibration = [row for row in samples if row["_date"] in calibration_dates]
     held = [row for row in samples if row["_date"] in held_dates]
+    held_start_utc = min(row["_as_of_utc"] for row in held)
+    calibration = [
+        row
+        for row in samples
+        if row["_date"] in calibration_dates
+        and row["_outcome_utc"] < held_start_utc
+    ]
     if not calibration or not held or dates[boundary - 1] >= dates[boundary]:
         raise DatasetError("cannot form strictly ordered non-empty partitions")
     return Split(
-        calibration, held, dates[0], dates[boundary - 1], dates[boundary], dates[-1]
+        calibration,
+        held,
+        min(row["_date"] for row in calibration),
+        max(row["_date"] for row in calibration),
+        min(row["_date"] for row in held),
+        max(row["_date"] for row in held),
     )
 
 
@@ -126,13 +141,13 @@ def conformal_threshold(
 ) -> float:
     if not 0.0 < alpha < 1.0:
         raise DatasetError("alpha must be strictly between 0 and 1")
-    wrong = sorted(1.0 - strengths[i] for i, flag in enumerate(correct_flags) if flag == 0)
+    wrong = sorted(strengths[i] for i, flag in enumerate(correct_flags) if flag == 0)
     if not wrong:
         return math.inf
     index = math.ceil((1 - alpha) * (len(wrong) + 1)) - 1
     if index >= len(wrong):
         return math.inf
-    return max(0.0, min(1.0, 1.0 - wrong[index]))
+    return max(0.0, min(1.0, wrong[index]))
 
 
 def run_conformal(
@@ -189,7 +204,12 @@ def build_report(
             result.conditional_wrong is not None and result.conditional_wrong <= 0.55
         ),
         "held_out_support": result.held_out_pass >= 100,
-        "source_families": len(_counts(samples, "source_family")) >= 2,
+        "calibration_source_families": (
+            len(_counts(split.calibration, "source_family")) >= 2
+        ),
+        "held_out_source_families": (
+            len(_counts(split.held_out, "source_family")) >= 2
+        ),
     }
     return {
         "status": "research-only",
@@ -205,6 +225,10 @@ def build_report(
             "held_out_start": split.held_out_start,
             "held_out_end": split.held_out_end,
             "calibration_strictly_before_held_out": split.calibration_end < split.held_out_start,
+            "outcome_embargo": (
+                max(row["_outcome_utc"] for row in split.calibration)
+                < min(row["_as_of_utc"] for row in split.held_out)
+            ),
         },
         "counts": {
             "per_family": _counts(samples, "source_family"),
