@@ -21,6 +21,7 @@ import os
 import re
 import sqlite3
 import stat
+import tempfile
 import threading
 import time
 import weakref
@@ -57,6 +58,7 @@ APPLICATION_ID = 0x54534653  # "TSFS"
 DEFAULT_MAX_ROWS = 10_000
 DEFAULT_MAX_DB_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_QUERY_ROWS = 10_000
+_TEMP_WAL_INDEX_ALLOWANCE = 1024 * 1024
 _EVENT_DOMAIN = b"trustforge.shadow.store.event.v1\x00"
 _ROOT_DOMAIN = b"trustforge.shadow.store.root.v1\x00"
 _RECEIPT_DOMAIN = b"trustforge.shadow.store.receipt.v1\x00"
@@ -83,6 +85,18 @@ class StoredEvaluation:
     aggregate_event_id: str
     decision_event_id: str
     observation_root_digest: str
+    decision: ShadowDecision
+
+
+@dataclass(frozen=True, slots=True)
+class ReadOnlyShadowEvaluation:
+    """Deterministic evaluation derived without mutating the evidence ledger."""
+
+    aggregate_event_id: str
+    decision_event_id: str
+    observation_root_digest: str
+    ordered_observation_event_ids: tuple[str, ...]
+    observations: tuple[ShadowObservation, ...]
     decision: ShadowDecision
 
 
@@ -157,6 +171,7 @@ class ShadowEvidenceStore:
         max_db_bytes: int = DEFAULT_MAX_DB_BYTES,
         max_query_rows: int = DEFAULT_MAX_QUERY_ROWS,
         busy_timeout_ms: int = 1_000,
+        read_only: bool = False,
     ) -> None:
         # Establish destructor-safe lifecycle state before any validation can
         # raise.  Invalid paths and limits still create a partial Python object
@@ -181,6 +196,7 @@ class ShadowEvidenceStore:
         self.max_db_bytes = max_db_bytes
         self.max_query_rows = max_query_rows
         self.busy_timeout_ms = busy_timeout_ms
+        self.read_only = read_only
         if os.name != "posix":
             raise ShadowEvidenceStoreError("shadow evidence store requires POSIX file locking")
         self._prepare_path()
@@ -190,7 +206,10 @@ class ShadowEvidenceStore:
     def _prepare_path(self) -> None:
         parent = self.path.parent
         try:
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if self.read_only and not parent.exists():
+                raise ShadowEvidenceStoreError("shadow database parent does not exist")
+            if not self.read_only:
+                parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if parent.is_symlink() or self.path.is_symlink():
                 raise ShadowEvidenceStoreError("shadow database path cannot use symlinks")
             resolved_parent = parent.resolve(strict=True)
@@ -203,6 +222,8 @@ class ShadowEvidenceStore:
                 mode = self.path.lstat().st_mode
                 if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o077:
                     raise ShadowEvidenceStoreError("shadow database must be a private regular file")
+            elif self.read_only:
+                raise ShadowEvidenceStoreError("shadow database does not exist")
             else:
                 flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
                 if hasattr(os, "O_NOFOLLOW"):
@@ -272,7 +293,8 @@ class ShadowEvidenceStore:
                 or database_stat.st_uid != os.geteuid()
             ):
                 raise ShadowEvidenceStoreError("shadow database identity changed")
-            os.fchmod(database_fd, 0o600)
+            if not self.read_only:
+                os.fchmod(database_fd, 0o600)
             for suffix in ("-wal", "-shm"):
                 sidecar = Path(f"{self.path}{suffix}")
                 if sidecar.exists() or sidecar.is_symlink():
@@ -306,11 +328,17 @@ class ShadowEvidenceStore:
             os.close(descriptor)
 
     def _connect(self) -> sqlite3.Connection:
+        if self.read_only:
+            raise ShadowEvidenceStoreError(
+                "read-only store must query an isolated filesystem snapshot"
+            )
         before, before_sidecars = self._verify_file_bindings()
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(
-                self.path, timeout=self.busy_timeout_ms / 1000, isolation_level=None,
+                str(self.path),
+                timeout=self.busy_timeout_ms / 1000,
+                isolation_level=None,
             )
             connection.row_factory = sqlite3.Row
             connection.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
@@ -339,6 +367,175 @@ class ShadowEvidenceStore:
             raise ShadowEvidenceStoreError("shadow database cannot be opened") from exc
         finally:
             self._close_descriptors(before)
+
+    def _bounded_source_sizes(self) -> dict[str, int]:
+        """Validate DB/WAL/SHM and enforce one aggregate source-size cap."""
+        sizes: dict[str, int] = {}
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{self.path}{suffix}")
+            if not path.exists():
+                if not suffix:
+                    raise ShadowEvidenceStoreError(
+                        "shadow snapshot database is missing"
+                    )
+                continue
+            try:
+                value = path.lstat()
+            except OSError as exc:
+                raise ShadowEvidenceStoreError(
+                    "shadow snapshot source size cannot be verified"
+                ) from exc
+            if (
+                not stat.S_ISREG(value.st_mode)
+                or value.st_uid != os.geteuid()
+                or stat.S_IMODE(value.st_mode) & 0o077
+            ):
+                raise ShadowEvidenceStoreError(
+                    "shadow snapshot source is unsafe"
+                )
+            sizes[suffix] = value.st_size
+            total += value.st_size
+            if total > self.max_db_bytes:
+                raise ShadowEvidenceStoreError(
+                    "combined shadow DB/WAL/SHM size limit exceeded"
+                )
+        # A private SQLite reader may checkpoint WAL pages into its disposable
+        # DB while retaining the WAL until close.  Reserve one additional WAL
+        # length plus a bounded WAL-index allowance up front so temporary
+        # storage cannot silently approach twice the configured cap.
+        if "-wal" in sizes:
+            projected_temporary_bytes = (
+                total
+                + sizes["-wal"]
+                + max(sizes.get("-shm", 0), _TEMP_WAL_INDEX_ALLOWANCE)
+            )
+            if projected_temporary_bytes > self.max_db_bytes:
+                raise ShadowEvidenceStoreError(
+                    "private shadow snapshot projection exceeds size limit"
+                )
+        return sizes
+
+    @staticmethod
+    def _copy_stable_file(
+        source: Path, destination: Path, *, expected_size: int,
+    ) -> None:
+        """Stream one verified source into a private file with bounded memory."""
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        source_fd = -1
+        destination_fd = -1
+        try:
+            source_fd = os.open(source, flags)
+            before = os.fstat(source_fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_uid != os.geteuid()
+                or stat.S_IMODE(before.st_mode) & 0o077
+                or before.st_size != expected_size
+            ):
+                raise ShadowEvidenceStoreError(
+                    "shadow snapshot source changed before copy"
+                )
+            destination_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                destination_flags |= os.O_NOFOLLOW
+            destination_fd = os.open(destination, destination_flags, 0o600)
+            total = 0
+            while True:
+                chunk = os.read(source_fd, 65_536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > expected_size:
+                    raise ShadowEvidenceStoreError(
+                        "shadow snapshot source grew during copy"
+                    )
+                view = memoryview(chunk)
+                written = 0
+                while written < len(view):
+                    count = os.write(destination_fd, view[written:])
+                    if count <= 0:
+                        raise ShadowEvidenceStoreError(
+                            "private shadow snapshot write failed"
+                        )
+                    written += count
+            os.fsync(destination_fd)
+            after = os.fstat(source_fd)
+            stable_fields = (
+                "st_dev", "st_ino", "st_mode", "st_uid", "st_size",
+                "st_mtime_ns", "st_ctime_ns",
+            )
+            if (
+                tuple(getattr(before, name) for name in stable_fields)
+                != tuple(getattr(after, name) for name in stable_fields)
+                or total != before.st_size
+            ):
+                raise ShadowEvidenceStoreError(
+                    "shadow snapshot source changed during copy"
+                )
+        except OSError as exc:
+            raise ShadowEvidenceStoreError(
+                "shadow snapshot source cannot be copied"
+            ) from exc
+        finally:
+            if destination_fd >= 0:
+                os.close(destination_fd)
+            if source_fd >= 0:
+                os.close(source_fd)
+
+    @contextmanager
+    def _read_only_snapshot_connection(self):
+        """Query a private DB/WAL copy so SQLite never opens source files.
+
+        The cooperative directory lock held by callers prevents trusted store
+        writers from changing DB/WAL while they are copied.  SHM is deliberately
+        not copied: SQLite creates any required shared-memory index beside the
+        disposable private copy.
+        """
+        bindings, _ = self._verify_file_bindings()
+        self._close_descriptors(bindings)
+        sizes = self._bounded_source_sizes()
+        connection: sqlite3.Connection | None = None
+        with tempfile.TemporaryDirectory(
+            prefix="trustforge-shadow-health-",
+        ) as directory:
+            snapshot = Path(directory) / "evidence.sqlite3"
+            self._copy_stable_file(
+                self.path, snapshot, expected_size=sizes[""],
+            )
+            if "-wal" in sizes:
+                self._copy_stable_file(
+                    Path(f"{self.path}-wal"),
+                    Path(f"{snapshot}-wal"),
+                    expected_size=sizes["-wal"],
+                )
+            # Revalidate every source binding and the aggregate cap after the
+            # streaming copy.  SHM is counted but never copied or opened.
+            bindings, _ = self._verify_file_bindings()
+            self._close_descriptors(bindings)
+            if self._bounded_source_sizes() != sizes:
+                raise ShadowEvidenceStoreError(
+                    "shadow snapshot source set changed during copy"
+                )
+            try:
+                connection = sqlite3.connect(
+                    snapshot,
+                    timeout=self.busy_timeout_ms / 1000,
+                    isolation_level=None,
+                )
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("PRAGMA foreign_keys=ON")
+                yield connection
+            except sqlite3.Error as exc:
+                raise ShadowEvidenceStoreError(
+                    "private shadow snapshot cannot be queried"
+                ) from exc
+            finally:
+                if connection is not None:
+                    connection.close()
 
     def _initialize(self) -> None:
         with self._process_lock():
@@ -436,6 +633,25 @@ class ShadowEvidenceStore:
             pass
 
     def _initialize_locked(self) -> None:
+        if self.read_only:
+            with self._read_only_snapshot_connection() as connection:
+                application_id = connection.execute(
+                    "PRAGMA application_id"
+                ).fetchone()[0]
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                has_tables = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+                ).fetchone()
+                if (
+                    not has_tables
+                    or application_id != APPLICATION_ID
+                    or version != SCHEMA_VERSION
+                ):
+                    raise ShadowEvidenceStoreError(
+                        "read-only health requires an existing v2 shadow database"
+                    )
+                self._verify_schema(connection)
+            return
         connection = self._connect()
         try:
             application_id = connection.execute("PRAGMA application_id").fetchone()[0]
@@ -539,6 +755,8 @@ class ShadowEvidenceStore:
         commit_guard: Callable[[], bool] | None = None,
     ) -> _T:
         with self._process_lock():
+            if self.read_only:
+                raise ShadowEvidenceStoreError("read-only shadow store rejects writes")
             if commit_guard is None:
                 return self._transaction_locked(operation)
             return self._transaction_locked(operation, commit_guard=commit_guard)
@@ -583,6 +801,32 @@ class ShadowEvidenceStore:
             raise ShadowEvidenceStoreError("shadow evidence transaction failed closed") from exc
         finally:
             connection.close()
+
+    def _read_transaction(
+        self, operation: Callable[[sqlite3.Connection], _T],
+    ) -> _T:
+        """Run a bounded ledger read without schema migration or event writes."""
+        with self._process_lock():
+            with self._read_only_snapshot_connection() as connection:
+                try:
+                    connection.execute("BEGIN")
+                    self._verify_schema(connection)
+                    result = operation(connection)
+                    connection.execute("ROLLBACK")
+                    return result
+                except (
+                    sqlite3.Error, OSError, ShadowContractError,
+                    ShadowEvidenceStoreError, ValueError, TypeError, KeyError,
+                ) as exc:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    if isinstance(exc, ShadowEvidenceStoreError):
+                        raise
+                    raise ShadowEvidenceStoreError(
+                        "shadow evidence read failed closed"
+                    ) from exc
 
     def _insert_event(
         self,
@@ -967,6 +1211,190 @@ class ShadowEvidenceStore:
             return StoredEvaluation(aggregate_id, decision_id, root, decision)
 
         return self._transaction(evaluate_and_write)
+
+    def read_only_evaluate(
+        self,
+        identity: ShadowReleaseIdentity,
+        policy: ShadowPolicy,
+        *,
+        now: str,
+        limit: int = DEFAULT_MAX_QUERY_ROWS,
+    ) -> ReadOnlyShadowEvaluation:
+        """Evaluate an exact release window without changing durable state.
+
+        Missing completion evidence is represented as a corrupt terminal
+        observation in memory.  Unlike ``evaluate``, this method never repairs
+        an orphan or appends aggregate/decision events.
+        """
+        if not self.read_only:
+            raise ShadowEvidenceStoreError(
+                "read-only evaluation requires read_only=True"
+            )
+        if not 0 < limit <= self.max_query_rows:
+            raise ShadowEvidenceStoreError(
+                "observation query exceeds configured bound"
+            )
+        if identity.policy_digest != policy_digest(policy):
+            raise ShadowEvidenceStoreError(
+                "release identity and policy digest differ"
+            )
+
+        def read(connection: sqlite3.Connection) -> ReadOnlyShadowEvaluation:
+            policy_row = connection.execute(
+                "SELECT * FROM policies WHERE policy_digest=?",
+                (identity.policy_digest,),
+            ).fetchone()
+            if not policy_row:
+                raise ShadowEvidenceStoreError(
+                    "evaluation policy is not durably recorded"
+                )
+            self._validated_policy_row(policy_row, policy)
+            rows = connection.execute(
+                "SELECT * FROM observations WHERE "
+                "active_release=? AND candidate_release=? AND "
+                "active_artifact_digest=? AND candidate_artifact_digest=? AND "
+                "policy_digest=? AND contract_version=? "
+                "ORDER BY observed_at ASC, event_id ASC LIMIT ?",
+                (*_identity_tuple(identity), self.max_query_rows + 1),
+            ).fetchall()
+            if len(rows) > self.max_query_rows:
+                raise ShadowEvidenceStoreError(
+                    "observation result exceeds query bound"
+                )
+            boundary = _utc_timestamp(now)
+            window_start = boundary - timedelta(hours=policy.window_hours)
+            observations: list[ShadowObservation] = []
+            ordered_ids: list[str] = []
+            for row in rows:
+                observation = self._validated_observation_row(row, identity)
+                observed_at = _utc_timestamp(observation.observed_at)
+                if observed_at > boundary:
+                    raise ShadowEvidenceStoreError(
+                        "future observation fails evaluation closed"
+                    )
+                if observed_at < window_start:
+                    continue
+                completion = connection.execute(
+                    "SELECT * FROM observation_completions "
+                    "WHERE observation_event_id=?",
+                    (row["event_id"],),
+                ).fetchone()
+                if completion is None:
+                    observation = replace(
+                        observation,
+                        elapsed_ms=policy.latency_each_ms_max,
+                        status="corrupt",
+                        parity_passed=False,
+                    )
+                else:
+                    completion_payload = json.loads(bytes(completion["payload"]))
+                    if (
+                        canonical_json(completion_payload)
+                        != bytes(completion["payload"])
+                        or completion_payload.get("observation_event_id")
+                        != row["event_id"]
+                        or completion_payload.get("elapsed_ms")
+                        != completion["elapsed_ms"]
+                        or completion_payload.get("terminal_status")
+                        not in {"completed", "orphaned_after_commit"}
+                        or _sha256(_EVENT_DOMAIN, completion_payload)
+                        != completion["payload_digest"]
+                        or completion["event_id"]
+                        != _event_id(
+                            "observation_completion",
+                            completion["payload_digest"],
+                        )
+                    ):
+                        raise ShadowEvidenceStoreError(
+                            "observation completion evidence is invalid"
+                        )
+                    terminal_status = completion_payload["terminal_status"]
+                    observation = replace(
+                        observation,
+                        elapsed_ms=float(completion["elapsed_ms"]),
+                        status=(
+                            "corrupt"
+                            if terminal_status == "orphaned_after_commit"
+                            else observation.status
+                        ),
+                        parity_passed=(
+                            False
+                            if terminal_status == "orphaned_after_commit"
+                            else observation.parity_passed
+                        ),
+                    )
+                observations.append(observation)
+                ordered_ids.append(row["event_id"])
+            if len(observations) > limit:
+                raise ShadowEvidenceStoreError(
+                    "selected observation window exceeds query bound"
+                )
+            if observations:
+                decision = evaluate_shadow(observations, policy, now=now)
+            else:
+                aggregate = ShadowAggregate(
+                    release_identity=identity,
+                    observation_count=0,
+                    coin_count=0,
+                    question_type_count=0,
+                    minimum_cell_count=0,
+                    parity_rate=0.0,
+                    terminal_failure_streak=0,
+                    latency_p95_ms=0.0,
+                    blockers=(
+                        *(
+                            (ShadowBlocker.MISSING_STALE_OR_FUTURE,)
+                            if rows else ()
+                        ),
+                        ShadowBlocker.INSUFFICIENT_OBSERVATIONS,
+                        ShadowBlocker.INSUFFICIENT_COIN_COVERAGE,
+                        ShadowBlocker.INSUFFICIENT_QTYPE_COVERAGE,
+                        ShadowBlocker.INCOMPLETE_SCENARIO_MATRIX,
+                    ),
+                )
+                decision = ShadowDecision(
+                    release_identity=identity,
+                    action=(
+                        ShadowDecisionAction.STOP
+                        if rows
+                        else ShadowDecisionAction.CONTINUE_OBSERVATION
+                    ),
+                    aggregate=aggregate,
+                )
+            root = _sha256(
+                _ROOT_DOMAIN,
+                {
+                    "identity": to_dict(identity),
+                    "policy_digest": identity.policy_digest,
+                    "now": now,
+                    "ordered_observation_event_ids": ordered_ids,
+                },
+            )
+            aggregate_payload = {
+                "aggregate": to_dict(decision.aggregate),
+                "observation_root_digest": root,
+                "ordered_observation_event_ids": ordered_ids,
+                "evaluated_at": now,
+            }
+            aggregate_digest = _sha256(_EVENT_DOMAIN, aggregate_payload)
+            aggregate_id = _event_id("aggregate", aggregate_digest)
+            decision_payload = {
+                "decision": to_dict(decision),
+                "aggregate_event_id": aggregate_id,
+                "observation_root_digest": root,
+                "evaluated_at": now,
+            }
+            decision_digest = _sha256(_EVENT_DOMAIN, decision_payload)
+            return ReadOnlyShadowEvaluation(
+                aggregate_event_id=aggregate_id,
+                decision_event_id=_event_id("decision", decision_digest),
+                observation_root_digest=root,
+                ordered_observation_event_ids=tuple(ordered_ids),
+                observations=tuple(observations),
+                decision=decision,
+            )
+
+        return self._read_transaction(read)
 
     def record_retention_receipt(
         self,
