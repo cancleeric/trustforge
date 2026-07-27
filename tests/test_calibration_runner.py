@@ -285,6 +285,70 @@ def test_legacy_same_date_details_fail_closed_as_ambiguous():
     assert "require a unique prediction" in result["row_alignment"]["reason"]
 
 
+@pytest.mark.parametrize("bad_index", [True, -1, 2, "0"])
+def test_malformed_or_out_of_range_prediction_index_is_excluded(bad_index):
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        }
+    ]
+    comparison = {
+        "details": [
+            {
+                "prediction_index": bad_index,
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": True,
+            }
+        ]
+    }
+
+    result = calculate_calibration_error(predictions, comparison)
+
+    assert sum(item["count"] for item in result["bins"]) == 0
+    assert result["confidence_correctness_roc_auc"]["value"] is None
+    assert result["row_alignment"]["excluded_invalid_indexed_details"] == 1
+    assert result["row_alignment"]["excluded_total"] == 1
+    assert "non-boolean in-range" in result["row_alignment"]["reason"]
+
+
+def test_duplicate_prediction_index_is_excluded_not_last_write_wins():
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        }
+    ]
+    comparison = {
+        "details": [
+            {
+                "prediction_index": 0,
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": True,
+            },
+            {
+                "prediction_index": 0,
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": False,
+            },
+        ]
+    }
+
+    result = calculate_calibration_error(predictions, comparison)
+
+    assert sum(item["count"] for item in result["bins"]) == 0
+    assert result["confidence_correctness_roc_auc"]["value"] is None
+    assert result["row_alignment"]["excluded_duplicate_indexed_details"] == 2
+    assert result["row_alignment"]["excluded_total"] == 2
+
+
 # ─── test_run_calibration_integration ────────────────────────────────────────
 
 

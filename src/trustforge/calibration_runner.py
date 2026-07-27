@@ -194,16 +194,35 @@ def calculate_calibration_error(
     # 從 details 建立 per-row hit lookup（以 T+1 為基準）。同日可以有多筆
     # 預測，不能只用 date 當 key，否則後一筆會覆寫前一筆。
     details = comparison_results.get("details", [])
-    hit_by_index: dict[int, bool] = {}
+    indexed_hits: dict[int, list[bool]] = {}
     legacy_hits_by_date: dict[str, list[bool]] = {}
+    invalid_indexed_details = 0
     for d in details:
         if d.get("horizon") == 1:
-            if isinstance(d.get("prediction_index"), int):
-                hit_by_index[d["prediction_index"]] = d["hit"]
+            if "prediction_index" in d:
+                prediction_index = d["prediction_index"]
+                if (
+                    isinstance(prediction_index, bool)
+                    or not isinstance(prediction_index, int)
+                    or prediction_index < 0
+                    or prediction_index >= len(predictions)
+                    or d.get("date") != predictions[prediction_index]["date"]
+                ):
+                    invalid_indexed_details += 1
+                    continue
+                indexed_hits.setdefault(prediction_index, []).append(d["hit"])
             else:
                 # Backward compatibility for stored reports created before row IDs.
                 legacy_hits_by_date.setdefault(d["date"], []).append(d["hit"])
 
+    duplicate_indexed_details = sum(
+        len(hits) for hits in indexed_hits.values() if len(hits) != 1
+    )
+    hit_by_index = {
+        index: hits[0]
+        for index, hits in indexed_hits.items()
+        if len(hits) == 1
+    }
     prediction_counts_by_date: dict[str, int] = {}
     for prediction in predictions:
         prediction_counts_by_date[prediction["date"]] = (
@@ -225,6 +244,17 @@ def calculate_calibration_error(
         if index not in hit_by_index
         and prediction["date"] in ambiguous_legacy_dates
     )
+    alignment_reasons = []
+    if excluded_ambiguous_legacy_rows:
+        alignment_reasons.append(
+            "legacy details without prediction_index require a unique "
+            "prediction and unique detail for the date"
+        )
+    if invalid_indexed_details or duplicate_indexed_details:
+        alignment_reasons.append(
+            "indexed details require one unique non-boolean in-range "
+            "prediction_index with a matching date"
+        )
 
     def _hit(index: int, prediction: dict) -> bool | None:
         if index in hit_by_index:
@@ -306,12 +336,14 @@ def calculate_calibration_error(
         "confidence_correctness_roc_auc": discrimination,
         "row_alignment": {
             "excluded_ambiguous_legacy_rows": excluded_ambiguous_legacy_rows,
-            "reason": (
-                "legacy details without prediction_index require a unique "
-                "prediction and unique detail for the date"
-                if excluded_ambiguous_legacy_rows
-                else None
+            "excluded_invalid_indexed_details": invalid_indexed_details,
+            "excluded_duplicate_indexed_details": duplicate_indexed_details,
+            "excluded_total": (
+                excluded_ambiguous_legacy_rows
+                + invalid_indexed_details
+                + duplicate_indexed_details
             ),
+            "reason": "; ".join(alignment_reasons) if alignment_reasons else None,
         },
     }
 
@@ -352,6 +384,9 @@ def run_calibration(
                 },
                 "row_alignment": {
                     "excluded_ambiguous_legacy_rows": 0,
+                    "excluded_invalid_indexed_details": 0,
+                    "excluded_duplicate_indexed_details": 0,
+                    "excluded_total": 0,
                     "reason": None,
                 },
             },
