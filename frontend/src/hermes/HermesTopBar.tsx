@@ -33,6 +33,10 @@ export default function HermesTopBar({
   onReducedMotionToggle,
 }: HermesTopBarProps) {
   const { locale, setLocale, t } = useHermesI18n()
+  // 後端沒走發版流程時 /api/health 會回 version: "dev"。那不是版號，是「這台
+  // 沒被建置過」的哨兵值；照原樣用一般樣式印出來，看起來就像系統版本叫 dev。
+  // 標成警示色並掛說明，讓它讀起來是狀態而不是版本名。
+  const isUnbuiltVersion = /^dev\b/.test(version)
   const navItems = [
     { id: 'analyze' as const, label: t('analyze'), description: locale === 'zh-TW' ? '找出風險、原因與可追溯證據' : 'Find risks, reasons, and traceable evidence' },
     { id: 'compare' as const, label: t('compare'), description: locale === 'zh-TW' ? '並排比較兩個資產的可信狀態' : 'Compare two assets side by side' },
@@ -62,8 +66,15 @@ export default function HermesTopBar({
           TRUSTFORGE <span style={{ color: 'var(--color-hermes-cyan)' }}>HERMES</span>
         </span>
       </button>
-      <span style={{ fontSize: 9, color: 'var(--color-hermes-tx3)', letterSpacing: 1 }}>✛ {systemId}</span>
-      <span style={{ fontSize: 10, color: 'var(--color-hermes-tx3)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 4, padding: '2px 7px' }}>{version}</span>
+      {/* 版號與系統代號原本吃 --color-hermes-tx3（#526375），在頂欄那層
+          rgba(10,16,24,.62) 疊 #02040a 的底上實測只有 3.2:1，而且字級只有
+          9~10px——CEO 直接回報「版號在哪裡？我怎麼畫面看不到」。改吃 tx2
+          （#7f97ab，6.4:1）。這兩格是識別資訊，不是裝飾文字，不該用最淡的階。 */}
+      <span style={{ fontSize: 9, color: 'var(--color-hermes-tx2)', letterSpacing: 1 }}>✛ {systemId}</span>
+      <span
+        title={isUnbuiltVersion ? t('versionDevHint') : undefined}
+        style={{ fontSize: 10, color: isUnbuiltVersion ? 'var(--color-hermes-amber)' : 'var(--color-hermes-tx2)', border: `1px solid ${isUnbuiltVersion ? 'rgba(232,179,77,.4)' : 'var(--color-hermes-bd2)'}`, borderRadius: 4, padding: '2px 7px' }}
+      >{version}</span>
       <span className="hermes-uplink-status" title={degradedMessage || undefined} aria-label={degradedMessage ? t('degradedState') : t('liveUplink')} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: degradedMessage ? 'var(--color-hermes-amber)' : 'var(--color-hermes-cyan)', background: degradedMessage ? 'rgba(232,179,77,.13)' : 'rgba(77,216,224,.13)', border: `1px solid ${degradedMessage ? 'rgba(232,179,77,.4)' : 'rgba(77,216,224,.4)'}`, borderRadius: 4, padding: '2px 8px' }}>
         <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: degradedMessage ? 'var(--color-hermes-amber)' : 'var(--color-hermes-cyan)', animation: 'hermes-pulse 1.8s infinite' }} />
         {/* N28: on very narrow phones (≤430px) the topbar has no room left

@@ -6,6 +6,7 @@ export type HermesLocale = 'zh-TW' | 'en'
 const messages = {
   'zh-TW': {
     analyze: '分析', compare: '比較', history: '歷史趨勢', sources: '來源狀態', costs: '成本', galaxy: '市場星系',
+    versionDevHint: '這台後端沒有走發版流程建置，回報的不是版號。',
     liveUplink: '即時連線', active: '運作中', costLedger: '成本帳本', syncing: '同步中', navigation: 'Hermes 工作區導覽', language: '切換語言',
     telemetry: '市場遙測', tracked: '追蹤資產', healthy: '健康', moderate: '注意', danger: '警示', latency: '連線延遲', online: '在線',
     transmitted: '指令已送出', analysisMode: '分析模式', order: '交付 Hermes 的任務', transmitting: '傳送中…', transmit: '交付 Hermes 執行',
@@ -366,6 +367,7 @@ const messages = {
   },
   en: {
     analyze: 'ANALYZE', compare: 'COMPARE', history: 'HISTORY', sources: 'SOURCES', costs: 'COSTS', galaxy: 'GALAXY',
+    versionDevHint: 'This backend was not built through the release path; that is not a version number.',
     liveUplink: 'LIVE UPLINK', active: 'ACTIVE', costLedger: 'COST LEDGER', syncing: 'SYNCING', navigation: 'Hermes workspace navigation', language: 'Switch language',
     telemetry: 'GALAXY TELEMETRY', tracked: 'Assets tracked', healthy: 'Healthy', moderate: 'Moderate', danger: 'Danger', latency: 'Uplink latency', online: 'ONLINE',
     transmitted: 'ORDER TRANSMITTED', analysisMode: 'ANALYSIS MODE', order: 'ORDER TO HERMES', transmitting: 'TRANSMITTING…', transmit: 'TRANSMIT TO HERMES',

@@ -15,7 +15,11 @@
   --color-hermes-bd2: #28405a;
   --color-hermes-tx: #dce9f2;
   --color-hermes-tx2: #7f97ab;
-  --color-hermes-tx3: #526375;
+  /* 第三階文字色。原本 #526375 在 HERMES 近黑底（#02040a）上只有 2.99:1，
+     而吃這個 token 的又都是 8~10.5px 的小字（來源標籤、單位、次要說明），
+     CEO 直接回報頂欄「版號在哪裡？我怎麼畫面看不到」。提到 #71859a（4.9:1，
+     過 WCAG AA 正文門檻），與 tx2 #7f97ab（6.6:1）仍有可辨識的階層差。 */
+  --color-hermes-tx3: #71859a;
   --color-hermes-cyan: #4dd8e0;
   --color-hermes-amber: #e8b34d;
   --color-hermes-red: #ff5f5f;

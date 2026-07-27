@@ -167,7 +167,7 @@ export default function CurrencyGalaxy({
       <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 160, background: 'linear-gradient(rgba(5,10,18,0),rgba(5,10,18,.9))', pointerEvents: 'none' }} />
 
       <div style={{ position: 'absolute', left: 26, top: 14, display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <span style={{ fontSize: 10, letterSpacing: '1.8px', color: 'rgba(220,240,245,.4)' }}>{t('bridgeMainViewport')}</span>
+        <span style={{ fontSize: 10, letterSpacing: '1.8px', color: 'rgba(220,240,245,.68)' }}>{t('bridgeMainViewport')}</span>
         <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(230,244,248,.9)' }}>{t('globalCurrencyGalaxy')}</span>
       </div>
 
