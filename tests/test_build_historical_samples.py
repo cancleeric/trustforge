@@ -260,7 +260,7 @@ def test_output_is_deterministic_and_cutoff_is_inclusive(tmp_path: Path) -> None
     assert [row["sample_id"] for row in first] == [row["sample_id"] for row in second]
 
 
-@pytest.mark.parametrize("failure", ["fsync", "replace"])
+@pytest.mark.parametrize("failure", ["write", "fsync", "replace"])
 def test_atomic_output_failure_preserves_old_file_and_cleans_temp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
@@ -271,7 +271,25 @@ def test_atomic_output_failure_preserves_old_file_and_cleans_temp(
     def fail(*_args: object, **_kwargs: object) -> None:
         raise OSError("injected atomic write failure")
 
-    monkeypatch.setattr(samples.os, failure, fail)
+    if failure == "write":
+        real_fdopen = samples.os.fdopen
+
+        class FailingWriter:
+            def __init__(self, descriptor: int, *args: object, **kwargs: object) -> None:
+                self.stream = real_fdopen(descriptor, *args, **kwargs)
+
+            def __enter__(self) -> FailingWriter:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                self.stream.close()
+
+            def write(self, _value: str) -> None:
+                fail()
+
+        monkeypatch.setattr(samples.os, "fdopen", FailingWriter)
+    else:
+        monkeypatch.setattr(samples.os, failure, fail)
     with pytest.raises(OSError, match="injected atomic write failure"):
         samples.main([
             "--fng-jsonl", str(fng),
