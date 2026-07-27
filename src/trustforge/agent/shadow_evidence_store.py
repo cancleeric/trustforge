@@ -1,0 +1,929 @@
+"""Standalone, append-only SQLite evidence for shadow release evaluation.
+
+This module deliberately has no imports from, or hooks into, the agent
+orchestrator.  A store failure therefore fails evidence collection closed
+without changing the active release path.
+
+Security boundary: this POSIX store requires a dedicated owner-only directory.
+The owning OS uid is trusted; hostile same-uid processes are out of scope
+because they can bypass advisory locks, mutate files, and inspect this process.
+Within that boundary, untrusted other users, symlinks, unsafe permissions,
+accidental replacements, concurrent trusted workers, and corrupt evidence fail
+closed.  We intentionally do not claim that pathname checks can make stdlib
+SQLite's WAL VFS safe from a malicious process running as the same uid.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import stat
+import threading
+import time
+import weakref
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Callable, TypeVar
+from urllib.parse import urlparse
+
+import fcntl
+
+from trustforge.agent.shadow_contracts import (
+    CONTRACT_VERSION,
+    ShadowAggregate,
+    ShadowBlocker,
+    ShadowContractError,
+    ShadowDecision,
+    ShadowDecisionAction,
+    ShadowInput,
+    ShadowObservation,
+    ShadowPolicy,
+    ShadowReleaseIdentity,
+    canonical_json,
+    evaluate_shadow,
+    observation_digest,
+    policy_digest,
+    to_dict,
+)
+
+SCHEMA_VERSION = 1
+APPLICATION_ID = 0x54534653  # "TSFS"
+DEFAULT_MAX_ROWS = 10_000
+DEFAULT_MAX_DB_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_QUERY_ROWS = 10_000
+_EVENT_DOMAIN = b"trustforge.shadow.store.event.v1\x00"
+_ROOT_DOMAIN = b"trustforge.shadow.store.root.v1\x00"
+_RECEIPT_DOMAIN = b"trustforge.shadow.store.receipt.v1\x00"
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_T = TypeVar("_T")
+_FORK_STORES: weakref.WeakSet[ShadowEvidenceStore] = weakref.WeakSet()
+
+
+def _after_fork_child() -> None:
+    for store in list(_FORK_STORES):
+        store._after_fork_child()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_child)
+
+
+class ShadowEvidenceStoreError(RuntimeError):
+    """Evidence cannot be proven durable and trustworthy."""
+
+
+@dataclass(frozen=True, slots=True)
+class StoredEvaluation:
+    aggregate_event_id: str
+    decision_event_id: str
+    observation_root_digest: str
+    decision: ShadowDecision
+
+
+def _sha256(domain: bytes, value: Any) -> str:
+    return "sha256:" + hashlib.sha256(domain + canonical_json(value)).hexdigest()
+
+
+def _event_id(kind: str, digest: str) -> str:
+    return _sha256(_EVENT_DOMAIN, {"kind": kind, "digest": digest})
+
+
+def _identity_tuple(identity: ShadowReleaseIdentity) -> tuple[str, ...]:
+    return (
+        identity.active_release,
+        identity.candidate_release,
+        identity.active_artifact_digest,
+        identity.candidate_artifact_digest,
+        identity.policy_digest,
+        identity.contract_version,
+    )
+
+
+def _identity_from(payload: dict[str, Any]) -> ShadowReleaseIdentity:
+    return ShadowReleaseIdentity(**payload)
+
+
+def _observation_from(payload: dict[str, Any]) -> ShadowObservation:
+    value = dict(payload)
+    value["release_identity"] = _identity_from(value["release_identity"])
+    value["canonical_input"] = ShadowInput(**value["canonical_input"])
+    value["claim_ids"] = tuple(value.get("claim_ids", ()))
+    return ShadowObservation(**value)
+
+
+def _aggregate_from(payload: dict[str, Any]) -> ShadowAggregate:
+    value = dict(payload)
+    value["release_identity"] = _identity_from(value["release_identity"])
+    value["blockers"] = tuple(ShadowBlocker(item) for item in value["blockers"])
+    return ShadowAggregate(**value)
+
+
+def _decision_from(payload: dict[str, Any]) -> ShadowDecision:
+    value = dict(payload)
+    value["release_identity"] = _identity_from(value["release_identity"])
+    value["aggregate"] = _aggregate_from(value["aggregate"])
+    value["action"] = ShadowDecisionAction(value["action"])
+    return ShadowDecision(**value)
+
+
+def _utc_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ShadowEvidenceStoreError("stored timestamp is malformed") from exc
+    if parsed.tzinfo is None:
+        raise ShadowEvidenceStoreError("stored timestamp lacks timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+class ShadowEvidenceStore:
+    """A bounded v1 evidence ledger.
+
+    Every public operation opens its own connection.  This avoids inherited
+    connections across forks and lets SQLite coordinate independent workers.
+    """
+
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        max_rows: int = DEFAULT_MAX_ROWS,
+        max_db_bytes: int = DEFAULT_MAX_DB_BYTES,
+        max_query_rows: int = DEFAULT_MAX_QUERY_ROWS,
+        busy_timeout_ms: int = 1_000,
+    ) -> None:
+        # Establish destructor-safe lifecycle state before any validation can
+        # raise.  Invalid paths and limits still create a partial Python object
+        # whose __del__ may run.
+        self._directory_lock_fd = -1
+        self._creator_pid = os.getpid()
+        self._thread_lock = threading.RLock()
+        self._closed = False
+        self._parent_identity: tuple[int, int] | None = None
+        self._database_identity: tuple[int, int] | None = None
+        configured = path if path is not None else os.environ.get("TRUSTFORGE_SHADOW_DB_PATH")
+        if not configured:
+            raise ShadowEvidenceStoreError("TRUSTFORGE_SHADOW_DB_PATH is required")
+        self.path = Path(configured)
+        if not self.path.is_absolute():
+            raise ShadowEvidenceStoreError("shadow database path must be absolute")
+        if min(max_rows, max_db_bytes, max_query_rows, busy_timeout_ms) <= 0:
+            raise ShadowEvidenceStoreError("store limits must be positive")
+        if max_query_rows > max_rows:
+            raise ShadowEvidenceStoreError("query limit cannot exceed row limit")
+        self.max_rows = max_rows
+        self.max_db_bytes = max_db_bytes
+        self.max_query_rows = max_query_rows
+        self.busy_timeout_ms = busy_timeout_ms
+        if os.name != "posix":
+            raise ShadowEvidenceStoreError("shadow evidence store requires POSIX file locking")
+        self._prepare_path()
+        _FORK_STORES.add(self)
+        self._initialize()
+
+    def _prepare_path(self) -> None:
+        parent = self.path.parent
+        try:
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if parent.is_symlink() or self.path.is_symlink():
+                raise ShadowEvidenceStoreError("shadow database path cannot use symlinks")
+            resolved_parent = parent.resolve(strict=True)
+            if resolved_parent != parent:
+                raise ShadowEvidenceStoreError("shadow database parent must be canonical")
+            parent_mode = stat.S_IMODE(parent.stat().st_mode)
+            if parent_mode & 0o077:
+                raise ShadowEvidenceStoreError("shadow database parent is accessible by group/other")
+            if self.path.exists():
+                mode = self.path.lstat().st_mode
+                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o077:
+                    raise ShadowEvidenceStoreError("shadow database must be a private regular file")
+            else:
+                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(self.path, flags, 0o600)
+                os.close(descriptor)
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{self.path}{suffix}")
+                if sidecar.is_symlink():
+                    raise ShadowEvidenceStoreError("shadow database sidecars cannot be symlinks")
+            self._parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
+            database = self.path.lstat()
+            self._database_identity = (database.st_dev, database.st_ino)
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            descriptor = os.open(parent, flags)
+            try:
+                bound = os.fstat(descriptor)
+                if (
+                    not stat.S_ISDIR(bound.st_mode)
+                    or (bound.st_dev, bound.st_ino) != self._parent_identity
+                ):
+                    raise ShadowEvidenceStoreError(
+                        "lock fd is not bound to database directory"
+                    )
+            except Exception:
+                os.close(descriptor)
+                raise
+            self._directory_lock_fd = descriptor
+        except OSError as exc:
+            raise ShadowEvidenceStoreError("shadow database path is unsafe") from exc
+
+    @staticmethod
+    def _open_bound(path: Path) -> tuple[int, os.stat_result]:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            return descriptor, os.fstat(descriptor)
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def _verify_file_bindings(self) -> tuple[list[int], dict[str, tuple[int, int]]]:
+        descriptors: list[int] = []
+        sidecar_identities: dict[str, tuple[int, int]] = {}
+        try:
+            parent_fd, parent_stat = self._open_bound(self.path.parent)
+            descriptors.append(parent_fd)
+            if (
+                not stat.S_ISDIR(parent_stat.st_mode)
+                or stat.S_IMODE(parent_stat.st_mode) & 0o077
+                or (parent_stat.st_dev, parent_stat.st_ino) != self._parent_identity
+            ):
+                raise ShadowEvidenceStoreError("shadow database parent identity changed")
+            if parent_stat.st_uid != os.geteuid():
+                raise ShadowEvidenceStoreError("shadow database parent owner changed")
+            database_fd, database_stat = self._open_bound(self.path)
+            descriptors.append(database_fd)
+            if (
+                not stat.S_ISREG(database_stat.st_mode)
+                or (database_stat.st_dev, database_stat.st_ino) != self._database_identity
+                or database_stat.st_uid != os.geteuid()
+            ):
+                raise ShadowEvidenceStoreError("shadow database identity changed")
+            os.fchmod(database_fd, 0o600)
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{self.path}{suffix}")
+                if sidecar.exists() or sidecar.is_symlink():
+                    try:
+                        sidecar_fd, sidecar_stat = self._open_bound(sidecar)
+                    except FileNotFoundError:
+                        # SQLite may remove an unused WAL/SHM between lstat and
+                        # open.  Absence is safe; any replacement is checked on
+                        # the post-connect binding pass.
+                        continue
+                    descriptors.append(sidecar_fd)
+                    if (
+                        not stat.S_ISREG(sidecar_stat.st_mode)
+                        or stat.S_IMODE(sidecar_stat.st_mode) & 0o077
+                    ):
+                        raise ShadowEvidenceStoreError("shadow database sidecar is unsafe")
+                    if sidecar_stat.st_uid != os.geteuid():
+                        raise ShadowEvidenceStoreError("shadow database sidecar owner is unsafe")
+                    sidecar_identities[suffix] = (sidecar_stat.st_dev, sidecar_stat.st_ino)
+            return descriptors, sidecar_identities
+        except (OSError, ShadowEvidenceStoreError) as exc:
+            for descriptor in descriptors:
+                os.close(descriptor)
+            if isinstance(exc, ShadowEvidenceStoreError):
+                raise
+            raise ShadowEvidenceStoreError("shadow database file binding failed") from exc
+
+    @staticmethod
+    def _close_descriptors(descriptors: list[int]) -> None:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+    def _connect(self) -> sqlite3.Connection:
+        before, before_sidecars = self._verify_file_bindings()
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                self.path, timeout=self.busy_timeout_ms / 1000, isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA wal_autocheckpoint=100")
+            journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(journal).lower() != "wal":
+                journal = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(journal).lower() != "wal":
+                connection.close()
+                raise ShadowEvidenceStoreError("WAL journal mode is unavailable")
+            after, after_sidecars = self._verify_file_bindings()
+            # WAL and SHM are lifecycle files: SQLite may legitimately replace
+            # them while concurrent connections open/close.  We bind and
+            # validate both snapshots (nofollow, regular, private owner/mode)
+            # rather than requiring an inode to survive across sqlite3.connect.
+            # The parent and primary DB identities remain immutable above.
+            _ = before_sidecars, after_sidecars
+            self._close_descriptors(after)
+            return connection
+        except Exception as exc:
+            if connection is not None:
+                connection.close()
+            if isinstance(exc, ShadowEvidenceStoreError):
+                raise
+            raise ShadowEvidenceStoreError("shadow database cannot be opened") from exc
+        finally:
+            self._close_descriptors(before)
+
+    def _initialize(self) -> None:
+        with self._process_lock():
+            self._initialize_locked()
+
+    @contextmanager
+    def _process_lock(self):
+        with self._thread_lock:
+            self._ensure_process_fd()
+            descriptor = self._directory_lock_fd
+            try:
+                lock_stat = os.fstat(descriptor)
+                if (
+                    lock_stat.st_uid != os.geteuid()
+                    or not stat.S_ISDIR(lock_stat.st_mode)
+                    or stat.S_IMODE(lock_stat.st_mode) & 0o077
+                    or (lock_stat.st_dev, lock_stat.st_ino) != self._parent_identity
+                ):
+                    raise ShadowEvidenceStoreError("shadow database lock is unsafe")
+                deadline = time.monotonic() + self.busy_timeout_ms / 1000
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError as exc:
+                        if time.monotonic() >= deadline:
+                            raise ShadowEvidenceStoreError(
+                                "shadow database process lock unavailable"
+                            ) from exc
+                        time.sleep(0.01)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError as exc:
+                raise ShadowEvidenceStoreError("shadow database process lock failed") from exc
+
+    def _after_fork_child(self) -> None:
+        self._thread_lock = threading.RLock()
+        if self._directory_lock_fd >= 0:
+            os.close(self._directory_lock_fd)
+        self._directory_lock_fd = -1
+        self._creator_pid = os.getpid()
+
+    def _ensure_process_fd(self) -> None:
+        if self._closed:
+            raise ShadowEvidenceStoreError("shadow evidence store is closed")
+        current_pid = os.getpid()
+        if self._creator_pid != current_pid:
+            self._after_fork_child()
+        if self._directory_lock_fd < 0:
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            descriptor = -1
+            try:
+                descriptor = os.open(self.path.parent, flags)
+                value = os.fstat(descriptor)
+            except OSError as exc:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                raise ShadowEvidenceStoreError("shadow database lock fd cannot reopen") from exc
+            if (
+                not stat.S_ISDIR(value.st_mode)
+                or value.st_uid != os.geteuid()
+                or stat.S_IMODE(value.st_mode) & 0o077
+                or (value.st_dev, value.st_ino) != self._parent_identity
+            ):
+                os.close(descriptor)
+                raise ShadowEvidenceStoreError("reopened database lock fd is unsafe")
+            self._directory_lock_fd = descriptor
+            self._creator_pid = current_pid
+
+    def close(self) -> None:
+        lock = getattr(self, "_thread_lock", None)
+        if lock is None:
+            descriptor = getattr(self, "_directory_lock_fd", -1)
+            if descriptor >= 0:
+                os.close(descriptor)
+                self._directory_lock_fd = -1
+            self._closed = True
+            return
+        with lock:
+            if self._directory_lock_fd >= 0:
+                os.close(self._directory_lock_fd)
+                self._directory_lock_fd = -1
+            self._closed = True
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except OSError:
+            pass
+
+    def _initialize_locked(self) -> None:
+        connection = self._connect()
+        try:
+            application_id = connection.execute("PRAGMA application_id").fetchone()[0]
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            has_tables = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone()
+            if has_tables and (application_id != APPLICATION_ID or version != SCHEMA_VERSION):
+                raise ShadowEvidenceStoreError("unknown or legacy shadow database schema")
+            if not has_tables:
+                connection.executescript(_SCHEMA)
+                connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
+                connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, contract_version, applied_at) "
+                    "VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    (SCHEMA_VERSION, CONTRACT_VERSION),
+                )
+                connection.executescript(_IMMUTABILITY_TRIGGERS)
+            self._verify_schema(connection)
+        except (sqlite3.Error, ShadowContractError) as exc:
+            if isinstance(exc, ShadowEvidenceStoreError):
+                raise
+            raise ShadowEvidenceStoreError("shadow database initialization failed") from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _verify_schema(connection: sqlite3.Connection) -> None:
+        integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        if integrity != "ok":
+            raise ShadowEvidenceStoreError("shadow database integrity check failed")
+        expected = {
+            "schema_migrations", "policies", "observations", "aggregates",
+            "decisions", "retention_receipts",
+        }
+        actual = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        if actual != expected:
+            raise ShadowEvidenceStoreError("shadow database schema does not exactly match v1")
+        expected_triggers = {
+            f"immutable_{table}_{operation}"
+            for table in expected
+            for operation in ("update", "delete")
+        }
+        actual_triggers = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        if actual_triggers != expected_triggers:
+            raise ShadowEvidenceStoreError("shadow database immutability guards are missing")
+        if _schema_fingerprint(connection) != _expected_schema_fingerprint():
+            raise ShadowEvidenceStoreError("shadow database canonical schema differs from v1")
+
+    def _storage_bytes(self) -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{self.path}{suffix}")
+            if path.exists() or path.is_symlink():
+                try:
+                    value = path.lstat()
+                except OSError as exc:
+                    raise ShadowEvidenceStoreError("shadow database size cannot be verified") from exc
+                if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+                    raise ShadowEvidenceStoreError("shadow database storage is unsafe")
+                total += value.st_size
+        return total
+
+    def _transaction(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        with self._process_lock():
+            return self._transaction_locked(operation)
+
+    def _transaction_locked(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._verify_schema(connection)
+            if self._storage_bytes() > self.max_db_bytes:
+                raise ShadowEvidenceStoreError("shadow database size limit exceeded")
+            result = operation(connection)
+            page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+            if page_count * page_size > self.max_db_bytes:
+                raise ShadowEvidenceStoreError("shadow database size limit exceeded")
+            if self._storage_bytes() > self.max_db_bytes:
+                raise ShadowEvidenceStoreError("shadow database WAL/SHM size limit exceeded")
+            bindings, _ = self._verify_file_bindings()
+            self._close_descriptors(bindings)
+            connection.execute("COMMIT")
+            return result
+        except (
+            sqlite3.Error, OSError, ShadowContractError, ValueError, TypeError, KeyError,
+        ) as exc:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            if isinstance(exc, ShadowEvidenceStoreError):
+                raise
+            raise ShadowEvidenceStoreError("shadow evidence transaction failed closed") from exc
+        finally:
+            connection.close()
+
+    def _insert_event(
+        self,
+        connection: sqlite3.Connection,
+        table: str,
+        event_id: str,
+        payload: dict[str, Any],
+        identity: ShadowReleaseIdentity,
+        extra: tuple[Any, ...] = (),
+    ) -> bool:
+        encoded = canonical_json(payload)
+        digest = _sha256(_EVENT_DOMAIN, payload)
+        existing = connection.execute(
+            f"SELECT payload, payload_digest FROM {table} WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if existing:
+            if bytes(existing["payload"]) == encoded and existing["payload_digest"] == digest:
+                return False
+            raise ShadowEvidenceStoreError("event id collision or conflicting duplicate")
+        count = connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        if count >= self.max_rows:
+            raise ShadowEvidenceStoreError(f"{table} row limit exceeded")
+        connection.execute(
+            f"INSERT INTO {table} "
+            "(event_id, active_release, candidate_release, active_artifact_digest, "
+            "candidate_artifact_digest, policy_digest, contract_version, payload, "
+            "payload_digest, recorded_at" + (", observed_at, input_digest" if table == "observations" else "") +
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')" +
+            (", ?, ?" if table == "observations" else "") + ")",
+            (event_id, *_identity_tuple(identity), encoded, digest, *extra),
+        )
+        return True
+
+    @staticmethod
+    def _validated_policy_row(row: sqlite3.Row, expected: ShadowPolicy) -> None:
+        raw = bytes(row["payload"])
+        payload = json.loads(raw)
+        digest = policy_digest(expected)
+        if (
+            canonical_json(payload) != raw
+            or payload != to_dict(expected)
+            or row["payload_digest"] != digest
+            or row["policy_digest"] != digest
+            or row["event_id"] != _event_id("policy", digest)
+            or row["contract_version"] != CONTRACT_VERSION
+        ):
+            raise ShadowEvidenceStoreError("stored policy evidence chain is invalid")
+
+    @staticmethod
+    def _validated_observation_row(
+        row: sqlite3.Row, identity: ShadowReleaseIdentity,
+    ) -> ShadowObservation:
+        raw = bytes(row["payload"])
+        payload = json.loads(raw)
+        if canonical_json(payload) != raw:
+            raise ShadowEvidenceStoreError("stored observation is not canonical")
+        observation = _observation_from(payload)
+        digest = _sha256(_EVENT_DOMAIN, payload)
+        expected_event = _event_id("observation", observation_digest(payload))
+        if (
+            row["payload_digest"] != digest
+            or row["event_id"] != expected_event
+            or observation.input_digest != row["input_digest"]
+            or observation.release_identity != identity
+            or tuple(row[name] for name in (
+                "active_release", "candidate_release", "active_artifact_digest",
+                "candidate_artifact_digest", "policy_digest", "contract_version",
+            )) != _identity_tuple(identity)
+            or observation.observed_at != row["observed_at"]
+        ):
+            raise ShadowEvidenceStoreError("stored observation evidence chain is invalid")
+        return observation
+
+    def record_policy(self, policy: ShadowPolicy) -> str:
+        payload = to_dict(policy)
+        digest = policy_digest(policy)
+        event_id = _event_id("policy", digest)
+
+        def write(connection: sqlite3.Connection) -> str:
+            existing = connection.execute(
+                "SELECT payload, payload_digest FROM policies WHERE event_id=?", (event_id,)
+            ).fetchone()
+            encoded = canonical_json(payload)
+            if existing:
+                if bytes(existing["payload"]) == encoded and existing["payload_digest"] == digest:
+                    return event_id
+                raise ShadowEvidenceStoreError("conflicting policy event")
+            if connection.execute("SELECT count(*) FROM policies").fetchone()[0] >= self.max_rows:
+                raise ShadowEvidenceStoreError("policy row limit exceeded")
+            connection.execute(
+                "INSERT INTO policies(event_id, policy_digest, contract_version, payload, "
+                "payload_digest, recorded_at) VALUES (?, ?, ?, ?, ?, "
+                "strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                (event_id, digest, CONTRACT_VERSION, encoded, digest),
+            )
+            return event_id
+
+        return self._transaction(write)
+
+    def record_observation(self, event_id: str, observation: ShadowObservation) -> str:
+        if event_id != _event_id("observation", observation_digest(to_dict(observation))):
+            raise ShadowEvidenceStoreError("observation event id does not match payload")
+        payload = to_dict(observation)
+
+        def write(connection: sqlite3.Connection) -> str:
+            policy = connection.execute(
+                "SELECT * FROM policies WHERE policy_digest=?",
+                (observation.release_identity.policy_digest,),
+            ).fetchone()
+            if not policy:
+                raise ShadowEvidenceStoreError("observation policy is not durably recorded")
+            expected_policy = ShadowPolicy(**json.loads(bytes(policy["payload"])))
+            self._validated_policy_row(policy, expected_policy)
+            self._insert_event(
+                connection, "observations", event_id, payload, observation.release_identity,
+                (observation.observed_at, observation.input_digest),
+            )
+            return event_id
+
+        return self._transaction(write)
+
+    @staticmethod
+    def observation_event_id(observation: ShadowObservation) -> str:
+        return _event_id("observation", observation_digest(to_dict(observation)))
+
+    def evaluate(
+        self,
+        identity: ShadowReleaseIdentity,
+        policy: ShadowPolicy,
+        *,
+        now: str,
+        limit: int = DEFAULT_MAX_QUERY_ROWS,
+    ) -> StoredEvaluation:
+        if not 0 < limit <= self.max_query_rows:
+            raise ShadowEvidenceStoreError("observation query exceeds configured bound")
+        if identity.policy_digest != policy_digest(policy):
+            raise ShadowEvidenceStoreError("release identity and policy digest differ")
+
+        def evaluate_and_write(connection: sqlite3.Connection) -> StoredEvaluation:
+            policy_row = connection.execute(
+                "SELECT * FROM policies WHERE policy_digest=?", (identity.policy_digest,)
+            ).fetchone()
+            if not policy_row:
+                raise ShadowEvidenceStoreError("evaluation policy is not durably recorded")
+            self._validated_policy_row(policy_row, policy)
+            rows = connection.execute(
+                "SELECT * FROM observations WHERE "
+                "active_release=? AND candidate_release=? AND active_artifact_digest=? AND "
+                "candidate_artifact_digest=? AND policy_digest=? AND contract_version=? "
+                "ORDER BY observed_at ASC, event_id ASC LIMIT ?",
+                (*_identity_tuple(identity), self.max_query_rows + 1),
+            ).fetchall()
+            if len(rows) > self.max_query_rows:
+                raise ShadowEvidenceStoreError("observation result exceeds query bound")
+            boundary = _utc_timestamp(now)
+            window_start = boundary - timedelta(hours=policy.window_hours)
+            observations: list[ShadowObservation] = []
+            selected_rows: list[sqlite3.Row] = []
+            for row in rows:
+                observation = self._validated_observation_row(row, identity)
+                observed_at = _utc_timestamp(observation.observed_at)
+                if observed_at > boundary:
+                    raise ShadowEvidenceStoreError("future observation fails evaluation closed")
+                if window_start <= observed_at <= boundary:
+                    observations.append(observation)
+                    selected_rows.append(row)
+            if len(observations) > limit:
+                raise ShadowEvidenceStoreError("selected observation window exceeds query bound")
+            decision = evaluate_shadow(observations, policy, now=now)
+            ordered_ids = [row["event_id"] for row in selected_rows]
+            root = _sha256(
+                _ROOT_DOMAIN,
+                {"identity": to_dict(identity), "policy_digest": identity.policy_digest,
+                 "now": now, "ordered_observation_event_ids": ordered_ids},
+            )
+            aggregate_payload = {
+                "aggregate": to_dict(decision.aggregate), "observation_root_digest": root,
+                "ordered_observation_event_ids": ordered_ids, "evaluated_at": now,
+            }
+            aggregate_digest = _sha256(_EVENT_DOMAIN, aggregate_payload)
+            aggregate_id = _event_id("aggregate", aggregate_digest)
+            self._insert_event(
+                connection, "aggregates", aggregate_id, aggregate_payload, identity,
+            )
+            decision_payload = {
+                "decision": to_dict(decision), "aggregate_event_id": aggregate_id,
+                "observation_root_digest": root, "evaluated_at": now,
+            }
+            decision_digest = _sha256(_EVENT_DOMAIN, decision_payload)
+            decision_id = _event_id("decision", decision_digest)
+            self._insert_event(
+                connection, "decisions", decision_id, decision_payload, identity,
+            )
+            return StoredEvaluation(aggregate_id, decision_id, root, decision)
+
+        return self._transaction(evaluate_and_write)
+
+    def record_retention_receipt(
+        self,
+        *,
+        identity: ShadowReleaseIdentity,
+        archive_uri: str,
+        before_event_id: str,
+        archive_digest: str,
+        observation_root_digest: str,
+    ) -> str:
+        parsed_uri = urlparse(archive_uri)
+        if parsed_uri.scheme != "s3" or not parsed_uri.netloc or not parsed_uri.path.strip("/"):
+            raise ShadowEvidenceStoreError("archive URI must identify an s3 object")
+        for value, name in (
+            (before_event_id, "before_event_id"),
+            (archive_digest, "archive_digest"),
+            (observation_root_digest, "observation_root_digest"),
+        ):
+            if _DIGEST_RE.fullmatch(value) is None:
+                raise ShadowEvidenceStoreError(f"{name} must be a lowercase sha256 digest")
+        payload = {
+            "operation": "archive_compaction", "archive_uri": archive_uri,
+            "before_event_id": before_event_id, "archive_digest": archive_digest,
+            "observation_root_digest": observation_root_digest,
+            "release_identity": to_dict(identity),
+        }
+        receipt_id = _sha256(_RECEIPT_DOMAIN, payload)
+
+        def write(connection: sqlite3.Connection) -> str:
+            cutoff = connection.execute(
+                "SELECT * FROM observations WHERE event_id=?", (before_event_id,)
+            ).fetchone()
+            if not cutoff:
+                raise ShadowEvidenceStoreError("retention cutoff observation does not exist")
+            self._validated_observation_row(cutoff, identity)
+            aggregate_rows = connection.execute(
+                "SELECT * FROM aggregates WHERE active_release=? AND candidate_release=? "
+                "AND active_artifact_digest=? AND candidate_artifact_digest=? "
+                "AND policy_digest=? AND contract_version=?",
+                _identity_tuple(identity),
+            ).fetchall()
+            bound = False
+            for aggregate_row in aggregate_rows:
+                aggregate_payload = json.loads(bytes(aggregate_row["payload"]))
+                if (
+                    canonical_json(aggregate_payload) == bytes(aggregate_row["payload"])
+                    and _sha256(_EVENT_DOMAIN, aggregate_payload)
+                    == aggregate_row["payload_digest"]
+                    and aggregate_row["event_id"]
+                    == _event_id("aggregate", aggregate_row["payload_digest"])
+                    and tuple(aggregate_row[name] for name in (
+                        "active_release", "candidate_release", "active_artifact_digest",
+                        "candidate_artifact_digest", "policy_digest", "contract_version",
+                    )) == _identity_tuple(identity)
+                    and aggregate_payload.get("observation_root_digest") == observation_root_digest
+                    and before_event_id
+                    in aggregate_payload.get("ordered_observation_event_ids", [])
+                ):
+                    bound = True
+                    break
+            if not bound:
+                raise ShadowEvidenceStoreError("retention receipt is not bound to an aggregate root")
+            encoded = canonical_json(payload)
+            existing = connection.execute(
+                "SELECT payload, payload_digest FROM retention_receipts WHERE receipt_id=?",
+                (receipt_id,),
+            ).fetchone()
+            if existing:
+                if (
+                    bytes(existing["payload"]) == encoded
+                    and existing["payload_digest"] == receipt_id
+                    and _sha256(_RECEIPT_DOMAIN, json.loads(bytes(existing["payload"])))
+                    == receipt_id
+                ):
+                    return receipt_id
+                raise ShadowEvidenceStoreError("conflicting retention receipt")
+            if connection.execute(
+                "SELECT count(*) FROM retention_receipts"
+            ).fetchone()[0] >= self.max_rows:
+                raise ShadowEvidenceStoreError("retention receipt row limit exceeded")
+            connection.execute(
+                "INSERT INTO retention_receipts(receipt_id, payload, payload_digest, recorded_at) "
+                "VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                (receipt_id, encoded, receipt_id),
+            )
+            return receipt_id
+
+        return self._transaction(write)
+
+
+_IDENTITY_COLUMNS = """
+    active_release TEXT NOT NULL,
+    candidate_release TEXT NOT NULL,
+    active_artifact_digest TEXT NOT NULL,
+    candidate_artifact_digest TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    contract_version TEXT NOT NULL
+"""
+_SCHEMA = f"""
+CREATE TABLE schema_migrations(
+    version INTEGER PRIMARY KEY, contract_version TEXT NOT NULL, applied_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE policies(
+    event_id TEXT PRIMARY KEY, policy_digest TEXT NOT NULL UNIQUE,
+    contract_version TEXT NOT NULL, payload BLOB NOT NULL,
+    payload_digest TEXT NOT NULL, recorded_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE observations(
+    event_id TEXT PRIMARY KEY, {_IDENTITY_COLUMNS},
+    payload BLOB NOT NULL, payload_digest TEXT NOT NULL, recorded_at TEXT NOT NULL,
+    observed_at TEXT NOT NULL, input_digest TEXT NOT NULL
+) STRICT;
+CREATE INDEX observations_tuple_order ON observations(
+    active_release, candidate_release, active_artifact_digest,
+    candidate_artifact_digest, policy_digest, contract_version, observed_at, event_id
+);
+CREATE TABLE aggregates(
+    event_id TEXT PRIMARY KEY, {_IDENTITY_COLUMNS},
+    payload BLOB NOT NULL, payload_digest TEXT NOT NULL, recorded_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE decisions(
+    event_id TEXT PRIMARY KEY, {_IDENTITY_COLUMNS},
+    payload BLOB NOT NULL, payload_digest TEXT NOT NULL, recorded_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE retention_receipts(
+    receipt_id TEXT PRIMARY KEY, payload BLOB NOT NULL,
+    payload_digest TEXT NOT NULL, recorded_at TEXT NOT NULL
+) STRICT;
+"""
+_IMMUTABILITY_TRIGGERS = "\n".join(
+    f"""
+CREATE TRIGGER immutable_{table}_update BEFORE UPDATE ON {table}
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_{table}_delete BEFORE DELETE ON {table}
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+"""
+    for table in (
+        "schema_migrations", "policies", "observations", "aggregates",
+        "decisions", "retention_receipts",
+    )
+)
+
+
+def _schema_fingerprint(connection: sqlite3.Connection) -> str:
+    objects = [
+        tuple(row) for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    ]
+    tables: dict[str, Any] = {}
+    for table in (
+        "schema_migrations", "policies", "observations", "aggregates",
+        "decisions", "retention_receipts",
+    ):
+        tables[table] = {
+            "table_xinfo": [tuple(row) for row in connection.execute(f"PRAGMA table_xinfo({table})")],
+            "indexes": [
+                {
+                    "list": tuple(index),
+                    "xinfo": [
+                        tuple(row) for row in connection.execute(
+                            f"PRAGMA index_xinfo({json.dumps(index[1])})"
+                        )
+                    ],
+                }
+                for index in connection.execute(f"PRAGMA index_list({table})")
+            ],
+        }
+    value = {
+            "application_id": connection.execute("PRAGMA application_id").fetchone()[0],
+            "user_version": connection.execute("PRAGMA user_version").fetchone()[0],
+            "objects": objects,
+            "tables": tables,
+    }
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return "sha256:" + hashlib.sha256(_EVENT_DOMAIN + encoded).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def _expected_schema_fingerprint() -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(_SCHEMA)
+        connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
+        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        connection.executescript(_IMMUTABILITY_TRIGGERS)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
