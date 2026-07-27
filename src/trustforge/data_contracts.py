@@ -20,6 +20,10 @@ from trustforge.asset_intrinsic import (
     MAX_URL_COUNT,
     MAX_URL_LENGTH,
 )
+from trustforge.asset_intrinsic_shadow import (
+    ASSESSMENT_SCHEMA_VERSION,
+    TOTAL_DELTA_CAP,
+)
 from trustforge.ecolink import ECOLINK_SCHEMA_VERSION, OFFICIAL_ECOLINK_HOSTS
 from trustforge.peer_metrics import PEER_METRICS_SCHEMA_VERSION
 
@@ -199,6 +203,130 @@ def _asset_intrinsic_schema_properties() -> dict[str, Any]:
     }
 
 
+def _asset_intrinsic_assessment_schema_properties() -> dict[str, Any]:
+    provenance = {
+        "type": ["object", "null"],
+        "required": [
+            "source_urls", "source_revision", "content_hash", "evidence_kind",
+            "source_coordinates", "as_of", "fetched_at",
+        ],
+        "properties": {
+            "source_urls": {"type": "array", "items": {"type": "string", "pattern": r"^https://"}},
+            "source_revision": {"type": "string"},
+            "content_hash": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
+            "evidence_kind": {"enum": ["upstream_excerpt", "decision_record"]},
+            "source_coordinates": {"type": "string"},
+            "as_of": {"type": "string", "format": "date-time"},
+            "fetched_at": {"type": "string", "format": "date-time"},
+        },
+        "additionalProperties": False,
+    }
+    dimension = {
+        "type": "object",
+        "required": [
+            "name", "status", "raw", "normalized", "weight", "signed_delta",
+            "reason_code", "coverage", "provenance",
+        ],
+        "properties": {
+            "name": {"enum": list(INTRINSIC_DIMENSION_NAMES)},
+            "status": {"enum": ["known", "unknown"]},
+            "raw": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "normalized": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "weight": {"type": "number", "minimum": 0},
+            "signed_delta": {
+                "type": "number", "minimum": -TOTAL_DELTA_CAP,
+                "maximum": TOTAL_DELTA_CAP,
+            },
+            "reason_code": {
+                "enum": [
+                    "eligible", "coverage_gate_not_met", "fact_unknown",
+                    "fact_unavailable",
+                ]
+            },
+            "coverage": {"type": "string", "minLength": 1},
+            "provenance": provenance,
+        },
+        "allOf": [
+            {
+                "if": {"properties": {"status": {"const": "unknown"}}},
+                "then": {
+                    "properties": {
+                        "raw": {"type": "null"},
+                        "normalized": {"type": "null"},
+                        "signed_delta": {"const": 0.0},
+                    }
+                },
+                "else": {
+                    "properties": {
+                        "raw": {"type": "number", "minimum": 0, "maximum": 1},
+                        "normalized": {"type": "number", "minimum": 0, "maximum": 1},
+                        "provenance": {"type": "object"},
+                    }
+                },
+            }
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "required": [
+            "schema_version", "mode", "affects_official_score", "asset_id",
+            "as_of", "total_delta", "total_delta_cap", "gate", "dimensions",
+        ],
+        "properties": {
+            "schema_version": {"const": ASSESSMENT_SCHEMA_VERSION},
+            "mode": {"const": "shadow"},
+            "affects_official_score": {"const": False},
+            "asset_id": {"type": "string", "minLength": 1},
+            "as_of": {"type": "string", "format": "date-time"},
+            "total_delta": {
+                "type": "number", "minimum": -TOTAL_DELTA_CAP,
+                "maximum": TOTAL_DELTA_CAP,
+            },
+            "total_delta_cap": {"const": TOTAL_DELTA_CAP},
+            "gate": {
+                "type": "object",
+                "required": [
+                    "passed", "known_count", "required_known",
+                    "source_family_count", "required_source_families", "reason_code",
+                ],
+                "properties": {
+                    "passed": {"type": "boolean"},
+                    "known_count": {"type": "integer", "minimum": 0, "maximum": 5},
+                    "required_known": {"const": 3},
+                    "source_family_count": {"type": "integer", "minimum": 0},
+                    "required_source_families": {"const": 2},
+                    "reason_code": {"enum": ["eligible", "insufficient_coverage"]},
+                },
+                "additionalProperties": False,
+            },
+            "dimensions": {
+                "type": "array",
+                "minItems": len(INTRINSIC_DIMENSION_NAMES),
+                "maxItems": len(INTRINSIC_DIMENSION_NAMES),
+                "items": dimension,
+            },
+        },
+        "allOf": [
+            {
+                "properties": {
+                    "dimensions": {
+                        "contains": {
+                            "type": "object",
+                            "properties": {"name": {"const": dimension_name}},
+                            "required": ["name"],
+                        },
+                        "minContains": 1,
+                        "maxContains": 1,
+                    }
+                }
+            }
+            for dimension_name in INTRINSIC_DIMENSION_NAMES
+        ],
+        "additionalProperties": False,
+    }
+
+
 def contract_schemas() -> dict[str, dict[str, Any]]:
     """Return deterministic JSON Schema documents used by CI and consumers."""
     return {
@@ -268,6 +396,12 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
                         {"type": "null"},
                     ],
                 },
+                "asset_intrinsic_assessment": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/AssetIntrinsicAssessment"},
+                        {"type": "null"},
+                    ],
+                },
                 "risk_notices": {
                     "type": "array",
                     "items": {
@@ -288,6 +422,7 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
             },
             "$defs": {
                 "AssetContext": _asset_context_schema_properties(),
+                "AssetIntrinsicAssessment": _asset_intrinsic_assessment_schema_properties(),
                 "TermAnnotation": {
                     "type": "object",
                     "required": ["term_id", "term_name", "matched_text", "start", "end", "glossary_link"],
@@ -315,6 +450,12 @@ def contract_schemas() -> dict[str, dict[str, Any]]:
             "$id": "https://trustforge.local/contracts/asset-intrinsic-profile/1.0.0",
             "title": "TrustForge AssetIntrinsicProfile",
             **_asset_intrinsic_schema_properties(),
+        },
+        "AssetIntrinsicAssessment": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://trustforge.local/contracts/asset-intrinsic-assessment/1.0.0",
+            "title": "TrustForge AssetIntrinsicAssessment",
+            **_asset_intrinsic_assessment_schema_properties(),
         },
         "PeerMetricsSnapshot": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
