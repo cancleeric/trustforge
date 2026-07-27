@@ -1,0 +1,34 @@
+{
+  "case_id": "failure_cases",
+  "commit": "6dbf60487c88d4f108776842539693db3fafab0b",
+  "description": "Empty claims list",
+  "expected_kernel_output": {
+    "abstain": true,
+    "confidence": 0.0,
+    "contrarian": [],
+    "decision_state": "abstain",
+    "direction": "不明",
+    "independent_sources": 0,
+    "reason_codes": [
+      "low_calibrated_confidence",
+      "insufficient_independent_sources"
+    ],
+    "scored_claims": [],
+    "supporting": [],
+    "supporting_count": 0,
+    "trust_score": 0.0
+  },
+  "expected_legacy_brief": {
+    "calibrated_confidence": 0.0,
+    "confidence": 0.0,
+    "contrarian": [],
+    "query": "BTC outlook",
+    "supporting": []
+  },
+  "input": {
+    "claims": [],
+    "coin": "BTC",
+    "pit_epoch": 1000.0,
+    "query": "BTC outlook"
+  }
+}

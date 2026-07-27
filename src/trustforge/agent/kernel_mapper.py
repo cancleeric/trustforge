@@ -1,5 +1,5 @@
 """Application-to-core contract normalization.
-
+ 
 This is intentionally an application adapter: it may know the current
 TrustForge ``Claim``/``Document`` shapes, while ``trustforge_core`` may not.
 """
@@ -10,9 +10,18 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from trustforge_core import JsonValue, KernelClaim, KernelDocument, KernelInput
+from trustforge_core import (
+    JsonValue,
+    KernelClaim,
+    KernelDocument,
+    KernelInput,
+    KernelOutput,
+    KernelReputationTrace,
+    KernelScoredClaim,
+    canonical_source,
+)
 
-from ..trust.scoring import Claim
+from ..trust.scoring import Claim, ScoredClaim, TrustedBrief
 
 
 def _freeze_json(value: Any) -> JsonValue:
@@ -64,3 +73,108 @@ def to_kernel_input(
         coin=coin,
         query=query,
     )
+
+
+def _trace_to_dict(trace: KernelReputationTrace | None) -> dict | None:
+    if trace is None:
+        return None
+    return {
+        "source": trace.source,
+        "prior": trace.prior,
+        "final": trace.final,
+        "agree_n": trace.agree_n,
+        "contradict_n": trace.contradict_n,
+        "iterations_run": trace.iterations_run,
+        "mode": trace.mode,
+    }
+
+
+def _validate_kernel_output(output: KernelOutput, claims: Sequence[Claim]) -> None:
+    if type(output) is not KernelOutput:
+        raise ValueError("output must be an exact KernelOutput")
+    if not 0.0 <= output.trust_score <= 1.0:
+        raise ValueError("trust_score must be in [0, 1]")
+    if not 0.0 <= output.confidence <= 1.0:
+        raise ValueError("confidence must be in [0, 1]")
+    if output.supporting_count != len(output.supporting):
+        raise ValueError("supporting_count must match supporting")
+    expected_independent = len(
+        {canonical_source(item.claim.document.source) for item in output.supporting}
+    )
+    if output.independent_sources != expected_independent:
+        raise ValueError("independent_sources must match")
+    if output.abstain != (output.decision_state == "abstain"):
+        raise ValueError("abstain must match decision_state")
+    claim_by_id = {claim.id: claim for claim in claims}
+    if len(claim_by_id) != len(claims):
+        raise ValueError("duplicate claim IDs")
+    for item in output.scored_claims:
+        if type(item.trust) is not float or not 0.0 <= item.trust <= 1.0:
+            raise ValueError("trust must be in [0, 1]")
+        if type(item.components) is not tuple:
+            raise ValueError("components must be a tuple")
+        for component in item.components:
+            if (
+                type(component) is not tuple
+                or len(component) != 2
+                or type(component[0]) is not str
+            ):
+                raise ValueError("components must contain (str, float) tuples")
+        if type(item.manip_flags) is not tuple or not all(
+            type(flag) is str for flag in item.manip_flags
+        ):
+            raise ValueError("manip_flags must be exact")
+        if type(item.info_flags) is not tuple or not all(
+            type(flag) is str for flag in item.info_flags
+        ):
+            raise ValueError("info_flags must be exact")
+    if len([c for c in claims if type(c) is not Claim]):
+        raise ValueError("claims must be exact list of exact Claim")
+    output_ids = {item.claim.id for item in output.scored_claims}
+    provided_ids = {claim.id for claim in claims}
+    if output_ids != provided_ids:
+        raise ValueError("complete app claim graph equivalence")
+    if len(set(item.claim.id for item in output.scored_claims)) != len(
+        output.scored_claims
+    ):
+        raise ValueError("scored_claims must contain unique claim IDs")
+
+
+def to_legacy_scoring(
+    output: KernelOutput, claims: Sequence[Claim]
+) -> tuple[list[ScoredClaim], TrustedBrief]:
+    """Convert kernel output into legacy ScoredClaim list and TrustedBrief.
+
+    Validates the complete output graph before mapping fields.  Field
+    mappings are exact and deterministic:
+    * KernelScoredClaim.trust -> ScoredClaim.trust
+    * KernelOutput.supporting -> TrustedBrief.supporting
+    * KernelOutput.confidence -> TrustedBrief.calibrated_confidence
+    """
+    _validate_kernel_output(output, claims)
+    claim_by_id = {claim.id: claim for claim in claims}
+    scored_claims: list[ScoredClaim] = []
+    for item in output.scored_claims:
+        original = claim_by_id[item.claim.id]
+        scored_claims.append(
+            ScoredClaim(
+                claim=original,
+                trust=item.trust,
+                components=dict(item.components),
+                reputation_trace=_trace_to_dict(item.reputation_trace),
+                manip_flags=list(item.manip_flags),
+                info_flags=list(item.info_flags),
+            )
+        )
+    supporting = [claim_by_id[item.claim.id] for item in output.supporting]
+    contrarian = [claim_by_id[item.claim.id] for item in output.contrarian]
+    supporting_scored = [s for s in scored_claims if s.claim.id in {c.id for c in supporting}]
+    contrarian_scored = [s for s in scored_claims if s.claim.id in {c.id for c in contrarian}]
+    brief = TrustedBrief(
+        query=output.query,
+        supporting=supporting_scored,
+        contrarian=contrarian_scored,
+        confidence=output.trust_score,
+        calibrated_confidence=output.confidence,
+    )
+    return scored_claims, brief

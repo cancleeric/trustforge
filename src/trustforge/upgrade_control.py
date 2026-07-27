@@ -66,11 +66,19 @@ def _root() -> Path:
 
 def _core_hash() -> str:
     digest = hashlib.sha256()
-    for relative in ("src/trustforge/trust/scoring.py", "src/trustforge/skills.py", "src/trustforge/analysis_flow.py"):
-        path = _root() / relative
+    core_dir = _root() / "src" / "trustforge_core"
+    core_files = sorted(core_dir.rglob("*.py"))
+    if not core_files:
+        for relative in ("src/trustforge/trust/scoring.py", "src/trustforge/skills.py", "src/trustforge/analysis_flow.py"):
+            path = _root() / relative
+            digest.update(relative.encode())
+            if path.is_file():
+                digest.update(path.read_bytes())
+        return digest.hexdigest()
+    for path in core_files:
+        relative = str(path.relative_to(_root()))
         digest.update(relative.encode())
-        if path.is_file():
-            digest.update(path.read_bytes())
+        digest.update(path.read_bytes())
     return digest.hexdigest()
 
 

@@ -1,0 +1,174 @@
+{
+  "case_id": "manipulation",
+  "commit": "6dbf60487c88d4f108776842539693db3fafab0b",
+  "description": "Claims with manipulation keywords",
+  "expected_kernel_output": {
+    "abstain": true,
+    "confidence": 0.0,
+    "contrarian": [
+      "c3",
+      "c1",
+      "c2"
+    ],
+    "decision_state": "abstain",
+    "direction": "不明",
+    "independent_sources": 0,
+    "reason_codes": [
+      "low_calibrated_confidence",
+      "insufficient_independent_sources"
+    ],
+    "scored_claims": [
+      {
+        "claim_id": "c1",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.6000000000000001,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [
+          "to the moon"
+        ],
+        "reputation_trace": null,
+        "trust": 0.009999999999999953
+      },
+      {
+        "claim_id": "c2",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 1.0,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [
+          "shill",
+          "pump"
+        ],
+        "reputation_trace": null,
+        "trust": 0.0
+      },
+      {
+        "claim_id": "c3",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.65
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.4
+      }
+    ],
+    "supporting": [],
+    "supporting_count": 0,
+    "trust_score": 0.0
+  },
+  "expected_legacy_brief": {
+    "calibrated_confidence": 0.0,
+    "confidence": 0.0,
+    "contrarian": [
+      {
+        "claim_id": "c3",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.0,
+          "recency": 0.5,
+          "reputation": 0.65
+        },
+        "info_flags": [],
+        "manip_flags": [],
+        "reputation_trace": null,
+        "trust": 0.4
+      },
+      {
+        "claim_id": "c1",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 0.6000000000000001,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [
+          "to the moon"
+        ],
+        "reputation_trace": null,
+        "trust": 0.009999999999999953
+      },
+      {
+        "claim_id": "c2",
+        "components": {
+          "corroboration": 0.0,
+          "manipulation": 1.0,
+          "recency": 0.5,
+          "reputation": 0.35
+        },
+        "info_flags": [],
+        "manip_flags": [
+          "shill",
+          "pump"
+        ],
+        "reputation_trace": null,
+        "trust": 0.0
+      }
+    ],
+    "query": "BTC outlook",
+    "supporting": []
+  },
+  "input": {
+    "claims": [
+      {
+        "claim_type": "fact",
+        "direction": "bullish",
+        "document": {
+          "id": "d1",
+          "kind": "social",
+          "meta": {},
+          "source": "anon",
+          "text": "BTC to the moon guaranteed",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c1",
+        "text": "BTC to the moon guaranteed"
+      },
+      {
+        "claim_type": "fact",
+        "direction": "bullish",
+        "document": {
+          "id": "d2",
+          "kind": "social",
+          "meta": {},
+          "source": "bot",
+          "text": "BTC shill pump now",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c2",
+        "text": "BTC shill pump now"
+      },
+      {
+        "claim_type": "fact",
+        "direction": "neutral",
+        "document": {
+          "id": "d3",
+          "kind": "news",
+          "meta": {},
+          "source": "CoinDesk",
+          "text": "BTC technical analysis",
+          "timestamp": 0.0,
+          "url": ""
+        },
+        "id": "c3",
+        "text": "BTC technical analysis"
+      }
+    ],
+    "coin": "BTC",
+    "pit_epoch": 1000.0,
+    "query": "BTC outlook"
+  }
+}
