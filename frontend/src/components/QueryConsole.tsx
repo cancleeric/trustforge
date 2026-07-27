@@ -93,7 +93,13 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
         </select>
         <p className="mt-1 text-[0.68rem] text-tf-muted">
           {t('qcComparePrefix')}
-          <Link to="/compare" className="text-tf-link underline">
+          {/* N60：全路由掃描量到這條連結只有 33x14（en 是 104x14），低於 24px 最小
+              點擊目標。它是句中行內連結，WCAG 2.5.8 的 inline 例外本來就豁免，所以
+              「不改」也是合規的；但行內元素的 padding 一樣參與命中測試，而負 margin
+              把 line box 抵銷回原值，於是可以純賺——高度 14→24，版面一個 px 都不動
+              （沒有背景/邊框，底線仍貼在 baseline）。不是為了讓掃描器閉嘴，是 430px
+              下拇指真的比較好按。 */}
+          <Link to="/compare" className="-my-[5px] py-[5px] text-tf-link underline">
             {t('qcCompareLinkLabel')}
           </Link>
           {t('qcComparePeriod')}

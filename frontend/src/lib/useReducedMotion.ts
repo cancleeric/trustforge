@@ -35,6 +35,27 @@ function resolveInitialState(): boolean {
   return getSystemPreference()
 }
 
+/**
+ * N63：把偏好套到 <html> 上，一次性、與 React 無關。
+ *
+ * 為什麼需要這支：useReducedMotion 只掛在 HermesDashboard（路由 `/`）裡，
+ * 所以「直接開 /analyze、/settings、/help…」的人，cookie 明明存著 on，
+ * 卻沒有任何程式碼去讀它——data-reduced-motion 從頭到尾沒被加上，全站動畫照跑。
+ * 實測 8 條路由裡有 7 條 attr=false，還有 27 類動畫在跑。低動態是「使用者偏好」，
+ * 不是「首頁功能」，它必須在 app 啟動時就生效，跟哪個畫面被 render 無關。
+ *
+ * 放在啟動點而不是 App 元件裡，是為了不製造第二份 useState——真正的開關狀態
+ * 仍然只有 HermesDashboard 那一份，這裡只負責開場把 DOM 校準到既有偏好。
+ */
+export function applyReducedMotionAttribute() {
+  if (typeof document === 'undefined') return
+  if (resolveInitialState()) {
+    document.documentElement.setAttribute('data-reduced-motion', '')
+  } else {
+    document.documentElement.removeAttribute('data-reduced-motion')
+  }
+}
+
 export function useReducedMotion() {
   const [reducedMotion, setReducedMotion] = useState<boolean>(resolveInitialState)
   const [userChosen, setUserChosen] = useState<boolean>(() => readCookie() !== null)

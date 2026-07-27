@@ -318,10 +318,67 @@
 }
 
 .hermes-frame {
-  --hermes-top: 44px;
+  /* N38: HermesHeroTagline 是一條常駐可見的 strip，但版面完全沒替它留高度——
+     它和軌道/艦橋原本都吃同一個 `top: var(--hermes-top)`，所以直接壓在左右軌
+     與艦橋的第一排標題上。背景 rgba(10,16,24,.42) 只有 42% 不透明，下面的
+     標題不是被遮掉而是透出來糊成一團。實測 1280x800 en：strip 寬 1113px
+     （badge 278 + 文案 825），蓋住 `GALAXY TELEMETRY`(x17,y59) 與
+     `BRIDGE MAIN VIEWPORT`(x294,y59)；zh-TW 1280/1440 蓋住 `主橋接視埠`。
+
+     第一次嘗試是直接把 --hermes-top 從 44px 調到 78px，實測無效並已回退：
+     strip 自己也吃 `top: var(--hermes-top)`，變數一動 strip 跟著往下移，
+     兩者永遠貼在一起（負向對照：strip 與左軌都變成 y=79，對撞數不變）。
+
+     正解是把「topbar 有多高」和「內容從多下面開始」拆成兩個量：
+       --hermes-topbar  topbar 自身高度，strip 貼在它下緣
+       --hermes-tagline strip 佔掉的高度（≤1024px strip 隱藏 → 0）
+       --hermes-top     = 兩者之和，軌道/艦橋/工作台一律吃這個 */
+  --hermes-topbar: 44px;
+  --hermes-tagline: 35px;
+  --hermes-top: calc(var(--hermes-topbar) + var(--hermes-tagline));
   --hermes-bottom: clamp(94px, 13.4vh, 120px);
   --hermes-rail: clamp(230px, 20.84vw, 300px);
   --hermes-right-rail: var(--hermes-rail);
+  /* N49 四格版面：左側從一欄拆成「選單欄 + 對話欄」。這個變數只是左軌
+     內部的切法，`--hermes-rail` 仍然代表左側佔用的總寬度，中間全息區、
+     底部管線條、右軌等所有 `left/inset: var(--hermes-rail)` 的規則因此
+     完全不受影響。窄螢幕預設 0：選單欄不獨立成欄，兩個 pane 垂直堆疊，
+     退回今天已驗證過的單欄版面。 */
+  --hermes-menu: 0px;
+}
+
+/* N49：左軌兩個 pane 的排列方式。`display/flex-direction/gap` 一定要在
+   這裡而不是元件的 inline style——inline 會贏過 class，斷點就切不動。 */
+.hermes-rail-split { display: flex; flex-direction: column; gap: 12px; }
+.hermes-rail-menu { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.hermes-rail-chat { min-width: 0; }
+
+@media (min-width: 1280px) {
+  /* 選擇器必須是 `.hermes-frame` 不是 `:root`：這兩個變數的基準宣告就在
+     `.hermes-frame`（上面 340 行），而它是左軌的祖先——寫在 `:root` 的覆寫
+     會被就近的 `.hermes-frame` 宣告蓋掉（實測 root 拿到 440px、左軌拿到
+     300px 的基準值，選單欄只剩 13px）。 */
+  .hermes-frame {
+    /* 選單欄 124~160px，對話欄 230~280px；總寬 354~440px（1280 寬時
+       約 27%、1920 寬時約 22%），中間全息區仍是最大的一格。 */
+    --hermes-menu: clamp(124px, 10vw, 160px);
+    --hermes-rail: calc(var(--hermes-menu) + clamp(230px, 19vw, 280px));
+    /* N50：右軌必須自己釘死，不能繼續吃 `var(--hermes-rail)`。左軌因為多了
+       選單欄而變寬，右軌沒有理由跟著胖——實測沒釘時 1920 的右軌從 300 變成
+       440。這裡維持 N49 之前的基準值。 */
+    --hermes-right-rail: clamp(230px, 20.84vw, 300px);
+  }
+  .hermes-rail-split { flex-direction: row; }
+  .hermes-rail-menu {
+    flex: 0 0 var(--hermes-menu);
+    width: var(--hermes-menu);
+    overflow-y: auto;
+    padding-right: 12px;
+    border-right: 1px solid var(--color-hermes-bd);
+  }
+  /* 對話欄吃掉剩下的寬度。`min-width: 0` 是必要的：flex item 預設
+     `min-width: auto`，長字串會把它撐爆而不是換行。 */
+  .hermes-rail-chat { flex: 1 1 auto; }
 }
 
 .hermes-frame::before,
@@ -381,6 +438,16 @@
   animation: hermes-core-band-spin-rev 6s linear infinite;
 }
 
+/* N62：這顆能量環的「置中、壓扁、淡出」三件事以前全都只寫在 keyframes 裡，
+   基態一行都沒有。低動態模式把 animation-duration 壓成 .001ms、
+   iteration-count 壓成 1，動畫瞬間跑完；沒有 fill-mode:forwards，計算值就退回
+   基態——於是 translate(-50%,-50%) 不見了（left/top:50% 讓左上角釘在核心星
+   正中心，實測中心偏移剛好 (123,123) 等於自身半徑）、rotateX(68deg) 不見了
+   （246x246 正圓而不是 316x118 橢圓）、opacity 也回到 1（.55 的邊框全亮）。
+   使用者關掉動態，畫面反而多出一個往右下垂的亮圈。
+   修法是把靜止狀態寫進基態，數值等同 keyframes 的 100%（脈衝結束＝散盡消失）：
+   動畫照跑時從 0% 起算，行為一個像素都不變；動畫被停掉時就停在「已散盡」的
+   正確終點，而不是退回一個從來沒打算被看到的原始盒子。 */
 .hermes-core-energy-ring {
   position: absolute;
   left: 50%;
@@ -390,6 +457,8 @@
   border-radius: 50%;
   border: 1px solid rgba(77, 216, 224, .55);
   pointer-events: none;
+  transform: translate(-50%, -50%) rotateX(68deg) scale(1.35);
+  opacity: 0;
   animation: hermes-energy-expand 3.2s ease-out infinite;
 }
 
@@ -486,7 +555,10 @@
 .hermes-module-deck {
   position: absolute;
   z-index: 18;
-  inset: 44px 300px 120px;
+  /* N38: 原本硬編 44px，--hermes-top 改成含 tagline strip 的 78px 後，
+     這裡不跟著吃變數就會比左右軌高 34px、上緣被 strip 蓋住。
+     （`300px 120px` 是另一個既知硬編問題，不在本次範圍。） */
+  inset: var(--hermes-top) 300px 120px;
   overflow: hidden;
   color: var(--color-hermes-tx);
   background: linear-gradient(180deg, #050b13, #03080f);
@@ -786,9 +858,17 @@
 .hermes-energy-deck {
   position: absolute;
   z-index: 8;
-  left: 0;
+  /* N41: 原本 `left: 0` 讓能量管線條橫跨整個畫面，包含左軌正下方那一段——
+     左軌是 AI agent 互動區，底下卻延伸出一條屬於中央艦橋的管線，看起來像
+     互動區自己的一部分。左緣改吃 `--hermes-rail`，管線從軌道右緣才開始。
+     不另外寫斷點：`--hermes-rail` 在 ≤560px 已經是 `0px`（軌道本身也
+     display:none），吃同一個變數就自動貼齊，這條關係在所有斷點都成立。
+     配合 `right: 0` + `width: auto` 取代固定的 1440px 設計稿寬度，
+     1440 視窗實際寬度＝1440 − 軌道，正是「從軌道右緣開始」的意思。 */
+  left: var(--hermes-rail);
+  right: 0;
   bottom: 0;
-  width: 1440px;
+  width: auto;
   height: 120px;
   overflow: hidden;
   display: grid;
@@ -896,6 +976,13 @@
   background: #e9ffff;
   box-shadow: 0 0 7px #fff, 0 0 16px #4dd8e0;
   transform: translate(-50%, -50%);
+  /* N63：跟 N62 同一類。這三顆封包的「位置」與「透明度」只寫在 keyframes 裡，
+     基態沒有 left 也沒有 opacity。低動態把動畫停掉，left 退回 auto——三顆全部
+     疊在同一個點（實測都落在 x=496），opacity 退回 1，於是使用者關掉動態反而
+     看到管線上堆著三顆亮點。靜止狀態寫成 keyframes 的 100%（已送達、散盡）：
+     動畫照跑時從 0% 起算，行為不變；停掉時停在正確終點。 */
+  left: 100%;
+  opacity: 0;
   animation: hermes-energy-flow 5s linear infinite;
 }
 
@@ -1044,9 +1131,15 @@
   color: #e8b34d;
 }
 
+/* N54：這條發光連接線是純裝飾，但 `right:100%` 讓它從引擎左緣往左伸 44px，
+   蓋在最後一顆管線站點上；`.hermes-engine` 的 z-index:3 又高過站點所在的
+   `.hermes-energy-nodes` (z-index:2)，於是「05 綜合信任分數」真實點擊被吃掉
+   （768x1024 實測：引擎左緣 663、站點中心 624，正好落在 619~663 這段線下）。
+   不改幾何、不動 z-index——裝飾元素本來就不該參與命中測試。 */
 .hermes-engine::before {
   content: '';
   position: absolute;
+  pointer-events: none;
   right: 100%;
   top: 50%;
   width: 44px;
@@ -2051,7 +2144,12 @@
 }
 
 .hermes-energy-deck {
-  right: 0;
+  /* N50：右緣比照 N41 的左緣改吃軌道變數。原本 `right: 0` 讓管線條整條鑽到
+     右軌底下——1920 實測 deck 右緣 1919、右軌左緣 1479，重疊 440px，HERMES
+     那顆環直接壓在「目前焦點」那一格下面。吃 `--hermes-right-rail` 之後管線
+     條在右軌左緣就收掉；≤900px 該變數已經是 0（右軌本來就不掛載），同一條
+     規則在所有斷點都成立，不必另外寫斷點。 */
+  right: var(--hermes-right-rail);
   width: auto;
   height: var(--hermes-bottom);
 }
@@ -2240,6 +2338,14 @@
      本就不影響操作（pointerEvents:none）。 */
   .hermes-hero-tagline {
     display: none !important;
+  }
+
+  /* N38: 這個斷點內 strip 是 display:none，就不該再替它保留高度。
+     歸零而不是改 --hermes-top，讓「= topbar + tagline」這條關係在所有
+     斷點都成立。1024x420 這種矮視窗最吃不起白掉的高度（左軌面板本來
+     就是被壓爛的重災區，見 N37）。 */
+  .hermes-frame {
+    --hermes-tagline: 0px;
   }
 }
 
@@ -2462,9 +2568,37 @@
     display: none !important;
   }
 
+  /* .bridge-display-mode（右上「HOLOGRAPHIC DISPLAY / AWAITING DATA」）與
+     .bridge-module-heading（左上頻道＋頁名，真內容）都是 bay 內的絕對定位，
+     一個靠右一個靠左，寬度不足時對撞：實測 390px 重疊 142x12px、320px 重疊
+     205x12px，兩段字直接疊成一團看不懂（561px 起才不重疊）。前者掛
+     aria-hidden="true" 純裝飾，窄螢幕直接收掉，保留真正有資訊的 heading。 */
+  .bridge-display-mode {
+    display: none;
+  }
+
   .hermes-topbar {
     padding-inline: 10px !important;
     gap: 8px !important;
+  }
+
+  /* N52：頂欄是 nowrap 的 flex，品牌鈕又不可壓縮，英文版字串較長時整排超出——
+     實測 en 320px scrollWidth 361 > clientWidth 318，語言切換鈕「繁中」整顆
+     落在畫面外 (L338 R362)、Help 也被切掉；中文剛好塞得下所以看不出來。
+     不逐項砍字，改成讓「最寬且最不重要」的品牌鈕可壓縮並截字：控制項一定
+     保留可點，品牌退讓成 TRUSTFO…。這樣任何語系任何寬度都成立，不是針對
+     en/320 硬調數字。（inline style 沒設 min-width/overflow，CSS 蓋得到。） */
+  .hermes-topbar>button:first-child {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .hermes-topbar>button:first-child>span {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .hermes-topbar>span {
@@ -4216,5 +4350,17 @@
 
   .hermes-onboarding footer {
     align-items: flex-end;
+  }
+}
+
+/* N38: en 的文案較長，實測 1025~1145px 之間 strip 會折成兩行（高 61px），
+   1160px 起才是單行（35px）——邊界是逐 15px 掃出來的，不是估的。
+   折行時只留 35px 會讓 strip 往下多吃 26px、又壓回軌道頂部，所以這個帶狀
+   區間要留 61px。zh-TW 在同一區間全程單行（實測 1025~1280 都是 35px），
+   多留 26px 是白掉的高度，因此用 `html[lang='en']` 只針對英文生效
+   （`documentElement.lang` 由 N15 保證有正確設值）。 */
+@media (min-width:1025px) and (max-width:1159px) {
+  html[lang='en'] .hermes-frame {
+    --hermes-tagline: 61px;
   }
 }

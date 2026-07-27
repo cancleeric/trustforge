@@ -78,8 +78,14 @@ try {
       })
 
       for (const route of routes) {
-        await page.goto(`${BASE_URL}${route.url}`, { waitUntil: 'networkidle' })
+        await page.goto(`${BASE_URL}${route.url}`, { waitUntil: 'domcontentloaded' })
         await page.waitForSelector(route.selectors.root, { state: 'visible' })
+        // 換掉 networkidle 之後，root 一掛上就量會量到還沒渲染完的星系
+        // （375/390 實測 "galaxy is not visible"）。這裡不能改成等每個
+        // selector：右軌在 <=900px 根本不掛載、左軌在 <=430px 是刻意隱藏，
+        // 等它們會永遠等不到。所以等 load 事件再給一段固定沉澱時間。
+        await page.waitForLoadState('load')
+        await page.waitForTimeout(1500)
         const boxes = await collectBoxes(page, route.selectors)
         assertGeometry({ viewport, routeName: route.name, boxes })
       }
@@ -129,7 +135,7 @@ async function runHitTestMatrix(browser, viewport, locale = 'en') {
   const page = await context.newPage()
   await page.setViewportSize(viewport)
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }))
-  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'networkidle' })
+  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.hermes-dashboard', { state: 'visible' })
 
   // N31 (CEO real-browser hit-test audit): beginnerMode defaults ON, so the
@@ -431,7 +437,7 @@ async function runBeginnerNarrativeSheetChecks(browser, viewport, locale) {
   const page = await context.newPage()
   await page.setViewportSize(viewport)
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }))
-  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'networkidle' })
+  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.hermes-dashboard', { state: 'visible' })
   await page.waitForSelector('.hermes-beginner-narrative', { state: 'visible' })
 
@@ -501,7 +507,7 @@ async function runFullExperienceChecks(browser, viewport, locale) {
   const page = await context.newPage()
   await page.setViewportSize(viewport)
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }))
-  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'networkidle' })
+  await page.goto(`${BASE_URL}/?qa=1&reducedMotion=1`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.hermes-dashboard', { state: 'visible' })
 
   const result = await page.evaluate((minTarget) => {
@@ -695,7 +701,7 @@ async function waitForServer(processHandle, url) {
     stderr += chunk.toString()
   })
 
-  while (Date.now() - started < 20_000) {
+  while (Date.now() - started < 90_000) {
     if (processHandle.exitCode !== null) {
       throw new Error(`Vite exited before serving ${url}: ${stderr}`)
     }

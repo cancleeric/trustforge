@@ -123,7 +123,10 @@ body {
 .tf-glossary-popover b { margin-bottom: 3px; color: var(--color-tf-text); }
 .tf-glossary-popover .tf-glossary-risk { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--color-tf-border); color: var(--color-tf-warn); }
 .tf-glossary-popover .tf-glossary-risk i { margin-right: 4px; font-style: normal; }
-.hermes-right-rail .tf-glossary-popover { left: auto; right: 0; }
+/* N51：移除 `.hermes-right-rail .tf-glossary-popover { left: auto; right: 0 }`。
+   popover 現在 portal 到 <body>，這條選擇器再也選不到它；而且它本身有害——
+   元件已用 inline style 指定 left 與 width，再補一個 right 會讓 left/width/right
+   三者過度約束。定位一律交給元件算好的 inline style。 */
 
 /* ── Reduced Motion（issue #231）──────────────────────────────────
    data-reduced-motion attribute on <html> = user-toggled low-motion mode.

@@ -19,14 +19,21 @@ const CATEGORIES: Array<{ id: Category; icon: string; labelKey: MessageKey }> = 
   { id: 'api', icon: '⚿', labelKey: 'setCatApi' },
 ]
 
-function Toggle({ on, onClick, accent = 'var(--color-tf-accent)' }: { on: boolean; onClick: () => void; accent?: string }) {
+// N59：`label` 是必填而不是選填——這顆按鈕本體沒有任何文字內容，Row 的 label 只是
+// 同層一個 <p>，沒有 for／aria-labelledby 關聯，少給就等於一顆螢幕閱讀器唸不出用途
+// 的開關。設成必填讓「忘了給」在編譯期就爆，而不是等下一次 a11y 掃描才發現。
+function Toggle({ on, onClick, label, accent = 'var(--color-tf-accent)' }: { on: boolean; onClick: () => void; label: string; accent?: string }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={on}
+      aria-label={label}
       onClick={onClick}
-      className="relative inline-block h-[22px] w-[42px] rounded-full transition-colors"
+      // 軌道視覺維持 22px（設計稿），但 22 < 24px 最小點擊目標，因此用 ::after 把
+      // 實際可點區域上下各撐 2px 到 26px。這不是遮罩取巧：::after 屬於這顆 button，
+      // 手指落在那 2px 上真的會觸發 onClick，Row 的 py-3.5 也保證不會壓到鄰居。
+      className="relative inline-block h-[22px] w-[42px] rounded-full transition-colors after:absolute after:inset-x-0 after:-inset-y-[2px] after:content-['']"
       style={{ background: on ? accent : 'var(--color-tf-border)' }}
     >
       <span
@@ -141,7 +148,7 @@ export default function SettingsPage() {
           {active === 'notifications' && (
             <Card title={t('setNotifTitle')} sub={t('setNotifSub')}>
               <Row label={t('setDropAlertLabel')} help={t('setDropAlertHelp')}>
-                <Toggle on={dropAlert} onClick={() => setDropAlert((v) => !v)} />
+                <Toggle label={t('setDropAlertLabel')} on={dropAlert} onClick={() => setDropAlert((v) => !v)} />
               </Row>
               <Row label={t('setThresholdLabel')} help={t('setThresholdHelpTemplate', { threshold })}>
                 <input
@@ -150,15 +157,15 @@ export default function SettingsPage() {
                   max={100}
                   value={threshold}
                   onChange={(e) => setThreshold(Number(e.target.value))}
-                  className="w-40 accent-tf-warn"
+                  className="h-6 w-40 accent-tf-warn"
                   aria-label={t('setThresholdLabel')}
                 />
               </Row>
               <Row label={t('setAbsenceAlertLabel')} help={t('setAbsenceAlertHelp')}>
-                <Toggle on={absenceAlert} onClick={() => setAbsenceAlert((v) => !v)} />
+                <Toggle label={t('setAbsenceAlertLabel')} on={absenceAlert} onClick={() => setAbsenceAlert((v) => !v)} />
               </Row>
               <Row label={t('setManipAlertLabel')} help={t('setManipAlertHelp')}>
-                <Toggle on={manipAlert} onClick={() => setManipAlert((v) => !v)} />
+                <Toggle label={t('setManipAlertLabel')} on={manipAlert} onClick={() => setManipAlert((v) => !v)} />
               </Row>
             </Card>
           )}
@@ -176,7 +183,7 @@ export default function SettingsPage() {
                       </div>
                       <span className="tf-num w-6 text-right text-[11px] text-tf-text">{s.weight}</span>
                     </div>
-                    <Toggle on={s.on} onClick={() => setSources((prev) => prev.map((x, j) => (j === i ? { ...x, on: !x.on } : x)))} />
+                    <Toggle label={s.name} on={s.on} onClick={() => setSources((prev) => prev.map((x, j) => (j === i ? { ...x, on: !x.on } : x)))} />
                   </div>
                 ))}
               </div>
@@ -188,7 +195,7 @@ export default function SettingsPage() {
                     max={100}
                     value={divergenceThreshold}
                     onChange={(e) => setDivergenceThreshold(Number(e.target.value))}
-                    className="flex-1 accent-tf-warn"
+                    className="h-6 flex-1 accent-tf-warn"
                     aria-label={t('setDivergenceLabel')}
                   />
                   <span className="tf-num w-10 text-xs font-semibold" style={{ color: 'var(--color-tf-warn)' }}>{divergenceThreshold}%</span>
@@ -202,7 +209,7 @@ export default function SettingsPage() {
               <Row label={t('setScanLabel')} help={t('setScanHelp')}>
                 <div className="flex items-center gap-2.5">
                   {continuousScan && <span className="text-[11px]" style={{ color: 'var(--color-tf-green)' }}>{t('setRunning')}</span>}
-                  <Toggle on={continuousScan} onClick={() => setContinuousScan((v) => !v)} accent="var(--color-tf-green)" />
+                  <Toggle label={t('setScanLabel')} on={continuousScan} onClick={() => setContinuousScan((v) => !v)} accent="var(--color-tf-green)" />
                 </div>
               </Row>
               <Row label={t('setIntervalLabel')} help={t('setIntervalHelp')}>

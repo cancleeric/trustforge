@@ -109,6 +109,13 @@ export default function CurrencyGalaxy({
         border: `1px solid ${orbit === 'B' ? 'rgba(232,179,77,.22)' : 'rgba(77,216,224,.28)'}`,
         transformStyle: 'preserve-3d',
         transform: rot,
+        // N56：這片軌道環只畫 1px 邊框，但命中測試吃的是整個 270/390px 的
+        // 圓盤方框，而 3D 旋轉後它正好罩在中央那顆 129x129 的 BTC 核心星上。
+        // 實測（1024x768 / 1280x800 / 1440x900 / 320x568，zh-TW 與 en 皆同）：
+        // 核心星真實滑鼠點擊 BLOCKED，事件落在這片看不見的 div 上；
+        // elementFromPoint 也回這片 div 而不是核心星。環本身沒有任何互動，
+        // 只有裡面兩顆行星要 hover，所以環退出命中測試、行星各自補回來。
+        pointerEvents: 'none',
         boxShadow: orbit === 'B' ? '0 0 26px rgba(232,179,77,.05) inset' : '0 0 22px rgba(77,216,224,.06) inset',
       }}
     >
@@ -117,7 +124,7 @@ export default function CurrencyGalaxy({
           aria-hidden="true"
           onMouseEnter={() => onHover(ids[0])}
           onMouseLeave={() => onHover(null)}
-          style={{ ...planetStyle(ids[0]), cursor: 'default' }}
+          style={{ ...planetStyle(ids[0]), cursor: 'default', pointerEvents: 'auto' }}
         >
           {planetSurface(ids[0])}
         </div>
@@ -125,7 +132,7 @@ export default function CurrencyGalaxy({
           aria-hidden="true"
           onMouseEnter={() => onHover(ids[1])}
           onMouseLeave={() => onHover(null)}
-          style={{ ...planetStyle(ids[1]), cursor: 'default' }}
+          style={{ ...planetStyle(ids[1]), cursor: 'default', pointerEvents: 'auto' }}
         >{planetSurface(ids[1])}</div>
       </div>
     </div>
@@ -147,8 +154,11 @@ export default function CurrencyGalaxy({
       <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 8% 22%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 18% 68%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 32% 15%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 46% 78%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-1 90s linear infinite alternate', opacity: 0.8 }} />
       <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 62% 30%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 74% 60%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 88% 20%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 94% 72%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-2 130s linear infinite alternate', opacity: 0.6 }} />
       <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 55% 85%,rgba(255,255,255,.5),transparent),radial-gradient(1px 1px at 12% 90%,rgba(255,255,255,.35),transparent),radial-gradient(1px 1px at 40% 45%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-3 160s linear infinite alternate', opacity: 0.45 }} />
-      {/* holo radar sweep */}
-      <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 60, background: 'linear-gradient(rgba(77,216,224,.09),transparent)', animation: 'hermes-holo-sweep 7s linear infinite', pointerEvents: 'none' }} />
+      {/* holo radar sweep — N63：掃描條的位移只寫在 keyframes 裡，基態沒有
+          transform。低動態把動畫停掉就退回 translateY(0)，這條青色漸層帶會
+          永遠卡在星系頂端，看起來像掃到一半凍住。基態補上 keyframes 100% 的
+          translateY(720px)（＝已掃出畫面），動畫照跑時從 0% 起算行為不變。 */}
+      <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 60, background: 'linear-gradient(rgba(77,216,224,.09),transparent)', transform: 'translateY(720px)', animation: 'hermes-holo-sweep 7s linear infinite', pointerEvents: 'none' }} />
       {/* orbit guide circles */}
       <div style={{ position: 'absolute', left: '50%', top: '50%', width: 660, height: 660, transform: 'translate(-50%,-50%)', border: '1px solid rgba(77,216,224,.12)', borderRadius: '50%' }} />
       <div style={{ position: 'absolute', left: '50%', top: '50%', width: 560, height: 560, transform: 'translate(-50%,-50%)', border: '1px solid rgba(77,216,224,.08)', borderRadius: '50%' }} />
@@ -223,6 +233,10 @@ export default function CurrencyGalaxy({
           {/* BTC core star */}
           <button
             type="button"
+            /* N55：新手導覽面板要在執行期量到這顆核心星的底緣才能算出自己的
+               可用高度，需要一個不隨語系變動的選擇器（aria-label 會在
+               zh-TW/en 之間變）。純標記，不帶樣式。 */
+            className="hermes-core-star"
             aria-label={`${t('focus')} Bitcoin`}
             aria-pressed={coreIsSel}
             onClick={() => onSelect('btc')}
