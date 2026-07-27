@@ -195,14 +195,36 @@ def calculate_calibration_error(
     # 預測，不能只用 date 當 key，否則後一筆會覆寫前一筆。
     details = comparison_results.get("details", [])
     hit_by_index: dict[int, bool] = {}
-    legacy_hit_by_date: dict[str, bool] = {}
+    legacy_hits_by_date: dict[str, list[bool]] = {}
     for d in details:
         if d.get("horizon") == 1:
             if isinstance(d.get("prediction_index"), int):
                 hit_by_index[d["prediction_index"]] = d["hit"]
             else:
                 # Backward compatibility for stored reports created before row IDs.
-                legacy_hit_by_date[d["date"]] = d["hit"]
+                legacy_hits_by_date.setdefault(d["date"], []).append(d["hit"])
+
+    prediction_counts_by_date: dict[str, int] = {}
+    for prediction in predictions:
+        prediction_counts_by_date[prediction["date"]] = (
+            prediction_counts_by_date.get(prediction["date"], 0) + 1
+        )
+    legacy_hit_by_date = {
+        date: hits[0]
+        for date, hits in legacy_hits_by_date.items()
+        if len(hits) == 1 and prediction_counts_by_date.get(date) == 1
+    }
+    ambiguous_legacy_dates = {
+        date
+        for date, hits in legacy_hits_by_date.items()
+        if len(hits) != 1 or prediction_counts_by_date.get(date) != 1
+    }
+    excluded_ambiguous_legacy_rows = sum(
+        1
+        for index, prediction in enumerate(predictions)
+        if index not in hit_by_index
+        and prediction["date"] in ambiguous_legacy_dates
+    )
 
     def _hit(index: int, prediction: dict) -> bool | None:
         if index in hit_by_index:
@@ -282,6 +304,15 @@ def calculate_calibration_error(
         "bins": bins_data,
         "reliable_bins": reliable_bins,
         "confidence_correctness_roc_auc": discrimination,
+        "row_alignment": {
+            "excluded_ambiguous_legacy_rows": excluded_ambiguous_legacy_rows,
+            "reason": (
+                "legacy details without prediction_index require a unique "
+                "prediction and unique detail for the date"
+                if excluded_ambiguous_legacy_rows
+                else None
+            ),
+        },
     }
 
 
@@ -318,6 +349,10 @@ def run_calibration(
                     "value": None,
                     "reason": "requires both correct and incorrect predictions",
                     "target": "confidence_discrimination_of_correctness",
+                },
+                "row_alignment": {
+                    "excluded_ambiguous_legacy_rows": 0,
+                    "reason": None,
                 },
             },
         }

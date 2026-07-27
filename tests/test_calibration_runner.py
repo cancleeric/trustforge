@@ -247,6 +247,44 @@ def test_calibration_same_date_predictions_keep_row_identity():
     assert sorted(item["empirical_hit_rate"] for item in nonempty_bins) == [0.0, 1.0]
 
 
+def test_legacy_same_date_details_fail_closed_as_ambiguous():
+    predictions = [
+        {
+            "date": "2024-01-01",
+            "direction": "偏多",
+            "confidence": 0.9,
+            "trust_score": 0.5,
+        },
+        {
+            "date": "2024-01-01",
+            "direction": "偏空",
+            "confidence": 0.1,
+            "trust_score": 0.5,
+        },
+    ]
+    legacy_comparison = {
+        "details": [
+            {
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": True,
+            },
+            {
+                "date": "2024-01-01",
+                "horizon": 1,
+                "hit": False,
+            },
+        ]
+    }
+
+    result = calculate_calibration_error(predictions, legacy_comparison)
+
+    assert sum(item["count"] for item in result["bins"]) == 0
+    assert result["confidence_correctness_roc_auc"]["value"] is None
+    assert result["row_alignment"]["excluded_ambiguous_legacy_rows"] == 2
+    assert "require a unique prediction" in result["row_alignment"]["reason"]
+
+
 # ─── test_run_calibration_integration ────────────────────────────────────────
 
 
