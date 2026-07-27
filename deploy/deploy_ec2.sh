@@ -308,53 +308,11 @@ elif [ "$MATCH_COUNT" -eq 1 ]; then
       ;;
   esac
 
-  # Deploy candidate: download artifact -> verify -> restart -> promote active
-  echo "[ec2] deploying candidate artifact to ${IID}..."
-  CMDID=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/'"${ARTIFACT_PREFIX}"'artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/'"${ARTIFACT_PREFIX}"'manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","pip3 install boto3 certifi","sed -i \"s|^Environment=BEDROCK_MODEL_ID=.*|Environment=BEDROCK_MODEL_ID='"$MODEL"'|\" /etc/systemd/system/trustforge.service","if grep -q \"^Environment=CACHE_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=CACHE_BACKEND=.*|Environment=CACHE_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=CACHE_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_CACHE_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_CACHE_TABLE=.*|Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=TRUSTFORGE_COST_LEDGER_TABLE=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=TRUSTFORGE_COST_LEDGER_TABLE=.*|Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger\" /etc/systemd/system/trustforge.service; fi","if grep -q \"^Environment=COST_LEDGER_BACKEND=\" /etc/systemd/system/trustforge.service; then sed -i \"s|^Environment=COST_LEDGER_BACKEND=.*|Environment=COST_LEDGER_BACKEND=dynamodb|\" /etc/systemd/system/trustforge.service; else sed -i \"/^Environment=PYTHONPATH=/a Environment=COST_LEDGER_BACKEND=dynamodb\" /etc/systemd/system/trustforge.service; fi"'"$UNIT_ENV_RECONCILE_CMDS"',"chmod 600 /etc/systemd/system/trustforge.service","bash deploy/install_hermes_scheduler.sh","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","echo \"[ec2] candidate deployed, running verification...\"","if ! python3 -m trustforge.verify_deployed_manifest /opt/trustforge; then echo \"[ec2] VERIFY FAILED\" >&2; exit 1; fi","echo \"[ec2] deployed verification passed\""]'
-    --query 'Command.CommandId' --output text)
-  if [ -z "$CMDID" ] || [ "$CMDID" = "None" ]; then
-    echo "[ec2] ERROR: SSM send-command failed" >&2
-    exit 1
-  fi
-  echo "[ec2] SSM CommandId=${CMDID}, polling..."
-  SSM_STATUS=$(poll_ssm_terminal_status "$CMDID" "$IID" 180 5) || true
-  if [ "$SSM_STATUS" != "Success" ]; then
-    echo "[ec2] ERROR: deploy failed (Status=${SSM_STATUS})" >&2
-    aws ssm get-command-invocation --region "$REGION" --command-id "$CMDID" --instance-id "$IID" \
-      --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
-    # Auto-rollback: try to restore previous
-    echo "[ec2] attempting rollback to previous..."
-    PREV_JSON=$(aws s3 cp "s3://${BUCKET}/pointers/previous.json" - --region "$REGION" 2>/dev/null || echo '')
-    if [ -n "$PREV_JSON" ]; then
-      PREV_DIGEST=$(echo "$PREV_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('digest',''))")
-      if [ -n "$PREV_DIGEST" ]; then
-        RBCMD=$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
-          --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$PREV_DIGEST"'/artifact.zip ./app.zip --region '"$REGION"'","aws s3 cp s3://'"$BUCKET"'/artifacts/'"$PREV_DIGEST"'/manifest.json ./manifest.json --region '"$REGION"'","unzip -o app.zip","systemctl daemon-reload","bash deploy/zero_downtime_restart.sh","echo \"[ec2] rollback to previous completed\""]'
-          --query 'Command.CommandId' --output text)
-        if [ -n "$RBCMD" ] && [ "$RBCMD" != "None" ]; then
-          rbstatus=$(poll_ssm_terminal_status "$RBCMD" "$IID" 120 5) || true
-          if [ "$rbstatus" = "Success" ]; then
-            echo "[ec2] rollback to previous (${PREV_DIGEST}) succeeded"
-          else
-            echo "[ec2] WARNING: rollback command failed (Status=${rbstatus})" >&2
-          fi
-        fi
-      fi
-    fi
-    exit 1
-  fi
-
-  # Promote candidate -> active
-  ACTIVE_JSON=$(aws s3 cp "s3://${BUCKET}/pointers/active.json" - --region "$REGION" 2>/dev/null || echo '')
-  if [ -n "$ACTIVE_JSON" ]; then
-    aws s3 cp - "s3://${BUCKET}/pointers/previous.json" --region "$REGION" <<<"$ACTIVE_JSON" >/dev/null
-    echo "[ec2] previous pointer updated (old active)"
-  fi
-  aws s3 cp - "s3://${BUCKET}/pointers/active.json" --region "$REGION" <<<"$CANDIDATE_JSON" >/dev/null
-  echo "[ec2] active pointer promoted to ${ARTIFACT_DIGEST}"
-
-  verify_fetch_scheduler "$IID"
+  # Deploy candidate: delegate full activation transaction to
+  # deploy/activate_release.sh (lock → preflight → download → verify →
+  # restart → promote → post-verify → receipt → release).
+  echo "[ec2] activating candidate artifact on ${IID} via activate_release.sh..."
+  deploy/activate_release.sh --target "$IID"
 
   IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
@@ -460,6 +418,29 @@ IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
 # First-time: candidate == active (no previous yet)
 aws s3 cp - "s3://${BUCKET}/pointers/active.json" --region "$REGION" <<<"$CANDIDATE_JSON" >/dev/null
 aws s3 cp - "s3://${BUCKET}/pointers/previous.json" --region "$REGION" <<<"$CANDIDATE_JSON" >/dev/null
+
+# First-time receipt
+if [ -x .venv/bin/python ]; then PYTHON=.venv/bin/python; else PYTHON=python3; fi
+$PYTHON -c "
+import sys
+sys.path.insert(0, 'src')
+from trustforge.activation_receipt import ActivationReceipt, write_receipt_to_s3
+ts = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+receipt = ActivationReceipt(
+    activation_target='$IID',
+    owner_id='first-time',
+    candidate_digest='$ARTIFACT_DIGEST',
+    previous_active_digest='',
+    status='completed',
+    build_timestamp=ts,
+    started_at=ts,
+    finished_at=ts,
+    error='',
+    rollback_triggered=False,
+    rollback_succeeded=False,
+)
+write_receipt_to_s3(receipt, region='$REGION')
+" 2>/dev/null || echo "[ec2] first-time receipt write failed (non-fatal)" >&2
 
 echo "[ec2] first-time build complete: $IID  public IP: ${IP} (model=${MODEL:-<offline>})"
 echo "[ec2] Live Demo: http://${IP}/"
