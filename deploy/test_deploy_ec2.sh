@@ -101,7 +101,7 @@ problems = []
 for want in [w for w in expected_csv.split(";") if w]:
     if want not in unit:
         problems.append("缺獨立行:" + want)
-if "ExecStart=/usr/bin/python3 -m trustforge.web" not in unit:
+if "ExecStart=/usr/bin/python3.11 -m trustforge.web" not in unit:
     problems.append("ExecStart 行不乾淨（可能被 EXTRA_UNIT_ENV 黏住）")
 print("MATCH" if not problems else "MISMATCH:" + "|".join(problems))
 PYEOF
@@ -713,7 +713,7 @@ else
   assert_contains "$UD_CONTENT" "Environment=TRUSTFORGE_LEASE_TABLE=trustforge-analyze-leases" "user-data: trustforge.service 有 shared lease table"
   assert_contains "$UD_CONTENT" "fetch-scheduler.service" "user-data: 有寫 fetch-scheduler.service"
   assert_contains "$UD_CONTENT" "fetch-scheduler.timer" "user-data: 有寫 fetch-scheduler.timer"
-  assert_contains "$UD_CONTENT" "ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py" "user-data: fetch-scheduler ExecStart 正確"
+  assert_contains "$UD_CONTENT" "ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py" "user-data: fetch-scheduler ExecStart 正確"
   assert_contains "$UD_CONTENT" "OnUnitActiveSec=15min" "user-data: timer 週期 15min"
   assert_contains "$UD_CONTENT" "systemctl enable --now fetch-scheduler.timer" "user-data: 有 enable --now timer"
   # BEDROCK_MODEL_ID 仍走 \${VAR-} fail-safe，離線測試環境未設 → 應為空
@@ -839,7 +839,7 @@ assert_unit_env_lines \
 
 UD_CONTENT_1B="$(cat "$CAPTURE/user_data.sh")"
 
-assert_contains "$UD_CONTENT_1B" "ExecStart=/usr/bin/python3 -m trustforge.web" "user-data 含乾淨獨立的 ExecStart 行"
+assert_contains "$UD_CONTENT_1B" "ExecStart=/usr/bin/python3.11 -m trustforge.web" "user-data 含乾淨獨立的 ExecStart 行"
 
 assert_not_contains "$UD_CONTENT_1B" "TRUSTFORGE_TOKEN_SSM_PREFIX=/trustforge/runtimeExecStart" "user-data 不含 PREFIX 與 ExecStart 黏在一起的壞字串"
 
@@ -1014,7 +1014,7 @@ Environment=TRUSTFORGE_ADMIN_TOKEN=stale-admin-token
 Environment=TRUSTFORGE_LIVE_TOKEN=stale-live-token
 Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=99
 Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=stale-prefix-OLD
-ExecStart=/usr/bin/python3 -m trustforge.web
+ExecStart=/usr/bin/python3.11 -m trustforge.web
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -1134,7 +1134,7 @@ Description=TrustForge web
 [Service]
 Environment=PYTHONPATH=/opt/trustforge
 Environment=TRUSTFORGE_TOKEN_SSM_PREFIX=old-stale-prefix
-ExecStart=/usr/bin/python3 -m trustforge.web
+ExecStart=/usr/bin/python3.11 -m trustforge.web
 [Install]
 WantedBy=multi-user.target
 UNITEOF2
@@ -1232,7 +1232,7 @@ with open('$CAPTURE/remote_script_cap.sh', 'w') as f:
 Description=TrustForge web
 [Service]
 Environment=PYTHONPATH=/opt/trustforge
-ExecStart=/usr/bin/python3 -m trustforge.web
+ExecStart=/usr/bin/python3.11 -m trustforge.web
 [Install]
 WantedBy=multi-user.target
 UNITEOF_CAP_INSERT
@@ -1267,7 +1267,7 @@ Description=TrustForge web
 [Service]
 Environment=PYTHONPATH=/opt/trustforge
 Environment=TRUSTFORGE_BEDROCK_DAILY_USD_CAP=99
-ExecStart=/usr/bin/python3 -m trustforge.web
+ExecStart=/usr/bin/python3.11 -m trustforge.web
 [Install]
 WantedBy=multi-user.target
 UNITEOF_CAP_REPLACE

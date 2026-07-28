@@ -22,8 +22,8 @@ Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
 Environment=SCHEDULER_RUN_LOG_BACKEND=dynamodb
 Environment=TRUSTFORGE_SCHEDULER_RUN_TABLE=trustforge-scheduler-runs
-ExecStartPre=/usr/bin/python3 scripts/fetch_scheduler.py --probe
-ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py --allow-partial
+ExecStartPre=/usr/bin/python3.11 scripts/fetch_scheduler.py --probe
+ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py --allow-partial
 UNIT
 
 install -m 0644 /dev/stdin "$UNIT_DIR/fetch-scheduler.timer" <<'UNIT'
