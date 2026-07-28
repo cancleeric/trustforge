@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 
 import pytest
 
@@ -131,6 +132,55 @@ class TestFailSafe:
             tele.record_invocation(f"flood.{i}", 1.0, "success")
         # Should not raise
         tele.shutdown()
+
+    def test_flush_reports_writer_failure_instead_of_fake_success(
+        self, tmp_db, monkeypatch
+    ):
+        from trustforge.module_telemetry import ModuleTelemetry
+
+        tele = ModuleTelemetry(db_path=tmp_db)
+
+        def _fail_write(events):
+            raise OSError("injected durable write failure")
+
+        monkeypatch.setattr(tele._store, "write_batch", _fail_write)
+        tele.record_invocation("broken.flush", 1.0)
+        assert tele.flush(timeout=1.0) is False
+        tele.shutdown()
+
+    def test_flush_times_out_when_full_queue_is_blocked(
+        self, tmp_db, monkeypatch
+    ):
+        from trustforge.module_telemetry import ModuleTelemetry, _QUEUE_MAX
+
+        tele = ModuleTelemetry(db_path=tmp_db)
+        write_entered = threading.Event()
+        release_write = threading.Event()
+        real_write_batch = tele._store.write_batch
+
+        def _blocked_write(events):
+            write_entered.set()
+            assert release_write.wait(timeout=2.0)
+            real_write_batch(events)
+
+        monkeypatch.setattr(tele._store, "write_batch", _blocked_write)
+        tele.record_invocation("blocked.first", 1.0)
+        assert write_entered.wait(timeout=1.0)
+        for index in range(_QUEUE_MAX):
+            tele.record_invocation(f"blocked.{index}", 1.0)
+        assert tele.flush(timeout=0.01) is False
+        release_write.set()
+        tele.shutdown()
+
+    def test_shutdown_reaps_writer_after_barrier(self, tmp_db):
+        from trustforge.module_telemetry import ModuleTelemetry
+
+        tele = ModuleTelemetry(db_path=tmp_db)
+        tele.record_invocation("shutdown.barrier", 1.0)
+        assert tele.flush(timeout=1.0)
+        tele.shutdown()
+        assert tele._writer_thread is not None
+        assert not tele._writer_thread.is_alive()
 
 
 class TestModuleStateV2:

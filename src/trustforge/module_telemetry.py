@@ -115,10 +115,11 @@ class _WriteEvent:
 class _FlushRequest:
     """Queue barrier used by tests and orderly callers to await durable writes."""
 
-    __slots__ = ("completed",)
+    __slots__ = ("completed", "succeeded")
 
     def __init__(self) -> None:
         self.completed = threading.Event()
+        self.succeeded = False
 
 
 class ModuleTelemetry:
@@ -178,6 +179,7 @@ class ModuleTelemetry:
     def _writer_loop(self) -> None:
         """Background loop：從 queue 消費並 batch 寫入 SQLite。"""
         batch: list[_WriteEvent] = []
+        writes_ok_since_barrier = True
         while True:
             try:
                 # Block-wait for first event
@@ -186,6 +188,8 @@ class ModuleTelemetry:
                     # Shutdown signal
                     break
                 if isinstance(event, _FlushRequest):
+                    event.succeeded = writes_ok_since_barrier
+                    writes_ok_since_barrier = True
                     event.completed.set()
                     continue
                 batch.append(event)
@@ -197,31 +201,41 @@ class ModuleTelemetry:
                             self._flush_batch(batch)
                             return
                         if isinstance(ev, _FlushRequest):
-                            self._flush_batch(batch)
+                            writes_ok_since_barrier = (
+                                self._flush_batch(batch) and writes_ok_since_barrier
+                            )
                             batch = []
+                            ev.succeeded = writes_ok_since_barrier
+                            writes_ok_since_barrier = True
                             ev.completed.set()
                             continue
                         batch.append(ev)
                     except queue.Empty:
                         break
-                self._flush_batch(batch)
+                writes_ok_since_barrier = (
+                    self._flush_batch(batch) and writes_ok_since_barrier
+                )
                 batch = []
             except queue.Empty:
                 if batch:
-                    self._flush_batch(batch)
+                    writes_ok_since_barrier = (
+                        self._flush_batch(batch) and writes_ok_since_barrier
+                    )
                     batch = []
             except Exception:
                 logger.warning("module_telemetry: writer loop error", exc_info=True)
                 batch = []
 
-    def _flush_batch(self, batch: list[_WriteEvent]) -> None:
+    def _flush_batch(self, batch: list[_WriteEvent]) -> bool:
         """Batch 寫入 SQLite。"""
         if not batch:
-            return
+            return True
         try:
             self._store.write_batch([_to_store_event(ev) for ev in batch])
+            return True
         except Exception:
             logger.warning("module_telemetry: flush_batch failed", exc_info=True)
+            return False
 
     def record_invocation(
         self,
@@ -342,7 +356,7 @@ class ModuleTelemetry:
             self._queue.put(request, timeout=timeout)
         except queue.Full:
             return False
-        return request.completed.wait(timeout)
+        return request.completed.wait(timeout) and request.succeeded
 
     def shutdown(self) -> None:
         """關閉 writer thread（graceful）。"""

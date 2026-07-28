@@ -1173,6 +1173,10 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     key = "dedup-delayed-follower-flight-reference-test-key"
     leader_may_finish = threading.Event()
     counter = _CallCounter()
+    simulated_now = [time.time()]
+
+    def _fake_wall_time():
+        return simulated_now[0]
 
     def _compute_leader():
         counter.hit()
@@ -1182,7 +1186,9 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     leader_result_holder: dict[str, object] = {}
 
     def _worker_leader():
-        leader_result_holder["value"] = web._dedup_analyze_call(key, _compute_leader)
+        leader_result_holder["value"] = web._dedup_analyze_call(
+            key, _compute_leader, wall_time=_fake_wall_time
+        )
 
     leader_thread = threading.Thread(target=_worker_leader)
     leader_thread.start()
@@ -1206,12 +1212,6 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     # `remaining` 參數的，不受這裡影響）。
     real_wait = flight.event.wait
     follower_waiting = threading.Event()
-    simulated_now = [flight.started_at]
-
-    def _fake_wall_time():
-        return simulated_now[0]
-
-    monkeypatch.setattr(web, "_dedup_wall_time", _fake_wall_time)
 
     def _delayed_wait(timeout=None):
         follower_waiting.set()
@@ -1239,7 +1239,9 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
 
     def _worker_follower():
         follower_result_holder["value"] = web._dedup_analyze_call(
-            key, _compute_follower_if_mistakenly_treated_as_fresh
+            key,
+            _compute_follower_if_mistakenly_treated_as_fresh,
+            wall_time=_fake_wall_time,
         )
 
     follower_thread = threading.Thread(target=_worker_follower)

@@ -4328,9 +4328,6 @@ _ANALYZE_DEDUP_STALE_LEADER_SECONDS = 90.0
 _analyze_dedup_lock = threading.Lock()
 
 
-_dedup_wall_time = time.time
-
-
 class _AnalyzeFlight:
     """#51 codex HIGH 複審 Round 14：單一 in-flight「這一輪 leader」物件，
     取代先前的 `(event, start_ts, generation)` tuple + 全域 generation
@@ -4366,9 +4363,9 @@ class _AnalyzeFlight:
 
     __slots__ = ("event", "started_at", "ok", "payload")
 
-    def __init__(self) -> None:
+    def __init__(self, *, wall_time: Callable[[], float] = time.time) -> None:
         self.event = threading.Event()
-        self.started_at = _dedup_wall_time()
+        self.started_at = wall_time()
         self.ok: bool | None = None
         self.payload: object = None
 
@@ -4856,7 +4853,12 @@ def _dedup_prep_failure_health() -> dict:
     }
 
 
-def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
+def _dedup_analyze_call(
+    key: str,
+    compute: Callable[[], Any],
+    *,
+    wall_time: Callable[[], float] = time.time,
+) -> Any:
     """#51 server-side idempotency（防重複送出）核心：同一把 `key`
     （見 `_analyze_dedup_key` docstring）同時只有一個真正在跑
     `compute()`（single-flight leader），後到的相同請求（follower）原地
@@ -4933,14 +4935,14 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     「我 pop 的時候，字典裡是不是還是我自己」這一次 identity 比對，就
     足以保證不會誤刪別人的 entry，不需要整數編號。
     """
-    deadline = _dedup_wall_time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
+    deadline = wall_time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
     my_flight: _AnalyzeFlight | None = None
 
     while True:
         with _analyze_dedup_lock:
             joined_flight = _analyze_dedup_inflight.get(key)
             if joined_flight is None:
-                my_flight = _AnalyzeFlight()
+                my_flight = _AnalyzeFlight(wall_time=wall_time)
                 _analyze_dedup_inflight[key] = my_flight
                 break
             # codex HIGH 複審 Round 15：stale-entry recovery——現有 entry
@@ -4950,14 +4952,14 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             # 拿到鎖的取代掉，之後拿到鎖的會看到已經是新 entry、不再視為
             # stale，落入正常 join-as-follower 路徑）。
             if (
-                _dedup_wall_time() - joined_flight.started_at
+                wall_time() - joined_flight.started_at
                 > _ANALYZE_DEDUP_STALE_LEADER_SECONDS
             ):
-                my_flight = _AnalyzeFlight()
+                my_flight = _AnalyzeFlight(wall_time=wall_time)
                 _analyze_dedup_inflight[key] = my_flight
                 break
         # 鎖外等待，避免持鎖期間阻塞其他 caller 對 dedup 狀態的存取。
-        remaining = deadline - _dedup_wall_time()
+        remaining = deadline - wall_time()
         if remaining <= 0:
             raise _AnalyzeDedupTimeout(
                 f"分析請求排隊等候逾時（前一個相同請求執行超過"

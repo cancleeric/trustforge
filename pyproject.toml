@@ -66,9 +66,3 @@ markers = [
     "serial: tests that must not run concurrently with related tests",
     "subprocess: tests that spawn external commands or child processes",
 ]
-
-[tool.coverage.run]
-# Python 3.12+ 的 sys.monitoring coverage core 保留逐行覆蓋語意，但避免
-# settrace 對 5k+ 測試造成的大量 interpreter overhead。沒有排除任何產品
-# 模組；pre-push 仍以完整 trustforge + trustforge_core 統計守住 75%。
-core = "sysmon"
