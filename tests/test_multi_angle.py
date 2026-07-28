@@ -484,3 +484,93 @@ class TestSynthesisSummary:
                               calibrated_confidence=0.0)
         report = synthesize_angles(angles, "BTC", "snap-fa-txt")
         assert "棄權" in report.synthesis_summary
+
+
+# ---------------------------------------------------------------------------
+# narrate_synthesis (#811)
+# ---------------------------------------------------------------------------
+
+class TestNarrateSynthesis:
+    def test_disabled_by_default(self, monkeypatch):
+        """Without env var, returns synthesis_summary directly."""
+        from trustforge.multi_angle import narrate_synthesis
+        monkeypatch.delenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", raising=False)
+
+        angles = _five_angles()
+        report = synthesize_angles(angles, "BTC", "snap-narr")
+
+        result = narrate_synthesis(report, client=None)
+        assert result == report.synthesis_summary
+
+    def test_offline_client_returns_summary(self, monkeypatch):
+        """Even with env=1, offline client returns synthesis_summary."""
+        from trustforge.multi_angle import narrate_synthesis
+        monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "1")
+
+        angles = _five_angles()
+        report = synthesize_angles(angles, "BTC", "snap-narr2")
+
+        class FakeClient:
+            offline = True
+
+        result = narrate_synthesis(report, client=FakeClient())
+        assert result == report.synthesis_summary
+
+    def test_online_client_uses_llm(self, monkeypatch):
+        """With env=1 and online client, calls client.complete and uses result."""
+        from trustforge.multi_angle import narrate_synthesis
+        monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "1")
+
+        angles = _five_angles()
+        report = synthesize_angles(angles, "BTC", "snap-narr3")
+
+        class FakeResult:
+            text = "這是 LLM 產生的摘要文字，描述五角度偏多的共識。"
+
+        class FakeClient:
+            offline = False
+            def complete(self, system, prompt):
+                assert "不可自行發明" in system or "不可添加" in prompt
+                return FakeResult()
+
+        result = narrate_synthesis(report, client=FakeClient())
+        assert result == "這是 LLM 產生的摘要文字，描述五角度偏多的共識。"
+
+    def test_llm_failure_degrades(self, monkeypatch):
+        """LLM raises → gracefully falls back to synthesis_summary."""
+        from trustforge.multi_angle import narrate_synthesis
+        monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "1")
+
+        angles = _five_angles()
+        report = synthesize_angles(angles, "BTC", "snap-narr4")
+
+        class FakeClient:
+            offline = False
+            def complete(self, system, prompt):
+                raise RuntimeError("Bedrock timeout")
+
+        result = narrate_synthesis(report, client=FakeClient())
+        assert result == report.synthesis_summary
+
+    def test_structural_fields_unchanged(self, monkeypatch):
+        """narrate_synthesis never modifies report's structural fields."""
+        from trustforge.multi_angle import narrate_synthesis
+        monkeypatch.setenv("TRUSTFORGE_MULTI_ANGLE_NARRATION", "1")
+
+        angles = _five_angles(direction="偏空")
+        report = synthesize_angles(angles, "ETH", "snap-narr5")
+        original_consensus = report.consensus
+        original_conflicts = list(report.conflicts)
+
+        class FakeResult:
+            text = "LLM 說偏多但不應影響結構"
+
+        class FakeClient:
+            offline = False
+            def complete(self, system, prompt):
+                return FakeResult()
+
+        narrate_synthesis(report, client=FakeClient())
+        # Structural fields unchanged
+        assert report.consensus == original_consensus
+        assert report.conflicts == original_conflicts

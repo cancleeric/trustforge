@@ -462,3 +462,85 @@ def _build_synthesis_summary(
         parts.append(f"棄權角度：{names}。")
 
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# LLM Narration（選填，#811）
+# ---------------------------------------------------------------------------
+
+_NARRATION_SYSTEM = (
+    "你是 TrustForge 的分析敘事助手。"
+    "你的唯一工作是把已經算好的結構化分析結果用流暢的中文摘要描述。"
+    "你不可以自行發明任何交叉訊號、方向判斷或結論。"
+    "你只能敘述以下 JSON 資料中已存在的結論和數值。"
+)
+
+_NARRATION_TEMPLATE = """{coin} 的五角度綜合分析結構化結果：
+
+共識：{consensus}
+加權信心：{consensus_confidence:.2f}
+證據獨立性：{evidence_independence:.0%}
+
+角度結果：
+{angles_summary}
+
+衝突清單：
+{conflicts_summary}
+
+限制：
+{limits}
+
+請用 2-3 句話摘要上述結果，語氣中性專業。不可添加任何原始資料中沒有的判斷。"""
+
+
+def narrate_synthesis(
+    report: MultiAngleReport,
+    client: "Any",
+    log: "Any | None" = None,
+) -> str:
+    """用 Bedrock 把 MultiAngleReport 改寫成人類可讀摘要（#811）。
+
+    硬約束：LLM 不可自行發明交叉訊號。
+    失敗降級：回傳 report.synthesis_summary（確定性模板文字）。
+    離線 / client.offline → 直接回傳 synthesis_summary。
+
+    由環境變數 TRUSTFORGE_MULTI_ANGLE_NARRATION=1 控制是否啟用。
+    """
+    import os
+    if os.environ.get("TRUSTFORGE_MULTI_ANGLE_NARRATION") != "1":
+        return report.synthesis_summary
+
+    # 離線直接降級
+    if getattr(client, "offline", True):
+        return report.synthesis_summary
+
+    # 組裝 prompt
+    angles_summary = "\n".join(
+        f"- {MODE_LABELS.get(a.angle, a.angle)}：{a.direction}（信心 {a.calibrated_confidence:.2f}，{a.decision_state}）"
+        for a in report.angles
+    )
+    conflicts_summary = "\n".join(
+        f"- {c.summary}" for c in report.conflicts
+    ) or "無衝突"
+    limits_text = "\n".join(f"- {lim}" for lim in report.limits) or "無"
+
+    prompt = _NARRATION_TEMPLATE.format(
+        coin=report.coin,
+        consensus=report.consensus,
+        consensus_confidence=report.consensus_confidence,
+        evidence_independence=report.evidence_independence,
+        angles_summary=angles_summary,
+        conflicts_summary=conflicts_summary,
+        limits=limits_text,
+    )
+
+    try:
+        result = client.complete(system=_NARRATION_SYSTEM, prompt=prompt)
+        narration = result.text.strip() if hasattr(result, "text") else str(result).strip()
+        if narration and len(narration) > 10:
+            return narration
+    except Exception:
+        pass
+
+    # 降級
+    return report.synthesis_summary
