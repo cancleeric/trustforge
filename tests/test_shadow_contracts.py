@@ -151,6 +151,46 @@ def test_timeout_error_cost_and_latency_fail_closed(mutation, expected_action, b
     assert ShadowBlocker(blocker) in decision.aggregate.blockers
 
 
+def test_aggregate_parity_threshold_allows_ten_percent_failures():
+    observations = _observations()
+    for index in range(3):
+        observations[index] = replace(
+            observations[index],
+            parity_passed=False,
+            confidence_delta=0.06,
+        )
+
+    decision = evaluate_shadow(
+        observations,
+        load_policy(),
+        now="2026-07-28T01:00:00+00:00",
+    )
+
+    assert decision.aggregate.parity_rate == 0.9
+    assert decision.action is ShadowDecisionAction.ELIGIBLE_FOR_OPERATOR_REVIEW
+    assert decision.aggregate.blockers == ()
+
+
+def test_aggregate_parity_threshold_blocks_below_ninety_percent():
+    observations = _observations()
+    for index in range(4):
+        observations[index] = replace(
+            observations[index],
+            parity_passed=True,
+            supporting_jaccard=0.6,
+        )
+
+    decision = evaluate_shadow(
+        observations,
+        load_policy(),
+        now="2026-07-28T01:00:00+00:00",
+    )
+
+    assert decision.aggregate.parity_rate < 0.9
+    assert decision.action is ShadowDecisionAction.CONTINUE_OBSERVATION
+    assert decision.aggregate.blockers == (ShadowBlocker.PARITY_RATE,)
+
+
 def test_mixed_identity_and_stale_window_fail_closed():
     observations = _observations()
     other_identity = replace(
