@@ -219,8 +219,8 @@ echo "[ec2] version=${GIT_VER}"
 
 # Compute config snapshot before building
 CONFIG_SNAPSHOT_JSON="{}"
-if [ -x .venv/bin/python ]; then PYTHON=.venv/bin/python; else PYTHON=python3; fi
-CONFIG_SNAPSHOT=$($PYTHON -c "
+if [ -x .venv/bin/python ]; then PYTHON="${PWD}/.venv/bin/python"; else PYTHON=python3; fi
+CONFIG_SNAPSHOT=$("$PYTHON" -c "
 import sys
 sys.path.insert(0, 'src')
 from trustforge.config_snapshot import ConfigSnapshot
@@ -233,7 +233,7 @@ CONFIG_IDENTITY=$(echo "$CONFIG_SNAPSHOT" | python3 -c "import sys,json; print(j
 ( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts skills deploy docs llms.txt -x '*/__pycache__/*' )
 ARTIFACT_DIGEST=$(sha256sum "$ZIP" | awk '{print $1}')
 ARTIFACT_PREFIX="artifacts/${ARTIFACT_DIGEST}/"
-MANIFEST_JSON=$(cd "$B" && $PYTHON -c "
+MANIFEST_JSON=$(cd "$B" && "$PYTHON" -c "
 import sys, json
 sys.path.insert(0, '.')
 from trustforge.release_manifest import compute_manifest, manifest_to_json
@@ -420,8 +420,8 @@ aws s3 cp - "s3://${BUCKET}/pointers/active.json" --region "$REGION" <<<"$CANDID
 aws s3 cp - "s3://${BUCKET}/pointers/previous.json" --region "$REGION" <<<"$CANDIDATE_JSON" >/dev/null
 
 # First-time receipt
-if [ -x .venv/bin/python ]; then PYTHON=.venv/bin/python; else PYTHON=python3; fi
-$PYTHON -c "
+if [ -x .venv/bin/python ]; then PYTHON="${PWD}/.venv/bin/python"; else PYTHON=python3; fi
+"$PYTHON" -c "
 import sys
 sys.path.insert(0, 'src')
 from trustforge.activation_receipt import ActivationReceipt, write_receipt_to_s3
