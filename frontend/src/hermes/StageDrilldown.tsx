@@ -250,7 +250,7 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
             {evidence.length > 0 ? (
               <div style={{ marginTop: 8 }}>
                 <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--color-hermes-tx3)', marginBottom: 6 }}>{t('scanned')} ({evidence.length})</div>
-                <EvidenceTable evidence={evidence} />
+                <EvidenceTable evidence={evidence} evidenceGroups={report?.evidence_groups} />
               </div>
             ) : (
               <div style={{ fontSize: 10.5, color: 'var(--color-hermes-tx3)', fontStyle: 'italic', marginTop: 8 }}>

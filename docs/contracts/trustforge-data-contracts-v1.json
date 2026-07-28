@@ -1740,6 +1740,60 @@
       "direction": {
         "type": "string"
       },
+      "evidence_groups": {
+        "anyOf": [
+          {
+            "items": {
+              "properties": {
+                "latest_value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "member_indices": {
+                  "items": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "representative_idx": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "trend": {
+                  "enum": [
+                    "rising",
+                    "falling",
+                    "stable",
+                    null
+                  ],
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "value_range": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "representative_idx",
+                "member_indices"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "facts": {
         "items": {
           "type": "string"
