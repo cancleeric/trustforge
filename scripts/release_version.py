@@ -27,13 +27,24 @@ def parse_version(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())
 
 
-def list_release_tags(root: Path = ROOT) -> list[str]:
+def list_release_tags(root: Path = ROOT, remote: str = "origin") -> list[str]:
     output = subprocess.check_output(
         ["git", "tag", "--list", "v[0-9]*.[0-9]*.[0-9]*"],
         cwd=root,
         text=True,
     )
-    return [tag for tag in output.splitlines() if VERSION_PATTERN.fullmatch(tag)]
+    tags = {tag for tag in output.splitlines() if VERSION_PATTERN.fullmatch(tag)}
+    remote_output = subprocess.check_output(
+        ["git", "ls-remote", "--tags", remote, "refs/tags/v*"],
+        cwd=root,
+        text=True,
+    )
+    for line in remote_output.splitlines():
+        ref = line.rsplit(maxsplit=1)[-1]
+        tag = ref.removeprefix("refs/tags/").removesuffix("^{}")
+        if VERSION_PATTERN.fullmatch(tag):
+            tags.add(tag)
+    return sorted(tags, key=parse_version)
 
 
 def highest_release_version(tags: list[str]) -> tuple[int, int, int]:

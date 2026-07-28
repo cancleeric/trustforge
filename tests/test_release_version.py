@@ -37,6 +37,17 @@ def test_highest_release_version_uses_semver_not_lexical_order() -> None:
     assert release_version.highest_release_version(["v0.9.9", "v0.10.0", "v0.2.99"]) == (0, 10, 0)
 
 
+def test_list_release_tags_combines_local_and_remote(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    outputs = iter(
+        [
+            "v0.9.0\nv0.10.0\n",
+            "abc\trefs/tags/v0.27.0\nabc\trefs/tags/v0.27.0^{}\nabc\trefs/tags/not-semver\n",
+        ]
+    )
+    monkeypatch.setattr(release_version.subprocess, "check_output", lambda *args, **kwargs: next(outputs))
+    assert release_version.list_release_tags(tmp_path) == ["v0.9.0", "v0.10.0", "v0.27.0"]
+
+
 @pytest.mark.parametrize(
     ("level", "expected"),
     [("patch", "1.2.4"), ("minor", "1.3.0"), ("major", "2.0.0")],
