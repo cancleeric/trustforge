@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import CoinSelect from './CoinSelect'
 import { useHermesI18n } from '../hermes/hermesI18n'
-import { QUESTION_TYPES, defaultQuestionTypeForFocus, isAnalysisFocusId, isQuestionTypeId, type QuestionTypeId } from '../lib/analysisTaxonomy'
+import { defaultQuestionTypeForFocus, isAnalysisFocusId } from '../lib/analysisTaxonomy'
 
 export interface QueryValues {
   coin: string
@@ -11,8 +11,8 @@ export interface QueryValues {
   q: string
 }
 
-// PLAN 方案 B：這五個是產品化的「分析角度」，不是官方題型。官方題型改由
-// 上面獨立一顆下拉負責（QUESTION_TYPES），這裡只留角度與它的預設題型映射。
+// 這五個是「分析角度」。N69 之後它是這張表單唯一的下拉，並同時決定送給
+// 後端的 question_type（映射見下方 onChange，與後端 analysis_flow.MODES 同源）。
 const ANALYSIS_MODES = [
   { value: 'risk', labelKey: 'qcModeRisk' },
   { value: 'sentiment', labelKey: 'qcModeSentiment' },
@@ -41,7 +41,6 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
   const [type, setType] = useState(initial.type)
   const [mode, setMode] = useState(initial.mode)
   const [q, setQ] = useState(initial.q)
-  const [typeEdited, setTypeEdited] = useState(false)
   // 使用者是否手動編輯過問題欄——一旦編輯過，換幣就不再覆蓋掉他打的字；
   // 「送出/瀏覽器上下頁」會在下方 effect 裡重置，視為開啟一輪新的表單狀態。
   const [queryEdited, setQueryEdited] = useState(false)
@@ -53,7 +52,6 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
     setMode(initial.mode)
     setQ(initial.q)
     setQueryEdited(false)
-    setTypeEdited(false)
   }, [initial.coin, initial.mode, initial.type, initial.q])
 
   function handleCoinChange(next: string) {
@@ -77,22 +75,17 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
       </div>
       <CoinSelect id="qc-coin" value={coin} onChange={handleCoinChange} />
       <div>
-        <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-qtype">
-          {t('qtypeLabel')}
-        </label>
-        <select
-          id="qc-qtype"
-          value={isQuestionTypeId(type) ? type : 'multi_source'}
-          onChange={(e) => {
-            setType(e.target.value as QuestionTypeId)
-            setTypeEdited(true)
-          }}
-          className="mb-3 w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
-        >
-          {QUESTION_TYPES.map((item) => (
-            <option key={item.id} value={item.id}>{t(item.labelKey)}</option>
-          ))}
-        </select>
+        {/* N69：這裡原本也有一顆「官方題型」下拉（多源整合／假設驗證／比較分析），
+            已移除，理由與 HermesLeftRail 同一條——`docs/competition/
+            COMPETITION-OFFICIAL.md` 那節的標題就是**「範例題型」**，同份文件並
+            寫明「比賽當日從題目池抽 1 題 + 指定幣種，現場公布，無法預知」。
+            三種是主辦方舉的例子，不是可出題的範圍；做成三選一是把示例當限制。
+            ⚠️ 這顆特別容易漏掉：QueryConsole 不只是 /analyze 的表單，在
+            **≤560px 它就是手機唯一的輸入口**（hermes.css 的 `@media
+            (max-width:560px)` 隱藏 left-rail，並刻意保留中央 QueryConsole）。
+            只改左軌等於只修好桌機，手機使用者照樣被三選一擋住。
+            題型改由分析角度推導（`defaultQuestionTypeForFocus`，與後端
+            `analysis_flow.MODES` 同源，analysisTaxonomy.test.ts 綁住兩邊）。 */}
         <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-type">
           {t('qcModeLabel')}
         </label>
@@ -102,9 +95,10 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
           onChange={(e) => {
             const next = e.target.value
             setMode(next)
-            // 使用者若還沒自己動過題型，角度沿用既有映射帶一個預設題型出來；
-            // 一旦他自己選過題型，就不再被角度覆蓋（題型才是官方要看的那層）。
-            if (!typeEdited && isAnalysisFocusId(next)) setType(defaultQuestionTypeForFocus(next))
+            // N69：題型不再由使用者選，改由角度推導，所以這裡無條件跟著換。
+            // （原本有一個 `typeEdited` 旗標擋覆蓋，題型下拉移除後它永遠是
+            // false，留著只會讓人以為還有「使用者自選題型」這條路。）
+            if (isAnalysisFocusId(next)) setType(defaultQuestionTypeForFocus(next))
           }}
           className="w-full rounded border border-tf-border bg-tf-bg px-2 py-1.5 text-sm text-tf-text"
         >

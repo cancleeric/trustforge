@@ -1,50 +1,71 @@
 import { useEffect, useRef } from 'react'
-import { TIER_COLOR, type GalaxyModel } from '../lib/hermesData'
 import { modeLabel, useHermesI18n } from './hermesI18n'
-import type { ServiceMonitorState } from '../pages/HermesDashboard'
 import type { AnalysisQuestionContext } from '../lib/endpoints'
 import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
-import { ANALYSIS_FOCUSES, QUESTION_TYPES, type AnalysisFocusId, type QuestionTypeId } from '../lib/analysisTaxonomy'
+import type { AnalysisFocusId } from '../lib/analysisTaxonomy'
+import type { HermesWorkspaceModule } from './HermesModuleDeck'
 
+/** N70（CEO：「把選單功能放到最左邊」「能按的都移到左邊欄」）：
+ *  頂欄過去同時承載顯示與操作，一般使用者掃不出哪些能按。導覽與四個開關
+ *  全部搬進這裡的 `hermes-rail-controls`；頂欄只留顯示（見 HermesTopBar）。
+ *  市場遙測則反向搬上頂欄，做成點擊展開的摘要膠囊。
+ *
+ *  ⚠️ 手機注意：`hermes.css` 的 `@media (max-width:560px)` 原本對
+ *  `[data-region='left-rail']` 下 `display:none !important`——照舊的話所有搬進來
+ *  的控制項在 ≤560px 會整組消失。N70 改成 `display:contents` 讓
+ *  `.hermes-rail-controls` 穿透出來、定位成頂欄下方可橫向捲動的固定條
+ *  （見 hermes.css N70 節，高度已折進 `--hermes-top`）。
+ *  改這裡之前先確認手機路徑還在。 */
 interface HermesLeftRailProps {
-  model: GalaxyModel
-  uplinkLatency?: string
   hermesMessage: string
   hasOrder: boolean
-  /** 官方三題型（多源整合／假設驗證／比較分析）——評審看的就是這個，所以它是
-   *  主選單。存 id 不存翻譯後的 label，理由見 lib/analysisTaxonomy.ts。 */
-  questionType: QuestionTypeId
-  /** 產品化分析角度，降級成選填的第二層（PLAN 方案 B）。 */
+  /** N70：分析角度。**已不是使用者的選擇**——由 HermesDashboard 從題目文字
+   *  推導（`recommendAnalysisMode`），`?mode=` 深連結優先。這裡只拿來顯示
+   *  「本次用哪個角度」。它仍決定送給後端的 question_type（對應表
+   *  `defaultQuestionTypeForFocus` 與後端 `analysis_flow.MODES` 同源，
+   *  由 analysisTaxonomy.test.ts 綁住）。存 id 不存翻譯後的 label。 */
   focus: AnalysisFocusId
   query: string
   submitLabel: string
   disabled?: boolean
-  serviceMonitor?: Record<string, ServiceMonitorState>
+  /** N70：從頂欄搬下來的操作項。 */
+  activeModule?: HermesWorkspaceModule | null
+  onModuleSelect?: (id: HermesWorkspaceModule) => void
+  onHome?: () => void
+  onBeginnerModeChange?: (v: boolean) => void
+  reducedMotion?: boolean
+  onReducedMotionToggle?: () => void
+  onHelp?: () => void
+  onToggleShip?: () => void
   questionContext?: AnalysisQuestionContext | null
   onRecallQuestion?: (question: string) => void
-  onQuestionType: (v: QuestionTypeId) => void
-  onFocus: (v: AnalysisFocusId) => void
   onQuery: (v: string) => void
   onSubmit: () => void
   beginnerMode?: boolean
-  recommendedMode?: AnalysisModeId
   onChooseIntent?: (mode: AnalysisModeId, question: string) => void
-  onApplyRecommendedMode?: (mode: AnalysisModeId) => void
 }
 
-// 兩顆下拉（官方題型／分析角度）共用同一組樣式，避免各寫一份日後漂移。
-const SELECT_LABEL = { display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 } as const
-const SELECT_WRAP = { position: 'relative', marginBottom: 10, flexShrink: 0 } as const
-const SELECT_STYLE = { width: '100%', appearance: 'none', background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd2)', borderRadius: 5, color: 'var(--color-hermes-tx)', fontFamily: 'var(--font-hermes-mono)', fontSize: 12, padding: '8px 10px', cursor: 'pointer' } as const
-const SELECT_CARET = { position: 'absolute', right: 10, top: 10, color: 'var(--color-hermes-tx3)', pointerEvents: 'none', fontSize: 10 } as const
+// N70：兩顆下拉（官方題型 N69／分析角度 N70）都移除後，共用的 SELECT_* 樣式
+// 常數也一併刪掉——留著會讓人以為左軌還有下拉。
 
 export default function HermesLeftRail({
-  model, uplinkLatency = '2.4s', hermesMessage, hasOrder, questionType, focus, query, submitLabel,
-  onQuestionType, onFocus, onQuery, onSubmit, disabled = false, serviceMonitor = {},
+  hermesMessage, hasOrder, focus, query, submitLabel,
+  onQuery, onSubmit, disabled = false,
   questionContext = null, onRecallQuestion,
-  beginnerMode = false, recommendedMode = 'risk', onChooseIntent, onApplyRecommendedMode,
+  beginnerMode = false, onChooseIntent,
+  activeModule = null, onModuleSelect, onHome, onBeginnerModeChange,
+  reducedMotion = false, onReducedMotionToggle, onHelp, onToggleShip,
 }: HermesLeftRailProps) {
-  const { t } = useHermesI18n()
+  const { t, locale, setLocale } = useHermesI18n()
+  // N70：從 HermesTopBar 原封搬過來（含 description，nav 的 tooltip/無障礙說明
+  // 都靠它），只換了容器。
+  const navItems = [
+    { id: 'analyze' as const, label: t('analyze'), description: locale === 'zh-TW' ? '找出風險、原因與可追溯證據' : 'Find risks, reasons, and traceable evidence' },
+    { id: 'compare' as const, label: t('compare'), description: locale === 'zh-TW' ? '並排比較兩個資產的可信狀態' : 'Compare two assets side by side' },
+    { id: 'history' as const, label: t('history'), description: locale === 'zh-TW' ? '查看信任與資料完整度如何變化' : 'Review trust and completeness over time' },
+    { id: 'status' as const, label: t('sources'), description: locale === 'zh-TW' ? '確認資料來源是否正常更新' : 'Check whether sources are updating' },
+    { id: 'costs' as const, label: t('costs'), description: locale === 'zh-TW' ? '查看分析使用量與模型費用' : 'Review analysis usage and model cost' },
+  ]
   // N42: 訊息串永遠停在 scrollTop 0，最新一則被切在容器下緣——實測 14 組
   // （2 locale × 7 視窗）全部 `scrollTop: 0`，而 scrollHeight 最高 1403、
   // clientHeight 只有 140。也就是說使用者從來看不到 HERMES 剛剛回了什麼，
@@ -56,7 +77,6 @@ export default function HermesLeftRail({
     const el = transcriptRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [transcriptDeps])
-  const { tierCounts, coins } = model
   return (
     <div
       className="hermes-glass hermes-rail-split"
@@ -88,22 +108,55 @@ export default function HermesLeftRail({
           的單欄堆疊。左側總寬仍然只由 `--hermes-rail` 表示，所以中間全息區、
           底部管線條、右軌那些 `left: var(--hermes-rail)` 的規則一行都不用改。 */}
       <div className="hermes-rail-menu">
-      {!beginnerMode && <div>
-        <div style={{ fontSize: 10, letterSpacing: '1.6px', color: 'var(--color-hermes-tx3)', marginBottom: 9 }}>{t('telemetry')}</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 7, background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)', borderRadius: 6, padding: '10px 12px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('tracked')}</span><span style={{ color: 'var(--color-hermes-tx)' }}>{coins.length}</span></div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('healthy')}</span><span style={{ color: TIER_COLOR.healthy }}>{tierCounts.healthy}</span></div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('moderate')}</span><span style={{ color: TIER_COLOR.moderate }}>{tierCounts.moderate}</span></div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('danger')}</span><span style={{ color: TIER_COLOR.danger }}>{tierCounts.danger}</span></div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}><span style={{ color: 'var(--color-hermes-tx2)' }}>{t('latency')}</span><span style={{ color: 'var(--color-hermes-tx)' }}>{uplinkLatency}</span></div>
-          <div className="hermes-service-monitor" aria-label="system link monitor">
-            {Object.entries(serviceMonitor).map(([name, state]) => {
-              const label = state === 'ok' ? 'UP' : state === 'empty' ? 'NO DATA' : state === 'stale' ? 'DEGRADED' : state === 'error' ? 'DOWN' : 'CHECK'
-              return <span key={name} className={`is-${state}`} title={`${name}: ${label}`}><i />{name} · {label}</span>
-            })}
-          </div>
-        </div>
-      </div>}
+      {/* N70 控制區：原本散在頂欄右半邊的所有可按項目。市場遙測（原本佔這個
+          位置）反向搬到頂欄做成點擊展開的膠囊——它是狀態顯示，不是操作。 */}
+      <nav className="hermes-rail-controls" aria-label={t('navigation')}>
+        <button type="button" className="hermes-nav-item" onClick={onHome} aria-pressed={activeModule === null}>
+          {t('homeAria')}
+        </button>
+        {/* N70（CEO：「使用者要按要點的功能統一到最左邊的選單欄中」）：
+            這裡原本在新手模式只留「分析」。導覽被藏起來的結果是新手模式沒有
+            比較的入口——角度已改由題目推導，而推導器不會產生 comparison。
+            導覽是「有哪些功能」，不是進階選項，五項一律顯示；新手模式該減的
+            是版面密度，不是功能的存在。 */}
+        {navItems.map((item) => (
+          <button
+            type="button"
+            key={item.id}
+            className="hermes-nav-item"
+            onClick={() => onModuleSelect?.(item.id)}
+            aria-pressed={activeModule === item.id}
+            aria-description={item.description}
+            data-description={item.description}
+          >
+            {item.label}
+          </button>
+        ))}
+        <div className="hermes-rail-controls-sep" role="separator" />
+        <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
+          {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
+        </button>
+        {/* N62：這顆按鈕原本掛 aria-label（「啟用低動態模式」），而 aria-label 是
+            「取代」不是「補充」可見文字——螢幕閱讀器唸到的名稱跟眼睛看到的
+            「動態」對不上，語音操作使用者照著唸也點不到（WCAG 2.5.3 Label in
+            Name）。狀態交給 aria-pressed，動作提示留在 title。 */}
+        <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} title={reducedMotion ? t('reducedMotionOnTitle') : t('reducedMotionOffTitle')}>
+          {reducedMotion ? t('dynamicOff') : t('dynamicOn')}
+        </button>
+        <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label={t('openBeginnerHelp')}>{t('helpToggle')}</button>
+        {/* N70（CEO：「一樣改到左邊選單，上方只留狀態」）：艦體升級原本只在完整
+            模式出現。跟導覽同一個道理——能按的一律留在左軌，新手模式減的是
+            版面密度不是功能的存在，所以拿掉 `!beginnerMode` 這道門。 */}
+        <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>{t('shipToggle')}</button>
+        <button
+          type="button"
+          className="hermes-lang-toggle"
+          aria-label={t('language')}
+          onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')}
+        >
+          {locale === 'zh-TW' ? 'EN' : '繁中'}
+        </button>
+      </nav>
         {/* N46: 這張「我想做什麼？」卡片預設攤開，五張 intent 卡（每張都是
             標題＋說明兩行）在 zh-TW 就吃掉 300px 以上，把 HERMES 對話串和
             輸入框一路推到畫面底部——老闆原話「這設計根本有問題 排盤很有問題」
@@ -154,42 +207,35 @@ export default function HermesLeftRail({
             </div>
           </details>
         )}
-        {/* PLAN 方案 B：官方三題型是主選單（評審看的是這個），產品化的五個
-            分析角度降級成下面那顆選填的第二層。原本這裡只有五個角度，被當成
-            官方題型顯示——那是 PLAN §3 明文要改掉的。 */}
-        <label style={SELECT_LABEL} htmlFor="hermes-qtype">{t('qtypeLabel')}</label>
-        <div style={SELECT_WRAP}>
-          <select
-            id="hermes-qtype"
-            value={questionType}
-            onChange={(e) => onQuestionType(e.target.value as QuestionTypeId)}
-            style={SELECT_STYLE}
-          >
-            {QUESTION_TYPES.map((item) => <option key={item.id} value={item.id}>{t(item.labelKey)}</option>)}
-          </select>
-          <span style={SELECT_CARET}>▼</span>
+        {/* N69（CEO 回報「這東西是比賽方的範例 不應該給使用者選」）：
+            這裡原本有一顆「官方題型」下拉（多源整合／假設驗證／比較分析），
+            現已移除。理由不是排版，是它在陳述一件不成立的事——
+            `docs/competition/COMPETITION-OFFICIAL.md` 那一節的標題就是
+            **「範例題型」**，同一份文件並明寫「比賽當日從題目池抽 1 題 + 指定
+            幣種，現場公布，無法預知」。三種是主辦方舉的例子，不是可出題的範圍；
+            做成三選一等於把示例當成限制，現場抽到範圍外的題目時使用者會卡住。
+            真正的輸入是下面那個自由題目輸入框（後端 `register_question` 收
+            1..1000 字任意字串，本來就吃得下）。
+            question_type 沒有消失、只是不再要使用者猜：改由分析角度推導
+            （`defaultQuestionTypeForFocus`，與後端 `analysis_flow.MODES` 同一套
+            對應——fundamentals/catalyst → hypothesis，其餘 → multi_source）。
+            「比較分析」本來就有 /compare 專頁且已在主導覽，不需要在這裡再開一個入口。
+            ⚠️ 要加回來之前請先確認官方文件已改成「限這三種」——目前不是。 */}
+        {/* N70（CEO：「分析角度 也不給使用者選」）：這裡原本是 `#hermes-focus`
+            五選一下拉。移除的理由跟 N69 的題型下拉是同一條——它要求使用者先讀懂
+            五個金融名詞才能開始，而在手動分析路徑上它實質只決定後端的
+            `question_type` 落在 multi_source 還是 hypothesis
+            （`analysis_flow.py` MODES：fundamentals/catalyst → HYPOTHESIS，
+            其餘 → MULTI_SOURCE；模板只有排程 `enqueue_matrix` 會用到，
+            `register_question` 收的是使用者自由文字）。要一般使用者去猜這個
+            二選一，是把系統的內部維度當成使用者的選擇題。
+            改由題目文字推導（`recommendAnalysisMode`，純函式、零延遲、已有測試），
+            這裡只做唯讀說明——保留透明度，但不再是選擇題。
+            ⚠️ `?mode=` 深連結仍然優先於推導（見 HermesDashboard），所以既有連結
+            與排程完全不受影響；不要為了「還原選單」而把 URL 那條路也拔掉。 */}
+        <div className="hermes-focus-derived">
+          {t('derivedFocusPrefix')}{modeLabel(focus, t)}{t('derivedFocusSuffix')}
         </div>
-        {questionType === 'comparison' && (
-          <div className="hermes-analysis-expectation">{t('qtypeComparisonHint')}</div>
-        )}
-
-        <label style={SELECT_LABEL} htmlFor="hermes-focus">{t('qcModeLabel')}</label>
-        <div style={SELECT_WRAP}>
-          <select
-            id="hermes-focus"
-            value={focus}
-            onChange={(e) => onFocus(e.target.value as AnalysisFocusId)}
-            style={SELECT_STYLE}
-          >
-            {ANALYSIS_FOCUSES.map((item) => <option key={item.id} value={item.id}>{t(item.labelKey)}</option>)}
-          </select>
-          <span style={SELECT_CARET}>▼</span>
-        </div>
-        {beginnerMode && focus !== recommendedMode && (
-          <button type="button" className="hermes-mode-suggestion" onClick={() => onApplyRecommendedMode?.(recommendedMode)}>
-            {t('suggestSwitchToPrefix')}{modeLabel(recommendedMode, t)}{t('suggestSwitchToSuffix')}
-          </button>
-        )}
 
         {beginnerMode && <div className="hermes-analysis-expectation">{t('analysisExpectationPrefix')}{modeLabel(focus, t)}{t('analysisExpectationSuffix')}</div>}
       </div>
