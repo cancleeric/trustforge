@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from trustforge import web
+from trustforge.comparison_contract import ComparisonRunResult
 from trustforge.schema import Report
 
 
@@ -60,7 +61,9 @@ def test_asset_context_seed_data_uses_runtime_copied_data_path() -> None:
 def test_comparison_payload_adds_context_per_report_without_internal_fields() -> None:
     # 負向控制組要用「fixture 裡真的沒有」的代號。BTC 自 2026-07-27 起已補進
     # data/asset_context_records.json（原本只有 ARB，五幣全空），不再適用。
-    payload = web._build_comparison_json_payload(_report("ARB"), [], _report("DOGE"), [], _Log())
+    payload = web._build_comparison_json_payload(
+        ComparisonRunResult(report_a=_report("ARB"), evidence_a=[], report_b=_report("DOGE"), evidence_b=[], comparison=None, log=_Log())
+    )
 
     report_a = payload["report_a"]
     report_b = payload["report_b"]

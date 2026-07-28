@@ -3975,8 +3975,8 @@ def _do_comparison(
     *,
     enforce_rate_limit: bool = True,
     online_stance_force_offline: bool | None = None,
-) -> tuple:
-    """雙幣比較分析入口，回傳 (report_a, evidence_a, report_b, evidence_b, log) 五元組。
+):
+    """雙幣比較分析入口，回傳 ComparisonRunResult（支援 unpack 為 5-tuple）。
 
     Raises:
         ValueError:        無法解析兩個幣種 / q 過長 / pipeline 無資料
@@ -4033,18 +4033,18 @@ def _do_comparison(
         )
         if _force_offline:
             _extra["force_stance_offline"] = True
-        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+        result = run_comparison(
             coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
         )
     else:
-        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+        result = run_comparison(
             coin_a, coin_b, query, offline=not live
         )
     # 成本會計階段3：comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，
     # 記 2 次（見 `_record_analyze_service_calls` docstring），理由同 `_do_analyze`。
     if real or live:
         _record_analyze_service_calls(2)
-    return report_a, evidence_a, report_b, evidence_b, log
+    return result
 
 
 def _sanitized_retry_href(path: str) -> str:
@@ -5424,16 +5424,20 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
     }
 
 
-def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, log) -> dict:
-    """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。"""
+def _build_comparison_json_payload(result) -> dict:
+    """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。
+
+    CA-06：接收 ComparisonRunResult（含 .comparison / ComparisonReport），
+    並加入 ``comparison_report`` 欄位。"""
     return {
         "version": VERSION,
-        "report_a": _public_report_dict(report_a),
-        "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
-        "report_b": _public_report_dict(report_b),
-        "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
-        "execution": log.manifest(),
-        "execution_log": log.events,
+        "report_a": _public_report_dict(result.report_a),
+        "evidence_a": [_public_evidence_dict(ev) for ev in result.evidence_a],
+        "report_b": _public_report_dict(result.report_b),
+        "evidence_b": [_public_evidence_dict(ev) for ev in result.evidence_b],
+        "comparison_report": result.comparison.to_dict() if result.comparison else None,
+        "execution": result.log.manifest(),
+        "execution_log": result.log.events,
     }
 
 
@@ -6749,7 +6753,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
         )
 
         if qtype == QuestionType.COMPARISON:
-            report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+            result = _dedup_analyze_call(
                 dedup_key,
                 lambda: _do_comparison(
                     qs,
@@ -6758,6 +6762,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                     online_stance_force_offline=force_offline,
                 ),
             )
+            report_a, evidence_a, report_b, evidence_b, log = result
             payload = {
                 "version": VERSION,
                 "report_a": _public_report_dict(report_a),
@@ -6770,6 +6775,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
+                "comparison_report": result.comparison.to_dict() if result.comparison else None,
                 "execution": log.manifest(),
                 "execution_log": log.events,
             }
@@ -8397,7 +8403,7 @@ class Handler(BaseHTTPRequestHandler):
                         # leader 會執行到）改傳 `enforce_rate_limit=False`，避免
                         # 同一個 caller 的 IP 被重複計入限流 bucket 兩次。
                         _analyze_enforce_caller_rate_limit(qs, client_ip)
-                        report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+                        result = _dedup_analyze_call(
                             dedup_key,
                             lambda: _do_comparison(
                                 qs, client_ip=client_ip, enforce_rate_limit=False,
@@ -8405,14 +8411,11 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                         )
                     else:
-                        report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
-                            qs, client_ip=client_ip
-                        )
+                        result = _do_comparison(qs, client_ip=client_ip)
+                    report_a, evidence_a, report_b, evidence_b, log = result
                     query = qs.get("q", [""])[0]
                     if u.path == "/analyze.json":
-                        payload = _build_comparison_json_payload(
-                            report_a, evidence_a, report_b, evidence_b, log
-                        )
+                        payload = _build_comparison_json_payload(result)
                         return self._send(
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",

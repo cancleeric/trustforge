@@ -27,6 +27,7 @@ import pytest
 
 from trustforge import pipeline as pipeline_module
 from trustforge import web
+from trustforge.comparison_contract import ComparisonRunResult
 from trustforge.ingestion.cache import (
     DynamoDBCache,
     JsonCacheBackend,
@@ -304,10 +305,10 @@ def test_api_analyze_trust_radar_field_equals_aggregate_trust_by_kind_single_and
     data2 = _envelope(body2)["data"]
     evidence_a = web._do_comparison(
         {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]}
-    )[1]
+    ).evidence_a
     evidence_b = web._do_comparison(
         {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]}
-    )[3]
+    ).evidence_b
     assert data2["trust_radar_a"] == aggregate_trust_by_kind(evidence_a)
     assert data2["trust_radar_b"] == aggregate_trust_by_kind(evidence_b)
 
@@ -3188,7 +3189,7 @@ def test_api_analyze_comparison_public_response_excludes_author(monkeypatch):
     evidence_a = list(evidence_a) + [authored_ev]
 
     def fake_run_comparison(coin_a, coin_b, query, **kwargs):
-        return report_a, evidence_a, report_b, evidence_b, log
+        return ComparisonRunResult(report_a=report_a, evidence_a=evidence_a, report_b=report_b, evidence_b=evidence_b, comparison=None, log=log)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 
@@ -3221,7 +3222,7 @@ def test_analyze_json_route_comparison_excludes_author(monkeypatch):
     evidence_a = list(evidence_a) + [authored_ev]
 
     def fake_run_comparison(coin_a, coin_b, query, **kwargs):
-        return report_a, evidence_a, report_b, evidence_b, log
+        return ComparisonRunResult(report_a=report_a, evidence_a=evidence_a, report_b=report_b, evidence_b=evidence_b, comparison=None, log=log)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 

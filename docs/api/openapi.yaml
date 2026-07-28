@@ -2861,6 +2861,72 @@ components:
               summary:
                 type: string
 
+    ComparisonReportData:
+      type: object
+      description: CA-06 結構化比較報告（`ComparisonReport.to_dict()`），四個比較面向、綜合結論、限制與翻轉條件
+      required:
+        - coin_a
+        - coin_b
+        - query
+        - conclusion
+        - dimensions
+        - confidence
+        - limits
+        - could_flip
+        - generated_at
+      properties:
+        coin_a:
+          type: string
+        coin_b:
+          type: string
+        query:
+          type: string
+        conclusion:
+          type: string
+        dimensions:
+          type: array
+          items:
+            type: object
+            properties:
+              dimension:
+                type: string
+              decision:
+                type: string
+              reasoning:
+                type: string
+              confidence:
+                type: number
+              evidence_refs:
+                type: array
+                items:
+                  type: string
+              abstain_reason:
+                type: string
+        confidence:
+          type: number
+        limits:
+          type: array
+          items:
+            type: string
+        could_flip:
+          type: array
+          items:
+            type: string
+        generated_at:
+          type: string
+        supporting_report_a:
+          $ref: "#/components/schemas/Report"
+        supporting_report_b:
+          $ref: "#/components/schemas/Report"
+        supporting_evidence_a:
+          type: array
+          items:
+            $ref: "#/components/schemas/Evidence"
+        supporting_evidence_b:
+          type: array
+          items:
+            $ref: "#/components/schemas/Evidence"
+
     AnalyzeComparisonData:
       type: object
       required:
@@ -2915,6 +2981,9 @@ components:
           description: 兩幣共用同一份 execution log（同一次請求內先後跑 A、B 兩次分析）
           items:
             type: object
+        comparison_report:
+          $ref: "#/components/schemas/ComparisonReportData"
+          description: CA-06 結構化比較報告（`ComparisonReport.to_dict()`）；離線／樣本例可能為 null
 
     ExecutionManifest:
       type: object

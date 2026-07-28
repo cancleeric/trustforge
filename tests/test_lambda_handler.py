@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import pytest
 
 from trustforge import lambda_handler, web
+from trustforge.comparison_contract import ComparisonRunResult
 from trustforge.schema import Evidence, QuestionType
 
 
@@ -242,7 +243,7 @@ def test_lambda_analyze_json_comparison_excludes_author(monkeypatch):
     report_b, evidence_b, _ = _authored_single("ETH", "lambda comparison leak b")
 
     def fake_do_comparison(qs, client_ip=""):
-        return report_a, evidence_a, report_b, evidence_b, log
+        return ComparisonRunResult(report_a=report_a, evidence_a=evidence_a, report_b=report_b, evidence_b=evidence_b, comparison=None, log=log)
 
     monkeypatch.setattr(web, "_do_comparison", fake_do_comparison)
 
