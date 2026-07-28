@@ -219,7 +219,7 @@ GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
   echo "[ec2] ERROR: refusing release without an exact git SHA" >&2
   exit 1
 }
-PACKAGE_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+PACKAGE_VER=$(python3 -c 'import runpy; print(runpy.run_path("scripts/release_version.py")["package_version"]())')
 [[ "$PACKAGE_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
   echo "[ec2] ERROR: refusing release without a strict package SemVer" >&2
   exit 1
