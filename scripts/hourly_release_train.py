@@ -125,13 +125,7 @@ def gate(worktree: Path) -> None:
             f'(version 1)(allow default){rules}'
             f'(deny file-write* (subpath "{home}"))'
             '(deny network-outbound (require-all (remote ip "*:*")'
-            ' (require-not (remote ip "localhost:*"))'
-            ' (require-not (remote ip "127.0.0.1:*"))'
-            ' (require-not (remote ip "::1:*"))))'
-            '(deny network-inbound (require-all (local ip "*:*")'
-            ' (require-not (local ip "localhost:*"))'
-            ' (require-not (local ip "127.0.0.1:*"))'
-            ' (require-not (local ip "::1:*"))))'
+            ' (require-not (remote ip "localhost:*"))))'
             '(deny process-exec (literal "/usr/bin/security"))'
         )
         command = [str(sandbox), "-p", profile, str(hook)]
