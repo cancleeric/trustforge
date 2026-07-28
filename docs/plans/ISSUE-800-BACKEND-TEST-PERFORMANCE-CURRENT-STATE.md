@@ -1,7 +1,7 @@
 # Issue #800 backend test performance — current state
 
-Date: 2026-07-28  
-Branch: `fix/800-test-performance-safe`  
+Date: 2026-07-28
+Branch: `fix/800-test-performance-safe`
 Baseline: `origin/develop` at `bf2173a2`
 
 ## Scope and non-negotiable constraints
