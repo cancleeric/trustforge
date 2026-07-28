@@ -574,6 +574,27 @@ def test_checkpoint_rebuild_rejects_signed_but_semantically_invalid_terminal(tmp
     assert not control._checkpoint_path.exists()
 
 
+def test_checkpoint_rebuild_rejects_terminal_with_invalid_monotonic_floor(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "invalid-floor-rebuild")
+    authorization = _authorization(control, "stop", "invalid-floor-stop")
+    control.ledger.append(
+        {
+            "kind": "operator_stop",
+            "nonce": authorization.nonce,
+            "actor": authorization.actor,
+            "at": NOW.isoformat(),
+            "checkpoint_floor_at": (NOW + timedelta(seconds=1)).isoformat(),
+            "authorization_receipt": asdict(authorization),
+        }
+    )
+    control._checkpoint_path.unlink()
+
+    with pytest.raises(DeploymentControlError, match="checkpoint floor is invalid"):
+        control.rebuild_checkpoint()
+    assert not control._checkpoint_path.exists()
+
+
 def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
     control = _control(tmp_path)
     _start_canary(control, "checkpoint-first")

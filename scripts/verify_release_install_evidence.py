@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from trustforge.release_router import ReleaseRoutingError, RoutingPolicy
 from trustforge.signed_event_ledger import SignedEventLedger
 
 SCHEMA = "trustforge.release-install-evidence/v1"
@@ -136,9 +137,36 @@ def _verified_control_history(args: argparse.Namespace, keys: dict) -> list[dict
     return records
 
 
-def _verify_endpoint_semantics(
-    args: argparse.Namespace, payload: dict
-) -> None:
+def _verify_outcome_projection(args: argparse.Namespace, keys: dict) -> None:
+    outcome_keys = _key_mapping(keys, "router_outcome_public")
+    directory = args.outcome_bootstrap.parent
+    root = directory.parent
+    directory_info, root_info = os.lstat(directory), os.lstat(root)
+    bootstrap_info = os.lstat(args.outcome_bootstrap)
+    SignedEventLedger(
+        directory=directory,
+        verification_keys=outcome_keys,
+        event_permissions={
+            "release-router-outcome": frozenset(
+                {
+                    "candidate_reservation",
+                    "candidate_result",
+                    "router_emergency_stop",
+                }
+            )
+        },
+        domain_keys={"release-router-outcome": frozenset(outcome_keys)},
+        ledger_role="release-router-outcomes",
+        coordination_root=root,
+        root_owner_uid=root_info.st_uid,
+        root_mode=stat.S_IMODE(root_info.st_mode),
+        directory_owner_uid=directory_info.st_uid,
+        directory_mode=stat.S_IMODE(directory_info.st_mode),
+        file_mode=stat.S_IMODE(bootstrap_info.st_mode),
+    ).read()
+
+
+def _verify_endpoint_semantics(args: argparse.Namespace, payload: dict) -> None:
     a_digest = "sha256:" + _digest(args.a_artifact)
     b_digest = "sha256:" + _digest(args.b_artifact)
     bundle = _json_file(args.endpoint_manifests)
@@ -212,15 +240,18 @@ def _verify_endpoint_semantics(
         or initialized.get("candidate", {}).get("release_digest") != b_digest
     ):
         raise SystemExit("deployment initialization A/B identity mismatch")
+    try:
+        validated_policy = RoutingPolicy(**policy)
+    except (TypeError, ReleaseRoutingError) as exc:
+        raise SystemExit("deployment routing policy is invalid") from exc
     for role in ("a", "b"):
         endpoint = initialized["active" if role == "a" else "candidate"]
-        if (
-            bundle[role]["origin"] != endpoint.get("base_url")
-            or bundle[role]["key_id"] != endpoint.get("manifest_key_id")
-        ):
+        if bundle[role]["origin"] != endpoint.get("base_url") or bundle[role][
+            "key_id"
+        ] != endpoint.get("manifest_key_id"):
             raise SystemExit("deployment initialization endpoint identity mismatch")
     routing_keys = _key_mapping(runtime_keys, "routing")
-    routing_key_id = policy.get("routing_key_id")
+    routing_key_id = validated_policy.routing_key_id
     if routing_key_id not in routing_keys:
         raise SystemExit("deployment routing signer is unavailable")
     outcome_public = _key_mapping(runtime_keys, "router_outcome_public")
@@ -234,6 +265,14 @@ def _verify_endpoint_semantics(
         or derived.public_bytes_raw() != outcome_public[outcome_key_id]
     ):
         raise SystemExit("runtime outcome signer identity mismatch")
+    outcome_bootstrap = _json_file(args.outcome_bootstrap)
+    if (
+        outcome_bootstrap.get("key_id") not in outcome_public
+        or outcome_bootstrap.get("key_id") == outcome_key_id
+        or outcome_bootstrap.get("signer_domain") != "release-router-outcome"
+    ):
+        raise SystemExit("outcome bootstrap signer identity mismatch")
+    _verify_outcome_projection(args, runtime_keys)
     runtime = _json_file(args.runtime)
     expected_runtime = {
         "schema": "trustforge.release-router-runtime/v1",
@@ -258,21 +297,22 @@ def _verify_endpoint_semantics(
         for entry in entries
         if isinstance(entry, dict) and entry.get("path") == ".venv/bin/python"
     ]
+    distributions = runtime_lock.get("distributions")
     if (
-        set(runtime_lock)
-        != {"schema", "tree_manifest_sha256", "python_sha256", "packages"}
-        or runtime_lock.get("schema") != "trustforge.router-runtime-lock/v1"
+        set(runtime_lock) != {"schema", "tree_manifest_sha256", "distributions"}
+        or runtime_lock.get("schema") != "trustforge.router-runtime-lock/v2"
         or runtime_lock.get("tree_manifest_sha256") != tree_digest
         or len(python_entries) != 1
-        or runtime_lock.get("python_sha256") != python_entries[0].get("sha256")
-        or not isinstance(runtime_lock.get("packages"), dict)
-        or not runtime_lock["packages"]
+        or not isinstance(distributions, dict)
+        or not distributions
         or any(
             not isinstance(name, str)
             or not name
-            or not isinstance(version, str)
-            or not version
-            for name, version in runtime_lock["packages"].items()
+            or not isinstance(claim, dict)
+            or set(claim)
+            != {"version", "dist_info", "metadata_sha256", "record_sha256"}
+            or any(not isinstance(value, str) or not value for value in claim.values())
+            for name, claim in distributions.items()
         )
     ):
         raise SystemExit("router runtime lock attestation is invalid")
@@ -302,8 +342,7 @@ def main() -> int:
     payload = json.loads(raw)
     if (
         not isinstance(payload, dict)
-        or set(payload)
-        != {"schema", "key_id", "signature", *FIELDS, *IDENTITY_FIELDS}
+        or set(payload) != {"schema", "key_id", "signature", *FIELDS, *IDENTITY_FIELDS}
         or payload.get("schema") != SCHEMA
         or json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         != raw

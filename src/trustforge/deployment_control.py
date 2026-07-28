@@ -407,6 +407,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 raise DeploymentControlError(
                     "rebuilt authorization checkpoint failed verification"
                 )
+            self.routing_snapshot(heal_checkpoint=False)
             if self._records()[-1]["event_hash"] != control_head:
                 raise DeploymentControlError(
                     "control ledger changed while publishing checkpoint"

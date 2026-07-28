@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import errno
@@ -27,6 +28,119 @@ from trustforge.signed_event_ledger import SignedEventLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    source = tmp_path / "release_router_service.py"
+    source.write_text("print('isolated-router')\n")
+    python_runtime = tmp_path / "python"
+    shutil.copy2(sys.executable, python_runtime)
+    python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site_prefix = Path(".venv/lib") / python_version / "site-packages"
+    package = tmp_path / "__init__.py"
+    package.write_text("__version__ = '0.0.test'\n")
+    metadata = tmp_path / "METADATA"
+    metadata.write_text(
+        "Metadata-Version: 2.1\nName: trustforge\nVersion: 0.0.test\n"
+    )
+
+    def record_hash(path: Path) -> str:
+        digest = hashlib.sha256(path.read_bytes()).digest()
+        return "sha256=" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+    record = tmp_path / "RECORD"
+    record.write_text(
+        "\n".join(
+            (
+                f"trustforge/__init__.py,{record_hash(package)},{package.stat().st_size}",
+                (
+                    "trustforge-0.0.test.dist-info/METADATA,"
+                    f"{record_hash(metadata)},{metadata.stat().st_size}"
+                ),
+                "trustforge-0.0.test.dist-info/RECORD,,",
+            )
+        )
+        + "\n"
+    )
+    files = {
+        Path(".venv/bin/python"): (python_runtime, "0555"),
+        Path("scripts/release_router_service.py"): (source, "0444"),
+        site_prefix / "trustforge/__init__.py": (package, "0444"),
+        site_prefix / "trustforge-0.0.test.dist-info/METADATA": (metadata, "0444"),
+        site_prefix / "trustforge-0.0.test.dist-info/RECORD": (record, "0444"),
+    }
+    directories = sorted(
+        {
+            parent
+            for relative in files
+            for parent in relative.parents
+            if parent != Path(".")
+        },
+        key=lambda path: path.as_posix(),
+    )
+    entries = [
+        {"path": path.as_posix(), "type": "directory", "mode": "0555"}
+        for path in directories
+    ]
+    entries.extend(
+        {
+            "path": relative.as_posix(),
+            "type": "file",
+            "mode": mode,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for relative, (path, mode) in sorted(
+            files.items(), key=lambda item: item[0].as_posix()
+        )
+    )
+    manifest = tmp_path / "tree.json"
+    manifest.write_text(
+        json.dumps(
+            {"schema": "trustforge.router-tree-manifest/v1", "entries": entries},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    runtime_lock = tmp_path / "runtime-lock.json"
+    runtime_lock.write_text(
+        json.dumps(
+            {
+                "schema": "trustforge.router-runtime-lock/v2",
+                "tree_manifest_sha256": hashlib.sha256(
+                    manifest.read_bytes()
+                ).hexdigest(),
+                "distributions": {
+                    "trustforge": {
+                        "version": "0.0.test",
+                        "dist_info": "trustforge-0.0.test.dist-info",
+                        "metadata_sha256": hashlib.sha256(
+                            metadata.read_bytes()
+                        ).hexdigest(),
+                        "record_sha256": hashlib.sha256(
+                            record.read_bytes()
+                        ).hexdigest(),
+                    }
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    archive = tmp_path / "router.tar"
+    with tarfile.open(archive, "w") as bundle:
+        for directory in directories:
+            info = tarfile.TarInfo(directory.as_posix())
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o555
+            bundle.addfile(info)
+        for relative, (path, mode) in files.items():
+            info = bundle.gettarinfo(str(path), arcname=relative.as_posix())
+            info.mode = int(mode, 8)
+            with path.open("rb") as stream:
+                bundle.addfile(info, stream)
+    return source, archive, manifest, runtime_lock
 
 
 def test_install_workflow_dry_run_is_explicit_and_non_mutating():
@@ -434,13 +548,22 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
     }
     routing_private = Ed25519PrivateKey.generate()
     routing_key_id = "routing-1"
-    policy = {
+    policy_identity = {
         "ratio_basis_points": 100,
         "request_cap": 1000,
         "timeout_ms": 1000,
         "routing_key_id": routing_key_id,
         "ramp_id": "release-test",
-        "policy_digest": "sha256:" + "9" * 64,
+    }
+    policy = {
+        **policy_identity,
+        "policy_digest": "sha256:"
+        + hashlib.sha256(
+            b"trustforge.routing-policy.v1\x00"
+            + json.dumps(
+                policy_identity, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
     }
     control_private = Ed25519PrivateKey.generate()
     control_public = control_private.public_key().public_bytes(
@@ -524,11 +647,47 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
     outcome_public = outcome_private.public_key().public_bytes(
         Encoding.Raw, PublicFormat.Raw
     )
+    outcome_bootstrap_private = Ed25519PrivateKey.generate()
+    outcome_bootstrap_public = outcome_bootstrap_private.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw
+    )
+    outcome_directory = control_root / "router-outcomes"
+    SignedEventLedger(
+        directory=outcome_directory,
+        verification_keys={
+            "outcome-bootstrap-1": outcome_bootstrap_public,
+            "outcome-1": outcome_public,
+        },
+        event_permissions={
+            "release-router-outcome": frozenset(
+                {
+                    "candidate_reservation",
+                    "candidate_result",
+                    "router_emergency_stop",
+                }
+            )
+        },
+        domain_keys={
+            "release-router-outcome": frozenset(
+                {"outcome-bootstrap-1", "outcome-1"}
+            )
+        },
+        signing_key_id="outcome-bootstrap-1",
+        signing_private_key=outcome_bootstrap_private.private_bytes_raw(),
+        signing_domain="release-router-outcome",
+        ledger_role="release-router-outcomes",
+        bootstrap=True,
+        coordination_root=control_root,
+    )
+    paths["outcome-bootstrap"] = outcome_directory / "bootstrap.json"
     paths["keys"].write_text(
         json.dumps(
             {
                 "control_event_public": {"control-1": control_public.hex()},
-                "router_outcome_public": {"outcome-1": outcome_public.hex()},
+                "router_outcome_public": {
+                    "outcome-bootstrap-1": outcome_bootstrap_public.hex(),
+                    "outcome-1": outcome_public.hex(),
+                },
                 "router_outcome_private": {
                     "outcome-1": outcome_private.private_bytes_raw().hex()
                 },
@@ -601,12 +760,18 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
     paths["runtime-lock"].write_text(
         json.dumps(
             {
-                "schema": "trustforge.router-runtime-lock/v1",
-                "tree_manifest_sha256": hashlib.sha256(
-                    paths["router-tree-manifest"].read_bytes()
-                ).hexdigest(),
-                "python_sha256": python_digest,
-                "packages": {"trustforge": "2026.7.28"},
+                    "schema": "trustforge.router-runtime-lock/v2",
+                    "tree_manifest_sha256": hashlib.sha256(
+                        paths["router-tree-manifest"].read_bytes()
+                    ).hexdigest(),
+                    "distributions": {
+                        "trustforge": {
+                            "version": "2026.7.28",
+                            "dist_info": "trustforge-2026.7.28.dist-info",
+                            "metadata_sha256": "1" * 64,
+                            "record_sha256": "2" * 64,
+                        }
+                    },
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -701,46 +866,7 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
 
 
 def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
-    source = tmp_path / "release_router_service.py"
-    source.write_text("print('isolated-router')\n")
-    python_runtime = tmp_path / "python"
-    shutil.copy2(sys.executable, python_runtime)
-    archive = tmp_path / "router.tar"
-    with tarfile.open(archive, "w") as bundle:
-        for directory in (".venv", ".venv/bin", "scripts"):
-            info = tarfile.TarInfo(directory)
-            info.type = tarfile.DIRTYPE
-            info.mode = 0o755
-            bundle.addfile(info)
-        bundle.add(source, arcname="scripts/release_router_service.py")
-        bundle.add(python_runtime, arcname=".venv/bin/python")
-    manifest = tmp_path / "tree.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema": "trustforge.router-tree-manifest/v1",
-                "entries": [
-                    {
-                        "path": ".venv/bin/python",
-                        "type": "file",
-                        "mode": "0555",
-                        "sha256": hashlib.sha256(
-                            python_runtime.read_bytes()
-                        ).hexdigest(),
-                    },
-                    {
-                        "path": "scripts/release_router_service.py",
-                        "type": "file",
-                        "mode": "0444",
-                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                    },
-                ],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
+    source, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
     releases = tmp_path / "releases"
     command = [
         str(ROOT / ".venv/bin/python"),
@@ -749,6 +875,8 @@ def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
         str(archive),
         "--tree-manifest",
         str(manifest),
+        "--runtime-lock",
+        str(runtime_lock),
         "--releases-root",
         str(releases),
     ]
@@ -815,7 +943,7 @@ def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
     releases_link = tmp_path / "releases-link"
     releases_link.symlink_to(releases, target_is_directory=True)
     symlink_command = command.copy()
-    symlink_command[7] = str(releases_link)
+    symlink_command[9] = str(releases_link)
     unsafe_symlink = subprocess.run(
         symlink_command, capture_output=True, text=True
     )
@@ -826,45 +954,7 @@ def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
 def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
     tmp_path, monkeypatch
 ):
-    source = tmp_path / "release_router_service.py"
-    source.write_text("print('router')\n")
-    python_runtime = tmp_path / "python"
-    shutil.copy2(sys.executable, python_runtime)
-    archive = tmp_path / "router.tar"
-    with tarfile.open(archive, "w") as bundle:
-        for directory in (".venv", ".venv/bin", "scripts"):
-            info = tarfile.TarInfo(directory)
-            info.type = tarfile.DIRTYPE
-            bundle.addfile(info)
-        bundle.add(source, arcname="scripts/release_router_service.py")
-        bundle.add(python_runtime, arcname=".venv/bin/python")
-    manifest = tmp_path / "tree.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema": "trustforge.router-tree-manifest/v1",
-                "entries": [
-                    {
-                        "path": ".venv/bin/python",
-                        "type": "file",
-                        "mode": "0555",
-                        "sha256": hashlib.sha256(
-                            python_runtime.read_bytes()
-                        ).hexdigest(),
-                    },
-                    {
-                        "path": "scripts/release_router_service.py",
-                        "type": "file",
-                        "mode": "0444",
-                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                    },
-                ],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
+    _, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
     releases = tmp_path / "releases"
     releases.mkdir(mode=0o755)
     real_lstat = os.lstat
@@ -883,6 +973,8 @@ def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
         str(archive),
         "--tree-manifest",
         str(manifest),
+        "--runtime-lock",
+        str(runtime_lock),
         "--releases-root",
         str(releases),
     ]
@@ -915,45 +1007,7 @@ def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
 def test_content_addressed_router_artifact_bounds_directory_member_bomb(
     tmp_path, monkeypatch
 ):
-    source = tmp_path / "release_router_service.py"
-    source.write_text("print('router')\n")
-    python_runtime = tmp_path / "python"
-    shutil.copy2(sys.executable, python_runtime)
-    archive = tmp_path / "router.tar"
-    with tarfile.open(archive, "w") as bundle:
-        for directory in (".venv", ".venv/bin", "scripts"):
-            info = tarfile.TarInfo(directory)
-            info.type = tarfile.DIRTYPE
-            bundle.addfile(info)
-        bundle.add(source, arcname="scripts/release_router_service.py")
-        bundle.add(python_runtime, arcname=".venv/bin/python")
-    manifest = tmp_path / "tree.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema": "trustforge.router-tree-manifest/v1",
-                "entries": [
-                    {
-                        "path": ".venv/bin/python",
-                        "type": "file",
-                        "mode": "0555",
-                        "sha256": hashlib.sha256(
-                            python_runtime.read_bytes()
-                        ).hexdigest(),
-                    },
-                    {
-                        "path": "scripts/release_router_service.py",
-                        "type": "file",
-                        "mode": "0444",
-                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                    },
-                ],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
+    _, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
     releases = tmp_path / "releases"
     monkeypatch.setattr(install_router_release_artifact, "MAX_MEMBERS", 3)
     monkeypatch.setattr(
@@ -965,6 +1019,8 @@ def test_content_addressed_router_artifact_bounds_directory_member_bomb(
             str(archive),
             "--tree-manifest",
             str(manifest),
+            "--runtime-lock",
+            str(runtime_lock),
             "--releases-root",
             str(releases),
         ],

@@ -95,6 +95,7 @@ RELEASE_DIR="$(
   python3 "$ROOT_DIR/scripts/install_router_release_artifact.py" \
     --archive "$ROUTER_ARCHIVE" \
     --tree-manifest "$ROUTER_TREE_MANIFEST" \
+    --runtime-lock "$RUNTIME_LOCK" \
     --releases-root "$RELEASES_ROOT"
 )"
 ARCHIVE_SHA256="$(sha256sum "$ROUTER_ARCHIVE" | awk '{print $1}')"
