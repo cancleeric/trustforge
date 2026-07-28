@@ -4,8 +4,10 @@ import os
 import platform
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -25,20 +27,25 @@ RUN_PRIVILEGE_TEST = (
 )
 
 
+@pytest.fixture
+def privilege_sandbox():
+    sandbox = Path(tempfile.mkdtemp(prefix="trustforge-privilege-", dir="/tmp"))
+    sandbox.chmod(0o755)
+    try:
+        yield sandbox
+    finally:
+        shutil.rmtree(sandbox)
+
+
 @pytest.mark.skipif(
     not RUN_PRIVILEGE_TEST,
     reason="requires opt-in Linux root privilege-integration CI",
 )
-def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
+def test_linux_cross_uid_projection_and_writer_permissions(privilege_sandbox):
+    tmp_path = privilege_sandbox
     router = pwd.getpwnam("trustforge-router")
     operator = pwd.getpwnam("trustforge-operator")
     release_gid = __import__("grp").getgrnam("trustforge-release").gr_gid
-    # pytest creates its session and worker parents as 0700.  The privilege
-    # integration intentionally changes UID below, so every sandbox ancestor
-    # below /tmp must be traversable without broadening the ledger directories.
-    tmp_path.parent.parent.chmod(0o755)
-    tmp_path.parent.chmod(0o755)
-    tmp_path.chmod(0o755)
     lock_parent = tmp_path / "release-control"
     lock_parent.mkdir(mode=0o750)
     os.chown(lock_parent, 0, release_gid)
@@ -266,6 +273,42 @@ assert records[-1]["event"]["kind"] == "operator_stop"
         ],
         check=True,
     )
+    generated_lock_parent = tmpfiles_root / "run/trustforge-release-control"
+    generated_lock = generated_lock_parent / "coordination.lock"
+    generated_root = tmpfiles_root / "var/lib/trustforge/security-ledger"
+    generated_control = generated_root / "control"
+    generated_outcomes = generated_root / "router-outcomes"
+    for path, expected_type, expected_uid, expected_mode in (
+        (generated_lock_parent, stat.S_IFDIR, 0, 0o750),
+        (generated_lock, stat.S_IFREG, 0, 0o660),
+        (generated_root, stat.S_IFDIR, 0, 0o750),
+        (generated_control, stat.S_IFDIR, operator.pw_uid, 0o750),
+        (generated_outcomes, stat.S_IFDIR, router.pw_uid, 0o750),
+    ):
+        metadata = path.lstat()
+        assert stat.S_IFMT(metadata.st_mode) == expected_type
+        assert metadata.st_uid == expected_uid
+        assert metadata.st_gid == release_gid
+        assert stat.S_IMODE(metadata.st_mode) == expected_mode
+    for identity, own, sibling in (
+        (router, generated_outcomes, generated_control),
+        (operator, generated_control, generated_outcomes),
+    ):
+        subprocess.run(
+            [
+                "setpriv",
+                f"--reuid={identity.pw_uid}",
+                f"--regid={identity.pw_gid}",
+                "--init-groups",
+                "sh",
+                "-c",
+                'test -w "$1" && test ! -w "$2" && test -r "$2"',
+                "tmpfiles-permission-check",
+                str(own),
+                str(sibling),
+            ],
+            check=True,
+        )
     for identity, own, projection in (
         (router, outcomes, control),
         (operator, control, outcomes),
