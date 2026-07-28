@@ -482,6 +482,79 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/whale-summary:
+    get:
+      tags: [observability]
+      operationId: getWhaleSummary
+      summary: 鯨魚大額轉帳即時摘要
+      description: |
+        從快取讀最新一批 Whale Alert 資料，聚合為交易所淨流入/流出、筆數、
+        最大單筆、最近 5 筆明細等即時統計。無資料時回傳空結構（total_count=0）。
+      parameters:
+        - name: coin
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BTC, ETH, SOL, BNB, XRP]
+            default: BTC
+      responses:
+        "200":
+          description: 鯨魚即時摘要
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/whale-history:
+    get:
+      tags: [observability]
+      operationId: getWhaleHistory
+      summary: 鯨魚大額轉帳歷程
+      description: |
+        從 SourceEventArchive（Bronze truth）讀歷史 Whale Alert 資料，按天或
+        小時聚合為時序 + 明細。排程器持續運行後自動累積歷史。
+      parameters:
+        - name: coin
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BTC, ETH, SOL, BNB, XRP]
+            default: BTC
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [1, 7, 30]
+            default: 7
+      responses:
+        "200":
+          description: 歷程資料（summary + timeline + transfers）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/data-plane-status:
     get:
       tags: [observability]

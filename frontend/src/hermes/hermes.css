@@ -357,8 +357,29 @@
 /* N49：左軌兩個 pane 的排列方式。`display/flex-direction/gap` 一定要在
    這裡而不是元件的 inline style——inline 會贏過 class，斷點就切不動。 */
 .hermes-rail-split { display: flex; flex-direction: column; gap: 12px; }
-.hermes-rail-menu { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
-.hermes-rail-chat { min-width: 0; }
+.hermes-rail-menu {
+  display: flex; flex-direction: column; gap: 12px; min-height: 0;
+  /* N73：垂直堆疊時這個 pane 會被 flex 壓縮，但 `overflow-y` 預設 visible，
+     內容原封不動溢出、蓋在下面的 HERMES 對話區上（實測 561x700 溢出 185px）。
+     自己捲就不會跑到別人身上。
+     N76（CEO：「左邊選單正常要縮吧」）：`flex` 從 `1 1 auto` 改成 `0 1 auto`——
+     原本選單會「長」去吃掉剩餘空間（實測 474~629px），對話區永遠只剩 200px。
+     選單只縮不長，剩下的空間全歸對話區。 */
+  flex: 0 1 auto; overflow-y: auto;
+}
+/* `min-width: 0` 是必要的：flex item 預設 `min-width: auto`，長字串會撐爆它。
+   N76：對話區裡有輸入框，是這一軌唯一「非按不可」的東西，必須永遠看得到。
+   原本它沒有 flex 宣告、被壓成 200px 高，而內容有 326px——輸入框就被擠到
+   自己的捲軸下面去了，畫面上看起來就是「輸入跑下去」。
+   `flex: 1 1 auto` 讓它吃掉選單讓出來的空間；`min-height` 是地板，
+   用 min() 是因為視窗很矮時 300px 反而會把選單壓死。 */
+.hermes-rail-chat {
+  min-width: 0;
+  flex: 1 1 auto;
+  /* 真正的樓地板是元件的 inline style（inline 贏過 class），這裡只是同步宣告，
+     避免以後有人只看 CSS 以為沒有下限。改的時候兩邊要一起改。 */
+  min-height: 300px;
+}
 
 /* N70（CEO：「能按的都移到左邊欄」）：頂欄原本混了顯示與操作，一般使用者掃視
    時分不出哪些能按。所有導覽/模式/語言鈕搬到左軌頂端這一區。
@@ -403,16 +424,29 @@
   background: var(--color-hermes-inset);
 }
 
-/* 開關類（完整模式／低動態／說明／艦體升級／語言）維持兩欄並排——它們是短標籤
-   的切換鈕，不是導覽層級，跟導覽拉開視覺差異剛好。語言鈕原本沒有框，混在有框
-   的鈕之間像壞掉的文字，補上同一套外框。 */
-.hermes-rail-controls .hermes-lang-toggle {
-  padding: 3px 8px;
-  border: 1px solid var(--color-hermes-bd);
-  border-radius: 6px;
+/* N72：語言切換已搬到頂欄右上（`.hermes-topbar-lang`），這裡原本的
+   `.hermes-rail-controls .hermes-lang-toggle` 規則一併移除，避免留下
+   對不到任何元素的死樣式。 */
+
+/* N72（CEO：「中文 英文 放右上，不要拿到左邊很怪」）：語言是全域偏好，慣例
+   位置就在右上角。外觀對齊頂欄其他膠囊（版號、連線狀態、市場遙測），讓它
+   讀起來屬於同一條 BAR；min-height 24px 維持可點目標尺寸（同 N29）。 */
+.hermes-topbar-lang {
+  flex: none;
+  min-height: 24px;
+  padding: 2px 9px;
+  cursor: pointer;
+  font: 500 10px/1.4 var(--font-hermes-sans);
+  letter-spacing: 1px;
+  color: var(--color-hermes-tx2);
   background: transparent;
-  color: inherit;
-  text-align: center;
+  border: 1px solid var(--color-hermes-bd2);
+  border-radius: 4px;
+}
+
+.hermes-topbar-lang:hover {
+  color: var(--color-hermes-cyan);
+  border-color: rgba(77, 216, 224, .5);
 }
 
 /* `.hermes-nav-item::after` 那顆說明泡泡原本是為橫向頂欄畫的：`left:50%` +
@@ -437,6 +471,101 @@
   height: 1px;
   margin: 2px 0;
   background: var(--color-hermes-bd2);
+}
+
+/* ── N71（CEO：「左邊選單 不像選單 在想想辦法」）─────────────────────────
+   問題不是功能放錯位置（N70 已經搬對了），是這一區沒有選單的視覺語彙：
+   1. 沒有分組標題，11 顆按鈕平鋪成一坨；
+   2. 導覽項是無框透明文字、hover 不變化、選中只有一層極淡底色，
+      掃視時看不出「這是一列一列可以點的東西」；
+   3. 下面五顆開關是三種不同外觀的 9px 小膠囊（灰框/青框/無框），
+      橫向 wrap 之後像散落的標籤，不像設定清單。
+   修法是給整區一套統一的「列」節奏：分組標題 → 等高整列 → hover 有底色
+   → 選中有左側指示條。功能不動、DOM 只多兩個標題。 */
+
+.hermes-rail-group {
+  flex-basis: 100%;
+  margin: 6px 0 1px;
+  font: 600 9px/1 var(--font-hermes-mono, monospace);
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--color-hermes-tx3);
+}
+.hermes-rail-group:first-child { margin-top: 0; }
+
+/* 導覽與開關共用同一套列樣式——它們在使用者眼裡都是「選單裡可以點的一列」，
+   之前刻意讓開關長得不一樣，結果就是看起來不屬於同一個選單。 */
+.hermes-rail-controls .hermes-nav-item,
+.hermes-rail-controls .hermes-mode-toggle,
+.hermes-rail-controls .hermes-help-toggle,
+.hermes-rail-controls .hermes-ship-toggle {
+  flex: 0 0 100%;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font: 500 12.5px/1.4 var(--font-hermes-sans);
+  letter-spacing: 0;
+  text-align: left;
+  white-space: normal;
+  color: var(--color-hermes-tx2);
+  position: relative;
+  transition: background .12s, color .12s;
+}
+
+/* 左側指示條：平常透明、hover 淡、選中亮。這是「這一列是選單項」最省空間的
+   訊號，比加外框好——11 列都加框會變成一堆盒子。 */
+.hermes-rail-controls .hermes-nav-item::before,
+.hermes-rail-controls .hermes-mode-toggle::before,
+.hermes-rail-controls .hermes-help-toggle::before,
+.hermes-rail-controls .hermes-ship-toggle::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.hermes-rail-controls > button:hover {
+  background: rgba(255, 255, 255, .045);
+  color: var(--color-hermes-tx);
+}
+.hermes-rail-controls > button:hover::before {
+  background: var(--color-hermes-bd2);
+}
+
+.hermes-rail-controls > button[aria-pressed='true'] {
+  background: var(--color-hermes-inset);
+  color: var(--color-hermes-cyan);
+}
+.hermes-rail-controls > button[aria-pressed='true']::before {
+  background: var(--color-hermes-cyan);
+}
+
+/* `.hermes-mode-toggle[aria-pressed='true']`（新手模式/低動態）原本是 amber 膠囊，
+   在列式選單裡改成同一套 amber 指示條，維持「這兩個是狀態開關」的區別。 */
+.hermes-rail-controls .hermes-mode-toggle[aria-pressed='true'] {
+  border-color: transparent;
+  background: rgba(232, 179, 77, .1);
+  color: var(--color-hermes-amber);
+}
+.hermes-rail-controls .hermes-mode-toggle[aria-pressed='true']::before {
+  background: var(--color-hermes-amber);
+}
+
+.hermes-rail-controls:focus-within .hermes-nav-item:focus-visible,
+.hermes-rail-controls > button:focus-visible {
+  outline: 2px solid var(--color-hermes-cyan);
+  outline-offset: -2px;
 }
 
 @media (min-width: 1280px) {
@@ -2691,6 +2820,9 @@
 
   /* nowrap + 可橫向捲：320px 也不會把最後一顆（語言切換）擠出畫面外——這正是
      N52 在頂欄踩過的坑，這裡直接用捲動避開，不靠算寬度。 */
+  /* N71：分組標題在橫向控制條裡只會吃掉寬度，隱藏（桌機才是選單形態）。 */
+  .hermes-rail-group { display: none; }
+
   .hermes-rail-controls > * {
     flex: 0 0 auto;
     white-space: nowrap;
@@ -3514,13 +3646,44 @@
   }
 }
 
-/* Upgrade mode owns the full bridge: left=automation, center=topology,
-   right=selected-module evidence. Underlying market rails must not waste space. */
+/* N72（CEO：「這把畫面擋住了，而且沒有疊層的感覺，使用者會誤會」「看要不要
+   蓋掉右邊就好」）：這塊原本 `left/right:18px` 幾乎滿版、又沒有任何背幕，
+   讀起來就是「換了一頁」而不是「開了一層」。兩件事一起改：
+   1. 左緣退到左軌之後——左軌整條留在外面看得見，使用者永遠知道自己還在
+      同一個畫面、也知道怎麼離開（跟 StageDrilldown 同一套做法）。
+   2. 底下補 `.hermes-upgrade-scrim` 背幕（見下），點背幕即關閉。 */
 .hermes-upgrade-overlay {
-  left: 18px;
+  left: calc(var(--hermes-rail) + 14px);
   right: 18px;
   top: 54px;
   bottom: calc(var(--hermes-bottom) + 10px)
+}
+
+/* 背幕：抄 `.hermes-drilldown-scrim` 的形狀（同樣避開左軌與上下欄），
+   讓「被蓋住的是右邊工作區」這件事在視覺上成立。它是 <button>，
+   點一下就關——這是 overlay 的通用直覺，不能只靠右上角那顆關閉鈕。 */
+.hermes-upgrade-scrim {
+  position: absolute;
+  inset: var(--hermes-top) 0 var(--hermes-bottom) var(--hermes-rail);
+  z-index: 29;
+  border: 0;
+  background: radial-gradient(circle at 70% 40%, rgba(77, 216, 224, .08), rgba(2, 4, 10, .68) 65%);
+  backdrop-filter: blur(2px);
+  cursor: default;
+}
+
+/* 窄螢幕沒有左軌可以讓（≤560px 時 `[data-region='left-rail']` 是
+   `display: contents`），退回滿版；上面那條 max-width:1050px 的舊覆寫
+   在原始碼順序上排在這組規則之前，會被上面那條無條件規則蓋掉，所以重下一次。 */
+@media(max-width:1050px) {
+  .hermes-upgrade-overlay {
+    left: 12px;
+    right: 12px
+  }
+
+  .hermes-upgrade-scrim {
+    inset: var(--hermes-top) 0 var(--hermes-bottom) 0;
+  }
 }
 
 .upgrade-control-body {
@@ -4609,3 +4772,10 @@
     flex-direction: column;
   }
 }
+
+/* ===== N76 左軌空間分配（CEO：「左邊選單正常要縮吧 怎麼會卡列」）=====
+   N73 原本在這裡放了一顆「功能 ▾」收合鈕。拿掉了——它長得像下拉選單、
+   又固定佔掉選單最上面一列，使用者看不出那是什麼（CEO：「怎麼會卡列」）。
+   選單本來就該自己縮，不該要人去按。實際修法在 `.hermes-rail-menu` /
+   `.hermes-rail-chat` 的 flex 宣告（選單 `0 1 auto` 只縮不長，
+   對話區 `1 1 auto` + min-height 保底）。 */

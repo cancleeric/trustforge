@@ -31,4 +31,24 @@ describe('multi-angle API errors', () => {
       message: 'pending',
     })
   })
+
+  it('rejects with AbortError when signal is aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    vi.stubGlobal('fetch', vi.fn((_url: string, opts?: RequestInit) => {
+      if (opts?.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    }))
+    await expect(submitMultiAngle('BTC', undefined, undefined, controller.signal)).rejects.toThrow()
+  })
+
+  it('preserves status and code in error for different HTTP errors', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'budget_exhausted', message: 'No budget' },
+    }), { status: 429, headers: { 'Content-Type': 'application/json' } })))
+    await expect(submitMultiAngle('BTC')).rejects.toMatchObject({
+      code: 'budget_exhausted', message: 'No budget', status: 429,
+    })
+  })
 })

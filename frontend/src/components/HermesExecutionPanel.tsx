@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { Evidence, ExecutionEvent, ExecutionManifest, Report } from '../lib/types'
-import { executionLogDownload } from '../lib/executionLogDownload'
+import ReportDownloads from './ReportDownloads'
 import { useHermesI18n, type MessageKey } from '../hermes/hermesI18n'
 
 const NODE_FALLBACK_DEFS: Array<{ id: string; labelKey: MessageKey; order: number }> = [
@@ -46,42 +46,6 @@ function nodeSummary(events: ExecutionEvent[], nodeId: string, t: (key: MessageK
   const failed = nodeEvents.some((event) => eventNode(event, t).status === 'failed')
   const completed = nodeEvents.some((event) => eventNode(event, t).status === 'completed')
   return { nodeEvents, duration, failed, completed }
-}
-
-function download(filename: string, body: string, type: string) {
-  const href = URL.createObjectURL(new Blob([body], { type }))
-  const a = document.createElement('a')
-  a.href = href
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(href)
-}
-
-function reportMarkdown(report: Report, t: (key: MessageKey, params?: Record<string, string | number>) => string): string {
-  const lines = [
-    `# ${t('hepMdReportTitleTemplate', { coin: report.coin })}`,
-    '',
-    `> Hermes run: ${report.generated_at}`,
-    `> ${t('hepMdQuestionPrefix')}${report.question}`,
-    '',
-    t('hepMdConclusionHeading'),
-    report.market_judgment,
-    '',
-    t('hepMdKeyBasisHeading'),
-    `${t('hepMdFactsHeading')}`,
-    ...report.facts.map((item) => `- ${item}`),
-    `${t('hepMdInferencesHeading')}`,
-    ...report.inferences.map((item) => `- ${item}`),
-    `${t('hepMdEvidenceMappingHeading')}`,
-    ...report.key_basis.map((item) => `- ${item.claim} [${item.evidence_idx.map((index) => `E${index}`).join(', ')}]：${item.explanation}`),
-    '',
-    t('hepMdCompletenessHeading'),
-    `${t('hepMdCalibratedConfidencePrefix')}${report.calibrated_confidence.toFixed(2)}`,
-    `${t('hepMdDecisionStatePrefix')}${report.decision_state}`,
-    ...report.limits.map((item) => `${t('hepMdKnownLimitPrefix')}${item}`),
-    ...report.could_flip.map((item) => `${t('hepMdCouldFlipPrefix')}${item}`),
-  ]
-  return lines.join('\n')
 }
 
 export default function HermesExecutionPanel({
@@ -192,12 +156,8 @@ export default function HermesExecutionPanel({
             {nodes.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
           </select>
         </label>
-        <button onClick={() => download(`${normalizedExecution.run_id}-report.md`, reportMarkdown(report, t), 'text/markdown;charset=utf-8')} className="rounded border border-tf-link px-3 py-1.5 text-sm font-semibold text-tf-link">{t('hepDownloadReport')}</button>
-        <button onClick={() => download(`${normalizedExecution.run_id}-evidence.json`, JSON.stringify(evidence, null, 2), 'application/json')} className="rounded border border-tf-link px-3 py-1.5 text-sm font-semibold text-tf-link">{t('hepDownloadEvidence')}</button>
-        <button onClick={() => {
-          const artifact = executionLogDownload(normalizedExecution, events)
-          download(artifact.name, artifact.body, artifact.type)
-        }} className="rounded border border-tf-link px-3 py-1.5 text-sm font-semibold text-tf-link">{t('hepDownloadLog')}</button>
+        {/* N71：實作已抽到 `ReportDownloads`，報告抬頭那排共用同一份。 */}
+        <ReportDownloads execution={normalizedExecution} events={events} report={report} evidence={evidence} />
       </div>
 
       <div className="mt-3 max-h-64 overflow-auto border border-tf-border">

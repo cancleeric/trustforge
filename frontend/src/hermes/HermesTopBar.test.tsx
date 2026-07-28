@@ -35,11 +35,14 @@ describe('HermesTopBar', () => {
   // 「真的搬走了」與「測試根本沒抓到東西」。
   it('has no navigation or mode controls left in the top bar', () => {
     renderTopBar()
-    for (const name of ['HERMES 主頁', '分析', '比較', '歷史趨勢', '來源狀態', '成本', '切換語言']) {
+    for (const name of ['HERMES 主頁', '分析', '比較', '歷史趨勢', '來源狀態', '成本']) {
       expect(screen.queryByRole('button', { name })).toBeNull()
     }
-    // 唯一允許存在的按鈕就是遙測膠囊。
-    expect(screen.getAllByRole('button')).toHaveLength(1)
+    // N72（CEO：「中文 英文 放右上，不要拿到左邊很怪」）：語言切換是 N70
+    // 「頂欄只留狀態」的明示例外——它是全域偏好而不是分析功能，慣例位置
+    // 就在右上角。除了它與遙測膠囊，頂欄不該有第三顆按鈕。
+    expect(screen.getByRole('button', { name: '切換語言' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button')).toHaveLength(2)
   })
 
   // N70（CEO：「狀態…放上方 做顯示 BAR 點了會打開」）

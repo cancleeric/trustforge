@@ -19,6 +19,8 @@ import HermesBeginnerNarrative from '../components/HermesBeginnerNarrative'
 import HermesMobileDivergenceEntry from '../hermes/HermesMobileDivergenceEntry'
 import TrainingStatusCard from '../components/TrainingStatusCard'
 import AgentCoreStatusBadge from '../components/AgentCoreStatusBadge'
+import { getWhaleSummary } from '../lib/endpoints'
+import type { WhaleSummary } from '../components/WhaleActivityPanel'
 import { defaultQuestionTypeForFocus, isAnalysisFocusId, isQuestionTypeId, type AnalysisFocusId, type QuestionTypeId } from '../lib/analysisTaxonomy'
 import { recommendAnalysisMode, rememberHermesOnboarding, shouldShowHermesOnboarding, type AnalysisModeId } from '../lib/beginnerExperience'
 import HermesFirstRun from '../hermes/HermesFirstRun'
@@ -85,6 +87,7 @@ export default function HermesDashboard() {
   const [beginnerMode, setBeginnerMode] = useState(() => !document.cookie.split('; ').some((item) => item === 'trustforge_hermes_experience=full'))
   const [upgradeData, setUpgradeData] = useState<HermesUpgradeData | null>(null)
   const [upgradeLoading, setUpgradeLoading] = useState(false)
+  const [whaleSummary, setWhaleSummary] = useState<WhaleSummary | null>(null)
   const [urlQuestionType, setUrlQuestionType] = useState<QuestionTypeId | null>(null)
   // N69：question_type 不再是使用者選的一顆下拉（原因見 HermesLeftRail 的註解——
   // 官方文件那三種是「範例題型」不是限制），改由分析角度推導。這個對應表跟後端
@@ -120,7 +123,7 @@ export default function HermesDashboard() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const requestedModule = searchParams.get('workspace')
   const activeModule: HermesWorkspaceModule | null =
-    requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs'
+    requestedModule === 'analyze' || requestedModule === 'compare' || requestedModule === 'history' || requestedModule === 'status' || requestedModule === 'costs' || requestedModule === 'whale'
       ? requestedModule : null
   const activeQuestionMode = focus
 
@@ -384,6 +387,21 @@ export default function HermesDashboard() {
       controllers.forEach((controller) => controller.abort())
     }
   }, [])
+
+  // Whale Alert 鯨魚動態背景輪詢（30 秒）
+  useEffect(() => {
+    let active = true
+    let timer: number | undefined
+    let controller: AbortController | null = null
+    const poll = async () => {
+      controller = new AbortController()
+      const result = await getWhaleSummary(selectedId.toUpperCase(), controller.signal)
+      if (active && result.ok) setWhaleSummary(result.data)
+      if (active) timer = window.setTimeout(() => void poll(), 30_000)
+    }
+    void poll()
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); controller?.abort() }
+  }, [selectedId])
 
   // 啟動時完整自檢；進入艦橋後持續監控所有唯讀系統通道。
   useEffect(() => {
@@ -669,17 +687,24 @@ export default function HermesDashboard() {
               crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
               derivation={hudDerivation}
               trainingStatus={<TrainingStatusCard />}
+              whaleSummary={whaleSummary}
               onOpenComposite={() => setSelectedStage('composite')}
               onOpenDivergence={() => setSelectedStage('divergence')}
             />
           </div>
         )}
 
-        <HermesMobileDivergenceEntry
-          derivation={hudDerivation}
-          crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
-          onOpen={() => setSelectedStage('divergence')}
-        />
+        {/* N75：這張卡 z-index 7，工作區面板是 18——模組一開它就整張被蓋住，
+            但仍留在 DOM 裡可聚焦、可被輔具讀到（實測 900x760 六個模組全中，
+            「跨來源分歧?」與「點擊查看 →」兩顆鈕的點擊點都被面板攔走）。
+            前景是工作區時就不該有這個看不見的陷阱，直接不 render。 */}
+        {!activeModule && (
+          <HermesMobileDivergenceEntry
+            derivation={hudDerivation}
+            crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
+            onOpen={() => setSelectedStage('divergence')}
+          />
+        )}
 
         <div className="hermes-boot-layer" style={{ opacity: boot.bottom ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <StageBar flow={analysisFlow} mode={activeModule} telemetry={moduleTelemetry} activity={{ status: phase, coin: selectedId.toUpperCase(), mode: focus, question: query.trim() }} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onSelectStage={(id) => setSelectedStage((s) => (s === id ? null : id))} />
@@ -694,7 +719,16 @@ export default function HermesDashboard() {
 
         {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} onBusyChange={handleModuleBusyChange} resubmitSignal={resubmitSignal} />}
 
-        {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />}
+        {/* N72（CEO：「這把畫面擋住了，而且沒有疊層的感覺，使用者會誤會」）：
+            升級控制台原本只有面板、沒有背幕，滿版蓋上去像換頁。補上跟
+            StageDrilldown 同一套的背幕（暗化＋點擊關閉），面板也退到左軌
+            之後，只蓋右邊工作區。 */}
+        {shipOpen && (
+          <>
+            <button className="hermes-upgrade-scrim" type="button" aria-label={t('close')} onClick={() => setShipOpen(false)} />
+            <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />
+          </>
+        )}
 
         <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
 

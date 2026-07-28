@@ -154,6 +154,11 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: dict[str, int] = {
     "coingecko-price": 5 * 60,        # price_live：5 分鐘
     "coingecko-sentiment": 5 * 60,    # sentiment：5 分鐘
     "coingecko-dev": 5 * 60,          # dev_activity：5 分鐘
+    # Whale Alert（免費層 10 req/min，每次真呼叫查最近 1 小時轉帳）：
+    # 5 分鐘一輪足夠即時、也遠低於 rate limit。
+    "whale-alert": 5 * 60,
+    # Arkham Intelligence（heavy endpoint 1 req/s，排程每 5 分鐘打一次綽綽有餘）：
+    "arkham-intel": 5 * 60,
 }
 DEFAULT_REFRESH_INTERVAL_FALLBACK_SECONDS = 15 * 60  # 未知來源名的保守預設
 

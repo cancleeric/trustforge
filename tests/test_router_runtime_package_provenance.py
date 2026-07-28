@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTHON = ROOT / ".venv/bin/python"
+PYTHON = Path(sys.executable).resolve()
 
 
 def test_actual_router_runtime_is_provenance_complete_and_importable(tmp_path):
     output = tmp_path / "build"
+    # Exercise the explicit-interpreter contract from a path that has no
+    # virtualenv-style sibling `bin/python`. This covers pre-push's system
+    # Python fallback as well as externally managed/shared virtualenvs.
+    interpreter = tmp_path / "standalone-python"
+    interpreter.symlink_to(PYTHON)
     subprocess.run(
         [
-            str(PYTHON),
+            str(interpreter),
             str(ROOT / "scripts/build_router_release_artifact.py"),
             "--source-root",
             str(ROOT),
-            "--venv",
-            str(ROOT / ".venv"),
+            "--python",
+            str(interpreter),
             "--output-dir",
             str(output),
         ],

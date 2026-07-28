@@ -49,7 +49,8 @@ for (const locale of ['zh-TW', 'en']) {
 
     if (!r.controlsVisible) problems.push(`${tag}: 控制條不可見`)
     if (r.visibleItems < r.totalItems) problems.push(`${tag}: 控制項只看到 ${r.visibleItems}/${r.totalItems}`)
-    if (r.topbarButtons !== 1) problems.push(`${tag}: 頂欄按鈕數 ${r.topbarButtons}（應為 1＝遙測膠囊）`)
+    // N72：頂欄允許兩顆——遙測膠囊 + 語言切換（CEO 指定放右上的例外）。
+    if (r.topbarButtons !== 2) problems.push(`${tag}: 頂欄按鈕數 ${r.topbarButtons}（應為 2＝遙測膠囊＋語言）`)
     if (!r.chipVisible) problems.push(`${tag}: 遙測膠囊不可見`)
     if (r.focusSelect) problems.push(`${tag}: 角度下拉還在`)
     if (!r.derivedNote) problems.push(`${tag}: 缺少角度說明`)

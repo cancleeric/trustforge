@@ -506,3 +506,26 @@ export function getEcoLink(
     },
   )
 }
+
+// ---------------------------------------------------------------------------
+// Whale Alert — 大額轉帳即時摘要
+// ---------------------------------------------------------------------------
+
+import type { WhaleSummary } from '../components/WhaleActivityPanel'
+
+export function getWhaleSummary(
+  coin: string,
+  signal?: AbortSignal,
+): Promise<ApiEnvelope<WhaleSummary>> {
+  const valid = (value: unknown): value is WhaleSummary => {
+    if (!value || typeof value !== 'object') return false
+    const data = value as Record<string, unknown>
+    return typeof data.total_count === 'number' && typeof data.coin === 'string'
+  }
+  return apiFetch<WhaleSummary>(
+    '/api/whale-summary',
+    { coin },
+    valid,
+    { signal, timeoutMs: DEFAULT_TIMEOUT_MS },
+  )
+}

@@ -48,7 +48,7 @@ export default function HermesTopBar({
   uplinkLatency = '2.4s',
   serviceMonitor = {},
 }: HermesTopBarProps) {
-  const { t } = useHermesI18n()
+  const { t, locale, setLocale } = useHermesI18n()
   // 後端沒走發版流程時 /api/health 會回 version: "dev"。那不是版號，是「這台
   // 沒被建置過」的哨兵值；照原樣用一般樣式印出來，看起來就像系統版本叫 dev。
   // 標成警示色並掛說明，讓它讀起來是狀態而不是版本名。
@@ -82,7 +82,13 @@ export default function HermesTopBar({
     <div
       className="hermes-topbar"
       style={{
-        position: 'absolute', left: 0, right: 0, top: 0, height: 'var(--hermes-top)', zIndex: 10,
+        /* N74（CEO：「這疊到」）：頂欄 zIndex 原本是 10，而它自己就是一個
+           stacking context——遙測面板寫 zIndex 30 也只是「在頂欄內部排第 30」，
+           永遠贏不過同層的 `.hermes-module-deck`（z-index 18）。分析工作區一開，
+           面板就被工作區標題壓在下面（實測 900/1024/1280/1440 四個寬度全中）。
+           修法是抬頂欄本身，不是再加大面板的數字。32 > 18（工作區）
+           且 < 49（drilldown 遮罩），所以 drilldown 打開時頂欄照樣被壓暗。 */
+        position: 'absolute', left: 0, right: 0, top: 0, height: 'var(--hermes-top)', zIndex: 32,
         display: 'flex', alignItems: 'center', gap: 14, padding: '0 20px',
         background: 'rgba(10,16,24,.62)', backdropFilter: 'blur(10px)',
         borderBottom: '1px solid var(--color-hermes-bd)',
@@ -179,6 +185,13 @@ export default function HermesTopBar({
       <div style={{ flex: 1 }} />
       {runtimeStatus}
       {!beginnerMode && <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>{t('costLedger')} <b style={{ color: 'var(--color-hermes-cyan)' }}>{costLedger === null ? '--' : `$${costLedger.toFixed(4)}`}</b></span>}
+      {/* N72（CEO：「中文 英文 放右上，不要拿到左邊很怪」）：語言切換是全域
+          偏好、慣例位置就在右上角，放進左軌會被讀成「跟分析同一層的功能」。
+          這是 N70「頂欄只留狀態」的**明示例外**，由 CEO 指定，別再搬回左軌。 */}
+      <button type="button" className="hermes-topbar-lang" aria-label={t('language')}
+        onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')}>
+        {locale === 'zh-TW' ? 'EN' : '繁中'}
+      </button>
     </div>
   )
 }

@@ -5,6 +5,18 @@ import { requeueAnalysis, type AnalysisFlowData, type AnalysisJourneyData } from
 import type { BridgeHologramData } from '../components/BridgeHologramContext'
 import EvidenceTable from '../components/EvidenceTable'
 import { groupByStance } from '../lib/stancePairs'
+import type { MessageKey } from './hermesI18n'
+
+/** N72：五關各自的「這關在做什麼／下面的數字怎麼看」。用查表而不是樣板字串
+ *  組 key——`selectedStage` 型別是 string，樣板組出來的 key 型別檢查擋不住
+ *  拼錯，查表則是查不到就不渲染（divergence 這種沒有對應說明的也安全）。 */
+const STAGE_ABOUT: Record<string, { about: MessageKey; read: MessageKey }> = {
+  scan: { about: 'stageAboutScan', read: 'stageReadScan' },
+  filter: { about: 'stageAboutFilter', read: 'stageReadFilter' },
+  crossverify: { about: 'stageAboutCrossverify', read: 'stageReadCrossverify' },
+  manipulation: { about: 'stageAboutManipulation', read: 'stageReadManipulation' },
+  composite: { about: 'stageAboutComposite', read: 'stageReadComposite' },
+}
 
 interface StageDrilldownProps {
   selCoin: GalaxyCoin
@@ -110,6 +122,18 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 18px' }}>
+        {/* N72（CEO：「中間這幾個是幹嘛用的 要寫清楚」）：這五關（來源掃描／
+            可信過濾／交叉驗證／操縱偵測／綜合信任分數）以前打開只看得到
+            worker 代號、佇列數與一堆數值，從頭到尾沒有一句話說這一關在做
+            什麼。第一句先用白話講「這關在幹嘛」，第二句講「所以下面這些
+            數字要怎麼看」，再進技術細節。 */}
+        {STAGE_ABOUT[selectedStage] && (
+          <div style={{ marginBottom: 14, padding: '11px 12px', borderLeft: `2px solid ${color}`, background: 'rgba(4,10,17,.72)', borderRadius: 4, fontSize: 11.5, lineHeight: 1.75, color: 'var(--color-hermes-tx)' }}>
+            <div style={{ fontSize: 9, letterSpacing: '1px', color: 'var(--color-hermes-tx2)', marginBottom: 4 }}>{t('stageWhatIsThis')}</div>
+            <div>{t(STAGE_ABOUT[selectedStage].about)}</div>
+            <div style={{ marginTop: 5, color: 'var(--color-hermes-tx2)' }}>{t(STAGE_ABOUT[selectedStage].read)}</div>
+          </div>
+        )}
         {(liveStage || completedStage) && (
           <div style={{ marginBottom: 14, padding: 12, border: '1px solid var(--color-hermes-bd2)', background: 'rgba(4,10,17,.96)', borderRadius: 6, fontSize: 11, lineHeight: 1.7 }}>
             <div style={{ color: HERMES_CYAN, fontWeight: 700 }}>HERMES WORKER · {liveStage?.id ?? completedStage?.id}</div>

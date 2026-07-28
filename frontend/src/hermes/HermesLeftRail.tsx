@@ -62,7 +62,7 @@ export default function HermesLeftRail({
   reducedMotion = false, onReducedMotionToggle, onHelp, onToggleShip,
   random = Math.random,
 }: HermesLeftRailProps) {
-  const { t, locale, setLocale } = useHermesI18n()
+  const { t, locale } = useHermesI18n()
   // N70：從 HermesTopBar 原封搬過來（含 description，nav 的 tooltip/無障礙說明
   // 都靠它），只換了容器。
   const navItems = [
@@ -77,6 +77,14 @@ export default function HermesLeftRail({
   // clientHeight 只有 140。也就是說使用者從來看不到 HERMES 剛剛回了什麼，
   // 得自己往下捲。沒有任何 agent 介面是這樣的，這正是「隨便一個 ai agent
   // 都比這個強」的核心。新訊息進來就釘到底，跟一般聊天介面一致。
+  // N76（CEO：「這很重要怎麼跑下去了」「左邊選單正常要縮吧 怎麼會卡列」）：
+  // <1280px 兩個 pane 垂直堆疊。原本選單 pane 是 `flex: 1 1 auto`，會長去吃掉
+  // 剩餘空間（實測 474~629px），對話 pane 沒有 flex 宣告只剩 200px，而它的
+  // 內容有 326px——輸入框就被擠到對話區自己的捲軸下面，看起來像「跑下去」。
+  // 修法全在 CSS：選單 `0 1 auto`（只縮不長）、對話區 `1 1 auto` + min-height
+  // 保底。N73 那顆手動收合鈕已移除：它長得像下拉選單又固定佔一列，
+  // 使用者看不出是什麼，而且選單本來就該自己縮，不該要人去按。
+
   const transcriptRef = useRef<HTMLDivElement>(null)
   const transcriptDeps = `${questionContext?.conversation?.length ?? 0}|${hermesMessage}`
   useEffect(() => {
@@ -117,6 +125,14 @@ export default function HermesLeftRail({
       {/* N70 控制區：原本散在頂欄右半邊的所有可按項目。市場遙測（原本佔這個
           位置）反向搬到頂欄做成點擊展開的膠囊——它是狀態顯示，不是操作。 */}
       <nav className="hermes-rail-controls" aria-label={t('navigation')}>
+        {/* N71（CEO：「左邊選單 不像選單 再想想辦法」）：搬進來的東西是對的，
+            但這一區沒有任何選單的樣子——沒有分組標題、項目是無框透明文字、
+            hover 沒反應、選中只有一層極淡底色，下面五顆開關又是三種不同外觀的
+            9px 小膠囊，掃過去像散落的標籤。這裡補上兩個分組標題（功能／設定），
+            CSS 端把兩組都排成等節奏的整列列項、選中列加左側指示條。
+            ⚠️ ≤560px 這一區會被抽成頂欄下的橫向控制條，標題在那裡是純浪費寬度，
+            已在 hermes.css 的 N70/N71 手機段落 `display:none`。 */}
+        <p className="hermes-rail-group">{t('railGroupNav')}</p>
         <button type="button" className="hermes-nav-item" onClick={onHome} aria-pressed={activeModule === null}>
           {t('homeAria')}
         </button>
@@ -139,6 +155,7 @@ export default function HermesLeftRail({
           </button>
         ))}
         <div className="hermes-rail-controls-sep" role="separator" />
+        <p className="hermes-rail-group">{t('railGroupSettings')}</p>
         <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
           {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
         </button>
@@ -154,14 +171,11 @@ export default function HermesLeftRail({
             模式出現。跟導覽同一個道理——能按的一律留在左軌，新手模式減的是
             版面密度不是功能的存在，所以拿掉 `!beginnerMode` 這道門。 */}
         <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>{t('shipToggle')}</button>
-        <button
-          type="button"
-          className="hermes-lang-toggle"
-          aria-label={t('language')}
-          onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')}
-        >
-          {locale === 'zh-TW' ? 'EN' : '繁中'}
-        </button>
+        {/* N72（CEO：「中文 英文 放右上，不要拿到左邊很怪」）：語言切換不是本產品
+            的功能，是整個介面的全域偏好——跟導覽、模式開關擺在一起，會讓人以為
+            它跟「分析什麼」同一層。這顆已搬到頂欄最右（`HermesTopBar`）。
+            ⚠️ 頂欄「只留狀態」的規則對它有例外：語言是慣例位置（右上），
+            這是 CEO 直接指定，不要又搬回左軌。 */}
       </nav>
         {/* N46: 這張「我想做什麼？」卡片預設攤開，五張 intent 卡（每張都是
             標題＋說明兩行）在 zh-TW 就吃掉 300px 以上，把 HERMES 對話串和
@@ -254,8 +268,13 @@ export default function HermesLeftRail({
            這個 .hermes-clip clientHeight 只剩 28px（scrollHeight 222），
            使用者看不到 HERMES 主控台的任何內容。改成 200px 樓地板：左軌自己
            已經是 overflow-y:auto，空間不夠時讓左軌滾，而不是把面板壓扁。
-           200 = 稽核腳本的可讀性門檻 min(scrollHeight, 200)。 */
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 200, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
+           N76（CEO：「這很重要怎麼跑下去了」）：樓地板從 200 提到 300。
+           200 是照「稽核腳本可讀性門檻」訂的，只保證看得到「內容」，
+           沒保證看得到「輸入框」——實測內容 326px 塞進 200px 的框，
+           composer 就被擠到這個框自己的捲軸下面，畫面上等同輸入不見了。
+           300 是量出來的：標頭 + 一則訊息 + composer 剛好露出。
+           空間真的不夠時左軌自己是 overflow-y:auto，讓左軌滾，不壓扁這裡。 */
+        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 300, overflowY: 'auto', background: 'rgba(13,20,30,.6)', border: '1px solid var(--color-hermes-bd)', borderRadius: 8, padding: 14, boxShadow: 'inset 0 0 24px rgba(77,216,224,.04)' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
           <div style={{ position: 'relative', width: 24, height: 24, flexShrink: 0, animation: 'hermes-hermes-breathe 3.2s ease-in-out infinite' }}>

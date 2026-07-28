@@ -28,7 +28,17 @@ def record_hash(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", type=Path, required=True)
-    parser.add_argument("--venv", type=Path, required=True)
+    interpreter = parser.add_mutually_exclusive_group(required=True)
+    interpreter.add_argument(
+        "--python",
+        type=Path,
+        help="exact Python interpreter whose runtime and packages are bundled",
+    )
+    interpreter.add_argument(
+        "--venv",
+        type=Path,
+        help="virtualenv root (legacy shorthand for <venv>/bin/python)",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     output = args.output_dir
@@ -37,7 +47,9 @@ def main() -> int:
         raise SystemExit("router runtime staging path already exists")
     stage.mkdir(parents=True, mode=0o700)
     try:
-        python = args.venv / "bin/python"
+        python = args.python if args.python is not None else args.venv / "bin/python"
+        if not python.is_file():
+            raise SystemExit(f"python interpreter does not exist: {python}")
         version = subprocess.check_output(
             [
                 str(python),
