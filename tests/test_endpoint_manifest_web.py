@@ -171,7 +171,10 @@ def test_real_production_web_entrypoint_serves_signed_artifact_identity(
         text=True,
     )
     try:
-        readiness_deadline = time.monotonic() + 10.0
+        # The production entrypoint imports the full connector/runtime graph.
+        # Under the mandatory ``pytest -n auto`` gate the host can be saturated,
+        # so preserve the polling assertion but allow realistic startup time.
+        readiness_deadline = time.monotonic() + 30.0
         while time.monotonic() < readiness_deadline:
             if process.poll() is not None:
                 stdout, stderr = process.communicate()
