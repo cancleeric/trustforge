@@ -8,7 +8,6 @@ RUN_ID="${TRUSTFORGE_RELEASE_RUN_ID:?TRUSTFORGE_RELEASE_RUN_ID is required}"
 BACKUP_ROOT="${TRUSTFORGE_BACKUP_ROOT:-$PWD/out/release-train/backups}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="trustforge-deploy-${ACCOUNT}"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 WORK="$(mktemp -d)"
 VERIFY="$(mktemp -d)"
 trap 'rm -rf "$WORK" "$VERIFY"' EXIT
@@ -25,8 +24,10 @@ printf '%s  artifact.zip\n' "$DIGEST" > "$WORK/SHA256SUMS"
 (cd "$WORK" && shasum -a 256 -c SHA256SUMS)
 bash deploy/verify_cost_ledger_pitr.sh --verify
 
-ARCHIVE="$BACKUP_ROOT/trustforge-production-${STAMP}-${DIGEST:0:12}.tar.gz"
-tar -C "$WORK" -czf "$ARCHIVE" active.json previous.json artifact.zip manifest.json SHA256SUMS
+ARCHIVE="$BACKUP_ROOT/trustforge-production-${DIGEST}.tar.gz"
+if [ ! -f "$ARCHIVE" ]; then
+  tar -C "$WORK" -czf "$ARCHIVE" active.json previous.json artifact.zip manifest.json SHA256SUMS
+fi
 tar -C "$VERIFY" -xzf "$ARCHIVE"
 (cd "$VERIFY" && shasum -a 256 -c SHA256SUMS)
 python3 - "$VERIFY/active.json" "$VERIFY/previous.json" "$VERIFY/manifest.json" <<'PY'

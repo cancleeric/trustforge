@@ -19,6 +19,9 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "out" / "release-train"
+PRODUCTION_ACCOUNT = "795930814369"
+PRODUCTION_REGION = "ap-southeast-2"
+PRODUCTION_URL = "https://trustforge.hurricanesoft.com.tw"
 def run(command: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
     result = subprocess.run(command, cwd=cwd, text=True, check=True, capture_output=capture)
     return result.stdout if capture else ""
@@ -34,6 +37,13 @@ def record(receipt: dict) -> Path:
     status = OUT / "last-status.json"
     shutil.copyfile(path, status)
     os.chmod(status, 0o600)
+    history = sorted(
+        (item for item in OUT.glob("20*.json") if not item.name.endswith("-backup.json")),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in history[100:]:
+        stale.unlink()
     return path
 
 
@@ -52,8 +62,8 @@ def lease() -> Iterable[None]:
             birth = run(["ps", "-o", "lstart=", "-p", str(owner)], capture=True).strip()
             if birth != owner_data.get("birth"):
                 raise ProcessLookupError
-        except (FileNotFoundError, ProcessLookupError, ValueError):
-            shutil.rmtree(lock)
+        except (FileNotFoundError, ProcessLookupError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            shutil.rmtree(lock, ignore_errors=True)
             try:
                 lock.mkdir(mode=0o700)
             except FileExistsError as race:
@@ -94,9 +104,19 @@ def gate(worktree: Path) -> None:
         if not sandbox.is_file():
             raise RuntimeError("trusted gate sandbox is unavailable")
         home = Path.home()
-        denied = [home / ".aws", home / ".ssh", home / ".config" / "gh", home / "Library" / "Keychains"]
+        denied = [
+            home / ".aws", home / ".ssh", home / ".config", home / ".docker",
+            home / ".npmrc", home / ".netrc", home / ".pypirc", home / "Library" / "Keychains",
+        ]
         rules = "".join(f'(deny file-read* (subpath "{path}"))' for path in denied)
-        profile = f'(version 1)(allow default){rules}(deny process-exec (literal "/usr/bin/security"))'
+        profile = (
+            f'(version 1)(allow default){rules}'
+            f'(deny file-write* (subpath "{home}"))'
+            '(deny network*)(allow network* (local ip "localhost:*"))'
+            '(allow network* (remote ip "localhost:*"))'
+            '(deny process-exec (literal "/usr/bin/security"))'
+            '(deny mach-lookup (global-name "com.apple.securityd"))'
+        )
         command = [str(sandbox), "-p", profile, str(hook)]
     env = dict(os.environ)
     for key in tuple(env):
@@ -108,12 +128,14 @@ def gate(worktree: Path) -> None:
 
 def production_identity() -> tuple[str, str]:
     account = run(["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"], capture=True).strip()
-    bucket = f"trustforge-deploy-{account}"
-    pointer = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/pointers/active.json", "-", "--region", "ap-southeast-2"], capture=True))
+    if account != PRODUCTION_ACCOUNT:
+        raise RuntimeError("AWS caller is not the pinned TrustForge production account")
+    bucket = f"trustforge-deploy-{PRODUCTION_ACCOUNT}"
+    pointer = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/pointers/active.json", "-", "--region", PRODUCTION_REGION], capture=True))
     digest = str(pointer["digest"])
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise RuntimeError("production active digest is invalid")
-    manifest = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/artifacts/{digest}/manifest.json", "-", "--region", "ap-southeast-2"], capture=True))
+    manifest = json.loads(run(["aws", "s3", "cp", f"s3://{bucket}/artifacts/{digest}/manifest.json", "-", "--region", PRODUCTION_REGION], capture=True))
     sha = str(manifest["git_sha"])
     if sha == "unknown":
         legacy = re.search(r"-g([0-9a-f]{7,40})(?:$|-)", str(pointer.get("version", "")))
@@ -123,6 +145,20 @@ def production_identity() -> tuple[str, str]:
     if len(sha) != 40 or any(char not in "0123456789abcdef" for char in sha):
         raise RuntimeError("production manifest git SHA is invalid")
     return sha, digest
+
+
+def verify_runtime_identity(expected_digest: str) -> None:
+    health = run(["curl", "-fsS", "--max-time", "15", f"{PRODUCTION_URL}/healthz"], capture=True).strip()
+    if health != "ok":
+        raise RuntimeError("production health endpoint did not return ok")
+    payload = json.loads(
+        run(
+            ["curl", "-fsS", "--max-time", "15", f"{PRODUCTION_URL}/api/.well-known/trustforge-release-manifest"],
+            capture=True,
+        )
+    )
+    if payload.get("artifact_digest") != f"sha256:{expected_digest}":
+        raise RuntimeError("production serving endpoint artifact digest mismatch")
 
 
 def require_backup_receipt(command: str, run_id: str) -> Path:
@@ -185,7 +221,7 @@ def execute(args: argparse.Namespace) -> Path:
                         run(["git", "merge", "--no-edit", "--no-ff", develop_sha], cwd=main_tree)
                     gate(main_tree)
                     main_sha = run(["git", "rev-parse", "HEAD"], cwd=main_tree, capture=True).strip()
-                    release_branch = f"release/auto-{run_id.lower()}-{main_sha[:8]}"
+                    release_branch = f"release/auto-{run_id[:8]}"
                     backup = require_backup_receipt(backup_command, run_id)
                     receipt["steps"].append({"backup_receipt": str(backup)})
                     if develop_only:
@@ -201,10 +237,17 @@ def execute(args: argparse.Namespace) -> Path:
                     deployed_sha, deployed_digest = production_identity()
                     if deployed_sha != main_sha:
                         raise RuntimeError("production active SHA does not match the verified main SHA")
+                    verify_runtime_identity(deployed_digest)
                     receipt["steps"].append({"production_deploy": "passed", "git_sha": deployed_sha, "artifact_digest": deployed_digest})
                 finally:
-                    subprocess.run(["git", "worktree", "remove", "--force", str(main_tree)], cwd=ROOT)
-                    subprocess.run(["git", "worktree", "remove", "--force", str(develop_tree)], cwd=ROOT)
+                    cleanup = []
+                    for tree in (main_tree, develop_tree):
+                        result = subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=ROOT)
+                        cleanup.append({"path": str(tree), "returncode": result.returncode})
+                    prune = subprocess.run(["git", "worktree", "prune"], cwd=ROOT)
+                    receipt["cleanup"] = cleanup + [{"worktree_prune": prune.returncode}]
+                    if any(item.get("returncode", item.get("worktree_prune", 0)) for item in receipt["cleanup"]):
+                        raise RuntimeError("release worktree cleanup failed")
             receipt["status"] = "completed"
     except Exception as exc:
         receipt["status"] = "failed"

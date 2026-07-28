@@ -5,7 +5,8 @@
 `scripts/hourly_release_train.py` 不掃描 feature 分支、不建立或合併 PR，只從已由
 開發流程整理完成的遠端 `develop` 開始。每輪使用獨立 worktree 與 lease，先驗
 `develop` 完整 pre-push gate，再合併到 `main`、重跑完整 gate、建立不可混淆的
-`release/auto-<UTC>-<SHA>` 分支，最後才執行備份回復驗證與 production deploy。
+`release/auto-<YYYYMMDD>` 每日 release 分支（同日只允許 fast-forward），最後才
+執行備份回復驗證與 production deploy。
 衝突、測試、備份或部署任一失敗都會停止並在 `out/release-train/` 留下 JSON
 receipt。
 
@@ -27,7 +28,8 @@ archive SHA-256 與回復驗證結果：
 目前核定的唯讀 production 備份命令是
 `bash deploy/backup_production_release.sh`：它封存 active/previous pointer、
 active immutable artifact 與 manifest 成 `tar.gz`，重新解壓核對 SHA-256，並確認
-cost ledger DynamoDB PITR 已啟用；不寫 AWS、不碰 schema。
+cost ledger DynamoDB PITR 已啟用；相同 artifact digest 會重用同一份備份，不會
+每次重試重複佔空間。排程 receipt 保留最近 100 份；不寫 AWS、不碰 schema。
 
 此排程不會啟動或變更 Hermes、資料收集、web 或 frontend daemon。
 
