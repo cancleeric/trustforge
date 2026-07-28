@@ -34,6 +34,14 @@ BACKUP_PORT="${2:-8081}"
 HEALTH_TIMEOUT="${TRUSTFORGE_HEALTH_TIMEOUT:-30}"
 HEALTH_INTERVAL="${TRUSTFORGE_HEALTH_INTERVAL:-1}"
 CANARY_UNIT="trustforge-canary-$$"
+MODEL_ID="${BEDROCK_MODEL_ID-}"
+if [ -z "$MODEL_ID" ] && [ -r /etc/systemd/system/trustforge.service ]; then
+  MODEL_ID=$(sed -n 's/^Environment=BEDROCK_MODEL_ID=//p' /etc/systemd/system/trustforge.service)
+fi
+if [ -n "$MODEL_ID" ] && ! [[ "$MODEL_ID" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  echo "[zero-downtime] ERROR: BEDROCK_MODEL_ID contains invalid characters" >&2
+  exit 1
+fi
 
 log() { printf '[zero-downtime] %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -72,7 +80,7 @@ systemd-run --unit="$CANARY_UNIT" \
   --property="Environment=TRUSTFORGE_CACHE_TABLE=${TRUSTFORGE_CACHE_TABLE:-trustforge-connector-cache}" \
   --property="Environment=TRUSTFORGE_COST_LEDGER_TABLE=${TRUSTFORGE_COST_LEDGER_TABLE:-trustforge-cost-ledger}" \
   --property="Environment=COST_LEDGER_BACKEND=${COST_LEDGER_BACKEND:-dynamodb}" \
-  --property="Environment=BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID-}" \
+  --property="Environment=BEDROCK_MODEL_ID=${MODEL_ID}" \
   --property="Type=exec" \
   /usr/bin/python3.11 -m trustforge.web
 
