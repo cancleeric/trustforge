@@ -68,7 +68,13 @@ describe('Hermes responsive bridge layout contract', () => {
     expect(upgradeShip).toContain("t('shipLlmReview')")
     expect(i18nDict).toContain("shipLlmReview: 'LLM 對抗審查'")
     expect(readFileSync(path.join(__dirname, 'HermesUpgradeShip.tsx'), 'utf8')).toContain('(data?.automation.historical_sources ?? []).map')
-    expect(css).toContain('left: 18px')
+    // N72（CEO：「這把畫面擋住了，而且沒有疊層的感覺」「看要不要蓋掉右邊就好」）：
+    // 升級控制台原本是 `left: 18px` 的近滿版面板，且沒有背幕，讀起來像換頁。
+    // 新合約：左緣退到左軌之後（左軌整條留著看得見），並且一定要有背幕。
+    expect(css).toContain('left: calc(var(--hermes-rail) + 14px)')
+    expect(css).toContain('.hermes-upgrade-scrim')
+    const dashboardSrc = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
+    expect(dashboardSrc).toContain('className="hermes-upgrade-scrim"')
   })
 
   it('does not restart the Hermes report for every score counter frame', () => {
@@ -304,5 +310,53 @@ describe('Hermes responsive bridge layout contract', () => {
     const midBreakpointBlock = midBreakpointMatch![1]
 
     expect(midBreakpointBlock).toMatch(/--hermes-rail:\s*clamp\(215px,\s*22vw,\s*245px\);/)
+  })
+})
+
+describe('N76 左軌：選單只縮不長，對話區保底且輸入框看得見', () => {
+  const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+  const rail = readFileSync(path.join(__dirname, 'HermesLeftRail.tsx'), 'utf8')
+
+  it('選單 pane 只縮不長（flex 0 1 auto），且自己捲', () => {
+    const base = css.slice(css.indexOf('.hermes-rail-menu {'))
+    const body = base.slice(0, base.indexOf('}'))
+    expect(body).toContain('flex: 0 1 auto')
+    expect(body).toContain('overflow-y: auto')
+  })
+
+  it('對話區樓地板 300px——200px 會把 composer 擠到捲軸下面', () => {
+    // 真正生效的是 inline style（inline 贏過 class），所以釘的是元件那一行。
+    expect(rail).toContain("flexDirection: 'column', minHeight: 300,")
+    const chat = css.slice(css.indexOf('.hermes-rail-chat {'))
+    expect(chat.slice(0, chat.indexOf('}'))).toContain('min-height: 300px')
+  })
+
+  it('N73 的手動收合鈕已移除（選單本來就該自己縮，不該要人按）', () => {
+    expect(rail).not.toContain('hermes-rail-menu-toggle')
+    expect(rail).not.toContain('menuCollapsed')
+    expect(css).not.toContain('hermes-rail-menu-toggle')
+  })
+})
+
+describe('N74 頂欄下拉面板不得被工作區蓋住', () => {
+  const topbar = readFileSync(path.join(__dirname, 'HermesTopBar.tsx'), 'utf8')
+  const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+
+  it('頂欄本身要疊在 module deck 之上（它是 stacking context，面板加數字沒用）', () => {
+    const m = topbar.match(/height: 'var\(--hermes-top\)', zIndex: (\d+)/)
+    expect(m).not.toBeNull()
+    const topbarZ = Number(m![1])
+    const deck = css.slice(css.indexOf('.hermes-module-deck'))
+    const deckZ = Number(deck.match(/z-index:\s*(\d+)/)![1])
+    expect(topbarZ).toBeGreaterThan(deckZ)
+    // 但仍要低於 drilldown 遮罩，drilldown 打開時頂欄要跟著被壓暗。
+    expect(topbarZ).toBeLessThan(49)
+  })
+})
+
+describe('N75 被工作區蓋住的區塊不得留在 DOM 當隱形陷阱', () => {
+  it('分歧卡只在沒有開工作區時 render', () => {
+    const dash = readFileSync(path.join(__dirname, '..', 'pages', 'HermesDashboard.tsx'), 'utf8')
+    expect(dash).toMatch(/\{!activeModule && \(\s*<HermesMobileDivergenceEntry/)
   })
 })

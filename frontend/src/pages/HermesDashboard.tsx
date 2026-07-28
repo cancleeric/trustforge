@@ -694,11 +694,17 @@ export default function HermesDashboard() {
           </div>
         )}
 
-        <HermesMobileDivergenceEntry
-          derivation={hudDerivation}
-          crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
-          onOpen={() => setSelectedStage('divergence')}
-        />
+        {/* N75：這張卡 z-index 7，工作區面板是 18——模組一開它就整張被蓋住，
+            但仍留在 DOM 裡可聚焦、可被輔具讀到（實測 900x760 六個模組全中，
+            「跨來源分歧?」與「點擊查看 →」兩顆鈕的點擊點都被面板攔走）。
+            前景是工作區時就不該有這個看不見的陷阱，直接不 render。 */}
+        {!activeModule && (
+          <HermesMobileDivergenceEntry
+            derivation={hudDerivation}
+            crossSignal={moduleTelemetry?.analysis?.report.cross_source_signal}
+            onOpen={() => setSelectedStage('divergence')}
+          />
+        )}
 
         <div className="hermes-boot-layer" style={{ opacity: boot.bottom ? 1 : 0, transition: 'opacity .5s ease-out' }}>
           <StageBar flow={analysisFlow} mode={activeModule} telemetry={moduleTelemetry} activity={{ status: phase, coin: selectedId.toUpperCase(), mode: focus, question: query.trim() }} selCoin={hudCoin} derivation={hudDerivation} selectedStage={selectedStage} onSelectStage={(id) => setSelectedStage((s) => (s === id ? null : id))} />
@@ -713,7 +719,16 @@ export default function HermesDashboard() {
 
         {activeModule && <HermesModuleDeck module={activeModule} onClose={closeModule} onTelemetry={setModuleTelemetry} onBusyChange={handleModuleBusyChange} resubmitSignal={resubmitSignal} />}
 
-        {shipOpen && <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />}
+        {/* N72（CEO：「這把畫面擋住了，而且沒有疊層的感覺，使用者會誤會」）：
+            升級控制台原本只有面板、沒有背幕，滿版蓋上去像換頁。補上跟
+            StageDrilldown 同一套的背幕（暗化＋點擊關閉），面板也退到左軌
+            之後，只蓋右邊工作區。 */}
+        {shipOpen && (
+          <>
+            <button className="hermes-upgrade-scrim" type="button" aria-label={t('close')} onClick={() => setShipOpen(false)} />
+            <HermesUpgradeShip data={upgradeData} loading={upgradeLoading} onClose={() => setShipOpen(false)} onRefresh={refreshUpgrades} />
+          </>
+        )}
 
         <HermesOnboarding open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
 
