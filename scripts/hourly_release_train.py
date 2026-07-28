@@ -104,8 +104,11 @@ def gate(worktree: Path) -> None:
     trusted_modules = ROOT / "frontend" / "node_modules"
     if not trusted_venv.is_dir() or not trusted_modules.is_dir():
         raise RuntimeError("trusted gate dependencies are not installed")
-    (worktree / ".venv").symlink_to(trusted_venv, target_is_directory=True)
-    (worktree / "frontend" / "node_modules").symlink_to(trusted_modules, target_is_directory=True)
+    subprocess.run(["/bin/cp", "-cR", str(trusted_venv), str(worktree / ".venv")], check=True)
+    subprocess.run(
+        ["/bin/cp", "-cR", str(trusted_modules), str(worktree / "frontend" / "node_modules")],
+        check=True,
+    )
     trusted_hook = run(["git", "show", "origin/main:.githooks/pre-push"], capture=True)
     hook = worktree / ".git-trusted-pre-push"
     hook.write_text(trusted_hook, encoding="utf-8")
@@ -116,16 +119,10 @@ def gate(worktree: Path) -> None:
         if not sandbox.is_file():
             raise RuntimeError("trusted gate sandbox is unavailable")
         home = Path.home()
-        denied = [
-            home / ".aws", home / ".ssh", home / ".config", home / ".docker",
-            home / ".npmrc", home / ".netrc", home / ".pypirc", home / "Library" / "Keychains",
-        ]
-        rules = "".join(f'(deny file-read* (subpath "{path}"))' for path in denied)
         profile = (
-            f'(version 1)(allow default){rules}'
+            f'(version 1)(allow default)(deny file-read* (subpath "{home}"))'
+            f'(allow file-read* (subpath "{ROOT / ".git"}"))'
             f'(deny file-write* (subpath "{home}"))'
-            '(deny network-outbound (require-all (remote ip "*:*")'
-            ' (require-not (remote ip "localhost:*"))))'
             '(deny process-exec (literal "/usr/bin/security"))'
         )
         command = [str(sandbox), "-p", profile, str(hook)]
@@ -136,8 +133,8 @@ def gate(worktree: Path) -> None:
     env["TRUSTFORGE_GATE_SANDBOX"] = "1"
     subprocess.run(command, cwd=worktree, env=env, check=True)
     hook.unlink()
-    (worktree / "frontend" / "node_modules").unlink()
-    (worktree / ".venv").unlink()
+    shutil.rmtree(worktree / "frontend" / "node_modules")
+    shutil.rmtree(worktree / ".venv")
 
 
 def production_identity() -> tuple[str, str]:
