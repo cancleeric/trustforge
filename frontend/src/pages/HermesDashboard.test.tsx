@@ -32,6 +32,7 @@ vi.mock('../lib/endpoints', () => ({
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'no_request', message: 'no request' } }),
   getWhaleSummary: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { accepted: true } }),
+  getWhaleSummary: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
 }))
 
 function DashboardHistoryControls() {
