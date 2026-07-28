@@ -100,7 +100,11 @@ def _agentcore_invoke(
             }
         client = boto3.client(
             "bedrock-agentcore",
-            config=Config(retries={"max_attempts": 2, "mode": "standard"}),
+            config=Config(
+                retries={"max_attempts": 2, "mode": "standard"},
+                connect_timeout=10,
+                read_timeout=120,
+            ),
         )
 
     payload = json.dumps(
