@@ -231,7 +231,8 @@ def test_do_get_api_health_route():
 
 def test_api_analyze_single_coin_envelope_and_extra_fields():
     code, body = web._handle_api_analyze(
-        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]}, client_ip="10.0.0.1"
+        {"coin": ["BTC"], "type": ["multi_source"], "q": ["test"]},
+        client_ip="192.0.2.201",
     )
     assert code == 200
     parsed = _envelope(body)
@@ -569,7 +570,9 @@ def test_api_analyze_json_serialisable_and_matches_analyze_json_report():
 
 def test_do_get_api_analyze_route_sets_json_content_type():
     h = web.Handler.__new__(web.Handler)
-    h.client_address = ("127.0.0.1", 1)
+    # Dedicated TEST-NET address: this assertion is not a rate-limit test and
+    # must not share a bucket with other route tests under pytest-xdist.
+    h.client_address = ("192.0.2.202", 1)
     h.path = "/api/analyze?coin=BTC&type=multi_source&q=test"
     from io import BytesIO
     from email.message import Message
