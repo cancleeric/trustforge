@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from trustforge import web
+from trustforge.comparison_contract import ComparisonRunResult
 from trustforge.execlog import ExecutionLog
 from trustforge.ingestion.base import Document
 from trustforge.schema import BasisItem, Evidence, QuestionType, Report
@@ -143,12 +144,13 @@ def test_api_analyze_single_golden_fixture(monkeypatch):
 
 def test_api_analyze_comparison_golden_fixture(monkeypatch):
     def fake_run_comparison(coin_a, coin_b, query, **_kwargs):
-        return (
-            _report(coin_a, "comparison", query),
-            [_evidence("fixture-a", "news", 0.8)],
-            _report(coin_b, "comparison", query),
-            [_evidence("fixture-b", "price", 0.9)],
-            ExecutionLog(),
+        return ComparisonRunResult(
+            report_a=_report(coin_a, "comparison", query),
+            evidence_a=[_evidence("fixture-a", "news", 0.8)],
+            report_b=_report(coin_b, "comparison", query),
+            evidence_b=[_evidence("fixture-b", "price", 0.9)],
+            comparison=None,
+            log=ExecutionLog(),
         )
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)

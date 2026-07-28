@@ -18,6 +18,12 @@ vi.mock('../components/AnalysisReportView', () => ({
   ),
 }))
 
+vi.mock('../components/ComparisonReportView', () => ({
+  default: ({ data }: { data: { conclusion: string } }) => (
+    <div data-testid="comparison-report-view">{data.conclusion}</div>
+  ),
+}))
+
 function renderPage(initialUrl = '/compare') {
   return render(
     <MemoryRouter initialEntries={[initialUrl]}>
@@ -52,5 +58,41 @@ describe('ComparePage · 同層 Peer 比較入口（模組③ Wave 3）', () => 
     renderPage('/compare?coin=BTC&coin2=BNB&q=test')
     await waitFor(() => expect(screen.getByLabelText('幣種 A · BTC')).toHaveTextContent('asset:btc'))
     expect(screen.getByLabelText('幣種 B · BNB')).toHaveTextContent('asset:bnb')
+  })
+
+  it('顯示 ComparisonReportView 當 comparison_report 存在，並保留摺疊的雙幣詳細分析', async () => {
+    vi.mocked(getComparisonSnapshot).mockResolvedValue({
+      ok: true,
+      data: {
+        version: 'test',
+        report_a: { coin: 'BTC', calibrated_confidence: 0.5 },
+        report_b: { coin: 'BNB', calibrated_confidence: 0.5 },
+        evidence_a: [], evidence_b: [],
+        trust_components_aggregate_a: { reputation: null, corroboration: null, recency: null, manipulation: null },
+        trust_components_aggregate_b: { reputation: null, corroboration: null, recency: null, manipulation: null },
+        trust_radar_a: {}, trust_radar_b: {}, price_provenance_a: {}, price_provenance_b: {},
+        execution_log: [],
+        comparison_report: {
+          coin_a: 'BTC',
+          coin_b: 'BNB',
+          query: 'test',
+          conclusion: 'BTC 整體優於 BNB',
+          dimensions: [
+            { dimension: '價格動能', decision: 'normal', reasoning: 'BTC 動能較強', confidence: 0.85, evidence_refs: [] },
+            { dimension: '鏈上活動', decision: 'insufficient', reasoning: 'BNB 資料不足', confidence: 0.3, evidence_refs: [] },
+          ],
+          confidence: 0.72,
+          limits: ['樣本有限'],
+          could_flip: ['若 BNB 推出重大升級'],
+          generated_at: '2026-07-28T00:00:00Z',
+        },
+      },
+    } as never)
+    renderPage('/compare?coin=BTC&coin2=BNB&q=test')
+    await waitFor(() => expect(screen.getByTestId('comparison-report-view')).toHaveTextContent('BTC 整體優於 BNB'))
+    // 各幣詳細分析仍然存在（在摺疊區內）
+    expect(screen.getByText('查看各幣詳細分析')).toBeInTheDocument()
+    expect(screen.getByLabelText('幣種 A · BTC')).toBeInTheDocument()
+    expect(screen.getByLabelText('幣種 B · BNB')).toBeInTheDocument()
   })
 })

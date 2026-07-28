@@ -105,50 +105,12 @@ def require_clean_root() -> None:
 
 
 def bump_patch_version(worktree: Path) -> str:
-    """Synchronize backend and frontend package metadata to the next patch."""
-    pyproject = worktree / "pyproject.toml"
-    match = re.search(
-        r'(?m)^version = "(?P<version>[^"]+)"$',
-        pyproject.read_text(encoding="utf-8"),
-    )
-    if not match or not VERSION_PATTERN.fullmatch(match.group("version")):
-        raise RuntimeError("pyproject release version is not strict SemVer")
-    current = match.group("version")
-    parsed = VERSION_PATTERN.fullmatch(current)
-    assert parsed is not None
-    next_version = (
-        f"{parsed.group('major')}.{parsed.group('minor')}."
-        f"{int(parsed.group('patch')) + 1}"
-    )
-    replacements = {
-        "pyproject.toml": (f'version = "{current}"', f'version = "{next_version}"', 1),
-        "src/trustforge/__init__.py": (
-            f'__version__ = "{current}"',
-            f'__version__ = "{next_version}"',
-            1,
-        ),
-        "src/trustforge/_version.py": (
-            f'VERSION = "{current}"',
-            f'VERSION = "{next_version}"',
-            1,
-        ),
-        "frontend/package.json": (
-            f'"version": "{current}"',
-            f'"version": "{next_version}"',
-            1,
-        ),
-        "frontend/package-lock.json": (
-            f'"version": "{current}"',
-            f'"version": "{next_version}"',
-            2,
-        ),
-    }
-    for relative, (old, new, expected) in replacements.items():
-        target = worktree / relative
-        body = target.read_text(encoding="utf-8")
-        if body.count(old) != expected:
-            raise RuntimeError(f"{relative} is not synchronized to {current}")
-        target.write_text(body.replace(old, new), encoding="utf-8")
+    """Bump the canonical version and regenerate derived package metadata."""
+    from scripts.release_version import bumped_version, package_version, parse_version, update_version_files
+
+    current = package_version(worktree)
+    next_version = bumped_version(parse_version(current), "patch")
+    update_version_files(next_version, worktree)
     return next_version
 
 

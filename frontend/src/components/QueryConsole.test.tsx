@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from 'vitest'
-import { render, fireEvent } from '@testing-library/react'
+import { render, fireEvent, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import QueryConsole from './QueryConsole'
 import { HermesI18nProvider } from '../hermes/hermesI18n'
@@ -51,5 +51,29 @@ describe('N69 QueryConsole 題型', () => {
       type: defaultQuestionTypeForFocus('fundamentals'),
     })
     expect(defaultQuestionTypeForFocus('fundamentals')).toBe('hypothesis')
+  })
+})
+
+describe('#823 competition question picker', () => {
+  it('fills exactly one deterministic question without submitting', () => {
+    const onSubmit = vi.fn()
+    const { container } = render(
+      <MemoryRouter>
+        <HermesI18nProvider>
+          <QueryConsole
+            initial={{ coin: 'BTC', type: 'multi_source', mode: 'risk', q: '原題目' }}
+            onSubmit={onSubmit}
+            random={() => 0}
+          />
+        </HermesI18nProvider>
+      </MemoryRouter>,
+    )
+    const picker = screen.getByRole('button', { name: '隨機競賽題目' })
+    fireEvent.click(picker)
+
+    const textarea = container.querySelector('#qc-q') as HTMLTextAreaElement
+    expect(textarea.value).toMatch(/^請分析 BTC：/)
+    expect(textarea.value.split('\n')).toHaveLength(1)
+    expect(onSubmit).not.toHaveBeenCalled()
   })
 })

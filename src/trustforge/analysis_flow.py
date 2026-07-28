@@ -61,6 +61,14 @@ MODES: dict[str, tuple[QuestionType, str]] = {
 }
 QUESTION_TYPES = {**{mode: item[0] for mode, item in MODES.items()}, "comparison": QuestionType.COMPARISON}
 QUEUE_CAPACITY = 500
+
+
+class MultiAngleCapacityError(RuntimeError):
+    """五角度工作無法原子入列。"""
+
+
+class MultiAngleBudgetError(RuntimeError):
+    """五角度執行的保守成本預檢未通過。"""
 MANUAL_PRIORITY = 0
 SCHEDULED_PRIORITY = 100
 MANUAL_DEDUP_WINDOW_SEC = 300
@@ -335,6 +343,14 @@ class AnalysisFlow:
           coin TEXT NOT NULL, mode TEXT NOT NULL, question TEXT NOT NULL,
           payload_json TEXT NOT NULL, published_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS analysis_synthesis_claims (
+          snapshot_id TEXT NOT NULL, coin TEXT NOT NULL, claimed_at REAL NOT NULL,
+          PRIMARY KEY(snapshot_id, coin)
+        );
+        CREATE TABLE IF NOT EXISTS analysis_multi_angle_runs (
+          snapshot_id TEXT NOT NULL, coin TEXT NOT NULL, submitted_at REAL NOT NULL,
+          PRIMARY KEY(snapshot_id, coin)
+        );
         CREATE INDEX IF NOT EXISTS idx_analysis_results_lookup
           ON analysis_results(coin, mode, question, published_at DESC);
         CREATE TABLE IF NOT EXISTS analysis_questions (
@@ -563,19 +579,106 @@ class AnalysisFlow:
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
         locale = normalize_locale(locale)
-        snapshot_id = self.create_snapshot(coin, query=question)
-        job_ids: dict[str, str | None] = {}
-        for mode, (_qtype, template) in MODES.items():
-            mode_question = template.format(coin=coin)
-            self.register_question(coin, mode, mode_question, enqueue=False)
-            job_id = self.enqueue_job(snapshot_id, mode, mode_question,
-                                      origin="manual", locale=locale)
-            job_ids[mode] = job_id
-        self._append_lineage(
-            "multi_angle_submitted", entity_type="multi_angle_run",
-            entity_id=f"ma-{snapshot_id}", snapshot_id=snapshot_id,
-            metadata={"coin": coin, "job_ids": job_ids, "locale": locale},
-        )
+        conn = self._conn()
+        # 快速容量預檢放在資料收集/建立 snapshot 之前，避免明知不可能原子
+        # 入列時留下孤兒 snapshot。真正防 race 的檢查仍在下方 IMMEDIATE tx。
+        pending = conn.execute(
+            "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')"
+        ).fetchone()[0]
+        if pending + len(MODES) > QUEUE_CAPACITY:
+            raise MultiAngleCapacityError(
+                f"佇列剩餘容量不足，五角度需同時保留 {len(MODES)} 個位置"
+            )
+
+        # 無副作用 admission check：只確認目前可觀測的 spent + in-flight
+        # reservations 尚容得下五次呼叫，不在 submit 跨 process 預扣額度。
+        # 每個 worker 真正呼叫時仍各自走既有原子 fail-closed guard。
+        if not budget_guard.request_budget_available(len(MODES)):
+            raise MultiAngleBudgetError("目前可觀測預算不足以啟動五角度分析")
+        snapshot_id: str | None = None
+        try:
+            snapshot_id = self.create_snapshot(coin, query=question)
+            planned: list[tuple[str, str, str]] = []
+            for mode, (_qtype, template) in MODES.items():
+                mode_question = template.format(coin=coin)
+                planned.append((mode, mode_question, f"flow-{uuid.uuid4().hex[:16]}"))
+
+            now = time.time()
+            conn.execute("BEGIN IMMEDIATE")
+            pending = conn.execute(
+                "SELECT count(*) FROM analysis_jobs WHERE state IN ('queued','running')"
+            ).fetchone()[0]
+            if pending + len(planned) > QUEUE_CAPACITY:
+                raise MultiAngleCapacityError(
+                    f"佇列剩餘容量不足，五角度需同時保留 {len(planned)} 個位置"
+                )
+            conn.execute(
+                "INSERT INTO analysis_multi_angle_runs(snapshot_id,coin,submitted_at) VALUES(?,?,?)",
+                (snapshot_id, coin, now),
+            )
+            for mode, mode_question, job_id in planned:
+                qtype = QUESTION_TYPES[mode]
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO analysis_jobs(
+                         job_id,snapshot_id,coin,mode,question,question_type,state,current_stage,
+                         retry_count,error,created_at,updated_at,origin,priority
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (job_id, snapshot_id, coin, mode, mode_question, qtype.value,
+                     "queued", STAGES[0], 0, None, now, now, "manual", MANUAL_PRIORITY),
+                )
+                if not cur.rowcount:
+                    raise MultiAngleCapacityError("五角度工作已存在，未建立部分重複工作")
+                self._checkpoint(job_id, STAGES[0], "queued")
+                self._append_lineage(
+                    "job_enqueued", entity_type="analysis_job", entity_id=job_id,
+                    snapshot_id=snapshot_id, job_id=job_id,
+                    parent_type="snapshot", parent_id=snapshot_id,
+                    metadata={"coin": coin, "mode": mode,
+                              "question_type": qtype.value, "origin": "manual",
+                              "priority": MANUAL_PRIORITY, "locale": locale},
+                )
+            job_ids = {mode: job_id for mode, _question, job_id in planned}
+            self._append_lineage(
+                "multi_angle_submitted", entity_type="multi_angle_run",
+                entity_id=f"ma-{snapshot_id}", snapshot_id=snapshot_id,
+                metadata={"coin": coin, "job_ids": job_ids, "locale": locale},
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            if snapshot_id is not None:
+                conn.execute(
+                    "DELETE FROM analysis_snapshots WHERE snapshot_id=? "
+                    "AND NOT EXISTS(SELECT 1 FROM analysis_jobs WHERE snapshot_id=?)",
+                    (snapshot_id, snapshot_id),
+                )
+            raise
+
+        for mode, mode_question, job_id in planned:
+            try:
+                self.register_question(coin, mode, mode_question, enqueue=False)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "multi-angle question registry failed for durable job %s",
+                    job_id,
+                    exc_info=True,
+                )
+            # SQLite queue/checkpoint 是跨 process source of truth；in-memory
+            # package 只是同 process 快路徑。快路徑失敗時保留 durable queued
+            # state，daemon 的 reconcile/restart 會接手，不可回滾成部分 DB jobs。
+            try:
+                self._put_package(
+                    STAGES[0],
+                    {"job_id": job_id, "priority": MANUAL_PRIORITY, "locale": locale},
+                )
+                self._adopted.add(job_id)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "multi-angle in-memory dispatch failed; durable daemon will recover %s",
+                    job_id,
+                    exc_info=True,
+                )
         return {"snapshot_id": snapshot_id, "job_ids": job_ids, "coin": coin}
 
     def multi_angle_status(self, coin: str, snapshot_id: str | None = None) -> dict[str, Any] | None:
@@ -610,7 +713,14 @@ class AnalysisFlow:
         由 _stage_report_delivery 在 COMMIT 後 fail-soft 呼叫。
         最後完成的 job 觸發此函式。Synthesis 是確定性演算法，不呼叫 LLM。
         """
-        completed = self._conn().execute(
+        conn = self._conn()
+        submitted = conn.execute(
+            "SELECT 1 FROM analysis_multi_angle_runs WHERE snapshot_id=? AND coin=?",
+            (snapshot_id, coin),
+        ).fetchone()
+        if not submitted:
+            return False
+        completed = conn.execute(
             "SELECT DISTINCT mode FROM analysis_results WHERE snapshot_id=? AND coin=?",
             (snapshot_id, coin),
         ).fetchall()
@@ -618,45 +728,87 @@ class AnalysisFlow:
         if not set(MODES.keys()) <= completed_modes:
             return False
         # 避免重複觸發
-        existing = self._conn().execute(
+        existing = conn.execute(
             "SELECT 1 FROM analysis_results WHERE snapshot_id=? AND coin=? AND mode='multi_angle'",
             (snapshot_id, coin),
         ).fetchone()
         if existing:
             return False
+        # 原子取得 synthesis claim，避免兩個最後完成的 worker 都呼叫 LLM、
+        # 重複寫 lineage。未完成或失敗時會釋放 claim，允許後續重試。
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM analysis_synthesis_claims "
+                "WHERE snapshot_id=? AND coin=? AND claimed_at<?",
+                (snapshot_id, coin, time.time() - STALE_RUNNING_JOB_THRESHOLD_SECONDS),
+            )
+            claim = conn.execute(
+                "INSERT OR IGNORE INTO analysis_synthesis_claims VALUES(?,?,?)",
+                (snapshot_id, coin, time.time()),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        if not claim.rowcount:
+            return False
+        try:
+            return self._complete_claimed_synthesis(snapshot_id, coin)
+        except Exception:
+            conn.execute(
+                "DELETE FROM analysis_synthesis_claims WHERE snapshot_id=? AND coin=?",
+                (snapshot_id, coin),
+            )
+            raise
+
+    def _complete_claimed_synthesis(self, snapshot_id: str, coin: str) -> bool:
+        """完成已取得唯一 claim 的合成；任何例外由 caller 釋放 claim。"""
+        conn = self._conn()
         from .multi_angle import angle_result_from_payload, synthesize_angles
         angles = []
         for mode in MODES:
-            row = self._conn().execute(
-                "SELECT payload_json, job_id FROM analysis_results "
+            row = conn.execute(
+                "SELECT payload_json, job_id, question FROM analysis_results "
                 "WHERE snapshot_id=? AND coin=? AND mode=? "
                 "ORDER BY published_at DESC LIMIT 1",
                 (snapshot_id, coin, mode),
             ).fetchone()
             if row:
-                angles.append(angle_result_from_payload(mode, row["payload_json"], job_id=row["job_id"]))
+                angles.append(angle_result_from_payload(
+                    mode,
+                    row["payload_json"],
+                    job_id=row["job_id"],
+                    question=row["question"],
+                ))
         if len(angles) < len(MODES):
-            return False
+            raise RuntimeError("multi-angle inputs disappeared after synthesis claim")
         report = synthesize_angles(angles, coin, snapshot_id)
-        # #811: 選填 LLM 敘事（env flag 控制，預設關）
-        narration = None
-        try:
-            from .multi_angle import narrate_synthesis
-            from .bedrock import BedrockClient
-            client = BedrockClient(offline=True)  # 預設離線；narrate_synthesis 內部檢查 env flag
-            narration = narrate_synthesis(report, client)
-        except Exception:
-            pass  # fail-soft
+        narration = report.synthesis_summary
+        # Flag 關閉時完全不進 live gate、不預留成本、不建立 client。
+        if os.environ.get("TRUSTFORGE_MULTI_ANGLE_NARRATION") == "1":
+            try:
+                from .multi_angle import narrate_synthesis
+                narration_log = ExecutionLog(run_id=f"ma-{snapshot_id}")
+                with _bedrock_live_attempt(narration_log) as live:
+                    client = BedrockClient(offline=not live)
+                    narration = narrate_synthesis(report, client, narration_log)
+            except Exception:
+                narration = report.synthesis_summary
         now = time.time()
         result_id = f"result-ma-{snapshot_id}"
         payload = report.to_dict()
         if narration and narration != report.synthesis_summary:
             payload["narration"] = narration
-        self._conn().execute(
-            "INSERT OR REPLACE INTO analysis_results VALUES(?,?,?,?,?,?,?,?)",
-            (result_id, f"ma-{snapshot_id}", snapshot_id, coin, "multi_angle",
-             "五角度綜合評估", json.dumps(payload, ensure_ascii=False), now),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO analysis_results VALUES(?,?,?,?,?,?,?,?)",
+                (result_id, f"ma-{snapshot_id}", snapshot_id, coin, "multi_angle",
+                 "五角度綜合評估", json.dumps(payload, ensure_ascii=False), now),
+            )
+        except sqlite3.IntegrityError:
+            return False
         self._append_lineage(
             "multi_angle_synthesized", entity_type="multi_angle_result",
             entity_id=result_id, snapshot_id=snapshot_id,
@@ -896,7 +1048,38 @@ class AnalysisFlow:
                     repaired["jobs"] += self._restart_from_snapshot([row["job_id"] for row in orphaned])
         if repaired["workers"] or repaired["jobs"]:
             logging.warning("Hermes runtime reconciled: %s", repaired)
+        repaired["syntheses"] = self._recover_multi_angle_syntheses()
         return repaired
+
+    def _recover_multi_angle_syntheses(self) -> int:
+        """重啟/巡檢時補做五角度已完成但 crash 遺失的 synthesis。"""
+        cutoff = time.time() - STALE_RUNNING_JOB_THRESHOLD_SECONDS
+        rows = self._conn().execute(
+            """SELECT r.snapshot_id,r.coin
+               FROM analysis_multi_angle_runs r
+               WHERE NOT EXISTS(
+                 SELECT 1 FROM analysis_results x
+                 WHERE x.snapshot_id=r.snapshot_id AND x.coin=r.coin AND x.mode='multi_angle'
+               )
+               AND (SELECT count(DISTINCT x.mode) FROM analysis_results x
+                    WHERE x.snapshot_id=r.snapshot_id AND x.coin=r.coin
+                    AND x.mode IN ('risk','sentiment','fundamentals','news','catalyst'))=5
+               AND NOT EXISTS(
+                 SELECT 1 FROM analysis_synthesis_claims c
+                 WHERE c.snapshot_id=r.snapshot_id AND c.coin=r.coin AND c.claimed_at>=?
+               )""",
+            (cutoff,),
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            self._conn().execute(
+                "DELETE FROM analysis_synthesis_claims "
+                "WHERE snapshot_id=? AND coin=? AND claimed_at<?",
+                (row["snapshot_id"], row["coin"], cutoff),
+            )
+            if self._maybe_trigger_synthesis(row["snapshot_id"], row["coin"]):
+                recovered += 1
+        return recovered
 
     def recover(self) -> None:
         # Runtime payloads are deliberately not pickled. Restart from immutable snapshot.
@@ -913,6 +1096,7 @@ class AnalysisFlow:
             self._checkpoint(row["job_id"], STAGES[0], "queued")
             self._put_package(STAGES[0], {"job_id": row["job_id"], "locale": self._locale_for_job(row["job_id"])})
             self._adopted.add(row["job_id"])
+        self._recover_multi_angle_syntheses()
 
     def reap_stale_running(self, threshold_seconds: float | None = None) -> int:
         """Recover `state='running'` jobs whose checkpoint stopped advancing.

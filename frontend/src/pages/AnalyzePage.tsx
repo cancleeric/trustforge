@@ -11,6 +11,7 @@ import AnalysisReportView from '../components/AnalysisReportView'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
 import { useHermesI18n } from '../hermes/hermesI18n'
+import MultiAngleOverview from '../hermes/MultiAngleOverview'
 
 function defaultQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
@@ -463,6 +464,12 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
               <div key={data.execution?.run_id ?? `${data.report.coin}-${data.report.generated_at}`} className="hermes-data-swap" aria-busy={loading}>
                 <AnalysisReportView data={data} mode={params.type} />
               </div>
+            )}
+            {!focusMode && (
+              <MultiAngleOverview
+                coin={params.coin}
+                snapshotId={searchParams.get('snapshot') || undefined}
+              />
             )}
             {!loading && !error && !data && (
               <div className="hermes-clip border border-tf-border bg-tf-card p-5 text-center" role="status">

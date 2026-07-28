@@ -3,7 +3,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { registerAnalysisQuestion } from '../lib/endpoints'
+import { getAnalysisQuestionContext, registerAnalysisQuestion } from '../lib/endpoints'
 import { buildGalaxyModel, deriveSelected, type HermesTier } from '../lib/hermesData'
 import type { CrossSourceSignal } from '../lib/types'
 import HermesRightRail from '../hermes/HermesRightRail'
@@ -30,6 +30,7 @@ vi.mock('../lib/endpoints', () => ({
   getHermesUpgrades: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'no_request', message: 'no request' } }),
   registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { accepted: true } }),
+  getWhaleSummary: vi.fn().mockResolvedValue({ ok: true, data: { coin: 'BTC', period_hours: 24, total_count: 0, total_usd: 0, net_exchange_flow_usd: 0, exchange_inflow_usd: 0, exchange_outflow_usd: 0, max_single_usd: 0, whale_transfer_count: 0, exchange_inflow_count: 0, exchange_outflow_count: 0 } }),
 }))
 
 function DashboardHistoryControls() {
@@ -111,6 +112,35 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.getAllByRole('textbox')).toHaveLength(1)
     expect(screen.queryByLabelText('問題')).not.toBeInTheDocument()
   })
+
+  it('fills a competition question without context network or submission', async () => {
+    vi.useRealTimers()
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0)
+    render(
+      <MemoryRouter initialEntries={['/?qa=1&coin=SOL']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+        <LocationProbe />
+      </MemoryRouter>,
+    )
+    await new Promise((resolve) => window.setTimeout(resolve, 300))
+    vi.mocked(getAnalysisQuestionContext).mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: '隨機競賽題目' }))
+    expect((screen.getByLabelText('交付 Hermes 的任務') as HTMLTextAreaElement).value).toMatch(/^請分析 SOL：/)
+    await new Promise((resolve) => window.setTimeout(resolve, 300))
+
+    expect(getAnalysisQuestionContext).not.toHaveBeenCalled()
+    expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('location')).toHaveTextContent('?qa=1&coin=SOL')
+
+    // Same deterministic pick is a no-op. It must not leave the one-shot skip
+    // armed for the next real edit.
+    fireEvent.click(screen.getByRole('button', { name: '隨機競賽題目' }))
+    fireEvent.change(screen.getByLabelText('交付 Hermes 的任務'), { target: { value: '手動輸入的新問題' } })
+    await waitFor(() => expect(getAnalysisQuestionContext).toHaveBeenCalledTimes(1))
+    expect(getAnalysisQuestionContext).toHaveBeenCalledTimes(1)
+    random.mockRestore()
+  }, 15_000)
 
   it('opens the divergence drilldown through the native button click', () => {
     render(
@@ -349,10 +379,14 @@ describe('N70 控制項位置', () => {
     // 負向對照：改動前這五顆全都在頂欄，這個 expect 會 fail。
     expect(topbar?.querySelectorAll('.hermes-nav-item').length).toBe(0)
     expect(rail?.querySelectorAll('.hermes-nav-item').length).toBeGreaterThan(0)
-    // 頂欄剩下的唯一按鈕是遙測膠囊。
+    // 頂欄只留兩顆：遙測膠囊（狀態摘要，點了展開）與語言切換。
+    // 語言切換是 N72 由 CEO 直接指定的例外（「中文 英文 放右上，不要拿到
+    // 左邊很怪」）——它是全域偏好、慣例位置就在右上角，不屬於「分析功能」。
+    // 除了這兩顆以外任何按鈕都不該回到頂欄。
     const topbarButtons = [...(topbar?.querySelectorAll('button') ?? [])]
-    expect(topbarButtons).toHaveLength(1)
-    expect(topbarButtons[0].className).toContain('hermes-telemetry-chip')
+    expect(topbarButtons.map((b) => b.className).sort()).toEqual(
+      ['hermes-telemetry-chip', 'hermes-topbar-lang'],
+    )
   })
 
   // N70（CEO：「使用者要按要點的功能統一到最左邊的選單欄中」）：新手模式是預設

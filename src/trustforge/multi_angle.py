@@ -14,6 +14,7 @@ Issue: #808
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -65,6 +66,7 @@ class AngleResult:
     market_judgment: str                # 完整 market_judgment 原文
     snapshot_id: str                    # 追溯用
     job_id: str | None = None           # 追溯用
+    question: str = ""                  # 同 snapshot 明細導覽用
 
     def to_dict(self) -> dict[str, Any]:
         """序列化為 JSON-safe dict。"""
@@ -80,6 +82,7 @@ class AngleResult:
             "market_judgment": self.market_judgment,
             "snapshot_id": self.snapshot_id,
             "job_id": self.job_id,
+            "question": self.question,
         }
 
 
@@ -120,6 +123,7 @@ class MultiAngleReport:
     agreement_matrix: dict[str, dict[str, str]]  # {angle_a: {angle_b: "agree"|"disagree"|"one_abstain"}}
     synthesis_summary: str              # 確定性模板組裝的摘要文字
     evidence_independence: float        # 獨立來源比例 0.0 ~ 1.0
+    decision_state: str = "normal"      # normal | partial_abstain | full_abstain
     limits: list[str] = field(default_factory=list)
     generated_at: str = ""
 
@@ -133,6 +137,7 @@ class MultiAngleReport:
             "snapshot_id": self.snapshot_id,
             "angles": [a.to_dict() for a in self.angles],
             "consensus": self.consensus,
+            "decision_state": self.decision_state,
             "consensus_confidence": self.consensus_confidence,
             "conflicts": [c.to_dict() for c in self.conflicts],
             "agreement_matrix": self.agreement_matrix,
@@ -148,14 +153,24 @@ class MultiAngleReport:
 # ---------------------------------------------------------------------------
 
 def angle_result_from_payload(mode: str, payload_json: str, *,
-                              job_id: str | None = None) -> AngleResult:
+                              job_id: str | None = None,
+                              question: str = "") -> AngleResult:
     """從 analysis_results.payload_json 反序列化為 AngleResult。
 
     容錯處理舊格式：缺欄位時用安全預設值，不 raise。
     """
-    data = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+    try:
+        data = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+    except (TypeError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
     report = data.get("report", {})
     evidence_list = data.get("evidence", [])
+    if not isinstance(report, dict):
+        report = {}
+    if not isinstance(evidence_list, list):
+        evidence_list = []
 
     # key_basis 取前 3 條 claim 文字
     key_basis_raw = report.get("key_basis", [])
@@ -180,11 +195,19 @@ def angle_result_from_payload(mode: str, payload_json: str, *,
     except ValueError:
         qtype = QuestionType.MULTI_SOURCE
 
+    try:
+        confidence = float(report.get("calibrated_confidence", 0.0))
+    except (TypeError, ValueError, OverflowError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    confidence = min(1.0, max(0.0, confidence))
+
     return AngleResult(
         angle=mode,
         qtype=qtype,
         direction=report.get("direction", "不明"),
-        calibrated_confidence=float(report.get("calibrated_confidence", 0.0)),
+        calibrated_confidence=confidence,
         decision_state=report.get("decision_state", "normal"),
         key_basis=key_basis,
         evidence_sources=evidence_sources,
@@ -192,6 +215,7 @@ def angle_result_from_payload(mode: str, payload_json: str, *,
         market_judgment=report.get("market_judgment", ""),
         snapshot_id=data.get("snapshot_id", ""),
         job_id=job_id,
+        question=question,
     )
 
 
@@ -205,11 +229,29 @@ def _is_opposing(d1: str, d2: str) -> bool:
 
 
 def _weighted_confidence(angles: list[AngleResult]) -> float:
-    """計算 non-abstain 角度的平均 calibrated_confidence。"""
+    """以角度間來源獨立性加權 calibrated confidence。
+
+    每角度權重為 ``max(0.1, 1 - 與其他可評估角度的平均 Jaccard overlap)``。
+    空來源 pair 無法評估，故不納入該角度平均；若完全沒有可評估 pair，
+    權重退回 1。重複堆疊相同 evidence 不會提高權重。
+    """
     if not angles:
         return 0.0
-    total = sum(a.calibrated_confidence for a in angles)
-    return round(total / len(angles), 4)
+    weights: list[float] = []
+    for index, angle in enumerate(angles):
+        overlaps: list[float] = []
+        for other_index, other in enumerate(angles):
+            if index == other_index or not angle.evidence_sources or not other.evidence_sources:
+                continue
+            union = angle.evidence_sources | other.evidence_sources
+            overlaps.append(len(angle.evidence_sources & other.evidence_sources) / len(union))
+        weights.append(max(0.1, 1.0 - sum(overlaps) / len(overlaps)) if overlaps else 1.0)
+    total_weight = sum(weights)
+    return round(
+        sum(a.calibrated_confidence * weight for a, weight in zip(angles, weights))
+        / total_weight,
+        4,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -279,24 +321,35 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
             ))
 
     # Phase 5: 證據獨立性評估
-    all_sources: set[str] = set()
     per_angle_sources: list[set[str]] = []
     for a in angles:
-        all_sources |= a.evidence_sources
         per_angle_sources.append(a.evidence_sources)
 
-    # 共用來源 = 出現在所有角度中的 source
-    # 空 sources 的角度視為「無可追溯來源」，不排除於計算外（codex review #1）
-    non_empty_sources = [s for s in per_angle_sources if s]
-    empty_count = len(per_angle_sources) - len(non_empty_sources)
-    if non_empty_sources and all_sources:
-        shared = set.intersection(*non_empty_sources)
-        overlap_ratio = len(shared) / len(all_sources)
+    # 驗收定義：逐對計算 Jaccard overlap，再取平均。空集合對不提供
+    # 「獨立」證據，故記為 overlap=1（independence=0），避免資料缺失反而
+    # 被獎勵成 100% 獨立。
+    source_pairs = list(combinations(per_angle_sources, 2))
+    if source_pairs:
+        overlaps = []
+        for (left, right), (left_angle, right_angle) in zip(
+            source_pairs, combinations(angles, 2)
+        ):
+            overlap = (len(left & right) / len(left | right)) if (left | right) else 1.0
+            overlaps.append(overlap)
+            if overlap > EVIDENCE_OVERLAP_WARNING_THRESHOLD:
+                conflicts.append(AngleConflict(
+                    angle_a=left_angle.angle,
+                    angle_b=right_angle.angle,
+                    conflict_type="evidence_overlap",
+                    detail={"jaccard_overlap": round(overlap, 4)},
+                    summary=(
+                        f"{MODE_LABELS.get(left_angle.angle, left_angle.angle)}與"
+                        f"{MODE_LABELS.get(right_angle.angle, right_angle.angle)}"
+                        f"證據來源重疊 {overlap:.0%}。"
+                    ),
+                ))
+        overlap_ratio = sum(overlaps) / len(overlaps)
         evidence_independence = round(1.0 - overlap_ratio, 4)
-        # 有角度完全無 traceable sources → 降低獨立性評分
-        if empty_count > 0:
-            penalty = empty_count / len(per_angle_sources)
-            evidence_independence = round(evidence_independence * (1.0 - penalty), 4)
     else:
         evidence_independence = 0.0
 
@@ -335,6 +388,7 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
         agreement_matrix=agreement_matrix,
         synthesis_summary=synthesis_summary,
         evidence_independence=evidence_independence,
+        decision_state="partial_abstain" if abstained else "normal",
         limits=limits,
     )
 
@@ -349,12 +403,13 @@ def _full_abstain_report(angles: list[AngleResult], coin: str, snapshot_id: str)
         coin=coin,
         snapshot_id=snapshot_id,
         angles=angles,
-        consensus="full_abstain",
+        consensus="不明",
         consensus_confidence=0.0,
         conflicts=[],
         agreement_matrix=_build_agreement_matrix(angles),
         synthesis_summary="五角度均因資料不足棄權，無法產出綜合結論。",
         evidence_independence=0.0,
+        decision_state="full_abstain",
         limits=["所有分析角度均因證據不足而棄權，目前無法給出任何方向性結論。"],
     )
 
@@ -368,32 +423,28 @@ def _derive_consensus(
     """確定性共識推導。
 
     規則：
-    1. 有方向背離（direction_divergence）→ "分歧"
-    2. 有 abstain 角度 → "partial_abstain"（但仍回報主要方向作為參考）
-    3. 多數決決定方向（偏多/偏空/中性）
-    4. 平手 → "中性"
+    1. 有嚴格多數時，以多數決決定方向（即使少數角度反向）
+    2. 無嚴格多數且同時有偏多/偏空 → "分歧"
+    3. 無方向分歧但有 abstain → "partial_abstain"
+    4. 其餘平手或中性最多 → "中性"
     """
     confidence = _weighted_confidence(active)
 
-    # 有方向背離 → 分歧
-    has_divergence = any(c.conflict_type == "direction_divergence" for c in conflicts)
-    if has_divergence:
-        return "分歧", confidence
-
-    # 有 abstain → partial_abstain
-    if abstained:
-        return "partial_abstain", confidence
-
-    # 多數決
     bullish = direction_counts.get("偏多", 0)
     bearish = direction_counts.get("偏空", 0)
     neutral = direction_counts.get("中性", 0)
+    directional_total = bullish + bearish + neutral
 
-    if bullish > bearish and bullish > neutral:
+    if bullish > directional_total / 2:
         return "偏多", confidence
-    if bearish > bullish and bearish > neutral:
+    if bearish > directional_total / 2:
         return "偏空", confidence
-    # 平手或中性最多
+    if neutral > directional_total / 2:
+        return "中性", confidence
+    if bullish and bearish:
+        return "分歧", confidence
+    if abstained:
+        return "partial_abstain", confidence
     return "中性", confidence
 
 
@@ -543,6 +594,18 @@ def narrate_synthesis(
 
     try:
         result = client.complete(system=_NARRATION_SYSTEM, prompt=prompt)
+        if log is not None and getattr(result, "model_id", None):
+            from .ledger import estimate_cost
+            log.record_llm_cost(
+                result.model_id,
+                result.input_tokens,
+                result.output_tokens,
+                estimate_cost(
+                    result.model_id,
+                    result.input_tokens,
+                    result.output_tokens,
+                ),
+            )
         narration = result.text.strip() if hasattr(result, "text") else str(result).strip()
         if narration and len(narration) > 10:
             return narration

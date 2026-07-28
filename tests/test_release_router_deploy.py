@@ -28,6 +28,7 @@ from trustforge.signed_event_ledger import SignedEventLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PYTHON = Path(sys.executable)
 
 
 def _minimal_router_runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -368,7 +369,7 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
     command(
         "python3",
         f'case "${{1:-}}" in *write_release_rollback_evidence.py) '
-        f'exec "{ROOT}/.venv/bin/python" "$@";; '
+        f'exec "{PYTHON}" "$@";; '
         f'*install_router_release_artifact.py) mkdir -p "{fake_release}"; '
         f'echo "{fake_release}";; esac\nexit 0\n',
     )
@@ -801,7 +802,7 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
     )
     keyring.chmod(0o400)
     command = [
-        str(ROOT / ".venv/bin/python"),
+        str(PYTHON),
         str(ROOT / "scripts/verify_release_install_evidence.py"),
         "--evidence",
         str(evidence),
@@ -869,7 +870,7 @@ def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
     source, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
     releases = tmp_path / "releases"
     command = [
-        str(ROOT / ".venv/bin/python"),
+        str(PYTHON),
         str(ROOT / "scripts/install_router_release_artifact.py"),
         "--archive",
         str(archive),
@@ -957,6 +958,7 @@ def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
     _, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
     releases = tmp_path / "releases"
     releases.mkdir(mode=0o755)
+    releases.chmod(0o755)
     real_lstat = os.lstat
 
     def wrong_owner_lstat(path):

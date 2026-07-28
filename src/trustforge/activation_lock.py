@@ -33,7 +33,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 
 
 logger = logging.getLogger(__name__)
@@ -164,11 +164,17 @@ class _DynamoDBActivationLockBackend:
 class _JsonActivationLockBackend:
     """Local-host lock backend used when DynamoDB is unavailable (dev/CI)."""
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
+    ):
         if path is None:
             home = os.getenv("TRUSTFORGE_HOME", str(Path(__file__).resolve().parents[2]))
             path = Path(home) / "out" / "activation_locks.json"
         self.path = Path(path)
+        self._clock = clock
 
     @property
     def _lock_path(self) -> Path:
@@ -221,7 +227,7 @@ class _JsonActivationLockBackend:
             logger.warning("Activation lock acquire: cannot acquire file lock (fail-closed)", exc_info=True)
             return False
         try:
-            now = time.time()
+            now = self._clock()
             data = self._load()
             existing = data.get(target)
             if existing is not None and now < existing.get("expires_at", 0.0):

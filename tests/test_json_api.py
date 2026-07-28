@@ -27,6 +27,7 @@ import pytest
 
 from trustforge import pipeline as pipeline_module
 from trustforge import web
+from trustforge.comparison_contract import ComparisonRunResult
 from trustforge.ingestion.cache import (
     DynamoDBCache,
     JsonCacheBackend,
@@ -304,10 +305,10 @@ def test_api_analyze_trust_radar_field_equals_aggregate_trust_by_kind_single_and
     data2 = _envelope(body2)["data"]
     evidence_a = web._do_comparison(
         {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]}
-    )[1]
+    ).evidence_a
     evidence_b = web._do_comparison(
         {"coin": ["BTC,ETH"], "type": ["comparison"], "q": ["radar cmp"]}
-    )[3]
+    ).evidence_b
     assert data2["trust_radar_a"] == aggregate_trust_by_kind(evidence_a)
     assert data2["trust_radar_b"] == aggregate_trust_by_kind(evidence_b)
 
@@ -1020,14 +1021,14 @@ def test_api_analyze_dedup_stalled_leader_follower_times_out_not_infinite_block(
     leader 完成前就已經返回（thread 真的被釋放，不是碰巧等到 leader
     做完才順便回來），且逾時的 follower 不會落回自己真的呼叫
     `pipeline.run`（避免放大 Bedrock 花費/thundering herd）。"""
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
 
     counter = _CallCounter()
     leader_finished = threading.Event()
 
     def _stalled_run(*args, **kwargs):
         counter.hit()
-        time.sleep(0.2)  # 遠大於逾時上界 0.05 秒，模擬 leader hang 住
+        time.sleep(1.5)  # 遠大於逾時上界 0.3 秒，模擬 leader hang 住
         result = pipeline_module.run(*args, **kwargs)
         leader_finished.set()
         return result
@@ -1173,6 +1174,10 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     key = "dedup-delayed-follower-flight-reference-test-key"
     leader_may_finish = threading.Event()
     counter = _CallCounter()
+    simulated_now = [time.time()]
+
+    def _fake_wall_time():
+        return simulated_now[0]
 
     def _compute_leader():
         counter.hit()
@@ -1182,7 +1187,9 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     leader_result_holder: dict[str, object] = {}
 
     def _worker_leader():
-        leader_result_holder["value"] = web._dedup_analyze_call(key, _compute_leader)
+        leader_result_holder["value"] = web._dedup_analyze_call(
+            key, _compute_leader, wall_time=_fake_wall_time
+        )
 
     leader_thread = threading.Thread(target=_worker_leader)
     leader_thread.start()
@@ -1205,11 +1212,15 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     # `_dedup_analyze_call` 呼叫這個 wait() **之前**，用來算
     # `remaining` 參數的，不受這裡影響）。
     real_wait = flight.event.wait
+    follower_waiting = threading.Event()
 
     def _delayed_wait(timeout=None):
+        follower_waiting.set()
         completed = real_wait(timeout=timeout)
         if completed:
-            time.sleep(0.1)  # 模擬排程延遲（舊 TTL 已不存在，只需非零延遲驗證正確性）
+            # 推進邏輯牆鐘而不真的睡六秒：仍精確模擬「喚醒後被排程延遲
+            # 超過舊 5 秒 TTL」的語意，且不把測試正確性綁在機器速度。
+            simulated_now[0] += 6.0
         return completed
 
     flight.event.wait = _delayed_wait
@@ -1222,19 +1233,21 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
 
     # 把 leader 標記完成（在 follower 開始等待之前先讓它就緒，確保
     # follower 真的走到「join → wait → 延遲 → 讀取」這條路，而不是自己
-    # 變成 leader）。follower 需要給自己夠長的 deadline，蓋過延遲。
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.5)
+    # 變成 leader）。follower 需要給自己夠長的 deadline，蓋過 6 秒延遲。
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 20.0)
 
     follower_result_holder: dict[str, object] = {}
 
     def _worker_follower():
         follower_result_holder["value"] = web._dedup_analyze_call(
-            key, _compute_follower_if_mistakenly_treated_as_fresh
+            key,
+            _compute_follower_if_mistakenly_treated_as_fresh,
+            wall_time=_fake_wall_time,
         )
 
     follower_thread = threading.Thread(target=_worker_follower)
     follower_thread.start()
-    time.sleep(0.2)  # 確保 follower 真的先走到 event.wait() 上
+    assert follower_waiting.wait(timeout=2), "follower 應先進入 event.wait()"
 
     leader_may_finish.set()
     leader_thread.join(timeout=10)
@@ -1305,10 +1318,10 @@ def test_dedup_analyze_call_leader_bounded_by_bedrock_style_timeout_follower_get
     取代機制時，用來替代它的正確性保證。"""
     from botocore.exceptions import ReadTimeoutError
 
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
     key = "dedup-leader-bedrock-style-timeout-test-key"
 
-    simulated_bedrock_read_timeout_sec = 0.2  # 遠比 0.05 秒 follower 逾時上界長
+    simulated_bedrock_read_timeout_sec = 1.5  # 遠比 0.3 秒 follower 逾時上界長
     leader_finished = threading.Event()
 
     def _compute_leader_simulating_hung_bedrock_call():
@@ -3188,7 +3201,7 @@ def test_api_analyze_comparison_public_response_excludes_author(monkeypatch):
     evidence_a = list(evidence_a) + [authored_ev]
 
     def fake_run_comparison(coin_a, coin_b, query, **kwargs):
-        return report_a, evidence_a, report_b, evidence_b, log
+        return ComparisonRunResult(report_a=report_a, evidence_a=evidence_a, report_b=report_b, evidence_b=evidence_b, comparison=None, log=log)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 
@@ -3221,7 +3234,7 @@ def test_analyze_json_route_comparison_excludes_author(monkeypatch):
     evidence_a = list(evidence_a) + [authored_ev]
 
     def fake_run_comparison(coin_a, coin_b, query, **kwargs):
-        return report_a, evidence_a, report_b, evidence_b, log
+        return ComparisonRunResult(report_a=report_a, evidence_a=evidence_a, report_b=report_b, evidence_b=evidence_b, comparison=None, log=log)
 
     monkeypatch.setattr(web, "run_comparison", fake_run_comparison)
 

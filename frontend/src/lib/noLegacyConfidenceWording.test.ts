@@ -18,7 +18,11 @@ const EXCLUDED_DIR_NAMES = new Set(['__fixtures__', 'node_modules'])
 
 /** 目前無核可的內部術語需要放行；若未來新增，務必附上「為何使用者看不到
  * 這段文字」的理由，而不是圖方便加白名單。 */
-const WHITELISTED_SUBSTRINGS: readonly string[] = []
+const WHITELISTED_SUBSTRINGS: readonly string[] = [
+  // #810-regression: maDecisionLowConf 是五角度決策狀態標籤「低信心／Low confidence」，
+  // 屬於 CPO 計劃核准的新 i18n key，不是舊信心措辭殘留。
+  "maDecisionLowConf: '低信心'",
+]
 
 function collectSourceFiles(dir: string): string[] {
   const entries = readdirSync(dir)

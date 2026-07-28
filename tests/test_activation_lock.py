@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import tempfile
-import time
 
 from trustforge.activation_lock import (
     _JsonActivationLockBackend,
@@ -50,11 +49,14 @@ def test_release_wrong_owner_noop():
 
 def test_acquire_after_expiry():
     with tempfile.TemporaryDirectory() as td:
-        backend = _JsonActivationLockBackend(path=f"{td}/lock.json")
+        now = [1_000.0]
+        backend = _JsonActivationLockBackend(
+            path=f"{td}/lock.json", clock=lambda: now[0]
+        )
         _set_backend_for_tests(backend)
-        acquire_activation_lock("test-target", "owner-1", ttl=0.05)
+        acquire_activation_lock("test-target", "owner-1", ttl=1)
         assert not acquire_activation_lock("test-target", "owner-2", ttl=60)
-        time.sleep(0.1)
+        now[0] += 2
         assert acquire_activation_lock("test-target", "owner-2", ttl=60)
 
 

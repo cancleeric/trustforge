@@ -204,7 +204,7 @@ describe('adminConsole — sourceLabel', () => {
 // 「localStorage」字樣說明政策，裸字比對會把這些說明性註解也打成違規。
 // 上述 4 種 pattern 都要求真實的存取/解構語法，不會誤殺純文字敘述。
 
-const WHITELISTED_RELATIVE_PATHS = new Set(['lib/theme.ts', 'hermes/useAdaptiveQuality.ts'])
+const WHITELISTED_RELATIVE_PATHS = new Set(['lib/theme.ts'])
 
 const LOCAL_STORAGE_USAGE_PATTERNS: RegExp[] = [
   /\blocalStorage\s*[.[]/, // localStorage.xxx / localStorage['xxx']

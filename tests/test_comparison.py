@@ -192,9 +192,12 @@ def test_comparison_evidence_json_coin_field(monkeypatch):
         assert ev_path.exists()
         data = json.loads(ev_path.read_text(encoding="utf-8"))
         assert data, "evidence.json 不可空"
-        for item in data:
+        # CA-06：evidence.json 已從 flat array 改為物件（含 comparison_report）
+        assert "evidence" in data, "evidence.json 缺少 evidence 陣列"
+        assert "comparison_report" in data, "evidence.json 缺少 comparison_report"
+        for item in data["evidence"]:
             assert "coin" in item, f"evidence 缺少 coin 欄位：{item}"
-        coins_found = {item["coin"] for item in data}
+        coins_found = {item["coin"] for item in data["evidence"]}
         assert "BTC" in coins_found, "evidence 缺少 BTC"
         assert "ETH" in coins_found, "evidence 缺少 ETH"
 

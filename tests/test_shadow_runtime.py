@@ -53,13 +53,13 @@ def _fail_boundary(*args, **kwargs):
 
 
 def _slow_kernel(kernel_input):
-    time.sleep(0.9)
+    time.sleep(2)
     return run_kernel(kernel_input)
 
 
 def _hung_kernel(kernel_input):
     while True:
-        time.sleep(0.2)
+        time.sleep(1)
 
 
 def _blocked_kernel(kernel_input, entered, release):
@@ -269,6 +269,7 @@ def test_success_latency_is_recorded_and_hard_bounded(monkeypatch, tmp_path):
 def test_external_executable_candidate_artifact_is_rejected(monkeypatch, tmp_path):
     path = tmp_path / "private" / "shadow.sqlite3"
     _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
     marker = tmp_path / "malicious-ran"
     candidate_path = path.parent / "candidate.py"
     candidate_path.write_text(
@@ -370,6 +371,7 @@ def test_invalid_posix_store_configuration_never_enters_candidate(
 ):
     path = tmp_path / "private" / "shadow.sqlite3"
     _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
     if kind == "relative":
         monkeypatch.setenv("TRUSTFORGE_SHADOW_DB_PATH", "relative.sqlite3")
     elif kind == "unsafe_parent":
@@ -391,6 +393,7 @@ def test_dedicated_runtime_attestation_is_mandatory(
     monkeypatch, tmp_path, missing_gate,
 ):
     _configure(monkeypatch, tmp_path / "private" / "shadow.sqlite3")
+    _allow_worker_startup(monkeypatch)
     monkeypatch.delenv(missing_gate)
 
     assert _observe(kernel_fn=_forbidden).status == "not_observed"
@@ -409,6 +412,7 @@ def test_environment_identity_must_match_measured_artifacts(
     monkeypatch, tmp_path, mismatch,
 ):
     _configure(monkeypatch, tmp_path / "private" / "shadow.sqlite3")
+    _allow_worker_startup(monkeypatch)
     monkeypatch.setenv(mismatch, "mismatch")
     assert _observe().status == "not_observed"
 
@@ -416,6 +420,7 @@ def test_environment_identity_must_match_measured_artifacts(
 def test_active_artifact_tamper_fails_identity_closed(monkeypatch, tmp_path):
     path = tmp_path / "private" / "shadow.sqlite3"
     _configure(monkeypatch, path)
+    _allow_worker_startup(monkeypatch)
     (path.parent / "active.zip").write_bytes(b"tampered after attestation")
     assert _observe().status == "not_observed"
 
@@ -458,6 +463,7 @@ def test_fd_snapshot_rejects_in_place_tamper(monkeypatch, tmp_path):
         _read_secure(target, owner_only=True, max_bytes=100)
 
 
+@pytest.mark.serial
 def test_timeout_is_hard_bounded_and_late_worker_cannot_record(monkeypatch, tmp_path):
     import trustforge.agent.shadow_runtime as runtime
 
@@ -491,6 +497,7 @@ def test_timeout_is_hard_bounded_and_late_worker_cannot_record(monkeypatch, tmp_
             connection.close()
 
 
+@pytest.mark.serial
 def test_transaction_entered_before_timeout_cannot_commit_late(
     monkeypatch, tmp_path,
 ):
@@ -515,6 +522,7 @@ def test_transaction_entered_before_timeout_cannot_commit_late(
     connection.close()
 
 
+@pytest.mark.serial
 def test_hung_child_is_reaped_and_next_observation_succeeds(monkeypatch, tmp_path):
     import trustforge.agent.shadow_runtime as runtime
 

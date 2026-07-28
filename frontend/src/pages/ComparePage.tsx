@@ -5,6 +5,8 @@ import type { ComparisonParams } from '../lib/endpoints'
 import type { ComparisonAnalyzeData } from '../lib/types'
 import { COIN_POOL } from '../lib/constants'
 import AnalysisReportView from '../components/AnalysisReportView'
+import ComparisonReportView from '../components/ComparisonReportView'
+import { isComparisonReportData } from '../lib/validators'
 import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
 import CoinSelect from '../components/CoinSelect'
@@ -225,34 +227,56 @@ export default function ComparePage() {
           選擇兩個市場後按下「比較分析」。開啟工作區不會自動執行兩次分析。
         </div>
       )}
-      {data && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <AnalysisReportView
-            heading={`幣種 A · ${data.report_a.coin}`}
-            data={{
-              version: data.version,
-              report: data.report_a,
-              evidence: data.evidence_a,
-              trust_radar: data.trust_radar_a,
-              trust_components_aggregate: data.trust_components_aggregate_a,
-              price_provenance: data.price_provenance_a,
-              execution_log: data.execution_log,
-            }}
-          />
-          <AnalysisReportView
-            heading={`幣種 B · ${data.report_b.coin}`}
-            data={{
-              version: data.version,
-              report: data.report_b,
-              evidence: data.evidence_b,
-              trust_radar: data.trust_radar_b,
-              trust_components_aggregate: data.trust_components_aggregate_b,
-              price_provenance: data.price_provenance_b,
-              execution_log: data.execution_log,
-            }}
-          />
-        </div>
-      )}
+      {data && (() => {
+        const cr = data.comparison_report
+        const hasComparisonReport = cr != null && isComparisonReportData(cr)
+
+        // 各幣詳細分析的雙欄區塊（會在新舊兩種佈局下複用）
+        const dualPanels = (
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <AnalysisReportView
+              heading={`幣種 A · ${data.report_a.coin}`}
+              data={{
+                version: data.version,
+                report: data.report_a,
+                evidence: data.evidence_a,
+                trust_radar: data.trust_radar_a,
+                trust_components_aggregate: data.trust_components_aggregate_a,
+                price_provenance: data.price_provenance_a,
+                execution_log: data.execution_log,
+              }}
+            />
+            <AnalysisReportView
+              heading={`幣種 B · ${data.report_b.coin}`}
+              data={{
+                version: data.version,
+                report: data.report_b,
+                evidence: data.evidence_b,
+                trust_radar: data.trust_radar_b,
+                trust_components_aggregate: data.trust_components_aggregate_b,
+                price_provenance: data.price_provenance_b,
+                execution_log: data.execution_log,
+              }}
+            />
+          </div>
+        )
+
+        if (hasComparisonReport) {
+          return (
+            <>
+              <ComparisonReportView data={cr!} />
+              <details className="hermes-clip rounded-lg border border-tf-border bg-tf-card">
+                <summary className="cursor-pointer p-4 text-sm font-semibold text-tf-text">
+                  查看各幣詳細分析
+                </summary>
+                <div className="px-4 pb-4">{dualPanels}</div>
+              </details>
+            </>
+          )
+        }
+
+        return dualPanels
+      })()}
     </main>
   )
 }

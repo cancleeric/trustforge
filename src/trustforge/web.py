@@ -3465,6 +3465,7 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
 def _render_comparison(
     report_a, evidence_a, report_b, evidence_b, query: str, log=None,
     mode_extra: dict | None = None,
+    comparison_report=None,
 ) -> str:
     """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。
 
@@ -3537,6 +3538,70 @@ def _render_comparison(
         f'<p><a href="{_analyze_json_href(f"{report_a.coin},{report_b.coin}", "comparison", query, mode_extra)}">'
         f'下載 JSON（report_a+report_b+evidence+log）</a></p>'
     )
+
+    # CA-08：unified comparison report（ComparisonReport.to_markdown() 的 HTML 對應）
+    unified_html = ""
+    if comparison_report is not None:
+        unified_parts: list[str] = []
+        cmp = comparison_report
+        unified_parts.append(
+            '<div class="tf-section" style="background:rgba(31,111,235,.08);'
+            'border-color:#1f6feb">'
+            f'<h2 style="margin:0 0 .3rem">{e(cmp.coin_a)} vs {e(cmp.coin_b)}'
+            f' · 比較分析報告</h2>'
+            f'<p style="color:var(--tf-muted);margin:.2rem 0">比較問題：{e(cmp.query)}</p>'
+            f'<p style="color:var(--tf-muted2);font-size:.75rem;margin:0">'
+            f'生成時間：{e(cmp.generated_at)}</p>'
+            f"</div>"
+        )
+
+        # 綜合結論
+        unified_parts.append(
+            '<div class="tf-section">'
+            f"<h3>綜合結論</h3>"
+            f"<p>{e(cmp.conclusion or '（待產生）')}</p>"
+        )
+        if cmp.confidence:
+            pct = int(cmp.confidence * 100)
+            unified_parts.append(
+                f'<p style="font-size:.85rem;color:var(--tf-muted)">'
+                f"整體比較信心：{pct}%</p>"
+            )
+        unified_parts.append("</div>")
+
+        # 四個比較面向
+        unified_parts.append(
+            '<div class="tf-section"><h3>比較面向分析</h3>'
+        )
+        for i, dim in enumerate(cmp.dimensions, start=1):
+            pct_dim = int(dim.confidence * 100)
+            unified_parts.append(
+                f"<h4>{i}. {e(dim.label)}</h4>"
+                f"<p>{e(dim.finding)}</p>"
+                f'<p style="font-size:.8rem;color:var(--tf-muted)">'
+                f"信心：{pct_dim}%｜判定：{e(dim.decision)}｜"
+                f"A 證據 {len(dim.a_evidence_refs)} 筆｜B 證據 {len(dim.b_evidence_refs)} 筆</p>"
+            )
+        unified_parts.append("</div>")
+
+        # 已知限制
+        if cmp.limits:
+            lim_items = "".join(f"<li>{e(item)}</li>" for item in cmp.limits)
+            unified_parts.append(
+                '<div class="tf-section">'
+                f"<h3>已知限制</h3><ul>{lim_items}</ul></div>"
+            )
+
+        # 可能推翻條件
+        if cmp.could_flip:
+            flip_items = "".join(f"<li>{e(item)}</li>" for item in cmp.could_flip)
+            unified_parts.append(
+                '<div class="tf-section">'
+                f"<h3>可能推翻條件</h3><ul>{flip_items}</ul></div>"
+            )
+
+        unified_html = "\n".join(unified_parts)
+
     return f"""
 <div class="tf-dash-hdr">
   <span class="tf-coin-badge">{e(report_a.coin)}</span>
@@ -3550,6 +3615,8 @@ def _render_comparison(
   <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
   <p style="color:var(--tf-muted);margin:.2rem 0">{e(query)}</p>
 </div>
+
+{unified_html}
 
 <div class="tf-section">
   <h3>1. 相對強弱比較</h3>
@@ -3975,8 +4042,8 @@ def _do_comparison(
     *,
     enforce_rate_limit: bool = True,
     online_stance_force_offline: bool | None = None,
-) -> tuple:
-    """雙幣比較分析入口，回傳 (report_a, evidence_a, report_b, evidence_b, log) 五元組。
+):
+    """雙幣比較分析入口，回傳 ComparisonRunResult（支援 unpack 為 5-tuple）。
 
     Raises:
         ValueError:        無法解析兩個幣種 / q 過長 / pipeline 無資料
@@ -4033,18 +4100,18 @@ def _do_comparison(
         )
         if _force_offline:
             _extra["force_stance_offline"] = True
-        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+        result = run_comparison(
             coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
         )
     else:
-        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+        result = run_comparison(
             coin_a, coin_b, query, offline=not live
         )
     # 成本會計階段3：comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，
     # 記 2 次（見 `_record_analyze_service_calls` docstring），理由同 `_do_analyze`。
     if real or live:
         _record_analyze_service_calls(2)
-    return report_a, evidence_a, report_b, evidence_b, log
+    return result
 
 
 def _sanitized_retry_href(path: str) -> str:
@@ -4363,9 +4430,9 @@ class _AnalyzeFlight:
 
     __slots__ = ("event", "started_at", "ok", "payload")
 
-    def __init__(self) -> None:
+    def __init__(self, *, wall_time: Callable[[], float] = time.time) -> None:
         self.event = threading.Event()
-        self.started_at = time.time()
+        self.started_at = wall_time()
         self.ok: bool | None = None
         self.payload: object = None
 
@@ -4853,7 +4920,12 @@ def _dedup_prep_failure_health() -> dict:
     }
 
 
-def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
+def _dedup_analyze_call(
+    key: str,
+    compute: Callable[[], Any],
+    *,
+    wall_time: Callable[[], float] = time.time,
+) -> Any:
     """#51 server-side idempotency（防重複送出）核心：同一把 `key`
     （見 `_analyze_dedup_key` docstring）同時只有一個真正在跑
     `compute()`（single-flight leader），後到的相同請求（follower）原地
@@ -4930,14 +5002,14 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
     「我 pop 的時候，字典裡是不是還是我自己」這一次 identity 比對，就
     足以保證不會誤刪別人的 entry，不需要整數編號。
     """
-    deadline = time.time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
+    deadline = wall_time() + _ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS
     my_flight: _AnalyzeFlight | None = None
 
     while True:
         with _analyze_dedup_lock:
             joined_flight = _analyze_dedup_inflight.get(key)
             if joined_flight is None:
-                my_flight = _AnalyzeFlight()
+                my_flight = _AnalyzeFlight(wall_time=wall_time)
                 _analyze_dedup_inflight[key] = my_flight
                 break
             # codex HIGH 複審 Round 15：stale-entry recovery——現有 entry
@@ -4946,12 +5018,15 @@ def _dedup_analyze_call(key: str, compute: Callable[[], Any]) -> Any:
             # Flight，避免跟其他同時發現 stale 的 thread 競相取代（第一個
             # 拿到鎖的取代掉，之後拿到鎖的會看到已經是新 entry、不再視為
             # stale，落入正常 join-as-follower 路徑）。
-            if time.time() - joined_flight.started_at > _ANALYZE_DEDUP_STALE_LEADER_SECONDS:
-                my_flight = _AnalyzeFlight()
+            if (
+                wall_time() - joined_flight.started_at
+                > _ANALYZE_DEDUP_STALE_LEADER_SECONDS
+            ):
+                my_flight = _AnalyzeFlight(wall_time=wall_time)
                 _analyze_dedup_inflight[key] = my_flight
                 break
         # 鎖外等待，避免持鎖期間阻塞其他 caller 對 dedup 狀態的存取。
-        remaining = deadline - time.time()
+        remaining = deadline - wall_time()
         if remaining <= 0:
             raise _AnalyzeDedupTimeout(
                 f"分析請求排隊等候逾時（前一個相同請求執行超過"
@@ -5424,16 +5499,20 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
     }
 
 
-def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, log) -> dict:
-    """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。"""
+def _build_comparison_json_payload(result) -> dict:
+    """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。
+
+    CA-06：接收 ComparisonRunResult（含 .comparison / ComparisonReport），
+    並加入 ``comparison_report`` 欄位。"""
     return {
         "version": VERSION,
-        "report_a": _public_report_dict(report_a),
-        "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
-        "report_b": _public_report_dict(report_b),
-        "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
-        "execution": log.manifest(),
-        "execution_log": log.events,
+        "report_a": _public_report_dict(result.report_a),
+        "evidence_a": [_public_evidence_dict(ev) for ev in result.evidence_a],
+        "report_b": _public_report_dict(result.report_b),
+        "evidence_b": [_public_evidence_dict(ev) for ev in result.evidence_b],
+        "comparison_report": result.comparison.to_dict() if result.comparison else None,
+        "execution": result.log.manifest(),
+        "execution_log": result.log.events,
     }
 
 
@@ -5459,13 +5538,14 @@ def _handle_api_multi_angle_get(qs: dict | None = None) -> tuple[int, str]:
 
 def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, str]:
     """`POST /api/multi-angle`：觸發五角度綜合分析（#809）。"""
-    payload, error = _read_admin_put_body(headers, rfile)
-    if error is not None:
-        return error
-    assert payload is not None
-    coin = str(payload.get("coin", "")).strip().upper()
-    question = str(payload.get("question", "")).strip()
-    locale = str(payload.get("locale", "zh-Hant"))
+    try:
+        content_length = int(headers.get("Content-Length", 0))
+        body = json.loads(rfile.read(content_length)) if content_length else {}
+    except (json.JSONDecodeError, ValueError):
+        return 400, _json_envelope_err("invalid_json", "請求 body 須為有效 JSON")
+    coin = str(body.get("coin", "")).strip().upper()
+    question = str(body.get("question", "")).strip()
+    locale = str(body.get("locale", "zh-Hant"))
     if not coin:
         return 400, _json_envelope_err("missing_param", "必須提供 coin")
     from .schema import COIN_POOL
@@ -5474,13 +5554,18 @@ def _handle_api_multi_angle_post(headers, rfile, client_ip: str) -> tuple[int, s
     if not question:
         question = f"評估{coin}整體信任狀態，多角度綜合分析。"
     try:
-        _check_status_rate_limit(client_ip, "analysis-write")
-        from .analysis_flow import AnalysisFlow
+        from .analysis_flow import (
+            AnalysisFlow,
+            MultiAngleBudgetError,
+            MultiAngleCapacityError,
+        )
         with AnalysisFlow() as flow:
             result = flow.submit_multi_angle(coin, question, locale=locale)
         return 200, _json_envelope_ok(result)
-    except TooManyRequests as exc:
-        return 429, _json_envelope_err("rate_limited", str(exc))
+    except MultiAngleBudgetError as exc:
+        return 409, _json_envelope_err("multi_angle_budget_unavailable", str(exc))
+    except MultiAngleCapacityError as exc:
+        return 503, _json_envelope_err("multi_angle_queue_unavailable", str(exc))
     except ValueError as exc:
         return 400, _json_envelope_err("validation_error", str(exc))
     except Exception:
@@ -6743,7 +6828,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
         )
 
         if qtype == QuestionType.COMPARISON:
-            report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+            result = _dedup_analyze_call(
                 dedup_key,
                 lambda: _do_comparison(
                     qs,
@@ -6752,6 +6837,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                     online_stance_force_offline=force_offline,
                 ),
             )
+            report_a, evidence_a, report_b, evidence_b, log = result
             payload = {
                 "version": VERSION,
                 "report_a": _public_report_dict(report_a),
@@ -6764,6 +6850,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
+                "comparison_report": result.comparison.to_dict() if result.comparison else None,
                 "execution": log.manifest(),
                 "execution_log": log.events,
             }
@@ -7056,6 +7143,51 @@ def _handle_api_costs(qs: dict | None = None, client_ip: str = "") -> tuple[int,
     except Exception:
         logging.exception("TrustForge /api/costs error")
         return 502, _json_envelope_err("upstream_error", "成本資料暫時無法讀取，請稍後再試")
+
+
+# ---------------------------------------------------------------------------
+# Whale Alert API（大額轉帳即時摘要 + 歷程）
+# ---------------------------------------------------------------------------
+
+def _handle_api_whale_summary(qs: dict) -> tuple[int, str]:
+    """`/api/whale-summary`：從 cache 讀最新 whale-alert 資料，聚合為即時摘要。
+
+    參數：`coin`（預設 BTC，須在 COIN_POOL 白名單內）。
+    """
+    from .whale_api import whale_summary
+
+    coin_raw = (qs.get("coin", ["BTC"])[0]).strip().upper()
+    if coin_raw not in {"BTC", "ETH", "SOL", "BNB", "XRP"}:
+        return 400, _json_envelope_err("invalid_coin", f"不支援的幣種：{coin_raw}")
+    try:
+        backend = _shared_web_cache_backend()
+        data = whale_summary(coin_raw, backend)
+        return 200, _json_envelope_ok(data)
+    except Exception as exc:
+        return 502, _json_envelope_err("whale_summary_error", str(exc))
+
+
+def _handle_api_whale_history(qs: dict) -> tuple[int, str]:
+    """`/api/whale-history`：從 SourceEventArchive 讀歷史 whale-alert 資料。
+
+    參數：`coin`（預設 BTC）、`days`（預設 7，僅接受 1/7/30）。
+    """
+    from .whale_api import whale_history
+
+    coin_raw = (qs.get("coin", ["BTC"])[0]).strip().upper()
+    if coin_raw not in {"BTC", "ETH", "SOL", "BNB", "XRP"}:
+        return 400, _json_envelope_err("invalid_coin", f"不支援的幣種：{coin_raw}")
+    try:
+        days = int(qs.get("days", ["7"])[0])
+    except (ValueError, TypeError):
+        days = 7
+    if days not in (1, 7, 30):
+        days = 7
+    try:
+        data = whale_history(coin_raw, days)
+        return 200, _json_envelope_ok(data)
+    except Exception as exc:
+        return 502, _json_envelope_err("whale_history_error", str(exc))
 
 
 # 對齊 `cache.py::TRUST_SNAPSHOT_HISTORY_TTL_SECONDS`（90 天保留期限）——問
@@ -8151,6 +8283,12 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/history":
             code, body = _handle_api_history(qs, client_ip)
             return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/whale-summary":
+            code, body = _handle_api_whale_summary(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/whale-history":
+            code, body = _handle_api_whale_history(qs)
+            return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/operations-status":
             code, body = _handle_api_operations_status()
             return self._send(code, body, "application/json; charset=utf-8")
@@ -8340,7 +8478,7 @@ class Handler(BaseHTTPRequestHandler):
                         # leader 會執行到）改傳 `enforce_rate_limit=False`，避免
                         # 同一個 caller 的 IP 被重複計入限流 bucket 兩次。
                         _analyze_enforce_caller_rate_limit(qs, client_ip)
-                        report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+                        result = _dedup_analyze_call(
                             dedup_key,
                             lambda: _do_comparison(
                                 qs, client_ip=client_ip, enforce_rate_limit=False,
@@ -8348,14 +8486,11 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                         )
                     else:
-                        report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
-                            qs, client_ip=client_ip
-                        )
+                        result = _do_comparison(qs, client_ip=client_ip)
+                    report_a, evidence_a, report_b, evidence_b, log = result
                     query = qs.get("q", [""])[0]
                     if u.path == "/analyze.json":
-                        payload = _build_comparison_json_payload(
-                            report_a, evidence_a, report_b, evidence_b, log
-                        )
+                        payload = _build_comparison_json_payload(result)
                         return self._send(
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
@@ -8368,6 +8503,7 @@ class Handler(BaseHTTPRequestHandler):
                     comparison_body = _render_comparison(
                         report_a, evidence_a, report_b, evidence_b, query, log,
                         mode_extra=mode_extra,
+                        comparison_report=result.comparison,
                     )
                     comparison_stats = _render_run_stats(evidence_a + evidence_b, log)
                     return self._send(
