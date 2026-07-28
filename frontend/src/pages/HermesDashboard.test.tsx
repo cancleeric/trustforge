@@ -30,6 +30,7 @@ vi.mock('../lib/endpoints', () => ({
   getHermesUpgrades: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'no_request', message: 'no request' } }),
   registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { accepted: true } }),
+  getWhaleSummary: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
 }))
 
 function DashboardHistoryControls() {
