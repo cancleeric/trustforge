@@ -38,13 +38,20 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             return 2
         coin_a, coin_b = parts
         try:
-            report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+            result = run_comparison(
                 coin_a, coin_b, args.query,
                 offline=args.offline, data_dir=args.data_dir,
             )
         except ValueError as e:
             print(f"錯誤（{e}）")
             return 1
+        # CA-06：保留 unpack 向後相容，同時取出 ComparisonRunResult 以取得
+        # comparison_report（ComparisonReport.to_dict()）。
+        report_a = result.report_a
+        evidence_a = result.evidence_a
+        report_b = result.report_b
+        evidence_b = result.evidence_b
+        log = result.log
 
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
@@ -52,13 +59,22 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         md = comparison_to_markdown(report_a, evidence_a, report_b, evidence_b, args.query)
         (out / "report.md").write_text(md, encoding="utf-8")
 
-        # evidence.json：兩幣合併，每筆加 coin 欄位標明歸屬
+        # CA-08：若 comparison_report 存在，也輸出 unified ComparisonReport.to_markdown()
+        if result.comparison is not None:
+            unified_md = result.comparison.to_markdown()
+            (out / "comparison_report.md").write_text(unified_md, encoding="utf-8")
+
+        # evidence.json：兩幣合併，每筆加 coin 欄位標明歸屬；外加 comparison_report
         all_ev = (
             [{**e.to_dict(), "coin": report_a.coin} for e in evidence_a]
             + [{**e.to_dict(), "coin": report_b.coin} for e in evidence_b]
         )
+        evidence_payload: dict = {
+            "evidence": all_ev,
+            "comparison_report": result.comparison.to_dict() if result.comparison else None,
+        }
         (out / "evidence.json").write_text(
-            json.dumps(all_ev, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(evidence_payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         (out / "execution_log.jsonl").write_text(log.to_jsonl(), encoding="utf-8")
 

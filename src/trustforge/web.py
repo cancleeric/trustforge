@@ -3465,6 +3465,7 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
 def _render_comparison(
     report_a, evidence_a, report_b, evidence_b, query: str, log=None,
     mode_extra: dict | None = None,
+    comparison_report=None,
 ) -> str:
     """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。
 
@@ -3537,6 +3538,70 @@ def _render_comparison(
         f'<p><a href="{_analyze_json_href(f"{report_a.coin},{report_b.coin}", "comparison", query, mode_extra)}">'
         f'下載 JSON（report_a+report_b+evidence+log）</a></p>'
     )
+
+    # CA-08：unified comparison report（ComparisonReport.to_markdown() 的 HTML 對應）
+    unified_html = ""
+    if comparison_report is not None:
+        unified_parts: list[str] = []
+        cmp = comparison_report
+        unified_parts.append(
+            '<div class="tf-section" style="background:rgba(31,111,235,.08);'
+            'border-color:#1f6feb">'
+            f'<h2 style="margin:0 0 .3rem">{e(cmp.coin_a)} vs {e(cmp.coin_b)}'
+            f' · 比較分析報告</h2>'
+            f'<p style="color:var(--tf-muted);margin:.2rem 0">比較問題：{e(cmp.query)}</p>'
+            f'<p style="color:var(--tf-muted2);font-size:.75rem;margin:0">'
+            f'生成時間：{e(cmp.generated_at)}</p>'
+            f"</div>"
+        )
+
+        # 綜合結論
+        unified_parts.append(
+            '<div class="tf-section">'
+            f"<h3>綜合結論</h3>"
+            f"<p>{e(cmp.conclusion or '（待產生）')}</p>"
+        )
+        if cmp.confidence:
+            pct = int(cmp.confidence * 100)
+            unified_parts.append(
+                f'<p style="font-size:.85rem;color:var(--tf-muted)">'
+                f"整體比較信心：{pct}%</p>"
+            )
+        unified_parts.append("</div>")
+
+        # 四個比較面向
+        unified_parts.append(
+            '<div class="tf-section"><h3>比較面向分析</h3>'
+        )
+        for i, dim in enumerate(cmp.dimensions, start=1):
+            pct_dim = int(dim.confidence * 100)
+            unified_parts.append(
+                f"<h4>{i}. {e(dim.label)}</h4>"
+                f"<p>{e(dim.finding)}</p>"
+                f'<p style="font-size:.8rem;color:var(--tf-muted)">'
+                f"信心：{pct_dim}%｜判定：{e(dim.decision)}｜"
+                f"A 證據 {len(dim.a_evidence_refs)} 筆｜B 證據 {len(dim.b_evidence_refs)} 筆</p>"
+            )
+        unified_parts.append("</div>")
+
+        # 已知限制
+        if cmp.limits:
+            lim_items = "".join(f"<li>{e(item)}</li>" for item in cmp.limits)
+            unified_parts.append(
+                '<div class="tf-section">'
+                f"<h3>已知限制</h3><ul>{lim_items}</ul></div>"
+            )
+
+        # 可能推翻條件
+        if cmp.could_flip:
+            flip_items = "".join(f"<li>{e(item)}</li>" for item in cmp.could_flip)
+            unified_parts.append(
+                '<div class="tf-section">'
+                f"<h3>可能推翻條件</h3><ul>{flip_items}</ul></div>"
+            )
+
+        unified_html = "\n".join(unified_parts)
+
     return f"""
 <div class="tf-dash-hdr">
   <span class="tf-coin-badge">{e(report_a.coin)}</span>
@@ -3550,6 +3615,8 @@ def _render_comparison(
   <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
   <p style="color:var(--tf-muted);margin:.2rem 0">{e(query)}</p>
 </div>
+
+{unified_html}
 
 <div class="tf-section">
   <h3>1. 相對強弱比較</h3>
@@ -3975,8 +4042,8 @@ def _do_comparison(
     *,
     enforce_rate_limit: bool = True,
     online_stance_force_offline: bool | None = None,
-) -> tuple:
-    """雙幣比較分析入口，回傳 (report_a, evidence_a, report_b, evidence_b, log) 五元組。
+):
+    """雙幣比較分析入口，回傳 ComparisonRunResult（支援 unpack 為 5-tuple）。
 
     Raises:
         ValueError:        無法解析兩個幣種 / q 過長 / pipeline 無資料
@@ -4033,18 +4100,18 @@ def _do_comparison(
         )
         if _force_offline:
             _extra["force_stance_offline"] = True
-        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+        result = run_comparison(
             coin_a, coin_b, query, data_mode="live", llm_mode="off", **_extra,
         )
     else:
-        report_a, evidence_a, report_b, evidence_b, log = run_comparison(
+        result = run_comparison(
             coin_a, coin_b, query, offline=not live
         )
     # 成本會計階段3：comparison 一次分析兩個幣種，各自都要讀一輪多來源資料，
     # 記 2 次（見 `_record_analyze_service_calls` docstring），理由同 `_do_analyze`。
     if real or live:
         _record_analyze_service_calls(2)
-    return report_a, evidence_a, report_b, evidence_b, log
+    return result
 
 
 def _sanitized_retry_href(path: str) -> str:
@@ -5432,16 +5499,20 @@ def _build_analyze_json_payload(report, evidence, log) -> dict:
     }
 
 
-def _build_comparison_json_payload(report_a, evidence_a, report_b, evidence_b, log) -> dict:
-    """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。"""
+def _build_comparison_json_payload(result) -> dict:
+    """`/analyze.json`（comparison）JSON payload——同上，兩入口共用。
+
+    CA-06：接收 ComparisonRunResult（含 .comparison / ComparisonReport），
+    並加入 ``comparison_report`` 欄位。"""
     return {
         "version": VERSION,
-        "report_a": _public_report_dict(report_a),
-        "evidence_a": [_public_evidence_dict(ev) for ev in evidence_a],
-        "report_b": _public_report_dict(report_b),
-        "evidence_b": [_public_evidence_dict(ev) for ev in evidence_b],
-        "execution": log.manifest(),
-        "execution_log": log.events,
+        "report_a": _public_report_dict(result.report_a),
+        "evidence_a": [_public_evidence_dict(ev) for ev in result.evidence_a],
+        "report_b": _public_report_dict(result.report_b),
+        "evidence_b": [_public_evidence_dict(ev) for ev in result.evidence_b],
+        "comparison_report": result.comparison.to_dict() if result.comparison else None,
+        "execution": result.log.manifest(),
+        "execution_log": result.log.events,
     }
 
 
@@ -6757,7 +6828,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
         )
 
         if qtype == QuestionType.COMPARISON:
-            report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+            result = _dedup_analyze_call(
                 dedup_key,
                 lambda: _do_comparison(
                     qs,
@@ -6766,6 +6837,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                     online_stance_force_offline=force_offline,
                 ),
             )
+            report_a, evidence_a, report_b, evidence_b, log = result
             payload = {
                 "version": VERSION,
                 "report_a": _public_report_dict(report_a),
@@ -6778,6 +6850,7 @@ def _handle_api_analyze(qs: dict, client_ip: str = "") -> tuple[int, str]:
                 "trust_radar_b": aggregate_trust_by_kind(evidence_b),
                 "trust_components_aggregate_b": _aggregate_trust_components(evidence_b),
                 "price_provenance_b": _price_provenance_data(evidence_b),
+                "comparison_report": result.comparison.to_dict() if result.comparison else None,
                 "execution": log.manifest(),
                 "execution_log": log.events,
             }
@@ -8405,7 +8478,7 @@ class Handler(BaseHTTPRequestHandler):
                         # leader 會執行到）改傳 `enforce_rate_limit=False`，避免
                         # 同一個 caller 的 IP 被重複計入限流 bucket 兩次。
                         _analyze_enforce_caller_rate_limit(qs, client_ip)
-                        report_a, evidence_a, report_b, evidence_b, log = _dedup_analyze_call(
+                        result = _dedup_analyze_call(
                             dedup_key,
                             lambda: _do_comparison(
                                 qs, client_ip=client_ip, enforce_rate_limit=False,
@@ -8413,14 +8486,11 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                         )
                     else:
-                        report_a, evidence_a, report_b, evidence_b, log = _do_comparison(
-                            qs, client_ip=client_ip
-                        )
+                        result = _do_comparison(qs, client_ip=client_ip)
+                    report_a, evidence_a, report_b, evidence_b, log = result
                     query = qs.get("q", [""])[0]
                     if u.path == "/analyze.json":
-                        payload = _build_comparison_json_payload(
-                            report_a, evidence_a, report_b, evidence_b, log
-                        )
+                        payload = _build_comparison_json_payload(result)
                         return self._send(
                             200, json.dumps(payload, ensure_ascii=False, indent=2),
                             "application/json; charset=utf-8",
@@ -8433,6 +8503,7 @@ class Handler(BaseHTTPRequestHandler):
                     comparison_body = _render_comparison(
                         report_a, evidence_a, report_b, evidence_b, query, log,
                         mode_extra=mode_extra,
+                        comparison_report=result.comparison,
                     )
                     comparison_stats = _render_run_stats(evidence_a + evidence_b, log)
                     return self._send(
