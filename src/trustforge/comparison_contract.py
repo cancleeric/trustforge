@@ -35,6 +35,127 @@ DIMENSION_LABEL_MAP = {
     "生態發展": "生態發展比較",
 }
 
+DIMENSION_CEILINGS = {
+    "價格動能": 0.85,
+    "鏈上活動": 0.80,
+    "市場情緒": 0.75,
+    "生態發展": 0.70,
+}
+
+EVIDENCE_KIND_TO_DIMENSION = {
+    "price": "價格動能",
+    "onchain": "鏈上活動",
+    "news": "市場情緒",
+    "social": "市場情緒",
+    "regulatory": "生態發展",
+}
+
+
+def classify_evidence_to_dimension(evidence: Evidence) -> str | None:
+    """根據 evidence.kind 歸類到四個比較面向。
+
+    Returns:
+        str | None: 比較面向名稱，未知 kind 回傳 None。
+    """
+    return EVIDENCE_KIND_TO_DIMENSION.get(evidence.kind)
+
+
+def build_comparison_report(
+    coin_a: str,
+    coin_b: str,
+    query: str,
+    report_a: Report,
+    report_b: Report,
+    evidence_a: list[Evidence],
+    evidence_b: list[Evidence],
+) -> ComparisonReport:
+    """從 A/B pipeline 結果產生結構化 ComparisonReport（純規則層，無 LLM）。
+
+    對四個面向逐一歸類 evidence、判定 decision、計算 confidence，
+    並產出綜合 conclusion。
+    """
+    a_by_dim: dict[str, list[int]] = {dim: [] for dim in COMPARISON_DIMENSIONS}
+    b_by_dim: dict[str, list[int]] = {dim: [] for dim in COMPARISON_DIMENSIONS}
+
+    for i, ev in enumerate(evidence_a):
+        dim = classify_evidence_to_dimension(ev)
+        if dim:
+            a_by_dim[dim].append(i)
+
+    for i, ev in enumerate(evidence_b):
+        dim = classify_evidence_to_dimension(ev)
+        if dim:
+            b_by_dim[dim].append(i)
+
+    dimensions: list[DimensionResult] = []
+    normal_count = 0
+    total_confidence = 0.0
+
+    for dim in COMPARISON_DIMENSIONS:
+        a_refs = a_by_dim[dim]
+        b_refs = b_by_dim[dim]
+        has_a = len(a_refs) > 0
+        has_b = len(b_refs) > 0
+        ceiling = DIMENSION_CEILINGS[dim]
+
+        if has_a and has_b:
+            max_trust = max(
+                max((evidence_a[i].trust for i in a_refs), default=0.0),
+                max((evidence_b[i].trust for i in b_refs), default=0.0),
+            )
+            confidence = min(max_trust, ceiling)
+            finding = f"雙邊均有足夠證據進行{dim}比較。"
+            decision = "normal"
+            normal_count += 1
+        elif has_a or has_b:
+            confidence = 0.0
+            side = coin_a if has_a else coin_b
+            finding = f"僅有 {side} 的證據，不做硬比較。"
+            decision = "insufficient"
+        else:
+            confidence = 0.0
+            finding = "雙邊皆無足夠證據。"
+            decision = "abstain"
+
+        total_confidence += confidence
+
+        dimensions.append(
+            DimensionResult(
+                dimension=dim,
+                label=DIMENSION_LABEL_MAP.get(dim, dim),
+                finding=finding,
+                a_evidence_refs=a_refs,
+                b_evidence_refs=b_refs,
+                confidence=confidence,
+                decision=decision,
+            )
+        )
+
+    if normal_count == 0:
+        conclusion = "四個面向均無足夠雙邊證據，無法產出有效比較結論。"
+    elif normal_count == len(COMPARISON_DIMENSIONS):
+        conclusion = "四個面向均有足夠雙邊證據，可進行完整比較分析。"
+    else:
+        conclusion = (
+            f"僅 {normal_count}/{len(COMPARISON_DIMENSIONS)} 個面向"
+            f"有足夠資料進行比較，其餘面向證據不足。"
+        )
+
+    overall_confidence = total_confidence / len(COMPARISON_DIMENSIONS) if COMPARISON_DIMENSIONS else 0.0
+
+    return ComparisonReport(
+        coin_a=coin_a,
+        coin_b=coin_b,
+        query=query,
+        conclusion=conclusion,
+        dimensions=dimensions,
+        confidence=overall_confidence,
+        supporting_report_a=report_a,
+        supporting_report_b=report_b,
+        supporting_evidence_a=list(evidence_a),
+        supporting_evidence_b=list(evidence_b),
+    )
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -159,30 +280,15 @@ class ComparisonReport:
         report_b: Report,
         evidence_b: list[Evidence],
     ) -> ComparisonReport:
-        """從 A/B pipeline 結果產生骨架 ComparisonReport。
-
-        四個面向皆標為 abstain，conclusion 為佔位文字。
-        CA-03 將填入實際比較內容。
-        """
-        dimensions = [
-            DimensionResult(
-                dimension=dim,
-                label=DIMENSION_LABEL_MAP.get(dim, dim),
-                finding="（尚待比較分析）",
-                decision="abstain",
-            )
-            for dim in COMPARISON_DIMENSIONS
-        ]
-        return cls(
+        """從 A/B pipeline 結果產生規則化 ComparisonReport（CA-03 deterministic fallback）。"""
+        return build_comparison_report(
             coin_a=coin_a,
             coin_b=coin_b,
             query=query,
-            conclusion=f"{coin_a} 與 {coin_b} 的比較分析尚待完成。",
-            dimensions=dimensions,
-            supporting_report_a=report_a,
-            supporting_report_b=report_b,
-            supporting_evidence_a=list(evidence_a),
-            supporting_evidence_b=list(evidence_b),
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=evidence_a,
+            evidence_b=evidence_b,
         )
 
 

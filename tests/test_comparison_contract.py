@@ -23,6 +23,8 @@ from trustforge.comparison_contract import (
     ComparisonReport,
     ComparisonRunResult,
     DimensionResult,
+    build_comparison_report,
+    classify_evidence_to_dimension,
     validate_comparison_report,
     validate_dimension_coverage,
 )
@@ -150,47 +152,42 @@ class TestSideBySideIsNotComparison:
             " CA-02 ComparisonReport.conclusion 將填補此缺口。"
         )
 
-    @pytest.mark.xfail(reason="CA-02/CA-03: DimensionResult 與四面向分析尚未實作", strict=False)
-    def test_golden_no_four_dimensions(self, btc_eth_fixture):
-        """【會 FAIL — 期望】目前沒有四面向結構化比較。
+    def test_golden_has_four_dimensions(self, btc_eth_fixture):
+        """CA-03: run_comparison() 產出的 ComparisonReport 包含四個比較面向。"""
+        result = btc_eth_fixture
+        assert result.comparison is not None, "comparison 應已填入（CA-03 deterministic fallback）"
 
-        當前 `comparison_to_markdown` 只有「相對強弱」、「流動性」、「訊號一致」
-        三個簡表，缺少完整四面向（價格動能、鏈上活動、市場情緒、生態發展）。
-        """
-        report_a, ev_a, report_b, ev_b, log = btc_eth_fixture
-
-        # 目前輸出沒有 comparison dimensions
-        dimensions_present = 0
-        for rpt in (report_a, report_b):
-            d = vars(rpt) if hasattr(rpt, "__dict__") else {}
-            for key in ("dimensions", "comparison_dimensions", "aspects"):
-                if key in d:
-                    dimensions_present += 1
-
-        assert dimensions_present > 0, (
-            "FAIL EXPECTED: 目前沒有 comparison dimensions 結構。"
-            " CA-02 DimensionResult + CA-03 將實作四面向分析。"
-            f" 期望四個面向：{COMPARISON_DIMENSIONS}"
+        present = {d.dimension for d in result.comparison.dimensions}
+        for dim in COMPARISON_DIMENSIONS:
+            assert dim in present, (
+                f"缺少比較面向 '{dim}'。實際面向: {present}"
+            )
+        assert len(result.comparison.dimensions) == len(COMPARISON_DIMENSIONS), (
+            f"預期 {len(COMPARISON_DIMENSIONS)} 個面向，"
+            f"實際 {len(result.comparison.dimensions)} 個"
         )
 
-    @pytest.mark.xfail(reason="CA-03: evidence 維度歸類尚未實作", strict=False)
-    def test_golden_no_evidence_cross_reference(self, btc_eth_fixture):
-        """【會 FAIL — 期望】目前無法將 evidence 對應到特定比較面向。
+    def test_golden_has_evidence_cross_reference(self, btc_eth_fixture):
+        """CA-03: 每個 dimension 的 a_evidence_refs / b_evidence_refs 正確對應 evidence。"""
+        result = btc_eth_fixture
+        assert result.comparison is not None
 
-        證據清單是兩幣合併的，但沒有標記每筆證據貢獻了哪個比較面向。
-        """
-        report_a, ev_a, report_b, ev_b, log = btc_eth_fixture
-
-        # evidence 本身沒有 dimension 標記
-        all_evidence = list(ev_a) + list(ev_b)
-        ev_with_dimension = sum(
-            1 for e in all_evidence
-            if hasattr(e, "dimension") and getattr(e, "dimension", None)
-        )
-        assert ev_with_dimension > 0, (
-            "FAIL EXPECTED: 證據缺少比較面向標記。"
-            " CA-03 將實作 dimension 歸類，DimensionResult 將包含 evidence refs。"
-        )
+        for dim in result.comparison.dimensions:
+            # 驗證 refs 指向正確 kind 的 evidence
+            for ref in dim.a_evidence_refs:
+                ev = result.comparison.supporting_evidence_a[ref]
+                mapped = classify_evidence_to_dimension(ev)
+                assert mapped == dim.dimension, (
+                    f"A 幣 evidence[{ref}] kind='{ev.kind}' 映射到 '{mapped}',"
+                    f"但 dimension '{dim.dimension}' 預期相同"
+                )
+            for ref in dim.b_evidence_refs:
+                ev = result.comparison.supporting_evidence_b[ref]
+                mapped = classify_evidence_to_dimension(ev)
+                assert mapped == dim.dimension, (
+                    f"B 幣 evidence[{ref}] kind='{ev.kind}' 映射到 '{mapped}',"
+                    f"但 dimension '{dim.dimension}' 預期相同"
+                )
 
 
 # ===========================================================================
@@ -204,27 +201,26 @@ class TestDimensionCoverage:
     """
 
     def test_golden_requires_price_momentum_dimension(self, btc_eth_fixture):
-        """【會 FAIL — 期望】價格動能面向必須存在且有雙邊 price evidence refs。"""
-        _, ev_a, _, ev_b, _ = btc_eth_fixture
-        dim = DimensionResult(
-            dimension="價格動能",
-            label="價格動能比較",
-            finding="BTC 呈現上漲趨勢（+4%），ETH 下跌（-2%），BTC 價格動能優於 ETH。",
-            a_evidence_refs=[i for i, e in enumerate(ev_a) if e.kind == "price"],
-            b_evidence_refs=[i for i, e in enumerate(ev_b) if e.kind == "price"],
-            confidence=0.85,
-            decision="normal",
+        """CA-03: build_comparison_report 產出含價格動能面向的報告，且有雙邊 evidence refs。"""
+        result = btc_eth_fixture
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較 BTC 與 ETH 的市場表現",
+            report_a=result.report_a,
+            report_b=result.report_b,
+            evidence_a=list(result.evidence_a),
+            evidence_b=list(result.evidence_b),
         )
-        # 驗證 dimension 基本結構
-        assert dim.dimension == "價格動能"
-        # 關鍵斷言：必須有雙邊證據（這個 fixture 有 price docs）
-        assert len(dim.a_evidence_refs) > 0, (
-            f"FAIL EXPECTED: 價格動能面向缺少 A 幣證據。"
-            f" ev_a 有 {len(ev_a)} 筆，其中 price 有 {sum(1 for e in ev_a if e.kind=='price')} 筆"
+        price_dim = next(
+            (d for d in comparison.dimensions if d.dimension == "價格動能"), None
         )
-        assert len(dim.b_evidence_refs) > 0, (
-            f"FAIL EXPECTED: 價格動能面向缺少 B 幣證據。"
-            f" ev_b 有 {len(ev_b)} 筆，其中 price 有 {sum(1 for e in ev_b if e.kind=='price')} 筆"
+        assert price_dim is not None, "缺少價格動能面向"
+        assert len(price_dim.a_evidence_refs) > 0, (
+            "價格動能面向缺少 A 幣證據"
+        )
+        assert len(price_dim.b_evidence_refs) > 0, (
+            "價格動能面向缺少 B 幣證據"
         )
 
     def test_golden_requires_onchain_dimension(self, btc_eth_fixture):
@@ -276,70 +272,27 @@ class TestDimensionCoverage:
         assert len(dim.b_evidence_refs) > 0, "生態發展面向缺少 B 幣證據"
 
     def test_golden_all_four_dimensions_present(self, btc_eth_fixture):
-        """【會 FAIL — 期望】四個面向必須完整存在。
-
-        目前的 comparison_to_markdown 只有三個簡表，缺少部分面向。
-        這測試會對照 fixture 資料，確認每個面向是否有足夠證據。
-        """
-        _, ev_a, _, ev_b, _ = btc_eth_fixture
-
-        dims = [
-            DimensionResult(
-                dimension="價格動能",
-                label="價格動能比較",
-                finding="價格面向比較",
-                a_evidence_refs=[i for i, e in enumerate(ev_a) if e.kind == "price"],
-                b_evidence_refs=[i for i, e in enumerate(ev_b) if e.kind == "price"],
-            ),
-            DimensionResult(
-                dimension="鏈上活動",
-                label="鏈上活動比較",
-                finding="鏈上面向比較",
-                a_evidence_refs=[i for i, e in enumerate(ev_a) if e.kind == "onchain"],
-                b_evidence_refs=[i for i, e in enumerate(ev_b) if e.kind == "onchain"],
-            ),
-            DimensionResult(
-                dimension="市場情緒",
-                label="市場情緒比較",
-                finding="情緒面向比較",
-                a_evidence_refs=[i for i, e in enumerate(ev_a)
-                                 if e.kind in ("news", "social")],
-                b_evidence_refs=[i for i, e in enumerate(ev_b)
-                                 if e.kind in ("news", "social")],
-            ),
-            DimensionResult(
-                dimension="生態發展",
-                label="生態發展比較",
-                finding="生態面向比較",
-                a_evidence_refs=[i for i, e in enumerate(ev_a)
-                                 if e.kind == "regulatory"],
-                b_evidence_refs=[i for i, e in enumerate(ev_b)
-                                 if e.kind == "regulatory"],
-            ),
-        ]
-
-        cr = ComparisonReport(
+        """CA-03: build_comparison_report 產出完整四面向報告並通過 validate_comparison_report。"""
+        result = btc_eth_fixture
+        comparison = build_comparison_report(
             coin_a="BTC",
             coin_b="ETH",
             query="比較",
-            conclusion="BTC 在四個面向全數優於 ETH",
-            dimensions=dims,
-            supporting_evidence_a=list(ev_a),
-            supporting_evidence_b=list(ev_b),
+            report_a=result.report_a,
+            report_b=result.report_b,
+            evidence_a=list(result.evidence_a),
+            evidence_b=list(result.evidence_b),
         )
 
         # 驗證四個面向存在
-        present = {d.dimension for d in cr.dimensions}
+        present = {d.dimension for d in comparison.dimensions}
         for dim in COMPARISON_DIMENSIONS:
-            assert dim in present, (
-                f"FAIL EXPECTED: 缺少比較面向 '{dim}'。"
-                f" 當前僅有：{present}"
-            )
+            assert dim in present, f"缺少比較面向 '{dim}'。實際: {present}"
 
-        # 驗證每個 dimension 有雙邊證據
-        violations = validate_comparison_report(cr, _raise=False)
+        # 驗證通過 validate_comparison_report
+        violations = validate_comparison_report(comparison, _raise=False)
         assert len(violations) == 0, (
-            f"FAIL EXPECTED: 比較報告有 {len(violations)} 項契約違規：\n"
+            f"比較報告有 {len(violations)} 項契約違規：\n"
             + "\n".join(violations)
         )
 
@@ -1114,8 +1067,8 @@ class TestSerializeDeserialize:
         assert restored.comparison.coin_a == "BTC"
         assert len(restored.comparison.dimensions) == 4
 
-    def test_from_a_b_reports_produces_skeleton(self, btc_eth_fixture):
-        """from_a_b_reports 產出含四 abstain 面向的骨架報告。"""
+    def test_from_a_b_reports_produces_valid_report(self, btc_eth_fixture):
+        """from_a_b_reports 現委託 build_comparison_report，產出含四面向的合法報告。"""
         result = btc_eth_fixture
         report_a, ev_a, report_b, ev_b, log = result
 
@@ -1135,14 +1088,13 @@ class TestSerializeDeserialize:
         present = {d.dimension for d in cr.dimensions}
         for dim in COMPARISON_DIMENSIONS:
             assert dim in present
-        for d in cr.dimensions:
-            assert d.decision == "abstain"
+        # CA-03: 雙邊皆有證據，decision 為 normal（不再是 abstain 骨架）
         assert cr.supporting_report_a is not None
         assert cr.supporting_report_b is not None
 
-        # 骨架應可通過 validate（四面向皆 abstain 是合法的）
+        # 應可通過 validate
         violations = validate_comparison_report(cr, _raise=False)
-        assert len(violations) == 0, f"骨架報告應無違規，實際: {violations}"
+        assert len(violations) == 0, f"報告應無違規，實際: {violations}"
 
 
 # ===========================================================================
@@ -1210,15 +1162,224 @@ class TestBackwardCompatibility:
         assert ev_b
         assert "comparison.start" in [e["tool"] for e in log.events]
 
-    def test_run_comparison_has_comparison_none(self, monkeypatch):
-        """CA-02: result.comparison is None（CA-03 才填內容）。"""
+    def test_run_comparison_has_comparison_populated(self, monkeypatch):
+        """CA-03: result.comparison 已由 build_comparison_report 填入。"""
         def fake_collect(query, coin=None, offline=False, data_dir=None, _failed=None):
             return _make_fixture_docs(coin)
 
         monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
         result = run_comparison("BTC", "ETH", "比較兩幣", offline=True)
-        assert result.comparison is None
+        assert result.comparison is not None, (
+            "CA-03: comparison 應由 build_comparison_report 填入"
+        )
+        assert result.has_comparison
+        assert len(result.comparison.dimensions) == len(COMPARISON_DIMENSIONS)
+        # 驗證報告契約
+        violations = validate_comparison_report(result.comparison, _raise=False)
+        assert len(violations) == 0, (
+            f"run_comparison 產出的 comparison 有 {len(violations)} 項違規：\n"
+            + "\n".join(violations)
+        )
+
+
+# ===========================================================================
+# CA-03: classify_evidence_to_dimension & build_comparison_report 單元測試
+# ===========================================================================
+
+class TestClassifyEvidenceToDimension:
+    """classify_evidence_to_dimension 的 mapping 正確性。"""
+
+    def test_classify_evidence_to_dimension_price(self):
+        """price evidence → 價格動能。"""
+        ev = Evidence(source="test", fetched_at="", content_reference="", related_claim="", kind="price")
+        assert classify_evidence_to_dimension(ev) == "價格動能"
+
+    def test_classify_evidence_to_dimension_onchain(self):
+        """onchain → 鏈上活動。"""
+        ev = Evidence(source="test", fetched_at="", content_reference="", related_claim="", kind="onchain")
+        assert classify_evidence_to_dimension(ev) == "鏈上活動"
+
+    def test_classify_evidence_to_dimension_news(self):
+        """news → 市場情緒。"""
+        ev = Evidence(source="test", fetched_at="", content_reference="", related_claim="", kind="news")
+        assert classify_evidence_to_dimension(ev) == "市場情緒"
+
+    def test_classify_evidence_to_dimension_social(self):
+        """social → 市場情緒。"""
+        ev = Evidence(source="test", fetched_at="", content_reference="", related_claim="", kind="social")
+        assert classify_evidence_to_dimension(ev) == "市場情緒"
+
+    def test_classify_evidence_to_dimension_regulatory(self):
+        """regulatory → 生態發展。"""
+        ev = Evidence(source="test", fetched_at="", content_reference="", related_claim="", kind="regulatory")
+        assert classify_evidence_to_dimension(ev) == "生態發展"
+
+    def test_classify_evidence_to_dimension_unknown(self):
+        """未知 kind → None。"""
+        ev = Evidence(source="test", fetched_at="", content_reference="", related_claim="", kind="unknown_kind")
+        assert classify_evidence_to_dimension(ev) is None
+
+
+class TestBuildComparisonReport:
+    """build_comparison_report 的結構與契約驗證。"""
+
+    def test_build_comparison_report_has_conclusion(self, btc_eth_fixture):
+        """產出的 report conclusion 非空。"""
+        result = btc_eth_fixture
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=result.report_a,
+            report_b=result.report_b,
+            evidence_a=list(result.evidence_a),
+            evidence_b=list(result.evidence_b),
+        )
+        assert comparison.conclusion.strip(), "conclusion 不可為空"
+
+    def test_build_comparison_report_dimensions_count(self, btc_eth_fixture):
+        """產出四個 dimension。"""
+        result = btc_eth_fixture
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=result.report_a,
+            report_b=result.report_b,
+            evidence_a=list(result.evidence_a),
+            evidence_b=list(result.evidence_b),
+        )
+        assert len(comparison.dimensions) == len(COMPARISON_DIMENSIONS)
+        present = {d.dimension for d in comparison.dimensions}
+        assert present == set(COMPARISON_DIMENSIONS)
+
+    def test_build_comparison_report_passes_validation(self, btc_eth_fixture):
+        """通過 validate_comparison_report。"""
+        result = btc_eth_fixture
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=result.report_a,
+            report_b=result.report_b,
+            evidence_a=list(result.evidence_a),
+            evidence_b=list(result.evidence_b),
+        )
+        violations = validate_comparison_report(comparison, _raise=False)
+        assert len(violations) == 0, (
+            f"build_comparison_report 產出 {len(violations)} 項違規：\n"
+            + "\n".join(violations)
+        )
+
+    def test_build_comparison_report_abstain_when_no_evidence(self):
+        """雙邊皆無證據的面向 decision 為 abstain。"""
+        report_a = Report(
+            coin="BTC", question_type="comparison", question="比較",
+            market_judgment="", facts=[], inferences=[], key_basis=[],
+            confidence=0.0, limits=[], could_flip=[], contrarian=[],
+            generated_at="2026-07-26T00:00:00Z",
+        )
+        report_b = Report(
+            coin="ETH", question_type="comparison", question="比較",
+            market_judgment="", facts=[], inferences=[], key_basis=[],
+            confidence=0.0, limits=[], could_flip=[], contrarian=[],
+            generated_at="2026-07-26T00:00:00Z",
+        )
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=[],
+            evidence_b=[],
+        )
+        for dim in comparison.dimensions:
+            assert dim.decision == "abstain", (
+                f"'{dim.dimension}' 雙邊無證據時應為 abstain"
+            )
+            assert dim.confidence == 0.0
+
+    def test_build_comparison_report_insufficient_when_one_sided(self):
+        """單邊有證據的面向 decision 為 insufficient。"""
+        report_a = Report(
+            coin="BTC", question_type="comparison", question="比較",
+            market_judgment="", facts=[], inferences=[], key_basis=[],
+            confidence=0.0, limits=[], could_flip=[], contrarian=[],
+            generated_at="2026-07-26T00:00:00Z",
+        )
+        report_b = Report(
+            coin="ETH", question_type="comparison", question="比較",
+            market_judgment="", facts=[], inferences=[], key_basis=[],
+            confidence=0.0, limits=[], could_flip=[], contrarian=[],
+            generated_at="2026-07-26T00:00:00Z",
+        )
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=[Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price")],
+            evidence_b=[],
+        )
+        price_dim = next(d for d in comparison.dimensions if d.dimension == "價格動能")
+        assert price_dim.decision == "insufficient"
+        assert price_dim.confidence == 0.0
+        assert "僅有 BTC 的證據" in price_dim.finding
+
+    def test_build_comparison_report_normal_when_both_sides(self, btc_eth_fixture):
+        """雙邊皆有證據的面向 decision 為 normal。"""
+        result = btc_eth_fixture
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=result.report_a,
+            report_b=result.report_b,
+            evidence_a=list(result.evidence_a),
+            evidence_b=list(result.evidence_b),
+        )
+        for dim in comparison.dimensions:
+            assert dim.decision == "normal", (
+                f"'{dim.dimension}' 雙邊有證據時應為 normal"
+            )
+            assert len(dim.a_evidence_refs) > 0
+            assert len(dim.b_evidence_refs) > 0
+
+    def test_build_comparison_report_ceiling_capped(self):
+        """confidence 被 dimension ceiling 限制。"""
+        report_a = Report(
+            coin="BTC", question_type="comparison", question="比較",
+            market_judgment="", facts=[], inferences=[], key_basis=[],
+            confidence=0.0, limits=[], could_flip=[], contrarian=[],
+            generated_at="2026-07-26T00:00:00Z",
+        )
+        report_b = Report(
+            coin="ETH", question_type="comparison", question="比較",
+            market_judgment="", facts=[], inferences=[], key_basis=[],
+            confidence=0.0, limits=[], could_flip=[], contrarian=[],
+            generated_at="2026-07-26T00:00:00Z",
+        )
+        comparison = build_comparison_report(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            report_a=report_a,
+            report_b=report_b,
+            evidence_a=[
+                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.99)
+            ],
+            evidence_b=[
+                Evidence(source="t", fetched_at="", content_reference="", related_claim="", kind="price", trust=0.99)
+            ],
+        )
+        price_dim = next(d for d in comparison.dimensions if d.dimension == "價格動能")
+        assert price_dim.decision == "normal"
+        assert price_dim.confidence <= 0.85, (
+            f"價格動能 confidence {price_dim.confidence} 應被 ceiling 0.85 限制"
+        )
 
 
 # ===========================================================================

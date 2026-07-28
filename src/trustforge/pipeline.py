@@ -18,7 +18,7 @@ from .budget_guard import (
     stance_model_priced,
     try_reserve_request_budget,
 )
-from .comparison_contract import ComparisonRunResult
+from .comparison_contract import ComparisonRunResult, build_comparison_report
 from .execlog import ExecutionLog
 from .ingestion.base import collect, execution_log_context
 from .policy import PolicyExecutor
@@ -471,11 +471,22 @@ def run_comparison(
         summary=f"{coin_a} vs {coin_b} 兩輪 pipeline 完成；"
                 f"evidence A={len(evidence_a)} B={len(evidence_b)}",
     )
+
+    comparison = build_comparison_report(
+        coin_a=coin_a,
+        coin_b=coin_b,
+        query=query,
+        report_a=report_a,
+        report_b=report_b,
+        evidence_a=evidence_a,
+        evidence_b=evidence_b,
+    )
+
     return ComparisonRunResult(
         report_a=report_a,
         report_b=report_b,
         evidence_a=evidence_a,
         evidence_b=evidence_b,
-        comparison=None,
+        comparison=comparison,
         log=log,
     )
