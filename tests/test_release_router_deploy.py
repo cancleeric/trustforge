@@ -1029,3 +1029,92 @@ def test_content_addressed_router_artifact_bounds_directory_member_bomb(
     with pytest.raises(SystemExit, match="too many members"):
         install_router_release_artifact.main()
     assert not any(releases.iterdir())
+
+
+@pytest.mark.parametrize(
+    "fault_point", ("rename", "chmod", "verify", "marker_fsync")
+)
+def test_router_publish_faults_leave_no_consumable_target_and_retry(
+    tmp_path, monkeypatch, fault_point
+):
+    _, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
+    releases = tmp_path / "releases"
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    target = releases / digest
+    marker = releases / f".published-{digest}.json"
+    arguments = [
+        "install_router_release_artifact.py",
+        "--archive",
+        str(archive),
+        "--tree-manifest",
+        str(manifest),
+        "--runtime-lock",
+        str(runtime_lock),
+        "--releases-root",
+        str(releases),
+    ]
+    real_replace = os.replace
+    real_chmod = os.chmod
+    real_verify_runtime = install_router_release_artifact._verify_runtime_lock
+    real_fsync = os.fsync
+
+    with monkeypatch.context() as fault:
+        fault.setattr(sys, "argv", arguments)
+        if fault_point == "rename":
+            fault.setattr(
+                install_router_release_artifact.os,
+                "replace",
+                lambda source, destination: (
+                    (_ for _ in ()).throw(OSError("rename fault"))
+                    if Path(destination) == target
+                    else real_replace(source, destination)
+                ),
+            )
+        elif fault_point == "chmod":
+            fault.setattr(
+                install_router_release_artifact.os,
+                "chmod",
+                lambda path, mode: (
+                    (_ for _ in ()).throw(OSError("chmod fault"))
+                    if Path(path) == target and mode == 0o555
+                    else real_chmod(path, mode)
+                ),
+            )
+        elif fault_point == "verify":
+            fault.setattr(
+                install_router_release_artifact,
+                "_verify_runtime_lock",
+                lambda root, lock, tree_digest: (
+                    (_ for _ in ()).throw(SystemExit("verify fault"))
+                    if Path(root) == target
+                    else real_verify_runtime(root, lock, tree_digest)
+                ),
+            )
+        else:
+            fault.setattr(
+                install_router_release_artifact.os,
+                "fsync",
+                lambda descriptor: (
+                    (_ for _ in ()).throw(OSError("marker fsync fault"))
+                    if marker.exists()
+                    and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    else real_fsync(descriptor)
+                ),
+            )
+        with pytest.raises((OSError, SystemExit)):
+            install_router_release_artifact.main()
+
+    assert not marker.exists() or (
+        target.is_dir() and stat.S_IMODE(target.stat().st_mode) == 0o555
+    )
+    monkeypatch.setattr(sys, "argv", arguments)
+    assert install_router_release_artifact.main() == 0
+    assert target.is_dir()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o555
+    assert json.loads(marker.read_text()) == {
+        "schema": "trustforge.router-published-release/v1",
+        "digest": digest,
+        "target": digest,
+    }
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o444
+    assert install_router_release_artifact.main() == 0

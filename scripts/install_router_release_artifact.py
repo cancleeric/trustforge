@@ -12,6 +12,7 @@ import stat
 import tarfile
 import base64
 import csv
+import fcntl
 import re
 from pathlib import Path, PurePosixPath
 
@@ -30,6 +31,7 @@ REQUIRED_FILES = {
 }
 RUNTIME_LOCK_SCHEMA = "trustforge.router-runtime-lock/v2"
 DIST_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+PUBLISHED_SCHEMA = "trustforge.router-published-release/v1"
 
 
 def _normalized_distribution_name(value: str) -> str:
@@ -303,6 +305,67 @@ def _verify_runtime_lock(root: Path, lock: dict, tree_digest: str) -> None:
         )
 
 
+def _marker_path(root: Path, digest: str) -> Path:
+    return root / f".published-{digest}.json"
+
+
+def _verify_published_marker(path: Path, digest: str, expected_uid: int) -> None:
+    payload, _ = _read_pinned_json(path, 1024)
+    info = os.lstat(path)
+    expected = {"schema": PUBLISHED_SCHEMA, "digest": digest, "target": digest}
+    if (
+        payload != expected
+        or info.st_uid != expected_uid
+        or stat.S_IMODE(info.st_mode) != 0o444
+    ):
+        raise SystemExit("router published marker is invalid")
+
+
+def _publish_marker(root: Path, root_fd: int, digest: str, expected_uid: int) -> None:
+    marker = _marker_path(root, digest)
+    if os.path.lexists(marker):
+        _verify_published_marker(marker, digest, expected_uid)
+        return
+    payload = {"schema": PUBLISHED_SCHEMA, "digest": digest, "target": digest}
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    temporary = root / f".published-{digest}.{os.getpid()}.tmp"
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o400,
+    )
+    try:
+        os.write(fd, raw)
+        os.fchmod(fd, 0o444)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(temporary, marker)
+        os.fsync(root_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    _verify_published_marker(marker, digest, expected_uid)
+
+
+def _remove_unpublished_target(target: Path, expected_uid: int) -> None:
+    info = os.lstat(target)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != expected_uid
+        or stat.S_IMODE(info.st_mode) not in {0o700, 0o555}
+    ):
+        raise SystemExit("unpublished router target has unsafe metadata")
+    os.chmod(target, 0o700)
+    for directory, directories, _ in os.walk(target):
+        os.chmod(directory, 0o700)
+        for child in directories:
+            os.chmod(Path(directory) / child, 0o700)
+    shutil.rmtree(target)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path, required=True)
@@ -349,15 +412,33 @@ def main() -> int:
             or stat.S_IMODE(releases_info.st_mode) != 0o755
         ):
             raise SystemExit("releases root must be owner-controlled 0755")
+        parent_fd = os.open(
+            args.releases_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        fcntl.flock(parent_fd, fcntl.LOCK_EX)
         stage = args.releases_root / f".{release_digest}.{os.getpid()}.staging"
         target = args.releases_root / release_digest
-        if target.exists():
-            _verify_tree(target, expected, expected_dirs, expected_uid)
-            _verify_runtime_lock(target, runtime_lock, tree_digest)
-            print(target)
-            return 0
-        stage.mkdir(mode=0o700)
         try:
+            marker = _marker_path(args.releases_root, release_digest)
+            if os.path.lexists(marker):
+                _verify_published_marker(marker, release_digest, expected_uid)
+                _verify_tree(target, expected, expected_dirs, expected_uid)
+                _verify_runtime_lock(target, runtime_lock, tree_digest)
+                print(target)
+                return 0
+            if os.path.lexists(target):
+                try:
+                    _verify_tree(target, expected, expected_dirs, expected_uid)
+                    _verify_runtime_lock(target, runtime_lock, tree_digest)
+                except (OSError, SystemExit):
+                    _remove_unpublished_target(target, expected_uid)
+                else:
+                    _publish_marker(
+                        args.releases_root, parent_fd, release_digest, expected_uid
+                    )
+                    print(target)
+                    return 0
+            stage.mkdir(mode=0o700)
             observed: set[PurePosixPath] = set()
             observed_dirs: set[PurePosixPath] = set()
             total_bytes = 0
@@ -458,11 +539,9 @@ def main() -> int:
             os.chmod(stage, 0o700)
             os.replace(stage, target)
             os.chmod(target, 0o555)
-            parent_fd = os.open(args.releases_root, os.O_RDONLY | os.O_DIRECTORY)
-            os.fsync(parent_fd)
-            os.close(parent_fd)
             _verify_tree(target, expected, expected_dirs, expected_uid)
             _verify_runtime_lock(target, runtime_lock, tree_digest)
+            _publish_marker(args.releases_root, parent_fd, release_digest, expected_uid)
         except BaseException:
             if stage.exists():
                 os.chmod(stage, 0o700)
@@ -472,6 +551,8 @@ def main() -> int:
                         os.chmod(Path(directory) / child, 0o700)
                 shutil.rmtree(stage)
             raise
+        finally:
+            os.close(parent_fd)
         print(target)
         return 0
     finally:
