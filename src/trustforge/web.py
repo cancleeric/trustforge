@@ -7140,6 +7140,18 @@ def _handle_api_health() -> tuple[int, str]:
 # Module Runtime Telemetry API（issue #382）
 # ---------------------------------------------------------------------------
 
+def _handle_api_agentcore_status() -> tuple[int, str]:
+    """Expose non-sensitive AgentCore readiness without probing AWS."""
+
+    try:
+        from .agent.agentcore_adapter import agentcore_status
+
+        return 200, _json_envelope_ok(agentcore_status())
+    except Exception:
+        logging.exception("TrustForge /api/agentcore/status error")
+        return 500, _json_envelope_err("internal_error", "AgentCore 狀態檢查失敗")
+
+
 def _handle_api_module_telemetry(qs: dict | None = None) -> tuple[int, str]:
     """`/api/module-telemetry`：回傳所有模組的 runtime 遙測資料。
 
@@ -8049,6 +8061,9 @@ class Handler(BaseHTTPRequestHandler):
         # docstring。
         if u.path == "/api/health":
             code, body = _handle_api_health()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/agentcore/status":
+            code, body = _handle_api_agentcore_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/rate-limit-status":
             code, body = _handle_api_rate_limit_status()

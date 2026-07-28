@@ -4368,3 +4368,44 @@
     --hermes-tagline: 61px;
   }
 }
+.agentcore-status {
+  position: fixed;
+  top: 4.2rem;
+  right: 1rem;
+  z-index: 45;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid rgba(120, 150, 170, 0.4);
+  border-radius: 999px;
+  background: rgba(7, 15, 23, 0.88);
+  color: var(--hermes-text-secondary, #aab7c4);
+  font: 600 0.68rem/1.2 'IBM Plex Mono', monospace;
+  letter-spacing: 0.04em;
+}
+
+.agentcore-status span {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: #768391;
+}
+
+.agentcore-status--configured span {
+  background: #3fd39d;
+  box-shadow: 0 0 0.5rem rgba(63, 211, 157, 0.7);
+}
+
+.agentcore-status--misconfigured span,
+.agentcore-status--unavailable span {
+  background: #f5a742;
+}
+
+@media (max-width: 720px) {
+  .agentcore-status {
+    position: static;
+    margin: 0.5rem 0.75rem 0 auto;
+    width: fit-content;
+  }
+}
