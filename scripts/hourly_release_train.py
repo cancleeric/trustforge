@@ -131,6 +131,8 @@ def gate(worktree: Path) -> None:
         if key.startswith(("AWS_", "GH_", "GITHUB_")):
             env.pop(key)
     env["TRUSTFORGE_GATE_SANDBOX"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     subprocess.run(command, cwd=worktree, env=env, check=True)
     hook.unlink()
     shutil.rmtree(worktree / "frontend" / "node_modules")
