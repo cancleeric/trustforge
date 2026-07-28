@@ -32,6 +32,7 @@ vi.mock('../lib/endpoints', () => ({
   getAnalyze: vi.fn().mockResolvedValue({ ok: false, error: { code: 'no_request', message: 'no request' } }),
   getWhaleSummary: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   registerAnalysisQuestion: vi.fn().mockResolvedValue({ ok: true, data: { accepted: true } }),
+  getWhaleSummary: vi.fn().mockResolvedValue({ ok: true, data: { coin: 'BTC', period_hours: 24, total_count: 0, total_usd: 0, net_exchange_flow_usd: 0, exchange_inflow_usd: 0, exchange_outflow_usd: 0, max_single_usd: 0, whale_transfer_count: 0, exchange_inflow_count: 0, exchange_outflow_count: 0 } }),
 }))
 
 function DashboardHistoryControls() {
