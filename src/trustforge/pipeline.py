@@ -18,6 +18,7 @@ from .budget_guard import (
     stance_model_priced,
     try_reserve_request_budget,
 )
+from .comparison_contract import ComparisonRunResult
 from .execlog import ExecutionLog
 from .ingestion.base import collect, execution_log_context
 from .policy import PolicyExecutor
@@ -419,8 +420,11 @@ def run_comparison(
     data_mode: str | None = None,
     llm_mode: str | None = None,
     force_stance_offline: bool = False,
-) -> tuple[Report, list[Evidence], Report, list[Evidence], ExecutionLog]:
-    """比較分析：各跑一次完整 pipeline，共用 ExecutionLog，回傳並列結果。
+) -> ComparisonRunResult:
+    """比較分析：各跑一次完整 pipeline，共用 ExecutionLog，回傳 ComparisonRunResult。
+
+    ComparisonRunResult 支援 unpack 為 5-tuple ``(report_a, ev_a, report_b, ev_b, log)``，
+    確保現有呼叫端向後相容。
 
     Args:
         coin_a:    幣種 A（須在 COIN_POOL）
@@ -435,7 +439,7 @@ def run_comparison(
             per-IP 限流是「整次請求」層級，不是逐幣獨立判斷。
 
     Returns:
-        (report_a, evidence_a, report_b, evidence_b, log)
+        ComparisonRunResult（支援 unpack 為 5-tuple）
 
     Raises:
         ValueError: 幣種不合法或兩個幣種相同
@@ -467,4 +471,11 @@ def run_comparison(
         summary=f"{coin_a} vs {coin_b} 兩輪 pipeline 完成；"
                 f"evidence A={len(evidence_a)} B={len(evidence_b)}",
     )
-    return report_a, evidence_a, report_b, evidence_b, log
+    return ComparisonRunResult(
+        report_a=report_a,
+        report_b=report_b,
+        evidence_a=evidence_a,
+        evidence_b=evidence_b,
+        comparison=None,
+        log=log,
+    )
