@@ -291,6 +291,61 @@ class ComparisonReport:
             evidence_b=evidence_b,
         )
 
+    def to_markdown(self) -> str:
+        """Unified ComparisonReport 格式的 Markdown 輸出（CA-08）。
+
+        取代舊版 `comparison_to_markdown()` 的雙幣並排格式，
+        以結構化的四個比較面向為主體，含綜合結論、已知限制、
+        可能推翻條件，並以摺疊區保留各幣詳細分析。
+        """
+        L: list[str] = []
+        L.append(f"# {self.coin_a} vs {self.coin_b} 比較分析報告")
+        L.append(f"> 比較問題：{self.query}")
+        L.append(f"> 生成時間：{self.generated_at}\n")
+
+        L.append("## 綜合結論")
+        L.append(self.conclusion or "（待產生）")
+        if self.confidence:
+            L.append(f"\n**整體比較信心：{self.confidence:.0%}**\n")
+
+        L.append("## 比較面向分析")
+        for i, dim in enumerate(self.dimensions, start=1):
+            L.append(f"### {i}. {dim.label}")
+            L.append(f"- 結論：{dim.finding}")
+            L.append(f"- 信心：{dim.confidence:.0%}")
+            L.append(f"- A 幣證據索引：{dim.a_evidence_refs}")
+            L.append(f"- B 幣證據索引：{dim.b_evidence_refs}")
+            L.append(f"- 判定：{dim.decision}")
+            L.append("")
+
+        if self.limits:
+            L.append("## 已知限制")
+            for item in self.limits:
+                L.append(f"- {item}")
+            L.append("")
+
+        if self.could_flip:
+            L.append("## 可能推翻條件")
+            for item in self.could_flip:
+                L.append(f"- {item}")
+            L.append("")
+
+        L.append("## 各幣詳細分析")
+        if self.supporting_report_a:
+            L.append(f"\n<details><summary>{self.coin_a} 詳細分析</summary>\n")
+            L.append(
+                self.supporting_report_a.to_markdown(self.supporting_evidence_a)
+            )
+            L.append("\n</details>")
+        if self.supporting_report_b:
+            L.append(f"\n<details><summary>{self.coin_b} 詳細分析</summary>\n")
+            L.append(
+                self.supporting_report_b.to_markdown(self.supporting_evidence_b)
+            )
+            L.append("\n</details>")
+
+        return "\n".join(L)
+
 
 # ---------------------------------------------------------------------------
 # 比較執行結果

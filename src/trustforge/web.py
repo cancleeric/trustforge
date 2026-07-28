@@ -3465,6 +3465,7 @@ def _parse_comparison_coins(coin_raw: str, query: str) -> tuple[str, str] | None
 def _render_comparison(
     report_a, evidence_a, report_b, evidence_b, query: str, log=None,
     mode_extra: dict | None = None,
+    comparison_report=None,
 ) -> str:
     """comparison 結果渲染成 HTML（並列比較儀表板 + 信任橫條 + 可展開 evidence）。
 
@@ -3537,6 +3538,70 @@ def _render_comparison(
         f'<p><a href="{_analyze_json_href(f"{report_a.coin},{report_b.coin}", "comparison", query, mode_extra)}">'
         f'下載 JSON（report_a+report_b+evidence+log）</a></p>'
     )
+
+    # CA-08：unified comparison report（ComparisonReport.to_markdown() 的 HTML 對應）
+    unified_html = ""
+    if comparison_report is not None:
+        unified_parts: list[str] = []
+        cmp = comparison_report
+        unified_parts.append(
+            '<div class="tf-section" style="background:rgba(31,111,235,.08);'
+            'border-color:#1f6feb">'
+            f'<h2 style="margin:0 0 .3rem">{e(cmp.coin_a)} vs {e(cmp.coin_b)}'
+            f' · 比較分析報告</h2>'
+            f'<p style="color:var(--tf-muted);margin:.2rem 0">比較問題：{e(cmp.query)}</p>'
+            f'<p style="color:var(--tf-muted2);font-size:.75rem;margin:0">'
+            f'生成時間：{e(cmp.generated_at)}</p>'
+            f"</div>"
+        )
+
+        # 綜合結論
+        unified_parts.append(
+            '<div class="tf-section">'
+            f"<h3>綜合結論</h3>"
+            f"<p>{e(cmp.conclusion or '（待產生）')}</p>"
+        )
+        if cmp.confidence:
+            pct = int(cmp.confidence * 100)
+            unified_parts.append(
+                f'<p style="font-size:.85rem;color:var(--tf-muted)">'
+                f"整體比較信心：{pct}%</p>"
+            )
+        unified_parts.append("</div>")
+
+        # 四個比較面向
+        unified_parts.append(
+            '<div class="tf-section"><h3>比較面向分析</h3>'
+        )
+        for i, dim in enumerate(cmp.dimensions, start=1):
+            pct_dim = int(dim.confidence * 100)
+            unified_parts.append(
+                f"<h4>{i}. {e(dim.label)}</h4>"
+                f"<p>{e(dim.finding)}</p>"
+                f'<p style="font-size:.8rem;color:var(--tf-muted)">'
+                f"信心：{pct_dim}%｜判定：{e(dim.decision)}｜"
+                f"A 證據 {len(dim.a_evidence_refs)} 筆｜B 證據 {len(dim.b_evidence_refs)} 筆</p>"
+            )
+        unified_parts.append("</div>")
+
+        # 已知限制
+        if cmp.limits:
+            lim_items = "".join(f"<li>{e(item)}</li>" for item in cmp.limits)
+            unified_parts.append(
+                '<div class="tf-section">'
+                f"<h3>已知限制</h3><ul>{lim_items}</ul></div>"
+            )
+
+        # 可能推翻條件
+        if cmp.could_flip:
+            flip_items = "".join(f"<li>{e(item)}</li>" for item in cmp.could_flip)
+            unified_parts.append(
+                '<div class="tf-section">'
+                f"<h3>可能推翻條件</h3><ul>{flip_items}</ul></div>"
+            )
+
+        unified_html = "\n".join(unified_parts)
+
     return f"""
 <div class="tf-dash-hdr">
   <span class="tf-coin-badge">{e(report_a.coin)}</span>
@@ -3550,6 +3615,8 @@ def _render_comparison(
   <h2 style="margin:0 0 .3rem">{e(report_a.coin)} vs {e(report_b.coin)} · comparison</h2>
   <p style="color:var(--tf-muted);margin:.2rem 0">{e(query)}</p>
 </div>
+
+{unified_html}
 
 <div class="tf-section">
   <h3>1. 相對強弱比較</h3>
@@ -8428,6 +8495,7 @@ class Handler(BaseHTTPRequestHandler):
                     comparison_body = _render_comparison(
                         report_a, evidence_a, report_b, evidence_b, query, log,
                         mode_extra=mode_extra,
+                        comparison_report=result.comparison,
                     )
                     comparison_stats = _render_run_stats(evidence_a + evidence_b, log)
                     return self._send(
