@@ -638,12 +638,24 @@ class AnalysisFlow:
         if len(angles) < len(MODES):
             return False
         report = synthesize_angles(angles, coin, snapshot_id)
+        # #811: 選填 LLM 敘事（env flag 控制，預設關）
+        narration = None
+        try:
+            from .multi_angle import narrate_synthesis
+            from .bedrock import BedrockClient
+            client = BedrockClient(offline=True)  # 預設離線；narrate_synthesis 內部檢查 env flag
+            narration = narrate_synthesis(report, client)
+        except Exception:
+            pass  # fail-soft
         now = time.time()
         result_id = f"result-ma-{snapshot_id}"
+        payload = report.to_dict()
+        if narration and narration != report.synthesis_summary:
+            payload["narration"] = narration
         self._conn().execute(
             "INSERT OR REPLACE INTO analysis_results VALUES(?,?,?,?,?,?,?,?)",
             (result_id, f"ma-{snapshot_id}", snapshot_id, coin, "multi_angle",
-             "五角度綜合評估", json.dumps(report.to_dict(), ensure_ascii=False), now),
+             "五角度綜合評估", json.dumps(payload, ensure_ascii=False), now),
         )
         self._append_lineage(
             "multi_angle_synthesized", entity_type="multi_angle_result",
