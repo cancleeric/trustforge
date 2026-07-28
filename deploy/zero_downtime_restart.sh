@@ -33,6 +33,7 @@ PRIMARY_PORT="${1:-8080}"
 BACKUP_PORT="${2:-8081}"
 HEALTH_TIMEOUT="${TRUSTFORGE_HEALTH_TIMEOUT:-30}"
 HEALTH_INTERVAL="${TRUSTFORGE_HEALTH_INTERVAL:-1}"
+CANARY_UNIT="trustforge-canary-$$"
 
 log() { printf '[zero-downtime] %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -60,9 +61,9 @@ fi
 
 # Step 1: Start canary on backup port
 log "Starting canary on port $BACKUP_PORT..."
-systemctl stop trustforge-canary 2>/dev/null || true
+systemctl stop "$CANARY_UNIT" 2>/dev/null || true
 # Create transient canary unit that mirrors trustforge.service but on backup port
-systemd-run --unit=trustforge-canary \
+systemd-run --unit="$CANARY_UNIT" \
   --property="Environment=PORT=$BACKUP_PORT" \
   --property="Environment=TRUSTFORGE_HOME=/opt/trustforge" \
   --property="Environment=PYTHONPATH=/opt/trustforge" \
@@ -78,7 +79,7 @@ systemd-run --unit=trustforge-canary \
 # Step 2: Wait for canary to be healthy
 if ! wait_for_health "$BACKUP_PORT" "canary"; then
   log "Canary failed to start; aborting (primary still running, no interruption)"
-  systemctl stop trustforge-canary 2>/dev/null || true
+  systemctl stop "$CANARY_UNIT" 2>/dev/null || true
   exit 1
 fi
 
@@ -95,6 +96,6 @@ fi
 
 # Step 5: Stop canary (primary is back, nginx routes to it first)
 log "Primary healthy; stopping canary..."
-systemctl stop trustforge-canary 2>/dev/null || true
+systemctl stop "$CANARY_UNIT" 2>/dev/null || true
 
 log "✅ Zero-downtime restart complete"
