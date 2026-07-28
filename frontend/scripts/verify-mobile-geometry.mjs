@@ -522,16 +522,36 @@ async function runFullExperienceChecks(browser, viewport, locale) {
     const out = []
 
     // N27: nav labels (analyze/compare/history/sources/costs) must render
-    // as a single line inside the topbar's own bounds, not wrap and get
-    // clipped by the topbar's fixed height.
-    const topbar = document.querySelector('.hermes-topbar')
-    const topbarBox = topbar ? topbar.getBoundingClientRect() : null
+    // inside their own container's bounds, not overflow and get clipped.
+    // N70 moved them out of the topbar into the left rail
+    // (`.hermes-rail-controls`), so the container to measure against is the
+    // rail control strip, not `.hermes-topbar`.
+    //   - horizontally: the strip clips labels at every width (the rail is
+    //     147~160px wide; ≤560px it is a fixed strip that scrolls sideways,
+    //     so there we measure against its scroll width, not its box).
+    //   - vertically: only meaningful ≤560px, where the strip has a fixed
+    //     height and nothing scrolls down; above that the rail scrolls
+    //     vertically by design and a lower item is not a defect.
+    const controls = document.querySelector('.hermes-rail-controls')
+    const controlsBox = controls ? controls.getBoundingClientRect() : null
+    const stripMode = window.innerWidth <= 560
     document.querySelectorAll('.hermes-nav-item').forEach((el) => {
       const r = el.getBoundingClientRect()
       if (r.width <= 0 || r.height <= 0) return
       const label = el.textContent?.trim() || '(nav item)'
-      if (topbarBox && (r.top < topbarBox.top - 1 || r.bottom > topbarBox.bottom + 1)) {
-        out.push(`nav item "${label}" clipped by topbar bounds: item top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} topbar top=${topbarBox.top.toFixed(1)} bottom=${topbarBox.bottom.toFixed(1)}`)
+      if (controlsBox) {
+        if (stripMode && (r.top < controlsBox.top - 1 || r.bottom > controlsBox.bottom + 1)) {
+          out.push(`nav item "${label}" clipped by rail strip bounds: item top=${r.top.toFixed(1)} bottom=${r.bottom.toFixed(1)} strip top=${controlsBox.top.toFixed(1)} bottom=${controlsBox.bottom.toFixed(1)}`)
+        }
+        // horizontal: ≤560 the strip scrolls, so an item may sit outside the
+        // visible box but must still fit within the scrollable content;
+        // >560 the rail does not scroll sideways, so the box is the limit.
+        const rightLimit = stripMode
+          ? controlsBox.left + controls.scrollWidth + 1
+          : controlsBox.right + 1
+        if (r.left < controlsBox.left - 1 || r.right > rightLimit) {
+          out.push(`nav item "${label}" clipped horizontally by rail controls: item left=${r.left.toFixed(1)} right=${r.right.toFixed(1)} limit left=${controlsBox.left.toFixed(1)} right=${rightLimit.toFixed(1)}`)
+        }
       }
       // N24: every nav item is an equally-weighted click target, including
       // "analyze", not just its siblings.

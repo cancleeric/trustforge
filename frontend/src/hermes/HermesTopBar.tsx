@@ -1,52 +1,83 @@
 import type { ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { TIER_COLOR } from '../lib/hermesData'
 import { useHermesI18n } from './hermesI18n'
-import type { HermesWorkspaceModule } from './HermesModuleDeck'
+import type { ServiceMonitorState } from '../pages/HermesDashboard'
+
+/** N70（CEO：「我們不要挑戰一般使用者」「能按的都移到左邊欄」「狀態要嘛放右欄
+ *  要嘛放上方 做顯示 BAR 點了會打開」）：
+ *
+ *  頂欄原本混了兩種東西——**顯示**（品牌、系統代號、版號、連線狀態、成本帳本）
+ *  與**操作**（5 條導覽鈕、完整模式、低動態、說明、艦體升級、語言）。一般使用者
+ *  掃視時分不出哪些能按，等於整條列都要試一次。
+ *
+ *  N70 之後這裡只剩顯示，所有可按的控制項都搬到左軌（見 HermesLeftRail 的
+ *  `hermes-rail-controls`）。唯一的例外是下面那顆「市場遙測」——它本身是狀態
+ *  顯示，但內容有 5 個數值＋服務燈號，攤在左軌會把 HERMES 對話框往下擠
+ *  （這正是 N46/N49 已經處理過一次的老問題），所以照 CEO 給的第二個選項做成
+ *  「BAR 上的摘要，點了才展開」。
+ *
+ *  `runtimeStatus` 是上游 #793 AgentCore 整合新增的純顯示元件（AgentCoreStatusBadge），
+ *  不是操作項，保留在頂欄。
+ *
+ *  ⚠️ 不要把按鈕加回這裡。要加操作項請加到左軌的控制區。 */
 
 interface HermesTopBarProps {
   costLedger?: number | null
   version?: string
   systemId?: string
-  activeModule?: HermesWorkspaceModule | null
-  onModuleSelect?: (module: HermesWorkspaceModule) => void
-  onHome?: () => void
   degradedMessage?: string | null
-  onToggleShip?: () => void
-  onHelp?: () => void
   beginnerMode?: boolean
-  onBeginnerModeChange?: (enabled: boolean) => void
-  reducedMotion?: boolean
-  onReducedMotionToggle?: () => void
   runtimeStatus?: ReactNode
+  /** 市場遙測（N70 從左軌搬上來，收在可展開的摘要膠囊裡）。 */
+  trackedCount?: number
+  tierCounts?: { healthy: number; moderate: number; danger: number }
+  uplinkLatency?: string
+  serviceMonitor?: Record<string, ServiceMonitorState>
 }
 
 export default function HermesTopBar({
   costLedger = null,
   version = '… · GALAXY', // 同 HermesDashboard：預設值不要長得像真的版號
   systemId = 'SYS·HRM-01',
-  activeModule = null,
-  onModuleSelect,
-  onHome,
   degradedMessage = null,
-  onToggleShip,
-  onHelp,
   beginnerMode = false,
-  onBeginnerModeChange,
-  reducedMotion = false,
-  onReducedMotionToggle,
   runtimeStatus,
+  trackedCount = 0,
+  tierCounts = { healthy: 0, moderate: 0, danger: 0 },
+  uplinkLatency = '2.4s',
+  serviceMonitor = {},
 }: HermesTopBarProps) {
-  const { locale, setLocale, t } = useHermesI18n()
+  const { t } = useHermesI18n()
   // 後端沒走發版流程時 /api/health 會回 version: "dev"。那不是版號，是「這台
   // 沒被建置過」的哨兵值；照原樣用一般樣式印出來，看起來就像系統版本叫 dev。
   // 標成警示色並掛說明，讓它讀起來是狀態而不是版本名。
   const isUnbuiltVersion = /^dev\b/.test(version)
-  const navItems = [
-    { id: 'analyze' as const, label: t('analyze'), description: locale === 'zh-TW' ? '找出風險、原因與可追溯證據' : 'Find risks, reasons, and traceable evidence' },
-    { id: 'compare' as const, label: t('compare'), description: locale === 'zh-TW' ? '並排比較兩個資產的可信狀態' : 'Compare two assets side by side' },
-    { id: 'history' as const, label: t('history'), description: locale === 'zh-TW' ? '查看信任與資料完整度如何變化' : 'Review trust and completeness over time' },
-    { id: 'status' as const, label: t('sources'), description: locale === 'zh-TW' ? '確認資料來源是否正常更新' : 'Check whether sources are updating' },
-    { id: 'costs' as const, label: t('costs'), description: locale === 'zh-TW' ? '查看分析使用量與模型費用' : 'Review analysis usage and model cost' },
-  ]
+  const [telemetryOpen, setTelemetryOpen] = useState(false)
+  const telemetryRef = useRef<HTMLDivElement>(null)
+
+  // 展開的面板是浮層，點面板外面要收起來——否則它會一直蓋住底下的全息區，
+  // 而使用者第一直覺不是「再按一次那顆膠囊」。Esc 一併處理（鍵盤使用者
+  // 沒有「點外面」這個動作）。
+  useEffect(() => {
+    if (!telemetryOpen) return
+    function onPointerDown(e: MouseEvent) {
+      if (!telemetryRef.current?.contains(e.target as Node)) setTelemetryOpen(false)
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setTelemetryOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [telemetryOpen])
+
+  const row = { display: 'flex', justifyContent: 'space-between', fontSize: 11 } as const
+  const rowLabel = { color: 'var(--color-hermes-tx2)' } as const
+
   return (
     <div
       className="hermes-topbar"
@@ -58,17 +89,17 @@ export default function HermesTopBar({
         boxShadow: '0 1px 12px rgba(77,216,224,.08)',
       }}
     >
-      {/* N29: min click target ≥24x24 (was 184.8x19.5 — under the 24px min
-          height on every viewport tested); minHeight + flex-centering keeps
-          the visual logo/label unchanged while guaranteeing the tap target. */}
-      <button type="button" onClick={onHome} aria-label={t('homeAria')} style={{ display: 'flex', alignItems: 'center', gap: 9, border: 0, padding: 0, background: 'transparent', fontFamily: 'inherit', cursor: 'pointer', minHeight: 24 }}>
+      {/* N70：品牌從 <button onClick={onHome}> 改回純顯示。「能按的都移到左邊欄」
+          包含這顆——回首頁的入口在左軌控制區第一項（HERMES 主控）。
+          原本 N29 為它加的 24px 最小點擊目標隨按鈕一起移到左軌那顆。 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
         <div style={{ width: 16, height: 16, position: 'relative', transform: 'rotate(45deg)', border: '1.5px solid var(--color-hermes-cyan)', borderRadius: 2 }}>
           <div style={{ position: 'absolute', inset: 3, background: 'var(--color-hermes-cyan)', opacity: 0.85 }} />
         </div>
         <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '1.6px', color: 'var(--color-hermes-tx)' }}>
           TRUSTFORGE <span style={{ color: 'var(--color-hermes-cyan)' }}>HERMES</span>
         </span>
-      </button>
+      </div>
       {/* 版號與系統代號原本吃 --color-hermes-tx3（#526375），在頂欄那層
           rgba(10,16,24,.62) 疊 #02040a 的底上實測只有 3.2:1，而且字級只有
           9~10px——CEO 直接回報「版號在哪裡？我怎麼畫面看不到」。改吃 tx2
@@ -82,64 +113,71 @@ export default function HermesTopBar({
         <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: degradedMessage ? 'var(--color-hermes-amber)' : 'var(--color-hermes-cyan)', animation: 'hermes-pulse 1.8s infinite' }} />
         {/* N28: on very narrow phones (≤430px) the topbar has no room left
             after logo + toggles for this label text without pushing trailing
-            controls (e.g. the language toggle) off-screen. The parent span
-            keeps its aria-label/title with the full text, so this is a
-            visual-only collapse, not a loss of information. */}
+            controls off-screen. The parent span keeps its aria-label/title
+            with the full text, so this is a visual-only collapse, not a loss
+            of information. */}
         <span className="hermes-uplink-status-label" aria-hidden="true">{degradedMessage ? t('degradedState') : t('liveUplink')}</span>
       </span>
+
+      {/* N70 市場遙測：摘要膠囊 + 點擊展開的面板。摘要只放兩個數字（追蹤、
+           需要注意的總數），因為頂欄的預算是一行；細節在面板裡。 */}
+      <div ref={telemetryRef} style={{ position: 'relative' }}>
+        <button
+          type="button"
+          className="hermes-telemetry-chip"
+          onClick={() => setTelemetryOpen((v) => !v)}
+          aria-expanded={telemetryOpen}
+          aria-controls="hermes-telemetry-panel"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 7, minHeight: 24, cursor: 'pointer',
+            fontFamily: 'inherit', fontSize: 10, color: 'var(--color-hermes-tx2)',
+            background: 'transparent', border: '1px solid var(--color-hermes-bd2)',
+            borderRadius: 4, padding: '2px 8px',
+          }}
+        >
+          <span style={{ letterSpacing: 1 }}>{t('telemetry')}</span>
+          <span style={{ color: 'var(--color-hermes-tx)' }}>{trackedCount}</span>
+          {/* 注意/警示不為 0 時才上色——全綠的時候不需要吸引注意力。 */}
+          {tierCounts.moderate > 0 && <span style={{ color: TIER_COLOR.moderate }}>▲{tierCounts.moderate}</span>}
+          {tierCounts.danger > 0 && <span style={{ color: TIER_COLOR.danger }}>●{tierCounts.danger}</span>}
+          <span aria-hidden="true" style={{ color: 'var(--color-hermes-tx3)' }}>{telemetryOpen ? '▲' : '▼'}</span>
+        </button>
+        {telemetryOpen && (
+          <div
+            id="hermes-telemetry-panel"
+            role="group"
+            aria-label={t('telemetry')}
+            style={{
+              /* 面板靠膠囊的**右**緣展開，不是左緣：膠囊在頂欄中段，靠左展開時
+                 210px 會直接掉出畫面右緣（實測 320~900px 全部溢出，768 溢出
+                 83px）。右對齊 + max-width 夾住視窗寬度，任何寬度都在畫面內。 */
+              position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 30,
+              width: 210, maxWidth: 'calc(100vw - 20px)',
+              display: 'flex', flexDirection: 'column', gap: 7,
+              background: 'var(--color-hermes-inset)', border: '1px solid var(--color-hermes-bd)',
+              borderRadius: 6, padding: '10px 12px', boxShadow: '0 8px 24px rgba(0,0,0,.45)',
+            }}
+          >
+            <div style={row}><span style={rowLabel}>{t('tracked')}</span><span style={{ color: 'var(--color-hermes-tx)' }}>{trackedCount}</span></div>
+            <div style={row}><span style={rowLabel}>{t('healthy')}</span><span style={{ color: TIER_COLOR.healthy }}>{tierCounts.healthy}</span></div>
+            <div style={row}><span style={rowLabel}>{t('moderate')}</span><span style={{ color: TIER_COLOR.moderate }}>{tierCounts.moderate}</span></div>
+            <div style={row}><span style={rowLabel}>{t('danger')}</span><span style={{ color: TIER_COLOR.danger }}>{tierCounts.danger}</span></div>
+            <div style={row}><span style={rowLabel}>{t('latency')}</span><span style={{ color: 'var(--color-hermes-tx)' }}>{uplinkLatency}</span></div>
+            <div className="hermes-service-monitor" aria-label="system link monitor">
+              {Object.entries(serviceMonitor).map(([name, state]) => {
+                const label = state === 'ok' ? 'UP' : state === 'empty' ? 'NO DATA' : state === 'stale' ? 'DEGRADED' : state === 'error' ? 'DOWN' : 'CHECK'
+                return <span key={name} className={`is-${state}`} title={`${name}: ${label}`}><i />{name} · {label}</span>
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
       <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--color-hermes-amber)', background: 'rgba(232,179,77,.13)', border: '1px solid rgba(232,179,77,.4)', borderRadius: 4, padding: '2px 8px' }}>
         <span style={{ width: 6, height: 6, transform: 'rotate(45deg)', background: 'var(--color-hermes-amber)', animation: 'hermes-pulse 2.4s infinite' }} />{t('systemActivePrefix')} {t('active')}
       </span>
-      <nav className="hermes-topbar-nav" aria-label={t('navigation')} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-        {navItems.filter((item) => !beginnerMode || item.id === 'analyze').map((item) => (
-          <button
-            type="button"
-            key={item.id}
-            className="hermes-nav-item"
-            onClick={() => onModuleSelect?.(item.id)}
-            aria-pressed={activeModule === item.id}
-            aria-description={item.description}
-            data-description={item.description}
-            style={{
-              color: activeModule === item.id ? 'var(--color-hermes-cyan)' : 'var(--color-hermes-tx2)',
-              fontSize: 9, letterSpacing: '.7px', textDecoration: 'none', padding: '4px 6px',
-              border: 0, borderBottom: activeModule === item.id ? '1px solid var(--color-hermes-cyan)' : '1px solid transparent',
-              background: 'transparent', fontFamily: 'inherit', cursor: 'pointer',
-              /* N24: this button's own padding/font only produced a 22.5px
-                 tall hit target (under the 24x24 minimum), visibly shorter
-                 than the sibling toolbar buttons in the same row (33-39px).
-                 minHeight + flex-centering keeps the visual label/padding
-                 unchanged (incl. the active-state border-bottom) while
-                 guaranteeing the tap target. */
-              minHeight: 24, display: 'inline-flex', alignItems: 'center',
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
       <div style={{ flex: 1 }} />
       {runtimeStatus}
-      <button type="button" className="hermes-mode-toggle" onClick={() => onBeginnerModeChange?.(!beginnerMode)} aria-pressed={beginnerMode}>
-        {beginnerMode ? t('beginnerModeOn') : t('beginnerModeOff')}
-      </button>
-      {/* N62：這顆按鈕原本掛 aria-label（「啟用低動態模式」），而 aria-label 是
-          「取代」不是「補充」可見文字——螢幕閱讀器唸到的名稱跟眼睛看到的
-          「動態」對不上，語音操作使用者照著唸也點不到（WCAG 2.5.3 Label in
-          Name）。而且兩個分支語意還互相打架：一邊是動作、一邊是狀態。改成跟
-          旁邊那顆模式切換一樣，讓可見文字直接當可及名稱，狀態交給
-          aria-pressed，動作提示留在 title。 */}
-      <button type="button" className="hermes-mode-toggle" onClick={onReducedMotionToggle} aria-pressed={reducedMotion} title={reducedMotion ? t('reducedMotionOnTitle') : t('reducedMotionOffTitle')}>
-        {reducedMotion ? t('dynamicOff') : t('dynamicOn')}
-      </button>
-      <button type="button" className="hermes-help-toggle" onClick={onHelp} aria-label={t('openBeginnerHelp')}>{t('helpToggle')}</button>
-      {!beginnerMode && <button type="button" className="hermes-ship-toggle" onClick={onToggleShip}>{t('shipToggle')}</button>}
-      {/* min click target ≥24x24 (was 26.8x21.5 — under the 24px min height
-          on every viewport tested); minHeight + flex-centering keeps the
-          visual label/padding unchanged while guaranteeing the tap target. */}
-      <button type="button" aria-label={t('language')} onClick={() => setLocale(locale === 'zh-TW' ? 'en' : 'zh-TW')} style={{ background: 'transparent', border: '1px solid var(--color-hermes-bd2)', borderRadius: 4, color: 'var(--color-hermes-tx2)', fontFamily: 'inherit', fontSize: 9, padding: '3px 7px', minWidth: 24, minHeight: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
-        {locale === 'zh-TW' ? 'EN' : '繁中'}
-      </button>
       {!beginnerMode && <span style={{ fontSize: 10, color: 'var(--color-hermes-tx2)' }}>{t('costLedger')} <b style={{ color: 'var(--color-hermes-cyan)' }}>{costLedger === null ? '--' : `$${costLedger.toFixed(4)}`}</b></span>}
     </div>
   )

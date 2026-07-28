@@ -21,6 +21,7 @@ import Header from '../components/Header'
 import TrainingStatusCard from '../components/TrainingStatusCard'
 import BridgeWorkspaceShell from '../components/BridgeWorkspaceShell'
 import HermesTopBar from './HermesTopBar'
+import HermesLeftRail from './HermesLeftRail'
 import AssetContextLookupPage from '../pages/AssetContextLookupPage'
 import PeerMetricsPage from '../pages/PeerMetricsPage'
 import EcoLinkPage from '../pages/EcoLinkPage'
@@ -169,14 +170,31 @@ describe('N26: zh-TW mode has no residual English strings', () => {
   })
 })
 
-describe('N17: en mode has no residual Chinese aria-labels — HermesTopBar', () => {
-  it('home logo button aria-label switches to English', () => {
+// N70（CEO：「能按的都移到左邊欄」）：主頁鈕／低動態／說明這三顆已從頂欄搬進
+// 左軌（HermesLeftRail 的 `hermes-rail-controls`）。這裡把 render 目標換成左軌，
+// 斷言本身一字未改——語系切換與 aria 規範的要求跟著控制項走，不因搬家而放寬。
+describe('N17: en mode has no residual Chinese aria-labels — 左軌控制項', () => {
+  const railProps = {
+    hermesMessage: '',
+    hasOrder: false,
+    focus: 'risk' as const,
+    query: '',
+    submitLabel: 'go',
+    onQuery: () => {},
+    onSubmit: () => {},
+  }
+  const renderRail = (withSwitcher = true) =>
     render(
-      <HermesI18nProvider>
-        <LocaleSwitcher to="en" />
-        <HermesTopBar />
-      </HermesI18nProvider>,
+      <MemoryRouter>
+        <HermesI18nProvider>
+          {withSwitcher ? <LocaleSwitcher to="en" /> : null}
+          <HermesLeftRail {...railProps} onHome={() => {}} onHelp={() => {}} onReducedMotionToggle={() => {}} />
+        </HermesI18nProvider>
+      </MemoryRouter>,
     )
+
+  it('home logo button aria-label switches to English', () => {
+    renderRail()
     expect(screen.getByRole('button', { name: 'HERMES 主頁' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'go en' }))
     expect(screen.queryByRole('button', { name: 'HERMES 主頁' })).not.toBeInTheDocument()
@@ -188,12 +206,7 @@ describe('N17: en mode has no residual Chinese aria-labels — HermesTopBar', ()
   // 這條的用意（兩種語言都要換掉、title 也要換）原封不動保留，只是可及名稱
   // 現在來自可見文字本身。
   it('reduced-motion toggle label AND title both switch to English', () => {
-    render(
-      <HermesI18nProvider>
-        <LocaleSwitcher to="en" />
-        <HermesTopBar />
-      </HermesI18nProvider>,
-    )
+    renderRail()
     const zhButton = screen.getByRole('button', { name: '動態' })
     expect(zhButton).toHaveAttribute('title', '一般動態（點擊開啟低動態）')
     fireEvent.click(screen.getByRole('button', { name: 'go en' }))
@@ -207,11 +220,7 @@ describe('N17: en mode has no residual Chinese aria-labels — HermesTopBar', ()
   // ——播放器圖示讀作動作、文字讀作狀態，兩套語意指向相反方向，正是使用者
   // 看到「兩個狀態反了」的原因。
   it('reduced-motion toggle: accessible name equals its visible label, state lives in aria-pressed', () => {
-    render(
-      <HermesI18nProvider>
-        <HermesTopBar />
-      </HermesI18nProvider>,
-    )
+    renderRail(false)
     const btn = screen.getByRole('button', { name: '動態' })
     expect(btn).not.toHaveAttribute('aria-label')
     expect(btn.textContent?.trim()).toBe('動態')
@@ -220,12 +229,7 @@ describe('N17: en mode has no residual Chinese aria-labels — HermesTopBar', ()
   })
 
   it('help toggle aria-label switches to English', () => {
-    render(
-      <HermesI18nProvider>
-        <LocaleSwitcher to="en" />
-        <HermesTopBar />
-      </HermesI18nProvider>,
-    )
+    renderRail()
     expect(screen.getByRole('button', { name: '開啟新手說明' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'go en' }))
     expect(screen.queryByRole('button', { name: '開啟新手說明' })).not.toBeInTheDocument()
