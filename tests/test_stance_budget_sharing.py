@@ -36,7 +36,6 @@ demo 可靠性 #32 追加 cost-integrity HIGH（第二次對抗審）：codex �
 from __future__ import annotations
 
 import trustforge.agent.orchestrator as orch_mod
-import trustforge.agent.kernel_mapper as mapper_mod
 import trustforge.trust.scoring as scoring_mod
 from trustforge.agent.orchestrator import (
     detect_cross_source_signal,
@@ -78,11 +77,11 @@ def test_run_agent_pipeline_shares_one_stance_fn_between_score_and_stance_pairs(
     """
     captured: dict[str, object] = {}
 
-    real_resolver = mapper_mod.resolve_kernel_run_resolution
+    real_authoritative = orch_mod.run_authoritative_judgment
 
-    def _spy_resolver(*args, **kwargs):
+    def _spy_authoritative(*args, **kwargs):
         captured["resolution_stance_fn"] = kwargs.get("stance_fn")
-        return real_resolver(*args, **kwargs)
+        return real_authoritative(*args, **kwargs)
 
     real_detect = orch_mod.detect_cross_source_signal
 
@@ -90,7 +89,9 @@ def test_run_agent_pipeline_shares_one_stance_fn_between_score_and_stance_pairs(
         captured["detect_stance_fn"] = kwargs.get("stance_fn")
         return real_detect(*args, **kwargs)
 
-    monkeypatch.setattr(mapper_mod, "resolve_kernel_run_resolution", _spy_resolver)
+    monkeypatch.setattr(
+        orch_mod, "run_authoritative_judgment", _spy_authoritative
+    )
     monkeypatch.setattr(orch_mod, "detect_cross_source_signal", _spy_detect)
 
     docs = _opposite_direction_news_docs()
