@@ -24,3 +24,4 @@ out/
 .cli/
 .playwright-mcp/
 .kiro/settings/
+data/trustforge.db

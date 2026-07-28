@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useHermesI18n } from './hermesI18n'
+import type { MessageKey } from './hermesI18n'
 import ConflictBadge from './ConflictBadge'
 import type { AngleResult, MultiAngleReport } from '../lib/multiAngleEndpoints'
 import { fetchMultiAngleReport, submitMultiAngle } from '../lib/multiAngleEndpoints'
@@ -234,7 +235,8 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     )
   }
 
-  const consensusLabel = t(CONSENSUS_KEY_MAP[report.consensus] || report.consensus)
+  const consensusKey = CONSENSUS_KEY_MAP[report.consensus]
+  const consensusLabel = consensusKey ? t(consensusKey as MessageKey) : report.consensus
 
   return (
     <section aria-label={t('maTitle')} className="rounded-xl border border-gray-700 p-4">
@@ -298,7 +300,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
                     className="inline-block w-2 h-2 rounded-full mr-1"
                     style={{ backgroundColor: STATE_COLORS[angle.decision_state] ?? '#6b7280' }}
                   />
-                  {t(DECISION_STATE_KEY[angle.decision_state] ?? angle.decision_state)}
+                  {(() => { const dsKey = DECISION_STATE_KEY[angle.decision_state]; return dsKey ? t(dsKey as MessageKey) : angle.decision_state })()}
                 </td>
                 <td className="py-2 px-2">
                   <ConflictBadge conflicts={report.conflicts} currentAngle={angle.angle} />

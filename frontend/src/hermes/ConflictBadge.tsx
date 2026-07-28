@@ -2,7 +2,7 @@
  * ConflictBadge — 角度間衝突的視覺提示 pill (#810).
  */
 import type { AngleConflict } from '../lib/multiAngleEndpoints'
-import { useHermesI18n } from './hermesI18n'
+import { useHermesI18n, type MessageKey } from './hermesI18n'
 
 interface ConflictBadgeProps {
   conflicts: AngleConflict[]
@@ -28,7 +28,8 @@ export default function ConflictBadge({ conflicts, currentAngle }: ConflictBadge
     <span className="inline-flex gap-1 flex-wrap">
       {relevant.map((c, i) => {
         const other = c.angle_a === currentAngle ? c.angle_b : c.angle_a
-        const label = t(SHORT_KEY_MAP[other]) ?? other
+        const otherKey = SHORT_KEY_MAP[other]
+        const label = otherKey ? t(otherKey as MessageKey) : other
         const icon = c.conflict_type === 'direction_divergence' ? '⚠️' : '📊'
         const reason = c.conflict_type === 'direction_divergence'
           ? t('maConflictDirOpposite')
