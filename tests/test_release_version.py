@@ -18,9 +18,15 @@ def _repo(root: Path, version: str = "0.18.1") -> None:
     (root / "src/trustforge").mkdir(parents=True)
     (root / "frontend").mkdir()
     (root / "docs").mkdir()
-    (root / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n', encoding="utf-8")
-    (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
-    (root / "src/trustforge/__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\ndynamic = ["version"]\n'
+        '[tool.setuptools.dynamic]\nversion = {attr = "trustforge._version.VERSION"}\n',
+        encoding="utf-8",
+    )
+    (root / "src/trustforge/__init__.py").write_text(
+        "from ._version import VERSION as __version__\n",
+        encoding="utf-8",
+    )
     (root / "src/trustforge/_version.py").write_text(f'VERSION = "{version}"\n', encoding="utf-8")
     (root / "frontend/package.json").write_text(
         json.dumps({"name": "frontend", "version": version}) + "\n",
@@ -64,7 +70,8 @@ def test_update_version_files_synchronizes_every_source(tmp_path: Path) -> None:
     assert (tmp_path / "docs/RELEASE-NOTES-v0.27.0.md").is_file()
 
 
-def test_version_sources_exposes_mismatch(tmp_path: Path) -> None:
+def test_version_sources_exposes_derived_mismatch(tmp_path: Path) -> None:
     _repo(tmp_path)
-    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
-    assert release_version.version_sources(tmp_path)["VERSION"] == "9.9.9"
+    package_path = tmp_path / "frontend/package.json"
+    package_path.write_text('{"name":"frontend","version":"9.9.9"}\n', encoding="utf-8")
+    assert release_version.version_sources(tmp_path)["frontend/package.json"] == "9.9.9"

@@ -77,13 +77,16 @@ def test_analyze_json_payload_has_version_key():
     assert parsed["version"] == web.VERSION
 
 
-def test_pyproject_version_matches_package_version():
-    """pyproject.toml 的 [project].version 應與 trustforge.__version__ 單一來源一致。"""
+def test_dynamic_package_and_frontend_versions_match_canonical_source():
+    """Python package 讀 canonical attr；npm metadata 是其受驗證衍生物。"""
     import trustforge
 
     pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
     data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    assert data["project"]["version"] == trustforge.__version__
+    assert data["project"]["dynamic"] == ["version"]
+    assert data["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "trustforge._version.VERSION"
+    }
 
     frontend_package = json.loads(
         (pyproject_path.parent / "frontend/package.json").read_text(encoding="utf-8")

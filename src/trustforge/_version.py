@@ -6,14 +6,14 @@ git describe 的結果。
 
 原本這支硬寫 VERSION = "dev"，於是 /api/health 永遠回 {"version": "dev"}，
 前端版號徽章也就永遠顯示不出版號——使用者回報「系統沒顯示版號」正是這個。
-套件自己知道版號（pyproject 與 __init__.__version__ 保持一致），
-只有這條回報路徑把它丟掉了。
+`VERSION` 是 repository 唯一的 canonical release version。pyproject 透過
+setuptools dynamic attr 讀取它，`trustforge.__version__` 也直接 import 它；
+frontend 的 npm metadata 則由 release_version.py 產生並驗證。
 
 注意不要改用 importlib.metadata 去問：實際跑 `python -m trustforge.web` 的
 直譯器（homebrew 3.14）沒有安裝 trustforge 的 package metadata，實測
 `version("trustforge")` 直接 PackageNotFoundError，等於又退回 "dev"，
-換湯不換藥。所以這裡與 __init__.__version__ 一樣採靜態字面值，
-並由 tests/test_version.py 釘住兩者一致，避免日後改一邊漏一邊。
+換湯不換藥。所以這裡保留可由 build backend 靜態解析的單一字面值。
 """
 
 VERSION = "0.27.0"

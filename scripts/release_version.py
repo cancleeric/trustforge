@@ -14,9 +14,13 @@ VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
 def package_version(root: Path = ROOT) -> str:
-    match = re.search(r'^version\s*=\s*"([^"]+)"', (root / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    match = re.search(
+        r'^VERSION\s*=\s*"([^"]+)"',
+        (root / "src/trustforge/_version.py").read_text(encoding="utf-8"),
+        re.M,
+    )
     if not match:
-        raise RuntimeError("pyproject project.version is missing")
+        raise RuntimeError("canonical trustforge._version.VERSION is missing")
     return match.group(1)
 
 
@@ -74,9 +78,6 @@ def _replace_once(path: Path, pattern: str, replacement: str) -> None:
 
 def update_version_files(version: str, root: Path = ROOT) -> None:
     parse_version(version)
-    _replace_once(root / "pyproject.toml", r'^version\s*=\s*"[^"]+"', f'version = "{version}"')
-    (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
-    _replace_once(root / "src/trustforge/__init__.py", r'^__version__\s*=\s*"[^"]+"', f'__version__ = "{version}"')
     _replace_once(root / "src/trustforge/_version.py", r'^VERSION\s*=\s*"[^"]+"', f'VERSION = "{version}"')
 
     package_path = root / "frontend/package.json"
@@ -117,32 +118,32 @@ def update_version_files(version: str, root: Path = ROOT) -> None:
 def version_sources(root: Path = ROOT) -> dict[str, str]:
     package = json.loads((root / "frontend/package.json").read_text(encoding="utf-8"))
     lock = json.loads((root / "frontend/package-lock.json").read_text(encoding="utf-8"))
-    init_match = re.search(
-        r'^__version__\s*=\s*"([^"]+)"',
-        (root / "src/trustforge/__init__.py").read_text(encoding="utf-8"),
-        re.M,
-    )
-    module_match = re.search(
-        r'^VERSION\s*=\s*"([^"]+)"',
-        (root / "src/trustforge/_version.py").read_text(encoding="utf-8"),
-        re.M,
-    )
-    if not init_match or not module_match:
-        raise RuntimeError("runtime version source is missing")
     return {
-        "pyproject.toml": package_version(root),
-        "VERSION": (root / "VERSION").read_text(encoding="utf-8").strip(),
-        "src/trustforge/__init__.py": init_match.group(1),
-        "src/trustforge/_version.py": module_match.group(1),
+        "canonical src/trustforge/_version.py": package_version(root),
         "frontend/package.json": str(package.get("version", "")),
         "frontend/package-lock.json": str(lock.get("version", "")),
         "frontend/package-lock.json packages['']": str(lock.get("packages", {}).get("", {}).get("version", "")),
     }
 
 
+def verify_dynamic_packaging(root: Path = ROOT) -> None:
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    if not re.search(r'(?ms)^\[project\].*?^dynamic\s*=\s*\["version"\]', pyproject):
+        raise RuntimeError("pyproject.toml must declare dynamic version")
+    if not re.search(
+        r'(?ms)^\[tool\.setuptools\.dynamic\].*?^version\s*=\s*\{attr\s*=\s*"trustforge\._version\.VERSION"\}',
+        pyproject,
+    ):
+        raise RuntimeError("pyproject.toml must derive version from trustforge._version.VERSION")
+    init_source = (root / "src/trustforge/__init__.py").read_text(encoding="utf-8")
+    if "from ._version import VERSION as __version__" not in init_source:
+        raise RuntimeError("trustforge.__version__ must import the canonical VERSION")
+
+
 def verify(ref: str | None = None, root: Path = ROOT) -> None:
     version = package_version(root)
     expected = f"v{version}"
+    verify_dynamic_packaging(root)
     mismatches = {source: value for source, value in version_sources(root).items() if value != version}
     if mismatches:
         raise RuntimeError(f"release version sources disagree with {version}: {mismatches}")
