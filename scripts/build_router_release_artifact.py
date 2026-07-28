@@ -93,11 +93,13 @@ def main() -> int:
             ).strip()
         )
         distributions: dict[str, dict[str, str]] = {}
-        package_metadata = (args.source_root / "pyproject.toml").read_text(
+        package_metadata = (
+            args.source_root / "src/trustforge/_version.py"
+        ).read_text(
             encoding="utf-8"
         )
         package_match = re.search(
-            r'(?m)^version = "([^"]+)"$', package_metadata
+            r'(?m)^VERSION = "([^"]+)"$', package_metadata
         )
         if not package_match:
             raise SystemExit("cannot resolve trustforge package version")
