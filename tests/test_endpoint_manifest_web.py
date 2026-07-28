@@ -19,12 +19,43 @@ from trustforge.endpoint_manifest import (
     EndpointManifestError,
     build_signed_endpoint_manifest,
     load_runtime_endpoint_manifest,
+    load_runtime_release_manifest,
 )
 
 
 def _write(path: Path, value: bytes, mode: int) -> None:
     path.write_bytes(value)
     path.chmod(mode)
+
+
+def test_classic_runtime_release_manifest_is_bound_to_artifact(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact.zip"
+    _write(artifact, b"classic release artifact", 0o444)
+    digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    release = tmp_path / "release.json"
+    payload = {
+        "manifest_version": "trustforge.release-manifest/v1",
+        "artifact_digest": digest,
+        "git_sha": "a" * 40,
+    }
+    _write(release, json.dumps(payload, indent=2).encode(), 0o444)
+    assert json.loads(
+        load_runtime_release_manifest(
+            release_manifest_path=release,
+            release_artifact_path=artifact,
+        )
+    ) == payload
+
+    artifact.chmod(0o644)
+    artifact.write_bytes(b"substituted")
+    artifact.chmod(0o444)
+    with pytest.raises(EndpointManifestError, match="does not match artifact"):
+        load_runtime_release_manifest(
+            release_manifest_path=release,
+            release_artifact_path=artifact,
+        )
 
 
 def _identity_files(

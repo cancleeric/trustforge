@@ -368,6 +368,8 @@ Environment=CACHE_BACKEND=dynamodb
 Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
+Environment=TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH=/opt/trustforge/manifest.json
+Environment=TRUSTFORGE_RUNTIME_RELEASE_ARTIFACT_PATH=/opt/trustforge/app.zip
 ExecStartPre=/opt/trustforge/scripts/sweep_deploy_parameters.sh
 ${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3.11 -m trustforge.web
 Restart=always
