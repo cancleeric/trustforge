@@ -215,6 +215,11 @@ cp -r deploy "$B/deploy"
 chmod +x "$B/scripts/"*.sh "$B/deploy/"*.sh
 mkdir -p "$B/docs"; cp -r docs/api "$B/docs/api"; cp llms.txt "$B/llms.txt"
 GIT_VER=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+[[ "$GIT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "[ec2] ERROR: refusing release without an exact git SHA" >&2
+  exit 1
+}
 printf 'VERSION = "%s"\n' "$GIT_VER" > "$B/trustforge/_version.py"
 echo "[ec2] version=${GIT_VER}"
 
@@ -239,7 +244,7 @@ MANIFEST_JSON=$(cd "$B" && "$PYTHON" -c "
 import os, sys, json
 sys.path.insert(0, '.')
 from trustforge.release_manifest import compute_manifest, manifest_to_json
-manifest = compute_manifest('${ZIP}', os.environ['CONFIG_SNAPSHOT_JSON'].encode('utf-8'))
+manifest = compute_manifest('${ZIP}', os.environ['CONFIG_SNAPSHOT_JSON'].encode('utf-8'), git_sha='${GIT_SHA}')
 print(manifest_to_json(manifest))
 " 2>/dev/null || echo '{}')
 rm -rf "$B"
@@ -264,7 +269,7 @@ aws s3 cp - "s3://${BUCKET}/${ARTIFACT_PREFIX}manifest.json" --region "$REGION" 
 # Append to index
 INDEX_LINE=$(python3 -c "
 import sys, json
-entry = {'digest': '${ARTIFACT_DIGEST}', 'timestamp': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), 'git_sha': '$(git rev-parse HEAD 2>/dev/null || echo unknown)', 'version': '${GIT_VER}'}
+entry = {'digest': '${ARTIFACT_DIGEST}', 'timestamp': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), 'git_sha': '${GIT_SHA}', 'version': '${GIT_VER}'}
 print(json.dumps(entry, sort_keys=True))
 ")
 echo "$INDEX_LINE" | aws s3 cp - "s3://${BUCKET}/artifacts/index.jsonl" --region "$REGION" >/dev/null || true

@@ -1,5 +1,38 @@
 # 部署 — AWS CLI + pre-push CD（Lambda + Function URL）
 
+## 每小時 release train
+
+`scripts/hourly_release_train.py` 不掃描 feature 分支、不建立或合併 PR，只從已由
+開發流程整理完成的遠端 `develop` 開始。每輪使用獨立 worktree 與 lease，先驗
+`develop` 完整 pre-push gate，再合併到 `main`、重跑完整 gate、建立不可混淆的
+`release/auto-<YYYYMMDD>` 每日 release 分支（同日只允許 fast-forward），最後才
+執行備份回復驗證與 production deploy。
+衝突、測試、備份或部署任一失敗都會停止並在 `out/release-train/` 留下 JSON
+receipt。
+
+安裝預設為 dry-run，每小時只產盤點 receipt：
+
+```bash
+./scripts/install_hourly_release_train.sh
+```
+
+啟用 production 使用 repo 內固定的
+`deploy/backup_production_release.sh` 與 `deploy/deploy_ec2.sh`，不接受 plist
+傳入任意命令，避免憑證或命令字串落碟。備份 receipt 會綁定 run ID、schema、
+archive SHA-256 與回復驗證結果：
+
+```bash
+./scripts/install_hourly_release_train.sh --execute
+```
+
+目前核定的唯讀 production 備份命令是
+`bash deploy/backup_production_release.sh`：它封存 active/previous pointer、
+active immutable artifact 與 manifest 成 `tar.gz`，重新解壓核對 SHA-256，並確認
+cost ledger DynamoDB PITR 已啟用；相同 artifact digest 會重用同一份備份，不會
+每次重試重複佔空間。排程 receipt 保留最近 100 份；不寫 AWS、不碰 schema。
+
+此排程不會啟動或變更 Hermes、資料收集、web 或 frontend daemon。
+
 > 不走 App Runner 自動化。流程：`git push` → pre-push hook 跑測試 → 綠 → AWS CLI 部署到 Lambda。
 > Lambda 在免費方案內可用、每月 100 萬請求免費；App Runner 不在免費內故不採用。
 
