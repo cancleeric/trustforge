@@ -557,6 +557,23 @@ def test_operator_rebuilds_missing_checkpoint_from_signed_terminal_history(tmp_p
         control.rebuild_checkpoint()
 
 
+def test_checkpoint_rebuild_rejects_signed_but_semantically_invalid_terminal(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "invalid-terminal-rebuild")
+    control.ledger.append(
+        {
+            "kind": "operator_stop",
+            "at": NOW.isoformat(),
+            "checkpoint_floor_at": NOW.isoformat(),
+        }
+    )
+    control._checkpoint_path.unlink()
+
+    with pytest.raises(DeploymentControlError, match="authorization is absent"):
+        control.rebuild_checkpoint()
+    assert not control._checkpoint_path.exists()
+
+
 def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
     control = _control(tmp_path)
     _start_canary(control, "checkpoint-first")

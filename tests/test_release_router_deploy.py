@@ -4,6 +4,7 @@ import json
 import hashlib
 import errno
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from scripts.deployment_readiness import (
 from scripts import install_router_release_artifact
 from trustforge.release_router_runtime import COORDINATION_LOCK_PATH
 from trustforge.signed_event_ledger import SECURITY_LEDGER_ROOT
+from trustforge.signed_event_ledger import SignedEventLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -362,10 +364,33 @@ def test_installer_failure_stops_new_service_and_restores_nginx(
         payload = json.loads(evidence.read_text())
         assert payload["schema"] == "trustforge.release-install-rollback-failed/v2"
         assert payload["steps"] == [
-            "artifact-restore",
-            "daemon-reload",
-            "service-health",
+            {
+                "attempted": True,
+                "error_code": 0,
+                "name": "service-stop",
+                "success": True,
+            },
+            {
+                "attempted": True,
+                "error_code": 0,
+                "name": "artifact-restore",
+                "success": True,
+            },
+            {
+                "attempted": True,
+                "error_code": 1,
+                "name": "daemon-reload",
+                "success": False,
+            },
+            {
+                "attempted": True,
+                "error_code": 0,
+                "name": "service-health",
+                "success": True,
+            },
         ]
+        assert payload["target_archive_sha256"] == fake_archive_digest
+        assert len(payload["target_evidence_sha256"]) == 64
     else:
         assert result.returncode == 22
         assert not evidence.exists()
@@ -377,6 +402,8 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
         "runtime",
         "keys",
         "control-bootstrap",
+        "control-events",
+        "control-head",
         "outcome-bootstrap",
         "a-artifact",
         "b-artifact",
@@ -405,6 +432,67 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
         + hashlib.sha256(paths[f"{role}-artifact"].read_bytes()).hexdigest()
         for role in ("a", "b")
     }
+    routing_private = Ed25519PrivateKey.generate()
+    routing_key_id = "routing-1"
+    policy = {
+        "ratio_basis_points": 100,
+        "request_cap": 1000,
+        "timeout_ms": 1000,
+        "routing_key_id": routing_key_id,
+        "ramp_id": "release-test",
+        "policy_digest": "sha256:" + "9" * 64,
+    }
+    control_private = Ed25519PrivateKey.generate()
+    control_public = control_private.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw
+    )
+    control_root = tmp_path / "ledger"
+    control_directory = control_root / "control"
+    ledger = SignedEventLedger(
+        directory=control_directory,
+        verification_keys={"control-1": control_public},
+        event_permissions={
+            "release-control": frozenset(
+                {
+                    "deployment_initialized",
+                    "operator_stop",
+                    "activation_prepared",
+                    "activation_completed",
+                    "activation_failed",
+                }
+            )
+        },
+        domain_keys={"release-control": frozenset({"control-1"})},
+        signing_key_id="control-1",
+        signing_private_key=control_private.private_bytes_raw(),
+        signing_domain="release-control",
+        ledger_role="release-control",
+        bootstrap=True,
+        coordination_root=control_root,
+    )
+    initialized = ledger.append(
+        {
+            "kind": "deployment_initialized",
+            "target": "production",
+            "target_confirmation": "test",
+            "active": {
+                "release_digest": artifact_digests["a"],
+                "base_url": "http://127.0.0.1:8000",
+                "manifest_key_id": endpoint_key_id,
+            },
+            "candidate": {
+                "release_digest": artifact_digests["b"],
+                "base_url": "http://127.0.0.1:8001",
+                "manifest_key_id": endpoint_key_id,
+            },
+            "policy": policy,
+            "evidence_bundle_digest": "sha256:" + "8" * 64,
+            "stop_after_errors": 3,
+        }
+    )
+    paths["control-bootstrap"] = control_directory / "bootstrap.json"
+    paths["control-events"] = control_directory / "events.jsonl"
+    paths["control-head"] = control_directory / "head.json"
     manifests_payload = {}
     for role in ("a", "b"):
         unsigned = {
@@ -432,19 +520,101 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
         )
         + "\n"
     )
-    paths["runtime"].write_text(
+    outcome_private = Ed25519PrivateKey.generate()
+    outcome_public = outcome_private.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw
+    )
+    paths["keys"].write_text(
         json.dumps(
             {
-                "schema": "trustforge.release-router-runtime/v1",
-                "a_artifact_digest": artifact_digests["a"],
-                "b_artifact_digest": artifact_digests["b"],
-                "endpoint_manifest_key_ids": [endpoint_key_id, endpoint_key_id],
+                "control_event_public": {"control-1": control_public.hex()},
+                "router_outcome_public": {"outcome-1": outcome_public.hex()},
+                "router_outcome_private": {
+                    "outcome-1": outcome_private.private_bytes_raw().hex()
+                },
+                "routing": {
+                    routing_key_id: routing_private.public_key()
+                    .public_bytes(Encoding.Raw, PublicFormat.Raw)
+                    .hex()
+                },
+                "endpoint_manifest_public": {endpoint_key_id: endpoint_public},
+                "authorization_public": {
+                    "authorization-1": Ed25519PrivateKey.generate()
+                    .public_key()
+                    .public_bytes(Encoding.Raw, PublicFormat.Raw)
+                    .hex()
+                },
+                "completion_public": {
+                    "completion-1": Ed25519PrivateKey.generate()
+                    .public_key()
+                    .public_bytes(Encoding.Raw, PublicFormat.Raw)
+                    .hex()
+                },
             },
             sort_keys=True,
             separators=(",", ":"),
         )
         + "\n"
     )
+    paths["runtime"].write_text(
+        json.dumps(
+            {
+                "schema": "trustforge.release-router-runtime/v1",
+                "a_artifact_digest": artifact_digests["a"],
+                "b_artifact_digest": artifact_digests["b"],
+                "endpoint_manifest_key_ids": [endpoint_key_id],
+                "control_ledger_id": initialized["ledger_id"],
+                "deployment_initialized_event_hash": initialized["event_hash"],
+                "routing_policy": policy,
+                "outcome_signing_key_id": "outcome-1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    python_digest = hashlib.sha256(b"python-runtime").hexdigest()
+    paths["router-tree-manifest"].write_text(
+        json.dumps(
+            {
+                "schema": "trustforge.router-tree-manifest/v1",
+                "entries": [
+                    {
+                        "path": ".venv/bin/python",
+                        "type": "file",
+                        "mode": "0555",
+                        "sha256": python_digest,
+                    },
+                    {
+                        "path": "scripts/release_router_service.py",
+                        "type": "file",
+                        "mode": "0444",
+                        "sha256": hashlib.sha256(b"router").hexdigest(),
+                    },
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    paths["runtime-lock"].write_text(
+        json.dumps(
+            {
+                "schema": "trustforge.router-runtime-lock/v1",
+                "tree_manifest_sha256": hashlib.sha256(
+                    paths["router-tree-manifest"].read_bytes()
+                ).hexdigest(),
+                "python_sha256": python_digest,
+                "packages": {"trustforge": "2026.7.28"},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    payload["control_ledger_id"] = initialized["ledger_id"]
+    payload["control_ledger_head"] = initialized["event_hash"]
     for name in names:
         payload[name.replace("-", "_") + "_sha256"] = hashlib.sha256(
             paths[name].read_bytes()
@@ -477,6 +647,52 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
         command.extend(("--" + name, str(paths[name])))
 
     subprocess.run(command, check=True)
+    original_head = payload["control_ledger_head"]
+    payload["control_ledger_head"] = "0" * 64
+    unsigned_payload = {
+        key: value for key, value in payload.items() if key != "signature"
+    }
+    payload["signature"] = private.sign(
+        b"trustforge.release-install-evidence.v1\x00"
+        + json.dumps(
+            unsigned_payload, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hex()
+    evidence.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    ledger_mismatch = subprocess.run(command, capture_output=True, text=True)
+    assert ledger_mismatch.returncode != 0
+    assert "control ledger identity mismatch" in ledger_mismatch.stderr
+
+    payload["control_ledger_head"] = original_head
+    key_payload = json.loads(paths["keys"].read_text())
+    key_payload["endpoint_manifest_public"] = {
+        endpoint_key_id: Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(Encoding.Raw, PublicFormat.Raw)
+        .hex()
+    }
+    paths["keys"].write_text(
+        json.dumps(key_payload, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    payload["keys_sha256"] = hashlib.sha256(paths["keys"].read_bytes()).hexdigest()
+    unsigned_payload = {
+        key: value for key, value in payload.items() if key != "signature"
+    }
+    payload["signature"] = private.sign(
+        b"trustforge.release-install-evidence.v1\x00"
+        + json.dumps(
+            unsigned_payload, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hex()
+    evidence.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    key_mismatch = subprocess.run(command, capture_output=True, text=True)
+    assert key_mismatch.returncode != 0
+    assert "keys do not exactly match bundle" in key_mismatch.stderr
+
     paths["b-artifact"].write_text("tampered")
     failed = subprocess.run(command, capture_output=True, text=True)
 
@@ -486,11 +702,16 @@ def test_release_install_evidence_binds_every_intended_artifact(tmp_path):
 
 def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
     source = tmp_path / "release_router_service.py"
-    source.write_text("print('router')\n")
+    source.write_text("print('isolated-router')\n")
     python_runtime = tmp_path / "python"
-    python_runtime.write_text("isolated-python\n")
+    shutil.copy2(sys.executable, python_runtime)
     archive = tmp_path / "router.tar"
     with tarfile.open(archive, "w") as bundle:
+        for directory in (".venv", ".venv/bin", "scripts"):
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            bundle.addfile(info)
         bundle.add(source, arcname="scripts/release_router_service.py")
         bundle.add(python_runtime, arcname=".venv/bin/python")
     manifest = tmp_path / "tree.json"
@@ -498,14 +719,22 @@ def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
         json.dumps(
             {
                 "schema": "trustforge.router-tree-manifest/v1",
-                "files": {
-                    "scripts/release_router_service.py": hashlib.sha256(
-                        source.read_bytes()
-                    ).hexdigest(),
-                    ".venv/bin/python": hashlib.sha256(
-                        python_runtime.read_bytes()
-                    ).hexdigest(),
-                },
+                "entries": [
+                    {
+                        "path": ".venv/bin/python",
+                        "type": "file",
+                        "mode": "0555",
+                        "sha256": hashlib.sha256(
+                            python_runtime.read_bytes()
+                        ).hexdigest(),
+                    },
+                    {
+                        "path": "scripts/release_router_service.py",
+                        "type": "file",
+                        "mode": "0444",
+                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    },
+                ],
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -535,13 +764,37 @@ def test_content_addressed_router_artifact_rejects_unlisted_entries(tmp_path):
         stat.S_IMODE((release / "scripts/release_router_service.py").stat().st_mode)
         == 0o444
     )
+    isolated = subprocess.run(
+        [
+            str(release / ".venv/bin/python"),
+            "-I",
+            str(release / "scripts/release_router_service.py"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert isolated.stdout == "isolated-router\n"
+
+    (release / "scripts/release_router_service.py").chmod(0o555)
+    mode_tamper = subprocess.run(command, capture_output=True, text=True)
+    assert mode_tamper.returncode != 0
+    assert "does not match manifest" in mode_tamper.stderr
+    (release / "scripts/release_router_service.py").chmod(0o444)
 
     bad_manifest = tmp_path / "bad-tree.json"
     bad_manifest.write_text(
         json.dumps(
             {
                 "schema": "trustforge.router-tree-manifest/v1",
-                "files": {"../escape": "0" * 64},
+                "entries": [
+                    {
+                        "path": "../escape",
+                        "type": "file",
+                        "mode": "0444",
+                        "sha256": "0" * 64,
+                    }
+                ],
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -576,9 +829,13 @@ def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
     source = tmp_path / "release_router_service.py"
     source.write_text("print('router')\n")
     python_runtime = tmp_path / "python"
-    python_runtime.write_text("isolated-python\n")
+    shutil.copy2(sys.executable, python_runtime)
     archive = tmp_path / "router.tar"
     with tarfile.open(archive, "w") as bundle:
+        for directory in (".venv", ".venv/bin", "scripts"):
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            bundle.addfile(info)
         bundle.add(source, arcname="scripts/release_router_service.py")
         bundle.add(python_runtime, arcname=".venv/bin/python")
     manifest = tmp_path / "tree.json"
@@ -586,14 +843,22 @@ def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
         json.dumps(
             {
                 "schema": "trustforge.router-tree-manifest/v1",
-                "files": {
-                    "scripts/release_router_service.py": hashlib.sha256(
-                        source.read_bytes()
-                    ).hexdigest(),
-                    ".venv/bin/python": hashlib.sha256(
-                        python_runtime.read_bytes()
-                    ).hexdigest(),
-                },
+                "entries": [
+                    {
+                        "path": ".venv/bin/python",
+                        "type": "file",
+                        "mode": "0555",
+                        "sha256": hashlib.sha256(
+                            python_runtime.read_bytes()
+                        ).hexdigest(),
+                    },
+                    {
+                        "path": "scripts/release_router_service.py",
+                        "type": "file",
+                        "mode": "0444",
+                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    },
+                ],
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -643,5 +908,68 @@ def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
     )
 
     with pytest.raises(OSError, match="cross-device publish"):
+        install_router_release_artifact.main()
+    assert not any(releases.iterdir())
+
+
+def test_content_addressed_router_artifact_bounds_directory_member_bomb(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "release_router_service.py"
+    source.write_text("print('router')\n")
+    python_runtime = tmp_path / "python"
+    shutil.copy2(sys.executable, python_runtime)
+    archive = tmp_path / "router.tar"
+    with tarfile.open(archive, "w") as bundle:
+        for directory in (".venv", ".venv/bin", "scripts"):
+            info = tarfile.TarInfo(directory)
+            info.type = tarfile.DIRTYPE
+            bundle.addfile(info)
+        bundle.add(source, arcname="scripts/release_router_service.py")
+        bundle.add(python_runtime, arcname=".venv/bin/python")
+    manifest = tmp_path / "tree.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "trustforge.router-tree-manifest/v1",
+                "entries": [
+                    {
+                        "path": ".venv/bin/python",
+                        "type": "file",
+                        "mode": "0555",
+                        "sha256": hashlib.sha256(
+                            python_runtime.read_bytes()
+                        ).hexdigest(),
+                    },
+                    {
+                        "path": "scripts/release_router_service.py",
+                        "type": "file",
+                        "mode": "0444",
+                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    },
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    releases = tmp_path / "releases"
+    monkeypatch.setattr(install_router_release_artifact, "MAX_MEMBERS", 3)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "install_router_release_artifact.py",
+            "--archive",
+            str(archive),
+            "--tree-manifest",
+            str(manifest),
+            "--releases-root",
+            str(releases),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="too many members"):
         install_router_release_artifact.main()
     assert not any(releases.iterdir())

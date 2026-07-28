@@ -11,7 +11,12 @@ import stat
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+
+from trustforge.signed_event_ledger import SignedEventLedger
 
 SCHEMA = "trustforge.release-install-evidence/v1"
 SIGNING_DOMAIN = b"trustforge.release-install-evidence.v1\x00"
@@ -20,6 +25,8 @@ FIELDS = (
     "runtime_sha256",
     "keys_sha256",
     "control_bootstrap_sha256",
+    "control_events_sha256",
+    "control_head_sha256",
     "outcome_bootstrap_sha256",
     "a_artifact_sha256",
     "b_artifact_sha256",
@@ -28,6 +35,7 @@ FIELDS = (
     "router_tree_manifest_sha256",
     "runtime_lock_sha256",
 )
+IDENTITY_FIELDS = ("control_ledger_id", "control_ledger_head")
 
 
 def _regular(path: Path, *, mode: int | None = None) -> int:
@@ -36,6 +44,7 @@ def _regular(path: Path, *, mode: int | None = None) -> int:
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != os.geteuid()
+        or info.st_nlink != 1
         or stat.S_IMODE(info.st_mode) & 0o022
         or (mode is not None and stat.S_IMODE(info.st_mode) != mode)
     ):
@@ -74,7 +83,62 @@ def _json_file(path: Path) -> dict:
     return value
 
 
-def _verify_endpoint_semantics(args: argparse.Namespace) -> None:
+def _key_mapping(payload: dict, role: str) -> dict[str, bytes]:
+    value = payload.get(role)
+    if not isinstance(value, dict) or not value:
+        raise SystemExit(f"runtime {role} key mapping is invalid")
+    try:
+        decoded = {key: bytes.fromhex(item) for key, item in value.items()}
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"runtime {role} key mapping is invalid") from exc
+    if any(not key or len(item) != 32 for key, item in decoded.items()):
+        raise SystemExit(f"runtime {role} key mapping is invalid")
+    return decoded
+
+
+def _verified_control_history(args: argparse.Namespace, keys: dict) -> list[dict]:
+    control_keys = _key_mapping(keys, "control_event_public")
+    directory = args.control_bootstrap.parent
+    if (
+        args.control_events != directory / "events.jsonl"
+        or args.control_head != directory / "head.json"
+    ):
+        raise SystemExit("control ledger file paths are not canonical")
+    root = directory.parent
+    directory_info, root_info = os.lstat(directory), os.lstat(root)
+    bootstrap_info = os.lstat(args.control_bootstrap)
+    ledger = SignedEventLedger(
+        directory=directory,
+        verification_keys=control_keys,
+        event_permissions={
+            "release-control": frozenset(
+                {
+                    "deployment_initialized",
+                    "operator_stop",
+                    "activation_prepared",
+                    "activation_completed",
+                    "activation_failed",
+                }
+            )
+        },
+        domain_keys={"release-control": frozenset(control_keys)},
+        ledger_role="release-control",
+        coordination_root=root,
+        root_owner_uid=root_info.st_uid,
+        root_mode=stat.S_IMODE(root_info.st_mode),
+        directory_owner_uid=directory_info.st_uid,
+        directory_mode=stat.S_IMODE(directory_info.st_mode),
+        file_mode=stat.S_IMODE(bootstrap_info.st_mode),
+    )
+    records = ledger.read()
+    if not records or records[0]["event"].get("kind") != "deployment_initialized":
+        raise SystemExit("authenticated control ledger is not initialized")
+    return records
+
+
+def _verify_endpoint_semantics(
+    args: argparse.Namespace, payload: dict
+) -> None:
     a_digest = "sha256:" + _digest(args.a_artifact)
     b_digest = "sha256:" + _digest(args.b_artifact)
     bundle = _json_file(args.endpoint_manifests)
@@ -115,14 +179,103 @@ def _verify_endpoint_semantics(args: argparse.Namespace) -> None:
         ):
             raise SystemExit("endpoint manifest artifact identity is unrelated")
         key_ids.append(key_id)
+    runtime_keys = _json_file(args.keys)
+    if set(runtime_keys) != {
+        "control_event_public",
+        "router_outcome_public",
+        "router_outcome_private",
+        "routing",
+        "endpoint_manifest_public",
+        "authorization_public",
+        "completion_public",
+    }:
+        raise SystemExit("runtime key roles are incomplete or over-privileged")
+    endpoint_runtime = _key_mapping(runtime_keys, "endpoint_manifest_public")
+    try:
+        endpoint_bundle = {key: bytes.fromhex(value) for key, value in keys.items()}
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("endpoint manifest bundle keyring is invalid") from exc
+    if endpoint_runtime != endpoint_bundle or set(key_ids) != set(endpoint_bundle):
+        raise SystemExit("runtime endpoint manifest keys do not exactly match bundle")
+    records = _verified_control_history(args, runtime_keys)
+    initialized = records[0]["event"]
+    ledger_id, ledger_head = records[0]["ledger_id"], records[-1]["event_hash"]
+    if (
+        payload["control_ledger_id"] != ledger_id
+        or payload["control_ledger_head"] != ledger_head
+    ):
+        raise SystemExit("release evidence control ledger identity mismatch")
+    policy = initialized.get("policy")
+    if (
+        not isinstance(policy, dict)
+        or initialized.get("active", {}).get("release_digest") != a_digest
+        or initialized.get("candidate", {}).get("release_digest") != b_digest
+    ):
+        raise SystemExit("deployment initialization A/B identity mismatch")
+    for role in ("a", "b"):
+        endpoint = initialized["active" if role == "a" else "candidate"]
+        if (
+            bundle[role]["origin"] != endpoint.get("base_url")
+            or bundle[role]["key_id"] != endpoint.get("manifest_key_id")
+        ):
+            raise SystemExit("deployment initialization endpoint identity mismatch")
+    routing_keys = _key_mapping(runtime_keys, "routing")
+    routing_key_id = policy.get("routing_key_id")
+    if routing_key_id not in routing_keys:
+        raise SystemExit("deployment routing signer is unavailable")
+    outcome_public = _key_mapping(runtime_keys, "router_outcome_public")
+    outcome_private = _key_mapping(runtime_keys, "router_outcome_private")
+    if len(outcome_private) != 1:
+        raise SystemExit("runtime outcome signer cardinality is invalid")
+    outcome_key_id, outcome_seed = next(iter(outcome_private.items()))
+    derived = Ed25519PrivateKey.from_private_bytes(outcome_seed).public_key()
+    if (
+        outcome_key_id not in outcome_public
+        or derived.public_bytes_raw() != outcome_public[outcome_key_id]
+    ):
+        raise SystemExit("runtime outcome signer identity mismatch")
     runtime = _json_file(args.runtime)
-    if runtime != {
+    expected_runtime = {
         "schema": "trustforge.release-router-runtime/v1",
         "a_artifact_digest": a_digest,
         "b_artifact_digest": b_digest,
-        "endpoint_manifest_key_ids": sorted(key_ids),
-    }:
+        "endpoint_manifest_key_ids": sorted(set(key_ids)),
+        "control_ledger_id": ledger_id,
+        "deployment_initialized_event_hash": records[0]["event_hash"],
+        "routing_policy": policy,
+        "outcome_signing_key_id": outcome_key_id,
+    }
+    if runtime != expected_runtime:
         raise SystemExit("runtime A/B identity does not match signed artifacts")
+    runtime_lock = _json_file(args.runtime_lock)
+    tree_digest = _digest(args.router_tree_manifest)
+    tree = _json_file(args.router_tree_manifest)
+    entries = tree.get("entries")
+    if not isinstance(entries, list):
+        raise SystemExit("router runtime lock requires canonical tree entries")
+    python_entries = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("path") == ".venv/bin/python"
+    ]
+    if (
+        set(runtime_lock)
+        != {"schema", "tree_manifest_sha256", "python_sha256", "packages"}
+        or runtime_lock.get("schema") != "trustforge.router-runtime-lock/v1"
+        or runtime_lock.get("tree_manifest_sha256") != tree_digest
+        or len(python_entries) != 1
+        or runtime_lock.get("python_sha256") != python_entries[0].get("sha256")
+        or not isinstance(runtime_lock.get("packages"), dict)
+        or not runtime_lock["packages"]
+        or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(version, str)
+            or not version
+            for name, version in runtime_lock["packages"].items()
+        )
+    ):
+        raise SystemExit("router runtime lock attestation is invalid")
 
 
 def main() -> int:
@@ -149,7 +302,8 @@ def main() -> int:
     payload = json.loads(raw)
     if (
         not isinstance(payload, dict)
-        or set(payload) != {"schema", "key_id", "signature", *FIELDS}
+        or set(payload)
+        != {"schema", "key_id", "signature", *FIELDS, *IDENTITY_FIELDS}
         or payload.get("schema") != SCHEMA
         or json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         != raw
@@ -193,7 +347,12 @@ def main() -> int:
             or _digest(path) != expected
         ):
             raise SystemExit(f"intended release digest mismatch: {field}")
-    _verify_endpoint_semantics(args)
+    if any(
+        not isinstance(payload[field], str) or not payload[field]
+        for field in IDENTITY_FIELDS
+    ):
+        raise SystemExit("release evidence ledger identity is invalid")
+    _verify_endpoint_semantics(args, payload)
     print(payload["runtime_sha256"])
     return 0
 

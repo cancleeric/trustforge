@@ -274,12 +274,23 @@ The release workflow must provide a canonical
 `trustforge.release-install-evidence/v1` receipt and its root-owned `0400`
 Ed25519 public keyring. The domain-separated signature binds the exact unit,
 runtime configuration, runtime public key material, both ledger bootstraps,
-retained A artifact, candidate B artifact, and endpoint-manifest bundle.
-Installation verifies this receipt before writing any host artifact.
+the complete authenticated control events/head and ledger identity, retained A
+artifact, candidate B artifact, endpoint-manifest bundle, router archive/tree,
+and runtime-lock attestation. Runtime endpoint keys must exactly equal the
+bundle keyring; routing and outcome signer identities must agree with the
+authenticated initialization and runtime key material. Installation verifies
+the receipt before writing any host artifact and reopens and reauthenticates
+every input immediately before enabling the service.
 
 The router application is a bounded archive plus an exact canonical tree
-manifest. It is extracted without links/devices/traversal into private staging,
-then published as `/opt/trustforge/releases/<archive-sha256>`. The signed unit
+manifest whose entries bind path, regular-file type, `0444`/approved executable
+`0555` mode, and SHA-256. Extraction streams a pinned archive descriptor,
+bounds every file and directory header, and permits only the exact required
+parent directories; links, devices, traversal, extras and directory bombs fail
+closed. The final tree is descriptor-verified for owner, type, link count,
+mode and digest, then published as
+`/opt/trustforge/releases/<archive-sha256>`. The runtime lock binds the tree
+manifest digest, isolated Python digest, and canonical package inventory. The signed unit
 must use that exact directory for `WorkingDirectory`, an absolute `-I` Python
 entrypoint inside the release, clear `PYTHONPATH`/`PYTHONHOME`, and expose the
 same digest as `TRUSTFORGE_RELEASE_DIGEST`. Post-start verification checks the

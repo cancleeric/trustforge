@@ -366,10 +366,19 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 "checkpoint rebuild requires the operator signing identity"
             )
         with self.ledger.coordination_lock():
-            records = self.ledger.read()
+            records = self._records()
+            control_head = records[-1]["event_hash"]
+            # Replay authorization/completion/outcome semantics without allowing
+            # the normal read path to heal the projection under examination.
+            self.routing_snapshot(heal_checkpoint=False)
+            replayed = self._records()
+            if replayed[-1]["event_hash"] != control_head:
+                raise DeploymentControlError(
+                    "control ledger changed during checkpoint rebuild"
+                )
             terminals = [
                 record
-                for record in records
+                for record in replayed
                 if record["event"].get("kind")
                 in {"operator_stop", "activation_completed", "activation_failed"}
             ]
@@ -397,6 +406,10 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             if checkpoint != expected:
                 raise DeploymentControlError(
                     "rebuilt authorization checkpoint failed verification"
+                )
+            if self._records()[-1]["event_hash"] != control_head:
+                raise DeploymentControlError(
+                    "control ledger changed while publishing checkpoint"
                 )
             return expected
 
@@ -609,7 +622,7 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 floor = DeploymentControlLedger._terminal_floor(event, floor)
         return max(terminal_time, floor or terminal_time)
 
-    def routing_snapshot(self) -> RoutingSnapshot:
+    def routing_snapshot(self, *, heal_checkpoint: bool = True) -> RoutingSnapshot:
         current_time = self._current_time()
         records = self._records()
         terminal_transaction_ids = {
@@ -899,7 +912,9 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
             activation = "completed"
             current_canary_epoch = None
         clock_rolled_back = self._checkpoint_clock_rolled_back(
-            records, now=current_time, heal=self.ledger.can_sign
+            records,
+            now=current_time,
+            heal=heal_checkpoint and self.ledger.can_sign,
         )
         return RoutingSnapshot(
             ledger_id=records[0]["ledger_id"],

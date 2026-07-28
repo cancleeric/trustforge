@@ -70,20 +70,25 @@ ROUTER_TREE_MANIFEST="${TRUSTFORGE_ROUTER_TREE_MANIFEST:?set router tree manifes
 RUNTIME_LOCK="${TRUSTFORGE_RUNTIME_LOCK:?set exact Python/runtime lock}"
 UNIT_SOURCE="${TRUSTFORGE_SIGNED_UNIT:?set signed content-addressed systemd unit}"
 EXPECTED_UNIT_SHA256="$(sha256sum "$UNIT_SOURCE" | awk '{print $1}')"
-python3 "$ROOT_DIR/scripts/verify_release_install_evidence.py" \
-  --evidence "$RELEASE_EVIDENCE" \
-  --public-keyring "$RELEASE_EVIDENCE_KEYS" \
-  --unit "$UNIT_SOURCE" \
-  --runtime "$CONFIG_ROOT/release-router-runtime.json" \
-  --keys "$CONFIG_ROOT/release-router-runtime-keys.json" \
-  --control-bootstrap "$LEDGER_ROOT/control/bootstrap.json" \
-  --outcome-bootstrap "$LEDGER_ROOT/router-outcomes/bootstrap.json" \
-  --a-artifact "$A_ARTIFACT" \
-  --b-artifact "$B_ARTIFACT" \
-  --endpoint-manifests "$ENDPOINT_MANIFESTS" \
-  --router-archive "$ROUTER_ARCHIVE" \
-  --router-tree-manifest "$ROUTER_TREE_MANIFEST" \
-  --runtime-lock "$RUNTIME_LOCK" >/dev/null
+verify_release_inputs() {
+  python3 "$ROOT_DIR/scripts/verify_release_install_evidence.py" \
+    --evidence "$RELEASE_EVIDENCE" \
+    --public-keyring "$RELEASE_EVIDENCE_KEYS" \
+    --unit "$UNIT_SOURCE" \
+    --runtime "$CONFIG_ROOT/release-router-runtime.json" \
+    --keys "$CONFIG_ROOT/release-router-runtime-keys.json" \
+    --control-bootstrap "$LEDGER_ROOT/control/bootstrap.json" \
+    --control-events "$LEDGER_ROOT/control/events.jsonl" \
+    --control-head "$LEDGER_ROOT/control/head.json" \
+    --outcome-bootstrap "$LEDGER_ROOT/router-outcomes/bootstrap.json" \
+    --a-artifact "$A_ARTIFACT" \
+    --b-artifact "$B_ARTIFACT" \
+    --endpoint-manifests "$ENDPOINT_MANIFESTS" \
+    --router-archive "$ROUTER_ARCHIVE" \
+    --router-tree-manifest "$ROUTER_TREE_MANIFEST" \
+    --runtime-lock "$RUNTIME_LOCK" >/dev/null
+}
+verify_release_inputs
 
 RELEASES_ROOT="$DEST_ROOT/opt/trustforge/releases"
 RELEASE_DIR="$(
@@ -93,6 +98,7 @@ RELEASE_DIR="$(
     --releases-root "$RELEASES_ROOT"
 )"
 ARCHIVE_SHA256="$(sha256sum "$ROUTER_ARCHIVE" | awk '{print $1}')"
+RELEASE_EVIDENCE_SHA256="$(sha256sum "$RELEASE_EVIDENCE" | awk '{print $1}')"
 [[ "$RELEASE_DIR" == "$RELEASES_ROOT/$ARCHIVE_SHA256" ]] || {
   echo "router release directory is not content addressed" >&2
   exit 83
@@ -157,45 +163,78 @@ fi
 rollback_install() {
   status=$?
   rollback_failed=false
-  systemctl stop trustforge-release-router.service >/dev/null 2>&1 ||
+  if systemctl stop trustforge-release-router.service >/dev/null 2>&1; then
+    service_stop_code=0
+  else
+    service_stop_code=$?
     rollback_failed=true
+  fi
+  artifact_restore_failed=false
   for index in "${!TARGETS[@]}"; do
     if ${EXISTED[$index]}; then
       install -o root -g root -m 0644 "$BACKUP_DIR/$index" "${TARGETS[$index]}" ||
-        rollback_failed=true
-      cmp -s "$BACKUP_DIR/$index" "${TARGETS[$index]}" || rollback_failed=true
+        artifact_restore_failed=true
+      cmp -s "$BACKUP_DIR/$index" "${TARGETS[$index]}" ||
+        artifact_restore_failed=true
     else
-      rm -f -- "${TARGETS[$index]}" || rollback_failed=true
-      [[ ! -e "${TARGETS[$index]}" ]] || rollback_failed=true
+      rm -f -- "${TARGETS[$index]}" || artifact_restore_failed=true
+      [[ ! -e "${TARGETS[$index]}" ]] || artifact_restore_failed=true
     fi
   done
-  systemctl daemon-reload >/dev/null 2>&1 || rollback_failed=true
-  nginx -t >/dev/null 2>&1 || rollback_failed=true
-  systemctl reload nginx >/dev/null 2>&1 || rollback_failed=true
+  if $artifact_restore_failed; then
+    artifact_restore_code=1
+    rollback_failed=true
+  else
+    artifact_restore_code=0
+  fi
+  daemon_restore_failed=false
+  daemon_reload_code=0
+  systemctl daemon-reload >/dev/null 2>&1 ||
+    { daemon_reload_code=$?; daemon_restore_failed=true; }
+  nginx -t >/dev/null 2>&1 ||
+    { daemon_reload_code=$?; daemon_restore_failed=true; }
+  systemctl reload nginx >/dev/null 2>&1 ||
+    { daemon_reload_code=$?; daemon_restore_failed=true; }
+  if $daemon_restore_failed; then
+    rollback_failed=true
+  fi
+  service_restore_failed=false
+  service_health_code=0
   if $SERVICE_WAS_ACTIVE; then
     systemctl start trustforge-release-router.service >/dev/null 2>&1 ||
-      rollback_failed=true
+      { service_health_code=$?; service_restore_failed=true; }
     systemctl is-active --quiet trustforge-release-router.service ||
-      rollback_failed=true
+      { service_health_code=$?; service_restore_failed=true; }
     restored_pid="$(systemctl show -p MainPID --value trustforge-release-router.service)"
-    [[ "$restored_pid" =~ ^[1-9][0-9]*$ ]] || rollback_failed=true
+    [[ "$restored_pid" =~ ^[1-9][0-9]*$ ]] ||
+      { service_health_code=1; service_restore_failed=true; }
     curl --fail --silent --show-error \
       --unix-socket /run/trustforge/release-router.sock \
       -H 'X-TrustForge-Trusted-Subject: rollback-verify' \
-      http://localhost/healthz >/dev/null 2>&1 || rollback_failed=true
+      http://localhost/healthz >/dev/null 2>&1 ||
+      { service_health_code=$?; service_restore_failed=true; }
     if [[ -z "$DEST_ROOT" ]]; then
       [[ "$(readlink -f "/proc/$restored_pid/cwd")" == "$OLD_RELEASE_DIR" ]] ||
-        rollback_failed=true
+        { service_health_code=1; service_restore_failed=true; }
       [[ "$(sha256sum "/proc/$restored_pid/exe" | awk '{print $1}')" == \
-        "$OLD_EXE_SHA256" ]] || rollback_failed=true
+        "$OLD_EXE_SHA256" ]] ||
+        { service_health_code=1; service_restore_failed=true; }
     fi
+  fi
+  if $service_restore_failed; then
+    rollback_failed=true
   fi
   if $rollback_failed; then
     python3 "$ROOT_DIR/scripts/write_release_rollback_evidence.py" \
       --directory "$(dirname "$ROLLBACK_EVIDENCE")" \
       --original-status "$status" \
-      --steps "artifact-restore,daemon-reload,service-health" \
+      --service-stop-code "$service_stop_code" \
+      --artifact-restore-code "$artifact_restore_code" \
+      --daemon-reload-code "$daemon_reload_code" \
+      --service-health-code "$service_health_code" \
       --target-release "$RELEASE_EVIDENCE" \
+      --target-evidence-sha256 "$RELEASE_EVIDENCE_SHA256" \
+      --target-archive-sha256 "$ARCHIVE_SHA256" \
       --prior-release "$OLD_RELEASE_DIR" \
       --target-unit-sha256 "$EXPECTED_UNIT_SHA256" \
       --prior-unit-sha256 "$PRIOR_UNIT_SHA256" \
@@ -346,6 +385,9 @@ setpriv \
   echo "signed release inputs changed during installation" >&2
   false
 }
+# Reopen and reauthenticate every signed artifact and the complete control
+# chain immediately before the irreversible enable boundary.
+verify_release_inputs
 systemctl enable trustforge-release-router.service
 trap - ERR INT TERM
 rm -rf -- "$BACKUP_DIR"

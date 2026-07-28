@@ -48,7 +48,7 @@ def _keys(payload: dict, role: str) -> dict[str, bytes]:
 
 def build_runtime_router() -> ReleaseABRouter:
     """Load only ledger append, routing, and manifest verification material."""
-    _protected(RUNTIME_CONFIG_PATH)
+    runtime_config = _protected(RUNTIME_CONFIG_PATH)
     key_file = _protected(RUNTIME_KEYS_PATH)
     if set(key_file) != {
         "control_event_public",
@@ -138,6 +138,22 @@ def build_runtime_router() -> ReleaseABRouter:
     active = ReleaseEndpoint(**initialized["active"])
     candidate = ReleaseEndpoint(**initialized["candidate"])
     policy = RoutingPolicy(**initialized["policy"])
+    expected_runtime = {
+        "schema": "trustforge.release-router-runtime/v1",
+        "a_artifact_digest": active.release_digest,
+        "b_artifact_digest": candidate.release_digest,
+        "endpoint_manifest_key_ids": sorted(public_keys),
+        "control_ledger_id": records[0]["ledger_id"],
+        "deployment_initialized_event_hash": records[0]["event_hash"],
+        "routing_policy": initialized["policy"],
+        "outcome_signing_key_id": outcome_key_id,
+    }
+    if runtime_config != expected_runtime:
+        raise RouterRuntimeError(
+            "runtime identity does not match authenticated deployment initialization"
+        )
+    if policy.routing_key_id not in routing_keys:
+        raise RouterRuntimeError("runtime routing signer does not match policy")
     control = DeploymentControlLedger(
         ledger,
         outcome_ledger=outcome_ledger,

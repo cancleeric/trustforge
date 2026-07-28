@@ -26,14 +26,27 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--original-status", type=int, required=True)
-    parser.add_argument("--steps", required=True)
+    parser.add_argument("--service-stop-code", type=int, required=True)
+    parser.add_argument("--artifact-restore-code", type=int, required=True)
+    parser.add_argument("--daemon-reload-code", type=int, required=True)
+    parser.add_argument("--service-health-code", type=int, required=True)
     parser.add_argument("--target-release", required=True)
+    parser.add_argument("--target-evidence-sha256", required=True)
+    parser.add_argument("--target-archive-sha256", required=True)
     parser.add_argument("--prior-release", required=True)
     parser.add_argument("--target-unit-sha256", required=True)
     parser.add_argument("--prior-unit-sha256", required=True)
     parser.add_argument("--target-pid", type=int, required=True)
     parser.add_argument("--restored-pid", type=int, required=True)
     args = parser.parse_args()
+    for label, digest in (
+        ("release evidence", args.target_evidence_sha256),
+        ("router archive", args.target_archive_sha256),
+    ):
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise SystemExit(f"{label} SHA-256 is invalid")
     parent_fd = os.open(
         args.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     )
@@ -51,9 +64,24 @@ def main() -> int:
             "prior_unit_sha256": args.prior_unit_sha256,
             "restored_pid": args.restored_pid,
             "schema": SCHEMA,
-            "steps": sorted(set(filter(None, args.steps.split(",")))),
+            "steps": [
+                {
+                    "attempted": True,
+                    "error_code": code,
+                    "name": name,
+                    "success": code == 0,
+                }
+                for name, code in (
+                    ("service-stop", args.service_stop_code),
+                    ("artifact-restore", args.artifact_restore_code),
+                    ("daemon-reload", args.daemon_reload_code),
+                    ("service-health", args.service_health_code),
+                )
+            ],
             "target_pid": args.target_pid,
             "target_release": args.target_release,
+            "target_evidence_sha256": args.target_evidence_sha256,
+            "target_archive_sha256": args.target_archive_sha256,
             "target_unit_sha256": args.target_unit_sha256,
             "timestamp": datetime.now(UTC).isoformat(),
         }
