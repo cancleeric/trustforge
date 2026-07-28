@@ -59,6 +59,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         md = comparison_to_markdown(report_a, evidence_a, report_b, evidence_b, args.query)
         (out / "report.md").write_text(md, encoding="utf-8")
 
+        # CA-08：若 comparison_report 存在，也輸出 unified ComparisonReport.to_markdown()
+        if result.comparison is not None:
+            unified_md = result.comparison.to_markdown()
+            (out / "comparison_report.md").write_text(unified_md, encoding="utf-8")
+
         # evidence.json：兩幣合併，每筆加 coin 欄位標明歸屬；外加 comparison_report
         all_ev = (
             [{**e.to_dict(), "coin": report_a.coin} for e in evidence_a]

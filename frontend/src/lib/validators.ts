@@ -25,6 +25,7 @@ import type {
   BasisItem,
   CacheBackendStatus,
   ComparisonAnalyzeData,
+  ComparisonReportData,
   CostModelDetail,
   CostsData,
   LedgerRunRecord,
@@ -361,6 +362,42 @@ export function isComparisonAnalyzeData(value: unknown): value is ComparisonAnal
     isTrustComponentsAggregate(value.trust_components_aggregate_b) &&
     isPriceProvenance(value.price_provenance_b)
   )
+}
+
+// ── /api/analyze?type=comparison — comparison_report ──────────────────────
+
+function isComparisonDimension(value: unknown): value is ComparisonReportData['dimensions'][number] {
+  return (
+    isPlainObject(value) &&
+    typeof value.dimension === 'string' &&
+    typeof value.decision === 'string' &&
+    typeof value.reasoning === 'string' &&
+    typeof value.confidence === 'number' &&
+    isStringArray(value.evidence_refs) &&
+    (value.abstain_reason === undefined || typeof value.abstain_reason === 'string')
+  )
+}
+
+/** CA-07：驗證 `ComparisonReportData`（結構化比較報告）。
+ * `supporting_report_a/b` 與 `supporting_evidence_a/b` 為選填，存在時須
+ * 通過既有 `isReport`/`isEvidence` guard——與 `isComparisonAnalyzeData`
+ * 共用同一個 source of truth，不會分岔。 */
+export function isComparisonReportData(value: unknown): value is ComparisonReportData {
+  if (!isPlainObject(value)) return false
+  if (typeof value.coin_a !== 'string') return false
+  if (typeof value.coin_b !== 'string') return false
+  if (typeof value.query !== 'string') return false
+  if (typeof value.conclusion !== 'string') return false
+  if (!Array.isArray(value.dimensions) || !value.dimensions.every(isComparisonDimension)) return false
+  if (typeof value.confidence !== 'number') return false
+  if (!isStringArray(value.limits)) return false
+  if (!isStringArray(value.could_flip)) return false
+  if (typeof value.generated_at !== 'string') return false
+  if (value.supporting_report_a !== undefined && !isReport(value.supporting_report_a)) return false
+  if (value.supporting_report_b !== undefined && !isReport(value.supporting_report_b)) return false
+  if (value.supporting_evidence_a !== undefined && !(Array.isArray(value.supporting_evidence_a) && value.supporting_evidence_a.every(isEvidence))) return false
+  if (value.supporting_evidence_b !== undefined && !(Array.isArray(value.supporting_evidence_b) && value.supporting_evidence_b.every(isEvidence))) return false
+  return true
 }
 
 // ── /api/status ──────────────────────────────────────────────────────────
