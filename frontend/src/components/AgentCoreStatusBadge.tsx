@@ -64,6 +64,7 @@ export default function AgentCoreStatusBadge({
       className={`agentcore-status agentcore-status--${state}`}
       role="status"
       aria-live="polite"
+      aria-label={label}
       data-testid="agentcore-status"
       title={label}
     >

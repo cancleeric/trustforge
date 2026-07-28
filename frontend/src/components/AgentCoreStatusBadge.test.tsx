@@ -32,6 +32,7 @@ test('shows configured state returned by the same-origin API', async () => {
     'title',
     'AgentCore selected',
   )
+  expect(screen.getByRole('status')).toHaveAccessibleName('AgentCore selected')
 })
 
 test('does not claim a connection when the API fails', async () => {
