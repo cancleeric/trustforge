@@ -732,6 +732,7 @@ fi
 ZIP="$REPO_ROOT/build/trustforge_app.zip"
 assert_zip_contains "$ZIP" "scripts/fetch_scheduler.py" "zip 封包含 scripts/fetch_scheduler.py"
 assert_zip_contains "$ZIP" "trustforge/web.py" "zip 封包仍含 trustforge/（既有回歸）"
+assert_zip_contains "$ZIP" "trustforge_core/__init__.py" "zip 封包含 production 必要 trustforge_core/"
 
 # IAM DynamoDB reconcile：首次建置這條路徑也要在 instance 分支之前跑過
 # put-role-policy，鎖兩個 table 各自的 ARN（不給 Resource "*"）。
