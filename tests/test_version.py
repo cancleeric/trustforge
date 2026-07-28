@@ -123,7 +123,7 @@ def test_deploy_lambda_stamps_version_like_deploy_ec2():
 
     assert 'GIT_VER="v${PACKAGE_VER}"' in ec2_script
     assert 'GIT_VER="v${PACKAGE_VER}"' in lambda_script
-    canonical_reader = "from scripts.release_version import package_version"
+    canonical_reader = 'runpy.run_path("scripts/release_version.py")["package_version"]'
     assert canonical_reader in ec2_script
     assert canonical_reader in lambda_script
     assert '_version.py' in lambda_script
