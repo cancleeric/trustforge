@@ -958,6 +958,7 @@ def test_content_addressed_router_artifact_fails_closed_on_cross_device_publish(
     _, archive, manifest, runtime_lock = _minimal_router_runtime_fixture(tmp_path)
     releases = tmp_path / "releases"
     releases.mkdir(mode=0o755)
+    releases.chmod(0o755)
     real_lstat = os.lstat
 
     def wrong_owner_lstat(path):
