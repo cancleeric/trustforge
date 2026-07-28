@@ -36,7 +36,7 @@ from .ingestion.base import collect
 from .ingestion.cache import doc_from_dict, doc_to_dict
 from .ledger import append_run
 from .schema import COIN_POOL, QuestionType, iso_utc
-from .trust.scoring import aggregate, build_stance_fn, score
+from .trust.scoring import build_stance_fn
 from .feature_store import TrustFeatureStore
 
 STAGES = ("source_ingestion", "claim_extraction", "trust_reasoning", "evidence_assembly", "report_delivery")
@@ -1035,16 +1035,44 @@ class AnalysisFlow:
         return package
 
     def _stage_trust_reasoning(self, package: dict) -> dict:
+        from .agent.authoritative_kernel_mapper import run_authoritative_judgment
+        from .agent.kernel_mapper import to_kernel_claim
+        from .direction_resolution import resolve_direction
+
         finite = [d.ts for d in package["docs"] if math.isfinite(d.ts)]
         now = min(max(finite, default=time.time()), time.time())
         stance = build_stance_fn(stance_client=None, stance_remaining_time_fn=package["log"].remaining)
         # `offline` 反映 Step1（`_stage_claim_extraction`）決定的真實 live 狀態，
         # 不再寫死 True——`stance_client=None` 本來就不會真的打 Bedrock 分類，
         # 這裡只影響 DS EM 離線 fallback 是否觸發（見 `score()` docstring）。
-        package["scored"] = score(package["claims"], now, stance_fn=stance, offline=package["client"].offline, dynamic_reputation=True)
-        package["brief"] = aggregate(package["scored"], package["job"]["question"], coin=package["job"]["coin"])
+        direction = resolve_direction(
+            tuple(to_kernel_claim(claim) for claim in package["claims"]),
+            coin=package["job"]["coin"],
+            pit_epoch=now,
+        )
+        (
+            package["kernel_output"],
+            package["scored"],
+            package["brief"],
+            package["kernel_judgment"],
+        ) = run_authoritative_judgment(
+            package["claims"],
+            pit_epoch=now,
+            coin=package["job"]["coin"],
+            query=package["job"]["question"],
+            direction=direction,
+            stance_fn=stance,
+            offline=package["client"].offline,
+        )
         package["stance"] = stance
-        package["log"].record("pipeline.step2.start", summary=f"scored {len(package['scored'])} claims")
+        package["log"].record(
+            "judgment.derive",
+            params={
+                "judgment_source": "trustforge_core.run_kernel",
+                "contract_version": package["kernel_output"].contract_version,
+            },
+            summary=f"kernel scored {len(package['scored'])} claims",
+        )
         return package
 
     def _stage_evidence_assembly(self, package: dict) -> dict:
@@ -1056,6 +1084,7 @@ class AnalysisFlow:
             return build_report(
                 job["question"], job["coin"], QuestionType(job["question_type"]), package["brief"],
                 client=client, log=log, stance_fn=package["stance"], scored=package["scored"],
+                kernel_judgment=package["kernel_judgment"],
                 locale=package.get("locale", DEFAULT_NARRATIVE_LOCALE),
             )
 

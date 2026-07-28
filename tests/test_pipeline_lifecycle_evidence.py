@@ -65,8 +65,13 @@ def test_formal_run_logs_policy_provider_and_kernel_evidence(monkeypatch):
     assert llm_resolution[0]["params"]["invoked"] is True
 
     assert policy_events[0]["params"].get("event") == "policy_snapshot"
-    assert any("kernel_confidence" in event["params"] for event in kernel_events)
-    assert any("kernel_abstain" in event["params"] for event in kernel_events)
+    assert any(
+        event["params"].get("judgment_source") == "trustforge_core.run_kernel"
+        and "confidence" in event["params"]
+        and "contract_version" in event["params"]
+        for event in kernel_events
+    )
+    assert any("abstain" in event["params"] for event in kernel_events)
 
     policy_idx = events.index(policy_events[0])
     provider_idx = events.index(provider_events[0])
