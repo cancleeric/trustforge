@@ -552,6 +552,107 @@ class AnalysisFlow:
                 job_id = existing["job_id"] if existing else None
             return question_id, job_id
 
+    def submit_multi_angle(self, coin: str, question: str, *,
+                           locale: str = DEFAULT_NARRATIVE_LOCALE) -> dict[str, Any]:
+        """建立同一個 snapshot，同時跑五角度（#809）。
+
+        回傳 {snapshot_id, job_ids: {mode: job_id}, coin}。
+        五角度共用同一份 immutable source snapshot（解決 G-MA-2）。
+        """
+        coin = coin.strip().upper()
+        if coin not in COIN_POOL:
+            raise ValueError(f"unsupported coin: {coin}")
+        locale = normalize_locale(locale)
+        snapshot_id = self.create_snapshot(coin, query=question)
+        job_ids: dict[str, str | None] = {}
+        for mode, (_qtype, template) in MODES.items():
+            mode_question = template.format(coin=coin)
+            self.register_question(coin, mode, mode_question, enqueue=False)
+            job_id = self.enqueue_job(snapshot_id, mode, mode_question,
+                                      origin="manual", locale=locale)
+            job_ids[mode] = job_id
+        self._append_lineage(
+            "multi_angle_submitted", entity_type="multi_angle_run",
+            entity_id=f"ma-{snapshot_id}", snapshot_id=snapshot_id,
+            metadata={"coin": coin, "job_ids": job_ids, "locale": locale},
+        )
+        return {"snapshot_id": snapshot_id, "job_ids": job_ids, "coin": coin}
+
+    def multi_angle_status(self, coin: str, snapshot_id: str | None = None) -> dict[str, Any] | None:
+        """回傳指定幣種的最新 multi-angle synthesis 結果。
+
+        支援指定 snapshot_id 或取最新。readonly safe。
+        """
+        if self._readonly_store_missing():
+            return None
+        coin = coin.strip().upper()
+        if snapshot_id:
+            row = self._conn().execute(
+                "SELECT payload_json FROM analysis_results "
+                "WHERE snapshot_id=? AND coin=? AND mode='multi_angle' "
+                "ORDER BY published_at DESC LIMIT 1",
+                (snapshot_id, coin),
+            ).fetchone()
+        else:
+            row = self._conn().execute(
+                "SELECT payload_json FROM analysis_results "
+                "WHERE coin=? AND mode='multi_angle' "
+                "ORDER BY published_at DESC LIMIT 1",
+                (coin,),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["payload_json"])
+
+    def _maybe_trigger_synthesis(self, snapshot_id: str, coin: str) -> bool:
+        """檢查同 snapshot 五角度是否全部完成，觸發 synthesis（#809）。
+
+        由 _stage_report_delivery 在 COMMIT 後 fail-soft 呼叫。
+        最後完成的 job 觸發此函式。Synthesis 是確定性演算法，不呼叫 LLM。
+        """
+        completed = self._conn().execute(
+            "SELECT DISTINCT mode FROM analysis_results WHERE snapshot_id=? AND coin=?",
+            (snapshot_id, coin),
+        ).fetchall()
+        completed_modes = {row["mode"] for row in completed}
+        if not set(MODES.keys()) <= completed_modes:
+            return False
+        # 避免重複觸發
+        existing = self._conn().execute(
+            "SELECT 1 FROM analysis_results WHERE snapshot_id=? AND coin=? AND mode='multi_angle'",
+            (snapshot_id, coin),
+        ).fetchone()
+        if existing:
+            return False
+        from .multi_angle import angle_result_from_payload, synthesize_angles
+        angles = []
+        for mode in MODES:
+            row = self._conn().execute(
+                "SELECT payload_json, job_id FROM analysis_results "
+                "WHERE snapshot_id=? AND coin=? AND mode=? "
+                "ORDER BY published_at DESC LIMIT 1",
+                (snapshot_id, coin, mode),
+            ).fetchone()
+            if row:
+                angles.append(angle_result_from_payload(mode, row["payload_json"], job_id=row["job_id"]))
+        if len(angles) < len(MODES):
+            return False
+        report = synthesize_angles(angles, coin, snapshot_id)
+        now = time.time()
+        result_id = f"result-ma-{snapshot_id}"
+        self._conn().execute(
+            "INSERT OR REPLACE INTO analysis_results VALUES(?,?,?,?,?,?,?,?)",
+            (result_id, f"ma-{snapshot_id}", snapshot_id, coin, "multi_angle",
+             "五角度綜合評估", json.dumps(report.to_dict(), ensure_ascii=False), now),
+        )
+        self._append_lineage(
+            "multi_angle_synthesized", entity_type="multi_angle_result",
+            entity_id=result_id, snapshot_id=snapshot_id,
+            metadata={"consensus": report.consensus, "conflicts_count": len(report.conflicts),
+                      "evidence_independence": report.evidence_independence},
+        )
+        return True
+
     def question_context(self, coin: str, mode: str, question: str, *, limit: int = 5) -> dict[str, Any]:
         """Retrieve semantically similar prior questions and their published answers.
 
@@ -1152,6 +1253,14 @@ class AnalysisFlow:
             self._conn().execute("COMMIT")
         except Exception:
             self._conn().execute("ROLLBACK"); raise
+        # #809: Multi-angle synthesis 觸發（fail-soft，不影響 report_delivery）
+        try:
+            self._maybe_trigger_synthesis(job["snapshot_id"], job["coin"])
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "multi-angle synthesis trigger failed (fail-soft) for snapshot=%s coin=%s",
+                job["snapshot_id"], job["coin"], exc_info=True,
+            )
         return package
 
     def status(self) -> dict[str, Any]:
