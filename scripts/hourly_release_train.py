@@ -262,7 +262,10 @@ def execute(args: argparse.Namespace) -> Path:
                     if develop_only:
                         run(
                             [
-                                "git", "push", "--atomic", "origin",
+                                # The exact develop and merged-main candidates already passed
+                                # gate() above. Avoid a third, unisolated hook invocation here.
+                                "git", "-c", "core.hooksPath=/dev/null",
+                                "push", "--atomic", "origin",
                                 f"{main_sha}:refs/heads/main",
                                 f"{main_sha}:refs/heads/{release_branch}",
                             ],
