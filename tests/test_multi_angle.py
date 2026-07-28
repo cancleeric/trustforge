@@ -283,6 +283,7 @@ class TestSynthesizeAbstain:
         report = synthesize_angles(angles, "BTC", "snap-pa")
 
         assert report.consensus == "偏多"
+        assert report.decision_state == "partial_abstain"
         # confidence 只算 active 角度
         assert report.consensus_confidence == pytest.approx(0.65, abs=0.001)
         assert any("棄權" in lim for lim in report.limits)
@@ -293,7 +294,8 @@ class TestSynthesizeAbstain:
 
         report = synthesize_angles(angles, "ETH", "snap-fa")
 
-        assert report.consensus == "full_abstain"
+        assert report.consensus == "不明"
+        assert report.decision_state == "full_abstain"
         assert report.consensus_confidence == 0.0
         assert report.conflicts == []
         assert "棄權" in report.synthesis_summary
@@ -307,6 +309,7 @@ class TestSynthesizeAbstain:
 
         report = synthesize_angles(angles, "BTC", "snap-no-promo")
         assert report.consensus == "偏多"
+        assert report.decision_state == "partial_abstain"
 
 
 # ---------------------------------------------------------------------------

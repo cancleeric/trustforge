@@ -54,9 +54,10 @@ class TestSubmitMultiAngle:
         assert "multi_angle_submitted" in types
 
     def test_budget_preflight_rejects_before_snapshot(self, flow, monkeypatch):
-        monkeypatch.setattr("trustforge.analysis_flow.budget_guard.request_max_cost_usd", lambda: 1.0)
-        monkeypatch.setattr("trustforge.analysis_flow.budget_guard.daily_cap_usd", lambda: 4.0)
-        monkeypatch.setattr("trustforge.analysis_flow.budget_guard.daily_cost_usd", lambda: 0.0)
+        monkeypatch.setattr(
+            "trustforge.analysis_flow.budget_guard.try_reserve_request_budget_batch",
+            lambda _count: None,
+        )
         before = flow._conn().execute("SELECT count(*) FROM analysis_snapshots").fetchone()[0]
         with pytest.raises(MultiAngleBudgetError):
             flow.submit_multi_angle("BTC", "budget denied")
@@ -64,6 +65,10 @@ class TestSubmitMultiAngle:
         assert after == before
 
     def test_capacity_rejects_without_partial_jobs_or_snapshot(self, flow, monkeypatch):
+        flow._conn().execute(
+            "INSERT INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
+            ("snap-btc-existing", "BTC", time.time(), "old", "[]", 0),
+        )
         monkeypatch.setattr("trustforge.analysis_flow.QUEUE_CAPACITY", 4)
         before_snapshots = flow._conn().execute(
             "SELECT count(*) FROM analysis_snapshots"
@@ -75,13 +80,56 @@ class TestSubmitMultiAngle:
             "SELECT count(*) FROM analysis_snapshots"
         ).fetchone()[0] == before_snapshots
 
+    def test_batch_reservation_remains_held_until_run_finishes(self, flow, monkeypatch):
+        reservations = iter([0.25, None])
+        released: list[float] = []
+        monkeypatch.setattr(
+            "trustforge.analysis_flow.budget_guard.try_reserve_request_budget_batch",
+            lambda _count: next(reservations),
+        )
+        monkeypatch.setattr(
+            "trustforge.analysis_flow.budget_guard.release_request_budget",
+            lambda amount: released.append(amount),
+        )
+        first = flow.submit_multi_angle("BTC", "first")
+        with pytest.raises(MultiAngleBudgetError):
+            flow.submit_multi_angle("ETH", "second")
+        stored = flow._conn().execute(
+            "SELECT reserved_usd FROM analysis_multi_angle_runs WHERE snapshot_id=?",
+            (first["snapshot_id"],),
+        ).fetchone()[0]
+        assert stored == 0.25
+        assert released == []
+
+    def test_transaction_failure_removes_exact_new_snapshot_with_prior_same_coin(
+        self, flow, monkeypatch
+    ):
+        flow._conn().execute(
+            "INSERT INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
+            ("snap-btc-prior", "BTC", time.time(), "prior", "[]", 0),
+        )
+        before = flow._conn().execute(
+            "SELECT snapshot_id FROM analysis_snapshots"
+        ).fetchall()
+        monkeypatch.setattr(
+            flow, "_checkpoint",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("tx fail")),
+        )
+        with pytest.raises(RuntimeError, match="tx fail"):
+            flow.submit_multi_angle("BTC", "new snapshot")
+        after = flow._conn().execute(
+            "SELECT snapshot_id FROM analysis_snapshots"
+        ).fetchall()
+        assert [row[0] for row in after] == [row[0] for row in before]
+        assert flow._conn().execute("SELECT count(*) FROM analysis_jobs").fetchone()[0] == 0
+
 
 class TestMaybeTriggerSynthesis:
     def _insert_fake_result(self, flow, snapshot_id: str, coin: str, mode: str):
         """Insert a fake analysis_results row for testing."""
         flow._conn().execute(
-            "INSERT OR IGNORE INTO analysis_multi_angle_runs VALUES(?,?,?)",
-            (snapshot_id, coin, time.time()),
+            "INSERT OR IGNORE INTO analysis_multi_angle_runs VALUES(?,?,?,?)",
+            (snapshot_id, coin, time.time(), 0.0),
         )
         payload = json.dumps({
             "report": {
@@ -201,6 +249,27 @@ class TestMaybeTriggerSynthesis:
             (snapshot_id,),
         ).fetchone()[0] == 0
 
+    def test_daemon_recover_repairs_stale_synthesis_claim(self, flow):
+        snapshot_id = "snap-btc-crash-recovery"
+        flow._conn().execute(
+            "INSERT INTO analysis_snapshots VALUES(?,?,?,?,?,?)",
+            (snapshot_id, "BTC", time.time(), "revcrash", "[]", 0),
+        )
+        for mode in MODES:
+            self._insert_fake_result(flow, snapshot_id, "BTC", mode)
+        flow._conn().execute(
+            "INSERT OR REPLACE INTO analysis_synthesis_claims VALUES(?,?,?)",
+            (snapshot_id, "BTC", 0.0),
+        )
+
+        flow.recover()
+
+        assert flow._conn().execute(
+            "SELECT count(*) FROM analysis_results "
+            "WHERE snapshot_id=? AND mode='multi_angle'",
+            (snapshot_id,),
+        ).fetchone()[0] == 1
+
 
 class TestMultiAngleStatus:
     def test_returns_none_when_no_result(self, flow):
@@ -215,8 +284,8 @@ class TestMultiAngleStatus:
         )
         # Insert all five angles + trigger synthesis
         flow._conn().execute(
-            "INSERT INTO analysis_multi_angle_runs VALUES(?,?,?)",
-            (snapshot_id, "SOL", time.time()),
+            "INSERT INTO analysis_multi_angle_runs VALUES(?,?,?,?)",
+            (snapshot_id, "SOL", time.time(), 0.0),
         )
         modes = list(MODES.keys())
         for mode in modes:
@@ -252,8 +321,8 @@ class TestMultiAngleStatus:
                 (snap_id, "XRP", time.time(), f"rev-{snap_id}", "[]", 0),
             )
             flow._conn().execute(
-                "INSERT INTO analysis_multi_angle_runs VALUES(?,?,?)",
-                (snap_id, "XRP", time.time()),
+                "INSERT INTO analysis_multi_angle_runs VALUES(?,?,?,?)",
+                (snap_id, "XRP", time.time(), 0.0),
             )
             for mode in MODES:
                 payload = json.dumps({

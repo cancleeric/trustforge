@@ -4,12 +4,14 @@
  * Desktop: table layout
  * Mobile: card layout (via CSS grid)
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useHermesI18n } from './hermesI18n'
 import ConflictBadge from './ConflictBadge'
 import type { AngleResult, MultiAngleReport } from '../lib/multiAngleEndpoints'
 import { fetchMultiAngleReport, submitMultiAngle } from '../lib/multiAngleEndpoints'
 import { getAnalysisJob } from '../lib/endpoints'
+import AnalysisReportView from '../components/AnalysisReportView'
+import type { AnalyzeData } from '../lib/types'
 
 const MODE_LABELS_ZH: Record<string, string> = {
   risk: '風險評估',
@@ -46,12 +48,39 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
   const [loading, setLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<{ jobId: string; data: AnalyzeData } | null>(null)
+  const generation = useRef(0)
+  const timers = useRef(new Set<number>())
+  const controller = useRef(new AbortController())
+
+  const schedule = useCallback((callback: () => void, delay: number) => {
+    const timer = window.setTimeout(() => {
+      timers.current.delete(timer)
+      callback()
+    }, delay)
+    timers.current.add(timer)
+  }, [])
+
+  useEffect(() => {
+    generation.current += 1
+    controller.current.abort()
+    controller.current = new AbortController()
+    const activeController = controller.current
+    const activeTimers = timers.current
+    setExpanded(null)
+    return () => {
+      generation.current += 1
+      activeController.abort()
+      activeTimers.forEach(window.clearTimeout)
+      activeTimers.clear()
+    }
+  }, [coin, snapshotId])
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const result = await fetchMultiAngleReport(coin, snapshotId)
+      const result = await fetchMultiAngleReport(coin, snapshotId, controller.current.signal)
       setReport(result.multi_angle)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '載入失敗')
@@ -66,18 +95,28 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
     setSubmitting(true)
     setError(null)
     try {
-      const result = await submitMultiAngle(coin, undefined, locale)
+      const result = await submitMultiAngle(coin, undefined, locale, controller.current.signal)
+      const requestGeneration = generation.current
       const deadline = Date.now() + 10 * 60 * 1000
+      let transientFailures = 0
       const poll = async () => {
+        if (requestGeneration !== generation.current) return
         const states = await Promise.all(
-          Object.values(result.job_ids).map((jobId) => getAnalysisJob(jobId)),
+          Object.values(result.job_ids).map((jobId) => getAnalysisJob(jobId, controller.current.signal)),
         )
+        if (states.some((state) => !state.ok)) {
+          transientFailures += 1
+          if (transientFailures > 5) throw new Error('分析狀態暫時無法讀取')
+          schedule(() => { void poll().catch(handlePollError) }, 1500)
+          return
+        }
+        transientFailures = 0
         const failed = states.find((state) => state.ok && state.data.state === 'failed')
         if (failed?.ok) {
           throw new Error(failed.data.error || '其中一個分析角度執行失敗')
         }
         if (states.every((state) => state.ok && state.data.state === 'completed')) {
-          const data = await fetchMultiAngleReport(coin, result.snapshot_id)
+          const data = await fetchMultiAngleReport(coin, result.snapshot_id, controller.current.signal)
           if (data.multi_angle) {
             setReport(data.multi_angle)
             setSubmitting(false)
@@ -87,18 +126,35 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
         if (Date.now() >= deadline) {
           throw new Error('分析工作長時間沒有完成，請稍後再確認')
         }
-        window.setTimeout(() => { void poll().catch(handlePollError) }, 1500)
+        schedule(() => { void poll().catch(handlePollError) }, 1500)
       }
       const handlePollError = (reason: unknown) => {
         setError(reason instanceof Error ? reason.message : '分析狀態讀取失敗')
         setSubmitting(false)
       }
-      window.setTimeout(() => { void poll().catch(handlePollError) }, 1000)
+      schedule(() => { void poll().catch(handlePollError) }, 1000)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '提交失敗')
       setSubmitting(false)
     }
-  }, [coin, locale])
+  }, [coin, locale, schedule])
+
+  const handleAngleClick = useCallback(async (angle: AngleResult) => {
+    onAngleClick?.(angle)
+    if (!angle.job_id) return
+    if (expanded?.jobId === angle.job_id) {
+      setExpanded(null)
+      return
+    }
+    const requestGeneration = generation.current
+    const result = await getAnalysisJob(angle.job_id, controller.current.signal)
+    if (requestGeneration !== generation.current) return
+    if (!result.ok || result.data.state !== 'completed' || !result.data.result) {
+      setError('此角度明細尚未完成')
+      return
+    }
+    setExpanded({ jobId: angle.job_id, data: result.data.result })
+  }, [expanded?.jobId, onAngleClick])
 
   if (loading) {
     return <div className="animate-pulse text-center py-8 text-gray-400">{t('maTitle') || '五角度綜合分析'}...</div>
@@ -125,7 +181,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
 
   const consensusLabel = {
     '偏多': '📈 偏多', '偏空': '📉 偏空', '中性': '⚖️ 中性',
-    '分歧': '⚡ 分歧', 'partial_abstain': '⚠️ 部分棄權', 'full_abstain': '🚫 全部棄權',
+    '分歧': '⚡ 分歧', '不明': '🚫 無法判定',
   }[report.consensus] ?? report.consensus
 
   return (
@@ -139,6 +195,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
       {/* Consensus bar */}
       <div className="flex flex-wrap items-center gap-4 mb-4 p-3 rounded-lg" style={{ backgroundColor: 'rgba(124, 58, 237, 0.1)' }}>
         <span className="text-base font-semibold">{consensusLabel}</span>
+        {report.decision_state !== 'normal' && (
+          <span className="text-sm text-orange-400">
+            {report.decision_state === 'partial_abstain' ? '部分角度棄權' : '全部角度棄權'}
+          </span>
+        )}
         <span className="text-sm text-gray-300">
           {t('maConfidence') || '信心'} {report.consensus_confidence.toFixed(2)}
         </span>
@@ -169,11 +230,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
               <tr
                 key={angle.angle}
                 className="border-b border-gray-800 hover:bg-gray-800/50 cursor-pointer transition-colors"
-                onClick={() => onAngleClick?.(angle)}
+                onClick={() => { void handleAngleClick(angle) }}
                 role="button"
                 tabIndex={0}
                 aria-label={`${modeLabels[angle.angle] ?? angle.angle} 詳細`}
-                onKeyDown={(e) => e.key === 'Enter' && onAngleClick?.(angle)}
+                onKeyDown={(e) => e.key === 'Enter' && void handleAngleClick(angle)}
               >
                 <td className="py-2 px-2 font-medium">{modeLabels[angle.angle] ?? angle.angle}</td>
                 <td className="py-2 px-2">{angle.decision_state === 'abstain' ? '—' : angle.direction}</td>
@@ -202,11 +263,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
           <div
             key={angle.angle}
             className="rounded-lg border border-gray-700 p-3 cursor-pointer hover:border-purple-500 transition-colors"
-            onClick={() => onAngleClick?.(angle)}
+            onClick={() => { void handleAngleClick(angle) }}
             role="button"
             tabIndex={0}
             aria-label={`${modeLabels[angle.angle] ?? angle.angle} 詳細`}
-            onKeyDown={(e) => e.key === 'Enter' && onAngleClick?.(angle)}
+            onKeyDown={(e) => e.key === 'Enter' && void handleAngleClick(angle)}
           >
             <div className="flex items-center justify-between mb-1">
               <span className="font-medium">{modeLabels[angle.angle] ?? angle.angle}</span>
@@ -240,6 +301,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
       <div className="mt-3 text-sm text-gray-300 italic">
         {report.narration ?? report.synthesis_summary}
       </div>
+      {expanded && (
+        <div className="mt-4 border-t border-gray-700 pt-4">
+          <AnalysisReportView data={expanded.data} />
+        </div>
+      )}
     </section>
   )
 }

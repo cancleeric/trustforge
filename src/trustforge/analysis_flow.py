@@ -133,7 +133,7 @@ def _db_path(path: str | Path | None = None) -> Path:
 
 
 @contextmanager
-def _bedrock_live_attempt(log: ExecutionLog):
+def _bedrock_live_attempt(log: ExecutionLog, *, prepaid: bool = False):
     """Yield 是否本次真的允許呼叫 Bedrock（fail-closed；任何判定例外一律離線）。
 
     複用既有閘邏輯，不另造繞過 `budget_guard`／每日 cap 的新路徑（`STAGES`
@@ -176,8 +176,11 @@ def _bedrock_live_attempt(log: ExecutionLog):
             and not budget_guard.daily_cap_exceeded()
             and budget_guard.narrative_model_priced()
         ):
-            reservation = budget_guard.try_reserve_request_budget()
-            live = reservation is not None
+            if prepaid:
+                live = True
+            else:
+                reservation = budget_guard.try_reserve_request_budget()
+                live = reservation is not None
     except Exception:
         logging.getLogger(__name__).warning(
             "analysis_flow: bedrock live 閘判定失敗，fail-closed 強制本次離線",
@@ -349,6 +352,7 @@ class AnalysisFlow:
         );
         CREATE TABLE IF NOT EXISTS analysis_multi_angle_runs (
           snapshot_id TEXT NOT NULL, coin TEXT NOT NULL, submitted_at REAL NOT NULL,
+          reserved_usd REAL NOT NULL DEFAULT 0,
           PRIMARY KEY(snapshot_id, coin)
         );
         CREATE INDEX IF NOT EXISTS idx_analysis_results_lookup
@@ -410,6 +414,14 @@ class AnalysisFlow:
             conn.execute("ALTER TABLE analysis_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'scheduled'")
         if "priority" not in columns:
             conn.execute(f"ALTER TABLE analysis_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT {SCHEDULED_PRIORITY}")
+        run_columns = {row[1] for row in conn.execute(
+            "PRAGMA table_info(analysis_multi_angle_runs)"
+        ).fetchall()}
+        if "reserved_usd" not in run_columns:
+            conn.execute(
+                "ALTER TABLE analysis_multi_angle_runs "
+                "ADD COLUMN reserved_usd REAL NOT NULL DEFAULT 0"
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_priority ON analysis_jobs(state,priority,created_at)")
         TrustFeatureStore.ensure_schema(conn)
         # Backfill the dialogue surface for databases created before conversation
@@ -579,21 +591,12 @@ class AnalysisFlow:
         if coin not in COIN_POOL:
             raise ValueError(f"unsupported coin: {coin}")
         locale = normalize_locale(locale)
-        # 五角度各自會跑一次完整 pipeline；送出前先用既有單次保守上限做
-        # 5x fail-closed 預檢。這不是實際扣款（每個 worker 仍走正式原子預留），
-        # 但可避免明知額度不足仍建立五個永遠只能降級的工作。
-        required = budget_guard.request_max_cost_usd() * len(MODES)
-        try:
-            available = max(
-                0.0,
-                budget_guard.daily_cap_usd() - budget_guard.daily_cost_usd(),
-            )
-        except Exception as exc:
-            raise MultiAngleBudgetError("無法確認今日剩餘分析預算") from exc
-        if available < required:
-            raise MultiAngleBudgetError(
-                f"五角度分析需要最多 ${required:.4f}，今日僅剩 ${available:.4f}"
-            )
+        # 原子預留五個 fan-out pipeline 並計入其他 in-flight reservations。
+        # 選填 narration 是第六次呼叫，合成時另走 `_bedrock_live_attempt`
+        # 單獨預留；第六份額度不足時只降級 deterministic narration。
+        reservation = budget_guard.try_reserve_request_budget_batch(len(MODES))
+        if reservation is None:
+            raise MultiAngleBudgetError("無法原子預留五角度分析預算")
 
         conn = self._conn()
         # 快速容量預檢放在資料收集/建立 snapshot 之前，避免明知不可能原子
@@ -623,8 +626,8 @@ class AnalysisFlow:
                     f"佇列剩餘容量不足，五角度需同時保留 {len(planned)} 個位置"
                 )
             conn.execute(
-                "INSERT INTO analysis_multi_angle_runs VALUES(?,?,?)",
-                (snapshot_id, coin, now),
+                "INSERT INTO analysis_multi_angle_runs VALUES(?,?,?,?)",
+                (snapshot_id, coin, now, reservation),
             )
             for mode, mode_question, job_id in planned:
                 qtype = QUESTION_TYPES[mode]
@@ -657,6 +660,12 @@ class AnalysisFlow:
         except Exception:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
+            conn.execute(
+                "DELETE FROM analysis_snapshots WHERE snapshot_id=? "
+                "AND NOT EXISTS(SELECT 1 FROM analysis_jobs WHERE snapshot_id=?)",
+                (snapshot_id, snapshot_id),
+            )
+            budget_guard.release_request_budget(reservation)
             raise
 
         for mode, mode_question, job_id in planned:
@@ -819,7 +828,27 @@ class AnalysisFlow:
             metadata={"consensus": report.consensus, "conflicts_count": len(report.conflicts),
                       "evidence_independence": report.evidence_independence},
         )
+        reserved_row = conn.execute(
+            "SELECT reserved_usd FROM analysis_multi_angle_runs "
+            "WHERE snapshot_id=? AND coin=?",
+            (snapshot_id, coin),
+        ).fetchone()
+        reserved = float(reserved_row["reserved_usd"] or 0.0) if reserved_row else 0.0
+        if reserved:
+            conn.execute(
+                "UPDATE analysis_multi_angle_runs SET reserved_usd=0 "
+                "WHERE snapshot_id=? AND coin=?",
+                (snapshot_id, coin),
+            )
+            budget_guard.release_request_budget(reserved)
         return True
+
+    def _multi_angle_prepaid(self, snapshot_id: str) -> bool:
+        row = self._conn().execute(
+            "SELECT reserved_usd FROM analysis_multi_angle_runs WHERE snapshot_id=?",
+            (snapshot_id,),
+        ).fetchone()
+        return bool(row and float(row["reserved_usd"] or 0.0) > 0)
 
     def question_context(self, coin: str, mode: str, question: str, *, limit: int = 5) -> dict[str, Any]:
         """Retrieve semantically similar prior questions and their published answers.
@@ -1052,7 +1081,38 @@ class AnalysisFlow:
                     repaired["jobs"] += self._restart_from_snapshot([row["job_id"] for row in orphaned])
         if repaired["workers"] or repaired["jobs"]:
             logging.warning("Hermes runtime reconciled: %s", repaired)
+        repaired["syntheses"] = self._recover_multi_angle_syntheses()
         return repaired
+
+    def _recover_multi_angle_syntheses(self) -> int:
+        """重啟/巡檢時補做五角度已完成但 crash 遺失的 synthesis。"""
+        cutoff = time.time() - STALE_RUNNING_JOB_THRESHOLD_SECONDS
+        rows = self._conn().execute(
+            """SELECT r.snapshot_id,r.coin
+               FROM analysis_multi_angle_runs r
+               WHERE NOT EXISTS(
+                 SELECT 1 FROM analysis_results x
+                 WHERE x.snapshot_id=r.snapshot_id AND x.coin=r.coin AND x.mode='multi_angle'
+               )
+               AND (SELECT count(DISTINCT x.mode) FROM analysis_results x
+                    WHERE x.snapshot_id=r.snapshot_id AND x.coin=r.coin
+                    AND x.mode IN ('risk','sentiment','fundamentals','news','catalyst'))=5
+               AND NOT EXISTS(
+                 SELECT 1 FROM analysis_synthesis_claims c
+                 WHERE c.snapshot_id=r.snapshot_id AND c.coin=r.coin AND c.claimed_at>=?
+               )""",
+            (cutoff,),
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            self._conn().execute(
+                "DELETE FROM analysis_synthesis_claims "
+                "WHERE snapshot_id=? AND coin=? AND claimed_at<?",
+                (row["snapshot_id"], row["coin"], cutoff),
+            )
+            if self._maybe_trigger_synthesis(row["snapshot_id"], row["coin"]):
+                recovered += 1
+        return recovered
 
     def recover(self) -> None:
         # Runtime payloads are deliberately not pickled. Restart from immutable snapshot.
@@ -1069,6 +1129,7 @@ class AnalysisFlow:
             self._checkpoint(row["job_id"], STAGES[0], "queued")
             self._put_package(STAGES[0], {"job_id": row["job_id"], "locale": self._locale_for_job(row["job_id"])})
             self._adopted.add(row["job_id"])
+        self._recover_multi_angle_syntheses()
 
     def reap_stale_running(self, threshold_seconds: float | None = None) -> int:
         """Recover `state='running'` jobs whose checkpoint stopped advancing.
@@ -1295,7 +1356,9 @@ class AnalysisFlow:
 
     def _stage_claim_extraction(self, package: dict) -> dict:
         log = package["log"]
-        with _bedrock_live_attempt(log) as live:
+        with _bedrock_live_attempt(
+            log, prepaid=self._multi_angle_prepaid(package["job"]["snapshot_id"])
+        ) as live:
             client = BedrockClient(offline=not live)
             package["client"] = client
             package["claims"] = client.extract_claims_with_llm(package["docs"], log=log)
@@ -1366,7 +1429,9 @@ class AnalysisFlow:
             # 是兩次獨立真呼叫，中間隔著佇列等待——重新走一次獨立的 live 閘 +
             # 預留，反映呼叫當下最新的 cap 狀態，不沿用 Step1 當時已過期的判定
             # （避免這段等待期間才發生的「已達每日上限」被繞過）。
-            with _bedrock_live_attempt(log) as live:
+            with _bedrock_live_attempt(
+                log, prepaid=self._multi_angle_prepaid(package["job"]["snapshot_id"])
+            ) as live:
                 client.offline = not live
                 package["report"], package["evidence"] = _build_report()
         return package

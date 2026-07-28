@@ -30,6 +30,7 @@ export interface MultiAngleReport {
   snapshot_id: string
   angles: AngleResult[]
   consensus: string
+  decision_state: 'normal' | 'partial_abstain' | 'full_abstain'
   consensus_confidence: number
   conflicts: AngleConflict[]
   agreement_matrix: Record<string, Record<string, string>>
@@ -84,10 +85,11 @@ async function decodeEnvelope<T>(res: Response): Promise<T> {
 export async function fetchMultiAngleReport(
   coin: string,
   snapshotId?: string,
+  signal?: AbortSignal,
 ): Promise<{ multi_angle: MultiAngleReport | null; message?: string }> {
   const params = new URLSearchParams({ coin })
   if (snapshotId) params.set('snapshot_id', snapshotId)
-  const res = await fetch(`/api/multi-angle?${params}`)
+  const res = await fetch(`/api/multi-angle?${params}`, { signal })
   return decodeEnvelope<{ multi_angle: MultiAngleReport | null; message?: string }>(res)
 }
 
@@ -95,6 +97,7 @@ export async function submitMultiAngle(
   coin: string,
   question?: string,
   locale?: string,
+  signal?: AbortSignal,
 ): Promise<MultiAngleSubmitResponse> {
   const body: Record<string, string> = { coin }
   if (question) body.question = question
@@ -103,6 +106,7 @@ export async function submitMultiAngle(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
   return decodeEnvelope<MultiAngleSubmitResponse>(res)
 }

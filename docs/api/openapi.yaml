@@ -1147,6 +1147,56 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/multi-angle:
+    get:
+      tags: [analysis]
+      operationId: getMultiAngleAnalysis
+      summary: 讀取同一 snapshot 的五角度綜合報告
+      parameters:
+        - in: query
+          name: coin
+          required: true
+          schema: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        - in: query
+          name: snapshot_id
+          required: false
+          schema: {type: string, maxLength: 100}
+      responses:
+        "200":
+          description: 綜合報告；尚未完成時 data.multi_angle 為 null
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OkEnvelope"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+    post:
+      tags: [analysis]
+      operationId: submitMultiAngleAnalysis
+      summary: 原子建立同 snapshot 的五個分析工作
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [coin]
+              properties:
+                coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+                question: {type: string, minLength: 1, maxLength: 1000}
+                locale: {type: string, enum: [zh-Hant, en]}
+      responses:
+        "200":
+          description: 五個工作已完整入列，回傳 snapshot_id 與逐角度 job_ids
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OkEnvelope"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409":
+          description: 無法原子預留五個工作所需預算
+        "503":
+          description: 佇列無法同時容納五個工作
+        "502": {$ref: "#/components/responses/UpstreamError"}
+
   /api/analysis-job:
     get:
       tags: [analysis]

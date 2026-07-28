@@ -499,6 +499,26 @@ class BudgetReservation:
             self._reserved = round(self._reserved + cost, 6)
             return cost
 
+    def try_reserve_batch(
+        self, count: int, ledger: Ledger | None = None, *, now_fn=time.time
+    ) -> float | None:
+        """原子預留 ``count`` 個請求，計入既有 in-flight reservations。"""
+        if count <= 0:
+            raise ValueError("count must be positive")
+        cap = daily_cap_usd()
+        cost = round(request_max_cost_usd() * count, 6)
+        if cap <= 0:
+            return None
+        with self._lock:
+            try:
+                spent = daily_cost_usd(ledger, now_fn=now_fn)
+            except Exception:
+                return None
+            if round(spent + self._reserved + cost, 6) > cap:
+                return None
+            self._reserved = round(self._reserved + cost, 6)
+            return cost
+
     def release(self, amount: float | None) -> None:
         """釋放先前 `try_reserve()` 成功回傳的預留額度（reconcile：pipeline
         跑完/失敗都要呼叫，讓其他 in-flight／後續請求能用回這段額度）。
@@ -583,6 +603,28 @@ def try_reserve_request_budget(
         )
         _maybe_emit_budget_backend_down_metric(now_fn())
         return _RESERVATION.try_reserve(ledger, now_fn=now_fn)
+    return cost if ok else None
+
+
+def try_reserve_request_budget_batch(
+    count: int, ledger: Ledger | None = None, *, now_fn=time.time
+) -> float | None:
+    """一次原子預留多個請求；用於 fan-out 前的 fail-closed admission gate。"""
+    if count <= 0:
+        raise ValueError("count must be positive")
+    backend = _budget_counter_backend()
+    if backend is None:
+        return _RESERVATION.try_reserve_batch(count, ledger, now_fn=now_fn)
+    cap = daily_cap_usd()
+    cost = round(request_max_cost_usd() * count, 6)
+    try:
+        spent = daily_cost_usd(ledger, now_fn=now_fn)
+        ok = backend.try_reserve(spent_daily=spent, cost=cost, cap=cap, now=now_fn())
+    except BudgetBackendError:
+        _maybe_emit_budget_backend_down_metric(now_fn())
+        return _RESERVATION.try_reserve_batch(count, ledger, now_fn=now_fn)
+    except Exception:
+        return None
     return cost if ok else None
 
 

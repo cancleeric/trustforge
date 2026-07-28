@@ -12,7 +12,6 @@ import { ErrorState, LoadingState } from '../components/StatusStates'
 import { useBridgeHologram } from '../components/BridgeHologramContext'
 import { useHermesI18n } from '../hermes/hermesI18n'
 import MultiAngleOverview from '../hermes/MultiAngleOverview'
-import type { AngleResult } from '../lib/multiAngleEndpoints'
 
 function defaultQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
@@ -367,18 +366,6 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
     setRequestNonce((value) => value + 1)
   }
 
-  const handleAngleClick = (angle: AngleResult) => {
-    if (!angle.job_id || !angle.question) return
-    const next = new URLSearchParams(searchParams)
-    next.set('coin', params.coin)
-    next.set('mode', angle.angle)
-    next.set('type', angle.qtype)
-    next.set('q', angle.question)
-    next.set('job', angle.job_id)
-    next.set('snapshot', angle.snapshot_id)
-    setSearchParams(next)
-  }
-
   const showFullAnalysis = () => {
     const next = new URLSearchParams(searchParams)
     next.delete('focus')
@@ -482,7 +469,6 @@ export default function AnalyzePage({ embedded = false, onBusyChange, resubmitSi
               <MultiAngleOverview
                 coin={params.coin}
                 snapshotId={searchParams.get('snapshot') || undefined}
-                onAngleClick={handleAngleClick}
               />
             )}
             {!loading && !error && !data && (

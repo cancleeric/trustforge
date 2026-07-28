@@ -123,6 +123,7 @@ class MultiAngleReport:
     agreement_matrix: dict[str, dict[str, str]]  # {angle_a: {angle_b: "agree"|"disagree"|"one_abstain"}}
     synthesis_summary: str              # 確定性模板組裝的摘要文字
     evidence_independence: float        # 獨立來源比例 0.0 ~ 1.0
+    decision_state: str = "normal"      # normal | partial_abstain | full_abstain
     limits: list[str] = field(default_factory=list)
     generated_at: str = ""
 
@@ -136,6 +137,7 @@ class MultiAngleReport:
             "snapshot_id": self.snapshot_id,
             "angles": [a.to_dict() for a in self.angles],
             "consensus": self.consensus,
+            "decision_state": self.decision_state,
             "consensus_confidence": self.consensus_confidence,
             "conflicts": [c.to_dict() for c in self.conflicts],
             "agreement_matrix": self.agreement_matrix,
@@ -386,6 +388,7 @@ def synthesize_angles(angles: list[AngleResult], coin: str, snapshot_id: str) ->
         agreement_matrix=agreement_matrix,
         synthesis_summary=synthesis_summary,
         evidence_independence=evidence_independence,
+        decision_state="partial_abstain" if abstained else "normal",
         limits=limits,
     )
 
@@ -400,12 +403,13 @@ def _full_abstain_report(angles: list[AngleResult], coin: str, snapshot_id: str)
         coin=coin,
         snapshot_id=snapshot_id,
         angles=angles,
-        consensus="full_abstain",
+        consensus="不明",
         consensus_confidence=0.0,
         conflicts=[],
         agreement_matrix=_build_agreement_matrix(angles),
         synthesis_summary="五角度均因資料不足棄權，無法產出綜合結論。",
         evidence_independence=0.0,
+        decision_state="full_abstain",
         limits=["所有分析角度均因證據不足而棄權，目前無法給出任何方向性結論。"],
     )
 

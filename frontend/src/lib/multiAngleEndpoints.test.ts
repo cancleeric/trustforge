@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  MultiAngleApiError,
   fetchMultiAngleReport,
   submitMultiAngle,
 } from './multiAngleEndpoints'
@@ -14,7 +13,7 @@ describe('multi-angle API errors', () => {
       error: { code: 'multi_angle_queue_unavailable', message: 'full' },
     }), { status: 503, headers: { 'Content-Type': 'application/json' } })))
 
-    await expect(submitMultiAngle('BTC')).rejects.toMatchObject<MultiAngleApiError>({
+    await expect(submitMultiAngle('BTC')).rejects.toMatchObject({
       code: 'multi_angle_queue_unavailable',
       message: 'full',
       status: 503,
