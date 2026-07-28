@@ -50,7 +50,7 @@ CONTENT=$(cat "$SCRIPT_DIR/zero_downtime_restart.sh")
 assert_contains "has canary start" "$CONTENT" "trustforge-canary"
 assert_contains "has health check" "$CONTENT" "healthz"
 assert_contains "has primary restart" "$CONTENT" "systemctl restart trustforge"
-assert_contains "has canary stop" "$CONTENT" "systemctl stop trustforge-canary"
+assert_contains "has canary stop" "$CONTENT" 'systemctl stop "$CANARY_UNIT"'
 assert_contains "has wait_for_health function" "$CONTENT" "wait_for_health"
 
 # --- Test 3: Correct port defaults ---

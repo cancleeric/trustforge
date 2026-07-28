@@ -300,3 +300,32 @@ def load_runtime_endpoint_manifest_from_env() -> bytes | None:
             "required release identity configuration is absent: " + ", ".join(missing)
         )
     return load_runtime_endpoint_manifest(**values)
+
+
+def load_runtime_release_manifest(
+    *, release_manifest_path: str | Path, release_artifact_path: str | Path
+) -> bytes:
+    """Load identity for the classic single-instance production service."""
+    release = _object(_read_config_file(release_manifest_path), "release manifest")
+    digest = release.get("artifact_digest")
+    if (
+        release.get("manifest_version") != "trustforge.release-manifest/v1"
+        or not isinstance(digest, str)
+        or not _DIGEST.fullmatch(digest)
+        or not hmac.compare_digest(_artifact_digest(release_artifact_path), digest)
+    ):
+        raise EndpointManifestError("runtime release manifest does not match artifact")
+    return canonical_json(release)
+
+
+def load_runtime_release_manifest_from_env() -> bytes | None:
+    manifest = os.getenv("TRUSTFORGE_RUNTIME_RELEASE_MANIFEST_PATH", "").strip()
+    artifact = os.getenv("TRUSTFORGE_RUNTIME_RELEASE_ARTIFACT_PATH", "").strip()
+    if not manifest and not artifact:
+        return None
+    if not manifest or not artifact:
+        raise EndpointManifestError("runtime release identity configuration is incomplete")
+    return load_runtime_release_manifest(
+        release_manifest_path=manifest,
+        release_artifact_path=artifact,
+    )

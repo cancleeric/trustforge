@@ -73,7 +73,10 @@ from .budget_guard import (
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
-from .endpoint_manifest import load_runtime_endpoint_manifest_from_env
+from .endpoint_manifest import (
+    load_runtime_endpoint_manifest_from_env,
+    load_runtime_release_manifest_from_env,
+)
 
 try:
     from ._version import VERSION
@@ -8001,7 +8004,10 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET_impl(self, u, qs, client_ip):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
-        if u.path == "/.well-known/trustforge-release-manifest":
+        if u.path in {
+            "/.well-known/trustforge-release-manifest",
+            "/api/.well-known/trustforge-release-manifest",
+        }:
             if _ENDPOINT_MANIFEST_BODY is None:
                 return self._send(404, "not found", "text/plain; charset=utf-8")
             return self._send(
@@ -8503,7 +8509,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     global _ENDPOINT_MANIFEST_BODY
-    _ENDPOINT_MANIFEST_BODY = load_runtime_endpoint_manifest_from_env()
+    _ENDPOINT_MANIFEST_BODY = (
+        load_runtime_endpoint_manifest_from_env()
+        or load_runtime_release_manifest_from_env()
+    )
 
     from .ingestion.hoyabit import log_hoyabit_startup_status
 
