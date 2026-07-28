@@ -136,6 +136,11 @@ const messages = {
     qcModeRisk: '風險評估', qcModeSentiment: '市場情緒', qcModeFundamentals: '基本面驗證', qcModeNews: '事件與新聞', qcModeCatalyst: '催化因素',
     qcHeading: '設定本次分析', qcSubtext: '送出後會建立獨立 run，來源與執行紀錄不會覆蓋既有結果。',
     qcModeLabel: '分析角度（選填）', qcComparePrefix: '雙幣比較請至', qcCompareLinkLabel: '比較頁', qcComparePeriod: '。',
+    // Multi-angle (#810)
+    maTitle: '五角度綜合分析', maConsensus: '共識', maIndependence: '證據獨立性',
+    maConflict: '分歧', maAngle: '角度', maDirection: '結論', maConfidence: '信心', maState: '狀態',
+    maSubmit: '執行五角度綜合分析', maCostWarning: '消耗約 5× 分析預算',
+    maNoResult: '尚無五角度綜合分析結果',
     // 官方三題型（HOYA BIT 命題格式，見 docs/competition/COMPETITION-OFFICIAL.md）
     qtypeLabel: '官方題型', qtypeMultiSource: '多源整合', qtypeHypothesis: '假設驗證', qtypeComparison: '比較分析',
     qtypeComparisonHint: '比較分析會帶你到雙幣比較頁。',
@@ -494,6 +499,11 @@ const messages = {
     qcModeRisk: 'Risk assessment', qcModeSentiment: 'Market sentiment', qcModeFundamentals: 'Fundamentals check', qcModeNews: 'Events & news', qcModeCatalyst: 'Catalysts',
     qcHeading: 'Configure this analysis', qcSubtext: 'Submitting creates an independent run; sources and execution logs never overwrite existing results.',
     qcModeLabel: 'Analysis focus (optional)', qcComparePrefix: 'For two-coin comparison, go to', qcCompareLinkLabel: 'the compare page', qcComparePeriod: '.',
+    // Multi-angle (#810)
+    maTitle: 'Multi-angle Analysis', maConsensus: 'Consensus', maIndependence: 'Evidence independence',
+    maConflict: 'Conflict', maAngle: 'Angle', maDirection: 'Direction', maConfidence: 'Confidence', maState: 'State',
+    maSubmit: 'Run multi-angle analysis', maCostWarning: 'Uses ~5× analysis budget',
+    maNoResult: 'No multi-angle result yet',
     // 官方三題型。英文字串比中文長很多（「多源整合」4 字 vs 25 字元），PLAN §7
     // 指明 en 才是換行／溢出的觸發語系，兩個語系都要各驗一次。
     qtypeLabel: 'Official question type', qtypeMultiSource: 'Multi-source integration', qtypeHypothesis: 'Hypothesis validation', qtypeComparison: 'Comparative analysis',
