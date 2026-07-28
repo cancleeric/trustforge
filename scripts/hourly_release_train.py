@@ -12,6 +12,8 @@ import tempfile
 import hashlib
 import secrets
 import re
+import io
+import tarfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,39 +106,52 @@ def gate(worktree: Path) -> None:
     trusted_modules = ROOT / "frontend" / "node_modules"
     if not trusted_venv.is_dir() or not trusted_modules.is_dir():
         raise RuntimeError("trusted gate dependencies are not installed")
-    subprocess.run(["/bin/cp", "-cR", str(trusted_venv), str(worktree / ".venv")], check=True)
-    subprocess.run(
-        ["/bin/cp", "-cR", str(trusted_modules), str(worktree / "frontend" / "node_modules")],
-        check=True,
-    )
     trusted_hook = run(["git", "show", "origin/main:.githooks/pre-push"], capture=True)
-    hook = worktree / ".git-trusted-pre-push"
-    hook.write_text(trusted_hook, encoding="utf-8")
-    hook.chmod(0o500)
-    command = [str(hook)]
-    sandbox = Path("/usr/bin/sandbox-exec")
-    if sys.platform == "darwin":
-        if not sandbox.is_file():
-            raise RuntimeError("trusted gate sandbox is unavailable")
-        home = Path.home()
-        profile = (
-            f'(version 1)(allow default)(deny file-read* (subpath "{home}"))'
-            f'(allow file-read* (subpath "{ROOT / ".git"}"))'
-            f'(deny file-write* (subpath "{home}"))'
-            '(deny process-exec (literal "/usr/bin/security"))'
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    ).stdout
+    with tempfile.TemporaryDirectory(prefix="trustforge-gate-") as temporary:
+        sandbox_root = Path(temporary)
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+            bundle.extractall(sandbox_root, filter="data")
+        subprocess.run(["/bin/cp", "-cR", str(trusted_venv), str(sandbox_root / ".venv")], check=True)
+        subprocess.run(
+            ["/bin/cp", "-cR", str(trusted_modules), str(sandbox_root / "frontend" / "node_modules")],
+            check=True,
         )
-        command = [str(sandbox), "-p", profile, str(hook)]
-    env = dict(os.environ)
-    for key in tuple(env):
-        if key.startswith(("AWS_", "GH_", "GITHUB_")):
-            env.pop(key)
-    env["TRUSTFORGE_GATE_SANDBOX"] = "1"
-    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    subprocess.run(command, cwd=worktree, env=env, check=True)
-    hook.unlink()
-    shutil.rmtree(worktree / "frontend" / "node_modules")
-    shutil.rmtree(worktree / ".venv")
+        git_env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        subprocess.run(["git", "init", "-q"], cwd=sandbox_root, env=git_env, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=sandbox_root, env=git_env, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=TrustForge Gate", "-c", "user.email=gate@localhost", "commit", "-qm", "candidate"],
+            cwd=sandbox_root,
+            env=git_env,
+            check=True,
+        )
+        hook = sandbox_root / ".git-trusted-pre-push"
+        hook.write_text(trusted_hook, encoding="utf-8")
+        hook.chmod(0o500)
+        command = [str(hook)]
+        sandbox = Path("/usr/bin/sandbox-exec")
+        if sys.platform == "darwin":
+            if not sandbox.is_file():
+                raise RuntimeError("trusted gate sandbox is unavailable")
+            home = Path.home()
+            profile = (
+                f'(version 1)(allow default)(deny file-read* (subpath "{home}"))'
+                f'(deny file-write* (subpath "{home}"))'
+                '(deny process-exec (literal "/usr/bin/security"))'
+            )
+            command = [str(sandbox), "-p", profile, str(hook)]
+        env = dict(git_env)
+        for key in tuple(env):
+            if key.startswith(("AWS_", "GH_", "GITHUB_")):
+                env.pop(key)
+        env["TRUSTFORGE_GATE_SANDBOX"] = "1"
+        subprocess.run(command, cwd=sandbox_root, env=env, check=True)
 
 
 def production_identity() -> tuple[str, str]:
