@@ -414,6 +414,11 @@ def test_same_root_publish_performs_real_mode_and_receipt_swap(
     stage.mkdir(mode=0o750)
     (stage / "control").mkdir(mode=0o750)
     (stage / "router-outcomes").mkdir(mode=0o750)
+    target.chmod(0o700)
+    (target / "control").chmod(0o700)
+    stage.chmod(0o750)
+    (stage / "control").chmod(0o750)
+    (stage / "router-outcomes").chmod(0o750)
     (stage / "provision-receipt.json").write_text("authenticated receipt\n")
 
     _publish_swap(stage, target, backup, journal)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tempfile
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -29,8 +30,9 @@ from trustforge.upgrade_ports import (
 from trustforge.upgrade_queue import UpgradeQueue
 from trustforge.safe_fs import SafePathError
 
+TEST_TEMP_ROOT = Path(tempfile.gettempdir()).resolve()
 SANDBOX_AUTHORITY = SandboxAttestationAuthority(
-    Path("/private/tmp")
+    TEST_TEMP_ROOT
     / f"trustforge-upgrade-queue-test-capabilities-{os.getpid()}.jsonl"
 )
 
@@ -51,7 +53,7 @@ def attestation(
     db_identity=None,
 ):
     db_identity = str(
-        Path(db_identity or "/private/tmp/trustforge-test-default.sqlite3")
+        Path(db_identity or TEST_TEMP_ROOT / "trustforge-test-default.sqlite3")
         .resolve(strict=False)
     )
     details = {"candidate": {"family": "analysis", "revision": revision}, "tests": 24}

@@ -14,6 +14,7 @@ import TrustTrendSection from './TrustTrendSection'
 import { DirectionBadge } from './Badges'
 import { LoadingState } from './StatusStates'
 import HermesExecutionPanel from './HermesExecutionPanel'
+import ReportDownloads from './ReportDownloads'
 import { formatTimestamp } from '../lib/format'
 import PlainLanguageResultSummary from './PlainLanguageResultSummary'
 import GlossaryTerm from './GlossaryTerm'
@@ -34,6 +35,20 @@ const TrustRadarChart = lazy(() => import('./TrustRadarChart'))
  * 在標題列顯示本次分析用的模式（呼應設計稿 R2 mode: multi_source 標籤）。 */
 export default function AnalysisReportView({ data, heading, mode }: { data: AnalyzeData; heading?: string; mode?: string }) {
   const { t } = useHermesI18n()
+  // N71（CEO：「手動分析的報告要在哪裡下載？執行過程的 LOG 要在哪裡看」）：
+  // 三顆下載鈕本來只在最底下那個預設收合的「技術細節」裡，跑完分析根本找不到。
+  // 這裡在報告抬頭補一排永遠看得見的動作，外加一顆帶去執行過程面板的按鈕
+  // （順手把 `<details>` 展開——不展開的話捲過去只會看到收合的標題列）。
+  const openExecution = () => {
+    const details = document.getElementById('technical-analysis') as HTMLDetailsElement | null
+    if (!details) return
+    details.open = true
+    details.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const execution = data.execution ?? {
+    agent: 'hermes', run_id: 'legacy-run', started_at: data.report.generated_at,
+    elapsed_sec: 0, budget_sec: 900, nodes: [],
+  }
   return (
     <div className="flex flex-col gap-4">
       <div className="border-b border-tf-border pb-4">
@@ -57,6 +72,15 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
           <a href="/help" className="ml-auto text-tf-link no-underline hover:underline">
             {t('arvViewFullHelp')}
           </a>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2" aria-label={t('arvReportActions')}>
+          <ReportDownloads
+            execution={execution}
+            events={data.execution_log}
+            report={data.report}
+            evidence={data.evidence}
+            onOpenExecution={openExecution}
+          />
         </div>
       </div>
 

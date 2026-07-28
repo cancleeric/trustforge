@@ -229,6 +229,20 @@ class DynamoDBBudgetCounter:
             _log.warning("[budget_counter] 讀取 reserved_total 失敗：%s", exc, exc_info=True)
             return 0.0
 
+    def current_reserved_strict(self, now: float | None = None) -> float:
+        """唯讀查詢共享預留額度；讀取失敗時明確報錯供 fail-closed gate 使用。"""
+        try:
+            resp = self._get_table().get_item(
+                Key={"source_id": _PK, "coin": _day_key(now)},
+                ConsistentRead=True,
+            )
+            item = resp.get("Item")
+            if not item or item.get("reserved_total") is None:
+                return 0.0
+            return float(item["reserved_total"])
+        except Exception as exc:
+            raise BudgetBackendError(f"budget counter 讀取失敗: {exc}") from exc
+
 
 _default_counter_lock = threading.Lock()
 _default_counter_instance: "DynamoDBBudgetCounter | None" = None

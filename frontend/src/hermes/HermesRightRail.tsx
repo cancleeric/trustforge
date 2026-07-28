@@ -4,6 +4,7 @@ import { jobStateLabel, modeLabel, useHermesI18n } from './hermesI18n'
 import type { AnalysisFlowData, AnalysisJourneyData } from '../lib/endpoints'
 import type { CrossSourceSignal } from '../lib/types'
 import GlossaryTerm, { type GlossaryKey } from '../components/GlossaryTerm'
+import WhaleActivityPanel, { type WhaleSummary } from '../components/WhaleActivityPanel'
 
 interface HermesRightRailProps {
   selCoin: GalaxyCoin
@@ -15,12 +16,13 @@ interface HermesRightRailProps {
   journey?: AnalysisJourneyData | null
   crossSignal?: CrossSourceSignal | null
   trainingStatus?: ReactNode
+  whaleSummary?: WhaleSummary | null
   onOpenComposite: () => void
   onOpenDivergence: () => void
 }
 
 export default function HermesRightRail({
-  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, trainingStatus, onOpenComposite, onOpenDivergence,
+  selCoin, components, derivation, displayScore, derived, flow, journey, crossSignal, trainingStatus, whaleSummary, onOpenComposite, onOpenDivergence,
 }: HermesRightRailProps) {
   const { t } = useHermesI18n()
   const { score, tier, full } = selCoin
@@ -133,6 +135,9 @@ export default function HermesRightRail({
       </div>
 
       {trainingStatus && <div className="hermes-training-status-slot">{trainingStatus}</div>}
+
+      {/* Whale Alert — 鯨魚大額轉帳即時信號 */}
+      <WhaleActivityPanel summary={whaleSummary ?? null} />
 
       {/* divergence alert dock */}
       <div

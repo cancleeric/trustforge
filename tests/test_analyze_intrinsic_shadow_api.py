@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from trustforge import web
+from trustforge.comparison_contract import ComparisonRunResult
 from trustforge.schema import Report
 
 
@@ -50,7 +51,7 @@ def test_real_btc_and_bnb_api_shadow_is_zero_without_changing_official_fields() 
 
 def test_comparison_attaches_independent_shadow_assessments() -> None:
     payload = web._build_comparison_json_payload(
-        report("BTC"), [], report("BNB"), [], _Log()
+        ComparisonRunResult(report_a=report("BTC"), evidence_a=[], report_b=report("BNB"), evidence_b=[], comparison=None, log=_Log())
     )
 
     assert payload["report_a"]["asset_intrinsic_assessment"]["asset_id"] == "asset:btc"

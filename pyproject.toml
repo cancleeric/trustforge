@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trustforge"
-version = "0.18.3"
+dynamic = ["version"]
 description = "加密市場分析 AI Agent：多源資訊的信任提煉（AWS Bedrock）"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,13 +25,22 @@ dependencies = [
 # CI（.github/workflows/ci.yml）以 `pip install -e ".[dev]"` 安裝後直接跑 `pytest`，
 # 若這裡沒帶 pytest-cov，addopts 的 --cov 會讓 pytest 報「unrecognized arguments」
 # → CI 直接變紅。故新增 pytest-cov 是覆蓋率閘的必要相依。
-dev = ["pytest>=8", "moto[dynamodb]>=5", "pytest-cov>=5", "pytest-xdist>=3", "jsonschema>=4,<5"]
+dev = [
+    "pytest>=8",
+    "moto[dynamodb]>=5",
+    "pytest-cov>=5",
+    "pytest-xdist>=3,<4",
+    "jsonschema>=4,<5",
+]
 
 [project.scripts]
 trustforge = "trustforge.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "trustforge._version.VERSION"}
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
@@ -41,7 +50,7 @@ testpaths = ["tests"]
 # ⛔ --cov-fail-under 由 .githooks/pre-push 顯式傳入，不放在 addopts 中——
 #   放在 addopts 會讓單一測試檔也吃閥值（跑子集時全倉 9%→白爆）。
 #   本機跑子集時仍可加 --no-cov 加速。
-addopts = "--cov=trustforge --cov=trustforge_core --cov-report=term-missing"
+addopts = "--cov=trustforge --cov=trustforge_core"
 # Suppress benign GC-timing ResourceWarnings from sqlite3 connections.  All
 # sqlite-backed stores (SourceEventArchive, TrustFeatureStore,
 # SQLiteCacheBackend, AnalysisFlow) define close()+__del__, but Python's
@@ -59,27 +68,4 @@ markers = [
     "network: tests that perform real or simulated network-bound behavior",
     "serial: tests that must not run concurrently with related tests",
     "subprocess: tests that spawn external commands or child processes",
-]
-
-[tool.coverage.run]
-# 效能優化：只追蹤行覆蓋率（不追蹤分支），省約 30% coverage overhead。
-# pre-push 閘門只看 --cov-fail-under=75（行覆蓋率），不需要 branch coverage。
-branch = false
-# 排除測試本身和已知不需追蹤的模組
-omit = [
-    "tests/*",
-    "src/trustforge/cli.py",
-    "*/__pycache__/*",
-]
-
-[tool.coverage.report]
-# 不在 term-missing 報告裡列出測試檔
-omit = [
-    "tests/*",
-]
-# 排除不需覆蓋的 defensive code
-exclude_lines = [
-    "pragma: no cover",
-    "if __name__ == .__main__.",
-    "if TYPE_CHECKING:",
 ]

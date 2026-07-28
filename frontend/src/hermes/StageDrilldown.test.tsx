@@ -173,6 +173,35 @@ function telemetryNoEvidence(): BridgeHologramData {
   }
 }
 
+/** N72（CEO：「中間這幾個是幹嘛用的 要寫清楚」）：五關的抽屜以前打開只有
+ *  worker 代號與一堆數值，沒有一句話說這關在做什麼。這組斷言釘住「每一關
+ *  都必須有白話說明」，避免之後改版把它刪掉或只補其中幾關。 */
+describe('StageDrilldown 每一關都要說明自己在做什麼（N72）', () => {
+  const cases: Array<[string, RegExp]> = [
+    ['scan', /全部撈回來/],
+    ['filter', /丟掉不可信/],
+    ['crossverify', /互相對照/],
+    ['manipulation', /人為推動/],
+    ['composite', /加權合成/],
+  ]
+
+  it.each(cases)('%s 這一關有白話說明', (stage, expected) => {
+    render(
+      <HermesI18nProvider>
+        <StageDrilldown
+          selCoin={selCoin}
+          derivation={fallbackDerivation}
+          selectedStage={stage}
+          onClose={vi.fn()}
+          telemetry={telemetryWithEvidence()}
+        />
+      </HermesI18nProvider>,
+    )
+    expect(screen.getByText('這一關在做什麼')).toBeInTheDocument()
+    expect(screen.getByText(expected)).toBeInTheDocument()
+  })
+})
+
 describe('StageDrilldown composite drawer', () => {
   it('renders evidence label when analysis has evidence', () => {
     render(

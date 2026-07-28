@@ -112,6 +112,16 @@ class _WriteEvent:
         self.count_invocation = count_invocation
 
 
+class _FlushRequest:
+    """Queue barrier used by tests and orderly callers to await durable writes."""
+
+    __slots__ = ("completed", "succeeded")
+
+    def __init__(self) -> None:
+        self.completed = threading.Event()
+        self.succeeded = False
+
+
 class ModuleTelemetry:
     """Thread-safe 模組遙測 singleton。
 
@@ -124,7 +134,9 @@ class ModuleTelemetry:
     def __init__(self, db_path: str | None = None, store: TelemetryStore | None = None):
         self._db_path = db_path or _DEFAULT_DB_PATH
         self._store = store or SQLiteTelemetryStore(self._db_path)
-        self._queue: queue.Queue[_WriteEvent | None] = queue.Queue(maxsize=_QUEUE_MAX)
+        self._queue: queue.Queue[_WriteEvent | _FlushRequest | None] = queue.Queue(
+            maxsize=_QUEUE_MAX
+        )
         self._writer_thread: threading.Thread | None = None
         self._started = False
         self._init_db()
@@ -167,6 +179,7 @@ class ModuleTelemetry:
     def _writer_loop(self) -> None:
         """Background loop：從 queue 消費並 batch 寫入 SQLite。"""
         batch: list[_WriteEvent] = []
+        writes_ok_since_barrier = True
         while True:
             try:
                 # Block-wait for first event
@@ -174,6 +187,11 @@ class ModuleTelemetry:
                 if event is None:
                     # Shutdown signal
                     break
+                if isinstance(event, _FlushRequest):
+                    event.succeeded = writes_ok_since_barrier
+                    writes_ok_since_barrier = True
+                    event.completed.set()
+                    continue
                 batch.append(event)
                 # Drain remaining events (non-blocking)
                 while len(batch) < 64:
@@ -182,27 +200,42 @@ class ModuleTelemetry:
                         if ev is None:
                             self._flush_batch(batch)
                             return
+                        if isinstance(ev, _FlushRequest):
+                            writes_ok_since_barrier = (
+                                self._flush_batch(batch) and writes_ok_since_barrier
+                            )
+                            batch = []
+                            ev.succeeded = writes_ok_since_barrier
+                            writes_ok_since_barrier = True
+                            ev.completed.set()
+                            continue
                         batch.append(ev)
                     except queue.Empty:
                         break
-                self._flush_batch(batch)
+                writes_ok_since_barrier = (
+                    self._flush_batch(batch) and writes_ok_since_barrier
+                )
                 batch = []
             except queue.Empty:
                 if batch:
-                    self._flush_batch(batch)
+                    writes_ok_since_barrier = (
+                        self._flush_batch(batch) and writes_ok_since_barrier
+                    )
                     batch = []
             except Exception:
                 logger.warning("module_telemetry: writer loop error", exc_info=True)
                 batch = []
 
-    def _flush_batch(self, batch: list[_WriteEvent]) -> None:
+    def _flush_batch(self, batch: list[_WriteEvent]) -> bool:
         """Batch 寫入 SQLite。"""
         if not batch:
-            return
+            return True
         try:
             self._store.write_batch([_to_store_event(ev) for ev in batch])
+            return True
         except Exception:
             logger.warning("module_telemetry: flush_batch failed", exc_info=True)
+            return False
 
     def record_invocation(
         self,
@@ -309,6 +342,22 @@ class ModuleTelemetry:
             logger.warning("module_telemetry: get_all_telemetry failed", exc_info=True)
             return []
 
+    def flush(self, timeout: float = 2.0) -> bool:
+        """Wait until every event queued before this call is durably processed.
+
+        This is an explicit synchronization point, not a timing guess. Runtime
+        writes remain non-blocking; tests and shutdown-sensitive callers can use
+        the barrier instead of sleeping and hoping the writer has caught up.
+        """
+        if not self._started:
+            return True
+        request = _FlushRequest()
+        try:
+            self._queue.put(request, timeout=timeout)
+        except queue.Full:
+            return False
+        return request.completed.wait(timeout) and request.succeeded
+
     def shutdown(self) -> None:
         """關閉 writer thread（graceful）。"""
         if self._started:
@@ -380,6 +429,14 @@ def get_all_telemetry() -> list[TelemetryRecord]:
         return ModuleTelemetry.get_instance().get_all_telemetry()
     except Exception:
         return []
+
+
+def flush(timeout: float = 2.0) -> bool:
+    """Wait for module-level telemetry writes queued so far."""
+    try:
+        return ModuleTelemetry.get_instance().flush(timeout)
+    except Exception:
+        return False
 
 
 def record_state(

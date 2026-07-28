@@ -120,7 +120,6 @@ export default function HermesBeginnerNarrative() {
         borderRadius: 12,
         boxShadow: '0 20px 60px rgba(0,0,0,.6)',
         backdropFilter: 'blur(6px)',
-        willChange: 'backdrop-filter',
         padding: '14px 16px 16px',
       }}
     >

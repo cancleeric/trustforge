@@ -117,18 +117,17 @@ def handler(event, context=None):
 
             try:
                 if qtype == QuestionType.COMPARISON:
-                    report_a, evidence_a, report_b, evidence_b, log = web._do_comparison(
+                    result = web._do_comparison(
                         qs, client_ip=client_ip
                     )
+                    report_a, evidence_a, report_b, evidence_b, log = result
                     if path == "/analyze.json":
                         # codex vp-engineering 終審 H1（已實測證實 author 從此
                         # 入口外洩）：payload 組裝改呼叫 web.py 共用函式，跟
                         # web.py 自己的 `/analyze.json` 路由同一份，不再各自
                         # 複製、不會分岔（見 `web._build_comparison_json_payload`
                         # docstring）。
-                        payload = web._build_comparison_json_payload(
-                            report_a, evidence_a, report_b, evidence_b, log
-                        )
+                        payload = web._build_comparison_json_payload(result)
                         return _resp(200, json.dumps(payload, ensure_ascii=False, indent=2),
                                      "application/json; charset=utf-8")
                     query = qs.get("q", [""])[0]

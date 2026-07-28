@@ -482,6 +482,79 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
+  /api/whale-summary:
+    get:
+      tags: [observability]
+      operationId: getWhaleSummary
+      summary: 鯨魚大額轉帳即時摘要
+      description: |
+        從快取讀最新一批 Whale Alert 資料，聚合為交易所淨流入/流出、筆數、
+        最大單筆、最近 5 筆明細等即時統計。無資料時回傳空結構（total_count=0）。
+      parameters:
+        - name: coin
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BTC, ETH, SOL, BNB, XRP]
+            default: BTC
+      responses:
+        "200":
+          description: 鯨魚即時摘要
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
+  /api/whale-history:
+    get:
+      tags: [observability]
+      operationId: getWhaleHistory
+      summary: 鯨魚大額轉帳歷程
+      description: |
+        從 SourceEventArchive（Bronze truth）讀歷史 Whale Alert 資料，按天或
+        小時聚合為時序 + 明細。排程器持續運行後自動累積歷史。
+      parameters:
+        - name: coin
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BTC, ETH, SOL, BNB, XRP]
+            default: BTC
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [1, 7, 30]
+            default: 7
+      responses:
+        "200":
+          description: 歷程資料（summary + timeline + transfers）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OkEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+
   /api/data-plane-status:
     get:
       tags: [observability]
@@ -841,105 +914,6 @@ paths:
         "502":
           $ref: "#/components/responses/UpstreamError"
 
-  /api/multi-angle:
-    get:
-      tags: [analysis]
-      operationId: getMultiAngle
-      summary: 五角度綜合分析結果
-      description: |
-        唯讀。回傳指定幣種的最新五角度綜合分析結果（MultiAngleReport）。
-        可選 `snapshot_id` 參數指定特定快照。查無結果時回 200 + null。
-      parameters:
-        - in: query
-          name: coin
-          required: true
-          schema:
-            type: string
-          description: 幣種代碼，例如 `BTC`。
-        - in: query
-          name: snapshot_id
-          required: false
-          schema:
-            type: string
-          description: 指定快照 ID（選填，不指定則取最新）。
-      responses:
-        "200":
-          description: 五角度綜合分析結果
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        properties:
-                          multi_angle:
-                            type: object
-                            nullable: true
-                            description: MultiAngleReport 或 null（查無結果）
-        "400":
-          description: 參數錯誤
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-    post:
-      tags: [analysis]
-      operationId: postMultiAngle
-      summary: 觸發五角度綜合分析
-      description: |
-        建立同一份 immutable snapshot，同時為五個分析角度各排入一個 job。
-        五 job 全部完成後自動觸發 synthesis。
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [coin]
-              properties:
-                coin:
-                  type: string
-                  description: 幣種代碼
-                question:
-                  type: string
-                  description: 分析問題（選填，有預設模板）
-                locale:
-                  type: string
-                  description: 敘事語系（選填，預設 zh-Hant）
-      responses:
-        "200":
-          description: 五角度分析已排入佇列
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/OkEnvelope"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        required: [snapshot_id, job_ids, coin]
-                        properties:
-                          snapshot_id:
-                            type: string
-                          job_ids:
-                            type: object
-                          coin:
-                            type: string
-        "400":
-          description: 參數錯誤
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrEnvelope"
-        "502":
-          $ref: "#/components/responses/UpstreamError"
-
   /api/improvement-diagnostics:
     get:
       tags: [observability]
@@ -1245,6 +1219,56 @@ paths:
           description: 指定矩陣尚未發布
         "502":
           $ref: "#/components/responses/UpstreamError"
+
+  /api/multi-angle:
+    get:
+      tags: [analysis]
+      operationId: getMultiAngleAnalysis
+      summary: 讀取同一 snapshot 的五角度綜合報告
+      parameters:
+        - in: query
+          name: coin
+          required: true
+          schema: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+        - in: query
+          name: snapshot_id
+          required: false
+          schema: {type: string, maxLength: 100}
+      responses:
+        "200":
+          description: 綜合報告；尚未完成時 data.multi_angle 為 null
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OkEnvelope"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "502": {$ref: "#/components/responses/UpstreamError"}
+    post:
+      tags: [analysis]
+      operationId: submitMultiAngleAnalysis
+      summary: 原子建立同 snapshot 的五個分析工作
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [coin]
+              properties:
+                coin: {type: string, enum: [BTC, ETH, SOL, BNB, XRP]}
+                question: {type: string, minLength: 1, maxLength: 1000}
+                locale: {type: string, enum: [zh-Hant, en]}
+      responses:
+        "200":
+          description: 五個工作已完整入列，回傳 snapshot_id 與逐角度 job_ids
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OkEnvelope"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409":
+          description: 唯讀預檢顯示目前可觀測額度不足以啟動五個工作（未預扣款）
+        "503":
+          description: 佇列無法同時容納五個工作
+        "502": {$ref: "#/components/responses/UpstreamError"}
 
   /api/analysis-job:
     get:
@@ -2837,6 +2861,72 @@ components:
               summary:
                 type: string
 
+    ComparisonReportData:
+      type: object
+      description: CA-06 結構化比較報告（`ComparisonReport.to_dict()`），四個比較面向、綜合結論、限制與翻轉條件
+      required:
+        - coin_a
+        - coin_b
+        - query
+        - conclusion
+        - dimensions
+        - confidence
+        - limits
+        - could_flip
+        - generated_at
+      properties:
+        coin_a:
+          type: string
+        coin_b:
+          type: string
+        query:
+          type: string
+        conclusion:
+          type: string
+        dimensions:
+          type: array
+          items:
+            type: object
+            properties:
+              dimension:
+                type: string
+              decision:
+                type: string
+              reasoning:
+                type: string
+              confidence:
+                type: number
+              evidence_refs:
+                type: array
+                items:
+                  type: string
+              abstain_reason:
+                type: string
+        confidence:
+          type: number
+        limits:
+          type: array
+          items:
+            type: string
+        could_flip:
+          type: array
+          items:
+            type: string
+        generated_at:
+          type: string
+        supporting_report_a:
+          $ref: "#/components/schemas/Report"
+        supporting_report_b:
+          $ref: "#/components/schemas/Report"
+        supporting_evidence_a:
+          type: array
+          items:
+            $ref: "#/components/schemas/Evidence"
+        supporting_evidence_b:
+          type: array
+          items:
+            $ref: "#/components/schemas/Evidence"
+
     AnalyzeComparisonData:
       type: object
       required:
@@ -2891,6 +2981,9 @@ components:
           description: 兩幣共用同一份 execution log（同一次請求內先後跑 A、B 兩次分析）
           items:
             type: object
+        comparison_report:
+          $ref: "#/components/schemas/ComparisonReportData"
+          description: CA-06 結構化比較報告（`ComparisonReport.to_dict()`）；離線／樣本例可能為 null
 
     ExecutionManifest:
       type: object

@@ -6,9 +6,13 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useHermesI18n } from './hermesI18n'
+import type { MessageKey } from './hermesI18n'
 import ConflictBadge from './ConflictBadge'
 import type { AngleResult, MultiAngleReport } from '../lib/multiAngleEndpoints'
 import { fetchMultiAngleReport, submitMultiAngle } from '../lib/multiAngleEndpoints'
+import { getAnalysisJob } from '../lib/endpoints'
+import AnalysisReportView from '../components/AnalysisReportView'
+import type { AnalyzeData } from '../lib/types'
 
 const MODE_LABELS_ZH: Record<string, string> = {
   risk: '風險評估',
@@ -32,6 +36,20 @@ const STATE_COLORS: Record<string, string> = {
   abstain: '#6b7280',
 }
 
+const DECISION_STATE_KEY: Record<string, string> = {
+  normal: 'maDecisionNormal',
+  low_confidence: 'maDecisionLowConf',
+  abstain: 'maDecisionAbstain',
+}
+
+const CONSENSUS_KEY_MAP: Record<string, string> = {
+  '偏多': 'maConsensusBullish',
+  '偏空': 'maConsensusBearish',
+  '中性': 'maConsensusNeutral',
+  '分歧': 'maConsensusDivergent',
+  '不明': 'maConsensusUnknown',
+}
+
 interface MultiAngleOverviewProps {
   coin: string
   snapshotId?: string
@@ -45,110 +63,206 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
   const [loading, setLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const mountedRef = useRef(true)
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [expanded, setExpanded] = useState<{ jobId: string; data: AnalyzeData } | null>(null)
+  const [jobStates, setJobStates] = useState<Record<string, { state: string; error?: string }>>({})
+  const [submittedResult, setSubmittedResult] = useState<{
+    snapshot_id: string
+    job_ids: Record<string, string>
+    coin: string
+  } | null>(null)
+  const generation = useRef(0)
+  const timers = useRef(new Set<number>())
+  const controller = useRef(new AbortController())
+
+  const schedule = useCallback((callback: () => void, delay: number) => {
+    const timer = window.setTimeout(() => {
+      timers.current.delete(timer)
+      callback()
+    }, delay)
+    timers.current.add(timer)
+  }, [])
 
   useEffect(() => {
-    mountedRef.current = true
+    generation.current += 1
+    controller.current.abort()
+    controller.current = new AbortController()
+    const activeController = controller.current
+    const activeTimers = timers.current
+    setExpanded(null)
     return () => {
-      mountedRef.current = false
-      if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+      generation.current += 1
+      activeController.abort()
+      activeTimers.forEach(window.clearTimeout)
+      activeTimers.clear()
     }
-  }, [])
+  }, [coin, snapshotId])
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const result = await fetchMultiAngleReport(coin, snapshotId)
-      setReport(result?.multi_angle ?? null)
-    } catch {
-      setError('載入失敗')
+      const result = await fetchMultiAngleReport(coin, snapshotId, controller.current.signal)
+      setReport(result.multi_angle)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t('maErrorLoad'))
     } finally {
       setLoading(false)
     }
-  }, [coin, snapshotId])
+  }, [coin, snapshotId, t])
 
   useEffect(() => { load() }, [load])
 
   const handleSubmit = useCallback(async () => {
     setSubmitting(true)
     setError(null)
+    setJobStates({})
+    setSubmittedResult(null)
     try {
-      const result = await submitMultiAngle(coin)
-      if (result) {
-        let attempts = 0
-        const poll = async () => {
-          if (!mountedRef.current) return
-          attempts++
-          const data = await fetchMultiAngleReport(coin, result.snapshot_id)
-          if (!mountedRef.current) return
-          if (data?.multi_angle) {
+      const result = await submitMultiAngle(coin, undefined, locale, controller.current.signal)
+      setSubmittedResult(result)
+      const requestGeneration = generation.current
+      const deadline = Date.now() + 10 * 60 * 1000
+      let transientFailures = 0
+      const poll = async () => {
+        if (requestGeneration !== generation.current) return
+        const states = await Promise.all(
+          Object.values(result.job_ids).map((jobId) => getAnalysisJob(jobId, controller.current.signal)),
+        )
+        const nextStates: Record<string, { state: string; error?: string }> = {}
+        const entries = Object.entries(result.job_ids)
+        states.forEach((state, idx) => {
+          if (state.ok) nextStates[entries[idx][0]] = { state: state.data.state }
+          else nextStates[entries[idx][0]] = { state: 'error', error: 'unreachable' }
+        })
+        setJobStates({ ...nextStates })
+        if (states.some((state) => !state.ok)) {
+          transientFailures += 1
+          if (transientFailures > 5) throw new Error(t('maErrorStatusRead'))
+          schedule(() => { void poll().catch(handlePollError) }, 1500)
+          return
+        }
+        transientFailures = 0
+        const failed = states.find((state) => state.ok && state.data.state === 'failed')
+        if (failed?.ok) {
+          throw new Error(failed.data.error || t('maErrorJobFailed'))
+        }
+        if (states.every((state) => state.ok && state.data.state === 'completed')) {
+          const data = await fetchMultiAngleReport(coin, result.snapshot_id, controller.current.signal)
+          if (data.multi_angle) {
             setReport(data.multi_angle)
             setSubmitting(false)
-          } else if (attempts < 30) {
-            pollTimerRef.current = setTimeout(poll, Math.min(2000 + attempts * 500, 10000))
-          } else {
-            setError('分析超時，請稍後重新整理')
-            setSubmitting(false)
+            setSubmittedResult(null)
+            return
           }
         }
-        pollTimerRef.current = setTimeout(poll, 3000)
+        if (Date.now() >= deadline) {
+          throw new Error(t('maErrorTimeout'))
+        }
+        schedule(() => { void poll().catch(handlePollError) }, 1500)
       }
-    } catch {
-      setError('提交失敗')
+      const handlePollError = (reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : t('maErrorStatusRead'))
+        setSubmitting(false)
+        setSubmittedResult(null)
+      }
+      schedule(() => { void poll().catch(handlePollError) }, 1000)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t('maErrorSubmit'))
       setSubmitting(false)
+      setSubmittedResult(null)
     }
-  }, [coin])
+  }, [coin, locale, schedule, t])
+
+  const handleAngleClick = useCallback(async (angle: AngleResult) => {
+    onAngleClick?.(angle)
+    if (!angle.job_id) return
+    if (expanded?.jobId === angle.job_id) {
+      setExpanded(null)
+      return
+    }
+    const requestGeneration = generation.current
+    const result = await getAnalysisJob(angle.job_id, controller.current.signal)
+    if (requestGeneration !== generation.current) return
+    if (!result.ok || result.data.state !== 'completed' || !result.data.result) {
+      setError(t('maErrorDetailNotReady'))
+      return
+    }
+    setExpanded({ jobId: angle.job_id, data: result.data.result })
+  }, [expanded?.jobId, onAngleClick, t])
 
   if (loading) {
-    return <div className="animate-pulse text-center py-8 text-gray-400">{t('maTitle') || '五角度綜合分析'}...</div>
+    return <div className="animate-pulse text-center py-8 text-gray-400">{t('maTitle')}...</div>
   }
 
   if (!report) {
     return (
       <div className="text-center py-8">
-        <p className="text-gray-400 mb-4">{t('maNoResult') || '尚無五角度綜合分析結果'}</p>
+        <p className="text-gray-400 mb-4">{t('maNoResult')}</p>
         <button
           onClick={handleSubmit}
           disabled={submitting}
           className="px-4 py-2 rounded-lg font-medium transition-colors"
           style={{ backgroundColor: submitting ? '#374151' : '#7c3aed', color: '#fff' }}
-          aria-label={t('maSubmit') || '執行五角度綜合分析'}
+          aria-label={t('maSubmit')}
         >
-          {submitting ? '⏳ 分析中...' : `⚡ ${t('maSubmit') || '執行五角度綜合分析'}`}
+          {submitting ? t('maSubmitting') : `⚡ ${t('maSubmit')}`}
         </button>
-        <p className="text-xs text-gray-500 mt-2">{t('maCostWarning') || '消耗約 5× 分析預算'}</p>
+        <p className="text-xs text-gray-500 mt-2">{t('maCostWarning')}</p>
+        {submitting && Object.keys(jobStates).length > 0 && (
+          <div className="mt-4 space-y-2" role="status" aria-live="polite">
+            <p className="text-sm text-gray-400">
+              {submittedResult
+                ? t('maProgressTemplate', {
+                    n: String(Object.values(jobStates).filter((s) => s.state === 'completed').length),
+                    total: String(Object.keys(submittedResult.job_ids).length),
+                  })
+                : ''}
+            </p>
+            {Object.entries(jobStates).map(([angle, s]) => {
+              const color = s.state === 'completed' ? '#22c55e' : s.state === 'failed' ? '#ef4444' : '#eab308'
+              return (
+                <div key={angle} className="flex items-center gap-2 text-sm">
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+                  <span>{modeLabels[angle] ?? angle}</span>
+                  <span className="text-gray-400">{s.state}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
         {error && <p className="text-red-400 mt-2 text-sm">{error}</p>}
       </div>
     )
   }
 
-  const consensusLabel = {
-    '偏多': '📈 偏多', '偏空': '📉 偏空', '中性': '⚖️ 中性',
-    '分歧': '⚡ 分歧', 'partial_abstain': '⚠️ 部分棄權', 'full_abstain': '🚫 全部棄權',
-  }[report.consensus] ?? report.consensus
+  const consensusKey = CONSENSUS_KEY_MAP[report.consensus]
+  const consensusLabel = consensusKey ? t(consensusKey as MessageKey) : report.consensus
 
   return (
-    <section aria-label={t('maTitle') || '五角度綜合分析'} className="rounded-xl border border-gray-700 p-4">
+    <section aria-label={t('maTitle')} className="rounded-xl border border-gray-700 p-4">
       {/* Header */}
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-4">
-        <h3 className="text-lg font-bold">{coin} {t('maTitle') || '五角度綜合分析'}</h3>
+        <h3 className="text-lg font-bold">{coin} {t('maTitle')}</h3>
         <span className="text-xs text-gray-400 font-mono">snapshot: {report.snapshot_id.slice(0, 20)}...</span>
       </div>
 
       {/* Consensus bar */}
       <div className="flex flex-wrap items-center gap-4 mb-4 p-3 rounded-lg" style={{ backgroundColor: 'rgba(124, 58, 237, 0.1)' }}>
         <span className="text-base font-semibold">{consensusLabel}</span>
+        {report.decision_state !== 'normal' && (
+          <span className="text-sm text-orange-400">
+            {report.decision_state === 'partial_abstain' ? t('maPartialAbstain') : t('maFullAbstain')}
+          </span>
+        )}
         <span className="text-sm text-gray-300">
-          {t('maConfidence') || '完整度'} {report.consensus_confidence.toFixed(2)}
+          {t('maConfidence')} {report.consensus_confidence.toFixed(2)}
         </span>
         <span className="text-sm text-gray-300">
-          {t('maIndependence') || '獨立性'} {(report.evidence_independence * 100).toFixed(0)}%
+          {t('maIndependence')} {(report.evidence_independence * 100).toFixed(0)}%
         </span>
         {report.conflicts.length > 0 && (
           <span className="text-sm text-orange-400">
-            {report.conflicts.length} {t('maConflict') || '分歧'}
+            {report.conflicts.length} {t('maConflict')}
           </span>
         )}
       </div>
@@ -158,11 +272,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-gray-400 border-b border-gray-700">
-              <th className="py-2 px-2">{t('maAngle') || '角度'}</th>
-              <th className="py-2 px-2">{t('maDirection') || '結論'}</th>
-              <th className="py-2 px-2">{t('maConfidence') || '完整度'}</th>
-              <th className="py-2 px-2">{t('maState') || '狀態'}</th>
-              <th className="py-2 px-2">{t('maConflict') || '分歧'}</th>
+              <th className="py-2 px-2">{t('maAngle')}</th>
+              <th className="py-2 px-2">{t('maDirection')}</th>
+              <th className="py-2 px-2">{t('maConfidence')}</th>
+              <th className="py-2 px-2">{t('maState')}</th>
+              <th className="py-2 px-2">{t('maConflict')}</th>
             </tr>
           </thead>
           <tbody>
@@ -170,11 +284,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
               <tr
                 key={angle.angle}
                 className="border-b border-gray-800 hover:bg-gray-800/50 cursor-pointer transition-colors"
-                onClick={() => onAngleClick?.(angle)}
+                onClick={() => { void handleAngleClick(angle) }}
                 role="button"
                 tabIndex={0}
-                aria-label={`${modeLabels[angle.angle] ?? angle.angle} 詳細`}
-                onKeyDown={(e) => e.key === 'Enter' && onAngleClick?.(angle)}
+                aria-label={t('maAngleDetailLabel', { angle: modeLabels[angle.angle] ?? angle.angle })}
+                onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && void handleAngleClick(angle)}
               >
                 <td className="py-2 px-2 font-medium">{modeLabels[angle.angle] ?? angle.angle}</td>
                 <td className="py-2 px-2">{angle.decision_state === 'abstain' ? '—' : angle.direction}</td>
@@ -186,7 +300,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
                     className="inline-block w-2 h-2 rounded-full mr-1"
                     style={{ backgroundColor: STATE_COLORS[angle.decision_state] ?? '#6b7280' }}
                   />
-                  {angle.decision_state}
+                  {(() => { const dsKey = DECISION_STATE_KEY[angle.decision_state]; return dsKey ? t(dsKey as MessageKey) : angle.decision_state })()}
                 </td>
                 <td className="py-2 px-2">
                   <ConflictBadge conflicts={report.conflicts} currentAngle={angle.angle} />
@@ -203,11 +317,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
           <div
             key={angle.angle}
             className="rounded-lg border border-gray-700 p-3 cursor-pointer hover:border-purple-500 transition-colors"
-            onClick={() => onAngleClick?.(angle)}
+            onClick={() => { void handleAngleClick(angle) }}
             role="button"
             tabIndex={0}
-            aria-label={`${modeLabels[angle.angle] ?? angle.angle} 詳細`}
-            onKeyDown={(e) => e.key === 'Enter' && onAngleClick?.(angle)}
+            aria-label={t('maAngleDetailLabel', { angle: modeLabels[angle.angle] ?? angle.angle })}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && void handleAngleClick(angle)}
           >
             <div className="flex items-center justify-between mb-1">
               <span className="font-medium">{modeLabels[angle.angle] ?? angle.angle}</span>
@@ -215,12 +329,12 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
                 className="text-xs px-2 py-0.5 rounded-full"
                 style={{ backgroundColor: STATE_COLORS[angle.decision_state] ?? '#6b7280', color: '#fff' }}
               >
-                {angle.decision_state === 'abstain' ? '棄權' : angle.direction}
+                {angle.decision_state === 'abstain' ? t('maDecisionAbstain') : angle.direction}
               </span>
             </div>
             {angle.decision_state !== 'abstain' && (
               <div className="text-xs text-gray-400">
-                信賴度 {angle.calibrated_confidence.toFixed(2)}
+                {t('maInfoCompleteness')} {angle.calibrated_confidence.toFixed(2)}
               </div>
             )}
             <ConflictBadge conflicts={report.conflicts} currentAngle={angle.angle} />
@@ -241,6 +355,11 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
       <div className="mt-3 text-sm text-gray-300 italic">
         {report.narration ?? report.synthesis_summary}
       </div>
+      {expanded && (
+        <div className="mt-4 border-t border-gray-700 pt-4">
+          <AnalysisReportView data={expanded.data} />
+        </div>
+      )}
     </section>
   )
 }
