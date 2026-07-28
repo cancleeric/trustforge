@@ -73,7 +73,10 @@ from .budget_guard import (
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
-from .endpoint_manifest import load_runtime_endpoint_manifest_from_env
+from .endpoint_manifest import (
+    load_runtime_endpoint_manifest_from_env,
+    load_runtime_release_manifest_from_env,
+)
 
 try:
     from ._version import VERSION
@@ -8506,7 +8509,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     global _ENDPOINT_MANIFEST_BODY
-    _ENDPOINT_MANIFEST_BODY = load_runtime_endpoint_manifest_from_env()
+    _ENDPOINT_MANIFEST_BODY = (
+        load_runtime_endpoint_manifest_from_env()
+        or load_runtime_release_manifest_from_env()
+    )
 
     from .ingestion.hoyabit import log_hoyabit_startup_status
 
