@@ -3,6 +3,15 @@ from __future__ import annotations
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _skip_sec_politeness_wait_for_fake_network(monkeypatch):
+    """Fake SEC responses do not need the production inter-request delay."""
+    from trustforge.ingestion import regulatory
+
+    monkeypatch.setattr(regulatory, "_sleep", lambda _seconds: None)
+
+
 # ── 本地固定 fixture ──────────────────────────────────────────────────────────
 
 REDDIT_FIXTURE = b"""<?xml version="1.0" encoding="UTF-8"?>

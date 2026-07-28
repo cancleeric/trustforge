@@ -58,11 +58,11 @@ case "$PYTEST_WORKERS" in
     exit 1
     ;;
   *)
-    echo "[pre-push] pytest workers: ${PYTEST_WORKERS} (fixed, loadgroup)"
+    echo "[pre-push] pytest workers: ${PYTEST_WORKERS} (fixed, worksteal)"
     run_gate \
       "backend tests (parallel lane)" \
       env PYTHONPATH=src "$PYTHON" -m pytest -q \
-        -m "not serial" -n "$PYTEST_WORKERS" --dist loadgroup \
+        -m "not serial" -n "$PYTEST_WORKERS" --dist worksteal \
         --cov-report= --cov-fail-under=0
     run_gate \
       "backend tests (serial lane)" \
