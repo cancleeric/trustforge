@@ -1,5 +1,38 @@
 # 部署 — AWS CLI + pre-push CD（Lambda + Function URL）
 
+## 每小時 release train
+
+`scripts/hourly_release_train.py` 不掃描 feature 分支、不建立或合併 PR，只從已由
+開發流程整理完成的遠端 `develop` 開始。每輪使用獨立 worktree 與 lease，先驗
+`develop` 完整 pre-push gate，再合併到 `main`、重跑完整 gate、建立不可混淆的
+`release/auto-<UTC>-<SHA>` 分支，最後才執行備份回復驗證與 production deploy。
+衝突、測試、備份或部署任一失敗都會停止並在 `out/release-train/` 留下 JSON
+receipt。
+
+安裝預設為 dry-run，每小時只產盤點 receipt：
+
+```bash
+./scripts/install_hourly_release_train.sh
+```
+
+啟用 production 必須同時提供兩個命令。備份命令需把 JSON 寫到
+`$TRUSTFORGE_BACKUP_RECEIPT`，內容至少為
+`{"archive":"/absolute/backup.tar.gz","restore_verified":true}`；部署命令應呼叫
+既有 immutable A/B deployment workflow。缺任一設定會 fail-closed：
+
+```bash
+TRUSTFORGE_RELEASE_BACKUP_CMD='<approved backup and restore-drill command>' \
+TRUSTFORGE_RELEASE_DEPLOY_CMD='bash deploy/deploy_ec2.sh' \
+./scripts/install_hourly_release_train.sh --execute
+```
+
+目前核定的唯讀 production 備份命令是
+`bash deploy/backup_production_release.sh`：它封存 active/previous pointer、
+active immutable artifact 與 manifest 成 `tar.gz`，重新解壓核對 SHA-256，並確認
+cost ledger DynamoDB PITR 已啟用；不寫 AWS、不碰 schema。
+
+此排程不會啟動或變更 Hermes、資料收集、web 或 frontend daemon。
+
 > 不走 App Runner 自動化。流程：`git push` → pre-push hook 跑測試 → 綠 → AWS CLI 部署到 Lambda。
 > Lambda 在免費方案內可用、每月 100 萬請求免費；App Runner 不在免費內故不採用。
 
