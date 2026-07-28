@@ -1086,6 +1086,7 @@ class AnalysisFlow:
 
     def _recover_multi_angle_syntheses(self) -> int:
         """重啟/巡檢時補做五角度已完成但 crash 遺失的 synthesis。"""
+        self._release_failed_multi_angle_reservations()
         cutoff = time.time() - STALE_RUNNING_JOB_THRESHOLD_SECONDS
         rows = self._conn().execute(
             """SELECT r.snapshot_id,r.coin
@@ -1113,6 +1114,26 @@ class AnalysisFlow:
             if self._maybe_trigger_synthesis(row["snapshot_id"], row["coin"]):
                 recovered += 1
         return recovered
+
+    def _release_failed_multi_angle_reservations(self) -> int:
+        """釋放已進 failed/dead-letter 終態、無法再完成合成的批次預留。"""
+        rows = self._conn().execute(
+            """SELECT r.snapshot_id,r.coin,r.reserved_usd
+               FROM analysis_multi_angle_runs r
+               WHERE r.reserved_usd>0 AND EXISTS(
+                 SELECT 1 FROM analysis_jobs j
+                 JOIN analysis_dead_letters d ON d.job_id=j.job_id
+                 WHERE j.snapshot_id=r.snapshot_id
+               )"""
+        ).fetchall()
+        for row in rows:
+            self._conn().execute(
+                "UPDATE analysis_multi_angle_runs SET reserved_usd=0 "
+                "WHERE snapshot_id=? AND coin=? AND reserved_usd=?",
+                (row["snapshot_id"], row["coin"], row["reserved_usd"]),
+            )
+            budget_guard.release_request_budget(float(row["reserved_usd"]))
+        return len(rows)
 
     def recover(self) -> None:
         # Runtime payloads are deliberately not pickled. Restart from immutable snapshot.
