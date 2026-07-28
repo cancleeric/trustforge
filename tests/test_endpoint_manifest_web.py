@@ -140,12 +140,13 @@ def test_real_production_web_entrypoint_serves_signed_artifact_identity(
         text=True,
     )
     try:
-        for _ in range(100):
+        readiness_deadline = time.monotonic() + 10.0
+        while time.monotonic() < readiness_deadline:
             if process.poll() is not None:
                 stdout, stderr = process.communicate()
                 pytest.fail(f"production web exited early: {stdout}\n{stderr}")
             try:
-                with urllib.request.urlopen(origin + "/healthz", timeout=0.1) as response:
+                with urllib.request.urlopen(origin + "/healthz", timeout=0.2) as response:
                     if response.status == 200:
                         break
             except OSError:

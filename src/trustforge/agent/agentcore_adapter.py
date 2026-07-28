@@ -9,6 +9,9 @@ from typing import Any
 
 from ..backend_registry import get_provider
 
+_MAX_RESPONSE_BYTES = 1_048_576
+_MAX_RESPONSE_EVENTS = 4_096
+
 
 def invoke_agent(
     agent_name: str,
@@ -60,14 +63,25 @@ def _read_stream(response: Any) -> bytes:
     if response is None:
         return b""
     if hasattr(response, "read"):
-        return response.read()
-    chunks: list[bytes] = []
-    for event in response:
+        raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        if not isinstance(raw, bytes):
+            raise TypeError("AgentCore response body must be bytes")
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise ValueError("AgentCore response body is too large")
+        return raw
+    body = bytearray()
+    for event_count, event in enumerate(response, start=1):
+        if event_count > _MAX_RESPONSE_EVENTS:
+            raise ValueError("AgentCore response has too many events")
         chunk = event.get("chunk", {}).get("bytes", b"")
-        if isinstance(chunk, str):
-            chunk = chunk.encode("utf-8")
-        chunks.append(chunk)
-    return b"".join(chunks)
+        if not isinstance(chunk, bytes):
+            raise TypeError("AgentCore response chunk must be bytes")
+        if not chunk:
+            continue
+        if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
+            raise ValueError("AgentCore response body is too large")
+        body.extend(chunk)
+    return bytes(body)
 
 
 def _agentcore_invoke(
