@@ -128,13 +128,24 @@ def _isolate_rate_limit_store(monkeypatch):
     `web._rate_buckets`）行為不變。個別測試要驗證 DynamoDB 共享計數器本身
     時，自建 `rate_limit_store.RateLimitStore` + 假 `_table`（見
     `test_rate_limit_store.py`），不受本 fixture 影響。"""
-    from trustforge import rate_limit_store
+    from trustforge import rate_limit_store, web
 
     class _AlwaysUnavailableStore:
         def try_increment(self, bucket, key, window_seconds, max_requests, *, now=None):
             raise rate_limit_store.RateLimitBackendError("測試環境預設不打真 DynamoDB")
 
     monkeypatch.setattr(rate_limit_store, "_default_store_instance", _AlwaysUnavailableStore())
+    buckets = (
+        web._rate_buckets,
+        web._real_rate_buckets,
+        web._status_rate_buckets,
+        web._online_stance_rate_buckets,
+    )
+    for bucket in buckets:
+        bucket.clear()
+    yield
+    for bucket in buckets:
+        bucket.clear()
 
 
 @pytest.fixture(autouse=True)
