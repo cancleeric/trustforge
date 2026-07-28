@@ -109,6 +109,7 @@ export default function CurrencyGalaxy({
         border: `1px solid ${orbit === 'B' ? 'rgba(232,179,77,.22)' : 'rgba(77,216,224,.28)'}`,
         transformStyle: 'preserve-3d',
         transform: rot,
+        willChange: 'transform',
         // N56：這片軌道環只畫 1px 邊框，但命中測試吃的是整個 270/390px 的
         // 圓盤方框，而 3D 旋轉後它正好罩在中央那顆 129x129 的 BTC 核心星上。
         // 實測（1024x768 / 1280x800 / 1440x900 / 320x568，zh-TW 與 en 皆同）：
@@ -119,7 +120,7 @@ export default function CurrencyGalaxy({
         boxShadow: orbit === 'B' ? '0 0 26px rgba(232,179,77,.05) inset' : '0 0 22px rgba(77,216,224,.06) inset',
       }}
     >
-      <div style={{ position: 'absolute', inset: 0, transformStyle: 'preserve-3d', animation: `${spin} 40s linear infinite` }}>
+      <div style={{ position: 'absolute', inset: 0, transformStyle: 'preserve-3d', willChange: 'transform', animation: `${spin} 40s linear infinite` }}>
         <div
           aria-hidden="true"
           onMouseEnter={() => onHover(ids[0])}
@@ -150,10 +151,10 @@ export default function CurrencyGalaxy({
         transition: 'filter .4s ease-out',
       }}
     >
-      {/* parallax starfield: 3 layers */}
-      <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 8% 22%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 18% 68%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 32% 15%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 46% 78%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-1 90s linear infinite alternate', opacity: 0.8 }} />
-      <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 62% 30%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 74% 60%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 88% 20%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 94% 72%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-2 130s linear infinite alternate', opacity: 0.6 }} />
-      <div style={{ position: 'absolute', inset: -100, backgroundImage: 'radial-gradient(1.5px 1.5px at 55% 85%,rgba(255,255,255,.5),transparent),radial-gradient(1px 1px at 12% 90%,rgba(255,255,255,.35),transparent),radial-gradient(1px 1px at 40% 45%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-3 160s linear infinite alternate', opacity: 0.45 }} />
+      {/* parallax starfield: 3 layers — use transform for GPU compositing */}
+      <div style={{ position: 'absolute', inset: -100, willChange: 'transform', backgroundImage: 'radial-gradient(1.5px 1.5px at 8% 22%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 18% 68%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 32% 15%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 46% 78%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-1 90s linear infinite alternate', opacity: 0.8 }} />
+      <div style={{ position: 'absolute', inset: -100, willChange: 'transform', backgroundImage: 'radial-gradient(1.5px 1.5px at 62% 30%,rgba(255,255,255,.6),transparent),radial-gradient(1px 1px at 74% 60%,rgba(255,255,255,.5),transparent),radial-gradient(1.5px 1.5px at 88% 20%,rgba(255,255,255,.7),transparent),radial-gradient(1px 1px at 94% 72%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-2 130s linear infinite alternate', opacity: 0.6 }} />
+      <div style={{ position: 'absolute', inset: -100, willChange: 'transform', backgroundImage: 'radial-gradient(1.5px 1.5px at 55% 85%,rgba(255,255,255,.5),transparent),radial-gradient(1px 1px at 12% 90%,rgba(255,255,255,.35),transparent),radial-gradient(1px 1px at 40% 45%,rgba(255,255,255,.4),transparent)', animation: 'hermes-drift-3 160s linear infinite alternate', opacity: 0.45 }} />
       {/* holo radar sweep — N63：掃描條的位移只寫在 keyframes 裡，基態沒有
           transform。低動態把動畫停掉就退回 translateY(0)，這條青色漸層帶會
           永遠卡在星系頂端，看起來像掃到一半凍住。基態補上 keyframes 100% 的
@@ -185,7 +186,7 @@ export default function CurrencyGalaxy({
           chip 底部落在 top:~93 這個座標系裡），兩者 Y 範圍永遠不重疊，不論
           容器多窄都不會再互蓋。 */}
       {readoutC && (
-        <div className="hermes-live-telemetry hermes-clip-sm" style={{ position: 'absolute', right: 22, top: 101, zIndex: 5, width: 174, padding: '10px 12px', background: 'rgba(5,12,20,.76)', border: `1px solid ${TIER_COLOR[readoutC.tier]}`, backdropFilter: 'blur(8px)', boxShadow: `inset 0 0 18px ${TIER_COLOR[readoutC.tier]}18` }}>
+        <div className="hermes-live-telemetry hermes-clip-sm" style={{ position: 'absolute', right: 22, top: 101, zIndex: 5, width: 174, padding: '10px 12px', background: 'rgba(5,12,20,.76)', border: `1px solid ${TIER_COLOR[readoutC.tier]}`, backdropFilter: 'blur(8px)', willChange: 'backdrop-filter', boxShadow: `inset 0 0 18px ${TIER_COLOR[readoutC.tier]}18` }}>
           <div style={{ fontSize: 8.5, letterSpacing: '1.2px', color: TIER_COLOR[readoutC.tier], marginBottom: 7 }}>{t('liveTelemetry')} · {readoutC.name}</div>
           <div className="hermes-telemetry-row"><span>{t('trustScore')}</span><b>{readoutC.score}/100</b></div>
           <div className="hermes-telemetry-row"><span>{t('sourceCount')}</span><b>{Math.round(60 + readoutC.econ * .9)}</b></div>
@@ -267,7 +268,7 @@ export default function CurrencyGalaxy({
       {/* hover / selection readout */}
       <div style={{ position: 'absolute', left: '50%', bottom: 20, transform: 'translateX(-50%)', minWidth: 300, textAlign: 'center' }}>
         {readoutC ? (
-          <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, background: 'rgba(6,12,20,.85)', border: '1px solid rgba(255,255,255,.12)', borderRadius: 7, padding: '9px 18px', backdropFilter: 'blur(4px)' }}>
+          <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, background: 'rgba(6,12,20,.85)', border: '1px solid rgba(255,255,255,.12)', borderRadius: 7, padding: '9px 18px', backdropFilter: 'blur(4px)', willChange: 'backdrop-filter' }}>
             <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 7 }}>
               <span style={{ fontSize: 10.5, letterSpacing: '.8px', color: TIER_COLOR[readoutC.tier], textTransform: 'uppercase' }}>{readoutC.full}</span>
               <span style={{ fontSize: 16, fontWeight: 600, color: '#fff' }}>{readoutC.score}</span>

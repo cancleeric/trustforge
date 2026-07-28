@@ -19,7 +19,7 @@ export default function HermesHeroTagline() {
         position: 'absolute', left: 0, right: 0, top: 'var(--hermes-topbar)', zIndex: 9,
         display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center',
         gap: 10, padding: '7px 20px',
-        background: 'rgba(10,16,24,.42)', backdropFilter: 'blur(6px)',
+        background: 'rgba(10,16,24,.42)', backdropFilter: 'blur(6px)', willChange: 'backdrop-filter',
         borderBottom: '1px solid var(--color-hermes-bd)',
         pointerEvents: 'none',
       }}

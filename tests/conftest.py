@@ -195,3 +195,14 @@ def _isolate_calibration_model_cache():
     scoring._CALIBRATION_MODEL_CACHE.clear()
     yield
     scoring._CALIBRATION_MODEL_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _zero_regulatory_delay(monkeypatch):
+    """測試環境中禮貌性延遲歸零——CI 不打真 SEC API，不需等。
+    原值 0.1s × 12 查詢詞 = 1.1s/test，14 個 regulatory 測試共浪費 ~16s。"""
+    try:
+        from trustforge.ingestion import regulatory
+        monkeypatch.setattr(regulatory, "_REQUEST_DELAY_SECONDS", 0)
+    except (ImportError, AttributeError):
+        pass

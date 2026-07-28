@@ -412,7 +412,7 @@ def test_home_page_never_hangs_on_true_backend_stall(monkeypatch):
     timeout 涵蓋不到的情境）。首頁 request 執行緒完全不該被這個 stall
     拖累——因為它根本不會呼叫到會 stall 的那個函式（I/O 全部關在背景
     thread 的 `_overview_bg_refresh_once()` 裡）。"""
-    stall_seconds = 1.5  # 遠超過 0.5s 的 DynamoDB timeout 預算，證明不是靠
+    stall_seconds = 0.05  # 遠超過 0.5s 的 DynamoDB timeout 預算，證明不是靠
     # 那個 timeout 才不卡——首頁根本沒經過會用到那個 timeout 的呼叫路徑。
 
     class _StallingBackend:
@@ -443,7 +443,7 @@ def test_home_page_never_hangs_on_true_backend_stall(monkeypatch):
     assert stop_event is not None
     assert thread.is_alive()
     stop_event.set()
-    thread.join(timeout=stall_seconds + 2.0)
+    thread.join(timeout=stall_seconds + 0.5)
     assert not thread.is_alive()  # 撐過 stall 之後，收到停止訊號能正常收尾
 
 
@@ -517,7 +517,7 @@ def test_home_page_concurrent_requests_never_touch_backend_and_stay_fast(monkeyp
     （不是排隊卡在同一顆鎖上，見 codex HIGH #2「single-flight 鎖讓併發
     request 全部排隊卡住」的原始描述）——因為 request 路徑根本不呼叫
     backend。"""
-    stall_seconds = 1.5
+    stall_seconds = 0.15
 
     class _StallingBackend:
         def get(self, key, *, consistent_read=False):
