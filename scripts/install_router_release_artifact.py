@@ -416,18 +416,41 @@ def main() -> int:
         )
         runtime_lock, _ = _read_pinned_json(args.runtime_lock, 1024 * 1024)
         release_digest = _digest_fd(archive_fd)
-        args.releases_root.mkdir(mode=0o755, parents=True, exist_ok=True)
-        releases_info = os.lstat(args.releases_root)
+        args.releases_root.parent.mkdir(parents=True, exist_ok=True)
+        created_releases_root = False
+        try:
+            os.mkdir(args.releases_root, mode=0o755)
+            created_releases_root = True
+        except FileExistsError:
+            pass
+        try:
+            parent_fd = os.open(
+                args.releases_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+        except OSError as exc:
+            raise SystemExit(
+                "releases root must be owner-controlled 0755"
+            ) from exc
+        releases_info = os.fstat(parent_fd)
+        releases_path_info = os.lstat(args.releases_root)
         if (
             not stat.S_ISDIR(releases_info.st_mode)
-            or stat.S_ISLNK(releases_info.st_mode)
+            or not stat.S_ISDIR(releases_path_info.st_mode)
+            or stat.S_ISLNK(releases_path_info.st_mode)
             or releases_info.st_uid != expected_uid
-            or stat.S_IMODE(releases_info.st_mode) != 0o755
+            or releases_path_info.st_uid != expected_uid
+            or (releases_info.st_dev, releases_info.st_ino)
+            != (releases_path_info.st_dev, releases_path_info.st_ino)
         ):
+            os.close(parent_fd)
             raise SystemExit("releases root must be owner-controlled 0755")
-        parent_fd = os.open(
-            args.releases_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        )
+        if created_releases_root:
+            os.fchmod(parent_fd, 0o755)
+            os.fsync(parent_fd)
+            releases_info = os.fstat(parent_fd)
+        if stat.S_IMODE(releases_info.st_mode) != 0o755:
+            os.close(parent_fd)
+            raise SystemExit("releases root must be owner-controlled 0755")
         fcntl.flock(parent_fd, fcntl.LOCK_EX)
         stage = args.releases_root / f".{release_digest}.{os.getpid()}.staging"
         target = args.releases_root / release_digest
