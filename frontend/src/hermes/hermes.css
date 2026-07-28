@@ -367,6 +367,22 @@
      選單只縮不長，剩下的空間全歸對話區。 */
   flex: 0 1 auto; overflow-y: auto;
 }
+/* N78：左軌的 `<details>` 關起來之後，內容照樣排版、照樣看得見。
+   實測 1440x900 開啟工作區：「相似歷史」那個 details 是 `open=false`、
+   自己的盒子只有 32px（＝summary 高度），但它的兩個子 DIV 仍然被排在
+   y=546→685，直接壓在下面的 `.hermes-focus-derived`（563→613）與
+   `.hermes-analysis-expectation`（623→662）上，變成文字疊文字——
+   n78 探針在來源狀態／成本兩個模組各抓到 5 筆。
+   瀏覽器原生的「收合就不顯示內容」在這個 flex 直欄裡沒有生效
+   （子元素 assignedSlot 是 none、display 仍是 block），所以明寫出來。
+   這就是原生語意，不是特效：關著 = 不佔位、不可見。
+   （先前誤判成 flex-shrink 把子項壓扁，加 `.hermes-rail-menu>*{flex:0 0 auto}`
+   完全沒用，一筆都沒少，已移除。） */
+.hermes-rail-menu>details:not([open])>*:not(summary) { display: none; }
+/* 備忘：曾經加過 `.hermes-rail-menu>* { flex: 0 0 auto; }`，假設「子項被
+   flex 壓扁、內容溢出疊到下一塊」。實測推翻：加上之後 1440x900 的重疊一筆
+   都沒少（來源狀態、成本兩個模組照樣 5 筆）。病因不在 flex-shrink，別再走
+   這條路；要動之前先拿到有鑑別力的 RED。 */
 /* `min-width: 0` 是必要的：flex item 預設 `min-width: auto`，長字串會撐爆它。
    N76：對話區裡有輸入框，是這一軌唯一「非按不可」的東西，必須永遠看得到。
    原本它沒有 flex 宣告、被壓成 200px 高，而內容有 326px——輸入框就被擠到
@@ -2913,7 +2929,13 @@
   .hermes-energy-index {
     position: absolute;
     left: 50%;
-    top: 7px;
+    /* N78：原本是 `top: 7px`，跟 `.hermes-engine-activity`（絕對定位、
+       `top: 7px`、z-index 5）搶同一條橫向車道，兩邊都是文字，直接疊在一起——
+       實測 375x667 站點編號「03」[155,594 12x12] 壓在狀態列的「風險評估」
+       [133,586 45x15] 上 12x8px，430x932 是「02」壓「BTC」，七個模組全中。
+       站點高 72px、junction 置中，下緣是空的，編號改掛底部就各據一方。 */
+    top: auto;
+    bottom: 5px;
     transform: translateX(-50%);
   }
 
@@ -3985,7 +4007,15 @@
 
 .hermes-intent-picker>div {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* N78：原本硬寫 `1fr 1fr`。≥1280px 左軌會拆成獨立選單欄，寬度只有
+     clamp(124px,10vw,160px)，硬塞兩欄會讓每顆鈕只剩 55px，`<b>` 標題
+     實測被壓到 39px 寬、8 個中文字硬換行成 3 行（1280x800 量到 55px/39px/3行，
+     1440x900 是 63px/47px/3行）。改完同尺寸是 118px/102px/1行。
+     既有的 `is-module-open` 隱藏規則只補到「開工作區」那一半，沒開一樣壞。
+     改成 auto-fit：容器塞不下兩欄就自動變一欄，不再跟斷點玩打地鼠——
+     這個檔案已經為了 `1fr 1fr` 被 cascade 咬過一次（見上方 !important 註解）。
+     118px = 9.5px 中文標題 8 字 + 左右 padding 7px + 邊框的實測下限。 */
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   gap: 5px;
 }
 

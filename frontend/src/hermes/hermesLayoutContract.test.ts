@@ -360,3 +360,58 @@ describe('N75 被工作區蓋住的區塊不得留在 DOM 當隱形陷阱', () =
     expect(dash).toMatch(/\{!activeModule && \(\s*<HermesMobileDivergenceEntry/)
   })
 })
+
+describe('N78 意圖鈕：欄數跟著容器走，不要硬寫兩欄', () => {
+  const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+
+  it('用 auto-fit 而不是固定 1fr 1fr', () => {
+    // ≥1280px 左軌會拆出獨立選單欄，寬度只有 clamp(124px,10vw,160px)。
+    // 硬塞兩欄實測每顆鈕剩 55px、<b> 標題剩 39px、中文硬換行成 3 行。
+    // 改 auto-fit 後同尺寸量到 118px / 102px / 1 行。
+    // 這個選擇器出現兩次：窄視窗 @media 裡的 `1fr !important` 覆寫（檔案前段）
+    // 與基礎規則（檔案後段）。要釘的是後者，所以取最後一個。
+    const block = css.slice(css.lastIndexOf('.hermes-intent-picker>div {'))
+    // 註解裡會出現 `1fr 1fr`（在說明為什麼不用它），先剝掉才不會誤判。
+    const body = block.slice(0, block.indexOf('}')).replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body).toContain('repeat(auto-fit, minmax(118px, 1fr))')
+    expect(body).not.toContain('1fr 1fr')
+  })
+})
+
+describe('N78 左軌收合的 details 不得佔位', () => {
+  const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+
+  it('關起來的 details 內容明寫 display:none', () => {
+    // 瀏覽器原生的收合在這個 flex 直欄裡沒生效：實測 1440x900，「相似歷史」
+    // details 是 open=false、自己只有 32px 高，子元素照樣排在 y=546→685，
+    // 直接疊在 .hermes-focus-derived / .hermes-analysis-expectation 上。
+    expect(css).toContain('.hermes-rail-menu>details:not([open])>*:not(summary) { display: none; }')
+  })
+})
+
+describe('N76 對話區：pane 不捲，訊息串才捲', () => {
+  const rail = readFileSync(path.join(__dirname, 'HermesLeftRail.tsx'), 'utf8')
+
+  it('pane overflowY 是 hidden、訊息串 minHeight 是 0', () => {
+    // 兩處要一起成立才會綠：pane 若是 auto，整塊（含 composer）一起捲走；
+    // 訊息串若留 minHeight:140，pane 改 hidden 反而把 composer 裁掉。
+    // 實測 6 個尺寸（960x800 / 1024x900 / 1100x950 / 1279x900 /
+    // 1024x600 / 900x560）在只改其中一處時全 RED，兩處都改後 15/15 綠。
+    expect(rail).toContain("minHeight: 300, overflowY: 'hidden'")
+    expect(rail).toContain("flex: 1, minHeight: 0, overflowY: 'auto'")
+  })
+})
+
+describe('N78 手機版站點編號不得與狀態列搶同一條車道', () => {
+  const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+
+  it('≤560px 的 .hermes-energy-index 掛底部而不是 top:7px', () => {
+    // `.hermes-engine-activity` 是絕對定位、`top: 7px`、z-index 5 的狀態列。
+    // 編號原本也是 `top: 7px`，兩塊文字直接疊在一起：實測 375x667 是
+    // 「03」壓「風險評估」、430x932 是「02」壓「BTC」，七個模組全中。
+    const block = css.slice(css.lastIndexOf('.hermes-energy-index {'))
+    const body = block.slice(0, block.indexOf('}')).replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body).toContain('bottom: 5px')
+    expect(body).not.toMatch(/top:\s*7px/)
+  })
+})
