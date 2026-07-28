@@ -151,6 +151,7 @@ def gate(worktree: Path) -> None:
             if key.startswith(("AWS_", "GH_", "GITHUB_")):
                 env.pop(key)
         env["TRUSTFORGE_GATE_SANDBOX"] = "1"
+        env["HOME"] = str(sandbox_root)
         subprocess.run(command, cwd=sandbox_root, env=env, check=True)
 
 
