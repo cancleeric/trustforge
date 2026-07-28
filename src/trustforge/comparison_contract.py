@@ -139,16 +139,37 @@ def validate_comparison_report(
     if not comparison.conclusion.strip():
         violations.append("conclusion 不可為空")
 
-    # 2. 四個面向缺一不可
+    # 2. 四個面向缺一不可，且不可有重複或未知面向
     present_dimensions = {d.dimension for d in comparison.dimensions}
+    dim_names = [d.dimension for d in comparison.dimensions]
     for dim in COMPARISON_DIMENSIONS:
         if dim not in present_dimensions:
             violations.append(f"缺少比較面向：{dim}")
+    for dim in present_dimensions:
+        if dim not in COMPARISON_DIMENSIONS:
+            violations.append(f"未知的比較面向：'{dim}'（須為 {COMPARISON_DIMENSIONS} 之一）")
+    if len(dim_names) != len(set(dim_names)):
+        violations.append("存在重複的比較面向（每個面向只能出現一次）")
+    if len(dim_names) != len(COMPARISON_DIMENSIONS):
+        violations.append(
+            f"比較面向數量不正確：預期 {len(COMPARISON_DIMENSIONS)} 個，實際 {len(dim_names)} 個"
+        )
 
-    # 3. 每個面向的 evidence refs 必須有效
+    VALID_DECISIONS = ("abstain", "insufficient", "normal")
+
+    # 3. 每個面向的 evidence refs 必須有效，且 confidence/decision 合規
     ev_a_count = len(comparison.supporting_evidence_a)
     ev_b_count = len(comparison.supporting_evidence_b)
     for d in comparison.dimensions:
+        if not (0.0 <= d.confidence <= 1.0):
+            violations.append(
+                f"面向 '{d.dimension}' 的 confidence 超出範圍：{d.confidence}"
+            )
+        if d.decision not in VALID_DECISIONS:
+            violations.append(
+                f"面向 '{d.dimension}' 的 decision 無效：'{d.decision}'"
+                f"（須為 {VALID_DECISIONS} 之一）"
+            )
         for ref in d.a_evidence_refs:
             if ref < 0 or ref >= ev_a_count:
                 violations.append(

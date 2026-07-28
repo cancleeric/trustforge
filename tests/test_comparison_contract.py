@@ -468,6 +468,195 @@ class TestRejectsInvalidComparison:
             f"實際 {len(violations)} 項。"
         )
 
+    def test_golden_rejects_unknown_dimension(self):
+        """【會 FAIL — 期望】未知的比較面向應被拒絕。"""
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            conclusion="（測試用）",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="鏈上活動",
+                    label="鏈上活動比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="市場情緒",
+                    label="市場情緒比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="生態發展",
+                    label="生態發展比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="未知面向",  # ← 未知
+                    label="未知",
+                    finding="不該存在",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+            ],
+            supporting_evidence_a=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+            supporting_evidence_b=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+        )
+        violations = validate_comparison_report(cr, _raise=False)
+        assert any("未知面向" in v or "unknown" in v.lower() for v in violations), (
+            f"FAIL EXPECTED: 未知面向應觸發違規。違規清單: {violations}"
+        )
+
+    def test_golden_rejects_duplicate_dimension(self):
+        """【會 FAIL — 期望】重複的比較面向應被拒絕。"""
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            conclusion="（測試用）",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding="A",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="價格動能",  # ← 重複
+                    label="價格動能比較",
+                    finding="B",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="鏈上活動",
+                    label="鏈上活動比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="市場情緒",
+                    label="市場情緒比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+            ],
+            supporting_evidence_a=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+            supporting_evidence_b=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+        )
+        violations = validate_comparison_report(cr, _raise=False)
+        assert any("重複" in v or "duplicate" in v.lower() for v in violations), (
+            f"FAIL EXPECTED: 重複面向應觸發違規。違規清單: {violations}"
+        )
+
+    def test_golden_rejects_invalid_dimension_confidence(self):
+        """【會 FAIL — 期望】面向 confidence 超出範圍應被拒絕。"""
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            conclusion="（測試用）",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                    confidence=1.5,  # ← 超出範圍
+                ),
+                DimensionResult(
+                    dimension="鏈上活動",
+                    label="鏈上活動比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="市場情緒",
+                    label="市場情緒比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="生態發展",
+                    label="生態發展比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+            ],
+            supporting_evidence_a=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+            supporting_evidence_b=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+        )
+        violations = validate_comparison_report(cr, _raise=False)
+        assert any("confidence" in v.lower() for v in violations), (
+            f"FAIL EXPECTED: 無效 confidence 應觸發違規。違規清單: {violations}"
+        )
+
+    def test_golden_rejects_invalid_dimension_decision(self):
+        """【會 FAIL — 期望】面向 decision 無效應被拒絕。"""
+        cr = ComparisonReport(
+            coin_a="BTC",
+            coin_b="ETH",
+            query="比較",
+            conclusion="（測試用）",
+            dimensions=[
+                DimensionResult(
+                    dimension="價格動能",
+                    label="價格動能比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                    decision="typo",  # ← 無效
+                ),
+                DimensionResult(
+                    dimension="鏈上活動",
+                    label="鏈上活動比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="市場情緒",
+                    label="市場情緒比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+                DimensionResult(
+                    dimension="生態發展",
+                    label="生態發展比較",
+                    finding="正常",
+                    a_evidence_refs=[0],
+                    b_evidence_refs=[0],
+                ),
+            ],
+            supporting_evidence_a=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+            supporting_evidence_b=[Evidence(source="t", fetched_at="", content_reference="", related_claim="")],
+        )
+        violations = validate_comparison_report(cr, _raise=False)
+        assert any("decision" in v.lower() for v in violations), (
+            f"FAIL EXPECTED: 無效 decision 應觸發違規。違規清單: {violations}"
+        )
+
     def test_golden_rejects_same_coin(self):
         """【會 FAIL — 期望】相同幣種比較應被拒絕。"""
         cr = ComparisonReport(
