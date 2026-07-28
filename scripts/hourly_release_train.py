@@ -352,8 +352,15 @@ def execute(args: argparse.Namespace) -> Path:
                 finally:
                     cleanup = []
                     for tree in (main_tree, develop_tree):
-                        result = subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=ROOT)
-                        cleanup.append({"path": str(tree), "returncode": result.returncode})
+                        if tree.exists():
+                            result = subprocess.run(
+                                ["git", "worktree", "remove", "--force", str(tree)],
+                                cwd=ROOT,
+                            )
+                            returncode = result.returncode
+                        else:
+                            returncode = 0
+                        cleanup.append({"path": str(tree), "returncode": returncode})
                     prune = subprocess.run(["git", "worktree", "prune"], cwd=ROOT)
                     receipt["cleanup"] = cleanup + [{"worktree_prune": prune.returncode}]
                     if any(item.get("returncode", item.get("worktree_prune", 0)) for item in receipt["cleanup"]):
