@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.27.0 — 2026-07-29
+
+- feat: 新增官方雙幣比較契約、證據正規化、Bedrock synthesis、API/CLI/Lambda 輸出、單一報告 UI 與匯出。
+- feat: 完成 multi-angle 五方向分析整合、前端總覽、drilldown、敘事與 deterministic fallback。
+- feat: 完成 trust kernel release-level A/B rollback、canary readiness、唯一 judgment boundary 與 legacy bridge retirement 稽核。
+- feat: 新增 Whale Alert 顯示、歷史面板、資產本質 shadow contribution 與競賽題目選擇器。
+- perf: pre-push backend 測試改為 deterministic parallel/serial lanes，保留完整 coverage 與 serial rollback。
+- fix: 強化 router runtime provenance、release sandbox portability、Bedrock model ID 與多來源研究資料 PIT/chronological correctness。
+
 ## v0.16.36 — 2026-07-21
 
 - fix: 發布分析快照查詢修正
