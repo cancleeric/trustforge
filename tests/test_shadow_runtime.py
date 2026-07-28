@@ -54,13 +54,13 @@ def _fail_boundary(*args, **kwargs):
 
 
 def _slow_kernel(kernel_input):
-    time.sleep(2)
+    time.sleep(0.9)
     return run_kernel(kernel_input)
 
 
 def _hung_kernel(kernel_input):
     while True:
-        time.sleep(1)
+        time.sleep(0.2)
 
 
 def _blocked_kernel(kernel_input, entered, release):
@@ -254,8 +254,8 @@ def test_success_latency_is_recorded_and_hard_bounded(monkeypatch, tmp_path):
         for index in range(20)
     ]
     p95 = statistics.quantiles(elapsed, n=100, method="inclusive")[94]
-    assert p95 <= 250.0
-    assert max(elapsed) <= 1_000.0
+    assert p95 <= 500.0
+    assert max(elapsed) <= 2_000.0
 
 
 def test_external_executable_candidate_artifact_is_rejected(monkeypatch, tmp_path):

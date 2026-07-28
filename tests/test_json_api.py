@@ -1017,14 +1017,14 @@ def test_api_analyze_dedup_stalled_leader_follower_times_out_not_infinite_block(
     leader 完成前就已經返回（thread 真的被釋放，不是碰巧等到 leader
     做完才順便回來），且逾時的 follower 不會落回自己真的呼叫
     `pipeline.run`（避免放大 Bedrock 花費/thundering herd）。"""
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.05)
 
     counter = _CallCounter()
     leader_finished = threading.Event()
 
     def _stalled_run(*args, **kwargs):
         counter.hit()
-        time.sleep(1.5)  # 遠大於逾時上界 0.3 秒，模擬 leader hang 住
+        time.sleep(0.2)  # 遠大於逾時上界 0.05 秒，模擬 leader hang 住
         result = pipeline_module.run(*args, **kwargs)
         leader_finished.set()
         return result
@@ -1206,7 +1206,7 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
     def _delayed_wait(timeout=None):
         completed = real_wait(timeout=timeout)
         if completed:
-            time.sleep(6.0)  # 刻意比舊的 5 秒 TTL 寬限期更長
+            time.sleep(0.1)  # 模擬排程延遲（舊 TTL 已不存在，只需非零延遲驗證正確性）
         return completed
 
     flight.event.wait = _delayed_wait
@@ -1219,8 +1219,8 @@ def test_dedup_analyze_call_delayed_follower_reads_from_held_flight_reference_no
 
     # 把 leader 標記完成（在 follower 開始等待之前先讓它就緒，確保
     # follower 真的走到「join → wait → 延遲 → 讀取」這條路，而不是自己
-    # 變成 leader）。follower 需要給自己夠長的 deadline，蓋過 6 秒延遲。
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 20.0)
+    # 變成 leader）。follower 需要給自己夠長的 deadline，蓋過延遲。
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.5)
 
     follower_result_holder: dict[str, object] = {}
 
@@ -1302,10 +1302,10 @@ def test_dedup_analyze_call_leader_bounded_by_bedrock_style_timeout_follower_get
     取代機制時，用來替代它的正確性保證。"""
     from botocore.exceptions import ReadTimeoutError
 
-    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(web, "_ANALYZE_DEDUP_LEADER_TIMEOUT_SECONDS", 0.05)
     key = "dedup-leader-bedrock-style-timeout-test-key"
 
-    simulated_bedrock_read_timeout_sec = 1.5  # 遠比 0.3 秒 follower 逾時上界長
+    simulated_bedrock_read_timeout_sec = 0.2  # 遠比 0.05 秒 follower 逾時上界長
     leader_finished = threading.Event()
 
     def _compute_leader_simulating_hung_bedrock_call():

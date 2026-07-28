@@ -140,8 +140,8 @@ def test_lease_backend_expired_lease_can_be_reacquired(tmp_path):
     assert b.try_acquire(key, "owner-B", 0)  # 同一瞬間已過期（expires_at==now）→ 可被搶回
     # 真正「未過期」租約：用短 TTL + 實際等待驗證 is_held 在過期後放行
     b2 = JsonLeaseBackend(tmp_path / "l3.json")
-    assert b2.try_acquire(key, "owner-A", 1)
-    time.sleep(1.1)
+    assert b2.try_acquire(key, "owner-A", 0.05)
+    time.sleep(0.1)
     assert not b2.is_held(key)
     assert b2.try_acquire(key, "owner-B", 900)
 

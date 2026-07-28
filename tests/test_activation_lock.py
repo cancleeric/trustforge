@@ -52,9 +52,9 @@ def test_acquire_after_expiry():
     with tempfile.TemporaryDirectory() as td:
         backend = _JsonActivationLockBackend(path=f"{td}/lock.json")
         _set_backend_for_tests(backend)
-        acquire_activation_lock("test-target", "owner-1", ttl=1)
+        acquire_activation_lock("test-target", "owner-1", ttl=0.05)
         assert not acquire_activation_lock("test-target", "owner-2", ttl=60)
-        time.sleep(2)
+        time.sleep(0.1)
         assert acquire_activation_lock("test-target", "owner-2", ttl=60)
 
 
