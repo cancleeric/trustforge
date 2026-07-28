@@ -1,4 +1,4 @@
-"""Formal pipeline PR1 non-authoritative shadow regression (#732)."""
+"""Formal pipeline authoritative-kernel regression (#734)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from trustforge.schema import QuestionType
 
 
 def test_formal_pipeline_pr1_never_enters_candidate_runtime(monkeypatch):
-    """Both legacy switches on still cannot enter candidate wiring in PR1."""
     monkeypatch.setenv("KERNEL_CANARY_RATIO", "1.0")
     monkeypatch.setenv("KERNEL_SHADOW_OBSERVE", "1")
 
@@ -51,12 +50,8 @@ def test_formal_pipeline_pr1_never_enters_candidate_runtime(monkeypatch):
 
     assert report.coin == "BTC"
     assert evidence
-    event = next(
-        event for event in log.events
-        if event.get("tool") == "judgment.derive"
-        and "shadow_observation_status" in event.get("params", {})
-    )
-    assert event["params"]["shadow_observation_status"] == "not_observed"
-    assert event["params"]["shadow_candidate_latency_ms"] == 0.0
-    assert event["params"]["kernel_confidence"] is None
-    assert event["params"]["kernel_abstain"] is None
+    event = next(event for event in log.events if event.get("tool") == "judgment.derive")
+    assert event["params"]["judgment_source"] == "trustforge_core.run_kernel"
+    assert event["params"]["provider_calls"] == 0
+    assert event["params"]["cost_usd"] == 0.0
+    assert "shadow_observation_status" not in event["params"]

@@ -334,7 +334,7 @@ def test_report_direction_field_set(monkeypatch):
     monkeypatch.setattr("trustforge.pipeline.collect", fake_collect)
 
     report, _ev, _log = run("BTC", "分析 BTC", QuestionType.MULTI_SOURCE, offline=True)
-    assert report.direction in ("偏多", "偏空", "中性"), (
+    assert report.direction in ("偏多", "偏空", "中性", "不明"), (
         f"direction 欄位未正確填入，實際 {report.direction!r}"
     )
 
