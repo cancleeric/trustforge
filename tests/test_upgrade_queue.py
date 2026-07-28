@@ -30,7 +30,7 @@ from trustforge.upgrade_ports import (
 from trustforge.upgrade_queue import UpgradeQueue
 from trustforge.safe_fs import SafePathError
 
-TEST_TEMP_ROOT = Path(tempfile.gettempdir())
+TEST_TEMP_ROOT = Path(tempfile.gettempdir()).resolve()
 SANDBOX_AUTHORITY = SandboxAttestationAuthority(
     TEST_TEMP_ROOT
     / f"trustforge-upgrade-queue-test-capabilities-{os.getpid()}.jsonl"

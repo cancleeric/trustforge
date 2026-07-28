@@ -39,6 +39,21 @@ backend + combined-coverage runs. The measurements above retain the failed and
 slower configurations so the final result cannot hide the isolation work or
 the worker-saturation curve.
 
+## Latest develop integration
+
+After the three acceptance runs, `origin/develop` advanced to `5def34f0` and
+added 105 backend tests. The branch merged that baseline before PR review.
+The first parallel run exposed macOS temporary-path and interpreter-resolution
+defects in newly landed tests; the fixes preserve safe-path enforcement and
+the active virtual environment rather than weakening either check.
+
+The post-fix complete gate passed with 5,351 parallel tests, 3 serial tests,
+12 skips, 1 expected xfail, and 84% combined coverage. Its parallel lane took
+72.86 seconds under concurrent host load. This variance is recorded
+explicitly: the original three-run acceptance remains reproducible evidence
+for the scoped change, while the latest moving-baseline result must not be
+misreported as another sub-60-second run.
+
 ## Shared-resource and timing inventory
 
 | Resource / timing dependency | Risk under xdist | Treatment |
