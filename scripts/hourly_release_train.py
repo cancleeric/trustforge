@@ -124,10 +124,11 @@ def gate(worktree: Path) -> None:
         profile = (
             f'(version 1)(allow default){rules}'
             f'(deny file-write* (subpath "{home}"))'
-            '(deny network-outbound (require-not (remote ip "localhost:*")))'
-            '(deny network-inbound (require-not (local ip "localhost:*")))'
+            '(deny network-outbound (require-all (remote ip "*:*")'
+            ' (require-not (remote ip "localhost:*"))))'
+            '(deny network-inbound (require-all (local ip "*:*")'
+            ' (require-not (local ip "localhost:*"))))'
             '(deny process-exec (literal "/usr/bin/security"))'
-            '(deny mach-lookup (global-name "com.apple.securityd"))'
         )
         command = [str(sandbox), "-p", profile, str(hook)]
     env = dict(os.environ)
