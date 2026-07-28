@@ -369,8 +369,16 @@ class ComparisonReport:
             L.append(f"### {i}. {dim.label}")
             L.append(f"- 結論：{dim.finding}")
             L.append(f"- 信心：{dim.confidence:.0%}")
-            L.append(f"- A 幣證據索引：{dim.a_evidence_refs}")
-            L.append(f"- B 幣證據索引：{dim.b_evidence_refs}")
+            a_refs_display = [
+                f"[{self.supporting_evidence_a[i].source}:#{i}]"
+                for i in dim.a_evidence_refs
+            ]
+            b_refs_display = [
+                f"[{self.supporting_evidence_b[i].source}:#{i}]"
+                for i in dim.b_evidence_refs
+            ]
+            L.append(f"- A 幣證據索引：{a_refs_display if a_refs_display else '無'}")
+            L.append(f"- B 幣證據索引：{b_refs_display if b_refs_display else '無'}")
             L.append(f"- 判定：{dim.decision}")
             L.append("")
 
