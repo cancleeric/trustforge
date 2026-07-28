@@ -136,7 +136,7 @@ const messages = {
     qcModeLabel: '分析角度（選填）', qcComparePrefix: '雙幣比較請至', qcCompareLinkLabel: '比較頁', qcComparePeriod: '。',
     // Multi-angle (#810)
     maTitle: '五角度綜合分析', maConsensus: '共識', maIndependence: '證據獨立性',
-    maConflict: '分歧', maAngle: '角度', maDirection: '結論', maConfidence: '信心', maState: '狀態',
+    maConflict: '分歧', maAngle: '角度', maDirection: '結論', maConfidence: '資訊完整度', maState: '狀態',
     maSubmit: '執行五角度綜合分析', maCostWarning: '消耗約 5× 分析預算',
     maNoResult: '尚無五角度綜合分析結果',
     // 官方三題型（HOYA BIT 命題格式，見 docs/competition/COMPETITION-OFFICIAL.md）

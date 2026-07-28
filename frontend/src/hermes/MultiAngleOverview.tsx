@@ -130,7 +130,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
       <div className="flex flex-wrap items-center gap-4 mb-4 p-3 rounded-lg" style={{ backgroundColor: 'rgba(124, 58, 237, 0.1)' }}>
         <span className="text-base font-semibold">{consensusLabel}</span>
         <span className="text-sm text-gray-300">
-          {t('maConfidence') || '信心'} {report.consensus_confidence.toFixed(2)}
+          {t('maConfidence') || '完整度'} {report.consensus_confidence.toFixed(2)}
         </span>
         <span className="text-sm text-gray-300">
           {t('maIndependence') || '獨立性'} {(report.evidence_independence * 100).toFixed(0)}%
@@ -149,7 +149,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
             <tr className="text-left text-gray-400 border-b border-gray-700">
               <th className="py-2 px-2">{t('maAngle') || '角度'}</th>
               <th className="py-2 px-2">{t('maDirection') || '結論'}</th>
-              <th className="py-2 px-2">{t('maConfidence') || '信心'}</th>
+              <th className="py-2 px-2">{t('maConfidence') || '完整度'}</th>
               <th className="py-2 px-2">{t('maState') || '狀態'}</th>
               <th className="py-2 px-2">{t('maConflict') || '分歧'}</th>
             </tr>
@@ -209,7 +209,7 @@ export default function MultiAngleOverview({ coin, snapshotId, onAngleClick }: M
             </div>
             {angle.decision_state !== 'abstain' && (
               <div className="text-xs text-gray-400">
-                信心 {angle.calibrated_confidence.toFixed(2)}
+                信賴度 {angle.calibrated_confidence.toFixed(2)}
               </div>
             )}
             <ConflictBadge conflicts={report.conflicts} currentAngle={angle.angle} />
