@@ -4560,3 +4560,52 @@
     display: inline;
   }
 }
+.hermes-task-label-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-size: 10px;
+  color: var(--color-hermes-tx2);
+}
+
+.hermes-task-label-row button {
+  max-width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-hermes-bd2);
+  border-radius: 5px;
+  background: var(--color-hermes-inset);
+  color: var(--color-hermes-cyan);
+  font: inherit;
+  line-height: 1.3;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.hermes-task-label-row button:focus-visible {
+  outline: 2px solid var(--color-hermes-amber);
+  outline-offset: 2px;
+}
+
+.hermes-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 560px) {
+  .hermes-task-label-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

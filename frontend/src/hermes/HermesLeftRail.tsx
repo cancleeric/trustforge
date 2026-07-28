@@ -4,6 +4,8 @@ import type { AnalysisQuestionContext } from '../lib/endpoints'
 import { BEGINNER_INTENTS, type AnalysisModeId } from '../lib/beginnerExperience'
 import type { AnalysisFocusId } from '../lib/analysisTaxonomy'
 import type { HermesWorkspaceModule } from './HermesModuleDeck'
+import { pickCompetitionQuestion, type RandomSource } from '../lib/competitionQuestionPicker'
+import type { CoinSymbol } from '../lib/constants'
 
 /** N70（CEO：「把選單功能放到最左邊」「能按的都移到左邊欄」）：
  *  頂欄過去同時承載顯示與操作，一般使用者掃不出哪些能按。導覽與四個開關
@@ -26,6 +28,7 @@ interface HermesLeftRailProps {
    *  由 analysisTaxonomy.test.ts 綁住）。存 id 不存翻譯後的 label。 */
   focus: AnalysisFocusId
   query: string
+  coin: CoinSymbol
   submitLabel: string
   disabled?: boolean
   /** N70：從頂欄搬下來的操作項。 */
@@ -40,21 +43,24 @@ interface HermesLeftRailProps {
   questionContext?: AnalysisQuestionContext | null
   onRecallQuestion?: (question: string) => void
   onQuery: (v: string) => void
+  onPickCompetitionQuestion?: (v: string) => void
   onSubmit: () => void
   beginnerMode?: boolean
   onChooseIntent?: (mode: AnalysisModeId, question: string) => void
+  random?: RandomSource
 }
 
 // N70：兩顆下拉（官方題型 N69／分析角度 N70）都移除後，共用的 SELECT_* 樣式
 // 常數也一併刪掉——留著會讓人以為左軌還有下拉。
 
 export default function HermesLeftRail({
-  hermesMessage, hasOrder, focus, query, submitLabel,
-  onQuery, onSubmit, disabled = false,
+  hermesMessage, hasOrder, focus, query, coin, submitLabel,
+  onQuery, onPickCompetitionQuestion, onSubmit, disabled = false,
   questionContext = null, onRecallQuestion,
   beginnerMode = false, onChooseIntent,
   activeModule = null, onModuleSelect, onHome, onBeginnerModeChange,
   reducedMotion = false, onReducedMotionToggle, onHelp, onToggleShip,
+  random = Math.random,
 }: HermesLeftRailProps) {
   const { t, locale, setLocale } = useHermesI18n()
   // N70：從 HermesTopBar 原封搬過來（含 description，nav 的 tooltip/無障礙說明
@@ -321,13 +327,26 @@ export default function HermesLeftRail({
             })
           })()}
         </div>
-        <label style={{ display: 'block', fontSize: 10, color: 'var(--color-hermes-tx2)', marginBottom: 5 }}>{t('order')}</label>
+        <div className="hermes-task-label-row">
+          <label htmlFor="hermes-task-input">{t('order')}</label>
+          <button
+            type="button"
+            aria-describedby="hermes-question-picker-hint"
+            onClick={() => (onPickCompetitionQuestion ?? onQuery)(pickCompetitionQuestion(coin, random).query)}
+          >
+            {t('competitionQuestionPicker')}
+          </button>
+        </div>
+        <span id="hermes-question-picker-hint" className="hermes-sr-only">
+          {t('competitionQuestionPickerHint')}
+        </span>
         {/* N40 composer：輸入區整塊 flexShrink:0，訊息串（flex:1）吃剩下的高度，
             這是一般 agent 介面的配置——內容多的時候捲訊息，不是壓輸入框。 */}
         {/* N45 wrapper：輸入框與送出鍵疊在一起，`position: relative` 是圓鍵
             定位的參考框；整塊 flexShrink:0，訊息串吃剩下的高度。 */}
         <div style={{ position: 'relative', flexShrink: 0, marginBottom: 10 }}>
         <textarea
+          id="hermes-task-input"
           value={query}
           onChange={(e) => onQuery(e.target.value)}
           onKeyDown={(e) => {
