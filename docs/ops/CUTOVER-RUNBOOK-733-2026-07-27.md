@@ -1,90 +1,297 @@
-# #733 Production Cutover Runbook — Trust Kernel Canary & Promotion
+# #733 release-level A/B deployment-readiness runbook
 
-## 1. Prerequisites (MUST verify before any cutover)
+Status: deployment-ready control and data-plane package only. It does not
+authorize or perform a production deployment, traffic cutover or promotion.
 
-| Step | Check | Evidence |
-|------|-------|----------|
-| 1.1 | Previous approved A artifact exists and is verifiable | `python -m trustforge.verify_deployed_manifest --verify-active` |
-| 1.2 | P0-4 rollback drill is valid and executable | `docs/drills/DRILL-730-2026-07-27.md` |
-| 1.3 | Shadow parity rate from #732 >= 0.90 over last 30 runs | Check logs for `shadow_parity_rate` |
-| 1.4 | Minimum canary coverage: >= 3 coins, >= 2 question types in window | Check `shadow_diagnostics().coins_seen` |
-| 1.5 | No blocking streak (last 3 runs all passing) | Check `shadow_diagnostics()` |
-| 1.6 | Production artifact digest matches candidate | `deploy/verify_release.sh` |
+## Architecture and single truth
 
-**DO NOT PROCEED** if any prerequisite fails.
+A and B are complete, separately running immutable application releases on
+distinct loopback HTTP endpoints. Neither endpoint hot-swaps
+`trustforge_core`; the release router sits outside the application and never
+imports the Kernel.
 
-## 2. Canary Deployment
+The authenticated append-only deployment ledger at
+`/var/lib/trustforge/security-ledger` is the control-plane single source of
+truth. Every record is canonical and sequence/hash chained. Every record and
+its independently authenticated head is Ed25519 signed under an event-kind
+capability domain; the head detects complete-tail truncation. The directory
+and files are owner-only `0700`/`0600`, opened with `O_NOFOLLOW`,
+locked across verification and append, bounded, and file/directory fsynced.
+Unknown keys, corruption, truncation, stale heads and unsafe ownership fail
+closed.
 
-### 2.1 Set canary ratio
+The data-plane router reauthenticates this ledger before every possible B
+route. Missing/corrupt/disabled/stopped/prepared state, missing stable identity,
+missing routing key, exceeded request cap or invalid policy always routes the
+separately pinned A endpoint. It never logs a subject or subject-derived value.
+
+The router hot path is read-only. It never advances a clock file. After each
+successful control-plane terminal transition, the control process atomically
+writes and file/directory-fsyncs a coarse authorization checkpoint. That
+checkpoint is only a projection of the latest signed terminal head/sequence and
+its ledger-authenticated monotonic `checkpoint_floor_at`. Completion advances
+the floor from the independently signed completion `verified_at`; operator stop
+uses the ledger-signed terminal `at`; every terminal stores the maximum prior
+floor while always advancing the head. Missing, stale or corrupt checkpoint
+projection blocks a read-only router and is atomically rebuilt only by a
+control signer after full semantic replay. It never blocks status or emergency
+control. An unresolved
+authorization is always checked against the real current clock, never an
+attacker-controlled event timestamp. A clock rollback
+below the checkpoint blocks B, start and promotion, while status, stop,
+rollback-to-A and failed-transition reconciliation remain available.
+
+## Protected inputs
+
+Production consumes fixed owner-only files:
+
+- `/etc/trustforge/deployment-control.json`
+- `/etc/trustforge/deployment-keys/{ledger,authorization,completion,gates,routing,endpoint-manifests}.json`
+- `/etc/trustforge/release-router-runtime.json`
+- `/etc/trustforge/release-router-runtime-keys.json`
+- `/var/lib/trustforge/security-ledger/`
+
+Operator keyrings are physically separated by purpose and carry key IDs: ledger, authorization,
+activation completion, executable gates and privacy routing. Rotation retains
+old verification keys while selecting a new active ledger/routing key.
+Environment variables and command-line secret values are not accepted.
+`status` opens only the ledger key file; emergency `stop` opens only ledger and
+authorization keys and never touches artifact, gate, completion, routing or
+endpoint-manifest inputs. The long-running router accepts exactly ledger,
+routing and Ed25519 endpoint-manifest public verification roles.
+
+The protected config binds:
+
+- exact A/B artifact digests and fd-verified artifact paths;
+- exact separate loopback A/B endpoints;
+- production target and the literal confirmation
+  `PRODUCTION:<target>:<A digest>:<B digest>`;
+- signed limited-ratio policy, request cap, timeout, ramp ID and routing key ID;
+- the canonical #732 `trustforge.shadow-health/v1` export;
+- all signed executable gate receipts.
+
+## Preflight evidence
+
+Both A and B artifacts are opened relative to pinned directory descriptors with
+`O_NOFOLLOW`, hashed through stable file descriptors, and checked for
+device/inode/size/mtime changes.
+
+The #732 export must be fresh and `eligible_for_operator_review`, with no
+blockers. Exact active/candidate release identities, policy digest, contract
+version, observation root, aggregate/decision IDs, ordered observation IDs,
+completion checks, provider calls and cost are validated. The verifier opens
+the actual #732 read-only SQLite store and independently reruns its deterministic
+evaluation at the exported timestamp; owner-only JSON is not accepted as
+provenance by itself.
+
+Nine executable receipts are required: health, kernel golden, API contract,
+Report, Evidence, snapshot, replay, real user workflow and rollback drill.
+Each receipt is signed, key-ID/versioned, fresh, exact-A/B-bound and contains
+command/output digests, unique nonce, result and zero provider cost. The A/B
+snapshots, canonical shadow evidence and gate receipts form one evidence bundle
+digest.
+
+## Authorization and activation transaction
+
+First initialize the disabled ledger and read its generated ledger ID:
 
 ```bash
-# 5% canary (deterministic hash bucket)
-export KERNEL_CANARY_RATIO=0.05
-# Deploy with env var
-./deploy/deploy_ec2.sh --env KERNEL_CANARY_RATIO=0.05
+python scripts/deployment_readiness.py initialize
+python scripts/deployment_readiness.py status
 ```
 
-### 2.2 Verify canary is active
+`start`, `promote`, `stop` and `rollback-a` each require a separately signed,
+15-minute authorization receipt:
 
 ```bash
-# Tail logs for kernel_canary diagnostics
-journalctl -u trustforge -f | grep "canary_active\|canary_ratio"
-# Expected: canary_ratio=0.05, canary_active=true
+python scripts/deployment_readiness.py start \
+  --authorization /secure/start-authorization.json
 ```
 
-### 2.3 Monitor for minimum duration
+The receipt binds action, target confirmation, ledger ID, exact A/B digests,
+evidence bundle, routing policy digest, routing key ID, actor, expiry and
+globally single-use nonce.
 
-Duration: **30 minutes** (default; tunable via `CANARY_MIN_DURATION_MIN`).
+For `start`, `promote` and `rollback-a`, the command acquires the existing
+activation lock and appends `activation_prepared`. Prepared is not active:
 
-Metrics to watch:
-- `total_canary_requests` >= 50
-- `error_rate` < 0.01
-- `consecutive_errors` < 5
-- `shadow_parity_rate` maintained above 0.85
+- prepared start remains A-only;
+- prepared promotion enters an A-only safety hold until reconciliation;
+- prepared rollback immediately makes desired state non-canary, so B stops.
 
-## 3. Auto-Stop Conditions
-
-Canary automatically stops (falls back to legacy for all requests) if:
-- Consecutive kernel errors >= 5
-- Error rate > 1% after 100+ canary requests
-- Canary state `should_stop=true` in diagnostics
-
-## 4. Manual Promotion
-
-After canary duration and metrics are healthy:
+The explicit release workflow performs the existing immutable pointer
+transaction outside this issue. It then supplies a signed completion receipt:
 
 ```bash
-# Full kernel cutover
-export KERNEL_CANARY_RATIO=1.0
-./deploy/deploy_ec2.sh --env KERNEL_CANARY_RATIO=1.0
+python scripts/deployment_readiness.py complete \
+  --receipt /secure/activation-completion.json
 ```
 
-**Promotion is IRREVERSIBLE without a new deployment.** Use canary stop if uncertain.
+Completion binds the prepared event hash/transaction, exact A/B, observed
+active pointer, actor, timestamp, status and nonce. Start and rollback require
+the observed pointer to be exact A; promotion requires exact B. Lost lock,
+forged/stale receipt or pointer mismatch cannot reconcile. Failed activation is
+recorded distinctly. Thus desired and active phases cannot silently collapse
+after a crash.
 
-## 5. Post-Promotion Verification
+## Limited routing and automatic stop
 
-| Check | Command |
-|-------|---------|
-| Kernel is active for all requests | `grep "promotion.kernel_active" /var/log/trustforge/app.log` |
-| No legacy `score()`/`aggregate()` calls | `grep -c "pipeline.step2" /var/log/trustforge/app.log` (should show count, but not dominate) |
-| Report quality maintained | Run question bank: `python scripts/run_question_bank.py --limit 24` |
-| Parity rate sustained | Check `shadow_parity_rate >= 0.90` |
+The canary policy must remain between 1 and 9999 basis points. Stable identity
+is first HMAC-pseudonymized, then assigned with a domain-separated HMAC bound
+to candidate digest, ledger ID, ramp ID and routing key ID.
 
-## 6. Rollback
+Each B response is atomically appended against the exact ledger head. Timeout,
+transport error or HTTP 5xx fails over to A. At the configured consecutive
+error threshold the same result event carries the authenticated automatic-stop
+decision; the next request rereads `STOPPED` and cannot enter B. No health
+result can promote.
 
-```bash
-# Emergency: set ratio to 0 (legacy only)
-export KERNEL_CANARY_RATIO=0
-./deploy/deploy_ec2.sh --env KERNEL_CANARY_RATIO=0
-```
+Operator stop first creates an independent, Ed25519-signed, one-way latch for
+the current canary epoch using `O_EXCL`, mode `0600`, and file/directory fsync.
+The router checks that latch immediately before connecting to B. It does not
+hold the global coordination lock across HTTP request/response. Under that lock
+it performs the last latch check and establishes the B TCP socket with a
+maximum 250 ms connect timeout, then releases the lock before sending. A stop
+therefore waits at most for the bounded connect classification, never for a
+hanging B response. The signed manifest and request use that same socket;
+silent reconnect is forbidden.
 
-**Rollback verifies:**
-- Previous A artifact is activated via `activate_release.sh previous`
-- Receipt is written to `pointers/receipts/`
-- Post-rollback question bank passes
+The systemd sandbox runs `trustforge-router`, distinct from
+`trustforge-operator`, and mounts the control ledger (including checkpoint and
+epoch latches) read-only. Deployment keys and the control config are
+inaccessible. Only `router-outcomes` and the pre-provisioned
+`/run/trustforge-release-control/coordination.lock` inode are writable. Its
+parent is root-owned mode `0750`, so the shared group can lock the mode-`0660`
+inode but cannot unlink or replace it. Sysusers/tmpfiles artifacts provision
+the identities and pinned inode before service start; the security-ledger root
+is never shared read-write.
 
-## 7. Contacts
+The executable data plane is `scripts/release_router_service.py`, packaged by
+`deploy/trustforge-release-router.service`. It accepts idempotent GET only;
+POST/PUT/PATCH/DELETE are rejected with 405, so failover never retries a
+side-effecting request. Before serving either path it probes the endpoint's
+signed `/.well-known/trustforge-release-manifest` and requires the served
+artifact digest, origin and manifest key ID to match the ledger identity.
+Install the reviewed unit and reverse-proxy snippet with
+`deploy/install_release_router.sh --dry-run`, inspect the commands, then run
+the same script as root in the authorized release workflow. The service listens
+only on a mode-`0660` Unix socket. The nginx snippet rejects unauthenticated
+requests, strips any client identity headers and injects `$remote_user` from
+the site's authentication layer.
 
-- CISO review required before promotion (cost-sensitive)
-- `/codex-review` adversarial audit required before merge
-- Eye scan on actual branch required before merge
+## Promotion, verification and rollback
+
+Promotion is manual only and requires a new exact-bound authorization and
+activation transaction. After promotion rerun and archive signed receipts for:
+health, manifest/digest, golden, API, Report/Evidence, snapshot/replay, real
+workflow, latency/error and zero unapproved provider cost.
+
+On regression, stop first, then authorize `rollback-a`. Activate the retained
+exact A artifact; never rebuild an old commit and never edit Kernel code during
+the incident. Reconcile only after the signed completion receipt observes the
+active pointer at exact A, then repeat the full verification matrix.
+
+## Current release boundary
+
+All repository tests use two real, separately running local HTTP servers.
+Production endpoints are intentionally not provisioned or started by #733.
+An independently authorized release workflow must provision immutable A/B
+services and configure the external router before any production traffic
+operation.
+
+## Compatibility audit
+
+Repository-wide reference search found no consumer of the removed
+`trustforge.agent.kernel_canary` module or its former exports. The only
+remaining `KERNEL_CANARY_RATIO` references are regression tests proving that
+the obsolete environment switch cannot enter the formal candidate path. The
+old imports are intentionally breaking: retaining a facade that reports or
+enables `ratio=1` would recreate a second promotion authority. External
+consumers, if discovered, must migrate to the authenticated release router;
+there is no compatibility shim with activation semantics.
+
+## Ledger ownership and pre-field v2 replay
+
+The ledger root is `root:trustforge-release` mode `0750`. Control is owned by
+`trustforge-operator:trustforge-release`; router outcomes are owned by
+`trustforge-router:trustforge-release`. Both ledger directories are `0750`
+with `0640` files. A writer must be the configured owner; the other identity
+is a group-read-only projection and never creates or repairs ledger storage.
+
+Unshipped signed-ledger v2 terminal records created before
+`checkpoint_floor_at` are replayed by deriving the floor from their signed
+terminal `at` value and the prior authenticated floor. Legacy HMAC v1 remains
+rejected and requires an audited offline migration.
+
+On a fresh host, run `systemd-sysusers` before resolving either service
+identity, then apply the tmpfiles policy. As root, run
+`scripts/provision_release_ledgers.py provision` with root-owned mode-`0400`
+control and one-time outcome bootstrap seeds. The helper passes only the
+relevant seed descriptor into each identity-separated bootstrap process and
+deletes the outcome bootstrap seed after both signed bootstrap records verify.
+Archive the helper's public-key JSON output in the runtime verification
+keyrings; it contains no private seed material.
+Only then may the operator run `deployment_readiness.py initialize`.
+
+For an existing signed-ledger v2 installation, use
+`scripts/migrate_release_ledgers.py`. It authenticates both complete chains and
+signed heads before creating staging, revalidates the staged copy with its new
+metadata, and performs an atomic rename while retaining the prior target at
+the `.rollback` path. HMAC v1 is not accepted by this migration. The derived
+authorization checkpoint is deliberately not copied. After migration, the
+operator signer must run `deployment_readiness.py rebuild-checkpoint`; the
+command holds the stable release coordination lock, authenticates the complete
+control ledger, derives the monotonic floor from signed terminal history, and
+durably writes and rereads the exact terminal sequence/head projection. It
+fails closed if there is no signed terminal event or the operator private key
+is unavailable.
+
+### Ledger signer lifecycle
+
+Provisioning uses one-time `control-bootstrap-1` and
+`router-outcome-bootstrap-1` private seeds. Both seeds are opened with
+`O_NOFOLLOW`, pinned by parent-directory descriptor and inode, used only to
+authenticate each ledger bootstrap, then unlinked through that pinned
+directory and durably consumed. They must never be installed in the service.
+
+Before provisioning, generate independent persistent signers and pass only
+their public keys as `--control-runtime-public` and
+`--outcome-runtime-public`. Their key IDs are `control-runtime-1` and
+`router-outcome-runtime-1`; the router service receives only the latter
+private key. A failed or interrupted provision/migration must be rerun so the
+transaction journal can restore the prior authenticated state. Do not enable
+the router until `install_release_router.sh` authenticates both ledgers and
+completes the Unix-socket and nginx HTTP smoke tests.
+
+Installer rollback restores the unit, nginx snippet, sysusers/tmpfiles
+artifacts, daemon state, and the prior router service running state. Creation
+of the `trustforge-operator`, `trustforge-router`, and `trustforge-release`
+identities and addition of the nginx worker to `trustforge-release` are
+intentional non-reversible host mutations; rollback does not delete users,
+groups, or memberships.
+
+The release workflow must provide a canonical
+`trustforge.release-install-evidence/v1` receipt and its root-owned `0400`
+Ed25519 public keyring. The domain-separated signature binds the exact unit,
+runtime configuration, runtime public key material, both ledger bootstraps,
+the complete authenticated control events/head and ledger identity, retained A
+artifact, candidate B artifact, endpoint-manifest bundle, router archive/tree,
+and runtime-lock attestation. Runtime endpoint keys must exactly equal the
+bundle keyring; routing and outcome signer identities must agree with the
+authenticated initialization and runtime key material. Installation verifies
+the receipt before writing any host artifact and reopens and reauthenticates
+every input immediately before enabling the service.
+
+The router application is a bounded archive plus an exact canonical tree
+manifest whose entries bind path, regular-file type, `0444`/approved executable
+`0555` mode, and SHA-256. Extraction streams a pinned archive descriptor,
+bounds every file and directory header, and permits only the exact required
+parent directories; links, devices, traversal, extras and directory bombs fail
+closed. The final tree is descriptor-verified for owner, type, link count,
+mode and digest, then published as
+`/opt/trustforge/releases/<archive-sha256>`. The runtime lock binds the tree
+manifest digest, isolated Python digest, and canonical package inventory. The signed unit
+must use that exact directory for `WorkingDirectory`, an absolute `-I` Python
+entrypoint inside the release, clear `PYTHONPATH`/`PYTHONHOME`, and expose the
+same digest as `TRUSTFORGE_RELEASE_DIGEST`. Post-start verification checks the
+PID executable inode/hash, cwd, argv, and environment against this release.
