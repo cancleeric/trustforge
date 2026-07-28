@@ -51,6 +51,7 @@
   background: rgba(10, 16, 24, .82);
   backdrop-filter: blur(10px);
   box-shadow: 0 1px 12px rgba(77, 216, 224, .08);
+  will-change: backdrop-filter;
 }
 
 /* N64：這裡原本有一整塊 `:root[data-theme='light'] .hermes-surface`，把 tf-*
@@ -111,6 +112,7 @@
 .hermes-glass {
   background: rgba(10, 16, 24, 0.55);
   backdrop-filter: blur(10px);
+  will-change: backdrop-filter;
 }
 
 /* Boot layer 必須有實際尺寸；零尺寸容器套 clip-path 會裁掉 absolute HUD。 */
@@ -224,31 +226,31 @@
 
 @keyframes hermes-drift-1 {
   from {
-    background-position: 0 0;
+    transform: translate(0, 0);
   }
 
   to {
-    background-position: -260px 140px;
+    transform: translate(-260px, 140px);
   }
 }
 
 @keyframes hermes-drift-2 {
   from {
-    background-position: 0 0;
+    transform: translate(0, 0);
   }
 
   to {
-    background-position: 220px -160px;
+    transform: translate(220px, -160px);
   }
 }
 
 @keyframes hermes-drift-3 {
   from {
-    background-position: 0 0;
+    transform: translate(0, 0);
   }
 
   to {
-    background-position: -140px -90px;
+    transform: translate(-140px, -90px);
   }
 }
 
@@ -356,11 +358,25 @@
 
 /* N49：左軌兩個 pane 的排列方式。`display/flex-direction/gap` 一定要在
    這裡而不是元件的 inline style——inline 會贏過 class，斷點就切不動。 */
-.hermes-rail-split { display: flex; flex-direction: column; gap: 12px; }
-.hermes-rail-menu { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
-.hermes-rail-chat { min-width: 0; }
+.hermes-rail-split {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hermes-rail-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.hermes-rail-chat {
+  min-width: 0;
+}
 
 @media (min-width: 1280px) {
+
   /* 選擇器必須是 `.hermes-frame` 不是 `:root`：這兩個變數的基準宣告就在
      `.hermes-frame`（上面 340 行），而它是左軌的祖先——寫在 `:root` 的覆寫
      會被就近的 `.hermes-frame` 宣告蓋掉（實測 root 拿到 440px、左軌拿到
@@ -375,7 +391,11 @@
        440。這裡維持 N49 之前的基準值。 */
     --hermes-right-rail: clamp(230px, 20.84vw, 300px);
   }
-  .hermes-rail-split { flex-direction: row; }
+
+  .hermes-rail-split {
+    flex-direction: row;
+  }
+
   .hermes-rail-menu {
     flex: 0 0 var(--hermes-menu);
     width: var(--hermes-menu);
@@ -383,9 +403,12 @@
     padding-right: 12px;
     border-right: 1px solid var(--color-hermes-bd);
   }
+
   /* 對話欄吃掉剩下的寬度。`min-width: 0` 是必要的：flex item 預設
      `min-width: auto`，長字串會把它撐爆而不是換行。 */
-  .hermes-rail-chat { flex: 1 1 auto; }
+  .hermes-rail-chat {
+    flex: 1 1 auto;
+  }
 }
 
 .hermes-frame::before,
@@ -436,12 +459,14 @@
 
 .hermes-core-band.band-a {
   transform: rotate(24deg);
+  will-change: transform;
   animation: hermes-core-band-spin 10s linear infinite;
 }
 
 .hermes-core-band.band-b {
   inset: 24%;
   transform: rotate(-38deg);
+  will-change: transform;
   animation: hermes-core-band-spin-rev 6s linear infinite;
 }
 
@@ -466,6 +491,7 @@
   pointer-events: none;
   transform: translate(-50%, -50%) rotateX(68deg) scale(1.35);
   opacity: 0;
+  will-change: transform, opacity;
   animation: hermes-energy-expand 3.2s ease-out infinite;
 }
 
@@ -542,6 +568,7 @@
   border: 0;
   background: radial-gradient(circle at 70% 40%, rgba(77, 216, 224, .08), rgba(2, 4, 10, .68) 65%);
   backdrop-filter: blur(2px);
+  will-change: backdrop-filter;
   cursor: default;
 }
 
@@ -704,6 +731,7 @@
 .hermes-module-deck-scroll .bg-tf-card {
   background: rgba(10, 18, 29, .72) !important;
   backdrop-filter: blur(7px);
+  will-change: backdrop-filter;
   box-shadow: inset 0 0 18px rgba(77, 216, 224, .025);
 }
 
@@ -970,6 +998,7 @@
   inset: 1px 0;
   background: linear-gradient(90deg, transparent, #d9ffff 48%, transparent 53%);
   background-size: 220px 100%;
+  will-change: transform;
   animation: hermes-conduit-current 2.8s linear infinite;
 }
 
@@ -983,6 +1012,7 @@
   background: #e9ffff;
   box-shadow: 0 0 7px #fff, 0 0 16px #4dd8e0;
   transform: translate(-50%, -50%);
+  will-change: transform, opacity;
   /* N63：跟 N62 同一類。這三顆封包的「位置」與「透明度」只寫在 keyframes 裡，
      基態沒有 left 也沒有 opacity。低動態把動畫停掉，left 退回 auto——三顆全部
      疊在同一個點（實測都落在 x=496），opacity 退回 1，於是使用者關掉動態反而
@@ -1242,11 +1272,11 @@
 
 @keyframes hermes-conduit-current {
   from {
-    background-position: -220px 0;
+    transform: translateX(-220px);
   }
 
   to {
-    background-position: 220px 0;
+    transform: translateX(220px);
   }
 }
 
@@ -1292,6 +1322,7 @@
 
 /* 尊重 reduce-motion：關掉所有裝飾動畫，資訊層不受影響 */
 @media (prefers-reduced-motion: reduce) {
+
   .hermes-root *,
   .hermes-root *::before,
   .hermes-root *::after {
@@ -1313,19 +1344,43 @@
 
 /* 低動態時跳過啟動序列延遲：startup 直接顯示完成狀態 */
 @media (prefers-reduced-motion: reduce) {
-  .hermes-startup-progress i { transition: none !important; }
-  .hermes-data-swap { animation: none !important; transition: none !important; }
+  .hermes-startup-progress i {
+    transition: none !important;
+  }
+
+  .hermes-data-swap {
+    animation: none !important;
+    transition: none !important;
+  }
 }
-:root[data-reduced-motion] .hermes-startup-progress i { transition: none !important; }
-:root[data-reduced-motion] .hermes-data-swap { animation: none !important; transition: none !important; }
+
+:root[data-reduced-motion] .hermes-startup-progress i {
+  transition: none !important;
+}
+
+:root[data-reduced-motion] .hermes-data-swap {
+  animation: none !important;
+  transition: none !important;
+}
 
 /* 保留功能性 opacity（不影響 hover/focus 等狀態指示，只停止滑動動畫） */
 @media (prefers-reduced-motion: reduce) {
-  .hermes-energy-station::after { transition: opacity 0s !important; }
-  .hermes-row-hover { transition: none !important; }
+  .hermes-energy-station::after {
+    transition: opacity 0s !important;
+  }
+
+  .hermes-row-hover {
+    transition: none !important;
+  }
 }
-:root[data-reduced-motion] .hermes-energy-station::after { transition: opacity 0s !important; }
-:root[data-reduced-motion] .hermes-row-hover { transition: none !important; }
+
+:root[data-reduced-motion] .hermes-energy-station::after {
+  transition: opacity 0s !important;
+}
+
+:root[data-reduced-motion] .hermes-row-hover {
+  transition: none !important;
+}
 
 /* 艦橋永遠維持單一 1440×900 座標系；外層依 viewport 等比縮放。 */
 
@@ -2413,7 +2468,7 @@
   /* N30: min click target ≥24x24 (was 51.5x19.0/89.5x19.0 — under the 24px
      min height); min-height + flex-centering keeps the visual label/padding
      unchanged while guaranteeing the tap target. */
-  .hermes-mobile-divergence > button {
+  .hermes-mobile-divergence>button {
     justify-self: start;
     padding: 2px 0;
     border: 0;
@@ -4367,4 +4422,31 @@
   html[lang='en'] .hermes-frame {
     --hermes-tagline: 61px;
   }
+}
+
+/* ── Adaptive Quality System ──────────────────────────────────────────────
+   data-quality on <html> controls progressive animation degradation.
+   high = all animations; medium = decorative off; low = static mode. ── */
+
+/* Medium: disable starfield parallax + orbit rotations (keep glows/pulses) */
+:root[data-quality='medium'] .hermes-galaxy {
+  animation: none !important;
+}
+
+:root[data-quality='medium'] .hermes-galaxy>div {
+  animation: none !important;
+}
+
+/* Starfield layers: freeze */
+:root[data-quality='medium'] [style*='hermes-drift'] {
+  animation-play-state: paused !important;
+}
+
+/* Low: equivalent to reduced-motion — all animations off */
+:root[data-quality='low'] .hermes-root *,
+:root[data-quality='low'] .hermes-root *::before,
+:root[data-quality='low'] .hermes-root *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
 }

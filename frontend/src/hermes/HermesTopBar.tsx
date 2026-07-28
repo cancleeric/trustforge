@@ -50,7 +50,7 @@ export default function HermesTopBar({
       style={{
         position: 'absolute', left: 0, right: 0, top: 0, height: 'var(--hermes-top)', zIndex: 10,
         display: 'flex', alignItems: 'center', gap: 14, padding: '0 20px',
-        background: 'rgba(10,16,24,.62)', backdropFilter: 'blur(10px)',
+        background: 'rgba(10,16,24,.62)', backdropFilter: 'blur(10px)', willChange: 'backdrop-filter',
         borderBottom: '1px solid var(--color-hermes-bd)',
         boxShadow: '0 1px 12px rgba(77,216,224,.08)',
       }}
