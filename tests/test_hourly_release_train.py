@@ -39,3 +39,17 @@ def test_lease_rejects_overlap(tmp_path):
         with pytest.raises(RuntimeError, match="owns the lease"):
             with train.lease():
                 pass
+
+
+def test_lease_recovers_dead_owner(tmp_path, monkeypatch):
+    train.OUT = tmp_path
+    lock = tmp_path / "lease"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text("99999999\n")
+
+    def dead_owner(_pid, _signal):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(train.os, "kill", dead_owner)
+    with train.lease():
+        assert (lock / "pid").is_file()

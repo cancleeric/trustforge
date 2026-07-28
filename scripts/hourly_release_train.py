@@ -38,7 +38,19 @@ def lease() -> Iterable[None]:
     try:
         lock.mkdir(mode=0o700)
     except FileExistsError as exc:
-        raise RuntimeError("another release train owns the lease") from exc
+        try:
+            owner = int((lock / "pid").read_text(encoding="ascii").strip())
+            os.kill(owner, 0)
+        except (FileNotFoundError, ProcessLookupError, ValueError):
+            shutil.rmtree(lock)
+            try:
+                lock.mkdir(mode=0o700)
+            except FileExistsError as race:
+                raise RuntimeError("another release train owns the lease") from race
+        except PermissionError as denied:
+            raise RuntimeError("cannot verify the existing release-train lease owner") from denied
+        else:
+            raise RuntimeError("another release train owns the lease") from exc
     try:
         (lock / "pid").write_text(f"{os.getpid()}\n", encoding="ascii")
         yield
@@ -106,10 +118,13 @@ def execute(args: argparse.Namespace) -> Path:
                     gate(main_tree)
                     main_sha = run(["git", "rev-parse", "HEAD"], cwd=main_tree, capture=True).strip()
                     release_branch = f"release/auto-{run_id.lower()}-{main_sha[:8]}"
-                    run(["git", "push", "origin", f"{main_sha}:main", f"{main_sha}:{release_branch}"], cwd=main_tree)
-                    receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
                     backup = require_backup_receipt(backup_command, run_id)
                     receipt["steps"].append({"backup_receipt": str(backup)})
+                    run(
+                        ["git", "push", "--atomic", "origin", f"{main_sha}:main", f"{main_sha}:{release_branch}"],
+                        cwd=main_tree,
+                    )
+                    receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
                     env = dict(os.environ, TRUSTFORGE_RELEASE_SHA=main_sha, TRUSTFORGE_RELEASE_BRANCH=release_branch)
                     subprocess.run(["/bin/zsh", "-lc", deploy_command], cwd=main_tree, env=env, check=True)
                     receipt["steps"].append({"production_deploy": "passed"})

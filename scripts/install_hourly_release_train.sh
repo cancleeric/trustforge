@@ -40,7 +40,7 @@ payload = {
     "ProgramArguments": arguments,
     "EnvironmentVariables": {
         key: os.environ[key]
-        for key in ("TRUSTFORGE_RELEASE_BACKUP_CMD", "TRUSTFORGE_RELEASE_DEPLOY_CMD")
+        for key in ("PATH", "NVM_DIR", "TRUSTFORGE_RELEASE_BACKUP_CMD", "TRUSTFORGE_RELEASE_DEPLOY_CMD")
         if key in os.environ
     },
     "StartInterval": 3600,
