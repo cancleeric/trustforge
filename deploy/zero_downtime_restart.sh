@@ -73,7 +73,7 @@ systemd-run --unit=trustforge-canary \
   --property="Environment=COST_LEDGER_BACKEND=${COST_LEDGER_BACKEND:-dynamodb}" \
   --property="Environment=BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID-}" \
   --property="Type=exec" \
-  /usr/bin/python3 -m trustforge.web
+  /usr/bin/python3.11 -m trustforge.web
 
 # Step 2: Wait for canary to be healthy
 if ! wait_for_health "$BACKUP_PORT" "canary"; then
