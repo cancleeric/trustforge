@@ -92,6 +92,7 @@ export default function HermesDashboard() {
   // → multi_source，所以前端顯示的題型跟後端實際跑的一定一致，不會各說各話。
   // URL 的 ?type= 仍然被尊重（深連結／既有測試／從 /analyze 帶回來的狀態）。
   const [query, setQuery] = useState(t('defaultQuery'))
+  const skipQuestionContextRef = useRef(false)
   // N70（CEO：「分析角度 也不給使用者選」）：角度不再是使用者狀態，改成推導值。
   // 優先序：URL 的 ?mode=（深連結、排程回連、既有測試都靠它）> 由題目關鍵字
   // 判定（`recommendAnalysisMode`，beginnerExperience.ts:26，已有測試）。
@@ -219,6 +220,11 @@ export default function HermesDashboard() {
   }, [qaMode])
 
   useEffect(() => {
+    if (skipQuestionContextRef.current) {
+      skipQuestionContextRef.current = false
+      setQuestionContext(null)
+      return
+    }
     if (!query.trim()) {
       setQuestionContext(null)
       return
@@ -231,6 +237,12 @@ export default function HermesDashboard() {
     }, 250)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [activeQuestionMode, query, selectedId])
+
+  const fillCompetitionQuestion = useCallback((question: string) => {
+    if (question === query) return
+    skipQuestionContextRef.current = true
+    setQuery(question)
+  }, [query])
 
   useEffect(() => {
     let active = true
@@ -609,9 +621,11 @@ export default function HermesDashboard() {
             hermesMessage={hermesMessage}
             hasOrder={lastOrder}
             focus={focus}
+            coin={selectedId.toUpperCase() as 'BTC' | 'ETH' | 'SOL' | 'BNB' | 'XRP'}
             query={query}
             submitLabel={phase === 'loading' ? t('analyzingNow') : t('reAnalyze')}
             onQuery={setQuery}
+            onPickCompetitionQuestion={fillCompetitionQuestion}
             onSubmit={onSubmit}
             disabled={!query.trim() || phase === 'loading'}
             questionContext={questionContext}

@@ -3,7 +3,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { registerAnalysisQuestion } from '../lib/endpoints'
+import { getAnalysisQuestionContext, registerAnalysisQuestion } from '../lib/endpoints'
 import { buildGalaxyModel, deriveSelected, type HermesTier } from '../lib/hermesData'
 import type { CrossSourceSignal } from '../lib/types'
 import HermesRightRail from '../hermes/HermesRightRail'
@@ -111,6 +111,35 @@ describe('HermesDashboard workspace navigation', () => {
     expect(screen.getAllByRole('textbox')).toHaveLength(1)
     expect(screen.queryByLabelText('問題')).not.toBeInTheDocument()
   })
+
+  it('fills a competition question without context network or submission', async () => {
+    vi.useRealTimers()
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0)
+    render(
+      <MemoryRouter initialEntries={['/?qa=1&coin=SOL']}>
+        <HermesI18nProvider><HermesDashboard /></HermesI18nProvider>
+        <LocationProbe />
+      </MemoryRouter>,
+    )
+    await new Promise((resolve) => window.setTimeout(resolve, 300))
+    vi.mocked(getAnalysisQuestionContext).mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: '隨機競賽題目' }))
+    expect((screen.getByLabelText('交付 Hermes 的任務') as HTMLTextAreaElement).value).toMatch(/^請分析 SOL：/)
+    await new Promise((resolve) => window.setTimeout(resolve, 300))
+
+    expect(getAnalysisQuestionContext).not.toHaveBeenCalled()
+    expect(registerAnalysisQuestion).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('location')).toHaveTextContent('?qa=1&coin=SOL')
+
+    // Same deterministic pick is a no-op. It must not leave the one-shot skip
+    // armed for the next real edit.
+    fireEvent.click(screen.getByRole('button', { name: '隨機競賽題目' }))
+    fireEvent.change(screen.getByLabelText('交付 Hermes 的任務'), { target: { value: '手動輸入的新問題' } })
+    await waitFor(() => expect(getAnalysisQuestionContext).toHaveBeenCalledTimes(1))
+    expect(getAnalysisQuestionContext).toHaveBeenCalledTimes(1)
+    random.mockRestore()
+  }, 15_000)
 
   it('opens the divergence drilldown through the native button click', () => {
     render(

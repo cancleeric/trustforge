@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import CoinSelect from './CoinSelect'
 import { useHermesI18n } from '../hermes/hermesI18n'
 import { defaultQuestionTypeForFocus, isAnalysisFocusId } from '../lib/analysisTaxonomy'
+import { isCompetitionCoin, pickCompetitionQuestion, type RandomSource } from '../lib/competitionQuestionPicker'
 
 export interface QueryValues {
   coin: string
@@ -25,6 +26,7 @@ interface Props {
   initial: QueryValues
   onSubmit: (values: QueryValues) => void
   disabled?: boolean
+  random?: RandomSource
 }
 
 // 單幣分析的預設問題文字——跟 `AnalyzePage.tsx::paramsFromSearch` 是同一份
@@ -35,7 +37,7 @@ function defaultAnalyzeQuery(coin: string): string {
   return `分析${coin}近期市場狀況，整合多源資料`
 }
 
-export default function QueryConsole({ initial, onSubmit, disabled = false }: Props) {
+export default function QueryConsole({ initial, onSubmit, disabled = false, random = Math.random }: Props) {
   const { t } = useHermesI18n()
   const [coin, setCoin] = useState(initial.coin)
   const [type, setType] = useState(initial.type)
@@ -126,9 +128,27 @@ export default function QueryConsole({ initial, onSubmit, disabled = false }: Pr
         </p>
       </div>
       <div>
-        <label className="mb-1 block text-xs font-semibold text-tf-muted" htmlFor="qc-q">
-          {t('qcQuestionLabel')}
-        </label>
+        <div className="mb-1 flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <label className="block text-xs font-semibold text-tf-muted" htmlFor="qc-q">
+            {t('qcQuestionLabel')}
+          </label>
+          <button
+            type="button"
+            disabled={!isCompetitionCoin(coin)}
+            aria-describedby="qc-question-picker-hint"
+            className="max-w-full rounded border border-tf-border px-2 py-1 text-left text-xs text-tf-link hover:bg-tf-bg"
+            onClick={() => {
+              if (!isCompetitionCoin(coin)) return
+              setQ(pickCompetitionQuestion(coin, random).query)
+              setQueryEdited(true)
+            }}
+          >
+            {t('competitionQuestionPicker')}
+          </button>
+        </div>
+        <span id="qc-question-picker-hint" className="sr-only">
+          {t('competitionQuestionPickerHint')}
+        </span>
         <textarea
           id="qc-q"
           value={q}
