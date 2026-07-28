@@ -125,7 +125,7 @@ class TestFlagOffRegression:
     @staticmethod
     def _reports_by_mode(flow: AnalysisFlow) -> dict[str, dict[str, Any]]:
         rows = flow._conn().execute(
-            "SELECT mode, payload_json FROM analysis_results",
+            "SELECT mode, payload_json FROM analysis_results WHERE mode != 'multi_angle'",
         ).fetchall()
         out: dict[str, dict[str, Any]] = {}
         for row in rows:

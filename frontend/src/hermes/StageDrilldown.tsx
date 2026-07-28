@@ -88,7 +88,7 @@ export default function StageDrilldown({ selCoin, derivation: fallbackDerivation
       aria-labelledby="hermes-stage-title"
       className="hermes-clip-lg hermes-stage-drilldown"
       style={{
-        background: 'rgba(8,14,22,.92)', backdropFilter: 'blur(6px)', border: `1px solid ${color}`,
+        background: 'rgba(8,14,22,.92)', backdropFilter: 'blur(6px)', willChange: 'backdrop-filter', border: `1px solid ${color}`,
         borderRadius: 10, boxShadow: '0 20px 60px rgba(0,0,0,.5)', display: 'flex', flexDirection: 'column',
         animation: 'hermes-panel-in .22s ease-out',
       }}
