@@ -218,7 +218,6 @@ printf 'VERSION = "%s"\n' "$GIT_VER" > "$B/trustforge/_version.py"
 echo "[ec2] version=${GIT_VER}"
 
 # Compute config snapshot before building
-CONFIG_SNAPSHOT_JSON="{}"
 if [ -x .venv/bin/python ]; then PYTHON="${PWD}/.venv/bin/python"; else PYTHON=python3; fi
 CONFIG_SNAPSHOT=$("$PYTHON" -c "
 import sys
@@ -229,15 +228,17 @@ snapshot = ConfigSnapshot.capture()
 print(json.dumps({'identity': snapshot.identity, 'payload': snapshot.payload}))
 " 2>/dev/null || echo '{"identity":"sha256:unknown","payload":"{}"}')
 CONFIG_IDENTITY=$(echo "$CONFIG_SNAPSHOT" | python3 -c "import sys,json; print(json.load(sys.stdin)['identity'])")
+CONFIG_SNAPSHOT_JSON=$(echo "$CONFIG_SNAPSHOT" | python3 -c "import sys,json; print(json.load(sys.stdin)['payload'])")
+export CONFIG_SNAPSHOT_JSON
 
 ( cd "$B" && zip -qr "$ZIP" trustforge data demo scripts skills deploy docs llms.txt -x '*/__pycache__/*' )
 ARTIFACT_DIGEST=$(sha256sum "$ZIP" | awk '{print $1}')
 ARTIFACT_PREFIX="artifacts/${ARTIFACT_DIGEST}/"
 MANIFEST_JSON=$(cd "$B" && "$PYTHON" -c "
-import sys, json
+import os, sys, json
 sys.path.insert(0, '.')
 from trustforge.release_manifest import compute_manifest, manifest_to_json
-manifest = compute_manifest('${ZIP}', b'${CONFIG_SNAPSHOT_JSON}')
+manifest = compute_manifest('${ZIP}', os.environ['CONFIG_SNAPSHOT_JSON'].encode('utf-8'))
 print(manifest_to_json(manifest))
 " 2>/dev/null || echo '{}')
 rm -rf "$B"
