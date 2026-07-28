@@ -78,7 +78,7 @@ verify_fetch_scheduler() {
 
   local vcmdid
   vcmdid=$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","if ! ( AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe failed\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe passed\""]' \
+    --document-name AWS-RunShellScript --parameters commands='["set -e","cd /opt/trustforge","if ! ( AWS_REGION='"$REGION"' PYTHONPATH=/opt/trustforge CACHE_BACKEND=dynamodb TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger COST_LEDGER_BACKEND=dynamodb /usr/bin/python3.11 scripts/fetch_scheduler.py --probe ); then echo \"[ec2] fetch-scheduler --probe failed\" >&2; exit 1; fi","echo \"[ec2] fetch-scheduler probe passed\""]' \
     --query 'Command.CommandId' --output text)
   if [ -z "$vcmdid" ] || [ "$vcmdid" = "None" ]; then
     echo "[ec2] ERROR: fetch-scheduler probe send-command failed" >&2
@@ -342,8 +342,8 @@ UD=$(mktemp)
 cat > "$UD" <<EOF
 #!/bin/bash
 set -x
-dnf install -y python3 python3-pip unzip >/var/log/tf-setup.log 2>&1
-pip3 install boto3 certifi >>/var/log/tf-setup.log 2>&1
+dnf install -y python3.11 python3.11-pip unzip >/var/log/tf-setup.log 2>&1
+python3.11 -m pip install 'boto3>=1.34' 'certifi>=2024.2.2' 'portalocker>=3,<4' 'pypdf>=5,<7' >>/var/log/tf-setup.log 2>&1
 mkdir -p /opt/trustforge && cd /opt/trustforge
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}artifact.zip ./app.zip --region ${REGION} >>/var/log/tf-setup.log 2>&1
 aws s3 cp s3://${BUCKET}/${ARTIFACT_PREFIX}manifest.json ./manifest.json --region ${REGION} >>/var/log/tf-setup.log 2>&1
@@ -363,7 +363,7 @@ Environment=TRUSTFORGE_CACHE_TABLE=trustforge-connector-cache
 Environment=TRUSTFORGE_COST_LEDGER_TABLE=trustforge-cost-ledger
 Environment=COST_LEDGER_BACKEND=dynamodb
 ExecStartPre=/opt/trustforge/scripts/sweep_deploy_parameters.sh
-${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3 -m trustforge.web
+${EXTRA_UNIT_ENV}ExecStart=/usr/bin/python3.11 -m trustforge.web
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -376,7 +376,7 @@ Description=TrustForge connector cache fetch scheduler
 Type=oneshot
 WorkingDirectory=/opt/trustforge
 Environment=AWS_REGION=${REGION}
-ExecStart=/usr/bin/python3 scripts/fetch_scheduler.py
+ExecStart=/usr/bin/python3.11 scripts/fetch_scheduler.py
 UNIT2
 cat > /etc/systemd/system/fetch-scheduler.timer <<UNIT3
 [Unit]
