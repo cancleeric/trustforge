@@ -4368,3 +4368,62 @@
     --hermes-tagline: 61px;
   }
 }
+.agentcore-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid rgba(120, 150, 170, 0.4);
+  border-radius: 999px;
+  background: rgba(7, 15, 23, 0.88);
+  color: var(--hermes-text-secondary, #aab7c4);
+  font: 600 0.68rem/1.2 'IBM Plex Mono', monospace;
+  letter-spacing: 0.04em;
+}
+
+.agentcore-status-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: #768391;
+}
+
+.agentcore-status--configured .agentcore-status-dot {
+  background: #e8b34d;
+}
+
+.agentcore-status--misconfigured .agentcore-status-dot {
+  background: #e25b5b;
+}
+
+.agentcore-status--unavailable .agentcore-status-dot {
+  background: #768391;
+}
+
+.agentcore-status--inactive .agentcore-status-dot {
+  background: #4dd8e0;
+}
+
+.agentcore-status-short {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .agentcore-status {
+    padding: 0.25rem 0.4rem;
+    font-size: 0.62rem;
+  }
+
+  .agentcore-status-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+  }
+
+  .agentcore-status-label {
+    display: none;
+  }
+
+  .agentcore-status-short {
+    display: inline;
+  }
+}
