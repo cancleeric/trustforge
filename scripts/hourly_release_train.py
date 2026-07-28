@@ -261,7 +261,11 @@ def execute(args: argparse.Namespace) -> Path:
                     receipt["steps"].append({"backup_receipt": str(backup)})
                     if develop_only:
                         run(
-                            ["git", "push", "--atomic", "origin", f"{main_sha}:main", f"{main_sha}:{release_branch}"],
+                            [
+                                "git", "push", "--atomic", "origin",
+                                f"{main_sha}:refs/heads/main",
+                                f"{main_sha}:refs/heads/{release_branch}",
+                            ],
                             cwd=main_tree,
                         )
                         receipt["steps"].append({"main": main_sha, "release_branch": release_branch})
