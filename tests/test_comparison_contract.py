@@ -124,33 +124,11 @@ class TestSideBySideIsNotComparison:
             f"run_comparison() 應回傳 ComparisonRunResult，實際回傳 {type(result)}"
         )
 
-    @pytest.mark.xfail(reason="CA-02/CA-04: ComparisonReport.conclusion 尚未實作", strict=False)
-    def test_golden_no_common_conclusion(self, btc_eth_fixture):
-        """【會 FAIL — 期望】目前沒有 A vs B 的共同結論。
-
-        當前的 market_judgment 是各自獨立的（BTC 一個結論、ETH 一個結論），
-        沒有「BTC 相對於 ETH 表現如何」的綜合判斷。
-        """
-        report_a, ev_a, report_b, ev_b, log = btc_eth_fixture
-
-        # 檢查是否有任何跨幣種的綜合結論
-        cross_coin_texts = [
-            "vs", "compared to", "相對於", "優於", "劣於",
-            "較強", "較弱", "領先", "落後",
-        ]
-        combined_text = (
-            report_a.market_judgment + " " + report_b.market_judgment
-        )
-        has_cross_coin = any(
-            term.lower() in combined_text.lower()
-            for term in cross_coin_texts
-        )
-        # 不強制 assertion 結果，因為偶爾 LLM 可能提到；但結構上沒有 cross-coin
-        assert has_cross_coin, (
-            "FAIL EXPECTED: 目前沒有跨幣種綜合結論。"
-            " market_judgment 各自獨立，缺少 'BTC vs ETH' 的比較判斷。"
-            " CA-02 ComparisonReport.conclusion 將填補此缺口。"
-        )
+    def test_golden_has_common_conclusion(self, btc_eth_fixture):
+        """CA-03: build_comparison_report 已產出 conclusion（非空）。"""
+        result = btc_eth_fixture
+        assert result.comparison is not None, "comparison 應已填入"
+        assert result.comparison.conclusion.strip(), "conclusion 不可為空"
 
     def test_golden_has_four_dimensions(self, btc_eth_fixture):
         """CA-03: run_comparison() 產出的 ComparisonReport 包含四個比較面向。"""

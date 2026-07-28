@@ -455,6 +455,9 @@ def run_comparison(
     log = ExecutionLog()
     log.record("comparison.start", params={"coin_a": coin_a, "coin_b": coin_b})
 
+    # Resolve llm_mode from None (same default-resolution as run())
+    _, resolved_llm_mode = _resolve_modes(offline, data_mode=None, llm_mode=llm_mode)
+
     report_a, evidence_a, _ = run(
         coin_a, query, QuestionType.COMPARISON, offline, data_dir, _log=log,
         data_mode=data_mode, llm_mode=llm_mode,
@@ -481,6 +484,19 @@ def run_comparison(
         evidence_a=evidence_a,
         evidence_b=evidence_b,
     )
+
+    # CA-05: If Bedrock is available, enhance with LLM synthesis
+    if resolved_llm_mode == "bedrock" and comparison is not None:
+        try:
+            from .comparison_synthesis import synthesize_comparison_with_bedrock
+
+            bedrock_client = BedrockClient(offline=offline)
+            comparison = synthesize_comparison_with_bedrock(
+                bedrock_client, comparison, evidence_a, evidence_b
+            )
+        except Exception:
+            # Bedrock failure → keep deterministic fallback
+            pass
 
     return ComparisonRunResult(
         report_a=report_a,
