@@ -27,7 +27,7 @@ BUILD="$(mktemp -d)"; ZIP="$(pwd)/build/trustforge_lambda.zip"; mkdir -p build
 cp -r src/trustforge "$BUILD/trustforge"
 cp -r data "$BUILD/data"
 cp -r demo "$BUILD/demo"
-PACKAGE_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+PACKAGE_VER=$(python3 -c 'from scripts.release_version import package_version; print(package_version())')
 [[ "$PACKAGE_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
   echo "ERROR: refusing release without a strict package SemVer" >&2
   exit 1
