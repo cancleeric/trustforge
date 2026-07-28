@@ -172,6 +172,12 @@ class Report:
     # 以 term_annotations.annotate_terms() 對 market_judgment 注入。
     # 預設空 list，向後相容（舊 payload 無標註仍可 parse）。
     term_annotations: list[dict] = field(default_factory=list)
+    # #862 事實聚合群組：同源同指標的時序 Evidence 聚合為顯示群組。
+    # 純呈現層結構，不影響 evidence.json 輸出（完整保留）。
+    # 每筆 dict 為 EvidenceGroup.to_dict() 序列化結果，含
+    # representative_idx, member_indices, trend, value_range, latest_value。
+    # None 代表未計算聚合（舊呼叫端/既有測試不受影響），向後相容。
+    evidence_groups: list[dict] | None = None
 
     def confidence_label(self) -> str:
         """三態優先於純數字分桶：abstain/低信心用結構化狀態直接標示，避免

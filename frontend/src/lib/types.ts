@@ -120,6 +120,20 @@ export interface DataLineage {
   columns: string[]
 }
 
+/** #862 事實聚合群組：同源同指標的時序 Evidence 聚合為顯示群組。 */
+export interface EvidenceGroup {
+  /** 群組代表 Evidence 在 evidence[] 中的索引（trust 最高者）。 */
+  representative_idx: number
+  /** 群組所有成員在 evidence[] 中的索引（含代表自己）。 */
+  member_indices: number[]
+  /** 趨勢方向。null 表示無法判定（如群組只有單一數值）。 */
+  trend: 'rising' | 'falling' | 'stable' | null
+  /** 值域字串，如 "828–891 TH/s"。null 表示非數值型內容。 */
+  value_range: string | null
+  /** 最近一筆的數值摘要。null 表示無法提取。 */
+  latest_value: string | null
+}
+
 export interface StancePair {
   source: string
   stance: string
@@ -187,6 +201,9 @@ export interface Report {
    * unknown，渲染層必須先做 fail-closed shape validation，避免版本切換期
    * 的畸形 optional payload 拖垮整份正式報告。 */
   asset_intrinsic_assessment?: unknown
+  /** #862 事實聚合群組：同源同指標的時序 Evidence 聚合為顯示群組。
+   * 選填：舊快照或未計算聚合的報告合法不帶此欄位（前端退回 flat 模式）。 */
+  evidence_groups?: EvidenceGroup[] | null
 }
 
 // ── Asset taxonomy（對應後端 trustforge/asset_context.py enum）────────────

@@ -172,7 +172,7 @@ export default function AnalysisReportView({ data, heading, mode }: { data: Anal
 
       <div id="evidence-list">
         <h3 className="mb-3 text-sm font-semibold text-tf-text">{t('arvEvidenceList')}</h3>
-        <EvidenceTable evidence={data.evidence} />
+        <EvidenceTable evidence={data.evidence} evidenceGroups={data.report.evidence_groups} />
       </div>
     </div>
   )
