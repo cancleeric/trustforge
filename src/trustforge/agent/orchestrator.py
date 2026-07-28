@@ -25,11 +25,6 @@ from ..ingestion.base import Document, _matches_coin
 from ..ledger import append_run, estimate_cost
 from ..schema import BasisItem, Evidence, QuestionType, Report, iso_utc
 from ..term_annotations import annotate_terms
-from trustforge_core import run_kernel
-
-from .kernel_mapper import to_kernel_input, to_legacy_scoring
-from .kernel_canary import get_canary_state, should_use_kernel
-from .shadow import is_kernel_promoted, record_shadow_run
 from ..trust.scoring import KIND_REPUTATION, ScoredClaim, TrustedBrief
 from . import narrative_locale as _loc
 
@@ -40,6 +35,7 @@ _STEP4_SYSTEM = (
     "你是加密市場分析審查員。只能依據提供的報告文字審查，不引入外部知識。"
 )
 _STEP4_LIMIT_SENTINEL = "LIMITS_OK"
+
 
 OBJECTIVE_KINDS = {"price", "price_live", "onchain", "regulatory", "hoyabit"}
 _SENTIMENT_KINDS: set[str] = {"news", "social", "sentiment"}
@@ -1514,61 +1510,36 @@ def run_agent_pipeline(
     # 讓明確提及該幣的證據不因 query 措辭（如中文複合詞、無空格）忽窄忽寬地被截斷擠出。
     brief = aggregate(scored, query=query, coin=coin)
 
-    # #733 canary gating: only run kernel if this request is in the canary subset.
-    # In full-production mode (ratio=0), kernel is skipped to save cost.
-    # In canary mode (0 < ratio < 1), only a subset of requests runs kernel.
-    # In full-kernel mode (ratio >= 1), all requests run kernel.
-    _should_run_kernel = should_use_kernel(coin=coin, query=query, ts=iso_utc(now_ts))
-    if _should_run_kernel:
-        kernel_output = run_kernel(
-            to_kernel_input(claims, pit_epoch=now_ts, coin=coin, query=query)
-        )
-        get_canary_state().record_success()
-    else:
-        # Kernel is not active for this request; skip shadow parity entirely.
-        kernel_output = None
-        _kernel_promoted = False
-
-    # --- #732 P0-6 shadow parity: compare kernel vs legacy, track promotion ---
-    # Shadow code must NEVER block the user-facing pipeline (codex-review C4).
-    # If this raises, log it and continue with legacy — the user still gets a report.
-    if kernel_output is not None:
-        try:
-            _shadow_parity = record_shadow_run(
-                kernel=kernel_output,
-                legacy_confidence=(
-                    brief.calibrated_confidence
-                    if brief.calibrated_confidence is not None
-                    else brief.confidence
-                ),
-                legacy_trust_raw=brief.confidence,
-                legacy_scored=scored,
-                coin=coin,
-                qtype_value=qtype.value,
-            )
-            _kernel_promoted = is_kernel_promoted()
-        except Exception:
-            _shadow_parity = {"last_parity_passed": False, "parity_rate": 0.0, "window_runs": 0, "promoted": False, "promotion_eligible": False, "canary_stop_triggered": False, "coins_seen": [], "qtypes_seen": []}
-            _kernel_promoted = False
-            get_canary_state().record_error()
-            logging.warning(
-                "shadow parity comparison raised exception (coin=%s); "
-                "continuing with legacy brief. See traceback for details.",
-                coin, exc_info=True,
-            )
-            log.record(
-                "shadow.parity_failed",
-                params={"coin": coin, "qtype": qtype.value},
-                summary="shadow parity exception; continuing with legacy",
-            )
-    else:
-        _shadow_parity = {"last_parity_passed": True, "parity_rate": 0.0, "window_runs": 0, "promoted": False, "promotion_eligible": False, "canary_stop_triggered": False, "coins_seen": [], "qtypes_seen": []}
-        _kernel_promoted = False
-        log.record(
-            "shadow.parity_failed",
-            params={"coin": coin, "qtype": qtype.value},
-            summary="shadow parity exception; continuing with legacy",
-        )
+    # #732 PR3: candidate observation is explicitly enabled, bounded,
+    # non-authoritative, and durably recorded.  Every failure mode returns a
+    # diagnostic state only; report_scored/report_brief remain the exact active
+    # legacy objects regardless of candidate behavior.
+    report_scored, report_brief = scored, brief
+    from .shadow_runtime import observe_candidate
+    _shadow_result = observe_candidate(
+        claims=claims,
+        scored=scored,
+        legacy_confidence=(
+            brief.calibrated_confidence
+            if brief.calibrated_confidence is not None
+            else brief.confidence
+        ),
+        legacy_trust_raw=brief.confidence,
+        coin=coin,
+        question_type=qtype.value,
+        query=query,
+        request_id=log.run_id,
+        pit_epoch=now_ts,
+        observed_epoch=_wall_clock,
+    )
+    kernel_output = _shadow_result.kernel_output
+    _shadow_parity = _shadow_result.parity
+    _shadow_observation = {
+        "status": _shadow_result.status,
+        "last_parity_passed": (
+            _shadow_parity.parity_passed if _shadow_parity is not None else None
+        ),
+    }
     log.record(
         "judgment.derive",
         params={"supporting": len(brief.supporting), "contrarian": len(brief.contrarian),
@@ -1576,40 +1547,18 @@ def run_agent_pipeline(
                 "kernel_confidence": round(kernel_output.confidence, 3) if kernel_output is not None else None,
                 "kernel_abstain": kernel_output.abstain if kernel_output is not None else None,
                 "kernel_reason_codes": kernel_output.reason_codes if kernel_output is not None else (),
-                "shadow_parity_passed": _shadow_parity["last_parity_passed"],
-                "shadow_promoted": _kernel_promoted,
-                "shadow_parity_rate": _shadow_parity["parity_rate"],
-                "shadow_window_runs": _shadow_parity["window_runs"],
-                "canary_used": _should_run_kernel},
+                "shadow_observation_status": _shadow_observation["status"],
+                "shadow_candidate_latency_ms": _shadow_result.elapsed_ms,
+                "shadow_parity_passed": _shadow_observation.get("last_parity_passed"),
+                "shadow_observation_event_id": _shadow_result.observation_event_id,
+                "shadow_provider_calls": _shadow_result.provider_calls,
+                "shadow_cost_usd": _shadow_result.cost_usd,
+                "shadow_diagnostic": _shadow_result.diagnostic},
         summary="Step2 純 pipeline 完成；判斷由演算法產生，非 LLM",
     )
 
-    # #732 kernel promotion: if parity thresholds are met, the kernel-derived
-    # brief replaces the legacy brief for build_report().  The substitution is
-    # behind-to_legacy_scoring() which validates the full output graph before
-    # allowing promotion (see kernel_mapper.py docstring).
-    if _kernel_promoted and kernel_output is not None:
-        try:
-            _promoted_scored, _promoted_brief = to_legacy_scoring(kernel_output, claims)
-            report_scored = _promoted_scored
-            report_brief = _promoted_brief
-            log.record(
-                "promotion.kernel_active",
-                params={"kernel_trust_score": round(kernel_output.trust_score, 3),
-                        "kernel_confidence": round(kernel_output.confidence, 3)},
-                summary="kernel promoted; brief 來源已切換為 kernel 輸出",
-            )
-        except Exception:
-            report_scored = scored
-            report_brief = brief
-            logging.warning(
-                "kernel promotion failed: to_legacy_scoring raised exception; "
-                "falling back to legacy brief (coin=%s)", coin, exc_info=True
-            )
-    else:
-        report_scored = scored
-        report_brief = brief
-
+    # Observation has no activation authority.  The active result remains the
+    # legacy result byte-for-byte regardless of shadow success or failure.
     # ------------------------------------------------------------------
     # Step 3: 帶溯源行文（Bedrock #2，由 build_report 執行並記錄 log）
     # ------------------------------------------------------------------

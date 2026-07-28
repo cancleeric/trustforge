@@ -51,7 +51,7 @@ export default class ErrorBoundary extends Component<Props, State> {
           <Link
             to="/"
             onClick={this.handleReset}
-            className="rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-white no-underline transition hover:opacity-90"
+            className="rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-tf-on-accent no-underline transition hover:opacity-90"
           >
             回首頁
           </Link>

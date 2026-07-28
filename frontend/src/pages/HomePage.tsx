@@ -69,7 +69,7 @@ export default function HomePage() {
           </div>
           <Link
             to={HERO_HREF}
-            className="inline-flex items-center gap-1 rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-white no-underline hover:opacity-90"
+            className="inline-flex items-center gap-1 rounded-md bg-tf-accent px-3 py-2 text-sm font-semibold text-tf-on-accent no-underline hover:opacity-90"
           >
             新增分析 &#8594;
           </Link>

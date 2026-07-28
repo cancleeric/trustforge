@@ -1,0 +1,18 @@
+{
+  "confidence_delta_max": 0.05,
+  "cost_usd_max": 0.0,
+  "default_enabled": false,
+  "latency_each_ms_max": 1000.0,
+  "latency_p95_ms_max": 250.0,
+  "minimum_coins": 3,
+  "minimum_observations": 30,
+  "minimum_per_cell": 2,
+  "minimum_question_types": 2,
+  "parity_rate_min": 0.9,
+  "provider_calls_max": 0,
+  "supporting_jaccard_min": 0.7,
+  "terminal_failure_streak": 3,
+  "trust_delta_max": 0.05,
+  "version": "shadow-policy.v1",
+  "window_hours": 24
+}

@@ -1,0 +1,4 @@
+source_revision: assessment-2026-07-27
+source_url: https://docs.bnbchain.org/bnb-smart-chain/governance/overview/
+observation: Mutable documentation describes governance mechanics but does not establish voter entity independence or quantify capture resistance.
+decision: governance_capture_resistance=unknown

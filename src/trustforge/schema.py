@@ -164,6 +164,9 @@ class Report:
     # contract (enum taxonomy + validation) lives in `asset_context.py`.
     asset_context: dict | None = None
     risk_notices: list[dict] = field(default_factory=list)
+    # #758：資產本質的實驗性 shadow assessment。純展示、選填；不得回寫
+    # confidence/calibrated_confidence/decision_state/market_judgment。
+    asset_intrinsic_assessment: dict | None = None
     # #583 詞彙標註：在分析報告中出現的 glossary term 標註位置與連結，
     # 供前端渲染 glossary popover / link。由 build_report 在產出 Report 時
     # 以 term_annotations.annotate_terms() 對 market_judgment 注入。

@@ -102,7 +102,7 @@ export default function AssetContextLookupPage() {
         />
         <button
           type="submit"
-          className="rounded border border-tf-accent bg-tf-accent px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110"
+          className="rounded border border-tf-accent bg-tf-accent px-4 py-2 text-sm font-semibold text-tf-on-accent transition hover:brightness-110"
         >
           {t('searchButton')}
         </button>

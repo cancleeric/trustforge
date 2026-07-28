@@ -10,7 +10,6 @@ from .orchestrator import build_report
 from .shadow import (
     ShadowAccumulator,
     ShadowParityResult,
-    is_kernel_promoted,
     record_shadow_run,
     reset_shadow_accumulator,
     shadow_diagnostics,
@@ -25,7 +24,6 @@ __all__ = [
     "should_use_kernel",
     "ShadowAccumulator",
     "ShadowParityResult",
-    "is_kernel_promoted",
     "record_shadow_run",
     "reset_shadow_accumulator",
     "shadow_diagnostics",

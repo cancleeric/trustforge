@@ -15,9 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
-import stat
 from pathlib import Path
 
 from .pipeline import run, run_comparison
@@ -131,6 +129,23 @@ def cmd_control(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(control.__dict__, ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_shadow_health(args: argparse.Namespace) -> int:
+    """Print a read-only shadow readiness report; never activate a release."""
+    from .agent.shadow_health import (
+        build_shadow_health_report,
+        shadow_health_exit_code,
+    )
+
+    report = build_shadow_health_report(now=args.at)
+    print(json.dumps(
+        report,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2 if args.pretty else None,
+    ))
+    return shadow_health_exit_code(report)
 
 
 def cmd_backfill(args: argparse.Namespace) -> int:
@@ -668,6 +683,18 @@ def main(argv=None) -> int:
     c.add_argument("--reason", default="", help="寫入 runtime switch 的原因")
     c.add_argument("--json", action="store_true", help="輸出 JSON 狀態")
     c.set_defaults(func=cmd_control)
+
+    sh = sub.add_parser(
+        "shadow-health",
+        help="唯讀檢查 shadow 證據；只回報觀察/停止/人工審查資格",
+    )
+    sh.add_argument(
+        "--at",
+        default=None,
+        help="固定評估時間（ISO-8601）；省略時使用目前 UTC",
+    )
+    sh.add_argument("--pretty", action="store_true", help="縮排 JSON 輸出")
+    sh.set_defaults(func=cmd_shadow_health)
 
     s = sub.add_parser("smoke", help="Bedrock smoke test：驗證 AWS Bedrock 連線可用")
     s.add_argument("--out", default="out", help="Artifact 輸出目錄（預設 out/）")
