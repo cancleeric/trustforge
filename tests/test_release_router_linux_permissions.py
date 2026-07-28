@@ -33,6 +33,11 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     router = pwd.getpwnam("trustforge-router")
     operator = pwd.getpwnam("trustforge-operator")
     release_gid = __import__("grp").getgrnam("trustforge-release").gr_gid
+    # pytest creates its session and worker parents as 0700.  The privilege
+    # integration intentionally changes UID below, so every sandbox ancestor
+    # below /tmp must be traversable without broadening the ledger directories.
+    tmp_path.parent.parent.chmod(0o755)
+    tmp_path.parent.chmod(0o755)
     tmp_path.chmod(0o755)
     lock_parent = tmp_path / "release-control"
     lock_parent.mkdir(mode=0o750)
