@@ -23,7 +23,7 @@ if [ -n "$DAILY_CAP" ] && ! [[ "$DAILY_CAP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   echo "[ec2] ERROR: TRUSTFORGE_BEDROCK_DAILY_USD_CAP must be a decimal number" >&2
   exit 1
 fi
-if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
+if [ -n "$MODEL" ] && ! [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "[ec2] ERROR: BEDROCK_MODEL_ID contains invalid characters" >&2
   exit 1
 fi
