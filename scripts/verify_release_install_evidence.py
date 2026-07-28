@@ -24,6 +24,9 @@ FIELDS = (
     "a_artifact_sha256",
     "b_artifact_sha256",
     "endpoint_manifests_sha256",
+    "router_archive_sha256",
+    "router_tree_manifest_sha256",
+    "runtime_lock_sha256",
 )
 
 
@@ -33,6 +36,7 @@ def _regular(path: Path, *, mode: int | None = None) -> int:
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
         or (mode is not None and stat.S_IMODE(info.st_mode) != mode)
     ):
         os.close(fd)
@@ -49,6 +53,76 @@ def _digest(path: Path) -> str:
     finally:
         os.close(fd)
     return digest.hexdigest()
+
+
+def _json_file(path: Path) -> dict:
+    fd = _regular(path)
+    try:
+        info = os.fstat(fd)
+        if info.st_size > 1024 * 1024:
+            raise SystemExit(f"release JSON input is oversized: {path}")
+        raw = os.read(fd, 1024 * 1024 + 1)
+    finally:
+        os.close(fd)
+    value = json.loads(raw)
+    if (
+        not isinstance(value, dict)
+        or json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        != raw
+    ):
+        raise SystemExit(f"release JSON input is noncanonical: {path}")
+    return value
+
+
+def _verify_endpoint_semantics(args: argparse.Namespace) -> None:
+    a_digest = "sha256:" + _digest(args.a_artifact)
+    b_digest = "sha256:" + _digest(args.b_artifact)
+    bundle = _json_file(args.endpoint_manifests)
+    if (
+        set(bundle) != {"schema", "a", "b", "public_keys"}
+        or bundle.get("schema") != "trustforge.endpoint-manifest-bundle/v1"
+    ):
+        raise SystemExit("endpoint manifest bundle schema is invalid")
+    keys = bundle["public_keys"]
+    if not isinstance(keys, dict) or not keys:
+        raise SystemExit("endpoint manifest bundle keyring is invalid")
+    key_ids: list[str] = []
+    for role, expected_digest in (("a", a_digest), ("b", b_digest)):
+        manifest = bundle[role]
+        if not isinstance(manifest, dict) or set(manifest) != {
+            "schema",
+            "artifact_digest",
+            "origin",
+            "key_id",
+            "signature",
+        }:
+            raise SystemExit("endpoint manifest is incomplete")
+        key_id = manifest["key_id"]
+        try:
+            unsigned = {
+                key: value for key, value in manifest.items() if key != "signature"
+            }
+            Ed25519PublicKey.from_public_bytes(bytes.fromhex(keys[key_id])).verify(
+                bytes.fromhex(manifest["signature"]),
+                b"trustforge.endpoint-manifest.v1\x00"
+                + json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+            )
+        except (KeyError, TypeError, ValueError, InvalidSignature) as exc:
+            raise SystemExit("endpoint manifest signature is invalid") from exc
+        if (
+            manifest["schema"] != "trustforge.endpoint-manifest/v1"
+            or manifest["artifact_digest"] != expected_digest
+        ):
+            raise SystemExit("endpoint manifest artifact identity is unrelated")
+        key_ids.append(key_id)
+    runtime = _json_file(args.runtime)
+    if runtime != {
+        "schema": "trustforge.release-router-runtime/v1",
+        "a_artifact_digest": a_digest,
+        "b_artifact_digest": b_digest,
+        "endpoint_manifest_key_ids": sorted(key_ids),
+    }:
+        raise SystemExit("runtime A/B identity does not match signed artifacts")
 
 
 def main() -> int:
@@ -119,6 +193,7 @@ def main() -> int:
             or _digest(path) != expected
         ):
             raise SystemExit(f"intended release digest mismatch: {field}")
+    _verify_endpoint_semantics(args)
     print(payload["runtime_sha256"])
     return 0
 

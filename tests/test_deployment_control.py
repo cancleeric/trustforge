@@ -541,6 +541,22 @@ def test_read_only_router_cannot_heal_corrupt_checkpoint(tmp_path):
     assert control._checkpoint_path.read_bytes() == damaged
 
 
+def test_operator_rebuilds_missing_checkpoint_from_signed_terminal_history(tmp_path):
+    control = _control(tmp_path)
+    _start_canary(control, "operator-checkpoint-rebuild")
+    terminal = control._records()[-1]
+    control._checkpoint_path.unlink()
+
+    rebuilt = control.rebuild_checkpoint()
+
+    assert rebuilt == json.loads(control._checkpoint_path.read_text())
+    assert rebuilt["control_sequence"] == terminal["sequence"]
+    assert rebuilt["control_head"] == terminal["event_hash"]
+    control.ledger._private_key = None
+    with pytest.raises(DeploymentControlError, match="operator signing identity"):
+        control.rebuild_checkpoint()
+
+
 def test_checkpoint_rollback_and_tamper_fail_terminal_head_challenge(tmp_path):
     control = _control(tmp_path)
     _start_canary(control, "checkpoint-first")

@@ -55,10 +55,9 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     outcome_seed.write_bytes(b"o" * 32)
     control_seed.chmod(0o400)
     outcome_seed.chmod(0o400)
-    control_runtime_public = (
-        Ed25519PrivateKey.generate()
-        .public_key()
-        .public_bytes(Encoding.Raw, PublicFormat.Raw)
+    control_runtime_private = Ed25519PrivateKey.generate()
+    control_runtime_public = control_runtime_private.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw
     )
     outcome_runtime_public = (
         Ed25519PrivateKey.generate()
@@ -112,9 +111,62 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
     )
     control_public_file.chmod(0o400)
     outcome_public_file.chmod(0o400)
-    control_event = control / "events.jsonl"
-    control_event.touch(mode=0o640)
-    os.chown(control_event, operator.pw_uid, release_gid)
+    control_runtime_seed = tmp_path / "control-runtime.seed"
+    control_runtime_seed.write_bytes(control_runtime_private.private_bytes_raw())
+    control_runtime_seed.chmod(0o400)
+    os.chown(control_runtime_seed, operator.pw_uid, operator.pw_gid)
+    append_terminal = """
+from pathlib import Path
+from trustforge.signed_event_ledger import SignedEventLedger
+seed = Path(__import__("sys").argv[1]).read_bytes()
+root = Path(__import__("sys").argv[2])
+lock = Path(__import__("sys").argv[3])
+runtime = bytes.fromhex(__import__("sys").argv[4])
+bootstrap_id = __import__("sys").argv[5]
+bootstrap = bytes.fromhex(__import__("sys").argv[6])
+kinds = frozenset({"deployment_initialized", "operator_stop", "activation_prepared", "activation_completed", "activation_failed"})
+SignedEventLedger(
+    directory=root / "control",
+    verification_keys={bootstrap_id: bootstrap, "control-runtime-1": runtime},
+    event_permissions={"release-control": kinds},
+    domain_keys={"release-control": frozenset({bootstrap_id, "control-runtime-1"})},
+    signing_key_id="control-runtime-1",
+    signing_private_key=seed,
+    signing_domain="release-control",
+    ledger_role="release-control",
+    coordination_root=root,
+    coordination_lock_path=lock,
+    coordination_lock_mode=0o660,
+    coordination_lock_owner_uid=0,
+    coordination_lock_group="trustforge-release",
+    root_owner_uid=0,
+    root_group="trustforge-release",
+    root_mode=0o750,
+    directory_owner_uid=__import__("os").geteuid(),
+    directory_group="trustforge-release",
+    directory_mode=0o750,
+    file_mode=0o640,
+).append({"kind": "operator_stop", "at": "2026-07-28T00:00:00+00:00", "checkpoint_floor_at": "2026-07-28T00:00:00+00:00"})
+"""
+    control_bootstrap = provision_receipt["control_bootstrap_public"]
+    subprocess.run(
+        [
+            "setpriv",
+            f"--reuid={operator.pw_uid}",
+            f"--regid={operator.pw_gid}",
+            "--init-groups",
+            sys.executable,
+            "-c",
+            append_terminal,
+            str(control_runtime_seed),
+            str(root),
+            str(coordination_lock),
+            control_runtime_public.hex(),
+            control_bootstrap["key_id"],
+            control_bootstrap["public_key"],
+        ],
+        check=True,
+    )
     subprocess.run(
         [
             sys.executable,
@@ -132,6 +184,55 @@ def test_linux_cross_uid_projection_and_writer_permissions(tmp_path):
         ],
         check=True,
         timeout=10,
+    )
+    assert b'"kind":"operator_stop"' in (control / "events.jsonl").read_bytes()
+    read_terminal = """
+from pathlib import Path
+from trustforge.signed_event_ledger import SignedEventLedger
+root = Path(__import__("sys").argv[2])
+lock = Path(__import__("sys").argv[3])
+runtime = bytes.fromhex(__import__("sys").argv[4])
+bootstrap_id = __import__("sys").argv[5]
+bootstrap = bytes.fromhex(__import__("sys").argv[6])
+kinds = frozenset({"deployment_initialized", "operator_stop", "activation_prepared", "activation_completed", "activation_failed"})
+records = SignedEventLedger(
+    directory=root / "control",
+    verification_keys={bootstrap_id: bootstrap, "control-runtime-1": runtime},
+    event_permissions={"release-control": kinds},
+    domain_keys={"release-control": frozenset({bootstrap_id, "control-runtime-1"})},
+    ledger_role="release-control",
+    coordination_root=root,
+    coordination_lock_path=lock,
+    coordination_lock_mode=0o660,
+    coordination_lock_owner_uid=0,
+    coordination_lock_group="trustforge-release",
+    root_owner_uid=0,
+    root_group="trustforge-release",
+    root_mode=0o750,
+    directory_owner_uid=OPERATOR_UID,
+    directory_group="trustforge-release",
+    directory_mode=0o750,
+    file_mode=0o640,
+).read()
+assert records[-1]["event"]["kind"] == "operator_stop"
+"""
+    subprocess.run(
+        [
+            "setpriv",
+            f"--reuid={router.pw_uid}",
+            f"--regid={router.pw_gid}",
+            "--init-groups",
+            sys.executable,
+            "-c",
+            read_terminal.replace("OPERATOR_UID", str(operator.pw_uid)),
+            str(control_runtime_seed),
+            str(root),
+            str(coordination_lock),
+            control_runtime_public.hex(),
+            control_bootstrap["key_id"],
+            control_bootstrap["public_key"],
+        ],
+        check=True,
     )
     assert (control / "bootstrap.json").stat().st_mode & 0o777 == 0o640
     assert (outcomes / "bootstrap.json").stat().st_mode & 0o777 == 0o640

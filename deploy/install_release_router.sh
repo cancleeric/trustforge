@@ -11,7 +11,8 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST_ROOT="${TRUSTFORGE_INSTALL_ROOT:-}"
-UNIT_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.service"
+UNIT_TEMPLATE="$ROOT_DIR/deploy/trustforge-release-router.service"
+UNIT_SOURCE="$UNIT_TEMPLATE"
 NGINX_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.nginx.conf"
 SYSUSERS_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.sysusers.conf"
 TMPFILES_SOURCE="$ROOT_DIR/deploy/trustforge-release-router.tmpfiles.conf"
@@ -64,6 +65,11 @@ RELEASE_EVIDENCE_KEYS="${TRUSTFORGE_RELEASE_EVIDENCE_KEYS:?set release evidence 
 A_ARTIFACT="${TRUSTFORGE_A_ARTIFACT:?set exact retained A artifact}"
 B_ARTIFACT="${TRUSTFORGE_B_ARTIFACT:?set exact candidate B artifact}"
 ENDPOINT_MANIFESTS="${TRUSTFORGE_ENDPOINT_MANIFESTS:?set signed endpoint manifest bundle}"
+ROUTER_ARCHIVE="${TRUSTFORGE_ROUTER_ARCHIVE:?set immutable router application archive}"
+ROUTER_TREE_MANIFEST="${TRUSTFORGE_ROUTER_TREE_MANIFEST:?set router tree manifest}"
+RUNTIME_LOCK="${TRUSTFORGE_RUNTIME_LOCK:?set exact Python/runtime lock}"
+UNIT_SOURCE="${TRUSTFORGE_SIGNED_UNIT:?set signed content-addressed systemd unit}"
+EXPECTED_UNIT_SHA256="$(sha256sum "$UNIT_SOURCE" | awk '{print $1}')"
 python3 "$ROOT_DIR/scripts/verify_release_install_evidence.py" \
   --evidence "$RELEASE_EVIDENCE" \
   --public-keyring "$RELEASE_EVIDENCE_KEYS" \
@@ -74,7 +80,42 @@ python3 "$ROOT_DIR/scripts/verify_release_install_evidence.py" \
   --outcome-bootstrap "$LEDGER_ROOT/router-outcomes/bootstrap.json" \
   --a-artifact "$A_ARTIFACT" \
   --b-artifact "$B_ARTIFACT" \
-  --endpoint-manifests "$ENDPOINT_MANIFESTS" >/dev/null
+  --endpoint-manifests "$ENDPOINT_MANIFESTS" \
+  --router-archive "$ROUTER_ARCHIVE" \
+  --router-tree-manifest "$ROUTER_TREE_MANIFEST" \
+  --runtime-lock "$RUNTIME_LOCK" >/dev/null
+
+RELEASES_ROOT="$DEST_ROOT/opt/trustforge/releases"
+RELEASE_DIR="$(
+  python3 "$ROOT_DIR/scripts/install_router_release_artifact.py" \
+    --archive "$ROUTER_ARCHIVE" \
+    --tree-manifest "$ROUTER_TREE_MANIFEST" \
+    --releases-root "$RELEASES_ROOT"
+)"
+ARCHIVE_SHA256="$(sha256sum "$ROUTER_ARCHIVE" | awk '{print $1}')"
+[[ "$RELEASE_DIR" == "$RELEASES_ROOT/$ARCHIVE_SHA256" ]] || {
+  echo "router release directory is not content addressed" >&2
+  exit 83
+}
+grep -Fx "WorkingDirectory=$RELEASE_DIR" "$UNIT_SOURCE" >/dev/null || {
+  echo "signed unit WorkingDirectory does not match release digest" >&2
+  exit 84
+}
+grep -Fx \
+  "ExecStart=$RELEASE_DIR/.venv/bin/python -I $RELEASE_DIR/scripts/release_router_service.py" \
+  "$UNIT_SOURCE" >/dev/null || {
+  echo "signed unit ExecStart does not match release digest" >&2
+  exit 85
+}
+grep -Fx "UnsetEnvironment=PYTHONPATH PYTHONHOME" "$UNIT_SOURCE" >/dev/null || {
+  echo "signed unit does not isolate Python imports" >&2
+  exit 87
+}
+grep -Fx "Environment=TRUSTFORGE_RELEASE_DIGEST=$ARCHIVE_SHA256" \
+  "$UNIT_SOURCE" >/dev/null || {
+  echo "signed unit does not expose the on-process release digest" >&2
+  exit 86
+}
 
 mkdir -p "$(dirname "$UNIT_TARGET")" "$(dirname "$NGINX_TARGET")" \
   "$(dirname "$SYSUSERS_TARGET")" "$(dirname "$TMPFILES_TARGET")" \
@@ -103,6 +144,16 @@ PREFLIGHT_INPUT_SHA256="$(
 SERVICE_WAS_ACTIVE=false
 systemctl is-active --quiet trustforge-release-router.service && SERVICE_WAS_ACTIVE=true
 OLD_MAIN_PID="$(systemctl show -p MainPID --value trustforge-release-router.service 2>/dev/null || echo 0)"
+OLD_RELEASE_DIR="absent"
+OLD_EXE_SHA256="absent"
+if $SERVICE_WAS_ACTIVE && [[ -z "$DEST_ROOT" && "$OLD_MAIN_PID" =~ ^[1-9][0-9]*$ ]]; then
+  OLD_RELEASE_DIR="$(readlink -f "/proc/$OLD_MAIN_PID/cwd")"
+  OLD_EXE_SHA256="$(sha256sum "/proc/$OLD_MAIN_PID/exe" | awk '{print $1}')"
+fi
+PRIOR_UNIT_SHA256="absent"
+if ${EXISTED[0]}; then
+  PRIOR_UNIT_SHA256="$(sha256sum "$BACKUP_DIR/0" | awk '{print $1}')"
+fi
 rollback_install() {
   status=$?
   rollback_failed=false
@@ -132,19 +183,29 @@ rollback_install() {
       --unix-socket /run/trustforge/release-router.sock \
       -H 'X-TrustForge-Trusted-Subject: rollback-verify' \
       http://localhost/healthz >/dev/null 2>&1 || rollback_failed=true
+    if [[ -z "$DEST_ROOT" ]]; then
+      [[ "$(readlink -f "/proc/$restored_pid/cwd")" == "$OLD_RELEASE_DIR" ]] ||
+        rollback_failed=true
+      [[ "$(sha256sum "/proc/$restored_pid/exe" | awk '{print $1}')" == \
+        "$OLD_EXE_SHA256" ]] || rollback_failed=true
+    fi
   fi
   if $rollback_failed; then
-    evidence_tmp="$ROLLBACK_EVIDENCE.$$"
-    printf '{"original_status":%d,"schema":"trustforge.release-install-rollback-failed/v1"}\n' \
-      "$status" >"$evidence_tmp"
-    chmod 0600 "$evidence_tmp"
-    sync -f "$evidence_tmp"
-    mv -f "$evidence_tmp" "$ROLLBACK_EVIDENCE"
-    sync -f "$(dirname "$ROLLBACK_EVIDENCE")"
+    python3 "$ROOT_DIR/scripts/write_release_rollback_evidence.py" \
+      --directory "$(dirname "$ROLLBACK_EVIDENCE")" \
+      --original-status "$status" \
+      --steps "artifact-restore,daemon-reload,service-health" \
+      --target-release "$RELEASE_EVIDENCE" \
+      --prior-release "$OLD_RELEASE_DIR" \
+      --target-unit-sha256 "$EXPECTED_UNIT_SHA256" \
+      --prior-unit-sha256 "$PRIOR_UNIT_SHA256" \
+      --target-pid "${NEW_MAIN_PID:-0}" \
+      --restored-pid "${restored_pid:-0}"
     rm -rf -- "$BACKUP_DIR"
     exit 91
   fi
   rm -f -- "$ROLLBACK_EVIDENCE"
+  sync -f "$(dirname "$ROLLBACK_EVIDENCE")"
   rm -rf -- "$BACKUP_DIR"
   exit "$status"
 }
@@ -211,13 +272,31 @@ fi
   false
 }
 if [[ -z "$DEST_ROOT" ]]; then
-  [[ "$(readlink -f "/proc/$NEW_MAIN_PID/exe")" == "/opt/trustforge/.venv/bin/python"* ]] || {
+  [[ "$(readlink -f "/proc/$NEW_MAIN_PID/cwd")" == "$RELEASE_DIR" ]] || {
+    echo "router process cwd does not match intended release" >&2
+    false
+  }
+  [[ "$(stat -Lc '%d:%i' "/proc/$NEW_MAIN_PID/exe")" == \
+    "$(stat -Lc '%d:%i' "$RELEASE_DIR/.venv/bin/python")" ]] || {
     echo "router process executable does not match intended release" >&2
     false
   }
+  [[ "$(sha256sum "/proc/$NEW_MAIN_PID/exe" | awk '{print $1}')" == \
+    "$(sha256sum "$RELEASE_DIR/.venv/bin/python" | awk '{print $1}')" ]] || false
   tr '\0' '\n' <"/proc/$NEW_MAIN_PID/cmdline" |
-    grep -Fx "scripts/release_router_service.py" >/dev/null || {
+    grep -Fx "$RELEASE_DIR/scripts/release_router_service.py" >/dev/null || {
       echo "router process command does not match intended release" >&2
+      false
+    }
+  tr '\0' '\n' <"/proc/$NEW_MAIN_PID/cmdline" | grep -Fx -- "-I" >/dev/null || false
+  if tr '\0' '\n' <"/proc/$NEW_MAIN_PID/environ" |
+    grep -Eq '^(PYTHONPATH|PYTHONHOME)='; then
+    echo "router process inherited unsafe Python import environment" >&2
+    false
+  fi
+  tr '\0' '\n' <"/proc/$NEW_MAIN_PID/environ" |
+    grep -Fx "TRUSTFORGE_RELEASE_DIGEST=$ARCHIVE_SHA256" >/dev/null || {
+      echo "router process does not attest intended code digest" >&2
       false
     }
 fi
@@ -270,3 +349,5 @@ setpriv \
 systemctl enable trustforge-release-router.service
 trap - ERR INT TERM
 rm -rf -- "$BACKUP_DIR"
+rm -f -- "$ROLLBACK_EVIDENCE"
+sync -f "$(dirname "$ROLLBACK_EVIDENCE")"

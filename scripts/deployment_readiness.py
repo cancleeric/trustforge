@@ -263,6 +263,10 @@ def _redacted_status(control: DeploymentControlLedger) -> dict:
 def _key_roles_for_command(command: str) -> frozenset[str]:
     if command == "status":
         return frozenset({"control-public", "outcome-public"})
+    if command == "rebuild-checkpoint":
+        return frozenset(
+            {"control-public", "outcome-public", "control-private"}
+        )
     if command in {"stop", "rollback-a"}:
         return frozenset(
             {
@@ -315,6 +319,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("initialize")
     sub.add_parser("status")
+    sub.add_parser("rebuild-checkpoint")
     for action in ("start", "stop", "promote", "rollback-a"):
         item = sub.add_parser(action)
         item.add_argument("--authorization", type=Path, required=True)
@@ -346,6 +351,8 @@ def main() -> int:
             control.initialize()
         elif args.command == "status":
             pass
+        elif args.command == "rebuild-checkpoint":
+            control.rebuild_checkpoint()
         elif args.command == "complete":
             receipt = ActivationCompletionReceipt(**receipt_payload)
             control.complete(receipt, now=now)

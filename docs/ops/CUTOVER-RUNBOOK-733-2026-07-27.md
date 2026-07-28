@@ -237,7 +237,15 @@ For an existing signed-ledger v2 installation, use
 `scripts/migrate_release_ledgers.py`. It authenticates both complete chains and
 signed heads before creating staging, revalidates the staged copy with its new
 metadata, and performs an atomic rename while retaining the prior target at
-the `.rollback` path. HMAC v1 is not accepted by this migration.
+the `.rollback` path. HMAC v1 is not accepted by this migration. The derived
+authorization checkpoint is deliberately not copied. After migration, the
+operator signer must run `deployment_readiness.py rebuild-checkpoint`; the
+command holds the stable release coordination lock, authenticates the complete
+control ledger, derives the monotonic floor from signed terminal history, and
+durably writes and rereads the exact terminal sequence/head projection. It
+fails closed if there is no signed terminal event or the operator private key
+is unavailable.
+
 ### Ledger signer lifecycle
 
 Provisioning uses one-time `control-bootstrap-1` and
@@ -268,3 +276,11 @@ Ed25519 public keyring. The domain-separated signature binds the exact unit,
 runtime configuration, runtime public key material, both ledger bootstraps,
 retained A artifact, candidate B artifact, and endpoint-manifest bundle.
 Installation verifies this receipt before writing any host artifact.
+
+The router application is a bounded archive plus an exact canonical tree
+manifest. It is extracted without links/devices/traversal into private staging,
+then published as `/opt/trustforge/releases/<archive-sha256>`. The signed unit
+must use that exact directory for `WorkingDirectory`, an absolute `-I` Python
+entrypoint inside the release, clear `PYTHONPATH`/`PYTHONHOME`, and expose the
+same digest as `TRUSTFORGE_RELEASE_DIGEST`. Post-start verification checks the
+PID executable inode/hash, cwd, argv, and environment against this release.

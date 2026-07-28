@@ -359,6 +359,47 @@ class DeploymentControlLedger(ReleaseRoutingLedger):
                 return True
         return now < floor
 
+    def rebuild_checkpoint(self) -> dict[str, Any]:
+        """Rebuild the derived clock floor from authenticated terminal history."""
+        if not self.ledger.can_sign:
+            raise DeploymentControlError(
+                "checkpoint rebuild requires the operator signing identity"
+            )
+        with self.ledger.coordination_lock():
+            records = self.ledger.read()
+            terminals = [
+                record
+                for record in records
+                if record["event"].get("kind")
+                in {"operator_stop", "activation_completed", "activation_failed"}
+            ]
+            if not terminals:
+                raise DeploymentControlError(
+                    "checkpoint rebuild requires signed terminal history"
+                )
+            floor: datetime | None = None
+            for record in terminals:
+                floor = self._terminal_floor(record["event"], floor)
+            assert floor is not None
+            terminal = terminals[-1]
+            self._write_checkpoint_unlocked(
+                terminal_record=terminal,
+                floor=floor,
+            )
+            checkpoint = self._read_checkpoint_unlocked()
+            expected = {
+                "schema": "trustforge.authorization-checkpoint/v2",
+                "floor_at": floor.isoformat(),
+                "ledger_id": terminal["ledger_id"],
+                "control_sequence": terminal["sequence"],
+                "control_head": terminal["event_hash"],
+            }
+            if checkpoint != expected:
+                raise DeploymentControlError(
+                    "rebuilt authorization checkpoint failed verification"
+                )
+            return expected
+
     def _publish_checkpoint_after_terminal(
         self,
         *,
