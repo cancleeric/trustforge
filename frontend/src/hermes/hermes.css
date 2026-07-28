@@ -1338,13 +1338,24 @@
 }
 
 .hermes-energy-copy small {
-  display: block;
+  /* N80：原本是 `white-space: nowrap` + ellipsis，一列放不下就直接切掉。
+     但這一列放的是引擎狀態串（「0 待命 · 排隊 5 · 重試 0」、「150 已掃描」），
+     5 欄站點在 1280 寬每欄只有 ~76px，實測被吃掉 42%～72%——螢幕上只看得到
+     「0 待…」，使用者根本不知道排隊幾筆、重試幾次。
+     跟上面的 `strong` 用同一套解法（見 N12）：改成最多兩列的 line-clamp，
+     放得下就全顯示，放不下才截。站點高 82px，strong 兩列 24px + 這裡兩列
+     20px 仍有餘裕。另外在 StageBar 補了 `title`，兩列還不夠時可以停留看全文。 */
+  display: -webkit-box;
   margin-top: 5px;
   overflow: hidden;
   color: var(--color-hermes-tx3);
   font-size: 8px;
+  line-height: 1.25;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .hermes-energy-copy small b {
@@ -4809,3 +4820,28 @@
    選單本來就該自己縮，不該要人去按。實際修法在 `.hermes-rail-menu` /
    `.hermes-rail-chat` 的 flex 宣告（選單 `0 1 auto` 只縮不長，
    對話區 `1 1 auto` + min-height 保底）。 */
+
+/* N80：頂欄系統代號在窄螢幕讓位。見 HermesTopBar.tsx 同編號註解——
+   品牌加了 `flexShrink: 0` 之後，英文版 375/390/430/540/561 五個寬度
+   都把「Switch language」擠出視窗（375 en 溢出 82px）。頂欄放不下就得有人走，
+   走的是代號不是版號。 */
+@media (max-width: 640px) {
+  .hermes-topbar-sysid { display: none; }
+}
+
+/* N80：窄螢幕品牌只留「HERMES」。見 HermesTopBar.tsx 同編號註解——
+   375 英文版頂欄內容總寬 457px 塞不進 373px，品牌 149px 是最大的一格。
+   收前綴不是縮字，是換一個在手機上讀得完整的寫法。 */
+@media (max-width: 640px) {
+  .hermes-brand-prefix { display: none; }
+  /* 備忘：曾經想用 `.hermes-topbar { gap: 9px !important; padding: 0 12px !important }`
+     再擠出 3px。實測反而更寬（語言鈕右緣 377 → 383），已移除。頂欄裡有幾個
+     零寬子元素，改 gap 之後各段落點跟著位移，淨效果是負的。不要再走這條。 */
+}
+
+/* N80：窄螢幕遙測膠囊只留數字。見 HermesTopBar.tsx 同編號註解——
+   375 英文版頂欄總寬 376px 塞不進 373px，這一格的標題文字是最大的一塊。
+   不動膠囊本身，只收標題；名字由 button 的 aria-label 提供。 */
+@media (max-width: 640px) {
+  .hermes-telemetry-chip-label { display: none; }
+}

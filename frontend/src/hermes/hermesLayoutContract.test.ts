@@ -415,3 +415,37 @@ describe('N78 手機版站點編號不得與狀態列搶同一條車道', () => 
     expect(body).not.toMatch(/top:\s*7px/)
   })
 })
+
+describe('N80 站點狀態串不得被切到看不懂', () => {
+  const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+  const bar = readFileSync(path.join(__dirname, 'StageBar.tsx'), 'utf8')
+
+  it('.hermes-energy-copy small 換行兩列而不是 nowrap 截斷', () => {
+    // 內容是「0 待命 · 排隊 5 · 重試 0」這種狀態串，5 欄站點在 1280 寬每欄
+    // 只有 ~76px。實測 nowrap 時被吃掉 42%~72%，畫面上只剩「0 待…」。
+    const block = css.slice(css.indexOf('.hermes-energy-copy small {'))
+    const body = block.slice(0, block.indexOf('}')).replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(body).toContain('-webkit-line-clamp: 2')
+    expect(body).not.toMatch(/white-space:\s*nowrap/)
+  })
+
+  it('狀態串補 title 當最後保險', () => {
+    expect(bar).toContain('<small title={`${stage.metric} ${stage.unit}`.trim()}>')
+  })
+})
+
+describe('N80 窄螢幕頂欄不得把語言切換鈕擠出視窗', () => {
+  const css = readFileSync(path.join(__dirname, 'hermes.css'), 'utf8')
+  const bar = readFileSync(path.join(__dirname, 'HermesTopBar.tsx'), 'utf8')
+
+  it('≤640px 收掉遙測膠囊的標題文字', () => {
+    // 375 英文版實測頂欄內容 376px、可用 373px，語言鈕右緣 377 溢出。
+    // 縮 padding/gap 量出來反而更寬（pad12→378、gap10→384），因為這一格會
+    // 把讓出來的空間吃掉；只能讓內容變短。
+    expect(css).toMatch(/\.hermes-telemetry-chip-label\s*\{\s*display:\s*none/)
+  })
+
+  it('膠囊收字之後名字改掛 aria-label，不能只剩兩個數字', () => {
+    expect(bar).toContain("aria-label={t('telemetry')}")
+  })
+})

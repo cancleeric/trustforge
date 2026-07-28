@@ -3,13 +3,19 @@
 import { chromium } from 'playwright'
 const VIEWPORTS = [[375,667],[430,932],[561,700],[900,760],[1024,900],[1280,800],[1440,900]]
 const browser = await chromium.launch()
-const page = await browser.newPage()
 const problems = []
 for (const [w, h] of VIEWPORTS) {
+  // 每個尺寸開一支新的 page。共用同一支跑完所有尺寸時，切換幾次之後 goto 會固定
+  // 逾時然後整支崩掉——同時間 curl 打 dev server 只要幾 ms，卡住的是這支 page
+  // 不是伺服器。（與 N77/N80 探針同一處理。）
+  const page = await browser.newPage()
   await page.setViewportSize({ width: w, height: h })
-  await page.goto('http://localhost:4175/?qa=1&reducedMotion=1', { waitUntil: 'domcontentloaded' })
-  await page.context().addCookies([{ name: 'trustforge_hermes_locale', value: 'zh-TW', url: 'http://localhost:4175' }])
-  await page.reload({ waitUntil: 'domcontentloaded' })
+  const boot = async () => {
+    await page.goto('http://localhost:4175/?qa=1&reducedMotion=1', { waitUntil: 'domcontentloaded', timeout: 60000 })
+    await page.context().addCookies([{ name: 'trustforge_hermes_locale', value: 'zh-TW', url: 'http://localhost:4175' }])
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 })
+  }
+  try { await boot() } catch { await page.waitForTimeout(3000); await boot() }
   await page.waitForTimeout(2300)
   const navs = await page.locator('.hermes-nav-item').all()
   for (const idx of [null, ...navs.keys()]) {
@@ -128,6 +134,7 @@ for (const [w, h] of VIEWPORTS) {
     console.log(`${tag} overlaps=${hits.length}`)
     for (const x of hits) problems.push(`${tag}: ${x}`)
   }
+  await page.close()
 }
 await browser.close()
 if (problems.length) { console.log('\nN78 問題：'); for (const p of problems) console.log('  ✗ ' + p); process.exit(1) }

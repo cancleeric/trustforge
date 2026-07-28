@@ -127,7 +127,12 @@ export default function HermesBeginnerNarrative() {
       <div className="hermes-beginner-narrative-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, gap: 8 }}>
         <span
           className="hermes-beginner-narrative-title"
-          style={{ fontSize: 12, letterSpacing: '.14em', color: 'var(--color-hermes-cy,#4dd8e0)', textTransform: 'uppercase', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          /* N80：原本 `whiteSpace: 'nowrap'` + ellipsis，一列放不下就切掉。
+             實測 375x667：「新手脈絡 · 3 步看懂一個代幣」需要 195px，這格只有
+             150px，被吃掉 23%，標題尾巴不見。這是面板標題不是一行資料，改成
+             最多兩列的 line-clamp——放得下就全顯示，真的放不下才截。
+             `letterSpacing` 也跟著窄螢幕收斂：.14em 在 375 寬純粹是浪費。 */
+          style={{ fontSize: 12, letterSpacing: 'clamp(.02em, .5vw, .14em)', color: 'var(--color-hermes-cy,#4dd8e0)', textTransform: 'uppercase', minWidth: 0, overflow: 'hidden', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, textOverflow: 'ellipsis', whiteSpace: 'normal', overflowWrap: 'break-word', lineHeight: 1.25 }}
         >
           {t('beginnerNarrativeTitle')}
         </span>

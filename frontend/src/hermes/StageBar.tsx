@@ -88,7 +88,10 @@ export default function StageBar({ selCoin, derivation, selectedStage, onSelectS
               <i className="hermes-energy-junction"><b /></i>
               <span className="hermes-energy-copy">
                 <strong>{stage.label}</strong>
-                <small><b>{stage.metric}</b> {stage.unit}</small>
+                {/* N80：狀態串（「0 待命 · 排隊 5 · 重試 0」）在窄欄位會被截，
+                    CSS 已放寬成兩列，這裡再補 title 當最後保險——兩列還放不下時
+                    滑鼠停留仍能看到全文。 */}
+                <small title={`${stage.metric} ${stage.unit}`.trim()}><b>{stage.metric}</b> {stage.unit}</small>
               </span>
             </button>
           )
