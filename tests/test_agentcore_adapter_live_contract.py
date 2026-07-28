@@ -4,7 +4,12 @@ import io
 import json
 from unittest import mock
 
-from trustforge.agent.agentcore_adapter import _agentcore_invoke, agentcore_status
+from trustforge.agent.agentcore_adapter import (
+    _MAX_RESPONSE_BYTES,
+    _MAX_RESPONSE_EVENTS,
+    _agentcore_invoke,
+    agentcore_status,
+)
 
 
 def test_agentcore_invoke_fails_closed_without_runtime(monkeypatch):
@@ -61,6 +66,88 @@ def test_agentcore_invoke_rejects_empty_or_statusless_response(monkeypatch):
     )
 
     assert result["status"] == "failed"
+
+
+def test_agentcore_invoke_rejects_oversized_file_like_response(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_AGENTCORE_RUNTIME_ARN", "arn:test:runtime")
+    client = mock.Mock()
+    client.invoke_agent_runtime.return_value = {
+        "runtimeSessionId": "12345678-1234-1234-1234-123456789012",
+        "statusCode": 200,
+        "response": io.BytesIO(b"x" * (_MAX_RESPONSE_BYTES + 1)),
+    }
+
+    result = _agentcore_invoke(
+        agent_name="hermes",
+        input_text="hello",
+        client=client,
+    )
+
+    assert result["status"] == "failed"
+    assert result["output"]["error"].endswith("ValueError")
+
+
+def test_agentcore_invoke_rejects_stream_crossing_response_limit(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_AGENTCORE_RUNTIME_ARN", "arn:test:runtime")
+    client = mock.Mock()
+    client.invoke_agent_runtime.return_value = {
+        "runtimeSessionId": "12345678-1234-1234-1234-123456789012",
+        "statusCode": 200,
+        "response": iter([
+            {"chunk": {"bytes": b"x" * _MAX_RESPONSE_BYTES}},
+            {"chunk": {"bytes": b"x"}},
+        ]),
+    }
+
+    result = _agentcore_invoke(
+        agent_name="hermes",
+        input_text="hello",
+        client=client,
+    )
+
+    assert result["status"] == "failed"
+    assert result["output"]["error"].endswith("ValueError")
+
+
+def test_agentcore_invoke_rejects_excessive_empty_stream_events(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_AGENTCORE_RUNTIME_ARN", "arn:test:runtime")
+    client = mock.Mock()
+    client.invoke_agent_runtime.return_value = {
+        "runtimeSessionId": "12345678-1234-1234-1234-123456789012",
+        "statusCode": 200,
+        "response": (
+            {"chunk": {"bytes": b""}}
+            for _ in range(_MAX_RESPONSE_EVENTS + 1)
+        ),
+    }
+
+    result = _agentcore_invoke(
+        agent_name="hermes",
+        input_text="hello",
+        client=client,
+    )
+
+    assert result["status"] == "failed"
+    assert result["output"]["error"].endswith("ValueError")
+
+
+def test_agentcore_invoke_rejects_non_bytes_stream_chunk(monkeypatch):
+    monkeypatch.setenv("TRUSTFORGE_AGENTCORE_RUNTIME_ARN", "arn:test:runtime")
+    client = mock.Mock()
+    client.invoke_agent_runtime.return_value = {
+        "runtimeSessionId": "12345678-1234-1234-1234-123456789012",
+        "statusCode": 200,
+        "response": iter([{"chunk": {"bytes": "untrusted text"}}]),
+    }
+
+    result = _agentcore_invoke(
+        agent_name="hermes",
+        input_text="hello",
+        client=client,
+    )
+
+    assert result["status"] == "failed"
+    assert result["output"]["error"].endswith("TypeError")
 
 
 def test_agentcore_invoke_rejects_short_session_id(monkeypatch):
