@@ -19,6 +19,7 @@ DRY_RUN=0
 SKIP_LOCK=0
 TARGET=""
 PRINT_CHECKLIST=0
+LOCK_RESULT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in

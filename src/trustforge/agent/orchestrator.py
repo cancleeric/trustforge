@@ -1519,7 +1519,11 @@ def run_agent_pipeline(
     _shadow_result = observe_candidate(
         claims=claims,
         scored=scored,
-        legacy_confidence=brief.calibrated_confidence,
+        legacy_confidence=(
+            brief.calibrated_confidence
+            if brief.calibrated_confidence is not None
+            else brief.confidence
+        ),
         legacy_trust_raw=brief.confidence,
         coin=coin,
         question_type=qtype.value,

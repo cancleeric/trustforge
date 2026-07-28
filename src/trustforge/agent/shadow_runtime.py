@@ -11,6 +11,7 @@ import multiprocessing
 import os
 import threading
 import time
+from functools import partial
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, Sequence
@@ -26,7 +27,6 @@ from .shadow_contracts import (
     load_policy,
 )
 from .shadow_identity import measured_release_identity, verify_reviewed_loaded_candidate
-from .shadow_evidence_store import ShadowEvidenceStore
 
 _ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 _RUNTIME_FLAG = "TRUSTFORGE_SHADOW_RUNTIME_ENABLED"
@@ -62,6 +62,16 @@ class ShadowRuntimeResult:
 
 def _enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in _ENABLED_VALUES
+
+
+def _reject_unresolvable_spawn_callable(value: object) -> None:
+    """Reject callables known to be unresolvable by a fresh interpreter."""
+    if isinstance(value, partial):
+        _reject_unresolvable_spawn_callable(value.func)
+        return
+    qualname = getattr(value, "__qualname__", "")
+    if "<locals>" in qualname or getattr(value, "__name__", "") == "<lambda>":
+        raise TypeError("spawn callable must be module-resolvable")
 
 
 def _configured_identity():
@@ -134,6 +144,10 @@ def _observation_worker(
                 verify_reviewed_loaded_candidate(
                     kernel_fn, mapper_fn, candidate_contract_version,
                 )
+            if store_factory is None:
+                from .shadow_evidence_store import ShadowEvidenceStore
+
+                store_factory = ShadowEvidenceStore
             remaining_ms = max(1, int((deadline - monotonic_fn()) * 1000.0))
             store = store_factory(
                 busy_timeout_ms=min(int(hard_timeout_ms), remaining_ms),
@@ -247,7 +261,7 @@ def observe_candidate(
     monotonic_fn: Callable[[], float] = time.monotonic,
     kernel_fn: Callable = run_kernel,
     mapper_fn: Callable = to_kernel_input,
-    store_factory: Callable[..., ShadowEvidenceStore] = ShadowEvidenceStore,
+    store_factory: Callable[..., object] | None = None,
 ) -> ShadowRuntimeResult:
     """Attempt one bounded observation without affecting the active pipeline.
 
@@ -276,16 +290,23 @@ def observe_candidate(
 
     try:
         receive, send = context.Pipe(duplex=False)
+        worker_args = (
+            send, deadline, started, _HARD_TIMEOUT_MS, claims, scored,
+            legacy_confidence, legacy_trust_raw, coin, question_type,
+            query, request_id, pit_epoch, observed_epoch, monotonic_fn,
+            kernel_fn, mapper_fn, store_factory,
+            {name: os.environ.get(name) for name in _CHILD_ENV_NAMES},
+            kernel_fn is run_kernel and mapper_fn is to_kernel_input,
+        )
+        # Fail predictable local-function errors before a child can exist.
+        # Do not pickle the complete arguments here: valid multiprocessing
+        # synchronization primitives may only be serialized during spawn.
+        for spawn_callable in (monotonic_fn, kernel_fn, mapper_fn, store_factory):
+            if spawn_callable is not None:
+                _reject_unresolvable_spawn_callable(spawn_callable)
         process = context.Process(
             target=_observation_worker,
-            args=(
-                send, deadline, started, _HARD_TIMEOUT_MS, claims, scored,
-                legacy_confidence, legacy_trust_raw, coin, question_type,
-                query, request_id, pit_epoch, observed_epoch, monotonic_fn,
-                kernel_fn, mapper_fn, store_factory,
-                {name: os.environ.get(name) for name in _CHILD_ENV_NAMES},
-                kernel_fn is run_kernel and mapper_fn is to_kernel_input,
-            ),
+            args=worker_args,
             name="trustforge-shadow-observation",
             daemon=True,
         )

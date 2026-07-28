@@ -70,7 +70,11 @@ export default function EcoLinkImpactPanel({
         <div className="mb-2">
           <IllustrativeBadge />
         </div>
-        {t('elipInsufficientData')}
+        {/* N67：原本只有「資料不足，無法判定。」一句，CEO 讀成「其他也是空的
+            ＝壞掉」。空狀態要說得出為什麼空——沒有收錄的官方依賴邊，或有邊
+            但 confidence 低於門檻——否則使用者無法分辨「誠實回不足」與「查詢失敗」。 */}
+        <p>{t('elipInsufficientData')}</p>
+        <p className="mt-2 text-xs">{t('elipInsufficientWhy')}</p>
       </div>
     )
   }
