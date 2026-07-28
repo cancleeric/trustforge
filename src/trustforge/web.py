@@ -73,6 +73,7 @@ from .budget_guard import (
 from .pipeline import run, run_comparison
 from .ledger import PRICING, JsonlLedger, get_ledger
 from .cost_model import CONNECTOR_COST_MODEL, SHARED_POOL_LABEL, estimate_connector_cost
+from .endpoint_manifest import load_runtime_endpoint_manifest_from_env
 
 try:
     from ._version import VERSION
@@ -84,6 +85,10 @@ PORT = int(os.getenv("PORT", "8080"))
 # Swagger UI 開關：僅開發環境啟用，生產環境預設關閉。
 # 設定 TRUSTFORGE_SWAGGER=1 才會啟用 /docs 路由。
 SWAGGER_ENABLED = os.getenv("TRUSTFORGE_SWAGGER", "0") == "1"
+
+# Immutable A/B releases set TRUSTFORGE_RELEASE_IDENTITY_REQUIRED=1.  main()
+# verifies and freezes this value before binding the listening socket.
+_ENDPOINT_MANIFEST_BODY: bytes | None = None
 
 
 # The stdlib ThreadingHTTPServer has no worker bound: a slow SQLite read plus
@@ -7140,6 +7145,18 @@ def _handle_api_health() -> tuple[int, str]:
 # Module Runtime Telemetry API（issue #382）
 # ---------------------------------------------------------------------------
 
+def _handle_api_agentcore_status() -> tuple[int, str]:
+    """Expose non-sensitive AgentCore readiness without probing AWS."""
+
+    try:
+        from .agent.agentcore_adapter import agentcore_status
+
+        return 200, _json_envelope_ok(agentcore_status())
+    except Exception:
+        logging.exception("TrustForge /api/agentcore/status error")
+        return 500, _json_envelope_err("internal_error", "AgentCore 狀態檢查失敗")
+
+
 def _handle_api_module_telemetry(qs: dict | None = None) -> tuple[int, str]:
     """`/api/module-telemetry`：回傳所有模組的 runtime 遙測資料。
 
@@ -7984,6 +8001,15 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET_impl(self, u, qs, client_ip):
         if u.path == "/healthz":
             return self._send(200, "ok", "text/plain")
+        if u.path == "/.well-known/trustforge-release-manifest":
+            if _ENDPOINT_MANIFEST_BODY is None:
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            return self._send(
+                200,
+                _ENDPOINT_MANIFEST_BODY.decode("utf-8"),
+                "application/json; charset=utf-8",
+                extra_headers={"Cache-Control": "no-store"},
+            )
 
         # Swagger UI：以 CDN 載入的互動式 API 文件瀏覽器，讀取
         # `/api/openapi.yaml` 並以視覺化方式呈現所有端點。
@@ -8049,6 +8075,9 @@ class Handler(BaseHTTPRequestHandler):
         # docstring。
         if u.path == "/api/health":
             code, body = _handle_api_health()
+            return self._send(code, body, "application/json; charset=utf-8")
+        if u.path == "/api/agentcore/status":
+            code, body = _handle_api_agentcore_status()
             return self._send(code, body, "application/json; charset=utf-8")
         if u.path == "/api/rate-limit-status":
             code, body = _handle_api_rate_limit_status()
@@ -8473,6 +8502,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global _ENDPOINT_MANIFEST_BODY
+    _ENDPOINT_MANIFEST_BODY = load_runtime_endpoint_manifest_from_env()
+
     from .ingestion.hoyabit import log_hoyabit_startup_status
 
     log_hoyabit_startup_status()

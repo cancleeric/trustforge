@@ -14,6 +14,15 @@ vi.mock('../lib/endpoints', () => ({
   getOverview: vi.fn().mockResolvedValue({ ok: false, error: { code: 'offline', message: 'offline' } }),
   getCosts: vi.fn().mockResolvedValue({ ok: true, data: { total_cost_usd: 0 } }),
   getHealth: vi.fn().mockResolvedValue({ ok: true, data: { version: 'dev' } }),
+  getAgentCoreStatus: vi.fn().mockResolvedValue({
+    ok: true,
+    data: {
+      provider: 'builtin',
+      selected: false,
+      runtime_configured: false,
+      state: 'inactive',
+    },
+  }),
   getAnalysisSnapshot: vi.fn().mockResolvedValue({ ok: false, error: { code: 'snapshot_pending', message: 'pending' } }),
   getAnalysisFlow: vi.fn().mockResolvedValue({ ok: true, data: { agent: 'hermes', state: 'continuous', stages: [], updated_at: 'now' } }),
   getAnalysisJourney: vi.fn().mockResolvedValue({ ok: true, data: { jobs: [], dead_letters: [], updated_at: 'now' } }),

@@ -11,8 +11,8 @@
     {
       "name": "TrustForge",
       "build": "CodeZip",
-      "entrypoint": "main.py",
-      "codeLocation": "app/TrustForge/",
+      "entrypoint": "app/TrustForge/main.py",
+      "codeLocation": ".",
       "runtimeVersion": "PYTHON_3_14",
       "networkMode": "PUBLIC",
       "protocol": "HTTP",
